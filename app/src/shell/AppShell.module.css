@@ -1,0 +1,87 @@
+/* 应用根：铺满窗口，左侧 84px 侧栏槽位 + 主列；浮层根是它最后一个子元素 */
+.app {
+  position: relative;
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  height: 100%;
+  overflow: hidden;
+  background: var(--sk-bg);
+  isolation: isolate;
+}
+
+/* 背景层：底色上叠氛围晕染，开了全景时再叠樱花林 */
+.backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: var(--sk-z-backdrop);
+  background: var(--sk-ambience);
+  pointer-events: none;
+}
+
+.sidebarSlot {
+  position: relative;
+  z-index: var(--sk-z-sidebar);
+  min-height: 0;
+}
+
+.main {
+  position: relative;
+  z-index: var(--sk-z-main);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.content {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+/* 内容区滚动容器：页面的内边距与最大宽由页面根自己给；容器查询按内容区宽度而不是视口 */
+.scroll {
+  position: absolute;
+  inset: 0;
+  z-index: var(--sk-z-page);
+  overflow-x: hidden;
+  overflow-y: auto;
+  outline: none;
+  container: sk-page / inline-size;
+}
+
+/* ---- 首次启动向导 ---- */
+.onboarding {
+  position: relative;
+  z-index: var(--sk-z-main);
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.strip {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  height: 56px;
+  padding-left: var(--sk-space-20);
+}
+
+.stripLogo {
+  color: var(--sk-text);
+  transition: color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.strip[data-blurred] .stripLogo {
+  color: var(--sk-text-2);
+}
+
+.onboardingBody {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  container: sk-page / inline-size;
+}

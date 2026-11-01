@@ -1,0 +1,188 @@
+/*
+ * 表格是自己的滚动容器：页面用 fill 锁住高度时由它内部滚动，表头吸顶；高度不受限时随内容变高。
+ * 行左右 6 + 单元格左右 12：首列左缘与末列右缘正好 18，与卡片 md 内边距对齐，且不随隐藏列变化。
+ */
+.table {
+  position: relative;
+  min-width: 0;
+  max-height: 100%;
+  overflow: auto;
+}
+
+.head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--sk-surface);
+  border-bottom: 1px solid var(--sk-line);
+}
+
+.headRow,
+.row {
+  display: grid;
+  grid-template-columns: var(--table-cols-compact);
+  align-items: center;
+  box-sizing: border-box;
+  padding: 0 var(--sk-space-6);
+}
+
+:global([data-sk-tier="regular"]) .headRow,
+:global([data-sk-tier="regular"]) .row {
+  grid-template-columns: var(--table-cols-regular);
+}
+
+:global([data-sk-tier="wide"]) .headRow,
+:global([data-sk-tier="wide"]) .row {
+  grid-template-columns: var(--table-cols-wide);
+}
+
+.headRow {
+  height: var(--table-head);
+}
+
+.headCell,
+.cell {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  min-width: 0;
+  height: 100%;
+  padding: 0 var(--sk-space-12);
+  overflow: hidden;
+}
+
+.headCell {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+}
+
+:is(.headCell, .cell)[data-align="center"] {
+  justify-content: center;
+  padding: 0;
+}
+
+:is(.headCell, .cell)[data-align="end"] {
+  justify-content: flex-end;
+}
+
+/* 列的分档显示：未写档位时按 compact 处理，与列模板的默认值一致 */
+:is(.headCell, .cell)[data-hide-compact] {
+  display: none;
+}
+
+:global([data-sk-tier="regular"]) :is(.headCell, .cell) {
+  display: flex;
+}
+
+:global([data-sk-tier="regular"]) :is(.headCell, .cell)[data-hide-regular] {
+  display: none;
+}
+
+:global([data-sk-tier="wide"]) :is(.headCell, .cell) {
+  display: flex;
+}
+
+:global([data-sk-tier="wide"]) :is(.headCell, .cell)[data-hide-wide] {
+  display: none;
+}
+
+.text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- 可排序表头：整格是按钮 ---- */
+.sortButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-4);
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--sk-r-xs);
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  outline: none;
+  transition: color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.sortButton:hover,
+.sortButton[data-sorted] {
+  color: var(--sk-text);
+}
+
+.sortButton:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.sortIcon {
+  flex: none;
+  color: var(--sk-text-2);
+}
+
+/* ---- 行 ---- */
+.body {
+  position: relative;
+}
+
+.row {
+  height: var(--table-row);
+  border-bottom: 1px solid var(--sk-line);
+  color: var(--sk-text);
+  outline: none;
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.row:last-child {
+  border-bottom: 0;
+}
+
+.row[data-virtual] {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
+.row[data-activatable] {
+  cursor: pointer;
+}
+
+.row:hover {
+  background: color-mix(in srgb, var(--sk-bg-2) 60%, transparent);
+}
+
+.row[data-selected],
+.row[data-selected]:hover {
+  background: var(--sk-accent-soft);
+}
+
+/* 外环会被卡片裁掉，改成内描边 */
+.row:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--sk-accent);
+}
+
+/* 内容失效：文字列淡化，缩略图去色；开关与操作列保持不透明。缩略图组件以 img 或 data-media 标记 */
+.row[data-inactive] .cell:not([data-keep]) {
+  opacity: var(--sk-disabled);
+}
+
+.row[data-inactive] .cell:not([data-keep]) :is(img, [data-media]) {
+  filter: grayscale(0.8);
+}
+
+.emptyRow {
+  display: block;
+}
+
+.empty {
+  display: block;
+}

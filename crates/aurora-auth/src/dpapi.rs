@@ -14,8 +14,8 @@ use windows::Win32::Security::Cryptography::{
 };
 use windows::core::PCWSTR;
 
-use crate::credential::{CredentialStore, write_atomic};
-use crate::error::{AuthError, Result};
+use crate::credential::{CredentialStore, read_atomic, write_atomic};
+use crate::error::{AuthError, DPAPI_DECRYPT, DPAPI_ENCRYPT, Result};
 
 /// `CRYPTPROTECT_UI_FORBIDDEN`：禁止任何交互式 UI，保证调用绝不阻塞（稳定的 Win32 ABI 常量）。
 const CRYPTPROTECT_UI_FORBIDDEN: u32 = 0x1;
@@ -50,14 +50,11 @@ impl DpapiCredentialStore {
 
 impl CredentialStore for DpapiCredentialStore {
     fn load(&self) -> Result<Option<Vec<u8>>> {
-        match std::fs::read(&self.path) {
-            Ok(cipher) => Ok(Some(unprotect(&cipher)?)),
-            // 首次运行凭据文件尚不存在。
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(source) => Err(AuthError::Base(aurora_base::Error::Io {
-                path: self.path.clone(),
-                source,
-            })),
+        // 走 read_atomic：同进程里的并发回写会让读者撞上 Windows 原子替换的 delete-pending 窗口，
+        // 它只对这类瞬时打开失败做有界退避；首次运行文件不存在时返回 None。
+        match read_atomic(&self.path)? {
+            Some(cipher) => Ok(Some(unprotect(&cipher)?)),
+            None => Ok(None),
         }
     }
 
@@ -72,7 +69,7 @@ impl CredentialStore for DpapiCredentialStore {
 fn protect(plaintext: &[u8]) -> Result<Vec<u8>> {
     let input = CRYPT_INTEGER_BLOB {
         cbData: u32::try_from(plaintext.len()).map_err(|_| AuthError::Dpapi {
-            operation: "加密",
+            operation: DPAPI_ENCRYPT,
             message: "明文长度超过 DPAPI 上限".into(),
         })?,
         pbData: plaintext.as_ptr().cast_mut(),
@@ -94,7 +91,7 @@ fn protect(plaintext: &[u8]) -> Result<Vec<u8>> {
             &mut output,
         )
         .map_err(|e| AuthError::Dpapi {
-            operation: "加密",
+            operation: DPAPI_ENCRYPT,
             message: e.to_string(),
         })?;
     }
@@ -105,7 +102,7 @@ fn protect(plaintext: &[u8]) -> Result<Vec<u8>> {
 fn unprotect(cipher: &[u8]) -> Result<Vec<u8>> {
     let input = CRYPT_INTEGER_BLOB {
         cbData: u32::try_from(cipher.len()).map_err(|_| AuthError::Dpapi {
-            operation: "解密",
+            operation: DPAPI_DECRYPT,
             message: "密文长度超过 DPAPI 上限".into(),
         })?,
         pbData: cipher.as_ptr().cast_mut(),
@@ -126,7 +123,7 @@ fn unprotect(cipher: &[u8]) -> Result<Vec<u8>> {
             &mut output,
         )
         .map_err(|e| AuthError::Dpapi {
-            operation: "解密",
+            operation: DPAPI_DECRYPT,
             message: e.to_string(),
         })?;
     }

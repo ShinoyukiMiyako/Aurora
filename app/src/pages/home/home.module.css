@@ -1,0 +1,871 @@
+/*
+ * 主页私有样式。布局尺寸写成 .home 上的具名变量，按档位只改变量；颜色、字阶、间距、圆角一律取 --sk-* 令牌。
+ * 卡片沿用组件自己的微透底色，这里不给任何卡片加底色或背景模糊：飘落花瓣要从卡片后面透出来。
+ */
+
+.home {
+  /* 第一排（问候、继续游玩，wide 档还有洞察）的最小高度 */
+  --home-row-one: 300px;
+  /* 问候卡底栏右侧给角色立绘让出的宽度 */
+  --home-figure-room: 112px;
+  /* 继续游玩标题区给右侧方块让出的宽度，以及方块离右边缘的距离 */
+  --home-block-room: 150px;
+  --home-block-right: 40px;
+  /* 最近游玩：封面条高度、头像压在封面下沿的深度、右下角小钮占的宽度 */
+  --home-recent-cover: 62px;
+  --home-recent-avatar-lift: 24px;
+  --home-recent-action-room: 52px;
+  --home-avatar-ring: 0 0 0 3px var(--sk-surface);
+  /* 日历当日详情的最小宽与实例列表的最大高 */
+  --home-day-detail-min: 150px;
+  --home-day-list-max: 168px;
+  /* 近 7 天柱的柱槽与选中描边 */
+  --home-bar-track-width: 14px;
+  --home-bar-track-height: 58px;
+  --home-picked-ring: 0 0 0 2px var(--sk-accent-line);
+  /* 服务器信号格：4 格依次增高 */
+  --home-signal-height: 16px;
+  --home-signal-bar-width: 4px;
+  --home-signal-1: 7px;
+  --home-signal-2: 10px;
+  --home-signal-3: 13px;
+  --home-signal-4: 16px;
+  --home-online-dot: 6px;
+}
+
+:global(:root[data-sk-tier="wide"]) .home {
+  --home-row-one: 320px;
+  --home-block-room: 190px;
+  --home-block-right: 56px;
+}
+
+/* ---------------------------------------------------------------- 共用 */
+
+.rowOne {
+  min-height: var(--home-row-one);
+}
+
+/* 加载开始的前 300 ms：骨架占位但不可见，请求很快回来时界面不闪 */
+.pending {
+  visibility: hidden;
+}
+
+.grow {
+  flex: 1;
+}
+
+.ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dot {
+  flex: none;
+  width: var(--sk-space-4);
+  height: var(--sk-space-4);
+  border-radius: var(--sk-r-pill);
+  background: currentColor;
+}
+
+.slowHint {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+/* ---------------------------------------------------------------- 问候卡 */
+
+.greet {
+  overflow: hidden;
+}
+
+.greetBody {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sk-space-4);
+  min-width: 0;
+  padding: var(--sk-space-22) var(--sk-space-22) 0;
+}
+
+.greetDate {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.greetTitle {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  max-width: 100%;
+  min-width: 0;
+  margin: var(--sk-space-6) 0 0;
+  font-weight: var(--sk-w-title);
+}
+
+.greetHello {
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+}
+
+.greetName {
+  margin-bottom: var(--sk-space-4);
+  overflow: hidden;
+  font-size: var(--sk-fs-title);
+  line-height: var(--sk-lh-title);
+  letter-spacing: var(--sk-ls-title);
+  color: var(--sk-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.greetSkeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-8);
+  width: 100%;
+}
+
+.greetIssue {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sk-space-8);
+}
+
+.greetMuted {
+  font-size: var(--sk-fs-heading);
+  line-height: var(--sk-lh-heading);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text-2);
+}
+
+.greetFoot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-12);
+  min-width: 0;
+  margin-top: auto;
+  padding: var(--sk-space-16) var(--sk-space-22) var(--sk-space-20);
+}
+
+.greetFootFigure {
+  padding-right: var(--home-figure-room);
+}
+
+.greetStats {
+  display: flex;
+  gap: var(--sk-space-18);
+}
+
+.greetStat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.greetStatValue {
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 立绘整块是「管理账户」按钮；花瓣地面的投影中心线与立绘底边对齐（地面高 24、中心线 16） */
+.figureButton {
+  position: absolute;
+  right: var(--sk-space-16);
+  bottom: var(--sk-space-14);
+  display: grid;
+  justify-items: center;
+  align-items: end;
+  padding: 0;
+  border: 0;
+  border-radius: var(--sk-r);
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+}
+
+:global(:root:not([data-sk-reduced])) .figureButton {
+  transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+:global(:root:not([data-sk-reduced])) .figureButton:hover {
+  translate: 0 calc(var(--sk-space-4) * -1);
+}
+
+.figureButton:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.figureGround {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--sk-space-8) * -1);
+  transform: translateX(-50%);
+}
+
+.figure {
+  position: relative;
+}
+
+/* ---------------------------------------------------------------- 继续游玩 */
+
+.heroCentered {
+  justify-content: center;
+}
+
+.heroFrame {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: var(--home-row-one);
+}
+
+.heroFace {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 底图铺满大卡、垫在内容下面；Cover 自身是相对定位，这里提高特异性改成绝对铺满 */
+.heroFace > .heroCover {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.heroInner {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-14);
+  min-width: 0;
+  padding: var(--sk-space-20) var(--sk-space-24) var(--sk-space-22);
+}
+
+.heroTop {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-10);
+  min-width: 0;
+}
+
+.heroWhen {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+  white-space: nowrap;
+}
+
+.heroTitle {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+  min-width: 0;
+  max-width: calc(100% - var(--home-block-room));
+  margin-top: auto;
+}
+
+.heroName {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--sk-fs-hero);
+  line-height: var(--sk-lh-hero);
+  letter-spacing: var(--sk-ls-hero);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+:global(:root[data-sk-tier="wide"]) .heroName {
+  font-size: var(--sk-fs-display);
+  line-height: var(--sk-lh-display);
+  letter-spacing: var(--sk-ls-display);
+}
+
+.heroMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sk-space-6);
+}
+
+/* 整合包标签随卡宽收缩（标签默认不收缩），名字在标签里单行截断 */
+.heroPack {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.heroLine {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  min-width: 0;
+  margin: 0;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+.heroActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-10);
+}
+
+.heroBlock {
+  position: absolute;
+  top: 46%;
+  right: var(--home-block-right);
+  z-index: 1;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- 最近游玩 */
+
+.recent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+  min-width: 0;
+}
+
+.recentGrid {
+  --recent-count: 4;
+  display: grid;
+  grid-template-columns: repeat(var(--recent-count), minmax(0, 1fr));
+  gap: var(--sk-gap);
+}
+
+:global(:root[data-sk-tier="regular"]) .recentGrid {
+  --recent-count: 5;
+}
+
+:global(:root[data-sk-tier="wide"]) .recentGrid {
+  --recent-count: 6;
+}
+
+.recentCard {
+  min-width: 0;
+}
+
+/* 主体不能是定位元素：标题按钮的覆盖层要以卡片为参照铺满整张卡 */
+.recentBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+  padding: var(--sk-space-24) var(--home-recent-action-room) var(--sk-space-14) var(--sk-space-14);
+}
+
+.recentCard .recentAvatar {
+  --instance-badge-cutout: var(--sk-surface);
+  position: absolute;
+  top: calc(var(--home-recent-cover) - var(--home-recent-avatar-lift));
+  left: var(--sk-space-12);
+  box-shadow: var(--home-avatar-ring), var(--sk-shadow-sm);
+}
+
+.recentName {
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  font-weight: var(--sk-w-title);
+}
+
+.recentMeta {
+  overflow: hidden;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recentAction {
+  position: absolute;
+  right: var(--sk-space-12);
+  bottom: var(--sk-space-12);
+  display: grid;
+  place-items: center;
+}
+
+.recentDone {
+  display: inline-flex;
+  color: var(--sk-ok);
+}
+
+/* ---------------------------------------------------------------- 游玩日历 */
+
+.calendarBody {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--sk-space-16);
+  margin-top: var(--sk-space-12);
+}
+
+.dayDetail {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-self: stretch;
+  gap: var(--sk-space-2);
+  min-width: var(--home-day-detail-min);
+}
+
+.dayDate {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.dayTime {
+  font-size: var(--sk-fs-heading);
+  line-height: var(--sk-lh-heading);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.dayHint {
+  margin-top: var(--sk-space-8);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+.dayList {
+  max-height: var(--home-day-list-max);
+  margin-top: var(--sk-space-8);
+  overflow-y: auto;
+}
+
+.daySkeleton {
+  display: block;
+  margin-top: var(--sk-space-4);
+}
+
+/* ---------------------------------------------------------------- 游玩洞察 */
+
+.insightsBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-16);
+  min-width: 0;
+  margin-top: var(--sk-space-14);
+}
+
+.statSkeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+}
+
+.bars {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: var(--sk-space-4);
+  margin-top: auto;
+}
+
+.bar {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sk-space-4);
+  min-width: 0;
+  padding: var(--sk-space-4) 0;
+  border: 0;
+  border-radius: var(--sk-r-sm);
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  outline: none;
+}
+
+button.bar {
+  cursor: pointer;
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+button.bar:hover {
+  background: var(--sk-bg-2);
+}
+
+button.bar:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.barValue {
+  font-size: var(--sk-fs-micro);
+  line-height: var(--sk-lh-micro);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.bar[data-picked] .barValue {
+  font-weight: var(--sk-w-title);
+  color: var(--sk-accent-strong);
+}
+
+.barTrack {
+  position: relative;
+  width: var(--home-bar-track-width);
+  height: var(--home-bar-track-height);
+  overflow: hidden;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-bg-2);
+}
+
+button.bar:hover .barTrack {
+  background: var(--sk-bg-3);
+}
+
+.bar[data-picked] .barTrack {
+  box-shadow: var(--home-picked-ring);
+}
+
+.barFill {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--sk-accent-2);
+  transform: scaleY(var(--fill));
+  transform-origin: bottom;
+}
+
+:global(:root:not([data-sk-reduced])) .barFill {
+  transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.bar[data-today] .barFill {
+  background: var(--sk-accent-grad);
+}
+
+.barLabel {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.bar[data-today] .barLabel {
+  font-weight: var(--sk-w-title);
+  color: var(--sk-accent-strong);
+}
+
+/* ---------------------------------------------------------------- 资讯与服务器的行骨架 */
+
+.rowSkeletons {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-14);
+  margin-top: var(--sk-space-12);
+  padding: var(--sk-space-8) var(--sk-space-10);
+}
+
+.rowSkeleton {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-12);
+}
+
+.rowSkeleton > :last-child {
+  flex: 1;
+}
+
+/* ---------------------------------------------------------------- 资讯 */
+
+.newsList {
+  margin-top: var(--sk-space-10);
+}
+
+.newsNote {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sk-space-8);
+  margin-top: var(--sk-space-10);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.newsMeta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sk-space-4);
+}
+
+.newsWhen {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  white-space: nowrap;
+}
+
+.newsHeroText {
+  position: absolute;
+  right: var(--sk-space-24);
+  bottom: var(--sk-space-18);
+  left: var(--sk-space-24);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sk-space-8);
+}
+
+.newsHeroTitle {
+  margin: 0;
+  font-size: var(--sk-fs-lead);
+  line-height: var(--sk-lh-lead);
+  font-weight: var(--sk-w-title);
+}
+
+.newsBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-12);
+  padding: var(--sk-space-18) var(--sk-space-24) var(--sk-space-22);
+}
+
+.newsSummary {
+  margin: 0;
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  color: var(--sk-text);
+  user-select: text;
+}
+
+.newsDate {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+/* ---------------------------------------------------------------- 固定的服务器 */
+
+.serverList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  margin: var(--sk-space-10) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.serverRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: var(--sk-space-10);
+  padding: var(--sk-space-8) var(--sk-space-10);
+  border-radius: var(--sk-r-sm);
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.serverRow:hover {
+  background: var(--sk-bg-2);
+}
+
+.serverText {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.serverName {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sk-space-6);
+  min-width: 0;
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+}
+
+.serverVersion {
+  flex: none;
+  max-width: 50%;
+  overflow: hidden;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.serverMotd,
+.serverOnline {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.serverOnline {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  font-variant-numeric: tabular-nums;
+}
+
+.onlineDot {
+  flex: none;
+  width: var(--home-online-dot);
+  height: var(--home-online-dot);
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-ok);
+}
+
+.serverSide {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sk-space-4);
+}
+
+.signal {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sk-space-2);
+  height: var(--home-signal-height);
+}
+
+.signalBar {
+  width: var(--home-signal-bar-width);
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-line-2);
+}
+
+.signalBar[data-level="1"] {
+  height: var(--home-signal-1);
+}
+
+.signalBar[data-level="2"] {
+  height: var(--home-signal-2);
+}
+
+.signalBar[data-level="3"] {
+  height: var(--home-signal-3);
+}
+
+.signalBar[data-level="4"] {
+  height: var(--home-signal-4);
+}
+
+.signal[data-quality="good"] .signalBar[data-on] {
+  background: var(--sk-ok);
+}
+
+.signal[data-quality="fair"] .signalBar[data-on] {
+  background: var(--sk-warn);
+}
+
+.signal[data-quality="poor"] .signalBar[data-on] {
+  background: var(--sk-danger);
+}
+
+.ping {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ping[data-state="unreachable"] {
+  color: var(--sk-danger);
+}
+
+/* 这张卡在 compact（span 5）与 wide（span 3）两档最窄：「加入」保留文字按钮，延迟文字先让位，只留信号格 */
+:root[data-sk-tier="compact"] .ping,
+:root[data-sk-tier="wide"] .ping {
+  display: none;
+}
+
+.serverJoin {
+  display: inline-flex;
+}
+
+/* 实例选择：锚在「加入」上的 Popover */
+.joinPanel {
+  width: 280px;
+}
+
+.joinBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-12);
+  padding: var(--sk-space-14) var(--sk-space-16);
+}
+
+.joinTitle {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+}
+
+/* 候选多时在面板内部滚动，复选框与主按钮始终看得见 */
+.joinList {
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.joinOption {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sk-space-6);
+  min-width: 0;
+}
+
+.joinVersion {
+  flex: none;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  white-space: nowrap;
+}
+
+.joinFoot {
+  display: flex;
+  justify-content: flex-end;
+}

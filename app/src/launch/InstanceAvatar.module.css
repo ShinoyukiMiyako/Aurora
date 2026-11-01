@@ -1,0 +1,80 @@
+/* 状态环：外扩 4，铺在头像之外；只是指示，不接收指针 */
+.ring {
+  --ring-fill: var(--sk-accent);
+  position: absolute;
+  top: -4px;
+  left: -4px;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.ring[data-tone="info"] {
+  --ring-fill: var(--sk-info);
+}
+
+.track {
+  stroke: var(--sk-line-2);
+}
+
+/* 排队中尚无进度：只画虚线轨道，不做任何循环动画 */
+.ring[data-queued] .track {
+  stroke-dasharray: 3 4;
+}
+
+.fill {
+  stroke: var(--ring-fill);
+}
+
+/*
+ * 角标：右下各外扩 3，外描边取宿主底色（宿主可经 --instance-badge-cutout 指定，默认卡片面）。
+ * 「!」用状态色上的专用墨色：夜樱的状态色较亮，白字过不了对比度。
+ */
+.badge {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  display: grid;
+  place-items: center;
+  width: 13px;
+  height: 13px;
+  border-radius: var(--sk-r-pill);
+  box-shadow: 0 0 0 2.5px var(--instance-badge-cutout, var(--sk-surface));
+  font-family: var(--sk-font);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.badge[data-tone="ok"] {
+  background: var(--sk-ok);
+}
+
+.badge[data-tone="danger"] {
+  background: var(--sk-danger);
+  color: var(--sk-danger-ink);
+}
+
+.badge[data-tone="warn"] {
+  background: var(--sk-warn);
+  color: var(--sk-warn-ink);
+}
+
+/* 运行角标只在呼吸窗口内呼吸；窗口外是静止帧（scale 1、不透明） */
+:global(:root[data-sk-breath]:not([data-sk-reduced])) .badge[data-tone="ok"] {
+  animation: breath var(--sk-loop-breath) var(--sk-ease-breath) infinite;
+  /* 未设置时整条声明在计算期失效，回到初始值 0 */
+  animation-delay: var(--breath-delay);
+}
+
+@keyframes breath {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(0.82);
+    opacity: 0.55;
+  }
+}

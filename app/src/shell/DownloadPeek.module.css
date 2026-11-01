@@ -1,0 +1,199 @@
+/* 入口：34×34，与搜索入口、账户胶囊同高 */
+.entry {
+  --badge-ring: var(--sk-bg);
+  position: relative;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--sk-r-sm);
+  background: transparent;
+  color: var(--sk-text-2);
+  cursor: pointer;
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.entry:hover,
+.entry[data-open] {
+  background: var(--sk-bg-2);
+  color: var(--sk-text);
+}
+
+.entry:focus-visible {
+  outline: none;
+  box-shadow: var(--sk-focus);
+}
+
+.glyph {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+}
+
+.glyph > * {
+  grid-area: 1 / 1;
+}
+
+.glyphIcon {
+  display: inline-grid;
+  place-items: center;
+  color: var(--sk-accent-strong);
+}
+
+.unknownRing {
+  stroke: var(--sk-accent);
+}
+
+.count {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+}
+
+.failDot {
+  position: absolute;
+  bottom: 2px;
+  right: 2px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-danger);
+  box-shadow: 0 0 0 2px var(--sk-bg);
+}
+
+/* 没有计数角标时，失败点占右上角 */
+.failDot[data-alone] {
+  top: 3px;
+  bottom: auto;
+}
+
+/* ---- 浮层 ---- */
+.panel {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: 360px;
+  max-width: calc(100vw - var(--sk-space-32));
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sk-space-12);
+  padding: var(--sk-space-14) var(--sk-space-16) var(--sk-space-10);
+}
+
+.headTitle {
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  font-weight: var(--sk-w-title);
+}
+
+.headMeta {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-3);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  max-height: 320px;
+  margin: 0;
+  padding: 0 var(--sk-space-8) var(--sk-space-8);
+  overflow-y: auto;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  padding: var(--sk-space-8);
+  border-radius: var(--sk-r-sm);
+}
+
+.row:hover {
+  background: var(--sk-bg-2);
+}
+
+.rowHead {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-height: 30px;
+}
+
+.rowTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+}
+
+.rowMeta {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sk-space-12);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-3);
+}
+
+.rowDetail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowState {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.empty {
+  margin: 0;
+  padding: var(--sk-space-4) var(--sk-space-16) var(--sk-space-14);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+.failed {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  margin: 0 var(--sk-space-8) var(--sk-space-8);
+  padding: var(--sk-space-4) var(--sk-space-4) var(--sk-space-4) var(--sk-space-10);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-danger-soft);
+  color: var(--sk-danger);
+}
+
+.failedText {
+  flex: 1;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  font-weight: var(--sk-w-medium);
+}
+
+.foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sk-space-8);
+  padding: var(--sk-space-10) var(--sk-space-12);
+  border-top: 1px solid var(--sk-line);
+}

@@ -1,0 +1,25 @@
+.petal {
+  display: block;
+  flex: none;
+  overflow: visible;
+}
+
+.petal [data-shade="petal-0"] {
+  fill: var(--sk-petal-0);
+}
+
+.petal [data-shade="petal-1"] {
+  fill: var(--sk-petal-1);
+}
+
+.petal [data-shade="petal-2"] {
+  fill: var(--sk-petal-2);
+}
+
+.petal [data-shade="petal-3"] {
+  fill: var(--sk-petal-3);
+}
+
+.petal [data-shade="petal-4"] {
+  fill: var(--sk-petal-4);
+}

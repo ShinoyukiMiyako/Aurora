@@ -1,0 +1,128 @@
+/* 描边容器即控件外观；内部的 input 无边框、透明底，聚焦样式由容器的 :focus-within 承担 */
+.box {
+  --input-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: var(--input-height);
+  padding: 0 var(--sk-space-12);
+  border: 1px solid var(--sk-line-2);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-surface);
+  color: var(--sk-text);
+  font-size: var(--sk-fs-body);
+  cursor: text;
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.box[data-size="sm"] {
+  --input-height: 30px;
+  padding: 0 var(--sk-space-10);
+  font-size: var(--sk-fs-small);
+}
+
+.box[data-size="lg"] {
+  --input-height: 44px;
+  gap: var(--sk-space-10);
+  padding: 0 var(--sk-space-14);
+  border-radius: var(--sk-r);
+  font-size: var(--sk-fs-section);
+}
+
+.box:hover:not([data-disabled], [data-readonly], :focus-within) {
+  border-color: color-mix(in srgb, var(--sk-accent) 25%, var(--sk-line-2));
+}
+
+.box:focus-within {
+  border-color: var(--sk-accent);
+  box-shadow: var(--sk-focus);
+}
+
+.box[data-invalid] {
+  border-color: var(--sk-danger);
+}
+
+.box[data-invalid]:focus-within {
+  border-color: var(--sk-danger);
+  box-shadow: var(--sk-focus-danger);
+}
+
+.box[data-readonly] {
+  border-color: var(--sk-line);
+  background: var(--sk-bg-2);
+}
+
+.box[data-readonly]:focus-within {
+  border-color: var(--sk-line);
+}
+
+.box[data-disabled] {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}
+
+.prefix {
+  flex: none;
+  color: var(--sk-text-2);
+}
+
+.box:focus-within .prefix {
+  color: var(--sk-text);
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: var(--sk-w-body);
+  outline: none;
+}
+
+.input::placeholder {
+  color: var(--sk-text-2);
+  opacity: 1;
+}
+
+.input:disabled {
+  cursor: not-allowed;
+}
+
+/* 22 见方的清空键，右缘外扩 4px，让 x 与描边的视觉间距与左侧图标一致 */
+.clear {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-right: calc(var(--sk-space-4) * -1);
+  padding: 0;
+  border: 0;
+  border-radius: var(--sk-r-xs);
+  background: transparent;
+  color: var(--sk-text-2);
+  cursor: pointer;
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.clear:hover {
+  background: var(--sk-bg-2);
+  color: var(--sk-text);
+}
+
+.suffix {
+  flex: none;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-small);
+  font-variant-numeric: tabular-nums;
+}

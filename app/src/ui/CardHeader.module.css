@@ -1,0 +1,60 @@
+.header {
+  --card-header-min: 30px;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-10);
+  min-width: 0;
+  min-height: var(--card-header-min);
+  margin-bottom: var(--sk-space-12);
+}
+
+/* 30 边长的比例圆角为 9 */
+.icon,
+.slot {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: var(--card-header-min);
+  height: var(--card-header-min);
+}
+
+.icon {
+  border-radius: 9px;
+  background: var(--sk-accent-soft);
+  color: var(--sk-accent-strong);
+}
+
+.text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.title,
+.subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  font-weight: var(--sk-w-title);
+  color: var(--sk-text);
+}
+
+.subtitle {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sk-space-4);
+}

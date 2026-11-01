@@ -1,0 +1,410 @@
+import { describe, expect, it } from "vitest";
+import { FAILURE_CODES, type FailureCode } from "../domain/types";
+import { APP_NAME } from "../lib/app-info";
+import { CREATE_COPY } from "../flows/create-instance/copy";
+import { FOOTER_COPY } from "../flows/onboarding/copy";
+import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
+import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
+import { GPU_COPY } from "../pages/settings/copy";
+import { TASKS_COPY } from "../pages/tasks/copy";
+import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, failureCopy, failureToastLabel, lockReason, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskFailureReason, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
+import { PEEK_COPY } from "./shell";
+
+/** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
+const BANNED = [
+  "您",
+  "请稍候",
+  "请耐心等待",
+  "操作成功",
+  "操作失败",
+  "未知错误",
+  "发生错误",
+  "确定",
+  "OK",
+  "好的",
+  "导致",
+  "引起",
+  "造成",
+  "元凶",
+  "罪魁祸首",
+  "问题出在",
+  "崩溃原因是",
+  "一键修复",
+  "敬请期待",
+  "即将推出",
+  "Coming soon",
+  "MOD",
+  "mod",
+  "Mojang 账户",
+  "MSA",
+  "盗版",
+  "本地账户",
+  "离线模式账户",
+  "第三方登录",
+  "验证码",
+  "授权码",
+  "抱歉",
+  "对不起",
+  "哎呀",
+  "糟糕",
+  "啦",
+  "哦",
+  "呢",
+  "～",
+  "！",
+  "帐户",
+  "帐号",
+  "账号",
+  "登陆",
+  "模组",
+  "本启动器",
+  "我们",
+  "点击这里",
+  "点此",
+];
+
+function bannedIn(texts: readonly (string | null)[]): string[] {
+  return texts.flatMap((text) => (text === null ? [] : BANNED.filter((word) => text.includes(word)).map((word) => `${word}：${text}`)));
+}
+
+/** 每个失败码文案需要的插值参数；漏配一个码类型检查就不过。 */
+const PARAMS: Readonly<Record<FailureCode, Record<string, string | number>>> = {
+  java_missing: { major: 21, mc_version: "1.21.1" },
+  java_pinned_missing: { path: "C:/jdk/bin/java.exe", pinned_by: "instance" },
+  java_too_old: { current: 17, major: 21, mc_version: "1.21.1", pinned_by: "instance" },
+  account_relogin: { account: "Steve" },
+  account_refresh_network: { account: "Steve" },
+  account_service_down: { account: "Steve", status: 503 },
+  account_app_not_approved: { account: "Steve" },
+  files_offline: { count: 3 },
+  files_failed: { count: 2, reason: "连接超时" },
+  disk_full: { drive: "D:", needed_bytes: 1024 },
+  version_broken: { reason: "missing_main_class" },
+  loader_library_missing: { path: "D:/mc/libraries/forge-1.20.1-47.2.0-universal.jar" },
+  path_unsupported: { char: "한", path: "D:/Games/versions/한글/한글.jar" },
+  spawn_failed: { message: "CreateProcess error=2" },
+};
+
+const ctx = (accountName: string): FailureContext => ({ accountName, accountKind: "microsoft", javaPinned: false });
+
+// 账户名的边界：1 个字符、16 个字符（离线用户名上限）、带下划线与数字，再加一个随机名
+const randomName = `Player_${Math.floor(Math.random() * 1_000_000)}`;
+const NAMES = ["A", "Abcdefghijklmnop", "Hanami_Walker", randomName];
+
+describe("禁用词扫描本身", () => {
+  it("能扫出语气词、客套与旧称，干净的句子扫不出东西", () => {
+    expect(bannedIn(["请稍候，操作成功！", null, "已登录 Steve"])).toEqual(["请稍候：请稍候，操作成功！", "操作成功：请稍候，操作成功！", "！：请稍候，操作成功！"]);
+    expect(bannedIn(["账号登陆失败"])).toEqual(["账号：账号登陆失败", "登陆：账号登陆失败"]);
+    expect(bannedIn(["一键修复 MOD 导致的问题", "Mod 已装好"])).toEqual(["导致：一键修复 MOD 导致的问题", "一键修复：一键修复 MOD 导致的问题", "MOD：一键修复 MOD 导致的问题"]);
+  });
+});
+
+describe("通知正文", () => {
+  it("补全开始的通知与其他入队通知同一句式，句末不加句号", () => {
+    expect(OVERVIEW_COPY.repairStartedBody).toBe("进度见下载任务");
+    expect(TASK_TOAST.exportStarted("x").body).toBe(OVERVIEW_COPY.repairStartedBody);
+  });
+});
+
+describe("进行中的状态", () => {
+  it.each([
+    ["概览崩溃横幅读报告时", OVERVIEW_COPY.crashBodyPending],
+    ["头图的备份标签", HERO_COPY.backingUp],
+    ["读取显卡信息时", GPU_COPY.descLoading],
+    ["新建实例的按钮", CREATE_COPY.creating],
+    ["确认步查询开局 Mod", CREATE_COPY.confirm.starter.loading],
+    ["确认步读取默认设置", CREATE_COPY.confirm.starter.templateBlocked.loading],
+    ["首次启动向导的按钮", FOOTER_COPY.preparing],
+    ["安装面板页脚", INSTALL_COPY.footCounting(2)],
+  ])("%s以「正在」开头、以省略号结尾", (_where, text) => {
+    expect(text).toMatch(/正在[^…]+…$/);
+    expect(text).not.toContain("...");
+  });
+});
+
+describe("插值贴着中文时的混排", () => {
+  it("一键尝试改设置：项目是英文时两侧补空格，中文项目不加", () => {
+    expect(TOAST_COPY.settingChanged("生存", "Java", "Java 21").title).toBe("「生存」的 Java 已改为 Java 21");
+    expect(TOAST_COPY.settingChanged("生存", "内存", "6 GB").title).toBe("「生存」的内存已改为 6 GB");
+  });
+
+  it("概览资源包卡的脚注：加载器与版本号之间空一格，英文加载器与原版都一样", () => {
+    expect(OVERVIEW_COPY.packsFoot("fabric", "1.21.1")).toBe("Fabric 1.21.1 的资源可以在发现页按版本筛选。");
+    expect(OVERVIEW_COPY.packsFoot("vanilla", "1.21.1")).toBe("原版 1.21.1 的资源可以在发现页按版本筛选。");
+  });
+
+  it("发现页空状态：类型名是 Mod 时补空格，中文类型名不加", () => {
+    expect(SEARCH_COPY.emptyWithQuery("钠", "mod")).toBe("没有找到与「钠」相关的 Mod");
+    expect(SEARCH_COPY.emptyWithQuery("钠", "all")).toBe("没有找到与「钠」相关的资源");
+    expect(SEARCH_COPY.emptyNoQuery("mod")).toBe("没有符合条件的 Mod");
+    expect(SEARCH_COPY.emptyNoQuery("modpack")).toBe("没有符合条件的整合包");
+  });
+
+  it("接在任务标题后面的句子：标题以版本号或英文结尾时补空格，以中文或引号结尾时不加", () => {
+    expect(ACTION_ERROR.landTask("安装 1.21.1")).toBe("安装 1.21.1 已完成，后续设置没有写入");
+    expect(ACTION_ERROR.landTask("补全「生存」的游戏文件")).toBe("补全「生存」的游戏文件已完成，后续设置没有写入");
+    expect(PEEK_COPY.rowProgress("安装 Sodium")).toBe("安装 Sodium 的进度");
+    expect(PEEK_COPY.rowProgress("补全「生存」的游戏文件")).toBe("补全「生存」的游戏文件的进度");
+    expect(TASKS_COPY.row.progressLabel("安装 Sodium")).toBe("安装 Sodium 的进度");
+    expect(TASKS_COPY.row.progressLabel("补全「生存」的游戏文件")).toBe("补全「生存」的游戏文件的进度");
+    expect(TASKS_COPY.lanes.progressLabel("补全「生存」的游戏文件")).toBe("补全「生存」的游戏文件的进度");
+  });
+});
+
+describe("取消实例级任务的确认", () => {
+  it("标题里的任务标题带直角引号时换成『』，外层仍是「」", () => {
+    const copy = CONFIRM_COPY.cancelRepair(TASK_TEXT.repairTitle("生存"), "生存");
+    expect(copy.title).toBe("取消「补全『生存』的游戏文件」？");
+    expect(copy.body).toBe("「生存」会停在文件不完整的状态，之后可以再点「修复实例」。");
+    expect(CONFIRM_COPY.cancelCreate(TASK_TEXT.createTitle("1.21.1", "vanilla", null), "周末生存").title).toBe("取消「安装 1.21.1」？");
+    expect(CONFIRM_COPY.cancelCreate(TASK_TEXT.modpackTitle("RLCraft"), "RLCraft").title).toBe("取消「导入整合包 RLCraft」？");
+  });
+});
+
+describe("删除被别的实例依赖的实例", () => {
+  const body = (dependents: readonly string[]) => DELETE_INSTANCE_COPY.hasDependents("1.21.1", dependents).body;
+
+  it("标题说不能删，正文点名依赖它的实例；超过两个时只点两个、写明总数", () => {
+    expect(DELETE_INSTANCE_COPY.hasDependents("1.21.1", ["甲"]).title).toBe("不能删除「1.21.1」");
+    expect(body(["甲"])).toBe("实例「甲」依赖它，要先删除依赖它的实例");
+    expect(body(["甲", "乙"])).toBe("实例「甲」「乙」依赖它，要先删除依赖它的实例");
+    expect(body(["甲", "乙", "丙"])).toBe("实例「甲」「乙」等 3 个依赖它，要先删除依赖它的实例");
+  });
+
+  it("没有依赖却走到这句是调用方的错：不写出一句没有主语的话", () => {
+    expect(() => body([])).toThrow("没有实例依赖「1.21.1」");
+  });
+});
+
+describe("任务状态标签", () => {
+  it("运行中的本地任务按实际在做的事写，不说成下载；其余状态与下载类任务照状态表", () => {
+    expect(taskStatusLabel({ kind: "world_backup", status: "running" })).toBe("打包中");
+    expect(taskStatusLabel({ kind: "modpack_export", status: "running" })).toBe("打包中");
+    expect(taskStatusLabel({ kind: "world_restore", status: "running" })).toBe("恢复中");
+    expect(taskStatusLabel({ kind: "game", status: "running" })).toBe("下载中");
+    expect(taskStatusLabel({ kind: "repair", status: "running" })).toBe("下载中");
+    expect(taskStatusLabel({ kind: "world_backup", status: "queued" })).toBe("排队中");
+    expect(taskStatusLabel({ kind: "world_restore", status: "failed" })).toBe("失败");
+  });
+});
+
+describe("启动失败：账户验证暂时不可用", () => {
+  it.each(NAMES)("account_service_down（账户 %s）：标题、正文、重试与以离线方式进单人", (name) => {
+    const copy = failureCopy("account_service_down", PARAMS.account_service_down, ctx(name));
+    expect(copy).toEqual({
+      title: "微软登录服务暂时不可用",
+      body: `微软的登录服务出了故障，不是 ${name} 这个账户的问题。稍后重试；想先玩单人游戏，可以选择以离线方式进入。`,
+      fix: { kind: "retry", label: "重试" },
+      secondary: { kind: "launch_offline_once", label: "以离线方式进单人" },
+    });
+    expect(copy.title.length).toBeLessThanOrEqual(16);
+  });
+
+  it.each(NAMES)("外置登录账户（%s）遇到服务故障：不写微软，重试与以离线方式进单人照旧", (name) => {
+    const copy = failureCopy("account_service_down", PARAMS.account_service_down, { ...ctx(name), accountKind: "authlib" });
+    expect(copy).toEqual({
+      title: "登录服务暂时不可用",
+      body: `登录服务出了故障，不是 ${name} 这个账户的问题。稍后重试；想先玩单人游戏，可以选择以离线方式进入。`,
+      fix: { kind: "retry", label: "重试" },
+      secondary: { kind: "launch_offline_once", label: "以离线方式进单人" },
+    });
+  });
+
+  it("account_service_down 不读插值参数：缺 account 与 status 也给出同样的文案", () => {
+    expect(failureCopy("account_service_down", {}, ctx("Steve"))).toEqual(failureCopy("account_service_down", PARAMS.account_service_down, ctx("Steve")));
+  });
+
+  it("account_refresh_network：正文指向以离线方式进入，第二按钮为以离线方式进单人", () => {
+    expect(failureCopy("account_refresh_network", {}, ctx("Steve"))).toEqual({
+      title: "无法验证账户",
+      body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先以离线方式进入。",
+      fix: { kind: "retry", label: "重试" },
+      secondary: { kind: "launch_offline_once", label: "以离线方式进单人" },
+    });
+  });
+
+  it.each(NAMES)("account_refresh_network（账户 %s）：外置登录也会走到这里，标题与正文都不写账户类型", (name) => {
+    const copy = failureCopy("account_refresh_network", { server: "https://littleskin.cn/api/yggdrasil" }, ctx(name));
+    expect(copy.title).not.toContain("微软");
+    expect(copy.body).not.toContain("微软");
+    expect(copy.title.length).toBeLessThanOrEqual(16);
+  });
+
+  it("只有这两个失败码给出以离线方式进单人；登录失效仍是「重新登录」", () => {
+    const offering = FAILURE_CODES.filter((code) => {
+      const copy = failureCopy(code, PARAMS[code], ctx("Steve"));
+      return copy.fix.kind === "launch_offline_once" || copy.secondary?.kind === "launch_offline_once";
+    });
+    expect(offering).toEqual(["account_refresh_network", "account_service_down"]);
+    expect(failureCopy("account_relogin", PARAMS.account_relogin, ctx("Steve"))).toMatchObject({ fix: { kind: "relogin", label: "重新登录" }, secondary: null });
+  });
+
+  it("加载器文件缺失：失败卡的修复动作是重新安装加载器，正文与任务失败原因同一句", () => {
+    const copy = failureCopy("loader_library_missing", PARAMS.loader_library_missing, ctx("Steve"));
+    expect(copy).toEqual({
+      title: "加载器文件缺失",
+      body: "加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要重新安装加载器。",
+      fix: { kind: "reinstall_loader", label: "重新安装加载器" },
+      secondary: null,
+    });
+    expect(copy.title.length).toBeLessThanOrEqual(16);
+    expect(copy.body).toBe(`${taskFailureReason({ code: "loader_library_missing", message: "后端原文" })}。`);
+    expect(bannedIn([copy.title, copy.body, copy.fix.label, TASK_TEXT.reinstallLoaderTitle("生存"), TASK_TOAST.loaderReinstalled("生存").title, ACTION_ERROR.reinstallLoader])).toEqual([]);
+  });
+
+  it("重新安装加载器的禁用原因：占用矩阵与补全一样，说的是这件事", () => {
+    const reason = (lock: Parameters<typeof lockReason>[0]) => lockReason(lock, "reinstallLoader");
+    expect(reason(null)).toBeUndefined();
+    expect(reason("running")).toBe("游戏正在运行，先结束游戏");
+    expect(reason("installing")).toBe("进行中");
+    expect(reason("modifying")).toBe("正在改动这个实例的 Mod、资源或设置，完成后才能重新安装加载器");
+    expect(reason("backing_up")).toBe("正在备份或恢复这个实例的存档，完成后才能重新安装加载器");
+    expect(reason({ kind: "inherited", usedBy: "整合包" })).toBe("实例「整合包」正在使用它，结束后才能重新安装加载器");
+    expect(reason({ kind: "base_busy", base: "1.21.1", activity: "running" })).toBe("它依赖的实例「1.21.1」正在运行，结束后才能重新安装加载器");
+  });
+
+  it("依赖的实例正忙：说清是哪个实例、在做什么；这把锁只挡补全类操作", () => {
+    expect(lockReason({ kind: "base_busy", base: "1.21.1", activity: "running" }, "repair")).toBe("它依赖的实例「1.21.1」正在运行，结束后才能补全");
+    expect(lockReason({ kind: "base_busy", base: "1.21.1", activity: "launching" }, "repair")).toBe("它依赖的实例「1.21.1」正在启动，结束后才能补全");
+    expect(lockReason({ kind: "base_busy", base: "1.21.1", activity: "repairing" }, "repair")).toBe("它依赖的实例「1.21.1」正在补全文件，结束后才能补全");
+    expect(() => lockReason({ kind: "base_busy", base: "1.21.1", activity: "running" }, "rename")).toThrow("只挡补全");
+  });
+
+  it("以离线方式启动的通知：标题带实例名，正文说明只能玩单人", () => {
+    expect(TOAST_COPY.offlineLaunched("周末生存")).toEqual({ title: "「周末生存」以离线方式启动", body: "这一局只能玩单人游戏，多人服务器与 Realms 用不了" });
+    expect(TOAST_COPY.offlineLaunched("周末生存").body.length).toBeLessThanOrEqual(40);
+  });
+
+  it("新增与改动的文案不含禁用词", () => {
+    const texts = NAMES.flatMap((name) =>
+      (["account_service_down", "account_refresh_network"] as const).flatMap((code) => {
+        const copy = failureCopy(code, PARAMS[code], ctx(name));
+        return [copy.title, copy.body, copy.fix.label, copy.secondary === null ? null : copy.secondary.label];
+      }),
+    );
+    const toast = TOAST_COPY.offlineLaunched("生存");
+    expect(bannedIn([...texts, toast.title, toast.body])).toEqual([]);
+  });
+});
+
+describe("启动失败：登录应用未获批准", () => {
+  it("说明是应用的审批问题，修复动作打开设置，不给重试也不给以离线方式进单人", () => {
+    const copy = failureCopy("account_app_not_approved", PARAMS.account_app_not_approved, ctx("Steve"));
+    expect(copy).toEqual({
+      title: "登录应用未获批准",
+      body: `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
+      fix: { kind: "open_client_id_settings", label: "打开设置" },
+      secondary: null,
+    });
+    expect(copy.title.length).toBeLessThanOrEqual(16);
+    expect(bannedIn([copy.title, copy.body, copy.fix.label])).toEqual([]);
+  });
+
+  it("与登录弹窗上的同一条错误说的是同一句话", () => {
+    const launch = failureCopy("account_app_not_approved", {}, ctx("Steve"));
+    const login = microsoftLoginFailure("AppNotApproved", "x", undefined);
+    expect([launch.title, launch.body]).toEqual([login.title, login.body]);
+    expect(launch.fix.label).toBe(login.primary?.label);
+  });
+});
+
+/** 按钮字数：英文单词、版本号各按 1 个字计。 */
+function buttonLength(label: string): number {
+  return [...label.matchAll(/[A-Za-z0-9.]+|[^\sA-Za-z0-9.]/g)].length;
+}
+
+describe("启动失败的修复动作", () => {
+  const copies = [
+    ...FAILURE_CODES.map((code) => failureCopy(code, PARAMS[code], { ...ctx("Steve"), javaPinned: true })),
+    failureCopy("java_pinned_missing", { ...PARAMS.java_pinned_missing, pinned_by: "global" }, ctx("Steve")),
+    failureCopy("java_too_old", { ...PARAMS.java_too_old, pinned_by: "global" }, ctx("Steve")),
+  ];
+
+  it("字数的算法：英文单词与版本号各算 1 个字", () => {
+    expect(buttonLength("切换到 Java 21")).toBe(5);
+    expect(buttonLength("默认 Java 改回自动选择")).toBe(9);
+  });
+
+  it("按钮文案都在 2 到 8 个字之间", () => {
+    const labels = copies.flatMap((c) => (c.secondary === null ? [c.fix.label] : [c.fix.label, c.secondary.label]));
+    expect(labels.filter((label) => buttonLength(label) < 2 || buttonLength(label) > 8)).toEqual([]);
+  });
+
+  it("通知的操作都在 2 到 4 个字之间", () => {
+    const labels = copies.map((c) => failureToastLabel(c.fix));
+    expect(labels.filter((label) => buttonLength(label) < 2 || buttonLength(label) > 4)).toEqual([]);
+  });
+
+  it("改默认 Java 与改实例的 Java 在按钮和通知里都分得开，放得下的动作通知沿用按钮文案", () => {
+    const global = failureCopy("java_too_old", { ...PARAMS.java_too_old, pinned_by: "global" }, ctx("Steve")).fix;
+    const instance = failureCopy("java_too_old", PARAMS.java_too_old, ctx("Steve")).fix;
+    expect(global.label).toBe("默认 Java 改回自动");
+    expect(failureToastLabel(global)).toBe("改回自动");
+    expect(instance.label).toBe("改为自动选择");
+    expect(failureToastLabel(instance)).toBe("改为自动");
+    expect(failureToastLabel({ kind: "download_java", label: "下载 Java 21" })).toBe("下载 Java 21");
+    expect(failureToastLabel({ kind: "reinstall_loader", label: "重新安装加载器" })).toBe("重新安装");
+  });
+});
+
+describe("启动失败：版本文件有问题", () => {
+  it("缺主类才说找不到启动入口；JSON 写坏时 reason 是解析器的原话，不能说成 mainClass", () => {
+    const missing = failureCopy("version_broken", { reason: "missing_main_class" }, ctx("Steve"));
+    expect(missing.body).toContain("mainClass");
+    const unreadable = failureCopy("version_broken", { reason: "expected value at line 1 column 3" }, ctx("Steve"));
+    expect(unreadable.title).toBe("版本文件不完整");
+    expect(unreadable.body).not.toContain("mainClass");
+    expect(unreadable.body).toContain("读不出来");
+  });
+});
+
+describe("启动失败：路径里有 Java 读不了的字符", () => {
+  it("点名字符与路径，告诉玩家怎么避开；标题不超过 16 字", () => {
+    const copy = failureCopy("path_unsupported", { char: "한", path: "D:/Games/versions/한글/한글.jar" }, ctx("Steve"));
+    expect(copy.title.length).toBeLessThanOrEqual(16);
+    expect(copy.body).toContain("「한」");
+    expect(copy.body).toContain("D:/Games/versions/한글/한글.jar");
+    expect(copy.body).toContain("改个名字");
+    expect(copy.fix.kind).toBe("open_logs");
+    expect(bannedIn([copy.title, copy.body])).toEqual([]);
+  });
+});
+
+describe("微软登录失败：服务故障与应用未获批准", () => {
+  it("ServiceUnavailable：说明是微软一侧的故障，主按钮重试", () => {
+    expect(microsoftLoginFailure("ServiceUnavailable", "微软登录服务暂时不可用（XSTS 授权：HTTP 503）", { step: "XSTS 授权", status: 503 })).toEqual({
+      title: "微软登录服务暂时不可用",
+      body: "微软那边的服务出了故障，不是你的账户或网络的问题。稍后重试。",
+      primary: { kind: "retry", label: "重试" },
+      secondary: null,
+      closeOnly: false,
+    });
+  });
+
+  it("ServiceUnavailable 的文案不随 detail 变：429 或缺 detail 时相同", () => {
+    const base = microsoftLoginFailure("ServiceUnavailable", "x", { step: "Minecraft 登录", status: 503 });
+    expect(microsoftLoginFailure("ServiceUnavailable", "y", { step: "刷新令牌", status: 429 })).toEqual(base);
+    expect(microsoftLoginFailure("ServiceUnavailable", "z", undefined)).toEqual(base);
+  });
+
+  it("AppNotApproved：说明是应用的审批问题，主按钮打开设置、次按钮复制错误信息，不给重试", () => {
+    const copy = microsoftLoginFailure("AppNotApproved", "使用的微软应用未获准访问 Minecraft 服务（Invalid app registration）", undefined);
+    expect(copy).toEqual({
+      title: "登录应用未获批准",
+      body: `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
+      primary: { kind: "open_client_id_settings", label: "打开设置" },
+      secondary: { kind: "copy_error", label: "复制错误信息" },
+      closeOnly: false,
+    });
+    expect([copy.primary?.kind, copy.secondary?.kind]).not.toContain("retry");
+  });
+
+  it("新增的登录失败文案不含禁用词", () => {
+    const texts = (["ServiceUnavailable", "AppNotApproved"] as const).flatMap((code) => {
+      const copy = microsoftLoginFailure(code, "x", undefined);
+      return [copy.title, copy.body, copy.primary === null ? null : copy.primary.label, copy.secondary === null ? null : copy.secondary.label];
+    });
+    expect(texts).toHaveLength(8);
+    expect(bannedIn(texts)).toEqual([]);
+  });
+});

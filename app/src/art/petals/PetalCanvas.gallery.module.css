@@ -1,0 +1,32 @@
+/* 陈列用的「主页内容区」：花瓣层铺满它，上面压一张微透卡片，检查花瓣从卡片底下隐约透出 */
+.stage {
+  --stage-height: 360px;
+  position: relative;
+  height: var(--stage-height);
+  overflow: hidden;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-lg);
+  background: var(--sk-bg);
+}
+
+.card {
+  --card-width: 280px;
+  position: absolute;
+  z-index: var(--sk-z-page);
+  left: var(--sk-space-24);
+  top: var(--sk-space-24);
+  width: var(--card-width);
+  padding: var(--sk-space-16);
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-lg);
+  background: var(--sk-card);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-small);
+}
+
+.stats {
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  color: var(--sk-text-2);
+  user-select: text;
+}

@@ -3,8 +3,8 @@
 //! 隔离即让某版本使用「自己的」游戏工作目录（`versions/<id>/`）而非共享的 `.minecraft` 根，从而各版本
 //! 的 mods/saves/配置互不污染。判定优先级（自高而低）：
 //!
-//! 1. 版本目录内已存在 `mods/` 或 `saves/` —— 强制隔离。共享根会无视这些本地数据，放任不隔离会造成
-//!    「装了却不生效」的困惑，故最高优先级强制开启。
+//! 1. 版本目录内的 `mods/` 或 `saves/` 里有内容 —— 强制隔离。共享根会无视这些本地数据，放任不隔离会造成
+//!    「装了却不生效」的困惑，故最高优先级强制开启。空目录不算：隔离时跑过一次游戏就会有，没有数据要保护。
 //! 2. 版本级覆盖 [`IsolationOverride`]（开启 / 关闭 / 跟随全局）。
 //! 3. 全局档位 [`IsolationPolicy`]（对应 PCL2 的五档：关闭 / 仅 Mod 版本 / 仅非正式版 / 两者 / 全部）。
 
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::VERSIONS_DIR;
 use crate::error::{Error, Result};
 
-/// 全局版本隔离档位。对应 PCL2 设置里的五个选项，整数码 0..4 用于从旧配置迁移。
+/// 全局版本隔离档位，五档与 PCL2 设置里的选项一一对应。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationPolicy {
@@ -35,29 +35,6 @@ pub enum IsolationPolicy {
 }
 
 impl IsolationPolicy {
-    /// 从 PCL2 的整数档位迁移（0=关闭,1=仅Mod,2=仅非正式版,3=两者,4=全部）。越界回退到默认档位。
-    pub fn from_pcl_code(code: i64) -> Self {
-        match code {
-            0 => IsolationPolicy::Disabled,
-            1 => IsolationPolicy::ModLoadersOnly,
-            2 => IsolationPolicy::NonReleaseOnly,
-            3 => IsolationPolicy::ModLoadersAndNonRelease,
-            4 => IsolationPolicy::All,
-            _ => IsolationPolicy::default(),
-        }
-    }
-
-    /// 回写为 PCL2 的整数档位。
-    pub fn to_pcl_code(self) -> i64 {
-        match self {
-            IsolationPolicy::Disabled => 0,
-            IsolationPolicy::ModLoadersOnly => 1,
-            IsolationPolicy::NonReleaseOnly => 2,
-            IsolationPolicy::ModLoadersAndNonRelease => 3,
-            IsolationPolicy::All => 4,
-        }
-    }
-
     /// 档位的中文显示名。
     pub fn display_name(self) -> &'static str {
         match self {
@@ -97,7 +74,7 @@ pub struct IsolationFacts {
     pub has_mod_loader: bool,
     /// 是否为正式版（`type == release`）。
     pub is_release: bool,
-    /// 版本目录内是否已存在 `mods/` 或 `saves/`（触发强制隔离）。
+    /// 版本目录内的 `mods/` 或 `saves/` 里是否有内容（触发强制隔离）。
     pub has_existing_mods_or_saves: bool,
 }
 
@@ -140,12 +117,19 @@ pub fn game_working_dir(mc_dir: &Path, version_id: &str, isolated: bool) -> Path
     }
 }
 
-/// 探测版本目录下是否已存在 `mods/` 或 `saves/` 目录（同名普通文件不算）。
+/// 探测版本目录下的 `mods/` 或 `saves/` 目录里是否有内容（同名普通文件不算）。
+///
+/// 只看目录在不在不够：隔离时启动一次，游戏和加载器就会建出这两个空目录，之后「关闭」再也压不过它们，
+/// 实例被锁在隔离里，界面还得说里面有存档或 Mod。
 pub async fn has_existing_mods_or_saves(version_dir: &Path) -> Result<bool> {
     for sub in ["mods", "saves"] {
         let candidate = version_dir.join(sub);
         match tokio::fs::metadata(&candidate).await {
-            Ok(meta) if meta.is_dir() => return Ok(true),
+            Ok(meta) if meta.is_dir() => {
+                if dir_has_entries(&candidate).await? {
+                    return Ok(true);
+                }
+            }
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => {
@@ -157,6 +141,17 @@ pub async fn has_existing_mods_or_saves(version_dir: &Path) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+async fn dir_has_entries(dir: &Path) -> Result<bool> {
+    let first = async { tokio::fs::read_dir(dir).await?.next_entry().await }.await;
+    match first {
+        Ok(entry) => Ok(entry.is_some()),
+        Err(source) => Err(Error::Io {
+            path: dir.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 /// 一次隔离判定的完整结果。
@@ -201,24 +196,6 @@ pub async fn resolve_isolation(
 mod tests {
     use super::*;
 
-    #[test]
-    fn pcl_code_round_trips_and_falls_back() {
-        for policy in [
-            IsolationPolicy::Disabled,
-            IsolationPolicy::ModLoadersOnly,
-            IsolationPolicy::NonReleaseOnly,
-            IsolationPolicy::ModLoadersAndNonRelease,
-            IsolationPolicy::All,
-        ] {
-            assert_eq!(IsolationPolicy::from_pcl_code(policy.to_pcl_code()), policy);
-        }
-        assert_eq!(IsolationPolicy::from_pcl_code(0), IsolationPolicy::Disabled);
-        assert_eq!(IsolationPolicy::from_pcl_code(4), IsolationPolicy::All);
-        // 越界回退默认档位。
-        assert_eq!(IsolationPolicy::from_pcl_code(99), IsolationPolicy::default());
-        assert_eq!(IsolationPolicy::from_pcl_code(-1), IsolationPolicy::default());
-    }
-
     /// 决策真值表：手工给出每行的期望，覆盖全部档位 × 覆盖项 × 事实组合的代表点与边界。
     #[test]
     fn isolation_decision_table() {
@@ -237,16 +214,65 @@ mod tests {
             (P::Disabled, O::FollowGlobal, false, true, false, false),
             // 跟随全局 + 仅 Mod 版本：看 has_mod_loader。
             (P::ModLoadersOnly, O::FollowGlobal, true, true, false, true),
-            (P::ModLoadersOnly, O::FollowGlobal, false, false, false, false),
+            (
+                P::ModLoadersOnly,
+                O::FollowGlobal,
+                false,
+                false,
+                false,
+                false,
+            ),
             // 跟随全局 + 仅非正式版：看 !is_release。
-            (P::NonReleaseOnly, O::FollowGlobal, false, true, false, false),
-            (P::NonReleaseOnly, O::FollowGlobal, false, false, false, true),
+            (
+                P::NonReleaseOnly,
+                O::FollowGlobal,
+                false,
+                true,
+                false,
+                false,
+            ),
+            (
+                P::NonReleaseOnly,
+                O::FollowGlobal,
+                false,
+                false,
+                false,
+                true,
+            ),
             (P::NonReleaseOnly, O::FollowGlobal, true, true, false, false),
             // 跟随全局 + 两者：并集。
-            (P::ModLoadersAndNonRelease, O::FollowGlobal, true, true, false, true),
-            (P::ModLoadersAndNonRelease, O::FollowGlobal, false, true, false, false),
-            (P::ModLoadersAndNonRelease, O::FollowGlobal, false, false, false, true),
-            (P::ModLoadersAndNonRelease, O::FollowGlobal, true, false, false, true),
+            (
+                P::ModLoadersAndNonRelease,
+                O::FollowGlobal,
+                true,
+                true,
+                false,
+                true,
+            ),
+            (
+                P::ModLoadersAndNonRelease,
+                O::FollowGlobal,
+                false,
+                true,
+                false,
+                false,
+            ),
+            (
+                P::ModLoadersAndNonRelease,
+                O::FollowGlobal,
+                false,
+                false,
+                false,
+                true,
+            ),
+            (
+                P::ModLoadersAndNonRelease,
+                O::FollowGlobal,
+                true,
+                false,
+                false,
+                true,
+            ),
             // 跟随全局 + 全部：永远隔离。
             (P::All, O::FollowGlobal, false, true, false, true),
             (P::All, O::FollowGlobal, true, false, false, true),
@@ -281,8 +307,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path();
         let version_dir = mc.join("versions").join("1.21");
-        // 造出 versions/1.21/mods/ 触发强制隔离。
+        // versions/1.21/mods/ 里有文件才触发强制隔离。
         tokio::fs::create_dir_all(version_dir.join("mods"))
+            .await
+            .unwrap();
+        tokio::fs::write(version_dir.join("mods").join("a.jar"), b"jar")
             .await
             .unwrap();
 
@@ -340,5 +369,61 @@ mod tests {
             .unwrap();
 
         assert!(!has_existing_mods_or_saves(&version_dir).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn empty_mods_and_saves_dirs_leave_the_choice_to_the_setting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        let version_dir = mc.join("versions").join("1.21");
+        // 隔离时跑过一次，游戏和加载器自己建的空目录。
+        for sub in ["mods", "saves"] {
+            tokio::fs::create_dir_all(version_dir.join(sub))
+                .await
+                .unwrap();
+        }
+
+        let resolved = resolve_isolation(
+            mc,
+            "1.21",
+            IsolationPolicy::All,
+            IsolationOverride::Disabled,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(!resolved.isolated);
+        assert!(!resolved.forced_by_local_data);
+        assert_eq!(resolved.working_dir, mc);
+    }
+
+    #[tokio::test]
+    async fn a_world_in_saves_forces_isolation_even_without_any_file_in_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let version_dir = tmp.path().join("versions").join("1.21");
+        tokio::fs::create_dir_all(version_dir.join("mods"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(version_dir.join("saves").join("世界"))
+            .await
+            .unwrap();
+
+        assert!(has_existing_mods_or_saves(&version_dir).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn only_disabled_mods_still_count_as_local_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let version_dir = tmp.path().join("versions").join("1.21");
+        tokio::fs::create_dir_all(version_dir.join("mods"))
+            .await
+            .unwrap();
+        tokio::fs::write(version_dir.join("mods").join("a.jar.disabled"), b"jar")
+            .await
+            .unwrap();
+
+        assert!(has_existing_mods_or_saves(&version_dir).await.unwrap());
     }
 }

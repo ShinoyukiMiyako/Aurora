@@ -1,0 +1,231 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "title": "Lantern Fair Opens",
+      "tag": "News",
+      "category": "Minecraft: Java Edition",
+      "date": "2026-10-30",
+      "text": "A dozen invented maps for a quiet evening walk.",
+      "playPageImage": {
+        "title": "lanternfair_700x466.jpg",
+        "url": "/v2/images/lanternfair700x466.jpg"
+      },
+      "newsPageImage": {
+        "title": "lanternfair_772x350.jpg",
+        "url": "/v2/images/lanternfair772x350.jpg",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/lantern-fair-opens?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "Java",
+        "News page"
+      ],
+      "id": "82411625b4ff68af6a5d7cefed84c45ec777208b9dadab44ec6bd571882a547c",
+      "needsTranslation": false
+    },
+    {
+      "title": "Clockwork Harbor",
+      "tag": "news",
+      "category": "Minecraft for Windows",
+      "date": "2026-10-29",
+      "text": "Build a tiny harbor, wind up the clockwork cranes, and trade crates with the neighbouring islands. Finish the season ledger to unlock a brass lighthouse for your whole crew. Just remember to oil the gears before the tide turns!",
+      "playPageImage": {
+        "title": "CWH_Launcher_700x466.png",
+        "url": "/v2/images/CWHLauncher700x466.png"
+      },
+      "newsPageImage": {
+        "title": "CWH_Launcher_772x350.png",
+        "url": "/v2/images/CWHLauncher772x350.png",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/clockwork-harbor?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "News page",
+        "Bedrock"
+      ],
+      "id": "969063a1cd030be04ef07c7614fec88d9f1d45237ad5baac8d5b73dcf731c767",
+      "needsTranslation": true
+    },
+    {
+      "title": "Seven Quiet Gardens",
+      "tag": "news",
+      "category": "Minecraft for Windows",
+      "date": "2026-10-20",
+      "text": "Need a slower evening? Wander seven pocket gardens full of paper kites, mossy stairways, and tiny tea houses. Every path ends somewhere new, so pick a gate and take your time! ",
+      "playPageImage": {
+        "title": "PKG_QuietGardens_Launcher_700x466.png",
+        "url": "/v2/images/PKGQuietGardensLauncher700x466.png"
+      },
+      "newsPageImage": {
+        "title": "PKG_QuietGardens_Launcher_772x350.png",
+        "url": "/v2/images/PKGQuietGardensLauncher772x350.png",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://minecraft.net/article/seven-quiet-gardens-october-2026?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "News page",
+        "Bedrock"
+      ],
+      "id": "aa44585aa5999900c6a678f221a145b930b5cf5106cbf43e91a9718ad97971e5",
+      "needsTranslation": true
+    },
+    {
+      "title": "Tidewalker add-on  ",
+      "tag": "news",
+      "category": "Minecraft for Windows",
+      "date": "2026-10-16",
+      "text": "Walk the shallows in this made-up add-on! Chart tide pools, befriend the hermit crabs, and learn the old sea songs. Pick up the driftwood crown in the shop, free for a little while!",
+      "playPageImage": {
+        "title": "Tidewalker_Launcher_700x466.png",
+        "url": "/v2/images/TidewalkerLauncher700x466.png"
+      },
+      "newsPageImage": {
+        "title": "Tidewalker_Launcher_772x350.png",
+        "url": "/v2/images/TidewalkerLauncher772x350.png",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/tidewalker-add-on?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "News page",
+        "Bedrock"
+      ],
+      "id": "b456b9804ffc7e0236e5ff65ea2a0fc36043270ac6ad6e7e660f4e0958dc8dba",
+      "needsTranslation": true
+    },
+    {
+      "title": "Shared Harbors  ",
+      "tag": "news",
+      "category": "Minecraft for Windows",
+      "date": "2026-10-08",
+      "text": "Take your tide charts somewhere shared! Invite up to 10 friends from any device for a slow sail between the islands. Try it this weekend!",
+      "playPageImage": {
+        "title": "SH_Harbors_Primary_Launcher_700x466.png",
+        "url": "/v2/images/SHHarborsPrimaryLauncher700x466.png"
+      },
+      "newsPageImage": {
+        "title": "SH_Harbors_Primary_Launcher_772x350.png",
+        "url": "/v2/images/SHHarborsPrimaryLauncher772x350.png",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/shared-harbors?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "News page",
+        "Bedrock"
+      ],
+      "id": "dd69791f65d7b210ed1ebc68adb0124f27491396e021a90926b8cfd1911703a2",
+      "needsTranslation": true
+    },
+    {
+      "title": "Deep Vaults update is out",
+      "tag": "News",
+      "category": "Minecraft Dungeons II",
+      "date": "2026-09-28",
+      "text": "Grab a torch and mind the third step.",
+      "playPageImage": {
+        "title": "deepvaults_700x466.jpg",
+        "url": "/v2/images/deepvaults700x466.jpg"
+      },
+      "newsPageImage": {
+        "title": "deepvaults_772x350.jpg",
+        "url": "/v2/images/deepvaults772x350.jpg",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/deep-vaults-update-is-out?OCID=Launcher",
+      "cardBorder": true,
+      "articleBody": "",
+      "newsType": [
+        "Dungeons",
+        "DungeonsII",
+        "News page"
+      ],
+      "id": "24bf2eef916f4b81af8e781a968b8e7768ac7d829d7426f099203f62d4e99490",
+      "needsTranslation": false
+    },
+    {
+      "title": "Fresh Maps: Copper & Comets",
+      "tag": "News",
+      "category": "Minecraft: Java Edition",
+      "date": "2026-09-28",
+      "text": "Nine invented maps for the rainy weeks ahead.",
+      "playPageImage": {
+        "title": "fm-sep-700x466.jpg",
+        "url": "/v2/images/fmsep700x466.jpg"
+      },
+      "newsPageImage": {
+        "title": "fm-sep-772x350.jpg",
+        "url": "/v2/images/fmsep772x350.jpg",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/fresh-maps--copper-and-comets?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "Java",
+        "News page"
+      ],
+      "id": "78414c42c91674ca52934326ba3713477483080ed92e37d21c1f0f183646a80e",
+      "needsTranslation": false
+    },
+    {
+      "title": "Kite Day Challenge",
+      "tag": "news",
+      "category": "Minecraft for Windows",
+      "date": "2026-09-26",
+      "text": "Fly 200M paper kites and tie 50M ribbons in this made-up community event! Reach the halfway mark to unlock a free hat, or finish both goals by the end of the week for a bigger prize!",
+      "playPageImage": {
+        "title": "MCLauncher_700x466.png",
+        "url": "/v2/images/MCLauncher700x466.png"
+      },
+      "newsPageImage": {
+        "title": "MCLauncher_772x350.png",
+        "url": "/v2/images/MCLauncher772x350.png",
+        "dimensions": {
+          "width": 772,
+          "height": 350
+        }
+      },
+      "readMoreLink": "https://www.minecraft.net/article/kite-day-community-challenge?OCID=Launcher",
+      "cardBorder": false,
+      "articleBody": "",
+      "newsType": [
+        "Java",
+        "News page",
+        "Bedrock"
+      ],
+      "id": "deb8f187feb8d44c54ab18e21949f528428953e2baf90bc6a36eaba136aaa8c9",
+      "needsTranslation": true
+    }
+  ]
+}

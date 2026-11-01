@@ -1,0 +1,1252 @@
+//! 平台整合包的清单摘要：不下载整包，按 HTTP Range 只取 zip 末尾的中央目录与清单那一个条目。
+//!
+//! 整合包动辄几百 MB，而发现页要在用户点「安装」之前就说清有多少个 Mod、还要下多少字节。zip 的目录
+//! 在文件末尾，清单（`modrinth.index.json` / `manifest.json`）是其中一个条目：取尾部找到中央目录，
+//! 从目录里查出清单条目的偏移与压缩长度，再只取这一段解压。一共四五个小请求，与包的大小无关。
+//!
+//! 尾部不用 `bytes=-n` 取：Modrinth 的 CDN（Fastly）对这种写法一律回 501 Unsupported client range，
+//! 先用一个字节的范围问出总长，再按明确的起止取。
+//!
+//! 服务器不支持 Range（回 200 整包）时直接报错，不退回整包下载：那与导入时的下载重复，也违背
+//! 「不下载整包」的前提。ZIP64（中央目录或条目超过 4 GiB）同样报错：整合包远到不了这个体量。
+//!
+//! CurseForge 清单只有工程与文件 id，Mod 数与下载量要再问批量文件、批量工程两个接口，与导入同一套落点规则。
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use aurora_download::DownloadCredential;
+use aurora_modpack::{PackFormat, PackLoader, PackManifest};
+use aurora_modplatform::Platform;
+use zip::result::ZipError;
+
+use crate::error::{CoreError, Result};
+use crate::facade::Aurora;
+use crate::modpack::{BlockedProbe, RemoteFacts, count_pack_mods, read_pack_blocking};
+
+const EOCD_SIGNATURE: u32 = 0x0605_4b50;
+const CENTRAL_SIGNATURE: u32 = 0x0201_4b50;
+const LOCAL_SIGNATURE: u32 = 0x0403_4b50;
+const EOCD_LEN: usize = 22;
+const CENTRAL_HEADER_LEN: usize = 46;
+const LOCAL_HEADER_LEN: u64 = 30;
+/// EOCD 之后最多跟 65535 字节的注释，尾部取这么多一定能找到 EOCD。
+const TAIL_BYTES: u64 = EOCD_LEN as u64 + u16::MAX as u64;
+/// ZIP64 用这个值占位，真正的数在扩展记录里。
+const ZIP64_MARKER: u32 = u32::MAX;
+/// 清单解压后的上限。正常的清单在几百 KB，上限只防构造出来的压缩炸弹。
+const MANIFEST_MAX_BYTES: u64 = 32 * 1024 * 1024;
+/// 单次范围读取最多取这么多字节：尾部 64 KB，清单压缩后不会比解压上限大出多少，几千项的中央目录也只有
+/// 几 MB。中央目录与条目的长度出自包本身，可以写成任意值，超出时不去取。
+const RANGE_MAX_BYTES: u64 = 2 * MANIFEST_MAX_BYTES;
+/// 单个范围请求的时限。
+const RANGE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// 一个平台整合包版本的清单摘要。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModpackSummary {
+    pub format: PackFormat,
+    pub name: String,
+    pub version: Option<String>,
+    pub minecraft: String,
+    pub loader: Option<PackLoader>,
+    /// 整合包文件本身的字节数。
+    pub pack_bytes: u64,
+    /// 导入时要另外下载的远程文件数。
+    pub remote_files: usize,
+    /// 导入后落进 `mods/` 的 Mod 数，与本地预览同一口径（见 `count_pack_mods`）；CurseForge 的远程
+    /// 文件按工程大类认，与导入的落点一致。
+    pub mod_files: usize,
+    /// 远程文件总字节数；平台没给齐每个文件的大小时为 `None`。
+    pub remote_bytes: Option<u64>,
+    /// 包内自带的覆盖文件数。
+    pub override_files: usize,
+    /// 覆盖文件解压后的总字节数。
+    pub override_bytes: u64,
+}
+
+/// 按平台选用的清单解析函数。
+type ManifestParser = fn(&[u8]) -> aurora_modpack::Result<PackManifest>;
+
+/// 中央目录里的一个条目。
+#[derive(Debug)]
+struct CentralEntry {
+    name: String,
+    flags: u16,
+    method: u16,
+    crc32: u32,
+    compressed: u64,
+    uncompressed: u64,
+    local_offset: u64,
+}
+
+/// 按范围读出来的平台整合包：文件总长、清单与中央目录。
+#[derive(Debug)]
+struct RemotePack {
+    total: u64,
+    manifest: PackManifest,
+    entries: Vec<CentralEntry>,
+}
+
+impl Aurora {
+    /// 平台上某个整合包版本的清单摘要，不下载整包。服务器不支持范围读取、包不是可读的 zip
+    /// 或缺清单时报 [`CoreError::RemotePack`]，清单本身不合法或压缩方式解不开时报 [`CoreError::Modpack`]。
+    ///
+    /// 包本体不允许启动器直接下载时，认领过就读暂存副本（导入读的也是它），没认领过报
+    /// [`CoreError::FileDistributionBlocked`]，清单里只有这个包，用户在安装前就能手动下载。
+    pub async fn summarize_platform_modpack(
+        &self,
+        platform: Platform,
+        project_id: &str,
+        version_id: &str,
+    ) -> Result<ModpackSummary> {
+        // 只要下载地址：落点目录不会被用到。
+        let located = self
+            .platform_file_task(platform, project_id, version_id, Path::new(""), "")
+            .await;
+        let (_, task) = match located {
+            Ok(found) => found,
+            Err(err) => {
+                let (_, staged) = self.claimed_instead_of(err).await?;
+                return self.summarize_staged_pack(&staged).await;
+            }
+        };
+        // CurseForge 的包本体在 forgecdn 上，范围读取与导入时的下载一样要带下载密钥。
+        let reader = match &task.credential {
+            Some(credential) => RangeClient::Credentialed {
+                client: self.http_manual(),
+                credential: credential.clone(),
+            },
+            None => RangeClient::Shared(self.http()),
+        };
+        let pack = read_remote_pack(&reader, &task.url, platform).await?;
+        let remote = self
+            .remote_facts(&pack.manifest.remote, BlockedProbe::Skip)
+            .await?;
+        Ok(pack.summarize(remote))
+    }
+
+    /// 认领到暂存位的包本体：包已经在本地，与预览本地文件一样读，不发范围请求。
+    async fn summarize_staged_pack(&self, path: &Path) -> Result<ModpackSummary> {
+        let archive = read_pack_blocking(path.to_path_buf()).await?;
+        let pack_bytes = tokio::fs::metadata(path)
+            .await
+            .map_err(|source| aurora_base::Error::Io {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .len();
+        let remote = self
+            .remote_facts(&archive.manifest.remote, BlockedProbe::Skip)
+            .await?;
+        let mod_files = count_pack_mods(
+            remote.destinations(),
+            archive.overrides.iter().map(|entry| entry.path.as_str()),
+        );
+        let manifest = archive.manifest;
+        Ok(ModpackSummary {
+            format: manifest.format,
+            remote_files: manifest.remote.len(),
+            name: manifest.name,
+            version: manifest.version,
+            minecraft: manifest.minecraft,
+            loader: manifest.loader,
+            pack_bytes,
+            mod_files,
+            remote_bytes: remote.bytes,
+            override_files: archive.overrides.len(),
+            override_bytes: archive.overrides_bytes,
+        })
+    }
+}
+
+/// 范围请求怎么发：不带凭据走共享客户端；带凭据走不自动跳转的客户端，跳转逐跳判定带不带密钥。
+enum RangeClient {
+    Shared(reqwest::Client),
+    Credentialed {
+        client: reqwest::Client,
+        credential: DownloadCredential,
+    },
+}
+
+/// 取尾部找到中央目录，再只取清单那一个条目解析。
+async fn read_remote_pack(http: &RangeClient, url: &str, platform: Platform) -> Result<RemotePack> {
+    let (_, total) = fetch_range(http, url, "bytes=0-0".to_owned(), 1).await?;
+    let last = total
+        .checked_sub(1)
+        .ok_or_else(|| remote(url, "文件是空的"))?;
+    let tail_start = total.saturating_sub(TAIL_BYTES);
+    let (tail, _) = fetch_range(
+        http,
+        url,
+        format!("bytes={tail_start}-{last}"),
+        total - tail_start,
+    )
+    .await?;
+    let entries = central_directory(http, url, &tail, tail_start).await?;
+
+    let (manifest_name, parse): (&str, ManifestParser) = match platform {
+        Platform::Modrinth => ("modrinth.index.json", PackManifest::parse_modrinth),
+        Platform::CurseForge => ("manifest.json", PackManifest::parse_curseforge),
+    };
+    let entry = entries
+        .iter()
+        .find(|entry| entry.name == manifest_name)
+        .ok_or_else(|| remote(url, format!("包里没有 {manifest_name}")))?;
+    let manifest = parse(&read_entry(http, url, entry).await?)?;
+    Ok(RemotePack {
+        total,
+        manifest,
+        entries,
+    })
+}
+
+impl RemotePack {
+    fn summarize(self, remote: RemoteFacts) -> ModpackSummary {
+        // 覆盖文件与它去掉覆盖层前缀后、相对实例目录的落点。按落点去重、后面的层盖掉前面的，与本地读包
+        // 列覆盖文件同一规则（比较不分大小写），同一个包在发现页与导入弹窗报的覆盖文件数与大小才一致。
+        let mut landed: HashMap<String, (&CentralEntry, &str)> = HashMap::new();
+        for layer in &self.manifest.override_layers {
+            for entry in self
+                .entries
+                .iter()
+                .filter(|entry| !entry.name.ends_with('/'))
+            {
+                if let Some(relative) = entry.name.strip_prefix(layer.as_str())
+                    && !relative.is_empty()
+                {
+                    landed.insert(relative.to_lowercase(), (entry, relative));
+                }
+            }
+        }
+        let overrides: Vec<(&CentralEntry, &str)> = landed.into_values().collect();
+        let override_files = overrides.len();
+        let override_bytes = overrides.iter().map(|(entry, _)| entry.uncompressed).sum();
+        let mod_files = count_pack_mods(
+            remote.destinations(),
+            overrides.iter().map(|&(_, relative)| relative),
+        );
+        let manifest = self.manifest;
+        ModpackSummary {
+            format: manifest.format,
+            remote_files: manifest.remote.len(),
+            name: manifest.name,
+            version: manifest.version,
+            minecraft: manifest.minecraft,
+            loader: manifest.loader,
+            pack_bytes: self.total,
+            mod_files,
+            remote_bytes: remote.bytes,
+            override_files,
+            override_bytes,
+        }
+    }
+}
+
+fn remote(url: &str, reason: impl Into<String>) -> CoreError {
+    CoreError::RemotePack {
+        url: url.to_owned(),
+        reason: reason.into(),
+    }
+}
+
+/// 取一段范围（`bytes=a-b`），`len` 是这段范围的字节数；返回内容与 Content-Range
+/// 里的文件总长。回的不是 206 说明服务器没按范围给，连同响应体一起丢掉，不把整包读下来。
+///
+/// 回了 206 的正文也不一定守范围（服务器实现不规范或被人做了手脚），先整段读进内存再比就已经晚了：
+/// 声明的长度超出 `len` 时不读正文，没声明或声明不实的按块累计，一超出就中止。
+async fn fetch_range(
+    http: &RangeClient,
+    url: &str,
+    range: String,
+    len: u64,
+) -> Result<(Vec<u8>, u64)> {
+    if len > RANGE_MAX_BYTES {
+        return Err(remote(
+            url,
+            format!("要按范围读 {len} 字节（{range}），超出单次读取 {RANGE_MAX_BYTES} 字节的上限"),
+        ));
+    }
+    let fetch_error = |source| CoreError::Fetch {
+        url: url.to_owned(),
+        source,
+    };
+    let response = match http {
+        RangeClient::Shared(client) => client
+            .get(url)
+            .header(reqwest::header::RANGE, range.as_str())
+            .timeout(RANGE_TIMEOUT)
+            .send()
+            .await
+            .map_err(fetch_error)?,
+        // 逐跳的请求由下载层构造，没法挂单请求时限，改在外面限住整条跳转链；读响应体仍受客户端的读超时兜底。
+        RangeClient::Credentialed { client, credential } => tokio::time::timeout(
+            RANGE_TIMEOUT,
+            aurora_download::credentialed_get(client, credential, url, Some(range.as_str())),
+        )
+        .await
+        .map_err(|_| {
+            remote(
+                url,
+                format!("{range} 超过 {} 秒没有响应", RANGE_TIMEOUT.as_secs()),
+            )
+        })??,
+    };
+    let mut response = response.error_for_status().map_err(fetch_error)?;
+    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(remote(
+            url,
+            format!(
+                "服务器不支持按范围读取（{range} 回的是 {}）",
+                response.status()
+            ),
+        ));
+    }
+    let total = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit_once('/'))
+        .and_then(|(_, total)| total.parse::<u64>().ok())
+        .ok_or_else(|| remote(url, "206 响应缺少可读的 Content-Range 总长"))?;
+    let overlong = || {
+        remote(
+            url,
+            format!("服务器回的内容比请求的范围长（{range}，{len} 字节），已中止读取"),
+        )
+    };
+    if response
+        .content_length()
+        .is_some_and(|declared| declared > len)
+    {
+        return Err(overlong());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(fetch_error)? {
+        if (body.len() + chunk.len()) as u64 > len {
+            return Err(overlong());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, total))
+}
+
+fn le16(bytes: &[u8], at: usize) -> u16 {
+    u16::from_le_bytes([bytes[at], bytes[at + 1]])
+}
+
+fn le32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+/// 从尾部倒着找 EOCD，读出中央目录；目录不全在尾部时再取一次。
+async fn central_directory(
+    http: &RangeClient,
+    url: &str,
+    tail: &[u8],
+    tail_start: u64,
+) -> Result<Vec<CentralEntry>> {
+    let eocd = (0..=tail.len().saturating_sub(EOCD_LEN))
+        .rev()
+        .find(|&at| tail.len() >= at + EOCD_LEN && le32(tail, at) == EOCD_SIGNATURE)
+        .ok_or_else(|| remote(url, "文件末尾找不到 zip 目录结尾记录，不是 zip 或已损坏"))?;
+    let count = le16(tail, eocd + 10);
+    let size = le32(tail, eocd + 12);
+    let offset = le32(tail, eocd + 16);
+    if count == u16::MAX || size == ZIP64_MARKER || offset == ZIP64_MARKER {
+        return Err(remote(url, "包是 ZIP64 格式，暂不支持只读目录"));
+    }
+    let (size, offset) = (u64::from(size), u64::from(offset));
+    let directory = if offset >= tail_start {
+        let start = usize::try_from(offset - tail_start).expect("尾部内的偏移放得进 usize");
+        let end = start + usize::try_from(size).expect("尾部内的长度放得进 usize");
+        tail.get(start..end)
+            .ok_or_else(|| remote(url, "目录结尾记录里的目录范围越出了文件"))?
+            .to_vec()
+    } else if size == 0 {
+        Vec::new()
+    } else {
+        fetch_range(
+            http,
+            url,
+            format!("bytes={offset}-{}", offset + size - 1),
+            size,
+        )
+        .await?
+        .0
+    };
+    parse_central_directory(&directory, count).map_err(|reason| remote(url, reason))
+}
+
+fn parse_central_directory(
+    directory: &[u8],
+    count: u16,
+) -> std::result::Result<Vec<CentralEntry>, String> {
+    let mut entries = Vec::with_capacity(usize::from(count));
+    let mut at = 0;
+    for index in 0..count {
+        if directory.len() < at + CENTRAL_HEADER_LEN || le32(directory, at) != CENTRAL_SIGNATURE {
+            return Err(format!("目录第 {} 项的头部不对", index + 1));
+        }
+        let flags = le16(directory, at + 8);
+        let method = le16(directory, at + 10);
+        let crc32 = le32(directory, at + 16);
+        let compressed = le32(directory, at + 20);
+        let uncompressed = le32(directory, at + 24);
+        let name_len = usize::from(le16(directory, at + 28));
+        let extra_len = usize::from(le16(directory, at + 30));
+        let comment_len = usize::from(le16(directory, at + 32));
+        let local_offset = le32(directory, at + 42);
+        if [compressed, uncompressed, local_offset].contains(&ZIP64_MARKER) {
+            return Err(format!("目录第 {} 项是 ZIP64 条目，暂不支持", index + 1));
+        }
+        let name_start = at + CENTRAL_HEADER_LEN;
+        let name = directory
+            .get(name_start..name_start + name_len)
+            .ok_or_else(|| format!("目录第 {} 项的文件名越界", index + 1))?;
+        entries.push(CentralEntry {
+            // 与本地读包同一套解码；两步都解不了的才退成替换字符，摘要只拿名字数文件，不落盘。
+            name: aurora_modpack::decode_entry_name(name)
+                .unwrap_or_else(|| String::from_utf8_lossy(name).into_owned()),
+            flags,
+            method,
+            crc32,
+            compressed: u64::from(compressed),
+            uncompressed: u64::from(uncompressed),
+            local_offset: u64::from(local_offset),
+        });
+        at = name_start + name_len + extra_len + comment_len;
+    }
+    Ok(entries)
+}
+
+/// 取一个条目的数据并解压。本地头里的扩展字段长度可能与目录里的不同，所以先读本地头再定数据起点。
+async fn read_entry(http: &RangeClient, url: &str, entry: &CentralEntry) -> Result<Vec<u8>> {
+    if entry.uncompressed > MANIFEST_MAX_BYTES {
+        return Err(remote(
+            url,
+            format!(
+                "{} 解压后 {} 字节，超出上限",
+                entry.name, entry.uncompressed
+            ),
+        ));
+    }
+    let header_end = entry.local_offset + LOCAL_HEADER_LEN - 1;
+    let (header, _) = fetch_range(
+        http,
+        url,
+        format!("bytes={}-{header_end}", entry.local_offset),
+        LOCAL_HEADER_LEN,
+    )
+    .await?;
+    if header.len() < LOCAL_HEADER_LEN as usize || le32(&header, 0) != LOCAL_SIGNATURE {
+        return Err(remote(url, format!("{} 的本地头不对", entry.name)));
+    }
+    let data_start = entry.local_offset
+        + LOCAL_HEADER_LEN
+        + u64::from(le16(&header, 26))
+        + u64::from(le16(&header, 28));
+    let data = if entry.compressed == 0 {
+        Vec::new()
+    } else {
+        fetch_range(
+            http,
+            url,
+            format!("bytes={data_start}-{}", data_start + entry.compressed - 1),
+            entry.compressed,
+        )
+        .await?
+        .0
+    };
+    aurora_modpack::decompress_entry(
+        entry.method,
+        entry.flags,
+        entry.crc32,
+        &data,
+        entry.uncompressed,
+        MANIFEST_MAX_BYTES,
+    )
+    .map_err(|err| match err {
+        ZipError::CompressionMethodNotSupported(method) => {
+            aurora_modpack::Error::UnsupportedCompression {
+                path: PathBuf::from(url),
+                entry: entry.name.clone(),
+                method,
+            }
+            .into()
+        }
+        other => remote(url, format!("解压 {} 失败：{other}", entry.name)),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instances::tests::aurora_at;
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    /// 按请求头里的 Range 回 206 与对应片段；`ranges: false` 时像不支持范围的服务器一样回 200 整包。
+    struct RangeServer {
+        body: Arc<Vec<u8>>,
+        ranges: bool,
+        served_bytes: Arc<AtomicUsize>,
+    }
+
+    impl Respond for RangeServer {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let total = self.body.len();
+            let header = request
+                .headers
+                .get("range")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("bytes="));
+            let (Some(spec), true) = (header, self.ranges) else {
+                self.served_bytes.fetch_add(total, Ordering::SeqCst);
+                return ResponseTemplate::new(200).set_body_bytes(self.body.as_slice());
+            };
+            let (start, end) = match spec.split_once('-').unwrap() {
+                // Modrinth 的 CDN（Fastly）一律拒绝尾部范围，回 501 Unsupported client range
+                ("", _) => return ResponseTemplate::new(501),
+                (start, end) => (
+                    start.parse().unwrap(),
+                    end.parse::<usize>().unwrap().min(total - 1),
+                ),
+            };
+            self.served_bytes
+                .fetch_add(end + 1 - start, Ordering::SeqCst);
+            ResponseTemplate::new(206)
+                .insert_header(
+                    "content-range",
+                    format!("bytes {start}-{end}/{total}").as_str(),
+                )
+                .set_body_bytes(&self.body[start..=end])
+        }
+    }
+
+    /// 打一个 .mrpack：清单 + 两个覆盖文件，再塞一大块不会被读到的填充，模拟几十 MB 的包。
+    fn mrpack(manifest: &serde_json::Value) -> Vec<u8> {
+        mrpack_with(manifest, zip::CompressionMethod::Deflated)
+    }
+
+    fn mrpack_with(manifest: &serde_json::Value, method: zip::CompressionMethod) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let deflated = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer
+            .start_file("overrides/config/sodium.json", deflated)
+            .unwrap();
+        writer.write_all(&[b'x'; 300]).unwrap();
+        writer.start_file("filler.bin", stored).unwrap();
+        writer.write_all(&vec![7u8; 4 * 1024 * 1024]).unwrap();
+        writer
+            .add_directory("overrides/resourcepacks/", stored)
+            .unwrap();
+        writer.start_file("overrides/options.txt", stored).unwrap();
+        writer.write_all(b"lang:zh_cn").unwrap();
+        writer
+            .start_file(
+                "modrinth.index.json",
+                zip::write::SimpleFileOptions::default().compression_method(method),
+            )
+            .unwrap();
+        writer.write_all(manifest.to_string().as_bytes()).unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    /// 改中央目录里 `name` 那一项头部 `offset` 处的字节。
+    fn patch_central(pack: &mut [u8], name: &str, offset: usize, bytes: &[u8]) {
+        let start = (0..pack.len() - CENTRAL_HEADER_LEN)
+            .find(|&at| {
+                le32(pack, at) == CENTRAL_SIGNATURE
+                    && pack[at + CENTRAL_HEADER_LEN..].starts_with(name.as_bytes())
+            })
+            .expect("中央目录里应有这一项");
+        pack[start + offset..start + offset + bytes.len()].copy_from_slice(bytes);
+    }
+
+    fn manifest() -> serde_json::Value {
+        serde_json::json!({
+            "formatVersion": 1, "game": "minecraft", "versionId": "6.4.0",
+            "name": "Fabulously Optimized",
+            "dependencies": { "minecraft": "1.21.1", "fabric-loader": "0.16.10" },
+            "files": [
+                { "path": "mods/sodium.jar", "hashes": { "sha1": "a".repeat(40), "sha512": "b".repeat(128) },
+                  "downloads": ["https://cdn.modrinth.com/sodium.jar"], "fileSize": 1_000_000 },
+                { "path": "mods/lithium.jar", "hashes": { "sha1": "c".repeat(40), "sha512": "d".repeat(128) },
+                  "downloads": ["https://cdn.modrinth.com/lithium.jar"], "fileSize": 600_000 },
+                { "path": "resourcepacks/faithful.zip", "hashes": { "sha1": "e".repeat(40), "sha512": "f".repeat(128) },
+                  "downloads": ["https://cdn.modrinth.com/faithful.zip"], "fileSize": 9_000_000 }
+            ]
+        })
+    }
+
+    async fn serve(pack: Vec<u8>, ranges: bool) -> (MockServer, Arc<AtomicUsize>, usize) {
+        let server = MockServer::start().await;
+        let total = pack.len();
+        let served = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/version/ver1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "ver1", "project_id": "1KVo5zza", "name": "6.4.0", "version_number": "6.4.0",
+                "version_type": "release", "game_versions": ["1.21.1"], "loaders": ["fabric"],
+                "date_published": "2026-01-01T00:00:00Z", "dependencies": [],
+                "files": [{ "url": format!("{}/pack.mrpack", server.uri()), "filename": "fo.mrpack",
+                            "primary": true, "size": total,
+                            "hashes": { "sha1": "0".repeat(40), "sha512": "1".repeat(128) } }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/pack.mrpack"))
+            .respond_with(RangeServer {
+                body: Arc::new(pack),
+                ranges,
+                served_bytes: served.clone(),
+            })
+            .mount(&server)
+            .await;
+        (server, served, total)
+    }
+
+    /// 真实的 Modrinth CDN 拒绝尾部范围：全程只发带明确起止的范围，第一个问总长，第二个取尾部 64 KiB 多一点。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn summary_never_sends_a_suffix_range() {
+        let (server, _, total) = serve(mrpack(&manifest()), true).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap();
+
+        assert_eq!(summary.pack_bytes, total as u64);
+        let ranges: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/pack.mrpack")
+            .map(|request| {
+                request
+                    .headers
+                    .get("range")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(ranges[0], "bytes=0-0");
+        assert_eq!(
+            ranges[1],
+            format!("bytes={}-{}", total as u64 - TAIL_BYTES, total - 1)
+        );
+        assert!(
+            ranges.iter().all(|range| !range.starts_with("bytes=-")),
+            "{ranges:?}"
+        );
+    }
+
+    /// 比尾部窗口还小的包（发现页上不少整合包只有几 KB）：范围从文件开头算起，不能减成负数。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pack_smaller_than_the_tail_window_is_read_whole() {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "modrinth.index.json",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        writer.write_all(manifest().to_string().as_bytes()).unwrap();
+        let pack = writer.finish().unwrap().into_inner();
+        let total = pack.len();
+        assert!((total as u64) < TAIL_BYTES);
+        let (server, _, _) = serve(pack, true).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap();
+
+        assert_eq!(summary.pack_bytes, total as u64);
+        assert_eq!(summary.mod_files, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn summary_reads_only_the_directory_and_the_manifest() {
+        let (server, served, total) = serve(mrpack(&manifest()), true).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap();
+        assert_eq!(summary.name, "Fabulously Optimized");
+        assert_eq!(summary.version.as_deref(), Some("6.4.0"));
+        assert_eq!(summary.minecraft, "1.21.1");
+        assert_eq!(summary.pack_bytes, total as u64);
+        assert_eq!(summary.remote_files, 3);
+        assert_eq!(summary.mod_files, 2, "只数落进 mods/ 的");
+        assert_eq!(summary.remote_bytes, Some(10_600_000));
+        assert_eq!(summary.override_files, 2, "目录条目不算文件");
+        assert_eq!(summary.override_bytes, 300 + 10);
+        // 包里有 4 MiB 的填充：取到的字节远小于整包，说明没有整包下载。
+        let read = served.load(Ordering::SeqCst);
+        assert!(read < total / 20, "读了 {read} / {total} 字节");
+    }
+
+    /// 同一个 .mrpack，放在平台上读摘要与放在本地读预览，Mod 数一样：落进 mods/ 的远程文件加上两层覆盖里
+    /// 直接在 mods/ 下的 .jar，同一落点只算一次。
+    /// 本地读包认的压缩方式这里都认：同一个包不能在发现页报读不出来、导入时却能装。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifests_in_every_method_the_local_reader_supports_are_summarized() {
+        for method in [
+            zip::CompressionMethod::Stored,
+            zip::CompressionMethod::Deflated,
+            zip::CompressionMethod::Bzip2,
+            zip::CompressionMethod::Xz,
+            zip::CompressionMethod::Ppmd,
+        ] {
+            let (server, _, _) = serve(mrpack_with(&manifest(), method), true).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+
+            let summary = aurora
+                .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+                .await
+                .unwrap_or_else(|err| panic!("{method:?}：{err:?}"));
+            assert_eq!(summary.name, "Fabulously Optimized", "{method:?}");
+            assert_eq!(summary.remote_files, 3, "{method:?}");
+            assert_eq!(summary.mod_files, 2, "{method:?}");
+        }
+    }
+
+    /// 清单用了导入也解不了的压缩方式时，与导入报同一个错，界面给同一句提示；清单数据坏了算读不出来。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unsupported_or_corrupt_manifests_are_reported_like_the_local_reader() {
+        let mut zstd = mrpack(&manifest());
+        patch_central(&mut zstd, "modrinth.index.json", 10, &93u16.to_le_bytes());
+        let (server, _, _) = serve(zstd, true).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+        let err = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CoreError::Modpack(aurora_modpack::Error::UnsupportedCompression { entry, method: 93, .. })
+                    if entry == "modrinth.index.json"
+            ),
+            "{err:?}"
+        );
+
+        let mut corrupt = mrpack(&manifest());
+        patch_central(&mut corrupt, "modrinth.index.json", 16, &[0, 0, 0, 0]);
+        let (server, _, _) = serve(corrupt, true).await;
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+        let err = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::RemotePack { reason, .. } if reason.contains("modrinth.index.json")),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn platform_summary_and_local_preview_count_mods_the_same_way() {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in [
+            ("overrides/mods/extra.jar", &b"jar"[..]),
+            ("client-overrides/mods/extra.jar", b"client jar"),
+            ("client-overrides/mods/zoom.jar", b"zoom"),
+            ("overrides/mods/sodium.jar", b"patched"),
+            ("overrides/mods/README.md", b"read me"),
+            ("overrides/mods/old/legacy.jar", b"old"),
+        ] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.start_file("modrinth.index.json", options).unwrap();
+        writer.write_all(manifest().to_string().as_bytes()).unwrap();
+        let pack = writer.finish().unwrap().into_inner();
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("同一个包.mrpack");
+        std::fs::write(&local, &pack).unwrap();
+        let (server, _, _) = serve(pack, true).await;
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap();
+        let preview = aurora.preview_modpack_file(&local).await.unwrap();
+        assert_eq!(summary.mod_files, 4, "sodium、lithium、extra、zoom");
+        assert_eq!(preview.mod_files, summary.mod_files);
+        assert_eq!(preview.remote_bytes, summary.remote_bytes);
+        // 覆盖文件按落点计：client-overrides 的 extra.jar 盖掉 overrides 的那份，只留它的 10 字节。
+        assert_eq!(
+            (summary.override_files, summary.override_bytes),
+            (5, 10 + 4 + 7 + 7 + 3),
+            "两层里的 extra.jar 只算一份"
+        );
+        assert_eq!(
+            (preview.override_files, preview.override_bytes),
+            (summary.override_files, summary.override_bytes)
+        );
+    }
+
+    /// 中文系统上的老打包工具不设 UTF-8 标志、按 GBK 写条目名。「汉化.jar」与「补丁.jar」的 GBK 字节都不是合法
+    /// UTF-8，按替换字符解码会变成同一个名字。摘要要与本地读包同样先试 UTF-8 再按 GBK 解，两个 Mod 各算一个。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gbk_named_override_jars_are_counted_like_the_local_preview() {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        // 占位名与 GBK 名字节数相同，写完再原地换成 GBK 字节（本地头与中央目录各一处）。
+        for (name, bytes) in [
+            ("overrides/mods/QQQQ.jar", &b"hanhua"[..]),
+            ("overrides/mods/WWWW.jar", b"buding!"),
+        ] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.start_file("modrinth.index.json", options).unwrap();
+        writer.write_all(manifest().to_string().as_bytes()).unwrap();
+        let mut pack = writer.finish().unwrap().into_inner();
+        for (placeholder, gbk) in [
+            (&b"QQQQ.jar"[..], &[0xba, 0xba, 0xbb, 0xaf][..]),
+            (b"WWWW.jar", &[0xb2, 0xb9, 0xb6, 0xa1]),
+        ] {
+            let mut patched = 0;
+            let mut at = 0;
+            while let Some(found) = pack[at..]
+                .windows(placeholder.len())
+                .position(|w| w == placeholder)
+            {
+                let start = at + found;
+                pack[start..start + 4].copy_from_slice(gbk);
+                at = start + placeholder.len();
+                patched += 1;
+            }
+            assert_eq!(patched, 2, "本地头与中央目录各有一处条目名");
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("中文 包.mrpack");
+        std::fs::write(&local, &pack).unwrap();
+        let (server, _, _) = serve(pack, true).await;
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap();
+        let preview = aurora.preview_modpack_file(&local).await.unwrap();
+        let mut names: Vec<&str> = preview.mods.iter().map(|m| m.path.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "mods/lithium.jar",
+                "mods/sodium.jar",
+                "mods/汉化.jar",
+                "mods/补丁.jar"
+            ]
+        );
+        assert_eq!(summary.mod_files, 4, "sodium、lithium、汉化、补丁");
+        assert_eq!(preview.mod_files, summary.mod_files);
+        assert_eq!((summary.override_files, summary.override_bytes), (2, 6 + 7));
+        assert_eq!(
+            (preview.override_files, preview.override_bytes),
+            (summary.override_files, summary.override_bytes)
+        );
+    }
+
+    /// CurseForge 导出的 .zip：清单、一个配置与两个 mods/ 下的覆盖文件，再塞一大块不会被读到的填充。
+    fn curseforge_zip(manifest: &serde_json::Value) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let deflated = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("filler.bin", stored).unwrap();
+        writer.write_all(&vec![7u8; 4 * 1024 * 1024]).unwrap();
+        writer
+            .start_file("overrides/config/create.toml", deflated)
+            .unwrap();
+        writer.write_all(&[b'c'; 120]).unwrap();
+        writer
+            .start_file("overrides/mods/kubejs-extra.jar", stored)
+            .unwrap();
+        writer.write_all(&[b'j'; 30]).unwrap();
+        writer
+            .start_file("overrides/mods/notes.txt", stored)
+            .unwrap();
+        writer.write_all(&[b'n'; 6]).unwrap();
+        writer.start_file("manifest.json", deflated).unwrap();
+        writer.write_all(manifest.to_string().as_bytes()).unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn curseforge_manifest() -> serde_json::Value {
+        serde_json::json!({
+            "minecraft": { "version": "1.20.1", "modLoaders": [{ "id": "forge-47.2.0", "primary": true }] },
+            "manifestType": "minecraftModpack", "manifestVersion": 1,
+            "name": "All of Create", "version": "2.1", "author": "樱",
+            "files": [
+                { "projectID": 328085, "fileID": 4_712_001, "required": true },
+                { "projectID": 306612, "fileID": 4_712_002, "required": true },
+                { "projectID": 457570, "fileID": 4_712_003, "required": true },
+                { "projectID": 328085, "fileID": 4_712_004, "required": false }
+            ],
+            "overrides": "overrides"
+        })
+    }
+
+    fn curseforge_file(id: u32, mod_id: u32, name: &str, length: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "modId": mod_id, "displayName": name, "fileName": name,
+            "fileLength": length, "downloadUrl": format!("https://edge.forgecdn.net/files/{id}/{name}")
+        })
+    }
+
+    /// CurseForge 摘要：Mod 数按工程大类认（资源包不算），下载量由批量文件接口的大小加总；批量文件与批量
+    /// 工程接口各只问一次，作者停用的文件不进请求。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_summary_counts_mods_by_class_and_sums_file_lengths() {
+        use wiremock::matchers::body_json;
+
+        let server = MockServer::start().await;
+        let pack = curseforge_zip(&curseforge_manifest());
+        let total = pack.len();
+        Mock::given(method("GET"))
+            .and(path("/pack.zip"))
+            .respond_with(RangeServer {
+                body: Arc::new(pack),
+                ranges: true,
+                served_bytes: Arc::new(AtomicUsize::new(0)),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .and(body_json(
+                serde_json::json!({"fileIds": [4_712_001, 4_712_002, 4_712_003]}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    curseforge_file(4_712_001, 328085, "create-0.5.1.jar", 13_000_000),
+                    curseforge_file(4_712_002, 306612, "jei-15.2.jar", 1_250_000),
+                    curseforge_file(4_712_003, 457570, "create-textures.zip", 8_000_000),
+                ]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .and(body_json(
+                serde_json::json!({"modIds": [306612, 328085, 457570]}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                { "id": 328085, "name": "Create", "slug": "create", "summary": "", "classId": 6 },
+                { "id": 306612, "name": "JEI", "slug": "jei", "summary": "", "classId": 6 },
+                { "id": 457570, "name": "Textures", "slug": "textures", "summary": "", "classId": 12 }
+            ]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let http = aurora_base::http::build_client().unwrap();
+        let client = aurora_modplatform::CurseForgeClient::new(http.clone(), "k")
+            .with_base_url(server.uri());
+
+        let pack = read_remote_pack(
+            &RangeClient::Shared(http.clone()),
+            &format!("{}/pack.zip", server.uri()),
+            Platform::CurseForge,
+        )
+        .await
+        .unwrap();
+        let aurora_modpack::RemoteFiles::CurseForge(refs) = &pack.manifest.remote else {
+            panic!("应读出 CurseForge 清单");
+        };
+        let remote = crate::modpack::curseforge_remote_facts(&client, refs, BlockedProbe::Skip)
+            .await
+            .unwrap();
+        let summary = pack.summarize(remote);
+
+        assert_eq!(summary.format, PackFormat::CurseForge);
+        assert_eq!(summary.name, "All of Create");
+        assert_eq!(summary.minecraft, "1.20.1");
+        assert_eq!(summary.pack_bytes, total as u64);
+        assert_eq!(summary.remote_files, 3);
+        assert_eq!(
+            summary.mod_files, 3,
+            "create 与 jei 加覆盖层的 kubejs-extra.jar；资源包工程与覆盖层的说明文件不算"
+        );
+        assert_eq!(summary.remote_bytes, Some(22_250_000));
+        assert_eq!(
+            (summary.override_files, summary.override_bytes),
+            (3, 120 + 30 + 6)
+        );
+        server.verify().await;
+    }
+
+    /// CurseForge 的包本体在 forgecdn 上：摘要的每个范围请求都带下载密钥（CDN 只认带密钥的请求），
+    /// CDN 拒绝密钥时报密钥被拒、只请求一次，不当作普通的读取失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_summary_range_reads_carry_the_download_key() {
+        use wiremock::matchers::header;
+
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        for (file_id, file_name) in [(4_712_000u32, "pack.zip"), (4_712_999, "locked.zip")] {
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/mods/394468/files/{file_id}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"data": {
+                        "id": file_id, "modId": 394468, "displayName": "All of Create",
+                        "fileName": file_name, "hashes": [], "fileLength": 1,
+                        "downloadUrl": format!("{uri}/cdn/{file_name}"), "gameVersions": ["1.20.1"]
+                    }}),
+                ))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/cdn/pack.zip"))
+            .and(header("x-api-key", "k"))
+            .respond_with(RangeServer {
+                body: Arc::new(curseforge_zip(&curseforge_manifest())),
+                ranges: true,
+                served_bytes: Arc::new(AtomicUsize::new(0)),
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/cdn/locked.zip"))
+            .and(header("x-api-key", "k"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    curseforge_file(4_712_001, 328085, "create-0.5.1.jar", 13_000_000),
+                    curseforge_file(4_712_002, 306612, "jei-15.2.jar", 1_250_000),
+                    curseforge_file(4_712_003, 457570, "create-textures.zip", 8_000_000),
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                { "id": 328085, "name": "Create", "slug": "create", "summary": "", "classId": 6 },
+                { "id": 306612, "name": "JEI", "slug": "jei", "summary": "", "classId": 6 },
+                { "id": 457570, "name": "Textures", "slug": "textures", "summary": "", "classId": 12 }
+            ]})))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let port = server.address().port();
+        let aurora = aurora_at(tmp.path())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k")
+            .with_curseforge_cdn_scope(aurora_download::CredentialScope::new(
+                [format!("127.0.0.1:{port}")],
+                false,
+            ));
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::CurseForge, "394468", "4712000")
+            .await
+            .unwrap();
+        assert_eq!(summary.name, "All of Create");
+        assert_eq!((summary.remote_files, summary.mod_files), (3, 3));
+        let pack_reads: Vec<_> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.url.path() == "/cdn/pack.zip")
+            .collect();
+        assert_eq!(
+            pack_reads.len(),
+            4,
+            "总长、包尾、清单条目的本地头、清单数据各一次"
+        );
+        assert!(
+            pack_reads.iter().all(|request| request
+                .headers
+                .get("x-api-key")
+                .map(|v| v.to_str().unwrap())
+                == Some("k")),
+            "每个范围请求都带密钥"
+        );
+
+        let err = aurora
+            .summarize_platform_modpack(Platform::CurseForge, "394468", "4712999")
+            .await
+            .unwrap_err();
+        let CoreError::Download(download) = &err else {
+            panic!("应报下载错误，实为 {err:?}");
+        };
+        assert!(
+            matches!(download, aurora_download::Error::CredentialRejected { url, status: 401, .. } if url == &format!("{uri}/cdn/locked.zip")),
+            "{download:?}"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_without_range_support_is_refused_instead_of_downloading_the_pack() {
+        let (server, _, _) = serve(mrpack(&manifest()), false).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+
+        let err = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap_err();
+        let CoreError::RemotePack { reason, .. } = err else {
+            panic!("应报 RemotePack，实为 {err:?}");
+        };
+        assert!(reason.contains("不支持按范围读取"), "{reason}");
+    }
+
+    /// 回了 206、正文却比请求的范围长得多（这里每次都回整个包）：不把整段读进内存，照实报错。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_partial_response_longer_than_the_requested_range_is_refused() {
+        struct WholeBodyAsPartial(Vec<u8>);
+        impl Respond for WholeBodyAsPartial {
+            fn respond(&self, _: &Request) -> ResponseTemplate {
+                let total = self.0.len();
+                ResponseTemplate::new(206)
+                    .insert_header(
+                        "content-range",
+                        format!("bytes 0-{}/{total}", total - 1).as_str(),
+                    )
+                    .set_body_bytes(self.0.as_slice())
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/pack.mrpack"))
+            .respond_with(WholeBodyAsPartial(mrpack(&manifest())))
+            .mount(&server)
+            .await;
+        let http = aurora_base::http::build_client().unwrap();
+
+        let err = read_remote_pack(
+            &RangeClient::Shared(http),
+            &format!("{}/pack.mrpack", server.uri()),
+            Platform::Modrinth,
+        )
+        .await
+        .unwrap_err();
+
+        let CoreError::RemotePack { reason, .. } = err else {
+            panic!("应报 RemotePack，实为 {err:?}");
+        };
+        assert!(
+            reason.contains("bytes=0-0") && reason.contains("比请求的范围长"),
+            "{reason}"
+        );
+    }
+
+    /// 目录结尾记录里的目录长度出自包本身：写成超过单次范围读取上限的值时不去取，也就不会把整包读进内存。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_central_directory_size_beyond_the_range_limit_is_not_fetched() {
+        let mut pack = mrpack(&manifest());
+        let eocd = (0..=pack.len() - EOCD_LEN)
+            .rev()
+            .find(|&at| le32(&pack, at) == EOCD_SIGNATURE)
+            .unwrap();
+        let forged = u32::try_from(RANGE_MAX_BYTES + 1).unwrap();
+        pack[eocd + 12..eocd + 16].copy_from_slice(&forged.to_le_bytes());
+        pack[eocd + 16..eocd + 20].copy_from_slice(&0u32.to_le_bytes());
+        let total = pack.len();
+        let server = MockServer::start().await;
+        let served = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/pack.mrpack"))
+            .respond_with(RangeServer {
+                body: Arc::new(pack),
+                ranges: true,
+                served_bytes: served.clone(),
+            })
+            .mount(&server)
+            .await;
+        let http = aurora_base::http::build_client().unwrap();
+
+        let err = read_remote_pack(
+            &RangeClient::Shared(http),
+            &format!("{}/pack.mrpack", server.uri()),
+            Platform::Modrinth,
+        )
+        .await
+        .unwrap_err();
+
+        let CoreError::RemotePack { reason, .. } = err else {
+            panic!("应报 RemotePack，实为 {err:?}");
+        };
+        assert!(
+            reason.contains(&format!("{} 字节", RANGE_MAX_BYTES + 1)) && reason.contains("上限"),
+            "{reason}"
+        );
+        assert_eq!(
+            served.load(Ordering::SeqCst),
+            1 + TAIL_BYTES as usize,
+            "只问了总长、取了尾部，没有去取 {total} 字节的包里那段伪造的目录"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_file_that_is_not_a_zip_or_lacks_the_manifest_is_reported() {
+        let (server, _, _) = serve(vec![0u8; 1000], true).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+        let err = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::RemotePack { reason, .. } if reason.contains("找不到 zip 目录")),
+            "{err:?}"
+        );
+
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("readme.txt", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"hi").unwrap();
+        let (server, _, _) = serve(writer.finish().unwrap().into_inner(), true).await;
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+        let err = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::RemotePack { reason, .. } if reason.contains("modrinth.index.json")),
+            "{err:?}"
+        );
+    }
+}

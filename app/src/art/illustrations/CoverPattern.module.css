@@ -1,0 +1,51 @@
+/*
+ * 丘陵读起来是「带色相的白」：饱和度不超过 50%，日樱明度不低于 84%，不计入强调色面积。
+ * 饱和度与明度在日夜两种模式下取不同的值，由色相数据驱动，所以写成组件私有变量。
+ */
+.pattern {
+  --far-s: 48%;
+  --far-l: 89%;
+  --near-s: 46%;
+  --near-l: 85%;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  container-type: size;
+  pointer-events: none;
+}
+
+:global(:root[data-sk-mode="night"]) .pattern {
+  --far-s: 24%;
+  --far-l: 16%;
+  --near-s: 26%;
+  --near-l: 13%;
+}
+
+.hills {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.far {
+  /* sk-guard-allow T1: 丘陵色由数据色相与上面的私有分量合成，没有写死的颜色 */
+  fill: hsl(var(--hue) var(--far-s) var(--far-l));
+}
+
+.near {
+  /* sk-guard-allow T1: 同上，近丘 */
+  fill: hsl(var(--hue) var(--near-s) var(--near-l));
+}
+
+/*
+ * 花瓣位置按丘陵的 slice 缩放换算：缩放 = max(宽 / 320, 高 / 120)，水平居中、底边对齐。
+ * 只换算位置，花瓣本身保持 2 px 像素单元。
+ */
+.petal {
+  --scale: max(100cqw / 320, 100cqh / 120);
+  position: absolute;
+  left: calc(50cqw + (var(--px) - 160) * var(--scale));
+  top: calc(100cqh - (120 - var(--py)) * var(--scale));
+}

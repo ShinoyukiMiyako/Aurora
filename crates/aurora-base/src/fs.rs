@@ -1,16 +1,19 @@
 //! 文件校验、原子写入与目录定位。
 //!
-//! - 流式 sha1/sha256：分块读取，不把整文件读进内存；CPU 侧计算丢进 `spawn_blocking`，
+//! - 流式 sha1 / sha256：分块读取，不把整文件读进内存；CPU 侧计算丢进 `spawn_blocking`，
 //!   避免阻塞异步 worker。
+//! - 增量 sha1（[`Sha1Hasher`]）：数据边到边算，供下载引擎在写盘的同时校验，省掉写完再读一遍。
 //! - 原子写入：同目录临时文件写完 fsync 后 rename 覆盖目标，杜绝写一半留下损坏文件。
-//! - 目录定位：数据/缓存目录挂在 `%LOCALAPPDATA%\Petalfall` 下，经 [`DirectoryProvider`]
-//!   trait 留出跨平台缝（当前只实现 Windows 语义）。
+//! - 目录定位：数据目录便携优先——可执行文件所在目录可写就用它，否则挂在
+//!   `%LOCALAPPDATA%\Petalfall` 下（[`resolve_data_dir`]）。
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
-use sha1::Sha1;
-use sha2::{Digest, Sha256};
+use sha1::{Digest, Sha1};
+use sha2::Sha256;
 
 use crate::error::{Error, Result};
 
@@ -36,10 +39,34 @@ pub async fn verify_sha1(path: impl AsRef<Path>, expected: &str) -> Result<()> {
     ensure_match("SHA-1", expected, &actual)
 }
 
-/// 校验文件 SHA-256 是否等于 `expected`（大小写不敏感）。不符返回 [`Error::HashMismatch`]。
-pub async fn verify_sha256(path: impl AsRef<Path>, expected: &str) -> Result<()> {
-    let actual = sha256_hex(path).await?;
-    ensure_match("SHA-256", expected, &actual)
+/// 增量 SHA-1：数据一段段喂进来，最后与期望值比对。
+///
+/// 下载时每读到一段响应体就喂一次，写完即可校验，不必再把刚落盘的文件整份读回来重算。
+/// 单段几十 KiB 的摘要计算在微秒级，直接在异步任务里做，不值得为它切到阻塞线程池。
+pub struct Sha1Hasher(Sha1);
+
+impl Sha1Hasher {
+    /// 空摘要状态。
+    pub fn new() -> Self {
+        Self(Sha1::new())
+    }
+
+    /// 追加一段数据。
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    /// 与 `expected` 比对（大小写不敏感）。不符返回 [`Error::HashMismatch`]。
+    pub fn verify(self, expected: &str) -> Result<()> {
+        let actual = base16ct::lower::encode_string(&self.0.finalize());
+        ensure_match("SHA-1", expected, &actual)
+    }
+}
+
+impl Default for Sha1Hasher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// 原子写入：先写同目录临时文件并 fsync，再 rename 覆盖目标。
@@ -87,23 +114,29 @@ pub async fn atomic_write(path: impl AsRef<Path>, bytes: &[u8]) -> Result<()> {
 }
 
 async fn write_and_sync(tmp: &Path, bytes: &[u8]) -> Result<()> {
-    use tokio::io::AsyncWriteExt;
     let mut file = tokio::fs::File::create(tmp)
         .await
         .map_err(|source| Error::Io {
             path: tmp.to_owned(),
             source,
         })?;
-    file.write_all(bytes).await.map_err(|source| Error::Io {
-        path: tmp.to_owned(),
-        source,
-    })?;
+    write_durably(&mut file, bytes)
+        .await
+        .map_err(|source| Error::Io {
+            path: tmp.to_owned(),
+            source,
+        })
+}
+
+/// 把 `bytes` 写进已打开的文件并 fsync，任何一步失败都报出来。
+async fn write_durably(file: &mut tokio::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    file.write_all(bytes).await?;
+    // tokio 的 write_all 把数据交给后台线程就返回，后台写失败（磁盘写满）只在下一次 flush 里报；
+    // sync_all 会把这个错误吞掉照样成功，所以必须先 flush。
+    file.flush().await?;
     // fsync：确保 rename 之前数据已真正落盘，避免掉电后目标名指向空洞文件。
-    file.sync_all().await.map_err(|source| Error::Io {
-        path: tmp.to_owned(),
-        source,
-    })?;
-    Ok(())
+    file.sync_all().await
 }
 
 /// 取目标文件名作为临时文件前缀；异常情况下退回固定名。
@@ -157,66 +190,147 @@ fn ensure_match(algorithm: &'static str, expected: &str, actual: &str) -> Result
     }
 }
 
-/// 数据/缓存目录 provider。抽成 trait 是为了给未来的跨平台实现和测试注入留缝——
-/// 当前仅 [`SystemDirs`] 落地 Windows 语义。
-pub trait DirectoryProvider {
-    /// 数据根目录（放版本、库、账户缓存等）。
-    fn data_dir(&self) -> Result<PathBuf>;
-    /// 缓存目录，默认是数据目录下的 `cache` 子目录。
-    fn cache_dir(&self) -> Result<PathBuf> {
-        Ok(self.data_dir()?.join("cache"))
+/// 一次数据目录定位的结果，供启动日志记录走了哪条路、花了多久。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataDirResolution {
+    /// 数据目录。
+    pub path: PathBuf,
+    /// 是否为便携模式（exe 所在目录）。
+    pub portable: bool,
+    /// 没走便携模式的原因；便携模式下为 `None`。
+    pub fallback_reason: Option<String>,
+    /// 定位耗时（含可写探针）。
+    pub elapsed: Duration,
+}
+
+/// 文件此刻是否被别的进程以「不放行删除共享」的方式打开着（JVM 读 jar 就是这样打开的）：Windows 上
+/// 这时它既不能改名也不能删除、替换。在动手之前先探一次，能把「改到一半撞上占用」变成一次干净的拒绝。
+///
+/// 探测方式是以删除权限、放行一切共享去打开：只有已有句柄没放行删除共享时才会失败，正好就是改名与
+/// 删除会失败的那个条件。文件不存在算没被占用。其余打开失败原样交回，由调用方带上自己的路径与语境。
+#[cfg(windows)]
+pub fn held_open(path: &Path) -> std::io::Result<bool> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // Win32 常量：DELETE 访问权，FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE。
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
+    // ERROR_SHARING_VIOLATION 与 ERROR_LOCK_VIOLATION。
+    const SHARING_VIOLATION: i32 = 32;
+    const LOCK_VIOLATION: i32 = 33;
+
+    match std::fs::OpenOptions::new()
+        .access_mode(DELETE)
+        .share_mode(FILE_SHARE_ALL)
+        .open(path)
+    {
+        Ok(_) => Ok(false),
+        Err(err) if matches!(err.raw_os_error(), Some(SHARING_VIOLATION | LOCK_VIOLATION)) => {
+            Ok(true)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err),
     }
 }
 
-/// Windows 系统目录：`%LOCALAPPDATA%\Petalfall`。
-pub struct SystemDirs;
+/// 非 Windows 平台上改名、删除与替换不受已打开句柄影响，没有可探测的占用。
+#[cfg(not(windows))]
+pub fn held_open(_path: &Path) -> std::io::Result<bool> {
+    Ok(false)
+}
 
-impl DirectoryProvider for SystemDirs {
-    fn data_dir(&self) -> Result<PathBuf> {
-        let base = std::env::var_os("LOCALAPPDATA").ok_or(Error::MissingLocalAppData)?;
-        Ok(PathBuf::from(base).join(APP_DIR_NAME))
+/// 写入探针的文件名：真写一个再删掉，用来判定 exe 所在目录是否可写。
+const WRITE_PROBE: &str = concat!(".", crate::app_slug!(), "-write-probe");
+
+static RESOLVED: OnceLock<DataDirResolution> = OnceLock::new();
+
+/// 定位数据目录，进程内只探测一次。
+///
+/// 定位在日志装好之前就会发生（日志文件本身就落在数据目录里），所以结果连同原因与耗时一起留下，
+/// 由上层在日志就绪后补记一条。
+pub fn resolve_data_dir() -> Result<DataDirResolution> {
+    if let Some(resolved) = RESOLVED.get() {
+        return Ok(resolved.clone());
     }
+    let started = Instant::now();
+    let resolved = match writable_exe_dir() {
+        Ok(dir) => DataDirResolution {
+            path: dir,
+            portable: true,
+            fallback_reason: None,
+            elapsed: started.elapsed(),
+        },
+        Err(reason) => DataDirResolution {
+            path: system_data_dir()?,
+            portable: false,
+            fallback_reason: Some(reason),
+            elapsed: started.elapsed(),
+        },
+    };
+    Ok(RESOLVED.get_or_init(|| resolved).clone())
 }
 
-/// 显式根目录 provider：既是跨平台缝的通用实现，也让测试能注入确定路径，
-/// 绕开进程级环境变量（edition 2024 下 `set_var` 已是 unsafe，不宜在测试里改全局）。
-pub struct RootedDirs {
-    /// 应用目录将挂在 `root/Petalfall` 下。
-    pub root: PathBuf,
-}
-
-impl DirectoryProvider for RootedDirs {
-    fn data_dir(&self) -> Result<PathBuf> {
-        Ok(self.root.join(APP_DIR_NAME))
+/// 可执行文件所在目录，且确认真的能写；不能用时给出原因。
+///
+/// 判据是实际写一个探针文件再删掉，而不是查权限位：网络驱动器、只读介质、组策略重定向都可能让
+/// 权限位看着没问题却写不进去，那种失败要等到下载游戏文件时才炸。
+///
+/// debug 构建一律不走便携：开发时 exe 在 `target/debug` 下，便携判定会把配置、账户凭据和整个
+/// `.minecraft` 全写进构建产物目录，一次 `cargo clean` 就全没了。
+fn writable_exe_dir() -> std::result::Result<PathBuf, String> {
+    if cfg!(debug_assertions) {
+        return Err("debug 构建不使用便携模式".to_owned());
     }
+    let exe = std::env::current_exe().map_err(|err| format!("取不到可执行文件路径：{err}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| format!("可执行文件路径没有上级目录：{}", exe.display()))?
+        .to_path_buf();
+    probe_writable(&dir)?;
+    Ok(dir)
 }
 
-/// 默认（Windows 系统）数据目录：`%LOCALAPPDATA%\Petalfall`。
+/// 在 `dir` 里写一个探针文件再删掉；写不进去返回原因。
+fn probe_writable(dir: &Path) -> std::result::Result<(), String> {
+    let probe = dir.join(WRITE_PROBE);
+    std::fs::write(&probe, b"").map_err(|err| format!("{} 不可写：{err}", dir.display()))?;
+    // 探针删不掉不影响结论（已经证明可写），留个日志即可。
+    if let Err(err) = std::fs::remove_file(&probe) {
+        tracing::debug!(path = %probe.display(), error = %err, "清理写入探针失败");
+    }
+    Ok(())
+}
+
+/// 系统数据目录：`%LOCALAPPDATA%\Petalfall`。便携模式不可用时数据放这里。
+fn system_data_dir() -> Result<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA").ok_or(Error::MissingLocalAppData)?;
+    Ok(PathBuf::from(base).join(APP_DIR_NAME))
+}
+
+/// 数据目录（放配置、凭据、任务日志、托管 Java 等）：便携优先，回落 `%LOCALAPPDATA%\Petalfall`。
 pub fn data_dir() -> Result<PathBuf> {
-    SystemDirs.data_dir()
-}
-
-/// 默认（Windows 系统）缓存目录：`%LOCALAPPDATA%\Petalfall\cache`。
-pub fn cache_dir() -> Result<PathBuf> {
-    SystemDirs.cache_dir()
+    Ok(resolve_data_dir()?.path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // 已知向量：SHA-1("abc") 与 SHA-256("abc")。
+    // 已知向量：SHA-1("abc")。
     const ABC_SHA1: &str = "a9993e364706816aba3e25717850c26c9cd0d89d";
-    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     #[tokio::test]
-    async fn sha1_and_sha256_match_known_vectors() {
+    async fn sha1_matches_known_vector() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("abc.txt");
         tokio::fs::write(&file, b"abc").await.unwrap();
 
         assert_eq!(sha1_hex(&file).await.unwrap(), ABC_SHA1);
-        assert_eq!(sha256_hex(&file).await.unwrap(), ABC_SHA256);
+        // 已知向量：SHA-256("abc")。
+        assert_eq!(
+            sha256_hex(&file).await.unwrap(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[tokio::test]
@@ -224,14 +338,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("empty");
         tokio::fs::write(&file, b"").await.unwrap();
-        // 空输入的标准 SHA-1 / SHA-256。
+        // 空输入的标准 SHA-1。
         assert_eq!(
             sha1_hex(&file).await.unwrap(),
             "da39a3ee5e6b4b0d3255bfef95601890afd80709"
-        );
-        assert_eq!(
-            sha256_hex(&file).await.unwrap(),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }
 
@@ -244,11 +354,11 @@ mod tests {
         tokio::fs::write(&file, &payload).await.unwrap();
 
         // 用独立实现算个参照值（一次性喂入）。
-        let mut hasher = Sha256::new();
+        let mut hasher = Sha1::new();
         hasher.update(&payload);
         let expected = base16ct::lower::encode_string(&hasher.finalize());
 
-        assert_eq!(sha256_hex(&file).await.unwrap(), expected);
+        assert_eq!(sha1_hex(&file).await.unwrap(), expected);
     }
 
     #[tokio::test]
@@ -259,9 +369,43 @@ mod tests {
 
         verify_sha1(&file, ABC_SHA1).await.unwrap();
         // 大写期望值也应通过。
-        verify_sha256(&file, &ABC_SHA256.to_uppercase())
-            .await
-            .unwrap();
+        verify_sha1(&file, &ABC_SHA1.to_uppercase()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn incremental_hasher_matches_file_hash_across_split_points() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("payload.bin");
+        let payload: Vec<u8> = (0..HASH_CHUNK * 2 + 77).map(|i| (i % 251) as u8).collect();
+        tokio::fs::write(&file, &payload).await.unwrap();
+        let expected = sha1_hex(&file).await.unwrap();
+
+        // 切分点含 0 长度段与跨越整块的段：结果只取决于字节序列本身。
+        for split in [0usize, 1, HASH_CHUNK, payload.len()] {
+            let mut hasher = Sha1Hasher::new();
+            hasher.update(&payload[..split]);
+            hasher.update(&[]);
+            hasher.update(&payload[split..]);
+            hasher.verify(&expected.to_uppercase()).unwrap();
+        }
+    }
+
+    #[test]
+    fn incremental_hasher_reports_mismatch_with_both_digests() {
+        let mut hasher = Sha1Hasher::default();
+        hasher.update(b"abc");
+        match hasher.verify("0000000000000000000000000000000000000000") {
+            Err(Error::HashMismatch {
+                algorithm,
+                expected,
+                actual,
+            }) => {
+                assert_eq!(algorithm, "SHA-1");
+                assert_eq!(expected, "0000000000000000000000000000000000000000");
+                assert_eq!(actual, ABC_SHA1);
+            }
+            other => panic!("期望 HashMismatch，得到 {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -312,10 +456,7 @@ mod tests {
         let file = dir.path().join("out.txt");
         atomic_write(&file, b"first").await.unwrap();
         atomic_write(&file, b"second-and-longer").await.unwrap();
-        assert_eq!(
-            tokio::fs::read(&file).await.unwrap(),
-            b"second-and-longer"
-        );
+        assert_eq!(tokio::fs::read(&file).await.unwrap(), b"second-and-longer");
         // 临时文件不应残留（目录里只剩目标文件）。
         let mut entries = tokio::fs::read_dir(dir.path()).await.unwrap();
         let mut names = Vec::new();
@@ -323,6 +464,23 @@ mod tests {
             names.push(e.file_name().to_string_lossy().into_owned());
         }
         assert_eq!(names, vec!["out.txt".to_string()]);
+    }
+
+    /// 写入本身失败（这里让写落在文件系统容不下的偏移上，与磁盘写满一样由后台写报错）必须报出来。
+    /// 小于 tokio 单次缓冲的写入在 write_all 返回时还没真正写，错误只在之后的 flush 里出现；
+    /// 漏掉它，atomic_write 会把半截临时文件改名成正式文件，原来的内容就没了。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_failure_behind_tokio_buffer_is_reported() {
+        use tokio::io::AsyncSeekExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unwritable.tmp");
+        let mut file = tokio::fs::File::create(&path).await.unwrap();
+        file.seek(std::io::SeekFrom::Start(1 << 62)).await.unwrap();
+        let err = write_durably(&mut file, b"{\"download_concurrency\": 8}")
+            .await
+            .expect_err("写入没能落盘却报了成功");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
     }
 
     #[tokio::test]
@@ -333,18 +491,70 @@ mod tests {
         assert_eq!(tokio::fs::read(&nested).await.unwrap(), b"deep");
     }
 
+    /// 测试进程是 debug 构建，便携探测按约定短路，数据目录必然回落系统目录。
+    /// 去掉那个短路，这里会拿到 target/debug 而不是 %LOCALAPPDATA%\Petalfall。
     #[test]
-    fn rooted_dirs_join_app_name() {
-        let dirs = RootedDirs {
-            root: PathBuf::from("D:\\data"),
-        };
-        assert_eq!(
-            dirs.data_dir().unwrap(),
-            PathBuf::from("D:\\data\\Petalfall")
+    fn debug_builds_fall_back_to_system_dir_with_reason() {
+        let resolved = resolve_data_dir().unwrap();
+        assert!(!resolved.portable);
+        assert_eq!(resolved.path, system_data_dir().unwrap());
+        assert!(
+            resolved
+                .fallback_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("debug"))
         );
-        assert_eq!(
-            dirs.cache_dir().unwrap(),
-            PathBuf::from("D:\\data\\Petalfall\\cache")
-        );
+        assert_eq!(data_dir().unwrap(), resolved.path);
+        assert_eq!(resolve_data_dir().unwrap(), resolved, "进程内只定位一次");
+    }
+
+    /// 可写判据真写真删：可写目录通过且不留探针；指向文件（写不进子路径）的给出原因。
+    #[test]
+    fn write_probe_detects_writability_and_leaves_no_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        probe_writable(dir.path()).unwrap();
+        assert!(!dir.path().join(WRITE_PROBE).exists());
+        assert_eq!(WRITE_PROBE, ".petalfall-write-probe");
+
+        let file = dir.path().join("not-a-dir");
+        std::fs::write(&file, b"x").unwrap();
+        let reason = probe_writable(&file).unwrap_err();
+        assert!(reason.contains("不可写"), "实际：{reason}");
+    }
+
+    /// 只读不改环境变量：edition 2024 下 `set_var` 是 unsafe，测试不该动进程级全局状态。
+    #[test]
+    fn system_data_dir_is_app_name_under_local_app_data() {
+        match std::env::var_os("LOCALAPPDATA") {
+            Some(base) => assert_eq!(
+                system_data_dir().unwrap(),
+                PathBuf::from(base).join("Petalfall")
+            ),
+            None => assert!(matches!(system_data_dir(), Err(Error::MissingLocalAppData))),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn held_open_detects_a_handle_without_delete_sharing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let jar = dir.path().join("in-use.jar");
+        std::fs::write(&jar, b"jar").unwrap();
+        assert!(!held_open(&jar).unwrap());
+
+        // JVM 读 jar 的打开方式：放行读写共享、不放行删除共享。
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(&jar)
+            .unwrap();
+        assert!(held_open(&jar).unwrap());
+        // 与真正的改名同一结论：此刻改名确实会失败。
+        assert!(std::fs::rename(&jar, dir.path().join("moved.jar")).is_err());
+        drop(handle);
+        assert!(!held_open(&jar).unwrap());
+        // 不存在的文件谈不上占用。
+        assert!(!held_open(&dir.path().join("ghost.jar")).unwrap());
     }
 }

@@ -60,7 +60,7 @@ pub enum Error {
     CurseForgeKeyMissing,
 
     /// 切换模组启用/禁用状态时，目标文件名已存在（同名启用与禁用副本冲突）。
-    #[error("模组启禁状态切换失败: 目标文件已存在 {path}")]
+    #[error("Mod 启用状态切换失败：目标文件已存在 {path}")]
     ModStateConflict { path: PathBuf },
 }
 
@@ -90,9 +90,10 @@ impl RetryableError for Error {
 /// 判断 reqwest 传输层错误是否属于「再试一次可能就好」的瞬时故障。
 ///
 /// 明确排除 `is_status`（状态类错误由 [`Error::Status`] 单独承载并分级）与 `is_builder`
-/// （构造问题，重试无益）。
+/// （构造问题，重试无益）。读响应体时连接断开 reqwest 报 decode 类，JSON 解析失败另走 [`Error::Json`]，
+/// 所以这里的 decode 只会是传输故障。
 fn is_transient_reqwest(err: &reqwest::Error) -> bool {
-    err.is_timeout() || err.is_connect() || err.is_request() || err.is_body()
+    err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() || err.is_decode()
 }
 
 #[cfg(test)]
@@ -148,6 +149,14 @@ mod tests {
         assert_eq!(
             Error::CurseForgeKeyMissing.to_string(),
             "CurseForge API key 未配置（环境变量 AURORA_CURSEFORGE_API_KEY 缺失），该源已禁用"
+        );
+        // 原文直接作批量启停部分失败通知的正文，叫法与标点要和界面一致
+        let conflict = Error::ModStateConflict {
+            path: PathBuf::from("D:/mc/mods/a.jar.disabled"),
+        };
+        assert_eq!(
+            conflict.to_string(),
+            "Mod 启用状态切换失败：目标文件已存在 D:/mc/mods/a.jar.disabled"
         );
     }
 }

@@ -1,0 +1,167 @@
+.slider {
+  --slider-thumb: 20px;
+  --slider-value-gap: var(--sk-space-12);
+  --slider-value-width: 64px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: var(--slider-value-gap);
+}
+
+/* 命中区高 22，轨道垂直居中；点在轨道任意处跳到该值 */
+.control {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 22px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.rail {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  left: 0;
+  height: 6px;
+  margin-top: -3px;
+  overflow: hidden;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-line-2);
+}
+
+/* 已填充段到圆钮中心为止；跟手时与圆钮同步、不做过渡 */
+.fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: calc(var(--slider-thumb) / 2 + var(--slider-p) * (100% - var(--slider-thumb)));
+  background: var(--sk-accent-grad);
+}
+
+.slider[data-tone="warn"] .fill {
+  background: var(--sk-warn);
+}
+
+/* 推荐标记：2×12 竖线穿过轨道；两侧留出透明的悬停命中区 */
+.marker {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--slider-thumb) / 2 + var(--marker-p) * (100% - var(--slider-thumb)));
+  width: 2px;
+  height: 12px;
+  margin: -6px 0 0 -1px;
+  border-radius: 1px;
+  background: var(--sk-accent-strong);
+  opacity: 0.6;
+}
+
+.marker::before {
+  content: "";
+  position: absolute;
+  inset: -5px -5px;
+}
+
+/* 原生控件透明叠在命中区上，只负责焦点、键盘与读屏；指针由命中区处理 */
+.input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.thumb {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--slider-p) * (100% - var(--slider-thumb)));
+  width: var(--slider-thumb);
+  height: var(--slider-thumb);
+  margin-top: calc(var(--slider-thumb) / -2);
+  pointer-events: none;
+}
+
+.knob {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: #FFFFFF;
+  box-shadow: 0 0 0 1.5px var(--sk-line-strong), 0 2px 6px rgba(80, 30, 60, 0.22);
+  transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.control:hover .knob {
+  transform: scale(1.08);
+}
+
+.slider[data-dragging] .knob {
+  transform: scale(1.12);
+}
+
+.input:focus-visible ~ .thumb .knob {
+  box-shadow: 0 0 0 1px var(--sk-accent), var(--sk-focus);
+}
+
+:global([data-sk-reduced]) .knob {
+  transition: none;
+  transform: none;
+}
+
+.value {
+  flex: none;
+  min-width: var(--slider-value-width);
+  color: var(--sk-text);
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-title);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: right;
+}
+
+.slider[data-tone="warn"] .value {
+  color: var(--sk-warn);
+}
+
+/* 刻度行：左右内缩半个圆钮，有读数时右侧再让出读数宽与间距 */
+.marks {
+  position: relative;
+  height: 16px;
+  margin: 0 calc(var(--slider-thumb) / 2);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-micro);
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.slider[data-has-value] .marks {
+  margin-right: calc(var(--slider-thumb) / 2 + var(--slider-value-width) + var(--slider-value-gap));
+}
+
+.mark {
+  position: absolute;
+  top: 0;
+  left: calc(var(--mark-p) * 100%);
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.slider[data-disabled] {
+  opacity: var(--sk-disabled);
+}
+
+.slider[data-disabled] .control {
+  cursor: not-allowed;
+}
+
+.slider[data-disabled] .control:hover .knob {
+  transform: none;
+}

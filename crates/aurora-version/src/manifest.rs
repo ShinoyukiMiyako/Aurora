@@ -105,7 +105,10 @@ mod tests {
             r.url,
             "https://piston-meta.mojang.com/v1/packages/8a2338043e00aface892d86269f3eb88730e15bc/1.21.json"
         );
-        assert_eq!(r.sha1.as_deref(), Some("8a2338043e00aface892d86269f3eb88730e15bc"));
+        assert_eq!(
+            r.sha1.as_deref(),
+            Some("8a2338043e00aface892d86269f3eb88730e15bc")
+        );
 
         let s = m.latest_snapshot().expect("应找到 latest snapshot");
         assert_eq!(s.id, "24w21b");

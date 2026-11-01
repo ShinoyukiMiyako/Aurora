@@ -3,12 +3,17 @@
 //! 两者的 meta 服务同构：`GET {base}/{apiver}/versions/loader/{game}` 列出可用 loader，
 //! `GET {base}/{apiver}/versions/loader/{game}/{loader}/profile/json` 直接返回一份可落盘的
 //! 版本 JSON（`inheritsFrom` 指向原版，libraries 仅含加载器自身的 maven 简写库）。因此安装 =
-//! 取 profile JSON 原样落盘 + 下载它声明的加载器库，无需 Java 子进程。Fabric 走 v2、Quilt 走 v3。
+//! 取 profile JSON + 下载它声明的加载器库 + 原样落盘 profile JSON，无需 Java 子进程。Fabric 走 v2、
+//! Quilt 走 v3。
+//! `GET {base}/{apiver}/versions/game` 列出该加载器支持的全部游戏版本。
 
+use aurora_download::SourcePlan;
 use serde::Deserialize;
 
 use crate::context::InstallContext;
 use crate::error::{Error, Result};
+use crate::forge_versions::compare_versions;
+use crate::layout::checked_segment;
 use crate::net;
 use crate::plan;
 use aurora_version::VersionJson;
@@ -47,11 +52,12 @@ impl LoaderFlavor {
 }
 
 /// meta 的 loader 列表条目里我们关心的字段。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct LoaderVersion {
     /// loader 版本号，如 `0.15.11`。
     pub version: String,
-    /// 是否为稳定版（Quilt 缺省该字段时按 false）。
+    /// 是否为稳定版，一律按版本号里有没有预发布标记推断：Quilt meta 不给这个字段，Fabric meta 给的
+    /// 其实是「是不是当前推荐的那一个」，除了最新版全是 false。
     #[serde(default)]
     pub stable: bool,
 }
@@ -60,6 +66,15 @@ pub struct LoaderVersion {
 #[derive(Debug, Clone, Deserialize)]
 struct LoaderListEntry {
     loader: LoaderVersion,
+}
+
+/// meta 游戏版本列表的一个元素。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GameVersionEntry {
+    /// 游戏版本号，与版本清单里的 id 同形。
+    pub version: String,
+    #[serde(default)]
+    pub stable: bool,
 }
 
 /// 一次加载器安装的结果。
@@ -73,11 +88,26 @@ pub struct LoaderSummary {
     pub libraries: usize,
 }
 
+/// 版本号里预发布标记（beta / alpha / rc / pre）开始的位置；没有标记时为 `None`。
+pub(crate) fn prerelease_at(version: &str) -> Option<usize> {
+    let lower = version.to_ascii_lowercase();
+    ["beta", "alpha", "rc", "pre"]
+        .iter()
+        .filter_map(|tag| lower.find(tag))
+        .min()
+}
+
+/// 版本号里带预发布标记的视为预发布版。
+pub fn is_prerelease(version: &str) -> bool {
+    prerelease_at(version).is_some()
+}
+
 /// Fabric/Quilt 安装器。
 pub struct LoaderInstaller<'a> {
     cx: InstallContext<'a>,
     flavor: LoaderFlavor,
     base_url: String,
+    sources: Option<SourcePlan>,
 }
 
 impl<'a> LoaderInstaller<'a> {
@@ -97,6 +127,7 @@ impl<'a> LoaderInstaller<'a> {
             cx,
             flavor,
             base_url: flavor.default_base().to_owned(),
+            sources: None,
         }
     }
 
@@ -106,20 +137,57 @@ impl<'a> LoaderInstaller<'a> {
         self
     }
 
-    /// 列出某游戏版本的全部可用 loader（meta 返回顺序：最新在前）。
-    pub async fn list_loaders(&self, game_version: &str) -> Result<Vec<LoaderVersion>> {
-        let url = format!(
-            "{}/{}/versions/loader/{}",
-            self.base_url.trim_end_matches('/'),
-            self.flavor.api_version(),
-            game_version
-        );
-        let entries: Vec<LoaderListEntry> =
-            net::get_json(self.cx.client, &url, self.cx.policy, "loader 列表").await?;
-        Ok(entries.into_iter().map(|e| e.loader).collect())
+    /// meta 抓取按此方案在官方与镜像之间兜底（不设时只走 `base_url` 本身）。
+    pub fn with_sources(mut self, sources: SourcePlan) -> Self {
+        self.sources = Some(sources);
+        self
     }
 
-    /// 选出推荐 loader：优先最新稳定版，无稳定版则取列表首个（meta 已按新→旧排序）。
+    fn url(&self, tail: &str) -> String {
+        format!(
+            "{}/{}/versions/{tail}",
+            self.base_url.trim_end_matches('/'),
+            self.flavor.api_version()
+        )
+    }
+
+    /// 列出该加载器支持的全部游戏版本（meta 返回顺序：最新在前）。
+    pub async fn list_game_versions(&self) -> Result<Vec<GameVersionEntry>> {
+        net::get_json_from(
+            self.cx.client,
+            self.sources.as_ref(),
+            &self.url("game"),
+            self.cx.policy,
+            self.cx.cancel,
+            "游戏版本列表",
+        )
+        .await
+    }
+
+    /// 列出某游戏版本的全部可用 loader，新的在前。Quilt meta 这个端点不按版本排序，这里自己排：
+    /// 下游的「最新」「推荐」都靠这个顺序。
+    pub async fn list_loaders(&self, game_version: &str) -> Result<Vec<LoaderVersion>> {
+        let entries: Vec<LoaderListEntry> = net::get_json_from(
+            self.cx.client,
+            self.sources.as_ref(),
+            &self.url(&format!("loader/{game_version}")),
+            self.cx.policy,
+            self.cx.cancel,
+            "loader 列表",
+        )
+        .await?;
+        let mut loaders: Vec<LoaderVersion> = entries
+            .into_iter()
+            .map(|e| LoaderVersion {
+                stable: !is_prerelease(&e.loader.version),
+                version: e.loader.version,
+            })
+            .collect();
+        loaders.sort_by(|a, b| compare_versions(&b.version, &a.version));
+        Ok(loaders)
+    }
+
+    /// 选出推荐 loader：优先最新稳定版，无稳定版则取列表首个。
     pub async fn latest_loader(&self, game_version: &str) -> Result<LoaderVersion> {
         let loaders = self.list_loaders(game_version).await?;
         loaders
@@ -133,20 +201,33 @@ impl<'a> LoaderInstaller<'a> {
             })
     }
 
-    /// 取指定 game+loader 的 profile 版本 JSON 原始字节。
-    pub async fn fetch_profile_json(
+    /// 取 profile 版本 JSON 并解析，返回原始字节、解析结果与实际用的 loader 版本。`loader_version` 为
+    /// None 时自动选推荐版。取到就当场解析，某个源回的内容读不懂时换下一个源。
+    pub async fn fetch_profile(
         &self,
         game_version: &str,
-        loader_version: &str,
-    ) -> Result<Vec<u8>> {
-        let url = format!(
-            "{}/{}/versions/loader/{}/{}/profile/json",
-            self.base_url.trim_end_matches('/'),
-            self.flavor.api_version(),
-            game_version,
-            loader_version
-        );
-        net::get_bytes(self.cx.client, &url, self.cx.policy).await
+        loader_version: Option<&str>,
+    ) -> Result<(Vec<u8>, VersionJson, String)> {
+        let loader_version = match loader_version {
+            Some(v) => v.to_owned(),
+            None => self.latest_loader(game_version).await?.version,
+        };
+        let (raw, version) = net::get_decoded_from(
+            self.cx.client,
+            self.sources.as_ref(),
+            &self.url(&format!(
+                "loader/{game_version}/{loader_version}/profile/json"
+            )),
+            self.cx.policy,
+            self.cx.cancel,
+            "加载器 profile",
+            |raw| {
+                let version = net::parse_json(&raw, "加载器 profile JSON")?;
+                Ok((raw, version))
+            },
+        )
+        .await?;
+        Ok((raw, version, loader_version))
     }
 
     /// 安装指定 game 版本上的加载器。`loader_version` 为 None 时自动选推荐版。
@@ -157,21 +238,19 @@ impl<'a> LoaderInstaller<'a> {
         game_version: &str,
         loader_version: Option<&str>,
     ) -> Result<LoaderSummary> {
-        let loader_version = match loader_version {
-            Some(v) => v.to_owned(),
-            None => self.latest_loader(game_version).await?.version,
-        };
-
-        let raw = self.fetch_profile_json(game_version, &loader_version).await?;
-        let version = VersionJson::from_json_str(&String::from_utf8_lossy(&raw))?;
+        let (raw, version, loader_version) =
+            self.fetch_profile(game_version, loader_version).await?;
         let id = version.id.clone();
-
-        // 原样落盘 profile JSON（保留未建模字段），再下加载器库。
-        let json_path = self.cx.layout.version_json(&id);
-        aurora_base::fs::atomic_write(&json_path, &raw).await?;
+        // id 来自加载器 meta，原样拼进 versions/<id>/<id>.json。
+        checked_segment(&id, || "加载器 profile 的版本 id".to_owned())?;
 
         let tasks = plan::library_tasks(&version, self.cx.runtime, self.cx.layout)?;
         let libraries = self.cx.run_batch(tasks, "加载器库", None).await?;
+
+        // 版本列表只凭版本 JSON 认版本，库都就绪了才让它出现，失败或取消时这个加载器就是没装上。
+        // 原样落盘，保留未建模字段。
+        let json_path = self.cx.layout.version_json(&id);
+        aurora_base::fs::atomic_write(&json_path, &raw).await?;
 
         Ok(LoaderSummary {
             id,
@@ -205,7 +284,10 @@ mod tests {
     fn flavor_endpoints() {
         assert_eq!(LoaderFlavor::Fabric.api_version(), "v2");
         assert_eq!(LoaderFlavor::Quilt.api_version(), "v3");
-        assert_eq!(LoaderFlavor::Quilt.default_base(), "https://meta.quiltmc.org");
+        assert_eq!(
+            LoaderFlavor::Quilt.default_base(),
+            "https://meta.quiltmc.org"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -231,6 +313,228 @@ mod tests {
         let chosen = installer.latest_loader("1.21").await.unwrap();
         assert_eq!(chosen.version, "0.15.11", "应跳过 beta 选稳定版");
         assert!(chosen.stable);
+    }
+
+    /// 第一个源回 200 的错误页：不把它当成 profile 交给调用方，换下一个源取到真正的。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_garbled_profile_from_one_source_moves_on_to_the_next() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/garbled"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>维护中</html>"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let profile = r#"{"id":"fabric-loader-0.15.11-1.21","inheritsFrom":"1.21"}"#;
+        Mock::given(method("GET"))
+            .and(path("/clean"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(profile))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let layout = crate::layout::GameLayout::new(std::env::temp_dir());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let (raw, version, loader) = LoaderInstaller::fabric(cx)
+            .with_sources(crate::net::tests::plan_between(
+                &server, "/garbled", "/clean",
+            ))
+            .fetch_profile("1.21", Some("0.15.11"))
+            .await
+            .unwrap();
+
+        assert_eq!(version.id, "fabric-loader-0.15.11-1.21");
+        assert_eq!(loader, "0.15.11");
+        assert_eq!(raw, profile.as_bytes(), "落盘要的是原始字节");
+    }
+
+    /// Fabric meta 的 stable 只标当前推荐的那一个，其余 254 个正式版全是 false（2026 年实测）：
+    /// 照搬的话向导会把它们全标成测试版。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fabric_stability_ignores_the_meta_flag() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/1.20.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"loader":{"version":"0.20.1","stable":true}},
+                    {"loader":{"version":"0.20.0","stable":false}},
+                    {"loader":{"version":"0.19.5","stable":false}},
+                    {"loader":{"version":"0.19.0-beta.1","stable":false}}]"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let layout = crate::layout::GameLayout::new(std::env::temp_dir());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let loaders = LoaderInstaller::fabric(cx)
+            .with_base_url(server.uri())
+            .list_loaders("1.20.1")
+            .await
+            .unwrap();
+        let flags: Vec<(&str, bool)> = loaders
+            .iter()
+            .map(|l| (l.version.as_str(), l.stable))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![
+                ("0.20.1", true),
+                ("0.20.0", true),
+                ("0.19.5", true),
+                ("0.19.0-beta.1", false),
+            ]
+        );
+    }
+
+    /// Quilt meta 的 `loader/<游戏版本>` 不按版本排序，1.20.1 排在最前的是 0.20.0-beta.9，第一个正式版
+    /// 是 0.24.0：按返回顺序取「最新稳定版」会选到一个连 QFAPI 都载不起来的老版本。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quilt_loaders_are_ordered_newest_first_whatever_meta_returns() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/versions/loader/1.20.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"loader":{"version":"0.20.0-beta.9"}},
+                    {"loader":{"version":"0.20.0-beta.7"}},
+                    {"loader":{"version":"0.24.0"}},
+                    {"loader":{"version":"0.30.2-beta.1"}},
+                    {"loader":{"version":"0.9.1"}},
+                    {"loader":{"version":"0.31.0-beta.5"}},
+                    {"loader":{"version":"0.30.2"}}]"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let layout = crate::layout::GameLayout::new(std::env::temp_dir());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let installer = LoaderInstaller::quilt(cx).with_base_url(server.uri());
+        let order: Vec<String> = installer
+            .list_loaders("1.20.1")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.version)
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                "0.31.0-beta.5",
+                "0.30.2",
+                "0.30.2-beta.1",
+                "0.24.0",
+                "0.20.0-beta.9",
+                "0.20.0-beta.7",
+                "0.9.1",
+            ]
+        );
+        assert_eq!(
+            installer.latest_loader("1.20.1").await.unwrap().version,
+            "0.30.2"
+        );
+    }
+
+    /// Quilt meta 不给 stable 字段：按版本号推断，推荐版跳过 beta。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quilt_stability_is_inferred_from_version_string() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/versions/loader/1.21.1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"loader":{"version":"0.27.0-beta.1","build":1}},
+                    {"loader":{"version":"0.26.4","build":2}},
+                    {"loader":{"version":"0.26.4-pre.2","build":3}}]"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let layout = crate::layout::GameLayout::new(std::env::temp_dir());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let installer = LoaderInstaller::quilt(cx).with_base_url(server.uri());
+        let loaders = installer.list_loaders("1.21.1").await.unwrap();
+        let flags: Vec<(&str, bool)> = loaders
+            .iter()
+            .map(|l| (l.version.as_str(), l.stable))
+            .collect();
+        assert_eq!(
+            flags,
+            vec![
+                ("0.27.0-beta.1", false),
+                ("0.26.4", true),
+                ("0.26.4-pre.2", false)
+            ]
+        );
+        assert_eq!(
+            installer.latest_loader("1.21.1").await.unwrap().version,
+            "0.26.4"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_game_versions_reads_meta_game_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/game"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"version":"26.1","stable":true},{"version":"26.1-snapshot-1","stable":false}]"#,
+            ))
+            .mount(&server)
+            .await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let layout = crate::layout::GameLayout::new(std::env::temp_dir());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let versions = LoaderInstaller::fabric(cx)
+            .with_base_url(server.uri())
+            .list_game_versions()
+            .await
+            .unwrap();
+        assert_eq!(
+            versions,
+            vec![
+                GameVersionEntry {
+                    version: "26.1".into(),
+                    stable: true
+                },
+                GameVersionEntry {
+                    version: "26.1-snapshot-1".into(),
+                    stable: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn prerelease_tags_are_detected_case_insensitively() {
+        for v in ["0.16.0-beta.1", "1.0.0-RC2", "0.20.0-pre.1", "21.0.0-alpha"] {
+            assert!(is_prerelease(v), "{v}");
+        }
+        for v in ["0.16.10", "47.2.0", "21.1.77"] {
+            assert!(!is_prerelease(v), "{v}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -283,8 +587,145 @@ mod tests {
             std::fs::read(layout.version_json("fabric-loader-0.15.11-1.21")).unwrap();
         assert!(String::from_utf8_lossy(&json_on_disk).contains("KnotClient"));
         // 加载器库落到 libraries 下。
-        let lib = layout
-            .library_path("net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar");
+        let lib =
+            layout.library_path("net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar");
         assert_eq!(std::fs::read(lib).unwrap(), b"fabric-loader-jar");
+    }
+
+    const LOADER_ID: &str = "fabric-loader-0.15.11-1.21";
+    const LOADER_JAR_PATH: &str = "/net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar";
+
+    /// 挂上 profile 与加载器库的响应。
+    async fn mount_profile(server: &MockServer, library: ResponseTemplate) {
+        let base = server.uri();
+        let profile = format!(
+            r#"{{"id":"{LOADER_ID}","inheritsFrom":"1.21","mainClass":"Knot",
+                "libraries":[{{"name":"net.fabricmc:fabric-loader:0.15.11","url":"{base}/"}}]}}"#
+        );
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/1.21/0.15.11/profile/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(profile))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(LOADER_JAR_PATH))
+            .respond_with(library)
+            .mount(server)
+            .await;
+    }
+
+    /// 加载器库下不下来时这个加载器版本就是没装上：版本 JSON 不落位、版本目录也不出现。Fabric 的版本
+    /// 目录里没有别的文件，版本 JSON 先落位的话，版本列表里就多出一个启动不了的版本。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_library_download_leaves_no_version_behind() {
+        let server = MockServer::start().await;
+        mount_profile(&server, ResponseTemplate::new(404)).await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::GameLayout::new(dir.path());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let err = LoaderInstaller::fabric(cx)
+            .with_base_url(server.uri())
+            .install("1.21", Some("0.15.11"))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::BatchIncomplete { .. }), "实际 {err:?}");
+        assert!(!layout.version_dir(LOADER_ID).exists());
+    }
+
+    /// 取消发生在下加载器库的途中：同样不留版本 JSON 与版本目录。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_the_library_download_leaves_no_version_behind() {
+        let server = MockServer::start().await;
+        let stalled = ResponseTemplate::new(200)
+            .set_body_bytes(b"jar".to_vec())
+            .set_delay(Duration::from_secs(30));
+        mount_profile(&server, stalled).await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let token = aurora_download::CancellationToken::new();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4)
+            .with_cancel(token.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::GameLayout::new(dir.path());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy)
+            .with_cancel(Some(&token));
+        let installer = LoaderInstaller::fabric(cx).with_base_url(server.uri());
+        let attempt = installer.install("1.21", Some("0.15.11"));
+        tokio::pin!(attempt);
+
+        let library_requested = async {
+            loop {
+                let requests = server.received_requests().await.unwrap();
+                if requests.iter().any(|r| r.url.path() == LOADER_JAR_PATH) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            _ = &mut attempt => panic!("加载器库还没回来，安装不该结束"),
+            () = library_requested => {}
+        }
+        token.cancel();
+        let err = attempt.await.unwrap_err();
+
+        assert!(err.is_cancelled(), "实际 {err:?}");
+        assert!(!layout.version_dir(LOADER_ID).exists());
+    }
+
+    /// meta 给出的 profile id 原样拼进 versions/<id>/<id>.json：能走出版本目录的报路径越界，
+    /// 什么都不写、也不去下加载器库。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_rejects_a_profile_id_escaping_the_versions_dir() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let profile = format!(
+            r#"{{"id":"../escaped","inheritsFrom":"1.21","mainClass":"Knot",
+                "libraries":[{{"name":"net.fabricmc:fabric-loader:0.15.11","url":"{base}/"}}]}}"#
+        );
+        Mock::given(method("GET"))
+            .and(path("/v2/versions/loader/1.21/0.15.11/profile/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(profile))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/net/fabricmc/fabric-loader/0.15.11/fabric-loader-0.15.11.jar",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"jar".to_vec()))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = aurora_base::http::build_client().unwrap();
+        let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::GameLayout::new(dir.path());
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = fast_policy();
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy);
+
+        let err = LoaderInstaller::fabric(cx)
+            .with_base_url(&base)
+            .install("1.21", Some("0.15.11"))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, Error::UnsafePath { path, .. } if path == "../escaped"),
+            "实际 {err:?}"
+        );
+        assert!(!dir.path().join("escaped.json").exists());
+        assert!(!dir.path().join("versions").exists());
+        assert!(!layout.libraries_dir().exists());
     }
 }

@@ -13,16 +13,36 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Petalfall",
         "width": 1120,
         "height": 720,
-        "minWidth": 940,
-        "minHeight": 600,
-        "decorations": false
+        "minWidth": 960,
+        "minHeight": 720,
+        "decorations": false,
+        "shadow": true,
+        "transparent": false,
+        "resizable": true,
+        "maximizable": true,
+        "center": true,
+        "visible": false,
+        "backgroundColor": "#FBF7F9",
+        "zoomHotkeysEnabled": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": {
+        "default-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self'",
+        "font-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost aurora-tex: http://aurora-tex.localhost data:",
+        "base-uri": "'none'",
+        "form-action": "'none'",
+        "frame-ancestors": "'none'"
+      }
     }
   },
   "bundle": {

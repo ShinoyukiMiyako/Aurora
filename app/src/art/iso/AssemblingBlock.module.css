@@ -1,0 +1,32 @@
+.block {
+  position: relative;
+  display: block;
+  flex: none;
+  pointer-events: none;
+}
+
+.blueprint {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.blueprint path {
+  fill: none;
+  stroke: var(--sk-accent-line);
+  stroke-width: 1.2px;
+  stroke-dasharray: 2.5 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.face {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.face > canvas {
+  display: block;
+  image-rendering: pixelated;
+}

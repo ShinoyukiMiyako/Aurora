@@ -1,0 +1,250 @@
+.console {
+  --log-min-height: 340px;
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: var(--log-min-height);
+}
+
+.header {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+  padding: var(--sk-space-14) var(--sk-space-16) var(--sk-space-12);
+  border-bottom: 1px solid var(--sk-line);
+}
+
+.cardHeader {
+  margin-bottom: 0;
+}
+
+/* 头部图标底座：常态中性；实时输出中换成运行色，右上角一个静态圆点（不呼吸：运行可能持续数小时） */
+.headIcon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--sk-bg-2);
+  color: var(--sk-text-2);
+}
+
+.headIcon[data-live] {
+  background: var(--sk-ok-soft);
+  color: var(--sk-ok);
+}
+
+.liveDot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 9px;
+  height: 9px;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-ok);
+  box-shadow: 0 0 0 2px var(--sk-surface);
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+.omitted {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-height: 30px;
+  padding: var(--sk-space-4) var(--sk-space-16);
+  border-bottom: 1px solid var(--sk-line);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.area {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.scroller {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  border-bottom-left-radius: inherit;
+  border-bottom-right-radius: inherit;
+  background: color-mix(in srgb, var(--sk-bg-2) 55%, transparent);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  font-weight: var(--sk-w-mono);
+  font-variant-ligatures: no-contextual;
+  line-height: 18px;
+  user-select: text;
+  outline: none;
+}
+
+.scroller:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--sk-accent);
+}
+
+.canvas {
+  position: relative;
+  min-width: 100%;
+}
+
+/* 筛选后一行不剩：日志区顶端一行弱色说明，与日志行同样的左右内边距 */
+.filteredEmpty {
+  padding: var(--sk-space-8) var(--sk-space-16) 0;
+  color: var(--sk-text-2);
+  font-family: var(--sk-font);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+/* 一行四列：时间 / 级别 / 来源 / 正文；左边框给级别第三种表达（文字、颜色之外） */
+.line {
+  --log-tone: transparent;
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  grid-template-columns: 64px 44px 52px auto;
+  column-gap: var(--sk-space-10);
+  box-sizing: border-box;
+  width: max-content;
+  min-width: 100%;
+  height: 22px;
+  padding: var(--sk-space-2) var(--sk-space-16);
+  border-left: 2.5px solid var(--log-tone);
+  color: var(--sk-text);
+  white-space: pre;
+}
+
+.console[data-wrap] .line {
+  grid-template-columns: 64px 44px 52px minmax(0, 1fr);
+  width: 100%;
+  height: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.line:hover {
+  background: color-mix(in srgb, var(--sk-surface) 70%, transparent);
+}
+
+.time,
+.source {
+  color: var(--sk-text-2);
+}
+
+.time {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 级别标签 700 是组件私有常量：等宽小字里需要更重的字才压得住 */
+.level {
+  font-size: var(--sk-fs-micro);
+  font-weight: 700;
+}
+
+.source {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.line[data-level="warn"] {
+  --log-tone: var(--sk-warn);
+  background: var(--sk-warn-soft);
+}
+
+.line[data-level="warn"] .level {
+  color: var(--sk-warn);
+}
+
+.line[data-level="warn"] .text {
+  color: color-mix(in srgb, var(--sk-warn) 55%, var(--sk-text));
+}
+
+.line[data-level="error"] {
+  --log-tone: var(--sk-danger);
+  background: var(--sk-danger-soft);
+}
+
+.line[data-level="error"] .level {
+  color: var(--sk-danger);
+}
+
+.line[data-level="error"] .text {
+  color: color-mix(in srgb, var(--sk-danger) 70%, var(--sk-text));
+}
+
+.cursor {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: var(--sk-space-4);
+  border-radius: 2px;
+  background: var(--sk-accent);
+  opacity: 0.7;
+  vertical-align: middle;
+}
+
+/* 跳到最新：反色胶囊，悬在日志区底部居中 */
+.jump {
+  position: absolute;
+  bottom: var(--sk-space-14);
+  left: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-4);
+  height: 30px;
+  padding: 0 var(--sk-space-12) 0 var(--sk-space-10);
+  border: 0;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-text);
+  color: var(--sk-bg);
+  box-shadow: var(--sk-shadow);
+  font-family: inherit;
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  line-height: 1;
+  cursor: pointer;
+  outline: none;
+  translate: -50% 0;
+  transition: scale var(--sk-spring-tap-dur) var(--sk-spring-tap);
+}
+
+.jump:active {
+  scale: 0.96;
+}
+
+.jump:focus-visible {
+  box-shadow: var(--sk-focus), var(--sk-shadow);
+}
+
+:global([data-sk-reduced]) .jump:active {
+  scale: none;
+  opacity: 0.85;
+  transition: none;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

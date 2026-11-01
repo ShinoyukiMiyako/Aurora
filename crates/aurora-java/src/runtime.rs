@@ -1,18 +1,28 @@
 //! Mojang `java_runtime` 清单的下载与安装（architecture.md aurora-java 小节 v1 项）。
 //!
-//! 流程：拉 `all.json`（平台 -> 组件 -> 条目）→ 按目标主版本挑组件 → 拉该组件的文件清单
-//! → 逐个文件按 raw 直链下载、sha1 校验后原子落盘。所有远端 URL 都先经 aurora-base 的镜像
-//! 改写（官方源直连或 BMCLAPI 镜像），HTTP 客户端由外部注入以便单测走本地 mock。
+//! 流程：拉 `all.json`（平台 -> 组件 -> 条目）→ 按目标主版本挑组件 → 拉该组件的文件清单，
+//! 得到一份 [`RuntimePlan`]（每个文件的落盘路径、官方直链、sha1 与大小）。
 //!
-//! sha1 校验放在内存里、且在重试闭包内完成：校验不符会冒泡成 aurora-base 的 `HashMismatch`
-//! （可重试），于是一次损坏下载会自动重新拉取，而不是把坏文件留在盘上。
+//! 文件本身由调用方下载：上层把计划转成批量下载任务（并发、换源、进度、已就绪文件按 sha1 跳过），
+//! 下完再调 [`RuntimePlan::finalize`] 建目录、设可执行位、建链接。
+//!
+//! 组件清单的 sha1 校验放在内存里、且在重试闭包内完成：校验不符会冒泡成 aurora-base 的
+//! `HashMismatch`（可重试），于是一次损坏的下载会自动重新拉取。
+//!
+//! 两份清单都按源计划逐源尝试：当前源连不上、返回非 2xx、内容 sha1 不符或解析不了，就换下一个源
+//! 再取一次。清单是装运行时的第一步，单源抓取会让官方源一抽风整个 Java 安装就失败，而运行时
+//! 文件本身早已有换源兜底。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use aurora_base::http::{BodyReadError, METADATA_MAX_BYTES, read_body_capped};
 use aurora_base::mirror::{self, MirrorSource};
 use aurora_base::retry::{RetryPolicy, retry_async};
 use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{Error, Result};
 use crate::version::JavaVersion;
@@ -21,8 +31,7 @@ use crate::version::JavaVersion;
 ///
 /// 该 gamecore 哈希路径是社区长期稳定的公开入口；piston-meta 域名在 aurora-base 镜像表中，
 /// 走 BMCLAPI 时会被改写到镜像的同路径。
-pub const MOJANG_JAVA_RUNTIME_ALL: &str =
-    "https://piston-meta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
+pub const MOJANG_JAVA_RUNTIME_ALL: &str = "https://piston-meta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
 
 /// `all.json` 顶层结构：平台键 -> 组件名 -> 该组件的条目列表。
 ///
@@ -94,8 +103,84 @@ pub struct FileDownloads {
 pub struct DownloadRef {
     /// 对象 sha1（下载后逐文件校验）。
     pub sha1: String,
+    /// 对象大小（字节）。清单通常都给，缺省时下载进度没有总字节数。
+    #[serde(default)]
+    pub size: Option<u64>,
     /// 对象直链（官方域名，下载前经镜像改写）。
     pub url: String,
+}
+
+/// 一次运行时安装要做的全部事情。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePlan {
+    /// 组件名，如 `java-runtime-gamma`。
+    pub component: String,
+    /// 组件版本（由清单声明的 `version.name` 解析）。
+    pub version: JavaVersion,
+    /// 安装后 java 可执行文件的绝对路径。
+    pub java_executable: PathBuf,
+    /// 要下载的文件，按清单里的相对路径排序。
+    pub files: Vec<RuntimeFile>,
+    /// 清单显式列出的目录（含空目录）。
+    pub directories: Vec<PathBuf>,
+    /// 符号链接（只有 mac/linux 运行时会出现）。
+    pub links: Vec<RuntimeLink>,
+}
+
+/// 计划里的一个文件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeFile {
+    /// 落盘绝对路径。
+    pub path: PathBuf,
+    /// 官方直链（未经镜像改写；换源由下载方按自己的源策略做）。
+    pub url: String,
+    /// 期望 sha1。
+    pub sha1: String,
+    /// 期望大小（字节）。
+    pub size: Option<u64>,
+    /// 是否需要可执行权限（Unix 生效）。
+    pub executable: bool,
+}
+
+/// 计划里的一个符号链接。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLink {
+    /// 链接本身的绝对路径。
+    pub path: PathBuf,
+    /// 链接指向的目标（清单原样给出的相对路径）。
+    pub target: String,
+}
+
+impl RuntimePlan {
+    /// 文件下载完之后收尾：建清单里的目录、给可执行文件加权限、建符号链接。
+    ///
+    /// 可重复调用：目录已在不报错，同名旧链接先删再建，重装同一运行时不会因为残留而失败。
+    pub async fn finalize(&self) -> Result<()> {
+        for dir in &self.directories {
+            tokio::fs::create_dir_all(dir)
+                .await
+                .map_err(|source| aurora_base::Error::Io {
+                    path: dir.clone(),
+                    source,
+                })?;
+        }
+        for file in &self.files {
+            set_executable(&file.path, file.executable)?;
+        }
+        for link in &self.links {
+            create_symlink(&link.target, &link.path)?;
+        }
+        Ok(())
+    }
+
+    /// 安装产物描述。
+    pub fn installed(&self) -> InstalledRuntime {
+        InstalledRuntime {
+            component: self.component.clone(),
+            version: self.version.clone(),
+            java_executable: self.java_executable.clone(),
+        }
+    }
 }
 
 /// 一次成功安装的结果。
@@ -109,26 +194,49 @@ pub struct InstalledRuntime {
     pub java_executable: PathBuf,
 }
 
+/// 把官方地址按某个源改写成具体请求地址。
+///
+/// 生产为 [`aurora_base::mirror::rewrite`]；测试把两个源钉到不同的本地 mock，
+/// 以便分别控制官方源与镜像的应答。
+pub type SourceRewriter =
+    Arc<dyn Fn(&str, MirrorSource) -> aurora_base::Result<String> + Send + Sync>;
+
+/// 候选地址展开后的再排序，见 [`JavaRuntimeInstaller::with_candidate_order`]。
+pub type CandidateOrder = Arc<dyn Fn(Vec<String>) -> Vec<String> + Send + Sync>;
+
 /// Mojang Java 运行时安装器。
 ///
-/// 持有注入的 HTTP 客户端、清单地址、镜像源与重试策略。清单地址与镜像源都可注入，
-/// 使单测能把整条链路指向本地 mock（`Official` 源下镜像改写为恒等，mock URL 原样透传）。
+/// 持有注入的 HTTP 客户端、清单地址、源顺序、地址改写与重试策略。清单地址与改写都可注入，
+/// 使单测能把整条链路指向本地 mock：默认改写下 mock 地址不在镜像表里，两个源改写结果相同，
+/// 去重后只剩一个候选；要测换源时用 [`with_rewriter`](Self::with_rewriter) 把两个源分到两台 mock。
 pub struct JavaRuntimeInstaller {
     client: reqwest::Client,
     manifest_url: String,
-    source: MirrorSource,
+    sources: Vec<MirrorSource>,
+    rewriter: SourceRewriter,
+    candidate_order: Option<CandidateOrder>,
     policy: RetryPolicy,
+    cancel: Option<CancellationToken>,
 }
 
 impl JavaRuntimeInstaller {
-    /// 用注入的客户端创建安装器，默认走官方源与默认重试策略。
+    /// 用注入的客户端创建安装器：官方源在前、BMCLAPI 镜像兜底，默认重试策略。
     pub fn new(client: reqwest::Client) -> Self {
         Self {
             client,
             manifest_url: MOJANG_JAVA_RUNTIME_ALL.to_owned(),
-            source: MirrorSource::default(),
+            sources: vec![MirrorSource::Official, MirrorSource::BmclApi],
+            rewriter: Arc::new(mirror::rewrite),
+            candidate_order: None,
             policy: RetryPolicy::default(),
+            cancel: None,
         }
+    }
+
+    /// 挂取消令牌：拉取清单的网络等待中触发即放弃该请求，以 [`Error::Cancelled`] 返回。
+    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
+        self.cancel = Some(token);
+        self
     }
 
     /// 覆盖清单地址（测试指向 mock，或改用其它 gamecore 入口）。
@@ -137,9 +245,25 @@ impl JavaRuntimeInstaller {
         self
     }
 
-    /// 设定镜像源（官方直连 / BMCLAPI）。
-    pub fn with_source(mut self, source: MirrorSource) -> Self {
-        self.source = source;
+    /// 设定首选源：`primary` 先取，取不到再换另一个源兜底。
+    pub fn with_source(mut self, primary: MirrorSource) -> Self {
+        let fallback = match primary {
+            MirrorSource::Official => MirrorSource::BmclApi,
+            MirrorSource::BmclApi => MirrorSource::Official,
+        };
+        self.sources = vec![primary, fallback];
+        self
+    }
+
+    /// 覆盖地址改写（测试把官方源与镜像钉到不同的本地 mock）。
+    pub fn with_rewriter(mut self, rewriter: SourceRewriter) -> Self {
+        self.rewriter = rewriter;
+        self
+    }
+
+    /// 候选地址展开后再排一次序。aurora-java 不依赖下载引擎，门面经它把源健康表接进来，冷却中的主机排到后面。
+    pub fn with_candidate_order(mut self, order: CandidateOrder) -> Self {
+        self.candidate_order = Some(order);
         self
     }
 
@@ -149,143 +273,179 @@ impl JavaRuntimeInstaller {
         self
     }
 
-    /// 拉取并解析 `all.json` 总清单。
+    /// 拉取并解析 `all.json` 总清单；当前源取不到或内容解析不了时换下一个源。
     pub async fn fetch_manifest(&self) -> Result<JavaRuntimeManifest> {
-        let url = mirror::rewrite(&self.manifest_url, self.source)?;
-        let bytes = self.get_bytes(&url).await?;
-        parse_json(&bytes, "java-runtime all.json")
+        self.fetch_from_sources(&self.manifest_url, "Java 运行时总清单", |url| async move {
+            let bytes = self.get_bytes(&url).await?;
+            parse_json(&bytes, "java-runtime all.json")
+        })
+        .await
     }
 
-    /// 为当前平台安装匹配 `required_major` 的运行时到 `install_dir`。
-    pub async fn install(&self, required_major: u32, install_dir: &Path) -> Result<InstalledRuntime> {
-        self.install_for_platform(required_major, current_platform(), install_dir)
+    /// 为当前平台给出安装匹配 `required_major` 的运行时到 `install_dir` 的计划。
+    pub async fn plan(&self, required_major: u32, install_dir: &Path) -> Result<RuntimePlan> {
+        self.plan_for_platform(required_major, current_platform(), install_dir)
             .await
     }
 
-    /// 显式指定平台键的安装入口（测试用 `windows-x64` 注入，避开真实平台判定）。
-    pub async fn install_for_platform(
+    /// 显式指定平台键的计划入口（测试用 `windows-x64` 注入，避开真实平台判定）。
+    pub async fn plan_for_platform(
         &self,
         required_major: u32,
         platform: &str,
         install_dir: &Path,
-    ) -> Result<InstalledRuntime> {
+    ) -> Result<RuntimePlan> {
         let manifest = self.fetch_manifest().await?;
         let platform_map = manifest
             .get(platform)
             .ok_or_else(|| Error::UnsupportedPlatform(platform.to_owned()))?;
-        let (component_name, component) = select_component(platform_map, required_major)
-            .ok_or(Error::NoRuntimeForMajor {
+        let (component_name, component) =
+            select_component(platform_map, required_major).ok_or(Error::NoRuntimeForMajor {
                 major: required_major,
             })?;
 
         let files = self.fetch_component_files(component).await?;
-        self.download_files(&files, install_dir).await?;
-
-        let java_rel = locate_java_executable(&files).ok_or(Error::MissingJavaExecutable)?;
+        let java_rel = locate_java_executable(&files)?.ok_or(Error::MissingJavaExecutable)?;
         let version =
             JavaVersion::parse(&component.version.name).ok_or_else(|| Error::JavaVersionParse {
                 output: component.version.name.clone(),
             })?;
-        Ok(InstalledRuntime {
-            component: component_name.to_owned(),
+        build_plan(
+            component_name,
             version,
-            java_executable: install_dir.join(java_rel),
+            install_dir,
+            &files,
+            install_dir.join(java_rel),
+        )
+    }
+
+    /// 拉取并校验某组件的文件清单（含对清单自身的 sha1 校验）；当前源在重试耗尽后仍取不到、
+    /// sha1 一直不符或解析不了时换下一个源。
+    async fn fetch_component_files(&self, component: &RuntimeComponent) -> Result<ComponentFiles> {
+        let expected_sha1 = component.manifest.sha1.as_str();
+        self.fetch_from_sources(
+            &component.manifest.url,
+            "Java 运行时组件清单",
+            |url| async move {
+                let bytes = self.get_verified_bytes(&url, expected_sha1).await?;
+                parse_json(&bytes, "java-runtime component manifest")
+            },
+        )
+        .await
+    }
+
+    /// 按源顺序把官方地址展开成候选请求地址，去重保序：改写结果相同的源（地址不在镜像表里）只试一次。
+    pub fn candidates(&self, url: &str) -> Result<Vec<String>> {
+        let mut out: Vec<String> = Vec::with_capacity(self.sources.len());
+        for &source in &self.sources {
+            let resolved = (self.rewriter)(url, source)?;
+            if !out.contains(&resolved) {
+                out.push(resolved);
+            }
+        }
+        Ok(match &self.candidate_order {
+            Some(order) => order(out),
+            None => out,
         })
     }
 
-    /// 拉取并校验某组件的文件清单（含对清单自身的 sha1 校验）。
-    async fn fetch_component_files(&self, component: &RuntimeComponent) -> Result<ComponentFiles> {
-        let url = mirror::rewrite(&component.manifest.url, self.source)?;
-        let bytes = self
-            .get_verified_bytes(&url, &component.manifest.sha1)
-            .await?;
-        parse_json(&bytes, "java-runtime component manifest")
-    }
-
-    /// 逐个文件下载落盘：目录建目录、文件校验后原子写、链接建符号链接。
-    async fn download_files(&self, files: &ComponentFiles, install_dir: &Path) -> Result<()> {
-        for (rel, entry) in &files.files {
-            let target = install_dir.join(rel_to_path(rel));
-            match entry {
-                FileEntry::Directory => {
-                    tokio::fs::create_dir_all(&target)
-                        .await
-                        .map_err(|source| aurora_base::Error::Io {
-                            path: target.clone(),
-                            source,
-                        })?;
-                }
-                FileEntry::File {
-                    downloads,
-                    executable,
-                } => {
-                    let url = mirror::rewrite(&downloads.raw.url, self.source)?;
-                    let bytes = self.get_verified_bytes(&url, &downloads.raw.sha1).await?;
-                    aurora_base::fs::atomic_write(&target, &bytes).await?;
-                    set_executable(&target, *executable)?;
-                }
-                FileEntry::Link { target: link_target } => {
-                    create_symlink(link_target, &target)?;
+    /// 逐个候选执行 `fetch`，返回第一个成功的结果。
+    ///
+    /// 每个候选内部的重试与取消由 `fetch` 自己负责；取消立即返回，不再试下一个源——用户已经放弃，
+    /// 再换源只会让取消迟迟不生效。
+    async fn fetch_from_sources<T, F, Fut>(
+        &self,
+        url: &str,
+        context: &'static str,
+        fetch: F,
+    ) -> Result<T>
+    where
+        F: Fn(String) -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let candidates = self.candidates(url)?;
+        let mut failures: Vec<(String, Error)> = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            match fetch(candidate.clone()).await {
+                Ok(value) => return Ok(value),
+                Err(err) if err.is_cancelled() => return Err(err),
+                Err(err) => {
+                    tracing::warn!(
+                        context,
+                        url = %candidate,
+                        error = %err,
+                        "Java 运行时清单在该下载源上没取到"
+                    );
+                    failures.push((candidate, err));
                 }
             }
         }
-        Ok(())
+        Err(all_sources_failed(context, failures))
+    }
+
+    /// 在取消令牌下等待一次网络读取；令牌先触发即返回 [`Error::Cancelled`]。
+    async fn until_cancelled<T>(&self, fut: impl Future<Output = Result<T>>) -> Result<T> {
+        match &self.cancel {
+            Some(token) => token
+                .run_until_cancelled(fut)
+                .await
+                .unwrap_or(Err(Error::Cancelled)),
+            None => fut.await,
+        }
     }
 
     /// 带重试地 GET 一个 URL 的响应体（不校验哈希，用于 all.json 这类无预置哈希的清单）。
     async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
         let client = &self.client;
-        retry_async(&self.policy, move || async move {
-            let resp = client
-                .get(url)
-                .send()
-                .await
-                .map_err(|source| Error::Http {
-                    url: url.to_owned(),
-                    source,
-                })?;
+        let fetch = retry_async(&self.policy, move || async move {
+            let resp = client.get(url).send().await.map_err(|source| Error::Http {
+                url: url.to_owned(),
+                source,
+            })?;
             let resp = resp.error_for_status().map_err(|source| Error::Http {
                 url: url.to_owned(),
                 source,
             })?;
-            let bytes = resp.bytes().await.map_err(|source| Error::Http {
-                url: url.to_owned(),
-                source,
-            })?;
-            Ok::<Vec<u8>, Error>(bytes.to_vec())
-        })
-        .await
+            read_metadata_body(resp, url).await
+        });
+        self.until_cancelled(fetch).await
     }
 
     /// 带重试地 GET 并做 sha1 校验；校验不符冒泡为可重试的 `HashMismatch`，从而自动重下。
     async fn get_verified_bytes(&self, url: &str, expected_sha1: &str) -> Result<Vec<u8>> {
         let client = &self.client;
-        retry_async(&self.policy, move || async move {
-            let resp = client
-                .get(url)
-                .send()
-                .await
-                .map_err(|source| Error::Http {
-                    url: url.to_owned(),
-                    source,
-                })?;
+        let fetch = retry_async(&self.policy, move || async move {
+            let resp = client.get(url).send().await.map_err(|source| Error::Http {
+                url: url.to_owned(),
+                source,
+            })?;
             let resp = resp.error_for_status().map_err(|source| Error::Http {
                 url: url.to_owned(),
                 source,
             })?;
-            let bytes = resp
-                .bytes()
-                .await
-                .map_err(|source| Error::Http {
-                    url: url.to_owned(),
-                    source,
-                })?
-                .to_vec();
+            let bytes = read_metadata_body(resp, url).await?;
             verify_bytes_sha1(&bytes, expected_sha1)?;
             Ok::<Vec<u8>, Error>(bytes)
-        })
-        .await
+        });
+        self.until_cancelled(fetch).await
     }
+}
+
+/// 读完清单的响应体，超过元数据上限报 [`Error::ResponseTooLarge`]。
+async fn read_metadata_body(resp: reqwest::Response, url: &str) -> Result<Vec<u8>> {
+    read_body_capped(resp, METADATA_MAX_BYTES)
+        .await
+        .map_err(|err| match err {
+            BodyReadError::TooLarge { size, limit } => Error::ResponseTooLarge {
+                url: url.to_owned(),
+                size,
+                limit,
+            },
+            BodyReadError::Transport(source) => Error::Http {
+                url: url.to_owned(),
+                source,
+            },
+        })
 }
 
 /// 当前平台的运行时清单键。以 `windows-x64` 为主目标，其余平台尽力而为映射。
@@ -325,13 +485,63 @@ fn select_component(
 
 /// 取一个组件里版本号最高的条目（通常只有一条）。
 fn best_entry(entries: &[RuntimeComponent]) -> Option<&RuntimeComponent> {
-    entries
-        .iter()
-        .max_by(|a, b| JavaVersion::parse(&a.version.name).cmp(&JavaVersion::parse(&b.version.name)))
+    entries.iter().max_by(|a, b| {
+        JavaVersion::parse(&a.version.name).cmp(&JavaVersion::parse(&b.version.name))
+    })
 }
 
-/// 从文件清单里定位 java 可执行文件的相对路径（`bin/java` 或 `bin/java.exe`）。
-fn locate_java_executable(files: &ComponentFiles) -> Option<PathBuf> {
+/// 把组件文件清单摊成计划：相对路径落到 `install_dir` 下，清单的 BTreeMap 顺序即计划顺序。任何一条
+/// 路径或链接目标会落到 `install_dir` 之外时整份计划作废，一个文件都不下。
+fn build_plan(
+    component: &str,
+    version: JavaVersion,
+    install_dir: &Path,
+    files: &ComponentFiles,
+    java_executable: PathBuf,
+) -> Result<RuntimePlan> {
+    let mut plan = RuntimePlan {
+        component: component.to_owned(),
+        version,
+        java_executable,
+        files: Vec::new(),
+        directories: Vec::new(),
+        links: Vec::new(),
+    };
+    let links: BTreeSet<&str> = files
+        .files
+        .iter()
+        .filter(|(_, entry)| matches!(entry, FileEntry::Link { .. }))
+        .map(|(rel, _)| rel.as_str())
+        .collect();
+    for (rel, entry) in &files.files {
+        let path = install_dir.join(rel_to_path(rel)?);
+        check_not_under_link(rel, &links)?;
+        match entry {
+            FileEntry::Directory => plan.directories.push(path),
+            FileEntry::File {
+                downloads,
+                executable,
+            } => plan.files.push(RuntimeFile {
+                path,
+                url: downloads.raw.url.clone(),
+                sha1: downloads.raw.sha1.clone(),
+                size: downloads.raw.size,
+                executable: *executable,
+            }),
+            FileEntry::Link { target } => {
+                check_link_target(rel, target, &links)?;
+                plan.links.push(RuntimeLink {
+                    path,
+                    target: target.clone(),
+                });
+            }
+        }
+    }
+    Ok(plan)
+}
+
+/// 从文件清单里定位 java 可执行文件的相对路径（`bin/java` 或 `bin/java.exe`）；清单里没有时 `Ok(None)`。
+fn locate_java_executable(files: &ComponentFiles) -> Result<Option<PathBuf>> {
     files
         .files
         .iter()
@@ -340,11 +550,96 @@ fn locate_java_executable(files: &ComponentFiles) -> Option<PathBuf> {
                 && (rel.ends_with("bin/java.exe") || rel.ends_with("bin/java"))
         })
         .map(|(rel, _)| rel_to_path(rel))
+        .transpose()
 }
 
-/// 把清单里以 `/` 分隔的相对路径转成本平台 `PathBuf`。
-fn rel_to_path(rel: &str) -> PathBuf {
-    rel.split('/').collect()
+/// 把清单里以 `/` 分隔的相对路径转成本平台 `PathBuf`；能走出安装目录的报 [`Error::UnsafeRuntimePath`]。
+fn rel_to_path(rel: &str) -> Result<PathBuf> {
+    match unsafe_reason(rel) {
+        Some(reason) => Err(Error::UnsafeRuntimePath {
+            path: rel.to_owned(),
+            reason,
+        }),
+        None => Ok(rel.split('/').collect()),
+    }
+}
+
+/// 相对路径为什么不能拼进安装目录；能拼时 `None`。规则与版本域对库路径、资源逻辑名的判定一致（本 crate
+/// 不依赖版本域，在这里单独实现）：Windows 上反斜杠也是分隔符，冒号引出盘符或备用数据流，段尾的点与空格
+/// 会被悄悄去掉。
+fn unsafe_reason(rel: &str) -> Option<&'static str> {
+    if rel.is_empty() {
+        return Some("为空");
+    }
+    if rel.starts_with('/') {
+        return Some("是绝对路径");
+    }
+    if rel.contains('\\') {
+        return Some("含反斜杠");
+    }
+    if rel.contains(':') {
+        return Some("含冒号（盘符或备用数据流）");
+    }
+    rel.split('/').find_map(|segment| {
+        if segment.is_empty() {
+            Some("含空段")
+        } else if segment == "." || segment == ".." {
+            Some("含 . 或 .. 段")
+        } else if segment.ends_with(['.', ' ']) {
+            Some("有段以点或空格结尾")
+        } else {
+            None
+        }
+    })
+}
+
+/// 清单条目不能放在另一条链接底下：`up -> ..` 之后的 `up/x.dll`，路径逐段看都在目录里，写入时却跟着
+/// 链接走到了别处。真实清单（全部 mac、linux 组件）没有这种写法。
+fn check_not_under_link(rel: &str, links: &BTreeSet<&str>) -> Result<()> {
+    let under_link = rel
+        .match_indices('/')
+        .any(|(end, _)| links.contains(&rel[..end]));
+    if under_link {
+        return Err(Error::UnsafeRuntimePath {
+            path: rel.to_owned(),
+            reason: "穿过了清单里的符号链接",
+        });
+    }
+    Ok(())
+}
+
+/// 符号链接的目标相对链接所在目录解析（mac 运行时里 `../Home/lib/libjli.dylib` 这类），按段推演后不能
+/// 越过安装目录的根，也不能是绝对路径或带盘符、反斜杠。
+///
+/// 按段推演的前提是途中没有别的链接：走进一条链接后，再往下的落点取决于它指向哪里，所以目标中途穿过
+/// `links` 里的条目也算越界。目标最后一段正好是另一条链接没有问题，每条链接各自验过，串起来也出不了
+/// 目录。真实清单里的链接都不穿过别的链接。
+fn check_link_target(link: &str, target: &str, links: &BTreeSet<&str>) -> Result<()> {
+    let escapes = || Error::UnsafeRuntimeLink {
+        path: link.to_owned(),
+        target: target.to_owned(),
+    };
+    if target.is_empty() || target.starts_with('/') || target.contains(['\\', ':']) {
+        return Err(escapes());
+    }
+    // 从链接自身所在目录出发：`a/b/link` 从 `a/b` 开始走。
+    let mut at: Vec<&str> = link.split('/').collect();
+    at.pop();
+    let mut segments = target
+        .split('/')
+        .filter(|segment| !matches!(*segment, "" | "."))
+        .peekable();
+    while let Some(segment) = segments.next() {
+        if segment == ".." {
+            at.pop().ok_or_else(escapes)?;
+            continue;
+        }
+        at.push(segment);
+        if segments.peek().is_some() && links.contains(at.join("/").as_str()) {
+            return Err(escapes());
+        }
+    }
+    Ok(())
 }
 
 /// 反序列化 JSON，失败时带上是哪份报文的上下文。
@@ -353,6 +648,43 @@ fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8], context: &str) -> Re
         context: context.to_owned(),
         source,
     })
+}
+
+/// 把各源的失败收成一个错误。
+///
+/// 只试了一个源时原样返回它的错误，上层按错误类型做的映射（如判离线）照旧成立；两个及以上时
+/// 汇总成 [`Error::AllSourcesFailed`]，最后一个源的原错误挂在原因链上。
+fn all_sources_failed(context: &'static str, mut failures: Vec<(String, Error)>) -> Error {
+    let attempts: Vec<String> = failures
+        .iter()
+        .map(|(url, err)| describe_attempt(url, err))
+        .collect();
+    let (_, last) = failures
+        .pop()
+        .expect("源顺序恒含两个源，去重后至少剩一个候选");
+    if attempts.len() == 1 {
+        return last;
+    }
+    Error::AllSourcesFailed {
+        context,
+        attempts,
+        last: Box::new(last),
+    }
+}
+
+/// 一个源的失败描述：`地址：错误`，再接上错误 `source()` 链的每一层。
+///
+/// 只有最后一个源的错误留在原因链上，前面各源的底层原因（状态码、连接被拒）要在这里摊平，
+/// 否则汇总后就丢了。
+fn describe_attempt(url: &str, err: &Error) -> String {
+    let mut out = format!("{url}：{err}");
+    let mut cause = std::error::Error::source(err);
+    while let Some(inner) = cause {
+        out.push('：');
+        out.push_str(&inner.to_string());
+        cause = inner.source();
+    }
+    out
 }
 
 /// 内存内 sha1 校验；不符返回 aurora-base 的 `HashMismatch`（可重试）。
@@ -399,11 +731,17 @@ fn set_executable(_path: &Path, _executable: bool) -> Result<()> {
     Ok(())
 }
 
-/// 建立符号链接（Windows 运行时清单不含链接，此路为跨平台完整性兜底）。
+/// 建立符号链接（Windows 运行时清单不含链接，此路为跨平台完整性兜底）。同名旧链接先删掉。
 fn create_symlink(target: &str, link: &Path) -> Result<()> {
     if let Some(parent) = link.parent() {
         std::fs::create_dir_all(parent).map_err(|source| aurora_base::Error::Io {
             path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    if std::fs::symlink_metadata(link).is_ok() {
+        std::fs::remove_file(link).map_err(|source| aurora_base::Error::Io {
+            path: link.to_path_buf(),
             source,
         })?;
     }
@@ -432,6 +770,7 @@ fn symlink_impl(target: &str, link: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use sha1::{Digest, Sha1};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use wiremock::matchers::{method, path as match_path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -442,19 +781,22 @@ mod tests {
         base16ct::lower::encode_string(&hasher.finalize())
     }
 
-    fn fast_installer(client: reqwest::Client, base: &str) -> JavaRuntimeInstaller {
-        // 小延迟、关 jitter，让含重试的测试跑得快且确定。
-        let policy = RetryPolicy {
+    /// 小延迟、关 jitter，让含重试的测试跑得快且确定。
+    fn fast_policy() -> RetryPolicy {
+        RetryPolicy {
             max_attempts: 3,
             initial_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(4),
             multiplier: 2.0,
             jitter: false,
-        };
+        }
+    }
+
+    fn fast_installer(client: reqwest::Client, base: &str) -> JavaRuntimeInstaller {
         JavaRuntimeInstaller::new(client)
             .with_manifest_url(format!("{base}/all.json"))
             .with_source(MirrorSource::Official)
-            .with_retry_policy(policy)
+            .with_retry_policy(fast_policy())
     }
 
     // ---- 纯函数：平台映射 / 路径 / 组件挑选 ----
@@ -474,7 +816,7 @@ mod tests {
     #[test]
     fn rel_to_path_splits_forward_slashes() {
         assert_eq!(
-            rel_to_path("bin/java.exe"),
+            rel_to_path("bin/java.exe").unwrap(),
             ["bin", "java.exe"].iter().collect::<PathBuf>()
         );
     }
@@ -578,36 +920,114 @@ mod tests {
             .await;
     }
 
+    /// 拉组件清单卡住时取消：1000 ms 内以 Cancelled 返回。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn install_downloads_verifies_and_lands_files() {
+    async fn cancel_while_fetching_the_component_manifest_returns_quickly() {
+        let server = MockServer::start().await;
+        let base = server.uri();
+        let manifest = r#"{"files":{}}"#;
+        let all_json = format!(
+            r#"{{"windows-x64":{{"java-runtime-gamma":[{{"manifest":{{"sha1":"{}","size":{},"url":"{}/gamma.json"}},"version":{{"name":"17.0.8"}}}}]}}}}"#,
+            sha1_hex(manifest.as_bytes()),
+            manifest.len(),
+            base,
+        );
+        mount_get(&server, "/all.json", all_json).await;
+        Mock::given(method("GET"))
+            .and(match_path("/gamma.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(manifest)
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(&server)
+            .await;
+
+        let token = CancellationToken::new();
+        let client = aurora_base::http::build_client().expect("客户端应构建成功");
+        let installer = fast_installer(client, &base).with_cancel(token.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let install_dir = dir.path().to_path_buf();
+        let plan = tokio::spawn(async move {
+            installer
+                .plan_for_platform(17, "windows-x64", &install_dir)
+                .await
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let requests = server.received_requests().await.unwrap_or_default();
+            if requests.iter().any(|r| r.url.path() == "/gamma.json") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "组件清单请求未发出");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let cancelled_at = std::time::Instant::now();
+        token.cancel();
+        let err = plan.await.unwrap().unwrap_err();
+
+        assert!(err.is_cancelled(), "应为取消，实际：{err:?}");
+        // 组件清单要 30 秒才回话，以它为界。
+        assert!(cancelled_at.elapsed() < Duration::from_secs(30));
+    }
+
+    /// 计划给出每个文件的落盘路径、官方直链、sha1 与大小，且只拉清单、不下任何对象文件。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plan_lists_files_without_downloading_objects() {
         let server = MockServer::start().await;
         let (gamma_java, gamma_lib) = mount_full_manifest(&server).await;
-
-        let client = aurora_base::http::build_client().expect("客户端应构建成功");
-        let installer = fast_installer(client, &server.uri());
+        let base = server.uri();
+        let client = aurora_base::http::build_client().unwrap();
+        let installer = fast_installer(client, &base);
         let dir = tempfile::tempdir().unwrap();
 
-        let installed = installer
-            .install_for_platform(17, "windows-x64", dir.path())
+        let plan = installer
+            .plan_for_platform(17, "windows-x64", dir.path())
             .await
-            .expect("安装应成功");
+            .expect("计划应成功");
 
-        assert_eq!(installed.component, "java-runtime-gamma");
-        assert_eq!(installed.version.major, 17);
-        assert_eq!(installed.version.security, 8);
-        let expected_exe = dir.path().join("bin").join("java.exe");
-        assert_eq!(installed.java_executable, expected_exe);
-
-        // 文件真实落盘且内容与下载对象一致。
-        assert_eq!(std::fs::read(&expected_exe).unwrap(), gamma_java);
+        assert_eq!(plan.component, "java-runtime-gamma");
         assert_eq!(
-            std::fs::read(dir.path().join("lib").join("rt")).unwrap(),
-            gamma_lib
+            plan.java_executable,
+            dir.path().join("bin").join("java.exe")
         );
+        assert_eq!(plan.directories, vec![dir.path().join("bin")]);
+        assert!(plan.links.is_empty());
+        assert_eq!(
+            plan.files,
+            vec![
+                RuntimeFile {
+                    path: dir.path().join("bin").join("java.exe"),
+                    url: format!("{base}/objects/gamma-java"),
+                    sha1: sha1_hex(&gamma_java),
+                    size: Some(gamma_java.len() as u64),
+                    executable: true,
+                },
+                RuntimeFile {
+                    path: dir.path().join("lib").join("rt"),
+                    url: format!("{base}/objects/gamma-lib"),
+                    sha1: sha1_hex(&gamma_lib),
+                    size: Some(gamma_lib.len() as u64),
+                    executable: false,
+                },
+            ]
+        );
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.url.path().starts_with("/objects/")),
+            "计划阶段不应下载对象文件"
+        );
+        assert!(!dir.path().join("bin").exists(), "计划阶段不落盘");
+
+        plan.finalize().await.unwrap();
+        assert!(dir.path().join("bin").is_dir(), "收尾应建出清单里的目录");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn install_selects_delta_for_major_21() {
+    async fn plan_selects_delta_for_major_21() {
         let server = MockServer::start().await;
         mount_full_manifest(&server).await;
 
@@ -615,13 +1035,18 @@ mod tests {
         let installer = fast_installer(client, &server.uri());
         let dir = tempfile::tempdir().unwrap();
 
-        let installed = installer
-            .install_for_platform(21, "windows-x64", dir.path())
+        let plan = installer
+            .plan_for_platform(21, "windows-x64", dir.path())
             .await
-            .expect("安装 21 应成功");
+            .expect("21 的计划应成功");
+        let installed = plan.installed();
         assert_eq!(installed.component, "java-runtime-delta");
         assert_eq!(installed.version.major, 21);
-        assert!(dir.path().join("bin").join("java.exe").is_file());
+        assert_eq!(
+            installed.java_executable,
+            dir.path().join("bin").join("java.exe")
+        );
+        assert_eq!(plan.files.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -633,7 +1058,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let err = installer
-            .install_for_platform(17, "solaris-sparc", dir.path())
+            .plan_for_platform(17, "solaris-sparc", dir.path())
             .await
             .unwrap_err();
         assert!(matches!(err, Error::UnsupportedPlatform(p) if p == "solaris-sparc"));
@@ -648,38 +1073,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let err = installer
-            .install_for_platform(8, "windows-x64", dir.path())
+            .plan_for_platform(8, "windows-x64", dir.path())
             .await
             .unwrap_err();
         assert!(matches!(err, Error::NoRuntimeForMajor { major: 8 }));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn corrupt_object_exhausts_retries_with_hash_mismatch() {
+    async fn corrupt_component_manifest_exhausts_retries_with_hash_mismatch() {
         let server = MockServer::start().await;
         let base = server.uri();
 
-        // 组件清单声明的 java sha1 与实际下发字节不符，触发 HashMismatch 重试直至耗尽。
-        let real_bytes = b"whatever-bytes".to_vec();
-        let gamma_manifest = format!(
-            r#"{{"files":{{"bin/java.exe":{{"type":"file","downloads":{{"raw":{{"sha1":"{}","url":"{}/objects/gamma-java"}}}}}}}}}}"#,
-            "0000000000000000000000000000000000000000", base,
-        );
+        // all.json 声明的组件清单 sha1 与实际下发的清单不符，触发 HashMismatch 重试直至耗尽。
+        let gamma_manifest = r#"{"files":{}}"#.to_owned();
         let all_json = format!(
             r#"{{"windows-x64":{{"java-runtime-gamma":[{{"manifest":{{"sha1":"{}","url":"{}/gamma.json"}},"version":{{"name":"17.0.8"}}}}]}}}}"#,
-            sha1_hex(gamma_manifest.as_bytes()),
-            base,
+            "0000000000000000000000000000000000000000", base,
         );
         mount_get(&server, "/all.json", all_json).await;
         mount_get(&server, "/gamma.json", gamma_manifest).await;
-        mount_get_bytes(&server, "/objects/gamma-java", real_bytes).await;
 
         let client = aurora_base::http::build_client().unwrap();
         let installer = fast_installer(client, &base);
         let dir = tempfile::tempdir().unwrap();
 
         let err = installer
-            .install_for_platform(17, "windows-x64", dir.path())
+            .plan_for_platform(17, "windows-x64", dir.path())
             .await
             .unwrap_err();
         // sha1 不符经 aurora-base 冒泡为 Base(HashMismatch)。
@@ -723,17 +1142,714 @@ mod tests {
             .mount(&server)
             .await;
         mount_get(&server, "/gamma.json", gamma_manifest).await;
-        mount_get_bytes(&server, "/objects/gamma-java", gamma_java.clone()).await;
 
         let client = aurora_base::http::build_client().unwrap();
         let installer = fast_installer(client, &base);
         let dir = tempfile::tempdir().unwrap();
 
-        let installed = installer
-            .install_for_platform(17, "windows-x64", dir.path())
+        let plan = installer
+            .plan_for_platform(17, "windows-x64", dir.path())
             .await
             .expect("首个 503 后重试应成功");
-        assert_eq!(installed.component, "java-runtime-gamma");
-        assert_eq!(std::fs::read(dir.path().join("bin").join("java.exe")).unwrap(), gamma_java);
+        assert_eq!(plan.component, "java-runtime-gamma");
+        assert_eq!(plan.files[0].sha1, sha1_hex(&gamma_java));
+    }
+
+    // ---- 清单路径越界：清单与文件 sha1 同源，恶意条目能把合法 sha1 的文件写到运行时目录之外 ----
+
+    /// 递归列出目录下的全部文件与目录。
+    fn entries_under(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            for entry in std::fs::read_dir(&current).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path.clone());
+                }
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    /// 挂一份只含给定文件条目的组件清单，返回 mock 地址。
+    async fn mount_component(server: &MockServer, files: serde_json::Value) {
+        let base = server.uri();
+        let manifest = serde_json::json!({ "files": files }).to_string();
+        let all_json = serde_json::json!({
+            "windows-x64": {"java-runtime-gamma": [{
+                "manifest": {"sha1": sha1_hex(manifest.as_bytes()), "url": format!("{base}/gamma.json")},
+                "version": {"name": "17.0.8"}
+            }]}
+        })
+        .to_string();
+        mount_get(server, "/all.json", all_json).await;
+        mount_get(server, "/gamma.json", manifest).await;
+    }
+
+    fn file_entry(base: &str) -> serde_json::Value {
+        serde_json::json!({"type": "file", "downloads": {"raw": {
+            "sha1": sha1_hex(b"x"), "size": 1, "url": format!("{base}/objects/x")
+        }}})
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_paths_escaping_the_runtime_dir_are_rejected() {
+        for (path, reason) in [
+            ("../../escaped.dll", "含 . 或 .. 段"),
+            ("bin/../../escaped.dll", "含 . 或 .. 段"),
+            ("/abs/escaped.dll", "是绝对路径"),
+            ("C:/Windows/escaped.dll", "含冒号（盘符或备用数据流）"),
+            ("C:escaped.dll", "含冒号（盘符或备用数据流）"),
+            ("bin\\..\\..\\escaped.dll", "含反斜杠"),
+            ("bin/java.exe:stream", "含冒号（盘符或备用数据流）"),
+            ("bin//escaped.dll", "含空段"),
+            ("bin/escaped.dll.", "有段以点或空格结尾"),
+        ] {
+            let server = MockServer::start().await;
+            let base = server.uri();
+            mount_component(
+                &server,
+                serde_json::json!({ "bin/java.exe": file_entry(&base), path: file_entry(&base) }),
+            )
+            .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let install_dir = tmp.path().join("runtime").join("17");
+
+            let err = fast_installer(aurora_base::http::build_client().unwrap(), &base)
+                .plan_for_platform(17, "windows-x64", &install_dir)
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(&err, Error::UnsafeRuntimePath { path: got, reason: why } if got == path && *why == reason),
+                "{path:?}: {err:?}"
+            );
+            assert_eq!(entries_under(tmp.path()), Vec::<PathBuf>::new(), "{path:?}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn links_pointing_outside_the_runtime_dir_are_rejected() {
+        for target in [
+            "../../../../escaped",
+            "/etc/passwd",
+            "C:/Windows/System32",
+            "..\\..\\escaped",
+            "",
+        ] {
+            let server = MockServer::start().await;
+            let base = server.uri();
+            mount_component(
+                &server,
+                serde_json::json!({
+                    "bin/java.exe": file_entry(&base),
+                    "jre.bundle/Contents/MacOS/libjli.dylib": {"type": "link", "target": target}
+                }),
+            )
+            .await;
+            let tmp = tempfile::tempdir().unwrap();
+
+            let err = fast_installer(aurora_base::http::build_client().unwrap(), &base)
+                .plan_for_platform(17, "windows-x64", &tmp.path().join("17"))
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(&err, Error::UnsafeRuntimeLink { path, target: got }
+                    if path == "jre.bundle/Contents/MacOS/libjli.dylib" && got == target),
+                "{target:?}: {err:?}"
+            );
+            assert_eq!(
+                entries_under(tmp.path()),
+                Vec::<PathBuf>::new(),
+                "{target:?}"
+            );
+        }
+    }
+
+    /// mac 运行时真实的链接形态：目标经 `..` 回到包内另一个目录，仍在安装目录里。
+    #[test]
+    fn links_staying_inside_the_runtime_dir_are_kept() {
+        let files: ComponentFiles = serde_json::from_value(serde_json::json!({"files": {
+            "jre.bundle/Contents/Home/bin/java": {"type": "file", "executable": true,
+                "downloads": {"raw": {"sha1": "a", "size": 1, "url": "https://x/java"}}},
+            "jre.bundle/Contents/MacOS/libjli.dylib": {"type": "link", "target": "../Home/lib/libjli.dylib"},
+            "jre.bundle/Contents/Home/lib/jli": {"type": "link", "target": "../../.."}
+        }}))
+        .unwrap();
+        let root = PathBuf::from("/rt");
+        let plan = build_plan(
+            "jre-legacy",
+            JavaVersion::parse("17.0.8").unwrap(),
+            &root,
+            &files,
+            root.join("jre.bundle/Contents/Home/bin/java"),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.links,
+            vec![
+                RuntimeLink {
+                    path: root
+                        .join("jre.bundle")
+                        .join("Contents")
+                        .join("Home")
+                        .join("lib")
+                        .join("jli"),
+                    target: "../../..".into(),
+                },
+                RuntimeLink {
+                    path: root
+                        .join("jre.bundle")
+                        .join("Contents")
+                        .join("MacOS")
+                        .join("libjli.dylib"),
+                    target: "../Home/lib/libjli.dylib".into(),
+                },
+            ]
+        );
+        let no_links = BTreeSet::new();
+        assert!(
+            check_link_target("jre.bundle/Contents/Home/lib/jli", "../../../..", &no_links).is_ok()
+        );
+        assert!(
+            check_link_target(
+                "jre.bundle/Contents/Home/lib/jli",
+                "../../../../..",
+                &no_links
+            )
+            .is_err()
+        );
+    }
+
+    fn plan_of(files: serde_json::Value) -> Result<RuntimePlan> {
+        let files: ComponentFiles =
+            serde_json::from_value(serde_json::json!({ "files": files })).unwrap();
+        let root = PathBuf::from("/rt");
+        build_plan(
+            "java-runtime-gamma",
+            JavaVersion::parse("17.0.8").unwrap(),
+            &root,
+            &files,
+            root.join("bin/java"),
+        )
+    }
+
+    /// 按段推演只在途中没有别的链接时才算数：先放一条合法的链接指到根上，再经它往外走，或者把文件放到
+    /// 链接底下，逐段看都在目录里，实际会落到运行时目录之外。
+    #[test]
+    fn going_through_another_link_is_rejected() {
+        let err = plan_of(serde_json::json!({
+            "a/b/up": {"type": "link", "target": "../.."},
+            "t": {"type": "link", "target": "a/b/up/.."}
+        }))
+        .unwrap_err();
+        assert!(
+            matches!(&err, Error::UnsafeRuntimeLink { path, target }
+                if path == "t" && target == "a/b/up/.."),
+            "实际：{err:?}"
+        );
+
+        for (entry, kind) in [
+            (
+                "up/evil.dll",
+                serde_json::json!({"type": "file", "downloads": {"raw": {
+                    "sha1": "a", "size": 1, "url": "https://x/evil"
+                }}}),
+            ),
+            ("up/lib", serde_json::json!({"type": "directory"})),
+            (
+                "up/link",
+                serde_json::json!({"type": "link", "target": "x"}),
+            ),
+        ] {
+            let err = plan_of(serde_json::json!({
+                "up": {"type": "link", "target": "bin"},
+                entry: kind
+            }))
+            .unwrap_err();
+            assert!(
+                matches!(&err, Error::UnsafeRuntimePath { path, reason }
+                    if path == entry && *reason == "穿过了清单里的符号链接"),
+                "{entry}: {err:?}"
+            );
+        }
+    }
+
+    /// 链接的目标本身是另一条链接没有问题：每条链接各自验过，串起来也出不了目录。
+    #[test]
+    fn a_link_ending_on_another_link_is_kept() {
+        let plan = plan_of(serde_json::json!({
+            "legal/java.desktop/LICENSE": {"type": "link", "target": "../java.base/LICENSE"},
+            "legal/java.base/LICENSE": {"type": "link", "target": "../shared/LICENSE"}
+        }))
+        .unwrap();
+        assert_eq!(plan.links.len(), 2);
+    }
+
+    // ---- 读响应体途中的故障：wiremock 造不出响应体只到一半，手写应答 ----
+
+    /// 按连接顺序写出 `replies` 里的（声明长度，实际正文）后关闭连接。返回地址与已接受的连接数。
+    fn raw_server(replies: Vec<(u64, Vec<u8>)>) -> (String, Arc<AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/all.json", listener.local_addr().unwrap());
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = accepted.clone();
+        std::thread::spawn(move || {
+            for (declared, body) in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                counter.fetch_add(1, Ordering::SeqCst);
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                }
+                let status = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(status.as_bytes()).unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        (url, accepted)
+    }
+
+    /// 清单读到一半连接断开：同一个源再试一次就拿到完整内容，不必换源。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_manifest_cut_off_midway_is_retried_from_the_same_source() {
+        let full = br#"{"windows-x64":{}}"#.to_vec();
+        let (url, accepted) = raw_server(vec![
+            (full.len() as u64, full[..5].to_vec()),
+            (full.len() as u64, full.clone()),
+        ]);
+        let installer = fast_installer(aurora_base::http::build_client().unwrap(), &url);
+
+        assert_eq!(installer.get_bytes(&url).await.unwrap(), full);
+
+        assert_eq!(accepted.load(Ordering::SeqCst), 2, "应同源重试恰好一次");
+    }
+
+    /// 声明的长度超过上限：不读正文也不重试。带校验的那条读取路径同样限长。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_oversized_manifest_is_refused_without_a_retry() {
+        let declared = aurora_base::http::METADATA_MAX_BYTES + 1;
+        for verified in [false, true] {
+            let (url, accepted) = raw_server(vec![(declared, Vec::new()), (2, b"{}".to_vec())]);
+            let installer = fast_installer(aurora_base::http::build_client().unwrap(), &url);
+
+            let result = if verified {
+                installer.get_verified_bytes(&url, &sha1_hex(b"{}")).await
+            } else {
+                installer.get_bytes(&url).await
+            };
+
+            match result {
+                Err(Error::ResponseTooLarge {
+                    url: failed,
+                    size,
+                    limit,
+                }) => {
+                    assert_eq!(failed, url);
+                    assert_eq!(size, declared);
+                    assert_eq!(limit, aurora_base::http::METADATA_MAX_BYTES);
+                }
+                other => panic!("应为 ResponseTooLarge，实际 {other:?}"),
+            }
+            assert_eq!(accepted.load(Ordering::SeqCst), 1, "不该重试");
+        }
+    }
+
+    // ---- 逐源回退：两台 mock 分别扮演官方源与镜像 ----
+
+    /// 官方源原样请求；镜像把官方 mock 的前缀换成镜像 mock 的前缀。清单里的地址一律只写官方 mock 的，
+    /// 与真实清单只写官方域名一致。
+    fn pinned_rewriter(official: &str, mirror: &str) -> SourceRewriter {
+        let official = official.to_owned();
+        let mirror = mirror.to_owned();
+        Arc::new(move |url: &str, source: MirrorSource| {
+            Ok(match source {
+                MirrorSource::Official => url.to_owned(),
+                MirrorSource::BmclApi => match url.strip_prefix(official.as_str()) {
+                    Some(rest) => format!("{mirror}{rest}"),
+                    None => url.to_owned(),
+                },
+            })
+        })
+    }
+
+    fn two_source_installer(official: &str, mirror: &str) -> JavaRuntimeInstaller {
+        let client = aurora_base::http::build_client().unwrap();
+        fast_installer(client, official).with_rewriter(pinned_rewriter(official, mirror))
+    }
+
+    /// 只含 gamma 组件的最小清单：(all.json, 组件清单, java 对象内容)，地址都写官方 mock 的。
+    fn gamma_manifests(official_base: &str) -> (String, String, Vec<u8>) {
+        let java = b"MZ-fake-gamma".to_vec();
+        let component = format!(
+            r#"{{"files":{{"bin/java.exe":{{"type":"file","executable":true,"downloads":{{"raw":{{"sha1":"{}","size":{},"url":"{}/objects/gamma-java"}}}}}}}}}}"#,
+            sha1_hex(&java),
+            java.len(),
+            official_base,
+        );
+        let all_json = format!(
+            r#"{{"windows-x64":{{"java-runtime-gamma":[{{"manifest":{{"sha1":"{}","url":"{}/gamma.json"}},"version":{{"name":"17.0.8"}}}}]}}}}"#,
+            sha1_hex(component.as_bytes()),
+            official_base,
+        );
+        (all_json, component, java)
+    }
+
+    async fn mount_status(server: &MockServer, p: &str, status: u16) {
+        Mock::given(method("GET"))
+            .and(match_path(p))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(server)
+            .await;
+    }
+
+    async fn hits(server: &MockServer, p: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .expect("mock 默认记录请求")
+            .iter()
+            .filter(|r| r.url.path() == p)
+            .count()
+    }
+
+    #[test]
+    fn candidate_order_hook_reorders_the_expanded_candidates() {
+        let client = aurora_base::http::build_client().unwrap();
+        let installer =
+            JavaRuntimeInstaller::new(client).with_candidate_order(Arc::new(|mut candidates| {
+                candidates.reverse();
+                candidates
+            }));
+
+        let candidates = installer.candidates(MOJANG_JAVA_RUNTIME_ALL).unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[1], MOJANG_JAVA_RUNTIME_ALL, "官方源被排到了后面");
+    }
+
+    #[test]
+    fn candidates_follow_source_order_and_collapse_identical_rewrites() {
+        let client = aurora_base::http::build_client().unwrap();
+        let mirror_all = "https://bmclapi2.bangbang93.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
+
+        let default_order = JavaRuntimeInstaller::new(client.clone());
+        assert_eq!(
+            default_order.candidates(MOJANG_JAVA_RUNTIME_ALL).unwrap(),
+            vec![MOJANG_JAVA_RUNTIME_ALL.to_owned(), mirror_all.to_owned()],
+            "默认官方源在前、镜像兜底"
+        );
+
+        let mirror_first =
+            JavaRuntimeInstaller::new(client.clone()).with_source(MirrorSource::BmclApi);
+        assert_eq!(
+            mirror_first.candidates(MOJANG_JAVA_RUNTIME_ALL).unwrap(),
+            vec![mirror_all.to_owned(), MOJANG_JAVA_RUNTIME_ALL.to_owned()],
+            "首选镜像时镜像在前、官方源兜底"
+        );
+
+        // 不在镜像表里的地址两个源改写结果相同，只剩一个候选，不会对同一地址请求两遍。
+        let local = "http://127.0.0.1:9/all.json";
+        assert_eq!(
+            JavaRuntimeInstaller::new(client).candidates(local).unwrap(),
+            vec![local.to_owned()]
+        );
+    }
+
+    /// 官方源总清单一直 503：在官方源上按策略重试满次数后换镜像，计划照常给出，文件仍是官方直链。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn all_json_falls_back_to_the_mirror_after_official_503() {
+        let official = MockServer::start().await;
+        let mirror = MockServer::start().await;
+        let (all_json, component, java) = gamma_manifests(&official.uri());
+        mount_status(&official, "/all.json", 503).await;
+        mount_get(&official, "/gamma.json", component).await;
+        mount_get(&mirror, "/all.json", all_json).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = two_source_installer(&official.uri(), &mirror.uri())
+            .plan_for_platform(17, "windows-x64", dir.path())
+            .await
+            .expect("官方源 503 时应从镜像取到总清单");
+
+        assert_eq!(plan.component, "java-runtime-gamma");
+        assert_eq!(
+            plan.files,
+            vec![RuntimeFile {
+                path: dir.path().join("bin").join("java.exe"),
+                url: format!("{}/objects/gamma-java", official.uri()),
+                sha1: sha1_hex(&java),
+                size: Some(java.len() as u64),
+                executable: true,
+            }]
+        );
+        assert_eq!(
+            hits(&official, "/all.json").await,
+            fast_policy().max_attempts as usize,
+            "官方源上应按策略重试满次数才换源"
+        );
+        assert_eq!(
+            mirror.received_requests().await.unwrap().len(),
+            1,
+            "镜像只应收到一次总清单请求"
+        );
+        assert_eq!(hits(&mirror, "/all.json").await, 1);
+        assert_eq!(
+            hits(&official, "/gamma.json").await,
+            1,
+            "组件清单另起一轮，仍先从官方源取"
+        );
+    }
+
+    /// 官方源组件清单一直 503、镜像正常且 sha1 对：计划成功，组件清单来自镜像。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn component_manifest_falls_back_to_the_mirror_after_official_503() {
+        let official = MockServer::start().await;
+        let mirror = MockServer::start().await;
+        let (all_json, component, java) = gamma_manifests(&official.uri());
+        mount_get(&official, "/all.json", all_json).await;
+        mount_status(&official, "/gamma.json", 503).await;
+        mount_get(&mirror, "/gamma.json", component).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = two_source_installer(&official.uri(), &mirror.uri())
+            .plan_for_platform(17, "windows-x64", dir.path())
+            .await
+            .expect("官方源组件清单 503 时应从镜像取到");
+
+        assert_eq!(
+            plan.java_executable,
+            dir.path().join("bin").join("java.exe")
+        );
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].sha1, sha1_hex(&java));
+        assert_eq!(hits(&official, "/gamma.json").await, 3);
+        assert_eq!(hits(&mirror, "/gamma.json").await, 1);
+        assert_eq!(
+            hits(&mirror, "/all.json").await,
+            0,
+            "官方源总清单正常时不应碰镜像"
+        );
+    }
+
+    /// 官方源回了 200 但内容不是 JSON（如被网关替换成网页）：不在同一个源上重试，直接换镜像。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unparsable_all_json_moves_to_the_next_source() {
+        let official = MockServer::start().await;
+        let mirror = MockServer::start().await;
+        let (all_json, component, _) = gamma_manifests(&official.uri());
+        mount_get(&official, "/all.json", "<html>portal</html>".to_owned()).await;
+        mount_get(&official, "/gamma.json", component).await;
+        mount_get(&mirror, "/all.json", all_json).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = two_source_installer(&official.uri(), &mirror.uri())
+            .plan_for_platform(17, "windows-x64", dir.path())
+            .await
+            .expect("官方源内容解析不了时应换镜像");
+
+        assert_eq!(plan.component, "java-runtime-gamma");
+        assert_eq!(hits(&official, "/all.json").await, 1, "解析失败不可重试");
+        assert_eq!(hits(&mirror, "/all.json").await, 1);
+    }
+
+    /// 官方源组件清单内容与声明的 sha1 一直不符：重试满次数后换镜像拿到正确内容。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn component_manifest_sha1_mismatch_moves_to_the_next_source() {
+        let official = MockServer::start().await;
+        let mirror = MockServer::start().await;
+        let (all_json, component, _) = gamma_manifests(&official.uri());
+        mount_get(&official, "/all.json", all_json).await;
+        mount_get(&official, "/gamma.json", format!("{component} ")).await;
+        mount_get(&mirror, "/gamma.json", component).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = two_source_installer(&official.uri(), &mirror.uri())
+            .plan_for_platform(17, "windows-x64", dir.path())
+            .await
+            .expect("官方源组件清单损坏时应换镜像");
+
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(hits(&official, "/gamma.json").await, 3);
+        assert_eq!(hits(&mirror, "/gamma.json").await, 1);
+    }
+
+    /// 两个源都 503：汇总成 AllSourcesFailed，依次记下两个源的失败原因，原因链接到镜像的原错误与 reqwest 错误。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_source_failing_keeps_each_cause_in_order() {
+        use aurora_base::retry::RetryableError;
+
+        let official = MockServer::start().await;
+        let mirror = MockServer::start().await;
+        mount_status(&official, "/all.json", 503).await;
+        mount_status(&mirror, "/all.json", 503).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = two_source_installer(&official.uri(), &mirror.uri())
+            .plan_for_platform(17, "windows-x64", dir.path())
+            .await
+            .unwrap_err();
+
+        let official_url = format!("{}/all.json", official.uri());
+        let mirror_url = format!("{}/all.json", mirror.uri());
+        let Error::AllSourcesFailed {
+            context, attempts, ..
+        } = &err
+        else {
+            panic!("两个源都失败应汇总，实际：{err:?}");
+        };
+        assert_eq!(*context, "Java 运行时总清单");
+        assert_eq!(attempts.len(), 2);
+        assert!(
+            attempts[0].starts_with(&format!("{official_url}：")),
+            "第一条应是官方源：{}",
+            attempts[0]
+        );
+        assert!(
+            attempts[1].starts_with(&format!("{mirror_url}：")),
+            "第二条应是镜像：{}",
+            attempts[1]
+        );
+        assert!(
+            attempts.iter().all(|a| a.contains("503")),
+            "每条都应摊平到底层状态码：{attempts:?}"
+        );
+        assert!(
+            err.to_string()
+                .starts_with("Java 运行时总清单 在全部 2 个下载源上都失败："),
+            "{err}"
+        );
+        assert!(!err.is_retryable());
+
+        // thiserror 把 `last` 字段原样交给 source()，这一层的具体类型是 Box<Error>。
+        let last = std::error::Error::source(&err)
+            .and_then(|s| s.downcast_ref::<Box<Error>>())
+            .expect("原因链第一层应是最后一个源的原错误");
+        assert!(
+            matches!(last.as_ref(), Error::Http { url, .. } if *url == mirror_url),
+            "最后一个源应是镜像：{last:?}"
+        );
+        let mut cause = std::error::Error::source(&err);
+        let mut status = None;
+        while let Some(layer) = cause {
+            if let Some(http) = layer.downcast_ref::<reqwest::Error>() {
+                status = http.status();
+                break;
+            }
+            cause = layer.source();
+        }
+        assert_eq!(status, Some(reqwest::StatusCode::SERVICE_UNAVAILABLE));
+        assert_eq!(hits(&official, "/all.json").await, 3);
+        assert_eq!(hits(&mirror, "/all.json").await, 3);
+    }
+
+    /// 最后一个源连不上：汇总错误的原因链上仍能判出是网络不通。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreachable_last_source_is_still_recognised_as_a_network_failure() {
+        let official = MockServer::start().await;
+        mount_status(&official, "/all.json", 503).await;
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mirror = format!("http://127.0.0.1:{}", closed.local_addr().unwrap().port());
+        drop(closed);
+
+        // 单次尝试：Windows 上连本机已关闭的端口要等秒级才报拒连，不让重试把测试拖长。
+        let dir = tempfile::tempdir().unwrap();
+        let err = two_source_installer(&official.uri(), &mirror)
+            .with_retry_policy(RetryPolicy {
+                max_attempts: 1,
+                ..fast_policy()
+            })
+            .plan_for_platform(17, "windows-x64", dir.path())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, Error::AllSourcesFailed { attempts, .. } if attempts.len() == 2),
+            "{err:?}"
+        );
+        assert_eq!(
+            aurora_base::http::network_failure(&err),
+            Some(aurora_base::http::NetworkFailure::Connect)
+        );
+    }
+
+    /// 只有一个候选时失败原样返回原错误，不包成汇总错误。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn single_candidate_failure_keeps_the_original_error() {
+        let server = MockServer::start().await;
+        mount_status(&server, "/all.json", 503).await;
+        let client = aurora_base::http::build_client().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = fast_installer(client, &server.uri())
+            .plan_for_platform(17, "windows-x64", dir.path())
+            .await
+            .unwrap_err();
+
+        let expected_url = format!("{}/all.json", server.uri());
+        assert!(
+            matches!(&err, Error::Http { url, source } if *url == expected_url
+                && source.status() == Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)),
+            "单候选应原样返回 Http 错误：{err:?}"
+        );
+        assert_eq!(hits(&server, "/all.json").await, 3);
+    }
+
+    /// 官方源响应迟迟不来时取消：立即以 Cancelled 返回，不再去试镜像。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_while_official_is_slow_returns_without_trying_the_mirror() {
+        let official = MockServer::start().await;
+        let mirror = MockServer::start().await;
+        let (all_json, _, _) = gamma_manifests(&official.uri());
+        Mock::given(method("GET"))
+            .and(match_path("/all.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(all_json.clone())
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(&official)
+            .await;
+        mount_get(&mirror, "/all.json", all_json).await;
+
+        let token = CancellationToken::new();
+        let installer =
+            two_source_installer(&official.uri(), &mirror.uri()).with_cancel(token.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let install_dir = dir.path().to_path_buf();
+        let plan = tokio::spawn(async move {
+            installer
+                .plan_for_platform(17, "windows-x64", &install_dir)
+                .await
+        });
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while hits(&official, "/all.json").await == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "官方源总清单请求未发出"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let cancelled_at = std::time::Instant::now();
+        token.cancel();
+        let err = plan.await.unwrap().unwrap_err();
+
+        assert!(err.is_cancelled(), "应为取消，实际：{err:?}");
+        // 官方源的总清单要 30 秒才回话，以它为界。
+        assert!(cancelled_at.elapsed() < Duration::from_secs(30));
+        assert_eq!(
+            mirror.received_requests().await.unwrap().len(),
+            0,
+            "取消后不应再试镜像"
+        );
     }
 }

@@ -1,0 +1,141 @@
+/* 凹槽外框：外框高 = 项高 + 2 × 内边距 + 2px 描边（md 28 + 6 + 2 = 36，sm 24 + 4 + 2 = 30） */
+.group {
+  --segment-item-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-2);
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 3px;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+  /* 选中块与项内文字的局部层级 */
+  isolation: isolate;
+}
+
+.group[data-size="sm"] {
+  --segment-item-height: 24px;
+  padding: var(--sk-space-2);
+}
+
+.group[data-block] {
+  display: flex;
+  width: 100%;
+}
+
+.group[data-block] .item {
+  flex: 1 1 0;
+}
+
+.item {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 0;
+  height: var(--segment-item-height);
+  padding: 0 var(--sk-space-12);
+  border: 0;
+  border-radius: var(--sk-r-xs);
+  background: transparent;
+  color: var(--sk-text-2);
+  font: inherit;
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  outline: none;
+  transition: color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.group[data-size="sm"] .item {
+  padding: 0 var(--sk-space-10);
+}
+
+.item:hover:not(:disabled) {
+  color: var(--sk-text);
+}
+
+.item[aria-checked="true"] {
+  color: var(--sk-text);
+}
+
+.item:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.item:disabled {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}
+
+.thumb {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: var(--sk-r-xs);
+  background: var(--sk-surface);
+  box-shadow: var(--sk-shadow-sm), 0 0 0 1px var(--sk-line);
+}
+
+/* 夜樱的 surface 与凹槽 bg-2 几乎同色，选中块改用更亮一级的底与更明显的外环 */
+:global([data-sk-mode="night"]) .thumb {
+  background: var(--sk-bg-3);
+  box-shadow: var(--sk-shadow-sm), 0 0 0 1px var(--sk-line-2);
+}
+
+.content {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  min-width: 0;
+}
+
+.label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.count {
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+.item[aria-checked="true"] .count {
+  color: var(--sk-accent-strong);
+}
+
+.dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.dot[data-loader="vanilla"] {
+  background: var(--sk-loader-vanilla);
+}
+
+.dot[data-loader="fabric"] {
+  background: var(--sk-loader-fabric);
+}
+
+.dot[data-loader="quilt"] {
+  background: var(--sk-loader-quilt);
+}
+
+.dot[data-loader="forge"] {
+  background: var(--sk-loader-forge);
+}
+
+.dot[data-loader="neoforge"] {
+  background: var(--sk-loader-neoforge);
+}

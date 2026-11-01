@@ -1,0 +1,458 @@
+//! 打开整合包压缩包：读清单、列出覆盖文件、把覆盖文件解进实例目录。
+
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{self, BufReader, Read};
+use std::path::{Path, PathBuf};
+
+use zip::ZipArchive;
+use zip::read::{ZipFile, read_zipfile_from_stream};
+use zip::result::ZipError;
+
+use crate::error::{Error, Result};
+use crate::manifest::{CURSEFORGE_DOCUMENT, MODRINTH_DOCUMENT, PackManifest};
+use crate::path::SafeRelativePath;
+
+/// 清单正常只有几十到几百 KiB；设上限是为了让一个伪造的超大清单不能把内存吃满。
+const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+
+/// 单个条目解压途中隔多少字节看一次取消。整合包里可能有几百 MB 的存档或资源包：任务放弃之后解压线程
+/// 还在跑，只在条目之间看取消的话，它会一直往调用方正在清理的目录里写。
+const CANCEL_CHECK_BYTES: u64 = 1024 * 1024;
+
+/// 一个要解到实例目录的覆盖文件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverrideEntry {
+    /// 压缩包内的条目序号。
+    pub index: usize,
+    /// 压缩包内的条目名（含覆盖层前缀，按 [`entry_name`] 的规则解码），解压时用来核对序号没有错位。
+    pub entry_name: String,
+    /// 相对实例目录的落点。
+    pub path: SafeRelativePath,
+    /// 解压后的字节数。
+    pub size: u64,
+}
+
+/// 读出来的整合包。
+#[derive(Debug, Clone)]
+pub struct PackArchive {
+    /// 清单。
+    pub manifest: PackManifest,
+    /// 覆盖文件：已按层叠好，同一落点只留最上层的那一份，按条目序号排列。
+    pub overrides: Vec<OverrideEntry>,
+    /// 覆盖文件解压后的总字节数。
+    pub overrides_bytes: u64,
+}
+
+/// 打开整合包，读清单并列出覆盖文件。不解压任何覆盖文件。
+///
+/// 格式按包内容认：根目录有 `modrinth.index.json` 即 Modrinth，有 `manifest.json` 即 CurseForge。
+/// 扩展名只用来挡掉明显不是整合包的文件（改了扩展名的 .mrpack 照样认）。
+pub fn read_pack(path: &Path) -> Result<PackArchive> {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    if !matches!(extension.as_deref(), Some("mrpack" | "zip")) {
+        return Err(Error::UnsupportedExtension {
+            path: path.to_path_buf(),
+        });
+    }
+    let mut archive = open(path)?;
+
+    let manifest = if let Some(index) = archive.index_for_name(MODRINTH_DOCUMENT) {
+        PackManifest::parse_modrinth(&read_manifest(
+            &mut archive,
+            index,
+            path,
+            MODRINTH_DOCUMENT,
+        )?)?
+    } else if let Some(index) = archive.index_for_name(CURSEFORGE_DOCUMENT) {
+        PackManifest::parse_curseforge(&read_manifest(
+            &mut archive,
+            index,
+            path,
+            CURSEFORGE_DOCUMENT,
+        )?)?
+    } else {
+        return Err(Error::ManifestMissing {
+            path: path.to_path_buf(),
+        });
+    };
+
+    let overrides = list_overrides(&mut archive, path, &manifest.override_layers)?;
+    let overrides_bytes = overrides.iter().map(|e| e.size).sum();
+    Ok(PackArchive {
+        manifest,
+        overrides,
+        overrides_bytes,
+    })
+}
+
+/// 把 [`read_pack`] 列出的覆盖文件解到 `dest_root` 下，已有同名文件直接覆盖。返回写出的文件数。
+///
+/// 每个条目前检查一次 `is_cancelled`，大文件解压途中每隔 [`CANCEL_CHECK_BYTES`] 再查一次，返回真即以
+/// [`Error::Cancelled`] 中止；已写出的文件不回收，由调用方连同整个目标目录一起处理。
+pub fn extract_overrides(
+    pack_path: &Path,
+    entries: &[OverrideEntry],
+    dest_root: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<usize> {
+    let mut archive = open(pack_path)?;
+    // 1000 个条目落在几十个目录里，逐个 create_dir_all 会把同一串目录反复 stat 上千次。
+    let mut created: HashSet<PathBuf> = HashSet::new();
+    for entry in entries {
+        if is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let mut file = archive
+            .by_index(entry.index)
+            .map_err(|source| zip_error(pack_path, &entry.entry_name, source))?;
+        if entry_name(&file) != entry.entry_name {
+            return Err(corrupt(
+                pack_path,
+                ZipError::InvalidArchive(
+                    format!("第 {} 个条目已不是 {}", entry.index, entry.entry_name).into(),
+                ),
+            ));
+        }
+        let target = entry.path.resolve_under(dest_root);
+        if let Some(parent) = target.parent()
+            && !created.contains(parent)
+        {
+            std::fs::create_dir_all(parent).map_err(|source| Error::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+            created.insert(parent.to_path_buf());
+        }
+        let mut out = File::create(&target).map_err(|source| Error::Io {
+            path: target.clone(),
+            source,
+        })?;
+        // 读侧（解压、CRC 校验）和写侧的错误分开报：前者是包坏了，后者是磁盘的问题。
+        let mut buffer = [0u8; 64 * 1024];
+        let mut written = 0u64;
+        let mut next_check = CANCEL_CHECK_BYTES;
+        loop {
+            let n = file
+                .read(&mut buffer)
+                .map_err(|source| read_error(pack_path, &entry.entry_name, source))?;
+            if n == 0 {
+                break;
+            }
+            written += n as u64;
+            if written >= next_check {
+                if is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                next_check = written + CANCEL_CHECK_BYTES;
+            }
+            if written > entry.size {
+                return Err(corrupt(
+                    pack_path,
+                    ZipError::InvalidArchive(
+                        format!("{} 解压后超过声明的大小", entry.entry_name).into(),
+                    ),
+                ));
+            }
+            io::Write::write_all(&mut out, &buffer[..n]).map_err(|source| Error::Io {
+                path: target.clone(),
+                source,
+            })?;
+        }
+    }
+    Ok(entries.len())
+}
+
+fn open(path: &Path) -> Result<ZipArchive<BufReader<File>>> {
+    let file = File::open(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    ZipArchive::new(BufReader::new(file)).map_err(|source| corrupt(path, source))
+}
+
+fn corrupt(path: &Path, source: ZipError) -> Error {
+    Error::Corrupt {
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+/// 打开条目失败的归类。压缩方式不支持单独报：包没坏，重新下载同一个文件没用，要换作者发布的原始文件。
+fn zip_error(path: &Path, entry: &str, source: ZipError) -> Error {
+    match source {
+        ZipError::CompressionMethodNotSupported(method) => unsupported(path, entry, method),
+        source => corrupt(path, source),
+    }
+}
+
+/// 读条目内容失败的归类。zip 把解压阶段的 [`ZipError`] 包进 `io::Error` 往外抛，先拆出来再按
+/// [`zip_error`] 的口径分。
+fn read_error(path: &Path, entry: &str, source: io::Error) -> Error {
+    if let Some(ZipError::CompressionMethodNotSupported(method)) = source
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<ZipError>())
+    {
+        return unsupported(path, entry, *method);
+    }
+    corrupt(path, ZipError::Io(source))
+}
+
+fn unsupported(path: &Path, entry: &str, method: u16) -> Error {
+    Error::UnsupportedCompression {
+        path: path.to_path_buf(),
+        entry: entry.to_owned(),
+        method,
+    }
+}
+
+/// 条目名依次按 UTF-8、GBK、CP437 解码。
+///
+/// zip 只看通用标志位里的 UTF-8 标志：没有标志就按 CP437 解。中文系统上的老打包工具（资源管理器的
+/// 「发送到压缩文件夹」、旧版 WinRAR）不设标志，写的是本地代码页 GBK，按 CP437 解出来是乱码，落点与
+/// 路径校验都会错。带 UTF-8 标志或带 Unicode Path 扩展字段的条目，原始字节本来就是 UTF-8，第一步就命中；
+/// 不设标志却直接写 UTF-8 的打包器也在这一步。前两步都解不了的，才用 zip 按 CP437 解出的名字。
+pub(crate) fn entry_name<R: Read + ?Sized>(file: &ZipFile<'_, R>) -> String {
+    decode_entry_name(file.name_raw()).unwrap_or_else(|| file.name().to_owned())
+}
+
+/// [`entry_name`] 的前两步：原始字节先按 UTF-8、再按 GBK 解，都解不了为 `None`。自己读中央目录的调用方
+/// （平台整合包摘要只按范围取包尾）用它，与本地读包解出同一个名字，数出来的 Mod 与覆盖文件才一致。
+pub fn decode_entry_name(raw: &[u8]) -> Option<String> {
+    if let Ok(name) = std::str::from_utf8(raw) {
+        return Some(name.to_owned());
+    }
+    encoding_rs::GBK
+        .decode_without_bom_handling_and_without_replacement(raw)
+        .map(|name| name.into_owned())
+}
+
+/// 解开一段按范围取回来的条目数据。平台整合包摘要不下载整包，只取清单那一段；走这里才与读包是同一套解压
+/// 实现，同一个包不会在发现页读不出来、导入时却能装。解压后超过 `limit` 字节或 CRC 对不上都报错。
+///
+/// 除 `data` 外的参数取自中央目录。流式读取要从本地头开始：按这些字段拼一个最小的头，省得再向服务器要一次
+/// 文件名与扩展字段；大小已经写在头里，数据描述符标志要清掉。
+pub fn decompress_entry(
+    method: u16,
+    flags: u16,
+    crc32: u32,
+    data: &[u8],
+    uncompressed: u64,
+    limit: u64,
+) -> std::result::Result<Vec<u8>, ZipError> {
+    const LOCAL_SIGNATURE: u32 = 0x0403_4b50;
+    const VERSION_NEEDED: u16 = 20;
+    const USES_DATA_DESCRIPTOR: u16 = 1 << 3;
+    let too_large = || ZipError::InvalidArchive("条目超过 4 GiB".into());
+    let compressed = u32::try_from(data.len()).map_err(|_| too_large())?;
+    let size = u32::try_from(uncompressed).map_err(|_| too_large())?;
+
+    let mut header = Vec::with_capacity(31);
+    header.extend(LOCAL_SIGNATURE.to_le_bytes());
+    header.extend(VERSION_NEEDED.to_le_bytes());
+    header.extend((flags & !USES_DATA_DESCRIPTOR).to_le_bytes());
+    header.extend(method.to_le_bytes());
+    header.extend([0u8; 4]); // 修改时间与日期
+    header.extend(crc32.to_le_bytes());
+    header.extend(compressed.to_le_bytes());
+    header.extend(size.to_le_bytes());
+    header.extend(1u16.to_le_bytes()); // 文件名长度
+    header.extend(0u16.to_le_bytes()); // 扩展字段长度
+    header.push(b'x');
+
+    let mut stream = header.as_slice().chain(data);
+    let file = read_zipfile_from_stream(&mut stream)?
+        .ok_or_else(|| ZipError::InvalidArchive("拼出的本地头没被认出来".into()))?;
+    let mut out = Vec::new();
+    file.take(limit + 1).read_to_end(&mut out)?;
+    if out.len() as u64 > limit {
+        return Err(ZipError::InvalidArchive(
+            format!("解压后超过 {limit} 字节").into(),
+        ));
+    }
+    Ok(out)
+}
+
+fn read_manifest(
+    archive: &mut ZipArchive<BufReader<File>>,
+    index: usize,
+    path: &Path,
+    document: &'static str,
+) -> Result<Vec<u8>> {
+    let file = archive
+        .by_index(index)
+        .map_err(|source| zip_error(path, document, source))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|source| read_error(path, document, source))?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(Error::invalid(document, "清单超过 16 MiB"));
+    }
+    Ok(bytes)
+}
+
+/// 列覆盖文件时需要的条目元数据。
+struct EntryMeta {
+    name: String,
+    is_dir: bool,
+    is_symlink: bool,
+    size: u64,
+}
+
+fn list_overrides(
+    archive: &mut ZipArchive<BufReader<File>>,
+    path: &Path,
+    layers: &[String],
+) -> Result<Vec<OverrideEntry>> {
+    // 元数据用 by_index_raw 读，不建解压器：不在覆盖层里的条目（modlist.html 之类）用了什么压缩方式都与
+    // 安装无关，不该因为它们拒收整个包。每个条目只读一遍，再按层筛。
+    let mut metas = Vec::with_capacity(archive.len());
+    for index in 0..archive.len() {
+        let file = archive
+            .by_index_raw(index)
+            .map_err(|source| corrupt(path, source))?;
+        metas.push(EntryMeta {
+            name: entry_name(&file),
+            is_dir: file.is_dir(),
+            is_symlink: file.is_symlink(),
+            size: file.size(),
+        });
+    }
+
+    // 落点比较键 -> 条目。上层覆盖下层，同一层里撞车说明包本身有问题。
+    let mut merged: HashMap<String, OverrideEntry> = HashMap::new();
+    for layer in layers {
+        let mut in_layer: HashSet<String> = HashSet::new();
+        for (index, meta) in metas.iter().enumerate() {
+            let Some(relative) = meta.name.strip_prefix(layer.as_str()) else {
+                continue;
+            };
+            if relative.is_empty() || meta.is_dir {
+                continue;
+            }
+            if meta.is_symlink {
+                return Err(Error::SymlinkEntry {
+                    path: meta.name.clone(),
+                });
+            }
+            let safe = SafeRelativePath::new(relative).map_err(|source| Error::UnsafePath {
+                path: meta.name.clone(),
+                source,
+            })?;
+            let key = safe.comparison_key();
+            // 解码后才比：同一个名字一条按 UTF-8、一条按 GBK 写进包里，解出来是同一个文件。
+            if !in_layer.insert(key.clone()) {
+                return Err(Error::DuplicatePath {
+                    path: meta.name.clone(),
+                });
+            }
+            merged.insert(
+                key,
+                OverrideEntry {
+                    index,
+                    entry_name: meta.name.clone(),
+                    path: safe,
+                    size: meta.size,
+                },
+            );
+        }
+    }
+    let mut entries: Vec<OverrideEntry> = merged.into_values().collect();
+    entries.sort_by_key(|e| e.index);
+
+    // 真正要解的条目先按解压方式打开一次：压缩方式不支持、加密这类问题在读包时就报，不拖到装到一半。
+    for entry in &entries {
+        archive
+            .by_index(entry.index)
+            .map_err(|source| zip_error(path, &entry.entry_name, source))?;
+    }
+    Ok(entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_entry_names_decode_as_utf8_then_gbk_and_give_up_on_neither() {
+        assert_eq!(
+            decode_entry_name("mods/汉化.jar".as_bytes()).as_deref(),
+            Some("mods/汉化.jar")
+        );
+        assert_eq!(
+            decode_entry_name(b"mods/\xba\xba\xbb\xaf.jar").as_deref(),
+            Some("mods/汉化.jar")
+        );
+        assert_eq!(decode_entry_name(b"").as_deref(), Some(""));
+        // 0xFF 既不能起头 UTF-8 也不能起头 GBK：交回调用方用各自的兜底。
+        assert_eq!(decode_entry_name(b"mods/\xff.jar"), None);
+    }
+
+    /// 中央目录的字段直接交给 decompress_entry：数据描述符标志不影响解压，超过上限与不认识的方式都报错。
+    #[test]
+    fn range_read_entries_decompress_within_the_limit() {
+        let body = vec![b'x'; 10_000];
+        let mut writer = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("a", options).unwrap();
+        io::Write::write_all(&mut writer, &body).unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        let mut archive = ZipArchive::new(io::Cursor::new(&bytes)).unwrap();
+        let file = archive.by_index_raw(0).unwrap();
+        let start = usize::try_from(file.data_start().unwrap()).unwrap();
+        let len = usize::try_from(file.compressed_size()).unwrap();
+        let crc = file.crc32();
+        let data = &bytes[start..start + len];
+        const DEFLATED: u16 = 8;
+        const DATA_DESCRIPTOR: u16 = 1 << 3;
+
+        assert_eq!(
+            decompress_entry(DEFLATED, DATA_DESCRIPTOR, crc, data, 10_000, 10_000).unwrap(),
+            body
+        );
+        assert!(matches!(
+            decompress_entry(DEFLATED, 0, crc, data, 10_000, 9_999),
+            Err(ZipError::InvalidArchive(_))
+        ));
+        assert!(matches!(
+            decompress_entry(93, 0, crc, data, 10_000, 10_000),
+            Err(ZipError::CompressionMethodNotSupported(93))
+        ));
+    }
+
+    #[test]
+    fn read_errors_wrapping_an_unsupported_method_map_to_unsupported_compression() {
+        let pack = Path::new("pack.zip");
+        let wrapped = io::Error::from(ZipError::CompressionMethodNotSupported(93));
+        assert!(matches!(
+            read_error(pack, "overrides/a.txt", wrapped),
+            Error::UnsupportedCompression { path, entry, method: 93 }
+                if path == pack && entry == "overrides/a.txt"
+        ));
+
+        // 别的解压错误（CRC 不对、数据截断）仍然算包损坏。
+        let crc = io::Error::new(io::ErrorKind::InvalidData, "Invalid checksum");
+        assert!(matches!(
+            read_error(pack, "overrides/a.txt", crc),
+            Error::Corrupt { .. }
+        ));
+        let invalid = io::Error::from(ZipError::InvalidArchive("bad".into()));
+        assert!(matches!(
+            read_error(pack, "overrides/a.txt", invalid),
+            Error::Corrupt { .. }
+        ));
+        assert!(matches!(
+            zip_error(pack, "x", ZipError::CompressionMethodNotSupported(12)),
+            Error::UnsupportedCompression { method: 12, .. }
+        ));
+        assert!(matches!(
+            zip_error(pack, "x", ZipError::FileNotFound),
+            Error::Corrupt { .. }
+        ));
+    }
+}

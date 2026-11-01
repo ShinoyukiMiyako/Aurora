@@ -1,0 +1,201 @@
+/* 触发器：外观与输入框一致；展开中等同聚焦态 */
+.trigger {
+  --select-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  box-sizing: border-box;
+  max-width: 100%;
+  height: var(--select-height);
+  padding: 0 var(--sk-space-10) 0 var(--sk-space-12);
+  border: 1px solid var(--sk-line-2);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-surface);
+  color: var(--sk-text);
+  font: inherit;
+  font-size: var(--sk-fs-body);
+  font-weight: var(--sk-w-body);
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.trigger[data-size="sm"] {
+  --select-height: 30px;
+  font-size: var(--sk-fs-small);
+}
+
+.trigger[data-block] {
+  display: flex;
+  width: 100%;
+}
+
+.trigger:hover:not(:disabled, [data-open]) {
+  border-color: color-mix(in srgb, var(--sk-accent) 25%, var(--sk-line-2));
+}
+
+.trigger:focus-visible,
+.trigger[data-open] {
+  border-color: var(--sk-accent);
+  box-shadow: var(--sk-focus);
+}
+
+.trigger[data-invalid] {
+  border-color: var(--sk-danger);
+}
+
+.trigger[data-invalid]:focus-visible,
+.trigger[data-invalid][data-open] {
+  box-shadow: var(--sk-focus-danger);
+}
+
+.trigger:disabled {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}
+
+.triggerIcon {
+  flex: none;
+  color: var(--sk-text-2);
+}
+
+.value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.value[data-placeholder] {
+  color: var(--sk-text-2);
+}
+
+.chevron {
+  flex: none;
+  color: var(--sk-text-2);
+  transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.trigger[data-open] .chevron {
+  transform: rotate(180deg);
+}
+
+:global([data-sk-reduced]) .chevron {
+  transition: none;
+}
+
+/* ---- 列表 ---- */
+.panel {
+  display: flex;
+  flex-direction: column;
+  padding: var(--sk-space-6);
+}
+
+.filter {
+  flex: none;
+  margin-bottom: var(--sk-space-6);
+}
+
+/* 高度上限 308，约 8 个单行选项；超出内部滚动，过滤框与面板内边距不随之滚走 */
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 308px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  outline: none;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.groupTitle {
+  display: flex;
+  flex: none;
+  align-items: center;
+  height: 28px;
+  padding: 0 var(--sk-space-10);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  font-weight: var(--sk-w-medium);
+}
+
+.option {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sk-space-10);
+  box-sizing: border-box;
+  height: 36px;
+  padding: 0 var(--sk-space-10);
+  border-radius: var(--sk-r-sm);
+  color: var(--sk-text);
+  font-size: var(--sk-fs-body);
+  cursor: pointer;
+}
+
+.option[data-hint] {
+  height: 48px;
+}
+
+.option[data-highlight] {
+  background: var(--sk-bg-2);
+}
+
+.option[aria-selected="true"] {
+  color: var(--sk-accent-strong);
+  font-weight: var(--sk-w-medium);
+}
+
+.option[aria-disabled="true"] {
+  opacity: var(--sk-disabled);
+  cursor: not-allowed;
+}
+
+.optionIcon {
+  flex: none;
+  color: var(--sk-text-2);
+}
+
+.optionText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.optionLabel {
+  overflow: hidden;
+  line-height: var(--sk-lh-body);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.optionHint {
+  overflow: hidden;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  font-weight: var(--sk-w-body);
+  line-height: var(--sk-lh-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.check {
+  flex: none;
+  color: var(--sk-accent-strong);
+}
+
+.empty {
+  padding: var(--sk-space-8) var(--sk-space-10);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-small);
+}

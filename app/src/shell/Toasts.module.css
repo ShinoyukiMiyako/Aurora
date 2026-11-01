@@ -1,0 +1,34 @@
+/* 容器高度只等于通知栈本身，上方没有透明的大块挡住内容区 */
+.region {
+  --toasts-width: 340px;
+  position: absolute;
+  right: var(--sk-space-16);
+  bottom: var(--sk-space-16);
+  z-index: var(--sk-z-toast);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: var(--sk-space-10);
+  width: var(--toasts-width);
+  max-width: calc(100% - var(--sk-space-32));
+}
+
+/*
+ * 弹窗和向导开着时四个角都有按钮：右下是底栏主按钮，右上是头部关闭，左下是新建实例步骤条的末项。
+ * 贴左放在标题栏下方，再让过资源详情左上的「返回」，它在 900 高的窗口里下沿到 113。方向随落点翻到左侧
+ */
+:global(:root:has([data-sk-modal-layer], [data-sk-onboarding])) .region {
+  --toast-enter-side: -1;
+  top: calc(56px + var(--sk-space-64));
+  right: auto;
+  bottom: auto;
+  left: var(--sk-space-16);
+}
+
+:global(:root[data-sk-tier="compact"]) .region {
+  --toasts-width: 320px;
+}
+
+:global(:root[data-sk-tier="wide"]) .region {
+  --toasts-width: 360px;
+}

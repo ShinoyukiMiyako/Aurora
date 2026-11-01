@@ -1,0 +1,4 @@
+.button {
+  --button-h: 36px;
+  color: var(--sk-accent);
+}

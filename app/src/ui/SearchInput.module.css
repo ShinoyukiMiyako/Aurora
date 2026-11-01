@@ -1,0 +1,5 @@
+/* 键帽靠右，不随输入区伸缩 */
+.shortcut {
+  flex: none;
+  pointer-events: none;
+}

@@ -1,0 +1,6 @@
+.card {
+  transition:
+    opacity var(--sk-dur-hover) var(--sk-ease),
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap);
+  animation: spin var(--sk-loop-spin) linear infinite;
+}

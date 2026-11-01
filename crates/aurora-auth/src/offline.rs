@@ -38,10 +38,7 @@ pub fn validate_username(name: &str) -> Result<UsernameCheck> {
     }
 
     let mut warnings = Vec::new();
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         warnings.push("用户名包含非标准字符，可能无法进入 1.18+ 世界".into());
     }
     Ok(UsernameCheck { warnings })

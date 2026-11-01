@@ -1,0 +1,7 @@
+.title {
+  padding: 12px; /* expect T2 */
+  border-radius: 6px; /* expect T2 */
+  font-size: 14px; /* expect T2 */
+  gap: var(--sk-space-2) 4px; /* expect T2 */
+  background: var(--sk-bg) url(x.png); /* expect T2 */
+}

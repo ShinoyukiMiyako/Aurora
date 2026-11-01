@@ -1,0 +1,311 @@
+// 实例内的 Mod：列表、启停、移除、更新检查与更新；下载页的版本列表、落位矩阵与安装计划；新实例的开局 Mod。
+// 字段名与后端 DTO 的 serde 名一致（snake_case），入参键为 camelCase。
+
+import { invoke } from "./bridge";
+import type { BodyFormat, InstallableResourceType, PlatformId } from "./discover";
+import { isIpcError } from "./errors";
+
+export type ModLoader = "fabric" | "quilt" | "forge" | "neoforge" | "liteloader";
+
+/** 改动 mods 目录时文件正被占用（游戏运行中）的错误码；`detail.path` 为被占用的文件。 */
+export const MOD_FILE_BUSY_ERROR_CODE = "mod_file_busy";
+
+export function isModFileBusy(error: unknown): boolean {
+  return isIpcError(error) && error.code === MOD_FILE_BUSY_ERROR_CODE;
+}
+
+export type MetadataFormat = "fabric" | "quilt_mod_json" | "forge_toml" | "neo_forge_toml";
+
+export interface ModMetadata {
+  mod_id: string;
+  name: string | null;
+  version: string | null;
+  description: string | null;
+  authors: string[];
+  /** 声明的依赖 mod id（含 minecraft / fabricloader 这类平台伪 mod，原样列出）。 */
+  depends: string[];
+  /** 声明支持的 MC 版本约束原文。 */
+  minecraft_version: string | null;
+  /** jar 内的图标条目路径。 */
+  icon: string | null;
+  loader: ModLoader;
+  format: MetadataFormat;
+}
+
+/**
+ * 检查更新时对这个 Mod 的处理：ignored 不检查；pinned 只报不晚于锁定版本发布的候选。
+ * 键名与后端核心类型的 serde 名一致，list_mods 给出的值可以原样传回 set_mod_update_hold。
+ */
+export type UpdateHold = { kind: "ignored" } | { kind: "pinned"; version_id: string };
+
+/** 已装 Mod 在卷宗里的平台来源。 */
+export interface ModSource {
+  platform: PlatformId;
+  project_id: string;
+  version_id: string;
+  version_number: string | null;
+  title: string | null;
+  /** 作为谁的前置被带进来的（project_id）；玩家主动装的为 null。 */
+  dependency_of: string | null;
+  /** 装进实例的时刻，UNIX 秒；更新与回滚沿用原值。 */
+  installed_at: number;
+  /** 没设置为 null：照常检查更新。 */
+  update_hold: UpdateHold | null;
+}
+
+export interface InstalledMod {
+  path: string;
+  /** 磁盘上的文件名，禁用态带 `.disabled` 后缀。 */
+  file_name: string;
+  enabled: boolean;
+  size: number;
+  /** 文件修改时刻，UNIX 毫秒。 */
+  modified_ms: number;
+  metadata: ModMetadata | null;
+  /** 平台给的工程图标；来源不明或平台没给为 null。 */
+  icon_url: string | null;
+  /** 来源不明（手动放进来、还没被识别）为 null。 */
+  source: ModSource | null;
+}
+
+export type ReleaseChannel = "release" | "beta" | "alpha";
+export type DependencyKind = "required" | "optional" | "incompatible" | "embedded" | "tool";
+
+export interface ModDependency {
+  project_id: string | null;
+  version_id: string | null;
+  kind: DependencyKind;
+}
+
+export interface ModVersionInfo {
+  version_id: string;
+  project_id: string;
+  platform: PlatformId;
+  name: string;
+  version_number: string;
+  release_channel: ReleaseChannel;
+  game_versions: string[];
+  loaders: ModLoader[];
+  file_name: string;
+  file_size: number | null;
+  sha1: string | null;
+  download_url: string | null;
+  /** ISO 8601；平台没给为空串。 */
+  date_published: string;
+  dependencies: ModDependency[];
+}
+
+export interface UpdateCandidate {
+  /** 启用态文件名（磁盘上可能多一个 `.disabled`）。 */
+  file_name: string;
+  title: string | null;
+  current_version_id: string;
+  current_version_number: string | null;
+  latest: ModVersionInfo;
+}
+
+export interface ModUpdateOutcomeDto {
+  file_name: string;
+  path: string;
+  platform: PlatformId;
+  /** 新版本要的必需前置里没有照办的（被保留、已下架、没有适配版本），每条一句给玩家看的说明。更新不走确认计划，只有这里说得上。 */
+  skipped: string[];
+}
+
+export type Compatibility =
+  | { kind: "match" }
+  /** 平台元数据不全或认不出实例版本：软提示，仍可安装。 */
+  | { kind: "unknown"; reason: string }
+  | { kind: "mismatch"; reason: string };
+
+/** 落位矩阵的四态：兼容 / 可能可行 / 已安装 / 不兼容。数组已按这个顺序排好。 */
+export type MatchState = "compatible" | "maybe" | "installed" | "incompatible";
+
+/** 已装在实例里的那份。资源包、光影、数据包没有卷宗，后端按盘上文件的文件名与大小对平台版本认出来。 */
+export interface InstalledCopy {
+  file_name: string;
+  version_id: string;
+  version_number: string | null;
+  /** 数据包装在哪个存档（存档目录名，几个存档都有时取名字排在最前的）；其余类型为 null。 */
+  world: string | null;
+}
+
+export interface InstanceMatch {
+  version_id: string;
+  mc_version: string | null;
+  /** 实例已装加载器的小写名（OptiFine 也照实列出）。 */
+  loaders: string[];
+  state: MatchState;
+  compatibility: Compatibility;
+  best_version: ModVersionInfo | null;
+  installed: InstalledCopy | null;
+}
+
+export interface PlannedItem {
+  version: ModVersionInfo;
+  title: string | null;
+  icon_url: string | null;
+  /** 因谁被带进来（project_id）；玩家选的主项为 null。 */
+  required_by: string | null;
+  /** 已装在实例里，本次跳过下载。 */
+  already_satisfied: boolean;
+  /**
+   * 只出现在已满足的前置上：实例里装着的这一版在平台上已经找不到（下架或删除）。version 只由卷宗拼出，
+   * 版本 id、工程、平台、文件名与版本号可信，平台才有的字段为空，它的前置也没有展开。
+   */
+  delisted?: true;
+}
+
+export interface InstallPlan {
+  /** items[0] 恒为玩家选的主项，其余为必需前置。 */
+  items: PlannedItem[];
+  /** 跳过的依赖，每条一句给玩家看的说明。 */
+  skipped: string[];
+}
+
+export const listMods = (versionId: string): Promise<InstalledMod[]> => invoke<InstalledMod[]>("list_mods", { versionId });
+
+/** 返回改名后的磁盘绝对路径。 */
+export const setModEnabled = (versionId: string, fileName: string, enabled: boolean): Promise<string> =>
+  invoke<string>("set_mod_enabled", { versionId, fileName, enabled });
+
+/** 移除一个 Mod 文件；变更历史里记一条移除事件。 */
+export const removeMod = (versionId: string, fileName: string): Promise<void> => invoke<void>("remove_mod", { versionId, fileName });
+
+/**
+ * 忽略更新的 Mod 不出现；锁定版本的不报晚于锁定版本的候选；按当前版本的发布通道过滤：
+ * 正式版只报正式版，测试版报正式版或测试版，预览版三种都报。
+ */
+export const checkUpdates = (versionId: string): Promise<UpdateCandidate[]> => invoke<UpdateCandidate[]>("check_updates", { versionId });
+
+/** 批量启停里一个文件的结果：成功给改名后的路径，失败给这一项的命令错误，其余文件不受影响。 */
+export type ModToggleResult =
+  | { status: "ok"; file_name: string; path: string }
+  | { status: "error"; file_name: string; error: { code: string; message: string; detail?: unknown } };
+
+/** 批量启用或停用；结果与入参逐项对应、顺序一致。整次调用只在实例解析与互斥失败时拒绝。 */
+export const setModsEnabled = (versionId: string, fileNames: readonly string[], enabled: boolean): Promise<ModToggleResult[]> =>
+  invoke<ModToggleResult[]>("set_mods_enabled", { versionId, fileNames, enabled });
+
+/** 添加本地 jar 时一个文件的结果：成功给落盘的文件名，失败给这一项的命令错误，其余文件不受影响。 */
+export type LocalModResult =
+  | { status: "ok"; source: string; file_name: string }
+  | { status: "error"; source: string; error: { code: string; message: string; detail?: unknown } };
+
+/**
+ * 把本地 jar 复制进实例的 mods 目录，结果与入参逐项对应、顺序一致。重名、同一个 Mod 已装、不是 jar 只拒那一项
+ * （local_mod_refused，message 可以直接给玩家看）；整次调用只在实例解析与互斥失败时拒绝。
+ */
+export const addLocalMods = (versionId: string, paths: readonly string[]): Promise<LocalModResult[]> =>
+  invoke<LocalModResult[]>("add_local_mods", { versionId, paths });
+
+/** 改写卷宗里这个 Mod 的更新检查设置；hold 为 null 表示恢复检查更新。只改记录不碰文件，游戏运行中也可用。 */
+export const setModUpdateHold = (versionId: string, fileName: string, hold: UpdateHold | null): Promise<void> =>
+  invoke<void>("set_mod_update_hold", { versionId, fileName, hold });
+
+/** 某个平台版本的更新日志。 */
+export interface ModChangelog {
+  version_id: string;
+  /** Modrinth 为 markdown，CurseForge 为 html。 */
+  format: BodyFormat;
+  /** 平台没写（空或纯空白）为 null。 */
+  body: string | null;
+}
+
+/** 取这个 Mod 某个平台版本的更新日志：只读，不占实例；按卷宗里的平台与工程去问。 */
+export const modUpdateChangelog = (versionId: string, fileName: string, modVersionId: string): Promise<ModChangelog> =>
+  invoke<ModChangelog>("mod_update_changelog", { versionId, fileName, modVersionId });
+
+/**
+ * 长任务：进度经 core-event 推送并带 task_id，可用 cancelTask(taskId) 取消。旧文件留作 `.old` 备份，可在变更历史里回滚。
+ * 作为组合任务的一项调用时 step 给第几项（从 0 计），后端把它标在这次调用的每条事件上；单独调用不给。
+ */
+export const updateMod = (taskId: string, versionId: string, fileName: string, modVersionId: string, step?: number): Promise<ModUpdateOutcomeDto> =>
+  invoke<ModUpdateOutcomeDto>("update_mod", { taskId, versionId, fileName, modVersionId, step });
+
+/** 某工程的版本列表。 */
+export interface ModVersionList {
+  /** 发布时间倒序。 */
+  versions: ModVersionInfo[];
+  /** CurseForge 上文件太多、只翻到了页数上限（500 个文件）：更老的版本不在列表里，界面应说明列表不全。 */
+  truncated: boolean;
+}
+
+/** 工程的可用版本（发布时间倒序），连同列表是否截断；两个过滤维度传空数组表示不过滤。 */
+export const modVersionList = (
+  platform: PlatformId,
+  projectId: string,
+  gameVersions: string[],
+  loaders: ModLoader[],
+): Promise<ModVersionList> => invoke<ModVersionList>("list_mod_versions", { platform, projectId, gameVersions, loaders });
+
+/**
+ * 工程对全部已装实例的落位矩阵；给出 modVersionId 时只按这个版本判定。
+ * resourceType 决定判定口径：Mod 看加载器与游戏版本，资源包、光影、数据包只看游戏版本。
+ */
+export const matchInstances = (
+  platform: PlatformId,
+  projectId: string,
+  resourceType: InstallableResourceType,
+  modVersionId: string | null,
+): Promise<InstanceMatch[]> => invoke<InstanceMatch[]>("match_instances", { platform, projectId, resourceType, modVersionId });
+
+/** 实例里一个已装 Mod 的平台来源。 */
+export interface InstalledSource {
+  platform: PlatformId;
+  project_id: string;
+}
+
+/** 一个实例里已装 Mod 的平台来源；读不出卷宗或 mods 目录时带上命令错误的形状，其余实例不受影响。 */
+export type InstanceSources =
+  | { status: "ready"; version_id: string; sources: InstalledSource[] }
+  | { status: "error"; version_id: string; error: { code: string; message: string; detail?: unknown } };
+
+/**
+ * 全部实例已装 Mod 的平台来源，一次取齐，按实例 id 排序（发现页的「已装入 n 个实例」）。
+ * 卷宗与 mods 目录 join，禁用态也算；只读文件名，不打开 jar、不联网。
+ */
+export const installedSources = (): Promise<InstanceSources[]> => invoke<InstanceSources[]>("installed_sources");
+
+export const planInstall = (versionId: string, platform: PlatformId, projectId: string, modVersionId: string): Promise<InstallPlan> =>
+  invoke<InstallPlan>("plan_install", { versionId, platform, projectId, modVersionId });
+
+// ---------------------------------------------------------------- 开局 Mod
+
+/** 开局表里的分组：加载器的 API（Fabric API / QFAPI）与性能优化组合。 */
+export type StarterGroup = "api" | "performance";
+/** no_version：这个游戏版本与加载器下没有能用的版本；not_found：平台上已经没有这个工程（内置表过时）。 */
+export type StarterMissingReason = "no_version" | "not_found";
+/** 开局表按加载器分组；LiteLoader 没有开局表，以 invalid_argument（detail.reason 为 unsupported）拒绝。 */
+export type StarterLoader = "fabric" | "quilt" | "forge" | "neoforge";
+
+export interface StarterModDto {
+  group: StarterGroup;
+  /** Modrinth 工程 id。 */
+  project_id: string;
+  name: string;
+  /** 挑出的版本：与实例完全匹配的版本里，按正式版、测试版、内测版的顺序取最好那一档里最新的。 */
+  version: ModVersionInfo;
+}
+
+export interface StarterMissingDto {
+  group: StarterGroup;
+  project_id: string;
+  name: string;
+  reason: StarterMissingReason;
+}
+
+export interface StarterModsDto {
+  loader: StarterLoader;
+  mc_version: string;
+  /** available 与 missing 都按开局表的顺序（API 在前）。 */
+  available: StarterModDto[];
+  missing: StarterMissingDto[];
+}
+
+/**
+ * 某加载器与游戏版本下开局表里能装的项与缺的项，只查 Modrinth。某项没有这个版本时进 missing，不报错；
+ * 断网、超时这类失败让整次调用失败，不给半张表。参数问题报 invalid_argument：未知加载器 detail.reason 为 unknown，
+ * LiteLoader 为 unsupported，游戏版本去掉首尾空白后为空时 detail.field 为 mc_version、reason 为 empty。
+ */
+export const starterMods = (loader: StarterLoader, mcVersion: string): Promise<StarterModsDto> => invoke<StarterModsDto>("starter_mods", { loader, mcVersion });

@@ -1,0 +1,115 @@
+{
+  "id": "1.12.2",
+  "type": "release",
+  "time": "2017-09-18T08:39:46+00:00",
+  "releaseTime": "2017-09-18T08:39:46+00:00",
+  "minimumLauncherVersion": 18,
+  "mainClass": "net.minecraft.client.main.Main",
+  "assets": "1.12",
+  "assetIndex": {
+    "id": "1.12",
+    "sha1": "1111111111111111111111111111111111111111",
+    "size": 169008,
+    "url": "https://piston-meta.mojang.com/v1/packages/1111111111111111111111111111111111111111/1.12.json"
+  },
+  "downloads": {
+    "client": {
+      "sha1": "0f275bc1547f2f202a3aca38b2b93b426e94b04c",
+      "size": 10180113,
+      "url": "https://launcher.mojang.com/v1/objects/0f275bc1547f2f202a3aca38b2b93b426e94b04c/client.jar"
+    }
+  },
+  "minecraftArguments": "--username ${auth_player_name} --version ${version_name} --gameDir ${game_directory} --assetsDir ${assets_root} --assetIndex ${assets_index_name} --uuid ${auth_uuid} --accessToken ${auth_access_token} --userType ${user_type} --versionType ${version_type}",
+  "libraries": [
+    {
+      "name": "com.mojang:patchy:1.1",
+      "downloads": {
+        "artifact": {
+          "path": "com/mojang/patchy/1.1/patchy-1.1.jar",
+          "sha1": "aef610b34a1be37fa851825f12372b78424d8903",
+          "size": 15817,
+          "url": "https://libraries.minecraft.net/com/mojang/patchy/1.1/patchy-1.1.jar"
+        }
+      }
+    },
+    {
+      "name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209",
+      "downloads": {
+        "classifiers": {
+          "natives-linux": {
+            "path": "org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-linux.jar",
+            "sha1": "931074f46c795d2f7b30ed6395df5715cfd7675b",
+            "size": 578680,
+            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-linux.jar"
+          },
+          "natives-osx": {
+            "path": "org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-osx.jar",
+            "sha1": "bcab850f8f487c3f4c4dbabde778bb82bd1a4077f",
+            "size": 426822,
+            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-osx.jar"
+          },
+          "natives-windows": {
+            "path": "org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-windows.jar",
+            "sha1": "b84d5102b9dbfabfeb5e43c7e2828d98a7181d6f",
+            "size": 613264,
+            "url": "https://libraries.minecraft.net/org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-natives-windows.jar"
+          }
+        }
+      },
+      "extract": { "exclude": [ "META-INF/" ] },
+      "natives": {
+        "linux": "natives-linux",
+        "osx": "natives-osx",
+        "windows": "natives-windows"
+      }
+    },
+    {
+      "name": "tv.twitch:twitch-platform:5.16",
+      "rules": [
+        { "action": "allow" },
+        { "action": "disallow", "os": { "name": "osx" } }
+      ],
+      "extract": { "exclude": [ "META-INF/" ] },
+      "natives": {
+        "linux": "natives-linux",
+        "windows": "natives-windows-${arch}"
+      },
+      "downloads": {
+        "classifiers": {
+          "natives-linux": {
+            "path": "tv/twitch/twitch-platform/5.16/twitch-platform-5.16-natives-linux.jar",
+            "sha1": "7c6affe439099806a4f552da14c42f9d643d8b23",
+            "size": 505992,
+            "url": "https://libraries.minecraft.net/tv/twitch/twitch-platform/5.16/twitch-platform-5.16-natives-linux.jar"
+          },
+          "natives-windows-32": {
+            "path": "tv/twitch/twitch-platform/5.16/twitch-platform-5.16-natives-windows-32.jar",
+            "sha1": "1c0a1b7c3c3d8b6c1c8c9e9f0a1b2c3d4e5f6a7b",
+            "size": 5654047,
+            "url": "https://libraries.minecraft.net/tv/twitch/twitch-platform/5.16/twitch-platform-5.16-natives-windows-32.jar"
+          },
+          "natives-windows-64": {
+            "path": "tv/twitch/twitch-platform/5.16/twitch-platform-5.16-natives-windows-64.jar",
+            "sha1": "8b2f7d0e1a3c5b7d9f1e3a5c7b9d1f3e5a7c9b1d",
+            "size": 6539201,
+            "url": "https://libraries.minecraft.net/tv/twitch/twitch-platform/5.16/twitch-platform-5.16-natives-windows-64.jar"
+          }
+        }
+      }
+    },
+    {
+      "name": "ca.weblite:java-objc-bridge:1.0.0",
+      "rules": [
+        { "action": "allow", "os": { "name": "osx" } }
+      ],
+      "downloads": {
+        "artifact": {
+          "path": "ca/weblite/java-objc-bridge/1.0.0/java-objc-bridge-1.0.0.jar",
+          "sha1": "6ef160c3133a78de015830860197602ca1c855d3",
+          "size": 40502,
+          "url": "https://libraries.minecraft.net/ca/weblite/java-objc-bridge/1.0.0/java-objc-bridge-1.0.0.jar"
+        }
+      }
+    }
+  ]
+}

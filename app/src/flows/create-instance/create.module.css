@@ -1,0 +1,727 @@
+/*
+ * 新建实例弹窗（lg、主体无内边距）：左栏预览与步骤导航，右栏当前步骤。
+ * 弹窗挂在浮层根里，窗口三档下尺寸不变：主体固定高，换步时弹窗不随内容忽高忽低，960 × 720 下也放得下。
+ * 尺寸常量写成具名变量；色值、圆角、阴影、间距一律取令牌。
+ */
+
+.layout {
+  --cr-rail-width: 232px;
+  --cr-body-height: 440px;
+  display: grid;
+  grid-template-columns: var(--cr-rail-width) minmax(0, 1fr);
+  height: var(--cr-body-height);
+}
+
+/* ---------------------------------------------------------------- 底栏 */
+
+.footHint {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-4);
+  min-width: 0;
+  overflow: hidden;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- 左栏 */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-16);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--sk-space-16) var(--sk-space-16) var(--sk-space-18) var(--sk-space-22);
+  border-right: 1px solid var(--sk-line);
+  overflow-y: auto;
+}
+
+.preview {
+  flex: none;
+  overflow: hidden;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-lg);
+  box-shadow: var(--sk-shadow-sm);
+}
+
+/* 文字落在卡面左下；右侧让出身份方块（宽 64、距右 24）的位置 */
+.previewText {
+  --cr-preview-clear: 96px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: var(--sk-space-2);
+  box-sizing: border-box;
+  height: 100%;
+  min-width: 0;
+  padding: var(--sk-space-14) var(--cr-preview-clear) var(--sk-space-12) var(--sk-space-14);
+}
+
+.previewName {
+  overflow: hidden;
+  color: var(--sk-text);
+  font-size: var(--sk-fs-section);
+  font-weight: var(--sk-w-title);
+  line-height: var(--sk-lh-section);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 块级而非弹性盒：版本号加加载器版本可能超宽，块级容器里的行内内容才能出省略号 */
+.previewMeta {
+  overflow: hidden;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  font-weight: var(--sk-w-medium);
+  line-height: var(--sk-lh-caption);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.previewDot {
+  display: inline-block;
+  margin-right: var(--sk-space-6);
+  vertical-align: middle;
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  margin: 0 calc(var(--sk-space-8) * -1);
+  padding: 0;
+  list-style: none;
+}
+
+.stepButton {
+  --cr-step-min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-10);
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--cr-step-min-height);
+  padding: var(--sk-space-4) var(--sk-space-8);
+  border: 0;
+  border-radius: var(--sk-r);
+  background: transparent;
+  color: var(--sk-text);
+  font: inherit;
+  text-align: left;
+  outline: none;
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.stepButton:not(:disabled) {
+  cursor: pointer;
+}
+
+.stepButton:not(:disabled):hover {
+  background: var(--sk-bg-2);
+}
+
+.stepButton:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.stepDot {
+  --cr-step-dot: 24px;
+  display: grid;
+  flex: none;
+  place-items: center;
+  box-sizing: border-box;
+  width: var(--cr-step-dot);
+  height: var(--cr-step-dot);
+  border: 1.5px solid var(--sk-line-2);
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-surface);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-micro);
+  font-weight: var(--sk-w-title);
+  font-variant-numeric: tabular-nums;
+}
+
+.stepText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.stepLabel {
+  overflow: hidden;
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  line-height: var(--sk-lh-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepValue {
+  overflow: hidden;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-micro);
+  line-height: var(--sk-lh-micro);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepButton[data-state="current"] {
+  background: var(--sk-accent-soft);
+}
+
+.stepButton[data-state="current"] .stepLabel {
+  color: var(--sk-accent-strong);
+  font-weight: var(--sk-w-title);
+}
+
+.stepButton[data-state="current"] .stepDot {
+  border-color: transparent;
+  background: var(--sk-accent-grad);
+  color: var(--sk-accent-ink);
+  box-shadow: var(--sk-accent-glow);
+}
+
+.stepButton[data-state="done"] .stepDot {
+  border-color: transparent;
+  background: var(--sk-accent-soft-2);
+  color: var(--sk-accent-strong);
+}
+
+.stepButton[data-state="reached"] .stepDot {
+  border-color: var(--sk-accent-line);
+  color: var(--sk-accent-strong);
+}
+
+.stepButton[data-state="todo"],
+.stepButton[data-state="skipped"] {
+  color: var(--sk-text-2);
+}
+
+.stepButton[data-state="skipped"] .stepDot {
+  border-style: dashed;
+}
+
+/* ---------------------------------------------------------------- 右栏 */
+
+/* 换步时新旧两步短暂叠放，裁掉横向位移，不让它压到左栏上 */
+.main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 每一步各自是滚动容器：换步后新内容从顶部开始，不继承上一步的滚动位置 */
+.pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-16);
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 0;
+  padding: var(--sk-space-16) var(--sk-space-24) var(--sk-space-20);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.stepHead {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sk-space-12);
+}
+
+.stepHeadText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+  min-width: 0;
+}
+
+.stepTitle {
+  margin: 0;
+  color: var(--sk-text);
+  font-size: var(--sk-fs-heading);
+  font-weight: var(--sk-w-title);
+  line-height: var(--sk-lh-heading);
+}
+
+.stepBody {
+  margin: 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+}
+
+/* 推到步骤底部，和底栏的按钮挨着 */
+.pushDown {
+  flex: none;
+  margin-top: auto;
+}
+
+/* ---------------------------------------------------------------- 名称 */
+
+.ideas {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-6);
+}
+
+.ideasLabel {
+  margin-right: var(--sk-space-2);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+}
+
+/* ---------------------------------------------------------------- 版本与加载器版本：单选列表 */
+
+.filterRow {
+  --cr-version-search: 160px;
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-8) var(--sk-space-16);
+}
+
+.versionSearch {
+  width: var(--cr-version-search);
+}
+
+.filterCount {
+  margin-left: auto;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 列表自己滚动，标题与筛选条留在原位；四周留出聚焦环不被滚动裁切的余量 */
+.list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  min-height: 0;
+  margin: calc(var(--sk-space-4) * -1);
+  padding: var(--sk-space-4);
+  overflow-y: auto;
+}
+
+.row {
+  --cr-row-height: 56px;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sk-space-12);
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--cr-row-height);
+  padding: var(--sk-space-8) var(--sk-space-12);
+  border: 1px solid var(--sk-line-2);
+  border-radius: var(--sk-r);
+  background: var(--sk-surface);
+  color: var(--sk-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+  transition:
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.row:hover,
+.row[aria-checked="true"] {
+  border-color: var(--sk-accent-line);
+}
+
+.row[aria-checked="true"] {
+  background: var(--sk-accent-soft);
+}
+
+.row:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.radio {
+  --cr-radio: 18px;
+  --cr-radio-dot: 8px;
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  width: var(--cr-radio);
+  height: var(--cr-radio);
+  border: 1.5px solid var(--sk-line-strong);
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-surface);
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.radio::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: var(--cr-radio-dot);
+  height: var(--cr-radio-dot);
+  margin: auto;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-accent);
+  scale: 0;
+  transition: scale var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.row[aria-checked="true"] .radio {
+  border-color: var(--sk-accent);
+}
+
+.row[aria-checked="true"] .radio::after {
+  scale: 1;
+}
+
+.rowMain {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.rowTitle {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  min-width: 0;
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  line-height: var(--sk-lh-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.rowName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowSub {
+  overflow: hidden;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 最多 4 个加载器；限宽让左侧版本信息至少保住四成，真挤不下时换行而不是撑破行 */
+.rowLoaders {
+  --cr-loaders-max: 60%;
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sk-space-4);
+  max-width: var(--cr-loaders-max);
+}
+
+.loaderChip {
+  --cr-chip-height: 20px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-4);
+  height: var(--cr-chip-height);
+  padding: 0 var(--sk-space-6);
+  border-radius: var(--sk-r-xs);
+  background: var(--sk-bg-2);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-micro);
+  font-weight: var(--sk-w-medium);
+  white-space: nowrap;
+}
+
+.onlyVanilla {
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- 加载器：单选卡 */
+
+.loaderGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sk-space-10);
+}
+
+.loaderCard {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-12);
+  box-sizing: border-box;
+  min-width: 0;
+  padding: var(--sk-space-12);
+  border: 1px solid var(--sk-line-2);
+  border-radius: var(--sk-r);
+  background: var(--sk-surface);
+  color: var(--sk-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+  transition:
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.loaderCard:hover,
+.loaderCard[aria-checked="true"] {
+  border-color: var(--sk-accent-line);
+}
+
+.loaderCard[aria-checked="true"] {
+  background: var(--sk-accent-soft);
+}
+
+.loaderCard:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.loaderText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.loaderName {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  line-height: var(--sk-lh-small);
+}
+
+/* 描述限两行，同一行里的两张卡高度一致 */
+.loaderDesc {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+/* 选中勾：加载器卡与封面样本共用，未选中时缩小隐藏，选中时弹出 */
+.check {
+  --cr-check: 20px;
+  position: absolute;
+  top: var(--sk-space-8);
+  right: var(--sk-space-8);
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: var(--cr-check);
+  height: var(--cr-check);
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-accent);
+  color: var(--sk-accent-ink);
+  opacity: 0;
+  scale: 0.5;
+  transition:
+    opacity var(--sk-dur-hover) var(--sk-ease),
+    scale var(--sk-spring-pop-dur) var(--sk-spring-pop);
+}
+
+[aria-checked="true"] > .check {
+  opacity: 1;
+  scale: 1;
+}
+
+/* ---------------------------------------------------------------- 外观：封面样本 */
+
+.coverGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--sk-space-10);
+}
+
+.swatch {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--sk-line-2);
+  border-radius: var(--sk-r);
+  background: var(--sk-surface);
+  color: var(--sk-text);
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.swatch:hover {
+  border-color: var(--sk-accent-line);
+}
+
+.swatch[aria-checked="true"] {
+  border-color: var(--sk-accent);
+}
+
+.swatch:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.swatchArt {
+  flex: none;
+}
+
+.swatchBlock {
+  display: grid;
+  place-items: center;
+  height: 100%;
+}
+
+.swatchLabel {
+  overflow: hidden;
+  padding: var(--sk-space-4) var(--sk-space-8);
+  border-top: 1px solid var(--sk-line);
+  font-size: var(--sk-fs-caption);
+  font-weight: var(--sk-w-medium);
+  line-height: var(--sk-lh-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swatch[aria-checked="true"] .swatchLabel {
+  color: var(--sk-accent-strong);
+}
+
+/* ---------------------------------------------------------------- 确认 */
+
+.failed,
+.summary {
+  flex: none;
+}
+
+/* 存放位置是这一步最要紧的信息：放开换行让它完整可见、可以选中复制 */
+.path {
+  color: var(--sk-text-2);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  font-weight: var(--sk-w-mono);
+  overflow-wrap: anywhere;
+  white-space: normal;
+  user-select: text;
+}
+
+.after {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sk-space-8) var(--sk-space-12);
+  margin-top: auto;
+  padding-top: var(--sk-space-14);
+  border-top: 1px solid var(--sk-line);
+}
+
+.afterHint {
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+}
+
+/* ---------------------------------------------------------------- 开局选项 */
+
+.starter {
+  /* 说明行与复选框的标签文字对齐：方框 18 加上方框与标签之间的 9 */
+  --cr-option-indent: 27px;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--sk-space-12);
+}
+
+.option {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+}
+
+.optionNote {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  padding-left: var(--cr-option-indent);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  overflow-wrap: anywhere;
+}
+
+.optionLine {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+.optionWarn {
+  color: var(--sk-warn);
+}
+
+.starterNote {
+  margin: 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+}
+
+/* 预计下载：数字等宽，「不含加载器」用弱色跟在后面 */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.soft {
+  color: var(--sk-text-2);
+}
+
+/* Java 一行与实际会用的 Java 对不上时：值改 warn 色，原因与出路写在键值表下方的说明块里 */
+.warnText {
+  color: var(--sk-warn);
+}
+
+/* ---------------------------------------------------------------- 减少动画 */
+
+/* 只处理带缩放的几处：状态直接切换；只变颜色的过渡不算运动，照常保留 */
+:global([data-sk-reduced]) .check,
+:global([data-sk-reduced]) .radio::after {
+  transition: none;
+}
+
+.slowHint {
+  margin: 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}

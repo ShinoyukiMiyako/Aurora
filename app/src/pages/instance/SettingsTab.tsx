@@ -1,0 +1,738 @@
+// 实例设置：内存、Java、JVM 参数、版本隔离与窗口、实例管理。
+// 除 JVM 参数外都是改了立即保存：JVM 参数是自由文本，留一个显式的保存，免得半句参数被存下来。
+// 保存是乐观的：控件先显示新值，失败时统一错误处理报错、控件回到磁盘上的值。
+
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { ACTION_ERROR, lockReason, MODPACK_REIMPORT_COPY, REINSTALL_LOADER_LABEL, TOAST_COPY } from "../../copy/flows";
+import { JAVA_SOURCE_LABEL } from "../../copy/settings";
+import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
+import { formatMemory } from "../../domain/format";
+import { canReinstallLoader, isolationByPolicy, needsReimport, runtimeComplete } from "../../domain/rules";
+import { useLoadingGate } from "../../lib/loading-gate";
+import { useNav, useShell } from "../../shell/shell";
+import { useRunner } from "../../shell/useRunner";
+import { describeError } from "../../state/errors";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
+import { useInstanceSettings } from "../../state/queries/instance";
+import { useTemplateInfo } from "../../state/queries/starter";
+import type { ResourceResult } from "../../state/resource";
+import { reimportRoute } from "../../state/route";
+import { canPinMore } from "../../state/selectors";
+import { Banner } from "../../ui/Banner";
+import { Button } from "../../ui/Button";
+import { Callout } from "../../ui/Callout";
+import { Card } from "../../ui/Card";
+import { CardHeader } from "../../ui/CardHeader";
+import type { FeedbackTone } from "../../ui/Banner";
+import { MemorySlider, MEMORY_MIN_MB, MEMORY_STEP_MB } from "../../ui/MemorySlider";
+import { SegmentedControl } from "../../ui/SegmentedControl";
+import { Select, type SelectOption } from "../../ui/Select";
+import { SettingRow } from "../../ui/SettingRow";
+import { Skeleton } from "../../ui/Skeleton";
+import { Tag } from "../../ui/Tag";
+import { Textarea } from "../../ui/Textarea";
+import { TextInput } from "../../ui/TextInput";
+import { Toggle } from "../../ui/Toggle";
+import { ISOLATION_POLICY_LABEL, JVM_PRESET_LABEL, SETTINGS_COPY } from "./copy";
+import { useJavaInfo, useMemoryInfo, type JavaInfo, type JavaInfoSource, type MemoryInfo } from "./hooks";
+import styles from "./instance.module.css";
+import {
+  chosenRuntime,
+  deletableWorldCount,
+  effectiveJavaMajor,
+  hasFlags,
+  instanceFolderPath,
+  javaFit,
+  JVM_PRESET_KEYS,
+  overridesHeap,
+  parseDimension,
+  presetFlags,
+  RESOLUTION_LIMITS,
+  RESOLUTION_PRESETS,
+  toggleFlags,
+  ZGC_MIN_JAVA,
+} from "./model";
+import type { InstanceOps } from "./ops";
+import { ModuleError, SlowHint } from "./parts";
+
+export interface SettingsTabProps {
+  inst: InstanceSummary;
+  queryId: string | null;
+  ops: InstanceOps;
+}
+
+interface SettingsEditor {
+  /** 磁盘上的值叠加还没回来的乐观补丁。 */
+  value: InstanceSettings;
+  /** 此刻写不了实例设置的原因（安装、补全、改名、删除进行中）；能写为 undefined。锁住时各控件不触发 save。 */
+  locked: string | undefined;
+  save(patch: Partial<InstanceSettings>): Promise<boolean>;
+}
+
+function useSettingsEditor(id: string, settings: ResourceResult<InstanceSettings>, locked: string | undefined): SettingsEditor | null {
+  const actions = useLauncherActions();
+  const run = useRunner();
+  const [patch, setPatch] = useState<Partial<InstanceSettings>>({});
+  const data = settings.status === "ready" ? settings.data : null;
+  // 重新读到磁盘上的值就以它为准
+  useEffect(() => setPatch({}), [data]);
+  if (data === null) return null;
+  return {
+    value: { ...data, ...patch },
+    locked,
+    save: async (next) => {
+      setPatch((p) => ({ ...p, ...next }));
+      const outcome = await run(() => actions.updateInstanceSettings(id, next), ACTION_ERROR.instanceSettings);
+      if (!outcome.ok) setPatch({});
+      return outcome.ok;
+    },
+  };
+}
+
+export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
+  const settings = useInstanceSettings(queryId);
+  const editor = useSettingsEditor(inst.id, settings, ops.settingsReason);
+  const java = useJavaInfo(inst, settings);
+  const memory = useMemoryInfo(inst, settings, queryId);
+  // 整页一个加载门：300 ms 内都读到就不出骨架；骨架出现后至少停留 300 ms，几张卡一起换成内容
+  const gate = useLoadingGate(editor === null || java.status === "loading" || memory.status === "loading");
+  const placeholder = gate.view === "content" ? null : gate.view;
+
+  if (settings.status === "error") {
+    return (
+      <Card padding="lg">
+        <ModuleError title={SETTINGS_COPY.settingsError} error={settings.error} onRetry={settings.reload} />
+      </Card>
+    );
+  }
+
+  return (
+    <div className={styles.stack}>
+      {ops.busy && <Banner tone="info" title={SETTINGS_COPY.runningNote} />}
+      {ops.settingsReason !== undefined && <Banner tone="info" title={ops.settingsReason} />}
+      <div className={styles.settingsGrid}>
+        <MemoryCard inst={inst} editor={editor} memory={memory} placeholder={placeholder} />
+        <JavaCard inst={inst} editor={editor} java={java} placeholder={placeholder} />
+        {placeholder !== null || editor === null || java.status === "loading" ? (
+          <CardSkeleton title={SETTINGS_COPY.jvmTitle} icon="terminal" visible={placeholder !== "pending"} slow={gate.slow} />
+        ) : (
+          <JvmCard editor={editor} java={java.status === "ready" ? java.value : null} />
+        )}
+        {placeholder !== null || editor === null ? (
+          <CardSkeleton title={SETTINGS_COPY.windowTitle} icon="monitor" visible={placeholder !== "pending"} slow={false} />
+        ) : (
+          <WindowCard inst={inst} editor={editor} />
+        )}
+        <ManageCard inst={inst} ops={ops} />
+      </div>
+    </div>
+  );
+}
+
+/** 加载门的占位：pending 时只有卡片框架，skeleton 时才画骨架。 */
+type Placeholder = "pending" | "skeleton" | null;
+
+function CardSkeleton({ title, icon, visible, slow }: { title: string; icon: "terminal" | "monitor" | "memory" | "java"; visible: boolean; slow: boolean }) {
+  return (
+    <Card padding="lg">
+      <CardHeader icon={icon} title={title} />
+      {visible && <Skeleton shape="text" lines={3} />}
+      <SlowHint slow={slow} />
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------- 内存
+
+/** 切到「单独设置」时以全局生效值为初值，对齐到滑杆的步长与下限。 */
+function snapMemory(mb: number): number {
+  return Math.max(MEMORY_MIN_MB, Math.round(mb / MEMORY_STEP_MB) * MEMORY_STEP_MB);
+}
+
+function MemoryCard({
+  inst,
+  editor,
+  memory,
+  placeholder,
+}: {
+  inst: InstanceSummary;
+  editor: SettingsEditor | null;
+  memory: ReturnType<typeof useMemoryInfo>;
+  placeholder: Placeholder;
+}) {
+  const global = useLauncherSelector((s) => s.settings);
+  const { go } = useNav();
+  const custom = editor !== null && editor.value.memoryMb !== null;
+  const saved = editor === null ? null : editor.value.memoryMb;
+  const [draft, setDraft] = useState<number | null>(saved);
+  useEffect(() => setDraft(saved), [saved]);
+
+  const body = (() => {
+    if (placeholder === "pending") return null;
+    if (placeholder === null && memory.status === "error") return <ModuleError title={SETTINGS_COPY.memoryError} error={memory.error} onRetry={memory.reload} />;
+    if (placeholder !== null || memory.status !== "ready" || editor === null || global === null) return <Skeleton shape="text" lines={3} />;
+    const info: MemoryInfo = memory.value;
+    const recommended = info.advice.recommended_mb;
+    const mods = inst.modCount;
+    if (!custom || draft === null) {
+      return (
+        <div className={styles.followBox}>
+          <div className={styles.followText}>
+            <span className={styles.followValue}>{formatMemory(info.effectiveMb)}</span>
+            <span className={styles.soft}>{global.memory.auto ? SETTINGS_COPY.followAuto : SETTINGS_COPY.followFixed}</span>
+          </div>
+          <Button variant="ghost" size="sm" iconRight="arrow-right" onClick={() => go({ page: "settings", section: "game" })}>
+            {SETTINGS_COPY.globalSettings}
+          </Button>
+        </div>
+      );
+    }
+    // Mod 数不出来时这个建议值没有依据：宁可不给判断，也不说「0 个 Mod」
+    const below = mods !== null && draft < recommended;
+    return (
+      <MemorySlider
+        value={draft}
+        onChange={setDraft}
+        onCommit={(mb) => void editor.save({ memoryMb: mb })}
+        disabled={editor.locked !== undefined}
+        totalMb={info.advice.total_mb}
+        recommended={mods === null ? undefined : { mb: recommended, tip: SETTINGS_COPY.recommendTip(mods, recommended) }}
+        notes={mods === null ? [] : [below ? SETTINGS_COPY.belowRecommended(mods, recommended) : SETTINGS_COPY.enough(recommended)]}
+        notesTone={below ? "warn" : "default"}
+        ariaLabel={SETTINGS_COPY.memorySlider}
+      />
+    );
+  })();
+
+  return (
+    <Card padding="lg">
+      <CardHeader icon="memory" title={SETTINGS_COPY.memoryTitle} subtitle={SETTINGS_COPY.memorySubtitle} />
+      <div className={styles.cardBody}>
+        <SegmentedControl
+          block
+          value={custom ? "custom" : "follow"}
+          disabled={editor === null || memory.status !== "ready" || editor.locked !== undefined}
+          onChange={(mode) => {
+            if (editor === null || memory.status !== "ready") return;
+            void editor.save({ memoryMb: mode === "custom" ? snapMemory(memory.value.effectiveMb) : null });
+          }}
+          ariaLabel={SETTINGS_COPY.memoryMode}
+          options={[
+            { value: "follow", label: SETTINGS_COPY.follow },
+            { value: "custom", label: SETTINGS_COPY.custom },
+          ]}
+        />
+        {body}
+      </div>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------- Java
+
+const FIT_ICON = { match: "check-circle", higher: "alert", lower: "x-circle" } as const;
+
+const JAVA_ERROR_TITLE: Record<JavaInfoSource, string> = {
+  settings: SETTINGS_COPY.settingsError,
+  javaList: SETTINGS_COPY.javaError,
+  javaRequired: SETTINGS_COPY.javaRequiredError,
+};
+
+function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; editor: SettingsEditor | null; java: ReturnType<typeof useJavaInfo>; placeholder: Placeholder }) {
+  const global = useLauncherSelector((s) => s.settings);
+  const subtitle =
+    java.status === "ready" && java.value !== null && inst.mcVersion !== null
+      ? SETTINGS_COPY.javaSubtitle(inst.mcVersion, java.value.required)
+      : java.status === "ready" && java.value === null
+        ? SETTINGS_COPY.javaSubtitleUnknown
+        : undefined;
+
+  const body = (() => {
+    if (placeholder === "pending") return null;
+    if (placeholder === null && java.status === "error") return <ModuleError title={JAVA_ERROR_TITLE[java.source]} error={java.error} onRetry={java.reload} />;
+    if (placeholder !== null || java.status !== "ready" || editor === null || global === null) {
+      return (
+        <>
+          <Skeleton shape="block" width="100%" height={36} radius="md" />
+          <Skeleton shape="text" lines={2} />
+        </>
+      );
+    }
+    if (java.value === null) return null;
+    const info: JavaInfo = java.value;
+    const value = editor.value.java;
+    const options: SelectOption<string>[] = [
+      { value: JAVA_AUTO, label: SETTINGS_COPY.javaAuto, icon: "sparkle", hint: autoHint(info) },
+      ...info.runtimes.map((r) => {
+        const fit = javaFit(r.version.major, info.required);
+        const label = SETTINGS_COPY.javaOption(r.version.major, r.vendor);
+        // 缺运行时文件的不让选；已经固定成它的照常显示为当前值，让人看清现状
+        if (!runtimeComplete(r)) {
+          return { value: r.path, label, hint: SETTINGS_COPY.javaIncomplete(r.version.raw), icon: FIT_ICON[fit], disabled: r.path !== value };
+        }
+        const suffix = fit === "match" ? SETTINGS_COPY.javaFitMatch : fit === "lower" ? SETTINGS_COPY.javaFitLower : "";
+        return {
+          value: r.path,
+          label,
+          hint: `${r.version.raw} · ${JAVA_SOURCE_LABEL[r.source]}${suffix}`,
+          icon: FIT_ICON[fit],
+        };
+      }),
+    ];
+    if (value !== JAVA_AUTO && !info.runtimes.some((r) => r.path === value)) {
+      options.push({ value, label: SETTINGS_COPY.pinnedMissing, hint: value, icon: "x-circle", disabled: true });
+    }
+    return (
+      <>
+        <Select value={value} onChange={(next) => void editor.save({ java: next })} options={options} block disabled={editor.locked !== undefined} ariaLabel={SETTINGS_COPY.javaSelect} />
+        <JavaState info={info} autoDownload={global.autoDownloadJava} locked={editor.locked} onUseAuto={() => void editor.save({ java: JAVA_AUTO })} />
+      </>
+    );
+  })();
+
+  return (
+    <Card padding="lg">
+      <CardHeader icon="java" title={SETTINGS_COPY.javaTitle} subtitle={subtitle} />
+      <div className={styles.cardBody}>{body}</div>
+    </Card>
+  );
+}
+
+/** 「自动选择」项的提示：会用哪个、跟随全局指定的、或启动时下载。实例固定了 Java 时也照实写出自动会选谁。 */
+function autoHint(info: JavaInfo): string {
+  const pick = info.autoPick;
+  if (pick.kind === "global") return SETTINGS_COPY.javaAutoGlobal;
+  if (pick.kind === "local") return SETTINGS_COPY.javaAutoPick(pick.runtime.version.major, pick.runtime.vendor);
+  return SETTINGS_COPY.javaAutoDownload(info.required);
+}
+
+function JavaState({ info, autoDownload, locked, onUseAuto }: { info: JavaInfo; autoDownload: boolean; locked: string | undefined; onUseAuto(): void }) {
+  const { go } = useNav();
+  const runtime = chosenRuntime(info.choice);
+  // 实例跟随全局、全局固定了默认 Java：实例本来就是自动选择，「改用自动」改不了任何东西，出路在设置里的默认 Java
+  const globalPin = info.choice.auto && info.choice.pick.kind === "global";
+  const useAuto = info.choice.auto ? undefined : (
+    <Button size="sm" disabledReason={locked} onClick={onUseAuto}>
+      {SETTINGS_COPY.useAuto}
+    </Button>
+  );
+  const fix = globalPin ? (
+    <Button size="sm" iconRight="arrow-right" onClick={() => go({ page: "settings", section: "java" })}>
+      {SETTINGS_COPY.openJavaSettings}
+    </Button>
+  ) : (
+    useAuto
+  );
+  const state = ((): { tone: FeedbackTone; icon: "check-circle" | "alert" | "x-circle" | "download"; title: string; body: ReactNode; action?: ReactNode } => {
+    if (runtime === null) {
+      if (globalPin) return { tone: "danger", icon: "x-circle", title: SETTINGS_COPY.globalPinnedMissing, body: null, action: fix };
+      if (!info.choice.auto) return { tone: "danger", icon: "x-circle", title: SETTINGS_COPY.pinnedMissing, body: null, action: useAuto };
+      return autoDownload
+        ? { tone: "info", icon: "download", title: SETTINGS_COPY.fitDownload(info.required), body: SETTINGS_COPY.fitDownloadBody }
+        : { tone: "danger", icon: "x-circle", title: SETTINGS_COPY.fitNoDownload(info.required), body: SETTINGS_COPY.fitNoDownloadBody };
+    }
+    const fit = javaFit(runtime.version.major, info.required);
+    // 版本过低是启动不了，比缺文件更要紧，先报它；缺文件只在固定成它时出现，自动挑选已经跳过不完整的
+    if (fit !== "lower" && !runtimeComplete(runtime)) {
+      return { tone: "warn", icon: "alert", title: SETTINGS_COPY.fitIncomplete(runtime.missing_files), body: SETTINGS_COPY.fitIncompleteBody, action: useAuto };
+    }
+    if (fit === "match") return { tone: "ok", icon: "check-circle", title: SETTINGS_COPY.fitMatch(info.required), body: <code className={styles.path}>{runtime.path}</code> };
+    if (fit === "higher") return { tone: "warn", icon: "alert", title: SETTINGS_COPY.fitHigher(info.required), body: SETTINGS_COPY.fitHigherBody, action: fix };
+    return { tone: "danger", icon: "x-circle", title: SETTINGS_COPY.fitLower(info.required), body: globalPin ? SETTINGS_COPY.fitLowerGlobalBody : SETTINGS_COPY.fitLowerBody, action: fix };
+  })();
+  return (
+    <Callout tone={state.tone} icon={state.icon} action={state.action}>
+      <strong className={styles.calloutTitle}>{state.title}</strong>
+      {state.body !== null && <span className={styles.calloutBody}>{state.body}</span>}
+    </Callout>
+  );
+}
+
+// ---------------------------------------------------------------- JVM 参数
+
+function JvmCard({ editor, java }: { editor: SettingsEditor; java: JavaInfo | null }) {
+  const actions = useLauncherActions();
+  const saved = editor.value.jvmArgs;
+  const [draft, setDraft] = useState(saved);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setDraft(saved), [saved]);
+  // 保存时去掉首尾空白，盘上的值却可能带着（手改过 settings.json）：两边都去掉再比，读进来原样不动不算未保存
+  const dirty = draft.trim() !== saved.trim();
+  const major = java === null ? null : effectiveJavaMajor(java.choice, java.required);
+
+  const save = () => {
+    // Ctrl + Enter 也走这里：锁住时与保存按钮一样不动作
+    if (!dirty || saving || editor.locked !== undefined) return;
+    const next = draft.trim();
+    setSaving(true);
+    void editor.save({ jvmArgs: next }).then((ok) => {
+      setSaving(false);
+      if (ok) actions.toast("success", SETTINGS_COPY.jvmSaved, next === "" ? SETTINGS_COPY.jvmCleared : SETTINGS_COPY.jvmSavedBody);
+    });
+  };
+
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && event.ctrlKey) {
+      event.preventDefault();
+      save();
+    }
+  };
+
+  return (
+    <Card padding="lg">
+      <CardHeader
+        icon="terminal"
+        title={SETTINGS_COPY.jvmTitle}
+        subtitle={SETTINGS_COPY.jvmSubtitle}
+        actions={
+          dirty ? (
+            <Tag tone="warn" size="sm">
+              {SETTINGS_COPY.unsaved}
+            </Tag>
+          ) : undefined
+        }
+      />
+      <div className={styles.cardBody}>
+        <Textarea mono rows={3} value={draft} onChange={setDraft} placeholder={SETTINGS_COPY.jvmPlaceholder} aria-label={SETTINGS_COPY.jvmInput} className={styles.jvm} onKeyDown={onKeyDown} />
+        <div className={styles.chips}>
+          {JVM_PRESET_KEYS.map((key) => {
+            const flags = major === null ? null : presetFlags(key, major);
+            const on = flags !== null && hasFlags(draft, flags);
+            // 版本读不出来时不知道该给哪组参数，全部不可用；读得出来时只有 ZGC 会因为 Java 太旧不可用
+            const unsupported = major !== null && flags === null;
+            return (
+              <Button
+                key={key}
+                size="sm"
+                variant={on ? "secondary" : "ghost"}
+                icon={on ? "check" : "plus"}
+                aria-pressed={on}
+                disabledReason={unsupported ? SETTINGS_COPY.needsJava(ZGC_MIN_JAVA) : undefined}
+                disabled={major === null}
+                onClick={() => {
+                  if (flags !== null) setDraft(toggleFlags(draft, flags));
+                }}
+              >
+                {JVM_PRESET_LABEL[key]}
+              </Button>
+            );
+          })}
+        </div>
+        {overridesHeap(draft) && <Callout tone="warn">{SETTINGS_COPY.heapOverride}</Callout>}
+        <div className={styles.actionsRow}>
+          <span className={styles.hint}>{SETTINGS_COPY.saveHint}</span>
+          <Button variant="ghost" size="sm" disabled={!dirty} onClick={() => setDraft(saved)}>
+            {SETTINGS_COPY.restore}
+          </Button>
+          <Button size="sm" icon="check" disabled={!dirty} disabledReason={editor.locked} loading={saving} onClick={save}>
+            {SETTINGS_COPY.saveArgs}
+          </Button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------- 版本隔离与窗口
+
+function WindowCard({ inst, editor }: { inst: InstanceSummary; editor: SettingsEditor }) {
+  const policy = useLauncherSelector((state) => (state.settings === null ? null : state.settings.isolationPolicy));
+  const s = editor.value;
+  // 跟随全局时说此刻实际隔离与否：列表里后端给的生效值算上了「版本目录的 mods 或 saves 里有内容就强制隔离」，
+  // 前端看不到目录、推断不出这一条；后端没给出（实例设置读不出）时才按全局策略推断
+  const followIsolated = policy === null ? null : inst.isolated === null ? isolationByPolicy(policy, inst) : inst.isolated;
+  // 关闭也压不过这条强制隔离：写共用的话，说明和游戏实际读写的目录对不上
+  const offNote = inst.isolated === true ? SETTINGS_COPY.isolationOffForcedNote : SETTINGS_COPY.isolationOffNote;
+  const isolationNote =
+    s.isolation === "enabled"
+      ? SETTINGS_COPY.isolationOnNote
+      : s.isolation === "disabled"
+        ? offNote
+        : policy === null || followIsolated === null
+          ? undefined
+          : // 生效值隔离而策略不隔离，只能是强制隔离：照策略写「独立存放」读起来和「不隔离」自相矛盾，要把原因说出来
+            followIsolated && !isolationByPolicy(policy, inst)
+            ? SETTINGS_COPY.isolationFollowForcedNote(ISOLATION_POLICY_LABEL[policy])
+            : SETTINGS_COPY.isolationFollowNote(ISOLATION_POLICY_LABEL[policy], followIsolated);
+
+  return (
+    <Card padding="lg">
+      <CardHeader icon="monitor" title={SETTINGS_COPY.windowTitle} />
+      <div>
+        <SettingRow title={SETTINGS_COPY.isolation} description={isolationNote}>
+          <SegmentedControl
+            size="sm"
+            value={s.isolation}
+            disabled={editor.locked !== undefined}
+            onChange={(isolation) => void editor.save({ isolation })}
+            ariaLabel={SETTINGS_COPY.isolation}
+            options={[
+              { value: "follow_global", label: SETTINGS_COPY.isolationFollow },
+              { value: "enabled", label: SETTINGS_COPY.isolationOn },
+              { value: "disabled", label: SETTINGS_COPY.isolationOff },
+            ]}
+          />
+        </SettingRow>
+        <ResolutionRow editor={editor} />
+        <SettingRow title={SETTINGS_COPY.fullscreen} description={SETTINGS_COPY.fullscreenNote}>
+          <Toggle checked={s.fullscreen} onChange={(fullscreen) => void editor.save({ fullscreen })} ariaLabel={SETTINGS_COPY.fullscreen} disabledReason={editor.locked} />
+        </SettingRow>
+      </div>
+    </Card>
+  );
+}
+
+function ResolutionRow({ editor }: { editor: SettingsEditor }) {
+  const { width, height } = editor.value.resolution;
+  const fullscreen = editor.value.fullscreen;
+  const locked = editor.locked;
+  const [w, setW] = useState(String(width));
+  const [h, setH] = useState(String(height));
+  useEffect(() => setW(String(width)), [width]);
+  useEffect(() => setH(String(height)), [height]);
+  const wValue = parseDimension(w, RESOLUTION_LIMITS.width);
+  const hValue = parseDimension(h, RESOLUTION_LIMITS.height);
+
+  const commit = () => {
+    if (wValue === null || hValue === null) {
+      setW(String(width));
+      setH(String(height));
+      return;
+    }
+    if (wValue !== width || hValue !== height) void editor.save({ resolution: { width: wValue, height: hValue } });
+  };
+
+  return (
+    <SettingRow
+      title={SETTINGS_COPY.resolution}
+      description={
+        <span className={styles.resolutionNote}>
+          <span>{SETTINGS_COPY.resolutionNote}</span>
+          <span className={styles.chips}>
+            {RESOLUTION_PRESETS.map((p) => {
+              const on = p.width === width && p.height === height;
+              return (
+                <Button
+                  key={`${p.width}x${p.height}`}
+                  size="sm"
+                  variant={on ? "secondary" : "ghost"}
+                  aria-pressed={on}
+                  disabled={fullscreen}
+                  disabledReason={locked}
+                  onClick={() => void editor.save({ resolution: { width: p.width, height: p.height } })}
+                >
+                  {`${p.width}×${p.height}`}
+                </Button>
+              );
+            })}
+          </span>
+        </span>
+      }
+    >
+      <div className={styles.resolutionInputs}>
+        <TextInput
+          value={w}
+          onChange={setW}
+          size="sm"
+          inputMode="numeric"
+          invalid={wValue === null}
+          disabled={fullscreen || locked !== undefined}
+          aria-label={SETTINGS_COPY.resolutionWidth}
+          onBlur={commit}
+          onEnter={commit}
+          className={styles.resolutionWidth}
+        />
+        <span className={styles.soft}>×</span>
+        <TextInput
+          value={h}
+          onChange={setH}
+          size="sm"
+          inputMode="numeric"
+          invalid={hValue === null}
+          disabled={fullscreen || locked !== undefined}
+          aria-label={SETTINGS_COPY.resolutionHeight}
+          onBlur={commit}
+          onEnter={commit}
+          suffix={SETTINGS_COPY.pixels}
+          className={styles.resolutionHeight}
+        />
+      </div>
+    </SettingRow>
+  );
+}
+
+// ---------------------------------------------------------------- 实例管理
+
+function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) {
+  const pinBlocked = useLauncherSelector((s) => !inst.pinned && !canPinMore(s));
+  const gameDir = useLauncherSelector((s) => (s.settings === null ? null : s.settings.gameDir));
+  const { tier } = useShell();
+  const { go } = useNav();
+  const [name, setName] = useState(inst.name);
+  const [renaming, setRenaming] = useState(false);
+  // 头图那边也能改名：名字从外部变了就跟着同步
+  useEffect(() => setName(inst.name), [inst.name]);
+  const changed = name.trim() !== inst.name;
+  const error = changed ? ops.nameError(name) : null;
+  const renameReason = lockReason(ops.locks.rename, "rename");
+  const repairReason = lockReason(ops.locks.repair, "repair");
+  const deleteReason = lockReason(ops.locks.delete, "delete");
+  const folder = gameDir === null ? null : instanceFolderPath(gameDir, inst.id);
+
+  const saveName = () => {
+    if (!changed || error !== null || renaming) return;
+    setRenaming(true);
+    void ops.rename(name).then(() => setRenaming(false));
+  };
+
+  return (
+    <Card padding="lg" className={styles.settingsWide}>
+      <CardHeader icon="box" title={SETTINGS_COPY.manageTitle} />
+      <div>
+        <SettingRow title={SETTINGS_COPY.nameTitle} description={error === null ? SETTINGS_COPY.nameNote : <span className={styles.dangerText}>{error}</span>}>
+          <TextInput
+            value={name}
+            onChange={setName}
+            size="sm"
+            maxLength={32}
+            invalid={error !== null}
+            disabled={renameReason !== undefined}
+            aria-label={SETTINGS_COPY.nameTitle}
+            onEnter={saveName}
+            className={styles.nameInput}
+          />
+          {/* 锁住时改用带原因的禁用（悬停说明为什么），否则名字没改时的普通禁用会把原因吞掉 */}
+          <Button size="sm" disabled={renameReason === undefined && (!changed || error !== null)} disabledReason={renameReason} loading={renaming} onClick={saveName}>
+            {SETTINGS_COPY.rename}
+          </Button>
+        </SettingRow>
+        <SettingRow title={SETTINGS_COPY.pinTitle} description={SETTINGS_COPY.pinNote}>
+          <Toggle checked={inst.pinned} onChange={ops.togglePin} ariaLabel={SETTINGS_COPY.pinTitle} disabledReason={pinBlocked ? TOAST_COPY.pinLimit : undefined} />
+        </SettingRow>
+        <SettingRow title={SETTINGS_COPY.folderTitle} description={folder === null ? undefined : <code className={styles.path}>{folder}</code>}>
+          <Button size="sm" icon="folder" disabledReason={ops.folderReason("instance")} onClick={() => ops.openFolder("instance")}>
+            {SETTINGS_COPY.open}
+          </Button>
+        </SettingRow>
+        <TemplateRow id={inst.id} locked={ops.settingsReason} />
+        {needsReimport(inst) ? (
+          <SettingRow title={MODPACK_REIMPORT_COPY.menuReimport} description={MODPACK_REIMPORT_COPY.note}>
+            <Button size="sm" icon="modpack" onClick={() => go(reimportRoute(inst))}>
+              {MODPACK_REIMPORT_COPY.reimport}
+            </Button>
+          </SettingRow>
+        ) : (
+          <>
+            <SettingRow title={SETTINGS_COPY.repairTitle} description={ops.locks.repair === "running" ? SETTINGS_COPY.repairRunning : SETTINGS_COPY.repairNote}>
+              <Button size="sm" icon="wrench" disabled={ops.locks.repair === "installing"} focusableWhenDisabled disabledReason={ops.locks.repair === "installing" ? undefined : repairReason} onClick={ops.repair}>
+                {ops.locks.repair === "installing" ? SETTINGS_COPY.repairing : SETTINGS_COPY.repair}
+              </Button>
+            </SettingRow>
+            {/* 与补全同一个任务、同一把锁：哪个按钮点的都一样，进行中时两行都写「进行中」 */}
+            {canReinstallLoader(inst) && (
+              <SettingRow title={REINSTALL_LOADER_LABEL} description={ops.locks.repair === "running" ? SETTINGS_COPY.reinstallLoaderRunning : SETTINGS_COPY.reinstallLoaderNote}>
+                <Button
+                  size="sm"
+                  icon="wrench"
+                  disabled={ops.locks.repair === "installing"}
+                  focusableWhenDisabled
+                  disabledReason={ops.locks.repair === "installing" ? undefined : lockReason(ops.locks.repair, "reinstallLoader")}
+                  onClick={ops.reinstallLoader}
+                >
+                  {ops.locks.repair === "installing" ? SETTINGS_COPY.repairing : SETTINGS_COPY.reinstallLoader}
+                </Button>
+              </SettingRow>
+            )}
+          </>
+        )}
+      </div>
+      <div className={styles.dangerZone} data-stack={tier === "compact" || undefined}>
+        <div className={styles.dangerText}>
+          <strong>{SETTINGS_COPY.deleteTitle}</strong>
+          <DeleteNote inst={inst} busy={ops.busy} />
+        </div>
+        <Button variant="danger" icon="trash" disabledReason={deleteReason} onClick={ops.remove}>
+          {SETTINGS_COPY.deleteTitle}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+/** 文本骨架的宽度：默认设置读到之前，第二行先占一行的位置。 */
+const TEMPLATE_SKELETON_WIDTH = 200;
+
+/**
+ * 「设为新实例的默认设置」：保存读的是磁盘上的文件，所以游戏运行中也能存（游戏退出时才写入的改动不在其中）；
+ * 只在安装、补全、改名、删除挪动实例目录时禁用，原因与改实例设置的锁同一套。清除与本实例无关，不受这把锁约束。
+ */
+function TemplateRow({ id, locked }: { id: string; locked: string | undefined }) {
+  const template = useTemplateInfo();
+  const actions = useLauncherActions();
+  const run = useRunner();
+  const now = useNow(60_000);
+  const [busy, setBusy] = useState<"save" | "clear" | null>(null);
+  const info = template.status === "ready" ? template.data : null;
+  const present = info !== null && info.present;
+
+  // 默认设置没了，「清除」连同焦点一起从 DOM 里拿掉，焦点掉回 body，键盘用户得从文档开头重新找起。
+  // 交给同一行的「保存为默认」；焦点已经在别处时不抢
+  const saveRef = useRef<HTMLButtonElement>(null);
+  const hadClear = useRef(present);
+  useLayoutEffect(() => {
+    const removed = hadClear.current && !present;
+    hadClear.current = present;
+    if (!removed || document.activeElement !== document.body) return;
+    if (saveRef.current === null) throw new Error("「保存为默认」尚未挂载");
+    saveRef.current.focus();
+  }, [present]);
+
+  const save = () => {
+    setBusy("save");
+    void run(() => actions.saveInstanceAsTemplate(id), ACTION_ERROR.saveTemplate).then(() => setBusy(null));
+  };
+  const clear = () => {
+    setBusy("clear");
+    void run(() => actions.clearTemplate(), ACTION_ERROR.clearTemplate).then(() => setBusy(null));
+  };
+
+  const current =
+    template.status === "loading" ? (
+      <Skeleton shape="text" width={TEMPLATE_SKELETON_WIDTH} />
+    ) : template.status === "error" ? (
+      <span className={styles.soft}>{SETTINGS_COPY.templateError(describeError(template.error))}</span>
+    ) : info !== null && info.present ? (
+      <span className={styles.soft}>{SETTINGS_COPY.templateCurrent(info.source_instance, info.saved_at, now)}</span>
+    ) : null;
+
+  return (
+    <SettingRow
+      title={SETTINGS_COPY.templateTitle}
+      description={
+        <span className={styles.resolutionNote}>
+          <span>{SETTINGS_COPY.templateNote}</span>
+          {current}
+        </span>
+      }
+    >
+      {present && (
+        <Button size="sm" variant="ghost" loading={busy === "clear"} disabled={busy !== null} focusableWhenDisabled onClick={clear}>
+          {SETTINGS_COPY.templateClear}
+        </Button>
+      )}
+      <Button ref={saveRef} size="sm" loading={busy === "save"} disabled={busy !== null && locked === undefined} focusableWhenDisabled disabledReason={locked} onClick={save}>
+        {SETTINGS_COPY.templateSave}
+      </Button>
+    </SettingRow>
+  );
+}
+
+function DeleteNote({ inst, busy }: { inst: InstanceSummary; busy: boolean }) {
+  const worlds = deletableWorldCount(inst);
+  return (
+    <span className={styles.soft}>
+      {worlds === null ? null : worlds > 0 ? SETTINGS_COPY.deleteWorlds(worlds) : SETTINGS_COPY.deleteNoWorlds}
+      {busy && SETTINGS_COPY.deleteRunning}
+    </span>
+  );
+}

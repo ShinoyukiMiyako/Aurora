@@ -1,0 +1,129 @@
+/* 三列网格：图标底座跨行 / 文字列 / 关闭；宽度按窗口档位 320 / 340 / 360 */
+.toast {
+  --toast-tone: var(--sk-info);
+  --toast-tone-soft: var(--sk-info-soft);
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto;
+  column-gap: var(--sk-space-12);
+  row-gap: var(--sk-space-2);
+  box-sizing: border-box;
+  width: 340px;
+  padding: var(--sk-space-12) var(--sk-space-10) var(--sk-space-12) var(--sk-space-12);
+  overflow: hidden;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-lg);
+  background: var(--sk-surface);
+  box-shadow: var(--sk-shadow-lg);
+  color: var(--sk-text);
+}
+
+:global([data-sk-tier="compact"]) .toast {
+  width: 320px;
+}
+
+:global([data-sk-tier="wide"]) .toast {
+  width: 360px;
+}
+
+.toast[data-tone="success"] {
+  --toast-tone: var(--sk-ok);
+  --toast-tone-soft: var(--sk-ok-soft);
+}
+
+.toast[data-tone="warning"] {
+  --toast-tone: var(--sk-warn);
+  --toast-tone-soft: var(--sk-warn-soft);
+}
+
+.toast[data-tone="error"] {
+  --toast-tone: var(--sk-danger);
+  --toast-tone-soft: var(--sk-danger-soft);
+}
+
+/* 30 见方，圆角按标识类比例 round(30 × 0.3) = 9 */
+.iconBase {
+  display: inline-flex;
+  grid-row: 1 / span 2;
+  grid-column: 1;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: var(--toast-tone-soft);
+  color: var(--toast-tone);
+}
+
+.title {
+  display: -webkit-box;
+  grid-row: 1;
+  grid-column: 2;
+  margin: 0;
+  padding-top: 5px;
+  overflow: hidden;
+  font-size: var(--sk-fs-body);
+  font-weight: var(--sk-w-title);
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.body {
+  display: -webkit-box;
+  grid-row: 2;
+  grid-column: 2;
+  margin: 0;
+  overflow: hidden;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-small);
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+.action {
+  grid-row: 3;
+  grid-column: 2;
+  justify-self: start;
+  margin-top: var(--sk-space-4);
+}
+
+.close {
+  grid-row: 1;
+  grid-column: 3;
+}
+
+/* 倒计时细线：从剩余比例线性缩到 0；暂停计时期间停住 */
+.countdown {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: var(--toast-tone);
+  opacity: 0.35;
+  transform-origin: left center;
+  animation: toastCountdown var(--toast-remaining) linear forwards;
+}
+
+.countdown[data-paused] {
+  animation-play-state: paused;
+}
+
+:global([data-sk-reduced]) .countdown {
+  display: none;
+}
+
+@keyframes toastCountdown {
+  from {
+    transform: scaleX(var(--toast-from));
+  }
+
+  to {
+    transform: scaleX(0);
+  }
+}

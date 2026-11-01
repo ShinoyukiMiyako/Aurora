@@ -1,0 +1,219 @@
+// @vitest-environment jsdom
+// @module-tag heavy-page
+// 通知栈的落点。jsdom 不做布局，但 getComputedStyle 会按样式表算层叠：把通知容器的真样式表挂进文档，
+// 在真的外壳里开弹窗、走向导，读容器此刻算出来的定位。样式规则与界面上的标记属性任一头断了，这里都会挂。
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { act } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { stubCanvas } from "../art/illustrations/test-canvas";
+import { TOASTS_COPY } from "../copy/shell";
+import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
+import type { FlowProps } from "../state/flows";
+import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
+import { PAGE_IDS } from "../state/route";
+import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import type { IpcRecorder } from "../test/fake-bridge";
+import { bootOverrides, instanceDto, resetRecorder } from "../test/launcher";
+import { Modal } from "../ui/Modal";
+import { AppShell } from "./AppShell";
+import type { PageTable } from "./nav";
+import { createPageRegistry } from "./pages";
+import { ShellProvider, useShell, type ShellApi } from "./shell";
+import styles from "./Toasts.module.css";
+import { WindowPortProvider, browserWindowPort } from "./window";
+
+const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
+vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+// :global() 与局部类名都是构建期语法，换成浏览器认识的选择器和实际挂到元素上的类名
+const SHEET = readFileSync(join(HERE, "Toasts.module.css"), "utf8")
+  .replace(/:global\((.+)\) \.region/g, "$1 .region")
+  .replaceAll(".region", `.${styles.region}`);
+
+const BOTTOM_RIGHT = { top: "auto", bottom: "var(--sk-space-16)", left: "auto", right: "var(--sk-space-16)" };
+/** 标题栏 56 高、再留 64：资源详情的「返回」在 900 高的窗口里下沿到 113。 */
+const TOP_LEFT = { top: "calc(56px + var(--sk-space-64))", bottom: "auto", left: "var(--sk-space-16)", right: "auto" };
+
+const placement = () => {
+  const region = document.querySelector<HTMLElement>(`section[aria-label="${TOASTS_COPY.region}"]`);
+  if (region === null) throw new Error("通知容器没有挂上");
+  const { top, bottom, left, right } = getComputedStyle(region);
+  return { top, bottom, left, right };
+};
+
+/** 刚挂上的通知此刻的横向位移：入场动画还没走，就是入场起点。 */
+const enterShift = (title: string) => {
+  const toast = [...document.querySelectorAll<HTMLElement>("[data-tone]")].find((el) => el.textContent?.includes(title));
+  if (toast === undefined) throw new Error(`没有「${title}」这条通知`);
+  const match = /translateX\((-?[\d.]+)px\)/.exec(toast.style.transform);
+  if (match === null) throw new Error(`「${title}」此刻没有横向位移：${toast.style.transform}`);
+  return Number(match[1]);
+};
+
+let view: Rendered | undefined;
+let style: HTMLStyleElement;
+let shell: ShellApi;
+let launcher: LauncherApi;
+
+function Probe() {
+  shell = useShell();
+  launcher = useLauncher();
+  return null;
+}
+
+function Page() {
+  return <p data-page="" />;
+}
+
+function Wizard() {
+  return <p data-flow="onboarding">向导</p>;
+}
+
+/** 与真流程一样：弹窗挂在外壳的流程槽位里。 */
+function CreateInstance({ onClose }: FlowProps<"create-instance">) {
+  return <Modal open onClose={onClose} title="新建实例" />;
+}
+
+// 真定时器：弹窗的退场动画要真的播完、节点真的移除
+const flush = () =>
+  act(async () => {
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+async function mount() {
+  const pages = Object.fromEntries(PAGE_IDS.map((page) => [page, async () => ({ default: Page })])) as unknown as PageTable;
+  view = render(
+    <WindowPortProvider port={browserWindowPort()}>
+      <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, petals: false }}>
+        <LauncherProvider>
+          <ShellProvider>
+            <Probe />
+            <AppShell pages={createPageRegistry(pages)} flows={{ login: () => null, onboarding: Wizard, createInstance: CreateInstance }} />
+          </ShellProvider>
+        </LauncherProvider>
+      </AppearanceProvider>
+    </WindowPortProvider>,
+  );
+  await flush();
+}
+
+beforeEach(() => {
+  resetRecorder(ipc);
+  stubResizeObserver();
+  stubMatchMedia(false);
+  stubCanvas();
+  HTMLElement.prototype.scrollTo = function scrollTo(this: HTMLElement) {
+    this.scrollTop = 0;
+  };
+  ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+  style = document.createElement("style");
+  style.textContent = SHEET;
+  document.head.append(style);
+});
+
+afterEach(() => {
+  view?.unmount();
+  view = undefined;
+  style.remove();
+});
+
+describe("通知栈的落点", () => {
+  it("平时在右下角", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    act(() => launcher.actions.toast("error", "常驻的失败"));
+    expect(placement()).toEqual(BOTTOM_RIGHT);
+  });
+
+  it("弹窗开着时在标题栏下方的左上角，让出底栏和头部的关闭按钮；弹窗退场完回到右下角", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    act(() => launcher.actions.toast("error", "常驻的失败"));
+
+    act(() => shell.openCreateInstance());
+    await flush();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(placement()).toEqual(TOP_LEFT);
+
+    act(() => shell.closeCreateInstance());
+    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull(), { timeout: 3000, interval: 20 });
+    expect(placement()).toEqual(BOTTOM_RIGHT);
+  });
+
+  it("首次启动向导开着时同样在左上角：「开始使用」在向导底栏右侧；向导收尾后回到右下角", async () => {
+    bootOverrides(ipc, { instances: [], firstRun: true });
+    ipc.overrides.set("complete_first_run", () => null);
+    await mount();
+    act(() => launcher.actions.toast("success", "已添加离线账户"));
+    expect(document.querySelector("[data-flow='onboarding']")).not.toBeNull();
+    expect(placement()).toEqual(TOP_LEFT);
+
+    await act(async () => {
+      await launcher.actions.completeFirstRun("D:\\Games\\.minecraft", []);
+    });
+    await flush();
+    expect(document.querySelector("[data-flow='onboarding']")).toBeNull();
+    expect(placement()).toEqual(BOTTOM_RIGHT);
+  });
+
+  it("入场方向跟随落点：平时从右侧进，弹窗开着时从左侧进，弹窗退场完再回到右侧", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    act(() => void launcher.actions.toast("error", "平时来的"));
+    expect(enterShift("平时来的")).toBe(40);
+
+    act(() => shell.openCreateInstance());
+    await flush();
+    act(() => void launcher.actions.toast("error", "弹窗开着时来的"));
+    expect(enterShift("弹窗开着时来的")).toBe(-40);
+
+    act(() => shell.closeCreateInstance());
+    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull(), { timeout: 3000, interval: 20 });
+    act(() => void launcher.actions.toast("error", "弹窗走了才来的"));
+    expect(enterShift("弹窗走了才来的")).toBe(40);
+  });
+
+  it("平时进来的通知，弹窗开着时关掉：退场走左侧，栈此刻在左上角", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    let id = "";
+    act(() => {
+      id = launcher.actions.toast("error", "平时来的");
+    });
+    expect(enterShift("平时来的")).toBe(40);
+
+    act(() => shell.openCreateInstance());
+    await flush();
+    await vi.waitFor(() => expect(Math.abs(enterShift("平时来的"))).toBeLessThan(1), { timeout: 3000, interval: 10 });
+    act(() => launcher.actions.dismissToast(id));
+    await vi.waitFor(() => expect(enterShift("平时来的")).toBeLessThan(-4), { timeout: 2000, interval: 4 });
+  });
+
+  it("弹窗开着时进来的通知，弹窗退场完才关：退场走右侧，栈此刻已回右下角", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    act(() => shell.openCreateInstance());
+    await flush();
+    let id = "";
+    act(() => {
+      id = launcher.actions.toast("error", "弹窗开着时来的");
+    });
+    expect(enterShift("弹窗开着时来的")).toBe(-40);
+
+    act(() => shell.closeCreateInstance());
+    await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull(), { timeout: 3000, interval: 20 });
+    await vi.waitFor(() => expect(Math.abs(enterShift("弹窗开着时来的"))).toBeLessThan(1), { timeout: 3000, interval: 10 });
+    act(() => launcher.actions.dismissToast(id));
+    await vi.waitFor(() => expect(enterShift("弹窗开着时来的")).toBeGreaterThan(4), { timeout: 2000, interval: 4 });
+  });
+
+  it("首次启动向导开着时同样从左侧进", async () => {
+    bootOverrides(ipc, { instances: [], firstRun: true });
+    await mount();
+    act(() => void launcher.actions.toast("success", "已添加离线账户"));
+    expect(enterShift("已添加离线账户")).toBe(-40);
+  });
+});

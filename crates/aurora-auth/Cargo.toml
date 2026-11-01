@@ -2,6 +2,7 @@
 name = "aurora-auth"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 aurora-base = { path = "../aurora-base" }
@@ -10,6 +11,8 @@ aurora-base = { path = "../aurora-base" }
 reqwest = { version = "0.13", default-features = false, features = ["json", "form"] }
 # 设备码轮询需要 sleep + Instant，故只取 time 特性；DPAPI 为同步系统调用，无需 rt。
 tokio = { version = "1", default-features = false, features = ["time"] }
+# 设备码轮询与令牌链要能被「取消登录」打断；与下载引擎共用同一种取消令牌，上层一处触发即可。
+tokio-util = { version = "0.7", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

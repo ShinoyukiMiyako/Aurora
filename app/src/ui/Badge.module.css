@@ -1,0 +1,41 @@
+.badge {
+  --badge-size: 18px;
+  --badge-dot: 8px;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: var(--badge-size);
+  min-width: var(--badge-size);
+  padding: 0 calc(var(--sk-space-4) + 1px);
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-bg-3);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-micro);
+  font-weight: var(--sk-w-title);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.badge[data-kind="dot"] {
+  height: var(--badge-dot);
+  min-width: var(--badge-dot);
+  width: var(--badge-dot);
+  padding: 0;
+}
+
+.badge[data-tone="accent"] {
+  background: var(--sk-accent);
+  color: var(--sk-accent-ink);
+}
+
+.badge[data-tone="danger"] {
+  background: var(--sk-danger);
+  color: var(--sk-danger-ink);
+}
+
+.badge[data-ring] {
+  box-shadow: 0 0 0 2px var(--badge-ring, var(--sk-surface));
+}

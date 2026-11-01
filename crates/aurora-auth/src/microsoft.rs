@@ -4,11 +4,17 @@
 //! XSTS（xsts.auth.xboxlive.com，RelyingParty `rp://api.minecraftservices.com/`）->
 //! `login_with_xbox`（api.minecraftservices.com）-> `minecraft/profile`。
 //!
-//! - `client_id` 由配置注入，无内置默认（调试可用环境变量 `AURORA_MSA_CLIENT_ID`，读取归上层）。
+//! - `client_id` 由上层注入（默认值与环境变量覆盖的取舍归上层）。
 //! - 各端点 URL 通过 [`MsaEndpoints`] 可注入，便于本地 mock 测试；默认指向微软生产地址。
 //! - XSTS 六个错误码逐一映射为带中文说明的错误变体（见 [`map_xerr`]）。
-//! - 令牌刷新失败区分“需重登”（[`AuthError::ReloginRequired`]，`invalid_grant`）与瞬时网络失败
+//! - 令牌刷新失败区分“需重登”（[`AuthError::ReloginRequired`]，见 `REFRESH_NEEDS_RELOGIN`）与瞬时网络失败
 //!   （[`AuthError::Http`]，交由 `retry_async` 重试）。
+//! - 任一步收到 5xx 或 429 都报 [`AuthError::ServiceUnavailable`]（可重试），且在解析响应体之前判定：
+//!   故障页多半是 HTML，先解析只会得到误导性的解析错误，把微软的故障说成启动器的问题。
+//!   令牌端点回 `temporarily_unavailable` 时同样报它，不论状态码。
+//! - 挂上取消令牌（[`MicrosoftAuth::with_cancel`]）后，设备码请求、轮询与令牌链任一步都会在令牌
+//!   触发时立刻以 [`AuthError::Cancelled`] 返回；设备码有效期长达十几分钟，用户关掉登录弹窗时
+//!   不能让后台继续轮询到过期。
 
 use std::time::{Duration, Instant};
 
@@ -16,14 +22,23 @@ use aurora_base::retry::{RetryPolicy, retry_async};
 use reqwest::StatusCode;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tokio_util::sync::CancellationToken;
 
-use crate::account::GameProfile;
+use crate::account::{GameProfile, SkinModel, SkinRef};
 use crate::error::{AuthError, Result};
 
 /// 设备码流请求的 OAuth scope。
 const SCOPE: &str = "XboxLive.signin offline_access";
 /// 设备码授权的 grant_type。
 const DEVICE_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+/// 轮询间隔下限。服务端给 0 时若照办，循环会退化成不停打令牌端点的紧循环。
+const MIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// 刷新时只能靠重新登录补救的 OAuth 错误。微软令牌端点对 `interaction_required`（要补一步验证）
+/// 与 `consent_required`（要重新同意）给的处理办法都是把用户送回授权页，refresh token 自己换不出令牌。
+const REFRESH_NEEDS_RELOGIN: [&str; 3] =
+    ["invalid_grant", "interaction_required", "consent_required"];
+/// OAuth 端点表示「服务器暂时太忙」的错误名，官方给的处理办法是稍等后重试。
+const OAUTH_TEMPORARILY_UNAVAILABLE: &str = "temporarily_unavailable";
 
 /// 微软登录链各端点地址。默认指向生产环境；测试可整体替换为本地 mock 服务。
 #[derive(Debug, Clone)]
@@ -55,6 +70,7 @@ pub struct MicrosoftAuth {
     client_id: String,
     endpoints: MsaEndpoints,
     retry: RetryPolicy,
+    cancel: Option<CancellationToken>,
 }
 
 /// 设备码请求响应（供 UI 展示 user_code / 验证网址）。
@@ -92,6 +108,10 @@ pub struct MicrosoftSession {
     pub minecraft_expires_at: u64,
     /// 轮换后的 refresh token（须回写覆盖旧值）。
     pub refresh_token: String,
+    /// 档案里当前启用的皮肤；档案没有可识别的启用皮肤时为 None。
+    pub skin: Option<SkinRef>,
+    /// XSTS 声明里的 Xbox 用户 id（`xid`）；响应没带时为 None。
+    pub xuid: Option<String>,
 }
 
 /// 单次轮询设备码令牌的结果。
@@ -112,7 +132,14 @@ impl MicrosoftAuth {
             client_id: client_id.into(),
             endpoints: MsaEndpoints::default(),
             retry: RetryPolicy::default(),
+            cancel: None,
         }
+    }
+
+    /// 挂上取消令牌：之后的每个联网步骤都会在令牌触发时立刻以 [`AuthError::Cancelled`] 返回。
+    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
+        self.cancel = Some(token);
+        self
     }
 
     /// 覆盖端点表（测试注入 mock 地址）。
@@ -127,31 +154,52 @@ impl MicrosoftAuth {
         self
     }
 
+    /// 在取消令牌之下运行一步：令牌触发时丢弃这一步的 future 并报取消。
+    ///
+    /// 被丢弃的只有 HTTP 请求与计时等待，它们没有落盘副作用，半途丢弃是安全的。
+    async fn cancellable<T>(&self, step: impl Future<Output = Result<T>>) -> Result<T> {
+        match &self.cancel {
+            None => step.await,
+            Some(token) => match token.run_until_cancelled(step).await {
+                Some(result) => result,
+                None => Err(AuthError::Cancelled),
+            },
+        }
+    }
+
     /// 发起设备码请求（第一步，返回 user_code 等供 UI 展示）。
     pub async fn begin_device_code(&self) -> Result<DeviceCodeResponse> {
+        self.cancellable(self.begin_device_code_inner()).await
+    }
+
+    async fn begin_device_code_inner(&self) -> Result<DeviceCodeResponse> {
         let url = format!("{}/devicecode", self.endpoints.oauth_base);
         let params = [("client_id", self.client_id.as_str()), ("scope", SCOPE)];
         retry_async(&self.retry, || async {
             let (status, text) = self.send_form(&url, &params, "请求设备码").await?;
+            if let Some(err) = service_unavailable(status, "请求设备码") {
+                return Err(err);
+            }
             if !status.is_success() {
                 let err: OAuthErrorBody = parse(&text, "请求设备码")?;
-                return Err(AuthError::OAuth {
-                    error: err.error,
-                    description: err.error_description,
-                });
+                return Err(err.into_error(status, "请求设备码"));
             }
             parse::<DeviceCodeResponse>(&text, "请求设备码")
         })
         .await
     }
 
-    /// 轮询令牌端点直至用户完成授权、拒绝或设备码过期。
+    /// 轮询令牌端点直至用户完成授权、拒绝、设备码过期或被取消。
     ///
-    /// 循环自身按 `interval` 计时；仅瞬时网络故障交由 `retry_async` 重试，`authorization_pending`
-    /// 属正常等待（非错误），不触发退避。
+    /// 循环自身按 `interval` 计时（下限 [`MIN_POLL_INTERVAL`]）；仅瞬时网络故障交由 `retry_async`
+    /// 重试，`authorization_pending` 属正常等待（非错误），不触发退避。
     pub async fn poll_device_code(&self, device: &DeviceCodeResponse) -> Result<MsaToken> {
+        self.cancellable(self.poll_device_code_inner(device)).await
+    }
+
+    async fn poll_device_code_inner(&self, device: &DeviceCodeResponse) -> Result<MsaToken> {
         let deadline = Instant::now() + Duration::from_secs(device.expires_in);
-        let mut interval = Duration::from_secs(device.interval);
+        let mut interval = Duration::from_secs(device.interval).max(MIN_POLL_INTERVAL);
         loop {
             if Instant::now() >= deadline {
                 return Err(AuthError::DeviceCodeExpired);
@@ -176,6 +224,9 @@ impl MicrosoftAuth {
             ("grant_type", DEVICE_CODE_GRANT),
         ];
         let (status, text) = self.send_form(&url, &params, "轮询设备码令牌").await?;
+        if let Some(err) = service_unavailable(status, "轮询设备码令牌") {
+            return Err(err);
+        }
         if status.is_success() {
             let body: MsaTokenBody = parse(&text, "轮询设备码令牌")?;
             return Ok(PollOutcome::Token(body.into()));
@@ -186,15 +237,16 @@ impl MicrosoftAuth {
             "slow_down" => Ok(PollOutcome::SlowDown),
             "authorization_declined" => Err(AuthError::AuthorizationDeclined),
             "expired_token" => Err(AuthError::DeviceCodeExpired),
-            _ => Err(AuthError::OAuth {
-                error: err.error,
-                description: err.error_description,
-            }),
+            _ => Err(err.into_error(status, "轮询设备码令牌")),
         }
     }
 
-    /// 用 refresh token 换取新令牌（轮换）。`invalid_grant` 判定为需重登。
+    /// 用 refresh token 换取新令牌（轮换）。`REFRESH_NEEDS_RELOGIN` 里的错误判定为需重登。
     pub async fn refresh(&self, refresh_token: &str) -> Result<MsaToken> {
+        self.cancellable(self.refresh_inner(refresh_token)).await
+    }
+
+    async fn refresh_inner(&self, refresh_token: &str) -> Result<MsaToken> {
         let url = format!("{}/token", self.endpoints.oauth_base);
         let params = [
             ("client_id", self.client_id.as_str()),
@@ -204,42 +256,45 @@ impl MicrosoftAuth {
         ];
         retry_async(&self.retry, || async {
             let (status, text) = self.send_form(&url, &params, "刷新令牌").await?;
+            // invalid_grant 走的是 400，不会落进这里，仍归「需重登」。
+            if let Some(err) = service_unavailable(status, "刷新令牌") {
+                return Err(err);
+            }
             if status.is_success() {
                 let body: MsaTokenBody = parse(&text, "刷新令牌")?;
                 return Ok(body.into());
             }
             let err: OAuthErrorBody = parse(&text, "刷新令牌")?;
-            if err.error == "invalid_grant" {
-                // refresh token 已失效/被撤销：必须重新走完整登录，区别于可重试的网络失败。
+            if REFRESH_NEEDS_RELOGIN.contains(&err.error.as_str()) {
+                // refresh token 已失效/被撤销，或要求用户回授权页补验证：必须重新走完整登录，
+                // 区别于可重试的网络失败。
                 return Err(AuthError::ReloginRequired);
             }
-            Err(AuthError::OAuth {
-                error: err.error,
-                description: err.error_description,
-            })
+            Err(err.into_error(status, "刷新令牌"))
         })
         .await
     }
 
     /// 从微软 OAuth 令牌走完 XBL/XSTS/Minecraft/profile，得到完整会话。
     pub async fn complete_login(&self, msa: &MsaToken) -> Result<MicrosoftSession> {
+        self.cancellable(self.complete_login_inner(msa)).await
+    }
+
+    async fn complete_login_inner(&self, msa: &MsaToken) -> Result<MicrosoftSession> {
         let xbl = retry_async(&self.retry, || self.xbl_authenticate(&msa.access_token)).await?;
         let xsts = retry_async(&self.retry, || self.xsts_authorize(&xbl.token)).await?;
         let minecraft =
             retry_async(&self.retry, || self.login_with_xbox(&xsts.uhs, &xsts.token)).await?;
-        let profile = retry_async(&self.retry, || self.fetch_profile(&minecraft.access_token)).await?;
+        let (profile, skin) =
+            retry_async(&self.retry, || self.fetch_profile(&minecraft.access_token)).await?;
         Ok(MicrosoftSession {
             profile,
             minecraft_expires_at: now_unix().saturating_add(minecraft.expires_in),
             minecraft_token: minecraft.access_token,
             refresh_token: msa.refresh_token.clone(),
+            skin,
+            xuid: xsts.xid,
         })
-    }
-
-    /// 刷新令牌并走完令牌链，得到可直接启动的会话（含轮换后的 refresh token）。
-    pub async fn refresh_session(&self, refresh_token: &str) -> Result<MicrosoftSession> {
-        let msa = self.refresh(refresh_token).await?;
-        self.complete_login(&msa).await
     }
 
     async fn xbl_authenticate(&self, msa_access_token: &str) -> Result<XblToken> {
@@ -255,6 +310,9 @@ impl MicrosoftAuth {
         let (status, text) = self
             .send_json(&self.endpoints.xbl_authenticate, &body, "XBL 认证")
             .await?;
+        if let Some(err) = service_unavailable(status, "XBL 认证") {
+            return Err(err);
+        }
         if !status.is_success() {
             return Err(AuthError::Response {
                 context: "XBL 认证",
@@ -280,6 +338,9 @@ impl MicrosoftAuth {
         let (status, text) = self
             .send_json(&self.endpoints.xsts_authorize, &body, "XSTS 授权")
             .await?;
+        if let Some(err) = service_unavailable(status, "XSTS 授权") {
+            return Err(err);
+        }
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             let err: XstsErrorBody = parse(&text, "XSTS 授权")?;
             return Err(map_xerr(err.xerr));
@@ -292,18 +353,38 @@ impl MicrosoftAuth {
         }
         let parsed: XboxAuthResponse = parse(&text, "XSTS 授权")?;
         let uhs = parsed.first_uhs("XSTS 授权")?;
+        let xid = parsed
+            .display_claims
+            .xui
+            .first()
+            .and_then(|x| x.xid.clone());
         Ok(XstsToken {
             token: parsed.token,
             uhs,
+            xid,
         })
     }
 
     async fn login_with_xbox(&self, uhs: &str, xsts_token: &str) -> Result<MinecraftToken> {
-        let url = format!("{}/authentication/login_with_xbox", self.endpoints.minecraft_base);
+        let url = format!(
+            "{}/authentication/login_with_xbox",
+            self.endpoints.minecraft_base
+        );
         let body = LoginWithXboxRequest {
             identity_token: format!("XBL3.0 x={uhs};{xsts_token}"),
         };
         let (status, text) = self.send_json(&url, &body, "Minecraft 登录").await?;
+        if let Some(err) = service_unavailable(status, "Minecraft 登录") {
+            return Err(err);
+        }
+        // 官方没有公开这个拒绝的响应体结构，只按原文子串认，不依赖 JSON 字段名。
+        if status == StatusCode::FORBIDDEN
+            && text
+                .to_ascii_lowercase()
+                .contains("invalid app registration")
+        {
+            return Err(AuthError::AppNotApproved);
+        }
         if !status.is_success() {
             return Err(AuthError::Response {
                 context: "Minecraft 登录",
@@ -317,7 +398,7 @@ impl MicrosoftAuth {
         })
     }
 
-    async fn fetch_profile(&self, minecraft_token: &str) -> Result<GameProfile> {
+    async fn fetch_profile(&self, minecraft_token: &str) -> Result<(GameProfile, Option<SkinRef>)> {
         let url = format!("{}/minecraft/profile", self.endpoints.minecraft_base);
         let resp = self
             .client
@@ -334,6 +415,9 @@ impl MicrosoftAuth {
         if status == StatusCode::NOT_FOUND {
             return Err(AuthError::MinecraftProfileNotFound);
         }
+        if let Some(err) = service_unavailable(status, "获取游戏档案") {
+            return Err(err);
+        }
         let text = resp.text().await.map_err(|source| AuthError::Http {
             context: "获取游戏档案",
             source,
@@ -345,10 +429,14 @@ impl MicrosoftAuth {
             });
         }
         let body: ProfileBody = parse(&text, "获取游戏档案")?;
-        Ok(GameProfile {
-            id: body.id,
-            name: body.name,
-        })
+        let skin = active_skin(&body.skins);
+        Ok((
+            GameProfile {
+                id: body.id,
+                name: body.name,
+            },
+            skin,
+        ))
     }
 
     async fn send_form(
@@ -394,6 +482,17 @@ impl MicrosoftAuth {
     }
 }
 
+/// 5xx 与 429 判为服务端故障。各端点在故障或限流时的响应体没有文档，只能按状态码类别认。
+/// Yggdrasil 客户端同样用它：皮肤站故障时回的多半也是 HTML 故障页。
+pub(crate) fn service_unavailable(status: StatusCode, step: &'static str) -> Option<AuthError> {
+    (status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS).then(|| {
+        AuthError::ServiceUnavailable {
+            step,
+            status: status.as_u16(),
+        }
+    })
+}
+
 /// 把 XSTS 的 XErr 错误码映射为带中文说明的错误变体。
 fn map_xerr(xerr: i64) -> AuthError {
     match xerr {
@@ -404,6 +503,26 @@ fn map_xerr(xerr: i64) -> AuthError {
         2148916238 => AuthError::XstsChildAccount,
         other => AuthError::XstsUnknown(other),
     }
+}
+
+/// 从档案皮肤列表里取当前启用（`state == "ACTIVE"`）的一张。
+///
+/// 模型名只认 `CLASSIC` 与 `SLIM`；认不出的模型按「没有可用皮肤」处理并记 warn，
+/// 界面随之回落，而不是猜一个体型画错。
+fn active_skin(skins: &[SkinBody]) -> Option<SkinRef> {
+    let active = skins.iter().find(|s| s.state == "ACTIVE")?;
+    let model = match active.variant.as_deref() {
+        Some(v) if v.eq_ignore_ascii_case("CLASSIC") => SkinModel::Wide,
+        Some(v) if v.eq_ignore_ascii_case("SLIM") => SkinModel::Slim,
+        other => {
+            tracing::warn!(variant = ?other, url = %active.url, "档案皮肤的模型名无法识别，不使用这张皮肤");
+            return None;
+        }
+    };
+    Some(SkinRef {
+        url: active.url.clone(),
+        model,
+    })
 }
 
 /// 当前 Unix 秒。
@@ -429,6 +548,7 @@ struct XblToken {
 struct XstsToken {
     token: String,
     uhs: String,
+    xid: Option<String>,
 }
 
 struct MinecraftToken {
@@ -497,6 +617,8 @@ struct DisplayClaims {
 #[derive(serde::Deserialize)]
 struct Xui {
     uhs: String,
+    #[serde(default)]
+    xid: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -521,6 +643,16 @@ struct MinecraftTokenBody {
 struct ProfileBody {
     id: String,
     name: String,
+    #[serde(default)]
+    skins: Vec<SkinBody>,
+}
+
+#[derive(serde::Deserialize)]
+struct SkinBody {
+    state: String,
+    url: String,
+    #[serde(default)]
+    variant: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -545,6 +677,23 @@ struct OAuthErrorBody {
     error: String,
     #[serde(default)]
     error_description: String,
+}
+
+impl OAuthErrorBody {
+    /// 翻成错误。`temporarily_unavailable` 是令牌端点在说自己太忙，与 5xx 是一回事，只是可能走 4xx，
+    /// 只能认错误名；退避用完仍是它时要报服务故障，落成 OAuth 的话续期给不出对应的失败码。
+    fn into_error(self, status: StatusCode, step: &'static str) -> AuthError {
+        if self.error == OAUTH_TEMPORARILY_UNAVAILABLE {
+            return AuthError::ServiceUnavailable {
+                step,
+                status: status.as_u16(),
+            };
+        }
+        AuthError::OAuth {
+            error: self.error,
+            description: self.error_description,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -615,16 +764,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn poll_returns_token_after_pending() {
         let server = MockServer::start().await;
-        // 成功响应先挂（作为兜底）；pending 后挂且限一次——wiremock 后挂优先，故首次得 pending。
-        Mock::given(method("POST"))
-            .and(path("/token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "access_token": "AT",
-                "refresh_token": "RT",
-                "expires_in": 3600
-            })))
-            .mount(&server)
-            .await;
+        // wiremock 按挂载顺序取第一个仍能匹配的 mock：限一次的 pending 先挂，成功响应后挂作兜底，
+        // 于是第一次轮询得 pending、第二次得令牌。
         Mock::given(method("POST"))
             .and(path("/token"))
             .respond_with(ResponseTemplate::new(400).set_body_json(json!({
@@ -634,15 +775,73 @@ mod tests {
             .up_to_n_times(1)
             .mount(&server)
             .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "AT",
+                "refresh_token": "RT",
+                "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
 
-        // interval=0：pending 后立即再轮询，测试不引入真实等待。
+        // interval=0：间隔按下限 1 s 计，pending 之后至少等满 1 s 才发第二次轮询，
+        // 不会退化成紧循环。删掉下限，这里的耗时断言即挂。
+        let started = Instant::now();
         let token = auth_for(&server)
             .poll_device_code(&device(900, 0))
             .await
             .unwrap();
+        assert!(
+            started.elapsed() >= MIN_POLL_INTERVAL,
+            "两次轮询之间只隔了 {:?}",
+            started.elapsed()
+        );
         assert_eq!(token.access_token, "AT");
         assert_eq!(token.refresh_token, "RT");
         assert_eq!(token.expires_in, 3600);
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_during_polling_returns_cancelled_promptly() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "authorization_pending",
+                "error_description": "等待用户授权"
+            })))
+            .mount(&server)
+            .await;
+
+        let token = CancellationToken::new();
+        let auth = auth_for(&server).with_cancel(token.clone());
+        let trigger = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            trigger.cancel();
+        });
+
+        // 间隔 5 s：若取消没有打断等待，至少要 5 s 才会返回。
+        let interval = Duration::from_secs(5);
+        let started = Instant::now();
+        let err = auth
+            .poll_device_code(&device(900, interval.as_secs()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Cancelled), "得到 {err:?}");
+        assert!(
+            started.elapsed() < interval,
+            "取消后过了 {:?} 才返回",
+            started.elapsed()
+        );
+
+        // 已取消的令牌：后续任何一步都不再发请求。
+        let before = server.received_requests().await.unwrap().len();
+        let err = auth.begin_device_code().await.unwrap_err();
+        assert!(matches!(err, AuthError::Cancelled));
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -719,7 +918,12 @@ mod tests {
             .and(header("authorization", "Bearer MC-TOKEN"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": "0123456789abcdef0123456789abcdef",
-                "name": "AuroraPlayer"
+                "name": "AuroraPlayer",
+                "skins": [
+                    { "id": "old", "state": "INACTIVE", "url": "http://textures.minecraft.net/texture/old", "variant": "CLASSIC" },
+                    { "id": "new", "state": "ACTIVE", "url": "http://textures.minecraft.net/texture/new", "variant": "SLIM" }
+                ],
+                "capes": []
             })))
             .mount(&server)
             .await;
@@ -736,6 +940,86 @@ mod tests {
         assert_eq!(session.refresh_token, "rotated-refresh");
         // 到期时间应落在未来（now + 86400 附近）。
         assert!(session.minecraft_expires_at >= now_unix() + 86000);
+        // 只取启用中的那张皮肤，模型 SLIM 映射为细臂。
+        assert_eq!(
+            session.skin,
+            Some(SkinRef {
+                url: "http://textures.minecraft.net/texture/new".into(),
+                model: SkinModel::Slim,
+            })
+        );
+        // 这个 XSTS 响应没有 xid：xuid 如实为 None，而不是空串。
+        assert_eq!(session.xuid, None);
+    }
+
+    #[test]
+    fn active_skin_maps_models_and_rejects_unknown_variants() {
+        let skin = |state: &str, variant: Option<&str>| SkinBody {
+            state: state.into(),
+            url: format!("http://t/{state}"),
+            variant: variant.map(Into::into),
+        };
+        assert_eq!(
+            active_skin(&[skin("ACTIVE", Some("CLASSIC"))])
+                .unwrap()
+                .model,
+            SkinModel::Wide
+        );
+        assert_eq!(
+            active_skin(&[skin("ACTIVE", Some("slim"))]).unwrap().model,
+            SkinModel::Slim
+        );
+        assert_eq!(active_skin(&[skin("INACTIVE", Some("SLIM"))]), None);
+        assert_eq!(active_skin(&[skin("ACTIVE", Some("GIANT"))]), None);
+        assert_eq!(active_skin(&[skin("ACTIVE", None)]), None);
+        assert_eq!(active_skin(&[]), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xsts_xid_is_carried_into_the_session() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/xbl"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "Token": "xbl-token",
+                "DisplayClaims": { "xui": [ { "uhs": "uhs" } ] }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/xsts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "Token": "xsts-tok",
+                "DisplayClaims": { "xui": [ { "uhs": "uhs", "xid": "2535400000000001" } ] }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/authentication/login_with_xbox"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "MC-TOKEN",
+                "expires_in": 86400
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/minecraft/profile"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "0123456789abcdef0123456789abcdef",
+                "name": "AuroraPlayer"
+            })))
+            .mount(&server)
+            .await;
+
+        let msa = MsaToken {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_in: 3600,
+        };
+        let session = auth_for(&server).complete_login(&msa).await.unwrap();
+        assert_eq!(session.xuid.as_deref(), Some("2535400000000001"));
+        // 档案没有 skins 字段：没有皮肤，不报错。
+        assert_eq!(session.skin, None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -830,6 +1114,558 @@ mod tests {
         // 需重登，而非网络失败：明确区分。
         assert!(matches!(err, AuthError::ReloginRequired));
         assert!(!err.is_retryable());
+    }
+
+    /// 令牌端点要求用户回到授权页（补一步验证、重新同意）时，refresh token 本身再也换不出令牌，
+    /// 补救办法与 invalid_grant 相同：只能重新登录。别的 OAuth 错误不是凭据失效，照旧原样上报。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_rejections_that_need_user_interaction_require_relogin() {
+        for error in ["interaction_required", "consent_required"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                    "error": error,
+                    "error_description": "AADSTS50076: 需要额外的验证"
+                })))
+                .mount(&server)
+                .await;
+            let err = auth_for(&server)
+                .refresh("stale-refresh")
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, AuthError::ReloginRequired),
+                "{error} 应判为需重登，得到 {err:?}"
+            );
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "invalid_scope",
+                "error_description": "AADSTS70011"
+            })))
+            .mount(&server)
+            .await;
+        let err = auth_for(&server).refresh("r").await.unwrap_err();
+        assert!(
+            matches!(&err, AuthError::OAuth { error, .. } if error == "invalid_scope"),
+            "得到 {err:?}"
+        );
+    }
+
+    fn three_attempts() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 3,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            jitter: false,
+        }
+    }
+
+    fn msa() -> MsaToken {
+        MsaToken {
+            access_token: "a".into(),
+            refresh_token: "r".into(),
+            expires_in: 3600,
+        }
+    }
+
+    async fn hits(server: &MockServer, at: &str) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == at)
+            .count()
+    }
+
+    async fn mount_xbl_ok(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/xbl"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "Token": "xbl-token",
+                "DisplayClaims": { "xui": [ { "uhs": "uhs" } ] }
+            })))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_xsts_ok(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/xsts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "Token": "xsts-tok",
+                "DisplayClaims": { "xui": [ { "uhs": "uhs" } ] }
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xsts_outage_is_retried_then_reported_as_service_unavailable() {
+        let server = MockServer::start().await;
+        mount_xbl_ok(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/xsts"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
+            .mount(&server)
+            .await;
+
+        let err = auth_for(&server)
+            .with_retry(three_attempts())
+            .complete_login(&msa())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthError::ServiceUnavailable {
+                    step: "XSTS 授权",
+                    status: 503
+                }
+            ),
+            "得到 {err:?}"
+        );
+        assert!(err.is_retryable());
+        // 按退避把三次机会用满；不可重试的话这里只有 1 次。
+        assert_eq!(hits(&server, "/xsts").await, 3);
+        // XBL 第一次就成功，不应被连带重试。
+        assert_eq!(hits(&server, "/xbl").await, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_outage_html_page_is_service_unavailable_not_parse() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .set_body_string("<html><body><h1>Service Unavailable</h1></body></html>"),
+            )
+            .mount(&server)
+            .await;
+
+        let err = auth_for(&server).refresh("old-refresh").await.unwrap_err();
+        assert!(!matches!(err, AuthError::Parse { .. }), "得到 {err:?}");
+        assert!(
+            matches!(
+                err,
+                AuthError::ServiceUnavailable {
+                    step: "刷新令牌",
+                    status: 503
+                }
+            ),
+            "得到 {err:?}"
+        );
+    }
+
+    /// 令牌端点忙（`temporarily_unavailable`）是瞬时状况，微软给的处理办法是稍等后重试：
+    /// 刷新与设备码轮询都该按退避策略再来一次，而不是把一次服务端抖动报成登录失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn temporarily_unavailable_token_endpoint_is_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+                "error": "temporarily_unavailable",
+                "error_description": "AADSTS90033: 服务暂时不可用"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "AT", "refresh_token": "RT2", "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+        let two_attempts = RetryPolicy {
+            max_attempts: 2,
+            ..no_retry()
+        };
+
+        let token = auth_for(&server)
+            .with_retry(two_attempts.clone())
+            .refresh("r")
+            .await
+            .unwrap();
+        assert_eq!(token.refresh_token, "RT2");
+
+        // 轮询途中撞上一次同样的抖动，登录照常完成。
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+                "error": "temporarily_unavailable",
+                "error_description": "AADSTS90033"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "AT", "refresh_token": "RT3", "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+        let token = auth_for(&server)
+            .with_retry(two_attempts)
+            .poll_device_code(&device(900, 1))
+            .await
+            .unwrap();
+        assert_eq!(token.refresh_token, "RT3");
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    /// 503 在解析响应体之前就判成了服务故障；令牌端点用 4xx 回 `temporarily_unavailable` 时认的是错误名，
+    /// 同样要按退避再来一次，不能落成一次性的 OAuth 失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn busy_token_endpoint_below_5xx_is_retried_by_its_error_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "temporarily_unavailable",
+                "error_description": "AADSTS90033"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "AT", "refresh_token": "RT2", "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+
+        let token = auth_for(&server)
+            .with_retry(three_attempts())
+            .refresh("r")
+            .await
+            .unwrap();
+        assert_eq!(token.refresh_token, "RT2");
+        assert_eq!(hits(&server, "/token").await, 2);
+    }
+
+    /// 退避用完还在忙就是服务故障：启动续期靠这个错误落成 account_service_down，失败卡才给得出
+    /// 「以离线方式进单人」；落成 OAuth 的话账户失败记录里没有它，只剩一句原文。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn token_endpoint_that_stays_busy_is_a_service_outage() {
+        let server = MockServer::start().await;
+        let busy = ResponseTemplate::new(400).set_body_json(json!({
+            "error": "temporarily_unavailable",
+            "error_description": "AADSTS90033"
+        }));
+        for endpoint in ["/token", "/devicecode"] {
+            Mock::given(method("POST"))
+                .and(path(endpoint))
+                .respond_with(busy.clone())
+                .mount(&server)
+                .await;
+        }
+        let auth = auth_for(&server).with_retry(three_attempts());
+
+        let refresh = auth.refresh("r").await.unwrap_err();
+        assert!(
+            matches!(
+                refresh,
+                AuthError::ServiceUnavailable {
+                    step: "刷新令牌",
+                    status: 400
+                }
+            ),
+            "得到 {refresh:?}"
+        );
+        assert_eq!(hits(&server, "/token").await, 3);
+
+        let poll = auth.poll_device_code(&device(900, 1)).await.unwrap_err();
+        assert!(
+            matches!(
+                poll,
+                AuthError::ServiceUnavailable {
+                    step: "轮询设备码令牌",
+                    status: 400
+                }
+            ),
+            "得到 {poll:?}"
+        );
+
+        let begin = auth.begin_device_code().await.unwrap_err();
+        assert!(
+            matches!(
+                begin,
+                AuthError::ServiceUnavailable {
+                    step: "请求设备码",
+                    status: 400
+                }
+            ),
+            "得到 {begin:?}"
+        );
+        assert_eq!(hits(&server, "/devicecode").await, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn device_code_outage_is_service_unavailable() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/devicecode"))
+            .respond_with(
+                ResponseTemplate::new(502)
+                    .insert_header("content-type", "text/html")
+                    .set_body_string("<html>Bad Gateway</html>"),
+            )
+            .mount(&server)
+            .await;
+
+        let err = auth_for(&server).begin_device_code().await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthError::ServiceUnavailable {
+                    step: "请求设备码",
+                    status: 502
+                }
+            ),
+            "得到 {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn polling_outage_is_retried_then_reported_not_waited_out() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(503)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({
+                        "error": "temporarily_unavailable",
+                        "error_description": "AADSTS90033"
+                    })),
+            )
+            .mount(&server)
+            .await;
+
+        let err = auth_for(&server)
+            .with_retry(three_attempts())
+            .poll_device_code(&device(900, 0))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthError::ServiceUnavailable {
+                    step: "轮询设备码令牌",
+                    status: 503
+                }
+            ),
+            "得到 {err:?}"
+        );
+        assert_eq!(hits(&server, "/token").await, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn xbl_status_boundaries_split_outage_from_rejection() {
+        // 499 与 403 是客户端一侧的拒绝，重试无益，仍按协议错误报；500 与 599 是服务端故障。
+        for status in [403_u16, 499, 500, 599] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/xbl"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("{}"))
+                .mount(&server)
+                .await;
+
+            let err = auth_for(&server)
+                .with_retry(three_attempts())
+                .complete_login(&msa())
+                .await
+                .unwrap_err();
+            let attempts = hits(&server, "/xbl").await;
+            if status >= 500 {
+                assert!(
+                    matches!(err, AuthError::ServiceUnavailable { step: "XBL 认证", status: s } if s == status),
+                    "HTTP {status} 得到 {err:?}"
+                );
+                assert_eq!(attempts, 3, "HTTP {status}");
+            } else {
+                assert!(
+                    matches!(&err, AuthError::Response { context: "XBL 认证", detail } if detail.contains(&status.to_string())),
+                    "HTTP {status} 得到 {err:?}"
+                );
+                assert_eq!(attempts, 1, "HTTP {status}");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn profile_throttling_is_service_unavailable_but_neighbours_are_not() {
+        for (status, want_outage) in [(429_u16, true), (428, false), (430, false)] {
+            let server = MockServer::start().await;
+            mount_full_chain(&server, "uhs", "xsts-tok").await;
+            Mock::given(method("GET"))
+                .and(path("/minecraft/profile"))
+                .respond_with(ResponseTemplate::new(status).set_body_string("Too Many Requests"))
+                .mount(&server)
+                .await;
+
+            let err = auth_for(&server).complete_login(&msa()).await.unwrap_err();
+            if want_outage {
+                assert!(
+                    matches!(
+                        err,
+                        AuthError::ServiceUnavailable {
+                            step: "获取游戏档案",
+                            status: 429
+                        }
+                    ),
+                    "HTTP {status} 得到 {err:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        err,
+                        AuthError::Response {
+                            context: "获取游戏档案",
+                            ..
+                        }
+                    ),
+                    "HTTP {status} 得到 {err:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn minecraft_login_server_error_is_service_unavailable() {
+        let server = MockServer::start().await;
+        mount_xbl_ok(&server).await;
+        mount_xsts_ok(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/authentication/login_with_xbox"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
+            .mount(&server)
+            .await;
+
+        let err = auth_for(&server).complete_login(&msa()).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthError::ServiceUnavailable {
+                    step: "Minecraft 登录",
+                    status: 500
+                }
+            ),
+            "得到 {err:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_grant_and_missing_profile_keep_their_meaning() {
+        // 服务端故障判定不能吞掉这两个确定性结论。
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "invalid_grant",
+                "error_description": "AADSTS70000"
+            })))
+            .mount(&server)
+            .await;
+        let err = auth_for(&server)
+            .with_retry(three_attempts())
+            .refresh("dead")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::ReloginRequired), "得到 {err:?}");
+        assert_eq!(hits(&server, "/token").await, 1);
+
+        let server = MockServer::start().await;
+        mount_full_chain(&server, "uhs", "xsts-tok").await;
+        Mock::given(method("GET"))
+            .and(path("/minecraft/profile"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("<html>Not Found</html>"))
+            .mount(&server)
+            .await;
+        let err = auth_for(&server).complete_login(&msa()).await.unwrap_err();
+        assert!(
+            matches!(err, AuthError::MinecraftProfileNotFound),
+            "得到 {err:?}"
+        );
+    }
+
+    /// 挂上 XBL/XSTS 成功，login_with_xbox 按给定状态与响应体回应。
+    async fn mount_login_rejection(server: &MockServer, status: u16, body: &str) {
+        mount_xbl_ok(server).await;
+        mount_xsts_ok(server).await;
+        Mock::given(method("POST"))
+            .and(path("/authentication/login_with_xbox"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body.to_owned()))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_app_registration_is_app_not_approved_and_not_retried() {
+        let server = MockServer::start().await;
+        mount_login_rejection(
+            &server,
+            403,
+            r#"{"path":"/authentication/login_with_xbox","errorMessage":"Invalid app registration, see https://aka.ms/AppRegInfo for more information"}"#,
+        )
+        .await;
+
+        let err = auth_for(&server)
+            .with_retry(three_attempts())
+            .complete_login(&msa())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::AppNotApproved), "得到 {err:?}");
+        assert!(!err.is_retryable());
+        assert_eq!(hits(&server, "/authentication/login_with_xbox").await, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_app_registration_is_matched_case_insensitively_in_plain_text() {
+        let server = MockServer::start().await;
+        mount_login_rejection(&server, 403, "Forbidden: INVALID APP REGISTRATION").await;
+
+        let err = auth_for(&server).complete_login(&msa()).await.unwrap_err();
+        assert!(matches!(err, AuthError::AppNotApproved), "得到 {err:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn other_login_rejections_stay_response_errors() {
+        // 403 但不是应用审批问题；400 带同样字样也不算，只有 403 才是这个拒绝。
+        for (status, body) in [
+            (
+                403_u16,
+                r#"{"path":"/authentication/login_with_xbox","errorMessage":"Forbidden"}"#,
+            ),
+            (400, "Invalid app registration"),
+        ] {
+            let server = MockServer::start().await;
+            mount_login_rejection(&server, status, body).await;
+
+            let err = auth_for(&server)
+                .with_retry(three_attempts())
+                .complete_login(&msa())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, AuthError::Response { context: "Minecraft 登录", detail } if detail.contains(&status.to_string())),
+                "HTTP {status} 得到 {err:?}"
+            );
+            assert_eq!(hits(&server, "/authentication/login_with_xbox").await, 1);
+        }
     }
 
     #[test]

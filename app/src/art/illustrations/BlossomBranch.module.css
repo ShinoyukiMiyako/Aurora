@@ -1,0 +1,32 @@
+.branch {
+  position: relative;
+  flex: none;
+  pointer-events: none;
+}
+
+.branch[data-mirror] {
+  transform: scaleX(-1);
+}
+
+.branch[data-dim] {
+  opacity: 0.5;
+}
+
+.art {
+  position: absolute;
+  inset: 0;
+  display: block;
+  overflow: visible;
+}
+
+.wood {
+  fill: var(--sk-wood);
+}
+
+.bud {
+  fill: var(--sk-accent-2);
+}
+
+.petal {
+  position: absolute;
+}

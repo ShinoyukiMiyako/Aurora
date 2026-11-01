@@ -1,0 +1,8 @@
+.title {
+  padding: var(--sk-space-3) var(--sk-space-4);
+  margin: 0 auto;
+  border-radius: calc(var(--sk-radius) - 1px);
+  color: currentColor;
+  display: flex;
+  width: 120px;
+}

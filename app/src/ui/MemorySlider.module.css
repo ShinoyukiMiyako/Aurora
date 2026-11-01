@@ -1,0 +1,23 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 占用说明：刻度行下方 8px */
+.usage {
+  margin: var(--sk-space-8) 0 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+.usage[data-tone="warn"],
+.usage [data-tone="warn"] {
+  color: var(--sk-warn);
+}
+
+/* 警示说明：卡片内的局部提示，与占用说明隔 10px */
+.callout {
+  margin-top: var(--sk-space-10);
+}

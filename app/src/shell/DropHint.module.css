@@ -1,0 +1,40 @@
+/* 盖住侧栏与主列、在通知与浮层之下；内缩 8px，不压到窗口内缘的缩放命中区 */
+.hint {
+  position: absolute;
+  inset: var(--sk-space-8);
+  z-index: var(--sk-z-drop);
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--sk-accent-line);
+  border-radius: var(--sk-r-xl);
+  background: var(--sk-accent-soft);
+  pointer-events: none;
+}
+
+.label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-10);
+  padding: var(--sk-space-12) var(--sk-space-20);
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-surface);
+  box-shadow: var(--sk-shadow);
+  color: var(--sk-text);
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  font-weight: var(--sk-w-medium);
+}
+
+.label > svg {
+  color: var(--sk-accent-strong);
+}
+
+/* 只给读屏：不占位、不可见，但留在可访问性树里 */
+.announcer {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

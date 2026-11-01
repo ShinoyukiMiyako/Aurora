@@ -1,0 +1,81 @@
+.thumb {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+/* ---- 已加载：底色垫在透明图标之下，内描边叠在图片之上，分开白底图标与白卡片 ---- */
+.thumb[data-view="image"] {
+  background: var(--sk-bg-2);
+}
+
+.thumb[data-view="image"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px var(--sk-line);
+  pointer-events: none;
+}
+
+.image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  animation: reveal var(--sk-dur-reveal) var(--sk-ease-out);
+}
+
+.image[data-pixel] {
+  image-rendering: pixelated;
+}
+
+@keyframes reveal {
+  from {
+    opacity: 0;
+  }
+}
+
+/* ---- 无图 / 失败：色相底座 + 类型图标 ---- */
+.thumb[data-view="fallback"] {
+  /* sk-guard-allow T1: 色相底座公式，分量全部来自令牌 */
+  background: hsl(var(--hue) var(--sk-hue-s) var(--sk-hue-l));
+  /* sk-guard-allow T1: 色相底座内描边 */
+  box-shadow: inset 0 0 0 1px hsl(var(--hue) var(--sk-hue-edge-s) var(--sk-hue-edge-l));
+  /* sk-guard-allow T1: 底座上的类型图标色 */
+  color: hsl(var(--hue) var(--sk-hue-glyph-s) var(--sk-hue-glyph-l));
+}
+
+/* ---- 加载中：同形骨架，光带横扫；减少动画时静止。还在视口外没开始加载时只有底色 ---- */
+.thumb[data-view="pending"],
+.thumb[data-view="loading"] {
+  background: var(--sk-bg-2);
+}
+
+.thumb[data-view="loading"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--sk-bg-3), transparent);
+  transform: translateX(-100%);
+  animation: shimmer var(--sk-loop-shimmer) linear infinite;
+}
+
+:global([data-sk-reduced]) .thumb[data-view="loading"]::after {
+  animation: none;
+  opacity: 0;
+}
+
+@keyframes shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* ---- 内容失效 ---- */
+.thumb[data-inactive] {
+  filter: grayscale(0.8);
+  opacity: 0.5;
+}

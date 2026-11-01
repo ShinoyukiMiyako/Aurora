@@ -42,29 +42,40 @@ pub struct LoaderInfo {
 pub fn detect_loaders(version: &VersionJson) -> Vec<LoaderInfo> {
     let tokens = arg_tokens(version);
     let mut out = Vec::new();
+    let neoforge_libs = has_group(version, "net.neoforged");
+    // NeoForge 1.20.1（47.x）是 Forge 的分支：坐标是 net.neoforged:forge，启动参数也用 Forge 那几个。
+    let neoforge_fork = find_lib_version(version, "net.neoforged", "forge").is_some()
+        || flag_value(&tokens, "--fml.forgeGroup").as_deref() == Some("net.neoforged");
 
     // Forge：forge/fmlloader 库版本含 mc 前缀需剥离；退而用 --fml.forgeVersion，或 FMLTweaker 特征串。
+    // 组名只在没有 NeoForge 库时算数：NeoForge 也依赖这个组的工具库（srgutils、unsafe）。
     let forge_version = find_lib_version(version, "net.minecraftforge", "forge")
         .or_else(|| find_lib_version(version, "net.minecraftforge", "fmlloader"))
         .map(|v| strip_mc_prefix(&v))
         .or_else(|| flag_value(&tokens, "--fml.forgeVersion"));
-    let forge_present = forge_version.is_some()
-        || has_group(version, "net.minecraftforge")
-        || tokens
-            .iter()
-            .any(|t| t.contains("FMLTweaker") || t.contains("fml.common.launcher"));
+    let forge_present = !neoforge_fork
+        && (forge_version.is_some()
+            || (has_group(version, "net.minecraftforge") && !neoforge_libs)
+            || tokens
+                .iter()
+                .any(|t| t.contains("FMLTweaker") || t.contains("fml.common.launcher")));
     if forge_present {
         out.push(LoaderInfo {
             kind: LoaderKind::Forge,
-            version: forge_version,
+            version: forge_version.clone(),
         });
     }
 
-    // NeoForge：net.neoforged 组，版本可能带 mc 前缀。
+    // NeoForge：neoforge 坐标不带 mc 前缀，`-beta` 是版本号的一部分，不能当前缀剥；1.20.1 沿用 Forge 的
+    // 坐标名，版本号在 `net.neoforged:forge:<mc>-<版本>` 里；只靠 --fml.forgeGroup 认出的分支没有这个坐标，
+    // 版本号落在 Forge 的位置上。
     let neoforge_version = find_lib_version(version, "net.neoforged", "neoforge")
-        .map(|v| strip_mc_prefix(&v))
-        .or_else(|| flag_value(&tokens, "--fml.neoForgeVersion"));
-    let neoforge_present = neoforge_version.is_some() || has_group(version, "net.neoforged");
+        .or_else(|| flag_value(&tokens, "--fml.neoForgeVersion"))
+        .or_else(|| {
+            find_lib_version(version, "net.neoforged", "forge").map(|v| strip_mc_prefix(&v))
+        })
+        .or_else(|| forge_version.filter(|_| neoforge_fork));
+    let neoforge_present = neoforge_version.is_some() || neoforge_libs || neoforge_fork;
     if neoforge_present {
         out.push(LoaderInfo {
             kind: LoaderKind::NeoForge,
@@ -102,7 +113,9 @@ pub fn detect_loaders(version: &VersionJson) -> Vec<LoaderInfo> {
     let optifine_version = find_lib_version(version, "optifine", "OptiFine");
     let optifine_present = optifine_version.is_some()
         || has_group(version, "optifine")
-        || tokens.iter().any(|t| t.contains("optifine.OptiFineTweaker"));
+        || tokens
+            .iter()
+            .any(|t| t.contains("optifine.OptiFineTweaker"));
     if optifine_present {
         out.push(LoaderInfo {
             kind: LoaderKind::OptiFine,
@@ -259,6 +272,148 @@ mod tests {
         );
         // 不能把 NeoForge 误判成 Forge。
         assert!(!loaders.iter().any(|l| l.kind == LoaderKind::Forge));
+    }
+
+    /// 重新安装加载器照探测出的版本号拼安装器地址：`-beta` 是版本号的一部分，剥成 `beta` 就下不到安装器。
+    #[test]
+    fn detect_neoforge_keeps_the_beta_suffix() {
+        let ver = v(r#"{
+            "id":"neoforge-21.0.167-beta","inheritsFrom":"1.21",
+            "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments":{"game":["--fml.neoForgeVersion","21.0.167-beta"],"jvm":[]},
+            "libraries":[{"name":"net.neoforged:neoforge:21.0.167-beta:universal"}]
+        }"#);
+        assert_eq!(
+            detect_loaders(&ver),
+            vec![LoaderInfo {
+                kind: LoaderKind::NeoForge,
+                version: Some("21.0.167-beta".into())
+            }]
+        );
+    }
+
+    /// 1.20.1 的 NeoForge 沿用 Forge 的坐标名：启动参数没带 --fml.forgeVersion 时版本号只在
+    /// `net.neoforged:forge` 的坐标里，读不出来重新安装就装不回去。
+    #[test]
+    fn detect_neoforge_on_1_20_1_reads_its_forge_coordinate() {
+        let ver = v(r#"{
+            "id":"1.20.1-forge-47.1.106","inheritsFrom":"1.20.1",
+            "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments":{"game":["--fml.forgeGroup","net.neoforged"],"jvm":[]},
+            "libraries":[{"name":"net.neoforged:forge:1.20.1-47.1.106:universal"}]
+        }"#);
+        assert_eq!(
+            detect_loaders(&ver),
+            vec![LoaderInfo {
+                kind: LoaderKind::NeoForge,
+                version: Some("47.1.106".into())
+            }]
+        );
+    }
+
+    /// 真实的 NeoForge 版本 JSON 依赖 net.minecraftforge 组的工具库（1.21.1 有 srgutils，1.20.4 还多一个
+    /// unsafe）。多报一个 Forge 的后果在下游：Forge 专用的 jar 判成兼容、前置选中 Forge 版、导出整合包被
+    /// 「不止一种加载器」拦下。
+    #[test]
+    fn forge_group_utility_libs_do_not_make_neoforge_a_forge_instance() {
+        let cases = [
+            (
+                "21.1.265",
+                "1.21.1",
+                r#"[{"name":"net.neoforged.fancymodloader:loader:4.0.45"},
+                    {"name":"net.neoforged:bus:8.0.5"},
+                    {"name":"net.minecraftforge:srgutils:0.4.15"}]"#,
+            ),
+            (
+                "20.4.253",
+                "1.20.4",
+                r#"[{"name":"net.neoforged.fancymodloader:loader:2.0.17@jar"},
+                    {"name":"net.neoforged:bus:7.2.0@jar"},
+                    {"name":"net.minecraftforge:unsafe:0.2.0@jar"},
+                    {"name":"net.minecraftforge:srgutils:0.4.15@jar"}]"#,
+            ),
+        ];
+        for (neoforge, mc, libraries) in cases {
+            let ver = v(&format!(
+                r#"{{"id":"nf","mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+                    "arguments":{{"game":["--fml.neoForgeVersion","{neoforge}","--fml.mcVersion","{mc}",
+                                          "--launchTarget","forgeclient"],"jvm":[]}},
+                    "libraries":{libraries}}}"#
+            ));
+            assert_eq!(
+                detect_loaders(&ver),
+                vec![LoaderInfo {
+                    kind: LoaderKind::NeoForge,
+                    version: Some(neoforge.into())
+                }],
+                "NeoForge {neoforge}"
+            );
+        }
+    }
+
+    /// NeoForge 1.20.1（47.x）沿用 Forge 的坐标和启动参数，组名是 net.neoforged：只报 NeoForge，版本从 Forge
+    /// 的位置取。多报一个 Forge 的后果和工具库那条一样：导出被拦，Forge 专用的 jar 判成兼容。
+    #[test]
+    fn neoforge_1_20_1_is_not_reported_as_forge() {
+        let by_library = v(r#"{
+            "id":"1.20.1-forge-47.1.106","inheritsFrom":"1.20.1",
+            "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments":{"game":["--launchTarget","forgeclient","--fml.forgeVersion","47.1.106",
+                                 "--fml.mcVersion","1.20.1"],"jvm":[]},
+            "libraries":[{"name":"net.neoforged:forge:1.20.1-47.1.106:universal"}]
+        }"#);
+        let by_group_flag = v(r#"{
+            "id":"1.20.1-forge-47.1.106","inheritsFrom":"1.20.1",
+            "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments":{"game":["--launchTarget","forgeclient","--fml.forgeVersion","47.1.106",
+                                 "--fml.mcVersion","1.20.1","--fml.forgeGroup","net.neoforged"],"jvm":[]},
+            "libraries":[{"name":"net.minecraftforge:fmlloader:1.20.1-47.1.106"}]
+        }"#);
+        for ver in [by_library, by_group_flag] {
+            assert_eq!(
+                detect_loaders(&ver),
+                vec![LoaderInfo {
+                    kind: LoaderKind::NeoForge,
+                    version: Some("47.1.106".into())
+                }]
+            );
+        }
+    }
+
+    /// Forge 自己的版本同样写 --fml.forgeGroup，组名是 net.minecraftforge，不能被上面那条带走。
+    #[test]
+    fn forge_with_its_own_group_flag_stays_forge() {
+        let ver = v(r#"{
+            "id":"1.20.1-forge-47.2.0","inheritsFrom":"1.20.1",
+            "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments":{"game":["--fml.forgeVersion","47.2.0","--fml.mcVersion","1.20.1",
+                                 "--fml.forgeGroup","net.minecraftforge"],"jvm":[]},
+            "libraries":[{"name":"net.minecraftforge:fmlloader:1.20.1-47.2.0"}]
+        }"#);
+        assert_eq!(
+            detect_loaders(&ver),
+            vec![LoaderInfo {
+                kind: LoaderKind::Forge,
+                version: Some("47.2.0".into())
+            }]
+        );
+    }
+
+    /// 只有 net.minecraftforge 组的库、没有 forge 本体坐标的旧版本（1.6 的 minecraftforge 库）仍然是 Forge。
+    #[test]
+    fn forge_group_alone_still_means_forge() {
+        let ver = v(r#"{
+            "id":"1.6.4-Forge9.11.1.1345","inheritsFrom":"1.6.4",
+            "mainClass":"net.minecraft.launchwrapper.Launch",
+            "libraries":[{"name":"net.minecraftforge:minecraftforge:9.11.1.1345"}]
+        }"#);
+        assert_eq!(
+            detect_loaders(&ver),
+            vec![LoaderInfo {
+                kind: LoaderKind::Forge,
+                version: None
+            }]
+        );
     }
 
     #[test]

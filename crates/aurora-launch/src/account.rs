@@ -26,7 +26,8 @@ pub struct AuthValues {
     pub access_token: String,
     /// 账户类型（`${user_type}`）：微软走 `msa`，离线走 `legacy`。
     pub user_type: String,
-    /// Xbox 用户 id（`${auth_xuid}`）。当前账户模型未持有，默认空串，可由调用方补。
+    /// Xbox 用户 id（`${auth_xuid}`）。微软账户取登录链给出的值；离线、外置账户与登录链没给出时
+    /// 为空值：版本模板里 `--xuid` 后面必须跟一个参数位，游戏侧把空值当作「没有 Xbox 身份」。
     pub xuid: String,
     /// 启动器 client id（`${clientid}`）。默认空串，可由调用方补。
     pub client_id: String,
@@ -64,7 +65,9 @@ impl AuthValues {
             }
             AccountCredentials::Offline => (OFFLINE_ACCESS_TOKEN.to_owned(), "legacy".to_owned()),
             // 第三方 Yggdrasil 也用 msa 类型（游戏侧仅用于皮肤/多人握手分支，不做真实校验）。
-            AccountCredentials::AuthlibInjector(creds) => (creds.access_token.clone(), "msa".to_owned()),
+            AccountCredentials::AuthlibInjector(creds) => {
+                (creds.access_token.clone(), "msa".to_owned())
+            }
         };
 
         Ok(Self {
@@ -72,7 +75,10 @@ impl AuthValues {
             uuid: account.uuid.clone(),
             access_token,
             user_type,
-            xuid: String::new(),
+            xuid: match &account.xuid {
+                Some(xuid) => xuid.clone(),
+                None => String::new(),
+            },
             client_id: String::new(),
             user_properties: "{}".to_owned(),
         })
@@ -113,7 +119,10 @@ impl AuthlibInjector {
     }
 
     /// 从 Yggdrasil 凭据（持有 api_root）与 agent jar 构造。
-    pub fn from_credentials(agent_jar: impl Into<PathBuf>, credentials: &YggdrasilCredentials) -> Self {
+    pub fn from_credentials(
+        agent_jar: impl Into<PathBuf>,
+        credentials: &YggdrasilCredentials,
+    ) -> Self {
         Self::new(agent_jar, credentials.api_root.clone())
     }
 
@@ -131,7 +140,9 @@ impl AuthlibInjector {
             self.api_root
         )];
         if let Some(prefetched) = &self.prefetched {
-            args.push(format!("-Dauthlibinjector.yggdrasil.prefetched={prefetched}"));
+            args.push(format!(
+                "-Dauthlibinjector.yggdrasil.prefetched={prefetched}"
+            ));
         }
         args
     }
@@ -172,6 +183,15 @@ mod tests {
         let values = AuthValues::from_account(&account).unwrap();
         assert_eq!(values.access_token, "mc-token");
         assert_eq!(values.user_type, "msa");
+        // 登录链没给出 Xbox id：参数位留空值。
+        assert_eq!(values.xuid, "");
+
+        let with_xuid = Account {
+            xuid: Some("2535400000000001".into()),
+            ..account
+        };
+        let values = AuthValues::from_account(&with_xuid).unwrap();
+        assert_eq!(values.xuid, "2535400000000001");
     }
 
     #[test]
@@ -191,7 +211,10 @@ mod tests {
 
     #[test]
     fn authlib_injector_jvm_args_with_and_without_prefetch() {
-        let injector = AuthlibInjector::new(PathBuf::from("D:/aurora/authlib-injector.jar"), "https://skin.example/api");
+        let injector = AuthlibInjector::new(
+            PathBuf::from("D:/aurora/authlib-injector.jar"),
+            "https://skin.example/api",
+        );
         assert_eq!(
             injector.jvm_args(),
             vec!["-javaagent:D:/aurora/authlib-injector.jar=https://skin.example/api"]
@@ -213,6 +236,7 @@ mod tests {
             api_root: "https://ali.example/api/".into(),
             access_token: "at".into(),
             client_token: "ct".into(),
+            username: None,
         };
         let injector = AuthlibInjector::from_credentials(PathBuf::from("agent.jar"), &creds);
         assert_eq!(injector.api_root, "https://ali.example/api/");

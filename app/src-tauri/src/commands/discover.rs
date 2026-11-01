@@ -1,0 +1,1164 @@
+//! 发现与安装：聚合搜索 Modrinth + CurseForge、工程详情，把平台上的 Mod 版本装进实例。
+
+use aurora_core::{
+    AggregateResult, EventSink, ModLoader, Platform, ProjectDetail, ResourceInstallOutcome,
+    ResourceTarget, ResourceType, SearchCursor, SearchEntry, SearchQuery, SkippedPlatform,
+    SortField,
+};
+use serde::Serialize;
+use serde_json::Value;
+use tauri::{AppHandle, State};
+
+use crate::commands::instances::{ensure_saves_free_for_writing, InstanceActivity, InstanceLocks};
+use crate::commands::CommandError;
+use crate::events::CoreEventForwarder;
+use crate::facade::Facade;
+use crate::tasks::TaskRegistry;
+
+/// 聚合搜索里某平台的失败记录 DTO。
+#[derive(Debug, Serialize)]
+pub struct PlatformErrorDto {
+    pub platform: Platform,
+    pub message: String,
+}
+
+/// 聚合搜索结果 DTO。条目直接复用已 Serialize 的 [`SearchEntry`]（合并卡带全部来源），
+/// 单个平台的失败摊平成平台 + 文案，不影响另一平台的结果；没参与的平台与原因单列在 `skipped`。
+#[derive(Debug, Serialize)]
+pub struct SearchResultDto {
+    pub hits: Vec<SearchEntry>,
+    /// 参与平台报告的总数之和（合并前计数，界面写「约」）。
+    pub total: u64,
+    pub errors: Vec<PlatformErrorDto>,
+    pub skipped: Vec<SkippedPlatform>,
+    /// 下一页游标，原样回传给下一次搜索；`null` 表示到底。
+    pub next_cursor: Option<SearchCursor>,
+}
+
+/// 单页条数上限：CurseForge 搜索接口的 pageSize 最大 50。
+const MAX_SEARCH_LIMIT: u32 = 50;
+
+/// 一次 Mod 安装结果 DTO。
+#[derive(Debug, Serialize)]
+pub struct ModInstallOutcomeDto {
+    pub file_name: String,
+    pub path: String,
+    pub platform: Platform,
+    /// 这个版本要的必需前置里没有照办的，每条一句中文。开局 Mod 不走确认计划，靠它告诉玩家。
+    pub skipped: Vec<String>,
+}
+
+fn search_result_dto(result: AggregateResult) -> SearchResultDto {
+    SearchResultDto {
+        hits: result.hits,
+        total: result.total,
+        skipped: result.skipped,
+        next_cursor: result.next_cursor,
+        errors: result
+            .errors
+            .into_iter()
+            .map(|e| PlatformErrorDto {
+                platform: e.platform,
+                message: e.error.to_string(),
+            })
+            .collect(),
+    }
+}
+
+/// 前端传来的一次搜索的全部条件（字符串枚举尚未解析）。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SearchArgs {
+    pub query: Option<String>,
+    pub resource_types: Vec<String>,
+    pub category: Option<String>,
+    pub platform: Option<String>,
+    pub loaders: Vec<String>,
+    pub game_versions: Vec<String>,
+    pub sort: String,
+    pub limit: u32,
+    pub cursor: Option<Value>,
+}
+
+/// 校验并解析搜索条件。任何一项非法都整体报 `invalid_argument`，不发请求。
+pub(crate) fn parse_search(
+    args: SearchArgs,
+) -> Result<(SearchQuery, Option<Platform>, Option<SearchCursor>), CommandError> {
+    if args.limit == 0 || args.limit > MAX_SEARCH_LIMIT {
+        return Err(CommandError::invalid_argument(format!(
+            "每页条数须在 1 到 {MAX_SEARCH_LIMIT} 之间，收到 {}",
+            args.limit
+        )));
+    }
+    let category = args.category.map(|c| validate_category(&c)).transpose()?;
+    let game_versions = args
+        .game_versions
+        .into_iter()
+        .map(|v| {
+            let v = v.trim().to_owned();
+            if v.is_empty() || v.chars().any(char::is_control) {
+                Err(CommandError::invalid_argument(
+                    "游戏版本不能为空或含控制字符",
+                ))
+            } else {
+                Ok(v)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let cursor = args
+        .cursor
+        .map(|raw| {
+            serde_json::from_value::<SearchCursor>(raw)
+                .map_err(|err| CommandError::invalid_argument(format!("翻页游标不合法：{err}")))
+        })
+        .transpose()?;
+    let query = SearchQuery {
+        // 空白搜索词等同于没有搜索词：两个平台都按热门浏览。
+        query: args
+            .query
+            .map(|q| q.trim().to_owned())
+            .filter(|q| !q.is_empty()),
+        resource_types: args
+            .resource_types
+            .iter()
+            .map(|t| parse_resource_type(t))
+            .collect::<Result<_, _>>()?,
+        category,
+        loaders: args
+            .loaders
+            .iter()
+            .map(|l| parse_mod_loader(l))
+            .collect::<Result<_, _>>()?,
+        game_versions,
+        sort: parse_sort_field(&args.sort)?,
+        limit: args.limit,
+        offset: 0,
+    };
+    let platform = args.platform.as_deref().map(parse_platform).transpose()?;
+    Ok((query, platform, cursor))
+}
+
+/// 分类键只能是 Modrinth 的小写连字符键；它会被拼进平台的过滤表达式，其余字符一律拒收。
+fn validate_category(raw: &str) -> Result<String, CommandError> {
+    let ok = !raw.is_empty()
+        && raw.len() <= 64
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if ok {
+        Ok(raw.to_owned())
+    } else {
+        Err(CommandError::invalid_argument(format!(
+            "分类键不合法：{raw}"
+        )))
+    }
+}
+
+/// 聚合搜索 Modrinth + CurseForge 一页。前端传字符串枚举，命令内构造 [`SearchQuery`]。
+///
+/// `resourceTypes` 为空表示全部类型；`category` 取 Modrinth 分类键；`platform` 为 `null` 表示两个
+/// 平台都搜；`cursor` 首页传 `null`，之后原样回传上一页的 `next_cursor`。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn search_resources(
+    query: Option<String>,
+    resource_types: Vec<String>,
+    category: Option<String>,
+    platform: Option<String>,
+    loaders: Vec<String>,
+    game_versions: Vec<String>,
+    sort: String,
+    limit: u32,
+    cursor: Option<Value>,
+    facade: State<'_, Facade>,
+) -> Result<SearchResultDto, CommandError> {
+    let (search_query, only, cursor) = parse_search(SearchArgs {
+        query,
+        resource_types,
+        category,
+        platform,
+        loaders,
+        game_versions,
+        sort,
+        limit,
+        cursor,
+    })?;
+    let aurora = facade.snapshot().await;
+    Ok(search_result_dto(
+        aurora
+            .search_page(&search_query, only, cursor.as_ref())
+            .await?,
+    ))
+}
+
+/// 工程详情：介绍正文、图库、支持的加载器与版本、最新版本、必需前置。
+#[tauri::command]
+pub async fn project_detail(
+    platform: String,
+    project_id: String,
+    facade: State<'_, Facade>,
+) -> Result<ProjectDetail, CommandError> {
+    let platform = parse_platform(&platform)?;
+    if project_id.trim().is_empty() {
+        return Err(CommandError::invalid_argument("工程 id 不能为空"));
+    }
+    let aurora = facade.snapshot().await;
+    Ok(aurora.project_detail(platform, &project_id).await?)
+}
+
+/// 把某平台上的一个 Mod 版本安装到指定实例的 mods 目录。长任务：进度经 core-event 推送并带
+/// `task_id`，可经 `cancel_task(taskId)` 取消。
+///
+/// 作为组合任务（批量装 Mod）的一项调用时传 `step`（第几项，从 0 计），它原样标在这次调用的每条事件上，
+/// 前端据此把上一项晚到的进度和这一项的分开；单独调用不传。
+///
+/// 安装全程以「改动 Mod 与资源」占住实例：路径在开始时按实例名算好，期间改名或删除会让落位按旧路径
+/// 把目录重新建出来，所以这两件事在安装结束前报 `instance_busy`。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn install_mod(
+    app: AppHandle,
+    task_id: String,
+    step: Option<u32>,
+    version_id: String,
+    platform: String,
+    project_id: String,
+    mod_version_id: String,
+    facade: State<'_, Facade>,
+    tasks: State<'_, TaskRegistry>,
+    locks: State<'_, InstanceLocks>,
+) -> Result<ModInstallOutcomeDto, CommandError> {
+    let target_platform = parse_platform(&platform)?;
+    let events = CoreEventForwarder::to_app_step(&app, Some(task_id.clone()), step);
+    let outcome = install_mod_with(
+        &facade,
+        &tasks,
+        &locks,
+        &task_id,
+        ModTarget {
+            version_id: &version_id,
+            platform: target_platform,
+            project_id: &project_id,
+            mod_version_id: &mod_version_id,
+        },
+        events.sink(),
+    )
+    .await;
+    events.finish().await;
+    outcome
+}
+
+/// [`install_mod`] 要装的是哪个实例、哪个平台上的哪个版本。
+pub(crate) struct ModTarget<'a> {
+    pub version_id: &'a str,
+    pub platform: Platform,
+    pub project_id: &'a str,
+    pub mod_version_id: &'a str,
+}
+
+pub(crate) async fn install_mod_with(
+    facade: &Facade,
+    tasks: &TaskRegistry,
+    locks: &InstanceLocks,
+    task_id: &str,
+    target: ModTarget<'_>,
+    events: &EventSink,
+) -> Result<ModInstallOutcomeDto, CommandError> {
+    let _guard = locks.acquire(target.version_id, InstanceActivity::Modifying)?;
+    let task = tasks.register(task_id)?;
+    let aurora = facade.snapshot().await.with_cancel(task.token().clone());
+    let outcome = task
+        .run(async {
+            Ok(aurora
+                .install_mod(
+                    target.version_id,
+                    target.platform,
+                    target.project_id,
+                    target.mod_version_id,
+                    Some(events),
+                )
+                .await?)
+        })
+        .await?;
+    Ok(ModInstallOutcomeDto {
+        file_name: outcome.file_name,
+        path: outcome.path.display().to_string(),
+        platform: outcome.platform,
+        skipped: outcome.skipped,
+    })
+}
+
+/// 一次资源安装结果 DTO。
+#[derive(Debug, Serialize)]
+pub struct ResourceInstallOutcomeDto {
+    pub file_name: String,
+    pub path: String,
+    pub platform: Platform,
+    pub resource_type: ResourceType,
+    /// 数据包装进的存档；其余类型为 null。
+    pub world: Option<String>,
+}
+
+fn resource_outcome_dto(outcome: ResourceInstallOutcome) -> ResourceInstallOutcomeDto {
+    ResourceInstallOutcomeDto {
+        file_name: outcome.file_name,
+        path: outcome.path.display().to_string(),
+        platform: outcome.platform,
+        resource_type: outcome.resource_type,
+        world: outcome.world,
+    }
+}
+
+/// 把平台上的资源包、光影或数据包的一个版本装进实例里该类型的目录。长任务：进度经
+/// core-event 推送并带 `task_id`，可经 `cancel_task(taskId)` 取消。Mod 报 `invalid_argument`，
+/// 要经 [`install_mod`]：只有那条路径占住 mods 目录、写卷宗与历史并探测游戏占用。
+///
+/// `world` 只对数据包有意义且必填（存档目录名）；`fileVersionId` 为 Modrinth 版本 id 或
+/// CurseForge 文件 id。与 [`install_mod`] 一样全程占住实例，改名与删除在安装结束前报 `instance_busy`。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn install_resource(
+    app: AppHandle,
+    task_id: String,
+    version_id: String,
+    resource_type: String,
+    world: Option<String>,
+    platform: String,
+    project_id: String,
+    file_version_id: String,
+    facade: State<'_, Facade>,
+    tasks: State<'_, TaskRegistry>,
+    locks: State<'_, InstanceLocks>,
+) -> Result<ResourceInstallOutcomeDto, CommandError> {
+    let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
+    let outcome = install_resource_with(
+        &facade,
+        &tasks,
+        &locks,
+        &task_id,
+        InstallResourceArgs {
+            version_id: &version_id,
+            resource_type: &resource_type,
+            world: world.as_deref(),
+            platform: &platform,
+            project_id: &project_id,
+            file_version_id: &file_version_id,
+        },
+        events.sink(),
+    )
+    .await;
+    events.finish().await;
+    outcome
+}
+
+/// [`install_resource`] 的入参（字符串枚举尚未解析）。
+pub(crate) struct InstallResourceArgs<'a> {
+    pub version_id: &'a str,
+    pub resource_type: &'a str,
+    pub world: Option<&'a str>,
+    pub platform: &'a str,
+    pub project_id: &'a str,
+    pub file_version_id: &'a str,
+}
+
+pub(crate) async fn install_resource_with(
+    facade: &Facade,
+    tasks: &TaskRegistry,
+    locks: &InstanceLocks,
+    task_id: &str,
+    args: InstallResourceArgs<'_>,
+    events: &EventSink,
+) -> Result<ResourceInstallOutcomeDto, CommandError> {
+    // 先解析全部入参再登记任务：参数非法不该占用任务 id。
+    let resource_type = parse_resource_type(args.resource_type)?;
+    match resource_type {
+        ResourceType::Modpack | ResourceType::Plugin => {
+            return Err(CommandError::invalid_argument(format!(
+                "{} 不能作为单个资源装进实例",
+                args.resource_type
+            )));
+        }
+        ResourceType::Mod => {
+            return Err(CommandError::invalid_argument(
+                "Mod 要经 install_mod 安装，不能作为单个资源装进实例",
+            ));
+        }
+        ResourceType::ResourcePack | ResourceType::Shader | ResourceType::DataPack => {}
+    }
+    let platform = parse_platform(args.platform)?;
+    let _guard = locks.acquire(args.version_id, InstanceActivity::Modifying)?;
+    let snapshot = facade.snapshot().await;
+    // 数据包写进存档目录，与备份、恢复、导出存档相交。先记下再查，与那几件事先占后查对称，两边同时发起时
+    // 至少有一方会被挡住。被拒时记录随返回撤销。
+    let _writing = if resource_type == ResourceType::DataPack {
+        let writing = locks.write_saves(args.version_id);
+        ensure_saves_free_for_writing(&snapshot, locks, args.version_id).await?;
+        Some(writing)
+    } else {
+        None
+    };
+    let task = tasks.register(task_id)?;
+    let aurora = snapshot.with_cancel(task.token().clone());
+    let target = ResourceTarget {
+        version_id: args.version_id,
+        resource_type,
+        world: args.world,
+    };
+    let outcome = task
+        .run(async {
+            Ok(aurora
+                .install_resource(
+                    target,
+                    platform,
+                    args.project_id,
+                    args.file_version_id,
+                    Some(events),
+                )
+                .await?)
+        })
+        .await?;
+    Ok(resource_outcome_dto(outcome))
+}
+
+// 字符串取值统一用核心类型 serde 的 snake_case 表示，与出参 DTO 同一套命名。
+
+pub(crate) fn parse_platform(name: &str) -> Result<Platform, CommandError> {
+    match name {
+        "modrinth" => Ok(Platform::Modrinth),
+        "curseforge" => Ok(Platform::CurseForge),
+        other => Err(CommandError::invalid_argument(format!(
+            "未知资源平台 {other}（支持 modrinth/curseforge）"
+        ))),
+    }
+}
+
+pub(crate) fn parse_resource_type(name: &str) -> Result<ResourceType, CommandError> {
+    match name {
+        "mod" => Ok(ResourceType::Mod),
+        "modpack" => Ok(ResourceType::Modpack),
+        "resource_pack" => Ok(ResourceType::ResourcePack),
+        "shader" => Ok(ResourceType::Shader),
+        "data_pack" => Ok(ResourceType::DataPack),
+        "plugin" => Ok(ResourceType::Plugin),
+        other => Err(CommandError::invalid_argument(format!(
+            "未知资源类型 {other}"
+        ))),
+    }
+}
+
+fn parse_mod_loader(name: &str) -> Result<ModLoader, CommandError> {
+    match name {
+        "fabric" => Ok(ModLoader::Fabric),
+        "quilt" => Ok(ModLoader::Quilt),
+        "forge" => Ok(ModLoader::Forge),
+        "neoforge" => Ok(ModLoader::NeoForge),
+        "liteloader" => Ok(ModLoader::LiteLoader),
+        other => Err(CommandError::invalid_argument(format!(
+            "未知加载器 {other}"
+        ))),
+    }
+}
+
+fn parse_sort_field(name: &str) -> Result<SortField, CommandError> {
+    match name {
+        "relevance" => Ok(SortField::Relevance),
+        "downloads" => Ok(SortField::Downloads),
+        "follows" => Ok(SortField::Follows),
+        "newest" => Ok(SortField::Newest),
+        "updated" => Ok(SortField::Updated),
+        other => Err(CommandError::invalid_argument(format!(
+            "未知排序字段 {other}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::error::code;
+
+    // 前端会把出参里的枚举值原样回传（搜索结果的平台、已装 Mod 的加载器），入参解析必须认得
+    // 出参的序列化名，两边任何一处改名都要让这条测试挂掉。
+    #[test]
+    fn parsers_accept_every_serialized_name() {
+        for loader in [
+            ModLoader::Fabric,
+            ModLoader::Quilt,
+            ModLoader::Forge,
+            ModLoader::NeoForge,
+            ModLoader::LiteLoader,
+        ] {
+            let name = serde_json::to_value(loader).unwrap();
+            assert_eq!(parse_mod_loader(name.as_str().unwrap()).unwrap(), loader);
+        }
+        for platform in [Platform::Modrinth, Platform::CurseForge] {
+            let name = serde_json::to_value(platform).unwrap();
+            assert_eq!(parse_platform(name.as_str().unwrap()).unwrap(), platform);
+        }
+        for resource_type in [
+            ResourceType::Mod,
+            ResourceType::Modpack,
+            ResourceType::ResourcePack,
+            ResourceType::Shader,
+            ResourceType::DataPack,
+            ResourceType::Plugin,
+        ] {
+            let name = serde_json::to_value(resource_type).unwrap();
+            assert_eq!(
+                parse_resource_type(name.as_str().unwrap()).unwrap(),
+                resource_type
+            );
+        }
+        for sort in [
+            SortField::Relevance,
+            SortField::Downloads,
+            SortField::Follows,
+            SortField::Newest,
+            SortField::Updated,
+        ] {
+            let name = serde_json::to_value(sort).unwrap();
+            assert_eq!(parse_sort_field(name.as_str().unwrap()).unwrap(), sort);
+        }
+        assert_eq!(
+            parse_mod_loader("neo_forge").unwrap_err().code,
+            code::INVALID_ARGUMENT
+        );
+        assert_eq!(
+            parse_platform("curse_forge").unwrap_err().code,
+            code::INVALID_ARGUMENT
+        );
+    }
+
+    fn facade_in(dir: &std::path::Path, base: &str) -> Facade {
+        let config = aurora_core::AuroraConfig {
+            game_directory: Some(dir.join(".minecraft")),
+            isolation_policy: aurora_core::IsolationPolicy::All,
+            ..aurora_core::AuroraConfig::default()
+        };
+        let aurora = aurora_core::Aurora::open(config, dir.to_path_buf(), dir.join("config.json"))
+            .unwrap()
+            .with_platform_bases(base, base);
+        Facade::new(aurora)
+    }
+
+    /// 端到端：资源包经命令装进实例的 resourcepacks/，事件都带本任务 id，任务随之注销。游戏运行中
+    /// 照样能装，装完实例仍记为运行中。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_resource_lands_pack_and_tags_events_with_task_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/version/rp1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "rp1", "project_id": "faithful", "name": "32x", "version_number": "1.0",
+                "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                "files": [{"hashes": {}, "url": format!("{}/Faithful.zip", server.uri()),
+                           "filename": "Faithful.zip", "primary": true, "size": 4}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/Faithful.zip"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"pack".to_vec()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mc = dir.path().join(".minecraft");
+        let version_dir = mc.join("versions").join("生存");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("生存.json"),
+            r#"{"id":"生存","type":"release","mainClass":"m"}"#,
+        )
+        .unwrap();
+        let facade = facade_in(dir.path(), &server.uri());
+        let registry = TaskRegistry::default();
+        let delivered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = delivered.clone();
+        let forwarder =
+            CoreEventForwarder::spawn(Some("rp#1".into()), move |p| log.lock().unwrap().push(p));
+        let locks = InstanceLocks::default();
+        let _game = locks.acquire("生存", InstanceActivity::Running).unwrap();
+
+        let outcome = install_resource_with(
+            &facade,
+            &registry,
+            &locks,
+            "rp#1",
+            InstallResourceArgs {
+                version_id: "生存",
+                resource_type: "resource_pack",
+                world: None,
+                platform: "modrinth",
+                project_id: "faithful",
+                file_version_id: "rp1",
+            },
+            forwarder.sink(),
+        )
+        .await
+        .unwrap();
+        forwarder.finish().await;
+
+        assert_eq!(outcome.file_name, "Faithful.zip");
+        assert_eq!(outcome.resource_type, ResourceType::ResourcePack);
+        let landed = version_dir.join("resourcepacks").join("Faithful.zip");
+        assert_eq!(std::path::PathBuf::from(&outcome.path), landed);
+        assert_eq!(std::fs::read(&landed).unwrap(), b"pack");
+        assert!(!registry.is_running("rp#1"));
+        assert_eq!(locks.activity("生存"), Some(InstanceActivity::Running));
+        let delivered = delivered.lock().unwrap();
+        assert!(!delivered.is_empty());
+        assert!(delivered
+            .iter()
+            .all(|p| p.task_id.as_deref() == Some("rp#1")));
+    }
+
+    /// 批量装 Mod 的两项先后经命令跑完、共用一个 task_id，两个文件大小相同：每一项的事件都标着它自己的
+    /// 项序号，两项下完时的快照除 step 外一模一样。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn composite_items_tag_every_event_with_their_own_step() {
+        use crate::events::CoreEventKind;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let items: [(&str, &str, &[u8]); 2] =
+            [("sodium", "s1", b"aaaa"), ("lithium", "l1", b"bbbb")];
+        for (project, version, bytes) in items {
+            let file = format!("{project}-{version}.jar");
+            Mock::given(method("GET"))
+                .and(path(format!("/version/{version}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": version, "project_id": project, "name": project, "version_number": "1.0",
+                    "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                    "game_versions": ["1.21"], "loaders": [], "dependencies": [],
+                    "files": [{"hashes": {}, "url": format!("{}/{file}", server.uri()),
+                               "filename": file, "primary": true, "size": bytes.len()}]
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/{file}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec()))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "sodium", "title": "Sodium", "description": "d", "project_type": "mod", "downloads": 1},
+                {"id": "lithium", "title": "Lithium", "description": "d", "project_type": "mod", "downloads": 1}
+            ])))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let version_dir = dir.path().join(".minecraft").join("versions").join("生存");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("生存.json"),
+            r#"{"id":"生存","type":"release","mainClass":"m"}"#,
+        )
+        .unwrap();
+        let facade = facade_in(dir.path(), &server.uri());
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let delivered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        for (step, (project, version, _)) in (0u32..).zip(items) {
+            let log = delivered.clone();
+            let forwarder =
+                CoreEventForwarder::spawn_step(Some("all#1".into()), Some(step), move |p| {
+                    log.lock().unwrap().push(p)
+                });
+            install_mod_with(
+                &facade,
+                &registry,
+                &locks,
+                "all#1",
+                ModTarget {
+                    version_id: "生存",
+                    platform: Platform::Modrinth,
+                    project_id: project,
+                    mod_version_id: version,
+                },
+                forwarder.sink(),
+            )
+            .await
+            .unwrap();
+            forwarder.finish().await;
+            assert!(!registry.is_running("all#1"), "第 {step} 项结束后应注销");
+        }
+
+        let mods_dir = version_dir.join("mods");
+        assert_eq!(
+            std::fs::read(mods_dir.join("sodium-s1.jar")).unwrap(),
+            b"aaaa"
+        );
+        assert_eq!(
+            std::fs::read(mods_dir.join("lithium-l1.jar")).unwrap(),
+            b"bbbb"
+        );
+        let delivered = delivered.lock().unwrap();
+        assert!(delivered
+            .iter()
+            .all(|p| p.task_id.as_deref() == Some("all#1")));
+        let steps: Vec<u32> = delivered
+            .iter()
+            .map(|p| p.step.expect("组合任务的每条事件都要带项序号"))
+            .collect();
+        let switch = steps.iter().position(|&s| s == 1).expect("第 1 项应有事件");
+        assert!(switch > 0, "第 0 项应有事件");
+        assert!(steps[..switch].iter().all(|&s| s == 0));
+        assert!(steps[switch..].iter().all(|&s| s == 1));
+        let completed_download = |step: u32| {
+            delivered
+                .iter()
+                .filter(|p| p.step == Some(step))
+                .find_map(|p| match p.event {
+                    CoreEventKind::Download {
+                        total,
+                        finished,
+                        bytes,
+                        total_bytes,
+                        ..
+                    } if finished == total => Some((total, finished, bytes, total_bytes)),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("第 {step} 项没有下完的快照"))
+        };
+        assert_eq!(completed_download(0), (1, 1, 4, Some(4)));
+        assert_eq!(completed_download(1), completed_download(0));
+        let stages_of = |step: u32| -> Vec<&str> {
+            delivered
+                .iter()
+                .filter(|p| p.step == Some(step))
+                .filter_map(|p| match &p.event {
+                    CoreEventKind::Stage { message } => Some(message.as_str()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(stages_of(0).iter().any(|m| m.contains("sodium-s1.jar")));
+        assert!(stages_of(1).iter().any(|m| m.contains("lithium-l1.jar")));
+        assert!(!stages_of(0).iter().any(|m| m.contains("lithium-l1.jar")));
+    }
+
+    /// 实例正在改名或删除时，装 Mod 与装资源在登记任务、碰网络之前就以 instance_busy 拒绝，
+    /// 也不在实例里建出任何目录。
+    #[tokio::test]
+    async fn installs_are_refused_while_the_instance_is_renamed_or_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), "http://127.0.0.1:9");
+        let registry = TaskRegistry::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let version_dir = dir.path().join(".minecraft").join("versions").join("生存");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        let locks = InstanceLocks::default();
+        for activity in [InstanceActivity::Renaming, InstanceActivity::Deleting] {
+            let held = locks.acquire("生存", activity).unwrap();
+            let err = install_mod_with(
+                &facade,
+                &registry,
+                &locks,
+                "mod#1",
+                ModTarget {
+                    version_id: "生存",
+                    platform: Platform::Modrinth,
+                    project_id: "sodium",
+                    mod_version_id: "v1",
+                },
+                &sink,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{activity:?}");
+            assert!(!registry.is_running("mod#1"));
+            let err = install_resource_with(
+                &facade,
+                &registry,
+                &locks,
+                "rp#2",
+                InstallResourceArgs {
+                    version_id: "生存",
+                    resource_type: "shader",
+                    world: None,
+                    platform: "modrinth",
+                    project_id: "bsl",
+                    file_version_id: "v1",
+                },
+                &sink,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{activity:?}");
+            assert_eq!(
+                err.detail.unwrap()["activity"],
+                serde_json::to_value(activity).unwrap()
+            );
+            assert!(!registry.is_running("rp#2"));
+            drop(held);
+        }
+        let mut entries: Vec<_> = std::fs::read_dir(&version_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        entries.sort();
+        assert!(entries.is_empty(), "实例里不该多出东西：{entries:?}");
+    }
+
+    /// 数据包写进存档目录：备份在做时报 instance_busy，不登记任务；资源包不碰存档，照常装。开始之后全程记着
+    /// 「存档正被写」，备份、恢复据此等它，任务结束记录撤销。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn data_pack_install_keeps_clear_of_world_tasks() {
+        use std::time::{Duration, Instant};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        for (version, file, delay) in [("dp1", "Slow.zip", 30), ("rp1", "Quick.zip", 0)] {
+            Mock::given(method("GET"))
+                .and(path(format!("/version/{version}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": version, "project_id": "pack", "name": "x", "version_number": "1.0",
+                    "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                    "files": [{"hashes": {}, "url": format!("{}/{file}", server.uri()),
+                               "filename": file, "primary": true, "size": 4}]
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/{file}")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_bytes(b"pack".to_vec())
+                        .set_delay(Duration::from_secs(delay)),
+                )
+                .mount(&server)
+                .await;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let version_dir = dir.path().join(".minecraft").join("versions").join("生存");
+        std::fs::create_dir_all(version_dir.join("saves").join("新的世界")).unwrap();
+        std::fs::write(
+            version_dir.join("生存.json"),
+            r#"{"id":"生存","type":"release","mainClass":"m"}"#,
+        )
+        .unwrap();
+        let facade = std::sync::Arc::new(facade_in(dir.path(), &server.uri()));
+        let registry = std::sync::Arc::new(TaskRegistry::default());
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let data_pack = || InstallResourceArgs {
+            version_id: "生存",
+            resource_type: "data_pack",
+            world: Some("新的世界"),
+            platform: "modrinth",
+            project_id: "pack",
+            file_version_id: "dp1",
+        };
+
+        let backing_up = locks.acquire("生存", InstanceActivity::BackingUp).unwrap();
+        let err = install_resource_with(&facade, &registry, &locks, "dp#0", data_pack(), &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(err.detail.unwrap()["activity"], "backing_up");
+        assert!(!registry.is_running("dp#0"));
+        assert!(locks.writing_saves().is_empty(), "被拒时记录随之撤销");
+        let resource_pack = InstallResourceArgs {
+            resource_type: "resource_pack",
+            world: None,
+            file_version_id: "rp1",
+            ..data_pack()
+        };
+        install_resource_with(&facade, &registry, &locks, "rp#1", resource_pack, &sink)
+            .await
+            .unwrap();
+        drop(backing_up);
+
+        let install = tokio::spawn({
+            let (f, r, l) = (facade.clone(), registry.clone(), locks.clone());
+            async move {
+                let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+                let args = InstallResourceArgs {
+                    version_id: "生存",
+                    resource_type: "data_pack",
+                    world: Some("新的世界"),
+                    platform: "modrinth",
+                    project_id: "pack",
+                    file_version_id: "dp1",
+                };
+                install_resource_with(&f, &r, &l, "dp#1", args, &sink).await
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !registry.is_running("dp#1") {
+            assert!(Instant::now() < deadline, "数据包安装没有开始");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(locks.writing_saves(), vec!["生存".to_owned()]);
+
+        assert!(registry.cancel("dp#1"));
+        let err = install.await.unwrap().unwrap_err();
+        assert_eq!(err.code, code::CANCELLED);
+        assert!(locks.writing_saves().is_empty());
+    }
+
+    /// 资源下载进行中，实例一直以「改动 Mod 与资源」占着：改名与删除报 instance_busy、目录原地不动；
+    /// 取消后占用释放。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_resource_holds_the_instance_until_it_returns() {
+        use std::time::{Duration, Instant};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        use crate::commands::instances::{delete_instance_with, rename_instance_with};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/version/rp9"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "rp9", "project_id": "faithful", "name": "32x", "version_number": "1.0",
+                "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                "files": [{"hashes": {}, "url": format!("{}/Slow.zip", server.uri()),
+                           "filename": "Slow.zip", "primary": true, "size": 4}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/Slow.zip"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"pack".to_vec())
+                    .set_delay(Duration::from_secs(30)),
+            )
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let versions = dir.path().join(".minecraft").join("versions");
+        let version_dir = versions.join("生存");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("生存.json"),
+            r#"{"id":"生存","type":"release","mainClass":"m"}"#,
+        )
+        .unwrap();
+        let facade = std::sync::Arc::new(facade_in(dir.path(), &server.uri()));
+        let registry = std::sync::Arc::new(TaskRegistry::default());
+        let locks = InstanceLocks::default();
+        let install = tokio::spawn({
+            let (f, r, l) = (facade.clone(), registry.clone(), locks.clone());
+            async move {
+                let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+                install_resource_with(
+                    &f,
+                    &r,
+                    &l,
+                    "rp#slow",
+                    InstallResourceArgs {
+                        version_id: "生存",
+                        resource_type: "resource_pack",
+                        world: None,
+                        platform: "modrinth",
+                        project_id: "faithful",
+                        file_version_id: "rp9",
+                    },
+                    &sink,
+                )
+                .await
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !registry.is_running("rp#slow") {
+            assert!(Instant::now() < deadline, "资源安装没有开始");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(locks.activity("生存"), Some(InstanceActivity::Modifying));
+        let err = rename_instance_with(&facade, &locks, "生存", "创造")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(err.detail.unwrap()["activity"], "modifying");
+        let err = delete_instance_with(&facade, &locks, "生存", NeverDispose)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert!(version_dir.join("生存.json").is_file());
+        assert!(!versions.join("创造").exists());
+
+        assert!(registry.cancel("rp#slow"));
+        let err = install.await.unwrap().unwrap_err();
+        assert_eq!(err.code, code::CANCELLED);
+        assert_eq!(locks.activity("生存"), None);
+    }
+
+    /// 测试里走不到真正的删除：实例被占着时删除命令必须在动目录之前就拒绝。
+    struct NeverDispose;
+
+    impl aurora_core::Disposer for NeverDispose {
+        fn dispose(&self, dir: &std::path::Path) -> Result<(), aurora_core::InstanceError> {
+            panic!("被占着的实例不该被删除：{}", dir.display());
+        }
+    }
+
+    #[tokio::test]
+    async fn install_resource_rejects_bad_type_before_registering() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), "http://127.0.0.1:9");
+        let registry = TaskRegistry::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
+        for resource_type in ["modpack", "plugin", "world", "mod"] {
+            let err = install_resource_with(
+                &facade,
+                &registry,
+                &InstanceLocks::default(),
+                "t",
+                InstallResourceArgs {
+                    version_id: "x",
+                    resource_type,
+                    world: None,
+                    platform: "modrinth",
+                    project_id: "p",
+                    file_version_id: "v",
+                },
+                &sink,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, code::INVALID_ARGUMENT, "{resource_type}");
+            assert!(!registry.is_running("t"));
+        }
+    }
+
+    fn args() -> SearchArgs {
+        SearchArgs {
+            sort: "relevance".into(),
+            limit: 24,
+            ..SearchArgs::default()
+        }
+    }
+
+    #[test]
+    fn search_args_map_to_query_platform_and_cursor() {
+        let cursor = SearchCursor {
+            modrinth: aurora_core::PlatformCursor {
+                offset: 24,
+                exhausted: false,
+                total: Some(1240),
+                absorbed: vec![],
+            },
+            curseforge: aurora_core::PlatformCursor {
+                offset: 20,
+                exhausted: false,
+                total: Some(300),
+                absorbed: vec!["238222".into()],
+            },
+        };
+        let (query, platform, parsed_cursor) = parse_search(SearchArgs {
+            query: Some("  sodium  ".into()),
+            resource_types: vec!["mod".into(), "data_pack".into()],
+            category: Some("semi-realistic".into()),
+            platform: Some("modrinth".into()),
+            loaders: vec!["neoforge".into()],
+            game_versions: vec![" 1.21.1 ".into()],
+            sort: "downloads".into(),
+            limit: 24,
+            cursor: Some(serde_json::to_value(&cursor).unwrap()),
+        })
+        .unwrap();
+        assert_eq!(query.query.as_deref(), Some("sodium"));
+        assert_eq!(
+            query.resource_types,
+            vec![ResourceType::Mod, ResourceType::DataPack]
+        );
+        assert_eq!(query.category.as_deref(), Some("semi-realistic"));
+        assert_eq!(query.loaders, vec![ModLoader::NeoForge]);
+        assert_eq!(query.game_versions, vec!["1.21.1".to_string()]);
+        assert_eq!(query.sort, SortField::Downloads);
+        assert_eq!(query.limit, 24);
+        assert_eq!(platform, Some(Platform::Modrinth));
+        assert_eq!(parsed_cursor, Some(cursor));
+    }
+
+    #[test]
+    fn empty_types_and_blank_query_mean_all_and_none() {
+        let (query, platform, cursor) = parse_search(SearchArgs {
+            query: Some("   ".into()),
+            ..args()
+        })
+        .unwrap();
+        assert!(query.resource_types.is_empty());
+        assert_eq!(query.effective_types().len(), 5);
+        assert_eq!(query.query, None);
+        assert_eq!(platform, None);
+        assert_eq!(cursor, None);
+    }
+
+    #[test]
+    fn search_args_reject_bad_limit_category_version_and_cursor() {
+        for limit in [0, 51] {
+            let err = parse_search(SearchArgs { limit, ..args() }).unwrap_err();
+            assert_eq!(err.code, code::INVALID_ARGUMENT, "limit {limit}");
+        }
+        assert!(parse_search(SearchArgs {
+            limit: 50,
+            ..args()
+        })
+        .is_ok());
+        assert!(parse_search(SearchArgs { limit: 1, ..args() }).is_ok());
+        for category in ["", "Optimization", "a b", "x\"]\"", &"a".repeat(65)] {
+            let err = parse_search(SearchArgs {
+                category: Some(category.to_string()),
+                ..args()
+            })
+            .unwrap_err();
+            assert_eq!(err.code, code::INVALID_ARGUMENT, "分类 {category:?}");
+        }
+        let err = parse_search(SearchArgs {
+            game_versions: vec!["  ".into()],
+            ..args()
+        })
+        .unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        let err = parse_search(SearchArgs {
+            cursor: Some(serde_json::json!({"modrinth": 3})),
+            ..args()
+        })
+        .unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        let err = parse_search(SearchArgs {
+            resource_types: vec!["world".into()],
+            ..args()
+        })
+        .unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        let err = parse_search(SearchArgs {
+            platform: Some("planetminecraft".into()),
+            ..args()
+        })
+        .unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+    }
+
+    /// 出参里的跳过原因与平台名都能被前端原样理解：序列化名钉死。
+    #[test]
+    fn skipped_platform_serializes_with_snake_case_reason() {
+        let skipped = SkippedPlatform {
+            platform: Platform::CurseForge,
+            reason: aurora_core::SkipReason::CategoryUnmapped,
+        };
+        assert_eq!(
+            serde_json::to_value(skipped).unwrap(),
+            serde_json::json!({"platform": "curseforge", "reason": "category_unmapped"})
+        );
+        for (reason, name) in [
+            (aurora_core::SkipReason::Filtered, "filtered"),
+            (aurora_core::SkipReason::KeyMissing, "key_missing"),
+        ] {
+            assert_eq!(serde_json::to_value(reason).unwrap(), name);
+        }
+    }
+}

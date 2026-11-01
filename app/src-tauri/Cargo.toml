@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Petalfall 的 Tauri 外壳：把 aurora-core 门面通过 IPC 暴露给 React 前端"
 authors = ["Petalfall"]
 edition = "2021"
+license.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -18,14 +19,62 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
+# dialog 的次版本锁定：package.json 里有同名的 @tauri-apps/plugin-dialog，tauri 构建会比对
+# JS 包与 crate 的主次版本，不一致直接报错；放开成 "2" 的话一次 cargo update 就可能打破配对。
+# opener 与 updater 没有对应的 JS 包：外链由 opener 注入的脚本接管，打开文件夹与自更新都走 Rust 命令。
+# 系统选择文件夹 / 文件对话框：更改游戏目录、导入本地整合包都要拿磁盘绝对路径，
+# 而 WebView 里的 <input type="file"> 出于安全拿不到路径。
+tauri-plugin-dialog = "~2.7"
+# 启动器自更新：检查、下载、安装新版本；安装包由发布环境用私钥签名，客户端以内置公钥校验。
+# 装完后的重启用 tauri 自带的 AppHandle::restart，不需要 process 插件。
+tauri-plugin-updater = "~2.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 门面：前端全部能力经此 crate 暴露，不直接依赖任何下层 crate。
+# 门面：前端全部能力经此 crate 暴露，业务调用不直接依赖任何下层 crate。
 aurora-core = { path = "../../crates/aurora-core" }
-# managed state 用 tokio::sync::Mutex（Aurora 兼有 &self async 与 &mut self 方法）；
-# 事件转发用 mpsc + spawn，故需 rt-multi-thread/macros/sync。
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+# 品牌常量与数据目录定位（日志要和 config.json 落在同一处）。
+aurora-base = { path = "../../crates/aurora-base" }
+# managed state 用 tokio::sync::RwLock；事件转发用 mpsc + spawn；兜底显示窗口与取消宽限要计时。
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# 日志：下层各 crate 只发事件，subscriber 在此层配置。必须开 time 特性，
+# 否则每行时间戳会打成 <unknown time>，没有时间的日志排查不了任何东西。
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
+# 自定义协议的路径解码：实例 id 可含中文与空格，WebView 发来的是百分号编码形式。
+percent-encoding = "2"
+
+# 生产构建关闭 WebView2 浏览器加速键要直接调 ICoreWebView2Settings3。
+# 两者版本必须与 Cargo.lock 里 wry 所用的一致：Tauri 升级带来版本错位时这里会编译失败，
+# 这是有意的硬失败，提醒同步升级。
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38.2"
+windows-core = "0.61"
+# 主窗口的原生拖放（drop.rs）要自己注册 IDropTarget、读拖入数据里的文件列表与文字。
+# 设置页判断有没有两块能切换的显卡（gpu.rs）要经 DXGI 按高性能与省电偏好枚举适配器。
+# 同一数据目录只跑一个启动器（single_instance.rs）要具名事件。
+# 版本同样跟着 webview2-com 所用的 windows 走，HWND 等类型才是同一个。
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
-# 产品名一致性测试要读 aurora-base 的品牌常量；只在测试期依赖，运行时仍只经 aurora-core。
-aurora-base = { path = "../../crates/aurora-base" }
+# 暂停时钟：带时限的用例按定时器先后判定，不受机器负载影响。
+tokio = { version = "1", features = ["test-util"] }
+tempfile = "3"
+# 命令层集成测试用本地 mock 端点（设备码登录、版本清单）。
+wiremock = "0.6"
+# 整合包导入的命令层测试要现场打一个 .mrpack；特性与 aurora-modpack 一致，不引入 C 依赖的压缩后端。
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }

@@ -1,0 +1,11 @@
+.layer {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+
+.layer > canvas {
+  display: block;
+  /* 位图已按 dpr 生成；万一浏览器再缩放一次，也保持最近邻，不让像素画发糊 */
+  image-rendering: pixelated;
+}

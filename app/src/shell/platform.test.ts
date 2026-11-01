@@ -1,0 +1,113 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { IpcRecorder } from "../test/fake-bridge";
+import { callsOf, resetRecorder } from "../test/launcher";
+import { gameDirectoryCommands, launcherFolderCommands, pickDirectory, pickFile, pickSaveFile, withExtension } from "./platform";
+
+const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
+const dialog = vi.hoisted(() => ({ open: vi.fn(), save: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => dialog);
+vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
+
+beforeEach(() => {
+  resetRecorder(ipc);
+  dialog.open.mockReset();
+  dialog.save.mockReset();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("启动器数据目录与日志目录", () => {
+  it("各调一次 open_folder，目标分别为 data_dir 与 launcher_logs，不带实例 id", async () => {
+    ipc.overrides.set("open_folder", () => null);
+    await launcherFolderCommands.openDataDirectory();
+    await launcherFolderCommands.openLauncherLogs();
+    expect(callsOf(ipc, "open_folder")).toEqual([
+      { target: "data_dir", id: null, world: null },
+      { target: "launcher_logs", id: null, world: null },
+    ]);
+  });
+
+  it("后端拒绝时原样抛出，不当作已打开", async () => {
+    ipc.overrides.set("open_folder", () => {
+      throw Object.assign(new Error("目录不存在"), { code: "instance_failed" });
+    });
+    await expect(launcherFolderCommands.openLauncherLogs()).rejects.toMatchObject({ code: "instance_failed" });
+  });
+});
+
+describe("游戏目录与选择文件夹", () => {
+  it("登记与移除目录按原样转给后端；移除一条不存在的记录不算失败", async () => {
+    ipc.overrides.set("add_game_directory", () => null);
+    ipc.overrides.set("remove_game_directory", () => false);
+    await gameDirectoryCommands.addGameDirectory("HMCL", "D:\\Games\\HMCL\\.minecraft");
+    await expect(gameDirectoryCommands.removeGameDirectory("D:\\Games\\HMCL\\.minecraft")).resolves.toBeUndefined();
+    expect(ipc.calls.map((c) => [c.cmd, c.args])).toEqual([
+      ["add_game_directory", { name: "HMCL", path: "D:\\Games\\HMCL\\.minecraft" }],
+      ["remove_game_directory", { path: "D:\\Games\\HMCL\\.minecraft" }],
+    ]);
+  });
+
+  it("浏览器预览里没有系统对话框：明确拒绝，不当作用户取消", async () => {
+    await expect(pickDirectory("C:\\Users\\a\\.minecraft")).rejects.toThrow("浏览器预览里没有系统的选择文件夹对话框");
+  });
+
+  it("窗口里：只选一个文件夹，从默认位置打开；给了标题才带标题；取消为 null", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    dialog.open.mockResolvedValueOnce("C:\\Users\\a\\Downloads").mockResolvedValueOnce(null);
+    await expect(pickDirectory("C:\\Users\\a\\Downloads", "选择下载好的文件所在的文件夹")).resolves.toBe("C:\\Users\\a\\Downloads");
+    await expect(pickDirectory("C:\\Users\\a\\.minecraft")).resolves.toBeNull();
+    expect(dialog.open.mock.calls).toEqual([
+      [{ directory: true, multiple: false, defaultPath: "C:\\Users\\a\\Downloads", title: "选择下载好的文件所在的文件夹" }],
+      [{ directory: true, multiple: false, defaultPath: "C:\\Users\\a\\.minecraft" }],
+    ]);
+  });
+});
+
+describe("选择文件", () => {
+  const filter = { name: "整合包", extensions: ["mrpack", "zip"] };
+
+  it("窗口里：只选一个文件，带上标题与扩展名过滤；选中给出完整路径，取消为 null", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    dialog.open.mockResolvedValueOnce("D:\\Downloads\\pack.mrpack").mockResolvedValueOnce(null);
+    await expect(pickFile({ title: "选择整合包文件", filter })).resolves.toBe("D:\\Downloads\\pack.mrpack");
+    await expect(pickFile({ title: "选择整合包文件", filter })).resolves.toBeNull();
+    expect(dialog.open).toHaveBeenCalledTimes(2);
+    expect(dialog.open).toHaveBeenNthCalledWith(1, { title: "选择整合包文件", multiple: false, directory: false, filters: [{ name: "整合包", extensions: ["mrpack", "zip"] }] });
+  });
+
+  it("浏览器预览里没有系统对话框：明确拒绝，不当作用户取消，也不去调对话框", async () => {
+    await expect(pickFile({ title: "选择整合包文件", filter })).rejects.toThrow("浏览器预览里没有系统的选择文件对话框");
+    expect(dialog.open).not.toHaveBeenCalled();
+  });
+});
+
+describe("保存文件", () => {
+  const options = { title: "导出「新的世界」", defaultPath: "新的世界.zip", filter: { name: "存档压缩包", extensions: ["zip"] } };
+
+  it("窗口里：带上标题、默认文件名与类型过滤；选定给出完整路径，取消为 null", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    dialog.save.mockResolvedValueOnce("E:\\备份\\新的世界.zip").mockResolvedValueOnce(null);
+    await expect(pickSaveFile(options)).resolves.toBe("E:\\备份\\新的世界.zip");
+    await expect(pickSaveFile(options)).resolves.toBeNull();
+    expect(dialog.save).toHaveBeenCalledTimes(2);
+    expect(dialog.save).toHaveBeenNthCalledWith(1, { title: "导出「新的世界」", defaultPath: "新的世界.zip", filters: [{ name: "存档压缩包", extensions: ["zip"] }] });
+    expect(dialog.open).not.toHaveBeenCalled();
+  });
+
+  it("浏览器预览里没有保存对话框：明确拒绝，不当作用户取消", async () => {
+    await expect(pickSaveFile(options)).rejects.toThrow("浏览器预览里没有系统的保存文件对话框，导出要在桌面应用里进行");
+    expect(dialog.save).not.toHaveBeenCalled();
+  });
+
+  it("扩展名不对时补上，已经带着（不分大小写）时原样返回", () => {
+    expect(withExtension("D:\\分享\\樱花", "mrpack")).toBe("D:\\分享\\樱花.mrpack");
+    expect(withExtension("D:\\分享\\樱花.zip", "mrpack")).toBe("D:\\分享\\樱花.zip.mrpack");
+    expect(withExtension("D:\\分享\\樱花.MRPACK", "mrpack")).toBe("D:\\分享\\樱花.MRPACK");
+    expect(withExtension("D:\\分享\\樱花.mrpack", "mrpack")).toBe("D:\\分享\\樱花.mrpack");
+    // 只差一个点的名字不算带着扩展名
+    expect(withExtension("D:\\分享\\樱花mrpack", "mrpack")).toBe("D:\\分享\\樱花mrpack.mrpack");
+  });
+});

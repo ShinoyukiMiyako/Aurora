@@ -1,7 +1,7 @@
 //! 版本可用性检查。
 //!
 //! 在启动前判定一个版本是否 "结构上可启动"，把具体不可用原因逐条列出（而非只给一个布尔）。
-//! 检查项对齐 architecture.md：mainClass 存在、inheritsFrom 前置已安装（通过 provider 能取到）、
+//! 检查项：mainClass 存在、inheritsFrom 前置已安装（通过 provider 能取到）、
 //! 版本号可识别。前置是否 "已安装" 借 [`VersionProvider`] 表达——provider 取不到即视为未安装。
 //! 文件系统层面的 "版本文件夹是否存在" 由上层（aurora-instance）在构造 provider 时保证。
 
@@ -16,7 +16,10 @@ pub enum UnavailableReason {
     /// 合并后仍缺少 mainClass。
     MissingMainClass,
     /// inheritsFrom 前置未安装（provider 取不到）。
-    InheritanceUnresolved { missing_id: String, referenced_by: String },
+    InheritanceUnresolved {
+        missing_id: String,
+        referenced_by: String,
+    },
     /// 继承链存在循环。
     InheritanceCycle { chain: Vec<String> },
     /// inheritsFrom 指向自身。
@@ -95,10 +98,7 @@ where
 }
 
 fn has_main_class(version: &VersionJson) -> bool {
-    version
-        .main_class
-        .as_deref()
-        .is_some_and(|m| !m.is_empty())
+    version.main_class.as_deref().is_some_and(|m| !m.is_empty())
 }
 
 #[cfg(test)]
@@ -124,7 +124,9 @@ mod tests {
     #[test]
     fn loader_with_installed_parent_is_available() {
         let vanilla = v(r#"{"id":"1.21","mainClass":"net.minecraft.client.main.Main"}"#);
-        let fabric = v(r#"{"id":"fabric-1.21","inheritsFrom":"1.21","mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient"}"#);
+        let fabric = v(
+            r#"{"id":"fabric-1.21","inheritsFrom":"1.21","mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient"}"#,
+        );
         let a = check_availability(&fabric, &provider(&[vanilla]));
         assert!(a.is_available(), "预期可用，得到 {:?}", a.reasons);
     }

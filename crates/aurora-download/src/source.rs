@@ -1,16 +1,19 @@
-//! 下载源调度：官方源与 BMCLAPI 镜像之间的优先级列表、URL 解析与测速排序。
+//! 下载源调度：官方源与 BMCLAPI 镜像之间的优先级列表、URL 解析与测速探针。
 //!
 //! [`SourcePlan`] 持有一组按优先级排列的 [`MirrorSource`]，并通过 [`SourceResolver`] 把一个
 //! 官方 URL 展开成一组「候选具体 URL」（去重、保序）。引擎按此列表依次尝试，某源重试耗尽即切换
 //! 下一个。解析器是可注入的接口：生产用 [`MirrorResolver`]（走 aurora-base 的镜像改写表），
-//! 单元测试可注入自定义映射把不同源指向不同的本地 mock 端点。
+//! 单元测试可注入自定义映射把不同源指向不同的本地 mock 端点。测速结论的缓存见
+//! [`crate::speed::SourceSpeedCache`]。
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aurora_base::mirror::{self, MirrorSource};
+use tokio::task::JoinSet;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
+use crate::health::SourceHealth;
 
 /// 把「官方 URL + 下载源」解析为该源上的具体请求 URL。
 pub trait SourceResolver: Send + Sync {
@@ -18,7 +21,7 @@ pub trait SourceResolver: Send + Sync {
     fn resolve(&self, url: &str, source: MirrorSource) -> Result<String>;
 }
 
-/// 生产用解析器：直接套用 [`aurora_base::mirror::rewrite`] 的官方↔BMCLAPI 改写规则。
+/// 生产用解析器：直接套用 [`aurora_base::mirror::rewrite`] 的官方与 BMCLAPI 之间的改写规则。
 pub struct MirrorResolver;
 
 impl SourceResolver for MirrorResolver {
@@ -33,6 +36,9 @@ pub struct SourcePlan {
     /// 按优先级排列的下载源，引擎从头到尾依次尝试。
     pub sources: Vec<MirrorSource>,
     resolver: Arc<dyn SourceResolver>,
+    /// 挂了健康表时，候选里冷却中的主机沉底。下载引擎自己持有健康表，不走这里；走这里的是不经引擎的
+    /// 元数据抓取。
+    health: Option<Arc<SourceHealth>>,
 }
 
 impl std::fmt::Debug for SourcePlan {
@@ -56,12 +62,23 @@ impl SourcePlan {
         Self {
             sources,
             resolver: Arc::new(MirrorResolver),
+            health: None,
         }
     }
 
     /// 注入自定义解析器构造（测试或特殊源改写场景）。
     pub fn with_resolver(sources: Vec<MirrorSource>, resolver: Arc<dyn SourceResolver>) -> Self {
-        Self { sources, resolver }
+        Self {
+            sources,
+            resolver,
+            health: None,
+        }
+    }
+
+    /// 让 [`candidates`](Self::candidates) 按这张健康表把冷却中的主机排到后面。
+    pub fn with_health(mut self, health: Arc<SourceHealth>) -> Self {
+        self.health = Some(health);
+        self
     }
 
     /// 把一个官方 URL 展开为按优先级排列、去重后的候选 URL 列表。
@@ -79,23 +96,24 @@ impl SourcePlan {
         if out.is_empty() {
             out.push(url.to_owned());
         }
-        Ok(out)
+        Ok(match &self.health {
+            Some(health) => health.prioritize(out),
+            None => out,
+        })
     }
 
-    /// 对一个样本 URL 逐源测速，并据此把 [`Self::sources`] 按时延升序重排（失败源沉底）。
-    pub async fn reorder_by_speed(
-        &mut self,
-        client: &reqwest::Client,
-        sample_url: &str,
-        per_probe_timeout: Duration,
-    ) -> Result<()> {
-        let sources = self.sources.clone();
-        let resolver = self.resolver.clone();
-        let measured =
-            probe_latencies(client, sample_url, &sources, resolver.as_ref(), per_probe_timeout)
-                .await?;
-        self.sources = order_by_latency(measured);
-        Ok(())
+    /// 上报元数据抓取的一次成功：这个候选所在的主机恢复。没挂健康表时什么也不做。
+    pub fn record_success(&self, url: &str) {
+        if let Some(health) = &self.health {
+            health.record_success(url);
+        }
+    }
+
+    /// 上报元数据抓取的一次失败，`fault` 的含义见 [`SourceHealth::record_failure`]。
+    pub fn record_failure(&self, url: &str, fault: bool) {
+        if let Some(health) = &self.health {
+            health.record_failure(url, fault);
+        }
     }
 }
 
@@ -111,7 +129,14 @@ pub fn order_by_latency(mut measured: Vec<(MirrorSource, Option<Duration>)>) -> 
     measured.into_iter().map(|(source, _)| source).collect()
 }
 
-/// 逐源发起一次极小的 Range 探测请求并计时。成功（2xx）记时延，失败/超时记 `None`。
+/// 并发对各源发起一次极小的 Range 探测并计时（响应头到达即止，不读响应体）。成功（2xx）记时延，
+/// 失败或超时记 `None`。
+///
+/// 并发而非逐个：串行时每个不通的源都要各自等满超时，网络整体不佳（探针全数失败正是这种情形）时
+/// 光探测就白搭进「源数 × 超时」，而这段延迟发生在下载开始前，直接计入玩家的等待。
+///
+/// 返回顺序与 `sources` 一致：[`order_by_latency`] 的稳定排序靠它保留同级源原有的优先级。
+/// 解析失败在发出任何探针前整体返回错误；探测任务异常终止返回 [`Error::TaskJoin`]。
 pub async fn probe_latencies(
     client: &reqwest::Client,
     sample_url: &str,
@@ -119,30 +144,73 @@ pub async fn probe_latencies(
     resolver: &dyn SourceResolver,
     per_probe_timeout: Duration,
 ) -> Result<Vec<(MirrorSource, Option<Duration>)>> {
-    let mut out = Vec::with_capacity(sources.len());
-    for &source in sources {
-        let url = resolver.resolve(sample_url, source)?;
-        let started = Instant::now();
-        let probe = tokio::time::timeout(
-            per_probe_timeout,
-            client
-                .get(url.as_str())
-                .header(reqwest::header::RANGE, "bytes=0-0")
-                .send(),
-        )
-        .await;
-        let latency = match probe {
-            Ok(Ok(resp)) if resp.status().is_success() => Some(started.elapsed()),
-            _ => None,
-        };
-        out.push((source, latency));
+    let targets = sources
+        .iter()
+        .map(|&source| resolver.resolve(sample_url, source))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut set = JoinSet::new();
+    for (index, url) in targets.into_iter().enumerate() {
+        let client = client.clone();
+        set.spawn(async move {
+            let started = Instant::now();
+            let probe = tokio::time::timeout(
+                per_probe_timeout,
+                client
+                    .get(url.as_str())
+                    .header(reqwest::header::RANGE, "bytes=0-0")
+                    .send(),
+            )
+            .await;
+            let latency = match probe {
+                Ok(Ok(resp)) if resp.status().is_success() => Some(started.elapsed()),
+                _ => None,
+            };
+            (index, latency)
+        });
     }
-    Ok(out)
+
+    let mut latencies = vec![None; sources.len()];
+    while let Some(joined) = set.join_next().await {
+        let (index, latency) = joined.map_err(Error::TaskJoin)?;
+        latencies[index] = latency;
+    }
+    Ok(sources.iter().copied().zip(latencies).collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_with_health_sinks_a_tripped_host_and_keeps_the_rest_in_order() {
+        let official = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+        let mirror = "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json";
+        let health = Arc::new(SourceHealth::new());
+        let mirror_first = || vec![MirrorSource::BmclApi, MirrorSource::Official];
+        let plan = SourcePlan::new(mirror_first()).with_health(health.clone());
+        assert_eq!(
+            plan.candidates(official).unwrap(),
+            vec![mirror.to_owned(), official.to_owned()],
+            "都健康时保留原序"
+        );
+
+        for _ in 0..3 {
+            health.record_failure(mirror, true);
+        }
+
+        assert_eq!(
+            plan.candidates(official).unwrap(),
+            vec![official.to_owned(), mirror.to_owned()]
+        );
+        assert_eq!(
+            SourcePlan::new(mirror_first())
+                .candidates(official)
+                .unwrap(),
+            vec![mirror.to_owned(), official.to_owned()],
+            "没挂健康表的方案不受影响"
+        );
+    }
 
     #[test]
     fn candidates_dedup_unmapped_host_to_single() {

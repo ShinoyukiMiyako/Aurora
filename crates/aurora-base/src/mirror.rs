@@ -1,7 +1,7 @@
 //! 下载镜像源与官方 -> BMCLAPI 的 URL 改写。
 //!
 //! 中国大陆直连 Mojang/Forge/Fabric 官方源常年不稳，BMCLAPI（bmclapi2.bangbang93.com）
-//! 是社区事实标准镜像。本模块把官方下载 URL 按 architecture.md 五节速查表改写到对应镜像路径。
+//! 是社区事实标准镜像。本模块把官方下载 URL 改写到 BMCLAPI 上的对应路径。
 //!
 //! 映射为表驱动（[`MIRROR_TABLE`]），无对应镜像的域名（Modrinth/CurseForge 等）原样透传。
 
@@ -30,29 +30,35 @@ impl MirrorSource {
     }
 }
 
-/// 官方 host -> BMCLAPI 路径前缀的映射表。前缀为空串表示「仅换主机名、路径原样保留」。
+/// 官方 host、官方路径根 -> BMCLAPI 路径根的映射表。两个根都是路径前缀：官方根换成镜像根，其余原样保留；
+/// 都为空串表示「仅换主机名」。路径不在官方根下的没有对应镜像，原样透传。
 ///
-/// 覆盖 architecture.md 五节速查表全部行：
+/// 覆盖安装与启动用到的全部官方下载域名：
 /// - 版本清单 / Java 清单：piston-meta.mojang.com（meta 家族，根路径）
 /// - assets 对象：resources.download.minecraft.net -> /assets
 /// - libraries：libraries.minecraft.net -> /maven
-/// - Fabric：meta.fabricmc.net -> /fabric-meta
-/// - Forge：maven.minecraftforge.net -> /forge
-/// - NeoForge：maven.neoforged.net -> /neoforge
+/// - Fabric：meta.fabricmc.net -> /fabric-meta，加载器与它的库 maven.fabricmc.net -> /maven
+/// - Forge：maven.minecraftforge.net -> /maven
+/// - NeoForge：maven.neoforged.net/releases/ -> /maven/
+///
+/// BMCLAPI 的 /maven 是合并仓库，Forge 与 NeoForge 的 installer、库和 maven-metadata.xml 都在里面，
+/// 没有官方的仓库名那一层；/forge、/neoforge 只是版本查询接口，文件路径在那里全是 404，走镜像等于
+/// 没有镜像。
 ///
 /// 另附三个 meta 家族的兄弟域名：客户端 jar、服务端 jar、Java runtime 实体文件实际由
 /// piston-data / launcher / launchermeta 派发，BMCLAPI 同样以根路径镜像；缺了它们，
-/// 速查表里「版本清单/Java 清单」指向的产物就没法走镜像下载，故一并纳入。
-const MIRROR_TABLE: &[(&str, &str)] = &[
-    ("piston-meta.mojang.com", ""),
-    ("piston-data.mojang.com", ""),
-    ("launcher.mojang.com", ""),
-    ("launchermeta.mojang.com", ""),
-    ("resources.download.minecraft.net", "/assets"),
-    ("libraries.minecraft.net", "/maven"),
-    ("meta.fabricmc.net", "/fabric-meta"),
-    ("maven.minecraftforge.net", "/forge"),
-    ("maven.neoforged.net", "/neoforge"),
+/// 版本清单与 Java 清单指向的产物就没法走镜像下载，故一并纳入。
+const MIRROR_TABLE: &[(&str, &str, &str)] = &[
+    ("piston-meta.mojang.com", "", ""),
+    ("piston-data.mojang.com", "", ""),
+    ("launcher.mojang.com", "", ""),
+    ("launchermeta.mojang.com", "", ""),
+    ("resources.download.minecraft.net", "", "/assets"),
+    ("libraries.minecraft.net", "", "/maven"),
+    ("meta.fabricmc.net", "", "/fabric-meta"),
+    ("maven.fabricmc.net", "", "/maven"),
+    ("maven.minecraftforge.net", "", "/maven"),
+    ("maven.neoforged.net", "/releases/", "/maven/"),
 ];
 
 /// 按下载源改写 URL。
@@ -77,22 +83,24 @@ fn rewrite_to_bmcl(raw: &str) -> Result<String> {
         .host_str()
         .ok_or_else(|| Error::UrlMissingHost(raw.to_owned()))?;
 
-    let Some((_, prefix)) = MIRROR_TABLE
+    let Some((_, official_root, mirror_root)) = MIRROR_TABLE
         .iter()
-        .find(|(official, _)| official.eq_ignore_ascii_case(host))
+        .find(|(official, _, _)| official.eq_ignore_ascii_case(host))
     else {
         // 没有对应镜像（如 Modrinth/CurseForge），交给官方直连。
         return Ok(raw.to_owned());
     };
+    let Some(path) = parsed.path().strip_prefix(official_root) else {
+        return Ok(raw.to_owned());
+    };
 
-    // 组装 https://bmclapi2.bangbang93.com{prefix}{path}{?query}
-    let path = parsed.path();
+    // 组装 https://bmclapi2.bangbang93.com{mirror_root}{path}{?query}
     let query = parsed.query();
     let mut out = String::with_capacity(
-        BMCL_BASE.len() + prefix.len() + path.len() + query.map_or(0, |q| q.len() + 1),
+        BMCL_BASE.len() + mirror_root.len() + path.len() + query.map_or(0, |q| q.len() + 1),
     );
     out.push_str(BMCL_BASE);
-    out.push_str(prefix);
+    out.push_str(mirror_root);
     out.push_str(path);
     if let Some(q) = query {
         out.push('?');
@@ -112,8 +120,8 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_covers_feature_matrix_table() {
-        // (输入官方 URL, 期望 BMCLAPI URL)，逐条对应五节速查表。
+    fn rewrite_covers_every_mirrored_host() {
+        // (输入官方 URL, 期望 BMCLAPI URL)，逐条覆盖 MIRROR_TABLE 的每一行。
         let cases = [
             (
                 "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
@@ -145,11 +153,15 @@ mod tests {
             ),
             (
                 "https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.1-47.2.0/forge-1.20.1-47.2.0-installer.jar",
-                "https://bmclapi2.bangbang93.com/forge/net/minecraftforge/forge/1.20.1-47.2.0/forge-1.20.1-47.2.0-installer.jar",
+                "https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/1.20.1-47.2.0/forge-1.20.1-47.2.0-installer.jar",
             ),
             (
                 "https://maven.neoforged.net/releases/net/neoforged/neoforge/21.0.0/neoforge-21.0.0-installer.jar",
-                "https://bmclapi2.bangbang93.com/neoforge/releases/net/neoforged/neoforge/21.0.0/neoforge-21.0.0-installer.jar",
+                "https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/21.0.0/neoforge-21.0.0-installer.jar",
+            ),
+            (
+                "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.16.9/fabric-loader-0.16.9.jar",
+                "https://bmclapi2.bangbang93.com/maven/net/fabricmc/fabric-loader/0.16.9/fabric-loader-0.16.9.jar",
             ),
         ];
         for (input, expected) in cases {
@@ -158,6 +170,40 @@ mod tests {
                 expected,
                 "改写 {input} 结果不符"
             );
+        }
+    }
+
+    /// 加载器的 Maven 元数据也在镜像的合并仓库里，版本列表走镜像时才取得到。
+    #[test]
+    fn loader_maven_metadata_lands_in_the_merged_repository() {
+        let cases = [
+            (
+                "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml",
+                "https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/maven-metadata.xml",
+            ),
+            (
+                "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml",
+                "https://bmclapi2.bangbang93.com/maven/net/neoforged/neoforge/maven-metadata.xml",
+            ),
+            (
+                "https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml",
+                "https://bmclapi2.bangbang93.com/maven/net/neoforged/forge/maven-metadata.xml",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(rewrite(input, MirrorSource::BmclApi).unwrap(), expected);
+        }
+    }
+
+    /// 镜像只收 NeoForge 的 releases 仓库：别的仓库与长得像的路径没有对应，原样走官方。
+    #[test]
+    fn paths_outside_the_mirrored_repository_pass_through() {
+        for input in [
+            "https://maven.neoforged.net/snapshots/net/neoforged/neoforge/21.0.0/a.jar",
+            "https://maven.neoforged.net/releases-old/net/neoforged/a.jar",
+            "https://maven.neoforged.net/releases",
+        ] {
+            assert_eq!(rewrite(input, MirrorSource::BmclApi).unwrap(), input);
         }
     }
 

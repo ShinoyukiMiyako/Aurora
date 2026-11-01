@@ -7,6 +7,7 @@
 //! - `1.12.2.json` 复刻老式格式（minecraftArguments 扁平串、classifiers 式 natives、twitch 的
 //!   `${arch}` 占位）；坐标与结构为真实历史形态，个别 sha1 为代表性占位（解析/行为测试不校验哈希值）。
 //! - `fabric-loader-1.21.json` / `forge-1.12.2.json` 为对应加载器的真实结构切片。
+//! - `1.18.2-natives-twins.json` 取自真实 1.18.2 客户端 JSON 的 lwjgl 与 text2speech 条目，原样保留条目顺序。
 
 use std::collections::HashMap;
 
@@ -19,6 +20,7 @@ const VANILLA_1_21: &str = include_str!("fixtures/1.21.json");
 const VANILLA_1_12_2: &str = include_str!("fixtures/1.12.2.json");
 const FABRIC_1_21: &str = include_str!("fixtures/fabric-loader-1.21.json");
 const FORGE_1_12_2: &str = include_str!("fixtures/forge-1.12.2.json");
+const NATIVES_TWINS_1_18_2: &str = include_str!("fixtures/1.18.2-natives-twins.json");
 
 fn win64() -> RuntimeContext {
     RuntimeContext::new(OsName::Windows, "x86_64", 64)
@@ -38,7 +40,10 @@ fn parse_real_1_21_all_fields() {
     let v = VersionJson::from_json_str(VANILLA_1_21).expect("1.21 应解析");
     assert_eq!(v.id, "1.21");
     assert_eq!(v.release_type.as_deref(), Some("release"));
-    assert_eq!(v.main_class.as_deref(), Some("net.minecraft.client.main.Main"));
+    assert_eq!(
+        v.main_class.as_deref(),
+        Some("net.minecraft.client.main.Main")
+    );
     assert_eq!(v.java_version.as_ref().unwrap().major_version, 21);
     assert_eq!(v.assets.as_deref(), Some("17"));
     assert_eq!(v.asset_index.as_ref().unwrap().id, "17");
@@ -48,7 +53,13 @@ fn parse_real_1_21_all_fields() {
         "0e9a07b9bb3390602f977073aa12884a4ce12431"
     );
     assert_eq!(
-        v.logging.as_ref().unwrap().client.as_ref().unwrap().log_type,
+        v.logging
+            .as_ref()
+            .unwrap()
+            .client
+            .as_ref()
+            .unwrap()
+            .log_type,
         "log4j2-xml"
     );
 
@@ -81,6 +92,41 @@ fn rules_gate_1_21_natives_by_os() {
     assert!(
         lin.iter()
             .any(|l| l.name == "org.lwjgl:lwjgl-freetype:3.3.3:natives-linux")
+    );
+}
+
+/// 1.13 到 1.18 的原版 JSON 把同一个库写成两条同名条目：前一条只有主件，后一条带 natives 分类件。
+/// 两条都要选中，后一条被当成重复丢掉的话 natives 既不下载也不解压，游戏报找不到 lwjgl.dll。
+#[test]
+fn natives_twin_of_a_plain_library_survives_selection() {
+    let v = VersionJson::from_json_str(NATIVES_TWINS_1_18_2).expect("1.18.2 切片应解析");
+
+    let names = |ctx: &RuntimeContext, natives: bool| -> Vec<String> {
+        select_libraries(&v, ctx)
+            .iter()
+            .filter(|l| l.natives.is_some() == natives)
+            .map(|l| l.name.clone())
+            .collect()
+    };
+    let expected = ["org.lwjgl:lwjgl:3.2.2", "com.mojang:text2speech:1.12.4"];
+    assert_eq!(names(&win64(), false), expected, "主件一条不少");
+    assert_eq!(names(&win64(), true), expected, "natives 一条不少");
+
+    // macOS 走的是 3.2.1 那一对，同样成对保留。
+    let on_mac = ["org.lwjgl:lwjgl:3.2.1", "com.mojang:text2speech:1.12.4"];
+    assert_eq!(names(&osx64(), false), on_mac);
+    assert_eq!(names(&osx64(), true), on_mac);
+
+    let selected = select_libraries(&v, &win64());
+    let natives = selected
+        .iter()
+        .find(|l| l.natives.is_some() && l.name.starts_with("org.lwjgl"))
+        .expect("lwjgl 的 natives 条目应被选中");
+    assert_eq!(
+        natives
+            .native_artifact(&win64())
+            .and_then(|artifact| artifact.path.as_deref()),
+        Some("org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar")
     );
 }
 
@@ -246,8 +292,7 @@ fn forge_on_1_12_2_merges_and_detects() {
     assert_eq!(raw_mc.value.as_deref(), Some("1.12.2"));
     assert_eq!(raw_mc.source, IdentifySource::InheritsFrom);
 
-    let provider: HashMap<String, VersionJson> =
-        HashMap::from([("1.12.2".to_string(), vanilla)]);
+    let provider: HashMap<String, VersionJson> = HashMap::from([("1.12.2".to_string(), vanilla)]);
     assert!(check_availability(&forge, &provider).is_available());
 
     let merged = resolve(&forge, &provider).expect("应合并");

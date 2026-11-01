@@ -1,0 +1,60 @@
+.ring {
+  --ring-fill: var(--sk-accent);
+  position: relative;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  vertical-align: middle;
+}
+
+/* 旋转 -90°：SVG 圆的描边从 3 点方向起笔，转到 12 点 */
+.ring > svg {
+  grid-area: 1 / 1;
+  transform: rotate(-90deg);
+}
+
+.ring[data-tone="ok"] {
+  --ring-fill: var(--sk-ok);
+}
+
+.ring[data-tone="info"] {
+  --ring-fill: var(--sk-info);
+}
+
+.ring[data-tone="warn"] {
+  --ring-fill: var(--sk-warn);
+}
+
+.ring[data-tone="danger"] {
+  --ring-fill: var(--sk-danger);
+}
+
+.ring[data-tone="muted"] {
+  --ring-fill: var(--sk-text-3);
+}
+
+.track {
+  stroke: var(--sk-bg-3);
+}
+
+.fill {
+  stroke: var(--ring-fill);
+}
+
+.label {
+  grid-area: 1 / 1;
+  font-size: var(--sk-fs-micro);
+  font-weight: var(--sk-w-title);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--sk-text);
+}
+
+/* 84 档是页面级的总进度环：圆心数字按小标题字号画，才和 7px 的描边相称 */
+.ring[data-size="84"] > .label {
+  font-size: var(--sk-fs-lead);
+}
+
+.ring[data-empty] > .label {
+  color: var(--sk-text-2);
+}

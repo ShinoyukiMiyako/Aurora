@@ -5,13 +5,17 @@
 //! `(major, minor, security, build)` 用于比较排序，`major` 即 `javaVersion.majorVersion`
 //! 匹配所依据的主版本号。
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 
 /// 归一后的 Java 版本号。
 ///
 /// `major` 是对外匹配用的主版本（8 / 11 / 17 / 21…）；其余三段用于同一主版本内的排序，
 /// 使得更新的补丁/构建号排在前面。`raw` 保留原始字符串以便展示与排序兜底。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// 可序列化是为了把探测结果落进探测缓存，下次启动免去再跑一次 `java -version`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JavaVersion {
     /// 主版本号：旧式取 `1.X` 的 X，新式取首段。
     pub major: u32,
@@ -195,13 +199,22 @@ mod tests {
     #[test]
     fn parses_modern_java11_17_21() {
         let v11 = JavaVersion::parse("11.0.12+7").unwrap();
-        assert_eq!((v11.major, v11.minor, v11.security, v11.build), (11, 0, 12, 7));
+        assert_eq!(
+            (v11.major, v11.minor, v11.security, v11.build),
+            (11, 0, 12, 7)
+        );
 
         let v17 = JavaVersion::parse("17.0.1+12").unwrap();
-        assert_eq!((v17.major, v17.minor, v17.security, v17.build), (17, 0, 1, 12));
+        assert_eq!(
+            (v17.major, v17.minor, v17.security, v17.build),
+            (17, 0, 1, 12)
+        );
 
         let v21 = JavaVersion::parse("21.0.3").unwrap();
-        assert_eq!((v21.major, v21.minor, v21.security, v21.build), (21, 0, 3, 0));
+        assert_eq!(
+            (v21.major, v21.minor, v21.security, v21.build),
+            (21, 0, 3, 0)
+        );
     }
 
     #[test]
@@ -288,7 +301,10 @@ mod tests {
         assert_eq!(p11.vendor, "OpenJDK");
 
         let p17 = parse_java_version_output(OPENJDK_17).unwrap();
-        assert_eq!((p17.version.major, p17.version.security, p17.version.build), (17, 1, 12));
+        assert_eq!(
+            (p17.version.major, p17.version.security, p17.version.build),
+            (17, 1, 12)
+        );
         assert!(p17.is_64bit);
     }
 
