@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { render, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, resetRecorder } from "../test/launcher";
+import { bootOverrides, callsOf, instanceDto, resetRecorder } from "../test/launcher";
 import { TOASTS_COPY } from "../copy/shell";
 import { TOAST_CLOSE_LABEL } from "../ui/Toast";
 import { OverlayRoot } from "./overlay";
@@ -226,5 +226,35 @@ describe("通知容器的指针暂停", () => {
       toastOf("甲").dispatchEvent(new PointerEvent("pointermove", { bubbles: true, clientX: 300, clientY: 40 }));
     });
     expect(running()).toEqual([{ title: "甲", running: false }]);
+  });
+});
+
+describe("通知上的动作按钮", () => {
+  it("改名后点已经显示着的「启动」：按钮走的是迁移后的动作，启动新名字", async () => {
+    let onDisk = [instanceDto("生存"), instanceDto("创造")];
+    ipc.overrides.set("list_instances", () => onDisk);
+    ipc.overrides.set("repair_instance", () => ({ reinstalled: true, libraries: 1, assets: 0, natives: 0 }));
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    ipc.overrides.set("rename_instance", () => {
+      onDisk = onDisk.map((i) => (i.id === "生存" ? { ...i, id: "生存二" } : i));
+      return { id: "生存二" };
+    });
+    await act(async () => {
+      await launcher.actions.reload("instances");
+      await launcher.actions.repairInstance("生存");
+    });
+    await flush();
+
+    await act(async () => {
+      await launcher.actions.renameInstance("生存", "生存二");
+    });
+    await flush();
+    const button = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "启动");
+    if (button === undefined) throw new Error("已修复的通知应还显示着「启动」");
+    act(() => button.click());
+    await flush();
+
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存二"]);
+    expect(launcher.state.toasts.map((t) => t.tone)).not.toContain("error");
   });
 });
