@@ -2132,7 +2132,7 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(serde_json::json!({}))
-                    .set_delay(Duration::from_secs(3)),
+                    .set_delay(Duration::from_secs(30)),
             )
             .mount(&server)
             .await;
@@ -2176,12 +2176,13 @@ mod tests {
         use crate::commands::instances::rename_instance_with;
 
         let server = MockServer::start().await;
+        // 在取消之前都等不到回音，下面几步落在导出进行中不取决于它们跑得多快。
         Mock::given(method("POST"))
             .and(path("/version_files"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(serde_json::json!({}))
-                    .set_delay(Duration::from_secs(3)),
+                    .set_delay(Duration::from_secs(30)),
             )
             .mount(&server)
             .await;

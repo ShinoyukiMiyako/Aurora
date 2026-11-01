@@ -4572,14 +4572,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn restore_waits_for_an_export_that_packs_the_saves() {
         let server = MockServer::start().await;
-        // 导出先按哈希向 Modrinth 查 Mod：让它慢一点，好在导出进行中发起恢复
+        // 导出先按哈希向 Modrinth 查 Mod：把回音扣到用例放行，恢复和备份都落在导出进行中，
+        // 不靠响应延迟。用例失败退出时放行端跟着丢弃，recv 出错，mock 的服务线程照样放开
+        let (release_export, export_held) = std::sync::mpsc::channel::<()>();
+        let export_held = std::sync::Mutex::new(export_held);
         Mock::given(method("POST"))
             .and(path("/version_files"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(json!({}))
-                    .set_delay(Duration::from_millis(1500)),
-            )
+            .respond_with(move |_request: &wiremock::Request| {
+                let _ = export_held.lock().unwrap().recv();
+                ResponseTemplate::new(200).set_body_json(json!({}))
+            })
             .mount(&server)
             .await;
         let uri = server.uri();
@@ -4650,6 +4652,7 @@ mod tests {
             .unwrap();
         assert_eq!(made.backup.kind, BackupKind::Manual);
 
+        release_export.send(()).expect("mock 还在等放行");
         export.await.unwrap().unwrap();
         assert!(dest.is_file());
         let restored = restore_world_backup_with(
