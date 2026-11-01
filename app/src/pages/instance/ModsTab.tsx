@@ -11,7 +11,7 @@ import { errorRecord } from "../../state/errors";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useInstanceMods, type InstalledMod, type UpdateCandidate } from "../../state/queries/instance";
 import { invalidate, type ResourceResult } from "../../state/resource";
-import { progressTrack } from "../../state/tasks";
+import { modFilesBeingUpdated, progressTrack } from "../../state/tasks";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
@@ -29,7 +29,7 @@ import { Toggle } from "../../ui/Toggle";
 import { Tooltip } from "../../ui/Tooltip";
 import { LOCK_REASON, MODS_COPY, SOURCE_LABEL } from "./copy";
 import styles from "./instance.module.css";
-import { disabledFileName, enabledFileName, filterMods, isPendingModUpdate, modCounts, modRows, modTotals, removalRelations, updateTaskFiles, type ModFilter, type ModRow } from "./model";
+import { disabledFileName, enabledFileName, filterMods, isPendingModUpdate, modCounts, modRows, modTotals, removalRelations, type ModFilter, type ModRow } from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
@@ -122,7 +122,8 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     (s) => s.tasks.filter((t) => isPendingModUpdate(t, id)),
     shallowArrayEqual,
   );
-  const updatingFiles = new Set(updateTasks.flatMap((t) => updateTaskFiles(t.spec)));
+  // 组合任务跑完之前入队的几项都算在更新中，否则玩家能对同一个文件另起一个单个更新，后跑的那个按旧文件名只会失败
+  const updatingFiles = modFilesBeingUpdated(updateTasks, id);
   const rows = modsData === null ? [] : modRows(modsData, updates.status === "ready" ? updates.data : null).map((r) => {
     const override = overrides.get(r.fileName);
     return override === undefined ? r : { ...r, enabled: override };
