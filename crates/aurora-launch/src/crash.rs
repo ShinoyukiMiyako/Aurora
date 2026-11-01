@@ -223,7 +223,7 @@ const RULES: &[Rule] = &[
         regex: Some(concat!(
             r"(?i)hard_dep(?:_no_candidate|_incompatible_preselected)? \S+ \S+ \{depends |",
             r"\brequires .+ which is missing|",
-            r"需要 模组 '[^']+' \([a-z0-9_\-]+\) 的"
+            r"需要 模组 '.+' \([a-z0-9_\-]+\) 的"
         )),
         // 写法要带上「没装」那半句：`of mod 'X' (x)` 与 `需要 模组 'X' (x) 的` 在版本不对、加载不了时一模一样。
         extract: Some(concat!(
@@ -764,6 +764,9 @@ const NON_MOD_TOKENS: &[&str] = &[
 /// Mod 初始化抛异常时的 `provided by 'sodium'`、mixin 报错尾部的 `from mod sodium`，以及 Forge 依赖报错的
 /// `Requested by: 'sodium'`。mixin 规则自带的提取式可能退回 `*.mixins.json` 配置文件名，
 /// 故不在复用之列。
+///
+/// 显示名里可能有撇号（`Xaero's Minimap`），所以引号里不能写成 `[^']+`；又得是懒惰匹配：一行常有依赖方和前置两个 Mod，
+/// 贪婪匹配会从第一个引号吞到最后一个括号，依赖方就丢了。
 static MOD_ID_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     RULES
         .iter()
@@ -775,8 +778,8 @@ static MOD_ID_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         })
         .filter_map(|rule| rule.extract)
         .chain([
-            r"(?i)\bmod '[^']+' \(([a-z0-9_\-]+)\)",
-            r"(?i)模组 '[^']+' \(([a-z0-9_\-]+)\)",
+            r"(?i)\bmod '.+?' \(([a-z0-9_\-]+)\)",
+            r"(?i)模组 '.+?' \(([a-z0-9_\-]+)\)",
             r"(?i)\bhard_dep(?:_no_candidate|_incompatible_preselected)? ([a-z0-9_\-]+) \S+ \{depends ",
             r"(?i)\bfrom mod ([a-z0-9_\-]+)",
             r"(?i)requested by: '([a-z0-9_\-]+)'",
@@ -1457,6 +1460,51 @@ More details:\n\
             CrashCategory::DependencyVersionMismatch,
         );
         assert_eq!(diag.detail.as_deref(), Some("xaerominimap"));
+    }
+
+    /// 显示名里的撇号不是引号的结尾。一行里常有两个 Mod，也不能从第一个引号一路吞到最后一个括号，把依赖方吞掉。
+    #[test]
+    fn mods_with_an_apostrophe_in_their_name_are_still_named() {
+        for (log, expected) in [
+            (
+                "\t - Mod 'Xaero's Minimap' (xaerominimap) 24.4.0 requires version 0.92.0 or later of fabric-api, which is missing!",
+                vec!["xaerominimap", "fabric-api"],
+            ),
+            (
+                "\t - 模组 'Xaero's Minimap' (xaerominimap) 24.4.0 需要 fabric-api 的 0.92.0 及以上版本，但没有安装它！",
+                vec!["xaerominimap"],
+            ),
+            (
+                "\t - Mod 'Xaero's World Map' (xaeroworldmap) 1.39.0 requires version 24.0 or later of mod 'Xaero's Minimap' (xaerominimap), but only the wrong version is present: 23.0!",
+                vec!["xaeroworldmap", "xaerominimap"],
+            ),
+            (
+                "\t - 模组 'Xaero's World Map' (xaeroworldmap) 1.39.0 需要 模组 'Xaero's Minimap' (xaerominimap) 的 24.0 及以上版本，但已经安装了的版本 23.0 不对！",
+                vec!["xaeroworldmap", "xaerominimap"],
+            ),
+            (
+                "\t - Mod 'Create: Steam 'n' Rails' (railways) 1.5.0 requires version 0.92.0 or later of mod 'Fabric API' (fabric-api), but only the wrong version is present: 0.83.0!",
+                vec!["railways", "fabric-api"],
+            ),
+            (
+                "\t - 将 模组 'Xaero's Minimap' (xaerominimap) 23.0 替换为 24.0 及以上版本。",
+                vec!["xaerominimap"],
+            ),
+        ] {
+            assert_eq!(extract_mod_ids(log), expected, "{log}");
+        }
+    }
+
+    /// 线索不能因为前置的显示名带撇号就消失：这几行是报错里唯一提到它的地方。
+    #[test]
+    fn missing_dependency_with_an_apostrophe_in_its_name() {
+        let missing = "\t - 模组 'Better Waypoints' (betterwaypoints) 1.0 需要 模组 'Xaero's Minimap' (xaerominimap) 的 任意版本，但没有安装它！";
+        let diag = primary(missing, CrashCategory::MissingDependency);
+        assert_eq!(diag.detail.as_deref(), Some("xaerominimap"));
+
+        let blocked = "\t - 模组 'Better Waypoints' (betterwaypoints) 1.0 需要 模组 'Xaero's Minimap' (xaerominimap) 的 24.0 及以上版本，但由于其他限制条件无法载入！";
+        let diag = primary(blocked, CrashCategory::MissingDependency);
+        assert_eq!(diag.detail, None, "装着的前置不能说成缺失");
     }
 
     /// 几个候选都不对时 Loader 用复数。
