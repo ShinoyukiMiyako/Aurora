@@ -106,12 +106,12 @@ const RULES: &[Rule] = &[
     Rule {
         category: CrashCategory::OutOfMemory,
         patterns: &[
-            "outofmemoryerror",
             "could not reserve enough space for object heap",
             "there is insufficient memory for the java runtime",
             "java heap space",
         ],
-        regex: None,
+        // 按词认：崩溃报告与 JVM 错误日志会原样列出 -XX:+HeapDumpOnOutOfMemoryError 这类开关，开着不等于内存不足。
+        regex: Some(r"(?i)\boutofmemoryerror\b"),
         extract: None,
         summary: "内存不足",
         advice: "调高最大内存（-Xmx），减少同时加载的 Mod 与高清材质；32 位 Java 无法分配大内存，请改用 64 位 Java。",
@@ -589,6 +589,26 @@ mod tests {
             CrashCategory::OutOfMemory,
         );
         assert_absent("Loaded 12 mods", CrashCategory::OutOfMemory);
+    }
+
+    /// 崩溃报告的 JVM Flags、JVM 错误日志的命令行会原样列出启动参数：名字里带 OutOfMemoryError 的开关
+    /// 开着不等于内存不足，一次无关的崩溃不该带上一条「调高最大内存」的线索。
+    #[test]
+    fn out_of_memory_switches_in_jvm_args_are_not_a_clue() {
+        for line in [
+            "JVM Flags: 3 total; -XX:+HeapDumpOnOutOfMemoryError -Xss1M -Xmx4096m",
+            "Command Line: -XX:+ExitOnOutOfMemoryError -Xmx4096m net.minecraft.client.main.Main",
+            "jvm_args: -XX:OnOutOfMemoryError=taskkill -XX:+CrashOnOutOfMemoryError",
+        ] {
+            assert_absent(line, CrashCategory::OutOfMemory);
+        }
+        for line in [
+            "java.lang.OutOfMemoryError: Metaspace",
+            "Caused by: java.lang.OutOfMemoryError",
+            "OutOfMemoryError somewhere",
+        ] {
+            primary(line, CrashCategory::OutOfMemory);
+        }
     }
 
     #[test]
