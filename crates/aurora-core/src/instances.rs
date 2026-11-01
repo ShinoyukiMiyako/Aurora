@@ -420,6 +420,7 @@ pub fn broken_reason_text(reason: &BrokenReason) -> String {
     match reason {
         BrokenReason::MissingJson => "缺少版本 JSON".to_owned(),
         BrokenReason::Parse(detail) => format!("版本 JSON 损坏：{detail}"),
+        BrokenReason::Unreadable(detail) => format!("版本 JSON 读不出来：{detail}"),
     }
 }
 
@@ -985,6 +986,28 @@ pub(crate) mod tests {
         assert_eq!(ready.mod_count, None, "定不了工作目录就不数");
         assert_eq!(ready.world_count, None);
         assert_eq!(ready.isolated, None);
+    }
+
+    /// 版本 JSON 读不出来的实例在列表里是损坏项，带上原因；同目录下别的实例不受影响。
+    #[tokio::test]
+    async fn unreadable_version_json_lists_as_broken_with_its_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        std::fs::create_dir_all(game.join("versions").join("被占").join("被占.json")).unwrap();
+
+        let list = aurora.list_instances().await.unwrap();
+
+        let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, vec!["1.21.1", "被占"]);
+        assert!(matches!(list[0].version, InstanceVersion::Ready(_)));
+        let InstanceVersion::Broken(reason) = &list[1].version else {
+            panic!("应为损坏：{:?}", list[1].version);
+        };
+        let text = broken_reason_text(reason);
+        assert!(text.starts_with("版本 JSON 读不出来："), "{text}");
+        assert!(text.contains("被占.json"), "{text}");
     }
 
     /// 整合包来源与最近崩溃时刻随列表给出；这两份附属文件坏了只标在这个实例上，列表照常返回。
