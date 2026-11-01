@@ -169,16 +169,24 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | `renaming` / `deleting` | 改名（新旧两个名字都占）、删除 | 互斥 |
 | `launching` -> `running` | 启动命令（Quick Play 直达同样走 `launch_game`），从启动一直持有到游戏退出 | 只与 `modifying`、`inherited` 兼容 |
 | `backing_up` | 备份、导出、恢复存档；开着自动备份时，游戏退出后由启动命令把 `running` 转成它，备份做完才放开 | 只与 `modifying`、`inherited` 兼容 |
-| `modifying` | 装、删、启停、更新、回滚 Mod，批量启停、更新检查设置，装资源包、光影、数据包，写实例设置，检查 Mod 更新（会回写卷宗），打开文件夹时创建缺失的工作子目录，导出整合包 | 与自身、`launching`、`running`、`backing_up`、`inherited` 兼容 |
+| `modifying` | 装、删、启停、更新、回滚 Mod，批量启停、更新检查设置，装资源包、光影、数据包，写实例设置，检查 Mod 更新（会回写卷宗），打开文件夹时创建缺失的工作子目录，导出整合包，把实例存为新实例的默认设置 | 与自身、`launching`、`running`、`backing_up`、`inherited` 兼容 |
 | `inherited` | 继承链上的基底版本：别的实例启动到退出（开着自动备份时到备份做完）、补全、导入整合包期间（导入时占将要继承的原版），以那个实例的名义占住 | 与 `launching`、`running`、`backing_up`、`modifying` 及别的 `inherited` 兼容 |
 
-这张表在后端（`InstanceActivity::compatible_with`）、前端的禁用判断与模拟后端三处保持一致。
+写成集合就是两条：`{modifying, inherited}` 与 `{modifying, launching, running, backing_up, inherited}` 兼容，`{launching, running, backing_up}` 与 `{modifying, inherited}` 兼容；`installing`、`repairing`、`renaming`、`deleting` 与一切互斥。这张表在后端（`InstanceActivity::compatible_with`）、前端的禁用判断（`pages/instance/model.ts` 的 `instanceLocks`）与模拟后端（`ipc/mock/handlers/instances.ts` 的 `compatible`）三处保持一致。
 
-游戏运行时仍然可以改动 Mod。被游戏占用的文件由门面在动手前检测，检测到时报 `mod_file_busy`。`list_instances` 返回的 `activity` 就来自这张表，前端刷新之后也能据此知道哪个实例正在安装；几件事并行时报实例自己的事，其次 `modifying`，最后 `inherited`。
+游戏运行时仍然可以改动 Mod。被游戏占用的文件由门面在动手前检测，检测到时报 `mod_file_busy`。`list_instances` 返回的 `activity` 就来自这张表，前端刷新之后也能据此知道哪个实例正在安装；几件事并行时按 `report_rank` 报排在最前的那件：实例自己的事 0，`modifying` 1，`inherited` 2。
 
-基底占用经 `InstanceLocks::acquire_with_bases` 先占实例自己、再依次占 `Aurora::inheritance_chain` 给出的基底（只沿链读各环的版本 JSON；断在哪一环就停在那里，原因交给启动与补全照原有失败码报出），与实例同名或彼此只差大小写的只占一次，任何一处冲突时已占到的一并放开。基底被占时对它的删除、改名、补全报 `instance_busy`，正文为「实例 <id> 正在被实例 <使用者> 使用，请稍后再试」，`detail` 为 `{ id, activity: "inherited", used_by }`；其余活动的 `detail` 不带 `used_by`。实例列表与删除预览的 `used_by` 给出正以它为基底的实例（几个时取最早占到的那个，与报错的是同一个），前端据此提前禁用改名、补全、删除并写明是谁在用。新建实例是合并后的自包含版本 JSON（不继承原版），不占基底。
+`instance_busy` 的冲突优先级与列表一致：一次占用与几份占用都冲突时，报不兼容的那几份里排在最前的，不随哪份占用先到而变（`InstanceLocks::hold`）。所以基底自己在运行时，被拒的删除报 `running`，不说成「正在被别的实例使用」。实例列表与删除预览经 `InstanceLocks::occupancy` 在同一次查表里取出 `activity` 与 `used_by`，分两次查的话，中间别的命令占上或放开基底，就会报出 `inherited` 却没有 `used_by` 这类对不上的一对。`used_by` 非空时 `activity` 不一定是 `inherited`：基底自己可能正在启动、运行或备份，界面不能这样假设。
 
-备份、导出与恢复存档只碰 saves 下的一个存档与游戏目录里的备份区，和 Mod 改动、基底占用都不相交，所以兼容；游戏开着时存档随时在写，所以与启动、运行互斥。导出整合包对外是 `modifying`，但可能把存档一起打包，与备份、恢复另有两条互斥：实例报着 `backing_up` 时导出报 `instance_busy`；勾了存档时导出记下「存档正被读走」（`InstanceLocks::read_saves`），恢复在读完之前报 `instance_busy`（`activity` 为 `modifying`，正文写明在导出），只读存档的备份与导出存档不受影响。两边都先写自己的记录再查对方，同时发起时至少挡下一方。不隔离的实例共用游戏目录的 saves，实例锁只管自己这个实例，所以这些检查还要看共用同一份存档的别的实例：别的实例正开着游戏时备份、导出或恢复这份存档，别的实例占着 `backing_up` 时启动或导出整合包，别的实例正把存档读进整合包时恢复，都报 `instance_busy`，`detail.id` 指向挡路的那个实例。
+前端的 `instanceLocks(busy, installing, modifying, usedBy, backingUp)` 五个参数都必填，按这个顺序给出禁用原因：运行 > 安装中（删除除外）> 本实例的活动（备份优先于改动）> 被别的实例当作基底。备份与改动都不挡 Mod 操作，只挡改名、补全、删除。
+
+基底占用只经 `InstanceLocks::acquire_with_bases` 与 `acquire_with_chain` 建立，`acquire` 不收 `inherited`。两者都先占实例自己、再依次占基底，与实例同名或彼此只差大小写的只占一次，任何一处冲突时已占到的一并放开，得到的 `ChainGuard` 把实例自己与基底的占用一起持有、一起放开。`acquire_with_chain` 给基底要读盘才知道的场合用（启动的 `reserve_launch`、`repair_instance`）：占住实例自己之后才读 `Aurora::inheritance_chain`（只沿链读各环的版本 JSON；断在哪一环就停在那里，原因交给启动与补全照原有失败码报出）。实例正被安装、补全、改名或删除时它的版本 JSON 可能正被替换，先读的话报出来的会是读文件的错误，而不是 `instance_busy`。导入整合包时实例的版本 JSON 还没写出来，用 `acquire_with_bases` 占 `PreparedModpack::base_version()` 给出的原版。基底被占时对它的删除、改名、补全报 `instance_busy`，正文为「实例 <id> 正在被实例 <使用者> 使用，请稍后再试」，`detail` 为 `{ id, activity: "inherited", used_by }`；其余活动的 `detail` 不带 `used_by`。实例列表与删除预览的 `used_by` 给出正以它为基底的实例（几个时取最早占到的那个，与报错的是同一个），前端据此提前禁用改名、补全、删除并写明是谁在用。新建实例是合并后的自包含版本 JSON（不继承原版），不占基底。
+
+`set_activity` 不重新检查冲突，只用于兼容集合相同的活动之间转换：进程起来后 `launching` 转 `running`，游戏退出后 `running` 转 `backing_up`。`ChainGuard::set_activity` 只改实例自己那一份，转备份时基底的 `inherited` 留到备份做完才放开。
+
+`launch_game` 的占用顺序：先取快照，再 `reserve_launch`（先占同一时间只跑一个游戏的占用槽，再 `acquire_with_chain`），然后 `ensure_shared_worlds_settled`。不隔离的实例先占住自己再查别的实例有没有在备份共用存档，查完之后别的实例再想备份，会被占用槽那一侧的 `ensure_shared_world_free` 挡住。
+
+备份、导出与恢复存档只碰 saves 下的一个存档与游戏目录里的备份区，和 Mod 改动、基底占用都不相交，所以兼容；游戏开着时存档随时在写，所以与启动、运行互斥。导出整合包对外是 `modifying`，但可能把存档一起打包，与备份、恢复另有两条互斥：实例报着 `backing_up` 时导出报 `instance_busy`；勾了存档时导出记下「存档正被读走」（`InstanceLocks::read_saves`），恢复在读完之前报 `instance_busy`（`activity` 为 `modifying`，正文写明在导出，`ensure_saves_not_read`），只读存档的备份与导出存档不受影响。两边都先写自己的记录再查对方，同时发起时至少挡下一方。导出整合包与运行中的游戏兼容：勾了存档时读到的是游戏此刻盘上的存档，`session.lock` 跳过。不隔离的实例共用游戏目录的 saves，实例锁只管自己这个实例，所以这些检查还要看共用同一份存档的别的实例：别的实例正开着游戏时备份、导出或恢复这份存档，别的实例占着 `backing_up` 时启动或导出整合包，别的实例正把存档读进整合包时恢复，都报 `instance_busy`，`detail.id` 指向挡路的那个实例。
 
 `install_resource` 只装资源包、光影与数据包，对 Mod 报 `invalid_argument`：Mod 一律走 `install_mod`，才会登记卷宗、带上前置并写进历史。CurseForge 上禁止第三方分发的文件，装 Mod、装资源与导入整合包都报 `distribution_blocked`（带文件名），空白的 `downloadUrl` 按缺失处理、先走 download-url 兜底。
 
