@@ -385,7 +385,8 @@ function claimStagingPath(file: BlockedFileDto): string {
  */
 function claimBlockedFiles(args: MockArgs): ClaimReportDto {
   const cmd = "claim_blocked_files";
-  const folder = argReader(cmd, args).string("folder");
+  // 与后端 non_blank 一致：去掉首尾空白后再用，选文件夹时带进来的空白不让下载文件夹认不出来
+  const folder = argReader(cmd, args).string("folder").trim();
   let files: BlockedFileDto[];
   try {
     files = parseBlockedFiles(args.files, "files");
@@ -393,12 +394,12 @@ function claimBlockedFiles(args: MockArgs): ClaimReportDto {
     // 形状由 serde 反序列化：不对是 Tauri 的参数错误
     throw tauriArgError(cmd, "files", error instanceof Error ? error.message : String(error));
   }
-  if (folder.trim() === "") throw new IpcError("invalid_argument", "folder 不能为空");
+  if (folder === "") throw new IpcError("invalid_argument", "folder 不能为空");
   if (files.length === 0) throw new IpcError("invalid_argument", "files 不能为空");
   const seen = new Set<number>();
   for (const file of files) {
-    if (!isSafeFileName(file.file_name)) throw new IpcError("invalid_argument", `${file.file_name} 不是单个安全的文件名`);
-    if (seen.has(file.file_id)) throw new IpcError("invalid_argument", `file_id ${file.file_id} 出现了不止一次`);
+    if (!isSafeFileName(file.file_name)) throw new IpcError("invalid_argument", `file_name 不是单个文件名：${file.file_name}`);
+    if (seen.has(file.file_id)) throw new IpcError("invalid_argument", `file_id 重复：${file.file_id}`);
     seen.add(file.file_id);
   }
   const inDownloads = folder.toLowerCase() === MOCK_DOWNLOADS_DIR.toLowerCase();

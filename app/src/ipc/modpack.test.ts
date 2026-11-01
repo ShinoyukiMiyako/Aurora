@@ -302,7 +302,8 @@ describe("整合包 mock：可选文件与需要手动下载的文件", () => {
     seedMockDownloads(["blocked-a.jar", "blocked-b.jar"]);
     const files = (await previewModpack("D:\\Downloads\\blocked.zip")).blocked_files;
     expect(await claimBlockedFiles("D:\\别处", files)).toEqual({ claimed: [], missing: [5000001, 5000002] });
-    await claimBlockedFiles(MOCK_DOWNLOADS_DIR, [files[0]]);
+    // 后端去掉文件夹首尾的空白再找，认领到的源路径也按去掉之后的写
+    expect(await claimBlockedFiles(`  ${MOCK_DOWNLOADS_DIR} `, [files[0]])).toEqual({ claimed: [{ file_id: 5000001, source_path: `${MOCK_DOWNLOADS_DIR}\\blocked-a.jar` }], missing: [] });
     seedMockDownloads([]);
     expect(await claimBlockedFiles("D:\\别处", files)).toEqual({
       claimed: [{ file_id: 5000001, source_path: "D:\\Games\\Launcher\\cache\\modpacks\\claims\\curseforge-5000001\\blocked-a.jar" }],
@@ -310,13 +311,13 @@ describe("整合包 mock：可选文件与需要手动下载的文件", () => {
     });
   });
 
-  it("认领的参数校验：文件夹为空、清单为空、文件名带路径、file_id 重复报 invalid_argument；清单形状不对是 Tauri 的参数错误", async () => {
+  it("认领的参数校验：文件夹为空、清单为空、文件名带路径、file_id 重复报 invalid_argument，正文与后端同文；清单形状不对是 Tauri 的参数错误", async () => {
     const err = (folder: string, files: unknown) => invoke("claim_blocked_files", { folder, files }).catch((e: unknown) => e);
     expect(await err("  ", [FILE_A])).toMatchObject({ code: "invalid_argument", message: "folder 不能为空" });
     expect(await err(MOCK_DOWNLOADS_DIR, [])).toMatchObject({ code: "invalid_argument", message: "files 不能为空" });
-    expect(await err(MOCK_DOWNLOADS_DIR, [{ ...FILE_A, file_name: "..\\x.jar" }])).toMatchObject({ code: "invalid_argument" });
-    expect(await err(MOCK_DOWNLOADS_DIR, [{ ...FILE_A, file_name: "a.jar." }])).toMatchObject({ code: "invalid_argument" });
-    expect(await err(MOCK_DOWNLOADS_DIR, [FILE_A, { ...FILE_A, file_name: "other.jar" }])).toMatchObject({ code: "invalid_argument", message: "file_id 5000001 出现了不止一次" });
+    expect(await err(MOCK_DOWNLOADS_DIR, [{ ...FILE_A, file_name: "..\\x.jar" }])).toMatchObject({ code: "invalid_argument", message: "file_name 不是单个文件名：..\\x.jar" });
+    expect(await err(MOCK_DOWNLOADS_DIR, [{ ...FILE_A, file_name: "a.jar." }])).toMatchObject({ code: "invalid_argument", message: "file_name 不是单个文件名：a.jar." });
+    expect(await err(MOCK_DOWNLOADS_DIR, [FILE_A, { ...FILE_A, file_name: "other.jar" }])).toMatchObject({ code: "invalid_argument", message: "file_id 重复：5000001" });
     expect(await err(MOCK_DOWNLOADS_DIR, ["blocked-a.jar"])).toMatchObject({ code: "unknown" });
     expect(await downloadsFolder()).toBe(MOCK_DOWNLOADS_DIR);
   });
