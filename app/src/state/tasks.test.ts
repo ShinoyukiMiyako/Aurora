@@ -461,6 +461,11 @@ describe("下载队列：纯函数", () => {
     expect(retryTask([failed], "t1")[0]).toMatchObject({ status: "queued", startedAt: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0 });
   });
 
+  it("开始运行时这一次尝试的进度全部从 0 算起", () => {
+    const queued = task("t1", { progress: 0.5, bytes: 9, totalBytes: 10, doneBytes: 9, transferredBytes: 9, batchTransferred: 9, speedBps: 9 });
+    expect(markRunning([queued], "t1", T0 + 10)[0]).toMatchObject({ status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, speedBps: 0, startedAt: T0 + 10 });
+  });
+
   it("重试较早记录里失败的任务：传输量从 0 算起，新进度能累加", () => {
     const old = task("t1", { status: "failed", transferredBytes: null, finishedAt: T0 + 9, error: { code: "network_failed", message: "x" } });
     const running = markRunning(retryTask([old], "t1"), "t1", T0 + 10);
