@@ -156,6 +156,10 @@ export interface Task {
 export const BUSY_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited", "backing_up"] as const;
 export type BusyActivity = (typeof BUSY_ACTIVITIES)[number];
 
+/** 基底做着这些事时容不下基底占用：自己在启动、运行，或目录正被挪走、重写。改动、备份与别的实例的基底占用都和它兼容。 */
+export const BASE_BLOCKING_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running"] as const;
+export type BaseBlockingActivity = (typeof BASE_BLOCKING_ACTIVITIES)[number];
+
 /** instance_busy 拒绝的原因：被占着的实例与它在做的事；inherited 时 usedBy 是正以它为基底的实例，其余为 null。 */
 export interface InstanceBusy {
   id: string;

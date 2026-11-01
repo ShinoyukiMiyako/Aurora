@@ -111,6 +111,8 @@ export interface InstanceDto {
   activity: InstanceActivity | null;
   /** 正以它为基底的实例；有几个时为最早占到的那个（与 instance_busy 报的同一个），没被当作基底时为 null。 */
   used_by: string | null;
+  /** 继承链上此刻容不下基底占用的基底（由近及远第一个），形状与这时 instance_busy 的 detail 相同；非空时补全、重新安装加载器会被拒。 */
+  base_busy: { id: string; activity: InstanceActivity } | null;
   /** 累计游玩分钟（向下取整）；没玩过为 0，游玩记录读不出时为 null。 */
   playtime_min: number | null;
   /** 上次游玩结束的毫秒时间戳；没玩过或游玩记录读不出时为 null。 */

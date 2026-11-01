@@ -53,10 +53,10 @@ async function repairing(): Promise<{ taskId: string; finish: (value: unknown) =
   return { taskId: String(call.taskId), finish: done.resolve, fail: done.reject };
 }
 
-async function launching(): Promise<{ taskId: string; launched: (value: { pid: number; offline: boolean }) => void; refuse: (error: unknown) => void; pending: Promise<void> }> {
+async function launching(id = CHILD): Promise<{ taskId: string; launched: (value: { pid: number; offline: boolean }) => void; refuse: (error: unknown) => void; pending: Promise<void> }> {
   const done = deferred<{ pid: number; offline: boolean }>();
   ipc.overrides.set("launch_game", () => done.promise);
-  const pending = store.actions.launch(CHILD);
+  const pending = store.actions.launch(id);
   await settle();
   const session = store.getState().session;
   if (session === null) throw new Error("没有建立会话");
@@ -168,6 +168,30 @@ describe("子实例开工后基底的占用立刻进列表", () => {
     emit(CORE_EVENT, { kind: "stage", task_id: String(call.taskId), message: "查找原版 1.21.1" });
     await settle();
     expect(callsOf(ipc, "list_instances")).toHaveLength(before);
+  });
+});
+
+describe("基底自己开着游戏", () => {
+  const childRepairLock = (): unknown => {
+    const inst = store.getState().instances.find((i) => i.id === CHILD);
+    if (inst === undefined) throw new Error("子实例不在列表里");
+    return locksOf(inst, false).repair;
+  };
+
+  it("基底启动的第一条阶段事件后，它上面的实例补全带原因禁用；启动取消后放开", async () => {
+    const { taskId, refuse, pending } = await launching(BASE);
+    expect(childRepairLock()).toBeNull();
+
+    onDisk = [instanceDto(BASE, { activity: "launching" }), instanceDto(CHILD, { base_busy: { id: BASE, activity: "launching" } })];
+    emit(LAUNCH_PHASE_EVENT, { task_id: taskId, phase: "preparing", stage_index: 0 } satisfies LaunchPhaseEvent);
+    await settle();
+    expect(childRepairLock()).toEqual({ kind: "base_busy", base: BASE, activity: "launching" });
+
+    onDisk = idle();
+    refuse(cancelledError());
+    await pending;
+    await settle();
+    expect(childRepairLock()).toBeNull();
   });
 });
 

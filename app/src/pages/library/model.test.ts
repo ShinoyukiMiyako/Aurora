@@ -34,6 +34,7 @@ function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSum
     lastCrashError: null,
     activity: null,
     usedBy: null,
+    baseBusy: null,
     settingsError: null,
     incomplete: null,
     placeholder: false,

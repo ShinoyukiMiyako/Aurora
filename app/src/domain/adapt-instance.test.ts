@@ -28,6 +28,7 @@ function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): Instance
     created_at: 1_700_000_000_000,
     activity: null,
     used_by: null,
+    base_busy: null,
     playtime_min: 0,
     last_played_at: null,
     play_error: null,
@@ -137,6 +138,15 @@ describe("实例 DTO 适配：状态", () => {
     expect(unread).toMatchObject({ playtimeMin: null, lastPlayedAt: null, playError: "解析 游玩记录 失败", dirError: null });
     const dir = instanceFromDto(instanceDto("目录", { mod_count: null, world_count: null, isolated: null, dir_error: "文件 IO 失败: mods" }), idle);
     expect(dir).toMatchObject({ modCount: null, worldCount: null, isolated: null, dirError: "文件 IO 失败: mods", playtimeMin: 0, playError: null });
+  });
+
+  it("继承链上的基底正忙：是哪个基底、在做什么原样带过；基底闲着为 null", () => {
+    expect(instanceFromDto(instanceDto("Fabric"), idle).baseBusy).toBeNull();
+    expect(instanceFromDto(instanceDto("Fabric", { base_busy: { id: "1.21.1", activity: "running" } }), idle).baseBusy).toEqual({ id: "1.21.1", activity: "running" });
+  });
+
+  it("基底的改动与备份挡不住基底占用，报这样的基底正忙是契约破了", () => {
+    expect(() => instanceFromDto(instanceDto("Fabric", { base_busy: { id: "1.21.1", activity: "modifying" } }), idle)).toThrow("modifying");
   });
 
   it("时长与读取错误对不上是契约破了：不让界面在 0 和读不到之间猜", () => {

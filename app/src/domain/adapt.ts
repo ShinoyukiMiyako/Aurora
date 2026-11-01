@@ -18,7 +18,7 @@ import type {
 } from "../ipc/instances";
 import type { LaunchDownloadDto, LogLineDto } from "../ipc/launch";
 import type { TaskRecordDto } from "../ipc/tasks";
-import { PLATFORMS, TASK_KINDS, TASK_STATUSES, type AccountKind, type LoaderKind, type LogLine, type Platform, type SessionDownload, type Task } from "./types";
+import { BASE_BLOCKING_ACTIVITIES, PLATFORMS, TASK_KINDS, TASK_STATUSES, type AccountKind, type BaseBlockingActivity, type LoaderKind, type LogLine, type Platform, type SessionDownload, type Task } from "./types";
 
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], what: string): T {
   if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) throw new Error(`未知的${what}：${String(value)}`);
@@ -170,6 +170,8 @@ export interface InstanceSummary {
   activity: InstanceActivity | null;
   /** 正以它为基底的实例（启动到游戏退出、补全或导入整合包期间）；这时它的启动、改名、补全、删除会被后端拒绝。没被当作基底时为 null。 */
   usedBy: string | null;
+  /** 继承链上正忙、容不下基底占用的基底；这时它的补全、重新安装加载器会被后端拒绝。 */
+  baseBusy: { id: string; activity: BaseBlockingActivity } | null;
   settingsError: string | null;
   incomplete: InstanceIncomplete | null;
   /** 新建或导入任务已入队、实例目录还没扫到时由状态层补上的占位项。 */
@@ -278,6 +280,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     lastCrashError: dto.last_crash_error,
     activity: dto.activity,
     usedBy: dto.used_by,
+    baseBusy: dto.base_busy === null ? null : { id: dto.base_busy.id, activity: oneOf(dto.base_busy.activity, BASE_BLOCKING_ACTIVITIES, "基底的活动") },
     settingsError: dto.settings_error,
     incomplete,
     placeholder: false,

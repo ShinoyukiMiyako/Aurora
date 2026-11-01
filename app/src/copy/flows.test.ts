@@ -260,6 +260,14 @@ describe("启动失败：账户验证暂时不可用", () => {
     expect(reason("modifying")).toBe("正在改动这个实例的 Mod、资源或设置，完成后才能重新安装加载器");
     expect(reason("backing_up")).toBe("正在备份或恢复这个实例的存档，完成后才能重新安装加载器");
     expect(reason({ kind: "inherited", usedBy: "整合包" })).toBe("实例「整合包」正在使用它，结束后才能重新安装加载器");
+    expect(reason({ kind: "base_busy", base: "1.21.1", activity: "running" })).toBe("它依赖的实例「1.21.1」正在运行，结束后才能重新安装加载器");
+  });
+
+  it("依赖的实例正忙：说清是哪个实例、在做什么；这把锁只挡补全类操作", () => {
+    expect(lockReason({ kind: "base_busy", base: "1.21.1", activity: "running" }, "repair")).toBe("它依赖的实例「1.21.1」正在运行，结束后才能补全");
+    expect(lockReason({ kind: "base_busy", base: "1.21.1", activity: "launching" }, "repair")).toBe("它依赖的实例「1.21.1」正在启动，结束后才能补全");
+    expect(lockReason({ kind: "base_busy", base: "1.21.1", activity: "repairing" }, "repair")).toBe("它依赖的实例「1.21.1」正在补全文件，结束后才能补全");
+    expect(() => lockReason({ kind: "base_busy", base: "1.21.1", activity: "running" }, "rename")).toThrow("只挡补全");
   });
 
   it("以离线方式启动的通知：标题带实例名，正文说明只能玩单人", () => {
