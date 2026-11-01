@@ -799,15 +799,7 @@ impl Aurora {
             Err(err) if is_rejected_token(&err) => return self.expire(account).await,
             Err(err) => return Err(err.into()),
         };
-        // 档案取不到（连不上、服务器出错）时皮肤保持原样，不因一次连不上就清掉；角色在服务器上
-        // 已不存在时才清。
-        let profile = match client.session_profile(&account.uuid).await {
-            Ok(profile) => Some(profile),
-            Err(err) => {
-                tracing::warn!(uuid = %account.uuid, error = %err, "刷新令牌后取外置角色档案失败，皮肤保持原样");
-                None
-            }
-        };
+        // 旧令牌此刻已经作废，新令牌先落盘再查档案：档案接口慢或连不上时要退避好一阵。
         let name = resp.selected_profile.map(|p| p.name);
         let uuid = account.uuid.clone();
         let api_root = creds.api_root.clone();
@@ -823,19 +815,15 @@ impl Aurora {
                 if let Some(name) = name {
                     stored.name = name;
                 }
-                match profile {
-                    Some(Some(profile)) => stored.skin = profile.skin,
-                    Some(None) => stored.skin = None,
-                    None => {}
-                }
                 stored.status = AccountStatus::Ok;
                 stored.last_verified_at = Some(unix_millis());
             })
         })
-        .await
+        .await?;
+        self.sync_authlib_profile(&client, account).await
     }
 
-    /// 令牌已校验有效：从会话服务器取角色名与皮肤写回，记一次验证时刻，令牌原样不动。
+    /// 令牌已校验有效或刚刷新过：从会话服务器取角色名与皮肤写回，记一次验证时刻，令牌原样不动。
     ///
     /// 档案取不到（连不上、服务器出错）只记 warn，角色名与皮肤保持原样，不拿空值盖掉；角色在服务器上
     /// 已不存在（204）时没有皮肤可显示，皮肤清空、名字留着。
@@ -2312,6 +2300,64 @@ mod tests {
                     .unwrap_err();
             assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
             holder.abort();
+        }
+
+        /// 外置刷新一成功旧令牌就作废了，新令牌不能等档案查完才落盘：档案接口慢或连不上时要退避好一阵，
+        /// 这段时间关掉启动器，新令牌就丢了，账户只能重新登录。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn rotated_authlib_token_is_stored_before_the_profile_lookup() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                    "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/refresh"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "accessToken": "rotated", "clientToken": "cli",
+                    "selectedProfile": { "id": HERO, "name": "Hero" }
+                })))
+                .mount(&server)
+                .await;
+            let profile = format!("/sessionserver/session/minecraft/profile/{HERO}");
+            Mock::given(method("GET"))
+                .and(path(profile.as_str()))
+                .respond_with(ResponseTemplate::new(204).set_delay(Duration::from_secs(30)))
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let aurora = aurora_at(tmp.path());
+            let info = AuthServerInfo {
+                api_root: format!("{}/", server.uri()),
+                server_name: "Petal Skin".into(),
+                host: "127.0.0.1".into(),
+            };
+            let stale = aurora
+                .store_login(authlib_account(
+                    &info,
+                    "hero@example.com",
+                    "stale".into(),
+                    "cli".into(),
+                    GameProfile {
+                        id: HERO.into(),
+                        name: "Hero".into(),
+                    },
+                    None,
+                ))
+                .unwrap();
+
+            let renewal = {
+                let aurora = aurora.clone();
+                tokio::spawn(async move { aurora.ensure_account_fresh(&stale).await })
+            };
+            until_requested(&server, &profile).await;
+            let stored = aurora.find_account(HERO).unwrap().unwrap();
+            assert_eq!(stored_authlib_token(&stored), "rotated");
+            assert_eq!(stored.status, AccountStatus::Ok);
+            renewal.abort();
         }
 
         /// 微软账户凭据里的 refresh token。
