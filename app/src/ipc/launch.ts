@@ -53,6 +53,9 @@ export interface QuickPlayUnsupportedDetail {
   mode: "singleplayer" | "multiplayer";
 }
 
+/** 直达的世界文件夹不在实例的 saves 下（或名字不能当文件夹名），detail：{ version_id, world }。 */
+export const WORLD_NOT_FOUND_CODE = "world_not_found";
+
 /** 启动成功：游戏进程已经起来。 */
 export interface LaunchedDto {
   pid: number | null;

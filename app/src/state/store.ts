@@ -2117,6 +2117,10 @@ export class LauncherStore {
           return;
         }
         this.set({ session: null });
+        // 直达的存档已被移走：入口手里的存档列表过时了，重读一遍，免得那一行留着让人再点
+        if (quickPlay !== null && quickPlay.kind === "singleplayer" && isIpcError(error) && error.code === launchIpc.WORLD_NOT_FOUND_CODE) {
+          invalidateResources(`content:${instanceId}`);
+        }
         throw error;
       },
     );

@@ -149,6 +149,29 @@ describe("直达走与启动相同的拦截链", () => {
     expect(s.getState().toasts.filter((t) => t.tone === "error")).toEqual([]);
   });
 
+  it("存档不在：这个实例的存档列表重取，被移走的那一行不再留着让人再点；版本不支持不重取", async () => {
+    const s = await boot();
+    const fetched: string[] = [];
+    const stops = ["content:生存", "content:创造"].map((key) => resources.subscribe(key, async () => fetched.push(key), () => undefined));
+    await settle();
+    fetched.length = 0;
+
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("quick_play_unsupported", "版本 生存 不支持直接进入存档（1.20 之前的版本没有 Quick Play）", { version_id: "生存", mode: "singleplayer" });
+    });
+    await expect(s.actions.quickPlay("生存", WORLD)).rejects.toMatchObject({ code: "quick_play_unsupported" });
+    await settle();
+    expect(fetched).toEqual([]);
+
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("world_not_found", "实例 生存 里没有存档 New World", { version_id: "生存", world: "New World" });
+    });
+    await expect(s.actions.quickPlay("生存", WORLD)).rejects.toMatchObject({ code: "world_not_found" });
+    await settle();
+    expect(fetched).toEqual(["content:生存"]);
+    stops.forEach((stop) => stop());
+  });
+
   it("启动失败后重试带着同一个 quickPlay", async () => {
     const s = await boot();
     ipc.overrides.set("launch_game", () => {
