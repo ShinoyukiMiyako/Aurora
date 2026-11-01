@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CRASH_CATEGORIES, type CrashCategoryName } from "../../copy/flows";
 import { bestLocalRuntime, runtimeComplete } from "../../domain/rules";
 import type { Task } from "../../domain/types";
 import type { LaunchView } from "../../launch/launchView";
@@ -51,6 +52,7 @@ import {
   toggleFlags,
   weeklyHours,
   workLock,
+  type CrashFix,
   type CrashFixContext,
 } from "./model";
 import { isolationByPolicy } from "../../domain/rules";
@@ -852,6 +854,51 @@ describe("一键尝试", () => {
   it("同一类别只出一条；没有线索时只剩对照日志", () => {
     expect(crashFixes(report([clue("out_of_memory"), clue("out_of_memory")]), ctx()).length).toBe(2);
     expect(crashFixes(report([]), ctx())).toEqual([{ kind: "compare_log" }]);
+  });
+});
+
+describe("一键尝试：每个诊断类别都有落点", () => {
+  // CRASH_CATEGORIES 在 crash-sync.test.ts 里与后端枚举对齐，所以后端新增类别时这张表编译不过或遍历挂掉，不会等到玩家的崩溃页才炸
+  const BARE_CLUE_FIXES: Readonly<Record<CrashCategoryName, readonly CrashFix["kind"][]>> = {
+    java_version_mismatch: ["download_java", "compare_log"],
+    out_of_memory: ["raise_memory", "compare_log"],
+    jvm_args_invalid: ["jvm_args", "compare_log"],
+    missing_language_provider: ["compare_log"],
+    game_version_mismatch: ["find_mod_version", "compare_log"],
+    dependency_version_mismatch: ["find_mod_version", "compare_log"],
+    missing_dependency: ["find_dependency", "compare_log"],
+    optifine_incompatible: ["compare_log"],
+    mixin_failure: ["compare_log"],
+    duplicate_mod: ["compare_log"],
+    native_library_missing: ["repair", "compare_log"],
+    intel_graphics_driver: ["driver_steps", "compare_log"],
+    graphics_driver: ["driver_steps", "compare_log"],
+    corrupted_jar: ["repair", "compare_log"],
+    loopback_unavailable: ["compare_log"],
+    native_crash: ["driver_steps", "compare_log"],
+  };
+
+  it.each(CRASH_CATEGORIES)("%s 单独出现时", (category) => {
+    expect(crashFixes(report([clue(category)]), ctx()).map((f) => f.kind)).toEqual(BARE_CLUE_FIXES[category]);
+  });
+
+  it("全部类别同时出现：不抛错，对照完整日志只在末尾出现一次", () => {
+    const kinds = crashFixes(report(CRASH_CATEGORIES.map((c) => clue(c))), ctx()).map((f) => f.kind);
+    expect(kinds.filter((k) => k === "compare_log")).toHaveLength(1);
+    expect(kinds[kinds.length - 1]).toBe("compare_log");
+  });
+
+  it("本机连接失败：没有一键尝试，只留对照完整日志，也不影响别的线索出动作", () => {
+    expect(crashFixes(report([clue("loopback_unavailable", { matched: "java.io.IOException: Unable to establish loopback connection" })]), ctx())).toEqual([{ kind: "compare_log" }]);
+    expect(crashFixes(report([clue("loopback_unavailable"), clue("out_of_memory")]), ctx({ memoryMb: 4096 }))).toEqual([
+      { kind: "raise_memory", currentMb: 4096, targetMb: 6144, followsGlobal: true },
+      { kind: "compare_log" },
+    ]);
+  });
+
+  it("不认识的类别照样抛错：上面的遍历靠这一点才抓得住漏掉的类别", () => {
+    const stray = "cosmic_ray" as unknown as CrashClueDto["category"];
+    expect(() => crashFixes(report([clue(stray)]), ctx())).toThrow("未知的崩溃诊断类别：cosmic_ray");
   });
 });
 

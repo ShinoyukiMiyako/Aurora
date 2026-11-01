@@ -234,6 +234,46 @@ describe("崩溃诊断：JVM 参数被拒", () => {
   });
 });
 
+describe("崩溃诊断：Java 建不起本机连接", () => {
+  it("线索卡照常画出解释与命中行，一键尝试只有对照完整日志，点了去日志页", async () => {
+    await crashWith(1);
+    ipc.overrides.set("last_crash", (args) => {
+      const base = mockCrashReport(String(args.versionId));
+      if (base === null) throw new Error("mock 里应有崩溃报告");
+      const report: CrashReportDto = {
+        ...base,
+        diagnoses: [
+          {
+            category: "loopback_unavailable",
+            summary: "",
+            advice: "",
+            detail: null,
+            matched: "java.io.IOException: Unable to establish loopback connection",
+            line: 42,
+            context: [],
+            source: "session_log",
+          },
+        ],
+      };
+      return report;
+    });
+    await open("crash");
+    expect(text()).toContain("找到 1 条线索，日志指向本机连接失败");
+    expect(text()).toContain("Java 建不起本机连接");
+    expect(text()).toContain("确认环境变量 TEMP 指向的文件夹存在、可写");
+    expect(text()).toContain("java.io.IOException: Unable to establish loopback connection");
+    expect(text()).toContain("命中的日志行 · 第 42 行");
+
+    const fixes = [...document.querySelectorAll("li")].filter((li) => textOf(li).includes("对照完整日志"));
+    expect(fixes).toHaveLength(1);
+    const rows = [...(fixes[0].parentElement as HTMLElement).children];
+    expect(rows).toHaveLength(1);
+    click(fixes[0].querySelector("button") as HTMLButtonElement);
+    await flush();
+    expect(nav.route).toEqual({ page: "instance", id: ID, tab: "logs" });
+  });
+});
+
 describe("崩溃诊断：参与扫描的文件", () => {
   it("两份文件各占一行、各有复制按钮，复制的是对应的完整路径；来源不是会话日志的线索写出来源名", async () => {
     await crashWith(-1073741819);
