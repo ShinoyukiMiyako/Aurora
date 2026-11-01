@@ -266,7 +266,7 @@ describe("外壳布局", () => {
       await mount();
       const row = brandRow();
       expect(row.textContent).toBe(APP_NAME_EN);
-      expect(row.querySelectorAll("svg")).toHaveLength(1);
+      expect(row.querySelectorAll("canvas")).toHaveLength(1);
       expect(row.nextElementSibling?.tagName).toBe("NAV");
     });
 
