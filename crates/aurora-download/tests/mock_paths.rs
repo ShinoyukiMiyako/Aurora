@@ -996,3 +996,62 @@ async fn pool_dispatches_largest_files_first() {
         .collect();
     assert_eq!(order, vec!["/large", "/mid", "/small", "/unknown"]);
 }
+
+/// 响应头已到、响应体只来了一截连接就断开：同一个源上重试一次即可拿到完整文件。
+/// wiremock 造不出「声明了长度却只写一半」，这里用手写的 TCP 端点：第一次连接声明 `payload.len()`
+/// 字节、只写前 64 字节就关掉；第二次连接给完整内容。reqwest 把读响应体途中的失败一律归为
+/// decode 类，引擎不能把它当成永久失败。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn body_cut_off_midway_is_retried_on_the_same_source() {
+    use std::io::{Read, Write};
+
+    let payload = ascii_payload(4096);
+    let sha1 = sha1_of(&payload).await;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/cut.bin", listener.local_addr().unwrap());
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = accepted.clone();
+    let served = payload.clone();
+    std::thread::spawn(move || {
+        for attempt in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            counter.fetch_add(1, Ordering::SeqCst);
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let status = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                served.len()
+            );
+            stream.write_all(status.as_bytes()).unwrap();
+            let body = if attempt == 0 {
+                &served[..64]
+            } else {
+                &served[..]
+            };
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("cut.bin");
+    // size 未知 -> 单流路径，不探测 Range，连接数只来自重试。
+    let downloader = Downloader::new(client(), single_source_config(ChunkConfig::default()));
+    let task = DownloadTask::new(url, &dest).with_sha1(&sha1);
+
+    downloader
+        .download(&task)
+        .await
+        .expect("响应体中途断开后应在同一源上重试成功");
+
+    assert_eq!(tokio::fs::read(&dest).await.unwrap(), payload);
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        2,
+        "应恰好断开一次、重试一次"
+    );
+}

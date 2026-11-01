@@ -132,8 +132,12 @@ impl RetryableError for Error {
 ///
 /// 明确排除 `is_status`（状态类错误在本 crate 由 [`Error::Status`] 单独承载并分级）与
 /// `is_builder`/`is_redirect`（构造/重定向配置问题，重试无益）。
+///
+/// `is_decode` 也算：引擎用 `Response::chunk` 读响应体，reqwest 把读体途中的一切失败（连接被断开、
+/// 响应体不足声明的长度）都包成 decode 类。工作区开了 gzip 解压，坏掉的压缩流同样落在这里，
+/// 那是确定性失败，但重试有次数上限，代价只是多试几次。
 fn is_transient_reqwest(err: &reqwest::Error) -> bool {
-    err.is_timeout() || err.is_connect() || err.is_request() || err.is_body()
+    err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() || err.is_decode()
 }
 
 #[cfg(test)]

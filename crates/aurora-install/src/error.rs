@@ -200,7 +200,8 @@ impl RetryableError for Error {
 ///
 /// 读响应体时连接被重置或提前关闭也算瞬时故障：reqwest 把读体失败包成 decode 类（`Response::bytes`
 /// 里统一经 `error::decode`），只认 body 类会把读到一半断开的请求当成永久失败、不再同源重试。
-/// 本 crate 不开 reqwest 的解压与 json 特性，decode 类不会来自报文本身的格式问题。
+/// 工作区里 aurora-base 开了 gzip 解压（特性按工作区合并），坏掉的压缩流也会落在 decode 类：那是
+/// 确定性失败，但重试有次数上限，代价只是多试几次。
 fn is_retryable_http(err: &reqwest::Error) -> bool {
     if err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() || err.is_decode()
     {
