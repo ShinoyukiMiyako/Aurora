@@ -30,6 +30,9 @@ const API_LOCATION_HEADER: &str = "x-authlib-injector-api-location";
 /// 规范里「凭据无效 / 令牌无效」共用的错误名。
 pub const FORBIDDEN_OPERATION: &str = "ForbiddenOperationException";
 
+/// 读验证服务器元数据这一步在服务故障原文里的名字。
+const METADATA_STEP: &str = "读取验证服务器信息";
+
 /// Yggdrasil 认证客户端。`api_root` 以 `/` 结尾，其下拼接各 `authserver/*` 端点。
 pub struct YggdrasilClient {
     client: reqwest::Client,
@@ -139,6 +142,13 @@ impl YggdrasilClient {
             let (status, text) = self
                 .post("authserver/authenticate", &payload, "Yggdrasil 认证")
                 .await?;
+            // 限流时服务器多半会用错误体说明白，登录弹窗要原位显示这句话；带着密码再试几轮只会把限流
+            // 拖长。启动续期那几个端点不走这里：那边要的是落成服务故障，好给出离线进单人。
+            if status == StatusCode::TOO_MANY_REQUESTS
+                && let err @ AuthError::Yggdrasil { .. } = yggdrasil_error(&text, "Yggdrasil 认证")
+            {
+                return Err(err);
+            }
             if let Some(err) = service_unavailable(status, "Yggdrasil 认证") {
                 return Err(err);
             }
@@ -376,8 +386,9 @@ pub async fn resolve_api_root(
 
 /// 预取 ALI 元数据：解析 API 根地址后 GET 之，返回根地址、Base64 明文与解析后的元数据。
 ///
-/// `timeout` 是两次请求合计的时限。网络失败与超时报 [`AuthError::Http`]；连上了但对方不是
-/// Yggdrasil 验证服务器（非 2xx、不是 JSON、没有 `meta` 对象）报 [`AuthError::NotYggdrasilServer`]。
+/// `timeout` 是两次请求合计的时限。网络失败与超时报 [`AuthError::Http`]；回 5xx、429 报
+/// [`AuthError::ServiceUnavailable`]：启动时这个地址刚通过校验，错的不是地址；连上了但对方不是
+/// Yggdrasil 验证服务器（其余非 2xx、不是 JSON、没有 `meta` 对象）报 [`AuthError::NotYggdrasilServer`]。
 pub async fn prefetch_metadata(
     client: &reqwest::Client,
     server_url: &str,
@@ -400,6 +411,9 @@ pub async fn prefetch_metadata(
         context: CONTEXT,
         source,
     })?;
+    if let Some(err) = service_unavailable(status, METADATA_STEP) {
+        return Err(err);
+    }
     let not_yggdrasil = |detail: String| AuthError::NotYggdrasilServer {
         url: api_root.clone(),
         detail,
@@ -771,6 +785,38 @@ mod tests {
         );
     }
 
+    /// 认证接口限流时服务器会用错误体说明白，登录弹窗要原位显示这句话；带着密码再试几轮只会把限流拖长。
+    /// 没有错误体的 429 仍是服务故障，见上一条用例。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn throttled_login_keeps_the_servers_words_and_is_not_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/authserver/authenticate"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+                "error": "TooManyRequests",
+                "errorMessage": "请求过于频繁，请稍后再试"
+            })))
+            .mount(&server)
+            .await;
+        let client = client_for(&server).with_retry(RetryPolicy {
+            max_attempts: 3,
+            ..no_retry()
+        });
+
+        let err = client.authenticate("u", "p", None).await.unwrap_err();
+        match err {
+            AuthError::Yggdrasil {
+                error,
+                error_message,
+            } => {
+                assert_eq!(error, "TooManyRequests");
+                assert_eq!(error_message, "请求过于频繁，请稍后再试");
+            }
+            other => panic!("期望 Yggdrasil，得到 {other:?}"),
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
     /// 4xx 仍按 Yggdrasil 的错误体解析，凭据错误照旧是凭据错误。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn client_errors_still_read_the_yggdrasil_error_body() {
@@ -888,6 +934,32 @@ mod tests {
                     assert_eq!(url, format!("{}/", server.uri()))
                 }
                 other => panic!("期望 NotYggdrasilServer，得到 {other:?}"),
+            }
+        }
+    }
+
+    /// 地址是对的，只是验证服务器此刻出了故障：不能说成「不是验证服务器」，那样玩家会去改一个没写错的地址。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prefetch_reports_a_server_fault_as_an_outage_not_a_wrong_address() {
+        let http = aurora_base::http::build_client().unwrap();
+        for status in [429, 500, 503] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_string("<html>服务维护中</html>"),
+                )
+                .mount(&server)
+                .await;
+            let err = prefetch_metadata(&http, &server.uri(), TEST_TIMEOUT)
+                .await
+                .unwrap_err();
+            match err {
+                AuthError::ServiceUnavailable { step, status: seen } => {
+                    assert_eq!(step, METADATA_STEP);
+                    assert_eq!(seen, status);
+                }
+                other => panic!("HTTP {status} 期望 ServiceUnavailable，得到 {other:?}"),
             }
         }
     }
