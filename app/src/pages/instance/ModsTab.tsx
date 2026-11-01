@@ -539,7 +539,7 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
       )}
 
       {preview !== null && (
-        <UpdatePreviewModal key={preview.key} open={previewOpen} queryId={queryId} rows={previewRows} onClose={() => setPreviewOpen(false)} onConfirm={confirmPreview} />
+        <UpdatePreviewModal key={preview.key} open={previewOpen} queryId={queryId} rows={previewRows} lock={ops.updateReason} onClose={() => setPreviewOpen(false)} onConfirm={confirmPreview} />
       )}
     </div>
   );

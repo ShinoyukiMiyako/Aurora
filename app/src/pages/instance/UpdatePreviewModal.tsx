@@ -27,6 +27,8 @@ export interface UpdatePreviewModalProps {
   queryId: string | null;
   /** 可更新的行；update 为 null 的行不该传进来。 */
   rows: readonly ModRow[];
+  /** 此刻不能更新的原因：预览开着时实例可能被别处锁住，确认键随之带原因禁用。能更新为 undefined。 */
+  lock: string | undefined;
   onClose(): void;
   /** 勾选的几项，至少一项。 */
   onConfirm(picked: readonly UpdateCandidate[]): void;
@@ -37,7 +39,7 @@ interface PreviewItem {
   candidate: UpdateCandidate;
 }
 
-export function UpdatePreviewModal({ open, queryId, rows, onClose, onConfirm }: UpdatePreviewModalProps) {
+export function UpdatePreviewModal({ open, queryId, rows, lock, onClose, onConfirm }: UpdatePreviewModalProps) {
   const items = useMemo(
     () =>
       rows
@@ -87,7 +89,7 @@ export function UpdatePreviewModal({ open, queryId, rows, onClose, onConfirm }: 
           <Button onClick={onClose}>{UPDATE_PREVIEW_COPY.cancel}</Button>
           <Button
             variant="primary"
-            disabledReason={picked.length === 0 ? UPDATE_PREVIEW_COPY.nonePicked : undefined}
+            disabledReason={lock !== undefined ? lock : picked.length === 0 ? UPDATE_PREVIEW_COPY.nonePicked : undefined}
             onClick={() => onConfirm(picked.map((i) => i.candidate))}
           >
             {UPDATE_PREVIEW_COPY.confirm(picked.length)}

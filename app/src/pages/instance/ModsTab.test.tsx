@@ -791,6 +791,66 @@ describe("更新预览", () => {
     expect(launcher.state.tasks).toEqual([]);
   });
 
+  const updateTasks = () => launcher.state.tasks.filter((t) => t.spec.command === "update_mod" || t.spec.command === "update_mods");
+
+  it.each([
+    ["Mod 标签", "mods", "全部更新 · 3"],
+    ["概览", "overview", "全部更新"],
+  ] as const)("%s的预览开着时开始补全：确认键带原因禁用，点了不入队、不报错", async (_where, tab, entry) => {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open(tab);
+    click(button(entry));
+    await flush();
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+    });
+    await flush();
+    const confirm = button("更新 3 个", dialog());
+    expect(confirm.getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverReason(confirm)).toBe("实例正在补全文件");
+    click(confirm);
+    await flush();
+    expect(updateTasks()).toEqual([]);
+    expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
+  });
+
+  it("预览开着时开始改名：更新同样要占实例，确认键带原因禁用；改完恢复可用", async () => {
+    await open();
+    click(button("全部更新 · 3"));
+    await flush();
+    instances = [instanceDto(ID, { loaders: [{ kind: "fabric", version: "0.16.10" }], mod_count: 4, activity: "renaming" })];
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+    });
+    await flush();
+    const confirm = button("更新 3 个", dialog());
+    expect(confirm.getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverReason(confirm)).toBe("正在重命名这个实例，完成后才能改动 Mod");
+
+    instances = [instanceDto(ID, { loaders: [{ kind: "fabric", version: "0.16.10" }], mod_count: 4 })];
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+    });
+    await flush();
+    expect(button("更新 3 个", dialog()).getAttribute("aria-disabled")).toBeNull();
+    click(button("更新 3 个", dialog()));
+    await flush();
+    expect(updateTasks().map((t) => t.spec.command)).toEqual(["update_mods"]);
+  });
+
+  it("全不选时实例也被锁：先说实例为什么动不了", async () => {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open();
+    click(button("全部更新 · 3"));
+    await flush();
+    click(find("checkbox", "全选", dialog()));
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+    });
+    await flush();
+    expect(await hoverReason(button("更新 0 个", dialog()))).toBe("实例正在补全文件");
+  });
+
   it("只勾一项确认：按单个更新入队，批量选择随之清空", async () => {
     await open();
     click(find("checkbox", "选择 Sodium"));
