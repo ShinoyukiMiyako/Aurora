@@ -31,7 +31,7 @@ import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers } from "../types";
 import { mockAccountFacts } from "./accounts";
 import { handlers as configHandlers, requireStruct, samePath, tauriArgError } from "./config";
-import { acquireMockInstance, mockInstanceQuickPlay, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { acquireMockInstance, ensureMockSharedWorldsSettled, mockInstanceQuickPlay, mockInstanceWorlds, type MockInstanceHold } from "./instances";
 import { serverKey } from "./system";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
@@ -372,9 +372,11 @@ async function launchGame(args: MockArgs): Promise<LaunchedDto> {
   if (quickPlay !== null) checkQuickPlay(versionId, quickPlay);
   lastQuickPlay = quickPlay;
   if (occupant) throw busy(occupant);
-  // 与后端同序：先占全局唯一的游戏槽，再占实例（新建、补全、改名、删除进行中报 instance_busy），最后登记任务。
+  // 与后端同序：先占全局唯一的游戏槽，再占实例（新建、补全、改名、删除进行中报 instance_busy），共用存档再查别的实例
+  // 有没有在备份，最后登记任务。
   const hold = acquireMockInstance(versionId, "launching");
   try {
+    ensureMockSharedWorldsSettled(versionId);
     beginMockTask(taskId);
   } catch (error) {
     hold.release();

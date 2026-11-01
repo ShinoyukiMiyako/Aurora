@@ -240,13 +240,15 @@ function parseWorldBackup(raw: unknown): WorldBackupSettings {
   const keep = count("keep_per_world");
   const total = count("max_total_gb");
   if (keep < KEEP_PER_WORLD_RANGE.min || keep > KEEP_PER_WORLD_RANGE.max) {
-    throw new IpcError("invalid_argument", `每个存档保留的自动备份须在 ${KEEP_PER_WORLD_RANGE.min} 到 ${KEEP_PER_WORLD_RANGE.max} 份之间，收到 ${keep}`, {
+    throw new IpcError("invalid_argument", `每个存档保留的自动备份份数须在 ${KEEP_PER_WORLD_RANGE.min} 到 ${KEEP_PER_WORLD_RANGE.max} 之间，收到 ${keep}`, {
       field: "world_backup.keep_per_world",
+      value: keep,
     });
   }
   if (total < MAX_TOTAL_GB_RANGE.min || total > MAX_TOTAL_GB_RANGE.max) {
-    throw new IpcError("invalid_argument", `备份总量上限须在 ${MAX_TOTAL_GB_RANGE.min} 到 ${MAX_TOTAL_GB_RANGE.max} GB 之间，收到 ${total}`, {
+    throw new IpcError("invalid_argument", `备份总量上限（GB）须在 ${MAX_TOTAL_GB_RANGE.min} 到 ${MAX_TOTAL_GB_RANGE.max} 之间，收到 ${total}`, {
       field: "world_backup.max_total_gb",
+      value: total,
     });
   }
   return { auto: record.auto, keep_per_world: keep, max_total_gb: total };

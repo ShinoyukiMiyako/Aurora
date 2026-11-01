@@ -11,7 +11,8 @@ import type { InstanceSettingsDto } from "../../ipc/instances";
 import { SESSION_COPY } from "../../copy/flows";
 import { formatBytes, formatSpeed, percent } from "../../domain/format";
 import { GAME_LOG_EVENT, LAUNCH_PHASE_EVENT } from "../../ipc/launch";
-import type { InstalledMod } from "../../ipc/mods";
+import { EXPORT_EXTRAS } from "../../ipc/modpack";
+import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
 import { CORE_EVENT } from "../../ipc/tasks";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
@@ -41,6 +42,9 @@ const renders = vi.hoisted(() => ({
   HistoryCard: 0,
   /** 时间线的每一行：时刻包在一个提示气泡里，整页只有这里的提示气泡包着 <time>。 */
   TimelineItem: 0,
+  WorldBackupsModal: 0,
+  ExportModpackModal: 0,
+  UpdatePreviewModal: 0,
 }));
 /** 控制台最近一次拿到的行数：确认日志确实画到了控制台上。 */
 const consoleLines = vi.hoisted(() => ({ last: -1 }));
@@ -79,6 +83,18 @@ vi.mock("./CrashTab", async (orig) => {
 vi.mock("./InstallStage", async (orig) => {
   const mod = await orig<typeof import("./InstallStage")>();
   return { ...mod, InstallStageTab: counted("InstallStageTab", mod.InstallStageTab) };
+});
+vi.mock("./WorldBackupsModal", async (orig) => {
+  const mod = await orig<typeof import("./WorldBackupsModal")>();
+  return { ...mod, WorldBackupsModal: counted("WorldBackupsModal", mod.WorldBackupsModal) };
+});
+vi.mock("./ExportModpackModal", async (orig) => {
+  const mod = await orig<typeof import("./ExportModpackModal")>();
+  return { ...mod, ExportModpackModal: counted("ExportModpackModal", mod.ExportModpackModal) };
+});
+vi.mock("./UpdatePreviewModal", async (orig) => {
+  const mod = await orig<typeof import("./UpdatePreviewModal")>();
+  return { ...mod, UpdatePreviewModal: counted("UpdatePreviewModal", mod.UpdatePreviewModal) };
 });
 vi.mock("../../ui/Tabs", async (orig) => {
   const mod = await orig<typeof import("../../ui/Tabs")>();
@@ -437,5 +453,189 @@ describe("实例详情：本实例的进度在走", () => {
     expect(launcher.state.session?.download?.done).toBe(20);
     expect(launcher.state.session?.logs).toBe(logsBefore);
     expect(renders).toEqual(before);
+  });
+});
+
+// 存档备份列表与导出整合包两个弹窗挂在页面子树里（经传送门画到外面）：弹窗开着时，本实例的游戏日志与另一个实例的
+// 下载进度同样不能让它们重渲染
+describe("实例详情的弹窗：本实例运行中、另一个实例在补全", () => {
+  function control(selector: string, name: string): HTMLElement {
+    const found = [...document.querySelectorAll<HTMLElement>(selector)].find((el) => el.getAttribute("aria-label") === name || el.textContent === name);
+    if (found === undefined) throw new Error(`找不到「${name}」`);
+    return found;
+  }
+
+  function dialogTitled(title: string): HTMLElement {
+    const found = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].find((d) => d.querySelector("h2")?.textContent === title);
+    if (found === undefined) throw new Error(`弹窗「${title}」没有打开`);
+    return found;
+  }
+
+  /** 本实例运行中、另一个实例的补全一直在下载；返回补全任务的 id。 */
+  async function busyAround(): Promise<string> {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await launch(ID);
+    await act(async () => {
+      await launcher.actions.repairInstance(OTHER);
+      await settle(20);
+    });
+    const task = launcher.state.tasks.find((t) => t.instanceId === OTHER);
+    if (task === undefined || task.status !== "running") throw new Error("另一个实例的补全任务应在进行中");
+    return task.id;
+  }
+
+  function stream(taskId: string) {
+    logs(ID);
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        emit(CORE_EVENT, { kind: "download", task_id: `${taskId}#1`, total: 40, finished: i, bytes: i * 1000, total_bytes: 40_000, speed: 1_000_000 });
+      });
+    }
+    const progress = launcher.state.tasks.find((t) => t.id === taskId)?.progress;
+    if (progress === undefined) throw new Error("补全任务不见了");
+    expect(percent(progress)).toBe("50%");
+  }
+
+  it("存档备份列表开着：20 批日志加 20 次下载进度，页面子树（含弹窗）一次都不提交，弹窗不重渲染", async () => {
+    ipc.overrides.set("list_world_backups", () => ({
+      world: "w1",
+      scope: "instance",
+      dir: `D:/Games/.minecraft/.petalfall/backups/instances/${ID}/w1`,
+      backups: [{ file: "1761900000000-auto.zip", kind: "auto", created_at: NOW - 3_600_000, size_bytes: 4096, level_name: "新世界" }],
+      total_bytes: 4096,
+    }));
+    await open("overview");
+    const taskId = await busyAround();
+    act(() => control("button", "「新世界」的更多操作").click());
+    act(() => control('[role="menuitem"]', "查看备份").click());
+    await flush();
+    expect(dialogTitled("「新世界」的备份").querySelectorAll("li")).toHaveLength(1);
+    expect(renders.WorldBackupsModal).toBeGreaterThan(0);
+    commits = 0;
+    const before = { ...renders };
+    stream(taskId);
+    expect(commits).toBe(0);
+    expect(renders).toEqual(before);
+  });
+
+  it("导出整合包弹窗开着：20 批日志加 20 次下载进度，页面子树（含弹窗）一次都不提交，弹窗不重渲染", async () => {
+    ipc.overrides.set("preview_modpack_export", () => ({
+      name: ID,
+      version: "1.0.0",
+      minecraft: "1.21.1",
+      loader: { kind: "fabric", version: "0.16.10" },
+      indexed: [],
+      bundled: [],
+      disabled: [],
+      extras: EXPORT_EXTRAS.map((extra) => ({ extra, files: extra === "config" ? 3 : 0, bytes: extra === "config" ? 4096 : 0, default_selected: extra === "config" })),
+      skipped: [],
+    }));
+    await open("overview");
+    const taskId = await busyAround();
+    act(() => control("button", HERO_COPY.more).click());
+    act(() => control('[role="menuitem"]', HERO_COPY.exportModpack).click());
+    await flush();
+    expect((dialogTitled("导出整合包").querySelector('input[value="1.0.0"]') as HTMLInputElement | null)?.value).toBe("1.0.0");
+    expect(renders.ExportModpackModal).toBeGreaterThan(0);
+    commits = 0;
+    const before = { ...renders };
+    stream(taskId);
+    expect(commits).toBe(0);
+    expect(renders).toEqual(before);
+  });
+});
+
+describe("Mod 标签的批量条与更新预览：另一个实例在运行、第三个实例在补全", () => {
+  const THIRD = "空岛";
+
+  function modWithSource(fileName: string, name: string, projectId: string): InstalledMod {
+    return {
+      ...mod(fileName, name),
+      source: { platform: "modrinth", project_id: projectId, version_id: `${projectId}-v1`, version_number: "1.0.0", title: null, dependency_of: null, installed_at: Math.floor(NOW / 1000) - 86_400 * 30, update_hold: null },
+    };
+  }
+
+  function candidate(fileName: string, name: string, projectId: string): UpdateCandidate {
+    return {
+      file_name: fileName,
+      title: name,
+      current_version_id: `${projectId}-v1`,
+      current_version_number: "1.0.0",
+      latest: {
+        version_id: `${projectId}-v2`,
+        project_id: projectId,
+        platform: "modrinth",
+        name: "1.1.0",
+        version_number: "1.1.0",
+        release_channel: "release",
+        game_versions: ["1.21.1"],
+        loaders: ["fabric"],
+        file_name: `${projectId}-1.1.0.jar`,
+        file_size: 2048,
+        sha1: null,
+        download_url: null,
+        date_published: "",
+        dependencies: [],
+      },
+    };
+  }
+
+  function byName<T extends HTMLElement>(selector: string, name: string, root: ParentNode = document): T {
+    const found = [...root.querySelectorAll<T>(selector)].find((el) => el.getAttribute("aria-label") === name || el.textContent === name);
+    if (found === undefined) throw new Error(`找不到「${name}」`);
+    return found;
+  }
+
+  it("勾了两行、批量更新的预览开着并展开一条更新日志：20 批日志加 20 次下载进度，页面子树（含弹窗）一次都不提交，弹窗不重渲染", async () => {
+    bootOverrides(ipc, {
+      instances: [instanceDto(ID, { loaders: [{ kind: "fabric", version: "0.16.10" }], mod_count: 2, last_played_at: NOW - 7_200_000 }), instanceDto(OTHER), instanceDto(THIRD)],
+      config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false } }),
+    });
+    ipc.overrides.set("last_crash", () => null);
+    ipc.overrides.set("list_mods", () => [modWithSource("sodium.jar", "Sodium", "AANobbMI"), modWithSource("lithium.jar", "Lithium", "gvQqBUqZ")]);
+    ipc.overrides.set("check_updates", () => [candidate("sodium.jar", "Sodium", "AANobbMI"), candidate("lithium.jar", "Lithium", "gvQqBUqZ")]);
+    ipc.overrides.set("mod_update_changelog", () => ({ version_id: "AANobbMI-v2", format: "markdown", body: "- 修复了区块边缘的闪烁" }));
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open("mods");
+    await launch(OTHER);
+    await act(async () => {
+      await launcher.actions.repairInstance(THIRD);
+      await settle(20);
+    });
+    const task = launcher.state.tasks.find((t) => t.instanceId === THIRD);
+    if (task === undefined || task.status !== "running") throw new Error("第三个实例的补全任务应在进行中");
+
+    act(() => byName<HTMLElement>('[role="checkbox"]', "选择 Sodium").click());
+    act(() => byName<HTMLElement>('[role="checkbox"]', "选择 Lithium").click());
+    await flush();
+    const bar = document.querySelector<HTMLElement>("[data-batch]");
+    if (bar === null) throw new Error("勾选两行后批量条应出现");
+    expect(bar.textContent).toContain("已选 2 个");
+    act(() => byName<HTMLButtonElement>("button", "更新", bar).click());
+    await flush();
+    const dialog = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].find((d) => d.querySelector("h2")?.textContent === "更新 Mod");
+    if (dialog === undefined) throw new Error("更新预览没有打开");
+    expect(dialog.textContent).toContain("已勾选 2 / 2");
+    act(() => byName<HTMLButtonElement>("button", "Sodium 的更新日志", dialog).click());
+    await flush();
+    expect(dialog.textContent).toContain("修复了区块边缘的闪烁");
+    expect(renders.UpdatePreviewModal).toBeGreaterThan(0);
+
+    commits = 0;
+    const before = { ...renders };
+    logs(OTHER);
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: i, bytes: i * 1000, total_bytes: 40_000, speed: 1_000_000 });
+      });
+    }
+    const progress = launcher.state.tasks.find((t) => t.id === task.id)?.progress;
+    if (progress === undefined) throw new Error("补全任务不见了");
+    expect(percent(progress)).toBe("50%");
+    expect(commits).toBe(0);
+    expect(renders).toEqual(before);
+    // 选择与预览都还在：没有被哪次重挂载清掉
+    expect(document.querySelector("[data-batch]")?.textContent).toContain("已选 2 个");
+    expect(dialog.textContent).toContain("已勾选 2 / 2");
   });
 });

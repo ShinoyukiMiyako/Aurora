@@ -490,14 +490,17 @@ export interface MockInstanceHold {
   setActivity(activity: InstanceActivity): void;
 }
 
+/** instance_busy 的形状与后端 busy() 一致：detail 带实例 id 与正在做的事。 */
+function busyError(id: string, activity: InstanceActivity): IpcError {
+  return new IpcError("instance_busy", `实例 ${id} 正在${ACTIVITY_LABELS[activity]}，请稍后再试`, { id, activity });
+}
+
 /** 占住实例做 activity；有与它不兼容的事在做时报 instance_busy，形状与后端一致。 */
 export function acquireMockInstance(id: string, activity: InstanceActivity): MockInstanceHold {
   const key = id.toLowerCase();
   const held = holds.get(key);
   const conflict = held === undefined ? undefined : held.find((h) => !compatible(activity, h.activity));
-  if (conflict !== undefined) {
-    throw new IpcError("instance_busy", `实例 ${id} 正在${ACTIVITY_LABELS[conflict.activity]}，请稍后再试`, { id, activity: conflict.activity });
-  }
+  if (conflict !== undefined) throw busyError(id, conflict.activity);
   const hold = { token: nextHoldToken, activity };
   nextHoldToken += 1;
   holds.set(key, held === undefined ? [hold] : [...held, hold]);
@@ -520,13 +523,13 @@ export function acquireMockInstance(id: string, activity: InstanceActivity): Moc
   };
 }
 
-/** 占着实例执行 work，结束（含异步完成与失败）即放开；同步的处理函数仍同步返回。 */
 /** 实例此刻有没有人占着做 activity：与后端按活动查占用同一口径，键不分大小写。 */
 export function mockInstanceHeldFor(id: string, activity: InstanceActivity): boolean {
   const held = holds.get(id.toLowerCase());
   return held !== undefined && held.some((h) => h.activity === activity);
 }
 
+/** 占着实例执行 work，结束（含异步完成与失败）即放开；同步的处理函数仍同步返回。 */
 export function withMockInstance<T>(id: string, activity: InstanceActivity, work: () => T): T {
   const hold = acquireMockInstance(id, activity);
   let result: T;
@@ -1068,13 +1071,53 @@ function backupDir(instance: MockInstance, world: string): { scope: WorldBackupL
     : { scope: "shared", dir: `${MOCK_BACKUPS_ROOT}/shared/${world}` };
 }
 
+/** 实例上占着 wanted 里哪一件事；都没有为 null。 */
+function heldActivity(instance: MockInstance, wanted: readonly InstanceActivity[]): InstanceActivity | null {
+  const held = holds.get(instance.dto.id.toLowerCase());
+  const hit = held === undefined ? undefined : held.find((h) => wanted.includes(h.activity));
+  return hit === undefined ? null : hit.activity;
+}
+
+const GAME_ACTIVITIES: readonly InstanceActivity[] = ["launching", "running"];
+
 /**
- * 备份、恢复、导出共用的长任务外壳：先占住实例（启动、运行中报 instance_busy）、再登记任务，结束（含失败）放开。
- * 打包与解压按文件数推进度，期间被取消即以 cancelled 拒绝。
+ * 与后端 ensure_shared_world_free 一致：实例锁只管自己，可游戏同时只跑一个。另一个也不隔离的实例正开着游戏时，
+ * 它可能正打开着这份共用存档，报 instance_busy，detail 为那个实例与它的启动或运行。
+ */
+function ensureSharedWorldFree(id: string): void {
+  const key = id.toLowerCase();
+  for (const other of instances) {
+    if (other.dto.id.toLowerCase() === key) continue;
+    const game = heldActivity(other, GAME_ACTIVITIES);
+    if (game === null) continue;
+    if (!isolatedOf(requireInstance(id)) && !isolatedOf(other)) throw busyError(other.dto.id, game);
+    return;
+  }
+}
+
+/**
+ * 与后端 ensure_shared_worlds_settled 一致，方向与上面相反：另一个也不隔离的实例正在备份、恢复或导出共用存档时，
+ * 这个实例的游戏一起来就可能打开同一份存档，启动报 instance_busy，detail 为那个实例与 backing_up。
+ * 启动 mock 占住实例之后、登记任务之前调用。
+ */
+export function ensureMockSharedWorldsSettled(id: string): void {
+  const key = id.toLowerCase();
+  const others = instances.filter((other) => other.dto.id.toLowerCase() !== key && heldActivity(other, ["backing_up"]) !== null);
+  // 没有别的实例在备份时不看自己的存档作用域：每次启动都会经过这里
+  if (others.length === 0) return;
+  if (isolatedOf(requireInstance(id))) return;
+  const shared = others.find((other) => !isolatedOf(other));
+  if (shared !== undefined) throw busyError(shared.dto.id, "backing_up");
+}
+
+/**
+ * 备份、恢复、导出共用的长任务外壳：先占住实例（启动、运行中报 instance_busy），共用存档再查别的实例的游戏，
+ * 最后登记任务，结束（含失败）放开。打包与解压按文件数推进度，期间被取消即以 cancelled 拒绝。
  */
 async function worldTask<T>(taskId: string, id: string, work: () => Promise<T>): Promise<T> {
   const release = acquire(id, "backing_up");
   try {
+    ensureSharedWorldFree(id);
     beginMockTask(taskId);
   } catch (error) {
     release();
