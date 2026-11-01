@@ -76,7 +76,8 @@ pub struct ModrinthFile {
     pub sha1: String,
     /// 字节数。
     pub size: u64,
-    /// 客户端可选（`env.client` 为 `optional`）。可选文件照装，只是标出来。
+    /// 客户端可选（`env.client` 为 `optional`）。默认照装，调用方可以用
+    /// [`RemoteFiles::exclude_optional`] 去掉不要的。
     pub optional: bool,
 }
 
@@ -110,6 +111,42 @@ impl RemoteFiles {
     /// 是否没有远程文件。
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// 去掉调用方选择跳过的 Modrinth 可选文件，返回去掉的个数。路径按落点比较（Windows 下不区分
+    /// 大小写），同一个文件写了两遍只算一次。
+    ///
+    /// 某个路径不是本包里 `optional` 为真的 Modrinth 文件，或包是 CurseForge 格式而 `paths` 非空，报
+    /// [`Error::NotOptional`]。先全部核对再动清单，出错时清单原样不变。
+    pub fn exclude_optional(&mut self, paths: &[String]) -> Result<usize> {
+        let files = match self {
+            RemoteFiles::Modrinth(files) => files,
+            // CurseForge 清单没有可选文件：作者停用的项（required 为 false）解析时已经去掉了。
+            RemoteFiles::CurseForge(_) => {
+                return match paths.first() {
+                    Some(path) => Err(Error::NotOptional { path: path.clone() }),
+                    None => Ok(0),
+                };
+            }
+        };
+        let optional: HashSet<String> = files
+            .iter()
+            .filter(|f| f.optional)
+            .map(|f| f.path.comparison_key())
+            .collect();
+        let mut skipped = HashSet::with_capacity(paths.len());
+        for path in paths {
+            // 过不了路径校验的不可能是包里的文件，与「不在可选清单里」同一个结论。
+            let key = SafeRelativePath::new(path.as_str())
+                .ok()
+                .map(|p| p.comparison_key())
+                .filter(|key| optional.contains(key))
+                .ok_or_else(|| Error::NotOptional { path: path.clone() })?;
+            skipped.insert(key);
+        }
+        let before = files.len();
+        files.retain(|f| !skipped.contains(&f.path.comparison_key()));
+        Ok(before - files.len())
     }
 }
 
@@ -571,6 +608,146 @@ mod tests {
             ]
         );
         assert_eq!(pack.loader, None, "只有 minecraft 依赖即原版整合包");
+    }
+
+    fn optional_pack() -> RemoteFiles {
+        PackManifest::parse_modrinth(&index(
+            serde_json::json!([
+                file("mods/required.jar", Some("required"), CDN),
+                file("mods/Helper.jar", Some("optional"), CDN),
+                file("resourcepacks/extra.zip", Some("optional"), CDN),
+                file("mods/plain.jar", None, CDN)
+            ]),
+            serde_json::json!({"minecraft": "1.21.1"}),
+        ))
+        .unwrap()
+        .remote
+    }
+
+    fn remaining(remote: &RemoteFiles) -> Vec<String> {
+        let RemoteFiles::Modrinth(files) = remote else {
+            panic!("应为 Modrinth 文件")
+        };
+        files.iter().map(|f| f.path.as_str().to_owned()).collect()
+    }
+
+    #[test]
+    fn exclude_optional_drops_only_the_chosen_optional_files() {
+        let mut remote = optional_pack();
+        assert_eq!(remote.len(), 4);
+        assert_eq!(remote.exclude_optional(&[]).unwrap(), 0);
+        assert_eq!(remote.len(), 4);
+
+        assert_eq!(
+            remote
+                .exclude_optional(&["resourcepacks/extra.zip".into()])
+                .unwrap(),
+            1
+        );
+        assert_eq!(remote.len(), 3);
+        assert_eq!(
+            remaining(&remote),
+            vec!["mods/required.jar", "mods/Helper.jar", "mods/plain.jar"]
+        );
+
+        // 落点按 Windows 规则比较；同一个文件写两遍只去掉一次。
+        assert_eq!(
+            remote
+                .exclude_optional(&["MODS/helper.JAR".into(), "mods/Helper.jar".into()])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            remaining(&remote),
+            vec!["mods/required.jar", "mods/plain.jar"]
+        );
+    }
+
+    #[test]
+    fn exclude_optional_rejects_paths_that_are_not_optional_and_leaves_list_intact() {
+        for bad in [
+            "mods/required.jar",
+            "mods/plain.jar",
+            "mods/not-in-pack.jar",
+            "../mods/Helper.jar",
+            "",
+        ] {
+            let mut remote = optional_pack();
+            // 合法的那一项排在前面：出错时也不能先把它去掉。
+            let err = remote
+                .exclude_optional(&["mods/Helper.jar".into(), bad.into()])
+                .unwrap_err();
+            assert!(
+                matches!(&err, Error::NotOptional { path } if path == bad),
+                "{bad}: {err:?}"
+            );
+            assert_eq!(remote.len(), 4, "{bad}");
+        }
+    }
+
+    #[test]
+    fn exclude_optional_on_curseforge_only_accepts_an_empty_list() {
+        let mut remote = RemoteFiles::CurseForge(vec![CurseForgeFileRef {
+            project_id: 1,
+            file_id: 10,
+        }]);
+        assert_eq!(remote.exclude_optional(&[]).unwrap(), 0);
+        let err = remote.exclude_optional(&["mods/a.jar".into()]).unwrap_err();
+        assert!(matches!(&err, Error::NotOptional { path } if path == "mods/a.jar"));
+        assert_eq!(remote.len(), 1);
+    }
+
+    #[test]
+    fn exclude_optional_random_subsets_shrink_by_exactly_the_subset() {
+        // 固定种子的 xorshift：每轮随机挑一组可选文件跳过，可复现。
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for round in 0..32 {
+            let total = (next() % 40) as usize + 1;
+            let files: Vec<_> = (0..total)
+                .map(|i| {
+                    let client = if next() % 2 == 0 {
+                        "optional"
+                    } else {
+                        "required"
+                    };
+                    file(&format!("mods/m{i:02}.jar"), Some(client), CDN)
+                })
+                .collect();
+            let mut remote = PackManifest::parse_modrinth(&index(
+                serde_json::Value::Array(files),
+                serde_json::json!({"minecraft": "1.21.1"}),
+            ))
+            .unwrap()
+            .remote;
+            let RemoteFiles::Modrinth(parsed) = &remote else {
+                panic!()
+            };
+            let mut chosen = Vec::new();
+            for f in parsed.iter().filter(|f| f.optional) {
+                match next() % 3 {
+                    0 => {}
+                    1 => chosen.push(f.path.as_str().to_owned()),
+                    _ => chosen.push(f.path.as_str().to_uppercase()),
+                }
+            }
+            let removed = remote.exclude_optional(&chosen).unwrap();
+            assert_eq!(removed, chosen.len(), "round {round}");
+            assert_eq!(remote.len(), total - chosen.len(), "round {round}");
+            let left: HashSet<String> = remaining(&remote)
+                .into_iter()
+                .map(|p| p.to_lowercase())
+                .collect();
+            assert!(
+                chosen.iter().all(|c| !left.contains(&c.to_lowercase())),
+                "round {round}"
+            );
+        }
     }
 
     #[test]
