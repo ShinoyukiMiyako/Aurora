@@ -392,7 +392,7 @@ function plan(instance: MockInstance, root: ModVersionInfo): InstallPlan {
   const skipped: string[] = [];
   const visited = new Set([root.project_id]);
   const name = (id: string | null) => {
-    if (id === null) return "未标明工程的依赖项";
+    if (id === null) return "未标明工程的前置";
     const found = findMockSource(root.platform, id);
     return found === undefined ? id : found.project.title;
   };
@@ -401,11 +401,11 @@ function plan(instance: MockInstance, root: ModVersionInfo): InstallPlan {
     const v = item.version;
     const children: PlannedItem[] = [];
     for (const dep of v.dependencies) {
-      if (dep.kind === "optional") skipped.push(`可选依赖 ${name(dep.project_id)} 未自动安装，需要时请手动添加`);
+      if (dep.kind === "optional") skipped.push(`可选前置 ${name(dep.project_id)} 未自动安装，需要时请手动添加`);
       else if (dep.kind === "incompatible") skipped.push(`${v.file_name} 声明与 ${name(dep.project_id)} 不兼容，未做任何处理`);
-      else if (dep.kind === "embedded") skipped.push(`内嵌依赖 ${name(dep.project_id)} 已打包在 ${v.file_name} 内，无需单独安装`);
+      else if (dep.kind === "embedded") skipped.push(`内嵌前置 ${name(dep.project_id)} 已打包在 ${v.file_name} 内，无需单独安装`);
       else if (dep.kind === "tool") skipped.push(`工具类关联 ${name(dep.project_id)} 未自动安装`);
-      else if (dep.project_id === null) skipped.push(`${v.file_name} 的一条必需依赖没有给出工程标识，无法自动解析`);
+      else if (dep.project_id === null) skipped.push(`${v.file_name} 的一条必需前置没有给出工程标识，无法自动解析`);
       else if (!visited.has(dep.project_id)) {
         visited.add(dep.project_id);
         const kept = installedAny(instance, v.platform, dep.project_id);
@@ -421,7 +421,7 @@ function plan(instance: MockInstance, root: ModVersionInfo): InstallPlan {
         const candidates = projectVersions(v.platform, dep.project_id);
         const chosen = newestFirst(candidates).find((c) => classify(c, instance.mc_version, instance.loaders).kind !== "mismatch");
         if (chosen) children.push(plannedFromPlatform(chosen, v.project_id, false));
-        else skipped.push(`依赖 ${name(dep.project_id)} 没有适配该实例的版本，未加入计划`);
+        else skipped.push(`前置 ${name(dep.project_id)} 没有适配该实例的版本，未加入计划`);
       }
     }
     stack.push(...children.reverse());
@@ -726,15 +726,18 @@ function place(instance: MockInstance, items: PlannedItem[]): void {
     if (previous && previous.file_name !== target && present(instance, target)) {
       throw refuse(target, `mods 目录里已有文件 ${target}，它不属于本次要更新的 ${previous.file_name}，为避免覆盖已中止安装`);
     }
+    let wasDisabled = false;
     if (previous) {
       // 启用态与禁用态都认：被玩家禁用过的旧版同样改名成备份，不留一份没人管的禁用副本。
       const old = instance.files.find((f) => ledgerKey(f.file_name) === previous.file_name);
       if (!old) throw new Error(`mock 状态不一致：卷宗里的 ${previous.file_name} 不在文件表里`);
+      wasDisabled = old.file_name.endsWith(DISABLED_SUFFIX);
       old.file_name = `${previous.file_name}${BACKUP_SUFFIX}`;
       instance.ledger = instance.ledger.filter((r) => r.file_name !== previous.file_name);
     }
     if (v.file_size === null) throw new Error(`mock 目录里的版本 ${v.version_id} 缺少 file_size`);
-    instance.files.push({ file_name: target, size: v.file_size, modified_ms: Date.now(), metadata: null });
+    // 启用状态跟着 Mod 走，停用的旧版换下来新版也停用；卷宗与历史仍按启用态文件名记账，与后端一致
+    instance.files.push({ file_name: wasDisabled ? `${target}${DISABLED_SUFFIX}` : target, size: v.file_size, modified_ms: Date.now(), metadata: null });
     // 换版本还是同一个 Mod：装进实例的时刻与更新检查设置跟着走
     instance.ledger.push({
       file_name: target,
@@ -768,6 +771,13 @@ function place(instance: MockInstance, items: PlannedItem[]): void {
   if (fresh.length > 0) instance.history.push({ kind: "install", id: nextEventId(instance.history, at), at, files: fresh });
 }
 
+/** 卷宗文件名在磁盘上的真实名字：停用态多一个后缀，返回给前端的落盘结果用它。 */
+function diskName(instance: MockInstance, key: string): string {
+  const file = instance.files.find((f) => ledgerKey(f.file_name) === key);
+  if (!file) throw new Error(`mock 状态不一致：${key} 不在文件表里`);
+  return file.file_name;
+}
+
 function stage(taskId: string, step: number | null, message: string): void {
   emitMockEvent(CORE_EVENT, { kind: "stage", ...eventOwner(taskId, step), message });
 }
@@ -796,7 +806,8 @@ function installMod(args: MockArgs): Promise<ModInstallOutcomeDto> {
     assertNotBusy(versionId, pending.map((i) => i.version.file_name));
     place(instance, result.items);
     stage(taskId, step, `模组 ${main.file_name} 已安装`);
-    return { file_name: main.file_name, path: `${mockModsDir(versionId)}/${main.file_name}`, platform: main.platform };
+    const onDisk = diskName(instance, main.file_name);
+    return { file_name: onDisk, path: `${mockModsDir(versionId)}/${onDisk}`, platform: main.platform };
   }).finally(() => hold.release());
 }
 
@@ -986,7 +997,8 @@ export const handlers: MockHandlers = {
       place(instance, result.items);
       const main = result.items[0].version;
       stage(taskId, step, `模组 ${main.file_name} 已安装`);
-      return { file_name: main.file_name, path: `${mockModsDir(id)}/${main.file_name}`, platform: main.platform };
+      const onDisk = diskName(instance, main.file_name);
+      return { file_name: onDisk, path: `${mockModsDir(id)}/${onDisk}`, platform: main.platform };
     } finally {
       endMockTask(taskId);
       hold.release();

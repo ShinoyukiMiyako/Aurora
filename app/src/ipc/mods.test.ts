@@ -239,6 +239,25 @@ describe("更新检查与更新", () => {
     expect(twice.detail).toEqual({ causes: [`事件 ${update.id} 已经回滚过，不能重复回滚`] });
   });
 
+  it("停用的 Mod 更新后仍停用：落盘与返回都带 .disabled，卷宗与历史按启用态文件名记账", async () => {
+    await setModEnabled(MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", false);
+    const outcome = await updateMod("task-off", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar.disabled", "sodium-060");
+    expect(outcome.file_name).toBe("AANobbMI-0.6.0.jar.disabled");
+    expect(outcome.path.endsWith("/mods/AANobbMI-0.6.0.jar.disabled")).toBe(true);
+
+    const row = (await listMods(MOCK_MOD_INSTANCE)).find((m) => m.file_name === "AANobbMI-0.6.0.jar.disabled");
+    expect(row).toMatchObject({ enabled: false, source: { version_id: "sodium-060", version_number: "0.6.0" } });
+    expect((await listMods(MOCK_MOD_INSTANCE)).map((m) => m.file_name)).not.toContain("AANobbMI-0.6.0.jar");
+    expect((await listHistory(MOCK_MOD_INSTANCE)).at(-1)).toMatchObject({ kind: "update", file_name: "AANobbMI-0.6.0.jar", old_file: "AANobbMI-0.5.3.jar" });
+  });
+
+  it("启用着的 Mod 更新后仍启用，从发现页重装停用的 Mod 也沿用停用态", async () => {
+    expect((await updateMod("task-on", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060")).file_name).toBe("AANobbMI-0.6.0.jar");
+    await setModEnabled(MOCK_MOD_INSTANCE, "P7dR8mSH-0.92.2.jar", false);
+    const again = await installMod("task-reinstall", MOCK_MOD_INSTANCE, "modrinth", "P7dR8mSH", "fapi-0927");
+    expect(again.file_name).toBe("P7dR8mSH-0.92.7.jar.disabled");
+  });
+
   it("参数非法先于登记任务拒绝；任务 id 冲突与取消和后端同码", async () => {
     expect(await failure(updateMod("task-u2", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", ""))).toMatchObject({
       code: "invalid_argument",
@@ -581,11 +600,11 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
       // 实例里已有 Fabric API（旧版）：沿用，不擅自升级。
       ["fapi-0922", "AANobbMI", true, "Fabric API"],
     ]);
-    expect(plan.skipped).toEqual(["可选依赖 Mod Menu 未自动安装，需要时请手动添加"]);
+    expect(plan.skipped).toEqual(["可选前置 Mod Menu 未自动安装，需要时请手动添加"]);
 
     const forge = await planInstall("1.20.1-Forge", "modrinth", "AANobbMI", "sodium-060");
     expect(forge.items).toHaveLength(1);
-    expect(forge.skipped).toEqual(["依赖 Fabric API 没有适配该实例的版本，未加入计划", "可选依赖 Mod Menu 未自动安装，需要时请手动添加"]);
+    expect(forge.skipped).toEqual(["前置 Fabric API 没有适配该实例的版本，未加入计划", "可选前置 Mod Menu 未自动安装，需要时请手动添加"]);
 
     const same = await planInstall(MOCK_MOD_INSTANCE, "modrinth", "gvQqBUqZ", "lith-060");
     expect(same.items[0].already_satisfied).toBe(true);
@@ -609,7 +628,7 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
       download_url: null,
       dependencies: [],
     });
-    expect(plan.skipped).toEqual(["可选依赖 Mod Menu 未自动安装，需要时请手动添加"]);
+    expect(plan.skipped).toEqual(["可选前置 Mod Menu 未自动安装，需要时请手动添加"]);
 
     expect((await installMod("t-delisted", MOCK_MOD_INSTANCE, "modrinth", "AANobbMI", "sodium-060")).file_name).toBe("AANobbMI-0.6.0.jar");
     // 只落下主项，下架的 Fabric API 原样留着、卷宗记录不变。
