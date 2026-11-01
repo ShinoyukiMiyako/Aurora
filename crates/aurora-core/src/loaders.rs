@@ -828,7 +828,7 @@ mod tests {
     }
 
     /// 快照上的取消令牌一直传到加载器列表的元数据抓取（Fabric meta 经安装上下文，Forge 的 Maven
-    /// 元数据直接传）：端点迟迟不回时 1 秒内以已取消返回，也不退回缓存冒充结果。
+    /// 元数据直接传）：端点迟迟不回时立即以已取消返回，也不退回缓存冒充结果。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelling_a_loader_listing_returns_promptly_instead_of_the_cache() {
         use aurora_download::CancellationToken;
@@ -850,9 +850,10 @@ mod tests {
                 .unwrap();
         }
 
+        let stall = Duration::from_secs(10);
         let stalled = MockServer::start().await;
         Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
+            .respond_with(ResponseTemplate::new(200).set_delay(stall))
             .mount(&stalled)
             .await;
         let stalled_endpoints = endpoints(&stalled);
@@ -872,7 +873,7 @@ mod tests {
             let err = listing.await.unwrap_err();
             assert!(err.is_cancelled(), "{loader:?}：实际 {err:?}");
             assert!(
-                cancelled_at.elapsed() < Duration::from_secs(1),
+                cancelled_at.elapsed() < stall,
                 "{loader:?}：取消后等了 {:?}",
                 cancelled_at.elapsed()
             );

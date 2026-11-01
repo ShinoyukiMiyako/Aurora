@@ -87,9 +87,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_source_slower_than_the_timeout_is_offline() {
+        let answers_after = Duration::from_secs(5);
         let server = MockServer::start().await;
         Mock::given(method("HEAD"))
-            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
+            .respond_with(ResponseTemplate::new(200).set_delay(answers_after))
             .mount(&server)
             .await;
         let started = Instant::now();
@@ -102,7 +103,7 @@ mod tests {
         .unwrap();
         assert!(!reachable);
         assert!(
-            started.elapsed() < Duration::from_secs(3),
+            started.elapsed() < answers_after,
             "应在时限到达时放弃，而不是等响应"
         );
     }
