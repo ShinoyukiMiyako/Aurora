@@ -1,0 +1,110 @@
+name: Dev 构建
+
+# 这台是内网自托管机，公开仓库绝不能在这里加 pull_request 触发：那等于让任何 fork 在内网跑代码。
+on:
+  push:
+    branches: [dev]
+
+# 滚动预发布只留最新一个包，排队的旧构建做完也会被覆盖，不如直接取消。
+concurrency:
+  group: dev-build
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: [self-hosted, Linux, X64, petalfall]
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      # 同一块盘上还有别的项目的 Runner，余量不够就在这里失败，不能把盘写满。
+      # 依赖升级后旧产物不会自己清掉；冷构建只要几分钟，缓存超过 4G 就直接重来。
+      - name: 检查磁盘余量
+        run: |
+          if [ -d "$CARGO_TARGET_DIR" ] && [ "$(du -s -BG "$CARGO_TARGET_DIR" | cut -f1 | tr -dc 0-9)" -gt 4 ]; then
+            rm -rf "$CARGO_TARGET_DIR"
+          fi
+          avail="$(df --output=avail -BG / | tail -1 | tr -dc 0-9)"
+          echo "磁盘余量 ${avail}G"
+          test "$avail" -ge 3
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 安装依赖
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: 前端质量门
+        working-directory: app
+        run: |
+          pnpm typecheck
+          pnpm lint:tokens
+          pnpm test --maxWorkers=4
+
+      # 许可清单用 cargo metadata --frozen 现取，crate 必须先下好。
+      - name: 下载 Rust 依赖
+        run: cargo fetch --locked
+
+      # 安装包和前端显示的版本号都以 tauri.conf.json 为准，只改这一处两边才一致。
+      - name: 写入 dev 版本号
+        id: version
+        working-directory: app
+        run: |
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")-dev.$GITHUB_RUN_NUMBER"
+          node -e "
+            const fs = require('fs');
+            const path = 'src-tauri/tauri.conf.json';
+            const conf = JSON.parse(fs.readFileSync(path, 'utf8'));
+            conf.version = process.argv[1];
+            fs.writeFileSync(path, JSON.stringify(conf, null, 2));
+          " "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # 工作区每次都被清空，构建缓存放在 CARGO_TARGET_DIR；旧安装包不清就会越积越多。
+      - name: 构建 Windows 安装包
+        id: bundle
+        working-directory: app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bundle_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle"
+          rm -rf "$bundle_dir"
+          pnpm tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
+          installer="$bundle_dir/nsis/Petalfall_${VERSION}_x64-setup.exe"
+          test -f "$installer"
+          echo "installer=$installer" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.bundle.outputs.installer }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+      # tag 名不能叫 dev：和分支同名后 git 引用会有歧义。
+      - name: 更新滚动预发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: dev-build
+          VERSION: ${{ steps.version.outputs.version }}
+          INSTALLER: ${{ steps.bundle.outputs.installer }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --cleanup-tag --yes
+          fi
+          gh release create "$TAG" "$INSTALLER" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Dev 构建 $VERSION" \
+            --notes "dev 分支 ${GITHUB_SHA::8} 的自动构建，用于内部试用。交叉编译，未签名，不含自动更新。"
