@@ -63,6 +63,24 @@ impl LoaderChoice {
         LoaderChoice::Forge,
         LoaderChoice::NeoForge,
     ];
+
+    /// [`Aurora::install`] 装这个加载器版本时在 `versions/` 下用的版本 id。
+    ///
+    /// 真正的 id 写在加载器的 profile 或安装器里，要装到那一步才读得到；要在安装开始前占住目录的调用方只能按
+    /// 各加载器的写法算。早期 Forge 的 legacy 安装器不一定是这个形状，那时算出的名字不对应任何目录，占了也不碍事。
+    pub fn natural_version_id(self, game_version: &str, loader_version: &str) -> String {
+        match self {
+            LoaderChoice::Fabric => format!("fabric-loader-{loader_version}-{game_version}"),
+            LoaderChoice::Quilt => format!("quilt-loader-{loader_version}-{game_version}"),
+            // 1.20.1 的 NeoForge 沿用 Forge 的坐标，版本 id 也同形。
+            LoaderChoice::NeoForge if game_version != "1.20.1" => {
+                format!("neoforge-{loader_version}")
+            }
+            LoaderChoice::Forge | LoaderChoice::NeoForge => {
+                format!("{game_version}-forge-{loader_version}")
+            }
+        }
+    }
 }
 
 /// 一次安装的结果：原版摘要 + 可选加载器摘要。
@@ -261,6 +279,45 @@ mod tests {
     use crate::config::AuroraConfig;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// 算出的 id 要与加载器自己写在版本 JSON 里的一致，否则导入前占的不是它真正写的目录。
+    #[test]
+    fn natural_version_ids_match_what_each_loader_writes() {
+        for (choice, game, loader, id) in [
+            (
+                LoaderChoice::Fabric,
+                "1.21",
+                "0.15.11",
+                "fabric-loader-0.15.11-1.21",
+            ),
+            (
+                LoaderChoice::Quilt,
+                "1.21",
+                "0.26.0",
+                "quilt-loader-0.26.0-1.21",
+            ),
+            (
+                LoaderChoice::Forge,
+                "1.20.1",
+                "47.2.0",
+                "1.20.1-forge-47.2.0",
+            ),
+            (
+                LoaderChoice::NeoForge,
+                "1.21",
+                "21.0.167",
+                "neoforge-21.0.167",
+            ),
+            (
+                LoaderChoice::NeoForge,
+                "1.20.1",
+                "47.1.106",
+                "1.20.1-forge-47.1.106",
+            ),
+        ] {
+            assert_eq!(choice.natural_version_id(game, loader), id);
+        }
+    }
 
     /// 安装一个「空壳」原版：清单指向 mock，版本 JSON 无下载/资源/库，install 只落版本 JSON。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

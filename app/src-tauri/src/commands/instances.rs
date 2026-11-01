@@ -5,8 +5,8 @@
 //! 更新、回滚 Mod 与装资源，以及备份、恢复、导出存档与删除存档备份）经 [`InstanceLocks`] 互斥，冲突时报 `instance_busy`
 //! 并在 detail 里带上正在做的事。Mod 与资源的改动彼此之间、与启动和运行中的游戏、与存档备份之间可以并行
 //! （运行中改不了的文件由门面的占用探测把关），与其余操作互斥。启动到游戏退出、补全与导入整合包期间，实例继承链上的
-//! 基底版本（客户端 jar 与 natives 所在的原版）以 inherited 一并占住，启动、删除、改名、补全基底报
-//! `instance_busy` 并带上正在用它的实例；基底自己开着游戏时，这几件事反过来被基底挡住。
+//! 基底版本（客户端 jar 与 natives 所在的原版，导入时还有它要写的加载器版本）以 inherited 一并占住，启动、删除、
+//! 改名、补全基底报 `instance_busy` 并带上正在用它的实例；基底自己开着游戏时，这几件事反过来被基底挡住。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -52,8 +52,8 @@ pub enum InstanceActivity {
     /// 删除存档备份，或为打开文件夹建出工作目录下的子目录。
     Modifying,
     /// 别的实例正以它为基底（在那个实例的 `inheritsFrom` 链上）：那个实例启动到游戏退出、补全、导入整合包
-    /// 期间都要读写这里的客户端 jar 与 natives。只经 [`InstanceLocks::acquire_with_bases`] 占，
-    /// 占用里记着是哪个实例在用。
+    /// 期间都要读写这里的客户端 jar 与 natives。导入还以同样的名义占住要写的加载器版本：不在继承链上，但实例
+    /// JSON 抄自它。只经 [`InstanceLocks::acquire_with_bases`] 占，占用里记着是哪个实例在用。
     Inherited,
     /// 备份、恢复或导出存档；游戏退出后的自动备份由启动命令把「运行」转成它，备份完才释放，基底在转的时候
     /// 就放开（[`ChainGuard::into_backup`]）。
@@ -185,7 +185,7 @@ impl InstanceLocks {
     }
 
     /// 占住实例 `id` 做 `activity`，同时以它的名义占住继承链上的基底版本 `bases`
-    /// （[`aurora_core::Aurora::inheritance_chain`] 的结果，或导入将要继承的原版）。
+    /// （[`aurora_core::Aurora::inheritance_chain`] 的结果，或导入要写的自然版本目录）。
     ///
     /// 先占实例自己，再依次占基底；任一处冲突都报 `instance_busy`（基底被占时 detail 里的 id 是那个基底），
     /// 已占到的随返回的错误一起放开。基底里与 `id` 同名（链成环）或彼此重复（不分大小写）的只占一次。

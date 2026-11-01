@@ -252,8 +252,9 @@ pub(crate) async fn preview_modpack_with(
 ///
 /// 实例名一定下来（平台整合包要先下载完才知道清单里的名字）就以「安装」占住，直到导入结束、半成品
 /// 清理完：这期间启动、改名、删除这个实例都报 `instance_busy`，列表里它的 activity 为 installing。
-/// 整合包要求的原版同时以 inherited 占住，启动、删除、改名、补全它报 `instance_busy`（detail.used_by 为实例名）；
-/// 原版自己开着游戏时导入报 `instance_busy`（detail.id 为原版），这时写不动它的 natives。
+/// 整合包要求的原版与加载器版本同时以 inherited 占住，启动、删除、改名、补全它们报 `instance_busy`
+/// （detail.used_by 为实例名）；它们自己开着游戏时导入报 `instance_busy`（detail.id 为那个版本），这时写不动
+/// 原版的 natives，加载器目录也不该被重写。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn install_modpack(
@@ -308,13 +309,13 @@ pub(crate) async fn install_modpack_with(
             let prepared = aurora
                 .prepare_modpack(&source, name, &selection, Some(events))
                 .await?;
-            // 导入把原版装进它的自然版本目录，导入出的实例又继承它；实例 JSON 要到原版装完才写出来，
-            // 删除与改名动手时的依赖检查扫不到，所以这里按将要继承的 id 一并占住。
-            let base = [prepared.base_version().to_owned()];
+            // 导入把原版与加载器装进它们的自然版本目录，导入出的实例继承前者、抄自后者；实例 JSON 要到它们都
+            // 装完才写出来，删除与改名动手时的依赖检查扫不到，所以这里按将要写的 id 一并占住。
+            let natural = prepared.natural_versions();
             let guard = match locks.acquire_with_bases(
                 prepared.name(),
                 InstanceActivity::Installing,
-                &base,
+                &natural,
             ) {
                 Ok(guard) => guard,
                 Err(busy) => {
@@ -1104,6 +1105,23 @@ mod tests {
         writer.finish().unwrap();
     }
 
+    /// 只装原版与 Fabric 0.15.0、没有远程文件与覆盖文件的本地整合包。
+    fn write_fabric_pack(dest: &Path, minecraft: &str) {
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(dest).unwrap());
+        writer
+            .start_file(
+                "modrinth.index.json",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        let index = serde_json::json!({
+            "formatVersion": 1, "game": "minecraft", "versionId": "1.0.0", "name": "Fabric 包",
+            "files": [], "dependencies": {"minecraft": minecraft, "fabric-loader": "0.15.0"}
+        });
+        writer.write_all(index.to_string().as_bytes()).unwrap();
+        writer.finish().unwrap();
+    }
+
     /// 预览 DTO 带上 mod_files（snake_case），数的是落进 mods/ 的远程文件加上覆盖层 mods/ 下的 .jar。
     #[tokio::test]
     async fn preview_reports_the_mod_count_under_its_wire_name() {
@@ -1226,6 +1244,50 @@ mod tests {
         assert_eq!(locks.activity("test"), Some(InstanceActivity::Running));
     }
 
+    /// 整合包要的加载器版本自己开着游戏时同样在建目录前拒绝，detail 说的是它在运行：导入要重写这个目录。
+    /// 已占到的实例名与原版随之放开。
+    #[tokio::test]
+    async fn import_onto_a_loader_version_running_its_own_game_is_refused_before_creating_anything()
+    {
+        const LOADER: &str = "fabric-loader-0.15.0-test";
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), "http://127.0.0.1:9");
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        let pack = dir.path().join("fabric.mrpack");
+        write_fabric_pack(&pack, "test");
+        let _game = locks.acquire(LOADER, InstanceActivity::Running).unwrap();
+
+        let err = install_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            "mp-loader-running",
+            file(&pack.display().to_string()),
+            Some("周末联机"),
+            None,
+            &sink,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail.unwrap(),
+            serde_json::json!({ "id": LOADER, "activity": "running" })
+        );
+        assert!(!dir
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("周末联机")
+            .exists());
+        assert_eq!(locks.activity("周末联机"), None);
+        assert_eq!(locks.activity("test"), None);
+        assert_eq!(locks.activity(LOADER), Some(InstanceActivity::Running));
+    }
+
     /// 导入进行中实例名一直以「安装」占着：列表里 activity 为 installing，删除与改名报 instance_busy，
     /// 目录不动；取消后半成品删掉，占用随之释放。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1329,14 +1391,15 @@ mod tests {
         assert_eq!(locks.activity("导入中"), None);
     }
 
-    /// 导入一个 Fabric 1.20.1 整合包：实例 JSON 还没写出来（原版还在下载）时，盘上已有的原版 1.20.1
-    /// 就以「被使用」占着，删除、改名、补全它都以 instance_busy 拒绝，detail 指出正在用它的实例。
-    /// 导入结束（这里是取消）后放开。
+    /// 导入一个 Fabric 1.20.1 整合包：实例 JSON 还没写出来（原版还在下载）时，盘上已有的原版 1.20.1 与加载器
+    /// 版本目录就以「被使用」占着，删除、改名、补全它们都以 instance_busy 拒绝，detail 指出正在用它们的实例；
+    /// 另一个用同一加载器的整合包照常导入，两边都只是往这些目录里写同样的东西。导入结束（这里是取消）后放开。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn importing_a_fabric_pack_holds_its_base_version_until_the_import_ends() {
+    async fn importing_a_fabric_pack_holds_its_natural_versions_until_the_import_ends() {
         use crate::commands::instances::{
             delete_instance_with, list_instances_with, rename_instance_with, repair_instance_with,
         };
+        const LOADER: &str = "fabric-loader-0.15.0-1.20.1";
 
         let server = MockServer::start().await;
         let base = server.uri();
@@ -1373,87 +1436,88 @@ mod tests {
         .unwrap()
         .with_manifest_url(format!("{base}/manifest.json"));
         let facade = std::sync::Arc::new(Facade::new(aurora));
-        // 用户手里已有的原版实例：导入会把原版装进这个自然版本目录，导入出的实例也继承它。
-        let vanilla = dir
-            .path()
-            .join(".minecraft")
-            .join("versions")
-            .join("1.20.1");
-        std::fs::create_dir_all(&vanilla).unwrap();
-        std::fs::write(
-            vanilla.join("1.20.1.json"),
-            r#"{"id":"1.20.1","type":"release","mainClass":"M"}"#,
-        )
-        .unwrap();
+        // 用户手里已有的原版与加载器版本：导入把它们装进这两个自然版本目录，导入出的实例继承前者、照抄后者的
+        // 版本 JSON。
+        let versions = dir.path().join(".minecraft").join("versions");
+        for (id, json) in [
+            (
+                "1.20.1",
+                r#"{"id":"1.20.1","type":"release","mainClass":"M"}"#,
+            ),
+            (
+                LOADER,
+                r#"{"id":"fabric-loader-0.15.0-1.20.1","inheritsFrom":"1.20.1","mainClass":"Knot"}"#,
+            ),
+        ] {
+            std::fs::create_dir_all(versions.join(id)).unwrap();
+            std::fs::write(versions.join(id).join(format!("{id}.json")), json).unwrap();
+        }
         let registry = std::sync::Arc::new(TaskRegistry::default());
         let locks = InstanceLocks::default();
         let pack = dir.path().join("fabric.mrpack");
-        let mut writer = zip::ZipWriter::new(std::fs::File::create(&pack).unwrap());
-        writer
-            .start_file(
-                "modrinth.index.json",
-                zip::write::SimpleFileOptions::default(),
-            )
-            .unwrap();
-        let index = serde_json::json!({
-            "formatVersion": 1, "game": "minecraft", "versionId": "1.0.0", "name": "Fabric 包",
-            "files": [], "dependencies": {"minecraft": "1.20.1", "fabric-loader": "0.15.0"}
-        });
-        writer.write_all(index.to_string().as_bytes()).unwrap();
-        writer.finish().unwrap();
-        let install = tokio::spawn({
+        write_fabric_pack(&pack, "1.20.1");
+        let spawn_import = |task: &'static str, name: &'static str| {
             let (f, r, l) = (facade.clone(), registry.clone(), locks.clone());
             let source = file(&pack.display().to_string());
-            async move {
+            tokio::spawn(async move {
                 let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
-                install_modpack_with(&f, &r, &l, "mp-base", source, Some("导入中"), None, &sink)
-                    .await
+                install_modpack_with(&f, &r, &l, task, source, Some(name), None, &sink).await
+            })
+        };
+        let wait_for_dir = |name: &str| {
+            let marker = aurora_core::MarkerStore::for_version_dir(&versions.join(name))
+                .path()
+                .to_path_buf();
+            async move {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !marker.is_file() {
+                    assert!(Instant::now() < deadline, "导入没有建出实例目录");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
             }
-        });
-        let marker = aurora_core::MarkerStore::for_version_dir(
-            &dir.path()
-                .join(".minecraft")
-                .join("versions")
-                .join("导入中"),
-        )
-        .path()
-        .to_path_buf();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !marker.is_file() {
-            assert!(Instant::now() < deadline, "导入没有建出实例目录");
-            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let install = spawn_import("mp-base", "导入中");
+        wait_for_dir("导入中").await;
+
+        let listed = list_instances_with(&facade, &locks).await.unwrap();
+        for (id, new_name) in [("1.20.1", "原版"), (LOADER, "加载器")] {
+            let in_use =
+                serde_json::json!({ "id": id, "activity": "inherited", "used_by": "导入中" });
+            assert_eq!(locks.activity(id), Some(InstanceActivity::Inherited));
+            let entry = listed.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(entry.activity, Some(InstanceActivity::Inherited));
+            assert_eq!(entry.used_by.as_deref(), Some("导入中"));
+            let err = delete_instance_with(&facade, &locks, id, NeverDispose)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            assert_eq!(err.detail.unwrap(), in_use);
+            let err = rename_instance_with(&facade, &locks, id, new_name)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            assert_eq!(err.detail.unwrap(), in_use);
+            let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+            let err = repair_instance_with(&facade, &registry, &locks, "r-base", id, &sink)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            assert_eq!(err.detail.unwrap(), in_use);
+            assert!(!registry.is_running("r-base"));
+            assert!(versions.join(id).join(format!("{id}.json")).is_file());
         }
 
-        let in_use =
-            serde_json::json!({ "id": "1.20.1", "activity": "inherited", "used_by": "导入中" });
-        assert_eq!(locks.activity("1.20.1"), Some(InstanceActivity::Inherited));
-        let listed = list_instances_with(&facade, &locks).await.unwrap();
-        let entry = listed.iter().find(|i| i.id == "1.20.1").unwrap();
-        assert_eq!(entry.activity, Some(InstanceActivity::Inherited));
-        assert_eq!(entry.used_by.as_deref(), Some("导入中"));
-        let err = delete_instance_with(&facade, &locks, "1.20.1", NeverDispose)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, code::INSTANCE_BUSY);
-        assert_eq!(err.detail.unwrap(), in_use);
-        let err = rename_instance_with(&facade, &locks, "1.20.1", "原版")
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, code::INSTANCE_BUSY);
-        assert_eq!(err.detail.unwrap(), in_use);
-        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
-        let err = repair_instance_with(&facade, &registry, &locks, "r-base", "1.20.1", &sink)
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, code::INSTANCE_BUSY);
-        assert_eq!(err.detail.unwrap(), in_use);
-        assert!(!registry.is_running("r-base"));
-        assert!(vanilla.join("1.20.1.json").is_file());
+        let second = spawn_import("mp-same-loader", "同加载器");
+        wait_for_dir("同加载器").await;
 
         assert!(registry.cancel("mp-base"));
-        let err = install.await.unwrap().unwrap_err();
-        assert_eq!(err.code, code::CANCELLED);
+        assert!(registry.cancel("mp-same-loader"));
+        for import in [install, second] {
+            let err = import.await.unwrap().unwrap_err();
+            assert_eq!(err.code, code::CANCELLED);
+        }
         assert_eq!(locks.activity("1.20.1"), None, "导入结束后基底放开");
+        assert_eq!(locks.activity(LOADER), None, "导入结束后加载器版本放开");
         assert_eq!(locks.activity("导入中"), None);
     }
 
