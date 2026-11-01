@@ -562,7 +562,7 @@ export const LOGS_COPY = {
   historyEmptyTitle: "还没有变更",
   historyEmptyBody: "装 Mod、更新、移除之后，每一步都会留下记录，更新可以一键回滚。",
   historyError: "读不到变更历史",
-  reverted: "已撤销",
+  reverted: "已回滚",
   rollbackTo: (version: string) => `回滚到 ${version}`,
   rollback: "回滚",
   showEarlier: (n: number) => `显示更早的 ${n} 条`,

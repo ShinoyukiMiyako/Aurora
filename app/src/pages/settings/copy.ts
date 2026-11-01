@@ -153,7 +153,7 @@ export const GPU_COPY = {
   dualNote: (powerSaving: string, highPerformance: string) =>
     `这台电脑有两块显卡：${powerSaving} 和 ${highPerformance}。笔记本常默认用省电的那块跑游戏，帧数会低不少。`,
   revertNote:
-    "关掉后不会撤销已经写进 Windows 的设置；要改回，到 Windows 设置 → 系统 → 屏幕 → 显示卡（Windows 10：系统 → 显示 → 图形设置）里把 java.exe 改回「让 Windows 决定」。",
+    "关掉后，已经写进 Windows 的设置不会自动改回；要改回，到 Windows 设置 → 系统 → 屏幕 → 显示卡（Windows 10：系统 → 显示 → 图形设置）里把 java.exe 改回「让 Windows 决定」。",
   readFailed: "读不到显卡信息",
 } as const;
 

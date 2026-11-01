@@ -192,6 +192,8 @@ function lint(file: string, source: string): string[] {
   for (const { line, text } of stringLiterals(source)) {
     if (!CJK.test(text)) continue;
     for (const word of BANNED) if (text.includes(word)) out.push(`${file}:${line}：禁用词「${word}」：${text}`);
+    // 术语表里「撤销」只指刚做的一键调整的复原，也就是诊断页那一个按钮
+    if (text.includes("撤销") && text !== "撤销") out.push(`${file}:${line}：「撤销」只用于一键调整的复原：${text}`);
     for (const issue of punctuationIssues(text)) out.push(`${file}:${line}：${issue}：${text}`);
   }
   return out;
@@ -263,6 +265,8 @@ describe("文案检查本身", () => {
       'const bad1 = "请稍候...";',
       'const bad2 = "安装Sodium完成！";',
       'const bad3 = "“生存”已就绪 ，下次启动生效";',
+      'const undo = "撤销";',
+      'const bad4 = "关掉后不会撤销这项设置";',
       'const date = "2026年10月30日";',
       "const sep = (a: string) => `更新 0.5.8 → 0.6.0 · 「${a}」 · 已就绪`;",
     ].join("\n");
@@ -274,6 +278,7 @@ describe("文案检查本身", () => {
       "x.ts:3：中西文之间加空格：m完：安装Sodium完成！",
       "x.ts:4：引号用直角引号：“生存”已就绪 ，下次启动生效",
       "x.ts:4：全角标点旁不加空格： ，：“生存”已就绪 ，下次启动生效",
+      "x.ts:6：「撤销」只用于一键调整的复原：关掉后不会撤销这项设置",
     ]);
   });
 });
