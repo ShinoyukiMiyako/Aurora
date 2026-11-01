@@ -1,8 +1,7 @@
 // @vitest-environment jsdom
 import { MotionGlobalConfig } from "framer-motion";
-import { act } from "react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, stubMatchMedia, stubResizeObserver, type MediaQueryStub, type ResizeObserverStub } from "../../test/dom";
+import { render, stubMatchMedia, stubResizeObserver, waitForFrames, type MediaQueryStub, type ResizeObserverStub } from "../../test/dom";
 import { currentPetalStats } from "./engine";
 import { PetalCanvas, type PetalCanvasProps } from "./PetalCanvas";
 import { manualFrames, stubCanvas, stubPetalTokens, type ManualFrames } from "./test-canvas";
@@ -53,12 +52,8 @@ function ui(props: Partial<PetalCanvasProps> = {}, onDowngrade = vi.fn()) {
 
 const canvasIn = (container: HTMLElement) => container.querySelector("canvas[data-sk-petals]");
 
-/** 等 framer-motion 跑完退场（它用自己在导入时取到的 rAF，不经过本测试替换的那个）。 */
-async function settle() {
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 80));
-  });
-}
+/** 等 framer-motion 跑完退场、卸下画布（它用自己在导入时取到的 rAF，不经过本测试替换的那个）。 */
+const exited = (container: HTMLElement) => waitForFrames(() => expect(canvasIn(container)).toBeNull());
 
 describe("PetalCanvas", () => {
   it("挂在内容区里、对读屏隐藏，挂载即按画布尺寸开始播放", () => {
@@ -110,8 +105,7 @@ describe("PetalCanvas", () => {
     const view = render(ui());
     expect(canvasIn(view.container)).not.toBeNull();
     view.rerender(ui({ show: false }));
-    await settle();
-    expect(canvasIn(view.container)).toBeNull();
+    await exited(view.container);
     expect(frames.pending()).toBe(0);
     expect(currentPetalStats()).toBeNull();
     view.rerender(ui({ show: true }));
