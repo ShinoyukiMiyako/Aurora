@@ -308,6 +308,15 @@ describe("设置页：Java", () => {
     expect(text()).toContain("还缺 Java 25，对应实例会启动失败。可以在下面手动下载，或打开「自动下载 Java」。");
   });
 
+  it("一个运行时都没扫到：列表位置换成空状态，缺版本的提醒照常出现", async () => {
+    ipc.overrides.set("detect_java", () => []);
+    await mount("java");
+    expect(text()).toContain("没有在本机找到 Java");
+    expect(text()).toContain("首次启动时会自动下载");
+    expect(text()).toContain("还缺 Java 25、Java 21、Java 8，首次启动对应实例时会自动下载。");
+    expect(all('[role="radio"]')).toEqual([]);
+  });
+
   it("固定成某个运行时：写入路径并出现固定提醒", async () => {
     await mount("java");
     await click(radio("Java 8"));

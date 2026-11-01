@@ -109,32 +109,37 @@ function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
   const notes = javaNotes(write.value, runtimes, instances, settings.autoDownloadJava);
   return (
     <>
-      <RadioTile<string>
-        className={s.javaList}
-        ariaLabel={JAVA_COPY.defaultJava}
-        columns={tier === "wide" ? 2 : 1}
-        value={write.value}
-        onChange={write.set}
-        options={[
-          {
-            value: JAVA_AUTO,
-            title: (
-              <span className={s.titleWithTag}>
-                {JAVA_COPY.auto}
-                <Tag size="sm" tone="accent">
-                  {JAVA_COPY.recommended}
-                </Tag>
-              </span>
-            ),
-            description: JAVA_COPY.autoDesc(majors, settings.autoDownloadJava),
-          },
-          ...sorted.map((runtime) => ({
-            value: runtime.path,
-            title: <RuntimeTitle runtime={runtime} />,
-            description: <RuntimeDetail runtime={runtime} instances={instances} />,
-          })),
-        ]}
-      />
+      {/* 一个都没扫到时只剩「自动选择」一项，构不成单选列表：列表位置换成空状态，提醒照常跟在后面 */}
+      {sorted.length === 0 ? (
+        <EmptyState compact icon="java" title={JAVA_COPY.emptyTitle} body={settings.autoDownloadJava ? JAVA_COPY.emptyAuto : JAVA_COPY.emptyManual} />
+      ) : (
+        <RadioTile<string>
+          className={s.javaList}
+          ariaLabel={JAVA_COPY.defaultJava}
+          columns={tier === "wide" ? 2 : 1}
+          value={write.value}
+          onChange={write.set}
+          options={[
+            {
+              value: JAVA_AUTO,
+              title: (
+                <span className={s.titleWithTag}>
+                  {JAVA_COPY.auto}
+                  <Tag size="sm" tone="accent">
+                    {JAVA_COPY.recommended}
+                  </Tag>
+                </span>
+              ),
+              description: JAVA_COPY.autoDesc(majors, settings.autoDownloadJava),
+            },
+            ...sorted.map((runtime) => ({
+              value: runtime.path,
+              title: <RuntimeTitle runtime={runtime} />,
+              description: <RuntimeDetail runtime={runtime} instances={instances} />,
+            })),
+          ]}
+        />
+      )}
       {notes.map((note) => (
         <Callout key={note.kind} tone="warn" icon="alert" announce>
           {noteText(note)}
@@ -174,13 +179,6 @@ function RuntimeCard() {
         <Skeleton shape="block" width="100%" height={64} radius="md" />
         <Skeleton shape="block" width="100%" height={84} radius="md" />
       </div>
-    );
-  } else if (java.data.length === 0) {
-    body = (
-      <>
-        <EmptyState compact icon="java" title={JAVA_COPY.emptyTitle} body={settings.autoDownloadJava ? JAVA_COPY.emptyAuto : JAVA_COPY.emptyManual} />
-        <RuntimeList runtimes={java.data} />
-      </>
     );
   } else {
     body = <RuntimeList runtimes={java.data} />;
