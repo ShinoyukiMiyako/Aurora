@@ -189,6 +189,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
                   join={joinPlan(row.instance, instances, busy)}
                   candidates={candidates}
                   selectedInstanceId={selectedInstanceId}
+                  busy={busy}
                   onUnpin={() => toggle({ name: row.name, address: row.address, instance: row.instance })}
                 />
               </motion.li>
@@ -316,10 +317,17 @@ interface ServerRowViewProps {
   /** 能用来加入服务器的实例，已排好序。 */
   candidates: readonly InstanceSummary[];
   selectedInstanceId: string | null;
+  /** 占着游戏进程的那一局；实例选择里选中它时「加入服务器」带原因禁用。 */
+  busy: BusySession | null;
   onUnpin: () => void;
 }
 
-function ServerRowView({ row, join, candidates, selectedInstanceId, onUnpin }: ServerRowViewProps) {
+/** 占着游戏进程的实例不能再拿来加入：同一实例再启动是空操作，加载阶段写「正在启动」。 */
+function busyReason(instanceId: string, phase: BusySession["phase"]): string {
+  return phase === "running" ? HOME_COPY.joinRunning(instanceId) : HOME_COPY.joinLaunching(instanceId);
+}
+
+function ServerRowView({ row, join, candidates, selectedInstanceId, busy, onUnpin }: ServerRowViewProps) {
   const { copyText } = useShell();
   const actions = useLauncherActions();
   const run = useRunner();
@@ -352,7 +360,7 @@ function ServerRowView({ row, join, candidates, selectedInstanceId, onUnpin }: S
     await quickPlay(instanceId);
   };
   const forget = () => void run(() => actions.setPinnedServerInstance(row.address, null), HOME_COPY.saveJoinError);
-  const joinBlocked = join.kind === "busy" ? (join.phase === "running" ? HOME_COPY.joinRunning(join.instanceId) : HOME_COPY.joinLaunching(join.instanceId)) : undefined;
+  const joinBlocked = join.kind === "busy" ? busyReason(join.instanceId, join.phase) : undefined;
 
   useEffect(() => {
     if (!copied) return;
@@ -424,6 +432,7 @@ function ServerRowView({ row, join, candidates, selectedInstanceId, onUnpin }: S
           server={row.name}
           candidates={candidates}
           selectedInstanceId={selectedInstanceId}
+          busy={busy}
           rememberDefault={picker.remember}
           onJoin={(instanceId, remember) => void joinWith(instanceId, remember)}
           onClose={closePicker}
@@ -439,17 +448,20 @@ interface JoinPickerProps {
   server: string;
   candidates: readonly InstanceSummary[];
   selectedInstanceId: string | null;
+  busy: BusySession | null;
   rememberDefault: boolean;
   onJoin: (instanceId: string, remember: boolean) => void;
   onClose: () => void;
 }
 
 /** 选用哪个实例加入：只列能加入服务器的实例；一个都没有时换成紧凑空状态，不给复选框与主按钮。 */
-function JoinPicker({ open, anchor, server, candidates, selectedInstanceId, rememberDefault, onJoin, onClose }: JoinPickerProps) {
+function JoinPicker({ open, anchor, server, candidates, selectedInstanceId, busy, rememberDefault, onJoin, onClose }: JoinPickerProps) {
   const [choice, setChoice] = useState<string | null>(() => defaultJoinChoice(candidates, selectedInstanceId));
   const [remember, setRemember] = useState(rememberDefault);
   // 开着的时候实例列表可能变了（被删除、开始安装）：选中的那一项不在候选里就退回默认
   const current = choice !== null && candidates.some((c) => c.id === choice) ? choice : defaultJoinChoice(candidates, selectedInstanceId);
+  // 默认选中的当前实例常常就是正在运行的那个：照常列出、可以改选，只是不能拿它加入
+  const blocked = busy !== null && busy.instanceId === current ? busyReason(current, busy.phase) : undefined;
   return (
     <Popover open={open} anchor={anchor} onClose={onClose} placement="bottom-end" autoFocus aria-label={HOME_COPY.joinPickerLabel(server)} className={s.joinPanel}>
       {current === null ? (
@@ -460,7 +472,7 @@ function JoinPicker({ open, anchor, server, candidates, selectedInstanceId, reme
           <JoinChoice candidates={candidates} value={current} onChange={setChoice} />
           <Checkbox checked={remember} onChange={setRemember} label={HOME_COPY.rememberChoice} />
           <div className={s.joinFoot}>
-            <Button variant="primary" size="sm" onClick={() => onJoin(current, remember)}>
+            <Button variant="primary" size="sm" disabledReason={blocked} onClick={() => onJoin(current, remember)}>
               {HOME_COPY.joinServer}
             </Button>
           </div>

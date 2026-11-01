@@ -929,6 +929,47 @@ describe("主页：固定服务器的「加入」", () => {
     expect(launcher.state.launchPrompt).toEqual({ instanceId: "生存", occupantId: "创造", occupantPhase: "running", quickPlay: SERVER });
   });
 
+  it("实例选择里选中的正是运行中的实例：「加入服务器」aria-disabled 并写明原因，点了既不保存也不启动；换一个实例就能加入", async () => {
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+    });
+    await flush();
+    click(joinButton());
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    // 默认选中当前实例，也就是正在运行的生存
+    expect(radios(panel).map((o) => o.getAttribute("aria-checked"))).toEqual(["true", "false", "false"]);
+    const remember = panel.querySelector<HTMLElement>('[role="checkbox"]');
+    if (remember === null) throw new Error("没有「记住这个选择」");
+    click(remember);
+    const submit = buttonByText("加入服务器", panel);
+    expect(submit.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      submit.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = submit.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「加入服务器」悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toContain("「生存」正在运行");
+    click(submit);
+    await flush();
+    expect(callsOf(ipc, "set_pinned_server_instance")).toHaveLength(0);
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["生存"]);
+    expect(picker()).not.toBeNull();
+
+    click(radios(panel)[1]);
+    const enabled = buttonByText("加入服务器", panel);
+    expect(enabled.getAttribute("aria-disabled")).toBeNull();
+    click(enabled);
+    await flush();
+    expect(callsOf(ipc, "set_pinned_server_instance")).toEqual([{ address: "play.example", instance: "创造" }]);
+    expect(launcher.state.launchPrompt).toEqual({ instanceId: "创造", occupantId: "生存", occupantPhase: "running", quickPlay: SERVER });
+  });
+
   it("「不再记住实例」清掉绑定；「更换加入用的实例」打开实例选择且默认勾选记住", async () => {
     pinned = [{ name: "晨星", address: "play.example", instance: "生存" }];
     await mount();
