@@ -60,10 +60,13 @@ pub fn detect_loaders(version: &VersionJson) -> Vec<LoaderInfo> {
         });
     }
 
-    // NeoForge：net.neoforged 组，版本可能带 mc 前缀。
+    // NeoForge：neoforge 坐标不带 mc 前缀，`-beta` 是版本号的一部分，不能当前缀剥；1.20.1 沿用 Forge 的
+    // 坐标名，版本号在 `net.neoforged:forge:<mc>-<版本>` 里。
     let neoforge_version = find_lib_version(version, "net.neoforged", "neoforge")
-        .map(|v| strip_mc_prefix(&v))
-        .or_else(|| flag_value(&tokens, "--fml.neoForgeVersion"));
+        .or_else(|| flag_value(&tokens, "--fml.neoForgeVersion"))
+        .or_else(|| {
+            find_lib_version(version, "net.neoforged", "forge").map(|v| strip_mc_prefix(&v))
+        });
     let neoforge_present = neoforge_version.is_some() || has_group(version, "net.neoforged");
     if neoforge_present {
         out.push(LoaderInfo {
@@ -261,6 +264,44 @@ mod tests {
         );
         // 不能把 NeoForge 误判成 Forge。
         assert!(!loaders.iter().any(|l| l.kind == LoaderKind::Forge));
+    }
+
+    /// 重新安装加载器照探测出的版本号拼安装器地址：`-beta` 是版本号的一部分，剥成 `beta` 就下不到安装器。
+    #[test]
+    fn detect_neoforge_keeps_the_beta_suffix() {
+        let ver = v(r#"{
+            "id":"neoforge-21.0.167-beta","inheritsFrom":"1.21",
+            "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments":{"game":["--fml.neoForgeVersion","21.0.167-beta"],"jvm":[]},
+            "libraries":[{"name":"net.neoforged:neoforge:21.0.167-beta:universal"}]
+        }"#);
+        assert_eq!(
+            detect_loaders(&ver),
+            vec![LoaderInfo {
+                kind: LoaderKind::NeoForge,
+                version: Some("21.0.167-beta".into())
+            }]
+        );
+    }
+
+    /// 1.20.1 的 NeoForge 沿用 Forge 的坐标名与启动参数：版本号在 `net.neoforged:forge` 的坐标里，
+    /// 没有它时 NeoForge 这一条就没有版本号。
+    #[test]
+    fn detect_neoforge_on_1_20_1_reads_its_forge_coordinate() {
+        let ver = v(r#"{
+            "id":"1.20.1-forge-47.1.106","inheritsFrom":"1.20.1",
+            "mainClass":"cpw.mods.bootstraplauncher.BootstrapLauncher",
+            "arguments":{"game":["--fml.forgeVersion","47.1.106","--fml.forgeGroup","net.neoforged"],"jvm":[]},
+            "libraries":[{"name":"net.neoforged:forge:1.20.1-47.1.106:universal"}]
+        }"#);
+        let loaders = detect_loaders(&ver);
+        assert!(
+            loaders.contains(&LoaderInfo {
+                kind: LoaderKind::NeoForge,
+                version: Some("47.1.106".into())
+            }),
+            "{loaders:?}"
+        );
     }
 
     #[test]
