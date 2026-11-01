@@ -262,7 +262,7 @@ fn check_version(entry: &dyn UninstallEntry, expected: &str, found: &mut Vec<Mis
 }
 
 /// 目录比较要忽略大小写和末尾分隔符：Windows 下这些写法指向同一处，比字节会把好安装判成失败。
-fn fold_dir(path: &str) -> String {
+pub(crate) fn fold_dir(path: &str) -> String {
     path.trim_end_matches(['\\', '/']).to_lowercase()
 }
 

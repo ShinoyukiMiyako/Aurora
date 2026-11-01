@@ -21,7 +21,7 @@ use windows_sys::Win32::System::Threading::{
 
 use crate::contract::{Existing, ExistingKind, Probe};
 use crate::extract::PAYLOAD_NAME;
-use crate::verify::Mismatch;
+use crate::verify::{Mismatch, fold_dir};
 
 pub const JOURNAL_FILE: &str = "journal.json";
 const JOURNAL_TEMP_FILE: &str = "journal.json.tmp";
@@ -200,8 +200,18 @@ pub fn recover(
 }
 
 /// 把半装状态折进探测结果：首装半装回欢迎页按首装重装到原目录，升级半装走修复。
+///
+/// 记录只有核验通过才删，标准安装程序、NSIS 原包和自更新都不碰它，所以它可能早已过期，这时以登记为准：
+/// 登记的版本更新时，改成首装或修复都等于绕过降级保护；登记在别的目录时，按记录走首装 /D= 会把登记
+/// 改指回去，原来那份成孤儿，走修复则 NSIS 装回登记的目录，而核验盯着记录的目录，永远过不了。
 pub fn mark_interrupted(probe: Probe, journal: &Journal) -> Probe {
     let dir = journal.instdir.to_string_lossy().into_owned();
+    let superseded = probe.existing.as_ref().is_some_and(|existing| {
+        existing.kind == ExistingKind::Newer || fold_dir(&existing.dir) != fold_dir(&dir)
+    });
+    if superseded {
+        return probe;
+    }
     if journal.was_fresh {
         return Probe {
             default_dir: dir,
@@ -485,6 +495,71 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_install_keeps_its_downgrade_block_whatever_the_record_says() {
+        for was_fresh in [true, false] {
+            let journal = Journal {
+                was_fresh,
+                ..sample(None)
+            };
+            for dir in [r"D:\游戏 目录\Petalfall", r"E:\Elsewhere"] {
+                let found = probe(Some(Existing {
+                    kind: ExistingKind::Newer,
+                    version: "0.4.0".into(),
+                    dir: dir.into(),
+                }));
+
+                assert_eq!(mark_interrupted(found.clone(), &journal), found);
+            }
+        }
+    }
+
+    #[test]
+    fn a_fresh_record_does_not_hide_an_install_registered_elsewhere() {
+        // 首装失败后改用标准安装程序，装到了默认目录：再按记录走首装，/D= 会把登记改指回去
+        let found = probe(Some(Existing {
+            kind: ExistingKind::Same,
+            version: "0.3.0".into(),
+            dir: r"C:\Users\a\AppData\Local\Petalfall".into(),
+        }));
+
+        assert_eq!(mark_interrupted(found.clone(), &sample(None)), found);
+    }
+
+    #[test]
+    fn a_half_upgrade_of_a_directory_no_longer_registered_is_superseded() {
+        // 修复只传 /S，NSIS 装回登记的目录；界面却拿记录的目录去核验，永远过不了
+        let journal = Journal {
+            was_fresh: false,
+            ..sample(None)
+        };
+        let found = probe(Some(Existing {
+            kind: ExistingKind::Upgrade,
+            version: "0.1.0".into(),
+            dir: r"E:\Old".into(),
+        }));
+
+        assert_eq!(mark_interrupted(found.clone(), &journal), found);
+    }
+
+    #[test]
+    fn the_registered_directory_matches_despite_case_and_trailing_separator() {
+        let journal = Journal {
+            was_fresh: false,
+            ..sample(None)
+        };
+        let existing = Some(Existing {
+            kind: ExistingKind::Upgrade,
+            version: "0.1.0".into(),
+            dir: r"d:\游戏 目录\PETALFALL\".into(),
+        });
+
+        let marked = mark_interrupted(probe(existing), &journal);
+
+        assert_eq!(marked.existing.unwrap().kind, ExistingKind::Broken);
+        assert!(marked.interrupted);
+    }
+
+    #[test]
     fn a_half_upgrade_becomes_a_broken_install_keeping_the_registered_version() {
         let journal = Journal {
             was_fresh: false,
@@ -493,7 +568,7 @@ mod tests {
         let existing = Some(Existing {
             kind: ExistingKind::Upgrade,
             version: "0.1.0".into(),
-            dir: r"E:\Old".into(),
+            dir: r"D:\游戏 目录\Petalfall".into(),
         });
 
         let marked = mark_interrupted(probe(existing), &journal);
