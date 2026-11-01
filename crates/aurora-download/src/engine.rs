@@ -13,9 +13,9 @@
 //! 6. 合并到同目录临时文件，校验大小与 sha1，最后原子 rename 覆盖目标。sha1 在写盘的同时算好，
 //!    不把刚写完的文件再读一遍；落盘是否 fsync 见 [`Landing`]。
 //! 7. 大文件的网络传输段由吞吐看门狗盯着（见 [`crate::watchdog`]）：终点慢到窗口平均低于阈值，
-//!    就向原地址重新取一个终点，已完整的分片保留、只续传没下完的；取不到新终点即换源；已是最后
-//!    一个源时关掉看门狗在当前终点上续传，后面的源都失败时回到先前判慢的源关掉看门狗下完，慢也装上。
-//!    合并、校验、落位不计时。
+//!    就向原地址重新取一个终点，已完整的分片保留、只续传没下完的；取不到新终点或这个源的换终点
+//!    额度用完即换源；已是最后一个源时关掉看门狗在当前终点上续传，后面的源都失败时回到先前判慢的
+//!    源关掉看门狗下完，慢也装上。合并、校验、落位不计时。
 //!
 //! 同一个目标路径的下载在进程内串行（[`lock_dest`]）：两次安装同时落同一个共享文件时，后到的一方
 //! 等前一方落位后再做第 1 步，通常直接跳过。
@@ -31,6 +31,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use aurora_base::fs::Sha1Hasher;
@@ -169,7 +170,12 @@ impl Downloader {
         // 它是唯一真在送数据的源，要回到它关掉看门狗下完：慢也比装不上强。
         let mut slow_left: Option<&String> = None;
         for (index, url) in candidates.iter().enumerate() {
-            let mut outcome = self.fetch_from(url, task, file, cancel, Watch::On).await;
+            // 换终点额度按源计：重试与分片回退都还是这个源，各记各的话一回退就清零，
+            // 一个源上要白等多少个窗口就没了准数。
+            let switches = AtomicU32::new(0);
+            let mut outcome = self
+                .fetch_from(url, task, file, cancel, Watch::On(&switches))
+                .await;
             if index + 1 == candidates.len() && matches!(outcome, Err(Error::SlowEndpoint { .. })) {
                 // 没有别的源可换了：慢也比装不上强。不记失败，已完整的分片在续传里复用。
                 tracing::warn!(
@@ -285,7 +291,7 @@ impl Downloader {
         task: &DownloadTask,
         file: &FileProgress,
         cancel: Option<&CancellationToken>,
-        watch: Watch,
+        watch: Watch<'_>,
     ) -> Result<u64> {
         let transfer = transfer_for(&self.config.chunk, url, task.size);
         if transfer == Transfer::Whole {
@@ -351,7 +357,7 @@ impl Downloader {
         file: &FileProgress,
         cancel: Option<&CancellationToken>,
         transfer: Transfer,
-        watch: Watch,
+        watch: Watch<'_>,
     ) -> Result<u64> {
         let attempt = || self.attempt(url, task, file, cancel, transfer, watch);
         match cancel {
@@ -374,7 +380,7 @@ impl Downloader {
         file: &FileProgress,
         cancel: Option<&CancellationToken>,
         transfer: Transfer,
-        watch: Watch,
+        watch: Watch<'_>,
     ) -> Result<u64> {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
@@ -396,8 +402,11 @@ impl Downloader {
             file,
             cancel,
             watchdog: match watch {
-                Watch::On if self.config.watchdog.applies_to(task.size) => {
-                    Some(self.config.watchdog)
+                Watch::On(switches) if self.config.watchdog.applies_to(task.size) => {
+                    Some(Watched {
+                        config: self.config.watchdog,
+                        switches,
+                    })
                 }
                 _ => None,
             },
@@ -428,7 +437,6 @@ impl Downloader {
         let route = self.route_for(job.task)?;
         let durable = landing.durable();
         let mut target = url.to_owned();
-        let mut switches = 0;
         loop {
             let armed = job.arm();
             let net = armed.as_ref().map(Armed::token).or(job.cancel);
@@ -462,11 +470,11 @@ impl Downloader {
             if job.user_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let (Some(bytes_per_sec), Some(config)) = (fired, job.watchdog) else {
+            let (Some(bytes_per_sec), Some(watched)) = (fired, job.watchdog) else {
                 return Err(err);
             };
             target = self
-                .next_endpoint(url, &endpoint, job, config, bytes_per_sec, &mut switches)
+                .next_endpoint(url, &endpoint, job, watched, bytes_per_sec)
                 .await?;
             // 新终点上从头重下：摘要与已计入的字节都作废。
             *landing = Landing::for_task(job.task);
@@ -514,7 +522,6 @@ impl Downloader {
 
         let mut endpoint = final_url;
         let mut resume = false;
-        let mut switches = 0;
         let fetched = loop {
             let armed = job.arm();
             let net = armed.as_ref().map(Armed::token).or(job.cancel);
@@ -529,9 +536,9 @@ impl Downloader {
             if job.user_cancelled() {
                 return Err(Error::Cancelled);
             }
-            if let (Some(bytes_per_sec), Some(config)) = (fired, job.watchdog) {
+            if let (Some(bytes_per_sec), Some(watched)) = (fired, job.watchdog) {
                 endpoint = self
-                    .next_endpoint(url, &endpoint, job, config, bytes_per_sec, &mut switches)
+                    .next_endpoint(url, &endpoint, job, watched, bytes_per_sec)
                     .await?;
                 resume = true;
                 // 在途分片都已停下，此刻退回不会与分片记账赛跑；续传时完整的分片重新计入。
@@ -706,10 +713,10 @@ impl Downloader {
         origin: &str,
         slow: &str,
         job: Job<'_>,
-        config: WatchdogConfig,
+        watched: Watched<'_>,
         bytes_per_sec: u64,
-        switches: &mut u32,
     ) -> Result<String> {
+        let Watched { config, switches } = watched;
         let dest = job.task.dest.display();
         let window_secs = config.window.as_secs();
         tracing::warn!(
@@ -725,11 +732,12 @@ impl Downloader {
             threshold: config.min_bytes_per_sec,
             window_secs,
         };
-        if *switches >= config.max_endpoint_switches {
+        let used = switches.load(Ordering::Relaxed);
+        if used >= config.max_endpoint_switches {
             tracing::warn!(
                 file = %dest,
                 url = %origin,
-                switches = *switches,
+                switches = used,
                 "换终点次数已用尽，换下一个下载源"
             );
             return Err(slow_endpoint());
@@ -760,12 +768,12 @@ impl Downloader {
             );
             return Err(slow_endpoint());
         }
-        *switches += 1;
+        switches.store(used + 1, Ordering::Relaxed);
         tracing::info!(
             file = %dest,
             from = %slow,
             to = %next,
-            switches = *switches,
+            switches = used + 1,
             "向原地址重新取到新终点，接着续传"
         );
         Ok(next)
@@ -871,11 +879,20 @@ impl Downloader {
 }
 
 /// 本次调用是否让吞吐看门狗盯着大文件。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Watch {
-    On,
+#[derive(Debug, Clone, Copy)]
+enum Watch<'a> {
+    /// 盯着，带上这个源已用掉的换终点次数。用原子量只为让跨 await 的下载 future 能 Send，
+    /// 同一个文件的换终点永远一个接一个发生。
+    On(&'a AtomicU32),
     /// 已是最后一个源时用：没有别的源可换，慢也得装上。
     Off,
+}
+
+/// 看门狗盯着一次尝试时用到的东西。
+#[derive(Clone, Copy)]
+struct Watched<'a> {
+    config: WatchdogConfig,
+    switches: &'a AtomicU32,
 }
 
 /// 一个文件在一次尝试里不变的几样东西。
@@ -886,14 +903,14 @@ struct Job<'a> {
     /// 用户的取消令牌。
     cancel: Option<&'a CancellationToken>,
     /// 本次尝试要武装的看门狗；不盯时为 `None`。
-    watchdog: Option<WatchdogConfig>,
+    watchdog: Option<Watched<'a>>,
 }
 
 impl Job<'_> {
     /// 为一个终点武装看门狗，每个终点各开一个新窗口；不盯时为 `None`，网络操作直接观察用户令牌。
     fn arm(&self) -> Option<Armed> {
         self.watchdog
-            .map(|config| Armed::arm(config, self.file, self.cancel))
+            .map(|watched| Armed::arm(watched.config, self.file, self.cancel))
     }
 
     /// 用户是否已取消。看门狗的令牌是用户令牌的子令牌，两者都会让网络操作返回取消，

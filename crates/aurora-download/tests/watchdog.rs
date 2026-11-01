@@ -118,6 +118,10 @@ enum Pace {
     Fast,
     /// 末尾这么多字节每 200 ms 写 2 KiB，之前的一口气发完。
     DripTail(usize),
+    /// 无视 Range 一律回整体 200：不支持 Range 的终点。
+    NoRange,
+    /// 回 503。
+    Unavailable,
 }
 
 /// 按本次请求的 Range 起点（不带 Range 为 `None`）与此前收到的全部请求决定节奏。
@@ -221,6 +225,17 @@ async fn answer(
         seen.push(start);
         pace
     };
+    if matches!(pace, Pace::Unavailable) {
+        let head =
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(head.as_bytes()).await;
+        return;
+    }
+    let range = if matches!(pace, Pace::NoRange) {
+        None
+    } else {
+        range
+    };
     let total = body.len();
     let (head, slice) = match range {
         Some((start, end)) => (
@@ -239,8 +254,8 @@ async fn answer(
         return;
     }
     let tail = match pace {
-        Pace::HeadOnly => return,
-        Pace::Fast => 0,
+        Pace::HeadOnly | Pace::Unavailable => return,
+        Pace::Fast | Pace::NoRange => 0,
         Pace::DripTail(tail) => tail.min(slice.len()),
     };
     let (quick, slow) = slice.split_at(slice.len() - tail);
@@ -273,6 +288,25 @@ async fn redirector(route: &str, first: &str, then: &str) -> MockServer {
         .with_priority(2)
         .mount(&server)
         .await;
+    server
+}
+
+/// 扮演分发入口：依次 302 到 `hops` 里的地址，用完后一直跳到最后一个。
+async fn redirect_chain(route: &str, hops: &[String]) -> MockServer {
+    let server = MockServer::start().await;
+    for (index, hop) in hops.iter().enumerate() {
+        let priority = u8::try_from(index + 1).expect("跳转链不长");
+        let mock = Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", hop.as_str()))
+            .with_priority(priority);
+        let mock = if index + 1 < hops.len() {
+            mock.up_to_n_times(1)
+        } else {
+            mock
+        };
+        mock.mount(&server).await;
+    }
     server
 }
 
@@ -994,5 +1028,126 @@ async fn credentialed_whole_file_switch_decides_the_key_per_hop() {
         vec![None, None],
         "作用域外的新节点：重取终点的探测与从头重下都不带密钥"
     );
+    only_dest_left(dir.path(), &dest);
+}
+
+/// 分片续传换到不支持 Range 的终点后回退整文件，还是同一个源：之前用掉的换终点次数接着算，
+/// 不随回退清零。上限 2 次：慢节点换到无 Range 节点算一次，回退后的慢节点再换一次，然后换源。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn falling_back_from_a_node_without_range_keeps_the_switch_count() {
+    let total = 2 * MIB;
+    let body = payload(total);
+    let sha1 = sha1_of(&body).await;
+    let first = Endpoint::start(body.clone(), probe_then_drip).await;
+    let no_range = Endpoint::start(body.clone(), |_, _| Pace::NoRange).await;
+    let drip: PaceFn = |_, _| Pace::DripTail(DRIP_ALL);
+    let second = Endpoint::start(body.clone(), drip).await;
+    let third = Endpoint::start(body.clone(), drip).await;
+    let fourth = Endpoint::start(body.clone(), drip).await;
+    let mirror = Endpoint::start(body.clone(), probe_then_fast).await;
+    let origin = redirect_chain(
+        "/f.jar",
+        &[
+            first.url("/f.jar"),
+            no_range.url("/f.jar"),
+            second.url("/f.jar"),
+            third.url("/f.jar"),
+            fourth.url("/f.jar"),
+        ],
+    )
+    .await;
+    let sources = SourcePlan::with_resolver(
+        vec![MirrorSource::Official, MirrorSource::BmclApi],
+        Arc::new(TwoSources {
+            official: format!("{}/f.jar", origin.uri()),
+            mirror: mirror.url("/f.jar"),
+        }),
+    );
+    let downloader = Downloader::new(client(), config(one_at_a_time(MIB), sources));
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("f.jar");
+    let task = DownloadTask::new("https://official.example/f.jar", &dest)
+        .with_size(total)
+        .with_sha1(&sha1);
+
+    downloader
+        .download(&task)
+        .await
+        .expect("应在第二个源上下完");
+
+    assert_eq!(sha1_of_file(&dest).await, sha1);
+    assert_eq!(
+        origin_gets(&origin).await,
+        4,
+        "首次取终点、第一次换终点、回退整文件、第二次换终点，之后不再问"
+    );
+    assert!(
+        fourth.requests().is_empty(),
+        "额度用完就不该再换到下一个节点"
+    );
+    assert_eq!(mirror.range_starts(), vec![0, MIB], "第二个源上从头下完");
+    only_dest_left(dir.path(), &dest);
+}
+
+/// 换到的新终点对 Range 回 503，同一个源上重试：重试也不清零换终点次数。
+/// 每次尝试都先落到一个慢节点、再换到回 503 的节点，第三次尝试时额度已用完，判慢即换源。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retrying_on_the_same_source_keeps_the_switch_count() {
+    let total = 2 * MIB;
+    let body = payload(total);
+    let sha1 = sha1_of(&body).await;
+    let first = Endpoint::start(body.clone(), probe_then_drip).await;
+    let second = Endpoint::start(body.clone(), probe_then_drip).await;
+    let third = Endpoint::start(body.clone(), probe_then_drip).await;
+    let unavailable = Endpoint::start(body.clone(), |start, _| match start {
+        None => Pace::HeadOnly,
+        Some(_) => Pace::Unavailable,
+    })
+    .await;
+    let mirror = Endpoint::start(body.clone(), probe_then_fast).await;
+    let refusing = unavailable.url("/f.jar");
+    let origin = redirect_chain(
+        "/f.jar",
+        &[
+            first.url("/f.jar"),
+            refusing.clone(),
+            second.url("/f.jar"),
+            refusing.clone(),
+            third.url("/f.jar"),
+            refusing,
+        ],
+    )
+    .await;
+    let sources = SourcePlan::with_resolver(
+        vec![MirrorSource::Official, MirrorSource::BmclApi],
+        Arc::new(TwoSources {
+            official: format!("{}/f.jar", origin.uri()),
+            mirror: mirror.url("/f.jar"),
+        }),
+    );
+    let downloader = Downloader::new(client(), config(one_at_a_time(MIB), sources));
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("f.jar");
+    let task = DownloadTask::new("https://official.example/f.jar", &dest)
+        .with_size(total)
+        .with_sha1(&sha1);
+
+    downloader
+        .download(&task)
+        .await
+        .expect("应在第二个源上下完");
+
+    assert_eq!(sha1_of_file(&dest).await, sha1);
+    assert_eq!(
+        origin_gets(&origin).await,
+        5,
+        "两次尝试各取终点并换一次，第三次取到终点后判慢不再换"
+    );
+    assert_eq!(
+        unavailable.range_starts(),
+        vec![0, MIB, 0, MIB],
+        "只换过去两次，每次两片都被拒"
+    );
+    assert_eq!(mirror.range_starts(), vec![0, MIB], "第二个源上从头下完");
     only_dest_left(dir.path(), &dest);
 }
