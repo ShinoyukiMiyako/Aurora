@@ -2707,49 +2707,60 @@ mod tests {
 
         /// 留存名已被占用（同一秒里又坏了一次）：另取 `-2`，先前那份不被顶掉。Windows 上的 rename 会
         /// 直接覆盖已存在的目标，去掉占用检查本用例即挂。
+        ///
+        /// 留存名取自系统时钟，没有注入口，用例只能把接下来几秒的名字先占上。机器满载时读库可能排到这几秒
+        /// 之后，那一轮的头一个候选没被占用，什么也说明不了，换个目录重来。
         #[test]
         fn preserving_never_overwrites_an_earlier_copy() {
             use chrono::{Datelike, Local, Timelike};
-            let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
-            let credentials = tmp.path().join(CREDENTIALS_FILE);
-            // 从现在起往后几秒的留存名都先占上，不论用例跑到哪一秒，头一个候选都已被占用。
-            let start = Local::now();
-            let occupied: Vec<_> = (0..3)
-                .map(|offset| {
-                    let at = start + chrono::Duration::seconds(offset);
-                    let name = format!(
-                        "{CREDENTIALS_FILE}{BROKEN_SUFFIX}{:04}{:02}{:02}-{:02}{:02}{:02}",
-                        at.year(),
-                        at.month(),
-                        at.day(),
-                        at.hour(),
-                        at.minute(),
-                        at.second()
-                    );
-                    let path = tmp.path().join(name);
-                    std::fs::write(&path, format!("earlier {offset}")).unwrap();
-                    path
-                })
-                .collect();
-            std::fs::write(&credentials, b"broken again").unwrap();
+            const OCCUPIED_SECONDS: i64 = 5;
+            for _ in 0..50 {
+                let tmp = tempfile::tempdir().unwrap();
+                let aurora = aurora_at(tmp.path());
+                let credentials = tmp.path().join(CREDENTIALS_FILE);
+                let start = Local::now();
+                let occupied: Vec<_> = (0..OCCUPIED_SECONDS)
+                    .map(|offset| {
+                        let at = start + chrono::Duration::seconds(offset);
+                        let name = format!(
+                            "{CREDENTIALS_FILE}{BROKEN_SUFFIX}{:04}{:02}{:02}-{:02}{:02}{:02}",
+                            at.year(),
+                            at.month(),
+                            at.day(),
+                            at.hour(),
+                            at.minute(),
+                            at.second()
+                        );
+                        let path = tmp.path().join(name);
+                        std::fs::write(&path, format!("earlier {offset}")).unwrap();
+                        path
+                    })
+                    .collect();
+                std::fs::write(&credentials, b"broken again").unwrap();
 
-            aurora.accounts().unwrap();
-            let all = preserved_credentials(tmp.path());
-            assert_eq!(all.len(), occupied.len() + 1, "{all:?}");
-            for (offset, path) in occupied.iter().enumerate() {
-                assert_eq!(
-                    std::fs::read_to_string(path).unwrap(),
-                    format!("earlier {offset}")
+                aurora.accounts().unwrap();
+                // 全程不到 OCCUPIED_SECONDS - 1 秒，取名时的那一秒才一定落在占好的名字里。
+                if Local::now() - start >= chrono::Duration::seconds(OCCUPIED_SECONDS - 1) {
+                    continue;
+                }
+                let all = preserved_credentials(tmp.path());
+                assert_eq!(all.len(), occupied.len() + 1, "{all:?}");
+                for (offset, path) in occupied.iter().enumerate() {
+                    assert_eq!(
+                        std::fs::read_to_string(path).unwrap(),
+                        format!("earlier {offset}")
+                    );
+                }
+                let fresh = all.iter().find(|p| !occupied.contains(p)).unwrap();
+                assert!(
+                    fresh.to_str().unwrap().ends_with("-2"),
+                    "头一个候选被占用时应追加 -2：{}",
+                    fresh.display()
                 );
+                assert_eq!(std::fs::read(fresh).unwrap(), b"broken again");
+                return;
             }
-            let fresh = all.iter().find(|p| !occupied.contains(p)).unwrap();
-            assert!(
-                fresh.to_str().unwrap().ends_with("-2"),
-                "头一个候选被占用时应追加 -2：{}",
-                fresh.display()
-            );
-            assert_eq!(std::fs::read(fresh).unwrap(), b"broken again");
+            panic!("连续 50 轮读库都没赶在占好的几秒之内，判断不了留存名的占用");
         }
 
         /// 读文件本身失败（这里是同名目录占着凭据库的位置）不是坏文件：照实报错，什么都不挪。
