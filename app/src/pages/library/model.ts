@@ -61,13 +61,21 @@ function byRecent(a: InstanceSummary, b: InstanceSummary): number {
   return y - x;
 }
 
+/** 按累计时长倒序；游玩记录读不出的实例说不上多少，排在最后。 */
+function byPlaytime(a: InstanceSummary, b: InstanceSummary): number {
+  if (a.playtimeMin === null && b.playtimeMin === null) return 0;
+  if (a.playtimeMin === null) return 1;
+  if (b.playtimeMin === null) return -1;
+  return b.playtimeMin - a.playtimeMin;
+}
+
 const nameCollator = new Intl.Collator("zh-CN");
 
 export function sortInstances(list: readonly InstanceSummary[], key: SortKey): InstanceSummary[] {
   const out = [...list];
   if (key === "recent") out.sort(byRecent);
   else if (key === "name") out.sort((a, b) => nameCollator.compare(a.name, b.name));
-  else out.sort((a, b) => b.playtimeMin - a.playtimeMin);
+  else out.sort(byPlaytime);
   return out;
 }
 
@@ -78,8 +86,14 @@ export function visibleInstances(list: readonly InstanceSummary[], view: Library
   );
 }
 
-export function totalPlaytime(list: readonly InstanceSummary[]): number {
-  return list.reduce((sum, inst) => sum + inst.playtimeMin, 0);
+/** 全部实例的累计分钟；有实例的游玩记录读不出时加不出总数，为 null。 */
+export function totalPlaytime(list: readonly InstanceSummary[]): number | null {
+  let total = 0;
+  for (const inst of list) {
+    if (inst.playtimeMin === null) return null;
+    total += inst.playtimeMin;
+  }
+  return total;
 }
 
 /** 修复横幅列出的实例：补全能修好的损坏实例。整合包没导入完的补全补不回来，各自在卡片上给重新导入。 */

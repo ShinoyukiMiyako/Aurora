@@ -360,6 +360,16 @@ describe("主页：游玩日历与洞察", () => {
     expect(text()).toContain("存档「山顶小屋」");
   });
 
+  it("游玩记录读不出但统计读得出：大卡与洞察写读不到，不写还没玩过与 0 分钟", async () => {
+    instances = instances.map((i) => ({ ...i, playtime_min: null, last_played_at: null, play_error: "解析 游玩记录 失败" }));
+    await mount();
+    expect(text()).toContain("上次游玩读不到");
+    expect(text()).toContain("累计时长读不到");
+    expect(text()).not.toContain("还没玩过");
+    expect(text()).not.toContain("累计 0 分钟");
+    expect(document.querySelector('[aria-label^="累计时长 读不到，"]')?.textContent).toContain("累计时长读不到");
+  });
+
   it("游玩记录读取失败：两张卡原位报错，重试再请求一次", async () => {
     ipc.overrides.set("play_stats", () => {
       throw new IpcError("io", "playtime.json 读不出来");

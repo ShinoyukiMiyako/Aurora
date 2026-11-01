@@ -54,6 +54,18 @@ pub enum Error {
 /// crate 级 `Result` 别名。
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// 错误连同它的原因链，用「：」接起来。要显示给人看时用：真正的原因（系统错误、JSON 的行列）常在第二层。
+pub fn error_with_causes(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut cause = err.source();
+    while let Some(inner) = cause {
+        text.push('：');
+        text.push_str(&inner.to_string());
+        cause = inner.source();
+    }
+    text
+}
+
 impl RetryableError for Error {
     fn is_retryable(&self) -> bool {
         match self {
@@ -89,6 +101,19 @@ fn is_transient_io(kind: std::io::ErrorKind) -> bool {
 mod tests {
     use super::*;
     use std::io;
+
+    #[test]
+    fn error_with_causes_walks_the_whole_source_chain() {
+        let err = Error::Io {
+            path: PathBuf::from("mods"),
+            source: io::Error::other("拒绝访问"),
+        };
+        assert_eq!(error_with_causes(&err), format!("{err}：拒绝访问"));
+        assert_eq!(
+            error_with_causes(&io::Error::other("没有下一层")),
+            "没有下一层"
+        );
+    }
 
     #[test]
     fn hash_mismatch_is_retryable() {

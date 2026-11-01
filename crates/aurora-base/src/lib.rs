@@ -19,4 +19,4 @@ pub mod http;
 pub mod mirror;
 pub mod retry;
 
-pub use error::{Error, Result};
+pub use error::{Error, Result, error_with_causes};

@@ -81,7 +81,7 @@ export interface InstanceDto {
    * 继承链断了或 broken 时为 null。
    */
   quick_play: QuickPlaySupportDto | null;
-  /** 工作目录 mods/ 下的 Mod 文件数（.jar 与 .jar.disabled）；broken 或设置读不出时为 null。 */
+  /** 工作目录 mods/ 下的 Mod 文件数（.jar 与 .jar.disabled）；broken、设置或工作目录读不出时为 null。 */
   mod_count: number | null;
   /** 工作目录 saves/ 下的存档数（每个文件夹算一个）；何时为 null 同 mod_count。 */
   world_count: number | null;
@@ -103,16 +103,20 @@ export interface InstanceDto {
   /** 崩溃记录读不出来的原因。 */
   last_crash_error: string | null;
   incomplete: IncompleteDto | null;
-  /** 实例目录创建时刻（毫秒时间戳）；文件系统不记录时为 null。 */
+  /** 实例目录创建时刻（毫秒时间戳）；文件系统不记录或目录读不出时为 null。 */
   created_at: number | null;
+  /** 实例目录或工作目录读不出来的原因；此时 created_at 或 mod_count、world_count、isolated 为 null。 */
+  dir_error: string | null;
   /** 有几件事并行时报最值得界面知道的那一件：实例自己的事优先，其次 modifying，最后 inherited。 */
   activity: InstanceActivity | null;
   /** 正以它为基底的实例；有几个时为最早占到的那个（与 instance_busy 报的同一个），没被当作基底时为 null。 */
   used_by: string | null;
-  /** 累计游玩分钟（向下取整）；没玩过为 0。 */
-  playtime_min: number;
-  /** 上次游玩结束的毫秒时间戳；没玩过为 null。 */
+  /** 累计游玩分钟（向下取整）；没玩过为 0，游玩记录读不出时为 null。 */
+  playtime_min: number | null;
+  /** 上次游玩结束的毫秒时间戳；没玩过或游玩记录读不出时为 null。 */
   last_played_at: number | null;
+  /** 游玩记录读不出来的原因。 */
+  play_error: string | null;
 }
 
 export type IsolationOverride = "follow_global" | "enabled" | "disabled";

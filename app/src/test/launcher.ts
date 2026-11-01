@@ -92,6 +92,8 @@ export function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): I
     used_by: null,
     playtime_min: 0,
     last_played_at: null,
+    play_error: null,
+    dir_error: null,
     ...overrides,
   };
 }

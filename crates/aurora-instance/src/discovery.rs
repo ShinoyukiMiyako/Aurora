@@ -1,8 +1,8 @@
 //! `versions/` 目录扫描与版本发现。
 //!
 //! 约定每个版本占一个子目录，目录名即版本 id，版本 JSON 为 `<id>/<id>.json`（原版启动器约定）。扫描把
-//! 每个 JSON 解析为 [`VersionJson`] 并探测其加载器，产出 [`DiscoveredVersion`]；解析不了的目录（缺 JSON
-//! 或 JSON 损坏）不静默丢弃，而是作为 [`BrokenVersion`] 单独列出，供上层归入「出错」类展示。
+//! 每个 JSON 解析为 [`VersionJson`] 并探测其加载器，产出 [`DiscoveredVersion`]；解析不了的目录（缺 JSON、
+//! JSON 损坏或读不出来）不静默丢弃，而是作为 [`BrokenVersion`] 单独列出，供上层归入「出错」类展示。
 //!
 //! 加载器探测与版本类型都取自「独立 JSON」本身（不解继承链）：加载器 JSON 自带其加载器库与 mainClass，
 //! 探测成立；`type` 字段一般由加载器从原版拷入。继承解析与可用性检查归 aurora-version / aurora-launch。
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 
+use aurora_base::error_with_causes;
 use aurora_version::{LoaderInfo, VersionJson, detect_loaders};
 use tokio::task::JoinSet;
 
@@ -71,6 +72,8 @@ pub enum BrokenReason {
     MissingJson,
     /// `<id>.json` 存在但内容非法（非 UTF-8 或反序列化失败），携带具体错误说明。
     Parse(String),
+    /// `<id>.json` 读不出来（被占用、没有权限等真实 IO 故障），携带具体错误说明。只有全量扫描报这一项。
+    Unreadable(String),
 }
 
 /// 一次 `versions/` 扫描的完整结果：成功版本与出错版本各自成列，均按 id 升序稳定排列。
@@ -92,8 +95,8 @@ pub enum VersionProbe {
 
 /// 扫描 `mc_dir/versions/` 并解析全部版本。`versions/` 不存在时返回空结果（全新 `.minecraft` 的正常态）。
 ///
-/// 单个版本 JSON 缺失或损坏计入 `broken`，不影响其它版本；只有读取 `versions/` 目录本身或读取一个
-/// 确实存在的 JSON 文件时发生真实 IO 故障才向上冒泡。
+/// 单个版本 JSON 缺失、损坏或读不出来都计入 `broken`，不影响其它版本；只有读取 `versions/` 目录本身
+/// 发生真实 IO 故障才向上冒泡。
 pub async fn discover_versions(mc_dir: &Path) -> Result<VersionScan> {
     let versions_dir = mc_dir.join(VERSIONS_DIR);
     let Some(names) = list_version_dirs(mc_dir).await? else {
@@ -107,7 +110,7 @@ pub async fn discover_versions(mc_dir: &Path) -> Result<VersionScan> {
         while running.len() < SCAN_CONCURRENCY {
             let Some(id) = pending.next() else { break };
             let dir = versions_dir.clone();
-            running.spawn_blocking(move || probe_version_blocking(&dir, id));
+            running.spawn_blocking(move || scan_version_blocking(&dir, id));
         }
         let Some(joined) = running.join_next().await else {
             break;
@@ -115,7 +118,7 @@ pub async fn discover_versions(mc_dir: &Path) -> Result<VersionScan> {
         let probe = joined.map_err(|join| Error::Io {
             path: versions_dir.clone(),
             source: std::io::Error::other(format!("版本解析任务异常结束: {join}")),
-        })??;
+        })?;
         probes.push(probe);
     }
 
@@ -241,6 +244,22 @@ fn cache_lock() -> std::sync::MutexGuard<'static, HashMap<PathBuf, CachedParse>>
 
 fn prune_cache(versions_dir: &Path, live: &HashSet<PathBuf>) {
     cache_lock().retain(|path, _| !path.starts_with(versions_dir) || live.contains(path));
+}
+
+/// 全量扫描里的一个版本：读不出来的 JSON 只算在它自己头上，一个被占用的文件不该让整个扫描失败。
+fn scan_version_blocking(versions_dir: &Path, id: String) -> VersionProbe {
+    match probe_version_blocking(versions_dir, id.clone()) {
+        Ok(probe) => probe,
+        Err(err) => {
+            let reason = error_with_causes(&err);
+            tracing::warn!(id, error = %reason, "版本 JSON 读不出来");
+            VersionProbe::Broken(BrokenVersion {
+                dir: versions_dir.join(&id),
+                id,
+                reason: BrokenReason::Unreadable(reason),
+            })
+        }
+    }
 }
 
 /// 全量扫描与单版本查询共用这一处，避免两条路径对「什么算损坏」各有一套判断而悄悄分叉。
@@ -523,6 +542,31 @@ mod tests {
             VersionProbe::Broken(b) => assert!(matches!(b.reason, BrokenReason::Parse(_))),
             other => panic!("应为损坏，实际 {other:?}"),
         }
+    }
+
+    /// 版本 JSON 读不出来（这里让它是个目录，读文件必报 IO 错）：全量扫描只把这一个版本记成损坏，
+    /// 其余版本照常，不让一个文件拖垮实例列表；单版本查询要回答的就是这一个版本，照实报错。
+    #[tokio::test]
+    async fn unreadable_json_only_breaks_that_version_in_a_full_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21.1", r#"{"id":"1.21.1","type":"release"}"#).await;
+        tokio::fs::create_dir_all(mc.join("versions").join("locked").join("locked.json"))
+            .await
+            .unwrap();
+
+        let scan = discover_versions(mc).await.unwrap();
+
+        let found: Vec<&str> = scan.versions.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(found, vec!["1.21.1"]);
+        let broken: Vec<&str> = scan.broken.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(broken, vec!["locked"]);
+        assert_eq!(scan.broken[0].dir, mc.join("versions").join("locked"));
+        let BrokenReason::Unreadable(reason) = &scan.broken[0].reason else {
+            panic!("应记成读不出来：{:?}", scan.broken[0].reason);
+        };
+        assert!(reason.contains("locked.json"), "{reason}");
+        assert!(probe_version(mc, "locked").await.is_err());
     }
 
     /// 文件被改写（大小变化）后缓存必须失效，读到的是新内容；内容不变时复用缓存结果。

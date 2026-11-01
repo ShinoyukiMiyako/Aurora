@@ -22,7 +22,7 @@ const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }))
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 const T0 = 1_700_000_000_000;
-const inst = { id: "生存", name: "生存", lastPlayedAt: null } as InstanceSummary;
+const inst = { id: "生存", name: "生存", lastPlayedAt: null, playError: null } as InstanceSummary;
 const session = startSession("生存", "launch-1", { uuid: "u", name: "Steve", kind: "microsoft" }, T0, null);
 
 describe("侧栏选中项", () => {
@@ -57,6 +57,12 @@ describe("固定实例名称提示的第二行", () => {
   ];
   it.each(cases)("%s", (_name, view, expected) => {
     expect(pinLine(view, inst, T0)).toBe(expected);
+  });
+
+  it("游玩记录读不出：就绪时写读不到，不说从未游玩；别的状态照常", () => {
+    const unread = { ...inst, playError: "解析 游玩记录 失败" };
+    expect(pinLine({ kind: "ready", busyElsewhere: false }, unread, T0)).toBe("上次游玩读不到");
+    expect(pinLine({ kind: "broken", reason: "x", reimport: false }, unread, T0)).toBe(AVATAR_LINE.broken);
   });
 
   it("排队中却没有名次是状态坏了，直接抛错", () => {

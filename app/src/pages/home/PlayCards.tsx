@@ -259,12 +259,16 @@ function InsightsBody({ activity, selected, onPickDay }: { activity: PlayActivit
           value={top === null ? HOME_COPY.none : LOADER_NAME[top.loader]}
           delta={top === null ? undefined : { direction: "flat", text: HOME_COPY.topLoaderShare(Math.round(top.share * 100)) }}
         />
-        <StatTile
-          label={HOME_COPY.total}
-          value={formatCount(total.hours)}
-          unit={HOME_COPY.hours}
-          delta={{ direction: "flat", text: HOME_COPY.instanceCount(total.count) }}
-        />
+        {total.hours === null ? (
+          <StatTile label={HOME_COPY.total} kind="text" value={HOME_COPY.totalUnknown} delta={{ direction: "flat", text: HOME_COPY.instanceCount(total.count) }} />
+        ) : (
+          <StatTile
+            label={HOME_COPY.total}
+            value={formatCount(total.hours)}
+            unit={HOME_COPY.hours}
+            delta={{ direction: "flat", text: HOME_COPY.instanceCount(total.count) }}
+          />
+        )}
       </StatGrid>
       <div className={s.bars} role="group" aria-label={HOME_COPY.barsLabel}>
         {days.map((date) => {

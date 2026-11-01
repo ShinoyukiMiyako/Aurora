@@ -30,6 +30,8 @@ function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSum
     createdAt: null,
     lastPlayedAt: null,
     playtimeMin: 0,
+    playError: null,
+    dirError: null,
     modCount: 0,
     worldCount: 0,
     isolated: false,

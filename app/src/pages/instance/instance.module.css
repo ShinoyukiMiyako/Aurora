@@ -243,6 +243,10 @@
   min-width: 0;
 }
 
+.statsNotice {
+  margin-top: var(--sk-space-14);
+}
+
 .rows {
   display: flex;
   flex-direction: column;

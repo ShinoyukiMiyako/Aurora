@@ -22,6 +22,8 @@ export function summary(id: string, overrides: Partial<InstanceSummary> = {}): I
     createdAt: 1_700_000_000_000,
     lastPlayedAt: null,
     playtimeMin: 0,
+    playError: null,
+    dirError: null,
     modCount: 0,
     worldCount: 0,
     isolated: false,

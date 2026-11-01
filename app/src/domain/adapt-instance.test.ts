@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { IncompleteDto, InstanceDto } from "../ipc/instances";
-import { instanceFromDto } from "./adapt";
+import { instanceFromDto, releaseTypeFromDto } from "./adapt";
 
 function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): InstanceDto {
   return {
@@ -30,6 +30,8 @@ function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): Instance
     used_by: null,
     playtime_min: 0,
     last_played_at: null,
+    play_error: null,
+    dir_error: null,
     ...overrides,
   };
 }
@@ -68,10 +70,15 @@ describe("实例 DTO 适配：加载器", () => {
     expect(inst.loaderVersion).toBeNull();
   });
 
-  it("未知加载器与未知版本类型抛错；old_alpha 归为 old", () => {
+  it("未知加载器抛错；old_alpha 归为 old", () => {
     expect(() => instanceFromDto(instanceDto("X", { loaders: [{ kind: "rift" as never, version: null }] }), idle)).toThrow("未知的加载器：rift");
-    expect(() => instanceFromDto(instanceDto("X", { release_type: "pending" }), idle)).toThrow("未知的版本类型：pending");
     expect(instanceFromDto(instanceDto("Alpha", { release_type: "old_alpha" }), idle).releaseType).toBe("old");
+  });
+
+  it("已装实例的版本类型来自它自己的 JSON，认不出时当不知道，其余字段照常；版本清单仍按契约抛错", () => {
+    const inst = instanceFromDto(instanceDto("别的启动器装的", { release_type: "modified" }), idle);
+    expect(inst).toMatchObject({ id: "别的启动器装的", status: "ready", releaseType: null, mcVersion: "1.21.1" });
+    expect(() => releaseTypeFromDto("pending")).toThrow("未知的版本类型：pending");
   });
 });
 
@@ -123,6 +130,18 @@ describe("实例 DTO 适配：状态", () => {
     expect(inst).toMatchObject({ worldCount: 3, isolated: true, memoryMb: 6144, lastCrashAt: 1_720_000_000_000, lastCrashError: null, modpack: null, modpackError: "整合包记录解析失败" });
     const unread = instanceFromDto(instanceDto("坏", { world_count: null, isolated: null, last_crash_error: "格式版本是 9" }), idle);
     expect(unread).toMatchObject({ worldCount: null, isolated: null, memoryMb: null, lastCrashAt: null, lastCrashError: "格式版本是 9" });
+  });
+
+  it("游玩记录读不出：时长为 null、原因带过；实例目录读不出的原因同样带过", () => {
+    const unread = instanceFromDto(instanceDto("坏", { playtime_min: null, last_played_at: null, play_error: "解析 游玩记录 失败" }), idle);
+    expect(unread).toMatchObject({ playtimeMin: null, lastPlayedAt: null, playError: "解析 游玩记录 失败", dirError: null });
+    const dir = instanceFromDto(instanceDto("目录", { mod_count: null, world_count: null, isolated: null, dir_error: "文件 IO 失败: mods" }), idle);
+    expect(dir).toMatchObject({ modCount: null, worldCount: null, isolated: null, dirError: "文件 IO 失败: mods", playtimeMin: 0, playError: null });
+  });
+
+  it("时长与读取错误对不上是契约破了：不让界面在 0 和读不到之间猜", () => {
+    expect(() => instanceFromDto(instanceDto("X", { playtime_min: null }), idle)).toThrow("实例 X 的游玩时长与它的读取错误对不上");
+    expect(() => instanceFromDto(instanceDto("Y", { playtime_min: 3, play_error: "坏了" }), idle)).toThrow("实例 Y 的游玩时长与它的读取错误对不上");
   });
 
   it("直达能力逐位带过：旧版只能加入服务器、读不出版本信息为 null", () => {

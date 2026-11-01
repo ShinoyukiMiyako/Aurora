@@ -202,4 +202,9 @@ describe("近 7 天柱与累计", () => {
     expect(totalPlaytime(list)).toEqual({ hours: 2, count: 2 });
     expect(totalPlaytime([])).toEqual({ hours: 0, count: 0 });
   });
+
+  it("有实例的游玩记录读不出时小时数为 null，实例数照算；占位项不影响", () => {
+    const list = [inst("a", { playtimeMin: 90 }), inst("b", { playtimeMin: null }), inst("c", { playtimeMin: 0, placeholder: true })];
+    expect(totalPlaytime(list)).toEqual({ hours: null, count: 2 });
+  });
 });

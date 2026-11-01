@@ -231,6 +231,7 @@ export const AVATAR_LINE = {
   queued: (position: number) => `等待安装 · 第 ${position} 位`,
   installing: (pct: string) => `安装中 · ${pct}`,
   broken: "需要修复",
+  playUnknown: "上次游玩读不到",
 } as const;
 
 // ---------------------------------------------------------------- 启动失败

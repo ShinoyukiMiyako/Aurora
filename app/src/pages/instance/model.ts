@@ -18,6 +18,7 @@ import { MODS_COPY } from "./copy";
 /**
  * 「上次崩溃」只在这次崩溃之后没有再正常玩过、且此刻不在启动或运行时提示。崩溃报告不会被后续正常启动清空，
  * 所以要拿它和上次游玩比：崩溃那一局的退出时刻同时写进两边，之后正常结束的一局会把上次游玩推到更晚。
+ * 游玩记录读不出时比不了，按还没再玩过算：多提示一次，好过把崩溃藏起来。
  */
 export function isCrashActive(crashAt: number | null, lastPlayedAt: number | null, view: LaunchViewKind): boolean {
   if (crashAt === null) return false;

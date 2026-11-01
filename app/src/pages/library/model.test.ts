@@ -22,6 +22,8 @@ function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSum
     createdAt: 1_000,
     lastPlayedAt: null,
     playtimeMin: 0,
+    playError: null,
+    dirError: null,
     modCount: 0,
     worldCount: 0,
     isolated: false,
@@ -88,6 +90,11 @@ describe("sortInstances", () => {
     expect(ids(sortInstances(list, "playtime"))).toEqual(["c", "b", "a"]);
   });
 
+  it("游玩时长：读不到的实例排在最后，彼此保持原序；不按 0 算", () => {
+    const list = [inst("读不到甲", { playtimeMin: null }), inst("没玩过", { playtimeMin: 0 }), inst("读不到乙", { playtimeMin: null }), inst("玩过", { playtimeMin: 300 })];
+    expect(ids(sortInstances(list, "playtime"))).toEqual(["玩过", "没玩过", "读不到甲", "读不到乙"]);
+  });
+
   it("不改动传入的数组", () => {
     const list = [inst("b"), inst("a")];
     sortInstances(list, "name");
@@ -101,6 +108,13 @@ describe("统计与签名", () => {
     expect(totalPlaytime(list)).toBe(120);
     expect(ids(brokenInstances(list))).toEqual(["b"]);
     expect(LIBRARY_COPY.subtitle(3, 2, totalPlaytime(list))).toBe("共 3 个实例 · 2 个固定在侧栏 · 累计 2 小时");
+  });
+
+  it("有实例的游玩记录读不出时加不出总数，页头明说读不到，不写 0 也不只加读得出的部分", () => {
+    const list = [inst("a", { playtimeMin: 90 }), inst("b", { playtimeMin: null })];
+    expect(totalPlaytime(list)).toBeNull();
+    expect(LIBRARY_COPY.subtitle(2, 1, totalPlaytime(list))).toBe("共 2 个实例 · 1 个固定在侧栏 · 累计时长读不到");
+    expect(totalPlaytime([])).toBe(0);
   });
 
   it("修复横幅不收整合包没导入完的实例：补全补不回来；其他种类的未完成照收", () => {
