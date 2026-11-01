@@ -5,6 +5,7 @@ import type { GpuAdapterDto, JavaInstallationDto } from "../../state/queries/cat
 import { instanceDto } from "../../test/launcher";
 import { dirName, hasBang, overAvailable, unrecorded } from "./game-model";
 import {
+  defaultDownloadMajor,
   gpuSummary,
   hasManaged,
   javaNotes,
@@ -33,6 +34,63 @@ function runtime(path: string, major: number, overrides: Partial<JavaInstallatio
 function instance(id: string, javaMajor: number | null) {
   return instanceFromDto(instanceDto(id, { java_major: javaMajor }), { pins: [], busyTaskInstanceIds: new Set() });
 }
+
+describe("下载运行时的默认主版本", () => {
+  const need = (...majors: (number | null)[]) => majors.map((major, i) => instance(`实例 ${i}`, major));
+  const have = (...majors: number[]) => majors.map((major) => runtime(`C:/jdk-${major}/bin/java.exe`, major));
+
+  it("缺一个：选缺的那个，哪怕更高的主版本已经装了", () => {
+    expect(defaultDownloadMajor(need(21, 17), have(21))).toBe(17);
+  });
+
+  it("缺多个：选缺的里最高的，而不是实例要求里最高的", () => {
+    expect(defaultDownloadMajor(need(25, 21, 17, 8), have(25, 21))).toBe(17);
+    expect(defaultDownloadMajor(need(8, 17, 21), [])).toBe(21);
+  });
+
+  it("都不缺：实例要求里最高的", () => {
+    expect(defaultDownloadMajor(need(21, 17, 8), have(21, 17, 8))).toBe(21);
+  });
+
+  it("本机多装的、没有实例要的主版本不算数", () => {
+    expect(defaultDownloadMajor(need(21, 17), have(25, 21))).toBe(17);
+    expect(defaultDownloadMajor(need(17), have(25, 21, 17))).toBe(17);
+  });
+
+  it("只有不完整的运行时算缺：重新下载就是修复", () => {
+    const broken = runtime("C:/jdk-17/bin/java.exe", 17, { missing_files: ["lib/modules"] });
+    expect(defaultDownloadMajor(need(21, 17), [...have(21), broken])).toBe(17);
+  });
+
+  it("同一主版本有完整的就不缺，不完整的那份不影响判断", () => {
+    const broken = runtime("D:/jdk-17/bin/java.exe", 17, { missing_files: ["release"] });
+    expect(defaultDownloadMajor(need(21, 17), [...have(21, 17), broken])).toBe(21);
+  });
+
+  it("没有实例要求时为 null；认不出版本的实例不计", () => {
+    expect(defaultDownloadMajor([], have(21))).toBeNull();
+    expect(defaultDownloadMajor(need(null), [])).toBeNull();
+    expect(defaultDownloadMajor(need(null, 17), have(21))).toBe(17);
+  });
+
+  it("一次成功的扫描都还没有：按都不缺算，取实例要求里最高的", () => {
+    expect(defaultDownloadMajor(need(17, 21), undefined)).toBe(21);
+    expect(defaultDownloadMajor([], undefined)).toBeNull();
+  });
+
+  it("随机的需求与安装组合：结果与实例顺序、重复无关", () => {
+    const pool = [8, 11, 16, 17, 21, 25];
+    const subset = () => pool.filter(() => Math.random() < 0.5);
+    for (let round = 0; round < 200; round++) {
+      const needed = subset();
+      const installed = subset();
+      const missing = needed.filter((major) => !installed.includes(major));
+      const expected = missing.length > 0 ? Math.max(...missing) : needed.length > 0 ? Math.max(...needed) : null;
+      const shuffled = [...needed, ...needed].sort(() => Math.random() - 0.5);
+      expect(defaultDownloadMajor(need(...shuffled), have(...installed))).toBe(expected);
+    }
+  });
+});
 
 describe("Java 分区推导", () => {
   const instances = [instance("生存", 21), instance("老版本", 8), instance("新快照", 25), instance("同版本", 21), instance("认不出", null)];

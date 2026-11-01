@@ -493,6 +493,101 @@ describe("设置页：Java", () => {
     expect(java.map((t) => t.spec)).toEqual([{ command: "install_java", args: { requiredMajor: 25 } }]);
     expect(toasts()).toContainEqual({ tone: "info", title: "已加入下载队列：Java 25", body: undefined });
   });
+
+  describe("下载运行时的默认主版本", () => {
+    const instancesNeed = (...majors: number[]) =>
+      ipc.overrides.set("list_instances", () => majors.map((major) => instanceDto(`要 Java ${major}`, { java_major: major })));
+    const installed = (...majors: number[]) => setMockJavaInstallations(majors.map((major) => installation(`C:\\Java\\jdk-${major}\\bin\\java.exe`, major)));
+    const shown = () => button("要下载的主版本").textContent;
+
+    it("缺一个：实例要 21 和 17、本机只装了 21，默认选 17，点下载入队的也是 17", async () => {
+      instancesNeed(21, 17);
+      installed(21);
+      await mount("java");
+      expect(shown()).toContain("Java 17");
+      await click(contentButton("下载"));
+      const java = launcher.state.tasks.filter((t) => t.kind === "java" && t.status !== "done");
+      expect(java.map((t) => t.spec)).toEqual([{ command: "install_java", args: { requiredMajor: 17 } }]);
+    });
+
+    it("缺多个：选缺的里最高的，而不是实例要求里最高的", async () => {
+      instancesNeed(25, 17, 8);
+      installed(25);
+      await mount("java");
+      expect(shown()).toContain("Java 17");
+    });
+
+    it("都不缺：保持实例要求里最高的主版本", async () => {
+      instancesNeed(21, 17);
+      installed(21, 17);
+      await mount("java");
+      expect(shown()).toContain("Java 21");
+    });
+
+    it("没手动选过：默认跟着扫描结果走，补上一个就换到下一个缺的，全补齐后回到最高的", async () => {
+      instancesNeed(21, 17, 8);
+      installed(21);
+      await mount("java");
+      expect(shown()).toContain("Java 17");
+      installed(21, 17);
+      await click(button("重新扫描"));
+      expect(shown()).toContain("Java 8");
+      installed(21, 17, 8);
+      await click(button("重新扫描"));
+      expect(shown()).toContain("Java 21");
+    });
+
+    it("手动选过的不被扫描结果改掉", async () => {
+      instancesNeed(21, 17, 8);
+      installed(21);
+      await mount("java");
+      await click(button("要下载的主版本"));
+      const option = all('[role="option"]').find((o) => o.textContent?.startsWith("Java 8"));
+      if (option === undefined) throw new Error("「要下载的主版本」里没有 Java 8");
+      await click(option);
+      expect(shown()).toContain("Java 8");
+      installed(21, 8);
+      await click(button("重新扫描"));
+      expect(shown()).toContain("Java 8");
+    });
+
+    it("首次扫描还没回来：先按都不缺显示最高的，回来后换到缺的那个", async () => {
+      const scan = deferred<JavaInstallationDto[]>();
+      instancesNeed(21, 17);
+      ipc.overrides.set("detect_java", () => scan.promise);
+      await mount("java");
+      expect(shown()).toContain("Java 21");
+      await act(async () => {
+        scan.resolve([installation("C:\\Java\\jdk-21\\bin\\java.exe", 21)]);
+        await settle(20);
+      });
+      expect(shown()).toContain("Java 17");
+    });
+
+    it("首次扫描就失败：说不出缺哪个，按都不缺显示最高的，下载照常可点", async () => {
+      instancesNeed(21, 17);
+      ipc.overrides.set("detect_java", () => {
+        throw new Error("拒绝访问");
+      });
+      await mount("java");
+      expect(text()).toContain("扫描 Java 时出错");
+      expect(shown()).toContain("Java 21");
+      expect(contentButton("下载").getAttribute("aria-disabled")).toBeNull();
+    });
+
+    it("重新扫描失败：沿用上一次的结果，下拉留在缺的那个上", async () => {
+      instancesNeed(21, 17);
+      installed(21);
+      await mount("java");
+      expect(shown()).toContain("Java 17");
+      ipc.overrides.set("detect_java", () => {
+        throw new Error("拒绝访问");
+      });
+      await click(button("重新扫描"));
+      expect(text()).toContain("扫描 Java 时出错");
+      expect(shown()).toContain("Java 17");
+    });
+  });
 });
 
 const JRE8 = "C:\\Program Files\\Java\\jre1.8.0_421\\bin\\java.exe";
@@ -655,12 +750,15 @@ describe("设置页：Java · 手动添加与不完整的运行时", () => {
 
   it("托管的 Java 不完整时不算装了，「下载」照常可点；完整的才带原因禁用", async () => {
     const managed = "D:\\Games\\Launcher\\runtime\\25\\bin\\java.exe";
+    // 只留要 Java 25 的实例：还缺别的主版本时，25 装齐后默认会换到缺的那个
+    ipc.overrides.set("list_instances", () => [instanceDto("新快照", { java_major: 25, mc_version: "26.1" })]);
     setMockJavaInstallations([installation(managed, 25, { source: "managed", missing_files: ["lib/modules"] })]);
     await mount("java");
     expect(button("要下载的主版本").textContent).toContain("Java 25");
     expect(contentButton("下载").getAttribute("aria-disabled")).toBeNull();
     setMockJavaInstallations([installation(managed, 25, { source: "managed" })]);
     await click(button("重新扫描"));
+    expect(button("要下载的主版本").textContent).toContain("Java 25");
     expect(contentButton("下载").getAttribute("aria-disabled")).toBe("true");
   });
 

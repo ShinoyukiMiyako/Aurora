@@ -27,6 +27,7 @@ import { JAVA_SOURCE_LABEL } from "../../../copy/settings";
 import { GPU_COPY, JAVA_COPY, LOAD_COPY } from "../copy";
 import { InstanceStack } from "../InstanceStack";
 import {
+  defaultDownloadMajor,
   gpuSummary,
   hasManaged,
   instancesNeeding,
@@ -413,7 +414,8 @@ function DownloadCard() {
   const java = useJavaRuntimes();
   const majors = majorsInUse(instances);
   const [picked, setPicked] = useState<string | null>(null);
-  const major = picked !== null && majors.includes(Number(picked)) ? Number(picked) : majors.length > 0 ? majors[0] : null;
+  // 只记手动选的：默认值每次渲染现算，扫描回来或补上一个运行时后才跟得上。重新扫描失败时 data 仍是上一次的结果，下拉不会跳走
+  const major = picked !== null && majors.includes(Number(picked)) ? Number(picked) : defaultDownloadMajor(instances, java.data);
   // 同一主版本已在队列里时状态层会自己提示，这里只在真正入队时报「已加入」
   const alreadyQueued = useLauncherSelector((s) =>
     s.tasks.some((t) => (t.status === "queued" || t.status === "running") && t.spec.command === "install_java" && t.spec.args.requiredMajor === major),

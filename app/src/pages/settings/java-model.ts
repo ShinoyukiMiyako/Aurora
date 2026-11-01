@@ -43,6 +43,16 @@ export function missingMajors(instances: readonly InstanceSummary[], runtimes: r
   return majorsInUse(instances).filter((m) => !present.has(m));
 }
 
+/**
+ * 「下载运行时」下拉没手动选过时的主版本：缺的里最高的，都不缺时实例要求里最高的，没有实例要求时为 null。
+ * 一次成功的扫描都还没有时 runtimes 为 undefined：说不出缺哪个，按都不缺算。
+ */
+export function defaultDownloadMajor(instances: readonly InstanceSummary[], runtimes: readonly JavaInstallationDto[] | undefined): number | null {
+  const missing = runtimes === undefined ? [] : missingMajors(instances, runtimes);
+  const candidates = missing.length > 0 ? missing : majorsInUse(instances);
+  return candidates.length > 0 ? candidates[0] : null;
+}
+
 /** 已有完整的托管运行时；不完整的不算装了，重新下载就是修复。 */
 export function hasManaged(runtimes: readonly JavaInstallationDto[], major: number): boolean {
   return runtimes.some((r) => r.source === "managed" && r.version.major === major && runtimeComplete(r));
