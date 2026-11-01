@@ -299,6 +299,23 @@ describe("安装时间与新增标注", () => {
     expect(widest).toBe("2026年12月28日");
     expect(Number(px[1]) - 2 * CELL_PADDING).toBeGreaterThanOrEqual(widthOf(widest));
   });
+
+  it("操作列放得下更新按钮、更多菜单与移除键，按钮不被单元格裁掉", async () => {
+    await open();
+    const headers = [...grid().querySelectorAll<HTMLElement>('[role="columnheader"]')].filter((h) => h.dataset.hideRegular === undefined);
+    const at = headers.findIndex((h) => h.textContent === "操作");
+    expect(at).toBeGreaterThan(0);
+    const template = grid().style.getPropertyValue("--table-cols-regular").match(/minmax\([^)]*\)|\S+/g);
+    if (template === null) throw new Error("表格没有 regular 档的列模板");
+    const px = /^(\d+)px$/.exec(template[at]);
+    if (px === null) throw new Error(`操作列不是固定宽：${template[at]}`);
+
+    const CELL_PADDING = 12;
+    const GAP = 6;
+    const UPDATE_BUTTON = 56;
+    const ICON_BUTTON = 30;
+    expect(Number(px[1]) - 2 * CELL_PADDING).toBeGreaterThanOrEqual(UPDATE_BUTTON + ICON_BUTTON + ICON_BUTTON + 2 * GAP);
+  });
 });
 
 describe("批量操作", () => {

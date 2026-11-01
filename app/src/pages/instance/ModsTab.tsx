@@ -718,7 +718,8 @@ function modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, togg
     {
       key: "actions",
       header: MODS_COPY.colActions,
-      width: 128,
+      // 三个控件加间距与单元格左右各 12：更新按钮最窄 56，compact 档换成图标按钮 30；再窄按钮左边会被单元格裁掉
+      width: compact ? 128 : 152,
       align: "end",
       keepOpaque: true,
       cell: (r) => (
