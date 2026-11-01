@@ -5766,6 +5766,90 @@ mod tests {
         assert!(moved.join("新的世界").join(&made.backup.file).is_file());
     }
 
+    /// 一个什么都绑着的实例：改名（含只改大小写）时侧栏固定、当前选中、固定服务器的绑定、游玩记录与存档备份一起跟到
+    /// 新名字，落到盘上；别的实例的绑定不动。删除时前四样清掉，备份留下。
+    #[tokio::test]
+    async fn rename_and_delete_keep_every_reference_in_step() {
+        let env = Env::new();
+        env.isolated_world("周末生存", "新的世界");
+        env.vanilla("别的");
+        write_playtime(
+            &env,
+            r#"{"format":1,"book":{
+                "instances":{"周末生存":{"total_ms":5400000,"last_played_at":1761832800000}},
+                "days":{"2026-10-30":{"instances":{"周末生存":5400000}}}}}"#,
+        );
+        let server = |address: &str, instance: &str| aurora_core::PinnedServer {
+            name: address.to_owned(),
+            address: address.to_owned(),
+            instance: Some(instance.to_owned()),
+        };
+        env.facade
+            .update(|aurora| {
+                aurora.set_sidebar_pins(vec!["周末生存".into(), "别的".into()]);
+                aurora.set_selected_version(Some("周末生存".into()));
+                aurora.set_pinned_servers(vec![
+                    server("home.example", "周末生存"),
+                    server("other.example", "别的"),
+                ])?;
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+        let w = WorldEnv::new();
+        let (events, _rx) = sink();
+        let made = backup_world_with(&w.with(&env), "bk", "周末生存", "新的世界", &events)
+            .await
+            .unwrap();
+
+        for name in ["Weekend", "WEEKEND"] {
+            rename_instance_with(
+                &env.facade,
+                &w.locks,
+                &env.saved_config().await.selected_version.unwrap(),
+                name,
+            )
+            .await
+            .unwrap();
+            let saved = env.saved_config().await;
+            assert_eq!(saved.sidebar_pins, vec![name.to_owned(), "别的".to_owned()]);
+            assert_eq!(saved.selected_version.as_deref(), Some(name));
+            assert_eq!(saved.pinned_servers[0].instance.as_deref(), Some(name));
+            assert_eq!(saved.pinned_servers[1].instance.as_deref(), Some("别的"));
+            let summaries = env.facade.snapshot().await.play_summaries().await.unwrap();
+            assert_eq!(summaries.keys().collect::<Vec<_>>(), vec![name]);
+            assert_eq!(summaries[name].playtime_min, 90);
+            let listed = list_world_backups_with(&env.facade, name, "新的世界")
+                .await
+                .unwrap();
+            assert_eq!(listed.backups, vec![made.backup.clone()]);
+        }
+
+        delete_instance_with(&env.facade, &w.locks, "WEEKEND", Remove)
+            .await
+            .unwrap();
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, vec!["别的".to_owned()]);
+        assert_eq!(saved.selected_version, None);
+        assert_eq!(saved.pinned_servers[0].instance, None);
+        assert_eq!(saved.pinned_servers[1].instance.as_deref(), Some("别的"));
+        assert!(env
+            .facade
+            .snapshot()
+            .await
+            .play_summaries()
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(env
+            .backups_root()
+            .join("instances")
+            .join("WEEKEND")
+            .join("新的世界")
+            .join(&made.backup.file)
+            .is_file());
+    }
+
     /// 只差备份没挪成：报 world_backups_not_moved，detail.renamed_to 为新名字、path 为留在旧名下的备份目录，
     /// 目录与侧栏固定照样改好；游玩记录也没跟上时报游玩记录那一路。
     #[tokio::test]
