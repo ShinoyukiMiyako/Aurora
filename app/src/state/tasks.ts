@@ -417,6 +417,14 @@ export function trimHistory(tasks: readonly Task[]): Task[] {
   return tasks.filter((t) => isActiveTask(t) || keep.has(t.id));
 }
 
+/**
+ * 补全成功后，这个实例失败的新建与补全都没有要重试的了：实例已经好了，留着的话任务页一直报失败，新建那行点重试还会撞名。
+ */
+export function dropSuperseded(tasks: readonly Task[], instanceId: string): Task[] {
+  const key = instanceId.toLowerCase();
+  return tasks.filter((t) => !(t.status === "failed" && t.instanceId !== null && t.instanceId.toLowerCase() === key && (t.spec.command === "install_version" || t.spec.command === "repair_instance")));
+}
+
 export function clearFinished(tasks: readonly Task[]): Task[] {
   return tasks.filter(isActiveTask);
 }
