@@ -2,7 +2,7 @@
 // 只吃 props 与自己的 state：打开期间下载进度、游戏日志都不让它重渲染。
 // 更新日志点开才请求，平台给的正文经受限节点树渲染（Modrinth 为 Markdown，CurseForge 为 HTML），不注入原始 HTML。
 
-import { motion, useReducedMotionConfig } from "framer-motion";
+import { motion } from "framer-motion";
 import { useMemo, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { hueOf } from "../../art/illustrations/seed";
@@ -38,7 +38,6 @@ interface PreviewItem {
 }
 
 export function UpdatePreviewModal({ open, queryId, rows, onClose, onConfirm }: UpdatePreviewModalProps) {
-  const reduced = useReducedMotionConfig() === true;
   const items = useMemo(
     () =>
       rows
@@ -140,7 +139,7 @@ export function UpdatePreviewModal({ open, queryId, rows, onClose, onConfirm }: 
                 </Button>
               </div>
               {unfolded && (
-                <motion.div className={styles.changelog} initial={reduced ? false : { opacity: 0 }} animate={{ opacity: 1, transition: fade.in }}>
+                <motion.div className={styles.changelog} initial={{ opacity: 0 }} animate={{ opacity: 1, transition: fade.in }}>
                   <Changelog queryId={queryId} fileName={candidate.file_name} modVersionId={candidate.latest.version_id} />
                 </motion.div>
               )}

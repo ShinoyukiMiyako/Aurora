@@ -3,7 +3,7 @@
 // 游戏运行中（含加载中）与安装中禁用全部 Mod 文件操作：JVM 占着文件，Windows 下改名、替换、删除都会失败。
 // 忽略更新只改记录、不碰 jar，只在补全时禁用。
 
-import { motion, useReducedMotionConfig } from "framer-motion";
+import { motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { hueOf } from "../../art/illustrations/seed";
 import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
@@ -108,7 +108,6 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const { tier, confirm, registerFind } = useShell();
   const { go } = useNav();
   const run = useRunner();
-  const reduced = useReducedMotionConfig() === true;
   const now = useNow(NEW_TAG_TICK_MS);
   const mods = useInstanceMods(queryId);
   const load = useModuleView(mods);
@@ -318,7 +317,8 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const batch = selectedRows.length > 0 ? batchAvailability(selectedRows, lock) : null;
   // 进行中的那个按钮转圈，其余批量按钮在它结束前一并禁用
   const batchBlocked = (action: BatchAction) => batchBusy !== null && batchBusy !== action;
-  const barFade = barMounted.current && !reduced ? { opacity: 0 } : false;
+  // 减少动画时只去掉位移与形变，200 ms 的淡入照常保留
+  const barFade = barMounted.current ? { opacity: 0 } : false;
 
   return (
     <div className={styles.stack}>
