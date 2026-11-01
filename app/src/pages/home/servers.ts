@@ -179,6 +179,14 @@ export function joinBlock(inst: Pick<InstanceSummary, "id" | "usedBy">, busy: Bu
   return null;
 }
 
+/**
+ * 记住的实例已经不在实例列表里。比对口径与 joinPlan 相同。listed 为假（实例列表还没读出来或读取失败）时手里的列表是空的，
+ * 下不了这个结论。
+ */
+export function rememberedGone(remembered: string | null, instances: readonly InstanceSummary[], listed: boolean): boolean {
+  return listed && remembered !== null && !instances.some((i) => i.id === remembered);
+}
+
 export type JoinPlan =
   /** 记住的实例可用：点「加入」直接以它启动并进服。 */
   | { kind: "direct"; instanceId: string }

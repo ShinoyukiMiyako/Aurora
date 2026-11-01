@@ -2,7 +2,7 @@
 // @module-tag heavy-page
 import { MotionConfig } from "framer-motion";
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi, type Mock } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { mockInvoke } from "../../ipc/mock";
 import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
@@ -16,6 +16,7 @@ import type { ProjectDetail, SearchArgs, SearchEntry, SearchResultDto } from "..
 import type { BlockedFileDto, PackModDto } from "../../state/store";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
+import { emulateFocusFixup } from "../../test/focus-fixup";
 import { bootOverrides, callsOf, cancelledError, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { entry, match, modVersion, result } from "./fixtures";
 import DiscoverPage from "./index";
@@ -1602,6 +1603,29 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(callsOf(ipc, "install_modpack")).toMatchObject([{ source: { kind: "file", path: BLOCKED_PACK }, name: "周末联机", excludedOptional: [] }]);
   });
 
+  it("「继续导入」：「查看这些文件」被重新读取换掉，焦点落回确认步的第一个控件，不掉回 body，也不停在关闭按钮上", async () => {
+    seedMockDownloads(["blocked-a.jar", "blocked-b.jar"]);
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    const view = buttonByText("查看这些文件", dialog());
+    act(() => view.focus());
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+
+    const gate = deferred<void>();
+    ipc.overrides.set("preview_modpack", (args) => gate.promise.then(() => mockInvoke("preview_modpack", args)));
+    await clickIn(blockedDialog(), "继续导入");
+    expect(view.isConnected).toBe(false);
+    expect(dialog().textContent).toContain("正在重新读取 blocked-pack.zip…");
+    expect(document.activeElement).toBe(buttonByText("换封面", dialog()));
+
+    // 读完之后焦点不被新内容打断
+    await act(async () => {
+      gate.resolve();
+      await settle();
+    });
+    expect(document.activeElement).toBe(buttonByText("换封面", dialog()));
+  });
+
   it("选文件夹时取消什么都不变；选的文件夹读不了时原位写出后端原文，列表状态不变；别的失败交给外层通知", async () => {
     const { IpcError } = await import("../../ipc/errors");
     await mount({ page: "discover", importFile: BLOCKED_PACK });
@@ -1683,7 +1707,9 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     await clickIn(blockedDialog(), "我已下载，重新检查");
     expect(buttonByText("正在检查…", blockedDialog()).getAttribute("aria-busy")).toBe("true");
     const openButtons = [...blockedDialog().querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent === "打开网页");
-    expect(openButtons.map((b) => b.disabled)).toEqual([true, true]);
+    expect(openButtons.map((b) => b.getAttribute("aria-disabled"))).toEqual(["true", "true"]);
+    act(() => openButtons[0].click());
+    expect(callsOf(ipc, "plugin:opener|open_url")).toEqual([]);
 
     await clickIn(blockedDialog(), "关闭");
     await act(async () => {
@@ -1694,6 +1720,35 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(blockedRow("blocked-a.jar").textContent).toBe("blocked-a.jar装到 mods/打开网页");
     expect(blockedRow("blocked-b.jar").textContent).toBe("blocked-b.jar装到 mods/打开网页");
     expect(buttonByText("我已下载，重新检查", blockedDialog()).getAttribute("aria-busy")).toBeNull();
+  });
+
+  it("「打开网页」聚焦着时开始检查：焦点留在按钮上；这个文件找到后按钮消失，焦点交给主按钮，没找到的行照旧", async () => {
+    onTestFinished(emulateFocusFixup());
+    seedMockDownloads(["blocked-a.jar"]);
+    const gate = deferred<void>();
+    ipc.overrides.set("claim_blocked_files", (args) => gate.promise.then(() => mockInvoke("claim_blocked_files", args)));
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    await clickIn(dialog(), "查看这些文件");
+    const web = buttonByText("打开网页", blockedRow("blocked-a.jar"));
+    act(() => web.focus());
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(web.disabled).toBe(false);
+    expect(document.activeElement).toBe(web);
+
+    await act(async () => {
+      gate.resolve();
+      await settle();
+    });
+    expect(shownText(blockedRow("blocked-a.jar"))).toBe("blocked-a.jar装到 mods/已找到");
+    expect(document.activeElement).toBe(buttonByText("我已下载，重新检查", blockedDialog()));
+
+    // 还在的那一行不受影响：焦点在它上面时检查完留在原处
+    const other = buttonByText("打开网页", blockedRow("blocked-b.jar"));
+    act(() => other.focus());
+    ipc.overrides.delete("claim_blocked_files");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(shownText(blockedRow("blocked-b.jar"))).toBe("blocked-b.jar装到 mods/还没找到打开网页");
+    expect(document.activeElement).toBe(other);
   });
 
   it("平台整合包以 distribution_blocked 失败：面板写出个数，「查看这些文件」打开清单，「打开网页」用系统浏览器打开文件页；都找到后重新安装", async () => {
@@ -1823,6 +1878,28 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     });
     await clickIn(dialog(), "打开网页");
     expect(launcher.state.toasts.find((t) => t.title === "没能打开网页")?.body).toBe("没有默认浏览器");
+  });
+
+  it("介绍末尾的「在网页上打开」用系统浏览器打开工程页，打不开时报出来", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    const mod = entry("M1", { title: "有工程页", resource_type: "mod", loaders: ["fabric"] });
+    const url = "https://modrinth.com/mod/sodium";
+    pages = () => result([mod]);
+    ipc.overrides.set("project_detail", () => detailOf(mod, { page_url: url }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [], truncated: false }));
+    await mount();
+    act(() => card("有工程页").click());
+    await flush();
+
+    await clickIn(dialog(), "在网页上打开");
+    expect(callsOf(ipc, "plugin:opener|open_url")).toEqual([{ url }]);
+    expect(launcher.state.toasts.filter((t) => t.tone === "error")).toEqual([]);
+
+    ipc.overrides.set("plugin:opener|open_url", () => {
+      throw new IpcError("internal", "没有默认浏览器");
+    });
+    await clickIn(dialog(), "在网页上打开");
+    expect(launcher.state.toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body])).toEqual([["没能打开网页", "没有默认浏览器"]]);
   });
 
   describe("整合包本体要手动下载时的提前说明", () => {

@@ -39,7 +39,7 @@ export interface OverlaySnapshot {
   scrimOpen: boolean;
 }
 
-/** 焦点归还时，原焦点元素已不在文档中，就落到带这个属性的元素（外壳把它挂在内容区滚动容器上）。 */
+/** 焦点归还时，原焦点元素已不在文档中、所在区域里也没有可落的控件，就落到带这个属性的元素（外壳把它挂在内容区滚动容器上）。 */
 export const FOCUS_FALLBACK_ATTR = "data-sk-focus-fallback";
 
 class OverlayRegistry {

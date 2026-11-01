@@ -945,6 +945,42 @@ describe("主页：固定服务器的「加入」", () => {
     expect(callsOf(ipc, "launch_game")).toHaveLength(0);
   });
 
+  it("记住的实例已经不在：菜单不写已不存在的 id，说清楚它不在了；点了打开实例选择且默认勾选记住，选定后绑定换成新实例", async () => {
+    pinned = [{ name: "晨星", address: "play.example", instance: "已删除" }];
+    await mount();
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    expect(menuItems().map((el) => el.textContent)).toEqual(["复制地址play.example", "重新选择实例之前的实例已不在", "不再记住实例", "取消固定"]);
+    click(menuItem("重新选择实例"));
+    await flush();
+    const panel = picker();
+    if (panel === null) throw new Error("没有弹出实例选择");
+    expect(panel.querySelector('[role="checkbox"]')?.getAttribute("aria-checked")).toBe("true");
+    click(buttonByText("加入服务器", panel));
+    await flush();
+    expect(callsOf(ipc, "set_pinned_server_instance")).toEqual([{ address: "play.example", instance: "生存" }]);
+    expect(callsOf(ipc, "launch_game").map((a) => [a.versionId, a.quickPlay])).toEqual([["生存", SERVER]]);
+
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    expect(menuItems().map((el) => el.textContent)).toEqual(["复制地址play.example", "更换加入用的实例生存", "不再记住实例", "取消固定"]);
+  });
+
+  it("实例列表没读出来：手里的列表是空的，不能断定记住的实例不在了，菜单照旧写它的名字", async () => {
+    pinned = [{ name: "晨星", address: "play.example", instance: "生存" }];
+    ipc.overrides.set("list_instances", () => {
+      throw new IpcError("config_read_failed", "读不出实例列表");
+    });
+    await mount();
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    expect(menuItems().map((el) => el.textContent)).toEqual(["复制地址play.example", "更换加入用的实例生存", "不再记住实例", "取消固定"]);
+  });
+
+  it("记住的实例损坏或版本不支持：它还在列表里，菜单照旧写它的名字，不说它不在了", async () => {
+    pinned = [{ name: "晨星", address: "play.example", instance: "空岛" }];
+    await mount();
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    expect(menuItems().map((el) => el.textContent)).toEqual(["复制地址play.example", "更换加入用的实例空岛", "不再记住实例", "取消固定"]);
+  });
+
   it("记住的实例正在运行：「加入」aria-disabled 并写明原因，点了不启动；别的实例运行时照常走替换确认", async () => {
     pinned = [{ name: "晨星", address: "play.example", instance: "创造" }];
     await mount();

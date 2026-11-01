@@ -252,25 +252,7 @@
 }
 
 .pageLink {
-  display: inline-flex;
   align-self: flex-start;
-  align-items: center;
-  gap: var(--sk-space-6);
-  border-radius: var(--sk-r-xs);
-  font-size: var(--sk-fs-small);
-  line-height: var(--sk-lh-small);
-  font-weight: var(--sk-w-medium);
-  color: var(--sk-accent);
-  text-decoration: none;
-  outline: none;
-}
-
-.pageLink:hover {
-  text-decoration: underline;
-}
-
-.pageLink:focus-visible {
-  box-shadow: var(--sk-focus);
 }
 
 /* ---- 介绍正文没有内容时的摘要段落（正文本身由 ui 的受限富文本组件绘制） ---- */

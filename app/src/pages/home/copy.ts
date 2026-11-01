@@ -147,6 +147,8 @@ export const HOME_COPY = {
   rememberChoice: "记住这个选择",
   joinServer: "加入服务器",
   switchJoinInstance: "更换加入用的实例",
+  rechooseJoinInstance: "重新选择实例",
+  joinInstanceGone: "之前的实例已不在",
   forgetJoinInstance: "不再记住实例",
   joinEmptyTitle: "没有能加入服务器的实例",
   joinEmptyBody: "新建一个 1.6 以后的实例再来加入。",

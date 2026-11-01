@@ -52,6 +52,7 @@ import {
   joinPlan,
   pinCandidates,
   pinMenuPlan,
+  rememberedGone,
   serverRows,
   type BusySession,
   type JoinBlock,
@@ -84,6 +85,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
   // 实例列表只在重扫时换引用；会话只取占着游戏进程的实例与它在加载还是运行这两个原始值，
   // 下载进度与游戏日志每 100 ms 换一份会话，都不让这张卡重渲染
   const instances = useLauncherSelector((st) => st.instances);
+  const instancesListed = useLauncherSelector((st) => st.status.instances.kind === "ready");
   const selectedInstanceId = useLauncherSelector((st) => st.selectedInstanceId);
   const busyId = useLauncherSelector(busyInstanceId);
   const busyPhase = useLauncherSelector((st) => (busyInstanceId(st) === null || st.session === null ? null : st.session.phase === "running" ? "running" : "loading"));
@@ -191,6 +193,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
                 <ServerRowView
                   row={row}
                   join={joinPlan(row.instance, instances, busy, savesBusy)}
+                  instanceGone={rememberedGone(row.instance, instances, instancesListed)}
                   candidates={candidates}
                   selectedInstanceId={selectedInstanceId}
                   busy={busy}
@@ -319,6 +322,8 @@ function ServerPicker({ open, known, onPin, onClose }: ServerPickerProps) {
 interface ServerRowViewProps {
   row: ServerRow;
   join: JoinPlan;
+  /** 记住的实例已经不在实例列表里：菜单不再写它的 id，改说它不在了。 */
+  instanceGone: boolean;
   /** 能用来加入服务器的实例，已排好序。 */
   candidates: readonly InstanceSummary[];
   selectedInstanceId: string | null;
@@ -339,7 +344,7 @@ function blockReason(instanceId: string, block: JoinBlock): string {
   return block.phase === "running" ? HOME_COPY.joinRunning(instanceId) : HOME_COPY.joinLaunching(instanceId);
 }
 
-function ServerRowView({ row, join, candidates, selectedInstanceId, busy, savesBusy, onUnpin }: ServerRowViewProps) {
+function ServerRowView({ row, join, instanceGone, candidates, selectedInstanceId, busy, savesBusy, onUnpin }: ServerRowViewProps) {
   const { copyText } = useShell();
   const actions = useLauncherActions();
   const run = useRunner();
@@ -395,7 +400,12 @@ function ServerRowView({ row, join, candidates, selectedInstanceId, busy, savesB
   const menu: MenuEntry[] = [{ label: copied ? HOME_COPY.copied : HOME_COPY.copyAddress, icon: copied ? "check" : "copy", hint: row.address, onSelect: copy }];
   if (row.instance !== null) {
     menu.push(
-      { label: HOME_COPY.switchJoinInstance, icon: "switch", hint: row.instance, onSelect: () => openPicker(true) },
+      {
+        label: instanceGone ? HOME_COPY.rechooseJoinInstance : HOME_COPY.switchJoinInstance,
+        icon: "switch",
+        hint: instanceGone ? HOME_COPY.joinInstanceGone : row.instance,
+        onSelect: () => openPicker(true),
+      },
       { label: HOME_COPY.forgetJoinInstance, icon: "x", onSelect: forget },
     );
   }

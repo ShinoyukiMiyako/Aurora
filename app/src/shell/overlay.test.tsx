@@ -311,6 +311,147 @@ describe("焦点圈定与归还", () => {
     expect(document.activeElement).toBe(document.querySelector('[data-testid="fallback"]'));
   });
 
+  describe("原焦点元素被换掉时落到它所在的区域", () => {
+    /** 触发按钮包在会随它一起消失的一层里：从被移除的子树往上走不回区域，只能靠打开时记下的祖先链。 */
+    function Region({ stay = true }: { stay?: boolean }) {
+      const [open, setOpen] = useState(false);
+      const [replaced, setReplaced] = useState(false);
+      return (
+        <div tabIndex={-1} {...{ [FOCUS_FALLBACK_ATTR]: "" }} data-testid="fallback">
+          <button>区域外</button>
+          <div>
+            <button>边界内</button>
+            <section data-testid="region">
+              {replaced ? <span>换成了说明</span> : <p><button onClick={() => setOpen(true)}>打开</button></p>}
+              {stay && <button>同区域</button>}
+            </section>
+          </div>
+          <FocusReturnPoint active={open} />
+          {open && (
+            <Dialog
+              onClose={() => {
+                setOpen(false);
+                setReplaced(true);
+              }}
+            />
+          )}
+        </div>
+      );
+    }
+
+    const close = () => {
+      act(() => byText("打开").focus());
+      act(() => byText("打开").click());
+      act(() => byText("丙").click());
+    };
+
+    it("最近的还在文档里的祖先有控件：落到它的第一个可 Tab 控件", () => {
+      mount(<Region />);
+      close();
+      expect(document.activeElement).toBe(byText("同区域"));
+    });
+
+    it("近处没有控件：往外一层找，不直接跳到兜底容器", () => {
+      mount(<Region stay={false} />);
+      close();
+      expect(document.activeElement).toBe(byText("边界内"));
+    });
+
+    it("所在弹窗就是区域外沿：区域里没有控件时落到弹窗容器本身，不越过弹窗，也不落到弹窗头部的按钮上", () => {
+      function InDialog() {
+        const [replaced, setReplaced] = useState(false);
+        const [open, setOpen] = useState(false);
+        return (
+          <>
+            <button>背后</button>
+            <div role="dialog" tabIndex={-1} aria-label="底层" data-testid="under">
+              <button>头部关闭</button>
+              <section>{replaced ? <span>换成了说明</span> : <p><button onClick={() => setOpen(true)}>打开</button></p>}</section>
+            </div>
+            <FocusReturnPoint active={open} />
+            {open && (
+              <Dialog
+                onClose={() => {
+                  setOpen(false);
+                  setReplaced(true);
+                }}
+              />
+            )}
+          </>
+        );
+      }
+      mount(<InDialog />);
+      close();
+      expect(document.activeElement).toBe(document.querySelector('[data-testid="under"]'));
+    });
+
+    it("整个区域都不在了：回到兜底容器", () => {
+      function Gone() {
+        const [open, setOpen] = useState(false);
+        const [page, setPage] = useState(true);
+        return (
+          <div tabIndex={-1} {...{ [FOCUS_FALLBACK_ATTR]: "" }} data-testid="fallback">
+            {page && (
+              <section>
+                <button onClick={() => setOpen(true)}>打开</button>
+                <button>同区域</button>
+              </section>
+            )}
+            <FocusReturnPoint active={open} />
+            {open && (
+              <Dialog
+                onClose={() => {
+                  setOpen(false);
+                  setPage(false);
+                }}
+              />
+            )}
+          </div>
+        );
+      }
+      mount(<Gone />);
+      close();
+      expect(document.activeElement).toBe(document.querySelector('[data-testid="fallback"]'));
+    });
+
+    it("浮层根里的触发元素不把搜索范围放大到整个浮层根：别的浮层里的控件不算它的区域", () => {
+      function InLayer() {
+        const [open, setOpen] = useState(false);
+        const [shown, setShown] = useState(true);
+        return (
+          <div tabIndex={-1} {...{ [FOCUS_FALLBACK_ATTR]: "" }} data-testid="fallback">
+            <FocusReturnPoint active={open} />
+            {open && (
+              <Dialog
+                onClose={() => {
+                  setOpen(false);
+                  setShown(false);
+                }}
+              />
+            )}
+            <LayerContent shown={shown} onOpen={() => setOpen(true)} />
+          </div>
+        );
+      }
+      function LayerContent({ shown, onOpen }: { shown: boolean; onOpen: () => void }) {
+        const root = useOverlayRoot();
+        if (root === null) return null;
+        return createPortal(
+          <>
+            <div data-testid="toast">{shown && <button onClick={onOpen}>打开</button>}</div>
+            <div data-testid="other-layer">
+              <button>别的浮层</button>
+            </div>
+          </>,
+          root,
+        );
+      }
+      mount(<InLayer />);
+      close();
+      expect(document.activeElement).toBe(document.querySelector('[data-testid="fallback"]'));
+    });
+  });
+
   it("skip() 后本次关闭不归还焦点", () => {
     const handle: { current: FocusReturnHandle | null } = { current: null };
     const skip = () => {

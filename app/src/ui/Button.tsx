@@ -1,7 +1,7 @@
 // 按钮只有四种变体：主（每个视图至多 1 个）、次（默认）、幽灵、危险（每个视图至多 1 个）。
 // 只有图标没有文字时用 IconButton；在多个互斥选项间切换用分段控件。
 
-import type { ButtonHTMLAttributes, MouseEvent, MouseEventHandler, ReactNode } from "react";
+import type { ButtonHTMLAttributes, MouseEvent, MouseEventHandler, ReactNode, Ref } from "react";
 import { Icon, type IconName, type IconSize } from "../art/Icon";
 import { Spinner, type SpinnerTone } from "../art/Spinner";
 import { cx } from "../lib/util";
@@ -44,6 +44,8 @@ export function softDisabledProps<E extends Element>(inert: boolean, onClick: Mo
 type NativeButton = Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children" | "type" | "disabled">;
 
 export interface ButtonProps extends NativeButton {
+  /** 随 rest 落到 button 元素上：相邻的控件消失时，调用方靠它把焦点交给这个按钮。 */
+  ref?: Ref<HTMLButtonElement>;
   variant?: ButtonVariant;
   size?: ControlSize;
   /** 前置图标。 */
