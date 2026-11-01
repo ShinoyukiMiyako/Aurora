@@ -76,21 +76,10 @@ fn lock_account_db() -> MutexGuard<'static, ()> {
 ///
 /// 外置登录的刷新会让旧令牌当场作废，两次续期同时拿同一个旧令牌去刷，后到的一方必被服务器以
 /// 「令牌无效」拒绝，账户就被误判成需要重新登录。排在后面的一方拿到闸后先重读库里的凭据，
-/// 别人刚续出的新令牌直接接着用。表项只增不删：一个进程里出现过的账户屈指可数。
-static REFRESH_GATES: LazyLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> =
+/// 别人刚续出的新令牌直接接着用。键带上数据目录：闸管的是同一份凭据库里的同一个账户，另一个目录里
+/// uuid 相同的账户令牌各是各的，不该排在一起。表项只增不删：一个进程里出现过的账户屈指可数。
+static REFRESH_GATES: LazyLock<Mutex<HashMap<(PathBuf, String), Arc<AsyncMutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
-
-async fn refresh_gate(uuid: &str) -> OwnedMutexGuard<()> {
-    let gate = {
-        // 表里只有闸本身，中毒不携带需要放弃的状态。
-        let mut gates = REFRESH_GATES.lock().unwrap_or_else(PoisonError::into_inner);
-        gates
-            .entry(uuid.to_owned())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone()
-    };
-    gate.lock_owned().await
-}
 
 /// 凭据库读不出来时做的处置：原文件改名留存，按空凭据库继续。供启动提示告诉用户。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +300,19 @@ impl Aurora {
 
     fn yggdrasil(&self, api_root: &str) -> YggdrasilClient {
         YggdrasilClient::new(self.http(), api_root)
+    }
+
+    /// 排进这个账户的续期闸，见 [`REFRESH_GATES`]。
+    async fn refresh_gate(&self, uuid: &str) -> OwnedMutexGuard<()> {
+        let gate = {
+            // 表里只有闸本身，中毒不携带需要放弃的状态。
+            let mut gates = REFRESH_GATES.lock().unwrap_or_else(PoisonError::into_inner);
+            gates
+                .entry((self.data_dir().to_path_buf(), uuid.to_owned()))
+                .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+                .clone()
+        };
+        gate.lock_owned().await
     }
 
     /// 在阻塞线程池上跑一段账户库读写，供异步流程调用。
@@ -615,7 +617,7 @@ impl Aurora {
     }
 
     async fn refresh_account_now(&self, uuid: &str) -> Result<Account> {
-        let _gate = refresh_gate(uuid).await;
+        let _gate = self.refresh_gate(uuid).await;
         let account = self.stored_account(uuid).await?;
         match &account.credentials {
             AccountCredentials::Microsoft(creds) => {
@@ -696,7 +698,7 @@ impl Aurora {
     }
 
     async fn ensure_account_fresh_now(&self, uuid: &str) -> Result<Account> {
-        let _gate = refresh_gate(uuid).await;
+        let _gate = self.refresh_gate(uuid).await;
         let account = self.stored_account(uuid).await?;
         match &account.credentials {
             AccountCredentials::Microsoft(creds) => {
@@ -1342,13 +1344,12 @@ mod tests {
 
         const HERO: &str = "1111111111111111aaaaaaaaaaaaaaaa";
         const ALT: &str = "2222222222222222bbbbbbbbbbbbbbbb";
-        // 续期闸按账户 uuid 进程内共享，各用例并行跑；凡是会在闸里等网络的用例各用一个角色，
-        // 不和别的用例排同一道闸，满载时也不会被别人的慢请求拖过等待时限。
         const STILL_VALID: &str = "3333333333333333cccccccccccccccc";
         const PROFILE_DOWN: &str = "4444444444444444dddddddddddddddd";
         const ABANDONED_LAUNCH: &str = "5555555555555555eeeeeeeeeeeeeeee";
         const CANCELLED_REFRESH: &str = "6666666666666666ffffffffffffffff";
         const ROTATED_PROFILE_DOWN: &str = "7777777777777777aaaaaaaaaaaaaaaa";
+        const SHARED_UUID: &str = "8888888888888888bbbbbbbbbbbbbbbb";
 
         fn logged_in(outcome: AuthlibLogin) -> Account {
             match outcome {
@@ -2234,6 +2235,54 @@ mod tests {
             })
             .await
             .unwrap_or_else(|_| panic!("15 秒内没等到 {endpoint} 的请求"));
+        }
+
+        /// 续期闸只管同一份凭据库里的同一个账户：另一个数据目录里 uuid 相同的续期不该排在它后面。
+        /// 闸只按 uuid 取的话，这里的第二次续期要等第一次的 30 秒走完。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn renewals_in_different_data_dirs_do_not_queue_behind_each_other() {
+            let slow = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+                .mount(&slow)
+                .await;
+            let quick = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                    "error": "invalid_grant", "error_description": "refresh token 已失效"
+                })))
+                .mount(&quick)
+                .await;
+            let (slow_dir, quick_dir) =
+                (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            let held = aurora_at(slow_dir.path()).with_msa_endpoints(msa_endpoints(&slow));
+            let other = aurora_at(quick_dir.path()).with_msa_endpoints(msa_endpoints(&quick));
+            let stale = Account::new(
+                SHARED_UUID,
+                "PetalPlayer",
+                AccountCredentials::Microsoft(MicrosoftCredentials {
+                    refresh_token: "old-refresh".into(),
+                    minecraft_token: None,
+                    minecraft_expires_at: None,
+                }),
+            );
+            held.store_login(stale.clone()).unwrap();
+            other.store_login(stale.clone()).unwrap();
+
+            let holder = {
+                let stale = stale.clone();
+                tokio::spawn(async move { held.ensure_account_fresh(&stale).await })
+            };
+            until_requested(&slow, "/token").await;
+            let err =
+                tokio::time::timeout(Duration::from_secs(10), other.ensure_account_fresh(&stale))
+                    .await
+                    .expect("另一个数据目录的续期被这道闸挡住了")
+                    .unwrap_err();
+            assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
+            holder.abort();
         }
 
         /// 等到库里的账户满足 `done`，超时即失败。续期在后台跑完落盘，调用方那时早已返回。
