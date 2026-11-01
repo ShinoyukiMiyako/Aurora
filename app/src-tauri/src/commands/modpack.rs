@@ -18,7 +18,9 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::commands::discover::parse_platform;
 use crate::commands::error::code;
-use crate::commands::instances::{busy, InstanceActivity, InstanceGuard, InstanceLocks};
+use crate::commands::instances::{
+    busy, ensure_shared_worlds_settled, InstanceActivity, InstanceGuard, InstanceLocks,
+};
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -669,8 +671,11 @@ pub(crate) async fn export_modpack_with(
     if locks.activity(id) == Some(InstanceActivity::BackingUp) {
         return Err(busy(id, InstanceActivity::BackingUp));
     }
+    // 不隔离的实例共用游戏目录的 saves：另一个不隔离的实例在备份或恢复时，这份存档同样是半截的。
+    let snapshot = facade.snapshot().await;
+    ensure_shared_worlds_settled(&snapshot, locks, id).await?;
     let task = tasks.register(task_id)?;
-    let aurora = facade.snapshot().await.with_cancel(task.token().clone());
+    let aurora = snapshot.with_cancel(task.token().clone());
     // 落点放在任务的 future 之外：取消宽限期满时 run 会丢弃 future，临时文件仍要在这里清掉。
     let target = ModpackExportTarget::new(destination);
     let result = task
@@ -2124,6 +2129,80 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(destination.is_file());
+    }
+
+    /// 不隔离的实例共用游戏目录的 saves：另一个不隔离的实例正在备份或恢复存档时，导出同样报 instance_busy，
+    /// detail 指向那个实例，不登记任务、不写文件；隔离的实例在备份不挡。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn export_of_a_shared_instance_waits_for_another_shared_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), "http://127.0.0.1:9");
+        export_instance(dir.path());
+        let game = dir.path().join(".minecraft");
+        for id in ["共用甲", "共用乙"] {
+            let version = game.join("versions").join(id);
+            std::fs::create_dir_all(&version).unwrap();
+            std::fs::write(
+                version.join(format!("{id}.json")),
+                format!(
+                    r#"{{"id":"{id}","clientVersion":"1.21.1","type":"release","mainClass":"M"}}"#
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(game.join("saves").join("共用").join("region")).unwrap();
+        std::fs::write(game.join("saves").join("共用").join("level.dat"), b"level").unwrap();
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        let destination = dir.path().join("共用 1.0.0.mrpack");
+        let args = || {
+            let mut args = export_args(&destination);
+            args.extras = vec!["saves".into()];
+            args
+        };
+
+        let backing_up = locks
+            .acquire("共用甲", InstanceActivity::BackingUp)
+            .unwrap();
+        let err = export_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            "ex-shared",
+            "共用乙",
+            args(),
+            &sink,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail,
+            Some(json!({ "id": "共用甲", "activity": "backing_up" }))
+        );
+        assert!(!registry.is_running("ex-shared"));
+        assert!(!destination.exists());
+        assert_eq!(locks.activity("共用乙"), None);
+        drop(backing_up);
+
+        let isolated = locks
+            .acquire(EXPORT_ID, InstanceActivity::BackingUp)
+            .unwrap();
+        let outcome = export_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            "ex-shared",
+            "共用乙",
+            args(),
+            &sink,
+        )
+        .await
+        .unwrap();
+        drop(isolated);
+        assert_eq!(outcome.override_files, 1, "共用存档里的 level.dat");
         assert!(destination.is_file());
     }
 
