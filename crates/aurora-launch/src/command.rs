@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use aurora_version::{RuntimeContext, VersionJson, check_path_segment};
 use serde::Serialize;
 
-use crate::account::{AuthValues, AuthlibInjector};
+use crate::account::{AuthValues, AuthlibInjector, OFFLINE_ACCESS_TOKEN};
 use crate::args;
 use crate::classpath;
 use crate::error::{LaunchError, Result};
@@ -366,6 +366,9 @@ impl<'a> CommandBuilder<'a> {
         if let Some(authlib) = &self.authlib {
             jvm_templates.extend(authlib.jvm_args());
         }
+        if self.auth.access_token == OFFLINE_ACCESS_TOKEN {
+            jvm_templates.extend(args::offline_api_args(self.version));
+        }
         match self
             .version
             .arguments
@@ -580,6 +583,66 @@ mod tests {
                 .join("legacy")
                 .display()
                 .to_string()
+        );
+    }
+
+    fn jvm_args_for(authlib: &str, auth: AuthValues) -> Vec<String> {
+        let json = format!(
+            r#"{{"id":"1.16.5","mainClass":"net.minecraft.client.main.Main",
+                "libraries":[{{"name":"com.mojang:authlib:{authlib}"}}],
+                "arguments":{{"game":["--username","${{auth_player_name}}"],"jvm":["-cp","${{classpath}}"]}}}}"#
+        );
+        let version = VersionJson::from_json_str(&json).unwrap();
+        let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+        let paths = GamePaths::standard(PathBuf::from("/mc"), &version.id);
+        CommandBuilder::new(&version, ctx, "java.exe", paths, "/mc", auth, "1.0.0")
+            .build()
+            .unwrap()
+            .args
+    }
+
+    fn redirects_api(args: &[String]) -> bool {
+        [
+            "-Dminecraft.api.auth.host=https://invalid.invalid",
+            "-Dminecraft.api.account.host=https://invalid.invalid",
+            "-Dminecraft.api.session.host=https://invalid.invalid",
+            "-Dminecraft.api.services.host=https://invalid.invalid",
+        ]
+        .iter()
+        .all(|arg| args.iter().any(|a| a == arg))
+    }
+
+    /// 1.16.4、1.16.5 带的 authlib 2.1 拿离线占位令牌问权限接口被拒后，多人游戏整个不可用；接口连不上时它才
+    /// 按离线处理。指到解析不了的地址，离线账户才进得了局域网和第三方服务器。
+    #[test]
+    fn offline_account_on_authlib_2_1_redirects_the_api_hosts() {
+        let args = jvm_args_for("2.1.28", AuthValues::offline("Steve", "uuid"));
+        assert!(redirects_api(&args), "{args:?}");
+    }
+
+    #[test]
+    fn other_authlib_versions_keep_the_real_api_hosts() {
+        for authlib in ["1.5.25", "2.3.31", "6.0.54"] {
+            let args = jvm_args_for(authlib, AuthValues::offline("Steve", "uuid"));
+            assert!(
+                !args.iter().any(|a| a.starts_with("-Dminecraft.api.")),
+                "{authlib}: {args:?}"
+            );
+        }
+    }
+
+    /// 带真实令牌的账户要连官方接口：正版校验、皮肤与 Realms 都靠它。
+    #[test]
+    fn real_token_keeps_the_real_api_hosts_on_authlib_2_1() {
+        let auth = AuthValues {
+            access_token: "real-token".to_owned(),
+            user_type: "msa".to_owned(),
+            ..AuthValues::offline("Steve", "uuid")
+        };
+        let args = jvm_args_for("2.1.28", auth);
+        assert!(
+            !args.iter().any(|a| a.starts_with("-Dminecraft.api.")),
+            "{args:?}"
         );
     }
 
