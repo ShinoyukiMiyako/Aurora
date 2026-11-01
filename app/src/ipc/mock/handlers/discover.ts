@@ -312,6 +312,7 @@ export async function simulateDownload(taskId: string, label: string, totalBytes
       finished: quarter === 4 ? 1 : 0,
       bytes,
       total_bytes: totalBytes,
+      transferred: bytes,
       speed: quarter === 0 ? 0 : 2_097_152,
     });
     if (quarter < 4) await tick();

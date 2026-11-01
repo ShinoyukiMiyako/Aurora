@@ -28,6 +28,8 @@ export type CoreEvent =
       bytes: number;
       /** 本批声明大小之和；有任一文件大小未知时为 null。 */
       total_bytes: number | null;
+      /** 本批传输字节：网络上实际读到的字节，含重传，跳过的完整文件不算；批内只增不减，本地任务恒为 0。 */
+      transferred: number;
       /** 瞬时速度，字节每秒。 */
       speed: number;
     };
@@ -58,6 +60,8 @@ export interface TaskRecordDto {
   total_bytes: number | null;
   /** 较早写入的日志没有这一项。 */
   done_bytes?: number;
+  /** 这一次尝试实际传输的字节。较早写入的日志没有这一项，读回后再写时为 null。 */
+  transferred_bytes?: number | null;
   speed_bps: number;
   /** 较早写入的日志没有这一项。 */
   started_at?: number | null;

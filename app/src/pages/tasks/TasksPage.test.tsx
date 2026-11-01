@@ -132,12 +132,13 @@ function record(id: string, status: TaskRecordDto["status"], overrides: Partial<
 
 /** 一条完成、一条失败（关联现存实例）、一条取消（关联已不存在的实例）。 */
 const HISTORY: TaskRecordDto[] = [
-  // 排队 10 秒后开始，跑了 50 秒；最后一批 2 MB，这一次尝试累计下了 50 MB
+  // 排队 10 秒后开始，跑了 50 秒；最后一批 2 MB，这一次尝试累计传了 50 MB
   record("done-java", "done", {
     progress: 1,
     bytes: 2 * MB,
     total_bytes: 2 * MB,
     done_bytes: 52_400_000,
+    transferred_bytes: 52_400_000,
     created_at: T0 - 300_000,
     started_at: T0 - 290_000,
     finished_at: T0 - 240_000,
@@ -530,7 +531,7 @@ describe("下载任务页：进行中", () => {
     expect(page().textContent).toContain("最近 48 秒没有下载流量");
   });
 
-  it("完成行：总量是几批下载的累计，用时从开始运行算起，排队等待不算", async () => {
+  it("完成行：写几批的实际传输量累计，用时从开始运行算起，排队等待不算", async () => {
     const ids = await fourJavaTasks();
     // 第四个任务排队 30 秒后才轮到
     await advance(30_000);
@@ -539,10 +540,10 @@ describe("下载任务页：进行中", () => {
     expect(launcher.state.tasks.find((t) => t.id === ids[3])?.status).toBe("running");
 
     const id = `${ids[3]}#1`;
-    act(() => emit(CORE_EVENT, { kind: "download", task_id: id, total: 4, finished: 2, bytes: 60 * MB, total_bytes: 100 * MB, speed: 10 * MB }));
-    act(() => emit(CORE_EVENT, { kind: "download", task_id: id, total: 4, finished: 4, bytes: 100 * MB, total_bytes: 100 * MB, speed: 10 * MB }));
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: id, total: 4, finished: 2, bytes: 60 * MB, total_bytes: 100 * MB, transferred: 60 * MB, speed: 10 * MB }));
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: id, total: 4, finished: 4, bytes: 100 * MB, total_bytes: 100 * MB, transferred: 100 * MB, speed: 10 * MB }));
     // 第二批从 0 重新计起
-    act(() => emit(CORE_EVENT, { kind: "download", task_id: id, total: 3, finished: 3, bytes: 20 * MB, total_bytes: 20 * MB, speed: 10 * MB }));
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: id, total: 3, finished: 3, bytes: 20 * MB, total_bytes: 20 * MB, transferred: 20 * MB, speed: 10 * MB }));
     await advance(12_000);
     javaRuns.get(id)?.resolve({ component: "java-runtime-delta", version: { major: 25, minor: 0, security: 1, build: 1, raw: "25.0.1" }, java_executable: "C:/java25.exe" });
     await flush();
@@ -550,6 +551,28 @@ describe("下载任务页：进行中", () => {
     const finished = row("Java 25");
     expect(finished.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Java，已完成");
     expect(finished.textContent).toContain("120 MB · 用时 12 秒");
+  });
+
+  it("补全完成行：进度按有效字节走满，说明只写实际下载的量；一个字节没传写文件已就绪", async () => {
+    const ids = await fourJavaTasks();
+    const repaired = `${ids[0]}#1`;
+    const present = `${ids[1]}#1`;
+    // 大部分文件本就完整：有效字节 701 MB、走网络的只有 5.5 MB
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: repaired, total: 900, finished: 450, bytes: 350 * MB, total_bytes: 701 * MB, transferred: 2 * MB, speed: MB }));
+    expect(row("Java 8").textContent).toContain("350 MB / 701 MB");
+    expect(row("Java 8").textContent).toContain("50%");
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: repaired, total: 900, finished: 900, bytes: 701 * MB, total_bytes: 701 * MB, transferred: 5.5 * MB, speed: MB }));
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: present, total: 900, finished: 900, bytes: 701 * MB, total_bytes: 701 * MB, transferred: 0, speed: 0 }));
+    await advance(2_000);
+    const java = { component: "java-runtime-delta", version: { major: 8, minor: 0, security: 1, build: 1, raw: "1.8.0_1" }, java_executable: "C:/java8.exe" };
+    javaRuns.get(repaired)?.resolve(java);
+    javaRuns.get(present)?.resolve(java);
+    await flush();
+
+    expect(row("Java 8").textContent).toContain("5.5 MB · 用时 2 秒");
+    expect(row("Java 8").textContent).not.toContain("701 MB");
+    expect(row("Java 17").textContent).toContain("文件已就绪 · 用时 2 秒");
+    expect(row("Java 17").textContent).not.toContain("701 MB");
   });
 
   it("取消排队中的任务不确认、不发命令；全部取消要确认，继续下载则什么都不做", async () => {

@@ -18,6 +18,7 @@ function seedJournal(): TaskRecordDto[] {
       progress: 1,
       bytes: 52_400_000,
       total_bytes: 52_400_000,
+      transferred_bytes: 52_400_000,
       speed_bps: 0,
       attempt: 1,
       error: null,

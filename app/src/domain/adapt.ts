@@ -463,8 +463,10 @@ export function taskFromRecord(dto: TaskRecordDto): Task {
     progress: dto.progress,
     bytes: dto.bytes,
     totalBytes: dto.total_bytes,
-    // 较早的日志没有这两项：累计字节只知道最后一批的，开始时刻不知道（不显示用时）
+    // 较早的日志没有这几项：累计字节只知道最后一批的，开始时刻（不显示用时）与传输量（不显示下载量）不知道
     doneBytes: dto.done_bytes === undefined ? dto.bytes : dto.done_bytes,
+    transferredBytes: dto.transferred_bytes === undefined ? null : dto.transferred_bytes,
+    batchTransferred: 0,
     speedBps: dto.speed_bps,
     startedAt: dto.started_at === undefined ? null : dto.started_at,
     attempt: dto.attempt,
@@ -487,6 +489,7 @@ export function taskToRecord(task: Task): TaskRecordDto {
     bytes: task.bytes,
     total_bytes: task.totalBytes,
     done_bytes: task.doneBytes,
+    transferred_bytes: task.transferredBytes,
     speed_bps: task.speedBps,
     started_at: task.startedAt,
     attempt: task.attempt,

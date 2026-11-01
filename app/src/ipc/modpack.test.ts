@@ -604,7 +604,7 @@ describe("导出整合包 mock", () => {
     expect(events.filter((e) => e.kind === "warning").map((e) => (e.kind === "warning" ? e.message : ""))).toEqual(["1 个 Mod 不在 Modrinth 上，已直接打包进文件"]);
     const progress = events.filter((e) => e.kind === "download");
     expect(progress).toHaveLength(5);
-    expect(progress.at(-1)).toEqual({ task_id: "t-ok", kind: "download", total: 40, finished: 40, bytes, total_bytes: bytes, speed: 8 * 1_048_576 });
+    expect(progress.at(-1)).toEqual({ task_id: "t-ok", kind: "download", total: 40, finished: 40, bytes, total_bytes: bytes, transferred: 0, speed: 8 * 1_048_576 });
     expect(events.at(-1)).toEqual({ task_id: "t-ok", kind: "stage", message: `已导出到 ${DEST}` });
 
     // 不带停用的 Mod、不带额外项：只剩不在 Modrinth 上的那一个

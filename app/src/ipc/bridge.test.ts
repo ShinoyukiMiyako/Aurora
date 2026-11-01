@@ -168,7 +168,7 @@ describe("浏览器与测试环境走 mock", () => {
   it("事件：负载按 JSON 往返送达，退订后不再收到", async () => {
     const received: CoreEvent[] = [];
     const unlisten = await onCoreEvent((e) => received.push(e));
-    const payload: CoreEvent = { kind: "download", task_id: "t1", total: 10, finished: 3, bytes: 2048, total_bytes: null, speed: 512 };
+    const payload: CoreEvent = { kind: "download", task_id: "t1", total: 10, finished: 3, bytes: 2048, total_bytes: null, transferred: 1024, speed: 512 };
     emitMockEvent(CORE_EVENT, payload);
     expect(received).toEqual([payload]);
     expect(received[0]).not.toBe(payload);

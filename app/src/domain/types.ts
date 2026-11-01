@@ -129,8 +129,12 @@ export interface Task {
   /** 当前这一批下载已下的字节；一次安装连跑好几批，每批从 0 重新计。 */
   bytes: number;
   totalBytes: number | null;
-  /** 这一次尝试累计下载的字节，跨批次累加：完成后的「总量」用它。 */
+  /** 这一次尝试累计的有效字节，跨批次累加。跳过的完整文件也算在内，不代表下载了这么多；本地任务完成后的「总量」用它。 */
   doneBytes: number;
+  /** 这一次尝试网络上实际读到的字节，跨批次累加，含重传：下载类任务完成后报的量。较早写入的任务记录没有这一项，为 null。 */
+  transferredBytes: number | null;
+  /** 当前这一批迄今读到的网络字节，只用来算下一条快照又传了多少，不落盘；组合任务的这个数按项记在进度游标里。 */
+  batchTransferred: number;
   speedBps: number;
   /** 这一次尝试开始运行的时刻；排队中、还没开始过为 null。「用时」是 finishedAt 减去它，不含排队等待。 */
   startedAt: number | null;

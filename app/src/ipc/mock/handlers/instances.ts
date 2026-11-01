@@ -807,6 +807,7 @@ async function fakeDownload(taskId: string, files: number, bytesPerFile: number)
       finished,
       bytes: finished * bytesPerFile,
       total_bytes: files * bytesPerFile,
+      transferred: finished * bytesPerFile,
       speed: Math.round((files * bytesPerFile) / ((MOCK_INSTALL_STEPS * MOCK_STEP_MS) / 1000)),
     });
   }

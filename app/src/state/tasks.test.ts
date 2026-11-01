@@ -12,6 +12,7 @@ import {
   compositeProgress,
   completeCompositeStep,
   findDuplicate,
+  markRunning,
   modFilesBeingUpdated,
   newTask,
   progressTrack,
@@ -229,30 +230,62 @@ describe("下载队列：纯函数", () => {
 
   it("下载进度按批次如实显示：批次内只进不退，新批次从头算起", () => {
     const running = [task("t1", { status: "running" })];
-    const first = applyTaskDownload(running, "t1#1", { total: 10, finished: 8, bytes: 800, totalBytes: 1000, speed: 5 });
+    const first = applyTaskDownload(running, "t1#1", { total: 10, finished: 8, bytes: 800, totalBytes: 1000, transferred: 0, speed: 5 });
     expect(first[0]).toMatchObject({ bytes: 800, totalBytes: 1000, speedBps: 5 });
     expect(first[0].progress).toBeCloseTo(0.8, 10);
-    const more = applyTaskDownload(first, "t1#1", { total: 10, finished: 9, bytes: 900, totalBytes: 1000, speed: 5 });
+    const more = applyTaskDownload(first, "t1#1", { total: 10, finished: 9, bytes: 900, totalBytes: 1000, transferred: 0, speed: 5 });
     expect(more[0].progress).toBeCloseTo(0.9, 10);
-    const nextBatch = applyTaskDownload(more, "t1#1", { total: 40, finished: 4, bytes: 100, totalBytes: 1000, speed: 5 });
+    const nextBatch = applyTaskDownload(more, "t1#1", { total: 40, finished: 4, bytes: 100, totalBytes: 1000, transferred: 0, speed: 5 });
     expect(nextBatch[0].progress).toBeCloseTo(0.1, 10);
     // 别的尝试的进度不认
-    expect(applyTaskDownload(first, "t1#2", { total: 1, finished: 1, bytes: 1, totalBytes: 1, speed: 1 })).toEqual(first);
+    expect(applyTaskDownload(first, "t1#2", { total: 1, finished: 1, bytes: 1, totalBytes: 1, transferred: 0, speed: 1 })).toEqual(first);
   });
 
   it("累计字节跨批次往上加：批次内按增量计，新批次从它自己的已下字节算起", () => {
     const running = [task("t1", { status: "running" })];
-    const a = applyTaskDownload(running, "t1#1", { total: 10, finished: 2, bytes: 200, totalBytes: 1000, speed: 5 });
-    const b = applyTaskDownload(a, "t1#1", { total: 10, finished: 10, bytes: 1000, totalBytes: 1000, speed: 5 });
+    const a = applyTaskDownload(running, "t1#1", { total: 10, finished: 2, bytes: 200, totalBytes: 1000, transferred: 0, speed: 5 });
+    const b = applyTaskDownload(a, "t1#1", { total: 10, finished: 10, bytes: 1000, totalBytes: 1000, transferred: 0, speed: 5 });
     expect(b[0].doneBytes).toBe(1000);
     // 第二批：资源文件 500 字节
-    const c = applyTaskDownload(b, "t1#1", { total: 3, finished: 1, bytes: 120, totalBytes: 500, speed: 5 });
+    const c = applyTaskDownload(b, "t1#1", { total: 3, finished: 1, bytes: 120, totalBytes: 500, transferred: 0, speed: 5 });
     expect(c[0]).toMatchObject({ bytes: 120, doneBytes: 1120 });
-    const d = applyTaskDownload(c, "t1#1", { total: 3, finished: 3, bytes: 500, totalBytes: 500, speed: 5 });
+    const d = applyTaskDownload(c, "t1#1", { total: 3, finished: 3, bytes: 500, totalBytes: 500, transferred: 0, speed: 5 });
     expect(d[0]).toMatchObject({ bytes: 500, doneBytes: 1500 });
     // 第三批大小与第二批相同，但已下字节变少：仍认作新批次
-    const e = applyTaskDownload(d, "t1#1", { total: 3, finished: 0, bytes: 0, totalBytes: 500, speed: 0 });
+    const e = applyTaskDownload(d, "t1#1", { total: 3, finished: 0, bytes: 0, totalBytes: 500, transferred: 0, speed: 0 });
     expect(e[0].doneBytes).toBe(1500);
+  });
+
+  it("传输量跨批次累加：批次内按增量计，新批次从它自己的传输字节算起；跳过的文件只进累计字节", () => {
+    const snap = (bytes: number, totalBytes: number | null, transferred: number) => ({ total: 10, finished: 0, bytes, totalBytes, transferred, speed: 5 });
+    const a = applyTaskDownload([task("t1", { status: "running" })], "t1#1", snap(600, 1000, 100));
+    expect(a[0]).toMatchObject({ doneBytes: 600, transferredBytes: 100, batchTransferred: 100 });
+    const b = applyTaskDownload(a, "t1#1", snap(1000, 1000, 150));
+    expect(b[0]).toMatchObject({ doneBytes: 1000, transferredBytes: 150, batchTransferred: 150 });
+    // 第二批：大小不同，从 0 重新计起
+    const c = applyTaskDownload(b, "t1#1", snap(120, 500, 20));
+    expect(c[0]).toMatchObject({ transferredBytes: 170, batchTransferred: 20 });
+    // 第三批大小与第二批相同，传输字节变少：还是新批次
+    const d = applyTaskDownload(c, "t1#1", snap(5, 500, 5));
+    expect(d[0]).toMatchObject({ transferredBytes: 175, batchTransferred: 5 });
+    // 大小都未知的批次同样靠传输字节变少认出来
+    const e = applyTaskDownload(applyTaskDownload(d, "t1#1", snap(800, null, 800)), "t1#1", snap(7, null, 7));
+    expect(e[0].transferredBytes).toBe(982);
+  });
+
+  it("重传时有效字节退回、传输字节还在涨：还是同一批，已传的不重复算", () => {
+    const snap = (bytes: number, transferred: number) => ({ total: 1, finished: 0, bytes, totalBytes: 1000, transferred, speed: 5 });
+    const a = applyTaskDownload([task("t1", { status: "running" })], "t1#1", snap(1000, 1000));
+    // 校验不过，整份退回后重下：网上又走了 200 字节
+    const b = applyTaskDownload(a, "t1#1", snap(200, 1200));
+    expect(b[0]).toMatchObject({ bytes: 200, transferredBytes: 1200 });
+    const c = applyTaskDownload(b, "t1#1", snap(1000, 2000));
+    expect(c[0].transferredBytes).toBe(2000);
+  });
+
+  it("读回的旧记录没有传输量，不会再运行；运行中却没有是状态层的契约错误", () => {
+    const broken = task("t1", { status: "running", transferredBytes: null });
+    expect(() => applyTaskDownload([broken], "t1#1", { total: 1, finished: 0, bytes: 1, totalBytes: 2, transferred: 1, speed: 1 })).toThrow("没有传输量");
   });
 
   it("组合任务的权重：声明大小都已知且总和大于 0 时按字节，否则按项数", () => {
@@ -269,7 +302,7 @@ describe("下载队列：纯函数", () => {
     let tasks = startComposite([task("t1", { status: "running" })], "t1#1", cursor);
     expect(tasks[0]).toMatchObject({ progress: 0, bytes: 0, totalBytes: 400 });
     const step = (item: number, bytes: number, totalBytes: number | null) => {
-      const next = applyCompositeDownload(tasks, "t1#1", cursor, item, { total: 1, finished: bytes === totalBytes ? 1 : 0, bytes, totalBytes, speed: 7 + item });
+      const next = applyCompositeDownload(tasks, "t1#1", cursor, item, { total: 1, finished: bytes === totalBytes ? 1 : 0, bytes, totalBytes, transferred: 0, speed: 7 + item });
       if (next === null) return false;
       tasks = next.tasks;
       cursor = next.cursor;
@@ -302,14 +335,14 @@ describe("下载队列：纯函数", () => {
     expect(step(1, 20, 20)).toBe(true);
     expect(tasks[0]).toMatchObject({ progress: 1, bytes: 400, doneBytes: 270, speedBps: 8 });
     // 别的尝试的进度不认
-    expect(applyCompositeDownload(tasks, "t1#2", cursor, 0, { total: 1, finished: 0, bytes: 1, totalBytes: 2, speed: 1 })).toBeNull();
+    expect(applyCompositeDownload(tasks, "t1#2", cursor, 0, { total: 1, finished: 0, bytes: 1, totalBytes: 2, transferred: 0, speed: 1 })).toBeNull();
   });
 
   it("组合任务按项数折算时：总量为空，已下字节累计实际下载的", () => {
     let cursor = compositeProgress([null, 2048, 4096]);
     let tasks = startComposite([task("t1", { status: "running" })], "t1#1", cursor);
     const apply = (step: number, bytes: number, totalBytes: number) => {
-      const next = applyCompositeDownload(tasks, "t1#1", cursor, step, { total: 1, finished: 0, bytes, totalBytes, speed: 1 });
+      const next = applyCompositeDownload(tasks, "t1#1", cursor, step, { total: 1, finished: 0, bytes, totalBytes, transferred: 0, speed: 1 });
       if (next === null) throw new Error("这条进度应被采纳");
       tasks = next.tasks;
       cursor = next.cursor;
@@ -330,7 +363,7 @@ describe("下载队列：纯函数", () => {
     let tasks = startComposite([task("t1", { status: "running" })], "t1#1", cursor);
     return {
       feed(step: number, bytes: number, totalBytes: number | null, finished: number, speed = 1) {
-        const next = applyCompositeDownload(tasks, "t1#1", cursor, step, { total: 1, finished, bytes, totalBytes, speed });
+        const next = applyCompositeDownload(tasks, "t1#1", cursor, step, { total: 1, finished, bytes, totalBytes, transferred: 0, speed });
         if (next === null) throw new Error("这一次尝试在运行，进度应被采纳");
         ({ tasks, cursor } = next);
       },
@@ -387,6 +420,33 @@ describe("下载队列：纯函数", () => {
     expect(run.cursor.itemBytes).toEqual([100, 300]);
   });
 
+  it("组合任务的传输量：按项分开算增量，晚到的进度不重复算，跳过的文件不算", () => {
+    let cursor = compositeProgress([100, 100]);
+    let tasks = startComposite([task("t1", { status: "running" })], "t1#1", cursor);
+    const feed = (step: number, bytes: number, totalBytes: number, transferred: number) => {
+      const next = applyCompositeDownload(tasks, "t1#1", cursor, step, { total: 1, finished: 0, bytes, totalBytes, transferred, speed: 1 });
+      if (next === null) throw new Error("这一次尝试在运行，进度应被采纳");
+      ({ tasks, cursor } = next);
+    };
+    // 第 0 项本就完整：进度走满，一个字节没传
+    feed(0, 60, 100, 0);
+    expect(tasks[0]).toMatchObject({ doneBytes: 60, transferredBytes: 0 });
+    ({ tasks, cursor } = completeCompositeStep(tasks, "t1#1", cursor));
+    feed(1, 30, 100, 30);
+    expect(tasks[0]).toMatchObject({ doneBytes: 90, transferredBytes: 30 });
+    // 第 0 项晚到的进度带着 40 字节：记在它自己那一批上
+    feed(0, 100, 100, 40);
+    expect(tasks[0]).toMatchObject({ doneBytes: 130, transferredBytes: 70 });
+    feed(1, 100, 100, 100);
+    expect(tasks[0]).toMatchObject({ doneBytes: 200, transferredBytes: 140 });
+    // 同一项里重传：有效字节退回，传输字节接着涨，不重复算
+    feed(1, 20, 100, 120);
+    expect(tasks[0]).toMatchObject({ transferredBytes: 160 });
+    // 同一项里换了一批：总量变了，从它自己的传输字节算起
+    feed(1, 3, 50, 3);
+    expect(tasks[0]).toMatchObject({ transferredBytes: 163 });
+  });
+
   it("项序号越过当前项或越界：调用方给错了序号，直接报错", () => {
     const run = twoItems([100, 100]);
     expect(() => run.feed(1, 10, 100, 0)).toThrow("还在第 0 项，收到了第 1 项的进度");
@@ -396,9 +456,16 @@ describe("下载队列：纯函数", () => {
     expect(run.task).toMatchObject({ progress: 0, doneBytes: 0 });
   });
 
-  it("重试清掉上一次尝试的开始时刻与累计字节", () => {
-    const failed = task("t1", { status: "failed", startedAt: T0 + 5, doneBytes: 4096, finishedAt: T0 + 9, error: { code: "network_failed", message: "x" } });
-    expect(retryTask([failed], "t1")[0]).toMatchObject({ status: "queued", startedAt: null, doneBytes: 0 });
+  it("重试清掉上一次尝试的开始时刻、累计字节与传输量", () => {
+    const failed = task("t1", { status: "failed", startedAt: T0 + 5, doneBytes: 4096, transferredBytes: 2048, batchTransferred: 1024, finishedAt: T0 + 9, error: { code: "network_failed", message: "x" } });
+    expect(retryTask([failed], "t1")[0]).toMatchObject({ status: "queued", startedAt: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0 });
+  });
+
+  it("重试较早记录里失败的任务：传输量从 0 算起，新进度能累加", () => {
+    const old = task("t1", { status: "failed", transferredBytes: null, finishedAt: T0 + 9, error: { code: "network_failed", message: "x" } });
+    const running = markRunning(retryTask([old], "t1"), "t1", T0 + 10);
+    expect(running[0]).toMatchObject({ status: "running", attempt: 2, transferredBytes: 0 });
+    expect(applyTaskDownload(running, "t1#2", { total: 1, finished: 0, bytes: 9, totalBytes: 10, transferred: 3, speed: 1 })[0].transferredBytes).toBe(3);
   });
 
   it("正在更新的 Mod 文件：单个与组合任务都算，实例 id 不分大小写，已结束的与别的实例不算", () => {
@@ -580,7 +647,7 @@ describe("下载队列：状态容器", () => {
     store.stop();
   });
 
-  it("开始时刻记在开始运行的那一刻而不是入队时；用时与总量取这一次尝试的开始时刻与累计字节", async () => {
+  it("开始时刻记在开始运行的那一刻而不是入队时；用时与传输量取这一次尝试的开始时刻与累计", async () => {
     const store = await startedStore();
     for (const major of [8, 17, 21, 25]) await store.actions.installJava(major);
     await settle();
@@ -588,30 +655,32 @@ describe("下载队列：状态容器", () => {
     expect(tasks.map((t) => t.startedAt)).toEqual([T0, T0, T0, null]);
 
     vi.setSystemTime(T0 + 4000);
-    emit(CORE_EVENT, { kind: "download", task_id: `${tasks[0].id}#1`, total: 2, finished: 2, bytes: 700, total_bytes: 700, speed: 1 });
+    emit(CORE_EVENT, { kind: "download", task_id: `${tasks[0].id}#1`, total: 2, finished: 2, bytes: 700, total_bytes: 700, transferred: 300, speed: 1 });
     runs.get(`${tasks[0].id}#1`)?.resolve(runtime("8.0.412"));
     await settle();
     const after = store.getState().tasks;
-    expect(after[0]).toMatchObject({ status: "done", startedAt: T0, finishedAt: T0 + 4000, doneBytes: 700 });
+    expect(after[0]).toMatchObject({ status: "done", startedAt: T0, finishedAt: T0 + 4000, doneBytes: 700, transferredBytes: 300 });
     // 第四个在通道空出的这一刻才开始
-    expect(after[3]).toMatchObject({ status: "running", startedAt: T0 + 4000, doneBytes: 0 });
+    expect(after[3]).toMatchObject({ status: "running", startedAt: T0 + 4000, doneBytes: 0, transferredBytes: 0 });
     store.stop();
   });
 
-  it("任务日志存下开始时刻与累计字节；较早的日志没有这两项时，开始时刻为空、累计字节取最后一批", async () => {
+  it("任务日志存下开始时刻、累计字节与传输量；较早的日志没有这几项时，开始时刻与传输量为空、累计字节取最后一批", async () => {
     bootOverrides(ipc, {
-      journal: [record("new", "done", { started_at: T0 - 9000, done_bytes: 52_000 }), record("old", "done")],
+      journal: [record("new", "done", { started_at: T0 - 9000, done_bytes: 52_000, transferred_bytes: 1200 }), record("zero", "done", { transferred_bytes: 0 }), record("old", "done")],
     });
     const store = await startedStore();
-    expect(store.getState().tasks.map((t) => [t.id, t.startedAt, t.doneBytes])).toEqual([
-      ["new", T0 - 9000, 52_000],
-      ["old", null, 4096],
+    expect(store.getState().tasks.map((t) => [t.id, t.startedAt, t.doneBytes, t.transferredBytes])).toEqual([
+      ["new", T0 - 9000, 52_000, 1200],
+      ["zero", null, 4096, 0],
+      ["old", null, 4096, null],
     ]);
     await store.actions.flushTaskJournal();
     const saved = callsOf(ipc, "save_task_journal").at(-1)?.tasks as TaskRecordDto[];
-    expect(saved.map((r) => [r.id, r.started_at, r.done_bytes])).toEqual([
-      ["new", T0 - 9000, 52_000],
-      ["old", null, 4096],
+    expect(saved.map((r) => [r.id, r.started_at, r.done_bytes, r.transferred_bytes])).toEqual([
+      ["new", T0 - 9000, 52_000, 1200],
+      ["zero", null, 4096, 0],
+      ["old", null, 4096, null],
     ]);
     store.stop();
   });

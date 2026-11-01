@@ -108,6 +108,8 @@ export function newTask(draft: TaskDraft, now: number): Task {
     bytes: 0,
     totalBytes: null,
     doneBytes: 0,
+    transferredBytes: 0,
+    batchTransferred: 0,
     speedBps: 0,
     startedAt: null,
     attempt: 1,
@@ -210,7 +212,7 @@ function update(tasks: readonly Task[], id: string, fn: (task: Task) => Task): T
 
 export function markRunning(tasks: readonly Task[], id: string, now: number): Task[] {
   return update(tasks, id, (t) =>
-    t.status === "queued" ? { ...t, status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, speedBps: 0, startedAt: now } : t,
+    t.status === "queued" ? { ...t, status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, speedBps: 0, startedAt: now } : t,
   );
 }
 
@@ -220,6 +222,7 @@ export interface DownloadSnapshot {
   finished: number;
   bytes: number;
   totalBytes: number | null;
+  transferred: number;
   speed: number;
 }
 
@@ -227,6 +230,20 @@ export interface DownloadSnapshot {
 function snapshotFraction(event: DownloadSnapshot): number {
   if (event.totalBytes !== null && event.totalBytes > 0) return Math.min(1, event.bytes / event.totalBytes);
   return event.total > 0 ? event.finished / event.total : 0;
+}
+
+/**
+ * 这条快照比上一条多传了多少。传输字节在一批内只增不减，判同一批不看有效字节：失败的文件退回时有效字节变少，
+ * 那还是同一批，按新批次算会把这一批已传的再算一遍。
+ */
+function transferredSince(mark: { totalBytes: number | null; transferred: number }, event: DownloadSnapshot): number {
+  return event.totalBytes === mark.totalBytes && event.transferred >= mark.transferred ? event.transferred - mark.transferred : event.transferred;
+}
+
+/** 运行中的任务都从 0 算起；只有读回的旧记录没有这个数，它们已经结束，重试时也从 0 开始。 */
+function transferredAfter(task: Task, added: number): number {
+  if (task.transferredBytes === null) throw new Error(`运行中的任务 ${task.id} 没有传输量`);
+  return task.transferredBytes + added;
 }
 
 /**
@@ -244,6 +261,8 @@ export function applyTaskDownload(tasks: readonly Task[], attemptId: string, eve
       bytes: event.bytes,
       totalBytes: event.totalBytes,
       doneBytes: t.doneBytes + (sameBatch ? event.bytes - t.bytes : event.bytes),
+      transferredBytes: transferredAfter(t, transferredSince({ totalBytes: t.totalBytes, transferred: t.batchTransferred }, event)),
+      batchTransferred: event.transferred,
       speedBps: event.speed,
     };
   });
@@ -255,6 +274,7 @@ export function applyTaskDownload(tasks: readonly Task[], attemptId: string, eve
 interface BatchMark {
   bytes: number;
   totalBytes: number | null;
+  transferred: number;
 }
 
 function continues(mark: BatchMark, event: DownloadSnapshot): boolean {
@@ -348,10 +368,11 @@ export function applyCompositeDownload(
   const mark = cursor.batches[step];
   const added = mark !== null && continues(mark, event) ? event.bytes - mark.bytes : event.bytes;
   const itemBytes = replaced(cursor.itemBytes, step, cursor.itemBytes[step] + added);
-  const next: CompositeProgress = { ...cursor, batches: replaced(cursor.batches, step, { bytes: event.bytes, totalBytes: event.totalBytes }), itemBytes };
+  const next: CompositeProgress = { ...cursor, batches: replaced(cursor.batches, step, { bytes: event.bytes, totalBytes: event.totalBytes, transferred: event.transferred }), itemBytes };
   const doneBytes = task.doneBytes + added;
+  const transferredBytes = transferredAfter(task, mark === null ? event.transferred : transferredSince(mark, event));
   if (step < cursor.index) {
-    const late = withCompositeProgress(task, cursor, task.progress, doneBytes);
+    const late = { ...withCompositeProgress(task, cursor, task.progress, doneBytes), transferredBytes };
     return { tasks: tasks.map((t) => (t === task ? late : t)), cursor: next };
   }
   const whole = weightBefore(cursor, cursor.weights.length);
@@ -360,7 +381,7 @@ export function applyCompositeDownload(
     cursor.totalBytes === null
       ? (before + cursor.weights[step] * snapshotFraction(event)) / whole
       : Math.min(1, (before + itemBytes[step]) / whole);
-  const current: Task = { ...withCompositeProgress(task, cursor, fraction, doneBytes), speedBps: event.speed };
+  const current: Task = { ...withCompositeProgress(task, cursor, fraction, doneBytes), transferredBytes, speedBps: event.speed };
   return { tasks: tasks.map((t) => (t === task ? current : t)), cursor: next };
 }
 
@@ -415,6 +436,8 @@ export function retryTask(tasks: readonly Task[], id: string): Task[] {
     bytes: 0,
     totalBytes: null,
     doneBytes: 0,
+    transferredBytes: 0,
+    batchTransferred: 0,
     speedBps: 0,
     startedAt: null,
     finishedAt: null,

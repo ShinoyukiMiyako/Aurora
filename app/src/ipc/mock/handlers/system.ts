@@ -58,6 +58,7 @@ export async function simulateMockDownload(taskId: string, files: number, totalB
       finished: step === DOWNLOAD_STEPS ? files : Math.floor((files * step) / DOWNLOAD_STEPS),
       bytes: Math.round((totalBytes * step) / DOWNLOAD_STEPS),
       total_bytes: totalBytes,
+      transferred: Math.round((totalBytes * step) / DOWNLOAD_STEPS),
       speed,
     });
   }

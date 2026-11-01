@@ -125,7 +125,7 @@ export function taskGroups(b: TaskBuckets, filter: TaskFilter): TaskGroup[] {
 }
 
 /** 下载进度快照只改这几个字段。 */
-const PROGRESS_FIELDS: ReadonlySet<string> = new Set<keyof Task>(["progress", "bytes", "totalBytes", "doneBytes", "speedBps"]);
+const PROGRESS_FIELDS: ReadonlySet<string> = new Set<keyof Task>(["progress", "bytes", "totalBytes", "doneBytes", "transferredBytes", "batchTransferred", "speedBps"]);
 
 function sameApartFromProgress(a: Task, b: Task): boolean {
   if (a === b) return true;
@@ -259,19 +259,30 @@ function runningMeta(task: Task, speedForEta: number): { left: string; right: st
 }
 
 /**
- * 完成行左侧的「总量 · 用时」。总量是这一次尝试跨批次累计下载的字节（一次安装连跑好几批，最后一批只是其中一段）；
- * 一个字节都没下（文件都已就绪）时不写。用时从这一次尝试开始运行算起，不含排队等待，也不含之前失败的尝试；
+ * 完成行的量。下载类写这一次尝试跨批次实际传输的字节（一次安装连跑好几批，最后一批只是其中一段）：有效字节含跳过的完整文件，
+ * 补全时比真正下载的多出几百 MB，不能当下载量说。一个字节都没传就是文件都已就绪。
+ * 较早写入的下载记录没有传输量，不写，也不说已就绪：那时到底下了多少已经无从得知。
+ * 导出、备份、恢复没有网络传输，写处理的字节，没处理过什么时不写。
+ */
+function doneAmount(task: Task): string | null {
+  if (!DOWNLOADS_WHEN_RUNNING[task.kind]) return task.doneBytes > 0 ? formatBytes(task.doneBytes) : null;
+  if (task.transferredBytes === null) return null;
+  return task.transferredBytes > 0 ? formatBytes(task.transferredBytes) : TASKS_COPY.row.doneReady;
+}
+
+/**
+ * 完成行左侧的「量 · 用时」。用时从这一次尝试开始运行算起，不含排队等待，也不含之前失败的尝试；
  * 较早写入的任务记录没有开始时刻，不写用时，而不是拿加入队列的时刻冒充。
  * 运行期间系统时钟往回调过时结束时刻会早于开始时刻：两个时刻都是真实记下的，只是用时无从得知，同样不写；
  * 任务表会落盘，按契约错误抛出的话下载任务页每次打开都崩，清理已结束任务的按钮也在这一页上。
  */
 function doneSummary(task: Task): string {
-  const size = task.doneBytes > 0 ? formatBytes(task.doneBytes) : null;
+  const amount = doneAmount(task);
   const finishedAt = finishedAtOf(task);
   const took = task.startedAt === null || finishedAt < task.startedAt ? null : durationText(finishedAt - task.startedAt);
-  if (size !== null && took !== null) return TASKS_COPY.row.doneWithSize(size, took);
+  if (amount !== null && took !== null) return TASKS_COPY.row.doneWithAmount(amount, took);
   if (took !== null) return TASKS_COPY.row.doneNoSize(took);
-  if (size !== null) return size;
+  if (amount !== null) return amount;
   return TASK_STATUS_LABEL.done;
 }
 
