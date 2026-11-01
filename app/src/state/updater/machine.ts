@@ -5,6 +5,7 @@
 // 「正在下载」这些只存在于本次会话里的事，所以两路合并：瞬时阶段（检查中、下载中、安装中）不被后端信息覆盖，
 // 「已是最新」「检查失败」这类会话内结论在后端没有更新可报时保留。
 
+import type { NetworkFailure } from "../errors";
 import type { UpdaterInfoDto } from "../queries/catalog";
 
 /** 一个可安装的版本。字段与后端 UpdateDto 同形。 */
@@ -19,7 +20,8 @@ export type UpdaterPhase =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "up_to_date"; checkedAt: number }
-  | { kind: "check_failed"; message: string }
+  /** message 是后端原文；network 是后端标明的网络层失败种类，其余失败为 null。 */
+  | { kind: "check_failed"; message: string; network: NetworkFailure | null }
   | { kind: "available"; update: UpdateInfo }
   | { kind: "downloading"; update: UpdateInfo; taskId: string; bytes: number; totalBytes: number | null }
   | { kind: "download_failed"; update: UpdateInfo; reason: string; signature: boolean }
@@ -42,7 +44,7 @@ export type UpdaterEvent =
   | { type: "info"; info: UpdaterInfoDto }
   | { type: "check_start" }
   | { type: "check_done"; update: UpdateInfo | null; at: number }
-  | { type: "check_failed"; message: string }
+  | { type: "check_failed"; message: string; network: NetworkFailure | null }
   | { type: "download_start"; taskId: string }
   | { type: "download_progress"; taskId: string; bytes: number; totalBytes: number | null }
   | { type: "download_done"; taskId: string; update: UpdateInfo }
@@ -113,7 +115,7 @@ export function updaterReducer(state: UpdaterState, event: UpdaterEvent): Update
       return to(event.update === null ? { kind: "up_to_date", checkedAt: event.at } : { kind: "available", update: event.update });
     case "check_failed":
       if (phase.kind !== "checking") return state;
-      return to({ kind: "check_failed", message: event.message });
+      return to({ kind: "check_failed", message: event.message, network: event.network });
     case "download_start": {
       const update = phaseUpdate(phase);
       if (update === null || (phase.kind !== "available" && phase.kind !== "download_failed")) return state;

@@ -69,7 +69,7 @@ export function updateCardView(state: UpdaterState, ctx: CardContext): CardView 
     case "up_to_date":
       return view(UPDATE_COPY.upToDate, UPDATE_COPY.checkedAgo(formatRelative(phase.checkedAt, ctx.now)), check());
     case "check_failed":
-      return view(UPDATE_COPY.checkFailed, phase.message, check(UPDATE_COPY.retry), { subIsError: true });
+      return view(phase.network === null ? UPDATE_COPY.checkFailed : UPDATE_COPY.checkFailedNetwork[phase.network], phase.message, check(UPDATE_COPY.retry), { subIsError: true });
     case "available": {
       const parts: string[] = [];
       if (phase.update.date !== null) parts.push(UPDATE_COPY.publishedAt(formatDate(phase.update.date)));

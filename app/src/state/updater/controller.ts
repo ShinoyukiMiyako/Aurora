@@ -1,13 +1,13 @@
 // 更新状态机的执行者：把检查、下载、安装几条后端命令接到状态机上，供更新卡与更新面板共用一份状态。
 // 与 React 无关（订阅接口照 useSyncExternalStore 的形状），测试可以直接实例化并注入假的后端。
 
-import { describeError } from "../errors";
+import { describeError, networkFailureOf } from "../errors";
 import type { UpdaterInfoDto } from "../queries/catalog";
 import { INITIAL_UPDATER_STATE, updaterReducer, type UpdateInfo, type UpdaterEvent, type UpdaterState } from "./machine";
 
 /** 更新相关的后端命令。语义与同名命令一致：download 的进度来自带同一 taskId 的下载事件。 */
 export interface UpdaterPort {
-  /** check_update：已是最新为 null。 */
+  /** check_update：没有新版本为 null。 */
   check(): Promise<UpdateInfo | null>;
   /** download_update：下载最近一次检查到的版本并校验签名；被取消时以 cancelled 错误拒绝。 */
   download(taskId: string, onProgress: (bytes: number, totalBytes: number | null) => void): Promise<UpdateInfo>;
@@ -67,7 +67,7 @@ export class UpdaterController {
   }
 
   /**
-   * 检查更新。检查失败是更新卡的正式状态（卡内原样显示原因并给出重试），所以这里落进状态而不再抛出；
+   * 检查更新。检查失败是更新卡的正式状态（卡内写明原因、留下原文并给出重试），所以这里落进状态而不再抛出；
    * 原错误照样写进控制台。
    */
   async check(): Promise<void> {
@@ -80,7 +80,7 @@ export class UpdaterController {
       this.dispatch({ type: "check_done", update, at: this.now() });
     } catch (error) {
       console.error("检查启动器更新失败", error);
-      this.dispatch({ type: "check_failed", message: describeError(error) });
+      this.dispatch({ type: "check_failed", message: describeError(error), network: networkFailureOf(error) });
     }
   }
 

@@ -30,6 +30,11 @@ export const UPDATE_COPY = {
   installOnExitCard: (v: string) => `关闭${APP_NAME}时会安装 ${v}`,
   installNow: "现在安装",
   checkFailed: "检查更新失败",
+  /** 网络层失败的主句。TLS 不通也算 connect，这时用户的网络完全可能是好的，所以只说更新服务器，不叫人去检查网络。 */
+  checkFailedNetwork: {
+    connect: "连不上更新服务器",
+    timeout: "更新服务器没有响应",
+  },
   retry: "重试",
   unsupported: "当前环境不支持自动更新",
   /** 不支持的原因：调试构建不检查更新；发布构建没配签名公钥时验不了更新包，同样不检查。 */

@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { IpcError } from "../ipc/errors";
-import { describeError, errorDetail, errorDetailOf } from "./errors";
+import { describeError, errorDetail, errorDetailOf, networkFailureOf } from "./errors";
+
+describe("网络层失败的种类", () => {
+  it("只认后端标在 detail.network 里的 connect 与 timeout；其余都不算", () => {
+    expect(networkFailureOf(new IpcError("update_check_failed", "x", { network: "connect" }))).toBe("connect");
+    expect(networkFailureOf(new IpcError("update_check_failed", "x", { network: "timeout" }))).toBe("timeout");
+    expect(networkFailureOf(new IpcError("update_check_failed", "x", { network: "dns" }))).toBeNull();
+    expect(networkFailureOf(new IpcError("update_check_failed", "x", { endpoints: [] }))).toBeNull();
+    expect(networkFailureOf(new IpcError("update_check_failed", "x"))).toBeNull();
+    expect(networkFailureOf(new Error("编程错误"))).toBeNull();
+  });
+});
 
 describe("复制错误信息的文本", () => {
   it("后端错误：错误码、原文、逐条原因，其余细节以 JSON 附在最后", () => {

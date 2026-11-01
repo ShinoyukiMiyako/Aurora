@@ -50,12 +50,26 @@ describe("更新卡各阶段", () => {
   it("退出时安装、检查失败、下载失败、不支持", () => {
     const onExit = updateCardView(state({ kind: "install_on_exit", update: UPDATE }), CTX);
     expect([onExit.button.label, onExit.button.variant, onExit.button.action]).toEqual(["现在安装", "secondary", "install"]);
-    const failed = updateCardView(state({ kind: "check_failed", message: "DNS 解析失败" }), CTX);
-    expect([failed.title, failed.sub, failed.subIsError, failed.button.label]).toEqual(["检查更新失败", "DNS 解析失败", true, "重试"]);
+    const failed = updateCardView(state({ kind: "check_failed", message: "清单里没有这个平台", network: null }), CTX);
+    expect([failed.title, failed.sub, failed.subIsError, failed.button.label]).toEqual(["检查更新失败", "清单里没有这个平台", true, "重试"]);
     const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true }), CTX);
     expect(signature.sub).toBe("下载失败：更新包签名校验不通过，已丢弃，不会安装");
     const unsupported = updateCardView(state({ kind: "unsupported", reason: "debug_build" }), CTX);
     expect([unsupported.title, unsupported.sub, unsupported.button.disabled]).toEqual(["当前环境不支持自动更新", "开发环境或调试模式下不检查更新", true]);
+  });
+
+  it("检查失败是网络层的：主句按种类写中文说明，英文原文放进可选中的次句，按钮仍是重试", () => {
+    const raw = "检查更新失败：error sending request for url (https://petalfall.org/updates/latest.json)";
+    const connect = updateCardView(state({ kind: "check_failed", message: raw, network: "connect" }), CTX);
+    expect([connect.title, connect.sub, connect.subIsError, connect.button.label, connect.button.action]).toEqual(["连不上更新服务器", raw, true, "重试", "check"]);
+    const timeout = updateCardView(state({ kind: "check_failed", message: raw, network: "timeout" }), CTX);
+    expect([timeout.title, timeout.sub, timeout.subIsError]).toEqual(["更新服务器没有响应", raw, true]);
+  });
+
+  it("更新域名 TLS 不通时后端标 connect：主句全是中文，也不把原因说成用户的网络", () => {
+    const { title } = updateCardView(state({ kind: "check_failed", message: "检查更新失败：error sending request", network: "connect" }), CTX);
+    expect(title).not.toMatch(/[A-Za-z]/);
+    expect(title).not.toContain("网络");
   });
 
   it("不支持更新的原因分开说：发布构建没配签名公钥时不说成是开发环境", () => {

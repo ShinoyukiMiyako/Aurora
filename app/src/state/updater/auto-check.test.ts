@@ -41,7 +41,7 @@ describe("查完之后要不要提示", () => {
 
   it("没查到新版本或检查失败时不提示", () => {
     expect(updateToAnnounce(state({ kind: "up_to_date", checkedAt: 5 }), null, null)).toBeNull();
-    expect(updateToAnnounce(state({ kind: "check_failed", message: "超时" }), null, null)).toBeNull();
+    expect(updateToAnnounce(state({ kind: "check_failed", message: "超时", network: "timeout" }), null, null)).toBeNull();
     expect(updateToAnnounce(state({ kind: "ready", update: UPDATE }), null, null)).toBeNull();
   });
 });

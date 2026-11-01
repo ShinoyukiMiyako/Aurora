@@ -1089,6 +1089,27 @@ describe("设置页：关于与启动器更新", () => {
     expect(text()).toContain("有新版本 0.2.0");
   });
 
+  it("检查失败是网络层的：主句写中文说明，英文原文放进可选中的细节", async () => {
+    const raw = "检查更新失败：error sending request for url (https://petalfall.org/updates/latest.json)";
+    ipc.overrides.set("check_update", () => {
+      throw new IpcError("update_check_failed", raw, { network: "connect", causes: ["client error (Connect)"] });
+    });
+    await mount("about");
+    await click(button("检查更新"));
+    expect(text()).toContain("连不上更新服务器");
+    expect(all("[data-selectable]").map((el) => el.textContent)).toContain(raw);
+    expect(button("重试").textContent).toBe("重试");
+  });
+
+  it("更新源上没有清单：后端按没有新版本回 null，卡片写已是最新，不算失败", async () => {
+    ipc.overrides.set("check_update", () => null);
+    await mount("about");
+    await click(button("检查更新"));
+    expect(text()).toContain("已是最新版本");
+    expect(text()).not.toContain("检查更新失败");
+    expect(all("button").some((b) => b.textContent === "重试")).toBe(false);
+  });
+
   it("支持卡与声明", async () => {
     await mount("about");
     await click(rowButton("打开日志目录", "打开"));

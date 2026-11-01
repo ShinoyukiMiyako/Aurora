@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IpcError } from "../../ipc/errors";
 import { UpdaterController, type UpdaterPort } from "./controller";
 import type { UpdateInfo } from "./machine";
 
@@ -68,8 +69,19 @@ describe("UpdaterController", () => {
   it("检查失败落进 check_failed（带后端原文与错误码），不再抛出，并写控制台", async () => {
     const c = controllerWith(fakePort({ check: async () => Promise.reject(ipcError("update_check_failed", "连不上更新服务器")) }));
     await expect(c.check()).resolves.toBeUndefined();
-    expect(c.getState().phase).toEqual({ kind: "check_failed", message: "连不上更新服务器" });
+    expect(c.getState().phase).toEqual({ kind: "check_failed", message: "连不上更新服务器", network: null });
     expect(console.error).toHaveBeenCalledTimes(1);
+  });
+
+  it("网络层失败：记下 detail.network 的种类，原文照旧留在 message", async () => {
+    const raw = "检查更新失败：error sending request for url (https://petalfall.org/updates/latest.json)";
+    const failWith = (network: string) => async () => Promise.reject(new IpcError("update_check_failed", raw, { endpoints: ["https://petalfall.org/updates/latest.json"], network }));
+    const connect = controllerWith(fakePort({ check: failWith("connect") }));
+    await connect.check();
+    expect(connect.getState().phase).toEqual({ kind: "check_failed", message: raw, network: "connect" });
+    const timeout = controllerWith(fakePort({ check: failWith("timeout") }));
+    await timeout.check();
+    expect(timeout.getState().phase).toEqual({ kind: "check_failed", message: raw, network: "timeout" });
   });
 
   it("不能检查的阶段调用 check 直接抛错，不发命令", async () => {
