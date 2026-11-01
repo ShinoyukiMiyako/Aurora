@@ -480,15 +480,43 @@ function ShellCore({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // WebView2 最小化时 visibilityState 仍是 visible，只能问窗口：最小化与还原都会让窗口尺寸变化，变一次读一次
+  const [minimized, setMinimized] = useState(false);
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    const read = () =>
+      void run(async () => {
+        const now = await port.isMinimized();
+        if (!disposed) setMinimized(now);
+      }, SHELL_ACTION_ERROR.windowState);
+    port.onResized(read).then(
+      (release) => {
+        if (disposed) {
+          release();
+          return;
+        }
+        unlisten = release;
+        read();
+      },
+      (error: unknown) => void run(() => Promise.reject(error), SHELL_ACTION_ERROR.windowState),
+    );
+    return () => {
+      disposed = true;
+      if (unlisten !== null) unlisten();
+    };
+  }, [port, run]);
+  const shown = visible && !minimized;
+
   // 窗口不可见期间全部通知暂停计时
   useEffect(() => {
-    if (visible) return;
+    if (shown) return;
     actions.pauseToasts("hidden");
     return () => actions.resumeToasts("hidden");
-  }, [actions, visible]);
+  }, [actions, shown]);
 
   // 运行呼吸窗口：进入运行、或运行中窗口重新获得焦点时开始；失焦或不可见立即结束
-  const active = visible && focused;
+  const active = shown && focused;
   useEffect(() => {
     if (runningSince === null || !active) {
       endBreathWindow();
@@ -498,7 +526,7 @@ function ShellCore({ children }: { children: ReactNode }) {
     return () => endBreathWindow();
   }, [runningSince, active]);
 
-  const petalsPaused = !visible || !focused || scrimOpen;
+  const petalsPaused = !shown || !focused || scrimOpen;
 
   // ---------------------------------------------------------------- 材质状态
 
