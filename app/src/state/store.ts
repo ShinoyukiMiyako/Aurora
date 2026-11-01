@@ -1831,11 +1831,22 @@ export class LauncherStore {
     const keep = this.keepsPlaceholder(before);
     this.set((raw) => ({ tasks: trimHistory(markDone(raw.tasks, id, attempt, Date.now())), ...(keep ? { landing: [...raw.landing, id] } : {}) }));
     this.tasksChanged();
+    this.rescanHeld(before.instanceId);
     if (this.discardLanding.has(id)) return;
     this.background(
       ACTION_ERROR.landTask(before.title),
       this.landTask(before, result).finally(() => this.endLanding(id)),
     );
+  }
+
+  /**
+   * 任务进行中的重扫把后端当时的占用记进了列表，派生时留着它。任务结束时后端已放开，有的任务落地时不重扫（更新 Mod、
+   * 导出整合包），不重读的话改名、删除、补全一直按占用禁用到下一次重扫。落地也重扫的按序号采纳后一次，多扫一遍无妨。
+   */
+  private rescanHeld(instanceId: string | null): void {
+    if (instanceId === null) return;
+    const key = instanceId.toLowerCase();
+    if (this.raw.scanned.some((i) => i.id.toLowerCase() === key && i.activity !== null)) this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
   }
 
   /** 新建与导入任务结束时它的占位项要留到落地重扫落定（见 RawState.landing）；用户正在删除它时不留。 */
@@ -1874,6 +1885,7 @@ export class LauncherStore {
       else this.failureToast(before, taskFailureReason(record));
     }
     this.tasksChanged();
+    this.rescanHeld(before.instanceId);
     // 恢复没做完时原来的存档可能已经进了回收站；备份失败也可能清掉了半截的临时文件。列表、存档与实例的活动都按盘上重读
     if (WORLD_TASK_COMMANDS.has(before.spec.command) && before.instanceId !== null) {
       invalidateResources(WORLD_BACKUPS_RESOURCE);
