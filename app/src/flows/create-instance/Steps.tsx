@@ -1,7 +1,7 @@
 // 新建实例各步骤的右栏内容。状态全在流程组件里，这里只负责呈现与回调。
 // 单选列表与单选卡用漫游焦点：组内一个 Tab 停靠点，方向键移动并立即选中，Enter 由流程组件统一当作「下一步」。
 
-import type { ReactNode } from "react";
+import { useLayoutEffect, useRef, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { COVER_PRESETS, type InstanceCover } from "../../art/iso/covers";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
@@ -66,6 +66,16 @@ function StepHead({ title, body, right }: { title: string; body: string; right?:
       </div>
       {right}
     </div>
+  );
+}
+
+/** 一步里至多一条说明块，其余的 warn 注记写成行：不限两行，后端原文不会被截断，这一步的固定高度里也省地方。 */
+function WarnNote({ children }: { children: ReactNode }) {
+  return (
+    <p className={styles.warnNote}>
+      <Icon name="alert" size={16} className={styles.warnNoteIcon} />
+      <span>{children}</span>
+    </p>
   );
 }
 
@@ -308,12 +318,10 @@ export function LoaderStep({ version, value, onChange, loaderErrors }: LoaderSte
           );
         })}
       </div>
-      {missing.length > 0 && <Callout tone="info">{CREATE_COPY.loader.missing(version.id, missing)}</Callout>}
       {loaderErrors.map((e) => (
-        <Callout key={e.loader} tone="warn">
-          {CREATE_COPY.loader.unavailable(e.loader, e.message)}
-        </Callout>
+        <WarnNote key={e.loader}>{CREATE_COPY.loader.unavailable(e.loader, e.message)}</WarnNote>
       ))}
+      {missing.length > 0 && <Callout tone="info">{CREATE_COPY.loader.missing(version.id, missing)}</Callout>}
     </>
   );
 }
@@ -511,11 +519,7 @@ export function ConfirmStep({ name, version, loader, loaderVersion, cover, setti
   const java = useConfirmJava(requirements, settings);
   return (
     <>
-      {error !== null && (
-        <Banner tone="danger" title={c.failed} announce>
-          {describeError(error)}
-        </Banner>
-      )}
+      {error !== null && <CreateFailed error={error} />}
       <StepHead title={c.title} body={c.body} />
       <Inset className={styles.summary}>
         <KV
@@ -539,17 +543,30 @@ export function ConfirmStep({ name, version, loader, loaderVersion, cover, setti
         />
       </Inset>
       {java.status === "ready" && <PinnedJavaNote java={java.java} />}
-      {version.type === "snapshot" && (
-        <Callout tone="warn" icon="alert">
-          {c.snapshotWarning}
-        </Callout>
-      )}
+      {version.type === "snapshot" && <WarnNote>{c.snapshotWarning}</WarnNote>}
       <StarterOptions {...starter} />
       <div className={styles.after}>
         <Checkbox checked={openAfter} onChange={onOpenAfter} label={c.openAfter} />
         <span className={styles.afterHint}>{willPin ? c.autoPin : c.pinFull}</span>
       </div>
     </>
+  );
+}
+
+/** 创建失败的原因写在这一步最上面：开局选项让这一步常要滚动，出现时把滚动容器带回顶部，不让它停在视野之外。 */
+function CreateFailed({ error }: { error: unknown }) {
+  const host = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const pane = host.current === null ? null : host.current.parentElement;
+    if (pane === null) throw new Error("创建失败的横幅没有挂在步骤里");
+    pane.scrollTop = 0;
+  }, [error]);
+  return (
+    <div ref={host} className={styles.failed}>
+      <Banner tone="danger" title={CREATE_COPY.confirm.failed} announce>
+        {describeError(error)}
+      </Banner>
+    </div>
   );
 }
 
