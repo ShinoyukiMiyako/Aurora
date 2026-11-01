@@ -727,7 +727,7 @@ describe("设置页：Java · 显卡", () => {
     const note = card.querySelector('[data-tone="info"]');
     expect(note?.textContent).toBe("这台电脑有两块显卡：Intel(R) UHD Graphics 和 NVIDIA GeForce RTX 4060 Laptop GPU。笔记本常默认用省电的那块跑游戏，帧数会低不少。");
     expect(card.textContent).toContain("启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」，游戏会用 NVIDIA GeForce RTX 4060 Laptop GPU");
-    expect(card.textContent).toContain("关掉后不会撤销已经写进 Windows 的设置");
+    expect(card.textContent).toContain("关掉后，已经写进 Windows 的设置不会自动改回");
     const toggle = button("让游戏用独立显卡");
     expect(toggle.getAttribute("aria-checked")).toBe("false");
     await click(toggle);

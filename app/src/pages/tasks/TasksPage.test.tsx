@@ -477,7 +477,7 @@ describe("下载任务页：进行中", () => {
     act(() => buttonIn(row("备份「旧世界」"), "重试").click());
     await flush();
     const labels = [...page().querySelectorAll('[role="progressbar"]')].map((bar) => bar.getAttribute("aria-label"));
-    expect(labels.filter((label) => label === "备份「旧世界」 的进度")).toHaveLength(2);
+    expect(labels.filter((label) => label === "备份「旧世界」的进度")).toHaveLength(2);
     expect(labels.filter((label) => label !== null && label.includes("下载进度"))).toEqual([]);
   });
 
