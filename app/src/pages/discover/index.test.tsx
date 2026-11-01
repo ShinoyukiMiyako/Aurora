@@ -889,6 +889,28 @@ describe("发现页：整合包", () => {
     expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["warning", "没有网络连接", "恢复联网后再安装"]);
   });
 
+  it("平台整合包缺下载密钥：面板写「没装成」加规定的原因，主按钮仍是重试", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    const pack = entry("M1", { title: "樱落", resource_type: "modpack", loaders: ["fabric"] });
+    const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
+    pages = () => result([pack]);
+    ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
+    ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
+    ipc.overrides.set("install_modpack", () => {
+      throw new IpcError("curseforge_key_missing", "CurseForge API key 未配置（环境变量 AURORA_CURSEFORGE_API_KEY 缺失），该源已禁用");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    act(() => card("樱落").click());
+    await flush();
+    act(() => buttonByText("安装为新实例", dialog()).click());
+    await flush();
+    expect(dialog().textContent).toContain("没装成：这个包里有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY");
+    expect(dialog().textContent).not.toContain("该源已禁用");
+    expect(buttonByText("重试", dialog())).toBeDefined();
+  });
+
   it("平台整合包的名称按去掉首尾空格后的样子校验：前面多个空格撞上已有实例就报重名，末尾多个空格照常装、装成去掉空格的名字", async () => {
     const pack = entry("M1", { title: "樱落", resource_type: "modpack", loaders: ["fabric"] });
     const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });

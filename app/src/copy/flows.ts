@@ -758,6 +758,8 @@ export function taskFailureReason(error: TaskError): string {
       return "加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要重新安装加载器";
     case "curseforge_key_rejected":
       return "CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试";
+    case "curseforge_key_missing":
+      return "这个包里有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY";
     case "distribution_blocked":
       // 较早的任务日志只存了错误码与原文（原文里列着文件名），没有清单时照原文给出
       return error.blocked_files === undefined ? error.message : `有 ${error.blocked_files.length} 个文件需要到 CurseForge 网页手动下载`;

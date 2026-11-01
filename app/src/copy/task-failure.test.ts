@@ -22,6 +22,12 @@ describe("taskFailureReason", () => {
     );
   });
 
+  it("包里有文件只能从 CurseForge 下载又没配密钥：说明要设置哪个环境变量，不露「该源已禁用」这样的排查原文", () => {
+    expect(taskFailureReason({ code: "curseforge_key_missing", message: "CurseForge API key 未配置（环境变量 AURORA_CURSEFORGE_API_KEY 缺失），该源已禁用" })).toBe(
+      "这个包里有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY",
+    );
+  });
+
   it("需要手动下载的文件：按清单写出个数，一个与多个同一句式", () => {
     const message = "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：a.jar";
     expect(taskFailureReason({ code: "distribution_blocked", message, blocked_files: blocked(1) })).toBe("有 1 个文件需要到 CurseForge 网页手动下载");
