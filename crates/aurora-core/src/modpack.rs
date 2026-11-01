@@ -353,16 +353,20 @@ impl Aurora {
     /// 数得出 Mod、算得出下载量（导入同样要问），没配 API key 或断网时与导入报同样的错。
     ///
     /// CurseForge 包里没给下载地址的文件逐个问 download-url 端点，作者不允许直接下载的列进
-    /// `blocked_files`，暂存位里已有校验通过副本的记为已认领。受限文件不让预览失败：用户要在这一步就
-    /// 看到要手动下载哪些。
+    /// `blocked_files`，暂存位里已有校验通过副本的记为已认领，落点被覆盖层盖住的不用下载、也不列。受限文件
+    /// 不让预览失败：用户要在这一步就看到要手动下载哪些。
     pub async fn preview_modpack_file(&self, path: &Path) -> Result<ModpackPreview> {
         let archive = read_pack_blocking(path.to_path_buf()).await?;
         let remote = self
             .remote_facts(&archive.manifest.remote, BlockedProbe::Probe)
             .await?;
+        let covered = override_landings(&archive);
         let mut claimed = HashSet::new();
         let mut blocked = Vec::new();
         for item in remote.entries.iter().filter_map(|e| e.blocked.as_ref()) {
+            if covered.contains(&item.destination.to_lowercase()) {
+                continue;
+            }
             if self.claimed_copy(item).await?.is_some() {
                 claimed.insert(item.file_id);
             } else {
@@ -544,7 +548,7 @@ impl Aurora {
             )),
         );
         let remote = self
-            .remote_downloads(&manifest.remote, &version_dir)
+            .remote_downloads(&manifest.remote, &override_landings(&archive), &version_dir)
             .await?;
         tracing::debug!(%name, ?source, remote = remote.downloads.len(), claimed = remote.claimed.len(), skipped, "整合包导入已准备好");
         Ok((name, archive, remote))
@@ -870,10 +874,12 @@ impl Aurora {
         Ok((dest, Some(dir)))
     }
 
-    /// 把清单里的远程文件变成下载任务（落点都在实例目录下）；CurseForge 的受限文件认领到了就从暂存位复制。
+    /// 把清单里的远程文件变成下载任务（落点都在实例目录下）；CurseForge 的受限文件认领到了就从暂存位复制，
+    /// 落点在 `covered`（见 [`override_landings`]）里的不用管。
     async fn remote_downloads(
         &self,
         remote: &RemoteFiles,
+        covered: &HashSet<String>,
         version_dir: &Path,
     ) -> Result<RemotePlan> {
         match remote {
@@ -914,18 +920,20 @@ impl Aurora {
             RemoteFiles::CurseForge(refs) if refs.is_empty() => Ok(RemotePlan::default()),
             RemoteFiles::CurseForge(refs) => {
                 let client = self.curseforge_client()?;
-                self.curseforge_downloads(&client, refs, version_dir).await
+                self.curseforge_downloads(&client, refs, covered, version_dir)
+                    .await
             }
         }
     }
 
     /// CurseForge 清单里的文件 id 换成下载任务：落点按 [`CurseForgeIndex::locate`]，没给下载地址的再问
-    /// download-url 端点，任务都挂上 CDN 下载凭据。作者禁止第三方分发的文件，暂存位里有校验通过的副本就
-    /// 改为复制；还有没认领到的就汇总成一个错误，只列这些。
+    /// download-url 端点，任务都挂上 CDN 下载凭据。作者禁止第三方分发的文件，落点被覆盖层盖住的跳过，暂存位
+    /// 里有校验通过的副本就改为复制；还有没认领到的就汇总成一个错误，只列这些。
     async fn curseforge_downloads(
         &self,
         client: &CurseForgeClient,
         refs: &[CurseForgeFileRef],
+        covered: &HashSet<String>,
         version_dir: &Path,
     ) -> Result<RemotePlan> {
         let index = CurseForgeIndex::fetch(client, refs).await?;
@@ -944,6 +952,9 @@ impl Aurora {
                         Some(url) => task_for_file_url(url, &dest, file),
                         None => {
                             let item = index.blocked(reference, file, sub)?;
+                            if covered.contains(&item.destination.to_lowercase()) {
+                                continue;
+                            }
                             match self.claimed_copy(&item).await? {
                                 Some(staged) => plan.claimed.push(ClaimedCopy { staged, dest }),
                                 None => blocked.push(item),
@@ -1236,6 +1247,16 @@ pub(crate) async fn curseforge_remote_facts(
             .map(|(sum, length)| sum + length);
     }
     Ok(RemoteFacts { entries, bytes })
+}
+
+/// 覆盖文件的落点，已转小写，与 Windows 上落盘的结果一致。覆盖文件在下载之后解出，落点相同的远程文件
+/// 反正会被盖掉，受限的那些不必让用户手动下载。
+fn override_landings(archive: &PackArchive) -> HashSet<String> {
+    archive
+        .overrides
+        .iter()
+        .map(|entry| entry.path.as_str().to_lowercase())
+        .collect()
 }
 
 fn file_name_of(path: &str) -> String {
@@ -2253,7 +2274,10 @@ mod tests {
             ),
         ]);
 
-        let plan = aurora.remote_downloads(&files, &inst).await.unwrap();
+        let plan = aurora
+            .remote_downloads(&files, &HashSet::new(), &inst)
+            .await
+            .unwrap();
         aurora.download_remote(plan.downloads, None).await.unwrap();
 
         assert_eq!(
@@ -2290,7 +2314,10 @@ mod tests {
             &[format!("{}/locked.jar", cdn.uri())],
             b"x",
         )]);
-        let plan = aurora.remote_downloads(&locked, &inst).await.unwrap();
+        let plan = aurora
+            .remote_downloads(&locked, &HashSet::new(), &inst)
+            .await
+            .unwrap();
         let err = aurora
             .download_remote(plan.downloads, None)
             .await
@@ -2417,7 +2444,12 @@ mod tests {
         let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
 
         let plan = aurora
-            .curseforge_downloads(&client, &refs(&[(1, 11), (2, 22), (3, 33), (4, 44)]), dir)
+            .curseforge_downloads(
+                &client,
+                &refs(&[(1, 11), (2, 22), (3, 33), (4, 44)]),
+                &HashSet::new(),
+                dir,
+            )
             .await
             .unwrap();
         assert!(plan.claimed.is_empty());
@@ -2447,7 +2479,12 @@ mod tests {
         );
 
         let err = aurora
-            .curseforge_downloads(&client, &refs(&[(1, 11), (5, 55), (6, 66)]), dir)
+            .curseforge_downloads(
+                &client,
+                &refs(&[(1, 11), (5, 55), (6, 66)]),
+                &HashSet::new(),
+                dir,
+            )
             .await
             .unwrap_err();
         let CoreError::FileDistributionBlocked { files } = &err else {
@@ -2488,7 +2525,7 @@ mod tests {
         assert_eq!((files[0].fingerprint, files[0].size), (0, Some(10)));
 
         let err = aurora
-            .curseforge_downloads(&client, &refs(&[(9, 99)]), dir)
+            .curseforge_downloads(&client, &refs(&[(9, 99)]), &HashSet::new(), dir)
             .await
             .unwrap_err();
         assert!(
@@ -3105,6 +3142,107 @@ mod tests {
         assert!(
             matches!(&err, CoreError::Modpack(aurora_modpack::Error::NotOptional { path }) if path == "mods/core.jar"),
             "{err:?}"
+        );
+    }
+
+    /// 受限文件的落点被覆盖层盖住时不用手动下载：覆盖文件在下载之后解出，手动下载的那份反正会被盖掉。
+    /// 预览不列它、准备不报受限，导入后落点是包里自带的内容；落点比较不分大小写。别的受限文件照常报。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_files_covered_by_an_override_need_no_manual_download() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    cf_file(55, 5, "Covered.jar", None),
+                    cf_file(66, 6, "still-blocked.jar", None),
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": [cf_mod(5, 6), cf_mod(6, 6)]})),
+            )
+            .mount(&server)
+            .await;
+        for (project, file) in [(5u32, 55u32), (6, 66)] {
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/v1/mods/{project}/files/{file}/download-url"
+                )))
+                .respond_with(ResponseTemplate::new(403))
+                .mount(&server)
+                .await;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+        let covered = serde_json::json!({ "projectID": 5, "fileID": 55, "required": true });
+        let blocked = serde_json::json!({ "projectID": 6, "fileID": 66, "required": true });
+        let bundled: &[(&str, &[u8])] = &[("overrides/mods/covered.jar", b"bundled jar")];
+        let none = ImportSelection::default();
+
+        // 只有被盖住的那个：预览不列、导入不拦。
+        let pack = tmp.path().join("自带.zip");
+        write_curseforge_pack(
+            &pack,
+            &curseforge_vanilla_manifest(serde_json::json!([covered])),
+            bundled,
+        );
+        let preview = aurora.preview_modpack_file(&pack).await.unwrap();
+        assert_eq!(preview.blocked_files, Vec::new());
+        assert_eq!(
+            preview
+                .mods
+                .iter()
+                .map(|m| (m.file_name.as_str(), m.availability))
+                .collect::<Vec<_>>(),
+            vec![("covered.jar", PackFileAvailability::Bundled)]
+        );
+        let outcome = aurora
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("自带"),
+                &none,
+                "task-covered",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(outcome.version_dir.join("mods").join("covered.jar")).unwrap(),
+            b"bundled jar"
+        );
+
+        // 另一个没被盖住的文件照常报，清单里只有它。
+        let pack = tmp.path().join("混合.zip");
+        write_curseforge_pack(
+            &pack,
+            &curseforge_vanilla_manifest(serde_json::json!([covered, blocked])),
+            bundled,
+        );
+        let preview = aurora.preview_modpack_file(&pack).await.unwrap();
+        assert_eq!(
+            preview
+                .blocked_files
+                .iter()
+                .map(|f| f.file_id)
+                .collect::<Vec<_>>(),
+            vec![66]
+        );
+        let err = aurora
+            .prepare_modpack(&ModpackSource::File { path: pack }, None, &none, None)
+            .await
+            .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = err else {
+            panic!("应报受限文件");
+        };
+        assert_eq!(
+            files.iter().map(|f| f.file_id).collect::<Vec<_>>(),
+            vec![66]
         );
     }
 
