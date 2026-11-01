@@ -18,6 +18,7 @@ import {
 } from "./mock/handlers/mods";
 import { beginMockTask, endMockTask } from "./mock/handlers/tasks";
 import {
+  addLocalMods,
   checkUpdates,
   isModFileBusy,
   installedSources,
@@ -117,6 +118,26 @@ describe("实例 Mod 列表", () => {
     // 删掉后 Mod 一侧的状态一并忘掉，同名新实例不会凭空带着旧 Mod。
     await deleteInstance("樱花生存二周目");
     expect(mockModFileCount("樱花生存二周目")).toBe(0);
+  });
+
+  it("添加本地 jar：逐项给结果，加成的算进列表、Mod 数与安装历史；同名与非 jar 只拒那一项，扩展名大写落盘改小写", async () => {
+    const before = mockModFileCount(MOCK_MOD_INSTANCE);
+    const results = await addLocalMods(MOCK_MOD_INSTANCE, ["D:\\dl\\extra.jar", "D:\\dl\\handmade-1.0.jar", "D:\\dl\\Shout.JAR", "D:\\dl\\notes.txt"]);
+    expect(results).toEqual([
+      { status: "ok", source: "D:\\dl\\extra.jar", file_name: "extra.jar" },
+      { status: "error", source: "D:\\dl\\handmade-1.0.jar", error: { code: "local_mod_refused", message: "mods 目录里已有 handmade-1.0.jar，先移除它再添加", detail: { path: "D:\\dl\\handmade-1.0.jar" } } },
+      { status: "ok", source: "D:\\dl\\Shout.JAR", file_name: "Shout.jar" },
+      { status: "error", source: "D:\\dl\\notes.txt", error: { code: "local_mod_refused", message: "notes.txt 不是 .jar 文件", detail: { path: "D:\\dl\\notes.txt" } } },
+    ]);
+    expect(mockModFileCount(MOCK_MOD_INSTANCE)).toBe(before + 2);
+    const listed = await listMods(MOCK_MOD_INSTANCE);
+    expect(listed.find((m) => m.file_name === "extra.jar")?.source).toBeNull();
+    expect((await listHistory(MOCK_MOD_INSTANCE)).at(-1)).toMatchObject({ kind: "install", files: ["extra.jar", "Shout.jar"] });
+  });
+
+  it("添加本地 jar 的入参与后端同文：空数组、空路径在占住实例之前拒绝", async () => {
+    expect(await failure(addLocalMods(MOCK_MOD_INSTANCE, []))).toMatchObject({ code: "invalid_argument", message: "paths 不能为空" });
+    expect(await failure(addLocalMods(MOCK_MOD_INSTANCE, ["D:\\a.jar", " "]))).toMatchObject({ code: "invalid_argument", message: "paths 里有空路径" });
   });
 
   it("启停改文件名并返回新路径；已是目标状态不动；文件不在如实报错", async () => {

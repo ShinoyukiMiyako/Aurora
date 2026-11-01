@@ -417,6 +417,11 @@ export interface LauncherActions {
    * 整次被拒（实例忙碌等）照常抛出。
    */
   toggleMods(instanceId: string, fileNames: readonly string[], enabled: boolean): Promise<void>;
+  /**
+   * 把本地 jar 复制进实例：逐个文件，一个被拒不中断其余的。全部加成给 success 通知，有被拒的给 warning 通知并写明原因；
+   * 整次被拒（实例忙碌等）照常抛出。
+   */
+  addLocalMods(instanceId: string, paths: readonly string[]): Promise<void>;
   updateMod(instanceId: string, fileName: string): Promise<void>;
   /**
    * 不给 picked：现查一次可更新项，全部更新（没有可更新的提示都已是最新）。
@@ -2971,6 +2976,22 @@ export class LauncherStore {
           const copy = TOAST_COPY.modsDisabled(results.length);
           store.pushToast("info", copy.title, copy.body);
         }
+      },
+      async addLocalMods(instanceId, paths) {
+        if (paths.length === 0) throw new Error("添加本地 Mod 至少要有一个文件");
+        store.assertModsEditable(instanceId);
+        let results: modsIpc.LocalModResult[];
+        try {
+          results = await modsIpc.addLocalMods(instanceId, paths);
+        } finally {
+          // 落盘之后写历史失败也是整次报错，文件已经在 mods 里：列表、历史与可更新项不能停在动手之前
+          store.modsChanged(instanceId);
+        }
+        await store.fetchInstances();
+        const added = results.flatMap((r) => (r.status === "ok" ? [r.file_name] : []));
+        const failed = results.flatMap((r) => (r.status === "error" ? [r.error.message] : []));
+        if (failed.length > 0) store.pushToast("warning", TOAST_COPY.modsAddFailed(added.length, failed.length), batchFailureReason(failed));
+        else store.pushToast("success", added.length === 1 ? TOAST_COPY.modAdded(added[0]) : TOAST_COPY.modsAdded(added.length));
       },
       async updateAllMods(instanceId, picked) {
         store.assertModsEditable(instanceId);

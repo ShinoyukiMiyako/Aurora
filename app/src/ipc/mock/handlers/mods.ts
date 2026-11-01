@@ -13,6 +13,7 @@ import type {
   InstalledSource,
   InstanceMatch,
   InstanceSources,
+  LocalModResult,
   MatchState,
   ModLoader,
   ModMetadata,
@@ -559,6 +560,29 @@ function batchFileNames(value: unknown): string[] {
   return names;
 }
 
+/** 添加本地 jar 的路径：参数校验与后端同文，先于占住实例。 */
+function localModPaths(value: unknown): string[] {
+  if (!Array.isArray(value)) throw new Error("add_local_mods 缺少数组参数 paths");
+  const paths = value.map((p) => requireString(p, "paths[]"));
+  if (paths.length === 0) throw new IpcError("invalid_argument", "paths 不能为空");
+  if (paths.some((p) => p.trim() === "")) throw new IpcError("invalid_argument", "paths 里有空路径");
+  return paths;
+}
+
+/** 已经占住实例之后的单个本地 jar：与后端一样按文件名与 mod_id 查重，返回落盘的文件名。假后端读不到真文件，mod_id 取文件名去掉扩展名。 */
+function addLocalFile(instance: MockInstance, source: string): string {
+  const name = source.slice(source.lastIndexOf("\\") + 1);
+  const refused = (message: string) => new IpcError("local_mod_refused", message, { path: source });
+  if (!name.toLowerCase().endsWith(".jar")) throw refused(`${name} 不是 .jar 文件`);
+  const stem = name.slice(0, -".jar".length);
+  const fileName = `${stem}.jar`;
+  if (present(instance, fileName)) throw refused(`mods 目录里已有 ${fileName}，先移除它再添加`);
+  const twin = instance.files.find((f) => f.metadata !== null && f.metadata.mod_id === stem);
+  if (twin !== undefined) throw refused(`实例里已有同一个 Mod（${twin.file_name}），先移除它再添加`);
+  instance.files.push({ file_name: fileName, size: 4_096, modified_ms: Date.now(), metadata: metadata(stem, stem, "1.0") });
+  return fileName;
+}
+
 /**
  * 更新检查设置：null 为恢复检查；形状与后端核心类型的 serde 名一致，认不出的原样写进报错。
  * 后端形参是 Option，Tauri 对缺省的键给 None，所以不带 hold 与显式传 null 一样都是恢复检查。
@@ -924,6 +948,28 @@ export const handlers: MockHandlers = {
           return { status: "error", file_name: fileName, error: { code: error.code, message: error.message, ...detail } };
         }
       });
+    });
+  },
+  // 逐个文件添加，一个被拒不中断其余的；本地文件没有来源，不进卷宗，历史记一条安装事件
+  add_local_mods: (args): LocalModResult[] => {
+    const id = requireString(args.versionId, "versionId");
+    const paths = localModPaths(args.paths);
+    return withMockInstance(id, "modifying", () => {
+      const instance = mockInstance(id);
+      const results = paths.map((source): LocalModResult => {
+        try {
+          return { status: "ok", source, file_name: addLocalFile(instance, source) };
+        } catch (error) {
+          if (!(error instanceof IpcError)) throw error;
+          return { status: "error", source, error: { code: error.code, message: error.message, detail: error.detail } };
+        }
+      });
+      const files = results.flatMap((r) => (r.status === "ok" ? [r.file_name] : []));
+      if (files.length > 0) {
+        const at = nowSeconds();
+        instance.history.push({ kind: "install", id: nextEventId(instance.history, at), at, files });
+      }
+      return results;
     });
   },
   // 只改卷宗不碰 jar：与运行中的游戏兼容，同样以 modifying 占住实例
