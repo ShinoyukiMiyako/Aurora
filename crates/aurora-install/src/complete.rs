@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_download::DownloadTask;
+use aurora_download::{CancellationToken, DownloadTask};
 use aurora_version::{AssetLayout, AssetObjectsIndex, VersionJson};
 
 use crate::context::InstallContext;
@@ -223,7 +223,7 @@ async fn materialize_assets(
         }
         AssetLayout::MapToResources => cx.layout.resources_dir(),
     };
-    materialize_objects(cx.layout, index, &target_dir).await
+    materialize_objects(cx.layout, index, &target_dir, cx.cancel).await
 }
 
 /// 把索引里的对象按逻辑名铺到 `target_dir`。对象必须已在 `assets/objects` 里，缺了报错。
@@ -231,6 +231,7 @@ pub async fn materialize_objects(
     layout: &GameLayout,
     index: &AssetObjectsIndex,
     target_dir: &Path,
+    cancel: Option<&CancellationToken>,
 ) -> Result<()> {
     let jobs: Vec<(PathBuf, PathBuf, u64)> = index
         .objects
@@ -243,7 +244,7 @@ pub async fn materialize_objects(
             ))
         })
         .collect::<Result<_>>()?;
-    let turn = lock_dir(&target_dir, cx.cancel).await?;
+    let turn = lock_dir(target_dir, cancel).await?;
     tokio::task::spawn_blocking(move || {
         let _turn = turn;
         copy_missing(&jobs)

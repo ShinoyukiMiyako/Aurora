@@ -357,7 +357,7 @@ mod tests {
         .unwrap();
         let ctx = RuntimeContext::new(OsName::Windows, "x86_64", 64);
 
-        let count = extract_all_natives(&version, &ctx, &layout, "1.16.5")
+        let count = extract_all_natives(&version, &ctx, &layout, "1.16.5", None)
             .await
             .unwrap();
         assert_eq!(count, 1);
@@ -382,7 +382,7 @@ mod tests {
             )],
         });
 
-        let count = extract_all_natives(&version, &ctx, &layout, "26.3")
+        let count = extract_all_natives(&version, &ctx, &layout, "26.3", None)
             .await
             .unwrap();
 
