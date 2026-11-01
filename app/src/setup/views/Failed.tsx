@@ -30,23 +30,34 @@ function selectContents(event: FocusEvent<HTMLElement>): void {
 export function Failed({ copy, failure, recovery, standardInstaller, onRecover, onOpenLog, onReport, onStandardInstaller, onBack }: FailedProps) {
   const text = copy.failed;
   const reason = text.reason[failure.code];
-  // NSIS 没有互斥，连点两下会有两个向导同写一个目录。成功后窗口就关了，失败进 fatal，这个状态不用复位
-  const [leaving, setLeaving] = useState(false);
-  useEscapeListener(true, onBack);
+  // 重试和标准安装程序各起一个 NSIS，NSIS 之间没有互斥，同写一个目录只会留下半套文件，还会让窗口关不掉。
+  // 所以选定一条路就关上别的路。两条路的结局都是离开这一页或关窗，出错进 fatal，这个状态不用复位
+  const [leaving, setLeaving] = useState<"recover" | "standard" | null>(null);
+  useEscapeListener(leaving === null, onBack);
 
   return (
     <Frame
       title={reason.title}
       lead={<span role="alert">{reason.body(failure.detail)}</span>}
       footerStart={
-        <Button variant="ghost" onClick={onBack}>
+        <Button variant="ghost" disabled={leaving !== null} focusableWhenDisabled onClick={onBack}>
           {text.back}
         </Button>
       }
       footer={
         <>
           <Button onClick={onOpenLog}>{text.openLog}</Button>
-          <Button variant="primary" autoFocus onClick={onRecover}>
+          <Button
+            variant="primary"
+            autoFocus
+            loading={leaving === "recover"}
+            disabled={leaving === "standard"}
+            focusableWhenDisabled
+            onClick={() => {
+              setLeaving("recover");
+              onRecover();
+            }}
+          >
             {recovery === "retry" ? text.retry : text.changeLocation}
           </Button>
         </>
@@ -62,9 +73,11 @@ export function Failed({ copy, failure, recovery, standardInstaller, onRecover, 
           <Button
             variant="ghost"
             size="sm"
-            loading={leaving}
+            loading={leaving === "standard"}
+            disabled={leaving === "recover"}
+            focusableWhenDisabled
             onClick={() => {
-              setLeaving(true);
+              setLeaving("standard");
               onStandardInstaller();
             }}
           >

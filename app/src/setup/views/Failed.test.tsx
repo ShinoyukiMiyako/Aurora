@@ -189,6 +189,51 @@ describe("标准安装程序", () => {
     expect(onStandardInstaller).toHaveBeenCalledTimes(1);
     expect(button(zh.failed.standardInstaller).getAttribute("aria-busy")).toBe("true");
   });
+
+  it("点过之后重试、返回和 Esc 都走不通，焦点还在原地", () => {
+    const onRecover = vi.fn();
+    const onBack = vi.fn();
+    view = render(failed({ standardInstaller: true, onRecover, onBack }));
+    const standard = button(zh.failed.standardInstaller);
+    standard.focus();
+    act(() => standard.click());
+    act(() => button(zh.failed.retry).click());
+    act(() => button(zh.failed.back).click());
+    keydown(document.body, "Escape");
+    expect(onRecover).not.toHaveBeenCalled();
+    expect(onBack).not.toHaveBeenCalled();
+    expect(button(zh.failed.retry).getAttribute("aria-disabled")).toBe("true");
+    expect(button(zh.failed.back).getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(standard);
+  });
+
+  it("点了重试之后标准安装程序、返回和 Esc 都走不通，重试转加载", () => {
+    const onRecover = vi.fn();
+    const onBack = vi.fn();
+    const onStandardInstaller = vi.fn();
+    view = render(failed({ standardInstaller: true, onRecover, onBack, onStandardInstaller }));
+    act(() => button(zh.failed.retry).click());
+    act(() => button(zh.failed.retry).click());
+    act(() => button(zh.failed.standardInstaller).click());
+    act(() => button(zh.failed.back).click());
+    keydown(document.body, "Escape");
+    expect(onRecover).toHaveBeenCalledTimes(1);
+    expect(onStandardInstaller).not.toHaveBeenCalled();
+    expect(onBack).not.toHaveBeenCalled();
+    expect(button(zh.failed.retry).getAttribute("aria-busy")).toBe("true");
+    expect(button(zh.failed.standardInstaller).getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("点过之后打开日志和问题反馈照常可用：它们不起安装", () => {
+    const onOpenLog = vi.fn();
+    const onReport = vi.fn();
+    view = render(failed({ standardInstaller: true, onOpenLog, onReport }));
+    act(() => button(zh.failed.standardInstaller).click());
+    act(() => button(zh.failed.openLog).click());
+    act(() => button(zh.failed.report).click());
+    expect(onOpenLog).toHaveBeenCalledTimes(1);
+    expect(onReport).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("接上流程", () => {
@@ -237,5 +282,40 @@ describe("接上流程", () => {
     });
     await vi.waitFor(() => expect(fake.callsOf("close")).toEqual([[true]]));
     expect(fake.calls.map((call) => call.name).filter((name) => name === "runStandardInstaller" || name === "close")).toEqual(["runStandardInstaller", "close"]);
+  });
+
+  it("标准安装程序还在起的时候点重试，不会再起一遍安装，窗口照常关掉", async () => {
+    const fake = await failedApp(FAILURE);
+    let started: () => void = () => {
+      throw new Error("标准安装程序还没开始起");
+    };
+    vi.spyOn(fake, "runStandardInstaller").mockImplementation(() => new Promise((resolve) => (started = resolve)));
+    act(() => button(zh.failed.standardInstaller).click());
+    await act(async () => {
+      button(zh.failed.retry).click();
+    });
+    keydown(document.body, "Escape");
+    expect(fake.callsOf("launcherRunning")).toEqual([]);
+    expect(fake.callsOf("install")).toEqual([]);
+    expect(heading()).toBe(zh.failed.reason.payload_exit.title);
+    await act(async () => started());
+    await vi.waitFor(() => expect(fake.callsOf("close")).toEqual([[true]]));
+  });
+
+  it("重试还在查进程的时候点标准安装程序，不会两边都起", async () => {
+    const fake = await failedApp(FAILURE);
+    let answer: (running: boolean) => void = () => {
+      throw new Error("还没开始查进程");
+    };
+    vi.spyOn(fake, "launcherRunning").mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+    await act(async () => {
+      button(zh.failed.retry).click();
+    });
+    await act(async () => {
+      button(zh.failed.standardInstaller).click();
+    });
+    expect(fake.callsOf("runStandardInstaller")).toEqual([]);
+    await act(async () => answer(false));
+    expect(fake.callsOf("install")).toHaveLength(1);
   });
 });
