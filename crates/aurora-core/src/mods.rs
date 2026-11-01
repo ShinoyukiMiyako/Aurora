@@ -2254,10 +2254,7 @@ mod tests {
             .id()
             .to_owned();
         let err = aurora.rollback("1.21", &first_update).await.unwrap_err();
-        assert!(
-            refusal(&err).1.contains("先回滚之后的那次更新"),
-            "{err:?}"
-        );
+        assert!(refusal(&err).1.contains("先回滚之后的那次更新"), "{err:?}");
         assert_eq!(dir_names(&mods_dir).await, before);
         let jars: Vec<_> = aurora
             .list_mods("1.21")

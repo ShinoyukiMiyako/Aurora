@@ -30,7 +30,7 @@ use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
 use crate::ledger::{LedgerEntry, UpdateHold};
 use crate::modfs::{
-    bounded_map, ledger_key, local_concurrency, lock_mods_dir, NETWORK_CONCURRENCY, present, refuse,
+    NETWORK_CONCURRENCY, bounded_map, ledger_key, local_concurrency, lock_mods_dir, present, refuse,
 };
 use crate::mods::{InstanceDirs, mod_file_path, scan_installed};
 

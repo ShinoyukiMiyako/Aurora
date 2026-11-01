@@ -566,7 +566,10 @@ mod tests {
         let slot = aurora.claim_slot(&file);
         std::fs::create_dir_all(slot.parent().unwrap()).unwrap();
         std::fs::write(&slot, b"good").unwrap();
-        assert_eq!(aurora.claimed_copy(&file).await.unwrap(), Some(slot.clone()));
+        assert_eq!(
+            aurora.claimed_copy(&file).await.unwrap(),
+            Some(slot.clone())
+        );
 
         let verified_at = std::fs::metadata(&slot).unwrap().modified().unwrap();
         let rewrite = |content: &[u8], modified: std::time::SystemTime| {
@@ -575,7 +578,10 @@ mod tests {
             handle.set_modified(modified).unwrap();
         };
         rewrite(b"evil", verified_at);
-        assert_eq!(aurora.claimed_copy(&file).await.unwrap(), Some(slot.clone()));
+        assert_eq!(
+            aurora.claimed_copy(&file).await.unwrap(),
+            Some(slot.clone())
+        );
 
         rewrite(b"evil", verified_at + std::time::Duration::from_secs(2));
         assert_eq!(aurora.claimed_copy(&file).await.unwrap(), None);

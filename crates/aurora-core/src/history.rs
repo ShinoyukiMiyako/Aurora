@@ -1343,10 +1343,7 @@ mod tests {
         let err = aurora.rollback(VERSION_ID, "200-001").await.unwrap_err();
         let (path, reason) = refusal(&err);
         assert_eq!(path, store.path());
-        assert!(
-            reason.contains("先回滚之后的那次更新"),
-            "原因实得 {reason}"
-        );
+        assert!(reason.contains("先回滚之后的那次更新"), "原因实得 {reason}");
         assert_eq!(dir_names(&mods_dir).await, disk_before);
         assert_eq!(aurora.history(VERSION_ID).await.unwrap().events.len(), 3);
 
