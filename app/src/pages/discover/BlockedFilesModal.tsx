@@ -3,9 +3,10 @@
 // 从导入确认步打开时，全部找到后「继续导入」回确认步重新读取；从安装失败态打开时「重新安装」重排这个任务。
 // 检查进行中可以关掉清单：后台检查不打断，结果丢弃。
 
-import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
+import { AnimatePresence, motion, useIsPresent } from "framer-motion";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { fade } from "../../lib/motion";
+import { cx } from "../../lib/util";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions } from "../../state/launcher";
 import type { BlockedFileDto, ClaimReportDto } from "../../state/store";
@@ -32,10 +33,14 @@ export interface BlockedFilesModalProps {
   onAllFound: () => void;
 }
 
-/** 落点所在的目录：「装到 mods/」。CurseForge 文件总是落进实例下的某个子目录。 */
-export function destinationDir(destination: string): string {
+/**
+ * 落点所在的目录：「装到 mods/」。整合包里的文件总是落进实例下的某个子目录；落点只有文件名的是整合包本体
+ * （作者不允许启动器直接下载整个包），它不装进实例的哪个目录，返回 null。以斜杠开头的落点违反契约。
+ */
+export function destinationDir(destination: string): string | null {
   const slash = destination.lastIndexOf("/");
-  if (slash <= 0) throw new Error(`需要手动下载的文件落点 ${destination} 不在任何子目录里`);
+  if (slash === -1) return null;
+  if (slash === 0) throw new Error(`需要手动下载的文件落点 ${destination} 不是相对路径`);
   return destination.slice(0, slash);
 }
 
@@ -70,10 +75,11 @@ function FadeBox({ block, children }: { block: boolean; children: ReactNode }) {
   );
 }
 
-/** 状态标签与说明块的出现与切换：淡入淡出、不位移；系统开了减少动效时直接切换。 */
+/**
+ * 状态标签与说明块的出现与切换：只做透明度过渡、不位移。减少动效时也照样淡入淡出：只去掉位移类动效，
+ * 不超过 200 ms 的透明度过渡保留，否则标签与说明块会无过渡地跳变。
+ */
 function Fade({ id, block = false, children }: { id: string | null; block?: boolean; children: ReactNode }) {
-  const reduced = useReducedMotionConfig() === true;
-  if (reduced) return id === null ? null : children;
   return (
     <AnimatePresence mode="popLayout" initial={false}>
       {id !== null && (
@@ -156,7 +162,7 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
       size="md"
       footer={
         <>
-          <span className={styles.footNote}>{BLOCKED_COPY.footNote}</span>
+          <span className={cx(styles.footNote, styles.blockedFootNote)}>{BLOCKED_COPY.footNote}</span>
           <Button variant="ghost" onClick={close}>
             {BLOCKED_COPY.close}
           </Button>
@@ -170,11 +176,12 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
           <List aria-label={BLOCKED_COPY.title}>
             {files.map((file) => {
               const status = statuses === null ? undefined : statuses.get(file.file_id);
+              const dir = destinationDir(file.destination);
               return (
                 <ListRow
                   key={file.file_id}
                   title={<span className={styles.blockedName}>{file.file_name}</span>}
-                  meta={<span className={styles.blockedDest}>{BLOCKED_COPY.destination(destinationDir(file.destination))}</span>}
+                  meta={dir === null ? undefined : <span className={styles.blockedDest}>{BLOCKED_COPY.destination(dir)}</span>}
                   trailing={
                     <>
                       <Fade id={status === undefined ? null : status}>

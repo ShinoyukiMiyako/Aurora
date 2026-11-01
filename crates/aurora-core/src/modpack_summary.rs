@@ -310,7 +310,9 @@ fn parse_central_directory(
             .get(name_start..name_start + name_len)
             .ok_or_else(|| format!("目录第 {} 项的文件名越界", index + 1))?;
         entries.push(CentralEntry {
-            name: String::from_utf8_lossy(name).into_owned(),
+            // 与本地读包同一套解码；两步都解不了的才退成替换字符，摘要只拿名字数文件，不落盘。
+            name: aurora_modpack::decode_entry_name(name)
+                .unwrap_or_else(|| String::from_utf8_lossy(name).into_owned()),
             method,
             compressed: u64::from(compressed),
             uncompressed: u64::from(uncompressed),
@@ -555,6 +557,71 @@ mod tests {
             (5, 10 + 4 + 7 + 7 + 3),
             "两层里的 extra.jar 只算一份"
         );
+        assert_eq!(
+            (preview.override_files, preview.override_bytes),
+            (summary.override_files, summary.override_bytes)
+        );
+    }
+
+    /// 中文系统上的老打包工具不设 UTF-8 标志、按 GBK 写条目名。「汉化.jar」与「补丁.jar」的 GBK 字节都不是合法
+    /// UTF-8，按替换字符解码会变成同一个名字。摘要要与本地读包同样先试 UTF-8 再按 GBK 解，两个 Mod 各算一个。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gbk_named_override_jars_are_counted_like_the_local_preview() {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        // 占位名与 GBK 名字节数相同，写完再原地换成 GBK 字节（本地头与中央目录各一处）。
+        for (name, bytes) in [
+            ("overrides/mods/QQQQ.jar", &b"hanhua"[..]),
+            ("overrides/mods/WWWW.jar", b"buding!"),
+        ] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.start_file("modrinth.index.json", options).unwrap();
+        writer.write_all(manifest().to_string().as_bytes()).unwrap();
+        let mut pack = writer.finish().unwrap().into_inner();
+        for (placeholder, gbk) in [
+            (&b"QQQQ.jar"[..], &[0xba, 0xba, 0xbb, 0xaf][..]),
+            (b"WWWW.jar", &[0xb2, 0xb9, 0xb6, 0xa1]),
+        ] {
+            let mut patched = 0;
+            let mut at = 0;
+            while let Some(found) = pack[at..]
+                .windows(placeholder.len())
+                .position(|w| w == placeholder)
+            {
+                let start = at + found;
+                pack[start..start + 4].copy_from_slice(gbk);
+                at = start + placeholder.len();
+                patched += 1;
+            }
+            assert_eq!(patched, 2, "本地头与中央目录各有一处条目名");
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let local = tmp.path().join("中文 包.mrpack");
+        std::fs::write(&local, &pack).unwrap();
+        let (server, _, _) = serve(pack, true).await;
+        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+
+        let summary = aurora
+            .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
+            .await
+            .unwrap();
+        let preview = aurora.preview_modpack_file(&local).await.unwrap();
+        let mut names: Vec<&str> = preview.mods.iter().map(|m| m.path.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "mods/lithium.jar",
+                "mods/sodium.jar",
+                "mods/汉化.jar",
+                "mods/补丁.jar"
+            ]
+        );
+        assert_eq!(summary.mod_files, 4, "sodium、lithium、汉化、补丁");
+        assert_eq!(preview.mod_files, summary.mod_files);
+        assert_eq!((summary.override_files, summary.override_bytes), (2, 6 + 7));
         assert_eq!(
             (preview.override_files, preview.override_bytes),
             (summary.override_files, summary.override_bytes)

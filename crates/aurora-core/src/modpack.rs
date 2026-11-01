@@ -406,10 +406,8 @@ impl Aurora {
                 project_id,
                 version_id,
             } => {
-                let (pack, dir) = self
-                    .download_platform_pack(*platform, project_id, version_id, events)
-                    .await?;
-                (pack, Some(dir))
+                self.download_platform_pack(*platform, project_id, version_id, events)
+                    .await?
             }
         };
         match self
@@ -820,13 +818,16 @@ impl Aurora {
     }
 
     /// 平台整合包下载到缓存目录，返回包路径与它所在的临时目录。
+    ///
+    /// CurseForge 包本体也可能不允许启动器直接下载：这时报的受限清单里只有这个包，用户从网页下载、认领进
+    /// 暂存位后，重新安装直接读暂存副本，不再向 CDN 要，也没有要删的临时目录（暂存副本留给下次用）。
     async fn download_platform_pack(
         &self,
         platform: Platform,
         project_id: &str,
         version_id: &str,
         events: Option<&EventSink>,
-    ) -> Result<(PathBuf, PathBuf)> {
+    ) -> Result<(PathBuf, Option<PathBuf>)> {
         // 版本 id 要拼进缓存目录名。
         if !is_safe_file_name(version_id) {
             return Err(CoreError::InvalidProjectId {
@@ -842,9 +843,25 @@ impl Aurora {
         let dir = cache_root
             .join("modpacks")
             .join(format!("{platform_slug}-{version_id}"));
-        let (file_name, task) = self
+        let (file_name, task) = match self
             .platform_file_task(platform, project_id, version_id, &dir, "")
-            .await?;
+            .await
+        {
+            Ok(found) => found,
+            Err(CoreError::FileDistributionBlocked { files }) => {
+                if let [pack] = files.as_slice()
+                    && let Some(staged) = self.claimed_copy(pack).await?
+                {
+                    emit(
+                        events,
+                        CoreEvent::stage(format!("使用手动下载的整合包 {}", pack.file_name)),
+                    );
+                    return Ok((staged, None));
+                }
+                return Err(CoreError::FileDistributionBlocked { files });
+            }
+            Err(err) => return Err(err),
+        };
         emit(events, CoreEvent::stage(format!("下载整合包 {file_name}")));
         let dest = task.dest.clone();
         let report = self
@@ -854,7 +871,7 @@ impl Aurora {
         if let Some(failure) = report.failures.into_iter().next() {
             return Err(failure.error.into());
         }
-        Ok((dest, dir))
+        Ok((dest, Some(dir)))
     }
 
     /// 把清单里的远程文件变成下载任务（落点都在实例目录下）；CurseForge 的受限文件认领到了就从暂存位复制。
@@ -3039,6 +3056,94 @@ mod tests {
                 .blocked_claims_dir()
                 .join("curseforge-55")
                 .join("blocked-a.jar")
+                .is_file(),
+            "暂存副本导入后留着"
+        );
+        assert!(renamed.is_file(), "下载文件夹里的原文件不动");
+    }
+
+    /// CurseForge 整合包本体就不允许启动器直接下载：第一次导入报受限文件，清单里只有这个包；用户从网页
+    /// 下载、认领进暂存位后再导入，直接用暂存副本，不再向 CDN 要包，暂存副本导入后留着。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claimed_curseforge_pack_file_is_imported_without_downloading() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("built.zip");
+        write_curseforge_pack(
+            &built,
+            &curseforge_vanilla_manifest(serde_json::json!([])),
+            &[("overrides/options.txt", b"fov:70")],
+        );
+        let pack_bytes = std::fs::read(&built).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700/files/7001"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": cf_file_with(7001, 700, "受限包-1.0.zip", None, &pack_bytes)
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700/files/7001/download-url"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": cf_mod(700, 4471)})),
+            )
+            .mount(&server)
+            .await;
+        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+        let source = ModpackSource::Platform {
+            platform: Platform::CurseForge,
+            project_id: "700".into(),
+            version_id: "7001".into(),
+        };
+        let none = ImportSelection::default();
+
+        let err = aurora
+            .install_modpack(&source, Some("网页下的包"), &none, "task-b1", None)
+            .await
+            .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = err else {
+            panic!("应报受限文件：{err:?}");
+        };
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| (f.file_id, f.file_name.as_str(), f.destination.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(7001, "受限包-1.0.zip", "受限包-1.0.zip")]
+        );
+
+        let downloads = tmp.path().join("下载 文件夹");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let renamed = downloads.join("受限包-1.0 (1).zip");
+        std::fs::write(&renamed, &pack_bytes).unwrap();
+        let report = aurora
+            .claim_blocked_files(&downloads, &files)
+            .await
+            .unwrap();
+        assert_eq!(report.missing, Vec::<u32>::new());
+
+        let outcome = aurora
+            .install_modpack(&source, Some("网页下的包"), &none, "task-b2", None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.modpack.platform, Some(Platform::CurseForge));
+        assert_eq!(outcome.modpack.version_id.as_deref(), Some("7001"));
+        assert_eq!(
+            std::fs::read(outcome.version_dir.join("options.txt")).unwrap(),
+            b"fov:70"
+        );
+        assert!(
+            aurora
+                .blocked_claims_dir()
+                .join("curseforge-7001")
+                .join("受限包-1.0.zip")
                 .is_file(),
             "暂存副本导入后留着"
         );

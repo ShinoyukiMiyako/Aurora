@@ -60,6 +60,13 @@ function resolveColor(value: string, tokens: Map<string, string>, backdrop: Rgb)
     if (next === undefined) throw new Error(`令牌 ${ref[1]} 没有定义`);
     return resolveColor(next, tokens, backdrop);
   }
+  const blend = /^color-mix\(in srgb, (var\(--sk-[a-z0-9-]+\)) (\d+)%, (var\(--sk-[a-z0-9-]+\))\)$/.exec(value);
+  if (blend !== null) {
+    const first = resolveColor(blend[1], tokens, backdrop);
+    const second = resolveColor(blend[3], tokens, backdrop);
+    const weight = Number(blend[2]) / 100;
+    return first.map((c, i) => c * weight + second[i] * (1 - weight)) as unknown as Rgb;
+  }
   const mix = /^color-mix\(in srgb, (var\(--sk-[a-z0-9-]+\)) (\d+)%, transparent\)$/.exec(value);
   if (mix !== null) {
     const color = resolveColor(mix[1], tokens, backdrop);
@@ -123,5 +130,48 @@ describe("本地整合包投放区的对比度", () => {
     expect(ratios(APPEARANCES["夜樱 · 樱粉"]).over).toBeCloseTo(6.25, 2);
     expect(ratios(APPEARANCES["夜樱 · 紫水晶"]).over).toBeCloseTo(6.62, 2);
     expect(ratios(APPEARANCES["夜樱 · 青苔"]).over).toBeCloseTo(7.57, 2);
+  });
+});
+
+// 需要手动下载的文件清单：「装到 mods/」副文字在弹窗正文（--sk-surface）上，底栏说明在弹窗页脚上。两处都是要被读到的
+// 信息，不能用只给装饰与禁用的 text-3（日樱约 2.1:1）。
+const modalCss = stripComments(readFileSync(new URL("../../ui/Modal.module.css", import.meta.url), "utf8"));
+const modalBlocks = blocks(modalCss);
+
+function modalFooterBackground(): string {
+  const value = modalBlocks.get(".footer")?.get("background");
+  if (value === undefined) throw new Error("Modal.module.css 的 .footer 没有声明 background");
+  return value;
+}
+
+describe("需要手动下载的文件清单的说明文字", () => {
+  it.each(Object.entries(APPEARANCES))("%s：落点副文字与底栏说明对各自底色都不低于 4.5:1", (_name, selectors) => {
+    const tokens = tokensOf(selectors);
+    const surface = resolveColor("var(--sk-surface)", tokens, [0, 0, 0]);
+    const footer = resolveColor(modalFooterBackground(), tokens, surface);
+    const dest = contrast(resolveColor(decl(".blockedDest", "color"), tokens, surface), surface);
+    // 底栏说明的颜色来自共用的 footNote，清单只把字号压到 12
+    const foot = contrast(resolveColor(decl(".footNote", "color"), tokens, footer), footer);
+    expect({ dest: dest >= 4.5, foot: foot >= 4.5 }).toEqual({ dest: true, foot: true });
+  });
+
+  it("两处都是 12 号字的 text-2", () => {
+    expect(decl(".blockedDest", "color")).toBe("var(--sk-text-2)");
+    expect(decl(".blockedDest", "font-size")).toBe("var(--sk-fs-caption)");
+    expect(decl(".footNote", "color")).toBe("var(--sk-text-2)");
+    expect(packBlocks.get(".blockedFootNote")?.has("color")).toBe(false);
+    expect(decl(".blockedFootNote", "font-size")).toBe("var(--sk-fs-caption)");
+    expect(decl(".blockedFootNote", "line-height")).toBe("var(--sk-lh-caption)");
+  });
+});
+
+// 整合包面板、导入弹窗与安装面板共用的底栏左侧说明（「1.21.1 · Fabric · 214 个 Mod」「勾选右侧的实例后安装」）
+// 同样是要读到的信息，落在弹窗页脚的混色底上。
+describe("弹窗底栏左侧说明", () => {
+  it.each(Object.entries(APPEARANCES))("%s：对页脚底色不低于 4.5:1", (_name, selectors) => {
+    const tokens = tokensOf(selectors);
+    const surface = resolveColor("var(--sk-surface)", tokens, [0, 0, 0]);
+    const footer = resolveColor(modalFooterBackground(), tokens, surface);
+    expect(contrast(resolveColor(decl(".footNote", "color"), tokens, footer), footer)).toBeGreaterThanOrEqual(4.5);
   });
 });

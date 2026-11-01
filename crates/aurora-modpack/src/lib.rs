@@ -18,7 +18,7 @@ pub mod manifest;
 pub mod path;
 pub mod writer;
 
-pub use archive::{OverrideEntry, PackArchive, extract_overrides, read_pack};
+pub use archive::{OverrideEntry, PackArchive, decode_entry_name, extract_overrides, read_pack};
 pub use error::{Error, Result};
 pub use manifest::{
     CurseForgeFileRef, ModrinthFile, PackFormat, PackLoader, PackLoaderKind, PackManifest,

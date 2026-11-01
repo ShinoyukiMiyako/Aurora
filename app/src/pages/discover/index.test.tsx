@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { MotionConfig } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
@@ -55,19 +56,21 @@ const flush = () =>
     await settle();
   });
 
-async function mount(route: Parameters<NavApi["go"]>[0] = { page: "discover" }) {
+async function mount(route: Parameters<NavApi["go"]>[0] = { page: "discover" }, reducedMotion: "always" | "never" = "never") {
   view = render(
-    <WindowPortProvider port={port}>
-      <LauncherProvider>
-        <ShellProvider>
-          <PickFolderProvider value={pickFolder}>
-            <Probe />
-            <PageArea />
-            <OverlayRoot />
-          </PickFolderProvider>
-        </ShellProvider>
-      </LauncherProvider>
-    </WindowPortProvider>,
+    <MotionConfig reducedMotion={reducedMotion}>
+      <WindowPortProvider port={port}>
+        <LauncherProvider>
+          <ShellProvider>
+            <PickFolderProvider value={pickFolder}>
+              <Probe />
+              <PageArea />
+              <OverlayRoot />
+            </PickFolderProvider>
+          </ShellProvider>
+        </LauncherProvider>
+      </WindowPortProvider>
+    </MotionConfig>,
   );
   await flush();
   act(() => nav.go(route));
@@ -1265,12 +1268,29 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(launcher.state.tasks[0].spec.args.excludedOptional).toEqual(["mods/optional-helper.jar"]);
   });
 
+  it("减少动效时清单的状态标签与说明块照常淡入淡出：换成「已找到」时旧标签先留在原处淡出", async () => {
+    seedMockDownloads(["blocked-a.jar"]);
+    await mount({ page: "discover", importFile: BLOCKED_PACK }, "always");
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(shownText(blockedRow("blocked-b.jar"))).toBe("blocked-b.jar装到 mods/还没找到打开网页");
+
+    seedMockDownloads(["blocked-b.jar"]);
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    const row = blockedRow("blocked-b.jar");
+    expect([...row.querySelectorAll("[data-exiting]")].map((el) => el.textContent)).toEqual(["还没找到"]);
+    expect(shownText(row)).toBe("blocked-b.jar装到 mods/已找到");
+    expect([...blockedDialog().querySelectorAll("[data-exiting]")].map((el) => el.textContent)).toContain("找到 1 个，还差 1 个。文件要和网页上的完全一致，改过名也能认出来。");
+  });
+
   it("受限文件挡住导入；清单里检查下载文件夹：只下了 a 时 a 已找到、b 还没找到，都找到后继续导入，确认步原地重新读取", async () => {
     seedMockDownloads(["blocked-a.jar"]);
     await mount({ page: "discover", importFile: BLOCKED_PACK });
     expect(modRows()).toHaveLength(41);
     expect(rowsTagged("需手动下载")).toEqual(["blocked-a.jar", "blocked-b.jar"]);
     expect(dialog().textContent).toContain("有 2 个文件需要到 CurseForge 网页手动下载，下载好之前不能导入。");
+    // 说明块里的操作只用小号幽灵按钮
+    expect(buttonByText("查看这些文件", dialog())).toMatchObject({ dataset: { variant: "ghost", size: "sm" } });
     expect(submitButton().getAttribute("aria-disabled")).toBe("true");
     await clickIn(dialog(), "导入为新实例");
     expect(callsOf(ipc, "install_modpack")).toEqual([]);
@@ -1284,6 +1304,9 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(blockedDialog().textContent).toContain("这 2 个文件的作者不允许启动器直接下载。到 CurseForge 网页下载后，回到这里重新检查。");
     expect(blockedRow("blocked-a.jar").textContent).toBe("blocked-a.jar装到 mods/打开网页");
     expect(blockedDialog().textContent).toContain("下载好后选文件所在的文件夹");
+    // 底栏说明叠上清单自己的 12 号 text-2 样式，不沿用共用说明的 text-3
+    const footNote = [...blockedDialog().querySelectorAll("span")].find((s) => s.textContent === "下载好后选文件所在的文件夹");
+    expect(footNote?.className.split(" ").some((c) => c.includes("blockedFootNote"))).toBe(true);
 
     await clickIn(blockedDialog(), "我已下载，重新检查");
     expect(pickFolder.mock.calls).toEqual([[MOCK_DOWNLOADS_DIR, "选择下载好的文件所在的文件夹"]]);
@@ -1409,5 +1432,47 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect([firstId, secondId]).toEqual([`${launcher.state.tasks[0].id}#1`, `${launcher.state.tasks[0].id}#2`]);
     expect(launcher.state.tasks[0]).toMatchObject({ status: "running", attempt: 2, error: null });
     expect(openDialogs()).toHaveLength(1);
+  });
+
+  it("CurseForge 整合包本体就需要手动下载：清单照常列出这个包，不写落点目录；找到后重新安装", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    const PACK: BlockedFileDto[] = [
+      {
+        project_id: 700,
+        file_id: 7001,
+        file_name: "生存 2.0.0.zip",
+        web_url: "https://www.curseforge.com/minecraft/modpacks/survival/files/7001",
+        destination: "生存 2.0.0.zip",
+        sha1: "3f786850e387550fdab836ed7e6dc881de23001b",
+        fingerprint: 0,
+        size: 2048,
+      },
+    ];
+    const pack = entry("M1", { title: "生存", resource_type: "modpack", loaders: ["fabric"] });
+    const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
+    pages = () => result([pack]);
+    ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
+    ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
+    let attempts = 0;
+    ipc.overrides.set("install_modpack", () => {
+      attempts += 1;
+      if (attempts === 1) throw new IpcError("distribution_blocked", "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：生存 2.0.0.zip", { files: PACK });
+      return new Promise(() => {});
+    });
+    ipc.overrides.set("claim_blocked_files", () => ({ claimed: [{ file_id: 7001, source_path: `${MOCK_DOWNLOADS_DIR}\\生存 2.0.0 (1).zip` }], missing: [] }));
+    await mount();
+    act(() => card("生存").click());
+    await flush();
+    await clickIn(dialog(), "安装为新实例");
+    expect(dialog().textContent).toContain("没装成：有 1 个文件需要到 CurseForge 网页手动下载");
+
+    await clickIn(dialog(), "查看这些文件");
+    const row = blockedRow("生存 2.0.0.zip");
+    expect(row.textContent).not.toContain("装到");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(blockedDialog().textContent).toContain("1 个文件都已找到。");
+    await clickIn(blockedDialog(), "重新安装");
+    expect(callsOf(ipc, "install_modpack")).toHaveLength(2);
   });
 });

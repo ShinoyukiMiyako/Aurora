@@ -460,7 +460,7 @@ function ImportConfirm({ path, preview, refreshing, online, footerHost, onReread
           <Callout
             tone="warn"
             action={
-              <Button size="sm" variant="secondary" onClick={() => setBlockedOpen(true)}>
+              <Button size="sm" variant="ghost" onClick={() => setBlockedOpen(true)}>
                 {IMPORT_COPY.viewBlocked}
               </Button>
             }

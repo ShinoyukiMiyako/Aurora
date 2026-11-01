@@ -205,14 +205,18 @@ fn unsupported(path: &Path, entry: &str, method: u16) -> Error {
 /// 路径校验都会错。带 UTF-8 标志或带 Unicode Path 扩展字段的条目，原始字节本来就是 UTF-8，第一步就命中；
 /// 不设标志却直接写 UTF-8 的打包器也在这一步。前两步都解不了的，才用 zip 按 CP437 解出的名字。
 pub(crate) fn entry_name<R: Read + ?Sized>(file: &ZipFile<'_, R>) -> String {
-    let raw = file.name_raw();
+    decode_entry_name(file.name_raw()).unwrap_or_else(|| file.name().to_owned())
+}
+
+/// [`entry_name`] 的前两步：原始字节先按 UTF-8、再按 GBK 解，都解不了为 `None`。自己读中央目录的调用方
+/// （平台整合包摘要只按范围取包尾）用它，与本地读包解出同一个名字，数出来的 Mod 与覆盖文件才一致。
+pub fn decode_entry_name(raw: &[u8]) -> Option<String> {
     if let Ok(name) = std::str::from_utf8(raw) {
-        return name.to_owned();
+        return Some(name.to_owned());
     }
-    if let Some(name) = encoding_rs::GBK.decode_without_bom_handling_and_without_replacement(raw) {
-        return name.into_owned();
-    }
-    file.name().to_owned()
+    encoding_rs::GBK
+        .decode_without_bom_handling_and_without_replacement(raw)
+        .map(|name| name.into_owned())
 }
 
 fn read_manifest(
@@ -315,6 +319,21 @@ fn list_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_entry_names_decode_as_utf8_then_gbk_and_give_up_on_neither() {
+        assert_eq!(
+            decode_entry_name("mods/汉化.jar".as_bytes()).as_deref(),
+            Some("mods/汉化.jar")
+        );
+        assert_eq!(
+            decode_entry_name(b"mods/\xba\xba\xbb\xaf.jar").as_deref(),
+            Some("mods/汉化.jar")
+        );
+        assert_eq!(decode_entry_name(b"").as_deref(), Some(""));
+        // 0xFF 既不能起头 UTF-8 也不能起头 GBK：交回调用方用各自的兜底。
+        assert_eq!(decode_entry_name(b"mods/\xff.jar"), None);
+    }
 
     #[test]
     fn read_errors_wrapping_an_unsupported_method_map_to_unsupported_compression() {
