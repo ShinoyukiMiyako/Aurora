@@ -790,6 +790,10 @@ fn is_bundled(lib: &aurora_version::Library) -> bool {
 ///
 /// 盘上已有且 sha1 对得上的不再重写：同一 Forge 版本的另一个实例可能正在运行，Windows 上覆盖
 /// 一个被占用的 jar 会失败。
+///
+/// 地址留空的库不一定在 installer 里：1.20.4 起 version.json 把处理器才生成的 `:client` jar 也列了
+/// 进来。这里只解 installer 里有的，其余留给处理器（官方 installer 也是这样处理），处理器没生成出来
+/// 时由补全报 [`Error::LoaderLibraryMissing`]。
 async fn extract_bundled_libraries(
     installer: &Path,
     libraries: &[aurora_version::Library],
@@ -814,7 +818,11 @@ async fn extract_bundled_libraries(
         if file_matches_sha1(&dest, &artifact.sha1).await? {
             continue;
         }
-        let bytes = read_zip_entry_async(installer, &format!("maven/{rel}")).await?;
+        let bytes = match read_zip_entry_async(installer, &format!("maven/{rel}")).await {
+            Ok(bytes) => bytes,
+            Err(Error::InstallerEntryMissing { .. }) => continue,
+            Err(err) => return Err(err),
+        };
         if !artifact.sha1.is_empty() {
             let mut hasher = aurora_base::fs::Sha1Hasher::new();
             hasher.update(&bytes);
@@ -1707,6 +1715,58 @@ mod tests {
         assert_eq!(
             std::fs::read(f.layout.library_path(shim_path)).unwrap(),
             shim
+        );
+    }
+
+    /// 1.20.4 起 version.json 把补丁后的 `:client` jar 也列成地址留空的库，installer 的 `maven/` 下
+    /// 却没有它：它要等处理器生成。解库这一步不能因此报条目缺失，那样这些版本一次都装不上；
+    /// 处理器没生成出来时由随后的补全报加载器自带库缺失。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_library_left_for_the_processors_is_not_required_in_the_installer() {
+        let patched: &[u8] = b"patched-client";
+        let patched_path = "net/minecraftforge/forge/1.21.1-52.0.30/forge-1.21.1-52.0.30-client.jar";
+        let library = serde_json::json!({
+            "name": "net.minecraftforge:forge:1.21.1-52.0.30:client",
+            "downloads": {"artifact": {
+                "path": patched_path, "url": "",
+                "sha1": sha1_hex(patched), "size": patched.len()
+            }}
+        });
+        let profile = serde_json::json!({
+            "spec": 1,
+            "version": "1.21.1-forge-52.0.30",
+            "minecraft": "1.21.1",
+            "json": "/version.json",
+            "data": {},
+            "processors": [],
+            "libraries": []
+        });
+        let version = serde_json::json!({
+            "id": "1.21.1-forge-52.0.30",
+            "inheritsFrom": "1.21.1",
+            "mainClass": "net.minecraftforge.bootstrap.ForgeBootstrap",
+            "libraries": [library]
+        });
+        let f = fixture();
+        let installer = write_installer(
+            &f.root,
+            &[
+                ("install_profile.json", profile.to_string().as_bytes()),
+                ("version.json", version.to_string().as_bytes()),
+            ],
+        );
+
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        let summary = ForgeInstaller::new(cx, "java")
+            .install_from_installer(&installer)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.id, "1.21.1-forge-52.0.30");
+        assert_eq!(summary.libraries, 0, "这个库没有地址，不进下载批次");
+        assert!(
+            !f.layout.library_path(patched_path).exists(),
+            "它只能由处理器生成，解库这一步什么都不写"
         );
     }
 
