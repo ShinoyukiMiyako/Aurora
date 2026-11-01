@@ -184,6 +184,17 @@ describe("发通知之前的等待里落盘的改名：按新名字发", () => {
   });
 });
 
+describe("换游戏目录后留着的通知", () => {
+  it("实例 id 只在一个目录内唯一：动作摘掉，点不到另一目录的同名实例", async () => {
+    await repaired("生存");
+    expect(toast("「生存」已修复").action).toBeDefined();
+    ipc.overrides.set("set_game_directory", () => undefined);
+    await store.actions.setGameDirectory("E:/别的目录");
+    await settle();
+    expect(toast("「生存」已修复").action).toBeUndefined();
+  });
+});
+
 describe("改名后点击留着的通知：闭包动作", () => {
   it("新建已就绪的「启动」：启动新名字，不报实例不存在", async () => {
     await create("新世界");

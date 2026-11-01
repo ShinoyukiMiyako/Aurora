@@ -136,6 +136,7 @@ import {
   type TaskDraft,
 } from "./tasks";
 import {
+  detachInstanceToasts,
   detachToasts,
   dismissToast,
   EMPTY_TOASTS,
@@ -3260,6 +3261,7 @@ export class LauncherStore {
       },
       async setGameDirectory(path) {
         await configIpc.setGameDirectory(path);
+        store.set((raw) => ({ toasts: detachInstanceToasts(raw.toasts) }));
         for (const prefix of GAME_DIR_SCOPED_RESOURCES) invalidateResources(prefix);
         await Promise.all([store.fetchSettings(), store.fetchInstances(), store.fetchPins()]);
       },

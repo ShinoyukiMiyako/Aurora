@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   EMPTY_TOASTS,
+  detachInstanceToasts,
   detachToasts,
   dismissToast,
   expireToasts,
@@ -41,6 +42,15 @@ describe("通知寿命", () => {
 });
 
 describe("通知去重与挤出", () => {
+  it("文案相同、动作指向别的实例：不并进旧条，各走各的", () => {
+    const toInstance = (id: string): ToastAction => ({ label: "查看", to: { page: "instance", id, tab: "overview" } });
+    const once = push(EMPTY_TOASTS, { tone: "success", title: "完成", action: toInstance("旧") });
+    const twice = push(once, { tone: "success", title: "完成", action: toInstance("新") }, T0 + 1000);
+    expect(twice.items.map((t) => t.action)).toEqual([toInstance("旧"), toInstance("新")]);
+    const again = push(twice, { tone: "success", title: "完成", action: toInstance("新") }, T0 + 1500);
+    expect(again.items).toHaveLength(2);
+  });
+
   it("3000 ms 内同色调、同标题、同正文不新增，只把寿命重置为满额", () => {
     const first = pushToast(EMPTY_TOASTS, { tone: "success", title: "「生存」已就绪", body: "可以直接开玩" }, T0);
     const again = pushToast(first.state, { tone: "success", title: "「生存」已就绪", body: "可以直接开玩" }, T0 + 3000);
@@ -167,6 +177,20 @@ describe("实例改名与删除时迁移动作", () => {
     expect(retargetToasts(s, "生存", "生存二")).toBe(s);
     expect(detachToasts(s, "生存")).toBe(s);
     expect(retargetToasts(EMPTY_TOASTS, "生存", "生存二")).toBe(EMPTY_TOASTS);
+  });
+
+  it("换游戏目录：指向实例的动作都摘掉，不指向实例的动作留着", () => {
+    const route: ToastAction = { label: "查看", to: { page: "instance", id: "生存", tab: "overview" } };
+    const closure = instanceAction("创造", () => ({ label: "启动", run: () => undefined, errorTitle: "没能启动" }));
+    const other: ToastAction = { label: "去设置", to: { page: "settings", section: "general" } };
+    let state = push(EMPTY_TOASTS, { tone: "error", title: "一", action: route });
+    state = push(state, { tone: "error", title: "二", action: closure });
+    state = push(state, { tone: "error", title: "三", action: other });
+    expect(detachInstanceToasts(state).items.map((t) => [t.title, t.action])).toEqual([
+      ["一", undefined],
+      ["二", undefined],
+      ["三", other],
+    ]);
   });
 
   it("删除：指向它的通知留着、动作摘掉，别的不动", () => {

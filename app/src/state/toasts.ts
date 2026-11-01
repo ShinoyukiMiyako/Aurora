@@ -79,8 +79,10 @@ function evictOne(items: Toast[]): Toast[] {
 
 export function pushToast(state: ToastsState, input: ToastInput, now: number): { state: ToastsState; id: string } {
   const paused = state.pausedBy.length > 0;
+  const target = targetOf(input.action);
+  // 文案相同但动作指向别的实例时并进旧条，新通知就用上了旧动作
   const duplicate = state.items.find(
-    (t) => t.tone === input.tone && t.title === input.title && t.body === input.body && now - t.createdAt <= TOAST_DEDUPE_MS,
+    (t) => t.tone === input.tone && t.title === input.title && t.body === input.body && now - t.createdAt <= TOAST_DEDUPE_MS && targetOf(t.action) === target,
   );
   if (duplicate) {
     const items = state.items.map((t) => (t === duplicate ? withFullLife(t, paused, now) : t));
@@ -133,6 +135,10 @@ function actionTarget(action: ToastAction): string | null {
   return "to" in action ? routeInstanceId(action.to) : null;
 }
 
+function targetOf(action: ToastAction | undefined): string | null {
+  return action === undefined ? null : actionTarget(action);
+}
+
 function mapTargeting(state: ToastsState, id: string, change: (toast: Toast, action: ToastAction) => Toast): ToastsState {
   const targets = (toast: Toast) => toast.action !== undefined && actionTarget(toast.action) === id;
   if (!state.items.some(targets)) return state;
@@ -153,6 +159,12 @@ export function retargetToasts(state: ToastsState, from: string, to: string): To
 /** 实例删除：通知留着，动作摘掉。之后有实例用上这个名字时，点它不能落到新实例上。 */
 export function detachToasts(state: ToastsState, id: string): ToastsState {
   return mapTargeting(state, id, (toast) => ({ ...toast, action: undefined }));
+}
+
+/** 换游戏目录：实例 id 只在一个目录内唯一，留着的动作可能落到另一目录的同名实例上，一律摘掉。 */
+export function detachInstanceToasts(state: ToastsState): ToastsState {
+  if (!state.items.some((t) => targetOf(t.action) !== null)) return state;
+  return { ...state, items: state.items.map((t) => (targetOf(t.action) === null ? t : { ...t, action: undefined })) };
 }
 
 /** 移除到期的通知。 */
