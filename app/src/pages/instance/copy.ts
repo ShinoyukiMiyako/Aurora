@@ -641,8 +641,8 @@ export const CRASH_PAGE_COPY = {
   driverSteps: "查看处理办法",
   driverNote: "没有自动修复，按下面三步排查",
   driverStep1: "到显卡厂商官网更新驱动",
-  driverStep2: "打开 Windows 图形设置（Windows 10：设置 → 系统 → 显示 → 图形设置；Windows 11：设置 → 系统 → 屏幕 → 显示卡），把 javaw.exe 设为「高性能」",
-  copyJavaw: "复制 javaw.exe 路径",
+  driverStep2: "打开 Windows 图形设置（Windows 10：设置 → 系统 → 显示 → 图形设置；Windows 11：设置 → 系统 → 屏幕 → 显示卡），把 java.exe 设为「高性能」",
+  copyJavaw: "复制 java.exe 路径",
   memoryItem: "内存",
   javaItem: "Java",
 

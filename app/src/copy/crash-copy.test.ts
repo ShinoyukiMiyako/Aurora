@@ -127,6 +127,13 @@ describe("崩溃诊断文案", () => {
   });
 });
 
+describe("显卡驱动的处理办法", () => {
+  it("游戏由 java.exe 拉起，步骤与复制按钮都写 java.exe，不写 javaw.exe", () => {
+    expect(CRASH_PAGE_COPY.driverStep2).toContain("把 java.exe 设为「高性能」");
+    expect(CRASH_PAGE_COPY.copyJavaw).toBe("复制 java.exe 路径");
+  });
+});
+
 describe("退出码说明", () => {
   it("页头小字：认得的退出码追加十六进制与短语，退出码 1 只给通用短语，不认得的与拿不到的照旧", () => {
     expect(CRASH_COPY.exitLine("3 分钟前", -1073741819, ACCESS_VIOLATION)).toBe("3 分钟前崩溃 · 退出码 -1073741819（0xC0000005 访问冲突）");
