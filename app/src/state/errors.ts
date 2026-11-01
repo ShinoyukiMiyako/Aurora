@@ -1,6 +1,8 @@
 // 错误进通知正文时的写法：后端原文原样给出，带错误码（XErr、HTTP 状态）时在末尾用全角括号附上。
 // 「复制错误信息」要的是完整的一份：错误名与错误码、原文、后端给的原因链与其余结构化细节，贴进反馈里就能定位。
 
+import { INSTANCE_IN_USE_COPY } from "../copy/flows";
+import { instanceBusyFromError, isInstanceBusy } from "../domain/instance-busy";
 import { IpcError, isIpcError, UNKNOWN_ERROR_CODE } from "../ipc/errors";
 
 function numericDetail(detail: unknown, key: string): number | null {
@@ -12,6 +14,11 @@ function numericDetail(detail: unknown, key: string): number | null {
 export function describeError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
   if (!isIpcError(error)) return error.message;
+  if (isInstanceBusy(error)) {
+    // 被别的实例当作基底而被拒，与禁用提示用同一组文案说是谁在用；其余占用的后端原文已说清在做什么
+    const { usedBy } = instanceBusyFromError(error);
+    if (usedBy !== null) return INSTANCE_IN_USE_COPY.reason(usedBy);
+  }
   const xerr = numericDetail(error.detail, "xerr");
   if (xerr !== null) return `${error.message}（XErr ${xerr}）`;
   const status = numericDetail(error.detail, "status");
