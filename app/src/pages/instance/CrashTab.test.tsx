@@ -267,6 +267,22 @@ describe("崩溃诊断：这次启动时的提醒", () => {
     expect(nav.route).toEqual({ page: "accounts" });
   });
 
+  it("多条提醒逐行列出、不用局部提示框：一张卡片至多一条局部提示，留给过期与再次运行的说明", async () => {
+    setMockLaunchWarnings(["onedrive_folder", "long_player_name", "jvm_min_over_max"]);
+    await crashWith(-1073741819);
+    await open("crash");
+    const warnings = section("这次启动时的提醒");
+    expect(warnings.querySelectorAll("div[data-tone]")).toHaveLength(0);
+    const rows = [...warnings.querySelectorAll("li")];
+    expect(rows.map((li) => [li.querySelector("svg") !== null, textOf(li.querySelector("button") as Element)])).toEqual([
+      [true, "更换游戏目录"],
+      [true, "管理账户"],
+      [true, "打开实例设置"],
+    ]);
+    expect(textOf(rows[2])).toContain("最小内存大于最大内存");
+    expect(textOf(rows[2])).toContain("JVM 参数里 -Xms 比 -Xmx 大，Java 会拒绝启动。");
+  });
+
   it("提醒只跟下一份报告走：再崩一次就没有了，整块不出现", async () => {
     setMockLaunchWarnings(["icloud_folder"]);
     await crashWith(-1073741819);
