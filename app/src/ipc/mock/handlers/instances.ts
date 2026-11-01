@@ -521,6 +521,12 @@ export function acquireMockInstance(id: string, activity: InstanceActivity): Moc
 }
 
 /** 占着实例执行 work，结束（含异步完成与失败）即放开；同步的处理函数仍同步返回。 */
+/** 实例此刻有没有人占着做 activity：与后端按活动查占用同一口径，键不分大小写。 */
+export function mockInstanceHeldFor(id: string, activity: InstanceActivity): boolean {
+  const held = holds.get(id.toLowerCase());
+  return held !== undefined && held.some((h) => h.activity === activity);
+}
+
 export function withMockInstance<T>(id: string, activity: InstanceActivity, work: () => T): T {
   const hold = acquireMockInstance(id, activity);
   let result: T;

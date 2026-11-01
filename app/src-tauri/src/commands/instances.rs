@@ -227,7 +227,7 @@ fn lock_key(id: &str) -> String {
     id.to_lowercase()
 }
 
-fn busy(id: &str, activity: InstanceActivity) -> CommandError {
+pub(crate) fn busy(id: &str, activity: InstanceActivity) -> CommandError {
     CommandError::new(
         code::INSTANCE_BUSY,
         format!("实例 {id} 正在{}，请稍后再试", activity.label()),

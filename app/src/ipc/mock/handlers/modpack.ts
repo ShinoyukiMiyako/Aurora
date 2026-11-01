@@ -34,7 +34,7 @@ import { findMockSource, type MockPackManifest } from "../catalog";
 import type { MockArgs, MockHandlers } from "../types";
 import { MOCK_DATA_DIR, tauriArgError } from "./config";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, parsePlatform, runMockTask, simulateDownload } from "./discover";
-import { acquireMockInstance, addMockInstance, handlers as instanceHandlers, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { acquireMockInstance, addMockInstance, handlers as instanceHandlers, mockInstanceHeldFor, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
 import { DISABLED_SUFFIX, ledgerKey, mockInstance, mockModsDir, placeMockPackMods } from "./mods";
 import { isMockTaskCancelled } from "./tasks";
 
@@ -623,6 +623,11 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
   const options = validateExport(id, parseExportOptions(args.options));
   // 与后端一样先占实例再登记任务：参数不合法不占任何东西，任务无论怎样结束都在最后放开
   const hold = acquireMockInstance(id, "modifying");
+  // 与后端一样先占住再查：改 Mod 与存档备份兼容，导出却可能连存档一起打包
+  if (mockInstanceHeldFor(id, "backing_up")) {
+    hold.release();
+    throw new IpcError("instance_busy", `实例 ${id} 正在备份或恢复存档，请稍后再试`, { id, activity: "backing_up" });
+  }
   return runMockTask(taskId, async () => {
     const plan = planExport(id);
     emitCoreEvent({ task_id: taskId, kind: "stage", message: `读取 ${plan.indexed.length + plan.bundled.length} 个 Mod 文件` });

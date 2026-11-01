@@ -84,6 +84,7 @@ export const LOCK_REASON = {
     installing: "安装任务正在写这个实例的文件夹，完成后才能导出",
     renaming: "正在重命名这个实例，完成后才能导出",
     deleting: "正在删除这个实例",
+    backingUp: "正在备份或恢复存档，完成后才能导出",
     broken: "实例文件不完整，修复后才能导出",
   },
 } as const;

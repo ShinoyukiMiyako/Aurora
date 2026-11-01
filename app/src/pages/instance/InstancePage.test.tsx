@@ -860,6 +860,7 @@ describe("实例详情：导出整合包入口", () => {
     ["补全进行中", { activity: "repairing" }, "安装任务正在写这个实例的文件夹，完成后才能导出"],
     ["正在重命名", { activity: "renaming" }, "正在重命名这个实例，完成后才能导出"],
     ["正在删除", { activity: "deleting" }, "正在删除这个实例"],
+    ["正在备份或恢复存档", { activity: "backing_up" }, "正在备份或恢复存档，完成后才能导出"],
     ["文件不完整", { status: "broken", broken_reason: "缺少版本 JSON" }, "实例文件不完整，修复后才能导出"],
   ])("%s：菜单项带原因禁用，点了不读导出预览", async (_case, patch, reason) => {
     instances = instances.map((i) => (i.id === ID ? { ...i, ...patch } : i));

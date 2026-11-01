@@ -18,7 +18,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::commands::discover::parse_platform;
 use crate::commands::error::code;
-use crate::commands::instances::{InstanceActivity, InstanceGuard, InstanceLocks};
+use crate::commands::instances::{busy, InstanceActivity, InstanceGuard, InstanceLocks};
 use crate::commands::CommandError;
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
@@ -664,6 +664,11 @@ pub(crate) async fn export_modpack_with(
     let id = export_id(id)?;
     let (destination, options) = parse_export_options(options).await?;
     let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
+    // 改 Mod 与存档备份互相兼容，导出却可能连存档一起打包：备份或恢复正在打包、替换存档时不能导出，
+    // 否则包里是半截的存档。先占住再查，被拒时守卫随返回放开。
+    if locks.activity(id) == Some(InstanceActivity::BackingUp) {
+        return Err(busy(id, InstanceActivity::BackingUp));
+    }
     let task = tasks.register(task_id)?;
     let aurora = facade.snapshot().await.with_cancel(task.token().clone());
     // 落点放在任务的 future 之外：取消宽限期满时 run 会丢弃 future，临时文件仍要在这里清掉。
@@ -2065,6 +2070,61 @@ mod tests {
         assert!(registry.cancel("ex-hold"));
         assert_eq!(export.await.unwrap().unwrap_err().code, code::CANCELLED);
         assert_eq!(locks.activity(EXPORT_ID), None);
+    }
+
+    /// 存档备份或恢复占着实例时导出报 instance_busy（activity 为 backing_up），不登记任务、不写文件；
+    /// 被拒的那一次不留下「改动中」，备份结束后照常能导出。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn export_waits_for_a_world_backup_or_restore() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/version_files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), &server.uri());
+        export_instance(dir.path());
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        let destination = dir.path().join("备份中.mrpack");
+
+        let backing_up = locks
+            .acquire(EXPORT_ID, InstanceActivity::BackingUp)
+            .unwrap();
+        let err = export_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            "ex-backup",
+            EXPORT_ID,
+            export_args(&destination),
+            &sink,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(err.detail.unwrap()["activity"], "backing_up");
+        assert!(!registry.is_running("ex-backup"));
+        assert!(!destination.exists());
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert_eq!(locks.activity(EXPORT_ID), Some(InstanceActivity::BackingUp));
+        drop(backing_up);
+        assert_eq!(locks.activity(EXPORT_ID), None);
+
+        export_modpack_with(
+            &facade,
+            &registry,
+            &locks,
+            "ex-after",
+            EXPORT_ID,
+            export_args(&destination),
+            &sink,
+        )
+        .await
+        .unwrap();
+        assert!(destination.is_file());
     }
 
     /// 前端要调的保存对话框与「在文件夹里选中」两条插件权限写在能力文件里。

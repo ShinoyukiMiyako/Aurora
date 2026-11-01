@@ -466,6 +466,16 @@ describe("导出整合包 mock", () => {
     expect(() => acquireMockInstance(FABRIC, "renaming").release()).not.toThrow();
   });
 
+  it("存档备份或恢复进行中报 instance_busy，活动为 backing_up；不登记任务、不留占用", async () => {
+    const backingUp = acquireMockInstance(FABRIC, "backing_up");
+    expect(await errorOf(exportModpack("t-backup", FABRIC, base))).toMatchObject({ code: "instance_busy", detail: { id: FABRIC, activity: "backing_up" } });
+    expect(await cancelTask("t-backup")).toBe(false);
+    backingUp.release();
+    // 被拒的那一次没有留下「改动中」：补全这类与改动中互斥的事照常能占
+    expect(() => acquireMockInstance(FABRIC, "repairing").release()).not.toThrow();
+    expect(await exportModpack("t-after", FABRIC, base)).toMatchObject({ path: base.destination });
+  });
+
   it("导出进行中批量启停与忽略更新照常可用；改过的盘面在下一次预览里体现，忽略更新的 Mod 仍走索引", async () => {
     const running = exportModpack("t-mods", FABRIC, base);
     await new Promise((resolve) => setTimeout(resolve, 0));

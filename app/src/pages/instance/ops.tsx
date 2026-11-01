@@ -60,6 +60,8 @@ export function lockReason(lock: InstanceLock | null, kind: "mods" | "rename" | 
 export function exportReason(inst: InstanceSummary, work: WorkLock | null): string | undefined {
   if (inst.placeholder) return LOCK_REASON.export.placeholder;
   if (work !== null) return LOCK_REASON.export[work];
+  // 改 Mod 与存档备份互相兼容，导出却可能连存档一起打包：备份或恢复正在写存档时不能导出
+  if (inst.activity === "backing_up") return LOCK_REASON.export.backingUp;
   if (inst.status === "broken") return LOCK_REASON.export.broken;
   return undefined;
 }
