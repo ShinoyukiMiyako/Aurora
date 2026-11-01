@@ -322,6 +322,17 @@ describe("下载队列：纯函数", () => {
     expect([...modFilesBeingUpdated(tasks, "Nether")]).toEqual([]);
     expect(() => modFilesBeingUpdated([update("f", "Survival", { items: [{ title: "x" }] }, "update_mods")], "Survival")).toThrow("update_mods 任务的一项缺少 fileName");
   });
+
+  it("正在更新的 Mod 文件：任务参数形状不对时抛错，不把缺口当成「没有在更新」", () => {
+    const update = (args: Record<string, unknown>, command: string) => task("g", { kind: "mod", instanceId: "Survival", status: "running", spec: { command, args: { versionId: "Survival", ...args } } });
+    expect(() => modFilesBeingUpdated([update({}, "update_mods")], "Survival")).toThrow("update_mods 任务缺少 items");
+    expect(() => modFilesBeingUpdated([update({ items: "sodium.jar" }, "update_mods")], "Survival")).toThrow("update_mods 任务缺少 items");
+    expect(() => modFilesBeingUpdated([update({ items: [null] }, "update_mods")], "Survival")).toThrow("update_mods 任务的一项缺少 fileName");
+    expect(() => modFilesBeingUpdated([update({ fileName: 42 }, "update_mod")], "Survival")).toThrow("update_mod 任务的 fileName 不是字符串：42");
+    expect(() => modFilesBeingUpdated([update({ items: [{ fileName: null }] }, "update_mods")], "Survival")).toThrow("update_mods 任务的 fileName 不是字符串：null");
+    // 已结束的任务不看参数
+    expect([...modFilesBeingUpdated([task("h", { kind: "mod", instanceId: "Survival", status: "done", spec: { command: "update_mods", args: {} } })], "Survival")]).toEqual([]);
+  });
 });
 
 describe("下载队列：状态容器", () => {
