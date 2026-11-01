@@ -614,6 +614,29 @@ describe("mock：存档备份", () => {
     expect((await listInstances()).find((i) => i.id === ID)?.activity).toBeNull();
   });
 
+  it("删除备份占住实例：改名、删除、新建、补全进行中报 instance_busy，备份留着；与运行中的游戏、备份、Mod 改动并行", async () => {
+    const [first, second, third] = (await listWorldBackups(ID, WORLD)).backups;
+    for (const activity of ["renaming", "deleting", "installing", "repairing"] as const) {
+      const hold = acquireMockInstance(ID, activity);
+      const error = await rejection(deleteWorldBackup(ID, WORLD, first.file));
+      expect(error.code, activity).toBe("instance_busy");
+      expect(detail(error), activity).toMatchObject({ id: ID, activity });
+      hold.release();
+    }
+    expect((await listWorldBackups(ID, WORLD)).backups).toHaveLength(3);
+
+    const running = acquireMockInstance(ID, "running");
+    await deleteWorldBackup(ID, WORLD, first.file);
+    running.release();
+    const modifying = acquireMockInstance(ID, "modifying");
+    await deleteWorldBackup(ID, WORLD, second.file);
+    modifying.release();
+    const backing = acquireMockInstance(ID, "backing_up");
+    await deleteWorldBackup(ID, WORLD, third.file);
+    backing.release();
+    expect((await listWorldBackups(ID, WORLD)).backups).toEqual([]);
+  });
+
   it("共用存档跨实例互斥：另一个不隔离的实例开着游戏时备份、恢复、导出报 instance_busy（指向那个实例），不占任务 id；任一方隔离就不挡", async () => {
     vi.useFakeTimers();
     // 1.21.1 是原版正式版，跟随全局时不隔离；樱花生存是 Fabric 实例，关掉隔离后与它共用存档

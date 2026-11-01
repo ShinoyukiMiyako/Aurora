@@ -1616,14 +1616,17 @@ export const handlers: MockHandlers = {
     const id = str(args, "id");
     const world = worldArg(args);
     const file = str(args, "file");
-    requireInstance(id);
-    const list = worldBackups(id, world);
-    if (!list.some((b) => b.file === file)) throw backupNotFound(id, world, file);
-    setWorldBackups(
-      id,
-      world,
-      list.filter((b) => b.file !== file),
-    );
+    // 与后端同序：先校验入参，再占住实例（改名、删除、新建、补全进行中报 instance_busy；与运行中的游戏、备份兼容）
+    return withMockInstance(id, "modifying", () => {
+      requireInstance(id);
+      const list = worldBackups(id, world);
+      if (!list.some((b) => b.file === file)) throw backupNotFound(id, world, file);
+      setWorldBackups(
+        id,
+        world,
+        list.filter((b) => b.file !== file),
+      );
+    });
   },
 
   export_world: exportWorld,
