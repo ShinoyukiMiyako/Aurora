@@ -82,7 +82,8 @@ pub trait TargetEnv {
 /// `not_empty` 说的是用户给的目录里有别人的文件，这时 `normalized` 已经追加了一层；`has_config` 说的是
 /// `normalized` 这个目录里有上次的数据。
 ///
-/// `resume_dir` 是半装记录里的目录：那里可能只写了一半文件，不能被当成别人的非空目录再套一层。
+/// `resume_dir` 是已知属于落樱、要接着用的目录：半装记录里的目录可能只写了一半文件，卸载后留下的
+/// 上次安装目录里只剩数据，目录内容都证明不了归属，不传的话会被当成别人的非空目录再套一层。
 pub fn check_dir(
     input: &str,
     need: SpaceNeed,
@@ -143,9 +144,9 @@ fn evaluate(
     if last_segment(&long).eq_ignore_ascii_case(GAME_FOLDER) || contents.versions {
         return Err(DirIssue::Minecraft);
     }
-    // config.json 也算自己的：界面会告诉用户接着用这份数据，套一层就接不上了
+    // config.json 不算凭据：别的程序目录里也常有这个名字，当成自己的就会读写或改名人家的配置、
+    // 覆盖同名 uninstall.exe。多套一层最坏是新开一份数据，不会毁东西
     let ours = contents.exe
-        || contents.config
         || resume_dir.is_some_and(|dir| lowered_segments(dir) == lowered_segments(&long));
     let not_empty = contents.any && !ours;
 
@@ -1240,6 +1241,7 @@ mod tests {
     #[test]
     fn no_space_still_reports_the_target_volume_and_the_data_found() {
         let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(APP_EXE), b"MZ").unwrap();
         fs::write(dir.path().join(CONFIG_FILE), b"{}").unwrap();
         let free = random_below(NEED.target);
         let env = FakeEnv {
@@ -1336,14 +1338,49 @@ mod tests {
     }
 
     #[test]
-    fn leftover_data_stays_in_place_and_reports_config() {
+    fn leftover_data_in_a_folder_named_petalfall_stays_and_reports_config() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("Config.JSON"), b"{}").unwrap();
+        let named = dir.path().join(APP_FOLDER);
+        fs::create_dir(&named).unwrap();
+        fs::write(named.join("Config.JSON"), b"{}").unwrap();
+        fs::create_dir(named.join(GAME_FOLDER)).unwrap();
+        let check = check(text(&named), &FakeEnv::default());
+        assert_eq!(check.normalized, text(&named));
+        assert!(check.has_config);
+    }
+
+    #[test]
+    fn leftover_data_in_the_resume_dir_stays_and_reports_config() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(CONFIG_FILE), b"{}").unwrap();
         fs::create_dir(dir.path().join(GAME_FOLDER)).unwrap();
-        let check = check(text(dir.path()), &FakeEnv::default());
+        let check = check_dir(
+            text(dir.path()),
+            NEED,
+            Some(text(dir.path())),
+            &FakeEnv::default(),
+        );
         assert_eq!(check.normalized, text(dir.path()));
         assert!(check.has_config);
         assert!(!check.not_empty);
+    }
+
+    #[test]
+    fn a_foreign_config_json_does_not_make_the_folder_ours() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(CONFIG_FILE), b"{}").unwrap();
+        fs::write(dir.path().join("uninstall.exe"), b"MZ").unwrap();
+        assert_eq!(
+            check(text(dir.path()), &FakeEnv::default()),
+            DirCheck {
+                normalized: format!(r"{}\Petalfall", text(dir.path())),
+                issue: None,
+                has_config: false,
+                not_empty: true,
+                free_bytes: 1 << 40,
+            }
+        );
+        assert!(!dir.path().join(APP_FOLDER).exists());
     }
 
     #[test]
