@@ -101,6 +101,20 @@ impl SourcePlan {
             None => out,
         })
     }
+
+    /// 上报元数据抓取的一次成功：这个候选所在的主机恢复。没挂健康表时什么也不做。
+    pub fn record_success(&self, url: &str) {
+        if let Some(health) = &self.health {
+            health.record_success(url);
+        }
+    }
+
+    /// 上报元数据抓取的一次失败，`fault` 的含义见 [`SourceHealth::record_failure`]。
+    pub fn record_failure(&self, url: &str, fault: bool) {
+        if let Some(health) = &self.health {
+            health.record_failure(url, fault);
+        }
+    }
 }
 
 /// 按时延升序排序：`Some(时延)` 之间比大小，`None`（探测失败/超时）一律沉到末尾。稳定排序保留同级原序。

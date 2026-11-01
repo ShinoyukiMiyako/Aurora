@@ -768,7 +768,6 @@ mod tests {
         assert_eq!(all, (0..total as u64).collect::<Vec<_>>());
     }
 
-    /// Mod 打印几 MB 不带换行的转储：这一行只留前 64 KB 并注明丢掉的字节数，后面的行照常读到。
     async fn read_lines(input: &'static [u8], stream: LogStream) -> Vec<String> {
         let (tx, mut rx) = mpsc::unbounded_channel();
         spawn_reader(input, stream, SessionClock::start().unwrap(), tx)
@@ -808,6 +807,7 @@ mod tests {
         );
     }
 
+    /// Mod 打印几 MB 不带换行的转储：这一行只留前 64 KB 并注明丢掉的字节数，后面的行照常读到。
     #[tokio::test]
     async fn overlong_line_is_capped_and_the_next_line_survives() {
         const LONG: usize = 5 * 1024 * 1024;
@@ -1114,6 +1114,43 @@ mod tests {
         // 结局由调用方写：此时文件里还没有结局行。
         drop(log);
         assert_eq!(read_back(&out.dir).await.1, None);
+    }
+
+    /// 版本 JSON 的日志配置让 stdout 走 XML：会话日志与崩溃判定缓存里都要是还原后的普通行。
+    #[tokio::test]
+    async fn xml_log_events_are_recorded_as_plain_lines() {
+        let out = output(
+            b"  <log4j:Event logger=\"FabricLoader\" timestamp=\"1\" level=\"ERROR\" thread=\"main\">\n    <log4j:Message><![CDATA[Incompatible mods found!]]></log4j:Message>\n  </log4j:Event>\nPLAIN\n",
+        )
+        .await;
+        let exited = Exited {
+            status: Ok(clean_exit()),
+            terminated_by_launcher: false,
+        };
+        let end = conclude(
+            exited,
+            out.clock,
+            out.readers,
+            out.pump,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            end.report.recent_lines,
+            ["[main/ERROR]: Incompatible mods found!", "PLAIN"]
+        );
+        end.log
+            .expect("日志应保持打开交还调用方")
+            .finish(out.clock.now(), SessionOutcome::Exited)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_back(&out.dir).await.0,
+            [
+                game("[main/ERROR]: Incompatible mods found!"),
+                game("PLAIN")
+            ]
+        );
     }
 
     /// 等待进程本身失败：照样读完输出、写下原因与结局并落盘，退出报告与那次失败一并交出。

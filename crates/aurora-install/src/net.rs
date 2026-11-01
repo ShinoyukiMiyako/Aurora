@@ -9,15 +9,28 @@
 //! 国内直连 meta.fabricmc.net、maven.minecraftforge.net 经常不通，单源抓取会让加载器列表与安装
 //! 直接失败，而文件下载早已有镜像兜底。
 //!
+//! 换源的代价要小：后面还有源可换时只试一次，而且响应头迟迟不来就走。一个源连接挂着不回话的时候，
+//! 客户端要等满超时，退避重试跑满要一分多钟；新建实例页的版本列表就是这么转上两分钟骨架屏的。
+//! 成败记进下载源方案挂的健康表，这个源不通的结论后面的请求不用再赔一遍；最后一个候选没得换，
+//! 重试照常跑满。
+//!
 //! 给了取消令牌时，等连接、等响应头、读响应体与两次尝试之间的退避都看它：令牌一触发就丢下进行中的
 //! 请求返回已取消。元数据只进内存、不落盘，半途丢下请求没有要清理的东西；不看令牌的话，一次卡住的
 //! 抓取要等满客户端超时加整轮退避才返回，远超取消时限。
 
+use std::future::Future;
+use std::time::Duration;
+
 use aurora_base::http::{BodyReadError, METADATA_MAX_BYTES, read_body_capped};
 use aurora_base::retry::{RetryPolicy, retry_async};
-use aurora_download::{CancellationToken, SourcePlan};
+use aurora_download::{CancellationToken, SourcePlan, is_host_fault};
 
 use crate::error::{Error, Result};
+
+/// 后面还有别的源可换时，一个源多久没回响应头就不等了。只限响应头：响应体慢是线路慢，不是不通，
+/// 换走了反而可能换到一个更慢的源。
+const FALLBACK_RESPONSE_TIMEOUT: Duration =
+    Duration::from_millis(if cfg!(test) { 1_000 } else { 5_000 });
 
 /// 带退避重试地 GET 一个 URL 的响应体字节；`cancel` 触发即以已取消返回。
 pub(crate) async fn get_bytes(
@@ -26,50 +39,89 @@ pub(crate) async fn get_bytes(
     policy: &RetryPolicy,
     cancel: Option<&CancellationToken>,
 ) -> Result<Vec<u8>> {
-    let fetch = fetch_with_retry(client, url, policy);
+    cancellable(
+        retry_async(policy, || fetch_once(client, url, None)),
+        cancel,
+    )
+    .await
+}
+
+/// 后面还有别的源可换时的一次尝试：不重试，响应头迟迟不来就放弃。
+async fn try_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    cancel: Option<&CancellationToken>,
+) -> Result<Vec<u8>> {
+    cancellable(
+        fetch_once(client, url, Some(FALLBACK_RESPONSE_TIMEOUT)),
+        cancel,
+    )
+    .await
+}
+
+async fn cancellable<T>(
+    work: impl Future<Output = Result<T>>,
+    cancel: Option<&CancellationToken>,
+) -> Result<T> {
     let Some(token) = cancel else {
-        return fetch.await;
+        return work.await;
     };
-    match token.run_until_cancelled(fetch).await {
+    match token.run_until_cancelled(work).await {
         Some(result) => result,
         None => Err(aurora_download::Error::Cancelled.into()),
     }
 }
 
-async fn fetch_with_retry(
+async fn fetch_once(
     client: &reqwest::Client,
     url: &str,
-    policy: &RetryPolicy,
+    response_timeout: Option<Duration>,
 ) -> Result<Vec<u8>> {
-    retry_async(policy, || async {
-        let resp = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|source| Error::Http {
+    let request = client.get(url).send();
+    let response = match response_timeout {
+        Some(limit) => {
+            tokio::time::timeout(limit, request)
+                .await
+                .map_err(|_| Error::NoResponse {
+                    url: url.to_owned(),
+                    seconds: limit.as_secs(),
+                })?
+        }
+        None => request.await,
+    };
+    let resp = response
+        .map_err(|source| Error::Http {
+            url: url.to_owned(),
+            source,
+        })?
+        .error_for_status()
+        .map_err(|source| Error::Http {
+            url: url.to_owned(),
+            source,
+        })?;
+    read_body_capped(resp, METADATA_MAX_BYTES)
+        .await
+        .map_err(|err| match err {
+            BodyReadError::TooLarge { size, limit } => Error::ResponseTooLarge {
+                url: url.to_owned(),
+                size,
+                limit,
+            },
+            BodyReadError::Transport(source) => Error::Http {
                 url: url.to_owned(),
                 source,
-            })?
-            .error_for_status()
-            .map_err(|source| Error::Http {
-                url: url.to_owned(),
-                source,
-            })?;
-        read_body_capped(resp, METADATA_MAX_BYTES)
-            .await
-            .map_err(|err| match err {
-                BodyReadError::TooLarge { size, limit } => Error::ResponseTooLarge {
-                    url: url.to_owned(),
-                    size,
-                    limit,
-                },
-                BodyReadError::Transport(source) => Error::Http {
-                    url: url.to_owned(),
-                    source,
-                },
-            })
-    })
-    .await
+            },
+        })
+}
+
+/// 这次失败算不算这个源不行。404 是「这个源没有这份文件」，内容读不懂只说明这一份报文坏了，
+/// 都不说明线路有问题，记在主机头上会误伤它对其余路径的正常服务。
+fn is_source_fault(err: &Error) -> bool {
+    match err {
+        Error::Http { source, .. } => is_host_fault(source.status().map(|code| code.as_u16())),
+        Error::NoResponse { .. } => true,
+        _ => false,
+    }
 }
 
 /// 按下载源方案展开官方地址的全部候选；没给方案时只有官方地址本身。
@@ -113,17 +165,31 @@ pub(crate) async fn get_decoded_from<T>(
 ) -> Result<T> {
     let mut attempts = Vec::new();
     let mut last = None;
-    for candidate in candidates(sources, url)? {
-        let outcome = match get_bytes(client, &candidate, policy, cancel).await {
+    let candidates = candidates(sources, url)?;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let fetched = if index + 1 < candidates.len() {
+            try_bytes(client, candidate, cancel).await
+        } else {
+            get_bytes(client, candidate, policy, cancel).await
+        };
+        let outcome = match fetched {
             Ok(bytes) => decode(bytes),
             Err(err) => Err(err),
         };
         match outcome {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                if let Some(plan) = sources {
+                    plan.record_success(candidate);
+                }
+                return Ok(value);
+            }
             Err(err) if err.is_cancelled() => return Err(err),
             Err(err) => {
                 tracing::warn!(url = %candidate, error = %err, "元数据抓取失败，换下一个下载源");
-                attempts.push(describe_attempt(&candidate, &err));
+                if let Some(plan) = sources {
+                    plan.record_failure(candidate, is_source_fault(&err));
+                }
+                attempts.push(describe_attempt(candidate, &err));
                 last = Some(err);
             }
         }
@@ -165,7 +231,7 @@ pub(crate) mod tests {
     use super::*;
     use aurora_base::mirror::MirrorSource;
     use aurora_base::retry::RetryableError;
-    use aurora_download::SourceResolver;
+    use aurora_download::{SourceHealth, SourceResolver};
     use std::io::{Read, Write};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -298,6 +364,192 @@ pub(crate) mod tests {
             matches!(err, Error::Http { ref url, .. } if url.ends_with("/broken")),
             "实际：{err:?}"
         );
+    }
+
+    /// 镜像线路不通时连接挂着什么都不回。实测 BMCLAPI 这样的时候，每个元数据请求要在它身上耗掉一分多
+    /// 钟才轮到官方，新建实例的版本列表转两分钟骨架屏。后面还有源可换时只等一小会、只试一次。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_silent_source_is_left_quickly_when_another_can_answer() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/silent",
+            ResponseTemplate::new(200).set_delay(Duration::from_secs(60)),
+            1,
+        )
+        .await;
+        mount(
+            &server,
+            "/good",
+            ResponseTemplate::new(200).set_body_string("ok"),
+            1,
+        )
+        .await;
+        let client = aurora_base::http::build_client().unwrap();
+        let plan = plan_between(&server, "/silent", "/good");
+
+        let started = Instant::now();
+        let body = get_bytes_from(
+            &client,
+            Some(&plan),
+            UPSTREAM,
+            &RetryPolicy::default(),
+            None,
+            "测试报文",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(body, b"ok");
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    /// 响应头到了、响应体慢慢来不算不通：线路慢的玩家不能因此被换到另一个源。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_body_from_a_source_that_answered_is_read_to_the_end() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/meta.json", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsl")
+                .unwrap();
+            stream.flush().unwrap();
+            std::thread::sleep(FALLBACK_RESPONSE_TIMEOUT * 2);
+            stream.write_all(b"ow").unwrap();
+        });
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/spare",
+            ResponseTemplate::new(200).set_body_string("spare"),
+            0,
+        )
+        .await;
+        let spare = format!("{}/spare", server.uri());
+        let plan = SourcePlan::with_resolver(
+            vec![MirrorSource::Official, MirrorSource::BmclApi],
+            Arc::new(Fixed {
+                official: url,
+                mirror: spare,
+            }),
+        );
+        let client = aurora_base::http::build_client().unwrap();
+
+        let body = get_bytes_from(
+            &client,
+            Some(&plan),
+            UPSTREAM,
+            &fast_policy(),
+            None,
+            "测试报文",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(body, b"slow");
+    }
+
+    /// 最后一个候选后面没得换了：退避重试照常跑满，别把仅剩的机会用掉一次就放弃。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_last_candidate_still_gets_every_retry() {
+        let server = MockServer::start().await;
+        mount(&server, "/first", ResponseTemplate::new(503), 1).await;
+        mount(&server, "/last", ResponseTemplate::new(503), 3).await;
+        let client = aurora_base::http::build_client().unwrap();
+        let plan = plan_between(&server, "/first", "/last");
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            ..fast_policy()
+        };
+
+        get_bytes_from(&client, Some(&plan), UPSTREAM, &policy, None, "测试报文")
+            .await
+            .unwrap_err();
+    }
+
+    fn plan_across(down: &MockServer, good: &MockServer, health: Arc<SourceHealth>) -> SourcePlan {
+        SourcePlan::with_resolver(
+            vec![MirrorSource::BmclApi, MirrorSource::Official],
+            Arc::new(Fixed {
+                official: format!("{}/meta", good.uri()),
+                mirror: format!("{}/meta", down.uri()),
+            }),
+        )
+        .with_health(health)
+    }
+
+    /// 同一个源连续失败够数后，之后的元数据请求不再先去碰它：「这个源现在不通」只赔一次学费。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_source_that_keeps_failing_sinks_for_later_requests() {
+        let down = MockServer::start().await;
+        let good = MockServer::start().await;
+        mount(&down, "/meta", ResponseTemplate::new(503), 3).await;
+        mount(
+            &good,
+            "/meta",
+            ResponseTemplate::new(200).set_body_string("ok"),
+            5,
+        )
+        .await;
+        let client = aurora_base::http::build_client().unwrap();
+        let health = Arc::new(SourceHealth::new());
+        let plan = plan_across(&down, &good, health.clone());
+
+        for _ in 0..5 {
+            let body = get_bytes_from(
+                &client,
+                Some(&plan),
+                UPSTREAM,
+                &fast_policy(),
+                None,
+                "测试报文",
+            )
+            .await
+            .unwrap();
+            assert_eq!(body, b"ok");
+        }
+
+        assert!(health.is_tripped(&format!("{}/meta", down.uri())));
+    }
+
+    /// 404 说的是这个源没有这份文件，不是这个源不行：别的文件还要找它。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_missing_file_does_not_count_against_the_source() {
+        let down = MockServer::start().await;
+        let good = MockServer::start().await;
+        mount(&down, "/meta", ResponseTemplate::new(404), 4).await;
+        mount(
+            &good,
+            "/meta",
+            ResponseTemplate::new(200).set_body_string("ok"),
+            4,
+        )
+        .await;
+        let client = aurora_base::http::build_client().unwrap();
+        let health = Arc::new(SourceHealth::new());
+        let plan = plan_across(&down, &good, health.clone());
+
+        for _ in 0..4 {
+            get_bytes_from(
+                &client,
+                Some(&plan),
+                UPSTREAM,
+                &fast_policy(),
+                None,
+                "测试报文",
+            )
+            .await
+            .unwrap();
+        }
+
+        assert!(!health.is_tripped(&format!("{}/meta", down.uri())));
     }
 
     /// 第一个候选回 200 但内容不是合法 JSON：不把它当成功，换第二个候选取到真正的报文。

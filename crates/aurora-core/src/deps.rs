@@ -93,6 +93,14 @@ enum SkipNote {
         project_id: String,
         file_name: String,
     },
+    PinOlderThanInstalled {
+        project_id: String,
+        file_name: String,
+    },
+    PinIncompatible {
+        project_id: String,
+        file_name: String,
+    },
     Optional {
         project_id: Option<String>,
     },
@@ -116,7 +124,9 @@ impl SkipNote {
             SkipNote::PinnedGone { project_id, .. }
             | SkipNote::NoCompatibleVersion { project_id }
             | SkipNote::ProjectGone { project_id }
-            | SkipNote::HeldBack { project_id, .. } => Some(project_id),
+            | SkipNote::HeldBack { project_id, .. }
+            | SkipNote::PinOlderThanInstalled { project_id, .. }
+            | SkipNote::PinIncompatible { project_id, .. } => Some(project_id),
             SkipNote::Optional { project_id }
             | SkipNote::Incompatible { project_id, .. }
             | SkipNote::Embedded { project_id, .. }
@@ -153,6 +163,20 @@ impl SkipNote {
                 "前置 {} 按你的更新设置保留现有版本，未换成 {file_name} 指定的版本",
                 name(Some(project_id))
             ),
+            SkipNote::PinOlderThanInstalled {
+                project_id,
+                file_name,
+            } => format!(
+                "前置 {} 保留现有的较新版本，未换成 {file_name} 指定的旧版本",
+                name(Some(project_id))
+            ),
+            SkipNote::PinIncompatible {
+                project_id,
+                file_name,
+            } => format!(
+                "{file_name} 指定的前置 {} 版本不适配这个实例，已改用适配的版本",
+                name(Some(project_id))
+            ),
             SkipNote::Optional { project_id } => format!(
                 "可选前置 {} 未自动安装，需要时请手动添加",
                 name(project_id.as_deref())
@@ -174,6 +198,27 @@ impl SkipNote {
             SkipNote::Tool { project_id } => {
                 format!("工具类关联 {} 未自动安装", name(project_id.as_deref()))
             }
+        }
+    }
+}
+
+/// 作者钉的前置版本为什么没被采用。
+enum PinRejection {
+    OlderThanInstalled,
+    Incompatible,
+}
+
+impl PinRejection {
+    fn note(self, project_id: String, file_name: String) -> SkipNote {
+        match self {
+            PinRejection::OlderThanInstalled => SkipNote::PinOlderThanInstalled {
+                project_id,
+                file_name,
+            },
+            PinRejection::Incompatible => SkipNote::PinIncompatible {
+                project_id,
+                file_name,
+            },
         }
     }
 }
@@ -310,7 +355,7 @@ impl Aurora {
                             });
                             author_pin = None;
                         }
-                        match self
+                        let (resolved, rejected) = self
                             .resolve_required(
                                 platform,
                                 &dep_project,
@@ -319,8 +364,11 @@ impl Aurora {
                                 &ledger,
                                 &dirs.mods_dir,
                             )
-                            .await?
-                        {
+                            .await?;
+                        notes.extend(rejected.map(|rejection| {
+                            rejection.note(dep_project.clone(), version.file_name.clone())
+                        }));
+                        match resolved {
                             Resolved::Chosen(chosen, installed) => {
                                 children.push(PlannedItem::from_platform(
                                     *chosen,
@@ -386,14 +434,11 @@ impl Aurora {
         Ok(InstallPlan { items, skipped })
     }
 
-    /// 解析一条必需依赖。
+    /// 解析一条必需依赖，连同作者钉的版本没被采用的原因（有的话）一起交回。
     ///
-    /// 依赖声明里带了精确版本号时原样采用、不再择优：那是 Mod 作者钉死的搭配，启动器凭「更新」二字
-    /// 推翻它，换来的通常是一个作者从未测过的组合。没钉版本时，实例里已有同工程的文件就沿用它。
-    ///
-    /// 实例里装着的那一版在平台上已经找不到（下架或删除）时照样算已满足：文件就在 mods 目录里，能不能
-    /// 用由玩家现有的整套 Mod 说了算；拿平台上另一版顶替是替他换版本，让整份计划失败则连主 Mod 也装
-    /// 不上。只有「找不到这个版本」这样处理，网络与别的平台错误照常冒泡。
+    /// 依赖声明里带了精确版本号时优先采用，不再择优：实例里没有这个前置时，那是作者测过的搭配。但它
+    /// 说的是「发版时用的这一版」，不是「只能用这一版」，所以有两种情况不照做，见 [`Aurora::reject_pin`]。
+    /// 没钉版本或钉的版本没被采用时，走 [`Aurora::resolve_unpinned`]。
     async fn resolve_required(
         &self,
         platform: Platform,
@@ -402,30 +447,98 @@ impl Aurora {
         facts: &InstanceFacts,
         ledger: &Ledger,
         mods_dir: &Path,
-    ) -> Result<Resolved> {
+    ) -> Result<(Resolved, Option<PinRejection>)> {
+        let mut rejected = None;
         if let Some(pinned) = pinned {
-            return match self.get_mod_version(platform, dep_project, pinned).await {
+            match self.get_mod_version(platform, dep_project, pinned).await {
                 Ok(version) => {
                     let installed = installed_exact(ledger, mods_dir, &version).await?;
-                    Ok(Resolved::Chosen(Box::new(version), installed))
+                    if !installed {
+                        rejected = self.reject_pin(&version, facts, ledger, mods_dir).await?;
+                    }
+                    if rejected.is_none() {
+                        return Ok((Resolved::Chosen(Box::new(version), installed), None));
+                    }
                 }
                 // 「作者钉的版本没了」与「这个实例用不上任何版本」是两回事，玩家该拿到哪一种，取决于他
                 // 接下来是去找替代 Mod 还是去换实例。
-                Err(CoreError::ModVersionNotFound { .. }) => Ok(
-                    match installed_version(ledger, mods_dir, platform, dep_project, Some(pinned))
-                        .await?
+                Err(CoreError::ModVersionNotFound { .. }) => {
+                    let resolved = match installed_version(
+                        ledger,
+                        mods_dir,
+                        platform,
+                        dep_project,
+                        Some(pinned),
+                    )
+                    .await?
                     {
                         Some(entry) => Resolved::Delisted(Box::new(entry.clone())),
                         None => Resolved::Skipped(SkipNote::PinnedGone {
                             project_id: dep_project.to_owned(),
                             version_id: pinned.to_owned(),
                         }),
-                    },
-                ),
-                Err(other) => Err(other),
-            };
+                    };
+                    return Ok((resolved, None));
+                }
+                Err(other) => return Err(other),
+            }
         }
+        let resolved = self
+            .resolve_unpinned(platform, dep_project, facts, ledger, mods_dir)
+            .await?;
+        // 什么都没选上时，跳过说明已经说清了，再说「已改用适配的版本」就是假话。
+        if matches!(resolved, Resolved::Skipped(_)) {
+            rejected = None;
+        }
+        Ok((resolved, rejected))
+    }
 
+    /// 作者钉的版本不该照做时给出原因；实例里已经是这一版时不用问。
+    ///
+    /// 一是这一版明确不适配实例：Modrinth 的钉版本常常只是作者发版时的构建环境，旧版 AppleSkin 钉的
+    /// Fabric API 0.83.0+1.20 只认 1.20，装进 1.20.1 实例后加载器直接拒绝启动。
+    /// 二是实例里已有不比它旧的版本：前置是实例里所有 Mod 共用的，往回换会让别的 Mod 要求的版本不再
+    /// 满足，玩家只是装一个 Mod，实例却再也起不来。已装的那一版在平台上找不到时比不出先后，同样不换。
+    async fn reject_pin(
+        &self,
+        pin: &ModVersionInfo,
+        facts: &InstanceFacts,
+        ledger: &Ledger,
+        mods_dir: &Path,
+    ) -> Result<Option<PinRejection>> {
+        if matches!(judge(pin, facts), Compatibility::Mismatch { .. }) {
+            return Ok(Some(PinRejection::Incompatible));
+        }
+        let Some(entry) =
+            installed_version(ledger, mods_dir, pin.platform, &pin.project_id, None).await?
+        else {
+            return Ok(None);
+        };
+        match self
+            .get_mod_version(pin.platform, &pin.project_id, &entry.version_id)
+            .await
+        {
+            Ok(current) if current.date_published < pin.date_published => Ok(None),
+            Ok(_) | Err(CoreError::ModVersionNotFound { .. }) => {
+                Ok(Some(PinRejection::OlderThanInstalled))
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// 解析一条没钉版本（或钉的版本没被采用）的必需依赖：实例里已有同工程的文件就沿用它，否则择优。
+    ///
+    /// 实例里装着的那一版在平台上已经找不到（下架或删除）时照样算已满足：文件就在 mods 目录里，能不能
+    /// 用由玩家现有的整套 Mod 说了算；拿平台上另一版顶替是替他换版本，让整份计划失败则连主 Mod 也装
+    /// 不上。只有「找不到这个版本」这样处理，网络与别的平台错误照常冒泡。
+    async fn resolve_unpinned(
+        &self,
+        platform: Platform,
+        dep_project: &str,
+        facts: &InstanceFacts,
+        ledger: &Ledger,
+        mods_dir: &Path,
+    ) -> Result<Resolved> {
         if let Some(entry) =
             installed_version(ledger, mods_dir, platform, dep_project, None).await?
         {
@@ -1491,6 +1604,195 @@ mod tests {
         assert_eq!(plan.items[1].version.version_id, "pinned");
         assert!(!plan.items[1].already_satisfied);
         assert!(plan.skipped.is_empty());
+    }
+
+    /// 主 Mod 钉了 `fabric-api` 的 pinned，平台上另有一个 2025 年发布的 current，实例里按 `installed`
+    /// 装着（卷宗记的版本 id）。返回算出的计划。
+    async fn plan_with_author_pin(
+        pin_date: &str,
+        pin_games: &[&str],
+        installed: Option<&str>,
+    ) -> InstallPlan {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "appleskin",
+            &[modrinth_version(
+                "v1",
+                "appleskin",
+                "2023-06-08T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"fabric-api","version_id":"pinned","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        mount_versions(
+            &server,
+            "fabric-api",
+            &[
+                modrinth_version(
+                    "current",
+                    "fabric-api",
+                    "2025-01-01T00:00:00Z",
+                    &["1.20.1"],
+                    &["fabric"],
+                    "",
+                ),
+                modrinth_version("pinned", "fabric-api", pin_date, pin_games, &["fabric"], ""),
+            ],
+        )
+        .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+        if let Some(version_id) = installed {
+            let mut ledger = Ledger::default();
+            ledger.upsert(entry("fabric-api.jar", "fabric-api", version_id));
+            aurora
+                .ledger_store("1.20.1-fabric")
+                .save(&ledger)
+                .await
+                .unwrap();
+            let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+            tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+            tokio::fs::write(mods_dir.join("fabric-api.jar"), b"jar")
+                .await
+                .unwrap();
+        }
+
+        aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "appleskin", "v1")
+            .await
+            .unwrap()
+    }
+
+    /// 作者钉的是发版时用的版本，不是「只能用这一版」：实例里已有更新的前置时不往回换。真实数据里
+    /// 旧版 AppleSkin 钉了 Fabric API 0.83，照做就把别的 Mod 依赖的 0.92 换掉了，实例再也起不来。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn author_pin_never_downgrades_an_installed_dependency() {
+        let plan = plan_with_author_pin("2023-06-08T00:00:00Z", &["1.20.1"], Some("current")).await;
+
+        let dep = &plan.items[1];
+        assert_eq!(dep.version.version_id, "current");
+        assert!(dep.already_satisfied);
+        assert_eq!(
+            plan.skipped,
+            vec![
+                "前置 fabric-api 保留现有的较新版本，未换成 appleskin-v1.jar 指定的旧版本"
+                    .to_owned()
+            ]
+        );
+    }
+
+    /// 作者要的比实例里的新：这是真需要，照常换上去。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn author_pin_newer_than_the_installed_dependency_is_taken() {
+        let plan = plan_with_author_pin("2026-06-01T00:00:00Z", &["1.20.1"], Some("current")).await;
+
+        let dep = &plan.items[1];
+        assert_eq!(dep.version.version_id, "pinned");
+        assert!(!dep.already_satisfied);
+        assert!(plan.skipped.is_empty());
+    }
+
+    /// 作者钉的版本明确不支持这个实例的游戏版本（AppleSkin 2.5.0 钉的 Fabric API 0.83.0+1.20 只认
+    /// 1.20）：装上去游戏起不来，改走没钉版本时的择优。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn author_pin_for_another_game_version_falls_back_to_a_compatible_one() {
+        let plan = plan_with_author_pin("2023-06-08T00:00:00Z", &["1.20"], None).await;
+
+        let dep = &plan.items[1];
+        assert_eq!(dep.version.version_id, "current");
+        assert!(!dep.already_satisfied);
+        assert_eq!(
+            plan.skipped,
+            vec![
+                "appleskin-v1.jar 指定的前置 fabric-api 版本不适配这个实例，已改用适配的版本"
+                    .to_owned()
+            ]
+        );
+    }
+
+    /// 钉的版本不适配，平台上也没有别的版本适配：只说没有可用的版本，不能再说「已改用」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn author_pin_with_nothing_compatible_reports_only_that() {
+        let server = MockServer::start().await;
+        mount_versions(
+            &server,
+            "appleskin",
+            &[modrinth_version(
+                "v1",
+                "appleskin",
+                "2023-06-08T00:00:00Z",
+                &["1.20.1"],
+                &["fabric"],
+                r#"{"project_id":"fabric-api","version_id":"pinned","dependency_type":"required"}"#,
+            )],
+        )
+        .await;
+        mount_versions(
+            &server,
+            "fabric-api",
+            &[modrinth_version(
+                "pinned",
+                "fabric-api",
+                "2023-05-30T00:00:00Z",
+                &["1.20"],
+                &["fabric"],
+                "",
+            )],
+        )
+        .await;
+        let tmp = tempfile::tempdir().unwrap();
+        put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
+        let aurora = aurora_at(tmp.path(), server.uri());
+
+        let plan = aurora
+            .plan_install("1.20.1-fabric", Platform::Modrinth, "appleskin", "v1")
+            .await
+            .unwrap();
+
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(
+            plan.skipped,
+            vec!["前置 fabric-api 没有适配该实例的版本，未加入计划".to_owned()]
+        );
+    }
+
+    /// 不适配的钉版本遇上实例里已有的前置：同样不换。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn author_pin_for_another_game_version_keeps_the_installed_dependency() {
+        let plan = plan_with_author_pin("2026-06-01T00:00:00Z", &["1.20"], Some("current")).await;
+
+        let dep = &plan.items[1];
+        assert_eq!(dep.version.version_id, "current");
+        assert!(dep.already_satisfied);
+        assert_eq!(plan.skipped.len(), 1);
+    }
+
+    /// 实例里已经是作者钉的那一版：什么说明都不用。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn author_pin_already_installed_needs_no_note() {
+        let plan = plan_with_author_pin("2023-06-08T00:00:00Z", &["1.20"], Some("pinned")).await;
+
+        let dep = &plan.items[1];
+        assert_eq!(dep.version.version_id, "pinned");
+        assert!(dep.already_satisfied);
+        assert!(plan.skipped.is_empty());
+    }
+
+    /// 实例里那一版已从平台下架，比不出谁新：不替玩家换，照常按卷宗列出。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn author_pin_leaves_a_delisted_installed_dependency_alone() {
+        let plan =
+            plan_with_author_pin("2023-06-08T00:00:00Z", &["1.20.1"], Some("delisted")).await;
+
+        let dep = &plan.items[1];
+        assert_eq!(dep.version.version_id, "delisted");
+        assert!(dep.delisted && dep.already_satisfied);
+        assert_eq!(plan.skipped.len(), 1);
     }
 
     /// 前置已装着的那一版在平台上已下架（单版本端点 404）：照常算已满足，计划只按卷宗列出它，不去

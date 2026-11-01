@@ -19,7 +19,7 @@ const EMBEDDED_CDATA_END: &str = "]]>]]&gt;<![CDATA[";
 enum State {
     /// 事件之外。
     Outside,
-    /// 事件之内、文本段之外。`head` 是这个事件的行首 `[线程/级别]: `。
+    /// 事件之内、文本段之外。`head` 是这个事件的行首 `[线程/级别]: `，事件头缺属性时为空。
     InEvent { head: String },
     /// 跨行的文本段之内。
     InText { close: &'static str, head: String },
@@ -39,46 +39,41 @@ impl Log4jXmlDecoder {
 
     /// 喂一行原文；还原出的行交给 `emit`。事件的外壳行不产出内容。
     pub fn decode(&mut self, line: String, emit: &mut impl FnMut(String)) {
+        let trimmed = line.trim();
+        // 超长行被截断时收尾标记跟着丢了：事件头优先于「还在事件或文本段里」，一行截断只影响它自己。
+        if trimmed.starts_with(EVENT_OPEN) {
+            let head = event_head(trimmed);
+            self.state = State::InEvent {
+                head: head.clone().unwrap_or_default(),
+            };
+            if head.is_none() {
+                emit(line);
+            }
+            return;
+        }
         match std::mem::replace(&mut self.state, State::Outside) {
-            State::Outside => match event_head(&line) {
-                Some(head) => self.state = State::InEvent { head },
-                None => emit(line),
-            },
+            State::Outside => emit(line),
             State::InEvent { head } => {
-                let trimmed = line.trim_start();
                 if trimmed == EVENT_CLOSE {
                     return;
                 }
-                let text = trimmed
-                    .strip_prefix(MESSAGE_OPEN)
-                    .map(|body| (body, MESSAGE_CLOSE))
-                    .or_else(|| {
-                        trimmed
-                            .strip_prefix(THROWABLE_OPEN)
-                            .map(|body| (body, THROWABLE_CLOSE))
-                    });
-                let Some((body, close)) = text else {
-                    emit(line);
-                    self.state = State::InEvent { head };
-                    return;
-                };
-                match body.strip_suffix(close) {
-                    Some(whole) => {
-                        emit(with_head(&head, whole));
-                        self.state = State::InEvent { head };
-                    }
+                match text_section(trimmed) {
+                    Some((body, close)) => self.open_section(body, close, head, emit),
                     None => {
-                        emit(with_head(&head, body));
-                        self.state = State::InText { close, head };
+                        emit(line);
+                        self.state = State::InEvent { head };
                     }
                 }
             }
             State::InText { close, head } => {
-                // 超长行被截断时收尾标记跟着丢了，事件的结束行还在，走到这里也算收尾。
-                if line.trim() == EVENT_CLOSE {
+                if trimmed == EVENT_CLOSE {
                     return;
                 }
-                match line.strip_suffix(close) {
+                if let Some((body, close)) = text_section(trimmed) {
+                    self.open_section(body, close, head, emit);
+                    return;
+                }
+                match line.trim_end().strip_suffix(close) {
                     Some(rest) => {
                         if !rest.is_empty() {
                             emit(unescape_cdata(rest));
@@ -93,6 +88,28 @@ impl Log4jXmlDecoder {
             }
         }
     }
+
+    /// 文本段的第一行：同一行就收尾的回到事件里，否则记下这一段还开着。
+    fn open_section(
+        &mut self,
+        body: &str,
+        close: &'static str,
+        head: String,
+        emit: &mut impl FnMut(String),
+    ) {
+        let (text, closed) = match body.strip_suffix(close) {
+            Some(whole) => (whole, true),
+            None => (body, false),
+        };
+        if !text.is_empty() || close == MESSAGE_CLOSE {
+            emit(format!("{head}{}", unescape_cdata(text)));
+        }
+        self.state = if closed {
+            State::InEvent { head }
+        } else {
+            State::InText { close, head }
+        };
+    }
 }
 
 impl Default for Log4jXmlDecoder {
@@ -101,8 +118,16 @@ impl Default for Log4jXmlDecoder {
     }
 }
 
-fn with_head(head: &str, text: &str) -> String {
-    format!("{head}{}", unescape_cdata(text))
+/// 文本段开始行里的正文与这一段的收尾标记。
+fn text_section(trimmed: &str) -> Option<(&str, &'static str)> {
+    trimmed
+        .strip_prefix(MESSAGE_OPEN)
+        .map(|body| (body, MESSAGE_CLOSE))
+        .or_else(|| {
+            trimmed
+                .strip_prefix(THROWABLE_OPEN)
+                .map(|body| (body, THROWABLE_CLOSE))
+        })
 }
 
 fn unescape_cdata(text: &str) -> String {
@@ -110,9 +135,9 @@ fn unescape_cdata(text: &str) -> String {
 }
 
 /// 事件开始行的行首：`[线程/级别]: `，与 latest.log 的写法同形，级别推断与崩溃规则都认它。时刻不写：
-/// 日志行本身带着读到它的时刻。缺属性的不算事件，原样放行。
-fn event_head(line: &str) -> Option<String> {
-    let tag = line.trim_start().strip_prefix(EVENT_OPEN)?;
+/// 日志行本身带着读到它的时刻。缺属性时不编造。
+fn event_head(tag: &str) -> Option<String> {
+    let tag = tag.strip_prefix(EVENT_OPEN)?;
     let tag = tag.strip_suffix('>')?;
     let level = attribute(tag, "level")?;
     let thread = attribute(tag, "thread")?;
@@ -139,6 +164,7 @@ fn attribute(tag: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logfile::{LauncherLevel, game_line_level};
 
     fn decode(lines: &[&str]) -> Vec<String> {
         let mut decoder = Log4jXmlDecoder::new();
@@ -161,21 +187,38 @@ mod tests {
         );
     }
 
-    /// 真实客户端的多行消息：只有第一行带行首，收尾标记贴在最后一行末尾。
+    /// 还原之后级别才认得出来：日志页的筛选全靠这个。
+    #[test]
+    fn decoded_lines_carry_the_level_of_the_event() {
+        let decoded = decode(&[
+            r#"  <log4j:Event logger="net.minecraft.class_310" timestamp="1" level="WARN" thread="Render thread">"#,
+            "    <log4j:Message><![CDATA[Failed to verify authentication]]></log4j:Message>",
+            "  </log4j:Event>",
+        ]);
+        assert_eq!(
+            decoded,
+            ["[Render thread/WARN]: Failed to verify authentication"]
+        );
+        assert_eq!(game_line_level(&decoded[0]), LauncherLevel::Warn);
+    }
+
+    /// 真实客户端的多行消息：只有第一行带行首，收尾标记贴在最后一行末尾，缩进原样留下。
     #[test]
     fn multi_line_message_keeps_its_lines() {
         assert_eq!(
             decode(&[
                 r#"  <log4j:Event logger="FabricLoader" timestamp="1" level="INFO" thread="main">"#,
-                "    <log4j:Message><![CDATA[Loading 2 mods:",
+                "    <log4j:Message><![CDATA[Loading 84 mods:",
                 "\t- fabric-api 0.92.12+1.20.1",
-                "\t- pfcrash 1.0.0]]></log4j:Message>",
+                "\t   |-- fabric-api-base 0.4.32+1802ada577",
+                "\t- zoomify 2.15.2+1.20.1]]></log4j:Message>",
                 "  </log4j:Event>",
             ]),
             vec![
-                "[main/INFO]: Loading 2 mods:",
+                "[main/INFO]: Loading 84 mods:",
                 "\t- fabric-api 0.92.12+1.20.1",
-                "\t- pfcrash 1.0.0",
+                "\t   |-- fabric-api-base 0.4.32+1802ada577",
+                "\t- zoomify 2.15.2+1.20.1",
             ]
         );
     }
@@ -185,9 +228,11 @@ mod tests {
     fn throwable_section_keeps_level_on_its_first_line() {
         assert_eq!(
             decode(&[
-                r#"  <log4j:Event logger="FabricLoader" timestamp="1" level="ERROR" thread="main">"#,
+                r#"  <log4j:Event logger="FabricLoader" timestamp="1793537169348" level="ERROR" thread="main">"#,
                 "    <log4j:Message><![CDATA[Incompatible mods found!]]></log4j:Message>",
                 "    <log4j:Throwable><![CDATA[net.fabricmc.loader.impl.FormattedException: Some of your mods are incompatible with the game or each other!",
+                "确定了一种可能的解决方法，这样做可能会解决你的问题：",
+                "\t - 将 模组 'Fabric API' (fabric-api) 0.83.0+1.20 替换为 0.92.0+1.20.1 及以上版本。",
                 "\tat net.fabricmc.loader.impl.launch.knot.KnotClient.main(KnotClient.java:23)",
                 "]]></log4j:Throwable>",
                 "  </log4j:Event>",
@@ -195,8 +240,23 @@ mod tests {
             vec![
                 "[main/ERROR]: Incompatible mods found!",
                 "[main/ERROR]: net.fabricmc.loader.impl.FormattedException: Some of your mods are incompatible with the game or each other!",
+                "确定了一种可能的解决方法，这样做可能会解决你的问题：",
+                "\t - 将 模组 'Fabric API' (fabric-api) 0.83.0+1.20 替换为 0.92.0+1.20.1 及以上版本。",
                 "\tat net.fabricmc.loader.impl.launch.knot.KnotClient.main(KnotClient.java:23)",
             ]
+        );
+    }
+
+    #[test]
+    fn an_empty_throwable_section_adds_no_line() {
+        assert_eq!(
+            decode(&[
+                r#"<log4j:Event logger="a" timestamp="1" level="ERROR" thread="main">"#,
+                "<log4j:Message><![CDATA[x]]></log4j:Message>",
+                "<log4j:Throwable><![CDATA[]]></log4j:Throwable>",
+                "</log4j:Event>",
+            ]),
+            vec!["[main/ERROR]: x"]
         );
     }
 
@@ -216,6 +276,18 @@ mod tests {
                 "#@!@# Game crashed! Crash report saved to: #@!@# D:\\mc\\crash.txt",
             ]
         );
+    }
+
+    /// 标题画面的判据与崩溃规则都按正文匹配，还原不能把正文动了。
+    #[test]
+    fn plain_output_passes_through_untouched() {
+        let lines = [
+            "[05:09:52] [main/INFO]: Loading Minecraft 1.20.1 with Quilt Loader 0.24.0",
+            "#@!@# Game crashed! Crash report saved to: #@!@# D:\\crash.txt",
+            "",
+            "  indented, not a tag",
+        ];
+        assert_eq!(decode(&lines), lines);
     }
 
     #[test]
@@ -249,6 +321,45 @@ mod tests {
         );
     }
 
+    /// 截断的不只是最后一段：后面紧跟着的异常段、下一条事件和普通行都要照常解开，不能把标签当正文放出来。
+    #[test]
+    fn a_truncated_section_does_not_swallow_what_follows() {
+        assert_eq!(
+            decode(&[
+                r#"<log4j:Event logger="x" timestamp="1" level="ERROR" thread="main">"#,
+                "<log4j:Message><![CDATA[xxxx…（这一行超过 64 KB，其余 9 字节没有记录）",
+                "<log4j:Throwable><![CDATA[java.lang.RuntimeException: boom",
+                "]]></log4j:Throwable>",
+                "</log4j:Event>",
+                r#"<log4j:Event logger="x" timestamp="2" level="INFO" thread="main">"#,
+                "<log4j:Message><![CDATA[next]]></log4j:Message>",
+                "</log4j:Event>",
+                "plain again",
+            ]),
+            vec![
+                "[main/ERROR]: xxxx…（这一行超过 64 KB，其余 9 字节没有记录）",
+                "[main/ERROR]: java.lang.RuntimeException: boom",
+                "[main/INFO]: next",
+                "plain again",
+            ]
+        );
+    }
+
+    /// 事件结束行本身被吞掉时，下一条事件的开始行不能被当成正文。
+    #[test]
+    fn a_new_event_starts_even_while_a_section_is_open() {
+        assert_eq!(
+            decode(&[
+                r#"<log4j:Event logger="a" timestamp="1" level="INFO" thread="main">"#,
+                "<log4j:Message><![CDATA[cut off",
+                r#"<log4j:Event logger="a" timestamp="2" level="WARN" thread="main">"#,
+                "<log4j:Message><![CDATA[next]]></log4j:Message>",
+                "</log4j:Event>",
+            ]),
+            vec!["[main/INFO]: cut off", "[main/WARN]: next"]
+        );
+    }
+
     /// 游戏死在事件中间时已经读到的内容都交出去了，没有东西压在解码器里。
     #[test]
     fn nothing_is_held_back_when_the_game_dies_mid_event() {
@@ -262,10 +373,18 @@ mod tests {
         );
     }
 
+    /// 事件头缺级别或线程时这一行原样放行，不吞也不编造级别；后面的正文照样解开。
     #[test]
-    fn a_tag_without_level_or_thread_is_not_an_event() {
-        let line = r#"<log4j:Event logger="a" timestamp="1">"#;
-        assert_eq!(decode(&[line]), vec![line]);
+    fn an_event_without_level_or_thread_keeps_its_tag_and_message() {
+        let tag = r#"<log4j:Event logger="a" timestamp="1">"#;
+        assert_eq!(
+            decode(&[
+                tag,
+                "<log4j:Message><![CDATA[bare]]></log4j:Message>",
+                "</log4j:Event>",
+            ]),
+            vec![tag, "bare"]
+        );
     }
 
     #[test]
