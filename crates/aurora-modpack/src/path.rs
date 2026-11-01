@@ -106,7 +106,7 @@ pub enum PathValidationError {
     ParentTraversal,
     #[error("路径含 Windows 盘符前缀")]
     DrivePrefix,
-    #[error("路径进入启动器元数据目录：{component}")]
+    #[error("路径进入{}元数据目录：{component}", aurora_base::brand::APP_NAME)]
     ProtectedTopLevel { component: String },
     #[error("路径组件以点或空格结尾：{component}")]
     TrailingDotOrSpace { component: String },

@@ -474,7 +474,7 @@ describe("自动备份事件", () => {
   const payload: WorldBackupEvent = {
     instance_id: "樱花生存",
     backed_up: ["New World"],
-    failed: [{ world: "坏档", error: { code: "world_in_use", message: "这个存档正被游戏打开，退出游戏后再试", detail: { path: "D:/saves/坏档" } } }],
+    failed: [{ world: "坏档", error: { code: "world_in_use", message: "这个存档正被游戏打开，结束游戏后再试", detail: { path: "D:/saves/坏档" } } }],
   };
 
   it("mock 推的自动备份结果原样送到 onWorldBackup，退订后不再收到", async () => {

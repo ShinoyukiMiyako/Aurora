@@ -1507,7 +1507,7 @@ function insideMockBackups(path: string): boolean {
 function revealInFolder(args: MockArgs): void {
   const path = str(args, "path");
   if (!/^([A-Za-z]:[\\/]|\\\\)/.test(path)) throw invalid("path", "relative", `要定位的路径必须是绝对路径：${path}`);
-  if (!exportedFiles.has(path) && !insideMockBackups(path)) throw invalid("path", "not_launcher_output", `只能定位启动器自己产出的文件：${path}`);
+  if (!exportedFiles.has(path) && !insideMockBackups(path)) throw invalid("path", "not_launcher_output", `只能定位自己产出的文件：${path}`);
   mockRevealedPaths.push(path);
 }
 

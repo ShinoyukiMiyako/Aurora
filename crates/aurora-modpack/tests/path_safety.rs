@@ -167,7 +167,10 @@ fn rejection_messages_use_full_width_colons() {
         validate_relative_path(&format!("{meta}/a"))
             .unwrap_err()
             .to_string(),
-        format!("路径进入启动器元数据目录：{meta}")
+        format!(
+            "路径进入{}元数据目录：{meta}",
+            aurora_base::brand::APP_NAME
+        )
     );
     for (path, message) in [
         ("mods/a.", "路径组件以点或空格结尾：a."),

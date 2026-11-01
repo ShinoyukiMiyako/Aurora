@@ -247,7 +247,7 @@ describe("备份、导出与恢复入队", () => {
     const list = cacheProbe(worldBackupsKey("生存", "w1"));
     await list.read();
     const scans = callsOf(ipc, "list_instances").length;
-    pending.reject(new IpcError("world_in_use", "这个存档正被游戏打开，退出游戏后再试", { path: "D:/saves/w1" }));
+    pending.reject(new IpcError("world_in_use", "这个存档正被游戏打开，结束游戏后再试", { path: "D:/saves/w1" }));
     await settle();
     const task = store.getState().tasks.find((t) => t.kind === "world_backup");
     expect(task).toMatchObject({ status: "failed", error: { code: "world_in_use" } });
@@ -317,16 +317,16 @@ describe("游戏退出后的自动备份", () => {
       event({
         backed_up: ["w1"],
         failed: [
-          { world: "w2", error: { code: "world_in_use", message: "这个存档正被游戏打开，退出游戏后再试", detail: { path: "D:/saves/w2" } } },
+          { world: "w2", error: { code: "world_in_use", message: "这个存档正被游戏打开，结束游戏后再试", detail: { path: "D:/saves/w2" } } },
           { world: "w3", error: { code: "io", message: "磁盘已满" } },
         ],
       }),
     );
     await settle();
-    expect(toasts()).toEqual([["error", "「生存」的自动备份没有完成", "这个存档正被游戏打开，退出游戏后再试"]]);
+    expect(toasts()).toEqual([["error", "「生存」的自动备份没有完成", "这个存档正被游戏打开，结束游戏后再试"]]);
     expect(toast("「生存」的自动备份没有完成").action?.label).toBe("复制错误信息");
     await runAction("「生存」的自动备份没有完成");
-    expect(writeText).toHaveBeenCalledWith('w2：这个存档正被游戏打开，退出游戏后再试\n{"path":"D:/saves/w2"}\nw3：磁盘已满');
+    expect(writeText).toHaveBeenCalledWith('w2：这个存档正被游戏打开，结束游戏后再试\n{"path":"D:/saves/w2"}\nw3：磁盘已满');
     expect(error).toHaveBeenCalledTimes(2);
   });
 });

@@ -1963,7 +1963,10 @@ fn reveal_target(
         invalid_field(
             "path",
             "not_launcher_output",
-            format!("只能定位启动器自己产出的文件：{path}"),
+            format!(
+                "只能定位{}自己产出的文件：{path}",
+                aurora_base::brand::APP_NAME
+            ),
         )
     };
     let (Some(real), Some(root)) = (

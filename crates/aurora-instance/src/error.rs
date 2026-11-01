@@ -98,7 +98,7 @@ pub enum Error {
     BackupIndexInvalid { path: PathBuf, reason: String },
 
     /// 存档正被游戏打开（游戏对 session.lock 持有排他锁）。
-    #[error("存档 {path} 正被游戏打开，退出游戏后再试")]
+    #[error("存档 {path} 正被游戏打开，结束游戏后再试")]
     WorldInUse { path: PathBuf },
 
     /// 原来的存档已移入回收站，恢复出的副本却没能改名就位；副本留在 `staged`，那是用户唯一的新副本。

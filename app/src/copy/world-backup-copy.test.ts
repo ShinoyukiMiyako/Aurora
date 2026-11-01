@@ -22,7 +22,7 @@ describe("任务类别与标题", () => {
 
 describe("失败原因", () => {
   it("存档被占用、备份损坏、备份不在了给统一说法", () => {
-    expect(taskFailureReason({ code: "world_in_use", message: "这个存档正被游戏打开，退出游戏后再试" })).toBe("这个存档正被游戏打开");
+    expect(taskFailureReason({ code: "world_in_use", message: "这个存档正被游戏打开，结束游戏后再试" })).toBe("这个存档正被游戏打开");
     expect(taskFailureReason({ code: "world_backup_corrupt", message: "备份里有越出存档目录的条目 ../level.dat" })).toBe("备份文件已损坏，无法恢复");
     expect(taskFailureReason({ code: "world_backup_not_found", message: "「w1」的备份 1-auto.zip 已经不在了" })).toBe("这份备份已经不在了");
   });
