@@ -104,8 +104,8 @@ pub fn library_relative_path(lib: &Library) -> Result<String> {
 
 /// 组装该版本的 classpath 条目（绝对路径），顺序 = 合并后生效库的顺序，客户端主 jar 垫最后。
 ///
-/// 只收非 natives 库：带 natives 映射或 classifier 以 `natives-` 开头的条目只提供解压用的本地库，
-/// 不进 classpath（其解压由 aurora-install 完成）。坐标无法解析的非 natives 库直接冒泡成错误，
+/// 由启动器解压的 natives 库不进 classpath（解压由 aurora-install 完成，判据见
+/// [`VersionJson::extracts_native`]）。坐标无法解析的库直接冒泡成错误，
 /// 不静默跳过——否则会导致运行期 `ClassNotFoundException`，问题被推迟到更难定位的地方。
 pub fn classpath_entries(
     version: &VersionJson,
@@ -115,7 +115,7 @@ pub fn classpath_entries(
 ) -> Result<Vec<PathBuf>> {
     let mut entries = Vec::new();
     for lib in select_libraries(version, ctx) {
-        if lib.is_native() {
+        if version.extracts_native(lib) {
             continue;
         }
         let relative = library_relative_path(lib)?;
@@ -240,6 +240,57 @@ mod tests {
         let joined = classpath_string(&entries, ';');
         assert_eq!(joined.matches(';').count(), 2, "3 条目 2 个分隔符");
         assert!(joined.ends_with("1.21.jar"));
+    }
+
+    /// 26.2 起 `java.library.path` 指到 natives 子目录，启动器解压的文件 LWJGL 读不到：
+    /// 新式 natives jar 不进 classpath 时游戏起不来（Failed to locate library: lwjgl.dll）。
+    #[test]
+    fn natives_jars_stay_on_classpath_when_library_path_moves_to_a_subdir() {
+        let version = VersionJson::from_json_str(
+            r#"{
+                "id":"26.3",
+                "arguments":{"jvm":["-Djava.library.path=${natives_directory}/java","-cp","${classpath}"]},
+                "libraries":[
+                    {"name":"org.lwjgl:lwjgl:3.4.3",
+                     "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.4.3/lwjgl-3.4.3.jar","sha1":"a","size":1,"url":"u"}}},
+                    {"name":"org.lwjgl:lwjgl:3.4.3:natives-windows",
+                     "downloads":{"artifact":{"path":"org/lwjgl/lwjgl/3.4.3/lwjgl-3.4.3-natives-windows.jar","sha1":"b","size":1,"url":"u"}}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let libraries_dir = Path::new("D:/mc/.minecraft/libraries");
+        let client_jar = Path::new("D:/mc/.minecraft/versions/26.3/26.3.jar");
+        let entries = classpath_entries(&version, &win64(), libraries_dir, client_jar).unwrap();
+
+        assert_eq!(
+            entries,
+            vec![
+                libraries_dir.join("org/lwjgl/lwjgl/3.4.3/lwjgl-3.4.3.jar"),
+                libraries_dir.join("org/lwjgl/lwjgl/3.4.3/lwjgl-3.4.3-natives-windows.jar"),
+                client_jar.to_path_buf(),
+            ]
+        );
+    }
+
+    /// 旧式 natives 映射的 classifier 件只供解压，换了新布局也不进 classpath。
+    #[test]
+    fn old_style_natives_map_stays_off_classpath_in_the_new_layout() {
+        let version = VersionJson::from_json_str(
+            r#"{
+                "id":"26.3",
+                "arguments":{"jvm":["-Djava.library.path=${natives_directory}/java"]},
+                "libraries":[
+                    {"name":"org.lwjgl.lwjgl:lwjgl-platform:2.9.4",
+                     "natives":{"windows":"natives-windows"},
+                     "downloads":{"classifiers":{"natives-windows":{"path":"p.jar","sha1":"a","size":1,"url":"u"}}}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let client_jar = Path::new("/c.jar");
+        let entries = classpath_entries(&version, &win64(), Path::new("/libs"), client_jar).unwrap();
+        assert_eq!(entries, vec![client_jar.to_path_buf()]);
     }
 
     /// 库路径与由坐标算出的路径按补全时下载计划的同一判据校验：空段、`..`、反斜杠一律报路径越界，
