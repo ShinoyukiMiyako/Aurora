@@ -18,6 +18,18 @@ function inUseReason(error: IpcError): string | null {
   return usedBy === null ? null : INSTANCE_IN_USE_COPY.reason(usedBy);
 }
 
+/** 网络层失败的种类：connect（DNS 解析失败、连接被拒、TLS 握手失败）或 timeout。 */
+export type NetworkFailure = "connect" | "timeout";
+
+/** 后端在原因链里认出网络层失败时标在 detail.network 里的种类；其余错误为 null。 */
+export function networkFailureOf(error: unknown): NetworkFailure | null {
+  if (!isIpcError(error)) return null;
+  const { detail } = error;
+  if (typeof detail !== "object" || detail === null) return null;
+  const kind = (detail as Record<string, unknown>).network;
+  return kind === "connect" || kind === "timeout" ? kind : null;
+}
+
 export function describeError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
   if (!isIpcError(error)) return error.message;

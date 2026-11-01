@@ -64,7 +64,7 @@ describe("后端信息同步进状态机", () => {
 
   it("后端没有可报的更新时，会话内的「已是最新」「检查失败」保留；带版本的阶段回到 idle", () => {
     expect(run(at({ kind: "up_to_date", checkedAt: 5 }), { type: "info", info: info() }).phase).toEqual({ kind: "up_to_date", checkedAt: 5 });
-    expect(run(at({ kind: "check_failed", message: "超时" }), { type: "info", info: info() }).phase).toEqual({ kind: "check_failed", message: "超时" });
+    expect(run(at({ kind: "check_failed", message: "超时", network: "timeout" }), { type: "info", info: info() }).phase).toEqual({ kind: "check_failed", message: "超时", network: "timeout" });
     expect(run(at({ kind: "ready", update: UPDATE }), { type: "info", info: info({ current_version: "0.2.1" }) })).toEqual(
       at({ kind: "idle" }, { currentVersion: "0.2.1" }),
     );
@@ -87,8 +87,8 @@ describe("检查", () => {
   });
 
   it("失败进入 check_failed，重试再回到 checking", () => {
-    const failed = run(at({ kind: "idle" }), { type: "check_start" }, { type: "check_failed", message: "DNS 解析失败" });
-    expect(failed.phase).toEqual({ kind: "check_failed", message: "DNS 解析失败" });
+    const failed = run(at({ kind: "idle" }), { type: "check_start" }, { type: "check_failed", message: "DNS 解析失败", network: "connect" });
+    expect(failed.phase).toEqual({ kind: "check_failed", message: "DNS 解析失败", network: "connect" });
     expect(run(failed, { type: "check_start" }).phase).toEqual({ kind: "checking" });
   });
 
@@ -111,7 +111,7 @@ describe("检查", () => {
   it("不在检查中时到达的检查结果被丢弃", () => {
     const state = at({ kind: "ready", update: UPDATE });
     expect(run(state, { type: "check_done", update: null, at: 9 })).toBe(state);
-    expect(run(state, { type: "check_failed", message: "x" })).toBe(state);
+    expect(run(state, { type: "check_failed", message: "x", network: null })).toBe(state);
   });
 });
 
@@ -191,7 +191,7 @@ describe("提示点", () => {
 
   it("只有带版本的阶段能打开更新面板", () => {
     expect(hasPanel({ kind: "idle" })).toBe(false);
-    expect(hasPanel({ kind: "check_failed", message: "x" })).toBe(false);
+    expect(hasPanel({ kind: "check_failed", message: "x", network: null })).toBe(false);
     expect(hasPanel({ kind: "available", update: UPDATE })).toBe(true);
     expect(hasPanel({ kind: "installing", update: UPDATE })).toBe(true);
   });
