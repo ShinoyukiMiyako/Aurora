@@ -15,10 +15,10 @@ class NoNativeDialogError extends Error {
   }
 }
 
-/** 系统选择文件夹对话框，从 defaultPath 打开；用户取消为 null。 */
-export async function pickDirectory(defaultPath: string): Promise<string | null> {
+/** 系统选择文件夹对话框，从 defaultPath 打开；title 缺省时用系统默认标题。用户取消为 null。 */
+export async function pickDirectory(defaultPath: string, title?: string): Promise<string | null> {
   if (!inTauri()) throw new NoNativeDialogError("选择文件夹");
-  return open({ directory: true, multiple: false, defaultPath });
+  return open(title === undefined ? { directory: true, multiple: false, defaultPath } : { directory: true, multiple: false, defaultPath, title });
 }
 
 export interface FileFilter {

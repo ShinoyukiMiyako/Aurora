@@ -52,6 +52,17 @@ describe("游戏目录与选择文件夹", () => {
   it("浏览器预览里没有系统对话框：明确拒绝，不当作用户取消", async () => {
     await expect(pickDirectory("C:\\Users\\a\\.minecraft")).rejects.toThrow("浏览器预览里没有系统的选择文件夹对话框");
   });
+
+  it("窗口里：只选一个文件夹，从默认位置打开；给了标题才带标题；取消为 null", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    dialog.open.mockResolvedValueOnce("C:\\Users\\a\\Downloads").mockResolvedValueOnce(null);
+    await expect(pickDirectory("C:\\Users\\a\\Downloads", "选择下载好的文件所在的文件夹")).resolves.toBe("C:\\Users\\a\\Downloads");
+    await expect(pickDirectory("C:\\Users\\a\\.minecraft")).resolves.toBeNull();
+    expect(dialog.open.mock.calls).toEqual([
+      [{ directory: true, multiple: false, defaultPath: "C:\\Users\\a\\Downloads", title: "选择下载好的文件所在的文件夹" }],
+      [{ directory: true, multiple: false, defaultPath: "C:\\Users\\a\\.minecraft" }],
+    ]);
+  });
 });
 
 describe("选择文件", () => {
