@@ -289,7 +289,15 @@ fn pick_best(
         return (Compatibility::Unknown { reason }, Some(version.clone()));
     }
     match newest_reason {
-        Some(reason) => (Compatibility::Mismatch { reason }, None),
+        Some(reason) => {
+            // 每个版本的原因只说它自己。工程在这个 MC 版本上一个文件都没有时，最新版的「需要某加载器」
+            // 是误导：换了加载器也没得装。
+            let reason = match instance_mc_version {
+                Some(mc) if !covers_game_version(versions, mc) => format!("不支持 MC {mc}"),
+                _ => reason,
+            };
+            (Compatibility::Mismatch { reason }, None)
+        }
         // 工程一个版本都没有：没东西可装是确凿事实，如实说明，不含糊成「无法判断」。
         None => (
             Compatibility::Mismatch {
@@ -298,6 +306,13 @@ fn pick_best(
             None,
         ),
     }
+}
+
+/// 工程是否可能有这个 MC 版本的文件。平台没标 MC 版本的算可能：不知道不等于没有。
+fn covers_game_version(versions: &[ModVersionInfo], mc: &str) -> bool {
+    versions
+        .iter()
+        .any(|v| v.game_versions.is_empty() || v.game_versions.iter().any(|g| g == mc))
 }
 
 /// 只判调用方指定的那一个版本（落位层的版本下拉选了具体版本时）。
@@ -1046,6 +1061,52 @@ mod tests {
         assert_eq!(best.unwrap().version_id, "newest");
     }
 
+    /// 工程压根没有这个 MC 版本的文件时，说「需要 NeoForge」等于让玩家去换加载器，换了也没得装。
+    #[test]
+    fn pick_best_reports_the_game_version_when_the_project_never_covers_it() {
+        let versions = vec![
+            dated("newest", 2026, &[ModLoader::NeoForge], &["1.21.1"]),
+            dated("older", 2025, &[ModLoader::Fabric], &["1.20.1"]),
+        ];
+        let (compat, best) = pick_best(
+            ResourceType::Mod,
+            &versions,
+            Some("1.12.2"),
+            &names(&["forge"]),
+        );
+        assert_eq!(compat, mismatch("不支持 MC 1.12.2"));
+        assert_eq!(best, None);
+    }
+
+    /// 这个 MC 版本有文件、只是加载器不对：换加载器才有用，原因仍说加载器。
+    #[test]
+    fn pick_best_keeps_the_loader_reason_when_another_loader_covers_the_game_version() {
+        let versions = vec![
+            dated("newest", 2026, &[ModLoader::NeoForge], &["1.21.1"]),
+            dated("older", 2025, &[ModLoader::Fabric], &["1.12.2"]),
+        ];
+        let (compat, _) = pick_best(
+            ResourceType::Mod,
+            &versions,
+            Some("1.12.2"),
+            &names(&["forge"]),
+        );
+        assert_eq!(compat, mismatch("需要 NeoForge，该实例装的是 Forge"));
+    }
+
+    /// 平台没标 MC 版本的不算「确实没有」：版本维度说不准，就别改口。
+    #[test]
+    fn pick_best_does_not_claim_a_game_version_gap_from_unlabelled_versions() {
+        let versions = vec![dated("newest", 2026, &[ModLoader::NeoForge], &[])];
+        let (compat, _) = pick_best(
+            ResourceType::Mod,
+            &versions,
+            Some("1.12.2"),
+            &names(&["forge"]),
+        );
+        assert_eq!(compat, mismatch("需要 NeoForge，该实例装的是 Forge"));
+    }
+
     #[test]
     fn pick_best_skips_newer_mismatches_to_reach_a_match() {
         let versions = vec![
@@ -1458,11 +1519,8 @@ mod tests {
             mismatch("需要 Fabric/Quilt，该实例装的是 Forge")
         );
 
-        // 不兼容：两个版本都对不上，说明取自最新版的原因，不给候选版本。
-        assert_eq!(
-            matches[4].compatibility,
-            mismatch("需要 Fabric/Quilt，该实例装的是 Forge")
-        );
+        // 不兼容：工程在 1.18.2 上一个文件都没有，说版本不说加载器，不给候选版本。
+        assert_eq!(matches[4].compatibility, mismatch("不支持 MC 1.18.2"));
         assert!(matches[4].best_version.is_none());
         assert_eq!(matches[4].installed, None);
     }
