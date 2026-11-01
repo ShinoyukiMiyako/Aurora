@@ -7,8 +7,11 @@ import { formatDate } from "../../domain/format";
 import { IpcError } from "../../ipc/errors";
 import type { InstanceDto } from "../../ipc/instances";
 import type { InstalledMod, ModChangelog, ModSource, UpdateCandidate } from "../../ipc/mods";
+import { ACTION_ERROR } from "../../copy/flows";
+import { DROP_COPY } from "../../copy/shell";
 import { OverlayRoot } from "../../shell/overlay";
-import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
+import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
+import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type WindowPort } from "../../shell/window";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
@@ -27,6 +30,9 @@ const NOW = new Date(2026, 9, 31, 12, 0, 0).getTime();
 let view: Rendered | undefined;
 let nav: NavApi;
 let launcher: LauncherApi;
+let shell: ShellApi;
+let dropHandlers: ((event: WindowDropEvent) => void)[];
+let port: WindowPort;
 let instances: InstanceDto[];
 let mods: InstalledMod[];
 let updates: UpdateCandidate[];
@@ -34,6 +40,7 @@ let updates: UpdateCandidate[];
 function Probe() {
   nav = useNav();
   launcher = useLauncher();
+  shell = useShell();
   return null;
 }
 
@@ -44,14 +51,16 @@ function Routed() {
 
 function Providers({ children }: { children: ReactNode }) {
   return (
-    <LauncherProvider>
-      <ShellProvider>
-        <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
-          {children}
-          <OverlayRoot />
-        </RemoteImageProvider>
-      </ShellProvider>
-    </LauncherProvider>
+    <WindowPortProvider port={port}>
+      <LauncherProvider>
+        <ShellProvider>
+          <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
+            {children}
+            <OverlayRoot />
+          </RemoteImageProvider>
+        </ShellProvider>
+      </LauncherProvider>
+    </WindowPortProvider>
   );
 }
 
@@ -227,6 +236,16 @@ beforeEach(() => {
     },
   );
   vi.stubGlobal("innerWidth", 1440);
+  dropHandlers = [];
+  port = {
+    ...browserWindowPort(),
+    onDrop: async (handler) => {
+      dropHandlers.push(handler);
+      return () => {
+        dropHandlers = dropHandlers.filter((h) => h !== handler);
+      };
+    },
+  };
   instances = [instanceDto(ID, { loaders: [{ kind: "fabric", version: "0.16.10" }], mod_count: 4 })];
   mods = [
     modDto("sodium.jar", "Sodium", { source: source("AANobbMI", { installed_at: Math.floor((NOW - 2 * DAY) / 1000) }) }),
@@ -254,6 +273,164 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe("把 .jar 拖进 Mod 页", () => {
+  const JAR = "D:\\Downloads\\sodium-extra.jar";
+  const JAR_B = "D:\\Downloads\\Lithium.JAR";
+  const baseName = (path: string) => path.slice(path.lastIndexOf("\\") + 1);
+  const added = (args: Record<string, unknown>) => (args.paths as string[]).map((source) => ({ status: "ok", source, file_name: baseName(source) }));
+
+  const dragIn = (...paths: string[]) =>
+    act(() => {
+      for (const handler of [...dropHandlers]) handler({ type: "enter", content: { kind: "files", paths } });
+    });
+  const dropFiles = async (...paths: string[]) => {
+    act(() => {
+      for (const handler of [...dropHandlers]) handler({ type: "drop", content: { kind: "files", paths } });
+    });
+    await flush();
+  };
+
+  beforeEach(() => {
+    ipc.overrides.set("add_local_mods", added);
+  });
+
+  it("单个 .jar：经过时提示松开以添加；松开后发一次添加命令，通知写文件名，留在 Mod 页，列表与实例摘要重取", async () => {
+    await open();
+    const listsBefore = callsOf(ipc, "list_mods").length;
+    const instancesBefore = callsOf(ipc, "list_instances").length;
+
+    dragIn(JAR);
+    expect(shell.fileDropHint).toBe("mods");
+    await dropFiles(JAR);
+
+    expect(shell.fileDropHint).toBeNull();
+    expect(callsOf(ipc, "add_local_mods")).toEqual([{ versionId: ID, paths: [JAR] }]);
+    expect(toasts()).toEqual([["success", "已添加 sodium-extra.jar", undefined]]);
+    expect(nav.route).toEqual({ page: "instance", id: ID, tab: "mods" });
+    expect(callsOf(ipc, "list_mods").length).toBeGreaterThan(listsBefore);
+    expect(callsOf(ipc, "list_instances").length).toBeGreaterThan(instancesBefore);
+  });
+
+  it("多个 .jar：一次命令带上全部 .jar，混在里面的别的文件不带，通知写个数", async () => {
+    await open();
+    await dropFiles(JAR, "D:\\Downloads\\notes.txt", JAR_B);
+    expect(callsOf(ipc, "add_local_mods")).toEqual([{ versionId: ID, paths: [JAR, JAR_B] }]);
+    expect(toasts()).toEqual([["success", "已添加 2 个 Mod", undefined]]);
+  });
+
+  it("有一个被拒：warning 通知写几个加成、几个没加成与后端给的原因", async () => {
+    const reason = "mods 目录里已有 sodium-extra.jar，先移除它再添加";
+    ipc.overrides.set("add_local_mods", () => [
+      { status: "error", source: JAR, error: { code: "local_mod_refused", message: reason } },
+      { status: "ok", source: JAR_B, file_name: "Lithium.jar" },
+    ]);
+    await open();
+    await dropFiles(JAR, JAR_B);
+    expect(toasts()).toEqual([["warning", "已添加 1 个 Mod，1 个没能添加", reason]]);
+  });
+
+  it.each([
+    ["running", "游戏正在运行，Mod 文件被占用"],
+    ["launching", "游戏正在运行，Mod 文件被占用"],
+    ["renaming", "正在重命名这个实例，完成后才能改动 Mod"],
+    ["deleting", "正在删除这个实例"],
+  ] as const)("实例 %s 时：不提示松开以添加，松开不发命令，通知写与按钮同一条禁用原因", async (activity, reason) => {
+    instances = [instanceDto(ID, { loaders: [{ kind: "fabric", version: "0.16.10" }], mod_count: 4, activity })];
+    bootOverrides(ipc, { instances, config: configDto() });
+    ipc.overrides.set("list_instances", () => instances);
+    await open();
+
+    dragIn(JAR);
+    expect(shell.fileDropHint).toBeNull();
+    await dropFiles(JAR);
+
+    expect(callsOf(ipc, "add_local_mods")).toEqual([]);
+    expect(toasts()).toEqual([["warning", DROP_COPY.modsLocked, reason]]);
+  });
+
+  it("锁解开之后不用重进页面：同一页再拖就能添加", async () => {
+    instances = [instanceDto(ID, { loaders: [{ kind: "fabric", version: "0.16.10" }], mod_count: 4, activity: "renaming" })];
+    bootOverrides(ipc, { instances, config: configDto() });
+    ipc.overrides.set("list_instances", () => instances);
+    await open();
+    await dropFiles(JAR);
+    expect(callsOf(ipc, "add_local_mods")).toEqual([]);
+
+    instances = [instanceDto(ID, { loaders: [{ kind: "fabric", version: "0.16.10" }], mod_count: 4 })];
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+      await settle(20);
+    });
+    await dropFiles(JAR);
+    expect(callsOf(ipc, "add_local_mods")).toEqual([{ versionId: ID, paths: [JAR] }]);
+  });
+
+  it("命令整次被拒（实例被占）：错误通知写标题与后端原文，不报已添加", async () => {
+    ipc.overrides.set("add_local_mods", () => {
+      throw new IpcError("instance_busy", "实例正在改名，稍后再试", { id: ID, activity: "renaming" });
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await open();
+    await dropFiles(JAR);
+    expect(toasts()).toEqual([["error", ACTION_ERROR.addMod, "实例正在改名，稍后再试"]]);
+  });
+
+  it("原版实例的 Mod 页：不提示，松开写明原版实例不加载 Mod，不说要去 Mod 页", async () => {
+    instances = [instanceDto(ID, { loaders: [], mod_count: 0 })];
+    bootOverrides(ipc, { instances, config: configDto() });
+    ipc.overrides.set("list_instances", () => instances);
+    await open();
+
+    dragIn(JAR);
+    expect(shell.fileDropHint).toBeNull();
+    await dropFiles(JAR);
+
+    expect(callsOf(ipc, "add_local_mods")).toEqual([]);
+    expect(toasts()).toEqual([["warning", DROP_COPY.modsLocked, "原版实例不加载 Mod"]]);
+  });
+
+  it("实例的别的标签：不收 .jar，说明要到 Mod 页；切走之后 Mod 页也不再收", async () => {
+    await open("overview");
+    dragIn(JAR);
+    expect(shell.fileDropHint).toBeNull();
+    await dropFiles(JAR);
+    expect(callsOf(ipc, "add_local_mods")).toEqual([]);
+    expect(toasts()).toEqual([["warning", DROP_COPY.jarElsewhere.title, DROP_COPY.jarElsewhere.body]]);
+
+    act(() => nav.go({ page: "instance", id: ID, tab: "mods" }));
+    await flush();
+    await dropFiles(JAR);
+    expect(callsOf(ipc, "add_local_mods")).toHaveLength(1);
+
+    act(() => nav.go({ page: "instance", id: ID, tab: "settings" }));
+    await flush();
+    // 相同的通知会合并成一条，清掉才看得出这一次又提醒了
+    act(() => {
+      for (const toast of launcher.state.toasts) launcher.actions.dismissToast(toast.id);
+    });
+    await dropFiles(JAR);
+    expect(callsOf(ipc, "add_local_mods")).toHaveLength(1);
+    expect(toasts()).toEqual([["warning", DROP_COPY.jarElsewhere.title, DROP_COPY.jarElsewhere.body]]);
+  });
+
+  it("Mod 页上拖整合包：照常去发现页导入，不被 Mod 页吃掉", async () => {
+    await open();
+    await dropFiles("D:\\Downloads\\pack.mrpack");
+    expect(callsOf(ipc, "add_local_mods")).toEqual([]);
+    expect(nav.route).toEqual({ page: "discover", importFile: "D:\\Downloads\\pack.mrpack" });
+  });
+
+  it("确认框开着时不处理拖放：不发命令也不提醒", async () => {
+    await open();
+    click(button("移除 Handmade"));
+    await flush();
+    expect(dialog().textContent).toContain("移除 Handmade");
+    await dropFiles(JAR);
+    expect(callsOf(ipc, "add_local_mods")).toEqual([]);
+    expect(toasts()).toEqual([]);
+  });
 });
 
 describe("安装时间与新增标注", () => {

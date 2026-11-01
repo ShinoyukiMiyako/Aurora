@@ -5,6 +5,9 @@
 //   接收方只收文件，这期间拖进来的服务器链接不处理。
 // - 没有接收方时外壳自己处理：拖进整合包文件（.mrpack / .zip）显示放置提示，松开后导航到发现页并带上文件路径，
 //   由发现页打开本地整合包导入弹窗；松开的不是整合包，提示只认哪两种文件。
+// - 页面可以另外登记 .jar 接收方（registerJarDrop，只有实例的 Mod 页这么做）：它不独占，只拿走拖进来的 .jar，
+//   整合包、别的文件和服务器链接仍按这里的规则走，也和外壳一样受下面第二条限制。.jar 和整合包一起拖进来时 .jar 优先。
+//   没有页面收 .jar 时，松开 .jar 说明要到实例的 Mod 页。
 // - 拖进外置登录服务器链接（authlib-injector:yggdrasil-server:）显示放置提示，松开后打开外置登录弹窗、
 //   填好地址并自动执行「下一步」。
 // - 首次启动向导期间、或有浮层打开时外壳不处理也不提示：导航入口此时被挡住，与导航快捷键同一规则。
@@ -20,6 +23,13 @@ export interface FileDropTarget {
   onDrop(paths: readonly string[]): void;
 }
 
+/** 页面登记的 .jar 接收方：只会收到拖进来的文件里的 .jar。 */
+export interface JarDropTarget {
+  /** 此刻收不了的原因；能收为 undefined。有原因时不显示放置提示，松开后只说明这条原因。 */
+  lockReason(): string | undefined;
+  onDrop(paths: readonly string[]): void;
+}
+
 /** 外壳认得的文件种类：选择文件对话框的过滤与拖放的判定共用这一张表。 */
 export const FILE_KINDS = {
   modpack: { extensions: ["mrpack", "zip"] },
@@ -29,8 +39,8 @@ export const FILE_KINDS = {
 
 export type FileKind = keyof typeof FILE_KINDS;
 
-/** 拖动经过窗口时外壳显示的放置提示：整合包文件或外置登录服务器链接；null 为不显示。Java 只经选择文件添加，拖进来不认。 */
-export type FileDropHint = "modpack" | "auth_server" | null;
+/** 拖动经过窗口时外壳显示的放置提示：整合包文件、外置登录服务器链接或页面能收的 .jar；null 为不显示。Java 只经选择文件添加，拖进来不认。 */
+export type FileDropHint = "modpack" | "auth_server" | "mods" | null;
 
 export function fileExtension(path: string): string {
   const parts = path.split(/[\\/]/);
@@ -49,9 +59,14 @@ export function firstModpack(paths: readonly string[]): string | null {
   return found === undefined ? null : found;
 }
 
-/** 拖进来的内容配哪种提示：文件里有整合包才提示，服务器链接总是提示。 */
-function hintFor(content: DropContent): FileDropHint {
+function isJar(path: string): boolean {
+  return fileExtension(path) === "jar";
+}
+
+/** 拖进来的内容配哪种提示：有页面收 .jar 时 .jar 优先，此刻收不了就不提示；其余文件里有整合包才提示，服务器链接总是提示。 */
+function hintFor(content: DropContent, jarTarget: JarDropTarget | undefined): FileDropHint {
   if (content.kind === "auth_server") return "auth_server";
+  if (jarTarget !== undefined && content.paths.some(isJar)) return jarTarget.lockReason() === undefined ? "mods" : null;
   return firstModpack(content.paths) !== null ? "modpack" : null;
 }
 
@@ -61,6 +76,10 @@ export interface FileDropRouting {
   go(route: Route): void;
   /** 松开的文件里没有整合包。 */
   rejectNonModpack(): void;
+  /** 松开了 .jar，但当前页面不收它。 */
+  rejectJars(): void;
+  /** 松开了 .jar，收它的页面此刻收不了；reason 是这个原因。 */
+  rejectLockedJars(reason: string): void;
   /** 松开的是外置登录服务器链接：打开外置登录弹窗，填好这个地址并自动执行「下一步」。 */
   openAuthServer(url: string): void;
   /** 订阅失败交给外层统一处理。 */
@@ -69,12 +88,14 @@ export interface FileDropRouting {
 
 export interface FileDropApi {
   registerFileDrop(target: FileDropTarget): () => void;
+  registerJarDrop(target: JarDropTarget): () => void;
   hint: FileDropHint;
 }
 
 /** 订阅窗口的文件拖放并按上面的规则分发。routing 每次渲染都可以是新对象：存进 ref，订阅只建一次。 */
 export function useFileDrop(port: WindowPort, routing: FileDropRouting): FileDropApi {
   const targets = useRef<FileDropTarget[]>([]);
+  const jarTargets = useRef<JarDropTarget[]>([]);
   const routingRef = useRef(routing);
   routingRef.current = routing;
   const [hint, setHint] = useState<FileDropHint>(null);
@@ -86,6 +107,14 @@ export function useFileDrop(port: WindowPort, routing: FileDropRouting): FileDro
     return () => {
       const i = targets.current.lastIndexOf(target);
       if (i >= 0) targets.current.splice(i, 1);
+    };
+  }, []);
+
+  const registerJarDrop = useCallback((target: JarDropTarget) => {
+    jarTargets.current.push(target);
+    return () => {
+      const i = jarTargets.current.lastIndexOf(target);
+      if (i >= 0) jarTargets.current.splice(i, 1);
     };
   }, []);
 
@@ -104,9 +133,10 @@ export function useFileDrop(port: WindowPort, routing: FileDropRouting): FileDro
         return;
       }
       const now = routingRef.current;
+      const jarTarget = jarTargets.current[jarTargets.current.length - 1];
       switch (event.type) {
         case "enter":
-          setHint(now.blocked() ? null : hintFor(event.content));
+          setHint(now.blocked() ? null : hintFor(event.content, jarTarget));
           return;
         case "leave":
           setHint(null);
@@ -119,9 +149,17 @@ export function useFileDrop(port: WindowPort, routing: FileDropRouting): FileDro
             now.openAuthServer(content.url);
             return;
           }
+          const jars = content.paths.filter(isJar);
+          if (jarTarget !== undefined && jars.length > 0) {
+            const reason = jarTarget.lockReason();
+            if (reason === undefined) jarTarget.onDrop(jars);
+            else now.rejectLockedJars(reason);
+            return;
+          }
           const file = firstModpack(content.paths);
-          if (file === null) now.rejectNonModpack();
-          else now.go({ page: "discover", importFile: file });
+          if (file !== null) now.go({ page: "discover", importFile: file });
+          else if (jars.length > 0) now.rejectJars();
+          else now.rejectNonModpack();
           return;
         }
       }
@@ -139,5 +177,5 @@ export function useFileDrop(port: WindowPort, routing: FileDropRouting): FileDro
     };
   }, [port]);
 
-  return { registerFileDrop, hint };
+  return { registerFileDrop, registerJarDrop, hint };
 }

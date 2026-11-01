@@ -114,7 +114,11 @@ export const TOASTS_COPY = {
 export const DROP_COPY = {
   modpackHint: "松开以导入整合包",
   authServerHint: "松开以添加外置登录服务器",
+  modsHint: "松开以添加 Mod",
   notModpack: { title: "拖进来的不是整合包", body: "只认 .mrpack 和 CurseForge 导出的 .zip" },
+  jarElsewhere: { title: "Mod 要拖到实例的 Mod 页", body: "打开实例，切到 Mod 标签再拖进来" },
+  /** 正文是这个实例此刻改不了 Mod 的原因，与页面上按钮的禁用原因同一条。 */
+  modsLocked: "现在不能添加 Mod",
 } as const;
 
 /** 系统选择文件对话框：标题与文件类型下拉里的名称。 */

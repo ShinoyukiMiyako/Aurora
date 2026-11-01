@@ -2,6 +2,7 @@
 // 选中至少一行时工具条原位换成批量操作条；全部更新与批量更新都先打开更新预览，勾选后才入队。
 // 游戏运行中（含加载中）与安装中禁用全部 Mod 文件操作：JVM 占着文件，Windows 下改名、替换、删除都会失败。
 // 忽略更新只改记录、不碰 jar，游戏运行不挡；但写卷宗要占住实例，安装、补全、改名、删除进行中禁用。
+// 把 .jar 拖进这一页就是添加本地 Mod：锁定规则与上面的文件操作同一条，只在这一页收。
 
 import { motion } from "framer-motion";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from "react";
@@ -78,7 +79,29 @@ interface PreviewScope {
   key: number;
 }
 
+/** 登记这一页收 .jar。只登记一次，锁经 ref 取最新的：实例状态一变就重登的话，拖动途中接收方会换人。 */
+function useJarDrop(inst: InstanceSummary, modsReason: string | undefined) {
+  const { registerJarDrop } = useShell();
+  const actions = useLauncherActions();
+  const run = useRunner();
+  const id = inst.id;
+  const lock = inst.loader === "vanilla" ? MODS_COPY.vanillaTitle : modsReason;
+  const lockRef = useRef(lock);
+  useLayoutEffect(() => {
+    lockRef.current = lock;
+  });
+  useEffect(
+    () =>
+      registerJarDrop({
+        lockReason: () => lockRef.current,
+        onDrop: (paths) => void run(() => actions.addLocalMods(id, paths), ACTION_ERROR.addMod),
+      }),
+    [actions, id, registerJarDrop, run],
+  );
+}
+
 export function ModsTab({ inst, queryId, ops, updates }: ModsTabProps) {
+  useJarDrop(inst, ops.modsReason);
   if (inst.loader === "vanilla") return <VanillaMods inst={inst} />;
   return <ModdedMods inst={inst} queryId={queryId} ops={ops} updates={updates} />;
 }
