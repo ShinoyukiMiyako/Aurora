@@ -55,8 +55,8 @@ pub use memory::{
 pub use placeholder::Placeholders;
 pub use precheck::{
     DEFAULT_JAVA_MAJOR, JvmMemoryIssue, MIN_MAX_HEAP_MB, ONEDRIVE_ENV_VARS, PLAYER_NAME_MAX_UNITS,
-    SyncProvider, SyncRoot, game_path_warning, jvm_memory_issue, long_player_name,
-    required_java_major, sync_folder, sync_roots_from_env,
+    SyncProvider, SyncRoot, effective_max_heap_mb, game_path_warning, jvm_memory_issue,
+    long_player_name, required_java_major, sync_folder, sync_roots_from_env,
 };
 pub use process::{
     ExitReport, GameSession, KillSwitch, LogBatchSink, LogLine, LogStream, SessionEnd,

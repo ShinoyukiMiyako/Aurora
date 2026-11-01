@@ -603,6 +603,7 @@ export const CRASH_PAGE_COPY = {
   enabledToast: (names: string) => `已启用 ${names}`,
   toggleLabel: (name: string, enabled: boolean) => (enabled ? `停用 ${name}` : `启用 ${name}`),
   memoryDone: (mb: number) => `已调到 ${formatMemory(mb)}，下次启动生效`,
+  memoryInJvmArgsNote: "这一局的最大内存写在 JVM 参数的 -Xmx 里，内存设置管不到它",
   java64Done: "已改为自动选择 Java，下次启动生效",
   java64Note: "这次用的是 32 位 Java，分配不到这么多内存",
   jvmArgsNote: "自定义 JVM 参数在实例设置里，改掉或删掉写错的那一项",
