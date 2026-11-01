@@ -29,9 +29,8 @@ use aurora_launch::{
     AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, JvmMemoryIssue,
     LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, QuickPlayMode,
     QuickPlayTarget, SessionClock, SessionLog, SyncProvider, effective_max_heap_mb,
-    game_path_warning, jvm_memory_issue,
-    long_player_name, quick_play_support, recommended_max_mb, required_java_major, sync_folder,
-    sync_roots_from_env,
+    game_path_warning, jvm_memory_issue, long_player_name, quick_play_support, recommended_max_mb,
+    required_java_major, sync_folder, sync_roots_from_env,
 };
 use aurora_version::{AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, resolve};
 use serde::Serialize;

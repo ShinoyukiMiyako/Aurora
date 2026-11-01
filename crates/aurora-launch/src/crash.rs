@@ -842,9 +842,15 @@ mod tests {
                 "Error occurred during initialization of VM\nInitial heap size set to a larger value than the maximum heap size",
                 None,
             ),
-            ("错误: 找不到或无法加载主类 XX:+UseG1GC", Some("XX:+UseG1GC")),
+            (
+                "错误: 找不到或无法加载主类 XX:+UseG1GC",
+                Some("XX:+UseG1GC"),
+            ),
             ("錯誤: 找不到或無法載入主要類別 Xmx4G", Some("Xmx4G")),
-            ("Error: Could not find or load main class Xmx4G", Some("Xmx4G")),
+            (
+                "Error: Could not find or load main class Xmx4G",
+                Some("Xmx4G"),
+            ),
         ] {
             let diag = primary(log, CrashCategory::JvmArgsInvalid);
             assert_eq!(diag.detail.as_deref(), detail, "{log}");
