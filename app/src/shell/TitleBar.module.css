@@ -1,6 +1,7 @@
 /*
  * 三列网格：左右两列各占剩余宽度的一半，中列状态岛按内容宽度居中于主列。
  * 右列不小于自身内容宽（max-content），窗口变窄时先压缩左列的标题。
+ * 左内边距让开伸出侧栏槽位的品牌字标。
  */
 .bar {
   display: grid;
@@ -8,7 +9,7 @@
   align-items: center;
   gap: var(--sk-space-12);
   height: 56px;
-  padding-left: var(--sk-space-4);
+  padding-left: var(--sk-space-14);
 }
 
 .start {
