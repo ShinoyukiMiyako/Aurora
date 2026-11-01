@@ -1,0 +1,9 @@
+[package]
+name = "aurora-setup-payload"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+# 打包工具在 Linux host 上跑、引导程序在 Windows 上跑，格式库两边共用，所以不碰任何系统接口，也不带别的依赖。
+sha2 = "0.11"

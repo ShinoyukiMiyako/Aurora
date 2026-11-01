@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "app/src-tauri"]
+members = ["crates/*", "app/src-tauri", "app/src-tauri-setup"]
 
 # 根目录 LICENSE 与 README 只授权 AGPL 第 3 版，没有「或任何更高版本」的条款，故写 -only。
 [workspace.package]
