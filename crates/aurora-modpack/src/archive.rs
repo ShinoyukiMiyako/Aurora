@@ -16,6 +16,10 @@ use crate::path::SafeRelativePath;
 /// 清单正常只有几十到几百 KiB；设上限是为了让一个伪造的超大清单不能把内存吃满。
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
+/// 单个条目解压途中隔多少字节看一次取消。整合包里可能有几百 MB 的存档或资源包：任务放弃之后解压线程
+/// 还在跑，只在条目之间看取消的话，它会一直往调用方正在清理的目录里写。
+const CANCEL_CHECK_BYTES: u64 = 1024 * 1024;
+
 /// 一个要解到实例目录的覆盖文件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverrideEntry {
@@ -87,8 +91,8 @@ pub fn read_pack(path: &Path) -> Result<PackArchive> {
 
 /// 把 [`read_pack`] 列出的覆盖文件解到 `dest_root` 下，已有同名文件直接覆盖。返回写出的文件数。
 ///
-/// 每个条目前检查一次 `is_cancelled`，返回真即以 [`Error::Cancelled`] 中止；已写出的文件不回收，
-/// 由调用方连同整个目标目录一起处理。
+/// 每个条目前检查一次 `is_cancelled`，大文件解压途中每隔 [`CANCEL_CHECK_BYTES`] 再查一次，返回真即以
+/// [`Error::Cancelled`] 中止；已写出的文件不回收，由调用方连同整个目标目录一起处理。
 pub fn extract_overrides(
     pack_path: &Path,
     entries: &[OverrideEntry],
@@ -130,6 +134,7 @@ pub fn extract_overrides(
         // 读侧（解压、CRC 校验）和写侧的错误分开报：前者是包坏了，后者是磁盘的问题。
         let mut buffer = [0u8; 64 * 1024];
         let mut written = 0u64;
+        let mut next_check = CANCEL_CHECK_BYTES;
         loop {
             let n = file
                 .read(&mut buffer)
@@ -138,6 +143,12 @@ pub fn extract_overrides(
                 break;
             }
             written += n as u64;
+            if written >= next_check {
+                if is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                next_check = written + CANCEL_CHECK_BYTES;
+            }
             if written > entry.size {
                 return Err(corrupt(
                     pack_path,
