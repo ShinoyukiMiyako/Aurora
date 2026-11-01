@@ -106,20 +106,28 @@ describe("AccountAvatar", () => {
 });
 
 describe("AccountFigure", () => {
-  it("旧格式皮肤：左臂左腿取右侧镜像，外层只画帽子；立绘 scale 5 为 80 × 160", async () => {
+  it("旧格式皮肤：布局方框 scale 5 为 80 × 160，投影画在四周各大 10 px 的外框里，外层只有帽子", async () => {
     skinSize = { width: 64, height: 32 };
     view = render(<AccountFigure uuid="u5" skin={{ kind: "remote", sha1: "dd".repeat(20), model: "wide", hat: true }} scale={5} />);
     await settle();
     expect(root().dataset.art).toBe("skin");
     expect(root().style.width).toBe("80px");
     expect(root().style.height).toBe("160px");
-    expect(canvas.sourceRects(bitmaps[0])).toEqual(["8,8,8,8", "20,20,8,12", "44,20,4,12", "44,20,4,12", "4,20,4,12", "4,20,4,12", "40,8,8,8"]);
+    const frame = root().firstElementChild as HTMLElement;
+    expect([frame.style.left, frame.style.top, frame.style.width, frame.style.height]).toEqual(["-10px", "-10px", "100px", "180px"]);
+    // 六个部位各三个可见面，帽子再加背面三个、正面三个；旧格式身体与四肢没有外层
+    const faces = canvas.draws.filter((d) => d.canvas.width === 100 && d.canvas.height === 180 && (d.source as { width: number }).width <= 8);
+    expect(faces).toHaveLength(6 * 3 + 3 + 3);
+    expect(canvas.sourceRects(bitmaps[0])).toEqual(["0,0,64,32"]);
   });
 
-  it("没有皮肤时是剪影立绘", async () => {
+  it("没有皮肤时是剪影立绘，尺寸和真皮肤同一套，放在外框中央", async () => {
     view = render(<AccountFigure uuid="u6" skin={null} scale={4} />);
     await settle();
     expect(root().dataset.art).toBe("silhouette");
     expect(root().style.height).toBe("128px");
+    const display = root().querySelector("canvas");
+    expect(display?.style.width).toBe("80px");
+    expect(display?.style.height).toBe("144px");
   });
 });

@@ -6,8 +6,8 @@
 .home {
   /* 第一排（问候、继续游玩，wide 档还有洞察）的最小高度 */
   --home-row-one: 300px;
-  /* 问候卡底栏右侧给角色立绘让出的宽度 */
-  --home-figure-room: 112px;
+  /* 问候卡底栏右侧给角色立绘让出的宽度：6 倍档投影外框的左缘离卡片右缘 124 */
+  --home-figure-room: 124px;
   /* 继续游玩标题区给右侧方块让出的宽度，以及方块离右边缘的距离 */
   --home-block-room: 150px;
   --home-block-right: 40px;
@@ -31,6 +31,11 @@
   --home-signal-3: 13px;
   --home-signal-4: 16px;
   --home-online-dot: 6px;
+}
+
+/* 紧凑档立绘是 5 倍，外框左缘只到 106 */
+:global(:root[data-sk-tier="compact"]) .home {
+  --home-figure-room: 112px;
 }
 
 :global(:root[data-sk-tier="wide"]) .home {

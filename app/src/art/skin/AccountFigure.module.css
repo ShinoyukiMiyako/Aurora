@@ -3,3 +3,21 @@
   display: block;
   flex: none;
 }
+
+/* 投影外框：比根元素的布局方框大，不参与布局，位置与尺寸按 scale 写在行内 */
+.frame {
+  position: absolute;
+  display: block;
+}
+
+/* 拖动转身：不起文字选区，触屏上也不让页面抢走手势 */
+.spin {
+  cursor: grab;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.spin:active {
+  cursor: grabbing;
+}

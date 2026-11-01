@@ -46,7 +46,7 @@ export function Stage({ account, variant, children }: StageProps) {
       <svg className={styles.pedestal} width={pedestal.width} height={pedestal.height} viewBox={`0 0 ${pedestal.width} ${pedestal.height}`} aria-hidden="true" focusable="false">
         <ellipse cx={pedestal.width / 2} cy={pedestal.height / 2} rx={pedestal.width / 2} ry={pedestal.height / 2} />
       </svg>
-      <AccountFigure uuid={account.uuid} skin={skin.status === "ready" ? skin.data : null} scale={variant === "spot" ? 6 : 4} className={styles.figure} />
+      <AccountFigure uuid={account.uuid} skin={skin.status === "ready" ? skin.data : null} scale={variant === "spot" ? 6 : 4} interactive={variant === "spot"} className={styles.figure} />
       {children}
     </div>
   );
