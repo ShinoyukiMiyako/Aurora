@@ -235,7 +235,7 @@ describe("存档行「进入」的禁用原因", () => {
     expect(enterWorldBlock({ status: "ready", quickPlay: legacy, activity: "backing_up", usedBy: null }, "ready", true)).toBe("legacy");
     expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "backing_up", usedBy: "FAB" }, "running", false)).toBe("backingUp");
     expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null, usedBy: null }, "loading", true)).toBe("backingUp");
-    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "inherited", usedBy: "FAB" }, "ready", false)).toBe("inherited");
+    expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: "inherited", usedBy: "FAB" }, "ready", false)).toEqual({ kind: "inherited", usedBy: "FAB" });
     expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null, usedBy: null }, "loading", false)).toBe("launching");
     expect(enterWorldBlock({ status: "ready", quickPlay: both, activity: null, usedBy: null }, "running", false)).toBe("running");
   });

@@ -90,6 +90,7 @@ export function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): I
     created_at: 1_700_000_000_000,
     activity: null,
     used_by: null,
+    base_busy: null,
     playtime_min: 0,
     last_played_at: null,
     play_error: null,

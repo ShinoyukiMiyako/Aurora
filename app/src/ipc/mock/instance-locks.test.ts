@@ -65,6 +65,12 @@ async function busy(promise: Promise<unknown>): Promise<[string, unknown]> {
 
 const offline = (versionId: string, taskId: string) => ({ taskId, versionId, accountUuid: null, offlineName: "Steve", offlineFallback: false, quickPlay: null });
 
+async function baseBusyOf(id: string): Promise<unknown> {
+  const found = (await listInstances()).find((i) => i.id === id);
+  if (found === undefined) throw new Error(`列表里没有 ${id}`);
+  return found.base_busy;
+}
+
 async function activityOf(id: string): Promise<string | null> {
   const found = (await listInstances()).find((i) => i.id === id);
   if (found === undefined) throw new Error(`列表里没有 ${id}`);
@@ -144,15 +150,29 @@ describe("mock 的实例占用与后端同一张兼容表", () => {
   it("基底开着自己的游戏时补全它上面的实例报基底在运行；反过来实例在用基底时基底启动不了，占用槽没被留下", async () => {
     addMockInstance("导入的包", "1.21", { kind: "fabric", version: "0.16.10" }, null);
     await launchGame(offline("1.21", "t-base"));
+    expect(await baseBusyOf("导入的包")).toEqual({ id: "1.21", activity: "running" });
     expect(await busy(repairInstance("t-repair", "导入的包"))).toEqual(["实例 1.21 正在运行，请稍后再试", { id: "1.21", activity: "running" }]);
     expect(await activityOf("导入的包")).toBeNull();
     endMockGame(0, MINUTE);
+    expect(await baseBusyOf("导入的包")).toBeNull();
 
     const chain = acquireMockInstanceWithBases("导入的包", "repairing", ["1.21"]);
     expect(await busy(launchGame(offline("1.21", "t-blocked")))).toEqual([`实例 1.21 正在被实例 导入的包 使用，请稍后再试`, { id: "1.21", activity: "inherited", used_by: "导入的包" }]);
     chain.release();
     await launchGame(offline("1.21", "t-free"));
     endMockGame(0, MINUTE);
+  });
+
+  it("列表的 base_busy 与补全实际被拒的一致：基底只是在备份、改动时不算，基底自己与原版实例没有这一项", async () => {
+    addMockInstance("导入的包", "1.21", { kind: "fabric", version: "0.16.10" }, null);
+    const backup = acquireMockInstance("1.21", "backing_up");
+    expect(await baseBusyOf("导入的包")).toBeNull();
+    backup.release();
+    const running = acquireMockInstance("1.21", "running");
+    expect(await baseBusyOf("导入的包")).toEqual({ id: "1.21", activity: "running" });
+    expect(await baseBusyOf("1.21")).toBeNull();
+    running.release();
+    expect(await baseBusyOf("导入的包")).toBeNull();
   });
 
   it("启动失败或被取消：占用随之放开", async () => {

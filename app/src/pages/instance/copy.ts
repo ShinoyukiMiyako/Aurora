@@ -180,14 +180,13 @@ export const OVERVIEW_COPY = {
   openSaves: "打开存档文件夹",
   openWorld: (name: string) => `打开「${name}」所在文件夹`,
   enterWorld: (name: string) => `进入「${name}」`,
-  /** 「进入」不能点的原因，键与 enterWorldBlock 的结论一一对应。 */
+  /** 「进入」不能点的原因，键与 enterWorldBlock 的结论一一对应；被当作基底的结论带着使用者，走 INSTANCE_IN_USE_COPY.launch。 */
   enterWorldBlocked: {
     installing: "实例还在安装",
     broken: "实例需要先修复",
     unknownVersion: "这个实例的版本信息不完整",
     legacy: "1.20 之前的版本不能直接进入存档",
     backingUp: "正在备份或恢复存档，完成后再启动",
-    inherited: "别的实例正在使用它，结束后才能启动",
     launching: "正在启动这个实例",
     running: "游戏正在运行",
   },

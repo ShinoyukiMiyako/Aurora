@@ -595,6 +595,36 @@ describe("实例详情：后端正在改动实例", () => {
     expect(byRole("switch", "停用 Sodium").getAttribute("aria-disabled")).toBeNull();
   });
 
+  it("依赖的实例正在运行：头图菜单的补全带原因禁用，点了不排任务也就不留失败任务；重命名与删除不碰基底，照常可用", async () => {
+    vi.stubGlobal("innerWidth", 1200);
+    instances = instances.map((i) => (i.id === ID ? { ...i, base_busy: { id: "1.21.1", activity: "running" } } : i));
+    await open("overview");
+    click(button("更多操作"));
+    const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+    const item = (label: string) => {
+      const found = items.find((el) => textOf(el) === label);
+      if (found === undefined) throw new Error(`菜单里没有「${label}」`);
+      return found;
+    };
+    const repair = item("补全游戏文件");
+    expect(repair.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      repair.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = repair.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「补全游戏文件」悬停后没有关联提示气泡");
+    expect(document.getElementById(tipId)?.textContent).toBe("它依赖的实例「1.21.1」正在运行，结束后才能补全");
+    expect(item("重命名").getAttribute("aria-disabled")).toBeNull();
+    expect(item("删除实例").getAttribute("aria-disabled")).toBeNull();
+    click(repair);
+    await flush();
+    expect(callsOf(ipc, "repair_instance")).toEqual([]);
+    expect(launcher.state.tasks.filter((t) => t.spec.command === "repair_instance")).toEqual([]);
+  });
+
   it("别的实例正以它为基底：头图菜单的重命名、补全与删除带上是谁在用的原因禁用，Mod 开关照常可用", async () => {
     vi.stubGlobal("innerWidth", 1200);
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "inherited", used_by: "Fabric 整合" } : i));
@@ -2065,6 +2095,7 @@ describe("实例详情：设置", () => {
       ["正在改动 Mod", { activity: "modifying" as const }],
       ["正在备份存档", { activity: "backing_up" as const }],
       ["被别的实例当作基底", { activity: "inherited" as const, used_by: "整合包" }],
+      ["依赖的实例正在运行", { base_busy: { id: "1.21.1", activity: "running" as const } }],
     ])("%s：与补全同一把锁，按钮带原因禁用", async (_name, patch) => {
       patchInstance(patch);
       await open("settings");
@@ -2269,6 +2300,16 @@ describe("实例详情：设置", () => {
     click(repair);
     await flush();
     expect(callsOf(ipc, "repair_instance")).toHaveLength(1);
+  });
+
+  it("有实例依赖它：预览里就看出删不了，不弹确认框，直接说明是谁依赖它，不发删除", async () => {
+    ipc.overrides.set("preview_instance_deletion", () => ({ id: ID, worlds: [], size_bytes: 0, file_count: 0, dependents: ["Fabric 整合"], activity: null }));
+    await open("settings");
+    click(button("删除实例"));
+    await flush();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(launcher.state.toasts.at(-1)).toMatchObject({ tone: "warning", title: `不能删除「${ID}」`, body: "实例「Fabric 整合」依赖它，要先删除依赖它的实例" });
+    expect(callsOf(ipc, "delete_instance")).toEqual([]);
   });
 
   it("实例上还挂着任务：确认框说明会先取消任务", async () => {
@@ -2840,6 +2881,18 @@ describe("实例详情：存档直达", () => {
     });
     await flush();
     expect(capsule().getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("别的实例正以它为基底：每行「进入」写明是哪个实例在用，与启动入口同一句，点了不发 launch_game", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "inherited", used_by: "Fabric 整合" } : i));
+    await open("overview");
+    for (const name of ["新世界", "旧世界"]) {
+      expect(playButton(name).getAttribute("aria-disabled")).toBe("true");
+      expect(await hoverTip(playButton(name))).toContain("实例「Fabric 整合」正在使用它，结束后才能启动");
+    }
+    click(playButton("新世界"));
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
   });
 
   it("读不出版本信息：每行都写「这个实例的版本信息不完整」", async () => {

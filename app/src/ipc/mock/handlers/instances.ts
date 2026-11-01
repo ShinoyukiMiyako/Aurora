@@ -91,6 +91,7 @@ const LOADER_NAMES: Record<LoaderChoice, string> = {
 type DerivedField =
   | "activity"
   | "used_by"
+  | "base_busy"
   | "description"
   | "cover"
   | "memory_mb"
@@ -490,6 +491,20 @@ function usedByOf(id: string): string | null {
   return user === undefined ? null : user.usedBy;
 }
 
+/** 继承链上第一个容不下基底占用的基底，与后端 InstanceLocks::blocking_base 一致。 */
+function baseBusyOf(id: string): InstanceDto["base_busy"] {
+  for (const base of mockInheritanceChain(id)) {
+    const held = holds.get(base.toLowerCase());
+    const conflicts = held === undefined ? [] : held.filter((h) => !compatible("inherited", h.activity));
+    if (conflicts.length > 0) {
+      let conflict = conflicts[0];
+      for (const h of conflicts) if (reportRank(h.activity) < reportRank(conflict.activity)) conflict = h;
+      return { id: base, activity: conflict.activity };
+    }
+  }
+  return null;
+}
+
 const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
   installing: "安装",
   repairing: "补全文件",
@@ -684,6 +699,7 @@ function toDto(instance: MockInstance): InstanceDto {
     last_crash_error: null,
     activity: activityOf(instance.dto.id),
     used_by: usedByOf(instance.dto.id),
+    base_busy: ready ? baseBusyOf(instance.dto.id) : null,
     playtime_min: playError !== null ? null : play === null ? 0 : play.playtime_min,
     last_played_at: play === null ? null : play.last_played_at,
     play_error: playError,

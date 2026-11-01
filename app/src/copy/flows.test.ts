@@ -7,7 +7,7 @@ import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
 import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import { GPU_COPY } from "../pages/settings/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
-import { ACTION_ERROR, CONFIRM_COPY, failureCopy, failureToastLabel, lockReason, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskFailureReason, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
+import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, failureCopy, failureToastLabel, lockReason, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskFailureReason, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
 import { PEEK_COPY } from "./shell";
 
 /** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
@@ -161,6 +161,21 @@ describe("取消实例级任务的确认", () => {
   });
 });
 
+describe("删除被别的实例依赖的实例", () => {
+  const body = (dependents: readonly string[]) => DELETE_INSTANCE_COPY.hasDependents("1.21.1", dependents).body;
+
+  it("标题说不能删，正文点名依赖它的实例；超过两个时只点两个、写明总数", () => {
+    expect(DELETE_INSTANCE_COPY.hasDependents("1.21.1", ["甲"]).title).toBe("不能删除「1.21.1」");
+    expect(body(["甲"])).toBe("实例「甲」依赖它，要先删除依赖它的实例");
+    expect(body(["甲", "乙"])).toBe("实例「甲」「乙」依赖它，要先删除依赖它的实例");
+    expect(body(["甲", "乙", "丙"])).toBe("实例「甲」「乙」等 3 个依赖它，要先删除依赖它的实例");
+  });
+
+  it("没有依赖却走到这句是调用方的错：不写出一句没有主语的话", () => {
+    expect(() => body([])).toThrow("没有实例依赖「1.21.1」");
+  });
+});
+
 describe("任务状态标签", () => {
   it("运行中的本地任务按实际在做的事写，不说成下载；其余状态与下载类任务照状态表", () => {
     expect(taskStatusLabel({ kind: "world_backup", status: "running" })).toBe("打包中");
@@ -245,6 +260,14 @@ describe("启动失败：账户验证暂时不可用", () => {
     expect(reason("modifying")).toBe("正在改动这个实例的 Mod、资源或设置，完成后才能重新安装加载器");
     expect(reason("backing_up")).toBe("正在备份或恢复这个实例的存档，完成后才能重新安装加载器");
     expect(reason({ kind: "inherited", usedBy: "整合包" })).toBe("实例「整合包」正在使用它，结束后才能重新安装加载器");
+    expect(reason({ kind: "base_busy", base: "1.21.1", activity: "running" })).toBe("它依赖的实例「1.21.1」正在运行，结束后才能重新安装加载器");
+  });
+
+  it("依赖的实例正忙：说清是哪个实例、在做什么；这把锁只挡补全类操作", () => {
+    expect(lockReason({ kind: "base_busy", base: "1.21.1", activity: "running" }, "repair")).toBe("它依赖的实例「1.21.1」正在运行，结束后才能补全");
+    expect(lockReason({ kind: "base_busy", base: "1.21.1", activity: "launching" }, "repair")).toBe("它依赖的实例「1.21.1」正在启动，结束后才能补全");
+    expect(lockReason({ kind: "base_busy", base: "1.21.1", activity: "repairing" }, "repair")).toBe("它依赖的实例「1.21.1」正在补全文件，结束后才能补全");
+    expect(() => lockReason({ kind: "base_busy", base: "1.21.1", activity: "running" }, "rename")).toThrow("只挡补全");
   });
 
   it("以离线方式启动的通知：标题带实例名，正文说明只能玩单人", () => {

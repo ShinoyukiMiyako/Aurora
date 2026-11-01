@@ -34,6 +34,7 @@ export function summary(id: string, overrides: Partial<InstanceSummary> = {}): I
     lastCrashError: null,
     activity: null,
     usedBy: null,
+    baseBusy: null,
     settingsError: null,
     incomplete: null,
     placeholder: false,

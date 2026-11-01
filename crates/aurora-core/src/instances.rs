@@ -107,6 +107,8 @@ pub struct ReadyVersion {
     pub java_major: Option<u32>,
     /// 支持哪些直达方式（进入存档、加入服务器）；继承链断了时为 `None`。
     pub quick_play: Option<QuickPlaySupport>,
+    /// 继承链上除它自己以外的版本 id，由近及远，口径同 [`Aurora::inheritance_chain`]。
+    pub bases: Vec<String>,
     /// 工作目录 `mods/` 下的 Mod 文件数；设置文件读不出定不了工作目录、或工作目录读不出时为 `None`。
     pub mod_count: Option<u32>,
     /// 工作目录 `saves/` 下的存档数，口径同 [`count_worlds`]；何时为 `None` 同 `mod_count`。
@@ -177,6 +179,7 @@ impl Aurora {
         // 先算再隐藏：这两项要沿继承链走，隐藏的版本可能正是链上的一环。
         let javas = java_majors(&scan);
         let quick_plays = quick_play_supports(&scan);
+        let mut chains = inheritance_chains(&scan);
         hide_base_versions(self.game_dir(), &mut scan).await;
         let mut entries: Vec<Entry> = scan
             .versions
@@ -184,7 +187,10 @@ impl Aurora {
             .map(|version| {
                 let java = javas.get(&version.id).copied().flatten();
                 let quick_play = quick_plays.get(&version.id).copied().flatten();
-                Entry::Found(Box::new(version), java, quick_play)
+                let bases = chains
+                    .remove(&version.id)
+                    .expect("继承链按同一份扫描结果算，每个版本都有");
+                Entry::Found(Box::new(version), java, quick_play, bases)
             })
             .chain(scan.broken.into_iter().map(Entry::Broken))
             .collect();
@@ -459,6 +465,7 @@ enum Entry {
         Box<DiscoveredVersion>,
         Option<u32>,
         Option<QuickPlaySupport>,
+        Vec<String>,
     ),
     Broken(BrokenVersion),
 }
@@ -532,7 +539,7 @@ async fn summarize(
 
     let version = match entry {
         Entry::Broken(broken) => InstanceVersion::Broken(broken.reason),
-        Entry::Found(version, java_major, quick_play) => {
+        Entry::Found(version, java_major, quick_play, bases) => {
             let workdir = match &settings {
                 Readable::Read(settings) => {
                     match workdir_facts(game_dir, &id, policy, settings, &version).await {
@@ -554,6 +561,7 @@ async fn summarize(
                 loaders: version.loaders,
                 java_major,
                 quick_play,
+                bases,
                 mod_count: workdir.map(|(mods, _, _)| mods),
                 world_count: workdir.map(|(_, worlds, _)| worlds),
                 isolated: workdir.map(|(_, _, isolated)| isolated),
@@ -679,6 +687,42 @@ fn chain_quick_play(
         }
     }
     None
+}
+
+/// 每个版本的继承链，口径同 [`Aurora::inheritance_chain`]：不分大小写、断在哪一环就停在那一环（它的 id 收进结果）。
+/// 列表要给全部实例算，所以从扫描结果走，不再逐个读版本 JSON。
+fn inheritance_chains(scan: &VersionScan) -> HashMap<String, Vec<String>> {
+    let by_key: HashMap<String, &VersionJson> = scan
+        .versions
+        .iter()
+        .map(|v| (v.id.to_lowercase(), &v.json))
+        .collect();
+    scan.versions
+        .iter()
+        .map(|v| (v.id.clone(), chain_of(&v.id, &by_key)))
+        .collect()
+}
+
+fn chain_of(id: &str, by_key: &HashMap<String, &VersionJson>) -> Vec<String> {
+    let mut seen = HashSet::from([id.to_lowercase()]);
+    let mut chain = Vec::new();
+    let mut current = id.to_lowercase();
+    for _ in 0..MAX_INHERIT_DEPTH {
+        let Some(parent) = by_key
+            .get(&current)
+            .and_then(|json| json.inherits_from.as_deref())
+            .filter(|parent| !parent.trim().is_empty())
+        else {
+            break;
+        };
+        let key = parent.to_lowercase();
+        if !seen.insert(key.clone()) {
+            break;
+        }
+        chain.push(parent.to_owned());
+        current = key;
+    }
+    chain
 }
 
 /// 继承链的根版本 id：客户端 jar 与 natives 所在的版本。没有 inheritsFrom 时就是自己。
@@ -2091,6 +2135,64 @@ pub(crate) mod tests {
             err,
             CoreError::Instance(InstanceError::InvalidId { .. })
         ));
+    }
+
+    /// 列表的 `bases` 从扫描结果走、不逐个读版本 JSON，补全占基底走的是 `inheritance_chain`：两边要断在同一环，
+    /// 界面提前说的才是补全真会撞上的那个基底。
+    #[tokio::test]
+    async fn listed_bases_are_the_inheritance_chain_the_locks_are_taken_along() {
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora_at(tmp.path());
+        let game = aurora.game_dir().to_path_buf();
+        write_version(&game, "1.20.1", &vanilla_json("1.20.1"));
+        write_version(
+            &game,
+            "fabric-1.20.1",
+            &fabric_json("fabric-1.20.1", "1.20.1"),
+        );
+        write_version(&game, "叠层", &fabric_json("叠层", "fabric-1.20.1"));
+        write_version(
+            &game,
+            "空白",
+            r#"{"id":"空白","inheritsFrom":"  ","type":"release","mainClass":"M"}"#,
+        );
+        write_version(&game, "孤儿", &fabric_json("孤儿", "1.19.4"));
+        write_version(&game, "坏父", "{ not json");
+        write_version(&game, "坏子", &fabric_json("坏子", "坏父"));
+        write_version(&game, "环A", &fabric_json("环A", "环b"));
+        write_version(&game, "环b", &fabric_json("环b", "环a"));
+        write_version(&game, "越界", &fabric_json("越界", "../../secret"));
+
+        let bases_of = |list: &[InstanceSummary], id: &str| -> Vec<String> {
+            let found = list.iter().find(|i| i.id == id).unwrap();
+            let InstanceVersion::Ready(ready) = &found.version else {
+                panic!("{id} 应可用：{:?}", found.version);
+            };
+            ready.bases.clone()
+        };
+        let list = aurora.list_instances().await.unwrap();
+        assert_eq!(
+            bases_of(&list, "叠层"),
+            ["fabric-1.20.1".to_owned(), "1.20.1".to_owned()],
+            "由近及远"
+        );
+        for id in [
+            "1.20.1",
+            "fabric-1.20.1",
+            "叠层",
+            "空白",
+            "孤儿",
+            "坏子",
+            "环A",
+            "环b",
+            "越界",
+        ] {
+            assert_eq!(
+                bases_of(&list, id),
+                aurora.inheritance_chain(id).await.unwrap(),
+                "{id}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -53,10 +53,10 @@ async function repairing(): Promise<{ taskId: string; finish: (value: unknown) =
   return { taskId: String(call.taskId), finish: done.resolve, fail: done.reject };
 }
 
-async function launching(): Promise<{ taskId: string; launched: (value: { pid: number; offline: boolean }) => void; refuse: (error: unknown) => void; pending: Promise<void> }> {
+async function launching(id = CHILD): Promise<{ taskId: string; launched: (value: { pid: number; offline: boolean }) => void; refuse: (error: unknown) => void; pending: Promise<void> }> {
   const done = deferred<{ pid: number; offline: boolean }>();
   ipc.overrides.set("launch_game", () => done.promise);
-  const pending = store.actions.launch(CHILD);
+  const pending = store.actions.launch(id);
   await settle();
   const session = store.getState().session;
   if (session === null) throw new Error("没有建立会话");
@@ -171,6 +171,30 @@ describe("子实例开工后基底的占用立刻进列表", () => {
   });
 });
 
+describe("基底自己开着游戏", () => {
+  const childRepairLock = (): unknown => {
+    const inst = store.getState().instances.find((i) => i.id === CHILD);
+    if (inst === undefined) throw new Error("子实例不在列表里");
+    return locksOf(inst, false).repair;
+  };
+
+  it("基底启动的第一条阶段事件后，它上面的实例补全带原因禁用；启动取消后放开", async () => {
+    const { taskId, refuse, pending } = await launching(BASE);
+    expect(childRepairLock()).toBeNull();
+
+    onDisk = [instanceDto(BASE, { activity: "launching" }), instanceDto(CHILD, { base_busy: { id: BASE, activity: "launching" } })];
+    emit(LAUNCH_PHASE_EVENT, { task_id: taskId, phase: "preparing", stage_index: 0 } satisfies LaunchPhaseEvent);
+    await settle();
+    expect(childRepairLock()).toEqual({ kind: "base_busy", base: BASE, activity: "launching" });
+
+    onDisk = idle();
+    refuse(cancelledError());
+    await pending;
+    await settle();
+    expect(childRepairLock()).toBeNull();
+  });
+});
+
 describe("排队的任务撞上基底占用", () => {
   it("补全基底被拒：任务失败原因用「正在使用它」，不是后端原文", async () => {
     ipc.overrides.set("repair_instance", () =>
@@ -181,5 +205,48 @@ describe("排队的任务撞上基底占用", () => {
     const task = store.getState().tasks.find((t) => t.instanceId === BASE);
     expect(task).toMatchObject({ status: "failed", error: { code: "instance_busy", message: `实例「${CHILD}」正在使用它` } });
     expect(store.getState().toasts.at(-1)).toMatchObject({ body: `实例「${CHILD}」正在使用它` });
+  });
+
+  // 占用在拿到整合包之前就被拒：一个字节都没下载；实例名与整合包名不同是撞名时默认名追加序号的常态
+  const importAs = (name: string) =>
+    store.actions.installModpack({
+      source: { kind: "file", path: "C:/packs/nf.mrpack" },
+      name,
+      cover: "grass",
+      packName: CHILD,
+      packVersion: "1.0.0",
+      modCount: 0,
+      mcVersion: BASE,
+      loader: "neoforge",
+      loaderVersion: "21.1.265",
+      excludedOptional: [],
+    });
+  const rejectImport = () =>
+    ipc.overrides.set("install_modpack", () => Promise.reject(new IpcError("instance_busy", `实例 ${BASE} 正在运行，请稍后再试`, { id: BASE, activity: "running" })));
+
+  it("导入被占用拒绝：通知写导入没有完成而不是下载失败，名字与开始通知同一个实例名", async () => {
+    rejectImport();
+    await importAs("NF Pack 2");
+    await settle();
+    expect(store.getState().toasts.at(-1)).toMatchObject({ tone: "error", title: "导入「NF Pack 2」没有完成", body: `实例 ${BASE} 正在运行，请稍后再试`, action: { label: "重试" } });
+  });
+
+  it("接连几个导入被拒各自一条：不并成「n 个下载失败」，也不开启下载失败的合并", async () => {
+    rejectImport();
+    await importAs("NF Pack 2");
+    await importAs("NF Pack 3");
+    await settle();
+    ipc.overrides.set("install_java", () => Promise.reject(new IpcError("download_failed", "文件下载失败")));
+    await store.actions.installJava(21);
+    await settle();
+    expect(store.getState().toasts.map((t) => t.title)).toEqual(["导入「NF Pack 2」没有完成", "导入「NF Pack 3」没有完成", "下载失败：下载 Java 21"]);
+  });
+
+  it("导入缺手动下载的文件：通知转去失败筛选，不给必然再失败一次的重试", async () => {
+    const blocked = [{ project_id: 1, file_id: 2, file_name: "a.jar", web_url: "https://www.curseforge.com/a", destination: "mods/a.jar", sha1: null, fingerprint: 0, size: null }];
+    ipc.overrides.set("install_modpack", () => Promise.reject(new IpcError("distribution_blocked", "有文件要手动下载", { files: blocked })));
+    await importAs("NF Pack 2");
+    await settle();
+    expect(store.getState().toasts.at(-1)).toMatchObject({ title: "导入「NF Pack 2」没有完成", action: { label: "查看", to: { page: "tasks", filter: "failed" } } });
   });
 });

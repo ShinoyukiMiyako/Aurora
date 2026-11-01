@@ -2,7 +2,7 @@
 // 插值一律经 domain/format 格式化；带插值的条目写成函数，参数缺失属于调用方的契约错误，直接抛出。
 
 import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed } from "../domain/format";
-import type { InstanceLock } from "../domain/instance-locks";
+import type { BaseBusyLock, InstanceLock } from "../domain/instance-locks";
 import type { AccountKind, FailureCode, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskStatus } from "../domain/types";
 import type { CrashSource, ExitCodeKind, ExitCodeNoteDto, LaunchWarningCode } from "../ipc/diagnostics";
 import type { NameRule, TemplateSkipReason } from "../ipc/instances";
@@ -914,6 +914,8 @@ export const TASK_TOAST = {
   failed: (title: string, reason: string) => ({ title: `下载失败：${title}`, body: reason }),
   /** 补全不止下载：还要解压、校验、跑安装器，标题不说下载。 */
   repairFailed: (title: string, reason: string) => ({ title: `${title}没有完成`, body: reason }),
+  /** 导入同样不止下载，还可能没开工就被占用拒绝。名字用实例名，与开始、完成通知一致；任务标题写的是整合包自己的名字。 */
+  importFailed: (instance: string, reason: string) => ({ title: `导入「${instance}」没有完成`, body: reason }),
   exportStarted: (name: string) => ({ title: `已开始导出「${name}」`, body: "进度见下载任务" }),
   /** bundled：打包进文件的 Mod 数；没有时不写正文。 */
   exported: (name: string, bundled: number) =>
@@ -1323,6 +1325,16 @@ export const DELETE_INSTANCE_COPY = {
   /** 实例上还挂着没完成的任务（新建、导入、补全、装 Mod）时追加：确认后先取消任务再删除。 */
   pendingTask: "正在进行的安装任务会先取消。",
   confirmLabel: (worlds: number) => (worlds > 0 ? `删除实例和 ${worlds} 个存档` : "删除实例"),
+  /** 删除预览看出有实例经继承依赖它：这时删不了，不进确认框。Toast 正文放不下更多名字，只点两个。 */
+  hasDependents: (name: string, dependents: readonly string[]) => {
+    if (dependents.length === 0) throw new Error(`没有实例依赖「${name}」，不该走到这句`);
+    const named = dependents
+      .slice(0, 2)
+      .map((d) => `「${d}」`)
+      .join("");
+    const rest = dependents.length > 2 ? `等 ${dependents.length} 个` : "";
+    return { title: `不能删除「${name}」`, body: `实例${named}${rest}依赖它，要先删除依赖它的实例` };
+  },
 } as const;
 
 // ---------------------------------------------------------------- 整合包没导入完
@@ -1357,6 +1369,16 @@ export const INSTANCE_IN_USE_COPY = {
   launch: (user: string) => `实例「${user}」正在使用它，结束后才能启动`,
 } as const;
 
+/** 依赖的实例在做什么，接在「正在」之后。 */
+const BASE_ACTIVITY_LABEL: Readonly<Record<BaseBusyLock["activity"], string>> = {
+  installing: "安装",
+  repairing: "补全文件",
+  renaming: "改名",
+  deleting: "删除",
+  launching: "启动",
+  running: "运行",
+};
+
 /** 操作被实例锁挡住时的悬停提示与菜单项 hint。 */
 const INSTANCE_LOCK_REASON = {
   running: "游戏正在运行，先结束游戏",
@@ -1381,9 +1403,13 @@ const INSTANCE_LOCK_REASON = {
 } as const;
 
 /** 锁定原因的悬停文字；没有锁为 undefined，可以直接交给 disabledReason。 */
-export function lockReason(lock: InstanceLock | null, kind: "mods" | "rename" | "repair" | "reinstallLoader" | "delete"): string | undefined {
+export function lockReason(lock: InstanceLock | BaseBusyLock | null, kind: "mods" | "rename" | "repair" | "reinstallLoader" | "delete"): string | undefined {
   if (lock === null) return undefined;
   if (typeof lock === "object") {
+    if (lock.kind === "base_busy") {
+      if (kind !== "repair" && kind !== "reinstallLoader") throw new Error(`依赖的实例正忙只挡补全，不会锁住 ${kind}`);
+      return `它依赖的实例「${lock.base}」正在${BASE_ACTIVITY_LABEL[lock.activity]}，结束后才能${kind === "repair" ? "补全" : REINSTALL_LOADER_LABEL}`;
+    }
     if (kind === "mods") throw new Error("被别的实例当作基底时照样能改动 Mod，不会因此锁住 Mod 操作");
     return INSTANCE_IN_USE_COPY[kind](lock.usedBy);
   }
