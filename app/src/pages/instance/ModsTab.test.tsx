@@ -576,6 +576,48 @@ describe("忽略更新", () => {
     await flush();
     expect(callsOf(ipc, "set_mod_update_hold")).toHaveLength(1);
   });
+
+  const ignoreItem = (): HTMLElement => {
+    click(button("Sodium 的更多操作"));
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "忽略这个 Mod 的更新");
+    if (item === undefined) throw new Error("菜单里没有「忽略这个 Mod 的更新」");
+    return item;
+  };
+
+  // 后端写卷宗前要占住实例：这几件事进行中不提前禁用的话，玩家只能等它以 instance_busy 拒绝
+  it.each([
+    ["renaming", "正在重命名这个实例，完成后才能改动 Mod"],
+    ["deleting", "正在删除这个实例"],
+  ] as const)("实例 %s 时忽略项带原因禁用，点了不发命令", async (activity, reason) => {
+    instances = [instanceDto(ID, { loaders: [{ kind: "fabric", version: "0.16.10" }], mod_count: 4, activity })];
+    await open();
+    const ignore = ignoreItem();
+    expect(ignore.getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverReason(ignore)).toBe(reason);
+    click(ignore);
+    await flush();
+    expect(callsOf(ipc, "set_mod_update_hold")).toEqual([]);
+  });
+
+  it("补全进行中忽略项同样带原因禁用", async () => {
+    await open();
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+    });
+    await flush();
+    const ignore = ignoreItem();
+    expect(ignore.getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverReason(ignore)).toBe("安装任务正在写这个实例的文件夹，完成后才能改动 Mod");
+  });
+
+  it("别的 Mod 改动与更新检查设置兼容：实例在改动中时忽略项照常可用", async () => {
+    instances = [instanceDto(ID, { loaders: [{ kind: "fabric", version: "0.16.10" }], mod_count: 4, activity: "modifying" })];
+    await open();
+    click(ignoreItem());
+    await flush();
+    expect(callsOf(ipc, "set_mod_update_hold")).toEqual([{ versionId: ID, fileName: "sodium.jar", hold: { kind: "ignored" } }]);
+  });
 });
 
 describe("行标注的位置", () => {

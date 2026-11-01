@@ -39,6 +39,8 @@ export interface InstanceOps {
   exportReason: string | undefined;
   /** 此刻不能把存档带进整合包的原因；能带为 undefined。 */
   exportSavesReason: string | undefined;
+  /** 更新检查设置此刻改不了的原因：只写卷宗不碰 jar，游戏运行不挡；但要占住实例，安装、补全、改名、删除挡着。能改为 undefined。 */
+  updateHoldReason: string | undefined;
   repair(): void;
   remove(): void;
 }
@@ -100,6 +102,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     return work === null || !WORK_FOLDERS.has(target) ? undefined : LOCK_REASON.work.folder[work];
   };
   const settingsReason = work === null ? undefined : LOCK_REASON.work.settings[work];
+  const updateHoldReason = work === null ? undefined : LOCK_REASON.work.mods[work];
 
   const repair = () => {
     void run(() => actions.repairInstance(id), ACTION_ERROR.repair).then((outcome) => {
@@ -124,6 +127,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     settingsReason,
     exportReason: exportReason(inst, work),
     exportSavesReason: exportSavesReason(inst, busy),
+    updateHoldReason,
     repair,
     remove,
   };

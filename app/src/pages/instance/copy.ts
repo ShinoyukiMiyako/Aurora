@@ -65,6 +65,12 @@ export const LOCK_REASON = {
       renaming: "正在重命名这个实例，完成后才能检查更新",
       deleting: "正在删除这个实例",
     },
+    /** 更新检查设置与确认更新预览。 */
+    mods: {
+      installing: "安装任务正在写这个实例的文件夹，完成后才能改动 Mod",
+      renaming: "正在重命名这个实例，完成后才能改动 Mod",
+      deleting: "正在删除这个实例",
+    },
   },
   /** 导出整合包：读的是此刻的文件，游戏运行、存档备份与 Mod 改动不挡；会挪走或重写整个目录的事挡。带上存档另看 savesInGame、savesBackingUp。 */
   export: {
