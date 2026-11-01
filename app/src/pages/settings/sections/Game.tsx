@@ -8,11 +8,11 @@ import { samePath } from "../../../domain/paths";
 import { autoBackupOutcome } from "../../../domain/rules";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
-import { ACTION_ERROR } from "../../../copy/flows";
+import { ACTION_ERROR, gameDirSwitchReason, GAME_DIR_SWITCH_COPY } from "../../../copy/flows";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import { useDiscoveredGameDirectories, useGameDirectories, useMemoryAdvice, type GameDirectoryDto } from "../../../state/queries/catalog";
 import { invalidate } from "../../../state/resource";
-import { busyInstanceId, activeTasks } from "../../../state/selectors";
+import { gameDirectoryBusy } from "../../../state/selectors";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
 import { Card } from "../../../ui/Card";
@@ -26,6 +26,7 @@ import { Skeleton } from "../../../ui/Skeleton";
 import { Tag } from "../../../ui/Tag";
 import { Toggle } from "../../../ui/Toggle";
 import { Tooltip } from "../../../ui/Tooltip";
+import { useSwitchDirectory } from "../../shared/useSwitchDirectory";
 import { useSettingsCommands } from "../commands";
 import {
   AUTO_BACKUP_SKIPPED_NOTE,
@@ -40,7 +41,7 @@ import {
   RECOMMENDED_ISOLATION,
   WORLD_BACKUP_COPY,
 } from "../copy";
-import { dirName, hasBang, overAvailable, unrecorded } from "../game-model";
+import { overAvailable, unrecorded } from "../game-model";
 import { InstanceStack } from "../InstanceStack";
 import { useLoadedSettings } from "../SettingsGate";
 import { useSettingWrite, type SettingWrite } from "../write";
@@ -182,35 +183,10 @@ function IsolationCard() {
 
 // ---------------------------------------------------------------- 游戏目录
 
-/** 切换游戏目录前的共同步骤：查「!」、二次确认、切换、刷新目录列表。 */
-function useSwitchDirectory() {
-  const actions = useLauncherActions();
-  const { confirm } = useShell();
-  const run = useRunner();
-  return async (path: string, name: string = dirName(path)): Promise<void> => {
-    if (hasBang(path)) {
-      actions.toast("error", GAME_DIR_COPY.switchFailed, GAME_DIR_COPY.bangError);
-      return;
-    }
-    const ok = await confirm({
-      title: GAME_DIR_COPY.confirmTitle(name),
-      body: GAME_DIR_COPY.confirmBody,
-      confirmLabel: GAME_DIR_COPY.confirmLabel,
-      tone: "primary",
-    });
-    if (!ok) return;
-    await run(async () => {
-      await actions.setGameDirectory(path);
-      invalidate("game-dirs");
-    }, ACTION_ERROR.gameDirectory);
-  };
-}
-
-function OtherDirectoryRow({ dir, busyReason }: { dir: GameDirectoryDto; busyReason: string | undefined }) {
+function OtherDirectoryRow({ dir, busy }: { dir: GameDirectoryDto; busy: boolean }) {
   const run = useRunner();
   const commands = useSettingsCommands();
   const switchTo = useSwitchDirectory();
-  const reason = busyReason !== undefined ? busyReason : dir.available ? undefined : GAME_DIR_COPY.unavailableReason;
   const remove = () =>
     void run(async () => {
       await commands.removeGameDirectory(dir.path);
@@ -233,7 +209,7 @@ function OtherDirectoryRow({ dir, busyReason }: { dir: GameDirectoryDto; busyRea
         </span>
         <span className={s.dirPath}>{dir.path}</span>
       </span>
-      <Button size="sm" variant="ghost" disabledReason={reason} onClick={() => void switchTo(dir.path, dir.name)}>
+      <Button size="sm" variant="ghost" disabledReason={gameDirSwitchReason(busy, dir.available)} onClick={() => void switchTo(dir.path, dir.name)}>
         {GAME_DIR_COPY.switch}
       </Button>
       <Button size="sm" variant="ghost" onClick={remove}>
@@ -289,8 +265,7 @@ function DiscoveredBlock({ known, current }: { known: readonly GameDirectoryDto[
 
 function GameDirectoryCard() {
   const settings = useLoadedSettings();
-  // 游戏在跑或有任务在下时不能换游戏目录
-  const busy = useLauncherSelector((s) => busyInstanceId(s) !== null || activeTasks(s).length > 0);
+  const busy = useLauncherSelector(gameDirectoryBusy);
   const actions = useLauncherActions();
   const run = useRunner();
   const commands = useSettingsCommands();
@@ -298,7 +273,6 @@ function GameDirectoryCard() {
   const discovered = useDiscoveredGameDirectories();
   const { copyText } = useShell();
   const switchTo = useSwitchDirectory();
-  const busyReason = busy ? GAME_DIR_COPY.busyReason : undefined;
 
   const change = () =>
     void run(async () => {
@@ -323,7 +297,7 @@ function GameDirectoryCard() {
           label={GAME_DIR_COPY.openFolder}
           onClick={() => void run(() => actions.openFolder("game_dir"), ACTION_ERROR.openFolder)}
         />
-        <Button icon="edit" disabledReason={busyReason} onClick={change}>
+        <Button icon="edit" disabledReason={busy ? GAME_DIR_SWITCH_COPY.busyReason : undefined} onClick={change}>
           {GAME_DIR_COPY.change}
         </Button>
       </div>
@@ -356,7 +330,7 @@ function GameDirectoryCard() {
         {others.length > 0 && (
           <ul className={s.dirList}>
             {others.map((d) => (
-              <OtherDirectoryRow key={d.path} dir={d} busyReason={busyReason} />
+              <OtherDirectoryRow key={d.path} dir={d} busy={busy} />
             ))}
           </ul>
         )}

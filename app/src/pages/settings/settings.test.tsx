@@ -1114,6 +1114,10 @@ describe("设置页：游戏", () => {
   });
 
   it("有下载在进行时「更改」「切换」带原因禁用", async () => {
+    ipc.overrides.set("list_game_directories", () => [
+      { name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: true, available: true, version_count: 0 },
+      { name: "HMCL", path: "D:\\HMCL\\.minecraft", is_current: false, available: true, version_count: 3 },
+    ]);
     await mount("game");
     await act(async () => {
       await launcher.actions.installJava(17);
@@ -1122,6 +1126,9 @@ describe("设置页：游戏", () => {
     expect(button("更改").getAttribute("aria-disabled")).toBe("true");
     await click(button("更改"));
     expect(commands.calls).toEqual([]);
+    expect(button("切换").getAttribute("aria-disabled")).toBe("true");
+    await click(button("切换"));
+    expect(openDialogs()).toEqual([]);
   });
 });
 

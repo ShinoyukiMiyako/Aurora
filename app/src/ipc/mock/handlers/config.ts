@@ -22,6 +22,11 @@ const DEFAULT_DIR_NAME = "默认目录";
 const SEED_DISK = [DEFAULT_GAME_DIR, "C:\\Users\\player\\AppData\\Roaming\\.minecraft", "D:\\HMCL\\.minecraft"];
 // 带 versions 文件夹（已有游戏文件）的目录。
 const SEED_WITH_VERSIONS = ["C:\\Users\\player\\AppData\\Roaming\\.minecraft", "D:\\HMCL\\.minecraft"];
+// 这些目录 versions 下各有几个版本。真后端逐个目录数盘，这里写死。
+const SEED_VERSION_COUNTS: readonly (readonly [path: string, count: number])[] = [
+  ["C:\\Users\\player\\AppData\\Roaming\\.minecraft", 3],
+  ["D:\\HMCL\\.minecraft", 12],
+];
 // 「发现其它启动器目录」会探到的候选；只报告盘上存在且尚未记录的。
 const DISCOVERABLE: NamedDirectoryDto[] = [
   { name: "官方启动器", path: "C:\\Users\\player\\AppData\\Roaming\\.minecraft" },
@@ -340,14 +345,21 @@ function parseDefaultJava(value: string): string {
   return value;
 }
 
+/** 与后端的目录记录一致：不可达说不上有几个版本，为 null；可达但没有 versions 文件夹是 0。 */
+function versionCount(path: string): number | null {
+  if (!disk.has(norm(path))) return null;
+  const seeded = SEED_VERSION_COUNTS.find(([seed]) => samePath(seed, path));
+  return seeded === undefined ? 0 : seeded[1];
+}
+
 function listGameDirectories(): GameDirectoryDto[] {
   const current = config.game_dir;
   const listed: GameDirectoryDto[] = [
-    { name: directoryName(current), path: current, is_current: true, available: disk.has(norm(current)) },
+    { name: directoryName(current), path: current, is_current: true, available: disk.has(norm(current)), version_count: versionCount(current) },
   ];
   for (const extra of extras) {
     if (samePath(extra.path, current)) continue;
-    listed.push({ name: extra.name, path: extra.path, is_current: false, available: disk.has(norm(extra.path)) });
+    listed.push({ name: extra.name, path: extra.path, is_current: false, available: disk.has(norm(extra.path)), version_count: versionCount(extra.path) });
   }
   return listed;
 }

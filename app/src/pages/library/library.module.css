@@ -16,9 +16,10 @@
 
 /* ---------------------------------------------------------------- 工具条 */
 
-/* 一行放不下时搜索与排序整体换到第二行并右对齐，分段筛选独占第一行 */
+/* 一行放不下时搜索、目录与排序整体换到第二行并右对齐，分段筛选独占第一行 */
 .toolbar {
   --lib-search-width: 180px;
+  --lib-directory-width: 148px;
   --lib-sort-width: 132px;
   display: flex;
   flex-wrap: wrap;
@@ -40,6 +41,10 @@
 
 .search {
   width: var(--lib-search-width);
+}
+
+.directory {
+  width: var(--lib-directory-width);
 }
 
 .sort {

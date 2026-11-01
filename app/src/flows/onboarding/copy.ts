@@ -50,7 +50,7 @@ export const DIR_COPY = {
   autoCreate: "目录不存在会自动创建",
   hasFiles: "这个目录里已经有游戏文件，会直接接管，原有存档和 Mod 不会被改动。",
   othersTitle: "发现了其他启动器的文件夹",
-  othersDesc: "收下之后可以直接切过去玩，里面的存档和 Mod 不会被移动，也不会被改。",
+  othersDesc: "收下后只是记下这些文件夹，当前游戏目录不变。要玩里面的实例，到实例库切过去，存档和 Mod 不会被移动，也不会被改。",
   othersCount: (picked: number, total: number) => `${picked}/${total}`,
   none: "没有找到其他启动器的文件夹。之后可以在设置里手动添加。",
   empty: "游戏目录不能为空",

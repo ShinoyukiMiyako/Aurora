@@ -127,6 +127,11 @@ export interface GameDirectoryDto {
   is_current: boolean;
   /** 此刻能否访问；为假时记录仍保留（移动硬盘拔了之类）。 */
   available: boolean;
+  /**
+   * versions 下的版本目录数，跳过文件和点开头的目录，versions 不存在算 0。
+   * 目录不可达、探测超时或读取失败时为 null，这时说不上有几个，不能当成 0。
+   */
+  version_count: number | null;
 }
 
 export interface NamedDirectoryDto {
@@ -140,7 +145,7 @@ export interface GameDirectoryInspectionDto {
   has_versions: boolean;
 }
 
-/** 全部已知游戏目录：当前目录在前，其余按记录顺序，各目录限时探测是否可达。 */
+/** 全部已知游戏目录：当前目录在前，其余按记录顺序，各目录限时探测是否可达并数一遍版本。 */
 export const listGameDirectories = (): Promise<GameDirectoryDto[]> => invoke<GameDirectoryDto[]>("list_game_directories");
 
 /** 这台机器上尚未记录的其它启动器的 .minecraft。只报告不写入。 */

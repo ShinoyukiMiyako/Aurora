@@ -23,6 +23,11 @@ export function activeTasks(state: LauncherState): Task[] {
   return state.tasks.filter(isActiveTask);
 }
 
+/** 游戏在跑或有任务在下时不能换游戏目录。 */
+export function gameDirectoryBusy(state: LauncherState): boolean {
+  return busyInstanceId(state) !== null || activeTasks(state).length > 0;
+}
+
 /** 活动任务里下载类的个数：本地打包与备份不能说成下载。 */
 export function activeDownloads(state: LauncherState): number {
   return activeTasks(state).filter((t) => DOWNLOADS_WHEN_RUNNING[t.kind]).length;

@@ -4,6 +4,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { CONFIRM_COPY, DELETE_INSTANCE_COPY, SLOW_LOADING_HINT, TOAST_COPY } from "../../copy/flows";
+import type { GameDirectoryDto } from "../../ipc/config";
 import type { InstanceDto, WorldDto } from "../../ipc/instances";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
@@ -142,6 +143,8 @@ beforeEach(() => {
   ipc.overrides.set("list_instances", () => instances);
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
+  // 空实例库要等目录列表才定说法，假后端的命令又带模拟延迟：默认立即给回只有当前目录的列表
+  ipc.overrides.set("list_game_directories", (): GameDirectoryDto[] => [{ name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: true, available: true, version_count: 0 }]);
 });
 
 afterEach(() => {
@@ -344,6 +347,249 @@ describe("实例库：筛选、搜索与空状态", () => {
     await flush();
     expect(callsOf(ipc, "list_instances").length).toBe(before + 1);
     expect(cardNames()).toHaveLength(4);
+  });
+});
+
+describe("实例库：游戏目录", () => {
+  const HOME = "D:\\Games\\Launcher\\.minecraft";
+  const PCL = "E:\\Plain Craft Launcher 2\\.minecraft";
+  const HMCL = "D:\\HMCL\\.minecraft";
+  const directory = (name: string, path: string, version_count: number | null, overrides: Partial<GameDirectoryDto> = {}): GameDirectoryDto => ({
+    name,
+    path,
+    is_current: false,
+    available: true,
+    version_count,
+    ...overrides,
+  });
+  const home = directory("默认目录", HOME, 0, { is_current: true });
+  const pcl = directory("PCL2", PCL, 12);
+  const hmcl = directory("HMCL", HMCL, 3);
+  const unplugged = directory("移动硬盘", "F:\\.minecraft", null, { available: false });
+
+  const dirsAre = (dirs: GameDirectoryDto[]) => ipc.overrides.set("list_game_directories", () => dirs);
+  const picker = () => document.querySelector<HTMLButtonElement>(`[role="combobox"][aria-label="${LIBRARY_COPY.directoryLabel}"]`);
+  const openPicker = () => {
+    const trigger = picker();
+    if (trigger === null) throw new Error("工具条上没有目录选择");
+    click(trigger);
+  };
+  const options = () => [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+  const dialogTitle = () => document.querySelector('[role="dialog"] h2')?.textContent;
+
+  beforeEach(() => {
+    ipc.overrides.set("set_game_directory", () => null);
+  });
+
+  it("当前目录没有实例、别的目录有版本：空状态点名版本最多的目录和版本数，主按钮切过去，去发现降为次按钮", async () => {
+    instances = [];
+    dirsAre([home, hmcl, unplugged, pcl]);
+    await mount();
+    const text = document.body.textContent;
+    expect(text).toContain(LIBRARY_COPY.switchEmptyTitle);
+    expect(text).toContain("「PCL2」里有 12 个版本，切过去就能玩，文件不会被移动。");
+    expect(text).not.toContain(LIBRARY_COPY.emptyTitle);
+    expect(text).not.toContain(LIBRARY_COPY.emptyBody);
+    expect(byText("button", "切到 PCL2").getAttribute("data-variant")).toBe("primary");
+    const discover = byText("button", LIBRARY_COPY.emptyAction);
+    expect(discover.getAttribute("data-variant")).toBe("secondary");
+    click(discover);
+    expect(nav.route).toEqual({ page: "discover", kind: "modpack" });
+  });
+
+  it("空状态的主按钮沿用切换流程：确认后切到那个目录并刷新目录列表", async () => {
+    instances = [];
+    dirsAre([home, pcl]);
+    await mount();
+    const listed = callsOf(ipc, "list_game_directories").length;
+    click(byText("button", "切到 PCL2"));
+    await flush();
+    expect(dialogTitle()).toBe("切换到「PCL2」？");
+    expect(callsOf(ipc, "set_game_directory")).toEqual([]);
+    instances = sample();
+    dirsAre([{ ...pcl, is_current: true }, { ...home, is_current: false }]);
+    click(dialogButton("切换"));
+    await flush();
+    expect(callsOf(ipc, "set_game_directory")).toEqual([{ path: PCL }]);
+    expect(callsOf(ipc, "list_game_directories").length).toBeGreaterThan(listed);
+    await afterMotion();
+    expect(cardNames()).toHaveLength(4);
+    expect(picker()?.textContent).toBe("PCL2");
+  });
+
+  it("确认框点取消不切", async () => {
+    instances = [];
+    dirsAre([home, pcl]);
+    await mount();
+    click(byText("button", "切到 PCL2"));
+    await flush();
+    click(dialogButton(CONFIRM_COPY.cancel));
+    await flush();
+    expect(callsOf(ipc, "set_game_directory")).toEqual([]);
+  });
+
+  it("切换被后端拒绝：通知说明原因，空状态还在", async () => {
+    instances = [];
+    dirsAre([home, pcl]);
+    ipc.overrides.set("set_game_directory", () => {
+      throw new Error("这个位置现在访问不到");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    click(byText("button", "切到 PCL2"));
+    await flush();
+    click(dialogButton("切换"));
+    await flush();
+    expect(toastTitles()).toContain("error:没能切换游戏目录");
+    expect(document.body.textContent).toContain(LIBRARY_COPY.switchEmptyTitle);
+    vi.restoreAllMocks();
+  });
+
+  it("路径带「!」：不弹确认，直接报错，不发切换", async () => {
+    instances = [];
+    dirsAre([home, directory("Hi!", "D:\\Hi!\\.minecraft", 2)]);
+    await mount();
+    click(byText("button", "切到 Hi!"));
+    await flush();
+    expect(dialogTitle()).toBeUndefined();
+    expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toEqual([["error", "没能切换游戏目录", "路径里不能有「!」，Java 会读不出里面的游戏文件"]]);
+    expect(callsOf(ipc, "set_game_directory")).toEqual([]);
+  });
+
+  it("有下载在进行：主按钮带原因禁用，点了不弹确认；目录选择里别的目录也切不了", async () => {
+    instances = [];
+    dirsAre([home, pcl]);
+    ipc.overrides.set("install_java", () => new Promise(() => undefined));
+    await mount();
+    await act(async () => {
+      await launcher.actions.installJava(17);
+    });
+    await flush();
+    const primary = byText<HTMLButtonElement>("button", "切到 PCL2");
+    expect(primary.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(primary)).toBe("有游戏或下载在进行，结束后再切换");
+    click(primary);
+    await flush();
+    expect(dialogTitle()).toBeUndefined();
+    openPicker();
+    const target = options()[1];
+    expect(target.textContent).toBe("PCL2有游戏或下载在进行，结束后再切换");
+    expect(target.getAttribute("aria-disabled")).toBe("true");
+    click(target);
+    await flush();
+    expect(dialogTitle()).toBeUndefined();
+    expect(callsOf(ipc, "set_game_directory")).toEqual([]);
+  });
+
+  it.each([
+    ["别的目录是空的", [home, directory("空的", "D:\\Empty", 0)]],
+    ["别的目录访问不到", [home, unplugged]],
+    ["别的目录读不到版本数", [home, directory("读不到", "D:\\Locked", null)]],
+    ["只有当前目录", [home]],
+  ])("%s：空状态还是「实例库还是空的」，没有切换入口", async (_label, dirs) => {
+    instances = [];
+    dirsAre(dirs);
+    await mount();
+    expect(document.body.textContent).toContain(LIBRARY_COPY.emptyTitle);
+    expect(document.body.textContent).toContain(LIBRARY_COPY.emptyBody);
+    expect(document.body.textContent).not.toContain(LIBRARY_COPY.switchEmptyTitle);
+    expect([...document.querySelectorAll("button")].filter((b) => b.textContent?.startsWith("切到"))).toEqual([]);
+    expect(byText("button", LIBRARY_COPY.emptyAction)).toBeDefined();
+  });
+
+  it("目录列表还没回来：先不下结论，不闪「实例库还是空的」；回来后直接给切换入口", async () => {
+    instances = [];
+    const list = deferred<GameDirectoryDto[]>();
+    ipc.overrides.set("list_game_directories", () => list.promise);
+    await mount();
+    expect(document.body.textContent).not.toContain(LIBRARY_COPY.emptyTitle);
+    expect(document.querySelector(`[aria-label="${LIBRARY_COPY.loadingLabel}"]`)).not.toBeNull();
+    await act(async () => {
+      list.resolve([home, pcl]);
+      await settle();
+    });
+    expect(document.body.textContent).toContain(LIBRARY_COPY.switchEmptyTitle);
+  });
+
+  it("目录列表读不出来：页面照常，退回普通空状态，没有目录选择", async () => {
+    instances = [];
+    ipc.overrides.set("list_game_directories", () => {
+      throw new Error("读不出配置");
+    });
+    await mount();
+    expect(document.body.textContent).toContain(LIBRARY_COPY.emptyTitle);
+    expect(picker()).toBeNull();
+  });
+
+  it("目录列表读得慢不耽误有实例的目录：卡片先出来", async () => {
+    ipc.overrides.set("list_game_directories", () => deferred<GameDirectoryDto[]>().promise);
+    await mount();
+    expect(cardNames()).toHaveLength(4);
+    expect(picker()).toBeNull();
+  });
+
+  it("回到实例库时后台重读目录列表：别的启动器后来装的版本能看到", async () => {
+    instances = [];
+    dirsAre([home, { ...pcl, version_count: 0 }]);
+    await mount();
+    expect(document.body.textContent).toContain(LIBRARY_COPY.emptyTitle);
+    view?.unmount();
+    dirsAre([home, pcl]);
+    await mount();
+    expect(document.body.textContent).toContain(LIBRARY_COPY.switchEmptyTitle);
+  });
+
+  it("只登记了一个目录：工具条上没有目录选择", async () => {
+    dirsAre([home]);
+    await mount();
+    expect(picker()).toBeNull();
+  });
+
+  it("登记了不止一个目录：工具条显示当前目录名，选项带版本数，当前目录的数跟实例列表走，访问不到的禁用并说明原因", async () => {
+    dirsAre([home, pcl, directory("读不到", "D:\\Locked", null), unplugged]);
+    await mount();
+    expect(picker()?.textContent).toBe("默认目录");
+    openPicker();
+    expect(options().map((o) => [o.textContent, o.getAttribute("aria-disabled"), o.getAttribute("aria-selected")])).toEqual([
+      ["默认目录4 个版本", null, "true"],
+      ["PCL212 个版本", null, "false"],
+      ["读不到版本数读不到", null, "false"],
+      ["移动硬盘位置访问不到，无法切过去", "true", "false"],
+    ]);
+    click(options()[3]);
+    await flush();
+    expect(dialogTitle()).toBeUndefined();
+  });
+
+  it("当前目录的盘拔掉了：实例列表读到空，目录选择写版本数读不到，不写 0 个版本", async () => {
+    instances = [];
+    dirsAre([{ ...unplugged, is_current: true }, pcl]);
+    await mount();
+    openPicker();
+    expect(options()[0].textContent).toBe("移动硬盘版本数读不到");
+  });
+
+  it("目录选择选中别的目录：用登记的名字问确认，切换前显示的还是原目录，确认后切过去", async () => {
+    dirsAre([home, directory("我的 HMCL", HMCL, 3)]);
+    await mount();
+    openPicker();
+    click(options()[1]);
+    await flush();
+    expect(dialogTitle()).toBe("切换到「我的 HMCL」？");
+    expect(picker()?.textContent).toBe("默认目录");
+    click(dialogButton("切换"));
+    await flush();
+    expect(callsOf(ipc, "set_game_directory")).toEqual([{ path: HMCL }]);
+  });
+
+  it("目录选择再选当前目录：什么都不做", async () => {
+    dirsAre([home, pcl]);
+    await mount();
+    openPicker();
+    click(options()[0]);
+    await flush();
+    expect(dialogTitle()).toBeUndefined();
+    expect(callsOf(ipc, "set_game_directory")).toEqual([]);
   });
 });
 

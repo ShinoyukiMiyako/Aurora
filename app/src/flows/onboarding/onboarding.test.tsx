@@ -124,6 +124,8 @@ describe("首次启动向导：第一步", () => {
     const boxes = all('[role="checkbox"]');
     expect(boxes.map((b) => b.getAttribute("aria-checked"))).toEqual(["true", "true"]);
     expect(text()).toContain("2/2");
+    // 收下的文件夹不会自动变成当前目录：说明里要讲清楚得去实例库切过去
+    expect(text()).toContain("当前游戏目录不变。要玩里面的实例，到实例库切过去");
     // 第一步没有「跳过」也没有「上一步」
     expect(all("button").some((b) => b.textContent === "跳过" || b.textContent === "上一步")).toBe(false);
   });
