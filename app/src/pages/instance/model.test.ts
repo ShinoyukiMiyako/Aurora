@@ -6,7 +6,7 @@ import type { JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashClueDto, CrashReportDto, HistoryEvent, InstalledMod, UpdateCandidate, UpdateHold, WorldDto } from "../../state/queries/instance";
 import { applyPhase, sessionLaunched, startSession } from "../../state/session";
 import { newTask } from "../../state/tasks";
-import { LOGS_COPY, MODS_COPY } from "./copy";
+import { LOGS_COPY, MODS_COPY, OVERVIEW_COPY } from "./copy";
 import {
   adjustModSort,
   autoJavaPick,
@@ -47,6 +47,7 @@ import {
   removalRelations,
   sortRows,
   sortWorlds,
+  playtimeNote,
   toggleFlags,
   weeklyHours,
   workLock,
@@ -371,6 +372,14 @@ describe("游玩与内存", () => {
     const week = 7 * 24 * 3600 * 1000;
     expect(weeklyHours(120, 0, week * 4)).toBe("0.5");
     expect(weeklyHours(90, 0, 1000)).toBe("1.5");
+  });
+
+  it("累计游玩格的说明：没玩过说没开始，玩过不足一分钟不说没开始，缺创建时间时不算周均", () => {
+    const week = 7 * 24 * 3600 * 1000;
+    expect(playtimeNote({ playtimeMin: 0, lastPlayedAt: null, createdAt: 0 }, week)).toBe(OVERVIEW_COPY.notStarted);
+    expect(playtimeNote({ playtimeMin: 0, lastPlayedAt: week - 1000, createdAt: 0 }, week)).toBe(OVERVIEW_COPY.underAMinute);
+    expect(playtimeNote({ playtimeMin: 120, lastPlayedAt: 1000, createdAt: 0 }, week * 4)).toBe(OVERVIEW_COPY.perWeek("0.5"));
+    expect(playtimeNote({ playtimeMin: 120, lastPlayedAt: 1000, createdAt: null }, week)).toBeNull();
   });
 
   it("实例设置优先，否则自动分配取推荐值、固定取全局值", () => {

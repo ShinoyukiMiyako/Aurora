@@ -11,7 +11,7 @@ import type { JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, UpdateHold, WorldDto } from "../../state/queries/instance";
 import { isActiveTask } from "../../state/tasks";
 import type { TableSort } from "../../ui/Table";
-import { MODS_COPY } from "./copy";
+import { MODS_COPY, OVERVIEW_COPY } from "./copy";
 
 // ---------------------------------------------------------------- 上次崩溃
 
@@ -192,6 +192,12 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 export function weeklyHours(playtimeMin: number, createdAt: number, now: number): string {
   const weeks = Math.max(1, (now - createdAt) / WEEK_MS);
   return (playtimeMin / 60 / weeks).toFixed(1);
+}
+
+/** 累计游玩格的说明。时长按分钟取整，玩过一局也可能是 0：是否玩过看上次游玩。没有创建时间就算不出周均，返回 null。 */
+export function playtimeNote(inst: Pick<InstanceSummary, "playtimeMin" | "lastPlayedAt" | "createdAt">, now: number): string | null {
+  if (inst.playtimeMin === 0) return inst.lastPlayedAt === null ? OVERVIEW_COPY.notStarted : OVERVIEW_COPY.underAMinute;
+  return inst.createdAt === null ? null : OVERVIEW_COPY.perWeek(weeklyHours(inst.playtimeMin, inst.createdAt, now));
 }
 
 // ---------------------------------------------------------------- 内存

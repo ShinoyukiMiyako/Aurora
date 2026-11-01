@@ -21,6 +21,20 @@ afterEach(() => {
 });
 
 describe("游戏退出后的缓存失效", () => {
+  it("启动途中后端自己下载了 Java：退出后 Java 列表重新请求", async () => {
+    const store = await startedStore();
+    let majors = [17];
+    const java = () => Promise.resolve(majors);
+    expect(await resources.read("java", java)).toEqual([17]);
+
+    majors = [17, 8];
+    emit(GAME_EXIT_EVENT, exit("生存"));
+    await settle();
+
+    expect(await resources.read("java", java)).toEqual([17, 8]);
+    store.stop();
+  });
+
   it("没人订阅的存档内容与游玩统计被丢弃，下次读取重新请求；别的实例的内容不受影响", async () => {
     const store = await startedStore();
     let worlds = 1;
