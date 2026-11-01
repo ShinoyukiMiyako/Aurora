@@ -61,7 +61,7 @@ function RuntimeDetail({ runtime, instances }: { runtime: JavaInstallationDto; i
   );
 }
 
-function noteText(note: JavaNote): string {
+function noteText(note: Exclude<JavaNote, { kind: "pinnedMissing" }>): string {
   switch (note.kind) {
     case "pinned":
       return JAVA_COPY.pinnedNote;
@@ -70,6 +70,37 @@ function noteText(note: JavaNote): string {
     case "bits32":
       return JAVA_COPY.bits32Note;
   }
+}
+
+/**
+ * 固定的默认 Java 找不到了：写出是哪个路径（列表里已经没有它，别处看不到），给出改回自动与重新选两条出路。
+ * 扫描结果为空时没有别的可选，onPickAgain 为 null，只给前一条。
+ */
+function PinnedMissingNote({ path, onUseAuto, onPickAgain }: { path: string; onUseAuto(): void; onPickAgain: (() => void) | null }) {
+  return (
+    <Callout
+      tone="warn"
+      icon="alert"
+      announce
+      action={
+        <span className={s.calloutActions}>
+          <Button size="sm" variant="ghost" onClick={onUseAuto}>
+            {JAVA_COPY.useAuto}
+          </Button>
+          {onPickAgain !== null && (
+            <Button size="sm" variant="ghost" onClick={onPickAgain}>
+              {JAVA_COPY.pickAgain}
+            </Button>
+          )}
+        </span>
+      }
+    >
+      <span className={s.calloutTitle}>{JAVA_COPY.pinnedMissing}</span>
+      <span className={s.calloutPath} title={path}>
+        {path}
+      </span>
+    </Callout>
+  );
 }
 
 /** 手动「重新扫描」：记下扫描前的列表，结果回来后报告找到几个、与上次差多少。 */
@@ -107,44 +138,59 @@ function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
   const majors = majorsInUse(instances);
   const sorted = sortRuntimes(runtimes);
   const notes = javaNotes(write.value, runtimes, instances, settings.autoDownloadJava);
+  const listRef = useRef<HTMLDivElement>(null);
+  // 「重新选择」不替用户挑：把焦点放到第一个运行时上，方向键或点击即可选定
+  const pickAgain = () => {
+    const host = listRef.current;
+    if (host === null) throw new Error("默认 Java 列表还没挂载，不能重新选择");
+    const first = host.querySelectorAll<HTMLElement>('[role="radio"]')[1];
+    if (first === undefined) throw new Error("默认 Java 列表里没有可选的运行时");
+    first.focus();
+  };
   return (
     <>
       {/* 一个都没扫到时只剩「自动选择」一项，构不成单选列表：列表位置换成空状态，提醒照常跟在后面 */}
       {sorted.length === 0 ? (
         <EmptyState compact icon="java" title={JAVA_COPY.emptyTitle} body={settings.autoDownloadJava ? JAVA_COPY.emptyAuto : JAVA_COPY.emptyManual} />
       ) : (
-        <RadioTile<string>
-          className={s.javaList}
-          ariaLabel={JAVA_COPY.defaultJava}
-          columns={tier === "wide" ? 2 : 1}
-          value={write.value}
-          onChange={write.set}
-          options={[
-            {
-              value: JAVA_AUTO,
-              title: (
-                <span className={s.titleWithTag}>
-                  {JAVA_COPY.auto}
-                  <Tag size="sm" tone="accent">
-                    {JAVA_COPY.recommended}
-                  </Tag>
-                </span>
-              ),
-              description: JAVA_COPY.autoDesc(majors, settings.autoDownloadJava),
-            },
-            ...sorted.map((runtime) => ({
-              value: runtime.path,
-              title: <RuntimeTitle runtime={runtime} />,
-              description: <RuntimeDetail runtime={runtime} instances={instances} />,
-            })),
-          ]}
-        />
+        <div ref={listRef}>
+          <RadioTile<string>
+            className={s.javaList}
+            ariaLabel={JAVA_COPY.defaultJava}
+            columns={tier === "wide" ? 2 : 1}
+            value={write.value}
+            onChange={write.set}
+            options={[
+              {
+                value: JAVA_AUTO,
+                title: (
+                  <span className={s.titleWithTag}>
+                    {JAVA_COPY.auto}
+                    <Tag size="sm" tone="accent">
+                      {JAVA_COPY.recommended}
+                    </Tag>
+                  </span>
+                ),
+                description: JAVA_COPY.autoDesc(majors, settings.autoDownloadJava),
+              },
+              ...sorted.map((runtime) => ({
+                value: runtime.path,
+                title: <RuntimeTitle runtime={runtime} />,
+                description: <RuntimeDetail runtime={runtime} instances={instances} />,
+              })),
+            ]}
+          />
+        </div>
       )}
-      {notes.map((note) => (
-        <Callout key={note.kind} tone="warn" icon="alert" announce>
-          {noteText(note)}
-        </Callout>
-      ))}
+      {notes.map((note) =>
+        note.kind === "pinnedMissing" ? (
+          <PinnedMissingNote key={note.kind} path={note.path} onUseAuto={() => write.set(JAVA_AUTO)} onPickAgain={sorted.length === 0 ? null : pickAgain} />
+        ) : (
+          <Callout key={note.kind} tone="warn" icon="alert" announce>
+            {noteText(note)}
+          </Callout>
+        ),
+      )}
     </>
   );
 }

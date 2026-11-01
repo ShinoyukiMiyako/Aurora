@@ -280,6 +280,23 @@
   user-select: text;
 }
 
+/* 说明块最多两行：标题一行、路径一行，路径过长时省略，全文放在悬停提示里 */
+.calloutPath {
+  display: block;
+  overflow: hidden;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.calloutActions {
+  display: flex;
+  gap: var(--sk-space-4);
+}
+
 /* ---------------------------------------------------------------- 游戏目录 */
 
 .pathRow {
