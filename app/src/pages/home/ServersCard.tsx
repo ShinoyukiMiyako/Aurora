@@ -69,6 +69,10 @@ const SKELETON_ROWS = 2;
 
 /** 挑选弹窗底栏的「关闭」：列表挑空之后焦点交给它。 */
 const PICKER_CLOSE_ATTR = "data-picker-close";
+/** 服务器行上记着地址：取消固定回来时认出焦点是不是还在这一行。 */
+const SERVER_ROW_ATTR = "data-server-row";
+/** 卡片头的加号：取消固定后接手焦点。 */
+const PIN_BUTTON_ATTR = "data-pin-server";
 
 /** 只作说明的禁用项：菜单不会执行禁用项，真被执行说明菜单的禁用判定坏了。 */
 function inert(): never {
@@ -126,6 +130,16 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
 
   const pin = async (server: PinnedServerDto) => (await run(() => actions.togglePinServer(server), ACTION_ERROR.servers)).ok;
   const toggle = (server: PinnedServerDto) => void pin(server);
+  // 行退场动画结束后「更多」跟着移除，焦点会掉回 body；焦点还在这一行时趁它还在交给卡片头的加号
+  const unpin = (server: PinnedServerDto) =>
+    void pin(server).then((ok) => {
+      if (!ok) return;
+      const row = document.activeElement?.closest(`[${SERVER_ROW_ATTR}]`);
+      if (row === null || row === undefined || row.getAttribute(SERVER_ROW_ATTR) !== server.address) return;
+      const plus = document.querySelector<HTMLElement>(`[${PIN_BUTTON_ATTR}]`);
+      if (plus === null) throw new Error("服务器卡片头上找不到加号");
+      plus.focus();
+    });
 
   const addItems = (): MenuEntry[] => {
     if (known.status === "loading") return [{ label: HOME_COPY.knownLoading, disabled: true, onSelect: inert }];
@@ -182,6 +196,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
             {rows.map((row) => (
               <motion.li
                 key={row.address}
+                {...{ [SERVER_ROW_ATTR]: row.address }}
                 layout
                 layoutDependency={rows.map((r) => r.address).join("|")}
                 className={s.serverRow}
@@ -198,7 +213,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
                   selectedInstanceId={selectedInstanceId}
                   busy={busy}
                   savesBusy={savesBusy}
-                  onUnpin={() => toggle({ name: row.name, address: row.address, instance: row.instance })}
+                  onUnpin={() => unpin({ name: row.name, address: row.address, instance: row.instance })}
                 />
               </motion.li>
             ))}
@@ -227,7 +242,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
         title={HOME_COPY.serversTitle}
         subtitle={subtitle}
         icon="server"
-        actions={<MenuButton items={addItems()} placement="bottom-end" trigger={(props) => <IconButton {...props} icon="plus" variant="secondary" size="sm" label={HOME_COPY.pinServer} />} />}
+        actions={<MenuButton items={addItems()} placement="bottom-end" trigger={(props) => <IconButton {...props} {...{ [PIN_BUTTON_ATTR]: "" }} icon="plus" variant="secondary" size="sm" label={HOME_COPY.pinServer} />} />}
       />
       {body()}
       {picker !== null && <ServerPicker key={picker.session} open={picker.open} known={known} onPin={pin} onClose={closePicker} />}

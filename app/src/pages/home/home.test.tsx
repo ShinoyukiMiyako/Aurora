@@ -558,6 +558,30 @@ describe("主页：固定的服务器", () => {
     expect(callsOf(ipc, "set_pinned_servers").at(-1)).toEqual({ servers: [{ name: "本地", address: "localhost", instance: null }] });
   });
 
+  it("取消固定：焦点在这一行时交给加号，不随退场的行掉回 body", async () => {
+    await mount();
+    const more = buttonByLabel("晨星 的更多操作");
+    act(() => more.focus());
+    await openMenu(more);
+    click(menuItem("取消固定"));
+    await flush();
+    expect(callsOf(ipc, "set_pinned_servers").at(-1)).toEqual({ servers: [] });
+    expect(document.activeElement).toBe(buttonByLabel("固定服务器"));
+  });
+
+  it("取消固定失败：行还在，焦点留给它的「更多」", async () => {
+    await mount();
+    ipc.overrides.set("set_pinned_servers", () => {
+      throw new Error("写不进去");
+    });
+    const more = buttonByLabel("晨星 的更多操作");
+    act(() => more.focus());
+    await openMenu(more);
+    click(menuItem("取消固定"));
+    await flush();
+    expect(document.activeElement).toBe(buttonByLabel("晨星 的更多操作"));
+  });
+
   it("全部已固定时加号菜单只有一条禁用说明", async () => {
     pinned = [
       { name: "晨星", address: "play.example", instance: null },
