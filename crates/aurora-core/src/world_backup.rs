@@ -111,7 +111,8 @@ impl Aurora {
     }
 
     /// 备份一个存档。存档文件夹不在报 [`CoreError::WorldNotFound`]，正被游戏打开报
-    /// `Instance(WorldInUse)`。写进清单之后，自动备份开着时按保留策略清理旧备份，清理不掉的发一条告警，下次再试。
+    /// `Instance(WorldInUse)`。写进清单之后，自动备份开着时按保留策略清理旧备份，清理不掉（包括别的存档的清单
+    /// 读不懂）只发一条告警，下次再试：这份备份已经成了，不能因为清理报失败。
     pub async fn backup_world(
         &self,
         id: &str,
@@ -125,9 +126,8 @@ impl Aurora {
         ensure_not_in_use(&paths.world_dir).await?;
 
         let root = self.backup_layout().root().to_path_buf();
-        // 打包前先确认清单都读得懂：打完包才发现记不进清单，备份就成了没人认领的文件。
+        // 打包前先确认自己的清单读得懂：打完包才发现记不进清单，备份就成了没人认领的文件。
         read_backup_index(&paths.backup_dir).await?;
-        scan_backup_indices(&root).await?;
         let dir = paths.backup_dir.clone();
         blocking(move || remove_partial_backups(&dir)).await?;
 
@@ -163,8 +163,22 @@ impl Aurora {
         // 保留策略只管自动备份：自动备份关着时设置页把两项保留设置一起禁用、写明不会清理，
         // 手动备份不能借机删掉玩家以前的自动备份。
         let pruned = if self.config().world_backup.auto {
-            self.prune(&root, Some((&paths.backup_dir, &entry.file)), events)
-                .await?
+            match self
+                .prune(&root, Some((&paths.backup_dir, &entry.file)), events)
+                .await
+            {
+                Ok(pruned) => pruned,
+                Err(err) => {
+                    tracing::error!(error = %err, "按保留策略清理旧的存档备份失败");
+                    emit(
+                        events,
+                        CoreEvent::warning(format!(
+                            "这次没能清理旧的自动备份，下次备份时再试：{err}"
+                        )),
+                    );
+                    0
+                }
+            }
         } else {
             0
         };
@@ -1731,6 +1745,79 @@ mod tests {
         let mut left = vec![manual.backup.file, next.backup.file];
         left.sort();
         assert_eq!(zips_in(&dir), left);
+    }
+
+    /// 别的存档的清单读不懂只影响清理：这一份备份照常写成、记进自己的清单，自动备份开着时发一条告警。
+    #[tokio::test]
+    async fn unreadable_index_of_another_world_only_costs_the_prune() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut aurora = aurora_at(tmp.path());
+        let saves = isolated(&aurora, "a");
+        world(&saves, "w", "w");
+        let elsewhere = isolated(&aurora, "b");
+        world(&elsewhere, "x", "x");
+        aurora
+            .backup_world("b", "x", BackupKind::Manual, None)
+            .await
+            .unwrap();
+        write(
+            &backups_root(&aurora)
+                .join("instances")
+                .join("b")
+                .join("x")
+                .join(aurora_instance::BACKUP_INDEX_FILE),
+            b"{ broken",
+        );
+        let dir = backups_root(&aurora).join("instances").join("a").join("w");
+
+        for (auto, kind, warned) in [
+            (false, BackupKind::Manual, false),
+            (true, BackupKind::Manual, true),
+            (true, BackupKind::Auto, true),
+        ] {
+            aurora.set_world_backup(WorldBackupSettings {
+                auto,
+                ..WorldBackupSettings::default()
+            });
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let outcome = aurora
+                .backup_world("a", "w", kind, Some(&tx))
+                .await
+                .unwrap_or_else(|err| panic!("auto={auto}, {kind:?}: {err:?}"));
+            drop(tx);
+
+            assert_eq!(outcome.pruned, 0);
+            assert!(dir.join(&outcome.backup.file).exists());
+            let index = read_backup_index(&dir).await.unwrap();
+            assert!(index.find(&outcome.backup.file).is_some());
+            let mut warnings = Vec::new();
+            while let Some(event) = rx.recv().await {
+                if let CoreEvent::Warning(text) = event {
+                    warnings.push(text);
+                }
+            }
+            assert_eq!(
+                !warnings.is_empty(),
+                warned,
+                "auto={auto}, {kind:?}: {warnings:?}"
+            );
+        }
+
+        // 自己这个存档的清单读不懂时仍然不打包：打完包记不进去，备份就成了没人认领的文件。
+        write(&dir.join(aurora_instance::BACKUP_INDEX_FILE), b"{ broken");
+        let before = zips_in(&dir);
+        let err = aurora
+            .backup_world("a", "w", BackupKind::Manual, None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CoreError::Instance(InstanceError::BackupIndexInvalid { .. })
+            ),
+            "{err:?}"
+        );
+        assert_eq!(zips_in(&dir), before);
     }
 
     #[tokio::test]
