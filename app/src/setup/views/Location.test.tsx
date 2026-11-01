@@ -340,6 +340,20 @@ describe("主按钮", () => {
     expect(onInstall).toHaveBeenCalledTimes(1);
   });
 
+  it("路径框里按住不放的重复事件不算", async () => {
+    const { onInstall } = mount();
+    await settle();
+    pressKey(pathInput(), "Enter", { repeat: true });
+    expect(onInstall).not.toHaveBeenCalled();
+  });
+
+  it("路径框里组字时的回车归输入法", async () => {
+    const { onInstall } = mount();
+    await settle();
+    pressKey(pathInput(), "Enter", { isComposing: true });
+    expect(onInstall).not.toHaveBeenCalled();
+  });
+
   it("发起后转加载，点不动", () => {
     const { onInstall } = mount({ busy: true });
     const primary = install();
@@ -522,5 +536,19 @@ describe("接真的 App", () => {
     await pass(DIR_CHECK_DEBOUNCE_MS * 2);
     expect(document.querySelector("h1")?.textContent).toBe(copy.welcome.title);
     expect(fake.callsOf("checkDir")).toEqual([]);
+  });
+
+  it("在「更改」上按住 Enter 进来时焦点已在路径框，重复事件不发起安装", async () => {
+    const fake = createFakeBridge({ outcome: "hang", progress: [] });
+    view = render(<App bridge={fake} copy={copy} initial={replay([{ type: "probed", probe: FAKE_PROBE }])} />);
+    act(() => button(copy.welcome.change).click());
+    expect(document.activeElement).toBe(pathInput());
+
+    pressKey(pathInput(), "Enter", { repeat: true });
+    await pass(DIR_CHECK_DEBOUNCE_MS);
+
+    expect(document.querySelector("h1")?.textContent).toBe(text.title);
+    expect(fake.callsOf("launcherRunning")).toEqual([]);
+    expect(fake.callsOf("install")).toEqual([]);
   });
 });

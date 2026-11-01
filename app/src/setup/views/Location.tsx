@@ -1,5 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon } from "../../art/Icon";
+import { isImeComposing } from "../../lib/util";
 import { useEscapeListener } from "../../shell/overlay";
 import { Button } from "../../ui/Button";
 import { Checkbox } from "../../ui/Checkbox";
@@ -96,6 +97,11 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
   // 发起安装时目录已经取走，这时再改或返回，安装仍按旧目录走，界面却对不上；下面的 busy 禁用同理
   useEscapeListener(!busy, onBack);
 
+  // 不用 TextInput 的 onEnter：它不看重复事件。在上一页的按钮上按住 Enter 进来时焦点已经落在这里，安装一旦发起就取消不了
+  const onPathKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter" && !event.repeat && !isImeComposing(event) && issue === undefined) onInstall();
+  };
+
   const browse = () => {
     void pickFolder().then((picked) => {
       if (picked !== null) onDirChange(withAppFolder(picked));
@@ -134,7 +140,7 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
           }
         >
           <div className={styles.dirRow}>
-            <TextInput className={styles.dirInput} size="lg" value={dir} onChange={onDirChange} onEnter={issue === undefined ? onInstall : undefined} readOnly={busy} spellCheck={false} autoComplete="off" autoFocus />
+            <TextInput className={styles.dirInput} size="lg" value={dir} onChange={onDirChange} onKeyDown={onPathKeyDown} readOnly={busy} spellCheck={false} autoComplete="off" autoFocus />
             <Button size="lg" icon="folder-open" disabled={busy} focusableWhenDisabled onClick={browse}>
               {text.browse}
             </Button>
