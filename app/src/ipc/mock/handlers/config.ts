@@ -65,6 +65,7 @@ function seedConfig(): ConfigDto {
     language: "zh-CN",
     extra_java_paths: [],
     prefer_dedicated_gpu: false,
+    skip_accessibility_onboarding: true,
     world_backup: { auto: true, keep_per_world: 5, max_total_gb: 20 },
   };
 }
@@ -319,6 +320,7 @@ function updateConfig(args: MockArgs): void {
   }
   if (args.language !== undefined) next.language = oneOf(args.language, UI_LANGUAGES, "的界面语言");
   if (args.preferDedicatedGpu !== undefined) next.prefer_dedicated_gpu = requireBoolean(args, "preferDedicatedGpu");
+  if (args.skipAccessibilityOnboarding !== undefined) next.skip_accessibility_onboarding = requireBoolean(args, "skipAccessibilityOnboarding");
   if (args.worldBackup !== undefined) next.world_backup = parseWorldBackup(args.worldBackup);
   config = next;
 }
@@ -402,7 +404,7 @@ interface ConfigSnapshot {
 }
 
 /** 后来才加进配置、早先存下的快照里没有的字段。 */
-type LaterConfigFields = "extra_java_paths" | "prefer_dedicated_gpu";
+type LaterConfigFields = "extra_java_paths" | "prefer_dedicated_gpu" | "skip_accessibility_onboarding";
 type StoredConfigSnapshot = Omit<ConfigSnapshot, "config"> & { config: Omit<ConfigDto, LaterConfigFields> & Partial<Pick<ConfigDto, LaterConfigFields>> };
 
 // 快照形状一变就升版本：旧快照里的配置缺字段，读回来会在 DTO 适配处出错，不如启用时就明确报版本不符。
@@ -411,8 +413,8 @@ export const persist: MockPersist = {
   snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], firstRunCompleted }),
   restore: (data) => {
     const saved = data as StoredConfigSnapshot;
-    // 与后端配置的 serde(default) 一致：手动 Java 与独显偏好是后加的字段，之前存下的快照没有它们，按默认值读入
-    config = { extra_java_paths: [], prefer_dedicated_gpu: false, ...saved.config };
+    // 与后端配置的 serde(default) 一致：手动 Java、独显偏好与跳过无障碍引导是后加的字段，之前存下的快照没有它们，按默认值读入
+    config = { extra_java_paths: [], prefer_dedicated_gpu: false, skip_accessibility_onboarding: true, ...saved.config };
     extras = saved.extras;
     disk = new Set(saved.disk);
     withVersions = new Set(saved.withVersions);

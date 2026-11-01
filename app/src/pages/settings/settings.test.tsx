@@ -241,6 +241,55 @@ describe("设置页：常规", () => {
     expect(toasts()).toContainEqual({ tone: "error", title: "没能保存「游戏启动后」", body: "磁盘已满" });
   });
 
+  describe("跳过首次无障碍引导", () => {
+    const SKIP = "跳过首次无障碍引导";
+    const stored = async () => (await mockInvoke<{ skip_accessibility_onboarding: boolean }>("get_config")).skip_accessibility_onboarding;
+
+    it("放在「启动」卡里、默认开，说明写清不显示什么与只影响哪些实例", async () => {
+      await mount("general");
+      const toggle = button(SKIP);
+      expect(section("启动").contains(toggle)).toBe(true);
+      expect(toggle.getAttribute("role")).toBe("switch");
+      expect(toggle.getAttribute("aria-checked")).toBe("true");
+      expect(section("启动").textContent).toContain("实例第一次启动时不显示 Minecraft 的讲述人与无障碍提示；只影响还没启动过的实例，需要讲述人时关掉");
+    });
+
+    it("关掉写入 skipAccessibilityOnboarding: false，再打开写回 true，控件、状态层与 mock 读回都跟着变", async () => {
+      await mount("general");
+      await click(button(SKIP));
+      expect(callsOf(ipc, "update_config")).toEqual([{ skipAccessibilityOnboarding: false }]);
+      expect(button(SKIP).getAttribute("aria-checked")).toBe("false");
+      expect(launcher.state.settings?.skipAccessibilityOnboarding).toBe(false);
+      expect(await stored()).toBe(false);
+
+      await click(button(SKIP));
+      expect(callsOf(ipc, "update_config")).toEqual([{ skipAccessibilityOnboarding: false }, { skipAccessibilityOnboarding: true }]);
+      expect(button(SKIP).getAttribute("aria-checked")).toBe("true");
+      expect(await stored()).toBe(true);
+    });
+
+    it("配置里已经关掉：打开设置页时开关就是关的", async () => {
+      await mockInvoke("update_config", { skipAccessibilityOnboarding: false });
+      await mount("general");
+      expect(button(SKIP).getAttribute("aria-checked")).toBe("false");
+    });
+
+    it("写入中开关先显示关；失败后回到开，error 通知标题点名设置项、正文给原因，配置没变", async () => {
+      const write = deferred<null>();
+      ipc.overrides.set("update_config", () => write.promise);
+      await mount("general");
+      await click(button(SKIP));
+      expect(callsOf(ipc, "update_config")).toEqual([{ skipAccessibilityOnboarding: false }]);
+      expect(button(SKIP).getAttribute("aria-checked")).toBe("false");
+
+      write.reject(new IpcError("config_io", "磁盘已满"));
+      await flush();
+      expect(button(SKIP).getAttribute("aria-checked")).toBe("true");
+      expect(toasts()).toContainEqual({ tone: "error", title: `没能保存「${SKIP}」`, body: "磁盘已满" });
+      expect(await stored()).toBe(true);
+    });
+  });
+
   it("client_id：展开输入、保存后写入并提示，不回显已保存的值", async () => {
     await mount("general");
     expect(text()).toContain("已配置");

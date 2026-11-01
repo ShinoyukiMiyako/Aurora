@@ -225,7 +225,7 @@ describe("设置页常规分区：游戏启动后关闭与自动备份", () => {
 });
 
 describe("设置页常规分区：按片订阅", () => {
-  it("游戏运行中 20 批日志：三个设置行一次都不重渲染；改了语言之后才重渲染", async () => {
+  it("游戏运行中 20 批日志：四个设置行一次都不重渲染；改了语言之后才重渲染", async () => {
     ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
     await mountGeneral();
     expect(languageTrigger().textContent).toBe("简体中文");

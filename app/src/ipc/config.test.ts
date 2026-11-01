@@ -88,6 +88,24 @@ describe("全局设置", () => {
   });
 });
 
+describe("跳过首次无障碍引导", () => {
+  it("默认开，补丁改了读回一致；不带这个键的补丁不动它", async () => {
+    expect((await getConfig()).skip_accessibility_onboarding).toBe(true);
+    await updateConfig({ skipAccessibilityOnboarding: false });
+    expect((await getConfig()).skip_accessibility_onboarding).toBe(false);
+    await updateConfig({ checkUpdates: false });
+    expect((await getConfig()).skip_accessibility_onboarding).toBe(false);
+    await updateConfig({ skipAccessibilityOnboarding: true });
+    expect((await getConfig()).skip_accessibility_onboarding).toBe(true);
+  });
+
+  it("不是布尔值是 Tauri 参数错误，归为 unknown，同一次补丁里的其它字段也不生效", async () => {
+    const error = await rejection(invoke("update_config", { checkUpdates: false, skipAccessibilityOnboarding: "false" }));
+    expect(error).toMatchObject({ code: "unknown", message: "invalid args `skipAccessibilityOnboarding` for command `update_config`: expected a boolean" });
+    expect(await getConfig()).toMatchObject({ skip_accessibility_onboarding: true, check_updates: true });
+  });
+});
+
 describe("游戏目录", () => {
   it("发现只报告盘上存在且未记录的目录，添加后不再出现", async () => {
     expect(await listGameDirectories()).toEqual([{ name: "默认目录", path: DEFAULT_DIR, is_current: true, available: true }]);

@@ -77,6 +77,8 @@ export interface ConfigDto {
   extra_java_paths: string[];
   /** 启动前把这次用的 java 设为 Windows 图形设置里的高性能显卡。 */
   prefer_dedicated_gpu: boolean;
+  /** 实例第一次启动时不显示 Minecraft 的讲述人与无障碍提示；已经启动过的实例不受影响。 */
+  skip_accessibility_onboarding: boolean;
   world_backup: WorldBackupSettings;
 }
 
@@ -104,6 +106,7 @@ export interface ConfigPatch {
   notifiedUpdateVersion?: string;
   language?: UiLanguage;
   preferDedicatedGpu?: boolean;
+  skipAccessibilityOnboarding?: boolean;
   /** 三个字段都必须给出；越界报 invalid_argument，detail.field 为 world_backup.keep_per_world 或 world_backup.max_total_gb。 */
   worldBackup?: WorldBackupSettings;
 }
