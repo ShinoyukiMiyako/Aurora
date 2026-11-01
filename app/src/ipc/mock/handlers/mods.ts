@@ -817,7 +817,7 @@ function installMod(args: MockArgs): Promise<ModInstallOutcomeDto> {
     place(instance, result.items);
     stage(taskId, step, `模组 ${main.file_name} 已安装`);
     const onDisk = diskName(instance, main.file_name);
-    return { file_name: onDisk, path: `${mockModsDir(versionId)}/${onDisk}`, platform: main.platform };
+    return { file_name: onDisk, path: `${mockModsDir(versionId)}/${onDisk}`, platform: main.platform, skipped: result.unmet };
   }).finally(() => hold.release());
 }
 

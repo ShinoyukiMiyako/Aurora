@@ -133,7 +133,7 @@ describe("工程目录：搜得到就打得开、装得上", () => {
       ["fapi-0115", "AANobbMI", false],
     ]);
     const outcome = await installMod("t-iris", "1.21.1-Fabric", "modrinth", "YL57xq9U", "iris-181");
-    expect(outcome).toEqual({ file_name: "YL57xq9U-1.8.1.jar", path: "C:/Games/.minecraft/versions/1.21.1-Fabric/mods/YL57xq9U-1.8.1.jar", platform: "modrinth" });
+    expect(outcome).toEqual({ file_name: "YL57xq9U-1.8.1.jar", path: "C:/Games/.minecraft/versions/1.21.1-Fabric/mods/YL57xq9U-1.8.1.jar", platform: "modrinth", skipped: [] });
     const mods = await listMods("1.21.1-Fabric");
     expect(mods.map((m) => [m.file_name, m.source?.project_id, m.source?.dependency_of])).toEqual([
       ["AANobbMI-0.6.5.jar", "AANobbMI", "YL57xq9U"],

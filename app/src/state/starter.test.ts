@@ -126,6 +126,34 @@ describe("新实例起步：沿用默认设置与开局 Mod", () => {
     expect(toasts().some((t) => t.includes("装上 5 个 Mod"))).toBe(false);
   });
 
+  it("开局 Mod 不走确认计划：没有照办的必需前置在装完后补一条通知，任务行留着全文", async () => {
+    const NOTE = "前置 Cloth Config 没有适配该实例的版本，未加入计划";
+    ipc.overrides.set("install_mod", async (args) => ({ ...((await mockInvoke("install_mod", args)) as object), skipped: [NOTE] }));
+    const picks = (await fabricPicks()).slice(0, 2);
+    await store.actions.createInstance({ name: NAME, mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "grass", useTemplate: false, starterMods: picks });
+    await runTasks();
+
+    expect(toasts()).toContain(`success:已给「${NAME}」装上 2 个 Mod`);
+    expect(toasts()).toContain(`warning:「${NAME}」有 1 个前置要留意:${NOTE}`);
+    expect(tasksOf("install_mods")[0].detail).toContain(NOTE);
+  });
+
+  it("中途失败：已经装上的几项没有照办的前置照样说", async () => {
+    const NOTE = "前置 Cloth Config 没有适配该实例的版本，未加入计划";
+    let calls = 0;
+    ipc.overrides.set("install_mod", async (args) => {
+      calls += 1;
+      if (calls === 2) throw new IpcError("mod_platform_failed", "Modrinth 请求失败: HTTP 503");
+      return { ...((await mockInvoke("install_mod", args)) as object), skipped: [NOTE] };
+    });
+    const picks = (await fabricPicks()).slice(0, 2);
+    await store.actions.createInstance({ name: NAME, mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "grass", useTemplate: false, starterMods: picks });
+    await runTasks();
+
+    expect(tasksOf("install_mods")[0].status).toBe("failed");
+    expect(toasts()).toContain(`warning:「${NAME}」有 1 个前置要留意:${NOTE}`);
+  });
+
   it("新建失败、盘上留下目录：重试改排补全，补全好了照样接着装当初勾的开局 Mod", async () => {
     // 第一次安装在下载前失败（加载器版本对不上），假后端与后端一样留下带安装标记的目录
     ipc.overrides.set("install_version", (args) => mockInvoke("install_version", { ...args, loaderVersion: "0.0.0-missing" }));

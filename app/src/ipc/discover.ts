@@ -142,6 +142,8 @@ export interface ModInstallOutcomeDto {
   file_name: string;
   path: string;
   platform: PlatformId;
+  /** 这个版本要的必需前置里没有照办的，每条一句中文。 */
+  skipped: string[];
 }
 
 export interface ResourceInstallOutcomeDto {

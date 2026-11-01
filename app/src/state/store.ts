@@ -734,6 +734,11 @@ interface UpdatesOutcome {
   skipped: string[];
 }
 
+/** 组合安装任务里各项没有照办的前置。 */
+interface InstallsOutcome {
+  skipped: string[];
+}
+
 /**
  * 动作失败时旁听一下错误（原样抛给调用方）：联网状态据此判断要不要探测连通性。
  * 动作内部互相调用走的是未包装的那一份，同一个错误不会被记两遍。
@@ -1796,11 +1801,24 @@ export class LauncherStore {
     // 组合任务逐个调后端命令，复用同一个 taskId
     if (command === "install_mods") {
       const versionId = strArg(args, "versionId", command);
-      await this.runSteps(
-        taskId,
-        modItems(args).map((item) => ({ size: item.fileSize, run: (step) => installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId, step) })),
-      );
-      return null;
+      const skipped: string[] = [];
+      try {
+        await this.runSteps(
+          taskId,
+          modItems(args).map((item) => ({
+            size: item.fileSize,
+            run: async (step) => {
+              const outcome = await installMod(taskId, versionId, item.platform, item.projectId, item.modVersionId, step);
+              skipped.push(...outcome.skipped);
+            },
+          })),
+        );
+      } catch (error) {
+        if (args.starter === true) this.reportSkippedDeps(task.id, versionId, skipped);
+        throw error;
+      }
+      const outcome: InstallsOutcome = { skipped };
+      return outcome;
     }
     if (command === "update_mods") {
       const versionId = strArg(args, "versionId", command);
@@ -2186,6 +2204,8 @@ export class LauncherStore {
         this.modsChanged(meta.instanceId);
         await this.fetchInstances();
         this.pushToast("success", TASK_TOAST.starterInstalled(meta.instanceId, meta.count).title);
+        // 发现页的安装在确认计划里已经列过，开局 Mod 没有这一步
+        this.reportSkippedDeps(task.id, meta.instanceId, (result as InstallsOutcome).skipped);
         return;
       }
       case "resource": {

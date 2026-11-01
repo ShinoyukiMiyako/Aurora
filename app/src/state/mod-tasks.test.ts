@@ -11,6 +11,8 @@ import type { LauncherStore } from "./store";
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
+const INSTALLED = { file_name: "x.jar", path: "", platform: "modrinth", skipped: [] };
+
 function version(projectId: string, versionId: string, overrides: Partial<ModVersionInfo> = {}): ModVersionInfo {
   return {
     version_id: versionId,
@@ -70,7 +72,7 @@ beforeEach(async () => {
   vi.setSystemTime(1_720_000_000_000);
   resetRecorder(ipc);
   bootOverrides(ipc);
-  ipc.overrides.set("install_mod", () => null);
+  ipc.overrides.set("install_mod", () => ({ file_name: "x.jar", path: "", platform: "modrinth", skipped: [] }));
   store = await startedStore();
 });
 afterEach(() => {
@@ -149,7 +151,7 @@ describe("装 Mod 期间实例的状态", () => {
     expect(inst("生存")).toMatchObject({ status: "ready", activity: "modifying", brokenReason: null });
     expect(inst("创造")).toMatchObject({ status: "ready", activity: null });
 
-    install.resolve(null);
+    install.resolve({ file_name: "x.jar", path: "", platform: "modrinth", skipped: [] });
     await settle();
     expect(inst("生存")).toMatchObject({ status: "ready", activity: null });
 
@@ -647,7 +649,7 @@ describe("组合任务的取消", () => {
   it("某一项在取消宽限期内照常装完、后端按成功返回：不再开始下一项，任务落为已取消，Mod 列表重取", async () => {
     ipc.overrides.set("plan_install", () => plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" }, { projectId: "lithium", versionId: "l1" }));
     const first = deferred<unknown>();
-    ipc.overrides.set("install_mod", () => (callsOf(ipc, "install_mod").length === 1 ? first.promise : { file_name: "x.jar", path: "", platform: "modrinth" }));
+    ipc.overrides.set("install_mod", () => (callsOf(ipc, "install_mod").length === 1 ? first.promise : { file_name: "x.jar", path: "", platform: "modrinth", skipped: [] }));
     // 取消到达时这一项正在运行（返回 true），后端随后不再记着这个 id
     ipc.overrides.set("cancel_task", () => true);
     await installSodium();
@@ -657,7 +659,7 @@ describe("组合任务的取消", () => {
     const mods = await cached("mods:生存");
 
     await store.actions.cancelTask(task.id);
-    first.resolve({ file_name: "sodium-v2.jar", path: "", platform: "modrinth" });
+    first.resolve({ file_name: "sodium-v2.jar", path: "", platform: "modrinth", skipped: [] });
     await settle();
 
     expect(callsOf(ipc, "install_mod").map((a) => a.projectId)).toEqual(["sodium"]);
@@ -687,14 +689,14 @@ describe("组合任务的取消", () => {
   it("取消落在最后一项上、它在宽限期内做完：活已经干完，任务算完成", async () => {
     ipc.overrides.set("plan_install", () => plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" }));
     const last = deferred<unknown>();
-    ipc.overrides.set("install_mod", () => (callsOf(ipc, "install_mod").length === 2 ? last.promise : { file_name: "x.jar", path: "", platform: "modrinth" }));
+    ipc.overrides.set("install_mod", () => (callsOf(ipc, "install_mod").length === 2 ? last.promise : { file_name: "x.jar", path: "", platform: "modrinth", skipped: [] }));
     ipc.overrides.set("cancel_task", () => true);
     await installSodium();
     await settle();
     const [task] = store.getState().tasks;
     expect(callsOf(ipc, "install_mod")).toHaveLength(2);
     await store.actions.cancelTask(task.id);
-    last.resolve({ file_name: "fabric-api-f1.jar", path: "", platform: "modrinth" });
+    last.resolve({ file_name: "fabric-api-f1.jar", path: "", platform: "modrinth", skipped: [] });
     await settle();
     expect(store.getState().tasks.map((t) => t.status)).toEqual(["done"]);
     expect(store.getState().toasts.filter((t) => t.tone === "success").map((t) => t.title)).toEqual(["已安装 Sodium 及 1 个前置"]);
@@ -703,14 +705,14 @@ describe("组合任务的取消", () => {
   it("删除实例时取消运行中的组合任务：同样不再开始下一项", async () => {
     ipc.overrides.set("plan_install", () => plan({ projectId: "sodium", versionId: "v2" }, { projectId: "fabric-api", versionId: "f1" }));
     const first = deferred<unknown>();
-    ipc.overrides.set("install_mod", () => (callsOf(ipc, "install_mod").length === 1 ? first.promise : { file_name: "x.jar", path: "", platform: "modrinth" }));
+    ipc.overrides.set("install_mod", () => (callsOf(ipc, "install_mod").length === 1 ? first.promise : { file_name: "x.jar", path: "", platform: "modrinth", skipped: [] }));
     ipc.overrides.set("cancel_task", () => true);
     ipc.overrides.set("delete_instance", () => ({ existed: true }));
     await installSodium();
     await settle();
     const deleting = store.actions.deleteInstance("生存", 0);
     await settle();
-    first.resolve({ file_name: "sodium-v2.jar", path: "", platform: "modrinth" });
+    first.resolve({ file_name: "sodium-v2.jar", path: "", platform: "modrinth", skipped: [] });
     await deleting;
     await settle();
     expect(callsOf(ipc, "install_mod")).toHaveLength(1);
@@ -808,11 +810,11 @@ describe("组合任务的进度按整体累计", () => {
     snap();
     emit(CORE_EVENT, { kind: "download", task_id: `${id}#1`, step: 0, total: 2, finished: 2, bytes: 3072, total_bytes: 3072, speed: 1 });
     snap();
-    calls[0].resolve(null);
+    calls[0].resolve(INSTALLED);
     await settle();
     snap();
     // 前置已经装好，第二项的命令无事可做
-    calls[1].resolve(null);
+    calls[1].resolve(INSTALLED);
     await settle();
     snap();
     expect(seen).toEqual([
@@ -848,15 +850,15 @@ describe("组合任务的进度按整体累计", () => {
       seen.push(store.getState().tasks[0].progress);
     };
     progress(0, 512, 1024);
-    calls[0].resolve(null);
+    calls[0].resolve(INSTALLED);
     await settle();
     seen.push(store.getState().tasks[0].progress);
     progress(1, 0, 4096);
     progress(1, 4096, 4096);
-    calls[1].resolve(null);
+    calls[1].resolve(INSTALLED);
     await settle();
     progress(2, 1024, 1024);
-    calls[2].resolve(null);
+    calls[2].resolve(INSTALLED);
     await settle();
 
     expect(store.getState().tasks[0]).toMatchObject({ status: "done", totalBytes: null });

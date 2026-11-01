@@ -481,7 +481,7 @@ describe("下载队列：状态容器", () => {
     try {
       const repairDone = deferred<unknown>();
       ipc.overrides.set("repair_instance", () => repairDone.promise);
-      ipc.overrides.set("install_mod", () => null);
+      ipc.overrides.set("install_mod", () => ({ file_name: "x.jar", path: "", platform: "modrinth", skipped: [] }));
       expect(store.actions.retryFailedTasks()).toBe(2);
       await settle();
       expect(callsOf(ipc, "repair_instance")).toHaveLength(1);

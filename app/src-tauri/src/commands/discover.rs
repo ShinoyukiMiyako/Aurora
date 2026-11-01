@@ -44,6 +44,8 @@ pub struct ModInstallOutcomeDto {
     pub file_name: String,
     pub path: String,
     pub platform: Platform,
+    /// 这个版本要的必需前置里没有照办的，每条一句中文。开局 Mod 不走确认计划，靠它告诉玩家。
+    pub skipped: Vec<String>,
 }
 
 fn search_result_dto(result: AggregateResult) -> SearchResultDto {
@@ -281,6 +283,7 @@ pub(crate) async fn install_mod_with(
         file_name: outcome.file_name,
         path: outcome.path.display().to_string(),
         platform: outcome.platform,
+        skipped: outcome.skipped,
     })
 }
 
