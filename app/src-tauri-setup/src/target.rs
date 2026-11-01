@@ -10,7 +10,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::contract::{DirCheck, DirIssue};
+use crate::contract::{DirCheck, DirIssue, Failure, FailureCode};
 use crate::existing::{APP_EXE, CONFIG_FILE, unquote};
 
 /// 非空目录追加的子目录名，也是默认安装目录的末段。
@@ -179,6 +179,47 @@ fn evaluate(
 /// 碰盘失败就是这里要的结论本身，`DirCheck` 没有放错误原文的字段。
 fn unwritable(_: io::Error) -> DirIssue {
     DirIssue::Unwritable
+}
+
+/// 安装失败后到目标目录看一眼：载荷只给退出码，盘满和没权限都是 2，界面给这两种的退路却不一样。
+/// 都没查出问题时返回 `None`，原因就只有退出码了。
+///
+/// 空间排在探针前：盘满时探针也写不进，说成没权限会把人带去查权限。`reclaimable` 是覆盖时腾得出来的字节，
+/// 不算进去的话，空间本来就紧的机器上别的原因失败也会被说成盘满。查不出卷时 `volume` 返回 `None`，只靠探针下结论。
+pub fn write_fault(
+    dir: &Path,
+    need: u64,
+    reclaimable: u64,
+    volume: impl FnOnce(&Path) -> Option<Volume>,
+) -> Option<Failure> {
+    let anchor = match nearest_existing(dir) {
+        Ok(anchor) => anchor,
+        Err(err) => return Some(refused(dir, &err)),
+    };
+    let short =
+        volume(anchor).filter(|volume| volume.free_bytes.saturating_add(reclaimable) < need);
+    if let Some(volume) = short {
+        return Some(Failure {
+            code: FailureCode::DiskFull,
+            detail: format!(
+                "{} 还剩 {} 字节，需要 {need} 字节",
+                volume.id, volume.free_bytes
+            ),
+        });
+    }
+    probe_write(anchor).err().map(|err| refused(dir, &err))
+}
+
+fn refused(dir: &Path, err: &io::Error) -> Failure {
+    let code = if err.kind() == io::ErrorKind::StorageFull {
+        FailureCode::DiskFull
+    } else {
+        FailureCode::DirUnwritable
+    };
+    Failure {
+        code,
+        detail: format!("{} 写不进去：{err}", dir.display()),
+    }
 }
 
 /// 去掉输入两端的空白和引号（资源管理器的「复制文件路径」带引号），盘符路径规整成唯一写法。
@@ -717,6 +758,115 @@ mod tests {
         }
         let status = command.stdout(Stdio::null()).status().unwrap();
         assert!(status.success());
+    }
+
+    fn roomy(_: &Path) -> Option<Volume> {
+        Some(Volume {
+            id: r"D:\".into(),
+            free_bytes: 1000,
+        })
+    }
+
+    #[test]
+    fn a_writable_target_with_room_has_no_fault_and_keeps_no_probe() {
+        let temp = tempfile::tempdir().unwrap();
+
+        assert_eq!(write_fault(temp.path(), 1000, 0, roomy), None);
+        assert_eq!(entries(temp.path()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_target_short_of_space_is_disk_full_and_names_the_numbers() {
+        let temp = tempfile::tempdir().unwrap();
+
+        assert_eq!(
+            write_fault(temp.path(), 1001, 0, roomy),
+            Some(Failure {
+                code: FailureCode::DiskFull,
+                detail: r"D:\ 还剩 1000 字节，需要 1001 字节".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn space_an_overwrite_gets_back_counts_towards_the_need() {
+        let temp = tempfile::tempdir().unwrap();
+
+        assert_eq!(write_fault(temp.path(), 1500, 500, roomy), None);
+        assert_eq!(
+            write_fault(temp.path(), 1501, 500, roomy).unwrap().code,
+            FailureCode::DiskFull
+        );
+    }
+
+    #[test]
+    fn the_volume_is_asked_about_the_nearest_existing_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let asked = std::cell::RefCell::new(PathBuf::new());
+
+        write_fault(&temp.path().join(r"a\b"), 1, 0, |dir| {
+            asked.replace(dir.to_owned());
+            None
+        });
+
+        assert_eq!(asked.into_inner(), temp.path());
+    }
+
+    #[test]
+    fn a_directory_that_refuses_writes_is_dir_unwritable_with_the_system_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("Petalfall");
+        set_write_denied(temp.path(), true);
+
+        let fault = write_fault(&dir, 1000, 0, roomy);
+
+        set_write_denied(temp.path(), false);
+        let fault = fault.unwrap();
+        assert_eq!(fault.code, FailureCode::DirUnwritable);
+        let prefix = format!("{} 写不进去：", dir.display());
+        assert!(fault.detail.starts_with(&prefix), "{}", fault.detail);
+        assert!(fault.detail.contains("os error 5"), "{}", fault.detail);
+    }
+
+    #[test]
+    fn an_unknown_volume_leaves_the_verdict_to_the_probe() {
+        let temp = tempfile::tempdir().unwrap();
+
+        assert_eq!(write_fault(temp.path(), 1, 0, |_| None), None);
+
+        set_write_denied(temp.path(), true);
+        let fault = write_fault(temp.path(), 1, 0, |_| None);
+        set_write_denied(temp.path(), false);
+        assert_eq!(fault.unwrap().code, FailureCode::DirUnwritable);
+    }
+
+    #[test]
+    fn a_full_disk_is_not_blamed_on_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        set_write_denied(temp.path(), true);
+
+        let fault = write_fault(temp.path(), 2000, 0, roomy);
+
+        set_write_denied(temp.path(), false);
+        assert_eq!(fault.unwrap().code, FailureCode::DiskFull);
+    }
+
+    #[test]
+    fn a_probe_stopped_by_a_full_disk_is_disk_full() {
+        for code in [112, 39] {
+            let err = io::Error::from_raw_os_error(code);
+
+            assert_eq!(
+                refused(Path::new(r"D:\Petalfall"), &err).code,
+                FailureCode::DiskFull,
+                "os error {code}"
+            );
+        }
+        let denied = io::Error::from_raw_os_error(5);
+        assert_eq!(
+            refused(Path::new(r"D:\Petalfall"), &denied).code,
+            FailureCode::DirUnwritable
+        );
     }
 
     #[test]
