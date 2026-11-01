@@ -1070,6 +1070,22 @@ export const ACTION_ERROR = {
   landTask: (title: string) => joinMixed(title, "已完成，后续设置没有写入"),
 } as const;
 
+/** 切换游戏目录：设置页的其他文件夹与实例库的目录选择走同一个流程，说法也是同一套。 */
+export const GAME_DIR_SWITCH_COPY = {
+  busyReason: "有游戏或下载在进行，结束后再切换",
+  unavailableReason: "位置访问不到，无法切过去",
+  bangError: "路径里不能有「!」，Java 会读不出里面的游戏文件",
+  confirmTitle: (name: string) => `切换到「${name}」？`,
+  confirmBody: "实例库会换成这个目录里的实例，原目录的文件不会被移动或删除。",
+  confirmLabel: "切换",
+} as const;
+
+/** 此刻切不到这个目录的原因，可以直接交给 disabledReason；能切时为 undefined。先说进行中的游戏与任务：等它们结束就能切。 */
+export function gameDirSwitchReason(busy: boolean, available: boolean): string | undefined {
+  if (busy) return GAME_DIR_SWITCH_COPY.busyReason;
+  return available ? undefined : GAME_DIR_SWITCH_COPY.unavailableReason;
+}
+
 /** 启动时首查各切片失败的通知标题。 */
 export const BOOT_SLICE_ERROR = {
   settings: "设置读不出来",
