@@ -34,7 +34,7 @@ import { findMockSource, type MockPackManifest } from "../catalog";
 import type { MockArgs, MockHandlers } from "../types";
 import { MOCK_DATA_DIR, tauriArgError } from "./config";
 import { MOCK_GAME_DIR, argReader, emitCoreEvent, parsePlatform, runMockTask, simulateDownload } from "./discover";
-import { acquireMockInstance, addMockInstance, handlers as instanceHandlers, mockInstanceHeldFor, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
+import { acquireMockInstance, addMockInstance, ensureMockSharedWorldsSettled, handlers as instanceHandlers, mockInstanceHeldFor, mockInstanceIds, mockInstanceWorlds, type MockInstanceHold } from "./instances";
 import { DISABLED_SUFFIX, ledgerKey, mockInstance, mockModsDir, placeMockPackMods } from "./mods";
 import { isMockTaskCancelled } from "./tasks";
 
@@ -628,6 +628,13 @@ function exportModpack(args: MockArgs): Promise<ModpackExportOutcomeDto> {
   if (mockInstanceHeldFor(id, "backing_up")) {
     hold.release();
     throw new IpcError("instance_busy", `实例 ${id} 正在备份或恢复存档，请稍后再试`, { id, activity: "backing_up" });
+  }
+  // 共用存档的实例还要看别的不隔离实例：它们备份或恢复的是同一份 saves，导出会打进半截的存档
+  try {
+    ensureMockSharedWorldsSettled(id);
+  } catch (error) {
+    hold.release();
+    throw error;
   }
   return runMockTask(taskId, async () => {
     const plan = planExport(id);

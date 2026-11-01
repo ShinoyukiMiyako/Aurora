@@ -2,7 +2,7 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke, listen } from "./bridge";
 import { IpcError } from "./errors";
-import { deleteInstance, getInstanceSettings, listInstances } from "./instances";
+import { deleteInstance, getInstanceSettings, listInstances, setInstanceSettings } from "./instances";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
 import { acquireMockInstance } from "./mock/handlers/instances";
@@ -475,6 +475,21 @@ describe("导出整合包 mock", () => {
     // 被拒的那一次没有留下「改动中」：补全这类与改动中互斥的事照常能占
     expect(() => acquireMockInstance(FABRIC, "repairing").release()).not.toThrow();
     expect(await exportModpack("t-after", FABRIC, base)).toMatchObject({ path: base.destination });
+  });
+
+  it("共用存档：另一个不隔离的实例在备份或恢复时报 instance_busy，指向那个实例，不登记任务、不留占用；自己隔离时不挡", async () => {
+    // 1.21.1 是原版正式版，跟随全局时不隔离；关掉 Fabric 实例的隔离后两者共用 .minecraft/saves
+    const OTHER = "1.21.1";
+    const settings = await getInstanceSettings(FABRIC);
+    await setInstanceSettings(FABRIC, { ...settings, isolation: "disabled" });
+    const backingUp = acquireMockInstance(OTHER, "backing_up");
+    expect(await errorOf(exportModpack("t-shared", FABRIC, base))).toMatchObject({ code: "instance_busy", detail: { id: OTHER, activity: "backing_up" } });
+    expect(await cancelTask("t-shared")).toBe(false);
+    expect(() => acquireMockInstance(FABRIC, "repairing").release()).not.toThrow();
+
+    await setInstanceSettings(FABRIC, { ...settings, isolation: "enabled" });
+    expect(await exportModpack("t-isolated", FABRIC, base)).toMatchObject({ path: base.destination });
+    backingUp.release();
   });
 
   it("导出进行中批量启停与忽略更新照常可用；改过的盘面在下一次预览里体现，忽略更新的 Mod 仍走索引", async () => {
