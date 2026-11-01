@@ -351,13 +351,19 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
     const info = java.value;
     if (info === null) return HERO_COPY.versionUnknown;
     const runtime = chosenRuntime(info.choice);
-    const text = info.choice.auto
+    // 实例跟随全局、全局固定了默认 Java：用的是那个固定的 Java，找不到时启动会失败，不会去下载
+    const globalPin = info.choice.auto && info.choice.pick.kind === "global";
+    const text = globalPin
       ? runtime === null
-        ? OVERVIEW_COPY.javaAutoDownload
-        : OVERVIEW_COPY.javaAutoFound(runtime.version.major)
-      : runtime === null
-        ? OVERVIEW_COPY.javaPinnedMissing
-        : OVERVIEW_COPY.javaPinned(runtime.version.major);
+        ? OVERVIEW_COPY.javaGlobalMissing
+        : OVERVIEW_COPY.javaGlobalPinned(runtime.version.major)
+      : info.choice.auto
+        ? runtime === null
+          ? OVERVIEW_COPY.javaAutoDownload
+          : OVERVIEW_COPY.javaAutoFound(runtime.version.major)
+        : runtime === null
+          ? OVERVIEW_COPY.javaPinnedMissing
+          : OVERVIEW_COPY.javaPinned(runtime.version.major);
     return (
       <span>
         {text}

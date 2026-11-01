@@ -535,6 +535,45 @@ describe("实例详情：实例跟随全局、全局固定了默认 Java", () =>
     await flush();
     expect(nav.route).toEqual({ page: "settings", section: "java" });
   });
+
+  it("概览的实例信息写跟随的默认 Java；它找不到时说找不到，不说启动时下载", async () => {
+    pinGlobal("C:/Java/jdk-17/bin/java.exe");
+    await open("overview");
+    expect(text()).toContain("跟随默认 · Java 17 · 要求 21");
+    view?.unmount();
+    view = undefined;
+    pinGlobal("C:/Java/gone/bin/java.exe");
+    await open("overview");
+    expect(text()).toContain("设置里固定的默认 Java 已不在本机");
+    expect(text()).not.toContain("自动 · 启动时下载");
+  });
+});
+
+describe("实例详情：设置页 Java 卡读不出来时标题说对是哪一样", () => {
+  const cardOf = (title: string): HTMLElement => {
+    const heading = [...document.querySelectorAll("h2, h3")].find((h) => h.textContent === title);
+    const found = heading === undefined ? null : heading.closest<HTMLElement>("[data-pad]");
+    if (found === null) throw new Error(`找不到卡片 ${title}`);
+    return found;
+  };
+
+  it("版本要求的 Java 读不出来写「读不到这个版本要求的 Java」，不说成本机 Java 列表读不出来", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, java_major: null } : i));
+    ipc.overrides.set("required_java", () => {
+      throw new IpcError("network_failed", "版本清单下载失败");
+    });
+    await open("settings");
+    expect(cardOf("Java 运行时").textContent).toContain("读不到这个版本要求的 Java");
+    expect(cardOf("Java 运行时").textContent).not.toContain("读不到本机的 Java 列表");
+  });
+
+  it("本机 Java 列表读不出来写「读不到本机的 Java 列表」", async () => {
+    ipc.overrides.set("detect_java", () => {
+      throw new IpcError("io", "注册表读不出来");
+    });
+    await open("settings");
+    expect(cardOf("Java 运行时").textContent).toContain("读不到本机的 Java 列表");
+  });
 });
 
 describe("实例详情：新建还没落盘的实例", () => {

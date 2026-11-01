@@ -32,7 +32,7 @@ import { Textarea } from "../../ui/Textarea";
 import { TextInput } from "../../ui/TextInput";
 import { Toggle } from "../../ui/Toggle";
 import { ISOLATION_POLICY_LABEL, JVM_PRESET_LABEL, SETTINGS_COPY } from "./copy";
-import { useJavaInfo, useMemoryInfo, type JavaInfo, type MemoryInfo } from "./hooks";
+import { useJavaInfo, useMemoryInfo, type JavaInfo, type JavaInfoSource, type MemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
 import {
   chosenRuntime,
@@ -230,6 +230,12 @@ function MemoryCard({
 
 const FIT_ICON = { match: "check-circle", higher: "alert", lower: "x-circle" } as const;
 
+const JAVA_ERROR_TITLE: Record<JavaInfoSource, string> = {
+  settings: SETTINGS_COPY.settingsError,
+  javaList: SETTINGS_COPY.javaError,
+  javaRequired: SETTINGS_COPY.javaRequiredError,
+};
+
 function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; editor: SettingsEditor | null; java: ReturnType<typeof useJavaInfo>; placeholder: Placeholder }) {
   const global = useLauncherSelector((s) => s.settings);
   const subtitle =
@@ -241,7 +247,7 @@ function JavaCard({ inst, editor, java, placeholder }: { inst: InstanceSummary; 
 
   const body = (() => {
     if (placeholder === "pending") return null;
-    if (placeholder === null && java.status === "error") return <ModuleError title={SETTINGS_COPY.javaError} error={java.error} onRetry={java.reload} />;
+    if (placeholder === null && java.status === "error") return <ModuleError title={JAVA_ERROR_TITLE[java.source]} error={java.error} onRetry={java.reload} />;
     if (placeholder !== null || java.status !== "ready" || editor === null || global === null) {
       return (
         <>

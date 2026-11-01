@@ -143,6 +143,8 @@ export const OVERVIEW_COPY = {
   javaAutoDownload: "自动 · 启动时下载",
   javaPinned: (major: number) => `Java ${major}`,
   javaPinnedMissing: "之前选的 Java 已不在本机",
+  javaGlobalPinned: (major: number) => `跟随默认 · Java ${major}`,
+  javaGlobalMissing: "设置里固定的默认 Java 已不在本机",
   javaRequired: (major: number) => ` · 要求 ${major}`,
   memoryFollow: " · 跟随全局",
 
@@ -283,6 +285,7 @@ export const SETTINGS_COPY = {
   openJavaSettings: "去改默认 Java",
   useAuto: "改用自动",
   javaError: "读不到本机的 Java 列表",
+  javaRequiredError: "读不到这个版本要求的 Java",
 
   jvmTitle: "JVM 参数",
   jvmSubtitle: `追加在${APP_NAME}默认参数之后，一般不需要改`,
@@ -465,7 +468,7 @@ export const CRASH_PAGE_COPY = {
     settings: SETTINGS_COPY.settingsError,
     memory: SETTINGS_COPY.memoryError,
     javaList: SETTINGS_COPY.javaError,
-    javaRequired: "读不到这个版本要求的 Java",
+    javaRequired: SETTINGS_COPY.javaRequiredError,
     mods: "读不到 Mod 列表",
   },
   retry: "重试",

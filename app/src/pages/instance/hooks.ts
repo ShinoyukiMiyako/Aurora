@@ -24,14 +24,19 @@ export interface JavaInfo {
   runtimes: readonly JavaInstallationDto[];
 }
 
+/** useJavaInfo 读不出来时是哪一样没读出来：实例设置、本机 Java 列表，还是这个版本要求的 Java。标题要说对是哪一样。 */
+export type JavaInfoSource = "settings" | "javaList" | "javaRequired";
+
+export type JavaInfoLoadable = { status: "loading" } | { status: "error"; error: Error; reload(): void; source: JavaInfoSource } | { status: "ready"; value: JavaInfo | null };
+
 /** 这个实例此刻的 Java 选择；要求的版本读不出来时 value 为 null。 */
-export function useJavaInfo(inst: InstanceSummary, settings: ResourceResult<InstanceSettings>): Loadable<JavaInfo | null> {
+export function useJavaInfo(inst: InstanceSummary, settings: ResourceResult<InstanceSettings>): JavaInfoLoadable {
   const global = useLauncherSelector((s) => s.settings);
   const runtimes = useJavaRuntimes();
   const required = useRequiredMajor(inst);
-  if (settings.status === "error") return { status: "error", error: settings.error, reload: settings.reload };
-  if (runtimes.status === "error") return { status: "error", error: runtimes.error, reload: runtimes.reload };
-  if (required.status === "error") return required;
+  if (settings.status === "error") return { status: "error", error: settings.error, reload: settings.reload, source: "settings" };
+  if (runtimes.status === "error") return { status: "error", error: runtimes.error, reload: runtimes.reload, source: "javaList" };
+  if (required.status === "error") return { ...required, source: "javaRequired" };
   if (settings.status !== "ready" || runtimes.status !== "ready" || required.status !== "ready" || global === null) return { status: "loading" };
   if (required.value === null) return { status: "ready", value: null };
   return {
