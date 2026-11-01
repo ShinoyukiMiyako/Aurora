@@ -1295,7 +1295,7 @@ describe("实例详情：工作目录与实例设置的占用", () => {
       { target: "saves", id: ID, world: null },
       { target: "mods", id: ID, world: null },
       { target: "logs", id: ID, world: null },
-      { target: "logs", id: ID, world: null },
+      { target: "session_logs", id: ID, world: null },
     ]);
     click(byRole("tab", "设置"));
     await flush();
