@@ -1,0 +1,41 @@
+name: CLA
+
+# 这两个事件都只取默认分支上的工作流文件，fork 改不到这里。作业带写权限响应 fork 的 PR，
+# 所以只调 API，只加载默认分支的脚本，绝不能 checkout 或执行 PR 里的任何文件。
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  check-signatures:
+    # 不能和提交状态 cla 同名：同名时两者都要通过，被下面的并发顶掉的运行会把已签署的 PR 卡住。
+    name: 检查 CLA 签署
+    # Dependabot 触发的运行只有只读令牌，写不了状态和签名。
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name == 'pull_request_target' || github.event.issue.pull_request)
+    # 这台自托管机在内网，fork 能触发的作业绝不能落到上面。
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # 同一 PR 串行，否则两次运行会各发一条机器人评论。排队的运行被顶掉没关系，后一次会重扫整条 PR。
+    concurrency:
+      group: cla-${{ github.event.pull_request.number || github.event.issue.number }}
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { runClaCheck } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/cla-check.mjs`);
+            await runClaCheck({ github, context, core });
