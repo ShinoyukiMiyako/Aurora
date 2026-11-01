@@ -151,6 +151,12 @@ describe("图标产物与母版同步", () => {
     expect(conf.bundle.icon).toContain("icons/icon.ico");
   });
 
+  it("NSIS 的安装包和卸载程序也用花瓣，不配时模板留着 NSIS 默认图标", () => {
+    const conf = JSON.parse(readFileSync(join(APP_DIR, "src-tauri", "tauri.conf.json"), "utf8")) as { bundle: { windows: { nsis: Record<string, unknown> } } };
+    expect(conf.bundle.windows.nsis.installerIcon).toBe("icons/icon.ico");
+    expect(conf.bundle.windows.nsis.uninstallerIcon).toBe("icons/icon.ico");
+  });
+
   it.each([
     ["grid16", { ...mark, grid16: withCellFlipped(mark.grid16, 2, 9, "L") }],
     ["grid12", { ...mark, grid12: withCellFlipped(mark.grid12, 1, 7, "L") }],
