@@ -172,11 +172,14 @@ impl InstanceLocks {
     ) -> Result<InstanceGuard, CommandError> {
         let key = lock_key(id);
         let mut table = lock_table(&self.table);
-        if let Some(conflict) = table
-            .held
-            .get(&key)
-            .and_then(|holds| holds.iter().find(|h| !activity.compatible_with(h.activity)))
-        {
+        // 冲突有几处时报列表里也报的那一件（实例自己的事、modifying、inherited 依次），不随哪份占用先到而变，
+        // 否则基底自己在运行时，被拒的删除会说成「正在被别的实例使用」，与界面上的状态对不上。
+        if let Some(conflict) = table.held.get(&key).and_then(|holds| {
+            holds
+                .iter()
+                .filter(|h| !activity.compatible_with(h.activity))
+                .min_by_key(|h| h.activity.report_rank())
+        }) {
             return Err(busy(id, conflict));
         }
         let token = table.next;
@@ -3075,6 +3078,41 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         churn.join().unwrap();
         assert!(idle > 0 && used > 0, "两种状态都该看到过：{idle} / {used}");
+    }
+
+    /// 基底自己也在运行或改动时，被拒的删除、改名、补全报它自己的事，与列表里的 activity 一致，
+    /// 不随哪一份占用先到而变：实例自己的事优先，其次 modifying，最后 inherited。
+    #[test]
+    fn busy_reports_the_same_activity_the_list_shows() {
+        use InstanceActivity::*;
+        let locks = InstanceLocks::default();
+        let bases = ["1.20.1".to_owned()];
+        let fabric = locks.acquire_with_bases("Fabric", Running, &bases).unwrap();
+        let modifying = locks.acquire("1.20.1", Modifying).unwrap();
+        let game = locks.acquire("1.20.1", Running).unwrap();
+        for activity in [Deleting, Renaming, Repairing, Installing] {
+            let err = locks.acquire("1.20.1", activity).err().unwrap();
+            assert_eq!(locks.activity("1.20.1"), Some(Running));
+            assert_eq!(
+                err.detail.unwrap(),
+                json!({ "id": "1.20.1", "activity": "running" }),
+                "{activity:?}"
+            );
+            assert_eq!(err.message, "实例 1.20.1 正在运行，请稍后再试");
+        }
+        drop(game);
+        let err = locks.acquire("1.20.1", Deleting).err().unwrap();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "modifying" })
+        );
+        drop(modifying);
+        let err = locks.acquire("1.20.1", Deleting).err().unwrap();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "1.20.1", "activity": "inherited", "used_by": "Fabric" })
+        );
+        drop(fabric);
     }
 
     #[test]
