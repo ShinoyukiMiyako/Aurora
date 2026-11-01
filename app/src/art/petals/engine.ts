@@ -9,12 +9,12 @@ import {
   EDGE_ON,
   LAYER_COUNTS,
   LAYERS,
-  MIN_DRAW_MS,
   NIGHT_ALPHA,
   clampDt,
   countPetals,
   createLayers,
   layerCounts,
+  nextDrawAt,
   resizeLayers,
   scaleWidth,
   scatterStill,
@@ -123,6 +123,8 @@ export class PetalEngine {
   private still: StillPetal[][] | null = null;
   private simT = 0;
   private last: number | null = null;
+  /** 下一拍的时刻；负无穷表示还没起拍，下一帧必画。 */
+  private drawDue = Number.NEGATIVE_INFINITY;
   private raf: number | null = null;
   private pointer: Pointer | null = null;
   private listening = false;
@@ -245,6 +247,7 @@ export class PetalEngine {
     const run = bounds !== null && !still && !this.inputs.paused;
     if (run && this.raf === null) {
       this.last = null;
+      this.drawDue = Number.NEGATIVE_INFINITY;
       this.governor.restart();
       this.raf = this.scheduler.request(this.onFrame);
     } else if (!run && this.raf !== null) {
@@ -257,13 +260,14 @@ export class PetalEngine {
 
   private readonly onFrame = (now: number): void => {
     this.raf = this.scheduler.request(this.onFrame);
-    if (this.last !== null && now - this.last < MIN_DRAW_MS) return;
+    if (now < this.drawDue) return;
     const layers = this.layers;
     const bounds = this.bounds;
     if (layers === null || bounds === null) throw new Error("花瓣帧循环在没有花瓣或尺寸时运行");
     const started = this.clock();
     const dt = this.last === null ? 0 : clampDt(now - this.last);
     this.last = now;
+    this.drawDue = nextDrawAt(this.drawDue, now);
     this.simT += dt;
     step(layers, dt, this.simT, this.pointer, bounds, this.random);
     this.drawLayers(layers);

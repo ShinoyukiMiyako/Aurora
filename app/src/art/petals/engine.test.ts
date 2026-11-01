@@ -52,6 +52,14 @@ function runFrames(frames: ManualFrames, start: number, end: number, interval: n
   return now - interval;
 }
 
+/** 按 hz 的刷新率放 durationMs 毫秒，时间戳按帧序号现算，不累加浮点误差。返回这段时间的实际绘制帧数。 */
+function playAt(r: Rig, hz: number, start: number, durationMs: number): number {
+  const drawnBefore = r.ctx().frames().length;
+  const count = Math.round((durationMs * hz) / 1000);
+  for (let i = 0; i < count; i++) r.frames.run(start + (i * 1000) / hz);
+  return r.ctx().frames().length - drawnBefore;
+}
+
 function lastFrame(r: Rig) {
   const all = r.ctx().frames();
   return all[all.length - 1];
@@ -106,7 +114,7 @@ describe("播放", () => {
     lastFrame(r).alphas.forEach((a, i) => expect(a).toBeCloseTo([0.32, 0.52, 0.72][i], 10));
   });
 
-  it("两次绘制间隔不足 12 ms 的帧跳过，120 Hz 下隔帧绘制", () => {
+  it("120 Hz 下隔帧绘制，跳过的帧照样续约 rAF", () => {
     const r = rig();
     r.engine.measure();
     r.frames.run(1000);
@@ -120,8 +128,47 @@ describe("播放", () => {
     expect(frames()).toBe(2);
     r.frames.run(1033.3);
     expect(frames()).toBe(3);
-    // 跳过的帧照样续约 rAF
     expect(r.frames.pending()).toBe(1);
+  });
+
+  it.each([75, 90, 100, 120, 144, 165, 240, 360])("%i Hz 屏上绘制限到约 60 帧", (hz) => {
+    const r = rig();
+    r.engine.measure();
+    const drawn = playAt(r, hz, 1000, 10_000);
+    expect(drawn / 10).toBeGreaterThanOrEqual(59);
+    expect(drawn / 10).toBeLessThanOrEqual(63);
+  });
+
+  it("60 Hz 屏每帧都画，时间戳抖动不会掉成隔帧", () => {
+    const r = rig();
+    r.engine.measure();
+    expect(playAt(r, 60, 1000, 10_000)).toBe(600);
+
+    const jittered = rig();
+    jittered.engine.measure();
+    const drawnBefore = jittered.ctx().frames().length;
+    for (let i = 0; i < 600; i++) jittered.frames.run(1000 + (i * 1000) / 60 + (i % 2 === 0 ? 0.3 : -0.3));
+    expect(jittered.ctx().frames().length - drawnBefore).toBe(600);
+  });
+
+  it.each([120, 144, 240, 360])("%i Hz 屏上花瓣走过的路程与 60 Hz 相同：限帧不改变动画速度", (hz) => {
+    // 画布够高，两秒内没有花瓣落出底边：回收发生在绘制帧上，会让不同帧率的两边分叉
+    const tall = { left: 0, top: 0, width: 800, height: 5000 };
+    const slow = rig({ tier: "wide" }, tall);
+    const fast = rig({ tier: "wide" }, tall);
+    slow.engine.measure();
+    fast.engine.measure();
+    playAt(slow, 60, 1000, 2000);
+    playAt(fast, hz, 1000, 2000);
+    // 收尾这一帧隔开一个节拍以上，两边都在同一时刻实际绘制，模拟时钟才可以逐片比对
+    slow.frames.run(3020);
+    fast.frames.run(3020);
+    const expected = lastFrame(slow).draws;
+    const actual = lastFrame(fast).draws;
+    expect(actual).toHaveLength(expected.length);
+    actual.forEach((d, i) => {
+      for (let m = 0; m < 6; m++) expect(d.transform[m]).toBeCloseTo(expected[i].transform[m], 6);
+    });
   });
 
   it("精灵就是设备像素尺寸、以中心为锚点；超过 400 万像素时降低有效像素比", () => {
@@ -369,6 +416,16 @@ describe("自动降级", () => {
     runFrames(r.frames, 1000, 12_000, 16);
     expect(r.downgrades).toEqual([]);
     expect(r.engine.stats()).toMatchObject({ running: true, level: 0, count: 26, drawIntervalMedianMs: 16 });
+  });
+
+  // 帧间隔略短于节拍的屏：从上次绘制起算时只能每两帧画一次，绘制间隔 28.6 ms，正好越过慢窗口的线
+  it("70 Hz 屏不因限帧被判成慢窗口", () => {
+    const r = rig({ tier: "wide" });
+    r.engine.measure();
+    playAt(r, 70, 1000, 12_000);
+    expect(r.downgrades).toEqual([]);
+    expect(r.engine.stats()).toMatchObject({ running: true, level: 0, count: 26 });
+    expect(r.engine.stats().drawIntervalMedianMs).toBeCloseTo(1000 / 70, 6);
   });
 });
 

@@ -15,6 +15,7 @@ import {
   createLayers,
   createRandom,
   layerCounts,
+  nextDrawAt,
   pickTone,
   pushTarget,
   resizeLayers,
@@ -149,6 +150,18 @@ describe("运动方程", () => {
     expect(clampDt(51)).toBe(DT_MAX);
     expect(clampDt(5000)).toBe(DT_MAX);
     expect(clampDt(-3)).toBe(0);
+  });
+
+  it("绘制节拍沿上一拍累加，晚到的余量抵给下一拍", () => {
+    expect(nextDrawAt(1000, 1000)).toBe(1016);
+    // 晚了 10 ms 才画，下一拍仍在 1016，不顺延到 1026
+    expect(nextDrawAt(1000, 1010)).toBe(1016);
+  });
+
+  it("绘制节拍落后整拍以上时从当前帧重新起拍，不连着补画", () => {
+    expect(nextDrawAt(1000, 1016)).toBe(1032);
+    expect(nextDrawAt(1000, 1100)).toBe(1116);
+    expect(nextDrawAt(Number.NEGATIVE_INFINITY, 1000)).toBe(1016);
   });
 
   it("按 dt 下落、自转、翻面，横向 = x0 + A·sin(ω·simT + phase)", () => {
