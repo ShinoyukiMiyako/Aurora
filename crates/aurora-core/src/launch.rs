@@ -1496,13 +1496,15 @@ impl Aurora {
         reporter: &mut Reporter<'_>,
     ) -> Result<AuthlibInjector, LaunchFailed> {
         let agent = self.ensure_authlib_agent(reporter).await?;
-        let metadata = aurora_auth::yggdrasil::prefetch_metadata(
-            &self.http(),
-            api_root,
-            crate::auth::AUTH_SERVER_TIMEOUT,
-        )
-        .await
-        .map_err(|err| authlib_metadata_failure(err, api_root, account_name))?;
+        let http = self.http();
+        let metadata = self
+            .until_cancelled(aurora_auth::yggdrasil::prefetch_metadata(
+                &http,
+                api_root,
+                crate::auth::AUTH_SERVER_TIMEOUT,
+            ))
+            .await?
+            .map_err(|err| authlib_metadata_failure(err, api_root, account_name))?;
         Ok(AuthlibInjector::new(agent, metadata.api_root).with_prefetched(metadata.prefetched))
     }
 
@@ -1513,8 +1515,11 @@ impl Aurora {
         reporter: &mut Reporter<'_>,
     ) -> Result<PathBuf, LaunchFailed> {
         let dir = crate::authlib::agent_dir(self.data_dir());
-        let urls = crate::authlib::latest_urls(&self.source_order(self.config().download_source));
-        let release = match crate::authlib::fetch_latest(&self.http(), &urls).await {
+        let urls = self.authlib_latest_urls();
+        let urls: Vec<&str> = urls.iter().map(String::as_str).collect();
+        let http = self.http();
+        let latest = crate::authlib::fetch_latest(&http, &urls);
+        let release = match self.until_cancelled(latest).await? {
             Ok(release) => release,
             Err(err) => {
                 let Some(jar) = crate::authlib::newest_local(&dir).await? else {
@@ -1557,6 +1562,33 @@ impl Aurora {
             .into());
         }
         Ok(jar)
+    }
+}
+
+impl Aurora {
+    fn authlib_latest_urls(&self) -> Vec<String> {
+        #[cfg(test)]
+        if let Some(url) = self.injected_authlib_latest_url() {
+            return vec![url.to_owned()];
+        }
+        crate::authlib::latest_urls(&self.source_order(self.config().download_source))
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// 等一段不挂下载池令牌的联网：线路黑洞时要等连接超时才回来，取消不能跟着等。
+    async fn until_cancelled<T>(
+        &self,
+        work: impl std::future::Future<Output = T>,
+    ) -> Result<T, LaunchFailed> {
+        match self.cancel_token() {
+            Some(token) => token
+                .run_until_cancelled(work)
+                .await
+                .ok_or_else(|| aurora_download::Error::Cancelled.into()),
+            None => Ok(work.await),
+        }
     }
 }
 
@@ -3383,6 +3415,77 @@ mod tests {
         assert_eq!(failure.params["account"], Value::from("Steve"));
         assert_eq!(failure.params["status"], Value::from(503u64));
         assert_eq!(failure.params["server"], Value::from(SERVER));
+    }
+
+    /// 查最新构建与预取元数据这两次联网都不挂下载池的令牌，线路黑洞时要等连接超时才回来。对端这里一直
+    /// 不回，取消后还能立刻以取消返回，才说明两处都接上了令牌。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_while_preparing_authlib_returns_without_waiting_for_the_network() {
+        use wiremock::matchers::{method, path};
+        let stalled =
+            wiremock::ResponseTemplate::new(503).set_delay(std::time::Duration::from_secs(60));
+
+        for stall_latest in [true, false] {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(method("GET"))
+                .and(path("/latest"))
+                .respond_with(if stall_latest {
+                    stalled.clone()
+                } else {
+                    wiremock::ResponseTemplate::new(404)
+                })
+                .mount(&server)
+                .await;
+            wiremock::Mock::given(method("GET"))
+                .and(path("/yggdrasil"))
+                .respond_with(stalled.clone())
+                .mount(&server)
+                .await;
+            let fx = fixture();
+            // 查不到最新构建时沿用这一份，流程才走得到预取元数据。
+            let dir = crate::authlib::agent_dir(&fx.root);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(crate::authlib::agent_jar(&dir, 1), b"agent").unwrap();
+
+            let token = CancellationToken::new();
+            let aurora = fx
+                .aurora
+                .clone()
+                .with_authlib_latest_url(format!("{}/latest", server.uri()))
+                .with_cancel(token.clone());
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut reporter = Reporter {
+                events: &tx,
+                clock: SessionClock::start().unwrap(),
+                log: None,
+            };
+            let api_root = format!("{}/yggdrasil", server.uri());
+            let cancel_once_stuck = async {
+                let stuck_on = if stall_latest { "/latest" } else { "/yggdrasil" };
+                while !server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|request| request.url.path() == stuck_on)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                token.cancel();
+            };
+            let (_, result) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                tokio::join!(
+                    cancel_once_stuck,
+                    aurora.prepare_authlib(&api_root, "Steve", &mut reporter)
+                )
+            })
+            .await
+            .unwrap_or_else(|_| panic!("取消没有打断等待（stall_latest={stall_latest}）"));
+            match result {
+                Err(err) => assert!(err.is_cancelled(), "{err:?}"),
+                Ok(_) => panic!("取消后不该拿到 agent"),
+            }
+        }
     }
 
     #[test]

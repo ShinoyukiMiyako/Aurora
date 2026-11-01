@@ -84,6 +84,9 @@ pub struct Aurora {
     /// 对清单地址的白名单校验，只能在下载池这一层改写。
     #[cfg(test)]
     download_resolver: Option<std::sync::Arc<dyn aurora_download::SourceResolver>>,
+    /// 测试注入的 authlib-injector 构建信息地址：生产地址是写死的常量，测不到启动时这一步。
+    #[cfg(test)]
+    authlib_latest_url: Option<String>,
 }
 
 impl Aurora {
@@ -145,6 +148,8 @@ impl Aurora {
             curseforge_cdn_scope: None,
             #[cfg(test)]
             download_resolver: None,
+            #[cfg(test)]
+            authlib_latest_url: None,
         })
     }
 
@@ -535,6 +540,7 @@ impl Aurora {
             curseforge_key: None,
             curseforge_cdn_scope: None,
             download_resolver: None,
+            authlib_latest_url: None,
         }
     }
 
@@ -600,6 +606,16 @@ impl Aurora {
         &self,
     ) -> Option<&aurora_download::CredentialScope> {
         self.curseforge_cdn_scope.as_ref()
+    }
+
+    /// 启动时查 authlib-injector 最新构建改查这个地址。
+    pub(crate) fn with_authlib_latest_url(mut self, url: String) -> Self {
+        self.authlib_latest_url = Some(url);
+        self
+    }
+
+    pub(crate) fn injected_authlib_latest_url(&self) -> Option<&str> {
+        self.authlib_latest_url.as_deref()
     }
 
     /// 下载池里每个地址先经这个解析器改写。
