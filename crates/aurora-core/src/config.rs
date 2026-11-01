@@ -223,6 +223,9 @@ pub struct AuroraConfig {
     pub extra_java_paths: Vec<PathBuf>,
     /// 启动前是否把这次用的 java 可执行文件设为 Windows 图形设置里的「高性能」。
     pub prefer_dedicated_gpu: bool,
+    /// 启动前是否在缺这一项的 options.txt 里写上 `onboardAccessibility:false`，跳过游戏的首次无障碍引导。
+    /// 关掉时不写，也不改已有的值。旧配置没有这一项时按开着处理。
+    pub skip_accessibility_onboarding: bool,
     /// 新实例是否沿用默认设置（数据目录里的模板）。关掉时新建与整合包导入一律不套模板；
     /// 旧配置没有这一项时按开着处理：没有模板时套用本来就什么也不做。
     pub new_instance_template: bool,
@@ -266,6 +269,7 @@ impl Default for AuroraConfig {
             language: UiLanguage::default(),
             extra_java_paths: Vec::new(),
             prefer_dedicated_gpu: false,
+            skip_accessibility_onboarding: true,
             new_instance_template: true,
             world_backup: WorldBackupSettings::default(),
             unrecognized: serde_json::Map::new(),
@@ -704,6 +708,7 @@ mod tests {
         assert_eq!(c.language, UiLanguage::ZhCn, "界面语言默认简体中文");
         assert!(c.extra_java_paths.is_empty());
         assert!(!c.prefer_dedicated_gpu, "独显偏好默认关");
+        assert!(c.skip_accessibility_onboarding, "默认跳过无障碍引导");
     }
 
     /// 没有手动 Java 与独显偏好两项的旧配置照常读入：两项取默认，其余字段原样保留；写过之后原样读回。
@@ -819,6 +824,28 @@ mod tests {
             serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
         assert_eq!(raw["new_instance_template"], false);
         assert_eq!(store.load().await.unwrap(), config);
+    }
+
+    /// 旧配置没有 skip_accessibility_onboarding 时按开着载入；关掉后整份落盘再读回还是关着。
+    #[tokio::test]
+    async fn skip_accessibility_onboarding_defaults_on_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = ConfigStore::at(&path);
+
+        tokio::fs::write(&path, br#"{"download_concurrency": 12}"#)
+            .await
+            .unwrap();
+        let mut loaded = store.load().await.unwrap();
+        assert!(loaded.skip_accessibility_onboarding);
+        assert_eq!(loaded.download_concurrency, 12);
+
+        loaded.skip_accessibility_onboarding = false;
+        store.save(&loaded).await.unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["skip_accessibility_onboarding"], false);
+        assert_eq!(store.load().await.unwrap(), loaded);
     }
 
     /// 旧配置没有 world_backup 时按默认值载入：自动备份开、每个存档 5 份、总量 20 GB。
@@ -1983,6 +2010,7 @@ mod tests {
         );
         assert!(config.extra_java_paths.is_empty());
         assert!(!config.prefer_dedicated_gpu);
+        assert!(config.skip_accessibility_onboarding);
         assert!(config.new_instance_template);
         assert_eq!(
             config.world_backup,
@@ -2008,6 +2036,7 @@ mod tests {
             auto: false,
         });
         aurora.set_prefer_dedicated_gpu(true);
+        aurora.set_skip_accessibility_onboarding(false);
         aurora.add_extra_java_path(PathBuf::from(r"D:\Java 21\中文\bin\java.exe"));
         aurora.config_mut().new_instance_template = false;
         aurora.set_language(UiLanguage::EnUs);
@@ -2055,6 +2084,7 @@ mod tests {
             serde_json::json!([r"D:\Java 21\中文\bin\java.exe"])
         );
         assert_eq!(raw["prefer_dedicated_gpu"], true);
+        assert_eq!(raw["skip_accessibility_onboarding"], false);
         assert_eq!(raw["new_instance_template"], false);
         assert_eq!(raw["notified_update_version"], "0.3.0");
 
@@ -2100,6 +2130,7 @@ mod tests {
         let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
         assert_eq!(raw["extra_java_paths"], serde_json::json!([]));
         assert_eq!(raw["prefer_dedicated_gpu"], false);
+        assert_eq!(raw["skip_accessibility_onboarding"], true);
         assert_eq!(raw["new_instance_template"], true);
         assert_eq!(
             raw["world_backup"],

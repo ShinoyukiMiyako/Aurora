@@ -78,6 +78,8 @@ pub struct ConfigDto {
     pub extra_java_paths: Vec<String>,
     /// 启动前是否把这次用的 Java 设为 Windows 图形设置里的「高性能」。
     pub prefer_dedicated_gpu: bool,
+    /// 启动前是否跳过游戏的首次无障碍引导。
+    pub skip_accessibility_onboarding: bool,
     /// 存档自动备份：`{ auto, keep_per_world, max_total_gb }`。
     pub world_backup: WorldBackupSettings,
 }
@@ -115,6 +117,7 @@ pub(crate) fn config_dto(aurora: &Aurora) -> ConfigDto {
             .map(|path| path.display().to_string())
             .collect(),
         prefer_dedicated_gpu: config.prefer_dedicated_gpu,
+        skip_accessibility_onboarding: config.skip_accessibility_onboarding,
         world_backup: config.world_backup,
     }
 }
@@ -169,6 +172,7 @@ pub(crate) struct ConfigPatch {
     notified_update_version: Option<String>,
     language: Option<UiLanguage>,
     prefer_dedicated_gpu: Option<bool>,
+    skip_accessibility_onboarding: Option<bool>,
     world_backup: Option<WorldBackupSettings>,
 }
 
@@ -191,6 +195,7 @@ pub(crate) struct RawConfigPatch {
     pub notified_update_version: Option<String>,
     pub language: Option<String>,
     pub prefer_dedicated_gpu: Option<bool>,
+    pub skip_accessibility_onboarding: Option<bool>,
     pub world_backup: Option<WorldBackupInput>,
 }
 
@@ -215,6 +220,7 @@ pub async fn update_config(
     notified_update_version: Option<String>,
     language: Option<String>,
     prefer_dedicated_gpu: Option<bool>,
+    skip_accessibility_onboarding: Option<bool>,
     world_backup: Option<WorldBackupInput>,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
@@ -235,6 +241,7 @@ pub async fn update_config(
         notified_update_version,
         language,
         prefer_dedicated_gpu,
+        skip_accessibility_onboarding,
         world_backup,
     };
     update_config_with(&facade, raw).await
@@ -289,6 +296,7 @@ async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
         notified_update_version: raw.notified_update_version,
         language: raw.language.as_deref().map(parse_language).transpose()?,
         prefer_dedicated_gpu: raw.prefer_dedicated_gpu,
+        skip_accessibility_onboarding: raw.skip_accessibility_onboarding,
         world_backup: raw.world_backup.map(validate_world_backup).transpose()?,
     })
 }
@@ -341,6 +349,9 @@ fn apply_patch(aurora: &mut Aurora, patch: ConfigPatch) -> Result<(), CommandErr
     }
     if let Some(enabled) = patch.prefer_dedicated_gpu {
         aurora.set_prefer_dedicated_gpu(enabled);
+    }
+    if let Some(enabled) = patch.skip_accessibility_onboarding {
+        aurora.set_skip_accessibility_onboarding(enabled);
     }
     if let Some(settings) = patch.world_backup {
         aurora.set_world_backup(settings);
@@ -1071,6 +1082,83 @@ mod tests {
         .await
         .unwrap();
         assert!(!read_config(&facade).await.prefer_dedicated_gpu);
+    }
+
+    /// 跳过无障碍引导默认开；update_config 带 skipAccessibilityOnboarding 关掉后 get_config 回读为关，并落了盘。
+    #[tokio::test]
+    async fn skip_accessibility_onboarding_patch_reads_back_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let initial = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(initial["skip_accessibility_onboarding"], true);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                skip_accessibility_onboarding: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let dto = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(dto["skip_accessibility_onboarding"], false);
+        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap();
+        assert!(!reloaded.skip_accessibility_onboarding);
+
+        // 不带这一项的补丁不动它。
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                check_updates: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!read_config(&facade).await.skip_accessibility_onboarding);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                skip_accessibility_onboarding: Some(true),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(read_config(&facade).await.skip_accessibility_onboarding);
+    }
+
+    /// 老配置文件里没有这个键：读回按开着，改别的设置落盘后键按开着写进文件。
+    #[tokio::test]
+    async fn old_config_without_the_key_skips_onboarding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, br#"{"download_concurrency": 12}"#).unwrap();
+        let config = aurora_core::ConfigStore::at(&path).load().await.unwrap();
+        let aurora = Aurora::open(config, dir.path().to_path_buf(), path.clone()).unwrap();
+        let facade = Facade::new(aurora);
+
+        let dto = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(dto["skip_accessibility_onboarding"], true);
+        assert_eq!(dto["download_concurrency"], 12);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                check_updates: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw["skip_accessibility_onboarding"], true);
     }
 
     /// 任一字段非法整体拒绝：前面合法的字段也不生效，配置文件不写。

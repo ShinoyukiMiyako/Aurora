@@ -328,6 +328,13 @@ impl Aurora {
         self.config.prefer_dedicated_gpu = enabled;
     }
 
+    /// 设置启动前是否跳过游戏的首次无障碍引导。
+    ///
+    /// 只决定缺这一项的 options.txt 补不补；已经写进文件的值不跟着改，分不出它是启动器写的还是玩家留下的。
+    pub fn set_skip_accessibility_onboarding(&mut self, enabled: bool) {
+        self.config.skip_accessibility_onboarding = enabled;
+    }
+
     /// 记下用户跳过的启动器版本。
     pub fn set_skipped_update_version(&mut self, version: Option<String>) {
         self.config.skipped_update_version = version;
@@ -707,6 +714,12 @@ mod tests {
         assert!(aurora.config().prefer_dedicated_gpu);
         aurora.set_prefer_dedicated_gpu(false);
         assert!(!aurora.config().prefer_dedicated_gpu);
+
+        assert!(aurora.config().skip_accessibility_onboarding);
+        aurora.set_skip_accessibility_onboarding(false);
+        assert!(!aurora.config().skip_accessibility_onboarding);
+        aurora.set_skip_accessibility_onboarding(true);
+        assert!(aurora.config().skip_accessibility_onboarding);
     }
 
     /// 改版本列表源只写配置：清单地址仍是官方地址，镜像优先体现在源计划给出的首个候选上。
