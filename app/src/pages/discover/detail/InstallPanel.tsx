@@ -47,6 +47,7 @@ import {
   type WorldsState,
 } from "../verdict";
 import styles from "./detail.module.css";
+import { PanelNotices, type PanelNotice } from "./PanelNotices";
 
 /** Iris Shaders 在 Modrinth 上的工程 id：Fabric / Quilt 实例加载光影要它。 */
 export const IRIS_PROJECT_ID = "YL57xq9U";
@@ -260,6 +261,21 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
   ];
 
   const pageUrl = detail.page_url;
+  // 重的在前：判断失败时不知道能装进哪些实例，手动下载挡着安装，Iris 只影响光影的判断，没有实例时列表本来就是空的
+  const notices: PanelNotice[] = [];
+  if (matches.status === "error") {
+    notices.push({ key: "matches-failed", tone: "danger", text: INSTALL_COPY.matchesFailed, reason: matches.error.message, action: { label: SEARCH_COPY.retry, run: matches.reload } });
+  }
+  if (!detail.distribution_allowed) {
+    const openWeb = pageUrl === null ? null : { label: INSTALL_COPY.openWeb, run: () => void run(() => actions.openExternal(pageUrl), BLOCKED_COPY.openFailed) };
+    notices.push({ key: "blocked", tone: "warn", text: INSTALL_COPY.blocked, reason: null, action: openWeb });
+  }
+  if (type === "shader" && iris !== null && iris.status === "error" && iris.error !== null) {
+    notices.push({ key: "iris-failed", tone: "warn", text: INSTALL_COPY.irisFailed, reason: iris.error.message, action: { label: SEARCH_COPY.retry, run: iris.reload } });
+  }
+  if (instances.length === 0) {
+    notices.push({ key: "no-instances", tone: "info", text: INSTALL_COPY.noInstances, reason: null, action: { label: INSTALL_COPY.createInstance, run: () => shell.openCreateInstance() } });
+  }
   const footer = (
     <>
       <span className={styles.footNote}>
@@ -285,21 +301,6 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
         <span className={styles.panelHint}>{installableCount > 0 ? INSTALL_COPY.installable(installableCount) : INSTALL_COPY.noneInstallable}</span>
       </div>
 
-      {!detail.distribution_allowed && (
-        <Callout
-          tone="warn"
-          action={
-            pageUrl === null ? undefined : (
-              <Button size="sm" variant="ghost" onClick={() => void run(() => actions.openExternal(pageUrl), BLOCKED_COPY.openFailed)}>
-                {INSTALL_COPY.openWeb}
-              </Button>
-            )
-          }
-        >
-          {INSTALL_COPY.blocked}
-        </Callout>
-      )}
-
       <Select<string>
         size="sm"
         block
@@ -318,24 +319,9 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
         ).map((id) => <WorldsProbe key={id} instanceId={id} onReport={reportWorlds} />)}
       {type === "shader" && <IrisProbe onReport={setIris} />}
 
-      {matches.status === "error" && (
-        <Callout tone="danger" action={<Button size="sm" variant="ghost" onClick={matches.reload}>{SEARCH_COPY.retry}</Button>}>
-          <span className={styles.errorTitle}>{INSTALL_COPY.matchesFailed}</span>
-          <span className={styles.errorText}>{matches.error.message}</span>
-        </Callout>
-      )}
-      {type === "shader" && iris !== null && iris.status === "error" && iris.error !== null && (
-        <Callout tone="warn" action={<Button size="sm" variant="ghost" onClick={iris.reload}>{SEARCH_COPY.retry}</Button>}>
-          <span className={styles.errorTitle}>{INSTALL_COPY.irisFailed}</span>
-          <span className={styles.errorText}>{iris.error.message}</span>
-        </Callout>
-      )}
+      <PanelNotices notices={notices} />
 
-      {instances.length === 0 ? (
-        <Callout tone="info" action={<Button size="sm" variant="ghost" onClick={() => shell.openCreateInstance()}>{INSTALL_COPY.createInstance}</Button>}>
-          {INSTALL_COPY.noInstances}
-        </Callout>
-      ) : (
+      {instances.length > 0 && (
         <>
           {rows.length > TARGET_FILTER_THRESHOLD && <SearchInput size="sm" value={filter} onChange={setFilter} placeholder={INSTALL_COPY.filterInstances} aria-label={INSTALL_COPY.filterInstances} />}
           <div className={styles.targets} role="group" aria-label={INSTALL_COPY.targetsLabel} aria-busy={matches.status === "loading" || undefined}>

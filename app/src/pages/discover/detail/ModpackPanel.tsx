@@ -27,7 +27,6 @@ import { Callout } from "../../../ui/Callout";
 import { Inset } from "../../../ui/Inset";
 import { ProgressBar } from "../../../ui/ProgressBar";
 import { Select } from "../../../ui/Select";
-import { WarnNote } from "../../../ui/WarnNote";
 import { BlockedFilesModal } from "../BlockedFilesModal";
 import { DETAIL_COPY, MODPACK_COPY, SEARCH_COPY } from "../copy";
 import { instancesFromPack, type ProjectOrigin } from "../model";
@@ -36,6 +35,7 @@ import { PackForm, packFootNote, type PackFacts } from "../PackForm";
 import { sortGameVersions } from "../versions";
 import { versionOptions } from "./InstallPanel";
 import styles from "./detail.module.css";
+import { PanelNotices, type PanelNotice } from "./PanelNotices";
 
 type PackLoaderKind = Exclude<LoaderKind, "vanilla">;
 const PACK_LOADERS: ReadonlySet<string> = new Set<PackLoaderKind>(["fabric", "quilt", "forge", "neoforge"]);
@@ -100,14 +100,6 @@ function packFileBlocked(detail: ProjectDetail, summary: ResourceResult<ModpackS
   return !detail.distribution_allowed || summaryBlockedFiles(summary) !== null;
 }
 
-/** 面板上的一条提醒。reason 只有读取失败才有；按钮是读取失败的重试，或手动下载的清单。 */
-interface PackNotice {
-  key: string;
-  text: string;
-  reason: string | null;
-  action: { label: string; run: () => void } | null;
-}
-
 /**
  * 还没开始安装时的提醒，重的在前：这一步至多一条说明块，第一条用说明块，其余写成行。
  * 几条色调相同，按对安装的影响排：装不了、要走手动下载、只能装最新版本、事先看不到清单，重名只是提个醒。
@@ -119,43 +111,26 @@ function packNotices(
   noGameVersion: boolean,
   fromPack: readonly { name: string }[],
   openBlocked: (files: readonly BlockedFileDto[]) => void,
-): PackNotice[] {
-  const notices: PackNotice[] = [];
+): PanelNotice[] {
+  const notices: PanelNotice[] = [];
+  const warn = { tone: "warn", reason: null, action: null } as const;
   const blockedFiles = summaryBlockedFiles(summary);
-  if (noGameVersion) notices.push({ key: "no-game-version", text: MODPACK_COPY.noGameVersion, reason: null, action: null });
+  if (noGameVersion) notices.push({ ...warn, key: "no-game-version", text: MODPACK_COPY.noGameVersion });
   if (packFileBlocked(detail, summary)) {
     notices.push(
       blockedFiles === null
-        ? { key: "pack-blocked", text: MODPACK_COPY.packBlocked, reason: null, action: null }
-        : { key: "pack-blocked", text: MODPACK_COPY.packBlockedListed, reason: null, action: { label: MODPACK_COPY.viewBlocked, run: () => openBlocked(blockedFiles) } },
+        ? { ...warn, key: "pack-blocked", text: MODPACK_COPY.packBlocked }
+        : { ...warn, key: "pack-blocked", text: MODPACK_COPY.packBlockedListed, action: { label: MODPACK_COPY.viewBlocked, run: () => openBlocked(blockedFiles) } },
     );
   }
   if (versions.status === "error") {
-    notices.push({ key: "versions-failed", text: MODPACK_COPY.versionsFailed, reason: versions.error.message, action: { label: SEARCH_COPY.retry, run: versions.reload } });
+    notices.push({ ...warn, key: "versions-failed", text: MODPACK_COPY.versionsFailed, reason: versions.error.message, action: { label: SEARCH_COPY.retry, run: versions.reload } });
   }
   if (summary.status === "error" && blockedFiles === null) {
-    notices.push({ key: "summary-failed", text: MODPACK_COPY.summaryFailed, reason: summaryErrorText(summary.error), action: { label: SEARCH_COPY.retry, run: summary.reload } });
+    notices.push({ ...warn, key: "summary-failed", text: MODPACK_COPY.summaryFailed, reason: summaryErrorText(summary.error), action: { label: SEARCH_COPY.retry, run: summary.reload } });
   }
-  if (fromPack.length > 0) notices.push({ key: "duplicate", text: MODPACK_COPY.duplicate(fromPack.length, fromPack[0].name), reason: null, action: null });
+  if (fromPack.length > 0) notices.push({ ...warn, key: "duplicate", text: MODPACK_COPY.duplicate(fromPack.length, fromPack[0].name) });
   return notices;
-}
-
-function NoticeText({ notice }: { notice: PackNotice }) {
-  if (notice.reason === null) return notice.text;
-  return (
-    <>
-      <span className={styles.errorTitle}>{notice.text}</span>
-      <span className={styles.errorText}>{notice.reason}</span>
-    </>
-  );
-}
-
-function NoticeAction({ action }: { action: NonNullable<PackNotice["action"]> }) {
-  return (
-    <Button size="sm" variant="ghost" onClick={action.run}>
-      {action.label}
-    </Button>
-  );
 }
 
 /** 这个实例最近一次导入任务。 */
@@ -292,7 +267,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   const installDisabled = version === null || facts.mcVersion === null || nameError !== null;
   const failedBlocked = progress !== null && progress.kind === "failed" ? progress.blocked : null;
   // 开始安装后版本选择已经收起，这些提醒都管不到这次安装了；进度态自己的说明块是这一步唯一的一条
-  const [leadNotice, ...otherNotices] =
+  const notices =
     progress === null
       ? packNotices(detail, versions, summary, version !== null && facts.mcVersion === null, fromPack, (files) => setBlocked({ open: true, files, taskId: null }))
       : [];
@@ -371,16 +346,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
         facts={listedFacts}
         readOnly={progress !== null && progress.kind !== "cancelled"}
       />
-      {leadNotice !== undefined && (
-        <Callout tone="warn" action={leadNotice.action === null ? undefined : <NoticeAction action={leadNotice.action} />}>
-          <NoticeText notice={leadNotice} />
-        </Callout>
-      )}
-      {otherNotices.map((notice) => (
-        <WarnNote key={notice.key} action={notice.action === null ? undefined : <NoticeAction action={notice.action} />}>
-          <NoticeText notice={notice} />
-        </WarnNote>
-      ))}
+      <PanelNotices notices={notices} />
       {progress === null && versions.status === "ready" && versions.data.truncated && <span className={styles.panelHint}>{DETAIL_COPY.versionsTruncated}</span>}
 
       {progress !== null && (progress.kind === "queued" || progress.kind === "downloading") && (

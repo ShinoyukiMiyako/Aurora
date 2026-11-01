@@ -1896,6 +1896,35 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(launcher.state.toasts.find((t) => t.title === "没能打开网页")?.body).toBe("没有默认浏览器");
   });
 
+  it("Mod 的安装面板一步至多一条说明块：判断失败留作说明块，手动下载写成行，重试与打开网页的入口都还在", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    vi.stubGlobal("open", vi.fn());
+    const mod = entry("M1", { title: "受限 Mod", resource_type: "mod", loaders: ["fabric"] });
+    pages = () => result([mod]);
+    ipc.overrides.set("project_detail", () => detailOf(mod, { distribution_allowed: false, page_url: "https://www.curseforge.com/minecraft/mc-mods/locked" }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [], truncated: false }));
+    let failing = true;
+    ipc.overrides.set("match_instances", () => {
+      if (failing) throw new IpcError("network_failed", "连接超时");
+      return [];
+    });
+    await mount();
+    act(() => card("受限 Mod").click());
+    await flush();
+
+    const panel = dialog().querySelector("aside") as HTMLElement;
+    const callouts = () => [...panel.querySelectorAll<HTMLElement>('[class*="_callout_"]')];
+    const rows = () => [...panel.querySelectorAll<HTMLElement>('[class*="_warnNote_"]')];
+    expect(callouts().map((el) => [el.dataset.tone, el.textContent])).toEqual([["danger", "没能判断能装进哪些实例连接超时重试"]]);
+    expect(rows().map((el) => el.textContent)).toEqual(["作者不允许在启动器里下载这个资源，只能去 CurseForge 网页下载。打开网页"]);
+
+    failing = false;
+    act(() => buttonByText("重试", panel).click());
+    await flush();
+    expect(callouts().map((el) => [el.dataset.tone, el.textContent])).toEqual([["warn", "作者不允许在启动器里下载这个资源，只能去 CurseForge 网页下载。打开网页"]]);
+    expect(rows()).toEqual([]);
+  });
+
   it("介绍末尾的「在网页上打开」用系统浏览器打开工程页，打不开时报出来", async () => {
     const { IpcError } = await import("../../ipc/errors");
     const mod = entry("M1", { title: "有工程页", resource_type: "mod", loaders: ["fabric"] });
