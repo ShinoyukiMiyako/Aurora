@@ -236,17 +236,20 @@ describe("存档备份设置", () => {
     await updateConfig({ worldBackup: { auto: true, keep_per_world: 1, max_total_gb: 1000 } });
     await updateConfig({ worldBackup: { auto: true, keep_per_world: 50, max_total_gb: 1 } });
     expect((await getConfig()).world_backup).toEqual({ auto: true, keep_per_world: 50, max_total_gb: 1 });
-    // 两项都越界时先报份数，与后端的校验顺序一致
-    for (const [patch, field, value] of [
-      [{ auto: true, keep_per_world: 0, max_total_gb: 20 }, "world_backup.keep_per_world", 0],
-      [{ auto: true, keep_per_world: 51, max_total_gb: 20 }, "world_backup.keep_per_world", 51],
-      [{ auto: true, keep_per_world: 5, max_total_gb: 0 }, "world_backup.max_total_gb", 0],
-      [{ auto: true, keep_per_world: 5, max_total_gb: 1001 }, "world_backup.max_total_gb", 1001],
-      [{ auto: true, keep_per_world: 99, max_total_gb: 5000 }, "world_backup.keep_per_world", 99],
+    // 两项都越界时先报份数，与后端的校验顺序一致；正文照后端 validate_world_backup 的原文，设置页把它原样放进提示
+    const keepText = (n: number) => `每个存档保留的自动备份份数须在 1 到 50 之间，收到 ${n}`;
+    const totalText = (n: number) => `备份总量上限（GB）须在 1 到 1000 之间，收到 ${n}`;
+    for (const [patch, field, value, message] of [
+      [{ auto: true, keep_per_world: 0, max_total_gb: 20 }, "world_backup.keep_per_world", 0, keepText(0)],
+      [{ auto: true, keep_per_world: 51, max_total_gb: 20 }, "world_backup.keep_per_world", 51, keepText(51)],
+      [{ auto: true, keep_per_world: 5, max_total_gb: 0 }, "world_backup.max_total_gb", 0, totalText(0)],
+      [{ auto: true, keep_per_world: 5, max_total_gb: 1001 }, "world_backup.max_total_gb", 1001, totalText(1001)],
+      [{ auto: true, keep_per_world: 99, max_total_gb: 5000 }, "world_backup.keep_per_world", 99, keepText(99)],
     ] as const) {
       const error = await rejection(updateConfig({ afterLaunch: "close", worldBackup: patch }));
       expect(error.code, JSON.stringify(patch)).toBe("invalid_argument");
       expect(error.detail, JSON.stringify(patch)).toEqual({ field, value });
+      expect(error.message, JSON.stringify(patch)).toBe(message);
     }
     expect(await getConfig()).toMatchObject({ after_launch: "minimize", world_backup: { auto: true, keep_per_world: 50, max_total_gb: 1 } });
   });
