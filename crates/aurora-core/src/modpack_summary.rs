@@ -33,6 +33,9 @@ const TAIL_BYTES: u64 = EOCD_LEN as u64 + u16::MAX as u64;
 const ZIP64_MARKER: u32 = u32::MAX;
 /// 清单解压后的上限。正常的清单在几百 KB，上限只防构造出来的压缩炸弹。
 const MANIFEST_MAX_BYTES: u64 = 32 * 1024 * 1024;
+/// 单次范围读取最多取这么多字节：尾部 64 KB，清单压缩后不会比解压上限大出多少，几千项的中央目录也只有
+/// 几 MB。中央目录与条目的长度出自包本身，可以写成任意值，超出时不去取。
+const RANGE_MAX_BYTES: u64 = 2 * MANIFEST_MAX_BYTES;
 /// 单个范围请求的时限。
 const RANGE_TIMEOUT: Duration = Duration::from_secs(20);
 const STORED: u16 = 0;
@@ -107,7 +110,7 @@ async fn read_remote_pack(
     url: &str,
     platform: Platform,
 ) -> Result<RemotePack> {
-    let (tail, total) = fetch_range(http, url, format!("bytes=-{TAIL_BYTES}")).await?;
+    let (tail, total) = fetch_range(http, url, format!("bytes=-{TAIL_BYTES}"), TAIL_BYTES).await?;
     let tail_start = total
         .checked_sub(tail.len() as u64)
         .ok_or_else(|| remote(url, "尾部范围比整个文件还长"))?;
@@ -178,14 +181,28 @@ fn remote(url: &str, reason: impl Into<String>) -> CoreError {
     }
 }
 
-/// 取一段范围（`bytes=a-b` 或尾部 `bytes=-n`），返回内容与 Content-Range 里的文件总长。
-/// 回的不是 206 说明服务器没按范围给，连同响应体一起丢掉，不把整包读下来。
-async fn fetch_range(http: &reqwest::Client, url: &str, range: String) -> Result<(Vec<u8>, u64)> {
+/// 取一段范围（`bytes=a-b` 或尾部 `bytes=-n`），`len` 是这段范围的字节数；返回内容与 Content-Range
+/// 里的文件总长。回的不是 206 说明服务器没按范围给，连同响应体一起丢掉，不把整包读下来。
+///
+/// 回了 206 的正文也不一定守范围（服务器实现不规范或被人做了手脚），先整段读进内存再比就已经晚了：
+/// 声明的长度超出 `len` 时不读正文，没声明或声明不实的按块累计，一超出就中止。
+async fn fetch_range(
+    http: &reqwest::Client,
+    url: &str,
+    range: String,
+    len: u64,
+) -> Result<(Vec<u8>, u64)> {
+    if len > RANGE_MAX_BYTES {
+        return Err(remote(
+            url,
+            format!("要按范围读 {len} 字节（{range}），超出单次读取 {RANGE_MAX_BYTES} 字节的上限"),
+        ));
+    }
     let fetch_error = |source| CoreError::Fetch {
         url: url.to_owned(),
         source,
     };
-    let response = http
+    let mut response = http
         .get(url)
         .header(reqwest::header::RANGE, range.as_str())
         .timeout(RANGE_TIMEOUT)
@@ -209,8 +226,26 @@ async fn fetch_range(http: &reqwest::Client, url: &str, range: String) -> Result
         .and_then(|value| value.rsplit_once('/'))
         .and_then(|(_, total)| total.parse::<u64>().ok())
         .ok_or_else(|| remote(url, "206 响应缺少可读的 Content-Range 总长"))?;
-    let bytes = response.bytes().await.map_err(fetch_error)?;
-    Ok((bytes.to_vec(), total))
+    let overlong = || {
+        remote(
+            url,
+            format!("服务器回的内容比请求的范围长（{range}，{len} 字节），已中止读取"),
+        )
+    };
+    if response
+        .content_length()
+        .is_some_and(|declared| declared > len)
+    {
+        return Err(overlong());
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(fetch_error)? {
+        if (body.len() + chunk.len()) as u64 > len {
+            return Err(overlong());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, total))
 }
 
 fn le16(bytes: &[u8], at: usize) -> u16 {
@@ -248,9 +283,14 @@ async fn central_directory(
     } else if size == 0 {
         Vec::new()
     } else {
-        fetch_range(http, url, format!("bytes={offset}-{}", offset + size - 1))
-            .await?
-            .0
+        fetch_range(
+            http,
+            url,
+            format!("bytes={offset}-{}", offset + size - 1),
+            size,
+        )
+        .await?
+        .0
     };
     parse_central_directory(&directory, count).map_err(|reason| remote(url, reason))
 }
@@ -307,6 +347,7 @@ async fn read_entry(http: &reqwest::Client, url: &str, entry: &CentralEntry) -> 
         http,
         url,
         format!("bytes={}-{header_end}", entry.local_offset),
+        LOCAL_HEADER_LEN,
     )
     .await?;
     if header.len() < LOCAL_HEADER_LEN as usize || le32(&header, 0) != LOCAL_SIGNATURE {
@@ -323,6 +364,7 @@ async fn read_entry(http: &reqwest::Client, url: &str, entry: &CentralEntry) -> 
             http,
             url,
             format!("bytes={data_start}-{}", data_start + entry.compressed - 1),
+            entry.compressed,
         )
         .await?
         .0
@@ -675,6 +717,93 @@ mod tests {
             panic!("应报 RemotePack，实为 {err:?}");
         };
         assert!(reason.contains("不支持按范围读取"), "{reason}");
+    }
+
+    /// 回了 206、正文却比请求的范围长得多（这里每次都回整个包）：不把整段读进内存，照实报错。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_partial_response_longer_than_the_requested_range_is_refused() {
+        struct WholeBodyAsPartial(Vec<u8>);
+        impl Respond for WholeBodyAsPartial {
+            fn respond(&self, _: &Request) -> ResponseTemplate {
+                let total = self.0.len();
+                ResponseTemplate::new(206)
+                    .insert_header(
+                        "content-range",
+                        format!("bytes 0-{}/{total}", total - 1).as_str(),
+                    )
+                    .set_body_bytes(self.0.as_slice())
+            }
+        }
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/pack.mrpack"))
+            .respond_with(WholeBodyAsPartial(mrpack(&manifest())))
+            .mount(&server)
+            .await;
+        let http = aurora_base::http::build_client().unwrap();
+
+        let err = read_remote_pack(
+            &http,
+            &format!("{}/pack.mrpack", server.uri()),
+            Platform::Modrinth,
+        )
+        .await
+        .unwrap_err();
+
+        let CoreError::RemotePack { reason, .. } = err else {
+            panic!("应报 RemotePack，实为 {err:?}");
+        };
+        assert!(
+            reason.contains(&format!("bytes=-{TAIL_BYTES}")) && reason.contains("比请求的范围长"),
+            "{reason}"
+        );
+    }
+
+    /// 目录结尾记录里的目录长度出自包本身：写成超过单次范围读取上限的值时不去取，也就不会把整包读进内存。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_central_directory_size_beyond_the_range_limit_is_not_fetched() {
+        let mut pack = mrpack(&manifest());
+        let eocd = (0..=pack.len() - EOCD_LEN)
+            .rev()
+            .find(|&at| le32(&pack, at) == EOCD_SIGNATURE)
+            .unwrap();
+        let forged = u32::try_from(RANGE_MAX_BYTES + 1).unwrap();
+        pack[eocd + 12..eocd + 16].copy_from_slice(&forged.to_le_bytes());
+        pack[eocd + 16..eocd + 20].copy_from_slice(&0u32.to_le_bytes());
+        let total = pack.len();
+        let server = MockServer::start().await;
+        let served = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/pack.mrpack"))
+            .respond_with(RangeServer {
+                body: Arc::new(pack),
+                ranges: true,
+                served_bytes: served.clone(),
+            })
+            .mount(&server)
+            .await;
+        let http = aurora_base::http::build_client().unwrap();
+
+        let err = read_remote_pack(
+            &http,
+            &format!("{}/pack.mrpack", server.uri()),
+            Platform::Modrinth,
+        )
+        .await
+        .unwrap_err();
+
+        let CoreError::RemotePack { reason, .. } = err else {
+            panic!("应报 RemotePack，实为 {err:?}");
+        };
+        assert!(
+            reason.contains(&format!("{} 字节", RANGE_MAX_BYTES + 1)) && reason.contains("上限"),
+            "{reason}"
+        );
+        assert_eq!(
+            served.load(Ordering::SeqCst),
+            TAIL_BYTES as usize,
+            "只取了尾部，没有去取 {total} 字节的包里那段伪造的目录"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
