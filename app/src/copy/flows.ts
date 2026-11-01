@@ -326,9 +326,10 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
     }
     case "account_relogin":
       return { title: "需要重新登录", body: `${ctx.accountName} 的登录已失效。`, fix: { kind: "relogin", label: "重新登录" }, secondary: null };
+    // 微软与外置登录账户续期时连不上都走这里，文案不写账户类型
     case "account_refresh_network":
       return {
-        title: "无法验证微软账户",
+        title: "无法验证账户",
         body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先以离线方式进入。",
         fix: RETRY,
         secondary: OFFLINE_ONCE,

@@ -107,11 +107,18 @@ describe("启动失败：账户验证暂时不可用", () => {
 
   it("account_refresh_network：正文指向以离线方式进入，第二按钮为以离线方式进单人", () => {
     expect(failureCopy("account_refresh_network", {}, ctx("Steve"))).toEqual({
-      title: "无法验证微软账户",
+      title: "无法验证账户",
       body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先以离线方式进入。",
       fix: { kind: "retry", label: "重试" },
       secondary: { kind: "launch_offline_once", label: "以离线方式进单人" },
     });
+  });
+
+  it.each(NAMES)("account_refresh_network（账户 %s）：外置登录也会走到这里，标题与正文都不写账户类型", (name) => {
+    const copy = failureCopy("account_refresh_network", { server: "https://littleskin.cn/api/yggdrasil" }, ctx(name));
+    expect(copy.title).not.toContain("微软");
+    expect(copy.body).not.toContain("微软");
+    expect(copy.title.length).toBeLessThanOrEqual(16);
   });
 
   it("只有这两个失败码给出以离线方式进单人；登录失效仍是「重新登录」", () => {
