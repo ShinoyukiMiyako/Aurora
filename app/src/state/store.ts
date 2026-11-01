@@ -768,8 +768,12 @@ function waitUntil(subscribe: (listener: () => void) => () => void, predicate: (
 
 // ---------------------------------------------------------------- 改名
 
-/** 命令参数里指向实例的那一项：失败任务重试时按它重新调用命令。 */
+/**
+ * 命令参数里指向实例的那一项：失败任务重试时按它重新调用命令。install_version 是要建的名字：新建失败留下的半成品改了名，
+ * 重试按这个名字认出半成品改排补全，不跟过去的话会在旧名字下再装一份，半成品一直留着。
+ */
 const INSTANCE_ARG: Readonly<Record<string, string>> = {
+  install_version: "targetName",
   repair_instance: "id",
   install_mod: "versionId",
   install_mods: "versionId",
@@ -782,10 +786,6 @@ const INSTANCE_ARG: Readonly<Record<string, string>> = {
   export_modpack: "id",
 };
 
-/**
- * 实例改名后任务里的实例 id 一并换掉：任务行的「查看实例」、重试时重新调用的命令参数都要指向新名字。
- * 后端在实例有活动任务时拒绝改名，所以这里换的只是已结束的任务（失败的可以重试）。
- */
 /**
  * 换游戏目录后要重取的按需数据：实例 id 只在一个游戏目录里唯一，同名实例换了目录就是另一个；游玩统计按游戏目录分开记；
  * 多人游戏列表读的是该目录下的 servers.dat。
@@ -855,6 +855,10 @@ function renamedTo(err: IpcError): string {
   throw new Error(`改名报 ${err.code} 却没给出 detail.renamed_to：${err.message}`);
 }
 
+/**
+ * 实例改名后任务里的实例 id 一并换掉：任务行的「查看实例」、重试时重新调用的命令参数都要指向新名字。
+ * 后端拒绝的是正占着实例的任务，这里换的是还没开始的（排队中）与已结束的（失败的可以重试）。
+ */
 function renamedTask(task: Task, from: string, to: string): Task {
   if (task.instanceId !== from) return task;
   const key = INSTANCE_ARG[task.spec.command];
@@ -876,11 +880,18 @@ function renamedMeta(meta: TaskMeta, from: string, to: string): TaskMeta {
     case "java":
       return meta.launchAfter === from || meta.pinFor === from ? { ...meta, launchAfter: swap(meta.launchAfter), pinFor: swap(meta.pinFor) } : meta;
     case "create":
+      return meta.name === from ? { ...meta, name: to } : meta;
     case "modpack":
     case "repair":
     case "export":
       return meta;
   }
+}
+
+/** 等登录后继续的启动挂在实例上：改名在弹窗开着时落盘的话，登录后要启动的是新名字。 */
+function renamedLogin(login: LoginState | null, from: string, to: string): LoginState | null {
+  if (login === null || login.intent.kind !== "launch" || login.intent.instanceId !== from) return login;
+  return { ...login, intent: { ...login.intent, instanceId: to } };
 }
 
 // ---------------------------------------------------------------- 派生
@@ -2023,6 +2034,7 @@ export class LauncherStore {
       taskMeta: Object.fromEntries(Object.entries(raw.taskMeta).map(([taskId, meta]) => [taskId, renamedMeta(meta, from, to)])),
       // 已结束的失败、崩溃会话不算占用，允许改名；它的修复动作与「查看诊断」都按会话里的实例 id 走，必须一起迁过去
       session: raw.session !== null && raw.session.instanceId === from ? { ...raw.session, instanceId: to } : raw.session,
+      login: renamedLogin(raw.login, from, to),
       launchPrompt:
         raw.launchPrompt === null
           ? null
