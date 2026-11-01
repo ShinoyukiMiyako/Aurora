@@ -44,7 +44,7 @@ pub enum CrashCategory {
     GraphicsDriver,
     /// 游戏或库文件损坏（jar 不完整 / 被修改）。
     CorruptedJar,
-    /// Java 建不起本机回环连接，用到网络选择器的 Mod 起不来，多半是临时目录的问题。
+    /// Java 建不起本机回环连接，用到网络选择器的 Mod 起不来，多半是被打包应用拉起、写入被重定向。
     LoopbackUnavailable,
     /// 进程死在原生代码里而日志里没有已知原因；只由 JVM 错误头或退出码兜底产出，不进规则表。
     NativeCrash,
@@ -88,14 +88,15 @@ struct Rule {
 ///   安装了的版本 1.20.4 不对！`；
 /// - Quilt Loader：`36 mods requires version [0.25.0, ∞) of quilt_loader, which is missing!`，主语可能是「N 个
 ///   Mod」，点不出是谁；
-/// - Forge / NeoForge：`\tMod ID: 'minecraft', Requested by: 'sodium', Expected range: '[1.20.4]', Actual version: '1.20.1'`。
+/// - Forge / NeoForge：`\tMod ID: 'minecraft', Requested by: 'sodium', Expected range: '[1.20.4]', Actual version: '1.20.1'`，
+///   `Mod ID` 也可能是加载器自己（`forge`、`neoforge`，以及 Forge 的 `fml`）。
 ///
 /// 依赖 Java 的同类报错不归这里（那是换 Java 的事），Mod 之间的版本不符归 [`DEPENDENCY_VERSION_MISMATCH`]。
 ///
 /// Fabric Loader 给玩家看的说明按系统语言翻译，同一次失败它还会写一行不翻译的原因
 /// `HARD_DEP_INCOMPATIBLE_PRESELECTED sodium 0.8.13 {depends minecraft @ [1.21]}`，最后一个分支认这种写法，
 /// 任何语言下都有。
-const GAME_VERSION_MISMATCH: &str = r"(?i)\(([a-z0-9_\-]+)\) \S+ requires .+ of .*\((?:minecraft|fabricloader)\), but only the wrong version|\(([a-z0-9_\-]+)\) \S+ 需要 .*\((?:minecraft|fabricloader)\) 的 .*不对|requires .+ of (?:minecraft|quilt_loader), which is missing|mod id: '(?:minecraft|forge|neoforge)', requested by: '([a-z0-9_\-]+)'|hard_dep(?:_incompatible_preselected)? ([a-z0-9_\-]+) \S+ \{depends (?:minecraft|fabricloader|quilt_loader) @";
+const GAME_VERSION_MISMATCH: &str = r"(?i)\(([a-z0-9_\-]+)\) \S+ requires .+ of .*\((?:minecraft|fabricloader)\), but only the wrong version|\(([a-z0-9_\-]+)\) \S+ 需要 .*\((?:minecraft|fabricloader)\) 的 .*不对|requires .+ of (?:minecraft|quilt_loader), which is missing|mod id: '(?:minecraft|forge|neoforge|fml)', requested by: '([a-z0-9_\-]+)'|hard_dep(?:_incompatible_preselected)? ([a-z0-9_\-]+) \S+ \{depends (?:minecraft|fabricloader|quilt_loader) @";
 
 /// 前置 Mod 装着、版本不对，每种日志写法一个分支，捕获的都是这个前置的 id：
 /// - Fabric Loader：`Mod 'YACL' (yacl) 3.6.6 requires version 0.92.0 or later of mod 'Fabric API' (fabric-api), but only
@@ -215,19 +216,20 @@ const RULES: &[Rule] = &[
         patterns: &[
             "missing or unsupported mandatory dependencies",
             "actual version: '[missing]'",
-            "which is missing",
             "requires version",
             "incompatible mod set",
         ],
-        // 依赖方是游戏、加载器或 Java 的原因行已被上面的规则占走，留下的是 Mod 之间的依赖。
+        // 依赖方是游戏、加载器或 Java 的原因行已被上面的规则占走，留下的是 Mod 之间的依赖。`which is missing` 只认 `requires`：
+        // 主语换成 `recommends` 是解析成功后的加载警告，游戏照常启动。
         regex: Some(concat!(
             r"(?i)hard_dep(?:_no_candidate|_incompatible_preselected)? \S+ \S+ \{depends |",
-            r"需要 模组 '[^']+' \([a-z0-9_\-]+\) 的"
+            r"\brequires .+ which is missing|",
+            r"需要 模组 '.+' \([a-z0-9_\-]+\) 的"
         )),
         // 写法要带上「没装」那半句：`of mod 'X' (x)` 与 `需要 模组 'X' (x) 的` 在版本不对、加载不了时一模一样。
         extract: Some(concat!(
-            r"(?i)of ([a-z0-9_\-]+),? which is missing|",
-            r"of mod '.+' \(([a-z0-9_\-]+)\),? which is missing|",
+            r"(?i)requires .+ of ([a-z0-9_\-]+),? which is missing|",
+            r"requires .+ of mod '.+' \(([a-z0-9_\-]+)\),? which is missing|",
             r"需要 模组 '.+' \(([a-z0-9_\-]+)\) 的 .*但没有安装|",
             r"hard_dep_no_candidate \S+ \S+ \{depends ([a-z0-9_\-]+) @|",
             r"mod id: '([a-z0-9_\-]+)', requested by: '[^']+', expected range: '[^']*', actual version: '\[missing\]'"
@@ -336,11 +338,20 @@ const RULES: &[Rule] = &[
     },
     Rule {
         category: CrashCategory::LoopbackUnavailable,
+        // Windows 上 NIO 的 Selector 靠 TEMP 下的 AF_UNIX 套接字建回环管道。TEMP 缺失、不可写或路径过长时绑定失败，
+        // JDK 退回 TCP，不会走到这句报错；走到这里是绑定成功、连接失败（`Invalid argument: connect`）：带文件系统写虚拟化的
+        // 打包应用把写进 AppData 的套接字文件重定向了，它的子进程都一样。所以建议指向启动方式，不让玩家去查 TEMP 存不存在。
         patterns: &["unable to establish loopback connection"],
         regex: None,
         extract: None,
         summary: "Java 建不起本机回环连接",
-        advice: "确认环境变量 TEMP 指向的文件夹存在、可写，路径不要太长；安全软件拦截时也会这样，可以把 Java 加入白名单再试。",
+        advice: concat!(
+            "从 AI 工具、打包版终端这类打包应用里拉起",
+            aurora_base::app_name!(),
+            "时，写进临时目录的文件会被系统重定向，Java 连不上自己。从开始菜单直接打开",
+            aurora_base::app_name!(),
+            "再试，或把环境变量 TEMP 改到 AppData 之外；安全软件拦截时也会这样，可以把 Java 加入白名单再试。"
+        ),
     },
 ];
 
@@ -385,6 +396,10 @@ impl CompiledRule {
         match self.rule.category {
             CrashCategory::DependencyVersionMismatch => wrong,
             CrashCategory::MissingDependency => !wrong,
+            // Forge 的要求方可能是平台自己（`Requested by: 'minecraft'`）：点名它，界面就会让玩家去找 Minecraft 这个 Mod 的新版本。
+            CrashCategory::GameVersionMismatch => {
+                !NON_MOD_TOKENS.contains(&id.to_ascii_lowercase().as_str())
+            }
             _ => true,
         }
     }
@@ -754,6 +769,9 @@ const NON_MOD_TOKENS: &[&str] = &[
 /// Mod 初始化抛异常时的 `provided by 'sodium'`、mixin 报错尾部的 `from mod sodium`，以及 Forge 依赖报错的
 /// `Requested by: 'sodium'`。mixin 规则自带的提取式可能退回 `*.mixins.json` 配置文件名，
 /// 故不在复用之列。
+///
+/// 显示名里可能有撇号（`Xaero's Minimap`），所以引号里不能写成 `[^']+`；又得是懒惰匹配：一行常有依赖方和前置两个 Mod，
+/// 贪婪匹配会从第一个引号吞到最后一个括号，依赖方就丢了。
 static MOD_ID_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     RULES
         .iter()
@@ -765,8 +783,8 @@ static MOD_ID_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         })
         .filter_map(|rule| rule.extract)
         .chain([
-            r"(?i)\bmod '[^']+' \(([a-z0-9_\-]+)\)",
-            r"(?i)模组 '[^']+' \(([a-z0-9_\-]+)\)",
+            r"(?i)\bmod '.+?' \(([a-z0-9_\-]+)\)",
+            r"(?i)模组 '.+?' \(([a-z0-9_\-]+)\)",
             r"(?i)\bhard_dep(?:_no_candidate|_incompatible_preselected)? ([a-z0-9_\-]+) \S+ \{depends ",
             r"(?i)\bfrom mod ([a-z0-9_\-]+)",
             r"(?i)requested by: '([a-z0-9_\-]+)'",
@@ -1047,10 +1065,10 @@ mod tests {
         }
     }
 
-    /// Windows 上 NIO 的 Selector 靠临时目录里的 AF_UNIX 套接字建回环管道，用到 Netty 或 java.net.http 的 Mod
-    /// 在这里失败时只留下这一句。
+    /// 用到 Netty 或 java.net.http 的 Mod 在这里失败时只留下这一句。TEMP 缺失、不可写、路径过长都走不到这句报错，
+    /// 建议不能再让玩家去查这三样，要指向启动方式。
     #[test]
-    fn loopback_failure_points_at_the_temp_directory() {
+    fn loopback_failure_points_at_how_the_launcher_was_started() {
         let log = "Caused by: io.netty.channel.ChannelException: failed to open a new selector
                    Caused by: java.io.IOException: Unable to establish loopback connection
                    	at java.base/sun.nio.ch.PipeImpl.<init>(PipeImpl.java:175)";
@@ -1058,7 +1076,16 @@ mod tests {
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert_eq!(diags[0].category, CrashCategory::LoopbackUnavailable);
         assert_eq!(diags[0].line, 1);
-        assert!(diags[0].advice.contains("TEMP"), "{}", diags[0].advice);
+        let advice = &diags[0].advice;
+        for fix in [
+            concat!("从开始菜单直接打开", aurora_base::app_name!()),
+            "把环境变量 TEMP 改到 AppData 之外",
+        ] {
+            assert!(advice.contains(fix), "{advice}");
+        }
+        for wrong_direction in ["存在", "可写", "路径不要太长"] {
+            assert!(!advice.contains(wrong_direction), "{advice}");
+        }
     }
 
     /// 真实 JVM 崩溃：写完 hs_err 后进程以退出码 1 结束，退出码兜底打不中。
@@ -1440,6 +1467,51 @@ More details:\n\
         assert_eq!(diag.detail.as_deref(), Some("xaerominimap"));
     }
 
+    /// 显示名里的撇号不是引号的结尾。一行里常有两个 Mod，也不能从第一个引号一路吞到最后一个括号，把依赖方吞掉。
+    #[test]
+    fn mods_with_an_apostrophe_in_their_name_are_still_named() {
+        for (log, expected) in [
+            (
+                "\t - Mod 'Xaero's Minimap' (xaerominimap) 24.4.0 requires version 0.92.0 or later of fabric-api, which is missing!",
+                vec!["xaerominimap", "fabric-api"],
+            ),
+            (
+                "\t - 模组 'Xaero's Minimap' (xaerominimap) 24.4.0 需要 fabric-api 的 0.92.0 及以上版本，但没有安装它！",
+                vec!["xaerominimap"],
+            ),
+            (
+                "\t - Mod 'Xaero's World Map' (xaeroworldmap) 1.39.0 requires version 24.0 or later of mod 'Xaero's Minimap' (xaerominimap), but only the wrong version is present: 23.0!",
+                vec!["xaeroworldmap", "xaerominimap"],
+            ),
+            (
+                "\t - 模组 'Xaero's World Map' (xaeroworldmap) 1.39.0 需要 模组 'Xaero's Minimap' (xaerominimap) 的 24.0 及以上版本，但已经安装了的版本 23.0 不对！",
+                vec!["xaeroworldmap", "xaerominimap"],
+            ),
+            (
+                "\t - Mod 'Create: Steam 'n' Rails' (railways) 1.5.0 requires version 0.92.0 or later of mod 'Fabric API' (fabric-api), but only the wrong version is present: 0.83.0!",
+                vec!["railways", "fabric-api"],
+            ),
+            (
+                "\t - 将 模组 'Xaero's Minimap' (xaerominimap) 23.0 替换为 24.0 及以上版本。",
+                vec!["xaerominimap"],
+            ),
+        ] {
+            assert_eq!(extract_mod_ids(log), expected, "{log}");
+        }
+    }
+
+    /// 线索不能因为前置的显示名带撇号就消失：这几行是报错里唯一提到它的地方。
+    #[test]
+    fn missing_dependency_with_an_apostrophe_in_its_name() {
+        let missing = "\t - 模组 'Better Waypoints' (betterwaypoints) 1.0 需要 模组 'Xaero's Minimap' (xaerominimap) 的 任意版本，但没有安装它！";
+        let diag = primary(missing, CrashCategory::MissingDependency);
+        assert_eq!(diag.detail.as_deref(), Some("xaerominimap"));
+
+        let blocked = "\t - 模组 'Better Waypoints' (betterwaypoints) 1.0 需要 模组 'Xaero's Minimap' (xaerominimap) 的 24.0 及以上版本，但由于其他限制条件无法载入！";
+        let diag = primary(blocked, CrashCategory::MissingDependency);
+        assert_eq!(diag.detail, None, "装着的前置不能说成缺失");
+    }
+
     /// 几个候选都不对时 Loader 用复数。
     #[test]
     fn wrong_version_dependency_with_several_candidates() {
@@ -1460,6 +1532,72 @@ More details:\n\
             )
             .is_empty()
         );
+    }
+
+    /// recommends 是解析成功之后才打的警告，没装也照常启动：单独出现不算线索，别的原因崩溃时也不能多出一条缺少前置。
+    #[test]
+    fn missing_recommended_dependency_is_not_a_clue() {
+        let warning = "[main/WARN]: Warnings were found!\n \
+            - Mod 'Mod Menu' (modmenu) 7.2.2 recommends any 1.20.x version of fabric-api, which is missing!\n\
+            \t - You should install any 1.20.x version of fabric-api for the optimal experience.";
+        assert!(analyze(warning, None).is_empty(), "{warning}");
+        assert!(
+            analyze(
+                "\t - 模组 'Mod Menu' (modmenu) 7.2.2 建议安装 fabric-api 的 任意 1.20.x 版本，但没有安装它！",
+                None
+            )
+            .is_empty()
+        );
+
+        let crashed = format!("{warning}\njava.lang.OutOfMemoryError: Java heap space");
+        let categories: Vec<CrashCategory> = analyze(&crashed, Some(1))
+            .iter()
+            .map(|d| d.category)
+            .collect();
+        assert_eq!(categories, vec![CrashCategory::OutOfMemory]);
+        assert!(
+            !extract_mod_ids(&crashed).contains(&"fabric-api".to_owned()),
+            "没装的推荐项不是日志指向的 Mod"
+        );
+    }
+
+    /// 真缺前置的报错紧跟在警告后面时，缺的是要求的那个，不是推荐的那个。
+    #[test]
+    fn missing_detail_skips_the_recommended_dependency() {
+        let lines = [
+            "[main/ERROR]: Incompatible mod set!",
+            "\t - Mod 'A' (a) 1.0 recommends any version of cloth-config, which is missing!",
+            "\t - Mod 'B' (b) 1.0 requires version 0.90.0 or later of fabric-api, which is missing!",
+        ];
+        let diags = analyze_lines(&lines);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].category, CrashCategory::MissingDependency);
+        assert_eq!(diags[0].line, 0);
+        assert_eq!(diags[0].detail.as_deref(), Some("fabric-api"));
+    }
+
+    /// 版本要求的说法有好多种，不是都写 requires version。
+    #[test]
+    fn required_dependency_is_missing_however_the_version_is_worded() {
+        for (line, dependency) in [
+            (
+                "\t - Mod 'Zoomify' (zoomify) 2.15.2 requires any version of fabric-language-kotlin, which is missing!",
+                "fabric-language-kotlin",
+            ),
+            (
+                "\t - Mod 'Mod Menu' (modmenu) 7.2.2 requires any 1.20.x version of fabric-api, which is missing!",
+                "fabric-api",
+            ),
+            (
+                "\t - Mod 'A' (a) 1.0 requires any version between 1.0 (inclusive) and 2.0 (exclusive) of cloth-config, which is missing!",
+                "cloth-config",
+            ),
+        ] {
+            let diags = analyze(line, Some(1));
+            assert_eq!(diags.len(), 1, "{diags:?}");
+            assert_eq!(diags[0].category, CrashCategory::MissingDependency);
+            assert_eq!(diags[0].detail.as_deref(), Some(dependency));
+        }
     }
 
     /// Forge 的报错：整体一行之下逐条列出，实际版本写着 [MISSING] 才是没装。
@@ -1497,7 +1635,7 @@ More details:\n\
         );
     }
 
-    /// Forge 把游戏与加载器的版本要求也列在这一段，整体那一行不能再算一条缺少前置；`fml` 这种平台 id 也不是谁的前置。
+    /// Forge 把游戏与加载器的版本要求也列在这一段，整体那一行不能再算一条缺少前置。
     #[test]
     fn dependency_summary_gives_way_to_a_version_clue() {
         let game = "Missing or unsupported mandatory dependencies:\n\
@@ -1506,11 +1644,47 @@ More details:\n\
             analyze(game, Some(1)).iter().map(|d| d.category).collect();
         assert_eq!(categories, vec![CrashCategory::GameVersionMismatch]);
 
-        let platform = "Missing or unsupported mandatory dependencies:\n\
-            \tMod ID: 'fml', Requested by: 'minecraft', Expected range: '[47,)', Actual version: '46'";
-        assert_absent(platform, CrashCategory::DependencyVersionMismatch);
         // 说不清是哪一种时它是唯一的线索，照旧算一条。
-        assert_eq!(primary(platform, CrashCategory::MissingDependency).line, 0);
+        let alone = "Missing or unsupported mandatory dependencies:";
+        assert_eq!(primary(alone, CrashCategory::MissingDependency).line, 0);
+    }
+
+    /// `fml` 是 Forge 自己：它的版本要求没满足是加载器版本不够，到发现页搜不到，不是缺前置；没登记成 Mod 时实际版本写 [MISSING]。
+    #[test]
+    fn forge_fml_requirement_is_a_loader_version_mismatch() {
+        for actual in ["46.0.14", "[MISSING]"] {
+            let log = format!(
+                "Missing or unsupported mandatory dependencies:\n\
+                 \tMod ID: 'fml', Requested by: 'create', Expected range: '[47,)', Actual version: '{actual}'"
+            );
+            let diags = analyze(&log, Some(1));
+            assert_eq!(diags.len(), 1, "{diags:?}");
+            assert_eq!(diags[0].category, CrashCategory::GameVersionMismatch);
+            assert_eq!(diags[0].detail.as_deref(), Some("create"));
+            assert_eq!(diags[0].line, 1);
+        }
+    }
+
+    /// 要求方可能是平台自己，它不是能换版本或停用的 Mod：线索不点名它，往下有点得出的 Mod 就取那一个。
+    #[test]
+    fn version_clue_never_names_a_platform_as_the_mod() {
+        for requested in [
+            "\tMod ID: 'fml', Requested by: 'minecraft', Expected range: '[47,)', Actual version: '46'",
+            "\tMod ID: 'forge', Requested by: 'minecraft', Expected range: '[47,)', Actual version: '46'",
+            "\tMod ID: 'minecraft', Requested by: 'neoforge', Expected range: '[1.21]', Actual version: '1.20.1'",
+        ] {
+            let diag = primary(requested, CrashCategory::GameVersionMismatch);
+            assert_eq!(diag.detail, None, "{requested}");
+        }
+
+        let lines = [
+            "\tMod ID: 'fml', Requested by: 'minecraft', Expected range: '[47,)', Actual version: '46'",
+            "\tMod ID: 'forge', Requested by: 'create', Expected range: '[47,)', Actual version: '46'",
+        ];
+        let diags = analyze_lines(&lines);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].line, 0);
+        assert_eq!(diags[0].detail.as_deref(), Some("create"));
     }
 
     /// 前置装着、版本也对，只是被别的限制挡住：这一行是连带，不是又缺了一个。
