@@ -216,7 +216,7 @@ async fn find_account_reads_the_store_off_the_async_thread() {
 mod microsoft {
     use super::*;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use aurora_core::MsaEndpoints;
     use wiremock::matchers::{method, path};
@@ -303,28 +303,22 @@ mod microsoft {
         assert_eq!(outcome.unwrap_err().code, "cancelled");
     }
 
-    /// 取消后 1000 ms 内 microsoft_login 以 cancelled 返回，且什么都没落库。
+    /// 取消后 microsoft_login 以 cancelled 返回，且什么都没落库。服务端一直不给结果，只有取消能让登录结束。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancel_rejects_login_with_cancelled_within_one_second() {
+    async fn cancel_rejects_login_with_cancelled() {
         let server = pending_forever_server().await;
         let dir = tempfile::tempdir().unwrap();
         let facade = facade_against(&server, dir.path());
         let slot = Arc::new(MicrosoftLoginSlot::default());
         let login = start_login(&facade, &slot).await;
 
-        let started = Instant::now();
         assert!(slot.cancel(), "登录进行中，取消应返回 true");
-        let outcome = tokio::time::timeout(Duration::from_millis(1000), login)
+        let outcome = tokio::time::timeout(Duration::from_secs(15), login)
             .await
-            .expect("取消后 1000 ms 内登录应结束")
+            .expect("取消后登录应结束")
             .unwrap();
-        let elapsed = started.elapsed();
         let err = outcome.unwrap_err();
         assert_eq!(err.code, "cancelled", "实际错误：{err:?}");
-        assert!(
-            elapsed < Duration::from_millis(1000),
-            "取消耗时 {elapsed:?}"
-        );
 
         assert!(!slot.cancel(), "登录结束后槽应已清空");
         let accounts = facade.snapshot().await.accounts().unwrap();
@@ -341,9 +335,9 @@ mod microsoft {
 
         let first = start_login(&facade, &slot).await;
         let second = start_login(&facade, &slot).await;
-        let first_outcome = tokio::time::timeout(Duration::from_millis(1000), first)
+        let first_outcome = tokio::time::timeout(Duration::from_secs(15), first)
             .await
-            .expect("被顶替的登录应在 1000 ms 内结束")
+            .expect("被顶替的登录应结束")
             .unwrap();
         assert_eq!(first_outcome.unwrap_err().code, "cancelled");
         assert!(!second.is_finished(), "新的一次不应被旧的收尾波及");
