@@ -1271,6 +1271,8 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(modRows()).toHaveLength(41);
     expect(rowsTagged("需手动下载")).toEqual(["blocked-a.jar", "blocked-b.jar"]);
     expect(dialog().textContent).toContain("有 2 个文件需要到 CurseForge 网页手动下载，下载好之前不能导入。");
+    // 说明块里的操作只用小号幽灵按钮
+    expect(buttonByText("查看这些文件", dialog())).toMatchObject({ dataset: { variant: "ghost", size: "sm" } });
     expect(submitButton().getAttribute("aria-disabled")).toBe("true");
     await clickIn(dialog(), "导入为新实例");
     expect(callsOf(ipc, "install_modpack")).toEqual([]);
