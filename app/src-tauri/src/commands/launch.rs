@@ -281,8 +281,11 @@ async fn reserve_launch<'a>(
     version_id: &str,
 ) -> Result<(SlotReservation<'a>, ChainGuard), CommandError> {
     let reservation = running.0.reserve(version_id).map_err(busy)?;
-    let bases = aurora.inheritance_chain(version_id).await?;
-    let instance = locks.acquire_with_bases(version_id, InstanceActivity::Launching, &bases)?;
+    let instance = locks
+        .acquire_with_chain(version_id, InstanceActivity::Launching, async {
+            Ok(aurora.inheritance_chain(version_id).await?)
+        })
+        .await?;
     Ok((reservation, instance))
 }
 
@@ -587,6 +590,51 @@ mod tests {
             ..aurora_core::AuroraConfig::default()
         };
         Facade::new(Aurora::open(config, dir.to_path_buf(), dir.join("config.json")).unwrap())
+    }
+
+    /// 实例自己正被占着（安装、补全、改名、删除）时先报 instance_busy，不先去读它的版本 JSON：安装途中 JSON
+    /// 正被替换、一时读不出来时，启动该说「正在安装」，而不是一个读文件的错误。没人占着时读不出来照实报错，
+    /// 占用槽与实例占用一并放开。
+    #[tokio::test]
+    async fn a_busy_instance_is_reported_before_its_chain_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        // 版本 JSON 的位置被一个目录占着：读它必出 IO 错误，而不是「不存在」。
+        std::fs::create_dir_all(
+            dir.path()
+                .join(".minecraft")
+                .join("versions")
+                .join("装到 一半")
+                .join("装到 一半.json"),
+        )
+        .unwrap();
+        let facade = facade_with(dir.path(), &[("生存", None)]);
+        let aurora = facade.snapshot().await;
+        let running = RunningGame::default();
+        let locks = InstanceLocks::default();
+
+        let installing = locks
+            .acquire("装到 一半", InstanceActivity::Installing)
+            .unwrap();
+        let err = reserve_launch(&running, &locks, &aurora, "装到 一半")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code, crate::commands::error::code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "装到 一半", "activity": "installing" })
+        );
+        drop(installing);
+
+        let err = reserve_launch(&running, &locks, &aurora, "装到 一半")
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.code, crate::commands::error::code::IO, "{err:?}");
+        assert_eq!(locks.activity("装到 一半"), None);
+        assert!(reserve_launch(&running, &locks, &aurora, "生存")
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

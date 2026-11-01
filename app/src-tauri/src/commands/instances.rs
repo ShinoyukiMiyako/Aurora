@@ -151,6 +151,30 @@ impl InstanceLocks {
         bases: &[String],
     ) -> Result<ChainGuard, CommandError> {
         let own = self.acquire(id, activity)?;
+        self.hold_bases(own, id, activity, bases)
+    }
+
+    /// 同 [`InstanceLocks::acquire_with_bases`]，基底要读盘才知道（`chain` 读实例的继承链）：占住实例自己之后
+    /// 才去读。实例正被安装、补全、改名或删除时它的版本 JSON 可能正被替换或挪走，先读的话报出来的会是读文件
+    /// 的错误而不是 `instance_busy`；占住之后链也不会再被别的命令改掉。读链失败时实例自己的占用随错误放开。
+    pub async fn acquire_with_chain(
+        &self,
+        id: &str,
+        activity: InstanceActivity,
+        chain: impl std::future::Future<Output = Result<Vec<String>, CommandError>>,
+    ) -> Result<ChainGuard, CommandError> {
+        let own = self.acquire(id, activity)?;
+        let bases = chain.await?;
+        self.hold_bases(own, id, activity, &bases)
+    }
+
+    fn hold_bases(
+        &self,
+        own: InstanceGuard,
+        id: &str,
+        activity: InstanceActivity,
+        bases: &[String],
+    ) -> Result<ChainGuard, CommandError> {
         let mut keys = HashSet::from([lock_key(id)]);
         let mut held = Vec::with_capacity(bases.len());
         for base in bases {
@@ -1190,8 +1214,11 @@ pub(crate) async fn repair_instance_with(
     let aurora = facade.snapshot().await;
     // 传统布局的加载器实例把客户端 jar 与 natives 补进继承链根的目录：补全期间基底不能被删、改名或补全。
     // 依赖检查只在删除、改名动手那一刻扫一次，挡不住补全中途的这些操作。
-    let bases = aurora.inheritance_chain(id).await.map_err(instance_error)?;
-    let _guard = locks.acquire_with_bases(id, InstanceActivity::Repairing, &bases)?;
+    let _guard = locks
+        .acquire_with_chain(id, InstanceActivity::Repairing, async {
+            aurora.inheritance_chain(id).await.map_err(instance_error)
+        })
+        .await?;
     let task = tasks.register(task_id)?;
     let aurora = aurora.with_cancel(task.token().clone());
     let (plan, marker) = aurora.begin_repair(id).await.map_err(instance_error)?;
@@ -1941,6 +1968,36 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.code, code::INSTANCE_BUSY);
+    }
+
+    /// 实例自己正被占着时补全先报 instance_busy，不先去读它的版本 JSON：安装途中 JSON 正被替换、一时读不出来时，
+    /// 补全该说「正在安装」，而不是一个读文件的错误；被拒的补全不占任务 id。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repairing_a_busy_instance_is_refused_before_its_chain_is_read() {
+        let env = Env::new();
+        std::fs::create_dir_all(
+            env.game_dir()
+                .join("versions")
+                .join("装到 一半")
+                .join("装到 一半.json"),
+        )
+        .unwrap();
+        let registry = TaskRegistry::default();
+        let locks = InstanceLocks::default();
+        let installing = locks
+            .acquire("装到 一半", InstanceActivity::Installing)
+            .unwrap();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+        let err = repair_instance_with(&env.facade, &registry, &locks, "r", "装到 一半", &sink)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY, "{err:?}");
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "装到 一半", "activity": "installing" })
+        );
+        assert!(!registry.is_running("r"));
+        drop(installing);
     }
 
     /// 传统布局的加载器实例补全时把客户端 jar 与 natives 写进继承链根的目录：补全期间删除、改名基底都以
