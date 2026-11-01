@@ -3,6 +3,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TOAST_COPY } from "../copy/flows";
+import { SHELL_ACTION_ERROR } from "../copy/shell";
 import { GAME_EXIT_EVENT } from "../ipc/launch";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
@@ -11,6 +12,7 @@ import { bootOverrides, callsOf, emit, instanceDto, resetRecorder, settle } from
 import { OverlayRoot } from "./overlay";
 import { pickSaveFile } from "./platform";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
+import { browserWindowPort, WindowPortProvider, type WindowPort } from "./window";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -266,6 +268,81 @@ describe("外壳：通知动作", () => {
     act(() => shell.runToastAction(toast));
     expect(launcher.state.toasts).toEqual([]);
     expect(nav.route).toEqual({ page: "tasks", filter: "failed" });
+  });
+});
+
+describe("外壳：最小化期间的通知", () => {
+  // WebView2 最小化时 visibilityState 仍是 visible，所以这里只动窗口状态，不动 document
+  let minimized: boolean;
+  let resized: () => void;
+  const port = (): WindowPort => ({
+    ...browserWindowPort(),
+    isMinimized: async () => minimized,
+    onResized: async (handler) => {
+      resized = handler;
+      return () => {};
+    },
+  });
+  const mountWithPort = async () => {
+    view = render(
+      <WindowPortProvider port={port()}>
+        <LauncherProvider>
+          <ShellProvider>
+            <Probe />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </WindowPortProvider>,
+    );
+    await flush();
+  };
+  const windowChanged = async (next: boolean) => {
+    minimized = next;
+    resized();
+    await flush();
+  };
+  const titles = () => launcher.state.toasts.map((t) => t.title);
+
+  beforeEach(() => {
+    minimized = false;
+    // 用例要把时钟拨过自动检查更新的延时：不支持更新时不排期，不会多出一条「可以更新了」
+    ipc.overrides.set("updater_info", () => ({ current_version: "0.1.0", supported: false, unsupported_reason: null, available: null, downloaded_version: null, install_on_exit: false }));
+  });
+
+  it("最小化期间到点的通知不消失，还原后按剩余时长继续走完", async () => {
+    await mountWithPort();
+    await act(async () => launcher.actions.toast("info", "已停用 Sodium"));
+    await windowChanged(true);
+
+    await act(async () => void vi.advanceTimersByTime(60_000));
+    expect(titles()).toEqual(["已停用 Sodium"]);
+
+    await windowChanged(false);
+    await act(async () => void vi.advanceTimersByTime(60_000));
+    expect(titles()).toEqual([]);
+  });
+
+  it("窗口没有最小化时通知照常到点消失", async () => {
+    await mountWithPort();
+    await act(async () => launcher.actions.toast("info", "已停用 Sodium"));
+    await windowChanged(false);
+    await act(async () => void vi.advanceTimersByTime(60_000));
+    expect(titles()).toEqual([]);
+  });
+
+  it("读不出窗口状态经外层统一错误处理报告", async () => {
+    view = render(
+      <WindowPortProvider port={{ ...port(), isMinimized: () => Promise.reject(new Error("窗口已销毁")) }}>
+        <LauncherProvider>
+          <ShellProvider>
+            <Probe />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </WindowPortProvider>,
+    );
+    await flush();
+    expect(launcher.state.toasts.map((t) => [t.title, t.body])).toEqual([[SHELL_ACTION_ERROR.windowState, "窗口已销毁"]]);
   });
 });
 

@@ -54,7 +54,8 @@ export interface ThumbProps {
 
 /**
  * 远程缩略图：资源平台的项目图标、官方资讯缩略图、服务器自带图标。加载中为同形骨架；
- * 无图或失败时为色相底座 + 类型图标，不显示裂图、不用名称首字。进入视口前 200 px 才开始加载。
+ * 无图或失败时为色相底座 + 类型图标，不显示裂图、不用名称首字。进入视口前 200 px 才开始加载，
+ * 在那之前只是静止的占位：一页结果里视口外的图可能一直不加载，带上扫光就是几十个看不见的循环动画常驻 CPU。
  */
 export function Thumb({ url, kind, hue, size, alt, inactive = false, className }: ThumbProps) {
   const ref = useRef<HTMLSpanElement>(null);
@@ -62,7 +63,7 @@ export function Thumb({ url, kind, hue, size, alt, inactive = false, className }
   const dpr = useDevicePixelRatio();
   const near = useNearViewport(ref);
   const image = useRemoteImage(url, near, Math.ceil(size * dpr * 2));
-  const view = url === null || image.status === "failed" ? "fallback" : image.status === "ready" ? "image" : "loading";
+  const view = url === null || image.status === "failed" ? "fallback" : image.status === "ready" ? "image" : near ? "loading" : "pending";
   const pixel = image.status === "ready" && isPixelArtThumb(image.naturalWidth, image.naturalHeight, size);
 
   useLayoutEffect(() => {
