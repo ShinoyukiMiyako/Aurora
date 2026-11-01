@@ -411,6 +411,17 @@ describe("更新预览里勾选的几项", () => {
     expect(callsOf(ipc, "check_updates")).toHaveLength(0);
   });
 
+  it("勾选里有文件已经在别的更新任务里换：那一项被剔除，只入队其余的", async () => {
+    ipc.overrides.set("update_mod", () => new Promise(() => undefined));
+    await store.actions.updateAllMods("生存", [picked[0]]);
+    await settle();
+    await store.actions.updateAllMods("生存", [picked[0], picked[1]]);
+    expect(store.getState().tasks.map((t) => [t.title, t.spec.args.fileName])).toEqual([
+      ["更新 sodium", "sodium-s1.jar"],
+      ["更新 lithium", "lithium-l1.jar"],
+    ]);
+  });
+
   it("一项都没勾是界面的错：直接报错，不入队", async () => {
     await expect(store.actions.updateAllMods("生存", [])).rejects.toThrow("至少要勾选一个 Mod");
     expect(store.getState().tasks).toEqual([]);

@@ -475,6 +475,65 @@ describe("批量操作", () => {
   });
 });
 
+describe("批量操作与启停窗口", () => {
+  it("单个停用后列表还没重扫回来就批量移除：按盘上改好的文件名调后端", async () => {
+    await open();
+    ipc.overrides.set("set_mod_enabled", () => "sodium.jar.disabled");
+    ipc.overrides.set("list_mods", () => new Promise(() => undefined));
+    click(find("switch", "停用 Sodium"));
+    await flush();
+    click(find("checkbox", "选择 Sodium"));
+    click(button("移除"));
+    await flush();
+    click(button("移除", dialog()));
+    await flush();
+    expect(callsOf(ipc, "remove_mod")).toEqual([{ versionId: ID, fileName: "sodium.jar.disabled" }]);
+  });
+
+  it("批量停用后列表还没重扫回来就移除单行：按盘上改好的文件名调后端", async () => {
+    await open();
+    ipc.overrides.set("list_mods", () => new Promise(() => undefined));
+    click(find("checkbox", "选择 Sodium"));
+    click(button("停用"));
+    await flush();
+    expect(callsOf(ipc, "set_mods_enabled")).toEqual([{ versionId: ID, fileNames: ["sodium.jar"], enabled: false }]);
+    click(button("移除 Sodium"));
+    await flush();
+    expect(textOf(dialog())).toContain("sodium.jar.disabled");
+    click(button("移除", dialog()));
+    await flush();
+    expect(callsOf(ipc, "remove_mod")).toEqual([{ versionId: ID, fileName: "sodium.jar.disabled" }]);
+  });
+
+  it("单个启停还没回来：选中它时批量动作带原因禁用，点了不发命令", async () => {
+    await open();
+    ipc.overrides.set("set_mod_enabled", () => new Promise(() => undefined));
+    click(find("switch", "停用 Sodium"));
+    await flush();
+    click(find("checkbox", "选择 Sodium"));
+    click(find("checkbox", "选择 Handmade"));
+    const disable = button("停用");
+    expect(disable.getAttribute("aria-disabled")).toBe("true");
+    click(disable);
+    await flush();
+    expect(callsOf(ipc, "set_mods_enabled")).toEqual([]);
+  });
+
+  it("批量启停进行中：选中行的开关带原因禁用，不单独发命令；别的行照常", async () => {
+    await open();
+    ipc.overrides.set("set_mods_enabled", () => new Promise(() => undefined));
+    click(find("checkbox", "选择 Sodium"));
+    click(button("停用"));
+    await flush();
+    const busy = find("switch", "停用 Sodium");
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    click(busy);
+    await flush();
+    expect(callsOf(ipc, "set_mod_enabled")).toEqual([]);
+    expect(find("switch", "停用 Handmade").getAttribute("aria-disabled")).not.toBe("true");
+  });
+});
+
 describe("忽略更新", () => {
   it("被忽略的行带「不检查更新」，筛选里多一项；更多菜单恢复检查，本地文件的忽略项禁用", async () => {
     await open();

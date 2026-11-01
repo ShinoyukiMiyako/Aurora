@@ -325,6 +325,24 @@ describe("改名时备份没跟上", () => {
     expect(callsOf(ipc, "reveal_in_folder")).toEqual([{ path: "D:/Games/.minecraft/.petalfall/backups/instances/生存" }]);
   });
 
+  it("备份没跟上照样迁移前端的记录：排着队的任务跟到新名字，重试不再指着旧 id", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    ipc.overrides.set("backup_world", () => new Promise(() => undefined));
+    await store.actions.backupWorld("生存", "w1", "第一个");
+    await store.actions.backupWorld("生存", "w2", "第二个");
+    expect(store.getState().tasks.map((t) => [t.instanceId, t.status])).toEqual([
+      ["生存", "running"],
+      ["生存", "queued"],
+    ]);
+    ipc.overrides.set("rename_instance", () => {
+      instances = instances.map((i) => (i.id === "生存" ? { ...i, id: "生存二" } : i));
+      throw notMoved({ id: "生存", renamed_to: "生存二", path: "D:/Games/.minecraft/.petalfall/backups/instances/生存" });
+    });
+    expect(await store.actions.renameInstance("生存", "生存二")).toBe("生存二");
+    const queued = store.getState().tasks.find((t) => t.status === "queued");
+    expect(queued).toMatchObject({ instanceId: "生存二", spec: { args: { id: "生存二", world: "w2" } } });
+  });
+
   it("缺 detail.path 是契约被破坏：直接报错，不提示", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     ipc.overrides.set("rename_instance", () => {

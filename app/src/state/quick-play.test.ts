@@ -221,6 +221,29 @@ describe("直达走与启动相同的拦截链", () => {
   });
 });
 
+describe("全局默认 Java 的修复动作", () => {
+  it("默认 Java 版本不够「默认 Java 改回自动选择」：改完设置立即重新启动，带着同一个 quickPlay", async () => {
+    const launcher = await boot();
+    let fails = true;
+    ipc.overrides.set("launch_game", () => {
+      if (!fails) return { pid: 7 };
+      fails = false;
+      throw new IpcError("java_too_old", "设置里固定的默认 Java 17 无法运行 Minecraft 1.21.1，至少需要 Java 21", {
+        current: 17,
+        major: 21,
+        mc_version: "1.21.1",
+        pinned_by: "global",
+      });
+    });
+    await launcher.actions.quickPlay("生存", WORLD);
+    const fix = launcher.actions.failureFix("auto_default_java");
+    if (!("run" in fix)) throw new Error("改回自动选择应是命令类修复动作");
+    await fix.run();
+    expect(callsOf(ipc, "update_config").filter((a) => "defaultJava" in a)).toEqual([{ defaultJava: "auto" }]);
+    expect(callsOf(ipc, "launch_game").map((a) => a.quickPlay)).toEqual([WORLD, WORLD]);
+  });
+});
+
 describe("固定服务器记住的实例", () => {
   let stored: PinnedServerDto[];
 
