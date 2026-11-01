@@ -3,7 +3,7 @@ import { act, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
-import { columnTemplate, nextSort, selectionState, Table, validateColumns, VIRTUALIZE_ABOVE, type TableColumn, type TableSort } from "./Table";
+import { columnTemplate, nextSort, rowChurn, selectionState, Table, validateColumns, VIRTUALIZE_ABOVE, type TableColumn, type TableSort } from "./Table";
 
 interface Mod {
   id: string;
@@ -88,6 +88,82 @@ function Harness({ onActivate, onRemove, initial = [] }: { onActivate?: (mod: Mo
     />
   );
 }
+
+/** 行集合可从外面换：增删、排序时表格怎么过渡。 */
+let setShownRows: (next: readonly Mod[]) => void;
+
+function Changing({ initial }: { initial: readonly Mod[] }) {
+  const [shown, setShown] = useState(initial);
+  setShownRows = setShown;
+  return <Table label="已装 Mod" columns={columns()} rows={shown} rowKey={(m) => m.id} onSortChange={() => undefined} empty={<span>没有 Mod</span>} />;
+}
+
+const someMods = (n: number): Mod[] => Array.from({ length: n }, (_, i) => ({ id: `mod-${i}`, name: `Mod ${i}`, version: "1", enabled: true }));
+
+const waitFrames = () =>
+  act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  });
+
+describe("行的增删", () => {
+  it("一次变化涉及多少行：增删的行数，集合没变时是换了位置的行数；其余行让位不算", () => {
+    const keys = someMods(50).map((m) => m.id);
+    expect(rowChurn(keys, keys)).toBe(0);
+    expect(rowChurn(keys, keys.filter((k) => !["mod-0", "mod-1", "mod-2"].includes(k)))).toBe(3);
+    expect(rowChurn(keys, [...keys, "new"])).toBe(1);
+    expect(rowChurn(keys, [...keys.slice(1), "new"])).toBe(2);
+    expect(rowChurn(keys, [...keys].reverse())).toBe(50);
+    expect(rowChurn(["a", "b", "c"], ["a", "c", "b"])).toBe(2);
+    expect(rowChurn([], [])).toBe(0);
+  });
+
+  it("移除一行：它留在原处淡出，这段时间不可交互、不算表格的行，其余行的序号立刻接上，放完后才离开文档", async () => {
+    mount(<Changing initial={MODS} />);
+    act(() => setShownRows([MODS[0], MODS[2]]));
+    const leaving = rows().find((r) => r.textContent?.includes("Lithium"));
+    if (leaving === undefined) throw new Error("移除的行应该还在淡出");
+    expect(leaving.hasAttribute("inert")).toBe(true);
+    expect(leaving.hasAttribute("data-row-index")).toBe(false);
+    expect(leaving.tabIndex).toBe(-1);
+    expect(rows().filter((r) => r.hasAttribute("data-row-index")).map((r) => [r.textContent?.includes("Iris"), r.dataset.rowIndex])).toEqual([
+      [false, "0"],
+      [true, "1"],
+    ]);
+
+    await waitFrames();
+    expect(rows().map((r) => r.textContent?.includes("Lithium"))).toEqual([false, false]);
+  });
+
+  it("新增的行留在表里，序号与内容都对", async () => {
+    mount(<Changing initial={[MODS[0]]} />);
+    act(() => setShownRows([MODS[0], MODS[1]]));
+    await waitFrames();
+    expect(rows().map((r) => [r.dataset.rowIndex, r.hasAttribute("inert")])).toEqual([
+      ["0", false],
+      ["1", false],
+    ]);
+    expect(rows()[1].textContent).toContain("Lithium");
+  });
+
+  it("一次变化超过 40 项：行不逐个淡出，下一帧就换好", async () => {
+    const all = someMods(60);
+    mount(<Changing initial={all} />);
+    act(() => setShownRows(all.slice(0, 10)));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    expect(rows()).toHaveLength(10);
+  });
+
+  it("虚拟化的表不做行退场", async () => {
+    const all = someMods(VIRTUALIZE_ABOVE + 20);
+    mount(<Changing initial={all} />);
+    await waitFrames();
+    expect(rows().every((r) => r.hasAttribute("data-virtual"))).toBe(true);
+    act(() => setShownRows(all.slice(1)));
+    expect(rows().every((r) => r.hasAttribute("data-virtual") && !r.textContent?.includes("Mod 0版本"))).toBe(true);
+  });
+});
 
 describe("列定义", () => {
   it("按档生成列模板：固定列像素宽，弹性列按最小宽分剩余空间，隐藏列不占位", () => {

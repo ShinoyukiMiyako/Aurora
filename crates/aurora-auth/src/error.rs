@@ -80,6 +80,18 @@ pub enum AuthError {
     #[error("登录凭据已失效，需要重新登录")]
     ReloginRequired,
 
+    /// 微软登录链或 Yggdrasil 外置登录某一步遇到服务端故障：5xx、429，或返回的是故障页。可重试。
+    /// 原文不写是哪家的服务：微软与外置登录共用这个变体，`step` 已经说明是哪一步。
+    #[error("登录服务暂时不可用（{step}：HTTP {status}）")]
+    ServiceUnavailable { step: &'static str, status: u16 },
+
+    /// Minecraft 服务拒绝了启动器所用的微软应用：login_with_xbox 返回 403，且响应体含 Invalid app registration。
+    #[error(
+        "{} 使用的微软应用未获准访问 Minecraft 服务（Invalid app registration）",
+        aurora_base::brand::APP_NAME
+    )]
+    AppNotApproved,
+
     /// 离线用户名不合法（空、含引号、超长）。
     #[error("离线用户名不合法: {0}")]
     InvalidUsername(String),
@@ -182,6 +194,8 @@ impl RetryableError for AuthError {
             // 微软令牌端点忙时回 temporarily_unavailable，官方给的处理办法就是稍等后重试；
             // 其余 OAuth 错误是确定性的拒绝。
             AuthError::OAuth { error, .. } => error == OAUTH_TEMPORARILY_UNAVAILABLE,
+            // 服务端故障多为短时过载或发布中的抖动，按退避重试有望恢复。
+            AuthError::ServiceUnavailable { .. } => true,
             // 其余均为确定性的业务/协议/凭据错误，重试是同样结果。
             AuthError::Parse { .. }
             | AuthError::Response { .. }
@@ -195,6 +209,8 @@ impl RetryableError for AuthError {
             | AuthError::XstsUnknown(_)
             | AuthError::MinecraftProfileNotFound
             | AuthError::ReloginRequired
+            // 同一个 client_id 再请求一次只会得到同样的拒绝。
+            | AuthError::AppNotApproved
             | AuthError::InvalidUsername(_)
             | AuthError::Yggdrasil { .. }
             | AuthError::AccountNotFound(_)
@@ -298,6 +314,35 @@ mod tests {
                 .to_string()
                 .contains("2148916236")
         );
+    }
+
+    #[test]
+    fn service_unavailable_is_retryable_and_names_step_and_status() {
+        let err = AuthError::ServiceUnavailable {
+            step: "XSTS 授权",
+            status: 503,
+        };
+        assert!(err.is_retryable());
+        assert!(!err.is_cancelled());
+        let text = err.to_string();
+        assert!(text.contains("XSTS 授权"), "{text}");
+        assert!(text.contains("HTTP 503"), "{text}");
+
+        let throttled = AuthError::ServiceUnavailable {
+            step: "获取游戏档案",
+            status: 429,
+        };
+        assert!(throttled.is_retryable());
+        assert!(throttled.to_string().contains("获取游戏档案：HTTP 429"));
+    }
+
+    #[test]
+    fn app_not_approved_is_terminal_and_names_the_app() {
+        let err = AuthError::AppNotApproved;
+        assert!(!err.is_retryable());
+        let text = err.to_string();
+        assert!(text.starts_with(aurora_base::brand::APP_NAME), "{text}");
+        assert!(text.contains("Invalid app registration"), "{text}");
     }
 
     #[test]

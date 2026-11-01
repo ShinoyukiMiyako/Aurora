@@ -44,6 +44,8 @@ export const fade = {
   out: { duration: 0.12, ease: [0.4, 0, 1, 1] },
   /** 提示气泡退场：要比别的浮层更快让路。 */
   quick: { duration: 0.08, ease: [0.4, 0, 1, 1] },
+  /** 一次变化太多、不逐项动画时的退场：直接换上。 */
+  none: { duration: 0 },
 } as const satisfies Record<string, Transition>;
 
 /** 应用根 MotionConfig 的兜底过渡：位移类走 base 弹簧，透明度走淡入补间。 */

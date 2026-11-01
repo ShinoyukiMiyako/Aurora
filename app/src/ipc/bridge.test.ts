@@ -197,12 +197,12 @@ describe("Tauri 窗口里走真命令", () => {
     await installJava("t-java", 21);
     await installVersion("t-ver", "1.21.1", "fabric", "0.16.9", "周末生存");
     await installMod("t-mod", "1.21.1-fabric", "modrinth", "AANobbMI", "mv1");
-    await launchGame({ taskId: "t-run", versionId: "1.21.1", accountUuid: null, offlineName: "Steve" });
+    await launchGame({ taskId: "t-run", versionId: "1.21.1", accountUuid: "u-1", offlineName: null, offlineFallback: true, quickPlay: null });
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
       ["install_java", { taskId: "t-java", requiredMajor: 21 }],
       ["install_version", { taskId: "t-ver", id: "1.21.1", loader: "fabric", loaderVersion: "0.16.9", targetName: "周末生存" }],
       ["install_mod", { taskId: "t-mod", versionId: "1.21.1-fabric", platform: "modrinth", projectId: "AANobbMI", modVersionId: "mv1" }],
-      ["launch_game", { taskId: "t-run", versionId: "1.21.1", accountUuid: null, offlineName: "Steve" }],
+      ["launch_game", { taskId: "t-run", versionId: "1.21.1", accountUuid: "u-1", offlineFallback: true, offlineName: null, quickPlay: null }],
     ]);
   });
 

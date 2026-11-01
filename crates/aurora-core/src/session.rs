@@ -15,7 +15,10 @@ use aurora_launch::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::crashdiag::{CrashReport, read_tail_for_diagnosis, save_crash_report};
+use crate::crashdiag::{
+    CrashReport, CrashSource, ScanInput, find_crash_report, find_hs_err, read_head_for_diagnosis,
+    read_tail_for_diagnosis, save_crash_report,
+};
 use crate::error::{CoreError, Result};
 use crate::launch::LaunchWarning;
 
@@ -42,6 +45,8 @@ pub(crate) struct RunInfo {
     pub max_memory_mb: u32,
     pub warnings: Vec<LaunchWarning>,
     pub pid: Option<u32>,
+    /// 这一局以离线方式进单人，没有经过账户验证。
+    pub offline: bool,
 }
 
 /// 一局运行中的游戏。
@@ -80,6 +85,11 @@ impl GameRun {
 
     pub fn pid(&self) -> Option<u32> {
         self.info.pid
+    }
+
+    /// 这一局是否以离线方式进单人（未经账户验证，只保证单人游戏）。
+    pub fn offline(&self) -> bool {
+        self.info.offline
     }
 
     pub fn running_since(&self) -> u64 {
@@ -182,12 +192,48 @@ async fn settle(info: RunInfo, end: SessionEnd) -> Finished {
                 .map(|(index, line)| (line.as_str(), index as u64 + 1))
                 .collect(),
         };
-        let mut crash = CrashReport::from_lines(&numbered);
+        // 游戏自己写下的崩溃报告与 JVM 错误日志：找不到是常态，找不了或读不了的只跳过那一份并如实上报。
+        let started_at = info.clock.started_at();
+        let found = [
+            (
+                CrashSource::CrashReport,
+                find_crash_report(&info.working_dir, started_at).await,
+            ),
+            (
+                CrashSource::HsErr,
+                find_hs_err(&info.working_dir, info.pid, started_at).await,
+            ),
+        ];
+        let mut extra: Vec<(CrashSource, String, String)> = Vec::new();
+        for (source, path) in found {
+            let path = match path {
+                Ok(Some(path)) => path,
+                Ok(None) => continue,
+                Err(err) => {
+                    problems.push(err);
+                    continue;
+                }
+            };
+            match read_head_for_diagnosis(&path).await {
+                Ok(text) => extra.push((source, path.display().to_string(), text)),
+                Err(err) => problems.push(err),
+            }
+        }
+        let mut inputs = vec![ScanInput {
+            source: CrashSource::SessionLog,
+            path: log_path.as_ref().map(|path| path.display().to_string()),
+            lines: numbered,
+        }];
+        inputs.extend(
+            extra
+                .iter()
+                .map(|(source, path, text)| ScanInput::numbered(*source, Some(path.clone()), text)),
+        );
+        let mut crash = CrashReport::from_sources(&inputs, report.code);
         if let Err(err) = crash.join_suspects(&info.working_dir).await {
             problems.push(err);
         }
         crash.at = Some(exited_at);
-        crash.exit_code = report.code;
         crash.session_started_at = log_path.as_ref().map(|_| info.clock.started_at());
         crash.java = Some(info.java.clone());
         crash.max_memory_mb = Some(info.max_memory_mb);
@@ -276,6 +322,16 @@ impl GameSlot {
         if state.occupant.as_ref().is_some_and(|o| o.id == ticket.0) {
             state.occupant = None;
         }
+    }
+
+    /// 当前占用者：`(版本 id, 是否已跑起来)`，加载中为 `false`；槽空着时为 `None`。
+    ///
+    /// 不隔离的实例共用同一份存档，备份或恢复共用存档前要知道是不是别的实例正开着游戏。
+    pub fn occupant(&self) -> Option<(String, bool)> {
+        self.state()
+            .occupant
+            .as_ref()
+            .map(|o| (o.version_id.clone(), o.kill.is_some()))
     }
 
     /// 运行中游戏的结束句柄；没有游戏或还在加载时为 `None`。
@@ -373,6 +429,7 @@ mod tests {
             max_memory_mb: 4096,
             warnings: Vec::new(),
             pid: session.id(),
+            offline: false,
         };
         Started {
             _tmp: tmp,
@@ -483,6 +540,28 @@ mod tests {
         assert!(slot.reserve("b").is_ok());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn occupant_reports_who_holds_the_slot_and_whether_it_runs() {
+        let slot = GameSlot::default();
+        assert_eq!(slot.occupant(), None);
+        let loading = slot.reserve("共用存档").unwrap();
+        assert_eq!(slot.occupant(), Some(("共用存档".to_owned(), false)));
+
+        let started = start("ping", &["-n", "30", "127.0.0.1"]).await;
+        let ticket = loading.occupy(started.run.kill_switch());
+        assert_eq!(slot.occupant(), Some(("共用存档".to_owned(), true)));
+
+        let waiting = tokio::spawn(started.run.finish());
+        assert!(slot.kill_switch().unwrap().kill().await.unwrap());
+        assert!(waiting.await.unwrap().exit.killed);
+        slot.release(ticket);
+        assert_eq!(slot.occupant(), None);
+
+        // 加载阶段的占用被丢弃（启动失败、取消）后同样空出来。
+        drop(slot.reserve("b").unwrap());
+        assert_eq!(slot.occupant(), None);
+    }
+
     #[test]
     fn dropped_reservation_frees_the_slot_and_stale_tickets_do_not() {
         let slot = GameSlot::default();
@@ -566,6 +645,7 @@ mod tests {
             max_memory_mb: 4096,
             warnings: Vec::new(),
             pid: None,
+            offline: false,
         };
         let end = SessionEnd {
             report: ExitReport {
@@ -589,7 +669,7 @@ mod tests {
         }
     }
 
-    async fn saved_crash(root: &Path) -> Option<CrashReport> {
+    async fn last_crash_of(root: &Path) -> Option<CrashReport> {
         crate::facade::Aurora::for_test(
             crate::config::AuroraConfig::default(),
             root.to_path_buf(),
@@ -619,7 +699,9 @@ mod tests {
             "{:?}",
             finished.problems[0]
         );
-        let crash = saved_crash(&failed.root).await.expect("应存下这一局的崩溃");
+        let crash = last_crash_of(&failed.root)
+            .await
+            .expect("应存下这一局的崩溃");
         assert_eq!(crash.exit_code, None);
         assert_eq!(
             crash
@@ -646,5 +728,124 @@ mod tests {
         assert_eq!(finished.problems.len(), 1, "{:?}", finished.problems);
         assert!(!crash_saved(&failed.version_dir));
         assert!(played_ms(&failed.root).await.is_some());
+    }
+
+    /// 落盘的崩溃报告本体（JSON）。
+    fn saved_crash(version_dir: &Path) -> serde_json::Value {
+        let bytes = std::fs::read(
+            version_dir
+                .join(aurora_instance::AURORA_META_DIR)
+                .join(crate::crashdiag::CRASH_REPORT_FILE),
+        )
+        .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["report"].clone()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn access_violation_without_log_clues_falls_back_to_a_native_crash() {
+        let started = start("cmd", &["/C", "exit -1073741819"]).await;
+        let finished = started.run.finish().await;
+        assert!(finished.problems.is_empty(), "{:?}", finished.problems);
+        assert_eq!(finished.exit.exit_code, Some(-1_073_741_819));
+        let report = saved_crash(&started.version_dir);
+        let clues = report["diagnoses"].as_array().unwrap();
+        assert_eq!(clues.len(), 1, "{clues:?}");
+        assert_eq!(clues[0]["category"], "native_crash");
+        assert_eq!(clues[0]["source"], "exit_code");
+        assert_eq!(clues[0]["detail"], "0xC0000005");
+        assert_eq!(clues[0]["line"], 0);
+        assert_eq!(clues[0]["matched"], "");
+        // 说明按退出码现算，不存；会话日志一项读报告时现找，也不存。
+        assert_eq!(report["exit_code_note"], serde_json::Value::Null);
+        assert_eq!(report["scanned_files"], serde_json::json!([]));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn crash_report_written_during_the_session_is_scanned() {
+        let started = start("cmd", &["/C", "exit 1"]).await;
+        let reports = started.root.join("crash-reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        let path = reports.join("crash-2026-10-31_12.00.00-client.txt");
+        std::fs::write(
+            &path,
+            "---- Minecraft Crash Report ----\nDescription: Unexpected error\n\njava.lang.OutOfMemoryError: Java heap space\n",
+        )
+        .unwrap();
+        let finished = started.run.finish().await;
+        assert!(finished.problems.is_empty(), "{:?}", finished.problems);
+        let report = saved_crash(&started.version_dir);
+        let clues = report["diagnoses"].as_array().unwrap();
+        assert_eq!(clues.len(), 1, "{clues:?}");
+        assert_eq!(clues[0]["category"], "out_of_memory");
+        assert_eq!(clues[0]["source"], "crash_report");
+        assert_eq!(clues[0]["line"], 4);
+        assert_eq!(
+            report["scanned_files"],
+            serde_json::json!([{ "kind": "crash_report", "path": path.display().to_string() }])
+        );
+        assert_eq!(report["exit_code"], 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unreadable_crash_files_become_problems_and_the_report_is_still_saved() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        // crash-reports 是个文件而不是目录：列目录失败。
+        let started = start("cmd", &["/C", "exit 3"]).await;
+        std::fs::write(started.root.join("crash-reports"), b"not a dir").unwrap();
+        let finished = started.run.finish().await;
+        assert_eq!(finished.problems.len(), 1, "{:?}", finished.problems);
+        assert!(crash_saved(&started.version_dir));
+
+        // hs_err 被别的进程独占打开：找得到、读不了，那一份跳过。
+        let started = start("cmd", &["/C", "exit 3"]).await;
+        let pid = started.run.pid().expect("进程已经起来");
+        let hs_err = started.root.join(format!("hs_err_pid{pid}.log"));
+        std::fs::write(&hs_err, "# C  [ig9icd64.dll+0x57a41c]\n").unwrap();
+        let _held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&hs_err)
+            .unwrap();
+        let finished = started.run.finish().await;
+        assert_eq!(finished.problems.len(), 1, "{:?}", finished.problems);
+        assert!(crash_saved(&started.version_dir));
+        let report = saved_crash(&started.version_dir);
+        assert_eq!(report["scanned_files"], serde_json::json!([]));
+        assert!(
+            report["diagnoses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|clue| clue["category"] != "intel_graphics_driver")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unlistable_crash_reports_do_not_drop_the_hs_err() {
+        // 两份文件各自独立：列不出 crash-reports 只跳过崩溃报告，已找到的 JVM 错误日志照样参与扫描。
+        let started = start("cmd", &["/C", "exit -1073741819"]).await;
+        let pid = started.run.pid().expect("进程已经起来");
+        std::fs::write(started.root.join("crash-reports"), b"not a dir").unwrap();
+        let hs_err = started.root.join(format!("hs_err_pid{pid}.log"));
+        std::fs::write(
+            &hs_err,
+            "# A fatal error has been detected by the Java Runtime Environment:\n#\n# C  [ig9icd64.dll+0x57a41c]\n",
+        )
+        .unwrap();
+        let finished = started.run.finish().await;
+        assert_eq!(finished.problems.len(), 1, "{:?}", finished.problems);
+        let report = saved_crash(&started.version_dir);
+        // 工作目录在实例目录之外（共享游戏目录），存的是绝对路径。
+        let scanned = report["scanned_files"].as_array().unwrap();
+        assert_eq!(scanned.len(), 1, "{scanned:?}");
+        assert_eq!(scanned[0]["kind"], "hs_err");
+        assert_eq!(scanned[0]["path"], hs_err.display().to_string());
+        let clues = report["diagnoses"].as_array().unwrap();
+        assert_eq!(clues.len(), 1, "{clues:?}");
+        assert_eq!(clues[0]["category"], "intel_graphics_driver");
+        assert_eq!(clues[0]["source"], "hs_err");
+        assert_eq!(clues[0]["line"], 3);
+        assert_eq!(clues[0]["detail"], "ig9icd64.dll");
     }
 }

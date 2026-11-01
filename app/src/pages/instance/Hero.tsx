@@ -1,6 +1,8 @@
 // 实例头图：代码绘制的实例封面为底，左侧等距方块与名称，右侧图钉、更多菜单与启动胶囊（本页唯一的主按钮）。
 // 名称就地改名：点改名或按 F2，回车保存、Esc 只取消改名；校验与新建、设置页共用一套规则。
+// 更多菜单的「导出整合包」打开导出弹窗，弹窗只在打开期间挂载。
 
+import { AnimatePresence } from "framer-motion";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "../../art/Icon";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
@@ -25,6 +27,7 @@ import { MoreMenu } from "../../ui/MoreMenu";
 import { Tag } from "../../ui/Tag";
 import { TextInput } from "../../ui/TextInput";
 import { HERO_COPY, SOURCE_LABEL } from "./copy";
+import { ExportModpackModal } from "./ExportModpackModal";
 import styles from "./instance.module.css";
 import { lockReason, type InstanceOps } from "./ops";
 
@@ -52,7 +55,9 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   const repairReason = lockReason(ops.locks.repair, "repair");
   const deleteReason = lockReason(ops.locks.delete, "delete");
   const folderReason = ops.folderReason("instance");
+  const exportReason = ops.exportReason;
   const compact = tier === "compact";
+  const [exporting, setExporting] = useState(false);
 
   const pinLabel = pinBlocked ? TOAST_COPY.pinLimit : inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin;
   const pinReason = pinBlocked ? TOAST_COPY.pinLimit : undefined;
@@ -63,6 +68,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
       ? [{ label: inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin, icon: inst.pinned ? ("pin-off" as const) : ("pin" as const), disabled: pinBlocked, disabledReason: pinReason, onSelect: ops.togglePin }]
       : []),
     { label: HERO_COPY.openFolder, icon: "folder", disabled: folderReason !== undefined, disabledReason: folderReason, onSelect: () => ops.openFolder("instance") },
+    { label: HERO_COPY.exportModpack, icon: "modpack", disabled: exportReason !== undefined, disabledReason: exportReason, onSelect: () => setExporting(true) },
     { kind: "separator" },
     needsReimport(inst)
       ? { label: MODPACK_REIMPORT_COPY.menuReimport, icon: "modpack", onSelect: () => go(reimportRoute(inst)) }
@@ -116,6 +122,11 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
                   </Tag>
                 )}
                 {view.kind === "installing" && <InstallingTag instanceId={inst.id} />}
+                {inst.activity === "backing_up" && (
+                  <Tag tone="info" icon="clock">
+                    {HERO_COPY.backingUp}
+                  </Tag>
+                )}
                 {crashActive && (
                   <Tag tone="danger" icon="x-circle">
                     {HERO_COPY.lastCrash}
@@ -141,6 +152,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
           </div>
         </Cover>
       </div>
+      <AnimatePresence>{exporting && <ExportModpackModal key="export" inst={inst} lockReason={exportReason} onClose={() => setExporting(false)} />}</AnimatePresence>
     </Card>
   );
 }

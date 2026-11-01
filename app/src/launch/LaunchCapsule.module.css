@@ -189,6 +189,25 @@
   box-shadow: var(--sk-focus), var(--sk-accent-glow);
 }
 
+/* 带原因的禁用：外观同按钮的禁用，悬停与按下失效，聚焦环照常 */
+.go[data-disabled] {
+  opacity: var(--sk-disabled);
+  box-shadow: var(--sk-gloss);
+  cursor: not-allowed;
+}
+
+.go[data-disabled]:hover::before {
+  opacity: 0;
+}
+
+.go[data-disabled]:active {
+  transform: none;
+}
+
+.go[data-disabled]:focus-visible {
+  box-shadow: var(--sk-focus), var(--sk-gloss);
+}
+
 .go[data-tone="warn"] {
   background: var(--sk-warn-tint);
   color: var(--sk-text);

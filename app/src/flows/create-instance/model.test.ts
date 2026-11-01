@@ -12,10 +12,16 @@ import {
   latestRelease,
   loaderOptions,
   manifestProblem,
+  newInstanceIsolated,
+  optionChecked,
   recommendedLoaderVersion,
+  starterBlock,
+  starterSelection,
   supportsLoader,
+  templateBlock,
   visibleSteps,
 } from "./model";
+import type { StarterModsDto } from "../../state/queries/starter";
 
 function manifest(overrides: Partial<ManifestDto> = {}): ManifestDto {
   return {
@@ -180,5 +186,112 @@ describe("文案", () => {
     expect(CREATE_COPY.loader.missing("1.5.2", ["fabric", "quilt"])).toBe("1.5.2 没有 Fabric、Quilt 可用，换个游戏版本就能看到。");
     expect(CREATE_COPY.subtitle(2, 6, "version")).toBe("第 2 步，共 6 步 · 游戏版本");
     expect(CREATE_COPY.loaderVersion.title("neoforge")).toBe("选择 NeoForge 版本");
+  });
+});
+
+describe("开局选项", () => {
+  const s = CREATE_COPY.confirm.starter;
+
+  function version(projectId: string, versionId: string, fileSize: number | null) {
+    return {
+      version_id: versionId,
+      project_id: projectId,
+      platform: "modrinth" as const,
+      name: versionId,
+      version_number: versionId,
+      release_channel: "release" as const,
+      game_versions: ["1.21.1"],
+      loaders: ["fabric" as const],
+      file_name: `${versionId}.jar`,
+      file_size: fileSize,
+      sha1: null,
+      download_url: null,
+      date_published: "2026-09-01T00:00:00Z",
+      dependencies: [],
+    };
+  }
+
+  const fabric: StarterModsDto = {
+    loader: "fabric",
+    mc_version: "1.21.1",
+    available: [
+      { group: "api", project_id: "P7dR8mSH", name: "Fabric API", version: version("P7dR8mSH", "fapi", 2048) },
+      { group: "performance", project_id: "AANobbMI", name: "Sodium", version: version("AANobbMI", "sodium", null) },
+      { group: "performance", project_id: "gvQqBUqZ", name: "Lithium", version: version("gvQqBUqZ", "lithium", 512) },
+    ],
+    missing: [{ group: "performance", project_id: "nmDcB62a", name: "ModernFix", reason: "no_version" }],
+  };
+
+  it("组合标签只数能装的项：0 项不带括号，1、2 项全写出，3 项及以上写前两个加总数", () => {
+    expect(s.performance([])).toBe("装上性能优化组合");
+    expect(s.performance(["Sodium"])).toBe("装上性能优化组合（Sodium）");
+    expect(s.performance(["Sodium", "Lithium"])).toBe("装上性能优化组合（Sodium、Lithium）");
+    expect(s.performance(["Sodium", "Lithium", "FerriteCore", "ModernFix", "Krypton"])).toBe("装上性能优化组合（Sodium、Lithium 等 5 个）");
+  });
+
+  it("缺项文案：没有这个版本的与平台上找不到的分两行，名字用顿号连接；没有缺项时一行也不出", () => {
+    expect(s.missing([{ name: "ModernFix", reason: "no_version" }], "1.21.1")).toEqual(["ModernFix 还没有适配 1.21.1，不会装上"]);
+    expect(
+      s.missing(
+        [
+          { name: "Sodium", reason: "no_version" },
+          { name: "Lithium", reason: "not_found" },
+          { name: "FerriteCore", reason: "no_version" },
+        ],
+        "1.20.1",
+      ),
+    ).toEqual(["Sodium、FerriteCore 还没有适配 1.20.1，不会装上", "Modrinth 上已经找不到 Lithium，不会装上"]);
+    expect(s.missing([], "1.21.1")).toEqual([]);
+    expect(s.apiMissing("QFAPI", "1.21.1")).toBe("QFAPI 还没有适配 1.21.1 的版本");
+    expect(s.noneAvailable("1.21.1")).toBe("这几个 Mod 都还没有适配 1.21.1");
+    expect(s.templateFrom("樱花生存", 1_000, 1_000 + 3 * 86_400_000)).toBe("取自「樱花生存」，3 天前保存");
+    expect(s.templateFrom("樱花生存", null, 0)).toBe("取自「樱花生存」");
+    expect(s.templateFrom(null, null, 0)).toBe("取自数据目录里的默认设置");
+  });
+
+  it("沿用默认设置的禁用原因按优先级：读取中、读不到、配置关闭、没有模板、不隔离；全都满足才用得上", () => {
+    const ready = (present: boolean, enabled: boolean) => ({ status: "ready" as const, data: { present, enabled } });
+    expect(templateBlock({ status: "loading" }, false)).toBe("loading");
+    expect(templateBlock({ status: "error", error: new Error("坏了") }, false)).toBe("unreadable");
+    // 几个原因同时成立时只报最前面那一条
+    expect(templateBlock(ready(false, false), false)).toBe("disabled");
+    expect(templateBlock(ready(false, true), false)).toBe("empty");
+    expect(templateBlock(ready(true, true), false)).toBe("shared");
+    expect(templateBlock(ready(true, true), null)).toBe("loading");
+    expect(templateBlock(ready(true, true), true)).toBeNull();
+  });
+
+  it("新实例的隔离按全局策略、加载器与版本类型推断", () => {
+    expect(newInstanceIsolated("mod_loaders_and_non_release", "vanilla", "release")).toBe(false);
+    expect(newInstanceIsolated("mod_loaders_and_non_release", "fabric", "release")).toBe(true);
+    expect(newInstanceIsolated("mod_loaders_and_non_release", "vanilla", "snapshot")).toBe(true);
+    expect(newInstanceIsolated("non_release_only", "fabric", "release")).toBe(false);
+    expect(newInstanceIsolated("disabled", "neoforge", "old")).toBe(false);
+    expect(newInstanceIsolated("all", "vanilla", "release")).toBe(true);
+  });
+
+  it("开局 Mod 的一项：查询中与查不到时禁用，某组一项都装不了时禁用；勾选按默认或用户的选择，禁用的一律不勾", () => {
+    expect(starterBlock({ status: "loading" }, "api")).toBe("loading");
+    expect(starterBlock({ status: "error", error: new Error("断网") }, "performance")).toBe("error");
+    expect(starterBlock({ status: "ready", data: fabric }, "api")).toBeNull();
+    expect(starterBlock({ status: "ready", data: { ...fabric, available: fabric.available.slice(0, 1) } }, "performance")).toBe("none");
+
+    expect(optionChecked(null, null, true)).toBe(true);
+    expect(optionChecked(null, null, false)).toBe(false);
+    expect(optionChecked(null, false, true)).toBe(false);
+    expect(optionChecked(null, true, false)).toBe(true);
+    expect(optionChecked("none", true, true)).toBe(false);
+    expect(optionChecked("shared", null, true)).toBe(false);
+  });
+
+  it("提交的 starterMods：API 在前、性能组合按表的顺序，只收能装的；两项都不勾为空", () => {
+    expect(starterSelection(fabric, true, true)).toEqual([
+      { projectId: "P7dR8mSH", modVersionId: "fapi", title: "Fabric API", fileSize: 2048 },
+      { projectId: "AANobbMI", modVersionId: "sodium", title: "Sodium", fileSize: null },
+      { projectId: "gvQqBUqZ", modVersionId: "lithium", title: "Lithium", fileSize: 512 },
+    ]);
+    expect(starterSelection(fabric, false, true).map((p) => p.projectId)).toEqual(["AANobbMI", "gvQqBUqZ"]);
+    expect(starterSelection(fabric, true, false).map((p) => p.projectId)).toEqual(["P7dR8mSH"]);
+    expect(starterSelection(fabric, false, false)).toEqual([]);
   });
 });

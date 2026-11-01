@@ -14,11 +14,13 @@
 use std::error::Error as StdError;
 
 use aurora_core::{
-    AuthError, BaseError, CoreError, DownloadError, InstallError, InstanceError, JavaError,
-    LaunchError, ModPlatformError, ModpackError, VersionError,
+    AuthError, BaseError, CoreError, CredentialRealm, DownloadError, InstallError, InstanceError,
+    JavaError, LaunchError, ModPlatformError, ModpackError, VersionError, TEMPLATE_FILES,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+
+use crate::commands::modpack::BlockedFileDto;
 
 /// 命令层与门面错误映射用到的全部错误码（账户错误码见 [`auth_code`]）。
 pub mod code {
@@ -50,10 +52,20 @@ pub mod code {
     pub const INSTANCE_FAILED: &str = "instance_failed";
     /// Java 探测或运行时下载失败。
     pub const JAVA_FAILED: &str = "java_failed";
+    /// 手动添加的 Java 路径不能用。detail：`{ path, reason }`，reason 为 not_absolute / not_java_executable /
+    /// not_found / probe_failed / probe_timeout。
+    pub const JAVA_PATH_INVALID: &str = "java_path_invalid";
+    /// 手动添加的 Java 缺少运行时文件。detail：`{ path, missing }`，missing 相对 Java 根目录、以 `/` 分隔。
+    pub const JAVA_RUNTIME_INCOMPLETE: &str = "java_runtime_incomplete";
+    /// 读不到本机显卡信息（DXGI 枚举失败）。detail：`{ hresult: "0x%08X", causes }`。
+    pub const GPU_QUERY_FAILED: &str = "gpu_query_failed";
     /// 启动链路失败（命令拼装、进程拉起）。
     pub const LAUNCH_FAILED: &str = "launch_failed";
     /// 未配置 CurseForge API 密钥。
     pub const CURSEFORGE_KEY_MISSING: &str = "curseforge_key_missing";
+    /// CurseForge 的下载服务器拒绝了下载密钥（HTTP 401），换源与重试都没用，只能换一个可用的密钥。
+    /// detail：`{ realm: "curseforge", url, status }`，url 为被拒的那一跳。
+    pub const CURSEFORGE_KEY_REJECTED: &str = "curseforge_key_rejected";
     /// 启停 Mod 时启用与禁用两份文件同时存在。
     pub const MOD_STATE_CONFLICT: &str = "mod_state_conflict";
     /// 资源平台请求或本地 Mod 扫描的其余失败。
@@ -80,7 +92,8 @@ pub mod code {
     pub const WORLD_NOT_FOUND: &str = "world_not_found";
     /// 平台给出的文件名不能安全落盘（detail.platform、file_name）。
     pub const UNSAFE_FILE_NAME: &str = "unsafe_file_name";
-    /// CurseForge 作者禁止第三方分发，文件只能去网页手动下载（detail.files）。
+    /// CurseForge 作者禁止第三方分发，文件只能去网页手动下载。detail.files 为对象数组，每项
+    /// `{ project_id, file_id, file_name, web_url, destination, sha1, fingerprint, size }`。
     pub const DISTRIBUTION_BLOCKED: &str = "distribution_blocked";
     /// 选的文件扩展名既不是 .mrpack 也不是 .zip（detail.path）。
     pub const MODPACK_UNSUPPORTED_EXTENSION: &str = "modpack_unsupported_extension";
@@ -90,6 +103,8 @@ pub mod code {
     pub const MODPACK_MANIFEST_INVALID: &str = "modpack_manifest_invalid";
     /// 整合包文件不完整或已损坏（detail.path）。
     pub const MODPACK_CORRUPT: &str = "modpack_corrupt";
+    /// 整合包里有条目用了不支持的压缩方式（detail.path、entry、method）。
+    pub const MODPACK_UNSUPPORTED_COMPRESSION: &str = "modpack_unsupported_compression";
     /// 整合包里有越出实例目录、写进启动器元数据目录或符号链接的条目（detail.path）。
     pub const MODPACK_UNSAFE_PATH: &str = "modpack_unsafe_path";
     /// 新实例名不可用（detail.name、rule：empty / too_long / illegal_char / reserved / duplicate）。
@@ -124,7 +139,8 @@ pub mod code {
     pub const UPDATE_INSTALL_FAILED: &str = "update_install_failed";
     /// 已有游戏在加载或运行，同一时间只跑一个游戏。detail：`{ version_id, phase: loading | running }`。
     pub const BUSY: &str = "busy";
-    /// 实例正在安装、补全、改名、删除、启动或运行，暂时不能做这件事。detail：`{ id, activity }`。
+    /// 实例正在安装、补全、改名、删除、启动、运行、改动、备份或恢复存档，或正被别的实例当作基底，暂时不能做
+    /// 这件事。detail：`{ id, activity, used_by? }`，used_by 只在 activity 为 inherited 时给出。
     pub const INSTANCE_BUSY: &str = "instance_busy";
     /// 有别的实例经 inheritsFrom 依赖它，不能改名或删除。detail：`{ id, dependents }`。
     pub const INSTANCE_HAS_DEPENDENTS: &str = "instance_has_dependents";
@@ -132,6 +148,12 @@ pub mod code {
     pub const OPEN_FAILED: &str = "open_failed";
     /// 要改动的 Mod 文件正被占用（游戏运行中）。detail：`{ path }`，为被占用的文件。
     pub const MOD_FILE_BUSY: &str = "mod_file_busy";
+    /// 这个实例写不成 Modrinth 整合包。detail：`{ id, reason, loader? }`，reason 为 version_unknown /
+    /// loader_unsupported / loader_version_unknown / multiple_loaders / incomplete，loader 只在加载器
+    /// 不受支持时给出。
+    pub const MODPACK_EXPORT_UNSUPPORTED: &str = "modpack_export_unsupported";
+    /// 导出的整合包没通过回读校验，产物已删除。detail：`{ path, reason }`。
+    pub const MODPACK_EXPORT_CHECK_FAILED: &str = "modpack_export_check_failed";
     /// 改名或删除已经完成（目录、侧栏固定与当前选中都已改好），只是游玩记录没能跟着改。前端照成功处理再
     /// 提示；没改成的记录由门面记着，之后读写游玩记录时补上。detail：`{ id, renamed_to? }` 与原因链。
     pub const PLAY_RECORDS_FAILED: &str = "play_records_failed";
@@ -140,6 +162,25 @@ pub mod code {
     pub const INSTALL_UNSAFE_PATH: &str = "install_unsafe_path";
     /// 加载器安装器自带的库（版本 JSON 里地址留空）缺失或已损坏，只能重装加载器补回。detail：`{ path }`。
     pub const LOADER_LIBRARY_MISSING: &str = "loader_library_missing";
+    /// 实例工作目录里没有可保存的设置文件。detail：`{ id, files }`，files 为白名单。
+    pub const TEMPLATE_SOURCE_EMPTY: &str = "template_source_empty";
+    /// 要恢复或删除的存档备份不在备份列表里，或文件已经不在盘上。detail：`{ id, world, file }`。
+    pub const WORLD_BACKUP_NOT_FOUND: &str = "world_backup_not_found";
+    /// 存档备份读不出来、有越界或符号链接条目、或解出来没有可读的 level.dat；现在的存档没有动。
+    /// detail：`{ path, reason, entry? }`，entry 为不合格的条目名。
+    pub const WORLD_BACKUP_CORRUPT: &str = "world_backup_corrupt";
+    /// 存档正被游戏打开（session.lock 被占着）。detail：`{ path }`。
+    pub const WORLD_IN_USE: &str = "world_in_use";
+    /// 恢复时原存档已移进回收站，恢复出的副本却没能放到位。detail：`{ path, staged }`，path 是存档原来的
+    /// 位置，staged 是恢复出的副本，那是这份备份唯一解出来的拷贝，不会被删掉。
+    pub const WORLD_RESTORE_INCOMPLETE: &str = "world_restore_incomplete";
+    /// 改名已经完成（目录、引用、游玩记录都已改好），只是存档备份没能跟着挪。前端照成功处理再提示。
+    /// detail：`{ id, renamed_to, path }` 与原因链，path 是留在旧名下的备份目录。
+    pub const WORLD_BACKUPS_NOT_MOVED: &str = "world_backups_not_moved";
+    /// 要改的服务器不在固定列表里。detail：`{ address }`。
+    pub const SERVER_NOT_PINNED: &str = "server_not_pinned";
+    /// 实例的版本不支持这种直达方式。detail：`{ version_id, mode: "singleplayer" | "multiplayer" }`。
+    pub const QUICK_PLAY_UNSUPPORTED: &str = "quick_play_unsupported";
 }
 
 /// 序列化给前端的命令错误。
@@ -254,11 +295,17 @@ fn core_code(err: &CoreError) -> &'static str {
     match err {
         CoreError::Base(e) => base_code(e),
         CoreError::Version(_) => code::VERSION_JSON_INVALID,
+        CoreError::Download(e) | CoreError::Install(InstallError::Download(e))
+            if e.credential_rejection() == Some(CredentialRealm::CurseForge) =>
+        {
+            code::CURSEFORGE_KEY_REJECTED
+        }
         CoreError::Download(_) => code::DOWNLOAD_FAILED,
         CoreError::Install(e) => install_code(e),
         CoreError::Instance(e) => instance_code(e),
         CoreError::Java(_) => code::JAVA_FAILED,
         CoreError::Auth(e) => auth_code(e),
+        CoreError::Launch(LaunchError::QuickPlayUnsupported { .. }) => code::QUICK_PLAY_UNSUPPORTED,
         CoreError::Launch(_) => code::LAUNCH_FAILED,
         CoreError::ModPlatform(e) => mod_platform_code(e),
         CoreError::ConfigIo { .. } => code::CONFIG_IO,
@@ -273,8 +320,10 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::InvalidProjectId { .. } => code::INVALID_ARGUMENT,
         CoreError::InvalidResourceTarget(_) => code::INVALID_ARGUMENT,
         CoreError::WorldNotFound { .. } => code::WORLD_NOT_FOUND,
+        CoreError::WorldBackupNotFound { .. } => code::WORLD_BACKUP_NOT_FOUND,
         CoreError::UnsafeFileName { .. } => code::UNSAFE_FILE_NAME,
         CoreError::FileDistributionBlocked { .. } => code::DISTRIBUTION_BLOCKED,
+        CoreError::ClaimFolderInvalid { .. } => code::IO,
         CoreError::Modpack(e) => modpack_code(e),
         CoreError::InstanceNameInvalid { .. } => code::INSTANCE_NAME_INVALID,
         CoreError::JsonFileInvalid { .. } => code::JSON_FILE_INVALID,
@@ -284,19 +333,39 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::FeedParse { .. } | CoreError::FeedTooLarge { .. } => code::FEED_INVALID,
         CoreError::RemotePack { .. } => code::REMOTE_PACK_UNREADABLE,
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
+        CoreError::ServerNotPinned { .. } => code::SERVER_NOT_PINNED,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
         CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
+        CoreError::JavaPathInvalid { .. } => code::JAVA_PATH_INVALID,
+        CoreError::JavaRuntimeIncomplete { .. } => code::JAVA_RUNTIME_INCOMPLETE,
+        // 写注册表失败本质是一次读写失败；它只在启动链路里转成警告，到了命令边界与其余读写失败同码。
+        CoreError::GpuPreferenceWrite { .. } => code::IO,
+        CoreError::TemplateSourceEmpty { .. } => code::TEMPLATE_SOURCE_EMPTY,
+        // 降级被拒说明这次传入的 offlineFallback 不成立，按参数错误报；拒绝原因放在 detail 里供前端分支。
+        CoreError::OfflineFallbackRefused { .. } => code::INVALID_ARGUMENT,
+        CoreError::ModpackExportUnsupported { .. } => code::MODPACK_EXPORT_UNSUPPORTED,
     }
 }
 
 /// 实例 id、名称、设置与侧栏固定的问题是调用方传错了参数，不论从哪个命令冒上来都报 invalid_argument：
 /// 崩溃诊断、启动日志、Mod 与历史这些命令不经实例领域自己的映射。
+///
+/// 存档备份的几种失败前端要分别处理（备份坏了、存档开着、恢复只做了一半），各自成码；备份索引读不懂与
+/// 实例里别的启动器 JSON 读不懂是同一类问题，沿用 json_file_invalid。
 fn instance_code(err: &InstanceError) -> &'static str {
     match err {
         InstanceError::InvalidId { .. }
         | InstanceError::InvalidName { .. }
         | InstanceError::InvalidSettings { .. }
-        | InstanceError::InvalidPins { .. } => code::INVALID_ARGUMENT,
+        | InstanceError::InvalidPins { .. }
+        | InstanceError::InvalidBackupArgument { .. } => code::INVALID_ARGUMENT,
+        InstanceError::BackupArchive { .. }
+        | InstanceError::BackupEntryUnsafe { .. }
+        | InstanceError::BackupLevelUnreadable { .. } => code::WORLD_BACKUP_CORRUPT,
+        InstanceError::BackupIndexInvalid { .. } => code::JSON_FILE_INVALID,
+        InstanceError::WorldInUse { .. } => code::WORLD_IN_USE,
+        InstanceError::RestoreNotPlaced { .. } => code::WORLD_RESTORE_INCOMPLETE,
+        InstanceError::Cancelled => code::CANCELLED,
         _ => code::INSTANCE_FAILED,
     }
 }
@@ -309,11 +378,14 @@ fn modpack_code(err: &ModpackError) -> &'static str {
             code::MODPACK_MANIFEST_INVALID
         }
         ModpackError::Corrupt { .. } => code::MODPACK_CORRUPT,
+        ModpackError::UnsupportedCompression { .. } => code::MODPACK_UNSUPPORTED_COMPRESSION,
+        ModpackError::NotOptional { .. } => code::INVALID_ARGUMENT,
         ModpackError::UnsafePath { .. } | ModpackError::SymlinkEntry { .. } => {
             code::MODPACK_UNSAFE_PATH
         }
         ModpackError::Io { .. } => code::IO,
         ModpackError::Cancelled => code::CANCELLED,
+        ModpackError::ExportCheckFailed { .. } => code::MODPACK_EXPORT_CHECK_FAILED,
     }
 }
 
@@ -365,6 +437,8 @@ pub fn auth_code(err: &AuthError) -> &'static str {
         AuthError::XstsUnknown(_) => "XstsUnknown",
         AuthError::MinecraftProfileNotFound => "MinecraftProfileNotFound",
         AuthError::ReloginRequired => "ReloginRequired",
+        AuthError::ServiceUnavailable { .. } => "ServiceUnavailable",
+        AuthError::AppNotApproved => "AppNotApproved",
         AuthError::InvalidUsername(_) => "InvalidUsername",
         AuthError::Yggdrasil { .. } => "Yggdrasil",
         AuthError::AccountNotFound(_) => "AccountNotFound",
@@ -394,9 +468,30 @@ fn xerr(err: &AuthError) -> Option<i64> {
     }
 }
 
+/// 错误链上被拒绝的那次下载：平台、那一跳的地址与状态码。组合错误（多源耗尽、分片回退）里包着的也找出来。
+fn credential_rejected(err: &DownloadError) -> Option<(CredentialRealm, &str, u16)> {
+    match err {
+        DownloadError::CredentialRejected { realm, url, status } => {
+            Some((*realm, url.as_str(), *status))
+        }
+        DownloadError::AllSourcesExhausted { last, .. } => credential_rejected(last),
+        DownloadError::ChunkedFallbackFailed {
+            chunked, fallback, ..
+        } => credential_rejected(fallback).or_else(|| credential_rejected(chunked)),
+        _ => None,
+    }
+}
+
 fn core_detail(err: &CoreError) -> Map<String, Value> {
     let mut detail = Map::new();
     match err {
+        CoreError::Download(e) | CoreError::Install(InstallError::Download(e)) => {
+            if let Some((realm, url, status)) = credential_rejected(e) {
+                detail.insert("realm".to_owned(), json!(realm.code()));
+                detail.insert("url".to_owned(), json!(url));
+                detail.insert("status".to_owned(), json!(status));
+            }
+        }
         CoreError::Auth(auth) => {
             if let Some(code) = xerr(auth) {
                 detail.insert("xerr".to_owned(), json!(code));
@@ -422,8 +517,19 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
                 AuthError::OfflineStoreDeserialize { path, .. } => {
                     detail.insert("path".to_owned(), json!(path.display().to_string()));
                 }
+                // 原因链上没有 reqwest 错误，因而不会带 detail.network：服务故障不是本机连不上网，
+                // 不该触发前端的连通性探测。
+                AuthError::ServiceUnavailable { step, status } => {
+                    detail.insert("step".to_owned(), json!(step));
+                    detail.insert("status".to_owned(), json!(status));
+                }
                 _ => {}
             }
+        }
+        CoreError::OfflineFallbackRefused { account, reason } => {
+            detail.insert("field".to_owned(), json!("offlineFallback"));
+            detail.insert("reason".to_owned(), json!(reason.as_str()));
+            detail.insert("account".to_owned(), json!(account));
         }
         CoreError::VersionNotInstalled { id } => {
             detail.insert("id".to_owned(), json!(id));
@@ -438,7 +544,10 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("rule".to_owned(), json!(violation.code()));
             detail.insert("name".to_owned(), json!(name));
         }
-        CoreError::Instance(InstanceError::InvalidSettings { field, reason }) => {
+        CoreError::Instance(
+            InstanceError::InvalidSettings { field, reason }
+            | InstanceError::InvalidBackupArgument { field, reason },
+        ) => {
             detail.insert("field".to_owned(), json!(field));
             detail.insert("reason".to_owned(), json!(reason));
         }
@@ -470,6 +579,40 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("version_id".to_owned(), json!(version_id));
             detail.insert("world".to_owned(), json!(world));
         }
+        CoreError::WorldBackupNotFound {
+            version_id,
+            world,
+            file,
+        } => {
+            detail.insert("id".to_owned(), json!(version_id));
+            detail.insert("world".to_owned(), json!(world));
+            detail.insert("file".to_owned(), json!(file));
+        }
+        CoreError::Instance(
+            InstanceError::BackupArchive { path, reason }
+            | InstanceError::BackupLevelUnreadable { path, reason },
+        ) => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
+            detail.insert("reason".to_owned(), json!(reason));
+        }
+        CoreError::Instance(InstanceError::BackupEntryUnsafe {
+            path,
+            entry,
+            reason,
+        }) => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
+            detail.insert("entry".to_owned(), json!(entry));
+            detail.insert("reason".to_owned(), json!(reason));
+        }
+        CoreError::Instance(
+            InstanceError::BackupIndexInvalid { path, .. } | InstanceError::WorldInUse { path },
+        ) => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
+        }
+        CoreError::Instance(InstanceError::RestoreNotPlaced { world_dir, staged }) => {
+            detail.insert("path".to_owned(), json!(world_dir.display().to_string()));
+            detail.insert("staged".to_owned(), json!(staged.display().to_string()));
+        }
         CoreError::UnsafeFileName {
             platform,
             file_name,
@@ -478,7 +621,11 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("file_name".to_owned(), json!(file_name));
         }
         CoreError::FileDistributionBlocked { files } => {
+            let files: Vec<BlockedFileDto> = files.iter().map(BlockedFileDto::from).collect();
             detail.insert("files".to_owned(), json!(files));
+        }
+        CoreError::ClaimFolderInvalid { path, .. } => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
         CoreError::InstanceNameInvalid { name, rule } => {
             detail.insert("name".to_owned(), json!(name));
@@ -500,15 +647,37 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             }
             ModpackError::UnsafePath { path, .. }
             | ModpackError::SymlinkEntry { path }
-            | ModpackError::DuplicatePath { path } => {
+            | ModpackError::DuplicatePath { path }
+            | ModpackError::NotOptional { path } => {
                 detail.insert("path".to_owned(), json!(path));
+            }
+            ModpackError::UnsupportedCompression {
+                path,
+                entry,
+                method,
+            } => {
+                detail.insert("path".to_owned(), json!(path.display().to_string()));
+                detail.insert("entry".to_owned(), json!(entry));
+                detail.insert("method".to_owned(), json!(method));
+            }
+            ModpackError::ExportCheckFailed { path, reason } => {
+                detail.insert("path".to_owned(), json!(path.display().to_string()));
+                detail.insert("reason".to_owned(), json!(reason));
             }
             ModpackError::Cancelled => {}
         },
+        CoreError::ModpackExportUnsupported { id, reason, loader } => {
+            detail.insert("id".to_owned(), json!(id));
+            detail.insert("reason".to_owned(), json!(reason));
+            if let Some(loader) = loader {
+                detail.insert("loader".to_owned(), json!(loader));
+            }
+        }
         CoreError::ConfigIo { path, .. } | CoreError::ConfigParse { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
-        CoreError::Base(BaseError::Io { path, .. }) => {
+        CoreError::Base(BaseError::Io { path, .. })
+        | CoreError::GpuPreferenceWrite { path, .. } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
         CoreError::Fetch { url, .. }
@@ -524,6 +693,13 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
             detail.insert("address".to_owned(), json!(address));
             detail.insert("reason".to_owned(), json!(reason));
         }
+        CoreError::ServerNotPinned { address } => {
+            detail.insert("address".to_owned(), json!(address));
+        }
+        CoreError::Launch(LaunchError::QuickPlayUnsupported { version, mode }) => {
+            detail.insert("version_id".to_owned(), json!(version));
+            detail.insert("mode".to_owned(), json!(mode.as_str()));
+        }
         CoreError::InvalidGameDirectory { path, problem } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
             detail.insert("problem".to_owned(), json!(problem.code()));
@@ -535,6 +711,18 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::Install(InstallError::LoaderLibraryMissing { path }) => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
+        CoreError::JavaPathInvalid { path, reason, .. } => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
+            detail.insert("reason".to_owned(), json!(reason.code()));
+        }
+        CoreError::JavaRuntimeIncomplete { path, missing } => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
+            detail.insert("missing".to_owned(), json!(missing));
+        }
+        CoreError::TemplateSourceEmpty { id } => {
+            detail.insert("id".to_owned(), json!(id));
+            detail.insert("files".to_owned(), json!(TEMPLATE_FILES));
+        }
         _ => {}
     }
     detail
@@ -543,6 +731,7 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aurora_core::OfflineFallbackRefusal;
     use std::path::PathBuf;
 
     #[test]
@@ -628,6 +817,56 @@ mod tests {
     }
 
     #[test]
+    fn login_outage_and_unapproved_app_map_to_their_own_codes() {
+        let outage: CommandError = AuthError::ServiceUnavailable {
+            step: "XSTS 授权",
+            status: 503,
+        }
+        .into();
+        assert_eq!(outage.code, "ServiceUnavailable");
+        assert_eq!(outage.message, "登录服务暂时不可用（XSTS 授权：HTTP 503）");
+        let detail = outage.detail.unwrap();
+        assert_eq!(detail, json!({ "step": "XSTS 授权", "status": 503 }));
+        // 不是本机网络问题：不带 network，前端不去探测连通性。
+        assert!(detail.get("network").is_none());
+
+        let throttled: CommandError = AuthError::ServiceUnavailable {
+            step: "获取游戏档案",
+            status: 429,
+        }
+        .into();
+        assert_eq!(throttled.detail.unwrap()["status"], json!(429));
+
+        let unapproved: CommandError = AuthError::AppNotApproved.into();
+        assert_eq!(unapproved.code, "AppNotApproved");
+        assert!(unapproved.detail.is_none());
+        assert!(unapproved.message.contains("Invalid app registration"));
+    }
+
+    #[test]
+    fn refused_offline_fallback_is_an_invalid_argument_naming_the_reason() {
+        for (reason, wire) in [
+            (OfflineFallbackRefusal::OfflineAccount, "offline_account"),
+            (OfflineFallbackRefusal::ReloginRequired, "relogin_required"),
+            (OfflineFallbackRefusal::NoRecentFailure, "no_recent_failure"),
+        ] {
+            let err: CommandError = CoreError::OfflineFallbackRefused {
+                account: "PetalPlayer".into(),
+                reason,
+            }
+            .into();
+            assert_eq!(err.code, code::INVALID_ARGUMENT);
+            assert!(err
+                .message
+                .starts_with("PetalPlayer 不能以离线方式进单人："));
+            assert_eq!(
+                err.detail.unwrap(),
+                json!({ "field": "offlineFallback", "reason": wire, "account": "PetalPlayer" })
+            );
+        }
+    }
+
+    #[test]
     fn core_variants_map_to_stable_codes_with_parameters() {
         let no_java: CommandError = CoreError::NoJava { major: 21 }.into();
         assert_eq!(no_java.code, code::JAVA_MISSING);
@@ -661,11 +900,54 @@ mod tests {
         assert_eq!(detail["world"], json!("新的世界"));
 
         let blocked: CommandError = CoreError::FileDistributionBlocked {
-            files: vec!["a.jar".into(), "b.jar".into()],
+            files: vec![
+                aurora_core::BlockedFile {
+                    project_id: 900_001,
+                    file_id: 5_000_001,
+                    file_name: "a.jar".into(),
+                    web_url: "https://www.curseforge.com/minecraft/mc-mods/a/files/5000001".into(),
+                    destination: "mods/a.jar".into(),
+                    sha1: Some("0f4a890d07402280686a518579fa9fa02309e315".into()),
+                    fingerprint: 0,
+                    size: Some(1024),
+                },
+                aurora_core::BlockedFile {
+                    project_id: 900_002,
+                    file_id: 5_000_002,
+                    file_name: "b.jar".into(),
+                    web_url: "https://www.curseforge.com/minecraft/texture-packs/b/files/5000002"
+                        .into(),
+                    destination: "resourcepacks/b.jar".into(),
+                    sha1: None,
+                    fingerprint: 4_294_967_295,
+                    size: None,
+                },
+            ],
         }
         .into();
         assert_eq!(blocked.code, code::DISTRIBUTION_BLOCKED);
-        assert_eq!(blocked.detail.unwrap()["files"], json!(["a.jar", "b.jar"]));
+        assert_eq!(
+            blocked.message,
+            "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：a.jar、b.jar"
+        );
+        assert_eq!(
+            blocked.detail.unwrap()["files"],
+            json!([
+                {
+                    "project_id": 900_001, "file_id": 5_000_001, "file_name": "a.jar",
+                    "web_url": "https://www.curseforge.com/minecraft/mc-mods/a/files/5000001",
+                    "destination": "mods/a.jar",
+                    "sha1": "0f4a890d07402280686a518579fa9fa02309e315",
+                    "fingerprint": 0, "size": 1024
+                },
+                {
+                    "project_id": 900_002, "file_id": 5_000_002, "file_name": "b.jar",
+                    "web_url": "https://www.curseforge.com/minecraft/texture-packs/b/files/5000002",
+                    "destination": "resourcepacks/b.jar",
+                    "sha1": null, "fingerprint": 4_294_967_295_u64, "size": null
+                }
+            ])
+        );
 
         let unsafe_name: CommandError = CoreError::UnsafeFileName {
             platform: "Modrinth",
@@ -739,6 +1021,171 @@ mod tests {
 
         let cancelled: CommandError = CoreError::from(ModpackError::Cancelled).into();
         assert!(cancelled.is_cancelled());
+
+        let compression: CommandError = CoreError::from(ModpackError::UnsupportedCompression {
+            path: PathBuf::from("D:/包.zip"),
+            entry: "overrides/mods/模组.jar".into(),
+            method: 93,
+        })
+        .into();
+        assert_eq!(compression.code, code::MODPACK_UNSUPPORTED_COMPRESSION);
+        assert_eq!(
+            compression.detail,
+            Some(json!({ "path": "D:/包.zip", "entry": "overrides/mods/模组.jar", "method": 93 }))
+        );
+
+        let not_optional: CommandError = CoreError::from(ModpackError::NotOptional {
+            path: "mods/core.jar".into(),
+        })
+        .into();
+        assert_eq!(not_optional.code, code::INVALID_ARGUMENT);
+        assert_eq!(
+            not_optional.detail,
+            Some(json!({ "path": "mods/core.jar" }))
+        );
+
+        let folder: CommandError = CoreError::ClaimFolderInvalid {
+            path: PathBuf::from("C:/Users/Player/Downloads"),
+            reason: "选的文件夹不存在".into(),
+        }
+        .into();
+        assert_eq!(folder.code, code::IO);
+        assert_eq!(folder.message, "选的文件夹不存在");
+        assert_eq!(
+            folder.detail,
+            Some(json!({ "path": "C:/Users/Player/Downloads" }))
+        );
+    }
+
+    /// CurseForge 拒绝下载密钥：不论直接冒上来、包在多源耗尽或分片回退里、还是从安装器的下载里来，码都是
+    /// curseforge_key_rejected，detail 带平台、被拒那一跳的地址与状态码；没带密钥的 401 仍是普通下载失败。
+    #[test]
+    fn rejected_download_keys_map_to_their_own_code() {
+        let cdn = "https://mediafilez.forgecdn.net/files/3040/523/jei.jar";
+        let rejected = || DownloadError::CredentialRejected {
+            realm: CredentialRealm::CurseForge,
+            url: cdn.into(),
+            status: 401,
+        };
+        let expected = json!({ "realm": "curseforge", "url": cdn, "status": 401 });
+        for (label, err) in [
+            ("直接", CoreError::Download(rejected())),
+            (
+                "多源耗尽",
+                CoreError::Download(DownloadError::AllSourcesExhausted {
+                    url: "https://edge.forgecdn.net/files/3040/523/jei.jar".into(),
+                    last: Box::new(rejected()),
+                }),
+            ),
+            (
+                "分片回退",
+                CoreError::Download(DownloadError::ChunkedFallbackFailed {
+                    url: cdn.into(),
+                    chunked: Box::new(DownloadError::Status {
+                        url: cdn.into(),
+                        status: 404,
+                    }),
+                    fallback: Box::new(rejected()),
+                }),
+            ),
+            (
+                "安装器",
+                CoreError::Install(InstallError::Download(rejected())),
+            ),
+        ] {
+            let mapped = CommandError::describe(&err);
+            assert_eq!(mapped.code, code::CURSEFORGE_KEY_REJECTED, "{label}");
+            assert_eq!(mapped.message, err.to_string(), "{label}");
+            let detail = mapped.detail.unwrap();
+            for key in ["realm", "url", "status"] {
+                assert_eq!(detail[key], expected[key], "{label}：{key}");
+            }
+        }
+        assert_eq!(
+            CommandError::describe(&CoreError::Download(rejected())).message,
+            format!("CurseForge 拒绝了下载密钥（HTTP 401）：{cdn}")
+        );
+
+        let plain: CommandError = DownloadError::Status {
+            url: cdn.into(),
+            status: 401,
+        }
+        .into();
+        assert_eq!(plain.code, code::DOWNLOAD_FAILED);
+        assert!(plain.detail.is_none_or(|d| d.get("realm").is_none()));
+
+        for other in [
+            DownloadError::InvalidCredential {
+                realm: CredentialRealm::CurseForge,
+            },
+            DownloadError::TooManyRedirects { url: cdn.into() },
+        ] {
+            let mapped: CommandError = other.into();
+            assert_eq!(mapped.code, code::DOWNLOAD_FAILED);
+        }
+    }
+
+    #[test]
+    fn modpack_export_errors_map_to_codes_with_parameters() {
+        let unsupported: CommandError = CoreError::ModpackExportUnsupported {
+            id: "光影版".into(),
+            reason: aurora_core::ExportBlock::LoaderUnsupported,
+            loader: Some("OptiFine".into()),
+        }
+        .into();
+        assert_eq!(unsupported.code, code::MODPACK_EXPORT_UNSUPPORTED);
+        assert_eq!(
+            unsupported.message,
+            "整合包格式不支持 OptiFine，只支持 Fabric、Quilt、Forge、NeoForge"
+        );
+        assert_eq!(
+            unsupported.detail,
+            Some(json!({ "id": "光影版", "reason": "loader_unsupported", "loader": "OptiFine" }))
+        );
+
+        for (reason, wire) in [
+            (aurora_core::ExportBlock::VersionUnknown, "version_unknown"),
+            (
+                aurora_core::ExportBlock::LoaderVersionUnknown,
+                "loader_version_unknown",
+            ),
+            (
+                aurora_core::ExportBlock::MultipleLoaders,
+                "multiple_loaders",
+            ),
+            (aurora_core::ExportBlock::Incomplete, "incomplete"),
+        ] {
+            let err: CommandError = CoreError::ModpackExportUnsupported {
+                id: "生存".into(),
+                reason,
+                loader: None,
+            }
+            .into();
+            assert_eq!(err.code, code::MODPACK_EXPORT_UNSUPPORTED);
+            assert_eq!(
+                err.detail,
+                Some(json!({ "id": "生存", "reason": wire })),
+                "{wire}"
+            );
+        }
+
+        let check: CommandError = CoreError::from(ModpackError::ExportCheckFailed {
+            path: PathBuf::from("D:/导出/樱花林.part.mrpack"),
+            reason: "清单里有 2 个文件，要写的是 3 个".into(),
+        })
+        .into();
+        assert_eq!(check.code, code::MODPACK_EXPORT_CHECK_FAILED);
+        assert_eq!(
+            check.message,
+            "导出的整合包没通过回读校验：清单里有 2 个文件，要写的是 3 个"
+        );
+        assert_eq!(
+            check.detail,
+            Some(json!({
+                "path": "D:/导出/樱花林.part.mrpack",
+                "reason": "清单里有 2 个文件，要写的是 3 个"
+            }))
+        );
     }
 
     #[test]
@@ -760,6 +1207,51 @@ mod tests {
         .into();
         assert_eq!(address.code, code::INVALID_ARGUMENT);
         assert_eq!(address.detail.unwrap()["address"], json!("h:0"));
+
+        let not_pinned: CommandError = CoreError::ServerNotPinned {
+            address: "play.example.cn:25566".into(),
+        }
+        .into();
+        assert_eq!(not_pinned.code, "server_not_pinned");
+        assert_eq!(
+            not_pinned.message,
+            "服务器「play.example.cn:25566」没有固定"
+        );
+        assert_eq!(
+            not_pinned.detail,
+            Some(json!({ "address": "play.example.cn:25566" }))
+        );
+
+        for (mode, name, message) in [
+            (
+                aurora_core::QuickPlayMode::Singleplayer,
+                "singleplayer",
+                "版本 1.12.2 不支持直接进入存档（1.20 之前的版本没有 Quick Play）",
+            ),
+            (
+                aurora_core::QuickPlayMode::Multiplayer,
+                "multiplayer",
+                "版本 1.12.2 不支持直接加入服务器",
+            ),
+        ] {
+            let unsupported: CommandError = LaunchError::QuickPlayUnsupported {
+                version: "1.12.2".into(),
+                mode,
+            }
+            .into();
+            assert_eq!(unsupported.code, "quick_play_unsupported");
+            assert_eq!(unsupported.message, message);
+            assert_eq!(
+                unsupported.detail,
+                Some(json!({ "version_id": "1.12.2", "mode": name }))
+            );
+        }
+        // 启动链路的其余失败仍是 launch_failed。
+        let other: CommandError = LaunchError::MissingMainClass {
+            version: "x".into(),
+        }
+        .into();
+        assert_eq!(other.code, code::LAUNCH_FAILED);
 
         let memory: CommandError = CoreError::MemoryUnavailable.into();
         assert_eq!(memory.code, code::MEMORY_UNAVAILABLE);
@@ -793,6 +1285,23 @@ mod tests {
         let detail = pack.detail.unwrap();
         assert_eq!(detail["url"], json!("https://cdn/pack.mrpack"));
         assert_eq!(detail["reason"], json!("服务器不支持按范围读取"));
+
+        let template: CommandError = CoreError::TemplateSourceEmpty {
+            id: "樱花生存".into(),
+        }
+        .into();
+        assert_eq!(template.code, code::TEMPLATE_SOURCE_EMPTY);
+        assert_eq!(
+            template.message,
+            "实例 樱花生存 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存"
+        );
+        assert_eq!(
+            template.detail.unwrap(),
+            json!({
+                "id": "樱花生存",
+                "files": ["options.txt", "servers.dat", "optionsof.txt", "optionsshaders.txt"],
+            })
+        );
     }
 
     /// 联网失败不论从哪个领域冒上来都带 detail.network；与网络无关的错误不带。
@@ -1018,6 +1527,178 @@ mod tests {
         assert_eq!(
             missing.detail,
             Some(json!({ "path": path.display().to_string() }))
+        );
+    }
+
+    /// 存档备份的失败各自成码，detail 带前端分支与「打开文件夹」要的路径；取消从实例层冒上来也是 cancelled。
+    #[test]
+    fn world_backup_errors_map_to_codes_with_parameters() {
+        let missing: CommandError = CoreError::WorldBackupNotFound {
+            version_id: "生存".into(),
+            world: "新的世界".into(),
+            file: "1761900000000-auto.zip".into(),
+        }
+        .into();
+        assert_eq!(missing.code, code::WORLD_BACKUP_NOT_FOUND);
+        assert_eq!(
+            missing.detail,
+            Some(json!({ "id": "生存", "world": "新的世界", "file": "1761900000000-auto.zip" }))
+        );
+
+        let zip = PathBuf::from("D:/g/.petalfall/backups/instances/a/w/1-manual.zip");
+        let archive: CommandError = InstanceError::BackupArchive {
+            path: zip.clone(),
+            reason: "中央目录读不出".into(),
+        }
+        .into();
+        assert_eq!(archive.code, code::WORLD_BACKUP_CORRUPT);
+        let detail = archive.detail.unwrap();
+        assert_eq!(detail["path"], json!(zip.display().to_string()));
+        assert_eq!(detail["reason"], json!("中央目录读不出"));
+        assert!(detail.get("entry").is_none());
+
+        let traversal: CommandError = InstanceError::BackupEntryUnsafe {
+            path: zip.clone(),
+            entry: "w/../../evil.txt".into(),
+            reason: "parent_traversal",
+        }
+        .into();
+        assert_eq!(traversal.code, code::WORLD_BACKUP_CORRUPT);
+        let detail = traversal.detail.unwrap();
+        assert_eq!(detail["entry"], json!("w/../../evil.txt"));
+        assert_eq!(detail["reason"], json!("parent_traversal"));
+        assert_eq!(detail["path"], json!(zip.display().to_string()));
+
+        let level: CommandError = InstanceError::BackupLevelUnreadable {
+            path: PathBuf::from("D:/g/saves/w.petalfall-restore/level.dat"),
+            reason: "不是 gzip".into(),
+        }
+        .into();
+        assert_eq!(level.code, code::WORLD_BACKUP_CORRUPT);
+        assert_eq!(level.detail.unwrap()["reason"], json!("不是 gzip"));
+
+        let index: CommandError = InstanceError::BackupIndexInvalid {
+            path: PathBuf::from("D:/g/.petalfall/backups/shared/w/index.json"),
+            reason: "expected value at line 1".into(),
+        }
+        .into();
+        assert_eq!(index.code, code::JSON_FILE_INVALID);
+        assert_eq!(
+            index.detail.unwrap()["path"],
+            json!("D:/g/.petalfall/backups/shared/w/index.json")
+        );
+
+        let in_use: CommandError = InstanceError::WorldInUse {
+            path: PathBuf::from("D:/g/saves/w"),
+        }
+        .into();
+        assert_eq!(in_use.code, code::WORLD_IN_USE);
+        assert_eq!(in_use.detail.unwrap()["path"], json!("D:/g/saves/w"));
+
+        let incomplete: CommandError = InstanceError::RestoreNotPlaced {
+            world_dir: PathBuf::from("D:/g/saves/w"),
+            staged: PathBuf::from("D:/g/saves/w.petalfall-restore"),
+        }
+        .into();
+        assert_eq!(incomplete.code, code::WORLD_RESTORE_INCOMPLETE);
+        let detail = incomplete.detail.unwrap();
+        assert_eq!(detail["path"], json!("D:/g/saves/w"));
+        assert_eq!(detail["staged"], json!("D:/g/saves/w.petalfall-restore"));
+
+        let dest: CommandError = InstanceError::InvalidBackupArgument {
+            field: "dest",
+            reason: "导出位置不能在存档文件夹里面".into(),
+        }
+        .into();
+        assert_eq!(dest.code, code::INVALID_ARGUMENT);
+        assert_eq!(
+            dest.detail,
+            Some(json!({ "field": "dest", "reason": "导出位置不能在存档文件夹里面" }))
+        );
+
+        let cancelled: CommandError = InstanceError::Cancelled.into();
+        assert_eq!(cancelled, CommandError::cancelled());
+    }
+
+    #[test]
+    fn manual_java_errors_map_to_codes_with_reason_and_missing_files() {
+        for (reason, name) in [
+            (aurora_core::JavaPathProblem::NotAbsolute, "not_absolute"),
+            (
+                aurora_core::JavaPathProblem::NotJavaExecutable,
+                "not_java_executable",
+            ),
+            (aurora_core::JavaPathProblem::NotFound, "not_found"),
+            (aurora_core::JavaPathProblem::ProbeFailed, "probe_failed"),
+            (aurora_core::JavaPathProblem::ProbeTimeout, "probe_timeout"),
+        ] {
+            let err: CommandError = CoreError::JavaPathInvalid {
+                path: PathBuf::from("D:/jdk/bin/java.exe"),
+                reason,
+                source: None,
+            }
+            .into();
+            assert_eq!(err.code, code::JAVA_PATH_INVALID);
+            assert_eq!(
+                err.detail,
+                Some(json!({ "path": "D:/jdk/bin/java.exe", "reason": name })),
+                "{name}"
+            );
+        }
+
+        // 识别超时：原错误进原因链。
+        let timeout: CommandError = CoreError::JavaPathInvalid {
+            path: PathBuf::from("D:/jdk/bin/java.exe"),
+            reason: aurora_core::JavaPathProblem::ProbeTimeout,
+            source: Some(JavaError::JavaProbeTimeout {
+                path: PathBuf::from("D:/jdk/bin/java.exe"),
+                timeout_secs: 10,
+            }),
+        }
+        .into();
+        assert_eq!(
+            timeout.message,
+            "这个 Java 10 秒内没有给出版本信息，已放弃：D:/jdk/bin/java.exe"
+        );
+        let detail = timeout.detail.unwrap();
+        assert_eq!(detail["reason"], json!("probe_timeout"));
+        assert_eq!(detail["causes"].as_array().unwrap().len(), 1);
+
+        let incomplete: CommandError = CoreError::JavaRuntimeIncomplete {
+            path: PathBuf::from("D:/jdk/bin/java.exe"),
+            missing: vec!["release".into(), "lib/modules".into()],
+        }
+        .into();
+        assert_eq!(incomplete.code, code::JAVA_RUNTIME_INCOMPLETE);
+        assert_eq!(
+            incomplete.message,
+            "这个 Java 缺少 release、lib/modules，可能没装完整：D:/jdk/bin/java.exe"
+        );
+        assert_eq!(
+            incomplete.detail,
+            Some(json!({ "path": "D:/jdk/bin/java.exe", "missing": ["release", "lib/modules"] }))
+        );
+
+        // 启动链路等别处的识别超时仍是 java_failed。
+        let elsewhere: CommandError = JavaError::JavaProbeTimeout {
+            path: PathBuf::from("D:/jdk/bin/java.exe"),
+            timeout_secs: 10,
+        }
+        .into();
+        assert_eq!(elsewhere.code, code::JAVA_FAILED);
+    }
+
+    #[test]
+    fn gpu_preference_write_maps_to_io_with_the_program_path() {
+        let err: CommandError = CoreError::GpuPreferenceWrite {
+            path: PathBuf::from("D:/jdk-17/bin/java.exe"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "拒绝访问"),
+        }
+        .into();
+        assert_eq!(err.code, code::IO);
+        assert_eq!(
+            err.detail,
+            Some(json!({ "path": "D:/jdk-17/bin/java.exe", "causes": ["拒绝访问"] }))
         );
     }
 

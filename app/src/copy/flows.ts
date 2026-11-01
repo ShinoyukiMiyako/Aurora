@@ -2,8 +2,9 @@
 // 插值一律经 domain/format 格式化；带插值的条目写成函数，参数缺失属于调用方的契约错误，直接抛出。
 
 import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed } from "../domain/format";
-import type { AccountKind, FailureCode, LoaderKind, SessionPhase, StopReason, TaskKind, TaskStatus } from "../domain/types";
-import type { NameRule } from "../ipc/instances";
+import type { AccountKind, FailureCode, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskStatus } from "../domain/types";
+import type { CrashSource, ExitCodeKind, ExitCodeNoteDto, LaunchWarningCode } from "../ipc/diagnostics";
+import type { NameRule, TemplateSkipReason } from "../ipc/instances";
 import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
 
 /** 启动失败（首帧之前出错）时错误页的文案。 */
@@ -214,6 +215,8 @@ export const LAUNCH_COPY = {
   queuedDetail: (position: number) => `排队中 · 第 ${position} 位`,
   installingTitle: (pct: string) => `正在安装 ${pct}`,
   busyElsewhere: "另一个游戏在运行",
+  /** 存档备份或恢复进行中，启动入口的禁用原因。 */
+  savesBusy: "正在备份或恢复存档，完成后再启动",
   group: (name: string) => `启动「${name}」`,
 } as const;
 
@@ -232,7 +235,7 @@ export const AVATAR_LINE = {
 // ---------------------------------------------------------------- 启动失败
 
 /** 失败修复动作的种类；按钮行为由启动层按种类执行。 */
-export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "auto_default_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs";
+export type FailureFixKind = "download_java" | "pick_java" | "auto_java" | "auto_default_java" | "relogin" | "retry" | "open_game_dir" | "repair" | "open_logs" | "launch_offline_once";
 
 export interface FailureFix {
   kind: FailureFixKind;
@@ -283,6 +286,8 @@ const AUTO_JAVA: FailureFix = { kind: "auto_java", label: "改为自动选择" }
 // 只想让这个实例换 Java 的，去实例设置里单独指定。
 const AUTO_DEFAULT_JAVA: FailureFix = { kind: "auto_default_java", label: "默认 Java 改回自动选择" };
 const PICK_JAVA: FailureFix = { kind: "pick_java", label: "选择 Java" };
+/** 只给验证暂时不可用的两个失败码：同一账户立即重新启动，不刷新登录，只保证单人游戏。 */
+const OFFLINE_ONCE: FailureFix = { kind: "launch_offline_once", label: "以离线方式进单人" };
 
 /** 固定的 Java 是实例设置里指定的，还是设置里固定的默认 Java（参数 pinned_by）。 */
 function pinnedGlobally(params: FailureParams, code: FailureCode): boolean {
@@ -324,9 +329,17 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
     case "account_refresh_network":
       return {
         title: "无法验证微软账户",
-        body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先切换到离线账户。",
+        body: "网络连接失败，暂时无法刷新登录。联网后重试；只玩单人游戏的话，可以先以离线方式进入。",
         fix: RETRY,
-        secondary: null,
+        secondary: OFFLINE_ONCE,
+      };
+    // 不读插值参数：status 只供排查，缺了也不该让失败卡抛错
+    case "account_service_down":
+      return {
+        title: "微软登录服务暂时不可用",
+        body: `微软的登录服务出了故障，不是 ${ctx.accountName} 这个账户的问题。稍后重试；想先玩单人游戏，可以选择以离线方式进入。`,
+        fix: RETRY,
+        secondary: OFFLINE_ONCE,
       };
     case "files_offline":
       return { title: "需要联网补全文件", body: `还缺 ${numParam(params, "count", code)} 个文件，当前没有网络连接。`, fix: RETRY, secondary: null };
@@ -363,15 +376,21 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
 
 // ---------------------------------------------------------------- 崩溃诊断
 
+/** 与后端规则的优先级同序；native_crash 只作兜底，排在最后。 */
 export const CRASH_CATEGORIES = [
   "java_version_mismatch",
   "out_of_memory",
+  "missing_language_provider",
+  "game_version_mismatch",
   "missing_dependency",
+  "optifine_incompatible",
   "mixin_failure",
   "duplicate_mod",
   "native_library_missing",
+  "intel_graphics_driver",
   "graphics_driver",
   "corrupted_jar",
+  "native_crash",
 ] as const;
 export type CrashCategoryName = (typeof CRASH_CATEGORIES)[number];
 
@@ -384,6 +403,10 @@ export interface CrashExplainContext {
   requiredJava: number | null;
   /** 这次的最大内存（MB）。 */
   maxMemoryMb: number | null;
+  /** 这次的退出码。 */
+  exitCode: number | null;
+  /** 退出码在对照表里时的说明。 */
+  exitNote: ExitCodeNoteDto | null;
 }
 
 interface CrashCategoryCopy {
@@ -396,6 +419,37 @@ function need<T>(value: T | null, what: string, category: CrashCategoryName): T 
   if (value === null) throw new Error(`诊断 ${category} 的解释需要 ${what}`);
   return value;
 }
+
+/** Forge 自带的语言支持 id：日志说缺它们时没有可装的 Mod。 */
+const FORGE_BUILTIN_PROVIDERS: readonly string[] = ["javafml", "lowcodefml"];
+
+export function isForgeBuiltinProvider(detail: string): boolean {
+  return FORGE_BUILTIN_PROVIDERS.includes(detail.toLowerCase());
+}
+
+/** 线索与扫描文件的来源名。 */
+export const CRASH_SOURCE_LABEL: Readonly<Record<CrashSource, string>> = {
+  session_log: "会话日志",
+  crash_report: "崩溃报告",
+  hs_err: "JVM 错误日志",
+  exit_code: "退出码",
+};
+
+/** 退出码说明：phrase 用在页头括注与 native_crash 的解释里，explain 是摘要卡退出码行的悬停提示。 */
+export const EXIT_CODE_COPY: Readonly<Record<ExitCodeKind, { phrase: string; explain: string }>> = {
+  access_violation: {
+    phrase: "访问冲突",
+    explain: "游戏进程读写了不允许访问的内存，多出现在显卡驱动、Java 本体或带本地库的 Mod 里。",
+  },
+  stack_buffer_overrun: {
+    phrase: "进程紧急中止",
+    explain: "进程自己触发了紧急中止，Java 遇到致命错误后常以这个码退出，JVM 错误日志里通常有更多线索。",
+  },
+  generic_failure: {
+    phrase: "报错退出",
+    explain: "退出码 1 只说明进程报错退出，具体原因要看日志。",
+  },
+};
 
 export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCopy>> = {
   java_version_mismatch: {
@@ -424,10 +478,38 @@ export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCop
     title: "同一个 Mod 装了不止一份",
     explain: (c) => `日志指向 ${need(c.detail, "重复的 Mod 名", "duplicate_mod")} 有多个文件，只需要保留一个版本。`,
   },
+  missing_language_provider: {
+    label: "缺少语言支持",
+    title: "Mod 需要的语言支持库没装",
+    explain: (c) => {
+      if (c.detail === null) return "日志指向有 Mod 缺少语言支持库。";
+      // javafml、lowcodefml 是 Forge 自带的语言支持：缺它说明 Mod 是给另一个版本的 Forge 做的，而不是少装了什么
+      if (isForgeBuiltinProvider(c.detail)) return `日志指向有 Mod 是给另一个版本的 Forge 做的，它要的是 ${c.detail}。`;
+      return `日志指向缺少语言支持库 ${c.detail}，它本身也是一个 Mod。`;
+    },
+  },
+  game_version_mismatch: {
+    label: "版本不符",
+    title: "Mod 要求别的游戏或加载器版本",
+    explain: (c) => (c.detail === null ? "日志里有 Mod 不支持当前的游戏版本或加载器版本。" : `日志指向 ${c.detail} 需要另一个版本的 Minecraft 或加载器。`),
+  },
+  optifine_incompatible: {
+    label: "OptiFine 不兼容",
+    title: "OptiFine 与当前加载器不兼容",
+    explain: () => "日志指向 OptiFine 与这个实例的加载器版本对不上。OptiFine 只支持特定版本的 Forge，在 Fabric 与 Quilt 上还要另装转接 Mod。",
+  },
   native_library_missing: {
     label: "本地库缺失",
     title: "本地库加载失败",
     explain: () => "游戏需要的本地库没有正确解压或加载。游戏目录路径含中文或特殊字符时也常出现这条线索。",
+  },
+  intel_graphics_driver: {
+    label: "Intel 显卡驱动",
+    title: "Intel 集成显卡驱动出错",
+    explain: (c) =>
+      c.detail === null
+        ? "日志指向 Intel 集成显卡的驱动。可以先更新驱动，再试试让游戏改用独立显卡。"
+        : `日志指向 Intel 集成显卡的驱动文件 ${c.detail}。可以先更新驱动，再试试让游戏改用独立显卡。`,
   },
   graphics_driver: {
     label: "显卡驱动",
@@ -438,6 +520,16 @@ export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCop
     label: "文件损坏",
     title: "游戏或 Mod 文件损坏",
     explain: () => "有 jar 文件不完整或被改动过。",
+  },
+  native_crash: {
+    label: "进程异常退出",
+    title: "游戏进程异常退出",
+    explain: (c) => {
+      const code = need(c.exitCode, "退出码", "native_crash");
+      const note = need(c.exitNote, "退出码说明", "native_crash");
+      if (note.code !== code) throw new Error(`退出码说明 ${note.code} 与退出码 ${code} 对不上`);
+      return `退出码 ${note.hex}（${EXIT_CODE_COPY[note.kind].phrase}），日志里没有匹配到已知原因。常见于显卡驱动、Java 本体或带本地库的 Mod，可以先更新显卡驱动，再换一个 Java 版本试试。`;
+    },
   },
 };
 
@@ -469,7 +561,12 @@ export const CRASH_COPY = {
     categories.length === 0
       ? "没有匹配到已知原因"
       : joinMixed(`找到 ${categories.length} 条线索，日志指向`, joinCrashLabels(categories.map(crashCategoryLabel))),
-  exitLine: (relative: string, exitCode: number | null) => `${relative}崩溃 · ${exitCode === null ? "退出码未知" : `退出码 ${exitCode}`}`,
+  exitLine: (relative: string, exitCode: number | null, note: ExitCodeNoteDto | null) => {
+    if (exitCode === null) return `${relative}崩溃 · 退出码未知`;
+    if (note === null) return `${relative}崩溃 · 退出码 ${exitCode}`;
+    if (note.code !== exitCode) throw new Error(`退出码说明 ${note.code} 与退出码 ${exitCode} 对不上`);
+    return `${relative}崩溃 · 退出码 ${exitCode}（${note.hex} ${EXIT_CODE_COPY[note.kind].phrase}）`;
+  },
   clueIndex: (n: number) => `线索 ${n}`,
   /** 一键尝试 · 内存。 */
   raiseMemory: (targetMb: number) => `调到 ${formatMemory(targetMb)}`,
@@ -482,6 +579,76 @@ export const CRASH_COPY = {
   openInstanceSettings: "打开实例设置",
 } as const;
 
+// ---------------------------------------------------------------- 启动提醒
+
+/** 后端的启动提醒全集（按启动阶段的先后）。诊断页按报告里记下的顺序展示。 */
+export const LAUNCH_WARNING_CODES = [
+  "game_path",
+  "onedrive_folder",
+  "icloud_folder",
+  "long_player_name",
+  "jvm_memory_unit",
+  "jvm_min_over_max",
+  "jvm_max_too_low",
+] as const satisfies readonly LaunchWarningCode[];
+
+/** 提醒上的动作：更换游戏目录去设置的「游戏」分区，管理账户去账户页，打开实例设置切到实例的「设置」标签。 */
+export type LaunchWarningActionKind = "change_game_dir" | "manage_accounts" | "instance_settings";
+
+export interface LaunchWarningCopy {
+  title: string;
+  body: string;
+  action: { kind: LaunchWarningActionKind; label: string };
+}
+
+const CHANGE_GAME_DIR = { kind: "change_game_dir", label: "更换游戏目录" } as const;
+const OPEN_INSTANCE_SETTINGS = { kind: "instance_settings", label: CRASH_COPY.openInstanceSettings } as const;
+
+/** 启动提醒不中断启动：加载时只写 warn 日志，崩溃后在诊断页的「这次启动时的提醒」里按这张表呈现。 */
+export const LAUNCH_WARNING: Readonly<Record<LaunchWarningCode, LaunchWarningCopy>> = {
+  game_path: {
+    title: "游戏路径含中文或特殊字符",
+    body: "部分 Forge 版本与本地库在这样的路径下读不出文件，可以换到纯英文路径再试。",
+    action: CHANGE_GAME_DIR,
+  },
+  onedrive_folder: {
+    title: "游戏目录在 OneDrive 里",
+    body: "OneDrive 同步时会占用或替换正在读写的文件，存档与 Mod 可能读不全。可以换一个不在 OneDrive 里的游戏目录。",
+    action: CHANGE_GAME_DIR,
+  },
+  icloud_folder: {
+    title: "游戏目录在 iCloud 里",
+    body: "iCloud 同步时会占用或替换正在读写的文件，存档与 Mod 可能读不全。可以换一个不在 iCloud 里的游戏目录。",
+    action: CHANGE_GAME_DIR,
+  },
+  long_player_name: {
+    title: "角色名超过 16 个字符",
+    body: "Minecraft 1.20.3 及更新的版本进不了存档与服务器。可以到皮肤站换一个不超过 16 个字符的角色名。",
+    action: { kind: "manage_accounts", label: "管理账户" },
+  },
+  jvm_memory_unit: {
+    title: "JVM 参数里的内存写法不对",
+    body: "-Xmx、-Xms 的数字后面只能跟 k、m、g、t，例如 -Xmx4g。",
+    action: OPEN_INSTANCE_SETTINGS,
+  },
+  jvm_min_over_max: {
+    title: "最小内存大于最大内存",
+    body: "JVM 参数里 -Xms 比 -Xmx 大，Java 会拒绝启动。",
+    action: OPEN_INSTANCE_SETTINGS,
+  },
+  jvm_max_too_low: {
+    title: "最大内存低于 512 MB",
+    body: "游戏多半进不了主界面，可以调高 -Xmx，或删掉它改用内存设置。",
+    action: OPEN_INSTANCE_SETTINGS,
+  },
+};
+
+/** 与崩溃类别同理：前后端随同一个安装包发布，出现未知的提醒说明发布有缺陷，直接抛错交给页面错误边界。 */
+export function launchWarningCopy(code: string): LaunchWarningCopy {
+  if (!(LAUNCH_WARNING_CODES as readonly string[]).includes(code)) throw new Error(`未知的启动提醒：${code}`);
+  return LAUNCH_WARNING[code as LaunchWarningCode];
+}
+
 // ---------------------------------------------------------------- 下载任务
 
 export const TASK_STATUS_LABEL: Readonly<Record<TaskStatus, string>> = {
@@ -492,7 +659,16 @@ export const TASK_STATUS_LABEL: Readonly<Record<TaskStatus, string>> = {
   cancelled: "已取消",
 };
 
-/** 任务类别标签。修复任务补的是游戏文件，归在「游戏」名下。 */
+/** 导出整合包在运行时是在本地打包，不是在下载。 */
+const EXPORT_RUNNING_LABEL = "打包中";
+
+/** 一个任务此刻的状态标签：显示任务状态的地方都用它，不直接取 TASK_STATUS_LABEL。 */
+export function taskStatusLabel(task: { kind: TaskKind; status: TaskStatus }): string {
+  if (task.status === "running" && task.kind === "modpack_export") return EXPORT_RUNNING_LABEL;
+  return TASK_STATUS_LABEL[task.status];
+}
+
+/** 任务类别标签。修复任务补的是游戏文件，归在「游戏」名下；备份、导出与恢复都归在「存档」名下。 */
 export const TASK_KIND_LABEL: Readonly<Record<TaskKind, string>> = {
   game: "游戏",
   loader: "加载器",
@@ -503,6 +679,9 @@ export const TASK_KIND_LABEL: Readonly<Record<TaskKind, string>> = {
   shader: "光影",
   datapack: "数据包",
   repair: "游戏",
+  world_backup: "存档",
+  world_restore: "存档",
+  modpack_export: "导出",
 };
 
 function versionWithLoader(mcVersion: string, loader: LoaderKind, loaderVersion: string | null, sep: string): string {
@@ -527,9 +706,19 @@ export const TASK_TEXT = {
   updateDetail: (from: string, to: string, instance: string) => `${from} → ${to} · 「${instance}」`,
   updateAllTitle: (count: number) => `更新 ${count} 个 Mod`,
   updateAllDetail: (instance: string) => `「${instance}」`,
+  /** 新实例就绪后接着装的开局 Mod（一个组合任务）。 */
+  starterTitle: (count: number) => `装上 ${count} 个开局 Mod`,
+  starterDetail: (instance: string) => `「${instance}」`,
   javaTitle: (major: number) => `下载 Java ${major}`,
   javaDetailPending: "Mojang 运行时 · 手动",
   javaDetail: (version: string) => `Mojang ${version} · 手动`,
+  backupTitle: (world: string) => `备份「${world}」`,
+  exportWorldTitle: (world: string) => `导出「${world}」`,
+  restoreTitle: (world: string) => `恢复「${world}」`,
+  /** 备份、导出与恢复任务的详情：存档属于哪个实例。 */
+  backupDetail: (instance: string) => `「${instance}」`,
+  exportTitle: (name: string) => `导出整合包 ${name}`,
+  exportDetail: (version: string, instance: string) => `${version} · 「${instance}」`,
   queuePosition: (n: number) => `排队中 · 第 ${n} 位`,
   attempt: (k: number) => `第 ${k} 次尝试`,
 } as const;
@@ -538,7 +727,7 @@ export const TASK_TEXT = {
 export const TASK_INTERRUPTED_CODE = "interrupted";
 
 /** 任务失败原因（行内与 Toast 正文）。能归类的给统一说法，其余用后端原文。 */
-export function taskFailureReason(error: { code: string; message: string }): string {
+export function taskFailureReason(error: TaskError): string {
   switch (error.code) {
     case TASK_INTERRUPTED_CODE:
       return `${APP_NAME}关闭时中断`;
@@ -550,6 +739,24 @@ export function taskFailureReason(error: { code: string; message: string }): str
       return "版本文件里有指向游戏目录之外的路径，已拒绝写入";
     case "loader_library_missing":
       return "加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要重新安装加载器";
+    case "curseforge_key_rejected":
+      return "CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试";
+    case "distribution_blocked":
+      // 较早的任务日志只存了错误码与原文（原文里列着文件名），没有清单时照原文给出
+      return error.blocked_files === undefined ? error.message : `有 ${error.blocked_files.length} 个文件需要到 CurseForge 网页手动下载`;
+    case "modpack_unsupported_compression":
+      return "整合包用了不支持的压缩方式，用整合包作者发布的原始文件再试";
+    case "world_in_use":
+      return "这个存档正被游戏打开";
+    case "world_backup_corrupt":
+      return "备份文件已损坏，无法恢复";
+    case "world_backup_not_found":
+      return "这份备份已经不在了";
+    // 原存档已进回收站、恢复出的副本留在临时目录：两个位置都在后端原文里，统一说法会把它们丢掉
+    case "world_restore_incomplete":
+      return error.message;
+    case "modpack_export_check_failed":
+      return "导出的文件没通过校验，已删除";
     default:
       return error.message;
   }
@@ -559,6 +766,13 @@ export function taskFailureReason(error: { code: string; message: string }): str
 export const NEXT_LAUNCH_SUFFIX = "，下次启动生效";
 
 const ALL_MODS_LATEST = "所有 Mod 都是最新的";
+
+/** 安装时没有套上默认设置的原因（通知正文）。 */
+const TEMPLATE_SKIP_REASON: Readonly<Record<TemplateSkipReason, string>> = {
+  disabled: "新建实例时沿用默认设置已在配置里关闭",
+  empty: "安装时没有找到默认设置，可能已被清除",
+  shared_working_dir: "这个实例与其他未隔离的实例共用 .minecraft 里的设置",
+};
 
 export const TASK_TOAST = {
   ready: (name: string) => ({ title: `「${name}」已就绪`, body: "可以开始游戏了" }),
@@ -584,12 +798,32 @@ export const TASK_TOAST = {
   /** 从任务日志恢复后重试成功、已没有入队时上下文的任务。 */
   finished: (title: string) => ({ title: `已完成：${title}` }),
   failed: (title: string, reason: string) => ({ title: `下载失败：${title}`, body: reason }),
+  exportStarted: (name: string) => ({ title: `已开始导出「${name}」`, body: "进度见下载任务" }),
+  /** bundled：打包进文件的 Mod 数；没有时不写正文。 */
+  exported: (name: string, bundled: number) =>
+    bundled > 0 ? { title: `已导出「${name}」`, body: `${bundled} 个 Mod 打包进了文件，分享前确认作者允许转载` } : { title: `已导出「${name}」` },
+  exportFailed: (title: string, reason: string) => ({ title: `导出失败：${title}`, body: reason }),
   failedMany: (count: number, reasons: readonly string[]) => ({
     title: `${count} 个下载失败`,
     body: new Set(reasons).size === 1 ? reasons[0] : "原因各不相同",
   }),
   cancelled: (title: string) => ({ title: `已取消：${title}` }),
+  /** 备份、导出、恢复存档的任务失败：它们不是下载，不并进「n 个下载失败」。 */
+  worldFailed: (title: string, reason: string) => ({ title: `${title}没有完成`, body: reason }),
+  backupStarted: (world: string) => ({ title: `已开始备份「${world}」`, body: "进度见下载任务" }),
+  worldBackedUp: (world: string, size: number, pruned: number) => ({
+    title: `已备份「${world}」`,
+    body: pruned > 0 ? `${formatBytes(size)} · 清理了 ${pruned} 份旧的自动备份` : formatBytes(size),
+  }),
+  worldExported: (world: string, path: string) => ({ title: `已导出「${world}」`, body: path }),
+  worldRestored: (world: string, previousInRecycleBin: boolean) =>
+    previousInRecycleBin ? { title: `已恢复「${world}」`, body: "原来的存档已移入回收站" } : { title: `已恢复「${world}」` },
+  viewBackupsAction: "查看备份",
+  openContainingAction: "打开所在文件夹",
   duplicate: (name: string) => ({ title: `${name} 已在下载队列里` }),
+  starterInstalled: (instance: string, count: number) => ({ title: `已给「${instance}」装上 ${count} 个 Mod` }),
+  /** 新建时勾了沿用默认设置、安装结果却是跳过：就绪通知之后补一条，正文说原因。 */
+  templateSkipped: (instance: string, reason: TemplateSkipReason) => ({ title: `「${instance}」没有沿用默认设置`, body: TEMPLATE_SKIP_REASON[reason] }),
   /** 要装的 Mod 连同前置都已在实例里，不入队。 */
   alreadyInstalled: (name: string, instance: string) => ({ title: `${name} 已经装在「${instance}」里了` }),
   enqueued: (name: string, instances: readonly string[]) => ({
@@ -597,6 +831,8 @@ export const TASK_TOAST = {
     body: instances.length === 1 ? `装入「${instances[0]}」` : `装入 ${instances.length} 个实例，进度见下载任务`,
   }),
   launchAction: "启动",
+  /** 在资源管理器里选中刚生成的文件。 */
+  revealAction: "打开所在文件夹",
   retryAction: "重试",
   viewAction: "查看",
 } as const;
@@ -609,6 +845,15 @@ export const TOAST_COPY = {
   stopFailed: "无法结束游戏进程",
   allModsLatest: ALL_MODS_LATEST,
   modRemoved: (name: string) => `已移除 ${name}`,
+  modsEnabled: (count: number) => `已启用 ${count} 个 Mod`,
+  modsDisabled: (count: number) => ({ title: `已停用 ${count} 个 Mod`, body: "文件名后加了 .disabled，随时可以再启用" }),
+  modsToggleFailed: (count: number, enabled: boolean) => (enabled ? `${count} 个 Mod 没能启用` : `${count} 个 Mod 没能停用`),
+  modsRemoved: (count: number) => `已移除 ${count} 个 Mod`,
+  modsRemoveFailed: (count: number) => `${count} 个 Mod 没能移除`,
+  /** 批量动作里失败的几项原因不止一种时的正文；只有一种时直接写后端原文。 */
+  mixedReasons: "原因各不相同",
+  updateIgnored: (name: string) => ({ title: `已忽略 ${name} 的更新`, body: "检查更新时会跳过它，可以在更多菜单里恢复" }),
+  updateRestored: (name: string) => `已恢复检查 ${name} 的更新`,
   rolledBack: (name: string, from: string, to: string) => ({ title: `已回滚 ${name}`, body: `${to} → ${from}` }),
   cannotRollback: "这条记录不能回滚",
   instanceDeleted: (name: string, worlds: number) =>
@@ -627,7 +872,18 @@ export const TOAST_COPY = {
   authlibAdded: (name: string, server: string) => ({ title: `已添加 ${name}`, body: `外置登录 · ${server}` }),
   /** 由启动拦截触发的登录或添加账户成功后，Toast 正文。 */
   continuingLaunch: (instance: string) => `正在启动「${instance}」`,
+  templateSaved: (instance: string) => ({ title: `已把「${instance}」的设置保存为默认`, body: "新建实例时可以在确认步沿用" }),
+  templateCleared: "已清除默认设置",
+  /** 失败卡上选了「以离线方式进单人」，游戏起来之后。 */
+  offlineLaunched: (name: string) => ({ title: `「${name}」以离线方式启动`, body: "这一局只能玩单人游戏，多人服务器与 Realms 用不了。" }),
   viewCrashAction: "查看诊断",
+  /** 游戏退出后的自动备份有存档没备份成：正文是第一个失败存档的后端原文。 */
+  autoBackupFailed: (instance: string, message: string) => ({ title: `「${instance}」的自动备份没有完成`, body: message }),
+  /** 改名已完成，存档备份还留在旧名下。 */
+  backupsNotMoved: (name: string, path: string) => ({ title: `「${name}」的存档备份没能跟着改名`, body: `备份还在 ${path}` }),
+  backupDeleted: { title: "已删除一份备份", body: "已移入回收站" },
+  copyErrorAction: "复制错误信息",
+  openFolderAction: "打开文件夹",
 } as const;
 
 export function accountKindLabel(kind: AccountKind, authServer: string | null): string {
@@ -649,6 +905,8 @@ export const ACTION_ERROR = {
   authlib: "外置登录没有完成",
   createInstance: "没能开始新建实例",
   importModpack: "没能开始导入整合包",
+  exportModpack: "没能开始导出整合包",
+  revealExport: "没能打开导出文件所在的文件夹",
   repair: "没能开始补全游戏文件",
   deleteInstance: (name: string) => `没能删除「${name}」`,
   renameInstance: "没能重命名实例",
@@ -660,11 +918,18 @@ export const ACTION_ERROR = {
   toggleMod: "Mod 开关没有生效",
   removeMod: "没能移除 Mod",
   updateMods: "没能检查 Mod 更新",
+  updateHold: "更新检查设置没有保存",
   install: "没能加入下载队列",
   probeNetwork: "没能检测网络连接",
   rollback: "没能回滚",
+  saveTemplate: "没能保存默认设置",
+  clearTemplate: "没能清除默认设置",
   cancelTask: "没能取消任务",
   openFolder: "没能打开文件夹",
+  backupWorld: "没能开始备份存档",
+  restoreWorld: "没能开始恢复存档",
+  exportWorld: "没能开始导出存档",
+  deleteWorldBackup: "没能删除这份备份",
   installJava: "没能开始下载 Java",
   servers: "服务器列表没有保存",
   firstRun: "首次设置没有保存",
@@ -731,6 +996,12 @@ export const CONFIRM_COPY = {
       confirmLabel: "全部取消",
     };
   },
+  /** moment 为备份时刻「2026年10月31日 14:02」，标题限 20 字，所以时刻写在正文里。 */
+  restoreWorld: (world: string, moment: string) => ({
+    title: `恢复「${world}」的备份？`,
+    body: `存档会回到 ${moment} 备份时的样子，现在的存档会移入回收站，需要时可以从回收站找回。`,
+    confirmLabel: "恢复备份",
+  }),
   closeWithSession: `游戏会继续运行，但之后的日志和崩溃诊断不会被记录。`,
   closeWithTasks: (count: number) => `还有 ${count} 个下载没完成，关闭后会中断，下次打开可以重试。`,
   closeTitle: `关闭${APP_NAME}？`,
@@ -759,7 +1030,7 @@ export const MICROSOFT_LOGIN_COPY = {
 /** 前端判定的失败：发起登录后 15 s 内没收到设备码。 */
 export const DEVICE_CODE_TIMEOUT_CODE = "device_code_timeout";
 
-export type LoginFailureActionKind = "retry" | "open_xbox" | "use_offline" | "copy_error" | "close";
+export type LoginFailureActionKind = "retry" | "open_xbox" | "use_offline" | "copy_error" | "close" | "open_client_id_settings";
 
 export interface LoginFailureAction {
   kind: LoginFailureActionKind;
@@ -825,6 +1096,16 @@ export function microsoftLoginFailure(code: string, message: string, detail: unk
         "没有找到 Minecraft Java 版的购买记录或游戏档案。买过的话，先在官方启动器里创建一次档案。",
         LOGIN_RETRY,
         { kind: "use_offline", label: "改用离线账户" },
+      );
+    case "ServiceUnavailable":
+      return plain("微软登录服务暂时不可用", "微软那边的服务出了故障，不是你的账户或网络的问题。稍后重试。", LOGIN_RETRY);
+    // 不给「重试」：同一个 client_id 重试只会得到同样的结果
+    case "AppNotApproved":
+      return plain(
+        "登录应用未获批准",
+        `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
+        { kind: "open_client_id_settings", label: "打开设置" },
+        { kind: "copy_error", label: "复制错误信息" },
       );
     default:
       return plain("微软登录失败", `${message}（${code}）`, LOGIN_RETRY, { kind: "copy_error", label: "复制错误信息" });
@@ -899,7 +1180,13 @@ export const DELETE_INSTANCE_COPY = {
   worldsLead: "实例文件夹会移入回收站，其中的 ",
   worldsCount: (n: number) => `${n} 个存档`,
   worldsTail: (bytes: number) => `（共 ${formatBytes(bytes)}）也会一起删除：`,
-  backupHint: "想留着存档的话，先在概览里打开存档文件夹备份一份。",
+  /** 这个实例的存档还没有备份时的末句。 */
+  backupHint: "想留着存档的话，先在概览的存档菜单里选「备份存档」。",
+  /** 已有备份时的末句，分三段：前半句、备份目录（等宽、可选中）、后半句。 */
+  backupsKeptLead: (count: number) => `这些存档已有 ${count} 份备份，保留在 `,
+  backupsKeptTail: "，不会随实例删除。",
+  /** 实例已经没有存档、游戏目录里还留着它以前的存档备份时，接在 noWorlds 之后，同样分三段。 */
+  backupsLeftLead: (count: number) => `这个实例以前的存档还有 ${count} 份备份，保留在 `,
   noWorlds: "这个实例没有存档。实例文件夹、Mod 与配置会一起移入回收站。",
   /** 实例上还挂着没完成的任务（新建、导入、补全、装 Mod）时追加：确认后先取消任务再删除。 */
   pendingTask: "正在进行的安装任务会先取消。",

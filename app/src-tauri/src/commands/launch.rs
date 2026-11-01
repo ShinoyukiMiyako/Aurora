@@ -6,14 +6,17 @@
 //! 启动的 `task_id` 只是取消句柄：加载阶段可经 `cancel_task` 取消，启动不进前端下载队列。阶段经
 //! [`LAUNCH_PHASE_EVENT`] 推送，启动器日志与游戏输出一并经 [`GAME_LOG_EVENT`] 成批推送；进程起来后
 //! 命令即返回，监控任务等它退出，收尾记账写完后先放开占用槽、再推 [`GAME_EXIT_EVENT`]——前端收到退出
-//! 事件就可能立刻启动下一个实例。
+//! 事件就可能立刻启动下一个实例。开着自动备份时，实例占用在退出事件之前转成「备份」，把这次玩过的存档各
+//! 备份一份后才放开，结果经 [`WORLD_BACKUP_EVENT`] 推送。
 
 use std::future::Future;
+use std::time::SystemTime;
 
 use aurora_core::{
-    game_line_level, Aurora, DownloadProgress, Finished, GameExit, GameRun, GameSlot,
-    LaunchAccount, LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage,
-    LauncherLevel, LogLine, LogSource, PlayRange, PlayStats, SlotBusy, SlotReservation, SlotTicket,
+    game_line_level, Aurora, AutoBackupOutcome, DownloadProgress, Finished, GameExit, GameRun,
+    GameSlot, LaunchAccount, LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage,
+    LauncherLevel, LogLine, LogSource, PlayRange, PlayStats, QuickPlay, SlotBusy, SlotReservation,
+    SlotTicket,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -22,7 +25,9 @@ use tokio::sync::mpsc;
 
 use crate::commands::accounts::find_account;
 use crate::commands::error::code::BUSY;
-use crate::commands::instances::{ChainGuard, InstanceActivity, InstanceLocks};
+use crate::commands::instances::{
+    ensure_shared_worlds_settled, ChainGuard, InstanceActivity, InstanceLocks,
+};
 use crate::commands::CommandError;
 use crate::events::{self, GAME_LOG_EVENT};
 use crate::facade::Facade;
@@ -34,14 +39,27 @@ pub const LAUNCH_PHASE_EVENT: &str = "aurora://launch-phase";
 /// 游戏进程退出（收尾记账已写完）。
 pub const GAME_EXIT_EVENT: &str = "aurora://game-exit";
 
+/// 游戏退出后的自动备份做完了。开着自动备份时每局都推，这次没进过存档也推（两个列表都空）：实例在备份期间
+/// 记着 backing_up，前端要靠这条事件知道它已放开、重读实例列表。
+pub const WORLD_BACKUP_EVENT: &str = "aurora://world-backup";
+
 /// 运行中游戏的占用槽。与门面分列两个 managed state：会话生命周期独立于门面，启动后门面锁应立即可用。
 #[derive(Default)]
 pub struct RunningGame(GameSlot);
+
+impl RunningGame {
+    /// 槽本身：存档备份要看此刻是哪个实例在跑游戏。
+    pub(crate) fn slot(&self) -> &GameSlot {
+        &self.0
+    }
+}
 
 /// 启动成功：进程已经起来。
 #[derive(Debug, Serialize)]
 pub struct LaunchedDto {
     pub pid: Option<u32>,
+    /// 这一局以离线方式进单人（未经账户验证）。
+    pub offline: bool,
 }
 
 /// 阶段 3 的下载进度。字段与 core-event 的下载进度一致。
@@ -124,6 +142,85 @@ impl From<GameExit> for GameExitDto {
             crashed,
             killed,
             duration_ms,
+        }
+    }
+}
+
+/// 一个没备份成的存档。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorldBackupFailureDto {
+    /// 存档文件夹名；整场自动备份都没能开始（例如实例的工作目录解析失败）时为 `*`。
+    pub world: String,
+    pub error: CommandError,
+}
+
+/// [`WORLD_BACKUP_EVENT`] 的负载。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorldBackupEventDto {
+    pub instance_id: String,
+    /// 备份成的存档文件夹名。
+    pub backed_up: Vec<String>,
+    pub failed: Vec<WorldBackupFailureDto>,
+}
+
+/// 整场自动备份没能开始时，`failed` 里那一项的存档名。
+const ALL_WORLDS: &str = "*";
+
+/// 自动备份的结果译成事件负载。失败都记 error：自动备份是后台进行的，前端只拿到一条通知，排查要靠日志。
+fn world_backup_event(
+    instance_id: &str,
+    outcome: aurora_core::Result<AutoBackupOutcome>,
+) -> WorldBackupEventDto {
+    let (backed_up, failed) = match outcome {
+        Ok(AutoBackupOutcome { backed_up, failed }) => {
+            let failed = failed
+                .into_iter()
+                .map(|(world, err)| {
+                    tracing::error!(instance = instance_id, world, error = %err, "自动备份存档失败");
+                    WorldBackupFailureDto {
+                        world,
+                        error: CommandError::describe(&err),
+                    }
+                })
+                .collect();
+            (backed_up, failed)
+        }
+        Err(err) => {
+            tracing::error!(instance = instance_id, error = %err, "游戏退出后的自动备份没能开始");
+            let failure = WorldBackupFailureDto {
+                world: ALL_WORLDS.to_owned(),
+                error: CommandError::describe(&err),
+            };
+            (Vec::new(), vec![failure])
+        }
+    };
+    WorldBackupEventDto {
+        instance_id: instance_id.to_owned(),
+        backed_up,
+        failed,
+    }
+}
+
+/// `launch_game` 的直达参数：启动后直接进入存档或加入服务器。前端键名 `quickPlay`，普通启动传 null。
+///
+/// 内部标签枚举叠 deny_unknown_fields 是有效的：serde_derive 1.0.228 先把 `kind` 从内容里取走，
+/// 再按容器属性反序列化结构体变体，多出的字段照样报错。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuickPlayArg {
+    /// `world_dir_name` 是 saves 下的世界文件夹名。
+    Singleplayer { world_dir_name: String },
+    /// `address` 是玩家写的地址原文。
+    Multiplayer { address: String },
+}
+
+impl From<QuickPlayArg> for QuickPlay {
+    fn from(arg: QuickPlayArg) -> Self {
+        match arg {
+            QuickPlayArg::Singleplayer { world_dir_name } => {
+                QuickPlay::Singleplayer { world_dir_name }
+            }
+            QuickPlayArg::Multiplayer { address } => QuickPlay::Multiplayer { address },
         }
     }
 }
@@ -243,28 +340,75 @@ async fn settle(finish: impl Future<Output = Finished>) -> GameExitDto {
     exit.into()
 }
 
-/// 监控一局游戏：收尾后先放开占用槽，再推退出事件。
-async fn watch(
-    finish: impl Future<Output = Finished>,
-    release: impl FnOnce(),
-    emit: impl FnOnce(GameExitDto),
-) {
-    let exit = settle(finish).await;
-    release();
-    emit(exit);
+/// 被监控的一局游戏：哪个实例、会话从何时算起（自动备份只挑这之后写过 level.dat 的存档）、它连同基底的占用。
+struct Watched {
+    version_id: String,
+    session_started: SystemTime,
+    instance: ChainGuard,
 }
 
-/// 实例与它基底的占用随进程寿命：游戏退出、收尾记账写完后与占用槽一起放开，删除、改名、补全它们
-/// 在运行期间被拒绝。
-fn spawn_watch(app: AppHandle, ticket: SlotTicket, instance: ChainGuard, run: GameRun) {
+/// 监控一局游戏：收尾后先放开占用槽，再推退出事件。
+///
+/// 关着自动备份时实例与基底的占用同占用槽一起放开。开着时实例自己的占用先原地转成「备份」再放开占用槽：
+/// 中间不留空档，备份期间实例不会被改名、删除或再次启动；退出事件照常先推（前端据此离开运行态），备份做完
+/// 才放开实例与基底、推备份事件。
+async fn watch(
+    facade: &Facade,
+    watched: Watched,
+    finish: impl Future<Output = Finished>,
+    release_slot: impl FnOnce(),
+    emit_exit: impl FnOnce(GameExitDto),
+    emit_backup: impl FnOnce(WorldBackupEventDto),
+) {
+    let Watched {
+        version_id,
+        session_started,
+        instance,
+    } = watched;
+    let exit = settle(finish).await;
+    let auto = facade.read().await.config().world_backup.auto;
+    if !auto {
+        drop(instance);
+        release_slot();
+        emit_exit(exit);
+        return;
+    }
+    instance.set_activity(InstanceActivity::BackingUp);
+    release_slot();
+    emit_exit(exit);
+    // 不挂取消令牌：自动备份不是前端发起的任务，没有能取消它的入口。
+    let outcome = facade
+        .snapshot()
+        .await
+        .auto_backup_after_session(&version_id, session_started)
+        .await;
+    drop(instance);
+    emit_backup(world_backup_event(&version_id, outcome));
+}
+
+/// 实例与它基底的占用随进程寿命：游戏退出、收尾记账（与开着时的自动备份）做完后放开，删除、改名、补全它们
+/// 在这期间被拒绝。
+fn spawn_watch(
+    app: AppHandle,
+    ticket: SlotTicket,
+    instance: ChainGuard,
+    run: GameRun,
+    session_started: SystemTime,
+) {
+    let version_id = run.version_id().to_owned();
     tauri::async_runtime::spawn(async move {
+        let facade = app.state::<Facade>();
         watch(
-            run.finish(),
-            || {
-                drop(instance);
-                app.state::<RunningGame>().0.release(ticket);
+            &facade,
+            Watched {
+                version_id,
+                session_started,
+                instance,
             },
+            run.finish(),
+            || app.state::<RunningGame>().0.release(ticket),
             |exit| events::emit(&app, GAME_EXIT_EVENT, exit),
+            |backup| events::emit(&app, WORLD_BACKUP_EVENT, backup),
         )
         .await;
     });
@@ -296,7 +440,13 @@ enum AccountArg {
 }
 
 /// 启动一个已安装版本。账户给 `account_uuid`（账户库里的账户）或 `offline_name`（临时离线账户）二者之一。
-/// 内存、Java、JVM 参数与分辨率由后端按实例设置与全局设置解析。
+/// 内存、Java、JVM 参数与分辨率由后端按实例设置与全局设置解析。`quick_play` 给出时启动后直接进入存档或
+/// 加入服务器：版本不支持报 quick_play_unsupported（detail.version_id、mode），存档不在报 world_not_found，
+/// 地址写法不对报 invalid_argument（detail.address），都在校验游戏文件阶段报出。
+///
+/// `offline_fallback` 为真时以离线方式进单人：不刷新登录，用账户上次登录时的档案名进游戏。能否放行由
+/// 后端凭这个账户上一次启动的失败判定，不能放行时报 `invalid_argument`（`detail.field` 为
+/// `offlineFallback`，`detail.reason` 为拒绝原因）。取消、占用与互斥的语义与普通启动相同。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn launch_game(
@@ -305,6 +455,8 @@ pub async fn launch_game(
     version_id: String,
     account_uuid: Option<String>,
     offline_name: Option<String>,
+    offline_fallback: bool,
+    quick_play: Option<QuickPlayArg>,
     facade: State<'_, Facade>,
     tasks: State<'_, TaskRegistry>,
     running: State<'_, RunningGame>,
@@ -322,6 +474,8 @@ pub async fn launch_game(
     let aurora = facade.snapshot().await;
     // 实例与它基底的占用从这里一直持有到游戏退出。
     let (reservation, instance) = reserve_launch(&running, &locks, &aurora, &version_id).await?;
+    // 共用存档的实例：先占住自己再查别人，查完之后再有别的实例想备份共用存档，会被占用槽那一侧的检查挡住。
+    ensure_shared_worlds_settled(&aurora, &locks, &version_id).await?;
     let task = tasks.register(&task_id)?;
     let aurora = aurora.with_cancel(task.token().clone());
 
@@ -346,6 +500,8 @@ pub async fn launch_game(
         }
     });
 
+    // 在拉起进程之前取：这之后被写过 level.dat 的存档，就是这一局进过的存档。
+    let session_started = SystemTime::now();
     let launched = task
         .run(async {
             let account = match account {
@@ -359,11 +515,14 @@ pub async fn launch_game(
                 account,
                 launcher_version: app.package_info().version.to_string(),
                 game_log: Some(log_tx),
+                quick_play: quick_play.map(QuickPlay::from),
             };
-            aurora
-                .launch(request, &events_tx)
-                .await
-                .map_err(launch_error)
+            let launched = if offline_fallback {
+                aurora.launch_offline_fallback(request, &events_tx).await
+            } else {
+                aurora.launch(request, &events_tx).await
+            };
+            launched.map_err(launch_error)
         })
         .await;
     drop(events_tx);
@@ -372,11 +531,14 @@ pub async fn launch_game(
     }
     let run = launched?;
 
-    let pid = run.pid();
+    let launched = LaunchedDto {
+        pid: run.pid(),
+        offline: run.offline(),
+    };
     let ticket = reservation.occupy(run.kill_switch());
     instance.set_activity(InstanceActivity::Running);
-    spawn_watch(app, ticket, instance, run);
-    Ok(LaunchedDto { pid })
+    spawn_watch(app, ticket, instance, run, session_started);
+    Ok(launched)
 }
 
 /// 结束运行中的游戏，等结束动作执行完才返回；退出结果经 [`GAME_EXIT_EVENT`] 推送。没有运行中的游戏时
@@ -637,6 +799,97 @@ mod tests {
             .is_ok());
     }
 
+    #[test]
+    fn service_down_failure_carries_account_status_and_causes() {
+        let mut params = BTreeMap::new();
+        params.insert("account".to_owned(), json!("PetalPlayer"));
+        params.insert("status".to_owned(), json!(503));
+        let failure = LaunchFailure {
+            code: FailureCode::AccountServiceDown,
+            message: "刷新 PetalPlayer 的登录失败：登录服务暂时不可用（刷新令牌：HTTP 503）".into(),
+            params,
+            source: Some(aurora_core::CoreError::Auth(
+                aurora_core::AuthError::ServiceUnavailable {
+                    step: "刷新令牌",
+                    status: 503,
+                },
+            )),
+        };
+        let err = launch_error(LaunchFailed::Failure(Box::new(failure)));
+        assert_eq!(err.code, "account_service_down");
+        assert_eq!(
+            err.detail,
+            Some(json!({
+                "account": "PetalPlayer",
+                "status": 503,
+                "causes": ["登录服务暂时不可用（刷新令牌：HTTP 503）"]
+            }))
+        );
+    }
+
+    #[test]
+    fn launched_payload_says_whether_the_run_is_offline() {
+        assert_eq!(
+            serde_json::to_value(LaunchedDto {
+                pid: Some(4242),
+                offline: true,
+            })
+            .unwrap(),
+            json!({ "pid": 4242, "offline": true })
+        );
+        assert_eq!(
+            serde_json::to_value(LaunchedDto {
+                pid: None,
+                offline: false,
+            })
+            .unwrap(),
+            json!({ "pid": null, "offline": false })
+        );
+    }
+
+    #[test]
+    fn quick_play_arg_parses_both_kinds_and_rejects_anything_else() {
+        let world: QuickPlayArg = serde_json::from_value(
+            json!({ "kind": "singleplayer", "world_dir_name": "New World" }),
+        )
+        .unwrap();
+        assert_eq!(
+            QuickPlay::from(world),
+            QuickPlay::Singleplayer {
+                world_dir_name: "New World".into()
+            }
+        );
+        let server: QuickPlayArg = serde_json::from_value(
+            json!({ "kind": "multiplayer", "address": "mc.example.com:25570" }),
+        )
+        .unwrap();
+        assert_eq!(
+            QuickPlay::from(server),
+            QuickPlay::Multiplayer {
+                address: "mc.example.com:25570".into()
+            }
+        );
+        // 前端普通启动传 null。
+        assert_eq!(
+            serde_json::from_value::<Option<QuickPlayArg>>(Value::Null).unwrap(),
+            None
+        );
+
+        for bad in [
+            json!({ "kind": "realms", "realm_id": "1" }),
+            json!({ "kind": "Singleplayer", "world_dir_name": "w" }),
+            json!({ "world_dir_name": "w" }),
+            json!({ "kind": "singleplayer" }),
+            json!({ "kind": "multiplayer", "address": "a", "port": 25565 }),
+            json!({ "kind": "singleplayer", "worldDirName": "w" }),
+        ] {
+            assert!(
+                serde_json::from_value::<QuickPlayArg>(bad.clone()).is_err(),
+                "{bad} 不该被接受"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn launch_reserves_the_slot_and_the_instance_or_neither() {
         let dir = tempfile::tempdir().unwrap();
@@ -853,25 +1106,295 @@ mod tests {
         );
     }
 
+    /// 游戏目录在临时目录下的门面，自动备份按 `auto` 开关。
+    fn facade_in(dir: &std::path::Path, auto: bool) -> Facade {
+        let config = aurora_core::AuroraConfig {
+            game_directory: Some(dir.join(".minecraft")),
+            world_backup: aurora_core::WorldBackupSettings {
+                auto,
+                ..aurora_core::WorldBackupSettings::default()
+            },
+            ..aurora_core::AuroraConfig::default()
+        };
+        Facade::new(
+            aurora_core::Aurora::open(config, dir.to_path_buf(), dir.join("config.json")).unwrap(),
+        )
+    }
+
+    fn finished(version_id: &str) -> Finished {
+        Finished {
+            exit: exit(version_id, Some(0), false, false),
+            problems: Vec::new(),
+        }
+    }
+
+    /// 隔离实例 `id`（实例目录下已有 saves），里面放一个存档，level.dat 的修改时刻为 `modified`。
+    fn world(dir: &std::path::Path, id: &str, world: &str, modified: SystemTime) {
+        let version = dir.join(".minecraft").join("versions").join(id);
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::write(
+            version.join(format!("{id}.json")),
+            format!(r#"{{"id":"{id}","type":"release","mainClass":"M"}}"#),
+        )
+        .unwrap();
+        let world = version.join("saves").join(world);
+        std::fs::create_dir_all(world.join("region")).unwrap();
+        std::fs::write(world.join("region").join("r.0.0.mca"), b"region").unwrap();
+        let level = std::fs::File::create(world.join("level.dat")).unwrap();
+        level.set_modified(modified).unwrap();
+    }
+
+    /// 关着自动备份：实例与占用槽在退出事件之前一起放开，不转成「备份」，也不推备份事件。前端收到退出事件
+    /// 就可能立即启动下一个实例，放开必须先于推送。
     #[tokio::test]
-    async fn slot_is_released_before_the_exit_event_goes_out() {
-        // 前端收到退出事件就可能立即启动下一个实例：放开占用槽必须先于推送。
+    async fn without_auto_backup_everything_is_released_before_the_exit_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), false);
+        let started = SystemTime::now();
+        world(
+            dir.path(),
+            "1.21",
+            "新的世界",
+            started + std::time::Duration::from_secs(60),
+        );
+        let locks = InstanceLocks::default();
+        let guard = locks
+            .acquire_with_bases("1.21", InstanceActivity::Running, &["原版".to_owned()])
+            .unwrap();
         let order = std::cell::RefCell::new(Vec::new());
         watch(
-            async {
-                Finished {
-                    exit: exit("1.21", Some(0), false, false),
-                    problems: Vec::new(),
-                }
+            &facade,
+            Watched {
+                version_id: "1.21".into(),
+                session_started: started,
+                instance: guard,
             },
+            async { finished("1.21") },
             || order.borrow_mut().push("release".to_owned()),
             |exit| {
+                assert_eq!(locks.activity("1.21"), None, "退出事件之前实例已放开");
+                assert_eq!(locks.activity("原版"), None, "退出事件之前基底已放开");
                 order
                     .borrow_mut()
-                    .push(format!("emit {:?}", exit.exit_code))
+                    .push(format!("exit {:?}", exit.exit_code))
+            },
+            |backup| order.borrow_mut().push(format!("backup {backup:?}")),
+        )
+        .await;
+        assert_eq!(order.into_inner(), vec!["release", "exit Some(0)"]);
+        assert_eq!(locks.activity("1.21"), None);
+        let backups = dir
+            .path()
+            .join(".minecraft")
+            .join(concat!(".", aurora_base::app_slug!()))
+            .join("backups");
+        assert!(!backups.exists(), "关着自动备份不碰盘");
+    }
+
+    /// 开着自动备份：占用槽放开、退出事件推出时实例正在「备份」，只备份这一局写过 level.dat 的存档，
+    /// 备份事件在退出事件之后，推出时实例已放开。
+    #[tokio::test]
+    async fn auto_backup_runs_after_the_exit_event_and_releases_the_instance_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), true);
+        let started = SystemTime::now();
+        let hour = std::time::Duration::from_secs(3600);
+        world(dir.path(), "1.21", "这局玩的", started + hour);
+        world(dir.path(), "1.21", "上周玩的", started - hour);
+        let locks = InstanceLocks::default();
+        let guard = locks
+            .acquire_with_bases("1.21", InstanceActivity::Launching, &[])
+            .unwrap();
+        guard.set_activity(InstanceActivity::Running);
+        let order = std::cell::RefCell::new(Vec::new());
+        let delivered = std::cell::RefCell::new(None);
+        watch(
+            &facade,
+            Watched {
+                version_id: "1.21".into(),
+                session_started: started,
+                instance: guard,
+            },
+            async { finished("1.21") },
+            || {
+                assert_eq!(locks.activity("1.21"), Some(InstanceActivity::BackingUp));
+                order.borrow_mut().push("release")
+            },
+            |_| {
+                assert_eq!(locks.activity("1.21"), Some(InstanceActivity::BackingUp));
+                // 备份期间实例不能再次启动，Mod 改动照常。
+                let err = locks
+                    .acquire("1.21", InstanceActivity::Launching)
+                    .err()
+                    .unwrap();
+                assert_eq!(err.detail.unwrap()["activity"], "backing_up");
+                drop(locks.acquire("1.21", InstanceActivity::Modifying).unwrap());
+                order.borrow_mut().push("exit")
+            },
+            |backup| {
+                assert_eq!(locks.activity("1.21"), None, "推备份事件时实例已放开");
+                order.borrow_mut().push("backup");
+                *delivered.borrow_mut() = Some(backup);
             },
         )
         .await;
-        assert_eq!(order.into_inner(), vec!["release", "emit Some(0)"]);
+        assert_eq!(order.into_inner(), vec!["release", "exit", "backup"]);
+        assert_eq!(locks.activity("1.21"), None);
+        let payload = delivered.into_inner().unwrap();
+        assert_eq!(payload.instance_id, "1.21");
+        assert_eq!(payload.backed_up, vec!["这局玩的".to_owned()]);
+        assert!(payload.failed.is_empty(), "{:?}", payload.failed);
+        let list = facade
+            .snapshot()
+            .await
+            .list_world_backups("1.21", "这局玩的")
+            .await
+            .unwrap();
+        assert_eq!(list.backups.len(), 1);
+        assert_eq!(list.backups[0].kind, aurora_core::BackupKind::Auto);
+        let untouched = facade
+            .snapshot()
+            .await
+            .list_world_backups("1.21", "上周玩的")
+            .await
+            .unwrap();
+        assert!(untouched.backups.is_empty());
+    }
+
+    /// 这一局没进过任何存档：照样推一条两个列表都空的备份事件，推时实例已放开，前端靠它重读实例的活动。
+    #[tokio::test]
+    async fn auto_backup_with_nothing_played_still_reports_the_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), true);
+        let started = SystemTime::now();
+        world(
+            dir.path(),
+            "1.21",
+            "旧档",
+            started - std::time::Duration::from_secs(60),
+        );
+        let locks = InstanceLocks::default();
+        let guard = locks
+            .acquire_with_bases("1.21", InstanceActivity::Running, &[])
+            .unwrap();
+        let order = std::cell::RefCell::new(Vec::new());
+        let delivered = std::cell::RefCell::new(None);
+        watch(
+            &facade,
+            Watched {
+                version_id: "1.21".into(),
+                session_started: started,
+                instance: guard,
+            },
+            async { finished("1.21") },
+            || {},
+            |_| order.borrow_mut().push("exit"),
+            |backup| {
+                assert_eq!(locks.activity("1.21"), None, "推备份事件时实例已放开");
+                order.borrow_mut().push("backup");
+                *delivered.borrow_mut() = Some(backup);
+            },
+        )
+        .await;
+        assert_eq!(order.into_inner(), vec!["exit", "backup"]);
+        let payload = delivered.into_inner().unwrap();
+        assert_eq!(payload.instance_id, "1.21");
+        assert!(payload.backed_up.is_empty());
+        assert!(payload.failed.is_empty());
+        let list = facade
+            .snapshot()
+            .await
+            .list_world_backups("1.21", "旧档")
+            .await
+            .unwrap();
+        assert!(list.backups.is_empty(), "会话前写过的存档不备份");
+    }
+
+    /// 加载器实例退出后转去自动备份：基底照旧记着「被使用」，跟着实例一直占到备份做完才放开，备份事件推出时
+    /// 两边都已放开。
+    #[tokio::test]
+    async fn auto_backup_keeps_the_base_held_until_the_instance_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path(), true);
+        let started = SystemTime::now();
+        world(
+            dir.path(),
+            "Fabric 生存",
+            "这局玩的",
+            started + std::time::Duration::from_secs(3600),
+        );
+        let locks = InstanceLocks::default();
+        let guard = locks
+            .acquire_with_bases(
+                "Fabric 生存",
+                InstanceActivity::Running,
+                &["1.20.1".to_owned()],
+            )
+            .unwrap();
+        let backed_up = std::cell::RefCell::new(None);
+        watch(
+            &facade,
+            Watched {
+                version_id: "Fabric 生存".into(),
+                session_started: started,
+                instance: guard,
+            },
+            async { finished("Fabric 生存") },
+            || {},
+            |_| {
+                assert_eq!(
+                    locks.activity("Fabric 生存"),
+                    Some(InstanceActivity::BackingUp)
+                );
+                assert_eq!(locks.activity("1.20.1"), Some(InstanceActivity::Inherited));
+            },
+            |backup| {
+                assert_eq!(locks.activity("Fabric 生存"), None);
+                assert_eq!(locks.activity("1.20.1"), None, "基底随实例一起放开");
+                *backed_up.borrow_mut() = Some(backup.backed_up);
+            },
+        )
+        .await;
+        assert_eq!(
+            backed_up.into_inner(),
+            Some(vec!["这局玩的".to_owned()]),
+            "备份事件要推出来"
+        );
+    }
+
+    /// 单个存档失败带着它的错误码进 failed；整场没能开始时 failed 只有一项，存档名为 `*`。
+    #[test]
+    fn auto_backup_failures_keep_their_codes() {
+        let payload = world_backup_event(
+            "生存",
+            Ok(AutoBackupOutcome {
+                backed_up: vec!["a".into()],
+                failed: vec![(
+                    "b".into(),
+                    aurora_core::CoreError::WorldNotFound {
+                        version_id: "生存".into(),
+                        world: "b".into(),
+                    },
+                )],
+            }),
+        );
+        assert_eq!(payload.backed_up, vec!["a".to_owned()]);
+        assert_eq!(payload.failed.len(), 1);
+        assert_eq!(payload.failed[0].world, "b");
+        assert_eq!(payload.failed[0].error.code, "world_not_found");
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["failed"][0]["error"]["code"], "world_not_found");
+        assert_eq!(json["instance_id"], "生存");
+
+        let whole = world_backup_event(
+            "生存",
+            Err(aurora_core::CoreError::VersionNotInstalled {
+                id: "生存".into()
+            }),
+        );
+        assert!(whole.backed_up.is_empty());
+        assert_eq!(whole.failed.len(), 1);
+        assert_eq!(whole.failed[0].world, "*");
+        assert_eq!(whole.failed[0].error.code, "version_not_installed");
     }
 }

@@ -11,7 +11,7 @@ use std::time::Duration;
 use aurora_base::retry::RetryPolicy;
 use aurora_download::{
     ChunkConfig, ChunkPlan, DownloadConfig, DownloadPool, DownloadProgress, DownloadTask,
-    Downloader, Error, MirrorSource, SourcePlan, SourceResolver,
+    Downloader, Error, MirrorSource, SourcePlan, SourceResolver, WatchdogConfig,
 };
 use tokio::sync::watch;
 use wiremock::matchers::{header, header_exists, method, path};
@@ -69,6 +69,7 @@ fn single_source_config(chunk: ChunkConfig) -> DownloadConfig {
         chunk,
         retry: fast_policy(),
         sources: SourcePlan::new(vec![MirrorSource::Official]),
+        watchdog: WatchdogConfig::default(),
     }
 }
 
@@ -475,6 +476,7 @@ async fn switching_source_drops_parts_when_task_has_no_sha1() {
             vec![MirrorSource::Official, MirrorSource::BmclApi],
             Arc::new(TwoPathResolver { base: server.uri() }),
         ),
+        watchdog: WatchdogConfig::default(),
     };
     let downloader = Downloader::new(client(), config);
     // 刻意不给 sha1：这类任务只校验总大小，跨源拼接的坏字节没有第二道关。
@@ -665,6 +667,7 @@ async fn exhausted_primary_switches_to_mirror() {
             vec![MirrorSource::Official, MirrorSource::BmclApi],
             resolver,
         ),
+        watchdog: WatchdogConfig::default(),
     };
 
     let dir = tempfile::tempdir().unwrap();

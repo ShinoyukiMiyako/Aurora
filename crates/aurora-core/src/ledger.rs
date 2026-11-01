@@ -25,6 +25,22 @@ use crate::facade::Aurora;
 /// 卷宗文件名。
 const LEDGER_FILE: &str = "ledger.json";
 
+/// 玩家对某个 Mod 的更新检查设置。
+///
+/// 记在卷宗而不是配置里：它跟着「实例里这个 Mod」走，换个实例装同一个 Mod 是另一回事；移除 Mod 时随
+/// 条目一起消失，不留孤儿设置。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UpdateHold {
+    /// 检查更新时跳过它。
+    Ignored,
+    /// 只接受不晚于这个版本的更新（版本标识同 [`LedgerEntry::version_id`] 的口径）。
+    Pinned {
+        /// 锁定上限的版本标识。
+        version_id: String,
+    },
+}
+
 /// 一条安装记录。`file_name` 是与磁盘 join 的键。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerEntry {
@@ -47,10 +63,14 @@ pub struct LedgerEntry {
     pub icon_url: Option<String>,
     /// 下载时校验用的 SHA-1；平台没给为 `None`。
     pub sha1: Option<String>,
-    /// 安装时刻 unix 秒。
+    /// 这个 Mod 装进实例的时刻（unix 秒）。更新与回滚换的是版本不是 Mod，都沿用原值；哈希反查补身份时
+    /// 真实时刻已不可考，取文件修改时刻。
     pub installed_at: i64,
     /// 作为谁的依赖被带进来的（project_id）；用户主动装的为 `None`。
     pub installed_as_dependency_of: Option<String>,
+    /// 更新检查设置；没设置为 `None`，落盘时不写这个键，早期卷宗读出也是 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_hold: Option<UpdateHold>,
 }
 
 /// 一个实例的全部安装记录。
@@ -64,6 +84,11 @@ impl Ledger {
     /// 按磁盘文件名查条目。
     pub fn find(&self, file_name: &str) -> Option<&LedgerEntry> {
         self.entries.iter().find(|e| e.file_name == file_name)
+    }
+
+    /// 按磁盘文件名查条目，可就地修改。
+    pub fn find_mut(&mut self, file_name: &str) -> Option<&mut LedgerEntry> {
+        self.entries.iter_mut().find(|e| e.file_name == file_name)
     }
 
     /// 同 `file_name` 覆盖，不同则追加。
@@ -162,6 +187,7 @@ mod tests {
             sha1: Some("aabbcc".to_owned()),
             installed_at: 1_754_000_000,
             installed_as_dependency_of: None,
+            update_hold: None,
         }
     }
 
@@ -251,6 +277,7 @@ mod tests {
             sha1: None,
             installed_at: -5,
             installed_as_dependency_of: Some("AANobbMI".to_owned()),
+            update_hold: None,
         });
         store.save(&ledger).await.unwrap();
 
@@ -282,6 +309,77 @@ mod tests {
         assert_eq!(only.version_number, None);
         assert_eq!(only.title, None);
         assert_eq!(only.icon_url, None);
+    }
+
+    #[test]
+    fn find_mut_edits_the_matching_entry_in_place() {
+        let mut ledger = Ledger::default();
+        ledger.upsert(entry("a.jar", "v1"));
+        ledger.upsert(entry("b.jar", "v2"));
+
+        ledger.find_mut("b.jar").expect("应命中 b.jar").update_hold = Some(UpdateHold::Ignored);
+        assert_eq!(ledger.entries[0].update_hold, None);
+        assert_eq!(ledger.entries[1].update_hold, Some(UpdateHold::Ignored));
+        assert!(ledger.find_mut("b.jar.disabled").is_none());
+        assert!(ledger.find_mut("").is_none());
+    }
+
+    #[tokio::test]
+    async fn entries_written_without_update_hold_load_as_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("ledger.json");
+        tokio::fs::write(
+            &path,
+            br#"{"entries":[{"file_name":"a.jar","platform":"modrinth","project_id":"p",
+                "version_id":"v","version_number":"1.0","title":"A","icon_url":null,
+                "sha1":"aa","installed_at":7,"installed_as_dependency_of":null}]}"#,
+        )
+        .await
+        .unwrap();
+        let ledger = LedgerStore::at(&path).load().await.unwrap();
+        assert_eq!(ledger.entries.len(), 1);
+        assert_eq!(ledger.entries[0].update_hold, None);
+        assert_eq!(ledger.entries[0].installed_at, 7);
+    }
+
+    #[tokio::test]
+    async fn update_hold_round_trips_and_is_omitted_when_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LedgerStore::at(tmp.path().join("ledger.json"));
+
+        let mut ledger = Ledger::default();
+        ledger.upsert(LedgerEntry {
+            update_hold: Some(UpdateHold::Ignored),
+            ..entry("ignored.jar", "v1")
+        });
+        ledger.upsert(LedgerEntry {
+            update_hold: Some(UpdateHold::Pinned {
+                version_id: "IZskiJmZ".to_owned(),
+            }),
+            ..entry("pinned.jar", "v1")
+        });
+        ledger.upsert(entry("plain.jar", "v1"));
+        store.save(&ledger).await.unwrap();
+
+        assert_eq!(store.load().await.unwrap(), ledger);
+
+        // 落盘形状：设了的是带 kind 的对象，没设的条目里根本没有这个键。
+        let raw: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(store.path()).await.unwrap()).unwrap();
+        let entries = raw["entries"].as_array().unwrap();
+        assert_eq!(
+            entries[0]["update_hold"],
+            serde_json::json!({ "kind": "ignored" })
+        );
+        assert_eq!(
+            entries[1]["update_hold"],
+            serde_json::json!({ "kind": "pinned", "version_id": "IZskiJmZ" })
+        );
+        assert!(
+            !entries[2].as_object().unwrap().contains_key("update_hold"),
+            "未设置时不应写出 update_hold：{}",
+            entries[2]
+        );
     }
 
     #[tokio::test]

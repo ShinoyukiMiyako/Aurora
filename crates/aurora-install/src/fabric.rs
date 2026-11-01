@@ -207,6 +207,7 @@ impl<'a> LoaderInstaller<'a> {
             )),
             self.cx.policy,
             self.cx.cancel,
+            "加载器 profile",
         )
         .await
     }

@@ -125,7 +125,7 @@ function WithLaunch({ id, children }: { id: string; children: (entry: LaunchEntr
   return children(useLaunch(id));
 }
 
-/** 当前实例的那一条启动类操作；视图里没有可做的启动动作时为 null。 */
+/** 当前实例的那一条启动类操作；视图里没有可做的启动动作（安装中，或存档备份、恢复进行中不能启动）时为 null。 */
 function currentInstanceEntry(entry: LaunchEntry): PaletteEntry | null {
   const name = entry.instance.name;
   const base = { group: "action" as const, instance: null, hint: name, keywords: [entry.instance.id, "launch", "qidong", "qd"], lastPlayedAt: null };
@@ -133,6 +133,7 @@ function currentInstanceEntry(entry: LaunchEntry): PaletteEntry | null {
     case "ready":
     case "stopped":
     case "failed":
+      if (entry.blocked !== null) return null;
       return { ...base, id: "current:launch", label: LAUNCH_COPY.group(name), hint: PALETTE_COPY.currentHint, icon: "play", navigates: false, run: entry.launch };
     case "broken": {
       const action = brokenAction(entry.view);

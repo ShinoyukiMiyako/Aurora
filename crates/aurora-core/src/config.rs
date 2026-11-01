@@ -13,12 +13,11 @@
 //! 枚举字段按字段前向兼容：降级后遇到新版本写入的取值，只把那一项退回默认，其余设置照常读入，
 //! 文件原样不动，之后落盘时没改过的那项写回原值（见 [`ConfigFieldReset`]）。整份当坏文件处理的
 //! 只剩不是合法 JSON 与类型对不上。不认识的顶层设置原样留在 [`AuroraConfig::unrecognized`] 里，
-//! 外观、内存段里不认识的键留在 [`AuroraConfig::carried_over`] 里，落盘时都原样写回。
+//! 外观、内存、存档备份段里不认识的键留在 [`AuroraConfig::carried_over`] 里，落盘时都原样写回。
 
 use std::path::{Path, PathBuf};
 
-use aurora_base::mirror::{self, MirrorSource};
-use aurora_download::SourcePlan;
+use aurora_base::mirror::MirrorSource;
 use aurora_instance::IsolationPolicy;
 use chrono::{Datelike, Local, Timelike};
 use serde::de::DeserializeOwned;
@@ -31,13 +30,13 @@ use crate::facade::Aurora;
 
 /// 下载源三档策略。对应功能矩阵的「文件下载源 / 版本列表源」三档设置。
 ///
-/// 静态候选顺序：`OfficialFirst`/`Auto` 官方优先、镜像兜底；`MirrorFirst` 镜像优先、官方兜底。
-/// `Auto` 语义为「自动测速」——其静态顺序同官方优先，运行期可用 [`SourcePlan::reorder_by_speed`]
-/// 按实测时延重排（门面未在每次下载前强制测速，以免为小文件引入探测延迟）。
+/// `OfficialFirst` 官方优先、镜像兜底；`MirrorFirst` 镜像优先、官方兜底。
+/// `Auto` 在生成下载计划前测一次各源首字节时间，按快慢排序，结论进程内保留 10 分钟；测不出来时
+/// 镜像优先；熔断中的主机由下载引擎沉底。具体顺序由门面的源计划给出，这里只定兜底顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DownloadSourcePolicy {
-    /// 自动测速（默认）：静态顺序官方优先，可运行期测速重排。
+    /// 自动（默认）：按测速结果在官方源与镜像之间择优，测不出来时镜像优先。
     #[default]
     Auto,
     /// 尽量官方：官方优先，镜像兜底。
@@ -47,36 +46,19 @@ pub enum DownloadSourcePolicy {
 }
 
 impl DownloadSourcePolicy {
-    /// 该策略下按优先级排列的镜像源列表。
+    /// 没有测速结论时的兜底顺序。
+    ///
+    /// `Auto` 测不出来时镜像在前：两个源都探不通多半是网络整体不佳，这时国内玩家直连官方 CDN 的成功率
+    /// 远不如 BMCLAPI，而镜像真不通时引擎换到官方也只多赔一轮重试。
     pub fn mirror_order(self) -> Vec<MirrorSource> {
         match self {
-            DownloadSourcePolicy::Auto | DownloadSourcePolicy::OfficialFirst => {
+            DownloadSourcePolicy::OfficialFirst => {
                 vec![MirrorSource::Official, MirrorSource::BmclApi]
             }
-            DownloadSourcePolicy::MirrorFirst => {
+            DownloadSourcePolicy::Auto | DownloadSourcePolicy::MirrorFirst => {
                 vec![MirrorSource::BmclApi, MirrorSource::Official]
             }
         }
-    }
-
-    /// 该策略的首选源（用于不走 [`SourcePlan`] 换源的单源抓取，如 Java 运行时清单）。
-    pub fn primary_mirror(self) -> MirrorSource {
-        match self {
-            DownloadSourcePolicy::MirrorFirst => MirrorSource::BmclApi,
-            DownloadSourcePolicy::Auto | DownloadSourcePolicy::OfficialFirst => {
-                MirrorSource::Official
-            }
-        }
-    }
-
-    /// 构造该策略对应的下载源调度方案。
-    pub fn source_plan(self) -> SourcePlan {
-        SourcePlan::new(self.mirror_order())
-    }
-
-    /// 把一个官方 URL 按该策略的首选源改写（首选官方时原样返回）。
-    pub fn rewrite_primary(self, url: &str) -> Result<String> {
-        Ok(mirror::rewrite(url, self.primary_mirror())?)
     }
 }
 
@@ -101,6 +83,29 @@ impl Default for MemorySettings {
             max_mb: 4096,
             min_mb: None,
             auto: true,
+        }
+    }
+}
+
+/// 存档备份设置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorldBackupSettings {
+    /// 游戏退出后是否自动备份这次玩过的存档。默认开：备份的价值在零操作兜底，等玩家想起来手动备份
+    /// 往往已经晚了。
+    pub auto: bool,
+    /// 每个存档保留的自动备份份数；手动备份不受它限制。
+    pub keep_per_world: u32,
+    /// 全部备份的总量上限（GB，按 1024^3 字节计），超过后先删最旧的自动备份。
+    pub max_total_gb: u32,
+}
+
+impl Default for WorldBackupSettings {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            keep_per_world: 5,
+            max_total_gb: 20,
         }
     }
 }
@@ -137,6 +142,9 @@ pub struct PinnedServer {
     pub name: String,
     /// `host` 或 `host:port`（IPv6 写成 `[addr]:port`）。
     pub address: String,
+    /// 「加入」时默认用的实例 id；没记住为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
 }
 
 /// 一条带名字的目录。名字是给人看的（「PCL2」「官方启动器」），路径才是身份。
@@ -196,6 +204,16 @@ pub struct AuroraConfig {
     pub notified_update_version: Option<String>,
     /// 界面语言。旧配置没有这一项时取默认的简体中文。
     pub language: UiLanguage,
+    /// 手动添加的 java 可执行文件，一律存成规范化后的 java.exe 路径：启动链路拉起的是 java.exe，
+    /// 同一个 Java 也不会因为选过 javaw.exe 记成两条。
+    pub extra_java_paths: Vec<PathBuf>,
+    /// 启动前是否把这次用的 java 可执行文件设为 Windows 图形设置里的「高性能」。
+    pub prefer_dedicated_gpu: bool,
+    /// 新实例是否沿用默认设置（数据目录里的模板）。关掉时新建与整合包导入一律不套模板；
+    /// 旧配置没有这一项时按开着处理：没有模板时套用本来就什么也不做。
+    pub new_instance_template: bool,
+    /// 存档备份。旧配置没有这一项时取默认值。
+    pub world_backup: WorldBackupSettings,
     /// 这个版本不认识的顶层设置（多半是更新的版本写的），原样留着、落盘时原样写回。
     ///
     /// 配置整份按内存里的值落盘：不留着的话，降级之后随便改一项设置，新版本的设置就从文件里消失了，
@@ -231,6 +249,10 @@ impl Default for AuroraConfig {
             skipped_update_version: None,
             notified_update_version: None,
             language: UiLanguage::default(),
+            extra_java_paths: Vec::new(),
+            prefer_dedicated_gpu: false,
+            new_instance_template: true,
+            world_backup: WorldBackupSettings::default(),
             unrecognized: serde_json::Map::new(),
             carried_over: CarriedOver::default(),
         }
@@ -238,15 +260,16 @@ impl Default for AuroraConfig {
 }
 
 /// 从 config.json 读进来、内存里的设置表示不了、落盘时要原样带回去的内容（多半是更新的版本写的）：
-/// 外观段、内存段里这个版本不认识的键，以及取值不认识、暂用默认值启动的枚举字段的原值。
+/// 外观段、内存段、存档备份段里这个版本不认识的键，以及取值不认识、暂用默认值启动的枚举字段的原值。
 ///
-/// 不放进 [`Appearance`] 与 [`MemorySettings`] 自己身上：这两个值原样进 IPC 出参，内存设置还会被设置页
-/// 整份替换，放在段里要么漏给前端，要么被一次替换冲掉。它也不参与配置的序列化，只由 [`ConfigStore`]
-/// 读入时收下、落盘时写回。
+/// 不放进 [`Appearance`]、[`MemorySettings`] 与 [`WorldBackupSettings`] 自己身上：这几个值原样进 IPC
+/// 出参，内存与存档备份设置还会被设置页整份替换，放在段里要么漏给前端，要么被一次替换冲掉。它也不参与
+/// 配置的序列化，只由 [`ConfigStore`] 读入时收下、落盘时写回。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CarriedOver {
     appearance: serde_json::Map<String, Value>,
     memory: serde_json::Map<String, Value>,
+    world_backup: serde_json::Map<String, Value>,
     enum_originals: Vec<EnumOriginal>,
 }
 
@@ -272,6 +295,7 @@ impl CarriedOver {
         Ok(Self {
             appearance: unrecognized_keys::<Appearance>(tree.get("appearance"))?,
             memory: unrecognized_keys::<MemorySettings>(tree.get("memory"))?,
+            world_backup: unrecognized_keys::<WorldBackupSettings>(tree.get("world_backup"))?,
             enum_originals: Vec::new(),
         })
     }
@@ -302,7 +326,11 @@ impl CarriedOver {
     /// 把收下的内容写回要落盘的 JSON 树：不认识的键与同段认识的键并排，没人改过的枚举字段换回原值。
     /// 交回这次换回了原值的字段。
     fn restore_into(&self, tree: &mut Value) -> serde_json::Result<Vec<&'static str>> {
-        for (section, keys) in [("appearance", &self.appearance), ("memory", &self.memory)] {
+        for (section, keys) in [
+            ("appearance", &self.appearance),
+            ("memory", &self.memory),
+            ("world_backup", &self.world_backup),
+        ] {
             if keys.is_empty() {
                 continue;
             }
@@ -647,6 +675,46 @@ mod tests {
         assert!(c.skipped_update_version.is_none());
         assert!(c.notified_update_version.is_none());
         assert_eq!(c.language, UiLanguage::ZhCn, "界面语言默认简体中文");
+        assert!(c.extra_java_paths.is_empty());
+        assert!(!c.prefer_dedicated_gpu, "独显偏好默认关");
+    }
+
+    /// 没有手动 Java 与独显偏好两项的旧配置照常读入：两项取默认，其余字段原样保留；写过之后原样读回。
+    #[tokio::test]
+    async fn old_config_without_java_paths_and_gpu_preference_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"download_concurrency": 24, "default_java": "C:\\jdk-17\\bin\\java.exe", "check_updates": false, "language": "en-US"}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let mut loaded = store.load().await.unwrap();
+        assert!(loaded.extra_java_paths.is_empty());
+        assert!(!loaded.prefer_dedicated_gpu);
+        assert_eq!(loaded.download_concurrency, 24);
+        assert_eq!(
+            loaded.default_java.as_deref(),
+            Some(Path::new(r"C:\jdk-17\bin\java.exe"))
+        );
+        assert!(!loaded.check_updates);
+        assert_eq!(loaded.language, UiLanguage::EnUs);
+
+        loaded.extra_java_paths = vec![
+            PathBuf::from(r"D:\Java\jdk-21\bin\java.exe"),
+            PathBuf::from(r"E:\zulu8\bin\java.exe"),
+        ];
+        loaded.prefer_dedicated_gpu = true;
+        store.save(&loaded).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["extra_java_paths"],
+            serde_json::json!([r"D:\Java\jdk-21\bin\java.exe", r"E:\zulu8\bin\java.exe"])
+        );
+        assert_eq!(raw["prefer_dedicated_gpu"], true);
+        assert_eq!(store.load().await.unwrap(), loaded);
     }
 
     /// 序列化名就是 config.json 里的 BCP 47 写法：区分大小写，下划线写法与裸语言码都不认。
@@ -687,6 +755,110 @@ mod tests {
             serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
         assert_eq!(raw["language"], "en-US");
         assert_eq!(store.load().await.unwrap().language, UiLanguage::EnUs);
+    }
+
+    /// 旧配置没有 new_instance_template 时按开着载入；写成 false 的读出 false，整份落盘再读回不变。
+    #[tokio::test]
+    async fn new_instance_template_defaults_on_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let store = ConfigStore::at(&path);
+
+        tokio::fs::write(&path, br#"{"download_concurrency": 12}"#)
+            .await
+            .unwrap();
+        let old = store.load().await.unwrap();
+        assert!(old.new_instance_template);
+        assert_eq!(old.download_concurrency, 12);
+
+        tokio::fs::write(
+            &path,
+            br#"{"new_instance_template": false, "check_updates": false}"#,
+        )
+        .await
+        .unwrap();
+        let off = store.load().await.unwrap();
+        assert!(!off.new_instance_template);
+        assert!(!off.check_updates);
+
+        let config = AuroraConfig {
+            new_instance_template: false,
+            download_concurrency: 7,
+            language: UiLanguage::EnUs,
+            ..AuroraConfig::default()
+        };
+        store.save(&config).await.unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["new_instance_template"], false);
+        assert_eq!(store.load().await.unwrap(), config);
+    }
+
+    /// 旧配置没有 world_backup 时按默认值载入：自动备份开、每个存档 5 份、总量 20 GB。
+    #[tokio::test]
+    async fn world_backup_defaults_for_old_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"download_concurrency": 16, "language": "en-US"}"#,
+        )
+        .await
+        .unwrap();
+        let loaded = ConfigStore::at(&path).load().await.unwrap();
+        assert_eq!(
+            loaded.world_backup,
+            WorldBackupSettings {
+                auto: true,
+                keep_per_world: 5,
+                max_total_gb: 20,
+            }
+        );
+        assert_eq!(loaded.download_concurrency, 16);
+        assert_eq!(loaded.language, UiLanguage::EnUs);
+    }
+
+    /// world_backup 只写了一部分时，缺的那几项取默认值；写过之后原样落盘、原样读回。
+    #[tokio::test]
+    async fn partial_world_backup_fills_defaults_and_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(&path, br#"{"world_backup": {"keep_per_world": 1}}"#)
+            .await
+            .unwrap();
+        let store = ConfigStore::at(&path);
+        let mut loaded = store.load().await.unwrap();
+        assert_eq!(
+            loaded.world_backup,
+            WorldBackupSettings {
+                auto: true,
+                keep_per_world: 1,
+                max_total_gb: 20,
+            }
+        );
+
+        tokio::fs::write(&path, br#"{"world_backup": {"auto": false}}"#)
+            .await
+            .unwrap();
+        let off = store.load().await.unwrap().world_backup;
+        assert_eq!(
+            (off.auto, off.keep_per_world, off.max_total_gb),
+            (false, 5, 20)
+        );
+
+        loaded.world_backup = WorldBackupSettings {
+            auto: false,
+            keep_per_world: 50,
+            max_total_gb: 1000,
+        };
+        store.save(&loaded).await.unwrap();
+        let raw: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["world_backup"],
+            serde_json::json!({ "auto": false, "keep_per_world": 50, "max_total_gb": 1000 })
+        );
+        assert_eq!(store.load().await.unwrap(), loaded);
     }
 
     /// 不认识的语言（新版本才有的译文）不让整份配置失败：语言退回简体中文，其余照常。
@@ -735,10 +907,18 @@ mod tests {
             after_launch: AfterLaunch::Close,
             check_updates: false,
             default_java: Some(PathBuf::from("C:/Java/jdk-21/bin/java.exe")),
-            pinned_servers: vec![PinnedServer {
-                name: "Hypixel".to_owned(),
-                address: "mc.hypixel.net".to_owned(),
-            }],
+            pinned_servers: vec![
+                PinnedServer {
+                    name: "Hypixel".to_owned(),
+                    address: "mc.hypixel.net".to_owned(),
+                    instance: None,
+                },
+                PinnedServer {
+                    name: "家".to_owned(),
+                    address: "10.0.0.2:25570".to_owned(),
+                    instance: Some("生存 1.21.1".to_owned()),
+                },
+            ],
             extra_game_directories: vec![NamedDirectory {
                 name: "PCL2".to_owned(),
                 path: PathBuf::from("D:/PCL2/.minecraft"),
@@ -753,8 +933,91 @@ mod tests {
         assert_eq!(reloaded, config);
     }
 
+    /// 旧配置里固定的服务器只有 name 与 address：照常读出、没有记住实例；原样写回时也不多出 instance 键，
+    /// 降级回旧版本读到的仍是它认识的形状。
+    #[tokio::test]
+    async fn pinned_servers_without_instance_load_and_resave_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            r#"{"pinned_servers": [{"name": "Hypixel", "address": "mc.hypixel.net"}, {"name": "家", "address": "10.0.0.2:25570"}]}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let loaded = store.load().await.unwrap();
+        assert_eq!(
+            loaded.pinned_servers,
+            vec![
+                PinnedServer {
+                    name: "Hypixel".to_owned(),
+                    address: "mc.hypixel.net".to_owned(),
+                    instance: None,
+                },
+                PinnedServer {
+                    name: "家".to_owned(),
+                    address: "10.0.0.2:25570".to_owned(),
+                    instance: None,
+                },
+            ]
+        );
+
+        store.save(&loaded).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["pinned_servers"],
+            serde_json::json!([
+                {"name": "Hypixel", "address": "mc.hypixel.net"},
+                {"name": "家", "address": "10.0.0.2:25570"}
+            ])
+        );
+
+        // 记住了实例的那条写出 instance，读回来一致。
+        let mut bound = loaded;
+        bound.pinned_servers[1].instance = Some("生存".to_owned());
+        store.save(&bound).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["pinned_servers"][1]["instance"], "生存");
+        assert!(raw["pinned_servers"][0].get("instance").is_none());
+        assert_eq!(store.load().await.unwrap(), bound);
+    }
+
+    /// 固定服务器这一层只认自己的字段、不拒绝别的键：版本之间互相降级时，整份配置不能因为条目多了一个键就读不出来。
+    /// 这一层的未知键不进顶层的保留区，写回时丢掉，代价只是「加入」再问一次用哪个实例。
+    #[tokio::test]
+    async fn pinned_server_with_a_key_from_another_version_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            r#"{"pinned_servers": [{"name": "家", "address": "10.0.0.2:25570", "instance": "生存", "favorite": true}], "download_concurrency": 8}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let loaded = store.load().await.unwrap();
+        assert_eq!(
+            loaded.pinned_servers,
+            vec![PinnedServer {
+                name: "家".to_owned(),
+                address: "10.0.0.2:25570".to_owned(),
+                instance: Some("生存".to_owned()),
+            }]
+        );
+        assert_eq!(loaded.download_concurrency, 8);
+
+        store.save(&loaded).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["pinned_servers"],
+            serde_json::json!([{"name": "家", "address": "10.0.0.2:25570", "instance": "生存"}])
+        );
+    }
+
+    /// 三档的兜底顺序：只有尽量官方把官方放前面，自动测不出来时与尽量镜像同为镜像在前。
     #[test]
-    fn source_policy_orders_mirrors() {
+    fn fallback_order_of_each_policy() {
         assert_eq!(
             DownloadSourcePolicy::OfficialFirst.mirror_order(),
             vec![MirrorSource::Official, MirrorSource::BmclApi]
@@ -763,47 +1026,9 @@ mod tests {
             DownloadSourcePolicy::MirrorFirst.mirror_order(),
             vec![MirrorSource::BmclApi, MirrorSource::Official]
         );
-        // 自动测速的静态顺序同官方优先。
         assert_eq!(
             DownloadSourcePolicy::Auto.mirror_order(),
-            vec![MirrorSource::Official, MirrorSource::BmclApi]
-        );
-        assert_eq!(
-            DownloadSourcePolicy::MirrorFirst.primary_mirror(),
-            MirrorSource::BmclApi
-        );
-        assert_eq!(
-            DownloadSourcePolicy::Auto.primary_mirror(),
-            MirrorSource::Official
-        );
-    }
-
-    #[test]
-    fn source_plan_candidate_order_follows_policy() {
-        // 尽量镜像：Mojang 库 URL 的首选候选应是 BMCLAPI。
-        let plan = DownloadSourcePolicy::MirrorFirst.source_plan();
-        let got = plan
-            .candidates("https://libraries.minecraft.net/foo/bar.jar")
-            .unwrap();
-        assert_eq!(got[0], "https://bmclapi2.bangbang93.com/maven/foo/bar.jar");
-        assert_eq!(got[1], "https://libraries.minecraft.net/foo/bar.jar");
-    }
-
-    #[test]
-    fn rewrite_primary_maps_manifest_to_mirror_only_when_mirror_first() {
-        let manifest = aurora_install::VERSION_MANIFEST_V2;
-        assert_eq!(
-            DownloadSourcePolicy::MirrorFirst
-                .rewrite_primary(manifest)
-                .unwrap(),
-            "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json"
-        );
-        // 官方优先/自动时清单地址原样。
-        assert_eq!(
-            DownloadSourcePolicy::OfficialFirst
-                .rewrite_primary(manifest)
-                .unwrap(),
-            manifest
+            vec![MirrorSource::BmclApi, MirrorSource::Official]
         );
     }
 
@@ -1471,6 +1696,70 @@ mod tests {
         assert_eq!(store.load().await.unwrap(), config);
     }
 
+    /// 存档备份段同样保留不认识的键：读入不算处置，出参里没有它们；设置页提交时整份替换这一段，
+    /// 认识的键按新值写，不认识的照旧写回。
+    #[tokio::test]
+    async fn unrecognized_world_backup_keys_survive_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        tokio::fs::write(
+            &path,
+            br#"{"world_backup": {"keep_per_world": 3, "schedule": {"every_hours": 6}, "target": ""}}"#,
+        )
+        .await
+        .unwrap();
+        let store = ConfigStore::at(&path);
+        let (mut config, recovery) = store.load_or_preserve().await.unwrap();
+        assert_eq!(recovery, None);
+        assert_eq!(
+            config.world_backup,
+            WorldBackupSettings {
+                auto: true,
+                keep_per_world: 3,
+                max_total_gb: 20,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(config.world_backup).unwrap(),
+            serde_json::json!({"auto": true, "keep_per_world": 3, "max_total_gb": 20})
+        );
+
+        config.check_updates = false;
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(raw["check_updates"], false);
+        assert_eq!(
+            raw["world_backup"],
+            serde_json::json!({
+                "auto": true,
+                "keep_per_world": 3,
+                "max_total_gb": 20,
+                "schedule": {"every_hours": 6},
+                "target": ""
+            })
+        );
+
+        let mut config = store.load().await.unwrap();
+        config.world_backup = WorldBackupSettings {
+            auto: false,
+            keep_per_world: 0,
+            max_total_gb: 1,
+        };
+        store.save(&config).await.unwrap();
+        let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            raw["world_backup"],
+            serde_json::json!({
+                "auto": false,
+                "keep_per_world": 0,
+                "max_total_gb": 1,
+                "schedule": {"every_hours": 6},
+                "target": ""
+            })
+        );
+        assert_eq!(store.load().await.unwrap(), config);
+    }
+
     /// 嵌套段里不认识的键只在落盘时带上：外观的读取值与补丁合并结果、内存设置的值里都没有它们（这些值原样
     /// 进 IPC 出参）。设置页提交内存时整份替换内存设置，也不会把它们冲掉。
     #[tokio::test]
@@ -1532,7 +1821,7 @@ mod tests {
     #[tokio::test]
     async fn empty_or_missing_sections_carry_nothing() {
         for bytes in [
-            br#"{"appearance": {}, "memory": {}}"#.as_slice(),
+            br#"{"appearance": {}, "memory": {}, "world_backup": {}}"#.as_slice(),
             br#"{"download_concurrency": 8}"#.as_slice(),
         ] {
             let dir = tempfile::tempdir().unwrap();
@@ -1550,6 +1839,10 @@ mod tests {
             assert_eq!(
                 raw["memory"],
                 serde_json::to_value(MemorySettings::default()).unwrap()
+            );
+            assert_eq!(
+                raw["world_backup"],
+                serde_json::to_value(WorldBackupSettings::default()).unwrap()
             );
         }
     }

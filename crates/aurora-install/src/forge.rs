@@ -406,6 +406,7 @@ impl<'a> ForgeInstaller<'a> {
             &format!("{installer_url}.sha1"),
             self.cx.policy,
             self.cx.cancel,
+            "installer 的 sha1",
         )
         .await?;
         let text = String::from_utf8(bytes).map_err(|err| Error::UnsupportedInstallProfile {

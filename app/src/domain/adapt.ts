@@ -131,6 +131,8 @@ export interface InstanceSummary {
   extraLoaders: { kind: ExtraLoaderKind; version: string | null }[];
   releaseType: ReleaseType | null;
   javaMajor: number | null;
+  /** 版本能否直接进入存档、直接加入服务器；读不出版本信息（损坏、继承链断了）或还在安装的占位项为 null。 */
+  quickPlay: { singleplayer: boolean; multiplayer: boolean } | null;
   /** 实例设置里的描述；没写或设置读不出时为 null。 */
   description: string | null;
   /** 封面预设 id；null 表示没设过，按默认封面规则画。 */
@@ -245,6 +247,7 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     extraLoaders,
     releaseType: dto.release_type === null ? null : releaseTypeFromDto(dto.release_type),
     javaMajor: dto.java_major,
+    quickPlay: dto.quick_play === null ? null : { singleplayer: dto.quick_play.singleplayer, multiplayer: dto.quick_play.multiplayer },
     description: dto.description,
     cover: dto.cover,
     pinned: ctx.pins.includes(dto.id),
@@ -341,6 +344,17 @@ export interface Settings {
   skippedUpdateVersion: string | null;
   notifiedUpdateVersion: string | null;
   language: UiLanguage;
+  /** 手动添加的 java 可执行文件；识别不识别得出以 Java 探测结果为准。 */
+  extraJavaPaths: string[];
+  preferDedicatedGpu: boolean;
+  /** 存档备份：退出游戏后是否自动备份，自动备份每个存档留几份、全部备份的总量上限（GB）。 */
+  worldBackup: WorldBackup;
+}
+
+export interface WorldBackup {
+  auto: boolean;
+  keepPerWorld: number;
+  maxTotalGb: number;
 }
 
 const SOURCES: readonly DownloadSourcePolicy[] = ["auto", "official_first", "mirror_first"];
@@ -367,6 +381,9 @@ export function settingsFromDto(dto: ConfigDto): Settings {
     skippedUpdateVersion: dto.skipped_update_version,
     notifiedUpdateVersion: dto.notified_update_version,
     language: oneOf(dto.language, UI_LANGUAGES, "界面语言"),
+    extraJavaPaths: [...dto.extra_java_paths],
+    preferDedicatedGpu: dto.prefer_dedicated_gpu,
+    worldBackup: { auto: dto.world_backup.auto, keepPerWorld: dto.world_backup.keep_per_world, maxTotalGb: dto.world_backup.max_total_gb },
   };
 }
 
@@ -386,12 +403,16 @@ export interface SettingsPatch {
   skippedUpdateVersion?: string;
   notifiedUpdateVersion?: string;
   language?: UiLanguage;
+  preferDedicatedGpu?: boolean;
+  /** 三项一起写：后端要求一次给全。 */
+  worldBackup?: WorldBackup;
 }
 
 export function settingsPatchToConfig(patch: SettingsPatch): ConfigPatch {
-  const { memory, ...rest } = patch;
+  const { memory, worldBackup, ...rest } = patch;
   const out: ConfigPatch = { ...rest };
   if (memory !== undefined) out.memory = { max_mb: memory.maxMb, min_mb: memory.minMb, auto: memory.auto };
+  if (worldBackup !== undefined) out.worldBackup = { auto: worldBackup.auto, keep_per_world: worldBackup.keepPerWorld, max_total_gb: worldBackup.maxTotalGb };
   return out;
 }
 

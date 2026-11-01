@@ -9,11 +9,15 @@
 //!
 //! 文件校验只看存在与大小、不算哈希：每次启动给几千个资源文件算 sha1 要几十秒。缺了或大小不对的
 //! 才交给下载池，下载池对它们做完整校验。
+//!
+//! 直达存档或服务器（[`QuickPlay`]）在校验游戏文件阶段预检：版本不支持、存档不在、地址写错都在这里
+//! 失败，不会先下载一堆文件再告诉玩家进不去。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use aurora_auth::{Account, AccountCredentials};
+use aurora_auth::{Account, AccountCredentials, AccountStatus};
 use aurora_download::{BatchReport, DownloadTask};
 use aurora_install::GameLayout;
 use aurora_instance::{
@@ -22,9 +26,11 @@ use aurora_instance::{
 use aurora_java::{DetectSource, JavaInstallation, select_for_major};
 use aurora_launch::logfile::{SessionOutcome, logs_dir};
 use aurora_launch::{
-    AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, LaunchCommand,
-    LauncherLevel, LogBatchSink, LogSource, MemoryConfig, SessionClock, SessionLog,
-    game_path_warning, recommended_max_mb, required_java_major,
+    AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, JvmMemoryIssue,
+    LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, QuickPlayMode,
+    QuickPlayTarget, SessionClock, SessionLog, SyncProvider, game_path_warning, jvm_memory_issue,
+    long_player_name, quick_play_support, recommended_max_mb, required_java_major, sync_folder,
+    sync_roots_from_env,
 };
 use aurora_version::{AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, resolve};
 use serde::Serialize;
@@ -32,7 +38,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::config::MemorySettings;
-use crate::error::CoreError;
+use crate::error::{CoreError, OfflineFallbackRefusal};
 use crate::event::{CoreEvent, DownloadProgress};
 use crate::facade::{Aurora, make_context};
 use crate::session::GameRun;
@@ -120,6 +126,18 @@ pub type LaunchEventSink = mpsc::UnboundedSender<LaunchEvent>;
 pub enum LaunchWarning {
     /// 游戏路径含非 ASCII 或 `!`。
     GamePath,
+    /// 工作目录在 OneDrive 同步的文件夹里。
+    OnedriveFolder,
+    /// 工作目录在 iCloud 同步的文件夹里。
+    IcloudFolder,
+    /// 角色名超过 16 个字符，而游戏版本是 1.20.3 或更新。
+    LongPlayerName,
+    /// 自定义 JVM 参数里 `-Xmx` / `-Xms` 的写法 Java 不认。
+    JvmMemoryUnit,
+    /// 生效的最小堆大于最大堆。
+    JvmMinOverMax,
+    /// 生效的最大堆低于 512 MB。
+    JvmMaxTooLow,
 }
 
 /// 用哪个账户启动。
@@ -131,6 +149,24 @@ pub enum LaunchAccount {
     Stored(Box<Account>),
 }
 
+/// 启动后直接去哪儿。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuickPlay {
+    /// 进入存档：`saves/` 下的世界文件夹名（不是存档里写的显示名）。
+    Singleplayer { world_dir_name: String },
+    /// 加入服务器：玩家写的地址原文。
+    Multiplayer { address: String },
+}
+
+impl QuickPlay {
+    pub fn mode(&self) -> QuickPlayMode {
+        match self {
+            QuickPlay::Singleplayer { .. } => QuickPlayMode::Singleplayer,
+            QuickPlay::Multiplayer { .. } => QuickPlayMode::Multiplayer,
+        }
+    }
+}
+
 /// 一次启动的输入。
 pub struct LaunchRequest {
     pub version_id: String,
@@ -139,6 +175,42 @@ pub struct LaunchRequest {
     pub launcher_version: String,
     /// 游戏输出的批量转发端；`None` 时只写会话日志。
     pub game_log: Option<LogBatchSink>,
+    /// 启动后直接进入存档或加入服务器；`None` 为停在标题画面。
+    pub quick_play: Option<QuickPlay>,
+}
+
+/// 各账户最近一次账户类启动失败，键为账户 uuid。只在内存里：降级放行要的是「刚才亲眼看到验证失败」，
+/// 重开启动器后就不再作数。门面的快照克隆共享同一个句柄。
+pub(crate) type AccountFailures = Arc<Mutex<HashMap<String, FailureCode>>>;
+
+/// 会被记进 [`AccountFailures`] 的失败码。
+const ACCOUNT_FAILURES: [FailureCode; 3] = [
+    FailureCode::AccountRelogin,
+    FailureCode::AccountRefreshNetwork,
+    FailureCode::AccountServiceDown,
+];
+
+/// 按记下的上一次账户失败决定能否降级：只有验证本身没能完成（服务故障、网络故障）才放行；凭据被判定
+/// 失效时离线进游戏只会掩盖问题，应当重新登录。
+fn offline_fallback_verdict(
+    previous: Option<FailureCode>,
+) -> Result<FailureCode, OfflineFallbackRefusal> {
+    match previous {
+        Some(code @ (FailureCode::AccountServiceDown | FailureCode::AccountRefreshNetwork)) => {
+            Ok(code)
+        }
+        // 记录里只有账户类失败码，剩下的就是 account_relogin。
+        Some(_) => Err(OfflineFallbackRefusal::ReloginRequired),
+        None => Err(OfflineFallbackRefusal::NoRecentFailure),
+    }
+}
+
+/// 启动用的身份：注入命令行的鉴权值、外置登录要注入的验证服务器，以及这一局是否未经验证。
+struct LaunchIdentity {
+    auth: AuthValues,
+    /// 外置登录账户的验证服务器 API 根；`None` 时不下载、不注入 authlib-injector。
+    authlib_root: Option<String>,
+    offline: bool,
 }
 
 /// 玩家能针对性处理的启动失败码。
@@ -150,6 +222,8 @@ pub enum FailureCode {
     JavaTooOld,
     AccountRelogin,
     AccountRefreshNetwork,
+    /// 登录服务一侧故障（微软或外置验证服务器回 5xx、429 或故障页），重试过仍不行；不是这个账户的问题。
+    AccountServiceDown,
     FilesOffline,
     FilesFailed,
     DiskFull,
@@ -165,6 +239,7 @@ impl FailureCode {
             FailureCode::JavaTooOld => "java_too_old",
             FailureCode::AccountRelogin => "account_relogin",
             FailureCode::AccountRefreshNetwork => "account_refresh_network",
+            FailureCode::AccountServiceDown => "account_service_down",
             FailureCode::FilesOffline => "files_offline",
             FailureCode::FilesFailed => "files_failed",
             FailureCode::DiskFull => "disk_full",
@@ -353,6 +428,28 @@ pub fn resolve_memory(
     }
 }
 
+/// 自定义 JVM 参数的内存问题对应的提醒与启动器日志原文。
+fn memory_warning(issue: JvmMemoryIssue) -> (LaunchWarning, String) {
+    match issue {
+        JvmMemoryIssue::BadUnit { arg } => (
+            LaunchWarning::JvmMemoryUnit,
+            format!(
+                "自定义 JVM 参数 {arg} 的写法 Java 不认，内存单位只能是 k、m、g、t，例如 -Xmx4g"
+            ),
+        ),
+        JvmMemoryIssue::MinOverMax { min_mb, max_mb } => (
+            LaunchWarning::JvmMinOverMax,
+            format!(
+                "自定义 JVM 参数让最小内存（{min_mb} MB）大于最大内存（{max_mb} MB），Java 会拒绝启动"
+            ),
+        ),
+        JvmMemoryIssue::MaxTooLow { max_mb } => (
+            LaunchWarning::JvmMaxTooLow,
+            format!("最大内存只有 {max_mb} MB，低于 512 MB，游戏多半进不了主界面"),
+        ),
+    }
+}
+
 /// 继承链只读目标及其祖先，不扫整个 `versions/`。
 struct VersionChain {
     target: DiscoveredVersion,
@@ -490,7 +587,18 @@ impl Aurora {
         request: LaunchRequest,
         events: &LaunchEventSink,
     ) -> Result<GameRun, LaunchFailed> {
-        self.launch_inner(request, events, None).await
+        self.launch_inner(request, false, events, None).await
+    }
+
+    /// 以离线方式进单人：这一局不续期、不校验，用账户上次登录时的档案名与 uuid、离线令牌进游戏，阶段
+    /// 推进与普通启动相同。只在这个账户上一次启动因服务或网络故障没能验证时放行，由门面凭自己记下的
+    /// 失败判定，不信调用方；不能放行时报 [`CoreError::OfflineFallbackRefused`]。
+    pub async fn launch_offline_fallback(
+        &self,
+        request: LaunchRequest,
+        events: &LaunchEventSink,
+    ) -> Result<GameRun, LaunchFailed> {
+        self.launch_inner(request, true, events, None).await
     }
 
     /// 固定用某个 Java 启动。实例设置还没有 Java 字段，测试要绕开本机 Java 探测只能从这里指定。
@@ -498,16 +606,23 @@ impl Aurora {
     pub(crate) async fn launch_with_java(
         &self,
         request: LaunchRequest,
+        offline_fallback: bool,
         events: &LaunchEventSink,
         java: PathBuf,
     ) -> Result<GameRun, LaunchFailed> {
-        self.launch_inner(request, events, Some(JavaChoice::Path(java)))
-            .await
+        self.launch_inner(
+            request,
+            offline_fallback,
+            events,
+            Some(JavaChoice::Path(java)),
+        )
+        .await
     }
 
     async fn launch_inner(
         &self,
         request: LaunchRequest,
+        offline_fallback: bool,
         events: &LaunchEventSink,
         java_override: Option<JavaChoice>,
     ) -> Result<GameRun, LaunchFailed> {
@@ -534,10 +649,23 @@ impl Aurora {
                 ))
                 .await;
         }
-        match self
-            .launch_with(request, chain, &mut reporter, java_override)
-            .await
-        {
+        let stored_uuid = match &request.account {
+            LaunchAccount::Stored(account) => Some(account.uuid.clone()),
+            LaunchAccount::Offline { .. } => None,
+        };
+        let result = self
+            .launch_with(
+                request,
+                offline_fallback,
+                chain,
+                &mut reporter,
+                java_override,
+            )
+            .await;
+        if let Some(uuid) = stored_uuid {
+            self.record_account_outcome(uuid, &result);
+        }
+        match result {
             Ok(run) => Ok(run),
             Err(err) => {
                 let outcome = if err.is_cancelled() {
@@ -561,6 +689,7 @@ impl Aurora {
     async fn launch_with(
         &self,
         request: LaunchRequest,
+        offline_fallback: bool,
         chain: VersionChain,
         reporter: &mut Reporter<'_>,
         java_override: Option<JavaChoice>,
@@ -570,6 +699,7 @@ impl Aurora {
             account,
             launcher_version,
             game_log,
+            quick_play,
         } = request;
         let merged = &chain.merged;
         // 继承链根就是原版：加载器版本的 inheritsFrom 可能指向另一个加载器版本，不能直接当游戏版本号。
@@ -592,7 +722,32 @@ impl Aurora {
             settings.java = JavaChoice::Path(path.clone());
             pinned_by = PinnedBy::Global;
         }
-        let (account, auth) = self.launch_identity(account, reporter).await?;
+        let LaunchIdentity {
+            auth,
+            authlib_root: authlib,
+            offline,
+        } = self
+            .launch_identity(account, offline_fallback, reporter)
+            .await?;
+        let mut warnings = Vec::new();
+        // 离线名与正版名本来就不超过 16 个字符，超长的只会来自外置登录的皮肤站，但对谁都查一遍不费事。
+        // 查的是真正交给游戏的角色名：以离线方式进单人时它同样取自账户上次登录的档案名。
+        // 改过名的原版实例没有 inheritsFrom，继承链根的 id 是玩家起的名字，游戏版本号只在 clientVersion 里。
+        let game_version = merged
+            .client_version
+            .as_deref()
+            .filter(|version| !version.is_empty())
+            .unwrap_or(&mc_version);
+        if long_player_name(&auth.player_name, game_version) {
+            warnings.push(LaunchWarning::LongPlayerName);
+            reporter
+                .warn(format!(
+                    "角色名 {} 有 {} 个字符，Minecraft 1.20.3 及更新的版本只认 16 个以内，进入存档或服务器时会被拒绝",
+                    auth.player_name,
+                    auth.player_name.encode_utf16().count()
+                ))
+                .await;
+        }
         let required_major = required_java_major(merged);
         let java_plan = self
             .plan_java(
@@ -621,10 +776,22 @@ impl Aurora {
                 path: working_dir.clone(),
                 source,
             })?;
-        let mut warnings = Vec::new();
         if let Some(text) = game_path_warning(&working_dir) {
             warnings.push(LaunchWarning::GamePath);
             reporter.warn(text).await;
+        }
+        if let Some(provider) = sync_folder(&working_dir, &sync_roots_from_env()) {
+            let (warning, name) = match provider {
+                SyncProvider::OneDrive => (LaunchWarning::OnedriveFolder, "OneDrive"),
+                SyncProvider::ICloud => (LaunchWarning::IcloudFolder, "iCloud"),
+            };
+            warnings.push(warning);
+            reporter
+                .warn(format!(
+                    "游戏目录在 {name} 同步的文件夹里（{}），同步时文件可能被占用或替换，建议换一个不在 {name} 里的游戏目录",
+                    working_dir.display()
+                ))
+                .await;
         }
         if merged.main_class.is_none() {
             return Err(LaunchFailure::new(
@@ -634,6 +801,24 @@ impl Aurora {
             .param("reason", "missing_main_class")
             .into());
         }
+        let quick_play = match quick_play {
+            Some(quick_play) => {
+                let target =
+                    quick_play_target(&version_id, merged, &working_dir, quick_play).await?;
+                reporter
+                    .info(match &target {
+                        QuickPlayTarget::Singleplayer { world_dir_name } => {
+                            format!("直接进入存档「{world_dir_name}」")
+                        }
+                        QuickPlayTarget::Multiplayer { address, .. } => {
+                            format!("直接加入服务器 {address}")
+                        }
+                    })
+                    .await;
+                Some(target)
+            }
+            None => None,
+        };
         let layout = self.layout();
         let mut plan = DownloadPlan::default();
         let mut legacy = self
@@ -652,10 +837,6 @@ impl Aurora {
             asset_index_missing: plan.asset_index_missing,
         };
         aurora_install::complete::reject_missing_bundled(&plan.files)?;
-        let authlib = match &account.credentials {
-            AccountCredentials::AuthlibInjector(creds) => Some(creds.api_root.clone()),
-            _ => None,
-        };
 
         // -- 3 下载缺失文件（游戏文件、托管 Java、authlib-injector）
         reporter.stage(LaunchStage::DownloadMissing).await;
@@ -696,6 +877,9 @@ impl Aurora {
                     .await?
             }
         };
+        if self.config().prefer_dedicated_gpu {
+            self.prefer_dedicated_gpu_for(&java.path, reporter).await?;
+        }
         let authlib = match authlib {
             Some(api_root) => Some(self.prepare_authlib(&api_root, reporter).await?),
             None => None,
@@ -730,6 +914,11 @@ impl Aurora {
             None
         };
         let memory = resolve_memory(settings.memory_mb, global_memory, auto_mb);
+        if let Some(issue) = jvm_memory_issue(&settings.jvm_args, memory) {
+            let (warning, text) = memory_warning(issue);
+            warnings.push(warning);
+            reporter.warn(text).await;
+        }
         let paths = GamePaths::standard(self.game_dir(), &chain.base_id);
         let command = assemble_command(
             merged,
@@ -743,6 +932,7 @@ impl Aurora {
             memory,
             &settings,
             authlib,
+            quick_play,
         )?;
         reporter
             .info(format!(
@@ -788,18 +978,83 @@ impl Aurora {
                 max_memory_mb: memory.max_mb,
                 warnings,
                 pid,
+                offline,
             },
             session,
         ))
     }
 
-    /// 账户与注入命令行的鉴权值。微软账户在这里静默续期，续期失败按原因分成「需要重登」「网络问题」与
-    /// 其余原样报出的错误（见 [`classify_refresh`]）。
+    /// 把这次要拉起的 java 可执行文件设为 Windows 图形设置里的「高性能」。
+    ///
+    /// 写不进去不挡启动：显卡偏好只影响帧数，游戏照样能玩，按 Windows 默认的显卡启动并在启动日志里说明。
+    /// 只有阻塞任务本身异常（程序缺陷）才冒泡。
+    async fn prefer_dedicated_gpu_for(
+        &self,
+        exe: &Path,
+        reporter: &mut Reporter<'_>,
+    ) -> Result<(), LaunchFailed> {
+        let store = self.gpu_preferences();
+        let path = exe.to_path_buf();
+        let outcome = tokio::task::spawn_blocking(move || {
+            crate::gpu::prefer_high_performance(&*store, &path)
+        })
+        .await?;
+        match outcome {
+            Ok(crate::gpu::GpuPreferenceChange::Written { previous, value }) => {
+                tracing::info!(path = %exe.display(), ?previous, %value, "已写入显卡偏好");
+                reporter
+                    .info(format!(
+                        "已在 Windows 图形设置里让 {} 使用高性能显卡",
+                        exe.display()
+                    ))
+                    .await;
+            }
+            Ok(crate::gpu::GpuPreferenceChange::Unchanged) => {}
+            Err(err) => {
+                tracing::warn!(path = %exe.display(), error = %err, cause = ?std::error::Error::source(&err), "写入显卡偏好失败，按 Windows 默认的显卡启动");
+                let reason = match &err {
+                    CoreError::GpuPreferenceWrite { source, .. } => source.to_string(),
+                    other => other.to_string(),
+                };
+                reporter
+                    .warn(format!(
+                        "没能写入显卡偏好（{reason}），这次按 Windows 默认的显卡启动"
+                    ))
+                    .await;
+            }
+        }
+        Ok(())
+    }
+
+    /// 记下或清掉这个账户最近一次账户类失败，供以离线方式进单人时判定。只有可处理的账户失败才记；
+    /// 正常验证后跑起来的一局清掉记录；其余结局（取消、文件或 Java 失败、降级启动本身）不动它。
+    fn record_account_outcome(&self, uuid: String, result: &Result<GameRun, LaunchFailed>) {
+        let mut failures = self
+            .account_failures
+            .lock()
+            .expect("账户失败记录的锁已中毒");
+        match result {
+            Err(LaunchFailed::Failure(failure)) if ACCOUNT_FAILURES.contains(&failure.code) => {
+                failures.insert(uuid, failure.code);
+            }
+            Ok(run) if !run.offline() => {
+                failures.remove(&uuid);
+            }
+            _ => {}
+        }
+    }
+
+    /// 账户与注入命令行的鉴权值。微软账户在这里静默续期，续期失败按原因分成「需要重登」「服务故障」
+    /// 「网络问题」与其余原样报出的错误（见 [`classify_refresh`]）。
     async fn launch_identity(
         &self,
         account: LaunchAccount,
+        offline_fallback: bool,
         reporter: &mut Reporter<'_>,
-    ) -> Result<(Account, AuthValues), LaunchFailed> {
+    ) -> Result<LaunchIdentity, LaunchFailed> {
+        if offline_fallback {
+            return self.offline_fallback_identity(account, reporter).await;
+        }
         let account = match account {
             LaunchAccount::Offline { name } => {
                 let (tx, mut rx) = mpsc::unbounded_channel();
@@ -815,7 +1070,68 @@ impl Aurora {
             LaunchAccount::Stored(account) => self.refresh_for_launch(*account).await?,
         };
         let auth = AuthValues::from_account(&account)?;
-        Ok((account, auth))
+        let authlib_root = match &account.credentials {
+            AccountCredentials::AuthlibInjector(creds) => Some(creds.api_root.clone()),
+            _ => None,
+        };
+        Ok(LaunchIdentity {
+            auth,
+            authlib_root,
+            offline: false,
+        })
+    }
+
+    /// 以离线方式进单人：不发任何网络请求，不写账户库，用账户上次登录时的档案名与 uuid、离线令牌进游戏。
+    /// 判定顺序固定：离线账户、已失效账户先拒；再取出（同时消耗）上一次账户失败的记录，按它放行或拒绝。
+    async fn offline_fallback_identity(
+        &self,
+        account: LaunchAccount,
+        reporter: &mut Reporter<'_>,
+    ) -> Result<LaunchIdentity, LaunchFailed> {
+        let refuse = |account: String, reason: OfflineFallbackRefusal| -> LaunchFailed {
+            CoreError::OfflineFallbackRefused { account, reason }.into()
+        };
+        let account = match account {
+            LaunchAccount::Offline { name } => {
+                return Err(refuse(name, OfflineFallbackRefusal::OfflineAccount));
+            }
+            LaunchAccount::Stored(account) => *account,
+        };
+        if matches!(account.credentials, AccountCredentials::Offline) {
+            return Err(refuse(account.name, OfflineFallbackRefusal::OfflineAccount));
+        }
+        if account.status == AccountStatus::Expired {
+            return Err(refuse(
+                account.name,
+                OfflineFallbackRefusal::ReloginRequired,
+            ));
+        }
+        let previous = self
+            .account_failures
+            .lock()
+            .expect("账户失败记录的锁已中毒")
+            .remove(&account.uuid);
+        let previous = match offline_fallback_verdict(previous) {
+            Ok(code) => code,
+            Err(reason) => return Err(refuse(account.name, reason)),
+        };
+        reporter
+            .warn(format!(
+                "以离线方式进单人：{} 这一局不经账户验证，只能玩单人游戏",
+                account.name
+            ))
+            .await;
+        tracing::warn!(
+            uuid = %account.uuid,
+            name = %account.name,
+            previous = previous.as_str(),
+            "账户验证不可用，按玩家选择以离线方式启动"
+        );
+        Ok(LaunchIdentity {
+            auth: AuthValues::offline(account.name, account.uuid),
+            authlib_root: None,
+            offline: true,
+        })
     }
 
     /// 微软令牌过期就续期，外置令牌先校验、无效再刷新，离线原样返回。凭据被判定失效时账户库里
@@ -867,6 +1183,15 @@ impl Aurora {
                     ))
                     .await;
             }
+            // 用户指定的 Java 不完整也照用：缺的文件未必影响启动，替用户换一个就违背了设置。
+            if !java.is_complete() {
+                reporter
+                    .warn(format!(
+                        "指定的 Java 缺少 {}，可能没装完整，启动失败时换一个 Java",
+                        java.missing_files.join("、")
+                    ))
+                    .await;
+            }
             return Ok(JavaPlan::Ready(java));
         }
 
@@ -887,8 +1212,12 @@ impl Aurora {
             })?
         {
             match probe_java(managed.clone(), DetectSource::Managed).await? {
-                Ok(java) if java.version.major == required_major => {
+                Ok(java) if java.version.major == required_major && java.is_complete() => {
                     return Ok(JavaPlan::Ready(java));
+                }
+                // 缺文件的托管运行时与自动选择一样跳过：重新下载时已就绪的文件按 sha1 跳过，等于补齐。
+                Ok(java) if java.version.major == required_major => {
+                    tracing::warn!(path = %managed.display(), missing = ?java.missing_files, "托管运行时缺少运行时文件，重新下载补齐")
                 }
                 Ok(java) => {
                     tracing::warn!(path = %managed.display(), major = java.version.major, "托管运行时主版本与目录不符，重新下载")
@@ -1026,6 +1355,7 @@ impl Aurora {
         reporter
             .info(format!("旧版资源目录缺少 {missing} 个文件，补全游戏文件"))
             .await;
+        self.prepare_sources().await?;
         let http = self.http();
         let pool = self.download_pool();
         let policy = self.retry_policy();
@@ -1098,6 +1428,7 @@ impl Aurora {
         files: Vec<DownloadTask>,
         reporter: &mut Reporter<'_>,
     ) -> Result<BatchReport, LaunchFailed> {
+        self.prepare_sources().await?;
         let (tx, mut rx) = mpsc::unbounded_channel::<CoreEvent>();
         let pool = self.download_pool_reporting(Some(&tx));
         drop(tx);
@@ -1127,6 +1458,7 @@ impl Aurora {
     ) -> Result<JavaInstallation, LaunchFailed> {
         reporter.info(format!("下载 Java {major} 托管运行时")).await;
         let install_dir = crate::java::runtime_install_dir(self.data_dir(), major);
+        self.prepare_sources().await?;
         let plan = self
             .java_installer(manifest_url)
             .plan(major, &install_dir)
@@ -1178,7 +1510,7 @@ impl Aurora {
         reporter: &mut Reporter<'_>,
     ) -> Result<PathBuf, LaunchFailed> {
         let dir = crate::authlib::agent_dir(self.data_dir());
-        let urls = crate::authlib::latest_urls(&self.config().download_source.mirror_order());
+        let urls = crate::authlib::latest_urls(&self.source_order(self.config().download_source));
         let release = match crate::authlib::fetch_latest(&self.http(), &urls).await {
             Ok(release) => release,
             Err(err) => {
@@ -1242,6 +1574,61 @@ fn agent_unavailable(err: crate::authlib::LatestLookupError) -> LaunchFailure {
     }
 }
 
+/// 直达目标的预检，顺序即报错的先后：版本不支持（不新增失败码，照常作为启动链路错误冒泡）、存档不在
+/// 或文件夹名不安全（复用 [`CoreError::WorldNotFound`]）、地址写法不对（[`CoreError::InvalidServerAddress`]）。
+/// 不联网解析地址，也不查 SRV：没写端口的地址原样交给游戏自己解析。
+async fn quick_play_target(
+    version_id: &str,
+    merged: &VersionJson,
+    working_dir: &Path,
+    quick_play: QuickPlay,
+) -> Result<QuickPlayTarget, LaunchFailed> {
+    let mode = quick_play.mode();
+    if !quick_play_support(merged).supports(mode) {
+        return Err(aurora_launch::LaunchError::QuickPlayUnsupported {
+            version: version_id.to_owned(),
+            mode,
+        }
+        .into());
+    }
+    match quick_play {
+        QuickPlay::Singleplayer { world_dir_name } => {
+            let not_found = || CoreError::WorldNotFound {
+                version_id: version_id.to_owned(),
+                world: world_dir_name.clone(),
+            };
+            // 文件夹名会原样拼进路径并交给游戏：带分隔符或 `..` 的名字不可能是 saves 下的一个存档。
+            if !crate::resources::is_safe_file_name(&world_dir_name) {
+                return Err(not_found().into());
+            }
+            let world_dir = working_dir.join("saves").join(&world_dir_name);
+            let is_dir = match tokio::fs::metadata(&world_dir).await {
+                Ok(meta) => meta.is_dir(),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+                Err(source) => {
+                    return Err(aurora_base::Error::Io {
+                        path: world_dir,
+                        source,
+                    }
+                    .into());
+                }
+            };
+            if !is_dir {
+                return Err(not_found().into());
+            }
+            Ok(QuickPlayTarget::Singleplayer { world_dir_name })
+        }
+        QuickPlay::Multiplayer { address } => {
+            let parsed = crate::servers::parse_server_address(&address)?;
+            Ok(QuickPlayTarget::Multiplayer {
+                address: address.trim().to_owned(),
+                host: parsed.host,
+                port: parsed.port,
+            })
+        }
+    }
+}
+
 /// 起进程；起不来就是 spawn_failed，原样带上系统给的原因。
 fn spawn_game(
     command: &LaunchCommand,
@@ -1278,9 +1665,11 @@ fn authlib_metadata_failure(err: aurora_auth::AuthError, api_root: &str) -> Laun
     .into()
 }
 
-/// 续期失败里只有两种给失败码：凭据被服务器判定失效（重新登录）与连不上（联网后重试）。封禁、
-/// 未购买、服务器回 5xx 或解析不了、凭据库读写失败、取消都不是重新登录能解决的，按门面错误原样
-/// 报出原文与错误码；取消因此也照常认得出。
+/// 续期失败里只有三种给失败码：凭据被服务器判定失效（重新登录，账户由续期本身写库标成需要重登）、
+/// 连不上（联网后重试）与登录服务故障（5xx、429，稍后重试）。后两种不碰账户库，账户还是好的，玩家可以
+/// 稍后重试或先以离线方式进单人。封禁、未购买、应用未获批准、响应解析不了、凭据库读写失败都不是重新
+/// 登录能解决的，按门面错误原样报出原文与错误码。取消同样原样报出：它不是续期的结论，当成账户失败
+/// 记下会盖掉门面记下的上一次服务或网络故障，让紧接着的以离线方式进单人被错拒。
 fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
     match &err {
         CoreError::Auth(aurora_auth::AuthError::Http { .. }) => LaunchFailure::new(
@@ -1289,6 +1678,17 @@ fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
         )
         .caused_by(err)
         .into(),
+        CoreError::Auth(aurora_auth::AuthError::ServiceUnavailable { status, .. }) => {
+            let status = u64::from(*status);
+            LaunchFailure::new(
+                FailureCode::AccountServiceDown,
+                format!("刷新 {account_name} 的登录失败：{err}"),
+            )
+            .param("account", account_name)
+            .param("status", status)
+            .caused_by(err)
+            .into()
+        }
         CoreError::Auth(aurora_auth::AuthError::ReloginRequired) => LaunchFailure::new(
             FailureCode::AccountRelogin,
             format!("{account_name} 的登录已失效：{err}"),
@@ -1375,11 +1775,14 @@ fn classify_download(report: &BatchReport, planned: usize, game_dir: &Path) -> L
 }
 
 /// 拉运行时清单或收尾（建目录、链接、可执行位）失败。取消照原样冒泡，连不上清单算离线。
+///
+/// 离线与否沿原因链找 HTTP 层错误，而不是只认某个变体：清单在多个源之间回退时，HTTP 错误包在
+/// 聚合错误的下层，只看顶层会把「每个源都连不上」误判成文件问题。
 fn java_download_failure(major: u32, err: aurora_java::Error) -> LaunchFailed {
     if err.is_cancelled() {
         return CoreError::from(err).into();
     }
-    let code = if matches!(err, aurora_java::Error::Http { .. }) {
+    let code = if has_http_cause(&err) {
         FailureCode::FilesOffline
     } else {
         FailureCode::FilesFailed
@@ -1389,6 +1792,18 @@ fn java_download_failure(major: u32, err: aurora_java::Error) -> LaunchFailed {
         .param("reason", err.to_string())
         .caused_by(err)
         .into()
+}
+
+/// 错误自身或其原因链上有没有 HTTP 层错误。
+fn has_http_cause(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(layer) = current {
+        if layer.is::<reqwest::Error>() {
+            return true;
+        }
+        current = layer.source();
+    }
+    false
 }
 
 /// 换源下载全部失败时，真正的原因在最后一个源的错误里。
@@ -1433,7 +1848,8 @@ fn drive_label(path: &Path) -> String {
     }
 }
 
-/// 用合并后的版本 JSON、路径、鉴权值与实例设置拼出启动命令。
+/// 用合并后的版本 JSON、路径、鉴权值与实例设置拼出启动命令。版本不支持直达时的错误照常冒泡，不归为
+/// version_broken：版本本身没坏，换个启动方式就能进。
 #[allow(clippy::too_many_arguments)]
 fn assemble_command(
     merged: &VersionJson,
@@ -1447,6 +1863,7 @@ fn assemble_command(
     memory: MemoryConfig,
     settings: &InstanceLaunchSettings,
     authlib: Option<AuthlibInjector>,
+    quick_play: Option<QuickPlayTarget>,
 ) -> Result<LaunchCommand, LaunchFailed> {
     let mut builder = CommandBuilder::new(
         merged,
@@ -1467,6 +1884,9 @@ fn assemble_command(
     if let Some(authlib) = authlib {
         builder = builder.with_authlib(authlib);
     }
+    if let Some(target) = quick_play {
+        builder = builder.with_quick_play(target);
+    }
     builder.build().map_err(|err| match err {
         aurora_launch::LaunchError::MissingMainClass { .. }
         | aurora_launch::LaunchError::InvalidLibraryCoordinate { .. }
@@ -1483,6 +1903,7 @@ mod tests {
     use crate::config::AuroraConfig;
     use aurora_download::CancellationToken;
     use aurora_launch::logfile::SessionOutcome;
+    use std::sync::Arc;
 
     const VERSION: &str = "1.20.1";
 
@@ -1501,6 +1922,21 @@ mod tests {
         );
         std::fs::write(&path, script).unwrap();
         path
+    }
+
+    /// 放在完整运行时目录里的 [`fake_java`]：带 `release` 与 `lib/modules`，启动日志里不会多出
+    /// 「指定的 Java 缺少文件」的提醒，断言整串提醒的用例用它。
+    fn complete_fake_java(dir: &Path, major: u32, exit_code: i32) -> PathBuf {
+        let home = dir.join(format!("jdk-{major}"));
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::create_dir_all(home.join("lib")).unwrap();
+        std::fs::write(
+            home.join("release"),
+            format!("JAVA_VERSION=\"{major}.0.8\""),
+        )
+        .unwrap();
+        std::fs::write(home.join("lib").join("modules"), b"image").unwrap();
+        fake_java(&home.join("bin"), major, exit_code)
     }
 
     /// 一个最小的可启动原版：版本 JSON 不带下载地址，客户端 jar 已在本地。
@@ -1552,6 +1988,7 @@ mod tests {
             },
             launcher_version: "9.9.9".to_owned(),
             game_log: None,
+            quick_play: None,
         }
     }
 
@@ -1560,8 +1997,36 @@ mod tests {
         aurora: &Aurora,
         java: PathBuf,
     ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
+        launch_request(aurora, request(), java).await
+    }
+
+    async fn launch_request(
+        aurora: &Aurora,
+        request: LaunchRequest,
+        java: PathBuf,
+    ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
+        launch_mode(aurora, request, false, java).await
+    }
+
+    /// 以离线方式进单人发起一次启动。
+    async fn launch_fallback(
+        aurora: &Aurora,
+        request: LaunchRequest,
+        java: PathBuf,
+    ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
+        launch_mode(aurora, request, true, java).await
+    }
+
+    async fn launch_mode(
+        aurora: &Aurora,
+        request: LaunchRequest,
+        offline_fallback: bool,
+        java: PathBuf,
+    ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let result = aurora.launch_with_java(request(), &tx, java).await;
+        let result = aurora
+            .launch_with_java(request, offline_fallback, &tx, java)
+            .await;
         drop(tx);
         let mut events = Vec::new();
         while let Some(event) = rx.recv().await {
@@ -1586,6 +2051,1030 @@ mod tests {
             Err(LaunchFailed::Core(err)) => panic!("应是可处理的启动失败，实际：{err:?}"),
             Ok(_) => panic!("应启动失败"),
         }
+    }
+
+    const MS_UUID: &str = "0123456789abcdef0123456789abcdef";
+    const MS_NAME: &str = "PetalPlayer";
+
+    /// Minecraft 令牌早已过期的微软账户：启动必须先续期。
+    fn stale_microsoft() -> Account {
+        let mut account = Account::new(
+            MS_UUID,
+            MS_NAME,
+            AccountCredentials::Microsoft(aurora_auth::MicrosoftCredentials {
+                refresh_token: "CACHED-REFRESH".into(),
+                minecraft_token: Some("CACHED-MC".into()),
+                minecraft_expires_at: Some(1),
+            }),
+        );
+        account.last_verified_at = Some(7);
+        account.xuid = Some("2535400000000001".into());
+        account
+    }
+
+    fn stored_request(account: Account) -> LaunchRequest {
+        LaunchRequest {
+            account: LaunchAccount::Stored(Box::new(account)),
+            ..request()
+        }
+    }
+
+    /// 游戏参数里与直达有关的四个块，摘自官方 1.20.1 版本 JSON。
+    const QUICK_PLAY_GAME_ARGS: &str = r#"["--username","${auth_player_name}","--version","${version_name}",
+        {"rules":[{"action":"allow","features":{"has_quick_plays_support":true}}],"value":["--quickPlayPath","${quickPlayPath}"]},
+        {"rules":[{"action":"allow","features":{"is_quick_play_singleplayer":true}}],"value":["--quickPlaySingleplayer","${quickPlaySingleplayer}"]},
+        {"rules":[{"action":"allow","features":{"is_quick_play_multiplayer":true}}],"value":["--quickPlayMultiplayer","${quickPlayMultiplayer}"]},
+        {"rules":[{"action":"allow","features":{"is_quick_play_realms":true}}],"value":["--quickPlayRealms","${quickPlayRealms}"]}]"#;
+
+    /// 旧式启动参数：有 `--username`，没有 Quick Play 块。
+    const LEGACY_ARGS: &str =
+        r#""minecraftArguments":"--username ${auth_player_name} --version ${version_name}""#;
+
+    fn quick_play_json(id: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"release","mainClass":"net.minecraft.client.main.Main","javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}},"arguments":{{"game":{QUICK_PLAY_GAME_ARGS}}}}}"#
+        )
+    }
+
+    fn legacy_json(id: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"release","mainClass":"net.minecraft.client.main.Main","javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}},{LEGACY_ARGS}}}"#
+        )
+    }
+
+    /// 装一个客户端 jar 已在本地、版本 JSON 由调用方给出的实例。
+    fn install_json(mc: &Path, id: &str, json: &str) {
+        let dir = mc.join("versions").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
+        std::fs::write(dir.join(format!("{id}.jar")), b"jar").unwrap();
+    }
+
+    fn quick_request(version_id: &str, quick_play: QuickPlay) -> LaunchRequest {
+        LaunchRequest {
+            version_id: version_id.to_owned(),
+            quick_play: Some(quick_play),
+            ..request()
+        }
+    }
+
+    fn msa_endpoints(server: &wiremock::MockServer) -> aurora_auth::MsaEndpoints {
+        aurora_auth::MsaEndpoints {
+            oauth_base: server.uri(),
+            xbl_authenticate: format!("{}/xbl", server.uri()),
+            xsts_authorize: format!("{}/xsts", server.uri()),
+            minecraft_base: server.uri(),
+        }
+    }
+
+    /// 刷新令牌端点按给定状态与响应体回应；其后的 XBL 等步骤都没挂，走不到。
+    async fn mount_token(server: &wiremock::MockServer, response: wiremock::ResponseTemplate) {
+        use wiremock::matchers::{method, path};
+        wiremock::Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(response)
+            .mount(server)
+            .await;
+    }
+
+    fn outage_page() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(503)
+            .insert_header("content-type", "text/html")
+            .set_body_string("<html><body>Service Unavailable</body></html>")
+    }
+
+    fn invalid_grant() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(400).set_body_json(serde_json::json!({
+            "error": "invalid_grant",
+            "error_description": "AADSTS70000: refresh token revoked"
+        }))
+    }
+
+    /// 门面上布置一个过期的微软账户、指向 mock 的登录端点，返回落库后的账户。
+    fn with_stale_account(fx: &Fixture, server: &wiremock::MockServer) -> (Aurora, Account) {
+        let aurora = fx.aurora.clone().with_msa_endpoints(msa_endpoints(server));
+        let stored = aurora.store_account_for_test(stale_microsoft()).unwrap();
+        (aurora, stored)
+    }
+
+    /// 冒充 java 的批处理：报 Java 17；当作游戏时把收到的全部参数回显成一行游戏输出。
+    fn echo_java(dir: &Path) -> PathBuf {
+        let path = dir.join("echo-java.cmd");
+        let script = "@echo off\r\n\
+             if \"%~1\"==\"-version\" goto version\r\n\
+             echo ARGS %*\r\n\
+             exit /b 0\r\n\
+             :version\r\n\
+             >&2 echo openjdk version \"17.0.8\" 2023-07-18\r\n\
+             >&2 echo OpenJDK 64-Bit Server VM (build 17.0.8+7, mixed mode)\r\n\
+             exit /b 0\r\n";
+        std::fs::write(&path, script).unwrap();
+        path
+    }
+
+    /// 带旧式 minecraftArguments 的最小原版：鉴权值经占位符原样落进游戏参数，回显出来即可断言。
+    fn install_legacy_args_version(mc: &Path) {
+        let dir = mc.join("versions").join(VERSION);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{VERSION}.json")),
+            format!(
+                r#"{{"id":"{VERSION}","type":"release","mainClass":"net.minecraft.client.main.Main","minecraftArguments":"--username ${{auth_player_name}} --uuid ${{auth_uuid}} --accessToken ${{auth_access_token}} --userType ${{user_type}}","javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}}}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join(format!("{VERSION}.jar")), b"jar").unwrap();
+    }
+
+    /// 刷新成功的整条令牌链；`login` 决定 Minecraft 登录那一步怎么回应。
+    async fn mount_chain(server: &wiremock::MockServer, login: wiremock::ResponseTemplate) {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        mount_token(
+            server,
+            ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "msa-access",
+                "refresh_token": "ROTATED-REFRESH",
+                "expires_in": 3600
+            })),
+        )
+        .await;
+        for route in ["/xbl", "/xsts"] {
+            Mock::given(method("POST"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "Token": "xbox-token",
+                    "DisplayClaims": { "xui": [ { "uhs": "uhs" } ] }
+                })))
+                .mount(server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/authentication/login_with_xbox"))
+            .respond_with(login)
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/minecraft/profile"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": MS_UUID,
+                "name": MS_NAME
+            })))
+            .mount(server)
+            .await;
+    }
+
+    fn refusal(result: Result<GameRun, LaunchFailed>) -> (String, OfflineFallbackRefusal) {
+        match result {
+            Err(LaunchFailed::Core(CoreError::OfflineFallbackRefused { account, reason })) => {
+                (account, reason)
+            }
+            Err(other) => panic!("应拒绝以离线方式进单人，实际：{other:?}"),
+            Ok(_) => panic!("应拒绝以离线方式进单人，实际启动成功"),
+        }
+    }
+
+    fn expect_run(result: Result<GameRun, LaunchFailed>) -> GameRun {
+        match result {
+            Ok(run) => run,
+            Err(err) => panic!("启动应成功：{err:?}"),
+        }
+    }
+
+    fn failures_of(aurora: &Aurora) -> HashMap<String, FailureCode> {
+        aurora.account_failures.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn offline_fallback_verdict_allows_only_unverifiable_outcomes() {
+        assert_eq!(
+            offline_fallback_verdict(Some(FailureCode::AccountServiceDown)),
+            Ok(FailureCode::AccountServiceDown)
+        );
+        assert_eq!(
+            offline_fallback_verdict(Some(FailureCode::AccountRefreshNetwork)),
+            Ok(FailureCode::AccountRefreshNetwork)
+        );
+        assert_eq!(
+            offline_fallback_verdict(Some(FailureCode::AccountRelogin)),
+            Err(OfflineFallbackRefusal::ReloginRequired)
+        );
+        assert_eq!(
+            offline_fallback_verdict(None),
+            Err(OfflineFallbackRefusal::NoRecentFailure)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_fallback_after_service_down_plays_with_cached_identity_and_no_network() {
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, outage_page()).await;
+        let fx = fixture();
+        install_legacy_args_version(&fx.root.join(".minecraft"));
+        let (aurora, stored) = with_stale_account(&fx, &server);
+        let java = echo_java(&fx.root);
+
+        let (result, _) =
+            launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
+        assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
+        assert_eq!(
+            failures_of(&aurora).get(MS_UUID),
+            Some(&FailureCode::AccountServiceDown)
+        );
+        let before = server.received_requests().await.unwrap().len();
+
+        let (result, events) = launch_fallback(&aurora, stored_request(stored.clone()), java).await;
+        let run = expect_run(result);
+        assert!(run.offline());
+        // 不续期、不校验：这一局没有打到任何登录端点。
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
+        // 阶段推进与普通启动相同。
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        let warning = format!("以离线方式进单人：{MS_NAME} 这一局不经账户验证，只能玩单人游戏");
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                LaunchEvent::Log { level: LauncherLevel::Warn, text, .. } if *text == warning
+            )),
+            "{events:?}"
+        );
+        // 记录取出即消耗，降级成功也不会再写回。
+        assert!(failures_of(&aurora).is_empty());
+
+        let finished = run.finish().await;
+        assert_eq!(finished.exit.exit_code, Some(0));
+        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        assert!(
+            log.lines.iter().any(|l| l.source == LogSource::Launcher
+                && l.level == Some(LauncherLevel::Warn)
+                && l.text == warning),
+            "{:?}",
+            log.lines
+        );
+        let args = log
+            .lines
+            .iter()
+            .find(|l| l.source == LogSource::Game && l.text.starts_with("ARGS "))
+            .map(|l| l.text.clone())
+            .expect("假 java 应回显启动参数");
+        assert!(args.contains(&format!("--username {MS_NAME} ")), "{args}");
+        assert!(args.contains(&format!("--uuid {MS_UUID} ")), "{args}");
+        assert!(args.contains("--accessToken 0 "), "{args}");
+        assert!(args.contains("--userType legacy"), "{args}");
+        for secret in ["CACHED-MC", "CACHED-REFRESH", "MC-TOKEN", "--userType msa"] {
+            assert!(!args.contains(secret), "参数里不该出现 {secret}：{args}");
+        }
+
+        // 账户状态与凭据不变：降级不写账户库。
+        let after = aurora
+            .find_account(MS_UUID)
+            .unwrap()
+            .expect("账户应仍在库中");
+        assert_eq!(after, stored);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_fallback_is_refused_for_offline_accounts() {
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+
+        let (result, events) = launch_fallback(&fx.aurora, request(), java.clone()).await;
+        assert_eq!(
+            refusal(result),
+            ("Steve".to_owned(), OfflineFallbackRefusal::OfflineAccount)
+        );
+        assert_eq!(stage_indices(&events), vec![0]);
+
+        let library = fx.aurora.add_offline_account("Alex", None).unwrap();
+        // 即便门面记着它的一次失败，离线账户也没有验证可降级。
+        fx.aurora
+            .account_failures
+            .lock()
+            .unwrap()
+            .insert(library.uuid.clone(), FailureCode::AccountServiceDown);
+        let (result, _) = launch_fallback(&fx.aurora, stored_request(library.clone()), java).await;
+        assert_eq!(
+            refusal(result),
+            ("Alex".to_owned(), OfflineFallbackRefusal::OfflineAccount)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_fallback_is_refused_once_the_login_is_invalid() {
+        // 续期被判定失效：账户落为 expired，降级按「需要重新登录」拒绝。
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, invalid_grant()).await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (result, _) = launch_request(&aurora, stored_request(stored), java.clone()).await;
+        assert_eq!(expect_failure(result).code, FailureCode::AccountRelogin);
+        let expired = aurora.find_account(MS_UUID).unwrap().unwrap();
+        assert_eq!(expired.status, AccountStatus::Expired);
+        let before = server.received_requests().await.unwrap().len();
+        let (result, _) =
+            launch_fallback(&aurora, stored_request(expired.clone()), java.clone()).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::ReloginRequired)
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), before);
+        assert_eq!(aurora.find_account(MS_UUID).unwrap().unwrap(), expired);
+
+        // 应用未获批准：重新登录也解决不了，按门面错误原样报出，不记账户失败，账户也没被标成失效；
+        // 没有服务或网络故障的记录，降级按「没有最近的失败」拒绝。
+        let server = wiremock::MockServer::start().await;
+        mount_chain(
+            &server,
+            wiremock::ResponseTemplate::new(403).set_body_string(
+                r#"{"path":"/authentication/login_with_xbox","errorMessage":"Invalid app registration, see https://aka.ms/AppRegInfo for more information"}"#,
+            ),
+        )
+        .await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (result, _) = launch_request(&aurora, stored_request(stored), java.clone()).await;
+        assert!(
+            matches!(
+                &result,
+                Err(LaunchFailed::Core(CoreError::Auth(
+                    aurora_auth::AuthError::AppNotApproved
+                )))
+            ),
+            "应用未获批准应原样报出：{:?}",
+            result.err()
+        );
+        assert!(failures_of(&aurora).is_empty());
+        let current = aurora.find_account(MS_UUID).unwrap().unwrap();
+        assert_eq!(current.status, AccountStatus::Ok);
+        let (result, _) = launch_fallback(&aurora, stored_request(current), java).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_fallback_needs_a_recent_failure_and_consumes_it_once() {
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, outage_page()).await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let (aurora, stored) = with_stale_account(&fx, &server);
+
+        // 没有先前失败：不放行，也不联网。
+        let (result, events) =
+            launch_fallback(&aurora, stored_request(stored.clone()), java.clone()).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
+        );
+        assert_eq!(stage_indices(&events), vec![0]);
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        let (result, _) =
+            launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
+        assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
+
+        // 重开门面（同一数据目录）：记录只在内存里，不作数。
+        let reopened = Aurora::for_test(
+            fx.aurora.config().clone(),
+            fx.root.clone(),
+            fx.root.join(".minecraft"),
+        )
+        .with_msa_endpoints(msa_endpoints(&server));
+        let (result, _) =
+            launch_fallback(&reopened, stored_request(stored.clone()), java.clone()).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
+        );
+
+        // 快照克隆共享同一份记录：在克隆上降级成功，原门面上的记录随之消耗。
+        let snapshot = aurora.clone();
+        let (result, _) =
+            launch_fallback(&snapshot, stored_request(stored.clone()), java.clone()).await;
+        let run = expect_run(result);
+        assert!(run.offline());
+        run.finish().await;
+
+        // 一次性：紧接着再降级一次就没有可用的失败记录了。
+        let (result, _) = launch_fallback(&aurora, stored_request(stored), java).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_fallback_still_warns_about_a_long_player_name() {
+        // 降级不经账户验证，但交给游戏的角色名照旧是账户档案名：超长名的提醒不能因为跳过了续期而漏掉。
+        const NEW_VERSION: &str = "1.21.1";
+        const LONG_NAME: &str = "PetalPlayerLongName01";
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, outage_page()).await;
+        let fx = fixture();
+        let dir = fx
+            .root
+            .join(".minecraft")
+            .join("versions")
+            .join(NEW_VERSION);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(format!("{NEW_VERSION}.json")),
+            format!(
+                r#"{{"id":"{NEW_VERSION}","type":"release","mainClass":"net.minecraft.client.main.Main","javaVersion":{{"component":"java-runtime-delta","majorVersion":17}}}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join(format!("{NEW_VERSION}.jar")), b"jar").unwrap();
+        let aurora = fx.aurora.clone().with_msa_endpoints(msa_endpoints(&server));
+        let mut account = stale_microsoft();
+        account.name = LONG_NAME.to_owned();
+        let stored = aurora.store_account_for_test(account).unwrap();
+        let java = complete_fake_java(&fx.root, 17, 3);
+        let request = || LaunchRequest {
+            version_id: NEW_VERSION.to_owned(),
+            ..stored_request(stored.clone())
+        };
+
+        let (result, _) = launch_request(&aurora, request(), java.clone()).await;
+        assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
+
+        let (result, events) = launch_fallback(&aurora, request(), java).await;
+        let run = expect_run(result);
+        assert!(run.offline());
+        let mut stage = None;
+        let mut warns = Vec::new();
+        for event in &events {
+            match event {
+                LaunchEvent::Stage(s) => stage = Some(s.index()),
+                LaunchEvent::Log {
+                    level: LauncherLevel::Warn,
+                    text,
+                    ..
+                } => warns.push((stage, text.clone())),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            warns,
+            vec![
+                (
+                    Some(0),
+                    format!("以离线方式进单人：{LONG_NAME} 这一局不经账户验证，只能玩单人游戏")
+                ),
+                (
+                    Some(0),
+                    format!(
+                        "角色名 {LONG_NAME} 有 21 个字符，Minecraft 1.20.3 及更新的版本只认 16 个以内，进入存档或服务器时会被拒绝"
+                    )
+                ),
+            ]
+        );
+
+        let finished = run.finish().await;
+        assert!(finished.problems.is_empty(), "{:?}", finished.problems);
+        let crash = aurora
+            .last_crash(NEW_VERSION)
+            .await
+            .unwrap()
+            .expect("崩溃应落盘");
+        assert_eq!(crash.warnings, vec![LaunchWarning::LongPlayerName]);
+        assert_eq!(crash.exit_code, Some(3));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn renamed_vanilla_instance_judges_a_long_player_name_by_its_client_version() {
+        // 改过名的原版实例没有 inheritsFrom，继承链根就是它自己，id 是玩家起的名字；游戏版本号只记在
+        // clientVersion 里。拿实例名去比 1.20.3 永远比不出结果，超长名的提醒就漏了。
+        const LONG_NAME: &str = "PetalPlayerLongName01";
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, outage_page()).await;
+        let fx = fixture();
+        let java = complete_fake_java(&fx.root, 17, 3);
+        let aurora = fx.aurora.clone().with_msa_endpoints(msa_endpoints(&server));
+        let mut account = stale_microsoft();
+        account.name = LONG_NAME.to_owned();
+        let stored = aurora.store_account_for_test(account).unwrap();
+
+        let mut warned = Vec::new();
+        for (renamed, client_version) in [("生存 服", "1.21.1"), ("老 存档", "1.20.2")] {
+            let dir = fx.root.join(".minecraft").join("versions").join(renamed);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{renamed}.json")),
+                format!(
+                    r#"{{"id":"{renamed}","clientVersion":"{client_version}","type":"release","mainClass":"net.minecraft.client.main.Main","javaVersion":{{"component":"java-runtime-gamma","majorVersion":17}}}}"#
+                ),
+            )
+            .unwrap();
+            std::fs::write(dir.join(format!("{renamed}.jar")), b"jar").unwrap();
+            let request = || LaunchRequest {
+                version_id: renamed.to_owned(),
+                ..stored_request(stored.clone())
+            };
+            let (result, _) = launch_request(&aurora, request(), java.clone()).await;
+            assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
+            let (result, events) = launch_fallback(&aurora, request(), java.clone()).await;
+            let run = expect_run(result);
+            let long_name_warns = events
+                .iter()
+                .filter(|event| {
+                    matches!(event, LaunchEvent::Log { level: LauncherLevel::Warn, text, .. } if text.starts_with("角色名 "))
+                })
+                .count();
+            run.finish().await;
+            let crash = aurora
+                .last_crash(renamed)
+                .await
+                .unwrap()
+                .expect("崩溃应落盘");
+            warned.push((
+                renamed,
+                long_name_warns,
+                crash.warnings.contains(&LaunchWarning::LongPlayerName),
+            ));
+        }
+        assert_eq!(warned, vec![("生存 服", 1, true), ("老 存档", 0, false)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn verified_launch_clears_the_recorded_failure() {
+        let down = wiremock::MockServer::start().await;
+        mount_token(&down, outage_page()).await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let (aurora, stored) = with_stale_account(&fx, &down);
+        let (result, _) =
+            launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
+        assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
+
+        // 服务恢复：普通启动续期成功并跑起来，清掉记下的失败。
+        let up = wiremock::MockServer::start().await;
+        mount_chain(
+            &up,
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "MC-TOKEN",
+                "expires_in": 86400
+            })),
+        )
+        .await;
+        let recovered = aurora.clone().with_msa_endpoints(msa_endpoints(&up));
+        let (result, _) =
+            launch_request(&recovered, stored_request(stored.clone()), java.clone()).await;
+        let run = expect_run(result);
+        assert!(!run.offline());
+        run.finish().await;
+        assert!(failures_of(&aurora).is_empty());
+
+        let (result, _) = launch_fallback(&aurora, stored_request(stored), java).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
+        );
+    }
+
+    #[test]
+    fn refresh_failures_split_into_relogin_outage_and_network() {
+        let outage = CoreError::Auth(aurora_auth::AuthError::ServiceUnavailable {
+            step: "刷新令牌",
+            status: 503,
+        });
+        let LaunchFailed::Failure(failure) = classify_refresh(outage, MS_NAME) else {
+            panic!("服务故障应是可处理的启动失败");
+        };
+        assert_eq!(failure.code, FailureCode::AccountServiceDown);
+        assert_eq!(failure.params.get("account"), Some(&Value::from(MS_NAME)));
+        assert_eq!(failure.params.get("status"), Some(&Value::from(503u64)));
+        assert!(failure.message.contains(MS_NAME), "{}", failure.message);
+        assert!(failure.message.contains("HTTP 503"), "{}", failure.message);
+        assert!(failure.source.is_some());
+
+        let relogin = CoreError::Auth(aurora_auth::AuthError::ReloginRequired);
+        let LaunchFailed::Failure(failure) = classify_refresh(relogin, MS_NAME) else {
+            panic!("凭据被判失效应是可处理的启动失败");
+        };
+        assert_eq!(failure.code, FailureCode::AccountRelogin);
+        assert_eq!(failure.params.get("account"), Some(&Value::from(MS_NAME)));
+        assert_eq!(failure.params.get("status"), None);
+
+        // 重新登录解决不了的账户错误原样报出，不冒充凭据失效。
+        for terminal in [
+            aurora_auth::AuthError::AppNotApproved,
+            aurora_auth::AuthError::MinecraftProfileNotFound,
+        ] {
+            let name = format!("{terminal:?}");
+            let failed = classify_refresh(CoreError::Auth(terminal), MS_NAME);
+            assert!(
+                matches!(failed, LaunchFailed::Core(CoreError::Auth(_))),
+                "{name} 不该提示重新登录：{failed:?}"
+            );
+        }
+
+        // 非账户错误原样冒泡，不冒充账户失败。
+        let other = classify_refresh(CoreError::NoJava { major: 17 }, MS_NAME);
+        assert!(
+            matches!(other, LaunchFailed::Core(CoreError::NoJava { major: 17 })),
+            "{other:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refresh_outage_fails_as_service_down_and_leaves_the_account_alone() {
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, outage_page()).await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let (aurora, stored) = with_stale_account(&fx, &server);
+
+        let (result, events) = launch_request(
+            &aurora,
+            stored_request(stored.clone()),
+            fake_java(&fx.root, 17, 0),
+        )
+        .await;
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::AccountServiceDown);
+        assert_eq!(failure.params.get("status"), Some(&Value::from(503u64)));
+        assert_eq!(failure.params.get("account"), Some(&Value::from(MS_NAME)));
+        // 停在阶段 0：账户不可用就不往下走。
+        assert_eq!(stage_indices(&events), vec![0]);
+        // 服务故障值得按退避重试：默认策略的每一次机会都打到了令牌端点。
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            aurora_base::retry::RetryPolicy::default().max_attempts as usize
+        );
+
+        // 账户还在、状态正常、凭据一个字没动。
+        let after = aurora
+            .find_account(MS_UUID)
+            .unwrap()
+            .expect("账户应仍在库中");
+        assert_eq!(after.status, aurora_auth::AccountStatus::Ok);
+        assert_eq!(after, stored);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_grant_fails_as_relogin_and_marks_the_account_expired() {
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, invalid_grant()).await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let (aurora, stored) = with_stale_account(&fx, &server);
+
+        let (result, _) = launch_request(
+            &aurora,
+            stored_request(stored.clone()),
+            fake_java(&fx.root, 17, 0),
+        )
+        .await;
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::AccountRelogin);
+        assert_eq!(failure.params.get("account"), Some(&Value::from(MS_NAME)));
+        // 凭据失效不重试。
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+
+        let after = aurora
+            .find_account(MS_UUID)
+            .unwrap()
+            .expect("账户应仍在库中");
+        assert_eq!(after.status, aurora_auth::AccountStatus::Expired);
+        assert_eq!(after.credentials, stored.credentials);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_while_refreshing_is_a_cancel_and_keeps_the_last_account_failure() {
+        // 续期还在等服务端回应（服务故障时还要退避重试）就被玩家取消：这不是凭据被判失效，不能报成需要
+        // 重新登录，也不能盖掉上一次的服务故障记录，否则紧接着的以离线方式进单人会被错拒。
+        let server = wiremock::MockServer::start().await;
+        mount_token(&server, outage_page()).await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (result, _) =
+            launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
+        assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
+
+        server.reset().await;
+        mount_token(
+            &server,
+            wiremock::ResponseTemplate::new(503).set_delay(std::time::Duration::from_secs(30)),
+        )
+        .await;
+        let token = CancellationToken::new();
+        let cancelling = aurora.clone().with_cancel(token.clone());
+        let trigger = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            token.cancel();
+        });
+        let (result, events) =
+            launch_request(&cancelling, stored_request(stored.clone()), java.clone()).await;
+        trigger.await.unwrap();
+        match result {
+            Err(err) => assert!(err.is_cancelled(), "{err:?}"),
+            Ok(_) => panic!("取消后不应拉起进程"),
+        }
+        assert_eq!(stage_indices(&events), vec![0]);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(
+            failures_of(&aurora).get(MS_UUID),
+            Some(&FailureCode::AccountServiceDown)
+        );
+        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        assert_eq!(
+            log.ended.map(|e| e.outcome),
+            Some(SessionOutcome::Cancelled)
+        );
+        assert_eq!(aurora.find_account(MS_UUID).unwrap().unwrap(), stored);
+
+        // 记录完好：降级照常放行。
+        let (result, _) = launch_fallback(&aurora, stored_request(stored), java).await;
+        let run = expect_run(result);
+        assert!(run.offline());
+        run.finish().await;
+    }
+
+    fn singleplayer(world: &str) -> QuickPlay {
+        QuickPlay::Singleplayer {
+            world_dir_name: world.to_owned(),
+        }
+    }
+
+    fn launcher_lines(events: &[LaunchEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LaunchEvent::Log { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 旧版要直达存档：在校验游戏文件阶段就失败，存档在不在都不看，也不会走到补全与下载。
+    #[tokio::test]
+    async fn legacy_singleplayer_fails_while_verifying_files_before_any_download() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_json(&mc, "1.12.2", &legacy_json("1.12.2"));
+        let java = fake_java(&fx.root, 17, 0);
+
+        let (result, events) = launch_request(
+            &fx.aurora,
+            quick_request("1.12.2", singleplayer("New World")),
+            java,
+        )
+        .await;
+        match result {
+            Err(LaunchFailed::Core(CoreError::Launch(
+                aurora_launch::LaunchError::QuickPlayUnsupported { version, mode },
+            ))) => {
+                assert_eq!(version, "1.12.2");
+                assert_eq!(mode, QuickPlayMode::Singleplayer);
+            }
+            other => panic!("应报不支持直达存档，实际：{:?}", other.err()),
+        }
+        assert_eq!(stage_indices(&events), vec![0, 1]);
+        assert!(
+            !events.iter().any(|e| matches!(e, LaunchEvent::Download(_))),
+            "不该推出下载进度：{events:?}"
+        );
+        let log = fx.aurora.last_launch_log("1.12.2").await.unwrap().unwrap();
+        assert_eq!(log.ended.map(|e| e.outcome), Some(SessionOutcome::Failed));
+    }
+
+    #[tokio::test]
+    async fn missing_or_unsafe_world_is_world_not_found_with_the_given_name() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_json(&mc, VERSION, &quick_play_json(VERSION));
+        // 同名的是文件不是文件夹：也不是存档。
+        std::fs::create_dir_all(mc.join("saves")).unwrap();
+        std::fs::write(mc.join("saves").join("只是文件"), b"x").unwrap();
+        let java = fake_java(&fx.root, 17, 0);
+
+        for world in ["New World", "../New World", "只是文件", ""] {
+            let (result, events) = launch_request(
+                &fx.aurora,
+                quick_request(VERSION, singleplayer(world)),
+                java.clone(),
+            )
+            .await;
+            match result {
+                Err(LaunchFailed::Core(CoreError::WorldNotFound {
+                    version_id,
+                    world: got,
+                })) => {
+                    assert_eq!(version_id, VERSION);
+                    assert_eq!(got, world);
+                }
+                other => panic!("{world:?} 应报存档不存在，实际：{:?}", other.err()),
+            }
+            assert_eq!(stage_indices(&events), vec![0, 1], "{world:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_server_address_fails_while_verifying_files() {
+        let fx = fixture();
+        install_json(
+            &fx.root.join(".minecraft"),
+            VERSION,
+            &quick_play_json(VERSION),
+        );
+        let java = fake_java(&fx.root, 17, 0);
+        let (result, events) = launch_request(
+            &fx.aurora,
+            quick_request(
+                VERSION,
+                QuickPlay::Multiplayer {
+                    address: "mc.example.com:0".to_owned(),
+                },
+            ),
+            java,
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(LaunchFailed::Core(CoreError::InvalidServerAddress { address, .. })) if address == "mc.example.com:0"),
+            "{:?}",
+            result.as_ref().err()
+        );
+        assert_eq!(stage_indices(&events), vec![0, 1]);
+    }
+
+    /// 存档在的时候照常走完八个阶段，启动日志写明直达了哪个存档。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quick_play_into_an_existing_world_reaches_running() {
+        let fx = fixture();
+        let mc = fx.root.join(".minecraft");
+        install_json(&mc, VERSION, &quick_play_json(VERSION));
+        std::fs::create_dir_all(mc.join("saves").join("New World")).unwrap();
+        let java = fake_java(&fx.root, 17, 0);
+
+        let (result, events) = launch_request(
+            &fx.aurora,
+            quick_request(VERSION, singleplayer("New World")),
+            java.clone(),
+        )
+        .await;
+        let run = match result {
+            Ok(run) => run,
+            Err(err) => panic!("启动应成功：{err:?}"),
+        };
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert!(
+            launcher_lines(&events).contains(&"直接进入存档「New World」".to_owned()),
+            "{:?}",
+            launcher_lines(&events)
+        );
+        run.finish().await;
+
+        let (result, events) = launch_request(
+            &fx.aurora,
+            quick_request(
+                VERSION,
+                QuickPlay::Multiplayer {
+                    address: " mc.example.com:25570 ".to_owned(),
+                },
+            ),
+            java,
+        )
+        .await;
+        let run = match result {
+            Ok(run) => run,
+            Err(err) => panic!("启动应成功：{err:?}"),
+        };
+        assert!(
+            launcher_lines(&events).contains(&"直接加入服务器 mc.example.com:25570".to_owned()),
+            "{:?}",
+            launcher_lines(&events)
+        );
+        run.finish().await;
+    }
+
+    fn assembled(
+        merged: &VersionJson,
+        quick_play: Option<QuickPlayTarget>,
+    ) -> Result<LaunchCommand, LaunchFailed> {
+        let root = PathBuf::from(r"D:\mc\.minecraft");
+        assemble_command(
+            merged,
+            &RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64),
+            Path::new(r"C:\jdk\bin\java.exe"),
+            GamePaths::standard(&root, &merged.id),
+            &root,
+            AuthValues::offline("Steve", "0123456789abcdef0123456789abcdef"),
+            &merged.id,
+            "9.9.9",
+            MemoryConfig::fixed(2048),
+            &InstanceLaunchSettings::default(),
+            None,
+            quick_play,
+        )
+    }
+
+    fn tail(args: &[String], n: usize) -> Vec<&str> {
+        args[args.len() - n..].iter().map(String::as_str).collect()
+    }
+
+    /// 预检得出的目标原样进命令行：新版走 Quick Play、地址不补端口；旧版换算成 --server/--port，
+    /// 没写端口时显式写 25565，IPv6 不带方括号。
+    #[tokio::test]
+    async fn checked_targets_reach_the_command_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let modern = VersionJson::from_json_str(&quick_play_json(VERSION)).unwrap();
+        let legacy = VersionJson::from_json_str(&legacy_json("1.12.2")).unwrap();
+        let multiplayer = |address: &str| QuickPlay::Multiplayer {
+            address: address.to_owned(),
+        };
+
+        let bare = quick_play_target(
+            VERSION,
+            &modern,
+            tmp.path(),
+            multiplayer(" play.example.com "),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            bare,
+            QuickPlayTarget::Multiplayer {
+                address: "play.example.com".to_owned(),
+                host: "play.example.com".to_owned(),
+                port: 25565,
+            }
+        );
+        let args = assembled(&modern, Some(bare)).unwrap().args;
+        assert_eq!(
+            tail(&args, 2),
+            vec!["--quickPlayMultiplayer", "play.example.com"]
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "--server" || a == "--quickPlayPath")
+        );
+
+        let default_port =
+            quick_play_target("1.12.2", &legacy, tmp.path(), multiplayer("mc.example.com"))
+                .await
+                .unwrap();
+        let args = assembled(&legacy, Some(default_port)).unwrap().args;
+        assert_eq!(
+            tail(&args, 4),
+            vec!["--server", "mc.example.com", "--port", "25565"]
+        );
+
+        let ipv6 = quick_play_target(
+            "1.12.2",
+            &legacy,
+            tmp.path(),
+            multiplayer("[2001:db8::1]:25570"),
+        )
+        .await
+        .unwrap();
+        let args = assembled(&legacy, Some(ipv6)).unwrap().args;
+        assert_eq!(
+            tail(&args, 4),
+            vec!["--server", "2001:db8::1", "--port", "25570"]
+        );
+
+        // 不带直达时命令行里没有任何直达参数。
+        let plain = assembled(&modern, None).unwrap().args;
+        assert!(
+            !plain
+                .iter()
+                .any(|a| a.starts_with("--quickPlay") || a.contains("${quickPlay"))
+        );
+    }
+
+    /// 拼命令时才发现不支持（调用方没预检）也照原样报不支持，不并进 version_broken。
+    #[test]
+    fn unsupported_target_at_assembly_is_not_version_broken() {
+        let legacy = VersionJson::from_json_str(&legacy_json("1.12.2")).unwrap();
+        let result = assembled(
+            &legacy,
+            Some(QuickPlayTarget::Singleplayer {
+                world_dir_name: "New World".to_owned(),
+            }),
+        );
+        assert!(
+            matches!(
+                &result,
+                Err(LaunchFailed::Core(CoreError::Launch(
+                    aurora_launch::LaunchError::QuickPlayUnsupported { version, mode: QuickPlayMode::Singleplayer }
+                ))) if version == "1.12.2"
+            ),
+            "{:?}",
+            result.as_ref().err()
+        );
     }
 
     #[test]
@@ -1856,6 +3345,142 @@ mod tests {
         );
     }
 
+    #[test]
+    fn launch_warning_codes_keep_their_wire_names() {
+        let all = [
+            LaunchWarning::GamePath,
+            LaunchWarning::OnedriveFolder,
+            LaunchWarning::IcloudFolder,
+            LaunchWarning::LongPlayerName,
+            LaunchWarning::JvmMemoryUnit,
+            LaunchWarning::JvmMinOverMax,
+            LaunchWarning::JvmMaxTooLow,
+        ];
+        let json = serde_json::to_value(all).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([
+                "game_path",
+                "onedrive_folder",
+                "icloud_folder",
+                "long_player_name",
+                "jvm_memory_unit",
+                "jvm_min_over_max",
+                "jvm_max_too_low"
+            ])
+        );
+        let back: Vec<LaunchWarning> = serde_json::from_value(json).unwrap();
+        assert_eq!(back, all);
+    }
+
+    #[test]
+    fn memory_issues_map_to_their_warning_and_log_text() {
+        assert_eq!(
+            memory_warning(aurora_launch::JvmMemoryIssue::BadUnit {
+                arg: "-Xmx4GB".into()
+            }),
+            (
+                LaunchWarning::JvmMemoryUnit,
+                "自定义 JVM 参数 -Xmx4GB 的写法 Java 不认，内存单位只能是 k、m、g、t，例如 -Xmx4g"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            memory_warning(aurora_launch::JvmMemoryIssue::MinOverMax {
+                min_mb: 4096,
+                max_mb: 2048
+            }),
+            (
+                LaunchWarning::JvmMinOverMax,
+                "自定义 JVM 参数让最小内存（4096 MB）大于最大内存（2048 MB），Java 会拒绝启动"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            memory_warning(aurora_launch::JvmMemoryIssue::MaxTooLow { max_mb: 256 }),
+            (
+                LaunchWarning::JvmMaxTooLow,
+                "最大内存只有 256 MB，低于 512 MB，游戏多半进不了主界面".to_owned()
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sync_folder_and_bad_jvm_memory_are_warned_in_their_stages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("OneDrive").join("games");
+        std::fs::create_dir_all(&root).unwrap();
+        let config = AuroraConfig {
+            memory: MemorySettings {
+                auto: false,
+                ..MemorySettings::default()
+            },
+            ..AuroraConfig::default()
+        };
+        let aurora = Aurora::for_test(config, root.clone(), root.join(".minecraft"));
+        install_version(&root.join(".minecraft"), 17, true);
+        aurora_instance::VersionSettingsStore::for_version_dir(
+            &root.join(".minecraft").join(VERSIONS_DIR).join(VERSION),
+        )
+        .save(&VersionSettings {
+            jvm_args: "-XX:+UseG1GC -Xmx4GB".into(),
+            ..VersionSettings::default()
+        })
+        .await
+        .unwrap();
+        let java = complete_fake_java(&root, 17, 3);
+
+        let (result, events) = launch(&aurora, java).await;
+        let run = match result {
+            Ok(run) => run,
+            Err(err) => panic!("提醒不阻断启动：{err:?}"),
+        };
+        // 每条提醒记下它出现在哪个阶段。
+        let mut stage = None;
+        let mut warns = Vec::new();
+        for event in &events {
+            match event {
+                LaunchEvent::Stage(s) => stage = Some(s.index()),
+                LaunchEvent::Log {
+                    level: LauncherLevel::Warn,
+                    text,
+                    ..
+                } => warns.push((stage, text.clone())),
+                _ => {}
+            }
+        }
+        assert_eq!(warns.len(), 2, "{warns:?}");
+        assert_eq!(warns[0].0, Some(1));
+        assert!(
+            warns[0]
+                .1
+                .starts_with("游戏目录在 OneDrive 同步的文件夹里（")
+                && warns[0].1.ends_with("建议换一个不在 OneDrive 里的游戏目录"),
+            "{}",
+            warns[0].1
+        );
+        assert_eq!(
+            warns[1],
+            (
+                Some(5),
+                "自定义 JVM 参数 -Xmx4GB 的写法 Java 不认，内存单位只能是 k、m、g、t，例如 -Xmx4g"
+                    .to_owned()
+            )
+        );
+
+        let finished = run.finish().await;
+        assert!(finished.problems.is_empty(), "{:?}", finished.problems);
+        let crash = aurora
+            .last_crash(VERSION)
+            .await
+            .unwrap()
+            .expect("崩溃应落盘");
+        assert_eq!(
+            crash.warnings,
+            vec![LaunchWarning::OnedriveFolder, LaunchWarning::JvmMemoryUnit]
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn failure_before_running_records_no_playtime() {
         let fx = fixture();
@@ -1988,6 +3613,145 @@ mod tests {
         );
     }
 
+    fn log_texts(events: &[LaunchEvent], want: LauncherLevel) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LaunchEvent::Log { level, text, .. } if *level == want => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 按给定开关、换上替身写入器启动一次，断言启动成功并等游戏退出，返回推出的事件。
+    async fn launch_preferring_gpu(
+        fx: &Fixture,
+        store: Arc<crate::gpu::testing::MemoryGpuPreferences>,
+        enabled: bool,
+        java: PathBuf,
+    ) -> Vec<LaunchEvent> {
+        let mut aurora = fx.aurora.clone().with_gpu_preference_store(store);
+        aurora.set_prefer_dedicated_gpu(enabled);
+        let (result, events) = launch(&aurora, java).await;
+        match result {
+            Ok(run) => {
+                run.finish().await;
+            }
+            Err(err) => panic!("启动应成功：{err:?}"),
+        }
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        events
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gpu_preference_is_left_alone_when_the_switch_is_off() {
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let store = Arc::new(crate::gpu::testing::MemoryGpuPreferences::default());
+
+        let events = launch_preferring_gpu(&fx, store.clone(), false, java).await;
+        assert!(store.writes().is_empty(), "开关关着不该写显卡偏好");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, LaunchEvent::Log { text, .. } if text.contains("显卡"))),
+            "开关关着不该提到显卡"
+        );
+    }
+
+    /// 写的正是这次拉起的那个 java，取值是高性能；已有的别的片段保留。写在拉起进程之前。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gpu_preference_is_written_for_the_launched_java_before_spawn() {
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+
+        let fresh = Arc::new(crate::gpu::testing::MemoryGpuPreferences::default());
+        let events = launch_preferring_gpu(&fx, fresh.clone(), true, java.clone()).await;
+        assert_eq!(
+            fresh.writes(),
+            vec![(java.clone(), "GpuPreference=2;".to_owned())]
+        );
+        let notice = format!(
+            "已在 Windows 图形设置里让 {} 使用高性能显卡",
+            java.display()
+        );
+        let notice_at = events
+            .iter()
+            .position(|e| matches!(e, LaunchEvent::Log { text, .. } if *text == notice))
+            .expect("应在启动日志里说明写了显卡偏好");
+        let spawn_at = events
+            .iter()
+            .position(|e| matches!(e, LaunchEvent::Stage(LaunchStage::SpawnProcess)))
+            .unwrap();
+        assert!(notice_at < spawn_at, "显卡偏好要在拉起进程之前写好");
+
+        let existing = Arc::new(crate::gpu::testing::MemoryGpuPreferences::with_value(
+            &java,
+            "AppStatus=0;",
+        ));
+        launch_preferring_gpu(&fx, existing.clone(), true, java.clone()).await;
+        assert_eq!(
+            existing.writes(),
+            vec![(java.clone(), "AppStatus=0;GpuPreference=2;".to_owned())]
+        );
+
+        // 已经是高性能：不写也不提示。
+        let events = launch_preferring_gpu(&fx, existing.clone(), true, java).await;
+        assert_eq!(existing.writes().len(), 1);
+        assert!(!log_texts(&events, LauncherLevel::Info).contains(&notice));
+    }
+
+    /// 指定的 Java 缺运行时文件：照常启动，启动日志里提醒一句；补齐之后不再提醒。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn incomplete_pinned_java_warns_but_still_launches() {
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let home = fx.root.join("half-jdk");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        let java = fake_java(&home.join("bin"), 17, 0);
+        let store = Arc::new(crate::gpu::testing::MemoryGpuPreferences::default());
+        let reminder = "指定的 Java 缺少 release、lib/modules，可能没装完整，启动失败时换一个 Java";
+
+        let events = launch_preferring_gpu(&fx, store.clone(), false, java.clone()).await;
+        assert!(
+            log_texts(&events, LauncherLevel::Warn).contains(&reminder.to_owned()),
+            "{:?}",
+            log_texts(&events, LauncherLevel::Warn)
+        );
+
+        std::fs::write(home.join("release"), b"JAVA_VERSION=\"17.0.8\"").unwrap();
+        std::fs::create_dir_all(home.join("lib")).unwrap();
+        std::fs::write(home.join("lib").join("modules"), b"image").unwrap();
+        let events = launch_preferring_gpu(&fx, store, false, java).await;
+        assert!(
+            !log_texts(&events, LauncherLevel::Warn)
+                .iter()
+                .any(|text| text.contains("可能没装完整")),
+            "{:?}",
+            log_texts(&events, LauncherLevel::Warn)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn gpu_preference_failure_warns_and_still_launches() {
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let store = Arc::new(crate::gpu::testing::MemoryGpuPreferences::failing());
+
+        let events = launch_preferring_gpu(&fx, store.clone(), true, java).await;
+        assert!(store.writes().is_empty());
+        assert!(
+            log_texts(&events, LauncherLevel::Warn).contains(
+                &"没能写入显卡偏好（拒绝访问），这次按 Windows 默认的显卡启动".to_owned()
+            ),
+            "{:?}",
+            log_texts(&events, LauncherLevel::Warn)
+        );
+    }
+
     #[tokio::test]
     async fn unknown_and_broken_versions_fail_before_any_stage() {
         let fx = fixture();
@@ -2057,6 +3821,7 @@ mod tests {
                 FailureCode::AccountRefreshNetwork,
                 "account_refresh_network",
             ),
+            (FailureCode::AccountServiceDown, "account_service_down"),
             (FailureCode::FilesOffline, "files_offline"),
             (FailureCode::FilesFailed, "files_failed"),
             (FailureCode::DiskFull, "disk_full"),
@@ -2075,6 +3840,61 @@ mod tests {
                 .with_size(2048),
             error,
         }
+    }
+
+    /// 拉 Java 运行时清单失败：HTTP 层错误（不论直接还是压在逐源回退的聚合错误下面）判离线，
+    /// 内容读不懂判文件失败。
+    #[tokio::test]
+    async fn java_manifest_failures_are_classified_by_http_cause() {
+        let all_sources_failed = |last: aurora_java::Error| aurora_java::Error::AllSourcesFailed {
+            context: "Java 运行时总清单",
+            attempts: vec![
+                "https://piston-meta.mojang.com/all.json：HTTP 请求失败".to_owned(),
+                format!("https://bmclapi2.bangbang93.com/all.json：{last}"),
+            ],
+            last: Box::new(last),
+        };
+
+        let http = aurora_base::http::build_client().unwrap();
+        let unreachable = || async {
+            aurora_java::Error::Http {
+                url: "::not-a-url".into(),
+                source: http.get("::not-a-url").send().await.unwrap_err(),
+            }
+        };
+        let code_of = |failed: LaunchFailed| match failed {
+            LaunchFailed::Failure(failure) => failure.code,
+            LaunchFailed::Core(err) => panic!("应归为可处理的失败，实际：{err:?}"),
+        };
+
+        assert_eq!(
+            code_of(java_download_failure(17, unreachable().await)),
+            FailureCode::FilesOffline
+        );
+        let garbled = aurora_java::Error::Json {
+            context: "all.json".into(),
+            source: serde_json::from_str::<serde_json::Value>("<html>").unwrap_err(),
+        };
+        assert_eq!(
+            code_of(java_download_failure(17, garbled)),
+            FailureCode::FilesFailed
+        );
+        // 两个源都没取到：最后一个源连不上仍判离线，最后一个源回的是读不懂的内容判文件失败。
+        assert_eq!(
+            code_of(java_download_failure(
+                17,
+                all_sources_failed(unreachable().await)
+            )),
+            FailureCode::FilesOffline
+        );
+        let garbled = aurora_java::Error::Json {
+            context: "all.json".into(),
+            source: serde_json::from_str::<serde_json::Value>("<html>").unwrap_err(),
+        };
+        assert_eq!(
+            code_of(java_download_failure(17, all_sources_failed(garbled))),
+            FailureCode::FilesFailed
+        );
     }
 
     #[tokio::test]

@@ -62,15 +62,42 @@ pub fn build_client() -> Result<reqwest::Client> {
 
 /// 按给定配置构建客户端。
 pub fn build_client_with(config: &HttpConfig) -> Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder()
+    configured_builder(config)
+        .build()
+        .map_err(Error::HttpClientBuild)
+}
+
+/// 两种客户端共用的配置：带凭据的下载换用不跳转的客户端时，超时、UA 与连接池必须与共享客户端一致，
+/// 以后给 [`HttpConfig`] 加的项也只改这一处。
+fn configured_builder(config: &HttpConfig) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder()
         .user_agent(config.user_agent.as_str())
         .connect_timeout(config.connect_timeout)
         .read_timeout(config.read_timeout)
         .pool_max_idle_per_host(config.pool_idle_per_host);
-    if let Some(total) = config.total_timeout {
-        builder = builder.timeout(total);
+    match config.total_timeout {
+        Some(total) => builder.timeout(total),
+        None => builder,
     }
-    builder.build().map_err(Error::HttpClientBuild)
+}
+
+/// 用默认配置构建不自动跟随跳转的客户端，见 [`build_manual_redirect_client_with`]。
+pub fn build_manual_redirect_client() -> Result<reqwest::Client> {
+    build_manual_redirect_client_with(&HttpConfig::default())
+}
+
+/// 按给定配置构建不自动跟随跳转的客户端：3xx 原样交回调用方。
+///
+/// reqwest 跟随跨主机跳转时只摘掉 Authorization、Cookie、cookie2、Proxy-Authorization、
+/// WWW-Authenticate 这几个头，自定义的 `x-api-key` 会被原样带到下一跳；跳转策略又只能按客户端设，
+/// 不能按请求设。所以带密钥的下载要换用这个客户端，由下载引擎逐跳决定带不带头。
+///
+/// 除跳转策略外与 [`build_client_with`] 逐项相同。
+pub fn build_manual_redirect_client_with(config: &HttpConfig) -> Result<reqwest::Client> {
+    configured_builder(config)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(Error::HttpClientBuild)
 }
 
 /// 联网请求在网络层失败的种类：连不上（DNS 解析失败、连接被拒、TLS 握手失败都在这里），或者等不到响应。
@@ -248,5 +275,89 @@ mod tests {
             .expect("请求应成功");
         // 命中带自定义 UA 的 mock 才会是 204；否则会是 404。
         assert_eq!(resp.status().as_u16(), 204);
+    }
+
+    /// 起点 302 到终点；终点只认带配置 UA 的请求。
+    async fn mount_redirect_pair(server: &MockServer, ua: &str) {
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/end", server.uri())),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/end"))
+            .and(header("user-agent", ua))
+            .respond_with(ResponseTemplate::new(200).set_body_string("arrived"))
+            .mount(server)
+            .await;
+    }
+
+    fn paths_requested(requests: &[wiremock::Request]) -> Vec<String> {
+        requests.iter().map(|r| r.url.path().to_owned()).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manual_redirect_client_hands_the_302_back_without_following() {
+        let server = MockServer::start().await;
+        let ua = "Petalfall/7.7.7-manual";
+        mount_redirect_pair(&server, ua).await;
+        let config = HttpConfig {
+            user_agent: ua.to_owned(),
+            ..HttpConfig::default()
+        };
+
+        let resp = build_manual_redirect_client_with(&config)
+            .unwrap()
+            .get(format!("{}/start", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 302);
+        assert_eq!(
+            resp.headers().get("location").unwrap().to_str().unwrap(),
+            format!("{}/end", server.uri())
+        );
+        assert_eq!(resp.url().path(), "/start");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(paths_requested(&requests), vec!["/start"]);
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("user-agent")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            ua,
+            "除跳转策略外沿用同一份配置"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn default_client_still_follows_the_302() {
+        let server = MockServer::start().await;
+        mount_redirect_pair(&server, USER_AGENT).await;
+        // 默认配置版本也不跟随。
+        let manual = build_manual_redirect_client()
+            .unwrap()
+            .get(format!("{}/start", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(manual.status().as_u16(), 302);
+
+        let resp = build_client()
+            .unwrap()
+            .get(format!("{}/start", server.uri()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(resp.url().path(), "/end");
+        assert_eq!(resp.text().await.unwrap(), "arrived");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(paths_requested(&requests), vec!["/start", "/start", "/end"]);
     }
 }

@@ -8,9 +8,10 @@ use aurora_core::folders::{
 };
 use aurora_core::{
     AfterLaunch, Aurora, CoreError, DownloadSourcePolicy, GameDirProblem, GameDirectoryEntry,
-    IsolationPolicy, MemorySettings, NamedDirectory,
+    IsolationPolicy, MemorySettings, NamedDirectory, WorldBackupSettings,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tauri::{AppHandle, State};
 
 use crate::commands::CommandError;
@@ -24,6 +25,12 @@ const CONCURRENCY_RANGE: std::ops::RangeInclusive<usize> = 1..=256;
 
 /// 最大堆的下限（MB），与设置页内存滑杆的最小值一致。
 const MIN_MAX_MEMORY_MB: u32 = 1024;
+
+/// 每个存档保留的自动备份份数。至少 1 份，否则刚备份完就被清掉；上限只挡住失控的值。
+const KEEP_PER_WORLD_RANGE: std::ops::RangeInclusive<u32> = 1..=50;
+
+/// 全部备份的总量上限（GB）。至少 1 GB；上限只挡住失控的值。
+const MAX_TOTAL_GB_RANGE: std::ops::RangeInclusive<u32> = 1..=1000;
 
 /// 全局配置 DTO。
 ///
@@ -67,6 +74,12 @@ pub struct ConfigDto {
     pub notified_update_version: Option<String>,
     /// 界面语言：`"zh-CN"` 或 `"en-US"`。
     pub language: UiLanguage,
+    /// 手动添加的 java 可执行文件路径（java.exe），只经 add_java_path / remove_java_path 修改。
+    pub extra_java_paths: Vec<String>,
+    /// 启动前是否把这次用的 Java 设为 Windows 图形设置里的「高性能」。
+    pub prefer_dedicated_gpu: bool,
+    /// 存档自动备份：`{ auto, keep_per_world, max_total_gb }`。
+    pub world_backup: WorldBackupSettings,
 }
 
 pub(crate) fn config_dto(aurora: &Aurora) -> ConfigDto {
@@ -96,6 +109,13 @@ pub(crate) fn config_dto(aurora: &Aurora) -> ConfigDto {
         skipped_update_version: config.skipped_update_version.clone(),
         notified_update_version: config.notified_update_version.clone(),
         language: config.language,
+        extra_java_paths: config
+            .extra_java_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        prefer_dedicated_gpu: config.prefer_dedicated_gpu,
+        world_backup: config.world_backup,
     }
 }
 
@@ -120,6 +140,16 @@ pub struct MemoryInput {
     pub auto: bool,
 }
 
+/// 存档自动备份入参：三项都必须给出，理由与 [`MemoryInput`] 相同（缺 `auto` 时按默认值补上，界面上关掉的
+/// 自动备份会被悄悄打开）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorldBackupInput {
+    pub auto: bool,
+    pub keep_per_world: u32,
+    pub max_total_gb: u32,
+}
+
 /// 解析好的配置修改；`None` 的字段不动。
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct ConfigPatch {
@@ -138,6 +168,8 @@ pub(crate) struct ConfigPatch {
     skipped_update_version: Option<String>,
     notified_update_version: Option<String>,
     language: Option<UiLanguage>,
+    prefer_dedicated_gpu: Option<bool>,
+    world_backup: Option<WorldBackupSettings>,
 }
 
 /// 未解析的配置修改，字段与 `update_config` 的入参一一对应。
@@ -158,6 +190,8 @@ pub(crate) struct RawConfigPatch {
     pub skipped_update_version: Option<String>,
     pub notified_update_version: Option<String>,
     pub language: Option<String>,
+    pub prefer_dedicated_gpu: Option<bool>,
+    pub world_backup: Option<WorldBackupInput>,
 }
 
 /// 更新全局配置：字段全可选，未提供者不动。先把全部参数校验完再拿写锁：有一个非法就整体拒绝，
@@ -180,6 +214,8 @@ pub async fn update_config(
     skipped_update_version: Option<String>,
     notified_update_version: Option<String>,
     language: Option<String>,
+    prefer_dedicated_gpu: Option<bool>,
+    world_backup: Option<WorldBackupInput>,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
     let raw = RawConfigPatch {
@@ -198,6 +234,8 @@ pub async fn update_config(
         skipped_update_version,
         notified_update_version,
         language,
+        prefer_dedicated_gpu,
+        world_backup,
     };
     update_config_with(&facade, raw).await
 }
@@ -250,6 +288,8 @@ async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
         skipped_update_version: raw.skipped_update_version,
         notified_update_version: raw.notified_update_version,
         language: raw.language.as_deref().map(parse_language).transpose()?,
+        prefer_dedicated_gpu: raw.prefer_dedicated_gpu,
+        world_backup: raw.world_backup.map(validate_world_backup).transpose()?,
     })
 }
 
@@ -258,7 +298,7 @@ fn apply_patch(aurora: &mut Aurora, patch: ConfigPatch) -> Result<(), CommandErr
         aurora.set_download_source(policy);
     }
     if let Some(policy) = patch.version_list_source {
-        aurora.set_version_list_source(policy)?;
+        aurora.set_version_list_source(policy);
     }
     if let Some(concurrency) = patch.download_concurrency {
         aurora.set_download_concurrency(concurrency);
@@ -298,6 +338,12 @@ fn apply_patch(aurora: &mut Aurora, patch: ConfigPatch) -> Result<(), CommandErr
     }
     if let Some(language) = patch.language {
         aurora.set_language(language);
+    }
+    if let Some(enabled) = patch.prefer_dedicated_gpu {
+        aurora.set_prefer_dedicated_gpu(enabled);
+    }
+    if let Some(settings) = patch.world_backup {
+        aurora.set_world_backup(settings);
     }
     Ok(())
 }
@@ -381,6 +427,39 @@ fn validate_memory(input: MemoryInput) -> Result<MemorySettings, CommandError> {
         max_mb: input.max_mb,
         min_mb: input.min_mb,
         auto: input.auto,
+    })
+}
+
+fn validate_world_backup(input: WorldBackupInput) -> Result<WorldBackupSettings, CommandError> {
+    let out_of_range =
+        |field: &str, label: &str, value: u32, range: &std::ops::RangeInclusive<u32>| {
+            CommandError::invalid_argument(format!(
+                "{label}须在 {} 到 {} 之间，收到 {value}",
+                range.start(),
+                range.end()
+            ))
+            .with_detail(json!({ "field": field, "value": value }))
+        };
+    if !KEEP_PER_WORLD_RANGE.contains(&input.keep_per_world) {
+        return Err(out_of_range(
+            "world_backup.keep_per_world",
+            "每个存档保留的自动备份份数",
+            input.keep_per_world,
+            &KEEP_PER_WORLD_RANGE,
+        ));
+    }
+    if !MAX_TOTAL_GB_RANGE.contains(&input.max_total_gb) {
+        return Err(out_of_range(
+            "world_backup.max_total_gb",
+            "备份总量上限（GB）",
+            input.max_total_gb,
+            &MAX_TOTAL_GB_RANGE,
+        ));
+    }
+    Ok(WorldBackupSettings {
+        auto: input.auto,
+        keep_per_world: input.keep_per_world,
+        max_total_gb: input.max_total_gb,
     })
 }
 
@@ -718,6 +797,154 @@ mod tests {
         assert!(!serde_json::from_value::<MemoryInput>(full).unwrap().auto);
     }
 
+    /// 份数与总量上限按闭区间校验，越界报 invalid_argument 并在 detail.field 指出是哪一项。
+    #[test]
+    fn world_backup_bounds_are_enforced_per_field() {
+        let input = |keep_per_world, max_total_gb| WorldBackupInput {
+            auto: false,
+            keep_per_world,
+            max_total_gb,
+        };
+        for (keep, gb) in [(1, 1), (50, 1000), (5, 20)] {
+            assert_eq!(
+                validate_world_backup(input(keep, gb)).unwrap(),
+                WorldBackupSettings {
+                    auto: false,
+                    keep_per_world: keep,
+                    max_total_gb: gb,
+                }
+            );
+        }
+        for (keep, gb, field, value) in [
+            (0, 20, "world_backup.keep_per_world", 0),
+            (51, 20, "world_backup.keep_per_world", 51),
+            (5, 0, "world_backup.max_total_gb", 0),
+            (5, 1001, "world_backup.max_total_gb", 1001),
+            (u32::MAX, 20, "world_backup.keep_per_world", u32::MAX),
+        ] {
+            let err = validate_world_backup(input(keep, gb)).unwrap_err();
+            assert_eq!(err.code, code::INVALID_ARGUMENT, "{keep} {gb}");
+            let detail = err.detail.unwrap();
+            assert_eq!(detail["field"], field, "{keep} {gb}");
+            assert_eq!(detail["value"], value, "{keep} {gb}");
+        }
+    }
+
+    #[test]
+    fn world_backup_input_requires_every_field() {
+        for partial in [
+            serde_json::json!({"keep_per_world": 5, "max_total_gb": 20}),
+            serde_json::json!({"auto": true, "max_total_gb": 20}),
+            serde_json::json!({"auto": true, "keep_per_world": 5}),
+            serde_json::json!({"auto": true, "keepPerWorld": 5, "max_total_gb": 20}),
+            serde_json::json!({"auto": true, "keep_per_world": 5, "max_total_gb": 20, "extra": 1}),
+            serde_json::json!({"auto": true, "keep_per_world": -1, "max_total_gb": 20}),
+        ] {
+            assert!(
+                serde_json::from_value::<WorldBackupInput>(partial.clone()).is_err(),
+                "{partial}"
+            );
+        }
+        let full = serde_json::json!({"auto": false, "keep_per_world": 10, "max_total_gb": 50});
+        assert_eq!(
+            serde_json::from_value::<WorldBackupInput>(full).unwrap(),
+            WorldBackupInput {
+                auto: false,
+                keep_per_world: 10,
+                max_total_gb: 50,
+            }
+        );
+    }
+
+    /// 自动备份设置三项一起写：出参与落盘都是写下的值；任一项越界整体拒绝，别的字段也不生效。
+    #[tokio::test]
+    async fn world_backup_patch_is_written_whole_and_rejected_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let initial = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(
+            initial["world_backup"],
+            serde_json::json!({ "auto": true, "keep_per_world": 5, "max_total_gb": 20 })
+        );
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                world_backup: Some(WorldBackupInput {
+                    auto: false,
+                    keep_per_world: 10,
+                    max_total_gb: 50,
+                }),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        let written = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(
+            written["world_backup"],
+            serde_json::json!({ "auto": false, "keep_per_world": 10, "max_total_gb": 50 })
+        );
+        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap();
+        assert_eq!(
+            reloaded.world_backup,
+            WorldBackupSettings {
+                auto: false,
+                keep_per_world: 10,
+                max_total_gb: 50,
+            }
+        );
+
+        let err = update_config_with(
+            &facade,
+            RawConfigPatch {
+                check_updates: Some(false),
+                world_backup: Some(WorldBackupInput {
+                    auto: true,
+                    keep_per_world: 3,
+                    max_total_gb: 1001,
+                }),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert_eq!(err.detail.unwrap()["field"], "world_backup.max_total_gb");
+        let after = read_config(&facade).await;
+        assert!(after.check_updates, "同一补丁里合法的字段也不生效");
+        assert_eq!(after.world_backup, reloaded.world_backup);
+    }
+
+    /// 没有 world_backup 的旧配置文件照常读入，取默认值（开、每个存档 5 份、总量 20 GB）。
+    #[tokio::test]
+    async fn config_without_world_backup_reads_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"check_updates": false, "download_concurrency": 16}"#,
+        )
+        .unwrap();
+        let config = aurora_core::ConfigStore::at(path).load().await.unwrap();
+        assert!(!config.check_updates);
+        assert_eq!(config.download_concurrency, 16);
+        let aurora = Aurora::open(
+            config,
+            dir.path().to_path_buf(),
+            dir.path().join("config.json"),
+        )
+        .unwrap();
+        let dto = serde_json::to_value(config_dto(&aurora)).unwrap();
+        assert_eq!(
+            dto["world_backup"],
+            serde_json::json!({ "auto": true, "keep_per_world": 5, "max_total_gb": 20 })
+        );
+    }
+
     /// 出参能原样作入参回传：拿 get_config 的值写回去，配置不变。
     #[tokio::test]
     async fn dto_values_roundtrip_through_update_config() {
@@ -795,6 +1022,55 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(read_config(&facade).await.default_java, DEFAULT_JAVA_AUTO);
+    }
+
+    /// 独显偏好默认关；update_config 带 preferDedicatedGpu 后 get_config 回读为开，并落了盘。
+    #[tokio::test]
+    async fn prefer_dedicated_gpu_patch_reads_back_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let initial = serde_json::to_value(read_config(&facade).await).unwrap();
+        assert_eq!(initial["prefer_dedicated_gpu"], false);
+        assert_eq!(initial["extra_java_paths"], serde_json::json!([]));
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                prefer_dedicated_gpu: Some(true),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(read_config(&facade).await.prefer_dedicated_gpu);
+        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+            .load()
+            .await
+            .unwrap();
+        assert!(reloaded.prefer_dedicated_gpu);
+
+        // 不带这一项的补丁不动它。
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                check_updates: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(read_config(&facade).await.prefer_dedicated_gpu);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                prefer_dedicated_gpu: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!read_config(&facade).await.prefer_dedicated_gpu);
     }
 
     /// 任一字段非法整体拒绝：前面合法的字段也不生效，配置文件不写。

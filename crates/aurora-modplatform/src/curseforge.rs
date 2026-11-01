@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use aurora_base::retry::RetryPolicy;
-use aurora_download::DownloadTask;
+use aurora_download::{DownloadCredential, DownloadTask};
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
@@ -25,6 +25,9 @@ pub const MINECRAFT_GAME_ID: u32 = 432;
 
 /// 环境变量名：CurseForge API key。
 pub const API_KEY_ENV: &str = "AURORA_CURSEFORGE_API_KEY";
+
+/// CurseForge 网站根地址，工程没给网页链接时用它拼文件页。
+const CURSEFORGE_WEBSITE: &str = "https://www.curseforge.com";
 
 /// 文件列表一页的条数。官方文档写明 `pageSize` 的默认值与上限都是 50。
 pub const MOD_FILES_PAGE_SIZE: u32 = 50;
@@ -248,6 +251,24 @@ impl CurseForgeClient {
         }
     }
 
+    /// 取单个文件的更新日志正文（平台给的是 HTML）；工程或文件不存在返回 `None`。
+    pub async fn file_changelog(&self, mod_id: u32, file_id: u32) -> Result<Option<String>> {
+        let url = format!(
+            "{}/v1/mods/{}/files/{}/changelog",
+            self.base_url, mod_id, file_id
+        );
+        let result: Result<Envelope<String>> =
+            send_json(&self.retry, "curseforge.file_changelog", || {
+                self.get(url.as_str())
+            })
+            .await;
+        match result {
+            Ok(envelope) => Ok(Some(envelope.data)),
+            Err(Error::Status { status: 404, .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     /// 按一批 modId 取工程详情，用于给安装计划与卷宗补上工程标题与图标。空批次不发请求。
     pub async fn mods(&self, mod_ids: &[u32]) -> Result<Vec<CurseForgeMod>> {
         if mod_ids.is_empty() {
@@ -297,6 +318,12 @@ impl CurseForgeClient {
         })
         .await?;
         Ok(envelope.data)
+    }
+
+    /// 与 API 请求用同一个 key 的 CDN 下载凭据。key 去掉首尾空白后为空或含不能放进请求头的字符时，
+    /// 报 [`aurora_download::Error::InvalidCredential`]。
+    pub fn download_credential(&self) -> aurora_download::Result<DownloadCredential> {
+        DownloadCredential::curseforge(&self.api_key)
     }
 }
 
@@ -539,6 +566,44 @@ impl From<&CurseForgeMod> for SearchHit {
             page_url: item.links.as_ref().and_then(|l| l.website_url.clone()),
         }
     }
+}
+
+/// 文件在 CurseForge 网站上的页面：工程 `links.websiteUrl` 去掉末尾的 `/` 后接 `/files/{file_id}`。
+/// 作者不允许第三方分发的文件，只能让用户到这个页面手动下载。
+///
+/// 没有网页链接（`links` 缺失或网址为空）时按 slug 拼
+/// `https://www.curseforge.com/minecraft/{段}/{slug}/files/{file_id}`，段按 class 取；认不出的 class
+/// 用 mc-mods 并记一条警告：拼出的页面可能落在别的分类下打不开，留个线索。
+pub fn file_page_url(project: &CurseForgeMod, file_id: u32) -> String {
+    let website = project
+        .links
+        .as_ref()
+        .and_then(|links| links.website_url.as_deref())
+        .map(str::trim)
+        .filter(|site| !site.is_empty());
+    if let Some(site) = website {
+        return format!("{}/files/{file_id}", site.trim_end_matches('/'));
+    }
+    let segment = match project.class_id {
+        Some(6) => "mc-mods",
+        Some(12) => "texture-packs",
+        Some(6552) => "shaders",
+        Some(6945) => "data-packs",
+        Some(4471) => "modpacks",
+        other => {
+            tracing::warn!(
+                project_id = project.id,
+                slug = %project.slug,
+                class_id = ?other,
+                "认不出工程的 class，文件页按 mc-mods 拼"
+            );
+            "mc-mods"
+        }
+    };
+    format!(
+        "{CURSEFORGE_WEBSITE}/minecraft/{segment}/{}/files/{file_id}",
+        project.slug
+    )
 }
 
 /// 最新文件索引项。
@@ -1104,6 +1169,49 @@ mod tests {
         assert!(client(&server).mod_file(238222, 9).await.unwrap().is_none());
     }
 
+    /// 文件更新日志：打 /v1/mods/{modId}/files/{fileId}/changelog 并带 key，拆开 data 原样给出 HTML；
+    /// 404 为 None；各只请求一次。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_changelog_unwraps_html_and_maps_404_to_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files/5001/changelog"))
+            .and(header("x-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": "<p>JEI 15.3</p><ul><li>修复配方查找</li></ul>"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files/9/changelog"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let c = client(&server);
+        assert_eq!(
+            c.file_changelog(238222, 5001).await.unwrap().as_deref(),
+            Some("<p>JEI 15.3</p><ul><li>修复配方查找</li></ul>")
+        );
+        assert!(c.file_changelog(238222, 9).await.unwrap().is_none());
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    /// 404 以外的失败照常冒泡，不当作「没有日志」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn file_changelog_client_error_bubbles() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/1/files/2/changelog"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let err = client(&server).file_changelog(1, 2).await.unwrap_err();
+        assert!(matches!(err, Error::Status { status: 403, .. }));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mods_posts_ids_and_unwraps_data() {
         let server = MockServer::start().await;
@@ -1465,5 +1573,153 @@ mod tests {
         let ids: Vec<u32> = list.files.iter().map(|file| file.id).collect();
         assert_eq!(ids, (7000..7090).collect::<Vec<_>>());
         assert!(!list.truncated);
+    }
+
+    fn project(extra: serde_json::Value) -> CurseForgeMod {
+        let mut base =
+            serde_json::json!({ "id": 238222, "name": "n", "slug": "jei", "summary": "" });
+        base.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(base).unwrap()
+    }
+
+    #[test]
+    fn file_page_follows_the_project_website() {
+        let with_slash = project(serde_json::json!({
+            "classId": 6,
+            "links": {"websiteUrl": "https://www.curseforge.com/minecraft/mc-mods/jei/"}
+        }));
+        assert_eq!(
+            file_page_url(&with_slash, 3040523),
+            "https://www.curseforge.com/minecraft/mc-mods/jei/files/3040523"
+        );
+        // 有网页链接时以它为准，不看 class。
+        let pack = project(serde_json::json!({
+            "classId": 6,
+            "links": {"websiteUrl": "https://www.curseforge.com/minecraft/modpacks/atm9"}
+        }));
+        assert_eq!(
+            file_page_url(&pack, u32::MAX),
+            "https://www.curseforge.com/minecraft/modpacks/atm9/files/4294967295"
+        );
+    }
+
+    #[test]
+    fn file_page_without_website_is_built_from_class_and_slug() {
+        for (class_id, segment) in [
+            (6, "mc-mods"),
+            (12, "texture-packs"),
+            (6552, "shaders"),
+            (6945, "data-packs"),
+            (4471, "modpacks"),
+        ] {
+            let item = project(serde_json::json!({ "classId": class_id }));
+            assert_eq!(
+                file_page_url(&item, 0),
+                format!("https://www.curseforge.com/minecraft/{segment}/jei/files/0"),
+                "class {class_id}"
+            );
+        }
+        // links 在但没给网址、或网址是空白，同样按 slug 拼。
+        for links in [
+            serde_json::json!({"websiteUrl": null}),
+            serde_json::json!({"websiteUrl": "  "}),
+            serde_json::json!({}),
+        ] {
+            let item = project(serde_json::json!({ "classId": 12, "links": links }));
+            assert_eq!(
+                file_page_url(&item, 7),
+                "https://www.curseforge.com/minecraft/texture-packs/jei/files/7"
+            );
+        }
+    }
+
+    #[test]
+    fn file_page_for_unknown_class_falls_back_to_mods() {
+        for extra in [
+            serde_json::json!({ "classId": 5 }),
+            serde_json::json!({ "classId": 17 }),
+            serde_json::json!({}),
+        ] {
+            assert_eq!(
+                file_page_url(&project(extra), 42),
+                "https://www.curseforge.com/minecraft/mc-mods/jei/files/42"
+            );
+        }
+    }
+
+    #[test]
+    fn download_credential_uses_the_api_key_and_targets_the_cdn() {
+        let http = aurora_base::http::build_client().unwrap();
+        let credential = CurseForgeClient::new(http.clone(), " api-key-1 ")
+            .download_credential()
+            .unwrap();
+        assert_eq!(
+            credential.realm(),
+            aurora_download::CredentialRealm::CurseForge
+        );
+        assert_eq!(credential.header_name().as_str(), "x-api-key");
+        let url = |raw: &str| reqwest::Url::parse(raw).unwrap();
+        assert!(credential.applies_to(&url("https://edge.forgecdn.net/files/3040/523/jei.jar")));
+        assert!(credential.applies_to(&url(
+            "https://mediafilez.forgecdn.net/files/3040/523/jei.jar"
+        )));
+        assert!(!credential.applies_to(&url("https://api.curseforge.com/v1/mods/1")));
+        assert!(!credential.applies_to(&url("http://edge.forgecdn.net/files/1/2/a.jar")));
+
+        for bad in ["", "   ", "line\nbreak"] {
+            let err = CurseForgeClient::new(http.clone(), bad)
+                .download_credential()
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    aurora_download::Error::InvalidCredential {
+                        realm: aurora_download::CredentialRealm::CurseForge
+                    }
+                ),
+                "{bad:?} 实际：{err:?}"
+            );
+        }
+    }
+
+    /// 文件下载与 API 请求带的是同一个 key（作用域换成本地 mock，模拟 CDN）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn download_credential_sends_the_api_key_to_the_cdn() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/files/3040/523/jei.jar"))
+            .and(header("x-api-key", "test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("jar-bytes"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let file: CurseForgeFile = serde_json::from_value(serde_json::json!({
+            "id": 3040523, "modId": 238222, "displayName": "jei", "fileName": "jei.jar",
+            "fileLength": 9,
+            "downloadUrl": format!("{}/files/3040/523/jei.jar", server.uri())
+        }))
+        .unwrap();
+        let scope = aurora_download::CredentialScope::new(
+            [format!("127.0.0.1:{}", server.address().port())],
+            false,
+        );
+        let credential = client(&server)
+            .download_credential()
+            .unwrap()
+            .with_scope(scope);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("jei.jar");
+        let task = file
+            .to_download_task(&dest)
+            .unwrap()
+            .with_credential(credential);
+        aurora_download::Downloader::with_defaults(aurora_base::http::build_client().unwrap())
+            .with_manual_redirect_client(aurora_base::http::build_manual_redirect_client().unwrap())
+            .download(&task)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"jar-bytes");
     }
 }

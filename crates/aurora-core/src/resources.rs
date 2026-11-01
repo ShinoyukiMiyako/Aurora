@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use aurora_download::DownloadTask;
 use aurora_modplatform::{CurseForgeClient, ModrinthClient, Platform, ResourceType};
 
+use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed, single_blocked};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Aurora;
@@ -58,7 +59,7 @@ impl Aurora {
         file_version_id: &str,
         events: Option<&EventSink>,
     ) -> Result<ResourceInstallOutcome> {
-        let dir = self.resource_dir(target).await?;
+        let (dir, landing) = self.resource_dir(target).await?;
         emit(
             events,
             CoreEvent::stage(format!(
@@ -67,18 +68,37 @@ impl Aurora {
                 target.version_id
             )),
         );
-        let (file_name, task) = self
-            .platform_file_task(platform, project_id, file_version_id, &dir)
-            .await?;
-        let dest = task.dest.clone();
-        emit(events, CoreEvent::stage(format!("开始下载 {file_name}")));
-        let report = self
-            .download_pool_reporting(events)
-            .download_all(vec![task], None)
-            .await?;
-        if let Some(failure) = report.failures.into_iter().next() {
-            return Err(failure.error.into());
-        }
+        let (file_name, dest) = match self
+            .platform_file_task(platform, project_id, file_version_id, &dir, &landing)
+            .await
+        {
+            Ok((file_name, task)) => {
+                let dest = task.dest.clone();
+                emit(events, CoreEvent::stage(format!("开始下载 {file_name}")));
+                let report = self
+                    .download_pool_reporting(events)
+                    .download_all(vec![task], None)
+                    .await?;
+                if let Some(failure) = report.failures.into_iter().next() {
+                    return Err(failure.error.into());
+                }
+                (file_name, dest)
+            }
+            Err(err) => {
+                let (file, staged) = self.claimed_instead_of(err).await?;
+                let dest = dir.join(&file.file_name);
+                emit(
+                    events,
+                    CoreEvent::stage(format!("使用手动下载的 {}", file.file_name)),
+                );
+                place_claimed(&[ClaimedCopy {
+                    staged,
+                    dest: dest.clone(),
+                }])
+                .await?;
+                (file.file_name, dest)
+            }
+        };
         emit(
             events,
             CoreEvent::stage(format!("{file_name} 已安装到 {}", dest.display())),
@@ -92,8 +112,9 @@ impl Aurora {
         })
     }
 
-    /// 资源该落到的目录；数据包的存档在这里校验存在。
-    async fn resource_dir(&self, target: ResourceTarget<'_>) -> Result<PathBuf> {
+    /// 资源该落到的目录，以及它相对工作目录、正斜杠分隔的写法（受限文件的落点用）；数据包的存档在这里
+    /// 校验存在。
+    async fn resource_dir(&self, target: ResourceTarget<'_>) -> Result<(PathBuf, String)> {
         enum Dest<'a> {
             Sub(&'static str),
             World(&'a str),
@@ -135,7 +156,7 @@ impl Aurora {
             .await?
             .working_dir;
         let world = match dest {
-            Dest::Sub(sub) => return Ok(working.join(sub)),
+            Dest::Sub(sub) => return Ok((working.join(sub), sub.to_owned())),
             Dest::World(world) => world,
         };
         let world_dir = working.join("saves").join(world);
@@ -156,16 +177,21 @@ impl Aurora {
                 world: world.to_owned(),
             });
         }
-        Ok(world_dir.join("datapacks"))
+        Ok((
+            world_dir.join("datapacks"),
+            format!("saves/{world}/datapacks"),
+        ))
     }
 
-    /// 取平台上一个版本（文件）的主文件，生成落到 `dir` 下的下载任务。
+    /// 取平台上一个版本（文件）的主文件，生成落到 `dir` 下的下载任务。CurseForge 的任务挂上下载凭据。
+    /// `landing` 是 `dir` 给用户看的相对写法：文件受限时它是受限文件的落点目录。
     pub(crate) async fn platform_file_task(
         &self,
         platform: Platform,
         project_id: &str,
         file_version_id: &str,
         dir: &Path,
+        landing: &str,
     ) -> Result<(String, DownloadTask)> {
         let not_found = || CoreError::ModVersionNotFound {
             platform: platform.display_name(),
@@ -198,44 +224,65 @@ impl Aurora {
                     .ok_or_else(not_found)?;
                 let file_name = checked_file_name(platform, &file.file_name)?;
                 let dest = dir.join(&file_name);
+                let credential = self.curseforge_credential(&client)?;
                 let task = match file.to_download_task(&dest) {
                     Some(task) => task,
-                    None => {
-                        let url =
-                            curseforge_download_url(&client, mod_id, file_id, &file_name).await?;
-                        let mut task = DownloadTask::new(url, &dest);
-                        if let Some(size) = file.file_length {
-                            task = task.with_size(size);
+                    None => match curseforge_download_url(&client, mod_id, file_id).await? {
+                        Some(url) => task_for_file_url(url, &dest, &file),
+                        None => {
+                            let destination = join_landing(landing, &file_name);
+                            return Err(single_blocked(&client, mod_id, |project| {
+                                BlockedFile::new(project, &file, destination)
+                            })
+                            .await);
                         }
-                        if let Some(sha1) = file.sha1() {
-                            task = task.with_sha1(sha1.to_owned());
-                        }
-                        task
-                    }
+                    },
                 };
-                Ok((file_name, task))
+                Ok((file_name, task.with_credential(credential)))
             }
         }
     }
 }
 
-/// 文件对象没给下载地址时向 download-url 端点要；作者禁止第三方分发时该端点拒绝（403/404），
-/// 报成「需要到网页手动下载」，而不是笼统的请求失败。
+/// 文件对象没给下载地址时向 download-url 端点要。作者禁止第三方分发时该端点拒绝（403/404）或给空串，
+/// 返回 `None`：调用方把它报成「需要到网页手动下载」，而不是笼统的请求失败。
 pub(crate) async fn curseforge_download_url(
     client: &CurseForgeClient,
     mod_id: u32,
     file_id: u32,
-    file_name: &str,
-) -> Result<String> {
+) -> Result<Option<String>> {
     match client.file_download_url(mod_id, file_id).await {
-        Ok(url) if !url.trim().is_empty() => Ok(url),
+        Ok(url) if !url.trim().is_empty() => Ok(Some(url)),
         Ok(_)
         | Err(aurora_modplatform::Error::Status {
             status: 403 | 404, ..
-        }) => Err(CoreError::FileDistributionBlocked {
-            files: vec![file_name.to_owned()],
-        }),
+        }) => Ok(None),
         Err(other) => Err(other.into()),
+    }
+}
+
+/// download-url 端点给的地址换成下载任务，带上文件对象里的大小与 sha1 契约。
+pub(crate) fn task_for_file_url(
+    url: String,
+    dest: &Path,
+    file: &aurora_modplatform::CurseForgeFile,
+) -> DownloadTask {
+    let mut task = DownloadTask::new(url, dest);
+    if let Some(size) = file.file_length {
+        task = task.with_size(size);
+    }
+    if let Some(sha1) = file.sha1() {
+        task = task.with_sha1(sha1.to_owned());
+    }
+    task
+}
+
+/// 相对目录与文件名拼成正斜杠分隔的落点；目录为空时就是文件名。
+pub(crate) fn join_landing(landing: &str, file_name: &str) -> String {
+    if landing.is_empty() {
+        file_name.to_owned()
+    } else {
+        format!("{landing}/{file_name}")
     }
 }
 
@@ -253,7 +300,7 @@ fn checked_file_name(platform: Platform, raw: &str) -> Result<String> {
 
 /// 是否为可以直接拼进路径的单个文件或目录名：非空、不是 `.` / `..`、不含路径分隔符、盘符冒号
 /// 与控制字符、不以空格或点结尾（Windows 会悄悄去掉它们，落盘名与预期不一致）。
-pub(crate) fn is_safe_file_name(name: &str) -> bool {
+pub fn is_safe_file_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
@@ -536,16 +583,99 @@ mod tests {
         );
     }
 
-    /// CurseForge 文件没有下载地址、download-url 端点也拒绝时，报成需要手动下载。
+    /// CurseForge 资源包没有下载地址、download-url 端点也拒绝时，报成需要手动下载：多问一次工程拼出网页链接，
+    /// 落点是这次安装的 resourcepacks/，哈希与大小照文件对象给；什么都不下载。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn curseforge_blocked_distribution_is_reported_as_such() {
+    async fn curseforge_blocked_resource_is_reported_with_its_page_and_landing() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v1/mods/123/files/456"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
                     "id": 456, "modId": 123, "displayName": "Pack", "fileName": "pack.zip",
-                    "downloadUrl": null, "fileLength": 10
+                    "hashes": [{"value": "0f4a890d07402280686a518579fa9fa02309e315", "algo": 1}],
+                    "downloadUrl": null, "fileLength": 10, "fileFingerprint": 778
+                }})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/123/files/456/download-url"))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/123"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 123, "name": "Pack", "slug": "pack", "summary": "", "classId": 12,
+                    "links": {"websiteUrl": "https://www.curseforge.com/minecraft/texture-packs/pack/"}
+                }})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21.1").await;
+        let aurora = aurora(mc, IsolationPolicy::All, &server.uri()).with_curseforge_key("k");
+
+        let err = aurora
+            .install_resource(
+                ResourceTarget {
+                    version_id: "1.21.1",
+                    resource_type: ResourceType::ResourcePack,
+                    world: None,
+                },
+                Platform::CurseForge,
+                "123",
+                "456",
+                None,
+            )
+            .await
+            .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = &err else {
+            panic!("实际：{err:?}");
+        };
+        assert_eq!(
+            files,
+            &[BlockedFile {
+                project_id: 123,
+                file_id: 456,
+                file_name: "pack.zip".into(),
+                web_url: "https://www.curseforge.com/minecraft/texture-packs/pack/files/456".into(),
+                destination: "resourcepacks/pack.zip".into(),
+                sha1: Some("0f4a890d07402280686a518579fa9fa02309e315".into()),
+                fingerprint: 778,
+                size: Some(10),
+            }]
+        );
+        assert_eq!(
+            err.to_string(),
+            "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：pack.zip"
+        );
+        assert!(!mc.join("versions/1.21.1/resourcepacks/pack.zip").exists());
+        server.verify().await;
+    }
+
+    /// 受限资源包手动下载并认领之后再装一次：不再报受限，暂存位的副本复制进 resourcepacks/，覆盖同名旧文件，
+    /// 暂存位留着副本。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_resource_installs_from_the_claimed_copy() {
+        let bytes: &[u8] = b"claimed-pack";
+        let sha1: String = Sha1::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/123/files/456"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 456, "modId": 123, "displayName": "Pack", "fileName": "pack.zip",
+                    "hashes": [{"value": sha1, "algo": 1}],
+                    "downloadUrl": null, "fileLength": bytes.len(), "fileFingerprint": 778
                 }})),
             )
             .mount(&server)
@@ -555,15 +685,137 @@ mod tests {
             .respond_with(ResponseTemplate::new(403))
             .mount(&server)
             .await;
-        let http = aurora_base::http::build_client().unwrap();
-        let client = CurseForgeClient::new(http, "k").with_base_url(server.uri());
-        let err = curseforge_download_url(&client, 123, 456, "pack.zip")
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/123"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 123, "name": "Pack", "slug": "pack", "summary": "", "classId": 12,
+                    "links": {"websiteUrl": "https://www.curseforge.com/minecraft/texture-packs/pack/"}
+                }})),
+            )
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21.1").await;
+        let aurora = aurora(mc, IsolationPolicy::All, &server.uri()).with_curseforge_key("k");
+        let target = ResourceTarget {
+            version_id: "1.21.1",
+            resource_type: ResourceType::ResourcePack,
+            world: None,
+        };
+
+        let err = aurora
+            .install_resource(target, Platform::CurseForge, "123", "456", None)
             .await
             .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = err else {
+            panic!("没认领时应报受限：{err:?}");
+        };
+        let downloads = mc.join("Downloads");
+        tokio::fs::create_dir_all(&downloads).await.unwrap();
+        tokio::fs::write(downloads.join("pack (1).zip"), bytes)
+            .await
+            .unwrap();
+        let report = aurora
+            .claim_blocked_files(&downloads, &files)
+            .await
+            .unwrap();
+        assert!(report.missing.is_empty(), "{report:?}");
+        let landing = mc.join("versions/1.21.1/resourcepacks");
+        tokio::fs::create_dir_all(&landing).await.unwrap();
+        tokio::fs::write(landing.join("pack.zip"), b"old")
+            .await
+            .unwrap();
+
+        let outcome = aurora
+            .install_resource(target, Platform::CurseForge, "123", "456", None)
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.file_name, "pack.zip");
+        assert_eq!(outcome.path, landing.join("pack.zip"));
+        assert_eq!(outcome.platform, Platform::CurseForge);
+        assert_eq!(tokio::fs::read(&outcome.path).await.unwrap(), bytes);
+        let mut names: Vec<String> = Vec::new();
+        let mut entries = tokio::fs::read_dir(&landing).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        assert_eq!(names, vec!["pack.zip"]);
         assert!(
-            matches!(&err, CoreError::FileDistributionBlocked { files } if files == &["pack.zip".to_string()]),
-            "实际：{err:?}"
+            aurora
+                .blocked_claims_dir()
+                .join("curseforge-456/pack.zip")
+                .is_file()
         );
+    }
+
+    /// CurseForge 的任务（含 download-url 兜底出来的）都挂 CurseForge 凭据，Modrinth 的任务不挂。数据包的
+    /// 落点写法带上存档。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_tasks_carry_the_download_credential_and_modrinth_tasks_do_not() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        mount_modrinth_version(&server, "rp1", "Faithful.zip", b"rp").await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/7/files/70"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 70, "modId": 7, "displayName": "d", "fileName": "direct.zip",
+                    "downloadUrl": format!("{uri}/cdn/direct.zip"), "fileLength": 2
+                }})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/8/files/80"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 80, "modId": 8, "displayName": "f", "fileName": "fallback.zip",
+                    "downloadUrl": null, "fileLength": 3
+                }})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/8/files/80/download-url"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": format!("{uri}/cdn/fallback.zip")})),
+            )
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora(tmp.path(), IsolationPolicy::All, &uri).with_curseforge_key("k");
+        let dir = tmp.path().join("rp");
+
+        let (_, modrinth) = aurora
+            .platform_file_task(Platform::Modrinth, "faithful", "rp1", &dir, "resourcepacks")
+            .await
+            .unwrap();
+        assert!(modrinth.credential.is_none());
+        for (project, file, url) in [
+            ("7", "70", format!("{uri}/cdn/direct.zip")),
+            ("8", "80", format!("{uri}/cdn/fallback.zip")),
+        ] {
+            let (_, task) = aurora
+                .platform_file_task(Platform::CurseForge, project, file, &dir, "resourcepacks")
+                .await
+                .unwrap();
+            assert_eq!(task.url, url);
+            let credential = task.credential.as_ref().expect("CurseForge 任务应带凭据");
+            assert_eq!(
+                credential.realm(),
+                aurora_download::CredentialRealm::CurseForge
+            );
+            assert_eq!(credential.header_name().as_str(), "x-api-key");
+        }
+        assert_eq!(
+            join_landing("saves/新的世界/datapacks", "a.zip"),
+            "saves/新的世界/datapacks/a.zip"
+        );
+        assert_eq!(join_landing("", "a.zip"), "a.zip");
     }
 
     #[test]

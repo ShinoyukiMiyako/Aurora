@@ -3,6 +3,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../../ipc/errors";
+import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
 import { CORE_EVENT, type TaskJournalDto, type TaskRecordDto } from "../../ipc/tasks";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
@@ -11,6 +12,7 @@ import type { RouteOf } from "../../state/route";
 import { render, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, cancelledError, deferred, emit, resetRecorder, settle, type Deferred } from "../../test/launcher";
+import { PickFolderProvider } from "../discover/platform";
 import TasksPage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -45,8 +47,10 @@ async function mount(route: RouteOf<"tasks"> = { page: "tasks" }) {
   view = render(
     <LauncherProvider>
       <ShellProvider>
-        <Host />
-        <OverlayRoot />
+        <PickFolderProvider value={() => Promise.resolve(MOCK_DOWNLOADS_DIR)}>
+          <Host />
+          <OverlayRoot />
+        </PickFolderProvider>
       </ShellProvider>
     </LauncherProvider>,
   );
@@ -266,6 +270,54 @@ describe("下载任务页：历史", () => {
     expect(headings()).toEqual(["进行中 · 1"]);
     expect(row("failed-java").textContent).toContain("第 2 次尝试");
     expect(row("failed-java").textContent).toContain("等待数据");
+  });
+
+  it("因需要手动下载的文件失败：行上是「查看这些文件」而不是重试，清单列出文件，都找到后重新安装这个任务", async () => {
+    resetModpackMock();
+    const file = (name: string, id: number) => ({
+      project_id: 9,
+      file_id: id,
+      file_name: name,
+      web_url: `https://www.curseforge.com/minecraft/mc-mods/locked/files/${id}`,
+      destination: `mods/${name}`,
+      sha1: "a".repeat(40),
+      fingerprint: 0,
+      size: 3,
+    });
+    const args = { id: "生存", platform: "curseforge", projectId: "9", versionId: "90" };
+    bootOverrides(ipc, {
+      journal: [
+        record("failed-mod", "failed", {
+          kind: "mod",
+          title: "安装 Locked",
+          instance_id: "生存",
+          error: { code: "distribution_blocked", message: "原文", blocked_files: [file("locked.jar", 90), file("dep.jar", 91)] },
+          spec: { command: "install_mod", args },
+        }),
+      ],
+    });
+    ipc.overrides.set("install_mod", () => new Promise(() => undefined));
+    await mount();
+    const failed = row("安装 Locked");
+    expect(failed.textContent).toContain("失败：有 2 个文件需要到 CurseForge 网页手动下载");
+    expect(hasButton(failed, "重试")).toBe(false);
+
+    act(() => buttonIn(failed, "查看这些文件").click());
+    await flush();
+    expect(dialog().textContent).toContain("需要手动下载的文件");
+    expect(dialog().textContent).toContain("locked.jar");
+    expect(dialog().textContent).toContain("dep.jar");
+    expect(hasButton(dialog(), "重新安装")).toBe(false);
+
+    seedMockDownloads(["locked.jar", "dep.jar"]);
+    act(() => buttonIn(dialog(), "我已下载，重新检查").click());
+    await flush();
+    expect(dialog().textContent).toContain("2 个文件都已找到。");
+    act(() => buttonIn(dialog(), "重新安装").click());
+    await flush();
+    expect(callsOf(ipc, "install_mod")).toEqual([{ ...args, taskId: "failed-mod#2" }]);
+    expect(row("安装 Locked").textContent).toContain("第 2 次尝试");
+    expect(hasButton(row("安装 Locked"), "查看这些文件")).toBe(false);
   });
 });
 

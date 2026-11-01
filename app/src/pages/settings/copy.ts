@@ -124,6 +124,37 @@ export const JAVA_COPY = {
   majorUsers: (n: number) => `${n} 个实例需要`,
   noMajors: "还没有实例用到需要下载的 Java，新建实例后这里会列出它们要的主版本。",
   enqueued: (major: number) => `已加入下载队列：Java ${major}`,
+  add: "添加 Java",
+  added: (major: number) => `已添加 Java ${major}`,
+  addedBody: (vendor: string, version: string) => `${vendor} ${version}`,
+  addFailed: "没能添加 Java",
+  pickFailed: "没能打开文件选择框",
+  incomplete: "不完整",
+  missingFiles: (files: readonly string[]) => `缺少 ${files.join("、")}，自动选择会跳过它`,
+  manualTitle: "手动添加的 Java",
+  manualDesc: "移除只删记录，不动磁盘文件",
+  manualDetail: (major: number, vendor: string, version: string) => `Java ${major} · ${vendor} ${version}`,
+  unrecognized: "识别不出",
+  unrecognizedDesc: "这个位置现在识别不出 Java，文件可能被移走了",
+  remove: "移除",
+  removed: "已移除手动添加的 Java",
+  defaultReset: "默认 Java 改回了自动选择",
+  removeFailed: "没能移除 Java",
+} as const;
+
+export const GPU_COPY = {
+  title: "显卡",
+  subtitle: `让${APP_NAME}启动的游戏用哪块显卡`,
+  toggle: "让游戏用独立显卡",
+  descSwitchable: (name: string) => `启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」，游戏会用 ${name}`,
+  descSingle: "这台电脑只找到一块显卡，开着也不会换显卡",
+  descLoading: "正在读取显卡信息",
+  descGeneric: "启动前把这次用的 Java 设为 Windows 图形设置里的「高性能」",
+  dualNote: (powerSaving: string, highPerformance: string) =>
+    `这台电脑有两块显卡：${powerSaving} 和 ${highPerformance}。笔记本常默认用省电的那块跑游戏，帧数会低不少。`,
+  revertNote:
+    "关掉后不会撤销已经写进 Windows 的设置；要改回，到 Windows 设置 → 系统 → 屏幕 → 显示卡（Windows 10：系统 → 显示 → 图形设置）里把 java.exe 改回「让 Windows 决定」。",
+  readFailed: "读不到显卡信息",
 } as const;
 
 // ---------------------------------------------------------------- 游戏
@@ -193,6 +224,25 @@ export const GAME_DIR_COPY = {
   dirsFailed: "游戏目录列表读不出来",
   discoverFailed: "没能探测其他启动器的文件夹",
 } as const;
+
+export const WORLD_BACKUP_COPY = {
+  title: "存档备份",
+  subtitle: "退出游戏后自动备份玩过的存档，备份放在游戏目录下，删除实例也不会带走",
+  auto: "自动备份",
+  autoDesc: "游戏退出后，把这次玩过的存档各备份一份",
+  keep: "每个存档保留",
+  keepDesc: "只清理自动备份，手动备份一直保留",
+  keepOption: (n: number) => `${n} 份`,
+  total: "总量上限",
+  totalDesc: "超过后先删最旧的自动备份",
+  totalOption: (gb: number) => `${gb} GB`,
+  /** 自动备份关着时后两项不起作用：清理只在写完一份自动备份后进行。 */
+  pruneOff: "自动备份关闭时不会清理",
+} as const;
+
+/** 两个下拉的常用取值；配置里是别的值（手改过配置）时把它作为额外一项列出。 */
+export const KEEP_PER_WORLD_OPTIONS: readonly number[] = [3, 5, 10, 20];
+export const MAX_TOTAL_GB_OPTIONS: readonly number[] = [5, 10, 20, 50, 100];
 
 // ---------------------------------------------------------------- 外观
 

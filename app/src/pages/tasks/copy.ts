@@ -50,6 +50,7 @@ export const TASKS_COPY = {
     listLabel: "下载任务",
     cancel: "取消任务",
     retry: "重试",
+    viewBlocked: "查看这些文件",
     viewInstance: "查看实例",
     failedTag: "失败",
     progressLabel: (title: string) => `${title} 的下载进度`,

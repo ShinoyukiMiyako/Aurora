@@ -9,7 +9,7 @@ import { DEVICE_CODE_EVENT } from "../../ipc/accounts";
 import { IpcError } from "../../ipc/errors";
 import { mockInvoke } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
-import { ShellProvider } from "../../shell/shell";
+import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { MANUAL_LOGIN } from "../../state/login";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
@@ -45,11 +45,13 @@ describe("离线用户名下方的提示", () => {
 
 let view: Rendered | undefined;
 let launcher: LauncherApi;
+let nav: NavApi;
 let writeText: ReturnType<typeof vi.fn>;
 let opened: string[];
 
 function Host() {
   launcher = useLauncher();
+  nav = useNav();
   const login = launcher.state.login;
   return login === null ? null : <LoginFlow login={login} />;
 }
@@ -125,7 +127,7 @@ describe("还没有账户", () => {
     expect(title()).toBe(NO_ACCOUNT_COPY.title);
     act(() => button(NO_ACCOUNT_COPY.addOffline).click());
     await flush();
-    expect(launcher.state.login).toEqual({ kind: "offline", intent: { kind: "launch", instanceId: "生存" } });
+    expect(launcher.state.login).toEqual({ kind: "offline", intent: { kind: "launch", instanceId: "生存", quickPlay: null } });
     expect(title()).toBe(OFFLINE_DIALOG_COPY.title);
   });
 });
@@ -300,6 +302,43 @@ describe("微软设备码弹窗", () => {
     act(() => button("打开 xbox.com").click());
     await flush();
     expect(opened).toEqual(["https://www.xbox.com/"]);
+  });
+
+  it("微软一侧服务故障：说明不是账户或网络的问题，「重试」重新发起登录", async () => {
+    ipc.overrides.set("microsoft_login", () => {
+      throw new IpcError("ServiceUnavailable", "微软登录服务暂时不可用（XSTS 授权：HTTP 503）", { step: "XSTS 授权", status: 503 });
+    });
+    await mount();
+    act(() => void launcher.actions.startMicrosoftLogin());
+    await flush();
+    expect(title()).toBe(DEVICE_DIALOG_COPY.title);
+    expect(dialog()?.textContent).toContain("微软登录服务暂时不可用");
+    expect(dialog()?.textContent).toContain("微软那边的服务出了故障，不是你的账户或网络的问题。稍后重试。");
+    act(() => button("重试").click());
+    await flush();
+    expect(callsOf(ipc, "microsoft_login")).toHaveLength(2);
+  });
+
+  it("应用未获批准：不给重试，「打开设置」关掉弹窗并进入设置的常规分区", async () => {
+    ipc.overrides.set("microsoft_login", () => {
+      throw new IpcError("AppNotApproved", "使用的微软应用未获准访问 Minecraft 服务（Invalid app registration）");
+    });
+    await mount();
+    act(() => void launcher.actions.startMicrosoftLogin());
+    await flush();
+    expect(dialog()?.textContent).toContain("登录应用未获批准");
+    const labels = [...document.querySelectorAll<HTMLButtonElement>("[role='dialog'] button")].map((b) => b.textContent);
+    expect(labels).toContain("复制错误信息");
+    expect(labels).not.toContain("重试");
+    expect(nav.route).not.toEqual({ page: "settings", section: "general" });
+
+    act(() => button("打开设置").click());
+    await flush();
+    expect(dialog()).toBeNull();
+    expect(launcher.state.login).toBeNull();
+    expect(nav.route).toEqual({ page: "settings", section: "general" });
+    // 登录已经失败，关弹窗不必再请后端取消
+    expect(callsOf(ipc, "cancel_microsoft_login")).toEqual([]);
   });
 });
 

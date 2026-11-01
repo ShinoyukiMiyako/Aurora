@@ -923,6 +923,14 @@ impl Aurora {
     }
 }
 
+#[cfg(all(test, windows))]
+impl Aurora {
+    /// 不走登录链，直接把账户写进凭据库并选为当前账户：启动等其它模块的门面级测试据此布置账户现场。
+    pub(crate) fn store_account_for_test(&self, account: Account) -> Result<Account> {
+        self.store_login(account)
+    }
+}
+
 /// 取外置角色的皮肤；失败不影响登录与刷新，只记 warn 让界面回落。
 async fn profile_skin_or_warn(client: &YggdrasilClient, profile_id: &str) -> Option<SkinRef> {
     match client.profile_skin(profile_id).await {

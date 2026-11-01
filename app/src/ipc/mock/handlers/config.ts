@@ -7,6 +7,7 @@ import type {
   IsolationPolicy,
   MemorySettings,
   NamedDirectoryDto,
+  WorldBackupSettings,
 } from "../../config";
 import { UI_LANGUAGES } from "../../config";
 import { IpcError } from "../../errors";
@@ -38,6 +39,9 @@ const ISOLATION_POLICIES: readonly IsolationPolicy[] = [
 ];
 const AFTER_LAUNCH: readonly AfterLaunch[] = ["keep", "minimize", "close"];
 const DEFAULT_JAVA_AUTO = "auto";
+/** 存档备份两项的取值范围，与后端命令层的校验一致。 */
+const KEEP_PER_WORLD_RANGE = { min: 1, max: 50 } as const;
+const MAX_TOTAL_GB_RANGE = { min: 1, max: 1000 } as const;
 
 function seedConfig(): ConfigDto {
   return {
@@ -59,6 +63,9 @@ function seedConfig(): ConfigDto {
     skipped_update_version: null,
     notified_update_version: null,
     language: "zh-CN",
+    extra_java_paths: [],
+    prefer_dedicated_gpu: false,
+    world_backup: { auto: true, keep_per_world: 5, max_total_gb: 20 },
   };
 }
 
@@ -221,6 +228,37 @@ function parseMemory(raw: unknown): MemorySettings {
   return { max_mb: record.max_mb, min_mb: min, auto: record.auto };
 }
 
+/** 与后端 WorldBackupInput 一致：deny_unknown_fields，三项都必须给；类型不对是 Tauri 参数错误，越界是 invalid_argument。 */
+function parseWorldBackup(raw: unknown): WorldBackupSettings {
+  const record = requireStruct(raw, ["auto", "keep_per_world", "max_total_gb"], "update_config", "worldBackup");
+  if (typeof record.auto !== "boolean") throw tauriArgError("update_config", "worldBackup", "missing field `auto`");
+  const count = (key: "keep_per_world" | "max_total_gb"): number => {
+    const value = record[key];
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0) throw tauriArgError("update_config", "worldBackup", `missing field \`${key}\``);
+    return value;
+  };
+  const keep = count("keep_per_world");
+  const total = count("max_total_gb");
+  if (keep < KEEP_PER_WORLD_RANGE.min || keep > KEEP_PER_WORLD_RANGE.max) {
+    throw new IpcError("invalid_argument", `每个存档保留的自动备份份数须在 ${KEEP_PER_WORLD_RANGE.min} 到 ${KEEP_PER_WORLD_RANGE.max} 之间，收到 ${keep}`, {
+      field: "world_backup.keep_per_world",
+      value: keep,
+    });
+  }
+  if (total < MAX_TOTAL_GB_RANGE.min || total > MAX_TOTAL_GB_RANGE.max) {
+    throw new IpcError("invalid_argument", `备份总量上限（GB）须在 ${MAX_TOTAL_GB_RANGE.min} 到 ${MAX_TOTAL_GB_RANGE.max} 之间，收到 ${total}`, {
+      field: "world_backup.max_total_gb",
+      value: total,
+    });
+  }
+  return { auto: record.auto, keep_per_world: keep, max_total_gb: total };
+}
+
+/** 存档备份的当前设置；实例 mock 备份完按它清理旧的自动备份。 */
+export function mockWorldBackupSettings(): WorldBackupSettings {
+  return config.world_backup;
+}
+
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], what: string): T {
   if (!allowed.includes(value as T)) throw new IpcError("invalid_argument", `未知${what} ${String(value)}`);
   return value as T;
@@ -233,9 +271,24 @@ export function setMockJavaPaths(paths: readonly string[]): void {
   knownJava = new Set(paths.map(norm));
 }
 
+/** 与后端 add_extra_java_path 一致：按不区分大小写的路径去重，已有时不动。 */
+export function addMockExtraJavaPath(path: string): void {
+  if (config.extra_java_paths.some((p) => samePath(p, path))) return;
+  config = { ...config, extra_java_paths: [...config.extra_java_paths, path] };
+}
+
+/** 与后端 remove_extra_java_path 一致：默认 Java 正是被移除的那个时改回自动选择。 */
+export function removeMockExtraJavaPath(path: string): { removed: boolean; default_reset: boolean } {
+  const kept = config.extra_java_paths.filter((p) => !samePath(p, path));
+  const removed = kept.length !== config.extra_java_paths.length;
+  const defaultReset = removed && config.default_java !== DEFAULT_JAVA_AUTO && samePath(config.default_java, path);
+  config = { ...config, extra_java_paths: kept, default_java: defaultReset ? DEFAULT_JAVA_AUTO : config.default_java };
+  return { removed, default_reset: defaultReset };
+}
+
 // 先把所有字段校验完再一次性写入，与后端「有一个不合法就整体拒绝」一致。
 function updateConfig(args: MockArgs): void {
-  const next: ConfigDto = { ...config, memory: { ...config.memory } };
+  const next: ConfigDto = { ...config, memory: { ...config.memory }, world_backup: { ...config.world_backup } };
   if (args.downloadSource !== undefined) next.download_source = oneOf(args.downloadSource, DOWNLOAD_SOURCES, "下载源策略");
   if (args.versionListSource !== undefined) next.version_list_source = oneOf(args.versionListSource, DOWNLOAD_SOURCES, "下载源策略");
   if (args.downloadConcurrency !== undefined) {
@@ -265,6 +318,8 @@ function updateConfig(args: MockArgs): void {
     next.notified_update_version = requireString(args, "notifiedUpdateVersion", "update_config");
   }
   if (args.language !== undefined) next.language = oneOf(args.language, UI_LANGUAGES, "的界面语言");
+  if (args.preferDedicatedGpu !== undefined) next.prefer_dedicated_gpu = requireBoolean(args, "preferDedicatedGpu");
+  if (args.worldBackup !== undefined) next.world_backup = parseWorldBackup(args.worldBackup);
   config = next;
 }
 
@@ -346,13 +401,18 @@ interface ConfigSnapshot {
   firstRunCompleted: boolean;
 }
 
+/** 后来才加进配置、早先存下的快照里没有的字段。 */
+type LaterConfigFields = "extra_java_paths" | "prefer_dedicated_gpu";
+type StoredConfigSnapshot = Omit<ConfigSnapshot, "config"> & { config: Omit<ConfigDto, LaterConfigFields> & Partial<Pick<ConfigDto, LaterConfigFields>> };
+
 // 快照形状一变就升版本：旧快照里的配置缺字段，读回来会在 DTO 适配处出错，不如启用时就明确报版本不符。
 export const persist: MockPersist = {
-  version: 2,
+  version: 3,
   snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], firstRunCompleted }),
   restore: (data) => {
-    const saved = data as ConfigSnapshot;
-    config = saved.config;
+    const saved = data as StoredConfigSnapshot;
+    // 与后端配置的 serde(default) 一致：手动 Java 与独显偏好是后加的字段，之前存下的快照没有它们，按默认值读入
+    config = { extra_java_paths: [], prefer_dedicated_gpu: false, ...saved.config };
     extras = saved.extras;
     disk = new Set(saved.disk);
     withVersions = new Set(saved.withVersions);

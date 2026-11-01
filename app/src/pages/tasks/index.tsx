@@ -5,7 +5,7 @@
 // 订阅分两层：页面只订阅任务表的结构（增删、换状态），分组、筛选、页头与已结束的行只在结构变化时重排；
 // 下载进度每个任务约 100 ms 一次，只交给吞吐卡、通道卡与运行中的那一行，它们各自订阅自己要的那一片。
 
-import { useEffect, useId, useLayoutEffect, useRef, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ACTION_ERROR, BOOT_SLICE_ERROR, PAGE_LABEL, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { Task } from "../../domain/types";
 import { useLoadingGate } from "../../lib/loading-gate";
@@ -15,6 +15,7 @@ import { describeError } from "../../state/errors";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useOnline } from "../../state/online";
 import type { PageProps, TaskFilter } from "../../state/route";
+import type { BlockedFileDto } from "../../state/store";
 import { isActiveTask, queuePosition } from "../../state/tasks";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -26,6 +27,7 @@ import { EntranceBlock, Page } from "../../ui/Page";
 import { PageHeader } from "../../ui/PageHeader";
 import { SegmentedControl } from "../../ui/SegmentedControl";
 import { Skeleton } from "../../ui/Skeleton";
+import { BlockedFilesModal } from "../discover/BlockedFilesModal";
 import { RELATIVE_TIME_REFRESH_MS } from "./constants";
 import { TASKS_COPY } from "./copy";
 import { LanesCard } from "./LanesCard";
@@ -59,6 +61,7 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   const nav = useNav();
   const { confirm, openCreateInstance } = useShell();
   const run = useRunner();
+  const [blocked, setBlocked] = useState<{ open: boolean; files: readonly BlockedFileDto[]; taskId: string } | null>(null);
   const online = useOnline();
   const now = useNow(RELATIVE_TIME_REFRESH_MS);
   const titleId = useId();
@@ -162,6 +165,10 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
         retryBlocked={online ? undefined : TASKS_COPY.offline.retryReason}
         onCancel={(task) => void cancel(task)}
         onRetry={(task) => void run(() => actions.retryTask(task.id), ACTION_ERROR.install)}
+        onViewBlocked={(task) => {
+          if (task.error?.blocked_files === undefined) throw new Error(`任务 ${task.id} 没有需要手动下载的文件清单`);
+          setBlocked({ open: true, files: task.error.blocked_files, taskId: task.id });
+        }}
         onViewInstance={(id) => nav.go({ page: "instance", id, tab: "overview" })}
       />,
     ];
@@ -202,6 +209,18 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
         {loadError}
         {body}
       </Page>
+      {blocked !== null && (
+        <BlockedFilesModal
+          open={blocked.open}
+          files={blocked.files}
+          origin="failed"
+          onClose={() => setBlocked({ ...blocked, open: false })}
+          onAllFound={() => {
+            setBlocked({ ...blocked, open: false });
+            void run(() => actions.retryTask(blocked.taskId), ACTION_ERROR.install);
+          }}
+        />
+      )}
     </ThroughputScope>
   );
 }
@@ -229,6 +248,7 @@ interface RowHandlers {
   retryBlocked: string | undefined;
   onCancel(task: Task): void;
   onRetry(task: Task): void;
+  onViewBlocked(task: Task): void;
   onViewInstance(id: string): void;
 }
 
@@ -258,6 +278,7 @@ function TaskListRow({ task: placed, queuePosition, now, handlers }: { task: Tas
       retryBlocked={handlers.retryBlocked}
       onCancel={() => handlers.onCancel(task)}
       onRetry={() => handlers.onRetry(task)}
+      onViewBlocked={() => handlers.onViewBlocked(task)}
       onViewInstance={() => {
         if (task.instanceId === null) throw new Error(`任务 ${task.id} 没有关联实例`);
         handlers.onViewInstance(task.instanceId);

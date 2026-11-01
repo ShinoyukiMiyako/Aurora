@@ -21,6 +21,7 @@ function inst(id: string, overrides: Partial<InstanceSummary> = {}): InstanceSum
     extraLoaders: [],
     releaseType: "release",
     javaMajor: 21,
+    quickPlay: { singleplayer: true, multiplayer: true },
     description: null,
     cover: null,
     pinned: false,
@@ -68,7 +69,7 @@ function state(overrides: Partial<LauncherState>): LauncherState {
 }
 
 const loading = (instanceId: string, stage = 0): SessionState => {
-  const s = startSession(instanceId, "launch-1", ACCOUNT, T0);
+  const s = startSession(instanceId, "launch-1", ACCOUNT, T0, null);
   return stage === 0 ? s : applyPhase(s, { taskId: "launch-1", phase: stage < 3 ? "preparing" : stage === 3 ? "downloading" : "launching", stageIndex: stage, download: null }, T0);
 };
 const running = (instanceId: string) => sessionLaunched(loading(instanceId), "launch-1", T0 + 1000);

@@ -5,12 +5,13 @@
 // 超时（10 s）由动作本身以错误结束，经统一错误处理弹「无法结束游戏进程」，入口回到原状态。
 
 import { useCallback, useEffect, useState } from "react";
-import { ACTION_ERROR, CONFIRM_COPY, type FailureCopy, type FailureFixKind } from "../copy/flows";
+import { ACTION_ERROR, CONFIRM_COPY, LAUNCH_COPY, type FailureCopy, type FailureFixKind } from "../copy/flows";
 import { javaPinned, type InstanceSummary } from "../domain/adapt";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useInstanceSettings } from "../state/queries/instance";
 import { reimportRoute } from "../state/route";
-import { getInstance } from "../state/selectors";
+import { getInstance, savesBusy } from "../state/selectors";
+import type { QuickPlayArg } from "../state/store";
 import { useLaunchHost } from "./host";
 import { launchFailure, launchView, launchViewEqual, type LaunchView } from "./launchView";
 
@@ -21,8 +22,18 @@ export interface LaunchEntry {
   stopping: boolean;
   /** failed 视图的文案与修复动作；其余视图为 null。 */
   failure: FailureCopy | null;
+  /**
+   * 此刻不能启动的原因：存档正在备份、恢复或导出，后端会以 instance_busy 拒绝。入口据此带原因禁用启动与重新启动，
+   * 取消、结束、查看诊断不受影响；能启动为 null。
+   */
+  blocked: string | null;
   /** 启动（就绪、已结束、失败、崩溃后再启动）；损坏时由状态容器转成「修复并启动」，整合包没导入完的去重新导入。 */
   launch(): void;
+  /**
+   * 启动并直达一个世界或一台服务器，拦截与 launch 相同（没有账户先登录、替换运行中的游戏先确认）。
+   * 损坏与安装中的实例不转成修复，由入口按禁用处理。
+   */
+  quickPlay(target: QuickPlayArg): void;
   /** 取消启动：加载阶段，不确认。 */
   cancel(): void;
   /** 结束游戏：运行中，先确认。 */
@@ -41,6 +52,7 @@ export function useLaunch(instanceId: string): LaunchEntry {
   const host = useLaunchHost();
   const inst = useLauncherSelector((s) => getInstance(s, instanceId));
   const view = useLauncherSelector((s) => launchView(s, getInstance(s, instanceId)), launchViewEqual);
+  const busySaves = useLauncherSelector((s) => savesBusy(s, getInstance(s, instanceId)));
   const [stopping, setStopping] = useState(false);
 
   // spawn_failed 的第二个按钮只在实例固定了 Java 时出现，要读实例设置；其余视图不发这个请求
@@ -65,6 +77,13 @@ export function useLaunch(instanceId: string): LaunchEntry {
     }
     void host.run(() => actions.launch(instanceId), isBroken ? ACTION_ERROR.repair : ACTION_ERROR.launch(name));
   }, [actions, host, inst, instanceId, isBroken, name, reimport]);
+
+  const quickPlay = useCallback(
+    (target: QuickPlayArg) => {
+      void host.run(() => actions.quickPlay(instanceId, target), ACTION_ERROR.launch(name));
+    },
+    [actions, host, instanceId, name],
+  );
 
   const endSession = useCallback(async () => {
     setStopping(true);
@@ -101,5 +120,6 @@ export function useLaunch(instanceId: string): LaunchEntry {
     [actions, host, name],
   );
 
-  return { instance: inst, view, stopping, failure, launch, cancel, stop, dismiss, openCrash, openLogs, fix };
+  const blocked = busySaves ? LAUNCH_COPY.savesBusy : null;
+  return { instance: inst, view, stopping, failure, blocked, launch, quickPlay, cancel, stop, dismiss, openCrash, openLogs, fix };
 }

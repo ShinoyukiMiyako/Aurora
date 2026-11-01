@@ -1,5 +1,5 @@
-// 崩溃诊断：顶部是这次崩溃的摘要；左列逐条线索（类别、解释、命中的日志行与前两行），
-// 右列是按线索推出的一键尝试与「日志指向」的 Mod。规则命中只是线索，文案一律写「日志指向」，不写「导致」。
+// 崩溃诊断：顶部是这次崩溃的摘要（参与扫描的文件、这次启动时的提醒）；左列逐条线索（类别、解释、命中的日志行与前两行，
+// 只有退出码时改写退出码），右列是按线索推出的一键尝试与「日志指向」的 Mod。规则命中只是线索，文案一律写「日志指向」，不写「导致」。
 // 本页不放第二个启动胶囊：重新启动用头图的胶囊。
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -7,7 +7,18 @@ import { Icon } from "../../art/Icon";
 import { EmptyArt } from "../../art/illustrations/EmptyArt";
 import { KindTile } from "../../art/illustrations/FeatureTile";
 import { hueOf } from "../../art/illustrations/seed";
-import { ACTION_ERROR, CRASH_CATEGORY, CRASH_COPY, crashCategoryLabel, TOAST_COPY, type CrashCategoryName } from "../../copy/flows";
+import {
+  ACTION_ERROR,
+  CRASH_CATEGORY,
+  CRASH_COPY,
+  CRASH_SOURCE_LABEL,
+  crashCategoryLabel,
+  EXIT_CODE_COPY,
+  launchWarningCopy,
+  TOAST_COPY,
+  type CrashCategoryName,
+  type LaunchWarningActionKind,
+} from "../../copy/flows";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { clock, formatDate, formatMemory, formatRelative } from "../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
@@ -30,6 +41,7 @@ import { Skeleton } from "../../ui/Skeleton";
 import { Tag } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
 import { Toggle } from "../../ui/Toggle";
+import { Tooltip } from "../../ui/Tooltip";
 import { CRASH_PAGE_COPY, MODS_COPY, SETTINGS_COPY } from "./copy";
 import { useMemoryInfo, useRequiredMajor } from "./hooks";
 import styles from "./instance.module.css";
@@ -160,7 +172,13 @@ function SummaryCard({ inst, ops, view, report, crashActive, onTab }: { inst: In
         <div className={styles.crashText}>
           <span className={styles.crashEyebrow}>
             <span className={styles.dangerDot} aria-hidden="true" />
-            {CRASH_COPY.exitLine(relative, report.exit_code)}
+            {report.exit_code_note === null ? (
+              CRASH_COPY.exitLine(relative, report.exit_code, null)
+            ) : (
+              <Tooltip content={EXIT_CODE_COPY[report.exit_code_note.kind].explain} wrap>
+                <span tabIndex={0}>{CRASH_COPY.exitLine(relative, report.exit_code, report.exit_code_note)}</span>
+              </Tooltip>
+            )}
           </span>
           <h2 className={styles.crashTitle}>
             {unique.length > 0 ? CRASH_PAGE_COPY.clueCount(report.diagnoses.length) : CRASH_COPY.noClueTitle}
@@ -175,12 +193,90 @@ function SummaryCard({ inst, ops, view, report, crashActive, onTab }: { inst: In
             </span>
           )}
           <span className={styles.soft}>{`${formatDate(report.at)} ${clock(report.at)}`}</span>
+          {report.scanned_files.length > 0 && <ScannedFiles files={report.scanned_files} />}
+          {report.warnings.length > 0 && <LaunchWarnings warnings={report.warnings} onTab={onTab} />}
         </div>
         <Button variant="ghost" size="sm" icon="terminal" onClick={() => onTab("logs")}>
           {CRASH_PAGE_COPY.fullLog}
         </Button>
       </div>
     </Card>
+  );
+}
+
+type ScannedFile = CrashReportDto["scanned_files"][number];
+
+/** 路径过长时从中间省略：目录部分可以缩，文件名留全。 */
+function splitPath(path: string): { dir: string; file: string } {
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return { dir: path.slice(0, cut + 1), file: path.slice(cut + 1) };
+}
+
+function ScannedFiles({ files }: { files: readonly ScannedFile[] }) {
+  const { copyText } = useShell();
+  return (
+    <section className={styles.crashBlock} aria-label={CRASH_PAGE_COPY.scannedTitle}>
+      <span className={styles.crashBlockTitle}>{CRASH_PAGE_COPY.scannedTitle}</span>
+      <ul className={styles.scanList}>
+        {files.map((file) => {
+          const { dir, file: name } = splitPath(file.path);
+          return (
+            <li key={`${file.kind}:${file.path}`} className={styles.scanRow}>
+              <span className={styles.scanKind}>{CRASH_SOURCE_LABEL[file.kind]}</span>
+              <Tooltip content={<span className={styles.tipPath}>{file.path}</span>} wrap>
+                <code tabIndex={0} className={styles.scanPath}>
+                  <span className={styles.scanDir}>{dir}</span>
+                  <span className={styles.scanFile}>{name}</span>
+                </code>
+              </Tooltip>
+              <CopyButton text={file.path} label={CRASH_PAGE_COPY.copyScannedPath} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+function LaunchWarnings({ warnings, onTab }: { warnings: CrashReportDto["warnings"]; onTab(tab: InstanceTab): void }) {
+  const { go } = useNav();
+  const act = (kind: LaunchWarningActionKind) => {
+    switch (kind) {
+      case "change_game_dir":
+        go({ page: "settings", section: "game" });
+        return;
+      case "manage_accounts":
+        go({ page: "accounts" });
+        return;
+      case "instance_settings":
+        onTab("settings");
+        return;
+    }
+  };
+  // 后端每种提醒至多记一次，按启动阶段的先后排；这里只防重复的键
+  const unique = warnings.filter((w, i) => warnings.indexOf(w) === i);
+  return (
+    <section className={styles.crashBlock} aria-label={CRASH_PAGE_COPY.warningsTitle}>
+      <span className={styles.crashBlockTitle}>{CRASH_PAGE_COPY.warningsTitle}</span>
+      {/* 一张卡片至多一条局部提示，那一条留给过期与再次运行的说明；提醒可能有多条，逐行列出 */}
+      <ul className={styles.warnList}>
+        {unique.map((code) => {
+          const copy = launchWarningCopy(code);
+          return (
+            <li key={code} className={styles.warnRow}>
+              <Icon name="alert" size={16} className={styles.warnIcon} />
+              <span className={styles.warnText}>
+                <span className={styles.warningTitle}>{copy.title}</span>
+                {copy.body}
+              </span>
+              <Button size="sm" onClick={() => act(copy.action.kind)}>
+                {copy.action.label}
+              </Button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
   );
 }
 
@@ -195,6 +291,8 @@ function ClueCard({ index, clue, report, required }: { index: number; clue: Cras
     currentJava: report.java === null ? null : report.java.major,
     requiredJava: fromDetail === null ? required : fromDetail,
     maxMemoryMb: report.max_memory_mb,
+    exitCode: report.exit_code,
+    exitNote: report.exit_code_note,
   });
   return (
     <Card padding="lg">
@@ -214,21 +312,34 @@ function ClueCard({ index, clue, report, required }: { index: number; clue: Cras
         <Icon name="sparkle" size={16} />
         <span>{explain}</span>
       </p>
-      <div className={styles.matched}>
-        <span className={styles.soft}>{CRASH_PAGE_COPY.matchedLine(clue.line)}</span>
-        <div className={styles.matchedBox}>
-          {clue.context.map((line, i) => (
-            <div key={i} className={styles.matchedLine}>
-              {line}
-            </div>
-          ))}
-          <div className={styles.matchedLine} data-hit="">
-            {clue.matched}
-          </div>
-        </div>
-      </div>
+      {clue.source === "exit_code" ? <ExitCodeLine report={report} /> : <MatchedLines clue={clue} source={clue.source} />}
     </Card>
   );
+}
+
+function MatchedLines({ clue, source }: { clue: CrashClueDto; source: Exclude<CrashClueDto["source"], "exit_code"> }) {
+  return (
+    <div className={styles.matched}>
+      <span className={styles.soft}>{CRASH_PAGE_COPY.matchedLine(clue.line, source)}</span>
+      <div className={styles.matchedBox}>
+        {clue.context.map((line, i) => (
+          <div key={i} className={styles.matchedLine}>
+            {line}
+          </div>
+        ))}
+        <div className={styles.matchedLine} data-hit="">
+          {clue.matched}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** 只有退出码的线索没有可画的日志行，改写一行退出码。后端只对认得的退出码给这种线索，说明必然在。 */
+function ExitCodeLine({ report }: { report: CrashReportDto }) {
+  const note = report.exit_code_note;
+  if (note === null) throw new Error(`退出码 ${String(report.exit_code)} 给出了退出码线索，却没有退出码说明`);
+  return <code className={styles.exitCodeLine}>{CRASH_PAGE_COPY.exitCodeLine(note.code, note.hex)}</code>;
 }
 
 // ---------------------------------------------------------------- 一键尝试
@@ -245,6 +356,7 @@ const FIX_ICON: Readonly<Record<CrashFix["kind"], "memory" | "java" | "mod" | "c
   enable_mod: "mod",
   search_dependency: "compass",
   find_dependency: "compass",
+  find_mod_version: "compass",
   disable_mod: "mod",
   keep_latest: "mod",
   repair: "wrench",
@@ -263,16 +375,17 @@ function fixTitle(fix: CrashFix): string {
     case "download_java":
       return CRASH_CATEGORY.java_version_mismatch.label;
     case "enable_mod":
-    case "search_dependency":
     case "find_dependency":
       return CRASH_CATEGORY.missing_dependency.label;
+    case "find_mod_version":
+      return CRASH_CATEGORY.game_version_mismatch.label;
+    case "search_dependency":
     case "disable_mod":
     case "repair":
+    case "driver_steps":
       return CRASH_CATEGORY[fix.category].label;
     case "keep_latest":
       return CRASH_CATEGORY.duplicate_mod.label;
-    case "driver_steps":
-      return CRASH_CATEGORY.graphics_driver.label;
     case "compare_log":
       return CRASH_PAGE_COPY.compareLog;
   }
@@ -513,16 +626,28 @@ function FixRow({
       action = button(CRASH_PAGE_COPY.enableMod(fix.name), () => toggleMods([fix], true, CRASH_PAGE_COPY.enabledDone(fix.name)), modReason([fix]));
       break;
     case "search_dependency":
-      note = CRASH_PAGE_COPY.searchModNote;
+      note = fix.category === "missing_language_provider" ? CRASH_PAGE_COPY.searchProviderNote : CRASH_PAGE_COPY.searchModNote;
       action = button(CRASH_PAGE_COPY.searchMod(fix.detail), () => go({ page: "discover", query: fix.detail, kind: "mod", forInstance: inst.id }));
       break;
     case "find_dependency":
       note = CRASH_PAGE_COPY.findOnDiscoverNote;
       action = button(CRASH_PAGE_COPY.findOnDiscover, () => go({ page: "discover", kind: "mod", forInstance: inst.id }));
       break;
+    case "find_mod_version": {
+      note = CRASH_PAGE_COPY.findModVersionNote;
+      const query = fix.detail;
+      action = button(CRASH_PAGE_COPY.findOnDiscover, () =>
+        go(query === null ? { page: "discover", kind: "mod", forInstance: inst.id } : { page: "discover", query, kind: "mod", forInstance: inst.id }),
+      );
+      break;
+    }
     case "disable_mod":
       note = CRASH_PAGE_COPY.disableModNote;
-      action = button(CRASH_PAGE_COPY.disableMod(fix.name), () => toggleMods([fix], false, CRASH_PAGE_COPY.disabledDone(1)), modReason([fix]));
+      action = button(
+        fix.category === "optifine_incompatible" ? CRASH_PAGE_COPY.disableOptifine : CRASH_PAGE_COPY.disableMod(fix.name),
+        () => toggleMods([fix], false, CRASH_PAGE_COPY.disabledDone(1)),
+        modReason([fix]),
+      );
       break;
     case "keep_latest":
       note = CRASH_PAGE_COPY.keepLatestNote(fix.disable.length);

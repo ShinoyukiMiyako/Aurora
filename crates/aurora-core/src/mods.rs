@@ -29,12 +29,13 @@ use aurora_modplatform::{
 };
 use serde::Serialize;
 
+use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed, single_blocked};
 use crate::deps::PlannedItem;
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Aurora;
 use crate::history::HistoryEvent;
-use crate::ledger::{Ledger, LedgerEntry};
+use crate::ledger::{Ledger, LedgerEntry, UpdateHold};
 use crate::modfs::{
     MODS_DIR, ensure_not_held, is_plain_file_name, ledger_key, lock_mods_dir, now_unix,
     numbered_backup_name, present, refuse, try_exists,
@@ -99,6 +100,19 @@ pub struct ModSource {
     pub title: Option<String>,
     /// 作为谁的前置被带进来的（project_id）；玩家主动装的为 `None`。
     pub dependency_of: Option<String>,
+    /// 这个 Mod 装进实例的时刻（unix 秒），取卷宗原值。
+    pub installed_at: i64,
+    /// 更新检查设置；没设置为 `None`（序列化为 `null`）。
+    pub update_hold: Option<UpdateHold>,
+}
+
+/// 批量启停里一个文件的结果。
+#[derive(Debug)]
+pub struct ModToggleOutcome {
+    /// 入参里的文件名，原样带回。
+    pub file_name: String,
+    /// 切换后的磁盘路径，或这一个文件失败的原因。
+    pub result: Result<PathBuf>,
 }
 
 /// 实例 Mod 列表的一项：磁盘扫描结果 + 卷宗 join 出的来源与图标。
@@ -123,6 +137,8 @@ struct StagedItem {
     file_name: String,
     /// 下载任务，`dest` 指向暂存区。
     task: DownloadTask,
+    /// 手动下载认领到的副本：有它时不下载，从这里复制进暂存区，任务只用来核对大小与哈希。
+    claimed: Option<PathBuf>,
     /// 校验通过后的 SHA-1：平台声明了就是它，没声明就是对暂存文件的实测值。
     sha1: Option<String>,
 }
@@ -256,15 +272,68 @@ impl Aurora {
         enabled: bool,
     ) -> Result<PathBuf> {
         let dirs = self.resolved_dirs(version_id).await?;
-        let path = mod_file_path(&dirs.mods_dir, file_name)?;
         let _guard = lock_mods_dir(&dirs.mods_dir).await;
-        ensure_not_held(vec![path.clone()]).await?;
-        let switched = if enabled {
-            enable_mod(&path).await?
-        } else {
-            disable_mod(&path).await?
-        };
-        Ok(switched)
+        toggle_locked(&dirs.mods_dir, file_name, enabled).await
+    }
+
+    /// 批量启用或禁用一组文件，逐个给出结果，顺序与入参一致。
+    ///
+    /// 单个文件失败（名字不合法、文件不在、被游戏占用、目标名已存在）只记在它那一项，不中断其余：
+    /// 玩家勾了十个，一个被占用不该让另外九个也不动。外层错误只来自实例本身解析不了。mods 目录的写锁
+    /// 整批只拿一次，批次中途不会插进别的改动。与单个启停一样不写历史。
+    pub async fn set_mods_enabled(
+        &self,
+        version_id: &str,
+        file_names: &[String],
+        enabled: bool,
+    ) -> Result<Vec<ModToggleOutcome>> {
+        let dirs = self.resolved_dirs(version_id).await?;
+        let _guard = lock_mods_dir(&dirs.mods_dir).await;
+        let mut outcomes = Vec::with_capacity(file_names.len());
+        for file_name in file_names {
+            outcomes.push(ModToggleOutcome {
+                file_name: file_name.clone(),
+                result: toggle_locked(&dirs.mods_dir, file_name, enabled).await,
+            });
+        }
+        Ok(outcomes)
+    }
+
+    /// 设置某个 Mod 的更新检查：`Some` 为忽略或锁定版本，`None` 为恢复检查。
+    ///
+    /// `file_name` 是列表里的磁盘文件名，禁用态也认。只改卷宗、不碰 jar，所以游戏运行中也能做；值没变
+    /// 时不落盘。文件不在 mods 目录里、或卷宗里没有它的平台来源（本地文件不参与更新检查）时拒绝。
+    pub async fn set_mod_update_hold(
+        &self,
+        version_id: &str,
+        file_name: &str,
+        hold: Option<UpdateHold>,
+    ) -> Result<()> {
+        let dirs = self.resolved_dirs(version_id).await?;
+        let path = mod_file_path(&dirs.mods_dir, file_name)?;
+        let key = ledger_key(file_name);
+        let _guard = lock_mods_dir(&dirs.mods_dir).await;
+        if !present(&dirs.mods_dir, key).await? {
+            return Err(refuse(
+                &path,
+                std::io::ErrorKind::NotFound,
+                format!("mods 目录里没有 {file_name}，可能已被移除"),
+            ));
+        }
+        let store = self.ledger_store(version_id);
+        let mut ledger = store.load().await?;
+        let entry = ledger.find_mut(key).ok_or_else(|| {
+            refuse(
+                &path,
+                std::io::ErrorKind::NotFound,
+                format!("{file_name} 没有平台来源记录，不能设置更新检查"),
+            )
+        })?;
+        if entry.update_hold == hold {
+            return Ok(());
+        }
+        entry.update_hold = hold;
+        store.save(&ledger).await
     }
 
     /// 从实例里移除一个 Mod 文件，摘掉它的卷宗条目，并在历史里记一条移除事件。
@@ -404,8 +473,17 @@ impl Aurora {
         );
 
         let mut staged: Vec<StagedItem> = Vec::with_capacity(pending.len());
+        let mut blocked: Vec<BlockedFile> = Vec::new();
         for item in pending {
-            staged.push(self.stage_item(item, &staging_dir).await?);
+            match self.stage_item(item, &staging_dir).await {
+                Ok(item) => staged.push(item),
+                // 一次报全：不让玩家手动下完一个、重试，才发现还有下一个。
+                Err(CoreError::FileDistributionBlocked { files }) => blocked.extend(files),
+                Err(err) => return Err(err),
+            }
+        }
+        if !blocked.is_empty() {
+            return Err(CoreError::FileDistributionBlocked { files: blocked });
         }
         ensure_unique_targets(&staged, &dirs.mods_dir)?;
 
@@ -476,12 +554,24 @@ impl Aurora {
             ));
         }
         let dest = staging_dir.join(&file_name);
-        let task = match version.to_download_task(&dest) {
-            Some(task) => task,
-            None => {
-                let url = self.fallback_download_url(&version).await?;
-                version.task_for_url(url, &dest)
+        let (task, claimed) = match version.to_download_task(&dest) {
+            Some(task) => (task, None),
+            None => match self.fallback_download_url(&version).await {
+                Ok(url) => (version.task_for_url(url, &dest), None),
+                Err(err) => {
+                    let (_, copy) = self.claimed_instead_of(err).await?;
+                    // 这条任务不下载，地址只会出现在校验失败的报错里，写副本路径才对得上来源。
+                    let source = copy.display().to_string();
+                    (version.task_for_url(source, &dest), Some(copy))
+                }
+            },
+        };
+        let task = match version.platform {
+            Platform::CurseForge => {
+                let client = self.curseforge_client()?;
+                task.with_credential(self.curseforge_credential(&client)?)
             }
+            Platform::Modrinth => task,
         };
         Ok(StagedItem {
             sha1: version.sha1.clone(),
@@ -491,12 +581,13 @@ impl Aurora {
             required_by,
             file_name,
             task,
+            claimed,
         })
     }
 
     /// 版本自带直链为空时的兜底直链。只有 CurseForge 会走到这里（禁止第三方分发的工程不在文件对象里
     /// 给直链）；Modrinth 版本没有文件时根本不会进入版本列表。端点拒绝或给空串时报
-    /// [`CoreError::FileDistributionBlocked`]，与整合包导入、资源安装同一口径。
+    /// [`CoreError::FileDistributionBlocked`]，与整合包导入、资源安装同一口径，落点是 `mods/` 下的同名文件。
     async fn fallback_download_url(&self, version: &ModVersionInfo) -> Result<String> {
         let not_found = || CoreError::ModVersionNotFound {
             platform: version.platform.display_name(),
@@ -507,13 +598,22 @@ impl Aurora {
             Platform::CurseForge => {
                 let mod_id: u32 = version.project_id.parse().map_err(|_| not_found())?;
                 let file_id: u32 = version.version_id.parse().map_err(|_| not_found())?;
-                curseforge_download_url(
-                    &self.curseforge_client()?,
-                    mod_id,
-                    file_id,
-                    &version.file_name,
-                )
-                .await
+                let client = self.curseforge_client()?;
+                match curseforge_download_url(&client, mod_id, file_id).await? {
+                    Some(url) => Ok(url),
+                    // 版本信息里没有 fileFingerprint，只按 sha1 与大小认。
+                    None => Err(single_blocked(&client, mod_id, |project| BlockedFile {
+                        project_id: mod_id,
+                        file_id,
+                        file_name: version.file_name.clone(),
+                        web_url: aurora_modplatform::curseforge::file_page_url(project, file_id),
+                        destination: format!("{MODS_DIR}/{}", version.file_name),
+                        sha1: version.sha1.clone(),
+                        fingerprint: 0,
+                        size: version.file_size,
+                    })
+                    .await),
+                }
             }
             Platform::Modrinth => Err(not_found()),
         }
@@ -528,14 +628,31 @@ impl Aurora {
         if staged.is_empty() {
             return Ok(());
         }
-        let tasks: Vec<DownloadTask> = staged.iter().map(|s| s.task.clone()).collect();
-        let report = self
-            .download_pool_reporting(events)
-            .download_all(tasks, None)
-            .await?;
-        // 有失败即冒泡其最终错误（重试换源后仍失败），绝不当作成功。
-        if let Some(failure) = report.failures.into_iter().next() {
-            return Err(failure.error.into());
+        let claimed: Vec<ClaimedCopy> = staged
+            .iter()
+            .filter_map(|item| {
+                item.claimed.clone().map(|copy| ClaimedCopy {
+                    staged: copy,
+                    dest: item.task.dest.clone(),
+                })
+            })
+            .collect();
+        place_claimed(&claimed).await?;
+
+        let tasks: Vec<DownloadTask> = staged
+            .iter()
+            .filter(|item| item.claimed.is_none())
+            .map(|item| item.task.clone())
+            .collect();
+        if !tasks.is_empty() {
+            let report = self
+                .download_pool_reporting(events)
+                .download_all(tasks, None)
+                .await?;
+            // 有失败即冒泡其最终错误（重试换源后仍失败），绝不当作成功。
+            if let Some(failure) = report.failures.into_iter().next() {
+                return Err(failure.error.into());
+            }
         }
 
         let total = staged.len();
@@ -652,11 +769,19 @@ impl Aurora {
         for placement in placements {
             // 改名式更新：旧文件名那条记录必须先摘掉，否则卷宗里会同时挂着新旧两个文件名，而磁盘上
             // 旧的那个已经变成 .old 备份了。
-            if let Some(replaced) = &placement.replaced
-                && replaced.old_file != placement.file_name
-            {
-                ledger.remove(&replaced.old_file);
-            }
+            let previous = match &placement.replaced {
+                Some(replaced) if replaced.old_file != placement.file_name => {
+                    ledger.remove(&replaced.old_file)
+                }
+                Some(_) => ledger.find(&placement.file_name).cloned(),
+                None => None,
+            };
+            // 更新换的是版本不是 Mod：装进实例的时刻与玩家的更新设置都跟着这个 Mod 走。顶替来路不明的
+            // 文件时没有旧记录可继承，按新装算。
+            let (installed_at, update_hold) = match previous {
+                Some(old) => (old.installed_at, old.update_hold),
+                None => (at, None),
+            };
             ledger.upsert(LedgerEntry {
                 file_name: placement.file_name.clone(),
                 platform: placement.version.platform,
@@ -666,8 +791,9 @@ impl Aurora {
                 title: placement.title.clone(),
                 icon_url: placement.icon_url.clone(),
                 sha1: placement.sha1.clone(),
-                installed_at: at,
+                installed_at,
                 installed_as_dependency_of: placement.required_by.clone(),
+                update_hold,
             });
         }
         self.ledger_store(version_id).save(&ledger).await?;
@@ -743,21 +869,36 @@ fn join_ledger(installed: InstalledMod, ledger: &Ledger) -> InstanceMod {
             version_number: e.version_number.clone(),
             title: e.title.clone(),
             dependency_of: e.installed_as_dependency_of.clone(),
+            installed_at: e.installed_at,
+            update_hold: e.update_hold.clone(),
         }),
         installed,
     }
+}
+
+/// 切换一个文件的启停。调用方持有 mods 目录写锁；单个与批量启停共用这一段，两条路径的校验与占用
+/// 检查才不会走岔。
+async fn toggle_locked(mods_dir: &Path, file_name: &str, enabled: bool) -> Result<PathBuf> {
+    let path = mod_file_path(mods_dir, file_name)?;
+    ensure_not_held(vec![path.clone()]).await?;
+    let switched = if enabled {
+        enable_mod(&path).await?
+    } else {
+        disable_mod(&path).await?
+    };
+    Ok(switched)
 }
 
 /// 前端传来的 mods 目录文件名 -> 完整路径，挡住任何不是「mods 目录里一个模组 jar」的名字。
 ///
 /// 移除与启停只该作用于模组文件本身：放任任意文件名进来，`.old` 备份、配置文件乃至带 `..` 的路径都会
 /// 被当成 Mod 删掉或改名。
-fn mod_file_path(mods_dir: &Path, file_name: &str) -> Result<PathBuf> {
+pub(crate) fn mod_file_path(mods_dir: &Path, file_name: &str) -> Result<PathBuf> {
     if !is_plain_file_name(file_name) || !ledger_key(file_name).ends_with(".jar") {
         return Err(refuse(
             &mods_dir.join(file_name),
             std::io::ErrorKind::InvalidInput,
-            format!("{file_name} 不是 mods 目录里的模组文件名"),
+            format!("{file_name} 不是 mods 目录里的 Mod 文件名"),
         ));
     }
     Ok(mods_dir.join(file_name))
@@ -1379,7 +1520,8 @@ mod tests {
         }
     }
 
-    /// 挂一个 CurseForge 文件：文件对象里的直链取 `download_url`，download-url 端点按 `fallback` 应答。
+    /// 挂一个 CurseForge 文件：文件对象里的直链取 `download_url`，download-url 端点按 `fallback` 应答，
+    /// 工程摘要给受限文件的网页链接用。
     async fn mount_curseforge_file(
         server: &MockServer,
         download_url: serde_json::Value,
@@ -1407,11 +1549,20 @@ mod tests {
             .respond_with(fallback)
             .mount(server)
             .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 238222, "name": "JEI", "slug": "jei", "summary": "", "classId": 6
+                }})),
+            )
+            .mount(server)
+            .await;
     }
 
     /// 作者禁止第三方分发的 CurseForge 文件：文件对象不给直链，download-url 端点拒绝或给空串。
-    /// 装 Mod 要与整合包导入一样报「需要到网页手动下载」并带上文件名，而不是一句笼统的 HTTP 失败；
-    /// 什么都不落进 mods 目录。
+    /// 装 Mod 要与整合包导入一样报「需要到网页手动下载」并带上文件名与网页链接，而不是一句笼统的 HTTP
+    /// 失败；什么都不落进 mods 目录。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn curseforge_file_blocked_from_distribution_is_reported_as_such() {
         let cases = [
@@ -1435,9 +1586,22 @@ mod tests {
                 .install_mod("1.21", Platform::CurseForge, "238222", "5000", None)
                 .await
                 .unwrap_err();
-            assert!(
-                matches!(&err, CoreError::FileDistributionBlocked { files } if files == &["jei-1.21.jar"]),
-                "直链 {download_url}：期望 FileDistributionBlocked，得到 {err:?}"
+            let CoreError::FileDistributionBlocked { files } = &err else {
+                panic!("直链 {download_url}：期望 FileDistributionBlocked，得到 {err:?}");
+            };
+            assert_eq!(
+                files,
+                &[BlockedFile {
+                    project_id: 238222,
+                    file_id: 5000,
+                    file_name: "jei-1.21.jar".into(),
+                    web_url: "https://www.curseforge.com/minecraft/mc-mods/jei/files/5000".into(),
+                    destination: "mods/jei-1.21.jar".into(),
+                    sha1: None,
+                    fingerprint: 0,
+                    size: Some(4),
+                }],
+                "直链 {download_url}"
             );
             let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
             assert!(!try_exists(&mods_dir.join("jei-1.21.jar")).await.unwrap());
@@ -1637,6 +1801,19 @@ mod tests {
             .await
             .unwrap();
 
+        // 装进实例的时刻定在过去，好与「现在」区分；更新设置经禁用态文件名设上。
+        let store = aurora.ledger_store("1.21");
+        let mut ledger = store.load().await.unwrap();
+        ledger.find_mut("sodium-v1.jar").unwrap().installed_at = 1_600_000_000;
+        store.save(&ledger).await.unwrap();
+        let pin = UpdateHold::Pinned {
+            version_id: "v2".to_owned(),
+        };
+        aurora
+            .set_mod_update_hold("1.21", "sodium-v1.jar.disabled", Some(pin.clone()))
+            .await
+            .unwrap();
+
         let outcome = aurora
             .update_mod("1.21", "sodium-v1.jar.disabled", "v2", None)
             .await
@@ -1664,6 +1841,9 @@ mod tests {
         let entry = ledger.find("sodium-v2.jar").unwrap();
         assert_eq!(entry.version_id, "v2");
         assert_eq!(entry.sha1.as_deref(), Some(sha1_hex(&new_jar).as_str()));
+        // 换的是版本不是 Mod：装进实例的时刻与更新设置原样带到新条目上。
+        assert_eq!(entry.installed_at, 1_600_000_000);
+        assert_eq!(entry.update_hold, Some(pin.clone()));
 
         let history = aurora.history("1.21").await.unwrap();
         assert_eq!(history.events.len(), 2);
@@ -1695,18 +1875,12 @@ mod tests {
         let update_id = history.events[1].id().to_owned();
         aurora.rollback("1.21", &update_id).await.unwrap();
         assert_eq!(dir_names(&mods_dir).await, vec!["sodium-v1.jar"]);
-        assert_eq!(
-            aurora
-                .ledger_store("1.21")
-                .load()
-                .await
-                .unwrap()
-                .find("sodium-v1.jar")
-                .unwrap()
-                .version_number
-                .as_deref(),
-            Some("v1.0")
-        );
+        let ledger = aurora.ledger_store("1.21").load().await.unwrap();
+        let restored = ledger.find("sodium-v1.jar").unwrap();
+        assert_eq!(restored.version_number.as_deref(), Some("v1.0"));
+        // 回滚同样不改装进实例的时刻，更新设置也还在。
+        assert_eq!(restored.installed_at, 1_600_000_000);
+        assert_eq!(restored.update_hold, Some(pin));
     }
 
     /// 挂一个文件名固定为 sodium.jar 的版本：各版本的下载地址按版本分开，文件名却相同（原地更新）。
@@ -1744,6 +1918,12 @@ mod tests {
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
+        let store = aurora.ledger_store("1.21");
+        let mut ledger = store.load().await.unwrap();
+        let entry = ledger.find_mut("sodium.jar").unwrap();
+        entry.installed_at = 1_500_000_000;
+        entry.update_hold = Some(UpdateHold::Ignored);
+        store.save(&ledger).await.unwrap();
         aurora
             .update_mod("1.21", "sodium.jar", "v2", None)
             .await
@@ -1752,6 +1932,17 @@ mod tests {
             .update_mod("1.21", "sodium.jar", "v3", None)
             .await
             .unwrap();
+        // 同名原地更新同样沿用旧条目的装进时刻与更新设置。
+        let entry = store
+            .load()
+            .await
+            .unwrap()
+            .find("sodium.jar")
+            .cloned()
+            .unwrap();
+        assert_eq!(entry.version_id, "v3");
+        assert_eq!(entry.installed_at, 1_500_000_000);
+        assert_eq!(entry.update_hold, Some(UpdateHold::Ignored));
 
         let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
         assert_eq!(
@@ -2001,6 +2192,7 @@ mod tests {
             sha1: None,
             installed_at: 0,
             installed_as_dependency_of: None,
+            update_hold: None,
         });
         aurora.ledger_store("1.21").save(&ledger).await.unwrap();
 
@@ -2032,7 +2224,7 @@ mod tests {
             let err = aurora.remove_mod("1.21", bad).await.unwrap_err();
             let (_, reason) = refusal(&err);
             assert!(
-                reason.contains("不是 mods 目录里的模组文件名"),
+                reason.contains("不是 mods 目录里的 Mod 文件名"),
                 "{bad:?}: {reason}"
             );
             assert!(aurora.set_mod_enabled("1.21", bad, false).await.is_err());
@@ -2044,6 +2236,248 @@ mod tests {
         let err = aurora.remove_mod("1.21", "ghost.jar").await.unwrap_err();
         assert!(refusal(&err).1.contains("没有 ghost.jar"));
         assert!(aurora.history("1.21").await.unwrap().events.is_empty());
+    }
+
+    /// 批量启停：逐个给出结果、顺序同入参；单个失败不影响其余；已是目标状态的原样返回路径；不写历史。
+    #[tokio::test]
+    async fn set_mods_enabled_reports_each_file_in_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        for name in ["a.jar", "b.jar.disabled", "c.jar"] {
+            tokio::fs::write(mods_dir.join(name), name.as_bytes())
+                .await
+                .unwrap();
+        }
+
+        let names: Vec<String> = [
+            "a.jar",
+            "config.toml",
+            "b.jar.disabled",
+            "ghost.jar",
+            "c.jar",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let outcomes = aurora
+            .set_mods_enabled("1.21", &names, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|o| o.file_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "a.jar",
+                "config.toml",
+                "b.jar.disabled",
+                "ghost.jar",
+                "c.jar"
+            ]
+        );
+        assert_eq!(
+            outcomes[0].result.as_ref().unwrap(),
+            &mods_dir.join("a.jar.disabled")
+        );
+        let (_, reason) = refusal(outcomes[1].result.as_ref().unwrap_err());
+        assert!(reason.contains("不是 mods 目录里的 Mod 文件名"), "{reason}");
+        // 已是禁用态：原样返回原路径。
+        assert_eq!(
+            outcomes[2].result.as_ref().unwrap(),
+            &mods_dir.join("b.jar.disabled")
+        );
+        assert!(outcomes[3].result.is_err());
+        assert_eq!(
+            outcomes[4].result.as_ref().unwrap(),
+            &mods_dir.join("c.jar.disabled")
+        );
+        assert_eq!(
+            dir_names(&mods_dir).await,
+            vec!["a.jar.disabled", "b.jar.disabled", "c.jar.disabled"]
+        );
+        assert!(aurora.history("1.21").await.unwrap().events.is_empty());
+
+        // 反向批量启用。
+        let back: Vec<String> = ["a.jar.disabled", "c.jar.disabled"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let outcomes = aurora.set_mods_enabled("1.21", &back, true).await.unwrap();
+        assert!(outcomes.iter().all(|o| o.result.is_ok()));
+        assert_eq!(
+            dir_names(&mods_dir).await,
+            vec!["a.jar", "b.jar.disabled", "c.jar"]
+        );
+
+        let err = aurora
+            .set_mods_enabled("ghost", &back, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CoreError::VersionNotInstalled { .. }));
+    }
+
+    /// 更新检查设置：禁用态文件名也能设；文件不在、无来源记录各自拒绝；值没变不改写卷宗文件。
+    #[tokio::test]
+    async fn set_mod_update_hold_writes_ledger_and_skips_unchanged_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        tokio::fs::write(mods_dir.join("sodium.jar.disabled"), b"jar")
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("manual.jar"), b"jar")
+            .await
+            .unwrap();
+        let store = aurora.ledger_store("1.21");
+        let mut ledger = Ledger::default();
+        for (file_name, project_id) in [("sodium.jar", "AANobbMI"), ("gone.jar", "P7dR8mSH")] {
+            ledger.upsert(LedgerEntry {
+                file_name: file_name.to_owned(),
+                platform: Platform::Modrinth,
+                project_id: project_id.to_owned(),
+                version_id: "v1".to_owned(),
+                version_number: None,
+                title: None,
+                icon_url: None,
+                sha1: None,
+                installed_at: 1_700_000_000,
+                installed_as_dependency_of: None,
+                update_hold: None,
+            });
+        }
+        store.save(&ledger).await.unwrap();
+
+        aurora
+            .set_mod_update_hold("1.21", "sodium.jar.disabled", Some(UpdateHold::Ignored))
+            .await
+            .unwrap();
+        let after = store.load().await.unwrap();
+        assert_eq!(
+            after.find("sodium.jar").unwrap().update_hold,
+            Some(UpdateHold::Ignored)
+        );
+        assert_eq!(after.find("gone.jar").unwrap().update_hold, None);
+
+        // 值相同不落盘：先把文件换成紧凑写法，真的改写过就会变回带缩进的格式。
+        let compact = serde_json::to_vec(&after).unwrap();
+        tokio::fs::write(store.path(), &compact).await.unwrap();
+        aurora
+            .set_mod_update_hold("1.21", "sodium.jar", Some(UpdateHold::Ignored))
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(store.path()).await.unwrap(), compact);
+
+        // 改成锁定、再恢复检查。
+        let pin = UpdateHold::Pinned {
+            version_id: "v9".to_owned(),
+        };
+        aurora
+            .set_mod_update_hold("1.21", "sodium.jar", Some(pin.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load()
+                .await
+                .unwrap()
+                .find("sodium.jar")
+                .unwrap()
+                .update_hold,
+            Some(pin)
+        );
+        aurora
+            .set_mod_update_hold("1.21", "sodium.jar", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .load()
+                .await
+                .unwrap()
+                .find("sodium.jar")
+                .unwrap()
+                .update_hold,
+            None
+        );
+
+        let before = tokio::fs::read(store.path()).await.unwrap();
+        // 卷宗里有、盘上没有：按已被移除拒绝。
+        let err = aurora
+            .set_mod_update_hold("1.21", "gone.jar", Some(UpdateHold::Ignored))
+            .await
+            .unwrap_err();
+        let (path, reason) = refusal(&err);
+        assert_eq!(path, mods_dir.join("gone.jar"));
+        assert!(reason.contains("mods 目录里没有 gone.jar"), "{reason}");
+        // 盘上有、卷宗没有：本地文件不参与更新检查。
+        let err = aurora
+            .set_mod_update_hold("1.21", "manual.jar", Some(UpdateHold::Ignored))
+            .await
+            .unwrap_err();
+        assert!(
+            refusal(&err)
+                .1
+                .contains("manual.jar 没有平台来源记录，不能设置更新检查"),
+            "{err:?}"
+        );
+        let err = aurora
+            .set_mod_update_hold("1.21", "a.jar.old", None)
+            .await
+            .unwrap_err();
+        assert!(refusal(&err).1.contains("不是 mods 目录里的 Mod 文件名"));
+        assert_eq!(tokio::fs::read(store.path()).await.unwrap(), before);
+    }
+
+    /// 列表里的来源带上装进实例的时刻与更新设置，没设置时序列化为 null。
+    #[tokio::test]
+    async fn listed_source_carries_installed_at_and_update_hold() {
+        let tmp = tempfile::tempdir().unwrap();
+        put_version(tmp.path(), "1.21").await;
+        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        tokio::fs::write(mods_dir.join("a.jar"), b"a")
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("b.jar"), b"b")
+            .await
+            .unwrap();
+        let mut ledger = Ledger::default();
+        for (file_name, at, hold) in [
+            ("a.jar", 1_700_000_001, None),
+            ("b.jar", -3, Some(UpdateHold::Ignored)),
+        ] {
+            ledger.upsert(LedgerEntry {
+                file_name: file_name.to_owned(),
+                platform: Platform::Modrinth,
+                project_id: format!("p-{file_name}"),
+                version_id: "v1".to_owned(),
+                version_number: None,
+                title: None,
+                icon_url: None,
+                sha1: None,
+                installed_at: at,
+                installed_as_dependency_of: None,
+                update_hold: hold,
+            });
+        }
+        aurora.ledger_store("1.21").save(&ledger).await.unwrap();
+
+        let mut listed = aurora.list_mods("1.21").await.unwrap();
+        listed.sort_by(|x, y| x.installed.file_name.cmp(&y.installed.file_name));
+        let a = serde_json::to_value(listed[0].source.as_ref().unwrap()).unwrap();
+        assert_eq!(a["installed_at"], 1_700_000_001);
+        assert_eq!(a["update_hold"], serde_json::Value::Null);
+        let b = serde_json::to_value(listed[1].source.as_ref().unwrap()).unwrap();
+        assert_eq!(b["installed_at"], -3);
+        assert_eq!(b["update_hold"], serde_json::json!({ "kind": "ignored" }));
     }
 
     /// 同一实例上的并发变更不丢记录：每次移除都留下自己的历史事件，卷宗条目全部摘净。
@@ -2073,6 +2507,7 @@ mod tests {
                 sha1: None,
                 installed_at: 0,
                 installed_as_dependency_of: None,
+                update_hold: None,
             });
         }
         aurora.ledger_store("1.21").save(&ledger).await.unwrap();
@@ -2227,5 +2662,413 @@ mod tests {
             dir_names(&mods_dir).await,
             vec!["sodium-v1.jar", "sodium-v2.jar"]
         );
+    }
+
+    fn version_info(
+        platform: &str,
+        project: &str,
+        file: &str,
+        url: Option<&str>,
+    ) -> ModVersionInfo {
+        serde_json::from_value(serde_json::json!({
+            "version_id": file, "project_id": project, "platform": platform, "name": "n",
+            "version_number": "1", "release_channel": "release", "game_versions": ["1.21"],
+            "loaders": [], "file_name": format!("{project}-{file}.jar"), "file_size": 3,
+            "sha1": null, "download_url": url, "date_published": "", "dependencies": []
+        }))
+        .unwrap()
+    }
+
+    fn planned(version: ModVersionInfo) -> PlannedItem {
+        PlannedItem {
+            version,
+            title: None,
+            icon_url: None,
+            required_by: None,
+            already_satisfied: false,
+            delisted: false,
+        }
+    }
+
+    /// CurseForge 的暂存任务（直链与 download-url 兜底出来的）都挂 CurseForge 凭据，Modrinth 的不挂。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_staged_tasks_carry_the_credential_and_modrinth_tasks_do_not() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/8/files/80/download-url"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": format!("{uri}/cdn/fallback.jar")})),
+            )
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = isolated_aurora(tmp.path(), uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k");
+        let staging = tmp.path().join("staging");
+
+        let modrinth = aurora
+            .stage_item(
+                planned(version_info(
+                    "modrinth",
+                    "sodium",
+                    "v1",
+                    Some("https://cdn.modrinth.com/a.jar"),
+                )),
+                &staging,
+            )
+            .await
+            .unwrap();
+        assert!(modrinth.task.credential.is_none());
+        let direct = aurora
+            .stage_item(
+                planned(version_info(
+                    "curseforge",
+                    "7",
+                    "70",
+                    Some(&format!("{uri}/cdn/direct.jar")),
+                )),
+                &staging,
+            )
+            .await
+            .unwrap();
+        let fallback = aurora
+            .stage_item(
+                planned(version_info("curseforge", "8", "80", None)),
+                &staging,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fallback.task.url, format!("{uri}/cdn/fallback.jar"));
+        for item in [direct, fallback] {
+            let credential = item
+                .task
+                .credential
+                .as_ref()
+                .expect("CurseForge 任务应带凭据");
+            assert_eq!(
+                credential.realm(),
+                aurora_download::CredentialRealm::CurseForge
+            );
+        }
+    }
+
+    /// 作者不允许第三方分发的 CurseForge Mod：报受限文件，落点是 mods/ 下的同名文件，网页链接按工程拼。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_curseforge_mod_is_reported_with_its_page_and_landing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/9/files/90/download-url"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/9"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 9, "name": "Locked", "slug": "locked", "summary": "", "classId": 6
+                }})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let uri = server.uri();
+        let aurora = isolated_aurora(tmp.path(), uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k");
+        let mut version = version_info("curseforge", "9", "90", None);
+        version.sha1 = Some("a".repeat(40));
+
+        let err = aurora
+            .stage_item(planned(version), &tmp.path().join("staging"))
+            .await
+            .err()
+            .expect("受限 Mod 应报错");
+        let CoreError::FileDistributionBlocked { files } = &err else {
+            panic!("实际：{err:?}");
+        };
+        assert_eq!(
+            files,
+            &[BlockedFile {
+                project_id: 9,
+                file_id: 90,
+                file_name: "9-90.jar".into(),
+                web_url: "https://www.curseforge.com/minecraft/mc-mods/locked/files/90".into(),
+                destination: "mods/9-90.jar".into(),
+                sha1: Some("a".repeat(40)),
+                fingerprint: 0,
+                size: Some(3),
+            }]
+        );
+        server.verify().await;
+    }
+
+    /// 挂好一个作者不允许第三方分发的 CurseForge 工程：download-url 拒绝，工程摘要给网页链接用。
+    async fn mount_blocked_project(server: &MockServer, mod_id: u32, file_id: u32) {
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/v1/mods/{mod_id}/files/{file_id}/download-url"
+            )))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/mods/{mod_id}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": mod_id, "name": "Locked", "slug": format!("locked-{mod_id}"), "summary": "", "classId": 6
+                }})),
+            )
+            .mount(server)
+            .await;
+    }
+
+    fn blocked_version(mod_id: u32, file_id: u32, bytes: &[u8]) -> ModVersionInfo {
+        let mut version = version_info(
+            "curseforge",
+            &mod_id.to_string(),
+            &file_id.to_string(),
+            None,
+        );
+        version.sha1 = Some(sha1_hex(bytes));
+        version.file_size = Some(bytes.len() as u64);
+        version
+    }
+
+    fn blocked_file(mod_id: u32, file_id: u32, bytes: &[u8]) -> BlockedFile {
+        let file_name = format!("{mod_id}-{file_id}.jar");
+        BlockedFile {
+            project_id: mod_id,
+            file_id,
+            web_url: format!(
+                "https://www.curseforge.com/minecraft/mc-mods/locked-{mod_id}/files/{file_id}"
+            ),
+            destination: format!("mods/{file_name}"),
+            file_name,
+            sha1: Some(sha1_hex(bytes)),
+            fingerprint: 0,
+            size: Some(bytes.len() as u64),
+        }
+    }
+
+    /// 把受限文件放进「下载文件夹」再认领，走和界面一样的入口进暂存位。
+    async fn claim(aurora: &Aurora, tmp: &Path, file: &BlockedFile, bytes: &[u8]) {
+        let downloads = tmp.join("Downloads");
+        tokio::fs::create_dir_all(&downloads).await.unwrap();
+        tokio::fs::write(downloads.join(&file.file_name), bytes)
+            .await
+            .unwrap();
+        let report = aurora
+            .claim_blocked_files(&downloads, std::slice::from_ref(file))
+            .await
+            .unwrap();
+        assert!(report.missing.is_empty(), "{report:?}");
+    }
+
+    /// 受限 Mod 手动下载并认领之后再装一次：不再报受限，也不下载，暂存位的副本过一遍校验后落进 mods/，
+    /// 暂存位留着副本，卷宗照常记下来源。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_mod_installs_from_the_claimed_copy() {
+        let server = MockServer::start().await;
+        mount_blocked_project(&server, 9, 90).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21").await;
+        let uri = server.uri();
+        let aurora = isolated_aurora(mc, uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k");
+        let bytes: &[u8] = b"claimed-jar";
+        claim(&aurora, mc, &blocked_file(9, 90, bytes), bytes).await;
+
+        let outcome = aurora
+            .install_planned(
+                "1.21",
+                vec![planned(blocked_version(9, 90, bytes))],
+                (Platform::CurseForge, "9", "90"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.file_name, "9-90.jar");
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        assert_eq!(dir_names(&mods_dir).await, vec!["9-90.jar"]);
+        assert_eq!(tokio::fs::read(&outcome.path).await.unwrap(), bytes);
+        let listed = aurora.list_mods("1.21").await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].source.as_ref().map(|s| s.project_id.as_str()),
+            Some("9")
+        );
+        assert!(
+            aurora
+                .blocked_claims_dir()
+                .join("curseforge-90/9-90.jar")
+                .is_file()
+        );
+    }
+
+    /// 暂存位的副本被改坏了（校验不过）不算认领：照旧报受限，mods/ 里什么都不落。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tampered_claimed_copy_is_not_installed() {
+        let server = MockServer::start().await;
+        mount_blocked_project(&server, 9, 90).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21").await;
+        let uri = server.uri();
+        let aurora = isolated_aurora(mc, uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k");
+        let bytes: &[u8] = b"claimed-jar";
+        claim(&aurora, mc, &blocked_file(9, 90, bytes), bytes).await;
+        tokio::fs::write(
+            aurora.blocked_claims_dir().join("curseforge-90/9-90.jar"),
+            b"tampered",
+        )
+        .await
+        .unwrap();
+
+        let err = aurora
+            .install_planned(
+                "1.21",
+                vec![planned(blocked_version(9, 90, bytes))],
+                (Platform::CurseForge, "9", "90"),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CoreError::FileDistributionBlocked { .. }),
+            "{err:?}"
+        );
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        assert!(!mods_dir.join("9-90.jar").exists());
+    }
+
+    /// 计划里有好几个受限文件时一次报全，已认领的不在其中；有没认领的就一个文件都不落。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_unclaimed_file_of_a_plan_is_reported_at_once() {
+        let server = MockServer::start().await;
+        for (mod_id, file_id) in [(9, 90), (10, 100), (11, 110)] {
+            mount_blocked_project(&server, mod_id, file_id).await;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21").await;
+        let uri = server.uri();
+        let aurora = isolated_aurora(mc, uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k");
+        let bytes: &[u8] = b"claimed-jar";
+        claim(&aurora, mc, &blocked_file(10, 100, bytes), bytes).await;
+
+        let err = aurora
+            .install_planned(
+                "1.21",
+                vec![
+                    planned(blocked_version(9, 90, b"first")),
+                    planned(blocked_version(10, 100, bytes)),
+                    planned(blocked_version(11, 110, b"third")),
+                ],
+                (Platform::CurseForge, "9", "90"),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        let CoreError::FileDistributionBlocked { files } = &err else {
+            panic!("实际：{err:?}");
+        };
+        assert_eq!(
+            files,
+            &[
+                blocked_file(9, 90, b"first"),
+                blocked_file(11, 110, b"third")
+            ]
+        );
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        assert!(!mods_dir.join("10-100.jar").exists());
+    }
+
+    /// 门面级：CDN 对带了密钥的请求回 401，install_mod 失败；错误链上认得出是 CurseForge 拒绝了密钥，
+    /// 带着被拒那一跳的地址；CDN 只被请求 1 次（不重试、不换源），请求确实带了 x-api-key；mods 里什么都没落。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn curseforge_cdn_rejecting_the_key_fails_install_once() {
+        use wiremock::matchers::header;
+
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        let cdn = format!("{uri}/files/3040/523/jei.jar");
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/238222/files/3040523"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {
+                    "id": 3040523, "modId": 238222, "displayName": "JEI", "fileName": "jei.jar",
+                    "hashes": [{"value": sha1_hex(b"jar"), "algo": 1}], "fileLength": 3,
+                    "downloadUrl": cdn, "gameVersions": ["1.21"]
+                }})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    {"id": 238222, "name": "JEI", "slug": "jei", "summary": "", "classId": 6}
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/files/3040/523/jei.jar"))
+            .and(header("x-api-key", "k"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21").await;
+        let port = server.address().port();
+        let aurora = isolated_aurora(mc, uri.clone())
+            .with_curseforge_base(&uri)
+            .with_curseforge_key("k")
+            .with_curseforge_cdn_scope(aurora_download::CredentialScope::new(
+                [format!("127.0.0.1:{port}")],
+                false,
+            ));
+
+        let err = aurora
+            .install_mod("1.21", Platform::CurseForge, "238222", "3040523", None)
+            .await
+            .unwrap_err();
+        let CoreError::Download(download) = &err else {
+            panic!("实际：{err:?}");
+        };
+        assert_eq!(
+            download.credential_rejection(),
+            Some(aurora_download::CredentialRealm::CurseForge)
+        );
+        assert!(
+            matches!(download, aurora_download::Error::CredentialRejected { url, status: 401, .. } if url == &cdn),
+            "{download:?}"
+        );
+        server.verify().await;
+        let cdn_hits = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/files/3040/523/jei.jar")
+            .count();
+        assert_eq!(cdn_hits, 1);
+        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        assert!(!mods_dir.join("jei.jar").exists());
     }
 }

@@ -1,10 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { invoke } from "./bridge";
 import { IpcError } from "./errors";
 import { listHistory, rollback, rollbackChecks } from "./history";
 import { resetMocks } from "./mock";
-import { clearMockEventListeners, subscribeMockEvent } from "./mock/events";
 import { installMod } from "./discover";
-import { MOCK_MOD_INSTANCE, mockModFileCount, setMockModFileBusy, setMockVersionDelisted, setMockVersionListTruncated } from "./mock/handlers/mods";
+import { clearMockEventListeners, subscribeMockEvent } from "./mock/events";
+import { acquireMockInstance } from "./mock/handlers/instances";
+import {
+  MOCK_MOD_INSTANCE,
+  mockInstance,
+  mockModFileCount,
+  setMockChangelog,
+  setMockModFileBusy,
+  setMockVersionChannel,
+  setMockVersionDelisted,
+  setMockVersionListTruncated,
+} from "./mock/handlers/mods";
 import { beginMockTask, endMockTask } from "./mock/handlers/tasks";
 import {
   checkUpdates,
@@ -12,11 +23,16 @@ import {
   installedSources,
   listMods,
   matchInstances,
+  modUpdateChangelog,
   modVersionList,
   planInstall,
   removeMod,
   setModEnabled,
+  starterMods,
+  setModsEnabled,
+  setModUpdateHold,
   updateMod,
+  type UpdateHold,
 } from "./mods";
 import { CORE_EVENT, cancelTask } from "./tasks";
 import { deleteInstance, listInstances, renameInstance } from "./instances";
@@ -51,7 +67,12 @@ describe("实例 Mod 列表", () => {
       version_number: "0.5.3",
       title: "Sodium",
       dependency_of: null,
+      // 种子里装上之后没再动过：装进实例的时刻就是文件修改时刻（秒）
+      installed_at: 1_788_220_800,
+      update_hold: null,
     });
+    expect(sodium.modified_ms).toBe(1_788_220_800_000);
+    expect(lithium.source?.installed_at).toBe(1_789_948_800);
     expect(sodium.icon_url).toBe("https://cdn.modrinth.com/data/AANobbMI/icon.png");
     expect(fabricApi.source?.dependency_of).toBe("AANobbMI");
     // 禁用态按启用态名字与卷宗 join。
@@ -153,7 +174,7 @@ describe("移除", () => {
     expect(await failure(removeMod(MOCK_MOD_INSTANCE, " "))).toMatchObject({ code: "invalid_argument", message: "file_name 不能为空" });
     const notMod = await failure(removeMod(MOCK_MOD_INSTANCE, "config.toml"));
     expect(notMod.code).toBe("io");
-    expect(notMod.detail).toEqual({ causes: ["config.toml 不是 mods 目录里的模组文件名"] });
+    expect(notMod.detail).toEqual({ causes: ["config.toml 不是 mods 目录里的 Mod 文件名"] });
     const gone = await failure(removeMod(MOCK_MOD_INSTANCE, "ghost.jar"));
     expect(gone.detail).toEqual({ causes: ["mods 目录里没有 ghost.jar，可能已被移除"] });
     expect(await listHistory(MOCK_MOD_INSTANCE)).toHaveLength(1);
@@ -256,6 +277,235 @@ describe("更新检查与更新", () => {
     expect(unknown.detail).toEqual({ causes: ["handmade-1.0.jar 没有平台来源记录，无法自动更新（先检查更新让启动器识别它）"] });
     setMockModFileBusy(MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", true);
     expect(await failure(updateMod("task-u6", MOCK_MOD_INSTANCE, "AANobbMI-0.5.3.jar", "sodium-060"))).toMatchObject({ code: "mod_file_busy" });
+  });
+});
+
+describe("批量启停", () => {
+  const SODIUM = "AANobbMI-0.5.3.jar";
+  const FABRIC_API = "P7dR8mSH-0.92.2.jar";
+  const HANDMADE = "handmade-1.0.jar";
+  const states = async () => (await listMods(MOCK_MOD_INSTANCE)).map((m) => [m.file_name, m.enabled]);
+
+  it("三个文件其中一个被占用：其余两个照常停用，被占用的那项报 mod_file_busy 且文件不动，结果顺序同入参", async () => {
+    setMockModFileBusy(MOCK_MOD_INSTANCE, FABRIC_API, true);
+    const results = await setModsEnabled(MOCK_MOD_INSTANCE, [SODIUM, FABRIC_API, HANDMADE], false);
+
+    expect(results.map((r) => [r.status, r.file_name])).toEqual([
+      ["ok", SODIUM],
+      ["error", FABRIC_API],
+      ["ok", HANDMADE],
+    ]);
+    const [first, busy, third] = results;
+    if (first.status !== "ok" || busy.status !== "error" || third.status !== "ok") throw new Error("结果的状态与断言不符");
+    expect(first.path).toBe(`C:/Games/.minecraft/versions/${MOCK_MOD_INSTANCE}/mods/${SODIUM}.disabled`);
+    expect(third.path).toBe(`C:/Games/.minecraft/versions/${MOCK_MOD_INSTANCE}/mods/${HANDMADE}.disabled`);
+    expect(busy.error.code).toBe("mod_file_busy");
+    expect(busy.error.detail).toEqual({ path: `C:/Games/.minecraft/versions/${MOCK_MOD_INSTANCE}/mods/${FABRIC_API}` });
+    expect(await states()).toEqual([
+      [`${SODIUM}.disabled`, false],
+      [FABRIC_API, true],
+      ["gvQqBUqZ-0.11.2.jar.disabled", false],
+      [`${HANDMADE}.disabled`, false],
+    ]);
+  });
+
+  it("已是目标状态的原样返回；名字不合法、文件不在的那一项各自报错，不影响别的文件", async () => {
+    const results = await setModsEnabled(MOCK_MOD_INSTANCE, ["gvQqBUqZ-0.11.2.jar.disabled", HANDMADE, "config.toml", "ghost.jar.disabled"], true);
+    expect(results.map((r) => (r.status === "ok" ? ["ok", r.path.split("/").pop()] : ["error", r.error.code]))).toEqual([
+      ["ok", "gvQqBUqZ-0.11.2.jar"],
+      ["ok", HANDMADE],
+      ["error", "io"],
+      ["error", "mod_platform_failed"],
+    ]);
+    const invalid = results[2];
+    if (invalid.status !== "error") throw new Error("非模组文件名应当报错");
+    expect(invalid.error.detail).toEqual({ causes: ["config.toml 不是 mods 目录里的 Mod 文件名"] });
+    expect(await states()).toEqual([
+      [SODIUM, true],
+      [FABRIC_API, true],
+      ["gvQqBUqZ-0.11.2.jar", true],
+      [HANDMADE, true],
+    ]);
+  });
+
+  it("停用的目标名已被同名副本占着：那一项报 mod_state_conflict，正文与后端原文相同，两份文件都不动", async () => {
+    mockInstance(MOCK_MOD_INSTANCE).files.push({ file_name: `${SODIUM}.disabled`, size: 1, modified_ms: 0, metadata: null });
+    const [conflict] = await setModsEnabled(MOCK_MOD_INSTANCE, [SODIUM], false);
+    if (conflict.status !== "error") throw new Error("目标文件已存在时应当报错");
+    expect(conflict.error).toMatchObject({
+      code: "mod_state_conflict",
+      message: `Mod 启用状态切换失败：目标文件已存在 C:/Games/.minecraft/versions/${MOCK_MOD_INSTANCE}/mods/${SODIUM}.disabled`,
+    });
+    expect((await states()).filter(([name]) => String(name).startsWith(SODIUM))).toEqual([
+      [SODIUM, true],
+      [`${SODIUM}.disabled`, false],
+    ]);
+  });
+
+  it("参数非法整次拒绝、一个文件都不动；实例在补全时整次以 instance_busy 拒绝", async () => {
+    expect(await failure(setModsEnabled(MOCK_MOD_INSTANCE, [], false))).toMatchObject({ code: "invalid_argument", message: "file_names 不能为空" });
+    expect(await failure(setModsEnabled(MOCK_MOD_INSTANCE, [SODIUM, " "], false))).toMatchObject({ code: "invalid_argument", message: "file_names 里有空文件名" });
+    expect(await failure(setModsEnabled(MOCK_MOD_INSTANCE, [SODIUM, HANDMADE, SODIUM], false))).toMatchObject({
+      code: "invalid_argument",
+      message: `file_names 里有重复的 ${SODIUM}`,
+    });
+    const repairing = acquireMockInstance(MOCK_MOD_INSTANCE, "repairing");
+    try {
+      expect(await failure(setModsEnabled(MOCK_MOD_INSTANCE, [SODIUM], false))).toMatchObject({ code: "instance_busy", detail: { activity: "repairing" } });
+    } finally {
+      repairing.release();
+    }
+    expect((await states()).filter(([, enabled]) => !enabled)).toEqual([["gvQqBUqZ-0.11.2.jar.disabled", false]]);
+  });
+});
+
+describe("忽略与锁定更新", () => {
+  const SODIUM = "AANobbMI-0.5.3.jar";
+  const updatable = async () => (await checkUpdates(MOCK_MOD_INSTANCE)).map((c) => [c.file_name, c.latest.version_id]);
+  const holdOf = async (fileName: string) => (await listMods(MOCK_MOD_INSTANCE)).find((m) => m.file_name === fileName)?.source?.update_hold;
+
+  it("忽略后检查更新不再含这一项，列表出参带上设置；恢复后重新出现", async () => {
+    expect(await updatable()).toEqual([
+      [SODIUM, "sodium-060"],
+      ["P7dR8mSH-0.92.2.jar", "fapi-0927"],
+    ]);
+    await setModUpdateHold(MOCK_MOD_INSTANCE, SODIUM, { kind: "ignored" });
+    expect(await holdOf(SODIUM)).toEqual({ kind: "ignored" });
+    expect(await updatable()).toEqual([["P7dR8mSH-0.92.2.jar", "fapi-0927"]]);
+
+    await setModUpdateHold(MOCK_MOD_INSTANCE, SODIUM, null);
+    expect(await holdOf(SODIUM)).toBeNull();
+    expect(await updatable()).toEqual([
+      [SODIUM, "sodium-060"],
+      ["P7dR8mSH-0.92.2.jar", "fapi-0927"],
+    ]);
+  });
+
+  it("不带 hold 键与后端的 Option 缺省一样，按恢复检查处理", async () => {
+    await setModUpdateHold(MOCK_MOD_INSTANCE, SODIUM, { kind: "ignored" });
+    await invoke("set_mod_update_hold", { versionId: MOCK_MOD_INSTANCE, fileName: SODIUM });
+    expect(await holdOf(SODIUM)).toBeNull();
+    expect((await updatable()).map(([file]) => file)).toContain(SODIUM);
+  });
+
+  it("锁定版本是上限：锁在当前版本不报更新，锁在较新的版本报到它为止，锁的版本不在列表里不报", async () => {
+    const pin = (version_id: string): UpdateHold => ({ kind: "pinned", version_id });
+    await setModUpdateHold(MOCK_MOD_INSTANCE, SODIUM, pin("sodium-053"));
+    expect(await updatable()).toEqual([["P7dR8mSH-0.92.2.jar", "fapi-0927"]]);
+    await setModUpdateHold(MOCK_MOD_INSTANCE, SODIUM, pin("sodium-060"));
+    expect(await updatable()).toEqual([
+      [SODIUM, "sodium-060"],
+      ["P7dR8mSH-0.92.2.jar", "fapi-0927"],
+    ]);
+    // sodium-121 只支持 1.21.1，不在这个实例能用的版本里
+    await setModUpdateHold(MOCK_MOD_INSTANCE, SODIUM, pin("sodium-121"));
+    expect(await updatable()).toEqual([["P7dR8mSH-0.92.2.jar", "fapi-0927"]]);
+  });
+
+  it("更新后新文件沿用装进实例的时刻与更新检查设置；禁用态文件名也能设置", async () => {
+    await setModUpdateHold(MOCK_MOD_INSTANCE, SODIUM, { kind: "pinned", version_id: "sodium-060" });
+    await updateMod("task-hold", MOCK_MOD_INSTANCE, SODIUM, "sodium-060");
+    const updated = (await listMods(MOCK_MOD_INSTANCE)).find((m) => m.file_name === "AANobbMI-0.6.0.jar");
+    expect(updated?.source).toMatchObject({ version_id: "sodium-060", installed_at: 1_788_220_800, update_hold: { kind: "pinned", version_id: "sodium-060" } });
+
+    await setModUpdateHold(MOCK_MOD_INSTANCE, "gvQqBUqZ-0.11.2.jar.disabled", { kind: "ignored" });
+    expect(await holdOf("gvQqBUqZ-0.11.2.jar.disabled")).toEqual({ kind: "ignored" });
+  });
+
+  it("新装的 Mod 装进实例的时刻是落位那一刻，设置为空", async () => {
+    const before = Math.floor(Date.now() / 1000);
+    await installMod("t-fresh", "1.21.1-Fabric", "modrinth", "YL57xq9U", "iris-181");
+    const after = Math.floor(Date.now() / 1000);
+    const iris = (await listMods("1.21.1-Fabric")).find((m) => m.source?.project_id === "YL57xq9U");
+    if (iris === undefined || iris.source === null) throw new Error("Iris 没装上");
+    expect(iris.source.installed_at).toBeGreaterThanOrEqual(before);
+    expect(iris.source.installed_at).toBeLessThanOrEqual(after);
+    expect(iris.source.update_hold).toBeNull();
+  });
+
+  it("参数与对象如实报错：空名、认不出的设置、空的锁定版本、没有来源、文件不在", async () => {
+    expect(await failure(setModUpdateHold(MOCK_MOD_INSTANCE, " ", null))).toMatchObject({ code: "invalid_argument", message: "file_name 不能为空" });
+    const frozen = { kind: "frozen" } as unknown as UpdateHold;
+    expect(await failure(setModUpdateHold(MOCK_MOD_INSTANCE, SODIUM, frozen))).toMatchObject({ code: "invalid_argument", message: '未知的更新设置 {"kind":"frozen"}' });
+    expect(await failure(setModUpdateHold(MOCK_MOD_INSTANCE, SODIUM, { kind: "pinned", version_id: "  " }))).toMatchObject({
+      code: "invalid_argument",
+      message: "hold.version_id 不能为空",
+    });
+    const local = await failure(setModUpdateHold(MOCK_MOD_INSTANCE, "handmade-1.0.jar", { kind: "ignored" }));
+    expect(local).toMatchObject({ code: "io", detail: { causes: ["handmade-1.0.jar 没有平台来源记录，不能设置更新检查"] } });
+    const gone = await failure(setModUpdateHold(MOCK_MOD_INSTANCE, "ghost.jar", { kind: "ignored" }));
+    expect(gone).toMatchObject({ code: "io", detail: { causes: ["mods 目录里没有 ghost.jar，可能已被移除"] } });
+    expect(await holdOf(SODIUM)).toBeNull();
+  });
+});
+
+describe("更新候选按发布通道过滤", () => {
+  const sodium = async () => (await checkUpdates(MOCK_MOD_INSTANCE)).find((c) => c.file_name === "AANobbMI-0.5.3.jar");
+
+  it("当前是正式版、候选只有测试版：不报", async () => {
+    setMockVersionChannel("modrinth", "sodium-060", "beta");
+    expect(await sodium()).toBeUndefined();
+  });
+
+  it("当前是测试版：同为测试版的更新照报，预览版不报", async () => {
+    setMockVersionChannel("modrinth", "sodium-053", "beta");
+    setMockVersionChannel("modrinth", "sodium-060", "beta");
+    const found = await sodium();
+    expect(found?.latest).toMatchObject({ version_id: "sodium-060", release_channel: "beta" });
+    setMockVersionChannel("modrinth", "sodium-060", "alpha");
+    expect(await sodium()).toBeUndefined();
+  });
+
+  it("当前是预览版：正式版也报", async () => {
+    setMockVersionChannel("modrinth", "sodium-053", "alpha");
+    expect((await sodium())?.latest).toMatchObject({ version_id: "sodium-060", release_channel: "release" });
+  });
+});
+
+describe("更新日志", () => {
+  const SODIUM = "AANobbMI-0.5.3.jar";
+
+  it("Modrinth 的版本给 Markdown：没登记时是固定的合成内容，登记了给原文，空白算没写", async () => {
+    expect(await modUpdateChangelog(MOCK_MOD_INSTANCE, SODIUM, "sodium-060")).toEqual({
+      version_id: "sodium-060",
+      format: "markdown",
+      body: "## 0.6.0\n\n- 修复与新版加载器的兼容问题\n- 降低区块加载时的内存占用\n",
+    });
+    setMockChangelog("modrinth", "sodium-060", "- 修好了夜视闪烁");
+    expect(await modUpdateChangelog(MOCK_MOD_INSTANCE, SODIUM, "sodium-060")).toEqual({ version_id: "sodium-060", format: "markdown", body: "- 修好了夜视闪烁" });
+    setMockChangelog("modrinth", "sodium-060", " \n ");
+    expect((await modUpdateChangelog(MOCK_MOD_INSTANCE, SODIUM, "sodium-060")).body).toBeNull();
+    setMockChangelog("modrinth", "sodium-060", null);
+    expect((await modUpdateChangelog(MOCK_MOD_INSTANCE, SODIUM, "sodium-060")).body).toBeNull();
+  });
+
+  it("CurseForge 的文件给 HTML；补全进行中照样能读（只读，不占实例）", async () => {
+    await installMod("t-cf", MOCK_MOD_INSTANCE, "curseforge", "394468", "4957843");
+    const repairing = acquireMockInstance(MOCK_MOD_INSTANCE, "repairing");
+    try {
+      expect(await modUpdateChangelog(MOCK_MOD_INSTANCE, "394468-0.5.3.jar", "4957843")).toEqual({
+        version_id: "4957843",
+        format: "html",
+        body: "<p>0.5.3 更新内容</p><ul><li>修复与新版加载器的兼容问题</li><li>降低区块加载时的内存占用</li></ul>",
+      });
+      setMockChangelog("curseforge", "4957843", "<p>Fixed crash</p>");
+      expect((await modUpdateChangelog(MOCK_MOD_INSTANCE, "394468-0.5.3.jar", "4957843")).body).toBe("<p>Fixed crash</p>");
+    } finally {
+      repairing.release();
+    }
+  });
+
+  it("没有来源记录报 io，平台上没有的版本报 mod_version_not_found 并带上平台、工程与版本", async () => {
+    expect(await failure(modUpdateChangelog(MOCK_MOD_INSTANCE, "handmade-1.0.jar", "x"))).toMatchObject({
+      code: "io",
+      detail: { causes: ["handmade-1.0.jar 没有平台来源记录，取不到更新日志"] },
+    });
+    expect(await failure(modUpdateChangelog(MOCK_MOD_INSTANCE, SODIUM, "nope"))).toMatchObject({
+      code: "mod_version_not_found",
+      detail: { platform: "Modrinth", project_id: "AANobbMI", version_id: "nope" },
+    });
+    expect(await failure(modUpdateChangelog(MOCK_MOD_INSTANCE, SODIUM, ""))).toMatchObject({ code: "invalid_argument", message: "mod_version_id 不能为空" });
+    expect(await failure(modUpdateChangelog("ghost", SODIUM, "sodium-060"))).toMatchObject({ code: "version_not_installed" });
   });
 });
 
@@ -376,5 +626,63 @@ describe("下载页：版本列表、落位矩阵与安装计划", () => {
     const listed = await planInstall(MOCK_MOD_INSTANCE, "modrinth", "AANobbMI", "sodium-060");
     expect(listed.items[1].delisted).toBeUndefined();
     expect(listed.items[1].version.file_size).not.toBeNull();
+  });
+});
+
+describe("开局 Mod", () => {
+  const ids = (list: { project_id: string }[]) => list.map((m) => m.project_id);
+
+  it("1.21.1 Fabric：开局表五项全可装，按表的顺序、API 在前，每项挑出与实例完全匹配的版本", async () => {
+    const result = await starterMods("fabric", "1.21.1");
+    expect(result.loader).toBe("fabric");
+    expect(result.mc_version).toBe("1.21.1");
+    expect(result.available.map((m) => [m.group, m.project_id, m.name, m.version.version_id])).toEqual([
+      ["api", "P7dR8mSH", "Fabric API", "fapi-0115"],
+      ["performance", "AANobbMI", "Sodium", "sodium-121"],
+      ["performance", "gvQqBUqZ", "Lithium", "lith-0143"],
+      ["performance", "uXXizFIs", "FerriteCore", "fc-702-fabric"],
+      ["performance", "nmDcB62a", "ModernFix", "mfix-5194-fabric"],
+    ]);
+    expect(result.missing).toEqual([]);
+  });
+
+  it("1.21.1 Quilt：只认标了 quilt 的版本，只有 Lithium 可装，其余按表的顺序进缺项", async () => {
+    const result = await starterMods("quilt", "1.21.1");
+    expect(ids(result.available)).toEqual(["gvQqBUqZ"]);
+    expect(result.missing.map((m) => [m.group, m.project_id, m.name, m.reason])).toEqual([
+      ["api", "qvIfYCYJ", "QFAPI", "no_version"],
+      ["performance", "AANobbMI", "Sodium", "no_version"],
+      ["performance", "uXXizFIs", "FerriteCore", "no_version"],
+    ]);
+  });
+
+  it("NeoForge 四项都有 neoforge 版本；Forge 的两项 1.21.1 都缺；只有测试通道的版本也照样挑出", async () => {
+    const neo = await starterMods("neoforge", "1.21.1");
+    expect(neo.available.map((m) => m.version.version_id)).toEqual(["sodium-121", "lith-0143", "fc-702-neoforge", "mfix-5194-neoforge"]);
+    expect(neo.available.every((m) => m.group === "performance")).toBe(true);
+
+    const forge = await starterMods("forge", "1.21.1");
+    expect(forge.available).toEqual([]);
+    expect(forge.missing.map((m) => [m.project_id, m.reason])).toEqual([
+      ["uXXizFIs", "no_version"],
+      ["nmDcB62a", "no_version"],
+    ]);
+    expect(ids((await starterMods("forge", "1.20.1")).available)).toEqual(["uXXizFIs", "nmDcB62a"]);
+
+    // QFAPI 在 1.21 上只发了内测版：没有更好的通道时取它，不当成缺项
+    const qfapi = (await starterMods("quilt", "1.21")).available.find((m) => m.project_id === "qvIfYCYJ");
+    expect(qfapi?.version).toMatchObject({ version_id: "qsl-1100", release_channel: "alpha" });
+  });
+
+  it("游戏版本去掉首尾空白后再查；LiteLoader、未知加载器与空版本号的 invalid_argument 带上契约里的 detail", async () => {
+    expect((await starterMods("fabric", " 1.21.1 ")).mc_version).toBe("1.21.1");
+    const lite = await failure(starterMods("liteloader" as never, "1.21.1"));
+    expect([lite.code, lite.detail]).toEqual(["invalid_argument", { field: "loader", reason: "unsupported" }]);
+    const unknown = await failure(starterMods("rift" as never, "1.21.1"));
+    expect([unknown.code, unknown.detail]).toEqual(["invalid_argument", { field: "loader", reason: "unknown" }]);
+    for (const blank of ["", "   "]) {
+      const empty = await failure(starterMods("fabric", blank));
+      expect([empty.code, empty.detail]).toEqual(["invalid_argument", { field: "mc_version", reason: "empty" }]);
+    }
   });
 });

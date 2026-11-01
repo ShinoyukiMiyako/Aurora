@@ -585,14 +585,18 @@ function PinLine({ view, instance }: { view: LaunchView; instance: InstanceSumma
 
 // ---------------------------------------------------------------- 固定实例的操作菜单
 
-/** 菜单第一项：按启动视图给出启动、取消、结束、诊断或修复；安装中给一个禁用项说明原因。 */
-export function pinLaunchItem(entry: Pick<LaunchEntry, "view" | "launch" | "cancel" | "stop" | "openCrash">): MenuItem {
+/**
+ * 菜单第一项：按启动视图给出启动、取消、结束、诊断或修复；安装中给一个禁用项说明原因。
+ * 存档备份或恢复进行中，启动与重新启动是带原因的禁用项。
+ */
+export function pinLaunchItem(entry: Pick<LaunchEntry, "view" | "blocked" | "launch" | "cancel" | "stop" | "openCrash">): MenuItem {
+  const launchBlock = entry.blocked === null ? {} : { disabled: true, disabledReason: entry.blocked };
   switch (entry.view.kind) {
     case "ready":
     case "stopped":
-      return { label: LAUNCH_COPY.launch, icon: "play", onSelect: entry.launch };
+      return { label: LAUNCH_COPY.launch, icon: "play", ...launchBlock, onSelect: entry.launch };
     case "failed":
-      return { label: LAUNCH_COPY.relaunch, icon: "play", onSelect: entry.launch };
+      return { label: LAUNCH_COPY.relaunch, icon: "play", ...launchBlock, onSelect: entry.launch };
     case "loading":
       return { label: LAUNCH_COPY.cancel, icon: "x", onSelect: entry.cancel };
     case "running":

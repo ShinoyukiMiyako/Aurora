@@ -1,13 +1,16 @@
 // 实例详情页的派生计算：纯函数，不碰 React 与状态容器，五个标签页与头图共用同一份判断。
 // 输入一律是状态层给出的领域模型与 DTO；页面组件只负责把这里的结论画出来。
 
+import { isForgeBuiltinProvider } from "../../copy/flows";
 import type { InstanceSummary, Settings } from "../../domain/adapt";
-import { isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
-import type { Task, TaskStatus } from "../../domain/types";
+import { bestLocalRuntime, isHeapReserveFailure, javaMajorFromClassVersion, memoryLowerTarget, memoryTarget } from "../../domain/rules";
+import type { Task, TaskError, TaskStatus } from "../../domain/types";
 import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
 import type { JavaInstallationDto } from "../../state/queries/catalog";
-import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, WorldDto } from "../../state/queries/instance";
+import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, UpdateHold, WorldDto } from "../../state/queries/instance";
 import { isActiveTask } from "../../state/tasks";
+import type { TableSort } from "../../ui/Table";
+import { MODS_COPY } from "./copy";
 
 // ---------------------------------------------------------------- 上次崩溃
 
@@ -41,8 +44,11 @@ export interface InheritedLock {
   usedBy: string;
 }
 
-/** 锁的来源：本实例的游戏会话、安装或补全任务、后端正在改动 Mod、资源或设置，或别的实例正以它为基底。 */
-export type InstanceLock = "running" | "installing" | "modifying" | InheritedLock;
+/** 锁的来源：本实例的游戏会话、安装或补全任务、后端正在改动 Mod、资源或设置，正在备份、恢复、导出存档，或别的实例正以它为基底。 */
+export type InstanceLock = "running" | "installing" | "modifying" | "backing_up" | InheritedLock;
+
+/** 后端占着实例、又不挡 Mod 操作的两种活动。 */
+type HeldActivity = "modifying" | "backing_up";
 
 /** 实例忙碌时各类操作的锁：null 为可用，否则为禁用原因的种类。 */
 export interface InstanceLocks {
@@ -51,22 +57,25 @@ export interface InstanceLocks {
   rename: InstanceLock | null;
   /** 补全游戏文件：安装中显示「进行中」而不是禁用原因。 */
   repair: InstanceLock | null;
-  delete: "running" | "modifying" | InheritedLock | null;
+  delete: "running" | HeldActivity | InheritedLock | null;
 }
 
 /**
  * busy：本实例的会话在准备、下载、启动或运行中（JVM 占着 Mod 文件，Windows 下改名、替换、删除都会失败）。
  * installing：安装或补全任务正在写这个实例的目录。
- * modifying：后端正占着实例改动 Mod、资源或设置。它与游戏运行、与它自己兼容，所以不锁 Mod 操作；
- * 但与改名、删除、补全互斥，不提前禁用的话只能等后端以 instance_busy 拒绝后再报错。
+ * modifying：后端正占着实例改动 Mod、资源或设置。backingUp：后端正在备份、恢复或导出存档（游戏退出后的
+ * 自动备份也算）。两者都与 Mod 改动兼容，所以不锁 Mod 操作；但与改名、删除、补全互斥，不提前禁用的话
+ * 只能等后端以 instance_busy 拒绝后再报错。后端只报告一种活动，两者不会同时为真。
  * usedBy：正以它为基底的实例。基底照样能启动、改动 Mod，所以不锁 Mod 操作；改名、删除、补全会挪走或重写它的
  * 目录，与之互斥。几种原因同时在时报实例自己的事。
  */
-export function instanceLocks(busy: boolean, installing: boolean, modifying: boolean, usedBy: string | null): InstanceLocks {
-  const fileLock = busy ? "running" : installing ? "installing" : null;
+export function instanceLocks(busy: boolean, installing: boolean, modifying: boolean, usedBy: string | null, backingUp: boolean): InstanceLocks {
+  const held: HeldActivity | null = backingUp ? "backing_up" : modifying ? "modifying" : null;
   const inherited: InheritedLock | null = usedBy === null ? null : { kind: "inherited", usedBy };
-  const dirLock = fileLock !== null ? fileLock : modifying ? "modifying" : inherited;
-  return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : modifying ? "modifying" : inherited };
+  const occupied = held !== null ? held : inherited;
+  const fileLock = busy ? "running" : installing ? "installing" : null;
+  const dirLock = fileLock !== null ? fileLock : occupied;
+  return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : occupied };
 }
 
 /** 打开工作子目录与写实例设置被什么挡住。 */
@@ -128,6 +137,28 @@ export function overviewBanner(view: LaunchViewKind, crashActive: boolean): Over
   return null;
 }
 
+// ---------------------------------------------------------------- 存档直达
+
+export type EnterWorldBlock = "installing" | "broken" | "unknownVersion" | "legacy" | "backingUp" | "launching" | "running";
+
+/**
+ * 存档行「进入」此刻为什么不能点；能点为 null。自上而下取第一条：实例自身的状态先于版本能力，版本能力先于进行中的
+ * 备份与这一局的会话。另一个实例占着游戏进程时照常能点，由启动拦截弹替换确认。
+ *
+ * 备份或恢复期间后端以 instance_busy 拒绝启动，这里提前禁用。worldTask 是前端排着或进行中的存档任务：后端还没
+ * 报 backing_up 时就点进入，会正好撞上马上要占实例的那个任务。
+ */
+export function enterWorldBlock(inst: Pick<InstanceSummary, "status" | "quickPlay" | "activity">, view: LaunchViewKind, worldTask: boolean): EnterWorldBlock | null {
+  if (inst.status === "installing") return "installing";
+  if (inst.status === "broken") return "broken";
+  if (inst.quickPlay === null) return "unknownVersion";
+  if (!inst.quickPlay.singleplayer) return "legacy";
+  if (inst.activity === "backing_up" || worldTask) return "backingUp";
+  if (view === "loading") return "launching";
+  if (view === "running") return "running";
+  return null;
+}
+
 // ---------------------------------------------------------------- 新建与导入还没装好
 
 /** 新建实例与导入整合包：它们的任务挂在一个还没装好的实例名下。补全不在其中，补全的实例原本就装好过、内容都在。 */
@@ -142,7 +173,7 @@ export interface CreationRef {
   status: TaskStatus;
   title: string;
   modpack: boolean;
-  error: { code: string; message: string } | null;
+  error: TaskError | null;
 }
 
 /** 挂在这个实例名下的新建或导入任务：进行中的优先（重试还是同一个任务）；都已结束时取最近建的那个。 */
@@ -178,7 +209,7 @@ export type InstallStage =
   | { kind: "none" }
   | { kind: "queued" | "running"; title: string }
   | { kind: "landing" }
-  | { kind: "failed"; taskId: string; modpack: boolean; error: { code: string; message: string } };
+  | { kind: "failed"; taskId: string; modpack: boolean; error: TaskError };
 
 export function installStage(inst: Pick<InstanceSummary, "id" | "placeholder" | "activity">, creation: CreationRef | null): InstallStage {
   if (creation !== null && (creation.status === "queued" || creation.status === "running")) return { kind: creation.status, title: creation.title };
@@ -224,29 +255,14 @@ export function javaFit(major: number, required: number): JavaFit {
   return major > required ? "higher" : "lower";
 }
 
-function compareJavaVersion(a: JavaInstallationDto["version"], b: JavaInstallationDto["version"]): number {
-  return a.major - b.major || a.minor - b.minor || a.security - b.security || a.build - b.build;
-}
-
 /**
  * 自动选择会落到哪个运行时，与后端的挑选同一条规则：全局设置里指定了默认 Java 时一律用它；
- * 否则在主版本相等的候选里先挑 64 位、再挑版本号最高的；一个都没有时启动阶段自动下载。
+ * 否则在主版本相等、文件齐全的候选里先挑 64 位、再挑版本号最高的；一个都没有时启动阶段自动下载。
  */
 export type AutoJavaPick =
   | { kind: "global"; path: string; runtime: JavaInstallationDto | null }
   | { kind: "local"; runtime: JavaInstallationDto }
   | { kind: "download" };
-
-/** 主版本相等的候选里先挑 64 位、再挑版本号最高的；一个都没有为 null。 */
-export function bestLocalRuntime(runtimes: readonly JavaInstallationDto[], major: number): JavaInstallationDto | null {
-  return runtimes
-    .filter((r) => r.version.major === major)
-    .reduce<JavaInstallationDto | null>((acc, r) => {
-      if (acc === null) return r;
-      if (r.is_64bit !== acc.is_64bit) return r.is_64bit ? r : acc;
-      return compareJavaVersion(r.version, acc.version) > 0 ? r : acc;
-    }, null);
-}
 
 export function autoJavaPick(runtimes: readonly JavaInstallationDto[], required: number, defaultJava: string, javaAuto: string): AutoJavaPick {
   if (defaultJava !== javaAuto) {
@@ -348,31 +364,6 @@ export function parseDimension(text: string, limit: { min: number; max: number }
   return value >= limit.min && value <= limit.max ? value : null;
 }
 
-// ---------------------------------------------------------------- 版本隔离
-
-export type IsolationPolicyName = Settings["isolationPolicy"];
-
-/**
- * 跟随全局时按全局策略与实例类型推断是否隔离，与后端判定同一张表：加载器（含 OptiFine、LiteLoader）算模组版本，
- * 版本类型不是 release 算非正式版。后端另有一条「版本目录里已有 mods 或 saves 就强制隔离」，前端看不到目录，不参与推断。
- */
-export function isolationByPolicy(policy: IsolationPolicyName, inst: Pick<InstanceSummary, "loader" | "extraLoaders" | "releaseType">): boolean {
-  const modded = inst.loader !== "vanilla" || inst.extraLoaders.length > 0;
-  const nonRelease = inst.releaseType !== "release";
-  switch (policy) {
-    case "disabled":
-      return false;
-    case "mod_loaders_only":
-      return modded;
-    case "non_release_only":
-      return nonRelease;
-    case "mod_loaders_and_non_release":
-      return modded || nonRelease;
-    case "all":
-      return true;
-  }
-}
-
 // ---------------------------------------------------------------- 路径
 
 /** 实例文件夹：<游戏目录>/versions/<实例 id>，分隔符沿用游戏目录自己的写法。 */
@@ -428,9 +419,14 @@ export interface ModRow {
   dependencyOf: string | null;
   /** 带它进来的工程 id（对不上已装 Mod 时也保留，用于移除确认里的说明）。 */
   dependencyOfProject: string | null;
+  /** 已忽略更新的行恒为 null：设置刚改、可更新项还没重取时也不再给「更新」。 */
   update: UpdateCandidate | null;
   size: number;
   modId: string | null;
+  /** 装进实例的时刻（毫秒）：有来源记录取卷宗里的原值，本地文件取文件修改时刻。 */
+  addedAt: number;
+  /** 检查更新时的处理；本地文件没有来源记录，恒为 null。 */
+  hold: UpdateHold | null;
 }
 
 export function modName(mod: InstalledMod): string {
@@ -448,7 +444,9 @@ export function modRows(mods: readonly InstalledMod[], updates: readonly UpdateC
     const source = m.source;
     const depProject = source === null ? null : source.dependency_of;
     const depName = depProject === null ? undefined : nameByProject.get(depProject);
-    const update = updates === null ? undefined : updates.find((u) => u.file_name === enabledFileName(m.file_name));
+    const hold = source === null ? null : source.update_hold;
+    const ignored = hold !== null && hold.kind === "ignored";
+    const update = updates === null || ignored ? undefined : updates.find((u) => u.file_name === enabledFileName(m.file_name));
     const version = meta !== null && meta.version !== null ? meta.version : source !== null ? source.version_number : null;
     return {
       fileName: m.file_name,
@@ -466,6 +464,8 @@ export function modRows(mods: readonly InstalledMod[], updates: readonly UpdateC
       update: update === undefined ? null : update,
       size: m.size,
       modId: meta === null ? null : meta.mod_id,
+      addedAt: source === null ? m.modified_ms : source.installed_at * 1000,
+      hold,
     };
   });
   return rows.sort((a, b) => a.name.localeCompare(b.name, "zh-CN") || a.fileName.localeCompare(b.fileName));
@@ -482,11 +482,21 @@ export function modTotals(inst: Pick<InstanceSummary, "modCount" | "modpack">, l
   return { total, partial: total > listed };
 }
 
-export type ModFilter = "all" | "enabled" | "disabled" | "outdated";
+export type ModFilter = "all" | "enabled" | "disabled" | "outdated" | "ignored";
+
+function isIgnored(row: ModRow): boolean {
+  return row.hold !== null && row.hold.kind === "ignored";
+}
 
 export function modCounts(rows: readonly ModRow[]): Readonly<Record<ModFilter, number>> {
   const enabled = rows.filter((r) => r.enabled).length;
-  return { all: rows.length, enabled, disabled: rows.length - enabled, outdated: rows.filter((r) => r.update !== null).length };
+  return {
+    all: rows.length,
+    enabled,
+    disabled: rows.length - enabled,
+    outdated: rows.filter((r) => r.update !== null).length,
+    ignored: rows.filter(isIgnored).length,
+  };
 }
 
 /** 名称、作者、文件名、简介里不分大小写的子串匹配，再叠加状态筛选。 */
@@ -496,6 +506,7 @@ export function filterMods(rows: readonly ModRow[], query: string, filter: ModFi
     if (filter === "enabled" && !r.enabled) return false;
     if (filter === "disabled" && r.enabled) return false;
     if (filter === "outdated" && r.update === null) return false;
+    if (filter === "ignored" && !isIgnored(r)) return false;
     if (q === "") return true;
     return [r.name, r.author, r.fileName, r.summary].some((field) => field !== null && field.toLowerCase().includes(q));
   });
@@ -506,6 +517,65 @@ export function removalRelations(row: ModRow, rows: readonly ModRow[]): { brough
   const broughtIn = row.projectId === null ? [] : rows.filter((r) => r.dependencyOfProject === row.projectId && r.fileName !== row.fileName).map((r) => r.name);
   const dependents = row.dependencyOf === null ? [] : [row.dependencyOf];
   return { broughtIn, dependents };
+}
+
+/**
+ * 批量移除的两层关系，只说没被一起选中的：选中项带进来的前置会保留；把选中项当前置的 Mod 可能加载不了。
+ * 一起选中的已经要一并移除，提醒它们没有意义。名字按出现顺序去重。
+ */
+export function batchRemovalRelations(selected: readonly ModRow[], rows: readonly ModRow[]): { broughtIn: string[]; dependents: string[] } {
+  const chosen = new Set(selected.map((r) => r.fileName));
+  const projects = new Set(selected.flatMap((r) => (r.projectId === null ? [] : [r.projectId])));
+  const broughtIn = rows.filter((r) => !chosen.has(r.fileName) && r.dependencyOfProject !== null && projects.has(r.dependencyOfProject)).map((r) => r.name);
+  const dependents = selected.flatMap((s) =>
+    s.dependencyOfProject === null ? [] : rows.filter((r) => r.projectId === s.dependencyOfProject && !chosen.has(r.fileName)).map((r) => r.name),
+  );
+  return { broughtIn: [...new Set(broughtIn)], dependents: [...new Set(dependents)] };
+}
+
+/** 批量操作条四个按钮的禁用原因；undefined 为可用。锁住时四个都沿用单行操作的锁定原因。 */
+export interface BatchAvailability {
+  enable: string | undefined;
+  disable: string | undefined;
+  update: string | undefined;
+  remove: string | undefined;
+}
+
+export function batchAvailability(selected: readonly ModRow[], lock: string | undefined): BatchAvailability {
+  if (selected.length === 0) throw new Error("没有选中的 Mod 时不显示批量操作条");
+  if (lock !== undefined) return { enable: lock, disable: lock, update: lock, remove: lock };
+  return {
+    enable: selected.every((r) => r.enabled) ? MODS_COPY.batchAllEnabled : undefined,
+    disable: selected.every((r) => !r.enabled) ? MODS_COPY.batchAllDisabled : undefined,
+    update: selected.every((r) => r.update === null) ? MODS_COPY.batchNoUpdates : undefined,
+    remove: undefined,
+  };
+}
+
+const NEW_MOD_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** 装进实例不满 7 天算新增；恰好满 7 天起不再算。时刻在将来（本机时钟被往回调过）也按刚装上算。 */
+export function isNewMod(row: Pick<ModRow, "addedAt">, now: number): boolean {
+  return now - row.addedAt < NEW_MOD_MS;
+}
+
+/** 表头点到「安装时间」时第一次按新到旧：想看的是最近装了什么；再点由表格照常翻转。 */
+export function adjustModSort(previous: TableSort, next: TableSort): TableSort {
+  if (next.key === "installed" && previous.key !== "installed") return { key: "installed", direction: "desc" };
+  return next;
+}
+
+/** 列表排序：名称、来源、启用状态按文本比，同值按名称；安装时间按时刻比，同一时刻按名称（再按文件名）升序。 */
+export function sortRows(rows: readonly ModRow[], sort: TableSort): ModRow[] {
+  const dir = sort.direction === "asc" ? 1 : -1;
+  const byName = (a: ModRow, b: ModRow) => a.name.localeCompare(b.name, "zh-CN") || a.fileName.localeCompare(b.fileName);
+  if (sort.key === "installed") return [...rows].sort((a, b) => dir * (a.addedAt - b.addedAt) || byName(a, b));
+  const key = (r: ModRow): string => {
+    if (sort.key === "source") return r.platform === null ? "~" : r.platform;
+    if (sort.key === "enabled") return r.enabled ? "0" : "1";
+    return r.name;
+  };
+  return [...rows].sort((a, b) => dir * key(a).localeCompare(key(b), "zh-CN") || a.name.localeCompare(b.name, "zh-CN"));
 }
 
 // ---------------------------------------------------------------- Mod 速览
@@ -650,12 +720,15 @@ export type CrashFix =
   | { kind: "switch_java"; major: number; path: string }
   | { kind: "download_java"; major: number }
   | { kind: "enable_mod"; fileName: string; name: string }
-  | { kind: "search_dependency"; detail: string }
+  | { kind: "search_dependency"; category: "missing_dependency" | "missing_language_provider"; detail: string }
   | { kind: "find_dependency" }
-  | { kind: "disable_mod"; category: "mixin_failure" | "corrupted_jar"; fileName: string; name: string }
+  /** Mod 要求别的游戏或加载器版本、又对不上唯一一个已装 Mod：去发现页按 detail 找适配的版本，没有 detail 时不带关键词。 */
+  | { kind: "find_mod_version"; detail: string | null }
+  | { kind: "disable_mod"; category: "mixin_failure" | "corrupted_jar" | "game_version_mismatch" | "optifine_incompatible"; fileName: string; name: string }
   | { kind: "keep_latest"; disable: { fileName: string; name: string }[] }
   | { kind: "repair"; category: "native_library_missing" | "corrupted_jar"; changeGameDir: boolean }
-  | { kind: "driver_steps"; javawPath: string | null }
+  /** category 是这份报告里第一条显卡或本地崩溃类线索的类别，三类共用这一条。 */
+  | { kind: "driver_steps"; category: "graphics_driver" | "intel_graphics_driver" | "native_crash"; javawPath: string | null }
   | { kind: "compare_log" };
 
 export interface CrashFixContext {
@@ -682,12 +755,27 @@ function compareModVersion(a: InstalledMod, b: InstalledMod): number {
   return va.localeCompare(vb, undefined, { numeric: true }) || a.modified_ms - b.modified_ms;
 }
 
+/** 文件名或 mod id 里带 optifine 的已启用 Mod。OptiFine 的 jar 不一定带加载器读得出的元数据，所以文件名也要看。 */
+function enabledOptifine(mods: readonly InstalledMod[]): InstalledMod[] {
+  return mods.filter(
+    (m) => m.enabled && (m.file_name.toLowerCase().includes("optifine") || (m.metadata !== null && m.metadata.mod_id.toLowerCase().includes("optifine"))),
+  );
+}
+
 /**
  * 按线索推出的一键尝试，同一类别只出一条（取第一条线索），末尾固定「对照完整日志」。
+ * 不同类别推出同一个动作（比如两条线索都指向停用同一个文件）时只留第一条，键不重复。
  * 一键尝试只改实例设置（可撤销）或建任务（可在任务里取消），不改全局设置、不删除文件。
  */
 export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashFix[] {
   const fixes: CrashFix[] = [];
+  const keys = new Set<string>();
+  const push = (fix: CrashFix) => {
+    const key = crashFixKey(fix);
+    if (keys.has(key)) return;
+    keys.add(key);
+    fixes.push(fix);
+  };
   const seen = new Set<string>();
   for (const clue of report.diagnoses) {
     if (seen.has(clue.category)) continue;
@@ -695,12 +783,12 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
     switch (clue.category) {
       case "out_of_memory": {
         if (isHeapReserveFailure(clue.matched)) {
-          if (report.java !== null && !report.java.is_64bit) fixes.push({ kind: "use_64bit_java" });
-          else fixes.push({ kind: "lower_memory", currentMb: ctx.memoryMb, targetMb: memoryLowerTarget(ctx.memoryMb) });
+          if (report.java !== null && !report.java.is_64bit) push({ kind: "use_64bit_java" });
+          else push({ kind: "lower_memory", currentMb: ctx.memoryMb, targetMb: memoryLowerTarget(ctx.memoryMb) });
           break;
         }
         const target = memoryTarget(ctx.memoryMb, ctx.physicalMb);
-        fixes.push(
+        push(
           target.kind === "raise"
             ? { kind: "raise_memory", currentMb: ctx.memoryMb, targetMb: target.targetMb, followsGlobal: ctx.followsGlobal }
             : { kind: "memory_at_cap", totalMb: ctx.physicalMb },
@@ -712,25 +800,40 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         const major = fromDetail === null ? ctx.requiredJava : fromDetail;
         if (major === null) break;
         const runtime = bestLocalRuntime(ctx.runtimes, major);
-        fixes.push(runtime === null ? { kind: "download_java", major } : { kind: "switch_java", major, path: runtime.path });
+        push(runtime === null ? { kind: "download_java", major } : { kind: "switch_java", major, path: runtime.path });
         break;
       }
       case "missing_dependency": {
         if (clue.detail === null) {
-          fixes.push({ kind: "find_dependency" });
+          push({ kind: "find_dependency" });
           break;
         }
         const installed = modsByDetail(clue.detail, ctx.mods);
         const disabled = installed.find((m) => !m.enabled);
-        if (disabled !== undefined) fixes.push({ kind: "enable_mod", fileName: disabled.file_name, name: modName(disabled) });
-        else if (installed.length === 0) fixes.push({ kind: "search_dependency", detail: clue.detail });
+        if (disabled !== undefined) push({ kind: "enable_mod", fileName: disabled.file_name, name: modName(disabled) });
+        else if (installed.length === 0) push({ kind: "search_dependency", category: "missing_dependency", detail: clue.detail });
+        break;
+      }
+      case "missing_language_provider":
+        // Forge 自带的语言支持装不上：缺它说明 Mod 不是给这个版本的 Forge 做的，没有可搜的东西
+        if (clue.detail !== null && !isForgeBuiltinProvider(clue.detail)) push({ kind: "search_dependency", category: "missing_language_provider", detail: clue.detail });
+        break;
+      case "game_version_mismatch": {
+        const hits = clue.detail === null ? [] : modsByDetail(clue.detail, ctx.mods).filter((m) => m.enabled);
+        if (hits.length === 1) push({ kind: "disable_mod", category: "game_version_mismatch", fileName: hits[0].file_name, name: modName(hits[0]) });
+        else push({ kind: "find_mod_version", detail: clue.detail });
+        break;
+      }
+      case "optifine_incompatible": {
+        const hits = enabledOptifine(ctx.mods);
+        if (hits.length === 1) push({ kind: "disable_mod", category: "optifine_incompatible", fileName: hits[0].file_name, name: modName(hits[0]) });
         break;
       }
       case "mixin_failure": {
         // 对应到多个或对应不上时不出按钮，交给「日志指向的 Mod」逐个开关
         if (clue.detail === null) break;
         const hits = modsByDetail(clue.detail, ctx.mods).filter((m) => m.enabled);
-        if (hits.length === 1) fixes.push({ kind: "disable_mod", category: "mixin_failure", fileName: hits[0].file_name, name: modName(hits[0]) });
+        if (hits.length === 1) push({ kind: "disable_mod", category: "mixin_failure", fileName: hits[0].file_name, name: modName(hits[0]) });
         break;
       }
       case "duplicate_mod": {
@@ -738,19 +841,22 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         const copies = modsByDetail(clue.detail, ctx.mods).filter((m) => m.enabled);
         if (copies.length < 2) break;
         const keep = copies.reduce((a, b) => (compareModVersion(b, a) > 0 ? b : a));
-        fixes.push({ kind: "keep_latest", disable: copies.filter((m) => m !== keep).map((m) => ({ fileName: m.file_name, name: modName(m) })) });
+        push({ kind: "keep_latest", disable: copies.filter((m) => m !== keep).map((m) => ({ fileName: m.file_name, name: modName(m) })) });
         break;
       }
       case "native_library_missing":
-        fixes.push({ kind: "repair", category: "native_library_missing", changeGameDir: report.warnings.includes("game_path") });
+        push({ kind: "repair", category: "native_library_missing", changeGameDir: report.warnings.includes("game_path") });
         break;
       case "graphics_driver":
-        fixes.push({ kind: "driver_steps", javawPath: report.java === null ? null : javawOf(report.java.path) });
+      case "intel_graphics_driver":
+      case "native_crash":
+        // 三类的处理办法相同，键都是 driver_steps：只留第一条出现的类别
+        push({ kind: "driver_steps", category: clue.category, javawPath: report.java === null ? null : javawOf(report.java.path) });
         break;
       case "corrupted_jar": {
         const mod = corruptedModFile(clue.matched, ctx.mods);
-        if (mod !== null && mod.enabled) fixes.push({ kind: "disable_mod", category: "corrupted_jar", fileName: mod.file_name, name: modName(mod) });
-        else fixes.push({ kind: "repair", category: "corrupted_jar", changeGameDir: false });
+        if (mod !== null && mod.enabled) push({ kind: "disable_mod", category: "corrupted_jar", fileName: mod.file_name, name: modName(mod) });
+        else push({ kind: "repair", category: "corrupted_jar", changeGameDir: false });
         break;
       }
       default:
@@ -771,7 +877,9 @@ export function crashFixKey(fix: CrashFix): string {
     case "disable_mod":
       return `${fix.kind}:${fix.fileName}`;
     case "search_dependency":
-      return `${fix.kind}:${fix.detail}`;
+      return `${fix.kind}:${fix.detail.toLowerCase()}`;
+    case "find_mod_version":
+      return fix.detail === null ? fix.kind : `${fix.kind}:${fix.detail.toLowerCase()}`;
     case "repair":
       return `${fix.kind}:${fix.category}`;
     default:

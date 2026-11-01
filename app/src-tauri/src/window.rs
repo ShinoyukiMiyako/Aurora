@@ -174,10 +174,10 @@ mod tests {
     /// opener 的两条给它注入的外链脚本用（target="_blank" 的链接交给系统浏览器）：一条放行 open_url 命令，
     /// 一条给出 http(s)、mailto、tel 的地址范围。前端用不到的不授予：自更新后的重启在 Rust 侧，WebView
     /// 不需要 process 插件的权限；恢复最小化的窗口走不激活窗口的后端命令，WebView 不需要会激活窗口的
-    /// unminimize；打开文件夹走后端命令，WebView 不需要 opener 的 reveal_item_in_dir——它不受任何路径范围
-    /// 约束，`opener:default` 会连它一起授予，页面里一段注入的脚本就能让资源管理器定位到任意路径。
-    /// 核心权限也逐条列出、不用 `core:default`：整套默认集还放行路径解析、事件发送、菜单、托盘等命令，
-    /// 前端一条都不用，页面里注入的脚本却能借它们探路径、伪造事件。
+    /// unminimize；打开文件夹与在文件夹里选中都走后端命令，WebView 不需要 opener 的 reveal_item_in_dir——
+    /// 它不受任何路径范围约束，`opener:default` 会连它一起授予，页面里一段注入的脚本就能让资源管理器定位到
+    /// 任意路径。核心权限也逐条列出、不用 `core:default`：整套默认集还放行路径解析、事件发送、菜单、托盘等
+    /// 命令，前端一条都不用，页面里注入的脚本却能借它们探路径、伪造事件。
     ///
     /// 授予清单按全集比对，不只查缺：只查缺时，单独加一条 `core:event:allow-emit` 或
     /// `core:path:allow-resolve-directory` 测试照样通过，收窄就悄悄退回去了。新调用 `@tauri-apps/api` 的接口时，
@@ -212,6 +212,7 @@ mod tests {
             "opener:allow-open-url",
             "opener:allow-default-urls",
             "dialog:allow-open",
+            "dialog:allow-save",
         ];
         for unneeded in ["opener:default", "opener:allow-reveal-item-in-dir"] {
             assert!(

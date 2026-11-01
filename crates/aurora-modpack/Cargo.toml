@@ -15,9 +15,21 @@ thiserror = "2"
 tracing = "0.1"
 # 校验整合包清单里的下载地址（只收 https 与白名单主机）。
 url = "2"
-# 读整合包（.mrpack / CurseForge .zip）。只留纯 Rust 的 deflate 后端，规避 Windows 无 C 编译器时的
-# 构建失败；与 aurora-core、aurora-modplatform 同一选择。
-zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+# 读整合包（.mrpack / CurseForge .zip）。只开纯 Rust 实现的解压后端，规避 Windows 无 C 编译器时的
+# 构建失败：deflate 走 flate2 的纯 Rust 后端，bzip2 0.6 的默认后端是 libbz2-rs-sys（不是 bzip2-sys），
+# lzma / xz 走 lzma-rust2，ppmd、deflate64、legacy-zip（shrink / reduce / implode）各自是纯 Rust crate。
+# 不开 zstd（zstd-sys 要编 C，Zstandard 条目报不支持的压缩方式）与 aes-crypto（加密，不是压缩方式）。
+zip = { version = "8", default-features = false, features = [
+    "deflate-flate2",
+    "deflate64",
+    "bzip2",
+    "lzma",
+    "xz",
+    "ppmd",
+    "legacy-zip",
+] }
+# 老工具（Windows 资源管理器、旧版 WinRAR）在中文系统上打包时不设 UTF-8 标志，条目名是 GBK 字节。
+encoding_rs = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

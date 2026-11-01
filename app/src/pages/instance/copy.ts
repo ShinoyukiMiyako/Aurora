@@ -2,8 +2,8 @@
 // 跨页面共用的文案（启动、崩溃类别、确认框、通知）取自 copy/flows，这里只放本页私有的部分。
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
-import { joinCrashLabels, joinMixed, LOADER_NAME } from "../../copy/flows";
-import { formatBytes, formatMemory, formatPlaytime } from "../../domain/format";
+import { CRASH_SOURCE_LABEL, joinCrashLabels, joinMixed, LOADER_NAME, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
+import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
 
@@ -30,11 +30,14 @@ export const HERO_COPY = {
   broken: "文件不完整",
   installing: (pct: string) => `安装中 ${pct}`,
   installingQueued: "等待安装",
+  /** 后端报告实例在备份、恢复或导出存档（游戏退出后的自动备份也算）。 */
+  backingUp: "正在备份存档",
   lastCrash: "上次崩溃",
   pin: "固定到侧栏",
   unpin: "从侧栏取消固定",
   more: "更多操作",
   openFolder: "打开实例文件夹",
+  exportModpack: "导出整合包",
   repair: "补全游戏文件",
   delete: "删除实例",
 } as const;
@@ -53,6 +56,12 @@ export const LOCK_REASON = {
     rename: "正在改动这个实例的 Mod、资源或设置，完成后才能重命名",
     repair: "正在改动这个实例的 Mod、资源或设置，完成后才能补全",
     delete: "正在改动这个实例的 Mod、资源或设置，完成后才能删除",
+  },
+  /** 备份、恢复或导出存档进行中，游戏退出后的自动备份也算。 */
+  backingUp: {
+    rename: "正在备份或恢复这个实例的存档，完成后才能重命名",
+    repair: "正在备份或恢复这个实例的存档，完成后才能补全",
+    delete: "正在备份或恢复这个实例的存档，完成后才能删除",
   },
   /** 新建或导入还没落盘的占位项：盘上可能还没有实例目录，打开哪个文件夹都只会报未安装。 */
   placeholderFolder: "新建的实例还没装好，装完后才能打开文件夹",
@@ -74,6 +83,62 @@ export const LOCK_REASON = {
       deleting: "正在删除这个实例",
     },
   },
+  /** 导出整合包：读的是此刻的文件，游戏运行与 Mod 改动不挡；会挪走或重写整个目录的事挡。 */
+  export: {
+    placeholder: "新建的实例还没装好，装完后才能导出",
+    installing: "安装任务正在写这个实例的文件夹，完成后才能导出",
+    renaming: "正在重命名这个实例，完成后才能导出",
+    deleting: "正在删除这个实例",
+    backingUp: "正在备份或恢复存档，完成后才能导出",
+    broken: "实例文件不完整，修复后才能导出",
+  },
+} as const;
+
+// ---------------------------------------------------------------- 导出整合包
+
+export const EXPORT_COPY = {
+  title: "导出整合包",
+  subtitle: (name: string, mcVersion: string | null, loader: string | null) => {
+    const head = mcVersion === null ? `「${name}」` : `「${name}」· ${mcVersion}`;
+    return loader === null ? head : `${head} · ${loader}`;
+  },
+  reading: "正在读取 Mod 与配置…",
+  retry: "重试",
+  cancel: "取消",
+  submit: "导出整合包",
+  needName: "先填写名称",
+  needVersion: "先填写版本号",
+  nameLabel: "名称",
+  versionLabel: "版本号",
+  summaryLabel: "简介",
+  summaryPlaceholder: "一句话介绍这个整合包",
+  bundleTitle: "一起打包",
+  extra: {
+    config: "配置文件（config）",
+    defaultconfigs: "默认配置（defaultconfigs）",
+    kubejs: "KubeJS 脚本（kubejs）",
+    resourcepacks: "资源包（resourcepacks）",
+    shaderpacks: "光影（shaderpacks）",
+    options: "游戏选项（options.txt）",
+    saves: "存档（saves）",
+  },
+  savesHint: "地图类整合包才需要，体积可能很大",
+  missingFolder: "实例里没有这个文件夹",
+  missingOptions: "实例里没有 options.txt",
+  none: "无",
+  fileStat: (files: number, bytes: number) => `${files} 个文件 · ${formatBytes(bytes)}`,
+  disabledMods: (count: number) => `带上停用的 ${count} 个 Mod`,
+  disabledHint: "导入后仍是停用状态",
+  statsLabel: "导出预览",
+  indexedLabel: "走 Modrinth 索引",
+  indexedValue: (count: number) => `${count} 个 Mod`,
+  indexedHint: "导入时从 Modrinth 下载",
+  bundledLabel: "打包进文件",
+  unlisted: (count: number) => `${count} 个 Mod 不在 Modrinth 上，会把文件直接打包进去。分享前确认作者允许转载。`,
+  showList: "查看",
+  hideList: "收起",
+  unlistedListLabel: "直接打包进去的 Mod",
+  skipped: (count: number) => `${count} 个文件的名字在 Windows 上不安全，不会打包`,
 } as const;
 
 // ---------------------------------------------------------------- 概览
@@ -118,6 +183,17 @@ export const OVERVIEW_COPY = {
   worldsEmptySubtitle: "进入游戏创建世界后会出现在这里",
   openSaves: "打开存档文件夹",
   openWorld: (name: string) => `打开「${name}」所在文件夹`,
+  enterWorld: (name: string) => `进入「${name}」`,
+  /** 「进入」不能点的原因，键与 enterWorldBlock 的结论一一对应。 */
+  enterWorldBlocked: {
+    installing: "实例还在安装",
+    broken: "实例需要先修复",
+    unknownVersion: "这个实例的版本信息不完整",
+    legacy: "1.20 之前的版本不能直接进入存档",
+    backingUp: "正在备份或恢复存档，完成后再启动",
+    launching: "正在启动这个实例",
+    running: "游戏正在运行",
+  },
   recent: "最近",
   worldNeverPlayed: "还没进过",
   modeUnknown: "模式未知",
@@ -175,6 +251,59 @@ export const OVERVIEW_COPY = {
   packInactive: "资源包 · 未启用",
   packsFoot: (loader: LoaderKind, mc: string) => `${joinMixed(LOADER_NAME[loader], mc)} 的资源可以在发现页按版本筛选。`,
   packsError: "读不到资源包与光影",
+} as const;
+
+// ---------------------------------------------------------------- 存档备份
+
+/** 备份、导出、恢复被实例上的哪件事挡住时，「正在<活动>」里的说法。 */
+export const WORLD_BLOCKER_LABEL = {
+  installing: "安装",
+  repairing: "修复",
+  renaming: "改名",
+  deleting: "删除",
+  backing_up: "备份或恢复存档",
+  /** 只挡恢复：导出整合包勾了存档时要读整份存档。 */
+  exporting: "导出整合包",
+} as const;
+
+export const WORLD_BACKUP_COPY = {
+  rowMenu: (world: string) => `「${world}」的更多操作`,
+  backup: "备份存档",
+  viewBackups: "查看备份",
+  export: "导出存档",
+
+  /** 启动中或游戏中：游戏开着会边写边打包，退出时又会自动备份一份。 */
+  runningBackup: "游戏退出后再备份，退出时会自动备份一份",
+  runningRestore: "游戏退出后再恢复",
+  blocked: (instance: string, activity: string) => `「${instance}」正在${activity}，完成后再试`,
+  worldBusy: "这个存档正在备份或恢复",
+
+  exportDialogTitle: (world: string) => `导出「${world}」`,
+  /** Windows 的类型下拉原样显示过滤名，不会自己补扩展名，所以写进名字里。 */
+  exportFilter: "存档压缩包（*.zip）",
+
+  modalTitle: (world: string) => `「${world}」的备份`,
+  modalSubtitle: (count: number, bytes: number) => `${count} 份 · 共 ${formatBytes(bytes)}`,
+  modalSubtitleEmpty: "还没有备份",
+  sharedSuffix: " · 所有共用存档的实例看到的是同一份",
+  kindLabel: { auto: "自动", manual: "手动" },
+  /** 备份时刻：绝对日期到分钟 + 相对时间。 */
+  moment: (absolute: string, relative: string) => `${absolute} · ${relative}`,
+  formerName: (levelName: string) => `当时名为「${levelName}」`,
+  restore: "恢复",
+  restoreLabel: (moment: string) => `恢复 ${moment} 的备份`,
+  remove: "删除",
+  removeLabel: (moment: string) => `删除 ${moment} 的备份`,
+  autoOnNote: (keep: number) => `退出游戏后会自动备份玩过的存档，每个存档保留 ${keep} 份自动备份。`,
+  autoOffNote: "自动备份已关闭，可以在设置 · 游戏里打开。",
+  goSettings: "去设置",
+  openFolder: "打开备份文件夹",
+  /** 一份备份都还没写过时备份目录还不存在，文件管理器打不开它。 */
+  noFolderYet: "还没有备份，备份目录还没建出来",
+  loadError: "读不到备份列表",
+  retry: "重试",
+  emptyTitle: "还没有备份",
+  emptyBody: "退出游戏时会自动备份玩过的存档，也可以现在备份一份。",
 } as const;
 
 // ---------------------------------------------------------------- Mod 管理
@@ -236,9 +365,55 @@ export const MODS_COPY = {
   removeDependents: (names: readonly string[]) => `${names.join("、")} 把它作为前置，移除后可能无法加载。`,
   removeBroughtIn: (names: readonly string[]) => `它带进来的前置 ${names.join("、")} 会保留，如果不再需要可以单独移除。`,
   removeConfirm: "移除",
+
+  ignoredFilter: "不检查更新",
+  colInstalled: "安装时间",
+  newTag: "新增",
+  ignoredTag: "不检查更新",
+  pinnedTag: "已锁定版本",
+  more: (name: string) => `${name} 的更多操作`,
+  ignoreUpdates: "忽略这个 Mod 的更新",
+  restoreUpdates: "恢复检查更新",
+  localNoUpdates: "本地文件不参与更新检查",
+  selectAll: "选择列出的全部 Mod",
+  selectRow: (name: string) => `选择 ${name}`,
+
+  batchSelected: (count: number) => `已选 ${count} 个`,
+  batchEnable: "启用",
+  batchDisable: "停用",
+  batchUpdate: "更新",
+  batchRemove: "移除",
+  clearSelection: "取消选择",
+  batchAllEnabled: "选中的 Mod 都已启用",
+  batchAllDisabled: "选中的 Mod 都已停用",
+  batchNoUpdates: "选中的 Mod 都没有可用的更新",
+  batchRemoveTitle: (count: number) => `移除 ${count} 个 Mod？`,
+  batchRemoveBody: (count: number, size: number) => `会删除选中的 ${count} 个文件（共 ${formatBytes(size)}），这一步不能回滚。以后可以从发现页重新安装。`,
+  batchRemoveDependents: (names: readonly string[]) => `${names.join("、")} 把其中的 Mod 作为前置，移除后可能无法加载。`,
+  batchRemoveBroughtIn: (names: readonly string[]) => `它们带进来的前置 ${names.join("、")} 会保留，如果不再需要可以单独移除。`,
 } as const;
 
 export const SOURCE_LABEL = { modrinth: "Modrinth", curseforge: "CurseForge" } as const;
+
+/** Mod 版本的不稳定通道沿用启动器自己发布通道的叫法；正式版不标。 */
+export const MOD_CHANNEL_LABEL = { beta: RELEASE_CHANNEL_LABEL.beta, alpha: RELEASE_CHANNEL_LABEL.preview } as const;
+
+export const UPDATE_PREVIEW_COPY = {
+  title: "更新 Mod",
+  subtitle: "勾选要更新的 Mod。旧版本会保留，之后可以在历史里回滚。",
+  selectAll: "全选",
+  picked: (picked: number, total: number) => `已勾选 ${picked} / ${total}`,
+  pick: (name: string) => `选择 ${name}`,
+  versions: (from: string, to: string) => `${from} → ${to}`,
+  changelog: "更新日志",
+  changelogLabel: (name: string) => `${name} 的更新日志`,
+  changelogFailed: "更新日志没能取到",
+  changelogEmpty: "这个版本没有写更新日志",
+  retry: "重试",
+  cancel: "取消",
+  confirm: (count: number) => `更新 ${count} 个`,
+  nonePicked: "至少勾选一个 Mod",
+} as const;
 
 // ---------------------------------------------------------------- 设置
 
@@ -270,11 +445,14 @@ export const SETTINGS_COPY = {
   javaOption: (major: number, vendor: string) => `Java ${major} · ${vendor}`,
   javaFitMatch: " · 匹配",
   javaFitLower: " · 版本过低",
+  javaIncomplete: (version: string) => `${version} · 不完整`,
   fitMatch: (major: number) => `与要求的 Java ${major} 匹配`,
   fitHigher: (major: number) => `高于要求的 Java ${major}`,
   fitHigherBody: "新版 Java 多数情况下能跑，但旧版 Forge 与部分 Mod 会直接报错。",
   fitLower: (major: number) => `低于要求的 Java ${major}，游戏无法启动`,
   fitLowerBody: "换成自动选择，或装一个对应版本的 Java。",
+  fitIncomplete: (files: readonly string[]) => `这个 Java 缺少 ${files.join("、")}，可能没装完整`,
+  fitIncompleteBody: "启动时照常用它；启动失败的话换一个 Java，或把它重装一遍。",
   fitDownload: (major: number) => `启动时会自动下载 Java ${major}`,
   fitDownloadBody: `${APP_NAME}会把它放进托管目录，不影响系统里的 Java。`,
   fitNoDownload: (major: number) => `本机没有 Java ${major}，自动下载已关闭`,
@@ -326,6 +504,14 @@ export const SETTINGS_COPY = {
   pinNote: "固定后会以等距方块的样子常驻在侧栏，一键进入。",
   folderTitle: "实例文件夹",
   open: "打开",
+  templateTitle: "设为新实例的默认设置",
+  templateNote: "把本实例的 options.txt（键位、视距等）与服务器列表复制一份，新建实例时可以沿用。",
+  /** 已有默认设置时的第二行；文件是手放进数据目录的、没有记录时说来源不明。 */
+  templateCurrent: (source: string | null, savedAt: number | null, now: number) =>
+    source === null ? "当前默认来自数据目录里的文件" : savedAt === null ? `当前默认取自「${source}」` : `当前默认取自「${source}」，${formatRelative(savedAt, now)}保存`,
+  templateError: (message: string) => `读不到默认设置：${message}`,
+  templateSave: "保存为默认",
+  templateClear: "清除",
   repairTitle: "补全游戏文件",
   repairNote: "重新校验并下载缺失或损坏的原版文件、依赖库与加载器，存档不受影响。",
   repairRunning: "游戏正在运行，结束后才能补全。",
@@ -406,7 +592,13 @@ export const CRASH_PAGE_COPY = {
   clueTail: (labels: readonly string[]) => `，${joinMixed("日志指向", joinCrashLabels(labels))}`,
   stale: (relative: string) => `这是${relative}的崩溃，之后已经正常启动过。`,
   runningAgain: "游戏正在运行；如果再次崩溃，这里会换成新的诊断。",
-  matchedLine: (line: number) => `命中的日志行 · 第 ${line} 行`,
+  /** 会话日志是默认来源，不写来源名；其余来源写在行号前。 */
+  matchedLine: (line: number, source: Exclude<keyof typeof CRASH_SOURCE_LABEL, "exit_code">) =>
+    source === "session_log" ? `命中的日志行 · 第 ${line} 行` : `命中的日志行 · ${CRASH_SOURCE_LABEL[source]} 第 ${line} 行`,
+  exitCodeLine: (code: number, hex: string) => `退出码 ${code}（${hex}）`,
+  scannedTitle: "参与扫描的文件",
+  copyScannedPath: "复制路径",
+  warningsTitle: "这次启动时的提醒",
 
   fixesTitle: "一键尝试",
   fixesSubtitle: "按线索推荐，改动都可以随时改回",
@@ -432,9 +624,12 @@ export const CRASH_PAGE_COPY = {
   enableModNote: "日志指向的前置已经装了，只是停用着",
   searchMod: (detail: string) => `搜索 ${detail}`,
   searchModNote: "在发现页找这个前置，安装目标预选这个实例",
+  searchProviderNote: "在发现页找这个语言支持库，安装目标预选这个实例",
   findOnDiscover: "去发现页查找",
   findOnDiscoverNote: "在发现页找缺失的前置，安装目标预选这个实例",
+  findModVersionNote: "在发现页找适配这个实例的版本，安装目标预选这个实例",
   disableMod: (name: string) => `停用 ${name}`,
+  disableOptifine: "停用 OptiFine",
   disableModNote: "先停用它再启动一次，看看问题是否还在",
   keepLatest: "只保留最新版本",
   keepLatestNote: (n: number) => `停用其余 ${n} 个同 id 的文件（改名为 .disabled，不删除）`,

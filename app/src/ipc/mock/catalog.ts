@@ -175,7 +175,7 @@ function seed(): MockProject[] {
       dateModified: "2026-09-01T00:00:00Z",
       sources: [
         source("mod", "Lithium", "modrinth", "gvQqBUqZ", "lithium", 45_000_000, 9_800, [
-          { id: "lith-0143", number: "0.14.3", date: "2026-09-01T00:00:00Z", game: ["1.21.1"], loaders: ["fabric", "neoforge"], size: 786_432 },
+          { id: "lith-0143", number: "0.14.3", date: "2026-09-01T00:00:00Z", game: ["1.21.1"], loaders: ["fabric", "neoforge", "quilt"], size: 786_432 },
           { id: "lith-060", number: "0.11.2", date: "2025-12-01T00:00:00Z", game: ["1.20.1"], loaders: ["fabric"], size: 524_288 },
         ]),
       ],
@@ -388,16 +388,78 @@ function seed(): MockProject[] {
   ];
 }
 
-const CATALOG: readonly MockProject[] = seed();
+/**
+ * 只在新实例的开局 Mod 里用到的工程：版本列表、详情、装进实例都和目录里的其他工程一样查得到，只是不进发现页的
+ * 搜索结果。搜索结果是一份固定的展示集，分类、加载器、平台筛选与翻页的样例都按它逐条写定。
+ * 版本按真实平台的形状给：FerriteCore 与 ModernFix 的 1.21.1 版本分加载器各发一份，ModernFix 不发 Quilt 版；
+ * QFAPI 只到 1.21，没有 1.21.1 的版本。
+ */
+function starterSeed(): MockProject[] {
+  return [
+    {
+      title: "FerriteCore",
+      description: "降低游戏的内存占用",
+      author: "malte0811",
+      hue: 25,
+      categories: ["optimization"],
+      resourceType: "mod",
+      datePublished: "2021-01-28T00:00:00Z",
+      dateModified: "2026-05-10T00:00:00Z",
+      sources: [
+        source("mod", "FerriteCore", "modrinth", "uXXizFIs", "ferrite-core", 60_000_000, 6_400, [
+          { id: "fc-702-fabric", number: "7.0.2-fabric", date: "2026-05-10T00:00:00Z", game: ["1.21.1"], loaders: ["fabric"], size: 143_360 },
+          { id: "fc-702-neoforge", number: "7.0.2-neoforge", date: "2026-05-10T01:00:00Z", game: ["1.21.1"], loaders: ["neoforge"], size: 145_408 },
+          { id: "fc-601", number: "6.0.1", date: "2025-01-12T00:00:00Z", game: ["1.20.1"], loaders: ["fabric", "quilt", "forge"], size: 131_072 },
+        ]),
+      ],
+    },
+    {
+      title: "ModernFix",
+      description: "加快启动、减少内存占用的通用修补",
+      author: "embeddedt",
+      hue: 190,
+      categories: ["optimization", "utility"],
+      resourceType: "mod",
+      datePublished: "2023-01-02T00:00:00Z",
+      dateModified: "2026-07-20T00:00:00Z",
+      sources: [
+        source("mod", "ModernFix", "modrinth", "nmDcB62a", "modernfix", 25_000_000, 3_900, [
+          { id: "mfix-5194-fabric", number: "5.19.4-fabric", date: "2026-07-20T00:00:00Z", game: ["1.21.1"], loaders: ["fabric"], size: 696_320 },
+          { id: "mfix-5194-neoforge", number: "5.19.4-neoforge", date: "2026-07-20T01:00:00Z", game: ["1.21.1"], loaders: ["neoforge"], size: 704_512 },
+          { id: "mfix-5181", number: "5.18.1", date: "2025-03-02T00:00:00Z", game: ["1.20.1"], loaders: ["fabric", "forge"], size: 655_360 },
+        ]),
+      ],
+    },
+    {
+      title: "QFAPI",
+      description: "Quilt Mod 常用的前置库",
+      author: "QuiltMC",
+      hue: 270,
+      categories: ["library"],
+      resourceType: "mod",
+      datePublished: "2022-04-18T00:00:00Z",
+      dateModified: "2025-08-01T00:00:00Z",
+      sources: [
+        source("mod", "QFAPI", "modrinth", "qvIfYCYJ", "qsl", 9_000_000, 1_200, [
+          { id: "qsl-1100", number: "11.0.0-alpha.3+0.100.7-1.21", date: "2025-08-01T00:00:00Z", game: ["1.21"], loaders: ["quilt"], channel: "alpha", size: 4_194_304 },
+          { id: "qsl-701", number: "7.0.1+0.89.3-1.20.1", date: "2024-02-01T00:00:00Z", game: ["1.20.1"], loaders: ["quilt"], size: 4_194_304 },
+        ]),
+      ],
+    },
+  ];
+}
 
-/** 目录里全部工程，按种子顺序（搜索的「相关度」就按这个顺序）。 */
+const CATALOG: readonly MockProject[] = seed();
+const STARTER_ONLY: readonly MockProject[] = starterSeed();
+
+/** 发现页搜得到的工程，按种子顺序（搜索的「相关度」就按这个顺序）。 */
 export function mockProjects(): readonly MockProject[] {
   return CATALOG;
 }
 
-/** 平台上的某个工程；不在目录里为 undefined（调用方按各自命令的错误码报错）。 */
+/** 平台上的某个工程（含只在开局 Mod 里用到的）；不在目录里为 undefined（调用方按各自命令的错误码报错）。 */
 export function findMockSource(platform: PlatformId, projectId: string): { project: MockProject; source: MockSource } | undefined {
-  for (const project of CATALOG) {
+  for (const project of [...CATALOG, ...STARTER_ONLY]) {
     const found = project.sources.find((s) => s.platform === platform && s.projectId === projectId);
     if (found !== undefined) return { project, source: found };
   }

@@ -19,6 +19,7 @@ tokio-util = { version = "0.7", default-features = false }
 
 [dev-dependencies]
 # 集成测试用 wiremock（需真正后台运行时），故补 macros/rt-multi-thread，并显式带上 sync/time 便于用 watch/timeout。
-tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
+# net/io-util 给看门狗测试里手写的限速服务器用：wiremock 只能整体延迟响应，造不出「每秒几 KB」的终点。
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util"] }
 wiremock = "0.6"
 tempfile = "3"

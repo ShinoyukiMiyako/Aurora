@@ -1,6 +1,8 @@
 // 前端领域模型的基础类型：界面与状态层只认这里的形状，DTO（snake_case）在状态层转换后再进来。
 // 取值集合写成 as const 数组再派生类型，运行期校验（未知取值即抛错）与类型共用同一份来源。
 
+import type { BlockedFileDto } from "../ipc/modpack";
+
 // ---------------------------------------------------------------- 外观
 
 export const APPEARANCE_MODES = ["day", "night"] as const;
@@ -41,6 +43,7 @@ export const FAILURE_CODES = [
   "java_too_old",
   "account_relogin",
   "account_refresh_network",
+  "account_service_down",
   "files_offline",
   "files_failed",
   "disk_full",
@@ -85,7 +88,11 @@ export interface Session {
 
 // ---------------------------------------------------------------- 下载任务
 
-export const TASK_KINDS = ["game", "loader", "mod", "modpack", "java", "resourcepack", "shader", "datapack", "repair"] as const;
+/**
+ * world_backup：备份与导出存档（都是打包）；world_restore：用备份恢复存档。两者都不算安装；后端在任务期间把实例记为
+ * backing_up，只与 Mod 改动兼容，启动、改名、删除都要等它结束。
+ */
+export const TASK_KINDS = ["game", "loader", "mod", "modpack", "java", "resourcepack", "shader", "datapack", "repair", "world_backup", "world_restore", "modpack_export"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 
 export const TASK_STATUSES = ["queued", "running", "done", "failed", "cancelled"] as const;
@@ -98,6 +105,13 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 export interface TaskSpec {
   command: string;
   args: Record<string, unknown>;
+}
+
+/** 任务失败记录：错误码与后端原文；以 distribution_blocked 失败时另带需要手动下载的文件清单，较早的日志里没有它。 */
+export interface TaskError {
+  code: string;
+  message: string;
+  blocked_files?: readonly BlockedFileDto[];
 }
 
 export interface Task {
@@ -119,7 +133,7 @@ export interface Task {
   startedAt: number | null;
   /** 第几次尝试，从 1 计。 */
   attempt: number;
-  error: { code: string; message: string } | null;
+  error: TaskError | null;
   createdAt: number;
   finishedAt: number | null;
   spec: TaskSpec;

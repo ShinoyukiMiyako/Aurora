@@ -9,6 +9,8 @@
 
 use aurora_base::retry::RetryableError;
 
+use crate::credential::CredentialRealm;
+
 /// aurora-download 对外统一错误。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -74,9 +76,37 @@ pub enum Error {
         last: Box<Error>,
     },
 
+    /// 吞吐看门狗判定当前下载终点过慢，且向原地址要不到另一个终点（或换终点次数已用尽）。
+    /// 换源编排据此换下一个源；已是最后一个源时关掉看门狗续传，所以它不会成为一批下载的最终错误。
+    #[error(
+        "下载终点过慢：{url}（最近 {window_secs} 秒平均 {bytes_per_sec} 字节/秒，低于 {threshold} 字节/秒）"
+    )]
+    SlowEndpoint {
+        url: String,
+        bytes_per_sec: u64,
+        threshold: u64,
+        window_secs: u64,
+    },
+
     /// 调用方经取消令牌放弃了本次下载；返回前已清掉该文件的临时文件与分片。
     #[error("下载已取消")]
     Cancelled,
+
+    /// 带了凭据的那一跳被服务器以 401 拒绝。换源、重试都拿不到文件，只能换一个可用的密钥。
+    #[error("{} 拒绝了下载密钥（HTTP {status}）：{url}", .realm.display_name())]
+    CredentialRejected {
+        realm: CredentialRealm,
+        url: String,
+        status: u16,
+    },
+
+    /// 密钥为空或含不能放进请求头的字符。
+    #[error("{} 的下载密钥格式不对", .realm.display_name())]
+    InvalidCredential { realm: CredentialRealm },
+
+    /// 引擎逐跳跟随跳转时超过了上限；`url` 是这次请求的起始地址。
+    #[error("跳转次数过多：{url}")]
+    TooManyRedirects { url: String },
 }
 
 impl Error {
@@ -94,6 +124,22 @@ impl Error {
             Error::Status { status, .. } => Some(*status),
             Error::AllSourcesExhausted { last, .. } => last.http_status(),
             Error::ChunkedFallbackFailed { fallback, .. } => fallback.http_status(),
+            Error::CredentialRejected { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+
+    /// 这次失败是不是哪个平台拒绝了下载密钥：自身，或多源耗尽、分片回退里包着的那次拒绝。
+    /// 命令层据此给出「换一个可用的密钥」的提示，而不是笼统的下载失败。
+    pub fn credential_rejection(&self) -> Option<CredentialRealm> {
+        match self {
+            Error::CredentialRejected { realm, .. } => Some(*realm),
+            Error::AllSourcesExhausted { last, .. } => last.credential_rejection(),
+            Error::ChunkedFallbackFailed {
+                chunked, fallback, ..
+            } => fallback
+                .credential_rejection()
+                .or_else(|| chunked.credential_rejection()),
             _ => None,
         }
     }
@@ -122,8 +168,14 @@ impl RetryableError for Error {
             | Error::TaskJoin(_)
             | Error::Internal { .. }
             | Error::AllSourcesExhausted { .. } => false,
+            // 同一个源上重试只会被打回同一个慢终点；换终点已在引擎内做过，接下来该换源。
+            Error::SlowEndpoint { .. } => false,
             // 取消是调用方的决定，重试或换源都违背它。
             Error::Cancelled => false,
+            // 密钥被拒、密钥本身不合法、跳转成环，换个时机再来结果都一样。
+            Error::CredentialRejected { .. }
+            | Error::InvalidCredential { .. }
+            | Error::TooManyRedirects { .. } => false,
         }
     }
 }
@@ -287,6 +339,117 @@ mod tests {
             }),
         };
         assert!(!terminal.is_retryable(), "回退阶段 404 即终态");
+    }
+
+    fn rejected() -> Error {
+        Error::CredentialRejected {
+            realm: CredentialRealm::CurseForge,
+            url: "https://edge.forgecdn.net/files/1/2/a.jar".into(),
+            status: 401,
+        }
+    }
+
+    #[test]
+    fn credential_errors_are_terminal_and_carry_their_status() {
+        let rejected = rejected();
+        assert!(!rejected.is_retryable());
+        assert_eq!(rejected.http_status(), Some(401));
+        assert_eq!(
+            rejected.to_string(),
+            "CurseForge 拒绝了下载密钥（HTTP 401）：https://edge.forgecdn.net/files/1/2/a.jar"
+        );
+
+        let invalid = Error::InvalidCredential {
+            realm: CredentialRealm::CurseForge,
+        };
+        assert!(!invalid.is_retryable());
+        assert_eq!(invalid.http_status(), None);
+        assert_eq!(invalid.to_string(), "CurseForge 的下载密钥格式不对");
+
+        let redirects = Error::TooManyRedirects {
+            url: "https://edge.forgecdn.net/a".into(),
+        };
+        assert!(!redirects.is_retryable());
+        assert_eq!(redirects.http_status(), None);
+        assert_eq!(
+            redirects.to_string(),
+            "跳转次数过多：https://edge.forgecdn.net/a"
+        );
+    }
+
+    #[test]
+    fn credential_rejection_is_found_inside_composite_errors() {
+        assert_eq!(
+            rejected().credential_rejection(),
+            Some(CredentialRealm::CurseForge)
+        );
+        let exhausted = Error::AllSourcesExhausted {
+            url: "https://edge.forgecdn.net/a".into(),
+            last: Box::new(rejected()),
+        };
+        assert_eq!(
+            exhausted.credential_rejection(),
+            Some(CredentialRealm::CurseForge)
+        );
+        let status = |status| {
+            Box::new(Error::Status {
+                url: "https://edge.forgecdn.net/a".into(),
+                status,
+            })
+        };
+        let in_chunked = Error::ChunkedFallbackFailed {
+            url: "https://edge.forgecdn.net/a".into(),
+            chunked: Box::new(rejected()),
+            fallback: status(503),
+        };
+        assert_eq!(
+            in_chunked.credential_rejection(),
+            Some(CredentialRealm::CurseForge)
+        );
+        let in_fallback = Error::ChunkedFallbackFailed {
+            url: "https://edge.forgecdn.net/a".into(),
+            chunked: status(404),
+            fallback: Box::new(rejected()),
+        };
+        assert_eq!(
+            in_fallback.credential_rejection(),
+            Some(CredentialRealm::CurseForge)
+        );
+
+        // 没带凭据的那一跳收到的 401 只是普通的状态码错误。
+        let plain_401 = Error::AllSourcesExhausted {
+            url: "https://x/a".into(),
+            last: status(401),
+        };
+        assert_eq!(plain_401.credential_rejection(), None);
+        assert_eq!(
+            Error::InvalidCredential {
+                realm: CredentialRealm::CurseForge
+            }
+            .credential_rejection(),
+            None
+        );
+    }
+
+    #[test]
+    fn slow_endpoint_is_terminal_and_counts_against_the_host() {
+        let err = Error::SlowEndpoint {
+            url: "https://node.example/f.jar?s=sig&e=1".into(),
+            bytes_per_sec: 2048,
+            threshold: 32768,
+            window_secs: 15,
+        };
+        assert!(!err.is_retryable(), "同一源上重试只会回到同一个慢终点");
+        assert_eq!(err.http_status(), None);
+        assert!(
+            crate::health::is_host_fault(err.http_status()),
+            "慢记作主机故障"
+        );
+        assert!(!err.is_cancelled());
+        assert_eq!(
+            err.to_string(),
+            "下载终点过慢：https://node.example/f.jar?s=sig&e=1（最近 15 秒平均 2048 字节/秒，低于 32768 字节/秒）"
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ pub enum Error {
     Base(#[from] aurora_base::Error),
 
     /// 访问远端（Java 运行时清单 / 组件文件）时的 HTTP 层错误，附带具体 URL。
-    #[error("HTTP 请求失败: {url}")]
+    #[error("HTTP 请求失败：{url}")]
     Http {
         url: String,
         #[source]
@@ -24,7 +24,7 @@ pub enum Error {
     },
 
     /// JSON 反序列化失败，`context` 标明是哪一份报文（all.json / 组件清单）。
-    #[error("解析 JSON 失败: {context}")]
+    #[error("解析 JSON 失败：{context}")]
     Json {
         context: String,
         #[source]
@@ -32,7 +32,7 @@ pub enum Error {
     },
 
     /// 启动 `java -version` 子进程本身失败（路径不存在 / 无执行权限等）。
-    #[error("执行 java 可执行文件失败: {path}")]
+    #[error("执行 java 可执行文件失败：{path}")]
     JavaExec {
         path: PathBuf,
         #[source]
@@ -40,8 +40,12 @@ pub enum Error {
     },
 
     /// `java -version` 有输出，但无法从中解析出版本号。
-    #[error("无法从 java -version 输出解析版本号: {output}")]
+    #[error("无法从 java -version 输出解析版本号：{output}")]
     JavaVersionParse { output: String },
+
+    /// `java -version` 在等待上限内没有结束；子进程已被结束并确认退出。
+    #[error("java -version 超过 {timeout_secs} 秒没有结束，已结束该进程：{path}")]
+    JavaProbeTimeout { path: PathBuf, timeout_secs: u64 },
 
     /// Java 运行时清单不包含当前平台键（如非 windows-x64 平台）。
     #[error("Java 运行时清单不含平台 {0}")]
@@ -67,6 +71,19 @@ pub enum Error {
     /// 组件清单里的符号链接指到运行时安装目录之外：之后经它写入或加载的文件会落到别处。
     #[error("Java 运行时清单里的链接「{path}」指向「{target}」，会指到运行时目录之外，已拒绝安装")]
     UnsafeRuntimeLink { path: String, target: String },
+
+    /// 同一份清单在两个及以上下载源上都没取到。
+    ///
+    /// `attempts` 按尝试顺序给出每个源的地址与它的完整失败原因（错误本身接上 `source()` 链），
+    /// 排障时一眼能看出是官方源、镜像还是两边都出了问题；`last` 是最后一个源的原错误，
+    /// 原因链从它接着往下，上层据此仍能判出是否属于网络不通。
+    #[error("{context} 在全部 {} 个下载源上都失败：{}", .attempts.len(), .attempts.join("；"))]
+    AllSourcesFailed {
+        context: &'static str,
+        attempts: Vec<String>,
+        #[source]
+        last: Box<Error>,
+    },
 }
 
 impl Error {
@@ -90,6 +107,8 @@ impl RetryableError for Error {
             Error::Json { .. }
             | Error::JavaExec { .. }
             | Error::JavaVersionParse { .. }
+            // 挂住的 JVM 再拉一次多半还是挂住，只会让调用方多等一个超时。
+            | Error::JavaProbeTimeout { .. }
             | Error::UnsupportedPlatform(_)
             | Error::NoRuntimeForMajor { .. }
             | Error::MissingJavaExecutable => false,
@@ -97,6 +116,8 @@ impl RetryableError for Error {
             Error::Cancelled => false,
             // 清单内容本身越界，重拉同一份清单结果不变。
             Error::UnsafeRuntimePath { .. } | Error::UnsafeRuntimeLink { .. } => false,
+            // 每个源内部已按策略重试过，整体再来一轮只会把同样的失败重演一遍。
+            Error::AllSourcesFailed { .. } => false,
         }
     }
 }
@@ -112,5 +133,81 @@ fn is_retryable_http(err: &reqwest::Error) -> bool {
             status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
         }
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error as _;
+
+    #[test]
+    fn all_sources_failed_lists_every_attempt_in_order_and_is_final() {
+        let err = Error::AllSourcesFailed {
+            context: "Java 运行时总清单",
+            attempts: vec![
+                "https://a/all.json：HTTP 请求失败：https://a/all.json".to_owned(),
+                "https://b/all.json：Java 运行时清单不含平台 x".to_owned(),
+            ],
+            last: Box::new(Error::UnsupportedPlatform("x".to_owned())),
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "Java 运行时总清单 在全部 2 个下载源上都失败：\
+             https://a/all.json：HTTP 请求失败：https://a/all.json；\
+             https://b/all.json：Java 运行时清单不含平台 x"
+        );
+        let last = err
+            .source()
+            .and_then(|s| s.downcast_ref::<Box<Error>>())
+            .expect("原因链第一层应是最后一个源的原错误");
+        assert!(matches!(last.as_ref(), Error::UnsupportedPlatform(p) if p == "x"));
+        assert!(
+            !err.is_retryable(),
+            "各源已各自重试过，聚合错误不应再整体重试"
+        );
+        assert!(!err.is_cancelled());
+    }
+
+    /// 这些原文经 detail.causes 与日志出现在界面上，和「没能添加 Java」的主提示并排：中文句后一律全角冒号。
+    #[test]
+    fn chinese_messages_use_full_width_colons() {
+        let http = Error::Http {
+            url: "https://a/all.json".into(),
+            source: reqwest::Client::new()
+                .get("不是网址")
+                .build()
+                .expect_err("非法网址构建请求必然失败"),
+        };
+        assert_eq!(http.to_string(), "HTTP 请求失败：https://a/all.json");
+        let json = Error::Json {
+            context: "all.json".into(),
+            source: serde_json::from_str::<serde_json::Value>("{").expect_err("半截 JSON"),
+        };
+        assert_eq!(json.to_string(), "解析 JSON 失败：all.json");
+        let exec = Error::JavaExec {
+            path: PathBuf::from("D:/Java/bin/java.exe"),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        };
+        assert_eq!(
+            exec.to_string(),
+            "执行 java 可执行文件失败：D:/Java/bin/java.exe"
+        );
+        let parse = Error::JavaVersionParse {
+            output: "garbage".into(),
+        };
+        assert_eq!(
+            parse.to_string(),
+            "无法从 java -version 输出解析版本号：garbage"
+        );
+        let timeout = Error::JavaProbeTimeout {
+            path: PathBuf::from("D:/Java/bin/java.exe"),
+            timeout_secs: 10,
+        };
+        assert_eq!(
+            timeout.to_string(),
+            "java -version 超过 10 秒没有结束，已结束该进程：D:/Java/bin/java.exe"
+        );
     }
 }

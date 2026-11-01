@@ -19,6 +19,9 @@ export const INSTALL_STAGE_COPY = {
   landing: "安装任务已经结束，正在刷新实例列表…",
   failedTitle: { create: "安装没有完成", modpack: "导入没有完成" },
   failedBody: (reason: string) => `${sentence(reason)}可以重试，或到下载任务里查看。`,
+  /** 有文件要手动下载：重试必然还是这个结果，下一步在「查看这些文件」的清单里。 */
+  failedBlockedBody: (reason: string) => sentence(reason),
   retry: "重试",
+  viewBlocked: "查看这些文件",
   viewTasks: "查看下载任务",
 } as const;

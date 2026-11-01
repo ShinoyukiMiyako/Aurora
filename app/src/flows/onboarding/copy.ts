@@ -67,6 +67,7 @@ export const JAVA_STEP_COPY = {
   vendor: (vendor: string, version: string) => `${vendor} ${version}`,
   bits64: "64 位",
   bits32: "32 位",
+  incomplete: "不完整",
   more: (n: number) => `还有 ${n} 个`,
   emptyTitle: "没有在本机找到 Java",
   emptyBody: "不用担心，打开下面的自动下载，第一次启动游戏时会下好匹配的版本。",

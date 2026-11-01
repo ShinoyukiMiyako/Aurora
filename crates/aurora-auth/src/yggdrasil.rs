@@ -22,6 +22,7 @@ use serde::de::DeserializeOwned;
 
 use crate::account::{GameProfile, SkinModel, SkinRef};
 use crate::error::{AuthError, Result};
+use crate::microsoft::service_unavailable;
 
 /// authlib-injector 用于指示真正 API 根地址的响应头。
 const API_LOCATION_HEADER: &str = "x-authlib-injector-api-location";
@@ -138,6 +139,9 @@ impl YggdrasilClient {
             let (status, text) = self
                 .post("authserver/authenticate", &payload, "Yggdrasil 认证")
                 .await?;
+            if let Some(err) = service_unavailable(status, "Yggdrasil 认证") {
+                return Err(err);
+            }
             if !status.is_success() {
                 return Err(yggdrasil_error(&text, "Yggdrasil 认证"));
             }
@@ -167,6 +171,9 @@ impl YggdrasilClient {
             let (status, text) = self
                 .post("authserver/refresh", &payload, "Yggdrasil 刷新")
                 .await?;
+            if let Some(err) = service_unavailable(status, "Yggdrasil 刷新") {
+                return Err(err);
+            }
             if !status.is_success() {
                 return Err(yggdrasil_error(&text, "Yggdrasil 刷新"));
             }
@@ -189,6 +196,9 @@ impl YggdrasilClient {
             if status.is_success() {
                 return Ok(true);
             }
+            if let Some(err) = service_unavailable(status, "Yggdrasil 校验") {
+                return Err(err);
+            }
             if status == StatusCode::FORBIDDEN {
                 return Ok(false);
             }
@@ -209,6 +219,9 @@ impl YggdrasilClient {
                 .await?;
             if status.is_success() {
                 return Ok(());
+            }
+            if let Some(err) = service_unavailable(status, "Yggdrasil 登出") {
+                return Err(err);
             }
             Err(yggdrasil_error(&text, "Yggdrasil 登出"))
         })
@@ -704,6 +717,80 @@ mod tests {
             .mount(&server2)
             .await;
         assert!(!client_for(&server2).validate("tok", None).await.unwrap());
+    }
+
+    /// 皮肤站故障时回的是 HTML 故障页或空响应，解析不了错误体：要先按状态码认成服务故障，
+    /// 否则会被当成解析失败，续期时再落成「登录已失效」。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_faults_are_service_unavailable_before_the_body_is_parsed() {
+        let server = MockServer::start().await;
+        let fault_page = "<html><body>503 Service Temporarily Unavailable</body></html>";
+        for (endpoint, status) in [
+            ("/authserver/authenticate", 429),
+            ("/authserver/refresh", 502),
+            ("/authserver/validate", 503),
+            ("/authserver/invalidate", 500),
+        ] {
+            Mock::given(method("POST"))
+                .and(path(endpoint))
+                .respond_with(ResponseTemplate::new(status).set_body_string(fault_page))
+                .mount(&server)
+                .await;
+        }
+        let client = client_for(&server);
+        let outcomes = [
+            client.authenticate("u", "p", None).await.map(|_| ()),
+            client.refresh("tok", Some("cli"), None).await.map(|_| ()),
+            client.validate("tok", Some("cli")).await.map(|_| ()),
+            client.invalidate("tok", Some("cli")).await,
+        ];
+        let seen: Vec<_> = outcomes
+            .into_iter()
+            .map(|outcome| match outcome.expect_err("故障响应必须报错") {
+                AuthError::ServiceUnavailable { step, status } => (step, status),
+                other => panic!("期望 ServiceUnavailable，得到 {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("Yggdrasil 认证", 429),
+                ("Yggdrasil 刷新", 502),
+                ("Yggdrasil 校验", 503),
+                ("Yggdrasil 登出", 500),
+            ]
+        );
+        let message = AuthError::ServiceUnavailable {
+            step: "Yggdrasil 刷新",
+            status: 502,
+        }
+        .to_string();
+        assert!(
+            !message.contains("微软"),
+            "外置登录的故障不能说成微软：{message}"
+        );
+    }
+
+    /// 4xx 仍按 Yggdrasil 的错误体解析，凭据错误照旧是凭据错误。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_errors_still_read_the_yggdrasil_error_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/authserver/refresh"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "error": "IllegalArgumentException",
+                "errorMessage": "Access token already has a profile assigned."
+            })))
+            .mount(&server)
+            .await;
+        let err = client_for(&server)
+            .refresh("tok", Some("cli"), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, AuthError::Yggdrasil { error, .. } if error == "IllegalArgumentException"),
+            "{err:?}"
+        );
     }
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(10);

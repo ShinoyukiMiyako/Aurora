@@ -1,4 +1,4 @@
-// 新建实例、设置页用到的静态与本机数据：版本清单、加载器版本、Java、内存建议、游戏目录、启动器更新。
+// 新建实例、设置页用到的静态与本机数据：版本清单、加载器版本、Java、显卡、内存建议、游戏目录、启动器更新。
 
 import {
   discoverGameDirectories,
@@ -8,7 +8,7 @@ import {
   type GameDirectoryInspectionDto,
   type NamedDirectoryDto,
 } from "../../ipc/config";
-import { detectJava, type JavaInstallationDto } from "../../ipc/java";
+import { detectJava, gpuAdapters, type GpuAdaptersDto, type JavaInstallationDto } from "../../ipc/java";
 import {
   listLoaderVersions,
   listManifest,
@@ -23,7 +23,7 @@ import { memoryAdvice, updaterInfo, type MemoryAdviceDto, type UpdaterInfoDto } 
 import { useResource, type ResourceResult } from "../resource";
 
 export type { GameDirectoryDto, GameDirectoryInspectionDto, GameDirectoryProblem, NamedDirectoryDto } from "../../ipc/config";
-export type { JavaInstallationDto, JavaSource, JavaVersionDto } from "../../ipc/java";
+export type { GpuAdapterDto, GpuAdaptersDto, JavaInstallationDto, JavaSource, JavaVersionDto } from "../../ipc/java";
 export type { LoaderChoice, LoaderVersionDto, ManifestDto, ManifestVersionDto, VersionRequirementsDto } from "../../ipc/instances";
 export type { MemoryAdviceDto, MemoryTier, UpdaterInfoDto } from "../../ipc/system";
 
@@ -60,6 +60,11 @@ export function useRequiredJava(mcVersion: string | null): ResourceResult<number
 /** java —— 本机 Java 全量探测；Java 下载完成后失效。 */
 export function useJavaRuntimes(): ResourceResult<JavaInstallationDto[]> {
   return useResource("java", detectJava);
+}
+
+/** gpu-adapters —— 本机硬件显卡与是否可切换，显卡卡片据此决定说明。 */
+export function useGpuAdapters(): ResourceResult<GpuAdaptersDto> {
+  return useResource("gpu-adapters", gpuAdapters);
 }
 
 /** memory-advice:<id> 或 memory-advice（按主页当前实例 / 原版定档）。 */

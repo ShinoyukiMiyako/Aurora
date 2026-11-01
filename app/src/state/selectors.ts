@@ -40,6 +40,52 @@ export function instanceTask(state: LauncherState, instanceId: string): Task | n
   return task === undefined ? null : task;
 }
 
+/** 备份、导出与恢复存档的任务命令；它们都带着 id（实例）与 world（存档文件夹名）两个参数。 */
+export const WORLD_TASK_COMMANDS: ReadonlySet<string> = new Set(["backup_world", "export_world", "restore_world_backup"]);
+
+/**
+ * 这个实例上有备份、导出或恢复任务在排队或进行中的存档（文件夹名，去重后按码位排序）。只随任务的增减变，
+ * 不随进度变：按 shallowArrayEqual 订阅不会跟着下载进度重渲染。
+ */
+export function busyWorlds(state: LauncherState, instanceId: string): string[] {
+  const worlds = new Set<string>();
+  for (const task of state.tasks) {
+    if (!isActiveTask(task) || task.instanceId !== instanceId || !WORLD_TASK_COMMANDS.has(task.spec.command)) continue;
+    const world = task.spec.args.world;
+    if (typeof world !== "string") throw new Error(`任务 ${task.title} 的参数 world 应为字符串`);
+    worlds.add(world);
+  }
+  return [...worlds].sort();
+}
+
+/**
+ * 实例的存档此刻正被备份、恢复或导出，后端会以 instance_busy 拒绝启动：后端报着 backing_up，或者前端有它的存档任务
+ * 在排队或进行中（列表是任务开始前扫的，排着的任务一开始就会占住实例，这时点启动正好撞上它）。
+ */
+export function savesBusy(state: LauncherState, inst: InstanceSummary): boolean {
+  return inst.activity === "backing_up" || busyWorlds(state, inst.id).length > 0;
+}
+
+/** 存档正被备份、恢复或导出的实例 id，按实例列表的顺序。只随实例列表与任务的增减变，按 shallowArrayEqual 订阅。 */
+export function savesBusyIds(state: LauncherState): string[] {
+  return state.instances.filter((inst) => savesBusy(state, inst)).map((inst) => inst.id);
+}
+
+/**
+ * 这个实例有勾了存档的导出整合包任务在排队或进行中：导出会把整份存档读进包里，后端在它读完前拒绝恢复存档
+ * （恢复要替换存档）；只读存档的备份与导出存档不受影响。只随任务的增减变。
+ */
+export function savesExported(state: LauncherState, instanceId: string): boolean {
+  return state.tasks.some((task) => {
+    if (!isActiveTask(task) || task.instanceId !== instanceId || task.spec.command !== "export_modpack") return false;
+    const options = task.spec.args.options;
+    if (typeof options !== "object" || options === null || !("extras" in options) || !Array.isArray(options.extras)) {
+      throw new Error(`任务 ${task.title} 的参数 options.extras 应为数组`);
+    }
+    return options.extras.includes("saves");
+  });
+}
+
 export function queuePosition(state: LauncherState, taskId: string): number | null {
   return taskQueuePosition(state.tasks, taskId);
 }

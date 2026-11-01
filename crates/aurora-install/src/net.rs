@@ -71,42 +71,25 @@ pub(crate) fn candidates(sources: Option<&SourcePlan>, url: &str) -> Result<Vec<
     }
 }
 
-/// 依次尝试各候选地址，返回第一个成功的响应体；全部失败时返回最后一个候选的错误。
-/// 取消不换源：它是调用方的决定，不是这个源的故障。
+/// 依次尝试各候选地址，返回第一个成功的响应体。取消不换源：它是调用方的决定，不是这个源的故障。
+///
+/// 全部失败时：只有一个候选就原样返回它的错误（没有换源可言，多包一层只会让上层的错误映射认不出它）；
+/// 两个及以上返回 [`Error::AllSourcesFailed`]，按尝试顺序带上每个候选的失败原因。
 pub(crate) async fn get_bytes_from(
     client: &reqwest::Client,
     sources: Option<&SourcePlan>,
     url: &str,
     policy: &RetryPolicy,
     cancel: Option<&CancellationToken>,
-) -> Result<Vec<u8>> {
-    let mut last = None;
-    for candidate in candidates(sources, url)? {
-        match get_bytes(client, &candidate, policy, cancel).await {
-            Ok(bytes) => return Ok(bytes),
-            Err(err) if err.is_cancelled() => return Err(err),
-            Err(err) => {
-                tracing::warn!(url = %candidate, error = %err, "元数据抓取失败，换下一个下载源");
-                last = Some(err);
-            }
-        }
-    }
-    Err(last.expect("候选地址至少有官方地址本身"))
-}
-
-/// GET 并用 serde_json 反序列化，失败时带上报文上下文。
-pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(
-    client: &reqwest::Client,
-    url: &str,
-    policy: &RetryPolicy,
-    cancel: Option<&CancellationToken>,
     context: &str,
-) -> Result<T> {
-    let bytes = get_bytes(client, url, policy, cancel).await?;
-    parse_json(&bytes, context)
+) -> Result<Vec<u8>> {
+    first_success(client, sources, url, policy, cancel, context, Ok).await
 }
 
-/// 同 [`get_json`]，但按下载源方案在候选地址间兜底。
+/// GET 并用 serde_json 反序列化（失败时带上报文上下文），按下载源方案在候选地址间兜底。
+///
+/// 每个候选取到字节就当场解析，解析失败也换下一个：镜像偶尔回一页错误提示或截断的报文，状态码却是
+/// 200，只看传输成败会把这份读不懂的内容当成功交出去，另一个源明明有好的也用不上。
 pub(crate) async fn get_json_from<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     sources: Option<&SourcePlan>,
@@ -115,8 +98,61 @@ pub(crate) async fn get_json_from<T: serde::de::DeserializeOwned>(
     cancel: Option<&CancellationToken>,
     context: &str,
 ) -> Result<T> {
-    let bytes = get_bytes_from(client, sources, url, policy, cancel).await?;
-    parse_json(&bytes, context)
+    first_success(client, sources, url, policy, cancel, context, |bytes| {
+        parse_json(&bytes, context)
+    })
+    .await
+}
+
+/// 逐个候选取字节并交给 `decode`，返回第一个取到且解码成功的结果；取消与失败的规则见 [`get_bytes_from`]。
+async fn first_success<T>(
+    client: &reqwest::Client,
+    sources: Option<&SourcePlan>,
+    url: &str,
+    policy: &RetryPolicy,
+    cancel: Option<&CancellationToken>,
+    context: &str,
+    decode: impl Fn(Vec<u8>) -> Result<T>,
+) -> Result<T> {
+    let mut attempts = Vec::new();
+    let mut last = None;
+    for candidate in candidates(sources, url)? {
+        let outcome = match get_bytes(client, &candidate, policy, cancel).await {
+            Ok(bytes) => decode(bytes),
+            Err(err) => Err(err),
+        };
+        match outcome {
+            Ok(value) => return Ok(value),
+            Err(err) if err.is_cancelled() => return Err(err),
+            Err(err) => {
+                tracing::warn!(url = %candidate, error = %err, "元数据抓取失败，换下一个下载源");
+                attempts.push(describe_attempt(&candidate, &err));
+                last = Some(err);
+            }
+        }
+    }
+    let last = last.expect("候选地址至少有官方地址本身");
+    if attempts.len() == 1 {
+        return Err(last);
+    }
+    Err(Error::AllSourcesFailed {
+        context: context.to_owned(),
+        attempts,
+        last: Box::new(last),
+    })
+}
+
+/// 一次失败尝试的完整描述：地址、错误本身，再接上它 source 链的每一层。只记顶层会丢掉真正的原因
+/// （状态码、连接被拒、JSON 第几行出错都在下层）。
+fn describe_attempt(url: &str, err: &Error) -> String {
+    let mut text = format!("{url}：{err}");
+    let mut cause = std::error::Error::source(err);
+    while let Some(layer) = cause {
+        text.push('：');
+        text.push_str(&layer.to_string());
+        cause = layer.source();
+    }
+    text
 }
 
 /// 直接从字节反序列化：编码损坏要如实报错，不能先做有损 UTF-8 转换把坏字节换成替换符再解析。
@@ -139,18 +175,6 @@ mod tests {
     use std::time::{Duration, Instant};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    /// 官方源与镜像各自改写成给定地址，让两个候选都落在本地端点上。
-    #[derive(Debug)]
-    struct Fixed(Vec<String>);
-    impl SourceResolver for Fixed {
-        fn resolve(&self, _url: &str, source: MirrorSource) -> aurora_download::Result<String> {
-            Ok(match source {
-                MirrorSource::Official => self.0[0].clone(),
-                MirrorSource::BmclApi => self.0[1].clone(),
-            })
-        }
-    }
 
     fn fast_policy() -> RetryPolicy {
         RetryPolicy {
@@ -182,52 +206,192 @@ mod tests {
         );
     }
 
-    /// 第一个候选失败时换下一个；全部失败时报最后一个的错误，不吞。
+    /// 官方候选钉到 `official`、镜像候选钉到 `mirror`，与真实镜像改写表无关。
+    #[derive(Debug)]
+    struct Fixed {
+        official: String,
+        mirror: String,
+    }
+
+    impl SourceResolver for Fixed {
+        fn resolve(&self, _url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+            Ok(match source {
+                MirrorSource::Official => self.official.clone(),
+                MirrorSource::BmclApi => self.mirror.clone(),
+            })
+        }
+    }
+
+    fn plan_between(server: &MockServer, official: &str, mirror: &str) -> SourcePlan {
+        SourcePlan::with_resolver(
+            vec![MirrorSource::Official, MirrorSource::BmclApi],
+            Arc::new(Fixed {
+                official: format!("{}{official}", server.uri()),
+                mirror: format!("{}{mirror}", server.uri()),
+            }),
+        )
+    }
+
+    async fn mount(server: &MockServer, route: &str, response: ResponseTemplate, times: u64) {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(response)
+            .expect(times)
+            .mount(server)
+            .await;
+    }
+
+    const UPSTREAM: &str = "https://x.invalid/a";
+
+    /// 第一个候选 503 时换第二个取到；只有一个候选时失败原样返回它自己的 Http 错误，不包聚合层。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_bytes_from_falls_back_to_next_candidate() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/broken"))
-            .respond_with(ResponseTemplate::new(404))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/good"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
-            .expect(1)
-            .mount(&server)
-            .await;
+        mount(&server, "/broken", ResponseTemplate::new(503), 2).await;
+        mount(
+            &server,
+            "/good",
+            ResponseTemplate::new(200).set_body_string("ok"),
+            1,
+        )
+        .await;
         let client = aurora_base::http::build_client().unwrap();
-        let resolver = Arc::new(Fixed(vec![
-            format!("{}/broken", server.uri()),
-            format!("{}/good", server.uri()),
-        ]));
-        let plan = SourcePlan::with_resolver(
-            vec![MirrorSource::Official, MirrorSource::BmclApi],
-            resolver.clone(),
-        );
+        let plan = plan_between(&server, "/broken", "/good");
         let body = get_bytes_from(
             &client,
             Some(&plan),
-            "https://x.invalid/a",
+            UPSTREAM,
             &fast_policy(),
             None,
+            "测试报文",
         )
         .await
         .unwrap();
         assert_eq!(body, b"ok");
 
-        let only_broken = SourcePlan::with_resolver(vec![MirrorSource::Official], resolver);
+        let only_broken = SourcePlan::with_resolver(
+            vec![MirrorSource::Official],
+            Arc::new(Fixed {
+                official: format!("{}/broken", server.uri()),
+                mirror: format!("{}/good", server.uri()),
+            }),
+        );
         let err = get_bytes_from(
             &client,
             Some(&only_broken),
-            "https://x.invalid/a",
+            UPSTREAM,
             &fast_policy(),
             None,
+            "测试报文",
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, Error::Http { ref url, .. } if url.ends_with("/broken")));
+        assert!(
+            matches!(err, Error::Http { ref url, .. } if url.ends_with("/broken")),
+            "实际：{err:?}"
+        );
+    }
+
+    /// 第一个候选回 200 但内容不是合法 JSON：不把它当成功，换第二个候选取到真正的报文。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_json_from_moves_on_when_a_candidate_returns_unparsable_body() {
+        let server = MockServer::start().await;
+        mount(
+            &server,
+            "/garbled",
+            ResponseTemplate::new(200).set_body_string("<html>维护中</html>"),
+            1,
+        )
+        .await;
+        mount(
+            &server,
+            "/clean",
+            ResponseTemplate::new(200).set_body_string(r#"{"id":"1.21.1"}"#),
+            1,
+        )
+        .await;
+        let client = aurora_base::http::build_client().unwrap();
+        let plan = plan_between(&server, "/garbled", "/clean");
+        let value: serde_json::Value = get_json_from(
+            &client,
+            Some(&plan),
+            UPSTREAM,
+            &fast_policy(),
+            None,
+            "版本 JSON",
+        )
+        .await
+        .unwrap();
+        assert_eq!(value["id"], "1.21.1");
+    }
+
+    /// 两个候选都失败：聚合成 AllSourcesFailed，attempts 按尝试顺序各含自己的地址与下层原因，
+    /// source 是第二个候选的原错误。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_candidate_failing_keeps_each_reason_in_order() {
+        let server = MockServer::start().await;
+        mount(&server, "/down", ResponseTemplate::new(503), 1).await;
+        mount(
+            &server,
+            "/garbled",
+            ResponseTemplate::new(200).set_body_string("not json"),
+            1,
+        )
+        .await;
+        let client = aurora_base::http::build_client().unwrap();
+        let plan = plan_between(&server, "/down", "/garbled");
+        let err = get_json_from::<serde_json::Value>(
+            &client,
+            Some(&plan),
+            UPSTREAM,
+            &fast_policy(),
+            None,
+            "版本清单",
+        )
+        .await
+        .unwrap_err();
+        let source_text = std::error::Error::source(&err)
+            .expect("聚合错误应挂着最后一个候选的错误")
+            .to_string();
+        let Error::AllSourcesFailed {
+            context,
+            attempts,
+            last,
+        } = &err
+        else {
+            panic!("应聚合为 AllSourcesFailed，实际：{err:?}");
+        };
+        assert_eq!(context, "版本清单");
+        assert_eq!(attempts.len(), 2);
+        let down = format!("{}/down", server.uri());
+        let garbled = format!("{}/garbled", server.uri());
+        assert!(
+            attempts[0].starts_with(&format!("{down}：")),
+            "{attempts:?}"
+        );
+        assert!(
+            attempts[0].contains("503"),
+            "第一条要带上下层的状态码：{attempts:?}"
+        );
+        assert!(
+            attempts[1].starts_with(&format!("{garbled}：")),
+            "{attempts:?}"
+        );
+        assert!(
+            attempts[1].contains("解析 JSON 失败: 版本清单"),
+            "{attempts:?}"
+        );
+        assert!(
+            matches!(**last, Error::Json { ref context, .. } if context == "版本清单"),
+            "last 应是第二个候选的原错误：{last:?}"
+        );
+        assert_eq!(source_text, last.to_string());
+        assert!(
+            err.to_string()
+                .starts_with("版本清单 在全部 2 个下载源上都失败："),
+            "{err}"
+        );
+        assert!(!err.is_retryable());
     }
 
     /// 两次尝试之间的退避长到测试期间等不完，取消落在退避里时看得出有没有被打断。
@@ -391,8 +555,9 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
 
-        let err = get_json::<serde_json::Value>(
+        let err = get_json_from::<serde_json::Value>(
             &client,
+            None,
             &format!("{}/a.json", server.uri()),
             &fast_policy(),
             Some(&token),
@@ -419,22 +584,17 @@ mod tests {
             .mount(&server)
             .await;
         let client = aurora_base::http::build_client().unwrap();
-        let plan = SourcePlan::with_resolver(
-            vec![MirrorSource::Official, MirrorSource::BmclApi],
-            Arc::new(Fixed(vec![
-                format!("{}/stuck", server.uri()),
-                format!("{}/spare", server.uri()),
-            ])),
-        );
+        let plan = plan_between(&server, "/stuck", "/spare");
         let token = CancellationToken::new();
         let policy = fast_policy();
 
         let fetch = get_bytes_from(
             &client,
             Some(&plan),
-            "https://x.invalid/a",
+            UPSTREAM,
             &policy,
             Some(&token),
+            "测试报文",
         );
         let (result, waited) = cancel_midway(fetch, &token, Duration::from_millis(300)).await;
         assert_cancelled_promptly(result, waited);

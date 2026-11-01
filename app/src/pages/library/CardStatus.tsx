@@ -25,7 +25,7 @@ export function CardStatus({ inst }: { inst: InstanceSummary }) {
     case "ready":
       return (
         <div className={styles.status} data-view="ready">
-          <Button size="sm" icon="play" onClick={entry.launch}>
+          <Button size="sm" icon="play" disabledReason={entry.blocked === null ? undefined : entry.blocked} onClick={entry.launch}>
             {LAUNCH_COPY.launchShort}
           </Button>
           {view.busyElsewhere && <span className={styles.statusHint}>{LAUNCH_COPY.busyElsewhere}</span>}

@@ -16,9 +16,7 @@ impl Aurora {
     /// （官方与 BMCLAPI 镜像）：玩家的网络只通其中一个时，下载照样能换源完成，不该判为离线。
     pub async fn probe_network(&self) -> Result<bool> {
         let targets = self
-            .config()
-            .download_source
-            .source_plan()
+            .source_plan(self.config().download_source)
             .candidates(self.manifest_url())?;
         reachable_any(&self.http(), targets, PROBE_TIMEOUT).await
     }

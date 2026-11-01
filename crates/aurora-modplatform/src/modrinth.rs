@@ -162,6 +162,23 @@ impl ModrinthClient {
         }
     }
 
+    /// 取单个版本的更新日志；版本不存在返回 `None`。
+    ///
+    /// 与 [`Self::version`] 同一个端点，但只解析日志相关的几个字段：更新预览里玩家展开哪一项才取哪一项，
+    /// 列表查询一律不带日志（见 [`Self::versions`]）。
+    pub async fn version_changelog(&self, version_id: &str) -> Result<Option<ModrinthChangelog>> {
+        let url = format!("{}/version/{}", self.base_url, version_id);
+        let result = send_json(&self.retry, "modrinth.version_changelog", || {
+            self.http.get(url.as_str())
+        })
+        .await;
+        match result {
+            Ok(changelog) => Ok(Some(changelog)),
+            Err(Error::Status { status: 404, .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     /// 按一批 SHA-1 反查各自对应的版本，返回 `哈希 -> 版本` 映射；未收录的哈希不出现在结果里。
     ///
     /// 手动丢进 mods 目录的 jar 补身份时，逐个文件各问一次就是 N 次请求，一个整合包实例上百个文件
@@ -193,11 +210,14 @@ impl ModrinthClient {
     ///
     /// 未收录或已是最新的哈希不会出现在结果里，故缺键即「无更新」，不是错误。一个实例几十个 Mod
     /// 逐个查会立刻撞上 Modrinth 限流（HTTP 429），这里一次请求覆盖整批。
+    ///
+    /// `version_types` 限定只看这些发布通道的版本，空切片表示不过滤（请求体里不带这个字段）。
     pub async fn latest_versions_by_hashes(
         &self,
         sha1s: &[String],
         loaders: &[crate::model::ModLoader],
         game_versions: &[&str],
+        version_types: &[ReleaseChannel],
     ) -> Result<std::collections::HashMap<String, ModrinthVersion>> {
         // 空批次不该白打一次网络请求，也避免服务端对空 hashes 的行为差异。
         if sha1s.is_empty() {
@@ -209,12 +229,19 @@ impl ModrinthClient {
             algorithm: &'a str,
             loaders: Vec<&'a str>,
             game_versions: Vec<&'a str>,
+            // 字段可选：不过滤时整个不出现，而不是发一个空数组让服务端自行解释。
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            version_types: Vec<&'static str>,
         }
         let body = UpdateBody {
             hashes: sha1s,
             algorithm: "sha1",
             loaders: loaders.iter().map(|l| l.modrinth_facet()).collect(),
             game_versions: game_versions.to_vec(),
+            version_types: version_types
+                .iter()
+                .map(|channel| channel.modrinth_name())
+                .collect(),
         };
         let url = format!("{}/version_files/update", self.base_url);
         send_json(&self.retry, "modrinth.version_files.update", || {
@@ -655,6 +682,18 @@ impl ModrinthVersion {
     }
 }
 
+/// 单个版本的更新日志（`GET /version/{id}` 的一部分字段）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModrinthChangelog {
+    /// 版本 id。
+    pub id: String,
+    /// 所属工程 id。
+    pub project_id: String,
+    /// 更新日志正文（Markdown）；作者没写时平台给 `null`。
+    #[serde(default)]
+    pub changelog: Option<String>,
+}
+
 /// 版本依赖。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModrinthDependency {
@@ -1069,7 +1108,7 @@ mod tests {
 
         let hashes = vec!["hash-a".to_owned(), "hash-b".to_owned()];
         let got = client(&server)
-            .latest_versions_by_hashes(&hashes, &[ModLoader::NeoForge], &["1.21.1"])
+            .latest_versions_by_hashes(&hashes, &[ModLoader::NeoForge], &["1.21.1"], &[])
             .await
             .unwrap();
 
@@ -1079,16 +1118,148 @@ mod tests {
         assert!(!got.contains_key("hash-b"));
     }
 
+    /// 发布通道过滤下推给服务端：请求体的 version_types 恰为给定通道的 Modrinth 名，顺序照给定顺序。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn latest_versions_by_hashes_sends_version_types_when_given() {
+        for (channels, expected) in [
+            (
+                vec![ReleaseChannel::Release],
+                serde_json::json!(["release"]),
+            ),
+            (
+                vec![ReleaseChannel::Release, ReleaseChannel::Beta],
+                serde_json::json!(["release", "beta"]),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/version_files/update"))
+                .and(body_partial_json(serde_json::json!({
+                    "hashes": ["hash-a"],
+                    "version_types": expected.clone()
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let got = client(&server)
+                .latest_versions_by_hashes(
+                    &["hash-a".to_owned()],
+                    &[ModLoader::Fabric],
+                    &["1.21.1"],
+                    &channels,
+                )
+                .await
+                .unwrap();
+            assert!(got.is_empty());
+            // body_partial_json 只验包含；数组相等还要再看一遍原文，防止多带了别的通道。
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1);
+            let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(body["version_types"], expected);
+        }
+    }
+
+    /// 不过滤通道时请求体里不出现 version_types 这个键。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn latest_versions_by_hashes_omits_version_types_when_empty() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/version_files/update"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client(&server)
+            .latest_versions_by_hashes(
+                &["hash-a".to_owned()],
+                &[ModLoader::Fabric],
+                &["1.21.1"],
+                &[],
+            )
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let keys: Vec<&str> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert!(!keys.contains(&"version_types"), "请求体：{body}");
+        assert_eq!(body["hashes"], serde_json::json!(["hash-a"]));
+        assert_eq!(body["loaders"], serde_json::json!(["fabric"]));
+    }
+
+    /// 单版本更新日志：打 /version/{id}，取回 Markdown 正文；版本不存在为 None；各只请求一次。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn version_changelog_reads_body_and_maps_404_to_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/version/IZskiJmZ"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "IZskiJmZ",
+                "project_id": "AANobbMI",
+                "name": "Sodium 0.5.3",
+                "changelog": "## 0.5.3\n- 修复渲染错误\n- 提升帧率",
+                "version_type": "release"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/version/ghost"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/version/nolog"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "nolog",
+                "project_id": "AANobbMI",
+                "changelog": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let c = client(&server);
+        let got = c
+            .version_changelog("IZskiJmZ")
+            .await
+            .unwrap()
+            .expect("应命中版本");
+        assert_eq!(got.id, "IZskiJmZ");
+        assert_eq!(got.project_id, "AANobbMI");
+        assert_eq!(
+            got.changelog.as_deref(),
+            Some("## 0.5.3\n- 修复渲染错误\n- 提升帧率")
+        );
+        assert!(c.version_changelog("ghost").await.unwrap().is_none());
+        let empty = c.version_changelog("nolog").await.unwrap().unwrap();
+        assert_eq!(empty.changelog, None);
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
+
     /// 空批次直接短路，不打网络请求。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn empty_batches_skip_the_request() {
         let server = MockServer::start().await;
         let c = client(&server);
         assert!(
-            c.latest_versions_by_hashes(&[], &[ModLoader::Fabric], &["1.21.1"])
-                .await
-                .unwrap()
-                .is_empty()
+            c.latest_versions_by_hashes(
+                &[],
+                &[ModLoader::Fabric],
+                &["1.21.1"],
+                &[ReleaseChannel::Release]
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
         assert!(c.versions_by_hashes(&[]).await.unwrap().is_empty());
         assert!(c.projects(&[]).await.unwrap().is_empty());

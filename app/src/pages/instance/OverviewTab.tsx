@@ -11,6 +11,7 @@ import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, per
 import { needsReimport } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
+import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
@@ -37,18 +38,35 @@ import { EmptyState } from "../../ui/EmptyState";
 import { IconButton } from "../../ui/IconButton";
 import { KV } from "../../ui/KV";
 import { LoaderTag } from "../../ui/LoaderTag";
+import { MoreMenu } from "../../ui/MoreMenu";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { Skeleton } from "../../ui/Skeleton";
 import { StatGrid, StatTile } from "../../ui/StatTile";
 import { Tag } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
 import { Tooltip } from "../../ui/Tooltip";
-import { HERO_COPY, OVERVIEW_COPY } from "./copy";
+import { HERO_COPY, OVERVIEW_COPY, WORLD_BACKUP_COPY } from "./copy";
 import { useJavaInfo, useMemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
-import { chosenRuntime, isPendingModUpdate, modRows, modTotals, overviewBanner, peekLayout, peekPerRow, sortWorlds, weeklyHours, worldName, WORLDS_PREVIEW, type ModRow } from "./model";
+import {
+  chosenRuntime,
+  enterWorldBlock,
+  isPendingModUpdate,
+  modRows,
+  modTotals,
+  overviewBanner,
+  peekLayout,
+  peekPerRow,
+  sortWorlds,
+  weeklyHours,
+  worldName,
+  WORLDS_PREVIEW,
+  type ModRow,
+} from "./model";
 import { lockReason, type InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
+import { useWorldOps, WorldBackupsModal, worldRef, type WorldRef } from "./WorldBackupsModal";
+import { UpdatePreviewModal } from "./UpdatePreviewModal";
 
 export interface OverviewTabProps {
   inst: InstanceSummary;
@@ -76,9 +94,9 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashActive, upda
       {banner === "installing" && view.kind === "installing" && <InstallingBanner instanceId={inst.id} />}
       <StatsCard inst={inst} content={content} mods={mods} outdated={outdated} />
       <div className={styles.overviewGrid}>
-        <WorldsCard content={content} ops={ops} />
+        <WorldsCard inst={inst} view={view} content={content} ops={ops} />
         <InfoCard inst={inst} queryId={queryId} onTab={onTab} />
-        <ModsPeekCard inst={inst} mods={mods} updates={updates} ops={ops} onTab={onTab} />
+        <ModsPeekCard inst={inst} queryId={queryId} mods={mods} updates={updates} ops={ops} onTab={onTab} />
         <PacksCard inst={inst} content={content} />
       </div>
     </div>
@@ -266,9 +284,20 @@ const MODE_TILE: Readonly<Record<keyof typeof MODE_LABEL, WorldMode | null>> = {
   spectator: null,
 };
 
-function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentDto>; ops: InstanceOps }) {
+function WorldsCard({ inst, view, content, ops }: { inst: InstanceSummary; view: LaunchView; content: ResourceResult<InstanceContentDto>; ops: InstanceOps }) {
   const now = useNow(30_000);
+  // 不经 useLaunch：它按片订阅的启动视图随下载进度变，页面传进来的 view 只在阶段变化时变，存档行用它就够了
+  const actions = useLauncherActions();
+  const run = useRunner();
+  // 直达按世界文件夹名：level.dat 里的世界名可以重名，也可以和文件夹名不同
+  const enter = (dirName: string) => void run(() => actions.quickPlay(inst.id, { kind: "singleplayer", world_dir_name: dirName }), ACTION_ERROR.launch(inst.name));
   const [expanded, setExpanded] = useState(false);
+  const worldOps = useWorldOps(inst, ops);
+  const block = enterWorldBlock(inst, view.kind, worldOps.busyWorlds.length > 0);
+  const enterReason = block === null ? undefined : OVERVIEW_COPY.enterWorldBlocked[block];
+  // 弹窗关上后仍记着最近看的那个存档：退场动画期间标题与列表不变成空的
+  const [backupsOf, setBackupsOf] = useState<WorldRef | null>(null);
+  const [backupsOpen, setBackupsOpen] = useState(false);
   const load = useModuleView(content);
   const worlds = content.status === "ready" ? sortWorlds(content.data.worlds) : [];
   const total = worlds.reduce((sum, w) => sum + w.size_bytes, 0);
@@ -318,8 +347,17 @@ function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentD
                       )}
                     </span>
                   </div>
-                  <span className={styles.rowMeta}>{formatBytes(w.size_bytes)}</span>
+                  <span className={cx(styles.rowMeta, styles.worldSize)}>{formatBytes(w.size_bytes)}</span>
+                  <IconButton icon="play" label={OVERVIEW_COPY.enterWorld(name)} size="sm" disabledReason={enterReason} onClick={() => enter(w.dir_name)} />
                   <IconButton icon="folder" label={OVERVIEW_COPY.openWorld(name)} size="sm" onClick={() => ops.openFolder("world", w.dir_name)} />
+                  <MoreMenu
+                    size="sm"
+                    label={WORLD_BACKUP_COPY.rowMenu(name)}
+                    items={worldOps.menu(worldRef(w), () => {
+                      setBackupsOf(worldRef(w));
+                      setBackupsOpen(true);
+                    })}
+                  />
                 </li>
               );
             })}
@@ -333,6 +371,7 @@ function WorldsCard({ content, ops }: { content: ResourceResult<InstanceContentD
           )}
         </>
       )}
+      {backupsOf !== null && <WorldBackupsModal inst={inst} world={backupsOf} open={backupsOpen} onClose={() => setBackupsOpen(false)} worldOps={worldOps} />}
     </Card>
   );
 }
@@ -424,12 +463,14 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
 
 function ModsPeekCard({
   inst,
+  queryId,
   mods,
   updates,
   ops,
   onTab,
 }: {
   inst: InstanceSummary;
+  queryId: string | null;
   mods: ResourceResult<InstalledMod[]>;
   updates: ResourceResult<UpdateCandidate[]>;
   ops: InstanceOps;
@@ -445,6 +486,8 @@ function ModsPeekCard({
   const rows: ModRow[] = mods.status === "ready" ? modRows(mods.data, updates.status === "ready" ? updates.data : null) : [];
   const { total, partial } = modTotals(inst, rows.length);
   const outdated = rows.filter((r) => r.update !== null);
+  // 「全部更新」先打开更新预览，与 Mod 标签同一个弹窗；key 每次打开递增，勾选从默认全选重新开始
+  const [preview, setPreview] = useState<{ key: number; open: boolean } | null>(null);
 
   const subtitle = vanilla || load.view !== "ready" || rows.length === 0 ? undefined : partial ? OVERVIEW_COPY.modsPartial(total, rows.length) : OVERVIEW_COPY.modsCount(total);
 
@@ -504,7 +547,7 @@ function ModsPeekCard({
                   icon="download"
                   disabledReason={lockReason(ops.locks.mods, "mods")}
                   loading={updating}
-                  onClick={() => void run(() => actions.updateAllMods(inst.id), ACTION_ERROR.updateMods)}
+                  onClick={() => setPreview((p) => ({ key: p === null ? 0 : p.key + 1, open: true }))}
                 >
                   {OVERVIEW_COPY.updateAll}
                 </Button>
@@ -517,6 +560,19 @@ function ModsPeekCard({
             </Callout>
           )}
         </>
+      )}
+      {preview !== null && (
+        <UpdatePreviewModal
+          key={preview.key}
+          open={preview.open}
+          queryId={queryId}
+          rows={outdated}
+          onClose={() => setPreview((p) => (p === null ? p : { ...p, open: false }))}
+          onConfirm={(picked) => {
+            setPreview((p) => (p === null ? p : { ...p, open: false }));
+            void run(() => actions.updateAllMods(inst.id, picked), ACTION_ERROR.updateMods);
+          }}
+        />
       )}
     </Card>
   );

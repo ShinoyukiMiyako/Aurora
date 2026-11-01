@@ -1,4 +1,4 @@
-//! 主页「固定的服务器」：固定列表的读写、游戏多人列表的读取，以及带缓存的状态查询。
+//! 主页「固定的服务器」：固定列表的读写（含「加入」时记住的实例）、游戏多人列表的读取，以及带缓存的状态查询。
 //!
 //! 状态查询走 Server List Ping（[`slp`]），每台单独限时 [`PING_TIMEOUT`]，全部并发；结果按地址缓存
 //! [`STATUS_TTL`]，主页定时刷新不会每次都去敲一遍服务器。最近一次连通的时刻与在线人数另记一份落盘，
@@ -14,6 +14,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use aurora_instance::is_safe_instance_id;
+
+use crate::InstanceError;
 use crate::config::PinnedServer;
 use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
@@ -336,13 +339,17 @@ impl Aurora {
         &self.config().pinned_servers
     }
 
-    /// 整体替换固定列表：逐个校验地址，同一地址只留第一次出现的那条；名字为空时用地址当名字。
+    /// 整体替换固定列表：逐个校验地址与记住的实例 id，同一地址只留第一次出现的那条（连同它记住的实例）；
+    /// 名字为空时用地址当名字。实例是否存在不在这里查：列表随时可能变，界面把找不到的当作没记住。
     /// 落盘仍需调用 [`Aurora::save_config`]。
     pub fn set_pinned_servers(&mut self, servers: Vec<PinnedServer>) -> Result<()> {
         let mut seen = Vec::new();
         let mut cleaned = Vec::with_capacity(servers.len());
         for server in servers {
             let key = parse_server_address(&server.address)?.key();
+            if let Some(id) = &server.instance {
+                ensure_safe_instance_id(id)?;
+            }
             if seen.contains(&key) {
                 continue;
             }
@@ -352,10 +359,63 @@ impl Aurora {
                 "" => address.clone(),
                 name => name.to_owned(),
             };
-            cleaned.push(PinnedServer { name, address });
+            cleaned.push(PinnedServer {
+                name,
+                address,
+                instance: server.instance,
+            });
         }
         self.config_mut().pinned_servers = cleaned;
         Ok(())
+    }
+
+    /// 记住或清掉一台固定服务器「加入」时用的实例。按地址的身份找（主机不分大小写，没写端口等于
+    /// 25565），不在固定列表里报 [`CoreError::ServerNotPinned`]。实例是否存在由调用方检查。
+    /// 落盘仍需调用 [`Aurora::save_config`]。
+    pub fn set_pinned_server_instance(
+        &mut self,
+        address: &str,
+        instance: Option<String>,
+    ) -> Result<()> {
+        let key = parse_server_address(address)?.key();
+        if let Some(id) = &instance {
+            ensure_safe_instance_id(id)?;
+        }
+        let pinned = self
+            .config_mut()
+            .pinned_servers
+            .iter_mut()
+            .find(|server| parse_server_address(&server.address).is_ok_and(|a| a.key() == key))
+            .ok_or_else(|| CoreError::ServerNotPinned {
+                address: address.to_owned(),
+            })?;
+        pinned.instance = instance;
+        Ok(())
+    }
+
+    /// 实例改名后，把记住 `old` 的固定服务器改成记住 `new`。与侧栏固定同一口径：按 id 精确相等。
+    /// 返回配置是否有变化。
+    pub(crate) fn rename_pinned_instance(&mut self, old: &str, new: &str) -> bool {
+        let mut changed = false;
+        for server in &mut self.config_mut().pinned_servers {
+            if server.instance.as_deref() == Some(old) {
+                server.instance = Some(new.to_owned());
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// 实例删除后，记住它的固定服务器改回没记住。返回配置是否有变化。
+    pub(crate) fn forget_pinned_instance(&mut self, id: &str) -> bool {
+        let mut changed = false;
+        for server in &mut self.config_mut().pinned_servers {
+            if server.instance.as_deref() == Some(id) {
+                server.instance = None;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// 游戏多人游戏列表里的服务器：读游戏目录根下与各版本目录（隔离实例）下的 `servers.dat`，
@@ -388,6 +448,15 @@ impl Aurora {
             seen.push(key);
         }
         Ok(out)
+    }
+}
+
+/// 实例 id 来自前端，写进配置之前与拼路径时同一标准。
+fn ensure_safe_instance_id(id: &str) -> Result<()> {
+    if is_safe_instance_id(id) {
+        Ok(())
+    } else {
+        Err(InstanceError::InvalidId { id: id.to_owned() }.into())
     }
 }
 
@@ -477,6 +546,7 @@ mod tests {
         let pin = |name: &str, address: &str| PinnedServer {
             name: name.to_owned(),
             address: address.to_owned(),
+            instance: None,
         };
         aurora
             .set_pinned_servers(vec![
@@ -499,6 +569,163 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, CoreError::InvalidServerAddress { .. }));
         assert_eq!(aurora.pinned_servers().len(), 2);
+    }
+
+    fn bound(name: &str, address: &str, instance: Option<&str>) -> PinnedServer {
+        PinnedServer {
+            name: name.to_owned(),
+            address: address.to_owned(),
+            instance: instance.map(str::to_owned),
+        }
+    }
+
+    fn test_aurora(dir: &Path) -> Aurora {
+        Aurora::for_test(
+            AuroraConfig::default(),
+            dir.to_path_buf(),
+            dir.join(".minecraft"),
+        )
+    }
+
+    #[test]
+    fn set_pinned_servers_keeps_instances_and_rejects_unsafe_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut aurora = test_aurora(dir.path());
+        aurora
+            .set_pinned_servers(vec![
+                bound("家", "10.0.0.2", Some("生存 1.21.1")),
+                // 同一台服务器的第二条连同它记住的实例一起丢掉，留第一次出现的那条。
+                bound("重复", "10.0.0.2:25565", Some("创造")),
+                bound("小游戏", "mini.example:25570", None),
+                // 实例存不存在不在这里查。
+                bound("旧服", "old.example", Some("早就删了")),
+            ])
+            .unwrap();
+        assert_eq!(
+            aurora.pinned_servers(),
+            &[
+                bound("家", "10.0.0.2", Some("生存 1.21.1")),
+                bound("小游戏", "mini.example:25570", None),
+                bound("旧服", "old.example", Some("早就删了")),
+            ]
+        );
+
+        for unsafe_id in ["../outside", r"..\outside", "a/b", ""] {
+            let err = aurora
+                .set_pinned_servers(vec![
+                    bound("ok", "ok.example", None),
+                    bound("坏", "bad.example", Some(unsafe_id)),
+                ])
+                .unwrap_err();
+            assert!(
+                matches!(&err, CoreError::Instance(InstanceError::InvalidId { id }) if id == unsafe_id),
+                "{unsafe_id:?}: {err:?}"
+            );
+        }
+        // 被拒绝时原列表不动。
+        assert_eq!(aurora.pinned_servers().len(), 3);
+    }
+
+    #[test]
+    fn set_pinned_server_instance_matches_by_address_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut aurora = test_aurora(dir.path());
+        aurora
+            .set_pinned_servers(vec![
+                bound("示例", "play.example.cn", None),
+                bound("另一台", "other.example:25570", Some("小游戏")),
+            ])
+            .unwrap();
+
+        // 大小写不同、显式写出缺省端口，都是同一台。
+        aurora
+            .set_pinned_server_instance(" PLAY.example.cn:25565 ", Some("生存".to_owned()))
+            .unwrap();
+        assert_eq!(
+            aurora.pinned_servers(),
+            &[
+                bound("示例", "play.example.cn", Some("生存")),
+                bound("另一台", "other.example:25570", Some("小游戏")),
+            ]
+        );
+
+        // 改记另一个，再清掉；别的固定项不受影响。
+        aurora
+            .set_pinned_server_instance("play.example.cn", Some("创造".to_owned()))
+            .unwrap();
+        assert_eq!(aurora.pinned_servers()[0].instance.as_deref(), Some("创造"));
+        aurora
+            .set_pinned_server_instance("play.example.cn", None)
+            .unwrap();
+        assert_eq!(aurora.pinned_servers()[0].instance, None);
+        assert_eq!(
+            aurora.pinned_servers()[1].instance.as_deref(),
+            Some("小游戏")
+        );
+
+        // 端口不同就是另一台服务器：没固定。
+        let err = aurora
+            .set_pinned_server_instance("play.example.cn:25566", Some("生存".to_owned()))
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::ServerNotPinned { address } if address == "play.example.cn:25566"),
+            "{err:?}"
+        );
+        assert_eq!(err.to_string(), "服务器「play.example.cn:25566」没有固定");
+
+        let err = aurora
+            .set_pinned_server_instance("play.example.cn", Some("../x".to_owned()))
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Instance(InstanceError::InvalidId { .. })
+        ));
+        let err = aurora
+            .set_pinned_server_instance("bad:0", None)
+            .unwrap_err();
+        assert!(matches!(err, CoreError::InvalidServerAddress { .. }));
+        assert_eq!(aurora.pinned_servers()[0].instance, None);
+    }
+
+    #[test]
+    fn pinned_instance_follows_rename_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut aurora = test_aurora(dir.path());
+        aurora
+            .set_pinned_servers(vec![
+                bound("一", "a.example", Some("生存")),
+                bound("二", "b.example", Some("生存")),
+                bound("三", "c.example", Some("生存服")),
+                bound("四", "d.example", None),
+            ])
+            .unwrap();
+        let ids = |aurora: &Aurora| -> Vec<Option<String>> {
+            aurora
+                .pinned_servers()
+                .iter()
+                .map(|s| s.instance.clone())
+                .collect()
+        };
+
+        assert!(aurora.rename_pinned_instance("生存", "生存 2"));
+        // 只认精确相等：「生存服」不因前缀相同被改。
+        assert_eq!(
+            ids(&aurora),
+            vec![
+                Some("生存 2".to_owned()),
+                Some("生存 2".to_owned()),
+                Some("生存服".to_owned()),
+                None
+            ]
+        );
+        assert!(!aurora.rename_pinned_instance("生存", "别的"));
+
+        assert!(aurora.forget_pinned_instance("生存 2"));
+        assert_eq!(
+            ids(&aurora),
+            vec![None, None, Some("生存服".to_owned()), None]
+        );
+        assert!(!aurora.forget_pinned_instance("生存 2"));
     }
 
     #[tokio::test]
@@ -530,6 +757,7 @@ mod tests {
             pinned_servers: vec![PinnedServer {
                 name: "整合包服".to_owned(),
                 address: "pack.example:25570".to_owned(),
+                instance: None,
             }],
             ..AuroraConfig::default()
         };

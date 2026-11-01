@@ -297,6 +297,32 @@
   gap: var(--sk-space-4);
 }
 
+.warnLine {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-warn);
+}
+
+.manualBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+  min-width: 0;
+}
+
+.manualPath {
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  font-weight: var(--sk-w-mono);
+  user-select: text;
+}
+
+.manualMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+}
+
 /* ---------------------------------------------------------------- 游戏目录 */
 
 .pathRow {

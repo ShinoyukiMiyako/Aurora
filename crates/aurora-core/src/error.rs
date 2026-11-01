@@ -94,6 +94,13 @@ pub enum CoreError {
     /// 数据包要装进的存档在该实例里不存在。
     #[error("实例 {version_id} 里没有存档 {world}")]
     WorldNotFound { version_id: String, world: String },
+    /// 要恢复或删除的备份不在这个存档的备份清单里，或清单里有、盘上已经没有了。
+    #[error("实例 {version_id} 的存档 {world} 没有备份 {file}")]
+    WorldBackupNotFound {
+        version_id: String,
+        world: String,
+        file: String,
+    },
     /// 平台给出的文件名不能安全地落盘（含路径分隔符、`..` 等）。
     #[error("{platform} 给出的文件名不安全：{file_name}")]
     UnsafeFileName {
@@ -101,8 +108,16 @@ pub enum CoreError {
         file_name: String,
     },
     /// CurseForge 作者禁止第三方分发，这些文件拿不到下载地址，只能去网页手动下载。
-    #[error("这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：{}", files.join("、"))]
-    FileDistributionBlocked { files: Vec<String> },
+    #[error(
+        "这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：{}",
+        blocked_names(files)
+    )]
+    FileDistributionBlocked {
+        files: Vec<crate::blocked::BlockedFile>,
+    },
+    /// 认领手动下载的文件时，选的文件夹不存在、不是文件夹或读不了。
+    #[error("{reason}")]
+    ClaimFolderInvalid { path: PathBuf, reason: String },
     /// 新实例的名字不可用。
     #[error("实例名 {name} 不可用：{}", rule.describe())]
     InstanceNameInvalid {
@@ -150,6 +165,9 @@ pub enum CoreError {
         address: String,
         reason: &'static str,
     },
+    /// 要改的服务器不在固定列表里。
+    #[error("服务器「{address}」没有固定")]
+    ServerNotPinned { address: String },
     /// 游戏目录不能用作当前目录。
     #[error("游戏目录 {path} 不能用：{problem}")]
     InvalidGameDirectory {
@@ -159,6 +177,81 @@ pub enum CoreError {
     /// 读不到本机物理内存信息。
     #[error("读不到本机内存信息")]
     MemoryUnavailable,
+    /// 手动添加的 Java 路径不能用。`source` 只在识别失败（拉起了 java -version）时有。
+    #[error("{}", reason.message(path))]
+    JavaPathInvalid {
+        path: PathBuf,
+        reason: JavaPathProblem,
+        #[source]
+        source: Option<aurora_java::Error>,
+    },
+    /// 手动添加的 Java 缺少运行时文件，多半没装完整；`missing` 相对 Java 根目录、以 `/` 分隔。
+    #[error("这个 Java 缺少 {}，可能没装完整：{}", missing.join("、"), path.display())]
+    JavaRuntimeIncomplete { path: PathBuf, missing: Vec<String> },
+    /// 读写 Windows 图形设置里某个程序的显卡偏好失败。`path` 是那个程序。
+    #[error("写入 {path} 的显卡偏好失败")]
+    GpuPreferenceWrite {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// 要保存为默认设置的实例，工作目录里一个设置文件都没有（还没进过游戏）。
+    #[error("实例 {id} 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存")]
+    TemplateSourceEmpty { id: String },
+    /// 玩家选了以离线方式进单人，但这个账户此刻不能这样启动。
+    #[error("{account} 不能以离线方式进单人：{}", reason.describe())]
+    OfflineFallbackRefused {
+        account: String,
+        reason: OfflineFallbackRefusal,
+    },
+    /// 这个实例写不成 Modrinth 整合包。`loader` 只在加载器不受支持时给出它的名字。
+    #[error("{}", reason.describe(loader.as_deref()))]
+    ModpackExportUnsupported {
+        id: String,
+        reason: crate::export::ExportBlock,
+        loader: Option<String>,
+    },
+}
+
+/// 不能以离线方式进单人的原因。[`OfflineFallbackRefusal::as_str`] 是给前端分支用的稳定码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfflineFallbackRefusal {
+    /// 离线账户本来就不经验证，没有什么可降级的。
+    OfflineAccount,
+    /// 登录已被判定失效：降级只为服务或网络故障兜底，凭据失效应当重新登录。
+    ReloginRequired,
+    /// 门面没有这个账户最近一次验证失败的记录：启动器重开过，或这次失败已经降级过一次。
+    NoRecentFailure,
+}
+
+impl OfflineFallbackRefusal {
+    /// 稳定的 snake_case 码。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OfflineFallbackRefusal::OfflineAccount => "offline_account",
+            OfflineFallbackRefusal::ReloginRequired => "relogin_required",
+            OfflineFallbackRefusal::NoRecentFailure => "no_recent_failure",
+        }
+    }
+
+    /// 给人看的原因。
+    pub fn describe(self) -> &'static str {
+        match self {
+            OfflineFallbackRefusal::OfflineAccount => "离线账户本来就不经验证",
+            OfflineFallbackRefusal::ReloginRequired => "登录已失效，需要重新登录",
+            OfflineFallbackRefusal::NoRecentFailure => {
+                "没有这个账户最近一次验证失败的记录，先重试一次启动"
+            }
+        }
+    }
+}
+
+fn blocked_names(files: &[crate::blocked::BlockedFile]) -> String {
+    files
+        .iter()
+        .map(|file| file.file_name.as_str())
+        .collect::<Vec<_>>()
+        .join("、")
 }
 
 /// 游戏目录不能用的具体原因。[`GameDirProblem::code`] 是给前端分支用的稳定码。
@@ -197,6 +290,51 @@ impl std::fmt::Display for GameDirProblem {
     }
 }
 
+/// 手动添加的 Java 路径不能用的具体原因。[`JavaPathProblem::code`] 是给前端分支用的稳定码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavaPathProblem {
+    /// 不是绝对路径。
+    NotAbsolute,
+    /// 文件名不是 java.exe 或 javaw.exe。
+    NotJavaExecutable,
+    /// 文件不存在。
+    NotFound,
+    /// java -version 跑不起来或输出里认不出版本。
+    ProbeFailed,
+    /// java -version 在限时内没有结束。
+    ProbeTimeout,
+}
+
+impl JavaPathProblem {
+    /// 稳定的 snake_case 码。
+    pub fn code(self) -> &'static str {
+        match self {
+            JavaPathProblem::NotAbsolute => "not_absolute",
+            JavaPathProblem::NotJavaExecutable => "not_java_executable",
+            JavaPathProblem::NotFound => "not_found",
+            JavaPathProblem::ProbeFailed => "probe_failed",
+            JavaPathProblem::ProbeTimeout => "probe_timeout",
+        }
+    }
+
+    /// 提示原文，直接作为界面上的提示正文。
+    fn message(self, path: &std::path::Path) -> String {
+        let path = path.display();
+        match self {
+            JavaPathProblem::NotAbsolute => format!("Java 路径须是绝对路径：{path}"),
+            JavaPathProblem::NotJavaExecutable => {
+                format!("只能添加 java.exe 或 javaw.exe：{path}")
+            }
+            JavaPathProblem::NotFound => format!("找不到这个文件：{path}"),
+            JavaPathProblem::ProbeFailed => format!("识别不出这个 Java：{path}"),
+            JavaPathProblem::ProbeTimeout => format!(
+                "这个 Java {} 秒内没有给出版本信息，已放弃：{path}",
+                aurora_java::PROBE_TIMEOUT.as_secs()
+            ),
+        }
+    }
+}
+
 impl CoreError {
     /// 是否由取消令牌引起。取消可能从下载引擎、安装器或 Java 下载任一层冒上来，
     /// 上层据此把它与真正的失败分开（前端不弹错误、任务记为已取消）。
@@ -207,6 +345,7 @@ impl CoreError {
             CoreError::Java(err) => err.is_cancelled(),
             CoreError::Auth(err) => err.is_cancelled(),
             CoreError::Modpack(aurora_modpack::Error::Cancelled) => true,
+            CoreError::Instance(aurora_instance::Error::Cancelled) => true,
             _ => false,
         }
     }
@@ -232,15 +371,130 @@ mod tests {
         assert!(CoreError::Auth(aurora_auth::AuthError::Cancelled).is_cancelled());
         assert!(!CoreError::Auth(aurora_auth::AuthError::ReloginRequired).is_cancelled());
         assert!(CoreError::Modpack(aurora_modpack::Error::Cancelled).is_cancelled());
+        assert!(CoreError::Instance(aurora_instance::Error::Cancelled).is_cancelled());
+        assert!(
+            !CoreError::Instance(aurora_instance::Error::WorldInUse {
+                path: PathBuf::from("saves/w"),
+            })
+            .is_cancelled()
+        );
+
+        assert!(
+            !CoreError::OfflineFallbackRefused {
+                account: "PetalPlayer".into(),
+                reason: OfflineFallbackRefusal::NoRecentFailure,
+            }
+            .is_cancelled()
+        );
 
         // 真正的失败不能被当成取消。
         assert!(!CoreError::NoJava { major: 17 }.is_cancelled());
+        assert!(
+            !CoreError::JavaPathInvalid {
+                path: PathBuf::from("java.exe"),
+                reason: JavaPathProblem::ProbeTimeout,
+                source: None,
+            }
+            .is_cancelled()
+        );
         assert!(
             !CoreError::Download(aurora_download::Error::Status {
                 url: "http://x".into(),
                 status: 404,
             })
             .is_cancelled()
+        );
+    }
+
+    /// 手动添加 Java 的提示原文直接显示给用户：每种原因的码与原文都钉住。
+    #[test]
+    fn java_path_problems_have_stable_codes_and_messages() {
+        let path = PathBuf::from(r"D:\Java\jdk-21\bin\java.exe");
+        let shown = path.display();
+        for (reason, code, message) in [
+            (
+                JavaPathProblem::NotAbsolute,
+                "not_absolute",
+                format!("Java 路径须是绝对路径：{shown}"),
+            ),
+            (
+                JavaPathProblem::NotJavaExecutable,
+                "not_java_executable",
+                format!("只能添加 java.exe 或 javaw.exe：{shown}"),
+            ),
+            (
+                JavaPathProblem::NotFound,
+                "not_found",
+                format!("找不到这个文件：{shown}"),
+            ),
+            (
+                JavaPathProblem::ProbeFailed,
+                "probe_failed",
+                format!("识别不出这个 Java：{shown}"),
+            ),
+            (
+                JavaPathProblem::ProbeTimeout,
+                "probe_timeout",
+                format!("这个 Java 10 秒内没有给出版本信息，已放弃：{shown}"),
+            ),
+        ] {
+            assert_eq!(reason.code(), code);
+            let err = CoreError::JavaPathInvalid {
+                path: path.clone(),
+                reason,
+                source: None,
+            };
+            assert_eq!(err.to_string(), message);
+            assert!(std::error::Error::source(&err).is_none());
+        }
+
+        let probed = CoreError::JavaPathInvalid {
+            path: path.clone(),
+            reason: JavaPathProblem::ProbeFailed,
+            source: Some(aurora_java::Error::JavaVersionParse {
+                output: "garbage".into(),
+            }),
+        };
+        assert_eq!(
+            std::error::Error::source(&probed).map(ToString::to_string),
+            Some("无法从 java -version 输出解析版本号：garbage".to_owned())
+        );
+
+        let incomplete = CoreError::JavaRuntimeIncomplete {
+            path: path.clone(),
+            missing: vec!["release".into(), "lib/modules".into()],
+        };
+        assert_eq!(
+            incomplete.to_string(),
+            format!("这个 Java 缺少 release、lib/modules，可能没装完整：{shown}")
+        );
+    }
+
+    #[test]
+    fn offline_fallback_refusal_codes_and_message() {
+        let all = [
+            (OfflineFallbackRefusal::OfflineAccount, "offline_account"),
+            (OfflineFallbackRefusal::ReloginRequired, "relogin_required"),
+            (OfflineFallbackRefusal::NoRecentFailure, "no_recent_failure"),
+        ];
+        for (reason, code) in all {
+            assert_eq!(reason.as_str(), code);
+        }
+        let err = CoreError::OfflineFallbackRefused {
+            account: "PetalPlayer".into(),
+            reason: OfflineFallbackRefusal::ReloginRequired,
+        };
+        assert_eq!(
+            err.to_string(),
+            "PetalPlayer 不能以离线方式进单人：登录已失效，需要重新登录"
+        );
+        assert_eq!(
+            CoreError::OfflineFallbackRefused {
+                account: "Steve".into(),
+                reason: OfflineFallbackRefusal::OfflineAccount,
+            }
+            .to_string(),
+            "Steve 不能以离线方式进单人：离线账户本来就不经验证"
         );
     }
 }

@@ -10,12 +10,14 @@
 //! 经它装配的下载池与 Java 下载都会响应取消。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use aurora_auth::MsaEndpoints;
 use aurora_base::retry::RetryPolicy;
 use aurora_download::{
-    CancellationToken, DownloadConfig, DownloadPool, DownloadProgress, Downloader,
+    CancellationToken, DownloadConfig, DownloadPool, DownloadProgress, Downloader, MirrorResolver,
+    SourceHealth, SourceResolver, SourceSpeedCache,
 };
 use aurora_install::{GameLayout, InstallContext, VERSION_MANIFEST_V2};
 use aurora_instance::IsolationPolicy;
@@ -27,21 +29,26 @@ use crate::appearance::{Appearance, AppearancePatch};
 use crate::config::{AfterLaunch, AuroraConfig, DownloadSourcePolicy, MemorySettings};
 use crate::error::Result;
 use crate::event::{CoreEvent, EventSink};
+use crate::gpu::{GpuPreferenceStore, RegistryGpuPreferences};
 
 /// 下载进度事件的最小间隔。采样器每 100 ms 推一次快照，逐文件完成时还会额外推一次；
 /// 上千个小文件的资源批次若逐条转发，事件通道与前端 IPC 都会被灌满，按此间隔只留最新快照。
-const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 门面：组合下层 crate 的统一入口。
 #[derive(Clone)]
 pub struct Aurora {
     config: AuroraConfig,
     http: reqwest::Client,
+    /// 不自动跟随跳转的客户端，只给带下载凭据的任务用：自动跟随会把凭据头原样带到下一跳的主机，
+    /// 由下载引擎逐跳决定带不带。
+    http_manual: reqwest::Client,
     runtime: RuntimeContext,
     data_dir: PathBuf,
     game_dir: PathBuf,
     config_path: PathBuf,
     // 远端端点基址：生产默认，测试注入 mock。
+    /// 版本清单的官方地址；在官方与镜像之间选源交给源计划。
     manifest_url: String,
     modrinth_base: String,
     curseforge_base: String,
@@ -54,10 +61,29 @@ pub struct Aurora {
     /// 工程版本列表的短时缓存。放在门面上而不是进程全局：快照克隆的是同一个句柄，跨命令复用；
     /// 各自新建的门面（含测试）互不串用。
     pub(crate) mod_versions: crate::modversions::SharedVersionCache,
+    /// 下载源测速结论。放在门面上随快照共享：各长任务生成下载计划时共用一份未过期的结论，
+    /// TTL 内不重复探测。
+    pub(crate) source_speed: Arc<SourceSpeedCache>,
+    /// 把官方地址改写到各下载源的解析器；生产为镜像改写表，测试把两个源钉到不同的本地 mock。
+    pub(crate) source_resolver: Arc<dyn SourceResolver>,
+    /// 下载源健康表。跨池、跨任务共享：一个任务刚证明某个源不通，紧接着的任务不必把同一轮重试再赔一遍。
+    source_health: Arc<SourceHealth>,
+    /// Windows 图形设置里按程序显卡偏好的读写；测试注入替身，不碰真实注册表。
+    gpu_preferences: Arc<dyn GpuPreferenceStore>,
+    /// 各账户最近一次账户类启动失败，以离线方式进单人时据此放行。与工程版本缓存一样放在门面上：快照
+    /// 克隆共享同一个句柄，重开门面即清空。
+    pub(crate) account_failures: crate::launch::AccountFailures,
     /// 测试注入的 CurseForge key：生产只认运行期环境变量与构建时内嵌的 key，测试改不了进程环境，
     /// 有了它 CurseForge 路径上的门面级行为才写得出端到端测试。
     #[cfg(test)]
     curseforge_key: Option<String>,
+    /// 测试把 CurseForge 下载凭据的作用域换成本地 mock：生产作用域只认 https 的 forgecdn.net。
+    #[cfg(test)]
+    curseforge_cdn_scope: Option<aurora_download::CredentialScope>,
+    /// 测试注入的下载地址改写：往返测试要让导入侧把清单里的正式 CDN 地址下到本地 mock，又不能放松导入
+    /// 对清单地址的白名单校验，只能在下载池这一层改写。
+    #[cfg(test)]
+    download_resolver: Option<std::sync::Arc<dyn aurora_download::SourceResolver>>,
 }
 
 impl Aurora {
@@ -86,22 +112,20 @@ impl Aurora {
     /// 用显式配置与数据目录构造（供 CLI 应用命令行覆盖后调用，或测试注入）。
     pub fn open(config: AuroraConfig, data_dir: PathBuf, config_path: PathBuf) -> Result<Self> {
         let http = aurora_base::http::build_client()?;
+        let http_manual = aurora_base::http::build_manual_redirect_client()?;
         let game_dir = config
             .game_directory
             .clone()
             .unwrap_or_else(|| data_dir.join(aurora_instance::MINECRAFT_DIR_NAME));
-        // 版本清单地址随「版本列表源」策略选官方或镜像。
-        let manifest_url = config
-            .version_list_source
-            .rewrite_primary(VERSION_MANIFEST_V2)?;
         Ok(Self {
             config,
             http,
+            http_manual,
             runtime: RuntimeContext::current(),
             data_dir,
             game_dir,
             config_path,
-            manifest_url,
+            manifest_url: VERSION_MANIFEST_V2.to_owned(),
             modrinth_base: aurora_modplatform::MODRINTH_BASE.to_owned(),
             curseforge_base: aurora_modplatform::CURSEFORGE_BASE.to_owned(),
             fabric_base: "https://meta.fabricmc.net".to_owned(),
@@ -110,23 +134,33 @@ impl Aurora {
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
             mod_versions: Default::default(),
+            source_speed: Arc::new(SourceSpeedCache::new(VERSION_MANIFEST_V2)),
+            source_resolver: Arc::new(MirrorResolver),
+            source_health: Arc::new(SourceHealth::new()),
+            gpu_preferences: Arc::new(RegistryGpuPreferences),
+            account_failures: Default::default(),
             #[cfg(test)]
             curseforge_key: None,
+            #[cfg(test)]
+            curseforge_cdn_scope: None,
+            #[cfg(test)]
+            download_resolver: None,
         })
     }
 
-    /// 以带应用版本的 User-Agent（`Petalfall/<应用版本>`）重建共享 HTTP 客户端。
+    /// 以带应用版本的 User-Agent（`Petalfall/<应用版本>`）重建两个共享 HTTP 客户端。
     ///
     /// 构造时的客户端用的是 aurora-base 自己的 crate 版本，发版只改应用版本时它不会跟着变；镜像站按 UA
-    /// 统计与限流，一个永远不变的版本号让对方分不出新旧客户端。桌面应用在构造门面后、任何请求之前调用。
+    /// 统计与限流，一个永远不变的版本号让对方分不出新旧客户端。不自动跳转的那个也得重建：带凭据的下载
+    /// 走它，漏掉的话同一个应用会发出两种 UA。桌面应用在构造门面后、任何请求之前调用。
     pub fn with_app_version(mut self, version: &str) -> Result<Self> {
-        self.http = aurora_base::http::build_client_with(
-            &aurora_base::http::HttpConfig::for_app_version(version),
-        )?;
+        let config = aurora_base::http::HttpConfig::for_app_version(version);
+        self.http = aurora_base::http::build_client_with(&config)?;
+        self.http_manual = aurora_base::http::build_manual_redirect_client_with(&config)?;
         Ok(self)
     }
 
-    /// 覆盖版本清单地址（默认按「版本列表源」策略取官方或镜像）。用于本地 mock 与集成测试。
+    /// 覆盖版本清单地址（默认官方地址）。用于本地 mock 与集成测试。
     pub fn with_manifest_url(mut self, url: impl Into<String>) -> Self {
         self.manifest_url = url.into();
         self
@@ -217,13 +251,9 @@ impl Aurora {
         self.config.download_source = policy;
     }
 
-    /// 设置版本列表源策略，并据此重算版本清单地址。
-    ///
-    /// 清单地址在构造时按此策略一次性改写为官方或镜像；只改配置字段不会生效，故这里同步重算。
-    pub fn set_version_list_source(&mut self, policy: DownloadSourcePolicy) -> Result<()> {
-        self.manifest_url = policy.rewrite_primary(VERSION_MANIFEST_V2)?;
+    /// 设置版本列表源策略（下次取版本清单即生效：清单地址恒为官方地址，选源在取的时候按源计划做）。
+    pub fn set_version_list_source(&mut self, policy: DownloadSourcePolicy) {
         self.config.version_list_source = policy;
-        Ok(())
     }
 
     /// 设置批量下载的文件级并发上限。
@@ -286,6 +316,13 @@ impl Aurora {
         self.config.default_java = java;
     }
 
+    /// 设置启动前是否把这次用的 Java 设为 Windows 图形设置里的「高性能」。
+    ///
+    /// 关掉时不撤销已经写进 Windows 的值：那里分不出是谁写的，可能是用户自己在系统设置里改的。
+    pub fn set_prefer_dedicated_gpu(&mut self, enabled: bool) {
+        self.config.prefer_dedicated_gpu = enabled;
+    }
+
     /// 记下用户跳过的启动器版本。
     pub fn set_skipped_update_version(&mut self, version: Option<String>) {
         self.config.skipped_update_version = version;
@@ -308,6 +345,11 @@ impl Aurora {
         self.http.clone()
     }
 
+    /// 不自动跳转的客户端，带下载凭据的请求由调用方逐跳跟随（克隆廉价：内部 `Arc`）。
+    pub(crate) fn http_manual(&self) -> reqwest::Client {
+        self.http_manual.clone()
+    }
+
     /// 运行环境快照。
     pub(crate) fn runtime(&self) -> &RuntimeContext {
         &self.runtime
@@ -318,13 +360,32 @@ impl Aurora {
         GameLayout::new(&self.game_dir)
     }
 
+    /// 按文件下载源策略生成的单文件引擎配置。只读测速缓存，不发请求：自动档要先经
+    /// [`prepare_sources`](Self::prepare_sources) 测过，顺序才是实测的。
+    pub(crate) fn download_config(&self) -> DownloadConfig {
+        DownloadConfig {
+            sources: self.source_plan(self.config.download_source),
+            ..DownloadConfig::default()
+        }
+    }
+
     /// 按当前配置的下载源策略与并发上限装配一个批量下载池；门面挂了取消令牌时池也挂上。
     pub(crate) fn download_pool(&self) -> DownloadPool {
-        let config = DownloadConfig {
-            sources: self.config.download_source.source_plan(),
-            ..DownloadConfig::default()
+        let config = self.download_config();
+        #[cfg(test)]
+        let config = match &self.download_resolver {
+            Some(resolver) => DownloadConfig {
+                sources: aurora_download::SourcePlan::with_resolver(
+                    config.sources.sources.clone(),
+                    resolver.clone(),
+                ),
+                ..config
+            },
+            None => config,
         };
-        let downloader = Downloader::new(self.http.clone(), config);
+        let downloader =
+            Downloader::with_health(self.http.clone(), config, self.source_health().clone())
+                .with_manual_redirect_client(self.http_manual.clone());
         let pool = DownloadPool::new(downloader, self.config.download_concurrency);
         match &self.cancel {
             Some(token) => pool.with_cancel(token.clone()),
@@ -360,7 +421,7 @@ impl Aurora {
     pub(crate) fn java_installer(&self, manifest_url: &str) -> JavaRuntimeInstaller {
         let installer = JavaRuntimeInstaller::new(self.http())
             .with_manifest_url(manifest_url)
-            .with_source(self.config().download_source.primary_mirror());
+            .with_source(self.preferred_source(self.config().download_source));
         match &self.cancel {
             Some(token) => installer.with_cancel(token.clone()),
             None => installer,
@@ -383,7 +444,12 @@ impl Aurora {
         RetryPolicy::default()
     }
 
-    /// 版本清单地址（已按版本列表源策略改写）。
+    /// 门面共享的下载源健康表。
+    pub(crate) fn source_health(&self) -> &Arc<SourceHealth> {
+        &self.source_health
+    }
+
+    /// 版本清单的官方地址（测试里是注入的 mock 地址）；具体请求哪个源由源计划改写得出。
     pub(crate) fn manifest_url(&self) -> &str {
         &self.manifest_url
     }
@@ -406,6 +472,11 @@ impl Aurora {
 
     pub(crate) fn java_runtime_url(&self) -> &str {
         &self.java_runtime_url
+    }
+
+    /// 按程序显卡偏好的写入器（克隆廉价：`Arc`）。
+    pub(crate) fn gpu_preferences(&self) -> Arc<dyn GpuPreferenceStore> {
+        self.gpu_preferences.clone()
     }
 }
 
@@ -430,9 +501,12 @@ impl Aurora {
     /// 测试构造：以显式配置、数据目录、游戏目录建门面，端点基址随后用 `with_*` 注入。
     pub(crate) fn for_test(config: AuroraConfig, data_dir: PathBuf, game_dir: PathBuf) -> Self {
         let http = aurora_base::http::build_client().expect("构建测试 HTTP 客户端");
+        let http_manual =
+            aurora_base::http::build_manual_redirect_client().expect("构建测试 HTTP 客户端");
         Self {
             config,
             http,
+            http_manual,
             runtime: RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64),
             data_dir,
             config_path: game_dir.join("config.json"),
@@ -446,8 +520,46 @@ impl Aurora {
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
             mod_versions: Default::default(),
+            // 默认测速指向一个不会应答的本机地址且 1 毫秒即超时：走到生成下载计划的既有测试不连真实网络，
+            // 也不吃 Windows 上连接被拒要等秒级的延迟；探针全超时即按兜底顺序、不写缓存。
+            source_speed: Arc::new(SourceSpeedCache::with_probe(
+                VERSION_MANIFEST_V2,
+                Arc::new(UnansweredProbe),
+                Duration::from_secs(10 * 60),
+                Duration::from_millis(1),
+            )),
+            source_resolver: Arc::new(MirrorResolver),
+            source_health: Arc::new(SourceHealth::new()),
+            gpu_preferences: Arc::new(crate::gpu::testing::UnsetGpuPreferences),
+            account_failures: Default::default(),
             curseforge_key: None,
+            curseforge_cdn_scope: None,
+            download_resolver: None,
         }
+    }
+
+    /// 换掉下载源解析器与测速缓存（两者用同一个解析器），把官方与镜像钉到不同的本地 mock；健康表换新。
+    pub(crate) fn with_source_routes(
+        mut self,
+        resolver: Arc<dyn SourceResolver>,
+        ttl: Duration,
+        probe_timeout: Duration,
+    ) -> Self {
+        self.source_speed = Arc::new(SourceSpeedCache::with_probe(
+            VERSION_MANIFEST_V2,
+            resolver.clone(),
+            ttl,
+            probe_timeout,
+        ));
+        self.source_resolver = resolver;
+        self.source_health = Arc::new(SourceHealth::new());
+        self
+    }
+
+    /// 换上显卡偏好写入器的替身。
+    pub(crate) fn with_gpu_preference_store(mut self, store: Arc<dyn GpuPreferenceStore>) -> Self {
+        self.gpu_preferences = store;
+        self
     }
 
     pub(crate) fn with_modrinth_base(mut self, url: impl Into<String>) -> Self {
@@ -473,6 +585,45 @@ impl Aurora {
 
     pub(crate) fn injected_curseforge_key(&self) -> Option<&str> {
         self.curseforge_key.as_deref()
+    }
+
+    /// 让 CurseForge 下载凭据只发往这个作用域（测试里指到某一个 wiremock 服务器）。
+    pub(crate) fn with_curseforge_cdn_scope(
+        mut self,
+        scope: aurora_download::CredentialScope,
+    ) -> Self {
+        self.curseforge_cdn_scope = Some(scope);
+        self
+    }
+
+    pub(crate) fn injected_curseforge_cdn_scope(
+        &self,
+    ) -> Option<&aurora_download::CredentialScope> {
+        self.curseforge_cdn_scope.as_ref()
+    }
+
+    /// 下载池里每个地址先经这个解析器改写。
+    pub(crate) fn with_download_resolver(
+        mut self,
+        resolver: std::sync::Arc<dyn aurora_download::SourceResolver>,
+    ) -> Self {
+        self.download_resolver = Some(resolver);
+        self
+    }
+}
+
+/// 测试门面默认的测速解析器：所有源都解析到同一个没人应答的本机地址。
+#[cfg(test)]
+struct UnansweredProbe;
+
+#[cfg(test)]
+impl SourceResolver for UnansweredProbe {
+    fn resolve(
+        &self,
+        _url: &str,
+        _source: aurora_download::MirrorSource,
+    ) -> aurora_download::Result<String> {
+        Ok("http://127.0.0.1:9/probe".to_owned())
     }
 }
 
@@ -532,23 +683,43 @@ mod tests {
 
         aurora.set_default_java(None);
         assert!(aurora.config().default_java.is_none());
+
+        assert!(!aurora.config().prefer_dedicated_gpu);
+        aurora.set_prefer_dedicated_gpu(true);
+        assert!(aurora.config().prefer_dedicated_gpu);
+        aurora.set_prefer_dedicated_gpu(false);
+        assert!(!aurora.config().prefer_dedicated_gpu);
     }
 
+    /// 改版本列表源只写配置：清单地址仍是官方地址，镜像优先体现在源计划给出的首个候选上。
     #[test]
-    fn set_version_list_source_rederives_manifest_url() {
+    fn set_version_list_source_keeps_official_manifest_and_reorders_plan() {
         let mut aurora = test_aurora();
-        aurora
-            .set_version_list_source(DownloadSourcePolicy::MirrorFirst)
-            .expect("改写清单地址");
+        aurora.set_version_list_source(DownloadSourcePolicy::MirrorFirst);
         assert_eq!(
             aurora.config().version_list_source,
             DownloadSourcePolicy::MirrorFirst
         );
-        // 清单地址应等于按新策略改写的结果；删掉 setter 里的重算行会退回默认地址，此断言即挂。
-        let expected = DownloadSourcePolicy::MirrorFirst
-            .rewrite_primary(VERSION_MANIFEST_V2)
-            .expect("镜像改写");
-        assert_eq!(aurora.manifest_url(), expected);
+        assert_eq!(aurora.manifest_url(), VERSION_MANIFEST_V2);
+        let candidates = aurora
+            .source_plan(aurora.config().version_list_source)
+            .candidates(aurora.manifest_url())
+            .unwrap();
+        assert_eq!(
+            candidates,
+            vec![
+                "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json".to_owned(),
+                VERSION_MANIFEST_V2.to_owned(),
+            ]
+        );
+
+        aurora.set_version_list_source(DownloadSourcePolicy::OfficialFirst);
+        let first = aurora
+            .source_plan(aurora.config().version_list_source)
+            .candidates(aurora.manifest_url())
+            .unwrap()
+            .remove(0);
+        assert_eq!(first, VERSION_MANIFEST_V2);
     }
 
     #[test]
@@ -644,7 +815,8 @@ mod tests {
         assert_eq!(last.bytes, 10);
     }
 
-    /// 门面发出的请求带应用版本的 User-Agent；快照（克隆）共用同一个客户端，同样带着。
+    /// 门面发出的请求带应用版本的 User-Agent，不自动跳转的客户端也一样；快照（克隆）共用同样的客户端，
+    /// 同样带着。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn requests_carry_the_app_version_in_user_agent() {
         use wiremock::matchers::{header, method, path};
@@ -660,14 +832,15 @@ mod tests {
         let aurora = test_aurora().with_app_version("2.3.0-beta.1").unwrap();
         let snapshot = aurora.clone();
         for facade in [&aurora, &snapshot] {
-            let status = facade
-                .http()
-                .get(format!("{}/ua", server.uri()))
-                .send()
-                .await
-                .unwrap()
-                .status();
-            assert_eq!(status.as_u16(), 204, "UA 不是应用版本时 mock 回 404");
+            for client in [facade.http(), facade.http_manual()] {
+                let status = client
+                    .get(format!("{}/ua", server.uri()))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status();
+                assert_eq!(status.as_u16(), 204, "UA 不是应用版本时 mock 回 404");
+            }
         }
         let default = test_aurora()
             .http()

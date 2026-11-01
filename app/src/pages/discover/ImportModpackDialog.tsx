@@ -1,7 +1,9 @@
 // 导入本地整合包文件：选文件 -> 读取 -> 确认三步。读取失败留在第一步，按错误码给出原因。
 // 文件有四个来源：拖进投放区（第一步期间独占窗口拖放）、「选择文件」的系统对话框、路径输入框，
 // 以及外壳在没有接收方时把拖进窗口的整合包经路由带进来（打开弹窗即读取）。
-// 确认的内容与资源详情里的整合包面板相同（共用 PackForm），版本只读。
+// 确认的内容与资源详情里的整合包面板相同（共用 PackForm），版本只读；其后列出包内每个 Mod 与其他可选文件，
+// 可选文件默认勾上，取消勾选的不下载。还有需要到 CurseForge 网页手动下载的文件时不能导入：打开清单认领完，
+// 回到确认步原地重新读一次（名字、封面、勾选都保留），受限数为 0 后才能提交。
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -14,15 +16,30 @@ import { useRunner } from "../../shell/useRunner";
 import { errorRecord } from "../../state/errors";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useModpackPreview, type ModpackPreviewDto } from "../../state/queries/discover";
+import type { PackModDto } from "../../state/store";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
+import { Checkbox } from "../../ui/Checkbox";
+import { List, ListRow } from "../../ui/ListRow";
 import { AUTOFOCUS_ATTR, Modal } from "../../ui/Modal";
 import { Spinner } from "../../art/Spinner";
+import { SectionTitle } from "../../ui/SectionTitle";
+import { Tag } from "../../ui/Tag";
 import { TextInput } from "../../ui/TextInput";
+import { Tooltip } from "../../ui/Tooltip";
+import { BlockedFilesModal } from "./BlockedFilesModal";
 import { IMPORT_COPY, MODPACK_COPY, SEARCH_COPY } from "./copy";
 import { uniqueName } from "./names";
 import { PackForm, packFootNote, type PackFacts } from "./PackForm";
 import styles from "./pack.module.css";
+
+/** modpack_unsupported_compression 带着解码后的条目名（detail.entry）；没带说明后端违反了错误契约。 */
+function compressionEntry(error: unknown): string {
+  const detail = typeof error === "object" && error !== null && "detail" in error ? (error as { detail: unknown }).detail : undefined;
+  const entry = typeof detail === "object" && detail !== null ? (detail as Record<string, unknown>).entry : undefined;
+  if (typeof entry !== "string" || entry === "") throw new Error(`modpack_unsupported_compression 没有带条目名：${errorRecord(error).message}`);
+  return entry;
+}
 
 /** 读取失败的原因：能归类的给统一说法，其余用后端原文。 */
 export function previewErrorText(error: unknown): string {
@@ -36,6 +53,8 @@ export function previewErrorText(error: unknown): string {
       return IMPORT_COPY.errorManifestInvalid(record.message);
     case "modpack_corrupt":
       return IMPORT_COPY.errorCorrupt;
+    case "modpack_unsupported_compression":
+      return IMPORT_COPY.errorCompression(compressionEntry(error));
     // 只有 CurseForge 包的预览会联网（清单不带落点与大小，要问平台）
     case "network_failed":
       return IMPORT_COPY.errorNetwork;
@@ -75,6 +94,11 @@ export function previewFacts(preview: ModpackPreviewDto): PackFacts {
   };
 }
 
+/** 提交时跳过的可选文件：按清单顺序，只取这一份清单里还是可选的（重新读取后清单可能变了）。 */
+export function excludedPaths(preview: ModpackPreviewDto, excluded: ReadonlySet<string>): string[] {
+  return [...preview.mods, ...preview.optional_extras].filter((m) => m.optional && excluded.has(m.path)).map((m) => m.path);
+}
+
 /** 打开导入弹窗的请求：带着文件时打开即读取它。每次打开都是新对象，弹窗据此重置。 */
 export interface ImportRequest {
   file: string | null;
@@ -99,12 +123,15 @@ export function ImportModpackDialog({ request, onClose, online }: ImportModpackD
   // 所以每次开始读一个文件都重新发起请求，这一轮请求发出之前不看缓存里的旧结果
   const [fresh, setFresh] = useState<FreshRead | null>(null);
   const refreshed = useRef<FreshRead | null>(null);
+  // 认领完回到确认步后的重新读取：确认步原地等新结果（名字、封面、勾选都保留），不退回读取页
+  const [rereading, setRereading] = useState(false);
   const [footerHost, setFooterHost] = useState<HTMLElement | null>(null);
   const preview = useModpackPreview(path);
 
   const startRead = (file: string | null) => {
     setPath(file);
     setFresh(file === null ? null : { file });
+    setRereading(false);
   };
 
   // 新的打开请求：带着文件就直接进入读取，否则从选文件开始
@@ -140,9 +167,14 @@ export function ImportModpackDialog({ request, onClose, online }: ImportModpackD
     setInput("");
     onClose();
   };
+  const reread = () => {
+    setRereading(true);
+    reloadPreview();
+  };
 
-  // 重取已读成功的文件时缓存保留旧清单并标记 refreshing：这期间同样算读取中，确认页等新结果出来再画
-  const reading = path !== null && (fresh !== null || preview.status === "loading" || preview.refreshing);
+  // 重取已读成功的文件时缓存保留旧清单并标记 refreshing：这期间同样算读取中，确认页等新结果出来再画；
+  // 认领完的重新读取除外，确认页留着
+  const reading = path !== null && (fresh !== null || preview.status === "loading" || (preview.refreshing && !rereading));
   const confirming = path !== null && !reading && preview.status === "ready";
   return (
     <Modal
@@ -154,7 +186,17 @@ export function ImportModpackDialog({ request, onClose, online }: ImportModpackD
       footer={confirming ? <div ref={setFooterHost} className={styles.footerHost} /> : undefined}
     >
       {confirming ? (
-        <ImportConfirm key={path} path={path} preview={preview.data} online={online} footerHost={footerHost} onBack={() => setPath(null)} onDone={close} />
+        <ImportConfirm
+          key={path}
+          path={path}
+          preview={preview.data}
+          refreshing={preview.refreshing}
+          online={online}
+          footerHost={footerHost}
+          onReread={reread}
+          onBack={() => startRead(null)}
+          onDone={close}
+        />
       ) : path !== null && reading ? (
         <div className={styles.dropZone} data-state="reading" aria-busy="true">
           <Spinner size={24} />
@@ -253,26 +295,99 @@ function ChooseFile({ input, onInput, onRead, onFile, error }: ChooseFileProps) 
   );
 }
 
+/** 清单行右侧的状态标签：照常下载的不标，可选文件标「可选」。 */
+function availabilityTag(entry: PackModDto): { tone: "neutral" | "warn" | "ok"; text: string } | null {
+  switch (entry.availability) {
+    case "bundled":
+      return { tone: "neutral", text: IMPORT_COPY.tagBundled };
+    case "blocked":
+      return { tone: "warn", text: IMPORT_COPY.tagBlocked };
+    case "claimed":
+      return { tone: "ok", text: IMPORT_COPY.tagFound };
+    case "download":
+      return entry.optional ? { tone: "neutral", text: IMPORT_COPY.tagOptional } : null;
+  }
+}
+
+interface PackFileRowProps {
+  entry: PackModDto;
+  included: boolean;
+  /** 窄档：状态标签放到文件名下一行，勾选框仍在行尾。 */
+  narrow: boolean;
+  disabled: boolean;
+  onToggle: (path: string, include: boolean) => void;
+}
+
+function PackFileRow({ entry, included, narrow, disabled, onToggle }: PackFileRowProps) {
+  const status = availabilityTag(entry);
+  const tag =
+    status === null ? null : (
+      <Tag tone={status.tone} size="sm">
+        {status.text}
+      </Tag>
+    );
+  const checkbox = entry.optional ? (
+    <Checkbox checked={included} disabled={disabled} onChange={(next) => onToggle(entry.path, next)} ariaLabel={IMPORT_COPY.optionalLabel(entry.file_name)} />
+  ) : null;
+  const trailingTag = narrow ? null : tag;
+  return (
+    <ListRow
+      size="sm"
+      title={
+        <Tooltip content={entry.path}>
+          <span className={styles.modName}>{entry.file_name}</span>
+        </Tooltip>
+      }
+      meta={narrow && tag !== null ? <span className={styles.modTagBelow}>{tag}</span> : undefined}
+      trailing={
+        trailingTag === null && checkbox === null ? undefined : (
+          <span className={styles.modTrailing}>
+            {trailingTag}
+            {checkbox}
+          </span>
+        )
+      }
+    />
+  );
+}
+
 interface ImportConfirmProps {
   path: string;
   preview: ModpackPreviewDto;
+  /** 认领完正在重新读取：先照旧显示清单，等新结果出来。 */
+  refreshing: boolean;
   online: boolean;
   footerHost: HTMLElement | null;
+  onReread: () => void;
   onBack: () => void;
   onDone: () => void;
 }
 
-function ImportConfirm({ path, preview, online, footerHost, onBack, onDone }: ImportConfirmProps) {
+function ImportConfirm({ path, preview, refreshing, online, footerHost, onReread, onBack, onDone }: ImportConfirmProps) {
   const instances = useLauncherSelector((s) => s.instances);
   const actions = useLauncherActions();
   const run = useRunner();
+  const { tier } = useShell();
   const existing = instances.map((i) => i.id);
   const [name, setName] = useState(() => uniqueName(preview.name, existing));
   const [cover, setCover] = useState<InstanceCover>(() => defaultModpackCover(preview.name));
   const [submitting, setSubmitting] = useState(false);
+  // 取消勾选的可选文件落点；默认全部勾上
+  const [excluded, setExcluded] = useState<ReadonlySet<string>>(() => new Set());
+  const [blockedOpen, setBlockedOpen] = useState(false);
   const facts = previewFacts(preview);
   // 与平台整合包面板同理：校验与提交用同一个去掉首尾空格的名字
   const nameError = instanceNameError(name.trim(), existing);
+  const blocked = preview.blocked_files;
+  const narrow = tier === "compact";
+
+  const toggle = (file: string, include: boolean) =>
+    setExcluded((prev) => {
+      const next = new Set(prev);
+      if (include) next.delete(file);
+      else next.add(file);
+      return next;
+    });
 
   const submit = async () => {
     if (!online) {
@@ -293,6 +408,7 @@ function ImportConfirm({ path, preview, online, footerHost, onBack, onDone }: Im
           mcVersion: preview.minecraft,
           loader: facts.loader,
           loaderVersion: preview.loader === null ? null : preview.loader.version,
+          excludedOptional: excludedPaths(preview, excluded),
         }),
       ACTION_ERROR.importModpack,
     );
@@ -315,21 +431,89 @@ function ImportConfirm({ path, preview, online, footerHost, onBack, onDone }: Im
         facts={facts}
         readOnly={false}
       />
+      <section className={styles.modSection} aria-label={IMPORT_COPY.modsLabel}>
+        <SectionTitle level={3}>{IMPORT_COPY.modsTitle(preview.mod_files)}</SectionTitle>
+        <div className={styles.modList}>
+          <List aria-label={IMPORT_COPY.modsLabel}>
+            {preview.mods.map((entry) => (
+              <PackFileRow key={entry.path} entry={entry} included={!excluded.has(entry.path)} narrow={narrow} disabled={submitting} onToggle={toggle} />
+            ))}
+          </List>
+        </div>
+      </section>
+      {preview.optional_extras.length > 0 && (
+        <section className={styles.modSection} aria-label={IMPORT_COPY.extrasTitle}>
+          <SectionTitle level={3}>{IMPORT_COPY.extrasTitle}</SectionTitle>
+          <List aria-label={IMPORT_COPY.extrasTitle}>
+            {preview.optional_extras.map((entry) => (
+              <PackFileRow key={entry.path} entry={entry} included={!excluded.has(entry.path)} narrow={narrow} disabled={submitting} onToggle={toggle} />
+            ))}
+          </List>
+        </section>
+      )}
+      {refreshing ? (
+        <div className={styles.rereading} aria-busy="true">
+          <Spinner size={16} />
+          <span>{IMPORT_COPY.rereading(fileName(path))}</span>
+        </div>
+      ) : (
+        blocked.length > 0 && (
+          <Callout
+            tone="warn"
+            action={
+              <Button size="sm" variant="ghost" onClick={() => setBlockedOpen(true)}>
+                {IMPORT_COPY.viewBlocked}
+              </Button>
+            }
+          >
+            {IMPORT_COPY.blockedNotice(blocked.length)}
+          </Callout>
+        )
+      )}
+      <BlockedFilesModal
+        open={blockedOpen}
+        files={blocked}
+        origin="import"
+        onClose={() => setBlockedOpen(false)}
+        onAllFound={() => {
+          setBlockedOpen(false);
+          onReread();
+        }}
+      />
       {footerHost !== null && (
-        <FooterButtons host={footerHost} note={packFootNote(facts)} onBack={onBack} onSubmit={() => void submit()} disabled={nameError !== null} loading={submitting} />
+        <FooterButtons
+          host={footerHost}
+          note={packFootNote(facts)}
+          onBack={onBack}
+          onSubmit={() => void submit()}
+          disabled={nameError !== null || refreshing}
+          disabledReason={blocked.length > 0 ? IMPORT_COPY.submitBlocked(blocked.length) : undefined}
+          loading={submitting}
+        />
       )}
     </div>
   );
 }
 
-function FooterButtons({ host, note, onBack, onSubmit, disabled, loading }: { host: HTMLElement; note: string; onBack: () => void; onSubmit: () => void; disabled: boolean; loading: boolean }) {
+interface FooterButtonsProps {
+  host: HTMLElement;
+  note: string;
+  onBack: () => void;
+  onSubmit: () => void;
+  disabled: boolean;
+  /** 还有需要手动下载的文件：主按钮保持可聚焦，悬停说明还差几个。 */
+  disabledReason: string | undefined;
+  loading: boolean;
+}
+
+function FooterButtons({ host, note, onBack, onSubmit, disabled, disabledReason, loading }: FooterButtonsProps) {
   return createPortal(
     <>
       <span className={styles.footNote}>{note}</span>
       <Button variant="ghost" onClick={onBack}>
         {IMPORT_COPY.changeFile}
       </Button>
-      <Button variant="primary" icon="upload" disabled={disabled} loading={loading} onClick={onSubmit}>
+      <Button variant="primary" icon="upload" disabled={disabled} disabledReason={disabledReason} loading={loading} onClick={onSubmit}>
         {IMPORT_COPY.submit}
       </Button>
     </>,

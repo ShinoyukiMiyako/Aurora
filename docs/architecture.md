@@ -34,7 +34,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | L0 | `aurora-base` | reqwest + rustls 客户端工厂、官方域名到 BMCLAPI 的镜像改写、流式 sha1 校验与原子写入（写完先 flush 再 sync，后台写失败照实报错，不把半截的临时文件改名成正式文件）、数据目录定位、指数退避重试、品牌常量 | 无 |
 | L1 | `aurora-version` | 版本清单与版本 JSON 的模型、规则求值、`inheritsFrom` 继承合并、加载器识别；纯解析，不联网也不读写磁盘 | 无 |
 | L1 | `aurora-auth` | 微软登录（设备码、XBL、XSTS、Minecraft 令牌）、离线账户、Yggdrasil 外置登录、DPAPI 凭据存储 | base |
-| L1 | `aurora-java` | 本机 Java 探测与识别缓存、按主版本挑选、Mojang 托管运行时的清单与安装计划 | base |
+| L1 | `aurora-java` | 本机 Java 探测（托管目录、手动添加、注册表 HKLM 与 HKCU、JAVA_HOME、常见目录、PATH）与识别缓存、单次 `java -version` 限时 10 秒、运行时完整性检查、按主版本挑选（跳过不完整的）、Mojang 托管运行时的清单与安装计划 | base |
 | L1 | `aurora-download` | 单文件下载引擎（Range 分块、分片续传、按源重试）、批量并发池、换源调度、取消令牌 | base |
 | L2 | `aurora-instance` | 实例发现、命名规则、实例设置、未完成标记、版本隔离判定、存档与资源包读取、移入回收站；只读写本地文件 | base, version |
 | L2 | `aurora-install` | 原版、Fabric、Quilt、Forge、NeoForge 安装（含 Forge 处理器子进程），库、资源与 natives 补全 | base, version, download |
@@ -69,11 +69,11 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 启动前与账户页手动刷新共用一套续期：微软账户的 Minecraft 令牌过期才用 refresh token 重走令牌链，外置账户先校验令牌、无效再刷新。同一账户的续期按账户排队（`core/auth.rs` 的续期闸），进队后以账户库里此刻的凭据为准，两边不会拿同一份旧令牌各刷一次、后到的一方被服务器拒掉。服务器判定凭据失效时，只有库里仍是被拒的那一份才把账户落成 `expired`：等回音期间用户重新登录过，新凭据不受影响。
 
-手动刷新外置账户时先校验令牌：仍有效就只从会话服务器更新角色名与皮肤、记一次验证时刻，不轮换令牌（刷新会让正在运行的游戏手里的旧令牌当场作废）；失效才刷新。档案取不到（连不上、服务器出错）时角色名与皮肤保持原样，角色在服务器上已不存在（204）时才清掉皮肤，刷新令牌那条路同样如此。
+手动刷新外置账户时先校验令牌：仍有效就只从会话服务器更新角色名与皮肤、记一次验证时刻，不轮换令牌（刷新会让正在运行的游戏手里的旧令牌当场作废）；失效才刷新。校验本身遇到服务故障（`ServiceUnavailable`）时照实报错，不接着刷新，令牌与账户库都不动。档案取不到（连不上、服务器出错）时角色名与皮肤保持原样，角色在服务器上已不存在（204）时才清掉皮肤，刷新令牌那条路同样如此。
 
-续期联网的部分跑在独立任务里（`Aurora::renew_detached`）：排闸、读库、联网、落盘一口气做完，续期闸也由任务持有。调用方被取消（快照上的取消令牌触发，或 future 被丢弃）时立刻以 `cancelled` 返回，续期照样跑完落盘：外置刷新与微软令牌链一发出请求，服务器那边的旧凭据就可能作废，新凭据只在回音里。所以续期用的微软令牌链不挂取消令牌（设备码登录仍挂）；已经取消了才来的续期不开始。
+续期联网的部分跑在独立任务里（`Aurora::renew_detached`）：排闸、读库、联网、落盘一口气做完，续期闸也由任务持有。调用方被取消（快照上的取消令牌触发，或 future 被丢弃）时立刻以 `cancelled` 返回，续期照样跑完落盘：外置刷新与微软令牌链一发出请求，服务器那边的旧凭据就可能作废，新凭据只在回音里。所以续期用的微软令牌链不挂取消令牌（设备码登录仍挂）；已经取消了才来的续期不开始。服务故障的退避重试同样在这个任务里跑完，调用方取消时不等它，排在后面的续期等它结束才读库。
 
-微软令牌端点回 `interaction_required` / `consent_required` 等需要用户在浏览器里操作的错误判为需要重新登录，回 `temporarily_unavailable` 按退避重试。启动前续期的失败只有两种给启动失败码：凭据失效（`ReloginRequired`）给 `account_relogin`，连不上（`Http`）给 `account_refresh_network`；封禁、未购买、服务器回 5xx 或解析不了、凭据库读写失败、取消都不是重新登录能解决的，按账户错误码与原文原样报出。读外置验证服务器元数据失败时同理，只有连不上给 `account_refresh_network`。
+微软令牌端点回 `interaction_required` / `consent_required` 等需要用户在浏览器里操作的错误判为需要重新登录，回 `temporarily_unavailable` 按退避重试。启动前续期的失败只有三种给启动失败码：凭据失效（`ReloginRequired`）给 `account_relogin`，连不上（`Http`）给 `account_refresh_network`，登录服务故障（`ServiceUnavailable`：微软或外置验证服务器回 5xx、429，退避重试过仍不行）给 `account_service_down`；后两种不碰账户库，账户还是好的，可以稍后重试或先以离线方式进单人。封禁、未购买、应用未获批准、响应解析不了、凭据库读写失败、取消都不是重新登录能解决的，按账户错误码与原文原样报出。读外置验证服务器元数据失败时同理，只有连不上给 `account_refresh_network`。
 
 ### 安装、补全与启动的约定
 
@@ -109,6 +109,7 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | `drop.rs` | 主窗口原生拖放：在 WebView2 的子窗口上注册自己的 `IDropTarget`，读拖入的文件列表与 authlib-injector 服务器链接，经 `aurora://window-drop` 推给前端 |
 | `renderer.rs` | 主窗口 WebView2 渲染进程退出或无响应时自动重载页面，60 秒内最多 2 次；用完即停下并记 error，之后安静满 60 秒才重新计数。停下后网页里的标题栏与关闭键都没了，关闭请求（Alt+F4、任务栏）由后端直接销毁窗口 |
 | `exit.rs` | 正常退出（`RunEvent::Exit`）时的收尾：先补写游玩记录里待补的改动（限时 3 秒），再按需拉起更新安装程序 |
+| `gpu.rs` | 经 DXGI 列出本机硬件显卡，看出 Windows 按高性能与省电偏好各挑哪一块（`gpu_adapters` 命令用）；Windows 10 1803 之前没有按偏好枚举，退回系统顺序且不标首选；非 Windows 为空 |
 
 ## IPC 约定
 
@@ -149,13 +150,18 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | `installing` | 新建实例、导入整合包（实例名确定后、建目录前就占住，直到半成品清理完） | 互斥 |
 | `repairing` | 补全实例 | 互斥 |
 | `renaming` / `deleting` | 改名（新旧两个名字都占）、删除 | 互斥 |
-| `launching` -> `running` | 启动命令，从启动一直持有到游戏退出 | 只与 `modifying` 兼容 |
-| `modifying` | 装、删、启停、更新、回滚 Mod，装资源包、光影、数据包，写实例设置，检查 Mod 更新（会回写卷宗），打开文件夹时创建缺失的工作子目录 | 与自身、`launching`、`running`、`inherited` 兼容 |
-| `inherited` | 继承链上的基底版本：别的实例启动到退出、补全、导入整合包期间（导入时占将要继承的原版），以那个实例的名义占住 | 与 `launching`、`running`、`modifying` 及别的 `inherited` 兼容 |
+| `launching` -> `running` | 启动命令（Quick Play 直达同样走 `launch_game`），从启动一直持有到游戏退出 | 只与 `modifying`、`inherited` 兼容 |
+| `backing_up` | 备份、导出、恢复存档；开着自动备份时，游戏退出后由启动命令把 `running` 转成它，备份做完才放开 | 只与 `modifying`、`inherited` 兼容 |
+| `modifying` | 装、删、启停、更新、回滚 Mod，批量启停、更新检查设置，装资源包、光影、数据包，写实例设置，检查 Mod 更新（会回写卷宗），打开文件夹时创建缺失的工作子目录，导出整合包 | 与自身、`launching`、`running`、`backing_up`、`inherited` 兼容 |
+| `inherited` | 继承链上的基底版本：别的实例启动到退出（开着自动备份时到备份做完）、补全、导入整合包期间（导入时占将要继承的原版），以那个实例的名义占住 | 与 `launching`、`running`、`backing_up`、`modifying` 及别的 `inherited` 兼容 |
+
+这张表在后端（`InstanceActivity::compatible_with`）、前端的禁用判断与模拟后端三处保持一致。
 
 游戏运行时仍然可以改动 Mod。被游戏占用的文件由门面在动手前检测，检测到时报 `mod_file_busy`。`list_instances` 返回的 `activity` 就来自这张表，前端刷新之后也能据此知道哪个实例正在安装；几件事并行时报实例自己的事，其次 `modifying`，最后 `inherited`。
 
 基底占用经 `InstanceLocks::acquire_with_bases` 先占实例自己、再依次占 `Aurora::inheritance_chain` 给出的基底（只沿链读各环的版本 JSON；断在哪一环就停在那里，原因交给启动与补全照原有失败码报出），与实例同名或彼此只差大小写的只占一次，任何一处冲突时已占到的一并放开。基底被占时对它的删除、改名、补全报 `instance_busy`，正文为「实例 <id> 正在被实例 <使用者> 使用，请稍后再试」，`detail` 为 `{ id, activity: "inherited", used_by }`；其余活动的 `detail` 不带 `used_by`。实例列表与删除预览的 `used_by` 给出正以它为基底的实例（几个时取最早占到的那个，与报错的是同一个），前端据此提前禁用改名、补全、删除并写明是谁在用。新建实例是合并后的自包含版本 JSON（不继承原版），不占基底。
+
+备份、导出与恢复存档只碰 saves 下的一个存档与游戏目录里的备份区，和 Mod 改动、基底占用都不相交，所以兼容；游戏开着时存档随时在写，所以与启动、运行互斥。导出整合包对外是 `modifying`，但可能把存档一起打包，与备份、恢复另有两条互斥：实例报着 `backing_up` 时导出报 `instance_busy`；勾了存档时导出记下「存档正被读走」（`InstanceLocks::read_saves`），恢复在读完之前报 `instance_busy`（`activity` 为 `modifying`，正文写明在导出），只读存档的备份与导出存档不受影响。两边都先写自己的记录再查对方，同时发起时至少挡下一方。不隔离的实例共用游戏目录的 saves，实例锁只管自己这个实例，所以这些检查还要看共用同一份存档的别的实例：别的实例正开着游戏时备份、导出或恢复这份存档，别的实例占着 `backing_up` 时启动或导出整合包，别的实例正把存档读进整合包时恢复，都报 `instance_busy`，`detail.id` 指向挡路的那个实例。
 
 `install_resource` 只装资源包、光影与数据包，对 Mod 报 `invalid_argument`：Mod 一律走 `install_mod`，才会登记卷宗、带上前置并写进历史。CurseForge 上禁止第三方分发的文件，装 Mod、装资源与导入整合包都报 `distribution_blocked`（带文件名），空白的 `downloadUrl` 按缺失处理、先走 download-url 兜底。
 
@@ -169,9 +175,15 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 
 安装 Mod 的依赖解析沿用实例里已装的前置时，那一版在平台上下架（`mod_version_not_found`）不再让整个计划失败：按已满足处理，计划项带 `delisted: true`，版本视图由卷宗拼出（版本 id、工程、平台、文件名、版本号可信，其余平台元数据为空），下层前置不展开，也不去平台另挑一版顶替；钉了版本、实例装的正是那一版时同样处理，装的是别的版本时仍报指定的版本已不存在。其余平台错误与网络故障照常冒泡。没有 CurseForge API key 时 `check_updates` 跳过 CurseForge 来源的那一段，照常给出 Modrinth 部分的结果。扫描 mods 目录时读不了的 jar（被占用、打开失败等瞬时 IO 错误）不把「无元数据」写进缓存，下一轮重新解析；CRC 不符、压缩流损坏、文件截断这类同一份字节每次都失败的照常缓存。
 
+`launch_game` 带必填参数 `offlineFallback`，出参为 `{ pid, offline }`。为 true 时以离线方式进单人：不刷新也不校验登录，不下载、不注入 authlib-injector，用账户上次登录时的档案名与 uuid 加离线令牌（`accessToken` 为 `0`，`userType` 为 `legacy`）进游戏，只保证单人游戏，账户库不写；启动器日志记一条警告。能否放行由门面凭自己记下的「这个账户最近一次账户类启动失败」判定，不信前端：记录挂在 `Aurora` 的共享句柄上，只在内存里，快照共用、重开门面即清空，判定时取出即消耗，经验证跑起来的一局清掉它；只记 `account_relogin`、`account_refresh_network`、`account_service_down` 三种失败码，续期原样报出的账户错误、取消、文件或 Java 失败都不动它。上次是 `account_service_down` 或 `account_refresh_network` 才放行；离线账户、已失效账户、上次是 `account_relogin` 或没有记录时报 `invalid_argument`，`detail` 为 `{ field: "offlineFallback", reason, account }`，`reason` 取 `offline_account`、`relogin_required`、`no_recent_failure`。降级启动与普通启动走同一条阶段链路，取消与实例互斥不变。
+
+微软登录链各步（设备码、轮询、刷新令牌、XBL、XSTS、Minecraft 登录、档案）与外置验证服务器的认证、刷新、校验、登出遇到 5xx、429 或故障页时，先判状态码再解析响应体，按退避重试过仍不行就报 `ServiceUnavailable`，`detail` 为 `{ step, status }`；它的原因链上没有 HTTP 客户端错误，不带 `detail.network`，不触发连通性探测。启动续期遇到它时失败码为 `account_service_down`，账户库不动；只有服务器明确判定凭据失效（`account_relogin`）才把账户标成需要重登。Minecraft 服务以 403 且响应体含 Invalid app registration 拒绝启动器所用的微软应用时报 `AppNotApproved`，不重试、不带 `detail`；重新登录解决不了，启动续期遇到它时按账户错误码原样报出。
+
+`set_mods_enabled` 批量启停一组 Mod：整批只占一次 `modifying`、只拿一次 mods 目录写锁，按入参顺序逐项返回 `{ status: "ok", file_name, path }` 或 `{ status: "error", file_name, error }`，单个文件被占用（`mod_file_busy`）、改名冲突（`mod_state_conflict`）或不在盘上只让那一项失败；空数组、空文件名和重复文件名在占锁前以 `invalid_argument` 拒绝。`set_mod_update_hold` 写卷宗里的更新检查设置：`{ kind: "ignored" }` 忽略更新，`{ kind: "pinned", version_id }` 只接受不晚于该版本的更新，`null` 恢复检查，与 `list_mods` 出参的 `update_hold` 同形；它只改记录、不碰 jar，游戏运行中也能用，文件不在或没有平台来源时报 `io`。`check_updates` 出参形状不变：忽略的 Mod 不进任何查询；锁定的走版本列表在本地挑，不报比锁定版本新的候选；候选只取与当前版本同一发布通道或更稳定的（正式版只报正式版，测试版报正式版与测试版，预览版三种都报，当前通道认不出时按正式版）。Modrinth 侧按当前通道分组下推 `version_types`，全是正式版时仍只有两次请求。`mod_update_changelog` 取某个 Mod 某个平台版本的更新日志 `{ version_id, format, body }`（Modrinth 为 `markdown`，CurseForge 为 `html`，作者没写为 `null`），只读、不占实例锁、不缓存；版本不属于这个工程时报 `mod_version_not_found`。`list_mods` 来源里的 `installed_at` 是这个 Mod 装进实例的时刻（UNIX 秒），更新与回滚都沿用原值，哈希反查补身份时取文件修改时刻。
+
 `installed_sources` 一次给出全部实例已装 Mod 的平台来源（卷宗与 mods 目录的文件名 join，禁用态也算），只读、不占实例锁；某个实例读不出时只让那一项带上错误。发现页的「已装入 n 个实例」用它，不再逐个实例调 `list_mods`。
 
-前端的任务表里，新建实例、导入整合包、补全实例三种任务期间实例算「安装中」；其余挂在实例上的任务（装、更新 Mod 与资源）只算「改动中」，不挡启动。
+前端的任务表里，新建实例、导入整合包、补全实例三种任务期间实例算「安装中」；其余挂在实例上的任务（装、更新 Mod 与资源，导出整合包）只算「改动中」，不挡启动。备份、导出与恢复存档的任务同样算「改动中」，但排队或进行中时挡启动（`state/selectors.ts` 的 `savesBusy`）：后端这期间占着 `backing_up`，与启动互斥。
 
 前端调度（`state/tasks.ts` 的 `tasksToStart`）最多同时跑 3 个任务，并照后端的实例锁避开必然失败的组合：新建、导入、补全与同一实例（不分大小写）上的任何别的任务互斥，与运行中的、或排在它前面的任务互斥的留在队里，先到先做；装 Mod 与装资源彼此照常并行。「全部更新」剔掉这个实例上已有更新任务正在换的 Mod 文件（`modFilesBeingUpdated`，单个与组合任务都算），一个都不剩时提示已在下载队列里。一次装进几个实例时，某个实例的安装计划失败不挡其余实例：排得上的照常排上并通知，最后再报出没排上的（只有一个时原样抛出它的错误）。
 
@@ -180,6 +192,10 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 新建与导入任务在实例目录装好之前，实例列表里是按入队上下文生成的占位项；任务结束（完成、失败或取消）后占位项留到这次结束触发的那次重扫落定，与扫描结果在同一次更新里交接：盘上有同名实例就由扫描项接替，没有就移除。否则实例先从列表里消失，外壳会把指向它的实例页路由剪掉。装到一半被重扫扫到的半成品目录还没有版本 JSON，扫描项沿用入队时的版本与加载器。失败的新建在盘上留下带安装标记的目录时，「重试」改排补全（`repair_instance`）接替那一行：照原样重跑 `install_version` 会被重名检查拦下。重启后重试上次关闭时中断的新建或导入，入队上下文按命令参数补上，与当初入队时的一致。
 
 `open_folder` 的目标里，`game_dir`、`data_dir`（数据目录）与 `launcher_logs`（启动器日志目录）不属于任何实例，`id` 传 `null`；其余目标都要实例 id。
+
+`detect_java` 的来源取 `managed`、`manual`、`registry`、`java_home`、`common_dir`、`path`，同一个可执行文件只按排在前面的来源出现一次。`missing_files` 列出缺失的运行时文件（相对 Java 根目录：`release`，Java 9 起的 `lib/modules`，Java 8 的 `lib/rt.jar`），非空的不参与自动选择；缺文件的托管运行时交给自动下载，已就绪的文件按 sha1 跳过，等于补齐。设置或实例里固定的 Java 不完整时照用，启动日志里警告一句。`add_java_path` 只收 java.exe 或 javaw.exe（javaw 按同目录的 java.exe 记，游戏由 java.exe 拉起），识别一次后拒绝缺运行时文件的（`java_runtime_incomplete`），其余问题报 `java_path_invalid`，`detail.reason` 区分；通过后记进 `config.json` 的 `extra_java_paths`，同一路径再加不落盘。`remove_java_path` 只删记录，被移除的正是默认 Java 时默认改回自动选择（`default_reset`）。`gpu_adapters` 经 DXGI 列出硬件显卡，标出 Windows 按高性能与省电偏好各挑哪一块，`switchable` 表示两者不是同一块；枚举失败报 `gpu_query_failed`。这三个命令都不碰实例目录，不经实例锁，也不带 `task_id`。
+
+`prefer_dedicated_gpu` 开着时，启动在定下 Java 之后、拉起游戏之前，把这次用的 java 可执行文件写进当前用户的 `Software\Microsoft\DirectX\UserGpuPreferences`（Windows 图形设置记按程序显卡偏好的位置）：值名是完整路径，取值里的 `GpuPreference` 改成 `2`（高性能），其余片段原样保留，已经是高性能时不写。写不进去只在启动日志里记一条警告，游戏按 Windows 默认的显卡启动；关掉开关不撤销已写的值。
 
 ### 事件
 
@@ -225,7 +241,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 
 ### 启动提示
 
-`config.json` 解析失败时，启动不中断：坏文件改名为 `config.json.broken-<本地时间>`（重名时追加 `-2`、`-3`）留作现场，按默认配置启动，首次启动向导会重新出现。只有枚举设置（文件下载源、版本列表源、版本隔离、外观明暗与强调色、游戏启动后、界面语言）的取值这个版本不认识时（例如降级后读到新版本写的值），不算损坏：这几项按默认值启动，其余设置照常读入。之后整份落盘时，这一项只要还是暂用的默认值就写回原值，用户改成别的取值才按新值写；改过并落过盘后再改回默认，就按默认写。类型对不上（例如枚举写成数字）仍按损坏处理。这个版本不认识的顶层设置（例如新版本才有的项）与外观、内存这类嵌套段里不认识的键，读入时原样收下，落盘时原样写回，不算启动处置；它们收在 `AuroraConfig.carried_over` 里（不进 IPC 出参，也不被整份替换的设置冲掉）。落盘先序列化成 JSON 树再写出，`config.json` 的键按字母序排列。
+`config.json` 解析失败时，启动不中断：坏文件改名为 `config.json.broken-<本地时间>`（重名时追加 `-2`、`-3`）留作现场，按默认配置启动，首次启动向导会重新出现。只有枚举设置（文件下载源、版本列表源、版本隔离、外观明暗与强调色、游戏启动后、界面语言）的取值这个版本不认识时（例如降级后读到新版本写的值），不算损坏：这几项按默认值启动，其余设置照常读入。之后整份落盘时，这一项只要还是暂用的默认值就写回原值，用户改成别的取值才按新值写；改过并落过盘后再改回默认，就按默认写。类型对不上（例如枚举写成数字）仍按损坏处理。这个版本不认识的顶层设置（例如新版本才有的项）与外观、内存、存档备份这类嵌套段里不认识的键，读入时原样收下，落盘时原样写回，不算启动处置；它们收在 `AuroraConfig.carried_over` 里（不进 IPC 出参，也不被整份替换的设置冲掉）。落盘先序列化成 JSON 树再写出，`config.json` 的键按字母序排列。
 
 `credentials.bin` 读到了却还原不出账户库时（数据目录搬到了另一台机器或另一个 Windows 用户下，或文件被改坏：只认 DPAPI 解密失败与 JSON 解析失败），账户相关命令不报错：原文件原样改名为 `credentials.bin.broken-<本地时间>`（重名时追加 `-2`、`-3`，不覆盖先前的留存），按空凭据库继续，离线账户照常可用；当前账户原本在凭据库里时留存后就没有当前账户，不自动改选离线账户。读文件本身失败、改名失败仍照实报错。
 
@@ -235,9 +251,9 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 
 `ipc/bridge.ts` 是全项目唯一引入 `@tauri-apps/api/core` 和 `@tauri-apps/api/event` 的文件。它在每次调用时判断运行环境：在 Tauri 窗口里走真实命令；在纯浏览器（`pnpm dev`）和 vitest 里，动态加载 `ipc/mock`。模拟后端尽量复刻真实后端的参数校验、错误码和状态变化，方便调界面和测试前端，但不能替代 Rust 侧的测试。真机运行时不会加载这个分块。
 
-插件命令（如 `plugin:opener|open_url`）同样经 `bridge.ts` 调用，模拟后端有同名的处理。`bridge.test.ts` 检查模拟后端的命令与 `generate_handler!` 注册的命令一一对应，插件命令则必须在 `capabilities/default.json` 里有对应的权限。opener 插件只授予 `opener:allow-open-url` 与 `opener:allow-default-urls`（http、https、mailto、tel），不用 `opener:default`：它连带授予不受路径范围约束的 `reveal_item_in_dir`，打开文件夹一律走后端的 `open_folder`。
+插件命令（如 `plugin:opener|open_url`）同样经 `bridge.ts` 调用，模拟后端有同名的处理。`bridge.test.ts` 检查模拟后端的命令与 `generate_handler!` 注册的命令一一对应，插件命令则必须在 `capabilities/default.json` 里有对应的权限。opener 插件只授予 `opener:allow-open-url` 与 `opener:allow-default-urls`（http、https、mailto、tel），不用 `opener:default`：它连带授予不受路径范围约束的 `reveal_item_in_dir`。打开文件夹走后端的 `open_folder`；在文件管理器里定位并选中走后端的 `reveal_in_folder`，只放行启动器自己产出的路径（当前游戏目录的存档备份区，这次运行里导出的存档与整合包），别的路径报 `invalid_argument`。dialog 插件只授予 `dialog:allow-open` 与 `dialog:allow-save`（`shell/platform.ts` 的选择文件与保存文件对话框）。
 
-开发构建在纯浏览器里运行时，`main.tsx` 在第一条命令之前调用 `enableMockPersistence(localStorage, APP_SLUG)`：首次启动是否完成、配置、外观、账户、实例与 Mod 的状态存进键 `<slug>.mock.<领域>`，刷新页面后接着上次的状态。存下的数据读不出或快照版本不符时启动直接报错，在控制台执行 `__sk.resetMockData()` 恢复种子数据并刷新。vitest 不启用持久化。
+开发构建在纯浏览器里运行时，`main.tsx` 在第一条命令之前调用 `enableMockPersistence(localStorage, APP_SLUG)`：首次启动是否完成、配置、外观、账户、实例、Mod 与 Java 探测结果的状态存进键 `<slug>.mock.<领域>`，刷新页面后接着上次的状态。存下的数据读不出或快照版本不符时启动直接报错，在控制台执行 `__sk.resetMockData()` 恢复种子数据并刷新。vitest 不启用持久化。
 
 ## 前端（app/src）
 
@@ -299,7 +315,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | `offline_accounts.json` | 离线账户 |
 | `tasks.json` | 前端任务表 |
 | `playtime.json` | 游玩时长，按游戏目录分开记（格式版本 2，旧版读到时归到第一次读到它时的当前游戏目录，没改写成也不随之后切换的游戏目录走）；实例改名、删除时只改当前游戏目录下的记录。记录没跟上时命令报 `play_records_failed`，改动留在进程内待补，之后读写时补上；启动器正常退出时、立即安装更新拉起安装程序之前也各补写一次。文件读得出、替换不了时，只读调用（实例列表、游玩统计）照常给出补上改动后的结果，落盘留到下一次；写入调用照实报错。新建实例与导入整合包在实例目录建成后清掉当前游戏目录下同名的残留记录（属于在启动器之外被删掉的旧实例），撞名时不动现有实例的记录 |
-| `java-probe-cache.json` | Java 识别缓存，按可执行文件指纹记录 |
+| `java-probe-cache.json` | Java 识别缓存，按可执行文件指纹记录识别结果与识别失败的原因（`exec` / `timeout` / `parse`）。全量探测时，指纹没变、失败不到 10 分钟的候选不再拉起 JVM；单个识别（启动取 Java、添加 Java）不看失败记录。运行时文件是否齐全不进缓存，每次现查 |
 | `runtime/<主版本>/` | 托管 Java 运行时 |
 | `logs/<unix 秒>.log` | 启动器日志，每次启动一个文件 |
 | `cache/` | 下载缓存（例如平台整合包，导入结束后删除） |

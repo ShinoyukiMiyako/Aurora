@@ -159,6 +159,124 @@ mod tests {
         );
     }
 
+    /// last_crash 直接返回门面的 CrashReport，没有 DTO：这里钉住前端读的 JSON 字段名与取值形状。
+    #[test]
+    fn crash_report_json_carries_sources_scanned_files_and_exit_code_note() {
+        use aurora_core::{
+            CrashCategory, CrashClue, CrashReport, CrashSource, ExitCodeKind, ExitCodeNote,
+            LaunchWarning, ScannedFile,
+        };
+        let report = CrashReport {
+            at: Some(2_000),
+            exit_code: Some(-1_073_741_819),
+            session_started_at: Some(1_000),
+            log_path: Some(r"E:\mc\logs\latest.log".into()),
+            diagnoses: vec![
+                CrashClue {
+                    category: CrashCategory::IntelGraphicsDriver,
+                    summary: "Intel 集成显卡驱动出错".into(),
+                    advice: "更新驱动".into(),
+                    detail: Some("ig9icd64.dll".into()),
+                    matched: "# C  [ig9icd64.dll+0x57a41c]".into(),
+                    line: 8,
+                    context: vec!["# Problematic frame:".into()],
+                    source: CrashSource::HsErr,
+                },
+                CrashClue {
+                    category: CrashCategory::NativeCrash,
+                    summary: "游戏进程异常退出".into(),
+                    advice: "更新显卡驱动".into(),
+                    detail: Some("0xC0000005".into()),
+                    matched: String::new(),
+                    line: 0,
+                    context: Vec::new(),
+                    source: CrashSource::ExitCode,
+                },
+            ],
+            suspects: Vec::new(),
+            java: None,
+            max_memory_mb: Some(4096),
+            warnings: vec![LaunchWarning::OnedriveFolder, LaunchWarning::JvmMaxTooLow],
+            exit_code_note: Some(ExitCodeNote {
+                code: -1_073_741_819,
+                hex: "0xC0000005".into(),
+                kind: ExitCodeKind::AccessViolation,
+                summary: "访问冲突".into(),
+            }),
+            scanned_files: vec![
+                ScannedFile {
+                    kind: CrashSource::SessionLog,
+                    path: r"E:\mc\logs\latest.log".into(),
+                },
+                ScannedFile {
+                    kind: CrashSource::CrashReport,
+                    path: r"E:\mc\crash-reports\crash-2026-10-29_19.04.12-client.txt".into(),
+                },
+                ScannedFile {
+                    kind: CrashSource::HsErr,
+                    path: r"E:\mc\hs_err_pid4242.log".into(),
+                },
+            ],
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["diagnoses"][0]["source"], json!("hs_err"));
+        assert_eq!(
+            json["diagnoses"][0]["category"],
+            json!("intel_graphics_driver")
+        );
+        assert_eq!(json["diagnoses"][1]["source"], json!("exit_code"));
+        assert_eq!(json["diagnoses"][1]["category"], json!("native_crash"));
+        assert_eq!(json["diagnoses"][1]["line"], json!(0));
+        assert_eq!(json["diagnoses"][1]["matched"], json!(""));
+        assert_eq!(
+            json["exit_code_note"],
+            json!({ "code": -1_073_741_819, "hex": "0xC0000005", "kind": "access_violation", "summary": "访问冲突" })
+        );
+        assert_eq!(
+            json["scanned_files"],
+            json!([
+                { "kind": "session_log", "path": r"E:\mc\logs\latest.log" },
+                { "kind": "crash_report", "path": r"E:\mc\crash-reports\crash-2026-10-29_19.04.12-client.txt" },
+                { "kind": "hs_err", "path": r"E:\mc\hs_err_pid4242.log" }
+            ])
+        );
+        assert_eq!(
+            json["warnings"],
+            json!(["onedrive_folder", "jvm_max_too_low"])
+        );
+        let mut fields: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut expected = vec![
+            "at",
+            "diagnoses",
+            "exit_code",
+            "exit_code_note",
+            "java",
+            "log_path",
+            "max_memory_mb",
+            "scanned_files",
+            "session_started_at",
+            "suspects",
+            "warnings",
+        ];
+        expected.sort_unstable();
+        fields.sort_unstable();
+        assert_eq!(fields, expected);
+        // 表外的退出码没有说明，序列化为 null 而不是缺字段。
+        let plain = CrashReport {
+            exit_code_note: None,
+            scanned_files: Vec::new(),
+            ..report
+        };
+        let json = serde_json::to_value(&plain).unwrap();
+        assert_eq!(json["exit_code_note"], serde_json::Value::Null);
+        assert_eq!(json["scanned_files"], json!([]));
+    }
+
     #[test]
     fn launch_log_lines_get_a_level_for_every_source() {
         let dto = LaunchLogDto::from(LaunchLog {

@@ -4,6 +4,8 @@
 //! 这是本 crate 的门面：JVM 段（安全/编码/内存/authlib + 版本 jvm 参数或旧版基座 + 日志参数）与
 //! 游戏段（新式 `arguments.game` 或旧式 `minecraftArguments`）分别拼成模板序列，再统一过一遍 `${}` 占位符
 //! 替换。占位符全表（natives/library/game_directory/assets/auth_*/version_type/classpath…）在这里一次性算好。
+//! 直达存档或服务器（[`QuickPlayTarget`]）按版本 JSON 有没有 Quick Play 条件块，决定是置 feature 填占位符，
+//! 还是给旧版追加 `--server` / `--port`。
 
 use std::path::PathBuf;
 
@@ -16,6 +18,10 @@ use crate::classpath;
 use crate::error::{LaunchError, Result};
 use crate::memory::MemoryConfig;
 use crate::placeholder::Placeholders;
+use crate::quickplay::{
+    self, FEATURE_MULTIPLAYER, FEATURE_SINGLEPLAYER, PLACEHOLDER_MULTIPLAYER,
+    PLACEHOLDER_SINGLEPLAYER, QuickPlayTarget,
+};
 
 /// 一次启动所需的 `.minecraft` 布局路径。
 ///
@@ -99,6 +105,19 @@ pub struct CommandBuilder<'a> {
     fullscreen: bool,
     extra_jvm_args: Vec<String>,
     extra_game_args: Vec<String>,
+    quick_play: Option<QuickPlayTarget>,
+}
+
+/// 直达目标落到命令行上的方式。
+enum QuickPlayPlan {
+    /// 置上 feature，让版本 JSON 的条件块生效，占位符填目标。
+    Feature {
+        feature: &'static str,
+        placeholder: &'static str,
+        value: String,
+    },
+    /// 版本没有 Quick Play 块：追加旧版的 `--server <host> --port <port>`。
+    LegacyServer { host: String, port: u16 },
 }
 
 impl<'a> CommandBuilder<'a> {
@@ -132,6 +151,7 @@ impl<'a> CommandBuilder<'a> {
             fullscreen: false,
             extra_jvm_args: Vec::new(),
             extra_game_args: Vec::new(),
+            quick_play: None,
         }
     }
 
@@ -184,8 +204,61 @@ impl<'a> CommandBuilder<'a> {
         self
     }
 
+    /// 启动后直接进入存档或加入服务器。版本不支持这种方式时 [`CommandBuilder::build`] 报
+    /// [`LaunchError::QuickPlayUnsupported`]。
+    pub fn with_quick_play(mut self, target: QuickPlayTarget) -> Self {
+        self.quick_play = Some(target);
+        self
+    }
+
+    /// 定出直达目标怎样落到命令行上。有 Quick Play 块的版本只走 Quick Play：同一版本删掉了 `--server`。
+    fn plan_quick_play(&self) -> Result<Option<QuickPlayPlan>> {
+        let Some(target) = &self.quick_play else {
+            return Ok(None);
+        };
+        let mode = target.mode();
+        if !quickplay::quick_play_support(self.version).supports(mode) {
+            return Err(LaunchError::QuickPlayUnsupported {
+                version: self.version.id.clone(),
+                mode,
+            });
+        }
+        let plan = match target {
+            QuickPlayTarget::Singleplayer { world_dir_name } => QuickPlayPlan::Feature {
+                feature: FEATURE_SINGLEPLAYER,
+                placeholder: PLACEHOLDER_SINGLEPLAYER,
+                value: world_dir_name.clone(),
+            },
+            QuickPlayTarget::Multiplayer {
+                address,
+                host,
+                port,
+            } => {
+                if quickplay::has_feature_block(self.version, FEATURE_MULTIPLAYER) {
+                    // 原文照传、不补端口：没写端口时由游戏按它自己多人列表的规则解析（含 SRV）。
+                    QuickPlayPlan::Feature {
+                        feature: FEATURE_MULTIPLAYER,
+                        placeholder: PLACEHOLDER_MULTIPLAYER,
+                        value: address.clone(),
+                    }
+                } else {
+                    QuickPlayPlan::LegacyServer {
+                        host: host.clone(),
+                        port: *port,
+                    }
+                }
+            }
+        };
+        Ok(Some(plan))
+    }
+
     /// 拼出完整启动命令。
-    pub fn build(self) -> Result<LaunchCommand> {
+    pub fn build(mut self) -> Result<LaunchCommand> {
+        // feature 要在展开条件参数之前置上，否则 Quick Play 块不会进入模板序列。
+        let quick_play = self.plan_quick_play()?;
+        if let Some(QuickPlayPlan::Feature { feature, .. }) = &quick_play {
+            self.ctx = self.ctx.with_feature(*feature, true);
+        }
         let separator = classpath::classpath_separator(self.ctx.os_name);
         let entries = classpath::classpath_entries(
             self.version,
@@ -274,6 +347,12 @@ impl<'a> CommandBuilder<'a> {
             ph.insert("resolution_width", width.to_string());
             ph.insert("resolution_height", height.to_string());
         }
+        if let Some(QuickPlayPlan::Feature {
+            placeholder, value, ..
+        }) = &quick_play
+        {
+            ph.insert(*placeholder, value.as_str());
+        }
 
         // JVM 段模板：先注入的安全/编码/内存/authlib，再叠版本 jvm 参数（或旧版基座），最后日志参数。
         let mut jvm_templates: Vec<String> = Vec::new();
@@ -350,6 +429,16 @@ impl<'a> CommandBuilder<'a> {
                 width.to_string(),
                 "--height".to_owned(),
                 height.to_string(),
+            ]);
+        }
+        // 放在自定义游戏参数合并之前：玩家自己写的 --server / --port 照常覆盖这里的值。端口总是显式写出，
+        // 不依赖旧版游戏自己的缺省值。
+        if let Some(QuickPlayPlan::LegacyServer { host, port }) = quick_play {
+            game_args.extend([
+                "--server".to_owned(),
+                host,
+                "--port".to_owned(),
+                port.to_string(),
             ]);
         }
         if self.fullscreen {
@@ -466,6 +555,40 @@ mod tests {
         let args = build_with_resolution(modern, Some((854, 480)));
         assert_eq!(value_after(&args, "--width"), vec!["854"]);
         assert_eq!(value_after(&args, "--height"), vec!["480"]);
+    }
+
+    /// 旧版又设分辨率又直达服务器：窗口尺寸与 `--server` / `--port` 都走追加，谁也不能挤掉谁。
+    #[test]
+    fn legacy_arguments_keep_the_resolution_alongside_the_quick_play_server() {
+        let version = VersionJson::from_json_str(
+            r#"{"id":"1.12.2","mainClass":"net.minecraft.client.main.Main",
+            "minecraftArguments":"--username ${auth_player_name} --version ${version_name}"}"#,
+        )
+        .unwrap();
+        let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+        let paths = GamePaths::standard(PathBuf::from("/mc"), &version.id);
+        let args = CommandBuilder::new(
+            &version,
+            ctx,
+            "java.exe",
+            paths,
+            "/mc",
+            AuthValues::offline("Steve", "uuid"),
+            "1.0.0",
+        )
+        .with_resolution(1920, 1080)
+        .with_quick_play(QuickPlayTarget::Multiplayer {
+            address: "play.example.com:25566".to_owned(),
+            host: "play.example.com".to_owned(),
+            port: 25566,
+        })
+        .build()
+        .unwrap()
+        .args;
+        assert_eq!(value_after(&args, "--width"), vec!["1920"]);
+        assert_eq!(value_after(&args, "--height"), vec!["1080"]);
+        assert_eq!(value_after(&args, "--server"), vec!["play.example.com"]);
+        assert_eq!(value_after(&args, "--port"), vec!["25566"]);
     }
 
     /// 日志配置名原样当作 `assets/log_configs/` 下的文件名：不是单个安全路径段时报路径越界，

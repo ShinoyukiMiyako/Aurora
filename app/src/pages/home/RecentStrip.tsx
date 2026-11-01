@@ -103,10 +103,19 @@ function RecentCard({ inst }: { inst: InstanceSummary }) {
 
 /** 卡片右下角的小号启动入口：与启动胶囊同一套视图。 */
 function RecentLaunch({ instanceId }: { instanceId: string }) {
-  const { instance, view, failure, launch, openCrash, fix } = useLaunch(instanceId);
+  const { instance, view, failure, blocked, launch, openCrash, fix } = useLaunch(instanceId);
   switch (view.kind) {
     case "ready":
-      return <IconButton icon="play" variant="secondary" size="sm" label={LAUNCH_COPY.group(instance.name)} onClick={launch} />;
+      return (
+        <IconButton
+          icon="play"
+          variant="secondary"
+          size="sm"
+          label={LAUNCH_COPY.group(instance.name)}
+          disabledReason={blocked === null ? undefined : blocked}
+          onClick={launch}
+        />
+      );
     case "broken": {
       const action = brokenAction(view);
       return <IconButton icon={action.icon} variant="secondary" size="sm" label={action.label} onClick={launch} />;

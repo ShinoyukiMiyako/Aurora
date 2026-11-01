@@ -86,7 +86,12 @@ export interface PinnedServerDto {
   name: string;
   /** host、host:port、[IPv6]:port；不写端口为 25565。 */
   address: string;
+  /** 「加入」时默认用的实例 id；没记住为 null。后端不保证它此刻还在实例列表里。 */
+  instance: string | null;
 }
+
+/** 要改的服务器不在固定列表里，detail：{ address }。 */
+export const SERVER_NOT_PINNED_CODE = "server_not_pinned";
 
 /** 游戏多人列表（servers.dat）里的一台服务器。 */
 export interface KnownServerDto {
@@ -121,6 +126,14 @@ export const listPinnedServers = (): Promise<PinnedServerDto[]> => invoke<Pinned
 /** 整体替换固定列表，返回整理后的列表（同地址去重、空名字用地址）；有一个地址不合法整体拒绝（invalid_argument，detail.address）。 */
 export const setPinnedServers = (servers: PinnedServerDto[]): Promise<PinnedServerDto[]> =>
   invoke<PinnedServerDto[]>("set_pinned_servers", { servers });
+
+/**
+ * 记住或忘掉某台固定服务器「加入」时用的实例，返回整份固定列表。地址按与固定去重相同的规则匹配
+ * （主机不分大小写，不写端口等于 25565）；不在固定列表里报 SERVER_NOT_PINNED_CODE；实例不存在报
+ * version_not_installed（detail.id），id 不安全报 invalid_argument。
+ */
+export const setPinnedServerInstance = (address: string, instance: string | null): Promise<PinnedServerDto[]> =>
+  invoke<PinnedServerDto[]>("set_pinned_server_instance", { address, instance });
 
 export const listKnownServers = (): Promise<KnownServerDto[]> => invoke<KnownServerDto[]>("list_known_servers");
 

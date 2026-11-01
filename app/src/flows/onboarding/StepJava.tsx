@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { Spinner } from "../../art/Spinner";
+import { runtimeComplete } from "../../domain/rules";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useJavaRuntimes, type JavaInstallationDto } from "../../state/queries/catalog";
@@ -37,6 +38,11 @@ function RuntimeRows({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
               {r.is_64bit ? JAVA_STEP_COPY.bits64 : JAVA_STEP_COPY.bits32}
             </Tag>
             <Tag size="sm">{JAVA_SOURCE_LABEL[r.source]}</Tag>
+            {!runtimeComplete(r) && (
+              <Tag size="sm" tone="warn">
+                {JAVA_STEP_COPY.incomplete}
+              </Tag>
+            )}
           </span>
         </li>
       ))}

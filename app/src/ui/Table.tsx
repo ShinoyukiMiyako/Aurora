@@ -7,10 +7,13 @@
 // 行高只有两档且固定：超过 100 行时虚拟化，固定行高才能不经测量直接定位。
 // 列按尺寸档显示或隐藏，档位由 <html data-sk-tier> 决定，组件不需要在脚本里知道当前档。
 // 选择、排序的状态都由页面持有：组件只渲染并回报，批量操作条也由页面替换工具条。
+// 行的增删：被删的行脱离布局原地淡出，其余行靠布局动画让位；页面只管换 rows，不用为退场做任何事。
 
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
+import { AnimatePresence, motion, useAnimate, useIsPresent, useReducedMotionConfig, type HTMLMotionProps, type Variants } from "framer-motion";
+import { useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
+import { fade, springs } from "../lib/motion";
 import { cssVars, cx } from "../lib/util";
 import type { TierName } from "./Card";
 import styles from "./Table.module.css";
@@ -83,6 +86,8 @@ export const ROW_HEIGHT: Readonly<Record<TableDensity, number>> = { regular: 64,
 export const HEADER_HEIGHT = 36;
 /** 超过这个行数开启虚拟化。 */
 export const VIRTUALIZE_ABOVE = 100;
+/** 一次增删或换位超过这么多行时不逐行动画：行直接换上，整张表淡入一次。再多，布局测量本身就会掉帧。 */
+const ROW_MOTION_LIMIT = 40;
 
 const TIERS: readonly TierName[] = ["compact", "regular", "wide"];
 const ROW_FOCUSABLE = 'button, a[href], input, select, textarea, [tabindex], [data-table-tabindex]';
@@ -126,6 +131,54 @@ export function nextSort(current: TableSort | null | undefined, key: string): Ta
   return { key, direction: "asc" };
 }
 
+/** 一次变化涉及多少行：增删的行数；行集合没变时是换了位置的行数。增删带来的让位不算，那正是布局动画要做的。 */
+export function rowChurn(previous: readonly string[], next: readonly string[]): number {
+  const before = new Set(previous);
+  const after = new Set(next);
+  const changed = next.filter((k) => !before.has(k)).length + previous.filter((k) => !after.has(k)).length;
+  return changed > 0 ? changed : next.filter((k, i) => previous[i] !== k).length;
+}
+
+/** full 淡入淡出带缩放；fade 减少动画时只留透明度；none 一次变化太多，行直接换上。 */
+type RowMotion = "full" | "fade" | "none";
+
+const ROW_VARIANTS: Variants = {
+  hidden: (motion: RowMotion) => (motion === "none" ? { opacity: 1, scale: 1 } : motion === "fade" ? { opacity: 0, scale: 1 } : { opacity: 0, scale: 0.98 }),
+  show: { opacity: 1, scale: 1, transition: { ...springs.settle, opacity: fade.in } },
+  leave: (motion: RowMotion) => (motion === "none" ? { opacity: 0, transition: fade.none } : { opacity: 0, scale: motion === "fade" ? 1 : 0.98, transition: fade.out }),
+};
+
+interface PresenceRowProps extends HTMLMotionProps<"div"> {
+  index: number;
+  rowMotion: RowMotion;
+  /** 行顺序的签名：只有它变了才量布局，窗口缩放、分档切换引起的重渲染不触发布局动画。 */
+  order: string;
+}
+
+/**
+ * 不虚拟化的一行。退场时留在原处淡出，这段时间它已经不是表格的一行：不再带序号（键盘移动按序号找行），
+ * 也不接受指针与焦点，读屏不再读到。
+ */
+function PresenceRow({ index, rowMotion, order, tabIndex, ...rest }: PresenceRowProps) {
+  const present = useIsPresent();
+  return (
+    <motion.div
+      {...rest}
+      data-row-index={present ? index : undefined}
+      tabIndex={present ? tabIndex : -1}
+      inert={!present}
+      custom={rowMotion}
+      variants={ROW_VARIANTS}
+      initial="hidden"
+      animate="show"
+      exit="leave"
+      layout={rowMotion === "full" ? "position" : false}
+      layoutDependency={order}
+      transition={{ layout: springs.settle }}
+    />
+  );
+}
+
 /** 非当前行的行内控件退出 Tab 序列；回到当前行时恢复原值。原值记在 data-table-tabindex 上。 */
 function syncRowTabStops(body: HTMLElement) {
   for (const row of body.querySelectorAll<HTMLElement>(':scope > [role="row"]')) {
@@ -163,7 +216,7 @@ export function Table<T>({
   if (columns.some((c) => c.sortable === true) && onSortChange === undefined) throw new Error("Table 有可排序列时必须给出 onSortChange");
 
   const scrollRef = useRef<HTMLDivElement>(null);
-  const bodyRef = useRef<HTMLDivElement>(null);
+  const [bodyRef, animateBody] = useAnimate<HTMLDivElement>();
   const [active, setActive] = useState(0);
   const pendingFocus = useRef<number | null>(null);
   const rowHeight = ROW_HEIGHT[density];
@@ -171,6 +224,12 @@ export function Table<T>({
   const keys = rows.map(rowKey);
   if (new Set(keys).size !== keys.length) throw new Error("Table 的 rowKey 必须唯一");
   const activeIndex = rows.length === 0 ? -1 : Math.min(active, rows.length - 1);
+
+  const reduced = useReducedMotionConfig() === true;
+  const shownKeys = useRef(keys);
+  const crowded = rowChurn(shownKeys.current, keys) > ROW_MOTION_LIMIT;
+  const rowMotion: RowMotion = crowded ? "none" : reduced ? "fade" : "full";
+  const order = keys.join("|");
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -186,8 +245,10 @@ export function Table<T>({
   const tabStop = renderedIndexes === null || renderedIndexes.length === 0 || renderedIndexes.includes(activeIndex) ? activeIndex : renderedIndexes[0];
 
   useLayoutEffect(() => {
+    shownKeys.current = keys;
     const body = bodyRef.current;
     if (body === null) return;
+    if (crowded) void animateBody(body, { opacity: [0, 1] }, fade.in);
     syncRowTabStops(body);
     const wanted = pendingFocus.current;
     if (wanted === null) return;
@@ -283,36 +344,30 @@ export function Table<T>({
     const key = keys[index];
     const selected = selection !== undefined && selection.selected.has(key);
     const ctx: TableCellContext = { selected, toggleSelected: () => toggle(key) };
-    return (
-      <div
-        key={key}
-        role="row"
-        className={styles.row}
-        data-row-index={index}
-        data-selected={selected || undefined}
-        data-inactive={isInactive !== undefined && isInactive(row) ? "" : undefined}
-        data-activatable={onActivate === undefined ? undefined : ""}
-        data-virtual={virtual ? "" : undefined}
-        aria-rowindex={virtual ? index + 2 : undefined}
-        aria-selected={selection === undefined ? undefined : selected}
-        tabIndex={index === tabStop ? 0 : -1}
-        style={style}
-        onFocus={(event) => {
-          if (event.target === event.currentTarget) setActive(index);
-        }}
-        onKeyDown={(event) => onRowKeyDown(event, index, row, key)}
-        onClick={(event) => onRowClick(event, row)}
-      >
-        {columns.map((column) => {
-          const content = column.cell(row, ctx);
-          return (
-            <div key={column.key} role="gridcell" className={styles.cell} data-align={column.align === undefined ? "start" : column.align} data-keep={column.keepOpaque ? "" : undefined} {...tierAttrs(column)}>
-              {typeof content === "string" || typeof content === "number" ? <span className={styles.text}>{content}</span> : content}
-            </div>
-          );
-        })}
-      </div>
-    );
+    const shared = {
+      role: "row",
+      className: styles.row,
+      "data-selected": selected || undefined,
+      "data-inactive": isInactive !== undefined && isInactive(row) ? "" : undefined,
+      "data-activatable": onActivate === undefined ? undefined : "",
+      "aria-selected": selection === undefined ? undefined : selected,
+      tabIndex: index === tabStop ? 0 : -1,
+      onFocus: (event: FocusEvent<HTMLDivElement>) => {
+        if (event.target === event.currentTarget) setActive(index);
+      },
+      onKeyDown: (event: KeyboardEvent<HTMLDivElement>) => onRowKeyDown(event, index, row, key),
+      onClick: (event: MouseEvent<HTMLDivElement>) => onRowClick(event, row),
+      children: columns.map((column) => {
+        const content = column.cell(row, ctx);
+        return (
+          <div key={column.key} role="gridcell" className={styles.cell} data-align={column.align === undefined ? "start" : column.align} data-keep={column.keepOpaque ? "" : undefined} {...tierAttrs(column)}>
+            {typeof content === "string" || typeof content === "number" ? <span className={styles.text}>{content}</span> : content}
+          </div>
+        );
+      }),
+    };
+    if (style !== undefined) return <div key={key} {...shared} data-row-index={index} data-virtual="" aria-rowindex={index + 2} style={style} />;
+    return <PresenceRow key={key} {...shared} index={index} rowMotion={rowMotion} order={order} />;
   };
 
   const vars = cssVars({
@@ -324,7 +379,7 @@ export function Table<T>({
   });
 
   return (
-    <div
+    <motion.div
       ref={scrollRef}
       className={cx(styles.table, className)}
       style={vars}
@@ -333,6 +388,7 @@ export function Table<T>({
       aria-rowcount={virtual ? rows.length + 1 : undefined}
       aria-multiselectable={selection === undefined ? undefined : true}
       data-density={density}
+      layoutScroll
     >
       <div className={styles.head} role="rowgroup">
         <div className={styles.headRow} role="row" aria-rowindex={virtual ? 1 : undefined}>
@@ -371,9 +427,11 @@ export function Table<T>({
         ) : virtual ? (
           virtualizer.getVirtualItems().map((item) => renderRow(item.index, { transform: `translateY(${item.start}px)` }))
         ) : (
-          rows.map((_, index) => renderRow(index))
+          <AnimatePresence initial={false} mode="popLayout" custom={rowMotion}>
+            {rows.map((_, index) => renderRow(index))}
+          </AnimatePresence>
         )}
       </div>
-    </div>
+    </motion.div>
   );
 }

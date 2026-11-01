@@ -26,14 +26,17 @@ pub mod appearance;
 pub mod art;
 pub mod auth;
 mod authlib;
+pub mod blocked;
 pub mod compat;
 pub mod config;
 pub mod crashdiag;
 pub mod deps;
 pub mod error;
 pub mod event;
+pub mod export;
 pub mod facade;
 pub mod folders;
+mod gpu;
 pub mod history;
 pub mod install;
 pub mod instance_install;
@@ -56,50 +59,71 @@ pub mod resources;
 pub mod search;
 pub mod servers;
 pub mod session;
+mod sources;
+pub mod starter;
+pub mod template;
 pub mod updates;
 pub mod versions;
 mod workdir;
+pub mod world_backup;
 
 // ---- 门面自身的公开类型 ----
 pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
+pub use blocked::{BlockedFile, ClaimReport, ClaimedFile};
 pub use compat::{
     Compatibility, InstalledCopy, InstalledSource, InstanceMatch, InstanceSources, MatchState,
 };
 pub use config::{
     AfterLaunch, AuroraConfig, ConfigFieldReset, ConfigRecovery, ConfigStore, DownloadSourcePolicy,
-    MemorySettings, NamedDirectory, PinnedServer,
+    MemorySettings, NamedDirectory, PinnedServer, WorldBackupSettings,
 };
-pub use crashdiag::{CrashClue, CrashReport, CrashSuspect, LaunchLog};
+pub use crashdiag::{CrashClue, CrashReport, CrashSource, CrashSuspect, LaunchLog, ScannedFile};
 pub use deps::{InstallPlan, PlannedItem};
-pub use error::{CoreError, GameDirProblem, Result};
+pub use error::{CoreError, GameDirProblem, JavaPathProblem, OfflineFallbackRefusal, Result};
 pub use event::{CoreEvent, DownloadProgress, EventSink};
+pub use export::{
+    BundleReason, ExportBlock, ExportBundledMod, ExportExtra, ExportExtraStat, ExportIndexedMod,
+    ExportMatch, ModpackExportOptions, ModpackExportOutcome, ModpackExportPreview,
+    ModpackExportTarget,
+};
 pub use facade::Aurora;
 pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
 pub use history::{History, HistoryEvent, HistoryStore, RollbackCheck};
 pub use install::{InstallOutcome, LoaderChoice};
+pub use java::RemovedJavaPath;
 pub use launch::{
     FailureCode, InstanceLaunchSettings, JavaChoice, LaunchAccount, LaunchEvent, LaunchEventSink,
-    LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning,
+    LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning, QuickPlay,
     resolve_memory,
 };
 pub use launcher_update::{UpdateSource, order_update_sources};
-pub use ledger::{Ledger, LedgerEntry, LedgerStore};
+pub use ledger::{Ledger, LedgerEntry, LedgerStore, UpdateHold};
 pub use modfs::is_mod_file_busy;
 pub use modpack::{
-    INSTANCE_NAME_MAX_CHARS, InstanceModpack, InstanceNameRule, ModpackInstallOutcome,
-    ModpackPreview, ModpackSource, PreparedModpack, read_instance_modpack, validate_instance_name,
+    INSTANCE_NAME_MAX_CHARS, ImportSelection, InstanceModpack, InstanceNameRule,
+    ModpackInstallOutcome, ModpackPreview, ModpackSource, PackFileAvailability, PackFileOrigin,
+    PackModEntry, PreparedModpack, read_instance_modpack, validate_instance_name,
 };
 pub use modpack_summary::ModpackSummary;
-pub use mods::{InstanceMod, ModInstallOutcome, ModSource};
+pub use mods::{InstanceMod, ModInstallOutcome, ModSource, ModToggleOutcome};
 pub use modversions::ProjectInfo;
 pub use news::{LauncherChannel, NewsFeed, NewsItem, NewsTag};
 pub use playtime::{InstanceMinutes, PlayDay, PlayRange, PlayStats, PlaySummary};
+pub use resources::is_safe_file_name;
 pub use resources::{ResourceInstallOutcome, ResourceTarget};
 pub use servers::{KnownServer, ServerMonitor, ServerStatus};
 pub use session::{
     Finished, GameExit, GameRun, GameSlot, JavaUsed, SlotBusy, SlotReservation, SlotTicket,
 };
-pub use updates::UpdateCandidate;
+pub use starter::{
+    StarterEntry, StarterGroup, StarterMissing, StarterMissingReason, StarterMod, StarterMods,
+    starter_table,
+};
+pub use template::{TEMPLATE_FILES, TemplateFile, TemplateInfo, TemplateOutcome, TemplateSkip};
+pub use updates::{ModChangelog, UpdateCandidate};
+pub use world_backup::{
+    AutoBackupOutcome, BackupOutcome, ExportOutcome, RestoreOutcome, WorldBackup, WorldBackupList,
+};
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
@@ -116,13 +140,15 @@ pub use aurora_auth::{
 };
 pub use aurora_install::{LoaderSummary, VanillaSummary};
 pub use aurora_instance::{
-    BrokenReason, BrokenVersion, DiscoveredVersion, IsolationPolicy, VersionScan,
+    BackupKind, BrokenReason, BrokenVersion, DiscoveredVersion, IsolationPolicy, VersionScan,
+    WorldScope,
 };
 pub use aurora_java::{DetectSource, InstalledRuntime, JavaInstallation, JavaVersion};
 pub use aurora_launch::{
-    CrashCategory, CrashDiagnosis, ExitReport, KillSwitch, LauncherLevel, LogBatchSink, LogEntry,
-    LogLine, LogSource, LogStream, MemoryAdvice, MemoryTier, SessionEnded, SessionOutcome,
-    SystemMemory, analyze, detect_crash, game_line_level, probe_system_memory,
+    CrashCategory, CrashDiagnosis, ExitCodeKind, ExitCodeNote, ExitReport, KillSwitch,
+    LauncherLevel, LogBatchSink, LogEntry, LogLine, LogSource, LogStream, MemoryAdvice, MemoryTier,
+    QuickPlayMode, QuickPlaySupport, QuickPlayTarget, SessionEnded, SessionOutcome, SystemMemory,
+    analyze, detect_crash, game_line_level, probe_system_memory,
 };
 pub use aurora_modplatform::{
     AggregateResult, DependencyKind, InstalledMod, MetadataFormat, ModDependency, ModLoader,
@@ -140,6 +166,8 @@ pub use aurora_version::{LoaderInfo, LoaderKind, ManifestVersion, VersionManifes
 // （长任务快照经 [`Aurora::with_cancel`] 挂上，命令层用同一类型登记与触发取消）。
 pub use aurora_auth::MsaEndpoints;
 pub use aurora_download::CancellationToken;
+// 下载密钥被拒时命令层按平台给出码与提示。
+pub use aurora_download::CredentialRealm;
 
 // 实例管理：列表、设置、内容、删除、改名、侧栏固定；按实例名新建与补全；加载器版本与版本清单概览。
 pub use aurora_instance::{

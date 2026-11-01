@@ -24,3 +24,20 @@ describe("全局设置的适配：界面语言", () => {
     });
   });
 });
+
+describe("全局设置的适配：存档备份", () => {
+  it("三项转成驼峰进 Settings，取值原样", () => {
+    expect(settingsFromDto(configDto({ world_backup: { auto: false, keep_per_world: 1, max_total_gb: 1000 } })).worldBackup).toEqual({
+      auto: false,
+      keepPerWorld: 1,
+      maxTotalGb: 1000,
+    });
+  });
+
+  it("补丁里的存档备份三项一起转回 update_config 的形状，没给时不出现这个键", () => {
+    expect(settingsPatchToConfig({ worldBackup: { auto: true, keepPerWorld: 10, maxTotalGb: 50 } })).toEqual({
+      worldBackup: { auto: true, keep_per_world: 10, max_total_gb: 50 },
+    });
+    expect("worldBackup" in settingsPatchToConfig({ checkUpdates: false })).toBe(false);
+  });
+});

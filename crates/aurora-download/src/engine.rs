@@ -12,6 +12,10 @@
 //! 5. 分片路径在某个源上彻底失败后自动回退为整文件单请求，宁可失去并行加速也要把文件装上。
 //! 6. 合并到同目录临时文件，校验大小与 sha1，最后原子 rename 覆盖目标。sha1 在写盘的同时算好，
 //!    不把刚写完的文件再读一遍；落盘是否 fsync 见 [`Landing`]。
+//! 7. 大文件的网络传输段由吞吐看门狗盯着（见 [`crate::watchdog`]）：终点慢到窗口平均低于阈值，
+//!    就向原地址重新取一个终点，已完整的分片保留、只续传没下完的；取不到新终点即换源；已是最后
+//!    一个源时关掉看门狗在当前终点上续传，后面的源都失败时回到先前判慢的源关掉看门狗下完，慢也装上。
+//!    合并、校验、落位不计时。
 //!
 //! 同一个目标路径的下载在进程内串行（[`lock_dest`]）：两次安装同时落同一个共享文件时，后到的一方
 //! 等前一方落位后再做第 1 步，通常直接跳过。
@@ -19,6 +23,10 @@
 //! 取消是协作式的：令牌只在文件开始前、网络等待点（发请求、读响应体）与退避等待里被观察，
 //! 观察到就让当前尝试正常返回 [`Error::Cancelled`]，再由 [`Downloader::run`] 统一清掉该文件的
 //! 临时文件与分片。不在落盘中途丢弃 future，否则进行中的阻塞文件操作会在清理之后才落地。
+//!
+//! 带凭据的任务（[`DownloadTask::credential`]）换用不自动跳转的客户端，跳转由引擎逐跳跟随，
+//! 每一跳各自按凭据作用域决定带不带头（见 [`follow_redirects`]）；带了凭据的那一跳回 401 时，
+//! 不重试、不换源、不回退整文件，直接以 [`Error::CredentialRejected`] 结束。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -33,11 +41,13 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::chunk::{Chunk, ChunkConfig, ChunkPlan};
+use crate::credential::DownloadCredential;
 use crate::error::{Error, Result};
 use crate::health::{SourceHealth, is_host_fault};
 use crate::progress::{FileProgress, ProgressReporter};
 use crate::source::SourcePlan;
 use crate::task::DownloadTask;
+use crate::watchdog::{Armed, WatchdogConfig};
 
 /// 下载引擎的运行参数。
 #[derive(Clone, Default)]
@@ -48,12 +58,16 @@ pub struct DownloadConfig {
     pub retry: RetryPolicy,
     /// 下载源优先级方案。
     pub sources: SourcePlan,
+    /// 大文件的吞吐看门狗。
+    pub watchdog: WatchdogConfig,
 }
 
 /// 单文件下载引擎。可廉价克隆（内部 `reqwest::Client` 与配置均为 `Arc` 共享），供并发池分发。
 #[derive(Clone)]
 pub struct Downloader {
     client: reqwest::Client,
+    /// 不自动跟随跳转的客户端，带凭据的任务全靠它发请求；没装时带凭据的任务直接报错。
+    manual_client: Option<reqwest::Client>,
     config: Arc<DownloadConfig>,
     /// 跨任务共享的源健康表：克隆出的引擎共用同一份，一个文件学到的教训整批受用。
     health: Arc<SourceHealth>,
@@ -74,9 +88,17 @@ impl Downloader {
     ) -> Self {
         Self {
             client,
+            manual_client: None,
             config: Arc::new(config),
             health,
         }
+    }
+
+    /// 装上不自动跟随跳转的客户端，应由 [`aurora_base::http::build_manual_redirect_client`] 构建。
+    /// 共享客户端跟随跳转时会把自定义头原样带到下一跳，带凭据的任务因此只能走这个客户端。
+    pub fn with_manual_redirect_client(mut self, client: reqwest::Client) -> Self {
+        self.manual_client = Some(client);
+        self
     }
 
     /// 只读访问源健康表。
@@ -110,6 +132,9 @@ impl Downloader {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
         }
+        // 装配缺陷在碰磁盘、发请求之前就报出来：拖到请求时才发现，会在重试与换源里打转，
+        // 还会被记成源的故障。
+        self.route_for(task)?;
         let _dest = lock_dest(&task.dest, cancel).await?;
         let file = FileProgress::new(progress);
         if let Some(len) = self.already_complete(task).await? {
@@ -140,8 +165,21 @@ impl Downloader {
             .health
             .prioritize(self.config.sources.candidates(&task.url)?);
         let mut last_err: Option<Error> = None;
+        // 第一个因为慢而让给后面的源。后面的源若全都失败（镜像还没同步到的新文件回 404 就是这样），
+        // 它是唯一真在送数据的源，要回到它关掉看门狗下完：慢也比装不上强。
+        let mut slow_left: Option<&String> = None;
         for (index, url) in candidates.iter().enumerate() {
-            match self.fetch_from(url, task, file, cancel).await {
+            let mut outcome = self.fetch_from(url, task, file, cancel, Watch::On).await;
+            if index + 1 == candidates.len() && matches!(outcome, Err(Error::SlowEndpoint { .. })) {
+                // 没有别的源可换了：慢也比装不上强。不记失败，已完整的分片在续传里复用。
+                tracing::warn!(
+                    file = %task.dest.display(),
+                    %url,
+                    "已是最后一个下载源，关掉看门狗在当前终点上续传"
+                );
+                outcome = self.fetch_from(url, task, file, cancel, Watch::Off).await;
+            }
+            match outcome {
                 Ok(len) => {
                     self.health.record_success(url);
                     return Ok(len);
@@ -152,7 +190,22 @@ impl Downloader {
                     self.discard_leftovers(task).await;
                     return Err(Error::Cancelled);
                 }
+                Err(err @ Error::CredentialRejected { .. }) => {
+                    // 密钥失效只能由用户换密钥解决：换源只会把这条明确的结论淹没在「所有源均失败」里。
+                    // 这也不是源的毛病，不记健康账。
+                    tracing::warn!(
+                        source_index = index,
+                        file = %task.dest.display(),
+                        %url,
+                        error = %err,
+                        "下载密钥被拒，不再尝试其余下载源"
+                    );
+                    return Err(err);
+                }
                 Err(err) => {
+                    if slow_left.is_none() && matches!(err, Error::SlowEndpoint { .. }) {
+                        slow_left = Some(url);
+                    }
                     // 4xx 只说明「这个源没有这个文件」，换源即可，不能记在主机头上。
                     self.health
                         .record_failure(url, is_host_fault(err.http_status()));
@@ -176,6 +229,41 @@ impl Downloader {
                 }
             }
         }
+        // 最后一个源判慢时已在循环里关掉看门狗续传过，留在这里的只可能是更早的源。
+        if let Some(url) = slow_left {
+            tracing::warn!(
+                file = %task.dest.display(),
+                %url,
+                "其余下载源都失败，回到慢的那个源关掉看门狗下完"
+            );
+            // 同换源前的分片纪律：没有 sha1 兜底时，最后一个源留下的分片不能拼进这个源的文件。
+            if task.sha1.is_none() {
+                self.remove_parts(task).await;
+            }
+            match self.fetch_from(url, task, file, cancel, Watch::Off).await {
+                Ok(len) => {
+                    self.health.record_success(url);
+                    return Ok(len);
+                }
+                Err(Error::Cancelled) => {
+                    self.discard_leftovers(task).await;
+                    return Err(Error::Cancelled);
+                }
+                Err(err @ Error::CredentialRejected { .. }) => return Err(err),
+                Err(err) => {
+                    self.health
+                        .record_failure(url, is_host_fault(err.http_status()));
+                    tracing::warn!(
+                        file = %task.dest.display(),
+                        %url,
+                        http_status = ?err.http_status(),
+                        error = %err,
+                        "回到慢源关掉看门狗后仍失败"
+                    );
+                    last_err = Some(err);
+                }
+            }
+        }
         // 候选列表由 SourcePlan::candidates 保证非空，走到这里说明那条保证被破坏了。
         let last = last_err.ok_or(Error::Internal {
             what: "候选下载源列表为空",
@@ -189,20 +277,30 @@ impl Downloader {
     /// 在一个源上完成下载。分片路径在本源上彻底失败时，退回整文件单请求再试一轮：分片依赖
     /// Range，而 Range 恰是最容易被 CDN 前端搞坏的一环（见 [`probe_final_url`]），宁可失去并行
     /// 加速，也不能因此判定文件装不上。
+    ///
+    /// 慢终点不走这条回退：整文件回退是给 Range 故障的，换成单请求照样打在慢终点上。
     async fn fetch_from(
         &self,
         url: &str,
         task: &DownloadTask,
         file: &FileProgress,
         cancel: Option<&CancellationToken>,
+        watch: Watch,
     ) -> Result<u64> {
         let transfer = transfer_for(&self.config.chunk, url, task.size);
         if transfer == Transfer::Whole {
-            return self.retry_on(url, task, file, cancel, transfer).await;
+            return self
+                .retry_on(url, task, file, cancel, transfer, watch)
+                .await;
         }
-        let chunk_err = match self.retry_on(url, task, file, cancel, transfer).await {
+        let chunk_err = match self
+            .retry_on(url, task, file, cancel, transfer, watch)
+            .await
+        {
             Ok(len) => return Ok(len),
-            Err(err) if err.is_cancelled() => return Err(err),
+            Err(err) if ends_the_download(&err) || matches!(err, Error::SlowEndpoint { .. }) => {
+                return Err(err);
+            }
             Err(err) => err,
         };
         tracing::info!(
@@ -212,7 +310,7 @@ impl Downloader {
             "分片路径失败，回退整文件单请求重下"
         );
         match self
-            .retry_on(url, task, file, cancel, Transfer::Whole)
+            .retry_on(url, task, file, cancel, Transfer::Whole, watch)
             .await
         {
             Ok(len) => {
@@ -220,7 +318,11 @@ impl Downloader {
                 self.remove_parts(task).await;
                 Ok(len)
             }
-            Err(err) if err.is_cancelled() => Err(err),
+            // 回退阶段判慢要原样交给换源编排：包进双失败里，最后一个源就认不出该关看门狗续传了。
+            // 分片阶段为什么失败已在上面那条日志里。
+            Err(err) if ends_the_download(&err) || matches!(err, Error::SlowEndpoint { .. }) => {
+                Err(err)
+            }
             Err(fallback_err) => {
                 tracing::warn!(
                     stage = "fallback",
@@ -249,8 +351,9 @@ impl Downloader {
         file: &FileProgress,
         cancel: Option<&CancellationToken>,
         transfer: Transfer,
+        watch: Watch,
     ) -> Result<u64> {
-        let attempt = || self.attempt(url, task, file, cancel, transfer);
+        let attempt = || self.attempt(url, task, file, cancel, transfer, watch);
         match cancel {
             // 退避等待里观察到取消即视为取消；进行中的尝试自己在网络等待点上响应。
             Some(token) => retry_async_until(&self.config.retry, token.cancelled(), attempt)
@@ -271,6 +374,7 @@ impl Downloader {
         file: &FileProgress,
         cancel: Option<&CancellationToken>,
         transfer: Transfer,
+        watch: Watch,
     ) -> Result<u64> {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Err(Error::Cancelled);
@@ -287,15 +391,23 @@ impl Downloader {
 
         // 每次尝试从空摘要开始：上一次尝试喂进去的字节已作废。
         let mut landing = Landing::for_task(task);
+        let job = Job {
+            task,
+            file,
+            cancel,
+            watchdog: match watch {
+                Watch::On if self.config.watchdog.applies_to(task.size) => {
+                    Some(self.config.watchdog)
+                }
+                _ => None,
+            },
+        };
         let assembled = match transfer {
             Transfer::Chunked { total } => {
-                self.download_chunked(url, task, total, file, cancel, &mut landing)
-                    .await?
+                self.download_chunked(url, job, total, &mut landing).await?
             }
             Transfer::Whole => Assembled {
-                len: self
-                    .download_stream(url, task, file, cancel, &mut landing)
-                    .await?,
+                len: self.download_stream(url, job, &mut landing).await?,
                 parts: Vec::new(),
             },
         };
@@ -304,50 +416,78 @@ impl Downloader {
     }
 
     /// 单流下载：一次 GET 流式落到临时文件，返回写入字节数。用于小文件或大小未知的文件。
-    async fn download_stream(
+    ///
+    /// 看门狗判慢时向原地址重新取终点，在新终点上从头重下：单流没有续传，半截临时文件已在失败时删掉。
+    async fn download_stream<'a>(
         &self,
         url: &str,
-        task: &DownloadTask,
-        file: &FileProgress,
-        cancel: Option<&CancellationToken>,
-        landing: &mut Landing<'_>,
+        job: Job<'a>,
+        landing: &mut Landing<'a>,
     ) -> Result<u64> {
-        let temp = temp_path(&task.dest);
-        let resp = until_cancelled(cancel, self.client.get(url).send())
-            .await?
-            .map_err(|source| Error::Request {
-                url: url.to_owned(),
-                source,
-            })?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(Error::Status {
-                url: url.to_owned(),
-                status: status.as_u16(),
-            });
-        }
+        let temp = temp_path(&job.task.dest);
+        let route = self.route_for(job.task)?;
         let durable = landing.durable();
-        match stream_to_file(resp, &temp, file, cancel, landing.hasher(), durable).await {
-            Ok(len) => Ok(len),
-            Err(err) => {
-                // 单流不做续传，失败即清掉半截临时文件，下次从头再来。
-                let _ = tokio::fs::remove_file(&temp).await;
-                Err(err)
+        let mut target = url.to_owned();
+        let mut switches = 0;
+        loop {
+            let armed = job.arm();
+            let net = armed.as_ref().map(Armed::token).or(job.cancel);
+            // 跟随跳转之后真正送数据的终点，响应头到了才知道；之前按请求地址算。
+            let mut endpoint = target.clone();
+            let result: Result<u64> = async {
+                let resp = route.get(&target, None, net).await?;
+                endpoint = resp.url().as_str().to_owned();
+                let status = resp.status();
+                if !status.is_success() {
+                    return Err(Error::Status {
+                        url: target.clone(),
+                        status: status.as_u16(),
+                    });
+                }
+                match stream_to_file(resp, &temp, job.file, net, landing.hasher(), durable).await {
+                    Ok(len) => Ok(len),
+                    Err(err) => {
+                        // 单流不做续传，失败即清掉半截临时文件，下次从头再来。
+                        let _ = tokio::fs::remove_file(&temp).await;
+                        Err(err)
+                    }
+                }
             }
+            .await;
+            let fired = armed.and_then(Armed::disarm);
+            let err = match result {
+                Ok(len) => return Ok(len),
+                Err(err) => err,
+            };
+            if job.user_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let (Some(bytes_per_sec), Some(config)) = (fired, job.watchdog) else {
+                return Err(err);
+            };
+            target = self
+                .next_endpoint(url, &endpoint, job, config, bytes_per_sec, &mut switches)
+                .await?;
+            // 新终点上从头重下：摘要与已计入的字节都作废。
+            *landing = Landing::for_task(job.task);
+            job.file.reset();
         }
     }
 
     /// 分块下载的入口：先把跳转解干净，再对最终地址发 Range，失败按阶段落日志。
-    async fn download_chunked(
+    ///
+    /// 看门狗判慢时等在途分片都停下，向原地址重新取终点，在新终点上续传：已完整的分片一律保留，
+    /// 只对没下完的发 Range。分片全部收齐才合并，合并不计时：大文件合并的磁盘时间不能被当成慢。
+    async fn download_chunked<'a>(
         &self,
         url: &str,
-        task: &DownloadTask,
+        job: Job<'a>,
         total: u64,
-        file: &FileProgress,
-        cancel: Option<&CancellationToken>,
-        landing: &mut Landing<'_>,
+        landing: &mut Landing<'a>,
     ) -> Result<Assembled> {
-        let final_url = match probe_final_url(&self.client, url, cancel).await {
+        let task = job.task;
+        let route = self.route_for(task)?;
+        let final_url = match probe_final_url(&route, url, job.cancel).await {
             Ok(resolved) => resolved,
             Err(err) => {
                 if !err.is_cancelled() {
@@ -372,38 +512,88 @@ impl Downloader {
             );
         }
 
-        let result = self
-            .fetch_chunks(&final_url, task, total, file, cancel, landing)
-            .await;
-        if let Err(err) = &result
-            && !err.is_cancelled()
-        {
-            tracing::warn!(
-                stage = "chunk",
-                file = %task.dest.display(),
-                %url,
-                %final_url,
-                http_status = ?err.http_status(),
-                error = %err,
-                "分片下载失败"
-            );
+        let mut endpoint = final_url;
+        let mut resume = false;
+        let mut switches = 0;
+        let fetched = loop {
+            let armed = job.arm();
+            let net = armed.as_ref().map(Armed::token).or(job.cancel);
+            let result = self
+                .fetch_chunks(&endpoint, job, net, total, landing, resume)
+                .await;
+            let fired = armed.and_then(Armed::disarm);
+            let err = match result {
+                Ok(fetched) => break fetched,
+                Err(err) => err,
+            };
+            if job.user_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            if let (Some(bytes_per_sec), Some(config)) = (fired, job.watchdog) {
+                endpoint = self
+                    .next_endpoint(url, &endpoint, job, config, bytes_per_sec, &mut switches)
+                    .await?;
+                resume = true;
+                // 在途分片都已停下，此刻退回不会与分片记账赛跑；续传时完整的分片重新计入。
+                job.file.reset();
+                // 忽略 Range 的整体 200 会边写合并临时文件边算摘要，换终点后两者都作废。
+                *landing = Landing::for_task(task);
+                remove_if_present(&temp_path(&task.dest)).await;
+                continue;
+            }
+            if !err.is_cancelled() {
+                tracing::warn!(
+                    stage = "chunk",
+                    file = %task.dest.display(),
+                    %url,
+                    final_url = %endpoint,
+                    http_status = ?err.http_status(),
+                    error = %err,
+                    "分片下载失败"
+                );
+            }
+            return Err(err);
+        };
+
+        match fetched {
+            Fetched::Whole(len) => Ok(Assembled {
+                len,
+                parts: Vec::new(),
+            }),
+            Fetched::Parts(plan) => {
+                let temp = temp_path(&task.dest);
+                let durable = landing.durable();
+                let len = concat_parts(&plan, &task.dest, &temp, landing.hasher(), durable).await?;
+                Ok(Assembled {
+                    len,
+                    parts: plan
+                        .chunks
+                        .iter()
+                        .map(|chunk| part_path(&task.dest, chunk.index))
+                        .collect(),
+                })
+            }
         }
-        result
     }
 
-    /// 分块并发下载。整体返回时临时文件已是完整合并结果，并带回本次涉及的分片（供落位后清理）。
+    /// 在一个终点上把分片收齐，不合并。
     ///
     /// `url` 必须是 [`probe_final_url`] 解出的最终地址：所有 Range 请求都直接打在源站上，
-    /// 不再经过任何跳转。
+    /// 不再经过任何跳转。`cancel` 是网络操作观察的令牌，武装看门狗时是它的子令牌。
+    ///
+    /// 首次进入时首片每次都重下，兼任 Range 支持探测。`resume`（换终点续传）时首片与其余分片一视同仁：
+    /// 完整的跳过，没完整的一律要求 206，新终点支不支持 Range 由它回的第一个 206 证明。
     async fn fetch_chunks(
         &self,
         url: &str,
-        task: &DownloadTask,
-        total: u64,
-        file: &FileProgress,
+        job: Job<'_>,
         cancel: Option<&CancellationToken>,
+        total: u64,
         landing: &mut Landing<'_>,
-    ) -> Result<Assembled> {
+        resume: bool,
+    ) -> Result<Fetched> {
+        let task = job.task;
+        let file = job.file;
         let temp = temp_path(&task.dest);
         let durable = landing.durable();
         let plan = ChunkPlan::compute(
@@ -411,44 +601,48 @@ impl Downloader {
             self.config.chunk.chunk_size,
             self.config.chunk.max_chunks,
         );
-        let first = plan.chunks[0];
+        let route = self.route_for(task)?;
 
-        // 首块兼任「探测该源是否支持 Range」之责。
-        let resp0 = ranged_get(&self.client, url, first.start, first.end, cancel).await?;
-        if resp0.status() == reqwest::StatusCode::OK {
-            // 服务器忽略了 Range、返回整体 200：此响应即完整文件，直接落到合并临时文件。
-            return match stream_to_file(resp0, &temp, file, cancel, landing.hasher(), durable).await
-            {
-                Ok(len) => Ok(Assembled {
-                    len,
-                    parts: Vec::new(),
-                }),
-                Err(err) => {
-                    let _ = tokio::fs::remove_file(&temp).await;
-                    Err(err)
-                }
-            };
-        }
+        let rest_from = if resume {
+            0
+        } else {
+            let first = plan.chunks[0];
+            // 首块兼任「探测该源是否支持 Range」之责。
+            let resp0 = ranged_get(&route, url, first.start, first.end, cancel).await?;
+            if resp0.status() == reqwest::StatusCode::OK {
+                // 服务器忽略了 Range、返回整体 200：此响应即完整文件，直接落到合并临时文件。
+                return match stream_to_file(resp0, &temp, file, cancel, landing.hasher(), durable)
+                    .await
+                {
+                    Ok(len) => Ok(Fetched::Whole(len)),
+                    Err(err) => {
+                        let _ = tokio::fs::remove_file(&temp).await;
+                        Err(err)
+                    }
+                };
+            }
 
-        // 206：写首片。首片每次尝试都重下（一个块尺寸，代价可忽略），确保 Range 支持性判定可靠。
-        // 分片不算摘要：合并时按序读回来一次性算，乱序到达的分片没法边写边算。
-        let part0 = part_path(&task.dest, first.index);
-        let written0 = stream_to_file(resp0, &part0, file, cancel, None, durable).await?;
-        if written0 != first.byte_len() {
-            let _ = tokio::fs::remove_file(&part0).await;
-            return Err(Error::IncompleteBody {
-                url: url.to_owned(),
-                expected: first.byte_len(),
-                actual: written0,
-            });
-        }
+            // 206：写首片。首片每次尝试都重下（一个块尺寸，代价可忽略），确保 Range 支持性判定可靠。
+            // 分片不算摘要：合并时按序读回来一次性算，乱序到达的分片没法边写边算。
+            let part0 = part_path(&task.dest, first.index);
+            let written0 = stream_to_file(resp0, &part0, file, cancel, None, durable).await?;
+            if written0 != first.byte_len() {
+                let _ = tokio::fs::remove_file(&part0).await;
+                return Err(Error::IncompleteBody {
+                    url: url.to_owned(),
+                    expected: first.byte_len(),
+                    actual: written0,
+                });
+            }
+            1
+        };
 
         // 其余分片并发下载，已完成的分片（尺寸吻合）跳过——这是断点续传的落点。
         let semaphore = Arc::new(Semaphore::new(self.config.chunk.chunk_concurrency.max(1)));
         let owned_cancel = cancel.cloned();
         let mut set: JoinSet<Result<()>> = JoinSet::new();
         let mut first_err: Option<Error> = None;
-        for chunk in plan.chunks.iter().skip(1).copied() {
+        for chunk in plan.chunks.iter().skip(rest_from).copied() {
             let part = part_path(&task.dest, chunk.index);
             if part_complete(&part, chunk.byte_len()).await {
                 file.reused(chunk.byte_len());
@@ -461,14 +655,14 @@ impl Downloader {
                 });
                 break;
             };
-            let client = self.client.clone();
+            let route = route.clone();
             let url = url.to_owned();
             let chunk_file = file.clone();
             let token = owned_cancel.clone();
             set.spawn(async move {
                 let _permit = permit;
                 download_one_chunk(
-                    &client,
+                    &route,
                     &url,
                     chunk,
                     &part,
@@ -499,16 +693,82 @@ impl Downloader {
             // 网络类失败：保留已完成分片，交由外层重试断点续传，不在此清理。
             return Err(err);
         }
+        Ok(Fetched::Parts(plan))
+    }
 
-        let len = concat_parts(&plan, &task.dest, &temp, landing.hasher(), durable).await?;
-        Ok(Assembled {
-            len,
-            parts: plan
-                .chunks
-                .iter()
-                .map(|chunk| part_path(&task.dest, chunk.index))
-                .collect(),
-        })
+    /// 看门狗判慢后向原地址重新取终点。BMCLAPI 这类分发入口每次请求都可能跳到不同节点，再问一次
+    /// 往往就能换到快的；节点地址带签名与过期参数，只在这一次尝试里用，不跨文件留存。
+    ///
+    /// 换出了新终点就返回它。原地址仍跳回同一个节点（见 [`same_node`]；没有跳转的源就是这样）
+    /// 或换终点次数已用尽，返回 [`Error::SlowEndpoint`] 交给换源；重新取终点本身失败，原样返回那个错误。
+    async fn next_endpoint(
+        &self,
+        origin: &str,
+        slow: &str,
+        job: Job<'_>,
+        config: WatchdogConfig,
+        bytes_per_sec: u64,
+        switches: &mut u32,
+    ) -> Result<String> {
+        let dest = job.task.dest.display();
+        let window_secs = config.window.as_secs();
+        tracing::warn!(
+            file = %dest,
+            endpoint = %slow,
+            bytes_per_sec,
+            window_secs,
+            "下载终点吞吐过低，放弃该终点"
+        );
+        let slow_endpoint = || Error::SlowEndpoint {
+            url: slow.to_owned(),
+            bytes_per_sec,
+            threshold: config.min_bytes_per_sec,
+            window_secs,
+        };
+        if *switches >= config.max_endpoint_switches {
+            tracing::warn!(
+                file = %dest,
+                url = %origin,
+                switches = *switches,
+                "换终点次数已用尽，换下一个下载源"
+            );
+            return Err(slow_endpoint());
+        }
+        let route = self.route_for(job.task)?;
+        let next = match probe_final_url(&route, origin, job.cancel).await {
+            Ok(next) => next,
+            Err(err) => {
+                if !err.is_cancelled() {
+                    tracing::warn!(
+                        stage = "probe",
+                        file = %dest,
+                        url = %origin,
+                        http_status = ?err.http_status(),
+                        error = %err,
+                        "探测最终下载地址失败"
+                    );
+                }
+                return Err(err);
+            }
+        };
+        if same_node(&next, slow) {
+            tracing::warn!(
+                file = %dest,
+                url = %origin,
+                endpoint = %slow,
+                "原地址没有换出新终点，换下一个下载源"
+            );
+            return Err(slow_endpoint());
+        }
+        *switches += 1;
+        tracing::info!(
+            file = %dest,
+            from = %slow,
+            to = %next,
+            switches = *switches,
+            "向原地址重新取到新终点，接着续传"
+        );
+        Ok(next)
     }
 
     /// 合并后校验并原子落位，返回文件实际大小。大小/哈希不符视为损坏：清掉临时文件与分片，
@@ -569,6 +829,22 @@ impl Downloader {
         }
     }
 
+    /// 这个任务的请求怎么发：不带凭据走共享客户端，带凭据走不自动跳转的客户端。
+    fn route_for(&self, task: &DownloadTask) -> Result<Route> {
+        match &task.credential {
+            None => Ok(Route::Auto(self.client.clone())),
+            Some(credential) => {
+                let client = self.manual_client.clone().ok_or(Error::Internal {
+                    what: "带下载凭据的任务需要不自动跳转的客户端",
+                })?;
+                Ok(Route::Credentialed {
+                    client,
+                    credential: credential.clone(),
+                })
+            }
+        }
+    }
+
     /// 目标是否已存在且满足完整性契约：声明了大小先比大小，有 sha1 再校 sha1，两者都没有则不认为
     /// 完整。完整时返回文件大小，供进度计入。
     ///
@@ -592,6 +868,47 @@ impl Downloader {
             None => Ok(task.size.map(|_| len)),
         }
     }
+}
+
+/// 本次调用是否让吞吐看门狗盯着大文件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Watch {
+    On,
+    /// 已是最后一个源时用：没有别的源可换，慢也得装上。
+    Off,
+}
+
+/// 一个文件在一次尝试里不变的几样东西。
+#[derive(Clone, Copy)]
+struct Job<'a> {
+    task: &'a DownloadTask,
+    file: &'a FileProgress,
+    /// 用户的取消令牌。
+    cancel: Option<&'a CancellationToken>,
+    /// 本次尝试要武装的看门狗；不盯时为 `None`。
+    watchdog: Option<WatchdogConfig>,
+}
+
+impl Job<'_> {
+    /// 为一个终点武装看门狗，每个终点各开一个新窗口；不盯时为 `None`，网络操作直接观察用户令牌。
+    fn arm(&self) -> Option<Armed> {
+        self.watchdog
+            .map(|config| Armed::arm(config, self.file, self.cancel))
+    }
+
+    /// 用户是否已取消。看门狗的令牌是用户令牌的子令牌，两者都会让网络操作返回取消，
+    /// 先看这里才分得清是谁停的。
+    fn user_cancelled(&self) -> bool {
+        self.cancel.is_some_and(CancellationToken::is_cancelled)
+    }
+}
+
+/// 一个终点上把分片收齐的结果。
+enum Fetched {
+    /// 服务器忽略 Range 回了整体 200，合并临时文件已是完整文件，值为其字节数。
+    Whole(u64),
+    /// 各分片都已完整落盘，待合并。
+    Parts(ChunkPlan),
 }
 
 /// 一次尝试落到临时文件的结果。
@@ -639,6 +956,164 @@ impl<'a> Landing<'a> {
             None => Ok(()),
         }
     }
+}
+
+/// 两个下载地址是否落在同一个节点上：比协议、主机与端口，不比路径和查询串。
+///
+/// BMCLAPI 每次跳转都给节点地址签上新的签名与过期时间，同一个节点两次跳出来的完整地址也不一样，
+/// 逐字比较认不出「节点没换」，会在同一个慢节点上再白等一个窗口。解析不了的地址只能逐字比。
+fn same_node(a: &str, b: &str) -> bool {
+    match (reqwest::Url::parse(a), reqwest::Url::parse(b)) {
+        (Ok(a), Ok(b)) => a.origin() == b.origin(),
+        _ => a == b,
+    }
+}
+
+/// 换源、回退都救不回来的失败：取消是调用方的决定，密钥被拒只能换密钥。
+fn ends_the_download(err: &Error) -> bool {
+    err.is_cancelled() || matches!(err, Error::CredentialRejected { .. })
+}
+
+/// 带凭据时引擎最多跟随的跳数，与 reqwest 默认跳转策略的上限相同。
+const MAX_REDIRECTS: usize = 10;
+
+/// 一个任务的请求怎么发。克隆只是增加引用计数，分片任务各持一份。
+#[derive(Clone)]
+enum Route {
+    /// 共享客户端，跳转由 reqwest 自动跟随。
+    Auto(reqwest::Client),
+    /// 不自动跳转的客户端加凭据：跳转由引擎逐跳跟随，见 [`follow_redirects`]。
+    Credentialed {
+        client: reqwest::Client,
+        credential: DownloadCredential,
+    },
+}
+
+impl Route {
+    /// 发一次 GET，返回跳转链末端的响应；状态码交给调用方判定。`range` 每一跳都带同一个值。
+    async fn get(
+        &self,
+        url: &str,
+        range: Option<&str>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<reqwest::Response> {
+        match self {
+            Route::Auto(client) => {
+                let mut request = client.get(url);
+                if let Some(range) = range {
+                    request = request.header(reqwest::header::RANGE, range);
+                }
+                until_cancelled(cancel, request.send())
+                    .await?
+                    .map_err(|source| Error::Request {
+                        url: url.to_owned(),
+                        source,
+                    })
+            }
+            Route::Credentialed { client, credential } => {
+                follow_redirects(client, credential, url, range, cancel).await
+            }
+        }
+    }
+}
+
+/// 逐跳跟随跳转：每一跳各自按 `credential` 的作用域决定带不带头，最多跟 [`MAX_REDIRECTS`] 跳。
+///
+/// 为什么不让客户端自己跟：reqwest 跨主机跳转时只摘掉 Authorization、Cookie 等标准敏感头，
+/// 自定义的 `x-api-key` 会被原样带到下一跳。CurseForge 的 edge.forgecdn.net 302 到
+/// mediafilez.forgecdn.net，两者都在作用域内；但跳转一旦指向作用域外的主机，密钥就不能跟过去。
+///
+/// 带了凭据的那一跳回 401，报 [`Error::CredentialRejected`]；没带凭据的那一跳回 401 照常交回调用方，
+/// 按普通状态码处理。
+async fn follow_redirects(
+    client: &reqwest::Client,
+    credential: &DownloadCredential,
+    url: &str,
+    range: Option<&str>,
+    cancel: Option<&CancellationToken>,
+) -> Result<reqwest::Response> {
+    let mut hop = reqwest::Url::parse(url).map_err(|source| {
+        Error::Base(aurora_base::Error::UrlParse {
+            url: url.to_owned(),
+            source,
+        })
+    })?;
+    let mut followed = 0usize;
+    loop {
+        let carries = credential.applies_to(&hop);
+        let mut request = client.get(hop.clone());
+        if carries {
+            request = request.header(
+                credential.header_name().clone(),
+                credential.header_value().clone(),
+            );
+        }
+        if let Some(range) = range {
+            request = request.header(reqwest::header::RANGE, range);
+        }
+        let resp = until_cancelled(cancel, request.send())
+            .await?
+            .map_err(|source| Error::Request {
+                url: hop.as_str().to_owned(),
+                source,
+            })?;
+        let status = resp.status();
+        if is_followed_redirect(status) {
+            if followed == MAX_REDIRECTS {
+                tracing::warn!(%url, last_hop = %hop, "下载跳转超过上限");
+                return Err(Error::TooManyRedirects {
+                    url: url.to_owned(),
+                });
+            }
+            let next = resp
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|location| hop.join(location).ok());
+            let Some(next) = next else {
+                return Err(Error::Status {
+                    url: hop.as_str().to_owned(),
+                    status: status.as_u16(),
+                });
+            };
+            tracing::debug!(
+                from = %hop,
+                to = %next,
+                credential_sent = credential.applies_to(&next),
+                "逐跳跟随下载跳转"
+            );
+            hop = next;
+            followed += 1;
+            continue;
+        }
+        if carries && status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(Error::CredentialRejected {
+                realm: credential.realm(),
+                url: hop.as_str().to_owned(),
+                status: status.as_u16(),
+            });
+        }
+        return Ok(resp);
+    }
+}
+
+/// 引擎之外的少量带凭据读取（如整合包摘要按范围读包尾）用的单次 GET：与下载任务同一套逐跳规则，
+/// 每一跳按作用域决定带不带密钥，`range` 每一跳都带同一个值，带了密钥的那一跳回 401 报
+/// [`Error::CredentialRejected`]。`client` 必须是不自动跳转的客户端
+/// （`aurora_base::http::build_manual_redirect_client`），否则 reqwest 会把密钥原样带到跳转的下一跳。
+/// 返回跳转链末端的响应，状态码交给调用方判定。
+pub async fn credentialed_get(
+    client: &reqwest::Client,
+    credential: &DownloadCredential,
+    url: &str,
+    range: Option<&str>,
+) -> Result<reqwest::Response> {
+    follow_redirects(client, credential, url, range, None).await
+}
+
+/// 引擎替客户端跟随的跳转状态码。300（多选）与 304（未修改）不是跳转到别处的指令，原样交回。
+fn is_followed_redirect(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)
 }
 
 /// 在取消令牌下等待一个网络 future：令牌先触发即返回 [`Error::Cancelled`]。
@@ -735,16 +1210,11 @@ fn transfer_for(config: &ChunkConfig, url: &str, size: Option<u64>) -> Transfer 
 /// 取到最终 URL 后立即丢弃响应，底层传输随之取消。不用 HEAD 是因为部分 CDN 对 HEAD 直接回
 /// 403/405，会把好源误判成坏源。
 async fn probe_final_url(
-    client: &reqwest::Client,
+    route: &Route,
     url: &str,
     cancel: Option<&CancellationToken>,
 ) -> Result<String> {
-    let resp = until_cancelled(cancel, client.get(url).send())
-        .await?
-        .map_err(|source| Error::Request {
-            url: url.to_owned(),
-            source,
-        })?;
+    let resp = route.get(url, None, cancel).await?;
     let status = resp.status();
     let final_url = resp.url().as_str().to_owned();
     drop(resp);
@@ -760,20 +1230,14 @@ async fn probe_final_url(
 
 /// 发起一次 Range 请求。仅放行 206（分块命中）与 200（服务器忽略 Range 的整体响应）两种成功形态。
 async fn ranged_get(
-    client: &reqwest::Client,
+    route: &Route,
     url: &str,
     start: u64,
     end: u64,
     cancel: Option<&CancellationToken>,
 ) -> Result<reqwest::Response> {
     let value = format!("bytes={start}-{end}");
-    let send = client.get(url).header(reqwest::header::RANGE, value).send();
-    let resp = until_cancelled(cancel, send)
-        .await?
-        .map_err(|source| Error::Request {
-            url: url.to_owned(),
-            source,
-        })?;
+    let resp = route.get(url, Some(&value), cancel).await?;
     let status = resp.status();
     if status == reqwest::StatusCode::PARTIAL_CONTENT || status == reqwest::StatusCode::OK {
         Ok(resp)
@@ -785,9 +1249,9 @@ async fn ranged_get(
     }
 }
 
-/// 下载单个非首分片到其分片文件，并校验落盘字节数与区间长度一致。
+/// 下载单个分片到其分片文件（首片只在换终点续传时走这里），并校验落盘字节数与区间长度一致。
 async fn download_one_chunk(
-    client: &reqwest::Client,
+    route: &Route,
     url: &str,
     chunk: Chunk,
     part: &Path,
@@ -795,9 +1259,9 @@ async fn download_one_chunk(
     cancel: Option<&CancellationToken>,
     durable: bool,
 ) -> Result<()> {
-    let resp = ranged_get(client, url, chunk.start, chunk.end, cancel).await?;
+    let resp = ranged_get(route, url, chunk.start, chunk.end, cancel).await?;
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-        // 非零起始的分片却收到 200，意味着该源不支持 Range：上抛以触发换源，而非把整文件塞进某一分片。
+        // 分片却收到 200，意味着该源不支持 Range：上抛以触发换源，而非把整文件塞进某一分片。
         return Err(Error::RangeUnsupported {
             url: url.to_owned(),
         });
@@ -1160,6 +1624,36 @@ mod tests {
             transfer_for(&excluded, "https://cdn.modrinth.com/a.jar", Some(1 << 20)),
             Transfer::Chunked { total: 1 << 20 }
         );
+    }
+
+    #[test]
+    fn same_node_compares_scheme_host_and_port_only() {
+        let node = "https://bmclapi1.sakura.sld.tw/maven/a.jar?s=first&e=100";
+        assert!(
+            same_node(
+                node,
+                "https://bmclapi1.sakura.sld.tw/maven/a.jar?s=second&e=200"
+            ),
+            "重签的地址仍是同一个节点"
+        );
+        assert!(
+            same_node(node, "https://bmclapi1.sakura.sld.tw:443/other/b.jar"),
+            "默认端口写不写都一样，路径不同也是同一个节点"
+        );
+        assert!(!same_node(
+            node,
+            "https://bmclapi3.hurtmc.com/maven/a.jar?s=first&e=100"
+        ));
+        assert!(!same_node(
+            node,
+            "https://bmclapi1.sakura.sld.tw:4000/maven/a.jar"
+        ));
+        assert!(!same_node(
+            node,
+            "http://bmclapi1.sakura.sld.tw/maven/a.jar"
+        ));
+        assert!(same_node("not a url", "not a url"), "解析不了时逐字比");
+        assert!(!same_node("not a url", "not a url?s=2"));
     }
 
     #[test]

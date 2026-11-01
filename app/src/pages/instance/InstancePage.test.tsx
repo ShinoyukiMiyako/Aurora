@@ -2,14 +2,17 @@
 // @module-tag heavy-page
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { ICON_PATHS } from "../../art/icon-paths";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { CrashReportDto, LaunchLogDto } from "../../ipc/diagnostics";
 import { IpcError } from "../../ipc/errors";
 import type { HistoryEvent } from "../../ipc/history";
-import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSettingsDto } from "../../ipc/instances";
+import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSettingsDto, TemplateInfoDto, WorldBackupDto, WorldBackupListDto } from "../../ipc/instances";
 import type { JavaInstallationDto } from "../../ipc/java";
 import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
 import { OverlayRoot } from "../../shell/overlay";
+import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
+import { PickFolderProvider } from "../discover/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
@@ -18,14 +21,17 @@ import type { IpcRecorder } from "../../test/fake-bridge";
 import { emulateFocusFixup } from "../../test/focus-fixup";
 import { CORE_EVENT } from "../../ipc/tasks";
 import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
-import { invalidate } from "../../state/resource";
+import { invalidate, resources } from "../../state/resource";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 import { InstallStageTab } from "./InstallStage";
 import { creationRef, creationRefEqual, installStage } from "./model";
+import { PickSaveFileProvider, type PickSaveFile } from "./save-file";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+/** 系统保存文件对话框的替身：各用例按需改写返回值。 */
+const saveDialog = vi.hoisted(() => ({ pick: null as unknown as PickSaveFile }));
 
 const ID = "樱花生存";
 const DAY = 24 * 3600 * 1000;
@@ -40,6 +46,9 @@ let mods: InstalledMod[];
 let updates: UpdateCandidate[];
 let crash: CrashReportDto | null;
 let history: HistoryEvent[];
+let template: TemplateInfoDto;
+
+const NO_TEMPLATE: TemplateInfoDto = { present: false, files: [], source_instance: null, saved_at: null, enabled: true };
 
 function Probe() {
   nav = useNav();
@@ -58,8 +67,12 @@ function Providers({ children }: { children: ReactNode }) {
     <LauncherProvider>
       <ShellProvider>
         <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
-          {children}
-          <OverlayRoot />
+          <PickSaveFileProvider value={(options) => saveDialog.pick(options)}>
+            <PickFolderProvider value={() => Promise.resolve(MOCK_DOWNLOADS_DIR)}>
+              {children}
+              <OverlayRoot />
+            </PickFolderProvider>
+          </PickSaveFileProvider>
         </RemoteImageProvider>
       </ShellProvider>
     </LauncherProvider>
@@ -174,8 +187,8 @@ function modDto(fileName: string, name: string, over: Partial<InstalledMod> = {}
   };
 }
 
-function java(path: string, major: number): JavaInstallationDto {
-  return { path, version: { major, minor: 0, security: 5, build: 0, raw: `${major}.0.5` }, is_64bit: true, vendor: "Microsoft", source: "registry" };
+function java(path: string, major: number, over: Partial<JavaInstallationDto> = {}): JavaInstallationDto {
+  return { path, version: { major, minor: 0, security: 5, build: 0, raw: `${major}.0.5` }, is_64bit: true, vendor: "Microsoft", source: "registry", missing_files: [], ...over };
 }
 
 function contentDto(): InstanceContentDto {
@@ -192,6 +205,7 @@ function contentDto(): InstanceContentDto {
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
   resetRecorder(ipc);
+  saveDialog.pick = vi.fn(() => Promise.reject(new Error("这个用例不该弹保存对话框")));
   stubMatchMedia(false);
   stubResizeObserver();
   stubCanvas();
@@ -217,14 +231,15 @@ beforeEach(() => {
     fullscreen: false,
   };
   mods = [
-    modDto("sodium.jar", "Sodium", { source: { platform: "modrinth", project_id: "AANobbMI", version_id: "v1", version_number: "0.6.0", title: "Sodium", dependency_of: null } }),
+    modDto("sodium.jar", "Sodium", { source: { platform: "modrinth", project_id: "AANobbMI", version_id: "v1", version_number: "0.6.0", title: "Sodium", dependency_of: null, installed_at: 1_780_000_000, update_hold: null } }),
     modDto("fabric-api.jar", "Fabric API", {
-      source: { platform: "modrinth", project_id: "P7dR8mSH", version_id: "v2", version_number: "0.100", title: "Fabric API", dependency_of: "AANobbMI" },
+      source: { platform: "modrinth", project_id: "P7dR8mSH", version_id: "v2", version_number: "0.100", title: "Fabric API", dependency_of: "AANobbMI", installed_at: 1_780_000_000, update_hold: null },
     }),
   ];
   updates = [];
   crash = null;
   history = [];
+  template = NO_TEMPLATE;
   bootOverrides(ipc, { instances, config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false } }) });
   ipc.overrides.set("list_instances", () => instances);
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
@@ -245,6 +260,15 @@ beforeEach(() => {
     history.map((e) => ({ event_id: e.id, can_rollback: e.kind === "update", reason: e.kind === "update" ? null : "安装事件不支持回滚，请直接移除对应文件" })),
   );
   ipc.overrides.set("rollback", () => null);
+  ipc.overrides.set("template_info", () => template);
+  ipc.overrides.set("save_instance_as_template", (args) => {
+    template = { present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: String(args.id), saved_at: Date.now(), enabled: true };
+    return template;
+  });
+  ipc.overrides.set("clear_template", () => {
+    template = NO_TEMPLATE;
+    return template;
+  });
   ipc.overrides.set("open_folder", () => null);
   ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
   ipc.overrides.set("set_mod_enabled", (args) => `${String(args.fileName)}.disabled`);
@@ -433,9 +457,9 @@ describe("实例详情：后端正在改动实例", () => {
   const reason = (what: string) => `正在改动这个实例的 Mod、资源或设置，完成后才能${what}`;
 
   it.each([
-    ["compact", 1024, ["重命名", "固定到侧栏", "打开实例文件夹", "补全游戏文件", "删除实例"]],
-    ["regular", 1200, ["重命名", "打开实例文件夹", "补全游戏文件", "删除实例"]],
-    ["wide", 1440, ["重命名", "打开实例文件夹", "补全游戏文件", "删除实例"]],
+    ["compact", 1024, ["重命名", "固定到侧栏", "打开实例文件夹", "导出整合包", "补全游戏文件", "删除实例"]],
+    ["regular", 1200, ["重命名", "打开实例文件夹", "导出整合包", "补全游戏文件", "删除实例"]],
+    ["wide", 1440, ["重命名", "打开实例文件夹", "导出整合包", "补全游戏文件", "删除实例"]],
   ])("%s 档：头图菜单的重命名、补全与删除提前禁用，每项只写标签、原因放进悬停的提示气泡；F2 不进入改名", async (_tier, width, labels) => {
     vi.stubGlobal("innerWidth", width);
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
@@ -539,6 +563,46 @@ describe("实例详情：后端正在改动实例", () => {
     await flush();
     expect(byRole("switch", "停用 Sodium").getAttribute("aria-disabled")).toBeNull();
   });
+
+  it("头图状态标签：后端在备份或恢复存档时写「正在备份存档」，改动 Mod 时不写", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
+    await open("overview");
+    const hero = () => document.querySelector("section");
+    expect(hero()?.textContent).not.toContain("正在备份存档");
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "backing_up" } : i));
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+    });
+    await flush();
+    expect(hero()?.textContent).toContain("正在备份存档");
+  });
+
+  it("后端在备份或恢复存档（含游戏退出后的自动备份）：重命名、删除带备份的原因禁用，Mod 开关照常可用", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "backing_up" } : i));
+    await open("settings");
+    for (const [label, what] of [
+      ["重命名", "重命名"],
+      ["删除实例", "删除"],
+    ]) {
+      const el = button(label);
+      expect(el.getAttribute("aria-disabled")).toBe("true");
+      act(() => {
+        el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      const tipId = el.getAttribute("aria-describedby");
+      if (tipId === null) throw new Error(`「${label}」悬停后没有关联提示气泡`);
+      expect(document.getElementById(tipId)?.textContent).toBe(`正在备份或恢复这个实例的存档，完成后才能${what}`);
+    }
+    click(button("删除实例"));
+    await flush();
+    expect(callsOf(ipc, "preview_instance_deletion")).toEqual([]);
+    click(byRole("tab", /^Mod/));
+    await flush();
+    expect(byRole("switch", "停用 Sodium").getAttribute("aria-disabled")).toBeNull();
+  });
 });
 
 describe("实例详情：实例跟随全局、全局固定了默认 Java", () => {
@@ -638,6 +702,19 @@ describe("实例详情：新建还没落盘的实例", () => {
     return document.getElementById(tipId)?.textContent;
   }
 
+  it("头图菜单的「导出整合包」带原因禁用，点了不读导出预览、不开弹窗", async () => {
+    await openPlaceholder("overview");
+    click(button("更多操作"));
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "导出整合包");
+    if (item === undefined) throw new Error("菜单里没有「导出整合包」");
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(item)).toBe("新建的实例还没装好，装完后才能导出");
+    click(item);
+    await flush();
+    expect(callsOf(ipc, "preview_modpack_export")).toEqual([]);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it("头图菜单的「打开实例文件夹」带原因禁用，点了不发命令、不报错", async () => {
     await openPlaceholder("overview");
     click(button("更多操作"));
@@ -663,7 +740,7 @@ describe("实例详情：新建与导入还没装好", () => {
   const QUERIES = new Set(["list_mods", "check_updates", "list_instance_content", "get_instance_settings", "memory_advice", "last_launch_log", "list_history", "rollback_checks", "last_crash"]);
   const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
   const queriesFor = (id: string) => ipc.calls.filter((c) => QUERIES.has(c.cmd) && Object.values(c.args).includes(id)).map((c) => c.cmd);
-  const installResult = (): InstallResultDto => ({ id: NAME, mc_version: "1.21.1", loader: { kind: "fabric", version: "0.16.10" }, libraries: 40, assets: 3000, natives: 2 });
+  const installResult = (): InstallResultDto => ({ id: NAME, mc_version: "1.21.1", loader: { kind: "fabric", version: "0.16.10" }, libraries: 40, assets: 3000, natives: 2, template: null });
   const fabric: InstanceDto["loaders"] = [{ kind: "fabric", version: "0.16.10" }];
   /** 后端建好了目录、还在往里装：之后任何一次重扫都会扫到这样一份（占着实例名，未完成标记还在进行中）。 */
   const halfInstalled = (): InstanceDto =>
@@ -921,6 +998,123 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(text()).toContain(RUNNING);
     expect(text()).not.toContain("安装没有完成");
   });
+
+  it("没装成是因为有文件要手动下载：说明块不提重试，「查看这些文件」打开清单，都找到后重新安装", async () => {
+    resetModpackMock();
+    const FILE = {
+      project_id: 9,
+      file_id: 90,
+      file_name: "locked.jar",
+      web_url: "https://www.curseforge.com/minecraft/mc-mods/locked/files/90",
+      destination: "mods/locked.jar",
+      sha1: "a".repeat(40),
+      fingerprint: 0,
+      size: 3,
+    };
+    let attempts = 0;
+    ipc.overrides.set("install_version", () => {
+      attempts += 1;
+      return attempts === 1 ? Promise.reject(new IpcError("distribution_blocked", "原文", { files: [FILE] })) : new Promise(() => undefined);
+    });
+    function KeptPlaceholder() {
+      const creation = useLauncherSelector((s) => creationRef(s.tasks, NAME), creationRefEqual);
+      if (creation === null) return null;
+      const stage = installStage({ id: NAME, placeholder: true, activity: "installing" }, creation);
+      return stage.kind === "none" ? null : <InstallStageTab tab="crash" instanceId={NAME} stage={stage} />;
+    }
+    view = render(
+      <Providers>
+        <Probe />
+        <KeptPlaceholder />
+      </Providers>,
+    );
+    await flush();
+    await create(NAME);
+    expect(text()).toContain("有 1 个文件需要到 CurseForge 网页手动下载。");
+    expect(text()).not.toContain("可以重试");
+    expect([...document.querySelectorAll("button")].some((b) => b.textContent === "重试")).toBe(false);
+
+    click(button("查看这些文件"));
+    await flush();
+    seedMockDownloads(["locked.jar"]);
+    click(button("我已下载，重新检查"));
+    await flush();
+    click(button("重新安装"));
+    await flush();
+    expect(attempts).toBe(2);
+    expect(launcher.state.tasks.filter((t) => t.instanceId === NAME).map((t) => [t.status, t.attempt])).toEqual([["running", 2]]);
+    expect(text()).not.toContain("安装没有完成");
+  });
+});
+
+describe("实例详情：导出整合包入口", () => {
+  function exportItem(): HTMLElement {
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "导出整合包");
+    if (item === undefined) throw new Error("菜单里没有「导出整合包」");
+    return item;
+  }
+
+  async function tipOf(el: HTMLElement): Promise<string | null | undefined> {
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = el.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error("「导出整合包」悬停后没有关联提示气泡");
+    return document.getElementById(tipId)?.textContent;
+  }
+
+  it("菜单项排在「打开实例文件夹」之后、分隔线之前", async () => {
+    await open("overview");
+    click(button("更多操作"));
+    const labels = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map(textOf);
+    expect(labels.indexOf("导出整合包")).toBe(labels.indexOf("打开实例文件夹") + 1);
+    expect(exportItem().getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it.each<[string, Partial<InstanceDto>, string]>([
+    ["补全进行中", { activity: "repairing" }, "安装任务正在写这个实例的文件夹，完成后才能导出"],
+    ["正在重命名", { activity: "renaming" }, "正在重命名这个实例，完成后才能导出"],
+    ["正在删除", { activity: "deleting" }, "正在删除这个实例"],
+    ["正在备份或恢复存档", { activity: "backing_up" }, "正在备份或恢复存档，完成后才能导出"],
+    ["文件不完整", { status: "broken", broken_reason: "缺少版本 JSON" }, "实例文件不完整，修复后才能导出"],
+  ])("%s：菜单项带原因禁用，点了不读导出预览", async (_case, patch, reason) => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, ...patch } : i));
+    await open("overview");
+    click(button("更多操作"));
+    const item = exportItem();
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(await tipOf(item)).toBe(reason);
+    click(item);
+    await flush();
+    expect(callsOf(ipc, "preview_modpack_export")).toEqual([]);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it.each<[string, Partial<InstanceDto>]>([
+    ["游戏运行中", { activity: "running" }],
+    ["正在装 Mod", { activity: "modifying" }],
+  ])("%s：导出读的是此刻的文件，照常可用", async (_case, patch) => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, ...patch } : i));
+    await open("overview");
+    click(button("更多操作"));
+    expect(exportItem().getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("本实例的补全任务排着队时同样禁用", async () => {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+      await settle();
+    });
+    click(button("更多操作"));
+    const item = exportItem();
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(await tipOf(item)).toBe("安装任务正在写这个实例的文件夹，完成后才能导出");
+  });
 });
 
 describe("实例详情：工作目录与实例设置的占用", () => {
@@ -1020,8 +1214,13 @@ describe("实例详情：工作目录与实例设置的占用", () => {
     expect(save.getAttribute("aria-disabled")).toBe("true");
     click(save);
     keydown(area, "Enter", { ctrlKey: true });
+    // 补全会挪动实例目录：保存为默认同样带原因禁用
+    const asTemplate = button("保存为默认");
+    expect(asTemplate.getAttribute("aria-disabled")).toBe("true");
+    click(asTemplate);
     await flush();
     expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+    expect(callsOf(ipc, "save_instance_as_template")).toEqual([]);
   });
 
   it("补全进行中：Mod 标签的「检查更新」带原因禁用，点了不再查", async () => {
@@ -1309,7 +1508,7 @@ describe("实例详情：Mod 管理", () => {
     expect(callsOf(ipc, "remove_mod")).toEqual([]);
   });
 
-  it("「全部更新」进行中：这几个 Mod 的更新按钮转圈、点了不再单独入队，摘要行给出这个任务的进度", async () => {
+  it("「全部更新」先打开更新预览，确认后进行中：这几个 Mod 的更新按钮转圈、点了不再单独入队，摘要行给出这个任务的进度", async () => {
     vi.stubGlobal("innerWidth", 1440);
     const candidate = (fileName: string, title: string, projectId: string, from: string, to: string): UpdateCandidate => ({
       file_name: fileName,
@@ -1338,9 +1537,15 @@ describe("实例详情：Mod 管理", () => {
     await open("mods");
     click(button("全部更新 · 2"));
     await flush();
+    // 先到更新预览：默认全选，确认前不入队
+    expect(dialog().textContent).toContain("已勾选 2 / 2");
+    expect(launcher.state.tasks).toEqual([]);
+    click(button("更新 2 个", dialog()));
+    await flush();
     const composite = launcher.state.tasks.filter((t) => t.spec.command === "update_mods");
     expect(composite.map((t) => t.status)).toEqual(["running"]);
-    expect(callsOf(ipc, "update_mod").map((c) => c.fileName)).toEqual(["sodium.jar"]);
+    // 预览按名称升序列出，勾选项按这个顺序逐项更新
+    expect(callsOf(ipc, "update_mod").map((c) => c.fileName)).toEqual(["fabric-api.jar"]);
     // 组合任务还在跑，两行都算在更新中：按钮转圈，点了不另起一个同文件的单个更新
     const sodium = button("更新 Sodium");
     expect(sodium.getAttribute("aria-busy")).toBe("true");
@@ -1358,9 +1563,10 @@ describe("实例详情：Mod 管理", () => {
     const search = document.querySelector<HTMLInputElement>('input[placeholder="搜索名称、作者或文件名"]');
     if (search === null) throw new Error("没有搜索框");
     typeInto(search, "FABRIC");
-    const grid = document.querySelector('[role="grid"]');
-    expect(grid?.textContent).toContain("Fabric API");
-    expect(grid?.textContent).not.toContain("Sodium 的简介");
+    // 筛掉的行还在淡出，已经标了 inert，不算表格的行
+    const shownRows = [...document.querySelectorAll('[role="grid"] [role="row"]:not([inert])')].map((r) => r.textContent).join(" ");
+    expect(shownRows).toContain("Fabric API");
+    expect(shownRows).not.toContain("Sodium 的简介");
     typeInto(search, "nothing-here");
     expect(text()).toContain("列出的 Mod 里没有和「nothing-here」相关的。");
     click(button("清除筛选"));
@@ -1472,6 +1678,7 @@ describe("实例详情：Mod 管理", () => {
       click(all);
       await flush();
       expect(launcher.state.tasks.filter((t) => t.spec.command === "update_mods")).toEqual([]);
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
     });
   });
 
@@ -1536,6 +1743,62 @@ describe("实例详情：设置", () => {
     expect(button("保存参数").disabled).toBe(false);
   });
 
+  it("Java 下拉：手动添加的写明来源；不完整的禁用、提示写「不完整」，自动选择也跳过它", async () => {
+    ipc.overrides.set("detect_java", () => [
+      java("C:/Java/jdk-21/bin/java.exe", 21, { missing_files: ["release", "lib/modules"] }),
+      java("D:/Portable/jdk-17/bin/java.exe", 17, { source: "manual" }),
+    ]);
+    await open("settings");
+    click(byRole("combobox", "Java 运行时"));
+    await flush();
+    const options = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    const option = (start: string) => {
+      const found = options.find((o) => textOf(o).startsWith(start));
+      if (found === undefined) throw new Error(`Java 下拉里没有「${start}」`);
+      return found;
+    };
+    expect(option("Java 21").getAttribute("aria-disabled")).toBe("true");
+    expect(textOf(option("Java 21"))).toContain("21.0.5 · 不完整");
+    expect(option("Java 17").getAttribute("aria-disabled")).toBeNull();
+    expect(textOf(option("Java 17"))).toContain("17.0.5 · 手动添加");
+    expect(textOf(option("自动选择"))).toContain("本机没有 Java 21，启动时自动下载");
+    click(option("Java 21"));
+    await flush();
+    expect(callsOf(ipc, "set_instance_settings")).toEqual([]);
+  });
+
+  it("Java 下拉：实例已经固定成不完整的 Java 时照常显示为当前值", async () => {
+    settings = { ...settings, java: "C:/Java/jdk-21/bin/java.exe" };
+    ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-21/bin/java.exe", 21, { missing_files: ["release", "lib/modules"] })]);
+    await open("settings");
+    expect(textOf(byRole("combobox", "Java 运行时"))).toBe("Java 21 · Microsoft");
+    click(byRole("combobox", "Java 运行时"));
+    await flush();
+    const current = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((o) => textOf(o).startsWith("Java 21"));
+    expect(current?.getAttribute("aria-disabled")).toBeNull();
+    expect(current?.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("固定成不完整的 Java：说明块提示缺哪些文件而不是「匹配」，「改用自动」把实例改回自动选择", async () => {
+    settings = { ...settings, java: "C:/Java/jdk-21/bin/java.exe" };
+    ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-21/bin/java.exe", 21, { missing_files: ["release", "lib/modules"] })]);
+    await open("settings");
+    expect(text()).toContain("这个 Java 缺少 release、lib/modules，可能没装完整");
+    expect(text()).toContain("启动时照常用它；启动失败的话换一个 Java，或把它重装一遍。");
+    expect(text()).not.toContain("与要求的 Java 21 匹配");
+    click(button("改用自动"));
+    await flush();
+    expect(callsOf(ipc, "set_instance_settings").map((a) => (a.settings as InstanceSettingsDto).java)).toEqual(["auto"]);
+  });
+
+  it("固定成版本过低又不完整的 Java：先报版本过低", async () => {
+    settings = { ...settings, java: "C:/Java/jdk-17/bin/java.exe" };
+    ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-17/bin/java.exe", 17, { missing_files: ["release"] })]);
+    await open("settings");
+    expect(text()).toContain("低于要求的 Java 21，游戏无法启动");
+    expect(text()).not.toContain("可能没装完整");
+  });
+
   it("分代 ZGC 按实际生效的 Java：自动挑到 21 时带 ZGenerational", async () => {
     await open("settings");
     click(button("分代 ZGC"));
@@ -1562,6 +1825,81 @@ describe("实例详情：设置", () => {
     expect(skeletons()).toBe(0);
     expect(document.querySelector('textarea[aria-label="JVM 参数"]')).not.toBeNull();
     expect(text()).toContain("全局固定值");
+  });
+
+  describe("设为新实例的默认设置", () => {
+    const NOTE = "把本实例的 options.txt（键位、视距等）与服务器列表复制一份，新建实例时可以沿用。";
+    const row = () => {
+      const title = [...document.querySelectorAll("span")].find((el) => el.textContent === "设为新实例的默认设置");
+      const found = title?.parentElement?.parentElement;
+      if (found === undefined || found === null) throw new Error("实例管理卡里没有「设为新实例的默认设置」一行");
+      return found;
+    };
+
+    it("没有默认设置：说明位只有第一行，只有「保存为默认」；保存后命令收到实例 id，说明位改为当前默认取自本实例，可以清除", async () => {
+      await open("settings");
+      expect(row().textContent).toContain(NOTE);
+      expect(row().textContent).not.toContain("当前默认");
+      expect(() => button("清除", row())).toThrow();
+
+      click(button("保存为默认", row()));
+      await flush();
+      expect(callsOf(ipc, "save_instance_as_template")).toEqual([{ id: ID }]);
+      expect(toastTitles()).toContain(`已把「${ID}」的设置保存为默认`);
+      expect(launcher.state.toasts.find((t) => t.title === `已把「${ID}」的设置保存为默认`)?.body).toBe("新建实例时可以在确认步沿用");
+      expect(row().textContent).toContain(`当前默认取自「${ID}」，1 秒前保存`);
+
+      click(button("清除", row()));
+      await flush();
+      expect(callsOf(ipc, "clear_template")).toHaveLength(1);
+      expect(toastTitles()).toContain("已清除默认设置");
+      expect(row().textContent).toContain(NOTE);
+      expect(row().textContent).not.toContain("当前默认");
+      expect(() => button("清除", row())).toThrow();
+    });
+
+    it("已有别的实例存的默认设置写出来源与时刻，手放的写来源不明；没进过游戏时保存失败用后端原文报错，原来的不动", async () => {
+      template = { present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: "创造", saved_at: NOW - 3 * DAY, enabled: true };
+      ipc.overrides.set("save_instance_as_template", (args) => {
+        throw new IpcError("template_source_empty", `实例 ${String(args.id)} 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存`, { id: args.id, files: ["options.txt"] });
+      });
+      await open("settings");
+      expect(row().textContent).toContain("当前默认取自「创造」，3 天前保存");
+      click(button("保存为默认", row()));
+      await flush();
+      const failed = launcher.state.toasts.find((t) => t.tone === "error");
+      expect([failed?.title, failed?.body]).toEqual(["没能保存默认设置", `实例 ${ID} 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存`]);
+      expect(row().textContent).toContain("当前默认取自「创造」，3 天前保存");
+      view?.unmount();
+      view = undefined;
+
+      template = { ...template, source_instance: null, saved_at: null };
+      resources.clear();
+      await open("settings");
+      expect(row().textContent).toContain("当前默认来自数据目录里的文件");
+    });
+
+    it("读取中第二行是文本骨架、按钮照常可点；游戏运行中也能保存", async () => {
+      const pending = deferred<TemplateInfoDto>();
+      ipc.overrides.set("template_info", () => pending.promise);
+      ipc.overrides.set("launch_game", () => ({ pid: 42 }));
+      await open("settings");
+      expect(row().querySelector('[class*="_skeleton_"]')).not.toBeNull();
+      await act(async () => {
+        await launcher.actions.launch(ID);
+        await settle(20);
+      });
+      expect(launcher.state.session?.phase).toBe("running");
+      const save = button("保存为默认", row());
+      expect(save.getAttribute("aria-disabled")).toBeNull();
+      click(save);
+      await flush();
+      expect(callsOf(ipc, "save_instance_as_template")).toEqual([{ id: ID }]);
+      await act(async () => {
+        pending.resolve(NO_TEMPLATE);
+        await settle(20);
+      });
+    });
   });
 
   it("内存改为单独设置时以全局生效值为初值", async () => {
@@ -2031,6 +2369,146 @@ function modDisk(): { files: Set<string>; hold(): void; release(): Promise<void>
   };
 }
 
+describe("实例详情：存档直达", () => {
+  const playButton = (name: string) => {
+    const found = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.getAttribute("aria-label") === `进入「${name}」`);
+    if (found === undefined) throw new Error(`找不到「进入「${name}」」`);
+    return found;
+  };
+  /** 悬停后关联的提示气泡里的文字；没有关联气泡时报错。 */
+  const hoverTip = async (el: HTMLButtonElement): Promise<string> => {
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = el.getAttribute("aria-describedby");
+    if (tipId === null) throw new Error(`「${el.getAttribute("aria-label")}」悬停后没有关联提示气泡`);
+    const tip = document.getElementById(tipId);
+    if (tip === null) throw new Error("提示气泡不在文档里");
+    return textOf(tip);
+  };
+
+  it("「进入」以世界文件夹名直达：launch_game 的 quickPlay 是 singleplayer 加文件夹名，不是 level 里的世界名", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
+    await open("overview");
+    click(playButton("新世界"));
+    await flush();
+    const calls = callsOf(ipc, "launch_game");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ versionId: ID, offlineName: null });
+    expect(calls[0].quickPlay).toEqual({ kind: "singleplayer", world_dir_name: "w2" });
+    expect(launcher.state.session).toMatchObject({ instanceId: ID, quickPlay: { kind: "singleplayer", world_dir_name: "w2" } });
+  });
+
+  it("1.20 之前的版本：「进入」可聚焦但 aria-disabled，悬停写明原因，点了不启动；打开文件夹照常", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, mc_version: "1.12.2", quick_play: { singleplayer: false, multiplayer: true } } : i));
+    await open("overview");
+    const play = playButton("新世界");
+    expect(play.disabled).toBe(false);
+    expect(play.getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverTip(play)).toContain("1.20 之前的版本不能直接进入存档");
+    click(play);
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+    expect(launcher.state.session).toBeNull();
+    const folder = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.getAttribute("aria-label") === "打开「新世界」所在文件夹");
+    expect(folder?.getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("后端在备份或恢复存档（含游戏退出后的自动备份）：每行「进入」写明备份中，点了不发 launch_game；打开文件夹照常", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "backing_up" } : i));
+    await open("overview");
+    for (const name of ["新世界", "旧世界"]) {
+      expect(playButton(name).getAttribute("aria-disabled")).toBe("true");
+      expect(await hoverTip(playButton(name))).toContain("正在备份或恢复存档，完成后再启动");
+    }
+    click(playButton("新世界"));
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+    expect(launcher.state.session).toBeNull();
+    const folder = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.getAttribute("aria-label") === "打开「新世界」所在文件夹");
+    expect(folder?.getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("后端在备份或恢复存档：头图的启动胶囊带原因禁用、保持可聚焦，点了不发 launch_game；备份结束后恢复可点", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "backing_up" } : i));
+    await open("overview");
+    const capsule = () => {
+      const found = document.querySelector<HTMLButtonElement>(`[role="group"][aria-label="启动「${ID}」"] button`);
+      if (found === null) throw new Error("找不到启动胶囊的按钮");
+      return found;
+    };
+    expect(capsule().textContent).toBe("启动游戏");
+    expect(capsule().getAttribute("aria-disabled")).toBe("true");
+    expect(capsule().disabled).toBe(false);
+    expect(await hoverTip(capsule())).toBe("正在备份或恢复存档，完成后再启动");
+    click(capsule());
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(0);
+    expect(launcher.state.session).toBeNull();
+
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: null } : i));
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+    });
+    await flush();
+    expect(capsule().getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("读不出版本信息：每行都写「这个实例的版本信息不完整」", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, quick_play: null } : i));
+    await open("overview");
+    for (const name of ["新世界", "旧世界"]) {
+      expect(playButton(name).getAttribute("aria-disabled")).toBe("true");
+      expect(await hoverTip(playButton(name))).toContain("这个实例的版本信息不完整");
+    }
+  });
+
+  it("本实例在启动、在运行：分别写「正在启动这个实例」「游戏正在运行」，点了不再发 launch_game", async () => {
+    const launched = deferred<{ pid: number }>();
+    ipc.overrides.set("launch_game", () => launched.promise);
+    await open("overview");
+    click(playButton("新世界"));
+    await flush();
+    expect(await hoverTip(playButton("旧世界"))).toContain("正在启动这个实例");
+    click(playButton("旧世界"));
+    launched.resolve({ pid: 1 });
+    await flush();
+    expect(await hoverTip(playButton("旧世界"))).toContain("游戏正在运行");
+    click(playButton("旧世界"));
+    await flush();
+    expect(callsOf(ipc, "launch_game")).toHaveLength(1);
+  });
+
+  it("另一个实例在运行：「进入」照常可点，走替换确认，确认里带着这次的 quickPlay", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.launch("创造");
+    });
+    await flush();
+    const play = playButton("旧世界");
+    expect(play.getAttribute("aria-disabled")).toBeNull();
+    click(play);
+    await flush();
+    expect(launcher.state.launchPrompt).toEqual({ instanceId: ID, occupantId: "创造", occupantPhase: "running", quickPlay: { kind: "singleplayer", world_dir_name: "w1" } });
+    expect(callsOf(ipc, "launch_game").map((a) => a.versionId)).toEqual(["创造"]);
+  });
+
+  it("直达失败（存档已被移走）：外层报「无法启动」类错误，正文是后端原文，会话回到启动前", async () => {
+    ipc.overrides.set("launch_game", () => {
+      throw new IpcError("world_not_found", `实例 ${ID} 里没有存档 w2`, { version_id: ID, world: "w2" });
+    });
+    await open("overview");
+    click(playButton("新世界"));
+    await flush();
+    expect(launcher.state.session).toBeNull();
+    expect(launcher.state.toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body])).toEqual([[`「${ID}」启动失败`, `实例 ${ID} 里没有存档 w2`]]);
+  });
+});
+
 function report(diagnoses: { category: CrashReportDto["diagnoses"][number]["category"]; detail?: string }[], at: number): CrashReportDto {
   return {
     at,
@@ -2045,11 +2523,14 @@ function report(diagnoses: { category: CrashReportDto["diagnoses"][number]["cate
       matched: "java.lang.OutOfMemoryError: Java heap space",
       line: 18 + i,
       context: ["[19:04:10] [Render thread/INFO]: x", "[19:04:11] [Render thread/WARN]: y"],
+      source: "session_log",
     })),
     suspects: [],
     java: { major: 21, path: "C:/Java/jdk-21/bin/java.exe", is_64bit: true },
     max_memory_mb: 4096,
     warnings: [],
+    exit_code_note: null,
+    scanned_files: [],
   };
 }
 
@@ -2059,3 +2540,368 @@ function resetRecorderKeepOverrides() {
   resetRecorder(ipc);
   for (const [k, v] of saved) ipc.overrides.set(k, v);
 }
+
+describe("实例详情：存档备份", () => {
+  const MB = 1024 * 1024;
+  const HOUR = 3600 * 1000;
+  let list: WorldBackupListDto;
+
+  function backup(file: string, kind: WorldBackupDto["kind"], createdAt: number, sizeBytes: number, levelName: string | null): WorldBackupDto {
+    return { file, kind, created_at: createdAt, size_bytes: sizeBytes, level_name: levelName };
+  }
+
+  beforeEach(() => {
+    // 故意不按时间排：界面自己按 created_at 倒序
+    list = {
+      world: "w2",
+      scope: "instance",
+      dir: `D:/Games/.minecraft/.petalfall/backups/instances/${ID}/w2`,
+      backups: [
+        backup("b-old.zip", "auto", NOW - 3 * DAY, 300 * MB, "新世界"),
+        backup("b-new.zip", "auto", NOW - 2 * HOUR, 412 * MB, "新世界"),
+        backup("b-mid.zip", "manual", NOW - DAY - 2 * HOUR, 405 * MB, "最早的名字"),
+      ],
+      total_bytes: 1117 * MB,
+    };
+    ipc.overrides.set("list_world_backups", () => list);
+    ipc.overrides.set("restore_world_backup", () => new Promise(() => undefined));
+    ipc.overrides.set("backup_world", () => new Promise(() => undefined));
+    ipc.overrides.set("export_world", () => new Promise(() => undefined));
+    ipc.overrides.set("delete_world_backup", (args) => {
+      list = { ...list, backups: list.backups.filter((b) => b.file !== args.file) };
+      return null;
+    });
+  });
+
+  const rowMenu = (world: string) => button(`「${world}」的更多操作`);
+  const menuItems = () => [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+  const menuItem = (label: string) => {
+    const found = menuItems().find((el) => textOf(el) === label);
+    if (found === undefined) throw new Error(`菜单里没有「${label}」`);
+    return found;
+  };
+  const dialogs = () => [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].filter((d) => d.closest("[data-exiting]") === null);
+  const backupsDialog = () => {
+    const found = dialogs().find((d) => d.querySelector("h2")?.textContent === "「新世界」的备份");
+    if (found === undefined) throw new Error("备份列表弹窗没有打开");
+    return found;
+  };
+  const rows = () => [...backupsDialog().querySelectorAll("li")];
+
+  async function hoverReason(el: HTMLElement): Promise<string> {
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tip = [...document.querySelectorAll<HTMLElement>('[role="tooltip"]')].at(-1);
+    act(() => {
+      el.dispatchEvent(new PointerEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
+    });
+    if (tip === undefined) throw new Error("悬停后没有提示气泡");
+    return textOf(tip);
+  }
+
+  async function openBackups() {
+    await open("overview");
+    click(rowMenu("新世界"));
+    click(menuItem("查看备份"));
+    await flush();
+  }
+
+  async function startGame() {
+    ipc.overrides.set("launch_game", () => ({ pid: 42 }));
+    await act(async () => {
+      await launcher.actions.launch(ID);
+      await settle(20);
+    });
+    expect(launcher.state.session?.phase).toBe("running");
+  }
+
+  it("存档行的更多菜单有三项：备份存档、查看备份、导出存档，平时都能用", async () => {
+    await open("overview");
+    click(rowMenu("新世界"));
+    expect(menuItems().map(textOf)).toEqual(["备份存档", "查看备份", "导出存档"]);
+    expect(menuItem("备份存档").querySelector("svg path")?.getAttribute("d")).toBe(ICON_PATHS.archive.s);
+    expect(menuItems().map((el) => el.getAttribute("aria-disabled"))).toEqual([null, null, null]);
+    click(menuItem("备份存档"));
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toEqual([{ id: ID, world: "w2", taskId: `${launcher.state.tasks[0].id}#1` }]);
+    expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_backup", title: "备份「新世界」" });
+    expect(toastTitles()).toContain("已开始备份「新世界」");
+  });
+
+  it("游戏运行中：备份与导出禁用并写明原因，查看备份照常；点了不发命令", async () => {
+    await open("overview");
+    await startGame();
+    click(rowMenu("新世界"));
+    expect(menuItem("备份存档").getAttribute("aria-disabled")).toBe("true");
+    expect(menuItem("导出存档").getAttribute("aria-disabled")).toBe("true");
+    expect(menuItem("查看备份").getAttribute("aria-disabled")).toBeNull();
+    expect(await hoverReason(menuItem("备份存档"))).toBe("游戏退出后再备份，退出时会自动备份一份");
+    expect(await hoverReason(menuItem("导出存档"))).toBe("游戏退出后再备份，退出时会自动备份一份");
+    click(menuItem("备份存档"));
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+  });
+
+  it("后端报实例正在改名：备份与导出禁用，原因写实例名与活动", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, activity: "renaming" } : i));
+    await open("overview");
+    click(rowMenu("新世界"));
+    expect(menuItem("备份存档").getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverReason(menuItem("备份存档"))).toBe("「樱花生存」正在改名，完成后再试");
+  });
+
+  it("备份列表：按时间倒序列出，自动与手动各带 Tag，写大小、时刻与改名前的存档名；副标题写份数与总量", async () => {
+    await openBackups();
+    const dlg = backupsDialog();
+    expect(dlg.textContent).toContain("3 份 · 共 1.1 GB");
+    expect(rows()).toHaveLength(3);
+    const tags = rows().map((li) => li.querySelector("[data-tone]"));
+    expect(tags.map((t) => (t === null ? null : [textOf(t), t.getAttribute("data-tone")]))).toEqual([
+      ["自动", "neutral"],
+      ["手动", "accent"],
+      ["自动", "neutral"],
+    ]);
+    const texts = rows().map(textOf);
+    expect(texts[0]).toContain("2026年10月31日 10:00 · 2 小时前");
+    expect(texts[0]).toContain("412 MB");
+    expect(texts[1]).toContain("2026年10月30日 10:00 · 昨天");
+    expect(texts[1]).toContain("当时名为「最早的名字」");
+    expect(texts[2]).toContain("2026年10月28日 12:00 · 3 天前");
+    expect(texts[2]).toContain("300 MB");
+    // 存档名没变过的那几份不写「当时名为」
+    expect(texts[0]).not.toContain("当时名为");
+    expect(callsOf(ipc, "list_world_backups")).toEqual([{ id: ID, world: "w2" }]);
+    expect(dlg.textContent).toContain("退出游戏后会自动备份玩过的存档，每个存档保留 5 份自动备份。");
+  });
+
+  it("恢复先确认：确认前不调用 restore_world_backup，确认后调用一次，参数为实例、存档与那一份备份", async () => {
+    await openBackups();
+    click(button("恢复 2026年10月30日 10:00 的备份", backupsDialog()));
+    await flush();
+    const confirm = dialogs().at(-1);
+    if (confirm === undefined) throw new Error("没有确认框");
+    expect(confirm.querySelector("h2")?.textContent).toBe("恢复「新世界」的备份？");
+    expect(confirm.textContent).toContain("存档会回到 2026年10月30日 10:00 备份时的样子，现在的存档会移入回收站，需要时可以从回收站找回。");
+    expect(callsOf(ipc, "restore_world_backup")).toHaveLength(0);
+    click(button("恢复备份", confirm));
+    await flush();
+    const calls = callsOf(ipc, "restore_world_backup");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ id: ID, world: "w2", file: "b-mid.zip", taskId: `${launcher.state.tasks[0].id}#1` });
+    expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_restore", title: "恢复「新世界」" });
+  });
+
+  it("恢复的确认框取消：什么都不做", async () => {
+    await openBackups();
+    click(button("恢复 2026年10月31日 10:00 的备份", backupsDialog()));
+    await flush();
+    const confirm = dialogs().at(-1);
+    if (confirm === undefined) throw new Error("没有确认框");
+    click(button("取消", confirm));
+    await flush();
+    expect(callsOf(ipc, "restore_world_backup")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+  });
+
+  it("这个存档有任务在进行：各行的恢复与删除禁用，原因写这个存档正在备份或恢复", async () => {
+    await openBackups();
+    click(button("备份存档", backupsDialog()));
+    await flush();
+    expect(callsOf(ipc, "backup_world")).toHaveLength(1);
+    const restore = button("恢复 2026年10月31日 10:00 的备份", backupsDialog());
+    const remove = button("删除 2026年10月31日 10:00 的备份", backupsDialog());
+    expect(restore.getAttribute("aria-disabled")).toBe("true");
+    expect(remove.getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverReason(restore)).toBe("这个存档正在备份或恢复");
+    expect(button("备份存档", backupsDialog()).getAttribute("aria-disabled")).toBe("true");
+    click(remove);
+    await flush();
+    expect(callsOf(ipc, "delete_world_backup")).toEqual([]);
+  });
+
+  it("导出带存档的整合包进行中：恢复带原因禁用、点了不发命令；只读存档的备份照常；不带存档的导出不挡恢复", async () => {
+    const exporting = deferred<unknown>();
+    ipc.overrides.set("export_modpack", () => exporting.promise);
+    const options = (extras: string[]) => ({ destination: "D:/out/樱花.mrpack", name: "樱花", version: "1.0.0", summary: null, extras, include_disabled: false }) as never;
+    await openBackups();
+    await act(async () => {
+      await launcher.actions.exportModpack(ID, options(["config"]));
+    });
+    await flush();
+    const restore = () => button("恢复 2026年10月31日 10:00 的备份", backupsDialog());
+    expect(restore().getAttribute("aria-disabled")).toBeNull();
+
+    await act(async () => {
+      await launcher.actions.exportModpack(ID, options(["config", "saves"]));
+    });
+    await flush();
+    expect(restore().getAttribute("aria-disabled")).toBe("true");
+    expect(await hoverReason(restore())).toBe("「樱花生存」正在导出整合包，完成后再试");
+    click(restore());
+    await flush();
+    expect(dialogs()).toHaveLength(1);
+    expect(callsOf(ipc, "restore_world_backup")).toEqual([]);
+    expect(button("备份存档", backupsDialog()).getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("游戏运行中：恢复与备份存档禁用并写原因，删除照常（不占实例）", async () => {
+    await open("overview");
+    await startGame();
+    click(rowMenu("新世界"));
+    click(menuItem("查看备份"));
+    await flush();
+    const restore = button("恢复 2026年10月31日 10:00 的备份", backupsDialog());
+    expect(await hoverReason(restore)).toBe("游戏退出后再恢复");
+    expect(await hoverReason(button("备份存档", backupsDialog()))).toBe("游戏退出后再备份，退出时会自动备份一份");
+    click(button("删除 2026年10月31日 10:00 的备份", backupsDialog()));
+    await flush();
+    expect(callsOf(ipc, "delete_world_backup")).toEqual([{ id: ID, world: "w2", file: "b-new.zip" }]);
+  });
+
+  it("删除不确认：移入回收站后列表去掉这一行，提示已移入回收站", async () => {
+    await openBackups();
+    click(button("删除 2026年10月31日 10:00 的备份", backupsDialog()));
+    await flush();
+    expect(dialogs()).toHaveLength(1);
+    expect(callsOf(ipc, "delete_world_backup")).toEqual([{ id: ID, world: "w2", file: "b-new.zip" }]);
+    expect(rows()).toHaveLength(2);
+    expect(toastTitles()).toContain("已删除一份备份");
+  });
+
+  it("打开备份文件夹：在文件管理器里定位到列表给的目录；还没有备份时禁用", async () => {
+    ipc.overrides.set("reveal_in_folder", () => null);
+    await openBackups();
+    click(button("打开备份文件夹", backupsDialog()));
+    await flush();
+    expect(callsOf(ipc, "reveal_in_folder")).toEqual([{ path: list.dir }]);
+    view?.unmount();
+    list = { ...list, backups: [], total_bytes: 0 };
+    resetRecorderKeepOverrides();
+    await openBackups();
+    const openDir = button("打开备份文件夹", backupsDialog());
+    expect(await hoverReason(openDir)).toBe("还没有备份，备份目录还没建出来");
+    click(openDir);
+    await flush();
+    expect(callsOf(ipc, "reveal_in_folder")).toEqual([]);
+  });
+
+  it("没有备份：副标题与空状态都说还没有备份；共用存档的副标题注明所有共用的实例看到同一份", async () => {
+    list = { ...list, scope: "shared", backups: [], total_bytes: 0 };
+    await openBackups();
+    const dlg = backupsDialog();
+    expect(dlg.textContent).toContain("还没有备份 · 所有共用存档的实例看到的是同一份");
+    expect(dlg.textContent).toContain("退出游戏时会自动备份玩过的存档，也可以现在备份一份。");
+    expect(rows()).toHaveLength(0);
+  });
+
+  it("读不到列表：原位报错写原因，「重试」重新请求", async () => {
+    let fail = true;
+    ipc.overrides.set("list_world_backups", () => {
+      if (fail) throw new IpcError("json_file_invalid", "index.json 不是合法的 JSON", { path: "D:/b/index.json" });
+      return list;
+    });
+    await openBackups();
+    expect(backupsDialog().textContent).toContain("读不到备份列表");
+    expect(backupsDialog().textContent).toContain("index.json 不是合法的 JSON");
+    fail = false;
+    click(button("重试", backupsDialog()));
+    await flush();
+    expect(rows()).toHaveLength(3);
+    expect(callsOf(ipc, "list_world_backups")).toHaveLength(2);
+  });
+
+  it("自动备份关着：注记换成去设置，点了关掉弹窗并打开设置的游戏分区", async () => {
+    bootOverrides(ipc, { instances, config: configDto({ memory: { max_mb: 4096, min_mb: null, auto: false }, world_backup: { auto: false, keep_per_world: 5, max_total_gb: 20 } }) });
+    ipc.overrides.set("list_instances", () => instances);
+    await openBackups();
+    expect(backupsDialog().textContent).toContain("自动备份已关闭，可以在设置 · 游戏里打开。");
+    click(button("去设置", backupsDialog()));
+    await flush();
+    expect(nav.route).toEqual({ page: "settings", section: "game" });
+  });
+
+  it("导出：弹系统保存对话框（默认文件名是存档文件夹名），选定后入队导出；取消对话框什么都不做", async () => {
+    const pick = vi.fn<PickSaveFile>(() => Promise.resolve(null));
+    saveDialog.pick = pick;
+    await open("overview");
+    click(rowMenu("新世界"));
+    click(menuItem("导出存档"));
+    await flush();
+    expect(pick).toHaveBeenCalledWith({ title: "导出「新世界」", defaultPath: "w2.zip", filter: { name: "存档压缩包（*.zip）", extensions: ["zip"] } });
+    expect(callsOf(ipc, "export_world")).toEqual([]);
+    expect(launcher.state.tasks).toEqual([]);
+
+    pick.mockResolvedValueOnce("E:\\导出\\新世界.zip");
+    click(rowMenu("新世界"));
+    click(menuItem("导出存档"));
+    await flush();
+    expect(callsOf(ipc, "export_world")).toEqual([{ id: ID, world: "w2", dest: "E:\\导出\\新世界.zip", taskId: `${launcher.state.tasks[0].id}#1` }]);
+    expect(launcher.state.tasks[0]).toMatchObject({ kind: "world_backup", title: "导出「新世界」" });
+  });
+
+  it("删除实例的确认：有备份时说备份留在哪、不随实例删除；没有备份时指向存档菜单", async () => {
+    const preview = (backupCount: number) => () => ({
+      id: ID,
+      worlds: contentDto().worlds,
+      size_bytes: 3 * MB,
+      file_count: 10,
+      dependents: [],
+      activity: null,
+      backups_dir: `D:/Games/.minecraft/.petalfall/backups/instances/${ID}`,
+      backup_count: backupCount,
+    });
+    ipc.overrides.set("preview_instance_deletion", preview(4));
+    await open("settings");
+    click(button("删除实例"));
+    await flush();
+    expect(dialog().textContent).toContain(`这些存档已有 4 份备份，保留在 D:/Games/.minecraft/.petalfall/backups/instances/${ID}，不会随实例删除。`);
+    expect(dialog().textContent).not.toContain("想留着存档的话");
+    const path = [...dialog().querySelectorAll<HTMLElement>("[title]")].find((el) => el.getAttribute("title") === `D:/Games/.minecraft/.petalfall/backups/instances/${ID}`);
+    expect(path).toBeDefined();
+    click(button("取消", dialog()));
+    await flush();
+
+    ipc.overrides.set("preview_instance_deletion", preview(0));
+    click(button("删除实例"));
+    await flush();
+    expect(dialog().textContent).toContain("想留着存档的话，先在概览的存档菜单里选「备份存档」。");
+    expect(dialog().textContent).not.toContain("份备份，保留在");
+    click(button("取消", dialog()));
+    await flush();
+
+    // 路径太长时从中间省略，盘符与实例名都留着，悬停看全文
+    const long = `D:/Users/player/Games/Minecraft/.minecraft/.petalfall/backups/instances/${ID}`;
+    ipc.overrides.set("preview_instance_deletion", () => ({ ...preview(2)(), backups_dir: long }));
+    click(button("删除实例"));
+    await flush();
+    const shown = [...dialog().querySelectorAll<HTMLElement>("[title]")].find((el) => el.getAttribute("title") === long);
+    if (shown === undefined) throw new Error("备份目录没有带全文的悬停提示");
+    expect([...textOf(shown)].length).toBe(56);
+    expect(textOf(shown).startsWith("D:/Users/player/Games/")).toBe(true);
+    expect(textOf(shown).endsWith(`instances/${ID}`)).toBe(true);
+    expect(textOf(shown)).toContain("…");
+    click(button("取消", dialog()));
+    await flush();
+
+    // 实例已经没有存档，备份还在：照常说明备份留在哪，不提「先备份」
+    ipc.overrides.set("preview_instance_deletion", () => ({ ...preview(3)(), worlds: [] }));
+    click(button("删除实例"));
+    await flush();
+    expect(dialog().textContent).toContain("这个实例没有存档。");
+    expect(dialog().textContent).toContain(`这个实例以前的存档还有 3 份备份，保留在 D:/Games/.minecraft/.petalfall/backups/instances/${ID}，不会随实例删除。`);
+    expect(dialog().textContent).not.toContain("想留着存档的话");
+    click(button("取消", dialog()));
+    await flush();
+
+    ipc.overrides.set("preview_instance_deletion", () => ({ ...preview(0)(), worlds: [] }));
+    click(button("删除实例"));
+    await flush();
+    expect(dialog().textContent).toContain("这个实例没有存档。");
+    expect(dialog().textContent).not.toContain("份备份");
+  });
+});

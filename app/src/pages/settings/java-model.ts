@@ -1,8 +1,11 @@
-// Java 分区的推导：哪些主版本有实例在用、本机缺哪些、默认 Java 的提醒、重新扫描前后的差异。纯函数。
+// Java 分区的推导：哪些主版本有实例在用、本机缺哪些、默认 Java 的提醒、重新扫描前后的差异、手动添加的记录、
+// 显卡卡片的说明。纯函数。
 
 import type { InstanceSummary } from "../../domain/adapt";
 import { JAVA_AUTO } from "../../domain/adapt";
-import type { JavaInstallationDto } from "../../state/queries/catalog";
+import { runtimeComplete } from "../../domain/rules";
+import type { GpuAdapterDto, GpuAdaptersDto, JavaInstallationDto } from "../../state/queries/catalog";
+import { samePath } from "./game-model";
 
 export type JavaNote =
   | { kind: "pinned" }
@@ -33,14 +36,53 @@ export function instancesNeeding(instances: readonly InstanceSummary[], major: n
   return instances.filter((i) => i.javaMajor === major);
 }
 
-/** 有实例要、本机一个都没有的主版本。 */
+/** 有实例要、本机一个完整的都没有的主版本。 */
 export function missingMajors(instances: readonly InstanceSummary[], runtimes: readonly JavaInstallationDto[]): number[] {
-  const present = new Set(runtimes.map((r) => r.version.major));
+  const present = new Set(runtimes.filter(runtimeComplete).map((r) => r.version.major));
   return majorsInUse(instances).filter((m) => !present.has(m));
 }
 
+/** 已有完整的托管运行时；不完整的不算装了，重新下载就是修复。 */
 export function hasManaged(runtimes: readonly JavaInstallationDto[], major: number): boolean {
-  return runtimes.some((r) => r.source === "managed" && r.version.major === major);
+  return runtimes.some((r) => r.source === "managed" && r.version.major === major && runtimeComplete(r));
+}
+
+/** 不完整的运行时不能选作默认 Java；已经是当前默认值的除外，照常显示为选中，让人看清现状。 */
+export function selectableAsDefault(runtime: JavaInstallationDto, current: string): boolean {
+  return runtimeComplete(runtime) || runtime.path === current;
+}
+
+export interface ManualJava {
+  path: string;
+  /** 这次探测里识别出的那一项；识别不出（文件被移走、换成了别的东西）为 null。 */
+  runtime: JavaInstallationDto | null;
+}
+
+/** 手动添加的记录配上探测结果。按路径不分大小写配对，不看来源：同一路径被托管目录先认领时来源写托管。 */
+export function manualJavas(extraPaths: readonly string[], runtimes: readonly JavaInstallationDto[]): ManualJava[] {
+  return extraPaths.map((path) => {
+    const found = runtimes.find((r) => samePath(r.path, path));
+    return { path, runtime: found === undefined ? null : found };
+  });
+}
+
+export type GpuSummary =
+  | { kind: "switchable"; highPerformance: GpuAdapterDto; powerSaving: GpuAdapterDto }
+  | { kind: "single"; adapter: GpuAdapterDto }
+  /** 没有硬件显卡，或几块显卡里两种偏好挑的是同一块：说不出会换到哪块。 */
+  | { kind: "other" };
+
+export function gpuSummary(dto: GpuAdaptersDto): GpuSummary {
+  if (dto.switchable) {
+    const highPerformance = dto.adapters.find((a) => a.high_performance);
+    const powerSaving = dto.adapters.find((a) => a.power_saving);
+    if (highPerformance === undefined || powerSaving === undefined) {
+      throw new Error("显卡信息自相矛盾：标了可切换，却找不到高性能或省电偏好的首选");
+    }
+    return { kind: "switchable", highPerformance, powerSaving };
+  }
+  if (dto.adapters.length === 1) return { kind: "single", adapter: dto.adapters[0] };
+  return { kind: "other" };
 }
 
 /** 默认 Java 指向的运行时；自动选择或路径已不在探测结果里时为 null。 */

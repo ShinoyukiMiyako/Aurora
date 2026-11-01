@@ -3,15 +3,16 @@
 //! 来源有两种：平台上某整合包的一个版本（先下载到缓存目录），或用户选的本地 `.mrpack` / `.zip`。
 //! 导入总是新建一个实例目录 `versions/<实例名>/`，按顺序：
 //!
-//! 1. 读清单、校验实例名并查重；CurseForge 包先把全部文件 id 换成下载地址——有作者禁止第三方分发
-//!    的文件就在这一步整体报错，不先装几百 MB 游戏再告诉用户装不完。这一步不动游戏目录
-//!    （[`Aurora::prepare_modpack`]），调用方可以在这之后占住实例名再往下走。
+//! 1. 读清单、去掉用户选择跳过的可选文件、校验实例名并查重；CurseForge 包先把全部文件 id 换成下载
+//!    地址——有作者禁止第三方分发、用户也还没手动下载认领的文件就在这一步整体报错，不先装几百 MB 游戏再
+//!    告诉用户装不完。这一步不动游戏目录（[`Aurora::prepare_modpack`]），调用方可以在这之后占住实例名再往下走。
 //! 2. 原子地建目录（同名即报错），写下带任务 id 的未完成标记（[`Aurora::import_modpack`] 从这里开始）。
 //! 3. 装整合包要求的原版与加载器（与「安装版本」同一条路径，落在它们自然的版本目录里）。
 //! 4. 在实例目录写一份以实例名为 id 的版本 JSON：有加载器时是加载器 JSON 的副本，原版时只
 //!    `inheritsFrom` 原版。启动按 `inheritsFrom` 找客户端 jar，实例目录里不需要 jar。
 //! 5. 实例强制隔离：整合包的 Mod 与配置只该出现在这个实例里。
-//! 6. 下载远程文件、解出覆盖文件（覆盖文件在后，作者打进包里的配置压过下载来的默认值）。
+//! 6. 放入认领到的手动下载文件、下载远程文件、解出覆盖文件（覆盖文件在后，作者打进包里的配置压过
+//!    下载来的默认值）。
 //! 7. 写整合包信息，去掉未完成标记。
 //!
 //! 任何一步失败或取消，都按未完成标记删掉这个实例目录；标记里的任务 id 保证只删本次建的目录。
@@ -29,15 +30,18 @@ use aurora_instance::{
 use aurora_modpack::{
     CurseForgeFileRef, PackArchive, PackFormat, PackLoader, PackLoaderKind, RemoteFiles,
 };
-use aurora_modplatform::{CurseForgeClient, CurseForgeFile, Platform};
+use aurora_modplatform::{CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform};
 use serde::{Deserialize, Serialize};
 
+use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Aurora;
 use crate::install::LoaderChoice;
-use crate::instance_install::{MarkerSettlement, now_millis};
-use crate::resources::{curseforge_download_url, is_safe_file_name};
+use crate::instance_install::{MarkerSettlement, now_millis, template_stage};
+use crate::resources::{
+    curseforge_download_url, is_safe_file_name, join_landing, task_for_file_url,
+};
 
 /// 实例名的最大字符数：界面上要完整显示，路径也不宜过长。
 pub const INSTANCE_NAME_MAX_CHARS: usize = 32;
@@ -89,6 +93,65 @@ pub struct ModpackPreview {
     pub override_files: usize,
     /// 覆盖文件总字节数。
     pub override_bytes: u64,
+    /// 导入后落进 `mods/` 的每个文件，与 `mod_files` 同一口径（`mods.len() == mod_files`）：同一落点只留
+    /// 一份、覆盖层胜出，按路径不分大小写排序。
+    pub mods: Vec<PackModEntry>,
+    /// 不直接落进 `mods/` 的可选远程文件（资源包、光影、配置等），排序同上。
+    pub optional_extras: Vec<PackModEntry>,
+    /// 作者不允许启动器直接下载、暂存位里也还没有校验通过的副本的文件：导入前要用户手动下载。
+    pub blocked_files: Vec<BlockedFile>,
+}
+
+/// 整合包里的一个文件从哪来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackFileOrigin {
+    /// 清单里的远程文件，导入时下载。
+    Remote,
+    /// 包里自带的覆盖文件。
+    Override,
+}
+
+/// 整合包里的一个文件导入时怎么拿到。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackFileAvailability {
+    /// 启动器直接下载。
+    Download,
+    /// 包里自带。
+    Bundled,
+    /// 作者不允许启动器直接下载，要用户手动下载。
+    Blocked,
+    /// 受限文件，但已经从下载文件夹认领到了校验通过的副本。
+    Claimed,
+}
+
+/// 预览里列出的一个文件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackModEntry {
+    /// 相对实例目录的落点，正斜杠分隔。
+    pub path: String,
+    pub file_name: String,
+    pub origin: PackFileOrigin,
+    /// 可选文件（mrpack 里 `env.client` 为 `optional`），导入时可以跳过。
+    pub optional: bool,
+    /// CurseForge 远程文件的工程与文件 id；Modrinth 文件与覆盖文件为 `None`。
+    pub project_id: Option<u32>,
+    pub file_id: Option<u32>,
+    pub availability: PackFileAvailability,
+}
+
+/// 导入时用户的选择。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImportSelection {
+    /// 跳过不装的可选文件，取清单里的落点写法。
+    pub excluded_optional: Vec<String>,
+}
+
+/// 落点是否直接在 `mods/` 下（加载器只读这一层）。`key` 已转小写。
+fn directly_in_mods(key: &str) -> bool {
+    key.strip_prefix("mods/")
+        .is_some_and(|name| !name.is_empty() && !name.contains('/'))
 }
 
 /// 整合包导入后落进 `mods/` 的 Mod 数，平台摘要与本地预览都用它：清单里落点直接在 `mods/` 下的远程
@@ -101,10 +164,6 @@ pub(crate) fn count_pack_mods<'a>(
     remote: impl IntoIterator<Item = &'a str>,
     overrides: impl IntoIterator<Item = &'a str>,
 ) -> usize {
-    fn directly_in_mods(key: &str) -> bool {
-        key.strip_prefix("mods/")
-            .is_some_and(|name| !name.is_empty() && !name.contains('/'))
-    }
     let mut landed: HashSet<String> = HashSet::new();
     for path in remote {
         let key = path.to_lowercase();
@@ -246,8 +305,17 @@ pub struct PreparedModpack {
     pack_path: PathBuf,
     archive: PackArchive,
     remote: Vec<RemoteDownload>,
+    /// 认领到暂存位的受限文件：导入时复制进实例，不下载。
+    claimed: Vec<ClaimedCopy>,
     /// 平台整合包下载到的缓存目录；本地文件为 `None`。
     cache_dir: Option<PathBuf>,
+}
+
+/// 清单里的远程文件准备成的样子：要下载的，与认领到暂存位、直接复制的。
+#[derive(Debug, Default)]
+struct RemotePlan {
+    downloads: Vec<RemoteDownload>,
+    claimed: Vec<ClaimedCopy>,
 }
 
 impl PreparedModpack {
@@ -282,10 +350,25 @@ async fn remove_pack_cache(dir: Option<&Path>) {
 impl Aurora {
     /// 预览本地整合包文件：只读清单与条目表，不解压。CurseForge 清单有远程文件时要问两个批量接口才
     /// 数得出 Mod、算得出下载量（导入同样要问），没配 API key 或断网时与导入报同样的错。
+    ///
+    /// CurseForge 包里没给下载地址的文件逐个问 download-url 端点，作者不允许直接下载的列进
+    /// `blocked_files`，暂存位里已有校验通过副本的记为已认领。受限文件不让预览失败：用户要在这一步就
+    /// 看到要手动下载哪些。
     pub async fn preview_modpack_file(&self, path: &Path) -> Result<ModpackPreview> {
         let archive = read_pack_blocking(path.to_path_buf()).await?;
-        let remote = self.remote_facts(&archive.manifest.remote).await?;
-        Ok(preview_of(&archive, remote))
+        let remote = self
+            .remote_facts(&archive.manifest.remote, BlockedProbe::Probe)
+            .await?;
+        let mut claimed = HashSet::new();
+        let mut blocked = Vec::new();
+        for item in remote.entries.iter().filter_map(|e| e.blocked.as_ref()) {
+            if self.claimed_copy(item).await?.is_some() {
+                claimed.insert(item.file_id);
+            } else {
+                blocked.push(item.clone());
+            }
+        }
+        Ok(preview_of(&archive, remote, &claimed, blocked))
     }
 
     /// 把整合包导入为新实例：[`Aurora::prepare_modpack`] 之后紧接 [`Aurora::import_modpack`]。
@@ -294,21 +377,26 @@ impl Aurora {
         &self,
         source: &ModpackSource,
         name: Option<&str>,
+        selection: &ImportSelection,
         task_id: &str,
         events: Option<&EventSink>,
     ) -> Result<ModpackInstallOutcome> {
-        let prepared = self.prepare_modpack(source, name, events).await?;
+        let prepared = self
+            .prepare_modpack(source, name, selection, events)
+            .await?;
         self.import_modpack(prepared, task_id, events).await
     }
 
-    /// 导入的第一步：拿到整合包（平台整合包先下载到缓存目录）、读清单、定下实例名并查重，把远程
-    /// 文件换成下载任务（CurseForge 禁止分发的文件在这里整体报错）。`name` 缺省用整合包自己的名字。
+    /// 导入的第一步：拿到整合包（平台整合包先下载到缓存目录）、读清单、去掉 `selection` 里跳过的可选
+    /// 文件、定下实例名并查重，把远程文件换成下载任务（CurseForge 禁止分发、又没认领到副本的文件在这里
+    /// 整体报错，认领到的改为从暂存位复制）。`name` 缺省用整合包自己的名字。
     ///
     /// 不动游戏目录。之后交给 [`Aurora::import_modpack`]，不导入了就 [`PreparedModpack::discard`]。
     pub async fn prepare_modpack(
         &self,
         source: &ModpackSource,
         name: Option<&str>,
+        selection: &ImportSelection,
         events: Option<&EventSink>,
     ) -> Result<PreparedModpack> {
         let (pack_path, cache_dir) = match source {
@@ -318,19 +406,21 @@ impl Aurora {
                 project_id,
                 version_id,
             } => {
-                let (pack, dir) = self
-                    .download_platform_pack(*platform, project_id, version_id, events)
-                    .await?;
-                (pack, Some(dir))
+                self.download_platform_pack(*platform, project_id, version_id, events)
+                    .await?
             }
         };
-        match self.read_prepared(source, name, &pack_path, events).await {
+        match self
+            .read_prepared(source, name, selection, &pack_path, events)
+            .await
+        {
             Ok((name, archive, remote)) => Ok(PreparedModpack {
                 source: source.clone(),
                 name,
                 pack_path,
                 archive,
-                remote,
+                remote: remote.downloads,
+                claimed: remote.claimed,
                 cache_dir,
             }),
             Err(err) => {
@@ -356,10 +446,22 @@ impl Aurora {
             pack_path,
             archive,
             remote,
+            claimed,
             cache_dir,
         } = prepared;
         let outcome = self
-            .import_into_new_dir(&archive, &pack_path, &source, name, remote, task_id, events)
+            .import_into_new_dir(
+                &archive,
+                &pack_path,
+                &source,
+                name,
+                RemotePlan {
+                    downloads: remote,
+                    claimed,
+                },
+                task_id,
+                events,
+            )
             .await;
         remove_pack_cache(cache_dir.as_deref()).await;
         outcome
@@ -408,15 +510,20 @@ impl Aurora {
         self.settle_instance_marker(name, marker, settlement).await
     }
 
-    /// 读清单、定实例名并查重、把远程文件换成下载任务。
+    /// 读清单、去掉跳过的可选文件、定实例名并查重、把远程文件换成下载任务。
     async fn read_prepared(
         &self,
         source: &ModpackSource,
         name: Option<&str>,
+        selection: &ImportSelection,
         pack_path: &Path,
         events: Option<&EventSink>,
-    ) -> Result<(String, PackArchive, Vec<RemoteDownload>)> {
-        let archive = read_pack_blocking(pack_path.to_path_buf()).await?;
+    ) -> Result<(String, PackArchive, RemotePlan)> {
+        let mut archive = read_pack_blocking(pack_path.to_path_buf()).await?;
+        let skipped = archive
+            .manifest
+            .remote
+            .exclude_optional(&selection.excluded_optional)?;
         let manifest = &archive.manifest;
         let requested = name.unwrap_or(&manifest.name);
         let name = validate_instance_name(requested).map_err(|rule| name_error(requested, rule))?;
@@ -438,7 +545,7 @@ impl Aurora {
         let remote = self
             .remote_downloads(&manifest.remote, &version_dir)
             .await?;
-        tracing::debug!(%name, ?source, remote = remote.len(), "整合包导入已准备好");
+        tracing::debug!(%name, ?source, remote = remote.downloads.len(), claimed = remote.claimed.len(), skipped, "整合包导入已准备好");
         Ok((name, archive, remote))
     }
 
@@ -449,7 +556,7 @@ impl Aurora {
         pack_path: &Path,
         source: &ModpackSource,
         name: String,
-        remote: Vec<RemoteDownload>,
+        remote: RemotePlan,
         task_id: &str,
         events: Option<&EventSink>,
     ) -> Result<ModpackInstallOutcome> {
@@ -495,7 +602,7 @@ impl Aurora {
         source: &ModpackSource,
         name: &str,
         version_dir: &Path,
-        remote: Vec<RemoteDownload>,
+        remote: RemotePlan,
         events: Option<&EventSink>,
     ) -> Result<InstanceModpack> {
         let manifest = &archive.manifest;
@@ -543,14 +650,23 @@ impl Aurora {
                 source,
             })?;
 
-        let remote_files = remote.len();
-        if remote_files > 0 {
+        if !remote.claimed.is_empty() {
             emit(
                 events,
-                CoreEvent::stage(format!("下载 {remote_files} 个整合包文件")),
+                CoreEvent::stage(format!("放入 {} 个手动下载的文件", remote.claimed.len())),
             );
-            self.download_remote(remote, events).await?;
+            place_claimed(&remote.claimed).await?;
         }
+        let downloads = remote.downloads.len();
+        if downloads > 0 {
+            emit(
+                events,
+                CoreEvent::stage(format!("下载 {downloads} 个整合包文件")),
+            );
+            self.download_remote(remote.downloads, events).await?;
+        }
+        // 跳过的可选文件已从清单里去掉，记的是这个实例实际装进来的远程文件数（含手动下载的）。
+        let remote_files = manifest.remote.len();
 
         let override_files = archive.overrides.len();
         if override_files > 0 {
@@ -567,6 +683,15 @@ impl Aurora {
                 aurora_modpack::extract_overrides(&pack, &entries, &dest, &is_cancelled)
             })
             .await??;
+        }
+
+        // 覆盖文件之后才补：包里自带的 options.txt 是作者调好的，按只补缺的规则原样留着，缺的服务器列表
+        // 之类由默认设置补上。导入的实例一律隔离，套不套只看配置这一道闸。失败与其他步骤一样让导入失败。
+        let template = self.apply_template(name).await?;
+        if let crate::template::TemplateOutcome::Applied { copied, .. } = &template
+            && !copied.is_empty()
+        {
+            emit(events, CoreEvent::stage(template_stage(&template)));
         }
 
         let (platform, project_id, version_id) = match source {
@@ -693,13 +818,16 @@ impl Aurora {
     }
 
     /// 平台整合包下载到缓存目录，返回包路径与它所在的临时目录。
+    ///
+    /// CurseForge 包本体也可能不允许启动器直接下载：这时报的受限清单里只有这个包，用户从网页下载、认领进
+    /// 暂存位后，重新安装直接读暂存副本，不再向 CDN 要，也没有要删的临时目录（暂存副本留给下次用）。
     async fn download_platform_pack(
         &self,
         platform: Platform,
         project_id: &str,
         version_id: &str,
         events: Option<&EventSink>,
-    ) -> Result<(PathBuf, PathBuf)> {
+    ) -> Result<(PathBuf, Option<PathBuf>)> {
         // 版本 id 要拼进缓存目录名。
         if !is_safe_file_name(version_id) {
             return Err(CoreError::InvalidProjectId {
@@ -707,11 +835,7 @@ impl Aurora {
                 project_id: format!("{project_id}/{version_id}"),
             });
         }
-        let cache_root = self
-            .config()
-            .cache_directory
-            .clone()
-            .unwrap_or_else(|| self.data_dir().join("cache"));
+        let cache_root = self.cache_root();
         let platform_slug = match platform {
             Platform::Modrinth => "modrinth",
             Platform::CurseForge => "curseforge",
@@ -719,9 +843,20 @@ impl Aurora {
         let dir = cache_root
             .join("modpacks")
             .join(format!("{platform_slug}-{version_id}"));
-        let (file_name, task) = self
-            .platform_file_task(platform, project_id, version_id, &dir)
-            .await?;
+        let (file_name, task) = match self
+            .platform_file_task(platform, project_id, version_id, &dir, "")
+            .await
+        {
+            Ok(found) => found,
+            Err(err) => {
+                let (pack, staged) = self.claimed_instead_of(err).await?;
+                emit(
+                    events,
+                    CoreEvent::stage(format!("使用手动下载的整合包 {}", pack.file_name)),
+                );
+                return Ok((staged, None));
+            }
+        };
         emit(events, CoreEvent::stage(format!("下载整合包 {file_name}")));
         let dest = task.dest.clone();
         let report = self
@@ -731,15 +866,15 @@ impl Aurora {
         if let Some(failure) = report.failures.into_iter().next() {
             return Err(failure.error.into());
         }
-        Ok((dest, dir))
+        Ok((dest, Some(dir)))
     }
 
-    /// 把清单里的远程文件变成下载任务（落点都在实例目录下）。
+    /// 把清单里的远程文件变成下载任务（落点都在实例目录下）；CurseForge 的受限文件认领到了就从暂存位复制。
     async fn remote_downloads(
         &self,
         remote: &RemoteFiles,
         version_dir: &Path,
-    ) -> Result<Vec<RemoteDownload>> {
+    ) -> Result<RemotePlan> {
         match remote {
             RemoteFiles::Modrinth(files) => {
                 let mut downloads = Vec::with_capacity(files.len());
@@ -761,30 +896,91 @@ impl Aurora {
                         fallbacks: rest.to_vec(),
                     });
                 }
-                Ok(downloads)
+                Ok(RemotePlan {
+                    downloads,
+                    claimed: Vec::new(),
+                })
             }
-            RemoteFiles::CurseForge(refs) if refs.is_empty() => Ok(Vec::new()),
+            RemoteFiles::CurseForge(refs) if refs.is_empty() => Ok(RemotePlan::default()),
             RemoteFiles::CurseForge(refs) => {
                 let client = self.curseforge_client()?;
-                curseforge_downloads(&client, refs, version_dir).await
+                self.curseforge_downloads(&client, refs, version_dir).await
             }
         }
     }
 
+    /// CurseForge 清单里的文件 id 换成下载任务：落点按 [`CurseForgeIndex::locate`]，没给下载地址的再问
+    /// download-url 端点，任务都挂上 CDN 下载凭据。作者禁止第三方分发的文件，暂存位里有校验通过的副本就
+    /// 改为复制；还有没认领到的就汇总成一个错误，只列这些。
+    async fn curseforge_downloads(
+        &self,
+        client: &CurseForgeClient,
+        refs: &[CurseForgeFileRef],
+        version_dir: &Path,
+    ) -> Result<RemotePlan> {
+        let index = CurseForgeIndex::fetch(client, refs).await?;
+        let credential = self.curseforge_credential(client)?;
+        let mut plan = RemotePlan::default();
+        let mut blocked = Vec::new();
+        for reference in refs {
+            let (file, sub) = index.locate(reference)?;
+            let dest = version_dir.join(sub).join(&file.file_name);
+            let task = match file.to_download_task(&dest) {
+                Some(task) => task,
+                None => {
+                    match curseforge_download_url(client, reference.project_id, reference.file_id)
+                        .await?
+                    {
+                        Some(url) => task_for_file_url(url, &dest, file),
+                        None => {
+                            let item = index.blocked(reference, file, sub)?;
+                            match self.claimed_copy(&item).await? {
+                                Some(staged) => plan.claimed.push(ClaimedCopy { staged, dest }),
+                                None => blocked.push(item),
+                            }
+                            continue;
+                        }
+                    }
+                }
+            };
+            plan.downloads.push(RemoteDownload {
+                task: task.with_credential(credential.clone()),
+                fallbacks: Vec::new(),
+            });
+        }
+        if !blocked.is_empty() {
+            return Err(CoreError::FileDistributionBlocked { files: blocked });
+        }
+        Ok(plan)
+    }
+
     /// 远程文件的落点与总字节数。Modrinth 清单自带；CurseForge 要多问两个批量接口，没配 API key 时
-    /// 与导入一样报 key 缺失（该源被禁用），没有远程文件时不问。
-    pub(crate) async fn remote_facts(&self, remote: &RemoteFiles) -> Result<RemoteFacts> {
+    /// 与导入一样报 key 缺失（该源被禁用），没有远程文件时不问。`probe` 决定要不要逐个探出受限文件。
+    pub(crate) async fn remote_facts(
+        &self,
+        remote: &RemoteFiles,
+        probe: BlockedProbe,
+    ) -> Result<RemoteFacts> {
         match remote {
             RemoteFiles::Modrinth(files) => Ok(RemoteFacts {
-                destinations: files.iter().map(|f| f.path.as_str().to_owned()).collect(),
+                entries: files
+                    .iter()
+                    .map(|f| RemoteEntry {
+                        destination: f.path.as_str().to_owned(),
+                        optional: f.optional,
+                        project_id: None,
+                        file_id: None,
+                        blocked: None,
+                    })
+                    .collect(),
                 bytes: Some(files.iter().map(|f| f.size).sum()),
             }),
             RemoteFiles::CurseForge(refs) if refs.is_empty() => Ok(RemoteFacts {
-                destinations: Vec::new(),
+                entries: Vec::new(),
                 bytes: Some(0),
             }),
             RemoteFiles::CurseForge(refs) => {
-                curseforge_remote_facts(&self.curseforge_client()?, refs).await
+                curseforge_remote_facts(&self.curseforge_client()?, refs, probe).await
             }
         }
     }
@@ -828,7 +1024,8 @@ impl Aurora {
 /// 取落点，保证「预先报的数」与「导入后真正落进去的」是同一条规则。
 struct CurseForgeIndex {
     files: HashMap<u32, CurseForgeFile>,
-    classes: HashMap<u32, Option<u32>>,
+    /// 批量工程接口回的整份工程：落点要它的大类，受限文件的网页链接要它的 links 与 slug。
+    projects: HashMap<u32, CurseForgeMod>,
 }
 
 impl CurseForgeIndex {
@@ -848,13 +1045,13 @@ impl CurseForgeIndex {
             .into_iter()
             .collect();
         mod_ids.sort_unstable();
-        let mut classes: HashMap<u32, Option<u32>> = HashMap::with_capacity(mod_ids.len());
+        let mut projects: HashMap<u32, CurseForgeMod> = HashMap::with_capacity(mod_ids.len());
         for chunk in mod_ids.chunks(CURSEFORGE_BATCH) {
             for project in client.get_mods(chunk).await? {
-                classes.insert(project.id, project.class_id);
+                projects.insert(project.id, project);
             }
         }
-        Ok(Self { files, classes })
+        Ok(Self { files, projects })
     }
 
     /// 清单引用的文件与它在实例里的落点目录（工程的大类决定落进哪个目录）。平台响应里没有这个文件报
@@ -874,7 +1071,10 @@ impl CurseForgeIndex {
                 file_name: file.file_name.clone(),
             });
         }
-        let class_id = self.classes.get(&reference.project_id).copied().flatten();
+        let class_id = self
+            .projects
+            .get(&reference.project_id)
+            .and_then(|project| project.class_id);
         let sub = match class_id {
             Some(CF_CLASS_RESOURCE_PACKS) => "resourcepacks",
             Some(CF_CLASS_SHADERS) => "shaderpacks",
@@ -888,93 +1088,170 @@ impl CurseForgeIndex {
         };
         Ok((file, sub))
     }
+
+    /// 把一个受限文件拼成清单项。网页链接要工程信息：批量工程接口没回这个工程时，拼不出能打开的页面，
+    /// 与文件缺失一样报不存在。
+    fn blocked(
+        &self,
+        reference: &CurseForgeFileRef,
+        file: &CurseForgeFile,
+        sub: &str,
+    ) -> Result<BlockedFile> {
+        let project = self.projects.get(&reference.project_id).ok_or_else(|| {
+            CoreError::ModVersionNotFound {
+                platform: Platform::CurseForge.display_name(),
+                project_id: reference.project_id.to_string(),
+                version_id: reference.file_id.to_string(),
+            }
+        })?;
+        Ok(BlockedFile::new(
+            project,
+            file,
+            join_landing(sub, &file.file_name),
+        ))
+    }
+}
+
+/// 读远程文件的事实时要不要逐个探出受限文件：本地预览要（用户在导入前就该知道要手动下载哪些），平台
+/// 摘要不要（只为数 Mod、报下载量，不为它多发请求）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BlockedProbe {
+    Probe,
+    Skip,
 }
 
 /// 清单里的远程文件导入后落在哪、一共多大：平台摘要与本地预览据此数 Mod、报下载量。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteFacts {
-    /// 相对实例目录的落点，正斜杠分隔。
-    pub(crate) destinations: Vec<String>,
+    /// 清单顺序的每个远程文件。
+    pub(crate) entries: Vec<RemoteEntry>,
     /// 总字节数；平台没给齐每个文件的大小时为 `None`，不拿缺了几项的和冒充总量。
     pub(crate) bytes: Option<u64>,
 }
 
-/// CurseForge 清单只有工程与文件 id：落点与大小经 [`CurseForgeIndex`] 向批量接口要。
+impl RemoteFacts {
+    /// 相对实例目录的落点，正斜杠分隔。
+    pub(crate) fn destinations(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|entry| entry.destination.as_str())
+    }
+}
+
+/// 一个远程文件的事实。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteEntry {
+    /// 相对实例目录的落点，正斜杠分隔。
+    pub(crate) destination: String,
+    pub(crate) optional: bool,
+    /// CurseForge 的工程与文件 id；Modrinth 文件为 `None`。
+    pub(crate) project_id: Option<u32>,
+    pub(crate) file_id: Option<u32>,
+    /// 作者不允许启动器直接下载时的清单项；没探（[`BlockedProbe::Skip`]）或不受限为 `None`。
+    pub(crate) blocked: Option<BlockedFile>,
+}
+
+/// CurseForge 清单只有工程与文件 id：落点与大小经 [`CurseForgeIndex`] 向批量接口要。`probe` 为
+/// [`BlockedProbe::Probe`] 时，没给下载地址的文件再逐个问 download-url 端点，判定与导入相同。
 pub(crate) async fn curseforge_remote_facts(
     client: &CurseForgeClient,
     refs: &[CurseForgeFileRef],
+    probe: BlockedProbe,
 ) -> Result<RemoteFacts> {
     let index = CurseForgeIndex::fetch(client, refs).await?;
-    let mut destinations = Vec::with_capacity(refs.len());
+    let mut entries = Vec::with_capacity(refs.len());
     let mut bytes = Some(0u64);
     for reference in refs {
         let (file, sub) = index.locate(reference)?;
-        destinations.push(format!("{sub}/{}", file.file_name));
+        let blocked = match probe {
+            BlockedProbe::Probe if file.download_url.is_none() => {
+                match curseforge_download_url(client, reference.project_id, reference.file_id)
+                    .await?
+                {
+                    Some(_) => None,
+                    None => Some(index.blocked(reference, file, sub)?),
+                }
+            }
+            BlockedProbe::Probe | BlockedProbe::Skip => None,
+        };
+        entries.push(RemoteEntry {
+            destination: join_landing(sub, &file.file_name),
+            optional: false,
+            project_id: Some(reference.project_id),
+            file_id: Some(reference.file_id),
+            blocked,
+        });
         bytes = bytes
             .zip(file.file_length)
             .map(|(sum, length)| sum + length);
     }
-    Ok(RemoteFacts {
-        destinations,
-        bytes,
-    })
+    Ok(RemoteFacts { entries, bytes })
 }
 
-/// CurseForge 清单里的文件 id 换成下载任务：落点按 [`CurseForgeIndex::locate`]，没给下载地址的再问
-/// download-url 端点；作者禁止第三方分发的文件汇总成一个错误。
-async fn curseforge_downloads(
-    client: &CurseForgeClient,
-    refs: &[CurseForgeFileRef],
-    version_dir: &Path,
-) -> Result<Vec<RemoteDownload>> {
-    let index = CurseForgeIndex::fetch(client, refs).await?;
-    let mut downloads = Vec::with_capacity(refs.len());
-    let mut blocked = Vec::new();
-    for reference in refs {
-        let (file, sub) = index.locate(reference)?;
-        let dest = version_dir.join(sub).join(&file.file_name);
-        let task = match file.to_download_task(&dest) {
-            Some(task) => task,
-            None => {
-                match curseforge_download_url(
-                    client,
-                    reference.project_id,
-                    reference.file_id,
-                    &file.file_name,
-                )
-                .await
-                {
-                    Ok(url) => {
-                        let mut task = DownloadTask::new(url, &dest);
-                        if let Some(size) = file.file_length {
-                            task = task.with_size(size);
-                        }
-                        if let Some(sha1) = file.sha1() {
-                            task = task.with_sha1(sha1.to_owned());
-                        }
-                        task
-                    }
-                    Err(CoreError::FileDistributionBlocked { files }) => {
-                        blocked.extend(files);
-                        continue;
-                    }
-                    Err(other) => return Err(other),
-                }
-            }
+fn file_name_of(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_owned()
+}
+
+/// 预览里的 Mod 清单与其他可选文件。Mod 清单与 [`count_pack_mods`] 同一口径：直接落在 `mods/` 下的远程
+/// 文件，加上覆盖层 `mods/` 下的 `.jar`；同一落点不分大小写只留一份，覆盖层胜出（它会盖掉下载来的那份）。
+fn pack_entries(
+    archive: &PackArchive,
+    remote: &RemoteFacts,
+    claimed: &HashSet<u32>,
+) -> (Vec<PackModEntry>, Vec<PackModEntry>) {
+    let mut mods: HashMap<String, PackModEntry> = HashMap::new();
+    let mut extras = Vec::new();
+    for entry in &remote.entries {
+        let availability = match &entry.blocked {
+            Some(item) if claimed.contains(&item.file_id) => PackFileAvailability::Claimed,
+            Some(_) => PackFileAvailability::Blocked,
+            None => PackFileAvailability::Download,
         };
-        downloads.push(RemoteDownload {
-            task,
-            fallbacks: Vec::new(),
-        });
+        let item = PackModEntry {
+            path: entry.destination.clone(),
+            file_name: file_name_of(&entry.destination),
+            origin: PackFileOrigin::Remote,
+            optional: entry.optional,
+            project_id: entry.project_id,
+            file_id: entry.file_id,
+            availability,
+        };
+        let key = entry.destination.to_lowercase();
+        if directly_in_mods(&key) {
+            mods.insert(key, item);
+        } else if entry.optional {
+            extras.push(item);
+        }
     }
-    if !blocked.is_empty() {
-        return Err(CoreError::FileDistributionBlocked { files: blocked });
+    for entry in &archive.overrides {
+        let key = entry.path.as_str().to_lowercase();
+        if directly_in_mods(&key) && key.ends_with(".jar") {
+            mods.insert(
+                key,
+                PackModEntry {
+                    path: entry.path.as_str().to_owned(),
+                    file_name: file_name_of(entry.path.as_str()),
+                    origin: PackFileOrigin::Override,
+                    optional: false,
+                    project_id: None,
+                    file_id: None,
+                    availability: PackFileAvailability::Bundled,
+                },
+            );
+        }
     }
-    Ok(downloads)
+    let mut mods: Vec<PackModEntry> = mods.into_values().collect();
+    mods.sort_by_cached_key(|entry| entry.path.to_lowercase());
+    extras.sort_by_cached_key(|entry| entry.path.to_lowercase());
+    (mods, extras)
 }
 
-fn preview_of(archive: &PackArchive, remote: RemoteFacts) -> ModpackPreview {
+fn preview_of(
+    archive: &PackArchive,
+    remote: RemoteFacts,
+    claimed: &HashSet<u32>,
+    blocked_files: Vec<BlockedFile>,
+) -> ModpackPreview {
     let manifest = &archive.manifest;
+    let (mods, optional_extras) = pack_entries(archive, &remote, claimed);
     ModpackPreview {
         format: manifest.format,
         name: manifest.name.clone(),
@@ -985,12 +1262,15 @@ fn preview_of(archive: &PackArchive, remote: RemoteFacts) -> ModpackPreview {
         loader: manifest.loader.clone(),
         remote_files: manifest.remote.len(),
         mod_files: count_pack_mods(
-            remote.destinations.iter().map(String::as_str),
+            remote.destinations(),
             archive.overrides.iter().map(|entry| entry.path.as_str()),
         ),
         remote_bytes: remote.bytes,
         override_files: archive.overrides.len(),
         override_bytes: archive.overrides_bytes,
+        mods,
+        optional_extras,
+        blocked_files,
     }
 }
 
@@ -1221,6 +1501,7 @@ mod tests {
             .install_modpack(
                 &ModpackSource::File { path: pack.clone() },
                 Some(" 我的整合包 "),
+                &ImportSelection::default(),
                 "task-1",
                 Some(&tx),
             )
@@ -1303,6 +1584,86 @@ mod tests {
         );
     }
 
+    /// 包里自带的 options.txt 压过默认设置，包里没有的服务器列表由默认设置补上；配置里关掉时一个都不补。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn imported_instance_gets_missing_files_from_the_template() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/options.txt", b"lang:en_us")],
+        );
+        let aurora = aurora(tmp.path(), &server);
+        let servers: Vec<u8> = (0..fastrand::usize(1..2048))
+            .map(|_| fastrand::u8(..))
+            .collect();
+        let template = aurora.template_dir();
+        std::fs::create_dir_all(&template).unwrap();
+        std::fs::write(template.join("options.txt"), b"fov:90").unwrap();
+        std::fs::write(template.join("servers.dat"), &servers).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let outcome = aurora
+            .install_modpack(
+                &ModpackSource::File { path: pack.clone() },
+                Some("带模板"),
+                &ImportSelection::default(),
+                "task-t",
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+        drop(tx);
+        let dir = outcome.version_dir;
+        assert_eq!(
+            std::fs::read(dir.join("options.txt")).unwrap(),
+            b"lang:en_us"
+        );
+        assert_eq!(std::fs::read(dir.join("servers.dat")).unwrap(), servers);
+        let mut stages = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let CoreEvent::Stage(stage) = event {
+                stages.push(stage);
+            }
+        }
+        assert!(
+            stages
+                .iter()
+                .any(|s| s == "沿用默认设置：补上 servers.dat（已有的 options.txt 保留不动）"),
+            "{stages:?}"
+        );
+
+        let mut off = Aurora::for_test(
+            AuroraConfig {
+                new_instance_template: false,
+                ..AuroraConfig::default()
+            },
+            tmp.path().join("data"),
+            tmp.path().join("mc"),
+        )
+        .with_manifest_url(format!("{}/manifest.json", server.uri()));
+        off.set_isolation_policy(IsolationPolicy::Disabled);
+        let outcome = off
+            .install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("不带模板"),
+                &ImportSelection::default(),
+                "task-u",
+                None,
+            )
+            .await
+            .unwrap();
+        let dir = outcome.version_dir;
+        assert_eq!(
+            std::fs::read(dir.join("options.txt")).unwrap(),
+            b"lang:en_us"
+        );
+        assert!(!dir.join("servers.dat").exists());
+    }
+
     /// 同名旧实例在启动器之外被删掉后，名字下的游玩记录还留着；导入同名整合包得到的是一个没玩过的新实例。
     /// 撞上现有实例的导入被拦下，不动那个实例的记录。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1323,11 +1684,23 @@ mod tests {
         let source = ModpackSource::File { path: pack.clone() };
 
         aurora
-            .install_modpack(&source, Some("现有"), "task-dup", None)
+            .install_modpack(
+                &source,
+                Some("现有"),
+                &ImportSelection::default(),
+                "task-dup",
+                None,
+            )
             .await
             .unwrap_err();
         aurora
-            .install_modpack(&source, Some("RLCraft"), "task-1", None)
+            .install_modpack(
+                &source,
+                Some("RLCraft"),
+                &ImportSelection::default(),
+                "task-1",
+                None,
+            )
             .await
             .unwrap();
 
@@ -1361,7 +1734,12 @@ mod tests {
         let aurora = aurora(tmp.path(), &server);
 
         let prepared = aurora
-            .prepare_modpack(&ModpackSource::File { path: pack }, None, None)
+            .prepare_modpack(
+                &ModpackSource::File { path: pack },
+                None,
+                &ImportSelection::default(),
+                None,
+            )
             .await
             .unwrap();
         // 导入前预告的基底就是写出的实例 JSON 继承的那个原版，调用方据此在导入期间占住它。
@@ -1438,7 +1816,13 @@ mod tests {
         };
 
         let outcome = aurora
-            .install_modpack(&source, Some("从平台装"), "task-p", None)
+            .install_modpack(
+                &source,
+                Some("从平台装"),
+                &ImportSelection::default(),
+                "task-p",
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(outcome.modpack.platform, Some(Platform::Modrinth));
@@ -1499,7 +1883,10 @@ mod tests {
             .join("modpacks")
             .join("modrinth-pv2");
 
-        let prepared = aurora.prepare_modpack(&source, None, None).await.unwrap();
+        let prepared = aurora
+            .prepare_modpack(&source, None, &ImportSelection::default(), None)
+            .await
+            .unwrap();
         assert_eq!(prepared.name(), "测试包");
         assert!(cache.join("pack.mrpack").is_file(), "平台包应已下到缓存");
         assert!(
@@ -1510,7 +1897,7 @@ mod tests {
         assert!(!cache.exists(), "放弃导入时删掉下载缓存");
 
         let err = aurora
-            .prepare_modpack(&source, Some("a/b"), None)
+            .prepare_modpack(&source, Some("a/b"), &ImportSelection::default(), None)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1542,6 +1929,7 @@ mod tests {
             .install_modpack(
                 &ModpackSource::File { path: missing },
                 Some("坏包"),
+                &ImportSelection::default(),
                 "t1",
                 None,
             )
@@ -1556,7 +1944,13 @@ mod tests {
         write_pack(&pack, &index(serde_json::json!({"minecraft": "test"})), &[]);
         let source = ModpackSource::File { path: pack };
         let err = aurora
-            .install_modpack(&source, Some("taken"), "t2", None)
+            .install_modpack(
+                &source,
+                Some("taken"),
+                &ImportSelection::default(),
+                "t2",
+                None,
+            )
             .await
             .unwrap_err();
         assert!(
@@ -1569,7 +1963,13 @@ mod tests {
         );
 
         let err = aurora
-            .install_modpack(&source, Some("TEST"), "t3", None)
+            .install_modpack(
+                &source,
+                Some("TEST"),
+                &ImportSelection::default(),
+                "t3",
+                None,
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1585,7 +1985,13 @@ mod tests {
         );
 
         let err = aurora
-            .install_modpack(&source, Some("a/b"), "t4", None)
+            .install_modpack(
+                &source,
+                Some("a/b"),
+                &ImportSelection::default(),
+                "t4",
+                None,
+            )
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1754,7 +2160,8 @@ mod tests {
         serde_json::json!({"id": id, "name": "m", "slug": "m", "summary": "", "classId": class_id})
     }
 
-    /// CurseForge 文件按所属工程的大类落进对应目录；禁止分发的文件汇总报错。
+    /// CurseForge 文件按所属工程的大类落进对应目录，每个任务都挂 CurseForge 下载凭据；禁止分发的文件汇总
+    /// 报错，每项带工程、文件 id、网页链接与落点。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn curseforge_files_land_by_class_and_blocked_files_are_reported_together() {
         let server = MockServer::start().await;
@@ -1805,10 +2212,22 @@ mod tests {
                 .collect()
         };
 
-        let downloads =
-            curseforge_downloads(&client, &refs(&[(1, 11), (2, 22), (3, 33), (4, 44)]), dir)
-                .await
-                .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+
+        let plan = aurora
+            .curseforge_downloads(&client, &refs(&[(1, 11), (2, 22), (3, 33), (4, 44)]), dir)
+            .await
+            .unwrap();
+        assert!(plan.claimed.is_empty());
+        let downloads = plan.downloads;
+        for download in &downloads {
+            let credential = download.task.credential.as_ref().expect("应带下载凭据");
+            assert_eq!(
+                credential.realm(),
+                aurora_download::CredentialRealm::CurseForge
+            );
+        }
         let dests: Vec<_> = downloads.iter().map(|d| d.task.dest.clone()).collect();
         assert_eq!(
             dests,
@@ -1826,15 +2245,49 @@ mod tests {
             Some("0f4a890d07402280686a518579fa9fa02309e315")
         );
 
-        let err = curseforge_downloads(&client, &refs(&[(1, 11), (5, 55), (6, 66)]), dir)
+        let err = aurora
+            .curseforge_downloads(&client, &refs(&[(1, 11), (5, 55), (6, 66)]), dir)
             .await
             .unwrap_err();
-        assert!(
-            matches!(&err, CoreError::FileDistributionBlocked { files } if files == &["blocked-a.jar", "blocked-b.jar"]),
-            "{err:?}"
+        let CoreError::FileDistributionBlocked { files } = &err else {
+            panic!("实际：{err:?}");
+        };
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| (
+                    f.project_id,
+                    f.file_id,
+                    f.file_name.as_str(),
+                    f.web_url.as_str(),
+                    f.destination.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    5,
+                    55,
+                    "blocked-a.jar",
+                    "https://www.curseforge.com/minecraft/mc-mods/m/files/55",
+                    "mods/blocked-a.jar"
+                ),
+                (
+                    6,
+                    66,
+                    "blocked-b.jar",
+                    "https://www.curseforge.com/minecraft/mc-mods/m/files/66",
+                    "mods/blocked-b.jar"
+                ),
+            ]
         );
+        assert_eq!(
+            files[0].sha1.as_deref(),
+            Some("0f4a890d07402280686a518579fa9fa02309e315")
+        );
+        assert_eq!((files[0].fingerprint, files[0].size), (0, Some(10)));
 
-        let err = curseforge_downloads(&client, &refs(&[(9, 99)]), dir)
+        let err = aurora
+            .curseforge_downloads(&client, &refs(&[(9, 99)]), dir)
             .await
             .unwrap_err();
         assert!(
@@ -1889,9 +2342,11 @@ mod tests {
             })
             .collect();
 
-        let facts = curseforge_remote_facts(&client, &refs).await.unwrap();
+        let facts = curseforge_remote_facts(&client, &refs, BlockedProbe::Skip)
+            .await
+            .unwrap();
         assert_eq!(
-            facts.destinations,
+            facts.destinations().collect::<Vec<_>>(),
             [
                 "mods/sodium.jar",
                 "resourcepacks/faithful.zip",
@@ -1921,11 +2376,15 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let facts = curseforge_remote_facts(&client, &refs[..2]).await.unwrap();
-        assert_eq!(facts.destinations.len(), 2);
+        let facts = curseforge_remote_facts(&client, &refs[..2], BlockedProbe::Skip)
+            .await
+            .unwrap();
+        assert_eq!(facts.entries.len(), 2);
         assert_eq!(facts.bytes, None, "缺一个文件的大小就不报总量");
 
-        let err = curseforge_remote_facts(&client, &refs).await.unwrap_err();
+        let err = curseforge_remote_facts(&client, &refs, BlockedProbe::Skip)
+            .await
+            .unwrap_err();
         assert!(
             matches!(&err, CoreError::ModVersionNotFound { version_id, .. } if version_id == "33"),
             "{err:?}"
@@ -2049,6 +2508,38 @@ mod tests {
         assert_eq!(preview.mod_files, 4, "sodium、lithium、extra、zoom");
         assert_eq!(preview.remote_bytes, Some(10_600_000));
         assert_eq!(preview.override_files, 6, "两层里的 extra.jar 只留一份");
+        assert_eq!(
+            preview
+                .mods
+                .iter()
+                .map(|m| (m.path.as_str(), m.origin, m.availability))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "mods/extra.jar",
+                    PackFileOrigin::Override,
+                    PackFileAvailability::Bundled
+                ),
+                (
+                    "mods/lithium.jar",
+                    PackFileOrigin::Remote,
+                    PackFileAvailability::Download
+                ),
+                (
+                    "mods/sodium.jar",
+                    PackFileOrigin::Override,
+                    PackFileAvailability::Bundled
+                ),
+                (
+                    "mods/zoom.jar",
+                    PackFileOrigin::Override,
+                    PackFileAvailability::Bundled
+                ),
+            ]
+        );
+        assert_eq!(preview.mods.len(), preview.mod_files);
+        assert!(preview.optional_extras.is_empty(), "资源包不是可选文件");
+        assert!(preview.blocked_files.is_empty());
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
@@ -2117,8 +2608,10 @@ mod tests {
         };
         let client = CurseForgeClient::new(aurora_base::http::build_client().unwrap(), "k")
             .with_base_url(server.uri());
-        let remote = curseforge_remote_facts(&client, refs).await.unwrap();
-        let preview = preview_of(&archive, remote);
+        let remote = curseforge_remote_facts(&client, refs, BlockedProbe::Skip)
+            .await
+            .unwrap();
+        let preview = preview_of(&archive, remote, &HashSet::new(), Vec::new());
         assert_eq!(preview.remote_files, 3);
         assert_eq!(
             preview.mod_files, 3,
@@ -2126,7 +2619,519 @@ mod tests {
         );
         assert_eq!(preview.remote_bytes, Some(30), "每个文件 10 字节");
         assert_eq!(preview.override_files, 4);
+        assert_eq!(
+            preview
+                .mods
+                .iter()
+                .map(|m| (m.file_name.as_str(), m.origin, m.project_id, m.file_id))
+                .collect::<Vec<_>>(),
+            vec![
+                ("create-0.5.1.jar", PackFileOrigin::Override, None, None),
+                ("jei-15.2.jar", PackFileOrigin::Remote, Some(2), Some(22)),
+                ("kubejs-extra.jar", PackFileOrigin::Override, None, None),
+            ]
+        );
+        assert_eq!(preview.mods.len(), preview.mod_files);
         server.verify().await;
+    }
+
+    fn cf_file_with(
+        id: u32,
+        mod_id: u32,
+        name: &str,
+        url: Option<String>,
+        bytes: &[u8],
+    ) -> serde_json::Value {
+        let mut file = cf_file(id, mod_id, name, url);
+        file["hashes"] = serde_json::json!([{"value": sha1_hex(bytes), "algo": 1}]);
+        file["fileLength"] = serde_json::json!(bytes.len());
+        file
+    }
+
+    fn curseforge_vanilla_manifest(files: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "minecraft": { "version": "test", "modLoaders": [] },
+            "manifestType": "minecraftModpack", "manifestVersion": 1,
+            "name": "受限包", "files": files, "overrides": "overrides"
+        })
+    }
+
+    /// 本地 CurseForge 包在预览阶段就列出受限文件：没给下载地址的逐个问 download-url，回 403 的两个进
+    /// blocked_files（工程、文件 id、网页链接与落点精确匹配，有 links 的用 websiteUrl，没有的按 slug 拼），
+    /// 暂存位里已有校验通过副本的那个记为已认领、不进清单；给了下载地址的不问 download-url。预览本身不失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_curseforge_preview_lists_blocked_files_before_import() {
+        let server = MockServer::start().await;
+        let uri = server.uri();
+        let claimed_bytes = b"claimed jar";
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    cf_file(11, 1, "jei.jar", Some(format!("{uri}/f/11"))),
+                    cf_file(55, 5, "blocked-a.jar", None),
+                    cf_file(66, 6, "blocked-b.jar", None),
+                    cf_file_with(77, 7, "claimed.jar", None, claimed_bytes),
+                ]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                cf_mod(1, 6),
+                {"id": 5, "name": "A", "slug": "a-slug", "summary": "", "classId": 6,
+                 "links": {"websiteUrl": "https://www.curseforge.com/minecraft/mc-mods/blocked-a/"}},
+                cf_mod(6, 6),
+                cf_mod(7, 6),
+            ]})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for (project, file) in [(5u32, 55u32), (6, 66), (7, 77)] {
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/v1/mods/{project}/files/{file}/download-url"
+                )))
+                .respond_with(ResponseTemplate::new(403))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/1/files/11/download-url"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("local.zip");
+        write_curseforge_pack(
+            &pack,
+            &curseforge_vanilla_manifest(serde_json::json!([
+                { "projectID": 1, "fileID": 11, "required": true },
+                { "projectID": 5, "fileID": 55, "required": true },
+                { "projectID": 6, "fileID": 66, "required": true },
+                { "projectID": 7, "fileID": 77, "required": true }
+            ])),
+            &[("overrides/mods/extra.jar", b"x")],
+        );
+        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+        let slot = aurora
+            .blocked_claims_dir()
+            .join("curseforge-77")
+            .join("claimed.jar");
+        std::fs::create_dir_all(slot.parent().unwrap()).unwrap();
+        std::fs::write(&slot, claimed_bytes).unwrap();
+
+        let preview = aurora.preview_modpack_file(&pack).await.unwrap();
+        let hash = Some("0f4a890d07402280686a518579fa9fa02309e315".to_owned());
+        assert_eq!(
+            preview.blocked_files,
+            vec![
+                BlockedFile {
+                    project_id: 5,
+                    file_id: 55,
+                    file_name: "blocked-a.jar".into(),
+                    web_url: "https://www.curseforge.com/minecraft/mc-mods/blocked-a/files/55"
+                        .into(),
+                    destination: "mods/blocked-a.jar".into(),
+                    sha1: hash.clone(),
+                    fingerprint: 0,
+                    size: Some(10),
+                },
+                BlockedFile {
+                    project_id: 6,
+                    file_id: 66,
+                    file_name: "blocked-b.jar".into(),
+                    web_url: "https://www.curseforge.com/minecraft/mc-mods/m/files/66".into(),
+                    destination: "mods/blocked-b.jar".into(),
+                    sha1: hash,
+                    fingerprint: 0,
+                    size: Some(10),
+                },
+            ]
+        );
+        assert_eq!(
+            preview
+                .mods
+                .iter()
+                .map(|m| (m.file_name.as_str(), m.availability, m.file_id))
+                .collect::<Vec<_>>(),
+            vec![
+                ("blocked-a.jar", PackFileAvailability::Blocked, Some(55)),
+                ("blocked-b.jar", PackFileAvailability::Blocked, Some(66)),
+                ("claimed.jar", PackFileAvailability::Claimed, Some(77)),
+                ("extra.jar", PackFileAvailability::Bundled, None),
+                ("jei.jar", PackFileAvailability::Download, Some(11)),
+            ]
+        );
+        assert_eq!(preview.mod_files, 5);
+        assert_eq!(preview.mods.len(), preview.mod_files);
+        server.verify().await;
+    }
+
+    /// mrpack 里取消勾选的可选文件不进下载计划：准备好的任务里没有它们，导入时 CDN 也只收到必需文件的请求
+    /// （清单只认 https 地址，准备好之后把任务地址换到本地 mock 再导入）；
+    /// 预览里可选 Mod 在 Mod 清单里标为可选，资源包列在其他可选文件里；实例记下的远程文件数按剔除后的清单算。
+    /// 不是可选文件的路径报 NotOptional。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn skipped_optional_files_are_left_out_of_the_download_plan() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let uri = server.uri();
+        let files: [(&str, &[u8], bool); 3] = [
+            ("mods/core.jar", b"core", false),
+            ("mods/optional-helper.jar", b"helper", true),
+            ("resourcepacks/optional-pack.zip", b"pack!", true),
+        ];
+        let mut manifest = index(serde_json::json!({"minecraft": "test"}));
+        manifest["files"] = files
+            .iter()
+            .map(|(file_path, bytes, optional)| {
+                let name = file_path.rsplit('/').next().unwrap();
+                let mut entry = serde_json::json!({
+                    "path": file_path, "hashes": { "sha1": sha1_hex(bytes) },
+                    "downloads": [format!("https://cdn.modrinth.com/data/x/{name}")],
+                    "fileSize": bytes.len()
+                });
+                if *optional {
+                    entry["env"] = serde_json::json!({"client": "optional", "server": "optional"});
+                }
+                entry
+            })
+            .collect();
+        for (file_path, bytes, _) in &files {
+            let name = file_path.rsplit('/').next().unwrap();
+            Mock::given(method("GET"))
+                .and(path(format!("/cdn/{name}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.to_vec()))
+                .mount(&server)
+                .await;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("可选.mrpack");
+        write_pack(&pack, &manifest, &[]);
+        let aurora = aurora(tmp.path(), &server);
+        let source = ModpackSource::File { path: pack.clone() };
+
+        let preview = aurora.preview_modpack_file(&pack).await.unwrap();
+        assert_eq!(
+            preview
+                .mods
+                .iter()
+                .map(|m| (m.path.as_str(), m.optional))
+                .collect::<Vec<_>>(),
+            vec![("mods/core.jar", false), ("mods/optional-helper.jar", true)]
+        );
+        assert_eq!(
+            preview
+                .optional_extras
+                .iter()
+                .map(|m| (m.path.as_str(), m.optional, m.origin))
+                .collect::<Vec<_>>(),
+            vec![(
+                "resourcepacks/optional-pack.zip",
+                true,
+                PackFileOrigin::Remote
+            )]
+        );
+
+        let selection = ImportSelection {
+            excluded_optional: vec![
+                "mods/optional-helper.jar".into(),
+                "resourcepacks/optional-pack.zip".into(),
+            ],
+        };
+        let dir = aurora.game_dir().join("versions").join("可选");
+        let mut prepared = aurora
+            .prepare_modpack(&source, Some("可选"), &selection, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            prepared
+                .remote
+                .iter()
+                .map(|d| (d.task.dest.clone(), d.task.url.clone()))
+                .collect::<Vec<_>>(),
+            vec![(
+                dir.join("mods").join("core.jar"),
+                "https://cdn.modrinth.com/data/x/core.jar".to_owned()
+            )]
+        );
+        assert!(
+            prepared.remote.iter().all(|d| d.task.credential.is_none()),
+            "Modrinth 文件不挂下载凭据"
+        );
+        for download in &mut prepared.remote {
+            let name = download.task.url.rsplit('/').next().unwrap().to_owned();
+            download.task.url = format!("{uri}/cdn/{name}");
+        }
+
+        let outcome = aurora
+            .import_modpack(prepared, "task-o", None)
+            .await
+            .unwrap();
+        let cdn: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.url.path().to_owned())
+            .filter(|p| p.starts_with("/cdn/"))
+            .collect();
+        assert_eq!(cdn, vec!["/cdn/core.jar"]);
+        assert_eq!(
+            std::fs::read(dir.join("mods").join("core.jar")).unwrap(),
+            b"core"
+        );
+        assert!(!dir.join("mods").join("optional-helper.jar").exists());
+        assert!(!dir.join("resourcepacks").join("optional-pack.zip").exists());
+        assert_eq!(outcome.modpack.remote_files, 1);
+
+        let err = aurora
+            .prepare_modpack(
+                &source,
+                Some("必需"),
+                &ImportSelection {
+                    excluded_optional: vec!["mods/core.jar".into()],
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::Modpack(aurora_modpack::Error::NotOptional { path }) if path == "mods/core.jar"),
+            "{err:?}"
+        );
+    }
+
+    /// 受限文件的完整流程：准备时报受限，只列没认领的那一个；从下载文件夹认领（浏览器改过名）后再准备不再
+    /// 报受限，它不生成下载任务；导入后它落在 mods/ 下、内容与认领的文件相同，阶段里有「放入 1 个手动下载的
+    /// 文件」，暂存副本与下载文件夹里的原文件都还在。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claimed_blocked_files_are_copied_in_on_import() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let uri = server.uri();
+        let blocked_bytes = b"blocked jar bytes";
+        Mock::given(method("POST"))
+            .and(path("/v1/mods/files"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                    cf_file_with(11, 1, "jei.jar", Some(format!("{uri}/f/11")), b"jei"),
+                    cf_file_with(55, 5, "blocked-a.jar", None, blocked_bytes),
+                ]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/mods"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": [cf_mod(1, 6), cf_mod(5, 6)]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/5/files/55/download-url"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/f/11"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"jei".to_vec()))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("受限包.zip");
+        write_curseforge_pack(
+            &pack,
+            &curseforge_vanilla_manifest(serde_json::json!([
+                { "projectID": 1, "fileID": 11, "required": true },
+                { "projectID": 5, "fileID": 55, "required": true }
+            ])),
+            &[],
+        );
+        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+        let source = ModpackSource::File { path: pack };
+        let none = ImportSelection::default();
+
+        let err = aurora
+            .prepare_modpack(&source, None, &none, None)
+            .await
+            .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = err else {
+            panic!("应报受限文件");
+        };
+        assert_eq!(
+            files.iter().map(|f| f.file_id).collect::<Vec<_>>(),
+            vec![55]
+        );
+
+        let downloads = tmp.path().join("Downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let renamed = downloads.join("blocked-a (1).jar");
+        std::fs::write(&renamed, blocked_bytes).unwrap();
+        let report = aurora
+            .claim_blocked_files(&downloads, &files)
+            .await
+            .unwrap();
+        assert_eq!(
+            report.claimed,
+            vec![crate::blocked::ClaimedFile {
+                file_id: 55,
+                source: renamed.clone(),
+            }]
+        );
+        assert!(report.missing.is_empty());
+
+        let dir = aurora.game_dir().join("versions").join("受限包");
+        let prepared = aurora
+            .prepare_modpack(&source, None, &none, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            prepared
+                .remote
+                .iter()
+                .map(|d| d.task.dest.clone())
+                .collect::<Vec<_>>(),
+            vec![dir.join("mods").join("jei.jar")]
+        );
+        assert_eq!(
+            prepared
+                .claimed
+                .iter()
+                .map(|c| c.dest.clone())
+                .collect::<Vec<_>>(),
+            vec![dir.join("mods").join("blocked-a.jar")]
+        );
+        prepared.discard().await;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = aurora
+            .install_modpack(&source, None, &none, "task-c", Some(&tx))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read(dir.join("mods").join("blocked-a.jar")).unwrap(),
+            blocked_bytes
+        );
+        assert_eq!(
+            std::fs::read(dir.join("mods").join("jei.jar")).unwrap(),
+            b"jei"
+        );
+        assert_eq!(outcome.modpack.remote_files, 2);
+        drop(tx);
+        let mut stages = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let CoreEvent::Stage(stage) = event {
+                stages.push(stage);
+            }
+        }
+        assert!(
+            stages.iter().any(|s| s == "放入 1 个手动下载的文件"),
+            "{stages:?}"
+        );
+        assert!(
+            aurora
+                .blocked_claims_dir()
+                .join("curseforge-55")
+                .join("blocked-a.jar")
+                .is_file(),
+            "暂存副本导入后留着"
+        );
+        assert!(renamed.is_file(), "下载文件夹里的原文件不动");
+    }
+
+    /// CurseForge 整合包本体就不允许启动器直接下载：第一次导入报受限文件，清单里只有这个包；用户从网页
+    /// 下载、认领进暂存位后再导入，直接用暂存副本，不再向 CDN 要包，暂存副本导入后留着。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn claimed_curseforge_pack_file_is_imported_without_downloading() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("built.zip");
+        write_curseforge_pack(
+            &built,
+            &curseforge_vanilla_manifest(serde_json::json!([])),
+            &[("overrides/options.txt", b"fov:70")],
+        );
+        let pack_bytes = std::fs::read(&built).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700/files/7001"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": cf_file_with(7001, 700, "受限包-1.0.zip", None, &pack_bytes)
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700/files/7001/download-url"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/mods/700"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": cf_mod(700, 4471)})),
+            )
+            .mount(&server)
+            .await;
+        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+        let source = ModpackSource::Platform {
+            platform: Platform::CurseForge,
+            project_id: "700".into(),
+            version_id: "7001".into(),
+        };
+        let none = ImportSelection::default();
+
+        let err = aurora
+            .install_modpack(&source, Some("网页下的包"), &none, "task-b1", None)
+            .await
+            .unwrap_err();
+        let CoreError::FileDistributionBlocked { files } = err else {
+            panic!("应报受限文件：{err:?}");
+        };
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| (f.file_id, f.file_name.as_str(), f.destination.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(7001, "受限包-1.0.zip", "受限包-1.0.zip")]
+        );
+
+        let downloads = tmp.path().join("下载 文件夹");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let renamed = downloads.join("受限包-1.0 (1).zip");
+        std::fs::write(&renamed, &pack_bytes).unwrap();
+        let report = aurora
+            .claim_blocked_files(&downloads, &files)
+            .await
+            .unwrap();
+        assert_eq!(report.missing, Vec::<u32>::new());
+
+        let outcome = aurora
+            .install_modpack(&source, Some("网页下的包"), &none, "task-b2", None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.modpack.platform, Some(Platform::CurseForge));
+        assert_eq!(outcome.modpack.version_id.as_deref(), Some("7001"));
+        assert_eq!(
+            std::fs::read(outcome.version_dir.join("options.txt")).unwrap(),
+            b"fov:70"
+        );
+        assert!(
+            aurora
+                .blocked_claims_dir()
+                .join("curseforge-7001")
+                .join("受限包-1.0.zip")
+                .is_file(),
+            "暂存副本导入后留着"
+        );
+        assert!(renamed.is_file(), "下载文件夹里的原文件不动");
     }
 
     #[test]

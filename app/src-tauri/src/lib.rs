@@ -13,6 +13,7 @@ mod drop;
 mod events;
 mod exit;
 mod facade;
+mod gpu;
 mod logging;
 mod renderer;
 mod tasks;
@@ -49,7 +50,7 @@ pub fn run() {
 
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        // 更改游戏目录、导入本地整合包要拿磁盘绝对路径，只能走系统对话框。
+        // 更改游戏目录、导入本地整合包、选导出存档的位置要拿磁盘绝对路径，只能走系统对话框。
         .plugin(tauri_plugin_dialog::init())
         // -- art --
         .register_asynchronous_uri_scheme_protocol(textures::SCHEME, textures::handle);
@@ -73,6 +74,7 @@ pub fn run() {
             app.manage(TaskJournal::default());
             // -- instances --
             app.manage(commands::instances::InstanceLocks::default());
+            app.manage(commands::instances::ExportedFiles::default());
             // -- launch --
             app.manage(commands::launch::RunningGame::default());
             // -- accounts --
@@ -107,6 +109,9 @@ pub fn run() {
             // -- java --
             commands::java::detect_java,
             commands::java::install_java,
+            commands::java::add_java_path,
+            commands::java::remove_java_path,
+            commands::java::gpu_adapters,
             // -- accounts --
             commands::accounts::current_account,
             commands::accounts::create_offline_account,
@@ -140,6 +145,15 @@ pub fn run() {
             commands::instances::required_java,
             commands::instances::version_requirements,
             commands::instances::open_folder,
+            commands::instances::reveal_in_folder,
+            commands::instances::template_info,
+            commands::instances::save_instance_as_template,
+            commands::instances::clear_template,
+            commands::instances::backup_world,
+            commands::instances::list_world_backups,
+            commands::instances::restore_world_backup,
+            commands::instances::delete_world_backup,
+            commands::instances::export_world,
             // -- launch --
             commands::launch::launch_game,
             commands::launch::stop_game,
@@ -151,13 +165,17 @@ pub fn run() {
             // -- mods --
             commands::mods::list_mods,
             commands::mods::set_mod_enabled,
+            commands::mods::set_mods_enabled,
             commands::mods::remove_mod,
+            commands::mods::set_mod_update_hold,
             commands::mods::check_updates,
             commands::mods::update_mod,
+            commands::mods::mod_update_changelog,
             commands::mods::list_mod_versions,
             commands::mods::match_instances,
             commands::mods::installed_sources,
             commands::mods::plan_install,
+            commands::mods::starter_mods,
             // -- history --
             commands::history::list_history,
             commands::history::rollback_checks,
@@ -171,6 +189,10 @@ pub fn run() {
             commands::modpack::preview_modpack,
             commands::modpack::summarize_platform_modpack,
             commands::modpack::install_modpack,
+            commands::modpack::claim_blocked_files,
+            commands::modpack::downloads_folder,
+            commands::modpack::preview_modpack_export,
+            commands::modpack::export_modpack,
             // -- system --
             commands::system::memory_advice,
             commands::system::is_first_run,
@@ -179,6 +201,7 @@ pub fn run() {
             commands::system::probe_network,
             commands::servers::list_pinned_servers,
             commands::servers::set_pinned_servers,
+            commands::servers::set_pinned_server_instance,
             commands::servers::list_known_servers,
             commands::servers::ping_servers,
             commands::news::list_news,

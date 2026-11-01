@@ -1,8 +1,10 @@
-// 校验与推算：实例名、离线用户名、崩溃一键尝试的内存目标、Java 主版本、整合包没导入完。纯函数，页面、启动入口与状态层共用同一份。
+// 校验与推算：实例名、离线用户名、崩溃一键尝试的内存目标、Java 主版本、本机 Java 的自动挑选、整合包没导入完、跟随全局时的版本隔离。
+// 纯函数，页面、流程、启动入口与状态层共用同一份。
 
 import { INSTANCE_NAME_ERROR, OFFLINE_NAME_COPY } from "../copy/flows";
 import { checkInstanceName, ILLEGAL_NAME_CHARS, INSTANCE_NAME_MAX_UNITS } from "../ipc/instances";
-import type { InstanceSummary } from "./adapt";
+import type { JavaInstallationDto } from "../ipc/java";
+import type { InstanceSummary, Settings } from "./adapt";
 
 // ---------------------------------------------------------------- 实例名
 
@@ -136,6 +138,28 @@ export function javaMajorFromClassVersion(detail: string | null): number | null 
   return Number(match[1]) - CLASS_FILE_VERSION_OFFSET;
 }
 
+// ---------------------------------------------------------------- 本机 Java 的自动挑选
+
+function compareJavaVersion(a: JavaInstallationDto["version"], b: JavaInstallationDto["version"]): number {
+  return a.major - b.major || a.minor - b.minor || a.security - b.security || a.build - b.build;
+}
+
+/** 运行时文件齐全。后端挑选先滤掉不完整的，前端推断「自动会选哪个、缺哪个主版本、托管的装没装」时同样跳过它们，两边才说得一致。 */
+export function runtimeComplete(runtime: JavaInstallationDto): boolean {
+  return runtime.missing_files.length === 0;
+}
+
+/** 与后端 select_for_major 同一条规则：主版本相等、文件齐全的候选里先挑 64 位、再挑版本号最高的；一个都没有为 null。 */
+export function bestLocalRuntime(runtimes: readonly JavaInstallationDto[], major: number): JavaInstallationDto | null {
+  return runtimes
+    .filter((r) => r.version.major === major && runtimeComplete(r))
+    .reduce<JavaInstallationDto | null>((acc, r) => {
+      if (acc === null) return r;
+      if (r.is_64bit !== acc.is_64bit) return r.is_64bit ? r : acc;
+      return compareJavaVersion(r.version, acc.version) > 0 ? r : acc;
+    }, null);
+}
+
 // ---------------------------------------------------------------- 整合包没导入完
 
 /**
@@ -144,4 +168,29 @@ export function javaMajorFromClassVersion(detail: string | null): number | null 
  */
 export function needsReimport(inst: Pick<InstanceSummary, "status" | "incomplete">): boolean {
   return inst.status === "broken" && inst.incomplete !== null && inst.incomplete.kind === "modpack";
+}
+
+// ---------------------------------------------------------------- 版本隔离
+
+export type IsolationPolicyName = Settings["isolationPolicy"];
+
+/**
+ * 跟随全局时按全局策略与实例类型推断是否隔离，与后端判定同一张表：加载器（含 OptiFine、LiteLoader）算模组版本，
+ * 版本类型不是 release 算非正式版。后端另有一条「版本目录里已有 mods 或 saves 就强制隔离」，前端看不到目录，不参与推断。
+ */
+export function isolationByPolicy(policy: IsolationPolicyName, inst: Pick<InstanceSummary, "loader" | "extraLoaders" | "releaseType">): boolean {
+  const modded = inst.loader !== "vanilla" || inst.extraLoaders.length > 0;
+  const nonRelease = inst.releaseType !== "release";
+  switch (policy) {
+    case "disabled":
+      return false;
+    case "mod_loaders_only":
+      return modded;
+    case "non_release_only":
+      return nonRelease;
+    case "mod_loaders_and_non_release":
+      return modded || nonRelease;
+    case "all":
+      return true;
+  }
 }

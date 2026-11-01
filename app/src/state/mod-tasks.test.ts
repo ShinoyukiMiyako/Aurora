@@ -378,6 +378,143 @@ describe("全部更新", () => {
   });
 });
 
+describe("更新预览里勾选的几项", () => {
+  const picked = [candidate("sodium", "s1", "s2"), candidate("lithium", "l1", "l2"), candidate("iris", "i1", "i2")];
+
+  beforeEach(() => {
+    ipc.overrides.set("update_mod", (args) => ({ file_name: String(args.fileName), path: "", platform: "modrinth" }));
+  });
+
+  it("三项里勾了两项：入队的 update_mods 只含这两项，不再现查可更新项，逐项更新的也只有它们", async () => {
+    await store.actions.updateAllMods("生存", [picked[0], picked[2]]);
+    const task = store.getState().tasks[0];
+    expect(store.getState().tasks).toHaveLength(1);
+    expect(task).toMatchObject({ title: "更新 2 个 Mod", spec: { command: "update_mods" } });
+    const items = task.spec.args.items as { fileName: string; modVersionId: string; projectId: string; title: string }[];
+    expect(items.map((i) => [i.fileName, i.modVersionId, i.projectId, i.title])).toEqual([
+      ["sodium-s1.jar", "s2", "sodium", "sodium"],
+      ["iris-i1.jar", "i2", "iris", "iris"],
+    ]);
+    expect(callsOf(ipc, "check_updates")).toHaveLength(0);
+    await settle();
+    expect(callsOf(ipc, "update_mod").map((a) => [a.fileName, a.modVersionId, a.step])).toEqual([
+      ["sodium-s1.jar", "s2", 0],
+      ["iris-i1.jar", "i2", 1],
+    ]);
+  });
+
+  it("只勾了一项：按单个更新入队，标题写 Mod 名", async () => {
+    await store.actions.updateAllMods("生存", [picked[1]]);
+    expect(store.getState().tasks.map((t) => [t.title, t.spec.command, t.spec.args.fileName, t.spec.args.modVersionId])).toEqual([
+      ["更新 lithium", "update_mod", "lithium-l1.jar", "l2"],
+    ]);
+    expect(callsOf(ipc, "check_updates")).toHaveLength(0);
+  });
+
+  it("一项都没勾是界面的错：直接报错，不入队", async () => {
+    await expect(store.actions.updateAllMods("生存", [])).rejects.toThrow("至少要勾选一个 Mod");
+    expect(store.getState().tasks).toEqual([]);
+  });
+});
+
+describe("批量启停与移除", () => {
+  const infoAndWarnings = () => store.getState().toasts.map((t) => [t.tone, t.title, t.body]);
+
+  it("批量停用全部成功：一条 info 通知写个数并说明改名，Mod 列表失效", async () => {
+    ipc.overrides.set("set_mods_enabled", (args) => (args.fileNames as string[]).map((f) => ({ status: "ok", file_name: f, path: `${f}.disabled` })));
+    const mods = await cached("mods:生存");
+    await store.actions.toggleMods("生存", ["a.jar", "b.jar"], false);
+    expect(callsOf(ipc, "set_mods_enabled")).toEqual([{ versionId: "生存", fileNames: ["a.jar", "b.jar"], enabled: false }]);
+    expect(infoAndWarnings()).toEqual([["info", "已停用 2 个 Mod", "文件名后加了 .disabled，随时可以再启用"]]);
+    expect(await readAgain("mods:生存", mods)).toBe(2);
+  });
+
+  it("批量启用有一项被占用：warning 通知写失败个数与那条原因；两种原因时写原因各不相同", async () => {
+    const busy = { code: "mod_file_busy", message: "另一个程序正在使用此文件", detail: { path: "b.jar" } };
+    ipc.overrides.set("set_mods_enabled", () => [
+      { status: "ok", file_name: "a.jar.disabled", path: "a.jar" },
+      { status: "error", file_name: "b.jar.disabled", error: busy },
+    ]);
+    await store.actions.toggleMods("生存", ["a.jar.disabled", "b.jar.disabled"], true);
+    expect(infoAndWarnings()).toEqual([["warning", "1 个 Mod 没能启用", "另一个程序正在使用此文件"]]);
+
+    ipc.overrides.set("set_mods_enabled", () => [
+      { status: "error", file_name: "a.jar", error: busy },
+      { status: "error", file_name: "b.jar", error: { code: "mod_state_conflict", message: "目标文件已存在" } },
+      { status: "error", file_name: "c.jar", error: busy },
+    ]);
+    await store.actions.toggleMods("生存", ["a.jar", "b.jar", "c.jar"], false);
+    expect(infoAndWarnings().at(-1)).toEqual(["warning", "3 个 Mod 没能停用", "原因各不相同"]);
+  });
+
+  it("整次被拒（实例忙碌）照常抛出，不发通知", async () => {
+    ipc.overrides.set("set_mods_enabled", () => {
+      throw new IpcError("instance_busy", "实例 生存 正在补全，请稍后再试", { id: "生存", activity: "repairing" });
+    });
+    await expect(store.actions.toggleMods("生存", ["a.jar"], false)).rejects.toMatchObject({ code: "instance_busy" });
+    expect(infoAndWarnings()).toEqual([]);
+  });
+
+  it("批量移除两项其中一项被占用：另一项照常移除，warning 通知写「1 个 Mod 没能移除」与原因，列表与实例数重取", async () => {
+    ipc.overrides.set("remove_mod", (args) => {
+      if (args.fileName === "b.jar") throw new IpcError("mod_file_busy", "另一个程序正在使用此文件", { path: "b.jar" });
+      return null;
+    });
+    const mods = await cached("mods:生存");
+    const listsBefore = callsOf(ipc, "list_instances").length;
+    await store.actions.removeMods("生存", [
+      { fileName: "b.jar", name: "B" },
+      { fileName: "a.jar", name: "A" },
+    ]);
+    expect(callsOf(ipc, "remove_mod").map((a) => a.fileName)).toEqual(["b.jar", "a.jar"]);
+    expect(infoAndWarnings()).toEqual([["warning", "1 个 Mod 没能移除", "另一个程序正在使用此文件"]]);
+    expect(await readAgain("mods:生存", mods)).toBe(2);
+    expect(callsOf(ipc, "list_instances").length).toBe(listsBefore + 1);
+  });
+
+  it("批量移除全部成功：一条 info 通知写个数；一项都没有是界面的错", async () => {
+    ipc.overrides.set("remove_mod", () => null);
+    await store.actions.removeMods("生存", [
+      { fileName: "a.jar", name: "A" },
+      { fileName: "b.jar", name: "B" },
+      { fileName: "c.jar", name: "C" },
+    ]);
+    expect(infoAndWarnings()).toEqual([["info", "已移除 3 个 Mod", undefined]]);
+    await expect(store.actions.removeMods("生存", [])).rejects.toThrow("至少要有一个 Mod");
+    expect(callsOf(ipc, "remove_mod")).toHaveLength(3);
+  });
+});
+
+describe("忽略与恢复检查更新", () => {
+  it("忽略：带上设置调后端，Mod 列表与可更新项都失效，通知说明怎么恢复；恢复时 hold 传 null", async () => {
+    ipc.overrides.set("set_mod_update_hold", () => null);
+    const mods = await cached("mods:生存");
+    const updates = await cached("mod-updates:生存");
+    const otherUpdates = await cached("mod-updates:创造");
+    await store.actions.setModUpdateHold("生存", "sodium.jar", "Sodium", { kind: "ignored" });
+    expect(await readAgain("mods:生存", mods)).toBe(2);
+    expect(await readAgain("mod-updates:生存", updates)).toBe(2);
+    expect(await readAgain("mod-updates:创造", otherUpdates)).toBe(1);
+
+    await store.actions.setModUpdateHold("生存", "sodium.jar", "Sodium", null);
+    expect(callsOf(ipc, "set_mod_update_hold")).toEqual([
+      { versionId: "生存", fileName: "sodium.jar", hold: { kind: "ignored" } },
+      { versionId: "生存", fileName: "sodium.jar", hold: null },
+    ]);
+    expect(store.getState().toasts.map((t) => [t.tone, t.title, t.body])).toEqual([
+      ["info", "已忽略 Sodium 的更新", "检查更新时会跳过它，可以在更多菜单里恢复"],
+      ["info", "已恢复检查 Sodium 的更新", undefined],
+    ]);
+  });
+
+  it("更新日志的缓存按实例划分：实例删除后同名新实例不会拿到旧日志", async () => {
+    ipc.overrides.set("delete_instance", () => ({ existed: true }));
+    const changelog = await cached("mod-changelog:生存:sodium.jar|s2");
+    await store.actions.deleteInstance("生存", 0);
+    expect(await readAgain("mod-changelog:生存:sodium.jar|s2", changelog)).toBe(2);
+  });
+});
+
 describe("组合任务的取消", () => {
   const installSodium = () =>
     store.actions.installResource({
