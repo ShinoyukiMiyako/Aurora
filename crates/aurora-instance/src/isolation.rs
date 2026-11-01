@@ -3,8 +3,8 @@
 //! 隔离即让某版本使用「自己的」游戏工作目录（`versions/<id>/`）而非共享的 `.minecraft` 根，从而各版本
 //! 的 mods/saves/配置互不污染。判定优先级（自高而低）：
 //!
-//! 1. 版本目录内已存在 `mods/` 或 `saves/` —— 强制隔离。共享根会无视这些本地数据，放任不隔离会造成
-//!    「装了却不生效」的困惑，故最高优先级强制开启。
+//! 1. 版本目录内的 `mods/` 或 `saves/` 里有内容 —— 强制隔离。共享根会无视这些本地数据，放任不隔离会造成
+//!    「装了却不生效」的困惑，故最高优先级强制开启。空目录不算：隔离时跑过一次游戏就会有，没有数据要保护。
 //! 2. 版本级覆盖 [`IsolationOverride`]（开启 / 关闭 / 跟随全局）。
 //! 3. 全局档位 [`IsolationPolicy`]（对应 PCL2 的五档：关闭 / 仅 Mod 版本 / 仅非正式版 / 两者 / 全部）。
 
@@ -74,7 +74,7 @@ pub struct IsolationFacts {
     pub has_mod_loader: bool,
     /// 是否为正式版（`type == release`）。
     pub is_release: bool,
-    /// 版本目录内是否已存在 `mods/` 或 `saves/`（触发强制隔离）。
+    /// 版本目录内的 `mods/` 或 `saves/` 里是否有内容（触发强制隔离）。
     pub has_existing_mods_or_saves: bool,
 }
 
@@ -117,12 +117,19 @@ pub fn game_working_dir(mc_dir: &Path, version_id: &str, isolated: bool) -> Path
     }
 }
 
-/// 探测版本目录下是否已存在 `mods/` 或 `saves/` 目录（同名普通文件不算）。
+/// 探测版本目录下的 `mods/` 或 `saves/` 目录里是否有内容（同名普通文件不算）。
+///
+/// 只看目录在不在不够：隔离时启动一次，游戏和加载器就会建出这两个空目录，之后「关闭」再也压不过它们，
+/// 实例被锁在隔离里，界面还得说里面有存档或 Mod。
 pub async fn has_existing_mods_or_saves(version_dir: &Path) -> Result<bool> {
     for sub in ["mods", "saves"] {
         let candidate = version_dir.join(sub);
         match tokio::fs::metadata(&candidate).await {
-            Ok(meta) if meta.is_dir() => return Ok(true),
+            Ok(meta) if meta.is_dir() => {
+                if dir_has_entries(&candidate).await? {
+                    return Ok(true);
+                }
+            }
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => {
@@ -134,6 +141,17 @@ pub async fn has_existing_mods_or_saves(version_dir: &Path) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+async fn dir_has_entries(dir: &Path) -> Result<bool> {
+    let first = async { tokio::fs::read_dir(dir).await?.next_entry().await }.await;
+    match first {
+        Ok(entry) => Ok(entry.is_some()),
+        Err(source) => Err(Error::Io {
+            path: dir.to_path_buf(),
+            source,
+        }),
+    }
 }
 
 /// 一次隔离判定的完整结果。
@@ -289,8 +307,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path();
         let version_dir = mc.join("versions").join("1.21");
-        // 造出 versions/1.21/mods/ 触发强制隔离。
+        // versions/1.21/mods/ 里有文件才触发强制隔离。
         tokio::fs::create_dir_all(version_dir.join("mods"))
+            .await
+            .unwrap();
+        tokio::fs::write(version_dir.join("mods").join("a.jar"), b"jar")
             .await
             .unwrap();
 
@@ -348,5 +369,61 @@ mod tests {
             .unwrap();
 
         assert!(!has_existing_mods_or_saves(&version_dir).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn empty_mods_and_saves_dirs_leave_the_choice_to_the_setting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        let version_dir = mc.join("versions").join("1.21");
+        // 隔离时跑过一次，游戏和加载器自己建的空目录。
+        for sub in ["mods", "saves"] {
+            tokio::fs::create_dir_all(version_dir.join(sub))
+                .await
+                .unwrap();
+        }
+
+        let resolved = resolve_isolation(
+            mc,
+            "1.21",
+            IsolationPolicy::All,
+            IsolationOverride::Disabled,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(!resolved.isolated);
+        assert!(!resolved.forced_by_local_data);
+        assert_eq!(resolved.working_dir, mc);
+    }
+
+    #[tokio::test]
+    async fn a_world_in_saves_forces_isolation_even_without_any_file_in_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let version_dir = tmp.path().join("versions").join("1.21");
+        tokio::fs::create_dir_all(version_dir.join("mods"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(version_dir.join("saves").join("世界"))
+            .await
+            .unwrap();
+
+        assert!(has_existing_mods_or_saves(&version_dir).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn only_disabled_mods_still_count_as_local_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let version_dir = tmp.path().join("versions").join("1.21");
+        tokio::fs::create_dir_all(version_dir.join("mods"))
+            .await
+            .unwrap();
+        tokio::fs::write(version_dir.join("mods").join("a.jar.disabled"), b"jar")
+            .await
+            .unwrap();
+
+        assert!(has_existing_mods_or_saves(&version_dir).await.unwrap());
     }
 }

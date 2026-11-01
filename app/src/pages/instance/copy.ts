@@ -489,6 +489,7 @@ export const SETTINGS_COPY = {
   isolationOff: "关闭",
   isolationFollowNote: (policy: string, isolated: boolean) =>
     `跟随全局：${policy}。${isolated ? "这个实例会独立存放存档与配置。" : "这个实例与其他未隔离的实例共用存档与配置。"}`,
+  isolationFollowForcedNote: (policy: string) => `跟随全局：${policy}。这个实例的文件夹里已有存档或 Mod，仍然单独存放。`,
   isolationOnNote: "存档、配置与资源包放在实例自己的文件夹里。",
   isolationOffNote: "与其他未隔离的实例共用 .minecraft 下的存档与配置。",
   isolationOffForcedNote: "这个实例的文件夹里已有存档或 Mod，仍然单独存放。",
