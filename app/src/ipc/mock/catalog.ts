@@ -29,6 +29,8 @@ export interface MockVersion {
   info: ModVersionInfo;
   /** 只有整合包的版本带清单。 */
   manifest: MockPackManifest | null;
+  /** 文件本身不允许启动器直接下载，用户要去网页手动下载。 */
+  bodyBlocked: boolean;
 }
 
 /** 一个工程在某个平台上的那一份。 */
@@ -64,6 +66,7 @@ interface VersionSpec {
   size?: number;
   deps?: { projectId: string; kind: DependencyKind }[];
   manifest?: MockPackManifest;
+  bodyBlocked?: true;
 }
 
 const EXTENSION: Readonly<Record<DiscoverableType, (platform: PlatformId) => string>> = {
@@ -111,6 +114,7 @@ function source(
         dependencies: (spec.deps === undefined ? [] : spec.deps).map((d) => ({ project_id: d.projectId, version_id: null, kind: d.kind })),
       },
       manifest: spec.manifest === undefined ? null : spec.manifest,
+      bodyBlocked: spec.bodyBlocked === true,
     };
   });
   return { platform, projectId, slug, downloads, follows, versions };
@@ -330,6 +334,16 @@ function seed(): MockProject[] {
             loaders: ["forge"],
             size: 57_671_680,
             manifest: { remoteFiles: 182, modFiles: 182, remoteBytes: 524_288_000, overrideFiles: 900, overrideBytes: 52_428_800, loader: { kind: "forge", version: "14.23.5.2860" } },
+          },
+          {
+            id: "4501122",
+            number: "2.9.2",
+            date: "2025-03-14T00:00:00Z",
+            game: ["1.12.2"],
+            loaders: ["forge"],
+            size: 56_623_104,
+            manifest: { remoteFiles: 178, modFiles: 178, remoteBytes: 513_802_240, overrideFiles: 880, overrideBytes: 51_380_224, loader: { kind: "forge", version: "14.23.5.2860" } },
+            bodyBlocked: true,
           },
         ]),
       ],

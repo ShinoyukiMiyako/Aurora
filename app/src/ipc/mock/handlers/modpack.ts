@@ -3,6 +3,7 @@
 // 登记任务、推送带 task_id 的事件、响应取消，成功后新实例进入实例列表，清单里的 Mod 落进它的 mods/。
 // 文件名词干含 blocked 的 .zip 是带两个需要手动下载文件的 CurseForge 包：用户「下载」到下载文件夹里的文件
 // 记在 mockDownloads（测试经 seedMockDownloads 放），认领过的记在 claimed，导入时只有都认领了才能成。
+// 目录里标了 bodyBlocked 的平台版本，整合包文件本身也要手动下载：认领前摘要和导入都读不到清单。
 // 这两份状态只在内存里，不进浏览器里的持久化快照。
 // 导出读 Mod mock 里的同一份 mods 目录与卷宗，额外项的文件数与体积用固定表（浏览器里没有磁盘）。
 
@@ -210,6 +211,8 @@ interface PackFacts {
   slug: string;
   packBytes: number;
   manifest: MockPackManifest;
+  /** 整合包文件本身受限时的那一项，其余 null。 */
+  blockedBody: BlockedFileDto | null;
 }
 
 function packOf(source: ModpackSource): PackFacts {
@@ -223,6 +226,7 @@ function packOf(source: ModpackSource): PackFacts {
       slug: "pack",
       packBytes: 0,
       manifest: LOCAL_MANIFEST,
+      blockedBody: null,
     };
   }
   const notFound = () =>
@@ -248,7 +252,26 @@ function packOf(source: ModpackSource): PackFacts {
     slug: found.source.slug,
     packBytes: version.info.file_size,
     manifest: version.manifest,
+    blockedBody: version.bodyBlocked
+      ? {
+          project_id: Number(source.project_id),
+          file_id: Number(source.version_id),
+          file_name: version.info.file_name,
+          web_url: `https://www.curseforge.com/minecraft/modpacks/${found.source.slug}/files/${source.version_id}`,
+          destination: version.info.file_name,
+          sha1: null,
+          fingerprint: 2_718_281_828,
+          size: version.info.file_size,
+        }
+      : null,
   };
+}
+
+/** 与后端一样，读包之前就要拿到文件：没认领过的受限本体报只有这个包的清单。 */
+function assertBodyClaimed(pack: PackFacts): void {
+  const body = pack.blockedBody;
+  if (body === null || claimed.has(body.file_id)) return;
+  throw new IpcError(DISTRIBUTION_BLOCKED, `这些文件的作者不允许启动器直接下载，需要到 CurseForge 网页手动下载：${body.file_name}`, { files: [body] });
 }
 
 function previewModpack(args: MockArgs): ModpackPreviewDto {
@@ -303,6 +326,7 @@ function installModpack(args: MockArgs): Promise<ModpackInstallOutcomeDto> {
   let hold: MockInstanceHold | null = null;
   return runMockTask(taskId, async () => {
     const pack = packOf(source);
+    assertBodyClaimed(pack);
     const fixture = source.kind === "file" ? fixtureOf(source.path) : null;
     // 平台整合包的目录夹具没有可选文件：跳过任何文件都不对
     checkExcluded(excluded, fixture === null ? [] : fixtureOptional(fixture));
@@ -415,6 +439,7 @@ function summarizeModpack(args: MockArgs): ModpackSummaryDto {
     version_id: nonBlank("version_id", read.string("versionId")),
   };
   const pack = packOf(source);
+  assertBodyClaimed(pack);
   const { manifest } = pack;
   return {
     format: pack.format,

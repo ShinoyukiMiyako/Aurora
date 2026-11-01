@@ -290,6 +290,32 @@ describe("整合包 mock：可选文件与需要手动下载的文件", () => {
     return { events, off };
   };
 
+  it("平台整合包本体受限：摘要与导入都报只有这个包的清单，不建实例；手动下载并认领后两边都放行", async () => {
+    const source: ModpackSource = { kind: "platform", platform: "curseforge", project_id: "285109", version_id: "4501122" };
+    const body = {
+      project_id: 285109,
+      file_id: 4501122,
+      file_name: "285109-2.9.2.zip",
+      web_url: "https://www.curseforge.com/minecraft/modpacks/rlcraft/files/4501122",
+      destination: "285109-2.9.2.zip",
+      sha1: null,
+      fingerprint: 2718281828,
+      size: 56_623_104,
+    };
+    const blockedBy = async (attempt: Promise<unknown>) => blockedFilesOf(await attempt.then(() => null, (error: unknown) => error));
+
+    expect(await blockedBy(summarizePlatformModpack("curseforge", "285109", "4501122"))).toEqual([body]);
+    expect(await blockedBy(installModpack("t-body-1", source, "受限包", []))).toEqual([body]);
+    expect((await listInstances()).map((i) => i.id)).not.toContain("受限包");
+
+    seedMockDownloads(["285109-2.9.2.zip"]);
+    expect(await claimBlockedFiles(MOCK_DOWNLOADS_DIR, [body])).toMatchObject({ missing: [] });
+
+    expect(await summarizePlatformModpack("curseforge", "285109", "4501122")).toMatchObject({ version: "2.9.2", mod_files: 178 });
+    await installModpack("t-body-2", source, "受限包", []);
+    expect((await listInstances()).find((i) => i.id === "受限包")?.modpack).toMatchObject({ project_id: "285109", version_id: "4501122", version: "2.9.2" });
+  });
+
   it("预览：Mod 清单条数等于 mod_files，按落点排序；.mrpack 带一个可选 Mod 与一个可选资源包，CurseForge 包没有可选文件", async () => {
     const mrpack = await previewModpack("D:\\Downloads\\生存.mrpack");
     expect(mrpack.mods).toHaveLength(mrpack.mod_files);
