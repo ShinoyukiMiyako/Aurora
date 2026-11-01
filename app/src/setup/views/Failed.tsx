@@ -63,7 +63,6 @@ export function Failed({ copy, failure, recovery, standardInstaller, onRecover, 
         </>
       }
     >
-      {/* 拖动区里只有带 tabindex 的元素才不会一按下就拖窗，鼠标才选得到字 */}
       <code className={styles.code} tabIndex={0} onFocus={selectContents}>{`${failure.code}: ${failure.detail}`}</code>
       <div className={styles.links}>
         <Button variant="ghost" size="sm" iconRight="external" onClick={onReport}>

@@ -75,7 +75,7 @@ describe("原因", () => {
     ["disk_full", "os error 112", "这块盘空间不够", "腾出空间或换一块盘再试。"],
     ["extract_failed", "os error 225", "安装包没能解开", "杀毒软件可能拦下了它。放行后重试，或者重新下载一份。"],
     ["payload_exit", "2", "安装没有完成", "安装程序提前退出了，返回码 2。"],
-    ["verify_failed", "uninstall.exe missing", "安装没有完成", "安装程序报告成功，但没有找到程序文件。"],
+    ["verify_failed", "uninstall.exe missing", "安装没有完成", "安装程序报告成功，但事后检查没有通过，下面是没过的项。"],
   ])("%s", (code, detail, title, body) => {
     view = render(failed({ failure: { code, detail } }));
     expect(heading()).toBe(title);
@@ -91,7 +91,12 @@ describe("原因", () => {
 });
 
 describe("错误码", () => {
-  it("可以聚焦：拖动区里带 tabindex 才不会一按下就拖窗", () => {
+  it("落在内容区里：拖动区一按就拖窗，错误原文选不中", () => {
+    view = render(failed());
+    expect(errorCode().closest("[data-tauri-drag-region]")?.getAttribute("data-tauri-drag-region")).toBe("false");
+  });
+
+  it("键盘能聚焦", () => {
     view = render(failed());
     expect(errorCode().getAttribute("tabindex")).toBe("0");
   });

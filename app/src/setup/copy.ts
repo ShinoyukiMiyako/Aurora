@@ -68,6 +68,8 @@ export interface SetupCopy {
     issue: Readonly<Record<DirIssue, string>>;
     resume: string;
     notEmpty: string;
+    /** 目录里有别的文件时追加了一层，用户要看到实际落在哪。 */
+    finalPath(path: string): string;
     space(needed: string, free: string): string;
   };
   blocked: {
@@ -112,6 +114,7 @@ export interface SetupCopy {
     freeSoftware: string;
     licenseHeading: string;
     englishOnly: string;
+    licenseFailed: string;
     sourceLink: string;
     thirdPartyHeading: string;
     thirdPartyLoading: string;
@@ -163,7 +166,7 @@ const ZH: SetupCopy = {
       empty: "安装位置不能为空",
       relative: "要写完整路径，从盘符开始",
       bang: "路径里不能有「!」，Java 会读不出里面的游戏文件",
-      forbidden: "这个位置要管理员权限，装进去也没法自动更新，换一个文件夹",
+      forbidden: "这个位置不适合放程序和游戏文件，换一个文件夹",
       minecraft: `这里是游戏文件夹，不能当安装位置。装好后在${APP_NAME}里把它加为游戏目录`,
       network: "网络位置装不了，换一块本机的盘",
       unwritable: "这个位置写不进去，换一个你有权限的文件夹",
@@ -171,6 +174,7 @@ const ZH: SetupCopy = {
     },
     resume: "这里有之前留下的设置和游戏文件，装好后接着用。",
     notEmpty: "这个文件夹里已经有别的文件，建议换一个空文件夹",
+    finalPath: (path) => `实际会装到 ${path}`,
     space: (needed, free) => `需要约 ${needed}，这块盘还剩 ${free}`,
   },
   blocked: {
@@ -211,7 +215,7 @@ const ZH: SetupCopy = {
       disk_full: { title: "这块盘空间不够", body: () => "腾出空间或换一块盘再试。" },
       extract_failed: { title: "安装包没能解开", body: () => "杀毒软件可能拦下了它。放行后重试，或者重新下载一份。" },
       payload_exit: { title: "安装没有完成", body: (detail) => `安装程序提前退出了，返回码 ${detail}。` },
-      verify_failed: { title: "安装没有完成", body: () => "安装程序报告成功，但没有找到程序文件。" },
+      verify_failed: { title: "安装没有完成", body: () => "安装程序报告成功，但事后检查没有通过，下面是没过的项。" },
     },
     retry: "重试",
     changeLocation: "换个位置",
@@ -250,6 +254,7 @@ const ZH: SetupCopy = {
     freeSoftware: `${APP_NAME}是自由软件，你可以按 ${APP_LICENSE} 转发和修改它。它按现状提供，不提供任何担保。`,
     licenseHeading: "协议全文",
     englishOnly: "协议全文只有英文版",
+    licenseFailed: "协议全文读不出来",
     sourceLink: "查看源代码",
     thirdPartyHeading: "第三方许可",
     thirdPartyLoading: "正在读取许可清单…",
@@ -296,7 +301,7 @@ const EN: SetupCopy = {
       empty: "Enter a location",
       relative: "Use a full path, starting with the drive letter",
       bang: "The path can't contain \"!\". Java couldn't read the game files inside",
-      forbidden: "This location needs administrator rights and can't update itself. Pick another folder",
+      forbidden: "This location isn't suitable for the app and game files. Pick another folder",
       minecraft: `This is a game folder, so it can't be the install location. Add it as a game folder in ${APP_NAME_EN} afterwards`,
       network: "Network locations aren't supported. Pick a local drive",
       unwritable: "Can't write here. Pick a folder you have access to",
@@ -304,6 +309,7 @@ const EN: SetupCopy = {
     },
     resume: "This folder has settings and game files from before. They'll carry over.",
     notEmpty: "This folder already has other files. An empty folder is a better choice",
+    finalPath: (path) => `Will install to ${path}`,
     space: (needed, free) => `Needs about ${needed}, ${free} free on this drive`,
   },
   blocked: {
@@ -344,7 +350,7 @@ const EN: SetupCopy = {
       disk_full: { title: "Not enough disk space", body: () => "Free up some space or pick another drive, then try again." },
       extract_failed: { title: "Couldn't unpack the installer", body: () => "Antivirus software may have blocked it. Allow it and try again, or download a fresh copy." },
       payload_exit: { title: "The install didn't finish", body: (detail) => `The installer quit early with code ${detail}.` },
-      verify_failed: { title: "The install didn't finish", body: () => "The installer reported success, but the app files aren't there." },
+      verify_failed: { title: "The install didn't finish", body: () => "The installer reported success, but the check afterwards failed. The failed items are below." },
     },
     retry: "Retry",
     changeLocation: "Choose another location",
@@ -383,6 +389,7 @@ const EN: SetupCopy = {
     freeSoftware: `${APP_NAME_EN} is free software. You may redistribute and modify it under ${APP_LICENSE}. It is provided as is, with no warranty.`,
     licenseHeading: "Full license",
     englishOnly: "The full license is available in English only",
+    licenseFailed: "Couldn't read the full license",
     sourceLink: "View source code",
     thirdPartyHeading: "Third-party licenses",
     thirdPartyLoading: "Reading the license list…",

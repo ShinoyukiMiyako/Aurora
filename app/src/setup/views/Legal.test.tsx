@@ -144,10 +144,10 @@ describe("协议全文", () => {
     expect(licenseRegion()?.textContent).toBe(LICENSE);
   });
 
-  it("读失败时显示原文，清单、源代码和商标声明都还在", async () => {
+  it("读失败时说明并带上原文，清单、源代码和商标声明都还在", async () => {
     const onOpenExternal = vi.fn();
     await show({ loadLicenseText: () => Promise.reject(new Error("协议全文读不出来：/LICENSE.txt 返回 404")), onOpenExternal });
-    expect(document.querySelector('[role="alert"]')?.textContent).toBe("协议全文读不出来：/LICENSE.txt 返回 404");
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe(`${COPY.zh.legal.licenseFailed}协议全文读不出来：/LICENSE.txt 返回 404`);
     expect(licenseRegion()).toBeNull();
     expect(rows()).toHaveLength(3);
     expect(main()).toContain(COPY.zh.legal.trademark);
@@ -157,7 +157,7 @@ describe("协议全文", () => {
 
   it("拒绝值不是 Error 时也照实显示", async () => {
     await show({ loadLicenseText: () => Promise.reject("IPC 断了") });
-    expect(document.querySelector('[role="alert"]')?.textContent).toBe("IPC 断了");
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe(`${COPY.zh.legal.licenseFailed}IPC 断了`);
   });
 
   it("读失败记日志，不只是画在界面上", async () => {

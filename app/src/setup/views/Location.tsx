@@ -151,6 +151,7 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
           </div>
         </Field>
         <Checkbox checked={desktopShortcut} onChange={onShortcutChange} label={text.shortcut} disabled={busy} />
+        {check !== null && check.issue === null && check.notEmpty && <p className={styles.finalPath}>{text.finalPath(check.normalized)}</p>}
       </div>
     </Frame>
   );

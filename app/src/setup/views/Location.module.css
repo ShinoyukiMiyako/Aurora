@@ -40,3 +40,13 @@
   flex: none;
   margin-top: var(--sk-space-2);
 }
+
+.finalPath {
+  margin: 0;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  overflow-wrap: anywhere;
+  user-select: text;
+}

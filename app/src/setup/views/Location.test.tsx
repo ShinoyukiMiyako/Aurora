@@ -264,10 +264,23 @@ describe("提示按优先级只显示一条", () => {
     expect(noticeHint()?.querySelector("svg")).toBeNull();
   });
 
+  it("目录里没有别的文件时不多说实际位置", async () => {
+    mount({ checkDir: vi.fn(async () => okCheck({ normalized: `${DIR}-规整` })) });
+    await settle();
+    expect(document.body.textContent).not.toContain(text.finalPath(`${DIR}-规整`));
+  });
+
+  it("目录没过校验时不说实际位置：这时根本不会安装", async () => {
+    mount({ checkDir: vi.fn(async () => okCheck({ issue: "unwritable", notEmpty: true })) });
+    await settle();
+    expect(document.body.textContent).not.toContain(text.finalPath(DIR));
+  });
+
   it("有别的文件时建议换空文件夹，盖过空间提示，带警示图标", async () => {
     mount({ checkDir: vi.fn(async () => okCheck({ notEmpty: true })) });
     await settle();
     expect(noticeLine()).toBe(text.notEmpty);
+    expect(document.body.textContent).toContain(text.finalPath(DIR));
     expect(noticeHint()?.dataset.tone).toBe("warn");
     expect(noticeHint()?.querySelector("svg")).not.toBeNull();
   });

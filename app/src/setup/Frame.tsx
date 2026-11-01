@@ -2,7 +2,8 @@
 // 骨架数值沿用启动器 first-run 面板的 regular 档：安装窗关闭后向导面板以同尺寸出现，两段流程看着像一个产品。
 // 不引用 shell/TitleBar 的窗口按钮：它连带整个外壳。
 //
-// 空白处都能拖动窗口：data-tauri-drag-region="deep" 下子树里的按钮、输入框自然挡住拖动。
+// 窗口四周的空白都能拖动：data-tauri-drag-region="deep" 下子树里的按钮、输入框自然挡住拖动。
+// 内容区例外：滚动条和要选中的错误原文都不是可点击元素，放在拖动区里一按就成了拖窗。
 // 窗口级的东西（版本号、关窗能力、协议入口）由 App 经 FrameChrome 下发，视图只管自己的标题、内容和底栏。
 
 import { createContext, useContext, type ReactNode } from "react";
@@ -92,7 +93,9 @@ export function Frame({ title, lead, children, footer, footerStart }: FrameProps
           <h1 className={styles.title}>{title}</h1>
           {lead !== undefined && <p className={styles.lead}>{lead}</p>}
         </header>
-        <div className={styles.body}>{children}</div>
+        <div className={styles.body} data-tauri-drag-region="false">
+          {children}
+        </div>
         {(footer !== undefined || footerStart !== undefined) && (
           <footer className={styles.footer}>
             <div className={styles.footerStart}>{footerStart}</div>

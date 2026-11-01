@@ -36,18 +36,19 @@ function useLoaded<T>(load: () => Promise<T>): Loaded<T> {
   return loaded;
 }
 
-// 两块滚动区都带 tabindex：键盘能滚，而且拖动脚本把有 tabindex 的元素当可点击，里面的滚动条和选字才不会变成拖窗口
+// 两块滚动区都带 tabindex：键盘要能滚
 
-function LicenseText({ label, loaded }: { label: string; loaded: Loaded<string> }) {
+function LicenseText({ copy, loaded }: { copy: SetupCopy["legal"]; loaded: Loaded<string> }) {
   if (loaded.status === "failed") {
     return (
-      <p className={styles.failed} role="alert">
-        {loaded.message}
-      </p>
+      <div className={styles.failed} role="alert">
+        <p className={styles.failedTitle}>{copy.licenseFailed}</p>
+        <p className={styles.failedDetail}>{loaded.message}</p>
+      </div>
     );
   }
   return (
-    <pre className={styles.licenseText} role="region" aria-label={label} aria-busy={loaded.status === "loading"} tabIndex={0}>
+    <pre className={styles.licenseText} role="region" aria-label={copy.licenseHeading} aria-busy={loaded.status === "loading"} tabIndex={0}>
       {loaded.status === "ready" ? loaded.value : null}
     </pre>
   );
@@ -97,7 +98,7 @@ export function Legal({ copy, loadLicenseText, loadThirdParty, onOpenExternal, o
             {legal.licenseHeading}
             <span className={styles.headingNote}>{legal.englishOnly}</span>
           </h2>
-          <LicenseText label={legal.licenseHeading} loaded={license} />
+          <LicenseText copy={legal} loaded={license} />
         </section>
         <div className={styles.source}>
           <Button variant="ghost" size="sm" icon="external" onClick={() => onOpenExternal(REPO_URL)}>
