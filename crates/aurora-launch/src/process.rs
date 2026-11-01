@@ -357,9 +357,12 @@ pub fn spawn(
     let mut cmd = Command::new(&command.program);
     cmd.args(&command.args);
     cmd.current_dir(&command.working_dir);
-    if let Some(bin_dir) = command.program.parent() {
-        cmd.env("PATH", prepend_path(bin_dir));
-    }
+    // natives 目录进 PATH：LWJGL 2 用 String.getBytes() 把 OpenAL 的绝对路径交给 LoadLibraryA，
+    // -Dfile.encoding=UTF-8 下路径含中文就对不上系统代码页，它最后才按裸文件名走系统搜索路径。
+    // 这条路也没有的话，游戏不报错，直接进无声模式。
+    let mut search_dirs: Vec<&Path> = command.program.parent().into_iter().collect();
+    search_dirs.push(&command.natives_dir);
+    cmd.env("PATH", prepend_path(&search_dirs));
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     // 不继承 stdin：游戏不读控制台输入，避免子进程挂在管道上。
@@ -648,11 +651,17 @@ fn flush_batch(forward: &mut Option<LogBatchSink>, batch: &mut Vec<LogLine>) {
     }
 }
 
-/// 把 `bin_dir` 拼到现有 PATH 头部。
-fn prepend_path(bin_dir: &Path) -> std::ffi::OsString {
-    let mut combined = bin_dir.as_os_str().to_owned();
+/// 把 `dirs` 按顺序拼到现有 PATH 头部。
+fn prepend_path(dirs: &[&Path]) -> std::ffi::OsString {
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let mut combined = std::ffi::OsString::new();
+    for (index, dir) in dirs.iter().enumerate() {
+        if index > 0 {
+            combined.push(sep);
+        }
+        combined.push(dir.as_os_str());
+    }
     if let Some(existing) = std::env::var_os("PATH") {
-        let sep = if cfg!(windows) { ";" } else { ":" };
         combined.push(sep);
         combined.push(existing);
     }
@@ -713,9 +722,14 @@ mod tests {
     }
 
     #[test]
-    fn prepend_path_puts_bin_first() {
-        let combined = prepend_path(Path::new("C:/java/bin"));
-        assert!(combined.to_string_lossy().starts_with("C:/java/bin"));
+    fn prepend_path_keeps_the_given_order_in_front() {
+        let combined = prepend_path(&[Path::new("C:/java/bin"), Path::new("C:/mc/natives")]);
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        assert!(
+            combined
+                .to_string_lossy()
+                .starts_with(&format!("C:/java/bin{sep}C:/mc/natives"))
+        );
     }
 
     #[tokio::test]
@@ -1233,6 +1247,7 @@ mod tests {
             program: std::path::PathBuf::from(program),
             args: args.iter().map(|a| (*a).to_owned()).collect(),
             working_dir: std::env::temp_dir(),
+            natives_dir: std::env::temp_dir().join("natives-on-path"),
         }
     }
 
@@ -1286,6 +1301,29 @@ mod tests {
             .unwrap();
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("[game] PETAL_HELLO"), "{content}");
+    }
+
+    /// LWJGL 2 按裸文件名找 OpenAL 时靠的是系统的 DLL 搜索路径，游戏进程的 PATH 里得有 natives 目录。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn spawn_puts_natives_dir_on_the_game_path() {
+        let clock = SessionClock::start().unwrap();
+        let session = spawn(&cmd("echo PATH_IS=%PATH%"), clock, &mut None, None).unwrap();
+        let end = session.wait().await;
+        assert!(end.failure.is_none(), "{:?}", end.failure);
+
+        let line = end
+            .report
+            .recent_lines
+            .iter()
+            .find_map(|l| l.strip_prefix("PATH_IS="))
+            .expect("应打印 PATH")
+            .to_owned();
+        let natives = std::env::temp_dir().join("natives-on-path");
+        assert!(
+            line.split(';').any(|dir| dir == natives.to_string_lossy()),
+            "PATH 里应有 natives 目录：{line}"
+        );
     }
 
     #[cfg(windows)]

@@ -65,6 +65,8 @@ pub struct LaunchCommand {
     pub args: Vec<String>,
     /// 工作目录（隔离判定后的游戏目录）。
     pub working_dir: PathBuf,
+    /// natives 解压目录，游戏进程的 PATH 里要有它，见 [`crate::process::spawn`]。
+    pub natives_dir: PathBuf,
 }
 
 impl LaunchCommand {
@@ -457,6 +459,7 @@ impl<'a> CommandBuilder<'a> {
             program: self.java,
             args: argv,
             working_dir: self.game_dir,
+            natives_dir: self.paths.natives_dir,
         })
     }
 }
@@ -494,6 +497,7 @@ mod tests {
                 "".to_owned(),
             ],
             working_dir: PathBuf::from("D:/mc"),
+            natives_dir: PathBuf::from("D:/mc/natives"),
         };
         let line = command.command_line();
         assert!(line.starts_with("\"C:/Program Files/Java/bin/java.exe\""));
