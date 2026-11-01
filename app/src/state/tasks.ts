@@ -32,11 +32,12 @@ export function attemptTaskId(task: Pick<Task, "id" | "attempt">): string {
 }
 
 /**
- * 任务进度条（进度环、百分比文字）的平滑标识：同一次尝试的同一批下载内只进不退；换了批次（批次总量变了）或换了尝试
- * 直接跳到新值，否则新批次从 0 重新计起时，进度会停在上一批的最大值不动。凡是画任务进度的地方都用它。
+ * 任务进度条（进度环、百分比文字）的平滑标识：同一次尝试的同一批下载内只进不退；换了批次（总字节或文件数变了）或换了尝试
+ * 直接跳到新值，否则新批次从 0 重新计起时，进度会停在上一批的最大值不动。文件数不能省：Fabric 的库没声明大小，
+ * 版本 JSON 与本体加库两批的总字节都是未知。凡是画任务进度的地方都用它。
  */
 export function progressTrack(task: Task): string {
-  return `${attemptTaskId(task)}:${task.totalBytes === null ? "count" : task.totalBytes}`;
+  return `${attemptTaskId(task)}:${task.totalBytes === null ? "count" : task.totalBytes}:${task.batchFiles}`;
 }
 
 /**
@@ -110,6 +111,7 @@ export function newTask(draft: TaskDraft, now: number): Task {
     doneBytes: 0,
     transferredBytes: 0,
     batchTransferred: 0,
+    batchFiles: 0,
     speedBps: 0,
     startedAt: null,
     attempt: 1,
@@ -212,7 +214,7 @@ function update(tasks: readonly Task[], id: string, fn: (task: Task) => Task): T
 
 export function markRunning(tasks: readonly Task[], id: string, now: number): Task[] {
   return update(tasks, id, (t) =>
-    t.status === "queued" ? { ...t, status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, speedBps: 0, startedAt: now } : t,
+    t.status === "queued" ? { ...t, status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, batchFiles: 0, speedBps: 0, startedAt: now } : t,
   );
 }
 
@@ -248,13 +250,13 @@ function transferredAfter(task: Task, added: number): number {
 
 /**
  * 一批下载的进度快照。一次安装连跑好几批，每批从 0 重新计：进度按当前批次如实显示，
- * 批次内只进不退，新批次（已下字节变少或批次大小变了）从头开始。累计字节跨批次往上加。
+ * 批次内只进不退，新批次（已下字节变少，或批次大小、文件数变了）从头开始。累计字节跨批次往上加。
  */
 export function applyTaskDownload(tasks: readonly Task[], attemptId: string, event: DownloadSnapshot): Task[] {
   return tasks.map((t) => {
     if (t.status !== "running" || attemptTaskId(t) !== attemptId) return t;
     const fraction = snapshotFraction(event);
-    const sameBatch = event.totalBytes === t.totalBytes && event.bytes >= t.bytes;
+    const sameBatch = event.totalBytes === t.totalBytes && event.total === t.batchFiles && event.bytes >= t.bytes;
     return {
       ...t,
       progress: sameBatch ? Math.max(t.progress, fraction) : fraction,
@@ -263,6 +265,7 @@ export function applyTaskDownload(tasks: readonly Task[], attemptId: string, eve
       doneBytes: t.doneBytes + (sameBatch ? event.bytes - t.bytes : event.bytes),
       transferredBytes: transferredAfter(t, transferredSince({ totalBytes: t.totalBytes, transferred: t.batchTransferred }, event)),
       batchTransferred: event.transferred,
+      batchFiles: event.total,
       speedBps: event.speed,
     };
   });
@@ -438,6 +441,7 @@ export function retryTask(tasks: readonly Task[], id: string): Task[] {
     doneBytes: 0,
     transferredBytes: 0,
     batchTransferred: 0,
+    batchFiles: 0,
     speedBps: 0,
     startedAt: null,
     finishedAt: null,

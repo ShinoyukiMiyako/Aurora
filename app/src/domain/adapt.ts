@@ -473,6 +473,7 @@ export function taskFromRecord(dto: TaskRecordDto): Task {
     doneBytes: dto.done_bytes === undefined ? dto.bytes : dto.done_bytes,
     transferredBytes: dto.transferred_bytes === undefined ? null : dto.transferred_bytes,
     batchTransferred: 0,
+    batchFiles: 0,
     speedBps: dto.speed_bps,
     startedAt: dto.started_at === undefined ? null : dto.started_at,
     attempt: dto.attempt,
