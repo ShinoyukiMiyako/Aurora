@@ -30,7 +30,7 @@ use crate::error::{CoreError, Result};
 use crate::facade::Aurora;
 use crate::ledger::{LedgerEntry, UpdateHold};
 use crate::modfs::{
-    NETWORK_CONCURRENCY, bounded_map, ledger_key, local_concurrency, lock_mods_dir, refuse,
+    bounded_map, ledger_key, local_concurrency, lock_mods_dir, NETWORK_CONCURRENCY, present, refuse,
 };
 use crate::mods::{InstanceDirs, mod_file_path, scan_installed};
 
@@ -493,7 +493,8 @@ impl Aurora {
         let mut ledger = store.load().await?;
         let mut changed = false;
         for item in identified {
-            if ledger.find(&item.key).is_some() {
+            // 持着锁再看一眼：锁外那段时间里文件可能已被移除，不留对不上文件的身份记录。
+            if ledger.find(&item.key).is_some() || !present(mods_dir, &item.key).await? {
                 continue;
             }
             let info = titles
@@ -1103,6 +1104,52 @@ mod tests {
             listed[0].source.as_ref().unwrap().title.as_deref(),
             Some("Sodium")
         );
+    }
+
+    /// 哈希算完到写卷宗之间文件被删了：不留一条对不上文件的身份记录。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_file_removed_while_identifying_leaves_no_ledger_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.20.1-fabric", FABRIC_JSON).await;
+        let (jar, sha1) = put_mod(mc, "1.20.1-fabric", "mystery.jar", b"mystery-payload").await;
+
+        let server = MockServer::start().await;
+        mount_post(
+            &server,
+            "/version_files",
+            format!(
+                r#"{{"{sha1}":{}}}"#,
+                modrinth_version(
+                    "old1",
+                    "AANobbMI",
+                    "0.5.3",
+                    "2025-01-01T00:00:00Z",
+                    "mystery.jar",
+                    &sha1
+                )
+            ),
+        )
+        .await;
+        mount_post(&server, "/version_files/update", "{}".to_owned()).await;
+        // 工程信息是写卷宗前最后一个请求：玩家在这时移除了文件。
+        Mock::given(method("GET"))
+            .and(path("/projects"))
+            .respond_with(move |_: &wiremock::Request| {
+                std::fs::remove_file(&jar).unwrap();
+                ResponseTemplate::new(200).set_body_string(
+                    r#"[{"id":"AANobbMI","title":"Sodium","description":"d","project_type":"mod",
+                         "downloads":1,"icon_url":null}]"#,
+                )
+            })
+            .mount(&server)
+            .await;
+
+        let aurora = aurora_at(mc, &server.uri());
+        aurora.check_updates("1.20.1-fabric").await.unwrap();
+
+        let ledger = aurora.ledger_store("1.20.1-fabric").load().await.unwrap();
+        assert!(ledger.find("mystery.jar").is_none());
     }
 
     /// 两条通道都认不出（本地自制 Mod）：不报更新，且不为此凭空生成卷宗文件。
