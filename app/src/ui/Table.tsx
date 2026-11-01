@@ -145,7 +145,7 @@ type RowMotion = "full" | "fade" | "none";
 const ROW_VARIANTS: Variants = {
   hidden: (motion: RowMotion) => (motion === "none" ? { opacity: 1, scale: 1 } : motion === "fade" ? { opacity: 0, scale: 1 } : { opacity: 0, scale: 0.98 }),
   show: { opacity: 1, scale: 1, transition: { ...springs.settle, opacity: fade.in } },
-  leave: (motion: RowMotion) => (motion === "none" ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0, scale: motion === "fade" ? 1 : 0.98, transition: fade.out }),
+  leave: (motion: RowMotion) => (motion === "none" ? { opacity: 0, transition: fade.none } : { opacity: 0, scale: motion === "fade" ? 1 : 0.98, transition: fade.out }),
 };
 
 interface PresenceRowProps extends HTMLMotionProps<"div"> {
