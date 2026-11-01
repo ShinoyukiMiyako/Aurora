@@ -446,11 +446,13 @@ fn download_bytes(json: &VersionJson, ctx: &RuntimeContext) -> Option<u64> {
     let mut total = json.downloads.as_ref()?.client.as_ref()?.size;
     let index = json.asset_index.as_ref()?;
     total += index.size + index.total_size?;
+    let mut artifacts = HashSet::new();
     for library in select_libraries(json, ctx) {
         let downloads = library.downloads.as_ref()?;
         total += downloads
             .artifact
             .as_ref()
+            .filter(|artifact| artifacts.insert(&artifact.url))
             .map_or(0, |artifact| artifact.size);
         total += library.native_artifact(ctx).map_or(0, |native| native.size);
     }
@@ -787,6 +789,14 @@ mod tests {
                               "natives-here": { "path": "d", "sha1": "4", "size": 400, "url": "http://x/d" },
                               "natives-there": { "path": "e", "sha1": "5", "size": 90_000, "url": "http://x/e" }
                           }
+                      } },
+                    // 主 jar 在 natives 条目里又写一遍：两条都算，同一个文件只算一次。
+                    { "name": "a:dual:1", "downloads": { "artifact": { "path": "f", "sha1": "6", "size": 5, "url": "http://x/f" } } },
+                    { "name": "a:dual:1",
+                      "natives": { os: "natives-here" },
+                      "downloads": {
+                          "artifact": { "path": "f", "sha1": "6", "size": 5, "url": "http://x/f" },
+                          "classifiers": { "natives-here": { "path": "g", "sha1": "7", "size": 60, "url": "http://x/g" } }
                       } }
                 ]
             })
@@ -808,7 +818,7 @@ mod tests {
         assert_eq!(full.java_major, 21);
         assert_eq!(
             full.download_bytes,
-            Some(1000 + 300 + 50_000 + 7 + 20 + 3 + 400)
+            Some(1000 + 300 + 50_000 + 7 + 20 + 3 + 400 + 5 + 60)
         );
         assert_eq!(aurora.required_java("req-full").await.unwrap(), 21);
 

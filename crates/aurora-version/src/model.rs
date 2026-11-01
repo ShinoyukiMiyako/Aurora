@@ -226,13 +226,21 @@ impl Library {
 
     /// 用于同名库去重的键：`group:artifact`（+ classifier 以区分主件与各 natives）。
     /// 坐标无法解析时退回整个 name，保证不同名库不会被误并。
+    ///
+    /// 带 natives 映射的条目单独成一类：1.13 到 1.18 的版本 JSON 把同一坐标写成主 jar 与本地库两条，
+    /// 它们是两件东西，并掉本地库游戏就起不来；加载器压过的也只该是主 jar。
     pub fn dedup_key(&self) -> String {
-        match self.coordinate() {
+        let key = match self.coordinate() {
             Some(c) => match c.classifier {
                 Some(cl) => format!("{}:{}:{}", c.group, c.artifact, cl),
                 None => format!("{}:{}", c.group, c.artifact),
             },
             None => self.name.clone(),
+        };
+        if self.natives.is_some() {
+            format!("{key}#natives")
+        } else {
+            key
         }
     }
 
@@ -563,6 +571,35 @@ mod tests {
                 "org.ow2.asm:asm:9.6",
                 "org.lwjgl:lwjgl:3.3.3:natives-windows"
             ]
+        );
+    }
+
+    /// 1.13 到 1.18 的版本 JSON 把同一坐标写成两条：主 jar，和带 natives 映射的本地库。
+    /// 当成同名库去重，本地库就没了，游戏启动即崩（Failed to locate library: lwjgl.dll）。
+    #[test]
+    fn select_libraries_keeps_the_natives_entry_sharing_a_coordinate() {
+        let json = r#"{
+            "id":"1.16.5",
+            "libraries":[
+                {"name":"org.lwjgl:lwjgl:3.2.2"},
+                {"name":"org.lwjgl:lwjgl:3.2.2","natives":{"windows":"natives-windows"}},
+                {"name":"org.lwjgl:lwjgl:3.2.1","natives":{"windows":"natives-windows"}}
+            ]
+        }"#;
+        let v = VersionJson::from_json_str(json).expect("应解析");
+        let win64 = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let selected = select_libraries(&v, &win64);
+        let shape: Vec<(&str, bool)> = selected
+            .iter()
+            .map(|l| (l.name.as_str(), l.natives.is_some()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("org.lwjgl:lwjgl:3.2.2", false),
+                ("org.lwjgl:lwjgl:3.2.2", true),
+            ],
+            "主 jar 与本地库各留一条，同是本地库的仍按先出现者去重"
         );
     }
 

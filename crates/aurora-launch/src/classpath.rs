@@ -293,6 +293,36 @@ mod tests {
         assert_eq!(entries, vec![client_jar.to_path_buf()]);
     }
 
+    /// 1.13 到 1.18 同一坐标写两条：主 jar 进 classpath 一次，带 natives 映射的那条不进。
+    #[test]
+    fn main_jar_sharing_a_coordinate_with_natives_is_listed_once() {
+        let artifact =
+            r#"{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"}"#;
+        let version = VersionJson::from_json_str(&format!(
+            r#"{{
+                "id":"1.16.5",
+                "libraries":[
+                    {{"name":"org.lwjgl:lwjgl:3.2.2","downloads":{{"artifact":{artifact}}}}},
+                    {{"name":"org.lwjgl:lwjgl:3.2.2",
+                     "natives":{{"windows":"natives-windows"}},
+                     "downloads":{{"artifact":{artifact},
+                        "classifiers":{{"natives-windows":{{"path":"n.jar","sha1":"b","size":1,"url":"u"}}}}}}}}
+                ]
+            }}"#
+        ))
+        .unwrap();
+        let libraries_dir = Path::new("/libs");
+        let client_jar = Path::new("/c.jar");
+        let entries = classpath_entries(&version, &win64(), libraries_dir, client_jar).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                libraries_dir.join("org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar"),
+                client_jar.to_path_buf(),
+            ]
+        );
+    }
+
     /// 库路径与由坐标算出的路径按补全时下载计划的同一判据校验：空段、`..`、反斜杠一律报路径越界，
     /// 不把 `org//x.jar` 悄悄拼成 `org/x.jar`。
     #[test]

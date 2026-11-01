@@ -324,6 +324,41 @@ mod tests {
         );
     }
 
+    /// 1.13 到 1.18 同一坐标写两条，主 jar 在前、本地库在后，本地库要照样解出来。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn natives_entry_sharing_a_coordinate_with_the_main_jar_is_extracted() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = GameLayout::new(dir.path());
+        let jar = "org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar";
+        let jar_path = layout.library_path(jar);
+        std::fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+        build_test_jar(&jar_path);
+        let ctx = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let version = VersionJson::from_json_str(&format!(
+            r#"{{"id":"1.16.5","libraries":[
+                {{"name":"org.lwjgl:lwjgl:3.2.2",
+                 "downloads":{{"artifact":{{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"}}}}}},
+                {{"name":"org.lwjgl:lwjgl:3.2.2",
+                 "natives":{{"windows":"natives-windows"}},
+                 "downloads":{{
+                    "artifact":{{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"a","size":1,"url":"u"}},
+                    "classifiers":{{"natives-windows":{{"path":"{jar}","sha1":"b","size":1,"url":"u"}}}}
+                 }}}}
+            ]}}"#
+        ))
+        .unwrap();
+
+        let count = extract_all_natives(&version, &ctx, &layout, "1.16.5")
+            .await
+            .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            std::fs::read(layout.natives_dir("1.16.5").join("lwjgl.dll")).unwrap(),
+            b"fake-dll-bytes"
+        );
+    }
+
     /// 26.2 起游戏自己从 classpath 解压本地库，这里解出来的文件没人读，白占几百 MB。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn natives_are_not_extracted_when_library_path_moves_to_a_subdir() {

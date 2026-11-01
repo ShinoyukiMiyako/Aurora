@@ -8,6 +8,8 @@
 //! 落点里的每个相对段（库路径、坐标各段、资源 hash、索引 id、日志配置名、版本 id）都来自版本 JSON 或
 //! 资源索引，按 [`crate::layout`] 的规则校验，能走出游戏目录的报 [`Error::UnsafePath`]。
 
+use std::collections::HashSet;
+
 use aurora_download::DownloadTask;
 use aurora_version::{AssetObjectsIndex, Library, RuntimeContext, VersionJson, select_libraries};
 
@@ -42,6 +44,9 @@ pub fn library_tasks(
     for lib in selected {
         push_library_tasks(lib, ctx, layout, &mut tasks)?;
     }
+    // 1.13 到 1.18 的 natives 条目把主 jar 又写了一遍，同一个文件只下一次。
+    let mut seen = HashSet::new();
+    tasks.retain(|task| seen.insert(task.dest.clone()));
     Ok(tasks)
 }
 
@@ -343,6 +348,25 @@ mod tests {
             tasks[0].dest,
             PathBuf::from("/mc/libraries/org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-windows.jar")
         );
+    }
+
+    /// 1.13 到 1.18 的主 jar 在 natives 条目里又写一遍：本地库要下，同一个 jar 只下一次。
+    #[test]
+    fn main_jar_repeated_in_the_natives_entry_downloads_once() {
+        let artifact = r#"{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2.jar","sha1":"m1","size":10,"url":"https://libraries.minecraft.net/m.jar"}"#;
+        let v = VersionJson::from_json_str(&format!(
+            r#"{{"id":"1.16.5","libraries":[
+                {{"name":"org.lwjgl:lwjgl:3.2.2","downloads":{{"artifact":{artifact}}}}},
+                {{"name":"org.lwjgl:lwjgl:3.2.2",
+                 "natives":{{"windows":"natives-windows"}},
+                 "downloads":{{"artifact":{artifact},
+                    "classifiers":{{"natives-windows":{{"path":"org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar","sha1":"n1","size":20,"url":"https://libraries.minecraft.net/n.jar"}}}}}}}}
+            ]}}"#
+        ))
+        .unwrap();
+        let tasks = library_tasks(&v, &win64(), &layout()).unwrap();
+        let sha1s: Vec<_> = tasks.iter().map(|t| t.sha1.as_deref()).collect();
+        assert_eq!(sha1s, vec![Some("m1"), Some("n1")]);
     }
 
     #[test]
