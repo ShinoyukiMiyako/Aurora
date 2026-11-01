@@ -16,6 +16,8 @@ import { Button } from "../../ui/Button";
 import { IconButton } from "../../ui/IconButton";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { useDeleteInstance } from "../instance/delete";
+import { locksOf } from "../instance/model";
+import { lockReason } from "../instance/ops";
 import styles from "./library.module.css";
 
 export function CardStatus({ inst }: { inst: InstanceSummary }) {
@@ -77,7 +79,8 @@ export function CardStatus({ inst }: { inst: InstanceSummary }) {
       if (needsReimport(inst)) return <ReimportStatus inst={inst} />;
       return (
         <div className={styles.status} data-view="broken">
-          <Button size="sm" icon="wrench" onClick={entry.launch}>
+          {/* 视图是 broken 说明本实例没有活动的会话；补全被基底占用、备份、改动挡住时不让点了才报 instance_busy */}
+          <Button size="sm" icon="wrench" disabledReason={lockReason(locksOf(inst, false).repair, "repair")} onClick={entry.launch}>
             {LAUNCH_COPY.repairAndLaunch}
           </Button>
         </div>
@@ -94,7 +97,7 @@ function ReimportStatus({ inst }: { inst: InstanceSummary }) {
       <Button size="sm" icon="modpack" onClick={() => go(reimportRoute(inst))}>
         {MODPACK_REIMPORT_COPY.reimport}
       </Button>
-      <Button size="sm" variant="danger" icon="trash" onClick={() => void deleteInstance(inst)}>
+      <Button size="sm" variant="danger" icon="trash" disabledReason={lockReason(locksOf(inst, false).delete, "delete")} onClick={() => void deleteInstance(inst)}>
         {MODPACK_REIMPORT_COPY.delete}
       </Button>
     </div>

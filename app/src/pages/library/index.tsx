@@ -13,6 +13,7 @@ import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
+import { busyInstanceId } from "../../state/selectors";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
@@ -23,6 +24,8 @@ import { SearchInput } from "../../ui/SearchInput";
 import { SegmentedControl, type SegmentOption } from "../../ui/SegmentedControl";
 import { Select } from "../../ui/Select";
 import { Skeleton } from "../../ui/Skeleton";
+import { locksOf } from "../instance/model";
+import { lockReason } from "../instance/ops";
 import { LIBRARY_COPY } from "./copy";
 import { CARD_COVER_HEIGHT, InstanceCard } from "./InstanceCard";
 import styles from "./library.module.css";
@@ -66,6 +69,7 @@ export default function LibraryPage() {
   const all = useLauncherSelector((s) => s.instances);
   const slice = useLauncherSelector((s) => s.status.instances);
   const pinCount = useLauncherSelector((s) => s.sidebarPins.length);
+  const sessionInstance = useLauncherSelector(busyInstanceId);
   const actions = useLauncherActions();
   const { go } = useNav();
   const { tier, openCreateInstance, registerFind } = useShell();
@@ -100,8 +104,11 @@ export default function LibraryPage() {
   ];
   const sortOptions = SORT_KEYS.map((key) => ({ value: key, label: LIBRARY_COPY.sort[key] }));
 
+  // 被基底占用、备份或改动占着的这轮不排：补全排上也只会被 instance_busy 拒绝，留下一个失败的任务
+  const repairReason = (inst: InstanceSummary) => lockReason(locksOf(inst, inst.id === sessionInstance).repair, "repair");
+  const repairable = broken.filter((inst) => repairReason(inst) === undefined);
   const repairAll = () => {
-    for (const inst of broken) void run(() => actions.repairInstance(inst.id), ACTION_ERROR.repair);
+    for (const inst of repairable) void run(() => actions.repairInstance(inst.id), ACTION_ERROR.repair);
   };
 
   const clearFilter = () => setView({ loader: "all", query: "" });
@@ -156,7 +163,7 @@ export default function LibraryPage() {
           icon="wrench"
           title={LIBRARY_COPY.repairTitle(broken.length)}
           actions={
-            <Button size="sm" onClick={repairAll}>
+            <Button size="sm" disabledReason={repairable.length === 0 ? repairReason(broken[0]) : undefined} onClick={repairAll}>
               {broken.length > 1 ? LIBRARY_COPY.repairAll : LIBRARY_COPY.repairOne}
             </Button>
           }

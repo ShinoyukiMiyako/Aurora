@@ -10,7 +10,7 @@ import { busyInstanceId } from "../../state/selectors";
 import type { LauncherActions } from "../../state/store";
 import { HERO_COPY, LOCK_REASON, OVERVIEW_COPY } from "./copy";
 import { useDeleteInstance } from "./delete";
-import { instanceLocks, workLock, type InstanceLock, type InstanceLocks, type WorkLock } from "./model";
+import { locksOf, workLock, type InstanceLock, type InstanceLocks, type WorkLock } from "./model";
 
 /** 打开文件夹的目标，与状态层动作的入参同一类型。 */
 export type FolderTarget = Parameters<LauncherActions["openFolder"]>[0];
@@ -79,7 +79,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
   // 改名校验要全部实例名；只订阅名字，别的实例的进度与状态变化不让页面重渲染
   const ids = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
   const installing = inst.status === "installing";
-  const locks = instanceLocks(busy, installing, inst.activity === "modifying", inst.usedBy, inst.activity === "backing_up");
+  const locks = locksOf(inst, busy);
   const work = workLock(installing, inst.activity);
   const name = inst.name;
 

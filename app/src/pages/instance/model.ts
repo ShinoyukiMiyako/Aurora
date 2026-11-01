@@ -78,6 +78,11 @@ export function instanceLocks(busy: boolean, installing: boolean, modifying: boo
   return { mods: fileLock, rename: dirLock, repair: dirLock, delete: busy ? "running" : occupied };
 }
 
+/** 按实例摘要算的锁。busy 是本实例的会话在准备、下载、启动或运行中。实例页与实例库的卡片同一份判定。 */
+export function locksOf(inst: Pick<InstanceSummary, "status" | "activity" | "usedBy">, busy: boolean): InstanceLocks {
+  return instanceLocks(busy, inst.status === "installing", inst.activity === "modifying", inst.usedBy, inst.activity === "backing_up");
+}
+
 /** 打开工作子目录与写实例设置被什么挡住。 */
 export type WorkLock = "installing" | "renaming" | "deleting";
 
