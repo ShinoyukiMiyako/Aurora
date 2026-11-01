@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 
 use crate::command::LaunchCommand;
 use crate::error::{LaunchError, Result};
+use crate::log4j_xml::Log4jXmlDecoder;
 use crate::logfile::{LauncherLevel, LogSource, SessionClock, SessionLog, SessionOutcome};
 
 /// 崩溃判定缓存的最近游戏输出行数。
@@ -428,7 +429,8 @@ pub fn detect_crash(report: &ExitReport) -> bool {
 
 /// 逐行读一条输出流。按字节读、有损解码：JVM 的本地层（如致命错误头）按系统代码页输出，
 /// 一个非 UTF-8 字节就会让按字符串读的读取端报错退出，从此没人读这条管道，游戏随之卡死。
-/// 单行超过 [`MAX_LINE_BYTES`] 的部分边读边丢，读取照常往下走。
+/// 单行超过 [`MAX_LINE_BYTES`] 的部分边读边丢，读取照常往下走。stdout 上的 log4j XML 事件在这里还原成普通行，
+/// 之后的会话日志、崩溃判定与界面拿到的都是还原后的文本。
 fn spawn_reader<R>(
     reader: R,
     stream: LogStream,
@@ -441,7 +443,7 @@ where
     tokio::spawn(async move {
         let mut reader = BufReader::new(reader);
         let mut lines = LineSplitter::new();
-        let mut emit = |text: String| {
+        let mut send = |text: String| {
             let line = LogLine {
                 at: clock.now(),
                 stream,
@@ -452,6 +454,12 @@ where
             if tx.send(line).is_err() {
                 tracing::warn!(?stream, "游戏输出汇流任务已退出，丢弃后续输出");
             }
+        };
+        // 日志配置只把 XML 打到 stdout；stderr 上是 JVM 与未捕获异常的原文。
+        let mut xml = (stream == LogStream::Stdout).then(Log4jXmlDecoder::new);
+        let mut emit = |text: String| match xml.as_mut() {
+            Some(decoder) => decoder.decode(text, &mut send),
+            None => send(text),
         };
         loop {
             let chunk = match reader.fill_buf().await {
@@ -761,6 +769,45 @@ mod tests {
     }
 
     /// Mod 打印几 MB 不带换行的转储：这一行只留前 64 KB 并注明丢掉的字节数，后面的行照常读到。
+    async fn read_lines(input: &'static [u8], stream: LogStream) -> Vec<String> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        spawn_reader(input, stream, SessionClock::start().unwrap(), tx)
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        while let Some(line) = rx.recv().await {
+            out.push(line.text);
+        }
+        out
+    }
+
+    /// 真实客户端走官方日志配置时 stdout 是 XML：还原成普通行后级别才认得出来。
+    #[tokio::test]
+    async fn stdout_xml_events_reach_the_pipeline_as_plain_lines() {
+        let input = concat!(
+            "  <log4j:Event logger=\"a\" timestamp=\"1\" level=\"ERROR\" thread=\"main\">
+",
+            "    <log4j:Message><![CDATA[Incompatible mods found!]]></log4j:Message>
+",
+            "  </log4j:Event>
+",
+        )
+        .as_bytes();
+        let lines = read_lines(input, LogStream::Stdout).await;
+        assert_eq!(lines, vec!["[main/ERROR]: Incompatible mods found!"]);
+        assert_eq!(crate::game_line_level(&lines[0]), LauncherLevel::Error);
+    }
+
+    #[tokio::test]
+    async fn stderr_is_not_treated_as_xml() {
+        let input = b"<log4j:Event logger=\"a\" level=\"INFO\" thread=\"main\">
+";
+        assert_eq!(
+            read_lines(input, LogStream::Stderr).await,
+            vec![r#"<log4j:Event logger="a" level="INFO" thread="main">"#]
+        );
+    }
+
     #[tokio::test]
     async fn overlong_line_is_capped_and_the_next_line_survives() {
         const LONG: usize = 5 * 1024 * 1024;

@@ -25,6 +25,7 @@ pub mod classpath;
 pub mod command;
 pub mod crash;
 pub mod error;
+pub mod log4j_xml;
 pub mod logfile;
 pub mod memory;
 pub mod placeholder;
