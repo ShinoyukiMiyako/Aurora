@@ -7,7 +7,6 @@ const LAUNCHER = {
   port: 1420,
   hmrPort: 1421,
   rootPackage: "petalfall-tauri",
-  emitLicenseText: false,
 };
 
 const SETUP = {
@@ -16,7 +15,6 @@ const SETUP = {
   port: 1430,
   hmrPort: 1431,
   rootPackage: "petalfall-setup",
-  emitLicenseText: true,
 };
 
 export function buildTarget(mode) {

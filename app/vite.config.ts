@@ -33,7 +33,10 @@ function thirdPartyLicenses(rootPackage: string): Plugin {
   };
 }
 
-/** 协议全文随引导程序分发：离线也要能看。不用 ?raw 导入：路径出了 src，开发服务器还得放开 fs.allow。 */
+/**
+ * 协议全文随启动器与引导程序一起分发：AGPL 第 5(d) 条要界面上能看到协议，离线也要能看。
+ * 不用 ?raw 导入：路径出了 src，开发服务器还得放开 fs.allow。
+ */
 function licenseText(): Plugin {
   const text = () => readFileSync(join(APP_DIR, "..", "LICENSE"), "utf8");
   return {
@@ -69,7 +72,7 @@ function vendorChunk(id: string): string | null {
 export default defineConfig(async ({ mode }) => {
   const target = buildTarget(mode);
   return {
-    plugins: [react(), tailwindcss(), thirdPartyLicenses(target.rootPackage), ...(target.emitLicenseText ? [licenseText()] : [])],
+    plugins: [react(), tailwindcss(), thirdPartyLicenses(target.rootPackage), licenseText()],
 
     define: {
       __PETALFALL_BUILD__: JSON.stringify(readBuildInfo({ tauriConfPath: join(APP_DIR, "src-tauri", "tauri.conf.json"), env: process.env, now: new Date() })),

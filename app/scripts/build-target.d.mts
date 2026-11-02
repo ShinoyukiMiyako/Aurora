@@ -7,8 +7,6 @@ export interface BuildTarget {
   hmrPort: number;
   /** 第三方许可清单里 Rust 依赖闭包的起点。 */
   rootPackage: string;
-  /** 产物里是否带协议全文。 */
-  emitLicenseText: boolean;
 }
 
 export function buildTarget(mode: string): BuildTarget;

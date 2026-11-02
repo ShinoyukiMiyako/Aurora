@@ -1355,11 +1355,69 @@ describe("设置页：关于与启动器更新", () => {
     expect(all("button").some((b) => b.textContent === "重试")).toBe(false);
   });
 
-  it("支持卡与声明", async () => {
+  it("支持卡：打开日志目录", async () => {
     await mount("about");
     await click(rowButton("打开日志目录", "打开"));
     expect(commands.calls).toEqual(["open-logs"]);
-    expect(text()).toContain("与 Mojang Studios 和 Microsoft 没有关联");
+  });
+
+  // AGPL 第 5(d) 条要界面上有版权声明、无担保与可按协议转发的说明，以及看协议全文的入口（入口见下面的协议全文用例）
+  it("页尾依次写版权声明、自由软件与无担保声明、商标与数据来源声明", async () => {
+    await mount("about");
+    expect(all('[class*="disclaimer"]').map((p) => p.textContent)).toEqual([
+      "Copyright \u00A9 2026 Shinoyuki_Miyako",
+      `${APP_NAME}是自由软件，你可以按 AGPL-3.0-only 转发和修改它。它按现状提供，不提供任何担保。`,
+      `Minecraft 是 Mojang Studios 的商标。实例图标、皮肤与全景图这些原版图案读取自你本机的游戏文件，不随${APP_NAME}分发。` +
+        `Mod 与整合包的信息和文件来自 Modrinth 与 CurseForge。${APP_NAME}是社区开源项目，与 Mojang Studios 和 Microsoft 没有关联。`,
+    ]);
+  });
+
+  it("协议全文：打开弹窗时才读 LICENSE.txt，换行与缩进原样显示；关上再开不重读", async () => {
+    // 随机一行：显示的必须是读回来的那份，而不是哪里写死的文本
+    const marker = `  ${Math.random().toString(36).slice(2)}`;
+    const license = `                    GNU AFFERO GENERAL PUBLIC LICENSE\n                       Version 3, 19 November 2007\n\n${marker}\n\n  0. Definitions.\n`;
+    const fetchMock = vi.fn(async (_url: string) => ({ ok: true, status: 200, text: async () => license }));
+    vi.stubGlobal("fetch", fetchMock);
+    await mount("about");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await click(rowButton("协议全文", "查看"));
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual(["/LICENSE.txt"]);
+    const [dialog] = openDialogs();
+    expect(dialog.querySelector("h2")?.textContent).toBe("协议全文");
+    expect(dialog.querySelector("h2 + p")?.textContent).toBe("AGPL-3.0-only，协议全文只有英文版");
+    const region = dialog.querySelector<HTMLElement>('pre[role="region"]');
+    expect(region?.getAttribute("aria-label")).toBe("协议全文");
+    expect(region?.tabIndex).toBe(0);
+    expect(region?.textContent).toBe(license);
+
+    await click(button("关闭"));
+    expect(openDialogs()).toHaveLength(0);
+    await click(rowButton("协议全文", "查看"));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(openDialogs()[0]?.querySelector('pre[role="region"]')?.textContent).toBe(license);
+  });
+
+  it("协议全文读不出来：弹窗里写明原因与请求地址，不留白；重试再读一次", async () => {
+    const license = "GNU AFFERO GENERAL PUBLIC LICENSE\n";
+    const fetchMock = vi
+      .fn(async (_url: string) => ({ ok: true, status: 200, text: async () => license }))
+      .mockResolvedValueOnce({ ok: false, status: 404, text: async () => "Not Found" });
+    vi.stubGlobal("fetch", fetchMock);
+    await mount("about");
+    await click(rowButton("协议全文", "查看"));
+
+    const [dialog] = openDialogs();
+    const alert = dialog.querySelector('[role="alert"]');
+    expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe("协议全文读不出来");
+    expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe("协议全文读不出来：/LICENSE.txt 返回 404");
+    expect(dialog.querySelector("pre")).toBeNull();
+    expect(dialog.textContent).not.toContain("Not Found");
+
+    await click(all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === "重试") as HTMLButtonElement);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(openDialogs()[0]?.querySelector('[role="alert"]')).toBeNull();
+    expect(openDialogs()[0]?.querySelector('pre[role="region"]')?.textContent).toBe(license);
   });
 
   it("品牌卡与版本信息取构建信息：版本、发布通道、构建日期、协议与仓库地址；可复制整段或只复制仓库地址", async () => {

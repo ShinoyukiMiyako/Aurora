@@ -12,11 +12,11 @@ function readJson(rel: string): Record<string, any> {
 
 describe("构建目标", () => {
   it("--mode setup 走引导程序的产物目录、入口、端口和许可清单起点", () => {
-    expect(buildTarget("setup")).toEqual({ outDir: "dist-setup", html: "setup.html", port: 1430, hmrPort: 1431, rootPackage: "petalfall-setup", emitLicenseText: true });
+    expect(buildTarget("setup")).toEqual({ outDir: "dist-setup", html: "setup.html", port: 1430, hmrPort: 1431, rootPackage: "petalfall-setup" });
   });
 
-  it.each(["development", "production"])("默认模式 %s 仍是启动器，且不写协议全文", (mode) => {
-    expect(buildTarget(mode)).toEqual({ outDir: "dist", html: "index.html", port: 1420, hmrPort: 1421, rootPackage: "petalfall-tauri", emitLicenseText: false });
+  it.each(["development", "production"])("默认模式 %s 仍是启动器", (mode) => {
+    expect(buildTarget(mode)).toEqual({ outDir: "dist", html: "index.html", port: 1420, hmrPort: 1421, rootPackage: "petalfall-tauri" });
   });
 
   it.each([
