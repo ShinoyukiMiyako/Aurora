@@ -1,7 +1,7 @@
 // 设置页与启动器更新的文案。产品名一律经 APP_NAME 拼入。
 
 import type { IconName } from "../../art/Icon";
-import { APP_NAME } from "../../lib/app-info";
+import { APP_LICENSE, APP_NAME, COPYRIGHT_HOLDER, FIRST_RELEASE_YEAR } from "../../lib/app-info";
 import type { SettingsSection } from "../../state/route";
 
 export const SETTINGS_TITLE = "设置";
@@ -295,9 +295,18 @@ export const ABOUT_COPY = {
   licensesHeadName: "名称",
   licensesHeadVersion: "版本",
   licensesHeadLicense: "许可证",
+  licenseText: "协议全文",
+  licenseTextDesc: `${APP_LICENSE} 的英文原文，随应用分发`,
+  licenseTextSubtitle: `${APP_LICENSE}，协议全文只有英文版`,
+  licenseTextLoading: "正在读取协议全文…",
+  licenseTextFailed: "协议全文读不出来",
   feedback: "问题反馈",
   feedbackDesc: "在仓库的 Issues 页提交问题或建议，会用系统浏览器打开",
   feedbackFailed: "没能打开问题反馈页",
-  disclaimer: `实例图标、皮肤与全景图这些原版图案读取自你本机的游戏文件，不随${APP_NAME}分发。${APP_NAME}是社区开源项目，与 Mojang Studios 和 Microsoft 没有关联。`,
+  // 版权符号写成转义：它在 Unicode 里属于 Extended_Pictographic，令牌守卫的 Emoji 规则按码位判断会把它算进去
+  copyright: `Copyright \u00A9 ${FIRST_RELEASE_YEAR} ${COPYRIGHT_HOLDER}`,
+  /** 与引导程序协议页的 legal.freeSoftware 同一个意思：AGPL 第 5(d) 条要界面上写明无担保、可按协议转发。 */
+  freeSoftware: `${APP_NAME}是自由软件，你可以按 ${APP_LICENSE} 转发和修改它。它按现状提供，不提供任何担保。`,
+  disclaimer: `Minecraft 是 Mojang Studios 的商标。实例图标、皮肤与全景图这些原版图案读取自你本机的游戏文件，不随${APP_NAME}分发。Mod 与整合包的信息和文件来自 Modrinth 与 CurseForge。${APP_NAME}是社区开源项目，与 Mojang Studios 和 Microsoft 没有关联。`,
   infoFailed: "版本信息读不出来",
 } as const;

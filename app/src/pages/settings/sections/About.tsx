@@ -1,7 +1,8 @@
-// 关于：品牌卡、启动器更新卡、版本信息、支持入口（日志目录、第三方许可、问题反馈）、关于原版图案与商标的声明。
+// 关于：品牌卡、启动器更新卡、版本信息、支持入口（日志目录、协议全文、第三方许可、问题反馈）、
+// 页尾的版权与无担保声明（AGPL 第 5(d) 条要求界面上有），以及商标、原版图案与数据来源的声明。
 // 更新面板由外壳挂载。版本、发布通道与构建日期取构建时注入的构建信息：它和安装包、更新器比较用的是同一个版本号。
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { PetalMark } from "../../../art/PetalMark";
 import { Spinner } from "../../../art/Spinner";
 import { RELEASE_CHANNEL_LABEL } from "../../../copy/flows";
@@ -11,7 +12,8 @@ import { APP_LICENSE, APP_NAME, APP_NAME_EN, buildInfo, ISSUES_URL, REPO_URL, ty
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncherActions } from "../../../state/launcher";
-import { useThirdPartyLicenses, type ThirdPartyPackage } from "../../../state/queries/about";
+import { useLicenseText, useThirdPartyLicenses, type ThirdPartyPackage } from "../../../state/queries/about";
+import type { ResourceResult } from "../../../state/resource";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
 import { Card } from "../../../ui/Card";
@@ -102,46 +104,68 @@ function LicenseGroup({ title, packages }: { title: string; packages: readonly T
   );
 }
 
-/** 清单体积大，弹窗打开时才去读；读过一次之后整个会话复用。 */
-function LicensesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const manifest = useThirdPartyLicenses(open);
-  let body;
-  let subtitle: string | undefined;
-  if (manifest.status === "error") {
-    body = (
+/** 弹窗里按需读取的内容：读取中转圈；读失败写明原因、给重试，不静默留白；读到了交给 children 渲染。 */
+function LoadedBody<T>({ resource, loading, failed, children }: { resource: ResourceResult<T>; loading: string; failed: string; children: (data: T) => ReactNode }) {
+  if (resource.status === "error") {
+    return (
       <Callout
         tone="danger"
         announce
         action={
-          <Button size="sm" onClick={() => manifest.reload()}>
+          <Button size="sm" onClick={() => resource.reload()}>
             {LOAD_COPY.retry}
           </Button>
         }
       >
-        <span className={s.calloutTitle}>{ABOUT_COPY.licensesFailed}</span>
-        <span className={s.errorText}>{manifest.error.message}</span>
+        <span className={s.calloutTitle}>{failed}</span>
+        <span className={s.errorText}>{resource.error.message}</span>
       </Callout>
     );
-  } else if (manifest.status === "loading") {
-    body = (
+  }
+  if (resource.status === "loading") {
+    return (
       <div className={s.licensesLoading} role="status">
         <Spinner size={20} />
-        <span>{ABOUT_COPY.licensesLoading}</span>
-      </div>
-    );
-  } else {
-    const { packages } = manifest.data;
-    subtitle = ABOUT_COPY.licensesSubtitle(packages.length);
-    body = (
-      <div className={s.licenses}>
-        <LicenseGroup title={ABOUT_COPY.licensesNpm} packages={packages.filter((p) => p.ecosystem === "npm")} />
-        <LicenseGroup title={ABOUT_COPY.licensesCargo} packages={packages.filter((p) => p.ecosystem === "cargo")} />
+        <span>{loading}</span>
       </div>
     );
   }
+  return children(resource.data);
+}
+
+/** 清单体积大，弹窗打开时才去读；读过一次之后整个会话复用。 */
+function LicensesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const manifest = useThirdPartyLicenses(open);
+  const subtitle = manifest.status === "ready" ? ABOUT_COPY.licensesSubtitle(manifest.data.packages.length) : undefined;
   return (
     <Modal open={open} onClose={onClose} size="md" icon="file-text" title={ABOUT_COPY.licenses} subtitle={subtitle}>
-      {body}
+      <LoadedBody resource={manifest} loading={ABOUT_COPY.licensesLoading} failed={ABOUT_COPY.licensesFailed}>
+        {({ packages }) => (
+          <div className={s.licenses}>
+            <LicenseGroup title={ABOUT_COPY.licensesNpm} packages={packages.filter((p) => p.ecosystem === "npm")} />
+            <LicenseGroup title={ABOUT_COPY.licensesCargo} packages={packages.filter((p) => p.ecosystem === "cargo")} />
+          </div>
+        )}
+      </LoadedBody>
+    </Modal>
+  );
+}
+
+/**
+ * 协议全文随产物分发（构建时写出 LICENSE.txt），弹窗打开时才去读；读过一次之后整个会话复用。
+ * 弹窗主体自己滚动，原文块可聚焦，键盘聚焦到它就能翻页。lg 宽才放得下原文 80 列左右的排版，不至于行行折断。
+ */
+function LicenseTextDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const license = useLicenseText(open);
+  return (
+    <Modal open={open} onClose={onClose} size="lg" icon="file-text" title={ABOUT_COPY.licenseText} subtitle={ABOUT_COPY.licenseTextSubtitle}>
+      <LoadedBody resource={license} loading={ABOUT_COPY.licenseTextLoading} failed={ABOUT_COPY.licenseTextFailed}>
+        {(text) => (
+          <pre className={s.licenseText} role="region" aria-label={ABOUT_COPY.licenseText} tabIndex={0}>
+            {text}
+          </pre>
+        )}
+      </LoadedBody>
     </Modal>
   );
 }
@@ -150,6 +174,7 @@ function SupportCard() {
   const run = useRunner();
   const actions = useLauncherActions();
   const commands = useSettingsCommands();
+  const [licenseTextOpen, setLicenseTextOpen] = useState(false);
   const [licensesOpen, setLicensesOpen] = useState(false);
   return (
     <Card>
@@ -157,6 +182,11 @@ function SupportCard() {
       <SettingRow title={ABOUT_COPY.openLogs} description={ABOUT_COPY.openLogsDesc}>
         <Button size="sm" variant="ghost" icon="folder-open" onClick={() => void run(() => commands.openLauncherLogs(), ABOUT_COPY.openLogsFailed)}>
           {ABOUT_COPY.open}
+        </Button>
+      </SettingRow>
+      <SettingRow title={ABOUT_COPY.licenseText} description={ABOUT_COPY.licenseTextDesc}>
+        <Button size="sm" variant="ghost" icon="file-text" onClick={() => setLicenseTextOpen(true)}>
+          {ABOUT_COPY.view}
         </Button>
       </SettingRow>
       <SettingRow title={ABOUT_COPY.licenses} description={ABOUT_COPY.licensesDesc}>
@@ -169,6 +199,7 @@ function SupportCard() {
           {ABOUT_COPY.open}
         </Button>
       </SettingRow>
+      <LicenseTextDialog open={licenseTextOpen} onClose={() => setLicenseTextOpen(false)} />
       <LicensesDialog open={licensesOpen} onClose={() => setLicensesOpen(false)} />
     </Card>
   );
@@ -182,7 +213,9 @@ export function AboutSection() {
       <UpdateCard />
       <VersionCard build={build} />
       <SupportCard />
-      <Inset>
+      <Inset className={s.notices}>
+        <p className={s.disclaimer}>{ABOUT_COPY.copyright}</p>
+        <p className={s.disclaimer}>{ABOUT_COPY.freeSoftware}</p>
         <p className={s.disclaimer}>{ABOUT_COPY.disclaimer}</p>
       </Inset>
     </>

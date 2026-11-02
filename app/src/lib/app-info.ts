@@ -22,6 +22,11 @@ export const ISSUES_URL = `${REPO_URL}/issues`;
 /** 开源协议的 SPDX 写法，与仓库根目录的 LICENSE 一致：只授权第 3 版，没有「或任何更高版本」，故为 -only。Rust 侧的 Cargo 元数据由一致性测试钉住同值。 */
 export const APP_LICENSE = "AGPL-3.0-only";
 
+/** 版权持有人：版权声明里的署名。 */
+export const COPYRIGHT_HOLDER = "Shinoyuki_Miyako";
+/** 首次发布的年份：版权声明从这一年算起。 */
+export const FIRST_RELEASE_YEAR = 2026;
+
 /** 版本号、发布通道与构建时间。只有经 vite 构建或开发服务器加载的代码里才有；没注入就是构建配置坏了，直接报错。 */
 export function buildInfo(): BuildInfo {
   if (typeof __PETALFALL_BUILD__ === "undefined") throw new Error("构建信息没有注入：只有经 vite 构建或开发服务器加载时才有");
@@ -42,7 +47,7 @@ export async function loadThirdPartyLicenses(): Promise<ThirdPartyManifest> {
   return (await response.json()) as ThirdPartyManifest;
 }
 
-/** 协议全文：只有引导程序的产物带这个文件。 */
+/** 协议全文：关于页与引导程序的协议页都用它，用到时才去读。 */
 export async function loadLicenseText(): Promise<string> {
   const url = `${import.meta.env.BASE_URL}${LICENSE_TEXT_FILE}`;
   const response = await fetch(url);
