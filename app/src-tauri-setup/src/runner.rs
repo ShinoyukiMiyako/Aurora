@@ -1220,7 +1220,7 @@ mod tests {
         expected_arguments.push(&bench.instdir);
         assert_eq!(calls[0].arguments, expected_arguments);
         assert_eq!(calls[0].payload, bench.payload);
-        assert_eq!(calls[0].exe.file_name().unwrap(), "petalfall-nsis.exe");
+        assert_eq!(calls[0].exe.file_name().unwrap(), "Petalfall-NSIS.exe");
         assert_eq!(calls[0].exe.parent().unwrap(), calls[0].cwd);
         assert!(calls[0].cwd.starts_with(&bench.roots.temp));
         assert!(bench.temp_is_empty());

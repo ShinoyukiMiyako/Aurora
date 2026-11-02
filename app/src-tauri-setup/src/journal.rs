@@ -643,11 +643,11 @@ mod tests {
         assert!(!SystemProcesses.payload_alive(std::process::id()).unwrap());
     }
 
-    #[test]
-    fn system_processes_sees_a_live_payload_and_notices_when_it_exits() {
-        // cmd.exe 的副本改名成载荷，stdin 管道开着时它一直等输入，关掉就退出；全程不碰真实安装包
+    /// cmd.exe 的副本改名成 `image_name`，stdin 管道开着时它一直等输入，关掉就退出；全程不碰真实安装包。
+    /// 返回它还在跑时和退出后各问一次的回答。
+    fn alive_then_after_exit(image_name: &str) -> (bool, bool) {
         let dir = tempfile::tempdir().unwrap();
-        let image = dir.path().join(PAYLOAD_NAME);
+        let image = dir.path().join(image_name);
         let cmd = Path::new(&std::env::var_os("SystemRoot").unwrap()).join(r"System32\cmd.exe");
         fs::copy(cmd, &image).unwrap();
         let mut child = Command::new(&image)
@@ -662,8 +662,17 @@ mod tests {
         drop(child.stdin.take());
         child.wait().unwrap();
         let after_exit = SystemProcesses.payload_alive(pid).unwrap();
+        (alive, after_exit)
+    }
 
-        assert!(alive);
-        assert!(!after_exit);
+    #[test]
+    fn system_processes_sees_a_live_payload_and_notices_when_it_exits() {
+        assert_eq!(alive_then_after_exit(PAYLOAD_NAME), (true, false));
+    }
+
+    #[test]
+    fn system_processes_sees_the_lowercase_payload_of_an_older_bootstrapper() {
+        // 旧版引导程序解出的载荷叫这个名字：接手它留下的半装时，不能把还在跑的载荷当成已退出就去核验
+        assert_eq!(alive_then_after_exit("petalfall-nsis.exe"), (true, false));
     }
 }

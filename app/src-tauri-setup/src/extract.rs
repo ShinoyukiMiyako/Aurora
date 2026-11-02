@@ -19,7 +19,9 @@ use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use crate::contract::{Failure, FailureCode};
 
 pub const TEMP_PREFIX: &str = "Petalfall-Setup-";
-pub const PAYLOAD_NAME: &str = "petalfall-nsis.exe";
+/// 只能改大小写：半装恢复按镜像名认载荷还在不在跑，每个发出去的引导程序都不分大小写比较
+/// （`journal::SystemProcesses::payload_alive`），新旧版本接手对方留下的半装时才认得出对方解出的载荷。
+pub const PAYLOAD_NAME: &str = "Petalfall-NSIS.exe";
 /// 更新的目录可能属于正在运行的另一次安装。
 pub const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -220,7 +222,7 @@ mod tests {
 
         let extracted = extract(Cursor::new(&payload), &header_for(&payload), temp.path()).unwrap();
 
-        assert_eq!(extracted.path().file_name().unwrap(), "petalfall-nsis.exe");
+        assert_eq!(extracted.path().file_name().unwrap(), "Petalfall-NSIS.exe");
         let dir = extracted
             .dir()
             .file_name()
