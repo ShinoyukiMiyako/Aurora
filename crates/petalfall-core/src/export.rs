@@ -1756,6 +1756,7 @@ mod tests {
                 remote_files: 0,
                 override_files: 0,
                 installed_at: 1,
+                recommended_ram_mb: None,
             };
             std::fs::write(
                 dir.join(PETALFALL_META_DIR).join("modpack.json"),

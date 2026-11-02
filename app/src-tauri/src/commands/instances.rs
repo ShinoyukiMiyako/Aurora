@@ -4321,6 +4321,7 @@ mod tests {
             remote_files: 80,
             override_files: 12,
             installed_at: 1,
+            recommended_ram_mb: None,
         };
         let settings = VersionSettings {
             memory_mb: Some(6144),
