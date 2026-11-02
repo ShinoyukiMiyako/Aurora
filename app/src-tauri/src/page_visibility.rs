@@ -23,8 +23,8 @@ pub fn is_minimized(iconic: bool, size: PhysicalSize<u32>) -> bool {
 }
 
 /// 页面当前的可见性记录。初值是可见，与 wry 创建 controller 时一致：窗口以 `visible: false` 创建，但前端
-/// 要靠 rAF 画完首帧才显示窗口，窗口还没显示不等于页面不可见。回调都在 UI 线程上，原子量只是为了满足监听器
-/// 的 `Send`。
+/// 要靠 rAF 画完首帧才显示窗口，窗口还没显示不等于页面不可见。监听器是 `Fn`，记录只能靠内部可变；回调都在
+/// UI 线程上，没有竞争，内存序用最宽松的就够。
 #[derive(Debug, Default)]
 pub struct PageVisibility {
     hidden: AtomicBool,

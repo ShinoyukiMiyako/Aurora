@@ -150,7 +150,8 @@ aurora-launch / aurora-install / aurora-instance / aurora-modplatform / ...
 | `events.rs` | 门面事件转发成 Tauri 事件 |
 | `textures.rs` | 自定义协议 `aurora-tex`：从游戏 jar 读取原版材质给前端，不经过门面锁 |
 | `logging.rs` | tracing subscriber，每次启动写一个日志文件 |
-| `window.rs` | 主窗口兜底显示；生产构建关闭 WebView2 浏览器快捷键；装上原生拖放与渲染进程故障后的自动重载 |
+| `window.rs` | 主窗口兜底显示；生产构建关闭 WebView2 浏览器快捷键；装上原生拖放、渲染进程故障后的自动重载与页面可见性同步 |
+| `page_visibility.rs` | 主窗口最小化时把 WebView2 的 `IsVisible` 设为假，还原时设回真：WebView2 收不到顶层窗口的这两个消息，不告诉它就一直按可见出帧。只在状态翻转时才碰 controller，JS 与事件在隐藏期间照常运行 |
 | `drop.rs` | 主窗口原生拖放：在 WebView2 的子窗口上注册自己的 `IDropTarget`，读拖入的文件列表与 authlib-injector 服务器链接，经 `aurora://window-drop` 推给前端 |
 | `renderer.rs` | 主窗口 WebView2 渲染进程退出或无响应时自动重载页面，60 秒内最多 2 次；用完即停下并记 error，之后安静满 60 秒才重新计数。停下后网页里的标题栏与关闭键都没了，关闭请求（Alt+F4、任务栏）由后端直接销毁窗口 |
 | `exit.rs` | 正常退出（`RunEvent::Exit`）时的收尾：先补写游玩记录里待补的改动（限时 3 秒），再按需拉起更新安装程序 |
