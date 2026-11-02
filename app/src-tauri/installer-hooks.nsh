@@ -36,6 +36,43 @@ Function PetalfallRestoreLegacyDir
   Pop $0
 FunctionEnd
 
+; 更新器启动安装包从不带 /D=，老安装的目录只在老键里，.onInit 读不到就落回默认目录，
+; 新版装到别处，原来那份和指向它的快捷方式都还是旧版。静默更新不走 .onGUIInit，只能在这里纠正。
+; 卸载项的键只按产品名拼，改发布者不受影响，按它记的 InstallLocation 找回目录。
+; 只纠正模板自己推出来的两种目录，命令行显式给的 /D= 照用；引导器从不带 /UPDATE，它的 /S /D= 不经过这里。
+!macro NSIS_HOOK_PREINSTALL
+  ; 上面直接读写 HKCU，这里的 SHCTX 也只在当前用户安装时才是 HKCU
+  !if "${INSTALLMODE}" != "currentUser"
+    !error "安装钩子按 currentUser 安装模式写成，当前是 ${INSTALLMODE}"
+  !endif
+  ${If} $UpdateMode = 1
+    Push $0
+    Push $1
+    ReadRegStr $0 SHCTX "${UNINSTKEY}" "InstallLocation"
+    ; 模板写入时两头加了引号
+    StrCpy $1 $0 1
+    ${If} $1 == '"'
+      StrCpy $0 $0 -1 1
+    ${EndIf}
+    ReadRegStr $1 SHCTX "${MANUPRODUCTKEY}" ""
+    ${If} $INSTDIR == "$LOCALAPPDATA\${PRODUCTNAME}"
+    ${OrIf} $INSTDIR == $1
+      ${If} $0 != ""
+      ${AndIf} $0 != $INSTDIR
+      ${AndIf} ${FileExists} "$0\${MAINBINARYNAME}.exe"
+        StrCpy $1 $INSTDIR
+        StrCpy $INSTDIR $0
+        ; File 往 $OUTDIR 里放，光改 $INSTDIR 不够；当前目录也删不掉，得先切走
+        SetOutPath $INSTDIR
+        ; 模板的 SetOutPath 刚建出这个目录，不带 /r，里面有东西就留着
+        RMDir "$1"
+      ${EndIf}
+    ${EndIf}
+    Pop $1
+    Pop $0
+  ${EndIf}
+!macroend
+
 ; 走到这里模板已把目录写进新键。老键留着的话卸载只清新键，老键永远删不掉，
 ; 引导器在新键缺失时还会退回去读它，拿到早已不用的目录。
 !macro NSIS_HOOK_POSTINSTALL

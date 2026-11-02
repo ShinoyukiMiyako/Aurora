@@ -74,6 +74,16 @@ function expectRegistersRestored(code: string[]): void {
 }
 
 // 运行期逻辑整个包在第一层 ${If} 里：嵌套深度第一次回到 0 的就是最后一行
+function expectWrappedByFirstIf(code: string[]): void {
+  let depth = 0;
+  const depths = code.map((line) => {
+    if (line.startsWith("${If} ")) depth += 1;
+    if (line === "${EndIf}") depth -= 1;
+    return depth;
+  });
+  expect(depths.indexOf(0)).toBe(code.length - 1);
+}
+
 const brandSource = "crates/petalfall-base/src/brand.rs";
 const authSource = "crates/petalfall-core/src/auth.rs";
 const configSource = "crates/petalfall-core/src/config.rs";
@@ -221,6 +231,65 @@ describe("老安装第一次被新包交互或被动安装", () => {
 
   it("用到的寄存器原样还回去", () => {
     expectRegistersRestored(code);
+  });
+});
+
+describe("更新器静默更新老安装", () => {
+  const code = instructions(macroBody("NSIS_HOOK_PREINSTALL"));
+  const runtime = code.slice(3);
+
+  it("编译期只认当前用户安装", () => {
+    // 钩子直接读写 HKCU，SHCTX 也只在当前用户安装时落在 HKCU
+    expect(code.slice(0, 3)).toEqual([
+      '!if "${INSTALLMODE}" != "currentUser"',
+      expect.stringMatching(/^!error "/),
+      "!endif",
+    ]);
+  });
+
+  it("只在更新模式下动目录，引导器的 /S /D= 不经过这里", () => {
+    expect(runtime[0]).toBe("${If} $UpdateMode = 1");
+    expectWrappedByFirstIf(runtime);
+  });
+
+  it("目录取自卸载项的 InstallLocation，去掉模板加的引号", () => {
+    const read = runtime.indexOf('ReadRegStr $0 SHCTX "${UNINSTKEY}" "InstallLocation"');
+    expect(read).toBeGreaterThan(0);
+    expect(runtime.slice(read + 1, read + 5)).toEqual([
+      "StrCpy $1 $0 1",
+      `\${If} $1 == '"'`,
+      "StrCpy $0 $0 -1 1",
+      "${EndIf}",
+    ]);
+  });
+
+  it("只替换模板自己推出来的默认目录或新键里的目录", () => {
+    const replace = runtime.indexOf("StrCpy $INSTDIR $0");
+    expect(replace).toBeGreaterThan(5);
+    expect(runtime.slice(replace - 6, replace)).toEqual([
+      '${If} $INSTDIR == "$LOCALAPPDATA\\${PRODUCTNAME}"',
+      "${OrIf} $INSTDIR == $1",
+      '${If} $0 != ""',
+      "${AndIf} $0 != $INSTDIR",
+      '${AndIf} ${FileExists} "$0\\${MAINBINARYNAME}.exe"',
+      "StrCpy $1 $INSTDIR",
+    ]);
+    // 比对时 $1 得是新键里的目录：往前找最近一次写 $1 的指令
+    const lastWrite = runtime
+      .slice(0, replace - 6)
+      .reverse()
+      .find((line) => /^(?:StrCpy|ReadRegStr) \$1 /.test(line));
+    expect(lastWrite).toBe('ReadRegStr $1 SHCTX "${MANUPRODUCTKEY}" ""');
+  });
+
+  it("换目录后重新 SetOutPath，再非递归删掉模板建出的目录", () => {
+    // File 往 $OUTDIR 里放；RMDir 删不掉当前目录，必须先切走
+    const replace = runtime.indexOf("StrCpy $INSTDIR $0");
+    expect(runtime.slice(replace, replace + 3)).toEqual(["StrCpy $INSTDIR $0", "SetOutPath $INSTDIR", 'RMDir "$1"']);
+  });
+
+  it("用到的寄存器原样还回去", () => {
+    expectRegistersRestored(runtime);
   });
 });
 
