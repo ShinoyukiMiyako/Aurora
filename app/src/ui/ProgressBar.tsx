@@ -64,7 +64,9 @@ export function useSmoothProgress(value: number, track?: string): { smooth: Moti
     const step = nextProgressTarget(state.current, track, value);
     state.current = { track: step.track, target: step.target };
     if (step.jump || reduced) smooth.jump(step.target);
-    else smooth.set(step.target);
+    // jump 只停得住在跑的弹簧，停不住已排进帧循环、还没起步的那一次；页面 hidden 时帧不来，那一次会一直排着，
+    // 帧恢复后拿 jump 之前的目标起弹簧。这里把排着的目标换成当前值，起步时已到目标就不动
+    smooth.set(step.target);
   }, [smooth, track, value, reduced]);
 
   return { smooth, target: next.target };
