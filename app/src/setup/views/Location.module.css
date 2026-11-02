@@ -4,21 +4,6 @@
   gap: var(--sk-space-16);
 }
 
-.dirRow {
-  display: flex;
-  align-items: center;
-  gap: var(--sk-space-8);
-}
-
-.dirInput {
-  flex: 1;
-  min-width: 0;
-}
-
-.dirInput input {
-  font-family: var(--sk-mono);
-}
-
 /* 空着也占一行：校验结果回来时下面的复选框不跳 */
 .hint {
   display: flex;

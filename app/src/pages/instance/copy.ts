@@ -143,6 +143,8 @@ export const OVERVIEW_COPY = {
   queuedTitle: "安装任务排队中",
   queuedBody: "等前面的任务完成后自动开始",
   installProgress: (pct: string, speed: string, total: string | null) => (total === null ? `${pct} · ${speed}` : `${pct} · ${speed} · 共 ${total}`),
+  /** 分步任务的百分比是整体进度；「共多少」只是当前这一步那批的量，放一起会被读成全部大小，所以不写。 */
+  installStepProgress: (pct: string, step: string, speed: string) => `${pct} · ${step} · ${speed}`,
   viewTasks: "查看下载任务",
   failedTitle: (title: string) => `上次启动失败：${title}`,
   crashTitle: (relative: string) => `上次启动崩溃了 · ${relative}`,

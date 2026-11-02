@@ -38,6 +38,52 @@ function targets(body: string, command: string): string[] {
     .sort();
 }
 
+function functionBody(name: string): string {
+  const body = new RegExp(`^Function ${name}$([\\s\\S]*?)^FunctionEnd$`, "m").exec(hooks)?.[1];
+  if (body === undefined) throw new Error(`钩子里找不到函数 ${name}`);
+  return body;
+}
+
+// 宏里的 !define 要到 !insertmacro 才生效，MUI 生成 .onGUIInit 和编译函数体时都还看不到，所以只认宏外的
+function fileDefine(name: string): string {
+  const outsideMacros = hooks.replace(/^!macro\b[\s\S]*?^!macroend$/gm, "");
+  const value = new RegExp(`^!define ${name} (.+)$`, "m").exec(outsideMacros)?.[1];
+  if (value === undefined) throw new Error(`钩子的宏外找不到 !define ${name}`);
+  return value.replace(/^"(.*)"$/, "$1");
+}
+
+function instructions(body: string): string[] {
+  return body
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "" && !line.startsWith(";"));
+}
+
+// 压栈的寄存器要按相反顺序弹回，写过的寄存器都得先压栈，不然调用方的值被冲掉
+function expectRegistersRestored(code: string[]): void {
+  const pushed = code.filter((line) => line.startsWith("Push ")).map((line) => line.slice("Push ".length));
+  const popped = code.filter((line) => line.startsWith("Pop ")).map((line) => line.slice("Pop ".length));
+  expect(pushed.length).toBeGreaterThan(0);
+  expect(popped).toEqual([...pushed].reverse());
+  const written = code
+    .map((line) => /^(?:StrCpy|ReadRegStr) (\$R?\d)\b/.exec(line))
+    .filter((match): match is RegExpExecArray => match !== null)
+    .map((match) => match[1]);
+  expect(written.length).toBeGreaterThan(0);
+  expect(written.filter((register) => !pushed.includes(register))).toEqual([]);
+}
+
+// 运行期逻辑整个包在第一层 ${If} 里：嵌套深度第一次回到 0 的就是最后一行
+function expectWrappedByFirstIf(code: string[]): void {
+  let depth = 0;
+  const depths = code.map((line) => {
+    if (line.startsWith("${If} ")) depth += 1;
+    if (line === "${EndIf}") depth -= 1;
+    return depth;
+  });
+  expect(depths.indexOf(0)).toBe(code.length - 1);
+}
+
 const brandSource = "crates/petalfall-base/src/brand.rs";
 const authSource = "crates/petalfall-core/src/auth.rs";
 const configSource = "crates/petalfall-core/src/config.rs";
@@ -143,5 +189,131 @@ describe("安装包配置", () => {
     const license = join(TAURI_DIR, conf.bundle.licenseFile);
     expect(existsSync(license)).toBe(true);
     expect(readFileSync(license, "utf8")).toContain("GNU AFFERO GENERAL PUBLIC LICENSE");
+  });
+});
+
+describe("发布者改名后的目录键", () => {
+  it("新键就是模板按发布者和产品名拼出的 MANUPRODUCTKEY", () => {
+    expect(fileDefine("PETALFALL_DIR_KEY")).toBe(`Software\\${conf.bundle.publisher}\\${conf.productName}`);
+  });
+
+  it("老键是 dev.10 及更早的包记目录的位置", () => {
+    // 那时没设发布者，模板取 identifier 的第二段；这些包已经发出去，这个值不跟着配置变
+    expect(fileDefine("PETALFALL_LEGACY_DIR_KEY")).toBe("Software\\petalfall\\Petalfall");
+    expect(fileDefine("PETALFALL_LEGACY_DIR_KEY")).not.toBe(fileDefine("PETALFALL_DIR_KEY"));
+  });
+});
+
+describe("老安装第一次被新包交互或被动安装", () => {
+  const name = fileDefine("MUI_CUSTOMFUNCTION_GUIINIT");
+  const code = instructions(functionBody(name));
+
+  it("MUI 生成的 .onGUIInit 调的是本文件里的函数", () => {
+    expect(hooks.match(new RegExp(`^Function ${name}$`, "gm"))).toHaveLength(1);
+  });
+
+  it("新键空着且老键有值时才把老目录抄进新键", () => {
+    expect(code.slice(2, 4)).toEqual([
+      'ReadRegStr $0 HKCU "${PETALFALL_DIR_KEY}" ""',
+      'ReadRegStr $1 HKCU "${PETALFALL_LEGACY_DIR_KEY}" ""',
+    ]);
+    const write = code.indexOf('WriteRegStr HKCU "${PETALFALL_DIR_KEY}" "" $1');
+    expect(write).toBeGreaterThan(1);
+    expect(code.slice(write - 2, write)).toEqual(['${If} $0 == ""', '${AndIf} $1 != ""']);
+  });
+
+  it("只替换模板的默认目录，命令行带 /D= 的不动", () => {
+    expect(code.filter((line) => line.startsWith("StrCpy $INSTDIR "))).toEqual(["StrCpy $INSTDIR $1"]);
+    const replace = code.indexOf("StrCpy $INSTDIR $1");
+    expect(code[replace - 1]).toBe(`\${If} $INSTDIR == "$LOCALAPPDATA\\${conf.productName}"`);
+    expect(code[replace + 1]).toBe("${EndIf}");
+  });
+
+  it("用到的寄存器原样还回去", () => {
+    expectRegistersRestored(code);
+  });
+});
+
+describe("更新器静默更新老安装", () => {
+  const code = instructions(macroBody("NSIS_HOOK_PREINSTALL"));
+  const runtime = code.slice(3);
+
+  it("编译期只认当前用户安装", () => {
+    // 钩子直接读写 HKCU，SHCTX 也只在当前用户安装时落在 HKCU
+    expect(code.slice(0, 3)).toEqual([
+      '!if "${INSTALLMODE}" != "currentUser"',
+      expect.stringMatching(/^!error "/),
+      "!endif",
+    ]);
+  });
+
+  it("只在更新模式下动目录，引导器的 /S /D= 不经过这里", () => {
+    expect(runtime[0]).toBe("${If} $UpdateMode = 1");
+    expectWrappedByFirstIf(runtime);
+  });
+
+  it("目录取自卸载项的 InstallLocation，去掉模板加的引号", () => {
+    const read = runtime.indexOf('ReadRegStr $0 SHCTX "${UNINSTKEY}" "InstallLocation"');
+    expect(read).toBeGreaterThan(0);
+    expect(runtime.slice(read + 1, read + 5)).toEqual([
+      "StrCpy $1 $0 1",
+      `\${If} $1 == '"'`,
+      "StrCpy $0 $0 -1 1",
+      "${EndIf}",
+    ]);
+  });
+
+  it("只替换模板自己推出来的默认目录或新键里的目录", () => {
+    const replace = runtime.indexOf("StrCpy $INSTDIR $0");
+    expect(replace).toBeGreaterThan(5);
+    expect(runtime.slice(replace - 6, replace)).toEqual([
+      '${If} $INSTDIR == "$LOCALAPPDATA\\${PRODUCTNAME}"',
+      "${OrIf} $INSTDIR == $1",
+      '${If} $0 != ""',
+      "${AndIf} $0 != $INSTDIR",
+      '${AndIf} ${FileExists} "$0\\${MAINBINARYNAME}.exe"',
+      "StrCpy $1 $INSTDIR",
+    ]);
+    // 比对时 $1 得是新键里的目录：往前找最近一次写 $1 的指令
+    const lastWrite = runtime
+      .slice(0, replace - 6)
+      .reverse()
+      .find((line) => /^(?:StrCpy|ReadRegStr) \$1 /.test(line));
+    expect(lastWrite).toBe('ReadRegStr $1 SHCTX "${MANUPRODUCTKEY}" ""');
+  });
+
+  it("换目录后重新 SetOutPath，再非递归删掉模板建出的目录", () => {
+    // File 往 $OUTDIR 里放；RMDir 删不掉当前目录，必须先切走
+    const replace = runtime.indexOf("StrCpy $INSTDIR $0");
+    expect(runtime.slice(replace, replace + 3)).toEqual(["StrCpy $INSTDIR $0", "SetOutPath $INSTDIR", 'RMDir "$1"']);
+  });
+
+  it("用到的寄存器原样还回去", () => {
+    expectRegistersRestored(runtime);
+  });
+});
+
+describe("安装完成后清掉老键", () => {
+  const code = instructions(macroBody("NSIS_HOOK_POSTINSTALL"));
+
+  it("编译期核对新键就是模板的 MANUPRODUCTKEY，且和老键不同", () => {
+    expect(code.slice(0, 6)).toEqual([
+      '!if "${MANUPRODUCTKEY}" != "${PETALFALL_DIR_KEY}"',
+      expect.stringMatching(/^!error "/),
+      "!endif",
+      '!if "${MANUPRODUCTKEY}" == "${PETALFALL_LEGACY_DIR_KEY}"',
+      expect.stringMatching(/^!error "/),
+      "!endif",
+    ]);
+  });
+
+  it("只删老键和空了的老发布者键", () => {
+    const legacy = fileDefine("PETALFALL_LEGACY_DIR_KEY");
+    expect(code.slice(6)).toEqual([
+      'DeleteRegKey HKCU "${PETALFALL_LEGACY_DIR_KEY}"',
+      `DeleteRegKey /ifempty HKCU "${legacy.slice(0, legacy.lastIndexOf("\\"))}"`,
+    ]);
+    // 上面只看了安装后钩子，这里确认整份钩子没有别的删注册表
+    expect(hooks.match(/^\s*DeleteReg(?:Key|Value) /gm)).toHaveLength(2);
   });
 });

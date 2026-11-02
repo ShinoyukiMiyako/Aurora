@@ -68,8 +68,10 @@ export interface SetupCopy {
     installHere: string;
     issue: Readonly<Record<DirIssue, string>>;
     resume: string;
+    /** 目录里有别的文件、在里面另建了一层：说清楚会新建文件夹，实际路径由 finalPath 另起一行。 */
+    nested: string;
     notEmpty: string;
-    /** 目录里有别的文件时追加了一层，用户要看到实际落在哪。 */
+    /** 另建了一层时，用户要看到实际落在哪。 */
     finalPath(path: string): string;
     space(needed: string, free: string): string;
   };
@@ -177,6 +179,7 @@ const ZH: SetupCopy = {
       no_space: "这块盘空间不够",
     },
     resume: "这里有之前留下的设置和游戏文件，装好后接着用。",
+    nested: `这个文件夹里已经有别的文件，会在里面新建一个 ${APP_NAME_EN} 文件夹来装`,
     notEmpty: "这个文件夹里已经有别的文件，建议换一个空文件夹",
     finalPath: (path) => `实际会装到 ${path}`,
     space: (needed, free) => `需要约 ${needed}，这块盘还剩 ${free}`,
@@ -312,6 +315,7 @@ const EN: SetupCopy = {
       no_space: "Not enough space on this drive",
     },
     resume: "This folder has settings and game files from before. They'll carry over.",
+    nested: `This folder already has other files, so setup will make a ${APP_NAME_EN} folder inside it`,
     notEmpty: "This folder already has other files. An empty folder is a better choice",
     finalPath: (path) => `Will install to ${path}`,
     space: (needed, free) => `Needs about ${needed}, ${free} free on this drive`,

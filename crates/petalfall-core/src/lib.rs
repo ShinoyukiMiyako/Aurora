@@ -82,7 +82,7 @@ pub use config::{
 pub use crashdiag::{CrashClue, CrashReport, CrashSource, CrashSuspect, LaunchLog, ScannedFile};
 pub use deps::{InstallPlan, PlannedItem};
 pub use error::{CoreError, GameDirProblem, JavaPathProblem, OfflineFallbackRefusal, Result};
-pub use event::{CoreEvent, DownloadProgress, EventSink};
+pub use event::{CoreEvent, DownloadProgress, EventSink, InstallPhase};
 pub use export::{
     BundleReason, ExportBlock, ExportBundledMod, ExportExtra, ExportExtraStat, ExportIndexedMod,
     ExportMatch, ModpackExportOptions, ModpackExportOutcome, ModpackExportPreview,

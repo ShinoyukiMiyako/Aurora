@@ -18,7 +18,7 @@ import type {
 } from "../ipc/instances";
 import type { LaunchDownloadDto, LogLineDto } from "../ipc/launch";
 import type { TaskRecordDto } from "../ipc/tasks";
-import { BASE_BLOCKING_ACTIVITIES, PLATFORMS, TASK_KINDS, TASK_STATUSES, type AccountKind, type BaseBlockingActivity, type LoaderKind, type LogLine, type Platform, type SessionDownload, type Task } from "./types";
+import { BASE_BLOCKING_ACTIVITIES, INSTALL_PHASES, PLATFORMS, TASK_KINDS, TASK_STATUSES, type AccountKind, type BaseBlockingActivity, type InstallPhase, type LoaderKind, type LogLine, type Platform, type SessionDownload, type Task } from "./types";
 
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], what: string): T {
   if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) throw new Error(`未知的${what}：${String(value)}`);
@@ -453,6 +453,13 @@ export function sessionDownloadFromDto(dto: LaunchDownloadDto): SessionDownload 
   return { done: dto.finished, total: dto.total, bytes: dto.bytes, totalBytes: dto.total_bytes, speedBps: dto.speed };
 }
 
+// ---------------------------------------------------------------- 任务进度
+
+/** 步骤表里有不认识的键，说明前后端的表对不上，算出的「第几步」与进度都不可信。 */
+export function installPhasesFromDto(plan: readonly string[]): InstallPhase[] {
+  return plan.map((key) => oneOf(key, INSTALL_PHASES, "安装步骤"));
+}
+
 // ---------------------------------------------------------------- 任务日志
 
 export function taskFromRecord(dto: TaskRecordDto): Task {
@@ -474,6 +481,7 @@ export function taskFromRecord(dto: TaskRecordDto): Task {
     transferredBytes: dto.transferred_bytes === undefined ? null : dto.transferred_bytes,
     batchTransferred: 0,
     batchFiles: 0,
+    phase: null,
     speedBps: dto.speed_bps,
     startedAt: dto.started_at === undefined ? null : dto.started_at,
     attempt: dto.attempt,

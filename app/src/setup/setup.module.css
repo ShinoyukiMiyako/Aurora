@@ -214,6 +214,63 @@
   box-shadow: var(--sk-focus);
 }
 
+/* ---------------------------------------------------------------- 安装位置 */
+
+/*
+ * 欢迎页、已安装页的只读位置和选目录页的路径输入框是同一行：标签同 Field，框同 TextInput 的 lg 档，按钮也用 lg。
+ * 从欢迎页点「更改」过去，路径原地变成可编辑，字号、框高、文字起点都不跳。
+ * 只读框不做成只读输入框（只读页不该长得像能改），数值只能照抄 lg 档，path-layout.test.ts 钉住两边相等。
+ */
+.pathRow {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sk-space-8);
+}
+
+.pathField {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  min-width: 0;
+  margin: 0;
+}
+
+.pathLabel {
+  color: var(--sk-text);
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  line-height: var(--sk-lh-small);
+}
+
+/* 透明描边也占 1px：文字起点和输入框的「描边 + 内边距」对齐；上下内边距加行高正好凑满框高，单行竖直居中 */
+.pathBox {
+  box-sizing: border-box;
+  height: 44px;
+  margin: 0;
+  padding: var(--sk-space-10) var(--sk-space-14);
+  border: 1px solid transparent;
+  border-radius: var(--sk-r);
+  background: var(--sk-bg-2);
+  overflow: hidden;
+  color: var(--sk-text);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.pathInput {
+  flex: 1;
+  min-width: 0;
+}
+
+.pathInput input {
+  font-family: var(--sk-mono);
+}
+
 /* ---------------------------------------------------------------- 致命错误 */
 
 .fatalDetail {

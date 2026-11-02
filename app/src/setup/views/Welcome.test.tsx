@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, stubPetalTokens } from "../../art/petals/test-canvas";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import { COPY, type SetupCopy } from "../copy";
+import shared from "../setup.module.css";
 import { TestChrome } from "./test-chrome";
 import { Welcome, type WelcomeProps } from "./Welcome";
 
@@ -54,9 +55,16 @@ afterEach(() => {
 describe("内容", () => {
   it("写明要装到哪里，路径完整放在 title 上，单行显示的文字被省略时还能看全", () => {
     mount();
-    const path = [...document.querySelectorAll("span")].find((span) => span.textContent === DIR);
+    const path = document.querySelector("main dd");
+    expect(path?.textContent).toBe(DIR);
     expect(path?.getAttribute("title")).toBe(DIR);
-    expect(main()).toContain(copy.welcome.locationLabel);
+    expect(document.querySelector("main dt")?.textContent).toBe(copy.welcome.locationLabel);
+  });
+
+  it("位置行和选目录页同尺寸：用共用的路径框，「更改」是 lg 档", () => {
+    mount();
+    expect(document.querySelector("main dd")?.className).toBe(shared.pathBox);
+    expect(button(copy.welcome.change).getAttribute("data-size")).toBe("lg");
   });
 
   it("法律声明在安装之前就看得到", () => {

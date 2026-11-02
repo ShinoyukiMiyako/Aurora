@@ -47,6 +47,7 @@
   },
   "bundle": {
     "active": false,
+    "publisher": "Shinoyuki_Miyako",
     "icon": ["../src-tauri/icons/icon.ico"]
   }
 }

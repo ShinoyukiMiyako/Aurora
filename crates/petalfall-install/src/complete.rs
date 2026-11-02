@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use petalfall_download::{CancellationToken, DownloadTask};
 use petalfall_version::{AssetLayout, AssetObjectsIndex, VersionJson};
 
-use crate::context::InstallContext;
+use crate::context::{InstallContext, InstallPhase};
 use crate::dir_lock::lock_dir;
 use crate::error::{Error, Result, io_err};
 use crate::layout::{GameLayout, checked_segment, materialized_asset_path};
@@ -48,6 +48,7 @@ pub async fn ensure_complete(
 ) -> Result<CompletionReport> {
     // 原版安装时 target_id 就是远端版本 JSON 里的 id，客户端 jar 与 natives 目录都按它落盘。
     checked_segment(target_id, || "版本 id".to_owned())?;
+    cx.enter(InstallPhase::Libraries);
 
     // 第一批：库 + 日志配置 + 客户端 jar + assetIndex（都并入一池）。
     let library_tasks = plan::library_tasks(version, cx.runtime, cx.layout)?;
@@ -75,6 +76,8 @@ pub async fn ensure_complete(
         primary.push(plan::asset_index_task(version, cx.layout)?);
     }
     cx.run_batch(primary, "补全本体与库", None).await?;
+    // 没有 assetIndex 也报：步骤表开工前就排定了，跳过一步前端的步号会断档。
+    cx.enter(InstallPhase::Assets);
 
     // 第二批：资源对象全量补全（仅当版本带 assetIndex）。
     let assets = if has_assets {
@@ -89,6 +92,7 @@ pub async fn ensure_complete(
     };
 
     // natives 解压到 target 版本的 natives 目录。
+    cx.enter(InstallPhase::Natives);
     let natives =
         natives::extract_all_natives(version, cx.runtime, cx.layout, target_id, cx.cancel).await?;
 
@@ -491,6 +495,60 @@ mod tests {
             .unwrap();
 
         assert_eq!(std::fs::read(&jar).unwrap(), BODY);
+    }
+
+    /// 每一步都在上一批下载返回之后才报：报「资源」时库那一批的快照已经下完，前端凭这一点把晚到的快照算回
+    /// 上一步。没有资源索引的版本照样报「资源」，步号不断档。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn each_phase_is_entered_after_the_previous_batch_returned() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"jar".to_vec()))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let base = format!("{}/", server.uri());
+        let version: VersionJson = serde_json::from_value(serde_json::json!({
+            "id": "1.21.1",
+            "libraries": [
+                {"name": "com.example:a:1.0", "url": base},
+                {"name": "com.example:b:1.0", "url": base}
+            ]
+        }))
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let layout = crate::layout::GameLayout::new(dir.path());
+        let client = petalfall_base::http::build_client().unwrap();
+        let (tx, rx) = tokio::sync::watch::channel(petalfall_download::DownloadProgress::default());
+        let pool =
+            DownloadPool::new(Downloader::with_defaults(client.clone()), 2).with_progress(tx);
+        let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
+        let policy = RetryPolicy::default();
+        let entered = std::sync::Mutex::new(Vec::new());
+        let record = |phase: InstallPhase| {
+            let seen = *rx.borrow();
+            entered
+                .lock()
+                .unwrap()
+                .push((phase, seen.finished, seen.total));
+        };
+        let cx = InstallContext::new(&client, &pool, &layout, &runtime, &policy)
+            .with_phases(Some(&record));
+
+        ensure_complete(cx, &version, "1.21.1").await.unwrap();
+
+        assert_eq!(
+            entered.into_inner().unwrap(),
+            vec![
+                (InstallPhase::Libraries, 0, 0),
+                (InstallPhase::Assets, 2, 2),
+                (InstallPhase::Natives, 2, 2),
+            ]
+        );
     }
 
     /// virtual 布局却既没有 assetIndex 也没有 assets 字段：报缺少资源索引，而不是物化到

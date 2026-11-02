@@ -10,7 +10,7 @@ const CHOSEN_DIR = String.raw`D:\游戏 目录\app`;
 
 const probeOf = (existing: Existing | null, extra: Partial<Probe> = {}): Probe => ({ payloadVersion: "0.2.0", defaultDir: DEFAULT_DIR, requiredBytes: 41_943_040, existing, interrupted: false, elevated: false, ...extra });
 const existingOf = (kind: ExistingKind): Existing => ({ kind, version: "0.1.0", dir: String.raw`E:\app` });
-const checkOf = (extra: Partial<DirCheck> = {}): DirCheck => ({ normalized: CHOSEN_DIR, issue: null, hasConfig: false, notEmpty: false, freeBytes: 1 << 30, ...extra });
+const checkOf = (extra: Partial<DirCheck> = {}): DirCheck => ({ normalized: CHOSEN_DIR, issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 1 << 30, ...extra });
 const FAILURE: Failure = { code: "payload_exit", detail: "2" };
 const PROGRESS: Progress = { phase: "write", percent: 40, slow: false };
 
@@ -315,8 +315,9 @@ describe("崩溃", () => {
 
 describe("dirNotice", () => {
   it("按优先级只给一条", () => {
-    expect(dirNotice(checkOf({ issue: "no_space", hasConfig: true, notEmpty: true }))).toEqual({ kind: "issue", issue: "no_space" });
-    expect(dirNotice(checkOf({ hasConfig: true, notEmpty: true }))).toEqual({ kind: "resume" });
+    expect(dirNotice(checkOf({ issue: "no_space", hasConfig: true, notEmpty: true, appended: true }))).toEqual({ kind: "issue", issue: "no_space" });
+    expect(dirNotice(checkOf({ hasConfig: true, notEmpty: true, appended: true }))).toEqual({ kind: "resume" });
+    expect(dirNotice(checkOf({ notEmpty: true, appended: true }))).toEqual({ kind: "nested" });
     expect(dirNotice(checkOf({ notEmpty: true }))).toEqual({ kind: "not_empty" });
     expect(dirNotice(checkOf())).toEqual({ kind: "ok" });
   });

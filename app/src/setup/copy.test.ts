@@ -90,6 +90,10 @@ describe("文案表", () => {
     expect(disk_full.body("x", "retry")).toBe("The existing install can't move. Free up some space, then try again.");
   });
 
+  it.each(["zh", "en"] as const)("%s 表说另建文件夹时写出它的名字", (lang) => {
+    expect(COPY[lang].location.nested).toContain(APP_NAME_EN);
+  });
+
   it("空间提示带上两个数", () => {
     expect(COPY.zh.location.space("40 MB", "12.0 GB")).toBe("需要约 40 MB，这块盘还剩 12.0 GB");
     expect(COPY.en.location.space("40 MB", "12.0 GB")).toBe("Needs about 40 MB, 12.0 GB free on this drive");

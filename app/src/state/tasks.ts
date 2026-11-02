@@ -7,7 +7,7 @@
 import { TASK_INTERRUPTED_CODE, taskFailureReason } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import { MAX_PARALLEL_TASKS, TASK_HISTORY_LIMIT } from "../domain/limits";
-import type { Task, TaskKind, TaskSpec } from "../domain/types";
+import type { InstallPhase, Task, TaskKind, TaskPhase, TaskSpec } from "../domain/types";
 
 export interface TaskDraft {
   id: string;
@@ -34,9 +34,11 @@ export function attemptTaskId(task: Pick<Task, "id" | "attempt">): string {
 /**
  * 任务进度条（进度环、百分比文字）的平滑标识：同一次尝试的同一批下载内只进不退；换了批次（总字节或文件数变了）或换了尝试
  * 直接跳到新值，否则新批次从 0 重新计起时，进度会停在上一批的最大值不动。文件数不能省：Fabric 的库没声明大小，
- * 版本 JSON 与本体加库两批的总字节都是未知。凡是画任务进度的地方都用它。
+ * 版本 JSON 与本体加库两批的总字节都是未知。分步任务的进度是整次尝试的，本身只进不退，整次尝试用同一个标识，
+ * 换批次时不跳。凡是画任务进度的地方都用它。
  */
 export function progressTrack(task: Task): string {
+  if (task.phase !== null) return `${attemptTaskId(task)}:phased`;
   return `${attemptTaskId(task)}:${task.totalBytes === null ? "count" : task.totalBytes}:${task.batchFiles}`;
 }
 
@@ -112,6 +114,7 @@ export function newTask(draft: TaskDraft, now: number): Task {
     transferredBytes: 0,
     batchTransferred: 0,
     batchFiles: 0,
+    phase: null,
     speedBps: 0,
     startedAt: null,
     attempt: 1,
@@ -214,7 +217,7 @@ function update(tasks: readonly Task[], id: string, fn: (task: Task) => Task): T
 
 export function markRunning(tasks: readonly Task[], id: string, now: number): Task[] {
   return update(tasks, id, (t) =>
-    t.status === "queued" ? { ...t, status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, batchFiles: 0, speedBps: 0, startedAt: now } : t,
+    t.status === "queued" ? { ...t, status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, batchFiles: 0, phase: null, speedBps: 0, startedAt: now } : t,
   );
 }
 
@@ -249,17 +252,17 @@ function transferredAfter(task: Task, added: number): number {
 }
 
 /**
- * 一批下载的进度快照。一次安装连跑好几批，每批从 0 重新计：进度按当前批次如实显示，
- * 批次内只进不退，新批次（已下字节变少，或批次大小、文件数变了）从头开始。累计字节跨批次往上加。
+ * 一批下载的进度快照。一次安装连跑好几批，每批从 0 重新计。分步任务按步折成整体进度，只进不退（见 phaseBatch）；
+ * 其余任务按当前批次如实显示，批次内只进不退，新批次（已下字节变少，或批次大小、文件数变了）从头开始。
+ * 累计字节跨批次往上加，分步任务不算进当前一步的快照也照样记账。
  */
 export function applyTaskDownload(tasks: readonly Task[], attemptId: string, event: DownloadSnapshot): Task[] {
   return tasks.map((t) => {
     if (t.status !== "running" || attemptTaskId(t) !== attemptId) return t;
     const fraction = snapshotFraction(event);
     const sameBatch = event.totalBytes === t.totalBytes && event.total === t.batchFiles && event.bytes >= t.bytes;
-    return {
+    const counted: Task = {
       ...t,
-      progress: sameBatch ? Math.max(t.progress, fraction) : fraction,
       bytes: event.bytes,
       totalBytes: event.totalBytes,
       doneBytes: t.doneBytes + (sameBatch ? event.bytes - t.bytes : event.bytes),
@@ -268,7 +271,57 @@ export function applyTaskDownload(tasks: readonly Task[], attemptId: string, eve
       batchFiles: event.total,
       speedBps: event.speed,
     };
+    if (t.phase === null) return { ...counted, progress: sameBatch ? Math.max(t.progress, fraction) : fraction };
+    const phase = phaseBatch(t.phase, event);
+    return phase === null ? counted : { ...counted, phase, progress: Math.max(t.progress, phaseProgress(phase, fraction)) };
   });
+}
+
+// ---------------------------------------------------------------- 分步任务的进度
+
+/** 各步在整体进度条里占多宽，按常见耗时排；只决定进度条走得匀不匀，「第几步」不看它。 */
+export const PHASE_WEIGHT: Readonly<Record<InstallPhase, number>> = {
+  metadata: 1,
+  loader_profile: 1,
+  libraries: 7,
+  assets: 11,
+  natives: 1,
+  java: 4,
+  loader_installer: 1,
+  loader_libraries: 3,
+  loader_processors: 6,
+  verify: 2,
+  template: 1,
+};
+
+function phaseProgress(phase: TaskPhase, fraction: number): number {
+  const weights = phase.plan.map((key) => PHASE_WEIGHT[key]);
+  const whole = weights.reduce((sum, w) => sum + w, 0);
+  const before = weights.slice(0, phase.index).reduce((sum, w) => sum + w, 0);
+  return (before + weights[phase.index] * fraction) / whole;
+}
+
+/** 进入下一步：整体进度推到这一步的起点。步骤表中途变了、越界或没往前走是后端的契约错误，直接报错。 */
+export function applyTaskPhase(tasks: readonly Task[], attemptId: string, plan: readonly InstallPhase[], index: number): Task[] {
+  return tasks.map((t) => {
+    if (t.status !== "running" || attemptTaskId(t) !== attemptId) return t;
+    if (!Number.isInteger(index) || index < 0 || index >= plan.length) throw new Error(`任务 ${t.id} 的步骤表只有 ${plan.length} 步，收到了第 ${index} 步`);
+    if (t.phase !== null && t.phase.plan.join() !== plan.join()) throw new Error(`任务 ${t.id} 的步骤表中途变了：${t.phase.plan.join()} -> ${plan.join()}`);
+    if (t.phase !== null && index <= t.phase.index) throw new Error(`任务 ${t.id} 已在第 ${t.phase.index} 步，又收到了第 ${index} 步`);
+    const phase: TaskPhase = { plan, index, batch: null };
+    return { ...t, phase, progress: Math.max(t.progress, phaseProgress(phase, 0)) };
+  });
+}
+
+/**
+ * 这条快照算不算进当前这一步，算的话返回认下它那批之后的步骤，不算为 null。后端只在上一批返回之后才报下一步，
+ * 上一批晚到的快照都已下完：已下完、又不是这一步认下的那批，就是上一步的，不算。
+ * 一出现就已下完的批次（文件全都现成）同样不算，它那一步的份额在下一步开始时一并补上。
+ */
+function phaseBatch(phase: TaskPhase, event: DownloadSnapshot): TaskPhase | null {
+  if (phase.batch !== null && phase.batch.total === event.total && phase.batch.totalBytes === event.totalBytes) return phase;
+  if (event.finished >= event.total) return null;
+  return { ...phase, batch: { total: event.total, totalBytes: event.totalBytes } };
 }
 
 // ---------------------------------------------------------------- 组合任务的进度
@@ -442,6 +495,7 @@ export function retryTask(tasks: readonly Task[], id: string): Task[] {
     transferredBytes: 0,
     batchTransferred: 0,
     batchFiles: 0,
+    phase: null,
     speedBps: 0,
     startedAt: null,
     finishedAt: null,

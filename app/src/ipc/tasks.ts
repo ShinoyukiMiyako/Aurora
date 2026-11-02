@@ -17,6 +17,16 @@ export type CoreEvent =
   | { kind: "stage"; task_id: string | null; step?: number; message: string }
   | { kind: "warning"; task_id: string | null; step?: number; message: string }
   | {
+      /** 新建、补全实例这类分步任务进入了某一步。后端只在上一批下载返回之后才报下一步。 */
+      kind: "phase";
+      task_id: string | null;
+      step?: number;
+      /** 整份步骤表的键（domain/types 的 INSTALL_PHASES），开工时排定、全程不变。 */
+      plan: string[];
+      /** 当前一步在 plan 里的下标，只增不减。 */
+      index: number;
+    }
+  | {
       kind: "download";
       task_id: string | null;
       step?: number;

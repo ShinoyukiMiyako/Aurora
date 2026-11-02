@@ -39,7 +39,7 @@ mod net;
 mod process_tree;
 
 pub use complete::{CompletionReport, ensure_complete};
-pub use context::InstallContext;
+pub use context::{InstallContext, InstallPhase};
 pub use error::{Error, Result};
 pub use fabric::{
     GameVersionEntry, LoaderFlavor, LoaderInstaller, LoaderSummary, LoaderVersion, is_prerelease,

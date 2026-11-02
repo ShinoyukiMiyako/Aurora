@@ -10,6 +10,7 @@ import type { DirCheck } from "../contract";
 import { formatBytes, type SetupCopy } from "../copy";
 import { Frame } from "../Frame";
 import { dirNotice, withAppFolder } from "../model";
+import shared from "../setup.module.css";
 import styles from "./Location.module.css";
 
 /** check_dir 会真写探针文件，输入停下来才查，不为每个按键碰一次盘。 */
@@ -55,7 +56,7 @@ interface DirHint {
   tone?: "ok" | "warn";
 }
 
-/** 阻断问题走 Field 的 error，这里只管其余三种。 */
+/** 阻断问题走 Field 的 error，这里只管其余四种。 */
 function dirHint(copy: SetupCopy["location"], check: DirCheck, requiredBytes: number): DirHint | null {
   const notice = dirNotice(check);
   switch (notice.kind) {
@@ -63,6 +64,8 @@ function dirHint(copy: SetupCopy["location"], check: DirCheck, requiredBytes: nu
       return null;
     case "resume":
       return { text: copy.resume, tone: "ok" };
+    case "nested":
+      return { text: copy.nested, tone: "warn" };
     case "not_empty":
       return { text: copy.notEmpty, tone: "warn" };
     case "ok":
@@ -108,7 +111,11 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
   const browse = () => {
     attempt(async () => {
       const picked = await pickFolder();
-      if (picked !== null) onDirChange(withAppFolder(picked));
+      if (picked === null) return;
+      // 补层前先按选中的这一层认游戏目录：补出来的子目录还不存在，只看它的话，手敲会被拦下的 .minecraft，
+      // 浏览选它反而装得进去。认出来就停在原路径上，提示和禁用都跟手敲一致
+      const own = await checkDir(picked);
+      onDirChange(own.issue === "minecraft" ? picked : withAppFolder(picked));
     });
   };
 
@@ -143,15 +150,15 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
             </span>
           }
         >
-          <div className={styles.dirRow}>
-            <TextInput className={styles.dirInput} size="lg" value={dir} onChange={onDirChange} onKeyDown={onPathKeyDown} readOnly={busy} spellCheck={false} autoComplete="off" autoFocus />
+          <div className={shared.pathRow}>
+            <TextInput className={shared.pathInput} size="lg" value={dir} onChange={onDirChange} onKeyDown={onPathKeyDown} readOnly={busy} spellCheck={false} autoComplete="off" autoFocus />
             <Button size="lg" icon="folder-open" disabled={busy} focusableWhenDisabled onClick={browse}>
               {text.browse}
             </Button>
           </div>
         </Field>
         <Checkbox checked={desktopShortcut} onChange={onShortcutChange} label={text.shortcut} disabled={busy} />
-        {check !== null && check.issue === null && check.notEmpty && <p className={styles.finalPath}>{text.finalPath(check.normalized)}</p>}
+        {check !== null && check.issue === null && check.appended && <p className={styles.finalPath}>{text.finalPath(check.normalized)}</p>}
       </div>
     </Frame>
   );

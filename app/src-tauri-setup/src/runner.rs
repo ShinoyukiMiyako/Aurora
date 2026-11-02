@@ -101,9 +101,10 @@ fn known_folder(id: &GUID) -> io::Result<PathBuf> {
 /// 不带引号、放在最后的 `/D=`，认不出时不报错，静默装到默认目录。
 ///
 /// 升级和修复也带 /D=，目录就是探测到、界面显示、事后核验的那个登记目录。只传 /S 时 NSIS 从
-/// `HKCU\Software\petalfall\Petalfall` 还原目录，不看卸载项的 `InstallLocation`：这个键被清理工具删掉时
-/// 装进默认目录，和卸载项不一致时装进键里记的目录，两种都是另装一份并把登记改指过去，原来那份连同数据
-/// 成了孤儿，核验也永远过不了。传的是原登记目录，所以登记不会被改指别处。
+/// [`crate::existing::LAST_DIR_KEY`]（`HKCU\Software\<发布者>\Petalfall`）还原目录，不看卸载项的
+/// `InstallLocation`：这个键被清理工具删掉时装进默认目录，和卸载项不一致时装进键里记的目录，两种都是
+/// 另装一份并把登记改指过去，原来那份连同数据成了孤儿，核验也永远过不了。传的是原登记目录，所以登记不会
+/// 被改指别处。
 /// 不传 /UPDATE、/P、/R、/NS：GetOptions 按前缀匹配，多传一个就多一处误触发。
 pub fn nsis_arguments(dir: &Path) -> OsString {
     let mut arguments = OsString::from("/S /D=");
@@ -1220,7 +1221,7 @@ mod tests {
         expected_arguments.push(&bench.instdir);
         assert_eq!(calls[0].arguments, expected_arguments);
         assert_eq!(calls[0].payload, bench.payload);
-        assert_eq!(calls[0].exe.file_name().unwrap(), "petalfall-nsis.exe");
+        assert_eq!(calls[0].exe.file_name().unwrap(), "Petalfall-NSIS.exe");
         assert_eq!(calls[0].exe.parent().unwrap(), calls[0].cwd);
         assert!(calls[0].cwd.starts_with(&bench.roots.temp));
         assert!(bench.temp_is_empty());

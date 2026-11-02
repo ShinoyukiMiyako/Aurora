@@ -23,7 +23,7 @@ const REQUIRED = 40 * 1024 * 1024;
 const FREE = 12 * GIB;
 const DIR = "D:\\Games\\App";
 
-const okCheck = (overrides: Partial<DirCheck> = {}): DirCheck => ({ normalized: DIR, issue: null, hasConfig: false, notEmpty: false, freeBytes: FREE, ...overrides });
+const okCheck = (overrides: Partial<DirCheck> = {}): DirCheck => ({ normalized: DIR, issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: FREE, ...overrides });
 const issueCheck = (issue: DirIssue): DirCheck => okCheck({ issue });
 
 const ISSUES: readonly DirIssue[] = ["empty", "relative", "bang", "forbidden", "minecraft", "network", "unwritable", "no_space"];
@@ -250,8 +250,8 @@ describe("发起安装时带回来的结果", () => {
 });
 
 describe("提示按优先级只显示一条", () => {
-  it.each(ISSUES)("阻断问题 %s 显示它自己的文案，盖过其余三种", async (issue) => {
-    mount({ checkDir: vi.fn(async () => okCheck({ issue, hasConfig: true, notEmpty: true })) });
+  it.each(ISSUES)("阻断问题 %s 显示它自己的文案，盖过其余四种", async (issue) => {
+    mount({ checkDir: vi.fn(async () => okCheck({ issue, hasConfig: true, notEmpty: true, appended: true })) });
     await settle();
     expect(noticeLine()).toBe(text.issue[issue]);
   });
@@ -271,16 +271,33 @@ describe("提示按优先级只显示一条", () => {
   });
 
   it("目录没过校验时不说实际位置：这时根本不会安装", async () => {
-    mount({ checkDir: vi.fn(async () => okCheck({ issue: "unwritable", notEmpty: true })) });
+    mount({ checkDir: vi.fn(async () => okCheck({ issue: "unwritable", notEmpty: true, appended: true })) });
     await settle();
     expect(document.body.textContent).not.toContain(text.finalPath(DIR));
   });
 
-  it("有别的文件时建议换空文件夹，盖过空间提示，带警示图标", async () => {
+  it("目录里有东西但没另建一层时不说实际位置：路径就是框里那个", async () => {
+    mount({ checkDir: vi.fn(async () => okCheck({ hasConfig: true, notEmpty: true })) });
+    await settle();
+    expect(noticeLine()).toBe(text.resume);
+    expect(document.body.textContent).not.toContain(text.finalPath(DIR));
+  });
+
+  it("有别的文件、另建了一层时说会新建文件夹，写出实际位置，带警示图标", async () => {
+    const nested = `${DIR}\\${APP_NAME_EN}`;
+    mount({ checkDir: vi.fn(async () => okCheck({ normalized: nested, notEmpty: true, appended: true })) });
+    await settle();
+    expect(noticeLine()).toBe(text.nested);
+    expect(document.body.textContent).toContain(text.finalPath(nested));
+    expect(noticeHint()?.dataset.tone).toBe("warn");
+    expect(noticeHint()?.querySelector("svg")).not.toBeNull();
+  });
+
+  it("有别的文件、没另建一层时建议换空文件夹，不写实际位置，带警示图标", async () => {
     mount({ checkDir: vi.fn(async () => okCheck({ notEmpty: true })) });
     await settle();
     expect(noticeLine()).toBe(text.notEmpty);
-    expect(document.body.textContent).toContain(text.finalPath(DIR));
+    expect(document.body.textContent).not.toContain(text.finalPath(DIR));
     expect(noticeHint()?.dataset.tone).toBe("warn");
     expect(noticeHint()?.querySelector("svg")).not.toBeNull();
   });
@@ -332,6 +349,7 @@ describe("主按钮", () => {
   it.each([
     ["有旧数据", okCheck({ hasConfig: true })],
     ["有别的文件", okCheck({ notEmpty: true })],
+    ["另建了一层", okCheck({ notEmpty: true, appended: true })],
     ["正常", okCheck()],
   ])("%s 不阻断", async (_, check) => {
     const { onInstall } = mount({ checkDir: vi.fn(async () => check) });
@@ -463,6 +481,30 @@ describe("浏览", () => {
     act(() => button(text.browse).click());
     await pass(0);
     expect(onDirChange).not.toHaveBeenCalled();
+  });
+
+  it("选回的是游戏目录时不补层，停在原路径上按游戏目录拦下", async () => {
+    for (const picked of ["D:\\Games\\.minecraft", "E:\\MC\\packs\\mine"]) {
+      const checkDir = vi.fn(async (path: string) => (path === picked ? issueCheck("minecraft") : okCheck()));
+      const { onDirChange } = mount({ pickFolder: vi.fn(async () => picked), checkDir });
+      act(() => button(text.browse).click());
+      await pass(0);
+      expect(checkDir).toHaveBeenCalledWith(picked);
+      expect(vi.mocked(onDirChange).mock.calls).toEqual([[picked]]);
+      view?.unmount();
+      view = undefined;
+    }
+  });
+
+  it("选回的文件夹本身有别的问题时照常补层，交给补层后的路径再判", async () => {
+    for (const issue of ISSUES.filter((each) => each !== "minecraft")) {
+      const { onDirChange } = mount({ pickFolder: vi.fn(async () => "D:\\"), checkDir: vi.fn(async () => issueCheck(issue)) });
+      act(() => button(text.browse).click());
+      await pass(0);
+      expect(vi.mocked(onDirChange).mock.calls, issue).toEqual([[`D:\\${APP_NAME_EN}`]]);
+      view?.unmount();
+      view = undefined;
+    }
   });
 });
 

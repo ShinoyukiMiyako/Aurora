@@ -31,6 +31,7 @@ import {
   type WorldBackupListDto,
   type WorldDto,
 } from "../../instances";
+import type { InstallPhase } from "../../../domain/types";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
 import { followMockSelection, mockWorldBackupSettings } from "./config";
@@ -810,6 +811,30 @@ function stage(taskId: string, message: string): void {
   emitMockEvent(CORE_EVENT, { kind: "stage", task_id: taskId, message });
 }
 
+/** 与后端 install_plan 同一份步骤表：Forge / NeoForge 先补齐原版再装加载器，装好后照合并后的版本 JSON 再校验一遍。 */
+function mockInstallPlan(loader: LoaderChoice | null, useTemplate: boolean): InstallPhase[] {
+  const plan: InstallPhase[] = ["metadata"];
+  if (loader === "fabric" || loader === "quilt") plan.push("loader_profile", "libraries", "assets", "natives");
+  else if (loader === "forge" || loader === "neoforge") plan.push("libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify");
+  else plan.push("libraries", "assets", "natives");
+  if (useTemplate) plan.push("template");
+  return plan;
+}
+
+/** 只补全、不重装时的步骤表，与后端 repair_instance 的 Complete 一致。 */
+const MOCK_COMPLETE_PLAN: readonly InstallPhase[] = ["libraries", "assets", "natives"];
+
+function phase(taskId: string, plan: readonly InstallPhase[], key: InstallPhase): void {
+  const index = plan.indexOf(key);
+  if (index === -1) throw new Error(`步骤 ${key} 不在这次的步骤表 ${plan.join()} 里`);
+  emitMockEvent(CORE_EVENT, { kind: "phase", task_id: taskId, plan: [...plan], index });
+}
+
+/** 假后端只在「本体与库」那一步真的推下载进度，之后各步（模板除外，它跟着套模板报）接着报出来，进度条照样按步走。 */
+function phasesAfterLibraries(taskId: string, plan: readonly InstallPhase[]): void {
+  for (const key of plan.slice(plan.indexOf("libraries") + 1)) if (key !== "template") phase(taskId, plan, key);
+}
+
 /** 一段假下载：逐步推进度，期间被取消即以 cancelled 拒绝。 */
 async function fakeDownload(taskId: string, files: number, bytesPerFile: number): Promise<void> {
   for (let step = 1; step <= MOCK_INSTALL_STEPS; step++) {
@@ -1005,14 +1030,17 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
   // 与后端一样，名字下还留着的记录属于已经不在的同名旧实例（浏览器里刷新后游玩记录重新播种就会这样），新实例从零开始；
   // 会话日志与崩溃报告在后端存于实例目录，新目录里本来就没有。
   forgetMockLaunchRecords(name);
+  const plan = mockInstallPlan(loader, useTemplate);
   try {
     if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
+    phase(taskId, plan, "metadata");
     stage(taskId, `查找原版 ${mcVersion}`);
     await sleep(MOCK_STEP_MS);
     const entry = MANIFEST.find((v) => v.id === mcVersion);
     if (!entry) throw new IpcError("install_failed", `installer jar 内缺少条目: 版本清单中的 ${mcVersion}`);
     let loaderVersion: string | null = null;
     if (loader) {
+      if (plan.includes("loader_profile")) phase(taskId, plan, "loader_profile");
       const available = LOADER_VERSIONS[`${loader}:${mcVersion}`] ?? [];
       // 没给版本号时与后端一样取推荐版：最新稳定版，没有稳定版取最新的。
       const recommended = available.find((v) => v.stable) ?? available[0];
@@ -1023,7 +1051,9 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
       stage(taskId, `获取 ${LOADER_NAMES[loader]} 加载器信息`);
     }
     stage(taskId, "补全库、资源与 natives");
+    phase(taskId, plan, "libraries");
     await fakeDownload(taskId, 40, 512 * 1024);
+    phasesAfterLibraries(taskId, plan);
     instance.dto = {
       ...readyDto(name, mcVersion, loader && loaderVersion ? [{ kind: loader, version: loaderVersion }] : [], entry.java, createdAt),
       release_type: entry.type,
@@ -1032,6 +1062,7 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
     instance.sizeBytes = 40 * 512 * 1024;
     instance.fileCount = 40;
     // 与后端一样在补全之后、首次启动之前套模板：判断隔离要用到装好后才知道的版本类型
+    if (useTemplate) phase(taskId, plan, "template");
     const templateOutcome = useTemplate ? applyTemplate(instance) : null;
     if (templateOutcome !== null) stage(taskId, templateStage(templateOutcome));
     stage(taskId, `实例 ${name} 安装完成：库 40 / 资源 0 / natives 0`);
@@ -1120,6 +1151,9 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
       ? { kind: "install", outcome: "pending", started_at: startedAt, spec, error: null }
       : { kind: "repair", outcome: "pending", started_at: startedAt, spec: null, error: null };
     stage(taskId, `补全实例 ${id} 的文件`);
+    // 重装在后端就是走一遍新建（不套模板），步骤表也是新建那一份
+    const plan = spec ? mockInstallPlan(spec.loader, false) : MOCK_COMPLETE_PLAN;
+    for (const key of plan.slice(0, plan.indexOf("libraries") + 1)) phase(taskId, plan, key);
     try {
       await fakeDownload(taskId, 12, 256 * 1024);
     } catch (error) {
@@ -1133,6 +1167,7 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
       }
       throw error;
     }
+    phasesAfterLibraries(taskId, plan);
     if (spec) {
       const entry = MANIFEST.find((v) => v.id === spec.mc_version);
       if (!entry) {

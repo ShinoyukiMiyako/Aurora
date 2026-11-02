@@ -52,7 +52,7 @@ export interface FakeBridge extends SetupBridge {
 }
 
 function okCheck(path: string): DirCheck {
-  return { normalized: path, issue: path === "" ? "empty" : null, hasConfig: false, notEmpty: false, freeBytes: 120 * 1024 * 1024 * 1024 };
+  return { normalized: path, issue: path === "" ? "empty" : null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 120 * 1024 * 1024 * 1024 };
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

@@ -23,7 +23,7 @@ use serde::Deserialize;
 use tokio::process::{Child, Command};
 
 use crate::complete;
-use crate::context::InstallContext;
+use crate::context::{InstallContext, InstallPhase};
 use crate::error::{Error, ProcessorOutput, Result, io_err, zip_err};
 use crate::layout::checked_segment;
 use crate::net;
@@ -379,6 +379,7 @@ impl<'a> ForgeInstaller<'a> {
     /// installer 下到 `<根>/.<slug>-cache/<文件名>`，带 Maven 侧 `.sha1` 校验：同一版本重试安装时
     /// 校验通过的旧文件直接复用，不再重下几十 MB。
     async fn download_installer(&self, installer_url: &str) -> Result<PathBuf> {
+        self.cx.enter(InstallPhase::LoaderInstaller);
         let file_name = installer_url.rsplit('/').next().unwrap_or("installer.jar");
         // 地址由加载器版本号拼出，版本号来自远端版本列表或导入的整合包，原样成了文件名：Windows 上
         // 反斜杠也是分隔符，带 `..` 时会落到缓存目录之外。
@@ -478,6 +479,7 @@ impl<'a> ForgeInstaller<'a> {
 
         // 下载 install_profile 与 version.json 声明的库。下载地址留空的是 installer 自带的
         // （放在 `maven/` 下），从 installer 解出，不进下载批次：空地址交给下载引擎只会整批失败。
+        self.cx.enter(InstallPhase::LoaderLibraries);
         let mut libs = profile.libraries.clone();
         libs.extend(embedded.libraries.clone());
         let (bundled, remote): (Vec<_>, Vec<_>) = libs.into_iter().partition(is_bundled);
@@ -537,6 +539,7 @@ impl<'a> ForgeInstaller<'a> {
         minecraft_jar: &Path,
         tmp_dir: &Path,
     ) -> Result<usize> {
+        self.cx.enter(InstallPhase::LoaderProcessors);
         let extracted = extract_data_files(installer, &profile.data, &self.side, tmp_dir).await?;
 
         // 组装占位符表：解析后的 data + 安装器注入的特殊变量。
@@ -704,6 +707,7 @@ impl<'a> ForgeInstaller<'a> {
         checked_segment(&id, || "Forge versionInfo 的版本 id".to_owned())?;
 
         // 从 installer zip 解出通用 jar 到其 maven 落点。
+        self.cx.enter(InstallPhase::LoaderLibraries);
         let install = profile.install.as_ref().expect("已判定 install 存在");
         let coord = install
             .path
@@ -730,6 +734,8 @@ impl<'a> ForgeInstaller<'a> {
         )?)
         .await?;
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
+        // 旧版没有处理器，这一步照样报：步骤表开工前按加载器排定，那时还不知道是新版还是旧版，跳过会让步号断档。
+        self.cx.enter(InstallPhase::LoaderProcessors);
 
         if let Target::Standalone = target {
             petalfall_base::fs::atomic_write(&self.cx.layout.version_json(&id), &bytes).await?;
@@ -1680,7 +1686,10 @@ mod tests {
             .await;
 
         let f = fixture();
-        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy);
+        let entered = std::sync::Mutex::new(Vec::new());
+        let record = |phase: InstallPhase| entered.lock().unwrap().push(phase);
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy)
+            .with_phases(Some(&record));
         let (embedded, summary) = ForgeInstaller::new(cx, "java")
             .install_for_instance(&format!("{}/forge-installer.jar", server.uri()), "周末生存")
             .await
@@ -1689,6 +1698,15 @@ mod tests {
         assert_eq!(embedded.inherits_from.as_deref(), Some("1.12.2"));
         assert_eq!(summary.id, "1.12.2-forge-14.23.5.2860");
         assert_eq!(summary.processors, 0);
+        // 旧版没有处理器，处理器这一步也照报，步号不断档。
+        assert_eq!(
+            entered.into_inner().unwrap(),
+            vec![
+                InstallPhase::LoaderInstaller,
+                InstallPhase::LoaderLibraries,
+                InstallPhase::LoaderProcessors,
+            ]
+        );
         assert!(
             !f.layout.version_dir("1.12.2-forge-14.23.5.2860").exists(),
             "按实例安装不应另建 forge 版本目录"
@@ -2604,11 +2622,23 @@ mod tests {
             true,
         );
 
-        // 处理器 jar 不在、java 也不存在：只要真去执行就会失败。
-        let summary = install_with(&f, &f.root.join("no-such-java.exe"), &installer)
+        // 处理器 jar 不在、java 也不存在：只要真去执行就会失败。处理器全跳过时处理器这一步也照报。
+        let entered = std::sync::Mutex::new(Vec::new());
+        let record = |phase: InstallPhase| entered.lock().unwrap().push(phase);
+        let cx = InstallContext::new(&f.client, &f.pool, &f.layout, &f.runtime, &f.policy)
+            .with_phases(Some(&record));
+        let summary = ForgeInstaller::new(cx, f.root.join("no-such-java.exe"))
+            .install_from_installer(&installer)
             .await
             .unwrap();
 
+        assert_eq!(
+            entered.into_inner().unwrap(),
+            vec![
+                InstallPhase::LoaderLibraries,
+                InstallPhase::LoaderProcessors
+            ]
+        );
         assert_eq!(summary.processors, 0);
         assert_eq!(std::fs::read(library(&f, OUT_A)).unwrap(), a);
         assert_eq!(std::fs::read(library(&f, OUT_B)).unwrap(), b);

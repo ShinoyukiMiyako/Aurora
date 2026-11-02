@@ -344,7 +344,8 @@ mod tests {
     }
 
     // tauri.conf.json、index.html 与前端 TS 无法引用 Rust 常量，产品名只能各写一份，
-    // 由这条测试钉住它们与 petalfall-base 的 brand 模块一致。identifier 发布后即成兼容契约，单独写死。
+    // 由这条测试钉住它们与 petalfall-base 的 brand 模块一致。identifier 和 publisher 发布后即成兼容契约，
+    // 单独写死：publisher 还决定 NSIS 记安装目录的注册表键，引导程序按它去读。
     #[test]
     fn product_name_is_consistent_across_config_html_and_frontend() {
         let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
@@ -353,6 +354,7 @@ mod tests {
         assert_eq!(conf["mainBinaryName"], APP_NAME_EN);
         assert_eq!(conf["app"]["windows"][0]["title"], APP_NAME_EN);
         assert_eq!(conf["identifier"], "org.petalfall.launcher");
+        assert_eq!(conf["bundle"]["publisher"], "Shinoyuki_Miyako");
 
         let title = format!("<title>{APP_NAME_EN}</title>");
         assert!(

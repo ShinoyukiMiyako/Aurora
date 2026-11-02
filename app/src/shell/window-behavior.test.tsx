@@ -205,6 +205,7 @@ function task(id: string, status: Task["status"], kind: Task["kind"] = "game"): 
     transferredBytes: 0,
     batchTransferred: 0,
     batchFiles: 0,
+    phase: null,
     speedBps: 0,
     startedAt: null,
     attempt: 1,

@@ -74,6 +74,8 @@ pub struct DirCheck {
     pub issue: Option<DirIssue>,
     pub has_config: bool,
     pub not_empty: bool,
+    /// `not_empty` 时在 `normalized` 末尾追加了一层 `Petalfall`；目录本来就叫这个名字时不追加。
+    pub appended: bool,
     pub free_bytes: u64,
 }
 
@@ -242,6 +244,7 @@ mod tests {
             issue: Some(DirIssue::NoSpace),
             has_config: true,
             not_empty: true,
+            appended: true,
             free_bytes: 1024,
         };
         assert_eq!(
@@ -251,6 +254,7 @@ mod tests {
                 "issue": "no_space",
                 "hasConfig": true,
                 "notEmpty": true,
+                "appended": true,
                 "freeBytes": 1024,
             })
         );

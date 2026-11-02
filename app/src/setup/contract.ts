@@ -37,6 +37,8 @@ export interface DirCheck {
   issue: DirIssue | null;
   hasConfig: boolean;
   notEmpty: boolean;
+  /** notEmpty 时在 normalized 末尾追加了一层程序名文件夹；目录本来就叫这个名字时不追加，为 false。 */
+  appended: boolean;
   freeBytes: number;
 }
 

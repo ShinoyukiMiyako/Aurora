@@ -178,7 +178,7 @@ describe("右键菜单", () => {
 
 describe("发起安装", () => {
   it("首装的计划带校验规整后的目录，装完到完成页", async () => {
-    const fake = start({ checkDir: (path) => ({ normalized: `${path}-规整`, issue: null, hasConfig: false, notEmpty: false, freeBytes: 1 }) });
+    const fake = start({ checkDir: (path) => ({ normalized: `${path}-规整`, issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 1 }) });
     await seeHeading(copy.welcome.title);
     button(copy.welcome.install).click();
     await seeHeading(copy.done.title.fresh(""));
@@ -204,7 +204,7 @@ describe("发起安装", () => {
   });
 
   it("目录没过校验时退回选目录页，不调 install", async () => {
-    const fake = start({ checkDir: (path) => ({ normalized: path, issue: "unwritable", hasConfig: false, notEmpty: false, freeBytes: 0 }) });
+    const fake = start({ checkDir: (path) => ({ normalized: path, issue: "unwritable", hasConfig: false, notEmpty: false, appended: false, freeBytes: 0 }) });
     await seeHeading(copy.welcome.title);
     button(copy.welcome.install).click();
     await seeHeading(copy.location.title);
