@@ -197,8 +197,9 @@ jobs:
           path: dist
 
       # 更新包是引导程序，不是 NSIS 包。更新插件把下载到的任何 PE 都当 NSIS 包，带着
-      # /P /R /UPDATE /ARGS <启动器参数> 拉起；引导程序认得 /UPDATE，进更新模式直接升级到登记目录，
-      # 等落樱退出、失败重试都用它自己的页面，WebView2 不可用时才把同样的参数转给内嵌的 NSIS 包。
+      # /P /R /UPDATE /ARGS <启动器参数> 拉起；引导程序认得 /UPDATE，现有安装判定为升级时直接升级到登记目录，
+      # 其余情况退回交互向导；等落樱退出、失败重试都用它自己的页面，WebView2 不可用或建窗失败时才把同样的
+      # 参数转给内嵌的 NSIS 包。
       - name: 给更新包签名
         env:
           CLI_VERSION: ${{ needs.build.outputs.cli-version }}
