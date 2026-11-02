@@ -146,9 +146,9 @@ pub trait Launcher: Send + Sync {
         launcher::is_running()
     }
 
-    /// 打开装好的启动器。
-    fn open_app(&self, dir: &Path, instance: &Instance) -> io::Result<Opened> {
-        launcher::open(dir, instance)
+    /// 打开装好的启动器，`args` 原样交给它。
+    fn open_app(&self, dir: &Path, args: &[OsString], instance: &Instance) -> io::Result<Opened> {
+        launcher::open(dir, args, instance)
     }
 
     /// 目标目录所在的卷。
@@ -340,7 +340,7 @@ impl Target {
     }
 }
 
-/// 非静默运行的载荷：NSIS 原生向导接管，引导程序只负责清掉临时文件。
+/// 非静默运行的载荷：NSIS 自己的界面接管，引导程序只负责清掉临时文件。
 pub struct StandardRun {
     running: Box<dyn Running>,
     extracted: Extracted,
@@ -430,9 +430,14 @@ impl Session {
         self.launcher.app_running()
     }
 
-    /// 打开启动器，等它的窗口出现。会阻塞，放在工作线程上调。
-    pub fn open_launcher(&self, dir: &Path, instance: &Instance) -> io::Result<Opened> {
-        self.launcher.open_app(dir, instance)
+    /// 打开启动器，等它的窗口出现。`args` 原样交给启动器：更新完要把它更新前的参数带回去。会阻塞，放在工作线程上调。
+    pub fn open_launcher(
+        &self,
+        dir: &Path,
+        args: &[OsString],
+        instance: &Instance,
+    ) -> io::Result<Opened> {
+        self.launcher.open_app(dir, args, instance)
     }
 
     fn journal_store(&self) -> JournalStore {
@@ -480,10 +485,11 @@ impl Session {
         .map_err(|err| io_failure("启动载荷", &err))
     }
 
-    /// 解开载荷并启动 NSIS 原生向导，不带任何参数。
-    pub fn start_standard(&self) -> Result<StandardRun, Failure> {
+    /// 解开载荷，带着 `arguments` 启动 NSIS 自己的界面，参数整串原样走 `raw_arg`。空串是原生向导；
+    /// 窗口起不来时的更新也走这里，带上插件给的那串参数，交给 NSIS 自己的更新流程。
+    pub fn start_standard(&self, arguments: &OsStr) -> Result<StandardRun, Failure> {
         let extracted = self.extract()?;
-        let running = self.launch(&extracted, OsStr::new(""))?;
+        let running = self.launch(&extracted, arguments)?;
         Ok(StandardRun {
             running,
             extracted,
@@ -1824,7 +1830,7 @@ mod tests {
         let bench = Bench::new();
         let session = bench.session(vec![exits(5)]);
 
-        let run = session.start_standard().unwrap();
+        let run = session.start_standard(OsStr::new("")).unwrap();
 
         assert_eq!(run.pid(), 4242);
         assert!(!bench.temp_is_empty(), "向导运行期间临时文件要在");
@@ -1835,6 +1841,23 @@ mod tests {
         assert_eq!(run.wait_and_clean(&Recording::default()).unwrap(), 5);
         assert!(bench.temp_is_empty());
         assert!(!bench.store().path().exists(), "向导不写半装记录");
+    }
+
+    /// 窗口起不来时的更新：插件那串参数要一字不差地到 NSIS 手里，`/ARGS` 后面已经转义过的部分也不能再被动。
+    #[test]
+    fn the_standard_run_hands_its_arguments_to_the_payload_unchanged() {
+        let bench = Bench::new();
+        let session = bench.session(vec![exits(0)]);
+        let arguments =
+            OsStr::new(r#"/P /R /UPDATE /ARGS --flag "some space" "C:\游戏 目录\\" """#);
+
+        let run = session.start_standard(arguments).unwrap();
+
+        let call = &bench.calls()[0];
+        assert_eq!(call.arguments, arguments);
+        assert_eq!(call.payload, bench.payload);
+        assert_eq!(run.wait_and_clean(&Recording::default()).unwrap(), 0);
+        assert!(bench.temp_is_empty());
     }
 
     #[test]

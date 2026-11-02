@@ -3,6 +3,7 @@
 //! 这里对别的进程只读：静默的 NSIS 会直接结束同名进程，下载和没保存的改动都会丢，所以开着就让用户自己关。
 //! 打开进程只要查询权限，不要结束权限。
 
+use std::ffi::OsString;
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -45,15 +46,18 @@ pub fn is_running() -> io::Result<bool> {
     image_running(APP_EXE, &boot::current_user()?)
 }
 
-/// 打开 `dir` 下的启动器，等它的窗口出现或等满 [`WINDOW_WAIT`]。会阻塞，不能放在 UI 线程上跑。
-pub fn open(dir: &Path, instance: &Instance) -> io::Result<Opened> {
-    launch(&mut launcher_command(dir), instance, WINDOW_WAIT)
+/// 打开 `dir` 下的启动器，`args` 逐个交给它，等它的窗口出现或等满 [`WINDOW_WAIT`]。会阻塞，不能放在 UI 线程上跑。
+pub fn open(dir: &Path, args: &[OsString], instance: &Instance) -> io::Result<Opened> {
+    launch(&mut launcher_command(dir, args), instance, WINDOW_WAIT)
 }
 
-fn launcher_command(dir: &Path) -> Command {
+fn launcher_command(dir: &Path, args: &[OsString]) -> Command {
     let mut command = Command::new(dir.join(APP_EXE));
     // 工作目录留在安装包所在的文件夹，这个文件夹就在启动器的整个运行期间删不掉
     command.current_dir(dir);
+    // 这些是更新前启动器自己的参数，要逐个走 `args` 由 std 按 MSVC 规则加引号，启动器拆回来才和原来一模一样。
+    // 载荷那边整串走 `raw_arg` 是迁就 NSIS 的 /D=，这里没有那层顾虑
+    command.args(args);
     command
 }
 
@@ -171,6 +175,8 @@ fn image_name(raw: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::fs;
+    use std::os::windows::ffi::OsStringExt;
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
     use std::ptr::{null, null_mut};
@@ -185,6 +191,8 @@ mod tests {
 
     use super::*;
     use crate::boot::{Claim, test_claim, test_claim_within};
+
+    const DUMP_ENV: &str = "PETALFALL_TEST_DUMP_LAUNCHER_ARGS";
 
     fn instance(test: &str) -> Instance {
         match test_claim(&format!("launcher-{test}")) {
@@ -401,19 +409,88 @@ mod tests {
     #[test]
     fn the_launcher_starts_from_its_own_folder() {
         let dir = Path::new(r"D:\游戏 目录\Petalfall");
-        let command = launcher_command(dir);
+        let command = launcher_command(dir, &[]);
         assert_eq!(
             command.get_program(),
             r"D:\游戏 目录\Petalfall\Petalfall.exe"
         );
         assert_eq!(command.get_current_dir(), Some(dir));
+        assert_eq!(command.get_args().count(), 0, "没有参数时什么也不添");
+    }
+
+    /// 更新前启动器可能带着的参数：带空格、引号、末尾反斜杠、空串的都有，还有一个拼不成 UTF-8 的孤立代理项，
+    /// 转成字符串再转回来就会变样。
+    fn awkward_args() -> Vec<OsString> {
+        vec![
+            OsString::from("--flag"),
+            OsString::from(r#"say "hi there"\"#),
+            OsString::from(r"C:\游戏 目录\"),
+            OsString::new(),
+            OsString::from("petalfall://open?a=1&b=2"),
+            OsString::from_wide(&[0x0061, 0xD800, 0x0062]),
+        ]
+    }
+
+    #[test]
+    fn each_argument_reaches_the_launcher_unchanged() {
+        let args = awkward_args();
+
+        let command = launcher_command(Path::new(r"D:\Petalfall"), &args);
+
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            args.iter().map(OsString::as_os_str).collect::<Vec<_>>()
+        );
+    }
+
+    /// 不是用例，是下面那条测试拉起的子进程：把自己收到的参数写出来。
+    #[test]
+    fn relaunched_child_dumps_its_args() {
+        if let Some(path) = std::env::var_os(DUMP_ENV) {
+            let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+            fs::write(path, format!("{args:?}")).unwrap();
+        }
+    }
+
+    /// `get_args` 分不出 `arg` 和 `raw_arg`，只有真起一个进程、让它按系统规则拆一遍命令行，才看得出引号加得对不对。
+    #[test]
+    fn a_real_child_splits_the_command_line_back_into_the_same_arguments() {
+        let dir = TempDir::new().unwrap();
+        // 程序名写死成 Petalfall.exe，拿测试程序的副本顶替：它认得下面这个用例名，只把参数写出来
+        fs::copy(std::env::current_exe().unwrap(), dir.path().join(APP_EXE)).unwrap();
+        let dump = dir.path().join("args.txt");
+        // 子进程是测试程序，参数也会被当成用例名过滤：不以 - 开头才不会被当成它的选项，孤立代理项会让它直接崩掉，这两种留给上一条
+        let args: Vec<OsString> = awkward_args()
+            .into_iter()
+            .filter(|arg| arg.to_str().is_some_and(|text| !text.starts_with('-')))
+            .collect();
+        assert_eq!(args.len(), 4, "引号、末尾反斜杠和空串这几种都要在");
+        let filter = [
+            "--exact",
+            "launcher::tests::relaunched_child_dumps_its_args",
+        ];
+
+        let status = launcher_command(dir.path(), &args)
+            .args(filter)
+            .env(DUMP_ENV, &dump)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .unwrap();
+
+        assert!(status.success());
+        let mut expected = args;
+        expected.extend(filter.map(OsString::from));
+        assert_eq!(fs::read_to_string(dump).unwrap(), format!("{expected:?}"));
     }
 
     #[test]
     fn a_folder_without_the_launcher_reports_the_failure() {
         let dir = TempDir::new().unwrap();
         let instance = instance("missing");
-        let err = open(dir.path(), &instance).unwrap_err();
+        let err = open(dir.path(), &[], &instance).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
@@ -421,7 +498,7 @@ mod tests {
     fn a_failed_start_still_leaves_the_event_inheritable() {
         let dir = TempDir::new().unwrap();
         let instance = instance("restore");
-        open(dir.path(), &instance).unwrap_err();
+        open(dir.path(), &[], &instance).unwrap_err();
         assert!(instance.is_inheritable().unwrap());
     }
 }

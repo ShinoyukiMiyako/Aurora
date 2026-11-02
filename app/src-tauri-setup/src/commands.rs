@@ -3,6 +3,7 @@
 //! 不带 `async` 的命令跑在窗口线程上。碰盘、等进程的活都走 [`on_worker`]，否则窗口会跟着卡住。
 //! 除 `install` 外，拒绝一律是字符串：前端把它们当意外，进致命错误页显示原文。
 
+use std::ffi::OsStr;
 use std::fmt::Display;
 use std::io;
 use std::path::Path;
@@ -160,14 +161,14 @@ impl SetupContext {
     }
 
     pub fn open_launcher(&self, dir: &Path) -> io::Result<Opened> {
-        let opened = self.session.open_launcher(dir, &self.instance)?;
+        let opened = self.session.open_launcher(dir, &[], &self.instance)?;
         self.log.info(format_args!("打开启动器：{opened:?}"));
         Ok(opened)
     }
 
     /// 启动原生向导，不等它结束：调用方随后关窗。要等结束时用 [`Self::wait_for_wizard`]。
     pub fn start_wizard(&self) -> Result<(), Failure> {
-        let wizard = self.session.start_standard()?;
+        let wizard = self.session.start_standard(OsStr::new(""))?;
         self.log
             .info(format_args!("原生向导已启动，pid {}", wizard.pid()));
         *self.wizard.lock().unwrap_or_else(PoisonError::into_inner) = Some(wizard);
