@@ -129,6 +129,7 @@ export function configDto(overrides: Partial<ConfigDto> = {}): ConfigDto {
     memory: { max_mb: 4096, min_mb: null, auto: true },
     isolation_policy: "mod_loaders_and_non_release",
     has_client_id: true,
+    microsoft_login_available: true,
     auto_download_java: true,
     default_java: "auto",
     after_launch: "keep",

@@ -10,7 +10,7 @@ import { AnimatePresence, motion, useIsPresent } from "framer-motion";
 import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { Icon, type IconName } from "../art/Icon";
-import { ACTION_ERROR, LAUNCH_COPY, LOADER_NAME, PAGE_LABEL, SETTINGS_SECTION_LABEL, accountKindLabel } from "../copy/flows";
+import { ACTION_ERROR, LAUNCH_COPY, LOADER_NAME, MSA_CLIENT_ID_MISSING, PAGE_LABEL, SETTINGS_SECTION_LABEL, accountKindLabel } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import { InstanceAvatar } from "../launch/InstanceAvatar";
 import { brokenAction } from "../launch/launchView";
@@ -21,7 +21,7 @@ import { useAppearance } from "../state/appearance";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import type { LauncherState } from "../state/store";
 import { SETTINGS_SECTIONS, type PageId, type Route } from "../state/route";
-import { activeAccount, findInstance } from "../state/selectors";
+import { activeAccount, findInstance, microsoftLoginUnavailable } from "../state/selectors";
 import { FocusReturnPoint, type FocusReturnHandle } from "../ui/focus-return";
 import { KeyHint } from "../ui/KeyHint";
 import { useSwitchAccount } from "./AccountCapsule";
@@ -160,6 +160,7 @@ function usePaletteEntries(query: string, current: LaunchEntry | null): PaletteE
   const instances = useLauncherSelector((s) => s.instances);
   const accounts = useLauncherSelector((s) => s.accounts);
   const me = useLauncherSelector(activeAccount);
+  const microsoftUnavailable = useLauncherSelector(microsoftLoginUnavailable);
   const actions = useLauncherActions();
   const { go } = useNav();
   const { openCreateInstance } = useShell();
@@ -270,12 +271,15 @@ function usePaletteEntries(query: string, current: LaunchEntry | null): PaletteE
     lastPlayedAt: null,
     icon: "shield",
     instance: null,
-    hint: null,
+    hint: microsoftUnavailable ? MSA_CLIENT_ID_MISSING.reason : null,
     navigates: true,
-    run: () => {
-      go({ page: "accounts" });
-      void run(() => actions.openLogin("microsoft"), ACTION_ERROR.microsoftLogin);
-    },
+    // 没有 client_id 时登录必然失败，直接去填它的地方
+    run: microsoftUnavailable
+      ? goTo({ page: "settings", section: "general" })
+      : () => {
+          go({ page: "accounts" });
+          void run(() => actions.openLogin("microsoft"), ACTION_ERROR.microsoftLogin);
+        },
   });
   entries.push({
     id: "account:add-offline",

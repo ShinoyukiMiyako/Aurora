@@ -447,6 +447,7 @@ pub fn auth_code(err: &AuthError) -> &'static str {
         AuthError::ReloginRequired => "ReloginRequired",
         AuthError::ServiceUnavailable { .. } => "ServiceUnavailable",
         AuthError::AppNotApproved => "AppNotApproved",
+        AuthError::MsaClientIdMissing => "MsaClientIdMissing",
         AuthError::InvalidUsername(_) => "InvalidUsername",
         AuthError::Yggdrasil { .. } => "Yggdrasil",
         AuthError::AccountNotFound(_) => "AccountNotFound",
@@ -859,6 +860,10 @@ mod tests {
         assert_eq!(unapproved.code, "AppNotApproved");
         assert!(unapproved.detail.is_none());
         assert!(unapproved.message.contains("Invalid app registration"));
+
+        let missing: CommandError = AuthError::MsaClientIdMissing.into();
+        assert_eq!(missing.code, "MsaClientIdMissing");
+        assert!(missing.detail.is_none());
     }
 
     #[test]

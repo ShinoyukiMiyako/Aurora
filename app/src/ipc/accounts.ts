@@ -49,6 +49,8 @@ export type AuthErrorCode =
   | "ServiceUnavailable"
   /** Minecraft 服务拒绝了启动器所用的微软应用（client_id 未获批准）；没有 detail，重试只会得到同样的结果。 */
   | "AppNotApproved"
+  /** 这个构建没有可用的微软登录 client_id（没有内嵌，也没填）；没有 detail，填上 client_id 之前重试没用。 */
+  | "MsaClientIdMissing"
   | "ReloginRequired"
   | "InvalidUsername"
   | "Yggdrasil"

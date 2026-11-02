@@ -422,12 +422,23 @@ describe("微软登录失败：服务故障与应用未获批准", () => {
     expect([copy.primary?.kind, copy.secondary?.kind]).not.toContain("retry");
   });
 
+  it("MsaClientIdMissing：说明是这个构建没有内置 client_id，只给打开设置，不给重试也不给复制", () => {
+    const copy = microsoftLoginFailure("MsaClientIdMissing", "这个版本没有内置微软登录 client_id", undefined);
+    expect(copy).toEqual({
+      title: "这个版本没有内置微软登录",
+      body: `这个版本的${APP_NAME}没有内置微软应用的 client_id，自行构建和 fork 的版本都是这样。在「设置 · 常规 · 高级」里填入你自己注册并获准的 client_id 后就能登录。`,
+      primary: { kind: "open_client_id_settings", label: "打开设置" },
+      secondary: null,
+      closeOnly: false,
+    });
+  });
+
   it("新增的登录失败文案不含禁用词", () => {
-    const texts = (["ServiceUnavailable", "AppNotApproved"] as const).flatMap((code) => {
+    const texts = (["ServiceUnavailable", "AppNotApproved", "MsaClientIdMissing"] as const).flatMap((code) => {
       const copy = microsoftLoginFailure(code, "x", undefined);
       return [copy.title, copy.body, copy.primary === null ? null : copy.primary.label, copy.secondary === null ? null : copy.secondary.label];
     });
-    expect(texts).toHaveLength(8);
+    expect(texts).toHaveLength(12);
     expect(bannedIn(texts)).toEqual([]);
   });
 });

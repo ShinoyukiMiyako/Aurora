@@ -56,6 +56,9 @@ pub struct Petalfall {
     quilt_base: String,
     java_runtime_url: String,
     msa_endpoints: MsaEndpoints,
+    /// 配置之外的微软登录 client_id（运行期环境变量或构建时内嵌），构造时取一次，见
+    /// [`crate::auth::fallback_msa_client_id`]；测试门面为 `None`。
+    msa_fallback_client_id: Option<String>,
     /// 长任务快照上挂的取消令牌；常驻门面上恒为 `None`。
     cancel: Option<CancellationToken>,
     /// 工程版本列表的短时缓存。放在门面上而不是进程全局：快照克隆的是同一个句柄，跨命令复用；
@@ -137,6 +140,7 @@ impl Petalfall {
             quilt_base: "https://meta.quiltmc.org".to_owned(),
             java_runtime_url: petalfall_java::MOJANG_JAVA_RUNTIME_ALL.to_owned(),
             msa_endpoints: MsaEndpoints::default(),
+            msa_fallback_client_id: crate::auth::fallback_msa_client_id(),
             cancel: None,
             mod_versions: Default::default(),
             source_speed: Arc::new(SourceSpeedCache::new(VERSION_MANIFEST_V2)),
@@ -445,6 +449,11 @@ impl Petalfall {
         }
     }
 
+    /// 配置之外的微软登录 client_id（运行期环境变量或构建时内嵌）。
+    pub(crate) fn msa_fallback_client_id(&self) -> Option<&str> {
+        self.msa_fallback_client_id.as_deref()
+    }
+
     /// 微软登录链的端点表。
     pub(crate) fn msa_endpoints(&self) -> &MsaEndpoints {
         &self.msa_endpoints
@@ -540,6 +549,7 @@ impl Petalfall {
             quilt_base: "https://meta.quiltmc.org".to_owned(),
             java_runtime_url: petalfall_java::MOJANG_JAVA_RUNTIME_ALL.to_owned(),
             msa_endpoints: MsaEndpoints::default(),
+            msa_fallback_client_id: None,
             cancel: None,
             mod_versions: Default::default(),
             // 默认测速指向一个不会应答的本机地址且 1 毫秒即超时：走到生成下载计划的既有测试不连真实网络，
@@ -604,6 +614,12 @@ impl Petalfall {
 
     pub(crate) fn with_curseforge_base(mut self, url: impl Into<String>) -> Self {
         self.curseforge_base = url.into();
+        self
+    }
+
+    /// 装上配置之外的微软登录 client_id，相当于运行期设了环境变量或构建时内嵌了它。
+    pub(crate) fn with_msa_fallback_client_id(mut self, id: impl Into<String>) -> Self {
+        self.msa_fallback_client_id = Some(id.into());
         self
     }
 

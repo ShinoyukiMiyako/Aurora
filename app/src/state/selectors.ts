@@ -23,6 +23,11 @@ export function activeTasks(state: LauncherState): Task[] {
   return state.tasks.filter(isActiveTask);
 }
 
+/** 配置已读到，且这个构建没有任何可用的微软登录 client_id。配置还没读到时按可用算，真去登录时后端照样会拦下。 */
+export function microsoftLoginUnavailable(state: LauncherState): boolean {
+  return state.settings !== null && !state.settings.microsoftLoginAvailable;
+}
+
 /** 游戏在跑或有任务在下时不能换游戏目录。 */
 export function gameDirectoryBusy(state: LauncherState): boolean {
   return busyInstanceId(state) !== null || activeTasks(state).length > 0;

@@ -3,7 +3,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import type { GameDirectoryDto } from "../../ipc/config";
+import type { ConfigDto, GameDirectoryDto } from "../../ipc/config";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
@@ -212,6 +212,44 @@ describe("首次启动向导：推进与收尾", () => {
     if (offline === undefined) throw new Error("没有离线账户选项");
     await click(offline);
     expect(launcher.state.login).toMatchObject({ kind: "offline", intent: { kind: "manual" } });
+  });
+
+  describe("构建里没有微软登录 client_id", () => {
+    // 向导期间主界面没挂上，失败卡的「打开设置」去不了设置页，所以要在这一步就拦下
+    beforeEach(() => {
+      ipc.overrides.set("get_config", async () => ({ ...(await mockInvoke<ConfigDto>("get_config")), has_client_id: false, microsoft_login_available: false }));
+    });
+
+    it("还没有账户：微软账户那张选项卡置灰并写原因，点了不发起登录；离线账户照常可加", async () => {
+      ipc.overrides.set("list_accounts", () => []);
+      ipc.overrides.set("current_account", () => null);
+      await mount();
+      await click(button("下一步"));
+      await click(button("下一步"));
+      const cards = all<HTMLButtonElement>("button[data-kind]");
+      expect(cards.map((b) => [b.dataset.kind, b.disabled])).toEqual([
+        ["microsoft", true],
+        ["offline", false],
+        ["authlib", false],
+      ]);
+      expect(cards[0].textContent).toContain("这个版本没有内置微软登录，在设置里填入 client_id 后可用");
+      await click(cards[0]);
+      expect(launcher.state.login).toBeNull();
+      expect(callsOf(ipc, "microsoft_login")).toEqual([]);
+      await click(cards[1]);
+      expect(launcher.state.login).toMatchObject({ kind: "offline" });
+    });
+
+    it("已有账户：收起后的按钮行里微软账户同样不可用，点了不发起登录", async () => {
+      await mount();
+      await click(button("下一步"));
+      await click(button("下一步"));
+      const microsoft = button("微软账户");
+      expect([microsoft.getAttribute("aria-disabled"), button("离线账户").getAttribute("aria-disabled")]).toEqual(["true", null]);
+      await click(microsoft);
+      expect(launcher.state.login).toBeNull();
+      expect(callsOf(ipc, "microsoft_login")).toEqual([]);
+    });
   });
 
   it("直接开始：一次提交游戏目录与勾选的文件夹，向导随之卸载", async () => {

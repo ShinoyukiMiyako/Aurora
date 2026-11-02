@@ -2179,11 +2179,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         // 关掉自动分配：最大堆取全局的固定值，断言才不随本机此刻的空闲内存漂移。
+        // 续期要有 client_id 才装得出微软客户端；请求都打到 mock 端点，值随便填，不靠构建时有没有内嵌。
         let config = PetalfallConfig {
             memory: MemorySettings {
                 auto: false,
                 ..MemorySettings::default()
             },
+            msa_client_id: Some("test-client-id".into()),
             ..PetalfallConfig::default()
         };
         let petalfall = Petalfall::for_test(config, root.clone(), root.join(game_dir));
