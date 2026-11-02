@@ -4,6 +4,7 @@ import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import type { SetupCopy } from "../copy";
 import { Frame } from "../Frame";
+import { PathRow } from "../PathRow";
 import styles from "./Welcome.module.css";
 
 export interface WelcomeProps {
@@ -55,17 +56,15 @@ export function Welcome({ copy, dir, interrupted, busy, onChangeDir, onInstall }
     >
       <div className={styles.content}>
         {interrupted && <Callout tone="info">{text.interrupted}</Callout>}
-        <div className={styles.location}>
-          <span className={styles.label}>{text.locationLabel}</span>
-          <div className={styles.pathRow}>
-            <span className={styles.path} title={dir}>
-              {dir}
-            </span>
-            <Button variant="ghost" size="sm" disabled={busy} focusableWhenDisabled onClick={onChangeDir}>
+        <PathRow
+          label={text.locationLabel}
+          path={dir}
+          action={
+            <Button size="lg" disabled={busy} focusableWhenDisabled onClick={onChangeDir}>
               {text.change}
             </Button>
-          </div>
-        </div>
+          }
+        />
         <p className={styles.legal}>{text.legalNote}</p>
       </div>
     </Frame>

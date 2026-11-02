@@ -1,37 +1,8 @@
 .content {
   display: flex;
   flex-direction: column;
-  gap: var(--sk-space-12);
+  gap: var(--sk-space-16);
   height: 100%;
-}
-
-.location {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sk-space-4);
-  margin: 0;
-  padding: var(--sk-space-12);
-  border-radius: var(--sk-r-sm);
-  background: var(--sk-bg-2);
-}
-
-.locationLabel {
-  font-size: var(--sk-fs-caption);
-  line-height: var(--sk-lh-caption);
-  color: var(--sk-text-2);
-}
-
-/* 路径可以选中复制。拖动区里的元素按下就拖窗口，所以这一格在标记上退出了拖动区 */
-.locationPath {
-  margin: 0;
-  overflow: hidden;
-  font-family: var(--sk-mono);
-  font-size: var(--sk-fs-mono);
-  line-height: var(--sk-lh-mono);
-  color: var(--sk-text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  user-select: text;
 }
 
 .elevated {

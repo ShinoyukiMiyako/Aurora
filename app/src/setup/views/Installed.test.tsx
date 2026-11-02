@@ -9,6 +9,7 @@ import { render, type Rendered } from "../../test/dom";
 import type { ExistingKind } from "../contract";
 import { COPY, type Lang } from "../copy";
 import { FrameChromeProvider, type FrameChrome } from "../Frame";
+import shared from "../setup.module.css";
 import { Installed, type InstalledProps } from "./Installed";
 
 // 花瓣层要 canvas 和令牌，和这里要验的东西无关
@@ -139,7 +140,12 @@ describe.each(KINDS)("位置行与声明（%s）", (kind) => {
 
   it("路径退出拖动区：否则按下就拖窗口，选不了字", () => {
     show(kind);
-    expect(document.querySelector("dd")?.getAttribute("data-tauri-drag-region")).toBe("false");
+    expect(document.querySelector("dd")?.closest("[data-tauri-drag-region]")?.getAttribute("data-tauri-drag-region")).toBe("false");
+  });
+
+  it("位置行与欢迎页同一个路径框", () => {
+    show(kind);
+    expect(document.querySelector("dd")?.className).toBe(shared.pathBox);
   });
 
   it("显示协议声明", () => {

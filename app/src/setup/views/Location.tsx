@@ -10,6 +10,7 @@ import type { DirCheck } from "../contract";
 import { formatBytes, type SetupCopy } from "../copy";
 import { Frame } from "../Frame";
 import { dirNotice, withAppFolder } from "../model";
+import shared from "../setup.module.css";
 import styles from "./Location.module.css";
 
 /** check_dir 会真写探针文件，输入停下来才查，不为每个按键碰一次盘。 */
@@ -147,8 +148,8 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
             </span>
           }
         >
-          <div className={styles.dirRow}>
-            <TextInput className={styles.dirInput} size="lg" value={dir} onChange={onDirChange} onKeyDown={onPathKeyDown} readOnly={busy} spellCheck={false} autoComplete="off" autoFocus />
+          <div className={shared.pathRow}>
+            <TextInput className={shared.pathInput} size="lg" value={dir} onChange={onDirChange} onKeyDown={onPathKeyDown} readOnly={busy} spellCheck={false} autoComplete="off" autoFocus />
             <Button size="lg" icon="folder-open" disabled={busy} focusableWhenDisabled onClick={browse}>
               {text.browse}
             </Button>

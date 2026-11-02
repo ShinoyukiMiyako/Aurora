@@ -2,6 +2,7 @@ import { Button } from "../../ui/Button";
 import type { Existing } from "../contract";
 import type { SetupCopy } from "../copy";
 import { Frame } from "../Frame";
+import { PathRow } from "../PathRow";
 import styles from "./Installed.module.css";
 
 export interface InstalledProps {
@@ -64,12 +65,7 @@ export function Installed({ copy, existing, payloadVersion, elevated, busy, open
   return (
     <Frame title={text.title(existing.version)} lead={text.lead(existing.version, payloadVersion)} footer={footer}>
       <div className={styles.content}>
-        <dl className={styles.location}>
-          <dt className={styles.locationLabel}>{copy.installed.locationLabel}</dt>
-          <dd className={styles.locationPath} title={existing.dir} data-tauri-drag-region="false">
-            {existing.dir}
-          </dd>
-        </dl>
+        <PathRow label={copy.installed.locationLabel} path={existing.dir} />
         {elevated && existing.kind !== "broken" && <p className={styles.elevated}>{copy.done.elevated}</p>}
         <p className={styles.legalNote}>{copy.installed.legalNote}</p>
       </div>
