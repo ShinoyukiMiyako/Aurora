@@ -30,9 +30,9 @@ use petalfall_launch::{
     AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, JvmMemoryIssue,
     LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, PathWarning,
     QuickPlayMode, QuickPlayTarget, SessionClock, SessionLog, SyncProvider, effective_max_heap_mb,
-    jvm_memory_issue, long_player_name, non_ascii_path_at_risk, path_char_outside_code_page,
-    path_warnings, quick_play_support, recommended_max_mb, required_java_major, sync_folder,
-    sync_roots_from_env,
+    estimate_memory, jvm_memory_issue, long_player_name, non_ascii_path_at_risk,
+    path_char_outside_code_page, path_warnings, quick_play_support, required_java_major,
+    sync_folder, sync_roots_from_env,
 };
 use petalfall_version::{
     AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, detect_loaders, resolve,
@@ -978,16 +978,18 @@ impl Petalfall {
         // -- 5 生成启动参数
         reporter.stage(LaunchStage::BuildArguments).await;
         let global_memory = self.config().memory;
-        let auto_mb = if settings.memory_mb.is_none() && global_memory.auto {
-            let tier = self.instance_memory_tier(&chain.target).await?;
-            Some(recommended_max_mb(
-                crate::memory::read_system_memory().await?,
-                tier,
-            ))
+        let auto = if settings.memory_mb.is_none() && global_memory.auto {
+            let profile = self.memory_profile(&chain.target, &working_dir).await?;
+            let system = crate::memory::read_system_memory().await?;
+            Some((estimate_memory(&profile, system, java.is_64bit), system))
         } else {
             None
         };
-        let memory = resolve_memory(settings.memory_mb, global_memory, auto_mb);
+        let memory = resolve_memory(
+            settings.memory_mb,
+            global_memory,
+            auto.as_ref().map(|(estimate, _)| estimate.recommended_mb),
+        );
         if let Some(issue) = jvm_memory_issue(&settings.jvm_args, memory) {
             let (warning, text) = memory_warning(issue);
             warnings.push(warning);
@@ -995,6 +997,17 @@ impl Petalfall {
         }
         // 崩溃诊断拿它解释内存耗尽：写的要是内存设置而不是 -Xmx，诊断就会说一个这局根本没用上的数。
         let max_heap_mb = effective_max_heap_mb(&settings.jvm_args, memory);
+        // 自定义 JVM 参数里写了别的 -Xmx 时自动值没生效，再说「给了多少、空闲够不够」只会误导。
+        if let Some((estimate, system)) = &auto
+            && max_heap_mb == estimate.recommended_mb
+        {
+            reporter
+                .info(crate::memory::auto_memory_log(estimate))
+                .await;
+            for text in crate::memory::auto_memory_warnings(estimate, *system) {
+                reporter.warn(text).await;
+            }
+        }
         let command = assemble_command(
             merged,
             self.runtime(),
@@ -4264,6 +4277,83 @@ mod tests {
             log.lines.iter().any(|l| l.text.contains("最大内存 64 MB")),
             "{:?}",
             log.lines
+        );
+    }
+
+    /// 自动内存生效时启动日志写明来由，32 位 Java 封顶并提醒换 64 位；自定义 -Xmx 盖过它时不再说自动给了多少。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_memory_is_explained_in_the_launch_log_only_when_it_applies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
+            root.clone(),
+            root.join(".minecraft"),
+        );
+        install_version(&root.join(".minecraft"), 17, true);
+        let java = complete_fake_java(&root, 17, 0);
+        let script = std::fs::read_to_string(&java).unwrap();
+        std::fs::write(&java, script.replace("64-Bit Server VM", "Client VM")).unwrap();
+        let texts = |log: crate::crashdiag::LaunchLog| -> Vec<String> {
+            log.lines.into_iter().map(|l| l.text).collect()
+        };
+
+        let (result, _) = launch(&petalfall, java.clone()).await;
+        result.expect("32 位 Java 照常启动").finish().await;
+        let system = crate::memory::read_system_memory().await.unwrap();
+        let vanilla = petalfall_launch::MemoryProfile {
+            loader: petalfall_launch::LoaderClass::Vanilla,
+            enabled_mods: 0,
+            modpack_recommended_mb: None,
+            render_distance: None,
+            distant_horizons: false,
+        };
+        let estimate = estimate_memory(&vanilla, system, false);
+        assert_eq!(
+            estimate.recommended_mb, 1024,
+            "开发机物理内存的一半高于 1 GB"
+        );
+        let lines = texts(petalfall.last_launch_log(VERSION).await.unwrap().unwrap());
+        assert!(
+            lines.contains(
+                &"自动内存：需要 2560 MB（原版基数 2560 MB），本机上限 1024 MB（32 位 Java），给 1024 MB"
+                    .to_owned()
+            ),
+            "{lines:?}"
+        );
+        assert!(
+            lines.contains(
+                &"32 位 Java 最多分配 1024 MB，这个实例估计需要 2560 MB，换 64 位 Java 才能给够"
+                    .to_owned()
+            ),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("最大内存 1024 MB")),
+            "{lines:?}"
+        );
+
+        petalfall_instance::VersionSettingsStore::for_version_dir(
+            &root.join(".minecraft").join(VERSIONS_DIR).join(VERSION),
+        )
+        .save(&VersionSettings {
+            jvm_args: "-Xmx2G".into(),
+            ..VersionSettings::default()
+        })
+        .await
+        .unwrap();
+        let (result, _) = launch(&petalfall, java).await;
+        result.expect("自定义 -Xmx 照常启动").finish().await;
+        let lines = texts(petalfall.last_launch_log(VERSION).await.unwrap().unwrap());
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.starts_with("自动内存") || l.starts_with("32 位 Java")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("最大内存 2048 MB")),
+            "{lines:?}"
         );
     }
 

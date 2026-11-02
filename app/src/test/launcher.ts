@@ -8,6 +8,7 @@ import type { ConfigDto } from "../ipc/config";
 import { CANCELLED_ERROR_CODE, IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import { clearMockEventListeners, emitMockEvent } from "../ipc/mock/events";
+import type { MemoryAdviceDto } from "../ipc/system";
 import type { TaskRecordDto } from "../ipc/tasks";
 import { resources } from "../state/resource";
 import { LauncherStore } from "../state/store";
@@ -95,6 +96,24 @@ export function instanceDto(id: string, overrides: Partial<InstanceDto> = {}): I
     last_played_at: null,
     play_error: null,
     dir_error: null,
+    ...overrides,
+  };
+}
+
+/** 32 GB 的机器上装了加载器、2 个 Mod、带 Distant Horizons 的实例：需要与建议都是 6 GB，没被封顶。 */
+export function memoryAdviceDto(overrides: Partial<MemoryAdviceDto> = {}): MemoryAdviceDto {
+  return {
+    total_mb: 32768,
+    available_mb: 16000,
+    version_id: null,
+    need_mb: 6144,
+    limit: { mb: 16384, reason: "half_physical" },
+    recommended_mb: 6144,
+    factors: [
+      { kind: "base", loader: "modded", mb: 2765 },
+      { kind: "mods", count: 2, mb: 40 },
+      { kind: "distant_horizons", floor_mb: 6144 },
+    ],
     ...overrides,
   };
 }

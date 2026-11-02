@@ -970,7 +970,7 @@ describe("设置页：游戏", () => {
   it("内存：数据来自内存建议；关掉自动分配写入整组内存设置", async () => {
     await mount("game");
     expect(text()).toContain("本机共 16 GB，这里是所有实例的默认值");
-    expect(text()).toContain("当前按「原版」档给 3.8 GB");
+    expect(text()).toContain("按每个实例的 Mod 数量、整合包推荐值与视距估算；没有当前实例，按原版估算，建议 2.5 GB");
     expect(text()).toContain("现在空闲 9 GB");
     await click(button("自动分配"));
     expect(callsOf(ipc, "update_config")).toEqual([{ memory: { max_mb: 4096, min_mb: null, auto: false } }]);
@@ -1014,6 +1014,80 @@ describe("设置页：游戏", () => {
     ]);
     for (const resolve of pending) act(() => resolve());
     await flush();
+  });
+
+  describe("内存：自动分配的估算依据", () => {
+    const ADVICE = {
+      total_mb: 16384,
+      available_mb: 9000,
+      version_id: "整合包A",
+      need_mb: 5632,
+      limit: { mb: 8192, reason: "half_physical" },
+      recommended_mb: 5632,
+      factors: [
+        { kind: "base", loader: "modded", mb: 2765 },
+        { kind: "mods", count: 120, mb: 2457 },
+        { kind: "render_distance", distance: 16, mb: 46 },
+      ],
+    };
+
+    beforeEach(() => {
+      ipc.overrides.set("list_instances", () => [instanceDto("整合包A", { mc_version: "1.20.1", loaders: [{ kind: "forge", version: "47.2.0" }], mod_count: 120 })]);
+    });
+
+    /** 悬停滑杆上的推荐标记，读出它的提示。 */
+    async function markerTip(): Promise<string | null> {
+      const marker = document.querySelector<HTMLElement>("[style*='--marker-p']");
+      if (marker === null) throw new Error("滑杆上没有推荐标记");
+      act(() => {
+        marker.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      const tip = document.querySelector('[role="tooltip"]');
+      if (tip === null) throw new Error("推荐标记没有弹出提示");
+      return tip.textContent;
+    }
+
+    it("说明写当前实例的依据整句，推荐标记的提示是同一句", async () => {
+      ipc.overrides.set("memory_advice", () => ADVICE);
+      await mount("game");
+      const card = section("内存");
+      expect(card.textContent).toContain("按每个实例的 Mod 数量、整合包推荐值与视距估算；当前实例「整合包A」：Forge 1.20.1 · 120 个 Mod · 视距 16，建议 5.5 GB");
+      expect(card.querySelector('[data-tone="warn"]')).toBeNull();
+      expect(await markerTip()).toBe("Forge 1.20.1 · 120 个 Mod · 视距 16，建议 5.5 GB");
+    });
+
+    it("按当前实例的 id 取内存建议，没有当前实例时不带 id", async () => {
+      ipc.overrides.set("memory_advice", () => ADVICE);
+      await mount("game");
+      expect(callsOf(ipc, "memory_advice")).toEqual([{ versionId: undefined }]);
+    });
+
+    it("有当前实例时带上它的 id：换当前实例、改名与 Mod 变化都随实例作用域的失效重取", async () => {
+      ipc.overrides.set("memory_advice", () => ADVICE);
+      ipc.overrides.set("get_config", async (args) => ({ ...(await mockInvoke<object>("get_config", args)), selected_version: "整合包A" }));
+      await mount("game");
+      expect(callsOf(ipc, "memory_advice")).toEqual([{ versionId: "整合包A" }]);
+    });
+
+    it("当前实例在实例列表里找不到：加载器与版本不编，从组成项写起", async () => {
+      ipc.overrides.set("memory_advice", () => ({ ...ADVICE, version_id: "已删" }));
+      await mount("game");
+      expect(section("内存").textContent).toContain("当前实例「已删」：120 个 Mod · 视距 16，建议 5.5 GB");
+    });
+
+    it("被封顶：开着自动分配时提示需要多少、本机最多给多少，提示整句补上原因；关掉后不再提示", async () => {
+      ipc.overrides.set("memory_advice", () => ({ ...ADVICE, need_mb: 13312, recommended_mb: 8192, factors: [ADVICE.factors[0], { kind: "mods", count: 1100, mb: 10437 }] }));
+      await mount("game");
+      const card = section("内存");
+      expect(card.textContent).toContain("当前实例「整合包A」：Forge 1.20.1 · 1100 个 Mod，建议 8 GB");
+      expect(card.querySelector('[data-tone="warn"]')?.textContent).toBe("需要 13 GB，本机最多给 8 GB（物理内存的一半），内存可能不够用。");
+      expect(await markerTip()).toBe("Forge 1.20.1 · 1100 个 Mod，建议 8 GB。需要 13 GB，本机最多给 8 GB（物理内存的一半）");
+      await click(button("自动分配"));
+      expect(section("内存").textContent).not.toContain("内存可能不够用");
+    });
   });
 
   it("版本隔离：关闭档的例外写目录里有内容，不写已有目录（隔离时启动一次就会建出空目录，空目录不强制隔离）", async () => {

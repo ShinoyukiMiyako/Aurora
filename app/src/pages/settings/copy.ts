@@ -171,19 +171,14 @@ export const MEMORY_COPY = {
   title: "内存",
   subtitle: (total: string) => `本机共 ${total}，这里是所有实例的默认值`,
   auto: "自动分配",
-  autoDesc: (tier: string, recommended: string) => `按实例类型与开机时的空闲内存决定；当前按「${tier}」档给 ${recommended}`,
+  autoDesc: (current: string) => `按每个实例的 Mod 数量、整合包推荐值与视距估算；${current}`,
+  currentInstance: (name: string, summary: string) => `当前实例「${name}」：${summary}`,
+  noInstance: (recommended: string) => `没有当前实例，按原版估算，建议 ${recommended}`,
   max: "最大内存",
-  recommendedTip: (tier: string, mb: string) => `「${tier}」档推荐 ${mb}`,
   available: (mb: string) => `现在空闲 ${mb}`,
   custom: (n: number) => `${n} 个实例用自定义内存，不受这里影响`,
   overAvailable: (value: string, available: string) => `给游戏 ${value} 已经超过现在的空闲内存 ${available}，浏览器、语音软件开多了容易卡顿。`,
   readFailed: "读不到本机内存信息",
-} as const;
-
-export const MEMORY_TIER_LABEL = {
-  vanilla: "原版",
-  modded: "装 Mod",
-  large_modpack: "大型整合",
 } as const;
 
 export const ISOLATION_COPY = {

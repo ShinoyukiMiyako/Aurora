@@ -6,7 +6,7 @@ import { AnimatePresence } from "framer-motion";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "../../art/Icon";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
-import { lockReason, MODPACK_REIMPORT_COPY, modpackLabel, TOAST_COPY } from "../../copy/flows";
+import { EXTRA_LOADER_NAME, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { percent } from "../../domain/format";
 import { needsReimport } from "../../domain/rules";
@@ -160,8 +160,6 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
     </Card>
   );
 }
-
-const EXTRA_LOADER_NAME = { optifine: "OptiFine", liteloader: "LiteLoader" } as const;
 
 /** 头图上的安装标签：自己订阅本实例任务的百分比文字，进度怎么走都只换这一枚标签，头图其余部分不重渲染。 */
 function InstallingTag({ instanceId }: { instanceId: string }) {

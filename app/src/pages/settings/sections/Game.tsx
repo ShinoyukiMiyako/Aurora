@@ -4,11 +4,13 @@ import { useState, type ReactNode } from "react";
 import type { InstanceSummary, Settings, WorldBackup } from "../../../domain/adapt";
 import { formatMemory } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
+import { memoryBasis } from "../../../domain/memory";
 import { samePath } from "../../../domain/paths";
 import { autoBackupOutcome } from "../../../domain/rules";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR, gameDirSwitchReason, GAME_DIR_SWITCH_COPY } from "../../../copy/flows";
+import { MEMORY_BASIS_COPY } from "../../../copy/memory";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import { useDiscoveredGameDirectories, useGameDirectories, useMemoryAdvice, type GameDirectoryDto } from "../../../state/queries/catalog";
 import { invalidate } from "../../../state/resource";
@@ -37,7 +39,6 @@ import {
   LOAD_COPY,
   MAX_TOTAL_GB_OPTIONS,
   MEMORY_COPY,
-  MEMORY_TIER_LABEL,
   RECOMMENDED_ISOLATION,
   WORLD_BACKUP_COPY,
 } from "../copy";
@@ -66,9 +67,12 @@ function CustomMemoryLine({ instances }: { instances: readonly InstanceSummary[]
 function MemoryCard() {
   const settings = useLoadedSettings();
   const instances = useLauncherSelector((s) => s.instances);
+  const selectedInstanceId = useLauncherSelector((s) => s.selectedInstanceId);
   const actions = useLauncherActions();
   const run = useRunner();
-  const advice = useMemoryAdvice(null);
+  // 按当前实例的 id 取，不让后端自己去读主页选中了谁：缓存 key 带上实例 id，换当前实例、改名、删除与 Mod 变化
+  // 才会随实例作用域的失效一起重取，不会留着上一个实例的估算
+  const advice = useMemoryAdvice(selectedInstanceId);
   const memory = settings.memory;
   // 两项写的是同一组内存设置：一项还在写入时改另一项，要带上前一项正在写的值；按读到的旧配置拼整组，
   // 后到的这次就把前一项改回去了（刚关掉的自动分配又被打开，或刚调的最大内存退回原值）
@@ -113,14 +117,16 @@ function MemoryCard() {
     );
   }
 
-  const { total_mb: total, available_mb: available, recommended_mb: recommended, tier } = advice.data;
-  const tierLabel = MEMORY_TIER_LABEL[tier];
+  const { total_mb: total, available_mb: available, recommended_mb: recommended, version_id: versionId } = advice.data;
+  // 实例列表里还找不到当前实例时（重扫还没回来），加载器与版本只写组成项看得出来的部分
+  const basis = memoryBasis(advice.data, versionId === null ? null : (instances.find((i) => i.id === versionId) ?? null));
+  const current = versionId === null ? MEMORY_COPY.noInstance(formatMemory(recommended)) : MEMORY_COPY.currentInstance(versionId, basis.summary);
   const manual = dragging === null ? max.value : dragging;
   const value = auto.value ? recommended : manual;
   return (
     <Card>
       <CardHeader title={MEMORY_COPY.title} subtitle={MEMORY_COPY.subtitle(formatMemory(total))} icon="memory" />
-      <SettingRow title={MEMORY_COPY.auto} description={MEMORY_COPY.autoDesc(tierLabel, formatMemory(recommended))}>
+      <SettingRow title={MEMORY_COPY.auto} description={MEMORY_COPY.autoDesc(current)}>
         <Toggle checked={auto.value} onChange={auto.set} ariaLabel={MEMORY_COPY.auto} />
       </SettingRow>
       <div className={s.cardBody}>
@@ -129,7 +135,7 @@ function MemoryCard() {
           totalMb={total}
           value={value}
           disabled={auto.value}
-          recommended={{ mb: recommended, tip: MEMORY_COPY.recommendedTip(tierLabel, formatMemory(recommended)) }}
+          recommended={{ mb: recommended, tip: basis.sentence }}
           notes={[MEMORY_COPY.available(formatMemory(available))]}
           onChange={setDragging}
           onCommit={(mb) => {
@@ -138,6 +144,11 @@ function MemoryCard() {
           }}
         />
         <CustomMemoryLine instances={instances} />
+        {auto.value && basis.cap !== null && (
+          <Callout tone="warn" icon="alert" announce>
+            {MEMORY_BASIS_COPY.capNotice(basis.cap)}
+          </Callout>
+        )}
         {!auto.value && overAvailable(manual, available, total) && (
           <Callout tone="warn" icon="alert" announce>
             {MEMORY_COPY.overAvailable(formatMemory(manual), formatMemory(available))}

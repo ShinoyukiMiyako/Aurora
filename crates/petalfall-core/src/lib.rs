@@ -148,9 +148,10 @@ pub use petalfall_instance::{
 pub use petalfall_java::{DetectSource, InstalledRuntime, JavaInstallation, JavaVersion};
 pub use petalfall_launch::{
     CrashCategory, CrashDiagnosis, ExitCodeKind, ExitCodeNote, ExitReport, KillSwitch,
-    LauncherLevel, LogBatchSink, LogEntry, LogLine, LogSource, LogStream, MemoryAdvice, MemoryTier,
-    QuickPlayMode, QuickPlaySupport, QuickPlayTarget, SessionEnded, SessionOutcome, SystemMemory,
-    analyze, detect_crash, game_line_level, probe_system_memory,
+    LauncherLevel, LimitReason, LoaderClass, LogBatchSink, LogEntry, LogLine, LogSource, LogStream,
+    MemoryAdvice, MemoryEstimate, MemoryLimit, NeedFactor, QuickPlayMode, QuickPlaySupport,
+    QuickPlayTarget, SessionEnded, SessionOutcome, SystemMemory, analyze, detect_crash,
+    game_line_level, probe_system_memory,
 };
 pub use petalfall_modplatform::{
     AggregateResult, DependencyKind, InstalledMod, MetadataFormat, ModDependency, ModLoader,

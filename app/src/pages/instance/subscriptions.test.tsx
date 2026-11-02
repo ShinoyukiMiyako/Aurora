@@ -21,7 +21,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import { routeKey, type InstanceTab } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, configDto, deferred, emit, instanceDto, memoryAdviceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import { HERO_COPY, OVERVIEW_COPY } from "./copy";
 import InstancePage from "./index";
@@ -294,7 +294,7 @@ beforeEach(() => {
     worlds: [{ dir_name: "w1", level_status: "ok", level_error: null, name: "新世界", mode: "survival", last_played: NOW - 60_000, size_bytes: 1024, modified_at: null }],
   }));
   ipc.overrides.set("detect_java", () => [{ path: "C:/Java/jdk-21/bin/java.exe", version: { major: 21, minor: 0, security: 5, build: 0, raw: "21.0.5" }, is_64bit: true, vendor: "Microsoft", source: "registry", missing_files: [] }]);
-  ipc.overrides.set("memory_advice", () => ({ total_mb: 32768, available_mb: 16000, tier: "modded", recommended_mb: 6144 }));
+  ipc.overrides.set("memory_advice", () => memoryAdviceDto({ version_id: ID }));
   ipc.overrides.set("last_crash", () => crash);
   ipc.overrides.set("last_launch_log", () => null);
   ipc.overrides.set("list_history", () => history);

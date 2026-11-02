@@ -41,7 +41,7 @@ export interface MemorySliderProps {
   onCommit: (mb: number) => void;
   /** 物理内存（MB）。 */
   totalMb: number;
-  /** 推荐值（MB）与它的悬停说明（「按 120 个 Mod 推荐 6 GB」）。 */
+  /** 推荐值（MB）与它的悬停说明（「Forge 1.20.1 · 120 个 Mod，建议 6 GB」）。 */
   recommended?: { mb: number; tip: string };
   /** 接在占用说明后面的补充（推荐说明、「现在空闲 12 GB」），以「 · 」分隔。 */
   notes?: readonly string[];

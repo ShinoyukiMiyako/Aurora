@@ -11,6 +11,7 @@ import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSetting
 import type { JavaInstallationDto } from "../../ipc/java";
 import { GAME_EXIT_EVENT } from "../../ipc/launch";
 import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
+import type { MemoryAdviceDto } from "../../ipc/system";
 import { APP_NAME } from "../../lib/app-info";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickSaveFile } from "../../shell/platform";
@@ -23,7 +24,7 @@ import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } fr
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { emulateFocusFixup } from "../../test/focus-fixup";
 import { CORE_EVENT } from "../../ipc/tasks";
-import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, memoryAdviceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { invalidate, resources } from "../../state/resource";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
@@ -262,7 +263,7 @@ beforeEach(() => {
   ipc.overrides.set("check_updates", () => updates);
   ipc.overrides.set("list_instance_content", () => contentDto());
   ipc.overrides.set("detect_java", () => [java("C:/Java/jdk-21/bin/java.exe", 21), java("C:/Java/jdk-17/bin/java.exe", 17)]);
-  ipc.overrides.set("memory_advice", () => ({ total_mb: 32768, available_mb: 16000, tier: "modded", recommended_mb: 6144 }));
+  ipc.overrides.set("memory_advice", () => memoryAdviceDto({ version_id: ID }));
   ipc.overrides.set("last_crash", () => crash);
   ipc.overrides.set("last_launch_log", () => null);
   ipc.overrides.set("list_history", () => history);
@@ -2040,7 +2041,7 @@ describe("实例详情：设置", () => {
   });
 
   it("整页一个加载门：本机内存读得慢时 300 ms 后几张卡一起出骨架，读到后一起换成内容", async () => {
-    const advice = deferred<{ total_mb: number; available_mb: number; tier: string; recommended_mb: number }>();
+    const advice = deferred<MemoryAdviceDto>();
     ipc.overrides.set("memory_advice", () => advice.promise);
     await open("settings");
     const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
@@ -2051,7 +2052,7 @@ describe("实例详情：设置", () => {
     });
     expect(skeletons()).toBeGreaterThan(0);
     await act(async () => {
-      advice.resolve({ total_mb: 32768, available_mb: 16000, tier: "modded", recommended_mb: 6144 });
+      advice.resolve(memoryAdviceDto({ version_id: ID }));
       await settle(20);
       await vi.advanceTimersByTimeAsync(300);
     });
@@ -2272,19 +2273,79 @@ describe("实例详情：设置", () => {
     expect((saved[0].settings as InstanceSettingsDto).memory_mb).toBe(4096);
   });
 
-  it("单独设置的内存：Mod 数得出来时按它给建议", async () => {
-    settings = { ...settings, memory_mb: 4096 };
-    await open("settings");
-    expect(text()).toContain("2 个 Mod 建议至少 6 GB");
-  });
+  describe("内存的估算依据", () => {
+    const BASIS = "Fabric 1.21.1 · 2 个 Mod · Distant Horizons";
+    /** 16 GB 的机器上需要 13 GB 的实例：自动分配被物理内存的一半封顶在 8 GB。 */
+    const CAPPED = { total_mb: 16384, need_mb: 13312, limit: { mb: 8192, reason: "half_physical" as const }, recommended_mb: 8192 };
 
-  it("单独设置的内存：Mod 数不出来时不拿 0 个 Mod 下判断", async () => {
-    settings = { ...settings, memory_mb: 4096 };
-    instances = instances.map((i) => (i.id === ID ? { ...i, mod_count: null, dir_error: "文件 IO 失败: mods：拒绝访问" } : i));
-    await open("settings");
-    expect(text()).toContain("占系统内存 13%（共 32 GB）");
-    expect(text()).not.toContain("个 Mod 建议至少");
-    expect(text()).not.toContain("当前足够");
+    const memoryCard = (): HTMLElement => {
+      const heading = [...document.querySelectorAll("h2, h3")].find((h) => h.textContent === "内存");
+      const card = heading === undefined ? null : heading.closest<HTMLElement>("[data-pad]");
+      if (card === null) throw new Error("找不到内存卡片");
+      return card;
+    };
+    const usage = (): string => {
+      const line = [...memoryCard().querySelectorAll("p")].find((p) => textOf(p).startsWith("占系统内存"));
+      if (line === undefined) throw new Error("内存卡片里没有占用说明");
+      return textOf(line);
+    };
+    const autoGlobal = () => ipc.overrides.set("get_config", () => configDto({ memory: { max_mb: 4096, min_mb: null, auto: true } }));
+
+    it("跟随全局且全局自动分配：生效值下面写依据整句，没被封顶不提示", async () => {
+      autoGlobal();
+      await open("settings");
+      expect(memoryCard().textContent).toContain(`6 GB自动分配：${BASIS}，建议 6 GB`);
+      expect(memoryCard().querySelector('[data-tone="warn"]')).toBeNull();
+    });
+
+    it("跟随全局且全局自动分配：被封顶时提示需要多少、本机最多给多少", async () => {
+      autoGlobal();
+      ipc.overrides.set("memory_advice", () => memoryAdviceDto({ version_id: ID, ...CAPPED }));
+      await open("settings");
+      expect(memoryCard().textContent).toContain(`8 GB自动分配：${BASIS}，建议 8 GB`);
+      expect(memoryCard().querySelector('[data-tone="warn"]')?.textContent).toBe("需要 13 GB，本机最多给 8 GB（物理内存的一半），内存可能不够用。");
+    });
+
+    it("跟随全局但全局是固定值：只写「全局固定值」，被封顶也不提示", async () => {
+      ipc.overrides.set("memory_advice", () => memoryAdviceDto({ version_id: ID, ...CAPPED }));
+      await open("settings");
+      expect(memoryCard().textContent).toContain("4 GB全局固定值");
+      expect(memoryCard().textContent).not.toContain("自动分配：");
+      expect(memoryCard().querySelector('[data-tone="warn"]')).toBeNull();
+    });
+
+    it("单独设置低于建议值：按后端给的依据提醒偏少", async () => {
+      settings = { ...settings, memory_mb: 4096 };
+      await open("settings");
+      expect(usage()).toBe(`占系统内存 13%（共 32 GB） · ${BASIS}，建议 6 GB，当前偏少`);
+      expect(memoryCard().querySelector('p [data-tone="warn"]')?.textContent).toBe(` · ${BASIS}，建议 6 GB，当前偏少`);
+    });
+
+    it("单独设置不低于建议值：说当前足够", async () => {
+      settings = { ...settings, memory_mb: 6144 };
+      await open("settings");
+      expect(usage()).toBe(`占系统内存 19%（共 32 GB） · ${BASIS}，建议 6 GB，当前足够`);
+      expect(memoryCard().querySelector('p [data-tone="warn"]')).toBeNull();
+    });
+
+    it("实例摘要的 Mod 数读不出来也照后端的依据给建议，不再空着", async () => {
+      settings = { ...settings, memory_mb: 4096 };
+      instances = instances.map((i) => (i.id === ID ? { ...i, mod_count: null, dir_error: "文件 IO 失败: mods：拒绝访问" } : i));
+      await open("settings");
+      expect(usage()).toBe(`占系统内存 13%（共 32 GB） · ${BASIS}，建议 6 GB，当前偏少`);
+    });
+
+    it("被封顶时单独设得比建议值高、仍不到需求：说估算需要多少，不说足够；到了需求才说足够", async () => {
+      ipc.overrides.set("memory_advice", () => memoryAdviceDto({ version_id: ID, ...CAPPED }));
+      settings = { ...settings, memory_mb: 10240 };
+      await open("settings");
+      expect(usage()).toBe("占系统内存 63%（共 16 GB） · 估算需要 13 GB，当前仍偏少");
+      view?.unmount();
+      settings = { ...settings, memory_mb: 13312 };
+      resources.clear();
+      await open("settings");
+      expect(usage()).toBe(`占系统内存 81%（共 16 GB） · ${BASIS}，建议 8 GB，当前足够`);
+    });
   });
 
   it("删除实例：确认框按后端预览列出会一起移入回收站的存档，确认后删除", async () => {
