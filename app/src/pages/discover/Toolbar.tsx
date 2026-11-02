@@ -40,10 +40,10 @@ import {
 /** 头图右侧花枝插画的尺寸，按尺寸档。 */
 const BRANCH_SIZE = { compact: { width: 150, height: 110 }, regular: { width: 210, height: 150 }, wide: { width: 260, height: 170 } } as const;
 
-/** 悬停头图时花枝轻轻摆一下，离开时回正；不循环。 */
+/** 悬停头图时花枝轻轻上浮，离开时落回；不循环。不旋转：像素画转一个小角度就满边锯齿。 */
 const branchSway: Variants = {
-  rest: { rotate: 0, y: 0, transition: springs.soft },
-  hover: { rotate: -3, y: -2, transition: springs.soft },
+  rest: { y: 0, transition: springs.soft },
+  hover: { y: -2, transition: springs.soft },
 };
 
 export interface SearchHeroProps {

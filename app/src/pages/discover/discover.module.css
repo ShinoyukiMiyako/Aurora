@@ -69,12 +69,11 @@
   color: var(--sk-text-3);
 }
 
-/* 花枝只是装饰：不接收指针，悬停摆动的支点在枝条根部（右下角） */
+/* 花枝只是装饰：不接收指针 */
 .heroArt {
   flex: none;
   align-self: flex-end;
   pointer-events: none;
-  transform-origin: 100% 100%;
 }
 
 /* ---- 结果区：吸顶工具条 + 结果 ---- */

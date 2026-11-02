@@ -1,4 +1,4 @@
-// 字标组合 Logo 与五瓣樱花 SakuraMark。品牌图形是 PetalMark 像素花瓣，Logo 用它；SakuraMark 只留给 Spinner 与 BlossomBranch。
+// 字标组合 Logo 与五瓣樱花 SakuraMark。品牌图形是 PetalMark 像素花瓣，Logo 用它；SakuraMark 只留给 Spinner。
 // SakuraMark 每瓣带樱花特有的尖端缺刻，全部代码绘制，不使用任何商标图形。
 // 它按显示尺寸分三种形态：≥ 28 完整形（渐变花瓣、花心、花蕊）；20-27 简化形（平涂花瓣、镂空花心）；
 // 16 只用逐像素母版——矢量五瓣在 16 px 会糊成一团。17-19 px 与 16 px 以下没有可用形态，直接抛错。
