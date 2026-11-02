@@ -493,16 +493,23 @@ function ShellCore({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // WebView2 最小化时 visibilityState 仍是 visible，只能问窗口：最小化与还原都会让窗口尺寸变化，变一次读一次
+  // visibilityState 要靠宿主在最小化时把 WebView2 设为不可见，再问窗口一路兜底：最小化与还原都会让窗口尺寸变化，
+  // 变一次读一次。两路各自独立，任一说不可见就算不可见，先后到达都只翻转一次。
+  // 读取是异步命令，在线程池上各跑各的，回来的先后没有保证：只认最后发出的那次，
+  // 否则晚到的「已最小化」会盖掉「已还原」，通知暂停和花瓣就停在那里，下次窗口尺寸变化才解开
   const [minimized, setMinimized] = useState(false);
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
-    const read = () =>
+    let latestRead = 0;
+    const read = () => {
+      latestRead += 1;
+      const seq = latestRead;
       void run(async () => {
         const now = await port.isMinimized();
-        if (!disposed) setMinimized(now);
+        if (!disposed && seq === latestRead) setMinimized(now);
       }, SHELL_ACTION_ERROR.windowState);
+    };
     port.onResized(read).then(
       (release) => {
         if (disposed) {
