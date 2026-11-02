@@ -49,7 +49,7 @@ pub enum InstallMode {
 #[serde(rename_all = "camelCase")]
 pub struct InstallPlan {
     pub mode: InstallMode,
-    /// 只有首装带目录：升级和修复时目录由 NSIS 从注册表还原，传了反而会覆盖原位置。
+    /// 只有首装带目录：升级和修复装回探测到的登记目录，不让界面换位置，换了原来那份就成孤儿。
     pub dir: Option<String>,
     pub desktop_shortcut: bool,
 }

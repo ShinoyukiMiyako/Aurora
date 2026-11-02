@@ -25,7 +25,7 @@ export type InstallMode = "fresh" | "upgrade" | "repair";
 
 export interface InstallPlan {
   mode: InstallMode;
-  /** 只有首装带目录：升级和修复时目录由安装包从注册表还原，传了反而会覆盖原位置。 */
+  /** 只有首装带目录：升级和修复装回探测到的登记目录，不让界面换位置，换了原来那份就成孤儿。 */
   dir: string | null;
   desktopShortcut: boolean;
 }

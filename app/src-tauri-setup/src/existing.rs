@@ -81,7 +81,7 @@ pub fn classify(installed: &str, payload: &str) -> ExistingKind {
 
 /// 这台电脑上的现有安装。没有安装、或只是卸载后留下的目录记录时是 `None`。
 ///
-/// 有卸载项但程序文件不在是 broken：修复时目录由 NSIS 从注册表还原，界面只需要显示。broken 的
+/// 有卸载项但程序文件不在是 broken：修复装回这里探测到的目录，界面只需要显示。broken 的
 /// `version` 可能是空串，界面的 broken 文案不用它。
 pub fn detect(registry: &dyn Registry, payload_version: &str) -> io::Result<Option<Existing>> {
     let location = read_value(registry, UNINSTALL_KEY, Some(INSTALL_LOCATION))?;

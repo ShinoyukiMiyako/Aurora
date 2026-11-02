@@ -129,6 +129,11 @@ describe("安装包配置", () => {
     expect(outsideMacros).toMatch(/^AllowSkipFiles off$/m);
   });
 
+  it("缺 WebView2 时向导运行打进包里的引导器，不走模板的下载", () => {
+    // 模板默认用 NSISdl 下载引导器，NSISdl 不支持 HTTPS，微软的地址连 http 也跳到 https，沙箱实测必定失败
+    expect(conf.bundle.windows.webviewInstallMode).toEqual({ type: "embedBootstrapper" });
+  });
+
   it("中文系统看到中文向导，其余回落英文", () => {
     expect(conf.bundle.windows.nsis.languages).toEqual(["English", "SimpChinese"]);
   });

@@ -100,14 +100,14 @@ fn known_folder(id: &GUID) -> io::Result<PathBuf> {
 /// 拼 NSIS 的参数。整串走 `raw_arg`：`Command::arg` 遇空格会加引号，而 NSIS 只认
 /// 不带引号、放在最后的 `/D=`，认不出时不报错，静默装到默认目录。
 ///
-/// 升级和修复只传 `/S`：目录由 NSIS 从注册表还原，传 /D= 会把登记改指别处，旧目录成孤儿。
+/// 升级和修复也带 /D=，目录就是探测到、界面显示、事后核验的那个登记目录。只传 /S 时 NSIS 从
+/// `HKCU\Software\petalfall\Petalfall` 还原目录，不看卸载项的 `InstallLocation`：这个键被清理工具删掉时
+/// 装进默认目录，和卸载项不一致时装进键里记的目录，两种都是另装一份并把登记改指过去，原来那份连同数据
+/// 成了孤儿，核验也永远过不了。传的是原登记目录，所以登记不会被改指别处。
 /// 不传 /UPDATE、/P、/R、/NS：GetOptions 按前缀匹配，多传一个就多一处误触发。
-pub fn nsis_arguments(mode: InstallMode, dir: &Path) -> OsString {
-    let mut arguments = OsString::from("/S");
-    if mode == InstallMode::Fresh {
-        arguments.push(" /D=");
-        arguments.push(dir);
-    }
+pub fn nsis_arguments(dir: &Path) -> OsString {
+    let mut arguments = OsString::from("/S /D=");
+    arguments.push(dir);
     arguments
 }
 
@@ -527,7 +527,7 @@ impl Session {
             .save(&journal)
             .map_err(|err| io_failure("写半装记录", &err))?;
 
-        let arguments = nsis_arguments(target.mode, instdir);
+        let arguments = nsis_arguments(instdir);
         reporter.note(&format!("载荷参数：{}", arguments.display()));
         let before = dir_state(instdir);
         let mut watch = TargetWatch::new(instdir, header.exe_len);
@@ -685,26 +685,16 @@ mod tests {
     const DUMP_ENV: &str = "PETALFALL_TEST_DUMP_ARGS";
 
     #[test]
-    fn fresh_arguments_put_an_unquoted_directory_last() {
+    fn arguments_put_an_unquoted_directory_last() {
         assert_eq!(
-            nsis_arguments(InstallMode::Fresh, Path::new(r"D:\游戏 目录\Petalfall")),
+            nsis_arguments(Path::new(r"D:\游戏 目录\Petalfall")),
             OsString::from(r"/S /D=D:\游戏 目录\Petalfall")
         );
     }
 
     #[test]
-    fn upgrade_and_repair_pass_only_the_silent_switch() {
-        for mode in [InstallMode::Upgrade, InstallMode::Repair] {
-            assert_eq!(
-                nsis_arguments(mode, Path::new(r"D:\游戏 目录\Petalfall")),
-                OsString::from("/S")
-            );
-        }
-    }
-
-    #[test]
     fn the_command_carries_the_arguments_as_one_raw_string() {
-        let arguments = nsis_arguments(InstallMode::Fresh, Path::new(r"C:\Program Data\落樱"));
+        let arguments = nsis_arguments(Path::new(r"C:\Program Data\落樱"));
 
         let command = payload_command(
             Path::new(r"C:\t\petalfall-nsis.exe"),
@@ -744,7 +734,7 @@ mod tests {
         // 被加了引号的话这段路径会是一个参数；不加引号才会按空格断开，NSIS 看到的就是这种
         let dir = tempfile::tempdir().unwrap();
         let dump = dir.path().join("args.txt");
-        let arguments = nsis_arguments(InstallMode::Fresh, Path::new(r"D:\游戏 目录\Petalfall"));
+        let arguments = nsis_arguments(Path::new(r"D:\游戏 目录\Petalfall"));
 
         let status = payload_command(&std::env::current_exe().unwrap(), dir.path(), &arguments)
             .arg("child_dump_args")
@@ -1260,20 +1250,22 @@ mod tests {
     }
 
     #[test]
-    fn upgrades_are_recorded_as_not_fresh_and_get_only_the_silent_switch() {
-        let bench = Bench::new();
-        let session = bench.session(vec![bench.good_install()]);
+    fn upgrades_and_repairs_pin_nsis_to_the_registered_directory() {
+        // 只传 /S 的话 NSIS 按自己记的目录键装，那个键丢了就装进默认目录，登记跟着被改指过去
+        for mode in [InstallMode::Upgrade, InstallMode::Repair] {
+            let bench = Bench::new();
+            let session = bench.session(vec![bench.good_install()]);
 
-        session
-            .install(
-                &bench.target(InstallMode::Upgrade, true),
-                &Recording::default(),
-            )
-            .unwrap();
+            session
+                .install(&bench.target(mode, true), &Recording::default())
+                .unwrap();
 
-        let call = &bench.calls()[0];
-        assert_eq!(call.arguments, OsString::from("/S"));
-        assert!(!call.journal.as_ref().unwrap().was_fresh);
+            let call = &bench.calls()[0];
+            let mut expected_arguments = OsString::from("/S /D=");
+            expected_arguments.push(&bench.instdir);
+            assert_eq!(call.arguments, expected_arguments, "{mode:?}");
+            assert!(!call.journal.as_ref().unwrap().was_fresh, "{mode:?}");
+        }
     }
 
     #[test]
