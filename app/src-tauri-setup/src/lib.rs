@@ -3,6 +3,7 @@
 //! 模块按职责分文件，这里只声明不装配；命令注册和窗口创建在 `main.rs`。
 
 pub mod boot;
+pub mod cli;
 pub mod commands;
 pub mod contract;
 pub mod existing;
