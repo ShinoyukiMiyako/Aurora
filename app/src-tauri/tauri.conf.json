@@ -48,6 +48,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Shinoyuki_Miyako",
     "licenseFile": "../../LICENSE",
     "resources": {
       "../../LICENSE": "LICENSE"

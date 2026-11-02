@@ -47,6 +47,20 @@ describe("构建目标", () => {
     expect(conf.app.windows[0]).toMatchObject({ create: false, url: "setup.html", width: 880, height: 580, decorations: false, resizable: false, maximizable: false, visible: false });
   });
 
+  // 两个 exe 的 CompanyName 各取自己配置里的发布者；NSIS 按 Software\<发布者>\<产品名> 记安装目录，
+  // 引导程序在 existing.rs 里写死同一个键去读，两边各写一份只能靠这里钉住。老键是已发出去的包写下的，永远不变
+  it("两份 tauri 配置的发布者一致，引导程序读的上次目录键随它拼出", () => {
+    const launcher = readJson("src-tauri/tauri.conf.json");
+    const setup = readJson("src-tauri-setup/tauri.conf.json");
+    expect(launcher.bundle.publisher).toBe("Shinoyuki_Miyako");
+    expect(setup.bundle.publisher).toBe("Shinoyuki_Miyako");
+
+    const existing = readFileSync(join(APP_DIR, "src-tauri-setup/src/existing.rs"), "utf8");
+    const rawConst = (name: string) => existing.match(new RegExp(`pub const ${name}: &str = r"([^"]*)";`))?.[1];
+    expect(rawConst("LAST_DIR_KEY")).toBe(`Software\\${launcher.bundle.publisher}\\${launcher.productName}`);
+    expect(rawConst("LEGACY_LAST_DIR_KEY")).toBe("Software\\petalfall\\Petalfall");
+  });
+
   // 按全集比对：只查缺的话，多授一条权限测试照样过，收窄就悄悄退回去了
   it("引导程序的能力文件只授予前端用到的权限", () => {
     const capability = readJson("src-tauri-setup/capabilities/default.json");

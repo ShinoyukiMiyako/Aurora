@@ -321,7 +321,8 @@ mod tests {
     use super::*;
     use crate::contract::{Existing, ExistingKind};
     use crate::existing::{
-        APP_EXE, CONFIG_FILE, DISPLAY_VERSION, INSTALL_LOCATION, LAST_DIR_KEY, UNINSTALL_KEY,
+        APP_EXE, CONFIG_FILE, DISPLAY_VERSION, INSTALL_LOCATION, LAST_DIR_KEY, LEGACY_LAST_DIR_KEY,
+        UNINSTALL_KEY,
     };
     use crate::journal::Journal;
 
@@ -436,6 +437,23 @@ mod tests {
 
         let probe = assemble(
             &Table::default().with(LAST_DIR_KEY, None, dir),
+            Recovery::Clean,
+        );
+
+        assert_eq!(probe.default_dir, dir);
+        assert_eq!(probe.existing, None);
+        assert!(!probe.interrupted);
+    }
+
+    #[test]
+    fn data_left_under_the_legacy_key_becomes_the_default_dir() {
+        // 换发布者之前的包卸载后，目录只记在老键里
+        let leftover = tempfile::tempdir().unwrap();
+        std::fs::write(leftover.path().join(CONFIG_FILE), b"{}").unwrap();
+        let dir = leftover.path().to_str().unwrap();
+
+        let probe = assemble(
+            &Table::default().with(LEGACY_LAST_DIR_KEY, None, dir),
             Recovery::Clean,
         );
 

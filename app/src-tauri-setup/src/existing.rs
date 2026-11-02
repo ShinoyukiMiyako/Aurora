@@ -23,7 +23,11 @@ pub const DISPLAY_VERSION: &str = "DisplayVersion";
 pub const CONFIG_FILE: &str = "config.json";
 
 /// NSIS 记下的上次安装目录，存在键的默认值里。卸载后它可能还在，所以只能当备选。
-pub const LAST_DIR_KEY: &str = r"Software\petalfall\Petalfall";
+/// 模板按 `Software\<发布者>\<产品名>` 拼这个键，改发布者就得跟着改。
+pub const LAST_DIR_KEY: &str = r"Software\Shinoyuki_Miyako\Petalfall";
+
+/// dev.10 及更早的包没设发布者，模板取 identifier 的第二段，目录记在这里。这些包已经发出去了，这个值永远不变。
+pub const LEGACY_LAST_DIR_KEY: &str = r"Software\petalfall\Petalfall";
 
 /// 读 HKCU 的字符串值。抽出来是为了让测试换成内存表，不碰这台电脑上真实的安装记录。
 pub trait Registry: Send + Sync {
@@ -48,6 +52,15 @@ fn read_value(
         .map(unquote)
         .filter(|text| !text.is_empty())
         .map(str::to_owned))
+}
+
+/// 上次安装目录。现在的键优先：老安装被新包装过一次，它记的才是最近一次的目录；
+/// 在那之前目录只记在老键里，不回退的话老用户的目录和数据就认不出来了。
+fn last_dir(registry: &dyn Registry) -> io::Result<Option<String>> {
+    match read_value(registry, LAST_DIR_KEY, None)? {
+        Some(dir) => Ok(Some(dir)),
+        None => read_value(registry, LEGACY_LAST_DIR_KEY, None),
+    }
 }
 
 /// 程序文件是否还在。0 字节算不在：覆盖安装中途断电时旧 exe 已被截断，文件还在但打不开。
@@ -90,7 +103,7 @@ pub fn detect(registry: &dyn Registry, payload_version: &str) -> io::Result<Opti
 
     let dir = match location {
         Some(dir) => Some(dir),
-        None => read_value(registry, LAST_DIR_KEY, None)?,
+        None => last_dir(registry)?,
     };
     // 不知道目录就无从修复也无从显示，只能按没装过走首装
     let Some(dir) = dir else {
@@ -117,7 +130,7 @@ pub fn detect(registry: &dyn Registry, payload_version: &str) -> io::Result<Opti
 ///
 /// 读不到配置文件就当没有：这只是换个默认值，不值得拦住安装。
 pub fn leftover_dir(registry: &dyn Registry) -> io::Result<Option<String>> {
-    let dir = read_value(registry, LAST_DIR_KEY, None)?;
+    let dir = last_dir(registry)?;
     Ok(dir.filter(|dir| Path::new(dir).join(CONFIG_FILE).is_file()))
 }
 
@@ -260,7 +273,8 @@ mod tests {
             UNINSTALL_KEY,
             r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Petalfall"
         );
-        assert_eq!(LAST_DIR_KEY, r"Software\petalfall\Petalfall");
+        assert_eq!(LAST_DIR_KEY, r"Software\Shinoyuki_Miyako\Petalfall");
+        assert_eq!(LEGACY_LAST_DIR_KEY, r"Software\petalfall\Petalfall");
         assert_eq!(INSTALL_LOCATION, "InstallLocation");
         assert_eq!(DISPLAY_VERSION, "DisplayVersion");
         assert_eq!(APP_EXE, "Petalfall.exe");
@@ -527,6 +541,88 @@ mod tests {
 
         assert_eq!(leftover_dir(&registry).unwrap(), None);
         assert_eq!(leftover_dir(&FakeRegistry::default()).unwrap(), None);
+    }
+
+    /// 装着程序也留着数据的临时目录：选中哪个键，探测和遗留目录都会把它报出来。
+    fn installed_dir_with_data() -> (tempfile::TempDir, String) {
+        let (guard, dir) = installed_dir();
+        fs::write(guard.path().join(CONFIG_FILE), b"{}").unwrap();
+        (guard, dir)
+    }
+
+    #[test]
+    fn the_legacy_key_stands_in_when_the_current_key_is_missing() {
+        // 换发布者之前装的版本只在老键里记了目录
+        let (_guard, dir) = installed_dir();
+        let registry = FakeRegistry::default()
+            .with(UNINSTALL_KEY, Some(DISPLAY_VERSION), "0.1.0")
+            .with(LEGACY_LAST_DIR_KEY, None, &dir);
+        assert_eq!(
+            detect(&registry, PAYLOAD).unwrap(),
+            Some(Existing {
+                kind: ExistingKind::Upgrade,
+                version: "0.1.0".into(),
+                dir,
+            })
+        );
+    }
+
+    #[test]
+    fn the_current_key_wins_over_the_legacy_key() {
+        // 老安装被新包装过一次后，老键还停在当时的目录
+        let (_current_guard, current) = installed_dir_with_data();
+        let (_legacy_guard, legacy) = installed_dir_with_data();
+        let registry = FakeRegistry::default()
+            .with(UNINSTALL_KEY, Some(DISPLAY_VERSION), "0.1.0")
+            .with(LAST_DIR_KEY, None, &current)
+            .with(LEGACY_LAST_DIR_KEY, None, &legacy);
+
+        assert_eq!(detect(&registry, PAYLOAD).unwrap().unwrap().dir, current);
+        assert_eq!(leftover_dir(&registry).unwrap(), Some(current));
+    }
+
+    #[test]
+    fn a_legacy_last_dir_with_only_data_is_a_leftover_not_an_install() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(CONFIG_FILE), b"{}").unwrap();
+        let text = dir.path().to_str().unwrap();
+        let registry = FakeRegistry::default().with(LEGACY_LAST_DIR_KEY, None, text);
+
+        assert_eq!(detect(&registry, PAYLOAD).unwrap(), None);
+        assert_eq!(leftover_dir(&registry).unwrap().as_deref(), Some(text));
+    }
+
+    /// 一个键的随机状态：没写、写了空白、写了目录。返回写进去的原文和这个键该给出的目录。
+    fn random_last_dir(dir: &str) -> (Option<String>, Option<String>) {
+        match random_below(4) {
+            0 => (None, None),
+            1 => (Some("   ".to_owned()), None),
+            2 => (Some(r#""""#.to_owned()), None),
+            _ => (Some(dir.to_owned()), Some(dir.to_owned())),
+        }
+    }
+
+    #[test]
+    fn random_key_states_take_the_current_key_before_the_legacy_key() {
+        let (_current_guard, current) = installed_dir_with_data();
+        let (_legacy_guard, legacy) = installed_dir_with_data();
+        for _ in 0..200 {
+            let (current_text, current_dir) = random_last_dir(&current);
+            let (legacy_text, legacy_dir) = random_last_dir(&legacy);
+            let mut registry = FakeRegistry::default();
+            if let Some(text) = &current_text {
+                registry = registry.with(LAST_DIR_KEY, None, text);
+            }
+            if let Some(text) = &legacy_text {
+                registry = registry.with(LEGACY_LAST_DIR_KEY, None, text);
+            }
+            let expected = current_dir.or(legacy_dir);
+            let context = format!("现在的键 {current_text:?}，老键 {legacy_text:?}");
+
+            let detected = detect(&registry, PAYLOAD).unwrap();
+            assert_eq!(detected.map(|existing| existing.dir), expected, "{context}");
+            assert_eq!(leftover_dir(&registry).unwrap(), expected, "{context}");
+        }
     }
 
     #[test]
