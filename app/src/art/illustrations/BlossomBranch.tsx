@@ -17,8 +17,9 @@ export interface BlossomBranchProps {
 }
 
 /**
- * 花枝插画：全站唯一的大插画，静态，每屏最多一幅。像素画按设备像素现画：每格取整数个设备像素，
- * 画布只占整格覆盖到的部分（不足一格的余量留在右下），贴上去是一比一，不会被浏览器再缩放。
+ * 花枝插画：全站唯一的大插画，静态。账户页的聚光卡和每张账户卡各垫一幅，一屏可能有好几幅。
+ * 像素画按设备像素现画：每格取整数个设备像素，画布只占整格覆盖到的部分（不足一格的余量留在右下），
+ * 贴上去是一比一，不会被浏览器再缩放。
  */
 export function BlossomBranch({ width, height, mirror = false, dim = false, className }: BlossomBranchProps) {
   if (!(width > 0 && height > 0)) throw new Error(`花枝插画尺寸必须为正：${width}x${height}`);

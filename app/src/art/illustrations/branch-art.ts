@@ -1,7 +1,8 @@
 // 花枝像素画：原版物品贴图的笔法（同色系描边、斑驳杂色），名义上 3 CSS px 一格。
 // 枝干按骨架距离场现画：任何框尺寸都按 meet 等比放进去，主枝从框的左缘伸进来；花、花苞是 blossom-branch.json 里
 // 逐格手绘的精灵，格数固定不随框缩放，同一根枝上的花在形状、朝向、色调、开放程度上各不相同。
-// 颜色是插画自己的固定调色板，日夜与强调色都不换，和应用图标的花瓣同一套淡粉。
+// 颜色是插画自己的固定调色板，日夜与强调色都不换。花朵描边 O 与最亮的 H 和应用图标的花瓣相同，S、M、L 比图标深半档，
+// 浅底上托得住。
 
 import data from "../blossom-branch.json";
 import { blankPixels, type Pixels } from "./canvas";
@@ -219,7 +220,7 @@ interface WoodField {
   radius: Float32Array;
 }
 
-/** 最细处也有两格宽，细枝不至于断成虚线。 */
+/** 最细处只有一格宽；半径 0.9 时带宽 1.8 格，比任何走向连成四连通所需的 √2 格都宽，细枝不会断成虚线。 */
 const MIN_RADIUS = 0.9;
 
 /** 每格到骨架的距离小于该处半径即为木；重叠处取半径大的枝，主枝盖住分枝的接口。 */
@@ -352,12 +353,39 @@ export function placeBlossoms(layout: BranchLayout): PlacedBlossom[] {
   });
 }
 
+export interface PlacedPetal {
+  glyph: PetalGlyphName;
+  tone: PetalTone;
+  /** 字模左上角（格）。 */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** 本框里的花瓣：构图位置换算成字模左上角，再夹进画布。靠右下的几片在窄框、非整数缩放下会探出框边，被裁成半片。 */
+export function placePetals(layout: BranchLayout): PlacedPetal[] {
+  return PETALS.map((petal) => {
+    const { width, height } = PETAL_GLYPHS[petal.glyph];
+    const [px, py] = toCells(layout, petal.at);
+    return {
+      glyph: petal.glyph,
+      tone: petal.tone,
+      x: Math.max(0, Math.min(Math.round(px), layout.cols - width)),
+      y: Math.max(0, Math.min(Math.round(py), layout.rows - height)),
+      width,
+      height,
+    };
+  });
+}
+
 export interface BranchArt {
   cols: number;
   rows: number;
   /** 行优先，值为调色板下标 + 1，0 透明。 */
   cells: Uint8Array;
   blossoms: PlacedBlossom[];
+  petals: PlacedPetal[];
 }
 
 function stamp(cells: Uint8Array, layout: BranchLayout, grid: SpriteGrid, x0: number, y0: number): void {
@@ -378,15 +406,15 @@ export function paintBranch(width: number, height: number, cell: number): Branch
   paintBark(cells, layout, woodField(layout));
   const blossoms = placeBlossoms(layout);
   for (const b of blossoms) stamp(cells, layout, spriteVariant(b.sprite, b.tint, b.mirror), b.x, b.y);
-  for (const petal of PETALS) {
+  const petals = placePetals(layout);
+  for (const petal of petals) {
     const glyph = PETAL_GLYPHS[petal.glyph];
     const tone = PETAL_TONES[petal.tone];
     const keys = [null, PETAL_KEY[tone.main], PETAL_KEY[tone.light], PETAL_KEY[tone.dark]];
-    const [px, py] = toCells(layout, petal.at).map(Math.round);
     const grid = Array.from({ length: glyph.height }, (_, y) => Array.from({ length: glyph.width }, (_, x) => keys[glyph.cells[y * glyph.width + x]]));
-    stamp(cells, layout, grid, px, py);
+    stamp(cells, layout, grid, petal.x, petal.y);
   }
-  return { cols: layout.cols, rows: layout.rows, cells, blossoms };
+  return { cols: layout.cols, rows: layout.rows, cells, blossoms, petals };
 }
 
 /** 放大成位图：每格 cellDevice × cellDevice 个设备像素整块复制，不产生调色板之外的颜色。 */
