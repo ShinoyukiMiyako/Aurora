@@ -114,6 +114,8 @@ beforeEach(() => {
 afterEach(() => {
   view?.unmount();
   view = undefined;
+  // 假定时器也换了 requestAnimationFrame：先撤用例的替身，还原到的才是假定时器那一份，再由 useRealTimers 收走
+  vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
@@ -334,6 +336,43 @@ describe("启动后的窗口行为与后台提醒", () => {
     act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 1000 }));
     await flush();
     expect(win.port.restoreWithoutFocus).toHaveBeenCalledTimes(1);
+  });
+
+  describe("最小化之后页面 hidden、动画帧停摆", () => {
+    const launchThenHide = async () => {
+      bootOverrides(ipc, { instances: [instanceDto("生存")], config: configDto({ after_launch: "minimize" }) });
+      ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+      ipc.overrides.set("last_crash", () => null);
+      await mount();
+      await act(async () => {
+        await launcher.actions.launch("生存");
+        await settle();
+      });
+      expect(win.flags.minimized).toBe(true);
+      win.flags.focused = false;
+      vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+      vi.stubGlobal("requestAnimationFrame", () => 0);
+      act(() => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+    };
+
+    it("游戏正常退出：窗口恢复，不等任何一帧", async () => {
+      await launchThenHide();
+      act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 1000 }));
+      await flush();
+      expect(win.flags.minimized).toBe(false);
+      expect(launcher.state.session?.phase).toBe("stopped");
+    });
+
+    it("游戏崩溃：窗口恢复并请求任务栏提醒，不等任何一帧", async () => {
+      await launchThenHide();
+      act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 1, crashed: true, killed: false, duration_ms: 1000 }));
+      await flush();
+      expect(win.flags.minimized).toBe(false);
+      expect(win.port.requestAttention).toHaveBeenCalledTimes(1);
+      expect(launcher.state.session?.phase).toBe("crashed");
+    });
   });
 
   it("设置为保持打开：进入运行时不动窗口", async () => {

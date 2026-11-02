@@ -155,6 +155,9 @@ export function useWindowPort(): WindowPort {
  *
  * 「已显示」在那一帧真正触发时才记下：开发构建的 StrictMode 会把布局 effect 装上、拆掉再装一次，
  * 拆掉时那一帧被取消，若提前记下，第二次安装会以为已经显示过而什么都不做，窗口只能等后端兜底。
+ *
+ * 页面 hidden 时这一帧不来，这里不另开出路：宿主只在最小化时把 WebView2 设为不可见，能最小化的窗口已经显示过，
+ * 晚到的 show() 是空操作；启动期 WebView2 在不可见的窗口里照常出帧，这一帧才等得到，宿主不能在显示前把它设为不可见。
  */
 export function useRevealWindow(ready: boolean): void {
   const port = useWindowPort();
