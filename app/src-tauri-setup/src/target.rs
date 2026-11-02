@@ -23,6 +23,9 @@ const WRITE_PROBE: &str = ".petalfall-write-probe";
 const MAX_PATH_UNITS: usize = 200;
 /// 目标盘在 exe 之外要多留的：uninstall.exe、快捷方式和簇对齐的余量。
 const TARGET_SLACK_BYTES: u64 = 10 * 1024 * 1024;
+/// 临时盘在载荷和 exe 之外要多留的：solid 块里排在 exe 前面的 WebView2 引导器（约 1.8 MB）
+/// 不管用不用得上都得先解出来，插件也解在临时目录。
+const TEMP_SLACK_BYTES: u64 = 10 * 1024 * 1024;
 
 /// 安装占用的空间，按所在的盘分开算。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,11 +38,11 @@ pub struct SpaceNeed {
 
 impl SpaceNeed {
     /// 按载荷头的长度估算。NSIS 包是 solid 压缩，先把整段数据解到临时文件再写目标，
-    /// 所以临时盘上同时有载荷本身和一份解开的 exe。
+    /// 所以临时盘上同时有载荷本身、一份解开的 exe 和块里其余的文件。
     pub fn for_payload(payload_len: u64, exe_len: u64) -> Self {
         Self {
             target: exe_len + TARGET_SLACK_BYTES,
-            temp: payload_len + exe_len,
+            temp: payload_len + exe_len + TEMP_SLACK_BYTES,
         }
     }
 
@@ -1415,7 +1418,7 @@ mod tests {
             SpaceNeed::for_payload(10 * MIB, 40 * MIB),
             SpaceNeed {
                 target: 50 * MIB,
-                temp: 50 * MIB,
+                temp: 60 * MIB,
             }
         );
     }
