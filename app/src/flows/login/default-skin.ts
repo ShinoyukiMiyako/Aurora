@@ -24,8 +24,16 @@ export function javaUuidHash(uuid: string): number {
   return (a ^ b ^ c ^ d) | 0;
 }
 
+type DefaultSkinRef = Extract<SkinRef, { kind: "default" }>;
+
+/** 还没输入用户名时离线弹窗舞台上站的两位：宽臂的史蒂夫与细臂的艾利克斯，1.19.3 以前原版只有这两套默认皮肤。 */
+export const STARTER_SKINS: readonly { name: string; skin: DefaultSkinRef }[] = [
+  { name: "Steve", skin: { kind: "default", path: "entity/player/wide/steve", model: "wide" } },
+  { name: "Alex", skin: { kind: "default", path: "entity/player/slim/alex", model: "slim" } },
+];
+
 /** 这个 UUID 在原版客户端里的默认皮肤：下标为哈希对 18 取非负余数（Java 的 Math.floorMod）。 */
-export function defaultSkin(uuid: string): Extract<SkinRef, { kind: "default" }> {
+export function defaultSkin(uuid: string): DefaultSkinRef {
   const index = ((javaUuidHash(uuid) % DEFAULT_SKIN_COUNT) + DEFAULT_SKIN_COUNT) % DEFAULT_SKIN_COUNT;
   const slim = index < DEFAULT_SKIN_NAMES.length;
   const name = DEFAULT_SKIN_NAMES[slim ? index : index - DEFAULT_SKIN_NAMES.length];

@@ -224,6 +224,8 @@ describe("离线账户弹窗", () => {
         await launcher.actions.openLogin("offline");
       });
       await flush();
+      // 打开时先读了史蒂夫与艾利克斯，这里只看输入之后读的
+      fetched.length = 0;
       typeInto(inputs()[0], name);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(FIGURE_DEBOUNCE_MS);
@@ -237,13 +239,42 @@ describe("离线账户弹窗", () => {
       expect(figure().dataset.art).toBe("skin");
     });
 
-    it("还没输入用户名：画剪影，不读任何皮肤", async () => {
+    const figures = () => [...(dialog()?.querySelectorAll<HTMLElement>('[data-sk-art="skin"]') ?? [])];
+    const stageLabel = () => dialog()?.querySelector('[role="img"]')?.getAttribute("aria-label");
+
+    async function openEmpty() {
       await mount();
       await act(async () => {
         await launcher.actions.openLogin("offline");
       });
-      await flush();
-      expect(figure().dataset.art).toBe("silhouette");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FIGURE_DEBOUNCE_MS);
+        await settle();
+      });
+    }
+
+    it("还没输入用户名：并排站着宽臂的史蒂夫与细臂的艾利克斯，皮肤从本机游戏文件读取；一输入就换成那个名字的", async () => {
+      await openEmpty();
+      expect(stageLabel()).toBe("角色预览：史蒂夫与艾利克斯");
+      expect(figures().map((f) => f.dataset.art)).toEqual(["skin", "skin"]);
+      expect(fetched.map((url) => new URL(url).pathname + new URL(url).search).sort()).toEqual([
+        "/art/entity/player/slim/alex.png?v=1.21.1",
+        "/art/entity/player/wide/steve.png?v=1.21.1",
+      ]);
+
+      typeInto(inputs()[0], "Steve");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FIGURE_DEBOUNCE_MS);
+        await settle();
+      });
+      expect(figures()).toHaveLength(1);
+      expect(stageLabel()).toBe("Steve 的角色预览");
+    });
+
+    it("本机没有可用的游戏文件：两个位置都退回剪影，不读任何皮肤", async () => {
+      ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+      await openEmpty();
+      expect(figures().map((f) => f.dataset.art)).toEqual(["silhouette", "silhouette"]);
       expect(fetched).toEqual([]);
     });
 
