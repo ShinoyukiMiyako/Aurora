@@ -824,7 +824,17 @@ mod tests {
             rig.context
                 .install(&locked(InstallMode::Repair), &Recording::default())
                 .unwrap();
-            assert!(rig.logged().contains("开始安装"));
+            // 探测结果那行也带着这个目录，只看修复发起的那一行，才锁得住登记目录到 /D= 的映射
+            let logged = rig.logged();
+            let started = logged
+                .lines()
+                .rfind(|line| line.contains("开始安装"))
+                .expect("修复应当记下发起的目标");
+            assert!(started.contains("Repair"), "{started}");
+            assert!(
+                started.contains(&format!("{:?}", PathBuf::from(&existing.dir))),
+                "{started}"
+            );
         }
 
         #[test]
