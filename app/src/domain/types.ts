@@ -45,6 +45,7 @@ export const FAILURE_CODES = [
   "account_refresh_network",
   "account_service_down",
   "account_app_not_approved",
+  "account_client_id_missing",
   "files_offline",
   "files_failed",
   "disk_full",

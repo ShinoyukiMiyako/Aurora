@@ -29,8 +29,10 @@ jobs:
     timeout-minutes: 30
     # 微软登录 client_id 只在构建时内嵌，仓库里不放。它不是机密，每个安装包里都有，所以放仓库变量，
     # 这台机器上仍然不出现任何 secret。放在 job 级：每一步编译看到的都是同一个值，缓存不会来回失效。
+    # PETALFALL_OFFICIAL_BUILD 让编译本身也检查 client_id：以后的正式版流水线照抄这两行就有同样的兜底。
     env:
       PETALFALL_MSA_CLIENT_ID: ${{ vars.PETALFALL_MSA_CLIENT_ID }}
+      PETALFALL_OFFICIAL_BUILD: "1"
     outputs:
       version: ${{ steps.version.outputs.version }}
       installer-name: ${{ steps.bundle.outputs.installer-name }}

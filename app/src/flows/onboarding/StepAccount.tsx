@@ -26,7 +26,7 @@ interface Availability {
 
 /** 这种方式现在用不了的原因；能用为 null。 */
 function blockedReason(option: LoginOption, { online, microsoftUnavailable }: Availability): string | null {
-  if (option.kind === "microsoft" && microsoftUnavailable) return MSA_CLIENT_ID_MISSING.reason;
+  if (option.kind === "microsoft" && microsoftUnavailable) return MSA_CLIENT_ID_MISSING.onboardingReason;
   if (option.online && !online) return ACCOUNT_STEP_COPY.offlineReason;
   return null;
 }

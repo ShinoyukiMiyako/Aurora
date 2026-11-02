@@ -81,6 +81,7 @@ pnpm tauri build
 | 来源 | 说明 |
 | --- | --- |
 | `PETALFALL_MSA_CLIENT_ID` | 微软登录 client_id。构建时设置会内嵌进二进制，运行期设置会覆盖内嵌的值，`config.json` 里的 `msa_client_id`（设置的「常规 · 高级」）又优先于两者。三处都没有时微软登录显示为不可用，登录报 `MsaClientIdMissing`。仓库里不放这个值，见下文「微软登录与 fork」 |
+| `PETALFALL_OFFICIAL_BUILD` | 构建时环境变量，标明这是落樱官方发布的构建，取值不论，设了就算。设了它，`PETALFALL_MSA_CLIENT_ID` 却没设或只有空白时编译直接失败，不会打出微软登录不可用的包；dev 分支的 CI 两个都设。fork 与本机构建不用设 |
 | `PETALFALL_CURSEFORGE_API_KEY` | CurseForge API key，优先读运行期环境变量，其次读构建时嵌入的值，API 请求与 CDN 下载都用它。两处都没有时 CurseForge 源会被明确禁用；Modrinth 的搜索与安装不受影响，但 `.mrpack` 里有文件只有 forgecdn 地址时，导入会在准备阶段报 `curseforge_key_missing`（每个文件都另有别的地址时照常导入，forgecdn 那个地址失败后换备用地址）。CDN 拒绝这个 key 时下载任务直接失败（`curseforge_key_rejected`），不换源重试 |
 | `tauri.conf.json` 的 `plugins.updater` | 自更新需要在发布构建里配置签名公钥，仓库里的配置不带。dev 分支的 CI 打包时写入开发版公钥（`.github/dev-updater.pub`）并用仓库密钥 `DEV_UPDATER_PRIVATE_KEY` 签名；版本号带 `-dev.N` 的包只检查滚动预发布 `dev-build` 上的 `latest.json`，其余版本检查 petalfall.org。没有公钥时，或在 debug 构建里，自更新显示为不可用 |
 
@@ -93,6 +94,8 @@ pnpm tauri build
 1. 在 Azure 门户注册应用，受支持的账户类型选「仅个人 Microsoft 帐户」，在「身份验证」里打开「允许公共客户端流」，不需要客户端密码。
 2. 用 Mojang 的表单 <https://aka.ms/mce-reviewappid> 申请 Minecraft 服务的访问审批。没通过时登录走到最后一步会报 `AppNotApproved`。
 3. 构建时设置 `PETALFALL_MSA_CLIENT_ID`，或者在设置的「常规 · 高级」里填入。
+
+数据落在 `%LOCALAPPDATA%` 下时（不是便携模式，或者是 debug 构建），目录名取自 `petalfall-base` 的 `brand::APP_NAME_EN`。fork 改了品牌名，数据目录随之分开，不会和落樱官方发布的版本共用配置与账户；没改的话，设置里填的 client_id 存在同一个 `config.json` 里，同机落樱官方发布的版本也会用它，可以在同一处清除。
 
 请不要在这些版本里使用落樱的 client_id，包括从落樱发行包里取出的值。原样转发落樱官方发布的安装包不在此列。
 

@@ -18,6 +18,7 @@ import { useAppearance } from "../state/appearance";
 import type { FlowProps } from "../state/flows";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { routeKey, type Route } from "../state/route";
+import { onboardingActive } from "../state/selectors";
 import { ExternalLinkProvider } from "../ui/external-link";
 import { RemoteImageProvider } from "../ui/remote-image";
 import styles from "./AppShell.module.css";
@@ -67,7 +68,7 @@ const resolveRemoteImage = createThumbResolver(thumbRegister);
 export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
   // 按片订阅：外壳根只随「是否首次启动」变，下载进度与游戏日志不让整棵树跟着重渲染
   const firstRunKnown = useLauncherSelector((s) => s.status.firstRun.kind !== "loading");
-  const firstRun = useLauncherSelector((s) => s.firstRun);
+  const firstRun = useLauncherSelector(onboardingActive);
   const { bindRoot, bindPageScroll, fileDropHint } = useShell();
   const { appearance, reduced } = useAppearance();
   const run = useRunner();
@@ -87,8 +88,8 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
     return () => window.clearTimeout(timer);
   }, [pages, run]);
 
-  if (firstRun === true && flows.onboarding === null) throw new Error(SHELL_DEFECT_COPY.missingOnboarding);
-  const onboarding = firstRun === true ? flows.onboarding : null;
+  if (firstRun && flows.onboarding === null) throw new Error(SHELL_DEFECT_COPY.missingOnboarding);
+  const onboarding = firstRun ? flows.onboarding : null;
 
   // 内容区滚动容器：交给外壳核心记录滚动位置，也给侧栏与命令面板用
   const scrollEl = useRef<HTMLDivElement | null>(null);

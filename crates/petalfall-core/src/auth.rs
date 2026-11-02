@@ -46,6 +46,14 @@ pub const MSA_CLIENT_ID_ENV: &str = "PETALFALL_MSA_CLIENT_ID";
 /// 2) 通过 Mojang 的应用审批，否则 `login_with_xbox` 换 Minecraft 令牌那步返 403（[`AuthError::AppNotApproved`]）。
 const EMBEDDED_MSA_CLIENT_ID: Option<&str> = option_env!("PETALFALL_MSA_CLIENT_ID");
 
+// 官方构建（流水线设了 PETALFALL_OFFICIAL_BUILD）必须内嵌 client_id：缺了在编译期就失败，不让发出去的包
+// 安静地把微软登录置灰。fork 与本机构建不设这个变量，不受影响。
+const _: () = assert!(
+    option_env!("PETALFALL_OFFICIAL_BUILD").is_none()
+        || matches!(EMBEDDED_MSA_CLIENT_ID, Some(id) if !id.trim_ascii().is_empty()),
+    "设了 PETALFALL_OFFICIAL_BUILD 的官方构建必须同时设置 PETALFALL_MSA_CLIENT_ID"
+);
+
 /// 离线账户库文件名，与 `config.json` 同挂在数据目录下。
 pub const OFFLINE_ACCOUNTS_FILE: &str = "offline_accounts.json";
 

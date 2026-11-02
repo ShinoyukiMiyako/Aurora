@@ -49,6 +49,16 @@ export const GENERAL_COPY = {
   cancel: "取消",
   save: "保存",
   clientIdSaved: "client_id 已保存",
+  clientIdClear: "清除",
+  clientIdCleared: "已清除自定义的 client_id",
+  clientIdClearFailed: "没能清除自定义的 client_id",
+  // 微软发的续期凭据认 client_id：换回内置的以后，用自定义 client_id 登录的账户续不上
+  clientIdClearConfirm: {
+    title: "清除自定义的 client_id？",
+    body: "清除后改用这个版本内置的 client_id，没有内置时微软登录不可用。用自定义 client_id 登录的微软账户之后续期会被拒，需要重新登录。",
+    confirm: "清除",
+    cancel: "取消",
+  },
 } as const;
 
 export const AFTER_LAUNCH_OPTIONS = [

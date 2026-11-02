@@ -309,6 +309,26 @@ describe("设置页：常规", () => {
     expect(document.querySelector('input[aria-label="微软登录 client_id"]')).toBeNull();
   });
 
+  it("client_id：已配置时可以清除，先确认会让用它登录的账户重新登录；取消不写，确认后写入并提示", async () => {
+    await mount("general");
+    const clear = () => contentButton("清除");
+    const dialogButton = (name: string) => all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === name) as HTMLButtonElement;
+
+    await click(clear());
+    expect(openDialogs()[0]?.querySelector("h2")?.textContent).toBe("清除自定义的 client_id？");
+    expect(openDialogs()[0]?.textContent).toContain("用自定义 client_id 登录的微软账户之后续期会被拒，需要重新登录");
+    await click(dialogButton("取消"));
+    expect(callsOf(ipc, "update_config")).toEqual([]);
+
+    await click(clear());
+    await click(dialogButton("清除"));
+    expect(callsOf(ipc, "update_config")).toEqual([{ clearClientId: true }]);
+    expect(toasts()).toContainEqual({ tone: "success", title: "已清除自定义的 client_id", body: undefined });
+    // 清掉以后显示未配置，也不再给「清除」
+    expect(text()).toContain("未配置");
+    expect(all<HTMLButtonElement>('[role="region"] button').some((b) => b.textContent?.trim() === "清除")).toBe(false);
+  });
+
   it("client_id：保存还没回来时再按 Enter 不重复写入，只提示一次", async () => {
     await mount("general");
     await click(button("修改"));

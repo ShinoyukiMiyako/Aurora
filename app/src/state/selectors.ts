@@ -23,6 +23,11 @@ export function activeTasks(state: LauncherState): Task[] {
   return state.tasks.filter(isActiveTask);
 }
 
+/** 首次启动向导挂着：外壳只渲染向导，主界面（含设置页）没挂上。 */
+export function onboardingActive(state: LauncherState): boolean {
+  return state.firstRun === true;
+}
+
 /** 配置已读到，且这个构建没有任何可用的微软登录 client_id。配置还没读到时按可用算，真去登录时后端照样会拦下。 */
 export function microsoftLoginUnavailable(state: LauncherState): boolean {
   return state.settings !== null && !state.settings.microsoftLoginAvailable;

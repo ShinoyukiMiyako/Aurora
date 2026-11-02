@@ -7,7 +7,7 @@ import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
 import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import { GPU_COPY } from "../pages/settings/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
-import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, failureCopy, failureToastLabel, INSTALL_PHASE_LABEL, lockReason, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskFailureReason, taskPhaseText, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
+import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, failureCopy, failureToastLabel, INSTALL_PHASE_LABEL, lockReason, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskFailureReason, taskPhaseText, taskStatusLabel, TOAST_COPY, withoutSettingsAction, type FailureContext } from "./flows";
 import { PEEK_COPY } from "./shell";
 
 /** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
@@ -76,6 +76,7 @@ const PARAMS: Readonly<Record<FailureCode, Record<string, string | number>>> = {
   account_refresh_network: { account: "Steve" },
   account_service_down: { account: "Steve", status: 503 },
   account_app_not_approved: { account: "Steve" },
+  account_client_id_missing: { account: "Steve" },
   files_offline: { count: 3 },
   files_failed: { count: 2, reason: "连接超时" },
   disk_full: { drive: "D:", needed_bytes: 1024 },
@@ -331,6 +332,22 @@ describe("启动失败：登录应用未获批准", () => {
   });
 });
 
+describe("启动失败：这个版本没有微软登录 client_id", () => {
+  it("修复动作打开设置，不给重试也不给以离线方式进单人；与登录弹窗上的同一条错误说的是同一句话", () => {
+    const launch = failureCopy("account_client_id_missing", PARAMS.account_client_id_missing, ctx("Steve"));
+    expect(launch).toEqual({
+      title: "这个版本没有内置微软登录",
+      body: `这个版本的${APP_NAME}没有内置微软应用的 client_id，自行构建和 fork 的版本都是这样。在「设置 · 常规 · 高级」里填入你自己注册并获准的 client_id 后就能登录。`,
+      fix: { kind: "open_client_id_settings", label: "打开设置" },
+      secondary: null,
+    });
+    const login = microsoftLoginFailure("MsaClientIdMissing", "x", undefined);
+    expect([launch.title, launch.body, launch.fix.label]).toEqual([login.title, login.body, login.primary?.label]);
+    expect(launch.title.length).toBeLessThanOrEqual(16);
+    expect(bannedIn([launch.title, launch.body, launch.fix.label])).toEqual([]);
+  });
+});
+
 /** 按钮字数：英文单词、版本号各按 1 个字计。 */
 function buttonLength(label: string): number {
   return [...label.matchAll(/[A-Za-z0-9.]+|[^\sA-Za-z0-9.]/g)].length;
@@ -431,6 +448,29 @@ describe("微软登录失败：服务故障与应用未获批准", () => {
       secondary: null,
       closeOnly: false,
     });
+  });
+
+  it("向导期间去掉「打开设置」：只给关闭，正文补一句先走完向导，复制错误信息留着；别的失败原样不动", () => {
+    const unapproved = withoutSettingsAction(microsoftLoginFailure("AppNotApproved", "x", undefined));
+    expect(unapproved).toMatchObject({ primary: null, secondary: { kind: "copy_error" }, closeOnly: true });
+    expect(unapproved.body).toBe(`${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。先走完向导，再到设置里填写或更换。`);
+    const missing = withoutSettingsAction(microsoftLoginFailure("MsaClientIdMissing", "x", undefined));
+    expect(missing).toMatchObject({ primary: null, secondary: null, closeOnly: true });
+    expect(missing.body?.endsWith("先走完向导，再到设置里填写或更换。")).toBe(true);
+    const network = microsoftLoginFailure("Http", "x", undefined);
+    expect(withoutSettingsAction(network)).toBe(network);
+    expect(bannedIn([unapproved.body, missing.body])).toEqual([]);
+  });
+
+  it("向导期间去掉「打开设置」：放在次按钮上的也去掉，主按钮留着时不改初始焦点", () => {
+    const copy = withoutSettingsAction({
+      title: "t",
+      body: "b。",
+      primary: { kind: "retry", label: "重试" },
+      secondary: { kind: "open_client_id_settings", label: "打开设置" },
+      closeOnly: false,
+    });
+    expect(copy).toEqual({ title: "t", body: "b。先走完向导，再到设置里填写或更换。", primary: { kind: "retry", label: "重试" }, secondary: null, closeOnly: false });
   });
 
   it("新增的登录失败文案不含禁用词", () => {
