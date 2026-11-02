@@ -38,6 +38,9 @@ use crate::facade::Petalfall;
 /// 环境变量名：微软登录 client_id 的覆盖来源。
 pub const MSA_CLIENT_ID_ENV: &str = "PETALFALL_MSA_CLIENT_ID";
 
+/// 改名前的变量名。机器上可能还设着它，新名缺失或为空时读它。
+pub const LEGACY_MSA_CLIENT_ID_ENV: &str = "AURORA_MSA_CLIENT_ID";
+
 /// 内置默认微软登录 client_id：启动器自有的 Azure AD 公共客户端应用（受支持账户类型为个人 Microsoft 账户）。
 ///
 /// 两个前提：1) 该应用须在 Azure「身份验证」里开启「允许公共客户端流」，设备码流才成立；
@@ -266,6 +269,14 @@ fn is_rejected_token(err: &AuthError) -> bool {
     matches!(err, AuthError::Yggdrasil { error, .. } if error == petalfall_auth::yggdrasil::FORBIDDEN_OPERATION)
 }
 
+/// 环境变量给出的 client_id：新名优先，新名缺失或为空时取旧名；两个都没有可用值为 `None`。
+fn env_client_id(current: Option<String>, legacy: Option<String>) -> Option<String> {
+    [current, legacy]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.is_empty())
+}
+
 impl Petalfall {
     /// 解析微软登录 client_id：优先配置，其次环境变量，最后回落到内置默认（[`DEFAULT_MSA_CLIENT_ID`]），
     /// 保证正版登录开箱可用。
@@ -274,9 +285,10 @@ impl Petalfall {
             .msa_client_id
             .clone()
             .or_else(|| {
-                std::env::var(MSA_CLIENT_ID_ENV)
-                    .ok()
-                    .filter(|s| !s.is_empty())
+                env_client_id(
+                    std::env::var(MSA_CLIENT_ID_ENV).ok(),
+                    std::env::var(LEGACY_MSA_CLIENT_ID_ENV).ok(),
+                )
             })
             .unwrap_or_else(|| DEFAULT_MSA_CLIENT_ID.to_owned())
     }
@@ -1316,9 +1328,23 @@ mod tests {
         let petalfall =
             Petalfall::for_test(config, tmp.path().to_path_buf(), tmp.path().to_path_buf());
         // 未配置且无环境变量时回落到内置 client_id，保证正版登录开箱可用；删掉回落此断言即挂。
-        if std::env::var(MSA_CLIENT_ID_ENV).is_err() {
+        if std::env::var(MSA_CLIENT_ID_ENV).is_err()
+            && std::env::var(LEGACY_MSA_CLIENT_ID_ENV).is_err()
+        {
             assert_eq!(petalfall.msa_client_id(), DEFAULT_MSA_CLIENT_ID);
         }
+    }
+
+    /// 改名前的变量名照样认：新名缺失或为空时取旧名，新名在时旧名不起作用，空值不算配置。
+    #[test]
+    fn legacy_client_id_variable_is_read_when_the_new_one_is_missing() {
+        let some = |s: &str| Some(s.to_owned());
+        assert_eq!(env_client_id(some("new"), some("old")), some("new"));
+        assert_eq!(env_client_id(None, some("old")), some("old"));
+        assert_eq!(env_client_id(some(""), some("old")), some("old"));
+        assert_eq!(env_client_id(some("new"), None), some("new"));
+        assert_eq!(env_client_id(None, some("")), None);
+        assert_eq!(env_client_id(None, None), None);
     }
 
     #[test]
