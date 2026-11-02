@@ -185,10 +185,14 @@ export const LAUNCH_STAGES = [
   "游戏运行中",
 ] as const;
 
+const RUNNING_LABEL = "已运行";
+
 export const SESSION_COPY = {
   downloadProgress: (done: number, total: number, speedBps: number) => `文件 ${done}/${total} · ${formatSpeed(speedBps)}`,
   countingFiles: "正在统计缺失文件…",
-  running: (elapsedMs: number) => `已运行 ${formatElapsed(elapsedMs)}`,
+  running: (elapsedMs: number) => `${RUNNING_LABEL} ${formatElapsed(elapsedMs)}`,
+  /** 单独取出是给状态岛：文字与计时分开放，文字部分才不会每秒变。 */
+  runningLabel: RUNNING_LABEL,
   cancelledDetail: "已下载的文件会保留",
   played: (minutes: number) => (minutes < 1 ? "本次游玩不到 1 分钟" : `本次游玩 ${Math.floor(minutes)} 分钟`),
   crashClue: (label: string) => cluePointer([label]),
