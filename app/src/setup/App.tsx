@@ -13,7 +13,19 @@ import type { SetupBridge } from "./bridge";
 import { isFailure, type InstallMode } from "./contract";
 import type { SetupCopy } from "./copy";
 import { FrameChromeProvider, type FrameChrome } from "./Frame";
-import { canCloseWindow, canOpenLegal, failureRecovery, initialState, installedDir, offersStandardInstaller, reduce, type SetupEvent, type SetupState } from "./model";
+import {
+  canCloseWindow,
+  canOpenLegal,
+  failureRecovery,
+  initialState,
+  installedDir,
+  offersStandardInstaller,
+  reduce,
+  relaunchesAfterUpdate,
+  upgradesUnattended,
+  type SetupEvent,
+  type SetupState,
+} from "./model";
 import styles from "./setup.module.css";
 import { Blocked } from "./views/Blocked";
 import { Done } from "./views/Done";
@@ -29,6 +41,14 @@ import { Welcome } from "./views/Welcome";
 export const BLOCKED_POLL_MS = 1000;
 /** 安装视图最短展示时间：覆盖安装可能瞬间完成，一闪而过比多等一秒更像出了问题。 */
 export const MIN_INSTALLING_MS = 1200;
+/** 更新模式下等落樱退出时多久查一次：更新插件拉起引导程序后立即退出，进程通常很快就消失，查得密一点能早些开始。 */
+export const UPDATE_EXIT_POLL_MS = 200;
+/**
+ * 更新模式下最多等落樱退出多久，等不到再进「请先关闭」页。这段时间界面停在 boot、窗口不显示，
+ * 而 Rust 侧 boot.rs 的 SHOW_FALLBACK（3 秒）从建窗起算，到点会强制显示一个空窗口：
+ * 必须比它短，余下的留给 WebView 加载、字体和探测。
+ */
+export const UPDATE_EXIT_WAIT_MS = 2000;
 
 const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 
@@ -185,6 +205,31 @@ function useSetupFlow(bridge: SetupBridge, initial: SetupState): SetupFlow {
       await bridge.close();
     });
   }, [attempt, bridge]);
+
+  // 更新模式先在 boot 里等落樱自己退出：等到了直接开始升级，用户看不到「请先关闭」那一页
+  const updateSent = useRef(false);
+  useEffect(() => {
+    if (state.view !== "boot" || state.probe === null || !upgradesUnattended(state.probe) || updateSent.current) return;
+    updateSent.current = true;
+    const deadline = performance.now() + UPDATE_EXIT_WAIT_MS;
+    const stillRunning = async (): Promise<boolean> => {
+      for (;;) {
+        if (!(await bridge.launcherRunning())) return false;
+        const left = deadline - performance.now();
+        if (left <= 0) return true;
+        await sleep(Math.min(UPDATE_EXIT_POLL_MS, left));
+      }
+    };
+    stillRunning().then((running) => dispatch({ type: "update_started", running }), crash);
+  }, [bridge, crash, state.probe, state.view]);
+
+  // 装完替用户打开走的是和点按钮同一条路：等启动器窗口出来才关掉自己
+  const autoOpened = useRef(false);
+  useEffect(() => {
+    if (state.view !== "done" || state.probe === null || !relaunchesAfterUpdate(state.probe) || autoOpened.current) return;
+    autoOpened.current = true;
+    openLauncher();
+  }, [openLauncher, state.probe, state.view]);
 
   return { state, dispatch, busy, requestInstall, checkLauncher, openLauncher, attempt };
 }

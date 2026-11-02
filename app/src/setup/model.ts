@@ -61,6 +61,8 @@ export type SetupEvent =
   | { type: "shortcut_changed"; value: boolean }
   | { type: "install_requested"; mode: "fresh"; running: boolean; check: DirCheck }
   | { type: "install_requested"; mode: "upgrade" | "repair"; running: boolean }
+  /** 更新模式下等过落樱退出之后：running 是等满时长时它还在不在。 */
+  | { type: "update_started"; running: boolean }
   | { type: "launcher_gone" }
   | { type: "blocked_back" }
   | { type: "progress"; progress: Progress }
@@ -98,6 +100,19 @@ export function allowedModes(existing: Existing | null): readonly InstallMode[] 
   }
 }
 
+/**
+ * 启动器的更新插件拉起、现有安装又正好能升级时，不问用户，直接按升级装回登记目录。
+ * 别的情况说明插件看到的和登记的安装对不上：同版本没有可升的，更新的不能往回装，残缺和没登记的要修复或首装，都交给交互流程让用户看清楚再点。
+ */
+export function upgradesUnattended(probe: Probe): boolean {
+  return probe.update !== null && allowedModes(probe.existing).includes("upgrade");
+}
+
+/** 插件带了 /R 才替用户重新打开；提权时不开，理由同完成页：提权启动和普通启动用的是两个数据根。 */
+export function relaunchesAfterUpdate(probe: Probe): boolean {
+  return probe.update !== null && probe.update.relaunch && !probe.elevated;
+}
+
 function requireProbe(state: SetupState): Probe {
   if (state.probe === null) throw new Error(`视图 ${state.view} 需要探测结果，状态里没有`);
   return state.probe;
@@ -106,6 +121,9 @@ function requireProbe(state: SetupState): Probe {
 function startInstall(state: SetupState, running: boolean): SetupState {
   return running ? { ...state, view: "blocked" } : { ...state, view: "installing", run: state.run + 1, progress: null, failure: null };
 }
+
+// 这两种模式没有快捷方式的选项，NSIS 却总会建一个：传 false 让 Rust 删掉本来没有的，用户删过的不会被装回来
+const inPlacePlan = (mode: "upgrade" | "repair"): InstallPlan => ({ mode, dir: null, desktopShortcut: false });
 
 function requestInstall(state: SetupState, event: Extract<SetupEvent, { type: "install_requested" }>): SetupState {
   if (state.view !== "welcome" && state.view !== "location" && state.view !== "installed" && state.view !== "failed") return state;
@@ -118,9 +136,7 @@ function requestInstall(state: SetupState, event: Extract<SetupEvent, { type: "i
     const plan: InstallPlan = { mode: "fresh", dir: event.check.normalized, desktopShortcut: state.desktopShortcut };
     return startInstall({ ...state, plan, origin, keptData: event.check.hasConfig }, event.running);
   }
-  // 这两种模式没有快捷方式的选项，NSIS 却总会建一个：传 false 让 Rust 删掉本来没有的，用户删过的不会被装回来
-  const plan: InstallPlan = { mode: event.mode, dir: null, desktopShortcut: false };
-  return startInstall({ ...state, plan, origin, keptData: true }, event.running);
+  return startInstall({ ...state, plan: inPlacePlan(event.mode), origin, keptData: true }, event.running);
 }
 
 export function reduce(state: SetupState, event: SetupEvent): SetupState {
@@ -128,7 +144,10 @@ export function reduce(state: SetupState, event: SetupEvent): SetupState {
     case "probed": {
       if (state.view !== "boot") return state;
       const { existing } = event.probe;
-      return { ...state, probe: event.probe, dir: existing?.dir ?? event.probe.defaultDir, view: existing === null ? "welcome" : "installed" };
+      const probed = { ...state, probe: event.probe, dir: existing?.dir ?? event.probe.defaultDir };
+      // 留在 boot：窗口离开 boot 才显示，等落樱退出的这段时间不先闪一下已安装页
+      if (upgradesUnattended(event.probe)) return probed;
+      return { ...probed, view: existing === null ? "welcome" : "installed" };
     }
     case "open_location":
       // 只有首装能选位置：已有安装时位置是锁定的，换位置等于搬数据目录
@@ -143,6 +162,10 @@ export function reduce(state: SetupState, event: SetupEvent): SetupState {
       return state.view === "location" ? { ...state, desktopShortcut: event.value } : state;
     case "install_requested":
       return requestInstall(state, event);
+    case "update_started":
+      // 记作从已安装页发起：失败、拦截页返回时落在那里，重试也照那页的升级走
+      if (state.view !== "boot" || state.probe === null || !upgradesUnattended(state.probe)) return state;
+      return startInstall({ ...state, plan: inPlacePlan("upgrade"), origin: "installed", keptData: true }, event.running);
     case "launcher_gone":
       return state.view === "blocked" ? startInstall(state, false) : state;
     case "blocked_back":

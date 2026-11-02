@@ -1,7 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { APP_NAME_EN } from "../lib/app-info";
 import type { DirCheck, Existing, ExistingKind, Failure, FailureCode, InstallMode, InstallPlan, Probe, Progress } from "./contract";
-import { allowedModes, canCloseWindow, canOpenLegal, dirNotice, failureRecovery, initialState, installedDir, offersStandardInstaller, reduce, replay, withAppFolder, type SetupEvent, type SetupState, type View } from "./model";
+import {
+  allowedModes,
+  canCloseWindow,
+  canOpenLegal,
+  dirNotice,
+  failureRecovery,
+  initialState,
+  installedDir,
+  offersStandardInstaller,
+  reduce,
+  relaunchesAfterUpdate,
+  replay,
+  upgradesUnattended,
+  withAppFolder,
+  type SetupEvent,
+  type SetupState,
+  type View,
+} from "./model";
 
 const ALL_VIEWS: readonly View[] = ["boot", "welcome", "location", "installed", "blocked", "installing", "done", "failed", "legal", "fatal"];
 
@@ -124,6 +141,108 @@ describe("发起安装", () => {
 
   it.each<View>(["boot", "blocked", "installing", "done", "legal", "fatal"])("在 %s 发起安装不生效", (view) => {
     expect(reduce(AT[view], fresh())).toBe(AT[view]);
+  });
+});
+
+describe("更新模式", () => {
+  const RELAUNCH: Partial<Probe> = { update: { relaunch: true } };
+  const updateProbed = (existing: Existing | null = existingOf("upgrade"), extra: Partial<Probe> = {}) => probed(existing, { ...RELAUNCH, ...extra });
+  const started = (running: boolean): SetupEvent => ({ type: "update_started", running });
+  const UPGRADE_PLAN: InstallPlan = { mode: "upgrade", dir: null, desktopShortcut: false };
+
+  it("能升级时探测后留在 boot，探测结果和登记目录已经记下", () => {
+    const state = reduce(initialState, updateProbed());
+    expect(state.view).toBe("boot");
+    expect(state.probe?.update).toEqual({ relaunch: true });
+    expect(state.dir).toBe(String.raw`E:\app`);
+    expect(state.plan).toBeNull();
+    expect(state.run).toBe(0);
+  });
+
+  it("等到启动器退出后直接进安装：升级、装回登记目录、不要快捷方式，按已安装页发起", () => {
+    const state = replay([updateProbed(), started(false)]);
+    expect(state.view).toBe("installing");
+    expect(state.run).toBe(1);
+    expect(state.plan).toEqual(UPGRADE_PLAN);
+    expect(state.origin).toBe("installed");
+    expect(state.keptData).toBe(true);
+    expect(installedDir(state)).toBe(String.raw`E:\app`);
+  });
+
+  it("启动器一直不退出时进 blocked 不开始安装，进程消失后接着装", () => {
+    const blocked = replay([updateProbed(), started(true)]);
+    expect(blocked.view).toBe("blocked");
+    expect(blocked.run).toBe(0);
+    expect(blocked.plan).toEqual(UPGRADE_PLAN);
+    const resumed = reduce(blocked, { type: "launcher_gone" });
+    expect(resumed.view).toBe("installing");
+    expect(resumed.run).toBe(1);
+  });
+
+  it("拦截页返回落在已安装页，那里还能手动升级", () => {
+    const back = reduce(replay([updateProbed(), started(true)]), { type: "blocked_back" });
+    expect(back.view).toBe("installed");
+    expect(back.plan).toBeNull();
+    expect(reduce(back, upgrade()).plan).toEqual(UPGRADE_PLAN);
+  });
+
+  it("失败后重试仍是升级，轮次加一；返回落在已安装页", () => {
+    const failed = replay([updateProbed(), started(false), { type: "install_failed", failure: FAILURE }]);
+    expect(failed.view).toBe("failed");
+    const retried = reduce(failed, upgrade());
+    expect(retried.view).toBe("installing");
+    expect(retried.run).toBe(2);
+    expect(retried.plan).toEqual(UPGRADE_PLAN);
+    expect(retried.origin).toBe("installed");
+    expect(reduce(failed, { type: "failed_back" }).view).toBe("installed");
+  });
+
+  it.each<[string, Existing | null, View]>([
+    ["same", existingOf("same"), "installed"],
+    ["newer", existingOf("newer"), "installed"],
+    ["broken", existingOf("broken"), "installed"],
+    ["没有现有安装", null, "welcome"],
+  ])("现有安装是 %s 时退回交互流程，开始事件不生效", (_, existing, view) => {
+    const state = reduce(initialState, updateProbed(existing));
+    expect(state.view).toBe(view);
+    expect(reduce(state, started(false))).toBe(state);
+    expect(reduce(state, started(true))).toBe(state);
+  });
+
+  it("交互启动时照旧进已安装页，开始事件不生效", () => {
+    expect(reduce(AT.installed, started(false))).toBe(AT.installed);
+  });
+
+  it("探测之前和已经开始之后都不接受：晚到的结果不会让安装再跑一轮", () => {
+    expect(reduce(initialState, started(false))).toBe(initialState);
+    const installing = replay([updateProbed(), started(false)]);
+    expect(reduce(installing, started(false))).toBe(installing);
+    const blocked = replay([updateProbed(), started(true)]);
+    expect(reduce(blocked, started(false))).toBe(blocked);
+  });
+
+  it("等待期间界面上的安装请求不生效：发起安装只认更新流程这一条", () => {
+    const waiting = reduce(initialState, updateProbed());
+    expect(reduce(waiting, upgrade())).toBe(waiting);
+  });
+
+  it.each<[string, boolean, Partial<Probe>]>([
+    ["带了 /R", true, {}],
+    ["没带 /R", false, { update: { relaunch: false } }],
+    ["提权运行", false, { elevated: true }],
+    ["交互启动", false, { update: null }],
+  ])("%s 时装完替用户打开：%s", (_, expected, extra) => {
+    expect(relaunchesAfterUpdate(probeOf(existingOf("upgrade"), { ...RELAUNCH, ...extra }))).toBe(expected);
+  });
+
+  it.each<[string, boolean, Existing | null, Partial<Probe>]>([
+    ["更新模式、现有 upgrade", true, existingOf("upgrade"), RELAUNCH],
+    ["更新模式不带 /R", true, existingOf("upgrade"), { update: { relaunch: false } }],
+    ["交互启动、现有 upgrade", false, existingOf("upgrade"), {}],
+    ["更新模式、现有 same", false, existingOf("same"), RELAUNCH],
+    ["更新模式、没有安装", false, null, RELAUNCH],
+  ])("%s 时直接升级：%s", (_, expected, existing, extra) => {
+    expect(upgradesUnattended(probeOf(existing, extra))).toBe(expected);
   });
 });
 
