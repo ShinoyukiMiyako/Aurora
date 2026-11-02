@@ -108,11 +108,23 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
   const hasPinned = pinned.status === "ready" && pinned.data.length > 0;
   useEffect(() => {
     if (!hasPinned || !online) return;
+    // 窗口不可见时不测，跳过的周期记着：还原时补一次，否则最长要对着隐藏前的结果再等一整个周期。
+    // 没跳过周期的短暂最小化不补，结果还在有效期内
+    let missed = false;
     const timer = setInterval(() => {
-      // 窗口不可见时不测：重新可见后下一个周期再测
       if (document.visibilityState === "visible") reloadStatus();
+      else missed = true;
     }, SERVER_REFRESH_MS);
-    return () => clearInterval(timer);
+    const onVisibility = () => {
+      if (document.visibilityState !== "visible" || !missed) return;
+      missed = false;
+      reloadStatus();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [hasPinned, online, reloadStatus]);
 
   // 断网期间也会测速（断网时进主页、改固定列表），那时测到的连不上说明不了服务器：记下每份结果到手时是否在线，

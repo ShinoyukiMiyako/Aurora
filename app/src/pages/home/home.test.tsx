@@ -157,6 +157,13 @@ function setOnline(onLine: boolean) {
     window.dispatchEvent(new Event(onLine ? "online" : "offline"));
   });
 }
+/** 窗口最小化或还原：改读数后发出 visibilitychange，宿主把 WebView2 设为不可见或可见时页面收到的就是它。 */
+function setPageVisibility(state: DocumentVisibilityState) {
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue(state);
+  act(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+}
 const buttonByLabel = (label: string) => {
   const el = document.querySelector<HTMLElement>(`[aria-label="${label}"]`);
   if (el === null) throw new Error(`找不到名称为 ${label} 的元素`);
@@ -832,6 +839,63 @@ describe("主页：固定的服务器", () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });
     expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 2);
+  });
+
+  it("窗口隐藏期间不重测；隐藏跨过了重测周期时，还原立即补测一次，之后周期照常", async () => {
+    await mount();
+    const before = callsOf(ipc, "ping_servers").length;
+    setPageVisibility("hidden");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+    });
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before);
+
+    setPageVisibility("visible");
+    await flush();
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 2);
+  });
+
+  it("隐藏没跨过重测周期：还原不多测，下一个周期到点才测", async () => {
+    await mount();
+    const before = callsOf(ipc, "ping_servers").length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    setPageVisibility("hidden");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    setPageVisibility("visible");
+    await flush();
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
+  });
+
+  it("补测只补一次：还原后再隐藏、再还原，没有新跨过周期就不再测", async () => {
+    await mount();
+    const before = callsOf(ipc, "ping_servers").length;
+    setPageVisibility("hidden");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    setPageVisibility("visible");
+    await flush();
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
+
+    setPageVisibility("hidden");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    setPageVisibility("visible");
+    await flush();
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
   });
 
   // 单台测速分不出本机断网与服务器宕机：本机离线时整张卡说明本机离线，不把每台都标成连不上
