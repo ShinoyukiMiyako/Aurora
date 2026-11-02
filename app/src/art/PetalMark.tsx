@@ -1,4 +1,4 @@
-// 花瓣徽记：应用内的品牌图形，按 petal-mark.json 逐格画出。五瓣的 SakuraMark 只留给加载图形与花枝插图。
+// 花瓣徽记：应用内的品牌图形，按 petal-mark.json 逐格画出。五瓣的 SakuraMark 只留给加载图形。
 // 像素画只有落在整数倍上才不糊，所以尺寸从设备像素算起：边长换成设备像素后挑放得下的最大版本，余量留白；
 // 画布仍占满整个边长，换缩放比时布局不动。
 
@@ -6,14 +6,9 @@ import { useMemo } from "react";
 import { cx } from "../lib/util";
 import { BitmapCanvas } from "./illustrations/BitmapCanvas";
 import { blankPixels, pixelsToCanvas, useDevicePixelRatio, type Pixels } from "./illustrations/canvas";
-import type { Rgb } from "./illustrations/color";
+import { hexToRgb, type Rgb } from "./illustrations/color";
 import master from "./petal-mark.json";
 import styles from "./PetalMark.module.css";
-
-function hexToRgb(hex: string): Rgb {
-  const value = Number.parseInt(hex.slice(1), 16);
-  return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
-}
 
 const PALETTE = new Map(Object.entries(master.palette).map(([cell, hex]) => [cell, hexToRgb(hex)]));
 const TRANSPARENT_CELL = ".";

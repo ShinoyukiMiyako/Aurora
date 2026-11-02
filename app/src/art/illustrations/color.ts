@@ -3,6 +3,13 @@
 
 export type Rgb = readonly [r: number, g: number, b: number];
 
+/** 逐格母版（花瓣徽记、花枝）的调色板写成 #RRGGBB，画进 ImageData 前换成分量。 */
+export function hexToRgb(hex: string): Rgb {
+  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) throw new Error(`调色板颜色应为 #RRGGBB，实为 ${hex}`);
+  const value = Number.parseInt(hex.slice(1), 16);
+  return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
+}
+
 /** h 为色相（度，任意实数，按 360 取模），s、l 为百分数 0-100。结果四舍五入到 0-255。 */
 export function hslToRgb(h: number, s: number, l: number): Rgb {
   if (s < 0 || s > 100 || l < 0 || l > 100) throw new Error(`HSL 分量越界：s=${s} l=${l}`);
