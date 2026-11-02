@@ -43,11 +43,7 @@ export const BLOCKED_POLL_MS = 1000;
 export const MIN_INSTALLING_MS = 1200;
 /** 更新模式下等落樱退出时多久查一次：更新插件拉起引导程序后立即退出，进程通常很快就消失，查得密一点能早些开始。 */
 export const UPDATE_EXIT_POLL_MS = 200;
-/**
- * 更新模式下最多等落樱退出多久，等不到再进「请先关闭」页。这段时间界面停在 boot、窗口不显示，
- * 而 Rust 侧 boot.rs 的 SHOW_FALLBACK（3 秒）从建窗起算，到点会强制显示一个空窗口：
- * 必须比它短，余下的留给 WebView 加载、字体和探测。
- */
+/** 更新模式下最多等落樱退出多久，等不到再进「请先关闭」页。等的时候窗口已经显示着升级页。 */
 export const UPDATE_EXIT_WAIT_MS = 2000;
 
 const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
@@ -206,10 +202,10 @@ function useSetupFlow(bridge: SetupBridge, initial: SetupState): SetupFlow {
     });
   }, [attempt, bridge]);
 
-  // 更新模式先在 boot 里等落樱自己退出：等到了直接开始升级，用户看不到「请先关闭」那一页
+  // 更新模式先在准备升级页等落樱自己退出：等到了直接开始升级，用户看不到「请先关闭」那一页
   const updateSent = useRef(false);
   useEffect(() => {
-    if (state.view !== "boot" || state.probe === null || !upgradesUnattended(state.probe) || updateSent.current) return;
+    if (state.view !== "preparing" || state.probe === null || !upgradesUnattended(state.probe) || updateSent.current) return;
     updateSent.current = true;
     const deadline = performance.now() + UPDATE_EXIT_WAIT_MS;
     const stillRunning = async (): Promise<boolean> => {
@@ -253,6 +249,11 @@ function CurrentView({ flow, bridge, copy }: ViewProps) {
   switch (view) {
     case "boot":
       return null;
+    case "preparing": {
+      // 和安装中同一页，进度停在起点：等落樱退出只要一两秒，换页反而像跳了一下
+      const probe = requireValue(state.probe, "探测结果", view);
+      return <Installing copy={copy} mode="upgrade" version={probe.payloadVersion} run={state.run} progress={null} />;
+    }
     case "welcome": {
       const probe = requireValue(state.probe, "探测结果", view);
       return <Welcome copy={copy} dir={state.dir} interrupted={probe.interrupted} busy={busy} onChangeDir={() => dispatch({ type: "open_location" })} onInstall={() => requestInstall("fresh")} />;

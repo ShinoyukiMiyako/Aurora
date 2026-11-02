@@ -5,9 +5,6 @@
 // 不用 act 包裹：bridge 全是异步回调，按真实时间推进最接近实际，等待都用 vi.waitFor。
 
 import { MotionGlobalConfig } from "framer-motion";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { StrictMode, type ReactElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -467,12 +464,12 @@ describe("更新模式", () => {
     expect(seen).toEqual([upgrading]);
   });
 
-  it("启动器一直不退出：等待期间窗口不显示，等满时长才进「请先关闭」页，关掉后自动继续升级", async () => {
+  it("启动器一直不退出：等待期间窗口已显示着升级页，等满时长才进「请先关闭」页，关掉后自动继续升级", async () => {
     const fake = start({ probe: updateProbe(), running: true, outcome: "hang", progress: [] });
     const startedAt = performance.now();
     await vi.waitFor(() => expect(fake.callsOf("launcherRunning").length).toBeGreaterThanOrEqual(3), WAIT);
-    expect(heading()).toBeNull();
-    expect(fake.callsOf("windowReady")).toEqual([]);
+    expect(heading()).toBe(upgrading);
+    expect(fake.callsOf("windowReady")).toHaveLength(1);
 
     await vi.waitFor(() => expect(heading()).toBe(copy.blocked.title), { timeout: UPDATE_EXIT_WAIT_MS * 2, interval: 10 });
     // 定时器精度留 50 ms 余量
@@ -587,14 +584,6 @@ describe("更新模式", () => {
     expect(fake.callsOf("install")).toEqual([]);
   });
 
-  it("等待总时长比 Rust 强制显示窗口的兜底短", () => {
-    const boot = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../../src-tauri-setup/src/boot.rs"), "utf8");
-    const match = /pub const SHOW_FALLBACK: Duration = Duration::from_(secs|millis)\((\d+)\);/.exec(boot);
-    if (match === null) throw new Error("boot.rs 里没有 SHOW_FALLBACK");
-    const fallbackMs = Number(match[2]) * (match[1] === "secs" ? 1000 : 1);
-    expect(UPDATE_EXIT_WAIT_MS).toBeLessThan(fallbackMs);
-    expect(UPDATE_EXIT_POLL_MS).toBeLessThan(UPDATE_EXIT_WAIT_MS);
-  });
 });
 
 describe("协议页", () => {

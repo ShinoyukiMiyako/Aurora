@@ -20,7 +20,7 @@ import {
   type View,
 } from "./model";
 
-const ALL_VIEWS: readonly View[] = ["boot", "welcome", "location", "installed", "blocked", "installing", "done", "failed", "legal", "fatal"];
+const ALL_VIEWS: readonly View[] = ["boot", "preparing", "welcome", "location", "installed", "blocked", "installing", "done", "failed", "legal", "fatal"];
 
 const DEFAULT_DIR = String.raw`C:\Users\a\AppData\Local\app`;
 const CHOSEN_DIR = String.raw`D:\游戏 目录\app`;
@@ -39,6 +39,7 @@ const repair = (running = false): SetupEvent => ({ type: "install_requested", mo
 /** 每个视图各摆一份走到那里的状态。 */
 const AT: Readonly<Record<View, SetupState>> = {
   boot: initialState,
+  preparing: replay([probed(existingOf("upgrade"), { update: { relaunch: true } })]),
   welcome: replay([probed()]),
   location: replay([probed(), { type: "open_location" }]),
   installed: replay([probed(existingOf("upgrade"))]),
@@ -139,7 +140,7 @@ describe("发起安装", () => {
     expect(reduce(AT.installed, fresh())).toBe(AT.installed);
   });
 
-  it.each<View>(["boot", "blocked", "installing", "done", "legal", "fatal"])("在 %s 发起安装不生效", (view) => {
+  it.each<View>(["boot", "preparing", "blocked", "installing", "done", "legal", "fatal"])("在 %s 发起安装不生效", (view) => {
     expect(reduce(AT[view], fresh())).toBe(AT[view]);
   });
 });
@@ -150,9 +151,9 @@ describe("更新模式", () => {
   const started = (running: boolean): SetupEvent => ({ type: "update_started", running });
   const UPGRADE_PLAN: InstallPlan = { mode: "upgrade", dir: null, desktopShortcut: false };
 
-  it("能升级时探测后留在 boot，探测结果和登记目录已经记下", () => {
+  it("能升级时探测后直接进准备升级页，探测结果和登记目录已经记下，还没开始安装", () => {
     const state = reduce(initialState, updateProbed());
-    expect(state.view).toBe("boot");
+    expect(state.view).toBe("preparing");
     expect(state.probe?.update).toEqual({ relaunch: true });
     expect(state.dir).toBe(String.raw`E:\app`);
     expect(state.plan).toBeNull();

@@ -7,7 +7,7 @@
 import { APP_NAME_EN } from "../lib/app-info";
 import type { DirCheck, DirIssue, Existing, Failure, FailureCode, InstallMode, InstallPlan, Probe, Progress } from "./contract";
 
-export type View = "boot" | "welcome" | "location" | "installed" | "blocked" | "installing" | "done" | "failed" | "legal" | "fatal";
+export type View = "boot" | "preparing" | "welcome" | "location" | "installed" | "blocked" | "installing" | "done" | "failed" | "legal" | "fatal";
 
 /** 能发起安装的视图：失败后重试时回到的仍是这几个。 */
 export type InstallOrigin = "welcome" | "location" | "installed";
@@ -148,8 +148,9 @@ export function reduce(state: SetupState, event: SetupEvent): SetupState {
       if (state.view !== "boot") return state;
       const { existing } = event.probe;
       const probed = { ...state, probe: event.probe, dir: existing?.dir ?? event.probe.defaultDir };
-      // 留在 boot：窗口离开 boot 才显示，等落樱退出的这段时间不先闪一下已安装页
-      if (upgradesUnattended(event.probe)) return probed;
+      // 直接进准备升级页，不先闪一下已安装页；也不能留在 boot 等：窗口离开 boot 才显示，探测慢的机器上
+      // Rust 的显示兜底会先把一个空窗口顶出来
+      if (upgradesUnattended(event.probe)) return { ...probed, view: "preparing" };
       return { ...probed, view: existing === null ? "welcome" : "installed" };
     }
     case "open_location":
@@ -167,7 +168,7 @@ export function reduce(state: SetupState, event: SetupEvent): SetupState {
       return requestInstall(state, event);
     case "update_started":
       // 记作从已安装页发起：失败、拦截页返回时落在那里，重试也照那页的升级走
-      if (state.view !== "boot" || state.probe === null || !upgradesUnattended(state.probe)) return state;
+      if (state.view !== "preparing" || state.probe === null || !upgradesUnattended(state.probe)) return state;
       return startInstall({ ...state, plan: inPlacePlan("upgrade"), origin: "installed", keptData: true }, event.running);
     case "launcher_gone":
       return state.view === "blocked" ? startInstall(state, false) : state;
