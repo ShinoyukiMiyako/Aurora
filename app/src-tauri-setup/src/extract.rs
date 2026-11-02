@@ -19,11 +19,17 @@ use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 use crate::contract::{Failure, FailureCode};
 
 pub const TEMP_PREFIX: &str = "Petalfall-Setup-";
+/// 窗口的 WebView2 数据目录也建在系统临时目录下（`main.rs`）：默认的数据目录会永远留在 `%LOCALAPPDATA%`，
+/// 引导程序没有卸载流程。正常关窗会删，进程被强杀时走不到那一步，残留交给 [`sweep_stale`]。
+pub const WEBVIEW_DATA_PREFIX: &str = "petalfall-setup-webview-";
 /// 只能改大小写：半装恢复按镜像名认载荷还在不在跑，每个发出去的引导程序都不分大小写比较
 /// （`journal::SystemProcesses::payload_alive`），新旧版本接手对方留下的半装时才认得出对方解出的载荷。
 pub const PAYLOAD_NAME: &str = "Petalfall-NSIS.exe";
-/// 更新的目录可能属于正在运行的另一次安装。
+/// 更新的目录可能还有另一次安装或另一个窗口在用。
 pub const STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+/// 原样比较、分大小写。两种目录都由 tempfile 照前缀原样起名，NTFS 保留大小写，引导程序建的只会是这两种写法，
+/// 不分大小写只会多删到别的程序起的目录。代价是被人改过大小写的残留一直留着，只占点空间。
+const SWEPT_PREFIXES: [&str; 2] = [TEMP_PREFIX, WEBVIEW_DATA_PREFIX];
 
 /// 杀软扫描刚落盘的文件时，打开和启动都会短暂撞上访问拒绝或共享冲突，退避约 3 秒通常就过了。
 pub(crate) const BACKOFF: [Duration; 6] = [
@@ -169,12 +175,14 @@ pub struct Sweep {
     pub skipped: Vec<(PathBuf, io::Error)>,
 }
 
-/// 清扫崩溃或断电留下的目录。`now` 由调用方给，时间边界才测得了。
+/// 清扫崩溃、断电或被强杀留下的目录：解载荷的临时目录和窗口的 WebView2 数据目录。`now` 由调用方给，时间边界才测得了。
 pub fn sweep_stale(temp_root: &Path, now: SystemTime) -> io::Result<Sweep> {
     let mut sweep = Sweep::default();
     for entry in fs::read_dir(temp_root)? {
         let entry = entry?;
-        if !entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !SWEPT_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
             continue;
         }
         // 联接点和符号链接的 is_dir 是假：只删自己建的目录，不顺着链接走到别处
@@ -206,7 +214,13 @@ pub fn sweep_stale(temp_root: &Path, now: SystemTime) -> io::Result<Sweep> {
 mod tests {
     use std::cell::Cell;
     use std::io::Cursor;
+    use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+    };
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
     use super::*;
     use crate::overlay::test_support::random_bytes;
@@ -517,5 +531,124 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
 
         assert!(sweep_stale(&temp.path().join("gone"), SystemTime::now()).is_err());
+    }
+
+    /// 把修改时间拨到 `now` 之前 `age`：一次清扫里要同时有过期的和新鲜的。目录要带 FILE_FLAG_BACKUP_SEMANTICS 才打得开。
+    fn backdate(path: &Path, now: SystemTime, age: Duration) {
+        OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .unwrap()
+            .set_modified(now - age)
+            .unwrap();
+    }
+
+    /// 照 main.rs 的建法起名，里面放一份浏览器缓存那样的嵌套文件。
+    fn webview_data(temp: &Path) -> PathBuf {
+        let dir = tempfile::Builder::new()
+            .prefix(WEBVIEW_DATA_PREFIX)
+            .tempdir_in(temp)
+            .unwrap()
+            .keep();
+        let cache = dir.join(r"EBWebView\Default\Cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("data_0"), random_bytes(64)).unwrap();
+        dir
+    }
+
+    fn random_age() -> Duration {
+        let bytes = random_bytes(2);
+        Duration::from_secs(u64::from(u16::from_le_bytes([bytes[0], bytes[1]])))
+    }
+
+    #[test]
+    fn sweep_treats_webview_data_by_the_same_one_day_rule() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        let stale_webview = webview_data(temp.path());
+        let fresh_webview = webview_data(temp.path());
+        let old_webview = webview_data(temp.path());
+        let stale_payload = temp.path().join("Petalfall-Setup-old");
+        fs::create_dir(&stale_payload).unwrap();
+        let unrelated = temp.path().join("Other-webview-old");
+        fs::create_dir(&unrelated).unwrap();
+        let prefixed_file = temp.path().join(format!("{WEBVIEW_DATA_PREFIX}file"));
+        fs::write(&prefixed_file, b"not a directory").unwrap();
+        // 恰好满一天就算过期，差一秒不算
+        backdate(&stale_webview, now, STALE_AFTER);
+        backdate(&fresh_webview, now, STALE_AFTER - Duration::from_secs(1));
+        backdate(&old_webview, now, STALE_AFTER + random_age());
+        backdate(&stale_payload, now, STALE_AFTER + random_age());
+        backdate(&unrelated, now, STALE_AFTER * 2);
+        backdate(&prefixed_file, now, STALE_AFTER * 2);
+
+        let sweep = sweep_stale(temp.path(), now).unwrap();
+
+        let mut removed = sweep.removed;
+        removed.sort();
+        let mut expected = vec![stale_webview.clone(), old_webview, stale_payload];
+        expected.sort();
+        assert_eq!(removed, expected);
+        assert!(sweep.skipped.is_empty(), "{:?}", sweep.skipped);
+        assert!(!stale_webview.exists());
+        assert!(
+            fresh_webview
+                .join(r"EBWebView\Default\Cache\data_0")
+                .exists()
+        );
+        assert!(unrelated.exists());
+        assert!(prefixed_file.exists());
+    }
+
+    #[test]
+    fn sweep_matches_both_prefixes_with_their_exact_case() {
+        let temp = tempfile::tempdir().unwrap();
+        let kept = [
+            "PETALFALL-SETUP-WEBVIEW-a1",
+            "Petalfall-setup-webview-a2",
+            "petalfall-setup-a3",
+            "PETALFALL-SETUP-a4",
+        ]
+        .map(|name| temp.path().join(name));
+        // 改了大小写的 WebView2 前缀恰好原样以解载荷的前缀开头，按那一条删
+        let recased_but_ours = temp.path().join("Petalfall-Setup-Webview-a5");
+        for dir in kept.iter().chain([&recased_but_ours]) {
+            fs::create_dir(dir).unwrap();
+        }
+
+        let sweep = sweep_stale(temp.path(), stale_now()).unwrap();
+
+        assert_eq!(sweep.removed, vec![recased_but_ours]);
+        for dir in &kept {
+            assert!(dir.exists(), "{}", dir.display());
+        }
+    }
+
+    #[test]
+    fn sweep_does_not_follow_a_junction_named_like_webview_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::write(elsewhere.path().join("keep.txt"), b"not ours").unwrap();
+        let junction = temp.path().join(format!("{WEBVIEW_DATA_PREFIX}link"));
+        // 建联接点不要管理员权限，符号链接要
+        let status = Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&junction)
+            .arg(elsewhere.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let sweep = sweep_stale(temp.path(), stale_now()).unwrap();
+
+        assert!(sweep.removed.is_empty());
+        assert!(fs::symlink_metadata(&junction).is_ok(), "联接点本身也留着");
+        assert!(elsewhere.path().join("keep.txt").exists());
     }
 }

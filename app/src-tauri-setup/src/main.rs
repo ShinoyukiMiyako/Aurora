@@ -8,14 +8,12 @@ use std::time::Instant;
 
 use petalfall_setup_lib::boot::{self, Claim, DesktopUser, Notice, Webview};
 use petalfall_setup_lib::commands::{self, SetupContext};
+use petalfall_setup_lib::extract::WEBVIEW_DATA_PREFIX;
 use petalfall_setup_lib::log::{self, SetupLog};
 use petalfall_setup_lib::overlay;
 use petalfall_setup_lib::runner::Session;
 use tauri::{App, WebviewWindow, WebviewWindowBuilder};
 use tempfile::TempDir;
-
-/// 默认的 WebView2 数据目录会永远留在 `%LOCALAPPDATA%`：引导程序没有卸载流程。
-const WEBVIEW_DATA_PREFIX: &str = "petalfall-setup-webview-";
 
 struct Interface {
     app: App,

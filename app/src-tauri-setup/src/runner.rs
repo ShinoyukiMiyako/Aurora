@@ -684,6 +684,7 @@ mod tests {
     use super::test_support::Recording;
     use super::*;
     use crate::existing::{DISPLAY_VERSION, INSTALL_LOCATION};
+    use crate::extract::WEBVIEW_DATA_PREFIX;
     use crate::overlay::Overlay;
     use crate::overlay::test_support::{packed_image, random_bytes};
     use crate::verify::test_support::MemoryEntry;
@@ -788,6 +789,21 @@ mod tests {
         );
         assert_eq!(roots.temp, std::env::temp_dir());
         assert!(roots.desktop.is_absolute());
+    }
+
+    /// main.rs 按 tempfile 的默认临时目录建 WebView2 数据目录，清扫看的是这里的 temp：两处不是同一个目录的话，
+    /// 强杀留下的数据目录永远扫不到。
+    #[test]
+    fn webview_data_lands_where_the_sweep_looks() {
+        let webview = tempfile::Builder::new()
+            .prefix(WEBVIEW_DATA_PREFIX)
+            .tempdir()
+            .unwrap();
+
+        assert_eq!(
+            webview.path().parent(),
+            Some(Roots::system().unwrap().temp.as_path())
+        );
     }
 
     /// 桌面重定向到已断开的位置时文件夹不在，拿真桌面测不了，这里换一个几乎没有机器真有的已知文件夹。
