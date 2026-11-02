@@ -8,7 +8,7 @@ const ALL_VIEWS: readonly View[] = ["boot", "welcome", "location", "installed", 
 const DEFAULT_DIR = String.raw`C:\Users\a\AppData\Local\app`;
 const CHOSEN_DIR = String.raw`D:\游戏 目录\app`;
 
-const probeOf = (existing: Existing | null, extra: Partial<Probe> = {}): Probe => ({ payloadVersion: "0.2.0", defaultDir: DEFAULT_DIR, requiredBytes: 41_943_040, existing, interrupted: false, elevated: false, ...extra });
+const probeOf = (existing: Existing | null, extra: Partial<Probe> = {}): Probe => ({ payloadVersion: "0.2.0", defaultDir: DEFAULT_DIR, requiredBytes: 41_943_040, existing, interrupted: false, elevated: false, update: null, ...extra });
 const existingOf = (kind: ExistingKind): Existing => ({ kind, version: "0.1.0", dir: String.raw`E:\app` });
 const checkOf = (extra: Partial<DirCheck> = {}): DirCheck => ({ normalized: CHOSEN_DIR, issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 1 << 30, ...extra });
 const FAILURE: Failure = { code: "payload_exit", detail: "2" };

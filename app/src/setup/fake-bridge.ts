@@ -15,6 +15,7 @@ export const FAKE_PROBE: Probe = {
   existing: null,
   interrupted: false,
   elevated: false,
+  update: null,
 };
 
 /** 一次走完三个阶段的进度。 */

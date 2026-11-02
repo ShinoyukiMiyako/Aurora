@@ -469,6 +469,7 @@ mod tests {
             existing,
             interrupted: false,
             elevated: true,
+            update: None,
         }
     }
 
@@ -491,6 +492,7 @@ mod tests {
                 existing: None,
                 interrupted: true,
                 elevated: true,
+                update: None,
             }
         );
     }

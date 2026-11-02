@@ -211,6 +211,7 @@ fn assemble_probe(
         existing,
         interrupted: false,
         elevated,
+        update: None,
     };
     Ok(match recovery {
         Recovery::Interrupted { journal, .. } => journal::mark_interrupted(probe, &journal),
@@ -404,6 +405,7 @@ mod tests {
                 existing: None,
                 interrupted: false,
                 elevated: false,
+                update: None,
             }
         );
     }
