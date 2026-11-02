@@ -3,7 +3,8 @@
 //! 本文件只做装配：日志、插件、managed state、主窗口兜底、命令注册与退出收尾（[`exit`]）。命令实现按领域分在
 //! [`commands`] 下；各领域共用的设施——门面锁 [`facade`]、长任务登记与取消 [`tasks`]、
 //! 事件转发 [`events`]、主窗口启动期处理 [`window`]、主窗口原生拖放 [`drop`]、渲染进程故障后的
-//! 自动重载 [`renderer`]、同一数据目录只跑一个启动器 [`single_instance`]——各自成模块。
+//! 自动重载 [`renderer`]、最小化时的页面可见性 [`page_visibility`]、同一数据目录只跑一个启动器
+//! [`single_instance`]——各自成模块。
 //!
 //! 新增命令时在 `generate_handler!` 里本领域的分块内追加，块之间以 `// -- 领域 --` 分隔；
 //! 新增 managed state 同样写在 setup 里本领域的分块内。
@@ -15,6 +16,8 @@ mod exit;
 mod facade;
 mod gpu;
 mod logging;
+#[cfg(windows)]
+mod page_visibility;
 mod renderer;
 #[cfg(windows)]
 mod single_instance;
