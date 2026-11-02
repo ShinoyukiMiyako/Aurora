@@ -506,7 +506,8 @@ describe("更新模式", () => {
     await seeHeading(upgraded);
     await vi.waitFor(() => expect(fake.callsOf("close")).toEqual([[true]]), WAIT);
     expect(fake.callsOf("openLauncher")).toEqual([["E:\\app"]]);
-    expect(button(copy.done.open).getAttribute("aria-busy")).toBe("true");
+    // 假桥的打开与关窗都是立即兑现的微任务，React 的重渲染排在它们后面，忙碌态要等它画出来
+    await vi.waitFor(() => expect(button(copy.done.open).getAttribute("aria-busy")).toBe("true"), WAIT);
     await settle();
     expect(fake.callsOf("openLauncher")).toHaveLength(1);
     expect(fake.callsOf("launcherRunning")).toHaveLength(1);

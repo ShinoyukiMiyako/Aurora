@@ -231,6 +231,7 @@ describe("更新模式", () => {
     ["没带 /R", false, { update: { relaunch: false } }],
     ["提权运行", false, { elevated: true }],
     ["交互启动", false, { update: null }],
+    ["更新模式退回交互流程", false, { existing: existingOf("same") }],
   ])("%s 时装完替用户打开：%s", (_, expected, extra) => {
     expect(relaunchesAfterUpdate(probeOf(existingOf("upgrade"), { ...RELAUNCH, ...extra }))).toBe(expected);
   });

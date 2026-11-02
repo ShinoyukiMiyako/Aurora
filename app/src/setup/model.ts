@@ -108,9 +108,12 @@ export function upgradesUnattended(probe: Probe): boolean {
   return probe.update !== null && allowedModes(probe.existing).includes("upgrade");
 }
 
-/** 插件带了 /R 才替用户重新打开；提权时不开，理由同完成页：提权启动和普通启动用的是两个数据根。 */
+/**
+ * 只有无人值守的升级装完才替用户重新打开，且插件要带了 /R：退回交互流程的那几种情况是用户自己点着装的，
+ * 和平常一样停在完成页。提权时不开，理由同完成页：提权启动和普通启动用的是两个数据根。
+ */
 export function relaunchesAfterUpdate(probe: Probe): boolean {
-  return probe.update !== null && probe.update.relaunch && !probe.elevated;
+  return upgradesUnattended(probe) && probe.update?.relaunch === true && !probe.elevated;
 }
 
 function requireProbe(state: SetupState): Probe {
