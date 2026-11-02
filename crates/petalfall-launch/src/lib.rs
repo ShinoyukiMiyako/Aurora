@@ -52,8 +52,9 @@ pub use logfile::{
     SessionOutcome, game_line_level, read_log_tail, session_log_path, unix_millis,
 };
 pub use memory::{
-    MemoryAdvice, MemoryConfig, MemoryTier, SystemMemory, auto_allocate, probe_system_memory,
-    recommended_max_mb,
+    DISTANT_HORIZONS_MOD_ID, LimitReason, LoaderClass, MemoryAdvice, MemoryConfig, MemoryEstimate,
+    MemoryLimit, MemoryProfile, NeedFactor, SystemMemory, estimate_memory, estimate_need,
+    memory_limit, probe_system_memory,
 };
 pub use placeholder::Placeholders;
 pub use precheck::{

@@ -107,6 +107,13 @@ pub async fn count_mod_files(mods_dir: &Path) -> Result<u32> {
     blocking(mods_dir, move || count_mods_in(&dir)).await
 }
 
+/// 工作目录 `options.txt` 里的视距（`renderDistance`）。文件不存在或没写这一项为 `None`，游戏按默认视距。
+/// 值不是整数时同样为 `None`：游戏读到这种值也是跳过、退回默认视距。
+pub async fn read_render_distance(working_dir: &Path) -> Result<Option<u32>> {
+    let options = working_dir.join("options.txt");
+    blocking(working_dir, move || render_distance_in(&options)).await
+}
+
 /// 递归统计目录的字节数与文件数，不跟随符号链接。目录不存在为 (0, 0)。
 pub async fn dir_footprint(dir: &Path) -> Result<(u64, u64)> {
     let owned = dir.to_path_buf();
@@ -407,6 +414,29 @@ fn resource_pack_order(options: &Path) -> Result<Vec<String>> {
 
 /// 1.13 起 `options.txt` 启用列表里本地资源包的 id 前缀。
 const PACK_FILE_PREFIX: &str = "file/";
+
+fn render_distance_in(options: &Path) -> Result<Option<u32>> {
+    let text = match std::fs::read(options) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(Error::Io {
+                path: options.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let Some(raw) = text.lines().find_map(|l| l.strip_prefix("renderDistance:")) else {
+        return Ok(None);
+    };
+    match raw.trim().parse() {
+        Ok(distance) => Ok(Some(distance)),
+        Err(_) => {
+            tracing::warn!(path = %options.display(), value = raw, "options.txt 的视距不是整数，按默认视距算");
+            Ok(None)
+        }
+    }
+}
 
 /// 当前启用的光影包文件名：Iris（及其 Forge 移植 Oculus）记在 `config/<mod>.properties`，
 /// OptiFine 记在 `optionsshaders.txt`。Iris 的配置优先：两者同时存在时游戏实际用的是 Iris。
@@ -813,6 +843,33 @@ mod tests {
             resource_pack_order(&path).unwrap_err(),
             Error::Json { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn render_distance_comes_from_options_txt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path();
+        assert_eq!(
+            read_render_distance(wd).await.unwrap(),
+            None,
+            "没有 options.txt"
+        );
+        write(
+            &wd.join("options.txt"),
+            b"fov:0.0\r\nsimulationDistance:8\r\n",
+        );
+        assert_eq!(read_render_distance(wd).await.unwrap(), None, "没写视距");
+        write(
+            &wd.join("options.txt"),
+            b"fov:0.0\r\nrenderDistance:24\r\nsimulationDistance:8\r\n",
+        );
+        assert_eq!(read_render_distance(wd).await.unwrap(), Some(24));
+        write(&wd.join("options.txt"), b"renderDistance:far\n");
+        assert_eq!(
+            read_render_distance(wd).await.unwrap(),
+            None,
+            "写坏的视距游戏会跳过"
+        );
     }
 
     #[tokio::test]

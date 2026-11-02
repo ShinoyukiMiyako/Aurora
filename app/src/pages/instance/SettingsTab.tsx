@@ -4,9 +4,11 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ACTION_ERROR, lockReason, MODPACK_REIMPORT_COPY, REINSTALL_LOADER_LABEL, TOAST_COPY } from "../../copy/flows";
+import { MEMORY_BASIS_COPY } from "../../copy/memory";
 import { JAVA_SOURCE_LABEL } from "../../copy/settings";
 import { JAVA_AUTO, type InstanceSettings, type InstanceSummary } from "../../domain/adapt";
 import { formatMemory } from "../../domain/format";
+import { memoryBasis } from "../../domain/memory";
 import { canReinstallLoader, isolationByPolicy, needsReimport, runtimeComplete } from "../../domain/rules";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useNav, useShell } from "../../shell/shell";
@@ -172,23 +174,31 @@ function MemoryCard({
     if (placeholder === null && memory.status === "error") return <ModuleError title={SETTINGS_COPY.memoryError} error={memory.error} onRetry={memory.reload} />;
     if (placeholder !== null || memory.status !== "ready" || editor === null || global === null) return <Skeleton shape="text" lines={3} />;
     const info: MemoryInfo = memory.value;
-    const recommended = info.advice.recommended_mb;
-    const mods = inst.modCount;
+    const { recommended_mb: recommended, need_mb: need } = info.advice;
+    const basis = memoryBasis(info.advice, inst);
     if (!custom || draft === null) {
+      const auto = global.memory.auto;
       return (
-        <div className={styles.followBox}>
-          <div className={styles.followText}>
-            <span className={styles.followValue}>{formatMemory(info.effectiveMb)}</span>
-            <span className={styles.soft}>{global.memory.auto ? SETTINGS_COPY.followAuto : SETTINGS_COPY.followFixed}</span>
+        <>
+          <div className={styles.followBox}>
+            <div className={styles.followText}>
+              <span className={styles.followValue}>{formatMemory(info.effectiveMb)}</span>
+              <span className={styles.soft}>{auto ? SETTINGS_COPY.followAuto(basis.summary) : SETTINGS_COPY.followFixed}</span>
+            </div>
+            <Button variant="ghost" size="sm" iconRight="arrow-right" onClick={() => go({ page: "settings", section: "game" })}>
+              {SETTINGS_COPY.globalSettings}
+            </Button>
           </div>
-          <Button variant="ghost" size="sm" iconRight="arrow-right" onClick={() => go({ page: "settings", section: "game" })}>
-            {SETTINGS_COPY.globalSettings}
-          </Button>
-        </div>
+          {auto && basis.cap !== null && (
+            <Callout tone="warn" icon="alert" announce>
+              {MEMORY_BASIS_COPY.capNotice(basis.cap)}
+            </Callout>
+          )}
+        </>
       );
     }
-    // Mod 数不出来时这个建议值没有依据：宁可不给判断，也不说「0 个 Mod」
-    const below = mods !== null && draft < recommended;
+    // 被封顶时建议值只是本机上限：单独设得比它高，也可能还不到估算的需求，这时不能说「足够」
+    const note = draft < recommended ? SETTINGS_COPY.belowRecommended(basis.summary) : draft < need ? SETTINGS_COPY.belowNeed(need) : SETTINGS_COPY.enough(basis.summary);
     return (
       <MemorySlider
         value={draft}
@@ -196,9 +206,9 @@ function MemoryCard({
         onCommit={(mb) => void editor.save({ memoryMb: mb })}
         disabled={editor.locked !== undefined}
         totalMb={info.advice.total_mb}
-        recommended={mods === null ? undefined : { mb: recommended, tip: SETTINGS_COPY.recommendTip(mods, recommended) }}
-        notes={mods === null ? [] : [below ? SETTINGS_COPY.belowRecommended(mods, recommended) : SETTINGS_COPY.enough(recommended)]}
-        notesTone={below ? "warn" : "default"}
+        recommended={{ mb: recommended, tip: basis.sentence }}
+        notes={[note]}
+        notesTone={draft < need ? "warn" : "default"}
         ariaLabel={SETTINGS_COPY.memorySlider}
       />
     );

@@ -53,6 +53,20 @@ describe("窗口回到前台", () => {
     expect(await resources.read("java", java)).toEqual([]);
     store.stop();
   });
+
+  it("外部放进的 Mod 改变了自动内存的估算：内存建议跟着重读", async () => {
+    const store = await startedStore();
+    let need = 3072;
+    const advice = () => Promise.resolve({ need_mb: need });
+    expect(await resources.read("memory-advice:生存", advice)).toEqual({ need_mb: 3072 });
+
+    need = 5632;
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+
+    expect(await resources.read("memory-advice:生存", advice)).toEqual({ need_mb: 5632 });
+    store.stop();
+  });
 });
 
 describe("游戏退出后的缓存失效", () => {
@@ -112,6 +126,24 @@ describe("游戏退出后的缓存失效", () => {
 
     expect(await resources.read("mods:生存", mods)).toEqual(["fabric-api.jar", "sodium.jar"]);
     await resources.read("mods:创造", other);
+    expect(other).toHaveBeenCalledTimes(1);
+    store.stop();
+  });
+
+  it("游戏里调过视距：退出后这个实例的内存建议重新请求，别的实例不受影响", async () => {
+    const store = await startedStore();
+    let distance = 12;
+    const advice = () => Promise.resolve({ distance });
+    const other = vi.fn(() => Promise.resolve({ distance: 12 }));
+    expect(await resources.read("memory-advice:生存", advice)).toEqual({ distance: 12 });
+    await resources.read("memory-advice:创造", other);
+
+    distance = 32;
+    emit(GAME_EXIT_EVENT, exit("生存"));
+    await settle();
+
+    expect(await resources.read("memory-advice:生存", advice)).toEqual({ distance: 32 });
+    await resources.read("memory-advice:创造", other);
     expect(other).toHaveBeenCalledTimes(1);
     store.stop();
   });

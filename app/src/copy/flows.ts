@@ -1,6 +1,7 @@
 // 流程文案表。页面与组件只 import，不内联；产品名一律取自 app-info。
 // 插值一律经 domain/format 格式化；带插值的条目写成函数，参数缺失属于调用方的契约错误，直接抛出。
 
+import type { ExtraLoaderKind } from "../domain/adapt";
 import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed } from "../domain/format";
 import type { BaseBusyLock, InstanceLock } from "../domain/instance-locks";
 import type { AccountKind, FailureCode, InstallPhase, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskPhase, TaskStatus } from "../domain/types";
@@ -96,6 +97,12 @@ export const LOADER_NAME: Readonly<Record<LoaderKind, string>> = {
   quilt: "Quilt",
   forge: "Forge",
   neoforge: "NeoForge",
+};
+
+/** 外部安装器写进版本的附加加载器，写法同上。 */
+export const EXTRA_LOADER_NAME: Readonly<Record<ExtraLoaderKind, string>> = {
+  optifine: "OptiFine",
+  liteloader: "LiteLoader",
 };
 
 /** 封面预设的中文名，键为封面预设 id（与方块白名单一致）。新建实例、整合包导入与实例设置换封面共用。 */

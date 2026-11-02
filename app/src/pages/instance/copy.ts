@@ -430,12 +430,13 @@ export const SETTINGS_COPY = {
   follow: "跟随全局",
   custom: "为这个实例单独设置",
   memorySlider: "最大内存",
-  followAuto: "全局开启了自动分配，会按 Mod 数量与空闲内存调整",
+  followAuto: (summary: string) => `自动分配：${summary}`,
   followFixed: "全局固定值",
   globalSettings: "全局设置",
-  recommendTip: (mods: number, mb: number) => `按 ${mods} 个 Mod 推荐 ${formatMemory(mb)}`,
-  belowRecommended: (mods: number, mb: number) => `${mods} 个 Mod 建议至少 ${formatMemory(mb)}`,
-  enough: (mb: number) => `建议值 ${formatMemory(mb)}，当前足够`,
+  belowRecommended: (summary: string) => `${summary}，当前偏少`,
+  /** 被封顶时单独设得比建议值高，仍可能不到估算的需求。 */
+  belowNeed: (mb: number) => `估算需要 ${formatMemory(mb)}，当前仍偏少`,
+  enough: (summary: string) => `${summary}，当前足够`,
   memoryError: "读不到本机内存",
 
   javaTitle: "Java 运行时",

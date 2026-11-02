@@ -92,6 +92,20 @@ pub(crate) struct InstanceDirs {
     pub(crate) metadata_cache: PathBuf,
 }
 
+impl InstanceDirs {
+    /// 工作目录定了，mods 目录与元数据缓存的落点随之确定。启动链路已经按这一局的隔离算好工作目录，
+    /// 从这里取，不再判一遍隔离。
+    pub(crate) fn in_working_dir(working_dir: PathBuf) -> Self {
+        Self {
+            mods_dir: working_dir.join(MODS_DIR),
+            metadata_cache: working_dir
+                .join(PETALFALL_META_DIR)
+                .join(MOD_METADATA_CACHE_FILE),
+            working_dir,
+        }
+    }
+}
+
 /// 已装 Mod 在卷宗里的平台来源。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ModSource {
@@ -478,14 +492,7 @@ impl Petalfall {
                 version.is_release(),
             )
             .await?;
-        let working_dir = resolved.working_dir;
-        Ok(InstanceDirs {
-            mods_dir: working_dir.join(MODS_DIR),
-            metadata_cache: working_dir
-                .join(PETALFALL_META_DIR)
-                .join(MOD_METADATA_CACHE_FILE),
-            working_dir,
-        })
+        Ok(InstanceDirs::in_working_dir(resolved.working_dir))
     }
 
     /// [`Petalfall::resolve_instance`] + [`Petalfall::instance_dirs`]。

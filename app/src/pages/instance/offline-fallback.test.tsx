@@ -11,7 +11,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import { routeKey } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { accountDto, bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { accountDto, bootOverrides, callsOf, instanceDto, memoryAdviceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 
@@ -134,7 +134,7 @@ beforeEach(() => {
   ipc.overrides.set("list_mods", () => []);
   ipc.overrides.set("check_updates", () => []);
   ipc.overrides.set("list_instance_content", () => ({ resource_packs: [], shader_packs: [], worlds: [] }));
-  ipc.overrides.set("memory_advice", () => ({ total_mb: 32768, available_mb: 16000, tier: "modded", recommended_mb: 6144 }));
+  ipc.overrides.set("memory_advice", () => memoryAdviceDto({ version_id: ID }));
   ipc.overrides.set("last_crash", () => null);
   ipc.overrides.set("last_launch_log", () => null);
   ipc.overrides.set("list_history", () => []);

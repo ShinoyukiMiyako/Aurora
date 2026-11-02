@@ -1455,8 +1455,9 @@ export class LauncherStore {
   }
 
   private readonly onWindowFocus = (): void => {
-    // 玩家手动往 mods 文件夹里放了 jar：概览的数字和 Mod 页读的是同一份，都要重扫
+    // 玩家手动往 mods 文件夹里放了 jar：概览的数字和 Mod 页读的是同一份，都要重扫；自动内存按启用的 Mod 估算，也跟着重读
     invalidateResources("mods");
+    invalidateResources("memory-advice");
     if (this.raw.status.instances.kind !== "ready") return;
     if (Date.now() - this.lastScanAt < INSTANCE_RESCAN_MIN_MS) return;
     // 本机 Java 也可能被挪走：探测要起进程，跟着实例重扫一起节流
@@ -1532,10 +1533,10 @@ export class LauncherStore {
   /**
    * 实例里的 Mod 变了：该实例的列表、历史、可更新项与安装计划失效。发现页的落位矩阵按「装没装、装的哪一版」判定可装与否，
    * 它的 key 按工程而不是按实例划分，装上的前置也会改变别的工程的判定，所以整个 match 前缀一起失效。
-   * 「已装入 n 个实例」一次读全部实例的已装来源，同样整个前缀失效。
+   * 「已装入 n 个实例」一次读全部实例的已装来源，同样整个前缀失效。自动内存按启用的 Mod 估算，内存建议跟着失效。
    */
   private modsChanged(instanceId: string): void {
-    for (const prefix of ["mods", "history", "mod-updates", "plan"]) invalidateResources(`${prefix}:${instanceId}`);
+    for (const prefix of ["mods", "history", "mod-updates", "plan", "memory-advice"]) invalidateResources(`${prefix}:${instanceId}`);
     invalidateResources("match");
     invalidateResources("installed-sources");
   }
@@ -1670,6 +1671,8 @@ export class LauncherStore {
     // 玩家常常在资源管理器里往 mods 目录放了文件就直接启动：诊断页要拿日志点名的 Mod 对列表，旧列表里没有它，
     // 开关与「停用」就都出不来
     invalidateResources(`mods:${id}`);
+    // 游戏里调过的视距写在 options.txt，自动内存按它估算
+    invalidateResources(`memory-advice:${id}`);
     invalidateResources("play-stats");
     // 启动时缺 Java，后端也会自己下载运行时
     invalidateResources("java");

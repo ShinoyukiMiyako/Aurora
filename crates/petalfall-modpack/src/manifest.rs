@@ -183,6 +183,8 @@ pub struct PackManifest {
     pub remote: RemoteFiles,
     /// 覆盖文件所在的目录前缀（含结尾 `/`），按叠加顺序：后面的覆盖前面的。
     pub override_layers: Vec<String>,
+    /// 作者写的推荐内存（MiB），仅 CurseForge 有（`minecraft.recommendedRam`）；没写或写 0 为 `None`。
+    pub recommended_ram_mb: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -241,6 +243,9 @@ struct RawCurseForgeMinecraft {
     version: String,
     #[serde(default)]
     mod_loaders: Vec<RawCurseForgeLoader>,
+    /// 先收成任意 JSON 值：这一项没有官方规范，写成别的类型也不该让整个包导不进来。
+    #[serde(default)]
+    recommended_ram: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -354,6 +359,7 @@ impl PackManifest {
             loader,
             remote: RemoteFiles::Modrinth(files),
             override_layers: vec!["overrides/".to_owned(), "client-overrides/".to_owned()],
+            recommended_ram_mb: None,
         })
     }
 
@@ -420,7 +426,23 @@ impl PackManifest {
             loader,
             remote: RemoteFiles::CurseForge(files),
             override_layers: vec![format!("{}/", dir.as_str())],
+            recommended_ram_mb: curseforge_recommended_ram(raw.minecraft.recommended_ram.as_ref()),
         })
+    }
+}
+
+/// CurseForge 的 `minecraft.recommendedRam`：正整数（MiB）才算推荐值，0 是导出时没填。CurseForge 没有公开这一项的
+/// 规范，键名与单位依据 Prism Launcher 的读法与真实整合包；它只影响自动内存的估算，与装出来的实例无关，所以写坏了
+/// 只记日志、按没写处理，不像清单的其它部分那样整体拒收。
+fn curseforge_recommended_ram(value: Option<&serde_json::Value>) -> Option<u32> {
+    let value = value?;
+    match value.as_u64().map(u32::try_from) {
+        Some(Ok(0)) => None,
+        Some(Ok(mb)) => Some(mb),
+        _ => {
+            tracing::warn!(value = %value, "CurseForge 清单的 recommendedRam 不是 MiB 整数，忽略");
+            None
+        }
     }
 }
 
@@ -615,6 +637,37 @@ mod tests {
             ])
         );
         assert_eq!(pack.override_layers, vec!["overrides/"]);
+        assert_eq!(pack.recommended_ram_mb, None, "这份真实清单没写推荐内存");
+    }
+
+    #[test]
+    fn curseforge_recommended_ram_is_read_and_bad_values_are_ignored() {
+        let with_ram = |ram: serde_json::Value| {
+            let mut doc: serde_json::Value =
+                serde_json::from_slice(&curseforge(serde_json::json!([]), serde_json::json!([])))
+                    .unwrap();
+            doc["minecraft"]["recommendedRam"] = ram;
+            PackManifest::parse_curseforge(&serde_json::to_vec(&doc).unwrap())
+                .unwrap()
+                .recommended_ram_mb
+        };
+        assert_eq!(with_ram(serde_json::json!(10240)), Some(10240));
+        assert_eq!(with_ram(serde_json::json!(0)), None, "0 是导出时没填");
+        for bad in [
+            serde_json::json!(-1),
+            serde_json::json!(8192.5),
+            serde_json::json!("8G"),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+            serde_json::Value::Null,
+        ] {
+            assert_eq!(with_ram(bad.clone()), None, "{bad}");
+        }
+        let modrinth = PackManifest::parse_modrinth(&index(
+            serde_json::json!([]),
+            serde_json::json!({"minecraft": "1.20.1"}),
+        ))
+        .unwrap();
+        assert_eq!(modrinth.recommended_ram_mb, None);
     }
 
     #[test]

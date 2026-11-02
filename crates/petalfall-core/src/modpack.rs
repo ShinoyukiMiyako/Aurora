@@ -210,6 +210,10 @@ pub struct InstanceModpack {
     pub override_files: usize,
     /// 导入完成的时刻（Unix 秒）。
     pub installed_at: u64,
+    /// 作者写的推荐内存（MiB），自动内存按它估算。早于这一项的记录与没写推荐值的包都没有，所以缺省为 `None`；
+    /// 是 `None` 时不写出，旧版落樱读新记录不受影响。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_ram_mb: Option<u32>,
 }
 
 /// 校验实例名的写法（不查重），返回去掉首尾空白后的名字。规则与新建、改名是同一套。
@@ -752,6 +756,7 @@ impl Petalfall {
                 .duration_since(UNIX_EPOCH)
                 .map_err(CoreError::SystemClock)?
                 .as_secs(),
+            recommended_ram_mb: manifest.recommended_ram_mb,
         };
         let meta = version_dir.join(PETALFALL_META_DIR);
         let bytes = serde_json::to_vec_pretty(&info).map_err(CoreError::JsonSerialize)?;
@@ -1714,6 +1719,13 @@ mod tests {
         assert_eq!(info.loader, None);
         assert_eq!((info.remote_files, info.override_files), (0, 2));
         assert!(info.installed_at > 1_700_000_000);
+        assert_eq!(info.recommended_ram_mb, None, "Modrinth 包没有推荐内存");
+        assert!(
+            !std::fs::read_to_string(dir.join(PETALFALL_META_DIR).join(MODPACK_INFO_FILE))
+                .unwrap()
+                .contains("recommended_ram_mb"),
+            "没有推荐值时不写这一项，旧版落樱读到的记录与原来一样"
+        );
 
         // 启动链路看到的是一个独立实例：被发现、无加载器、全局不隔离时工作目录仍是实例目录。
         let scan = discover_versions(petalfall.game_dir()).await.unwrap();
@@ -4054,11 +4066,9 @@ mod tests {
         mount_vanilla(&server).await;
         let tmp = tempfile::tempdir().unwrap();
         let built = tmp.path().join("built.zip");
-        write_curseforge_pack(
-            &built,
-            &curseforge_vanilla_manifest(serde_json::json!([])),
-            &[("overrides/options.txt", b"fov:70")],
-        );
+        let mut manifest = curseforge_vanilla_manifest(serde_json::json!([]));
+        manifest["minecraft"]["recommendedRam"] = 8192.into();
+        write_curseforge_pack(&built, &manifest, &[("overrides/options.txt", b"fov:70")]);
         let pack_bytes = std::fs::read(&built).unwrap();
         Mock::given(method("GET"))
             .and(path("/v1/mods/700/files/7001"))
@@ -4119,6 +4129,14 @@ mod tests {
             .unwrap();
         assert_eq!(outcome.modpack.platform, Some(Platform::CurseForge));
         assert_eq!(outcome.modpack.version_id.as_deref(), Some("7001"));
+        assert_eq!(
+            read_instance_modpack(&outcome.version_dir)
+                .await
+                .unwrap()
+                .and_then(|info| info.recommended_ram_mb),
+            Some(8192),
+            "作者写的推荐内存随整合包记录落盘，自动内存按它估算"
+        );
         assert_eq!(
             std::fs::read(outcome.version_dir.join("options.txt")).unwrap(),
             b"fov:70"

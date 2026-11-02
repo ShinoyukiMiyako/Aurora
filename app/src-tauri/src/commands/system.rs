@@ -2,7 +2,7 @@
 
 use petalfall_base::fs::DataDirResolution;
 use petalfall_core::folders::{ensure_game_dir, probe_dir, validate_game_dir, FirstRunBaseline};
-use petalfall_core::{ConfigRecovery, MemoryAdvice, MemoryTier};
+use petalfall_core::{ConfigRecovery, MemoryAdvice, MemoryLimit, NeedFactor};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -10,15 +10,21 @@ use crate::commands::config::{parse_named_directory, NamedDirectoryDto};
 use crate::commands::CommandError;
 use crate::facade::Facade;
 
-/// 设置页内存卡要的事实：物理内存总量、此刻空闲、推荐值按哪一档算、推荐值。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// 内存卡要的事实：物理内存总量、此刻空闲，以及自动分配给多少、为什么是这个数。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemoryAdviceDto {
     pub total_mb: u32,
     pub available_mb: u32,
-    /// vanilla / modded / large_modpack。
-    pub tier: MemoryTier,
-    /// 自动分配此刻会给多少（MB），不超过物理内存一半。
+    /// 按哪个实例估算；没有选中实例时为 null，按原版。
+    pub version_id: Option<String>,
+    /// 实例需要多少（MB），已向上对齐到 512。
+    pub need_mb: u32,
+    /// 本机上限与它的来由（half_physical / java_32bit）。
+    pub limit: MemoryLimit,
+    /// 自动分配此刻会给多少（MB）：需求与上限取小。
     pub recommended_mb: u32,
+    /// 需求的组成项，按展示顺序。
+    pub factors: Vec<NeedFactor>,
 }
 
 impl From<MemoryAdvice> for MemoryAdviceDto {
@@ -26,14 +32,17 @@ impl From<MemoryAdvice> for MemoryAdviceDto {
         Self {
             total_mb: advice.total_mb,
             available_mb: advice.available_mb,
-            tier: advice.tier,
-            recommended_mb: advice.recommended_mb,
+            version_id: advice.version_id,
+            need_mb: advice.estimate.need_mb,
+            limit: advice.estimate.limit,
+            recommended_mb: advice.estimate.recommended_mb,
+            factors: advice.estimate.factors,
         }
     }
 }
 
-/// 内存建议。给出 `versionId` 按该实例定档；不给按主页当前选中的实例，没有选中按原版。
-/// 要扫版本目录，在快照上进行。
+/// 内存建议。给出 `versionId` 按该实例估算；不给按主页当前选中的实例，没有选中按原版。
+/// 要扫版本目录与 mods 目录，在快照上进行。
 #[tauri::command]
 pub async fn memory_advice(
     version_id: Option<String>,
@@ -586,7 +595,15 @@ mod tests {
 
         let advice: MemoryAdviceDto = petalfall.memory_advice(None).await.unwrap().into();
         let json = serde_json::to_value(advice).unwrap();
-        assert_eq!(json["tier"], "vanilla");
-        assert!(json["recommended_mb"].as_u64().unwrap() * 2 <= json["total_mb"].as_u64().unwrap());
+        assert_eq!(json["version_id"], serde_json::Value::Null);
+        assert_eq!(json["need_mb"], 2560);
+        assert_eq!(
+            json["factors"],
+            serde_json::json!([{"kind": "base", "loader": "vanilla", "mb": 2560}])
+        );
+        assert_eq!(json["limit"]["reason"], "half_physical");
+        let limit = json["limit"]["mb"].as_u64().unwrap();
+        assert!(limit * 2 <= json["total_mb"].as_u64().unwrap());
+        assert_eq!(json["recommended_mb"].as_u64().unwrap(), limit.min(2560));
     }
 }
