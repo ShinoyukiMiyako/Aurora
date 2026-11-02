@@ -583,4 +583,4 @@ versions/<实例名>/
 
 前端常量定义在 `app/src/lib/app-info.ts`，Rust 常量定义在 `petalfall-base` 的 `brand` 模块。Rust 用宏的形式提供，是为了能放进 `concat!`：User-Agent、元数据目录名、崩溃规则表都是编译期拼接的 `&'static str`。两边的取值由上面的品牌一致性测试保证相同；仓库地址另由 `petalfall-tauri` 资讯命令的测试 `repo_url_matches_frontend` 钉住（启动器资讯读这个仓库的 GitHub Releases）。
 
-crate 名、Rust 类型名、IPC 事件名前缀 `petalfall://`、自定义协议 `petalfall-tex` 和环境变量名 `PETALFALL_*` 直接写成字面量，不引用品牌常量。前四者只在同一份构建内部使用；环境变量名是对外接口，改名前叫 `AURORA_MSA_CLIENT_ID`、`AURORA_CURSEFORGE_API_KEY`，新名没设或为空时仍读旧名（`LEGACY_MSA_CLIENT_ID_ENV`、`LEGACY_API_KEY_ENV`）。
+crate 名、Rust 类型名、IPC 事件名前缀 `petalfall://`、自定义协议 `petalfall-tex` 和环境变量名 `PETALFALL_*` 直接写成字面量，不引用品牌常量。前四者只在同一份构建内部使用；环境变量名是对外接口，改名后机器上设着的旧名不再生效。

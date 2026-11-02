@@ -26,9 +26,6 @@ pub const MINECRAFT_GAME_ID: u32 = 432;
 /// 环境变量名：CurseForge API key。
 pub const API_KEY_ENV: &str = "PETALFALL_CURSEFORGE_API_KEY";
 
-/// 改名前的变量名。自行构建的机器上可能还设着它，运行期与构建期都在新名缺失或空白时读它。
-pub const LEGACY_API_KEY_ENV: &str = "AURORA_CURSEFORGE_API_KEY";
-
 /// CurseForge 网站根地址，工程没给网页链接时用它拼文件页。
 const CURSEFORGE_WEBSITE: &str = "https://www.curseforge.com";
 
@@ -64,17 +61,11 @@ impl CurseForgeClient {
 
     /// 取 key 构造：运行期环境变量 `PETALFALL_CURSEFORGE_API_KEY` 优先（开发与自行构建时用），
     /// 其次是构建时经同名环境变量内嵌进二进制的 key（发行版用户机器上没有这个变量，只能靠内嵌）。
-    /// 每处都先读新名、再读旧名 [`LEGACY_API_KEY_ENV`]；全部缺失或空白返回 [`Error::CurseForgeKeyMissing`]。
+    /// 两处都缺失或空白返回 [`Error::CurseForgeKeyMissing`]。
     pub fn from_env(http: reqwest::Client) -> Result<Self> {
         let key = resolve_api_key(
-            [
-                std::env::var(API_KEY_ENV).ok(),
-                std::env::var(LEGACY_API_KEY_ENV).ok(),
-            ],
-            [
-                option_env!("PETALFALL_CURSEFORGE_API_KEY"),
-                option_env!("AURORA_CURSEFORGE_API_KEY"),
-            ],
+            std::env::var(API_KEY_ENV).ok(),
+            option_env!("PETALFALL_CURSEFORGE_API_KEY"),
         )?;
         Ok(Self::new(http, key))
     }
@@ -344,14 +335,9 @@ fn key_from_env_value(value: Option<String>) -> Result<String> {
     }
 }
 
-/// 运行期的值优先，构建期内嵌的值兜底；每处是 `[新名, 旧名]`，旧名只在新名缺失或空白时才看。
-/// 运行期设的旧名也压过内嵌的新名：本机设的值才是自行构建的人要用的。全部缺失或空白即未配置。
-fn resolve_api_key(runtime: [Option<String>; 2], embedded: [Option<&str>; 2]) -> Result<String> {
-    runtime
-        .into_iter()
-        .chain(embedded.map(|value| value.map(str::to_owned)))
-        .find_map(|value| key_from_env_value(value).ok())
-        .ok_or(Error::CurseForgeKeyMissing)
+/// 运行期的值优先，构建期内嵌的值兜底；两者都缺失或空白即未配置。
+fn resolve_api_key(runtime: Option<String>, embedded: Option<&str>) -> Result<String> {
+    key_from_env_value(runtime).or_else(|_| key_from_env_value(embedded.map(str::to_owned)))
 }
 
 /// CurseForge 单次搜索请求的分类参数。
@@ -984,54 +970,22 @@ mod tests {
     #[test]
     fn runtime_key_wins_and_embedded_key_is_the_fallback() {
         assert_eq!(
-            resolve_api_key([Some("runtime".into()), None], [Some("embedded"), None]).unwrap(),
+            resolve_api_key(Some("runtime".into()), Some("embedded")).unwrap(),
             "runtime"
         );
         assert_eq!(
-            resolve_api_key([Some("  ".into()), None], [Some("embedded"), None]).unwrap(),
+            resolve_api_key(Some("  ".into()), Some("embedded")).unwrap(),
             "embedded"
         );
-        assert_eq!(
-            resolve_api_key([None, None], [Some("embedded"), None]).unwrap(),
-            "embedded"
-        );
+        assert_eq!(resolve_api_key(None, Some("embedded")).unwrap(), "embedded");
         assert!(matches!(
-            resolve_api_key([None, None], [Some(" "), None]),
+            resolve_api_key(None, Some(" ")),
             Err(Error::CurseForgeKeyMissing)
         ));
         assert!(matches!(
-            resolve_api_key([None, None], [None, None]),
+            resolve_api_key(None, None),
             Err(Error::CurseForgeKeyMissing)
         ));
-    }
-
-    /// 改名前的变量名照样认：新名缺失或空白时读旧名，运行期的旧名压过内嵌的新名，新名在时旧名不起作用。
-    #[test]
-    fn legacy_variable_name_is_read_when_the_new_one_is_missing() {
-        assert_eq!(
-            resolve_api_key(
-                [Some("new".into()), Some("old".into())],
-                [Some("embedded-new"), Some("embedded-old")]
-            )
-            .unwrap(),
-            "new"
-        );
-        assert_eq!(
-            resolve_api_key([None, Some("old".into())], [Some("embedded-new"), None]).unwrap(),
-            "old"
-        );
-        assert_eq!(
-            resolve_api_key([Some(" ".into()), Some("old".into())], [None, None]).unwrap(),
-            "old"
-        );
-        assert_eq!(
-            resolve_api_key([None, None], [Some("embedded-new"), Some("embedded-old")]).unwrap(),
-            "embedded-new"
-        );
-        assert_eq!(
-            resolve_api_key([None, Some("".into())], [Some(""), Some("embedded-old")]).unwrap(),
-            "embedded-old"
-        );
     }
 
     #[test]

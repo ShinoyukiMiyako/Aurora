@@ -84,8 +84,6 @@ pnpm tauri build
 | `PETALFALL_CURSEFORGE_API_KEY` | CurseForge API key，优先读运行期环境变量，其次读构建时嵌入的值，API 请求与 CDN 下载都用它。两处都没有时 CurseForge 源会被明确禁用；Modrinth 的搜索与安装不受影响，但 `.mrpack` 里有文件只有 forgecdn 地址时，导入会在准备阶段报 `curseforge_key_missing`（每个文件都另有别的地址时照常导入，forgecdn 那个地址失败后换备用地址）。CDN 拒绝这个 key 时下载任务直接失败（`curseforge_key_rejected`），不换源重试 |
 | `tauri.conf.json` 的 `plugins.updater` | 自更新需要在发布构建里配置公钥和更新地址。没有配置时，或在 debug 构建里，自更新显示为不可用 |
 
-两个环境变量改名前叫 `AURORA_MSA_CLIENT_ID`、`AURORA_CURSEFORGE_API_KEY`，新名没设或为空时仍读旧名，运行期与构建期都是。
-
 数据目录存放配置、加密凭据、任务日志、托管 Java、新实例的默认设置（`templates/default/`）与日志。可执行文件所在目录可写时使用该目录（便携模式），否则使用 `%LOCALAPPDATA%\Petalfall`。目录里已有读得进来的 `config.json` 时数据就在这里，即使这次写不进去也不换地方，启动后提示原因。debug 构建一律不走便携模式。存档备份不在数据目录里，放在游戏目录的 `.petalfall/backups/` 下。
 
 ## 目录结构
@@ -130,7 +128,7 @@ pnpm tauri build
 - 前端：`app/src/lib/app-info.ts` 中的 `APP_NAME`（落樱）、`APP_NAME_EN`（Petalfall）、`APP_SLUG`（petalfall）
 - Rust：`petalfall-base` 的 `brand` 模块，提供宏 `app_name!`、`app_name_en!`、`app_slug!` 和同名常量。宏的形式可以放进 `concat!` 做编译期拼接
 
-游戏目录里的元数据目录名由 `petalfall_instance::PETALFALL_META_DIR` 给出（`.petalfall`）。crate 名、Rust 类型名、IPC 事件名前缀 `petalfall://`、材质协议 `petalfall-tex` 与环境变量名 `PETALFALL_*` 直接写成字面量，不引用品牌常量。前四者只在同一份构建内部使用；环境变量名是对外接口，改名时要保留旧名回落。
+游戏目录里的元数据目录名由 `petalfall_instance::PETALFALL_META_DIR` 给出（`.petalfall`）。crate 名、Rust 类型名、IPC 事件名前缀 `petalfall://`、材质协议 `petalfall-tex` 与环境变量名 `PETALFALL_*` 直接写成字面量，不引用品牌常量。前四者只在同一份构建内部使用；环境变量名是对外接口，改名后机器上设着的旧名不再生效。
 
 ## 许可
 
