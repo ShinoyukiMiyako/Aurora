@@ -16,6 +16,7 @@
 //! - [`crash`]：崩溃基础检测规则表与结构化诊断。
 //! - [`precheck`]：启动前的轻量判断（所需 Java 主版本、路径与同步盘提醒、角色名长度、JVM 内存参数）。
 //! - [`quickplay`]：直达存档与服务器（Quick Play 与旧版 `--server` / `--port`）的支持判定。
+//! - [`redact`]：遮掉文字里的访问令牌，游戏输出、会话日志与崩溃诊断共用。
 //! - [`workspace`]：游戏工作目录（版本隔离）解析。
 //!
 //! 错误统一归口到 [`LaunchError`]，下游可 `#[from] petalfall_launch::LaunchError` 冒泡。
@@ -33,6 +34,7 @@ pub mod placeholder;
 pub mod precheck;
 pub mod process;
 pub mod quickplay;
+pub mod redact;
 pub mod workspace;
 
 pub use account::{AuthValues, AuthlibInjector, OFFLINE_ACCESS_TOKEN};
@@ -68,4 +70,5 @@ pub use quickplay::{
     FEATURE_MULTIPLAYER, FEATURE_SINGLEPLAYER, QuickPlayMode, QuickPlaySupport, QuickPlayTarget,
     legacy_server_args, quick_play_lost_char, quick_play_support,
 };
+pub use redact::{REDACTED, redact_access_tokens};
 pub use workspace::resolve_game_directory;

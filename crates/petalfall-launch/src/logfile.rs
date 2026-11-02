@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter};
 
 use crate::error::{LaunchError, Result};
+use crate::redact::redact_access_tokens;
 
 /// 实例元数据目录下存放会话日志的子目录名。
 pub const LOGS_DIR: &str = "logs";
@@ -498,6 +499,8 @@ impl LogTail {
 ///
 /// 一份大整合包的会话日志能到几十 MB，而诊断与日志页都只关心最后那段。被截断处的半截行与文件末尾
 /// 还没写完的半行都丢弃；截断点之前的行只数换行、不解析，用来给出准确的行号与「较早的 N 行已省略」。
+///
+/// 读出的每行都遮掉访问令牌：游戏输出写入前已经遮过，旧版本写下的日志却没有，日志页与诊断都从这里读。
 pub async fn read_log_tail(path: &Path, max_bytes: u64, max_lines: usize) -> Result<LogTail> {
     let header = read_header(path)
         .await?
@@ -588,7 +591,7 @@ pub async fn read_log_tail(path: &Path, max_bytes: u64, max_lines: usize) -> Res
     let drop = raw_lines.len().saturating_sub(max_lines);
     for (index, raw) in raw_lines.iter().enumerate() {
         let line_no = first_line + index as u64;
-        let entry =
+        let mut entry =
             decode_line(raw.trim_end_matches('\r'), header.started_at).ok_or_else(|| {
                 LaunchError::LogFormat {
                     path: path.to_owned(),
@@ -596,6 +599,7 @@ pub async fn read_log_tail(path: &Path, max_bytes: u64, max_lines: usize) -> Res
                 }
             })?;
         if index >= drop {
+            redact_access_tokens(&mut entry.text);
             entries.push(entry);
         }
     }
@@ -885,6 +889,36 @@ mod tests {
                     level: None,
                     text: "[main/INFO]: Setting user: Steve".into(),
                 },
+            ]
+        );
+    }
+
+    /// 旧版本写日志前不遮令牌（`SessionLog::write` 本身不遮，遮挡在游戏输出的读取任务里）：这样的日志读出来令牌也要遮掉，
+    /// 同一行的其余内容与别的行照旧。
+    #[tokio::test]
+    async fn tail_hides_tokens_left_in_logs_written_before_redaction() {
+        const TOKEN: &str =
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvbGQtbG9nIn0.b2xkLWJ1aWxkLWZha2Utc2lnbmF0dXJl";
+        const UUID: &str = "0123456789abcdef0123456789abcdef";
+        let tmp = tempfile::tempdir().unwrap();
+        let session = format!("[Client thread/INFO]: (Session ID is token:{TOKEN}:{UUID})");
+        let args = format!("--username Steve --uuid {UUID} --accessToken {TOKEN}");
+        let path = write_session(
+            &tmp.path().join("logs"),
+            0,
+            &["[Client thread/INFO]: Setting user: Steve", &session, &args],
+        )
+        .await;
+        assert!(std::fs::read_to_string(&path).unwrap().contains(TOKEN));
+
+        let tail = read_log_tail(&path, 1 << 20, 100).await.unwrap();
+        let got: Vec<&str> = tail.entries.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(
+            got,
+            vec![
+                "[Client thread/INFO]: Setting user: Steve".to_owned(),
+                format!("[Client thread/INFO]: (Session ID is token:<已隐藏>:{UUID})"),
+                format!("--username Steve --uuid {UUID} --accessToken <已隐藏>"),
             ]
         );
     }
