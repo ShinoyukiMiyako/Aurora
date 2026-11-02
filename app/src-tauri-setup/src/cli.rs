@@ -4,6 +4,9 @@
 //! 参数是「模式开关 /UPDATE /ARGS 逐个转义的启动器参数」，模式开关见同版本 src/config.rs 的 `nsis_args`：
 //! passive 是 `/P /R`，quiet 是 `/S /R`，basicUi 不带。转义按 Windows 标准规则来，std 拆 argv 就能还原，
 //! 所以 `/ARGS` 之后的记号原样就是启动器的参数。
+//!
+//! 这有个前提：启动器不配 `installer_args`。插件把它们接在启动器参数后面，格式上分不出来，配了就会被当成
+//! 启动器参数带回去，走原生回退时还会被转义成带引号的普通参数，NSIS 不再当开关认。
 
 use std::ffi::{OsStr, OsString};
 
