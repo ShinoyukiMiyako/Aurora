@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { CONFIRM_COPY, LAUNCH_COPY, LAUNCH_STAGES, PHASE_LABEL, SESSION_COPY, STOPPED_LABEL } from "../copy/flows";
@@ -14,7 +16,9 @@ import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, set
 import { ISLAND_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider } from "./shell";
-import { downloadStageNote, islandSecond, islandTone, stageNote, stageState, StatusIsland } from "./StatusIsland";
+import { downloadStageNote, islandLayoutKey, islandSecond, islandSecondText, islandTone, stageNote, stageState, StatusIsland } from "./StatusIsland";
+import styles from "./StatusIsland.module.css";
+import type { Tier } from "./tier";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -59,10 +63,18 @@ describe("状态岛收起态的第二段", () => {
     expect(islandSecond(s, "compact", T0, false)).toEqual({ label: null, value: "37%" });
   });
 
-  it("运行中：regular 写「已运行」，compact 只留计时", () => {
+  it("运行中：regular 写「已运行」加计时，计时进数字槽；compact 只留计时", () => {
     const s = session({ phase: "running", runningSince: T0, stageIndex: 7, progress: 1 });
-    expect(islandSecond(s, "regular", T0 + 65_000, false)).toEqual({ label: SESSION_COPY.running(65_000), value: null });
+    const regular = islandSecond(s, "regular", T0 + 65_000, false);
+    expect(regular).toEqual({ label: SESSION_COPY.runningLabel, value: "01:05" });
+    // 读屏读到的整句与详情头的「已运行 mm:ss」一字不差
+    expect(islandSecondText(regular)).toBe(SESSION_COPY.running(65_000));
     expect(islandSecond(s, "compact", T0 + 65_000, false)).toEqual({ label: null, value: "01:05" });
+  });
+
+  it("数字槽用等宽数字：计时的宽度只随位数变", () => {
+    const css = readFileSync(resolve(__dirname, "StatusIsland.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(css).toMatch(/\.value\s*\{[^}]*font-variant-numeric:\s*tabular-nums/);
   });
 
   it("正在结束盖过加载与运行的显示", () => {
@@ -88,6 +100,54 @@ describe("状态岛收起态的第二段", () => {
     expect(islandTone(session({ phase: "failed" }))).toBe("danger");
     expect(islandTone(session({ phase: "crashed" }))).toBe("danger");
     expect(islandTone(session({ phase: "stopped" }))).toBe("neutral");
+  });
+});
+
+describe("胶囊的布局依赖", () => {
+  const ALL_TIERS: Tier[] = ["compact", "regular", "wide"];
+  const runningSession = session({ phase: "running", runningSince: T0, stageIndex: 7, progress: 1 });
+
+  function keyAt(s: SessionState, tier: Tier, elapsedMs: number, stopping = false): string {
+    return islandLayoutKey(s, tier, "生存", islandSecond(s, tier, T0 + elapsedMs, stopping));
+  }
+
+  it.each(ALL_TIERS)("%s 档运行中：计时位数不变的任意两秒 layoutKey 相同", (tier) => {
+    const edges = [0, 1, 9, 10, 59, 60, 61, 599, 600, 3598, 3599];
+    const random = Array.from({ length: 40 }, () => Math.floor(Math.random() * 3600));
+    const keys = new Set([...edges, ...random].map((s) => keyAt(runningSession, tier, s * 1000)));
+    expect(keys.size).toBe(1);
+  });
+
+  it.each(ALL_TIERS)("%s 档运行中：计时多出一位才换 layoutKey", (tier) => {
+    const minutes = keyAt(runningSession, tier, 3_599_000);
+    const hours = keyAt(runningSession, tier, 3_600_000);
+    expect(hours).not.toBe(minutes);
+    expect(keyAt(runningSession, tier, 35_999_000)).toBe(hours);
+    expect(keyAt(runningSession, tier, 36_000_000)).not.toBe(hours);
+  });
+
+  it("阶段变化时 layoutKey 变：三个加载阶段、运行、已结束、失败、崩溃两两不同", () => {
+    const phases: Partial<SessionState>[] = [
+      { phase: "preparing", progress: 0.1 },
+      { phase: "downloading", progress: 0.1 },
+      { phase: "launching", progress: 0.1 },
+      { phase: "running", runningSince: T0 },
+      { phase: "stopped", stopReason: "exited", runningSince: T0 },
+      { phase: "failed" },
+      { phase: "crashed", runningSince: T0 },
+    ];
+    expect(new Set(phases.map((patch) => keyAt(session(patch), "regular", 0))).size).toBe(phases.length);
+  });
+
+  it("点了结束、换档位时 layoutKey 变：胶囊宽度确实要变", () => {
+    expect(keyAt(runningSession, "regular", 5000, true)).not.toBe(keyAt(runningSession, "regular", 5000));
+    expect(keyAt(runningSession, "wide", 5000)).not.toBe(keyAt(runningSession, "regular", 5000));
+  });
+
+  it("加载中：百分比走动不换 layoutKey，从一位数进到两位数才换", () => {
+    const at = (progress: number) => keyAt(session({ phase: "downloading", stageIndex: 3, progress }), "regular", 0);
+    expect(at(0.31)).toBe(at(0.87));
+    expect(at(0.09)).not.toBe(at(0.1));
   });
 });
 
@@ -316,6 +376,38 @@ describe("状态岛按片订阅", () => {
     expect(island.getAttribute("aria-label")).toBe(ISLAND_COPY.label("生存", "39%"));
     expect(commits).toBeGreaterThanOrEqual(20);
     expect(rects.mock.contexts.filter((el) => el === island)).toHaveLength(0);
+    rects.mockRestore();
+  });
+
+  it("regular 档运行中：每秒的重渲染不量布局，计时多出一位那一下才量", async () => {
+    vi.stubGlobal("innerWidth", 1280);
+    await running();
+    const since = launcher.state.session?.runningSince;
+    if (since === undefined || since === null) throw new Error("运行会话缺少运行起点");
+    const island = islandButton();
+    const label = (elapsedMs: number) => ISLAND_COPY.label("生存", SESSION_COPY.running(elapsedMs));
+    const tick = () =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+    const rects = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+    const measures = () => rects.mock.contexts.filter((el) => el === island).length;
+
+    commits = 0;
+    for (let i = 0; i < 5; i++) await tick();
+    expect(commits).toBe(5);
+    expect(island.getAttribute("aria-label")).toBe(label(5000));
+    expect([...island.querySelectorAll("span")].find((el) => el.textContent === "00:05")?.className).toBe(styles.value);
+    expect(measures()).toBe(0);
+
+    vi.setSystemTime(since + 3_598_000);
+    await tick();
+    expect(island.getAttribute("aria-label")).toBe(label(3_599_000));
+    expect(measures()).toBe(0);
+
+    await tick();
+    expect(island.getAttribute("aria-label")).toBe(label(3_600_000));
+    expect(measures()).toBeGreaterThan(0);
     rects.mockRestore();
   });
 });

@@ -62,8 +62,7 @@ export function islandSecond(session: SessionState, tier: Tier, now: number, sto
   switch (phase) {
     case "running": {
       if (session.runningSince === null) throw new Error("running 会话缺少运行起点");
-      const elapsed = now - session.runningSince;
-      return compact ? { label: null, value: formatElapsed(elapsed) } : { label: SESSION_COPY.running(elapsed), value: null };
+      return { label: compact ? null : SESSION_COPY.runningLabel, value: formatElapsed(now - session.runningSince) };
     }
     case "stopped": {
       if (session.stopReason === null) throw new Error("stopped 会话缺少结束原因");
@@ -79,6 +78,15 @@ export function islandSecond(session: SessionState, tier: Tier, now: number, sto
 
 export function islandSecondText(second: IslandSecond): string {
   return [second.label, second.value].filter((part): part is string => part !== null).join(" ");
+}
+
+/**
+ * 胶囊的宽度只取决于这几样：档位、名字、阶段文字、数字槽里的字数（等宽数字，字数相同就同宽）、尾部有没有圆点。
+ * 交给布局动画做 layoutDependency：下载进度、百分比、运行计时这类只改数字的重渲染不再逐次量一遍布局，
+ * 否则运行中每秒都要量一次、再跑一段弹簧。
+ */
+export function islandLayoutKey(session: SessionState, tier: Tier, name: string, second: IslandSecond): string {
+  return JSON.stringify([tier, name, second.label, second.value === null ? null : second.value.length, islandTone(session), session.phase === "crashed"]);
 }
 
 /**
@@ -135,9 +143,7 @@ function Island({ session }: { session: SessionState }) {
   const tone = islandTone(session);
   const second = islandSecond(session, tier, now, stopping);
   const loading = isLoadingPhase(session.phase);
-  // 胶囊的宽度只取决于这几样：档位、名字、阶段文字、数字槽里的字数（等宽数字，字数相同就同宽）、尾部有没有圆点。
-  // 交给布局动画做 layoutDependency：下载进度、百分比这类只改数字的重渲染不再逐次量一遍布局
-  const layoutKey = JSON.stringify([tier, name, second.label, second.value === null ? null : second.value.length, tone, session.phase === "crashed"]);
+  const layoutKey = islandLayoutKey(session, tier, name, second);
 
   const endSession = async () => {
     setStopping(true);
