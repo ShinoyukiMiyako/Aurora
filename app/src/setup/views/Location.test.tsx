@@ -464,6 +464,30 @@ describe("浏览", () => {
     await pass(0);
     expect(onDirChange).not.toHaveBeenCalled();
   });
+
+  it("选回的是游戏目录时不补层，停在原路径上按游戏目录拦下", async () => {
+    for (const picked of ["D:\\Games\\.minecraft", "E:\\MC\\packs\\mine"]) {
+      const checkDir = vi.fn(async (path: string) => (path === picked ? issueCheck("minecraft") : okCheck()));
+      const { onDirChange } = mount({ pickFolder: vi.fn(async () => picked), checkDir });
+      act(() => button(text.browse).click());
+      await pass(0);
+      expect(checkDir).toHaveBeenCalledWith(picked);
+      expect(vi.mocked(onDirChange).mock.calls).toEqual([[picked]]);
+      view?.unmount();
+      view = undefined;
+    }
+  });
+
+  it("选回的文件夹本身有别的问题时照常补层，交给补层后的路径再判", async () => {
+    for (const issue of ISSUES.filter((each) => each !== "minecraft")) {
+      const { onDirChange } = mount({ pickFolder: vi.fn(async () => "D:\\"), checkDir: vi.fn(async () => issueCheck(issue)) });
+      act(() => button(text.browse).click());
+      await pass(0);
+      expect(vi.mocked(onDirChange).mock.calls, issue).toEqual([[`D:\\${APP_NAME_EN}`]]);
+      view?.unmount();
+      view = undefined;
+    }
+  });
 });
 
 describe("其余控件", () => {

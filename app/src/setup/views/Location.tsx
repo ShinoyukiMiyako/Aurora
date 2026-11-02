@@ -108,7 +108,11 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
   const browse = () => {
     attempt(async () => {
       const picked = await pickFolder();
-      if (picked !== null) onDirChange(withAppFolder(picked));
+      if (picked === null) return;
+      // 补层前先按选中的这一层认游戏目录：补出来的子目录还不存在，只看它的话，手敲会被拦下的 .minecraft，
+      // 浏览选它反而装得进去。认出来就停在原路径上，提示和禁用都跟手敲一致
+      const own = await checkDir(picked);
+      onDirChange(own.issue === "minecraft" ? picked : withAppFolder(picked));
     });
   };
 
