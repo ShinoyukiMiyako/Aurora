@@ -31,7 +31,7 @@ export function buildInfo(): BuildInfo {
 /** 第三方许可清单在产物根目录下的文件名（构建时由 vite.config.ts 写出）。 */
 export { THIRD_PARTY_LICENSES_FILE };
 
-/** 协议全文在产物根目录下的文件名（只有引导程序的构建写出它）。 */
+/** 协议全文在产物根目录下的文件名（启动器与引导程序的构建都由 vite.config.ts 写出它）。 */
 export { LICENSE_TEXT_FILE };
 
 /** 第三方许可清单：体积大、只有关于页用到，用到时才去读。 */
