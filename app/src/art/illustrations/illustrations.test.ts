@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { coverRect } from "./canvas";
-import { hslToRgb } from "./color";
+import { hexToRgb, hslToRgb } from "./color";
 import { coverPetals } from "./CoverPattern";
 import { EMPTY_CATEGORIES, EMPTY_SCENES, emptyArtGeometry, sceneGlyphPath, type EmptyScene } from "./empty-art";
 import { glyphPath, PETAL_GLYPHS, PETAL_TONES, pickPetalTone, transformGlyph, type PetalGlyphName } from "./petal-glyphs";
@@ -59,6 +59,21 @@ describe("hslToRgb", () => {
   it("分量越界抛错", () => {
     expect(() => hslToRgb(0, 101, 50)).toThrow("越界");
     expect(() => hslToRgb(0, 50, -1)).toThrow("越界");
+  });
+});
+
+describe("hexToRgb", () => {
+  it("#RRGGBB 按十六进制拆成三个分量，大小写都认", () => {
+    expect(hexToRgb("#CF3080")).toEqual([207, 48, 128]);
+    expect(hexToRgb("#cf3080")).toEqual([207, 48, 128]);
+    expect(hexToRgb("#000000")).toEqual([0, 0, 0]);
+    expect(hexToRgb("#FFFFFF")).toEqual([255, 255, 255]);
+    expect(hexToRgb("#4A2539")).toEqual([74, 37, 57]);
+  });
+
+  // 不校验时这些值不会报错：短写被当成 0x000FFF，非十六进制解析成 NaN 后按位运算变成 0
+  it.each(["#FFF", "FFAABB", "#GG0000", "#CF30801", ""])("「%s」不是 #RRGGBB，抛错并带上原值", (hex) => {
+    expect(() => hexToRgb(hex)).toThrow(`调色板颜色应为 #RRGGBB，实为 ${hex}`);
   });
 });
 
