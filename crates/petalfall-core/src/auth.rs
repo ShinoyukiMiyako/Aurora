@@ -35,16 +35,16 @@ use crate::error::Result;
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Petalfall;
 
-/// 环境变量名：微软登录 client_id 的覆盖来源。
+/// 环境变量名：微软登录 client_id 的来源，构建时内嵌与运行期覆盖用同一个名字。
 pub const MSA_CLIENT_ID_ENV: &str = "PETALFALL_MSA_CLIENT_ID";
 
-/// 内置默认微软登录 client_id：启动器自有的 Azure AD 公共客户端应用（受支持账户类型为个人 Microsoft 账户）。
+/// 构建时经 [`MSA_CLIENT_ID_ENV`] 内嵌的微软登录 client_id。
 ///
-/// 两个前提：1) 该应用须在 Azure「身份验证」里开启「允许公共客户端流」，设备码流才成立；
-/// 2) 走完设备码/XBL/XSTS 后，若最终 `login_with_xbox` 换 Minecraft 令牌那步返 403，说明该应用尚未通过
-/// Mojang 的应用审批（审批通过后此步即放行）。
-/// 用户在 config.json 填 msa_client_id 或设环境变量 [`MSA_CLIENT_ID_ENV`] 均可覆盖此默认。
-pub const DEFAULT_MSA_CLIENT_ID: &str = "bf8c139d-45e9-48c0-b469-175e8234e516";
+/// 公开仓库不放真值：Mojang 的审批绑在 client_id 上，写进源码等于让每个 fork 默认冒用落樱的应用。
+/// 发行构建由 CI 注入，fork 与自行构建要用自己注册、自己过审的应用。这个应用要满足两点：
+/// 1) Azure「身份验证」里开启「允许公共客户端流」，设备码流才成立；
+/// 2) 通过 Mojang 的应用审批，否则 `login_with_xbox` 换 Minecraft 令牌那步返 403（[`AuthError::AppNotApproved`]）。
+const EMBEDDED_MSA_CLIENT_ID: Option<&str> = option_env!("PETALFALL_MSA_CLIENT_ID");
 
 /// 离线账户库文件名，与 `config.json` 同挂在数据目录下。
 pub const OFFLINE_ACCOUNTS_FILE: &str = "offline_accounts.json";
@@ -266,34 +266,52 @@ fn is_rejected_token(err: &AuthError) -> bool {
     matches!(err, AuthError::Yggdrasil { error, .. } if error == petalfall_auth::yggdrasil::FORBIDDEN_OPERATION)
 }
 
+/// 按先后取第一个非空白的 client_id，去掉首尾空白。
+fn first_client_id<'a>(candidates: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
+    candidates
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+/// 配置之外的 client_id：运行期环境变量 [`MSA_CLIENT_ID_ENV`] 优先，其次构建时内嵌的值。门面构造时取一次存下，
+/// 测试门面不取，测试结果就不随跑测试的机器设没设这个变量、编译时有没有内嵌而变。
+pub(crate) fn fallback_msa_client_id() -> Option<String> {
+    let runtime = std::env::var(MSA_CLIENT_ID_ENV).ok();
+    first_client_id([runtime.as_deref(), EMBEDDED_MSA_CLIENT_ID])
+}
+
 impl Petalfall {
-    /// 解析微软登录 client_id：优先配置，其次环境变量，最后回落到内置默认（[`DEFAULT_MSA_CLIENT_ID`]），
-    /// 保证正版登录开箱可用。
-    pub(crate) fn msa_client_id(&self) -> String {
-        self.config()
-            .msa_client_id
-            .clone()
-            .or_else(|| {
-                std::env::var(MSA_CLIENT_ID_ENV)
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            })
-            .unwrap_or_else(|| DEFAULT_MSA_CLIENT_ID.to_owned())
+    /// 解析微软登录 client_id：配置优先，其次门面构造时取到的环境变量或内嵌值（[`fallback_msa_client_id`]）。
+    /// 都没有时报 [`AuthError::MsaClientIdMissing`]。
+    pub(crate) fn msa_client_id(&self) -> Result<String> {
+        first_client_id([
+            self.config().msa_client_id.as_deref(),
+            self.msa_fallback_client_id(),
+        ])
+        .ok_or_else(|| AuthError::MsaClientIdMissing.into())
+    }
+
+    /// 有没有可用的微软登录 client_id。没有时前端把微软登录的入口显示为不可用。
+    pub fn microsoft_login_available(&self) -> bool {
+        self.msa_client_id().is_ok()
     }
 
     /// 装配不挂取消令牌的微软客户端。续期用它：令牌链一开跑就要走完，见 [`Petalfall::renew_detached`]。
-    fn msa_client(&self) -> MicrosoftAuth {
-        MicrosoftAuth::new(self.http(), self.msa_client_id())
-            .with_endpoints(self.msa_endpoints().clone())
+    fn msa_client(&self) -> Result<MicrosoftAuth> {
+        Ok(MicrosoftAuth::new(self.http(), self.msa_client_id()?)
+            .with_endpoints(self.msa_endpoints().clone()))
     }
 
     /// 装配登录用的微软客户端；门面快照挂了取消令牌时客户端也挂上。
-    fn microsoft_auth(&self) -> MicrosoftAuth {
-        let auth = self.msa_client();
-        match self.cancel_token() {
+    fn microsoft_auth(&self) -> Result<MicrosoftAuth> {
+        let auth = self.msa_client()?;
+        Ok(match self.cancel_token() {
             Some(token) => auth.with_cancel(token.clone()),
             None => auth,
-        }
+        })
     }
 
     fn yggdrasil(&self, api_root: &str) -> YggdrasilClient {
@@ -422,7 +440,7 @@ impl Petalfall {
         on_code: impl FnOnce(&DeviceCodeResponse),
     ) -> Result<Account> {
         Self::ensure_credential_store()?;
-        let account = perform_microsoft_login(&self.microsoft_auth(), on_code).await?;
+        let account = perform_microsoft_login(&self.microsoft_auth()?, on_code).await?;
         self.blocking(move |petalfall| petalfall.store_login(account))
             .await
     }
@@ -745,7 +763,7 @@ impl Petalfall {
     }
 
     async fn refresh_microsoft(&self, account: &Account, refresh_token: &str) -> Result<Account> {
-        let auth = self.msa_client();
+        let auth = self.msa_client()?;
         let msa = match auth.refresh(refresh_token).await {
             Ok(msa) => msa,
             Err(AuthError::ReloginRequired) => return self.expire(account).await,
@@ -1168,7 +1186,7 @@ mod tests {
 
         let mut shown = None;
         let before = unix_millis();
-        let account = perform_microsoft_login(&petalfall.microsoft_auth(), |dc| {
+        let account = perform_microsoft_login(&petalfall.microsoft_auth().unwrap(), |dc| {
             shown = Some(dc.user_code.clone());
         })
         .await
@@ -1305,20 +1323,47 @@ mod tests {
     }
 
     #[test]
-    fn client_id_prefers_config_then_falls_back_to_builtin_default() {
+    fn client_id_comes_from_config_then_the_fallback() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(petalfall_at(tmp.path()).msa_client_id(), "test-client-id");
-
-        let config = crate::config::PetalfallConfig {
+        let unset = crate::config::PetalfallConfig {
             msa_client_id: None,
             ..crate::config::PetalfallConfig::default()
         };
-        let petalfall =
-            Petalfall::for_test(config, tmp.path().to_path_buf(), tmp.path().to_path_buf());
-        // 未配置且无环境变量时回落到内置 client_id，保证正版登录开箱可用；删掉回落此断言即挂。
-        if std::env::var(MSA_CLIENT_ID_ENV).is_err() {
-            assert_eq!(petalfall.msa_client_id(), DEFAULT_MSA_CLIENT_ID);
-        }
+        let bare = Petalfall::for_test(unset, tmp.path().to_path_buf(), tmp.path().to_path_buf());
+        assert!(
+            matches!(
+                bare.msa_client_id(),
+                Err(CoreError::Auth(AuthError::MsaClientIdMissing))
+            ),
+            "配置与兜底都没有时必须报缺失"
+        );
+        assert!(!bare.microsoft_login_available());
+
+        let fallback_only = bare.with_msa_fallback_client_id("fallback-id");
+        assert_eq!(fallback_only.msa_client_id().unwrap(), "fallback-id");
+        assert!(fallback_only.microsoft_login_available());
+
+        let both = petalfall_at(tmp.path()).with_msa_fallback_client_id("fallback-id");
+        assert_eq!(both.msa_client_id().unwrap(), "test-client-id");
+
+        // 兜底里环境变量排在内嵌值前面；空白的一层视同没给，取到的值去掉首尾空白再用
+        assert_eq!(
+            first_client_id([Some("runtime-id"), Some("build-id")]).as_deref(),
+            Some("runtime-id")
+        );
+        assert_eq!(
+            first_client_id([
+                Some("  "),
+                Some(""),
+                Some(
+                    " build-id
+"
+                )
+            ])
+            .as_deref(),
+            Some("build-id")
+        );
+        assert_eq!(first_client_id([None, Some(" ")]), None);
     }
 
     #[test]
@@ -1344,6 +1389,34 @@ mod tests {
     #[cfg(windows)]
     mod credential {
         use super::*;
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn microsoft_login_without_client_id_fails_before_any_request() {
+            let server = MockServer::start().await;
+            let tmp = tempfile::tempdir().unwrap();
+            let config = crate::config::PetalfallConfig {
+                msa_client_id: None,
+                ..crate::config::PetalfallConfig::default()
+            };
+            let petalfall =
+                Petalfall::for_test(config, tmp.path().to_path_buf(), tmp.path().to_path_buf())
+                    .with_msa_endpoints(msa_endpoints(&server));
+
+            let mut shown = false;
+            let err = petalfall
+                .microsoft_login(|_| shown = true)
+                .await
+                .expect_err("没有 client_id 时登录必须失败");
+
+            assert!(
+                matches!(err, CoreError::Auth(AuthError::MsaClientIdMissing)),
+                "得到 {err:?}"
+            );
+            assert!(!shown, "不该拿到设备码");
+            let requests = server.received_requests().await.unwrap();
+            assert!(requests.is_empty(), "不该发出请求：{requests:?}");
+            assert!(petalfall.accounts().unwrap().is_empty());
+        }
 
         /// 外置服务器：根地址给元数据，认证与刷新按参数返回。
         async fn mount_yggdrasil(server: &MockServer, authenticate: serde_json::Value) {

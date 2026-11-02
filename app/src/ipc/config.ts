@@ -60,6 +60,8 @@ export interface ConfigDto {
   memory: MemorySettings;
   isolation_policy: IsolationPolicy;
   has_client_id: boolean;
+  /** 配置、环境变量、构建时内嵌三处至少有一个微软登录 client_id；fork 与自行构建没有内嵌时为 false。 */
+  microsoft_login_available: boolean;
   auto_download_java: boolean;
   /** "auto" 或 java 可执行文件绝对路径。 */
   default_java: string;

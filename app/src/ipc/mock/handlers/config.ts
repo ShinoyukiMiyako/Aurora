@@ -59,6 +59,7 @@ function seedConfig(): ConfigDto {
     memory: { max_mb: 4096, min_mb: null, auto: true },
     isolation_policy: "mod_loaders_and_non_release",
     has_client_id: true,
+    microsoft_login_available: true,
     auto_download_java: true,
     default_java: DEFAULT_JAVA_AUTO,
     after_launch: "minimize",
@@ -312,6 +313,7 @@ function updateConfig(args: MockArgs): void {
   if (args.clientId !== undefined) {
     if (requireString(args, "clientId", "update_config").trim() === "") throw new IpcError("invalid_argument", "client_id 不能为空");
     next.has_client_id = true;
+    next.microsoft_login_available = true;
   }
   if (args.selectedVersion !== undefined) next.selected_version = requireString(args, "selectedVersion", "update_config");
   if (args.afterLaunch !== undefined) next.after_launch = oneOf(args.afterLaunch, AFTER_LAUNCH, "的启动后行为");

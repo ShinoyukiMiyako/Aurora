@@ -54,8 +54,10 @@ pub struct ConfigDto {
     pub memory: MemorySettings,
     /// 全局版本隔离档位。
     pub isolation_policy: IsolationPolicy,
-    /// 是否填了自定义的微软登录 client_id（不回传 id 本身）。没填时走内置默认，正版登录照常可用。
+    /// 是否填了自定义的微软登录 client_id（不回传 id 本身）。没填时用运行期环境变量或构建时内嵌的值。
     pub has_client_id: bool,
+    /// 微软登录能不能用：配置、环境变量、构建时内嵌三处至少有一个 client_id。
+    pub microsoft_login_available: bool,
     /// 找不到匹配 Java 时是否自动下载。
     pub auto_download_java: bool,
     /// 全局默认 Java：`"auto"` 或 java 可执行文件绝对路径。
@@ -96,6 +98,7 @@ pub(crate) fn config_dto(petalfall: &Petalfall) -> ConfigDto {
         memory: config.memory,
         isolation_policy: config.isolation_policy,
         has_client_id: config.msa_client_id.is_some(),
+        microsoft_login_available: petalfall.microsoft_login_available(),
         auto_download_java: config.auto_download_java,
         default_java: match &config.default_java {
             Some(path) => path.display().to_string(),
@@ -959,6 +962,34 @@ mod tests {
             dto["world_backup"],
             serde_json::json!({ "auto": true, "keep_per_world": 5, "max_total_gb": 20 })
         );
+    }
+
+    /// 填进 client_id 后微软登录即可用；填之前可不可用，取决于这台机器设没设环境变量、编译时有没有内嵌。
+    #[tokio::test]
+    async fn microsoft_login_turns_available_once_a_client_id_is_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let before = read_config(&facade).await;
+        assert!(!before.has_client_id);
+        let has_fallback = option_env!("PETALFALL_MSA_CLIENT_ID")
+            .is_some_and(|id| !id.trim().is_empty())
+            || std::env::var(petalfall_core::MSA_CLIENT_ID_ENV)
+                .is_ok_and(|id| !id.trim().is_empty());
+        assert_eq!(before.microsoft_login_available, has_fallback);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                client_id: Some(" my-azure-app ".into()),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let after = read_config(&facade).await;
+        assert!(after.has_client_id);
+        assert!(after.microsoft_login_available);
     }
 
     /// 出参能原样作入参回传：拿 get_config 的值写回去，配置不变。

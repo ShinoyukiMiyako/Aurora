@@ -349,6 +349,7 @@ export interface Settings {
   memory: { maxMb: number; minMb: number | null; auto: boolean };
   isolationPolicy: IsolationPolicy;
   hasClientId: boolean;
+  microsoftLoginAvailable: boolean;
   autoDownloadJava: boolean;
   /** "auto" 或 java 可执行文件绝对路径。 */
   defaultJava: string;
@@ -388,6 +389,7 @@ export function settingsFromDto(dto: ConfigDto): Settings {
     memory: { maxMb: dto.memory.max_mb, minMb: dto.memory.min_mb, auto: dto.memory.auto },
     isolationPolicy: oneOf(dto.isolation_policy, ISOLATION, "版本隔离策略"),
     hasClientId: dto.has_client_id,
+    microsoftLoginAvailable: dto.microsoft_login_available,
     autoDownloadJava: dto.auto_download_java,
     defaultJava: dto.default_java,
     afterLaunch: oneOf(dto.after_launch, AFTER_LAUNCH, "游戏启动后的窗口行为"),

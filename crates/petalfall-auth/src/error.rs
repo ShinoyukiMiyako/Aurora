@@ -92,6 +92,13 @@ pub enum AuthError {
     )]
     AppNotApproved,
 
+    /// 没有可用的微软登录 client_id：构建时没有内嵌，配置和环境变量里也没有。fork 与自行构建默认就是这样，
+    /// 公开仓库不放落樱自己的 client_id。
+    #[error(
+        "这个版本没有内置微软登录 client_id：在设置的「常规 · 高级」里填入，或者设环境变量 PETALFALL_MSA_CLIENT_ID"
+    )]
+    MsaClientIdMissing,
+
     /// 离线用户名不合法（空、含引号、超长）。
     #[error("离线用户名不合法: {0}")]
     InvalidUsername(String),
@@ -212,6 +219,7 @@ impl RetryableError for AuthError {
             | AuthError::ReloginRequired
             // 同一个 client_id 再请求一次只会得到同样的拒绝。
             | AuthError::AppNotApproved
+            | AuthError::MsaClientIdMissing
             | AuthError::InvalidUsername(_)
             | AuthError::Yggdrasil { .. }
             | AuthError::AccountNotFound(_)
@@ -377,6 +385,16 @@ mod tests {
         let text = err.to_string();
         assert!(text.starts_with(petalfall_base::brand::APP_NAME), "{text}");
         assert!(text.contains("Invalid app registration"), "{text}");
+    }
+
+    #[test]
+    fn missing_client_id_is_terminal_and_says_where_to_fill_it() {
+        let err = AuthError::MsaClientIdMissing;
+        assert!(!err.is_retryable());
+        let text = err.to_string();
+        // 桌面端与 CLI 都用这句原文：两种填法都要写出来
+        assert!(text.contains("设置"), "{text}");
+        assert!(text.contains("PETALFALL_MSA_CLIENT_ID"), "{text}");
     }
 
     #[test]

@@ -27,12 +27,24 @@ jobs:
   build:
     runs-on: [self-hosted, Linux, X64, petalfall]
     timeout-minutes: 30
+    # 微软登录 client_id 只在构建时内嵌，仓库里不放。它不是机密，每个安装包里都有，所以放仓库变量，
+    # 这台机器上仍然不出现任何 secret。放在 job 级：每一步编译看到的都是同一个值，缓存不会来回失效。
+    env:
+      PETALFALL_MSA_CLIENT_ID: ${{ vars.PETALFALL_MSA_CLIENT_ID }}
     outputs:
       version: ${{ steps.version.outputs.version }}
       installer-name: ${{ steps.bundle.outputs.installer-name }}
       bootstrap-name: ${{ steps.bootstrap.outputs.bootstrap-name }}
       cli-version: ${{ steps.version.outputs.cli-version }}
     steps:
+      # 只认 GUID：空白或带换行的值会让启动器把它当成没有，下面在 exe 里的查找也会因此失效
+      - name: 检查微软登录 client_id
+        run: |
+          if ! [[ "$PETALFALL_MSA_CLIENT_ID" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::仓库变量 PETALFALL_MSA_CLIENT_ID 没有配置或不是 GUID，打出来的包登不了微软账户"
+            exit 1
+          fi
+
       # 同一块盘上还有别的项目的 Runner，余量不够就在这里失败，不能把盘写满。
       # 依赖升级后旧产物不会自己清掉；冷构建只要几分钟，缓存超过 4G 就直接重来。
       - name: 检查磁盘余量
@@ -103,6 +115,11 @@ jobs:
           bundle_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle"
           rm -rf "$bundle_dir"
           pnpm tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
+          # 构建缓存里旧的编译产物要是没随这个变量重编，包里就没有 client_id；直接在 exe 里找一遍
+          if ! grep -qF -e "$PETALFALL_MSA_CLIENT_ID" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
+            echo "::error::Petalfall.exe 里没有内嵌微软登录 client_id"
+            exit 1
+          fi
           installer="$bundle_dir/nsis/Petalfall_${VERSION}_x64-setup.exe"
           test -f "$installer"
           echo "installer=$installer" >> "$GITHUB_OUTPUT"

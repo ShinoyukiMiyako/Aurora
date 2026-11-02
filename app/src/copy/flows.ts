@@ -306,6 +306,13 @@ export const APP_NOT_APPROVED = {
   body: `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
   fixLabel: "打开设置",
 } as const;
+/** 构建时没有内嵌微软登录 client_id（fork 与自行构建）：登录失败卡与各登录入口的不可用原因共用。 */
+export const MSA_CLIENT_ID_MISSING = {
+  title: "这个版本没有内置微软登录",
+  body: `这个版本的${APP_NAME}没有内置微软应用的 client_id，自行构建和 fork 的版本都是这样。在「设置 · 常规 · 高级」里填入你自己注册并获准的 client_id 后就能登录。`,
+  reason: "这个版本没有内置微软登录，在设置里填入 client_id 后可用",
+  fixLabel: "打开设置",
+} as const;
 
 /** 固定的 Java 是实例设置里指定的，还是设置里固定的默认 Java（参数 pinned_by）。 */
 function pinnedGlobally(params: FailureParams, code: FailureCode): boolean {
@@ -1302,6 +1309,9 @@ export function microsoftLoginFailure(code: string, message: string, detail: unk
     // 不给「重试」：同一个 client_id 重试只会得到同样的结果
     case "AppNotApproved":
       return plain(APP_NOT_APPROVED.title, APP_NOT_APPROVED.body, { kind: "open_client_id_settings", label: APP_NOT_APPROVED.fixLabel }, { kind: "copy_error", label: "复制错误信息" });
+    // 同上不给「重试」：填上 client_id 之前结果不会变
+    case "MsaClientIdMissing":
+      return plain(MSA_CLIENT_ID_MISSING.title, MSA_CLIENT_ID_MISSING.body, { kind: "open_client_id_settings", label: MSA_CLIENT_ID_MISSING.fixLabel });
     default:
       return plain("微软登录失败", `${message}（${code}）`, LOGIN_RETRY, { kind: "copy_error", label: "复制错误信息" });
   }

@@ -14,7 +14,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import { MANUAL_LOGIN } from "../../state/login";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { accountDto, bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { accountDto, bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { AUTHLIB_DIALOG_COPY, DEVICE_DIALOG_COPY, OFFLINE_DIALOG_COPY } from "../../copy/login";
 import { NO_ART, setArtStatus } from "../../mc/art";
 import { clearArtCache } from "../../mc/useArt";
@@ -129,6 +129,28 @@ describe("还没有账户", () => {
     await flush();
     expect(launcher.state.login).toEqual({ kind: "offline", intent: { kind: "launch", instanceId: "生存", quickPlay: null } });
     expect(title()).toBe(OFFLINE_DIALOG_COPY.title);
+  });
+
+  it("构建里没有微软登录 client_id：添加微软账户置灰并挂上原因，点了不发起登录", async () => {
+    bootOverrides(ipc, { accounts: [], instances: [instanceDto("生存")], config: configDto({ has_client_id: false, microsoft_login_available: false }) });
+    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+    });
+    await flush();
+    expect(title()).toBe(NO_ACCOUNT_COPY.title);
+    const microsoft = button(NO_ACCOUNT_COPY.addMicrosoft);
+    expect(microsoft.getAttribute("aria-disabled")).toBe("true");
+    // 主按钮与初始焦点让给能用的离线账户
+    const offline = button(NO_ACCOUNT_COPY.addOffline);
+    expect([offline.dataset.variant, microsoft.dataset.variant]).toEqual(["primary", "secondary"]);
+    expect([offline.hasAttribute("data-autofocus"), microsoft.hasAttribute("data-autofocus")]).toEqual([true, false]);
+    act(() => microsoft.click());
+    await flush();
+    expect(callsOf(ipc, "microsoft_login")).toEqual([]);
+    expect(title()).toBe(NO_ACCOUNT_COPY.title);
+    expect(button(NO_ACCOUNT_COPY.addOffline).getAttribute("aria-disabled")).toBeNull();
   });
 });
 
@@ -339,6 +361,24 @@ describe("微软设备码弹窗", () => {
     expect(nav.route).toEqual({ page: "settings", section: "general" });
     // 登录已经失败，关弹窗不必再请后端取消
     expect(callsOf(ipc, "cancel_microsoft_login")).toEqual([]);
+  });
+
+  it("构建里没有 client_id：说明是这个版本没有内置微软登录，只给「打开设置」，不给重试", async () => {
+    ipc.overrides.set("microsoft_login", () => {
+      throw new IpcError("MsaClientIdMissing", "这个版本没有内置微软登录 client_id：在设置的「常规 · 高级」里填入，或者设环境变量 PETALFALL_MSA_CLIENT_ID");
+    });
+    await mount();
+    act(() => void launcher.actions.startMicrosoftLogin());
+    await flush();
+    expect(dialog()?.textContent).toContain("这个版本没有内置微软登录");
+    const labels = [...document.querySelectorAll<HTMLButtonElement>("[role='dialog'] button")].map((b) => b.textContent);
+    expect(labels).not.toContain("重试");
+    expect(labels).not.toContain("复制错误信息");
+
+    act(() => button("打开设置").click());
+    await flush();
+    expect(launcher.state.login).toBeNull();
+    expect(nav.route).toEqual({ page: "settings", section: "general" });
   });
 });
 
