@@ -5,6 +5,10 @@
 //!
 //! 插件只在配置了签名公钥的发行构建里注册（[`detect_support`]）。没有公钥时插件初始化本身就会失败，
 //! 而且没有公钥就无从校验更新包，宁可整体不支持；此时各命令报 `updater_unsupported`。
+//! 仓库里的配置不带公钥，dev 分支的 CI 打包时才写入开发版公钥（`.github/dev-updater.pub`）：
+//! 本地和 fork 构建的包不会去认落樱的更新。
+//!
+//! 去哪取清单由版本号决定（[`UpdateChannel`]），与前端从版本号推发布通道同源，不另设配置。
 
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -36,6 +40,46 @@ pub const MIRROR_ENDPOINT: &str = concat!(
 
 /// 镜像域名完成 ICP 备案前不能对外服务，先关着；打开后端点顺序按下载源策略排。
 pub const MIRROR_ENABLED: bool = false;
+
+/// dev 分支每次构建都重建的滚动预发布，CI 里的 tag 必须与它一致。
+const DEV_RELEASE_TAG: &str = "dev-build";
+
+/// 开发版通道的清单地址。dev 包本来就发在这个预发布上，清单和安装包放在一起，不用另找地方托管；
+/// 只有这一个源，也就不按下载源策略排序。
+pub fn dev_endpoint() -> String {
+    format!(
+        "{}/releases/download/{DEV_RELEASE_TAG}/latest.json",
+        petalfall_base::brand::REPO_URL
+    )
+}
+
+/// 更新通道：决定去哪里取清单。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateChannel {
+    /// dev 分支的 CI 构建，版本号形如 `0.1.0-dev.12`。
+    Dev,
+    /// 其余版本，走主源与镜像。
+    Release,
+}
+
+impl UpdateChannel {
+    /// 看版本号预发布标识的第一段：`dev` 后面只跟数字（或什么都不跟）的是开发版，大小写不论，
+    /// 与前端 build-info 认 dev 的规则一致。semver 的预发布标识只含 ASCII。
+    pub fn of(pre_release: &str) -> Self {
+        let tag = pre_release
+            .split_once('.')
+            .map_or(pre_release, |(head, _)| head);
+        let is_dev = tag
+            .get(..3)
+            .is_some_and(|head| head.eq_ignore_ascii_case("dev"))
+            && tag[3..].bytes().all(|byte| byte.is_ascii_digit());
+        if is_dev {
+            UpdateChannel::Dev
+        } else {
+            UpdateChannel::Release
+        }
+    }
+}
 
 /// 单个端点取清单的时限。清单是一次性的小请求，比下载源探测放宽，慢网下也要能拿到。
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -198,6 +242,16 @@ impl<U: ReleaseVersion> UpdateSlot<U> {
         self.available.as_ref()
     }
 
+    /// 下载前重查的结论落进槽位，返回该下载的版本。清单 404 时沿用记着的版本，见 [`settle_check`](Self::settle_check)。
+    fn update_to_download(&mut self, conclusion: CheckConclusion<U>) -> Result<U, CommandError>
+    where
+        U: Clone,
+    {
+        self.settle_check(conclusion).cloned().ok_or_else(|| {
+            CommandError::new(code::UPDATE_NOT_AVAILABLE, "重新检查后已经没有可用更新")
+        })
+    }
+
     /// 收下下载好的包。下载期间又检查过一次、结果换了版本或已无更新时不收：与 [`record_check`](Self::record_check)
     /// 守的是同一件事，界面按最新的检查结果显示版本，退出时装上的却是旧包。
     fn store_download(&mut self, update: U, bytes: Vec<u8>) -> Result<(), CommandError> {
@@ -311,7 +365,8 @@ pub async fn updater_info(
     Ok(updater.info(app.package_info().version.to_string()))
 }
 
-/// 检查更新。端点按「文件下载源」策略排序，前一个连不上或非 2xx 时插件自动试下一个。
+/// 检查更新。开发版只问 [`dev_endpoint`]；其余版本的端点按「文件下载源」策略排序，前一个连不上或非 2xx 时
+/// 插件自动试下一个。
 /// 已是最新返回 `null`；所有端点的清单都确认 404 不算失败，见 [`conclude_check`] 与 [`UpdateSlot::settle_check`]。
 /// 不看 `check_updates` 设置：那一项只管启动时要不要自动查，由前端决定。
 #[tauri::command]
@@ -321,11 +376,26 @@ pub async fn check_update(
     updater: State<'_, UpdaterState>,
 ) -> Result<Option<UpdateDto>, CommandError> {
     updater.require_supported()?;
-    let endpoints = facade
-        .snapshot()
-        .await
-        .update_endpoints(PRIMARY_ENDPOINT, MIRROR_ENABLED.then_some(MIRROR_ENDPOINT))
-        .await;
+    let conclusion = fetch_conclusion(&app, &facade).await?;
+    let dto = updater.slot().settle_check(conclusion).map(update_dto);
+    Ok(dto)
+}
+
+/// 取一次清单并下结论。检查和下载前的重查共用。
+async fn fetch_conclusion(
+    app: &AppHandle,
+    facade: &Facade,
+) -> Result<CheckConclusion<Update>, CommandError> {
+    let endpoints = match UpdateChannel::of(app.package_info().version.pre.as_str()) {
+        UpdateChannel::Dev => vec![dev_endpoint()],
+        UpdateChannel::Release => {
+            facade
+                .snapshot()
+                .await
+                .update_endpoints(PRIMARY_ENDPOINT, MIRROR_ENABLED.then_some(MIRROR_ENDPOINT))
+                .await
+        }
+    };
     let urls = endpoint_urls(&endpoints);
     let checker = app
         .updater_builder()
@@ -341,9 +411,7 @@ pub async fn check_update(
         Err(_) => {}
     }
     let version = app.package_info().version.to_string();
-    let conclusion = conclude_check(checked, &version, &endpoints).await?;
-    let dto = updater.slot().settle_check(conclusion).map(update_dto);
-    Ok(dto)
+    conclude_check(checked, &version, &endpoints).await
 }
 
 /// 把插件的检查结果变成给槽位的结论。
@@ -408,14 +476,15 @@ fn check_failed(endpoints: &[String], err: tauri_plugin_updater::Error) -> Comma
     )
 }
 
-/// 下载最近一次检查到的更新并校验签名。长任务：进度经 core-event 推送（`kind: "download"`，
-/// `total` 恒为 1，带 `task_id`），可经 `cancel_task(taskId)` 取消。签名不符报
-/// `update_signature_invalid`，包随即丢弃；下载期间再次检查换了版本或已无更新时报 `update_not_available`，
-/// 包同样丢弃。
+/// 先按最新清单重查一次，再下载其中的更新并校验签名，返回实际下载的版本（可能比界面上记着的新）。
+/// 长任务：进度经 core-event 推送（`kind: "download"`，`total` 恒为 1，带 `task_id`），可经
+/// `cancel_task(taskId)` 取消。签名不符报 `update_signature_invalid`，包随即丢弃；下载期间再次检查换了版本
+/// 或已无更新时报 `update_not_available`，包同样丢弃。
 #[tauri::command]
 pub async fn download_update(
     task_id: String,
     app: AppHandle,
+    facade: State<'_, Facade>,
     updater: State<'_, UpdaterState>,
     tasks: State<'_, TaskRegistry>,
 ) -> Result<UpdateDto, CommandError> {
@@ -423,10 +492,9 @@ pub async fn download_update(
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
     let outcome = async {
         let task = tasks.register(&task_id)?;
-        let update =
-            updater.slot().available.clone().ok_or_else(|| {
-                CommandError::new(code::UPDATE_NOT_AVAILABLE, "还没有检查到可用更新")
-            })?;
+        // 开发版的滚动预发布每次构建都删掉上一版安装包，检查时记下的地址过一阵就 404，重试也一样
+        let conclusion = fetch_conclusion(&app, &facade).await?;
+        let update = updater.slot().update_to_download(conclusion)?;
         let bytes = task
             .run(download_with_progress(&update, events.sink(), task.token()))
             .await?;
@@ -745,6 +813,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn channel_follows_the_first_pre_release_identifier() {
+        for dev in ["dev.12", "dev", "dev3", "DEV.1", "Dev.7.rc"] {
+            assert_eq!(UpdateChannel::of(dev), UpdateChannel::Dev, "{dev}");
+        }
+        for release in [
+            "",
+            "beta.1",
+            "rc.2",
+            "preview.3",
+            "nightly",
+            "devx.1",
+            "dev-1",
+            "de",
+            "alpha.dev",
+        ] {
+            assert_eq!(
+                UpdateChannel::of(release),
+                UpdateChannel::Release,
+                "{release}"
+            );
+        }
+    }
+
+    /// dev 包认的地址必须正是 CI 上传清单的位置：任何一边改了 tag 或文件名，已装的 dev 包就再也收不到更新。
+    #[test]
+    fn dev_endpoint_is_where_ci_uploads_the_manifest() {
+        let urls = endpoint_urls(&[dev_endpoint()]);
+        assert_eq!(urls[0].scheme(), "https");
+        assert_eq!(urls[0].host_str(), Some("github.com"));
+        assert_eq!(
+            urls[0].path(),
+            "/ShinoyukiMiyako/Petalfall/releases/download/dev-build/latest.json"
+        );
+
+        // Windows 检出的工作流是 CRLF，逐行比，不拿换行符做界
+        let workflow: Vec<&str> = include_str!("../../../../.github/workflows/dev-build.yml")
+            .lines()
+            .map(str::trim)
+            .collect();
+        assert!(workflow.contains(&format!("TAG: {DEV_RELEASE_TAG}").as_str()));
+        assert!(workflow.contains(&"manifest=\"$RUNNER_TEMP/latest.json\""));
+        assert!(workflow.iter().any(|line| line.starts_with("\"$MANIFEST#")));
+    }
+
     #[derive(Clone)]
     struct Fake(&'static str);
 
@@ -1011,6 +1124,35 @@ mod tests {
         assert!(slot.settle_check(CheckConclusion::Manifest(None)).is_none());
         assert_eq!(slot.downloaded_version(), None);
         assert!(!slot.install_on_exit);
+    }
+
+    /// 检查到 dev.12 之后预发布已重建成 dev.13：下载按重查到的版本走，不去拿已删掉的旧地址。
+    #[test]
+    fn download_follows_the_recheck_not_the_remembered_version() {
+        let mut slot = UpdateSlot::<Fake>::default();
+        slot.record_check(Some(Fake("0.1.0-dev.12")));
+
+        let newer = slot
+            .update_to_download(CheckConclusion::Manifest(Some(Fake("0.1.0-dev.13"))))
+            .unwrap();
+        assert_eq!(newer.0, "0.1.0-dev.13");
+        assert_eq!(slot.available.as_ref().map(|u| u.0), Some("0.1.0-dev.13"));
+        // 下好的正是重查到的版本，槽位照收
+        slot.store_download(newer, vec![7]).unwrap();
+        assert_eq!(slot.downloaded_version().as_deref(), Some("0.1.0-dev.13"));
+
+        // 预发布正在重建、清单 404：沿用记着的版本
+        let kept = slot
+            .update_to_download(CheckConclusion::NotPublished)
+            .unwrap();
+        assert_eq!(kept.0, "0.1.0-dev.13");
+
+        let Err(err) = slot.update_to_download(CheckConclusion::Manifest(None)) else {
+            panic!("重查已无更新时不该给出可下载的版本");
+        };
+        assert_eq!(err.code, code::UPDATE_NOT_AVAILABLE);
+        assert_eq!(slot.available.as_ref().map(|u| u.0), None);
+        assert_eq!(slot.downloaded_version(), None);
     }
 
     const MANIFEST: &str = "/updates/latest.json";
