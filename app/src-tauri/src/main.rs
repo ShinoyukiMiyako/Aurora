@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    aurora_tauri_lib::run()
+    petalfall_tauri_lib::run()
 }

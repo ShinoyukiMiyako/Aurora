@@ -15,10 +15,10 @@ afterEach(() => {
 });
 
 describe("textureProtocolPath", () => {
-  it("认得 Windows 的 http(s)://aurora-tex.localhost 与其余平台的 aurora-tex:// 两种地址", () => {
-    expect(textureProtocolPath("http://aurora-tex.localhost/art/block/stone.png?v=1.21.4", BASE)).toBe("/art/block/stone.png");
-    expect(textureProtocolPath("https://aurora-tex.localhost/skin/ab.png", BASE)).toBe("/skin/ab.png");
-    expect(textureProtocolPath("aurora-tex://localhost/panorama/0.png", BASE)).toBe("/panorama/0.png");
+  it("认得 Windows 的 http(s)://petalfall-tex.localhost 与其余平台的 petalfall-tex:// 两种地址", () => {
+    expect(textureProtocolPath("http://petalfall-tex.localhost/art/block/stone.png?v=1.21.4", BASE)).toBe("/art/block/stone.png");
+    expect(textureProtocolPath("https://petalfall-tex.localhost/skin/ab.png", BASE)).toBe("/skin/ab.png");
+    expect(textureProtocolPath("petalfall-tex://localhost/panorama/0.png", BASE)).toBe("/panorama/0.png");
     expect(textureProtocolPath("https://cdn.modrinth.com/data/x/icon.png", BASE)).toBeNull();
     expect(textureProtocolPath("/assets/logo.svg", BASE)).toBeNull();
   });
@@ -30,13 +30,13 @@ describe("auditTextures", () => {
     const root = document.createElement("div");
     document.body.append(root);
     root.innerHTML = `
-      <div data-sk-art="iso"><span><img id="block" src="http://aurora-tex.localhost/art/block/cherry_planks.png?v=1.21.4"></span></div>
-      <img id="stray" src="http://aurora-tex.localhost/art/block/stone.png">
+      <div data-sk-art="iso"><span><img id="block" src="http://petalfall-tex.localhost/art/block/cherry_planks.png?v=1.21.4"></span></div>
+      <img id="stray" src="http://petalfall-tex.localhost/art/block/stone.png">
       <div data-sk-art="panorama"><div id="bg"></div></div>
       <div data-sk-art="cover"><div id="mask"></div></div>
-      <div data-sk-art="skin"><svg><image id="svg" href="http://aurora-tex.localhost/skin/0a1b.png"></image></svg></div>
-      <img id="modicon" src="http://aurora-tex.localhost/modicon/My%20Pack/abc.png">
-      <img id="thumb" src="http://aurora-tex.localhost/thumb/def">
+      <div data-sk-art="skin"><svg><image id="svg" href="http://petalfall-tex.localhost/skin/0a1b.png"></image></svg></div>
+      <img id="modicon" src="http://petalfall-tex.localhost/modicon/My%20Pack/abc.png">
+      <img id="thumb" src="http://petalfall-tex.localhost/thumb/def">
       <img id="remote" src="https://cdn.modrinth.com/data/x/icon.png">
       <div id="pseudo"></div>`;
     const byId = (id: string) => {
@@ -44,10 +44,10 @@ describe("auditTextures", () => {
       if (!el) throw new Error(id);
       return el;
     };
-    book.set(byId("bg"), { backgroundImage: 'url("aurora-tex://localhost/panorama/0.png")' });
-    const mask = 'url("http://aurora-tex.localhost/art/block/cherry_leaves.png")';
+    book.set(byId("bg"), { backgroundImage: 'url("petalfall-tex://localhost/panorama/0.png")' });
+    const mask = 'url("http://petalfall-tex.localhost/art/block/cherry_leaves.png")';
     book.set(byId("mask"), { maskImage: mask, WebkitMaskImage: mask });
-    book.set(byId("pseudo"), {}, { "::before": { backgroundImage: 'url("http://aurora-tex.localhost/art/entity/player/wide/steve.png"), linear-gradient(red, blue)' } });
+    book.set(byId("pseudo"), {}, { "::before": { backgroundImage: 'url("http://petalfall-tex.localhost/art/entity/player/wide/steve.png"), linear-gradient(red, blue)' } });
 
     const entries = auditTextures({ root, base: BASE, styleOf: book.reader });
     expect(entries.map((e) => ({ id: e.element.id, pseudo: e.pseudo, source: e.source, path: e.path, art: e.art, ok: e.ok }))).toEqual([

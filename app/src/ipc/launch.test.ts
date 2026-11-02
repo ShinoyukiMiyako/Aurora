@@ -493,14 +493,14 @@ describe("Tauri 窗口里", () => {
     vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
   });
 
-  it("onWorldBackup 订阅 aurora://world-backup，只把负载交给处理函数", async () => {
+  it("onWorldBackup 订阅 petalfall://world-backup，只把负载交给处理函数", async () => {
     vi.mocked(tauriListen).mockImplementationOnce(async (_event, handler) => {
       handler({ event: WORLD_BACKUP_EVENT, id: 1, payload: { instance_id: "a", backed_up: ["w"], failed: [] } });
       return () => undefined;
     });
     const got: WorldBackupEvent[] = [];
     await onWorldBackup((e) => got.push(e));
-    expect(vi.mocked(tauriListen).mock.calls[0][0]).toBe("aurora://world-backup");
+    expect(vi.mocked(tauriListen).mock.calls[0][0]).toBe("petalfall://world-backup");
     expect(got).toEqual([{ instance_id: "a", backed_up: ["w"], failed: [] }]);
   });
 

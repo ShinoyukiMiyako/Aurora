@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use aurora_setup_payload::{Error, Header, locate};
+use petalfall_setup_payload::{Error, Header, locate};
 
 #[cfg(debug_assertions)]
 use crate::runner::fake::Fake;
@@ -80,7 +80,7 @@ pub(crate) mod test_support {
     use std::hash::{BuildHasher, Hasher};
     use std::path::{Path, PathBuf};
 
-    use aurora_setup_payload::Header;
+    use petalfall_setup_payload::Header;
 
     const DOS_LFANEW_AT: usize = 0x3C;
     const PE_AT: usize = 0x40;
@@ -154,11 +154,11 @@ mod tests {
         assert_eq!(overlay.header().exe_len, 777);
         assert_eq!(
             overlay.header().payload_sha256,
-            aurora_setup_payload::sha256(&payload)
+            petalfall_setup_payload::sha256(&payload)
         );
         assert_eq!(
             overlay.header().exe_sha256,
-            aurora_setup_payload::sha256(&exe)
+            petalfall_setup_payload::sha256(&exe)
         );
         let mut read_back = Vec::new();
         overlay

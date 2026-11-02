@@ -4,8 +4,8 @@ import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
 
 // ipc/ 只能以类型方式引用别的模块，事件名在这里按后端各写一份。
-const DEVICE_CODE_EVENT = "aurora://device-code";
-const CORE_EVENT = "aurora://core-event";
+const DEVICE_CODE_EVENT = "petalfall://device-code";
+const CORE_EVENT = "petalfall://core-event";
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;

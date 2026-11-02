@@ -25,7 +25,7 @@ mod tasks;
 mod textures;
 mod window;
 
-use aurora_core::{Aurora, ServerMonitor};
+use petalfall_core::{Petalfall, ServerMonitor};
 use tauri::Manager;
 
 use crate::commands::updater::{UpdaterState, UpdaterSupport};
@@ -52,7 +52,7 @@ pub fn run() {
         version = %context.package_info().version,
         log = ?log_path,
         "{} 启动",
-        aurora_base::brand::APP_NAME_EN
+        petalfall_base::brand::APP_NAME_EN
     );
     log_data_dir();
 
@@ -86,13 +86,14 @@ pub fn run() {
             // config.json 读不出来时不终止：此刻还没有窗口，终止就是双击后什么都看不到，而且以后每次都这样。
             // 坏文件改名留存、按默认配置启动，经过记成启动提示，由前端查询后告诉用户。数据目录定位不到、
             // 坏文件改不了名这类错误仍然冒泡终止，避免带着半初始化的门面继续跑。
-            let (aurora, recovery) = tauri::async_runtime::block_on(Aurora::load_recovering())?;
-            let aurora = aurora.with_app_version(&app.package_info().version.to_string())?;
-            let server_monitor = ServerMonitor::new(aurora.data_dir());
-            app.manage(Facade::new(aurora));
+            let (petalfall, recovery) =
+                tauri::async_runtime::block_on(Petalfall::load_recovering())?;
+            let petalfall = petalfall.with_app_version(&app.package_info().version.to_string())?;
+            let server_monitor = ServerMonitor::new(petalfall.data_dir());
+            app.manage(Facade::new(petalfall));
             app.manage(
                 commands::system::StartupNotices::from_recovery(recovery)
-                    .with_data_dir(&aurora_base::fs::resolve_data_dir()?),
+                    .with_data_dir(&petalfall_base::fs::resolve_data_dir()?),
             );
             // -- tasks --
             app.manage(TaskRegistry::default());
@@ -279,7 +280,7 @@ fn log_panics() {
 
 /// 数据目录在日志装好之前就定位了（日志文件就落在里面），走了哪条路、为什么、花了多久在这里补记。
 fn log_data_dir() {
-    match aurora_base::fs::resolve_data_dir() {
+    match petalfall_base::fs::resolve_data_dir() {
         Ok(resolved) => tracing::info!(
             path = ?resolved.path,
             portable = resolved.portable,
@@ -288,7 +289,7 @@ fn log_data_dir() {
             elapsed_ms = resolved.elapsed.as_millis() as u64,
             "数据目录"
         ),
-        // 这里只记录；随后的 Aurora::load 会以同一个错误终止启动。
+        // 这里只记录；随后的 Petalfall::load 会以同一个错误终止启动。
         Err(err) => tracing::error!(error = %err, "定位数据目录失败"),
     }
 }
@@ -297,7 +298,7 @@ fn log_data_dir() {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use aurora_base::brand::{APP_NAME, APP_NAME_EN, APP_SLUG};
+    use petalfall_base::brand::{APP_NAME, APP_NAME_EN, APP_SLUG};
 
     /// 收集日志输出的写入端。
     #[derive(Clone, Default)]
@@ -343,7 +344,7 @@ mod tests {
     }
 
     // tauri.conf.json、index.html 与前端 TS 无法引用 Rust 常量，产品名只能各写一份，
-    // 由这条测试钉住它们与 aurora-base 的 brand 模块一致。identifier 发布后即成兼容契约，单独写死。
+    // 由这条测试钉住它们与 petalfall-base 的 brand 模块一致。identifier 发布后即成兼容契约，单独写死。
     #[test]
     fn product_name_is_consistent_across_config_html_and_frontend() {
         let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))

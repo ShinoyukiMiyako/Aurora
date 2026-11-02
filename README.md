@@ -64,7 +64,7 @@ pnpm tauri build
 | --- | --- |
 | `cargo test --workspace` | 全部 Rust 单元测试与集成测试 |
 | `cargo clippy --workspace --all-targets` | 静态检查 |
-| `cargo run -p aurora-cli -- --help` | 调试用命令行：版本清单、安装、登录、离线启动、资源搜索 |
+| `cargo run -p petalfall-cli -- --help` | 调试用命令行：版本清单、安装、登录、离线启动、资源搜索 |
 
 在 `app/` 下执行（前端）：
 
@@ -80,8 +80,8 @@ pnpm tauri build
 
 | 来源 | 说明 |
 | --- | --- |
-| `AURORA_MSA_CLIENT_ID` | 运行期环境变量，覆盖内置的微软登录 client_id；`config.json` 里的 `msa_client_id` 优先于它 |
-| `AURORA_CURSEFORGE_API_KEY` | CurseForge API key，优先读运行期环境变量，其次读构建时嵌入的值，API 请求与 CDN 下载都用它。两处都没有时 CurseForge 源会被明确禁用；Modrinth 的搜索与安装不受影响，但 `.mrpack` 里有文件只有 forgecdn 地址时，导入会在准备阶段报 `curseforge_key_missing`（每个文件都另有别的地址时照常导入，forgecdn 那个地址失败后换备用地址）。CDN 拒绝这个 key 时下载任务直接失败（`curseforge_key_rejected`），不换源重试 |
+| `PETALFALL_MSA_CLIENT_ID` | 运行期环境变量，覆盖内置的微软登录 client_id；`config.json` 里的 `msa_client_id` 优先于它 |
+| `PETALFALL_CURSEFORGE_API_KEY` | CurseForge API key，优先读运行期环境变量，其次读构建时嵌入的值，API 请求与 CDN 下载都用它。两处都没有时 CurseForge 源会被明确禁用；Modrinth 的搜索与安装不受影响，但 `.mrpack` 里有文件只有 forgecdn 地址时，导入会在准备阶段报 `curseforge_key_missing`（每个文件都另有别的地址时照常导入，forgecdn 那个地址失败后换备用地址）。CDN 拒绝这个 key 时下载任务直接失败（`curseforge_key_rejected`），不换源重试 |
 | `tauri.conf.json` 的 `plugins.updater` | 自更新需要在发布构建里配置公钥和更新地址。没有配置时，或在 debug 构建里，自更新显示为不可用 |
 
 数据目录存放配置、加密凭据、任务日志、托管 Java、新实例的默认设置（`templates/default/`）与日志。可执行文件所在目录可写时使用该目录（便携模式），否则使用 `%LOCALAPPDATA%\Petalfall`。目录里已有读得进来的 `config.json` 时数据就在这里，即使这次写不进去也不换地方，启动后提示原因。debug 构建一律不走便携模式。存档备份不在数据目录里，放在游戏目录的 `.petalfall/backups/` 下。
@@ -92,18 +92,18 @@ pnpm tauri build
 .
 ├── Cargo.toml            Rust workspace（crates/* 与 app/src-tauri）
 ├── crates/               后端各层 crate，按依赖方向分层
-│   ├── aurora-base       HTTP 客户端工厂、镜像改写、原子写入与校验、重试、品牌常量
-│   ├── aurora-version    版本清单与版本 JSON 的模型、规则求值与继承合并
-│   ├── aurora-auth       微软、离线、外置登录与凭据存储
-│   ├── aurora-java       Java 探测、选择与托管运行时下载
-│   ├── aurora-download   并发下载引擎、分块续传、换源调度、测速、熔断、吞吐看门狗、下载凭据
-│   ├── aurora-instance   实例发现、命名、设置、未完成标记、隔离判定、存档备份的文件层、回收站
-│   ├── aurora-install    原版、Fabric、Quilt、Forge、NeoForge 安装与文件补全
-│   ├── aurora-modplatform Modrinth 与 CurseForge 客户端、本地 Mod 扫描
-│   ├── aurora-modpack    整合包格式读取、覆盖文件解压、写 .mrpack
-│   ├── aurora-launch     启动命令拼装、Quick Play、进程管理、会话日志、崩溃判定
-│   ├── aurora-core       门面：组合下层，向外壳与 CLI 暴露统一的异步 API
-│   └── aurora-cli        调试命令行
+│   ├── petalfall-base        HTTP 客户端工厂、镜像改写、原子写入与校验、重试、品牌常量
+│   ├── petalfall-version     版本清单与版本 JSON 的模型、规则求值与继承合并
+│   ├── petalfall-auth        微软、离线、外置登录与凭据存储
+│   ├── petalfall-java        Java 探测、选择与托管运行时下载
+│   ├── petalfall-download    并发下载引擎、分块续传、换源调度、测速、熔断、吞吐看门狗、下载凭据
+│   ├── petalfall-instance    实例发现、命名、设置、未完成标记、隔离判定、存档备份的文件层、回收站
+│   ├── petalfall-install     原版、Fabric、Quilt、Forge、NeoForge 安装与文件补全
+│   ├── petalfall-modplatform Modrinth 与 CurseForge 客户端、本地 Mod 扫描
+│   ├── petalfall-modpack     整合包格式读取、覆盖文件解压、写 .mrpack
+│   ├── petalfall-launch      启动命令拼装、Quick Play、进程管理、会话日志、崩溃判定
+│   ├── petalfall-core        门面：组合下层，向外壳与 CLI 暴露统一的异步 API
+│   └── petalfall-cli         调试命令行
 ├── app/                  桌面应用
 │   ├── src/              React 前端
 │   ├── src-tauri/        Tauri 外壳：命令、事件、长任务、实例互斥
@@ -119,16 +119,16 @@ pnpm tauri build
 - Rust 侧各 crate 自带单元测试。涉及网络的流程用 wiremock 在本地模拟 Mojang、Modrinth、CurseForge 与微软登录端点，命令层测试从参数校验一直覆盖到磁盘副作用。
 - 前端用 vitest：领域适配、状态容器、页面与外壳组件、IPC 模拟后端都有测试，`App.test.tsx` 从首次启动向导走到主界面做整应用冒烟。进程数取逻辑处理器的一半；渲染整页、流程弹窗或外壳的测试文件要在文件首部写 `// @module-tag heavy-page`（单例超时 30 秒），细则见 `docs/architecture.md` 的「测试与守卫」。
 - `pnpm lint:tokens` 运行 `app/scripts/check-tokens.mjs`，用纯文本扫描检查以下几类问题：字面色值、页面里写死的样式、Tailwind 任意值、视口断点、动效参数、目录间的依赖方向、原版材质的引用位置、Emoji、产品名字面量、富文本注入。每条规则在 `app/scripts/guard-fixtures/` 下都有正反例。
-- `aurora-tauri` 的一条测试检查 `tauri.conf.json`、`index.html`、`app/src/lib/app-info.ts` 三处的产品名与 Rust 品牌常量是否一致。
+- `petalfall-tauri` 的一条测试检查 `tauri.conf.json`、`index.html`、`app/src/lib/app-info.ts` 三处的产品名与 Rust 品牌常量是否一致。
 
-## 品牌与内部代号
+## 品牌
 
 产品名只在两处定义，代码里其余地方都引用它们，不写字面量：
 
 - 前端：`app/src/lib/app-info.ts` 中的 `APP_NAME`（落樱）、`APP_NAME_EN`（Petalfall）、`APP_SLUG`（petalfall）
-- Rust：`aurora-base` 的 `brand` 模块，提供宏 `app_name!`、`app_name_en!`、`app_slug!` 和同名常量。宏的形式可以放进 `concat!` 做编译期拼接
+- Rust：`petalfall-base` 的 `brand` 模块，提供宏 `app_name!`、`app_name_en!`、`app_slug!` 和同名常量。宏的形式可以放进 `concat!` 做编译期拼接
 
-游戏目录里的元数据目录名由 `aurora_instance::AURORA_META_DIR` 给出（`.petalfall`）。`aurora` 是内部代号，crate 名、Rust 类型名、IPC 事件名前缀 `aurora://` 和环境变量都沿用它，不随产品名变化。
+游戏目录里的元数据目录名由 `petalfall_instance::PETALFALL_META_DIR` 给出（`.petalfall`）。crate 名、Rust 类型名、IPC 事件名前缀 `petalfall://`、材质协议 `petalfall-tex` 与环境变量名 `PETALFALL_*` 直接写成字面量，不引用品牌常量。前四者只在同一份构建内部使用；环境变量名是对外接口，改名后机器上设着的旧名不再生效。
 
 ## 许可
 

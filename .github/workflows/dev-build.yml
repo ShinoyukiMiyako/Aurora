@@ -95,12 +95,12 @@ jobs:
           # 壳的版本号指向启动器的配置，构建脚本却只盯自己这份，不碰一下 exe 的版本资源会停在上一次。
           touch src-tauri-setup/tauri.conf.json
           TAURI_APP_PATH=src-tauri-setup pnpm tauri build --no-bundle --runner cargo-xwin --target x86_64-pc-windows-msvc
-          cargo test --release --locked -p aurora-setup-payload
+          cargo test --release --locked -p petalfall-setup-payload
           release_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release"
           bootstrap_dir="$release_dir/bundle/installer"
           bootstrap="$bootstrap_dir/Petalfall-Installer-${VERSION}-x64.exe"
           mkdir -p "$bootstrap_dir"
-          cargo run --release --locked -p aurora-setup-payload --bin pack-setup -- \
+          cargo run --release --locked -p petalfall-setup-payload --bin pack-setup -- \
             "$release_dir/petalfall-setup.exe" "$INSTALLER" "$release_dir/Petalfall.exe" "$VERSION" "$bootstrap"
           test -f "$bootstrap"
           echo "bootstrap=$bootstrap" >> "$GITHUB_OUTPUT"

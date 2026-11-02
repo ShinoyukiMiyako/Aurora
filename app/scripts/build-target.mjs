@@ -6,7 +6,7 @@ const LAUNCHER = {
   html: "index.html",
   port: 1420,
   hmrPort: 1421,
-  rootPackage: "aurora-tauri",
+  rootPackage: "petalfall-tauri",
   emitLicenseText: false,
 };
 
@@ -15,7 +15,7 @@ const SETUP = {
   html: "setup.html",
   port: 1430,
   hmrPort: 1431,
-  rootPackage: "aurora-setup",
+  rootPackage: "petalfall-setup",
   emitLicenseText: true,
 };
 

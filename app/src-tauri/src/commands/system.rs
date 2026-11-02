@@ -1,8 +1,8 @@
 //! 系统：内存建议、首次启动、启动提示与连通性探测。
 
-use aurora_base::fs::DataDirResolution;
-use aurora_core::folders::{ensure_game_dir, probe_dir, validate_game_dir, FirstRunBaseline};
-use aurora_core::{ConfigRecovery, MemoryAdvice, MemoryTier};
+use petalfall_base::fs::DataDirResolution;
+use petalfall_core::folders::{ensure_game_dir, probe_dir, validate_game_dir, FirstRunBaseline};
+use petalfall_core::{ConfigRecovery, MemoryAdvice, MemoryTier};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -39,8 +39,8 @@ pub async fn memory_advice(
     version_id: Option<String>,
     facade: State<'_, Facade>,
 ) -> Result<MemoryAdviceDto, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.memory_advice(version_id.as_deref()).await?.into())
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.memory_advice(version_id.as_deref()).await?.into())
 }
 
 /// 首次启动向导是否还没走过第一步。
@@ -86,9 +86,9 @@ pub(crate) async fn complete_first_run_with(
     let base = match slot.as_ref() {
         Some(base) => base.clone(),
         None => {
-            let aurora = facade.snapshot().await;
-            let current_exists = probe_dir(aurora.game_dir()).await;
-            let base = aurora.first_run_baseline(current_exists);
+            let petalfall = facade.snapshot().await;
+            let current_exists = probe_dir(petalfall.game_dir()).await;
+            let base = petalfall.first_run_baseline(current_exists);
             *slot = Some(base.clone());
             base
         }
@@ -96,8 +96,8 @@ pub(crate) async fn complete_first_run_with(
     // 建目录在拿写锁之前：盘慢或挂起时不连累其它命令。
     ensure_game_dir(&game_dir).await?;
     facade
-        .update(|aurora| {
-            aurora.complete_first_run(&base, game_dir, extras);
+        .update(|petalfall| {
+            petalfall.complete_first_run(&base, game_dir, extras);
             Ok::<_, CommandError>(())
         })
         .await
@@ -241,15 +241,15 @@ pub async fn startup_notices(
 /// 要联网，在快照上进行，不占门面锁。
 #[tauri::command]
 pub async fn probe_network(facade: State<'_, Facade>) -> Result<bool, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.probe_network().await?)
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.probe_network().await?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::error::code;
-    use aurora_core::{Aurora, AuroraConfig, ConfigFieldReset, ConfigStore};
+    use petalfall_core::{ConfigFieldReset, ConfigStore, Petalfall, PetalfallConfig};
 
     #[test]
     fn config_recovery_becomes_a_config_reset_notice() {
@@ -320,8 +320,8 @@ mod tests {
 
     fn facade_in(dir: &std::path::Path) -> Facade {
         Facade::new(
-            Aurora::open(
-                AuroraConfig::default(),
+            Petalfall::open(
+                PetalfallConfig::default(),
                 dir.to_path_buf(),
                 dir.join("config.json"),
             )
@@ -576,15 +576,15 @@ mod tests {
     #[tokio::test]
     async fn unknown_instance_in_memory_advice_is_version_not_installed() {
         let dir = tempfile::tempdir().unwrap();
-        let aurora = facade_in(dir.path()).snapshot().await;
-        let err: CommandError = aurora
+        let petalfall = facade_in(dir.path()).snapshot().await;
+        let err: CommandError = petalfall
             .memory_advice(Some("ghost"))
             .await
             .unwrap_err()
             .into();
         assert_eq!(err.code, code::VERSION_NOT_INSTALLED);
 
-        let advice: MemoryAdviceDto = aurora.memory_advice(None).await.unwrap().into();
+        let advice: MemoryAdviceDto = petalfall.memory_advice(None).await.unwrap().into();
         let json = serde_json::to_value(advice).unwrap();
         assert_eq!(json["tier"], "vanilla");
         assert!(json["recommended_mb"].as_u64().unwrap() * 2 <= json["total_mb"].as_u64().unwrap());

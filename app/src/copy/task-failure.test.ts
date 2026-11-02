@@ -18,13 +18,13 @@ function blocked(n: number): BlockedFileDto[] {
 describe("taskFailureReason", () => {
   it("CurseForge 拒绝下载密钥：说明怎么换密钥，不露后端的地址与状态码", () => {
     expect(taskFailureReason({ code: "curseforge_key_rejected", message: "CurseForge 拒绝了下载密钥（HTTP 401）：https://edge.forgecdn.net/files/1/2/a.jar" })).toBe(
-      "CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试",
+      "CurseForge 拒绝了下载密钥。设置环境变量 PETALFALL_CURSEFORGE_API_KEY 换一个可用的密钥后重试",
     );
   });
 
   it("包里有文件只能从 CurseForge 下载又没配密钥：说明要设置哪个环境变量，不露「该源已禁用」这样的排查原文", () => {
-    expect(taskFailureReason({ code: "curseforge_key_missing", message: "CurseForge API key 未配置（环境变量 AURORA_CURSEFORGE_API_KEY 缺失），该源已禁用" })).toBe(
-      "有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY",
+    expect(taskFailureReason({ code: "curseforge_key_missing", message: "CurseForge API key 未配置（环境变量 PETALFALL_CURSEFORGE_API_KEY 缺失），该源已禁用" })).toBe(
+      "有文件只能从 CurseForge 下载，需要先设置环境变量 PETALFALL_CURSEFORGE_API_KEY",
     );
   });
 

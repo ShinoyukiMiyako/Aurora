@@ -5,8 +5,8 @@ import { render, type Rendered } from "../test/dom";
 import { NO_ART, setArtStatus } from "./art";
 import { clearArtCache, loadArt, peekArt, useArt } from "./useArt";
 
-const URL_A = "http://aurora-tex.localhost/art/block/cherry_planks.png?v=1.21.1";
-const URL_B = "http://aurora-tex.localhost/art/block/blue_ice.png?v=1.21.1";
+const URL_A = "http://petalfall-tex.localhost/art/block/cherry_planks.png?v=1.21.1";
+const URL_B = "http://petalfall-tex.localhost/art/block/blue_ice.png?v=1.21.1";
 
 interface FakeBitmap {
   width: number;

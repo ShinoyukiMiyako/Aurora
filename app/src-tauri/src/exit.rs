@@ -69,8 +69,8 @@ pub async fn save_play_records(facade: &Facade, deadline: Duration) -> PlayRecor
 mod tests {
     use std::path::Path;
 
-    use aurora_core::playtime::PLAYTIME_FILE;
-    use aurora_core::{Aurora, AuroraConfig};
+    use petalfall_core::playtime::PLAYTIME_FILE;
+    use petalfall_core::{Petalfall, PetalfallConfig};
     use serde_json::Value;
 
     use super::*;
@@ -78,8 +78,8 @@ mod tests {
     /// 数据目录在 `dir`、游戏目录取默认（数据目录下）的门面。
     fn facade_in(dir: &Path) -> Facade {
         Facade::new(
-            Aurora::open(
-                AuroraConfig::default(),
+            Petalfall::open(
+                PetalfallConfig::default(),
                 dir.to_path_buf(),
                 dir.join("config.json"),
             )
@@ -114,9 +114,9 @@ mod tests {
         let path = dir.path().join(PLAYTIME_FILE);
         let facade = facade_in(dir.path());
         std::fs::write(&path, "{ broken").unwrap();
-        let aurora = facade.snapshot().await;
-        assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
-        assert!(aurora.forget_play_records("删掉的").await.is_err());
+        let petalfall = facade.snapshot().await;
+        assert!(petalfall.rename_play_records("旧名", "新名").await.is_err());
+        assert!(petalfall.forget_play_records("删掉的").await.is_err());
         std::fs::write(&path, RECORDS).unwrap();
 
         let outcome = save_play_records(&facade, PLAY_RECORDS_DEADLINE).await;
@@ -180,8 +180,8 @@ mod tests {
             .share_mode(FILE_SHARE_READ)
             .open(&path)
             .unwrap();
-        let aurora = facade.snapshot().await;
-        assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
+        let petalfall = facade.snapshot().await;
+        assert!(petalfall.rename_play_records("旧名", "新名").await.is_err());
 
         let outcome = save_play_records(&facade, PLAY_RECORDS_DEADLINE).await;
         assert!(matches!(outcome, PlayRecordsSave::Failed), "{outcome:?}");

@@ -52,7 +52,7 @@ function prng(seed: number): () => number {
 
 describe("分类显示名", () => {
   // Modrinth /v2/tag/category 的响应原样；服务器目录的分类不在发现页的搜索范围里，详情也打不开那类工程
-  const tags = JSON.parse(readFileSync(new URL("../../../../crates/aurora-modplatform/tests/fixtures/modrinth-tag-category.json", import.meta.url), "utf8")) as { name: string; project_type: string }[];
+  const tags = JSON.parse(readFileSync(new URL("../../../../crates/petalfall-modplatform/tests/fixtures/modrinth-tag-category.json", import.meta.url), "utf8")) as { name: string; project_type: string }[];
   const reachable = tags.filter((t) => t.project_type !== "minecraft_java_server");
 
   it("Mod、整合包、资源包、光影的全部分类都有中文名，表里也没有接口之外的键", () => {

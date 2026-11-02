@@ -23,9 +23,9 @@ pub(crate) const LOGS_DIR: &str = "logs";
 /// 保留的会话日志份数。十次启动够回溯到「昨天还好好的」，再多只是占地方。
 const KEEP_SESSIONS: usize = 10;
 
-/// 默认过滤级别。本工程各 crate（target 均以 aurora 开头）的 info 全收，第三方依赖只收 warn 以上——
+/// 默认过滤级别。本工程各 crate（target 均以 petalfall 开头）的 info 全收，第三方依赖只收 warn 以上——
 /// reqwest/hyper 的 debug 会把真正有用的行淹掉。设了 RUST_LOG 时以它为准。
-const DEFAULT_FILTER: &str = "warn,aurora=info";
+const DEFAULT_FILTER: &str = "warn,petalfall=info";
 
 /// 装好 subscriber，返回本次会话的日志文件路径（目录不可写时为 `None`）。
 ///
@@ -63,7 +63,7 @@ pub fn init() -> Option<PathBuf> {
 
 /// 开一份本次会话的日志文件，顺带清掉过老的那些。
 fn open_session_log() -> Result<(PathBuf, File), Box<dyn Error>> {
-    let dir = aurora_base::fs::data_dir()?.join(LOGS_DIR);
+    let dir = petalfall_base::fs::data_dir()?.join(LOGS_DIR);
     std::fs::create_dir_all(&dir)?;
     prune_old_sessions(&dir);
 

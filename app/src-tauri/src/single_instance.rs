@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use aurora_base::brand::APP_NAME_EN;
+use petalfall_base::brand::APP_NAME_EN;
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_EVENT, WAIT_OBJECT_0,
 };
@@ -69,7 +69,7 @@ impl Drop for Instance {
 
 /// 按当前数据目录占位。
 pub fn claim() -> Result<Claim, Box<dyn std::error::Error>> {
-    let dir = aurora_base::fs::data_dir()?;
+    let dir = petalfall_base::fs::data_dir()?;
     Ok(claim_name(&event_name(&dir))?)
 }
 

@@ -1,6 +1,6 @@
 //! 主页资讯：Mojang 官方启动器内容源的 Java 版条目，加上本启动器的 GitHub Releases。
 
-use aurora_core::{CoreError, LauncherChannel, NewsFeed, NewsItem};
+use petalfall_core::{CoreError, LauncherChannel, NewsFeed, NewsItem};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -55,8 +55,8 @@ pub async fn list_news(
 ) -> Result<NewsFeedDto, CommandError> {
     let version = &app.package_info().version;
     let channel = LauncherChannel::from_version(version.major, !version.pre.is_empty());
-    let aurora = facade.snapshot().await;
-    Ok(aurora.list_news(channel, retry).await?.into())
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.list_news(channel, retry).await?.into())
 }
 
 #[cfg(test)]
@@ -64,9 +64,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use aurora_base::brand::REPO_URL;
-    use aurora_core::news::LauncherFailure;
-    use aurora_core::NewsTag;
+    use petalfall_base::brand::REPO_URL;
+    use petalfall_core::news::LauncherFailure;
+    use petalfall_core::NewsTag;
     use serde_json::json;
 
     use crate::commands::error::code;
@@ -158,7 +158,7 @@ mod tests {
             listener.local_addr().unwrap().port()
         );
         drop(listener);
-        let source = aurora_base::http::build_client()
+        let source = petalfall_base::http::build_client()
             .unwrap()
             .get(&url)
             .send()

@@ -9,7 +9,7 @@
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use aurora_core::{CancellationToken, CoreEvent, DownloadProgress, EventSink};
+use petalfall_core::{CancellationToken, CoreEvent, DownloadProgress, EventSink};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State, Url};
@@ -23,14 +23,14 @@ use crate::tasks::TaskRegistry;
 /// 主更新源的清单地址。
 pub const PRIMARY_ENDPOINT: &str = concat!(
     "https://",
-    aurora_base::app_slug!(),
+    petalfall_base::app_slug!(),
     ".org/updates/latest.json"
 );
 
 /// 国内镜像的清单地址。
 pub const MIRROR_ENDPOINT: &str = concat!(
     "https://",
-    aurora_base::app_slug!(),
+    petalfall_base::app_slug!(),
     ".cn/updates/latest.json"
 );
 
@@ -370,8 +370,8 @@ async fn confirm_manifest_missing(
     app_version: &str,
     endpoints: &[String],
 ) -> Result<(), CommandError> {
-    let http = aurora_base::http::build_client_with(
-        &aurora_base::http::HttpConfig::for_app_version(app_version),
+    let http = petalfall_base::http::build_client_with(
+        &petalfall_base::http::HttpConfig::for_app_version(app_version),
     )?;
     for endpoint in endpoints {
         let response = http
@@ -614,8 +614,8 @@ fn updater_error(
     // 插件的 Reqwest 变体是 transparent：它的 source() 直接给出 reqwest 错误的下一层，
     // 从插件错误顺着原因链找不到 reqwest 错误本身，只能在这里取出来判断。
     let network = match &err {
-        UpdaterError::Reqwest(http) => aurora_base::http::network_failure(http),
-        other => aurora_base::http::network_failure(other),
+        UpdaterError::Reqwest(http) => petalfall_base::http::network_failure(http),
+        other => petalfall_base::http::network_failure(other),
     };
     if let Some(failure) = network {
         detail.insert("network".to_owned(), json!(failure.code()));
@@ -638,8 +638,8 @@ mod tests {
     /// 立即安装在拉起安装程序之前就把待补的游玩记录写进了文件，安装的结果原样返回。
     #[tokio::test]
     async fn install_now_saves_pending_play_records_before_installing() {
-        use aurora_core::playtime::PLAYTIME_FILE;
-        use aurora_core::{Aurora, AuroraConfig};
+        use petalfall_core::playtime::PLAYTIME_FILE;
+        use petalfall_core::{Petalfall, PetalfallConfig};
 
         const RECORDS: &str = r#"{"format":1,"book":{
             "instances":{
@@ -649,8 +649,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(PLAYTIME_FILE);
         let facade = Facade::new(
-            Aurora::open(
-                AuroraConfig::default(),
+            Petalfall::open(
+                PetalfallConfig::default(),
                 dir.path().to_path_buf(),
                 dir.path().join("config.json"),
             )
@@ -737,11 +737,11 @@ mod tests {
         assert_eq!(urls[0].scheme(), "https");
         assert_eq!(
             urls[0].host_str(),
-            Some(format!("{}.org", aurora_base::brand::APP_SLUG).as_str())
+            Some(format!("{}.org", petalfall_base::brand::APP_SLUG).as_str())
         );
         assert_eq!(
             urls[1].host_str(),
-            Some(format!("{}.cn", aurora_base::brand::APP_SLUG).as_str())
+            Some(format!("{}.cn", petalfall_base::brand::APP_SLUG).as_str())
         );
     }
 
@@ -921,7 +921,7 @@ mod tests {
             listener.local_addr().unwrap().port()
         );
         drop(listener);
-        let refused = aurora_base::http::build_client()
+        let refused = petalfall_base::http::build_client()
             .unwrap()
             .get(&url)
             .send()
@@ -965,7 +965,7 @@ mod tests {
             listener.local_addr().unwrap().port()
         );
         drop(listener);
-        let refused = aurora_base::http::build_client()
+        let refused = petalfall_base::http::build_client()
             .unwrap()
             .get(&url)
             .send()
@@ -1155,7 +1155,7 @@ mod tests {
             let (socket, _) = listener.accept().unwrap();
             drop(socket);
         });
-        let cut_off = aurora_base::http::build_client()
+        let cut_off = petalfall_base::http::build_client()
             .unwrap()
             .get(&url)
             .send()

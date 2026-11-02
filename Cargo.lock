@@ -289,279 +289,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
-name = "aurora-auth"
-version = "0.1.0"
-dependencies = [
- "aurora-base",
- "base64 0.22.1",
- "md-5",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "windows 0.62.2",
- "wiremock",
-]
-
-[[package]]
-name = "aurora-base"
-version = "0.1.0"
-dependencies = [
- "base16ct",
- "fastrand",
- "reqwest",
- "serde_json",
- "sha1",
- "sha2 0.11.1",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
- "wiremock",
-]
-
-[[package]]
-name = "aurora-cli"
-version = "0.1.0"
-dependencies = [
- "aurora-base",
- "aurora-core",
- "clap",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "aurora-core"
-version = "0.1.0"
-dependencies = [
- "aurora-auth",
- "aurora-base",
- "aurora-download",
- "aurora-install",
- "aurora-instance",
- "aurora-java",
- "aurora-launch",
- "aurora-modpack",
- "aurora-modplatform",
- "aurora-version",
- "base64 0.22.1",
- "chrono",
- "fastrand",
- "flate2",
- "fs2",
- "image",
- "reqwest",
- "serde",
- "serde_json",
- "sha1",
- "sys-locale",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "winreg 0.56.0",
- "wiremock",
- "zip 8.6.0",
-]
-
-[[package]]
-name = "aurora-download"
-version = "0.1.0"
-dependencies = [
- "aurora-base",
- "reqwest",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "wiremock",
-]
-
-[[package]]
-name = "aurora-install"
-version = "0.1.0"
-dependencies = [
- "aurora-base",
- "aurora-download",
- "aurora-version",
- "base16ct",
- "fastrand",
- "reqwest",
- "serde",
- "serde_json",
- "sha1",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "windows-sys 0.61.2",
- "wiremock",
- "zip 8.6.0",
-]
-
-[[package]]
-name = "aurora-instance"
-version = "0.1.0"
-dependencies = [
- "aurora-base",
- "aurora-version",
- "flate2",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "windows-sys 0.61.2",
- "zip 8.6.0",
-]
-
-[[package]]
-name = "aurora-java"
-version = "0.1.0"
-dependencies = [
- "aurora-base",
- "base16ct",
- "reqwest",
- "serde",
- "serde_json",
- "sha1",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
- "winreg 0.56.0",
- "wiremock",
-]
-
-[[package]]
-name = "aurora-launch"
-version = "0.1.0"
-dependencies = [
- "aurora-auth",
- "aurora-base",
- "aurora-instance",
- "aurora-version",
- "regex",
- "serde",
- "serde_json",
- "sysinfo",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "aurora-modpack"
-version = "0.1.0"
-dependencies = [
- "aurora-base",
- "aurora-instance",
- "aurora-version",
- "encoding_rs",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
- "url",
- "zip 8.6.0",
-]
-
-[[package]]
-name = "aurora-modplatform"
-version = "0.1.0"
-dependencies = [
- "aurora-base",
- "aurora-download",
- "base16ct",
- "reqwest",
- "serde",
- "serde_json",
- "sha1",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml 1.1.2+spec-1.1.0",
- "tracing",
- "wiremock",
- "zip 8.6.0",
-]
-
-[[package]]
-name = "aurora-setup"
-version = "0.1.0"
-dependencies = [
- "aurora-setup-payload",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tempfile",
- "webview2-com",
- "windows-core 0.61.2",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "aurora-setup-payload"
-version = "0.1.0"
-dependencies = [
- "sha2 0.11.1",
-]
-
-[[package]]
-name = "aurora-tauri"
-version = "0.1.0"
-dependencies = [
- "aurora-base",
- "aurora-core",
- "percent-encoding",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tauri-plugin-updater",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "webview2-com",
- "windows 0.61.3",
- "windows-core 0.61.2",
- "wiremock",
- "zip 8.6.0",
-]
-
-[[package]]
-name = "aurora-version"
-version = "0.1.0"
-dependencies = [
- "regex",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3260,6 +2987,279 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "petalfall-auth"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "md-5",
+ "petalfall-base",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "windows 0.62.2",
+ "wiremock",
+]
+
+[[package]]
+name = "petalfall-base"
+version = "0.1.0"
+dependencies = [
+ "base16ct",
+ "fastrand",
+ "reqwest",
+ "serde_json",
+ "sha1",
+ "sha2 0.11.1",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "petalfall-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "petalfall-base",
+ "petalfall-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "petalfall-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "fastrand",
+ "flate2",
+ "fs2",
+ "image",
+ "petalfall-auth",
+ "petalfall-base",
+ "petalfall-download",
+ "petalfall-install",
+ "petalfall-instance",
+ "petalfall-java",
+ "petalfall-launch",
+ "petalfall-modpack",
+ "petalfall-modplatform",
+ "petalfall-version",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sys-locale",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "winreg 0.56.0",
+ "wiremock",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "petalfall-download"
+version = "0.1.0"
+dependencies = [
+ "petalfall-base",
+ "reqwest",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
+name = "petalfall-install"
+version = "0.1.0"
+dependencies = [
+ "base16ct",
+ "fastrand",
+ "petalfall-base",
+ "petalfall-download",
+ "petalfall-version",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+ "wiremock",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "petalfall-instance"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "petalfall-base",
+ "petalfall-version",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "petalfall-java"
+version = "0.1.0"
+dependencies = [
+ "base16ct",
+ "petalfall-base",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "winreg 0.56.0",
+ "wiremock",
+]
+
+[[package]]
+name = "petalfall-launch"
+version = "0.1.0"
+dependencies = [
+ "petalfall-auth",
+ "petalfall-base",
+ "petalfall-instance",
+ "petalfall-version",
+ "regex",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "petalfall-modpack"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
+ "petalfall-base",
+ "petalfall-instance",
+ "petalfall-version",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "petalfall-modplatform"
+version = "0.1.0"
+dependencies = [
+ "base16ct",
+ "petalfall-base",
+ "petalfall-download",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "wiremock",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "petalfall-setup"
+version = "0.1.0"
+dependencies = [
+ "petalfall-setup-payload",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tempfile",
+ "webview2-com",
+ "windows-core 0.61.2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "petalfall-setup-payload"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.11.1",
+]
+
+[[package]]
+name = "petalfall-tauri"
+version = "0.1.0"
+dependencies = [
+ "percent-encoding",
+ "petalfall-base",
+ "petalfall-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tauri-plugin-updater",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "webview2-com",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
+ "wiremock",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "petalfall-version"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "phf"

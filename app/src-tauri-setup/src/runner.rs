@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use aurora_setup_payload::Header;
+use petalfall_setup_payload::Header;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::UI::Shell::{FOLDERID_Desktop, KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath};
 use windows_sys::core::{GUID, PWSTR};

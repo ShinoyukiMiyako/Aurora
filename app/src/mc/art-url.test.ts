@@ -17,7 +17,7 @@ import { ART_PATHS, COVER_TEXTURES, coverTexture, DEFAULT_SKIN_PATHS } from "./w
 import { BLOCK_TEXTURES, SKIN_TEXTURES } from "../ipc/art";
 
 const WINDOWS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0";
-const ORIGIN = "http://aurora-tex.localhost";
+const ORIGIN = "http://petalfall-tex.localhost";
 
 beforeEach(() => {
   vi.stubGlobal("navigator", { userAgent: WINDOWS_UA });
@@ -32,8 +32,8 @@ describe("texOrigin", () => {
   it("Windows 与 Android 用 http://<scheme>.localhost，其余平台用 <scheme>://localhost", () => {
     expect(texOrigin(WINDOWS_UA)).toBe(ORIGIN);
     expect(texOrigin("Mozilla/5.0 (Linux; Android 14; Pixel 8)")).toBe(ORIGIN);
-    expect(texOrigin("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15")).toBe("aurora-tex://localhost");
-    expect(texOrigin("Mozilla/5.0 (X11; Linux x86_64)")).toBe("aurora-tex://localhost");
+    expect(texOrigin("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15")).toBe("petalfall-tex://localhost");
+    expect(texOrigin("Mozilla/5.0 (X11; Linux x86_64)")).toBe("petalfall-tex://localhost");
   });
 });
 

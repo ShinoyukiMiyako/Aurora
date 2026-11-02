@@ -1,4 +1,4 @@
-// 原版材质与远程图片的取址入口。图片字节由后端的 aurora-tex 自定义协议提供：
+// 原版材质与远程图片的取址入口。图片字节由后端的 petalfall-tex 自定义协议提供：
 //   /art/<路径>.png?v=<材质源版本>   白名单内的方块面与默认皮肤
 //   /panorama/0.png                  樱花林全景正面
 //   /skin/<sha1(皮肤 URL)>.png       已下载的远程皮肤
@@ -10,7 +10,7 @@ import { useSyncExternalStore } from "react";
 import { sha1Hex } from "./sha1";
 import { ART_PATHS } from "./whitelist";
 
-export const TEX_SCHEME = "aurora-tex";
+export const TEX_SCHEME = "petalfall-tex";
 
 /**
  * 自定义协议在页面里的源。Windows 与 Android 的 WebView 不认自定义 scheme，Tauri 改写成

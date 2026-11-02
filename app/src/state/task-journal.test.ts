@@ -377,6 +377,6 @@ describe("需要手动下载的文件清单随失败记录进任务日志", () =
     await settle();
     const [failed] = store.getState().tasks;
     expect(failed.error).toEqual({ code: "curseforge_key_rejected", message: "CurseForge 拒绝了下载密钥（HTTP 401）：https://edge.forgecdn.net/files/1/2/a.jar" });
-    expect(store.getState().toasts.map((t) => t.body)).toContain("CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试");
+    expect(store.getState().toasts.map((t) => t.body)).toContain("CurseForge 拒绝了下载密钥。设置环境变量 PETALFALL_CURSEFORGE_API_KEY 换一个可用的密钥后重试");
   });
 });

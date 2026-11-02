@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use aurora_setup_payload::Header;
+use petalfall_setup_payload::Header;
 
 use crate::contract::{Failure, FailureCode};
 use crate::existing::{APP_EXE, DISPLAY_VERSION, INSTALL_LOCATION, Registry, UNINSTALL_KEY};
@@ -312,7 +312,7 @@ mod tests {
                 version: VERSION.to_owned(),
                 exe: Some(ExeFingerprint {
                     len: self.exe.len() as u64,
-                    sha256: aurora_setup_payload::sha256(&self.exe),
+                    sha256: petalfall_setup_payload::sha256(&self.exe),
                 }),
             }
         }
@@ -368,8 +368,8 @@ mod tests {
         assert_eq!(
             verify(&install.expected(), &install.entry()),
             vec![Mismatch::ExeHash {
-                expected: hex(&aurora_setup_payload::sha256(&install.exe)),
-                actual: hex(&aurora_setup_payload::sha256(&tampered)),
+                expected: hex(&petalfall_setup_payload::sha256(&install.exe)),
+                actual: hex(&petalfall_setup_payload::sha256(&tampered)),
             }]
         );
     }

@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use aurora_setup_payload::Header;
+use petalfall_setup_payload::Header;
 
 use super::{Launcher, Roots, Running, Session};
 use crate::boot::Instance;
@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(fake.header().payload_len, PAYLOAD_LEN as u64);
         assert_eq!(
             fake.header().payload_sha256,
-            aurora_setup_payload::sha256(fake.payload())
+            petalfall_setup_payload::sha256(fake.payload())
         );
         assert_eq!(fake.header().exe_len, EXE_LEN as u64);
         assert_eq!(fake.header().version, env!("CARGO_PKG_VERSION"));

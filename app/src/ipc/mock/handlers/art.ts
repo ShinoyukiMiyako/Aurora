@@ -5,7 +5,7 @@ import type { MockHandlers } from "../types";
 import { hasMockAccount, isMockOfflineAccount } from "./accounts";
 
 // ipc/ 只能以类型方式引用别的模块，事件名与名单在这里按后端各写一份。
-const ART_CHANGED_EVENT = "aurora://art-changed";
+const ART_CHANGED_EVENT = "petalfall://art-changed";
 const THUMB_HOSTS: readonly string[] = ["cdn.modrinth.com", "media.forgecdn.net", "launchercontent.mojang.com"];
 
 // 浏览器里没有材质协议，材质源恒为 null：界面全部画回落件，不发任何材质请求。

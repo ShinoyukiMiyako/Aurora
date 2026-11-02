@@ -252,7 +252,7 @@ export function measureAccentArea({ root, viewport, family, styleOf = readStyle 
 // ---------------------------------------------------------------- 原版材质审计
 
 // sk-guard-allow T7: 审计要识别材质协议的地址才能列出取图的元素，本身不取任何材质
-export const TEXTURE_PROTOCOL = "aurora-tex";
+export const TEXTURE_PROTOCOL = "petalfall-tex";
 
 /** 允许出现游戏本机材质的点缀位：实例方块、玩家皮肤、樱花林全景。 */
 export const TEXTURE_SLOTS = ["iso", "skin", "panorama"] as const;

@@ -40,7 +40,7 @@ import { forgetMockPinnedInstance, renameMockPinnedInstance } from "./system";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 // ipc/ 只能以类型方式引用别的模块，事件名与上限在这里按后端各写一份。
-const CORE_EVENT = "aurora://core-event";
+const CORE_EVENT = "petalfall://core-event";
 const SIDEBAR_PIN_MAX = 5;
 const FOLDER_TARGETS: readonly FolderTarget[] = [
   "game_dir",

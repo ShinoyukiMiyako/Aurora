@@ -1,5 +1,5 @@
 // 产品名的唯一定义点。页面与组件不写产品名字面量。
-// Rust 侧在 aurora-base 的 brand 模块另有一份，两边取值必须一致；ipc/ 下事件名里的 aurora 是内部代号，不随产品名改。
+// Rust 侧在 petalfall-base 的 brand 模块另有一份，两边取值必须一致；ipc/ 下事件名里的 petalfall 直接写成字面量，只需与 Rust 侧对上，不取这里的常量。
 // 构建信息与第三方许可清单由构建脚本生成（scripts/build-info.mjs、scripts/third-party-licenses.mjs），这里只给读取入口。
 
 import type { BuildInfo } from "../../scripts/build-info.mjs";

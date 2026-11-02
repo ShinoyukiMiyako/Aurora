@@ -1,6 +1,6 @@
 //! 诊断：最近一次崩溃报告、最近一次启动日志，以及前端自己的诊断日志。
 
-use aurora_core::{CrashReport, LaunchLog, SessionEnded};
+use petalfall_core::{CrashReport, LaunchLog, SessionEnded};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tauri::State;
@@ -56,8 +56,8 @@ pub async fn last_crash(
     version_id: String,
     facade: State<'_, Facade>,
 ) -> Result<Option<CrashReport>, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.last_crash(&version_id).await?)
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.last_crash(&version_id).await?)
 }
 
 /// 该实例最近一次启动的日志；从没启动过为 `null`。
@@ -66,8 +66,11 @@ pub async fn last_launch_log(
     version_id: String,
     facade: State<'_, Facade>,
 ) -> Result<Option<LaunchLogDto>, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.last_launch_log(&version_id).await?.map(Into::into))
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
+        .last_launch_log(&version_id)
+        .await?
+        .map(Into::into))
 }
 
 /// 前端诊断日志的级别。
@@ -93,7 +96,7 @@ impl DiagnosticLevel {
 
 /// 把前端的一条诊断写进启动器日志文件（花瓣降级、材质回落统计之类）；不弹任何界面。
 ///
-/// target 固定为 `aurora::frontend`：默认过滤只收 aurora 开头的 info，用 `RUST_LOG` 也能单独调它的级别。
+/// target 固定为 `petalfall::frontend`：默认过滤只收 petalfall 开头的 info，用 `RUST_LOG` 也能单独调它的级别。
 #[tauri::command]
 pub async fn log_diagnostic(
     level: String,
@@ -113,12 +116,16 @@ pub async fn log_diagnostic(
 fn write_diagnostic(level: DiagnosticLevel, message: &str, fields: &Value) {
     match level {
         DiagnosticLevel::Debug => {
-            tracing::debug!(target: "aurora::frontend", %fields, "{message}")
+            tracing::debug!(target: "petalfall::frontend", %fields, "{message}")
         }
-        DiagnosticLevel::Info => tracing::info!(target: "aurora::frontend", %fields, "{message}"),
-        DiagnosticLevel::Warn => tracing::warn!(target: "aurora::frontend", %fields, "{message}"),
+        DiagnosticLevel::Info => {
+            tracing::info!(target: "petalfall::frontend", %fields, "{message}")
+        }
+        DiagnosticLevel::Warn => {
+            tracing::warn!(target: "petalfall::frontend", %fields, "{message}")
+        }
         DiagnosticLevel::Error => {
-            tracing::error!(target: "aurora::frontend", %fields, "{message}")
+            tracing::error!(target: "petalfall::frontend", %fields, "{message}")
         }
     }
 }
@@ -126,7 +133,7 @@ fn write_diagnostic(level: DiagnosticLevel, message: &str, fields: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_core::{LauncherLevel, LogEntry, LogSource, SessionOutcome};
+    use petalfall_core::{LauncherLevel, LogEntry, LogSource, SessionOutcome};
 
     #[test]
     fn diagnostic_levels_are_exactly_the_four_names() {
@@ -162,7 +169,7 @@ mod tests {
     /// last_crash 直接返回门面的 CrashReport，没有 DTO：这里钉住前端读的 JSON 字段名与取值形状。
     #[test]
     fn crash_report_json_carries_sources_scanned_files_and_exit_code_note() {
-        use aurora_core::{
+        use petalfall_core::{
             CrashCategory, CrashClue, CrashReport, CrashSource, ExitCodeKind, ExitCodeNote,
             LaunchWarning, ScannedFile,
         };

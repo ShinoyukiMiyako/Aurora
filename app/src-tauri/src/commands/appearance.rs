@@ -1,9 +1,9 @@
 //! 外观偏好：前端首帧渲染前读取，切换时写回配置。
 //!
 //! 出入参都是 `{ mode, accent, petals, panorama, reduce_motion }`（snake_case），取值见
-//! aurora-core 的 appearance 模块。
+//! petalfall-core 的 appearance 模块。
 
-use aurora_core::{Appearance, AppearancePatch};
+use petalfall_core::{Appearance, AppearancePatch};
 use serde_json::Value;
 use tauri::State;
 
@@ -37,27 +37,27 @@ pub(crate) async fn set_appearance_with(
 
     // 没存住时门面原样不动：否则之后读到的是一份重启即丢的外观，与前端回滚后的状态也对不上。
     facade
-        .update(|aurora| Ok::<_, CommandError>(aurora.set_appearance(patch)))
+        .update(|petalfall| Ok::<_, CommandError>(petalfall.set_appearance(patch)))
         .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_core::{AccentColor, AppearanceMode, Aurora, AuroraConfig, ConfigStore};
+    use petalfall_core::{AccentColor, AppearanceMode, ConfigStore, Petalfall, PetalfallConfig};
     use serde_json::json;
     use std::path::Path;
 
     use crate::commands::error::code;
 
     fn facade_at(config_path: &Path, data_dir: &Path) -> Facade {
-        let aurora = Aurora::open(
-            AuroraConfig::default(),
+        let petalfall = Petalfall::open(
+            PetalfallConfig::default(),
             data_dir.to_path_buf(),
             config_path.to_path_buf(),
         )
         .unwrap();
-        Facade::new(aurora)
+        Facade::new(petalfall)
     }
 
     #[tokio::test]
