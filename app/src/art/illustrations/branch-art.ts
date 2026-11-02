@@ -352,12 +352,39 @@ export function placeBlossoms(layout: BranchLayout): PlacedBlossom[] {
   });
 }
 
+export interface PlacedPetal {
+  glyph: PetalGlyphName;
+  tone: PetalTone;
+  /** 字模左上角（格）。 */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** 本框里的花瓣：构图位置换算成字模左上角，再夹进画布。靠右下的几片在窄框、非整数缩放下会探出框边，被裁成半片。 */
+export function placePetals(layout: BranchLayout): PlacedPetal[] {
+  return PETALS.map((petal) => {
+    const { width, height } = PETAL_GLYPHS[petal.glyph];
+    const [px, py] = toCells(layout, petal.at);
+    return {
+      glyph: petal.glyph,
+      tone: petal.tone,
+      x: Math.max(0, Math.min(Math.round(px), layout.cols - width)),
+      y: Math.max(0, Math.min(Math.round(py), layout.rows - height)),
+      width,
+      height,
+    };
+  });
+}
+
 export interface BranchArt {
   cols: number;
   rows: number;
   /** 行优先，值为调色板下标 + 1，0 透明。 */
   cells: Uint8Array;
   blossoms: PlacedBlossom[];
+  petals: PlacedPetal[];
 }
 
 function stamp(cells: Uint8Array, layout: BranchLayout, grid: SpriteGrid, x0: number, y0: number): void {
@@ -378,15 +405,15 @@ export function paintBranch(width: number, height: number, cell: number): Branch
   paintBark(cells, layout, woodField(layout));
   const blossoms = placeBlossoms(layout);
   for (const b of blossoms) stamp(cells, layout, spriteVariant(b.sprite, b.tint, b.mirror), b.x, b.y);
-  for (const petal of PETALS) {
+  const petals = placePetals(layout);
+  for (const petal of petals) {
     const glyph = PETAL_GLYPHS[petal.glyph];
     const tone = PETAL_TONES[petal.tone];
     const keys = [null, PETAL_KEY[tone.main], PETAL_KEY[tone.light], PETAL_KEY[tone.dark]];
-    const [px, py] = toCells(layout, petal.at).map(Math.round);
     const grid = Array.from({ length: glyph.height }, (_, y) => Array.from({ length: glyph.width }, (_, x) => keys[glyph.cells[y * glyph.width + x]]));
-    stamp(cells, layout, grid, px, py);
+    stamp(cells, layout, grid, petal.x, petal.y);
   }
-  return { cols: layout.cols, rows: layout.rows, cells, blossoms };
+  return { cols: layout.cols, rows: layout.rows, cells, blossoms, petals };
 }
 
 /** 放大成位图：每格 cellDevice × cellDevice 个设备像素整块复制，不产生调色板之外的颜色。 */
