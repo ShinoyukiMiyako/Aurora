@@ -9,7 +9,7 @@ use petalfall_core::{CoreEvent, EventSink};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-/// 阶段、告警与下载进度。
+/// 阶段、告警、下载进度与多步任务的步骤。
 pub const CORE_EVENT: &str = "petalfall://core-event";
 
 /// 微软设备码登录拿到设备码时推送 user_code 与验证网址。
@@ -64,6 +64,11 @@ pub enum CoreEventKind {
         /// 瞬时速度，字节/秒。
         speed: u64,
     },
+    /// 进入多步任务的某一步：`plan` 是整份步骤表（各步的键），`index` 是这一步的下标。
+    Phase {
+        plan: Vec<&'static str>,
+        index: usize,
+    },
 }
 
 impl From<CoreEvent> for CoreEventKind {
@@ -78,6 +83,10 @@ impl From<CoreEvent> for CoreEventKind {
                 total_bytes: p.total_bytes,
                 transferred: p.transferred,
                 speed: p.speed,
+            },
+            CoreEvent::Phase { plan, index } => CoreEventKind::Phase {
+                plan: plan.into_iter().map(|phase| phase.key()).collect(),
+                index,
             },
         }
     }
@@ -193,6 +202,35 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&session).unwrap(),
             json!({ "task_id": null, "kind": "stage", "message": "开始安装原版 1.21" })
+        );
+    }
+
+    /// 步骤事件带整份步骤表的键与下标，前端按键取文案、按下标写「第几步，共几步」。
+    #[test]
+    fn phase_payload_carries_the_plan_keys_and_index() {
+        use petalfall_core::InstallPhase;
+        let payload = CoreEventPayload {
+            task_id: Some("t#1".into()),
+            step: None,
+            event: CoreEvent::Phase {
+                plan: vec![
+                    InstallPhase::Metadata,
+                    InstallPhase::Libraries,
+                    InstallPhase::Assets,
+                    InstallPhase::Natives,
+                ],
+                index: 2,
+            }
+            .into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap(),
+            json!({
+                "task_id": "t#1",
+                "kind": "phase",
+                "plan": ["metadata", "libraries", "assets", "natives"],
+                "index": 2
+            })
         );
     }
 

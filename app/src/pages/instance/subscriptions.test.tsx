@@ -417,6 +417,39 @@ describe("实例详情：本实例的进度在走", () => {
     expect(renders).toEqual(before);
   });
 
+  it("新建报了在第几步，再来 20 次下载进度：横幅写整体百分比与第几步、不写这一批的总量，头图、标签条与概览不重渲染", async () => {
+    const name = "周末生存";
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.createInstance({ name, mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "cherry_planks" });
+      await settle(20);
+    });
+    act(() => nav.go({ page: "instance", id: name, tab: "overview" }));
+    await flush();
+    const task = launcher.state.tasks.find((t) => t.instanceId === name);
+    if (task === undefined || task.status !== "running") throw new Error("新建任务应在进行中");
+    const before = { ...renders };
+    act(() => {
+      emit(CORE_EVENT, { kind: "phase", task_id: `${task.id}#1`, plan: ["metadata", "loader_profile", "libraries", "assets", "natives"], index: 2 });
+    });
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: i, bytes: i * 1000, total_bytes: 40_000, transferred: i * 1000, speed: 1_000_000 });
+      });
+    }
+    // 权重 1 + 1 + 7 + 11 + 1 = 21，前两步占 2，库这一步走了一半：(2 + 3.5) / 21
+    const progress = launcher.state.tasks.find((t) => t.id === task.id)?.progress;
+    if (progress === undefined) throw new Error("新建任务不见了");
+    expect(progress).toBeCloseTo(5.5 / 21, 10);
+    expect(document.body.textContent).toContain(HERO_COPY.installing("26%"));
+    expect(document.body.textContent).toContain(OVERVIEW_COPY.installStepProgress("26%", "第 3 步，共 5 步：下载游戏本体与库文件", formatSpeed(1_000_000)));
+    expect(document.body.textContent).not.toContain(formatBytes(40_000));
+    // 头图胶囊的副行放不下整句，写短的
+    expect(document.body.textContent).toContain("下载游戏本体与库文件 · 第 3/5 步");
+    expect(renders).toEqual(before);
+  });
+
   it("启动停在下载阶段，20 次进度：头图、标签条与概览不重渲染，胶囊上的文件计数照常走", async () => {
     const spawn = deferred<{ pid: number }>();
     ipc.overrides.set("launch_game", () => spawn.promise);

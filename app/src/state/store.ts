@@ -31,6 +31,7 @@ import {
   accountFromDto,
   authServerFromDto,
   authlibProfileFromDto,
+  installPhasesFromDto,
   instanceFromDto,
   instanceSettingsFromDto,
   instanceSettingsToDto,
@@ -110,6 +111,7 @@ import {
 import {
   applyCompositeDownload,
   applyTaskDownload,
+  applyTaskPhase,
   attemptTaskId,
   awaitsManualFiles,
   clearFinished,
@@ -1564,6 +1566,14 @@ export class LauncherStore {
   private onCoreEvent(event: CoreEvent): void {
     // 不带 task_id 的事件属于启动会话或非任务命令（离线用户名告警）；启动的进度走 launch-phase，日志走 game-log
     if (event.task_id === null) return;
+    // 基底的占用随阶段事件重扫（见 rescanHoldingBases），步骤事件不再多扫一遍
+    if (event.kind === "phase") {
+      const attemptId = event.task_id;
+      const index = event.index;
+      const plan = installPhasesFromDto(event.plan);
+      this.set((raw) => ({ tasks: applyTaskPhase(raw.tasks, attemptId, plan, index) }));
+      return;
+    }
     if (event.kind === "download") {
       const attemptId = event.task_id;
       const snapshot: DownloadSnapshot = { total: event.total, finished: event.finished, bytes: event.bytes, totalBytes: event.total_bytes, transferred: event.transferred, speed: event.speed };

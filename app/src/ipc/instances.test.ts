@@ -339,6 +339,38 @@ describe("mock：新建与补全", () => {
     expect(last).toMatchObject({ finished: 40, total: 40 });
   });
 
+  it("新建与补全按后端的步骤表逐步报出：每条都带整份表，本体与库那一步在下载之前，之后各步在下载之后", async () => {
+    vi.useFakeTimers();
+    const events: CoreEvent[] = [];
+    await onCoreEvent((e) => events.push(e));
+    const run = async <T>(promise: Promise<T>) => {
+      await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
+      return promise;
+    };
+    /** 这个任务报出的步骤（按 plan[index] 换成键），并核对每条的表都是同一份、下标从 0 依次加一。 */
+    const steps = (taskId: string) => {
+      const phases = events.flatMap((e) => (e.kind === "phase" && e.task_id === taskId ? [e] : []));
+      const plan = phases.length === 0 ? [] : phases[0].plan;
+      expect(phases.map((e) => [e.plan, e.index]), taskId).toEqual(plan.map((_, i) => [plan, i]));
+      return phases.map((e) => e.plan[e.index]);
+    };
+    await run(installVersion("t-fabric", "1.21.1", "fabric", null, "周末生存"));
+    expect(steps("t-fabric")).toEqual(["metadata", "loader_profile", "libraries", "assets", "natives"]);
+    const order = events.flatMap((e) => (e.task_id !== "t-fabric" ? [] : e.kind === "phase" ? [e.plan[e.index]] : e.kind === "download" ? ["download"] : []));
+    expect(order.indexOf("libraries")).toBeLessThan(order.indexOf("download"));
+    expect(order.lastIndexOf("download")).toBeLessThan(order.indexOf("assets"));
+
+    await run(installVersion("t-vanilla", "1.21.1", null, null, "原版", true));
+    expect(steps("t-vanilla")).toEqual(["metadata", "libraries", "assets", "natives", "template"]);
+    await run(installVersion("t-forge", "1.20.1", "forge", "47.2.0", "锻造"));
+    expect(steps("t-forge")).toEqual(["metadata", "libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"]);
+    // 只补全的实例走三步；照未完成标记重装的走新建那一份表，不套模板
+    await run(repairInstance("t-complete", "樱花生存"));
+    expect(steps("t-complete")).toEqual(["libraries", "assets", "natives"]);
+    await run(repairInstance("t-reinstall", "没装完"));
+    expect(steps("t-reinstall")).toEqual(["metadata", "libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"]);
+  });
+
   it("新建的实例不继承已经不在的同名旧实例留下的游玩记录，别的实例的记录不动", async () => {
     vi.useFakeTimers();
     // 浏览器里刷新时实例从存储里恢复、游玩记录重新播种：删掉的 1.21 不在了，它的记录却又回来了

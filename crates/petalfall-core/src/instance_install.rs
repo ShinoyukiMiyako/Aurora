@@ -15,6 +15,7 @@
 //! 安装链路。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use petalfall_install::{
@@ -30,7 +31,7 @@ use petalfall_version::{LoaderInfo, LoaderKind, VersionJson, identify_mc_version
 
 use crate::InstanceError;
 use crate::error::{CoreError, Result};
-use crate::event::{CoreEvent, EventSink, emit};
+use crate::event::{CoreEvent, EventSink, InstallPhase, emit};
 use crate::facade::{Petalfall, make_context};
 use crate::install::LoaderChoice;
 use crate::instances::{LEGACY_JAVA_MAJOR, broken_reason_text, inheritance_root};
@@ -217,6 +218,9 @@ impl Petalfall {
     ) -> Result<InstanceInstallOutcome> {
         request.validate()?;
         let dir = self.existing_instance_dir(id).await?;
+        let announcer = PhaseAnnouncer::new(events, install_plan(request));
+        let report_phase = |phase| announcer.enter(phase);
+        announcer.enter(InstallPhase::Metadata);
         self.prepare_sources().await?;
         let layout = self.layout();
         let pool = self.download_pool_reporting(events);
@@ -229,7 +233,8 @@ impl Petalfall {
             self.runtime(),
             &policy,
             self.cancel_token(),
-        );
+        )
+        .with_phases(Some(&report_phase));
         let mc = request.mc_version.as_str();
 
         emit(events, CoreEvent::stage(format!("查找原版 {mc}")));
@@ -249,6 +254,7 @@ impl Petalfall {
                     LoaderChoice::Fabric => (LoaderFlavor::Fabric, self.fabric_base()),
                     _ => (LoaderFlavor::Quilt, self.quilt_base()),
                 };
+                announcer.enter(InstallPhase::LoaderProfile);
                 emit(
                     events,
                     CoreEvent::stage(format!("获取 {} 加载器信息", choice.display_name())),
@@ -275,6 +281,7 @@ impl Petalfall {
                     .java_version
                     .as_ref()
                     .map_or(LEGACY_JAVA_MAJOR, |java| java.major_version);
+                announcer.enter(InstallPhase::Java);
                 let (_, java) = self.resolve_java(major, events).await?;
                 let url = match choice {
                     LoaderChoice::Forge => forge_installer_url(mc, &version),
@@ -321,7 +328,17 @@ impl Petalfall {
             })
             .await?;
         emit(events, CoreEvent::stage("补全库、资源与 natives"));
-        let report = ensure_complete(cx, &merged, id).await?;
+        // Forge / NeoForge 的原版文件与加载器的库在这之前都已下好，这一遍照合并后的版本 JSON 再核一遍：整遍合成
+        // 「校验」一步报，库、资源与 natives 这几步前面已经报过，不再报。
+        let report = if matches!(
+            request.loader,
+            Some(LoaderChoice::Forge | LoaderChoice::NeoForge)
+        ) {
+            announcer.enter(InstallPhase::Verify);
+            ensure_complete(cx.with_phases(None), &merged, id).await?
+        } else {
+            ensure_complete(cx, &merged, id).await?
+        };
         tokio::fs::remove_file(&staged)
             .await
             .map_err(|source| petalfall_base::Error::Io {
@@ -332,6 +349,7 @@ impl Petalfall {
         // 建目录那一刻还读不到。仍然在第一次启动之前，游戏还没来得及写出自己的默认设置。套失败让安装
         // 失败：重试经补全重装时会再套一次，标记里记着这次请求了套用。
         let template = if request.use_template {
+            announcer.enter(InstallPhase::Template);
             let outcome = self.apply_template(id).await?;
             emit(events, CoreEvent::stage(template_stage(&outcome)));
             Some(outcome)
@@ -563,6 +581,15 @@ impl Petalfall {
                 let pool = self.download_pool_reporting(events);
                 let policy = self.retry_policy();
                 let http = self.http();
+                let announcer = PhaseAnnouncer::new(
+                    events,
+                    vec![
+                        InstallPhase::Libraries,
+                        InstallPhase::Assets,
+                        InstallPhase::Natives,
+                    ],
+                );
+                let report_phase = |phase| announcer.enter(phase);
                 let cx = make_context(
                     &http,
                     &pool,
@@ -570,7 +597,8 @@ impl Petalfall {
                     self.runtime(),
                     &policy,
                     self.cancel_token(),
-                );
+                )
+                .with_phases(Some(&report_phase));
                 emit(events, CoreEvent::stage(format!("补全实例 {id} 的文件")));
                 let report = ensure_complete(cx, &merged, &root).await?;
                 emit(
@@ -634,6 +662,73 @@ fn reinstallable_loader(
             choice.display_name()
         )),
         Some((choice, Some(version))) => Ok((choice, version)),
+    }
+}
+
+/// 新建要走的各步。Forge / NeoForge 的处理器要读实例目录里的客户端 jar，先把原版补齐；加载器装好后照合并后的
+/// 版本 JSON 再补一遍，这一遍合成「校验」一步报。
+fn install_plan(request: &InstanceRequest) -> Vec<InstallPhase> {
+    use InstallPhase::*;
+    let mut plan = vec![Metadata];
+    match request.loader {
+        None => plan.extend([Libraries, Assets, Natives]),
+        Some(LoaderChoice::Fabric | LoaderChoice::Quilt) => {
+            plan.extend([LoaderProfile, Libraries, Assets, Natives]);
+        }
+        Some(LoaderChoice::Forge | LoaderChoice::NeoForge) => plan.extend([
+            Libraries,
+            Assets,
+            Natives,
+            Java,
+            LoaderInstaller,
+            LoaderLibraries,
+            LoaderProcessors,
+            Verify,
+        ]),
+    }
+    if request.use_template {
+        plan.push(Template);
+    }
+    plan
+}
+
+/// 按开工时排定的步骤表报步骤。报来的步骤不在表里、比上一步靠前或报了两遍，说明表排错了：前端拿到这样的
+/// 下标只会算出倒退的进度，直接崩。
+struct PhaseAnnouncer<'a> {
+    events: Option<&'a EventSink>,
+    plan: Vec<InstallPhase>,
+    /// 下一步最小的合法下标。
+    next: AtomicUsize,
+}
+
+impl<'a> PhaseAnnouncer<'a> {
+    fn new(events: Option<&'a EventSink>, plan: Vec<InstallPhase>) -> Self {
+        Self {
+            events,
+            plan,
+            next: AtomicUsize::new(0),
+        }
+    }
+
+    fn enter(&self, phase: InstallPhase) {
+        let index = self
+            .plan
+            .iter()
+            .position(|p| *p == phase)
+            .unwrap_or_else(|| panic!("步骤 {phase:?} 不在这次的步骤表 {:?} 里", self.plan));
+        let floor = self.next.swap(index + 1, Ordering::Relaxed);
+        assert!(
+            index >= floor,
+            "步骤 {phase:?} 报在了它后面的步骤之后，或报了两遍：{:?}",
+            self.plan
+        );
+        emit(
+            self.events,
+            CoreEvent::Phase {
+                plan: self.plan.clone(),
+                index,
+            },
+        );
     }
 }
 
@@ -916,6 +1011,138 @@ mod tests {
         );
     }
 
+    fn drain(mut rx: tokio::sync::mpsc::UnboundedReceiver<CoreEvent>) -> Vec<CoreEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    /// 步骤事件按到达先后的 (步骤表, 下标)。
+    fn phases_of(events: &[CoreEvent]) -> Vec<(Vec<InstallPhase>, usize)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                CoreEvent::Phase { plan, index } => Some((plan.clone(), *index)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 新建一路报出的步骤：第一条事件就是第一步，表里每一步按先后各报一次、一步不跳，整份表全程不变。
+    /// 套默认设置时这一步照报，哪怕实例共用游戏目录、最后没有套。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_announces_every_phase_once_in_plan_order() {
+        use InstallPhase::*;
+        let server = MockServer::start().await;
+        mock_meta(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path())
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_fabric_base(server.uri());
+        put_template(&petalfall, &[("options.txt", b"fov:90")]);
+        let cases = [
+            (
+                "织布",
+                request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10")),
+                vec![Metadata, LoaderProfile, Libraries, Assets, Natives],
+            ),
+            (
+                "原版",
+                InstanceRequest {
+                    use_template: true,
+                    ..request("1.21.1", None, None)
+                },
+                vec![Metadata, Libraries, Assets, Natives, Template],
+            ),
+        ];
+
+        for (name, req, plan) in cases {
+            petalfall.create_instance_dir(name, &req).await.unwrap();
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            petalfall
+                .install_instance(name, &req, Some(&tx))
+                .await
+                .unwrap();
+            drop(tx);
+
+            let events = drain(rx);
+            assert!(
+                matches!(events[0], CoreEvent::Phase { index: 0, .. }),
+                "{name}: {events:?}"
+            );
+            assert_eq!(
+                phases_of(&events),
+                (0..plan.len())
+                    .map(|i| (plan.clone(), i))
+                    .collect::<Vec<_>>(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn plans_list_the_steps_each_loader_goes_through() {
+        use InstallPhase::*;
+        let plan = |loader, version: Option<&str>, use_template| {
+            install_plan(&InstanceRequest {
+                use_template,
+                ..request("1.20.1", loader, version)
+            })
+        };
+        for use_template in [false, true] {
+            let tail: &[InstallPhase] = if use_template { &[Template] } else { &[] };
+            let expect = |steps: &[InstallPhase]| [steps, tail].concat();
+            assert_eq!(
+                plan(None, None, use_template),
+                expect(&[Metadata, Libraries, Assets, Natives])
+            );
+            for choice in [LoaderChoice::Fabric, LoaderChoice::Quilt] {
+                assert_eq!(
+                    plan(Some(choice), None, use_template),
+                    expect(&[Metadata, LoaderProfile, Libraries, Assets, Natives])
+                );
+            }
+            for (choice, version) in [
+                (LoaderChoice::Forge, "47.2.0"),
+                (LoaderChoice::NeoForge, "21.1.77"),
+            ] {
+                assert_eq!(
+                    plan(Some(choice), Some(version), use_template),
+                    expect(&[
+                        Metadata,
+                        Libraries,
+                        Assets,
+                        Natives,
+                        Java,
+                        LoaderInstaller,
+                        LoaderLibraries,
+                        LoaderProcessors,
+                        Verify,
+                    ])
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "报了两遍")]
+    fn announcing_a_phase_twice_panics() {
+        let announcer =
+            PhaseAnnouncer::new(None, vec![InstallPhase::Metadata, InstallPhase::Libraries]);
+        announcer.enter(InstallPhase::Libraries);
+        announcer.enter(InstallPhase::Libraries);
+    }
+
+    #[test]
+    #[should_panic(expected = "不在这次的步骤表")]
+    fn announcing_a_phase_outside_the_plan_panics() {
+        let announcer =
+            PhaseAnnouncer::new(None, vec![InstallPhase::Metadata, InstallPhase::Libraries]);
+        announcer.enter(InstallPhase::Template);
+    }
+
     #[test]
     fn request_round_trips_through_the_marker_spec() {
         for use_template in [true, false] {
@@ -1120,12 +1347,23 @@ mod tests {
         assert_eq!(on_disk.kind, IncompleteKind::Repair);
         assert_eq!(on_disk.outcome, IncompleteOutcome::Pending);
 
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let outcome = petalfall
-            .repair_instance("1.21.1", &plan, None)
+            .repair_instance("1.21.1", &plan, Some(&tx))
             .await
             .unwrap();
+        drop(tx);
         assert!(!outcome.reinstalled);
         assert_eq!(outcome.libraries, 0);
+        let steps = vec![
+            InstallPhase::Libraries,
+            InstallPhase::Assets,
+            InstallPhase::Natives,
+        ];
+        assert_eq!(
+            phases_of(&drain(rx)),
+            vec![(steps.clone(), 0), (steps.clone(), 1), (steps, 2)]
+        );
         petalfall
             .settle_instance_marker("1.21.1", marker.clone(), MarkerSettlement::Succeeded)
             .await

@@ -110,6 +110,31 @@ export interface TaskSpec {
   args: Record<string, unknown>;
 }
 
+/** 新建、补全实例的各步，取值与后端 InstallPhase::key 一一对应。 */
+export const INSTALL_PHASES = [
+  "metadata",
+  "loader_profile",
+  "libraries",
+  "assets",
+  "natives",
+  "java",
+  "loader_installer",
+  "loader_libraries",
+  "loader_processors",
+  "verify",
+  "template",
+] as const;
+export type InstallPhase = (typeof INSTALL_PHASES)[number];
+
+export interface TaskPhase {
+  /** 这次尝试的整份步骤表，开工时由后端排定、全程不变。 */
+  plan: readonly InstallPhase[];
+  /** 当前一步在 plan 里的下标。 */
+  index: number;
+  /** 这一步认下的那批下载；还没认下为 null。上一步晚到的收尾快照不会被认下。 */
+  batch: { total: number; totalBytes: number | null } | null;
+}
+
 /** 任务失败记录：错误码与后端原文；以 distribution_blocked 失败时另带需要手动下载的文件清单，较早的日志里没有它。 */
 export interface TaskError {
   code: string;
@@ -124,7 +149,7 @@ export interface Task {
   detail: string;
   instanceId: string | null;
   status: TaskStatus;
-  /** 0-1。 */
+  /** 0-1。分步任务是这一次尝试的整体进度，只进不退；其余任务是当前这一批的进度。 */
   progress: number;
   /** 当前这一批下载已下的字节；一次安装连跑好几批，每批从 0 重新计。 */
   bytes: number;
@@ -137,6 +162,8 @@ export interface Task {
   batchTransferred: number;
   /** 当前这一批的文件数：有文件没声明大小时 totalBytes 是 null，前后两批只能靠它区分，不落盘；组合任务不用它，恒为 0。 */
   batchFiles: number;
+  /** 新建、补全实例这类分步任务当前在哪一步；别的任务或还没报第一步时为 null。不落盘：读回的任务都已结束。 */
+  phase: TaskPhase | null;
   speedBps: number;
   /** 这一次尝试开始运行的时刻；排队中、还没开始过为 null。「用时」是 finishedAt 减去它，不含排队等待。 */
   startedAt: number | null;

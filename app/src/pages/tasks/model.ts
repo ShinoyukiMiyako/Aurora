@@ -2,7 +2,7 @@
 // 页面组件只负责把这些结果画出来，规则都在这里，便于不挂界面直接测。
 
 import type { IconName } from "../../art/Icon";
-import { CONFIRM_COPY, TASK_STATUS_LABEL, TASK_TEXT, taskFailureReason } from "../../copy/flows";
+import { CONFIRM_COPY, TASK_STATUS_LABEL, TASK_TEXT, taskFailureReason, taskPhaseText } from "../../copy/flows";
 import { formatBytes, formatPlaytime, formatRelative, formatSpeed, percent } from "../../domain/format";
 import { MAX_PARALLEL_TASKS } from "../../domain/limits";
 import type { Task, TaskKind } from "../../domain/types";
@@ -125,7 +125,7 @@ export function taskGroups(b: TaskBuckets, filter: TaskFilter): TaskGroup[] {
 }
 
 /** 下载进度快照只改这几个字段。 */
-const PROGRESS_FIELDS: ReadonlySet<string> = new Set<keyof Task>(["progress", "bytes", "totalBytes", "doneBytes", "transferredBytes", "batchTransferred", "batchFiles", "speedBps"]);
+const PROGRESS_FIELDS: ReadonlySet<string> = new Set<keyof Task>(["progress", "bytes", "totalBytes", "doneBytes", "transferredBytes", "batchTransferred", "batchFiles", "phase", "speedBps"]);
 
 function sameApartFromProgress(a: Task, b: Task): boolean {
   if (a === b) return true;
@@ -247,10 +247,16 @@ function sizeOrPending(bytes: number | null): string {
   return bytes === null ? TASKS_COPY.row.sizePending : formatBytes(bytes);
 }
 
+/**
+ * 分步任务这一步还没认下下载批次时，字节与速度还是上一批留下的，写出来像在下这一步，所以只写在第几步；
+ * 认下之后写的量与剩余时间都是这一步这一批的。
+ */
 function runningMeta(task: Task, speedForEta: number): { left: string; right: string } {
+  if (task.phase !== null && task.phase.batch === null) return { left: taskPhaseText(task.phase, "short"), right: "" };
   const total = task.totalBytes;
-  const left =
+  const amount =
     total === null ? (task.bytes > 0 ? TASKS_COPY.row.transfer(formatBytes(task.bytes), TASKS_COPY.row.sizePending) : TASKS_COPY.row.sizePending) : TASKS_COPY.row.transfer(formatBytes(task.bytes), formatBytes(total));
+  const left = task.phase === null ? amount : `${taskPhaseText(task.phase, "short")} · ${amount}`;
   if (task.speedBps <= 0) return { left, right: TASKS_COPY.row.waitingData };
   // 总量未知时估不出剩余时间，只报速度
   if (total === null) return { left, right: formatSpeed(task.speedBps) };

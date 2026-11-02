@@ -7,7 +7,7 @@ import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
 import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import { GPU_COPY } from "../pages/settings/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
-import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, failureCopy, failureToastLabel, lockReason, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskFailureReason, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
+import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, failureCopy, failureToastLabel, INSTALL_PHASE_LABEL, lockReason, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskFailureReason, taskPhaseText, taskStatusLabel, TOAST_COPY, type FailureContext } from "./flows";
 import { PEEK_COPY } from "./shell";
 
 /** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
@@ -119,6 +119,29 @@ describe("进行中的状态", () => {
   ])("%s以「正在」开头、以省略号结尾", (_where, text) => {
     expect(text).toMatch(/正在[^…]+…$/);
     expect(text).not.toContain("...");
+  });
+});
+
+describe("分步任务的步骤", () => {
+  const VANILLA = ["metadata", "libraries", "assets", "natives"] as const;
+  const FORGE = ["metadata", "libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"] as const;
+
+  it("横幅写整句，胶囊与任务行这类窄处写短的；首末两步与长表一样", () => {
+    expect(taskPhaseText({ plan: VANILLA, index: 2 }, "long")).toBe("第 3 步，共 4 步：下载资源文件");
+    expect(taskPhaseText({ plan: VANILLA, index: 2 }, "short")).toBe("下载资源文件 · 第 3/4 步");
+    expect(taskPhaseText({ plan: VANILLA, index: 0 }, "short")).toBe("获取版本信息 · 第 1/4 步");
+    expect(taskPhaseText({ plan: VANILLA, index: 3 }, "long")).toBe("第 4 步，共 4 步：解压本地库");
+    expect(taskPhaseText({ plan: FORGE, index: 8 }, "long")).toBe("第 9 步，共 9 步：校验游戏文件");
+    expect(taskPhaseText({ plan: FORGE, index: 4 }, "short")).toBe("准备 Java · 第 5/9 步");
+  });
+
+  it("下标越出步骤表是调用方的错，不写出一句缺了步骤名的话", () => {
+    expect(() => taskPhaseText({ plan: VANILLA, index: 4 }, "long")).toThrow("超出步骤表");
+    expect(() => taskPhaseText({ plan: VANILLA, index: -1 }, "short")).toThrow("超出步骤表");
+  });
+
+  it("各步的文案不含禁用词", () => {
+    expect(bannedIn(Object.values(INSTALL_PHASE_LABEL))).toEqual([]);
   });
 });
 

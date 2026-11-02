@@ -3,7 +3,7 @@
 
 import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed } from "../domain/format";
 import type { BaseBusyLock, InstanceLock } from "../domain/instance-locks";
-import type { AccountKind, FailureCode, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskStatus } from "../domain/types";
+import type { AccountKind, FailureCode, InstallPhase, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskPhase, TaskStatus } from "../domain/types";
 import type { CrashSource, ExitCodeKind, ExitCodeNoteDto, LaunchWarningCode } from "../ipc/diagnostics";
 import type { NameRule, TemplateSkipReason } from "../ipc/instances";
 import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
@@ -848,6 +848,31 @@ export const TASK_TEXT = {
   queuePosition: (n: number) => `排队中 · 第 ${n} 位`,
   attempt: (k: number) => `第 ${k} 次尝试`,
 } as const;
+
+/** 新建、补全实例的各步；键与后端 InstallPhase::key 一致。「校验游戏文件」「解压本地库」与启动阶段表同一说法。 */
+export const INSTALL_PHASE_LABEL: Readonly<Record<InstallPhase, string>> = {
+  metadata: "获取版本信息",
+  loader_profile: "获取加载器信息",
+  libraries: "下载游戏本体与库文件",
+  assets: "下载资源文件",
+  natives: "解压本地库",
+  java: "准备 Java",
+  loader_installer: "下载加载器安装器",
+  loader_libraries: "下载加载器的库文件",
+  loader_processors: "执行加载器安装器",
+  verify: "校验游戏文件",
+  template: "沿用默认设置",
+};
+
+/** 分步任务当前在第几步。long 用在横幅这类整句处，short 用在胶囊、任务行这类窄处。 */
+export function taskPhaseText(phase: Pick<TaskPhase, "plan" | "index">, form: "long" | "short"): string {
+  const key = phase.plan[phase.index];
+  if (key === undefined) throw new Error(`步骤下标 ${phase.index} 超出步骤表 ${phase.plan.join()}`);
+  const at = phase.index + 1;
+  const count = phase.plan.length;
+  const label = INSTALL_PHASE_LABEL[key];
+  return form === "long" ? `第 ${at} 步，共 ${count} 步：${label}` : `${label} · 第 ${at}/${count} 步`;
+}
 
 /** 前端给「上次关闭时中断」的任务用的错误码。 */
 export const TASK_INTERRUPTED_CODE = "interrupted";

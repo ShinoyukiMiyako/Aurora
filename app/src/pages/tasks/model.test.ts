@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { formatBytes } from "../../domain/format";
 import { MAX_PARALLEL_TASKS } from "../../domain/limits";
-import { TASK_KINDS, type Task, type TaskKind } from "../../domain/types";
+import { TASK_KINDS, type InstallPhase, type Task, type TaskKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
 import { newTask } from "../../state/tasks";
 import { CHART_MIN_CEILING_BPS, ETA_WINDOW_SAMPLES, THROUGHPUT_SAMPLES } from "./constants";
@@ -146,6 +147,24 @@ describe("行内元信息", () => {
     expect(rowMeta(task("r", { status: "running", bytes: 0, totalBytes: 612 * MB, speedBps: 0 }), ctx()).right).toBe("等待数据");
     expect(rowMeta(task("r", { status: "running", bytes: 0, totalBytes: null, speedBps: 0 }), ctx())).toMatchObject({ left: "大小待定", right: "等待数据" });
     expect(rowMeta(task("r", { status: "running", bytes: 3 * MB, totalBytes: null, speedBps: MB }), ctx())).toMatchObject({ left: "3.0 MB / 大小待定", right: "1.0 MB/s" });
+  });
+
+  describe("运行中的分步任务", () => {
+    const VANILLA: readonly InstallPhase[] = ["metadata", "libraries", "assets", "natives"];
+
+    it("这一步还没认下下载：只写在第几步，上一批留下的字节与速度不写", () => {
+      const t = task("r", { kind: "game", status: "running", bytes: 50e6, totalBytes: 50e6, speedBps: 3 * MB, phase: { plan: VANILLA, index: 3, batch: null } });
+      expect(rowMeta(t, ctx({ etaSpeed: 2 * MB }))).toEqual({ left: "解压本地库 · 第 4/4 步", right: "", danger: false });
+      expect(rowMeta({ ...t, attempt: 2 }, ctx()).left).toBe("解压本地库 · 第 4/4 步 · 第 2 次尝试");
+    });
+
+    it("认下了这一步的那批：在第几步之后写这一批的量，右侧照常是速度与剩余时间", () => {
+      const t = task("r", { kind: "game", status: "running", bytes: 24_800_000, totalBytes: 124_000_000, speedBps: 4 * MB, phase: { plan: VANILLA, index: 2, batch: { total: 3000, totalBytes: 124_000_000 } } });
+      const meta = rowMeta(t, ctx({ etaSpeed: 4 * MB }));
+      expect(meta.left).toBe(`下载资源文件 · 第 3/4 步 · ${TASKS_COPY.row.transfer(formatBytes(24_800_000), formatBytes(124_000_000))}`);
+      // 剩余 99.2 MB（这一批的），4 MB/s → 23.7 秒 → 约 25 秒
+      expect(meta.right).toBe("4.0 MB/s · 约 25 秒");
+    });
   });
 
   it("排队中：位次与总量；没有位次是调用方的错", () => {
@@ -400,6 +419,11 @@ describe("任务表的结构比较", () => {
   it("只换了下载进度的七个字段：结构相同", () => {
     const next = { ...running, progress: 0.9, bytes: 9 * MB, totalBytes: 12 * MB, doneBytes: 9 * MB, transferredBytes: 2 * MB, batchTransferred: 2 * MB, speedBps: 0 };
     expect(sameTaskLayout([running, queued], [next, queued])).toBe(true);
+  });
+
+  it("分步任务换了一步、认下了一批：只是进度，结构相同", () => {
+    const stepped = { ...running, phase: { plan: ["metadata", "libraries"] as const, index: 1, batch: { total: 40, totalBytes: 10 * MB } } };
+    expect(sameTaskLayout([running, queued], [stepped, queued])).toBe(true);
   });
 
   it("换了状态、尝试次数、结束时刻或标题：结构变了", () => {

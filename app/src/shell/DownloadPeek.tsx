@@ -4,7 +4,7 @@
 
 import { useEffect, useState } from "react";
 import { Icon } from "../art/Icon";
-import { ACTION_ERROR, CONFIRM_COPY } from "../copy/flows";
+import { ACTION_ERROR, CONFIRM_COPY, taskPhaseText } from "../copy/flows";
 import { formatSpeed, percent } from "../domain/format";
 import type { Task } from "../domain/types";
 import type { ConfirmOptions } from "../launch/host";
@@ -179,7 +179,7 @@ function PeekRow({ task, onCancel }: { task: Task; onCancel: () => void }) {
       </div>
       <ProgressBar value={queued ? 0 : task.progress} tone={queued ? "muted" : "accent"} size="sm" track={progressTrack(task)} label={PEEK_COPY.rowProgress(task.title)} />
       <div className={styles.rowMeta}>
-        <span className={styles.rowDetail}>{task.detail}</span>
+        <span className={styles.rowDetail}>{queued || task.phase === null ? task.detail : taskPhaseText(task.phase, "short")}</span>
         <span className={styles.rowState}>{queued ? PEEK_COPY.queued : PEEK_COPY.progress(percent(task.progress), formatSpeed(task.speedBps))}</span>
       </div>
     </li>

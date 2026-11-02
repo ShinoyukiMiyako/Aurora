@@ -5,7 +5,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../../art/Icon";
 import { KindTile, WorldModeTile, type WorldMode } from "../../art/illustrations/FeatureTile";
 import { hueOf } from "../../art/illustrations/seed";
-import { ACTION_ERROR, CRASH_COPY, crashCategoryLabel, INSTANCE_IN_USE_COPY, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, REINSTALL_LOADER_LABEL } from "../../copy/flows";
+import { ACTION_ERROR, CRASH_COPY, crashCategoryLabel, INSTANCE_IN_USE_COPY, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, REINSTALL_LOADER_LABEL, taskPhaseText } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, percent } from "../../domain/format";
 import { canReinstallLoader, lostLoaderLibrary, needsReimport } from "../../domain/rules";
@@ -209,7 +209,9 @@ export function InstallingBanner({ instanceId }: { instanceId: string }) {
         <ProgressBar value={running ? task.progress : 0} tone="info" size="sm" track={task === null ? undefined : progressTrack(task)} label={title} />
         <span className={styles.num}>
           {running
-            ? OVERVIEW_COPY.installProgress(percent(task.progress), formatSpeed(task.speedBps), task.totalBytes === null ? null : formatBytes(task.totalBytes))
+            ? task.phase === null
+              ? OVERVIEW_COPY.installProgress(percent(task.progress), formatSpeed(task.speedBps), task.totalBytes === null ? null : formatBytes(task.totalBytes))
+              : OVERVIEW_COPY.installStepProgress(percent(task.progress), taskPhaseText(task.phase, "long"), formatSpeed(task.speedBps))
             : OVERVIEW_COPY.queuedBody}
         </span>
       </div>

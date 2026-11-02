@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TASK_INTERRUPTED_CODE } from "../copy/flows";
-import type { Task } from "../domain/types";
+import type { InstallPhase, Task } from "../domain/types";
 import { CORE_EVENT, type TaskRecordDto } from "../ipc/tasks";
 import { APP_NAME } from "../lib/app-info";
 import type { IpcRecorder } from "../test/fake-bridge";
@@ -9,12 +9,15 @@ import { bootOverrides, callsOf, cancelledError, deferred, emit, resetRecorder, 
 import {
   applyCompositeDownload,
   applyTaskDownload,
+  applyTaskPhase,
   compositeProgress,
   completeCompositeStep,
   findDuplicate,
+  markDone,
   markRunning,
   modFilesBeingUpdated,
   newTask,
+  PHASE_WEIGHT,
   progressTrack,
   queuePosition,
   retryTask,
@@ -23,6 +26,7 @@ import {
   trimHistory,
   tasksToStart,
   type CompositeProgress,
+  type DownloadSnapshot,
 } from "./tasks";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -311,6 +315,118 @@ describe("下载队列：纯函数", () => {
     expect(() => applyTaskDownload([broken], "t1#1", { total: 1, finished: 0, bytes: 1, totalBytes: 2, transferred: 1, speed: 1 })).toThrow("没有传输量");
   });
 
+  describe("分步任务（新建、补全实例）的整体进度", () => {
+    // 原版新建的四步，权重 1 / 7 / 11 / 1，共 20
+    const VANILLA: readonly InstallPhase[] = ["metadata", "libraries", "assets", "natives"];
+    const snap = (total: number, finished: number, bytes: number, totalBytes: number | null): DownloadSnapshot => ({ total, finished, bytes, totalBytes, transferred: bytes, speed: 0 });
+
+    it("三批各自从 0 跑到 100%，整体进度只进不退；上一步晚到的收尾快照不算进新的一步", () => {
+      let tasks = [task("t1", { status: "running" })];
+      const seen: number[] = [];
+      const tracks = new Set<string>();
+      const record = () => {
+        seen.push(tasks[0].progress);
+        tracks.add(progressTrack(tasks[0]));
+      };
+      const phase = (index: number) => {
+        tasks = applyTaskPhase(tasks, "t1#1", VANILLA, index);
+        record();
+      };
+      const download = (...args: Parameters<typeof snap>) => {
+        tasks = applyTaskDownload(tasks, "t1#1", snap(...args));
+        record();
+      };
+      phase(0);
+      // 版本 JSON：一个没声明大小的文件
+      download(1, 0, 0, null);
+      download(1, 1, 35_014, null);
+      phase(1);
+      download(40, 0, 0, 50e6);
+      download(40, 20, 25e6, 50e6);
+      download(40, 40, 50e6, 50e6);
+      phase(2);
+      // 资源那一步已经开始，库那一批的收尾快照这时才到
+      download(40, 40, 50e6, 50e6);
+      download(3000, 0, 0, 124e6);
+      download(3000, 600, 24.8e6, 124e6);
+      download(3000, 3000, 124e6, 124e6);
+      phase(3);
+      const expected = [0, 0, 0.05, 0.05, 0.05, 0.225, 0.4, 0.4, 0.4, 0.4, 0.51, 0.95, 0.95];
+      expect(seen).toHaveLength(expected.length);
+      seen.forEach((progress, i) => expect(progress, `第 ${i + 1} 条`).toBeCloseTo(expected[i], 10));
+      expect(seen.every((progress, i) => i === 0 || progress >= seen[i - 1])).toBe(true);
+      expect([...tracks]).toEqual(["t1#1:phased"]);
+      expect(tasks[0].doneBytes).toBe(174_035_014);
+      expect(tasks[0].phase).toEqual({ plan: VANILLA, index: 3, batch: null });
+      expect(markDone(tasks, "t1", 1, T0)[0].progress).toBe(1);
+    });
+
+    it("一出现就已下完的批次不算：文件全都现成，那一步的份额在下一步开始时补上，字节照样记账", () => {
+      let tasks = applyTaskPhase([task("t1", { status: "running" })], "t1#1", VANILLA, 1);
+      expect(tasks[0].progress).toBeCloseTo(0.05, 10);
+      tasks = applyTaskDownload(tasks, "t1#1", snap(40, 40, 50e6, 50e6));
+      expect(tasks[0].progress).toBeCloseTo(0.05, 10);
+      expect(tasks[0].phase).toEqual({ plan: VANILLA, index: 1, batch: null });
+      expect(tasks[0].doneBytes).toBe(50e6);
+      // 边界：一个文件都没有的空批次同样不算
+      tasks = applyTaskDownload(tasks, "t1#1", snap(0, 0, 0, 0));
+      expect(tasks[0].phase).toEqual({ plan: VANILLA, index: 1, batch: null });
+      tasks = applyTaskPhase(tasks, "t1#1", VANILLA, 2);
+      expect(tasks[0].progress).toBeCloseTo(0.4, 10);
+    });
+
+    it("步骤往回走、报两遍、越界或中途换表是后端的契约错误；别的尝试、已结束的任务不认", () => {
+      const at2 = applyTaskPhase([task("t1", { status: "running" })], "t1#1", VANILLA, 2);
+      expect(() => applyTaskPhase(at2, "t1#1", VANILLA, 1)).toThrow("已在第 2 步");
+      expect(() => applyTaskPhase(at2, "t1#1", VANILLA, 2)).toThrow("已在第 2 步");
+      const fresh = [task("t1", { status: "running" })];
+      expect(() => applyTaskPhase(fresh, "t1#1", ["metadata", "libraries"], 2)).toThrow("只有 2 步");
+      expect(() => applyTaskPhase(fresh, "t1#1", ["metadata", "libraries"], -1)).toThrow("只有 2 步");
+      expect(() => applyTaskPhase(fresh, "t1#1", ["metadata", "libraries"], 0.5)).toThrow("只有 2 步");
+      expect(() => applyTaskPhase(at2, "t1#1", ["metadata", "loader_profile", "libraries", "assets", "natives"], 3)).toThrow("步骤表中途变了");
+      expect(applyTaskPhase(at2, "t1#2", VANILLA, 3)).toEqual(at2);
+      const done = markDone(at2, "t1", 1, T0);
+      expect(applyTaskPhase(done, "t1#1", VANILLA, 3)).toEqual(done);
+    });
+
+    it("随机的批次、现成的批次与晚到快照：整体进度只进不退，每步都落在自己那一段里", () => {
+      const FORGE: readonly InstallPhase[] = ["metadata", "libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"];
+      const weights = FORGE.map((key) => PHASE_WEIGHT[key]);
+      const whole = weights.reduce((sum, w) => sum + w, 0);
+      const startOf = (index: number) => weights.slice(0, index).reduce((sum, w) => sum + w, 0) / whole;
+      const rand = (n: number) => Math.floor(Math.random() * n);
+      for (let run = 0; run < 40; run++) {
+        let tasks = [task("t1", { status: "running" })];
+        let last = 0;
+        let lastFinal: DownloadSnapshot | null = null;
+        for (let index = 0; index < FORGE.length; index++) {
+          tasks = applyTaskPhase(tasks, "t1#1", FORGE, index);
+          expect(tasks[0].progress, `第 ${run} 轮进入第 ${index} 步`).toBeCloseTo(Math.max(last, startOf(index)), 10);
+          last = tasks[0].progress;
+          // 校验那一步连跑两批，其余步骤零到两批；各批里随机夹着上一批的收尾快照
+          const batches = FORGE[index] === "verify" ? 2 : rand(3);
+          for (let b = 0; b < batches; b++) {
+            const total = 1 + rand(5000);
+            const totalBytes = rand(3) === 0 ? null : total * (1 + rand(1_000_000));
+            const ready = rand(4) === 0;
+            const steps = ready ? [total] : [0, ...Array.from({ length: 1 + rand(5) }, () => rand(total + 1)).sort((x, y) => x - y), total];
+            for (const finished of steps) {
+              if (lastFinal !== null && rand(3) === 0) tasks = applyTaskDownload(tasks, "t1#1", lastFinal);
+              const bytes = totalBytes === null ? finished * 100 : Math.round((totalBytes * finished) / total);
+              tasks = applyTaskDownload(tasks, "t1#1", snap(total, finished, bytes, totalBytes));
+              const progress = tasks[0].progress;
+              expect(progress, `第 ${run} 轮第 ${index} 步`).toBeGreaterThanOrEqual(last);
+              expect(progress, `第 ${run} 轮第 ${index} 步`).toBeLessThanOrEqual(startOf(index + 1) + 1e-12);
+              last = progress;
+            }
+            lastFinal = snap(total, total, totalBytes === null ? total * 100 : totalBytes, totalBytes);
+          }
+        }
+        expect(last).toBeLessThanOrEqual(1);
+      }
+    });
+  });
+
   it("组合任务的权重：声明大小都已知且总和大于 0 时按字节，否则按项数", () => {
     expect(compositeProgress([100, 300, 600])).toMatchObject({ weights: [100, 300, 600], totalBytes: 1000, index: 0, batches: [null, null, null], itemBytes: [0, 0, 0] });
     expect(compositeProgress([100, null, 600])).toMatchObject({ weights: [1, 1, 1], totalBytes: null });
@@ -480,13 +596,15 @@ describe("下载队列：纯函数", () => {
   });
 
   it("重试清掉上一次尝试的开始时刻、累计字节与传输量", () => {
-    const failed = task("t1", { status: "failed", startedAt: T0 + 5, doneBytes: 4096, transferredBytes: 2048, batchTransferred: 1024, finishedAt: T0 + 9, error: { code: "network_failed", message: "x" } });
-    expect(retryTask([failed], "t1")[0]).toMatchObject({ status: "queued", startedAt: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0 });
+    const phase = { plan: ["metadata", "libraries"] as const, index: 1, batch: null };
+    const failed = task("t1", { status: "failed", startedAt: T0 + 5, doneBytes: 4096, transferredBytes: 2048, batchTransferred: 1024, phase, finishedAt: T0 + 9, error: { code: "network_failed", message: "x" } });
+    expect(retryTask([failed], "t1")[0]).toMatchObject({ status: "queued", startedAt: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, phase: null });
   });
 
   it("开始运行时这一次尝试的进度全部从 0 算起", () => {
-    const queued = task("t1", { progress: 0.5, bytes: 9, totalBytes: 10, doneBytes: 9, transferredBytes: 9, batchTransferred: 9, speedBps: 9 });
-    expect(markRunning([queued], "t1", T0 + 10)[0]).toMatchObject({ status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, speedBps: 0, startedAt: T0 + 10 });
+    const phase = { plan: ["metadata", "libraries"] as const, index: 1, batch: { total: 3, totalBytes: 10 } };
+    const queued = task("t1", { progress: 0.5, bytes: 9, totalBytes: 10, doneBytes: 9, transferredBytes: 9, batchTransferred: 9, phase, speedBps: 9 });
+    expect(markRunning([queued], "t1", T0 + 10)[0]).toMatchObject({ status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, phase: null, speedBps: 0, startedAt: T0 + 10 });
   });
 
   it("重试较早记录里失败的任务：传输量从 0 算起，新进度能累加", () => {
@@ -721,6 +839,19 @@ describe("下载队列：状态容器", () => {
     emit(CORE_EVENT, { kind: "download", task_id: `${t.id}#1`, total: 4, finished: 1, bytes: 300, total_bytes: 1200, speed: 2048 });
     expect(store.getState().tasks[0]).toMatchObject({ bytes: 300, totalBytes: 1200, speedBps: 2048 });
     expect(store.getState().tasks[0].progress).toBeCloseTo(0.25, 10);
+    store.stop();
+  });
+
+  it("步骤事件按这一次尝试的 taskId 进到那一步；表里有不认识的步骤直接报错，任务停在原来那一步", async () => {
+    const store = await startedStore();
+    await store.actions.installJava(21);
+    await settle();
+    const t = store.getState().tasks[0];
+    emit(CORE_EVENT, { kind: "phase", task_id: `${t.id}#1`, plan: ["metadata", "libraries", "assets", "natives"], index: 2 });
+    expect(store.getState().tasks[0].phase).toEqual({ plan: ["metadata", "libraries", "assets", "natives"], index: 2, batch: null });
+    expect(store.getState().tasks[0].progress).toBeCloseTo(0.4, 10);
+    expect(() => emit(CORE_EVENT, { kind: "phase", task_id: `${t.id}#1`, plan: ["metadata", "libraries", "assets", "bogus"], index: 3 })).toThrow("未知的安装步骤：bogus");
+    expect(store.getState().tasks[0].phase).toMatchObject({ index: 2 });
     store.stop();
   });
 

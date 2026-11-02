@@ -12,6 +12,9 @@ pub type EventSink = mpsc::UnboundedSender<CoreEvent>;
 /// 下载进度快照（从 petalfall-download 透传，前端进度条直接消费）。
 pub use petalfall_download::DownloadProgress;
 
+/// 新建、补全实例的步骤（从 petalfall-install 透传，前端按它的键取文案）。
+pub use petalfall_install::InstallPhase;
+
 /// 一次操作过程中发出的事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreEvent {
@@ -21,6 +24,12 @@ pub enum CoreEvent {
     Warning(String),
     /// 批量下载进度快照。
     Download(DownloadProgress),
+    /// 进入多步任务（新建、补全实例）的某一步。`plan` 是这次的整份步骤表，开工时排定、全程不变；`index`
+    /// 是这一步在表里的下标，只增不减。前端据此写「第几步，共几步」，并按步折算整体进度。
+    Phase {
+        plan: Vec<InstallPhase>,
+        index: usize,
+    },
 }
 
 impl CoreEvent {

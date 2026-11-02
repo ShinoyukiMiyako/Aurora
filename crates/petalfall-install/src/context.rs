@@ -16,6 +16,42 @@ use tokio::sync::watch;
 use crate::error::{Error, Result};
 use crate::layout::GameLayout;
 
+/// 新建、补全实例一路上的各步，按执行先后排。下载批次之间的几步由安装器经 [`InstallContext::enter`]
+/// 报出，其余由门面报；整份步骤表由门面开工前按请求排定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallPhase {
+    Metadata,
+    LoaderProfile,
+    Libraries,
+    Assets,
+    Natives,
+    Java,
+    LoaderInstaller,
+    LoaderLibraries,
+    LoaderProcessors,
+    Verify,
+    Template,
+}
+
+impl InstallPhase {
+    /// 事件负载与前端文案表里用的键。
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Metadata => "metadata",
+            Self::LoaderProfile => "loader_profile",
+            Self::Libraries => "libraries",
+            Self::Assets => "assets",
+            Self::Natives => "natives",
+            Self::Java => "java",
+            Self::LoaderInstaller => "loader_installer",
+            Self::LoaderLibraries => "loader_libraries",
+            Self::LoaderProcessors => "loader_processors",
+            Self::Verify => "verify",
+            Self::Template => "template",
+        }
+    }
+}
+
 /// 安装流程共享的协作对象（全为借用，`Copy`）。
 #[derive(Clone, Copy)]
 pub struct InstallContext<'a> {
@@ -32,6 +68,9 @@ pub struct InstallContext<'a> {
     /// 安装的取消令牌：元数据抓取（等连接、读响应体、退避）、Forge 安装排队与处理器子进程都看它。
     /// 应与 `pool` 上挂的是同一个令牌。
     pub cancel: Option<&'a CancellationToken>,
+    /// 进入下一步时的回调；`None` 表示不报。只在上一批下载已经返回、下一批还没开始时调：之后才送到的
+    /// 上一批快照都已下完（`finished == total`），前端凭这一点不把它们算进新的一步。
+    pub phases: Option<&'a (dyn Fn(InstallPhase) + Send + Sync)>,
 }
 
 impl<'a> InstallContext<'a> {
@@ -50,6 +89,7 @@ impl<'a> InstallContext<'a> {
             runtime,
             policy,
             cancel: None,
+            phases: None,
         }
     }
 
@@ -57,6 +97,19 @@ impl<'a> InstallContext<'a> {
     pub fn with_cancel(mut self, cancel: Option<&'a CancellationToken>) -> Self {
         self.cancel = cancel;
         self
+    }
+
+    /// 挂上报步骤的回调；传 `None` 表示这一段不报。
+    pub fn with_phases(mut self, phases: Option<&'a (dyn Fn(InstallPhase) + Send + Sync)>) -> Self {
+        self.phases = phases;
+        self
+    }
+
+    /// 报告进入了 `phase` 这一步；没挂回调时什么也不做。
+    pub fn enter(&self, phase: InstallPhase) {
+        if let Some(report) = self.phases {
+            report(phase);
+        }
     }
 
     /// 跑一批下载并把「有文件最终失败」收敛为 [`Error::BatchIncomplete`]。
