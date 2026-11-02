@@ -31,7 +31,7 @@ const IMAGE_NAME_CAPACITY: usize = 32_768;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Journal {
     pub instdir: PathBuf,
-    /// 为真时恢复要带 /D= 重装到原目录：这种半装可能还没有注册表记录，只传 /S 会装到默认位置。
+    /// 为真时恢复按首装回到原目录：这种半装可能还没有注册表记录，没有现成的安装可修。
     pub was_fresh: bool,
     pub version: String,
     /// 启动前落盘时还没有 pid，那一刻是空。
@@ -201,12 +201,12 @@ pub fn recover(
 }
 
 /// 把半装状态折进探测结果：升级半装走修复，首装半装回欢迎页按首装重装到原目录。什么都没登记时升级半装也按首装走：
-/// 修复只传 /S，NSIS 没有目录可还原就装到默认位置，核验却盯着记录的目录。
+/// 修复的目录取自登记，没有登记就没有现成的安装可修。
 ///
 /// 记录只有核验通过才删，标准安装程序、NSIS 原包和自更新都不碰它，所以它可能早已过期，这时以登记为准：
 /// 登记的版本比载荷新时，改成首装或修复都等于绕过降级保护；比记录新时那次安装早被盖过了，半装留下的登记只会比
-/// 记录旧，这时藏起现有安装，用户在选目录页换个位置，那份数据就成了孤儿；登记在别的目录时，按记录走首装 /D=
-/// 会把登记改指回去，原来那份成孤儿，走修复则 NSIS 装回登记的目录，而核验盯着记录的目录，永远过不了。
+/// 记录旧，这时藏起现有安装，用户在选目录页换个位置，那份数据就成了孤儿；登记在别的目录时，按记录走首装或修复
+/// 都会带着 /D= 把登记改指回记录的目录，原来那份成孤儿。
 pub fn mark_interrupted(probe: Probe, journal: &Journal) -> Probe {
     let dir = journal.instdir.to_string_lossy().into_owned();
     let superseded = probe.existing.as_ref().is_some_and(|existing| {
@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn a_half_upgrade_of_a_directory_no_longer_registered_is_superseded() {
-        // 修复只传 /S，NSIS 装回登记的目录；界面却拿记录的目录去核验，永远过不了
+        // 按记录的目录修复会带着 /D= 把登记改指过来，登记的那份就成了孤儿
         let journal = Journal {
             was_fresh: false,
             ..sample(None)
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn a_half_upgrade_with_nothing_registered_resumes_like_a_fresh_install() {
-        // 半装之后卸载并勾了删除数据：NSIS 没有目录可还原，修复只传 /S 会装到默认位置，核验又盯着记录的目录
+        // 半装之后卸载并勾了删除数据：没有登记就没有现成的安装可修，只能按首装回到记录的目录
         let journal = Journal {
             was_fresh: false,
             ..sample(None)
