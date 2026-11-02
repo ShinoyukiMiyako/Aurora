@@ -11,6 +11,7 @@ import {
   rasterizeBranch,
   SMALL_BLOSSOMS,
   spriteVariant,
+  type BranchArt,
   type SpriteName,
   type Tint,
 } from "./branch-art";
@@ -34,6 +35,25 @@ const FRAMES = [
 ] as const;
 
 const DPRS = [1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+
+/** 被花或花瓣盖住的格子：这些格子的颜色不出自树皮。 */
+function stampedCells(art: BranchArt): Set<number> {
+  const covered = new Set<number>();
+  for (const b of art.blossoms) {
+    spriteVariant(b.sprite, b.tint, b.mirror).forEach((line, y) =>
+      line.forEach((key, x) => {
+        if (key !== null) covered.add((b.y + y) * art.cols + b.x + x);
+      }),
+    );
+  }
+  for (const p of art.petals) {
+    const glyph = PETAL_GLYPHS[p.glyph];
+    for (let y = 0; y < glyph.height; y++) {
+      for (let x = 0; x < glyph.width; x++) if (glyph.cells[y * glyph.width + x] !== 0) covered.add((p.y + y) * art.cols + p.x + x);
+    }
+  }
+  return covered;
+}
 
 describe("branchCell", () => {
   it.each([
@@ -115,10 +135,73 @@ describe("paintBranch", () => {
     }
   });
 
-  it("同样的输入画出逐格相同的图", () => {
+  it("同样的输入画出逐格相同的图，中间画过别的尺寸也一样", () => {
     const a = paintBranch(250, 175, 3.2);
+    paintBranch(150, 96, 4 / 1.25);
     const b = paintBranch(250, 175, 3.2);
     expect(Array.from(a.cells)).toEqual(Array.from(b.cells));
+    // 两幅全透明的图也逐格相同，所以还要求树皮的描边、暗部、中间调、亮部、高光五阶都画了出来
+    const keys = new Set(Array.from(a.cells, keyOf));
+    for (const key of WOOD) expect(keys.has(key), key).toBe(true);
+  });
+
+  /** 每根分枝中段的一点（基准 px），离主枝和花都够远：这一格只能由这根分枝画出来。 */
+  const TWIG_POINTS = [
+    [121.6, 71.7],
+    [187.5, 105.9],
+    [63.1, 119.2],
+    [200.5, 61.8],
+  ] as const;
+
+  it("四根分枝都画了出来：各框、各缩放比下，分枝中段的格子是木色", () => {
+    for (const dpr of DPRS) {
+      const cell = branchCell(dpr) / dpr;
+      for (const [width, height] of FRAMES) {
+        const art = paintBranch(width, height, cell);
+        const layout = branchLayout(width, height, cell);
+        TWIG_POINTS.forEach(([x, y], i) => {
+          const col = Math.floor((layout.offsetX + x * layout.scale) / cell);
+          const row = Math.floor((layout.offsetY + y * layout.scale) / cell);
+          const key = keyOf(art.cells[row * art.cols + col]);
+          expect(key !== null && WOOD.has(key), `${width}x${height} 缩放比 ${dpr} 的第 ${i + 1} 根分枝 (${col}, ${row}) 是 ${key}`).toBe(true);
+        });
+      }
+    }
+  });
+
+  it("150 x 96 的枝全是细枝：外缘上沿描 m、下沿描 d，不描最暗的 w", () => {
+    for (const dpr of DPRS) {
+      const cell = branchCell(dpr) / dpr;
+      const art = paintBranch(150, 96, cell);
+      const covered = stampedCells(art);
+      const clear = (x: number, y: number) => x >= 0 && y >= 0 && x < art.cols && y < art.rows && art.cells[y * art.cols + x] === 0;
+      const edges: string[] = [];
+      const top = { total: 0, m: 0 };
+      const bottom = { total: 0, d: 0 };
+      for (let y = 0; y < art.rows; y++) {
+        for (let x = 0; x < art.cols; x++) {
+          const at = y * art.cols + x;
+          const key = keyOf(art.cells[at]);
+          if (key === null || !WOOD.has(key) || covered.has(at)) continue;
+          if (!(clear(x - 1, y) || clear(x + 1, y) || clear(x, y - 1) || clear(x, y + 1))) continue;
+          edges.push(key);
+          if (clear(x, y - 1) && !clear(x, y + 1)) {
+            top.total++;
+            if (key === "m") top.m++;
+          }
+          if (clear(x, y + 1) && !clear(x, y - 1)) {
+            bottom.total++;
+            if (key === "d") bottom.d++;
+          }
+        }
+      }
+      const where = `缩放比 ${dpr}`;
+      expect(new Set(edges), where).toEqual(new Set(["m", "d"]));
+      expect(edges.length, where).toBeGreaterThan(60);
+      // 上下之分取的是格子落在骨架哪一侧，斜走的细枝偶有一两格只露上沿却在骨架下侧，所以按九成判
+      expect(top.m / top.total, where).toBeGreaterThanOrEqual(0.9);
+      expect(bottom.d / bottom.total, where).toBeGreaterThanOrEqual(0.9);
+    }
   });
 
   it("框比构图宽时主枝仍从左缘伸进来，框边那一列不描边", () => {
