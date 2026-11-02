@@ -189,8 +189,8 @@ pub struct LaunchRequest {
 /// 重开启动器后就不再作数。门面的快照克隆共享同一个句柄。
 pub(crate) type AccountFailures = Arc<Mutex<HashMap<String, FailureCode>>>;
 
-/// 会被记进 [`AccountFailures`] 的失败码。[`FailureCode::AccountAppNotApproved`] 不在内：它不放行降级，
-/// 记下只会盖掉上一次服务或网络故障。
+/// 会被记进 [`AccountFailures`] 的失败码。[`FailureCode::AccountAppNotApproved`] 与
+/// [`FailureCode::AccountClientIdMissing`] 不在内：它们不放行降级，记下只会盖掉上一次服务或网络故障。
 const ACCOUNT_FAILURES: [FailureCode; 3] = [
     FailureCode::AccountRelogin,
     FailureCode::AccountRefreshNetwork,
@@ -233,6 +233,9 @@ pub enum FailureCode {
     AccountServiceDown,
     /// Minecraft 服务拒绝了启动器所用的微软应用，换一个已获批准的 client_id 才能解决。
     AccountAppNotApproved,
+    /// 这个版本没有可用的微软登录 client_id（构建时没内嵌，环境变量和设置里也没有），续期发不出去；
+    /// 填上 client_id 才能解决。
+    AccountClientIdMissing,
     FilesOffline,
     FilesFailed,
     DiskFull,
@@ -254,6 +257,7 @@ impl FailureCode {
             FailureCode::AccountRefreshNetwork => "account_refresh_network",
             FailureCode::AccountServiceDown => "account_service_down",
             FailureCode::AccountAppNotApproved => "account_app_not_approved",
+            FailureCode::AccountClientIdMissing => "account_client_id_missing",
             FailureCode::FilesOffline => "files_offline",
             FailureCode::FilesFailed => "files_failed",
             FailureCode::DiskFull => "disk_full",
@@ -1848,11 +1852,11 @@ fn authlib_metadata_failure(
     }
 }
 
-/// 续期失败里只有四种给失败码：凭据被服务器判定失效（重新登录，账户由续期本身写库标成需要重登）、
-/// 连不上（联网后重试）、登录服务故障（5xx、429，稍后重试）与应用未获批准（换 client_id）。连不上与
-/// 服务故障不碰账户库，账户还是好的，玩家可以稍后重试或先以离线方式进单人；应用未获批准重试多少次都
-/// 一样，失败码只为把玩家引到 client_id 设置。封禁、未购买、响应解析不了、凭据库读写失败都不是重新
-/// 登录能解决的，按门面错误原样报出原文与错误码。取消同样原样报出：它不是续期的结论，当成账户失败
+/// 续期失败里只有五种给失败码：凭据被服务器判定失效（重新登录，账户由续期本身写库标成需要重登）、
+/// 连不上（联网后重试）、登录服务故障（5xx、429，稍后重试）、应用未获批准（换 client_id）与这个版本
+/// 没有 client_id（填一个）。连不上与服务故障不碰账户库，账户还是好的，玩家可以稍后重试或先以离线方式
+/// 进单人；后两种重试多少次都一样，失败码只为把玩家引到 client_id 设置。封禁、未购买、响应解析不了、
+/// 凭据库读写失败都不是重新登录能解决的，按门面错误原样报出原文与错误码。取消同样原样报出：它不是续期的结论，当成账户失败
 /// 记下会盖掉门面记下的上一次服务或网络故障，让紧接着的以离线方式进单人被错拒。
 fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
     match &err {
@@ -1882,6 +1886,13 @@ fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
         .into(),
         CoreError::Auth(petalfall_auth::AuthError::AppNotApproved) => LaunchFailure::new(
             FailureCode::AccountAppNotApproved,
+            format!("刷新 {account_name} 的登录失败：{err}"),
+        )
+        .param("account", account_name)
+        .caused_by(err)
+        .into(),
+        CoreError::Auth(petalfall_auth::AuthError::MsaClientIdMissing) => LaunchFailure::new(
+            FailureCode::AccountClientIdMissing,
             format!("刷新 {account_name} 的登录失败：{err}"),
         )
         .param("account", account_name)
@@ -2962,6 +2973,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_login_without_client_id_points_to_settings_and_sends_nothing() {
+        // 这个版本没有 client_id：续期在发请求之前就失败，给失败码指向 client_id 设置；不记账户失败、
+        // 不把账户标成失效，降级按「没有最近的失败」拒绝。
+        let server = wiremock::MockServer::start().await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let (mut petalfall, stored) = with_stale_account(&fx, &server);
+        petalfall.clear_client_id();
+
+        let (result, events) =
+            launch_request(&petalfall, stored_request(stored.clone()), java.clone()).await;
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::AccountClientIdMissing);
+        assert_eq!(failure.params.get("account"), Some(&Value::from(MS_NAME)));
+        assert_eq!(stage_indices(&events), vec![0]);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        assert!(failures_of(&petalfall).is_empty());
+        let current = petalfall.find_account(MS_UUID).unwrap().unwrap();
+        assert_eq!(current.status, AccountStatus::Ok);
+        let (result, _) = launch_fallback(&petalfall, stored_request(current), java).await;
+        assert_eq!(
+            refusal(result),
+            (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn offline_fallback_is_refused_once_the_login_is_invalid() {
         // 续期被判定失效：账户落为 expired，降级按「需要重新登录」拒绝。
         let server = wiremock::MockServer::start().await;
@@ -3357,6 +3396,17 @@ mod tests {
         assert_eq!(failure.code, FailureCode::AccountAppNotApproved);
         assert_eq!(failure.params.get("account"), Some(&Value::from(MS_NAME)));
         assert_eq!(failure.params.get("status"), None);
+        assert!(failure.source.is_some());
+
+        // 没有 client_id 同样有自己的失败码，前端据此给去设置的入口，不是一条只有原文的通知。
+        let missing = CoreError::Auth(petalfall_auth::AuthError::MsaClientIdMissing);
+        let LaunchFailed::Failure(failure) = classify_refresh(missing, MS_NAME) else {
+            panic!("没有 client_id 应是可处理的启动失败");
+        };
+        assert_eq!(failure.code, FailureCode::AccountClientIdMissing);
+        assert_eq!(failure.params.get("account"), Some(&Value::from(MS_NAME)));
+        assert_eq!(failure.params.get("status"), None);
+        assert!(failure.message.contains(MS_NAME), "{}", failure.message);
         assert!(failure.source.is_some());
 
         // 其余重新登录解决不了的账户错误原样报出，不冒充凭据失效。
@@ -4807,6 +4857,10 @@ mod tests {
             (
                 FailureCode::AccountAppNotApproved,
                 "account_app_not_approved",
+            ),
+            (
+                FailureCode::AccountClientIdMissing,
+                "account_client_id_missing",
             ),
             (FailureCode::FilesOffline, "files_offline"),
             (FailureCode::FilesFailed, "files_failed"),

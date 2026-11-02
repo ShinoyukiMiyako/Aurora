@@ -166,7 +166,8 @@ pub(crate) struct ConfigPatch {
     isolation_policy: Option<IsolationPolicy>,
     auto_download_java: Option<bool>,
     cache_directory: Option<PathBuf>,
-    client_id: Option<String>,
+    /// `Some(None)` 是清掉填过的 client_id。
+    client_id: Option<Option<String>>,
     selected_version: Option<String>,
     after_launch: Option<AfterLaunch>,
     check_updates: Option<bool>,
@@ -190,6 +191,7 @@ pub(crate) struct RawConfigPatch {
     pub auto_download_java: Option<bool>,
     pub cache_directory: Option<String>,
     pub client_id: Option<String>,
+    pub clear_client_id: Option<bool>,
     pub selected_version: Option<String>,
     pub after_launch: Option<String>,
     pub check_updates: Option<bool>,
@@ -215,6 +217,7 @@ pub async fn update_config(
     auto_download_java: Option<bool>,
     cache_directory: Option<String>,
     client_id: Option<String>,
+    clear_client_id: Option<bool>,
     selected_version: Option<String>,
     after_launch: Option<String>,
     check_updates: Option<bool>,
@@ -236,6 +239,7 @@ pub async fn update_config(
         auto_download_java,
         cache_directory,
         client_id,
+        clear_client_id,
         selected_version,
         after_launch,
         check_updates,
@@ -288,7 +292,7 @@ async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
             .transpose()?,
         auto_download_java: raw.auto_download_java,
         cache_directory: raw.cache_directory.map(PathBuf::from),
-        client_id: raw.client_id.map(validate_client_id).transpose()?,
+        client_id: parse_client_id(raw.client_id, raw.clear_client_id)?,
         selected_version: raw.selected_version,
         after_launch: raw
             .after_launch
@@ -328,8 +332,10 @@ fn apply_patch(petalfall: &mut Petalfall, patch: ConfigPatch) -> Result<(), Comm
     if let Some(dir) = patch.cache_directory {
         petalfall.set_cache_directory(Some(dir));
     }
-    if let Some(id) = patch.client_id {
-        petalfall.set_client_id(id);
+    match patch.client_id {
+        Some(Some(id)) => petalfall.set_client_id(id),
+        Some(None) => petalfall.clear_client_id(),
+        None => {}
     }
     if let Some(id) = patch.selected_version {
         petalfall.set_selected_version(Some(id));
@@ -477,6 +483,21 @@ fn validate_world_backup(input: WorldBackupInput) -> Result<WorldBackupSettings,
         keep_per_world: input.keep_per_world,
         max_total_gb: input.max_total_gb,
     })
+}
+
+/// 填新值与清掉二选一；`clearClientId: false` 等于没给。
+fn parse_client_id(
+    client_id: Option<String>,
+    clear: Option<bool>,
+) -> Result<Option<Option<String>>, CommandError> {
+    match (client_id, clear == Some(true)) {
+        (Some(_), true) => Err(CommandError::invalid_argument(
+            "clientId 与 clearClientId 不能同时给",
+        )),
+        (Some(id), false) => Ok(Some(Some(validate_client_id(id)?))),
+        (None, true) => Ok(Some(None)),
+        (None, false) => Ok(None),
+    }
 }
 
 fn validate_client_id(id: String) -> Result<String, CommandError> {
@@ -964,9 +985,9 @@ mod tests {
         );
     }
 
-    /// 填进 client_id 后微软登录即可用；填之前可不可用，取决于这台机器设没设环境变量、编译时有没有内嵌。
+    /// 填进 client_id 后微软登录即可用；填之前与清掉之后可不可用，取决于这台机器设没设环境变量、编译时有没有内嵌。
     #[tokio::test]
-    async fn microsoft_login_turns_available_once_a_client_id_is_saved() {
+    async fn microsoft_login_follows_a_saved_then_cleared_client_id() {
         let dir = tempfile::tempdir().unwrap();
         let facade = facade_in(dir.path());
         let before = read_config(&facade).await;
@@ -990,6 +1011,56 @@ mod tests {
         let after = read_config(&facade).await;
         assert!(after.has_client_id);
         assert!(after.microsoft_login_available);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                clear_client_id: Some(true),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let cleared = read_config(&facade).await;
+        assert!(!cleared.has_client_id);
+        // clearClientId 为 false 等于没给：单给它不动配置，和 clientId 一起给照常写入
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                clear_client_id: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!read_config(&facade).await.has_client_id);
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                client_id: Some("another-app".into()),
+                clear_client_id: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(read_config(&facade).await.has_client_id);
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                clear_client_id: Some(true),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(cleared.microsoft_login_available, has_fallback);
+        // 落盘的配置里也去掉了，重开启动器不会又冒出来
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("config.json")).unwrap())
+                .unwrap();
+        assert!(raw["msa_client_id"].is_null(), "{raw}");
     }
 
     /// 出参能原样作入参回传：拿 get_config 的值写回去，配置不变。
@@ -1216,6 +1287,12 @@ mod tests {
             RawConfigPatch {
                 check_updates: Some(false),
                 client_id: Some("   ".into()),
+                ..RawConfigPatch::default()
+            },
+            RawConfigPatch {
+                check_updates: Some(false),
+                client_id: Some("my-azure-app".into()),
+                clear_client_id: Some(true),
                 ..RawConfigPatch::default()
             },
             RawConfigPatch {

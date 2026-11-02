@@ -99,6 +99,8 @@ export interface ConfigPatch {
   autoDownloadJava?: boolean;
   cacheDirectory?: string;
   clientId?: string;
+  /** 清掉填过的 client_id，回到运行期环境变量或构建时内嵌的值；与 clientId 同时给报 invalid_argument。 */
+  clearClientId?: true;
   selectedVersion?: string;
   afterLaunch?: AfterLaunch;
   checkUpdates?: boolean;

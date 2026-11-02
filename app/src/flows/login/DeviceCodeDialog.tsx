@@ -8,14 +8,15 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { AccountAvatar } from "../../art/skin/AccountAvatar";
 import { Spinner } from "../../art/Spinner";
-import { ACTION_ERROR, MICROSOFT_LOGIN_COPY, microsoftLoginFailure, type LoginFailureAction } from "../../copy/flows";
+import { ACTION_ERROR, MICROSOFT_LOGIN_COPY, microsoftLoginFailure, withoutSettingsAction, type LoginFailureAction } from "../../copy/flows";
 import type { Account } from "../../domain/adapt";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { fade, springs } from "../../lib/motion";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorDetailOf } from "../../state/errors";
-import { useLauncherActions, useNow } from "../../state/launcher";
+import { onboardingActive } from "../../state/selectors";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { deviceCodeExpired, deviceCodeRemaining, type DeviceLogin, type LoginState } from "../../state/login";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
@@ -57,6 +58,7 @@ export function DeviceCodeDialog({ login }: { login: MicrosoftLogin }) {
   const device = login.device;
   const now = useNow(1000);
   const totalMs = useCodeLifetime(device);
+  const onboarding = useLauncherSelector(onboardingActive);
 
   const close = () => void run(() => actions.closeLogin(), ACTION_ERROR.cancelLogin);
   const restart = () => void run(() => actions.startMicrosoftLogin(login.intent), ACTION_ERROR.microsoftLogin);
@@ -121,7 +123,8 @@ export function DeviceCodeDialog({ login }: { login: MicrosoftLogin }) {
       );
       break;
     case "failed": {
-      const copy = microsoftLoginFailure(device.code, device.message, device.detail);
+      const failure = microsoftLoginFailure(device.code, device.message, device.detail);
+      const copy = onboarding ? withoutSettingsAction(failure) : failure;
       const act = (action: LoginFailureAction) => () => {
         switch (action.kind) {
           case "retry":

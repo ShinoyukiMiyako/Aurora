@@ -416,6 +416,7 @@ export interface SettingsPatch {
   autoDownloadJava?: boolean;
   cacheDirectory?: string;
   clientId?: string;
+  clearClientId?: true;
   afterLaunch?: AfterLaunch;
   checkUpdates?: boolean;
   defaultJava?: string;

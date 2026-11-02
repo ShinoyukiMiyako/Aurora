@@ -363,6 +363,28 @@ describe("微软设备码弹窗", () => {
     expect(callsOf(ipc, "cancel_microsoft_login")).toEqual([]);
   });
 
+  it("首次启动向导期间应用未获批准：不给「打开设置」（主界面没挂上，去不了），正文写先走完向导，只能关闭", async () => {
+    bootOverrides(ipc, { accounts: [], firstRun: true });
+    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    ipc.overrides.set("microsoft_login", () => {
+      throw new IpcError("AppNotApproved", "使用的微软应用未获准访问 Minecraft 服务（Invalid app registration）");
+    });
+    await mount();
+    expect(launcher.state.firstRun).toBe(true);
+    act(() => void launcher.actions.startMicrosoftLogin());
+    await flush();
+    expect(dialog()?.textContent).toContain("登录应用未获批准");
+    expect(dialog()?.textContent).toContain("先走完向导，再到设置里填写或更换。");
+    const labels = [...document.querySelectorAll<HTMLButtonElement>("[role='dialog'] button")].map((b) => b.textContent);
+    expect(labels).not.toContain("打开设置");
+    expect(labels).toContain("复制错误信息");
+    // 没有主按钮，初始焦点给「关闭」
+    expect(button("关闭").hasAttribute("data-autofocus")).toBe(true);
+    act(() => button("关闭").click());
+    await flush();
+    expect(launcher.state.login).toBeNull();
+  });
+
   it("构建里没有 client_id：说明是这个版本没有内置微软登录，只给「打开设置」，不给重试", async () => {
     ipc.overrides.set("microsoft_login", () => {
       throw new IpcError("MsaClientIdMissing", "这个版本没有内置微软登录 client_id：在设置的「常规 · 高级」里填入，或者设环境变量 PETALFALL_MSA_CLIENT_ID");

@@ -232,7 +232,7 @@ describe("首次启动向导：推进与收尾", () => {
         ["offline", false],
         ["authlib", false],
       ]);
-      expect(cards[0].textContent).toContain("这个版本没有内置微软登录，在设置里填入 client_id 后可用");
+      expect(cards[0].textContent).toContain("这个版本没有内置微软登录，先走完向导，再到设置里填入 client_id");
       await click(cards[0]);
       expect(launcher.state.login).toBeNull();
       expect(callsOf(ipc, "microsoft_login")).toEqual([]);

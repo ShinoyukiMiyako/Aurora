@@ -310,11 +310,15 @@ function updateConfig(args: MockArgs): void {
   if (args.isolationPolicy !== undefined) next.isolation_policy = oneOf(args.isolationPolicy, ISOLATION_POLICIES, "隔离档位");
   if (args.autoDownloadJava !== undefined) next.auto_download_java = requireBoolean(args, "autoDownloadJava");
   if (args.cacheDirectory !== undefined) next.cache_directory = requireString(args, "cacheDirectory", "update_config");
+  const clearClientId = args.clearClientId !== undefined && requireBoolean(args, "clearClientId");
+  if (args.clientId !== undefined && clearClientId) throw new IpcError("invalid_argument", "clientId 与 clearClientId 不能同时给");
   if (args.clientId !== undefined) {
     if (requireString(args, "clientId", "update_config").trim() === "") throw new IpcError("invalid_argument", "client_id 不能为空");
     next.has_client_id = true;
     next.microsoft_login_available = true;
   }
+  // 假后端当作带着内嵌 client_id 的构建：清掉以后微软登录照常可用
+  if (clearClientId) next.has_client_id = false;
   if (args.selectedVersion !== undefined) next.selected_version = requireString(args, "selectedVersion", "update_config");
   if (args.afterLaunch !== undefined) next.after_launch = oneOf(args.afterLaunch, AFTER_LAUNCH, "的启动后行为");
   if (args.checkUpdates !== undefined) next.check_updates = requireBoolean(args, "checkUpdates");

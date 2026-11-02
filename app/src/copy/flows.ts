@@ -318,6 +318,8 @@ export const MSA_CLIENT_ID_MISSING = {
   title: "这个版本没有内置微软登录",
   body: `这个版本的${APP_NAME}没有内置微软应用的 client_id，自行构建和 fork 的版本都是这样。在「设置 · 常规 · 高级」里填入你自己注册并获准的 client_id 后就能登录。`,
   reason: "这个版本没有内置微软登录，在设置里填入 client_id 后可用",
+  /** 首次启动向导里设置页还去不了。 */
+  onboardingReason: "这个版本没有内置微软登录，先走完向导，再到设置里填入 client_id",
   fixLabel: "打开设置",
 } as const;
 
@@ -393,6 +395,9 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
     // 不给「重试」：同一个 client_id 重试只会得到同样的结果。不给以离线方式进单人：验证不是暂时不可用，后端也不放行
     case "account_app_not_approved":
       return { title: APP_NOT_APPROVED.title, body: APP_NOT_APPROVED.body, fix: { kind: "open_client_id_settings", label: APP_NOT_APPROVED.fixLabel }, secondary: null };
+    // 同上：填上 client_id 之前结果不会变，验证也不是暂时不可用
+    case "account_client_id_missing":
+      return { title: MSA_CLIENT_ID_MISSING.title, body: MSA_CLIENT_ID_MISSING.body, fix: { kind: "open_client_id_settings", label: MSA_CLIENT_ID_MISSING.fixLabel }, secondary: null };
     case "files_offline":
       return { title: "需要联网补全文件", body: `还缺 ${numParam(params, "count", code)} 个文件，当前没有网络连接。`, fix: RETRY, secondary: null };
     case "files_failed":
@@ -1256,7 +1261,7 @@ export interface LoginFailureCopy {
   body: string | null;
   primary: LoginFailureAction | null;
   secondary: LoginFailureAction | null;
-  /** 只剩「关闭」时用幽灵按钮。 */
+  /** 没有主按钮：初始焦点落在「关闭」上。 */
   closeOnly: boolean;
 }
 
@@ -1322,6 +1327,24 @@ export function microsoftLoginFailure(code: string, message: string, detail: unk
     default:
       return plain("微软登录失败", `${message}（${code}）`, LOGIN_RETRY, { kind: "copy_error", label: "复制错误信息" });
   }
+}
+
+/**
+ * 首次启动向导期间主界面没挂上，「打开设置」去不了设置页：主次按钮里都去掉它，正文补一句先走完向导。
+ * 没有这个动作的失败原样返回。
+ */
+export function withoutSettingsAction(copy: LoginFailureCopy): LoginFailureCopy {
+  const opensSettings = (action: LoginFailureAction | null) => action !== null && action.kind === "open_client_id_settings";
+  if (!opensSettings(copy.primary) && !opensSettings(copy.secondary)) return copy;
+  const hint = "先走完向导，再到设置里填写或更换。";
+  const primary = opensSettings(copy.primary) ? null : copy.primary;
+  return {
+    ...copy,
+    body: copy.body === null ? hint : `${copy.body}${hint}`,
+    primary,
+    secondary: opensSettings(copy.secondary) ? null : copy.secondary,
+    closeOnly: primary === null,
+  };
 }
 
 export const LITTLESKIN_API = "https://littleskin.cn/api/yggdrasil";

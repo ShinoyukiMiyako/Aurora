@@ -248,6 +248,11 @@ impl Petalfall {
         self.config.msa_client_id = Some(client_id.into());
     }
 
+    /// 去掉填过的 client_id，回到运行期环境变量或构建时内嵌的值。
+    pub fn clear_client_id(&mut self) {
+        self.config.msa_client_id = None;
+    }
+
     /// 把当前配置写回配置文件。
     ///
     /// 要可变借用：取值不认识、暂用默认值的枚举字段，没改过时写回原值；改成别的取值写进文件之后，
