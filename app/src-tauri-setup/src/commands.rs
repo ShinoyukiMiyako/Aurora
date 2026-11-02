@@ -26,8 +26,8 @@ use crate::target::{self, APP_FOLDER, SpaceNeed, SystemEnv, TargetEnv};
 struct Located {
     /// 升级和修复的目录，前端的计划里不带。
     registered: Option<String>,
-    /// 已知属于落樱的目录：半装记录或卸载残留。目录内容证明不了归属，校验时不能再套一层。
-    resume: Option<String>,
+    /// 已知属于落樱的目录，校验时不能当成别人的：默认目录（启动器回落的数据目录），以及探测换上的半装记录或卸载残留。
+    own: Vec<String>,
 }
 
 /// 窗口存活期间共用的东西，也是 `main.rs` 里 `manage` 进去的状态。
@@ -119,19 +119,20 @@ impl SetupContext {
 
         *self.located.lock().unwrap_or_else(PoisonError::into_inner) = Located {
             registered: probe.existing.as_ref().map(|existing| existing.dir.clone()),
-            resume: (probe.default_dir != default_dir).then(|| probe.default_dir.clone()),
+            own: own_dirs(default_dir, &probe),
         };
         Ok(probe)
     }
 
     pub fn check_dir(&self, path: &str, env: &dyn TargetEnv) -> DirCheck {
-        let resume = self
+        let own = self
             .located
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .resume
+            .own
             .clone();
-        target::check_dir(path, self.need(), resume.as_deref(), env)
+        let own: Vec<&str> = own.iter().map(String::as_str).collect();
+        target::check_dir(path, self.need(), &own, env)
     }
 
     pub fn launcher_running(&self) -> io::Result<bool> {
@@ -215,6 +216,16 @@ fn assemble_probe(
         Recovery::Interrupted { journal, .. } => journal::mark_interrupted(probe, &journal),
         Recovery::Clean | Recovery::Completed | Recovery::Discarded { .. } => probe,
     })
+}
+
+/// 校验时认作落樱自己的目录。默认目录同时是启动器写不进 exe 旁边时的数据目录：没写过 config.json 之前
+/// 里面只有日志、缓存和任务记录，当成别人的就会劝用户换文件夹，装到别处后启动器走便携，这份数据就成了孤儿。
+fn own_dirs(data_home: String, probe: &Probe) -> Vec<String> {
+    if probe.default_dir == data_home {
+        vec![data_home]
+    } else {
+        vec![data_home, probe.default_dir.clone()]
+    }
 }
 
 /// 进度发进窗口，其余进日志。
@@ -526,6 +537,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_default_dir_counts_as_ours_whether_or_not_the_probe_moved_away() {
+        let clean = assemble(&Table::default(), Recovery::Clean);
+        assert_eq!(
+            own_dirs(DEFAULT_DIR.to_owned(), &clean),
+            vec![DEFAULT_DIR.to_owned()]
+        );
+
+        let half = Path::new(r"D:\游戏 目录\Petalfall");
+        let moved = assemble(&Table::default(), interrupted(half, true));
+        assert_eq!(
+            own_dirs(DEFAULT_DIR.to_owned(), &moved),
+            vec![DEFAULT_DIR.to_owned(), half.to_str().unwrap().to_owned()]
+        );
+    }
+
     fn registered_commands() -> BTreeSet<&'static str> {
         let main = include_str!("main.rs");
         let (_, rest) = main
@@ -751,6 +778,7 @@ mod tests {
             assert_eq!(check.issue, None);
             assert_eq!(check.normalized, half.to_str().unwrap());
             assert!(!check.not_empty);
+            assert!(!check.appended);
         }
 
         #[test]
@@ -771,6 +799,7 @@ mod tests {
                 format!(r"{}\{APP_FOLDER}", other.display())
             );
             assert!(check.not_empty);
+            assert!(check.appended);
         }
 
         #[test]

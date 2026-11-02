@@ -80,24 +80,22 @@ pub trait TargetEnv {
 
 /// 校验用户给的目录，`normalized` 是实际该传给安装的路径。
 ///
-/// `not_empty` 说的是用户给的目录里有别人的文件，这时 `normalized` 已经追加了一层；`has_config` 说的是
-/// `normalized` 这个目录里有上次的数据。
+/// `not_empty` 说的是用户给的目录里有别人的文件；`appended` 说的是因此在 `normalized` 末尾追加了一层，
+/// 目录本来就叫 [`APP_FOLDER`] 时不追加，程序会和那些文件放在一起。`has_config` 说的是 `normalized`
+/// 这个目录里有上次的数据。
 ///
-/// `resume_dir` 是已知属于落樱、要接着用的目录：半装记录里的目录可能只写了一半文件，卸载后留下的
-/// 上次安装目录里只剩数据，目录内容都证明不了归属，不传的话会被当成别人的非空目录再套一层。
-pub fn check_dir(
-    input: &str,
-    need: SpaceNeed,
-    resume_dir: Option<&str>,
-    env: &dyn TargetEnv,
-) -> DirCheck {
+/// `own_dirs` 是已知属于落樱、要接着用的目录：默认安装目录同时是启动器写不进 exe 旁边时的数据目录，
+/// 没写过 config.json 之前里面只有日志、缓存这类常见名字；半装记录里的目录可能只写了一半文件；卸载后
+/// 留下的上次安装目录里只剩数据。目录内容都证明不了归属，不传的话会被当成别人的非空目录。
+pub fn check_dir(input: &str, need: SpaceNeed, own_dirs: &[&str], env: &dyn TargetEnv) -> DirCheck {
     let cleaned = clean(input);
     // 有阻断问题时界面只显示问题，其余字段没人看
-    evaluate(&cleaned, need, resume_dir, env).unwrap_or_else(|issue| DirCheck {
+    evaluate(&cleaned, need, own_dirs, env).unwrap_or_else(|issue| DirCheck {
         normalized: cleaned,
         issue: Some(issue),
         has_config: false,
         not_empty: false,
+        appended: false,
         free_bytes: 0,
     })
 }
@@ -107,7 +105,7 @@ pub fn check_dir(
 fn evaluate(
     path: &str,
     need: SpaceNeed,
-    resume_dir: Option<&str>,
+    own_dirs: &[&str],
     env: &dyn TargetEnv,
 ) -> Result<DirCheck, DirIssue> {
     if path.is_empty() {
@@ -148,12 +146,15 @@ fn evaluate(
     // config.json 不算凭据：别的程序目录里也常有这个名字，当成自己的就会读写或改名人家的配置、
     // 覆盖同名 uninstall.exe。多套一层最坏是新开一份数据，不会毁东西
     let ours = contents.exe
-        || resume_dir.is_some_and(|dir| lowered_segments(dir) == lowered_segments(&long));
+        || own_dirs
+            .iter()
+            .any(|dir| lowered_segments(dir) == lowered_segments(&long));
     let not_empty = contents.any && !ours;
 
     let mut target = long;
     // 已经叫这个名字的目录不再套一层：再套只会得到 Petalfall\Petalfall，也不比这里干净
-    if not_empty && !last_segment(&target).eq_ignore_ascii_case(APP_FOLDER) {
+    let appended = not_empty && !last_segment(&target).eq_ignore_ascii_case(APP_FOLDER);
+    if appended {
         target = format!(r"{target}\{APP_FOLDER}");
         contents = read_contents(Path::new(&target)).map_err(unwritable)?;
         if contents.versions {
@@ -175,6 +176,7 @@ fn evaluate(
         issue,
         has_config: contents.config,
         not_empty,
+        appended,
         free_bytes: volume.free_bytes,
     })
 }
@@ -716,7 +718,7 @@ mod tests {
     }
 
     fn check(path: &str, env: &FakeEnv) -> DirCheck {
-        check_dir(path, NEED, None, env)
+        check_dir(path, NEED, &[], env)
     }
 
     fn issue(path: &str, env: &FakeEnv) -> Option<DirIssue> {
@@ -1244,6 +1246,7 @@ mod tests {
                 issue: None,
                 has_config: false,
                 not_empty: false,
+                appended: false,
                 free_bytes: 1 << 40,
             }
         );
@@ -1406,6 +1409,7 @@ mod tests {
                 issue: Some(DirIssue::NoSpace),
                 has_config: true,
                 not_empty: false,
+                appended: false,
                 free_bytes: free,
             }
         );
@@ -1445,6 +1449,7 @@ mod tests {
                 issue: None,
                 has_config: false,
                 not_empty: true,
+                appended: true,
                 free_bytes: 1 << 40,
             }
         );
@@ -1478,6 +1483,7 @@ mod tests {
         let check = check(text(dir.path()), &FakeEnv::default());
         assert_eq!(check.normalized, text(dir.path()));
         assert!(!check.not_empty);
+        assert!(!check.appended);
     }
 
     #[test]
@@ -1508,7 +1514,7 @@ mod tests {
         let check = check_dir(
             text(dir.path()),
             NEED,
-            Some(text(dir.path())),
+            &[text(dir.path())],
             &FakeEnv::default(),
         );
         assert_eq!(check.normalized, text(dir.path()));
@@ -1528,6 +1534,7 @@ mod tests {
                 issue: None,
                 has_config: false,
                 not_empty: true,
+                appended: true,
                 free_bytes: 1 << 40,
             }
         );
@@ -1548,7 +1555,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("half-written.tmp"), b"x").unwrap();
         let resume = text(dir.path()).to_uppercase();
-        let check = check_dir(text(dir.path()), NEED, Some(&resume), &FakeEnv::default());
+        let check = check_dir(text(dir.path()), NEED, &[&resume], &FakeEnv::default());
         assert_eq!(check.normalized, text(dir.path()));
         assert!(!check.not_empty);
     }
@@ -1560,7 +1567,7 @@ mod tests {
         let check = check_dir(
             text(dir.path()),
             NEED,
-            Some(r"D:\somewhere\else"),
+            &[r"D:\somewhere\else"],
             &FakeEnv::default(),
         );
         assert_eq!(check.normalized, format!(r"{}\Petalfall", text(dir.path())));
@@ -1575,6 +1582,37 @@ mod tests {
         let check = check(text(&named), &FakeEnv::default());
         assert_eq!(check.normalized, text(&named));
         assert!(check.not_empty);
+        assert!(!check.appended);
+    }
+
+    #[test]
+    fn the_launchers_own_data_dir_is_not_someone_elses() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join(APP_FOLDER);
+        fs::create_dir_all(home.join("logs")).unwrap();
+        let log = format!("{}.log", random_below(u64::MAX));
+        fs::write(home.join("logs").join(log), b"x").unwrap();
+        fs::create_dir(home.join("cache")).unwrap();
+        fs::write(home.join("tasks.json"), b"[]").unwrap();
+        // 排在第二个、大小写不同：任何一个对上都算，比较不分大小写
+        let own = text(&home).to_uppercase();
+        let check = check_dir(
+            text(&home),
+            NEED,
+            &[r"D:\somewhere\else", &own],
+            &FakeEnv::default(),
+        );
+        assert_eq!(
+            check,
+            DirCheck {
+                normalized: text(&home).to_owned(),
+                issue: None,
+                has_config: false,
+                not_empty: false,
+                appended: false,
+                free_bytes: 1 << 40,
+            }
+        );
     }
 
     #[test]
@@ -1677,7 +1715,7 @@ mod tests {
         let windows = std::env::var("SystemRoot").unwrap();
         let input = format!(r"{windows}\Petalfall");
         assert_eq!(
-            check_dir(&input, NEED, None, &SystemEnv).issue,
+            check_dir(&input, NEED, &[], &SystemEnv).issue,
             Some(DirIssue::Forbidden)
         );
     }

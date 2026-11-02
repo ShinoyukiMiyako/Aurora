@@ -36,7 +36,7 @@ const rustVariants = (name: string) => [...rustBody("enum", name).matchAll(/^\s*
 const EXISTING: Existing = { kind: "upgrade", version: "", dir: "" };
 const PROBE: Probe = { payloadVersion: "", defaultDir: "", requiredBytes: 0, existing: null, interrupted: false, elevated: false };
 const PLAN: InstallPlan = { mode: "fresh", dir: null, desktopShortcut: true };
-const CHECK: DirCheck = { normalized: "", issue: null, hasConfig: false, notEmpty: false, freeBytes: 0 };
+const CHECK: DirCheck = { normalized: "", issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 0 };
 const PROGRESS: Progress = { phase: "unpack", percent: 0, slow: false };
 const FAILURE: Failure = { code: "disk_full", detail: "" };
 

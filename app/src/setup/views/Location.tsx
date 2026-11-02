@@ -56,7 +56,7 @@ interface DirHint {
   tone?: "ok" | "warn";
 }
 
-/** 阻断问题走 Field 的 error，这里只管其余三种。 */
+/** 阻断问题走 Field 的 error，这里只管其余四种。 */
 function dirHint(copy: SetupCopy["location"], check: DirCheck, requiredBytes: number): DirHint | null {
   const notice = dirNotice(check);
   switch (notice.kind) {
@@ -64,6 +64,8 @@ function dirHint(copy: SetupCopy["location"], check: DirCheck, requiredBytes: nu
       return null;
     case "resume":
       return { text: copy.resume, tone: "ok" };
+    case "nested":
+      return { text: copy.nested, tone: "warn" };
     case "not_empty":
       return { text: copy.notEmpty, tone: "warn" };
     case "ok":
@@ -156,7 +158,7 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
           </div>
         </Field>
         <Checkbox checked={desktopShortcut} onChange={onShortcutChange} label={text.shortcut} disabled={busy} />
-        {check !== null && check.issue === null && check.notEmpty && <p className={styles.finalPath}>{text.finalPath(check.normalized)}</p>}
+        {check !== null && check.issue === null && check.appended && <p className={styles.finalPath}>{text.finalPath(check.normalized)}</p>}
       </div>
     </Frame>
   );

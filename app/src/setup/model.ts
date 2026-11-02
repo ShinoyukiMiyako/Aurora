@@ -196,12 +196,13 @@ export function offersStandardInstaller(code: FailureCode): boolean {
   return code === "payload_exit" || code === "verify_failed";
 }
 
-export type DirNotice = { kind: "issue"; issue: DirIssue } | { kind: "resume" } | { kind: "not_empty" } | { kind: "ok" };
+export type DirNotice = { kind: "issue"; issue: DirIssue } | { kind: "resume" } | { kind: "nested" } | { kind: "not_empty" } | { kind: "ok" };
 
-/** 选目录页按优先级只显示一条：阻断问题 > 有旧数据 > 有别的文件 > 正常。 */
+/** 选目录页按优先级只显示一条：阻断问题 > 有旧数据 > 有别的文件、另建了一层 > 有别的文件、会放在一起 > 正常。 */
 export function dirNotice(check: DirCheck): DirNotice {
   if (check.issue !== null) return { kind: "issue", issue: check.issue };
   if (check.hasConfig) return { kind: "resume" };
+  if (check.appended) return { kind: "nested" };
   if (check.notEmpty) return { kind: "not_empty" };
   return { kind: "ok" };
 }
