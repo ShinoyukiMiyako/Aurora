@@ -1,8 +1,9 @@
 // 搜索头图与吸顶工具条：搜索框、热门分类、类型标签、适配实例、筛选浮层、排序。
 
 import { motion, useReducedMotionConfig, type Variants } from "framer-motion";
-import { useState, type Ref } from "react";
+import { useMemo, useState, type Ref } from "react";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
+import { useDevicePixelRatio } from "../../art/illustrations/canvas";
 import { Icon } from "../../art/Icon";
 import { LOADER_NAME } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
@@ -40,11 +41,16 @@ import {
 /** 头图右侧花枝插画的尺寸，按尺寸档。 */
 const BRANCH_SIZE = { compact: { width: 150, height: 110 }, regular: { width: 210, height: 150 }, wide: { width: 260, height: 170 } } as const;
 
-/** 悬停头图时花枝轻轻上浮，离开时落回；不循环。不旋转：像素画转一个小角度就满边锯齿。 */
-const branchSway: Variants = {
-  rest: { y: 0, transition: springs.soft },
-  hover: { y: -2, transition: springs.soft },
-};
+/**
+ * 悬停头图时花枝轻轻上浮，离开时落回；不循环。不旋转：像素画转一个小角度就满边锯齿。
+ * 上浮约 2 CSS px，按设备像素取整：125%、175% 缩放下整 2 px 是 2.5、3.5 个设备像素，停在半像素上整幅像素画会被重采样发虚。
+ */
+export function branchSway(dpr: number): Variants {
+  return {
+    rest: { y: 0, transition: springs.soft },
+    hover: { y: -Math.round(2 * dpr) / dpr, transition: springs.soft },
+  };
+}
 
 export interface SearchHeroProps {
   filters: DiscoverFilters;
@@ -63,6 +69,8 @@ export function SearchHero({ filters, onFilters, onQuery, onSubmit, onImport, in
   const { tier } = useShell();
   const reduced = useReducedMotionConfig() === true;
   const size = BRANCH_SIZE[tier];
+  const dpr = useDevicePixelRatio();
+  const sway = useMemo(() => branchSway(dpr), [dpr]);
   return (
     <Card as="section" padding="lg" className={styles.heroCard}>
       <motion.div className={styles.hero} initial="rest" animate="rest" whileHover={reduced ? undefined : "hover"}>
@@ -101,7 +109,7 @@ export function SearchHero({ filters, onFilters, onQuery, onSubmit, onImport, in
             })}
           </div>
         </div>
-        <motion.div className={styles.heroArt} variants={branchSway} style={{ width: size.width, height: size.height }}>
+        <motion.div className={styles.heroArt} variants={sway} style={{ width: size.width, height: size.height }}>
           <BlossomBranch width={size.width} height={size.height} />
         </motion.div>
       </motion.div>
