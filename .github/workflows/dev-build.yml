@@ -128,7 +128,8 @@ jobs:
           echo "installer-name=$(basename "$installer")" >> "$GITHUB_OUTPUT"
 
       # 壳不内嵌 NSIS，拼接放在最后：Runner 跑不了 Windows 程序，pack-setup 的自检是这条路上唯一的验证。
-      # 将来要签名的话，外层签名必须插在 pack-setup 之后。
+      # 将来要签名的话，外层签名必须插在 pack-setup 之后。publish 里的更新签名又得排在外层签名之后：
+      # 引导程序就是更新包，外层签名会改写文件，更新签名必须签最终发出去的字节。
       - name: 构建首装引导程序
         id: bootstrap
         working-directory: app
@@ -195,6 +196,9 @@ jobs:
           name: ${{ needs.build.outputs.bootstrap-name }}
           path: dist
 
+      # 更新包是引导程序，不是 NSIS 包。更新插件把下载到的任何 PE 都当 NSIS 包，带着
+      # /P /R /UPDATE /ARGS <启动器参数> 拉起；引导程序认得 /UPDATE，进更新模式直接升级到登记目录，
+      # 等落樱退出、失败重试都用它自己的页面，WebView2 不可用时才把同样的参数转给内嵌的 NSIS 包。
       - name: 给更新包签名
         env:
           CLI_VERSION: ${{ needs.build.outputs.cli-version }}
@@ -205,12 +209,12 @@ jobs:
             echo "仓库密钥 DEV_UPDATER_PRIVATE_KEY 没有配置，dev 包签不了名" >&2
             exit 1
           fi
-          npm exec --yes --package="@tauri-apps/cli@$CLI_VERSION" -- tauri signer sign "$INSTALLER"
-          test -s "$INSTALLER.sig"
+          npm exec --yes --package="@tauri-apps/cli@$CLI_VERSION" -- tauri signer sign "$BOOTSTRAP"
+          test -s "$BOOTSTRAP.sig"
 
       # 私钥和仓库里的公钥不是一对时 CLI 只打警告照样签，发出去的包所有 dev 用户都会拒收。
       - name: 按公钥验签
-        run: node .github/scripts/verify-update-signature.mjs .github/dev-updater.pub "$INSTALLER" "$INSTALLER.sig"
+        run: node .github/scripts/verify-update-signature.mjs .github/dev-updater.pub "$BOOTSTRAP" "$BOOTSTRAP.sig"
 
       # 插件只装比自己新的版本。工作流改名或重建会让运行序号从 1 重数，发出去的版本号比已装的小，
       # dev 包会一直以为自己是最新，在这里挡下来。
@@ -239,7 +243,7 @@ jobs:
             if (i === -1 || a[i] < b[i]) throw new Error('版本号 ' + now + ' 不比已发布的 ' + before + ' 新，dev 包不会更新过去');
           " "$previous" "$VERSION"
 
-      # 更新包就是原生 NSIS 包，地址指向下面重建的同一个预发布；文件名带版本号，清单和包总是同一次构建的。
+      # 更新包是上面签过名的引导程序，地址指向下面重建的同一个预发布；文件名带版本号，清单和包总是同一次构建的。
       - name: 生成开发版更新清单
         id: manifest
         run: |
@@ -247,20 +251,20 @@ jobs:
           node -e "
             const fs = require('fs');
             const path = require('path');
-            const [version, installer, repo, tag, sha, out] = process.argv.slice(1);
+            const [version, bootstrap, repo, tag, sha, out] = process.argv.slice(1);
             const manifest = {
               version,
               notes: 'dev 分支 ' + sha.slice(0, 8) + ' 的自动构建',
               pub_date: new Date().toISOString(),
               platforms: {
                 'windows-x86_64': {
-                  signature: fs.readFileSync(installer + '.sig', 'utf8').trim(),
-                  url: 'https://github.com/' + repo + '/releases/download/' + tag + '/' + path.basename(installer),
+                  signature: fs.readFileSync(bootstrap + '.sig', 'utf8').trim(),
+                  url: 'https://github.com/' + repo + '/releases/download/' + tag + '/' + path.basename(bootstrap),
                 },
               },
             };
             fs.writeFileSync(out, JSON.stringify(manifest, null, 2));
-          " "$VERSION" "$INSTALLER" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest"
+          " "$VERSION" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest"
           echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
 
       - name: 更新滚动预发布
@@ -273,10 +277,10 @@ jobs:
             gh release delete "$TAG" --cleanup-tag --yes
           fi
           gh release create "$TAG" \
-            "$BOOTSTRAP#首次安装用这个" \
-            "$INSTALLER#原生 NSIS 包，首装包被拦截时可用" \
+            "$BOOTSTRAP#首次安装用这个，也是自动更新包" \
+            "$INSTALLER#原生 NSIS 包，引导程序内嵌的就是它，首装包被拦截时可用" \
             "$MANIFEST#开发版自动更新清单" \
             --prerelease \
             --target "$GITHUB_SHA" \
             --title "Dev 构建 $VERSION" \
-            --notes "dev 分支 ${GITHUB_SHA::8} 的自动构建，用于内部试用。首次安装用 Petalfall-Installer，被安全软件拦下时换原生 NSIS 包。交叉编译，没有代码签名证书；装好后启动器会从这里检查开发版更新，更新包另有签名校验。"
+            --notes "dev 分支 ${GITHUB_SHA::8} 的自动构建，用于内部试用。首次安装用 Petalfall-Installer，被安全软件拦下时换原生 NSIS 包。交叉编译，没有代码签名证书；装好后启动器会从这里检查开发版更新，下载的更新包就是 Petalfall-Installer，另有签名校验。"
