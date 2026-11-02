@@ -254,6 +254,13 @@
   margin-bottom: var(--sk-space-16);
 }
 
+.stagePair {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sk-space-8);
+}
+
 .offlineForm {
   display: flex;
   flex-direction: column;
