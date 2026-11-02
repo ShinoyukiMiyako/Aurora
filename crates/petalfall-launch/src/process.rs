@@ -23,6 +23,7 @@ use crate::command::LaunchCommand;
 use crate::error::{LaunchError, Result};
 use crate::log4j_xml::Log4jXmlDecoder;
 use crate::logfile::{LauncherLevel, LogSource, SessionClock, SessionLog, SessionOutcome};
+use crate::redact::redact_access_tokens;
 
 /// 崩溃判定缓存的最近游戏输出行数。
 pub const RECENT_LINE_CAPACITY: usize = 500;
@@ -437,7 +438,8 @@ pub fn detect_crash(report: &ExitReport) -> bool {
 /// 逐行读一条输出流。按字节读、有损解码：JVM 的本地层（如致命错误头）按系统代码页输出，
 /// 一个非 UTF-8 字节就会让按字符串读的读取端报错退出，从此没人读这条管道，游戏随之卡死。
 /// 单行超过 [`MAX_LINE_BYTES`] 的部分边读边丢，读取照常往下走。stdout 上的 log4j XML 事件在这里还原成普通行，
-/// 之后的会话日志、崩溃判定与界面拿到的都是还原后的文本。
+/// 之后的会话日志、崩溃判定与界面拿到的都是还原后的文本。访问令牌也在这里遮掉（见 [`crate::redact`]）：
+/// 这三处都从这一行往下拿，会话日志落在启动器自己的目录里，玩家会整份拿去发给别人。
 fn spawn_reader<R>(
     reader: R,
     stream: LogStream,
@@ -450,7 +452,8 @@ where
     tokio::spawn(async move {
         let mut reader = BufReader::new(reader);
         let mut lines = LineSplitter::new();
-        let mut send = |text: String| {
+        let mut send = |mut text: String| {
+            redact_access_tokens(&mut text);
             let line = LogLine {
                 at: clock.now(),
                 stream,
@@ -1067,6 +1070,74 @@ mod tests {
             .unwrap();
         let logged: Vec<&str> = tail.entries.iter().map(|e| e.text.as_str()).collect();
         assert_eq!(logged, [expected.as_str(), "TAIL"]);
+    }
+
+    /// 游戏输出里的令牌：1.7、1.8 原版在 stdout 上以 log4j XML 打会话 id，stderr 上是原样回显的启动参数。
+    /// 会话日志文件、崩溃判定缓存与推给界面的批次里都只剩标记，同一行的其余内容照旧。
+    #[tokio::test]
+    async fn tokens_in_game_output_never_reach_log_recent_or_forward() {
+        const TOKEN: &str = "eyJhbGciOiJIUzI1NiJ9.eyJ4dWlkIjoiMjUzNTQwMDAwMDAwMDAwMCIsInN1YiI6InBldGFsZmFsbCJ9.Zm9yLXRlc3RzLW9ubHktbm90LWEtcmVhbC1zaWduYXR1cmU";
+        const UUID: &str = "0123456789abcdef0123456789abcdef";
+        let tmp = tempfile::tempdir().unwrap();
+        let clock = SessionClock::start().unwrap();
+        let log = SessionLog::create(tmp.path(), "t", clock.started_at())
+            .await
+            .unwrap();
+        let stdout = format!(
+            "<log4j:Event logger=\"bao\" timestamp=\"1\" level=\"INFO\" thread=\"Client thread\">\n\
+             <log4j:Message><![CDATA[(Session ID is token:{TOKEN}:{UUID})]]></log4j:Message>\n\
+             </log4j:Event>\n"
+        );
+        let stderr =
+            format!("args: --username Steve --uuid {UUID} --accessToken {TOKEN} --userType msa\n");
+        let (line_tx, line_rx) = mpsc::unbounded_channel();
+        let (fwd_tx, mut fwd_rx) = mpsc::unbounded_channel();
+        let readers = [
+            spawn_reader(
+                std::io::Cursor::new(stdout.into_bytes()),
+                LogStream::Stdout,
+                clock,
+                line_tx.clone(),
+            ),
+            spawn_reader(
+                std::io::Cursor::new(stderr.into_bytes()),
+                LogStream::Stderr,
+                clock,
+                line_tx,
+            ),
+        ];
+        let outcome = pump(line_rx, Some(log), Some(fwd_tx)).await;
+        for reader in readers {
+            reader.await.unwrap();
+        }
+
+        let session = format!("[Client thread/INFO]: (Session ID is token:<已隐藏>:{UUID})");
+        let args =
+            format!("args: --username Steve --uuid {UUID} --accessToken <已隐藏> --userType msa");
+        // 两条流各一个读取任务，谁先到汇流不定。
+        let sorted = |mut lines: Vec<String>| {
+            lines.sort();
+            lines
+        };
+        let expected = sorted(vec![session, args]);
+        let mut forwarded = Vec::new();
+        while let Ok(batch) = fwd_rx.try_recv() {
+            forwarded.extend(batch.into_iter().map(|line| line.text));
+        }
+        assert_eq!(sorted(forwarded), expected);
+        assert_eq!(sorted(outcome.recent.iter().cloned().collect()), expected);
+        let path = outcome
+            .log
+            .unwrap()
+            .finish(clock.now(), SessionOutcome::Exited)
+            .await
+            .unwrap();
+        // 读文件原文：读回会话日志时还会再遮一遍，那一遍挡不住写进磁盘的这一份。
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains(TOKEN), "{raw}");
+        for line in &expected {
+            assert!(raw.contains(line.as_str()), "{raw}");
+        }
     }
 
     /// 一局会话的输出端：stdout 读一段内存里的字节，stderr 立即读完，会话日志写进临时目录。

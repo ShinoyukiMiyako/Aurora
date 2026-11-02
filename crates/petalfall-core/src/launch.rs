@@ -2373,17 +2373,24 @@ mod tests {
         (petalfall, stored)
     }
 
-    /// 冒充 java 的批处理：报 Java 17；当作游戏时把收到的全部参数回显成一行游戏输出。
+    /// [`echo_java`] 另存收到的参数的文件，与脚本同目录。
+    const ECHO_JAVA_ARGS: &str = "echo-java-args.txt";
+
+    /// 冒充 java 的批处理：报 Java 17；当作游戏时把收到的全部参数回显成一行游戏输出，并原样另存到
+    /// [`ECHO_JAVA_ARGS`]：游戏输出里的令牌会被遮掉，要核对真正交给 java 的令牌只能看这份。
     fn echo_java(dir: &Path) -> PathBuf {
         let path = dir.join("echo-java.cmd");
-        let script = "@echo off\r\n\
+        let script = format!(
+            "@echo off\r\n\
              if \"%~1\"==\"-version\" goto version\r\n\
+             >\"%~dp0{ECHO_JAVA_ARGS}\" echo %*\r\n\
              echo ARGS %*\r\n\
              exit /b 0\r\n\
              :version\r\n\
              >&2 echo openjdk version \"17.0.8\" 2023-07-18\r\n\
              >&2 echo OpenJDK 64-Bit Server VM (build 17.0.8+7, mixed mode)\r\n\
-             exit /b 0\r\n";
+             exit /b 0\r\n"
+        );
         std::fs::write(&path, script).unwrap();
         path
     }
@@ -2882,12 +2889,19 @@ mod tests {
             "{:?}",
             log.lines
         );
-        let args = log
+        let echoed = log
             .lines
             .iter()
             .find(|l| l.source == LogSource::Game && l.text.starts_with("ARGS "))
             .map(|l| l.text.clone())
             .expect("假 java 应回显启动参数");
+        assert!(
+            echoed.contains(&format!(
+                "--username {MS_NAME} --uuid {MS_UUID} --accessToken <已隐藏> --userType legacy"
+            )),
+            "{echoed}"
+        );
+        let args = std::fs::read_to_string(fx.root.join(ECHO_JAVA_ARGS)).unwrap();
         assert!(args.contains(&format!("--username {MS_NAME} ")), "{args}");
         assert!(args.contains(&format!("--uuid {MS_UUID} ")), "{args}");
         assert!(args.contains("--accessToken 0 "), "{args}");

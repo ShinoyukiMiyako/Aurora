@@ -18,7 +18,7 @@ use petalfall_launch::logfile::{LATEST_LOG, logs_dir};
 use petalfall_launch::{
     CrashCategory, ExitCodeNote, LogEntry, LogTail, SessionEnded, analyze_lines, exit_code_clue,
     explain_exit_code, extract_mod_ids, has_crash_marker, jvm_exception_clue, read_log_tail,
-    session_log_path, suspected_mods,
+    redact_access_tokens, session_log_path, suspected_mods,
 };
 use petalfall_modplatform::{InstalledMod, scan_mods_dir};
 use serde::{Deserialize, Serialize};
@@ -476,6 +476,9 @@ pub(crate) async fn find_crash_report(
 }
 
 /// 读 hs_err 或崩溃报告的开头供诊断。它们由 JVM 与游戏按系统默认编码写，可能不是 UTF-8，按有损解码读。
+///
+/// 读出就遮掉访问令牌：hs_err 开头摘要的 `Command Line:` 一行在扫描范围里，线索的命中行与上下文取自这段文字，
+/// 还会存进崩溃报告文件。磁盘上 JVM 写的原文件不动。
 pub(crate) async fn read_head_for_diagnosis(path: &Path) -> Result<String> {
     let io_err = |source| petalfall_base::Error::Io {
         path: path.to_path_buf(),
@@ -487,7 +490,9 @@ pub(crate) async fn read_head_for_diagnosis(path: &Path) -> Result<String> {
         .read_to_end(&mut bytes)
         .await
         .map_err(io_err)?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    redact_access_tokens(&mut text);
+    Ok(text)
 }
 
 fn crash_report_path(version_dir: &Path) -> PathBuf {
@@ -613,6 +618,14 @@ impl Petalfall {
             );
         }
         report.exit_code_note = report.exit_code.and_then(explain_exit_code);
+        // 现在存下的报告取自遮过的文字，旧版本存下的没有：命中行、上下文与从中提取的信息都要再遮一遍。
+        for clue in &mut report.diagnoses {
+            redact_access_tokens(&mut clue.matched);
+            clue.context.iter_mut().for_each(redact_access_tokens);
+            if let Some(detail) = clue.detail.as_mut() {
+                redact_access_tokens(detail);
+            }
+        }
         Ok(Some(report))
     }
 
@@ -1223,6 +1236,131 @@ mod tests {
             read_head_for_diagnosis(&tmp.path().join("missing.log"))
                 .await
                 .is_err()
+        );
+    }
+
+    const FAKE_TOKEN: &str = "eyJhbGciOiJIUzI1NiJ9.eyJ4dWlkIjoiMjUzNTQwMDAwMDAwMDAwMCIsInN1YiI6InBldGFsZmFsbCJ9.Zm9yLXRlc3RzLW9ubHktbm90LWEtcmVhbC1zaWduYXR1cmU";
+    const FAKE_UUID: &str = "0123456789abcdef0123456789abcdef";
+
+    /// JVM 写下的 hs_err 带着整条启动参数，形状取自 JDK 26 实际写下的文件：开头摘要的 `Command Line:` 在扫描范围里，
+    /// 进程段的 `java_command:` 也读进了内存。读出来令牌已遮掉、其余照旧，磁盘上的原文件不动。
+    #[tokio::test]
+    async fn read_head_hides_the_access_token_in_hs_err_command_lines() {
+        let args = format!(
+            "net.minecraft.client.main.Main --username Steve --version 1.21.1 --uuid {FAKE_UUID} --accessToken {FAKE_TOKEN} --userType msa"
+        );
+        let hs_err = format!(
+            "#\n\
+             # A fatal error has been detected by the Java Runtime Environment:\n\
+             #\n\
+             #  fatal error: OutOfMemory encountered: Java heap space\n\
+             \n\
+             ---------------  S U M M A R Y ------------\n\
+             \n\
+             Command Line: -Xmx4096m {args}\n\
+             \n\
+             Host: AMD Ryzen 9, 32 cores, 93G,  Windows 11 , 64 bit Build 26100\n\
+             \n\
+             ---------------  P R O C E S S  ---------------\n\
+             \n\
+             VM Arguments:\n\
+             jvm_args: -Xmx4096m\n\
+             java_command: {args}\n\
+             Launcher Type: SUN_STANDARD\n"
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("hs_err_pid4242.log");
+        std::fs::write(&path, &hs_err).unwrap();
+
+        let head = read_head_for_diagnosis(&path).await.unwrap();
+        let hidden = format!(
+            "net.minecraft.client.main.Main --username Steve --version 1.21.1 --uuid {FAKE_UUID} --accessToken <已隐藏> --userType msa"
+        );
+        assert_eq!(head, hs_err.replace(&args, &hidden));
+        assert!(!head.contains(FAKE_TOKEN));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), hs_err);
+    }
+
+    /// 旧版本存下的报告没经过遮挡：1.7.10 原版启动时打的会话 id 落在显卡线索的上下文里，Java 拒绝的参数带着令牌，
+    /// 命中了 JVM 参数线索，令牌也进了提取出的信息。读报告时这三处都遮掉，其余照旧。
+    #[tokio::test]
+    async fn last_crash_hides_tokens_left_in_reports_saved_before_redaction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let version_dir = put_version(tmp.path(), "1.7.10");
+        let session_id =
+            format!("[Client thread/INFO]: (Session ID is token:{FAKE_TOKEN}:{FAKE_UUID})");
+        let rejected = format!("Unrecognized option: --accessToken={FAKE_TOKEN}");
+        let lines = [
+            "[Client thread/INFO]: Setting user: Steve",
+            session_id.as_str(),
+            "[Client thread/ERROR]: Couldn't set pixel format",
+            "org.lwjgl.LWJGLException: Pixel format not accelerated",
+            rejected.as_str(),
+        ];
+        let numbered: Vec<(&str, u64)> = lines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (*l, i as u64 + 1))
+            .collect();
+        let mut crash = CrashReport::from_sources(
+            &[ScanInput {
+                source: CrashSource::SessionLog,
+                path: None,
+                lines: numbered,
+            }],
+            Some(1),
+        );
+        crash.at = Some(9_000);
+        save_crash_report(&version_dir, &crash).await.unwrap();
+        let stored = std::fs::read_to_string(crash_report_path(&version_dir)).unwrap();
+        assert!(
+            stored.contains(FAKE_TOKEN),
+            "报告构建与保存本身不遮，遮挡在读报告时：{stored}"
+        );
+
+        /// 类别、命中行、上下文、提取的信息、行号。
+        type ClueView<'a> = (CrashCategory, &'a str, Vec<&'a str>, Option<&'a str>, u64);
+        let loaded = petalfall.last_crash("1.7.10").await.unwrap().unwrap();
+        let view: Vec<ClueView<'_>> = loaded
+            .diagnoses
+            .iter()
+            .map(|c| {
+                (
+                    c.category,
+                    c.matched.as_str(),
+                    c.context.iter().map(String::as_str).collect(),
+                    c.detail.as_deref(),
+                    c.line,
+                )
+            })
+            .collect();
+        let hidden_session_id =
+            format!("[Client thread/INFO]: (Session ID is token:<已隐藏>:{FAKE_UUID})");
+        assert_eq!(
+            view,
+            vec![
+                (
+                    CrashCategory::JvmArgsInvalid,
+                    "Unrecognized option: --accessToken=<已隐藏>",
+                    vec![
+                        "[Client thread/ERROR]: Couldn't set pixel format",
+                        "org.lwjgl.LWJGLException: Pixel format not accelerated",
+                    ],
+                    Some("--accessToken=<已隐藏>"),
+                    5,
+                ),
+                (
+                    CrashCategory::GraphicsDriver,
+                    "org.lwjgl.LWJGLException: Pixel format not accelerated",
+                    vec![
+                        hidden_session_id.as_str(),
+                        "[Client thread/ERROR]: Couldn't set pixel format",
+                    ],
+                    None,
+                    4,
+                ),
+            ]
         );
     }
 
