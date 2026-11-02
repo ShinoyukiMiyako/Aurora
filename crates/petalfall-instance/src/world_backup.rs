@@ -6,7 +6,7 @@
 //! 存档在 `instances/<实例 id>/<存档文件夹名>/`，共用 `.minecraft/saves` 的在 `shared/<存档文件夹名>/`，
 //! 名叫 shared 的实例也撞不上共用作用域。清单里不记实例 id，实例改名只需要挪目录。
 //!
-//! 打包、解压、恢复就位都是同步 IO，由门面放到阻塞线程池里执行；清单整份经 aurora-base 原子写。
+//! 打包、解压、恢复就位都是同步 IO，由门面放到阻塞线程池里执行；清单整份经 petalfall-base 原子写。
 
 use std::collections::HashSet;
 use std::fs::{self, File, TryLockError};
@@ -18,7 +18,7 @@ use zip::result::ZipError;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::AURORA_META_DIR;
+use crate::PETALFALL_META_DIR;
 use crate::error::{Error, Result};
 use crate::level::parse_level_dat;
 use crate::naming::is_safe_instance_id;
@@ -31,7 +31,7 @@ pub const BACKUP_INDEX_FILE: &str = "index.json";
 /// 清单格式版本。
 pub const BACKUP_INDEX_VERSION: u32 = 1;
 /// 恢复时解压用的同级临时目录后缀：`<saves>/<存档><后缀>`。与存档同盘，就位只需一次改名。
-pub const RESTORE_SUFFIX: &str = concat!(".", aurora_base::app_slug!(), "-restore");
+pub const RESTORE_SUFFIX: &str = concat!(".", petalfall_base::app_slug!(), "-restore");
 
 const INSTANCES_SCOPE: &str = "instances";
 const SHARED_SCOPE: &str = "shared";
@@ -81,7 +81,7 @@ pub struct BackupLayout {
 impl BackupLayout {
     pub fn new(game_dir: &Path) -> Self {
         Self {
-            root: game_dir.join(AURORA_META_DIR).join(BACKUPS_DIR),
+            root: game_dir.join(PETALFALL_META_DIR).join(BACKUPS_DIR),
         }
     }
 
@@ -217,7 +217,7 @@ pub async fn write_backup_index(world_backup_dir: &Path, index: &BackupIndex) ->
         path: path.clone(),
         source,
     })?;
-    aurora_base::fs::atomic_write(&path, &bytes).await?;
+    petalfall_base::fs::atomic_write(&path, &bytes).await?;
     Ok(())
 }
 
@@ -1945,7 +1945,7 @@ mod tests {
     #[test]
     fn layout_paths_follow_the_scope() {
         let layout = BackupLayout::new(Path::new("D:/mc"));
-        let root = Path::new("D:/mc").join(AURORA_META_DIR).join("backups");
+        let root = Path::new("D:/mc").join(PETALFALL_META_DIR).join("backups");
         assert_eq!(layout.root(), root);
         assert_eq!(
             layout.world_dir(&WorldScope::Instance("生存".into()), "新的世界"),

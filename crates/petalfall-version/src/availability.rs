@@ -3,7 +3,7 @@
 //! 在启动前判定一个版本是否 "结构上可启动"，把具体不可用原因逐条列出（而非只给一个布尔）。
 //! 检查项：mainClass 存在、inheritsFrom 前置已安装（通过 provider 能取到）、
 //! 版本号可识别。前置是否 "已安装" 借 [`VersionProvider`] 表达——provider 取不到即视为未安装。
-//! 文件系统层面的 "版本文件夹是否存在" 由上层（aurora-instance）在构造 provider 时保证。
+//! 文件系统层面的 "版本文件夹是否存在" 由上层（petalfall-instance）在构造 provider 时保证。
 
 use crate::error::Error;
 use crate::identify::identify_mc_version;

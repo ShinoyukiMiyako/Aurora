@@ -3,12 +3,12 @@
 //! 表里只记 Modrinth 工程 id，不记版本号：能装哪个版本按实例的 MC 版本现查，表不会随着这些 Mod
 //! 发新版而过时。查不到适配版本的项单独列出原因，界面据此说明「还没有适配」，而不是悄悄少装一个。
 
-use aurora_modplatform::{ModLoader, ModVersionInfo, Platform, ReleaseChannel};
+use petalfall_modplatform::{ModLoader, ModVersionInfo, Platform, ReleaseChannel};
 use serde::Serialize;
 
 use crate::compat::{Compatibility, classify};
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::modfs::bounded_map;
 
 /// 同时在途的版本查询数。表最长 5 项，再多只是在平台的令牌桶前排队。
@@ -127,7 +127,7 @@ enum Pick {
     Missing(StarterMissingReason),
 }
 
-impl Aurora {
+impl Petalfall {
     /// 按开局表逐项查 Modrinth 上适配 `mc_version` 与 `loader` 的版本。
     ///
     /// 版本列表复用 5 分钟的版本缓存。只收兼容判定为确凿匹配的版本。列表只按实例自己的加载器过滤，比发现页
@@ -138,9 +138,9 @@ impl Aurora {
     pub async fn starter_mods(&self, loader: ModLoader, mc_version: &str) -> Result<StarterMods> {
         let entries = starter_table(loader).to_vec();
         let picks = bounded_map(entries.clone(), STARTER_CONCURRENCY, |entry| {
-            let aurora = self.clone();
+            let petalfall = self.clone();
             let mc = mc_version.to_owned();
-            async move { aurora.pick_starter(entry, loader, &mc).await }
+            async move { petalfall.pick_starter(entry, loader, &mc).await }
         })
         .await?;
         let mut result = StarterMods {
@@ -170,8 +170,9 @@ impl Aurora {
             .await;
         let versions = match listed {
             Ok(list) => list.versions,
-            Err(CoreError::ModPlatform(aurora_modplatform::Error::Status {
-                status: 404, ..
+            Err(CoreError::ModPlatform(petalfall_modplatform::Error::Status {
+                status: 404,
+                ..
             })) => {
                 tracing::warn!(
                     project_id = entry.project_id,
@@ -209,14 +210,14 @@ impl Aurora {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use std::collections::HashSet;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn aurora(server: &MockServer) -> Aurora {
+    fn petalfall(server: &MockServer) -> Petalfall {
         let tmp = std::env::temp_dir().join("petalfall-starter-tests");
-        Aurora::for_test(AuroraConfig::default(), tmp.clone(), tmp)
+        Petalfall::for_test(PetalfallConfig::default(), tmp.clone(), tmp)
             .with_modrinth_base(format!("{}/v2", server.uri()))
     }
 
@@ -402,9 +403,9 @@ mod tests {
         )
         .await;
         mount_versions(&server, "nmDcB62a", "fabric", serde_json::json!([])).await;
-        let aurora = aurora(&server);
+        let petalfall = petalfall(&server);
 
-        let mods = aurora
+        let mods = petalfall
             .starter_mods(ModLoader::Fabric, "1.21.1")
             .await
             .unwrap();
@@ -436,7 +437,7 @@ mod tests {
 
         // 缓存期内再问一次：结果相同，一个请求都不多。
         assert_eq!(
-            aurora
+            petalfall
                 .starter_mods(ModLoader::Fabric, "1.21.1")
                 .await
                 .unwrap(),
@@ -506,7 +507,7 @@ mod tests {
         )
         .await;
 
-        let mods = aurora(&server)
+        let mods = petalfall(&server)
             .starter_mods(ModLoader::Forge, "1.21.1")
             .await
             .unwrap();
@@ -566,7 +567,7 @@ mod tests {
         .await;
         mount_versions(&server, "uXXizFIs", "quilt", serde_json::json!([])).await;
 
-        let mods = aurora(&server)
+        let mods = petalfall(&server)
             .starter_mods(ModLoader::Quilt, "1.21.1")
             .await
             .unwrap();
@@ -617,14 +618,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = aurora(&server)
+        let err = petalfall(&server)
             .starter_mods(ModLoader::Forge, "1.21.1")
             .await
             .unwrap_err();
         assert!(
             matches!(
                 err,
-                CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 500, .. })
+                CoreError::ModPlatform(petalfall_modplatform::Error::Status { status: 500, .. })
             ),
             "{err:?}"
         );
@@ -633,7 +634,7 @@ mod tests {
     #[tokio::test]
     async fn liteloader_has_nothing_to_query() {
         let server = MockServer::start().await;
-        let mods = aurora(&server)
+        let mods = petalfall(&server)
             .starter_mods(ModLoader::LiteLoader, "1.12.2")
             .await
             .unwrap();

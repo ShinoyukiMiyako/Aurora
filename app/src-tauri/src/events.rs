@@ -1,22 +1,22 @@
 //! 推给前端的事件：事件名、负载与把门面事件转成 Tauri 事件的转发器。
 //!
-//! aurora-core 与 UI 框架解耦，只认一个 `mpsc` 发送端作为事件出口（[`EventSink`]）。命令建一个
+//! petalfall-core 与 UI 框架解耦，只认一个 `mpsc` 发送端作为事件出口（[`EventSink`]）。命令建一个
 //! [`CoreEventForwarder`]，把它的发送端交给门面方法，转发任务把收到的每条 [`CoreEvent`] 译成
 //! [`CoreEventPayload`] 再 `emit` 出去。负载带 `task_id`：前端下载队列据此把进度归到对应任务，
 //! 不带 `task_id`（为 `null`）的事件只属于启动会话。
 
-use aurora_core::{CoreEvent, EventSink};
+use petalfall_core::{CoreEvent, EventSink};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 /// 阶段、告警与下载进度。
-pub const CORE_EVENT: &str = "aurora://core-event";
+pub const CORE_EVENT: &str = "petalfall://core-event";
 
 /// 微软设备码登录拿到设备码时推送 user_code 与验证网址。
-pub const DEVICE_CODE_EVENT: &str = "aurora://device-code";
+pub const DEVICE_CODE_EVENT: &str = "petalfall://device-code";
 
 /// 游戏进程的每一行 stdout / stderr。
-pub const GAME_LOG_EVENT: &str = "aurora://game-log";
+pub const GAME_LOG_EVENT: &str = "petalfall://game-log";
 
 /// 推送一个事件；失败（窗口已关、无监听者）只记日志，不影响命令本身的结果。
 pub fn emit<S: Serialize + Clone>(app: &AppHandle, event: &str, payload: S) {
@@ -151,7 +151,7 @@ impl CoreEventForwarder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_core::DownloadProgress;
+    use petalfall_core::DownloadProgress;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 

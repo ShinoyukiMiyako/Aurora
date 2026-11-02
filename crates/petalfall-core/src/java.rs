@@ -1,13 +1,13 @@
 //! Java 探测、启动时取 Java 与运行时下载的门面接口。
 //!
-//! - [`Aurora::detect_java`]：设置页与首次启动用的全量探测（托管目录 + 手动添加 + 注册表 + JAVA_HOME +
+//! - [`Petalfall::detect_java`]：设置页与首次启动用的全量探测（托管目录 + 手动添加 + 注册表 + JAVA_HOME +
 //!   常见目录 + PATH）。
-//! - [`Aurora::inspect_manual_java`]：设置页「添加 Java」识别用户选的 java 可执行文件；记下它由
-//!   [`Aurora::add_extra_java_path`] 写进配置，之后的全量探测把它算作手动添加的来源。
-//! - [`Aurora::resolve_java`]：启动与安装器取 Java。只校验最终选中的那一个，不在启动路径上跑全量探测：
+//! - [`Petalfall::inspect_manual_java`]：设置页「添加 Java」识别用户选的 java 可执行文件；记下它由
+//!   [`Petalfall::add_extra_java_path`] 写进配置，之后的全量探测把它算作手动添加的来源。
+//! - [`Petalfall::resolve_java`]：启动与安装器取 Java。只校验最终选中的那一个，不在启动路径上跑全量探测：
 //!   设置里固定了默认 Java 就用它；否则先在上次探测的结果里按主版本挑、再看托管目录里有没有这个主版本，
 //!   都没有才全量探测，仍没有且开着自动下载就下一个。
-//! - [`Aurora::install_java`]：把 Mojang 运行时下到托管目录 `<数据目录>/runtime/<主版本>`，
+//! - [`Petalfall::install_java`]：把 Mojang 运行时下到托管目录 `<数据目录>/runtime/<主版本>`，
 //!   文件交给下载池并发下载（换源、进度、取消、已就绪文件按 sha1 跳过）。
 //!
 //! 识别结果按文件指纹落盘在 `<数据目录>/java-probe-cache.json`：同一个 java 可执行文件没变就不再
@@ -16,8 +16,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aurora_download::DownloadTask;
-use aurora_java::{
+use petalfall_download::DownloadTask;
+use petalfall_java::{
     DetectScope, DetectSource, InstalledRuntime, JAVA_EXE, JavaInstallation, ProbeCache,
     RuntimePlan, SystemSources, detect_with, java_exe_in_home, managed_runtime_root, probe_cached,
     rank_for_major, select_for_major,
@@ -25,7 +25,7 @@ use aurora_java::{
 
 use crate::error::{CoreError, JavaPathProblem, Result};
 use crate::event::{CoreEvent, EventSink, emit};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 /// 探测缓存文件名，位于数据目录下。
 const PROBE_CACHE_FILE: &str = "java-probe-cache.json";
@@ -47,9 +47,9 @@ pub struct RemovedJavaPath {
 }
 
 /// 执行一次 `java -version` 的函数；在阻塞线程池里跨线程调用，故要 `Send + Sync + 'static`。
-type SharedRunner = Arc<dyn Fn(&Path) -> aurora_java::Result<String> + Send + Sync>;
+type SharedRunner = Arc<dyn Fn(&Path) -> petalfall_java::Result<String> + Send + Sync>;
 
-/// 探测环境。生产用 [`Aurora::java_env`]：真实子进程、扫系统位置、官方运行时清单；
+/// 探测环境。生产用 [`Petalfall::java_env`]：真实子进程、扫系统位置、官方运行时清单；
 /// 测试注入假运行器、关掉系统位置、把清单指向本地 mock，结果才不随测试机上装了什么 Java 而变。
 #[derive(Clone)]
 pub(crate) struct JavaEnv {
@@ -58,10 +58,10 @@ pub(crate) struct JavaEnv {
     runtime_manifest: String,
 }
 
-impl Aurora {
+impl Petalfall {
     fn java_env(&self) -> JavaEnv {
         JavaEnv {
-            runner: Arc::new(aurora_java::run_java_version),
+            runner: Arc::new(petalfall_java::run_java_version),
             system: true,
             runtime_manifest: self.java_runtime_url().to_owned(),
         }
@@ -69,7 +69,7 @@ impl Aurora {
 
     /// 全量探测本机可用 Java，结果按「托管 > 手动添加 > 注册表 > JAVA_HOME > 常见目录 > PATH」排列。
     ///
-    /// 单个坏 Java 不会中断整体扫描（aurora-java 内部按候选跳过），空列表即「本机没有 Java」。
+    /// 单个坏 Java 不会中断整体扫描（petalfall-java 内部按候选跳过），空列表即「本机没有 Java」。
     /// 缺运行时文件的 Java 照样列出（`missing_files` 非空），由挑选与界面跳过。
     pub async fn detect_java(&self) -> Result<Vec<JavaInstallation>> {
         self.detect_java_with(&self.java_env()).await
@@ -231,8 +231,8 @@ impl Aurora {
     /// 识别用户在「添加 Java」里选的文件，通过后返回来源为手动添加的安装项。
     ///
     /// 依次检查：绝对路径；文件名是 java 或 javaw（不区分大小写，javaw 换成同目录的 java）；文件存在；
-    /// 识别得出版本（`java -version` 最多等 [`aurora_java::PROBE_TIMEOUT`]，文件没变过时用识别缓存）；
-    /// 运行时文件齐全。只识别不记录：写进配置由调用方经 [`Aurora::add_extra_java_path`] 落盘。
+    /// 识别得出版本（`java -version` 最多等 [`petalfall_java::PROBE_TIMEOUT`]，文件没变过时用识别缓存）；
+    /// 运行时文件齐全。只识别不记录：写进配置由调用方经 [`Petalfall::add_extra_java_path`] 落盘。
     pub async fn inspect_manual_java(&self, path: &Path) -> Result<JavaInstallation> {
         self.inspect_manual_java_with(path, &self.java_env()).await
     }
@@ -260,7 +260,7 @@ impl Aurora {
                 return Err(invalid(&exe, JavaPathProblem::NotFound));
             }
             Err(source) => {
-                return Err(aurora_base::Error::Io { path: exe, source }.into());
+                return Err(petalfall_base::Error::Io { path: exe, source }.into());
             }
         }
 
@@ -277,7 +277,7 @@ impl Aurora {
         let java = probed.map_err(|err| CoreError::JavaPathInvalid {
             path: exe.clone(),
             reason: match err {
-                aurora_java::Error::JavaProbeTimeout { .. } => JavaPathProblem::ProbeTimeout,
+                petalfall_java::Error::JavaProbeTimeout { .. } => JavaPathProblem::ProbeTimeout,
                 _ => JavaPathProblem::ProbeFailed,
             },
             source: Some(err),
@@ -292,7 +292,7 @@ impl Aurora {
     }
 
     /// 把手动添加的 java 可执行文件记进配置；按路径不区分大小写去重，已在列表里时返回 `false`。
-    /// 落盘仍需调用 [`Aurora::save_config`]。
+    /// 落盘仍需调用 [`Petalfall::save_config`]。
     pub fn add_extra_java_path(&mut self, exe: PathBuf) -> bool {
         let paths = &mut self.config_mut().extra_java_paths;
         if paths.iter().any(|known| same_path(known, &exe)) {
@@ -304,7 +304,7 @@ impl Aurora {
 
     /// 从手动添加的列表里移除这一项（只删记录，不动磁盘文件）。全局默认 Java 正是它时一并改回按版本
     /// 自动选择：留着一个用户刚移除的固定 Java，下次启动会被当成指定的 Java 去用。
-    /// 落盘仍需调用 [`Aurora::save_config`]。
+    /// 落盘仍需调用 [`Petalfall::save_config`]。
     pub fn remove_extra_java_path(&mut self, exe: &Path) -> RemovedJavaPath {
         let config = self.config_mut();
         let before = config.extra_java_paths.len();
@@ -369,7 +369,7 @@ fn pick_local_java(
     managed_root: &Path,
     scope: &DetectScope,
     cache: &mut ProbeCache,
-    runner: &aurora_java::JavaRunner<'_>,
+    runner: &petalfall_java::JavaRunner<'_>,
 ) -> Result<Option<Picked>> {
     if let Some(path) = fixed {
         let source = if path.starts_with(managed_root) {
@@ -474,7 +474,7 @@ async fn save_probe_cache(data_dir: &Path, cache: &ProbeCache) {
     let path = data_dir.join(PROBE_CACHE_FILE);
     match serde_json::to_vec(cache) {
         Ok(bytes) => {
-            if let Err(err) = aurora_base::fs::atomic_write(&path, &bytes).await {
+            if let Err(err) = petalfall_base::fs::atomic_write(&path, &bytes).await {
                 tracing::warn!(path = %path.display(), error = %err, "Java 探测缓存写盘失败");
             }
         }
@@ -485,7 +485,7 @@ async fn save_probe_cache(data_dir: &Path, cache: &ProbeCache) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use sha1::{Digest, Sha1};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
@@ -519,11 +519,11 @@ mod tests {
     /// 齐全），返回清单地址与 java 可执行文件的内容。
     async fn mount_runtime(server: &MockServer) -> (String, Vec<u8>) {
         let base = server.uri();
-        let platform = aurora_java::current_platform();
+        let platform = petalfall_java::current_platform();
         let java_bytes = b"MZ-fake-managed-java".to_vec();
         let release_bytes = RELEASE_BODY.to_vec();
         let modules_bytes = MODULES_BODY.to_vec();
-        let exe_rel = format!("bin/{}", aurora_java::JAVA_EXE);
+        let exe_rel = format!("bin/{}", petalfall_java::JAVA_EXE);
         let file = |sha: String, size: usize, object: &str, executable: bool| {
             format!(
                 r#"{{"type":"file","executable":{executable},"downloads":{{"raw":{{"sha1":"{sha}","size":{size},"url":"{base}/objects/{object}"}}}}}}"#
@@ -579,8 +579,8 @@ mod tests {
         }
     }
 
-    fn aurora_with(config: AuroraConfig, data_dir: &Path) -> Aurora {
-        Aurora::for_test(config, data_dir.to_path_buf(), data_dir.join(".minecraft"))
+    fn petalfall_with(config: PetalfallConfig, data_dir: &Path) -> Petalfall {
+        Petalfall::for_test(config, data_dir.to_path_buf(), data_dir.join(".minecraft"))
     }
 
     fn touch(path: &Path) {
@@ -608,16 +608,16 @@ mod tests {
         touch(&exe);
         let calls = Arc::new(AtomicUsize::new(0));
         let env = counting_env(calls.clone(), String::new());
-        let aurora = aurora_with(AuroraConfig::default(), dir.path());
+        let petalfall = petalfall_with(PetalfallConfig::default(), dir.path());
 
-        let found = aurora.detect_java_with(&env).await.unwrap();
+        let found = petalfall.detect_java_with(&env).await.unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].path, exe);
         assert_eq!(found[0].source, DetectSource::Managed);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(dir.path().join(PROBE_CACHE_FILE).is_file());
 
-        let again = aurora.detect_java_with(&env).await.unwrap();
+        let again = petalfall.detect_java_with(&env).await.unwrap();
         assert_eq!(again, found);
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -634,10 +634,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let env = counting_env(calls.clone(), manifest);
-        let aurora = aurora_with(AuroraConfig::default(), dir.path());
+        let petalfall = petalfall_with(PetalfallConfig::default(), dir.path());
         let expected = java_exe_in_home(&runtime_install_dir(dir.path(), 17));
 
-        let (list, path) = aurora.resolve_java_with(17, None, &env).await.unwrap();
+        let (list, path) = petalfall.resolve_java_with(17, None, &env).await.unwrap();
         assert_eq!(path, expected);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].source, DetectSource::Managed);
@@ -645,7 +645,7 @@ mod tests {
         assert_eq!(requests_to(&server, "/objects/java").await, 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        let (_, second) = aurora.resolve_java_with(17, None, &env).await.unwrap();
+        let (_, second) = petalfall.resolve_java_with(17, None, &env).await.unwrap();
         assert_eq!(second, expected);
         assert_eq!(
             requests_to(&server, "/objects/java").await,
@@ -660,7 +660,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "命中缓存不拉起 JVM");
 
         std::fs::remove_file(dir.path().join(PROBE_CACHE_FILE)).unwrap();
-        let (_, third) = aurora.resolve_java_with(17, None, &env).await.unwrap();
+        let (_, third) = petalfall.resolve_java_with(17, None, &env).await.unwrap();
         assert_eq!(third, expected);
         assert_eq!(requests_to(&server, "/objects/java").await, 1);
         assert_eq!(
@@ -673,13 +673,16 @@ mod tests {
     #[tokio::test]
     async fn missing_java_without_auto_download_is_no_java() {
         let dir = tempfile::tempdir().unwrap();
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             auto_download_java: false,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = aurora_with(config, dir.path());
+        let petalfall = petalfall_with(config, dir.path());
         let env = counting_env(Arc::new(AtomicUsize::new(0)), String::new());
-        let err = aurora.resolve_java_with(21, None, &env).await.unwrap_err();
+        let err = petalfall
+            .resolve_java_with(21, None, &env)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, CoreError::NoJava { major: 21 }),
             "实际：{err:?}"
@@ -695,16 +698,16 @@ mod tests {
             .path()
             .join("jdk")
             .join("bin")
-            .join(aurora_java::JAVA_EXE);
+            .join(petalfall_java::JAVA_EXE);
         touch(&fixed);
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             default_java: Some(fixed.clone()),
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = aurora_with(config, dir.path());
+        let petalfall = petalfall_with(config, dir.path());
         let env = counting_env(Arc::new(AtomicUsize::new(0)), String::new());
 
-        let (list, path) = aurora.resolve_java_with(17, None, &env).await.unwrap();
+        let (list, path) = petalfall.resolve_java_with(17, None, &env).await.unwrap();
         assert_eq!(path, fixed);
         assert_eq!(
             list.iter().map(|j| &j.path).collect::<Vec<_>>(),
@@ -712,9 +715,12 @@ mod tests {
         );
 
         std::fs::remove_file(&fixed).unwrap();
-        let err = aurora.resolve_java_with(17, None, &env).await.unwrap_err();
+        let err = petalfall
+            .resolve_java_with(17, None, &env)
+            .await
+            .unwrap_err();
         assert!(
-            matches!(&err, CoreError::Java(aurora_java::Error::JavaExec { path, .. }) if path == &fixed),
+            matches!(&err, CoreError::Java(petalfall_java::Error::JavaExec { path, .. }) if path == &fixed),
             "实际：{err:?}"
         );
     }
@@ -729,7 +735,7 @@ mod tests {
             .path()
             .join("中文 目录")
             .join("bin")
-            .join(aurora_java::JAVA_EXE);
+            .join(petalfall_java::JAVA_EXE);
         touch(&exe);
         let expected = exe.to_str().unwrap().replace('/', "\\");
         let mixed = format!(
@@ -739,7 +745,7 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .replace('\\', "/"),
-            aurora_java::JAVA_EXE
+            petalfall_java::JAVA_EXE
         );
         let file = dir.path().join("config.json");
         tokio::fs::write(
@@ -753,20 +759,20 @@ mod tests {
         .await
         .unwrap();
         let config = crate::config::ConfigStore::at(&file).load().await.unwrap();
-        let mut aurora = aurora_with(config, dir.path());
+        let mut petalfall = petalfall_with(config, dir.path());
         let env = counting_env(Arc::new(AtomicUsize::new(0)), String::new());
 
-        let (_, path) = aurora.resolve_java_with(17, None, &env).await.unwrap();
+        let (_, path) = petalfall.resolve_java_with(17, None, &env).await.unwrap();
         assert_eq!(path.to_str(), Some(expected.as_str()));
 
         assert_eq!(
-            aurora.remove_extra_java_path(Path::new(&expected)),
+            petalfall.remove_extra_java_path(Path::new(&expected)),
             RemovedJavaPath {
                 removed: true,
                 default_reset: true,
             }
         );
-        assert_eq!(aurora.config().default_java, None);
+        assert_eq!(petalfall.config().default_java, None);
     }
 
     /// 安装走下载池：文件落到托管目录、发出带总数的下载进度与带产物路径的完成阶段。
@@ -775,10 +781,10 @@ mod tests {
         let server = MockServer::start().await;
         let (manifest, java_bytes) = mount_runtime(&server).await;
         let dir = tempfile::tempdir().unwrap();
-        let aurora = aurora_with(AuroraConfig::default(), dir.path());
+        let petalfall = petalfall_with(PetalfallConfig::default(), dir.path());
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let installed = aurora
+        let installed = petalfall
             .install_java_from(17, manifest.clone(), Some(&tx))
             .await
             .expect("mock 安装应成功");
@@ -789,7 +795,10 @@ mod tests {
         assert_eq!(std::fs::read(&expected_exe).unwrap(), java_bytes);
 
         // 再装一次：清单照拉，文件已就绪不再下载。
-        aurora.install_java_from(17, manifest, None).await.unwrap();
+        petalfall
+            .install_java_from(17, manifest, None)
+            .await
+            .unwrap();
         assert_eq!(requests_to(&server, "/objects/java").await, 1);
         assert_eq!(requests_to(&server, "/all.json").await, 2);
 
@@ -813,7 +822,7 @@ mod tests {
         assert!(
             stages
                 .iter()
-                .any(|m| m.contains("安装完成") && m.contains(aurora_java::JAVA_EXE)),
+                .any(|m| m.contains("安装完成") && m.contains(petalfall_java::JAVA_EXE)),
             "应发出带产物路径的安装完成阶段事件，实际: {stages:?}"
         );
     }
@@ -834,7 +843,7 @@ mod tests {
     /// 记下每次识别的路径，按给定的结果作答。
     fn recording_env(
         seen: Arc<std::sync::Mutex<Vec<PathBuf>>>,
-        answer: fn(&Path) -> aurora_java::Result<String>,
+        answer: fn(&Path) -> petalfall_java::Result<String>,
     ) -> JavaEnv {
         JavaEnv {
             runner: Arc::new(move |path: &Path| {
@@ -846,7 +855,7 @@ mod tests {
         }
     }
 
-    fn answer_17(_path: &Path) -> aurora_java::Result<String> {
+    fn answer_17(_path: &Path) -> petalfall_java::Result<String> {
         Ok(OPENJDK_17.to_owned())
     }
 
@@ -866,11 +875,11 @@ mod tests {
     async fn manual_java_in_config_is_detected_as_manual() {
         let dir = tempfile::tempdir().unwrap();
         let exe = jdk(&dir.path().join("elsewhere"), "jdk-17", true);
-        let mut aurora = aurora_with(AuroraConfig::default(), dir.path());
-        assert!(aurora.add_extra_java_path(exe.clone()));
+        let mut petalfall = petalfall_with(PetalfallConfig::default(), dir.path());
+        assert!(petalfall.add_extra_java_path(exe.clone()));
         let env = counting_env(Arc::new(AtomicUsize::new(0)), String::new());
 
-        let found = aurora.detect_java_with(&env).await.unwrap();
+        let found = petalfall.detect_java_with(&env).await.unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].path, exe);
         assert_eq!(found[0].source, DetectSource::Manual);
@@ -878,7 +887,7 @@ mod tests {
         assert!(found[0].is_complete(), "{:?}", found[0].missing_files);
 
         // 不在配置里就不会被探测到（系统位置关着）。
-        let bare = aurora_with(AuroraConfig::default(), dir.path());
+        let bare = petalfall_with(PetalfallConfig::default(), dir.path());
         assert!(bare.detect_java_with(&env).await.unwrap().is_empty());
     }
 
@@ -888,11 +897,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let exe = jdk(dir.path(), "jdk-17.0.8", true);
         let javaw = exe.with_file_name(JAVAW_EXE.to_uppercase());
-        let aurora = aurora_with(AuroraConfig::default(), dir.path());
+        let petalfall = petalfall_with(PetalfallConfig::default(), dir.path());
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let env = recording_env(seen.clone(), answer_17);
 
-        let java = aurora.inspect_manual_java_with(&javaw, &env).await.unwrap();
+        let java = petalfall
+            .inspect_manual_java_with(&javaw, &env)
+            .await
+            .unwrap();
         assert_eq!(java.path, exe);
         assert_eq!(java.source, DetectSource::Manual);
         assert_eq!(java.version.major, 17);
@@ -903,7 +915,7 @@ mod tests {
             "识别的是 java 不是 javaw"
         );
         assert!(
-            aurora.config().extra_java_paths.is_empty(),
+            petalfall.config().extra_java_paths.is_empty(),
             "识别不写配置，记下由调用方落盘"
         );
     }
@@ -911,12 +923,12 @@ mod tests {
     #[tokio::test]
     async fn inspect_manual_java_reports_each_problem() {
         let dir = tempfile::tempdir().unwrap();
-        let aurora = aurora_with(AuroraConfig::default(), dir.path());
+        let petalfall = petalfall_with(PetalfallConfig::default(), dir.path());
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let env = recording_env(seen.clone(), answer_17);
 
         let relative = Path::new("jdk").join("bin").join(JAVA_EXE);
-        let err = aurora
+        let err = petalfall
             .inspect_manual_java_with(&relative, &env)
             .await
             .unwrap_err();
@@ -927,7 +939,7 @@ mod tests {
 
         let notes = dir.path().join("notes.txt");
         touch(&notes);
-        let err = aurora
+        let err = petalfall
             .inspect_manual_java_with(&notes, &env)
             .await
             .unwrap_err();
@@ -936,7 +948,7 @@ mod tests {
             (JavaPathProblem::NotJavaExecutable, notes.as_path(), false)
         );
         let shell = dir.path().join("bin").join("javac.exe");
-        let err = aurora
+        let err = petalfall
             .inspect_manual_java_with(&shell, &env)
             .await
             .unwrap_err();
@@ -945,7 +957,7 @@ mod tests {
         // 选了 javaw，但旁边没有 java：报的是找不到那个 java。
         let lone_javaw = dir.path().join("lone").join("bin").join(JAVAW_EXE);
         touch(&lone_javaw);
-        let err = aurora
+        let err = petalfall
             .inspect_manual_java_with(&lone_javaw, &env)
             .await
             .unwrap_err();
@@ -957,7 +969,7 @@ mod tests {
         // 叫 java.exe 的目录也不是文件。
         let folder = dir.path().join("odd").join(JAVA_EXE);
         std::fs::create_dir_all(&folder).unwrap();
-        let err = aurora
+        let err = petalfall
             .inspect_manual_java_with(&folder, &env)
             .await
             .unwrap_err();
@@ -966,7 +978,7 @@ mod tests {
 
         let garbage = jdk(dir.path(), "garbage", true);
         let env = recording_env(seen.clone(), |_| Ok("not a java at all".to_owned()));
-        let err = aurora
+        let err = petalfall
             .inspect_manual_java_with(&garbage, &env)
             .await
             .unwrap_err();
@@ -977,12 +989,12 @@ mod tests {
 
         let stuck = jdk(dir.path(), "stuck", true);
         let env = recording_env(seen.clone(), |path| {
-            Err(aurora_java::Error::JavaProbeTimeout {
+            Err(petalfall_java::Error::JavaProbeTimeout {
                 path: path.to_path_buf(),
-                timeout_secs: aurora_java::PROBE_TIMEOUT.as_secs(),
+                timeout_secs: petalfall_java::PROBE_TIMEOUT.as_secs(),
             })
         });
-        let err = aurora
+        let err = petalfall
             .inspect_manual_java_with(&stuck, &env)
             .await
             .unwrap_err();
@@ -993,14 +1005,14 @@ mod tests {
         assert!(
             matches!(
                 std::error::Error::source(&err)
-                    .and_then(|source| source.downcast_ref::<aurora_java::Error>()),
-                Some(aurora_java::Error::JavaProbeTimeout { .. })
+                    .and_then(|source| source.downcast_ref::<petalfall_java::Error>()),
+                Some(petalfall_java::Error::JavaProbeTimeout { .. })
             ),
             "超时的原错误挂在 source 上"
         );
 
         let broken = jdk(dir.path(), "broken", false);
-        let err = aurora
+        let err = petalfall
             .inspect_manual_java_with(&broken, &recording_env(seen, answer_17))
             .await
             .unwrap_err();
@@ -1017,14 +1029,14 @@ mod tests {
     #[test]
     fn add_extra_java_path_dedupes_ignoring_case() {
         let dir = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_with(AuroraConfig::default(), dir.path());
+        let mut petalfall = petalfall_with(PetalfallConfig::default(), dir.path());
         let exe = PathBuf::from(r"D:\Java\jdk-21\bin\java.exe");
-        assert!(aurora.add_extra_java_path(exe.clone()));
-        assert!(!aurora.add_extra_java_path(exe.clone()));
-        assert!(!aurora.add_extra_java_path(PathBuf::from(r"d:\JAVA\JDK-21\BIN\JAVA.EXE")));
+        assert!(petalfall.add_extra_java_path(exe.clone()));
+        assert!(!petalfall.add_extra_java_path(exe.clone()));
+        assert!(!petalfall.add_extra_java_path(PathBuf::from(r"d:\JAVA\JDK-21\BIN\JAVA.EXE")));
         let other = PathBuf::from(r"E:\zulu8\bin\java.exe");
-        assert!(aurora.add_extra_java_path(other.clone()));
-        assert_eq!(aurora.config().extra_java_paths, vec![exe, other]);
+        assert!(petalfall.add_extra_java_path(other.clone()));
+        assert_eq!(petalfall.config().extra_java_paths, vec![exe, other]);
     }
 
     #[test]
@@ -1032,43 +1044,49 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let exe = PathBuf::from(r"D:\Java\jdk-21\bin\java.exe");
         let other = PathBuf::from(r"E:\zulu8\bin\java.exe");
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             extra_java_paths: vec![exe.clone(), other.clone()],
             default_java: Some(exe.clone()),
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let mut aurora = aurora_with(config, dir.path());
+        let mut petalfall = petalfall_with(config, dir.path());
 
         // 移除的不是默认 Java：默认不动。
         assert_eq!(
-            aurora.remove_extra_java_path(&other),
+            petalfall.remove_extra_java_path(&other),
             RemovedJavaPath {
                 removed: true,
                 default_reset: false
             }
         );
-        assert_eq!(aurora.config().default_java.as_deref(), Some(exe.as_path()));
+        assert_eq!(
+            petalfall.config().default_java.as_deref(),
+            Some(exe.as_path())
+        );
 
         assert_eq!(
-            aurora.remove_extra_java_path(Path::new(r"d:\java\JDK-21\bin\java.exe")),
+            petalfall.remove_extra_java_path(Path::new(r"d:\java\JDK-21\bin\java.exe")),
             RemovedJavaPath {
                 removed: true,
                 default_reset: true
             }
         );
-        assert!(aurora.config().default_java.is_none());
-        assert!(aurora.config().extra_java_paths.is_empty());
+        assert!(petalfall.config().default_java.is_none());
+        assert!(petalfall.config().extra_java_paths.is_empty());
 
         // 不在列表里：什么都不动，默认 Java 即便同路径也不改。
-        aurora.set_default_java(Some(exe.clone()));
+        petalfall.set_default_java(Some(exe.clone()));
         assert_eq!(
-            aurora.remove_extra_java_path(&exe),
+            petalfall.remove_extra_java_path(&exe),
             RemovedJavaPath {
                 removed: false,
                 default_reset: false
             }
         );
-        assert_eq!(aurora.config().default_java.as_deref(), Some(exe.as_path()));
+        assert_eq!(
+            petalfall.config().default_java.as_deref(),
+            Some(exe.as_path())
+        );
     }
 
     /// 托管运行时缺了文件就不再被自动选中，交给自动下载：已就绪的文件按 sha1 跳过，只补缺的那个。
@@ -1078,15 +1096,15 @@ mod tests {
         let (manifest, _) = mount_runtime(&server).await;
         let dir = tempfile::tempdir().unwrap();
         let env = counting_env(Arc::new(AtomicUsize::new(0)), manifest);
-        let aurora = aurora_with(AuroraConfig::default(), dir.path());
+        let petalfall = petalfall_with(PetalfallConfig::default(), dir.path());
         let home = runtime_install_dir(dir.path(), 17);
 
-        let (list, _) = aurora.resolve_java_with(17, None, &env).await.unwrap();
+        let (list, _) = petalfall.resolve_java_with(17, None, &env).await.unwrap();
         assert!(list[0].is_complete(), "{:?}", list[0].missing_files);
         assert_eq!(requests_to(&server, "/objects/release").await, 1);
 
         std::fs::remove_file(home.join("release")).unwrap();
-        let (list, path) = aurora.resolve_java_with(17, None, &env).await.unwrap();
+        let (list, path) = petalfall.resolve_java_with(17, None, &env).await.unwrap();
         assert_eq!(path, java_exe_in_home(&home));
         assert!(list[0].is_complete());
         assert_eq!(std::fs::read(home.join("release")).unwrap(), RELEASE_BODY);
@@ -1108,15 +1126,15 @@ mod tests {
     async fn incomplete_fixed_default_java_is_still_used() {
         let dir = tempfile::tempdir().unwrap();
         let fixed = jdk(dir.path(), "half-jdk", false);
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             default_java: Some(fixed.clone()),
             auto_download_java: false,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = aurora_with(config, dir.path());
+        let petalfall = petalfall_with(config, dir.path());
         let env = counting_env(Arc::new(AtomicUsize::new(0)), String::new());
 
-        let (list, path) = aurora.resolve_java_with(17, None, &env).await.unwrap();
+        let (list, path) = petalfall.resolve_java_with(17, None, &env).await.unwrap();
         assert_eq!(path, fixed);
         assert_eq!(list[0].missing_files, vec!["release", "lib/modules"]);
     }

@@ -1,23 +1,23 @@
-//! aurora-download 的独立错误类型。
+//! petalfall-download 的独立错误类型。
 //!
-//! 本 crate 在 [`aurora_base::Error`] 之上叠加下载专属的失败形态（HTTP 状态、响应体截断、
+//! 本 crate 在 [`petalfall_base::Error`] 之上叠加下载专属的失败形态（HTTP 状态、响应体截断、
 //! 大小不符、Range 不支持、分片回退双失败、多源耗尽等）。底层的哈希/IO/URL 错误经 [`Error::Base`] 直接冒泡，
-//! 下游只需 `#[from] aurora_download::Error` 一处承接。
+//! 下游只需 `#[from] petalfall_download::Error` 一处承接。
 //!
 //! 错误是否可重试实现在 [`RetryableError`] 上：区分「换个时机或换个源可能就好」的瞬时故障
-//! 与「重试也是白搭」的确定性失败，喂给 [`aurora_base::retry::retry_async`] 精确控制退避。
+//! 与「重试也是白搭」的确定性失败，喂给 [`petalfall_base::retry::retry_async`] 精确控制退避。
 
-use aurora_base::retry::RetryableError;
+use petalfall_base::retry::RetryableError;
 
 use crate::credential::CredentialRealm;
 use crate::watchdog::SlowCause;
 
-/// aurora-download 对外统一错误。
+/// petalfall-download 对外统一错误。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// 底层设施错误（哈希不符、文件 IO、URL 改写等），来自 aurora-base。
+    /// 底层设施错误（哈希不符、文件 IO、URL 改写等），来自 petalfall-base。
     #[error(transparent)]
-    Base(#[from] aurora_base::Error),
+    Base(#[from] petalfall_base::Error),
 
     /// 发送请求或读取响应体时的传输层错误（连接、超时、读到一半断开）。
     #[error("HTTP 请求失败: {url}")]
@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn base_hash_mismatch_bubbles_as_retryable() {
-        let base = aurora_base::Error::HashMismatch {
+        let base = petalfall_base::Error::HashMismatch {
             algorithm: "SHA-1",
             expected: "aa".into(),
             actual: "bb".into(),

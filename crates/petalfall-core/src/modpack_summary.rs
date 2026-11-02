@@ -16,13 +16,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use aurora_download::DownloadCredential;
-use aurora_modpack::{PackFormat, PackLoader, PackManifest};
-use aurora_modplatform::Platform;
+use petalfall_download::DownloadCredential;
+use petalfall_modpack::{PackFormat, PackLoader, PackManifest};
+use petalfall_modplatform::Platform;
 use zip::result::ZipError;
 
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::modpack::{BlockedProbe, RemoteFacts, count_pack_mods, read_pack_blocking};
 
 const EOCD_SIGNATURE: u32 = 0x0605_4b50;
@@ -67,7 +67,7 @@ pub struct ModpackSummary {
 }
 
 /// 按平台选用的清单解析函数。
-type ManifestParser = fn(&[u8]) -> aurora_modpack::Result<PackManifest>;
+type ManifestParser = fn(&[u8]) -> petalfall_modpack::Result<PackManifest>;
 
 /// 中央目录里的一个条目。
 #[derive(Debug)]
@@ -89,7 +89,7 @@ struct RemotePack {
     entries: Vec<CentralEntry>,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 平台上某个整合包版本的清单摘要，不下载整包。服务器不支持范围读取、包不是可读的 zip
     /// 或缺清单时报 [`CoreError::RemotePack`]，清单本身不合法或压缩方式解不开时报 [`CoreError::Modpack`]。
     ///
@@ -132,7 +132,7 @@ impl Aurora {
         let archive = read_pack_blocking(path.to_path_buf()).await?;
         let pack_bytes = tokio::fs::metadata(path)
             .await
-            .map_err(|source| aurora_base::Error::Io {
+            .map_err(|source| petalfall_base::Error::Io {
                 path: path.to_path_buf(),
                 source,
             })?
@@ -283,7 +283,7 @@ async fn fetch_range(
         // 逐跳的请求由下载层构造，没法挂单请求时限，改在外面限住整条跳转链；读响应体仍受客户端的读超时兜底。
         RangeClient::Credentialed { client, credential } => tokio::time::timeout(
             RANGE_TIMEOUT,
-            aurora_download::credentialed_get(client, credential, url, Some(range.as_str())),
+            petalfall_download::credentialed_get(client, credential, url, Some(range.as_str())),
         )
         .await
         .map_err(|_| {
@@ -407,7 +407,7 @@ fn parse_central_directory(
             .ok_or_else(|| format!("目录第 {} 项的文件名越界", index + 1))?;
         entries.push(CentralEntry {
             // 与本地读包同一套解码；两步都解不了的才退成替换字符，摘要只拿名字数文件，不落盘。
-            name: aurora_modpack::decode_entry_name(name)
+            name: petalfall_modpack::decode_entry_name(name)
                 .unwrap_or_else(|| String::from_utf8_lossy(name).into_owned()),
             flags,
             method,
@@ -459,7 +459,7 @@ async fn read_entry(http: &RangeClient, url: &str, entry: &CentralEntry) -> Resu
         .await?
         .0
     };
-    aurora_modpack::decompress_entry(
+    petalfall_modpack::decompress_entry(
         entry.method,
         entry.flags,
         entry.crc32,
@@ -469,7 +469,7 @@ async fn read_entry(http: &RangeClient, url: &str, entry: &CentralEntry) -> Resu
     )
     .map_err(|err| match err {
         ZipError::CompressionMethodNotSupported(method) => {
-            aurora_modpack::Error::UnsupportedCompression {
+            petalfall_modpack::Error::UnsupportedCompression {
                 path: PathBuf::from(url),
                 entry: entry.name.clone(),
                 method,
@@ -483,7 +483,7 @@ async fn read_entry(http: &RangeClient, url: &str, entry: &CentralEntry) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instances::tests::aurora_at;
+    use crate::instances::tests::petalfall_at;
     use std::io::Write;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -620,9 +620,9 @@ mod tests {
     async fn summary_never_sends_a_suffix_range() {
         let (server, _, total) = serve(mrpack(&manifest()), true).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+        let petalfall = petalfall_at(tmp.path()).with_modrinth_base(server.uri());
 
-        let summary = aurora
+        let summary = petalfall
             .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
             .await
             .unwrap();
@@ -672,9 +672,9 @@ mod tests {
         assert!((total as u64) < TAIL_BYTES);
         let (server, _, _) = serve(pack, true).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+        let petalfall = petalfall_at(tmp.path()).with_modrinth_base(server.uri());
 
-        let summary = aurora
+        let summary = petalfall
             .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
             .await
             .unwrap();
@@ -687,9 +687,9 @@ mod tests {
     async fn summary_reads_only_the_directory_and_the_manifest() {
         let (server, served, total) = serve(mrpack(&manifest()), true).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+        let petalfall = petalfall_at(tmp.path()).with_modrinth_base(server.uri());
 
-        let summary = aurora
+        let summary = petalfall
             .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
             .await
             .unwrap();
@@ -721,9 +721,9 @@ mod tests {
         ] {
             let (server, _, _) = serve(mrpack_with(&manifest(), method), true).await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+            let petalfall = petalfall_at(tmp.path()).with_modrinth_base(server.uri());
 
-            let summary = aurora
+            let summary = petalfall
                 .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
                 .await
                 .unwrap_or_else(|err| panic!("{method:?}：{err:?}"));
@@ -740,15 +740,15 @@ mod tests {
         patch_central(&mut zstd, "modrinth.index.json", 10, &93u16.to_le_bytes());
         let (server, _, _) = serve(zstd, true).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
-        let err = aurora
+        let petalfall = petalfall_at(tmp.path()).with_modrinth_base(server.uri());
+        let err = petalfall
             .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
             .await
             .unwrap_err();
         assert!(
             matches!(
                 &err,
-                CoreError::Modpack(aurora_modpack::Error::UnsupportedCompression { entry, method: 93, .. })
+                CoreError::Modpack(petalfall_modpack::Error::UnsupportedCompression { entry, method: 93, .. })
                     if entry == "modrinth.index.json"
             ),
             "{err:?}"
@@ -757,8 +757,8 @@ mod tests {
         let mut corrupt = mrpack(&manifest());
         patch_central(&mut corrupt, "modrinth.index.json", 16, &[0, 0, 0, 0]);
         let (server, _, _) = serve(corrupt, true).await;
-        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
-        let err = aurora
+        let petalfall = petalfall_at(tmp.path()).with_modrinth_base(server.uri());
+        let err = petalfall
             .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
             .await
             .unwrap_err();
@@ -790,13 +790,13 @@ mod tests {
         let local = tmp.path().join("同一个包.mrpack");
         std::fs::write(&local, &pack).unwrap();
         let (server, _, _) = serve(pack, true).await;
-        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+        let petalfall = petalfall_at(tmp.path()).with_modrinth_base(server.uri());
 
-        let summary = aurora
+        let summary = petalfall
             .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
             .await
             .unwrap();
-        let preview = aurora.preview_modpack_file(&local).await.unwrap();
+        let preview = petalfall.preview_modpack_file(&local).await.unwrap();
         assert_eq!(summary.mod_files, 4, "sodium、lithium、extra、zoom");
         assert_eq!(preview.mod_files, summary.mod_files);
         assert_eq!(preview.remote_bytes, summary.remote_bytes);
@@ -850,13 +850,13 @@ mod tests {
         let local = tmp.path().join("中文 包.mrpack");
         std::fs::write(&local, &pack).unwrap();
         let (server, _, _) = serve(pack, true).await;
-        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+        let petalfall = petalfall_at(tmp.path()).with_modrinth_base(server.uri());
 
-        let summary = aurora
+        let summary = petalfall
             .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
             .await
             .unwrap();
-        let preview = aurora.preview_modpack_file(&local).await.unwrap();
+        let preview = petalfall.preview_modpack_file(&local).await.unwrap();
         let mut names: Vec<&str> = preview.mods.iter().map(|m| m.path.as_str()).collect();
         names.sort_unstable();
         assert_eq!(
@@ -971,8 +971,8 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let http = aurora_base::http::build_client().unwrap();
-        let client = aurora_modplatform::CurseForgeClient::new(http.clone(), "k")
+        let http = petalfall_base::http::build_client().unwrap();
+        let client = petalfall_modplatform::CurseForgeClient::new(http.clone(), "k")
             .with_base_url(server.uri());
 
         let pack = read_remote_pack(
@@ -982,7 +982,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let aurora_modpack::RemoteFiles::CurseForge(refs) = &pack.manifest.remote else {
+        let petalfall_modpack::RemoteFiles::CurseForge(refs) = &pack.manifest.remote else {
             panic!("应读出 CurseForge 清单");
         };
         let remote = crate::modpack::curseforge_remote_facts(&client, refs, BlockedProbe::Skip)
@@ -1067,15 +1067,15 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let port = server.address().port();
-        let aurora = aurora_at(tmp.path())
+        let petalfall = petalfall_at(tmp.path())
             .with_curseforge_base(&uri)
             .with_curseforge_key("k")
-            .with_curseforge_cdn_scope(aurora_download::CredentialScope::new(
+            .with_curseforge_cdn_scope(petalfall_download::CredentialScope::new(
                 [format!("127.0.0.1:{port}")],
                 false,
             ));
 
-        let summary = aurora
+        let summary = petalfall
             .summarize_platform_modpack(Platform::CurseForge, "394468", "4712000")
             .await
             .unwrap();
@@ -1102,7 +1102,7 @@ mod tests {
             "每个范围请求都带密钥"
         );
 
-        let err = aurora
+        let err = petalfall
             .summarize_platform_modpack(Platform::CurseForge, "394468", "4712999")
             .await
             .unwrap_err();
@@ -1110,7 +1110,7 @@ mod tests {
             panic!("应报下载错误，实为 {err:?}");
         };
         assert!(
-            matches!(download, aurora_download::Error::CredentialRejected { url, status: 401, .. } if url == &format!("{uri}/cdn/locked.zip")),
+            matches!(download, petalfall_download::Error::CredentialRejected { url, status: 401, .. } if url == &format!("{uri}/cdn/locked.zip")),
             "{download:?}"
         );
         server.verify().await;
@@ -1120,9 +1120,9 @@ mod tests {
     async fn server_without_range_support_is_refused_instead_of_downloading_the_pack() {
         let (server, _, _) = serve(mrpack(&manifest()), false).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
+        let petalfall = petalfall_at(tmp.path()).with_modrinth_base(server.uri());
 
-        let err = aurora
+        let err = petalfall
             .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
             .await
             .unwrap_err();
@@ -1153,7 +1153,7 @@ mod tests {
             .respond_with(WholeBodyAsPartial(mrpack(&manifest())))
             .mount(&server)
             .await;
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
 
         let err = read_remote_pack(
             &RangeClient::Shared(http),
@@ -1195,7 +1195,7 @@ mod tests {
             })
             .mount(&server)
             .await;
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
 
         let err = read_remote_pack(
             &RangeClient::Shared(http),
@@ -1223,8 +1223,8 @@ mod tests {
     async fn a_file_that_is_not_a_zip_or_lacks_the_manifest_is_reported() {
         let (server, _, _) = serve(vec![0u8; 1000], true).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
-        let err = aurora
+        let petalfall = petalfall_at(tmp.path()).with_modrinth_base(server.uri());
+        let err = petalfall
             .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
             .await
             .unwrap_err();
@@ -1239,8 +1239,8 @@ mod tests {
             .unwrap();
         writer.write_all(b"hi").unwrap();
         let (server, _, _) = serve(writer.finish().unwrap().into_inner(), true).await;
-        let aurora = aurora_at(tmp.path()).with_modrinth_base(server.uri());
-        let err = aurora
+        let petalfall = petalfall_at(tmp.path()).with_modrinth_base(server.uri());
+        let err = petalfall
             .summarize_platform_modpack(Platform::Modrinth, "1KVo5zza", "ver1")
             .await
             .unwrap_err();

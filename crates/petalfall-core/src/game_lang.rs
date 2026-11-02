@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use aurora_install::GameLayout;
-use aurora_version::AssetObjectsIndex;
+use petalfall_install::GameLayout;
+use petalfall_version::AssetObjectsIndex;
 
 use crate::error::{CoreError, Result};
 use crate::launch::read_asset_index;
@@ -238,7 +238,7 @@ async fn pending_mod_defaults(working_dir: &Path) -> Result<Option<&'static str>
         let path = working_dir.join(relative);
         let exists = tokio::fs::try_exists(&path)
             .await
-            .map_err(|source| aurora_base::Error::Io { path, source })?;
+            .map_err(|source| petalfall_base::Error::Io { path, source })?;
         if exists {
             return Ok(Some(relative));
         }
@@ -288,7 +288,7 @@ async fn fill(
     let existing = match tokio::fs::read(&path).await {
         Ok(bytes) => Some(bytes),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(source) => return Err(aurora_base::Error::Io { path, source }.into()),
+        Err(source) => return Err(petalfall_base::Error::Io { path, source }.into()),
     };
     let existing = existing.as_deref();
     if existing.is_none()
@@ -317,7 +317,7 @@ async fn fill(
     let Some(content) = filled.or(respelled) else {
         return Ok(());
     };
-    aurora_base::fs::atomic_write(&path, &content).await?;
+    petalfall_base::fs::atomic_write(&path, &content).await?;
     if let (Some(code), Some(system)) = (&language, inputs.system) {
         report
             .notes
@@ -397,7 +397,7 @@ async fn choose_language(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_version::AssetObject;
+    use petalfall_version::AssetObject;
     use std::collections::BTreeMap;
 
     /// 下面几组键节选自官方资源索引，覆盖了语言键写法变化的每一处。

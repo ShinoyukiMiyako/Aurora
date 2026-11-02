@@ -1,4 +1,4 @@
-//! Mojang `java_runtime` 清单的下载与安装（architecture.md aurora-java 小节 v1 项）。
+//! Mojang `java_runtime` 清单的下载与安装（architecture.md petalfall-java 小节 v1 项）。
 //!
 //! 流程：拉 `all.json`（平台 -> 组件 -> 条目）→ 按目标主版本挑组件 → 拉该组件的文件清单，
 //! 得到一份 [`RuntimePlan`]（每个文件的落盘路径、官方直链、sha1 与大小）。
@@ -6,7 +6,7 @@
 //! 文件本身由调用方下载：上层把计划转成批量下载任务（并发、换源、进度、已就绪文件按 sha1 跳过），
 //! 下完再调 [`RuntimePlan::finalize`] 建目录、设可执行位、建链接。
 //!
-//! 组件清单的 sha1 校验放在内存里、且在重试闭包内完成：校验不符会冒泡成 aurora-base 的
+//! 组件清单的 sha1 校验放在内存里、且在重试闭包内完成：校验不符会冒泡成 petalfall-base 的
 //! `HashMismatch`（可重试），于是一次损坏的下载会自动重新拉取。
 //!
 //! 两份清单都按源计划逐源尝试：当前源连不上、返回非 2xx、内容 sha1 不符或解析不了，就换下一个源
@@ -18,9 +18,9 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use aurora_base::http::{BodyReadError, METADATA_MAX_BYTES, read_body_capped};
-use aurora_base::mirror::{self, MirrorSource};
-use aurora_base::retry::{RetryPolicy, retry_async};
+use petalfall_base::http::{BodyReadError, METADATA_MAX_BYTES, read_body_capped};
+use petalfall_base::mirror::{self, MirrorSource};
+use petalfall_base::retry::{RetryPolicy, retry_async};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
@@ -29,7 +29,7 @@ use crate::version::JavaVersion;
 
 /// Mojang Java 运行时总清单（`all.json`）默认地址。
 ///
-/// 该 gamecore 哈希路径是社区长期稳定的公开入口；piston-meta 域名在 aurora-base 镜像表中，
+/// 该 gamecore 哈希路径是社区长期稳定的公开入口；piston-meta 域名在 petalfall-base 镜像表中，
 /// 走 BMCLAPI 时会被改写到镜像的同路径。
 pub const MOJANG_JAVA_RUNTIME_ALL: &str = "https://piston-meta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
 
@@ -159,7 +159,7 @@ impl RuntimePlan {
         for dir in &self.directories {
             tokio::fs::create_dir_all(dir)
                 .await
-                .map_err(|source| aurora_base::Error::Io {
+                .map_err(|source| petalfall_base::Error::Io {
                     path: dir.clone(),
                     source,
                 })?;
@@ -196,10 +196,10 @@ pub struct InstalledRuntime {
 
 /// 把官方地址按某个源改写成具体请求地址。
 ///
-/// 生产为 [`aurora_base::mirror::rewrite`]；测试把两个源钉到不同的本地 mock，
+/// 生产为 [`petalfall_base::mirror::rewrite`]；测试把两个源钉到不同的本地 mock，
 /// 以便分别控制官方源与镜像的应答。
 pub type SourceRewriter =
-    Arc<dyn Fn(&str, MirrorSource) -> aurora_base::Result<String> + Send + Sync>;
+    Arc<dyn Fn(&str, MirrorSource) -> petalfall_base::Result<String> + Send + Sync>;
 
 /// 候选地址展开后的再排序，见 [`JavaRuntimeInstaller::with_candidate_order`]。
 pub type CandidateOrder = Arc<dyn Fn(Vec<String>) -> Vec<String> + Send + Sync>;
@@ -261,7 +261,7 @@ impl JavaRuntimeInstaller {
         self
     }
 
-    /// 候选地址展开后再排一次序。aurora-java 不依赖下载引擎，门面经它把源健康表接进来，冷却中的主机排到后面。
+    /// 候选地址展开后再排一次序。petalfall-java 不依赖下载引擎，门面经它把源健康表接进来，冷却中的主机排到后面。
     pub fn with_candidate_order(mut self, order: CandidateOrder) -> Self {
         self.candidate_order = Some(order);
         self
@@ -687,7 +687,7 @@ fn describe_attempt(url: &str, err: &Error) -> String {
     out
 }
 
-/// 内存内 sha1 校验；不符返回 aurora-base 的 `HashMismatch`（可重试）。
+/// 内存内 sha1 校验；不符返回 petalfall-base 的 `HashMismatch`（可重试）。
 fn verify_bytes_sha1(bytes: &[u8], expected: &str) -> Result<()> {
     use sha1::{Digest, Sha1};
     let mut hasher = Sha1::new();
@@ -696,7 +696,7 @@ fn verify_bytes_sha1(bytes: &[u8], expected: &str) -> Result<()> {
     if actual.eq_ignore_ascii_case(expected) {
         Ok(())
     } else {
-        Err(aurora_base::Error::HashMismatch {
+        Err(petalfall_base::Error::HashMismatch {
             algorithm: "SHA-1",
             expected: expected.to_owned(),
             actual,
@@ -713,13 +713,13 @@ fn set_executable(path: &Path, executable: bool) -> Result<()> {
         return Ok(());
     }
     let mut perms = std::fs::metadata(path)
-        .map_err(|source| aurora_base::Error::Io {
+        .map_err(|source| petalfall_base::Error::Io {
             path: path.to_path_buf(),
             source,
         })?
         .permissions();
     perms.set_mode(perms.mode() | 0o111);
-    std::fs::set_permissions(path, perms).map_err(|source| aurora_base::Error::Io {
+    std::fs::set_permissions(path, perms).map_err(|source| petalfall_base::Error::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -734,13 +734,13 @@ fn set_executable(_path: &Path, _executable: bool) -> Result<()> {
 /// 建立符号链接（Windows 运行时清单不含链接，此路为跨平台完整性兜底）。同名旧链接先删掉。
 fn create_symlink(target: &str, link: &Path) -> Result<()> {
     if let Some(parent) = link.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| aurora_base::Error::Io {
+        std::fs::create_dir_all(parent).map_err(|source| petalfall_base::Error::Io {
             path: parent.to_path_buf(),
             source,
         })?;
     }
     if std::fs::symlink_metadata(link).is_ok() {
-        std::fs::remove_file(link).map_err(|source| aurora_base::Error::Io {
+        std::fs::remove_file(link).map_err(|source| petalfall_base::Error::Io {
             path: link.to_path_buf(),
             source,
         })?;
@@ -750,7 +750,7 @@ fn create_symlink(target: &str, link: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn symlink_impl(target: &str, link: &Path) -> Result<()> {
-    std::os::unix::fs::symlink(target, link).map_err(|source| aurora_base::Error::Io {
+    std::os::unix::fs::symlink(target, link).map_err(|source| petalfall_base::Error::Io {
         path: link.to_path_buf(),
         source,
     })?;
@@ -759,9 +759,11 @@ fn symlink_impl(target: &str, link: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn symlink_impl(target: &str, link: &Path) -> Result<()> {
-    std::os::windows::fs::symlink_file(target, link).map_err(|source| aurora_base::Error::Io {
-        path: link.to_path_buf(),
-        source,
+    std::os::windows::fs::symlink_file(target, link).map_err(|source| {
+        petalfall_base::Error::Io {
+            path: link.to_path_buf(),
+            source,
+        }
     })?;
     Ok(())
 }
@@ -944,7 +946,7 @@ mod tests {
             .await;
 
         let token = CancellationToken::new();
-        let client = aurora_base::http::build_client().expect("客户端应构建成功");
+        let client = petalfall_base::http::build_client().expect("客户端应构建成功");
         let installer = fast_installer(client, &base).with_cancel(token.clone());
         let dir = tempfile::tempdir().unwrap();
         let install_dir = dir.path().to_path_buf();
@@ -978,7 +980,7 @@ mod tests {
         let server = MockServer::start().await;
         let (gamma_java, gamma_lib) = mount_full_manifest(&server).await;
         let base = server.uri();
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let installer = fast_installer(client, &base);
         let dir = tempfile::tempdir().unwrap();
 
@@ -1031,7 +1033,7 @@ mod tests {
         let server = MockServer::start().await;
         mount_full_manifest(&server).await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let installer = fast_installer(client, &server.uri());
         let dir = tempfile::tempdir().unwrap();
 
@@ -1053,7 +1055,7 @@ mod tests {
     async fn unsupported_platform_errors() {
         let server = MockServer::start().await;
         mount_full_manifest(&server).await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let installer = fast_installer(client, &server.uri());
         let dir = tempfile::tempdir().unwrap();
 
@@ -1068,7 +1070,7 @@ mod tests {
     async fn missing_major_errors() {
         let server = MockServer::start().await;
         mount_full_manifest(&server).await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let installer = fast_installer(client, &server.uri());
         let dir = tempfile::tempdir().unwrap();
 
@@ -1093,7 +1095,7 @@ mod tests {
         mount_get(&server, "/all.json", all_json).await;
         mount_get(&server, "/gamma.json", gamma_manifest).await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let installer = fast_installer(client, &base);
         let dir = tempfile::tempdir().unwrap();
 
@@ -1101,9 +1103,9 @@ mod tests {
             .plan_for_platform(17, "windows-x64", dir.path())
             .await
             .unwrap_err();
-        // sha1 不符经 aurora-base 冒泡为 Base(HashMismatch)。
+        // sha1 不符经 petalfall-base 冒泡为 Base(HashMismatch)。
         assert!(
-            matches!(err, Error::Base(aurora_base::Error::HashMismatch { algorithm, .. }) if algorithm == "SHA-1"),
+            matches!(err, Error::Base(petalfall_base::Error::HashMismatch { algorithm, .. }) if algorithm == "SHA-1"),
             "应因 sha1 不符失败，实际: {err:?}"
         );
     }
@@ -1143,7 +1145,7 @@ mod tests {
             .await;
         mount_get(&server, "/gamma.json", gamma_manifest).await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let installer = fast_installer(client, &base);
         let dir = tempfile::tempdir().unwrap();
 
@@ -1217,7 +1219,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let install_dir = tmp.path().join("runtime").join("17");
 
-            let err = fast_installer(aurora_base::http::build_client().unwrap(), &base)
+            let err = fast_installer(petalfall_base::http::build_client().unwrap(), &base)
                 .plan_for_platform(17, "windows-x64", &install_dir)
                 .await
                 .unwrap_err();
@@ -1251,7 +1253,7 @@ mod tests {
             .await;
             let tmp = tempfile::tempdir().unwrap();
 
-            let err = fast_installer(aurora_base::http::build_client().unwrap(), &base)
+            let err = fast_installer(petalfall_base::http::build_client().unwrap(), &base)
                 .plan_for_platform(17, "windows-x64", &tmp.path().join("17"))
                 .await
                 .unwrap_err();
@@ -1426,7 +1428,7 @@ mod tests {
             (full.len() as u64, full[..5].to_vec()),
             (full.len() as u64, full.clone()),
         ]);
-        let installer = fast_installer(aurora_base::http::build_client().unwrap(), &url);
+        let installer = fast_installer(petalfall_base::http::build_client().unwrap(), &url);
 
         assert_eq!(installer.get_bytes(&url).await.unwrap(), full);
 
@@ -1436,10 +1438,10 @@ mod tests {
     /// 声明的长度超过上限：不读正文也不重试。带校验的那条读取路径同样限长。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_oversized_manifest_is_refused_without_a_retry() {
-        let declared = aurora_base::http::METADATA_MAX_BYTES + 1;
+        let declared = petalfall_base::http::METADATA_MAX_BYTES + 1;
         for verified in [false, true] {
             let (url, accepted) = raw_server(vec![(declared, Vec::new()), (2, b"{}".to_vec())]);
-            let installer = fast_installer(aurora_base::http::build_client().unwrap(), &url);
+            let installer = fast_installer(petalfall_base::http::build_client().unwrap(), &url);
 
             let result = if verified {
                 installer.get_verified_bytes(&url, &sha1_hex(b"{}")).await
@@ -1455,7 +1457,7 @@ mod tests {
                 }) => {
                     assert_eq!(failed, url);
                     assert_eq!(size, declared);
-                    assert_eq!(limit, aurora_base::http::METADATA_MAX_BYTES);
+                    assert_eq!(limit, petalfall_base::http::METADATA_MAX_BYTES);
                 }
                 other => panic!("应为 ResponseTooLarge，实际 {other:?}"),
             }
@@ -1482,7 +1484,7 @@ mod tests {
     }
 
     fn two_source_installer(official: &str, mirror: &str) -> JavaRuntimeInstaller {
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         fast_installer(client, official).with_rewriter(pinned_rewriter(official, mirror))
     }
 
@@ -1523,7 +1525,7 @@ mod tests {
 
     #[test]
     fn candidate_order_hook_reorders_the_expanded_candidates() {
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let installer =
             JavaRuntimeInstaller::new(client).with_candidate_order(Arc::new(|mut candidates| {
                 candidates.reverse();
@@ -1538,7 +1540,7 @@ mod tests {
 
     #[test]
     fn candidates_follow_source_order_and_collapse_identical_rewrites() {
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let mirror_all = "https://bmclapi2.bangbang93.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
 
         let default_order = JavaRuntimeInstaller::new(client.clone());
@@ -1685,7 +1687,7 @@ mod tests {
     /// 两个源都 503：汇总成 AllSourcesFailed，依次记下两个源的失败原因，原因链接到镜像的原错误与 reqwest 错误。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn every_source_failing_keeps_each_cause_in_order() {
-        use aurora_base::retry::RetryableError;
+        use petalfall_base::retry::RetryableError;
 
         let official = MockServer::start().await;
         let mirror = MockServer::start().await;
@@ -1776,8 +1778,8 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(
-            aurora_base::http::network_failure(&err),
-            Some(aurora_base::http::NetworkFailure::Connect)
+            petalfall_base::http::network_failure(&err),
+            Some(petalfall_base::http::NetworkFailure::Connect)
         );
     }
 
@@ -1786,7 +1788,7 @@ mod tests {
     async fn single_candidate_failure_keeps_the_original_error() {
         let server = MockServer::start().await;
         mount_status(&server, "/all.json", 503).await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let dir = tempfile::tempdir().unwrap();
 
         let err = fast_installer(client, &server.uri())

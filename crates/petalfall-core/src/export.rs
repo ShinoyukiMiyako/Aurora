@@ -19,19 +19,19 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use aurora_instance::{AURORA_META_DIR, DiscoveredVersion, MarkerStore};
-use aurora_modpack::{
+use petalfall_instance::{DiscoveredVersion, MarkerStore, PETALFALL_META_DIR};
+use petalfall_modpack::{
     ExportPack, IndexFile, OverrideFile, PackLoader, PackLoaderKind, SafeRelativePath,
     WriteProgress, is_export_download_url,
 };
-use aurora_modplatform::{DISABLED_SUFFIX, ModrinthFile, ModrinthVersion, Platform};
-use aurora_version::{LoaderKind, identify_mc_version};
+use petalfall_modplatform::{DISABLED_SUFFIX, ModrinthFile, ModrinthVersion, Platform};
+use petalfall_version::{LoaderKind, identify_mc_version};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, DownloadProgress, EventSink, emit};
-use crate::facade::{Aurora, PROGRESS_EVENT_INTERVAL};
+use crate::facade::{PROGRESS_EVENT_INTERVAL, Petalfall};
 use crate::modfs::{BACKUP_SUFFIX, MODS_DIR, bounded_map, local_concurrency, try_exists};
 use crate::modpack::read_instance_modpack;
 
@@ -426,7 +426,7 @@ struct HashedJar {
     sha1: String,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 导出前的预览：能不能导出、默认名称与版本、哪些 Mod 走索引、哪些要打包、各额外项的大小。
     /// 只读，要联网问 Modrinth。
     pub async fn preview_modpack_export(&self, id: &str) -> Result<ModpackExportPreview> {
@@ -519,7 +519,7 @@ impl Aurora {
 
         if let Err(source) = tokio::fs::rename(target.part_path(), target.destination()).await {
             target.discard().await;
-            return Err(aurora_base::Error::Io {
+            return Err(petalfall_base::Error::Io {
                 path: target.destination().to_path_buf(),
                 source,
             }
@@ -549,7 +549,7 @@ impl Aurora {
         part: &Path,
         bytes_total: u64,
         events: Option<&EventSink>,
-    ) -> Result<aurora_modpack::WrittenPack> {
+    ) -> Result<petalfall_modpack::WrittenPack> {
         let (tx, rx) = watch::channel(DownloadProgress {
             total: pack.overrides.len() as u64,
             finished: 0,
@@ -589,7 +589,7 @@ impl Aurora {
                     emit(verify_sink.as_ref(), CoreEvent::stage("校验导出的整合包"));
                 }
             };
-            aurora_modpack::write_pack(&pack, &part, &is_cancelled, &mut on_progress)
+            petalfall_modpack::write_pack(&pack, &part, &is_cancelled, &mut on_progress)
         })
         .await?;
         if let Some(forwarder) = forwarder {
@@ -600,7 +600,7 @@ impl Aurora {
 
     fn ensure_not_cancelled(&self) -> Result<()> {
         if self.is_cancelled() {
-            return Err(aurora_modpack::Error::Cancelled.into());
+            return Err(petalfall_modpack::Error::Cancelled.into());
         }
         Ok(())
     }
@@ -611,7 +611,7 @@ impl Aurora {
             Some(token) => token
                 .run_until_cancelled(work)
                 .await
-                .ok_or_else(|| aurora_modpack::Error::Cancelled.into()),
+                .ok_or_else(|| petalfall_modpack::Error::Cancelled.into()),
             None => Ok(work.await),
         }
     }
@@ -649,9 +649,9 @@ impl Aurora {
                 let cancel = cancel.clone();
                 async move {
                     if cancel.as_ref().is_some_and(|t| t.is_cancelled()) {
-                        return Err(aurora_modpack::Error::Cancelled.into());
+                        return Err(petalfall_modpack::Error::Cancelled.into());
                     }
-                    let sha1 = aurora_base::fs::sha1_hex(&jar.file.source).await?;
+                    let sha1 = petalfall_base::fs::sha1_hex(&jar.file.source).await?;
                     Ok(HashedJar { jar, sha1 })
                 }
             },
@@ -690,7 +690,7 @@ impl Aurora {
             wanted
                 .into_iter()
                 .map(|extra| Ok((extra, collect_extra(&working_dir, extra, &excluded)?)))
-                .collect::<std::result::Result<BTreeMap<_, _>, aurora_base::Error>>()
+                .collect::<std::result::Result<BTreeMap<_, _>, petalfall_base::Error>>()
         })
         .await??;
 
@@ -866,7 +866,7 @@ struct ModListing {
 /// 说明文件）加载器不读，也不导出。与 Mod 列表同一条判定。
 async fn list_mods(mods_dir: &Path) -> Result<ModListing> {
     let io = |path: &Path, source: std::io::Error| -> CoreError {
-        aurora_base::Error::Io {
+        petalfall_base::Error::Io {
             path: path.to_path_buf(),
             source,
         }
@@ -1009,14 +1009,14 @@ fn collect_extra(
     working_dir: &Path,
     extra: ExportExtra,
     excluded: &HashSet<String>,
-) -> std::result::Result<CollectedExtra, aurora_base::Error> {
+) -> std::result::Result<CollectedExtra, petalfall_base::Error> {
     let mut collected = CollectedExtra::default();
     let root = working_dir.join(extra.relative());
     if extra == ExportExtra::Options {
         let meta = match std::fs::symlink_metadata(&root) {
             Ok(meta) => meta,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(collected),
-            Err(source) => return Err(aurora_base::Error::Io { path: root, source }),
+            Err(source) => return Err(petalfall_base::Error::Io { path: root, source }),
         };
         if meta.file_type().is_file() && !excluded.contains(&path_key(&root)) {
             collected.files.push(PlannedFile {
@@ -1033,7 +1033,7 @@ fn collect_extra(
         Ok(meta) if meta.file_type().is_dir() => {}
         Ok(_) => return Ok(collected),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(collected),
-        Err(source) => return Err(aurora_base::Error::Io { path: root, source }),
+        Err(source) => return Err(petalfall_base::Error::Io { path: root, source }),
     }
     walk(&root, extra.relative(), excluded, &mut collected)?;
     collected.files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -1048,8 +1048,8 @@ fn walk(
     relative: &str,
     excluded: &HashSet<String>,
     out: &mut CollectedExtra,
-) -> std::result::Result<(), aurora_base::Error> {
-    let io = |path: &Path, source: std::io::Error| aurora_base::Error::Io {
+) -> std::result::Result<(), petalfall_base::Error> {
+    let io = |path: &Path, source: std::io::Error| petalfall_base::Error::Io {
         path: path.to_path_buf(),
         source,
     };
@@ -1063,7 +1063,7 @@ fn walk(
         }
         let raw = entry.file_name();
         let name = raw.to_string_lossy();
-        if name.eq_ignore_ascii_case(AURORA_META_DIR) {
+        if name.eq_ignore_ascii_case(PETALFALL_META_DIR) {
             continue;
         }
         let child = format!("{relative}/{name}");
@@ -1113,12 +1113,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use crate::ledger::{Ledger, LedgerEntry, UpdateHold};
     use crate::modpack::{InstanceModpack, ModpackSource};
-    use aurora_download::CancellationToken;
-    use aurora_instance::{IsolationOverride, VersionSettings, VersionSettingsStore};
-    use aurora_modpack::PackFormat;
+    use petalfall_download::CancellationToken;
+    use petalfall_instance::{IsolationOverride, VersionSettings, VersionSettingsStore};
+    use petalfall_modpack::PackFormat;
     use sha1::{Digest, Sha1};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1165,7 +1165,7 @@ mod tests {
     struct Fixture {
         _tmp: tempfile::TempDir,
         root: PathBuf,
-        aurora: Aurora,
+        petalfall: Petalfall,
         server: MockServer,
         dir: PathBuf,
         jars: BTreeMap<&'static str, Vec<u8>>,
@@ -1190,10 +1190,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         let mc = root.join("mc");
-        let aurora = Aurora::for_test(AuroraConfig::default(), root.join("data"), mc.clone())
-            .with_modrinth_base(server.uri())
-            .with_fabric_base(server.uri())
-            .with_manifest_url(format!("{}/manifest.json", server.uri()));
+        let petalfall =
+            Petalfall::for_test(PetalfallConfig::default(), root.join("data"), mc.clone())
+                .with_modrinth_base(server.uri())
+                .with_fabric_base(server.uri())
+                .with_manifest_url(format!("{}/manifest.json", server.uri()));
         let dir = mc.join("versions").join(ID);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{ID}.json")), FABRIC_JSON).unwrap();
@@ -1227,7 +1228,7 @@ mod tests {
         let fixture = Fixture {
             _tmp: tmp,
             root,
-            aurora,
+            petalfall,
             server,
             dir,
             jars,
@@ -1241,7 +1242,7 @@ mod tests {
         fixture.write("config/sodium-options.json", b"{\"quality\":1}");
         fixture.write("config/sub/deep.toml", b"deep = true");
         fixture.write("config/stale.toml.OLD", b"backup");
-        fixture.write(&format!("config/{AURORA_META_DIR}/leak.json"), b"leak");
+        fixture.write(&format!("config/{PETALFALL_META_DIR}/leak.json"), b"leak");
         fixture.write("config/nul.json", b"reserved");
         fixture.write("options.txt", b"lang:zh_cn");
         fixture.write("resourcepacks/pack.zip", b"PK-pack");
@@ -1264,7 +1265,7 @@ mod tests {
                 update_hold: None,
             };
         fixture
-            .aurora
+            .petalfall
             .ledger_store(ID)
             .save(&Ledger {
                 entries: vec![
@@ -1335,7 +1336,7 @@ mod tests {
     async fn preview_splits_mods_by_ledger_and_hash_and_counts_extras() {
         let fixture = fixture().await;
         mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
-        let preview = fixture.aurora.preview_modpack_export(ID).await.unwrap();
+        let preview = fixture.petalfall.preview_modpack_export(ID).await.unwrap();
 
         assert_eq!(
             (preview.name.as_str(), preview.version.as_str()),
@@ -1482,7 +1483,7 @@ mod tests {
     async fn files_the_platform_serves_from_other_hosts_are_bundled() {
         let fixture = fixture().await;
         mount_modrinth(&fixture, "https://example.com/c.jar").await;
-        let preview = fixture.aurora.preview_modpack_export(ID).await.unwrap();
+        let preview = fixture.petalfall.preview_modpack_export(ID).await.unwrap();
         assert_eq!(
             names(&preview.indexed, |m| &m.file_name),
             vec!["a.jar", "b.jar"]
@@ -1508,7 +1509,7 @@ mod tests {
         let fixture = fixture().await;
         fixture.write("mods/a.jar", b"replaced by hand");
         mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
-        let preview = fixture.aurora.preview_modpack_export(ID).await.unwrap();
+        let preview = fixture.petalfall.preview_modpack_export(ID).await.unwrap();
         assert_eq!(
             names(&preview.indexed, |m| &m.file_name),
             vec!["b.jar", "c.jar"]
@@ -1529,12 +1530,12 @@ mod tests {
     async fn update_holds_do_not_change_how_mods_are_indexed() {
         let fixture = fixture().await;
         fixture
-            .aurora
+            .petalfall
             .set_mod_update_hold(ID, "a.jar", Some(UpdateHold::Ignored))
             .await
             .unwrap();
         fixture
-            .aurora
+            .petalfall
             .set_mod_update_hold(
                 ID,
                 "b.jar",
@@ -1545,7 +1546,7 @@ mod tests {
             .await
             .unwrap();
         mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
-        let preview = fixture.aurora.preview_modpack_export(ID).await.unwrap();
+        let preview = fixture.petalfall.preview_modpack_export(ID).await.unwrap();
 
         let indexed: Vec<_> = preview
             .indexed
@@ -1568,7 +1569,7 @@ mod tests {
         assert_eq!(by_ids.len(), 1);
         let ids = by_ids[0].url.query().unwrap().to_owned();
         assert!(ids.contains("va") && ids.contains("vb"), "{ids}");
-        let ledger = fixture.aurora.ledger_store(ID).load().await.unwrap();
+        let ledger = fixture.petalfall.ledger_store(ID).load().await.unwrap();
         let held: Vec<_> = ledger
             .entries
             .iter()
@@ -1588,9 +1589,13 @@ mod tests {
         );
     }
 
-    fn bare_aurora(root: &Path) -> Aurora {
-        Aurora::for_test(AuroraConfig::default(), root.join("data"), root.join("mc"))
-            .with_modrinth_base("http://127.0.0.1:9")
+    fn bare_petalfall(root: &Path) -> Petalfall {
+        Petalfall::for_test(
+            PetalfallConfig::default(),
+            root.join("data"),
+            root.join("mc"),
+        )
+        .with_modrinth_base("http://127.0.0.1:9")
     }
 
     fn bare_instance(root: &Path, id: &str, json: &str) -> PathBuf {
@@ -1604,7 +1609,7 @@ mod tests {
     #[tokio::test]
     async fn neoforge_on_1_20_1_exports_as_neoforge() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = bare_aurora(tmp.path());
+        let petalfall = bare_petalfall(tmp.path());
         bare_instance(
             tmp.path(),
             "新锻造",
@@ -1614,7 +1619,7 @@ mod tests {
                 "libraries":[{"name":"net.neoforged:forge:1.20.1-47.1.106:universal"}]}"#,
         );
 
-        let preview = aurora.preview_modpack_export("新锻造").await.unwrap();
+        let preview = petalfall.preview_modpack_export("新锻造").await.unwrap();
 
         assert_eq!(
             preview.loader,
@@ -1628,7 +1633,7 @@ mod tests {
     #[tokio::test]
     async fn instances_that_cannot_become_a_pack_say_why() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = bare_aurora(tmp.path());
+        let petalfall = bare_petalfall(tmp.path());
         let cases = [
             (
                 "带光影",
@@ -1661,7 +1666,7 @@ mod tests {
         ];
         for (id, json, reason, loader) in cases {
             bare_instance(tmp.path(), id, json);
-            let err = aurora.preview_modpack_export(id).await.unwrap_err();
+            let err = petalfall.preview_modpack_export(id).await.unwrap_err();
             let CoreError::ModpackExportUnsupported {
                 id: got_id,
                 reason: got,
@@ -1693,13 +1698,16 @@ mod tests {
             r#"{"id":"装了一半","inheritsFrom":"1.21.1","type":"release","mainClass":"M"}"#,
         );
         MarkerStore::for_version_dir(&dir)
-            .save(&aurora_instance::IncompleteMarker::pending(
-                aurora_instance::IncompleteKind::Repair,
+            .save(&petalfall_instance::IncompleteMarker::pending(
+                petalfall_instance::IncompleteKind::Repair,
                 1,
             ))
             .await
             .unwrap();
-        let err = aurora.preview_modpack_export("装了一半").await.unwrap_err();
+        let err = petalfall
+            .preview_modpack_export("装了一半")
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1712,7 +1720,10 @@ mod tests {
         );
         assert_eq!(err.to_string(), "实例还没装完整，修复后再导出");
 
-        let missing = aurora.preview_modpack_export("没有这个").await.unwrap_err();
+        let missing = petalfall
+            .preview_modpack_export("没有这个")
+            .await
+            .unwrap_err();
         assert!(
             matches!(missing, CoreError::VersionNotInstalled { .. }),
             "{missing:?}"
@@ -1724,13 +1735,13 @@ mod tests {
     #[tokio::test]
     async fn defaults_come_from_the_recorded_modpack() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = bare_aurora(tmp.path());
+        let petalfall = bare_petalfall(tmp.path());
         let dir = bare_instance(
             tmp.path(),
             "导入的",
             r#"{"id":"导入的","inheritsFrom":"1.21.1","type":"release","mainClass":"M"}"#,
         );
-        std::fs::create_dir_all(dir.join(AURORA_META_DIR)).unwrap();
+        std::fs::create_dir_all(dir.join(PETALFALL_META_DIR)).unwrap();
         for (version, expected) in [(Some("3.4.5"), "3.4.5"), (None, "1.0.0")] {
             let info = InstanceModpack {
                 schema: 1,
@@ -1747,11 +1758,11 @@ mod tests {
                 installed_at: 1,
             };
             std::fs::write(
-                dir.join(AURORA_META_DIR).join("modpack.json"),
+                dir.join(PETALFALL_META_DIR).join("modpack.json"),
                 serde_json::to_vec(&info).unwrap(),
             )
             .unwrap();
-            let preview = aurora.preview_modpack_export("导入的").await.unwrap();
+            let preview = petalfall.preview_modpack_export("导入的").await.unwrap();
             assert_eq!(preview.name, "Fabulously Optimized");
             assert_eq!(preview.version, expected);
             assert_eq!(preview.minecraft, "1.21.1");
@@ -1883,7 +1894,7 @@ mod tests {
     #[tokio::test]
     async fn links_and_junctions_inside_extras_are_not_followed() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = bare_aurora(tmp.path());
+        let petalfall = bare_petalfall(tmp.path());
         let dir = bare_instance(
             tmp.path(),
             "链接",
@@ -1917,7 +1928,7 @@ mod tests {
                 "目录联接应被认作链接"
             );
         }
-        let preview = aurora.preview_modpack_export("链接").await.unwrap();
+        let preview = petalfall.preview_modpack_export("链接").await.unwrap();
         let count = |extra: ExportExtra| {
             preview
                 .extras
@@ -1982,7 +1993,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         let outcome = fixture
-            .aurora
+            .petalfall
             .export_modpack(
                 ID,
                 &options(vec![ExportExtra::Config], false),
@@ -2101,7 +2112,7 @@ mod tests {
         fixture.write("mods/aux.jar", b"reserved");
         fixture.write("saves/World/prn.dat", b"reserved");
 
-        let preview = fixture.aurora.preview_modpack_export(ID).await.unwrap();
+        let preview = fixture.petalfall.preview_modpack_export(ID).await.unwrap();
         assert_eq!(preview.mod_skipped, vec!["mods/aux.jar", "mods/con.jar"]);
 
         let cases: [(&[ExportExtra], &[&str]); 4] = [
@@ -2127,7 +2138,7 @@ mod tests {
         for (index, (selected, expected)) in cases.into_iter().enumerate() {
             let target = ModpackExportTarget::new(fixture.root.join(format!("跳过{index}.mrpack")));
             let outcome = fixture
-                .aurora
+                .petalfall
                 .export_modpack(ID, &options(selected.to_vec(), false), &target, None)
                 .await
                 .unwrap();
@@ -2156,7 +2167,7 @@ mod tests {
         fixture.write("mods/aux.jar.disabled", b"reserved");
         fixture.write("mods/prn.jar.disabled", b"reserved");
 
-        let preview = fixture.aurora.preview_modpack_export(ID).await.unwrap();
+        let preview = fixture.petalfall.preview_modpack_export(ID).await.unwrap();
         assert_eq!(preview.mod_skipped, vec!["mods/con.jar"]);
         assert_eq!(
             preview.disabled_skipped,
@@ -2165,7 +2176,7 @@ mod tests {
 
         let without = ModpackExportTarget::new(fixture.root.join("不带停用.mrpack"));
         let outcome = fixture
-            .aurora
+            .petalfall
             .export_modpack(ID, &options(Vec::new(), false), &without, None)
             .await
             .unwrap();
@@ -2174,7 +2185,7 @@ mod tests {
 
         let with = ModpackExportTarget::new(fixture.root.join("带上停用.mrpack"));
         let outcome = fixture
-            .aurora
+            .petalfall
             .export_modpack(ID, &options(Vec::new(), true), &with, None)
             .await
             .unwrap();
@@ -2196,11 +2207,11 @@ mod tests {
         mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
         let walked = |plan: &ExportPlan| plan.extras.keys().copied().collect::<Vec<_>>();
 
-        let none = fixture.aurora.plan_export(ID, &[], None, None).await;
+        let none = fixture.petalfall.plan_export(ID, &[], None, None).await;
         assert_eq!(walked(&none.unwrap()), Vec::<ExportExtra>::new());
 
         let some = fixture
-            .aurora
+            .petalfall
             .plan_export(
                 ID,
                 &[
@@ -2218,7 +2229,7 @@ mod tests {
         assert_eq!(some.extras[&ExportExtra::Options].files.len(), 1);
 
         let all = fixture
-            .aurora
+            .petalfall
             .plan_export(ID, &ExportExtra::ALL, None, None);
         assert_eq!(walked(&all.await.unwrap()), ExportExtra::ALL);
     }
@@ -2232,7 +2243,7 @@ mod tests {
         let target = ModpackExportTarget::new(destination.clone());
 
         let outcome = fixture
-            .aurora
+            .petalfall
             .export_modpack(ID, &options(ExportExtra::ALL.to_vec(), true), &target, None)
             .await
             .unwrap();
@@ -2251,7 +2262,7 @@ mod tests {
         }
         for name in &names {
             let lower = name.to_lowercase();
-            assert!(!lower.contains(AURORA_META_DIR), "{name}");
+            assert!(!lower.contains(PETALFALL_META_DIR), "{name}");
             assert!(!lower.ends_with(".old"), "{name}");
             assert!(
                 !lower.contains("logs/") && !lower.contains("crash-reports/"),
@@ -2290,10 +2301,10 @@ mod tests {
             .unwrap();
         holder.lock().unwrap();
 
-        let preview = fixture.aurora.preview_modpack_export(ID).await;
+        let preview = fixture.petalfall.preview_modpack_export(ID).await;
         let target = ModpackExportTarget::new(fixture.root.join("开着存档.mrpack"));
         let outcome = fixture
-            .aurora
+            .petalfall
             .export_modpack(ID, &options(vec![ExportExtra::Saves], false), &target, None)
             .await;
         holder.unlock().unwrap();
@@ -2330,9 +2341,9 @@ mod tests {
         mount_modrinth(&fixture, &cdn("pc", "vc", "c.jar")).await;
         let token = CancellationToken::new();
         token.cancel();
-        let aurora = fixture.aurora.clone().with_cancel(token);
+        let petalfall = fixture.petalfall.clone().with_cancel(token);
         let target = ModpackExportTarget::new(fixture.root.join("取消.mrpack"));
-        let err = aurora
+        let err = petalfall
             .export_modpack(ID, &options(vec![ExportExtra::Config], true), &target, None)
             .await
             .unwrap_err();
@@ -2346,12 +2357,12 @@ mod tests {
     /// 把清单里的正式 CDN 地址改写到本地 mock，导入侧对清单地址的白名单校验不变。
     struct CdnToMock(String);
 
-    impl aurora_download::SourceResolver for CdnToMock {
+    impl petalfall_download::SourceResolver for CdnToMock {
         fn resolve(
             &self,
             url: &str,
-            _source: aurora_download::MirrorSource,
-        ) -> aurora_download::Result<String> {
+            _source: petalfall_download::MirrorSource,
+        ) -> petalfall_download::Result<String> {
             Ok(url.replace("https://cdn.modrinth.com/", &format!("{}/cdn/", self.0)))
         }
     }
@@ -2412,17 +2423,17 @@ mod tests {
                 .mount(&fixture.server)
                 .await;
         }
-        let aurora = fixture
-            .aurora
+        let petalfall = fixture
+            .petalfall
             .clone()
             .with_download_resolver(Arc::new(CdnToMock(base.clone())));
         let target = ModpackExportTarget::new(fixture.root.join("往返.mrpack"));
-        aurora
+        petalfall
             .export_modpack(ID, &options(vec![ExportExtra::Config], true), &target, None)
             .await
             .unwrap();
 
-        let imported = aurora
+        let imported = petalfall
             .install_modpack(
                 &ModpackSource::File {
                     path: target.destination().to_path_buf(),

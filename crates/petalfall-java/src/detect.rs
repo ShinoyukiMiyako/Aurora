@@ -241,7 +241,7 @@ impl DetectScope {
 ///
 /// 供不持有数据目录的调用方使用；持有数据目录与缓存的上层应调用 [`detect_with`]。
 pub fn detect_all() -> Vec<JavaInstallation> {
-    let managed_root = match aurora_base::fs::data_dir() {
+    let managed_root = match petalfall_base::fs::data_dir() {
         Ok(dir) => Some(managed_runtime_root(&dir)),
         Err(err) => {
             tracing::warn!(error = %err, "定位不到数据目录，本次探测不含托管运行时");
@@ -543,7 +543,7 @@ impl ProbeCache {
                 modified_ms,
                 failed_at_ms,
                 kind: ProbeFailureKind::of(err),
-                message: aurora_base::error_with_causes(err),
+                message: petalfall_base::error_with_causes(err),
             },
         );
     }
@@ -1024,11 +1024,11 @@ mod tests {
     // ---- 超时 ----
 
     /// 被重新拉起时当作挂住的 java。不带环境变量时立即返回，`--include-ignored` 跑全量也不会白等。
-    const HANG_HELPER_ENV: &str = "AURORA_JAVA_PROBE_HANG_HELPER";
+    const HANG_HELPER_ENV: &str = "PETALFALL_JAVA_PROBE_HANG_HELPER";
     /// 挂住多少秒；不给时 60 秒。留下的后代进程用短一些的值，测试结束后不久就自己退出。
-    const HANG_SECS_ENV: &str = "AURORA_JAVA_PROBE_HANG_SECS";
+    const HANG_SECS_ENV: &str = "PETALFALL_JAVA_PROBE_HANG_SECS";
     /// 被重新拉起时派生一个挂住的后代进程（继承输出管道）后立即退出。
-    const ORPHAN_HELPER_ENV: &str = "AURORA_JAVA_PROBE_ORPHAN_HELPER";
+    const ORPHAN_HELPER_ENV: &str = "PETALFALL_JAVA_PROBE_ORPHAN_HELPER";
     /// 后代进程握着管道的时长：要明显长于超时加余量，修复前测试才会因等它而超时。
     const ORPHAN_HOLDS_PIPES_SECS: &str = "8";
 
@@ -2169,7 +2169,7 @@ mod tests {
     #[test]
     fn default_roots_do_not_include_data_dir() {
         // 托管目录由 DetectScope 单独给出；常见目录里再列一遍会让它的来源被记成 CommonDir。
-        let data = aurora_base::fs::data_dir().unwrap();
+        let data = petalfall_base::fs::data_dir().unwrap();
         let roots = default_search_roots();
         assert!(
             !roots.iter().any(|root| root.starts_with(&data)),

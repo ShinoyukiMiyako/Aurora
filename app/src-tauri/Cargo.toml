@@ -1,7 +1,7 @@
 [package]
-name = "aurora-tauri"
+name = "petalfall-tauri"
 version = "0.1.0"
-description = "Petalfall 的 Tauri 外壳：把 aurora-core 门面通过 IPC 暴露给 React 前端"
+description = "Petalfall 的 Tauri 外壳：把 petalfall-core 门面通过 IPC 暴露给 React 前端"
 authors = ["Petalfall"]
 edition = "2021"
 license.workspace = true
@@ -10,7 +10,7 @@ license.workspace = true
 
 [lib]
 # `_lib` 后缀避免 lib 与 bin 同名（Windows 上的已知冲突，见 rust-lang/cargo#8519）。
-name = "aurora_tauri_lib"
+name = "petalfall_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -31,9 +31,9 @@ tauri-plugin-updater = "~2.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 门面：前端全部能力经此 crate 暴露，业务调用不直接依赖任何下层 crate。
-aurora-core = { path = "../../crates/aurora-core" }
+petalfall-core = { path = "../../crates/petalfall-core" }
 # 品牌常量与数据目录定位（日志要和 config.json 落在同一处）。
-aurora-base = { path = "../../crates/aurora-base" }
+petalfall-base = { path = "../../crates/petalfall-base" }
 # managed state 用 tokio::sync::RwLock；事件转发用 mpsc + spawn；兜底显示窗口与取消宽限要计时。
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 # 日志：下层各 crate 只发事件，subscriber 在此层配置。必须开 time 特性，
@@ -76,5 +76,5 @@ tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
 # 命令层集成测试用本地 mock 端点（设备码登录、版本清单）。
 wiremock = "0.6"
-# 整合包导入的命令层测试要现场打一个 .mrpack；特性与 aurora-modpack 一致，不引入 C 依赖的压缩后端。
+# 整合包导入的命令层测试要现场打一个 .mrpack；特性与 petalfall-modpack 一致，不引入 C 依赖的压缩后端。
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }

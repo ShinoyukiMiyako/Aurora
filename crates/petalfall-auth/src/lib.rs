@@ -1,10 +1,10 @@
-//! aurora-auth（L1 账户体系）
+//! petalfall-auth（L1 账户体系）
 //!
 //! 三类登录方式的后端状态机：微软正版、离线、Authlib-Injector（Yggdrasil）。
 //! 统一通行证（Nide8）依赖第三方商业服务，本轮不做。
 //!
 //! 模块划分：
-//! - [`error`]：本 crate 独立错误枚举 [`AuthError`]，`#[from] aurora_base::Error` 冒泡下层错误。
+//! - [`error`]：本 crate 独立错误枚举 [`AuthError`]，`#[from] petalfall_base::Error` 冒泡下层错误。
 //! - [`account`]：账户模型（uuid/名称/类型/令牌引用）与多账户管理 [`AccountManager`]。
 //! - [`offline`]：离线用户名合法性校验与稳定离线 UUID（与原版一致）。
 //! - [`offline_store`]：离线账户的明文 JSON 持久化（不进 DPAPI 凭据库）。

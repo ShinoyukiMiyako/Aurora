@@ -106,7 +106,7 @@ pub enum PathValidationError {
     ParentTraversal,
     #[error("路径含 Windows 盘符前缀")]
     DrivePrefix,
-    #[error("路径进入{}元数据目录：{component}", aurora_base::brand::APP_NAME)]
+    #[error("路径进入{}元数据目录：{component}", petalfall_base::brand::APP_NAME)]
     ProtectedTopLevel { component: String },
     #[error("路径组件以点或空格结尾：{component}")]
     TrailingDotOrSpace { component: String },
@@ -191,7 +191,7 @@ fn has_drive_prefix(path: &str) -> bool {
 /// 整合包能写的是游戏数据（含存档：地图类整合包本来就自带存档），不能写的只有启动器在实例里
 /// 记账的元数据目录。Windows 不区分大小写，比较也不区分。
 fn is_protected_top_level(component: &str) -> bool {
-    component.eq_ignore_ascii_case(aurora_instance::AURORA_META_DIR)
+    component.eq_ignore_ascii_case(petalfall_instance::PETALFALL_META_DIR)
 }
 
 fn is_dos_short_name(component: &str) -> bool {

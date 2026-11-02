@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use aurora_download::DownloadTask;
+use petalfall_download::DownloadTask;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{DependencyKind, ModLoader, Platform};

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::instance_install::now_millis;
 
 /// 白名单，按这个顺序列出、复制。前两个是原版写在游戏目录根下的设置与服务器列表，后两个是 OptiFine
@@ -125,7 +125,7 @@ async fn lock_template_dir(dir: &Path) -> OwnedMutexGuard<()> {
     entry.lock_owned().await
 }
 
-impl Aurora {
+impl Petalfall {
     /// 模板目录 `<数据目录>/templates/default`（不检查是否存在）。
     pub fn template_dir(&self) -> PathBuf {
         self.data_dir().join(TEMPLATES_DIR).join(DEFAULT_TEMPLATE)
@@ -189,7 +189,7 @@ impl Aurora {
         match tokio::fs::remove_dir_all(&dir).await {
             Ok(()) => tracing::info!(dir = %dir.display(), "已清除默认设置"),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(aurora_base::Error::Io { path: dir, source }.into()),
+            Err(source) => return Err(petalfall_base::Error::Io { path: dir, source }.into()),
         }
         self.read_template_info(&dir).await
     }
@@ -219,7 +219,7 @@ impl Aurora {
                 continue;
             }
             let bytes = read_file(&dir.join(file.name)).await?;
-            aurora_base::fs::atomic_write(&target, &bytes).await?;
+            petalfall_base::fs::atomic_write(&target, &bytes).await?;
             copied.push(file.name);
         }
         tracing::info!(id, ?copied, ?kept, "新实例已沿用默认设置");
@@ -238,7 +238,7 @@ impl Aurora {
             })?,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => TemplateMeta::default(),
             Err(source) => {
-                return Err(aurora_base::Error::Io {
+                return Err(petalfall_base::Error::Io {
                     path: meta_path,
                     source,
                 }
@@ -266,7 +266,7 @@ async fn template_files(dir: &Path) -> Result<Vec<TemplateFile>> {
             }),
             Ok(_) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(source) => return Err(aurora_base::Error::Io { path, source }.into()),
+            Err(source) => return Err(petalfall_base::Error::Io { path, source }.into()),
         }
     }
     Ok(files)
@@ -278,7 +278,7 @@ async fn entry_exists(path: &Path) -> Result<bool> {
     match tokio::fs::symlink_metadata(path).await {
         Ok(_) => Ok(true),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(aurora_base::Error::Io {
+        Err(source) => Err(petalfall_base::Error::Io {
             path: path.to_owned(),
             source,
         }
@@ -288,7 +288,7 @@ async fn entry_exists(path: &Path) -> Result<bool> {
 
 async fn read_file(path: &Path) -> Result<Vec<u8>> {
     tokio::fs::read(path).await.map_err(|source| {
-        aurora_base::Error::Io {
+        petalfall_base::Error::Io {
             path: path.to_owned(),
             source,
         }
@@ -303,7 +303,7 @@ async fn clear_leftovers(root: &Path) -> Result<()> {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
-            return Err(aurora_base::Error::Io {
+            return Err(petalfall_base::Error::Io {
                 path: root.to_owned(),
                 source,
             }
@@ -315,7 +315,7 @@ async fn clear_leftovers(root: &Path) -> Result<()> {
             Ok(Some(entry)) => entry,
             Ok(None) => return Ok(()),
             Err(source) => {
-                return Err(aurora_base::Error::Io {
+                return Err(petalfall_base::Error::Io {
                     path: root.to_owned(),
                     source,
                 }
@@ -342,14 +342,14 @@ async fn recover_interrupted_swap(root: &Path, dir: &Path) -> Result<()> {
         Ok(_) => return Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(source) => {
-            return Err(aurora_base::Error::Io {
+            return Err(petalfall_base::Error::Io {
                 path: dir.to_owned(),
                 source,
             }
             .into());
         }
     }
-    let io = |source| aurora_base::Error::Io {
+    let io = |source| petalfall_base::Error::Io {
         path: root.to_owned(),
         source,
     };
@@ -373,7 +373,7 @@ async fn recover_interrupted_swap(root: &Path, dir: &Path) -> Result<()> {
     let old = root.join(format!("{OLD_PREFIX}{stamp}"));
     tokio::fs::rename(&old, dir)
         .await
-        .map_err(|source| aurora_base::Error::Io {
+        .map_err(|source| petalfall_base::Error::Io {
             path: old.clone(),
             source,
         })?;
@@ -391,23 +391,23 @@ async fn fill_staging(
 ) -> Result<()> {
     tokio::fs::create_dir_all(root)
         .await
-        .map_err(|source| aurora_base::Error::Io {
+        .map_err(|source| petalfall_base::Error::Io {
             path: root.to_owned(),
             source,
         })?;
     // 不用 create_dir_all：同名目录已经存在说明残留没清掉，往里面混写会把别的文件带进模板。
     tokio::fs::create_dir(staging)
         .await
-        .map_err(|source| aurora_base::Error::Io {
+        .map_err(|source| petalfall_base::Error::Io {
             path: staging.to_owned(),
             source,
         })?;
     for name in present {
         let bytes = read_file(&source.join(name)).await?;
-        aurora_base::fs::atomic_write(staging.join(name), &bytes).await?;
+        petalfall_base::fs::atomic_write(staging.join(name), &bytes).await?;
     }
     let bytes = serde_json::to_vec_pretty(meta).map_err(CoreError::JsonSerialize)?;
-    aurora_base::fs::atomic_write(staging.join(TEMPLATE_META_FILE), &bytes).await?;
+    petalfall_base::fs::atomic_write(staging.join(TEMPLATE_META_FILE), &bytes).await?;
     Ok(())
 }
 
@@ -419,7 +419,7 @@ async fn swap_in(root: &Path, dir: &Path, staging: &Path, stamp: u64) -> Result<
         Ok(()) => true,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
         Err(source) => {
-            return Err(aurora_base::Error::Io {
+            return Err(petalfall_base::Error::Io {
                 path: dir.to_owned(),
                 source,
             }
@@ -430,7 +430,7 @@ async fn swap_in(root: &Path, dir: &Path, staging: &Path, stamp: u64) -> Result<
         if had_old && let Err(err) = tokio::fs::rename(&old, dir).await {
             tracing::error!(old = %old.display(), error = %err, "换上新模板失败后没能把旧模板挪回来");
         }
-        return Err(aurora_base::Error::Io {
+        return Err(petalfall_base::Error::Io {
             path: dir.to_owned(),
             source,
         }
@@ -456,19 +456,19 @@ async fn remove_staging(staging: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use crate::instances::tests::{vanilla_json, write_version};
-    use aurora_instance::IsolationPolicy;
+    use petalfall_instance::IsolationPolicy;
 
     /// 数据目录在 `root`，游戏目录在 `root/.minecraft`，全部实例隔离。
-    fn isolated(root: &Path) -> Aurora {
-        let mut aurora = Aurora::for_test(
-            AuroraConfig::default(),
+    fn isolated(root: &Path) -> Petalfall {
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             root.to_path_buf(),
             root.join(".minecraft"),
         );
-        aurora.set_isolation_policy(IsolationPolicy::All);
-        aurora
+        petalfall.set_isolation_policy(IsolationPolicy::All);
+        petalfall
     }
 
     fn random_bytes(len: usize) -> Vec<u8> {
@@ -476,8 +476,8 @@ mod tests {
         (0..len).map(|_| rng.u8(..)).collect()
     }
 
-    fn put_template(aurora: &Aurora, files: &[(&str, &[u8])]) {
-        let dir = aurora.template_dir();
+    fn put_template(petalfall: &Petalfall, files: &[(&str, &[u8])]) {
+        let dir = petalfall.template_dir();
         std::fs::create_dir_all(&dir).unwrap();
         for (name, bytes) in files {
             std::fs::write(dir.join(name), bytes).unwrap();
@@ -496,12 +496,12 @@ mod tests {
     #[tokio::test]
     async fn applies_missing_files_byte_for_byte() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = isolated(tmp.path());
-        let dir = write_version(aurora.game_dir(), "周末生存", &vanilla_json("1.21.1"));
+        let petalfall = isolated(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "周末生存", &vanilla_json("1.21.1"));
         let options = random_bytes(fastrand::usize(1..4096));
         let servers = random_bytes(fastrand::usize(1..4096));
         put_template(
-            &aurora,
+            &petalfall,
             &[
                 ("options.txt", &options),
                 ("servers.dat", &servers),
@@ -513,7 +513,7 @@ mod tests {
             ],
         );
 
-        let outcome = aurora.apply_template("周末生存").await.unwrap();
+        let outcome = petalfall.apply_template("周末生存").await.unwrap();
         assert_eq!(
             outcome,
             TemplateOutcome::Applied {
@@ -531,15 +531,15 @@ mod tests {
     #[tokio::test]
     async fn existing_target_file_is_kept_untouched() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = isolated(tmp.path());
-        let dir = write_version(aurora.game_dir(), "整合包", &vanilla_json("1.21.1"));
+        let petalfall = isolated(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "整合包", &vanilla_json("1.21.1"));
         std::fs::write(dir.join("options.txt"), b"lang:en_us").unwrap();
         put_template(
-            &aurora,
+            &petalfall,
             &[("options.txt", b"fov:90"), ("servers.dat", b"\x0a\x00\x00")],
         );
 
-        let outcome = aurora.apply_template("整合包").await.unwrap();
+        let outcome = petalfall.apply_template("整合包").await.unwrap();
         assert_eq!(
             outcome,
             TemplateOutcome::Applied {
@@ -561,74 +561,74 @@ mod tests {
     #[tokio::test]
     async fn shared_working_dir_is_skipped_and_root_files_are_untouched() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = isolated(tmp.path());
-        aurora.set_isolation_policy(IsolationPolicy::Disabled);
-        let dir = write_version(aurora.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
-        let root_options = aurora.game_dir().join("options.txt");
+        let mut petalfall = isolated(tmp.path());
+        petalfall.set_isolation_policy(IsolationPolicy::Disabled);
+        let dir = write_version(petalfall.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
+        let root_options = petalfall.game_dir().join("options.txt");
         std::fs::write(&root_options, b"fov:70").unwrap();
         put_template(
-            &aurora,
+            &petalfall,
             &[("options.txt", b"fov:90"), ("servers.dat", b"servers")],
         );
 
-        let outcome = aurora.apply_template("1.21.1").await.unwrap();
+        let outcome = petalfall.apply_template("1.21.1").await.unwrap();
         assert_eq!(
             outcome,
             TemplateOutcome::Skipped(TemplateSkip::SharedWorkingDir)
         );
         assert_eq!(std::fs::read(&root_options).unwrap(), b"fov:70");
-        assert!(!aurora.game_dir().join("servers.dat").exists());
+        assert!(!petalfall.game_dir().join("servers.dat").exists());
         assert!(!dir.join("options.txt").exists());
     }
 
     #[tokio::test]
     async fn disabled_in_config_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = Aurora::for_test(
-            AuroraConfig {
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig {
                 new_instance_template: false,
-                ..AuroraConfig::default()
+                ..PetalfallConfig::default()
             },
             tmp.path().to_path_buf(),
             tmp.path().join(".minecraft"),
         );
-        aurora.set_isolation_policy(IsolationPolicy::All);
-        let dir = write_version(aurora.game_dir(), "关掉的", &vanilla_json("1.21.1"));
+        petalfall.set_isolation_policy(IsolationPolicy::All);
+        let dir = write_version(petalfall.game_dir(), "关掉的", &vanilla_json("1.21.1"));
         put_template(
-            &aurora,
+            &petalfall,
             &[("options.txt", b"fov:90"), ("servers.dat", b"servers")],
         );
 
-        let outcome = aurora.apply_template("关掉的").await.unwrap();
+        let outcome = petalfall.apply_template("关掉的").await.unwrap();
         assert_eq!(outcome, TemplateOutcome::Skipped(TemplateSkip::Disabled));
         assert_eq!(names(&dir), vec!["关掉的.json".to_owned()]);
-        assert!(!aurora.template_info().await.unwrap().enabled);
+        assert!(!petalfall.template_info().await.unwrap().enabled);
     }
 
     /// 模板目录不在、在而空、只有元数据或只有同名目录，都算没有模板。
     #[tokio::test]
     async fn missing_or_empty_template_is_skipped() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = isolated(tmp.path());
-        let dir = write_version(aurora.game_dir(), "新的", &vanilla_json("1.21.1"));
+        let petalfall = isolated(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "新的", &vanilla_json("1.21.1"));
         assert_eq!(
-            aurora.apply_template("新的").await.unwrap(),
+            petalfall.apply_template("新的").await.unwrap(),
             TemplateOutcome::Skipped(TemplateSkip::Empty)
         );
 
-        put_template(&aurora, &[]);
+        put_template(&petalfall, &[]);
         assert_eq!(
-            aurora.apply_template("新的").await.unwrap(),
+            petalfall.apply_template("新的").await.unwrap(),
             TemplateOutcome::Skipped(TemplateSkip::Empty)
         );
 
-        put_template(&aurora, &[(TEMPLATE_META_FILE, b"{}")]);
-        std::fs::create_dir(aurora.template_dir().join("options.txt")).unwrap();
+        put_template(&petalfall, &[(TEMPLATE_META_FILE, b"{}")]);
+        std::fs::create_dir(petalfall.template_dir().join("options.txt")).unwrap();
         assert_eq!(
-            aurora.apply_template("新的").await.unwrap(),
+            petalfall.apply_template("新的").await.unwrap(),
             TemplateOutcome::Skipped(TemplateSkip::Empty)
         );
-        let info = aurora.template_info().await.unwrap();
+        let info = petalfall.template_info().await.unwrap();
         assert!(!info.present());
         assert!(info.files.is_empty());
         assert_eq!(names(&dir), vec!["新的.json".to_owned()]);
@@ -638,8 +638,8 @@ mod tests {
     #[tokio::test]
     async fn save_copies_only_the_whitelist_and_replaces_the_old_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = isolated(tmp.path());
-        let dir = write_version(aurora.game_dir(), "樱花生存", &vanilla_json("1.21.1"));
+        let petalfall = isolated(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "樱花生存", &vanilla_json("1.21.1"));
         std::fs::write(dir.join("optionsshaders.txt"), b"abc").unwrap();
         std::fs::write(dir.join("servers.dat"), b"12345").unwrap();
         std::fs::write(dir.join("options.txt"), b"fov:90\nlang").unwrap();
@@ -647,13 +647,13 @@ mod tests {
         std::fs::write(dir.join("config").join("x.json"), b"{}").unwrap();
         std::fs::write(dir.join("options.txt.bak"), b"old").unwrap();
         std::fs::create_dir_all(dir.join("mods")).unwrap();
-        put_template(&aurora, &[("optionsof.txt", b"ofFastRender:true")]);
+        put_template(&petalfall, &[("optionsof.txt", b"ofFastRender:true")]);
         let root = tmp.path().join(TEMPLATES_DIR);
         std::fs::create_dir_all(root.join(".default-staging-1")).unwrap();
         std::fs::create_dir_all(root.join(".default-old-2")).unwrap();
         let before = now_millis();
 
-        let info = aurora
+        let info = petalfall
             .save_template_from_instance("樱花生存")
             .await
             .unwrap();
@@ -680,7 +680,7 @@ mod tests {
         let saved_at = info.saved_at.unwrap();
         assert!(saved_at >= before && saved_at <= now_millis(), "{saved_at}");
         assert_eq!(
-            names(&aurora.template_dir()),
+            names(&petalfall.template_dir()),
             vec![
                 "options.txt",
                 "optionsshaders.txt",
@@ -689,23 +689,26 @@ mod tests {
             ]
         );
         assert_eq!(
-            std::fs::read(aurora.template_dir().join("options.txt")).unwrap(),
+            std::fs::read(petalfall.template_dir().join("options.txt")).unwrap(),
             b"fov:90\nlang"
         );
         assert_eq!(names(&root), vec![DEFAULT_TEMPLATE.to_owned()]);
-        assert_eq!(aurora.template_info().await.unwrap(), info);
+        assert_eq!(petalfall.template_info().await.unwrap(), info);
     }
 
     /// 不隔离的实例读的是游戏目录根下的文件。
     #[tokio::test]
     async fn save_from_a_shared_instance_reads_the_game_dir_root() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = isolated(tmp.path());
-        aurora.set_isolation_policy(IsolationPolicy::Disabled);
-        write_version(aurora.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
-        std::fs::write(aurora.game_dir().join("servers.dat"), b"root-servers").unwrap();
+        let mut petalfall = isolated(tmp.path());
+        petalfall.set_isolation_policy(IsolationPolicy::Disabled);
+        write_version(petalfall.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
+        std::fs::write(petalfall.game_dir().join("servers.dat"), b"root-servers").unwrap();
 
-        let info = aurora.save_template_from_instance("1.21.1").await.unwrap();
+        let info = petalfall
+            .save_template_from_instance("1.21.1")
+            .await
+            .unwrap();
         assert_eq!(
             info.files,
             vec![TemplateFile {
@@ -714,7 +717,7 @@ mod tests {
             }]
         );
         assert_eq!(
-            std::fs::read(aurora.template_dir().join("servers.dat")).unwrap(),
+            std::fs::read(petalfall.template_dir().join("servers.dat")).unwrap(),
             b"root-servers"
         );
     }
@@ -723,12 +726,12 @@ mod tests {
     #[tokio::test]
     async fn failed_save_keeps_the_old_template_and_leaves_no_staging() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = isolated(tmp.path());
-        let dir = write_version(aurora.game_dir(), "坏的", &vanilla_json("1.21.1"));
+        let petalfall = isolated(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "坏的", &vanilla_json("1.21.1"));
         std::fs::write(dir.join("options.txt"), b"new").unwrap();
         std::fs::create_dir_all(dir.join("servers.dat")).unwrap();
         put_template(
-            &aurora,
+            &petalfall,
             &[
                 ("options.txt", b"old"),
                 (
@@ -738,24 +741,24 @@ mod tests {
             ],
         );
 
-        let err = aurora
+        let err = petalfall
             .save_template_from_instance("坏的")
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, CoreError::Base(aurora_base::Error::Io { path, .. }) if path.ends_with("servers.dat")),
+            matches!(&err, CoreError::Base(petalfall_base::Error::Io { path, .. }) if path.ends_with("servers.dat")),
             "{err:?}"
         );
         assert_eq!(
-            std::fs::read(aurora.template_dir().join("options.txt")).unwrap(),
+            std::fs::read(petalfall.template_dir().join("options.txt")).unwrap(),
             b"old"
         );
-        assert!(!aurora.template_dir().join("servers.dat").exists());
+        assert!(!petalfall.template_dir().join("servers.dat").exists());
         assert_eq!(
             names(&tmp.path().join(TEMPLATES_DIR)),
             vec![DEFAULT_TEMPLATE.to_owned()]
         );
-        let info = aurora.template_info().await.unwrap();
+        let info = petalfall.template_info().await.unwrap();
         assert_eq!(info.source_instance.as_deref(), Some("旧的"));
         assert_eq!(info.saved_at, Some(7));
     }
@@ -763,13 +766,13 @@ mod tests {
     #[tokio::test]
     async fn instance_without_settings_files_is_reported_and_the_old_template_stays() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = isolated(tmp.path());
-        let dir = write_version(aurora.game_dir(), "没进过游戏", &vanilla_json("1.21.1"));
+        let petalfall = isolated(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "没进过游戏", &vanilla_json("1.21.1"));
         std::fs::create_dir_all(dir.join("mods")).unwrap();
         std::fs::write(dir.join("options.txt.bak"), b"x").unwrap();
-        put_template(&aurora, &[("options.txt", b"old")]);
+        put_template(&petalfall, &[("options.txt", b"old")]);
 
-        let err = aurora
+        let err = petalfall
             .save_template_from_instance("没进过游戏")
             .await
             .unwrap_err();
@@ -782,11 +785,11 @@ mod tests {
             "实例 没进过游戏 的游戏目录里还没有 options.txt 或服务器列表，进一次游戏后再保存"
         );
         assert_eq!(
-            std::fs::read(aurora.template_dir().join("options.txt")).unwrap(),
+            std::fs::read(petalfall.template_dir().join("options.txt")).unwrap(),
             b"old"
         );
         assert_eq!(
-            names(&aurora.template_dir()),
+            names(&petalfall.template_dir()),
             vec!["options.txt".to_owned()]
         );
     }
@@ -796,7 +799,7 @@ mod tests {
     #[tokio::test]
     async fn interrupted_swap_puts_the_old_template_back() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = isolated(tmp.path());
+        let petalfall = isolated(tmp.path());
         let root = tmp.path().join(TEMPLATES_DIR);
         let interrupted = |stamp: u64| {
             let old = root.join(format!("{OLD_PREFIX}{stamp}"));
@@ -813,7 +816,7 @@ mod tests {
         };
 
         interrupted(5);
-        let info = aurora.template_info().await.unwrap();
+        let info = petalfall.template_info().await.unwrap();
         assert_eq!(
             info.files,
             vec![TemplateFile {
@@ -824,15 +827,15 @@ mod tests {
         assert_eq!(info.source_instance.as_deref(), Some("樱花生存"));
         assert_eq!(info.saved_at, Some(3));
         assert_eq!(
-            std::fs::read(aurora.template_dir().join("options.txt")).unwrap(),
+            std::fs::read(petalfall.template_dir().join("options.txt")).unwrap(),
             b"fov:90"
         );
 
         std::fs::remove_dir_all(&root).unwrap();
         interrupted(6);
-        let dir = write_version(aurora.game_dir(), "周末生存", &vanilla_json("1.21.1"));
+        let dir = write_version(petalfall.game_dir(), "周末生存", &vanilla_json("1.21.1"));
         assert_eq!(
-            aurora.apply_template("周末生存").await.unwrap(),
+            petalfall.apply_template("周末生存").await.unwrap(),
             TemplateOutcome::Applied {
                 copied: vec!["options.txt"],
                 kept: vec![],
@@ -843,8 +846,8 @@ mod tests {
         // 清除之后旧模板不再冒出来：挪回原位的那份随 default 一起删掉，只剩没配对的暂存目录
         std::fs::remove_dir_all(&root).unwrap();
         interrupted(7);
-        assert!(!aurora.clear_template().await.unwrap().present());
-        assert!(!aurora.template_info().await.unwrap().present());
+        assert!(!petalfall.clear_template().await.unwrap().present());
+        assert!(!petalfall.template_info().await.unwrap().present());
     }
 
     /// 换上新模板后没删掉的旧目录单独留着、没有同一时刻的暂存目录：它不是中断的现场，模板随后可能已被清除，
@@ -852,7 +855,7 @@ mod tests {
     #[tokio::test]
     async fn lone_old_dir_is_not_brought_back() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = isolated(tmp.path());
+        let petalfall = isolated(tmp.path());
         let old = tmp
             .path()
             .join(TEMPLATES_DIR)
@@ -865,23 +868,23 @@ mod tests {
                 .join(format!("{STAGING_PREFIX}4")),
         )
         .unwrap();
-        let dir = write_version(aurora.game_dir(), "周末生存", &vanilla_json("1.21.1"));
+        let dir = write_version(petalfall.game_dir(), "周末生存", &vanilla_json("1.21.1"));
 
-        assert!(!aurora.template_info().await.unwrap().present());
+        assert!(!petalfall.template_info().await.unwrap().present());
         assert_eq!(
-            aurora.apply_template("周末生存").await.unwrap(),
+            petalfall.apply_template("周末生存").await.unwrap(),
             TemplateOutcome::Skipped(TemplateSkip::Empty)
         );
-        assert!(!aurora.template_dir().exists());
+        assert!(!petalfall.template_dir().exists());
         assert!(!dir.join("options.txt").exists());
     }
 
     #[tokio::test]
     async fn clear_is_idempotent_and_leaves_no_template() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = isolated(tmp.path());
+        let petalfall = isolated(tmp.path());
         put_template(
-            &aurora,
+            &petalfall,
             &[
                 ("options.txt", b"fov:90"),
                 (
@@ -890,24 +893,24 @@ mod tests {
                 ),
             ],
         );
-        assert!(aurora.template_info().await.unwrap().present());
+        assert!(petalfall.template_info().await.unwrap().present());
 
         for _ in 0..2 {
-            let info = aurora.clear_template().await.unwrap();
+            let info = petalfall.clear_template().await.unwrap();
             assert!(!info.present());
             assert_eq!(info.source_instance, None);
             assert_eq!(info.saved_at, None);
         }
-        assert!(!aurora.template_dir().exists());
-        assert!(!aurora.template_info().await.unwrap().present());
+        assert!(!petalfall.template_dir().exists());
+        assert!(!petalfall.template_info().await.unwrap().present());
     }
 
     #[tokio::test]
     async fn hand_placed_files_have_no_source_and_corrupt_meta_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = isolated(tmp.path());
-        put_template(&aurora, &[("optionsof.txt", b"ofFastRender:true")]);
-        let info = aurora.template_info().await.unwrap();
+        let petalfall = isolated(tmp.path());
+        put_template(&petalfall, &[("optionsof.txt", b"ofFastRender:true")]);
+        let info = petalfall.template_info().await.unwrap();
         assert_eq!(
             info.files,
             vec![TemplateFile {
@@ -918,10 +921,10 @@ mod tests {
         assert_eq!((info.source_instance, info.saved_at), (None, None));
 
         put_template(
-            &aurora,
+            &petalfall,
             &[(TEMPLATE_META_FILE, r#"{"saved_at":"昨天"}"#.as_bytes())],
         );
-        let err = aurora.template_info().await.unwrap_err();
+        let err = petalfall.template_info().await.unwrap_err();
         assert!(
             matches!(&err, CoreError::JsonFileInvalid { path, .. } if path.ends_with(TEMPLATE_META_FILE)),
             "{err:?}"

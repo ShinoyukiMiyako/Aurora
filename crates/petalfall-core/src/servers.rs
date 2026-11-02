@@ -14,12 +14,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use aurora_instance::is_safe_instance_id;
+use petalfall_instance::is_safe_instance_id;
 
 use crate::InstanceError;
 use crate::config::PinnedServer;
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 pub use nbt::{ListedServer, NbtError, parse_servers_dat};
 
@@ -283,7 +283,7 @@ async fn save_history(path: &Path, history: &HashMap<String, SeenRecord>) {
             return;
         }
     };
-    if let Err(err) = aurora_base::fs::atomic_write(path, &bytes).await {
+    if let Err(err) = petalfall_base::fs::atomic_write(path, &bytes).await {
         tracing::warn!(path = %path.display(), error = %err, "服务器连通记录写盘失败");
     }
 }
@@ -333,7 +333,7 @@ fn now_ms() -> u64 {
     u64::try_from(elapsed.as_millis()).expect("毫秒时间戳放得进 u64")
 }
 
-impl Aurora {
+impl Petalfall {
     /// 固定的服务器，按固定的先后。
     pub fn pinned_servers(&self) -> &[PinnedServer] {
         &self.config().pinned_servers
@@ -341,7 +341,7 @@ impl Aurora {
 
     /// 整体替换固定列表：逐个校验地址与记住的实例 id，同一地址只留第一次出现的那条（连同它记住的实例）；
     /// 名字为空时用地址当名字。实例是否存在不在这里查：列表随时可能变，界面把找不到的当作没记住。
-    /// 落盘仍需调用 [`Aurora::save_config`]。
+    /// 落盘仍需调用 [`Petalfall::save_config`]。
     pub fn set_pinned_servers(&mut self, servers: Vec<PinnedServer>) -> Result<()> {
         let mut seen = Vec::new();
         let mut cleaned = Vec::with_capacity(servers.len());
@@ -371,7 +371,7 @@ impl Aurora {
 
     /// 记住或清掉一台固定服务器「加入」时用的实例。按地址的身份找（主机不分大小写，没写端口等于
     /// 25565），不在固定列表里报 [`CoreError::ServerNotPinned`]。实例是否存在由调用方检查。
-    /// 落盘仍需调用 [`Aurora::save_config`]。
+    /// 落盘仍需调用 [`Petalfall::save_config`]。
     pub fn set_pinned_server_instance(
         &mut self,
         address: &str,
@@ -493,7 +493,7 @@ fn read_all_server_lists(game_dir: &Path) -> Vec<ListedServer> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use serde_json::json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -538,8 +538,8 @@ mod tests {
     #[test]
     fn set_pinned_servers_validates_dedups_and_names() {
         let dir = tempfile::tempdir().unwrap();
-        let mut aurora = Aurora::for_test(
-            AuroraConfig::default(),
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             dir.path().to_path_buf(),
             dir.path().join(".minecraft"),
         );
@@ -548,7 +548,7 @@ mod tests {
             address: address.to_owned(),
             instance: None,
         };
-        aurora
+        petalfall
             .set_pinned_servers(vec![
                 pin("Hypixel", "mc.hypixel.net"),
                 pin("重复", "MC.HYPIXEL.NET:25565"),
@@ -556,7 +556,7 @@ mod tests {
             ])
             .unwrap();
         assert_eq!(
-            aurora.pinned_servers(),
+            petalfall.pinned_servers(),
             &[
                 pin("Hypixel", "mc.hypixel.net"),
                 pin("play.example.cn:25566", "play.example.cn:25566"),
@@ -564,11 +564,11 @@ mod tests {
         );
 
         // 有一个不合法就整体拒绝，原列表不动。
-        let err = aurora
+        let err = petalfall
             .set_pinned_servers(vec![pin("ok", "a.example"), pin("bad", "a:0")])
             .unwrap_err();
         assert!(matches!(err, CoreError::InvalidServerAddress { .. }));
-        assert_eq!(aurora.pinned_servers().len(), 2);
+        assert_eq!(petalfall.pinned_servers().len(), 2);
     }
 
     fn bound(name: &str, address: &str, instance: Option<&str>) -> PinnedServer {
@@ -579,9 +579,9 @@ mod tests {
         }
     }
 
-    fn test_aurora(dir: &Path) -> Aurora {
-        Aurora::for_test(
-            AuroraConfig::default(),
+    fn test_petalfall(dir: &Path) -> Petalfall {
+        Petalfall::for_test(
+            PetalfallConfig::default(),
             dir.to_path_buf(),
             dir.join(".minecraft"),
         )
@@ -590,8 +590,8 @@ mod tests {
     #[test]
     fn set_pinned_servers_keeps_instances_and_rejects_unsafe_ids() {
         let dir = tempfile::tempdir().unwrap();
-        let mut aurora = test_aurora(dir.path());
-        aurora
+        let mut petalfall = test_petalfall(dir.path());
+        petalfall
             .set_pinned_servers(vec![
                 bound("家", "10.0.0.2", Some("生存 1.21.1")),
                 // 同一台服务器的第二条连同它记住的实例一起丢掉，留第一次出现的那条。
@@ -602,7 +602,7 @@ mod tests {
             ])
             .unwrap();
         assert_eq!(
-            aurora.pinned_servers(),
+            petalfall.pinned_servers(),
             &[
                 bound("家", "10.0.0.2", Some("生存 1.21.1")),
                 bound("小游戏", "mini.example:25570", None),
@@ -611,7 +611,7 @@ mod tests {
         );
 
         for unsafe_id in ["../outside", r"..\outside", "a/b", ""] {
-            let err = aurora
+            let err = petalfall
                 .set_pinned_servers(vec![
                     bound("ok", "ok.example", None),
                     bound("坏", "bad.example", Some(unsafe_id)),
@@ -623,14 +623,14 @@ mod tests {
             );
         }
         // 被拒绝时原列表不动。
-        assert_eq!(aurora.pinned_servers().len(), 3);
+        assert_eq!(petalfall.pinned_servers().len(), 3);
     }
 
     #[test]
     fn set_pinned_server_instance_matches_by_address_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let mut aurora = test_aurora(dir.path());
-        aurora
+        let mut petalfall = test_petalfall(dir.path());
+        petalfall
             .set_pinned_servers(vec![
                 bound("示例", "play.example.cn", None),
                 bound("另一台", "other.example:25570", Some("小游戏")),
@@ -638,11 +638,11 @@ mod tests {
             .unwrap();
 
         // 大小写不同、显式写出缺省端口，都是同一台。
-        aurora
+        petalfall
             .set_pinned_server_instance(" PLAY.example.cn:25565 ", Some("生存".to_owned()))
             .unwrap();
         assert_eq!(
-            aurora.pinned_servers(),
+            petalfall.pinned_servers(),
             &[
                 bound("示例", "play.example.cn", Some("生存")),
                 bound("另一台", "other.example:25570", Some("小游戏")),
@@ -650,21 +650,24 @@ mod tests {
         );
 
         // 改记另一个，再清掉；别的固定项不受影响。
-        aurora
+        petalfall
             .set_pinned_server_instance("play.example.cn", Some("创造".to_owned()))
             .unwrap();
-        assert_eq!(aurora.pinned_servers()[0].instance.as_deref(), Some("创造"));
-        aurora
+        assert_eq!(
+            petalfall.pinned_servers()[0].instance.as_deref(),
+            Some("创造")
+        );
+        petalfall
             .set_pinned_server_instance("play.example.cn", None)
             .unwrap();
-        assert_eq!(aurora.pinned_servers()[0].instance, None);
+        assert_eq!(petalfall.pinned_servers()[0].instance, None);
         assert_eq!(
-            aurora.pinned_servers()[1].instance.as_deref(),
+            petalfall.pinned_servers()[1].instance.as_deref(),
             Some("小游戏")
         );
 
         // 端口不同就是另一台服务器：没固定。
-        let err = aurora
+        let err = petalfall
             .set_pinned_server_instance("play.example.cn:25566", Some("生存".to_owned()))
             .unwrap_err();
         assert!(
@@ -673,25 +676,25 @@ mod tests {
         );
         assert_eq!(err.to_string(), "服务器「play.example.cn:25566」没有固定");
 
-        let err = aurora
+        let err = petalfall
             .set_pinned_server_instance("play.example.cn", Some("../x".to_owned()))
             .unwrap_err();
         assert!(matches!(
             err,
             CoreError::Instance(InstanceError::InvalidId { .. })
         ));
-        let err = aurora
+        let err = petalfall
             .set_pinned_server_instance("bad:0", None)
             .unwrap_err();
         assert!(matches!(err, CoreError::InvalidServerAddress { .. }));
-        assert_eq!(aurora.pinned_servers()[0].instance, None);
+        assert_eq!(petalfall.pinned_servers()[0].instance, None);
     }
 
     #[test]
     fn pinned_instance_follows_rename_and_delete() {
         let dir = tempfile::tempdir().unwrap();
-        let mut aurora = test_aurora(dir.path());
-        aurora
+        let mut petalfall = test_petalfall(dir.path());
+        petalfall
             .set_pinned_servers(vec![
                 bound("一", "a.example", Some("生存")),
                 bound("二", "b.example", Some("生存")),
@@ -699,18 +702,18 @@ mod tests {
                 bound("四", "d.example", None),
             ])
             .unwrap();
-        let ids = |aurora: &Aurora| -> Vec<Option<String>> {
-            aurora
+        let ids = |petalfall: &Petalfall| -> Vec<Option<String>> {
+            petalfall
                 .pinned_servers()
                 .iter()
                 .map(|s| s.instance.clone())
                 .collect()
         };
 
-        assert!(aurora.rename_pinned_instance("生存", "生存 2"));
+        assert!(petalfall.rename_pinned_instance("生存", "生存 2"));
         // 只认精确相等：「生存服」不因前缀相同被改。
         assert_eq!(
-            ids(&aurora),
+            ids(&petalfall),
             vec![
                 Some("生存 2".to_owned()),
                 Some("生存 2".to_owned()),
@@ -718,14 +721,14 @@ mod tests {
                 None
             ]
         );
-        assert!(!aurora.rename_pinned_instance("生存", "别的"));
+        assert!(!petalfall.rename_pinned_instance("生存", "别的"));
 
-        assert!(aurora.forget_pinned_instance("生存 2"));
+        assert!(petalfall.forget_pinned_instance("生存 2"));
         assert_eq!(
-            ids(&aurora),
+            ids(&petalfall),
             vec![None, None, Some("生存服".to_owned()), None]
         );
-        assert!(!aurora.forget_pinned_instance("生存 2"));
+        assert!(!petalfall.forget_pinned_instance("生存 2"));
     }
 
     #[tokio::test]
@@ -753,17 +756,17 @@ mod tests {
             b"not nbt",
         )
         .unwrap();
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             pinned_servers: vec![PinnedServer {
                 name: "整合包服".to_owned(),
                 address: "pack.example:25570".to_owned(),
                 instance: None,
             }],
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = Aurora::for_test(config, dir.path().to_path_buf(), game_dir);
+        let petalfall = Petalfall::for_test(config, dir.path().to_path_buf(), game_dir);
 
-        let known = aurora.known_servers().await.unwrap();
+        let known = petalfall.known_servers().await.unwrap();
         let summary: Vec<(&str, &str, bool)> = known
             .iter()
             .map(|k| (k.name.as_str(), k.address.as_str(), k.pinned))

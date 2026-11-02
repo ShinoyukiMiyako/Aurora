@@ -1,6 +1,6 @@
-//! aurora-download（L1 下载引擎与镜像源调度）
+//! petalfall-download（L1 下载引擎与镜像源调度）
 //!
-//! 在 [`aurora_base`] 的 HTTP 工厂、镜像改写表、流式校验与退避重试之上，构建一个面向 Minecraft
+//! 在 [`petalfall_base`] 的 HTTP 工厂、镜像改写表、流式校验与退避重试之上，构建一个面向 Minecraft
 //! 资源分发场景的通用下载引擎：
 //!
 //! - [`Downloader`]：单文件下载。已知大小的大文件走 Range 分块并发，分片粒度断点续传；每源指数
@@ -16,13 +16,13 @@
 //! - [`DownloadCredential`]：挂在任务上的下载凭据（CurseForge CDN 的 `x-api-key`），引擎逐跳跟随跳转，
 //!   只有 [`CredentialScope`] 内的那一跳才带上它。
 //!
-//! 所有失败归口到 [`Error`]，可重试性由 [`aurora_base::retry::RetryableError`] 精确分级。
+//! 所有失败归口到 [`Error`]，可重试性由 [`petalfall_base::retry::RetryableError`] 精确分级。
 //!
 //! ```no_run
-//! # async fn demo() -> aurora_download::Result<()> {
-//! use aurora_download::{DownloadTask, Downloader};
+//! # async fn demo() -> petalfall_download::Result<()> {
+//! use petalfall_download::{DownloadTask, Downloader};
 //!
-//! let client = aurora_base::http::build_client()?;
+//! let client = petalfall_base::http::build_client()?;
 //! let downloader = Downloader::with_defaults(client);
 //! let task = DownloadTask::new(
 //!     "https://libraries.minecraft.net/com/mojang/authlib/1.5.25/authlib-1.5.25.jar",
@@ -60,7 +60,7 @@ pub use speed::SourceSpeedCache;
 pub use task::DownloadTask;
 pub use watchdog::WatchdogConfig;
 
-// 下游可直接从本 crate 取镜像源枚举，无需再显式依赖 aurora-base。
-pub use aurora_base::mirror::MirrorSource;
+// 下游可直接从本 crate 取镜像源枚举，无需再显式依赖 petalfall-base。
+pub use petalfall_base::mirror::MirrorSource;
 // 取消令牌的唯一类型来源：上层（门面、命令层）都经本 crate 取它，保证整条链路用的是同一个类型。
 pub use tokio_util::sync::CancellationToken;

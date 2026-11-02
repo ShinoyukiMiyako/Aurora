@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
-use aurora_base::PathLocks;
-use aurora_download::CancellationToken;
+use petalfall_base::PathLocks;
+use petalfall_download::CancellationToken;
 use tokio::sync::OwnedMutexGuard;
 
 use crate::error::Result;
@@ -25,11 +25,11 @@ pub(crate) async fn lock_dir(
 ) -> Result<OwnedMutexGuard<()>> {
     let slot = DIRS.slot(dir);
     match cancel {
-        Some(token) if token.is_cancelled() => Err(aurora_download::Error::Cancelled.into()),
+        Some(token) if token.is_cancelled() => Err(petalfall_download::Error::Cancelled.into()),
         Some(token) => token
             .run_until_cancelled(slot.lock_owned())
             .await
-            .ok_or_else(|| aurora_download::Error::Cancelled.into()),
+            .ok_or_else(|| petalfall_download::Error::Cancelled.into()),
         None => Ok(slot.lock_owned().await),
     }
 }
@@ -83,14 +83,14 @@ mod tests {
         let (waited, ()) = tokio::join!(lock_dir(&path, Some(&token)), async { token.cancel() });
         assert!(matches!(
             waited.err().unwrap(),
-            Error::Download(aurora_download::Error::Cancelled)
+            Error::Download(petalfall_download::Error::Cancelled)
         ));
         drop(held);
 
         let err = lock_dir(&dir("丁"), Some(&token)).await.err().unwrap();
         assert!(matches!(
             err,
-            Error::Download(aurora_download::Error::Cancelled)
+            Error::Download(petalfall_download::Error::Cancelled)
         ));
     }
 }

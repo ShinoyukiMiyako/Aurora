@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
-use aurora_launch::logfile::SessionOutcome;
-use aurora_launch::{
+use petalfall_launch::logfile::SessionOutcome;
+use petalfall_launch::{
     GameSession, KillSwitch, LauncherLevel, LogSource, SessionClock, SessionEnd, SessionLog,
     detect_crash,
 };
@@ -134,7 +134,7 @@ async fn settle(info: RunInfo, end: SessionEnd) -> Finished {
 
     let mut problems = Vec::new();
     let log_path = match end.failure {
-        // 收尾不正常时 aurora-launch 已在日志里写下原因与结局并关闭，这里只接着用它的路径。
+        // 收尾不正常时 petalfall-launch 已在日志里写下原因与结局并关闭，这里只接着用它的路径。
         Some(failure) => {
             problems.push(CoreError::from(failure.error));
             failure.log_path
@@ -387,8 +387,8 @@ async fn close_log(
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
-    use aurora_launch::logfile::{LATEST_LOG, logs_dir};
-    use aurora_launch::{LaunchCommand, read_log_tail};
+    use petalfall_launch::logfile::{LATEST_LOG, logs_dir};
+    use petalfall_launch::{LaunchCommand, read_log_tail};
     use std::path::Path;
 
     struct Started {
@@ -413,7 +413,7 @@ mod tests {
             working_dir: root.clone(),
             natives_dir: root.join("natives"),
         };
-        let session = aurora_launch::spawn(&command, clock, &mut Some(log), None).unwrap();
+        let session = petalfall_launch::spawn(&command, clock, &mut Some(log), None).unwrap();
         let info = RunInfo {
             version_id: "1.21".to_owned(),
             version_dir: version_dir.clone(),
@@ -451,18 +451,18 @@ mod tests {
 
     fn crash_saved(version_dir: &Path) -> bool {
         version_dir
-            .join(aurora_instance::AURORA_META_DIR)
+            .join(petalfall_instance::PETALFALL_META_DIR)
             .join(crate::crashdiag::CRASH_REPORT_FILE)
             .exists()
     }
 
     async fn played_ms(root: &Path) -> Option<u64> {
-        let aurora = crate::facade::Aurora::for_test(
-            crate::config::AuroraConfig::default(),
+        let petalfall = crate::facade::Petalfall::for_test(
+            crate::config::PetalfallConfig::default(),
             root.to_path_buf(),
             root.to_path_buf(),
         );
-        aurora
+        petalfall
             .play_summaries()
             .await
             .unwrap()
@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(finished.problems.len(), 1);
     }
 
-    /// 等待失败后的现场：aurora-launch 已把读到的游戏输出与原因、结局写进会话日志并关闭。
+    /// 等待失败后的现场：petalfall-launch 已把读到的游戏输出与原因、结局写进会话日志并关闭。
     struct WaitFailed {
         _tmp: tempfile::TempDir,
         root: PathBuf,
@@ -602,7 +602,7 @@ mod tests {
     }
 
     async fn wait_failed(terminated_by_launcher: bool) -> WaitFailed {
-        use aurora_launch::{ExitReport, LaunchError, SessionFailure};
+        use petalfall_launch::{ExitReport, LaunchError, SessionFailure};
 
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
@@ -671,8 +671,8 @@ mod tests {
     }
 
     async fn last_crash_of(root: &Path) -> Option<CrashReport> {
-        crate::facade::Aurora::for_test(
-            crate::config::AuroraConfig::default(),
+        crate::facade::Petalfall::for_test(
+            crate::config::PetalfallConfig::default(),
             root.to_path_buf(),
             root.to_path_buf(),
         )
@@ -695,7 +695,7 @@ mod tests {
         assert!(
             matches!(
                 &finished.problems[0],
-                CoreError::Launch(aurora_launch::LaunchError::Wait(_))
+                CoreError::Launch(petalfall_launch::LaunchError::Wait(_))
             ),
             "{:?}",
             finished.problems[0]
@@ -710,11 +710,11 @@ mod tests {
                 .iter()
                 .map(|clue| clue.category)
                 .collect::<Vec<_>>(),
-            [aurora_launch::CrashCategory::OutOfMemory]
+            [petalfall_launch::CrashCategory::OutOfMemory]
         );
         assert!(crash.log_path.is_some(), "应能找回这一局的会话日志");
         assert!(played_ms(&failed.root).await.is_some());
-        // 结局由 aurora-launch 写过一次，这里不再追加。
+        // 结局由 petalfall-launch 写过一次，这里不再追加。
         assert_eq!(outcome(&failed.version_dir).await, SessionOutcome::Crashed);
     }
 
@@ -735,7 +735,7 @@ mod tests {
     fn saved_crash(version_dir: &Path) -> serde_json::Value {
         let bytes = std::fs::read(
             version_dir
-                .join(aurora_instance::AURORA_META_DIR)
+                .join(petalfall_instance::PETALFALL_META_DIR)
                 .join(crate::crashdiag::CRASH_REPORT_FILE),
         )
         .unwrap();

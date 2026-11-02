@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use aurora_version::{
+use petalfall_version::{
     Argument, IdentifySource, LoaderInfo, LoaderKind, OsName, RuntimeContext, VersionJson,
     check_availability, detect_loaders, identify_mc_version, resolve, select_libraries,
 };

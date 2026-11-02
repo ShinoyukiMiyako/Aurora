@@ -6,24 +6,24 @@
 //!
 //! 改名与删除会牵连两类引用：别的实例经 `inheritsFrom` 依赖它（传统布局的加载器版本），这种情况
 //! 直接拒绝；配置里的侧栏固定、当前选中与固定服务器记住的实例由调用方拿到写锁后经
-//! [`Aurora::rename_instance_refs`] / [`Aurora::forget_instance`] 同步再落盘，文件操作本身在快照上做，不占门面锁。
+//! [`Petalfall::rename_instance_refs`] / [`Petalfall::forget_instance`] 同步再落盘，文件操作本身在快照上做，不占门面锁。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aurora_base::error_with_causes;
-use aurora_instance::{
-    AURORA_META_DIR, BrokenReason, BrokenVersion, DiscoveredVersion, Disposer, IncompleteMarker,
-    InstanceContent, MarkerStore, PinsViolation, VersionProbe, VersionScan, VersionSettings,
+use petalfall_base::error_with_causes;
+use petalfall_instance::{
+    BrokenReason, BrokenVersion, DiscoveredVersion, Disposer, IncompleteMarker, InstanceContent,
+    MarkerStore, PETALFALL_META_DIR, PinsViolation, VersionProbe, VersionScan, VersionSettings,
     VersionSettingsStore, WorldEntry, check_instance_name, count_mod_files, count_worlds,
     dir_footprint, discover_versions, has_existing_mods_or_saves, is_backup_file_name,
     is_safe_instance_id, list_version_dirs, list_worlds, probe_version, read_instance_content,
     resolve_isolation,
 };
-use aurora_launch::{QuickPlaySupport, quick_play_support};
-use aurora_version::{LoaderInfo, VersionJson, identify_mc_version};
+use petalfall_launch::{QuickPlaySupport, quick_play_support};
+use petalfall_version::{LoaderInfo, VersionJson, identify_mc_version};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -31,7 +31,7 @@ use tokio::task::JoinSet;
 use crate::InstanceError;
 use crate::crashdiag::last_crash_at;
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::modfs::try_exists;
 use crate::modpack::{InstanceModpack, read_instance_modpack};
 use crate::workdir::read_version_json;
@@ -50,7 +50,7 @@ const LIST_CONCURRENCY: usize = 8;
 const MAX_INHERIT_DEPTH: usize = 16;
 
 /// 改名时旧版本 JSON 先挪到这个后缀的文件，新 JSON 写成功、其余文件也改完才删，失败时据此还原。
-const RENAME_STAGED_SUFFIX: &str = concat!(".", aurora_base::app_slug!(), "-rename");
+const RENAME_STAGED_SUFFIX: &str = concat!(".", petalfall_base::app_slug!(), "-rename");
 
 /// 依赖版本记录的文件名，放在游戏目录的元数据目录下：换一个游戏目录就是另一批版本。
 const BASE_RECORD_FILE: &str = "base-versions.json";
@@ -107,7 +107,7 @@ pub struct ReadyVersion {
     pub java_major: Option<u32>,
     /// 支持哪些直达方式（进入存档、加入服务器）；继承链断了时为 `None`。
     pub quick_play: Option<QuickPlaySupport>,
-    /// 继承链上除它自己以外的版本 id，由近及远，口径同 [`Aurora::inheritance_chain`]。
+    /// 继承链上除它自己以外的版本 id，由近及远，口径同 [`Petalfall::inheritance_chain`]。
     pub bases: Vec<String>,
     /// 工作目录 `mods/` 下的 Mod 文件数；设置文件读不出定不了工作目录、或工作目录读不出时为 `None`。
     pub mod_count: Option<u32>,
@@ -134,7 +134,7 @@ pub struct DeletionPreview {
     pub backup_count: u32,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 实例目录路径；id 不能安全拼进路径时报 [`InstanceError::InvalidId`]。不检查目录是否存在。
     pub fn instance_dir(&self, id: &str) -> Result<PathBuf> {
         if !is_safe_instance_id(id) {
@@ -150,14 +150,14 @@ impl Aurora {
             Ok(meta) if meta.is_dir() => Ok(dir),
             Ok(_) => Err(not_installed(id)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(not_installed(id)),
-            Err(source) => Err(aurora_base::Error::Io { path: dir, source }.into()),
+            Err(source) => Err(petalfall_base::Error::Io { path: dir, source }.into()),
         }
     }
 
     /// 实例的会话日志目录，日志页与崩溃报告读的启动日志都在这里。实例不存在报 [`CoreError::VersionNotInstalled`]，
     /// 日志目录本身可能还没建。
     pub async fn session_logs_dir(&self, id: &str) -> Result<PathBuf> {
-        Ok(aurora_launch::logfile::logs_dir(
+        Ok(petalfall_launch::logfile::logs_dir(
             &self.existing_instance_dir(id).await?,
         ))
     }
@@ -297,7 +297,7 @@ impl Aurora {
     /// 把实例目录交给 `disposer`（生产是系统回收站）。返回目录原先是否存在：不存在时什么都不做，
     /// 重复删除是幂等的。有别的实例依赖它时报 [`InstanceError::HasDependents`]。
     ///
-    /// 只处理文件；配置里的引用由调用方随后经 [`Aurora::forget_instance`] 清掉。
+    /// 只处理文件；配置里的引用由调用方随后经 [`Petalfall::forget_instance`] 清掉。
     pub async fn delete_instance_files(
         &self,
         id: &str,
@@ -308,7 +308,7 @@ impl Aurora {
             Ok(meta) if meta.is_dir() => {}
             Ok(_) => return Err(not_installed(id)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(source) => return Err(aurora_base::Error::Io { path: dir, source }.into()),
+            Err(source) => return Err(petalfall_base::Error::Io { path: dir, source }.into()),
         }
         let scan = discover_versions(self.game_dir()).await?;
         ensure_no_dependents(&scan, id)?;
@@ -337,7 +337,7 @@ impl Aurora {
     /// 改名：实例目录、版本 JSON（文件名与其中的 `id`）、客户端 jar 与 natives 目录一起改。
     ///
     /// 新名字按命名规则校验（不分大小写重名，自己除外）；有实例依赖它时拒绝。中途失败时把已经改掉的
-    /// 逐项改回去再报错。只处理文件；配置里的引用由调用方随后经 [`Aurora::rename_instance_refs`] 同步。
+    /// 逐项改回去再报错。只处理文件；配置里的引用由调用方随后经 [`Petalfall::rename_instance_refs`] 同步。
     pub async fn rename_instance_files(&self, old: &str, new: &str) -> Result<()> {
         let old_dir = self.existing_instance_dir(old).await?;
         let names = self.instance_names().await?;
@@ -482,7 +482,7 @@ impl Entry {
 /// 一个实例的摘要。不返回 `Result`：读不出来的都标在这个实例上，一个实例不该让整张列表失败。
 async fn summarize(
     game_dir: &Path,
-    policy: aurora_instance::IsolationPolicy,
+    policy: petalfall_instance::IsolationPolicy,
     entry: Entry,
 ) -> InstanceSummary {
     let (id, dir) = match &entry {
@@ -527,7 +527,7 @@ async fn summarize(
         // created() 报错只意味着这个文件系统不记录创建时间。
         Ok(meta) => meta.created().ok().and_then(unix_millis),
         Err(source) => {
-            let reason = error_with_causes(&aurora_base::Error::Io {
+            let reason = error_with_causes(&petalfall_base::Error::Io {
                 path: dir.clone(),
                 source,
             });
@@ -585,7 +585,7 @@ async fn summarize(
 async fn workdir_facts(
     game_dir: &Path,
     id: &str,
-    policy: aurora_instance::IsolationPolicy,
+    policy: petalfall_instance::IsolationPolicy,
     settings: &VersionSettings,
     version: &DiscoveredVersion,
 ) -> Result<(u32, u32, bool)> {
@@ -689,7 +689,7 @@ fn chain_quick_play(
     None
 }
 
-/// 每个版本的继承链，口径同 [`Aurora::inheritance_chain`]：不分大小写、断在哪一环就停在那一环（它的 id 收进结果）。
+/// 每个版本的继承链，口径同 [`Petalfall::inheritance_chain`]：不分大小写、断在哪一环就停在那一环（它的 id 收进结果）。
 /// 列表要给全部实例算，所以从扫描结果走，不再逐个读版本 JSON。
 fn inheritance_chains(scan: &VersionScan) -> HashMap<String, Vec<String>> {
     let by_key: HashMap<String, &VersionJson> = scan
@@ -742,7 +742,7 @@ pub(crate) fn inheritance_root(scan: &VersionScan, id: &str) -> String {
     current.to_owned()
 }
 
-impl Aurora {
+impl Petalfall {
     /// `id` 继承链上除它自己以外的版本 id，由近及远，最后一个是客户端 jar 与 natives 所在的链根。
     /// 没有 `inheritsFrom` 时为空。
     ///
@@ -793,7 +793,7 @@ struct BaseRecord {
 }
 
 fn base_record_path(game_dir: &Path) -> PathBuf {
-    game_dir.join(AURORA_META_DIR).join(BASE_RECORD_FILE)
+    game_dir.join(PETALFALL_META_DIR).join(BASE_RECORD_FILE)
 }
 
 async fn read_base_record(game_dir: &Path) -> Result<BaseRecord> {
@@ -802,7 +802,7 @@ async fn read_base_record(game_dir: &Path) -> Result<BaseRecord> {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|source| CoreError::JsonFileInvalid { path, source }),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(BaseRecord::default()),
-        Err(source) => Err(aurora_base::Error::Io { path, source }.into()),
+        Err(source) => Err(petalfall_base::Error::Io { path, source }.into()),
     }
 }
 
@@ -822,11 +822,11 @@ async fn update_base_record(game_dir: &Path, change: impl FnOnce(&mut Vec<String
         return Ok(());
     }
     let bytes = serde_json::to_vec_pretty(&record).map_err(CoreError::JsonSerialize)?;
-    aurora_base::fs::atomic_write(base_record_path(game_dir), &bytes).await?;
+    petalfall_base::fs::atomic_write(base_record_path(game_dir), &bytes).await?;
     Ok(())
 }
 
-impl Aurora {
+impl Petalfall {
     /// 记下导入落下的依赖版本目录。
     pub(crate) async fn record_base_versions(&self, ids: &[String]) -> Result<()> {
         update_base_record(self.game_dir(), |versions| {
@@ -923,10 +923,10 @@ fn is_natural_loader_version(version: &DiscoveredVersion) -> bool {
 /// 标记），自带 `mods`、`saves` 时里面是玩家的东西。依赖版本记录里的名字也看它：原目录在启动器之外被删掉后，
 /// 玩家可以用这个名字建实例。
 async fn has_instance_traces(dir: &Path) -> Result<bool> {
-    Ok(has_existing_mods_or_saves(dir).await? || try_exists(&dir.join(AURORA_META_DIR)).await?)
+    Ok(has_existing_mods_or_saves(dir).await? || try_exists(&dir.join(PETALFALL_META_DIR)).await?)
 }
 
-/// 经 `inheritsFrom` 直接依赖 `id` 的实例。不分大小写，与实例锁、[`Aurora::inheritance_chain`] 判环和 Windows 的
+/// 经 `inheritsFrom` 直接依赖 `id` 的实例。不分大小写，与实例锁、[`Petalfall::inheritance_chain`] 判环和 Windows 的
 /// 目录名同一口径：`inheritsFrom` 写的大小写与目录名不同时，那个实例照样靠这个目录运行。
 fn dependents_in(scan: &VersionScan, id: &str) -> Vec<String> {
     let key = id.to_lowercase();
@@ -1019,7 +1019,7 @@ fn rename_steps(
         let rewritten = rewrite_version_id(&bytes, new, &old_json)?;
         // 只改大小写时新旧文件名在 Windows 上指向同一个文件，先挪开旧文件再写新文件才不会互相覆盖。
         let staged = new_dir
-            .join(AURORA_META_DIR)
+            .join(PETALFALL_META_DIR)
             .join(format!("{old}.json{RENAME_STAGED_SUFFIX}"));
         if let Some(parent) = staged.parent() {
             std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
@@ -1055,7 +1055,7 @@ fn rename_path(from: &Path, to: &Path, done: &mut Vec<Undo>) -> Result<()> {
 }
 
 fn io_error(path: &Path, source: std::io::Error) -> CoreError {
-    aurora_base::Error::Io {
+    petalfall_base::Error::Io {
         path: path.to_path_buf(),
         source,
     }
@@ -1097,17 +1097,17 @@ fn rewrite_version_id(bytes: &[u8], new_id: &str, path: &Path) -> Result<Vec<u8>
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
-    use aurora_instance::{
+    use crate::config::PetalfallConfig;
+    use petalfall_instance::{
         IncompleteKind, IncompleteOutcome, InstallSpec, IsolationOverride, IsolationPolicy,
         NameViolation,
     };
     use serde_json::json;
     use std::sync::Mutex;
 
-    pub(crate) fn aurora_at(root: &Path) -> Aurora {
-        Aurora::for_test(
-            AuroraConfig::default(),
+    pub(crate) fn petalfall_at(root: &Path) -> Petalfall {
+        Petalfall::for_test(
+            PetalfallConfig::default(),
             root.to_path_buf(),
             root.join(".minecraft"),
         )
@@ -1140,7 +1140,7 @@ pub(crate) mod tests {
     struct RecordingDisposer(Arc<Mutex<Vec<PathBuf>>>);
 
     impl Disposer for RecordingDisposer {
-        fn dispose(&self, dir: &Path) -> aurora_instance::Result<()> {
+        fn dispose(&self, dir: &Path) -> petalfall_instance::Result<()> {
             self.0.lock().unwrap().push(dir.to_path_buf());
             std::fs::remove_dir_all(dir).map_err(|source| InstanceError::Io {
                 path: dir.to_path_buf(),
@@ -1152,8 +1152,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn list_instances_reports_versions_broken_entries_settings_and_markers() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
         let modded = write_version(&game, "模组", &fabric_json("模组", "1.21.1"));
         std::fs::create_dir_all(modded.join("mods")).unwrap();
@@ -1190,7 +1190,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let list = aurora.list_instances().await.unwrap();
+        let list = petalfall.list_instances().await.unwrap();
         let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["1.21.1", "Broken", "模组"]);
 
@@ -1223,7 +1223,10 @@ pub(crate) mod tests {
         };
         assert_eq!(fabric.mc_version.as_deref(), Some("1.21.1"));
         assert_eq!(fabric.java_major, Some(21), "沿继承链取原版声明的 Java");
-        assert_eq!(fabric.loaders[0].kind, aurora_version::LoaderKind::Fabric);
+        assert_eq!(
+            fabric.loaders[0].kind,
+            petalfall_version::LoaderKind::Fabric
+        );
         assert_eq!(fabric.mod_count, Some(2), "只数 .jar 与 .jar.disabled");
         assert_eq!(fabric.world_count, Some(2));
         assert_eq!(fabric.isolated, Some(true), "装了加载器的实例默认隔离");
@@ -1237,12 +1240,12 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn corrupt_settings_are_reported_per_instance_instead_of_failing_the_list() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let dir = write_version(aurora.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
-        std::fs::create_dir_all(dir.join(AURORA_META_DIR)).unwrap();
-        std::fs::write(dir.join(AURORA_META_DIR).join("settings.json"), b"{oops").unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
+        std::fs::create_dir_all(dir.join(PETALFALL_META_DIR)).unwrap();
+        std::fs::write(dir.join(PETALFALL_META_DIR).join("settings.json"), b"{oops").unwrap();
 
-        let list = aurora.list_instances().await.unwrap();
+        let list = petalfall.list_instances().await.unwrap();
         assert!(matches!(list[0].settings, Readable::Unreadable(_)));
         let InstanceVersion::Ready(ready) = &list[0].version else {
             panic!("版本 JSON 本身是好的");
@@ -1257,13 +1260,13 @@ pub(crate) mod tests {
     async fn unreadable_working_dir_is_reported_per_instance_instead_of_failing_the_list() {
         for blocked in ["mods", "saves"] {
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
-            let game = aurora.game_dir().to_path_buf();
+            let petalfall = petalfall_at(tmp.path());
+            let game = petalfall.game_dir().to_path_buf();
             write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
             let bad = write_version(&game, "模组", &fabric_json("模组", "1.21.1"));
             std::fs::write(bad.join(blocked), b"not a directory").unwrap();
 
-            let list = aurora.list_instances().await.unwrap();
+            let list = petalfall.list_instances().await.unwrap();
 
             let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
             assert_eq!(ids, vec!["1.21.1", "模组"]);
@@ -1287,15 +1290,20 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn instance_dir_vanishing_mid_scan_does_not_fail_the_summary() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let gone = aurora.game_dir().join("versions").join("刚删掉");
+        let petalfall = petalfall_at(tmp.path());
+        let gone = petalfall.game_dir().join("versions").join("刚删掉");
         let entry = Entry::Broken(BrokenVersion {
             id: "刚删掉".into(),
             dir: gone,
             reason: BrokenReason::MissingJson,
         });
 
-        let summary = summarize(aurora.game_dir(), aurora.config().isolation_policy, entry).await;
+        let summary = summarize(
+            petalfall.game_dir(),
+            petalfall.config().isolation_policy,
+            entry,
+        )
+        .await;
 
         assert_eq!(summary.id, "刚删掉");
         assert_eq!(summary.created_at, None);
@@ -1306,12 +1314,12 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn unreadable_version_json_lists_as_broken_with_its_reason() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
         std::fs::create_dir_all(game.join("versions").join("被占").join("被占.json")).unwrap();
 
-        let list = aurora.list_instances().await.unwrap();
+        let list = petalfall.list_instances().await.unwrap();
 
         let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["1.21.1", "被占"]);
@@ -1328,10 +1336,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn corrupt_version_json_reason_names_the_subject_once() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        write_version(aurora.game_dir(), "写坏了", "{ this is not json }");
+        let petalfall = petalfall_at(tmp.path());
+        write_version(petalfall.game_dir(), "写坏了", "{ this is not json }");
 
-        let list = aurora.list_instances().await.unwrap();
+        let list = petalfall.list_instances().await.unwrap();
 
         let InstanceVersion::Broken(reason) = &list[0].version else {
             panic!("应为损坏：{:?}", list[0].version);
@@ -1346,10 +1354,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn list_instances_carries_modpack_origin_and_last_crash() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         let pack = write_version(&game, "整合包", &vanilla_json("整合包"));
-        let meta = pack.join(AURORA_META_DIR);
+        let meta = pack.join(PETALFALL_META_DIR);
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(
             meta.join("modpack.json"),
@@ -1381,7 +1389,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
         let bad = write_version(&game, "坏记录", &vanilla_json("坏记录"));
-        let bad_meta = bad.join(AURORA_META_DIR);
+        let bad_meta = bad.join(PETALFALL_META_DIR);
         std::fs::create_dir_all(&bad_meta).unwrap();
         std::fs::write(bad_meta.join("modpack.json"), b"{oops").unwrap();
         std::fs::write(
@@ -1390,14 +1398,14 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        let list = aurora.list_instances().await.unwrap();
+        let list = petalfall.list_instances().await.unwrap();
         let by_id = |id: &str| list.iter().find(|i| i.id == id).unwrap();
         let Readable::Read(Some(modpack)) = &by_id("整合包").modpack else {
             panic!("应读出整合包信息：{:?}", by_id("整合包").modpack);
         };
         assert_eq!(
             modpack.platform,
-            Some(aurora_modplatform::Platform::Modrinth)
+            Some(petalfall_modplatform::Platform::Modrinth)
         );
         assert_eq!(modpack.project_id.as_deref(), Some("1KVo5zza"));
         assert_eq!(modpack.name, "Fabulously Optimized");
@@ -1445,8 +1453,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn list_instances_reports_quick_play_support_along_the_inheritance_chain() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         write_version(&game, "1.21.1", &quick_play_vanilla_json("1.21.1"));
         write_version(&game, "织布机", &fabric_json("织布机", "1.21.1"));
         write_version(
@@ -1457,7 +1465,7 @@ pub(crate) mod tests {
         );
         write_version(&game, "孤儿", &fabric_json("孤儿", "1.20.6"));
 
-        let list = aurora.list_instances().await.unwrap();
+        let list = petalfall.list_instances().await.unwrap();
         let support = |id: &str| -> Option<QuickPlaySupport> {
             match &list.iter().find(|i| i.id == id).unwrap().version {
                 InstanceVersion::Ready(ready) => ready.quick_play,
@@ -1495,7 +1503,7 @@ pub(crate) mod tests {
 
     /// 导入整合包时写进实例元数据目录的记录。
     fn write_pack_info(instance_dir: &Path, minecraft: &str) {
-        let meta = instance_dir.join(AURORA_META_DIR);
+        let meta = instance_dir.join(PETALFALL_META_DIR);
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(
             meta.join("modpack.json"),
@@ -1513,7 +1521,7 @@ pub(crate) mod tests {
 
     /// 写下依赖版本记录，内容与导入记下的同一形状。
     pub(crate) fn write_base_record(game_dir: &Path, ids: &[&str]) {
-        let meta = game_dir.join(AURORA_META_DIR);
+        let meta = game_dir.join(PETALFALL_META_DIR);
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(
             meta.join("base-versions.json"),
@@ -1522,8 +1530,8 @@ pub(crate) mod tests {
         .unwrap();
     }
 
-    async fn listed_ids(aurora: &Aurora) -> Vec<String> {
-        let list = aurora.list_instances().await.unwrap();
+    async fn listed_ids(petalfall: &Petalfall) -> Vec<String> {
+        let list = petalfall.list_instances().await.unwrap();
         list.into_iter().map(|instance| instance.id).collect()
     }
 
@@ -1545,8 +1553,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn recorded_base_versions_stay_out_of_the_list() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         let vanilla = write_version(&game, "1.21.1", &quick_play_vanilla_json("1.21.1"));
         let natural = write_version(
             &game,
@@ -1557,7 +1565,7 @@ pub(crate) mod tests {
         write_pack_info(&pack, "1.21.1");
         write_base_record(&game, &["1.21.1", NATURAL_NEOFORGE]);
 
-        let list = aurora.list_instances().await.unwrap();
+        let list = petalfall.list_instances().await.unwrap();
         let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["周末整合包"]);
         let InstanceVersion::Ready(ready) = &list[0].version else {
@@ -1575,18 +1583,18 @@ pub(crate) mod tests {
         assert!(vanilla.join("1.21.1.json").is_file());
         assert!(natural.join(format!("{NATURAL_NEOFORGE}.json")).is_file());
         assert_eq!(
-            aurora.instance_names().await.unwrap(),
+            petalfall.instance_names().await.unwrap(),
             ["1.21.1", NATURAL_NEOFORGE, "周末整合包"]
         );
         for taken in ["1.21.1", NATURAL_NEOFORGE] {
-            let err = aurora.check_new_instance_name(taken).await.unwrap_err();
+            let err = petalfall.check_new_instance_name(taken).await.unwrap_err();
             assert_duplicate_name(&err);
         }
         assert_eq!(
-            aurora.inheritance_chain("周末整合包").await.unwrap(),
+            petalfall.inheritance_chain("周末整合包").await.unwrap(),
             ["1.21.1"]
         );
-        let preview = aurora.deletion_preview("1.21.1").await.unwrap();
+        let preview = petalfall.deletion_preview("1.21.1").await.unwrap();
         assert_eq!(preview.dependents, [NATURAL_NEOFORGE, "周末整合包"]);
     }
 
@@ -1595,8 +1603,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn versions_that_were_already_there_stay_listed_next_to_a_pack_using_them() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
         write_version(
             &game,
@@ -1608,13 +1616,13 @@ pub(crate) mod tests {
         write_base_record(&game, &[]);
 
         assert_eq!(
-            listed_ids(&aurora).await,
+            listed_ids(&petalfall).await,
             ["1.21.1", NATURAL_NEOFORGE, "周末整合包"]
         );
 
         std::fs::remove_dir_all(&pack).unwrap();
 
-        assert_eq!(listed_ids(&aurora).await, ["1.21.1", NATURAL_NEOFORGE]);
+        assert_eq!(listed_ids(&petalfall).await, ["1.21.1", NATURAL_NEOFORGE]);
     }
 
     /// 被继承的自然加载器版本不列出，但它仍是继承链上的一环：Java 与直达方式穿过它算到原版，删除与改名
@@ -1622,8 +1630,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn hidden_loader_version_stays_on_the_chain_and_behind_the_dependents_check() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         write_version(&game, "1.21.1", &quick_play_vanilla_json("1.21.1"));
         let natural = write_version(
             &game,
@@ -1636,7 +1644,7 @@ pub(crate) mod tests {
             &format!(r#"{{"id":"光影叠加","inheritsFrom":"{NATURAL_NEOFORGE}","type":"release"}}"#),
         );
 
-        let list = aurora.list_instances().await.unwrap();
+        let list = petalfall.list_instances().await.unwrap();
         let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["1.21.1", "光影叠加"]);
         let InstanceVersion::Ready(on_top) = &list[1].version else {
@@ -1652,17 +1660,17 @@ pub(crate) mod tests {
         );
 
         assert_eq!(
-            aurora.inheritance_chain("光影叠加").await.unwrap(),
+            petalfall.inheritance_chain("光影叠加").await.unwrap(),
             [NATURAL_NEOFORGE, "1.21.1"]
         );
-        let preview = aurora.deletion_preview(NATURAL_NEOFORGE).await.unwrap();
+        let preview = petalfall.deletion_preview(NATURAL_NEOFORGE).await.unwrap();
         assert_eq!(preview.dependents, ["光影叠加"]);
         for refused in [
-            aurora
+            petalfall
                 .delete_instance_files(NATURAL_NEOFORGE, RecordingDisposer::default())
                 .await
                 .map(|_| ()),
-            aurora
+            petalfall
                 .rename_instance_files(NATURAL_NEOFORGE, "新名字")
                 .await,
         ] {
@@ -1684,8 +1692,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn loader_versions_that_belong_to_the_player_stay_in_the_list() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
 
         let official = "fabric-loader-0.16.10-1.21.1";
@@ -1697,7 +1705,7 @@ pub(crate) mod tests {
                 "mainClass":"net.fabricmc.loader.impl.launch.knot.KnotClient",
                 "libraries":[{"name":"net.fabricmc:fabric-loader:0.16.10"}]}"#,
         );
-        aurora_instance::InstallRecordStore::for_version_dir(&built)
+        petalfall_instance::InstallRecordStore::for_version_dir(&built)
             .save(&InstallSpec {
                 mc_version: "1.21.1".into(),
                 loader: Some("fabric".into()),
@@ -1759,7 +1767,7 @@ pub(crate) mod tests {
         }
 
         assert_eq!(
-            listed_ids(&aurora).await,
+            listed_ids(&petalfall).await,
             [
                 "1.21.1",
                 named_like_one,
@@ -1782,8 +1790,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn recorded_versions_stay_hidden_once_nothing_uses_them() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
         write_version(
             &game,
@@ -1793,11 +1801,11 @@ pub(crate) mod tests {
         let pack = write_version(&game, "周末整合包", &neoforge_json("周末整合包", "1.21.1"));
         write_pack_info(&pack, "1.21.1");
         write_base_record(&game, &["1.21.1", NATURAL_NEOFORGE]);
-        assert_eq!(listed_ids(&aurora).await, ["周末整合包"]);
+        assert_eq!(listed_ids(&petalfall).await, ["周末整合包"]);
 
         std::fs::remove_dir_all(&pack).unwrap();
 
-        assert!(listed_ids(&aurora).await.is_empty());
+        assert!(listed_ids(&petalfall).await.is_empty());
     }
 
     /// 导入下载途中原版目录还没有版本 JSON，进程被杀后也会这样留下：记录里的目录不因此露出来，不在记录里的
@@ -1805,24 +1813,24 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn recorded_directory_without_a_version_json_stays_hidden() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         for dir in ["正在下载的原版", "别的坏目录"] {
             std::fs::create_dir_all(game.join("versions").join(dir)).unwrap();
         }
         write_base_record(&game, &["正在下载的原版"]);
 
-        assert_eq!(listed_ids(&aurora).await, ["别的坏目录"]);
+        assert_eq!(listed_ids(&petalfall).await, ["别的坏目录"]);
     }
 
     /// 记录里的目录在启动器之外被删掉后，玩家可以用这个名字建实例：目录上有实例痕迹，它就是实例，不隐藏。
     #[tokio::test]
     async fn instance_under_a_recorded_name_is_listed() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         let built = write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
-        aurora_instance::InstallRecordStore::for_version_dir(&built)
+        petalfall_instance::InstallRecordStore::for_version_dir(&built)
             .save(&InstallSpec {
                 mc_version: "1.21.1".into(),
                 loader: None,
@@ -1833,25 +1841,28 @@ pub(crate) mod tests {
             .unwrap();
         write_base_record(&game, &["1.21.1"]);
 
-        assert_eq!(listed_ids(&aurora).await, ["1.21.1"]);
+        assert_eq!(listed_ids(&petalfall).await, ["1.21.1"]);
     }
 
     /// 并行的导入各记各的，谁都不能盖掉别人记下的 id。
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_records_keep_every_id() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let mut ids: Vec<String> = (0..16).map(|i| format!("base-{i:02}")).collect();
         let mut set = JoinSet::new();
         for id in &ids {
-            let (aurora, id) = (aurora.clone(), id.clone());
-            set.spawn(async move { aurora.record_base_versions(&[id]).await });
+            let (petalfall, id) = (petalfall.clone(), id.clone());
+            set.spawn(async move { petalfall.record_base_versions(&[id]).await });
         }
         while let Some(joined) = set.join_next().await {
             joined.unwrap().unwrap();
         }
 
-        let mut kept = read_base_record(aurora.game_dir()).await.unwrap().versions;
+        let mut kept = read_base_record(petalfall.game_dir())
+            .await
+            .unwrap()
+            .versions;
         kept.sort();
         ids.sort();
         assert_eq!(kept, ids);
@@ -1861,22 +1872,22 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn unreadable_base_record_is_rewritten_by_the_next_record() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
-        let meta = game.join(AURORA_META_DIR);
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        let meta = game.join(PETALFALL_META_DIR);
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(meta.join("base-versions.json"), b"{oops").unwrap();
         write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
         write_version(&game, "1.20.1", &vanilla_json("1.20.1"));
 
         for _ in 0..2 {
-            aurora
+            petalfall
                 .record_base_versions(&["1.21.1".to_owned()])
                 .await
                 .unwrap();
         }
 
-        assert_eq!(listed_ids(&aurora).await, ["1.20.1"]);
+        assert_eq!(listed_ids(&petalfall).await, ["1.20.1"]);
         assert_eq!(read_base_record(&game).await.unwrap().versions, ["1.21.1"]);
     }
 
@@ -1884,8 +1895,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn unreadable_base_record_hides_nothing_of_its_own() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
         write_version(
             &game,
@@ -1897,11 +1908,11 @@ pub(crate) mod tests {
             "光影叠加",
             &format!(r#"{{"id":"光影叠加","inheritsFrom":"{NATURAL_NEOFORGE}","type":"release"}}"#),
         );
-        let meta = game.join(AURORA_META_DIR);
+        let meta = game.join(PETALFALL_META_DIR);
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(meta.join("base-versions.json"), b"{oops").unwrap();
 
-        assert_eq!(listed_ids(&aurora).await, ["1.21.1", "光影叠加"]);
+        assert_eq!(listed_ids(&petalfall).await, ["1.21.1", "光影叠加"]);
     }
 
     #[test]
@@ -1922,25 +1933,25 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn settings_roundtrip_and_invalid_values_are_rejected_without_writing() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        write_version(aurora.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
+        let petalfall = petalfall_at(tmp.path());
+        write_version(petalfall.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
 
         let wanted = VersionSettings {
             memory_mb: Some(6144),
             isolation: IsolationOverride::Enabled,
             ..VersionSettings::default()
         };
-        aurora
+        petalfall
             .set_instance_settings("1.21.1", &wanted)
             .await
             .unwrap();
-        assert_eq!(aurora.instance_settings("1.21.1").await.unwrap(), wanted);
+        assert_eq!(petalfall.instance_settings("1.21.1").await.unwrap(), wanted);
 
         let bad = VersionSettings {
             memory_mb: Some(1000),
             ..VersionSettings::default()
         };
-        let err = aurora
+        let err = petalfall
             .set_instance_settings("1.21.1", &bad)
             .await
             .unwrap_err();
@@ -1954,11 +1965,11 @@ pub(crate) mod tests {
             ),
             "实际：{err:?}"
         );
-        assert_eq!(aurora.instance_settings("1.21.1").await.unwrap(), wanted);
+        assert_eq!(petalfall.instance_settings("1.21.1").await.unwrap(), wanted);
 
-        let missing = aurora.instance_settings("nope").await.unwrap_err();
+        let missing = petalfall.instance_settings("nope").await.unwrap_err();
         assert!(matches!(missing, CoreError::VersionNotInstalled { .. }));
-        let unsafe_id = aurora.instance_settings("../x").await.unwrap_err();
+        let unsafe_id = petalfall.instance_settings("../x").await.unwrap_err();
         assert!(matches!(
             unsafe_id,
             CoreError::Instance(InstanceError::InvalidId { .. })
@@ -1968,13 +1979,13 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn working_dir_follows_the_instance_isolation_override() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_at(tmp.path());
-        aurora.set_isolation_policy(IsolationPolicy::Disabled);
-        write_version(aurora.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
-        let shared = aurora.resolve_working_dir("1.21.1").await.unwrap();
-        assert_eq!(shared.working_dir, aurora.game_dir());
+        let mut petalfall = petalfall_at(tmp.path());
+        petalfall.set_isolation_policy(IsolationPolicy::Disabled);
+        write_version(petalfall.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
+        let shared = petalfall.resolve_working_dir("1.21.1").await.unwrap();
+        assert_eq!(shared.working_dir, petalfall.game_dir());
 
-        aurora
+        petalfall
             .set_instance_settings(
                 "1.21.1",
                 &VersionSettings {
@@ -1984,16 +1995,16 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-        let isolated = aurora.resolve_working_dir("1.21.1").await.unwrap();
+        let isolated = petalfall.resolve_working_dir("1.21.1").await.unwrap();
         assert!(isolated.isolated);
         assert_eq!(
             isolated.working_dir,
-            aurora.game_dir().join("versions").join("1.21.1")
+            petalfall.game_dir().join("versions").join("1.21.1")
         );
 
-        let broken_dir = aurora.game_dir().join("versions").join("坏的");
+        let broken_dir = petalfall.game_dir().join("versions").join("坏的");
         std::fs::create_dir_all(&broken_dir).unwrap();
-        let err = aurora.resolve_working_dir("坏的").await.unwrap_err();
+        let err = petalfall.resolve_working_dir("坏的").await.unwrap_err();
         assert!(matches!(
             err,
             CoreError::Instance(InstanceError::Broken { .. })
@@ -2003,23 +2014,23 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn delete_moves_the_directory_out_and_forget_prunes_pins_and_selection() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_at(tmp.path());
-        let dir = write_version(aurora.game_dir(), "旧世界", &vanilla_json("1.21.1"));
+        let mut petalfall = petalfall_at(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "旧世界", &vanilla_json("1.21.1"));
         std::fs::create_dir_all(dir.join("saves").join("w")).unwrap();
-        write_version(aurora.game_dir(), "1.20.1", &vanilla_json("1.20.1"));
-        aurora.set_sidebar_pins(vec!["1.20.1".into(), "旧世界".into()]);
-        aurora.set_selected_version(Some("旧世界".into()));
+        write_version(petalfall.game_dir(), "1.20.1", &vanilla_json("1.20.1"));
+        petalfall.set_sidebar_pins(vec!["1.20.1".into(), "旧世界".into()]);
+        petalfall.set_selected_version(Some("旧世界".into()));
 
-        let preview = aurora.deletion_preview("旧世界").await.unwrap();
+        let preview = petalfall.deletion_preview("旧世界").await.unwrap();
         assert_eq!(preview.worlds.len(), 1);
         assert_eq!(preview.worlds[0].dir_name, "w");
         assert!(preview.size_bytes > 0);
         assert!(preview.dependents.is_empty());
         assert_eq!(
             preview.backups_dir,
-            aurora
+            petalfall
                 .game_dir()
-                .join(AURORA_META_DIR)
+                .join(PETALFALL_META_DIR)
                 .join("backups")
                 .join("instances")
                 .join("旧世界")
@@ -2028,38 +2039,38 @@ pub(crate) mod tests {
 
         let disposer = RecordingDisposer::default();
         assert!(
-            aurora
+            petalfall
                 .delete_instance_files("旧世界", disposer.clone())
                 .await
                 .unwrap()
         );
         assert!(!dir.exists());
         assert_eq!(*disposer.0.lock().unwrap(), vec![dir.clone()]);
-        assert!(aurora.forget_instance("旧世界"));
-        assert_eq!(aurora.config().sidebar_pins, vec!["1.20.1".to_owned()]);
-        assert_eq!(aurora.config().selected_version, None);
+        assert!(petalfall.forget_instance("旧世界"));
+        assert_eq!(petalfall.config().sidebar_pins, vec!["1.20.1".to_owned()]);
+        assert_eq!(petalfall.config().selected_version, None);
 
         // 再删一次是幂等的空操作，配置也不再变化。
         assert!(
-            !aurora
+            !petalfall
                 .delete_instance_files("旧世界", disposer.clone())
                 .await
                 .unwrap()
         );
-        assert!(!aurora.forget_instance("旧世界"));
+        assert!(!petalfall.forget_instance("旧世界"));
         assert_eq!(disposer.0.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn delete_and_rename_are_refused_while_another_instance_inherits_from_it() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let parent = write_version(aurora.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
-        write_version(aurora.game_dir(), "fab", &fabric_json("fab", "1.21.1"));
+        let petalfall = petalfall_at(tmp.path());
+        let parent = write_version(petalfall.game_dir(), "1.21.1", &vanilla_json("1.21.1"));
+        write_version(petalfall.game_dir(), "fab", &fabric_json("fab", "1.21.1"));
 
-        let preview = aurora.deletion_preview("1.21.1").await.unwrap();
+        let preview = petalfall.deletion_preview("1.21.1").await.unwrap();
         assert_eq!(preview.dependents, vec!["fab".to_owned()]);
-        let err = aurora
+        let err = petalfall
             .delete_instance_files("1.21.1", RecordingDisposer::default())
             .await
             .unwrap_err();
@@ -2071,7 +2082,7 @@ pub(crate) mod tests {
             other => panic!("应报有依赖，实际：{other:?}"),
         }
         assert!(parent.exists());
-        let err = aurora
+        let err = petalfall
             .rename_instance_files("1.21.1", "原版")
             .await
             .unwrap_err();
@@ -2085,8 +2096,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn inheritance_chain_lists_the_bases_up_to_the_root_and_stops_where_the_chain_breaks() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         write_version(&game, "1.20.1", &vanilla_json("1.20.1"));
         write_version(
             &game,
@@ -2097,17 +2108,23 @@ pub(crate) mod tests {
         write_version(&game, "叠层", &fabric_json("叠层", "fabric-1.20.1"));
 
         assert_eq!(
-            aurora.inheritance_chain("叠层").await.unwrap(),
+            petalfall.inheritance_chain("叠层").await.unwrap(),
             vec!["fabric-1.20.1".to_owned(), "1.20.1".to_owned()]
         );
         assert_eq!(
-            aurora.inheritance_chain("fabric-1.20.1").await.unwrap(),
+            petalfall.inheritance_chain("fabric-1.20.1").await.unwrap(),
             vec!["1.20.1".to_owned()]
         );
-        assert!(aurora.inheritance_chain("1.20.1").await.unwrap().is_empty());
+        assert!(
+            petalfall
+                .inheritance_chain("1.20.1")
+                .await
+                .unwrap()
+                .is_empty()
+        );
         // 自包含的实例与盘上没有的 id：没有基底。
         assert!(
-            aurora
+            petalfall
                 .inheritance_chain("没有这个")
                 .await
                 .unwrap()
@@ -2119,18 +2136,24 @@ pub(crate) mod tests {
             "空白",
             r#"{"id":"空白","inheritsFrom":"  ","type":"release","mainClass":"M"}"#,
         );
-        assert!(aurora.inheritance_chain("空白").await.unwrap().is_empty());
+        assert!(
+            petalfall
+                .inheritance_chain("空白")
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         // 父版本不在或 JSON 坏了：它的 id 照样收进来，链停在它那里。
         write_version(&game, "孤儿", &fabric_json("孤儿", "1.19.4"));
         assert_eq!(
-            aurora.inheritance_chain("孤儿").await.unwrap(),
+            petalfall.inheritance_chain("孤儿").await.unwrap(),
             vec!["1.19.4".to_owned()]
         );
         write_version(&game, "坏父", "{ not json");
         write_version(&game, "坏子", &fabric_json("坏子", "坏父"));
         assert_eq!(
-            aurora.inheritance_chain("坏子").await.unwrap(),
+            petalfall.inheritance_chain("坏子").await.unwrap(),
             vec!["坏父".to_owned()]
         );
 
@@ -2138,17 +2161,17 @@ pub(crate) mod tests {
         write_version(&game, "环A", &fabric_json("环A", "环b"));
         write_version(&game, "环b", &fabric_json("环b", "环a"));
         assert_eq!(
-            aurora.inheritance_chain("环A").await.unwrap(),
+            petalfall.inheritance_chain("环A").await.unwrap(),
             vec!["环b".to_owned()]
         );
         // 盘上的 inheritsFrom 指向游戏目录之外时收下这个 id 但不去读它。
         write_version(&game, "越界", &fabric_json("越界", "../../secret"));
         assert_eq!(
-            aurora.inheritance_chain("越界").await.unwrap(),
+            petalfall.inheritance_chain("越界").await.unwrap(),
             vec!["../../secret".to_owned()]
         );
 
-        let err = aurora.inheritance_chain("../x").await.unwrap_err();
+        let err = petalfall.inheritance_chain("../x").await.unwrap_err();
         assert!(matches!(
             err,
             CoreError::Instance(InstanceError::InvalidId { .. })
@@ -2160,8 +2183,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn listed_bases_are_the_inheritance_chain_the_locks_are_taken_along() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         write_version(&game, "1.20.1", &vanilla_json("1.20.1"));
         write_version(
             &game,
@@ -2188,7 +2211,7 @@ pub(crate) mod tests {
             };
             ready.bases.clone()
         };
-        let list = aurora.list_instances().await.unwrap();
+        let list = petalfall.list_instances().await.unwrap();
         assert_eq!(
             bases_of(&list, "叠层"),
             ["fabric-1.20.1".to_owned(), "1.20.1".to_owned()],
@@ -2207,7 +2230,7 @@ pub(crate) mod tests {
         ] {
             assert_eq!(
                 bases_of(&list, id),
-                aurora.inheritance_chain(id).await.unwrap(),
+                petalfall.inheritance_chain(id).await.unwrap(),
                 "{id}"
             );
         }
@@ -2216,25 +2239,25 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn rename_moves_directory_json_jar_and_natives_and_keeps_the_mc_version() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_at(tmp.path());
+        let mut petalfall = petalfall_at(tmp.path());
         let old_dir = write_version(
-            aurora.game_dir(),
+            petalfall.game_dir(),
             "1.21.1",
             r#"{"id":"1.21.1","type":"release","mainClass":"M","x-unmodelled":{"keep":true}}"#,
         );
         std::fs::write(old_dir.join("1.21.1.jar"), b"jar").unwrap();
         std::fs::create_dir_all(old_dir.join("1.21.1-natives")).unwrap();
         std::fs::create_dir_all(old_dir.join("saves").join("w")).unwrap();
-        aurora.set_sidebar_pins(vec!["a".into(), "1.21.1".into()]);
-        aurora.set_selected_version(Some("1.21.1".into()));
+        petalfall.set_sidebar_pins(vec!["a".into(), "1.21.1".into()]);
+        petalfall.set_selected_version(Some("1.21.1".into()));
 
-        aurora
+        petalfall
             .rename_instance_files("1.21.1", "生存服")
             .await
             .unwrap();
-        assert!(aurora.rename_instance_refs("1.21.1", "生存服"));
+        assert!(petalfall.rename_instance_refs("1.21.1", "生存服"));
 
-        let new_dir = aurora.game_dir().join("versions").join("生存服");
+        let new_dir = petalfall.game_dir().join("versions").join("生存服");
         assert!(!old_dir.exists());
         assert_eq!(std::fs::read(new_dir.join("生存服.jar")).unwrap(), b"jar");
         assert!(new_dir.join("生存服-natives").is_dir());
@@ -2252,12 +2275,15 @@ pub(crate) mod tests {
         assert!(leftovers.is_empty(), "暂存文件应已删除：{leftovers:?}");
 
         assert_eq!(
-            aurora.config().sidebar_pins,
+            petalfall.config().sidebar_pins,
             vec!["a".to_owned(), "生存服".to_owned()]
         );
-        assert_eq!(aurora.config().selected_version.as_deref(), Some("生存服"));
+        assert_eq!(
+            petalfall.config().selected_version.as_deref(),
+            Some("生存服")
+        );
 
-        let list = aurora.list_instances().await.unwrap();
+        let list = petalfall.list_instances().await.unwrap();
         let InstanceVersion::Ready(ready) = &list[0].version else {
             panic!("改名后的实例应可用");
         };
@@ -2268,26 +2294,26 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn rename_only_changing_case_keeps_the_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        write_version(aurora.game_dir(), "survival", &vanilla_json("1.21.1"));
-        aurora
+        let petalfall = petalfall_at(tmp.path());
+        write_version(petalfall.game_dir(), "survival", &vanilla_json("1.21.1"));
+        petalfall
             .rename_instance_files("survival", "Survival")
             .await
             .unwrap();
-        let dir = aurora.game_dir().join("versions").join("Survival");
+        let dir = petalfall.game_dir().join("versions").join("Survival");
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("Survival.json")).unwrap()).unwrap();
         assert_eq!(json["id"], "Survival");
-        let names = aurora.instance_names().await.unwrap();
+        let names = petalfall.instance_names().await.unwrap();
         assert_eq!(names, vec!["Survival".to_owned()]);
     }
 
     #[tokio::test]
     async fn rename_validates_the_new_name_and_rolls_back_on_failure() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let dir = write_version(aurora.game_dir(), "a", &vanilla_json("1.21.1"));
-        write_version(aurora.game_dir(), "B", &vanilla_json("1.20.1"));
+        let petalfall = petalfall_at(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "a", &vanilla_json("1.21.1"));
+        write_version(petalfall.game_dir(), "B", &vanilla_json("1.20.1"));
 
         for (name, expected) in [
             ("b", NameViolation::Duplicate),
@@ -2295,7 +2321,10 @@ pub(crate) mod tests {
             ("x ", NameViolation::ReservedByWindows),
             ("a/b", NameViolation::IllegalChar),
         ] {
-            let err = aurora.rename_instance_files("a", name).await.unwrap_err();
+            let err = petalfall
+                .rename_instance_files("a", name)
+                .await
+                .unwrap_err();
             match err {
                 CoreError::Instance(InstanceError::InvalidName { violation, .. }) => {
                     assert_eq!(violation, expected, "{name:?}")
@@ -2307,13 +2336,13 @@ pub(crate) mod tests {
 
         // 版本 JSON 损坏：改写 id 失败，目录改名要还原。
         std::fs::write(dir.join("a.json"), b"{broken").unwrap();
-        let err = aurora.rename_instance_files("a", "c").await.unwrap_err();
+        let err = petalfall.rename_instance_files("a", "c").await.unwrap_err();
         assert!(
             matches!(err, CoreError::Instance(InstanceError::Json { .. })),
             "实际：{err:?}"
         );
         assert!(dir.join("a.json").is_file(), "失败后目录与 JSON 应还原");
-        assert!(!aurora.game_dir().join("versions").join("c").exists());
+        assert!(!petalfall.game_dir().join("versions").join("c").exists());
     }
 
     /// 改名已经全部做完、只剩删暂存的旧 JSON：删不掉不能报错，目录已是新名字，报错的话调用方就不再同步游玩
@@ -2343,19 +2372,19 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn dependents_are_found_regardless_of_case() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         let base = write_version(&game, "Vanilla-1.21", &vanilla_json("Vanilla-1.21"));
         write_version(&game, "fab", &fabric_json("fab", "vanilla-1.21"));
 
-        let preview = aurora.deletion_preview("Vanilla-1.21").await.unwrap();
+        let preview = petalfall.deletion_preview("Vanilla-1.21").await.unwrap();
         assert_eq!(preview.dependents, vec!["fab".to_owned()]);
         for err in [
-            aurora
+            petalfall
                 .delete_instance_files("Vanilla-1.21", RecordingDisposer::default())
                 .await
                 .unwrap_err(),
-            aurora
+            petalfall
                 .rename_instance_files("Vanilla-1.21", "底座")
                 .await
                 .unwrap_err(),
@@ -2376,9 +2405,9 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_corrupt_backup_index_does_not_block_the_deletion_preview() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        write_version(aurora.game_dir(), "生存", &vanilla_json("生存"));
-        let world = aurora
+        let petalfall = petalfall_at(tmp.path());
+        write_version(petalfall.game_dir(), "生存", &vanilla_json("生存"));
+        let world = petalfall
             .instance_backups_dir("生存")
             .unwrap()
             .join("新的世界");
@@ -2393,7 +2422,7 @@ pub(crate) mod tests {
             std::fs::write(world.join(name), b"x").unwrap();
         }
 
-        let preview = aurora.deletion_preview("生存").await.unwrap();
+        let preview = petalfall.deletion_preview("生存").await.unwrap();
         assert_eq!(preview.backup_count, 2);
         assert_eq!(preview.backups_dir, world.parent().unwrap());
     }
@@ -2406,8 +2435,8 @@ pub(crate) mod tests {
         }
     }
 
-    fn pinned_instances(aurora: &Aurora) -> Vec<(String, Option<String>)> {
-        aurora
+    fn pinned_instances(petalfall: &Petalfall) -> Vec<(String, Option<String>)> {
+        petalfall
             .pinned_servers()
             .iter()
             .map(|s| (s.address.clone(), s.instance.clone()))
@@ -2419,8 +2448,8 @@ pub(crate) mod tests {
     #[test]
     fn rename_and_forget_carry_the_pinned_server_bindings() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_at(tmp.path());
-        aurora
+        let mut petalfall = petalfall_at(tmp.path());
+        petalfall
             .set_pinned_servers(vec![
                 pinned("a.example", Some("生存")),
                 pinned("b.example", Some("创造")),
@@ -2428,38 +2457,38 @@ pub(crate) mod tests {
             ])
             .unwrap();
 
-        assert!(aurora.rename_instance_refs("生存", "生存 1.21.1"));
+        assert!(petalfall.rename_instance_refs("生存", "生存 1.21.1"));
         assert_eq!(
-            pinned_instances(&aurora),
+            pinned_instances(&petalfall),
             vec![
                 ("a.example".to_owned(), Some("生存 1.21.1".to_owned())),
                 ("b.example".to_owned(), Some("创造".to_owned())),
                 ("c.example".to_owned(), None),
             ]
         );
-        assert!(!aurora.rename_instance_refs("生存", "又一个"));
+        assert!(!petalfall.rename_instance_refs("生存", "又一个"));
 
-        assert!(aurora.forget_instance("生存 1.21.1"));
+        assert!(petalfall.forget_instance("生存 1.21.1"));
         assert_eq!(
-            pinned_instances(&aurora),
+            pinned_instances(&petalfall),
             vec![
                 ("a.example".to_owned(), None),
                 ("b.example".to_owned(), Some("创造".to_owned())),
                 ("c.example".to_owned(), None),
             ]
         );
-        assert!(!aurora.forget_instance("生存 1.21.1"));
+        assert!(!petalfall.forget_instance("生存 1.21.1"));
     }
 
     #[tokio::test]
     async fn sidebar_pins_reject_overflow_duplicates_and_unknown_ids() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_at(tmp.path());
+        let mut petalfall = petalfall_at(tmp.path());
         let ids: Vec<String> = (1..=6).map(|i| format!("i{i}")).collect();
         for id in &ids {
-            write_version(aurora.game_dir(), id, &vanilla_json("1.21.1"));
+            write_version(petalfall.game_dir(), id, &vanilla_json("1.21.1"));
         }
-        aurora
+        petalfall
             .validate_sidebar_pins(&ids[..MAX_SIDEBAR_PINS])
             .await
             .unwrap();
@@ -2468,14 +2497,14 @@ pub(crate) mod tests {
             CoreError::Instance(InstanceError::InvalidPins { reason, id }) => (reason, id),
             other => panic!("应报固定列表不合法，实际：{other:?}"),
         };
-        let too_many = aurora.validate_sidebar_pins(&ids).await.unwrap_err();
+        let too_many = petalfall.validate_sidebar_pins(&ids).await.unwrap_err();
         assert_eq!(pins_err(too_many), (PinsViolation::TooMany, None));
-        let dup = aurora
+        let dup = petalfall
             .validate_sidebar_pins(&["i1".into(), "i2".into(), "i1".into()])
             .await
             .unwrap_err();
         assert_eq!(pins_err(dup), (PinsViolation::Duplicate, Some("i1".into())));
-        let missing = aurora
+        let missing = petalfall
             .validate_sidebar_pins(&["i1".into(), "ghost".into()])
             .await
             .unwrap_err();
@@ -2484,9 +2513,9 @@ pub(crate) mod tests {
             (PinsViolation::NotFound, Some("ghost".into()))
         );
 
-        aurora.set_sidebar_pins(vec!["i2".into(), "gone".into(), "i1".into()]);
+        petalfall.set_sidebar_pins(vec!["i2".into(), "gone".into(), "i1".into()]);
         assert_eq!(
-            aurora.existing_sidebar_pins().await.unwrap(),
+            petalfall.existing_sidebar_pins().await.unwrap(),
             vec!["i2".to_owned(), "i1".to_owned()]
         );
     }
@@ -2495,8 +2524,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn hidden_versions_take_no_sidebar_pin_slot() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let mut petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
         write_version(
             &game,
@@ -2518,22 +2547,22 @@ pub(crate) mod tests {
         pins.extend(visible.iter().cloned());
         pins.push("坏的".to_owned());
         pins.push("光影叠加".to_owned());
-        aurora.set_sidebar_pins(pins);
+        petalfall.set_sidebar_pins(pins);
 
-        let existing = aurora.existing_sidebar_pins().await.unwrap();
+        let existing = petalfall.existing_sidebar_pins().await.unwrap();
 
         assert_eq!(existing, ["i1", "i2", "i3", "坏的", "光影叠加"]);
         assert_eq!(existing.len(), MAX_SIDEBAR_PINS);
-        aurora.validate_sidebar_pins(&existing).await.unwrap();
+        petalfall.validate_sidebar_pins(&existing).await.unwrap();
     }
 
     #[tokio::test]
     async fn new_instance_names_are_checked_against_existing_ones_case_insensitively() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        aurora.check_new_instance_name("全新").await.unwrap();
-        write_version(aurora.game_dir(), "Survival", &vanilla_json("1.21.1"));
-        let err = aurora
+        let petalfall = petalfall_at(tmp.path());
+        petalfall.check_new_instance_name("全新").await.unwrap();
+        write_version(petalfall.game_dir(), "Survival", &vanilla_json("1.21.1"));
+        let err = petalfall
             .check_new_instance_name("survival")
             .await
             .unwrap_err();

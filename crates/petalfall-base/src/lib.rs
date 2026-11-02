@@ -1,4 +1,4 @@
-//! aurora-base（L0 公共设施）
+//! petalfall-base（L0 公共设施）
 //!
 //! 整个 workspace 的地基：所有访问网络、落盘、校验、重试的上层 crate 都从这里取统一实现，
 //! 避免各处各写一份 reqwest 客户端、各拼一套 BMCLAPI 改写规则。

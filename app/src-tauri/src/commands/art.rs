@@ -1,7 +1,7 @@
-//! 原版材质服务的命令：状态查询、账户皮肤、远程缩略图登记。图本身经 `aurora-tex` 协议取
+//! 原版材质服务的命令：状态查询、账户皮肤、远程缩略图登记。图本身经 `petalfall-tex` 协议取
 //! （见 [`crate::textures`]），这里只回答「有没有、用哪个键去取」。
 
-use aurora_core::{
+use petalfall_core::{
     default_skin, Account, AccountType, ArtStatus, SkinInfo, SkinModel, TextureService, ThumbError,
 };
 use serde::Serialize;
@@ -19,7 +19,7 @@ pub struct ArtSourceDto {
     pub version_id: String,
 }
 
-/// 材质服务状态 DTO，也是 `aurora://art-changed` 的负载。
+/// 材质服务状态 DTO，也是 `petalfall://art-changed` 的负载。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ArtStatusDto {
     /// 材质源；为 null 时前端不发任何材质请求，所有点缀位画回落件。
@@ -98,7 +98,7 @@ impl From<ThumbError> for CommandError {
     }
 }
 
-/// 材质服务当前状态（只读内存）。前端应先订阅 `aurora://art-changed` 再调用它，避免漏掉
+/// 材质服务当前状态（只读内存）。前端应先订阅 `petalfall://art-changed` 再调用它，避免漏掉
 /// 启动时那次刷新的变化。
 #[tauri::command]
 pub async fn art_status(textures: State<'_, TextureService>) -> Result<ArtStatusDto, CommandError> {
@@ -114,9 +114,11 @@ pub async fn skin_info(
     textures: State<'_, TextureService>,
 ) -> Result<Option<SkinInfoDto>, CommandError> {
     let lookup = account_uuid.clone();
-    let account = with_accounts(&facade, move |aurora| aurora.find_account(&lookup))
+    let account = with_accounts(&facade, move |petalfall| petalfall.find_account(&lookup))
         .await?
-        .ok_or_else(|| CommandError::from(aurora_core::AuthError::AccountNotFound(account_uuid)))?;
+        .ok_or_else(|| {
+            CommandError::from(petalfall_core::AuthError::AccountNotFound(account_uuid))
+        })?;
     let Some(skin) = account.skin.as_ref() else {
         return skin_without_profile(&account);
     };
@@ -154,7 +156,7 @@ pub async fn thumb_register(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_core::SkinModel;
+    use petalfall_core::SkinModel;
 
     #[test]
     fn art_status_serializes_with_nullable_source() {
@@ -193,10 +195,10 @@ mod tests {
     #[test]
     fn offline_account_without_skin_gets_its_in_game_default() {
         // Steve 的离线 UUID 5627dd98-e6be-3c21-b8a8-e92344183641：原版里是宽臂 Efe
-        let steve = aurora_core::Account::new(
+        let steve = petalfall_core::Account::new(
             "5627dd98e6be3c21b8a8e92344183641",
             "Steve",
-            aurora_core::AccountCredentials::Offline,
+            petalfall_core::AccountCredentials::Offline,
         );
         let dto = skin_without_profile(&steve).unwrap().unwrap();
         assert_eq!(
@@ -204,10 +206,10 @@ mod tests {
             json!({ "kind": "default", "path": "entity/player/wide/efe", "model": "wide" })
         );
 
-        let alex = aurora_core::Account::new(
+        let alex = petalfall_core::Account::new(
             "36532b5ec4423dbba24cc7e55d0f979a",
             "Alex",
-            aurora_core::AccountCredentials::Offline,
+            petalfall_core::AccountCredentials::Offline,
         );
         assert_eq!(
             skin_without_profile(&alex).unwrap(),
@@ -220,10 +222,10 @@ mod tests {
 
     #[test]
     fn online_account_without_skin_stays_a_silhouette() {
-        let account = aurora_core::Account::new(
+        let account = petalfall_core::Account::new(
             "5627dd98e6be3c21b8a8e92344183641",
             "Steve",
-            aurora_core::AccountCredentials::Microsoft(aurora_core::MicrosoftCredentials {
+            petalfall_core::AccountCredentials::Microsoft(petalfall_core::MicrosoftCredentials {
                 refresh_token: "r".into(),
                 minecraft_token: None,
                 minecraft_expires_at: None,
@@ -234,10 +236,10 @@ mod tests {
 
     #[test]
     fn offline_account_with_a_broken_uuid_fails_loudly() {
-        let account = aurora_core::Account::new(
+        let account = petalfall_core::Account::new(
             "not-a-uuid",
             "Steve",
-            aurora_core::AccountCredentials::Offline,
+            petalfall_core::AccountCredentials::Offline,
         );
         assert_eq!(
             skin_without_profile(&account).unwrap_err().code,

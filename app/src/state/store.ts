@@ -520,7 +520,7 @@ const BASE_HOLDING_COMMANDS: ReadonlySet<string> = new Set(["repair_instance", "
 const OPEN_URL_COMMAND = "plugin:opener|open_url";
 
 
-/** refresh_account 判定凭据失效、只能重新登录时的错误码（aurora-auth 的变体名）。 */
+/** refresh_account 判定凭据失效、只能重新登录时的错误码（petalfall-auth 的变体名）。 */
 const RELOGIN_REQUIRED_CODE = "ReloginRequired";
 const APP_NOT_APPROVED_CODE = "AppNotApproved";
 

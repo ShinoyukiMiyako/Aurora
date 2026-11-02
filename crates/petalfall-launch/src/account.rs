@@ -1,4 +1,4 @@
-//! 账户注入：把 [`aurora_auth::Account`] 摊平成启动占位符要用的鉴权值，以及 Authlib-Injector 的
+//! 账户注入：把 [`petalfall_auth::Account`] 摊平成启动占位符要用的鉴权值，以及 Authlib-Injector 的
 //! javaagent 参数拼装。
 //!
 //! 鉴权值对应游戏参数里的 `${auth_player_name}` / `${auth_uuid}` / `${auth_access_token}` /
@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_auth::{Account, AccountCredentials, YggdrasilCredentials};
+use petalfall_auth::{Account, AccountCredentials, YggdrasilCredentials};
 
 use crate::error::{LaunchError, Result};
 
@@ -156,7 +156,7 @@ impl AuthlibInjector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_auth::{AccountCredentials, MicrosoftCredentials};
+    use petalfall_auth::{AccountCredentials, MicrosoftCredentials};
 
     #[test]
     fn offline_values_use_placeholder_token_and_legacy_type() {
@@ -212,19 +212,19 @@ mod tests {
     #[test]
     fn authlib_injector_jvm_args_with_and_without_prefetch() {
         let injector = AuthlibInjector::new(
-            PathBuf::from("D:/aurora/authlib-injector.jar"),
+            PathBuf::from("D:/petalfall/authlib-injector.jar"),
             "https://skin.example/api",
         );
         assert_eq!(
             injector.jvm_args(),
-            vec!["-javaagent:D:/aurora/authlib-injector.jar=https://skin.example/api"]
+            vec!["-javaagent:D:/petalfall/authlib-injector.jar=https://skin.example/api"]
         );
 
         let with_prefetch = injector.with_prefetched("eyJtZXRhIjoie319fQ==");
         assert_eq!(
             with_prefetch.jvm_args(),
             vec![
-                "-javaagent:D:/aurora/authlib-injector.jar=https://skin.example/api".to_string(),
+                "-javaagent:D:/petalfall/authlib-injector.jar=https://skin.example/api".to_string(),
                 "-Dauthlibinjector.yggdrasil.prefetched=eyJtZXRhIjoie319fQ==".to_string(),
             ]
         );

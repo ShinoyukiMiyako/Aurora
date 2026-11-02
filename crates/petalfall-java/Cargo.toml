@@ -1,26 +1,26 @@
 [package]
-name = "aurora-java"
+name = "petalfall-java"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
 [dependencies]
-aurora-base = { path = "../aurora-base" }
+petalfall-base = { path = "../petalfall-base" }
 # 只用注入进来的 reqwest::Client 的核心方法（get/send/error_for_status/bytes），
 # 不在本 crate 构建客户端，也不用 reqwest 的 json 解码（自己走 serde_json 以便对报文做 sha1 校验），
-# 故 default-features=false 且不额外开 TLS/json 特性，客户端与 TLS 栈由 aurora-base 统一提供。
+# 故 default-features=false 且不额外开 TLS/json 特性，客户端与 TLS 栈由 petalfall-base 统一提供。
 reqwest = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# 仅用到 tokio::fs::create_dir_all（建空目录），其余异步落盘复用 aurora-base 的 atomic_write。
+# 仅用到 tokio::fs::create_dir_all（建空目录），其余异步落盘复用 petalfall-base 的 atomic_write。
 tokio = { version = "1", default-features = false, features = ["fs", "rt"] }
 thiserror = "2"
 tracing = "0.1"
 # 下载报文/文件的 sha1 校验在内存里先行完成（校验失败即触发重试），故直接依赖 sha1 + base16ct，
-# 与 aurora-base 选型保持一致。
+# 与 petalfall-base 选型保持一致。
 sha1 = "0.11"
 base16ct = { version = "1", features = ["alloc"] }
-# 运行时下载可被上层取消（与 aurora-download 共用同一种令牌类型）。
+# 运行时下载可被上层取消（与 petalfall-download 共用同一种令牌类型）。
 tokio-util = { version = "0.7", default-features = false }
 
 # 注册表探测只在 Windows 编译；其它平台留空实现作跨平台缝（architecture.md 一节）。

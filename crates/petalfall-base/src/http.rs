@@ -10,7 +10,7 @@ use crate::error::{Error, Result};
 
 /// 兜底 User-Agent，形如 `Petalfall/0.1.0`。
 ///
-/// 版本段取的是 aurora-base 自己的 crate 版本，不随应用发版变化，只适合测试与命令行工具。
+/// 版本段取的是 petalfall-base 自己的 crate 版本，不随应用发版变化，只适合测试与命令行工具。
 /// 应用层应以 [`HttpConfig::for_app_version`] 带上真实的应用版本构建客户端：镜像站按 UA 统计
 /// 与限流，报出一个永远不变的版本号会让对方无从区分新旧客户端。
 pub const USER_AGENT: &str = concat!(crate::app_name_en!(), "/", env!("CARGO_PKG_VERSION"));

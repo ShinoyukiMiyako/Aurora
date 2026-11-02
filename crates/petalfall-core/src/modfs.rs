@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aurora_modplatform::DISABLED_SUFFIX;
+use petalfall_modplatform::DISABLED_SUFFIX;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use crate::error::{CoreError, Result};
@@ -78,10 +78,10 @@ fn is_device_name(name: &str) -> bool {
 
 /// 构造一条带中文原因的 IO 类错误。
 ///
-/// 安装、移除、回滚的拒绝原因都没有专用的错误变体，借 [`aurora_base::Error::Io`] 承载：`path` 指向真正
+/// 安装、移除、回滚的拒绝原因都没有专用的错误变体，借 [`petalfall_base::Error::Io`] 承载：`path` 指向真正
 /// 出问题的那个文件，完整原因挂在 `source` 上，不吞。
 pub(crate) fn refuse(path: &Path, kind: std::io::ErrorKind, reason: String) -> CoreError {
-    CoreError::Base(aurora_base::Error::Io {
+    CoreError::Base(petalfall_base::Error::Io {
         path: path.to_owned(),
         source: std::io::Error::new(kind, reason),
     })
@@ -91,7 +91,7 @@ pub(crate) fn refuse(path: &Path, kind: std::io::ErrorKind, reason: String) -> C
 pub(crate) async fn try_exists(path: &Path) -> Result<bool> {
     tokio::fs::try_exists(path)
         .await
-        .map_err(|source| aurora_base::Error::Io {
+        .map_err(|source| petalfall_base::Error::Io {
             path: path.to_owned(),
             source,
         })
@@ -191,8 +191,8 @@ pub(crate) async fn lock_mods_dir(mods_dir: &Path) -> OwnedMutexGuard<()> {
 /// 文件此刻是否被别的进程以「不许删除 / 改名」的方式打开着。游戏运行时 JVM 打开着每个 Mod jar，
 /// Windows 上这些文件既不能改名也不能删除。
 fn held_open(path: &Path) -> Result<bool> {
-    aurora_base::fs::held_open(path).map_err(|source| {
-        aurora_base::Error::Io {
+    petalfall_base::fs::held_open(path).map_err(|source| {
+        petalfall_base::Error::Io {
             path: path.to_owned(),
             source,
         }
@@ -235,7 +235,7 @@ pub(crate) async fn ensure_not_held(paths: Vec<PathBuf>) -> Result<()> {
 pub fn is_mod_file_busy(err: &CoreError) -> bool {
     matches!(
         err,
-        CoreError::Base(aurora_base::Error::Io { source, .. })
+        CoreError::Base(petalfall_base::Error::Io { source, .. })
             if source.kind() == std::io::ErrorKind::ResourceBusy
     )
 }
@@ -338,7 +338,7 @@ mod tests {
         .await
         .unwrap_err();
         match err {
-            CoreError::Base(aurora_base::Error::Io { source, .. }) => {
+            CoreError::Base(petalfall_base::Error::Io { source, .. }) => {
                 assert_eq!(source.to_string(), "第二项失败")
             }
             other => panic!("期望拒绝错误，得到 {other:?}"),

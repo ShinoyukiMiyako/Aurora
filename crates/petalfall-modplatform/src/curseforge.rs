@@ -2,14 +2,14 @@
 //!
 //! 覆盖搜索、工程详情、文件列表、按指纹匹配、取文件下载直链。CurseForge 强制 `x-api-key` 头，
 //! key 经构造函数注入，或由 [`CurseForgeClient::from_env`] 依次取运行期环境变量与构建期内嵌的
-//! `AURORA_CURSEFORGE_API_KEY`；都没有时构造直接失败（[`Error::CurseForgeKeyMissing`]），该源被明确
+//! `PETALFALL_CURSEFORGE_API_KEY`；都没有时构造直接失败（[`Error::CurseForgeKeyMissing`]），该源被明确
 //! 禁用而非静默降级。远端地址经 `base_url` 注入以走 mock。
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use aurora_base::retry::RetryPolicy;
-use aurora_download::{DownloadCredential, DownloadTask};
+use petalfall_base::retry::RetryPolicy;
+use petalfall_download::{DownloadCredential, DownloadTask};
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
@@ -24,7 +24,7 @@ pub const CURSEFORGE_BASE: &str = "https://api.curseforge.com";
 pub const MINECRAFT_GAME_ID: u32 = 432;
 
 /// 环境变量名：CurseForge API key。
-pub const API_KEY_ENV: &str = "AURORA_CURSEFORGE_API_KEY";
+pub const API_KEY_ENV: &str = "PETALFALL_CURSEFORGE_API_KEY";
 
 /// CurseForge 网站根地址，工程没给网页链接时用它拼文件页。
 const CURSEFORGE_WEBSITE: &str = "https://www.curseforge.com";
@@ -59,13 +59,13 @@ impl CurseForgeClient {
         }
     }
 
-    /// 取 key 构造：运行期环境变量 `AURORA_CURSEFORGE_API_KEY` 优先（开发与自行构建时用），
+    /// 取 key 构造：运行期环境变量 `PETALFALL_CURSEFORGE_API_KEY` 优先（开发与自行构建时用），
     /// 其次是构建时经同名环境变量内嵌进二进制的 key（发行版用户机器上没有这个变量，只能靠内嵌）。
     /// 两处都缺失或空白返回 [`Error::CurseForgeKeyMissing`]。
     pub fn from_env(http: reqwest::Client) -> Result<Self> {
         let key = resolve_api_key(
             std::env::var(API_KEY_ENV).ok(),
-            option_env!("AURORA_CURSEFORGE_API_KEY"),
+            option_env!("PETALFALL_CURSEFORGE_API_KEY"),
         )?;
         Ok(Self::new(http, key))
     }
@@ -321,8 +321,8 @@ impl CurseForgeClient {
     }
 
     /// 与 API 请求用同一个 key 的 CDN 下载凭据。key 去掉首尾空白后为空或含不能放进请求头的字符时，
-    /// 报 [`aurora_download::Error::InvalidCredential`]。
-    pub fn download_credential(&self) -> aurora_download::Result<DownloadCredential> {
+    /// 报 [`petalfall_download::Error::InvalidCredential`]。
+    pub fn download_credential(&self) -> petalfall_download::Result<DownloadCredential> {
         DownloadCredential::curseforge(&self.api_key)
     }
 }
@@ -862,7 +862,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client(server: &MockServer) -> CurseForgeClient {
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         CurseForgeClient::new(http, "test-key").with_base_url(server.uri())
     }
 
@@ -1652,13 +1652,13 @@ mod tests {
 
     #[test]
     fn download_credential_uses_the_api_key_and_targets_the_cdn() {
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         let credential = CurseForgeClient::new(http.clone(), " api-key-1 ")
             .download_credential()
             .unwrap();
         assert_eq!(
             credential.realm(),
-            aurora_download::CredentialRealm::CurseForge
+            petalfall_download::CredentialRealm::CurseForge
         );
         assert_eq!(credential.header_name().as_str(), "x-api-key");
         let url = |raw: &str| reqwest::Url::parse(raw).unwrap();
@@ -1676,8 +1676,8 @@ mod tests {
             assert!(
                 matches!(
                     err,
-                    aurora_download::Error::InvalidCredential {
-                        realm: aurora_download::CredentialRealm::CurseForge
+                    petalfall_download::Error::InvalidCredential {
+                        realm: petalfall_download::CredentialRealm::CurseForge
                     }
                 ),
                 "{bad:?} 实际：{err:?}"
@@ -1702,7 +1702,7 @@ mod tests {
             "downloadUrl": format!("{}/files/3040/523/jei.jar", server.uri())
         }))
         .unwrap();
-        let scope = aurora_download::CredentialScope::new(
+        let scope = petalfall_download::CredentialScope::new(
             [format!("127.0.0.1:{}", server.address().port())],
             false,
         );
@@ -1716,11 +1716,13 @@ mod tests {
             .to_download_task(&dest)
             .unwrap()
             .with_credential(credential);
-        aurora_download::Downloader::with_defaults(aurora_base::http::build_client().unwrap())
-            .with_manual_redirect_client(aurora_base::http::build_manual_redirect_client().unwrap())
-            .download(&task)
-            .await
-            .unwrap();
+        petalfall_download::Downloader::with_defaults(
+            petalfall_base::http::build_client().unwrap(),
+        )
+        .with_manual_redirect_client(petalfall_base::http::build_manual_redirect_client().unwrap())
+        .download(&task)
+        .await
+        .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"jar-bytes");
     }
 }

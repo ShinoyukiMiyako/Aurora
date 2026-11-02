@@ -1,19 +1,19 @@
 //! 版本安装编排：原版补全 + 可选 Mod 加载器（Fabric / Quilt / Forge / NeoForge）。
 //!
-//! 门面把 aurora-install 的原版安装器与加载器安装器串起来，按当前配置的下载源策略与并发跑批量下载，
+//! 门面把 petalfall-install 的原版安装器与加载器安装器串起来，按当前配置的下载源策略与并发跑批量下载，
 //! 并在关键节点发出阶段事件。Fabric / Quilt 的 meta 服务直接合成版本 JSON，无需本地安装器；
 //! Forge / NeoForge 则先读该版本要求的 Java 主版本、备妥运行时，再下载并执行官方 installer
 //! （内含 processors 子进程），故这两者的分支多一步 Java 解析。
 
-use aurora_install::{
+use petalfall_install::{
     ForgeInstaller, InstallContext, LoaderInstaller, LoaderSummary, VanillaInstaller,
     VanillaSummary, forge_installer_url, neoforge_installer_url,
 };
-use aurora_version::VersionJson;
+use petalfall_version::VersionJson;
 
 use crate::error::Result;
 use crate::event::{CoreEvent, EventSink, emit};
-use crate::facade::{Aurora, make_context};
+use crate::facade::{Petalfall, make_context};
 
 /// 可安装的 Mod 加载器选择。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +64,7 @@ impl LoaderChoice {
         LoaderChoice::NeoForge,
     ];
 
-    /// [`Aurora::install`] 装这个加载器版本时在 `versions/` 下用的版本 id。
+    /// [`Petalfall::install`] 装这个加载器版本时在 `versions/` 下用的版本 id。
     ///
     /// 真正的 id 写在加载器的 profile 或安装器里，要装到那一步才读得到；要在安装开始前占住目录的调用方只能按
     /// 各加载器的写法算。早期 Forge 的 legacy 安装器不一定是这个形状，那时算出的名字不对应任何目录，占了也不碍事。
@@ -92,7 +92,7 @@ pub struct InstallOutcome {
     pub loader: Option<LoaderSummary>,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 安装指定原版版本，并可选叠加一个 Mod 加载器。
     ///
     /// `loader_version` 仅在指定了 `loader` 时有意义，缺省取该加载器对该游戏版本的推荐版。
@@ -184,8 +184,8 @@ impl Aurora {
     /// 安装 Forge/NeoForge：先据原版版本 JSON 定 Java 主版本、备妥运行时，再下载并执行官方 installer。
     ///
     /// 与 Fabric/Quilt 不同，Forge/NeoForge 的 installer 内含需 Java 子进程执行的 processors，故本步依赖
-    /// [`Aurora::resolve_java`] 取得可执行 java。`installer_url` 由调用方按风味拼好（Forge 需 mc+loader
-    /// 两段，NeoForge 只需 loader 一段），本方法只负责 Java 解析、执行与把 [`aurora_install::ForgeSummary`]
+    /// [`Petalfall::resolve_java`] 取得可执行 java。`installer_url` 由调用方按风味拼好（Forge 需 mc+loader
+    /// 两段，NeoForge 只需 loader 一段），本方法只负责 Java 解析、执行与把 [`petalfall_install::ForgeSummary`]
     /// 收敛成 [`LoaderSummary`]。`processors` 计数在 [`LoaderSummary`] 中无对应字段，改由阶段事件保留。
     async fn install_forge(
         &self,
@@ -199,15 +199,16 @@ impl Aurora {
         // 原版安装已把版本 JSON 落在 versions/<id>/<id>.json，读回它取该版本要求的 Java 主版本
         // （缺省回落 8，与 launch 路径一致）。processors 用它执行 Forge 安装逻辑。
         let json_path = cx.layout.version_json(id);
-        let bytes = tokio::fs::read(&json_path)
-            .await
-            .map_err(|source| aurora_base::Error::Io {
-                path: json_path.clone(),
-                source,
-            })?;
+        let bytes =
+            tokio::fs::read(&json_path)
+                .await
+                .map_err(|source| petalfall_base::Error::Io {
+                    path: json_path.clone(),
+                    source,
+                })?;
         // 直接按字节解析：有损转换会把坏字节换成替换符，让损坏的 JSON 看起来能读。
         let version: VersionJson =
-            serde_json::from_slice(&bytes).map_err(|source| aurora_version::Error::Json {
+            serde_json::from_slice(&bytes).map_err(|source| petalfall_version::Error::Json {
                 context: "版本 JSON",
                 source,
             })?;
@@ -258,14 +259,14 @@ impl Aurora {
 /// 取出 Forge/NeoForge 的显式 loader 版本；缺省即报错，绝不静默兜底一个版本。
 ///
 /// Forge/NeoForge 的官方 maven 无 Fabric/Quilt 那样的「列出可用 loader」接口，无从推断推荐版，故要求
-/// 调用方显式传入。复用 [`aurora_install::Error::LoaderVersionNotFound`] 表达「没有可用 loader 版本」。
+/// 调用方显式传入。复用 [`petalfall_install::Error::LoaderVersionNotFound`] 表达「没有可用 loader 版本」。
 fn require_loader_version<'a>(
     choice: LoaderChoice,
     game_version: &str,
     loader_version: Option<&'a str>,
 ) -> Result<&'a str> {
     loader_version.ok_or_else(|| {
-        aurora_install::Error::LoaderVersionNotFound {
+        petalfall_install::Error::LoaderVersionNotFound {
             loader: choice.display_name(),
             game_version: game_version.to_owned(),
         }
@@ -276,7 +277,7 @@ fn require_loader_version<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -344,11 +345,14 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
-        let aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc.clone())
+        let petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc.clone())
             .with_manifest_url(format!("{base}/manifest.json"));
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let outcome = aurora.install("test", None, None, Some(&tx)).await.unwrap();
+        let outcome = petalfall
+            .install("test", None, None, Some(&tx))
+            .await
+            .unwrap();
 
         assert_eq!(outcome.vanilla.id, "test");
         assert_eq!(outcome.vanilla.libraries, 0);
@@ -417,7 +421,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
-        let aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc.clone())
+        let petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc.clone())
             .with_manifest_url(format!("https://meta.invalid{manifest_path}"))
             .with_source_routes(
                 Arc::new(crate::sources::tests::Routes {
@@ -428,8 +432,8 @@ mod tests {
                 Duration::from_secs(30),
             );
 
-        aurora.install("test", None, None, None).await.unwrap();
-        aurora.install("test", None, None, None).await.unwrap();
+        petalfall.install("test", None, None, None).await.unwrap();
+        petalfall.install("test", None, None, None).await.unwrap();
 
         // (探针, 清单, 版本 JSON) 各收到几次。
         let tally = |requests: Vec<wiremock::Request>| {
@@ -499,11 +503,11 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
-        let aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc.clone())
+        let petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc.clone())
             .with_manifest_url(format!("{base}/manifest.json"))
             .with_fabric_base(&base);
 
-        let outcome = aurora
+        let outcome = petalfall
             .install("test", Some(LoaderChoice::Fabric), Some("0.15.0"), None)
             .await
             .unwrap();
@@ -565,16 +569,16 @@ mod tests {
         mount_vanilla_with_client(&server, ResponseTemplate::new(404)).await;
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
-        let aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc.clone())
+        let petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc.clone())
             .with_manifest_url(format!("{}/manifest.json", server.uri()));
 
-        aurora
+        petalfall
             .install("test", None, None, None)
             .await
             .expect_err("客户端 jar 下不下来");
 
-        let scan = aurora_instance::discover_versions(&mc).await.unwrap();
-        assert_eq!(scan, aurora_instance::VersionScan::default());
+        let scan = petalfall_instance::discover_versions(&mc).await.unwrap();
+        assert_eq!(scan, petalfall_instance::VersionScan::default());
     }
 
     /// 取消发生在下客户端 jar 的途中：同样不留版本，门面按已取消返回。
@@ -587,11 +591,11 @@ mod tests {
         mount_vanilla_with_client(&server, stalled).await;
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
-        let token = aurora_download::CancellationToken::new();
-        let aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc.clone())
+        let token = petalfall_download::CancellationToken::new();
+        let petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc.clone())
             .with_manifest_url(format!("{}/manifest.json", server.uri()))
             .with_cancel(token.clone());
-        let attempt = aurora.install("test", None, None, None);
+        let attempt = petalfall.install("test", None, None, None);
         tokio::pin!(attempt);
 
         let client_jar_requested = async {
@@ -613,14 +617,14 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::error::CoreError::Install(aurora_install::Error::Download(
-                    aurora_download::Error::Cancelled
+                crate::error::CoreError::Install(petalfall_install::Error::Download(
+                    petalfall_download::Error::Cancelled
                 ))
             ),
             "实际：{err:?}"
         );
-        let scan = aurora_instance::discover_versions(&mc).await.unwrap();
-        assert_eq!(scan, aurora_instance::VersionScan::default());
+        let scan = petalfall_instance::discover_versions(&mc).await.unwrap();
+        assert_eq!(scan, petalfall_instance::VersionScan::default());
     }
 
     /// 原版装好了、加载器库下不下来：原版是真的装好了，留着；加载器版本不出现。
@@ -659,16 +663,16 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
-        let aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc.clone())
+        let petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc.clone())
             .with_manifest_url(format!("{base}/manifest.json"))
             .with_fabric_base(&base);
 
-        aurora
+        petalfall
             .install("test", Some(LoaderChoice::Fabric), Some("0.15.0"), None)
             .await
             .expect_err("加载器库下不下来");
 
-        let scan = aurora_instance::discover_versions(&mc).await.unwrap();
+        let scan = petalfall_instance::discover_versions(&mc).await.unwrap();
         let ids: Vec<&str> = scan.versions.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(ids, vec!["test"]);
         assert_eq!(scan.broken, Vec::new());
@@ -714,7 +718,7 @@ mod tests {
         let root = tmp.path().to_path_buf();
         let payload = root.join("payload");
         std::fs::write(&payload, b"not a zip").unwrap();
-        let sha1 = aurora_base::fs::sha1_hex(&payload).await.unwrap();
+        let sha1 = petalfall_base::fs::sha1_hex(&payload).await.unwrap();
         Mock::given(method("GET"))
             .and(path(SHA1_PATH))
             .respond_with(ResponseTemplate::new(404))
@@ -732,11 +736,11 @@ mod tests {
             "@echo off\r\n>&2 echo openjdk version \"17.0.8\" 2023-07-18\r\nexit /b 0\r\n",
         )
         .unwrap();
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             default_java: Some(java),
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = Aurora::for_test(config, root.clone(), root.clone())
+        let petalfall = Petalfall::for_test(config, root.clone(), root.clone())
             .with_manifest_url(format!("{base}{manifest_path}"))
             .with_source_routes(
                 std::sync::Arc::new(crate::sources::tests::Routes {
@@ -747,7 +751,7 @@ mod tests {
                 std::time::Duration::from_secs(2),
             );
 
-        aurora
+        petalfall
             .install("test", Some(LoaderChoice::Forge), Some("47.2.0"), None)
             .await
             .unwrap_err();
@@ -794,12 +798,12 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
-        let mut aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc.clone())
+        let mut petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc.clone())
             .with_manifest_url(format!("{base}/manifest.json"));
         // 关闭自动下载：无匹配 Java 时直接报 NoJava，而非去拉 Mojang 运行时（避免触网）。
-        aurora.set_auto_download_java(false);
+        petalfall.set_auto_download_java(false);
 
-        let err = aurora
+        let err = petalfall
             .install("test", Some(LoaderChoice::Forge), Some("47.2.0"), None)
             .await
             .unwrap_err();
@@ -839,16 +843,16 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
-        let aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc)
+        let petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc)
             .with_manifest_url(format!("{base}/manifest.json"));
 
         // NeoForge 缺省版本 -> LoaderVersionNotFound（loader 名取自 display_name，game_version 为原版 id）。
-        let err = aurora
+        let err = petalfall
             .install("test", Some(LoaderChoice::NeoForge), None, None)
             .await
             .unwrap_err();
         match err {
-            crate::error::CoreError::Install(aurora_install::Error::LoaderVersionNotFound {
+            crate::error::CoreError::Install(petalfall_install::Error::LoaderVersionNotFound {
                 loader,
                 game_version,
             }) => {
@@ -873,10 +877,13 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
-        let aurora = Aurora::for_test(AuroraConfig::default(), mc.clone(), mc)
+        let petalfall = Petalfall::for_test(PetalfallConfig::default(), mc.clone(), mc)
             .with_manifest_url(format!("{}/manifest.json", server.uri()));
 
-        let err = aurora.install("nope", None, None, None).await.unwrap_err();
+        let err = petalfall
+            .install("nope", None, None, None)
+            .await
+            .unwrap_err();
         // 清单里没有该版本 -> 安装器报 InstallerEntryMissing，经门面冒泡为 Install 变体。
         assert!(matches!(err, crate::error::CoreError::Install(_)));
     }

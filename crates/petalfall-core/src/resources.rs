@@ -3,20 +3,20 @@
 //! 每种资源落到实例工作目录下各自的位置：资源包 `resourcepacks/`、光影 `shaderpacks/`、
 //! 数据包 `saves/<存档>/datapacks/`（数据包只对单个存档生效，必须指明装进哪个存档）。Mod 不走这里，
 //! 见 [`ResourceTarget::resource_type`]。
-//! 工作目录与启动时同一套隔离判定（[`Aurora::resolve_working_dir`]），装进去的东西启动后才找得到。
+//! 工作目录与启动时同一套隔离判定（[`Petalfall::resolve_working_dir`]），装进去的东西启动后才找得到。
 //!
 //! 平台给的文件名直接拼进落盘路径，必须先验成单个安全的文件名：一个带 `..` 或路径分隔符的
 //! 文件名就能把文件写到实例目录之外。
 
 use std::path::{Path, PathBuf};
 
-use aurora_download::DownloadTask;
-use aurora_modplatform::{CurseForgeClient, ModrinthClient, Platform, ResourceType};
+use petalfall_download::DownloadTask;
+use petalfall_modplatform::{CurseForgeClient, ModrinthClient, Platform, ResourceType};
 
 use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed, single_blocked};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 /// 一次资源安装的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +46,7 @@ pub struct ResourceTarget<'a> {
     pub world: Option<&'a str>,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 把平台上某工程的一个版本（Modrinth 版本 id / CurseForge 文件 id）装进实例里该类型的目录。
     ///
     /// 先在本地定位目标目录（实例不存在、存档不存在都在触网前报错），再取平台文件、校验文件名、
@@ -164,7 +164,7 @@ impl Aurora {
             Ok(meta) => meta.is_dir(),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
             Err(source) => {
-                return Err(aurora_base::Error::Io {
+                return Err(petalfall_base::Error::Io {
                     path: world_dir,
                     source,
                 }
@@ -254,7 +254,7 @@ pub(crate) async fn curseforge_download_url(
     match client.file_download_url(mod_id, file_id).await {
         Ok(url) if !url.trim().is_empty() => Ok(Some(url)),
         Ok(_)
-        | Err(aurora_modplatform::Error::Status {
+        | Err(petalfall_modplatform::Error::Status {
             status: 403 | 404, ..
         }) => Ok(None),
         Err(other) => Err(other.into()),
@@ -265,7 +265,7 @@ pub(crate) async fn curseforge_download_url(
 pub(crate) fn task_for_file_url(
     url: String,
     dest: &Path,
-    file: &aurora_modplatform::CurseForgeFile,
+    file: &petalfall_modplatform::CurseForgeFile,
 ) -> DownloadTask {
     let mut task = DownloadTask::new(url, dest);
     if let Some(size) = file.file_length {
@@ -313,8 +313,8 @@ pub fn is_safe_file_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
-    use aurora_instance::IsolationPolicy;
+    use crate::config::PetalfallConfig;
+    use petalfall_instance::IsolationPolicy;
     use sha1::{Digest, Sha1};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -355,11 +355,16 @@ mod tests {
             .await;
     }
 
-    fn aurora(mc: &Path, policy: IsolationPolicy, base: &str) -> Aurora {
-        let mut aurora =
-            Aurora::for_test(AuroraConfig::default(), mc.to_path_buf(), mc.to_path_buf());
-        aurora.set_isolation_policy(policy);
-        aurora.with_modrinth_base(base).with_curseforge_base(base)
+    fn petalfall(mc: &Path, policy: IsolationPolicy, base: &str) -> Petalfall {
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
+            mc.to_path_buf(),
+            mc.to_path_buf(),
+        );
+        petalfall.set_isolation_policy(policy);
+        petalfall
+            .with_modrinth_base(base)
+            .with_curseforge_base(base)
     }
 
     /// 资源包落到隔离工作目录的 resourcepacks/，光影落到 shaderpacks/，内容与平台一致。
@@ -371,9 +376,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path();
         put_version(mc, "1.21.1").await;
-        let aurora = aurora(mc, IsolationPolicy::All, &server.uri());
+        let petalfall = petalfall(mc, IsolationPolicy::All, &server.uri());
 
-        let rp = aurora
+        let rp = petalfall
             .install_resource(
                 ResourceTarget {
                     version_id: "1.21.1",
@@ -393,7 +398,7 @@ mod tests {
         assert_eq!(rp.world, None);
         assert_eq!(tokio::fs::read(&expected).await.unwrap(), b"resource-pack");
 
-        let shader = aurora
+        let shader = petalfall
             .install_resource(
                 ResourceTarget {
                     version_id: "1.21.1",
@@ -420,8 +425,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path();
         put_version(mc, "1.21.1").await;
-        let aurora = aurora(mc, IsolationPolicy::Disabled, &server.uri());
-        let rp = aurora
+        let petalfall = petalfall(mc, IsolationPolicy::Disabled, &server.uri());
+        let rp = petalfall
             .install_resource(
                 ResourceTarget {
                     version_id: "1.21.1",
@@ -449,14 +454,14 @@ mod tests {
         tokio::fs::create_dir_all(mc.join("versions/1.21.1/saves/新的世界"))
             .await
             .unwrap();
-        let aurora = aurora(mc, IsolationPolicy::All, &server.uri());
+        let petalfall = petalfall(mc, IsolationPolicy::All, &server.uri());
         let target = |world| ResourceTarget {
             version_id: "1.21.1",
             resource_type: ResourceType::DataPack,
             world,
         };
 
-        let dp = aurora
+        let dp = petalfall
             .install_resource(
                 target(Some("新的世界")),
                 Platform::Modrinth,
@@ -471,7 +476,7 @@ mod tests {
         assert_eq!(dp.world.as_deref(), Some("新的世界"));
         assert_eq!(tokio::fs::read(&expected).await.unwrap(), b"datapack");
 
-        let missing = aurora
+        let missing = petalfall
             .install_resource(
                 target(Some("别的世界")),
                 Platform::Modrinth,
@@ -486,7 +491,7 @@ mod tests {
             "实际：{missing:?}"
         );
         for bad in ["..", "a/b", "..\\x", ""] {
-            let err = aurora
+            let err = petalfall
                 .install_resource(
                     target(Some(bad)),
                     Platform::Modrinth,
@@ -501,7 +506,7 @@ mod tests {
                 "{bad:?}：{err:?}"
             );
         }
-        let no_world = aurora
+        let no_world = petalfall
             .install_resource(target(None), Platform::Modrinth, "terralith", "dp1", None)
             .await
             .unwrap_err();
@@ -518,8 +523,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path();
         put_version(mc, "1.21.1").await;
-        let aurora = aurora(mc, IsolationPolicy::All, &server.uri());
-        let err = aurora
+        let petalfall = petalfall(mc, IsolationPolicy::All, &server.uri());
+        let err = petalfall
             .install_resource(
                 ResourceTarget {
                     version_id: "1.21.1",
@@ -552,13 +557,13 @@ mod tests {
         tokio::fs::write(mods.join("sodium.jar"), b"player-patched")
             .await
             .unwrap();
-        let aurora = aurora(mc, IsolationPolicy::All, "http://127.0.0.1:9");
+        let petalfall = petalfall(mc, IsolationPolicy::All, "http://127.0.0.1:9");
         for resource_type in [
             ResourceType::Modpack,
             ResourceType::Plugin,
             ResourceType::Mod,
         ] {
-            let err = aurora
+            let err = petalfall
                 .install_resource(
                     ResourceTarget {
                         version_id: "1.21.1",
@@ -619,9 +624,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path();
         put_version(mc, "1.21.1").await;
-        let aurora = aurora(mc, IsolationPolicy::All, &server.uri()).with_curseforge_key("k");
+        let petalfall = petalfall(mc, IsolationPolicy::All, &server.uri()).with_curseforge_key("k");
 
-        let err = aurora
+        let err = petalfall
             .install_resource(
                 ResourceTarget {
                     version_id: "1.21.1",
@@ -698,14 +703,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path();
         put_version(mc, "1.21.1").await;
-        let aurora = aurora(mc, IsolationPolicy::All, &server.uri()).with_curseforge_key("k");
+        let petalfall = petalfall(mc, IsolationPolicy::All, &server.uri()).with_curseforge_key("k");
         let target = ResourceTarget {
             version_id: "1.21.1",
             resource_type: ResourceType::ResourcePack,
             world: None,
         };
 
-        let err = aurora
+        let err = petalfall
             .install_resource(target, Platform::CurseForge, "123", "456", None)
             .await
             .unwrap_err();
@@ -717,7 +722,7 @@ mod tests {
         tokio::fs::write(downloads.join("pack (1).zip"), bytes)
             .await
             .unwrap();
-        let report = aurora
+        let report = petalfall
             .claim_blocked_files(&downloads, &files)
             .await
             .unwrap();
@@ -728,7 +733,7 @@ mod tests {
             .await
             .unwrap();
 
-        let outcome = aurora
+        let outcome = petalfall
             .install_resource(target, Platform::CurseForge, "123", "456", None)
             .await
             .unwrap();
@@ -744,7 +749,7 @@ mod tests {
         }
         assert_eq!(names, vec!["pack.zip"]);
         assert!(
-            aurora
+            petalfall
                 .blocked_claims_dir()
                 .join("curseforge-456/pack.zip")
                 .is_file()
@@ -787,10 +792,10 @@ mod tests {
             .mount(&server)
             .await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora(tmp.path(), IsolationPolicy::All, &uri).with_curseforge_key("k");
+        let petalfall = petalfall(tmp.path(), IsolationPolicy::All, &uri).with_curseforge_key("k");
         let dir = tmp.path().join("rp");
 
-        let (_, modrinth) = aurora
+        let (_, modrinth) = petalfall
             .platform_file_task(Platform::Modrinth, "faithful", "rp1", &dir, "resourcepacks")
             .await
             .unwrap();
@@ -799,7 +804,7 @@ mod tests {
             ("7", "70", format!("{uri}/cdn/direct.zip")),
             ("8", "80", format!("{uri}/cdn/fallback.zip")),
         ] {
-            let (_, task) = aurora
+            let (_, task) = petalfall
                 .platform_file_task(Platform::CurseForge, project, file, &dir, "resourcepacks")
                 .await
                 .unwrap();
@@ -807,7 +812,7 @@ mod tests {
             let credential = task.credential.as_ref().expect("CurseForge 任务应带凭据");
             assert_eq!(
                 credential.realm(),
-                aurora_download::CredentialRealm::CurseForge
+                petalfall_download::CredentialRealm::CurseForge
             );
             assert_eq!(credential.header_name().as_str(), "x-api-key");
         }

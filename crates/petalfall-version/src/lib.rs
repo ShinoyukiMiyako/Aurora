@@ -1,7 +1,7 @@
-//! aurora-version（L1 版本域模型）
+//! petalfall-version（L1 版本域模型）
 //!
 //! 纯解析 crate：只把 Minecraft 版本清单与版本 JSON 建模、求值、合并，不发任何网络请求、不碰文件系统。
-//! 版本来源（磁盘扫描）与网络抓取分别由 aurora-instance / aurora-download 提供，本 crate 通过
+//! 版本来源（磁盘扫描）与网络抓取分别由 petalfall-instance / petalfall-download 提供，本 crate 通过
 //! [`VersionProvider`] 抽象接住 "按 id 取版本" 的能力。
 //!
 //! 模块划分：

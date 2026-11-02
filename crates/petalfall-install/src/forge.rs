@@ -18,7 +18,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
-use aurora_download::{CancellationToken, SourcePlan};
+use petalfall_download::{CancellationToken, SourcePlan};
 use serde::Deserialize;
 use tokio::process::{Child, Command};
 
@@ -29,7 +29,7 @@ use crate::layout::checked_segment;
 use crate::net;
 use crate::plan;
 use crate::process_tree::ProcessTree;
-use aurora_version::VersionJson;
+use petalfall_version::VersionJson;
 
 /// install_profile.json 模型（现代与 legacy 字段并存，按 `installer 是否含 install/processors` 分流）。
 #[derive(Debug, Clone, Deserialize)]
@@ -51,7 +51,7 @@ struct InstallProfile {
     processors: Vec<Processor>,
     /// 运行处理器所需的库（piston 结构）。
     #[serde(default)]
-    libraries: Vec<aurora_version::Library>,
+    libraries: Vec<petalfall_version::Library>,
     /// legacy：安装指令块（含通用 jar 坐标与 zip 内路径）。
     #[serde(default)]
     install: Option<LegacyInstall>,
@@ -309,7 +309,7 @@ static FORGE_INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 ///
 /// 取消看上下文里的令牌（[`InstallContext::with_cancel`]）：触发后 `.sha1` 抓取与排队立刻停下，
 /// 不再起新的处理器，正在跑的处理器子进程被结束、等它真正退出后以
-/// [`aurora_download::Error::Cancelled`] 返回。下载阶段的取消由上下文里的下载池自己负责。
+/// [`petalfall_download::Error::Cancelled`] 返回。下载阶段的取消由上下文里的下载池自己负责。
 pub struct ForgeInstaller<'a> {
     cx: InstallContext<'a>,
     java_path: PathBuf,
@@ -341,7 +341,7 @@ impl<'a> ForgeInstaller<'a> {
         };
         tokio::select! {
             guard = FORGE_INSTALL.lock() => Ok(guard),
-            () = token.cancelled() => Err(aurora_download::Error::Cancelled.into()),
+            () = token.cancelled() => Err(petalfall_download::Error::Cancelled.into()),
         }
     }
 
@@ -384,7 +384,7 @@ impl<'a> ForgeInstaller<'a> {
         // 反斜杠也是分隔符，带 `..` 时会落到缓存目录之外。
         checked_segment(file_name, || "Forge 安装器的缓存文件名".to_owned())?;
         let dest = self.installer_cache_dir().join(file_name);
-        let mut task = aurora_download::DownloadTask::new(installer_url, dest.clone());
+        let mut task = petalfall_download::DownloadTask::new(installer_url, dest.clone());
         match self.installer_sha1(installer_url).await {
             Ok(sha1) => task = task.with_sha1(sha1),
             Err(err) if err.is_cancelled() => return Err(err),
@@ -401,7 +401,7 @@ impl<'a> ForgeInstaller<'a> {
         self.cx
             .layout
             .root()
-            .join(concat!(".", aurora_base::app_slug!(), "-cache"))
+            .join(concat!(".", petalfall_base::app_slug!(), "-cache"))
     }
 
     async fn installer_sha1(&self, installer_url: &str) -> Result<String> {
@@ -496,7 +496,7 @@ impl<'a> ForgeInstaller<'a> {
             Target::Standalone => self.installer_cache_dir(),
             Target::Instance(id) => self.cx.layout.version_dir(id),
         };
-        let tmp_dir = scratch_parent.join(concat!(".", aurora_base::app_slug!(), "-forge-tmp"));
+        let tmp_dir = scratch_parent.join(concat!(".", petalfall_base::app_slug!(), "-forge-tmp"));
         let minecraft_jar = match target {
             Target::Standalone => self.cx.layout.version_jar(&minecraft),
             Target::Instance(id) => self.cx.layout.version_jar(id),
@@ -514,7 +514,7 @@ impl<'a> ForgeInstaller<'a> {
         // 传统布局原样落盘，按实例安装交给调用方。
         if let Target::Standalone = target {
             let json_path = self.cx.layout.version_json(&version_id);
-            aurora_base::fs::atomic_write(&json_path, &version_bytes).await?;
+            petalfall_base::fs::atomic_write(&json_path, &version_bytes).await?;
         }
 
         Ok((
@@ -548,7 +548,7 @@ impl<'a> ForgeInstaller<'a> {
                 continue;
             }
             if self.cx.cancel.is_some_and(CancellationToken::is_cancelled) {
-                return Err(aurora_download::Error::Cancelled.into());
+                return Err(petalfall_download::Error::Cancelled.into());
             }
             if self.run_processor(processor, &values).await? {
                 ran += 1;
@@ -628,7 +628,7 @@ impl<'a> ForgeInstaller<'a> {
                 // 取消有时限，不等剩下的输出读完。
                 capture.abandon();
                 tracing::info!(jar = %processor.jar, "安装被取消，处理器子进程已结束");
-                return Err(aurora_download::Error::Cancelled.into());
+                return Err(petalfall_download::Error::Cancelled.into());
             }
             Err(source) => {
                 capture.abandon();
@@ -672,7 +672,7 @@ impl<'a> ForgeInstaller<'a> {
             if sha1.is_empty() {
                 continue;
             }
-            aurora_base::fs::verify_sha1(path, sha1).await?;
+            petalfall_base::fs::verify_sha1(path, sha1).await?;
         }
         Ok(true)
     }
@@ -732,7 +732,7 @@ impl<'a> ForgeInstaller<'a> {
         let libraries = self.cx.run_batch(tasks, "Forge 库", None).await?;
 
         if let Target::Standalone = target {
-            aurora_base::fs::atomic_write(&self.cx.layout.version_json(&id), &bytes).await?;
+            petalfall_base::fs::atomic_write(&self.cx.layout.version_json(&id), &bytes).await?;
         }
 
         Ok((
@@ -784,7 +784,7 @@ async fn read_zip_entry_async(archive: &Path, entry: &str) -> Result<Vec<u8>> {
 /// 把 zip 内某条目解出到目标路径（原子写）。
 async fn extract_zip_entry_to_async(archive: &Path, entry: &str, dest: &Path) -> Result<()> {
     let bytes = read_zip_entry_async(archive, entry).await?;
-    aurora_base::fs::atomic_write(dest, &bytes).await?;
+    petalfall_base::fs::atomic_write(dest, &bytes).await?;
     Ok(())
 }
 
@@ -804,7 +804,7 @@ async fn write_library(dest: &Path, bytes: &[u8]) -> Result<()> {
     {
         return Ok(());
     }
-    let Err(source) = aurora_base::fs::atomic_write(dest, bytes).await else {
+    let Err(source) = petalfall_base::fs::atomic_write(dest, bytes).await else {
         return Ok(());
     };
     match first_held_open(vec![dest.to_path_buf()]).await {
@@ -832,7 +832,7 @@ fn parse_sha1_file(bytes: Vec<u8>) -> Result<String> {
 }
 
 /// 库条目声明了下载件、地址却留空：这类库由 installer 自带。
-fn is_bundled(lib: &aurora_version::Library) -> bool {
+fn is_bundled(lib: &petalfall_version::Library) -> bool {
     lib.downloads
         .as_ref()
         .and_then(|d| d.artifact.as_ref())
@@ -849,7 +849,7 @@ fn is_bundled(lib: &aurora_version::Library) -> bool {
 /// 时由补全报 [`Error::LoaderLibraryMissing`]。
 async fn extract_bundled_libraries(
     installer: &Path,
-    libraries: &[aurora_version::Library],
+    libraries: &[petalfall_version::Library],
     layout: &crate::layout::GameLayout,
 ) -> Result<()> {
     let mut seen = std::collections::HashSet::new();
@@ -877,7 +877,7 @@ async fn extract_bundled_libraries(
             Err(err) => return Err(err),
         };
         if !artifact.sha1.is_empty() {
-            let mut hasher = aurora_base::fs::Sha1Hasher::new();
+            let mut hasher = petalfall_base::fs::Sha1Hasher::new();
             hasher.update(&bytes);
             hasher.verify(&artifact.sha1)?;
         }
@@ -891,10 +891,10 @@ async fn file_matches_sha1(dest: &Path, sha1: &str) -> Result<bool> {
     if sha1.is_empty() {
         return Ok(false);
     }
-    match aurora_base::fs::verify_sha1(dest, sha1).await {
+    match petalfall_base::fs::verify_sha1(dest, sha1).await {
         Ok(()) => Ok(true),
-        Err(aurora_base::Error::HashMismatch { .. }) => Ok(false),
-        Err(aurora_base::Error::Io { source, .. })
+        Err(petalfall_base::Error::HashMismatch { .. }) => Ok(false),
+        Err(petalfall_base::Error::Io { source, .. })
             if source.kind() == std::io::ErrorKind::NotFound =>
         {
             Ok(false)
@@ -920,10 +920,12 @@ async fn extract_data_files(
             // 用 zip 内条目的文件名 + 序号避免重名碰撞。
             let file_name = path.rsplit('/').next().unwrap_or("data.bin");
             // 文件名出自远端 installer，Windows 上反斜杠也是分隔符，`..` 能藏在里面走出临时目录。
-            aurora_version::check_path_segment(file_name).map_err(|problem| Error::UnsafePath {
-                entry: format!("Forge 安装器的数据项 {key}"),
-                path: path.clone(),
-                problem,
+            petalfall_version::check_path_segment(file_name).map_err(|problem| {
+                Error::UnsafePath {
+                    entry: format!("Forge 安装器的数据项 {key}"),
+                    path: path.clone(),
+                    problem,
+                }
             })?;
             let dest = tmp_dir.join(format!("{index}-{file_name}"));
             extract_zip_entry_to_async(installer, path.trim_start_matches('/'), &dest).await?;
@@ -981,7 +983,7 @@ async fn outputs_ready(jar: &str, outputs: &[(PathBuf, String)]) -> Result<bool>
 /// 删掉 sha1 对不上的旧产物；它正被别的进程占着时报 [`Error::ProcessorOutputLocked`]。
 async fn discard_stale_output(jar: &str, path: &Path) -> Result<()> {
     let probe = path.to_path_buf();
-    let held = tokio::task::spawn_blocking(move || aurora_base::fs::held_open(&probe))
+    let held = tokio::task::spawn_blocking(move || petalfall_base::fs::held_open(&probe))
         .await
         .map_err(|join| io_err(path, std::io::Error::other(join.to_string())))?
         .map_err(|source| io_err(path, source))?;
@@ -1015,7 +1017,7 @@ async fn first_held_open(paths: Vec<PathBuf>) -> Option<PathBuf> {
         paths
             .into_iter()
             .filter(|path| path.is_file())
-            .find(|path| match aurora_base::fs::held_open(path) {
+            .find(|path| match petalfall_base::fs::held_open(path) {
                 Ok(held) => held,
                 Err(err) => {
                     tracing::warn!(path = %path.display(), %err, "探测处理器用到的文件是否被占用失败");
@@ -1430,7 +1432,7 @@ mod tests {
         let is_unsafe = |result: Result<String>| match result {
             Err(Error::UnsafePath { entry, problem, .. }) => {
                 assert_eq!(entry, format!("库 {escaping}"));
-                assert_eq!(problem, aurora_version::UnsafePath::DotSegment);
+                assert_eq!(problem, petalfall_version::UnsafePath::DotSegment);
             }
             other => panic!("应报路径越界，实际：{other:?}"),
         };
@@ -1617,18 +1619,18 @@ mod tests {
         _dir: tempfile::TempDir,
         root: PathBuf,
         client: reqwest::Client,
-        pool: aurora_download::DownloadPool,
+        pool: petalfall_download::DownloadPool,
         layout: GameLayout,
-        runtime: aurora_version::RuntimeContext,
-        policy: aurora_base::retry::RetryPolicy,
+        runtime: petalfall_version::RuntimeContext,
+        policy: petalfall_base::retry::RetryPolicy,
     }
 
     fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let client = aurora_base::http::build_client().unwrap();
-        let pool = aurora_download::DownloadPool::new(
-            aurora_download::Downloader::with_defaults(client.clone()),
+        let client = petalfall_base::http::build_client().unwrap();
+        let pool = petalfall_download::DownloadPool::new(
+            petalfall_download::Downloader::with_defaults(client.clone()),
             2,
         );
         Fixture {
@@ -1637,12 +1639,12 @@ mod tests {
             _dir: dir,
             client,
             pool,
-            runtime: aurora_version::RuntimeContext::new(
-                aurora_version::OsName::Windows,
+            runtime: petalfall_version::RuntimeContext::new(
+                petalfall_version::OsName::Windows,
                 "x86_64",
                 64,
             ),
-            policy: aurora_base::retry::RetryPolicy {
+            policy: petalfall_base::retry::RetryPolicy {
                 max_attempts: 1,
                 initial_delay: std::time::Duration::from_millis(1),
                 max_delay: std::time::Duration::from_millis(1),
@@ -1698,7 +1700,7 @@ mod tests {
         assert_eq!(std::fs::read(universal).unwrap(), b"universal-jar");
         assert!(
             !f.root
-                .join(concat!(".", aurora_base::app_slug!(), "-cache"))
+                .join(concat!(".", petalfall_base::app_slug!(), "-cache"))
                 .exists(),
             "用完的 installer 与空缓存目录应被清掉"
         );
@@ -1728,7 +1730,7 @@ mod tests {
         let f = fixture();
         let cache = f
             .root
-            .join(concat!(".", aurora_base::app_slug!(), "-cache"));
+            .join(concat!(".", petalfall_base::app_slug!(), "-cache"));
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("forge-installer.jar"), &installer).unwrap();
 
@@ -1769,7 +1771,7 @@ mod tests {
         let f = fixture();
         let cache = f
             .root
-            .join(concat!(".", aurora_base::app_slug!(), "-cache"));
+            .join(concat!(".", petalfall_base::app_slug!(), "-cache"));
         std::fs::create_dir_all(&cache).unwrap();
         std::fs::write(cache.join("forge-installer.jar"), &installer).unwrap();
 
@@ -1825,7 +1827,7 @@ mod tests {
         assert!(
             matches!(
                 cancelled,
-                Error::Download(aurora_download::Error::Cancelled)
+                Error::Download(petalfall_download::Error::Cancelled)
             ),
             "实际：{cancelled:?}"
         );
@@ -2223,7 +2225,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                Error::UnsafePath { entry, path, problem: aurora_version::UnsafePath::Backslash }
+                Error::UnsafePath { entry, path, problem: petalfall_version::UnsafePath::Backslash }
                     if entry == "Forge 安装器的数据项 BINPATCH" && path == data_path
             ),
             "实际：{err:?}"
@@ -2259,7 +2261,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                Error::UnsafePath { entry, path, problem: aurora_version::UnsafePath::Backslash }
+                Error::UnsafePath { entry, path, problem: petalfall_version::UnsafePath::Backslash }
                     if entry == "Forge 安装器的缓存文件名" && path == file_name
             ),
             "实际：{err:?}"
@@ -2310,7 +2312,7 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(err, Error::Base(aurora_base::Error::HashMismatch { .. })),
+            matches!(err, Error::Base(petalfall_base::Error::HashMismatch { .. })),
             "实际：{err:?}"
         );
         assert!(!f.layout.library_path(path).exists());
@@ -2682,8 +2684,8 @@ mod tests {
         );
         let scratch = f
             .root
-            .join(concat!(".", aurora_base::app_slug!(), "-cache"))
-            .join(concat!(".", aurora_base::app_slug!(), "-forge-tmp"));
+            .join(concat!(".", petalfall_base::app_slug!(), "-cache"))
+            .join(concat!(".", petalfall_base::app_slug!(), "-forge-tmp"));
         assert!(!scratch.exists(), "临时目录应被清掉：{}", scratch.display());
     }
 
@@ -2903,8 +2905,8 @@ mod tests {
             let f = fixture();
             let (installer, id) = build(&f, &format!("{}/", server.uri()));
             let token = CancellationToken::new();
-            let pool = aurora_download::DownloadPool::new(
-                aurora_download::Downloader::with_defaults(f.client.clone()),
+            let pool = petalfall_download::DownloadPool::new(
+                petalfall_download::Downloader::with_defaults(f.client.clone()),
                 2,
             )
             .with_cancel(token.clone());
@@ -3335,7 +3337,7 @@ mod tests {
             }
             other => panic!("应为 ProcessorOutputLocked，实际 {other:?}"),
         }
-        assert!(!aurora_base::retry::RetryableError::is_retryable(&err));
+        assert!(!petalfall_base::retry::RetryableError::is_retryable(&err));
         assert!(err.to_string().contains("正被别的程序占用"), "{err}");
         assert_eq!(
             std::fs::read(library(&f, OUT_A)).unwrap(),
@@ -3434,13 +3436,13 @@ mod tests {
             Error::LibraryFileLocked { path, source } => {
                 assert_eq!(path, &universal);
                 assert!(
-                    matches!(source, aurora_base::Error::Io { path, .. } if *path == universal),
+                    matches!(source, petalfall_base::Error::Io { path, .. } if *path == universal),
                     "{source:?}"
                 );
             }
             other => panic!("应为 LibraryFileLocked，实际 {other:?}"),
         }
-        assert!(!aurora_base::retry::RetryableError::is_retryable(&err));
+        assert!(!petalfall_base::retry::RetryableError::is_retryable(&err));
         let shown = err.to_string();
         assert!(shown.contains(&universal.display().to_string()), "{shown}");
         assert!(shown.contains("正被别的程序占用"), "{shown}");
@@ -3468,7 +3470,7 @@ mod tests {
     const BUNDLED_REL: &str = "net/minecraftforge/forge/1.16.5/forge-1.16.5.jar";
 
     /// 地址留空、没写 sha1 的自带库，由 installer 里的 `bytes` 提供。
-    fn bundled_library(f: &Fixture, bytes: &[u8]) -> (PathBuf, aurora_version::Library) {
+    fn bundled_library(f: &Fixture, bytes: &[u8]) -> (PathBuf, petalfall_version::Library) {
         let installer = write_installer(&f.root, &[(&format!("maven/{BUNDLED_REL}"), bytes)]);
         let library = serde_json::from_value(serde_json::json!({
             "name": "net.minecraftforge:forge:1.16.5",
@@ -3529,7 +3531,7 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(&err, Error::Base(aurora_base::Error::Io { path, .. }) if *path == universal),
+            matches!(&err, Error::Base(petalfall_base::Error::Io { path, .. }) if *path == universal),
             "实际：{err:?}"
         );
     }
@@ -3620,14 +3622,14 @@ mod tests {
             } => {
                 assert_eq!(entry, "Forge 安装器的缓存文件名");
                 assert_eq!(path, file_name);
-                assert_eq!(problem, aurora_version::UnsafePath::Backslash);
+                assert_eq!(problem, petalfall_version::UnsafePath::Backslash);
             }
             other => panic!("应报路径越界，实际：{other:?}"),
         }
         assert!(!f.root.join("escaped-installer.jar").exists());
         assert!(
             !f.root
-                .join(concat!(".", aurora_base::app_slug!(), "-cache"))
+                .join(concat!(".", petalfall_base::app_slug!(), "-cache"))
                 .exists()
         );
     }

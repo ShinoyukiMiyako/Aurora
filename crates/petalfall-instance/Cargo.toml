@@ -1,21 +1,21 @@
 [package]
-name = "aurora-instance"
+name = "petalfall-instance"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
 [dependencies]
-aurora-base = { path = "../aurora-base" }
-aurora-version = { path = "../aurora-version" }
+petalfall-base = { path = "../petalfall-base" }
+petalfall-version = { path = "../petalfall-version" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2.0.18"
 # 目录扫描、版本 JSON 读取、配置原子落盘都是本地 IO；版本 JSON 的读取与反序列化放到阻塞线程池上
-# 有界并发执行（rt 提供 spawn_blocking 与 JoinSet）。原子写复用 aurora-base。
+# 有界并发执行（rt 提供 spawn_blocking 与 JoinSet）。原子写复用 petalfall-base。
 tokio = { version = "1", default-features = false, features = ["fs", "rt"] }
 # 存档的 level.dat 是 gzip 压缩的 NBT；flate2 已经在工作区里（zip 的 deflate 后端），用它的纯 Rust 后端。
 flate2 = "1"
-# 存档备份把存档文件夹打成 zip、从 zip 恢复。只留纯 Rust 的 deflate 后端，与 aurora-modpack、aurora-core 同一选择。
+# 存档备份把存档文件夹打成 zip、从 zip 恢复。只留纯 Rust 的 deflate 后端，与 petalfall-modpack、petalfall-core 同一选择。
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 # 存档备份的清理失败不该盖过本来要返回的结果，但也不能悄无声息，记日志。
 tracing = "0.1"

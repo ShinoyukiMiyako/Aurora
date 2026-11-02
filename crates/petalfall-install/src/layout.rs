@@ -3,14 +3,14 @@
 //! 安装器把「选定版本」落到一个游戏根目录（`.minecraft`）下的固定子结构：`versions/<id>/`、
 //! `libraries/<maven 路径>`、`assets/{indexes,objects,virtual}`。本模块只做路径拼装（纯字符串/
 //! `PathBuf` 运算，不碰文件系统），让下载与解压层拿到确定的落点。目录本身在写文件时由
-//! [`aurora_base::fs::atomic_write`] 或下载引擎按需创建。
+//! [`petalfall_base::fs::atomic_write`] 或下载引擎按需创建。
 //!
 //! 版本 JSON、加载器 profile、资源索引里的路径与 id 来自远端，落点一律经带 `checked` / 返回 `Result`
 //! 的入口算出：能走出游戏目录的值报 [`Error::UnsafePath`]，指认原始条目，不悄悄丢段。
 
 use std::path::{Path, PathBuf};
 
-use aurora_version::{check_path_segment, check_relative_path};
+use petalfall_version::{check_path_segment, check_relative_path};
 
 use crate::error::{Error, Result};
 use crate::maven;
@@ -192,7 +192,7 @@ pub(crate) fn checked_segment(segment: &str, entry: impl FnOnce() -> String) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_version::UnsafePath;
+    use petalfall_version::UnsafePath;
 
     fn layout() -> GameLayout {
         GameLayout::new(PathBuf::from("D:/mc/.minecraft"))

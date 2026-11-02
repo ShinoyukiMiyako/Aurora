@@ -1,6 +1,6 @@
 //! 实例的 Mod 变更历史与回滚。
 
-use aurora_core::{HistoryEvent, RollbackCheck};
+use petalfall_core::{HistoryEvent, RollbackCheck};
 use tauri::State;
 
 use crate::commands::instances::{InstanceActivity, InstanceLocks};
@@ -14,8 +14,8 @@ pub async fn list_history(
     version_id: String,
     facade: State<'_, Facade>,
 ) -> Result<Vec<HistoryEvent>, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.history(&version_id).await?.events)
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.history(&version_id).await?.events)
 }
 
 /// 逐条判断历史事件能否回滚，与 `list_history` 的顺序一一对齐。
@@ -24,8 +24,8 @@ pub async fn rollback_checks(
     version_id: String,
     facade: State<'_, Facade>,
 ) -> Result<Vec<RollbackCheck>, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.rollback_checks(&version_id).await?)
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.rollback_checks(&version_id).await?)
 }
 
 /// 回滚一条更新事件：旧文件从 `.old` 复原，新文件删除，历史追加一条回滚事件。回滚期间以
@@ -50,8 +50,8 @@ pub(crate) async fn rollback_with(
         return Err(CommandError::invalid_argument("event_id 不能为空"));
     }
     let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
-    let aurora = facade.snapshot().await;
-    aurora
+    let petalfall = facade.snapshot().await;
+    petalfall
         .rollback(version_id, event_id)
         .await
         .map_err(mods_error)
@@ -61,20 +61,20 @@ pub(crate) async fn rollback_with(
 mod tests {
     use super::*;
     use crate::commands::error::code;
-    use aurora_core::{Aurora, AuroraConfig, IsolationPolicy};
+    use petalfall_core::{IsolationPolicy, Petalfall, PetalfallConfig};
 
     #[tokio::test]
     async fn rollback_rejects_empty_event_id_and_unknown_version() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = Aurora::open(
-            AuroraConfig::default(),
+        let mut petalfall = Petalfall::open(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             tmp.path().join("config.json"),
         )
         .unwrap();
-        aurora.set_game_dir(tmp.path());
-        aurora.set_isolation_policy(IsolationPolicy::All);
-        let facade = Facade::new(aurora);
+        petalfall.set_game_dir(tmp.path());
+        petalfall.set_isolation_policy(IsolationPolicy::All);
+        let facade = Facade::new(petalfall);
 
         let err = rollback_with(&facade, &InstanceLocks::default(), "1.21", "")
             .await
@@ -107,15 +107,15 @@ mod tests {
             .await
             .unwrap();
 
-        let mut aurora = Aurora::open(
-            AuroraConfig::default(),
+        let mut petalfall = Petalfall::open(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             tmp.path().join("config.json"),
         )
         .unwrap();
-        aurora.set_game_dir(&mc);
-        aurora.set_isolation_policy(IsolationPolicy::All);
-        aurora
+        petalfall.set_game_dir(&mc);
+        petalfall.set_isolation_policy(IsolationPolicy::All);
+        petalfall
             .history_store("1.21")
             .append(HistoryEvent::Update {
                 id: "200-001".to_owned(),
@@ -131,7 +131,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let facade = Facade::new(aurora);
+        let facade = Facade::new(petalfall);
 
         let size = facade.snapshot().await.backup_size("1.21").await.unwrap();
         assert_eq!(size, 4);

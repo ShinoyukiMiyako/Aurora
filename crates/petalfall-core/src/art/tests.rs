@@ -209,7 +209,7 @@ fn fixture() -> Fixture {
     });
     let service = TextureService::with_parts(
         cache.clone(),
-        aurora_base::http::build_client().unwrap(),
+        petalfall_base::http::build_client().unwrap(),
         PanoramaSpec { sha1 },
         opener,
     );
@@ -630,17 +630,17 @@ fn candidates_start_with_the_configured_game_dir() {
         name: name.to_owned(),
         path,
     };
-    let config = crate::config::AuroraConfig {
+    let config = crate::config::PetalfallConfig {
         extra_game_directories: vec![
             named("PCL", tmp.path().join("pcl")),
             // 与当前目录相同的登记只留一次。
             named("重复", tmp.path().join("game")),
             named("HMCL", tmp.path().join("hmcl")),
         ],
-        ..crate::config::AuroraConfig::default()
+        ..crate::config::PetalfallConfig::default()
     };
-    let aurora = Aurora::for_test(config, tmp.path().to_path_buf(), tmp.path().join("game"));
-    let candidates = aurora.art_candidates();
+    let petalfall = Petalfall::for_test(config, tmp.path().to_path_buf(), tmp.path().join("game"));
+    let candidates = petalfall.art_candidates();
     assert_eq!(
         candidates[..3],
         [
@@ -652,7 +652,7 @@ fn candidates_start_with_the_configured_game_dir() {
     if let Some(official) = official_minecraft_dir() {
         assert_eq!(candidates.last(), Some(&official));
     }
-    let service = aurora.texture_service();
+    let service = petalfall.texture_service();
     assert_eq!(service.inner.cache_root, tmp.path().join("cache"));
     assert_eq!(service.status(), ArtStatus::default());
 }

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::AURORA_META_DIR;
+use crate::PETALFALL_META_DIR;
 use crate::error::{Error, Result};
 use crate::isolation::IsolationOverride;
 
@@ -38,7 +38,7 @@ pub struct VersionSettings {
     /// 使用的 Java。
     pub java: JavaSelection,
     /// 追加在默认参数之后的 JVM 参数，原样保存。启动时按空白切分，双引号括起来的部分不切开、引号不传给
-    /// JVM（规则见 `aurora_launch::split_args`）。
+    /// JVM（规则见 `petalfall_launch::split_args`）。
     pub jvm_args: String,
     /// 窗口分辨率。
     pub resolution: Resolution,
@@ -175,7 +175,7 @@ impl VersionSettingsStore {
     /// 默认路径：`version_dir/.petalfall/settings.json`（`version_dir` 即 `versions/<id>`）。
     pub fn for_version_dir(version_dir: &Path) -> Self {
         Self {
-            path: version_dir.join(AURORA_META_DIR).join(SETTINGS_FILE),
+            path: version_dir.join(PETALFALL_META_DIR).join(SETTINGS_FILE),
         }
     }
 
@@ -214,7 +214,7 @@ impl VersionSettingsStore {
             path: self.path.clone(),
             source,
         })?;
-        aurora_base::fs::atomic_write(&self.path, &bytes).await?;
+        petalfall_base::fs::atomic_write(&self.path, &bytes).await?;
         Ok(())
     }
 }
@@ -406,7 +406,7 @@ mod tests {
         assert_eq!(
             store.path(),
             tmp.path()
-                .join(crate::AURORA_META_DIR)
+                .join(crate::PETALFALL_META_DIR)
                 .join("settings.json")
         );
         assert_eq!(store.load().await.unwrap(), VersionSettings::default());

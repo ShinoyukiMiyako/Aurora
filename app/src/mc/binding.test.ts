@@ -52,7 +52,7 @@ describe("bindArtStatus", () => {
     expect(getArtStatus()).toEqual({ source: { versionId: "1.21.1" }, panorama: false });
     const urls = fetchMock.mock.calls.map((c) => String(c[0]));
     expect(urls).toHaveLength(17);
-    expect(urls).toContain("http://aurora-tex.localhost/art/block/grass_block_top.png?v=1.21.1");
+    expect(urls).toContain("http://petalfall-tex.localhost/art/block/grass_block_top.png?v=1.21.1");
     expect(urls.every((u) => u.endsWith("?v=1.21.1"))).toBe(true);
     dispose();
     expect(events.unlisten).toHaveBeenCalledTimes(1);

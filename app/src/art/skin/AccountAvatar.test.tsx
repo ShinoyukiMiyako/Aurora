@@ -70,7 +70,7 @@ describe("AccountAvatar", () => {
     view = render(<AccountAvatar uuid="u1" skin={{ kind: "default", path: "entity/player/slim/alex", model: "slim" }} size={40} current label="Alex 的头像" />);
     expect(root().dataset.art).toBe("silhouette");
     await settle();
-    expect(fetchMock).toHaveBeenCalledWith("http://aurora-tex.localhost/art/entity/player/slim/alex.png?v=1.21.1", { mode: "cors" });
+    expect(fetchMock).toHaveBeenCalledWith("http://petalfall-tex.localhost/art/entity/player/slim/alex.png?v=1.21.1", { mode: "cors" });
     expect(root().dataset.art).toBe("skin");
     expect(root().dataset.current).toBe("true");
     expect(root().getAttribute("role")).toBe("img");
@@ -84,7 +84,7 @@ describe("AccountAvatar", () => {
   it("远程皮肤按 sha1 取；后端判定没有帽子层时只画正脸", async () => {
     view = render(<AccountAvatar uuid="u2" skin={{ kind: "remote", sha1: REMOTE, model: "wide", hat: false }} size={24} />);
     await settle();
-    expect(fetchMock).toHaveBeenCalledWith(`http://aurora-tex.localhost/skin/${REMOTE}.png`, { mode: "cors" });
+    expect(fetchMock).toHaveBeenCalledWith(`http://petalfall-tex.localhost/skin/${REMOTE}.png`, { mode: "cors" });
     expect(root().dataset.art).toBe("skin");
     expect(canvas.sourceRects(bitmaps[0])).toEqual(["8,8,8,8"]);
   });

@@ -24,7 +24,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use aurora_auth::{SkinModel, SkinRef};
+use petalfall_auth::{SkinModel, SkinRef};
 
 pub use default_skin::{DefaultSkin, default_skin};
 pub use remote::{THUMB_HOSTS, ThumbError};
@@ -33,7 +33,7 @@ pub use source::{JarOpener, default_opener};
 use lru::{Cached, Lru};
 use source::{JarHashCache, SelectedSource};
 
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 /// 进程内缓存的条数上限。
 const LRU_MAX_ENTRIES: usize = 512;
@@ -138,7 +138,7 @@ pub struct TextureService {
     inner: Arc<Inner>,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 用门面的 HTTP 客户端与 `<数据目录>/cache` 建一个材质服务。
     pub fn texture_service(&self) -> TextureService {
         TextureService::new(self.data_dir().join("cache"), self.http())
@@ -165,7 +165,7 @@ impl Aurora {
 /// 官方启动器的默认游戏目录 `%APPDATA%\.minecraft`；没有 APPDATA（非 Windows）时为 None。
 fn official_minecraft_dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA")
-        .map(|appdata| PathBuf::from(appdata).join(aurora_instance::MINECRAFT_DIR_NAME))
+        .map(|appdata| PathBuf::from(appdata).join(petalfall_instance::MINECRAFT_DIR_NAME))
 }
 
 /// 状态锁只护着内存里的几张表，持锁期间不做 IO 也不 await；中毒不携带需要放弃的状态。
@@ -534,7 +534,7 @@ impl TextureService {
                 return None;
             }
         };
-        if let Err(err) = aurora_base::fs::atomic_write(path, &bytes).await {
+        if let Err(err) = petalfall_base::fs::atomic_write(path, &bytes).await {
             tracing::warn!(url, path = %path.display(), error = %err, "写入皮肤缓存失败，界面回落");
             return None;
         }
@@ -579,7 +579,7 @@ impl TextureService {
                 url: url.to_owned(),
             });
         }
-        aurora_base::fs::atomic_write(&path, &bytes).await?;
+        petalfall_base::fs::atomic_write(&path, &bytes).await?;
         lock(&self.inner.state).thumbs.insert(key.clone(), path);
         self.evict_thumbs(None).await;
         Ok(key)

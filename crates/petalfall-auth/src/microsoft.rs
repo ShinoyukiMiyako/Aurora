@@ -18,7 +18,7 @@
 
 use std::time::{Duration, Instant};
 
-use aurora_base::retry::{RetryPolicy, retry_async};
+use petalfall_base::retry::{RetryPolicy, retry_async};
 use reqwest::StatusCode;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -699,7 +699,7 @@ impl OAuthErrorBody {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_base::retry::RetryableError;
+    use petalfall_base::retry::RetryableError;
     use serde_json::json;
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -715,7 +715,7 @@ mod tests {
     }
 
     fn auth_for(server: &MockServer) -> MicrosoftAuth {
-        let client = aurora_base::http::build_client().expect("构建客户端");
+        let client = petalfall_base::http::build_client().expect("构建客户端");
         let endpoints = MsaEndpoints {
             oauth_base: server.uri(),
             xbl_authenticate: format!("{}/xbl", server.uri()),
@@ -918,7 +918,7 @@ mod tests {
             .and(header("authorization", "Bearer MC-TOKEN"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": "0123456789abcdef0123456789abcdef",
-                "name": "AuroraPlayer",
+                "name": "PetalfallPlayer",
                 "skins": [
                     { "id": "old", "state": "INACTIVE", "url": "http://textures.minecraft.net/texture/old", "variant": "CLASSIC" },
                     { "id": "new", "state": "ACTIVE", "url": "http://textures.minecraft.net/texture/new", "variant": "SLIM" }
@@ -935,7 +935,7 @@ mod tests {
         };
         let session = auth_for(&server).complete_login(&msa).await.unwrap();
         assert_eq!(session.profile.id, "0123456789abcdef0123456789abcdef");
-        assert_eq!(session.profile.name, "AuroraPlayer");
+        assert_eq!(session.profile.name, "PetalfallPlayer");
         assert_eq!(session.minecraft_token, "MC-TOKEN");
         assert_eq!(session.refresh_token, "rotated-refresh");
         // 到期时间应落在未来（now + 86400 附近）。
@@ -1006,7 +1006,7 @@ mod tests {
             .and(path("/minecraft/profile"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": "0123456789abcdef0123456789abcdef",
-                "name": "AuroraPlayer"
+                "name": "PetalfallPlayer"
             })))
             .mount(&server)
             .await;

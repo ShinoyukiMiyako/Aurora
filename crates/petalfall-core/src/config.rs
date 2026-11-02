@@ -3,7 +3,7 @@
 //! 门面持有一份可读写的全局配置：下载源与版本列表源各自的三档策略（对应功能矩阵「文件下载源 /
 //! 版本列表源」两项独立三档设置）、下载并发、默认内存、版本隔离档位、微软 client_id、可选自定义
 //! 游戏/缓存目录，以及启动后窗口行为、默认 Java、主页固定的服务器、并存的游戏目录、首次启动
-//! 是否完成、启动器更新的检查偏好与界面语言。凭据不进这里（归 aurora-auth 的加密存储）。
+//! 是否完成、启动器更新的检查偏好与界面语言。凭据不进这里（归 petalfall-auth 的加密存储）。
 //!
 //! 配置以 JSON 落在数据目录（`%LOCALAPPDATA%\Petalfall\config.json`）。缺失时用全默认值；损坏时
 //! [`ConfigStore::load`] 冒泡报错，而不是静默用默认覆盖（避免用户改坏的配置被无声吞掉）。桌面应用启动
@@ -12,22 +12,22 @@
 //!
 //! 枚举字段按字段前向兼容：降级后遇到新版本写入的取值，只把那一项退回默认，其余设置照常读入，
 //! 文件原样不动，之后落盘时没改过的那项写回原值（见 [`ConfigFieldReset`]）。整份当坏文件处理的
-//! 只剩不是合法 JSON 与类型对不上。不认识的顶层设置原样留在 [`AuroraConfig::unrecognized`] 里，
-//! 外观、内存、存档备份段里不认识的键留在 [`AuroraConfig::carried_over`] 里，落盘时都原样写回。
+//! 只剩不是合法 JSON 与类型对不上。不认识的顶层设置原样留在 [`PetalfallConfig::unrecognized`] 里，
+//! 外观、内存、存档备份段里不认识的键留在 [`PetalfallConfig::carried_over`] 里，落盘时都原样写回。
 
 use std::path::{Path, PathBuf};
 
-use aurora_base::mirror::MirrorSource;
-use aurora_instance::IsolationPolicy;
-use aurora_java::detect::normalize_separators;
 use chrono::{Datelike, Local, Timelike};
+use petalfall_base::mirror::MirrorSource;
+use petalfall_instance::IsolationPolicy;
+use petalfall_java::detect::normalize_separators;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::appearance::Appearance;
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 /// 下载源三档策略。对应功能矩阵的「文件下载源 / 版本列表源」三档设置。
 ///
@@ -168,7 +168,7 @@ pub struct ParkedDirectory {
 /// 全局配置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AuroraConfig {
+pub struct PetalfallConfig {
     /// 文件下载源策略（库/资源/客户端 jar 等大文件）。
     pub download_source: DownloadSourcePolicy,
     /// 版本列表源策略（版本清单抓取）。
@@ -179,7 +179,7 @@ pub struct AuroraConfig {
     pub memory: MemorySettings,
     /// 全局版本隔离档位。
     pub isolation_policy: IsolationPolicy,
-    /// 微软登录 client_id 的用户覆盖；缺省时依次回落到环境变量 `AURORA_MSA_CLIENT_ID` 与内置默认
+    /// 微软登录 client_id 的用户覆盖；缺省时依次回落到环境变量 `PETALFALL_MSA_CLIENT_ID` 与内置默认
     /// （`auth::DEFAULT_MSA_CLIENT_ID`），正版登录不依赖这一项。
     pub msa_client_id: Option<String>,
     /// 自定义游戏目录（`.minecraft`）；缺省时用数据目录下的 `.minecraft`。
@@ -242,7 +242,7 @@ pub struct AuroraConfig {
     pub carried_over: CarriedOver,
 }
 
-impl Default for AuroraConfig {
+impl Default for PetalfallConfig {
     fn default() -> Self {
         Self {
             download_source: DownloadSourcePolicy::default(),
@@ -322,7 +322,7 @@ impl CarriedOver {
     /// 记下退回默认的枚举字段的原值，连同载入后实际补上的取值。
     fn note_fallbacks(
         &mut self,
-        config: &AuroraConfig,
+        config: &PetalfallConfig,
         resets: &[ConfigFieldReset],
     ) -> serde_json::Result<()> {
         if resets.is_empty() {
@@ -410,8 +410,8 @@ fn unrecognized_keys<S: DeserializeOwned>(
     }
 }
 
-impl Aurora {
-    /// 设置界面语言；落盘仍需调用 [`Aurora::save_config`]。
+impl Petalfall {
+    /// 设置界面语言；落盘仍需调用 [`Petalfall::save_config`]。
     pub fn set_language(&mut self, language: UiLanguage) {
         self.config_mut().language = language;
     }
@@ -501,7 +501,7 @@ fn take_unknown_enum_values(root: &mut Value) -> Vec<ConfigFieldReset> {
 
 /// 配置里的 Java 路径换成规整后的分隔符。探测报出的路径都是规整过的，界面比对、移除时匹配都按文本：
 /// 文件里留着旧的混合写法的话，明明还在的 Java 会被说成已失效，移除时也对不上。
-fn settle_java_paths(config: &mut AuroraConfig) {
+fn settle_java_paths(config: &mut PetalfallConfig) {
     if let Some(path) = &mut config.default_java {
         *path = normalize_separators(path);
     }
@@ -531,16 +531,16 @@ impl ConfigStore {
 
     /// 载入配置。文件不存在返回全默认；存在但内容损坏冒泡 [`CoreError::ConfigParse`]。
     /// 枚举字段的取值不认识不算损坏：那几项退回默认、记进日志，其余照常读入。
-    pub async fn load(&self) -> Result<AuroraConfig> {
+    pub async fn load(&self) -> Result<PetalfallConfig> {
         Ok(self.load_reporting().await?.0)
     }
 
     /// 载入配置，连同取值不认识、退回默认的枚举字段。
-    async fn load_reporting(&self) -> Result<(AuroraConfig, Vec<ConfigFieldReset>)> {
+    async fn load_reporting(&self) -> Result<(PetalfallConfig, Vec<ConfigFieldReset>)> {
         match tokio::fs::read(&self.path).await {
             Ok(bytes) => self.parse(&bytes),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                Ok((AuroraConfig::default(), Vec::new()))
+                Ok((PetalfallConfig::default(), Vec::new()))
             }
             Err(source) => Err(CoreError::ConfigIo {
                 path: self.path.clone(),
@@ -549,13 +549,13 @@ impl ConfigStore {
         }
     }
 
-    fn parse(&self, bytes: &[u8]) -> Result<(AuroraConfig, Vec<ConfigFieldReset>)> {
+    fn parse(&self, bytes: &[u8]) -> Result<(PetalfallConfig, Vec<ConfigFieldReset>)> {
         let parse_error = |source| CoreError::ConfigParse {
             path: self.path.clone(),
             source,
         };
         // 先整份严格解析：读得出来的文件不必摘取值，结构损坏时也报这里带行列的原错误。
-        let strict = serde_json::from_slice::<AuroraConfig>(bytes);
+        let strict = serde_json::from_slice::<PetalfallConfig>(bytes);
         let mut tree: Value = serde_json::from_slice(bytes).map_err(parse_error)?;
         let (mut config, resets) = match strict {
             Ok(config) => (config, Vec::new()),
@@ -565,7 +565,7 @@ impl ConfigStore {
                     return Err(parse_error(strict));
                 }
                 // 退回之后仍对不上就是结构损坏。报退回之后的错误：严格解析的那个多半指向刚退回的取值，不是原因。
-                let config = AuroraConfig::deserialize(&tree).map_err(parse_error)?;
+                let config = PetalfallConfig::deserialize(&tree).map_err(parse_error)?;
                 (config, resets)
             }
         };
@@ -591,7 +591,7 @@ impl ConfigStore {
     /// 只是枚举取值不认识（降级后遇到新版本写的值）时不动文件，只把那几项退回默认并交回。
     ///
     /// 读文件本身失败、改名失败仍然报错：这时继续的话，下一次保存会把用户的文件覆盖掉。
-    pub async fn load_or_preserve(&self) -> Result<(AuroraConfig, Option<ConfigRecovery>)> {
+    pub async fn load_or_preserve(&self) -> Result<(PetalfallConfig, Option<ConfigRecovery>)> {
         let parse_error = match self.load_reporting().await {
             Ok((config, resets)) if resets.is_empty() => return Ok((config, None)),
             Ok((config, resets)) => return Ok((config, Some(ConfigRecovery::FieldsReset(resets)))),
@@ -606,7 +606,7 @@ impl ConfigStore {
             "配置文件读不出来，已改名留存，按默认配置启动"
         );
         Ok((
-            AuroraConfig::default(),
+            PetalfallConfig::default(),
             Some(ConfigRecovery::Reset {
                 preserved,
                 error: parse_error.to_string(),
@@ -653,14 +653,14 @@ impl ConfigStore {
     /// 仍是暂用默认值的枚举字段写回原值。
     ///
     /// 只写不记：同一份配置改成别的取值落过盘、再改回默认时，这里仍会写回原值。门面落盘走
-    /// [`Aurora::save_config`]，会把作废的原值一并去掉。
-    pub async fn save(&self, config: &AuroraConfig) -> Result<()> {
+    /// [`Petalfall::save_config`]，会把作废的原值一并去掉。
+    pub async fn save(&self, config: &PetalfallConfig) -> Result<()> {
         self.write(config).await.map(drop)
     }
 
     /// 同 [`ConfigStore::save`]，写成功后把已被新值顶掉的原值从内存里去掉：文件里已经是新值了，
     /// 之后用户再改回默认，也该按默认写，而不是把早先的原值翻出来。
-    pub(crate) async fn save_settling(&self, config: &mut AuroraConfig) -> Result<()> {
+    pub(crate) async fn save_settling(&self, config: &mut PetalfallConfig) -> Result<()> {
         let restored = self.write(config).await?;
         config
             .carried_over
@@ -670,14 +670,14 @@ impl ConfigStore {
     }
 
     /// 落盘，交回这次换回了原值的枚举字段。
-    async fn write(&self, config: &AuroraConfig) -> Result<Vec<&'static str>> {
+    async fn write(&self, config: &PetalfallConfig) -> Result<Vec<&'static str>> {
         let mut tree = serde_json::to_value(config).map_err(CoreError::ConfigSerialize)?;
         let restored = config
             .carried_over
             .restore_into(&mut tree)
             .map_err(CoreError::ConfigSerialize)?;
         let bytes = serde_json::to_vec_pretty(&tree).map_err(CoreError::ConfigSerialize)?;
-        aurora_base::fs::atomic_write(&self.path, &bytes).await?;
+        petalfall_base::fs::atomic_write(&self.path, &bytes).await?;
         Ok(restored)
     }
 }
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn default_config_has_expected_values() {
-        let c = AuroraConfig::default();
+        let c = PetalfallConfig::default();
         assert_eq!(c.download_source, DownloadSourcePolicy::Auto);
         assert_eq!(c.version_list_source, DownloadSourcePolicy::Auto);
         assert_eq!(c.download_concurrency, 64);
@@ -813,11 +813,11 @@ mod tests {
         assert!(!off.new_instance_template);
         assert!(!off.check_updates);
 
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             new_instance_template: false,
             download_concurrency: 7,
             language: UiLanguage::EnUs,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
         store.save(&config).await.unwrap();
         let raw: serde_json::Value =
@@ -952,7 +952,7 @@ mod tests {
     async fn system_settings_roundtrip_through_store() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             memory: MemorySettings {
                 max_mb: 6144,
                 min_mb: None,
@@ -985,7 +985,7 @@ mod tests {
             first_run_completed: true,
             skipped_update_version: Some("0.2.0".to_owned()),
             notified_update_version: Some("0.2.1".to_owned()),
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
         ConfigStore::at(&path).save(&config).await.unwrap();
         let reloaded = ConfigStore::at(&path).load().await.unwrap();
@@ -1099,10 +1099,10 @@ mod tests {
 
         // 文件不存在 -> 全默认。
         let loaded = store.load().await.unwrap();
-        assert_eq!(loaded, AuroraConfig::default());
+        assert_eq!(loaded, PetalfallConfig::default());
 
         // 改几个字段后落盘再读回，应完全一致。
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             download_source: DownloadSourcePolicy::MirrorFirst,
             download_concurrency: 32,
             memory: MemorySettings {
@@ -1111,7 +1111,7 @@ mod tests {
                 auto: false,
             },
             msa_client_id: Some("client-abc".to_owned()),
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
         store.save(&config).await.unwrap();
 
@@ -1146,7 +1146,7 @@ mod tests {
         let loaded = ConfigStore::at(&path).load().await.unwrap();
         assert_eq!(loaded.appearance, Appearance::default());
 
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             appearance: Appearance {
                 mode: AppearanceMode::Night,
                 accent: AccentColor::Amethyst,
@@ -1154,7 +1154,7 @@ mod tests {
                 panorama: true,
                 reduce_motion: true,
             },
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
         ConfigStore::at(&path).save(&config).await.unwrap();
         let reloaded = ConfigStore::at(&path).load().await.unwrap();
@@ -1222,7 +1222,7 @@ mod tests {
         let broken = br#"{"after_launch": "keep", "download_concurrency": "eight"}"#;
         tokio::fs::write(&path, broken).await.unwrap();
         let (config, recovery) = store.load_or_preserve().await.unwrap();
-        assert_eq!(config, AuroraConfig::default());
+        assert_eq!(config, PetalfallConfig::default());
         let (preserved, error) = whole_reset(recovery);
         assert!(!path.exists(), "坏文件已挪走，下次保存不会覆盖它");
         assert_eq!(tokio::fs::read(&preserved).await.unwrap(), broken);
@@ -1251,7 +1251,7 @@ mod tests {
         let store = ConfigStore::at(&path);
         assert_eq!(
             store.load_or_preserve().await.unwrap(),
-            (AuroraConfig::default(), None)
+            (PetalfallConfig::default(), None)
         );
         tokio::fs::write(&path, br#"{"download_concurrency": 8}"#)
             .await
@@ -1323,7 +1323,7 @@ mod tests {
                 ("after_launch", String::new()),
             ]
         );
-        let defaults = AuroraConfig::default();
+        let defaults = PetalfallConfig::default();
         assert_eq!(config.version_list_source, defaults.version_list_source);
         assert_eq!(config.isolation_policy, defaults.isolation_policy);
         assert_eq!(config.appearance.mode, AppearanceMode::Day);
@@ -1369,12 +1369,12 @@ mod tests {
             })
             .collect();
         assert_eq!(field_resets(recovery), expected);
-        let mut want = AuroraConfig {
+        let mut want = PetalfallConfig {
             download_concurrency: 128,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
         want.appearance.petals = false;
-        let settings = AuroraConfig {
+        let settings = PetalfallConfig {
             carried_over: CarriedOver::default(),
             ..config.clone()
         };
@@ -1418,7 +1418,7 @@ mod tests {
         }
         let mut leaves = Vec::new();
         string_leaves(
-            &serde_json::to_value(AuroraConfig::default()).unwrap(),
+            &serde_json::to_value(PetalfallConfig::default()).unwrap(),
             "",
             &mut leaves,
         );
@@ -1498,29 +1498,29 @@ mod tests {
         let path = dir.path().join("config.json");
         tokio::fs::write(
             &path,
-            br#"{"language": "fr-FR", "appearance": {"accent": "aurora", "mode": "night"}}"#,
+            br#"{"language": "fr-FR", "appearance": {"accent": "petalfall", "mode": "night"}}"#,
         )
         .await
         .unwrap();
         let (config, _) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
-        let mut aurora =
-            Aurora::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
+        let mut petalfall =
+            Petalfall::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
         for version in ["0.3.0", "0.3.1"] {
-            aurora.set_notified_update_version(Some(version.to_owned()));
-            aurora.save_config().await.unwrap();
+            petalfall.set_notified_update_version(Some(version.to_owned()));
+            petalfall.save_config().await.unwrap();
             let raw: Value =
                 serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
             assert_eq!(raw["notified_update_version"], version);
             assert_eq!(raw["language"], "fr-FR");
-            assert_eq!(raw["appearance"]["accent"], "aurora");
+            assert_eq!(raw["appearance"]["accent"], "petalfall");
             assert_eq!(raw["appearance"]["mode"], "night");
         }
-        assert_eq!(aurora.config().language, UiLanguage::ZhCn);
+        assert_eq!(petalfall.config().language, UiLanguage::ZhCn);
         let (reloaded, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
         assert_eq!(
             field_resets(recovery),
             vec![
-                ("appearance.accent", "aurora".to_owned()),
+                ("appearance.accent", "petalfall".to_owned()),
                 ("language", "fr-FR".to_owned()),
             ]
         );
@@ -1536,44 +1536,44 @@ mod tests {
         let path = dir.path().join("config.json");
         tokio::fs::write(
             &path,
-            br#"{"language": "fr-FR", "appearance": {"mode": "dusk", "accent": "aurora"}}"#,
+            br#"{"language": "fr-FR", "appearance": {"mode": "dusk", "accent": "petalfall"}}"#,
         )
         .await
         .unwrap();
         let (config, _) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
-        let mut aurora =
-            Aurora::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
+        let mut petalfall =
+            Petalfall::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
         let raw = || async {
             serde_json::from_slice::<Value>(&tokio::fs::read(&path).await.unwrap()).unwrap()
         };
 
-        aurora.set_language(UiLanguage::EnUs);
-        aurora.save_config().await.unwrap();
+        petalfall.set_language(UiLanguage::EnUs);
+        petalfall.save_config().await.unwrap();
         assert_eq!(raw().await["language"], "en-US");
-        aurora.set_language(UiLanguage::ZhCn);
-        aurora.save_config().await.unwrap();
+        petalfall.set_language(UiLanguage::ZhCn);
+        petalfall.save_config().await.unwrap();
         assert_eq!(raw().await["language"], "zh-CN");
 
-        aurora.set_appearance(AppearancePatch {
+        petalfall.set_appearance(AppearancePatch {
             accent: Some(AccentColor::Moss),
             ..AppearancePatch::default()
         });
-        aurora.save_config().await.unwrap();
+        petalfall.save_config().await.unwrap();
         let written = raw().await;
         assert_eq!(written["appearance"]["accent"], "moss");
         assert_eq!(written["appearance"]["mode"], "dusk");
 
-        aurora.set_appearance(AppearancePatch {
+        petalfall.set_appearance(AppearancePatch {
             mode: Some(AppearanceMode::Night),
             ..AppearancePatch::default()
         });
-        aurora.save_config().await.unwrap();
+        petalfall.save_config().await.unwrap();
         assert_eq!(raw().await["appearance"]["mode"], "night");
-        aurora.set_appearance(AppearancePatch {
+        petalfall.set_appearance(AppearancePatch {
             mode: Some(AppearanceMode::Day),
             ..AppearancePatch::default()
         });
-        aurora.save_config().await.unwrap();
+        petalfall.save_config().await.unwrap();
         let written = raw().await;
         assert_eq!(written["appearance"]["mode"], "day");
         assert_eq!(written["language"], "zh-CN");
@@ -1596,24 +1596,24 @@ mod tests {
         .unwrap();
         let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
         assert_eq!(recovery, None);
-        let mut aurora =
-            Aurora::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
-        aurora.set_notified_update_version(Some("0.3.0".to_owned()));
-        aurora.save_config().await.unwrap();
+        let mut petalfall =
+            Petalfall::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
+        petalfall.set_notified_update_version(Some("0.3.0".to_owned()));
+        petalfall.save_config().await.unwrap();
         let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
         assert_eq!(raw["language"], "en-US");
         assert_eq!(raw["after_launch"], "keep");
         assert_eq!(raw["appearance"]["mode"], "night");
 
-        aurora.set_language(UiLanguage::ZhCn);
-        aurora.set_after_launch(AfterLaunch::Minimize);
-        aurora.save_config().await.unwrap();
+        petalfall.set_language(UiLanguage::ZhCn);
+        petalfall.set_after_launch(AfterLaunch::Minimize);
+        petalfall.save_config().await.unwrap();
         let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
         assert_eq!(raw["language"], "zh-CN");
         assert_eq!(raw["after_launch"], "minimize");
         assert_eq!(
             ConfigStore::at(&path).load_or_preserve().await.unwrap(),
-            (aurora.config().clone(), None)
+            (petalfall.config().clone(), None)
         );
     }
 
@@ -1837,35 +1837,35 @@ mod tests {
         .await
         .unwrap();
         let config = ConfigStore::at(&path).load().await.unwrap();
-        let mut aurora =
-            Aurora::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
+        let mut petalfall =
+            Petalfall::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
         let appearance_keys = ["accent", "mode", "panorama", "petals", "reduce_motion"];
         let keys =
             |value: Value| -> Vec<String> { value.as_object().unwrap().keys().cloned().collect() };
         assert_eq!(
-            keys(serde_json::to_value(aurora.appearance()).unwrap()),
+            keys(serde_json::to_value(petalfall.appearance()).unwrap()),
             appearance_keys
         );
-        let merged = aurora.set_appearance(AppearancePatch {
+        let merged = petalfall.set_appearance(AppearancePatch {
             petals: Some(false),
             ..AppearancePatch::default()
         });
         assert_eq!(keys(serde_json::to_value(merged).unwrap()), appearance_keys);
         assert_eq!(
-            keys(serde_json::to_value(aurora.config().memory).unwrap()),
+            keys(serde_json::to_value(petalfall.config().memory).unwrap()),
             ["auto", "max_mb", "min_mb"]
         );
 
-        aurora.set_memory(MemorySettings {
+        petalfall.set_memory(MemorySettings {
             max_mb: 2048,
             min_mb: Some(512),
             auto: true,
         });
         assert_eq!(
-            keys(serde_json::to_value(aurora.config().memory).unwrap()),
+            keys(serde_json::to_value(petalfall.config().memory).unwrap()),
             ["auto", "max_mb", "min_mb"]
         );
-        aurora.save_config().await.unwrap();
+        petalfall.save_config().await.unwrap();
         let raw: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
         assert_eq!(raw["appearance"]["mode"], "night");
         assert_eq!(raw["appearance"]["petals"], false);
@@ -2023,26 +2023,26 @@ mod tests {
         let wire = serde_json::to_value(config.world_backup).unwrap();
         assert!(wire.get("compress").is_none(), "不认识的键不进 IPC 出参");
 
-        let mut aurora =
-            Aurora::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
-        aurora.set_world_backup(WorldBackupSettings {
+        let mut petalfall =
+            Petalfall::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
+        petalfall.set_world_backup(WorldBackupSettings {
             auto: false,
             keep_per_world: 3,
             max_total_gb: 5,
         });
-        aurora.set_memory(MemorySettings {
+        petalfall.set_memory(MemorySettings {
             max_mb: 2048,
             min_mb: Some(1024),
             auto: false,
         });
-        aurora.set_prefer_dedicated_gpu(true);
-        aurora.set_skip_accessibility_onboarding(false);
-        aurora.add_extra_java_path(PathBuf::from(r"D:\Java 21\中文\bin\java.exe"));
-        aurora.config_mut().new_instance_template = false;
-        aurora.set_language(UiLanguage::EnUs);
-        aurora.save_config().await.unwrap();
-        aurora.set_notified_update_version(Some("0.3.0".to_owned()));
-        aurora.save_config().await.unwrap();
+        petalfall.set_prefer_dedicated_gpu(true);
+        petalfall.set_skip_accessibility_onboarding(false);
+        petalfall.add_extra_java_path(PathBuf::from(r"D:\Java 21\中文\bin\java.exe"));
+        petalfall.config_mut().new_instance_template = false;
+        petalfall.set_language(UiLanguage::EnUs);
+        petalfall.save_config().await.unwrap();
+        petalfall.set_notified_update_version(Some("0.3.0".to_owned()));
+        petalfall.save_config().await.unwrap();
 
         let written = tokio::fs::read(&path).await.unwrap();
         let raw: Value = serde_json::from_slice(&written).unwrap();
@@ -2096,10 +2096,10 @@ mod tests {
                 ("after_launch", "hide_to_tray".to_owned()),
             ]
         );
-        assert_eq!(&reloaded, aurora.config());
+        assert_eq!(&reloaded, petalfall.config());
 
         let mut again =
-            Aurora::for_test(reloaded, dir.path().to_path_buf(), dir.path().to_path_buf());
+            Petalfall::for_test(reloaded, dir.path().to_path_buf(), dir.path().to_path_buf());
         again.save_config().await.unwrap();
         assert_eq!(tokio::fs::read(&path).await.unwrap(), written);
     }
@@ -2206,7 +2206,7 @@ mod tests {
                 br#"{"isolation_policy": ["all"]}"#,
                 "expected value at line 1",
             ),
-            (br#""zh-CN""#, "expected struct AuroraConfig"),
+            (br#""zh-CN""#, "expected struct PetalfallConfig"),
         ];
         for (bytes, cause) in cases {
             let dir = tempfile::tempdir().unwrap();
@@ -2214,7 +2214,7 @@ mod tests {
             tokio::fs::write(&path, bytes).await.unwrap();
             let (config, recovery) = ConfigStore::at(&path).load_or_preserve().await.unwrap();
             let text = String::from_utf8_lossy(bytes);
-            assert_eq!(config, AuroraConfig::default(), "{text}");
+            assert_eq!(config, PetalfallConfig::default(), "{text}");
             let (preserved, error) = whole_reset(recovery);
             assert!(error.contains(cause), "{text}：{error}");
             assert!(!error.contains("fr-FR"), "{text}：{error}");

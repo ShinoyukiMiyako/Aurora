@@ -1,16 +1,16 @@
 //! 内存建议：设置页画内存滑杆要的本机内存事实，以及「自动分配」此刻会给多少。
 //!
 //! 推荐值与启动时的自动分配必须是同一个数，否则界面在说谎；两者都经
-//! [`aurora_launch::recommended_max_mb`] 算出，档位都由 [`Aurora::instance_memory_tier`] 判定，
+//! [`petalfall_launch::recommended_max_mb`] 算出，档位都由 [`Petalfall::instance_memory_tier`] 判定，
 //! 唯一允许的差异是取空闲内存的时刻（设置页是打开那一刻，启动是按下开始那一刻）。
 
-use aurora_instance::{DiscoveredVersion, discover_version};
-use aurora_launch::{
+use petalfall_instance::{DiscoveredVersion, discover_version};
+use petalfall_launch::{
     MemoryAdvice, MemoryTier, SystemMemory, probe_system_memory, recommended_max_mb,
 };
 
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::modpack::read_instance_modpack;
 
 /// 在阻塞线程上读本机物理内存。
@@ -27,7 +27,7 @@ pub(crate) async fn read_system_memory() -> Result<SystemMemory> {
     })
 }
 
-impl Aurora {
+impl Petalfall {
     /// 内存建议。`version_id` 给出时按该实例定档；不给时按主页当前选中的实例；
     /// 没有选中或选中的实例已不在时按原版。
     pub async fn memory_advice(&self, version_id: Option<&str>) -> Result<MemoryAdvice> {
@@ -70,7 +70,7 @@ impl Aurora {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
 
     fn write_version(game_dir: &std::path::Path, id: &str, json: &str) {
         let dir = game_dir.join("versions").join(id);
@@ -100,15 +100,15 @@ mod tests {
         write_version(&game_dir, "1.20.1", VANILLA);
         write_version(&game_dir, "fabric-1.20.1", FABRIC);
 
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             selected_version: Some("fabric-1.20.1".to_owned()),
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = Aurora::for_test(config, dir.path().to_path_buf(), game_dir.clone());
+        let petalfall = Petalfall::for_test(config, dir.path().to_path_buf(), game_dir.clone());
 
-        let explicit = aurora.memory_advice(Some("1.20.1")).await.unwrap();
+        let explicit = petalfall.memory_advice(Some("1.20.1")).await.unwrap();
         assert_eq!(explicit.tier, MemoryTier::Vanilla);
-        let selected = aurora.memory_advice(None).await.unwrap();
+        let selected = petalfall.memory_advice(None).await.unwrap();
         assert_eq!(selected.tier, MemoryTier::Modded);
         assert_eq!(
             selected.recommended_mb,
@@ -122,7 +122,7 @@ mod tests {
             "推荐值与同一份内存快照下的自动分配同源"
         );
 
-        let err = aurora
+        let err = petalfall
             .memory_advice(Some("not-installed"))
             .await
             .unwrap_err();
@@ -141,37 +141,41 @@ mod tests {
         let meta = game_dir
             .join("versions")
             .join("整合包")
-            .join(aurora_instance::AURORA_META_DIR);
+            .join(petalfall_instance::PETALFALL_META_DIR);
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(
             meta.join("modpack.json"),
             r#"{"schema":1,"format":"modrinth","platform":null,"project_id":null,"version_id":null,"name":"测试包","version":null,"minecraft":"1.20.1","loader":null,"remote_files":0,"override_files":0,"installed_at":1}"#,
         )
         .unwrap();
-        let aurora = Aurora::for_test(AuroraConfig::default(), dir.path().to_path_buf(), game_dir);
+        let petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
+            dir.path().to_path_buf(),
+            game_dir,
+        );
 
-        let version = aurora.instance_version("整合包").await.unwrap();
+        let version = petalfall.instance_version("整合包").await.unwrap();
         assert_eq!(
-            aurora.instance_memory_tier(&version).await.unwrap(),
+            petalfall.instance_memory_tier(&version).await.unwrap(),
             MemoryTier::LargeModpack
         );
-        let advice = aurora.memory_advice(Some("整合包")).await.unwrap();
+        let advice = petalfall.memory_advice(Some("整合包")).await.unwrap();
         assert_eq!(advice.tier, MemoryTier::LargeModpack);
     }
 
     #[tokio::test]
     async fn advice_without_selection_falls_back_to_vanilla() {
         let dir = tempfile::tempdir().unwrap();
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             selected_version: Some("deleted-instance".to_owned()),
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = Aurora::for_test(
+        let petalfall = Petalfall::for_test(
             config,
             dir.path().to_path_buf(),
             dir.path().join(".minecraft"),
         );
-        let advice = aurora.memory_advice(None).await.unwrap();
+        let advice = petalfall.memory_advice(None).await.unwrap();
         assert_eq!(advice.tier, MemoryTier::Vanilla);
     }
 }

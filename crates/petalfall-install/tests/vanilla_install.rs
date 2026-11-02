@@ -9,13 +9,13 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aurora_base::retry::RetryPolicy;
-use aurora_download::{
+use petalfall_base::retry::RetryPolicy;
+use petalfall_download::{
     CancellationToken, DownloadConfig, DownloadPool, Downloader, MirrorSource, SourcePlan,
     SourceResolver,
 };
-use aurora_install::{GameLayout, InstallContext, VanillaInstaller};
-use aurora_version::{OsName, RuntimeContext};
+use petalfall_install::{GameLayout, InstallContext, VanillaInstaller};
+use petalfall_version::{OsName, RuntimeContext};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -32,7 +32,7 @@ struct MockResolver {
 }
 
 impl SourceResolver for MockResolver {
-    fn resolve(&self, url: &str, _source: MirrorSource) -> aurora_download::Result<String> {
+    fn resolve(&self, url: &str, _source: MirrorSource) -> petalfall_download::Result<String> {
         const OFFICIAL_ASSETS: &str = "https://resources.download.minecraft.net";
         if let Some(rest) = url.strip_prefix(OFFICIAL_ASSETS) {
             Ok(format!("{}{}", self.base, rest))
@@ -49,7 +49,7 @@ fn build_native_jar() -> Vec<u8> {
         let mut writer = zip::ZipWriter::new(Cursor::new(&mut buf));
         let opts: zip::write::FileOptions<'_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        writer.start_file("aurora_test.dll", opts).unwrap();
+        writer.start_file("petalfall_test.dll", opts).unwrap();
         writer.write_all(b"native-dll-payload").unwrap();
         writer.start_file("META-INF/MANIFEST.MF", opts).unwrap();
         writer.write_all(b"Manifest-Version: 1.0\n").unwrap();
@@ -142,7 +142,7 @@ async fn full_vanilla_install_lands_every_artifact() {
     .await;
 
     // ---- 组装上下文：注入把 assets 域名改写到 mock 的 resolver ----
-    let client = aurora_base::http::build_client().unwrap();
+    let client = petalfall_base::http::build_client().unwrap();
     let resolver = Arc::new(MockResolver { base: base.clone() });
     let sources = SourcePlan::with_resolver(vec![MirrorSource::Official], resolver);
     let config = DownloadConfig {
@@ -199,7 +199,7 @@ async fn full_vanilla_install_lands_every_artifact() {
     assert!(String::from_utf8_lossy(&vjson).contains("net.minecraft.client.main.Main"));
     // natives 解压出的 dll。
     assert_eq!(
-        std::fs::read(layout.natives_dir("1.21").join("aurora_test.dll")).unwrap(),
+        std::fs::read(layout.natives_dir("1.21").join("petalfall_test.dll")).unwrap(),
         b"native-dll-payload"
     );
 
@@ -247,7 +247,7 @@ impl Bench {
             multiplier: 1.0,
             jitter: false,
         };
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let config = DownloadConfig {
             retry: once.clone(),
             sources: SourcePlan::new(vec![MirrorSource::Official]),
@@ -414,7 +414,7 @@ async fn manifest_ids_escaping_the_versions_dir_are_rejected() {
         .mount(&server)
         .await;
 
-    let client = aurora_base::http::build_client().unwrap();
+    let client = petalfall_base::http::build_client().unwrap();
     let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 2);
     let dir = tempfile::tempdir().unwrap();
     let layout = GameLayout::new(dir.path());
@@ -435,7 +435,7 @@ async fn manifest_ids_escaping_the_versions_dir_are_rejected() {
         .unwrap_err();
 
     assert!(
-        matches!(&err, aurora_install::Error::UnsafePath { path, .. } if path == "../escaped"),
+        matches!(&err, petalfall_install::Error::UnsafePath { path, .. } if path == "../escaped"),
         "实际 {err:?}"
     );
     assert!(!dir.path().join("escaped.json").exists());

@@ -1,9 +1,9 @@
 //! 元数据抓取的薄封装。
 //!
-//! 安装流程里除了「下文件」（走 aurora-download 引擎），还要「读元数据」：版本清单、版本 JSON、
+//! 安装流程里除了「下文件」（走 petalfall-download 引擎），还要「读元数据」：版本清单、版本 JSON、
 //! Fabric/Quilt meta、Forge maven-metadata。这些是小报文、需在内存里解析，故用注入的
 //! `reqwest::Client` 直接 GET，并在退避重试下取回字节（5xx/超时自动重试）。报文一律交给
-//! serde_json 自行解析（与 aurora-java 一致），不启用 reqwest 的 json 特性。
+//! serde_json 自行解析（与 petalfall-java 一致），不启用 reqwest 的 json 特性。
 //!
 //! 调用方给了下载源调度方案时，按它把官方地址展开成候选（官方 / 镜像，按策略排序），逐个尝试：
 //! 国内直连 meta.fabricmc.net、maven.minecraftforge.net 经常不通，单源抓取会让加载器列表与安装
@@ -21,9 +21,9 @@
 use std::future::Future;
 use std::time::Duration;
 
-use aurora_base::http::{BodyReadError, METADATA_MAX_BYTES, read_body_capped};
-use aurora_base::retry::{RetryPolicy, retry_async};
-use aurora_download::{CancellationToken, SourcePlan, is_host_fault};
+use petalfall_base::http::{BodyReadError, METADATA_MAX_BYTES, read_body_capped};
+use petalfall_base::retry::{RetryPolicy, retry_async};
+use petalfall_download::{CancellationToken, SourcePlan, is_host_fault};
 
 use crate::error::{Error, Result};
 
@@ -68,7 +68,7 @@ async fn cancellable<T>(
     };
     match token.run_until_cancelled(work).await {
         Some(result) => result,
-        None => Err(aurora_download::Error::Cancelled.into()),
+        None => Err(petalfall_download::Error::Cancelled.into()),
     }
 }
 
@@ -229,9 +229,9 @@ pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(bytes: &[u8], context: 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use aurora_base::mirror::MirrorSource;
-    use aurora_base::retry::RetryableError;
-    use aurora_download::{SourceHealth, SourceResolver};
+    use petalfall_base::mirror::MirrorSource;
+    use petalfall_base::retry::RetryableError;
+    use petalfall_download::{SourceHealth, SourceResolver};
     use std::io::{Read, Write};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -277,7 +277,7 @@ pub(crate) mod tests {
     }
 
     impl SourceResolver for Fixed {
-        fn resolve(&self, _url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+        fn resolve(&self, _url: &str, source: MirrorSource) -> petalfall_download::Result<String> {
             Ok(match source {
                 MirrorSource::Official => self.official.clone(),
                 MirrorSource::BmclApi => self.mirror.clone(),
@@ -329,7 +329,7 @@ pub(crate) mod tests {
             1,
         )
         .await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let plan = plan_between(&server, "/broken", "/good");
         let body = get_bytes_from(
             &client,
@@ -385,7 +385,7 @@ pub(crate) mod tests {
             1,
         )
         .await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let plan = plan_between(&server, "/silent", "/good");
 
         let started = Instant::now();
@@ -440,7 +440,7 @@ pub(crate) mod tests {
                 mirror: spare,
             }),
         );
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
 
         let body = get_bytes_from(
             &client,
@@ -462,7 +462,7 @@ pub(crate) mod tests {
         let server = MockServer::start().await;
         mount(&server, "/first", ResponseTemplate::new(503), 1).await;
         mount(&server, "/last", ResponseTemplate::new(503), 3).await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let plan = plan_between(&server, "/first", "/last");
         let policy = RetryPolicy {
             max_attempts: 3,
@@ -498,7 +498,7 @@ pub(crate) mod tests {
             5,
         )
         .await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let health = Arc::new(SourceHealth::new());
         let plan = plan_across(&down, &good, health.clone());
 
@@ -532,7 +532,7 @@ pub(crate) mod tests {
             4,
         )
         .await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let health = Arc::new(SourceHealth::new());
         let plan = plan_across(&down, &good, health.clone());
 
@@ -570,7 +570,7 @@ pub(crate) mod tests {
             1,
         )
         .await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let plan = plan_between(&server, "/garbled", "/clean");
         let value: serde_json::Value = get_json_from(
             &client,
@@ -598,7 +598,7 @@ pub(crate) mod tests {
             1,
         )
         .await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let plan = plan_between(&server, "/down", "/garbled");
         let err = get_json_from::<serde_json::Value>(
             &client,
@@ -742,7 +742,7 @@ pub(crate) mod tests {
             )
             .mount(&server)
             .await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let token = CancellationToken::new();
         let url = format!("{}/slow.json", server.uri());
 
@@ -760,7 +760,7 @@ pub(crate) mod tests {
             body: b"{\"versions\":".to_vec(),
             hold: Duration::from_secs(10),
         }]);
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let token = CancellationToken::new();
 
         let policy = fast_policy();
@@ -779,7 +779,7 @@ pub(crate) mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let token = CancellationToken::new();
         let url = format!("{}/busy.json", server.uri());
 
@@ -812,7 +812,7 @@ pub(crate) mod tests {
             .expect(0)
             .mount(&server)
             .await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let token = CancellationToken::new();
         token.cancel();
 
@@ -844,7 +844,7 @@ pub(crate) mod tests {
             .expect(0)
             .mount(&server)
             .await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let plan = plan_between(&server, "/stuck", "/spare");
         let token = CancellationToken::new();
         let policy = fast_policy();
@@ -877,7 +877,7 @@ pub(crate) mod tests {
                 hold: Duration::ZERO,
             },
         ]);
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let twice = RetryPolicy {
             max_attempts: 2,
             ..fast_policy()
@@ -892,7 +892,7 @@ pub(crate) mod tests {
     /// 响应头声明的长度超过上限：不读正文，也不重试，同一个源再来一次还是这么大。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_oversized_response_is_refused_without_a_retry() {
-        let declared = aurora_base::http::METADATA_MAX_BYTES as usize + 1;
+        let declared = petalfall_base::http::METADATA_MAX_BYTES as usize + 1;
         let (url, accepted) = raw_server(vec![
             RawReply {
                 declared,
@@ -905,7 +905,7 @@ pub(crate) mod tests {
                 hold: Duration::ZERO,
             },
         ]);
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let twice = RetryPolicy {
             max_attempts: 2,
             ..fast_policy()
@@ -921,7 +921,7 @@ pub(crate) mod tests {
             } => {
                 assert_eq!(failed, &url);
                 assert_eq!(*size, declared as u64);
-                assert_eq!(*limit, aurora_base::http::METADATA_MAX_BYTES);
+                assert_eq!(*limit, petalfall_base::http::METADATA_MAX_BYTES);
             }
             other => panic!("应为 ResponseTooLarge，实际 {other:?}"),
         }
@@ -937,7 +937,7 @@ pub(crate) mod tests {
             body: b"{\"id\":".to_vec(),
             hold: Duration::ZERO,
         }]);
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
 
         let err = get_bytes(&client, &url, &fast_policy(), None)
             .await

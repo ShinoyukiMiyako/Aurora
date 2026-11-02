@@ -61,7 +61,7 @@ export type AuthErrorCode =
   | "OfflineStoreSerialize"
   | "OfflineStoreDeserialize";
 
-export const DEVICE_CODE_EVENT = "aurora://device-code";
+export const DEVICE_CODE_EVENT = "petalfall://device-code";
 
 /** 微软登录进入设备码阶段时推送，供界面展示待输入短码与验证网址。 */
 export interface DeviceCode {

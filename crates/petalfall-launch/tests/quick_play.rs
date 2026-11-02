@@ -4,11 +4,11 @@
 
 use std::path::PathBuf;
 
-use aurora_launch::{
+use petalfall_launch::{
     AuthValues, CommandBuilder, GamePaths, LaunchError, QuickPlayMode, QuickPlaySupport,
     QuickPlayTarget, legacy_server_args, quick_play_support,
 };
-use aurora_version::{OsName, RuntimeContext, VersionJson};
+use petalfall_version::{OsName, RuntimeContext, VersionJson};
 
 const V1_12_2: &str = include_str!("fixtures/1.12.2.json");
 const V1_20_1: &str = include_str!("fixtures/1.20.1.json");

@@ -5,8 +5,8 @@
 //!
 //! 1. 读清单、去掉用户选择跳过的可选文件、校验实例名并查重；CurseForge 包先把全部文件 id 换成下载
 //!    地址——有作者禁止第三方分发、用户也还没手动下载认领的文件就在这一步整体报错，不先装几百 MB 游戏再
-//!    告诉用户装不完。这一步不动游戏目录（[`Aurora::prepare_modpack`]），调用方可以在这之后占住实例名再往下走。
-//! 2. 原子地建目录（同名即报错），写下带任务 id 的未完成标记（[`Aurora::import_modpack`] 从这里开始）。
+//!    告诉用户装不完。这一步不动游戏目录（[`Petalfall::prepare_modpack`]），调用方可以在这之后占住实例名再往下走。
+//! 2. 原子地建目录（同名即报错），写下带任务 id 的未完成标记（[`Petalfall::import_modpack`] 从这里开始）。
 //! 3. 装整合包要求的原版与加载器（与「安装版本」同一条路径，落在它们自然的版本目录里）。这次新落下的目录
 //!    记进依赖版本记录，不进实例库；目录原本就在的是玩家的，不记。
 //! 4. 在实例目录写一份以实例名为 id 的版本 JSON：有加载器时是加载器 JSON 的副本，原版时只
@@ -23,22 +23,22 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aurora_download::{CredentialScope, DownloadCredential, DownloadTask};
-use aurora_instance::{
-    AURORA_META_DIR, IncompleteKind, IncompleteMarker, IsolationOverride, MarkerStore,
-    NameViolation, VERSIONS_DIR, VersionSettings, VersionSettingsStore, check_name_format,
+use petalfall_download::{CredentialScope, DownloadCredential, DownloadTask};
+use petalfall_instance::{
+    IncompleteKind, IncompleteMarker, IsolationOverride, MarkerStore, NameViolation,
+    PETALFALL_META_DIR, VERSIONS_DIR, VersionSettings, VersionSettingsStore, check_name_format,
 };
-use aurora_modpack::{
+use petalfall_modpack::{
     CurseForgeFileRef, ModrinthFile, PackArchive, PackFormat, PackLoader, PackLoaderKind,
     PackManifest, RemoteFiles,
 };
-use aurora_modplatform::{CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform};
+use petalfall_modplatform::{CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform};
 use serde::{Deserialize, Serialize};
 
 use crate::blocked::{BlockedFile, CLAIMS_DIR, ClaimedCopy, PACK_CACHE_DIR, place_claimed};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::install::LoaderChoice;
 use crate::instance_install::{MarkerSettlement, now_millis, template_stage};
 use crate::resources::{
@@ -221,11 +221,11 @@ pub fn validate_instance_name(raw: &str) -> std::result::Result<String, NameViol
 
 /// 读实例里的整合包信息；不是从整合包导入的实例返回 `None`。
 pub async fn read_instance_modpack(version_dir: &Path) -> Result<Option<InstanceModpack>> {
-    let path = version_dir.join(AURORA_META_DIR).join(MODPACK_INFO_FILE);
+    let path = version_dir.join(PETALFALL_META_DIR).join(MODPACK_INFO_FILE);
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(aurora_base::Error::Io { path, source }.into()),
+        Err(source) => return Err(petalfall_base::Error::Io { path, source }.into()),
     };
     serde_json::from_slice(&bytes)
         .map(Some)
@@ -347,7 +347,7 @@ async fn sweep_stale_pack_caches(root: &Path, now: SystemTime) {
     }
 }
 
-impl Aurora {
+impl Petalfall {
     /// 预览本地整合包文件：只读清单与条目表，不解压。CurseForge 清单有远程文件时要问两个批量接口才
     /// 数得出 Mod、算得出下载量（导入同样要问），没配 API key 或断网时与导入报同样的错。
     ///
@@ -375,7 +375,7 @@ impl Aurora {
         Ok(preview_of(&archive, remote, &claimed, blocked))
     }
 
-    /// 把整合包导入为新实例：[`Aurora::prepare_modpack`] 之后紧接 [`Aurora::import_modpack`]。
+    /// 把整合包导入为新实例：[`Petalfall::prepare_modpack`] 之后紧接 [`Petalfall::import_modpack`]。
     /// 需要在建目录前占住实例名的调用方分开调用这两步。
     pub async fn install_modpack(
         &self,
@@ -395,7 +395,7 @@ impl Aurora {
     /// 文件、定下实例名并查重，把远程文件换成下载任务（CurseForge 禁止分发、又没认领到副本的文件在这里
     /// 整体报错，认领到的改为从暂存位复制）。`name` 缺省用整合包自己的名字。
     ///
-    /// 不动游戏目录。之后交给 [`Aurora::import_modpack`]，不导入了就 [`PreparedModpack::discard`]。
+    /// 不动游戏目录。之后交给 [`Petalfall::import_modpack`]，不导入了就 [`PreparedModpack::discard`]。
     pub async fn prepare_modpack(
         &self,
         source: &ModpackSource,
@@ -436,7 +436,7 @@ impl Aurora {
 
     /// 导入的第二步：建实例目录、写下带 `task_id` 的未完成标记，装游戏与加载器、下载远程文件、
     /// 解出覆盖文件、写整合包信息。任何一步失败都删掉这个实例目录；任务被强行放弃（future 被丢弃）
-    /// 或这里删不掉时，由调用方经 [`Aurora::discard_modpack_import`] 按实例名再清一次。平台整合包的
+    /// 或这里删不掉时，由调用方经 [`Petalfall::discard_modpack_import`] 按实例名再清一次。平台整合包的
     /// 下载缓存不论成败都删掉。
     pub async fn import_modpack(
         &self,
@@ -473,7 +473,7 @@ impl Aurora {
 
     /// 删掉一次没成的导入留下的实例目录 `versions/<name>`，返回目录原先是否存在。
     ///
-    /// 调用方从定下实例名起就占住这个名字，并在占住之后经 [`Aurora::ensure_modpack_name_free`] 确认过
+    /// 调用方从定下实例名起就占住这个名字，并在占住之后经 [`Petalfall::ensure_modpack_name_free`] 确认过
     /// 名字仍然空闲：这期间名下出现的目录只可能是这次导入建的，所以不看未完成标记——标记可能还没
     /// 来得及写下，也可能读不出来，按标记找会漏掉这两种半成品。
     pub async fn discard_modpack_import(&self, name: &str) -> Result<bool> {
@@ -482,7 +482,7 @@ impl Aurora {
             Ok(meta) if meta.is_dir() => {}
             Ok(_) => return Ok(false),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(source) => return Err(aurora_base::Error::Io { path: dir, source }.into()),
+            Err(source) => return Err(petalfall_base::Error::Io { path: dir, source }.into()),
         }
         remove_instance_dir(&dir).await?;
         Ok(true)
@@ -675,7 +675,7 @@ impl Aurora {
         let mods_dir = version_dir.join("mods");
         tokio::fs::create_dir_all(&mods_dir)
             .await
-            .map_err(|source| aurora_base::Error::Io {
+            .map_err(|source| petalfall_base::Error::Io {
                 path: mods_dir,
                 source,
             })?;
@@ -710,7 +710,7 @@ impl Aurora {
             let cancel = self.cancel_token().cloned();
             tokio::task::spawn_blocking(move || {
                 let is_cancelled = || cancel.as_ref().is_some_and(|t| t.is_cancelled());
-                aurora_modpack::extract_overrides(&pack, &entries, &dest, &is_cancelled)
+                petalfall_modpack::extract_overrides(&pack, &entries, &dest, &is_cancelled)
             })
             .await??;
         }
@@ -753,9 +753,9 @@ impl Aurora {
                 .map_err(CoreError::SystemClock)?
                 .as_secs(),
         };
-        let meta = version_dir.join(AURORA_META_DIR);
+        let meta = version_dir.join(PETALFALL_META_DIR);
         let bytes = serde_json::to_vec_pretty(&info).map_err(CoreError::JsonSerialize)?;
-        aurora_base::fs::atomic_write(meta.join(MODPACK_INFO_FILE), &bytes).await?;
+        petalfall_base::fs::atomic_write(meta.join(MODPACK_INFO_FILE), &bytes).await?;
         MarkerStore::for_version_dir(version_dir).clear().await?;
         emit(
             events,
@@ -773,57 +773,56 @@ impl Aurora {
         loader_id: Option<&str>,
     ) -> Result<()> {
         let layout = self.layout();
-        let json = match loader_id {
-            // 复制原文而不是经模型重新序列化：加载器 JSON 里有模型不认识的字段，丢了就启动不了。
-            Some(loader_id) => {
-                let path = layout.version_json(loader_id);
-                let bytes =
-                    tokio::fs::read(&path)
-                        .await
-                        .map_err(|source| aurora_base::Error::Io {
+        let json =
+            match loader_id {
+                // 复制原文而不是经模型重新序列化：加载器 JSON 里有模型不认识的字段，丢了就启动不了。
+                Some(loader_id) => {
+                    let path = layout.version_json(loader_id);
+                    let bytes = tokio::fs::read(&path).await.map_err(|source| {
+                        petalfall_base::Error::Io {
                             path: path.clone(),
                             source,
-                        })?;
-                let mut value: serde_json::Value = serde_json::from_slice(&bytes)
-                    .map_err(|source| CoreError::JsonFileInvalid { path, source })?;
-                value["id"] = serde_json::Value::String(name.to_owned());
-                value
-            }
-            None => {
-                let path = layout.version_json(vanilla_id);
-                let bytes =
-                    tokio::fs::read(&path)
-                        .await
-                        .map_err(|source| aurora_base::Error::Io {
-                            path: path.clone(),
-                            source,
-                        })?;
-                let vanilla: serde_json::Value = serde_json::from_slice(&bytes)
-                    .map_err(|source| CoreError::JsonFileInvalid { path, source })?;
-                let mut value = serde_json::json!({ "id": name, "inheritsFrom": vanilla_id });
-                // 版本类型决定按「非正式版」隔离的档位，跟原版走。
-                if let Some(kind) = vanilla.get("type") {
-                    value["type"] = kind.clone();
+                        }
+                    })?;
+                    let mut value: serde_json::Value = serde_json::from_slice(&bytes)
+                        .map_err(|source| CoreError::JsonFileInvalid { path, source })?;
+                    value["id"] = serde_json::Value::String(name.to_owned());
+                    value
                 }
-                value
-            }
-        };
+                None => {
+                    let path = layout.version_json(vanilla_id);
+                    let bytes = tokio::fs::read(&path).await.map_err(|source| {
+                        petalfall_base::Error::Io {
+                            path: path.clone(),
+                            source,
+                        }
+                    })?;
+                    let vanilla: serde_json::Value = serde_json::from_slice(&bytes)
+                        .map_err(|source| CoreError::JsonFileInvalid { path, source })?;
+                    let mut value = serde_json::json!({ "id": name, "inheritsFrom": vanilla_id });
+                    // 版本类型决定按「非正式版」隔离的档位，跟原版走。
+                    if let Some(kind) = vanilla.get("type") {
+                        value["type"] = kind.clone();
+                    }
+                    value
+                }
+            };
         let bytes = serde_json::to_vec_pretty(&json).map_err(CoreError::JsonSerialize)?;
-        aurora_base::fs::atomic_write(version_dir.join(format!("{name}.json")), &bytes).await?;
+        petalfall_base::fs::atomic_write(version_dir.join(format!("{name}.json")), &bytes).await?;
         Ok(())
     }
 
     /// 不区分大小写地检查 `versions/` 下有没有同名目录；有就报与准备阶段相同的重名错误。
     ///
     /// 准备阶段已经查过一次；调用方占住实例名之后要再查一次：两次之间别的命令可能抢先建了同名实例，
-    /// 而只有占住之后仍然空闲，名下的目录才能认定是这次导入建的（见 [`Aurora::discard_modpack_import`]）。
+    /// 而只有占住之后仍然空闲，名下的目录才能认定是这次导入建的（见 [`Petalfall::discard_modpack_import`]）。
     pub async fn ensure_modpack_name_free(&self, name: &str) -> Result<()> {
         let versions = self.game_dir().join(VERSIONS_DIR);
         let mut entries = match tokio::fs::read_dir(&versions).await {
             Ok(entries) => entries,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(source) => {
-                return Err(aurora_base::Error::Io {
+                return Err(petalfall_base::Error::Io {
                     path: versions,
                     source,
                 }
@@ -835,7 +834,7 @@ impl Aurora {
             entries
                 .next_entry()
                 .await
-                .map_err(|source| aurora_base::Error::Io {
+                .map_err(|source| petalfall_base::Error::Io {
                     path: versions.clone(),
                     source,
                 })?
@@ -924,7 +923,7 @@ impl Aurora {
                 let mut downloads = Vec::with_capacity(files.len());
                 for file in files {
                     let Some((first, rest)) = file.urls.split_first() else {
-                        return Err(aurora_modpack::Error::ManifestInvalid {
+                        return Err(petalfall_modpack::Error::ManifestInvalid {
                             document: "modrinth.index.json",
                             reason: format!("{} 没有下载地址", file.path),
                         }
@@ -1060,7 +1059,7 @@ impl Aurora {
             if report.failures.is_empty() {
                 return Ok(());
             }
-            let mut failed: HashMap<PathBuf, aurora_download::Error> = report
+            let mut failed: HashMap<PathBuf, petalfall_download::Error> = report
                 .failures
                 .into_iter()
                 .map(|f| (f.task.dest, f.error))
@@ -1104,7 +1103,7 @@ fn modrinth_cdn_credential(
     }
     match resolve() {
         Ok(credential) => Ok(Some(credential)),
-        Err(CoreError::ModPlatform(aurora_modplatform::Error::CurseForgeKeyMissing))
+        Err(CoreError::ModPlatform(petalfall_modplatform::Error::CurseForgeKeyMissing))
             if files
                 .iter()
                 .all(|file| file.urls.iter().any(|url| !on_cdn(scope, url))) =>
@@ -1383,7 +1382,7 @@ fn preview_of(
 }
 
 pub(crate) async fn read_pack_blocking(path: PathBuf) -> Result<PackArchive> {
-    Ok(tokio::task::spawn_blocking(move || aurora_modpack::read_pack(&path)).await??)
+    Ok(tokio::task::spawn_blocking(move || petalfall_modpack::read_pack(&path)).await??)
 }
 
 fn name_error(name: &str, rule: NameViolation) -> CoreError {
@@ -1415,7 +1414,7 @@ async fn create_instance_dir(version_dir: &Path, name: &str) -> Result<()> {
     if let Some(parent) = version_dir.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|source| aurora_base::Error::Io {
+            .map_err(|source| petalfall_base::Error::Io {
                 path: parent.to_path_buf(),
                 source,
             })?;
@@ -1425,7 +1424,7 @@ async fn create_instance_dir(version_dir: &Path, name: &str) -> Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
             Err(name_error(name, NameViolation::Duplicate))
         }
-        Err(source) => Err(aurora_base::Error::Io {
+        Err(source) => Err(petalfall_base::Error::Io {
             path: version_dir.to_path_buf(),
             source,
         }
@@ -1450,7 +1449,7 @@ async fn remove_instance_dir(version_dir: &Path) -> Result<()> {
     tokio::fs::remove_dir_all(version_dir)
         .await
         .map_err(|source| {
-            aurora_base::Error::Io {
+            petalfall_base::Error::Io {
                 path: version_dir.to_path_buf(),
                 source,
             }
@@ -1463,8 +1462,8 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-    use crate::config::AuroraConfig;
-    use aurora_instance::{IsolationPolicy, discover_versions};
+    use crate::config::PetalfallConfig;
+    use petalfall_instance::{IsolationPolicy, discover_versions};
     use sha1::{Digest, Sha1};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1520,7 +1519,7 @@ mod tests {
         const CDN: &str = "https://cdn.modrinth.com/data/x/sodium.jar";
         let server = MockServer::start().await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora(tmp.path(), &server).with_curseforge_key("pack-key");
+        let petalfall = petalfall(tmp.path(), &server).with_curseforge_key("pack-key");
         let file = |name: &str, urls: &[&str]| {
             let urls: Vec<String> = urls.iter().map(|url| (*url).to_owned()).collect();
             modrinth_file(&format!("mods/{name}"), &urls, b"x")
@@ -1531,7 +1530,7 @@ mod tests {
             file("rei.jar", &[CDN, MEDIA]),
         ]);
 
-        let plan = aurora
+        let plan = petalfall
             .remote_downloads(&remote, &HashSet::new(), Path::new("D:/mc/versions/包"))
             .await
             .unwrap();
@@ -1545,23 +1544,23 @@ mod tests {
         let credential = plan.downloads[0].task.credential.as_ref().unwrap();
         assert_eq!(
             credential.realm(),
-            aurora_download::CredentialRealm::CurseForge
+            petalfall_download::CredentialRealm::CurseForge
         );
         assert!(credential.applies_to(&reqwest::Url::parse(MEDIA).unwrap()));
         assert!(!credential.applies_to(&reqwest::Url::parse(CDN).unwrap()));
         assert_eq!(plan.downloads[2].fallbacks, vec![MEDIA.to_owned()]);
     }
 
-    fn aurora(root: &Path, server: &MockServer) -> Aurora {
+    fn petalfall(root: &Path, server: &MockServer) -> Petalfall {
         let mc = root.join("mc");
-        let mut aurora = Aurora::for_test(AuroraConfig::default(), root.join("data"), mc)
+        let mut petalfall = Petalfall::for_test(PetalfallConfig::default(), root.join("data"), mc)
             .with_manifest_url(format!("{}/manifest.json", server.uri()))
             .with_fabric_base(server.uri())
             .with_modrinth_base(server.uri())
             .with_curseforge_base(server.uri());
         // 全局不隔离：导入的实例仍必须隔离，验证的是实例自己的强制隔离。
-        aurora.set_isolation_policy(IsolationPolicy::Disabled);
-        aurora
+        petalfall.set_isolation_policy(IsolationPolicy::Disabled);
+        petalfall
     }
 
     fn sha1_hex(bytes: &[u8]) -> String {
@@ -1624,7 +1623,7 @@ mod tests {
         let mut rng = fastrand::Rng::with_seed(seed);
         let alphabet: Vec<char> = "abcXYZ019 -_+()[]樱花林落樱整合包".chars().collect();
         for _ in 0..500 {
-            let len = rng.usize(1..=aurora_instance::MAX_NAME_UNITS);
+            let len = rng.usize(1..=petalfall_instance::MAX_NAME_UNITS);
             let raw: String = (0..len)
                 .map(|_| alphabet[rng.usize(..alphabet.len())])
                 .collect();
@@ -1657,10 +1656,10 @@ mod tests {
                 ("server-overrides/server.properties", b"motd=x"),
             ],
         );
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let outcome = aurora
+        let outcome = petalfall
             .install_modpack(
                 &ModpackSource::File { path: pack.clone() },
                 Some(" 我的整合包 "),
@@ -1671,7 +1670,7 @@ mod tests {
             .await
             .unwrap();
 
-        let dir = aurora.game_dir().join("versions").join("我的整合包");
+        let dir = petalfall.game_dir().join("versions").join("我的整合包");
         assert_eq!(outcome.version_id, "我的整合包");
         assert_eq!(outcome.version_dir, dir);
         let json: serde_json::Value =
@@ -1717,7 +1716,7 @@ mod tests {
         assert!(info.installed_at > 1_700_000_000);
 
         // 启动链路看到的是一个独立实例：被发现、无加载器、全局不隔离时工作目录仍是实例目录。
-        let scan = discover_versions(aurora.game_dir()).await.unwrap();
+        let scan = discover_versions(petalfall.game_dir()).await.unwrap();
         let found = scan
             .versions
             .iter()
@@ -1726,7 +1725,7 @@ mod tests {
         assert!(!found.has_mod_loader());
         assert!(found.is_release());
         assert_eq!(
-            aurora
+            petalfall
                 .resolve_working_dir("我的整合包")
                 .await
                 .unwrap()
@@ -1774,9 +1773,9 @@ mod tests {
             &index(serde_json::json!({"minecraft": "test", "fabric-loader": "0.15.0"})),
             &[],
         );
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
 
-        aurora
+        petalfall
             .install_modpack(
                 &ModpackSource::File { path: pack },
                 Some("坏掉的包"),
@@ -1787,7 +1786,7 @@ mod tests {
             .await
             .expect_err("加载器库下不下来，导入应失败");
 
-        let scan = discover_versions(aurora.game_dir()).await.unwrap();
+        let scan = discover_versions(petalfall.game_dir()).await.unwrap();
         let ids: Vec<&str> = scan.versions.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(ids, vec!["test"]);
         assert_eq!(scan.broken, Vec::new());
@@ -1805,17 +1804,17 @@ mod tests {
             &index(serde_json::json!({"minecraft": "test"})),
             &[("overrides/options.txt", b"lang:en_us")],
         );
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
         let servers: Vec<u8> = (0..fastrand::usize(1..2048))
             .map(|_| fastrand::u8(..))
             .collect();
-        let template = aurora.template_dir();
+        let template = petalfall.template_dir();
         std::fs::create_dir_all(&template).unwrap();
         std::fs::write(template.join("options.txt"), b"fov:90").unwrap();
         std::fs::write(template.join("servers.dat"), &servers).unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let outcome = aurora
+        let outcome = petalfall
             .install_modpack(
                 &ModpackSource::File { path: pack.clone() },
                 Some("带模板"),
@@ -1845,10 +1844,10 @@ mod tests {
             "{stages:?}"
         );
 
-        let mut off = Aurora::for_test(
-            AuroraConfig {
+        let mut off = Petalfall::for_test(
+            PetalfallConfig {
                 new_instance_template: false,
-                ..AuroraConfig::default()
+                ..PetalfallConfig::default()
             },
             tmp.path().join("data"),
             tmp.path().join("mc"),
@@ -1882,17 +1881,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pack = tmp.path().join("RLCraft.mrpack");
         write_pack(&pack, &index(serde_json::json!({"minecraft": "test"})), &[]);
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
         let hour = 3_600_000;
         for id in ["RLCraft", "现有", "别的"] {
-            crate::playtime::record_play(aurora.data_dir(), aurora.game_dir(), id, 0, 10 * hour)
-                .await
-                .unwrap();
+            crate::playtime::record_play(
+                petalfall.data_dir(),
+                petalfall.game_dir(),
+                id,
+                0,
+                10 * hour,
+            )
+            .await
+            .unwrap();
         }
-        std::fs::create_dir_all(aurora.game_dir().join("versions").join("现有")).unwrap();
+        std::fs::create_dir_all(petalfall.game_dir().join("versions").join("现有")).unwrap();
         let source = ModpackSource::File { path: pack.clone() };
 
-        aurora
+        petalfall
             .install_modpack(
                 &source,
                 Some("现有"),
@@ -1902,7 +1907,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        aurora
+        petalfall
             .install_modpack(
                 &source,
                 Some("RLCraft"),
@@ -1913,7 +1918,7 @@ mod tests {
             .await
             .unwrap();
 
-        let summaries = aurora.play_summaries().await.unwrap();
+        let summaries = petalfall.play_summaries().await.unwrap();
         assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["别的", "现有"]);
         assert_eq!(summaries["现有"].playtime_min, 600);
     }
@@ -1940,9 +1945,9 @@ mod tests {
             &index(serde_json::json!({"minecraft": "test", "fabric-loader": "0.15.0"})),
             &[],
         );
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
 
-        let prepared = aurora
+        let prepared = petalfall
             .prepare_modpack(
                 &ModpackSource::File { path: pack },
                 None,
@@ -1955,13 +1960,13 @@ mod tests {
         let natural = prepared.natural_versions();
         assert_eq!(natural, ["test", "fabric-loader-0.15.0-test"]);
         let base = natural[0].clone();
-        let outcome = aurora
+        let outcome = petalfall
             .import_modpack(prepared, "task-f", None)
             .await
             .unwrap();
         assert_eq!(outcome.version_id, "测试包");
         assert!(
-            aurora
+            petalfall
                 .game_dir()
                 .join(VERSIONS_DIR)
                 .join(&natural[1])
@@ -1974,7 +1979,7 @@ mod tests {
         assert_eq!(json["id"], "测试包");
         assert_eq!(json["inheritsFrom"], base.as_str());
         assert_eq!(
-            aurora.inheritance_chain("测试包").await.unwrap(),
+            petalfall.inheritance_chain("测试包").await.unwrap(),
             vec![base.clone()]
         );
         assert_eq!(
@@ -1992,7 +1997,7 @@ mod tests {
                 version: "0.15.0".into()
             })
         );
-        let scan = discover_versions(aurora.game_dir()).await.unwrap();
+        let scan = discover_versions(petalfall.game_dir()).await.unwrap();
         let found = scan.versions.iter().find(|v| v.id == "测试包").unwrap();
         assert!(found.has_mod_loader(), "加载器应能从实例 JSON 识别出来");
     }
@@ -2002,7 +2007,7 @@ mod tests {
     async fn natural_versions_follow_the_pack_manifest() {
         let server = MockServer::start().await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
         let pack = tmp.path().join("pack.mrpack");
         for (dependencies, natural) in [
             (serde_json::json!({"minecraft": "1.21"}), vec!["1.21"]),
@@ -2020,7 +2025,7 @@ mod tests {
             ),
         ] {
             write_pack(&pack, &index(dependencies), &[]);
-            let prepared = aurora
+            let prepared = petalfall
                 .prepare_modpack(
                     &ModpackSource::File { path: pack.clone() },
                     None,
@@ -2070,11 +2075,11 @@ mod tests {
     }
 
     async fn import_as(
-        aurora: &Aurora,
+        petalfall: &Petalfall,
         pack: PathBuf,
         name: &str,
     ) -> Result<ModpackInstallOutcome> {
-        aurora
+        petalfall
             .install_modpack(
                 &ModpackSource::File { path: pack },
                 Some(name),
@@ -2085,13 +2090,13 @@ mod tests {
             .await
     }
 
-    async fn listed_ids(aurora: &Aurora) -> Vec<String> {
-        let list = aurora.list_instances().await.unwrap();
+    async fn listed_ids(petalfall: &Petalfall) -> Vec<String> {
+        let list = petalfall.list_instances().await.unwrap();
         list.into_iter().map(|instance| instance.id).collect()
     }
 
-    fn write_game_version(aurora: &Aurora, id: &str, json: &str) {
-        let dir = aurora.game_dir().join("versions").join(id);
+    fn write_game_version(petalfall: &Petalfall, id: &str, json: &str) {
+        let dir = petalfall.game_dir().join("versions").join(id);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{id}.json")), json).unwrap();
     }
@@ -2105,13 +2110,13 @@ mod tests {
         mount_fabric(&server).await;
         let tmp = tempfile::tempdir().unwrap();
         let pack = fabric_pack(tmp.path());
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
 
-        let outcome = import_as(&aurora, pack, "周末整合包").await.unwrap();
+        let outcome = import_as(&petalfall, pack, "周末整合包").await.unwrap();
 
-        assert_eq!(listed_ids(&aurora).await, ["周末整合包"]);
+        assert_eq!(listed_ids(&petalfall).await, ["周末整合包"]);
         for base in ["test", NATURAL_FABRIC] {
-            let json = aurora
+            let json = petalfall
                 .game_dir()
                 .join("versions")
                 .join(base)
@@ -2121,8 +2126,8 @@ mod tests {
 
         std::fs::remove_dir_all(&outcome.version_dir).unwrap();
 
-        assert!(listed_ids(&aurora).await.is_empty());
-        let err = aurora.check_new_instance_name("test").await.unwrap_err();
+        assert!(listed_ids(&petalfall).await.is_empty());
+        let err = petalfall.check_new_instance_name("test").await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -2143,26 +2148,26 @@ mod tests {
         mount_fabric(&server).await;
         let tmp = tempfile::tempdir().unwrap();
         let pack = fabric_pack(tmp.path());
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
         write_game_version(
-            &aurora,
+            &petalfall,
             "test",
             r#"{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main"}"#,
         );
         write_game_version(
-            &aurora,
+            &petalfall,
             NATURAL_FABRIC,
             &fabric_profile("https://example.invalid"),
         );
 
-        let outcome = import_as(&aurora, pack, "周末整合包").await.unwrap();
+        let outcome = import_as(&petalfall, pack, "周末整合包").await.unwrap();
 
         assert_eq!(
-            listed_ids(&aurora).await,
+            listed_ids(&petalfall).await,
             [NATURAL_FABRIC, "test", "周末整合包"]
         );
         std::fs::remove_dir_all(&outcome.version_dir).unwrap();
-        assert_eq!(listed_ids(&aurora).await, [NATURAL_FABRIC, "test"]);
+        assert_eq!(listed_ids(&petalfall).await, [NATURAL_FABRIC, "test"]);
     }
 
     /// 一个整合包落下基底后，下一个用同样基底的整合包看到的是「目录原本就在」：记录不因此变，基底照样不列出。
@@ -2173,12 +2178,12 @@ mod tests {
         mount_fabric(&server).await;
         let tmp = tempfile::tempdir().unwrap();
         let pack = fabric_pack(tmp.path());
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
 
-        import_as(&aurora, pack.clone(), "第一个").await.unwrap();
-        import_as(&aurora, pack, "第二个").await.unwrap();
+        import_as(&petalfall, pack.clone(), "第一个").await.unwrap();
+        import_as(&petalfall, pack, "第二个").await.unwrap();
 
-        assert_eq!(listed_ids(&aurora).await, ["第一个", "第二个"]);
+        assert_eq!(listed_ids(&petalfall).await, ["第一个", "第二个"]);
     }
 
     /// 加载器没装成：原版已经落下、目录留着，不能露出来；加载器版本没有落下，不留在记录里，日后别的启动器装出
@@ -2189,13 +2194,13 @@ mod tests {
         mount_vanilla(&server).await;
         let tmp = tempfile::tempdir().unwrap();
         let pack = fabric_pack(tmp.path());
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
 
-        import_as(&aurora, pack, "周末整合包").await.unwrap_err();
+        import_as(&petalfall, pack, "周末整合包").await.unwrap_err();
 
-        assert!(listed_ids(&aurora).await.is_empty());
+        assert!(listed_ids(&petalfall).await.is_empty());
         assert!(
-            aurora
+            petalfall
                 .game_dir()
                 .join("versions")
                 .join("test")
@@ -2204,11 +2209,11 @@ mod tests {
         );
 
         write_game_version(
-            &aurora,
+            &petalfall,
             NATURAL_FABRIC,
             &fabric_profile("https://example.invalid"),
         );
-        assert_eq!(listed_ids(&aurora).await, [NATURAL_FABRIC]);
+        assert_eq!(listed_ids(&petalfall).await, [NATURAL_FABRIC]);
     }
 
     /// 安装器落的目录名和按写法算出的不同（早期 Forge 的 legacy 安装器会这样）：实际落下的记下，算出的那个没落下，
@@ -2235,17 +2240,17 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let pack = fabric_pack(tmp.path());
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
 
-        import_as(&aurora, pack, "周末整合包").await.unwrap();
+        import_as(&petalfall, pack, "周末整合包").await.unwrap();
 
-        assert_eq!(listed_ids(&aurora).await, ["周末整合包"]);
+        assert_eq!(listed_ids(&petalfall).await, ["周末整合包"]);
         write_game_version(
-            &aurora,
+            &petalfall,
             NATURAL_FABRIC,
             &fabric_profile("https://example.invalid"),
         );
-        assert_eq!(listed_ids(&aurora).await, [NATURAL_FABRIC, "周末整合包"]);
+        assert_eq!(listed_ids(&petalfall).await, [NATURAL_FABRIC, "周末整合包"]);
     }
 
     /// 原版就没装成：什么都没落下，记录里什么都不留，日后别的启动器装出这个版本时它照常列出。
@@ -2264,17 +2269,17 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let pack = fabric_pack(tmp.path());
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
 
-        import_as(&aurora, pack, "周末整合包").await.unwrap_err();
+        import_as(&petalfall, pack, "周末整合包").await.unwrap_err();
 
-        assert!(listed_ids(&aurora).await.is_empty());
+        assert!(listed_ids(&petalfall).await.is_empty());
         write_game_version(
-            &aurora,
+            &petalfall,
             "test",
             r#"{"id":"test","type":"release","mainClass":"net.minecraft.client.main.Main"}"#,
         );
-        assert_eq!(listed_ids(&aurora).await, ["test"]);
+        assert_eq!(listed_ids(&petalfall).await, ["test"]);
     }
 
     /// 平台整合包：先下载到缓存，导入后缓存删掉，整合包信息记下平台、工程与版本。
@@ -2306,14 +2311,14 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
             .mount(&server)
             .await;
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
         let source = ModpackSource::Platform {
             platform: Platform::Modrinth,
             project_id: "proj".into(),
             version_id: "pv1".into(),
         };
 
-        let outcome = aurora
+        let outcome = petalfall
             .install_modpack(
                 &source,
                 Some("从平台装"),
@@ -2366,14 +2371,14 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
             .mount(&server)
             .await;
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
         let source = ModpackSource::Platform {
             platform: Platform::Modrinth,
             project_id: "proj".into(),
             version_id: "pv2".into(),
         };
 
-        let prepared = aurora
+        let prepared = petalfall
             .prepare_modpack(&source, None, &ImportSelection::default(), None)
             .await
             .unwrap();
@@ -2385,7 +2390,11 @@ mod tests {
         );
         assert!(cache.join("pack.mrpack").is_file(), "平台包应已下到缓存");
         assert!(
-            !aurora.game_dir().join("versions").join("测试包").exists(),
+            !petalfall
+                .game_dir()
+                .join("versions")
+                .join("测试包")
+                .exists(),
             "准备一步不建实例目录"
         );
         prepared.discard().await;
@@ -2395,7 +2404,7 @@ mod tests {
             "放弃导入时删掉下载缓存"
         );
 
-        let err = aurora
+        let err = petalfall
             .prepare_modpack(&source, Some("a/b"), &ImportSelection::default(), None)
             .await
             .unwrap_err();
@@ -2474,17 +2483,17 @@ mod tests {
         );
         let bytes = std::fs::read(&built).unwrap();
         mount_platform_pack(&server, "pv3", &sha1_hex(&bytes), bytes).await;
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
         let source = platform_source("pv3");
         let none = ImportSelection::default();
 
         let (first, second) = tokio::join!(
-            aurora.prepare_modpack(&source, Some("第一份"), &none, None),
-            aurora.prepare_modpack(&source, Some("第二份"), &none, None),
+            petalfall.prepare_modpack(&source, Some("第一份"), &none, None),
+            petalfall.prepare_modpack(&source, Some("第二份"), &none, None),
         );
         let (first, second) = (first.unwrap(), second.unwrap());
         first.discard().await;
-        let outcome = aurora
+        let outcome = petalfall
             .import_modpack(second, "task-second", None)
             .await
             .unwrap();
@@ -2507,9 +2516,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // 回来的内容与声明的哈希对不上：下载走到了落盘这一步才失败，目录已经建出来了。
         mount_platform_pack(&server, "pv4", &"0".repeat(40), b"not the pack".to_vec()).await;
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
 
-        let err = aurora
+        let err = petalfall
             .prepare_modpack(
                 &platform_source("pv4"),
                 None,
@@ -2582,9 +2591,9 @@ mod tests {
             .unwrap()
             .set_modified(SystemTime::now() - STALE_PACK_CACHE_AGE - Duration::from_secs(60))
             .unwrap();
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
 
-        let prepared = aurora
+        let prepared = petalfall
             .prepare_modpack(
                 &platform_source("pv5"),
                 None,
@@ -2613,8 +2622,8 @@ mod tests {
         let server = MockServer::start().await;
         mount_vanilla(&server).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora(tmp.path(), &server);
-        let versions = aurora.game_dir().join("versions");
+        let petalfall = petalfall(tmp.path(), &server);
+        let versions = petalfall.game_dir().join("versions");
 
         let missing = tmp.path().join("missing.mrpack");
         write_pack(
@@ -2622,7 +2631,7 @@ mod tests {
             &index(serde_json::json!({"minecraft": "no-such-version"})),
             &[("overrides/a.txt", b"a")],
         );
-        let err = aurora
+        let err = petalfall
             .install_modpack(
                 &ModpackSource::File { path: missing },
                 Some("坏包"),
@@ -2640,7 +2649,7 @@ mod tests {
         let pack = tmp.path().join("ok.mrpack");
         write_pack(&pack, &index(serde_json::json!({"minecraft": "test"})), &[]);
         let source = ModpackSource::File { path: pack };
-        let err = aurora
+        let err = petalfall
             .install_modpack(
                 &source,
                 Some("taken"),
@@ -2659,7 +2668,7 @@ mod tests {
             b"keep"
         );
 
-        let err = aurora
+        let err = petalfall
             .install_modpack(
                 &source,
                 Some("TEST"),
@@ -2681,7 +2690,7 @@ mod tests {
             "与游戏版本同名应在安装前拒绝"
         );
 
-        let err = aurora
+        let err = petalfall
             .install_modpack(
                 &source,
                 Some("a/b"),
@@ -2706,8 +2715,8 @@ mod tests {
     async fn discard_by_name_removes_the_half_import_whatever_its_marker() {
         let tmp = tempfile::tempdir().unwrap();
         let server = MockServer::start().await;
-        let aurora = aurora(tmp.path(), &server);
-        let versions = aurora.game_dir().join("versions");
+        let petalfall = petalfall(tmp.path(), &server);
+        let versions = petalfall.game_dir().join("versions");
         let corrupt = MarkerStore::for_version_dir(&versions.join("标记坏了"));
         std::fs::create_dir_all(corrupt.path().parent().unwrap()).unwrap();
         std::fs::write(corrupt.path(), b"{").unwrap();
@@ -2718,13 +2727,19 @@ mod tests {
         std::fs::create_dir_all(versions.join("邻居")).unwrap();
 
         for name in ["标记坏了", "还没写标记", "正常的"] {
-            assert!(aurora.discard_modpack_import(name).await.unwrap(), "{name}");
+            assert!(
+                petalfall.discard_modpack_import(name).await.unwrap(),
+                "{name}"
+            );
             assert!(!versions.join(name).exists(), "{name}");
         }
-        assert!(!aurora.discard_modpack_import("正常的").await.unwrap());
+        assert!(!petalfall.discard_modpack_import("正常的").await.unwrap());
         assert!(versions.join("邻居").is_dir());
         assert!(matches!(
-            aurora.discard_modpack_import("..\\邻居").await.unwrap_err(),
+            petalfall
+                .discard_modpack_import("..\\邻居")
+                .await
+                .unwrap_err(),
             CoreError::Instance(crate::InstanceError::InvalidId { .. })
         ));
     }
@@ -2732,12 +2747,12 @@ mod tests {
     /// 删不掉的半成品落成结局：保留原来的开始时刻；原标记读不出来时换成一份新的、读得出来的。
     #[tokio::test]
     async fn settling_a_half_import_records_its_outcome() {
-        use aurora_instance::{IncompleteOutcome, MarkerError};
+        use petalfall_instance::{IncompleteOutcome, MarkerError};
 
         let tmp = tempfile::tempdir().unwrap();
         let server = MockServer::start().await;
-        let aurora = aurora(tmp.path(), &server);
-        let versions = aurora.game_dir().join("versions");
+        let petalfall = petalfall(tmp.path(), &server);
+        let versions = petalfall.game_dir().join("versions");
         let dir = versions.join("删不掉");
         std::fs::create_dir_all(&dir).unwrap();
         MarkerStore::for_version_dir(&dir)
@@ -2753,7 +2768,7 @@ mod tests {
             code: "download_failed".into(),
             message: "下载失败".into(),
         };
-        aurora
+        petalfall
             .settle_modpack_import("删不掉", "mp#1", MarkerSettlement::Failed(failure.clone()))
             .await
             .unwrap();
@@ -2775,7 +2790,7 @@ mod tests {
         let broken = MarkerStore::for_version_dir(&versions.join("标记坏了"));
         std::fs::create_dir_all(broken.path().parent().unwrap()).unwrap();
         std::fs::write(broken.path(), b"{").unwrap();
-        aurora
+        petalfall
             .settle_modpack_import("标记坏了", "mp#2", MarkerSettlement::Cancelled)
             .await
             .unwrap();
@@ -2802,7 +2817,10 @@ mod tests {
                 task_id: "mp#3".into()
             }
         );
-        assert_eq!(marker.outcome, aurora_instance::IncompleteOutcome::Pending);
+        assert_eq!(
+            marker.outcome,
+            petalfall_instance::IncompleteOutcome::Pending
+        );
         assert!(marker.started_at > 1_700_000_000_000);
     }
 
@@ -2821,7 +2839,7 @@ mod tests {
             .mount(&server)
             .await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
         let dest = tmp.path().join("inst").join("mods").join("a.jar");
         let item = |fallbacks: Vec<String>| RemoteDownload {
             task: DownloadTask::new(format!("{}/gone.jar", server.uri()), &dest)
@@ -2830,14 +2848,14 @@ mod tests {
             fallbacks,
         };
 
-        aurora
+        petalfall
             .download_remote(vec![item(vec![format!("{}/good.jar", server.uri())])], None)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"jar");
 
         std::fs::remove_file(&dest).unwrap();
-        let err = aurora
+        let err = petalfall
             .download_remote(vec![item(Vec::new())], None)
             .await
             .unwrap_err();
@@ -2847,7 +2865,7 @@ mod tests {
 
     fn modrinth_file(dest: &str, urls: &[String], bytes: &[u8]) -> ModrinthFile {
         ModrinthFile {
-            path: aurora_modpack::SafeRelativePath::new(dest).unwrap(),
+            path: petalfall_modpack::SafeRelativePath::new(dest).unwrap(),
             urls: urls.to_vec(),
             sha1: sha1_hex(bytes),
             size: bytes.len() as u64,
@@ -2878,9 +2896,9 @@ mod tests {
             .mount(&other)
             .await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora(tmp.path(), &other)
+        let petalfall = petalfall(tmp.path(), &other)
             .with_curseforge_key("k")
-            .with_curseforge_cdn_scope(aurora_download::CredentialScope::new(
+            .with_curseforge_cdn_scope(petalfall_download::CredentialScope::new(
                 [format!("127.0.0.1:{}", cdn.address().port())],
                 false,
             ));
@@ -2898,11 +2916,14 @@ mod tests {
             ),
         ]);
 
-        let plan = aurora
+        let plan = petalfall
             .remote_downloads(&files, &HashSet::new(), &inst)
             .await
             .unwrap();
-        aurora.download_remote(plan.downloads, None).await.unwrap();
+        petalfall
+            .download_remote(plan.downloads, None)
+            .await
+            .unwrap();
 
         assert_eq!(
             std::fs::read(inst.join("mods").join("cdn.jar")).unwrap(),
@@ -2938,18 +2959,21 @@ mod tests {
             &[format!("{}/locked.jar", cdn.uri())],
             b"x",
         )]);
-        let plan = aurora
+        let plan = petalfall
             .remote_downloads(&locked, &HashSet::new(), &inst)
             .await
             .unwrap();
-        let err = aurora
+        let err = petalfall
             .download_remote(plan.downloads, None)
             .await
             .unwrap_err();
         assert!(
             matches!(
                 &err,
-                CoreError::Download(aurora_download::Error::CredentialRejected { status: 401, .. })
+                CoreError::Download(petalfall_download::Error::CredentialRejected {
+                    status: 401,
+                    ..
+                })
             ),
             "{err:?}"
         );
@@ -2967,7 +2991,7 @@ mod tests {
         };
         let missing = || {
             Err(CoreError::ModPlatform(
-                aurora_modplatform::Error::CurseForgeKeyMissing,
+                petalfall_modplatform::Error::CurseForgeKeyMissing,
             ))
         };
         let key = || Ok(DownloadCredential::curseforge("k").unwrap());
@@ -2988,7 +3012,7 @@ mod tests {
         assert!(matches!(
             modrinth_cdn_credential(&cdn_only, &scope, missing),
             Err(CoreError::ModPlatform(
-                aurora_modplatform::Error::CurseForgeKeyMissing
+                petalfall_modplatform::Error::CurseForgeKeyMissing
             ))
         ));
 
@@ -3008,7 +3032,7 @@ mod tests {
         assert!(matches!(
             modrinth_cdn_credential(&with_fallback, &scope, malformed),
             Err(CoreError::Download(
-                aurora_download::Error::InvalidCredential { .. }
+                petalfall_download::Error::InvalidCredential { .. }
             ))
         ));
     }
@@ -3065,7 +3089,7 @@ mod tests {
                 .mount(&server)
                 .await;
         }
-        let client = CurseForgeClient::new(aurora_base::http::build_client().unwrap(), "k")
+        let client = CurseForgeClient::new(petalfall_base::http::build_client().unwrap(), "k")
             .with_base_url(&uri);
         let dir = Path::new("D:/mc/versions/包");
         let refs = |ids: &[(u32, u32)]| -> Vec<CurseForgeFileRef> {
@@ -3078,9 +3102,9 @@ mod tests {
         };
 
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+        let petalfall = petalfall(tmp.path(), &server).with_curseforge_key("k");
 
-        let plan = aurora
+        let plan = petalfall
             .curseforge_downloads(
                 &client,
                 &refs(&[(1, 11), (2, 22), (3, 33), (4, 44)]),
@@ -3095,7 +3119,7 @@ mod tests {
             let credential = download.task.credential.as_ref().expect("应带下载凭据");
             assert_eq!(
                 credential.realm(),
-                aurora_download::CredentialRealm::CurseForge
+                petalfall_download::CredentialRealm::CurseForge
             );
         }
         let dests: Vec<_> = downloads.iter().map(|d| d.task.dest.clone()).collect();
@@ -3115,7 +3139,7 @@ mod tests {
             Some("0f4a890d07402280686a518579fa9fa02309e315")
         );
 
-        let err = aurora
+        let err = petalfall
             .curseforge_downloads(
                 &client,
                 &refs(&[(1, 11), (5, 55), (6, 66)]),
@@ -3161,7 +3185,7 @@ mod tests {
         );
         assert_eq!((files[0].fingerprint, files[0].size), (0, Some(10)));
 
-        let err = aurora
+        let err = petalfall
             .curseforge_downloads(&client, &refs(&[(9, 99)]), &HashSet::new(), dir)
             .await
             .unwrap_err();
@@ -3207,7 +3231,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let client = CurseForgeClient::new(aurora_base::http::build_client().unwrap(), "k")
+        let client = CurseForgeClient::new(petalfall_base::http::build_client().unwrap(), "k")
             .with_base_url(&uri);
         let refs: Vec<CurseForgeFileRef> = [(1, 11), (2, 22), (3, 33), (1, 44)]
             .iter()
@@ -3375,9 +3399,9 @@ mod tests {
                 ("overrides/config/sodium.json", b"{}"),
             ],
         );
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
 
-        let preview = aurora.preview_modpack_file(&pack).await.unwrap();
+        let preview = petalfall.preview_modpack_file(&pack).await.unwrap();
         assert_eq!(preview.format, PackFormat::Modrinth);
         assert_eq!(preview.remote_files, 3);
         assert_eq!(preview.mod_files, 4, "sodium、lithium、extra、zoom");
@@ -3436,7 +3460,7 @@ mod tests {
             &curseforge_manifest(serde_json::json!([])),
             overrides,
         );
-        let preview = aurora(tmp.path(), &server)
+        let preview = petalfall(tmp.path(), &server)
             .preview_modpack_file(&offline)
             .await
             .unwrap();
@@ -3481,7 +3505,7 @@ mod tests {
         let RemoteFiles::CurseForge(refs) = &archive.manifest.remote else {
             panic!("应读出 CurseForge 清单");
         };
-        let client = CurseForgeClient::new(aurora_base::http::build_client().unwrap(), "k")
+        let client = CurseForgeClient::new(petalfall_base::http::build_client().unwrap(), "k")
             .with_base_url(server.uri());
         let remote = curseforge_remote_facts(&client, refs, BlockedProbe::Skip)
             .await
@@ -3592,15 +3616,15 @@ mod tests {
             ])),
             &[("overrides/mods/extra.jar", b"x")],
         );
-        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
-        let slot = aurora
+        let petalfall = petalfall(tmp.path(), &server).with_curseforge_key("k");
+        let slot = petalfall
             .blocked_claims_dir()
             .join("curseforge-77")
             .join("claimed.jar");
         std::fs::create_dir_all(slot.parent().unwrap()).unwrap();
         std::fs::write(&slot, claimed_bytes).unwrap();
 
-        let preview = aurora.preview_modpack_file(&pack).await.unwrap();
+        let preview = petalfall.preview_modpack_file(&pack).await.unwrap();
         let hash = Some("0f4a890d07402280686a518579fa9fa02309e315".to_owned());
         assert_eq!(
             preview.blocked_files,
@@ -3688,10 +3712,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pack = tmp.path().join("可选.mrpack");
         write_pack(&pack, &manifest, &[]);
-        let aurora = aurora(tmp.path(), &server);
+        let petalfall = petalfall(tmp.path(), &server);
         let source = ModpackSource::File { path: pack.clone() };
 
-        let preview = aurora.preview_modpack_file(&pack).await.unwrap();
+        let preview = petalfall.preview_modpack_file(&pack).await.unwrap();
         assert_eq!(
             preview
                 .mods
@@ -3719,8 +3743,8 @@ mod tests {
                 "resourcepacks/optional-pack.zip".into(),
             ],
         };
-        let dir = aurora.game_dir().join("versions").join("可选");
-        let mut prepared = aurora
+        let dir = petalfall.game_dir().join("versions").join("可选");
+        let mut prepared = petalfall
             .prepare_modpack(&source, Some("可选"), &selection, None)
             .await
             .unwrap();
@@ -3744,7 +3768,7 @@ mod tests {
             download.task.url = format!("{uri}/cdn/{name}");
         }
 
-        let outcome = aurora
+        let outcome = petalfall
             .import_modpack(prepared, "task-o", None)
             .await
             .unwrap();
@@ -3765,7 +3789,7 @@ mod tests {
         assert!(!dir.join("resourcepacks").join("optional-pack.zip").exists());
         assert_eq!(outcome.modpack.remote_files, 1);
 
-        let err = aurora
+        let err = petalfall
             .prepare_modpack(
                 &source,
                 Some("必需"),
@@ -3777,7 +3801,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(&err, CoreError::Modpack(aurora_modpack::Error::NotOptional { path }) if path == "mods/core.jar"),
+            matches!(&err, CoreError::Modpack(petalfall_modpack::Error::NotOptional { path }) if path == "mods/core.jar"),
             "{err:?}"
         );
     }
@@ -3816,7 +3840,7 @@ mod tests {
                 .await;
         }
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+        let petalfall = petalfall(tmp.path(), &server).with_curseforge_key("k");
         let covered = serde_json::json!({ "projectID": 5, "fileID": 55, "required": true });
         let blocked = serde_json::json!({ "projectID": 6, "fileID": 66, "required": true });
         let bundled: &[(&str, &[u8])] = &[("overrides/mods/covered.jar", b"bundled jar")];
@@ -3829,7 +3853,7 @@ mod tests {
             &curseforge_vanilla_manifest(serde_json::json!([covered])),
             bundled,
         );
-        let preview = aurora.preview_modpack_file(&pack).await.unwrap();
+        let preview = petalfall.preview_modpack_file(&pack).await.unwrap();
         assert_eq!(preview.blocked_files, Vec::new());
         assert_eq!(
             preview
@@ -3839,7 +3863,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("covered.jar", PackFileAvailability::Bundled)]
         );
-        let outcome = aurora
+        let outcome = petalfall
             .install_modpack(
                 &ModpackSource::File { path: pack },
                 Some("自带"),
@@ -3861,7 +3885,7 @@ mod tests {
             &curseforge_vanilla_manifest(serde_json::json!([covered, blocked])),
             bundled,
         );
-        let preview = aurora.preview_modpack_file(&pack).await.unwrap();
+        let preview = petalfall.preview_modpack_file(&pack).await.unwrap();
         assert_eq!(
             preview
                 .blocked_files
@@ -3870,7 +3894,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![66]
         );
-        let err = aurora
+        let err = petalfall
             .prepare_modpack(&ModpackSource::File { path: pack }, None, &none, None)
             .await
             .unwrap_err();
@@ -3930,11 +3954,11 @@ mod tests {
             ])),
             &[],
         );
-        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+        let petalfall = petalfall(tmp.path(), &server).with_curseforge_key("k");
         let source = ModpackSource::File { path: pack };
         let none = ImportSelection::default();
 
-        let err = aurora
+        let err = petalfall
             .prepare_modpack(&source, None, &none, None)
             .await
             .unwrap_err();
@@ -3950,7 +3974,7 @@ mod tests {
         std::fs::create_dir_all(&downloads).unwrap();
         let renamed = downloads.join("blocked-a (1).jar");
         std::fs::write(&renamed, blocked_bytes).unwrap();
-        let report = aurora
+        let report = petalfall
             .claim_blocked_files(&downloads, &files)
             .await
             .unwrap();
@@ -3963,8 +3987,8 @@ mod tests {
         );
         assert!(report.missing.is_empty());
 
-        let dir = aurora.game_dir().join("versions").join("受限包");
-        let prepared = aurora
+        let dir = petalfall.game_dir().join("versions").join("受限包");
+        let prepared = petalfall
             .prepare_modpack(&source, None, &none, None)
             .await
             .unwrap();
@@ -3987,7 +4011,7 @@ mod tests {
         prepared.discard().await;
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let outcome = aurora
+        let outcome = petalfall
             .install_modpack(&source, None, &none, "task-c", Some(&tx))
             .await
             .unwrap();
@@ -4012,7 +4036,7 @@ mod tests {
             "{stages:?}"
         );
         assert!(
-            aurora
+            petalfall
                 .blocked_claims_dir()
                 .join("curseforge-55")
                 .join("blocked-a.jar")
@@ -4056,7 +4080,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+        let petalfall = petalfall(tmp.path(), &server).with_curseforge_key("k");
         let source = ModpackSource::Platform {
             platform: Platform::CurseForge,
             project_id: "700".into(),
@@ -4064,7 +4088,7 @@ mod tests {
         };
         let none = ImportSelection::default();
 
-        let err = aurora
+        let err = petalfall
             .install_modpack(&source, Some("网页下的包"), &none, "task-b1", None)
             .await
             .unwrap_err();
@@ -4083,13 +4107,13 @@ mod tests {
         std::fs::create_dir_all(&downloads).unwrap();
         let renamed = downloads.join("受限包-1.0 (1).zip");
         std::fs::write(&renamed, &pack_bytes).unwrap();
-        let report = aurora
+        let report = petalfall
             .claim_blocked_files(&downloads, &files)
             .await
             .unwrap();
         assert_eq!(report.missing, Vec::<u32>::new());
 
-        let outcome = aurora
+        let outcome = petalfall
             .install_modpack(&source, Some("网页下的包"), &none, "task-b2", None)
             .await
             .unwrap();
@@ -4100,7 +4124,7 @@ mod tests {
             b"fov:70"
         );
         assert!(
-            aurora
+            petalfall
                 .blocked_claims_dir()
                 .join("curseforge-7001")
                 .join("受限包-1.0.zip")
@@ -4166,9 +4190,9 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let aurora = aurora(tmp.path(), &server).with_curseforge_key("k");
+        let petalfall = petalfall(tmp.path(), &server).with_curseforge_key("k");
 
-        let err = aurora
+        let err = petalfall
             .summarize_platform_modpack(Platform::CurseForge, "700", "7001")
             .await
             .unwrap_err();
@@ -4186,13 +4210,13 @@ mod tests {
         let downloads = tmp.path().join("下载");
         std::fs::create_dir_all(&downloads).unwrap();
         std::fs::write(downloads.join("受限包-1.0 (1).zip"), &pack_bytes).unwrap();
-        let report = aurora
+        let report = petalfall
             .claim_blocked_files(&downloads, &files)
             .await
             .unwrap();
         assert_eq!(report.missing, Vec::<u32>::new());
 
-        let summary = aurora
+        let summary = petalfall
             .summarize_platform_modpack(Platform::CurseForge, "700", "7001")
             .await
             .unwrap();
@@ -4213,12 +4237,12 @@ mod tests {
             }
         );
 
-        let staged = aurora
+        let staged = petalfall
             .blocked_claims_dir()
             .join("curseforge-7001")
             .join("受限包-1.0.zip");
         std::fs::write(&staged, b"tampered").unwrap();
-        let err = aurora
+        let err = petalfall
             .summarize_platform_modpack(Platform::CurseForge, "700", "7001")
             .await
             .unwrap_err();

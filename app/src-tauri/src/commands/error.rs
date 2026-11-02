@@ -5,7 +5,7 @@
 //!
 //! 取码规则：
 //! - 取消一律是 [`code::CANCELLED`]，无论它从哪一层冒上来。
-//! - 账户与登录错误取 aurora-auth 错误枚举的变体名（如 `DeviceCodeExpired`、`XstsChildAccount`），
+//! - 账户与登录错误取 petalfall-auth 错误枚举的变体名（如 `DeviceCodeExpired`、`XstsChildAccount`），
 //!   XSTS 的 XErr 数值放进 `detail.xerr`。
 //! - 其余取 snake_case 码，见 [`code`]；同一来源的不同失败只在前端需要区别对待时才拆码。
 //! - 原因链上有网络层失败（连不上、等不到响应）时，不论码是什么，`detail.network` 标明是哪一种
@@ -13,7 +13,7 @@
 
 use std::error::Error as StdError;
 
-use aurora_core::{
+use petalfall_core::{
     AuthError, BaseError, CoreError, CredentialRealm, DownloadError, InstallError, InstanceError,
     JavaError, LaunchError, ModPlatformError, ModpackError, VersionError, TEMPLATE_FILES,
 };
@@ -38,7 +38,7 @@ pub mod code {
     pub const HASH_MISMATCH: &str = "hash_mismatch";
     /// 定位不到数据目录。
     pub const DATA_DIR_MISSING: &str = "data_dir_missing";
-    /// aurora-base 的其余失败（HTTP 客户端构建、URL 改写）。
+    /// petalfall-base 的其余失败（HTTP 客户端构建、URL 改写）。
     pub const BASE: &str = "base";
     /// 版本 JSON 非法或继承链有误。
     pub const VERSION_JSON_INVALID: &str = "version_json_invalid";
@@ -235,7 +235,7 @@ impl CommandError {
         }
         let causes = source_chain(err);
         let mut detail = core_detail(err);
-        if let Some(failure) = aurora_base::http::network_failure(err) {
+        if let Some(failure) = petalfall_base::http::network_failure(err) {
             detail.insert("network".to_owned(), json!(failure.code()));
         }
         if !causes.is_empty() {
@@ -427,7 +427,7 @@ fn mod_platform_code(err: &ModPlatformError) -> &'static str {
     }
 }
 
-/// 账户错误码：取 aurora-auth 错误枚举的变体名，前端按它决定登录弹窗的失败态与文案。
+/// 账户错误码：取 petalfall-auth 错误枚举的变体名，前端按它决定登录弹窗的失败态与文案。
 pub fn auth_code(err: &AuthError) -> &'static str {
     match err {
         AuthError::Base(_) => "Base",
@@ -462,7 +462,7 @@ pub fn auth_code(err: &AuthError) -> &'static str {
     }
 }
 
-/// XSTS 拒绝时微软返回的 XErr 码。固定码的变体在 aurora-auth 里按码分出，这里还原成数值。
+/// XSTS 拒绝时微软返回的 XErr 码。固定码的变体在 petalfall-auth 里按码分出，这里还原成数值。
 fn xerr(err: &AuthError) -> Option<i64> {
     match err {
         AuthError::XstsBanned => Some(2_148_916_227),
@@ -749,7 +749,7 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_core::OfflineFallbackRefusal;
+    use petalfall_core::OfflineFallbackRefusal;
     use std::path::PathBuf;
 
     #[test]
@@ -936,7 +936,7 @@ mod tests {
 
         let blocked: CommandError = CoreError::FileDistributionBlocked {
             files: vec![
-                aurora_core::BlockedFile {
+                petalfall_core::BlockedFile {
                     project_id: 900_001,
                     file_id: 5_000_001,
                     file_name: "a.jar".into(),
@@ -946,7 +946,7 @@ mod tests {
                     fingerprint: 0,
                     size: Some(1024),
                 },
-                aurora_core::BlockedFile {
+                petalfall_core::BlockedFile {
                     project_id: 900_002,
                     file_id: 5_000_002,
                     file_name: "b.jar".into(),
@@ -1009,7 +1009,7 @@ mod tests {
     fn modpack_errors_map_to_codes_with_parameters() {
         let name: CommandError = CoreError::InstanceNameInvalid {
             name: "CON".into(),
-            rule: aurora_core::NameViolation::ReservedByWindows,
+            rule: petalfall_core::NameViolation::ReservedByWindows,
         }
         .into();
         assert_eq!(name.code, code::INSTANCE_NAME_INVALID);
@@ -1019,7 +1019,7 @@ mod tests {
 
         let unsafe_path: CommandError = CoreError::from(ModpackError::UnsafePath {
             path: "overrides/../evil.txt".into(),
-            source: aurora_core::PathValidationError::ParentTraversal,
+            source: petalfall_core::PathValidationError::ParentTraversal,
         })
         .into();
         assert_eq!(unsafe_path.code, code::MODPACK_UNSAFE_PATH);
@@ -1164,7 +1164,7 @@ mod tests {
     fn modpack_export_errors_map_to_codes_with_parameters() {
         let unsupported: CommandError = CoreError::ModpackExportUnsupported {
             id: "光影版".into(),
-            reason: aurora_core::ExportBlock::LoaderUnsupported,
+            reason: petalfall_core::ExportBlock::LoaderUnsupported,
             loader: Some("OptiFine".into()),
         }
         .into();
@@ -1179,16 +1179,19 @@ mod tests {
         );
 
         for (reason, wire) in [
-            (aurora_core::ExportBlock::VersionUnknown, "version_unknown"),
             (
-                aurora_core::ExportBlock::LoaderVersionUnknown,
+                petalfall_core::ExportBlock::VersionUnknown,
+                "version_unknown",
+            ),
+            (
+                petalfall_core::ExportBlock::LoaderVersionUnknown,
                 "loader_version_unknown",
             ),
             (
-                aurora_core::ExportBlock::MultipleLoaders,
+                petalfall_core::ExportBlock::MultipleLoaders,
                 "multiple_loaders",
             ),
-            (aurora_core::ExportBlock::Incomplete, "incomplete"),
+            (petalfall_core::ExportBlock::Incomplete, "incomplete"),
         ] {
             let err: CommandError = CoreError::ModpackExportUnsupported {
                 id: "生存".into(),
@@ -1227,7 +1230,7 @@ mod tests {
     fn system_variants_map_to_codes_with_parameters() {
         let dir: CommandError = CoreError::InvalidGameDirectory {
             path: PathBuf::from("D:/a!b/.minecraft"),
-            problem: aurora_core::GameDirProblem::ContainsBang,
+            problem: petalfall_core::GameDirProblem::ContainsBang,
         }
         .into();
         assert_eq!(dir.code, code::INVALID_GAME_DIRECTORY);
@@ -1259,12 +1262,12 @@ mod tests {
 
         for (mode, name, message) in [
             (
-                aurora_core::QuickPlayMode::Singleplayer,
+                petalfall_core::QuickPlayMode::Singleplayer,
                 "singleplayer",
                 "版本 1.12.2 不支持直接进入存档（1.20 之前的版本没有 Quick Play）",
             ),
             (
-                aurora_core::QuickPlayMode::Multiplayer,
+                petalfall_core::QuickPlayMode::Multiplayer,
                 "multiplayer",
                 "版本 1.12.2 不支持直接加入服务器",
             ),
@@ -1343,8 +1346,8 @@ mod tests {
     #[tokio::test]
     async fn network_layer_failures_are_marked_in_detail() {
         let dir = tempfile::tempdir().unwrap();
-        let aurora = aurora_core::Aurora::open(
-            aurora_core::AuroraConfig::default(),
+        let petalfall = petalfall_core::Petalfall::open(
+            petalfall_core::PetalfallConfig::default(),
             dir.path().to_path_buf(),
             dir.path().join("config.json"),
         )
@@ -1353,7 +1356,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let refused: CommandError = aurora
+        let refused: CommandError = petalfall
             .probe_auth_server(&format!("http://127.0.0.1:{port}/api/yggdrasil/"))
             .await
             .unwrap_err()
@@ -1373,15 +1376,15 @@ mod tests {
     #[tokio::test]
     async fn instance_argument_errors_are_invalid_argument_on_every_path() {
         let dir = tempfile::tempdir().unwrap();
-        let aurora = aurora_core::Aurora::open(
-            aurora_core::AuroraConfig::default(),
+        let petalfall = petalfall_core::Petalfall::open(
+            petalfall_core::PetalfallConfig::default(),
             dir.path().to_path_buf(),
             dir.path().join("config.json"),
         )
         .unwrap();
         for id in [r"..\outside", "../outside", ".hidden", "a/b"] {
-            let crash: CommandError = aurora.last_crash(id).await.unwrap_err().into();
-            let log: CommandError = aurora.last_launch_log(id).await.unwrap_err().into();
+            let crash: CommandError = petalfall.last_crash(id).await.unwrap_err().into();
+            let log: CommandError = petalfall.last_launch_log(id).await.unwrap_err().into();
             for err in [crash, log] {
                 assert_eq!(err.code, code::INVALID_ARGUMENT, "{id}");
                 assert_eq!(
@@ -1394,7 +1397,7 @@ mod tests {
 
         let name: CommandError = InstanceError::InvalidName {
             name: "CON".into(),
-            violation: aurora_core::NameViolation::ReservedByWindows,
+            violation: petalfall_core::NameViolation::ReservedByWindows,
         }
         .into();
         assert_eq!(name.code, code::INVALID_ARGUMENT);
@@ -1415,7 +1418,7 @@ mod tests {
         );
 
         let pins: CommandError = InstanceError::InvalidPins {
-            reason: aurora_core::PinsViolation::NotFound,
+            reason: petalfall_core::PinsViolation::NotFound,
             id: Some("ghost".into()),
         }
         .into();
@@ -1425,7 +1428,7 @@ mod tests {
             Some(json!({ "field": "pins", "reason": "not_found", "id": "ghost" }))
         );
         let too_many: CommandError = InstanceError::InvalidPins {
-            reason: aurora_core::PinsViolation::TooMany,
+            reason: petalfall_core::PinsViolation::TooMany,
             id: None,
         }
         .into();
@@ -1452,7 +1455,7 @@ mod tests {
             listener.local_addr().unwrap().port()
         );
         drop(listener);
-        let refused = aurora_base::http::build_client()
+        let refused = petalfall_base::http::build_client()
             .unwrap()
             .get(&url)
             .send()
@@ -1513,19 +1516,19 @@ mod tests {
             }]
         });
         std::fs::write(version_dir.join("evil.json"), version.to_string()).unwrap();
-        let config = aurora_core::AuroraConfig {
+        let config = petalfall_core::PetalfallConfig {
             game_directory: Some(game),
-            ..aurora_core::AuroraConfig::default()
+            ..petalfall_core::PetalfallConfig::default()
         };
-        let aurora = aurora_core::Aurora::open(
+        let petalfall = petalfall_core::Petalfall::open(
             config,
             dir.path().join("data"),
             dir.path().join("data").join("config.json"),
         )
         .unwrap();
 
-        let (plan, _) = aurora.begin_repair("evil").await.unwrap();
-        let err: CommandError = aurora
+        let (plan, _) = petalfall.begin_repair("evil").await.unwrap();
+        let err: CommandError = petalfall
             .repair_instance("evil", &plan, None)
             .await
             .unwrap_err()
@@ -1558,7 +1561,7 @@ mod tests {
         // 门面定补全方案时按启动失败码的名字认未完成标记里的这个码，两边是同一个字符串。
         assert_eq!(
             missing.code,
-            aurora_core::FailureCode::LoaderLibraryMissing.as_str()
+            petalfall_core::FailureCode::LoaderLibraryMissing.as_str()
         );
         assert_eq!(
             missing.message,
@@ -1663,14 +1666,17 @@ mod tests {
     #[test]
     fn manual_java_errors_map_to_codes_with_reason_and_missing_files() {
         for (reason, name) in [
-            (aurora_core::JavaPathProblem::NotAbsolute, "not_absolute"),
+            (petalfall_core::JavaPathProblem::NotAbsolute, "not_absolute"),
             (
-                aurora_core::JavaPathProblem::NotJavaExecutable,
+                petalfall_core::JavaPathProblem::NotJavaExecutable,
                 "not_java_executable",
             ),
-            (aurora_core::JavaPathProblem::NotFound, "not_found"),
-            (aurora_core::JavaPathProblem::ProbeFailed, "probe_failed"),
-            (aurora_core::JavaPathProblem::ProbeTimeout, "probe_timeout"),
+            (petalfall_core::JavaPathProblem::NotFound, "not_found"),
+            (petalfall_core::JavaPathProblem::ProbeFailed, "probe_failed"),
+            (
+                petalfall_core::JavaPathProblem::ProbeTimeout,
+                "probe_timeout",
+            ),
         ] {
             let err: CommandError = CoreError::JavaPathInvalid {
                 path: PathBuf::from("D:/jdk/bin/java.exe"),
@@ -1689,7 +1695,7 @@ mod tests {
         // 识别超时：原错误进原因链。
         let timeout: CommandError = CoreError::JavaPathInvalid {
             path: PathBuf::from("D:/jdk/bin/java.exe"),
-            reason: aurora_core::JavaPathProblem::ProbeTimeout,
+            reason: petalfall_core::JavaPathProblem::ProbeTimeout,
             source: Some(JavaError::JavaProbeTimeout {
                 path: PathBuf::from("D:/jdk/bin/java.exe"),
                 timeout_secs: 10,

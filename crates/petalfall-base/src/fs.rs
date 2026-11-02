@@ -245,7 +245,7 @@ pub fn held_open(_path: &Path) -> std::io::Result<bool> {
 /// 写入探针的文件名：真写一个再删掉，用来判定 exe 所在目录是否可写。
 const WRITE_PROBE: &str = concat!(".", crate::app_slug!(), "-write-probe");
 
-/// 全局配置的文件名，与 aurora-core 的 `Aurora::load` 读的是同一个文件：它在，数据就在这个目录里。
+/// 全局配置的文件名，与 petalfall-core 的 `Petalfall::load` 读的是同一个文件：它在，数据就在这个目录里。
 const CONFIG_FILE: &str = "config.json";
 
 /// 探针失败后每次重试前等多久。杀软扫新文件、另一个启动器进程撞上同名探针这类一时的占用几百毫秒就放开；
@@ -527,8 +527,8 @@ mod tests {
     async fn atomic_write_creates_and_reads_back() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("out.txt");
-        atomic_write(&file, b"hello aurora").await.unwrap();
-        assert_eq!(tokio::fs::read(&file).await.unwrap(), b"hello aurora");
+        atomic_write(&file, b"hello petalfall").await.unwrap();
+        assert_eq!(tokio::fs::read(&file).await.unwrap(), b"hello petalfall");
     }
 
     #[tokio::test]

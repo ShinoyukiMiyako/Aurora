@@ -80,7 +80,7 @@ mod tests {
     use super::*;
 
     /// 真的往回收站里放一个临时文件夹。会在开发者的回收站里留下一项，默认不跑：
-    /// `cargo test -p aurora-instance -- --ignored recycle_bin` 手动验证系统调用。
+    /// `cargo test -p petalfall-instance -- --ignored recycle_bin` 手动验证系统调用。
     #[cfg(windows)]
     #[test]
     #[ignore]

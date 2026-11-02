@@ -54,8 +54,8 @@ describe("InstanceBlock", () => {
     expect(block().dataset.art).toBe("emblem");
     await settle();
     expect(fetchMock.mock.calls.map((c) => c[0]).sort()).toEqual([
-      "http://aurora-tex.localhost/art/block/grass_block_side.png?v=1.21.1",
-      "http://aurora-tex.localhost/art/block/grass_block_top.png?v=1.21.1",
+      "http://petalfall-tex.localhost/art/block/grass_block_side.png?v=1.21.1",
+      "http://petalfall-tex.localhost/art/block/grass_block_top.png?v=1.21.1",
     ]);
     expect(block().dataset.art).toBe("texture");
     // 三个面按左、右、顶画到 32 × 36 的设备像素画布上，每面 16 × 16

@@ -7,7 +7,7 @@
 //! 留在原目录，事件里记下新旧文件名、备份名与新旧版本，回滚就是把这对名字换回去。一个 Mod 连着
 //! 更新几次就留下一条链，只能从最近的那次往回滚。因此「这条能不能回滚」不由历史自身决定，而由 `.old` 文件是否
 //! 还躺在磁盘上决定（见 [`RollbackCheck`]）——与卷宗同理，磁盘始终是权威。备份要占盘，代价必须
-//! 显式告诉玩家而不是偷偷长在他硬盘里（见 [`Aurora::backup_size`]）。
+//! 显式告诉玩家而不是偷偷长在他硬盘里（见 [`Petalfall::backup_size`]）。
 //!
 //! 事件 id 形如 `<unix秒>-<三位序号>`：秒级时间戳保证跨事件可排序，序号解决同一秒内多条事件的
 //! 撞号问题。不用随机数——随机 id 无法复现、排不了序，出问题时对着日志也拼不回时间线。
@@ -18,15 +18,15 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use aurora_instance::{AURORA_META_DIR, VERSIONS_DIR};
+use petalfall_instance::{PETALFALL_META_DIR, VERSIONS_DIR};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::modfs::{
     BACKUP_SUFFIX, backup_name, ensure_not_held, lock_mods_dir, now_unix, refuse, try_exists,
 };
-use aurora_modplatform::DISABLED_SUFFIX;
+use petalfall_modplatform::DISABLED_SUFFIX;
 
 /// 历史文件名。
 const HISTORY_FILE: &str = "history.json";
@@ -142,7 +142,7 @@ impl HistoryStore {
     /// 默认路径：`version_dir/<元数据目录>/history.json`（`version_dir` 即 `versions/<id>`）。
     pub fn for_version_dir(version_dir: &Path) -> Self {
         Self {
-            path: version_dir.join(AURORA_META_DIR).join(HISTORY_FILE),
+            path: version_dir.join(PETALFALL_META_DIR).join(HISTORY_FILE),
         }
     }
 
@@ -164,7 +164,7 @@ impl HistoryStore {
                 source,
             }),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(History::default()),
-            Err(source) => Err(aurora_base::Error::Io {
+            Err(source) => Err(petalfall_base::Error::Io {
                 path: self.path.clone(),
                 source,
             }
@@ -198,7 +198,7 @@ impl HistoryStore {
     /// 原子写入整份历史。
     async fn save(&self, history: &History) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(history).map_err(CoreError::ConfigSerialize)?;
-        aurora_base::fs::atomic_write(&self.path, &bytes).await?;
+        petalfall_base::fs::atomic_write(&self.path, &bytes).await?;
         Ok(())
     }
 }
@@ -272,7 +272,7 @@ fn superseded_update_ids<'a>(history: &'a History, reverted: &HashSet<&str>) -> 
 /// 目录还没建返回空表（这个实例一个 Mod 都没装过）；其余 IO 故障如实冒泡。不递归：备份只可能由
 /// 更新链路写在这一层，递归大实例是拿卡顿换零收益。同后缀的目录不是备份，不计入。
 async fn list_backups(mods_dir: &Path) -> Result<Vec<(String, u64)>> {
-    let io_err = |source| aurora_base::Error::Io {
+    let io_err = |source| petalfall_base::Error::Io {
         path: mods_dir.to_owned(),
         source,
     };
@@ -293,7 +293,7 @@ async fn list_backups(mods_dir: &Path) -> Result<Vec<(String, u64)>> {
         let meta = entry
             .metadata()
             .await
-            .map_err(|source| aurora_base::Error::Io {
+            .map_err(|source| petalfall_base::Error::Io {
                 path: entry.path(),
                 source,
             })?;
@@ -317,7 +317,7 @@ async fn remove_updated_file(mods_dir: &Path, file_name: &str) -> Result<()> {
             Ok(()) => return Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(source) => {
-                return Err(aurora_base::Error::Io {
+                return Err(petalfall_base::Error::Io {
                     path: candidate,
                     source,
                 }
@@ -328,10 +328,10 @@ async fn remove_updated_file(mods_dir: &Path, file_name: &str) -> Result<()> {
     Ok(())
 }
 
-impl Aurora {
+impl Petalfall {
     /// 该实例的历史句柄：`versions/<id>/<元数据目录>/history.json`。
     ///
-    /// 与 [`Aurora::ledger_store`] 同一套路径推导——只认版本 id，不随隔离档位漂移。历史记的是「这个
+    /// 与 [`Petalfall::ledger_store`] 同一套路径推导——只认版本 id，不随隔离档位漂移。历史记的是「这个
     /// 版本被改过什么」，若跟着工作目录走，关掉隔离后多个版本会共写一份历史，时间线立刻串味。
     pub fn history_store(&self, version_id: &str) -> HistoryStore {
         HistoryStore::for_version_dir(&self.game_dir().join(VERSIONS_DIR).join(version_id))
@@ -344,7 +344,7 @@ impl Aurora {
         self.history_store(version_id).load().await
     }
 
-    /// 逐条判断历史事件能否回滚，顺序与 [`Aurora::history`] 一致（时间正序），便于 UI 按下标对齐。
+    /// 逐条判断历史事件能否回滚，顺序与 [`Petalfall::history`] 一致（时间正序），便于 UI 按下标对齐。
     ///
     /// 判据落在磁盘而不是历史本身：`.old` 备份还在才谈得上回滚，玩家清理过备份就不能——与卷宗同理，
     /// 磁盘是权威。只有更新事件带备份，其余三类事件一律给出不可回滚的具体原因，而不是含糊地留空。
@@ -497,7 +497,7 @@ impl Aurora {
         remove_updated_file(mods_dir, file_name).await?;
         tokio::fs::rename(&backup, &restored)
             .await
-            .map_err(|source| aurora_base::Error::Io {
+            .map_err(|source| petalfall_base::Error::Io {
                 path: restored.clone(),
                 source,
             })?;
@@ -557,7 +557,7 @@ impl Aurora {
         entry.version_number = from_version_number;
         // 旧版本的 sha1 平台侧已无从取得，但文件本身就躺在磁盘上，算一遍是唯一诚实的取值；留 None
         // 会让后续的哈希反查白跑一趟。
-        entry.sha1 = Some(aurora_base::fs::sha1_hex(restored).await?);
+        entry.sha1 = Some(petalfall_base::fs::sha1_hex(restored).await?);
         // installed_at 沿用装进实例的时刻：回滚换回的是旧版本，不是新装了一个 Mod。
         // 走 upsert 而不是直接 push：万一卷宗里还留着旧文件名的残条，同名原位覆盖，不留重复键。
         ledger.upsert(entry);
@@ -568,10 +568,10 @@ impl Aurora {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use crate::ledger::{Ledger, LedgerEntry};
-    use aurora_instance::IsolationPolicy;
-    use aurora_modplatform::Platform;
+    use petalfall_instance::IsolationPolicy;
+    use petalfall_modplatform::Platform;
     use sha1::{Digest, Sha1};
 
     /// 测试实例的版本 id。
@@ -764,7 +764,7 @@ mod tests {
         let store = HistoryStore::for_version_dir(tmp.path());
         assert_eq!(
             store.path(),
-            tmp.path().join(AURORA_META_DIR).join("history.json")
+            tmp.path().join(PETALFALL_META_DIR).join("history.json")
         );
         assert_eq!(store.load().await.unwrap(), History::default());
     }
@@ -858,7 +858,7 @@ mod tests {
         );
     }
 
-    // ---- impl Aurora：历史 / 回滚 / 备份占用 ----
+    // ---- impl Petalfall：历史 / 回滚 / 备份占用 ----
 
     fn sha1_hex(bytes: &[u8]) -> String {
         Sha1::digest(bytes)
@@ -869,7 +869,7 @@ mod tests {
 
     /// 造一个已安装的实例：落一份最小合法版本 JSON，全量隔离（mods 与元数据同处版本目录），
     /// 并建好 mods 目录。返回门面与 mods 目录路径。
-    async fn installed_instance(root: &Path) -> (Aurora, PathBuf) {
+    async fn installed_instance(root: &Path) -> (Petalfall, PathBuf) {
         let dir = root.join("versions").join(VERSION_ID);
         tokio::fs::create_dir_all(&dir).await.unwrap();
         tokio::fs::write(
@@ -879,20 +879,20 @@ mod tests {
         .await
         .unwrap();
 
-        let mut aurora = Aurora::for_test(
-            AuroraConfig::default(),
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             root.to_path_buf(),
             root.to_path_buf(),
         );
-        aurora.set_isolation_policy(IsolationPolicy::All);
-        let mods_dir = aurora.resolve_mods_dir(VERSION_ID).await.unwrap();
+        petalfall.set_isolation_policy(IsolationPolicy::All);
+        let mods_dir = petalfall.resolve_mods_dir(VERSION_ID).await.unwrap();
         assert_eq!(
             mods_dir,
             dir.join("mods"),
             "全量隔离时 mods 应落在版本目录内"
         );
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
-        (aurora, mods_dir)
+        (petalfall, mods_dir)
     }
 
     /// 一条指向 Modrinth 工程 AANobbMI、且被标记为某工程依赖的卷宗记录。
@@ -926,7 +926,7 @@ mod tests {
     /// 从「回滚被拒绝」的错误里取出出问题的路径与原因文本。
     fn refusal(err: &CoreError) -> (PathBuf, String) {
         match err {
-            CoreError::Base(aurora_base::Error::Io { path, source }) => {
+            CoreError::Base(petalfall_base::Error::Io { path, source }) => {
                 (path.clone(), source.to_string())
             }
             other => panic!("期望回滚拒绝错误，得到 {other:?}"),
@@ -938,7 +938,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_of_a_disabled_mod_keeps_it_disabled() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
         for (event, at, new_file, old_file) in [
             ("200-001", 200, "sodium-0.6.0.jar", "sodium-0.5.3.jar"),
             // 原地更新：回滚目标与待删的新文件同名。
@@ -950,11 +950,11 @@ mod tests {
             tokio::fs::write(mods_dir.join(format!("{old_file}.old")), OLD_BYTES)
                 .await
                 .unwrap();
-            let ledger_store = aurora.ledger_store(VERSION_ID);
+            let ledger_store = petalfall.ledger_store(VERSION_ID);
             let mut ledger = Ledger::default();
             ledger.upsert(ledger_entry(new_file, "NEW-VER", &sha1_hex(NEW_BYTES)));
             ledger_store.save(&ledger).await.unwrap();
-            aurora
+            petalfall
                 .history_store(VERSION_ID)
                 .append(update_event(
                     event, at, new_file, old_file, "OLD-VER", "NEW-VER",
@@ -962,7 +962,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            aurora.rollback(VERSION_ID, event).await.unwrap();
+            petalfall.rollback(VERSION_ID, event).await.unwrap();
 
             assert_eq!(
                 dir_names(&mods_dir).await,
@@ -987,7 +987,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_of_a_disabled_mod_refuses_to_overwrite_the_disabled_target() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
         tokio::fs::write(mods_dir.join("sodium-0.6.0.jar.disabled"), NEW_BYTES)
             .await
             .unwrap();
@@ -997,7 +997,7 @@ mod tests {
         tokio::fs::write(mods_dir.join("sodium-0.5.3.jar.disabled"), b"someone else")
             .await
             .unwrap();
-        aurora
+        petalfall
             .history_store(VERSION_ID)
             .append(update_event(
                 "200-001",
@@ -1010,7 +1010,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = aurora.rollback(VERSION_ID, "200-001").await.unwrap_err();
+        let err = petalfall.rollback(VERSION_ID, "200-001").await.unwrap_err();
 
         let (path, reason) = refusal(&err);
         assert_eq!(path, mods_dir.join("sodium-0.5.3.jar.disabled"));
@@ -1027,7 +1027,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_restores_old_file_and_rewrites_ledger_identity() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
 
         tokio::fs::write(mods_dir.join("sodium-0.6.0.jar"), NEW_BYTES)
             .await
@@ -1036,7 +1036,7 @@ mod tests {
             .await
             .unwrap();
 
-        let ledger_store = aurora.ledger_store(VERSION_ID);
+        let ledger_store = petalfall.ledger_store(VERSION_ID);
         let mut ledger = Ledger::default();
         ledger.upsert(ledger_entry(
             "sodium-0.6.0.jar",
@@ -1045,7 +1045,7 @@ mod tests {
         ));
         ledger_store.save(&ledger).await.unwrap();
 
-        let store = aurora.history_store(VERSION_ID);
+        let store = petalfall.history_store(VERSION_ID);
         store
             .append(install("100-001", 100, &["sodium-0.5.3.jar"]))
             .await
@@ -1064,14 +1064,14 @@ mod tests {
 
         // 回滚前：备份占着旧 jar 那么多字节，且这条更新可回滚。
         assert_eq!(
-            aurora.backup_size(VERSION_ID).await.unwrap(),
+            petalfall.backup_size(VERSION_ID).await.unwrap(),
             OLD_BYTES.len() as u64
         );
-        let before = aurora.rollback_checks(VERSION_ID).await.unwrap();
+        let before = petalfall.rollback_checks(VERSION_ID).await.unwrap();
         assert!(before[1].can_rollback);
         assert_eq!(before[1].reason, None);
 
-        aurora.rollback(VERSION_ID, "200-001").await.unwrap();
+        petalfall.rollback(VERSION_ID, "200-001").await.unwrap();
 
         // 磁盘：旧文件按原名回来（内容是旧的那份）、备份被消费、新文件删除。
         assert_eq!(
@@ -1081,7 +1081,7 @@ mod tests {
             OLD_BYTES
         );
         assert_eq!(dir_names(&mods_dir).await, vec!["sodium-0.5.3.jar"]);
-        assert_eq!(aurora.backup_size(VERSION_ID).await.unwrap(), 0);
+        assert_eq!(petalfall.backup_size(VERSION_ID).await.unwrap(), 0);
 
         // 卷宗：键换成旧文件名，版本标识与版本号回到旧版，sha1 按复原后的文件重算，
         // 工程身份、标题图标与「谁的依赖」原样保留。
@@ -1099,7 +1099,7 @@ mod tests {
         assert_eq!(entry.installed_at, 1_700_000_000);
 
         // 历史：追加一条回滚事件，既有两条原样保留。
-        let history = aurora.history(VERSION_ID).await.unwrap();
+        let history = petalfall.history(VERSION_ID).await.unwrap();
         assert_eq!(history.events.len(), 3);
         assert_eq!(history.events[0].id(), "100-001");
         assert_eq!(history.events[1].id(), "200-001");
@@ -1111,11 +1111,11 @@ mod tests {
         }
 
         // 同一条更新不能再滚一次。
-        let after = aurora.rollback_checks(VERSION_ID).await.unwrap();
+        let after = petalfall.rollback_checks(VERSION_ID).await.unwrap();
         assert_eq!(after.len(), 3);
         assert!(!after[1].can_rollback);
         assert_eq!(after[1].reason.as_deref(), Some("该更新已经回滚过"));
-        let err = aurora.rollback(VERSION_ID, "200-001").await.unwrap_err();
+        let err = petalfall.rollback(VERSION_ID, "200-001").await.unwrap_err();
         let (path, reason) = refusal(&err);
         assert_eq!(path, store.path());
         assert!(reason.contains("已经回滚过"), "原因实得 {reason}");
@@ -1125,13 +1125,13 @@ mod tests {
     #[tokio::test]
     async fn rollback_without_backup_refuses_and_leaves_everything_untouched() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
 
         tokio::fs::write(mods_dir.join("sodium-0.6.0.jar"), NEW_BYTES)
             .await
             .unwrap();
 
-        let ledger_store = aurora.ledger_store(VERSION_ID);
+        let ledger_store = petalfall.ledger_store(VERSION_ID);
         let mut ledger = Ledger::default();
         ledger.upsert(ledger_entry(
             "sodium-0.6.0.jar",
@@ -1141,7 +1141,7 @@ mod tests {
         ledger_store.save(&ledger).await.unwrap();
         let ledger_before = ledger_store.load().await.unwrap();
 
-        aurora
+        petalfall
             .history_store(VERSION_ID)
             .append(update_event(
                 "200-001",
@@ -1154,7 +1154,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = aurora.rollback(VERSION_ID, "200-001").await.unwrap_err();
+        let err = petalfall.rollback(VERSION_ID, "200-001").await.unwrap_err();
         let (path, reason) = refusal(&err);
         assert_eq!(path, mods_dir.join("sodium-0.5.3.jar.old"));
         assert!(
@@ -1170,8 +1170,8 @@ mod tests {
             NEW_BYTES
         );
         assert_eq!(ledger_store.load().await.unwrap(), ledger_before);
-        assert_eq!(aurora.history(VERSION_ID).await.unwrap().events.len(), 1);
-        let checks = aurora.rollback_checks(VERSION_ID).await.unwrap();
+        assert_eq!(petalfall.history(VERSION_ID).await.unwrap().events.len(), 1);
+        let checks = petalfall.rollback_checks(VERSION_ID).await.unwrap();
         assert!(!checks[0].can_rollback);
         assert_eq!(
             checks[0].reason.as_deref(),
@@ -1183,7 +1183,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_rejects_unknown_and_non_update_events() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
 
         tokio::fs::write(mods_dir.join("sodium-0.6.0.jar"), NEW_BYTES)
             .await
@@ -1192,7 +1192,7 @@ mod tests {
             .await
             .unwrap();
 
-        let store = aurora.history_store(VERSION_ID);
+        let store = petalfall.history_store(VERSION_ID);
         store
             .append(install("100-001", 100, &["sodium-0.5.3.jar"]))
             .await
@@ -1210,7 +1210,7 @@ mod tests {
             .unwrap();
         let disk_before = dir_names(&mods_dir).await;
 
-        let err = aurora.rollback(VERSION_ID, "999-001").await.unwrap_err();
+        let err = petalfall.rollback(VERSION_ID, "999-001").await.unwrap_err();
         let (path, reason) = refusal(&err);
         assert_eq!(path, store.path());
         assert!(
@@ -1218,19 +1218,19 @@ mod tests {
             "原因要点名是哪个事件，实得 {reason}"
         );
 
-        let err = aurora.rollback(VERSION_ID, "100-001").await.unwrap_err();
+        let err = petalfall.rollback(VERSION_ID, "100-001").await.unwrap_err();
         let (_, reason) = refusal(&err);
         assert!(reason.contains("不是更新事件"), "原因实得 {reason}");
 
         assert_eq!(dir_names(&mods_dir).await, disk_before);
-        assert_eq!(aurora.history(VERSION_ID).await.unwrap().events.len(), 2);
+        assert_eq!(petalfall.history(VERSION_ID).await.unwrap().events.len(), 2);
     }
 
     /// 连续两次更新后回滚：落到上一版而不是最初版；再滚一次才回到最初版。
     #[tokio::test]
     async fn rollback_walks_back_one_update_at_a_time() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
 
         let v10 = b"lib 1.0".as_slice();
         let v11 = b"lib 1.1 body".as_slice();
@@ -1245,12 +1245,12 @@ mod tests {
             .await
             .unwrap();
 
-        let ledger_store = aurora.ledger_store(VERSION_ID);
+        let ledger_store = petalfall.ledger_store(VERSION_ID);
         let mut ledger = Ledger::default();
         ledger.upsert(ledger_entry("lib-1.2.jar", "V12", &sha1_hex(v12)));
         ledger_store.save(&ledger).await.unwrap();
 
-        let store = aurora.history_store(VERSION_ID);
+        let store = petalfall.history_store(VERSION_ID);
         store
             .append(install("100-001", 100, &["lib-1.0.jar"]))
             .await
@@ -1278,7 +1278,7 @@ mod tests {
             .await
             .unwrap();
 
-        aurora.rollback(VERSION_ID, "300-001").await.unwrap();
+        petalfall.rollback(VERSION_ID, "300-001").await.unwrap();
         assert_eq!(
             dir_names(&mods_dir).await,
             vec!["lib-1.0.jar.old", "lib-1.1.jar"]
@@ -1298,13 +1298,13 @@ mod tests {
             "V11"
         );
 
-        aurora.rollback(VERSION_ID, "200-001").await.unwrap();
+        petalfall.rollback(VERSION_ID, "200-001").await.unwrap();
         assert_eq!(dir_names(&mods_dir).await, vec!["lib-1.0.jar"]);
         let ledger = ledger_store.load().await.unwrap();
         assert_eq!(ledger.entries.len(), 1);
         assert_eq!(ledger.find("lib-1.0.jar").unwrap().version_id, "V10");
-        assert_eq!(aurora.backup_size(VERSION_ID).await.unwrap(), 0);
-        assert_eq!(aurora.history(VERSION_ID).await.unwrap().events.len(), 5);
+        assert_eq!(petalfall.backup_size(VERSION_ID).await.unwrap(), 0);
+        assert_eq!(petalfall.history(VERSION_ID).await.unwrap().events.len(), 5);
     }
 
     /// 更新链里较早的那条在较晚的那条回滚之前不可回滚：检查给出原因，回滚被拒且一个文件都不动；
@@ -1312,7 +1312,7 @@ mod tests {
     #[tokio::test]
     async fn earlier_update_in_a_chain_waits_for_the_later_one() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
         tokio::fs::write(mods_dir.join("lib-1.2.jar"), b"v12")
             .await
             .unwrap();
@@ -1322,7 +1322,7 @@ mod tests {
         tokio::fs::write(mods_dir.join("lib-1.0.jar.old"), b"v10")
             .await
             .unwrap();
-        let store = aurora.history_store(VERSION_ID);
+        let store = petalfall.history_store(VERSION_ID);
         for event in [
             install("100-001", 100, &["lib-1.0.jar"]),
             update_event("200-001", 200, "lib-1.1.jar", "lib-1.0.jar", "V10", "V11"),
@@ -1331,7 +1331,7 @@ mod tests {
             store.append(event).await.unwrap();
         }
 
-        let checks = aurora.rollback_checks(VERSION_ID).await.unwrap();
+        let checks = petalfall.rollback_checks(VERSION_ID).await.unwrap();
         assert!(!checks[1].can_rollback);
         assert_eq!(
             checks[1].reason.as_deref(),
@@ -1340,15 +1340,15 @@ mod tests {
         assert!(checks[2].can_rollback);
 
         let disk_before = dir_names(&mods_dir).await;
-        let err = aurora.rollback(VERSION_ID, "200-001").await.unwrap_err();
+        let err = petalfall.rollback(VERSION_ID, "200-001").await.unwrap_err();
         let (path, reason) = refusal(&err);
         assert_eq!(path, store.path());
         assert!(reason.contains("先回滚之后的那次更新"), "原因实得 {reason}");
         assert_eq!(dir_names(&mods_dir).await, disk_before);
-        assert_eq!(aurora.history(VERSION_ID).await.unwrap().events.len(), 3);
+        assert_eq!(petalfall.history(VERSION_ID).await.unwrap().events.len(), 3);
 
-        aurora.rollback(VERSION_ID, "300-001").await.unwrap();
-        let checks = aurora.rollback_checks(VERSION_ID).await.unwrap();
+        petalfall.rollback(VERSION_ID, "300-001").await.unwrap();
+        let checks = petalfall.rollback_checks(VERSION_ID).await.unwrap();
         assert!(checks[1].can_rollback, "{:?}", checks[1].reason);
         assert!(!checks[2].can_rollback);
     }
@@ -1357,7 +1357,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_uses_the_backup_name_recorded_in_the_event() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
         let (v1, v2, v3) = (
             b"one".as_slice(),
             b"two-two".as_slice(),
@@ -1372,11 +1372,11 @@ mod tests {
         tokio::fs::write(mods_dir.join("sodium.jar.2.old"), v2)
             .await
             .unwrap();
-        let ledger_store = aurora.ledger_store(VERSION_ID);
+        let ledger_store = petalfall.ledger_store(VERSION_ID);
         let mut ledger = Ledger::default();
         ledger.upsert(ledger_entry("sodium.jar", "V3", &sha1_hex(v3)));
         ledger_store.save(&ledger).await.unwrap();
-        let store = aurora.history_store(VERSION_ID);
+        let store = petalfall.history_store(VERSION_ID);
         store
             .append(update_event(
                 "200-001",
@@ -1394,13 +1394,13 @@ mod tests {
         }
         store.append(second).await.unwrap();
 
-        let checks = aurora.rollback_checks(VERSION_ID).await.unwrap();
+        let checks = petalfall.rollback_checks(VERSION_ID).await.unwrap();
         assert_eq!(
             checks.iter().map(|c| c.can_rollback).collect::<Vec<_>>(),
             vec![false, true]
         );
 
-        aurora.rollback(VERSION_ID, "300-001").await.unwrap();
+        petalfall.rollback(VERSION_ID, "300-001").await.unwrap();
         assert_eq!(
             tokio::fs::read(mods_dir.join("sodium.jar")).await.unwrap(),
             v2
@@ -1414,7 +1414,7 @@ mod tests {
         assert_eq!(entry.version_id, "V2");
         assert_eq!(entry.sha1.as_deref(), Some(sha1_hex(v2).as_str()));
 
-        aurora.rollback(VERSION_ID, "200-001").await.unwrap();
+        petalfall.rollback(VERSION_ID, "200-001").await.unwrap();
         assert_eq!(
             tokio::fs::read(mods_dir.join("sodium.jar")).await.unwrap(),
             v1
@@ -1436,7 +1436,7 @@ mod tests {
     #[tokio::test]
     async fn in_place_update_with_identical_file_name_rolls_back() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
 
         tokio::fs::write(mods_dir.join("sodium.jar"), NEW_BYTES)
             .await
@@ -1445,12 +1445,12 @@ mod tests {
             .await
             .unwrap();
 
-        let ledger_store = aurora.ledger_store(VERSION_ID);
+        let ledger_store = petalfall.ledger_store(VERSION_ID);
         let mut ledger = Ledger::default();
         ledger.upsert(ledger_entry("sodium.jar", "NEW-VER", &sha1_hex(NEW_BYTES)));
         ledger_store.save(&ledger).await.unwrap();
 
-        aurora
+        petalfall
             .history_store(VERSION_ID)
             .append(update_event(
                 "200-001",
@@ -1463,7 +1463,7 @@ mod tests {
             .await
             .unwrap();
 
-        aurora.rollback(VERSION_ID, "200-001").await.unwrap();
+        petalfall.rollback(VERSION_ID, "200-001").await.unwrap();
 
         assert_eq!(dir_names(&mods_dir).await, vec!["sodium.jar"]);
         assert_eq!(
@@ -1479,7 +1479,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_refuses_to_overwrite_a_file_sitting_on_the_old_name() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
 
         tokio::fs::write(mods_dir.join("sodium-0.6.0.jar"), NEW_BYTES)
             .await
@@ -1491,7 +1491,7 @@ mod tests {
             .await
             .unwrap();
 
-        aurora
+        petalfall
             .history_store(VERSION_ID)
             .append(update_event(
                 "200-001",
@@ -1504,7 +1504,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = aurora.rollback(VERSION_ID, "200-001").await.unwrap_err();
+        let err = petalfall.rollback(VERSION_ID, "200-001").await.unwrap_err();
         let (path, reason) = refusal(&err);
         assert_eq!(path, mods_dir.join("sodium-0.5.3.jar"));
         assert!(reason.contains("拒绝覆盖"), "原因实得 {reason}");
@@ -1531,14 +1531,14 @@ mod tests {
         use std::os::windows::fs::OpenOptionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
         tokio::fs::write(mods_dir.join("sodium-0.6.0.jar"), NEW_BYTES)
             .await
             .unwrap();
         tokio::fs::write(mods_dir.join("sodium-0.5.3.jar.old"), OLD_BYTES)
             .await
             .unwrap();
-        aurora
+        petalfall
             .history_store(VERSION_ID)
             .append(update_event(
                 "200-001",
@@ -1558,7 +1558,7 @@ mod tests {
             .open(mods_dir.join("sodium-0.6.0.jar"))
             .unwrap();
 
-        let err = aurora.rollback(VERSION_ID, "200-001").await.unwrap_err();
+        let err = petalfall.rollback(VERSION_ID, "200-001").await.unwrap_err();
         assert!(
             crate::modfs::is_mod_file_busy(&err),
             "占用应被识别为忙碌，实得 {err:?}"
@@ -1567,10 +1567,10 @@ mod tests {
             dir_names(&mods_dir).await,
             vec!["sodium-0.5.3.jar.old", "sodium-0.6.0.jar"]
         );
-        assert_eq!(aurora.history(VERSION_ID).await.unwrap().events.len(), 1);
+        assert_eq!(petalfall.history(VERSION_ID).await.unwrap().events.len(), 1);
 
         drop(held);
-        aurora.rollback(VERSION_ID, "200-001").await.unwrap();
+        petalfall.rollback(VERSION_ID, "200-001").await.unwrap();
         assert_eq!(dir_names(&mods_dir).await, vec!["sodium-0.5.3.jar"]);
     }
 
@@ -1578,7 +1578,7 @@ mod tests {
     #[tokio::test]
     async fn backup_size_sums_only_top_level_old_files() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
 
         tokio::fs::write(mods_dir.join("a.jar.old"), vec![0u8; 10])
             .await
@@ -1606,23 +1606,23 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(aurora.backup_size(VERSION_ID).await.unwrap(), 13);
+        assert_eq!(petalfall.backup_size(VERSION_ID).await.unwrap(), 13);
 
         // mods 目录还没建出来时是 0 字节，而不是报错。
         tokio::fs::remove_dir_all(&mods_dir).await.unwrap();
-        assert_eq!(aurora.backup_size(VERSION_ID).await.unwrap(), 0);
+        assert_eq!(petalfall.backup_size(VERSION_ID).await.unwrap(), 0);
     }
 
     /// 四类事件各自的可回滚判定，以及顺序与 history 一一对齐。
     #[tokio::test]
     async fn rollback_checks_classify_every_event_kind() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
         tokio::fs::write(mods_dir.join("kept-1.0.jar.old"), OLD_BYTES)
             .await
             .unwrap();
 
-        let store = aurora.history_store(VERSION_ID);
+        let store = petalfall.history_store(VERSION_ID);
         for event in [
             install("100-001", 100, &["kept-1.0.jar"]),
             update_event("200-001", 200, "kept-1.1.jar", "kept-1.0.jar", "V10", "V11"),
@@ -1641,8 +1641,8 @@ mod tests {
             store.append(event).await.unwrap();
         }
 
-        let checks = aurora.rollback_checks(VERSION_ID).await.unwrap();
-        let history = aurora.history(VERSION_ID).await.unwrap();
+        let checks = petalfall.rollback_checks(VERSION_ID).await.unwrap();
+        let history = petalfall.history(VERSION_ID).await.unwrap();
         let check_ids: Vec<&str> = checks.iter().map(|c| c.event_id.as_str()).collect();
         let event_ids: Vec<&str> = history.events.iter().map(HistoryEvent::id).collect();
         assert_eq!(check_ids, event_ids, "检查结果必须与历史逐条对齐");
@@ -1670,7 +1670,7 @@ mod tests {
     #[tokio::test]
     async fn rollback_without_ledger_entry_still_restores_files() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir) = installed_instance(tmp.path()).await;
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
 
         tokio::fs::write(mods_dir.join("manual-2.jar"), NEW_BYTES)
             .await
@@ -1678,7 +1678,7 @@ mod tests {
         tokio::fs::write(mods_dir.join("manual-1.jar.old"), OLD_BYTES)
             .await
             .unwrap();
-        aurora
+        petalfall
             .history_store(VERSION_ID)
             .append(update_event(
                 "200-001",
@@ -1691,11 +1691,11 @@ mod tests {
             .await
             .unwrap();
 
-        aurora.rollback(VERSION_ID, "200-001").await.unwrap();
+        petalfall.rollback(VERSION_ID, "200-001").await.unwrap();
 
         assert_eq!(dir_names(&mods_dir).await, vec!["manual-1.jar"]);
         assert_eq!(
-            aurora.ledger_store(VERSION_ID).load().await.unwrap(),
+            petalfall.ledger_store(VERSION_ID).load().await.unwrap(),
             Ledger::default()
         );
     }
@@ -1704,12 +1704,18 @@ mod tests {
     #[tokio::test]
     async fn history_on_fresh_instance_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, _) = installed_instance(tmp.path()).await;
+        let (petalfall, _) = installed_instance(tmp.path()).await;
         assert_eq!(
-            aurora.history(VERSION_ID).await.unwrap(),
+            petalfall.history(VERSION_ID).await.unwrap(),
             History::default()
         );
-        assert!(aurora.rollback_checks(VERSION_ID).await.unwrap().is_empty());
+        assert!(
+            petalfall
+                .rollback_checks(VERSION_ID)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// 历史句柄固定挂在版本目录下，与卷宗同处一处，不随隔离档位漂移。
@@ -1717,16 +1723,16 @@ mod tests {
     fn history_store_points_into_version_meta_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().join(".minecraft");
-        let aurora = Aurora::for_test(
-            AuroraConfig::default(),
+        let petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             mc.clone(),
         );
         assert_eq!(
-            aurora.history_store("1.20.1-Forge_47.4.20").path(),
+            petalfall.history_store("1.20.1-Forge_47.4.20").path(),
             mc.join("versions")
                 .join("1.20.1-Forge_47.4.20")
-                .join(AURORA_META_DIR)
+                .join(PETALFALL_META_DIR)
                 .join("history.json")
         );
     }
@@ -1735,28 +1741,28 @@ mod tests {
     #[tokio::test]
     async fn uninstalled_version_errors_before_touching_disk() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = Aurora::for_test(
-            AuroraConfig::default(),
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             tmp.path().to_path_buf(),
         );
-        aurora.set_isolation_policy(IsolationPolicy::All);
+        petalfall.set_isolation_policy(IsolationPolicy::All);
 
         assert!(matches!(
-            aurora.rollback("ghost", "1-001").await.unwrap_err(),
+            petalfall.rollback("ghost", "1-001").await.unwrap_err(),
             CoreError::VersionNotInstalled { id } if id == "ghost"
         ));
         assert!(matches!(
-            aurora.backup_size("ghost").await.unwrap_err(),
+            petalfall.backup_size("ghost").await.unwrap_err(),
             CoreError::VersionNotInstalled { id } if id == "ghost"
         ));
         assert!(matches!(
-            aurora.history("ghost").await.unwrap_err(),
+            petalfall.history("ghost").await.unwrap_err(),
             CoreError::VersionNotInstalled { id } if id == "ghost"
         ));
         // 带路径成分的 id 不能借历史读取逃出 versions 目录。
         assert!(matches!(
-            aurora.history("../outside").await.unwrap_err(),
+            petalfall.history("../outside").await.unwrap_err(),
             CoreError::VersionNotInstalled { .. }
         ));
     }

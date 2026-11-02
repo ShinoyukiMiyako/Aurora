@@ -12,11 +12,11 @@
 use std::future::Future;
 use std::time::SystemTime;
 
-use aurora_core::{
-    game_line_level, Aurora, AutoBackupOutcome, DownloadProgress, Finished, GameExit, GameRun,
-    GameSlot, LaunchAccount, LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage,
-    LauncherLevel, LogLine, LogSource, PlayRange, PlayStats, QuickPlay, SlotBusy, SlotReservation,
-    SlotTicket,
+use petalfall_core::{
+    game_line_level, AutoBackupOutcome, DownloadProgress, Finished, GameExit, GameRun, GameSlot,
+    LaunchAccount, LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage,
+    LauncherLevel, LogLine, LogSource, Petalfall, PlayRange, PlayStats, QuickPlay, SlotBusy,
+    SlotReservation, SlotTicket,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -34,14 +34,14 @@ use crate::facade::Facade;
 use crate::tasks::TaskRegistry;
 
 /// 启动阶段推进与阶段 3 的下载进度。
-pub const LAUNCH_PHASE_EVENT: &str = "aurora://launch-phase";
+pub const LAUNCH_PHASE_EVENT: &str = "petalfall://launch-phase";
 
 /// 游戏进程退出（收尾记账已写完）。
-pub const GAME_EXIT_EVENT: &str = "aurora://game-exit";
+pub const GAME_EXIT_EVENT: &str = "petalfall://game-exit";
 
 /// 游戏退出后的自动备份做完了。开着自动备份时每局都推，这次没进过存档也推（两个列表都空）：实例在备份期间
 /// 记着 backing_up，前端要靠这条事件知道它已放开、重读实例列表。
-pub const WORLD_BACKUP_EVENT: &str = "aurora://world-backup";
+pub const WORLD_BACKUP_EVENT: &str = "petalfall://world-backup";
 
 /// 运行中游戏的占用槽。与门面分列两个 managed state：会话生命周期独立于门面，启动后门面锁应立即可用。
 #[derive(Default)]
@@ -169,7 +169,7 @@ const ALL_WORLDS: &str = "*";
 /// 自动备份的结果译成事件负载。失败都记 error：自动备份是后台进行的，前端只拿到一条通知，排查要靠日志。
 fn world_backup_event(
     instance_id: &str,
-    outcome: aurora_core::Result<AutoBackupOutcome>,
+    outcome: petalfall_core::Result<AutoBackupOutcome>,
 ) -> WorldBackupEventDto {
     let (backed_up, failed) = match outcome {
         Ok(AutoBackupOutcome { backed_up, failed }) => {
@@ -421,13 +421,13 @@ fn spawn_watch(
 async fn reserve_launch<'a>(
     running: &'a RunningGame,
     locks: &InstanceLocks,
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     version_id: &str,
 ) -> Result<(SlotReservation<'a>, ChainGuard), CommandError> {
     let reservation = running.0.reserve(version_id).map_err(busy)?;
     let instance = locks
         .acquire_with_chain(version_id, InstanceActivity::Launching, async {
-            Ok(aurora.inheritance_chain(version_id).await?)
+            Ok(petalfall.inheritance_chain(version_id).await?)
         })
         .await?;
     Ok((reservation, instance))
@@ -472,13 +472,13 @@ pub async fn launch_game(
             ))
         }
     };
-    let aurora = facade.snapshot().await;
+    let petalfall = facade.snapshot().await;
     // 实例与它基底的占用从这里一直持有到游戏退出。
-    let (reservation, instance) = reserve_launch(&running, &locks, &aurora, &version_id).await?;
+    let (reservation, instance) = reserve_launch(&running, &locks, &petalfall, &version_id).await?;
     // 共用存档的实例：先占住自己再查别人，查完之后再有别的实例想备份共用存档，会被占用槽那一侧的检查挡住。
-    ensure_saves_free_for_launch(&aurora, &locks, &version_id).await?;
+    ensure_saves_free_for_launch(&petalfall, &locks, &version_id).await?;
     let task = tasks.register(&task_id)?;
-    let aurora = aurora.with_cancel(task.token().clone());
+    let petalfall = petalfall.with_cancel(task.token().clone());
 
     let (events_tx, mut events_rx) = mpsc::unbounded_channel::<LaunchEvent>();
     let phase_app = app.clone();
@@ -507,7 +507,7 @@ pub async fn launch_game(
         .run(async {
             let account = match account {
                 AccountArg::Stored(uuid) => {
-                    LaunchAccount::Stored(Box::new(find_account(&aurora, &uuid).await?))
+                    LaunchAccount::Stored(Box::new(find_account(&petalfall, &uuid).await?))
                 }
                 AccountArg::Offline(name) => LaunchAccount::Offline { name },
             };
@@ -519,9 +519,9 @@ pub async fn launch_game(
                 quick_play: quick_play.map(QuickPlay::from),
             };
             let launched = if offline_fallback {
-                aurora.launch_offline_fallback(request, &events_tx).await
+                petalfall.launch_offline_fallback(request, &events_tx).await
             } else {
-                aurora.launch(request, &events_tx).await
+                petalfall.launch(request, &events_tx).await
             };
             launched.map_err(launch_error)
         })
@@ -568,14 +568,14 @@ pub async fn play_stats(
         ))
         .with_detail(json!({ "from": range.from, "to": range.to }))
     })?;
-    let aurora = facade.snapshot().await;
-    Ok(aurora.play_stats(parsed).await?)
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.play_stats(parsed).await?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_core::{FailureCode, LaunchFailure, LogStream};
+    use petalfall_core::{FailureCode, LaunchFailure, LogStream};
     use std::collections::BTreeMap;
 
     fn progress(total: u64, finished: u64) -> DownloadProgress {
@@ -729,11 +729,11 @@ mod tests {
         );
 
         let core = launch_error(LaunchFailed::Core(
-            aurora_core::CoreError::VersionNotInstalled { id: "ghost".into() },
+            petalfall_core::CoreError::VersionNotInstalled { id: "ghost".into() },
         ));
         assert_eq!(core.code, "version_not_installed");
-        let cancelled = launch_error(LaunchFailed::Core(aurora_core::CoreError::Download(
-            aurora_core::DownloadError::Cancelled,
+        let cancelled = launch_error(LaunchFailed::Core(petalfall_core::CoreError::Download(
+            petalfall_core::DownloadError::Cancelled,
         )));
         assert!(cancelled.is_cancelled());
     }
@@ -749,11 +749,11 @@ mod tests {
             }
             std::fs::write(version_dir.join(format!("{id}.json")), body.to_string()).unwrap();
         }
-        let config = aurora_core::AuroraConfig {
+        let config = petalfall_core::PetalfallConfig {
             game_directory: Some(dir.join(".minecraft")),
-            ..aurora_core::AuroraConfig::default()
+            ..petalfall_core::PetalfallConfig::default()
         };
-        Facade::new(Aurora::open(config, dir.to_path_buf(), dir.join("config.json")).unwrap())
+        Facade::new(Petalfall::open(config, dir.to_path_buf(), dir.join("config.json")).unwrap())
     }
 
     /// 实例自己正被占着（安装、补全、改名、删除）时先报 instance_busy，不先去读它的版本 JSON：安装途中 JSON
@@ -772,14 +772,14 @@ mod tests {
         )
         .unwrap();
         let facade = facade_with(dir.path(), &[("生存", None)]);
-        let aurora = facade.snapshot().await;
+        let petalfall = facade.snapshot().await;
         let running = RunningGame::default();
         let locks = InstanceLocks::default();
 
         let installing = locks
             .acquire("装到 一半", InstanceActivity::Installing)
             .unwrap();
-        let err = reserve_launch(&running, &locks, &aurora, "装到 一半")
+        let err = reserve_launch(&running, &locks, &petalfall, "装到 一半")
             .await
             .err()
             .unwrap();
@@ -790,13 +790,13 @@ mod tests {
         );
         drop(installing);
 
-        let err = reserve_launch(&running, &locks, &aurora, "装到 一半")
+        let err = reserve_launch(&running, &locks, &petalfall, "装到 一半")
             .await
             .err()
             .unwrap();
         assert_eq!(err.code, crate::commands::error::code::IO, "{err:?}");
         assert_eq!(locks.activity("装到 一半"), None);
-        assert!(reserve_launch(&running, &locks, &aurora, "生存")
+        assert!(reserve_launch(&running, &locks, &petalfall, "生存")
             .await
             .is_ok());
     }
@@ -810,8 +810,8 @@ mod tests {
             code: FailureCode::AccountServiceDown,
             message: "刷新 PetalPlayer 的登录失败：登录服务暂时不可用（刷新令牌：HTTP 503）".into(),
             params,
-            source: Some(aurora_core::CoreError::Auth(
-                aurora_core::AuthError::ServiceUnavailable {
+            source: Some(petalfall_core::CoreError::Auth(
+                petalfall_core::AuthError::ServiceUnavailable {
                     step: "刷新令牌",
                     status: 503,
                 },
@@ -896,13 +896,13 @@ mod tests {
     async fn launch_reserves_the_slot_and_the_instance_or_neither() {
         let dir = tempfile::tempdir().unwrap();
         let facade = facade_with(dir.path(), &[("生存", None), ("创造", None)]);
-        let aurora = facade.snapshot().await;
+        let petalfall = facade.snapshot().await;
         let running = RunningGame::default();
         let locks = InstanceLocks::default();
 
         // 实例正在安装：报 instance_busy，占用槽的预留随之放开，别的实例照常能启动。
         let installing = locks.acquire("生存", InstanceActivity::Installing).unwrap();
-        let err = reserve_launch(&running, &locks, &aurora, "生存")
+        let err = reserve_launch(&running, &locks, &petalfall, "生存")
             .await
             .err()
             .unwrap();
@@ -910,12 +910,12 @@ mod tests {
         assert_eq!(err.detail.unwrap()["activity"], json!("installing"));
         drop(installing);
 
-        let (reservation, instance) = reserve_launch(&running, &locks, &aurora, "生存")
+        let (reservation, instance) = reserve_launch(&running, &locks, &petalfall, "生存")
             .await
             .unwrap();
         assert_eq!(locks.activity("生存"), Some(InstanceActivity::Launching));
         // 加载中：另一个实例拿不到占用槽，也不会被占住实例。
-        let err = reserve_launch(&running, &locks, &aurora, "创造")
+        let err = reserve_launch(&running, &locks, &petalfall, "创造")
             .await
             .err()
             .unwrap();
@@ -927,7 +927,7 @@ mod tests {
         drop(reservation);
         drop(instance);
         assert_eq!(locks.activity("生存"), None);
-        assert!(reserve_launch(&running, &locks, &aurora, "创造")
+        assert!(reserve_launch(&running, &locks, &petalfall, "创造")
             .await
             .is_ok());
     }
@@ -944,13 +944,13 @@ mod tests {
             dir.path(),
             &[("1.20.1", None), ("Fabric 生存", Some("1.20.1"))],
         );
-        let aurora = facade.snapshot().await;
+        let petalfall = facade.snapshot().await;
         let running = RunningGame::default();
         let locks = InstanceLocks::default();
         let tasks = TaskRegistry::default();
-        let (sink, _rx) = mpsc::unbounded_channel::<aurora_core::CoreEvent>();
+        let (sink, _rx) = mpsc::unbounded_channel::<petalfall_core::CoreEvent>();
 
-        let (reservation, instance) = reserve_launch(&running, &locks, &aurora, "Fabric 生存")
+        let (reservation, instance) = reserve_launch(&running, &locks, &petalfall, "Fabric 生存")
             .await
             .unwrap();
         instance.set_activity(InstanceActivity::Running);
@@ -985,7 +985,7 @@ mod tests {
         let repairing = locks
             .acquire("1.20.1", InstanceActivity::Repairing)
             .unwrap();
-        let err = reserve_launch(&running, &locks, &aurora, "Fabric 生存")
+        let err = reserve_launch(&running, &locks, &petalfall, "Fabric 生存")
             .await
             .err()
             .unwrap();
@@ -999,7 +999,7 @@ mod tests {
             "实例自己的占用随之放开"
         );
         drop(repairing);
-        assert!(reserve_launch(&running, &locks, &aurora, "Fabric 生存")
+        assert!(reserve_launch(&running, &locks, &petalfall, "Fabric 生存")
             .await
             .is_ok());
     }
@@ -1014,13 +1014,13 @@ mod tests {
             dir.path(),
             &[("1.20.1", None), ("Fabric 生存", Some("1.20.1"))],
         );
-        let aurora = facade.snapshot().await;
+        let petalfall = facade.snapshot().await;
         let running = RunningGame::default();
         let locks = InstanceLocks::default();
         let tasks = TaskRegistry::default();
-        let (sink, _rx) = mpsc::unbounded_channel::<aurora_core::CoreEvent>();
+        let (sink, _rx) = mpsc::unbounded_channel::<petalfall_core::CoreEvent>();
 
-        let (reservation, game) = reserve_launch(&running, &locks, &aurora, "1.20.1")
+        let (reservation, game) = reserve_launch(&running, &locks, &petalfall, "1.20.1")
             .await
             .unwrap();
         let err = repair_instance_with(&facade, &tasks, &locks, "r", "Fabric 生存", &sink)
@@ -1055,7 +1055,7 @@ mod tests {
                 &["1.20.1".to_owned()],
             )
             .unwrap();
-        let err = reserve_launch(&running, &locks, &aurora, "1.20.1")
+        let err = reserve_launch(&running, &locks, &petalfall, "1.20.1")
             .await
             .err()
             .unwrap();
@@ -1065,7 +1065,7 @@ mod tests {
         );
         drop(repairing);
         assert!(
-            reserve_launch(&running, &locks, &aurora, "1.20.1")
+            reserve_launch(&running, &locks, &petalfall, "1.20.1")
                 .await
                 .is_ok(),
             "占用槽没被留下"
@@ -1088,14 +1088,14 @@ mod tests {
                 ("OptiFabric", Some("fabric-loader-0.15.0-1.20.1")),
             ],
         );
-        let aurora = facade.snapshot().await;
+        let petalfall = facade.snapshot().await;
         let locks = InstanceLocks::default();
         let (first_slot, second_slot) = (RunningGame::default(), RunningGame::default());
 
-        let first = reserve_launch(&first_slot, &locks, &aurora, "Fabric")
+        let first = reserve_launch(&first_slot, &locks, &petalfall, "Fabric")
             .await
             .unwrap();
-        let second = reserve_launch(&second_slot, &locks, &aurora, "OptiFabric")
+        let second = reserve_launch(&second_slot, &locks, &petalfall, "OptiFabric")
             .await
             .unwrap();
         assert_eq!(locks.activity("1.20.1"), Some(InstanceActivity::Inherited));
@@ -1151,11 +1151,11 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let aurora = facade.snapshot().await;
+        let petalfall = facade.snapshot().await;
         let locks = InstanceLocks::default();
         let slot = RunningGame::default();
 
-        let launching = reserve_launch(&slot, &locks, &aurora, "OptiFabric")
+        let launching = reserve_launch(&slot, &locks, &petalfall, "OptiFabric")
             .await
             .unwrap();
 
@@ -1182,8 +1182,8 @@ mod tests {
     /// 测试里走不到真正的删除：基底被占着时删除命令必须在动目录之前就拒绝。
     struct NeverDispose;
 
-    impl aurora_core::Disposer for NeverDispose {
-        fn dispose(&self, dir: &std::path::Path) -> Result<(), aurora_core::InstanceError> {
+    impl petalfall_core::Disposer for NeverDispose {
+        fn dispose(&self, dir: &std::path::Path) -> Result<(), petalfall_core::InstanceError> {
             panic!("被占着的基底不该被删除：{}", dir.display());
         }
     }
@@ -1217,7 +1217,7 @@ mod tests {
         let killed = settle(async {
             Finished {
                 exit: exit("1.21", None, false, true),
-                problems: vec![aurora_core::CoreError::PlatformUnsupported],
+                problems: vec![petalfall_core::CoreError::PlatformUnsupported],
             }
         })
         .await;
@@ -1229,16 +1229,17 @@ mod tests {
 
     /// 游戏目录在临时目录下的门面，自动备份按 `auto` 开关。
     fn facade_in(dir: &std::path::Path, auto: bool) -> Facade {
-        let config = aurora_core::AuroraConfig {
+        let config = petalfall_core::PetalfallConfig {
             game_directory: Some(dir.join(".minecraft")),
-            world_backup: aurora_core::WorldBackupSettings {
+            world_backup: petalfall_core::WorldBackupSettings {
                 auto,
-                ..aurora_core::WorldBackupSettings::default()
+                ..petalfall_core::WorldBackupSettings::default()
             },
-            ..aurora_core::AuroraConfig::default()
+            ..petalfall_core::PetalfallConfig::default()
         };
         Facade::new(
-            aurora_core::Aurora::open(config, dir.to_path_buf(), dir.join("config.json")).unwrap(),
+            petalfall_core::Petalfall::open(config, dir.to_path_buf(), dir.join("config.json"))
+                .unwrap(),
         )
     }
 
@@ -1307,7 +1308,7 @@ mod tests {
         let backups = dir
             .path()
             .join(".minecraft")
-            .join(concat!(".", aurora_base::app_slug!()))
+            .join(concat!(".", petalfall_base::app_slug!()))
             .join("backups");
         assert!(!backups.exists(), "关着自动备份不碰盘");
     }
@@ -1372,7 +1373,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(list.backups.len(), 1);
-        assert_eq!(list.backups[0].kind, aurora_core::BackupKind::Auto);
+        assert_eq!(list.backups[0].kind, petalfall_core::BackupKind::Auto);
         let untouched = facade
             .snapshot()
             .await
@@ -1497,7 +1498,7 @@ mod tests {
                 backed_up: vec!["a".into()],
                 failed: vec![(
                     "b".into(),
-                    aurora_core::CoreError::WorldNotFound {
+                    petalfall_core::CoreError::WorldNotFound {
                         version_id: "生存".into(),
                         world: "b".into(),
                     },
@@ -1514,7 +1515,7 @@ mod tests {
 
         let whole = world_backup_event(
             "生存",
-            Err(aurora_core::CoreError::VersionNotInstalled {
+            Err(petalfall_core::CoreError::VersionNotInstalled {
                 id: "生存".into()
             }),
         );

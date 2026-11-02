@@ -13,7 +13,7 @@ use std::io::{self, Cursor};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use aurora_setup_payload::{
+use petalfall_setup_payload::{
     Error as FormatError, HEADER_LEN, Header, locate, overlay_start, sha256,
 };
 

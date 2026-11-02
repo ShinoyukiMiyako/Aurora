@@ -3,7 +3,7 @@
 //!
 //! 前端添加离线账户的弹窗按同一规则预览（`flows/login/default-skin.ts`），两边用同一组测试向量钉住。
 
-use aurora_auth::SkinModel;
+use petalfall_auth::SkinModel;
 
 /// 一套默认皮肤：材质名单里的路径与体型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,7 +268,7 @@ mod tests {
             ("jeb_", "entity/player/slim/ari"),
             ("樱花", "entity/player/wide/steve"),
         ] {
-            let uuid = aurora_auth::offline_uuid(name).simple().to_string();
+            let uuid = petalfall_auth::offline_uuid(name).simple().to_string();
             assert_eq!(default_skin(&uuid).unwrap().path, path, "{name}");
         }
     }

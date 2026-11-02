@@ -1,14 +1,14 @@
 //! classpath 组装：按「合并后 libraries 顺序」拼出 `-cp` 的条目，客户端主 jar 垫最后。
 //!
-//! 库的本地落点必须与 [`aurora_install`](../../aurora_install) 下载时写入的路径逐字一致，否则 classpath
-//! 指向的 jar 不存在。为此这里的 maven 坐标 -> 相对路径算法与 `aurora_install::maven::artifact_path`
-//! 保持一致（本 crate 不依赖 install，故独立实现一份；纯字符串运算）。选库复用 aurora-version 的
+//! 库的本地落点必须与 [`petalfall_install`](../../petalfall_install) 下载时写入的路径逐字一致，否则 classpath
+//! 指向的 jar 不存在。为此这里的 maven 坐标 -> 相对路径算法与 `petalfall_install::maven::artifact_path`
+//! 保持一致（本 crate 不依赖 install，故独立实现一份；纯字符串运算）。选库复用 petalfall-version 的
 //! [`select_libraries`]：它已按 rules 过滤并按 `Library::dedup_key` 去重、保留先出现者
 //! （合并继承链时加载器库在前，从而压过原版同名库）。
 
 use std::path::{Path, PathBuf};
 
-use aurora_version::{
+use petalfall_version::{
     Library, OsName, RuntimeContext, VersionJson, check_path_segment, check_relative_path,
     select_libraries,
 };
@@ -26,7 +26,7 @@ pub fn classpath_separator(os: OsName) -> char {
 /// 把一个 maven 坐标转成相对 `libraries/` 根的路径（正斜杠分隔）。
 ///
 /// 坐标形如 `group:artifact:version[:classifier][@ext]`，缺段/空段返回 `None`（交调用方冒泡成坐标非法）。
-/// 与 `aurora_install::maven::artifact_path` 同构，保证下载落点与 classpath 引用一致。
+/// 与 `petalfall_install::maven::artifact_path` 同构，保证下载落点与 classpath 引用一致。
 pub fn maven_artifact_path(coordinate: &str) -> Option<String> {
     let (coord, extension) = match coordinate.split_once('@') {
         Some((left, ext)) if !ext.is_empty() => (left, ext),
@@ -104,7 +104,7 @@ pub fn library_relative_path(lib: &Library) -> Result<String> {
 
 /// 组装该版本的 classpath 条目（绝对路径），顺序 = 合并后生效库的顺序，客户端主 jar 垫最后。
 ///
-/// 由启动器解压的 natives 库不进 classpath（解压由 aurora-install 完成，判据见
+/// 由启动器解压的 natives 库不进 classpath（解压由 petalfall-install 完成，判据见
 /// [`VersionJson::extracts_native`]）。坐标无法解析的库直接冒泡成错误，
 /// 不静默跳过——否则会导致运行期 `ClassNotFoundException`，问题被推迟到更难定位的地方。
 pub fn classpath_entries(
@@ -204,8 +204,8 @@ mod tests {
     fn relative_path_prefers_artifact_path_then_coordinate() {
         let with_download = Library {
             name: "net.fabricmc:tiny-mappings-parser:0.3.0".into(),
-            downloads: Some(aurora_version::LibraryDownloads {
-                artifact: Some(aurora_version::Artifact {
+            downloads: Some(petalfall_version::LibraryDownloads {
+                artifact: Some(petalfall_version::Artifact {
                     path: Some("custom/put/here.jar".into()),
                     sha1: "x".into(),
                     size: 1,
@@ -334,31 +334,31 @@ mod tests {
                 r#"{"name":"a:b:1","downloads":{"artifact":{"path":"org//x.jar","sha1":"a","size":1,"url":"u"}}}"#,
                 "库 a:b:1",
                 "org//x.jar",
-                aurora_version::UnsafePath::EmptySegment,
+                petalfall_version::UnsafePath::EmptySegment,
             ),
             (
                 r#"{"name":"a:b:1","downloads":{"artifact":{"path":"org/../../x.jar","sha1":"a","size":1,"url":"u"}}}"#,
                 "库 a:b:1",
                 "org/../../x.jar",
-                aurora_version::UnsafePath::DotSegment,
+                petalfall_version::UnsafePath::DotSegment,
             ),
             (
                 r#"{"name":"evil:..:1"}"#,
                 "库 evil:..:1",
                 "evil/../1/..-1.jar",
-                aurora_version::UnsafePath::DotSegment,
+                petalfall_version::UnsafePath::DotSegment,
             ),
             (
                 r#"{"name":"a:b\\..\\..:1"}"#,
                 r"库 a:b\..\..:1",
                 r"a/b\..\../1/b\..\..-1.jar",
-                aurora_version::UnsafePath::Backslash,
+                petalfall_version::UnsafePath::Backslash,
             ),
             (
                 r#"{"name":"a:b/c:1"}"#,
                 "库 a:b/c:1",
                 "a/b/c/1/b/c-1.jar",
-                aurora_version::UnsafePath::Separator,
+                petalfall_version::UnsafePath::Separator,
             ),
         ];
         for (library, entry, path, problem) in cases {
@@ -429,8 +429,8 @@ mod tests {
 
             let declared = Library {
                 name: name.into(),
-                downloads: Some(aurora_version::LibraryDownloads {
-                    artifact: Some(aurora_version::Artifact {
+                downloads: Some(petalfall_version::LibraryDownloads {
+                    artifact: Some(petalfall_version::Artifact {
                         path: Some(expected.into()),
                         sha1: "x".into(),
                         size: 1,

@@ -1,13 +1,13 @@
 //! crate 统一错误类型。
 //!
-//! 全 crate 只暴露一个 [`Error`] 枚举，下游可用 `#[from] aurora_base::Error` 一处冒泡。
+//! 全 crate 只暴露一个 [`Error`] 枚举，下游可用 `#[from] petalfall_base::Error` 一处冒泡。
 //! 每个变体都携带足够定位现场的上下文（出错路径、期望/实际哈希），不做默认值掩盖。
 
 use std::path::PathBuf;
 
 use crate::retry::RetryableError;
 
-/// aurora-base 对外统一错误。
+/// petalfall-base 对外统一错误。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// 构建 reqwest 客户端失败（TLS/连接池等配置层面问题，重试不会好转）。

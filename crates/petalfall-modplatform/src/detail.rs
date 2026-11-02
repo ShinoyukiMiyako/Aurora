@@ -363,7 +363,7 @@ fn newest_file_label(item: &CurseForgeMod) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_base::retry::RetryPolicy;
+    use petalfall_base::retry::RetryPolicy;
     use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -480,7 +480,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         let client = ModrinthClient::new(http)
             .with_base_url(server.uri())
             .with_retry(no_retry());
@@ -566,7 +566,7 @@ mod tests {
     }
 
     fn modrinth_client(server: &MockServer) -> ModrinthClient {
-        ModrinthClient::new(aurora_base::http::build_client().unwrap())
+        ModrinthClient::new(petalfall_base::http::build_client().unwrap())
             .with_base_url(server.uri())
             .with_retry(no_retry())
     }
@@ -784,7 +784,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         let client = CurseForgeClient::new(http, "k")
             .with_base_url(server.uri())
             .with_retry(no_retry());

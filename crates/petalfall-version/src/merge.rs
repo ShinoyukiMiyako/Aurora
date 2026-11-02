@@ -7,7 +7,7 @@
 //! - 新式 `arguments` 祖先在前拼接（原版基础参数先行，加载器 tweak 追加在后）；
 //! - 旧式 `minecraftArguments` 是整串替换语义，取最派生的非空串。
 //!
-//! provider 抽象出 "按 id 取版本"：内存 Map 用于测试，磁盘实现（扫描 versions/）归 aurora-instance。
+//! provider 抽象出 "按 id 取版本"：内存 Map 用于测试，磁盘实现（扫描 versions/）归 petalfall-instance。
 //! provider 对某 id 返回 None 即表示 "前置未安装"，会冒泡成 [`Error::MissingInherited`]。
 
 use std::collections::{HashMap, HashSet};

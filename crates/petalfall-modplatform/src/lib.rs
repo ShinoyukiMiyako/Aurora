@@ -1,6 +1,6 @@
-//! aurora-modplatform（L2 Mod 平台客户端与聚合）
+//! petalfall-modplatform（L2 Mod 平台客户端与聚合）
 //!
-//! 在 [`aurora_base`] 的 HTTP 工厂、退避重试、流式哈希与 [`aurora_download`] 的下载任务模型之上，
+//! 在 [`petalfall_base`] 的 HTTP 工厂、退避重试、流式哈希与 [`petalfall_download`] 的下载任务模型之上，
 //! 构建 Modrinth / CurseForge 双平台客户端与本地模组管理：
 //!
 //! - [`modrinth`]：Modrinth v2 客户端——搜索（facets 过滤）、工程详情、单版本与版本列表、依赖、
@@ -18,7 +18,7 @@
 //! - [`hash`]：Modrinth SHA-1 与 CurseForge MurmurHash2 指纹双通道，供已装模组的联网匹配与更新检测。
 //!
 //! 所有访问远端的客户端都支持注入 `base_url`，单元测试走本地 mock。错误统一归口到 [`Error`]，
-//! 可重试性由 [`aurora_base::retry::RetryableError`] 分级。
+//! 可重试性由 [`petalfall_base::retry::RetryableError`] 分级。
 
 pub mod aggregate;
 pub mod category_map;
@@ -72,5 +72,5 @@ pub use local::{
 
 pub use hash::{ModHashes, curseforge_fingerprint, fingerprint_file, hash_mod_file, murmur2};
 
-// 下游可直接从本 crate 取下载任务类型，无需再显式依赖 aurora-download。
-pub use aurora_download::DownloadTask;
+// 下游可直接从本 crate 取下载任务类型，无需再显式依赖 petalfall-download。
+pub use petalfall_download::DownloadTask;

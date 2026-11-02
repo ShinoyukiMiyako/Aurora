@@ -9,8 +9,8 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_download::SourcePlan;
-use aurora_version::{ManifestVersion, VersionJson, VersionManifest};
+use petalfall_download::SourcePlan;
+use petalfall_version::{ManifestVersion, VersionJson, VersionManifest};
 
 use crate::complete;
 use crate::context::InstallContext;
@@ -168,7 +168,7 @@ impl<'a> VanillaInstaller<'a> {
         entry: &ManifestVersion,
         dest: &Path,
     ) -> Result<VersionJson> {
-        let mut task = aurora_download::DownloadTask::new(entry.url.clone(), dest);
+        let mut task = petalfall_download::DownloadTask::new(entry.url.clone(), dest);
         if let Some(sha1) = &entry.sha1 {
             task = task.with_sha1(sha1.clone());
         }
@@ -200,7 +200,7 @@ impl<'a> VanillaInstaller<'a> {
 fn staged_json_path(dir: &Path) -> PathBuf {
     dir.join(format!(
         ".{}-version-{:016x}.json.part",
-        aurora_base::app_slug!(),
+        petalfall_base::app_slug!(),
         fastrand::u64(..)
     ))
 }
@@ -228,9 +228,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use aurora_base::retry::RetryPolicy;
-    use aurora_download::{DownloadPool, Downloader, MirrorSource, SourceResolver};
-    use aurora_version::{OsName, RuntimeContext};
+    use petalfall_base::retry::RetryPolicy;
+    use petalfall_download::{DownloadPool, Downloader, MirrorSource, SourceResolver};
+    use petalfall_version::{OsName, RuntimeContext};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -243,7 +243,7 @@ mod tests {
     }
 
     impl SourceResolver for Routes {
-        fn resolve(&self, url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+        fn resolve(&self, url: &str, source: MirrorSource) -> petalfall_download::Result<String> {
             let path = url.strip_prefix(UPSTREAM).expect("测试只解析版本清单地址");
             let prefix = match source {
                 MirrorSource::Official => "/official",
@@ -302,7 +302,7 @@ mod tests {
             .await;
 
         let tmp = tempfile::tempdir().unwrap();
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 1);
         let layout = crate::layout::GameLayout::new(tmp.path());
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
@@ -355,7 +355,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 1);
         let layout = crate::layout::GameLayout::new(std::env::temp_dir());
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);

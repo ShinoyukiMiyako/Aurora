@@ -1,4 +1,4 @@
-//! aurora-version 独立错误类型。
+//! petalfall-version 独立错误类型。
 //!
 //! 本 crate 是纯解析层，出错来源只有两类：
 //! 一是 JSON 反序列化失败（`Json`，context 标注是清单还是版本 JSON 便于定位；规则里非法的

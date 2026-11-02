@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::folders::same_path;
 
 /// 游玩记录文件名，位于数据目录下。
@@ -39,7 +39,7 @@ const MS_PER_MINUTE: u64 = 60_000;
 ///
 /// 多个实例可能同时退出，读改写必须串行，否则后写的那次会覆盖先写的那一局；读也要排队：读到旧版本时
 /// 当场改写，有待补的改动时一并补上落盘。之后对同一个文件的任何一次读写都先补上这些改动，补上之前读到
-/// 的记录也已是改过的样子。只在进程内：启动器正常退出时再补写一次（[`Aurora::save_pending_play_records`]），
+/// 的记录也已是改过的样子。只在进程内：启动器正常退出时再补写一次（[`Petalfall::save_pending_play_records`]），
 /// 那次也没写进去、或进程被强行结束时，这些改动就丢了，旧名下的记录不再对应任何实例。
 static PENDING: Mutex<BTreeMap<PathBuf, Pending>> = Mutex::const_new(BTreeMap::new());
 
@@ -396,8 +396,8 @@ fn playtime_path(data_dir: &Path) -> PathBuf {
     data_dir.join(PLAYTIME_FILE)
 }
 
-fn parse_error(path: &Path, source: serde_json::Error) -> aurora_instance::Error {
-    aurora_instance::Error::Json {
+fn parse_error(path: &Path, source: serde_json::Error) -> petalfall_instance::Error {
+    petalfall_instance::Error::Json {
         context: "游玩记录",
         path: path.to_path_buf(),
         source,
@@ -413,7 +413,7 @@ async fn load(path: &Path, game_dir: &Path) -> Result<(PlayLibrary, bool)> {
             return Ok((PlayLibrary::default(), false));
         }
         Err(source) => {
-            return Err(aurora_base::Error::Io {
+            return Err(petalfall_base::Error::Io {
                 path: path.to_path_buf(),
                 source,
             }
@@ -467,7 +467,7 @@ async fn save(path: &Path, library: PlayLibrary) -> Result<()> {
         directories: library.directories,
     })
     .map_err(|err| parse_error(path, err))?;
-    aurora_base::fs::atomic_write(path, &bytes).await?;
+    petalfall_base::fs::atomic_write(path, &bytes).await?;
     Ok(())
 }
 
@@ -631,7 +631,7 @@ async fn record_play_in<Tz: TimeZone>(
     .await
 }
 
-impl Aurora {
+impl Petalfall {
     /// 实例改名后把它在当前游戏目录下的游玩记录挪到新名字下（记录以实例 id 为键）。失败时改动记下待补，
     /// 之后读写游玩记录时补上。
     pub async fn rename_play_records(&self, old: &str, new: &str) -> Result<()> {
@@ -721,9 +721,9 @@ mod tests {
     }
 
     /// 数据目录在 `root`、当前游戏目录为 `game` 的门面。
-    fn aurora_in(root: &Path, game: &Path) -> Aurora {
-        Aurora::for_test(
-            crate::config::AuroraConfig::default(),
+    fn petalfall_in(root: &Path, game: &Path) -> Petalfall {
+        Petalfall::for_test(
+            crate::config::PetalfallConfig::default(),
             root.to_path_buf(),
             game.to_path_buf(),
         )
@@ -1022,22 +1022,22 @@ mod tests {
     async fn rename_and_forget_persist_and_do_not_create_an_empty_file() {
         let tmp = tempfile::tempdir().unwrap();
         let game = game_dir(tmp.path());
-        let aurora = aurora_in(tmp.path(), &game);
+        let petalfall = petalfall_in(tmp.path(), &game);
         let path = playtime_path(tmp.path());
-        aurora.rename_play_records("x", "y").await.unwrap();
-        aurora.forget_play_records("x").await.unwrap();
+        petalfall.rename_play_records("x", "y").await.unwrap();
+        petalfall.forget_play_records("x").await.unwrap();
         assert!(!path.exists());
 
         record_play_in(&utc8(), tmp.path(), &game, "旧名", 0, 2 * HOUR)
             .await
             .unwrap();
-        aurora.rename_play_records("旧名", "新名").await.unwrap();
-        let summaries = aurora.play_summaries().await.unwrap();
+        petalfall.rename_play_records("旧名", "新名").await.unwrap();
+        let summaries = petalfall.play_summaries().await.unwrap();
         assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["新名"]);
         assert_eq!(summaries["新名"].playtime_min, 120);
 
-        aurora.forget_play_records("新名").await.unwrap();
-        assert!(aurora.play_summaries().await.unwrap().is_empty());
+        petalfall.forget_play_records("新名").await.unwrap();
+        assert!(petalfall.play_summaries().await.unwrap().is_empty());
         let (library, _) = load(&path, &game).await.unwrap();
         assert!(library.book(&game).days.is_empty());
     }
@@ -1046,9 +1046,9 @@ mod tests {
     async fn missing_file_reads_as_empty_and_corrupt_file_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
         let game = game_dir(tmp.path());
-        let aurora = aurora_in(tmp.path(), &game);
-        assert!(aurora.play_summaries().await.unwrap().is_empty());
-        let stats = aurora
+        let petalfall = petalfall_in(tmp.path(), &game);
+        assert!(petalfall.play_summaries().await.unwrap().is_empty());
+        let stats = petalfall
             .play_stats(range("2026-10-01", "2026-10-31"))
             .await
             .unwrap();
@@ -1057,12 +1057,12 @@ mod tests {
 
         let path = playtime_path(tmp.path());
         std::fs::write(&path, "{ broken").unwrap();
-        assert!(aurora.play_summaries().await.is_err());
+        assert!(petalfall.play_summaries().await.is_err());
         // 认不得的新版本，以及版本号对、内容却是旧版形状的文件。
         std::fs::write(&path, r#"{"format":3,"directories":[]}"#).unwrap();
-        assert!(aurora.play_summaries().await.is_err());
+        assert!(petalfall.play_summaries().await.is_err());
         std::fs::write(&path, r#"{"format":2,"book":{"instances":{},"days":{}}}"#).unwrap();
-        assert!(aurora.play_summaries().await.is_err());
+        assert!(petalfall.play_summaries().await.is_err());
         // 坏文件不能被一次写入悄悄覆盖掉。
         assert!(
             record_play_in(&utc8(), tmp.path(), &game, "a", 0, HOUR)
@@ -1095,7 +1095,10 @@ mod tests {
         )
         .unwrap();
 
-        let summaries = aurora_in(tmp.path(), &home).play_summaries().await.unwrap();
+        let summaries = petalfall_in(tmp.path(), &home)
+            .play_summaries()
+            .await
+            .unwrap();
         assert_eq!(
             summaries["1.21"],
             PlaySummary {
@@ -1115,10 +1118,10 @@ mod tests {
             5_400_000
         );
 
-        let elsewhere = aurora_in(tmp.path(), &other);
+        let elsewhere = petalfall_in(tmp.path(), &other);
         assert!(elsewhere.play_summaries().await.unwrap().is_empty());
         assert_eq!(
-            aurora_in(tmp.path(), &home)
+            petalfall_in(tmp.path(), &home)
                 .play_stats(range("2026-10-30", "2026-10-30"))
                 .await
                 .unwrap()
@@ -1138,7 +1141,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("Games").join(".minecraft");
         let other = tmp.path().join("HMCL").join(".minecraft");
-        let (in_home, in_other) = (aurora_in(tmp.path(), &home), aurora_in(tmp.path(), &other));
+        let (in_home, in_other) = (
+            petalfall_in(tmp.path(), &home),
+            petalfall_in(tmp.path(), &other),
+        );
         let day = at("2026-10-30", 20, 0);
         record_play_in(&utc8(), tmp.path(), &home, "生存", day, day + 2 * HOUR)
             .await
@@ -1196,7 +1202,7 @@ mod tests {
             home.display().to_string().to_uppercase().replace('\\', "/")
         ));
         assert_eq!(
-            aurora_in(tmp.path(), &alias)
+            petalfall_in(tmp.path(), &alias)
                 .play_summaries()
                 .await
                 .unwrap()["生存"]
@@ -1235,7 +1241,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let game = game_dir(tmp.path());
         let other = tmp.path().join("别处").join(".minecraft");
-        let aurora = aurora_in(tmp.path(), &game);
+        let petalfall = petalfall_in(tmp.path(), &game);
         record_play_in(&utc8(), tmp.path(), &game, "旧名", 0, 2 * HOUR)
             .await
             .unwrap();
@@ -1249,17 +1255,17 @@ mod tests {
         let intact = std::fs::read(&path).unwrap();
 
         std::fs::write(&path, "{ broken").unwrap();
-        assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
-        assert!(aurora.forget_play_records("删掉的").await.is_err());
-        assert!(aurora.play_summaries().await.is_err());
+        assert!(petalfall.rename_play_records("旧名", "新名").await.is_err());
+        assert!(petalfall.forget_play_records("删掉的").await.is_err());
+        assert!(petalfall.play_summaries().await.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"{ broken");
 
         std::fs::write(&path, &intact).unwrap();
-        let summaries = aurora.play_summaries().await.unwrap();
+        let summaries = petalfall.play_summaries().await.unwrap();
         assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["新名"]);
         assert_eq!(summaries["新名"].playtime_min, 120);
         assert_eq!(instance_ids(&read_file(tmp.path())), vec!["新名"]);
-        let elsewhere = aurora_in(tmp.path(), &other)
+        let elsewhere = petalfall_in(tmp.path(), &other)
             .play_summaries()
             .await
             .unwrap();
@@ -1269,7 +1275,7 @@ mod tests {
         record_play_in(&utc8(), tmp.path(), &game, "旧名", 3 * HOUR, 4 * HOUR)
             .await
             .unwrap();
-        let summaries = aurora.play_summaries().await.unwrap();
+        let summaries = petalfall.play_summaries().await.unwrap();
         assert_eq!(summaries["旧名"].playtime_min, 60);
         assert_eq!(summaries["新名"].playtime_min, 120);
     }
@@ -1294,18 +1300,18 @@ mod tests {
     async fn rename_that_cannot_be_saved_is_saved_with_the_next_write() {
         let tmp = tempfile::tempdir().unwrap();
         let game = game_dir(tmp.path());
-        let aurora = aurora_in(tmp.path(), &game);
+        let petalfall = petalfall_in(tmp.path(), &game);
         record_play_in(&utc8(), tmp.path(), &game, "旧名", 0, 2 * HOUR)
             .await
             .unwrap();
         let path = playtime_path(tmp.path());
 
         let held = hold_read_only(&path);
-        assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
-        let summaries = aurora.play_summaries().await.unwrap();
+        assert!(petalfall.rename_play_records("旧名", "新名").await.is_err());
+        let summaries = petalfall.play_summaries().await.unwrap();
         assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["新名"]);
         assert_eq!(summaries["新名"].playtime_min, 120);
-        let stats = aurora
+        let stats = petalfall
             .play_stats(range("1970-01-01", "1970-01-01"))
             .await
             .unwrap();
@@ -1324,7 +1330,7 @@ mod tests {
             .unwrap();
         assert_eq!(instance_ids(&read_file(tmp.path())), vec!["新名"]);
         assert_eq!(
-            aurora.play_summaries().await.unwrap()["新名"].playtime_min,
+            petalfall.play_summaries().await.unwrap()["新名"].playtime_min,
             180
         );
     }
@@ -1344,10 +1350,13 @@ mod tests {
         std::fs::write(&path, legacy).unwrap();
 
         let held = hold_read_only(&path);
-        let summaries = aurora_in(tmp.path(), &home).play_summaries().await.unwrap();
+        let summaries = petalfall_in(tmp.path(), &home)
+            .play_summaries()
+            .await
+            .unwrap();
         assert_eq!(summaries["1.21"].playtime_min, 90);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
-        let elsewhere = aurora_in(tmp.path(), &other);
+        let elsewhere = petalfall_in(tmp.path(), &other);
         assert!(elsewhere.play_summaries().await.unwrap().is_empty());
         drop(held);
 
@@ -1359,7 +1368,7 @@ mod tests {
             home.display().to_string()
         );
         assert_eq!(
-            aurora_in(tmp.path(), &home)
+            petalfall_in(tmp.path(), &home)
                 .play_stats(range("2026-10-30", "2026-10-30"))
                 .await
                 .unwrap()
@@ -1373,13 +1382,13 @@ mod tests {
     async fn saving_with_nothing_pending_does_not_touch_the_file() {
         let tmp = tempfile::tempdir().unwrap();
         let game = game_dir(tmp.path());
-        let aurora = aurora_in(tmp.path(), &game);
+        let petalfall = petalfall_in(tmp.path(), &game);
         let path = playtime_path(tmp.path());
-        assert!(!aurora.save_pending_play_records().await.unwrap());
+        assert!(!petalfall.save_pending_play_records().await.unwrap());
         assert!(!path.exists());
 
         std::fs::write(&path, "{ broken").unwrap();
-        assert!(!aurora.save_pending_play_records().await.unwrap());
+        assert!(!petalfall.save_pending_play_records().await.unwrap());
         assert_eq!(std::fs::read(&path).unwrap(), b"{ broken");
     }
 
@@ -1390,7 +1399,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let game = game_dir(tmp.path());
         let other = tmp.path().join("别处").join(".minecraft");
-        let aurora = aurora_in(tmp.path(), &game);
+        let petalfall = petalfall_in(tmp.path(), &game);
         record_play_in(&utc8(), tmp.path(), &game, "旧名", 0, 2 * HOUR)
             .await
             .unwrap();
@@ -1407,13 +1416,13 @@ mod tests {
         let intact = std::fs::read(&path).unwrap();
 
         std::fs::write(&path, "{ broken").unwrap();
-        assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
-        assert!(aurora.forget_play_records("删掉的").await.is_err());
-        assert!(aurora.save_pending_play_records().await.is_err());
+        assert!(petalfall.rename_play_records("旧名", "新名").await.is_err());
+        assert!(petalfall.forget_play_records("删掉的").await.is_err());
+        assert!(petalfall.save_pending_play_records().await.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"{ broken");
 
         std::fs::write(&path, &intact).unwrap();
-        assert!(aurora.save_pending_play_records().await.unwrap());
+        assert!(petalfall.save_pending_play_records().await.unwrap());
         assert_eq!(instance_ids(&read_file(tmp.path())), vec!["新名", "留下"]);
         let file = read_file(tmp.path());
         let book = &file["directories"][0]["book"];
@@ -1430,7 +1439,7 @@ mod tests {
 
         // 队列已清空：文件拿走之后再补写什么都不做，也不重新建出文件。
         std::fs::remove_file(&path).unwrap();
-        assert!(!aurora.save_pending_play_records().await.unwrap());
+        assert!(!petalfall.save_pending_play_records().await.unwrap());
         assert!(!path.exists());
     }
 
@@ -1447,8 +1456,8 @@ mod tests {
             "instances":{"a":{"total_ms":600000,"last_played_at":1761800000000}},
             "days":{"2026-10-30":{"instances":{"a":600000}}}}}"#;
         std::fs::write(&path, legacy).unwrap();
-        let at_home = aurora_in(tmp.path(), &home);
-        let elsewhere = aurora_in(tmp.path(), &other);
+        let at_home = petalfall_in(tmp.path(), &home);
+        let elsewhere = petalfall_in(tmp.path(), &other);
 
         let held = hold_read_only(&path);
         assert!(at_home.rename_play_records("a", "b").await.is_err());

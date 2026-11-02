@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use aurora_version::{Argument, OsName, RuntimeContext, VersionJson, evaluate_rules};
+use petalfall_version::{Argument, OsName, RuntimeContext, VersionJson, evaluate_rules};
 
 /// 强制安全参数：缓解 Log4Shell（CVE-2021-44228）。必须默认注入，与用户设置无关。
 pub fn security_args() -> Vec<String> {
@@ -272,7 +272,7 @@ fn find_key(args: &[String], key: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_version::{ArgumentValue, OsName, OsRule, Rule, RuleAction};
+    use petalfall_version::{ArgumentValue, OsName, OsRule, Rule, RuleAction};
 
     fn ctx(os: OsName) -> RuntimeContext {
         RuntimeContext::new(os, "x86_64", 64)

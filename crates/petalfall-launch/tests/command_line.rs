@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use aurora_launch::{
+use petalfall_launch::{
     AuthValues, CommandBuilder, GamePaths, MemoryConfig, classpath_entries, classpath_separator,
     classpath_string,
 };
-use aurora_version::{OsName, RuntimeContext, VersionJson, resolve};
+use petalfall_version::{OsName, RuntimeContext, VersionJson, resolve};
 
 /// 调用方传入的应用版本号；断言它原样进入 `${launcher_version}`。
 const LAUNCHER_VERSION: &str = "2.3.4";
@@ -387,8 +387,8 @@ fn authlib_injector_agent_is_injected() {
         LAUNCHER_VERSION,
     )
     .with_authlib(
-        aurora_launch::AuthlibInjector::new(
-            PathBuf::from("D:/aurora/authlib-injector.jar"),
+        petalfall_launch::AuthlibInjector::new(
+            PathBuf::from("D:/petalfall/authlib-injector.jar"),
             "https://skin.example/api",
         )
         .with_prefetched("eyJ0ZXN0Ijp0cnVlfQ=="),
@@ -396,7 +396,7 @@ fn authlib_injector_agent_is_injected() {
     .build()
     .unwrap();
 
-    let agent = "-javaagent:D:/aurora/authlib-injector.jar=https://skin.example/api";
+    let agent = "-javaagent:D:/petalfall/authlib-injector.jar=https://skin.example/api";
     let prefetch = "-Dauthlibinjector.yggdrasil.prefetched=eyJ0ZXN0Ijp0cnVlfQ==";
     assert!(command.args.iter().any(|a| a == agent));
     assert!(command.args.iter().any(|a| a == prefetch));

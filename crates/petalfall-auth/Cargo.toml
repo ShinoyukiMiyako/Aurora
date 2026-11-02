@@ -1,13 +1,13 @@
 [package]
-name = "aurora-auth"
+name = "petalfall-auth"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
 [dependencies]
-aurora-base = { path = "../aurora-base" }
+petalfall-base = { path = "../petalfall-base" }
 # 需要 json（Xbox/Minecraft/Yggdrasil 请求体）与 form（微软 OAuth 端点用 x-www-form-urlencoded）。
-# rustls/http2 等由 aurora-base 在同一 workspace 内统一开启（特性并集）。
+# rustls/http2 等由 petalfall-base 在同一 workspace 内统一开启（特性并集）。
 reqwest = { version = "0.13", default-features = false, features = ["json", "form"] }
 # 设备码轮询需要 sleep + Instant，故只取 time 特性；DPAPI 为同步系统调用，无需 rt。
 tokio = { version = "1", default-features = false, features = ["time"] }
@@ -16,7 +16,7 @@ tokio-util = { version = "0.7", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-# 离线 UUID 走 md5("OfflinePlayer:"+name)，与原版 UUID.nameUUIDFromBytes 一致；沿用 aurora-base 的 RustCrypto 0.11 系。
+# 离线 UUID 走 md5("OfflinePlayer:"+name)，与原版 UUID.nameUUIDFromBytes 一致；沿用 petalfall-base 的 RustCrypto 0.11 系。
 md-5 = "0.11"
 uuid = "1"
 # authlib-injector 元数据预取需 Base64 编码 JSON 明文。

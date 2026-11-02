@@ -55,7 +55,7 @@ describe("PanoramaBackdrop", () => {
     setArtStatus({ source: null, panorama: true });
     view = render(<PanoramaBackdrop enabled />);
     await settle();
-    expect(fetchMock).toHaveBeenCalledWith("http://aurora-tex.localhost/panorama/0.png", { mode: "cors" });
+    expect(fetchMock).toHaveBeenCalledWith("http://petalfall-tex.localhost/panorama/0.png", { mode: "cors" });
     const el = backdrop();
     if (!el) throw new Error("全景背景没有渲染");
     expect(el.getAttribute("aria-hidden")).toBe("true");

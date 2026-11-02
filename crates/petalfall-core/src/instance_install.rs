@@ -1,37 +1,37 @@
 //! 按实例名新建实例，以及补全一个文件不全的实例。
 //!
 //! 新建分两步，中间由调用方登记任务：
-//! 1. [`Aurora::create_instance_dir`]：校验名称、原子地建出 `versions/<名>/`（并发重名在这一步暴露），
+//! 1. [`Petalfall::create_instance_dir`]：校验名称、原子地建出 `versions/<名>/`（并发重名在这一步暴露），
 //!    写下未完成标记；
-//! 2. [`Aurora::install_instance`]：原版 JSON 与加载器 JSON 合并成一份以实例名为 id 的自洽 JSON，
+//! 2. [`Petalfall::install_instance`]：原版 JSON 与加载器 JSON 合并成一份以实例名为 id 的自洽 JSON，
 //!    客户端 jar 与 natives 落在实例目录里，库与资源进共享目录。
 //!
-//! 结局由调用方记下：成功、失败经 [`Aurora::settle_instance_marker`]（成功删标记，失败记下错误码与原文，
-//! 界面据此显示「安装没有完成」），取消则经 [`Aurora::abandon_instance`] 把整个目录丢掉。
+//! 结局由调用方记下：成功、失败经 [`Petalfall::settle_instance_marker`]（成功删标记，失败记下错误码与原文，
+//! 界面据此显示「安装没有完成」），取消则经 [`Petalfall::abandon_instance`] 把整个目录丢掉。
 //!
-//! 补全先经 [`Aurora::begin_repair`] 看标记定方案：标记里记着当初的安装内容（安装没完成）就照着重装，
+//! 补全先经 [`Petalfall::begin_repair`] 看标记定方案：标记里记着当初的安装内容（安装没完成）就照着重装，
 //! 否则按现有版本 JSON 补齐缺失的文件；版本 JSON 被删或写坏时照装好时留下的安装记录重装。加载器自带的库
-//! 补不回来，要经 [`Aurora::begin_loader_reinstall`] 把版本 JSON 里读出的加载器原样重装一遍，走的是同一条
+//! 补不回来，要经 [`Petalfall::begin_loader_reinstall`] 把版本 JSON 里读出的加载器原样重装一遍，走的是同一条
 //! 安装链路。
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aurora_install::{
+use petalfall_install::{
     ForgeInstaller, LoaderFlavor, LoaderInstaller, VanillaInstaller, ensure_complete,
     forge_installer_url, merge_for_instance, neoforge_installer_url, write_instance_json,
 };
-use aurora_instance::{
-    AURORA_META_DIR, DiscoveredVersion, IncompleteKind, IncompleteMarker, IncompleteOutcome,
-    InstallRecordStore, InstallSpec, MarkerError, MarkerStore, NameViolation, VersionProbe,
+use petalfall_instance::{
+    DiscoveredVersion, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallRecordStore,
+    InstallSpec, MarkerError, MarkerStore, NameViolation, PETALFALL_META_DIR, VersionProbe,
     discover_versions, probe_version,
 };
-use aurora_version::{LoaderInfo, LoaderKind, VersionJson, identify_mc_version, resolve};
+use petalfall_version::{LoaderInfo, LoaderKind, VersionJson, identify_mc_version, resolve};
 
 use crate::InstanceError;
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
-use crate::facade::{Aurora, make_context};
+use crate::facade::{Petalfall, make_context};
 use crate::install::LoaderChoice;
 use crate::instances::{LEGACY_JAVA_MAJOR, broken_reason_text, inheritance_root};
 use crate::launch::FailureCode;
@@ -89,15 +89,15 @@ impl InstanceRequest {
         if let Some(choice @ (LoaderChoice::Forge | LoaderChoice::NeoForge)) = self.loader
             && self.loader_version.is_none()
         {
-            return Err(aurora_install::Error::LoaderVersionNotFound {
+            return Err(petalfall_install::Error::LoaderVersionNotFound {
                 loader: choice.display_name(),
                 game_version: self.mc_version.clone(),
             }
             .into());
         }
         if let (Some(choice), Some(version)) = (self.loader, &self.loader_version) {
-            aurora_version::check_path_segment(version).map_err(|problem| {
-                aurora_install::Error::UnsafePath {
+            petalfall_version::check_path_segment(version).map_err(|problem| {
+                petalfall_install::Error::UnsafePath {
                     entry: format!("{} 版本号", choice.display_name()),
                     path: version.clone(),
                     problem,
@@ -162,9 +162,9 @@ pub enum MarkerSettlement {
     Cancelled,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 校验名称，原子地建出实例目录并写下未完成标记，返回写下的标记（结局时原样交回
-    /// [`Aurora::settle_instance_marker`]）。目录已经存在（含并发新建的同名实例）报重名。
+    /// [`Petalfall::settle_instance_marker`]）。目录已经存在（含并发新建的同名实例）报重名。
     pub async fn create_instance_dir(
         &self,
         name: &str,
@@ -176,7 +176,7 @@ impl Aurora {
         let versions = self.layout().versions_dir();
         tokio::fs::create_dir_all(&versions)
             .await
-            .map_err(|source| aurora_base::Error::Io {
+            .map_err(|source| petalfall_base::Error::Io {
                 path: versions,
                 source,
             })?;
@@ -189,7 +189,7 @@ impl Aurora {
                 }
                 .into());
             }
-            Err(source) => return Err(aurora_base::Error::Io { path: dir, source }.into()),
+            Err(source) => return Err(petalfall_base::Error::Io { path: dir, source }.into()),
         }
         // 名字下还留着的记录属于在启动器之外被删掉的同名旧实例，不清掉的话新实例一建出来就带着它的时长。
         // 放在目录建成之后：撞名时那份记录是现有实例的。清不掉不拦新建，改动已记下待补，在这个实例的
@@ -237,7 +237,7 @@ impl Aurora {
             .with_manifest_url(self.manifest_url())
             .with_sources(self.source_plan(self.config().version_list_source));
         let entry = vanilla_installer.find_entry(mc).await?;
-        let staged = dir.join(AURORA_META_DIR).join(STAGED_VANILLA_JSON);
+        let staged = dir.join(PETALFALL_META_DIR).join(STAGED_VANILLA_JSON);
         let vanilla = vanilla_installer
             .download_version_json(&entry, &staged)
             .await?;
@@ -324,7 +324,7 @@ impl Aurora {
         let report = ensure_complete(cx, &merged, id).await?;
         tokio::fs::remove_file(&staged)
             .await
-            .map_err(|source| aurora_base::Error::Io {
+            .map_err(|source| petalfall_base::Error::Io {
                 path: staged.clone(),
                 source,
             })?;
@@ -365,7 +365,7 @@ impl Aurora {
                 Ok(())
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(aurora_base::Error::Io { path: dir, source }.into()),
+            Err(source) => Err(petalfall_base::Error::Io { path: dir, source }.into()),
         }
     }
 
@@ -406,7 +406,7 @@ impl Aurora {
     /// 内容接着重装。
     ///
     /// 标记里记着安装内容的照它重装，整合包没导入完的报不可补全，版本 JSON 丢失或写坏时照安装记录重装，都与
-    /// [`Aurora::begin_repair`] 一样；定不出能原样装回的内容时报不可补全，标记不动。
+    /// [`Petalfall::begin_repair`] 一样；定不出能原样装回的内容时报不可补全，标记不动。
     pub async fn begin_loader_reinstall(&self, id: &str) -> Result<(RepairPlan, IncompleteMarker)> {
         self.plan_repair(id, true).await
     }
@@ -665,7 +665,7 @@ pub(crate) fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instances::tests::{aurora_at, vanilla_json, write_version};
+    use crate::instances::tests::{petalfall_at, vanilla_json, write_version};
 
     fn marker_path(instance_dir: &std::path::Path) -> std::path::PathBuf {
         MarkerStore::for_version_dir(instance_dir)
@@ -722,19 +722,22 @@ mod tests {
         let server = MockServer::start().await;
         mock_meta(&server).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path())
+        let petalfall = petalfall_at(tmp.path())
             .with_manifest_url(format!("{}/manifest.json", server.uri()))
             .with_fabric_base(server.uri());
         let req = request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"));
 
-        let marker = aurora.create_instance_dir("周末生存", &req).await.unwrap();
-        let dir = aurora.game_dir().join("versions").join("周末生存");
+        let marker = petalfall
+            .create_instance_dir("周末生存", &req)
+            .await
+            .unwrap();
+        let dir = petalfall.game_dir().join("versions").join("周末生存");
         assert!(marker_path(&dir).is_file(), "安装开始前就写下标记");
-        let outcome = aurora
+        let outcome = petalfall
             .install_instance("周末生存", &req, None)
             .await
             .unwrap();
-        aurora
+        petalfall
             .settle_instance_marker("周末生存", marker, MarkerSettlement::Succeeded)
             .await
             .unwrap();
@@ -749,10 +752,14 @@ mod tests {
         );
         assert_eq!(outcome.libraries, 1);
         assert!(!marker_path(&dir).exists(), "成功后标记删除");
-        assert!(!dir.join(AURORA_META_DIR).join(STAGED_VANILLA_JSON).exists());
+        assert!(
+            !dir.join(PETALFALL_META_DIR)
+                .join(STAGED_VANILLA_JSON)
+                .exists()
+        );
         // versions/ 下只有这一个实例，没有多出原版或 fabric-loader-* 目录。
         assert_eq!(
-            aurora.instance_names().await.unwrap(),
+            petalfall.instance_names().await.unwrap(),
             vec!["周末生存".to_owned()]
         );
         let json: VersionJson =
@@ -762,17 +769,17 @@ mod tests {
         assert_eq!(json.client_version.as_deref(), Some("1.21.1"));
         assert_eq!(json.java_version.unwrap().major_version, 21);
 
-        let list = aurora.list_instances().await.unwrap();
+        let list = petalfall.list_instances().await.unwrap();
         let crate::instances::InstanceVersion::Ready(ready) = &list[0].version else {
             panic!("新实例应可用");
         };
         assert_eq!(ready.mc_version.as_deref(), Some("1.21.1"));
-        assert_eq!(ready.loaders[0].kind, aurora_version::LoaderKind::Fabric);
+        assert_eq!(ready.loaders[0].kind, petalfall_version::LoaderKind::Fabric);
         assert!(list[0].incomplete.is_none());
     }
 
-    fn put_template(aurora: &Aurora, files: &[(&str, &[u8])]) {
-        let dir = aurora.template_dir();
+    fn put_template(petalfall: &Petalfall, files: &[(&str, &[u8])]) {
+        let dir = petalfall.template_dir();
         std::fs::create_dir_all(&dir).unwrap();
         for (name, bytes) in files {
             std::fs::write(dir.join(name), bytes).unwrap();
@@ -795,14 +802,14 @@ mod tests {
         let server = MockServer::start().await;
         mock_meta(&server).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path())
+        let petalfall = petalfall_at(tmp.path())
             .with_manifest_url(format!("{}/manifest.json", server.uri()))
             .with_fabric_base(server.uri());
         let servers: Vec<u8> = (0..fastrand::usize(1..2048))
             .map(|_| fastrand::u8(..))
             .collect();
         put_template(
-            &aurora,
+            &petalfall,
             &[
                 ("options.txt", b"fov:90\nrenderDistance:16"),
                 ("servers.dat", &servers),
@@ -813,8 +820,11 @@ mod tests {
             ..request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"))
         };
 
-        aurora.create_instance_dir("周末生存", &req).await.unwrap();
-        let dir = aurora.game_dir().join("versions").join("周末生存");
+        petalfall
+            .create_instance_dir("周末生存", &req)
+            .await
+            .unwrap();
+        let dir = petalfall.game_dir().join("versions").join("周末生存");
         let stored = MarkerStore::for_version_dir(&dir)
             .load()
             .await
@@ -823,7 +833,7 @@ mod tests {
         assert_eq!(stored.kind, IncompleteKind::Install { spec: req.spec() });
         assert!(req.spec().use_template);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let outcome = aurora
+        let outcome = petalfall
             .install_instance("周末生存", &req, Some(&tx))
             .await
             .unwrap();
@@ -852,10 +862,13 @@ mod tests {
         );
 
         let plain = request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"));
-        aurora.create_instance_dir("不套", &plain).await.unwrap();
-        let outcome = aurora.install_instance("不套", &plain, None).await.unwrap();
+        petalfall.create_instance_dir("不套", &plain).await.unwrap();
+        let outcome = petalfall
+            .install_instance("不套", &plain, None)
+            .await
+            .unwrap();
         assert_eq!(outcome.template, None);
-        let other = aurora.game_dir().join("versions").join("不套");
+        let other = petalfall.game_dir().join("versions").join("不套");
         assert!(!other.join("options.txt").exists());
         assert!(!other.join("servers.dat").exists());
     }
@@ -866,19 +879,19 @@ mod tests {
         let server = MockServer::start().await;
         mock_meta(&server).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora =
-            aurora_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", server.uri()));
-        put_template(&aurora, &[("options.txt", b"fov:90")]);
-        std::fs::create_dir_all(aurora.game_dir()).unwrap();
-        std::fs::write(aurora.game_dir().join("options.txt"), b"fov:70").unwrap();
+        let petalfall =
+            petalfall_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", server.uri()));
+        put_template(&petalfall, &[("options.txt", b"fov:90")]);
+        std::fs::create_dir_all(petalfall.game_dir()).unwrap();
+        std::fs::write(petalfall.game_dir().join("options.txt"), b"fov:70").unwrap();
         let req = InstanceRequest {
             use_template: true,
             ..request("1.21.1", None, None)
         };
 
-        aurora.create_instance_dir("原版", &req).await.unwrap();
+        petalfall.create_instance_dir("原版", &req).await.unwrap();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let outcome = aurora
+        let outcome = petalfall
             .install_instance("原版", &req, Some(&tx))
             .await
             .unwrap();
@@ -891,10 +904,10 @@ mod tests {
             ))
         );
         assert_eq!(
-            std::fs::read(aurora.game_dir().join("options.txt")).unwrap(),
+            std::fs::read(petalfall.game_dir().join("options.txt")).unwrap(),
             b"fov:70"
         );
-        let dir = aurora.game_dir().join("versions").join("原版");
+        let dir = petalfall.game_dir().join("versions").join("原版");
         assert!(!dir.join("options.txt").exists());
         assert!(
             stages(rx).iter().any(
@@ -954,9 +967,9 @@ mod tests {
     #[tokio::test]
     async fn creating_an_existing_name_reports_duplicate_and_leaves_it_alone() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let dir = write_version(aurora.game_dir(), "Survival", &vanilla_json("1.21.1"));
-        let err = aurora
+        let petalfall = petalfall_at(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "Survival", &vanilla_json("1.21.1"));
+        let err = petalfall
             .create_instance_dir("survival", &request("1.21.1", None, None))
             .await
             .unwrap_err();
@@ -969,15 +982,15 @@ mod tests {
         ));
         assert!(!marker_path(&dir).exists());
 
-        let err = aurora
+        let err = petalfall
             .create_instance_dir("x", &request("1.21.1", Some(LoaderChoice::Forge), None))
             .await
             .unwrap_err();
         assert!(matches!(
             err,
-            CoreError::Install(aurora_install::Error::LoaderVersionNotFound { .. })
+            CoreError::Install(petalfall_install::Error::LoaderVersionNotFound { .. })
         ));
-        assert!(!aurora.game_dir().join("versions").join("x").exists());
+        assert!(!petalfall.game_dir().join("versions").join("x").exists());
     }
 
     /// 同名旧实例在启动器之外（资源管理器、共用游戏目录的别的启动器）被删掉后，它的游玩记录还在；新建的
@@ -985,38 +998,38 @@ mod tests {
     #[tokio::test]
     async fn new_instance_does_not_inherit_records_of_a_vanished_namesake() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let other = tmp.path().join("HMCL").join(".minecraft");
         let hour = 3_600_000;
         for (game_dir, id) in [
-            (aurora.game_dir(), "周末生存"),
-            (aurora.game_dir(), "Survival"),
-            (aurora.game_dir(), "别的"),
+            (petalfall.game_dir(), "周末生存"),
+            (petalfall.game_dir(), "Survival"),
+            (petalfall.game_dir(), "别的"),
             (other.as_path(), "周末生存"),
         ] {
             crate::playtime::record_play(tmp.path(), game_dir, id, 0, hour)
                 .await
                 .unwrap();
         }
-        write_version(aurora.game_dir(), "Survival", &vanilla_json("1.21.1"));
+        write_version(petalfall.game_dir(), "Survival", &vanilla_json("1.21.1"));
 
-        aurora
+        petalfall
             .create_instance_dir("survival", &request("1.21.1", None, None))
             .await
             .unwrap_err();
-        aurora
+        petalfall
             .create_instance_dir("周末生存", &request("1.21.1", None, None))
             .await
             .unwrap();
 
-        let summaries = aurora.play_summaries().await.unwrap();
+        let summaries = petalfall.play_summaries().await.unwrap();
         assert_eq!(
             summaries.keys().collect::<Vec<_>>(),
             vec!["Survival", "别的"]
         );
         assert_eq!(summaries["Survival"].playtime_min, 60);
-        let elsewhere = Aurora::for_test(
-            crate::config::AuroraConfig::default(),
+        let elsewhere = Petalfall::for_test(
+            crate::config::PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             other,
         );
@@ -1031,17 +1044,17 @@ mod tests {
         let server = MockServer::start().await;
         mock_meta(&server).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path())
+        let petalfall = petalfall_at(tmp.path())
             .with_manifest_url(format!("{}/manifest.json", server.uri()))
             .with_fabric_base(server.uri());
         // 不存在的 loader 版本：meta 404，安装失败。
         let bad = request("1.21.1", Some(LoaderChoice::Fabric), Some("9.9.9"));
-        let marker = aurora.create_instance_dir("半成品", &bad).await.unwrap();
-        let err = aurora
+        let marker = petalfall.create_instance_dir("半成品", &bad).await.unwrap();
+        let err = petalfall
             .install_instance("半成品", &bad, None)
             .await
             .unwrap_err();
-        aurora
+        petalfall
             .settle_instance_marker(
                 "半成品",
                 marker,
@@ -1053,7 +1066,7 @@ mod tests {
             .await
             .unwrap();
 
-        let dir = aurora.game_dir().join("versions").join("半成品");
+        let dir = petalfall.game_dir().join("versions").join("半成品");
         let stored = MarkerStore::for_version_dir(&dir)
             .load()
             .await
@@ -1072,12 +1085,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let (plan, marker) = aurora.begin_repair("半成品").await.unwrap();
+        let (plan, marker) = petalfall.begin_repair("半成品").await.unwrap();
         assert_eq!(plan, RepairPlan::Reinstall(good));
         assert_eq!(marker.outcome, IncompleteOutcome::Pending);
-        let outcome = aurora.repair_instance("半成品", &plan, None).await.unwrap();
+        let outcome = petalfall
+            .repair_instance("半成品", &plan, None)
+            .await
+            .unwrap();
         assert!(outcome.reinstalled);
-        aurora
+        petalfall
             .settle_instance_marker("半成品", marker, MarkerSettlement::Succeeded)
             .await
             .unwrap();
@@ -1088,13 +1104,13 @@ mod tests {
     #[tokio::test]
     async fn repair_of_a_complete_instance_writes_then_clears_a_repair_marker() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let dir = write_version(
-            aurora.game_dir(),
+            petalfall.game_dir(),
             "1.21.1",
             r#"{"id":"1.21.1","type":"release","mainClass":"M"}"#,
         );
-        let (plan, marker) = aurora.begin_repair("1.21.1").await.unwrap();
+        let (plan, marker) = petalfall.begin_repair("1.21.1").await.unwrap();
         assert_eq!(plan, RepairPlan::Complete);
         let on_disk = MarkerStore::for_version_dir(&dir)
             .load()
@@ -1104,17 +1120,20 @@ mod tests {
         assert_eq!(on_disk.kind, IncompleteKind::Repair);
         assert_eq!(on_disk.outcome, IncompleteOutcome::Pending);
 
-        let outcome = aurora.repair_instance("1.21.1", &plan, None).await.unwrap();
+        let outcome = petalfall
+            .repair_instance("1.21.1", &plan, None)
+            .await
+            .unwrap();
         assert!(!outcome.reinstalled);
         assert_eq!(outcome.libraries, 0);
-        aurora
+        petalfall
             .settle_instance_marker("1.21.1", marker.clone(), MarkerSettlement::Succeeded)
             .await
             .unwrap();
         assert!(!marker_path(&dir).exists());
 
         // 被取消时标记留下并记为 cancelled。
-        aurora
+        petalfall
             .settle_instance_marker("1.21.1", marker, MarkerSettlement::Cancelled)
             .await
             .unwrap();
@@ -1133,18 +1152,18 @@ mod tests {
         let server = MockServer::start().await;
         mock_meta(&server).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path())
+        let petalfall = petalfall_at(tmp.path())
             .with_manifest_url(format!("{}/manifest.json", server.uri()))
             .with_fabric_base(server.uri());
         let id = "周末生存";
         let req = request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"));
-        let marker = aurora.create_instance_dir(id, &req).await.unwrap();
-        aurora.install_instance(id, &req, None).await.unwrap();
-        aurora
+        let marker = petalfall.create_instance_dir(id, &req).await.unwrap();
+        petalfall.install_instance(id, &req, None).await.unwrap();
+        petalfall
             .settle_instance_marker(id, marker, MarkerSettlement::Succeeded)
             .await
             .unwrap();
-        let dir = aurora.game_dir().join("versions").join(id);
+        let dir = petalfall.game_dir().join("versions").join(id);
         let json = dir.join(format!("{id}.json"));
         let installed = std::fs::read_to_string(&json).unwrap();
         // 玩家的 Mod 不能因为修复而丢。
@@ -1157,12 +1176,12 @@ mod tests {
             Box::new(|p: &std::path::Path| std::fs::write(p, "{ not json").unwrap()),
         ] {
             damage(&json);
-            let (plan, marker) = aurora.begin_repair(id).await.unwrap();
+            let (plan, marker) = petalfall.begin_repair(id).await.unwrap();
             assert_eq!(plan, RepairPlan::Reinstall(req.clone()));
             assert!(matches!(marker.kind, IncompleteKind::Install { .. }));
-            let outcome = aurora.repair_instance(id, &plan, None).await.unwrap();
+            let outcome = petalfall.repair_instance(id, &plan, None).await.unwrap();
             assert!(outcome.reinstalled);
-            aurora
+            petalfall
                 .settle_instance_marker(id, marker, MarkerSettlement::Succeeded)
                 .await
                 .unwrap();
@@ -1185,16 +1204,19 @@ mod tests {
             .mount(&server)
             .await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path())
+        let petalfall = petalfall_at(tmp.path())
             .with_manifest_url(format!("{}/manifest.json", server.uri()))
             .with_fabric_base(server.uri());
         let req = InstanceRequest {
             use_template: true,
             ..request("1.21.1", Some(LoaderChoice::Fabric), None)
         };
-        aurora.create_instance_dir("推荐版", &req).await.unwrap();
-        aurora.install_instance("推荐版", &req, None).await.unwrap();
-        let dir = aurora.game_dir().join("versions").join("推荐版");
+        petalfall.create_instance_dir("推荐版", &req).await.unwrap();
+        petalfall
+            .install_instance("推荐版", &req, None)
+            .await
+            .unwrap();
+        let dir = petalfall.game_dir().join("versions").join("推荐版");
         assert_eq!(
             InstallRecordStore::for_version_dir(&dir)
                 .load()
@@ -1212,8 +1234,8 @@ mod tests {
     #[tokio::test]
     async fn interrupted_modpack_import_is_not_repairable_and_keeps_its_marker() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let dir = write_version(aurora.game_dir(), "整合包", &vanilla_json("1.21.1"));
+        let petalfall = petalfall_at(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "整合包", &vanilla_json("1.21.1"));
         let store = MarkerStore::for_version_dir(&dir);
         let marker = IncompleteMarker::pending(
             IncompleteKind::Modpack {
@@ -1223,7 +1245,7 @@ mod tests {
         );
         store.save(&marker).await.unwrap();
 
-        let err = aurora.begin_repair("整合包").await.unwrap_err();
+        let err = petalfall.begin_repair("整合包").await.unwrap_err();
         match err {
             CoreError::Instance(InstanceError::NotRepairable { id, reason }) => {
                 assert_eq!(id, "整合包");
@@ -1237,9 +1259,9 @@ mod tests {
     #[tokio::test]
     async fn broken_instance_without_install_record_is_not_repairable() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        std::fs::create_dir_all(aurora.game_dir().join("versions").join("空的")).unwrap();
-        let err = aurora.begin_repair("空的").await.unwrap_err();
+        let petalfall = petalfall_at(tmp.path());
+        std::fs::create_dir_all(petalfall.game_dir().join("versions").join("空的")).unwrap();
+        let err = petalfall.begin_repair("空的").await.unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1265,12 +1287,12 @@ mod tests {
         let server = MockServer::start().await;
         mock_meta(&server).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path())
+        let petalfall = petalfall_at(tmp.path())
             .with_manifest_url(format!("{}/manifest.json", server.uri()))
             .with_fabric_base(server.uri());
-        put_template(&aurora, &[("servers.dat", b"template")]);
+        put_template(&petalfall, &[("servers.dat", b"template")]);
         let dir = write_version(
-            aurora.game_dir(),
+            petalfall.game_dir(),
             "周末生存",
             &fabric_instance_json("周末生存", "0.16.10"),
         );
@@ -1289,7 +1311,7 @@ mod tests {
             std::fs::write(file, bytes).unwrap();
         }
 
-        let (plan, marker) = aurora.begin_loader_reinstall("周末生存").await.unwrap();
+        let (plan, marker) = petalfall.begin_loader_reinstall("周末生存").await.unwrap();
         let expected = request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"));
         assert_eq!(plan, RepairPlan::Reinstall(expected.clone()));
         let on_disk = MarkerStore::for_version_dir(&dir)
@@ -1306,11 +1328,11 @@ mod tests {
         );
         assert_eq!(on_disk.outcome, IncompleteOutcome::Pending);
 
-        let outcome = aurora
+        let outcome = petalfall
             .repair_instance("周末生存", &plan, None)
             .await
             .unwrap();
-        aurora
+        petalfall
             .settle_instance_marker("周末生存", marker, MarkerSettlement::Succeeded)
             .await
             .unwrap();
@@ -1347,8 +1369,8 @@ mod tests {
     #[tokio::test]
     async fn the_loader_to_reinstall_is_read_from_the_version_json() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         write_version(
             &game,
             "我的原版",
@@ -1406,7 +1428,7 @@ mod tests {
             ),
         ] {
             write_version(&game, id, json);
-            let (plan, _) = aurora.begin_loader_reinstall(id).await.unwrap();
+            let (plan, _) = petalfall.begin_loader_reinstall(id).await.unwrap();
             assert_eq!(
                 plan,
                 RepairPlan::Reinstall(request(mc, Some(loader), Some(version))),
@@ -1420,8 +1442,8 @@ mod tests {
     #[tokio::test]
     async fn loaders_that_cannot_be_put_back_as_they_were_are_refused() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let game = aurora.game_dir().to_path_buf();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
         for (id, json, reason) in [
             (
                 "原版",
@@ -1480,7 +1502,7 @@ mod tests {
             };
             store.save(&earlier).await.unwrap();
 
-            match aurora.begin_loader_reinstall(id).await.unwrap_err() {
+            match petalfall.begin_loader_reinstall(id).await.unwrap_err() {
                 CoreError::Instance(InstanceError::NotRepairable {
                     id: got,
                     reason: why,
@@ -1498,17 +1520,20 @@ mod tests {
     #[tokio::test]
     async fn an_unsafe_loader_version_in_the_version_json_is_refused_before_any_marker() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let dir = write_version(
-            aurora.game_dir(),
+            petalfall.game_dir(),
             "手改过",
             &fabric_instance_json("手改过", ".."),
         );
-        let err = aurora.begin_loader_reinstall("手改过").await.unwrap_err();
+        let err = petalfall
+            .begin_loader_reinstall("手改过")
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 err,
-                CoreError::Install(aurora_install::Error::UnsafePath { .. })
+                CoreError::Install(petalfall_install::Error::UnsafePath { .. })
             ),
             "实际：{err:?}"
         );
@@ -1520,17 +1545,20 @@ mod tests {
     #[tokio::test]
     async fn loader_reinstall_defers_to_what_the_marker_recorded() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let wanted = InstanceRequest {
             use_template: true,
             ..request("1.21.1", Some(LoaderChoice::Fabric), Some("0.16.10"))
         };
-        aurora.create_instance_dir("半成品", &wanted).await.unwrap();
-        let (plan, _) = aurora.begin_loader_reinstall("半成品").await.unwrap();
+        petalfall
+            .create_instance_dir("半成品", &wanted)
+            .await
+            .unwrap();
+        let (plan, _) = petalfall.begin_loader_reinstall("半成品").await.unwrap();
         assert_eq!(plan, RepairPlan::Reinstall(wanted));
 
         let dir = write_version(
-            aurora.game_dir(),
+            petalfall.game_dir(),
             "整合包",
             &fabric_instance_json("整合包", "0.16.10"),
         );
@@ -1542,7 +1570,11 @@ mod tests {
             1_700_000_000_000,
         );
         store.save(&marker).await.unwrap();
-        match aurora.begin_loader_reinstall("整合包").await.unwrap_err() {
+        match petalfall
+            .begin_loader_reinstall("整合包")
+            .await
+            .unwrap_err()
+        {
             CoreError::Instance(InstanceError::NotRepairable { reason, .. }) => {
                 assert!(reason.contains("重新导入"), "{reason}");
             }
@@ -1556,9 +1588,9 @@ mod tests {
     #[tokio::test]
     async fn repair_after_a_lost_loader_library_reinstalls_the_loader() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let dir = write_version(
-            aurora.game_dir(),
+            petalfall.game_dir(),
             "周末生存",
             &fabric_instance_json("周末生存", "0.16.10"),
         );
@@ -1573,14 +1605,14 @@ mod tests {
         };
 
         store.save(&failed_with("network_failed")).await.unwrap();
-        let (plan, _) = aurora.begin_repair("周末生存").await.unwrap();
+        let (plan, _) = petalfall.begin_repair("周末生存").await.unwrap();
         assert_eq!(plan, RepairPlan::Complete);
 
         store
             .save(&failed_with("loader_library_missing"))
             .await
             .unwrap();
-        let (plan, _) = aurora.begin_repair("周末生存").await.unwrap();
+        let (plan, _) = petalfall.begin_repair("周末生存").await.unwrap();
         assert_eq!(
             plan,
             RepairPlan::Reinstall(request(
@@ -1592,7 +1624,7 @@ mod tests {
 
         // 装不回的加载器照旧补全：玩家把文件放回去之后，这是清掉标记的唯一办法。
         let optifine = write_version(
-            aurora.game_dir(),
+            petalfall.game_dir(),
             "光影",
             r#"{"id":"光影","type":"release","clientVersion":"1.21.1","mainClass":"M",
                 "libraries":[{"name":"optifine:OptiFine:1.21.1_HD_U_J1"}]}"#,
@@ -1601,18 +1633,18 @@ mod tests {
             .save(&failed_with("loader_library_missing"))
             .await
             .unwrap();
-        let (plan, _) = aurora.begin_repair("光影").await.unwrap();
+        let (plan, _) = petalfall.begin_repair("光影").await.unwrap();
         assert_eq!(plan, RepairPlan::Complete);
     }
 
     #[tokio::test]
     async fn abandon_removes_the_directory_and_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let dir = write_version(aurora.game_dir(), "临时", &vanilla_json("1.21.1"));
-        aurora.abandon_instance("临时").await.unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let dir = write_version(petalfall.game_dir(), "临时", &vanilla_json("1.21.1"));
+        petalfall.abandon_instance("临时").await.unwrap();
         assert!(!dir.exists());
-        aurora.abandon_instance("临时").await.unwrap();
+        petalfall.abandon_instance("临时").await.unwrap();
     }
 
     #[test]
@@ -1638,17 +1670,17 @@ mod tests {
             (
                 LoaderChoice::Forge,
                 r"47.2.0\..\..\x",
-                aurora_version::UnsafePath::Backslash,
+                petalfall_version::UnsafePath::Backslash,
             ),
             (
                 LoaderChoice::NeoForge,
                 "21.1.42/../x",
-                aurora_version::UnsafePath::Separator,
+                petalfall_version::UnsafePath::Separator,
             ),
             (
                 LoaderChoice::Fabric,
                 "..",
-                aurora_version::UnsafePath::DotSegment,
+                petalfall_version::UnsafePath::DotSegment,
             ),
         ] {
             let request = InstanceRequest {
@@ -1658,7 +1690,7 @@ mod tests {
                 use_template: false,
             };
             match request.validate() {
-                Err(CoreError::Install(aurora_install::Error::UnsafePath {
+                Err(CoreError::Install(petalfall_install::Error::UnsafePath {
                     entry,
                     path,
                     problem: got,

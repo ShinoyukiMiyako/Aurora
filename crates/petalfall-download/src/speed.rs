@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use aurora_base::mirror::MirrorSource;
+use petalfall_base::mirror::MirrorSource;
 
 use crate::error::Result;
 use crate::source::{MirrorResolver, SourceResolver, order_by_latency, probe_latencies};

@@ -31,7 +31,7 @@ pub struct DpapiCredentialStore {
 impl DpapiCredentialStore {
     /// 默认位置：`%LOCALAPPDATA%\Petalfall\credentials.bin`。
     pub fn new() -> Result<Self> {
-        let path = aurora_base::fs::data_dir()?.join(CREDENTIAL_FILE);
+        let path = petalfall_base::fs::data_dir()?.join(CREDENTIAL_FILE);
         Ok(Self { path })
     }
 
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn protect_unprotect_roundtrip_and_ciphertext_differs() {
-        let plain: &[u8] = b"aurora-secret-\x00\x01\x02-payload";
+        let plain: &[u8] = b"petalfall-secret-\x00\x01\x02-payload";
         let cipher = protect(plain).unwrap();
         // 密文不等于明文（确实加密了）。
         assert_ne!(cipher.as_slice(), plain);

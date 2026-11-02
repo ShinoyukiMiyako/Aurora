@@ -1,6 +1,6 @@
 //! 完整性检查与缺失补全（`ensure_complete`）。
 //!
-//! 任何版本启动前都要确认「本体 jar / 库 / 资源 / natives」齐备。得益于 aurora-download 引擎的
+//! 任何版本启动前都要确认「本体 jar / 库 / 资源 / natives」齐备。得益于 petalfall-download 引擎的
 //! 幂等语义（目标已存在且 sha1/大小吻合即跳过），补全逻辑与全新安装是同一套：把该版本的完整文件
 //! 计划重跑一遍，缺什么下什么、坏什么重下什么，已就绪的文件零成本略过。这也是原版安装
 //! ([`crate::vanilla`]) 的公共下半段。
@@ -14,8 +14,8 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_download::{CancellationToken, DownloadTask};
-use aurora_version::{AssetLayout, AssetObjectsIndex, VersionJson};
+use petalfall_download::{CancellationToken, DownloadTask};
+use petalfall_version::{AssetLayout, AssetObjectsIndex, VersionJson};
 
 use crate::context::InstallContext;
 use crate::dir_lock::lock_dir;
@@ -168,9 +168,9 @@ async fn bundled_library_ready(task: &DownloadTask) -> Result<bool> {
     }
     match task.sha1.as_deref() {
         Some(sha1) if !sha1.is_empty() => {
-            match aurora_base::fs::verify_sha1(&task.dest, sha1).await {
+            match petalfall_base::fs::verify_sha1(&task.dest, sha1).await {
                 Ok(()) => Ok(true),
-                Err(aurora_base::Error::HashMismatch { .. }) => Ok(false),
+                Err(petalfall_base::Error::HashMismatch { .. }) => Ok(false),
                 Err(err) => Err(err.into()),
             }
         }
@@ -283,9 +283,9 @@ fn already_materialized(dest: &Path, size: u64) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_base::retry::RetryPolicy;
-    use aurora_download::{DownloadPool, Downloader};
-    use aurora_version::{OsName, RuntimeContext};
+    use petalfall_base::retry::RetryPolicy;
+    use petalfall_download::{DownloadPool, Downloader};
+    use petalfall_version::{OsName, RuntimeContext};
 
     fn version_with(asset_index: Option<&str>, assets: Option<&str>) -> VersionJson {
         let mut json = serde_json::json!({ "id": "1.6.4" });
@@ -307,7 +307,7 @@ mod tests {
         for (name, hash, size) in objects {
             index.objects.insert(
                 (*name).to_owned(),
-                aurora_version::AssetObject {
+                petalfall_version::AssetObject {
                     hash: (*hash).to_owned(),
                     size: *size,
                 },
@@ -322,7 +322,7 @@ mod tests {
     async fn materialize_skips_existing_objects_of_matching_size() {
         let dir = tempfile::tempdir().unwrap();
         let layout = crate::layout::GameLayout::new(dir.path());
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 2);
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
         let policy = RetryPolicy::default();
@@ -357,7 +357,7 @@ mod tests {
         const OBJECT_LEN: usize = 256 * 1024 * 1024;
         let dir = tempfile::tempdir().unwrap();
         let layout = crate::layout::GameLayout::new(dir.path());
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 2);
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
         let policy = RetryPolicy::default();
@@ -428,7 +428,7 @@ mod tests {
             .unwrap();
         std::fs::create_dir_all(universal.parent().unwrap()).unwrap();
         std::fs::write(&universal, b"universal").unwrap();
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 2);
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
         let policy = RetryPolicy::default();
@@ -480,7 +480,7 @@ mod tests {
             .unwrap();
         std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
         std::fs::write(&jar, b"truncated").unwrap();
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 2);
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
         let policy = RetryPolicy::default();
@@ -499,7 +499,7 @@ mod tests {
     async fn virtual_layout_without_index_id_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let layout = crate::layout::GameLayout::new(dir.path());
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 2);
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
         let policy = RetryPolicy::default();
@@ -550,7 +550,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let root = tmp.path().join("sandbox").join("game");
             std::fs::create_dir_all(&root).unwrap();
-            let client = aurora_base::http::build_client().unwrap();
+            let client = petalfall_base::http::build_client().unwrap();
             Self {
                 layout: crate::layout::GameLayout::new(root),
                 pool: DownloadPool::new(Downloader::with_defaults(client.clone()), 2),
@@ -637,7 +637,7 @@ mod tests {
 
         assert!(matches!(
             &err,
-            Error::UnsafePath { entry, path, problem: aurora_version::UnsafePath::Separator }
+            Error::UnsafePath { entry, path, problem: petalfall_version::UnsafePath::Separator }
                 if entry == "版本 id" && path == "../../escaped"
         ));
         assert_eq!(files_under(sandbox.tmp.path()), Vec::<PathBuf>::new());

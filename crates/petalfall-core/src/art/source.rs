@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use aurora_instance::discover_versions;
+use petalfall_instance::discover_versions;
 
 use super::whitelist::{DEGRADED_SET_MARKER, FULL_SET_MARKER, jar_entry};
 
@@ -50,7 +50,7 @@ impl JarHashCache {
         {
             return Ok(sha1.clone());
         }
-        let sha1 = aurora_base::fs::sha1_hex(jar)
+        let sha1 = petalfall_base::fs::sha1_hex(jar)
             .await
             .map_err(|e| format!("计算 jar 的 SHA-1 失败：{e}"))?;
         self.entries

@@ -2,7 +2,7 @@
 //!
 //! 这一层是纯函数：给定版本 JSON、运行环境 [`RuntimeContext`] 与目录布局，算出 client.jar、
 //! 依赖库、日志配置、assetIndex 各自的 [`DownloadTask`]（官方 URL + 落点 + sha1/size 契约），
-//! 以及资源对象清单展开出的批量任务。真正的落盘、换源、校验都交给 aurora-download 引擎，
+//! 以及资源对象清单展开出的批量任务。真正的落盘、换源、校验都交给 petalfall-download 引擎，
 //! 这里只负责「下什么、下到哪、期望什么哈希」，因此可以脱离网络做表驱动断言。
 //!
 //! 落点里的每个相对段（库路径、坐标各段、资源 hash、索引 id、日志配置名、版本 id）都来自版本 JSON 或
@@ -10,8 +10,10 @@
 
 use std::collections::HashSet;
 
-use aurora_download::DownloadTask;
-use aurora_version::{AssetObjectsIndex, Library, RuntimeContext, VersionJson, select_libraries};
+use petalfall_download::DownloadTask;
+use petalfall_version::{
+    AssetObjectsIndex, Library, RuntimeContext, VersionJson, select_libraries,
+};
 
 use crate::error::{Error, Result};
 use crate::layout::{ASSET_OBJECTS_BASE, GameLayout, checked_segment, coordinate_path};
@@ -208,7 +210,7 @@ pub fn asset_object_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_version::OsName;
+    use petalfall_version::OsName;
     use std::path::PathBuf;
 
     fn layout() -> GameLayout {
@@ -427,7 +429,7 @@ mod tests {
         assert_eq!(task.sha1.as_deref(), Some("log1"));
     }
 
-    use aurora_version::UnsafePath;
+    use petalfall_version::UnsafePath;
 
     /// 越界的各种形态与对应的问题；绝对路径、盘符在 Windows 上 join 时会整段替换掉库目录。
     const ESCAPING_PATHS: [(&str, UnsafePath); 7] = [
@@ -615,7 +617,7 @@ mod tests {
         let mut index = AssetObjectsIndex::default();
         index.objects.insert(
             "pack.mcmeta".to_owned(),
-            aurora_version::AssetObject {
+            petalfall_version::AssetObject {
                 hash: "../../../evil".to_owned(),
                 size: 1,
             },

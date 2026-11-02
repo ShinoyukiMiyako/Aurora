@@ -1,16 +1,16 @@
 [package]
-name = "aurora-modpack"
+name = "petalfall-modpack"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
 [dependencies]
 # 错误连同原因链拼成一行：写包失败的原因要显示给人看。
-aurora-base = { path = "../aurora-base" }
+petalfall-base = { path = "../petalfall-base" }
 # 只取游戏目录内启动器元数据目录名：整合包不得写进这个目录。
-aurora-instance = { path = "../aurora-instance" }
+petalfall-instance = { path = "../petalfall-instance" }
 # 加载器版本号会拼进安装器地址与版本 id，按版本 JSON 同一套路径段规则校验。
-aurora-version = { path = "../aurora-version" }
+petalfall-version = { path = "../petalfall-version" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

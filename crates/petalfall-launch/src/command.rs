@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use aurora_version::{RuntimeContext, VersionJson, check_path_segment};
+use petalfall_version::{RuntimeContext, VersionJson, check_path_segment};
 use serde::Serialize;
 
 use crate::account::{AuthValues, AuthlibInjector, OFFLINE_ACCESS_TOKEN};
@@ -25,7 +25,7 @@ use crate::quickplay::{
 
 /// 一次启动所需的 `.minecraft` 布局路径。
 ///
-/// 与 aurora-install 的落点一致：`jar_id` 是持有 `client.jar` 与 natives 的版本 id——原版即版本自身，
+/// 与 petalfall-install 的落点一致：`jar_id` 是持有 `client.jar` 与 natives 的版本 id——原版即版本自身，
 /// 加载器版本（已合并）则复用其原版目录，故 `jar_id` 传原版 id。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GamePaths {
@@ -146,7 +146,7 @@ impl<'a> CommandBuilder<'a> {
             auth,
             memory: MemoryConfig::fixed(2048),
             authlib: None,
-            launcher_name: aurora_base::brand::APP_NAME_EN.to_owned(),
+            launcher_name: petalfall_base::brand::APP_NAME_EN.to_owned(),
             launcher_version: launcher_version.into(),
             version_name: version.id.clone(),
             resolution: None,
@@ -529,7 +529,7 @@ mod tests {
 
     fn build_with_resolution(json: &str, resolution: Option<(u32, u32)>) -> Vec<String> {
         let version = VersionJson::from_json_str(json).unwrap();
-        let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+        let ctx = RuntimeContext::new(petalfall_version::OsName::Windows, "x86_64", 64);
         let paths = GamePaths::standard(PathBuf::from("/mc"), &version.id);
         let mut builder = CommandBuilder::new(
             &version,
@@ -556,7 +556,7 @@ mod tests {
     /// `--assetsDir` 指到 `${game_assets}`：launchwrapper 从这里读窗口图标，得和资源实际铺开的位置一致。
     fn game_assets_of(json: &str, game_dir: &str) -> String {
         let version = VersionJson::from_json_str(json).unwrap();
-        let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+        let ctx = RuntimeContext::new(petalfall_version::OsName::Windows, "x86_64", 64);
         let paths = GamePaths::standard(PathBuf::from("/mc"), &version.id);
         let args = CommandBuilder::new(
             &version,
@@ -609,7 +609,7 @@ mod tests {
                 "arguments":{{"game":["--username","${{auth_player_name}}"],"jvm":["-cp","${{classpath}}"]}}}}"#
         );
         let version = VersionJson::from_json_str(&json).unwrap();
-        let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+        let ctx = RuntimeContext::new(petalfall_version::OsName::Windows, "x86_64", 64);
         let paths = GamePaths::standard(PathBuf::from("/mc"), &version.id);
         CommandBuilder::new(&version, ctx, "java.exe", paths, "/mc", auth, "1.0.0")
             .build()
@@ -734,7 +734,7 @@ mod tests {
             "minecraftArguments":"--username ${auth_player_name} --version ${version_name}"}"#,
         )
         .unwrap();
-        let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+        let ctx = RuntimeContext::new(petalfall_version::OsName::Windows, "x86_64", 64);
         let paths = GamePaths::standard(PathBuf::from("/mc"), &version.id);
         let args = CommandBuilder::new(
             &version,
@@ -852,7 +852,7 @@ mod tests {
                 }}
             });
             let version = VersionJson::from_json_str(&json.to_string()).unwrap();
-            let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+            let ctx = RuntimeContext::new(petalfall_version::OsName::Windows, "x86_64", 64);
             let root = PathBuf::from("/我的 世界/.minecraft");
             let paths = GamePaths::standard(root.clone(), "1.21");
             let args = CommandBuilder::new(
@@ -880,9 +880,9 @@ mod tests {
     #[test]
     fn build_rejects_a_log_config_name_escaping_log_configs() {
         for (id, problem) in [
-            (r"..\..\evil.xml", aurora_version::UnsafePath::Backslash),
-            ("../evil.xml", aurora_version::UnsafePath::Separator),
-            ("..", aurora_version::UnsafePath::DotSegment),
+            (r"..\..\evil.xml", petalfall_version::UnsafePath::Backslash),
+            ("../evil.xml", petalfall_version::UnsafePath::Separator),
+            ("..", petalfall_version::UnsafePath::DotSegment),
         ] {
             let json = serde_json::json!({
                 "id": "1.21", "mainClass": "net.minecraft.client.main.Main",
@@ -893,7 +893,7 @@ mod tests {
                 }}
             });
             let version = VersionJson::from_json_str(&json.to_string()).unwrap();
-            let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+            let ctx = RuntimeContext::new(petalfall_version::OsName::Windows, "x86_64", 64);
             let paths = GamePaths::standard(PathBuf::from("/mc"), "1.21");
             let err = CommandBuilder::new(
                 &version,
@@ -920,7 +920,7 @@ mod tests {
     #[test]
     fn build_errors_when_main_class_missing() {
         let version = VersionJson::from_json_str(r#"{"id":"x"}"#).unwrap();
-        let ctx = RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64);
+        let ctx = RuntimeContext::new(petalfall_version::OsName::Windows, "x86_64", 64);
         let paths = GamePaths::standard(PathBuf::from("/mc"), "x");
         let err = CommandBuilder::new(
             &version,

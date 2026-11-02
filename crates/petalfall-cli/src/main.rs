@@ -1,23 +1,23 @@
 //! Petalfall 调试 CLI：端到端冒烟的载体。
 //!
 //! 子命令覆盖 architecture.md 约定的验收路径：列版本清单 / 安装（原版 + Fabric/Quilt）/ 微软登录与
-//! 账户状态 / 离线启动 / 资源搜索。所有业务逻辑在 aurora-core，本层只做参数解析、tracing subscriber
+//! 账户状态 / 离线启动 / 资源搜索。所有业务逻辑在 petalfall-core，本层只做参数解析、tracing subscriber
 //! 初始化与人类可读输出。库内只发 tracing 事件，subscriber 在此配置并写到 stderr，与 stdout 的
 //! 人类可读输出分离。
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use aurora_core::{
-    Aurora, CoreEvent, EventSink, LaunchAccount, LaunchEvent, LaunchFailed, LaunchRequest,
-    LoaderChoice, LogLine, LogStream, MemorySettings, ModLoader, SearchQuery,
-};
 use clap::{Parser, Subcommand, ValueEnum};
+use petalfall_core::{
+    CoreEvent, EventSink, LaunchAccount, LaunchEvent, LaunchFailed, LaunchRequest, LoaderChoice,
+    LogLine, LogStream, MemorySettings, ModLoader, Petalfall, SearchQuery,
+};
 use tokio::sync::mpsc;
 
-/// Petalfall 调试命令行。命令名 `aurora` 与日志过滤目标绑定 crate 名，属内部代号，不随产品名改。
+/// Petalfall 调试命令行。命令名 `petalfall` 与日志过滤目标都取 crate 名前缀，不经品牌宏。
 #[derive(Debug, Parser)]
-#[command(name = "aurora", version, about = concat!(aurora_base::app_name_en!(), " 调试 CLI"))]
+#[command(name = "petalfall", version, about = concat!(petalfall_base::app_name_en!(), " 调试 CLI"))]
 struct Cli {
     /// 游戏目录（.minecraft），覆盖配置默认值。
     #[arg(long, global = true)]
@@ -25,7 +25,7 @@ struct Cli {
     /// 微软登录 client_id，覆盖配置与环境变量。
     #[arg(long, global = true)]
     client_id: Option<String>,
-    /// 输出更详细的日志（等价于 RUST_LOG=aurora=debug）。
+    /// 输出更详细的日志（等价于 RUST_LOG=petalfall=debug）。
     #[arg(long, short, global = true)]
     verbose: bool,
     #[command(subcommand)]
@@ -156,9 +156,9 @@ async fn main() -> ExitCode {
 /// 配置 tracing subscriber：默认按 verbose 选级别，可被 RUST_LOG 覆盖，日志写 stderr。
 fn init_tracing(verbose: bool) {
     let default = if verbose {
-        "aurora=debug,info"
+        "petalfall=debug,info"
     } else {
-        "warn,aurora=info"
+        "warn,petalfall=info"
     };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
@@ -169,41 +169,41 @@ fn init_tracing(verbose: bool) {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let mut aurora = Aurora::load().await?;
+    let mut petalfall = Petalfall::load().await?;
     if let Some(game_dir) = &cli.game_dir {
-        aurora.set_game_dir(game_dir.clone());
+        petalfall.set_game_dir(game_dir.clone());
     }
     if let Some(client_id) = &cli.client_id {
-        aurora.set_client_id(client_id.clone());
+        petalfall.set_client_id(client_id.clone());
     }
 
     match cli.command {
-        Command::Versions { action } => versions(&aurora, action).await?,
+        Command::Versions { action } => versions(&petalfall, action).await?,
         Command::Install {
             id,
             loader,
             loader_version,
-        } => install(&aurora, &id, loader, loader_version.as_deref()).await?,
-        Command::Auth { action } => auth(&aurora, action).await?,
+        } => install(&petalfall, &id, loader, loader_version.as_deref()).await?,
+        Command::Auth { action } => auth(&petalfall, action).await?,
         Command::Launch {
             version,
             offline,
             max_memory,
-        } => launch(&aurora, &version, &offline, max_memory).await?,
+        } => launch(&petalfall, &version, &offline, max_memory).await?,
         Command::Search {
             query,
             loader,
             game_version,
             limit,
-        } => search(&aurora, &query, loader, game_version.as_deref(), limit).await?,
+        } => search(&petalfall, &query, loader, game_version.as_deref(), limit).await?,
     }
     Ok(())
 }
 
-async fn versions(aurora: &Aurora, action: VersionsAction) -> aurora_core::Result<()> {
+async fn versions(petalfall: &Petalfall, action: VersionsAction) -> petalfall_core::Result<()> {
     match action {
         VersionsAction::List { snapshots, limit } => {
-            let manifest = aurora.list_manifest().await?;
+            let manifest = petalfall.list_manifest().await?;
             println!("最新正式版：{}", manifest.latest.release);
             println!("最新快照：{}", manifest.latest.snapshot);
             println!("{:-<52}", "");
@@ -221,11 +221,11 @@ async fn versions(aurora: &Aurora, action: VersionsAction) -> aurora_core::Resul
             println!("（共列出 {shown} 个版本）");
         }
         VersionsAction::Installed => {
-            let scan = aurora.list_installed().await?;
+            let scan = petalfall.list_installed().await?;
             if scan.versions.is_empty() && scan.broken.is_empty() {
                 println!(
                     "当前游戏目录未发现已安装版本：{}",
-                    aurora.game_dir().display()
+                    petalfall.game_dir().display()
                 );
                 return Ok(());
             }
@@ -258,11 +258,11 @@ async fn versions(aurora: &Aurora, action: VersionsAction) -> aurora_core::Resul
 }
 
 async fn install(
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     id: &str,
     loader: Option<LoaderArg>,
     loader_version: Option<&str>,
-) -> aurora_core::Result<()> {
+) -> petalfall_core::Result<()> {
     let choice = match loader {
         Some(arg) => match arg.to_install_choice() {
             Some(choice) => Some(choice),
@@ -275,7 +275,7 @@ async fn install(
     };
 
     let (sink, printer) = spawn_event_printer();
-    let outcome = aurora
+    let outcome = petalfall
         .install(id, choice, loader_version, Some(&sink))
         .await;
     drop(sink);
@@ -299,16 +299,16 @@ async fn install(
     Ok(())
 }
 
-async fn auth(aurora: &Aurora, action: AuthAction) -> aurora_core::Result<()> {
+async fn auth(petalfall: &Petalfall, action: AuthAction) -> petalfall_core::Result<()> {
     match action {
-        AuthAction::Login => auth_login(aurora).await,
-        AuthAction::Status => auth_status(aurora),
+        AuthAction::Login => auth_login(petalfall).await,
+        AuthAction::Status => auth_status(petalfall),
     }
 }
 
 #[cfg(windows)]
-async fn auth_login(aurora: &Aurora) -> aurora_core::Result<()> {
-    let account = aurora
+async fn auth_login(petalfall: &Petalfall) -> petalfall_core::Result<()> {
+    let account = petalfall
         .microsoft_login(|device| {
             println!("请在浏览器打开：{}", device.verification_uri);
             println!("并输入代码：{}", device.user_code);
@@ -323,15 +323,15 @@ async fn auth_login(aurora: &Aurora) -> aurora_core::Result<()> {
 }
 
 #[cfg(not(windows))]
-async fn auth_login(_aurora: &Aurora) -> aurora_core::Result<()> {
+async fn auth_login(_petalfall: &Petalfall) -> petalfall_core::Result<()> {
     eprintln!("微软登录（凭据加密）仅支持 Windows。");
     Ok(())
 }
 
 #[cfg(windows)]
-fn auth_status(aurora: &Aurora) -> aurora_core::Result<()> {
-    let accounts = aurora.accounts()?;
-    let current = aurora.current_account()?;
+fn auth_status(petalfall: &Petalfall) -> petalfall_core::Result<()> {
+    let accounts = petalfall.accounts()?;
+    let current = petalfall.current_account()?;
     if accounts.is_empty() {
         println!("尚无已登录账户。");
         return Ok(());
@@ -352,7 +352,7 @@ fn auth_status(aurora: &Aurora) -> aurora_core::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn auth_status(_aurora: &Aurora) -> aurora_core::Result<()> {
+fn auth_status(_petalfall: &Petalfall) -> petalfall_core::Result<()> {
     eprintln!("账户存储（凭据加密）仅支持 Windows。");
     Ok(())
 }
@@ -360,16 +360,16 @@ fn auth_status(_aurora: &Aurora) -> aurora_core::Result<()> {
 /// 以离线账户启动。内存、Java、JVM 参数与分辨率按实例设置与全局设置解析；`--max-memory` 只覆盖
 /// 这一次运行的全局最大堆，不写回配置。
 async fn launch(
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     version: &str,
     offline: &str,
     max_memory: Option<u32>,
 ) -> Result<(), LaunchFailed> {
-    let mut aurora = aurora.clone();
+    let mut petalfall = petalfall.clone();
     if let Some(max_mb) = max_memory {
-        let min_mb = aurora.config().memory.min_mb;
+        let min_mb = petalfall.config().memory.min_mb;
         // 显式给了最大堆就关掉自动分配，否则自动分配会盖过这次覆盖。
-        aurora.set_memory(MemorySettings {
+        petalfall.set_memory(MemorySettings {
             max_mb,
             min_mb,
             auto: false,
@@ -413,7 +413,7 @@ async fn launch(
         game_log: Some(log_tx),
         quick_play: None,
     };
-    let launched = aurora.launch(request, &events).await;
+    let launched = petalfall.launch(request, &events).await;
     drop(events);
     let _ = printer.await;
     let run = match launched {
@@ -443,7 +443,7 @@ async fn launch(
     );
     if exit.crashed {
         println!("检测到崩溃，诊断如下：");
-        let Some(report) = aurora.last_crash(version).await? else {
+        let Some(report) = petalfall.last_crash(version).await? else {
             println!("  崩溃报告没有保存下来，原因见上方的收尾问题。");
             return Ok(());
         };
@@ -462,12 +462,12 @@ async fn launch(
 }
 
 async fn search(
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     query: &str,
     loader: Option<LoaderArg>,
     game_version: Option<&str>,
     limit: u32,
-) -> aurora_core::Result<()> {
+) -> petalfall_core::Result<()> {
     let mut search = SearchQuery::new(query).with_paging(limit, 0);
     if let Some(loader) = loader {
         search = search.with_loader(loader.to_mod_loader());
@@ -476,7 +476,7 @@ async fn search(
         search = search.with_game_version(game_version);
     }
 
-    let result = aurora.search(&search).await?;
+    let result = petalfall.search(&search).await?;
     for err in &result.errors {
         eprintln!("[{}] 搜索失败：{}", err.platform.display_name(), err.error);
     }

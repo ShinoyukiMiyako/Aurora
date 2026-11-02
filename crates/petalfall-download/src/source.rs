@@ -2,14 +2,14 @@
 //!
 //! [`SourcePlan`] 持有一组按优先级排列的 [`MirrorSource`]，并通过 [`SourceResolver`] 把一个
 //! 官方 URL 展开成一组「候选具体 URL」（去重、保序）。引擎按此列表依次尝试，某源重试耗尽即切换
-//! 下一个。解析器是可注入的接口：生产用 [`MirrorResolver`]（走 aurora-base 的镜像改写表），
+//! 下一个。解析器是可注入的接口：生产用 [`MirrorResolver`]（走 petalfall-base 的镜像改写表），
 //! 单元测试可注入自定义映射把不同源指向不同的本地 mock 端点。测速结论的缓存见
 //! [`crate::speed::SourceSpeedCache`]。
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aurora_base::mirror::{self, MirrorSource};
+use petalfall_base::mirror::{self, MirrorSource};
 use tokio::task::JoinSet;
 
 use crate::error::{Error, Result};
@@ -21,7 +21,7 @@ pub trait SourceResolver: Send + Sync {
     fn resolve(&self, url: &str, source: MirrorSource) -> Result<String>;
 }
 
-/// 生产用解析器：直接套用 [`aurora_base::mirror::rewrite`] 的官方与 BMCLAPI 之间的改写规则。
+/// 生产用解析器：直接套用 [`petalfall_base::mirror::rewrite`] 的官方与 BMCLAPI 之间的改写规则。
 pub struct MirrorResolver;
 
 impl SourceResolver for MirrorResolver {

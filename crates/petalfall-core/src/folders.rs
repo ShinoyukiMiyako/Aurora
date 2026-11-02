@@ -3,24 +3,24 @@
 //! 一台机器上常常同时存在好几个 `.minecraft`：官方启动器的、PCL2 或 HMCL 的、以及本启动器自己的。
 //! 这里把它们一并列出来让玩家在其间切换，而不是逼他把攒了多年的存档搬过来。
 //!
-//! 「当前目录」只有一个（[`AuroraConfig::game_directory`]，安装与启动真正落盘的地方），其余记在
-//! [`AuroraConfig::extra_game_directories`] 里。切换目录就是把候选提为当前、把原来的当前收进候选。
+//! 「当前目录」只有一个（[`PetalfallConfig::game_directory`]，安装与启动真正落盘的地方），其余记在
+//! [`PetalfallConfig::extra_game_directories`] 里。切换目录就是把候选提为当前、把原来的当前收进候选。
 //!
 //! 记录过的目录可能此刻访问不到（外置硬盘没插、网络盘断开），对这类路径做 `is_dir` 可能阻塞数秒，
 //! 所以一切磁盘探测都放进阻塞线程池并限时：超时按「不可达」处理，记录照样保留、照样列出。
 //!
-//! [`AuroraConfig::game_directory`]: crate::config::AuroraConfig::game_directory
-//! [`AuroraConfig::extra_game_directories`]: crate::config::AuroraConfig::extra_game_directories
+//! [`PetalfallConfig::game_directory`]: crate::config::PetalfallConfig::game_directory
+//! [`PetalfallConfig::extra_game_directories`]: crate::config::PetalfallConfig::extra_game_directories
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use aurora_instance::{MINECRAFT_DIR_NAME, list_version_dirs, official_minecraft_dir};
+use petalfall_instance::{MINECRAFT_DIR_NAME, list_version_dirs, official_minecraft_dir};
 use tokio::time::Instant;
 
 use crate::config::{NamedDirectory, ParkedDirectory};
 use crate::error::{CoreError, GameDirProblem, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 /// 单个目录探测的时限。本地盘是微秒级，超过它的基本是挂起的网络盘或拔掉的外置盘。
 pub const DIR_PROBE_TIMEOUT: Duration = Duration::from_millis(2000);
@@ -56,10 +56,10 @@ impl GameDirProbe {
     };
 }
 
-/// 首次启动向导第一步之前的目录记录，由 [`Aurora::first_run_baseline`] 取得。
+/// 首次启动向导第一步之前的目录记录，由 [`Petalfall::first_run_baseline`] 取得。
 ///
 /// 第一步可以提交不止一次：离开第一步就提交，用户回到第一步改了目录或勾选再离开时重新提交。
-/// 每次提交都从这份记录出发套用本次的选择（[`Aurora::complete_first_run`]），前几次提交设下的
+/// 每次提交都从这份记录出发套用本次的选择（[`Petalfall::complete_first_run`]），前几次提交设下的
 /// 当前目录、收下的文件夹不会叠加进来——否则上一次选的目录会被当成「原来的当前目录」收进额外目录，
 /// 取消勾选的文件夹也还留着。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,7 +71,7 @@ pub struct FirstRunBaseline {
     current_exists: bool,
 }
 
-/// 切换游戏目录之前对当前目录做的一次限时探测，由 [`Aurora::probe_current_game_dir`] 取得。
+/// 切换游戏目录之前对当前目录做的一次限时探测，由 [`Petalfall::probe_current_game_dir`] 取得。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentDirProbe {
     path: PathBuf,
@@ -131,7 +131,7 @@ pub async fn probe_dir(path: &Path) -> bool {
 async fn probe_game_dir(
     path: &Path,
     reachable: impl Future<Output = bool>,
-    versions: impl Future<Output = aurora_instance::Result<Option<Vec<String>>>>,
+    versions: impl Future<Output = petalfall_instance::Result<Option<Vec<String>>>>,
 ) -> GameDirProbe {
     let deadline = Instant::now() + DIR_PROBE_TIMEOUT;
     if !reachable.await {
@@ -173,7 +173,7 @@ pub async fn ensure_game_dir(path: &Path) -> Result<()> {
     let create = tokio::task::spawn_blocking(move || std::fs::create_dir_all(&owned));
     match tokio::time::timeout(CREATE_DIR_TIMEOUT, create).await {
         Ok(joined) => joined?.map_err(|source| {
-            CoreError::Base(aurora_base::Error::Io {
+            CoreError::Base(petalfall_base::Error::Io {
                 path: path.to_path_buf(),
                 source,
             })
@@ -190,7 +190,7 @@ pub fn default_game_dir(data_dir: &Path) -> PathBuf {
     data_dir.join(MINECRAFT_DIR_NAME)
 }
 
-impl Aurora {
+impl Petalfall {
     /// 首次启动向导是否还没走过第一步。
     pub fn is_first_run(&self) -> bool {
         !self.config().first_run_completed
@@ -213,7 +213,7 @@ impl Aurora {
     /// 标记向导已完成。同一个基线上重复提交，结果与只提交最后一次相同。
     ///
     /// 目录须事先经 [`validate_game_dir`] 校验并经 [`ensure_game_dir`] 建好；落盘仍由调用方
-    /// [`Aurora::save_config`] 完成。
+    /// [`Petalfall::save_config`] 完成。
     pub fn complete_first_run(
         &mut self,
         baseline: &FirstRunBaseline,
@@ -310,7 +310,7 @@ impl Aurora {
         extras.len() != before
     }
 
-    /// 限时探测此刻的当前目录在不在盘上，交给 [`Aurora::switch_game_directory`]。
+    /// 限时探测此刻的当前目录在不在盘上，交给 [`Petalfall::switch_game_directory`]。
     ///
     /// 要在拿门面写锁之前做：玩家多半正是因为当前目录所在的网络盘断了才要切走，对它同步 `is_dir`
     /// 会卡上几十秒，持着写锁卡住，所有读配置的命令跟着排队，整个界面停住。
@@ -324,7 +324,7 @@ impl Aurora {
     ///
     /// 原来的当前目录若在盘上存在就收进额外目录，否则切过去就再也找不回来了；从没建出来过的
     /// 默认目录不收，免得列表里多一条永远不可达的记录。在不在盘上看 `probe`（见
-    /// [`Aurora::probe_current_game_dir`]），这里不碰磁盘。探测之后当前目录已被换过时，探测结果
+    /// [`Petalfall::probe_current_game_dir`]），这里不碰磁盘。探测之后当前目录已被换过时，探测结果
     /// 说的不是它，按存在处理：多留一条不可达的记录无害，丢掉一个有存档的目录就找不回来了。
     pub fn switch_game_directory(&mut self, path: impl Into<PathBuf>, probe: &CurrentDirProbe) {
         let previous_exists = probe.exists || !same_path(&probe.path, self.game_dir());
@@ -388,7 +388,7 @@ impl Aurora {
             return named.name.clone();
         }
         if same_path(path, &default_game_dir(self.data_dir())) {
-            return aurora_base::brand::APP_NAME.to_owned();
+            return petalfall_base::brand::APP_NAME.to_owned();
         }
         let leaf = path.file_name().map(|s| s.to_string_lossy().into_owned());
         let label = match leaf.as_deref() {
@@ -475,14 +475,14 @@ fn sibling_launcher_dirs() -> Vec<NamedDirectory> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
 
-    fn aurora_at(data_dir: &Path, game_dir: &Path, extras: Vec<NamedDirectory>) -> Aurora {
-        let config = AuroraConfig {
+    fn petalfall_at(data_dir: &Path, game_dir: &Path, extras: Vec<NamedDirectory>) -> Petalfall {
+        let config = PetalfallConfig {
             extra_game_directories: extras,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        Aurora::for_test(config, data_dir.to_path_buf(), game_dir.to_path_buf())
+        Petalfall::for_test(config, data_dir.to_path_buf(), game_dir.to_path_buf())
     }
 
     fn named(name: &str, path: impl Into<PathBuf>) -> NamedDirectory {
@@ -532,32 +532,32 @@ mod tests {
     #[test]
     fn add_game_directory_updates_name_instead_of_duplicating() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_at(tmp.path(), &tmp.path().join(".minecraft"), Vec::new());
+        let mut petalfall = petalfall_at(tmp.path(), &tmp.path().join(".minecraft"), Vec::new());
 
-        aurora.add_game_directory("旧名", "E:\\Games\\.minecraft");
-        aurora.add_game_directory("新名", "e:/games/.minecraft/");
+        petalfall.add_game_directory("旧名", "E:\\Games\\.minecraft");
+        petalfall.add_game_directory("新名", "e:/games/.minecraft/");
 
-        let extras = &aurora.config().extra_game_directories;
+        let extras = &petalfall.config().extra_game_directories;
         assert_eq!(extras.len(), 1);
         assert_eq!(extras[0].name, "新名");
 
         // 与当前目录相同的不会被记成额外目录。
-        let current = aurora.game_dir().to_path_buf();
-        aurora.add_game_directory("自己", current);
-        assert_eq!(aurora.config().extra_game_directories.len(), 1);
+        let current = petalfall.game_dir().to_path_buf();
+        petalfall.add_game_directory("自己", current);
+        assert_eq!(petalfall.config().extra_game_directories.len(), 1);
     }
 
     #[test]
     fn remove_game_directory_reports_whether_anything_went() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_at(
+        let mut petalfall = petalfall_at(
             tmp.path(),
             &tmp.path().join(".minecraft"),
             vec![named("PCL2", "E:\\PCL2\\.minecraft")],
         );
-        assert!(aurora.remove_game_directory(Path::new("e:/pcl2/.minecraft")));
-        assert!(aurora.config().extra_game_directories.is_empty());
-        assert!(!aurora.remove_game_directory(Path::new("E:\\PCL2\\.minecraft")));
+        assert!(petalfall.remove_game_directory(Path::new("e:/pcl2/.minecraft")));
+        assert!(petalfall.config().extra_game_directories.is_empty());
+        assert!(!petalfall.remove_game_directory(Path::new("E:\\PCL2\\.minecraft")));
     }
 
     /// 切换把原当前目录（在盘上存在时）收进额外目录，目标从额外目录里摘掉。
@@ -566,21 +566,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let current = tmp.path().join("Games").join(".minecraft");
         std::fs::create_dir_all(&current).unwrap();
-        let mut aurora = aurora_at(
+        let mut petalfall = petalfall_at(
             tmp.path(),
             &current,
             vec![named("PCL2", "E:\\PCL2\\.minecraft")],
         );
 
-        let probe = aurora.probe_current_game_dir().await;
-        aurora.switch_game_directory("E:\\PCL2\\.minecraft", &probe);
+        let probe = petalfall.probe_current_game_dir().await;
+        petalfall.switch_game_directory("E:\\PCL2\\.minecraft", &probe);
 
-        assert_eq!(aurora.game_dir(), Path::new("E:\\PCL2\\.minecraft"));
+        assert_eq!(petalfall.game_dir(), Path::new("E:\\PCL2\\.minecraft"));
         assert_eq!(
-            aurora.config().game_directory.as_deref(),
+            petalfall.config().game_directory.as_deref(),
             Some(Path::new("E:\\PCL2\\.minecraft"))
         );
-        let extras = &aurora.config().extra_game_directories;
+        let extras = &petalfall.config().extra_game_directories;
         assert_eq!(extras, &vec![named("Games", current)]);
     }
 
@@ -593,32 +593,32 @@ mod tests {
         let second = tmp.path().join("second").join(".minecraft");
         std::fs::create_dir_all(&first).unwrap();
         std::fs::create_dir_all(&second).unwrap();
-        let mut aurora = aurora_at(tmp.path(), &first, Vec::new());
+        let mut petalfall = petalfall_at(tmp.path(), &first, Vec::new());
         let pins = vec!["生存".to_owned(), "建筑".to_owned()];
-        aurora.set_sidebar_pins(pins.clone());
-        aurora.set_selected_version(Some("建筑".to_owned()));
+        petalfall.set_sidebar_pins(pins.clone());
+        petalfall.set_selected_version(Some("建筑".to_owned()));
 
-        let probe = aurora.probe_current_game_dir().await;
-        aurora.switch_game_directory(&second, &probe);
-        assert!(aurora.config().sidebar_pins.is_empty());
-        assert_eq!(aurora.config().selected_version, None);
+        let probe = petalfall.probe_current_game_dir().await;
+        petalfall.switch_game_directory(&second, &probe);
+        assert!(petalfall.config().sidebar_pins.is_empty());
+        assert_eq!(petalfall.config().selected_version, None);
 
-        aurora.set_sidebar_pins(vec!["第二目录".to_owned()]);
-        aurora.set_selected_version(Some("第二目录".to_owned()));
-        let probe = aurora.probe_current_game_dir().await;
-        aurora.switch_game_directory(&first, &probe);
-        assert_eq!(aurora.config().sidebar_pins, pins);
-        assert_eq!(aurora.config().selected_version.as_deref(), Some("建筑"));
+        petalfall.set_sidebar_pins(vec!["第二目录".to_owned()]);
+        petalfall.set_selected_version(Some("第二目录".to_owned()));
+        let probe = petalfall.probe_current_game_dir().await;
+        petalfall.switch_game_directory(&first, &probe);
+        assert_eq!(petalfall.config().sidebar_pins, pins);
+        assert_eq!(petalfall.config().selected_version.as_deref(), Some("建筑"));
 
-        let probe = aurora.probe_current_game_dir().await;
-        aurora.switch_game_directory(&second, &probe);
-        assert_eq!(aurora.config().sidebar_pins, vec!["第二目录".to_owned()]);
+        let probe = petalfall.probe_current_game_dir().await;
+        petalfall.switch_game_directory(&second, &probe);
+        assert_eq!(petalfall.config().sidebar_pins, vec!["第二目录".to_owned()]);
         assert_eq!(
-            aurora.config().selected_version.as_deref(),
+            petalfall.config().selected_version.as_deref(),
             Some("第二目录")
         );
         assert_eq!(
-            aurora.config().parked_directories.len(),
+            petalfall.config().parked_directories.len(),
             1,
             "切回来的目录不留第二份记录"
         );
@@ -630,16 +630,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let current = tmp.path().join(".minecraft");
         std::fs::create_dir_all(&current).unwrap();
-        let mut aurora = aurora_at(tmp.path(), &current, Vec::new());
-        aurora.set_sidebar_pins(vec!["生存".to_owned()]);
-        aurora.set_selected_version(Some("生存".to_owned()));
+        let mut petalfall = petalfall_at(tmp.path(), &current, Vec::new());
+        petalfall.set_sidebar_pins(vec!["生存".to_owned()]);
+        petalfall.set_selected_version(Some("生存".to_owned()));
 
-        let probe = aurora.probe_current_game_dir().await;
-        aurora.switch_game_directory(&current, &probe);
+        let probe = petalfall.probe_current_game_dir().await;
+        petalfall.switch_game_directory(&current, &probe);
 
-        assert_eq!(aurora.config().sidebar_pins, vec!["生存".to_owned()]);
-        assert_eq!(aurora.config().selected_version.as_deref(), Some("生存"));
-        assert!(aurora.config().parked_directories.is_empty());
+        assert_eq!(petalfall.config().sidebar_pins, vec!["生存".to_owned()]);
+        assert_eq!(petalfall.config().selected_version.as_deref(), Some("生存"));
+        assert!(petalfall.config().parked_directories.is_empty());
     }
 
     /// 从没建出来过的默认目录不收进额外目录，免得列表里多一条永远不可达的记录。
@@ -647,14 +647,14 @@ mod tests {
     async fn switch_drops_never_created_previous_directory() {
         let tmp = tempfile::tempdir().unwrap();
         let default_dir = default_game_dir(tmp.path());
-        let mut aurora = aurora_at(tmp.path(), &default_dir, Vec::new());
+        let mut petalfall = petalfall_at(tmp.path(), &default_dir, Vec::new());
         let target = tmp.path().join("elsewhere");
 
-        let probe = aurora.probe_current_game_dir().await;
-        aurora.switch_game_directory(&target, &probe);
+        let probe = petalfall.probe_current_game_dir().await;
+        petalfall.switch_game_directory(&target, &probe);
 
-        assert_eq!(aurora.game_dir(), target);
-        assert!(aurora.config().extra_game_directories.is_empty());
+        assert_eq!(petalfall.game_dir(), target);
+        assert!(petalfall.config().extra_game_directories.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
@@ -662,15 +662,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let current = tmp.path().join(".minecraft");
         std::fs::create_dir_all(&current).unwrap();
-        let mut aurora = aurora_at(tmp.path(), &current, Vec::new());
+        let mut petalfall = petalfall_at(tmp.path(), &current, Vec::new());
 
-        let probe = aurora.probe_current_game_dir().await;
-        aurora.switch_game_directory(&current, &probe);
-        aurora.switch_game_directory(current.display().to_string().to_uppercase(), &probe);
+        let probe = petalfall.probe_current_game_dir().await;
+        petalfall.switch_game_directory(&current, &probe);
+        petalfall.switch_game_directory(current.display().to_string().to_uppercase(), &probe);
 
-        assert!(aurora.config().extra_game_directories.is_empty());
+        assert!(petalfall.config().extra_game_directories.is_empty());
         assert!(
-            aurora.config().game_directory.is_none(),
+            petalfall.config().game_directory.is_none(),
             "没有真正切换就不写配置"
         );
     }
@@ -682,26 +682,26 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let current = tmp.path().join("NAS").join(".minecraft");
         std::fs::create_dir_all(&current).unwrap();
-        let mut aurora = aurora_at(tmp.path(), &current, Vec::new());
-        let probe = aurora.probe_current_game_dir().await;
+        let mut petalfall = petalfall_at(tmp.path(), &current, Vec::new());
+        let probe = petalfall.probe_current_game_dir().await;
         std::fs::remove_dir_all(tmp.path().join("NAS")).unwrap();
 
         let local = tmp.path().join("Local");
-        aurora.switch_game_directory(&local, &probe);
-        assert_eq!(aurora.game_dir(), local);
+        petalfall.switch_game_directory(&local, &probe);
+        assert_eq!(petalfall.game_dir(), local);
         assert_eq!(
-            aurora.config().extra_game_directories,
+            petalfall.config().extra_game_directories,
             vec![named("NAS", current.clone())]
         );
 
-        let missing = aurora.probe_current_game_dir().await;
+        let missing = petalfall.probe_current_game_dir().await;
         std::fs::create_dir_all(&local).unwrap();
-        aurora.switch_game_directory(&current, &missing);
-        assert_eq!(aurora.game_dir(), current);
+        petalfall.switch_game_directory(&current, &missing);
+        assert_eq!(petalfall.game_dir(), current);
         assert!(
-            aurora.config().extra_game_directories.is_empty(),
+            petalfall.config().extra_game_directories.is_empty(),
             "探测时不在的目录不收：{:?}",
-            aurora.config().extra_game_directories
+            petalfall.config().extra_game_directories
         );
     }
 
@@ -710,18 +710,18 @@ mod tests {
     async fn stale_probe_keeps_the_directory_it_did_not_look_at() {
         let tmp = tempfile::tempdir().unwrap();
         let never_created = default_game_dir(tmp.path());
-        let mut aurora = aurora_at(tmp.path(), &never_created, Vec::new());
-        let stale = aurora.probe_current_game_dir().await;
+        let mut petalfall = petalfall_at(tmp.path(), &never_created, Vec::new());
+        let stale = petalfall.probe_current_game_dir().await;
 
         let games = tmp.path().join("Games").join(".minecraft");
-        aurora.switch_game_directory(&games, &stale);
-        assert!(aurora.config().extra_game_directories.is_empty());
+        petalfall.switch_game_directory(&games, &stale);
+        assert!(petalfall.config().extra_game_directories.is_empty());
 
         let target = tmp.path().join("Other");
-        aurora.switch_game_directory(&target, &stale);
-        assert_eq!(aurora.game_dir(), target);
+        petalfall.switch_game_directory(&target, &stale);
+        assert_eq!(petalfall.game_dir(), target);
         assert_eq!(
-            aurora.config().extra_game_directories,
+            petalfall.config().extra_game_directories,
             vec![named("Games", games)]
         );
     }
@@ -733,7 +733,7 @@ mod tests {
         let current = default_game_dir(tmp.path());
         std::fs::create_dir_all(&current).unwrap();
         let gone = tmp.path().join("unplugged").join(".minecraft");
-        let aurora = aurora_at(
+        let petalfall = petalfall_at(
             tmp.path(),
             &current,
             vec![
@@ -742,7 +742,7 @@ mod tests {
             ],
         );
 
-        let listed = aurora.game_directories().await;
+        let listed = petalfall.game_directories().await;
         assert_eq!(
             listed,
             vec![
@@ -785,7 +785,7 @@ mod tests {
         let one_version = tmp.path().join("Games").join(".minecraft");
         std::fs::create_dir_all(one_version.join("versions").join("1.21.1")).unwrap();
         let unplugged = tmp.path().join("unplugged").join(".minecraft");
-        let aurora = aurora_at(
+        let petalfall = petalfall_at(
             tmp.path(),
             &current,
             vec![
@@ -796,7 +796,7 @@ mod tests {
             ],
         );
 
-        let counts: Vec<(bool, Option<u32>)> = aurora
+        let counts: Vec<(bool, Option<u32>)> = petalfall
             .game_directories()
             .await
             .into_iter()
@@ -821,9 +821,9 @@ mod tests {
         let current = default_game_dir(tmp.path());
         std::fs::create_dir_all(&current).unwrap();
         std::fs::write(current.join("versions"), b"x").unwrap();
-        let aurora = aurora_at(tmp.path(), &current, Vec::new());
+        let petalfall = petalfall_at(tmp.path(), &current, Vec::new());
 
-        let listed = aurora.game_directories().await;
+        let listed = petalfall.game_directories().await;
         assert_eq!(listed.len(), 1);
         assert!(listed[0].available);
         assert_eq!(listed[0].version_count, None);
@@ -846,7 +846,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn unreadable_versions_is_unknown_but_directory_stays_available() {
         let failing = async {
-            Err(aurora_instance::Error::Io {
+            Err(petalfall_instance::Error::Io {
                 path: PathBuf::from("N:/.minecraft/versions"),
                 source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             })
@@ -955,32 +955,32 @@ mod tests {
     #[test]
     fn directory_name_prefers_record_then_brand_then_parent() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(
+        let petalfall = petalfall_at(
             tmp.path(),
             &tmp.path().join(".minecraft"),
             vec![named("我的整合", "D:/Packs/.minecraft")],
         );
         assert_eq!(
-            aurora.directory_name(Path::new("d:\\packs\\.minecraft")),
+            petalfall.directory_name(Path::new("d:\\packs\\.minecraft")),
             "我的整合"
         );
         assert_eq!(
-            aurora.directory_name(&default_game_dir(tmp.path())),
-            aurora_base::brand::APP_NAME
+            petalfall.directory_name(&default_game_dir(tmp.path())),
+            petalfall_base::brand::APP_NAME
         );
         assert_eq!(
-            aurora.directory_name(Path::new("E:/Games/.minecraft")),
+            petalfall.directory_name(Path::new("E:/Games/.minecraft")),
             "Games"
         );
-        assert_eq!(aurora.directory_name(Path::new("E:/Games/mc")), "mc");
+        assert_eq!(petalfall.directory_name(Path::new("E:/Games/mc")), "mc");
     }
 
     #[tokio::test(start_paused = true)]
     async fn discover_skips_known_directories() {
         let tmp = tempfile::tempdir().unwrap();
         let known: Vec<NamedDirectory> = sibling_launcher_dirs();
-        let aurora = aurora_at(tmp.path(), &tmp.path().join(".minecraft"), known.clone());
-        let found = aurora.discover_game_directories().await;
+        let petalfall = petalfall_at(tmp.path(), &tmp.path().join(".minecraft"), known.clone());
+        let found = petalfall.discover_game_directories().await;
         assert!(
             !found
                 .iter()
@@ -1025,20 +1025,20 @@ mod tests {
     async fn first_run_roundtrip_through_config_store() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.json");
-        let mut aurora = Aurora::open(
-            AuroraConfig::default(),
+        let mut petalfall = Petalfall::open(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             config_path.clone(),
         )
         .unwrap();
-        assert!(aurora.is_first_run());
+        assert!(petalfall.is_first_run());
 
         let chosen = tmp.path().join("Games").join(".minecraft");
         let chosen = validate_game_dir(&chosen.display().to_string()).unwrap();
-        let baseline = aurora.first_run_baseline(probe_dir(aurora.game_dir()).await);
+        let baseline = petalfall.first_run_baseline(probe_dir(petalfall.game_dir()).await);
         ensure_game_dir(&chosen).await.unwrap();
         assert!(chosen.is_dir(), "目录不存在会自动创建");
-        aurora.complete_first_run(
+        petalfall.complete_first_run(
             &baseline,
             chosen.clone(),
             vec![
@@ -1046,7 +1046,7 @@ mod tests {
                 named("自己", chosen.clone()),
             ],
         );
-        aurora.save_config().await.unwrap();
+        petalfall.save_config().await.unwrap();
 
         let reloaded = crate::config::ConfigStore::at(&config_path)
             .load()
@@ -1059,7 +1059,7 @@ mod tests {
             vec![named("HMCL", "D:/HMCL/.minecraft")],
             "与当前目录相同的勾选项不重复记录"
         );
-        let reopened = Aurora::open(reloaded, tmp.path().to_path_buf(), config_path).unwrap();
+        let reopened = Petalfall::open(reloaded, tmp.path().to_path_buf(), config_path).unwrap();
         assert!(!reopened.is_first_run());
         assert_eq!(reopened.game_dir(), chosen);
     }
@@ -1070,12 +1070,12 @@ mod tests {
     async fn recommitting_first_run_replaces_the_previous_choice() {
         let tmp = tempfile::tempdir().unwrap();
         let default_dir = default_game_dir(tmp.path());
-        let mut aurora = aurora_at(tmp.path(), &default_dir, Vec::new());
-        let baseline = aurora.first_run_baseline(probe_dir(aurora.game_dir()).await);
+        let mut petalfall = petalfall_at(tmp.path(), &default_dir, Vec::new());
+        let baseline = petalfall.first_run_baseline(probe_dir(petalfall.game_dir()).await);
         assert!(!default_dir.exists(), "向导之前默认目录还没建出来");
 
         ensure_game_dir(&default_dir).await.unwrap();
-        aurora.complete_first_run(
+        petalfall.complete_first_run(
             &baseline,
             default_dir.clone(),
             vec![
@@ -1083,27 +1083,27 @@ mod tests {
                 named("官方启动器", "C:/Users/p/AppData/Roaming/.minecraft"),
             ],
         );
-        assert_eq!(aurora.config().extra_game_directories.len(), 2);
+        assert_eq!(petalfall.config().extra_game_directories.len(), 2);
 
         let petal = tmp.path().join("Petal");
         ensure_game_dir(&petal).await.unwrap();
-        aurora.complete_first_run(
+        petalfall.complete_first_run(
             &baseline,
             petal.clone(),
             vec![named("官方启动器", "C:/Users/p/AppData/Roaming/.minecraft")],
         );
 
-        assert_eq!(aurora.game_dir(), petal);
+        assert_eq!(petalfall.game_dir(), petal);
         assert_eq!(
-            aurora.config().game_directory.as_deref(),
+            petalfall.config().game_directory.as_deref(),
             Some(petal.as_path())
         );
         assert_eq!(
-            aurora.config().extra_game_directories,
+            petalfall.config().extra_game_directories,
             vec![named("官方启动器", "C:/Users/p/AppData/Roaming/.minecraft")]
         );
-        assert!(aurora.config().first_run_completed);
-        let listed: Vec<(PathBuf, bool)> = aurora
+        assert!(petalfall.config().first_run_completed);
+        let listed: Vec<(PathBuf, bool)> = petalfall
             .game_directories()
             .await
             .into_iter()
@@ -1121,14 +1121,14 @@ mod tests {
         );
 
         // 再改回默认目录：默认目录又是当前，Petal 不留记录
-        aurora.complete_first_run(&baseline, default_dir.clone(), Vec::new());
-        assert_eq!(aurora.game_dir(), default_dir);
+        petalfall.complete_first_run(&baseline, default_dir.clone(), Vec::new());
+        assert_eq!(petalfall.game_dir(), default_dir);
         assert_eq!(
-            aurora.config().game_directory,
+            petalfall.config().game_directory,
             None,
             "改回向导之前的当前目录，配置也回到原样"
         );
-        assert!(aurora.config().extra_game_directories.is_empty());
+        assert!(petalfall.config().extra_game_directories.is_empty());
     }
 
     /// 向导之前就有的记录与当时就在盘上的当前目录照常保留：配置损坏后按默认配置重进向导时，
@@ -1138,27 +1138,27 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let current = tmp.path().join("Games").join(".minecraft");
         std::fs::create_dir_all(current.join("versions")).unwrap();
-        let mut aurora = aurora_at(
+        let mut petalfall = petalfall_at(
             tmp.path(),
             &current,
             vec![named("PCL2", "E:/PCL2/.minecraft")],
         );
-        let baseline = aurora.first_run_baseline(probe_dir(aurora.game_dir()).await);
+        let baseline = petalfall.first_run_baseline(probe_dir(petalfall.game_dir()).await);
 
         let first = tmp.path().join("A");
         ensure_game_dir(&first).await.unwrap();
-        aurora.complete_first_run(
+        petalfall.complete_first_run(
             &baseline,
             first.clone(),
             vec![named("HMCL", "D:/HMCL/.minecraft")],
         );
         let second = tmp.path().join("B");
         ensure_game_dir(&second).await.unwrap();
-        aurora.complete_first_run(&baseline, second.clone(), Vec::new());
+        petalfall.complete_first_run(&baseline, second.clone(), Vec::new());
 
-        assert_eq!(aurora.game_dir(), second);
+        assert_eq!(petalfall.game_dir(), second);
         assert_eq!(
-            aurora.config().extra_game_directories,
+            petalfall.config().extra_game_directories,
             vec![named("PCL2", "E:/PCL2/.minecraft"), named("Games", current)]
         );
     }
@@ -1172,7 +1172,7 @@ mod tests {
         let target = file.join(".minecraft");
         let err = ensure_game_dir(&target).await.unwrap_err();
         assert!(
-            matches!(&err, CoreError::Base(aurora_base::Error::Io { path, .. }) if path == &target),
+            matches!(&err, CoreError::Base(petalfall_base::Error::Io { path, .. }) if path == &target),
             "实际：{err:?}"
         );
     }

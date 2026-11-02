@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use aurora_base::retry::RetryPolicy;
-use aurora_download::{
+use petalfall_base::retry::RetryPolicy;
+use petalfall_download::{
     ChunkConfig, DownloadConfig, DownloadTask, Downloader, MirrorSource, SourceHealth, SourcePlan,
     SourceResolver, WatchdogConfig,
 };
@@ -15,14 +15,14 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 fn client() -> reqwest::Client {
-    aurora_base::http::build_client().expect("构建客户端")
+    petalfall_base::http::build_client().expect("构建客户端")
 }
 
 async fn sha1_of(bytes: &[u8]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("hashme");
     tokio::fs::write(&file, bytes).await.unwrap();
-    aurora_base::fs::sha1_hex(&file).await.unwrap()
+    petalfall_base::fs::sha1_hex(&file).await.unwrap()
 }
 
 fn fast_policy() -> RetryPolicy {
@@ -42,7 +42,7 @@ struct SplitHostResolver {
 }
 
 impl SourceResolver for SplitHostResolver {
-    fn resolve(&self, _url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+    fn resolve(&self, _url: &str, source: MirrorSource) -> petalfall_download::Result<String> {
         Ok(match source {
             MirrorSource::Official => format!("{}/file", self.primary),
             MirrorSource::BmclApi => format!("{}/file", self.mirror),

@@ -1,16 +1,16 @@
 [package]
-name = "aurora-install"
+name = "petalfall-install"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
 [dependencies]
-aurora-base = { path = "../aurora-base" }
-aurora-version = { path = "../aurora-version" }
-aurora-download = { path = "../aurora-download" }
+petalfall-base = { path = "../petalfall-base" }
+petalfall-version = { path = "../petalfall-version" }
+petalfall-download = { path = "../petalfall-download" }
 # 元数据抓取（Fabric/Quilt meta、版本 JSON、Forge maven-metadata）只用注入客户端的
-# get/send/error_for_status/bytes；客户端与 TLS 栈由 aurora-base 统一构建，故不开 TLS/json 特性，
-# 报文一律走 serde_json 自行解析（与 aurora-java 保持一致）。
+# get/send/error_for_status/bytes；客户端与 TLS 栈由 petalfall-base 统一构建，故不开 TLS/json 特性，
+# 报文一律走 serde_json 自行解析（与 petalfall-java 保持一致）。
 reqwest = { version = "0.13.4", default-features = false }
 # natives 解压与 Forge installer jar 解包只需读 zip（jar 用 store/deflate），关掉其余压缩算法。
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
@@ -21,7 +21,7 @@ serde_json = "1"
 tokio ={ version = "1", default-features = false, features = ["rt", "fs", "io-util", "sync", "process", "macros", "time"] }
 thiserror = "2"
 tracing = "0.1"
-# 版本 JSON 安装途中的临时名要带随机后缀，与 aurora-base 原子写同一选择。
+# 版本 JSON 安装途中的临时名要带随机后缀，与 petalfall-base 原子写同一选择。
 fastrand = "2"
 
 # 处理器输出按系统 ANSI 代码页解码（MultiByteToWideChar）；处理器放进 Job 对象，取消时连它的子进程一起结束。

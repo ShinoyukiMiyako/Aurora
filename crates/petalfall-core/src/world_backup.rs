@@ -1,6 +1,6 @@
 //! 存档备份的门面：备份、列出、恢复、删除、导出，退出游戏后的自动备份，以及实例改名时把备份带过去。
 //!
-//! 文件操作在 [`aurora_instance::world_backup`]，这里负责按实例解析存档的作用域与路径、进程内互斥、
+//! 文件操作在 [`petalfall_instance::world_backup`]，这里负责按实例解析存档的作用域与路径、进程内互斥、
 //! 进度事件与取消。快照之间共享两类锁，写法与下载引擎按目标路径加锁相同：按存档的备份目录加的锁在
 //! 整个备份、恢复、导出、删除期间持有；备份根锁在清单读改写、清理与改名搬运期间持有，同时要两把时
 //! 先存档锁后根锁。不隔离的实例共用同一份存档，两个实例同时操作它时就靠这两把锁排队。等锁期间响应取消。
@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use aurora_base::PathLocks;
-use aurora_download::CancellationToken;
-use aurora_instance::{
+use petalfall_base::PathLocks;
+use petalfall_download::CancellationToken;
+use petalfall_instance::{
     BackupEntry, BackupKind, BackupLayout, Disposer, PackProgress, PackedWorld, RESTORE_SUFFIX,
     ResolvedIsolation, RetentionPolicy, WorldScope, commit_restore, is_backup_file_name,
     is_safe_instance_id, merge_scope_dir, pack_world, plan_prune, read_backup_index,
@@ -24,7 +24,7 @@ use crate::InstanceError;
 use crate::config::WorldBackupSettings;
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, DownloadProgress, EventSink, emit};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 /// 字节进度事件的最小间隔，与下载进度的节流一致。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -104,7 +104,7 @@ struct WorldPaths {
     backup_dir: PathBuf,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 存档的归属：实例隔离时是它自己的，否则是不隔离的实例共用的 `.minecraft/saves`。
     pub async fn world_scope(&self, id: &str) -> Result<WorldScope> {
         Ok(scope_of(id, &self.resolve_working_dir(id).await?))
@@ -379,7 +379,7 @@ impl Aurora {
             .sum())
     }
 
-    /// 设置存档备份；落盘仍需调用 [`Aurora::save_config`]。取值范围由调用方校验。
+    /// 设置存档备份；落盘仍需调用 [`Petalfall::save_config`]。取值范围由调用方校验。
     pub fn set_world_backup(&mut self, settings: WorldBackupSettings) {
         self.config_mut().world_backup = settings;
     }
@@ -600,7 +600,7 @@ async fn read_level_name(world_dir: &Path) -> Option<String> {
 }
 
 fn parse_level_name(bytes: &[u8]) -> Option<String> {
-    aurora_instance::level::parse_level_dat(bytes).ok()?.name
+    petalfall_instance::level::parse_level_dat(bytes).ok()?.name
 }
 
 /// 这次会话里玩过的存档文件夹，按名排序。
@@ -620,7 +620,7 @@ impl PlayedWorld {
 
 async fn played_worlds(saves: &Path, since: SystemTime) -> Result<Vec<PlayedWorld>> {
     let io = |path: &Path, source| -> CoreError {
-        aurora_base::Error::Io {
+        petalfall_base::Error::Io {
             path: path.to_path_buf(),
             source,
         }
@@ -678,7 +678,7 @@ async fn path_exists(path: &Path) -> Result<bool> {
     match tokio::fs::symlink_metadata(path).await {
         Ok(_) => Ok(true),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(aurora_base::Error::Io {
+        Err(source) => Err(petalfall_base::Error::Io {
             path: path.to_path_buf(),
             source,
         }
@@ -690,7 +690,7 @@ async fn is_dir(path: &Path) -> Result<bool> {
     match tokio::fs::metadata(path).await {
         Ok(meta) => Ok(meta.is_dir()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(aurora_base::Error::Io {
+        Err(source) => Err(petalfall_base::Error::Io {
             path: path.to_path_buf(),
             source,
         }
@@ -699,7 +699,7 @@ async fn is_dir(path: &Path) -> Result<bool> {
 }
 
 async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> aurora_instance::Result<T> + Send + 'static,
+    work: impl FnOnce() -> petalfall_instance::Result<T> + Send + 'static,
 ) -> Result<T> {
     Ok(tokio::task::spawn_blocking(work).await??)
 }
@@ -807,7 +807,7 @@ impl Reporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instances::tests::{aurora_at, vanilla_json, write_version};
+    use crate::instances::tests::{petalfall_at, vanilla_json, write_version};
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
@@ -833,9 +833,9 @@ mod tests {
     }
 
     /// 隔离的实例（快照版默认隔离），返回它的 saves 目录。
-    fn isolated(aurora: &Aurora, id: &str) -> PathBuf {
+    fn isolated(petalfall: &Petalfall, id: &str) -> PathBuf {
         let dir = write_version(
-            aurora.game_dir(),
+            petalfall.game_dir(),
             id,
             &format!(r#"{{"id":"{id}","type":"snapshot","mainClass":"m"}}"#),
         );
@@ -843,9 +843,9 @@ mod tests {
     }
 
     /// 不隔离的原版正式版实例，返回共用的 saves 目录。
-    fn shared(aurora: &Aurora, id: &str) -> PathBuf {
-        write_version(aurora.game_dir(), id, &vanilla_json(id));
-        aurora.game_dir().join("saves")
+    fn shared(petalfall: &Petalfall, id: &str) -> PathBuf {
+        write_version(petalfall.game_dir(), id, &vanilla_json(id));
+        petalfall.game_dir().join("saves")
     }
 
     fn world(saves: &Path, name: &str, level_name: &str) -> PathBuf {
@@ -887,10 +887,10 @@ mod tests {
         names
     }
 
-    fn backups_root(aurora: &Aurora) -> PathBuf {
-        aurora
+    fn backups_root(petalfall: &Petalfall) -> PathBuf {
+        petalfall
             .game_dir()
-            .join(aurora_instance::AURORA_META_DIR)
+            .join(petalfall_instance::PETALFALL_META_DIR)
             .join("backups")
     }
 
@@ -925,7 +925,7 @@ mod tests {
     }
 
     impl Disposer for RecordingDisposer {
-        fn dispose(&self, path: &Path) -> aurora_instance::Result<()> {
+        fn dispose(&self, path: &Path) -> petalfall_instance::Result<()> {
             self.seen.lock().unwrap().push(path.to_path_buf());
             std::fs::rename(path, self.trash.join(path.file_name().unwrap())).unwrap();
             Ok(())
@@ -964,20 +964,20 @@ mod tests {
     #[tokio::test]
     async fn backup_of_an_isolated_world_is_packed_indexed_and_reported() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "生存");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "生存");
         world(&saves, "新的世界", "周末生存");
         assert_eq!(
-            aurora.world_scope("生存").await.unwrap(),
+            petalfall.world_scope("生存").await.unwrap(),
             WorldScope::Instance("生存".into())
         );
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let outcome = aurora
+        let outcome = petalfall
             .backup_world("生存", "新的世界", BackupKind::Manual, Some(&tx))
             .await
             .unwrap();
-        let dir = backups_root(&aurora)
+        let dir = backups_root(&petalfall)
             .join("instances")
             .join("生存")
             .join("新的世界");
@@ -1016,32 +1016,38 @@ mod tests {
     #[tokio::test]
     async fn worlds_of_unisolated_instances_share_one_scope() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = shared(&aurora, "1.21.1");
-        shared(&aurora, "1.20.1");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = shared(&petalfall, "1.21.1");
+        shared(&petalfall, "1.20.1");
         world(&saves, "共用", "共用");
         assert_eq!(
-            aurora.world_scope("1.21.1").await.unwrap(),
+            petalfall.world_scope("1.21.1").await.unwrap(),
             WorldScope::Shared
         );
-        aurora
+        petalfall
             .backup_world("1.21.1", "共用", BackupKind::Manual, None)
             .await
             .unwrap();
         // 另一个不隔离的实例看到的是同一份备份。
-        let list = aurora.list_world_backups("1.20.1", "共用").await.unwrap();
+        let list = petalfall
+            .list_world_backups("1.20.1", "共用")
+            .await
+            .unwrap();
         assert_eq!(list.scope, WorldScope::Shared);
-        assert_eq!(list.dir, backups_root(&aurora).join("shared").join("共用"));
+        assert_eq!(
+            list.dir,
+            backups_root(&petalfall).join("shared").join("共用")
+        );
         assert_eq!(list.backups.len(), 1);
     }
 
     #[tokio::test]
     async fn unsafe_or_missing_worlds_are_refused() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        isolated(&aurora, "a");
+        let petalfall = petalfall_at(tmp.path());
+        isolated(&petalfall, "a");
         for bad in ["..", "a/b", "", ".hidden", "C:x"] {
-            let err = aurora
+            let err = petalfall
                 .backup_world("a", bad, BackupKind::Manual, None)
                 .await
                 .unwrap_err();
@@ -1056,7 +1062,7 @@ mod tests {
                 "{bad:?}: {err:?}"
             );
         }
-        let err = aurora
+        let err = petalfall
             .backup_world("a", "不存在", BackupKind::Manual, None)
             .await
             .unwrap_err();
@@ -1064,30 +1070,33 @@ mod tests {
             matches!(&err, CoreError::WorldNotFound { version_id, world } if version_id == "a" && world == "不存在"),
             "{err:?}"
         );
-        assert!(!backups_root(&aurora).exists(), "参数不对时不碰盘");
+        assert!(!backups_root(&petalfall).exists(), "参数不对时不碰盘");
     }
 
     #[tokio::test]
     async fn sixth_auto_backup_evicts_the_oldest_auto_and_manuals_stay() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let mut petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         world(&saves, "w", "w");
-        let backup = |aurora: Aurora, kind| async move {
-            aurora.backup_world("a", "w", kind, None).await.unwrap()
+        let backup = |petalfall: Petalfall, kind| async move {
+            petalfall.backup_world("a", "w", kind, None).await.unwrap()
         };
-        let manual = backup(aurora.clone(), BackupKind::Manual).await;
+        let manual = backup(petalfall.clone(), BackupKind::Manual).await;
         let mut autos = Vec::new();
         for _ in 0..5 {
-            let outcome = backup(aurora.clone(), BackupKind::Auto).await;
+            let outcome = backup(petalfall.clone(), BackupKind::Auto).await;
             assert_eq!(outcome.pruned, 0);
             autos.push(outcome.backup.file);
         }
-        let manual2 = backup(aurora.clone(), BackupKind::Manual).await;
-        let sixth = backup(aurora.clone(), BackupKind::Auto).await;
+        let manual2 = backup(petalfall.clone(), BackupKind::Manual).await;
+        let sixth = backup(petalfall.clone(), BackupKind::Auto).await;
         assert_eq!(sixth.pruned, 1);
 
-        let dir = backups_root(&aurora).join("instances").join("a").join("w");
+        let dir = backups_root(&petalfall)
+            .join("instances")
+            .join("a")
+            .join("w");
         let mut expected: Vec<String> = autos[1..].to_vec();
         expected.extend([
             manual.backup.file.clone(),
@@ -1108,12 +1117,12 @@ mod tests {
         assert_eq!((kinds(BackupKind::Auto), kinds(BackupKind::Manual)), (5, 2));
 
         // 每个存档只留 1 份：一次清掉 5 份旧的自动备份，手动备份一份不少。
-        aurora.set_world_backup(WorldBackupSettings {
+        petalfall.set_world_backup(WorldBackupSettings {
             auto: true,
             keep_per_world: 1,
             max_total_gb: 20,
         });
-        let last = backup(aurora.clone(), BackupKind::Auto).await;
+        let last = backup(petalfall.clone(), BackupKind::Auto).await;
         assert_eq!(last.pruned, 5);
         let mut left = vec![
             manual.backup.file,
@@ -1150,20 +1159,20 @@ mod tests {
     #[tokio::test]
     async fn list_is_newest_first_and_survives_the_world_folder() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         let dir = world(&saves, "w", "w");
-        let first = aurora
+        let first = petalfall
             .backup_world("a", "w", BackupKind::Auto, None)
             .await
             .unwrap();
-        let second = aurora
+        let second = petalfall
             .backup_world("a", "w", BackupKind::Manual, None)
             .await
             .unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
 
-        let list = aurora.list_world_backups("a", "w").await.unwrap();
+        let list = petalfall.list_world_backups("a", "w").await.unwrap();
         assert_eq!(list.world, "w");
         assert_eq!(
             list.backups,
@@ -1174,7 +1183,7 @@ mod tests {
             first.backup.size_bytes + second.backup.size_bytes
         );
         assert!(
-            aurora
+            petalfall
                 .list_world_backups("a", "从没备份过")
                 .await
                 .unwrap()
@@ -1186,12 +1195,12 @@ mod tests {
     #[tokio::test]
     async fn restore_brings_the_backup_back_and_recycles_the_current_world() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         let dir = world(&saves, "w", "备份时");
         let mut at_backup = snapshot(&dir);
         at_backup.remove("session.lock");
-        let backup = aurora
+        let backup = petalfall
             .backup_world("a", "w", BackupKind::Manual, None)
             .await
             .unwrap()
@@ -1205,7 +1214,7 @@ mod tests {
 
         let disposer = RecordingDisposer::new(tmp.path().join("trash"));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let outcome = aurora
+        let outcome = petalfall
             .restore_world_backup("a", "w", &backup.file, disposer.clone(), Some(&tx))
             .await
             .unwrap();
@@ -1236,12 +1245,12 @@ mod tests {
     #[tokio::test]
     async fn restoring_an_unknown_or_vanished_backup_is_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         let dir = world(&saves, "w", "w");
         let before = snapshot(&dir);
         let disposer = RecordingDisposer::new(tmp.path().join("trash"));
-        let err = aurora
+        let err = petalfall
             .restore_world_backup("a", "w", "1-auto.zip", disposer.clone(), None)
             .await
             .unwrap_err();
@@ -1251,18 +1260,18 @@ mod tests {
             "{err:?}"
         );
 
-        let backup = aurora
+        let backup = petalfall
             .backup_world("a", "w", BackupKind::Auto, None)
             .await
             .unwrap()
             .backup;
-        let zip = backups_root(&aurora)
+        let zip = backups_root(&petalfall)
             .join("instances")
             .join("a")
             .join("w")
             .join(&backup.file);
         std::fs::remove_file(&zip).unwrap();
-        let err = aurora
+        let err = petalfall
             .restore_world_backup("a", "w", &backup.file, disposer.clone(), None)
             .await
             .unwrap_err();
@@ -1272,7 +1281,7 @@ mod tests {
         );
 
         // 文件名本身不安全的直接按参数错误拒绝。
-        let err = aurora
+        let err = petalfall
             .restore_world_backup("a", "w", "../../x.zip", disposer.clone(), None)
             .await
             .unwrap_err();
@@ -1290,15 +1299,15 @@ mod tests {
     #[tokio::test]
     async fn tampered_backup_with_parent_traversal_leaves_the_world_byte_for_byte() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         let dir = world(&saves, "w", "w");
-        let backup = aurora
+        let backup = petalfall
             .backup_world("a", "w", BackupKind::Auto, None)
             .await
             .unwrap()
             .backup;
-        let zip = backups_root(&aurora)
+        let zip = backups_root(&petalfall)
             .join("instances")
             .join("a")
             .join("w")
@@ -1313,7 +1322,7 @@ mod tests {
         let before = snapshot(&dir);
 
         let disposer = RecordingDisposer::new(tmp.path().join("trash"));
-        let err = aurora
+        let err = petalfall
             .restore_world_backup("a", "w", &backup.file, disposer.clone(), None)
             .await
             .unwrap_err();
@@ -1333,10 +1342,10 @@ mod tests {
     #[tokio::test]
     async fn cancelled_restore_leaves_the_world_alone() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         let dir = world(&saves, "w", "w");
-        let backup = aurora
+        let backup = petalfall
             .backup_world("a", "w", BackupKind::Auto, None)
             .await
             .unwrap()
@@ -1347,7 +1356,7 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
         let disposer = RecordingDisposer::new(tmp.path().join("trash"));
-        let err = aurora
+        let err = petalfall
             .clone()
             .with_cancel(token)
             .restore_world_backup("a", "w", &backup.file, disposer.clone(), None)
@@ -1362,15 +1371,18 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn waiting_for_a_busy_world_responds_to_cancellation() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         world(&saves, "w", "w");
-        let backup_dir = backups_root(&aurora).join("instances").join("a").join("w");
+        let backup_dir = backups_root(&petalfall)
+            .join("instances")
+            .join("a")
+            .join("w");
         // 另一个操作正占着这个存档。
         let held = acquire(&WORLD_LOCKS, &backup_dir, None).await.unwrap();
 
         let token = CancellationToken::new();
-        let snapshot = aurora.clone().with_cancel(token.clone());
+        let snapshot = petalfall.clone().with_cancel(token.clone());
         let waiting = tokio::spawn(async move {
             snapshot
                 .backup_world("a", "w", BackupKind::Manual, None)
@@ -1392,32 +1404,35 @@ mod tests {
     #[tokio::test]
     async fn delete_recycles_the_zip_and_drops_it_from_the_index() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         world(&saves, "w", "w");
-        let keep = aurora
+        let keep = petalfall
             .backup_world("a", "w", BackupKind::Manual, None)
             .await
             .unwrap()
             .backup;
-        let gone = aurora
+        let gone = petalfall
             .backup_world("a", "w", BackupKind::Auto, None)
             .await
             .unwrap()
             .backup;
-        let dir = backups_root(&aurora).join("instances").join("a").join("w");
+        let dir = backups_root(&petalfall)
+            .join("instances")
+            .join("a")
+            .join("w");
 
         let disposer = RecordingDisposer::new(tmp.path().join("trash"));
-        aurora
+        petalfall
             .delete_world_backup("a", "w", &gone.file, disposer.clone())
             .await
             .unwrap();
         assert_eq!(disposer.seen(), vec![dir.join(&gone.file)]);
         assert_eq!(zips_in(&dir), vec![keep.file.clone()]);
-        let list = aurora.list_world_backups("a", "w").await.unwrap();
+        let list = petalfall.list_world_backups("a", "w").await.unwrap();
         assert_eq!(list.backups, vec![keep]);
 
-        let err = aurora
+        let err = petalfall
             .delete_world_backup("a", "w", &gone.file, disposer.clone())
             .await
             .unwrap_err();
@@ -1452,7 +1467,7 @@ mod tests {
     }
 
     impl Disposer for PausingDisposer {
-        fn dispose(&self, path: &Path) -> aurora_instance::Result<()> {
+        fn dispose(&self, path: &Path) -> petalfall_instance::Result<()> {
             self.inner.dispose(path)?;
             self.disposed.notify_one();
             self.resume.wait();
@@ -1465,15 +1480,15 @@ mod tests {
     #[tokio::test]
     async fn rename_waits_for_a_delete_in_progress() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "旧名");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "旧名");
         world(&saves, "w", "w");
-        let keep = aurora
+        let keep = petalfall
             .backup_world("旧名", "w", BackupKind::Manual, None)
             .await
             .unwrap()
             .backup;
-        let gone = aurora
+        let gone = petalfall
             .backup_world("旧名", "w", BackupKind::Auto, None)
             .await
             .unwrap()
@@ -1481,9 +1496,10 @@ mod tests {
 
         let disposer = PausingDisposer::new(tmp.path().join("trash"));
         let deleting = tokio::spawn({
-            let (aurora, file, disposer) = (aurora.clone(), gone.file.clone(), disposer.clone());
+            let (petalfall, file, disposer) =
+                (petalfall.clone(), gone.file.clone(), disposer.clone());
             async move {
-                aurora
+                petalfall
                     .delete_world_backup("旧名", "w", &file, disposer)
                     .await
             }
@@ -1491,8 +1507,8 @@ mod tests {
         disposer.disposed.notified().await;
 
         let renaming = tokio::spawn({
-            let aurora = aurora.clone();
-            async move { aurora.rename_world_backups("旧名", "新名").await }
+            let petalfall = petalfall.clone();
+            async move { petalfall.rename_world_backups("旧名", "新名").await }
         });
         // 留够改名跑完的时间：它要是不用等，这段时间里已经把目录搬走了。
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1501,10 +1517,10 @@ mod tests {
         renaming.await.unwrap().unwrap();
 
         assert!(
-            !aurora.instance_backups_dir("旧名").unwrap().exists(),
+            !petalfall.instance_backups_dir("旧名").unwrap().exists(),
             "旧名下不应重建备份目录"
         );
-        let dir = aurora.instance_backups_dir("新名").unwrap().join("w");
+        let dir = petalfall.instance_backups_dir("新名").unwrap().join("w");
         assert_eq!(zips_in(&dir), vec![keep.file.clone()]);
         let index = read_backup_index(&dir).await.unwrap();
         let listed: Vec<&str> = index.entries.iter().map(|e| e.file.as_str()).collect();
@@ -1516,26 +1532,27 @@ mod tests {
     #[tokio::test]
     async fn delete_during_a_rename_leaves_the_moved_backups_alone() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "旧名");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "旧名");
         world(&saves, "w", "w");
-        let backup = aurora
+        let backup = petalfall
             .backup_world("旧名", "w", BackupKind::Manual, None)
             .await
             .unwrap()
             .backup;
-        let from = aurora.instance_backups_dir("旧名").unwrap();
-        let to = aurora.instance_backups_dir("新名").unwrap();
+        let from = petalfall.instance_backups_dir("旧名").unwrap();
+        let to = petalfall.instance_backups_dir("新名").unwrap();
 
         // 改名全程持有备份根锁，这里先占住，等删除排上队再搬目录。
-        let renaming = acquire(&ROOT_LOCKS, &aurora.world_backups_root(), None)
+        let renaming = acquire(&ROOT_LOCKS, &petalfall.world_backups_root(), None)
             .await
             .unwrap();
         let disposer = RecordingDisposer::new(tmp.path().join("trash"));
         let deleting = tokio::spawn({
-            let (aurora, file, disposer) = (aurora.clone(), backup.file.clone(), disposer.clone());
+            let (petalfall, file, disposer) =
+                (petalfall.clone(), backup.file.clone(), disposer.clone());
             async move {
-                aurora
+                petalfall
                     .delete_world_backup("旧名", "w", &file, disposer)
                     .await
             }
@@ -1569,8 +1586,8 @@ mod tests {
     #[tokio::test]
     async fn export_validates_the_destination_and_overwrites_it() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         let dir = world(&saves, "w", "w");
         let out = tmp.path().join("导出");
         std::fs::create_dir_all(&out).unwrap();
@@ -1583,7 +1600,10 @@ mod tests {
             dir.join("region").join("deeper.zip"),
             out.join("..").join("w.zip"),
         ] {
-            let err = aurora.export_world("a", "w", &bad, None).await.unwrap_err();
+            let err = petalfall
+                .export_world("a", "w", &bad, None)
+                .await
+                .unwrap_err();
             assert!(
                 matches!(
                     err,
@@ -1596,7 +1616,7 @@ mod tests {
 
         let dest = out.join("w.ZIP");
         std::fs::write(&dest, b"old").unwrap();
-        let outcome = aurora.export_world("a", "w", &dest, None).await.unwrap();
+        let outcome = petalfall.export_world("a", "w", &dest, None).await.unwrap();
         assert_eq!(outcome.path, dest);
         assert_eq!(outcome.size_bytes, std::fs::metadata(&dest).unwrap().len());
         assert_eq!(
@@ -1604,7 +1624,7 @@ mod tests {
             vec!["w/", "w/level.dat", "w/region/", "w/region/r.0.0.mca"]
         );
         assert!(
-            !backups_root(&aurora)
+            !backups_root(&petalfall)
                 .join("instances")
                 .join("a")
                 .join("w")
@@ -1625,8 +1645,8 @@ mod tests {
     #[tokio::test]
     async fn after_a_session_only_worlds_touched_since_it_started_are_backed_up() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         let started = SystemTime::now() - Duration::from_secs(600);
         let old = world(&saves, "没进过", "没进过");
         set_mtime(&old.join("level.dat"), started - Duration::from_secs(3600));
@@ -1641,7 +1661,7 @@ mod tests {
             .open(busy.join("session.lock"))
             .unwrap();
         holder.lock().unwrap();
-        let outcome = aurora
+        let outcome = petalfall
             .auto_backup_after_session("a", started)
             .await
             .unwrap();
@@ -1658,7 +1678,7 @@ mod tests {
             "{:?}",
             outcome.failed[0].1
         );
-        let scope = backups_root(&aurora).join("instances").join("a");
+        let scope = backups_root(&petalfall).join("instances").join("a");
         let indices = scope_backup_indices(&scope).await.unwrap();
         assert_eq!(indices.len(), 1);
         assert_eq!(indices[0].0, scope.join("玩过的"));
@@ -1669,19 +1689,19 @@ mod tests {
     #[tokio::test]
     async fn auto_backup_switched_off_produces_nothing() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let mut petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         world(&saves, "w", "w");
-        aurora.set_world_backup(WorldBackupSettings {
+        petalfall.set_world_backup(WorldBackupSettings {
             auto: false,
             ..WorldBackupSettings::default()
         });
-        let outcome = aurora
+        let outcome = petalfall
             .auto_backup_after_session("a", SystemTime::UNIX_EPOCH)
             .await
             .unwrap();
         assert!(outcome.backed_up.is_empty() && outcome.failed.is_empty());
-        assert!(!backups_root(&aurora).exists());
+        assert!(!backups_root(&petalfall).exists());
     }
 
     /// 设置页在自动备份关闭时禁用两项保留设置并写明「不会清理」：这时手动备份也不能顺手删掉以前的自动备份，
@@ -1689,30 +1709,33 @@ mod tests {
     #[tokio::test]
     async fn manual_backup_with_auto_off_keeps_every_earlier_auto_backup() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let mut petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         world(&saves, "w", "w");
         let mut autos = Vec::new();
         for _ in 0..3 {
-            let outcome = aurora
+            let outcome = petalfall
                 .backup_world("a", "w", BackupKind::Auto, None)
                 .await
                 .unwrap();
             autos.push(outcome.backup.file);
         }
 
-        aurora.set_world_backup(WorldBackupSettings {
+        petalfall.set_world_backup(WorldBackupSettings {
             auto: false,
             keep_per_world: 1,
             max_total_gb: 1,
         });
-        let manual = aurora
+        let manual = petalfall
             .backup_world("a", "w", BackupKind::Manual, None)
             .await
             .unwrap();
         assert_eq!(manual.pruned, 0);
 
-        let dir = backups_root(&aurora).join("instances").join("a").join("w");
+        let dir = backups_root(&petalfall)
+            .join("instances")
+            .join("a")
+            .join("w");
         let mut expected = autos.clone();
         expected.push(manual.backup.file.clone());
         expected.sort();
@@ -1720,12 +1743,12 @@ mod tests {
         assert_eq!(read_backup_index(&dir).await.unwrap().entries.len(), 4);
 
         // 重新打开后，下一份自动备份照常清理：每个存档只留 1 份自动备份，以前的 3 份都清掉，手动备份不动。
-        aurora.set_world_backup(WorldBackupSettings {
+        petalfall.set_world_backup(WorldBackupSettings {
             auto: true,
             keep_per_world: 1,
             max_total_gb: 20,
         });
-        let next = aurora
+        let next = petalfall
             .backup_world("a", "w", BackupKind::Auto, None)
             .await
             .unwrap();
@@ -1739,36 +1762,39 @@ mod tests {
     #[tokio::test]
     async fn unreadable_index_of_another_world_only_costs_the_prune() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let mut petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         world(&saves, "w", "w");
-        let elsewhere = isolated(&aurora, "b");
+        let elsewhere = isolated(&petalfall, "b");
         world(&elsewhere, "x", "x");
-        aurora
+        petalfall
             .backup_world("b", "x", BackupKind::Manual, None)
             .await
             .unwrap();
         write(
-            &backups_root(&aurora)
+            &backups_root(&petalfall)
                 .join("instances")
                 .join("b")
                 .join("x")
-                .join(aurora_instance::BACKUP_INDEX_FILE),
+                .join(petalfall_instance::BACKUP_INDEX_FILE),
             b"{ broken",
         );
-        let dir = backups_root(&aurora).join("instances").join("a").join("w");
+        let dir = backups_root(&petalfall)
+            .join("instances")
+            .join("a")
+            .join("w");
 
         for (auto, kind, warned) in [
             (false, BackupKind::Manual, false),
             (true, BackupKind::Manual, true),
             (true, BackupKind::Auto, true),
         ] {
-            aurora.set_world_backup(WorldBackupSettings {
+            petalfall.set_world_backup(WorldBackupSettings {
                 auto,
                 ..WorldBackupSettings::default()
             });
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            let outcome = aurora
+            let outcome = petalfall
                 .backup_world("a", "w", kind, Some(&tx))
                 .await
                 .unwrap_or_else(|err| panic!("auto={auto}, {kind:?}: {err:?}"));
@@ -1792,9 +1818,12 @@ mod tests {
         }
 
         // 自己这个存档的清单读不懂时仍然不打包：打完包记不进去，备份就成了没人认领的文件。
-        write(&dir.join(aurora_instance::BACKUP_INDEX_FILE), b"{ broken");
+        write(
+            &dir.join(petalfall_instance::BACKUP_INDEX_FILE),
+            b"{ broken",
+        );
         let before = zips_in(&dir);
-        let err = aurora
+        let err = petalfall
             .backup_world("a", "w", BackupKind::Manual, None)
             .await
             .unwrap_err();
@@ -1811,25 +1840,34 @@ mod tests {
     #[tokio::test]
     async fn renamed_instance_still_lists_its_backups() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "旧名");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "旧名");
         world(&saves, "w", "w");
-        let backup = aurora
+        let backup = petalfall
             .backup_world("旧名", "w", BackupKind::Manual, None)
             .await
             .unwrap()
             .backup;
 
-        aurora.rename_instance_files("旧名", "新名").await.unwrap();
-        aurora.rename_world_backups("旧名", "新名").await.unwrap();
-        let list = aurora.list_world_backups("新名", "w").await.unwrap();
+        petalfall
+            .rename_instance_files("旧名", "新名")
+            .await
+            .unwrap();
+        petalfall
+            .rename_world_backups("旧名", "新名")
+            .await
+            .unwrap();
+        let list = petalfall.list_world_backups("新名", "w").await.unwrap();
         assert_eq!(list.backups, vec![backup]);
         assert_eq!(list.scope, WorldScope::Instance("新名".into()));
-        assert!(!aurora.instance_backups_dir("旧名").unwrap().exists());
+        assert!(!petalfall.instance_backups_dir("旧名").unwrap().exists());
         // 旧名下没有备份时是空操作。
-        aurora.rename_world_backups("旧名", "新名").await.unwrap();
+        petalfall
+            .rename_world_backups("旧名", "新名")
+            .await
+            .unwrap();
         assert_eq!(
-            aurora
+            petalfall
                 .list_world_backups("新名", "w")
                 .await
                 .unwrap()
@@ -1838,7 +1876,10 @@ mod tests {
             1
         );
         assert!(matches!(
-            aurora.rename_world_backups("..", "新名").await.unwrap_err(),
+            petalfall
+                .rename_world_backups("..", "新名")
+                .await
+                .unwrap_err(),
             CoreError::Instance(InstanceError::InvalidId { .. })
         ));
     }
@@ -1846,23 +1887,28 @@ mod tests {
     #[tokio::test]
     async fn deleting_the_instance_keeps_its_backups_and_preview_counts_them() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         world(&saves, "w1", "w1");
         world(&saves, "w2", "w2");
         for w in ["w1", "w1", "w2"] {
-            aurora
+            petalfall
                 .backup_world("a", w, BackupKind::Manual, None)
                 .await
                 .unwrap();
         }
-        let preview = aurora.deletion_preview("a").await.unwrap();
-        let backups_dir = backups_root(&aurora).join("instances").join("a");
+        let preview = petalfall.deletion_preview("a").await.unwrap();
+        let backups_dir = backups_root(&petalfall).join("instances").join("a");
         assert_eq!(preview.backups_dir, backups_dir);
         assert_eq!(preview.backup_count, 3);
 
         let disposer = RecordingDisposer::new(tmp.path().join("trash"));
-        assert!(aurora.delete_instance_files("a", disposer).await.unwrap());
+        assert!(
+            petalfall
+                .delete_instance_files("a", disposer)
+                .await
+                .unwrap()
+        );
         assert_eq!(zips_in(&backups_dir.join("w1")).len(), 2);
         assert_eq!(zips_in(&backups_dir.join("w2")).len(), 1);
     }
@@ -1870,15 +1916,15 @@ mod tests {
     #[tokio::test]
     async fn a_world_open_in_the_game_is_not_backed_up() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let saves = isolated(&aurora, "a");
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
         let dir = world(&saves, "w", "w");
         let holder = std::fs::OpenOptions::new()
             .write(true)
             .open(dir.join("session.lock"))
             .unwrap();
         holder.lock().unwrap();
-        let err = aurora
+        let err = petalfall
             .backup_world("a", "w", BackupKind::Manual, None)
             .await
             .unwrap_err();

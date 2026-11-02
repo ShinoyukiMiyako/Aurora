@@ -6,11 +6,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
-use aurora_setup_lib::boot::{self, Claim, DesktopUser, Notice, Webview};
-use aurora_setup_lib::commands::{self, SetupContext};
-use aurora_setup_lib::log::{self, SetupLog};
-use aurora_setup_lib::overlay;
-use aurora_setup_lib::runner::Session;
+use petalfall_setup_lib::boot::{self, Claim, DesktopUser, Notice, Webview};
+use petalfall_setup_lib::commands::{self, SetupContext};
+use petalfall_setup_lib::log::{self, SetupLog};
+use petalfall_setup_lib::overlay;
+use petalfall_setup_lib::runner::Session;
 use tauri::{App, WebviewWindow, WebviewWindowBuilder};
 use tempfile::TempDir;
 

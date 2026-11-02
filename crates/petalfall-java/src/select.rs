@@ -1,7 +1,7 @@
 //! 按版本 JSON 的 `javaVersion.majorVersion` 从候选里挑选最合适的 Java。
 //!
-//! 匹配规则（architecture.md aurora-java 小节）：主版本号必须正确，其次偏好 64 位，
-//! JDK/JRE 不作区分；同等条件下版本号高者优先，再相同取候选里靠前的。本 crate 与 aurora-version 同层，
+//! 匹配规则（architecture.md petalfall-java 小节）：主版本号必须正确，其次偏好 64 位，
+//! JDK/JRE 不作区分；同等条件下版本号高者优先，再相同取候选里靠前的。本 crate 与 petalfall-version 同层，
 //! 不能反向依赖它，故这里只接受一个 `required_major: u32`（由上层从版本 JSON 取出）。
 //!
 //! 缺运行时文件的候选（[`JavaInstallation::is_complete`] 为假）一律不参与：它能答出版本，

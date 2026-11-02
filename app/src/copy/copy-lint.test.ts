@@ -464,8 +464,8 @@ describe("任务失败原因与后端码表对齐", () => {
     );
     expect(mapped).toEqual({
       hash_mismatch: "下载到的文件和官方记录不一致",
-      curseforge_key_rejected: "CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试",
-      curseforge_key_missing: "有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY",
+      curseforge_key_rejected: "CurseForge 拒绝了下载密钥。设置环境变量 PETALFALL_CURSEFORGE_API_KEY 换一个可用的密钥后重试",
+      curseforge_key_missing: "有文件只能从 CurseForge 下载，需要先设置环境变量 PETALFALL_CURSEFORGE_API_KEY",
       distribution_blocked: "有 0 个文件需要到 CurseForge 网页手动下载",
       modpack_unsupported_compression: "整合包用了不支持的压缩方式，用整合包作者发布的原始文件再试",
       network_failed: "网络连接失败",

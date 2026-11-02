@@ -15,8 +15,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use aurora_download::CancellationToken;
-use aurora_version::{Library, RuntimeContext, VersionJson, select_libraries};
+use petalfall_download::CancellationToken;
+use petalfall_version::{Library, RuntimeContext, VersionJson, select_libraries};
 use serde::{Deserialize, Serialize};
 
 use crate::dir_lock::lock_dir;
@@ -27,7 +27,7 @@ use crate::layout::{GameLayout, coordinate_path};
 const DEFAULT_EXCLUDES: &[&str] = &["META-INF/"];
 
 /// natives 目录里的解压戳记文件名。点开头、带产品 slug，不会与 jar 里的动态库重名。
-const STAMP_FILE: &str = concat!(".", aurora_base::app_slug!(), "-natives.json");
+const STAMP_FILE: &str = concat!(".", petalfall_base::app_slug!(), "-natives.json");
 
 /// 判断一个归档条目是否应被解压：目录一律跳过，命中任一 exclude 前缀也跳过。
 fn should_extract(entry_name: &str, excludes: &[String]) -> bool {
@@ -242,7 +242,7 @@ fn extract_jar(jar: &Path, dest: &Path, excludes: &[String]) -> Result<Vec<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_version::OsName;
+    use petalfall_version::OsName;
     use std::io::Write;
 
     #[test]
@@ -375,9 +375,9 @@ mod tests {
         put_native_jar(&layout);
         let ctx = RuntimeContext::new(OsName::Windows, "x86_64", 64);
         let mut version = new_style_version("x");
-        version.arguments = Some(aurora_version::Arguments {
+        version.arguments = Some(petalfall_version::Arguments {
             game: Vec::new(),
-            jvm: vec![aurora_version::Argument::Plain(
+            jvm: vec![petalfall_version::Argument::Plain(
                 "-Djava.library.path=${natives_directory}/java".to_owned(),
             )],
         });

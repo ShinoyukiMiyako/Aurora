@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use crate::config::DownloadSourcePolicy;
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 /// 单个源的探测时限。只是为了排个先后，等太久不如直接按镜像优先。
 pub const UPDATE_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -45,7 +45,7 @@ pub fn order_update_sources(
     }
 }
 
-impl Aurora {
+impl Petalfall {
     /// 本次检查更新要用的端点，按「文件下载源」策略排好。`mirror_url` 为 `None` 表示镜像未启用。
     pub async fn update_endpoints(
         &self,
@@ -110,7 +110,7 @@ async fn probe_latency(http: &reqwest::Client, url: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use UpdateSource::{Mirror, Primary};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -173,13 +173,13 @@ mod tests {
         }
     }
 
-    fn aurora_with(policy: DownloadSourcePolicy) -> Aurora {
-        let config = AuroraConfig {
+    fn petalfall_with(policy: DownloadSourcePolicy) -> Petalfall {
+        let config = PetalfallConfig {
             download_source: policy,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
         let dir = std::env::temp_dir();
-        Aurora::for_test(config, dir.clone(), dir.join(".minecraft"))
+        Petalfall::for_test(config, dir.clone(), dir.join(".minecraft"))
     }
 
     /// 自动档真去探测：等不到响应的源排到后面，两个方向各测一次；换成镜像优先就不再探测。
@@ -202,7 +202,7 @@ mod tests {
         let stalled = format!("{}/stalled/latest.json", server.uri());
         let fast = format!("{}/fast/latest.json", server.uri());
 
-        let ordered = aurora_with(DownloadSourcePolicy::Auto)
+        let ordered = petalfall_with(DownloadSourcePolicy::Auto)
             .update_endpoints(&stalled, Some(&fast))
             .await;
         assert_eq!(
@@ -211,7 +211,7 @@ mod tests {
             "主源等不到，镜像在前"
         );
         // 反过来：只有真测出了主源的时延才会把它排到前面（两边都测不出时是镜像在前）
-        let ordered = aurora_with(DownloadSourcePolicy::Auto)
+        let ordered = petalfall_with(DownloadSourcePolicy::Auto)
             .update_endpoints(&fast, Some(&stalled))
             .await;
         assert_eq!(
@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(probes.len(), 4);
         assert!(probes.iter().all(|r| r.headers.get("range").is_some()));
 
-        let fixed = aurora_with(DownloadSourcePolicy::OfficialFirst)
+        let fixed = petalfall_with(DownloadSourcePolicy::OfficialFirst)
             .update_endpoints(&stalled, Some(&fast))
             .await;
         assert_eq!(fixed, vec![stalled.clone(), fast]);
@@ -233,7 +233,7 @@ mod tests {
             "非自动档不探测"
         );
 
-        let only = aurora_with(DownloadSourcePolicy::Auto)
+        let only = petalfall_with(DownloadSourcePolicy::Auto)
             .update_endpoints(&stalled, None)
             .await;
         assert_eq!(only, vec![stalled]);

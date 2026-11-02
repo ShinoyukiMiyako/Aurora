@@ -1,6 +1,6 @@
-//! aurora-install（L2 游戏本体与 Mod 加载器安装）
+//! petalfall-install（L2 游戏本体与 Mod 加载器安装）
 //!
-//! 把「选定版本」变成「本地就绪」。在 aurora-version 的域模型与 aurora-download 的并发下载引擎之上，
+//! 把「选定版本」变成「本地就绪」。在 petalfall-version 的域模型与 petalfall-download 的并发下载引擎之上，
 //! 编排四条安装链路，并统一收口于完整性补全：
 //!
 //! - 原版（[`VanillaInstaller`]）：版本 JSON + client.jar + 按 rules 过滤的库 + assetIndex 与资源全量
@@ -19,7 +19,7 @@
 //!
 //! 下载任务的构造（[`plan`]）、maven 路径（[`maven`]）、目录布局（[`layout`]）、占位符替换等均为纯函数，
 //! 表驱动单测覆盖；网络逻辑一律支持注入 base_url，用本地 mock 验证。所有错误归口到 [`Error`]，
-//! 下游 `#[from] aurora_install::Error` 一处冒泡。
+//! 下游 `#[from] petalfall_install::Error` 一处冒泡。
 
 pub mod complete;
 pub mod context;

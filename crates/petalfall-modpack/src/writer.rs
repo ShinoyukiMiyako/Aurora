@@ -349,7 +349,7 @@ fn verify(pack: &ExportPack, dest: &Path, written: &BTreeMap<String, u64>) -> Re
         path: dest.to_path_buf(),
         reason,
     };
-    let archive = read_pack(dest).map_err(|err| fail(aurora_base::error_with_causes(&err)))?;
+    let archive = read_pack(dest).map_err(|err| fail(petalfall_base::error_with_causes(&err)))?;
     let manifest = &archive.manifest;
     if manifest.format != PackFormat::Modrinth {
         return Err(fail("读回来不是 Modrinth 格式".to_owned()));

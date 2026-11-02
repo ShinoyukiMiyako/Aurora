@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use aurora_base::retry::RetryPolicy;
-use aurora_download::{
+use petalfall_base::retry::RetryPolicy;
+use petalfall_download::{
     ChunkConfig, ChunkPlan, DownloadConfig, DownloadPool, DownloadProgress, DownloadTask,
     Downloader, Error, MirrorSource, SourcePlan, SourceResolver, WatchdogConfig,
 };
@@ -37,7 +37,7 @@ async fn mount_whole_file(server: &MockServer, route: &str, payload: &[u8]) {
 }
 
 fn client() -> reqwest::Client {
-    aurora_base::http::build_client().expect("构建客户端")
+    petalfall_base::http::build_client().expect("构建客户端")
 }
 
 /// 确定性 ASCII 负载，便于切片后以 `set_body_string` 原样返回。
@@ -49,7 +49,7 @@ async fn sha1_of(bytes: &[u8]) -> String {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("hashme");
     tokio::fs::write(&file, bytes).await.unwrap();
-    aurora_base::fs::sha1_hex(&file).await.unwrap()
+    petalfall_base::fs::sha1_hex(&file).await.unwrap()
 }
 
 fn fast_policy() -> RetryPolicy {
@@ -400,7 +400,7 @@ struct TwoPathResolver {
 }
 
 impl SourceResolver for TwoPathResolver {
-    fn resolve(&self, _url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+    fn resolve(&self, _url: &str, source: MirrorSource) -> petalfall_download::Result<String> {
         Ok(match source {
             MirrorSource::Official => format!("{}/a/file", self.base),
             MirrorSource::BmclApi => format!("{}/b/file", self.base),
@@ -621,7 +621,7 @@ struct TwoWayResolver {
 }
 
 impl SourceResolver for TwoWayResolver {
-    fn resolve(&self, _url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+    fn resolve(&self, _url: &str, source: MirrorSource) -> petalfall_download::Result<String> {
         Ok(match source {
             MirrorSource::Official => format!("{}/primary", self.base),
             MirrorSource::BmclApi => format!("{}/mirror", self.base),

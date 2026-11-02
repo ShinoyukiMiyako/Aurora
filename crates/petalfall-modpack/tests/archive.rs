@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use aurora_modpack::{
+use petalfall_modpack::{
     Error, PackFormat, PathValidationError, RemoteFiles, extract_overrides, read_pack,
 };
 use zip::write::SimpleFileOptions;
@@ -210,7 +210,7 @@ fn rejects_overrides_escaping_instance_or_entering_launcher_metadata() {
 
     let meta_entry = format!(
         "overrides/{}/modpack.json",
-        aurora_instance::AURORA_META_DIR.to_uppercase()
+        petalfall_instance::PETALFALL_META_DIR.to_uppercase()
     );
     let meta = pack(
         tmp.path(),

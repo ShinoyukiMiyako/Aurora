@@ -1,18 +1,20 @@
 //! 游戏工作目录解析：把版本隔离判定收敛成一次调用，产出该次启动应使用的工作目录。
 //!
-//! 隔离规则本身住在 [`aurora_instance::isolation`]（全局档位 + 版本级覆盖 + 已有 mods/saves 强制隔离），
+//! 隔离规则本身住在 [`petalfall_instance::isolation`]（全局档位 + 版本级覆盖 + 已有 mods/saves 强制隔离），
 //! 这里只做一层便捷封装，让启动侧一步拿到 [`ResolvedIsolation`]（其 `working_dir` 直接喂给
 //! [`crate::command::CommandBuilder`] 的 `game_dir`）。
 
 use std::path::Path;
 
-use aurora_instance::{IsolationOverride, IsolationPolicy, ResolvedIsolation, resolve_isolation};
+use petalfall_instance::{
+    IsolationOverride, IsolationPolicy, ResolvedIsolation, resolve_isolation,
+};
 
 use crate::error::Result;
 
 /// 解析某版本此次启动的游戏工作目录（含隔离判定）。
 ///
-/// 参数语义同 [`aurora_instance::resolve_isolation`]：`has_mod_loader` / `is_release` 由版本发现阶段提供，
+/// 参数语义同 [`petalfall_instance::resolve_isolation`]：`has_mod_loader` / `is_release` 由版本发现阶段提供，
 /// 目录内已有 `mods/` 或 `saves/` 会强制隔离。
 pub async fn resolve_game_directory(
     minecraft_dir: &Path,

@@ -143,7 +143,7 @@ pub async fn scan_mods_dir_cached(
         let dir = dir.clone();
         tokio::task::spawn_blocking(move || list_mod_candidates_blocking(&dir))
             .await
-            .map_err(|source| Error::Base(aurora_base::Error::HashTaskJoin(source)))??
+            .map_err(|source| Error::Base(petalfall_base::Error::HashTaskJoin(source)))??
     };
 
     let cache = match cache_path {
@@ -181,7 +181,7 @@ pub async fn scan_mods_dir_cached(
     }
     while let Some(joined) = set.join_next().await {
         let (index, candidate, outcome) =
-            joined.map_err(|source| Error::Base(aurora_base::Error::HashTaskJoin(source)))?;
+            joined.map_err(|source| Error::Base(petalfall_base::Error::HashTaskJoin(source)))?;
         let metadata = match outcome {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -248,7 +248,7 @@ pub async fn scan_mods_dir_cached(
 /// UTF-8 时报 `InvalidData`），只看错误类别的话，这个 jar 每一轮扫描都会被重开重解析。
 fn is_transient_read_failure(error: &Error) -> bool {
     let source = match error {
-        Error::Base(aurora_base::Error::Io { source, .. }) => source,
+        Error::Base(petalfall_base::Error::Io { source, .. }) => source,
         Error::Zip {
             source: zip::result::ZipError::Io(source),
             ..
@@ -423,7 +423,7 @@ async fn save_metadata_cache(path: &Path, cache: &ModMetadataCache) {
             return;
         }
     };
-    if let Err(error) = aurora_base::fs::atomic_write(path, &bytes).await {
+    if let Err(error) = petalfall_base::fs::atomic_write(path, &bytes).await {
         tracing::warn!(path = %path.display(), %error, "写入 Mod 元数据缓存失败，下次扫描将全量重解析");
     }
 }
@@ -433,7 +433,7 @@ async fn save_metadata_cache(path: &Path, cache: &ModMetadataCache) {
 /// 同步实现：调用方已把它整个放进 spawn_blocking，这里再用 tokio::fs 只会多套一层无谓的异步。
 fn list_mod_candidates_blocking(dir: &Path) -> Result<Vec<ModCandidate>> {
     let read_dir = std::fs::read_dir(dir).map_err(|source| {
-        Error::Base(aurora_base::Error::Io {
+        Error::Base(petalfall_base::Error::Io {
             path: dir.to_owned(),
             source,
         })
@@ -442,13 +442,13 @@ fn list_mod_candidates_blocking(dir: &Path) -> Result<Vec<ModCandidate>> {
     let mut out = Vec::new();
     for entry in read_dir {
         let entry = entry.map_err(|source| {
-            Error::Base(aurora_base::Error::Io {
+            Error::Base(petalfall_base::Error::Io {
                 path: dir.to_owned(),
                 source,
             })
         })?;
         let file_type = entry.file_type().map_err(|source| {
-            Error::Base(aurora_base::Error::Io {
+            Error::Base(petalfall_base::Error::Io {
                 path: entry.path(),
                 source,
             })
@@ -463,13 +463,13 @@ fn list_mod_candidates_blocking(dir: &Path) -> Result<Vec<ModCandidate>> {
         // 目录项读得出、元数据却读不出，属于目录级的 IO 故障，与上面 file_type 同等对待向上冒泡；
         // 不在这里降级成「不走缓存」，那会把真实故障压成一次永远慢的扫描。
         let meta = entry.metadata().map_err(|source| {
-            Error::Base(aurora_base::Error::Io {
+            Error::Base(petalfall_base::Error::Io {
                 path: entry.path(),
                 source,
             })
         })?;
         let stamp = FileStamp::from_metadata(&meta).map_err(|source| {
-            Error::Base(aurora_base::Error::Io {
+            Error::Base(petalfall_base::Error::Io {
                 path: entry.path(),
                 source,
             })
@@ -497,7 +497,7 @@ pub async fn read_jar_entry(
     let entry = entry.into();
     tokio::task::spawn_blocking(move || {
         let file = std::fs::File::open(&jar).map_err(|source| {
-            Error::Base(aurora_base::Error::Io {
+            Error::Base(petalfall_base::Error::Io {
                 path: jar.clone(),
                 source,
             })
@@ -510,7 +510,7 @@ pub async fn read_jar_entry(
         read_entry(&mut archive, &entry, &jar)
     })
     .await
-    .map_err(|source| Error::Base(aurora_base::Error::HashTaskJoin(source)))?
+    .map_err(|source| Error::Base(petalfall_base::Error::HashTaskJoin(source)))?
 }
 /// 解析单个 jar 的模组元数据。无可识别描述文件或非合法 zip 返回 `Ok(None)`；描述文件存在但内容
 /// 损坏返回 `Err`（不掩盖）。
@@ -518,12 +518,12 @@ pub async fn parse_mod_metadata(path: impl AsRef<Path>) -> Result<Option<ModMeta
     let path = path.as_ref().to_owned();
     tokio::task::spawn_blocking(move || extract_metadata_blocking(&path))
         .await
-        .map_err(|source| Error::Base(aurora_base::Error::HashTaskJoin(source)))?
+        .map_err(|source| Error::Base(petalfall_base::Error::HashTaskJoin(source)))?
 }
 
 fn extract_metadata_blocking(path: &Path) -> Result<Option<ModMetadata>> {
     let file = std::fs::File::open(path).map_err(|source| {
-        Error::Base(aurora_base::Error::Io {
+        Error::Base(petalfall_base::Error::Io {
             path: path.to_owned(),
             source,
         })
@@ -941,7 +941,7 @@ fn parse_toml_metadata(
     path: &Path,
 ) -> Result<Option<ModMetadata>> {
     let text = std::str::from_utf8(bytes).map_err(|_| {
-        Error::Base(aurora_base::Error::Io {
+        Error::Base(petalfall_base::Error::Io {
             path: path.to_owned(),
             source: std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1022,7 +1022,7 @@ pub async fn set_mod_enabled(path: impl AsRef<Path>, enabled: bool) -> Result<Pa
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            Error::Base(aurora_base::Error::Io {
+            Error::Base(petalfall_base::Error::Io {
                 path: path.to_owned(),
                 source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "路径缺少文件名"),
             })
@@ -1047,7 +1047,7 @@ pub async fn set_mod_enabled(path: impl AsRef<Path>, enabled: bool) -> Result<Pa
     let exists = tokio::fs::try_exists(&target_path)
         .await
         .map_err(|source| {
-            Error::Base(aurora_base::Error::Io {
+            Error::Base(petalfall_base::Error::Io {
                 path: target_path.clone(),
                 source,
             })
@@ -1059,7 +1059,7 @@ pub async fn set_mod_enabled(path: impl AsRef<Path>, enabled: bool) -> Result<Pa
     tokio::fs::rename(path, &target_path)
         .await
         .map_err(|source| {
-            Error::Base(aurora_base::Error::Io {
+            Error::Base(petalfall_base::Error::Io {
                 path: target_path.clone(),
                 source,
             })
@@ -1614,7 +1614,7 @@ authors="Snownee, TrainGuys"
         let missing = dir.path().join("ghost.jar");
         assert!(matches!(
             read_jar_entry(&missing, "a.png").await.unwrap_err(),
-            Error::Base(aurora_base::Error::Io { .. })
+            Error::Base(petalfall_base::Error::Io { .. })
         ));
     }
 
@@ -2285,7 +2285,7 @@ authors="Snownee, TrainGuys"
     fn only_os_level_read_failures_count_as_transient() {
         let io = |kind: std::io::ErrorKind| std::io::Error::new(kind, "x");
         let open = |kind| {
-            Error::Base(aurora_base::Error::Io {
+            Error::Base(petalfall_base::Error::Io {
                 path: PathBuf::from("a.jar"),
                 source: io(kind),
             })

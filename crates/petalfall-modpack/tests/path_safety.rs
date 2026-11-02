@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use aurora_modpack::path::{PathValidationError, SafeRelativePath, validate_relative_path};
+use petalfall_modpack::path::{PathValidationError, SafeRelativePath, validate_relative_path};
 
 #[test]
 fn accepts_portable_relative_paths_and_resolves_by_component() {
@@ -29,7 +29,7 @@ fn accepts_portable_relative_paths_and_resolves_by_component() {
 
 #[test]
 fn rejects_launcher_metadata_root_case_insensitively() {
-    let meta = aurora_instance::AURORA_META_DIR;
+    let meta = petalfall_instance::PETALFALL_META_DIR;
     for path in [
         format!("{meta}/modpack.json"),
         format!("{}/settings.json", meta.to_uppercase()),
@@ -162,12 +162,15 @@ fn rejects_windows_aliases_invalid_characters_and_controls() {
 /// 这些原文经错误详情显示在界面上，中文句子里用全角冒号。
 #[test]
 fn rejection_messages_use_full_width_colons() {
-    let meta = aurora_instance::AURORA_META_DIR;
+    let meta = petalfall_instance::PETALFALL_META_DIR;
     assert_eq!(
         validate_relative_path(&format!("{meta}/a"))
             .unwrap_err()
             .to_string(),
-        format!("路径进入{}元数据目录：{meta}", aurora_base::brand::APP_NAME)
+        format!(
+            "路径进入{}元数据目录：{meta}",
+            petalfall_base::brand::APP_NAME
+        )
     );
     for (path, message) in [
         ("mods/a.", "路径组件以点或空格结尾：a."),

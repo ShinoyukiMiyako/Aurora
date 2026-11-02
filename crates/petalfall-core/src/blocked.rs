@@ -9,14 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::SystemTime;
 
-use aurora_modplatform::curseforge::file_page_url;
-use aurora_modplatform::{
+use petalfall_modplatform::curseforge::file_page_url;
+use petalfall_modplatform::{
     CurseForgeClient, CurseForgeFile, CurseForgeMod, Platform, fingerprint_file,
 };
 use serde::Serialize;
 
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::resources::is_safe_file_name;
 
 /// 缓存根下放整合包相关内容的目录：下载来的包与认领暂存位都在它下面。
@@ -106,7 +106,7 @@ enum Check {
 /// 所以只有 fingerprint 时要读两趟。
 async fn verify_path(path: &Path, file: &BlockedFile) -> Result<Check> {
     if let Some(expected) = &file.sha1 {
-        let actual = aurora_base::fs::sha1_hex(path).await?;
+        let actual = petalfall_base::fs::sha1_hex(path).await?;
         return Ok(if actual.eq_ignore_ascii_case(expected) {
             Check::Match
         } else {
@@ -118,7 +118,7 @@ async fn verify_path(path: &Path, file: &BlockedFile) -> Result<Check> {
     }
     let fingerprint = fingerprint_file(path).await.map_err(|err| match err {
         // 与 sha1 那一支报同一种错：读不了文件要作为 io 错误回到界面，不算平台错误。
-        aurora_modplatform::Error::Base(base) => CoreError::Base(base),
+        petalfall_modplatform::Error::Base(base) => CoreError::Base(base),
         other => CoreError::ModPlatform(other),
     })?;
     Ok(if u64::from(fingerprint) == file.fingerprint {
@@ -148,7 +148,7 @@ fn remember_verified(slot: &Path, stamp: FileStamp) {
 }
 
 fn io_error(path: &Path, source: std::io::Error) -> CoreError {
-    aurora_base::Error::Io {
+    petalfall_base::Error::Io {
         path: path.to_path_buf(),
         source,
     }
@@ -173,7 +173,7 @@ struct Candidate {
     len: u64,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 下载缓存的根：配置了缓存目录就用它，否则是数据目录下的 cache/。
     pub(crate) fn cache_root(&self) -> PathBuf {
         self.config()
@@ -372,8 +372,8 @@ async fn list_top_level_files(folder: &Path) -> std::io::Result<Vec<Candidate>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
-    use aurora_modplatform::curseforge_fingerprint;
+    use crate::config::PetalfallConfig;
+    use petalfall_modplatform::curseforge_fingerprint;
     use sha1::{Digest, Sha1};
 
     fn sha1_hex(bytes: &[u8]) -> String {
@@ -396,8 +396,12 @@ mod tests {
         }
     }
 
-    fn aurora(root: &Path) -> Aurora {
-        Aurora::for_test(AuroraConfig::default(), root.join("data"), root.join("mc"))
+    fn petalfall(root: &Path) -> Petalfall {
+        Petalfall::for_test(
+            PetalfallConfig::default(),
+            root.join("data"),
+            root.join("mc"),
+        )
     }
 
     /// sha1 命中、fingerprint 命中、被浏览器改了名靠大小加哈希命中、大小相同但哈希不符算没找到；命中的复制进
@@ -432,9 +436,9 @@ mod tests {
             blocked(4, "blocked-d.jar", &d),
             blocked(5, "blocked-e.jar", &e),
         ];
-        let aurora = aurora(tmp.path());
+        let petalfall = petalfall(tmp.path());
 
-        let report = aurora
+        let report = petalfall
             .claim_blocked_files(&downloads, &files)
             .await
             .unwrap();
@@ -484,7 +488,7 @@ mod tests {
 
         // 再认领一次：暂存位里已有的直接算，来源给暂存路径；没找到的仍按顺序列出。
         std::fs::remove_file(downloads.join("Blocked-A.JAR")).unwrap();
-        let again = aurora
+        let again = petalfall
             .claim_blocked_files(&downloads, &files[..1])
             .await
             .unwrap();
@@ -503,13 +507,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unverifiable_files_and_bad_folders_are_refused() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora(tmp.path());
+        let petalfall = petalfall(tmp.path());
         let folder = tmp.path().join("dl");
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("nohash.jar"), b"x").unwrap();
         let mut unknown = blocked(7, "nohash.jar", b"x");
         unknown.sha1 = None;
-        let report = aurora
+        let report = petalfall
             .claim_blocked_files(&folder, std::slice::from_ref(&unknown))
             .await
             .unwrap();
@@ -517,7 +521,7 @@ mod tests {
         assert_eq!(report.missing, vec![7]);
 
         let gone = tmp.path().join("不存在");
-        let err = aurora
+        let err = petalfall
             .claim_blocked_files(&gone, std::slice::from_ref(&unknown))
             .await
             .unwrap_err();
@@ -525,7 +529,7 @@ mod tests {
             matches!(&err, CoreError::ClaimFolderInvalid { path, reason } if path == &gone && reason == "选的文件夹不存在"),
             "{err:?}"
         );
-        let err = aurora
+        let err = petalfall
             .claim_blocked_files(&folder.join("nohash.jar"), std::slice::from_ref(&unknown))
             .await
             .unwrap_err();
@@ -535,7 +539,7 @@ mod tests {
         );
 
         let evil = blocked(8, "../evil.jar", b"x");
-        let err = aurora
+        let err = petalfall
             .claim_blocked_files(&folder, &[evil])
             .await
             .unwrap_err();
@@ -546,14 +550,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tampered_slot_copy_is_not_a_claim() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora(tmp.path());
+        let petalfall = petalfall(tmp.path());
         let file = blocked(9, "x.jar", b"good");
-        let slot = aurora.claim_slot(&file);
+        let slot = petalfall.claim_slot(&file);
         std::fs::create_dir_all(slot.parent().unwrap()).unwrap();
         std::fs::write(&slot, b"evil").unwrap();
-        assert_eq!(aurora.claimed_copy(&file).await.unwrap(), None);
+        assert_eq!(petalfall.claimed_copy(&file).await.unwrap(), None);
         std::fs::write(&slot, b"good").unwrap();
-        assert_eq!(aurora.claimed_copy(&file).await.unwrap(), Some(slot));
+        assert_eq!(petalfall.claimed_copy(&file).await.unwrap(), Some(slot));
     }
 
     /// 面板每次打开都要问暂存副本：校验过、文件没动就不再整份读一遍。这里改内容时保住大小与修改时间，
@@ -561,13 +565,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_verified_slot_copy_is_not_hashed_again_until_it_changes() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora(tmp.path());
+        let petalfall = petalfall(tmp.path());
         let file = blocked(10, "x.jar", b"good");
-        let slot = aurora.claim_slot(&file);
+        let slot = petalfall.claim_slot(&file);
         std::fs::create_dir_all(slot.parent().unwrap()).unwrap();
         std::fs::write(&slot, b"good").unwrap();
         assert_eq!(
-            aurora.claimed_copy(&file).await.unwrap(),
+            petalfall.claimed_copy(&file).await.unwrap(),
             Some(slot.clone())
         );
 
@@ -579,12 +583,12 @@ mod tests {
         };
         rewrite(b"evil", verified_at);
         assert_eq!(
-            aurora.claimed_copy(&file).await.unwrap(),
+            petalfall.claimed_copy(&file).await.unwrap(),
             Some(slot.clone())
         );
 
         rewrite(b"evil", verified_at + std::time::Duration::from_secs(2));
-        assert_eq!(aurora.claimed_copy(&file).await.unwrap(), None);
+        assert_eq!(petalfall.claimed_copy(&file).await.unwrap(), None);
     }
 
     /// 流式哈希按 64 KiB 分块读：这些大小让最后一块分别是不满、正好满、多出一字节，0 字节则是第一次读就到
@@ -725,7 +729,7 @@ mod tests {
         let mut file = blocked(1, "gone.jar", b"x");
         let err = verify_path(&gone, &file).await.unwrap_err();
         assert!(
-            matches!(&err, CoreError::Base(aurora_base::Error::Io { path, .. }) if path == &gone),
+            matches!(&err, CoreError::Base(petalfall_base::Error::Io { path, .. }) if path == &gone),
             "{err:?}"
         );
 
@@ -733,7 +737,7 @@ mod tests {
         file.fingerprint = 1;
         let err = verify_path(&gone, &file).await.unwrap_err();
         assert!(
-            matches!(&err, CoreError::Base(aurora_base::Error::Io { path, .. }) if path == &gone),
+            matches!(&err, CoreError::Base(petalfall_base::Error::Io { path, .. }) if path == &gone),
             "{err:?}"
         );
     }
@@ -742,18 +746,18 @@ mod tests {
     #[test]
     fn claims_dir_follows_the_cache_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut aurora = aurora(tmp.path());
+        let mut petalfall = petalfall(tmp.path());
         assert_eq!(
-            aurora.blocked_claims_dir(),
+            petalfall.blocked_claims_dir(),
             tmp.path()
                 .join("data")
                 .join("cache")
                 .join("modpacks")
                 .join("claims")
         );
-        aurora.set_cache_directory(Some(tmp.path().join("别处")));
+        petalfall.set_cache_directory(Some(tmp.path().join("别处")));
         assert_eq!(
-            aurora.blocked_claims_dir(),
+            petalfall.blocked_claims_dir(),
             tmp.path().join("别处").join("modpacks").join("claims")
         );
     }

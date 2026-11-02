@@ -612,7 +612,7 @@ fn compare_heads(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_base::retry::RetryPolicy;
+    use petalfall_base::retry::RetryPolicy;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -816,7 +816,7 @@ mod tests {
     }
 
     fn clients(server: &MockServer) -> (ModrinthClient, CurseForgeClient) {
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         let modrinth = ModrinthClient::new(http.clone())
             .with_base_url(server.uri())
             .with_retry(no_retry());

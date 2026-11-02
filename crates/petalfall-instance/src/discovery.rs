@@ -5,7 +5,7 @@
 //! JSON 损坏或读不出来）不静默丢弃，而是作为 [`BrokenVersion`] 单独列出，供上层归入「出错」类展示。
 //!
 //! 加载器探测与版本类型都取自「独立 JSON」本身（不解继承链）：加载器 JSON 自带其加载器库与 mainClass，
-//! 探测成立；`type` 字段一般由加载器从原版拷入。继承解析与可用性检查归 aurora-version / aurora-launch。
+//! 探测成立；`type` 字段一般由加载器从原版拷入。继承解析与可用性检查归 petalfall-version / petalfall-launch。
 //!
 //! 版本 JSON 动辄几十到几百 KB，实例列表、启动、Mod 命令都要读它。两处省力：
 //! - 只关心一个版本的调用走 [`discover_version`]，不为两个布尔值把所有版本 JSON 全量读一遍；
@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 
-use aurora_base::error_with_causes;
-use aurora_version::{LoaderInfo, VersionJson, detect_loaders};
+use petalfall_base::error_with_causes;
+use petalfall_version::{LoaderInfo, VersionJson, detect_loaders};
 use tokio::task::JoinSet;
 
 use crate::VERSIONS_DIR;
@@ -347,7 +347,7 @@ fn parse_version_file(json_path: &Path) -> Result<ParseOutcome> {
             ParseOutcome::Parsed(Arc::new((json, loaders)))
         }
         // 这一层的文字只是「版本 JSON解析失败」，上层已经写了「版本 JSON 损坏」；坏在哪一行在 source 里。
-        Err(aurora_version::Error::Json { source, .. }) => {
+        Err(petalfall_version::Error::Json { source, .. }) => {
             ParseOutcome::Invalid(source.to_string())
         }
         Err(err) => ParseOutcome::Invalid(err.to_string()),
@@ -494,7 +494,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path();
         // 启动器元数据目录不应被当成版本。
-        tokio::fs::create_dir_all(mc.join("versions").join(crate::AURORA_META_DIR))
+        tokio::fs::create_dir_all(mc.join("versions").join(crate::PETALFALL_META_DIR))
             .await
             .unwrap();
         put_version(

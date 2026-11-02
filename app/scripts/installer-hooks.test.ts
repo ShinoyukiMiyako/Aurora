@@ -38,19 +38,19 @@ function targets(body: string, command: string): string[] {
     .sort();
 }
 
-const brandSource = "crates/aurora-base/src/brand.rs";
-const authSource = "crates/aurora-core/src/auth.rs";
-const configSource = "crates/aurora-core/src/config.rs";
+const brandSource = "crates/petalfall-base/src/brand.rs";
+const authSource = "crates/petalfall-core/src/auth.rs";
+const configSource = "crates/petalfall-core/src/config.rs";
 
 describe("卸载钩子的删除名单", () => {
   const body = macroBody("PETALFALL_DELETE_DATA");
 
   it("具名文件和启动器写进数据根的文件一一对应", () => {
     const configFile = "config.json";
-    expect(readSource("crates/aurora-core/src/facade.rs")).toContain(`data_dir.join("${configFile}")`);
+    expect(readSource("crates/petalfall-core/src/facade.rs")).toContain(`data_dir.join("${configFile}")`);
     const credentials = rustConst(authSource, "CREDENTIALS_FILE");
     const slug = /macro_rules! app_slug[\s\S]*?"([a-z]+)"/.exec(readSource(brandSource))?.[1];
-    expect(readSource("crates/aurora-base/src/fs.rs")).toContain('concat!(".", crate::app_slug!(), "-write-probe")');
+    expect(readSource("crates/petalfall-base/src/fs.rs")).toContain('concat!(".", crate::app_slug!(), "-write-probe")');
     expect(targets(body, "Delete")).toEqual(
       [
         configFile,
@@ -59,8 +59,8 @@ describe("卸载钩子的删除名单", () => {
         `${credentials}${rustConst(authSource, "BROKEN_SUFFIX")}*`,
         rustConst(authSource, "OFFLINE_ACCOUNTS_FILE"),
         rustConst("app/src-tauri/src/tasks.rs", "TASK_JOURNAL_FILE"),
-        rustConst("crates/aurora-core/src/playtime.rs", "PLAYTIME_FILE"),
-        rustConst("crates/aurora-core/src/java.rs", "PROBE_CACHE_FILE"),
+        rustConst("crates/petalfall-core/src/playtime.rs", "PLAYTIME_FILE"),
+        rustConst("crates/petalfall-core/src/java.rs", "PROBE_CACHE_FILE"),
         ".*.tmp",
         `.${slug}-write-probe`,
       ].sort(),
@@ -68,20 +68,20 @@ describe("卸载钩子的删除名单", () => {
   });
 
   it("通配的临时文件名覆盖两种原子写的命名", () => {
-    expect(readSource("crates/aurora-base/src/fs.rs")).toContain('".{}.{:016x}.tmp"');
-    expect(readSource("crates/aurora-auth/src/credential.rs")).toContain('".{}.{}.{}.tmp"');
+    expect(readSource("crates/petalfall-base/src/fs.rs")).toContain('".{}.{:016x}.tmp"');
+    expect(readSource("crates/petalfall-auth/src/credential.rs")).toContain('".{}.{}.{}.tmp"');
   });
 
   it("递归删除只落在启动器自有的子目录上", () => {
     const cacheDir = "cache";
-    expect(readSource("crates/aurora-core/src/art/mod.rs")).toContain(`self.data_dir().join("${cacheDir}")`);
+    expect(readSource("crates/petalfall-core/src/art/mod.rs")).toContain(`self.data_dir().join("${cacheDir}")`);
     expect(targets(body, "RMDir /r")).toEqual(
       [
         rustConst("app/src-tauri/src/logging.rs", "LOGS_DIR"),
         cacheDir,
-        rustConst("crates/aurora-java/src/detect.rs", "MANAGED_RUNTIME_DIR"),
-        rustConst("crates/aurora-core/src/authlib.rs", "AGENT_DIR"),
-        rustConst("crates/aurora-core/src/template.rs", "TEMPLATES_DIR"),
+        rustConst("crates/petalfall-java/src/detect.rs", "MANAGED_RUNTIME_DIR"),
+        rustConst("crates/petalfall-core/src/authlib.rs", "AGENT_DIR"),
+        rustConst("crates/petalfall-core/src/template.rs", "TEMPLATES_DIR"),
       ].sort(),
     );
     // 上面只数了带子目录名的写法，这里确认整份脚本没有别的递归删除
@@ -89,7 +89,7 @@ describe("卸载钩子的删除名单", () => {
   });
 
   it("游戏目录不在任何一条删除里", () => {
-    const gameDir = rustConst("crates/aurora-instance/src/lib.rs", "MINECRAFT_DIR_NAME");
+    const gameDir = rustConst("crates/petalfall-instance/src/lib.rs", "MINECRAFT_DIR_NAME");
     const code = hooks.split("\n").filter((line) => !line.trim().startsWith(";"));
     expect(code.filter((line) => line.includes(gameDir))).toEqual([]);
   });

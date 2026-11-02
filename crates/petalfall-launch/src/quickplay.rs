@@ -9,7 +9,7 @@
 //!
 //! Realms 与记录路径两个 feature 永远不置：前者要 Realms 的世界 id，后者会让游戏往磁盘写游玩记录。
 
-use aurora_version::{Argument, RuleAction, VersionJson};
+use petalfall_version::{Argument, RuleAction, VersionJson};
 use serde::Serialize;
 
 use crate::precheck::char_lost_on_command_line;

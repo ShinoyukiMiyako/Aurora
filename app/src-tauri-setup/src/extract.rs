@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use aurora_setup_payload::Header;
+use petalfall_setup_payload::Header;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
@@ -443,7 +443,7 @@ mod tests {
 
         assert_eq!(
             hash_reader(&mut Cursor::new(&bytes)).unwrap(),
-            aurora_setup_payload::sha256(&bytes)
+            petalfall_setup_payload::sha256(&bytes)
         );
     }
 

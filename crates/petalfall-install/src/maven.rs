@@ -1,6 +1,6 @@
 //! Maven 坐标到仓库相对路径的转换。
 //!
-//! 与 aurora-version 的 [`aurora_version::MavenCoordinate`] 不同，本模块要额外吃下 Forge
+//! 与 petalfall-version 的 [`petalfall_version::MavenCoordinate`] 不同，本模块要额外吃下 Forge
 //! install_profile 里常见的 `@扩展名` 后缀（如 `de.oceanlabs.mcp:mcp_config:1.20.1@zip`、
 //! `net.minecraft:client:1.20.1-...:mappings@txt`），因此单独实现一份解析，供库落盘路径与
 //! 处理器 `[坐标]` 占位符解析共用。纯字符串运算，不碰文件系统。

@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_base::mirror::MirrorSource;
+use petalfall_base::mirror::MirrorSource;
 use serde::Deserialize;
 
 use crate::error::Result;
@@ -64,7 +64,7 @@ pub(crate) fn latest_urls(sources: &[MirrorSource]) -> Vec<&'static str> {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum LatestLookupError {
     #[error(transparent)]
-    Download(#[from] aurora_download::Error),
+    Download(#[from] petalfall_download::Error),
     #[error("authlib-injector 构建信息 {url} 无法解析")]
     Parse {
         url: String,
@@ -81,7 +81,7 @@ impl LatestLookupError {
     pub(crate) fn is_offline(&self) -> bool {
         matches!(
             self,
-            LatestLookupError::Download(aurora_download::Error::Request { .. })
+            LatestLookupError::Download(petalfall_download::Error::Request { .. })
         )
     }
 }
@@ -108,14 +108,14 @@ async fn fetch_from(
     http: &reqwest::Client,
     url: &str,
 ) -> std::result::Result<AgentRelease, LatestLookupError> {
-    let request_failed = |source| aurora_download::Error::Request {
+    let request_failed = |source| petalfall_download::Error::Request {
         url: url.to_owned(),
         source,
     };
     let mut response = http.get(url).send().await.map_err(request_failed)?;
     let status = response.status();
     if !status.is_success() {
-        return Err(aurora_download::Error::Status {
+        return Err(petalfall_download::Error::Status {
             url: url.to_owned(),
             status: status.as_u16(),
         }
@@ -150,14 +150,14 @@ async fn fetch_from(
 pub(crate) async fn matches_checksum(jar: &Path, sha256: &str) -> Result<bool> {
     if !tokio::fs::try_exists(jar)
         .await
-        .map_err(|source| aurora_base::Error::Io {
+        .map_err(|source| petalfall_base::Error::Io {
             path: jar.to_path_buf(),
             source,
         })?
     {
         return Ok(false);
     }
-    let actual = aurora_base::fs::sha256_hex(jar).await?;
+    let actual = petalfall_base::fs::sha256_hex(jar).await?;
     Ok(actual.eq_ignore_ascii_case(sha256))
 }
 
@@ -166,7 +166,7 @@ pub(crate) async fn matches_checksum(jar: &Path, sha256: &str) -> Result<bool> {
 /// 目录里的 jar 都是下载完、校验过才改名到位的（下载引擎先写临时文件再原子改名，校验不过的当场删除），
 /// 所以离线时直接用它，不再重新校验。
 pub(crate) async fn newest_local(dir: &Path) -> Result<Option<PathBuf>> {
-    let io = |source| aurora_base::Error::Io {
+    let io = |source| petalfall_base::Error::Io {
         path: dir.to_path_buf(),
         source,
     };
@@ -230,7 +230,7 @@ mod tests {
             .await;
         let broken = format!("{}/broken/latest.json", server.uri());
         let ok = format!("{}/ok/latest.json", server.uri());
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
 
         let release = fetch_latest(&http, &[&broken, &ok]).await.unwrap();
         assert_eq!(release.build_number, 53);
@@ -246,7 +246,7 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                LatestLookupError::Download(aurora_download::Error::Status { status: 502, .. })
+                LatestLookupError::Download(petalfall_download::Error::Status { status: 502, .. })
             ),
             "{err:?}"
         );
@@ -261,7 +261,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string("<html>"))
             .mount(&server)
             .await;
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         let garbage = format!("{}/latest.json", server.uri());
         let err = fetch_latest(&http, &[&garbage]).await.unwrap_err();
         assert!(matches!(err, LatestLookupError::Parse { .. }), "{err:?}");
@@ -287,7 +287,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(padded.clone()))
             .mount(&server)
             .await;
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         let url = format!("{}/latest.json", server.uri());
 
         let err = fetch_latest(&http, &[&url]).await.unwrap_err();

@@ -2,13 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_core::config::UiLanguage;
-use aurora_core::folders::{
+use petalfall_core::config::UiLanguage;
+use petalfall_core::folders::{
     default_game_dir, inspect_game_directory as inspect_dir, probe_dir, validate_game_dir,
 };
-use aurora_core::{
-    AfterLaunch, Aurora, CoreError, DownloadSourcePolicy, GameDirProblem, GameDirectoryEntry,
-    IsolationPolicy, MemorySettings, NamedDirectory, WorldBackupSettings,
+use petalfall_core::{
+    AfterLaunch, CoreError, DownloadSourcePolicy, GameDirProblem, GameDirectoryEntry,
+    IsolationPolicy, MemorySettings, NamedDirectory, Petalfall, WorldBackupSettings,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -34,7 +34,7 @@ const MAX_TOTAL_GB_RANGE: std::ops::RangeInclusive<u32> = 1..=1000;
 
 /// 全局配置 DTO。
 ///
-/// 枚举在 aurora-core 已 derive Serialize 且为 snake_case，直接内嵌即得稳定的 JSON 表示，
+/// 枚举在 petalfall-core 已 derive Serialize 且为 snake_case，直接内嵌即得稳定的 JSON 表示，
 /// 且与 `update_config` 的入参同名。
 #[derive(Debug, Serialize)]
 pub struct ConfigDto {
@@ -84,12 +84,12 @@ pub struct ConfigDto {
     pub world_backup: WorldBackupSettings,
 }
 
-pub(crate) fn config_dto(aurora: &Aurora) -> ConfigDto {
-    let config = aurora.config();
+pub(crate) fn config_dto(petalfall: &Petalfall) -> ConfigDto {
+    let config = petalfall.config();
     ConfigDto {
-        game_dir: aurora.game_dir().display().to_string(),
-        default_game_dir: default_game_dir(aurora.data_dir()).display().to_string(),
-        data_dir: aurora.data_dir().display().to_string(),
+        game_dir: petalfall.game_dir().display().to_string(),
+        default_game_dir: default_game_dir(petalfall.data_dir()).display().to_string(),
+        data_dir: petalfall.data_dir().display().to_string(),
         download_source: config.download_source,
         version_list_source: config.version_list_source,
         download_concurrency: config.download_concurrency,
@@ -252,7 +252,9 @@ pub(crate) async fn update_config_with(
     raw: RawConfigPatch,
 ) -> Result<(), CommandError> {
     let patch = parse_patch(raw).await?;
-    facade.update(|aurora| apply_patch(aurora, patch)).await
+    facade
+        .update(|petalfall| apply_patch(petalfall, patch))
+        .await
 }
 
 async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
@@ -301,60 +303,60 @@ async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
     })
 }
 
-fn apply_patch(aurora: &mut Aurora, patch: ConfigPatch) -> Result<(), CommandError> {
+fn apply_patch(petalfall: &mut Petalfall, patch: ConfigPatch) -> Result<(), CommandError> {
     if let Some(policy) = patch.download_source {
-        aurora.set_download_source(policy);
+        petalfall.set_download_source(policy);
     }
     if let Some(policy) = patch.version_list_source {
-        aurora.set_version_list_source(policy);
+        petalfall.set_version_list_source(policy);
     }
     if let Some(concurrency) = patch.download_concurrency {
-        aurora.set_download_concurrency(concurrency);
+        petalfall.set_download_concurrency(concurrency);
     }
     if let Some(memory) = patch.memory {
-        aurora.set_memory(memory);
+        petalfall.set_memory(memory);
     }
     if let Some(policy) = patch.isolation_policy {
-        aurora.set_isolation_policy(policy);
+        petalfall.set_isolation_policy(policy);
     }
     if let Some(enabled) = patch.auto_download_java {
-        aurora.set_auto_download_java(enabled);
+        petalfall.set_auto_download_java(enabled);
     }
     if let Some(dir) = patch.cache_directory {
-        aurora.set_cache_directory(Some(dir));
+        petalfall.set_cache_directory(Some(dir));
     }
     if let Some(id) = patch.client_id {
-        aurora.set_client_id(id);
+        petalfall.set_client_id(id);
     }
     if let Some(id) = patch.selected_version {
-        aurora.set_selected_version(Some(id));
+        petalfall.set_selected_version(Some(id));
     }
     if let Some(after) = patch.after_launch {
-        aurora.set_after_launch(after);
+        petalfall.set_after_launch(after);
     }
     if let Some(enabled) = patch.check_updates {
-        aurora.set_check_updates(enabled);
+        petalfall.set_check_updates(enabled);
     }
     if let Some(java) = patch.default_java {
-        aurora.set_default_java(java);
+        petalfall.set_default_java(java);
     }
     if let Some(version) = patch.skipped_update_version {
-        aurora.set_skipped_update_version(Some(version));
+        petalfall.set_skipped_update_version(Some(version));
     }
     if let Some(version) = patch.notified_update_version {
-        aurora.set_notified_update_version(Some(version));
+        petalfall.set_notified_update_version(Some(version));
     }
     if let Some(language) = patch.language {
-        aurora.set_language(language);
+        petalfall.set_language(language);
     }
     if let Some(enabled) = patch.prefer_dedicated_gpu {
-        aurora.set_prefer_dedicated_gpu(enabled);
+        petalfall.set_prefer_dedicated_gpu(enabled);
     }
     if let Some(enabled) = patch.skip_accessibility_onboarding {
-        aurora.set_skip_accessibility_onboarding(enabled);
+        petalfall.set_skip_accessibility_onboarding(enabled);
     }
     if let Some(settings) = patch.world_backup {
-        aurora.set_world_backup(settings);
+        petalfall.set_world_backup(settings);
     }
     Ok(())
 }
@@ -575,8 +577,8 @@ pub(crate) fn parse_named_directory(
 pub async fn list_game_directories(
     facade: State<'_, Facade>,
 ) -> Result<Vec<GameDirectoryDto>, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
         .game_directories()
         .await
         .into_iter()
@@ -589,8 +591,8 @@ pub async fn list_game_directories(
 pub async fn discover_game_directories(
     facade: State<'_, Facade>,
 ) -> Result<Vec<NamedDirectoryDto>, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
         .discover_game_directories()
         .await
         .into_iter()
@@ -618,8 +620,8 @@ pub(crate) async fn add_game_directory_with(
         path: path.to_owned(),
     })?;
     facade
-        .update(|aurora| {
-            aurora.add_game_directory(dir.name, dir.path);
+        .update(|petalfall| {
+            petalfall.add_game_directory(dir.name, dir.path);
             Ok::<_, CommandError>(())
         })
         .await
@@ -632,7 +634,7 @@ pub async fn remove_game_directory(
     facade: State<'_, Facade>,
 ) -> Result<bool, CommandError> {
     Ok(facade
-        .update_if_changed(|aurora| aurora.remove_game_directory(Path::new(path.trim())))
+        .update_if_changed(|petalfall| petalfall.remove_game_directory(Path::new(path.trim())))
         .await?)
 }
 
@@ -663,8 +665,8 @@ pub(crate) async fn set_game_directory_with(
     }
     let current = facade.snapshot().await.probe_current_game_dir().await;
     facade
-        .update(|aurora| {
-            aurora.switch_game_directory(target, &current);
+        .update(|petalfall| {
+            petalfall.switch_game_directory(target, &current);
             Ok::<_, CommandError>(())
         })
         .await
@@ -687,16 +689,16 @@ pub async fn inspect_game_directory(
 mod tests {
     use super::*;
     use crate::commands::error::code;
-    use aurora_core::AuroraConfig;
+    use petalfall_core::PetalfallConfig;
 
     fn facade_in(dir: &Path) -> Facade {
-        let aurora = Aurora::open(
-            AuroraConfig::default(),
+        let petalfall = Petalfall::open(
+            PetalfallConfig::default(),
             dir.to_path_buf(),
             dir.join("config.json"),
         )
         .unwrap();
-        Facade::new(aurora)
+        Facade::new(petalfall)
     }
 
     #[test]
@@ -899,7 +901,7 @@ mod tests {
             written["world_backup"],
             serde_json::json!({ "auto": false, "keep_per_world": 10, "max_total_gb": 50 })
         );
-        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+        let reloaded = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
             .load()
             .await
             .unwrap();
@@ -943,16 +945,16 @@ mod tests {
             r#"{"check_updates": false, "download_concurrency": 16}"#,
         )
         .unwrap();
-        let config = aurora_core::ConfigStore::at(path).load().await.unwrap();
+        let config = petalfall_core::ConfigStore::at(path).load().await.unwrap();
         assert!(!config.check_updates);
         assert_eq!(config.download_concurrency, 16);
-        let aurora = Aurora::open(
+        let petalfall = Petalfall::open(
             config,
             dir.path().to_path_buf(),
             dir.path().join("config.json"),
         )
         .unwrap();
-        let dto = serde_json::to_value(config_dto(&aurora)).unwrap();
+        let dto = serde_json::to_value(config_dto(&petalfall)).unwrap();
         assert_eq!(
             dto["world_backup"],
             serde_json::json!({ "auto": true, "keep_per_world": 5, "max_total_gb": 20 })
@@ -1019,7 +1021,7 @@ mod tests {
         );
 
         // 落了盘：重新载入得到同样的配置。
-        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+        let reloaded = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
             .load()
             .await
             .unwrap();
@@ -1057,7 +1059,7 @@ mod tests {
         .await
         .unwrap();
         assert!(read_config(&facade).await.prefer_dedicated_gpu);
-        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+        let reloaded = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
             .load()
             .await
             .unwrap();
@@ -1106,7 +1108,7 @@ mod tests {
         .unwrap();
         let dto = serde_json::to_value(read_config(&facade).await).unwrap();
         assert_eq!(dto["skip_accessibility_onboarding"], false);
-        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+        let reloaded = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
             .load()
             .await
             .unwrap();
@@ -1142,9 +1144,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         std::fs::write(&path, br#"{"download_concurrency": 12}"#).unwrap();
-        let config = aurora_core::ConfigStore::at(&path).load().await.unwrap();
-        let aurora = Aurora::open(config, dir.path().to_path_buf(), path.clone()).unwrap();
-        let facade = Facade::new(aurora);
+        let config = petalfall_core::ConfigStore::at(&path).load().await.unwrap();
+        let petalfall = Petalfall::open(config, dir.path().to_path_buf(), path.clone()).unwrap();
+        let facade = Facade::new(petalfall);
 
         let dto = serde_json::to_value(read_config(&facade).await).unwrap();
         assert_eq!(dto["skip_accessibility_onboarding"], true);
@@ -1240,7 +1242,7 @@ mod tests {
         let dto = read_config(&facade).await;
         assert_eq!(dto.language, UiLanguage::EnUs);
         assert_eq!(serde_json::to_value(&dto).unwrap()["language"], "en-US");
-        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+        let reloaded = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
             .load()
             .await
             .unwrap();

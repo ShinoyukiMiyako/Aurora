@@ -21,17 +21,17 @@ pub trait CredentialStore {
 
 /// 同目录临时文件 + fsync + rename 的原子写入（跨平台，供文件型 store 复用）。
 ///
-/// 与 aurora-base 的异步 `atomic_write` 同构，但走同步 std::fs 以匹配同步的 [`CredentialStore`]。
+/// 与 petalfall-base 的异步 `atomic_write` 同构，但走同步 std::fs 以匹配同步的 [`CredentialStore`]。
 /// Windows 上 `std::fs::rename` 走 `MoveFileExW + REPLACE_EXISTING`，可覆盖已存在目标。
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> aurora_base::Result<()> {
-    let parent = path.parent().ok_or_else(|| aurora_base::Error::Io {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> petalfall_base::Result<()> {
+    let parent = path.parent().ok_or_else(|| petalfall_base::Error::Io {
         path: path.to_owned(),
         source: std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "凭据路径没有父目录，无法原子写入",
         ),
     })?;
-    std::fs::create_dir_all(parent).map_err(|source| aurora_base::Error::Io {
+    std::fs::create_dir_all(parent).map_err(|source| petalfall_base::Error::Io {
         path: parent.to_owned(),
         source,
     })?;
@@ -40,7 +40,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> aurora_base::Result<()>
     // 账户库与离线库都改成了每次操作现开一个实例（AccountManager / OfflineAccountStore），
     // 上层命令又只持共享锁，于是两次操作可能同时写同一个目标文件；临时名只挂进程号的话它们会踩进
     // 同一个临时文件，把彼此写了一半的内容 rename 出去，落盘结果既非旧值也非新值。
-    // 与 aurora-base 那份异步 `atomic_write` 的随机后缀同一目的，此处不引入随机数依赖，用原子计数器。
+    // 与 petalfall-base 那份异步 `atomic_write` 的随机后缀同一目的，此处不引入随机数依赖，用原子计数器。
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = parent.join(format!(
         ".{}.{}.{}.tmp",
@@ -57,7 +57,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> aurora_base::Result<()>
     }
     if let Err(source) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(aurora_base::Error::Io {
+        return Err(petalfall_base::Error::Io {
             path: path.to_owned(),
             source,
         });
@@ -85,13 +85,13 @@ const REPLACE_WINDOW_ATTEMPTS: u32 = 10;
 ///
 /// 重试严格按错误码判定，绝不看内容：撕裂的读是一次**成功**的读（`std::fs::read` 返回
 /// `Ok`），会从循环里当场返回，所以这条路径不具备替数据损坏兜底的能力。
-pub(crate) fn read_atomic(path: &Path) -> aurora_base::Result<Option<Vec<u8>>> {
+pub(crate) fn read_atomic(path: &Path) -> petalfall_base::Result<Option<Vec<u8>>> {
     match retry_replace_window(path, REPLACE_WINDOW_ATTEMPTS, || std::fs::read(path)) {
         Ok(bytes) => Ok(Some(bytes)),
         // 首次运行时目标还不存在。这一条既没重试也不该重试：它是「空库」的合法信号，
         // 重试只会让每次冷启动白白多等一轮退避。
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(aurora_base::Error::Io {
+        Err(source) => Err(petalfall_base::Error::Io {
             path: path.to_owned(),
             source,
         }),
@@ -142,21 +142,22 @@ fn is_replace_window_error(err: &std::io::Error) -> bool {
     cfg!(windows) && err.raw_os_error() == Some(32)
 }
 
-fn write_and_sync(tmp: &Path, bytes: &[u8]) -> aurora_base::Result<()> {
-    let mut file = std::fs::File::create(tmp).map_err(|source| aurora_base::Error::Io {
+fn write_and_sync(tmp: &Path, bytes: &[u8]) -> petalfall_base::Result<()> {
+    let mut file = std::fs::File::create(tmp).map_err(|source| petalfall_base::Error::Io {
         path: tmp.to_owned(),
         source,
     })?;
     file.write_all(bytes)
-        .map_err(|source| aurora_base::Error::Io {
+        .map_err(|source| petalfall_base::Error::Io {
             path: tmp.to_owned(),
             source,
         })?;
     // fsync：确保 rename 前数据已落盘，避免掉电后目标名指向空洞文件。
-    file.sync_all().map_err(|source| aurora_base::Error::Io {
-        path: tmp.to_owned(),
-        source,
-    })?;
+    file.sync_all()
+        .map_err(|source| petalfall_base::Error::Io {
+            path: tmp.to_owned(),
+            source,
+        })?;
     Ok(())
 }
 

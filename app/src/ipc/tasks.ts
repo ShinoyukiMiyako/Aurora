@@ -1,4 +1,4 @@
-// 长任务的关联、取消与任务日志，以及后端进度事件 aurora://core-event。
+// 长任务的关联、取消与任务日志，以及后端进度事件 petalfall://core-event。
 // 安装版本、装 Mod、装 Java、修复、整合包、启动这些长命令都带 taskId 参数；
 // 进度事件带 task_id 用来区分并行的任务，不带 task_id 的事件只属于启动会话。
 
@@ -6,7 +6,7 @@ import type { TaskKind, TaskStatus } from "../domain/types";
 import { invoke, listen, type UnlistenFn } from "./bridge";
 import type { BlockedFileDto } from "./modpack";
 
-export const CORE_EVENT = "aurora://core-event";
+export const CORE_EVENT = "petalfall://core-event";
 
 /**
  * step：命令作为组合任务的一项调用时，调用方给的「第几项」（从 0 计），后端原样标在这次调用的每条事件上。

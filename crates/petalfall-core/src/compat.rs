@@ -19,15 +19,15 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use aurora_instance::{DiscoveredVersion, discover_versions};
-use aurora_modplatform::{
+use petalfall_instance::{DiscoveredVersion, discover_versions};
+use petalfall_modplatform::{
     ModLoader, ModVersionInfo, Platform, ResourceType, parse_loader_name, scan_mods_dir_cached,
 };
-use aurora_version::identify_mc_version;
+use petalfall_version::identify_mc_version;
 use serde::Serialize;
 
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::instances::hide_base_versions;
 use crate::modfs::{bounded_map, ledger_key, local_concurrency, try_exists};
 use crate::modversions::sort_by_published_desc;
@@ -282,7 +282,7 @@ pub fn classify_game_version(
     Compatibility::Match
 }
 
-/// 按资源类型选判定口径：只有 Mod 要看加载器。整合包与插件在 [`Aurora::match_instances`] 入口就被拒掉。
+/// 按资源类型选判定口径：只有 Mod 要看加载器。整合包与插件在 [`Petalfall::match_instances`] 入口就被拒掉。
 fn judge(
     resource_type: ResourceType,
     version: &ModVersionInfo,
@@ -404,7 +404,7 @@ fn judge_pinned(
 
 /// 实例基于哪个 MC 版本；认不出返回 `None`。
 ///
-/// 走 aurora-version 的完整识别链（inheritsFrom -> clientVersion -> 严格 id -> --fml.mcVersion
+/// 走 petalfall-version 的完整识别链（inheritsFrom -> clientVersion -> 严格 id -> --fml.mcVersion
 /// -> 库坐标 -> id 内嵌子串），与更新检查、依赖计划同一口径。
 ///
 /// 只看 `inheritsFrom`、取不到就回落实例 id 的代价很实际：有些启动器会把加载器 JSON 与原版
@@ -440,7 +440,7 @@ pub(crate) fn instance_mod_loaders(version: &DiscoveredVersion) -> Vec<ModLoader
 /// 一起发会撞上平台限流，逐个发又让玩家多等好几个网络来回。
 const CURSEFORGE_PAGE_FETCHES: usize = 4;
 
-impl Aurora {
+impl Petalfall {
     /// 为某工程算出全部已装实例的匹配矩阵，按「兼容 > 可能可行 > 已安装 > 不兼容」排序，
     /// 同档内按实例 id 字典序，保证顺序稳定（UI 默认选中第一项）。
     ///
@@ -502,11 +502,11 @@ impl Aurora {
         } else {
             versions.clone()
         };
-        let aurora = self.clone();
+        let petalfall = self.clone();
         let project = project_id.to_owned();
 
         let mut matches = bounded_map(scan.versions, local_concurrency(), move |discovered| {
-            let aurora = aurora.clone();
+            let petalfall = petalfall.clone();
             let versions = versions.clone();
             let known = known.clone();
             let project = project.clone();
@@ -519,7 +519,7 @@ impl Aurora {
                     pick_best(resource_type, &versions, mc_version.as_deref(), &loaders)
                 };
                 let id = discovered.id.clone();
-                let installed = aurora
+                let installed = petalfall
                     .installed_copy_of(discovered, platform, &project, resource_type, &known)
                     .await?;
                 let state = match (&installed, &compatibility) {
@@ -567,16 +567,16 @@ impl Aurora {
             .await?;
         let mut versions = listing.versions;
         if listing.truncated && !mc_versions.is_empty() {
-            let aurora = self.clone();
+            let petalfall = self.clone();
             let project = project_id.to_owned();
             let pages = bounded_map(
                 mc_versions.iter().cloned().collect(),
                 CURSEFORGE_PAGE_FETCHES,
                 move |mc| {
-                    let aurora = aurora.clone();
+                    let petalfall = petalfall.clone();
                     let project = project.clone();
                     async move {
-                        aurora
+                        petalfall
                             .list_mod_versions(platform, &project, &[mc], &[])
                             .await
                     }
@@ -679,12 +679,12 @@ impl Aurora {
     /// 它那一项带上错误，其余实例照常给出，一个坏实例不该让整页的标记都没有。
     pub async fn installed_mod_sources(&self) -> Result<Vec<InstanceSources>> {
         let scan = discover_versions(self.game_dir()).await?;
-        let aurora = self.clone();
+        let petalfall = self.clone();
         let mut all = bounded_map(scan.versions, local_concurrency(), move |discovered| {
-            let aurora = aurora.clone();
+            let petalfall = petalfall.clone();
             async move {
                 let version_id = discovered.id.clone();
-                let sources = aurora.mod_sources_of(discovered).await;
+                let sources = petalfall.mod_sources_of(discovered).await;
                 Ok(InstanceSources {
                     version_id,
                     sources,
@@ -722,7 +722,7 @@ impl Aurora {
 /// mods 目录里各文件的卷宗键（启用态文件名）。只读目录项、不打开 jar；目录不存在即为空。
 async fn mod_file_keys(mods_dir: &Path) -> Result<HashSet<String>> {
     let io = |source| -> CoreError {
-        aurora_base::Error::Io {
+        petalfall_base::Error::Io {
             path: mods_dir.to_owned(),
             source,
         }
@@ -757,7 +757,7 @@ async fn find_pack_in<'v>(
     known: &'v [ModVersionInfo],
 ) -> Result<Option<&'v ModVersionInfo>> {
     let io = |source| -> CoreError {
-        aurora_base::Error::Io {
+        petalfall_base::Error::Io {
             path: dir.to_owned(),
             source,
         }
@@ -791,7 +791,7 @@ async fn find_pack_in<'v>(
             [] => None,
             [only] => Some(*only),
             several => {
-                let actual = aurora_base::fs::sha1_hex(entry.path()).await?;
+                let actual = petalfall_base::fs::sha1_hex(entry.path()).await?;
                 several.iter().copied().find(|&i| {
                     known[i]
                         .sha1
@@ -811,7 +811,7 @@ async fn find_pack_in<'v>(
 /// 取目录名排在最前的那个，同一份盘面每次给出同一个答案。
 async fn find_data_pack(saves: &Path, known: &[ModVersionInfo]) -> Result<Option<InstalledCopy>> {
     let io = |source| -> CoreError {
-        aurora_base::Error::Io {
+        petalfall_base::Error::Io {
             path: saves.to_owned(),
             source,
         }
@@ -845,9 +845,9 @@ async fn find_data_pack(saves: &Path, known: &[ModVersionInfo]) -> Result<Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use crate::ledger::{Ledger, LedgerEntry, LedgerStore};
-    use aurora_modplatform::ReleaseChannel;
+    use petalfall_modplatform::ReleaseChannel;
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1501,8 +1501,9 @@ mod tests {
 
     /// 用一段版本 JSON 造出发现结果（路径不参与本组断言，取占位值）。
     fn discovered(id: &str, json: &str) -> DiscoveredVersion {
-        let parsed = aurora_version::VersionJson::from_json_str(json).expect("测试版本 JSON 合法");
-        let loaders = aurora_version::detect_loaders(&parsed);
+        let parsed =
+            petalfall_version::VersionJson::from_json_str(json).expect("测试版本 JSON 合法");
+        let loaders = petalfall_version::detect_loaders(&parsed);
         let dir = std::path::PathBuf::from("versions").join(id);
         DiscoveredVersion {
             id: id.to_owned(),
@@ -1613,7 +1614,7 @@ mod tests {
 
     // ---- 实例匹配矩阵（端到端，平台走本地 mock）----
 
-    /// 各加载器的特征库坐标，[`aurora_version::detect_loaders`] 据此识别实例装了什么。
+    /// 各加载器的特征库坐标，[`petalfall_version::detect_loaders`] 据此识别实例装了什么。
     const FABRIC_LIB: &str = "net.fabricmc:fabric-loader:0.15.11";
     const QUILT_LIB: &str = "org.quiltmc:quilt-loader:0.26.0";
     const FORGE_LIB: &str = "net.minecraftforge:forge:1.20.1-47.2.0";
@@ -1692,11 +1693,14 @@ mod tests {
         put_ledger_and_disk(mc, "c-forge-1.20.1", &["sodium-0.5.jar.disabled"]).await;
     }
 
-    fn isolated(mc: &std::path::Path, base: String) -> Aurora {
-        let mut aurora =
-            Aurora::for_test(AuroraConfig::default(), mc.to_path_buf(), mc.to_path_buf());
-        aurora.set_isolation_policy(aurora_instance::IsolationPolicy::All);
-        aurora.with_modrinth_base(base)
+    fn isolated(mc: &std::path::Path, base: String) -> Petalfall {
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
+            mc.to_path_buf(),
+            mc.to_path_buf(),
+        );
+        petalfall.set_isolation_policy(petalfall_instance::IsolationPolicy::All);
+        petalfall.with_modrinth_base(base)
     }
 
     /// 真实数据的形状：新版只标 fabric，只有旧版还标着 quilt。
@@ -1898,7 +1902,7 @@ mod tests {
         put_instance(&mc, "e-broken-ledger", "1.20.1", FABRIC_LIB).await;
         put_file(
             mc.join("versions/e-broken-ledger")
-                .join(aurora_instance::AURORA_META_DIR)
+                .join(petalfall_instance::PETALFALL_META_DIR)
                 .join("ledger.json"),
             b"{",
         )
@@ -1915,8 +1919,8 @@ mod tests {
         store.save(&ledger).await.unwrap();
 
         // 不该有任何请求：给一个连不上的平台地址，真去联网就会失败。
-        let aurora = isolated(&mc, "http://127.0.0.1:9".to_owned());
-        let all = aurora.installed_mod_sources().await.unwrap();
+        let petalfall = isolated(&mc, "http://127.0.0.1:9".to_owned());
+        let all = petalfall.installed_mod_sources().await.unwrap();
         let ids: Vec<&str> = all.iter().map(|i| i.version_id.as_str()).collect();
         assert_eq!(
             ids,
@@ -1974,9 +1978,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
-        let aurora = isolated(&mc, server.uri());
+        let petalfall = isolated(&mc, server.uri());
         assert!(
-            aurora
+            petalfall
                 .match_instances(Platform::Modrinth, "sodium", ResourceType::Mod, None)
                 .await
                 .unwrap()
@@ -2055,15 +2059,15 @@ mod tests {
             .await;
     }
 
-    async fn curseforge_matrix(server: &MockServer) -> (Aurora, tempfile::TempDir) {
+    async fn curseforge_matrix(server: &MockServer) -> (Petalfall, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
         put_instance(&mc, "老整合", "1.12.2", FORGE_LIB).await;
         put_instance(&mc, "新整合", "1.20.1", FORGE_LIB).await;
-        let aurora = isolated(&mc, server.uri())
+        let petalfall = isolated(&mc, server.uri())
             .with_curseforge_base(server.uri())
             .with_curseforge_key("test-key");
-        (aurora, tmp)
+        (petalfall, tmp)
     }
 
     /// 文件多到翻满页数上限还没完：老 MC 版本的文件全在页外，矩阵按实例用到的 MC 版本各补拉一份，
@@ -2082,9 +2086,9 @@ mod tests {
         )
         .await;
         mount_files_for(&server, "1.12.2", vec![jei_1122()], 1).await;
-        let (aurora, _tmp) = curseforge_matrix(&server).await;
+        let (petalfall, _tmp) = curseforge_matrix(&server).await;
 
-        let matches = aurora
+        let matches = petalfall
             .match_instances(Platform::CurseForge, "238222", ResourceType::Mod, None)
             .await
             .unwrap();
@@ -2101,7 +2105,7 @@ mod tests {
         );
 
         // 同一场里再开一次走版本列表缓存，不再发请求（上面的 expect 在服务器析构时核对）。
-        aurora
+        petalfall
             .match_instances(Platform::CurseForge, "238222", ResourceType::Mod, None)
             .await
             .unwrap();
@@ -2116,9 +2120,9 @@ mod tests {
         mount_unfiltered_files(&server, all, 3).await;
         mount_files_for(&server, "1.20.1", Vec::new(), 0).await;
         mount_files_for(&server, "1.12.2", Vec::new(), 0).await;
-        let (aurora, _tmp) = curseforge_matrix(&server).await;
+        let (petalfall, _tmp) = curseforge_matrix(&server).await;
 
-        let matches = aurora
+        let matches = petalfall
             .match_instances(Platform::CurseForge, "238222", ResourceType::Mod, None)
             .await
             .unwrap();
@@ -2323,8 +2327,8 @@ mod tests {
         )
         .await;
 
-        let aurora = isolated(&mc, server.uri());
-        let packs = aurora
+        let petalfall = isolated(&mc, server.uri());
+        let packs = petalfall
             .match_instances(
                 Platform::Modrinth,
                 "faithful",
@@ -2358,7 +2362,7 @@ mod tests {
         assert_eq!(latest.version_id, "r5");
         assert_eq!(state_of(&packs, "c-wrong-size").installed, None);
 
-        let shaders = aurora
+        let shaders = petalfall
             .match_instances(
                 Platform::Modrinth,
                 "complementary",
@@ -2447,7 +2451,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("resourcepacks");
         put_file(dir.join("pack.zip"), b"AAAA").await;
-        let actual = aurora_base::fs::sha1_hex(dir.join("pack.zip"))
+        let actual = petalfall_base::fs::sha1_hex(dir.join("pack.zip"))
             .await
             .unwrap();
         let info = |id: &str, sha1: &str| ModVersionInfo {
@@ -2605,9 +2609,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().to_path_buf();
         put_instance(&mc, "fabric-1.20.1", "1.20.1", FABRIC_LIB).await;
-        let aurora = isolated(&mc, server.uri());
+        let petalfall = isolated(&mc, server.uri());
         for kind in [ResourceType::Modpack, ResourceType::Plugin] {
-            let err = aurora
+            let err = petalfall
                 .match_instances(Platform::Modrinth, "pack", kind, None)
                 .await
                 .unwrap_err();

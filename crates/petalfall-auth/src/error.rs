@@ -4,14 +4,14 @@
 //! 令牌刷新失败明确区分“需重登”（[`AuthError::ReloginRequired`]）与瞬时“网络失败”
 //! （[`AuthError::Http`]，实现 [`RetryableError`] 后可被上层 `retry_async` 重试）。
 
-use aurora_base::retry::RetryableError;
+use petalfall_base::retry::RetryableError;
 
-/// aurora-auth 对外统一错误。
+/// petalfall-auth 对外统一错误。
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
-    /// 下层 aurora-base 错误（文件、哈希、镜像改写等）冒泡。
+    /// 下层 petalfall-base 错误（文件、哈希、镜像改写等）冒泡。
     #[error(transparent)]
-    Base(#[from] aurora_base::Error),
+    Base(#[from] petalfall_base::Error),
 
     /// HTTP 请求发送或读取响应体失败（瞬时网络故障，可重试）。
     #[error("HTTP 请求失败（{context}）")]
@@ -88,7 +88,7 @@ pub enum AuthError {
     /// Minecraft 服务拒绝了启动器所用的微软应用：login_with_xbox 返回 403，且响应体含 Invalid app registration。
     #[error(
         "{} 使用的微软应用未获准访问 Minecraft 服务（Invalid app registration）",
-        aurora_base::brand::APP_NAME
+        petalfall_base::brand::APP_NAME
     )]
     AppNotApproved,
 
@@ -182,7 +182,7 @@ pub type Result<T> = std::result::Result<T, AuthError>;
 impl RetryableError for AuthError {
     fn is_retryable(&self) -> bool {
         match self {
-            // 下层错误的可重试性交给 aurora-base 判定（瞬时 IO、哈希不符等）。
+            // 下层错误的可重试性交给 petalfall-base 判定（瞬时 IO、哈希不符等）。
             AuthError::Base(inner) => inner.is_retryable(),
             // 连接建立、读取超时与读到一半断开都是瞬时网络故障，值得重试。读响应体失败 reqwest 报 decode
             // 类；响应解析不走这里，读不懂的 JSON 是 Parse。
@@ -250,7 +250,7 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{")
                 .unwrap();
         });
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let response = client.get(&url).send().await.unwrap();
 
         let source = response.text().await.unwrap_err();
@@ -306,7 +306,7 @@ mod tests {
         assert!(dpapi(DPAPI_DECRYPT).is_unreadable_credentials());
         assert!(AuthError::CredentialDeserialize(parse).is_unreadable_credentials());
 
-        let io = aurora_base::Error::Io {
+        let io = petalfall_base::Error::Io {
             path: "credentials.bin".into(),
             source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
         };
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn base_error_delegates_retryability() {
         // 下层可重试错误（哈希不符）经包装后仍可重试。
-        let base = aurora_base::Error::HashMismatch {
+        let base = petalfall_base::Error::HashMismatch {
             algorithm: "SHA-1",
             expected: "aa".into(),
             actual: "bb".into(),
@@ -375,7 +375,7 @@ mod tests {
         let err = AuthError::AppNotApproved;
         assert!(!err.is_retryable());
         let text = err.to_string();
-        assert!(text.starts_with(aurora_base::brand::APP_NAME), "{text}");
+        assert!(text.starts_with(petalfall_base::brand::APP_NAME), "{text}");
         assert!(text.contains("Invalid app registration"), "{text}");
     }
 

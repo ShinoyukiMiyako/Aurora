@@ -5,13 +5,13 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 use crate::error::Result;
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 /// 每个探测目标的时限。探测只回答「此刻连不连得上」，几秒内连不上的源对玩家来说就是断网；
 /// 离线期间前端还会按固定间隔反复探测，不必在一次里等满下载用的连接超时。
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
-impl Aurora {
+impl Petalfall {
     /// 下载实际要用的源里有没有一个连得上。目标是版本清单地址，以及它按当前下载源策略得出的另一个源
     /// （官方与 BMCLAPI 镜像）：玩家的网络只通其中一个时，下载照样能换源完成，不该判为离线。
     pub async fn probe_network(&self) -> Result<bool> {
@@ -46,7 +46,7 @@ async fn reachable_any(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use std::net::TcpListener;
     use std::path::PathBuf;
     use std::time::Instant;
@@ -61,10 +61,14 @@ mod tests {
         format!("http://127.0.0.1:{port}/mc/game/version_manifest_v2.json")
     }
 
-    fn aurora_with_manifest(url: String) -> Aurora {
+    fn petalfall_with_manifest(url: String) -> Petalfall {
         let dir = PathBuf::from("/data");
-        Aurora::for_test(AuroraConfig::default(), dir.clone(), dir.join(".minecraft"))
-            .with_manifest_url(url)
+        Petalfall::for_test(
+            PetalfallConfig::default(),
+            dir.clone(),
+            dir.join(".minecraft"),
+        )
+        .with_manifest_url(url)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -75,14 +79,14 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let aurora = aurora_with_manifest(format!("{}/manifest.json", server.uri()));
-        assert!(aurora.probe_network().await.unwrap());
+        let petalfall = petalfall_with_manifest(format!("{}/manifest.json", server.uri()));
+        assert!(petalfall.probe_network().await.unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn refused_connection_is_offline() {
-        let aurora = aurora_with_manifest(closed_port_url());
-        assert!(!aurora.probe_network().await.unwrap());
+        let petalfall = petalfall_with_manifest(closed_port_url());
+        assert!(!petalfall.probe_network().await.unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -95,7 +99,7 @@ mod tests {
             .await;
         let started = Instant::now();
         let reachable = reachable_any(
-            &aurora_base::http::build_client().unwrap(),
+            &petalfall_base::http::build_client().unwrap(),
             vec![format!("{}/manifest.json", server.uri())],
             Duration::from_millis(300),
         )
@@ -117,7 +121,7 @@ mod tests {
             .mount(&server)
             .await;
         let reachable = reachable_any(
-            &aurora_base::http::build_client().unwrap(),
+            &petalfall_base::http::build_client().unwrap(),
             vec![closed_port_url(), format!("{}/manifest.json", server.uri())],
             Duration::from_secs(4),
         )
@@ -126,7 +130,7 @@ mod tests {
         assert!(reachable);
         assert!(
             !reachable_any(
-                &aurora_base::http::build_client().unwrap(),
+                &petalfall_base::http::build_client().unwrap(),
                 Vec::new(),
                 PROBE_TIMEOUT
             )

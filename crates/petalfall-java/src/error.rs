@@ -1,19 +1,19 @@
 //! crate 统一错误类型。
 //!
 //! 与 workspace 其它 crate 一致，只暴露一个 [`Error`] 枚举，下游可用
-//! `#[from] aurora_java::Error` 一处冒泡。底层 aurora-base 的错误（镜像改写、原子写入、
+//! `#[from] petalfall_java::Error` 一处冒泡。底层 petalfall-base 的错误（镜像改写、原子写入、
 //! 哈希校验）通过 [`Error::Base`] 透传，且把它的可重试性一并继承过来。
 
 use std::path::PathBuf;
 
-use aurora_base::retry::RetryableError;
+use petalfall_base::retry::RetryableError;
 
-/// aurora-java 对外统一错误。
+/// petalfall-java 对外统一错误。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// 来自 aurora-base 的错误（镜像改写 / 原子写入 / sha1 校验等）原样透传。
+    /// 来自 petalfall-base 的错误（镜像改写 / 原子写入 / sha1 校验等）原样透传。
     #[error(transparent)]
-    Base(#[from] aurora_base::Error),
+    Base(#[from] petalfall_base::Error),
 
     /// 访问远端（Java 运行时清单 / 组件文件）时的 HTTP 层错误，附带具体 URL。
     #[error("HTTP 请求失败：{url}")]
@@ -104,7 +104,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl RetryableError for Error {
     fn is_retryable(&self) -> bool {
         match self {
-            // aurora-base 已区分好瞬时/永久（sha1 不符可重下、瞬时 IO 可重试）。
+            // petalfall-base 已区分好瞬时/永久（sha1 不符可重下、瞬时 IO 可重试）。
             Error::Base(inner) => inner.is_retryable(),
             // 网络类：超时、建连失败、请求发送失败可重试；5xx / 429 也当作瞬时故障重试。
             Error::Http { source, .. } => is_retryable_http(source),
@@ -129,7 +129,7 @@ impl RetryableError for Error {
     }
 }
 
-/// 判断一个 reqwest 错误是否值得重试（与 aurora-install 同策略）。
+/// 判断一个 reqwest 错误是否值得重试（与 petalfall-install 同策略）。
 ///
 /// 读响应体时连接被重置或提前关闭也算瞬时故障：reqwest 把读体失败包成 decode 类，只认 body 类会把读到
 /// 一半断开的请求当成永久失败、直接换源，两个源各断一次整次 Java 下载就失败了。

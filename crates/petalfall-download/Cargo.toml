@@ -1,15 +1,15 @@
 [package]
-name = "aurora-download"
+name = "petalfall-download"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
 [dependencies]
-aurora-base = { path = "../aurora-base" }
+petalfall-base = { path = "../petalfall-base" }
 # 只用运行时的 spawn(rt) + JoinSet/Semaphore/watch(sync) + 异步文件 IO(fs/io-util) + interval(time)。
-# 与 aurora-base 统一不强制 rt-multi-thread，运行时风格交由上层选择。
+# 与 petalfall-base 统一不强制 rt-multi-thread，运行时风格交由上层选择。
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "fs", "io-util", "time"] }
-# 客户端由 aurora-base 的工厂构建（rustls）；本 crate 仅使用其类型与方法，TLS 特性经工作区特性合并从 base 引入。
+# 客户端由 petalfall-base 的工厂构建（rustls）；本 crate 仅使用其类型与方法，TLS 特性经工作区特性合并从 base 引入。
 reqwest = { version = "0.13", default-features = false }
 thiserror = "2"
 tracing = "0.1"

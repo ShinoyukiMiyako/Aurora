@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use aurora_setup_payload::{HEADER_LEN, Header, VERSION_FIELD_LEN, locate, sha256};
+use petalfall_setup_payload::{HEADER_LEN, Header, VERSION_FIELD_LEN, locate, sha256};
 
 const MARKER: &[u8] = b"__TAURI_BUNDLE_TYPE_VAR_UNK";
 const MARKER_NSIS: &[u8] = b"__TAURI_BUNDLE_TYPE_VAR_NSS";

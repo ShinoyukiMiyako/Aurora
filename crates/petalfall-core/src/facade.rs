@@ -1,32 +1,32 @@
-//! 门面结构 [`Aurora`]：持有全局配置、共享 HTTP 客户端与运行环境，组合下层 crate 对外提供粗粒度
+//! 门面结构 [`Petalfall`]：持有全局配置、共享 HTTP 客户端与运行环境，组合下层 crate 对外提供粗粒度
 //! 异步 API。目标是让 Tauri 外壳与 CLI 只依赖本 crate。
 //!
-//! 各操作（版本清单、安装、登录、启动、搜索）分散在同名子模块的 `impl Aurora` 块里，本文件只负责
+//! 各操作（版本清单、安装、登录、启动、搜索）分散在同名子模块的 `impl Petalfall` 块里，本文件只负责
 //! 结构定义、构造与共享的内部辅助（目录布局、下载池、并发上下文装配）。远端端点基址以字段持有，
 //! 生产走各官方/镜像默认，单元测试用 `with_*` 注入本地 mock。
 //!
 //! 门面可廉价克隆（HTTP 客户端内部是 `Arc`，其余是配置与路径）。上层把它放在读写锁里，长任务
-//! 先克隆一份快照再放锁，网络等待期间不占锁；快照上可挂取消令牌（[`Aurora::with_cancel`]），
+//! 先克隆一份快照再放锁，网络等待期间不占锁；快照上可挂取消令牌（[`Petalfall::with_cancel`]），
 //! 经它装配的下载池与 Java 下载都会响应取消。
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use aurora_auth::MsaEndpoints;
-use aurora_base::retry::RetryPolicy;
-use aurora_download::{
+use petalfall_auth::MsaEndpoints;
+use petalfall_base::retry::RetryPolicy;
+use petalfall_download::{
     CancellationToken, DownloadConfig, DownloadPool, DownloadProgress, Downloader, MirrorResolver,
     SourceHealth, SourceResolver, SourceSpeedCache,
 };
-use aurora_install::{GameLayout, InstallContext, VERSION_MANIFEST_V2};
-use aurora_instance::IsolationPolicy;
-use aurora_java::JavaRuntimeInstaller;
-use aurora_version::RuntimeContext;
+use petalfall_install::{GameLayout, InstallContext, VERSION_MANIFEST_V2};
+use petalfall_instance::IsolationPolicy;
+use petalfall_java::JavaRuntimeInstaller;
+use petalfall_version::RuntimeContext;
 use tokio::sync::watch;
 
 use crate::appearance::{Appearance, AppearancePatch};
-use crate::config::{AfterLaunch, AuroraConfig, DownloadSourcePolicy, MemorySettings};
+use crate::config::{AfterLaunch, DownloadSourcePolicy, MemorySettings, PetalfallConfig};
 use crate::error::Result;
 use crate::event::{CoreEvent, EventSink};
 use crate::gpu::{GpuPreferenceStore, RegistryGpuPreferences};
@@ -37,8 +37,8 @@ pub(crate) const PROGRESS_EVENT_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 门面：组合下层 crate 的统一入口。
 #[derive(Clone)]
-pub struct Aurora {
-    config: AuroraConfig,
+pub struct Petalfall {
+    config: PetalfallConfig,
     http: reqwest::Client,
     /// 不自动跟随跳转的客户端，只给带下载凭据的任务用：自动跟随会把凭据头原样带到下一跳的主机，
     /// 由下载引擎逐跳决定带不带。
@@ -81,32 +81,32 @@ pub struct Aurora {
     curseforge_key: Option<String>,
     /// 测试把 CurseForge 下载凭据的作用域换成本地 mock：生产作用域只认 https 的 forgecdn.net。
     #[cfg(test)]
-    curseforge_cdn_scope: Option<aurora_download::CredentialScope>,
+    curseforge_cdn_scope: Option<petalfall_download::CredentialScope>,
     /// 测试注入的下载地址改写：往返测试要让导入侧把清单里的正式 CDN 地址下到本地 mock，又不能放松导入
     /// 对清单地址的白名单校验，只能在下载池这一层改写。
     #[cfg(test)]
-    download_resolver: Option<std::sync::Arc<dyn aurora_download::SourceResolver>>,
+    download_resolver: Option<std::sync::Arc<dyn petalfall_download::SourceResolver>>,
     /// 测试注入的 authlib-injector 构建信息地址：生产地址是写死的常量，测不到启动时这一步。
     #[cfg(test)]
     authlib_latest_url: Option<String>,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 以默认数据目录构造：从 `<数据目录>/config.json` 载入配置，构建共享 HTTP 客户端。
     ///
     /// 游戏目录取配置的 `game_directory`，缺省为 `<数据目录>/.minecraft`。
     pub async fn load() -> Result<Self> {
-        let data_dir = aurora_base::fs::data_dir()?;
+        let data_dir = petalfall_base::fs::data_dir()?;
         let config_path = data_dir.join("config.json");
         let config = crate::config::ConfigStore::at(&config_path).load().await?;
         Self::open(config, data_dir, config_path)
     }
 
-    /// 同 [`Aurora::load`]，但配置文件损坏时不报错：坏文件改名留存、按默认配置构造，并交回经过；
+    /// 同 [`Petalfall::load`]，但配置文件损坏时不报错：坏文件改名留存、按默认配置构造，并交回经过；
     /// 只是个别枚举取值不认识时文件不动，交回退回默认的那几项。
     /// 给桌面应用启动用：那时还没有窗口能显示错误，报错等于一声不响地打不开。
     pub async fn load_recovering() -> Result<(Self, Option<crate::config::ConfigRecovery>)> {
-        let data_dir = aurora_base::fs::data_dir()?;
+        let data_dir = petalfall_base::fs::data_dir()?;
         let config_path = data_dir.join("config.json");
         let (config, recovery) = crate::config::ConfigStore::at(&config_path)
             .load_or_preserve()
@@ -115,13 +115,13 @@ impl Aurora {
     }
 
     /// 用显式配置与数据目录构造（供 CLI 应用命令行覆盖后调用，或测试注入）。
-    pub fn open(config: AuroraConfig, data_dir: PathBuf, config_path: PathBuf) -> Result<Self> {
-        let http = aurora_base::http::build_client()?;
-        let http_manual = aurora_base::http::build_manual_redirect_client()?;
+    pub fn open(config: PetalfallConfig, data_dir: PathBuf, config_path: PathBuf) -> Result<Self> {
+        let http = petalfall_base::http::build_client()?;
+        let http_manual = petalfall_base::http::build_manual_redirect_client()?;
         let game_dir = config
             .game_directory
             .clone()
-            .unwrap_or_else(|| data_dir.join(aurora_instance::MINECRAFT_DIR_NAME));
+            .unwrap_or_else(|| data_dir.join(petalfall_instance::MINECRAFT_DIR_NAME));
         Ok(Self {
             config,
             http,
@@ -131,11 +131,11 @@ impl Aurora {
             game_dir,
             config_path,
             manifest_url: VERSION_MANIFEST_V2.to_owned(),
-            modrinth_base: aurora_modplatform::MODRINTH_BASE.to_owned(),
-            curseforge_base: aurora_modplatform::CURSEFORGE_BASE.to_owned(),
+            modrinth_base: petalfall_modplatform::MODRINTH_BASE.to_owned(),
+            curseforge_base: petalfall_modplatform::CURSEFORGE_BASE.to_owned(),
             fabric_base: "https://meta.fabricmc.net".to_owned(),
             quilt_base: "https://meta.quiltmc.org".to_owned(),
-            java_runtime_url: aurora_java::MOJANG_JAVA_RUNTIME_ALL.to_owned(),
+            java_runtime_url: petalfall_java::MOJANG_JAVA_RUNTIME_ALL.to_owned(),
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
             mod_versions: Default::default(),
@@ -158,13 +158,13 @@ impl Aurora {
 
     /// 以带应用版本的 User-Agent（`Petalfall/<应用版本>`）重建两个共享 HTTP 客户端。
     ///
-    /// 构造时的客户端用的是 aurora-base 自己的 crate 版本，发版只改应用版本时它不会跟着变；镜像站按 UA
+    /// 构造时的客户端用的是 petalfall-base 自己的 crate 版本，发版只改应用版本时它不会跟着变；镜像站按 UA
     /// 统计与限流，一个永远不变的版本号让对方分不出新旧客户端。不自动跳转的那个也得重建：带凭据的下载
     /// 走它，漏掉的话同一个应用会发出两种 UA。桌面应用在构造门面后、任何请求之前调用。
     pub fn with_app_version(mut self, version: &str) -> Result<Self> {
-        let config = aurora_base::http::HttpConfig::for_app_version(version);
-        self.http = aurora_base::http::build_client_with(&config)?;
-        self.http_manual = aurora_base::http::build_manual_redirect_client_with(&config)?;
+        let config = petalfall_base::http::HttpConfig::for_app_version(version);
+        self.http = petalfall_base::http::build_client_with(&config)?;
+        self.http_manual = petalfall_base::http::build_manual_redirect_client_with(&config)?;
         Ok(self)
     }
 
@@ -213,14 +213,14 @@ impl Aurora {
         self.config.appearance
     }
 
-    /// 合并一次外观修改并返回合并后的完整偏好；落盘仍需调用 [`Aurora::save_config`]。
+    /// 合并一次外观修改并返回合并后的完整偏好；落盘仍需调用 [`Petalfall::save_config`]。
     pub fn set_appearance(&mut self, patch: AppearancePatch) -> Appearance {
         self.config.appearance.apply(patch);
         self.config.appearance
     }
 
     /// 只读访问当前配置。
-    pub fn config(&self) -> &AuroraConfig {
+    pub fn config(&self) -> &PetalfallConfig {
         &self.config
     }
 
@@ -289,7 +289,7 @@ impl Aurora {
         self.config.cache_directory = dir;
     }
 
-    /// 设置游戏目录并写入配置（区别于仅改运行期字段的 [`Aurora::set_game_dir`]）。
+    /// 设置游戏目录并写入配置（区别于仅改运行期字段的 [`Petalfall::set_game_dir`]）。
     ///
     /// 同时更新运行期 `game_dir` 与 `config.game_directory`，`save_config` 落盘后下次 `load` 生效；
     /// 而 `set_game_dir` 只改运行期字段，供 CLI 的临时覆盖使用。
@@ -304,7 +304,7 @@ impl Aurora {
         self.config.selected_version = id;
     }
 
-    /// 设置侧栏固定的实例列表。不做校验：校验要扫盘，由 [`Aurora::validate_sidebar_pins`] 在快照上做完再写。
+    /// 设置侧栏固定的实例列表。不做校验：校验要扫盘，由 [`Petalfall::validate_sidebar_pins`] 在快照上做完再写。
     pub fn set_sidebar_pins(&mut self, pins: Vec<String>) {
         self.config.sidebar_pins = pins;
     }
@@ -349,7 +349,7 @@ impl Aurora {
     }
 
     /// 可变访问配置，供本 crate 内按领域分文件的操作（固定服务器、游戏目录、首次启动）改写各自的字段。
-    pub(crate) fn config_mut(&mut self) -> &mut AuroraConfig {
+    pub(crate) fn config_mut(&mut self) -> &mut PetalfallConfig {
         &mut self.config
     }
 
@@ -390,7 +390,7 @@ impl Aurora {
         #[cfg(test)]
         let config = match &self.download_resolver {
             Some(resolver) => DownloadConfig {
-                sources: aurora_download::SourcePlan::with_resolver(
+                sources: petalfall_download::SourcePlan::with_resolver(
                     config.sources.sources.clone(),
                     resolver.clone(),
                 ),
@@ -505,7 +505,7 @@ impl Aurora {
 /// 装配一个安装上下文所需的一束借用（生命周期绑定到传入的各组件）。
 ///
 /// 安装/补全类操作先建 `layout`/`pool`/`policy` 局部变量，再借此函数打成 [`InstallContext`]，避免每处
-/// 重复五参数样板。`cancel` 传门面快照上的令牌（[`Aurora::cancel_token`]）：元数据抓取与 Forge
+/// 重复五参数样板。`cancel` 传门面快照上的令牌（[`Petalfall::cancel_token`]）：元数据抓取与 Forge
 /// 处理器不经过下载池，只从上下文里看取消；必填是为了让每个造上下文的地方都想到它。
 pub(crate) fn make_context<'a>(
     http: &'a reqwest::Client,
@@ -519,26 +519,26 @@ pub(crate) fn make_context<'a>(
 }
 
 #[cfg(test)]
-impl Aurora {
+impl Petalfall {
     /// 测试构造：以显式配置、数据目录、游戏目录建门面，端点基址随后用 `with_*` 注入。
-    pub(crate) fn for_test(config: AuroraConfig, data_dir: PathBuf, game_dir: PathBuf) -> Self {
-        let http = aurora_base::http::build_client().expect("构建测试 HTTP 客户端");
+    pub(crate) fn for_test(config: PetalfallConfig, data_dir: PathBuf, game_dir: PathBuf) -> Self {
+        let http = petalfall_base::http::build_client().expect("构建测试 HTTP 客户端");
         let http_manual =
-            aurora_base::http::build_manual_redirect_client().expect("构建测试 HTTP 客户端");
+            petalfall_base::http::build_manual_redirect_client().expect("构建测试 HTTP 客户端");
         Self {
             config,
             http,
             http_manual,
-            runtime: RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64),
+            runtime: RuntimeContext::new(petalfall_version::OsName::Windows, "x86_64", 64),
             data_dir,
             config_path: game_dir.join("config.json"),
             game_dir,
             manifest_url: VERSION_MANIFEST_V2.to_owned(),
-            modrinth_base: aurora_modplatform::MODRINTH_BASE.to_owned(),
-            curseforge_base: aurora_modplatform::CURSEFORGE_BASE.to_owned(),
+            modrinth_base: petalfall_modplatform::MODRINTH_BASE.to_owned(),
+            curseforge_base: petalfall_modplatform::CURSEFORGE_BASE.to_owned(),
             fabric_base: "https://meta.fabricmc.net".to_owned(),
             quilt_base: "https://meta.quiltmc.org".to_owned(),
-            java_runtime_url: aurora_java::MOJANG_JAVA_RUNTIME_ALL.to_owned(),
+            java_runtime_url: petalfall_java::MOJANG_JAVA_RUNTIME_ALL.to_owned(),
             msa_endpoints: MsaEndpoints::default(),
             cancel: None,
             mod_versions: Default::default(),
@@ -620,7 +620,7 @@ impl Aurora {
     /// 让 CurseForge 下载凭据只发往这个作用域（测试里指到某一个 wiremock 服务器）。
     pub(crate) fn with_curseforge_cdn_scope(
         mut self,
-        scope: aurora_download::CredentialScope,
+        scope: petalfall_download::CredentialScope,
     ) -> Self {
         self.curseforge_cdn_scope = Some(scope);
         self
@@ -628,7 +628,7 @@ impl Aurora {
 
     pub(crate) fn injected_curseforge_cdn_scope(
         &self,
-    ) -> Option<&aurora_download::CredentialScope> {
+    ) -> Option<&petalfall_download::CredentialScope> {
         self.curseforge_cdn_scope.as_ref()
     }
 
@@ -645,7 +645,7 @@ impl Aurora {
     /// 下载池里每个地址先经这个解析器改写。
     pub(crate) fn with_download_resolver(
         mut self,
-        resolver: std::sync::Arc<dyn aurora_download::SourceResolver>,
+        resolver: std::sync::Arc<dyn petalfall_download::SourceResolver>,
     ) -> Self {
         self.download_resolver = Some(resolver);
         self
@@ -661,8 +661,8 @@ impl SourceResolver for UnansweredProbe {
     fn resolve(
         &self,
         _url: &str,
-        _source: aurora_download::MirrorSource,
-    ) -> aurora_download::Result<String> {
+        _source: petalfall_download::MirrorSource,
+    ) -> petalfall_download::Result<String> {
         Ok("http://127.0.0.1:9/probe".to_owned())
     }
 }
@@ -671,9 +671,9 @@ impl SourceResolver for UnansweredProbe {
 mod tests {
     use super::*;
 
-    fn test_aurora() -> Aurora {
-        Aurora::for_test(
-            AuroraConfig::default(),
+    fn test_petalfall() -> Petalfall {
+        Petalfall::for_test(
+            PetalfallConfig::default(),
             PathBuf::from("/data"),
             PathBuf::from("/data/.minecraft"),
         )
@@ -681,18 +681,18 @@ mod tests {
 
     #[test]
     fn config_setters_write_through() {
-        let mut aurora = test_aurora();
-        aurora.set_download_source(DownloadSourcePolicy::MirrorFirst);
-        aurora.set_download_concurrency(16);
-        aurora.set_auto_download_java(false);
-        aurora.set_memory(MemorySettings {
+        let mut petalfall = test_petalfall();
+        petalfall.set_download_source(DownloadSourcePolicy::MirrorFirst);
+        petalfall.set_download_concurrency(16);
+        petalfall.set_auto_download_java(false);
+        petalfall.set_memory(MemorySettings {
             max_mb: 8192,
             min_mb: Some(1024),
             auto: false,
         });
-        aurora.set_isolation_policy(IsolationPolicy::All);
+        petalfall.set_isolation_policy(IsolationPolicy::All);
 
-        let cfg = aurora.config();
+        let cfg = petalfall.config();
         assert_eq!(cfg.download_source, DownloadSourcePolicy::MirrorFirst);
         assert_eq!(cfg.download_concurrency, 16);
         assert!(!cfg.auto_download_java);
@@ -704,14 +704,14 @@ mod tests {
 
     #[test]
     fn system_setters_write_through() {
-        let mut aurora = test_aurora();
-        aurora.set_after_launch(AfterLaunch::Keep);
-        aurora.set_check_updates(false);
-        aurora.set_default_java(Some(PathBuf::from("C:/jdk/bin/java.exe")));
-        aurora.set_skipped_update_version(Some("0.3.0".to_owned()));
-        aurora.set_notified_update_version(Some("0.3.1".to_owned()));
+        let mut petalfall = test_petalfall();
+        petalfall.set_after_launch(AfterLaunch::Keep);
+        petalfall.set_check_updates(false);
+        petalfall.set_default_java(Some(PathBuf::from("C:/jdk/bin/java.exe")));
+        petalfall.set_skipped_update_version(Some("0.3.0".to_owned()));
+        petalfall.set_notified_update_version(Some("0.3.1".to_owned()));
 
-        let cfg = aurora.config();
+        let cfg = petalfall.config();
         assert_eq!(cfg.after_launch, AfterLaunch::Keep);
         assert!(!cfg.check_updates);
         assert_eq!(
@@ -721,35 +721,35 @@ mod tests {
         assert_eq!(cfg.skipped_update_version.as_deref(), Some("0.3.0"));
         assert_eq!(cfg.notified_update_version.as_deref(), Some("0.3.1"));
 
-        aurora.set_default_java(None);
-        assert!(aurora.config().default_java.is_none());
+        petalfall.set_default_java(None);
+        assert!(petalfall.config().default_java.is_none());
 
-        assert!(!aurora.config().prefer_dedicated_gpu);
-        aurora.set_prefer_dedicated_gpu(true);
-        assert!(aurora.config().prefer_dedicated_gpu);
-        aurora.set_prefer_dedicated_gpu(false);
-        assert!(!aurora.config().prefer_dedicated_gpu);
+        assert!(!petalfall.config().prefer_dedicated_gpu);
+        petalfall.set_prefer_dedicated_gpu(true);
+        assert!(petalfall.config().prefer_dedicated_gpu);
+        petalfall.set_prefer_dedicated_gpu(false);
+        assert!(!petalfall.config().prefer_dedicated_gpu);
 
-        assert!(aurora.config().skip_accessibility_onboarding);
-        aurora.set_skip_accessibility_onboarding(false);
-        assert!(!aurora.config().skip_accessibility_onboarding);
-        aurora.set_skip_accessibility_onboarding(true);
-        assert!(aurora.config().skip_accessibility_onboarding);
+        assert!(petalfall.config().skip_accessibility_onboarding);
+        petalfall.set_skip_accessibility_onboarding(false);
+        assert!(!petalfall.config().skip_accessibility_onboarding);
+        petalfall.set_skip_accessibility_onboarding(true);
+        assert!(petalfall.config().skip_accessibility_onboarding);
     }
 
     /// 改版本列表源只写配置：清单地址仍是官方地址，镜像优先体现在源计划给出的首个候选上。
     #[test]
     fn set_version_list_source_keeps_official_manifest_and_reorders_plan() {
-        let mut aurora = test_aurora();
-        aurora.set_version_list_source(DownloadSourcePolicy::MirrorFirst);
+        let mut petalfall = test_petalfall();
+        petalfall.set_version_list_source(DownloadSourcePolicy::MirrorFirst);
         assert_eq!(
-            aurora.config().version_list_source,
+            petalfall.config().version_list_source,
             DownloadSourcePolicy::MirrorFirst
         );
-        assert_eq!(aurora.manifest_url(), VERSION_MANIFEST_V2);
-        let candidates = aurora
-            .source_plan(aurora.config().version_list_source)
-            .candidates(aurora.manifest_url())
+        assert_eq!(petalfall.manifest_url(), VERSION_MANIFEST_V2);
+        let candidates = petalfall
+            .source_plan(petalfall.config().version_list_source)
+            .candidates(petalfall.manifest_url())
             .unwrap();
         assert_eq!(
             candidates,
@@ -759,10 +759,10 @@ mod tests {
             ]
         );
 
-        aurora.set_version_list_source(DownloadSourcePolicy::OfficialFirst);
-        let first = aurora
-            .source_plan(aurora.config().version_list_source)
-            .candidates(aurora.manifest_url())
+        petalfall.set_version_list_source(DownloadSourcePolicy::OfficialFirst);
+        let first = petalfall
+            .source_plan(petalfall.config().version_list_source)
+            .candidates(petalfall.manifest_url())
             .unwrap()
             .remove(0);
         assert_eq!(first, VERSION_MANIFEST_V2);
@@ -770,19 +770,19 @@ mod tests {
 
     #[test]
     fn set_game_directory_syncs_runtime_and_config() {
-        let mut aurora = test_aurora();
-        aurora.set_game_directory(PathBuf::from("/games/mc"));
-        assert_eq!(aurora.game_dir(), Path::new("/games/mc"));
+        let mut petalfall = test_petalfall();
+        petalfall.set_game_directory(PathBuf::from("/games/mc"));
+        assert_eq!(petalfall.game_dir(), Path::new("/games/mc"));
         assert_eq!(
-            aurora.config().game_directory.as_deref(),
+            petalfall.config().game_directory.as_deref(),
             Some(Path::new("/games/mc"))
         );
     }
 
     #[test]
     fn set_appearance_merges_patch_into_config() {
-        let mut aurora = test_aurora();
-        let merged = aurora.set_appearance(AppearancePatch {
+        let mut petalfall = test_petalfall();
+        let merged = petalfall.set_appearance(AppearancePatch {
             accent: Some(crate::appearance::AccentColor::Moss),
             panorama: Some(true),
             ..AppearancePatch::default()
@@ -791,20 +791,20 @@ mod tests {
         assert!(merged.panorama);
         // 未改的字段保持默认，且写进了配置本身。
         assert!(merged.petals);
-        assert_eq!(aurora.config().appearance, merged);
-        assert_eq!(aurora.appearance(), merged);
+        assert_eq!(petalfall.config().appearance, merged);
+        assert_eq!(petalfall.appearance(), merged);
     }
 
     /// 快照挂令牌后装配的下载池会响应取消；常驻门面不受影响。
     #[tokio::test]
     async fn snapshot_with_cancel_propagates_to_download_pool() {
-        let aurora = test_aurora();
+        let petalfall = test_petalfall();
         let token = CancellationToken::new();
-        let snapshot = aurora.clone().with_cancel(token.clone());
+        let snapshot = petalfall.clone().with_cancel(token.clone());
         token.cancel();
 
         let dir = tempfile::tempdir().unwrap();
-        let task = aurora_download::DownloadTask::new(
+        let task = petalfall_download::DownloadTask::new(
             "http://127.0.0.1:9/never.jar",
             dir.path().join("never.jar"),
         );
@@ -814,7 +814,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_cancelled(), "实际：{err:?}");
-        assert!(aurora.cancel.is_none(), "常驻门面不应被快照的令牌影响");
+        assert!(petalfall.cancel.is_none(), "常驻门面不应被快照的令牌影响");
     }
 
     /// 进度转发：池里一批下载的快照被节流成 Download 事件，最后一条是完成态且带总字节数；
@@ -834,15 +834,21 @@ mod tests {
         }
         let dir = tempfile::tempdir().unwrap();
         let tasks = vec![
-            aurora_download::DownloadTask::new(format!("{}/a", server.uri()), dir.path().join("a"))
-                .with_size(4),
-            aurora_download::DownloadTask::new(format!("{}/b", server.uri()), dir.path().join("b"))
-                .with_size(6),
+            petalfall_download::DownloadTask::new(
+                format!("{}/a", server.uri()),
+                dir.path().join("a"),
+            )
+            .with_size(4),
+            petalfall_download::DownloadTask::new(
+                format!("{}/b", server.uri()),
+                dir.path().join("b"),
+            )
+            .with_size(6),
         ];
 
-        let aurora = test_aurora();
+        let petalfall = test_petalfall();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let pool = aurora.download_pool_reporting(Some(&tx));
+        let pool = petalfall.download_pool_reporting(Some(&tx));
         let report = pool.download_all(tasks, None).await.unwrap();
         assert!(report.is_success());
         drop(pool);
@@ -876,9 +882,9 @@ mod tests {
             .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
-        let aurora = test_aurora().with_app_version("2.3.0-beta.1").unwrap();
-        let snapshot = aurora.clone();
-        for facade in [&aurora, &snapshot] {
+        let petalfall = test_petalfall().with_app_version("2.3.0-beta.1").unwrap();
+        let snapshot = petalfall.clone();
+        for facade in [&petalfall, &snapshot] {
             for client in [facade.http(), facade.http_manual()] {
                 let status = client
                     .get(format!("{}/ua", server.uri()))
@@ -889,7 +895,7 @@ mod tests {
                 assert_eq!(status.as_u16(), 204, "UA 不是应用版本时 mock 回 404");
             }
         }
-        let default = test_aurora()
+        let default = test_petalfall()
             .http()
             .get(format!("{}/ua", server.uri()))
             .send()
@@ -901,15 +907,15 @@ mod tests {
 
     #[test]
     fn set_selected_version_updates_config() {
-        let mut aurora = test_aurora();
-        assert!(aurora.config().selected_version.is_none());
-        aurora.set_selected_version(Some("1.20.1-Forge_47.4.20".to_owned()));
+        let mut petalfall = test_petalfall();
+        assert!(petalfall.config().selected_version.is_none());
+        petalfall.set_selected_version(Some("1.20.1-Forge_47.4.20".to_owned()));
         assert_eq!(
-            aurora.config().selected_version.as_deref(),
+            petalfall.config().selected_version.as_deref(),
             Some("1.20.1-Forge_47.4.20")
         );
         // 传 None 清空选择；删掉 setter 里的赋值这两条断言即挂。
-        aurora.set_selected_version(None);
-        assert!(aurora.config().selected_version.is_none());
+        petalfall.set_selected_version(None);
+        assert!(petalfall.config().selected_version.is_none());
     }
 }

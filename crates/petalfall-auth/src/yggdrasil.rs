@@ -3,8 +3,8 @@
 //! - Yggdrasil 认证：`authserver/authenticate`、`refresh`、`validate`、`invalidate`，
 //!   请求/响应字段与错误格式遵循 authlib-injector 的 Yggdrasil 服务端技术规范。
 //! - ALI 元数据预取：GET 用户填写的服务器地址，按 `X-Authlib-Injector-API-Location` 头解析出
-//!   真正的 API 根地址，再 GET 该根地址取元数据 JSON 并 Base64 编码（供 aurora-launch 拼装
-//!   `-Dauthlibinjector.yggdrasil.prefetched`）。javaagent 参数本身的拼装归 aurora-launch。
+//!   真正的 API 根地址，再 GET 该根地址取元数据 JSON 并 Base64 编码（供 petalfall-launch 拼装
+//!   `-Dauthlibinjector.yggdrasil.prefetched`）。javaagent 参数本身的拼装归 petalfall-launch。
 //! - 角色皮肤：会话服务器 `sessionserver/session/minecraft/profile/{uuid}` 返回的 `textures`
 //!   属性（Base64 JSON）里的 `SKIN.url` 与 `metadata.model`。
 //!
@@ -14,8 +14,8 @@
 
 use std::time::{Duration, Instant};
 
-use aurora_base::retry::{RetryPolicy, retry_async};
 use base64::Engine as _;
+use petalfall_base::retry::{RetryPolicy, retry_async};
 use reqwest::StatusCode;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -626,7 +626,7 @@ mod tests {
     }
 
     fn client_for(server: &MockServer) -> YggdrasilClient {
-        let http = aurora_base::http::build_client().expect("构建客户端");
+        let http = petalfall_base::http::build_client().expect("构建客户端");
         YggdrasilClient::new(http, format!("{}/", server.uri())).with_retry(no_retry())
     }
 
@@ -865,7 +865,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         let ali = prefetch_metadata(&http, &server.uri(), TEST_TIMEOUT)
             .await
             .unwrap();
@@ -896,7 +896,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         let ali = prefetch_metadata(&http, &server.uri(), TEST_TIMEOUT)
             .await
             .unwrap();
@@ -911,7 +911,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prefetch_rejects_servers_that_are_not_yggdrasil() {
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         // 网页、没有 meta 的 JSON、非 2xx：都能连上，但都不是验证服务器。
         let cases = [
             ResponseTemplate::new(200).set_body_string("<html>皮肤站首页</html>"),
@@ -941,7 +941,7 @@ mod tests {
     /// 地址是对的，只是验证服务器此刻出了故障：不能说成「不是验证服务器」，那样玩家会去改一个没写错的地址。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn prefetch_reports_a_server_fault_as_an_outage_not_a_wrong_address() {
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         for status in [429, 500, 503] {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
@@ -977,7 +977,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         let started = Instant::now();
         let err = prefetch_metadata(&http, &server.uri(), Duration::from_millis(300))
             .await

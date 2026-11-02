@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use aurora_base::retry::{RetryPolicy, retry_async};
+use petalfall_base::retry::{RetryPolicy, retry_async};
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 // 桶的时间和 sleep 必须走同一只钟，用例暂停时钟时两边才对得上。
@@ -36,7 +36,7 @@ type Gates = Mutex<HashMap<String, Arc<Mutex<TokenBucket>>>>;
 /// 按上游分桶是因为配额是各上游自己的：共用一个桶只会让打给一个上游的请求排在另一个上游的队后面，
 /// 分开后每个上游收到的请求上限不变。表项只增不删：一个进程里出现过的上游屈指可数。
 ///
-/// 只管元数据请求：文件下载走 aurora-download 自己的并发池，不受此限。
+/// 只管元数据请求：文件下载走 petalfall-download 自己的并发池，不受此限。
 static GATES: LazyLock<Gates> = LazyLock::new(Gates::default);
 
 struct TokenBucket {
@@ -183,7 +183,7 @@ mod tests {
             (full.len(), full[..4].to_vec()),
             (full.len(), full.clone()),
         ]);
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
 
         let value: serde_json::Value =
             send_json(&two_attempts(), "测试", || client.get(url.as_str()))
@@ -202,7 +202,7 @@ mod tests {
             (garbage.len(), garbage.clone()),
             (garbage.len(), garbage),
         ]);
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
 
         let err = send_json::<serde_json::Value, _>(&two_attempts(), "测试", || {
             client.get(url.as_str())
@@ -225,7 +225,7 @@ mod tests {
         let shared_bucket_floor =
             Duration::from_secs_f64((HOSTS as f64 - BUCKET_CAPACITY) / REFILL_PER_SEC);
         let body = br#"{"hits":7}"#.to_vec();
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
 
         let started = Instant::now();
         let mut requests = tokio::task::JoinSet::new();
@@ -262,7 +262,7 @@ mod tests {
         let floor = Duration::from_secs_f64((OVER_CAPACITY - 1) as f64 / REFILL_PER_SEC);
         let body = br#"{"hits":7}"#.to_vec();
         let (url, accepted) = raw_server(vec![(body.len(), body); total]);
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
 
         let started = Instant::now();
         let mut requests = tokio::task::JoinSet::new();

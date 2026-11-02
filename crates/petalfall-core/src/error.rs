@@ -1,8 +1,8 @@
 //! 门面层错误枚举。
 //!
-//! aurora-core 组合各下层 crate，故其错误既向下透传各 crate 的独立错误（`#[from]` 冒泡，不吞不掩），
+//! petalfall-core 组合各下层 crate，故其错误既向下透传各 crate 的独立错误（`#[from]` 冒泡，不吞不掩），
 //! 也补充门面自身的失败：配置读写/解析、缺失微软 client_id、目标版本未安装、无匹配 Java 等。
-//! 统一收口后由更上层（aurora-cli / 未来前端）做兜底展示。
+//! 统一收口后由更上层（petalfall-cli / 未来前端）做兜底展示。
 
 use std::path::PathBuf;
 
@@ -11,34 +11,34 @@ use std::path::PathBuf;
 pub enum CoreError {
     /// 下层公共设施错误（HTTP 构建、镜像改写、文件校验、目录定位）。
     #[error(transparent)]
-    Base(#[from] aurora_base::Error),
+    Base(#[from] petalfall_base::Error),
     /// 版本 JSON 解析/继承合并错误。
     #[error(transparent)]
-    Version(#[from] aurora_version::Error),
+    Version(#[from] petalfall_version::Error),
     /// 下载引擎错误。
     #[error(transparent)]
-    Download(#[from] aurora_download::Error),
+    Download(#[from] petalfall_download::Error),
     /// 安装（原版/加载器补全）错误。
     #[error(transparent)]
-    Install(#[from] aurora_install::Error),
+    Install(#[from] petalfall_install::Error),
     /// 实例（目录/版本发现/隔离）错误。
     #[error(transparent)]
-    Instance(#[from] aurora_instance::Error),
+    Instance(#[from] petalfall_instance::Error),
     /// Java 探测/自动下载错误。
     #[error(transparent)]
-    Java(#[from] aurora_java::Error),
+    Java(#[from] petalfall_java::Error),
     /// 账户/登录错误。
     #[error(transparent)]
-    Auth(#[from] aurora_auth::AuthError),
+    Auth(#[from] petalfall_auth::AuthError),
     /// 启动链路错误。
     #[error(transparent)]
-    Launch(#[from] aurora_launch::LaunchError),
+    Launch(#[from] petalfall_launch::LaunchError),
     /// Mod 平台错误（Modrinth/CurseForge 客户端、本地模组扫描与启禁）。
     #[error(transparent)]
-    ModPlatform(#[from] aurora_modplatform::Error),
+    ModPlatform(#[from] petalfall_modplatform::Error),
     /// 整合包文件错误（格式、清单、路径安全、解压）。
     #[error(transparent)]
-    Modpack(#[from] aurora_modpack::Error),
+    Modpack(#[from] petalfall_modpack::Error),
 
     /// 读取配置文件失败。
     #[error("读取配置文件 {path} 失败")]
@@ -135,7 +135,7 @@ pub enum CoreError {
     #[error("实例名 {name} 不可用：{}", rule.message())]
     InstanceNameInvalid {
         name: String,
-        rule: aurora_instance::NameViolation,
+        rule: petalfall_instance::NameViolation,
     },
     /// 启动器写在实例里的 JSON 文件（整合包信息、未完成标记、版本 JSON）读不懂。
     #[error("读不懂 {path}")]
@@ -196,7 +196,7 @@ pub enum CoreError {
         path: PathBuf,
         reason: JavaPathProblem,
         #[source]
-        source: Option<aurora_java::Error>,
+        source: Option<petalfall_java::Error>,
     },
     /// 手动添加的 Java 缺少运行时文件，多半没装完整；`missing` 相对 Java 根目录、以 `/` 分隔。
     #[error("这个 Java 缺少 {}，可能没装完整：{}", missing.join("、"), path.display())]
@@ -342,7 +342,7 @@ impl JavaPathProblem {
             JavaPathProblem::ProbeFailed => format!("识别不出这个 Java：{path}"),
             JavaPathProblem::ProbeTimeout => format!(
                 "这个 Java {} 秒内没有给出版本信息，已放弃：{path}",
-                aurora_java::PROBE_TIMEOUT.as_secs()
+                petalfall_java::PROBE_TIMEOUT.as_secs()
             ),
         }
     }
@@ -354,17 +354,17 @@ impl CoreError {
     pub fn is_cancelled(&self) -> bool {
         match self {
             CoreError::Download(err) => err.is_cancelled(),
-            CoreError::Install(aurora_install::Error::Download(err)) => err.is_cancelled(),
+            CoreError::Install(petalfall_install::Error::Download(err)) => err.is_cancelled(),
             CoreError::Java(err) => err.is_cancelled(),
             CoreError::Auth(err) => err.is_cancelled(),
-            CoreError::Modpack(aurora_modpack::Error::Cancelled) => true,
-            CoreError::Instance(aurora_instance::Error::Cancelled) => true,
+            CoreError::Modpack(petalfall_modpack::Error::Cancelled) => true,
+            CoreError::Instance(petalfall_instance::Error::Cancelled) => true,
             _ => false,
         }
     }
 }
 
-/// 门面层 `Result` 别名，下游用 `#[from] aurora_core::CoreError` 冒泡。
+/// 门面层 `Result` 别名，下游用 `#[from] petalfall_core::CoreError` 冒泡。
 pub type Result<T> = std::result::Result<T, CoreError>;
 
 #[cfg(test)]
@@ -373,20 +373,20 @@ mod tests {
 
     #[test]
     fn cancellation_is_recognised_at_every_layer_it_can_surface_from() {
-        assert!(CoreError::Download(aurora_download::Error::Cancelled).is_cancelled());
+        assert!(CoreError::Download(petalfall_download::Error::Cancelled).is_cancelled());
         assert!(
-            CoreError::Install(aurora_install::Error::Download(
-                aurora_download::Error::Cancelled
+            CoreError::Install(petalfall_install::Error::Download(
+                petalfall_download::Error::Cancelled
             ))
             .is_cancelled()
         );
-        assert!(CoreError::Java(aurora_java::Error::Cancelled).is_cancelled());
-        assert!(CoreError::Auth(aurora_auth::AuthError::Cancelled).is_cancelled());
-        assert!(!CoreError::Auth(aurora_auth::AuthError::ReloginRequired).is_cancelled());
-        assert!(CoreError::Modpack(aurora_modpack::Error::Cancelled).is_cancelled());
-        assert!(CoreError::Instance(aurora_instance::Error::Cancelled).is_cancelled());
+        assert!(CoreError::Java(petalfall_java::Error::Cancelled).is_cancelled());
+        assert!(CoreError::Auth(petalfall_auth::AuthError::Cancelled).is_cancelled());
+        assert!(!CoreError::Auth(petalfall_auth::AuthError::ReloginRequired).is_cancelled());
+        assert!(CoreError::Modpack(petalfall_modpack::Error::Cancelled).is_cancelled());
+        assert!(CoreError::Instance(petalfall_instance::Error::Cancelled).is_cancelled());
         assert!(
-            !CoreError::Instance(aurora_instance::Error::WorldInUse {
+            !CoreError::Instance(petalfall_instance::Error::WorldInUse {
                 path: PathBuf::from("saves/w"),
             })
             .is_cancelled()
@@ -411,7 +411,7 @@ mod tests {
             .is_cancelled()
         );
         assert!(
-            !CoreError::Download(aurora_download::Error::Status {
+            !CoreError::Download(petalfall_download::Error::Status {
                 url: "http://x".into(),
                 status: 404,
             })
@@ -464,7 +464,7 @@ mod tests {
         let probed = CoreError::JavaPathInvalid {
             path: path.clone(),
             reason: JavaPathProblem::ProbeFailed,
-            source: Some(aurora_java::Error::JavaVersionParse {
+            source: Some(petalfall_java::Error::JavaVersionParse {
                 output: "garbage".into(),
             }),
         };

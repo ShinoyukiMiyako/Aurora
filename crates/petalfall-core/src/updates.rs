@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use aurora_modplatform::{
+use petalfall_modplatform::{
     BodyFormat, CurseForgeClient, CurseForgeFile, CurseForgeFingerprintMatch, InstalledMod,
     ModHashes, ModLoader, ModVersionInfo, ModrinthVersion, Platform, ReleaseChannel, hash_mod_file,
 };
@@ -29,7 +29,7 @@ use crate::compat::{
 };
 use crate::deps::project_gone;
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::ledger::{LedgerEntry, UpdateHold};
 use crate::modfs::{
     NETWORK_CONCURRENCY, bounded_map, ledger_key, local_concurrency, lock_mods_dir, present, refuse,
@@ -88,7 +88,7 @@ struct Identified {
     modified_ms: i64,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 检查该实例可更新的 Mod。
     ///
     /// 有身份走精确查，无身份先做一轮哈希反查补身份（补上的身份写回卷宗，下次不必再查）。返回顺序按
@@ -99,8 +99,8 @@ impl Aurora {
             .await
     }
 
-    /// [`Aurora::check_updates`] 的本体。`curseforge` 构造 CurseForge 客户端，只用来判断 CurseForge
-    /// 那部分能不能查；文件列表照旧经版本列表缓存取。生产传 [`Aurora::curseforge_client`]：有没有 key
+    /// [`Petalfall::check_updates`] 的本体。`curseforge` 构造 CurseForge 客户端，只用来判断 CurseForge
+    /// 那部分能不能查；文件列表照旧经版本列表缓存取。生产传 [`Petalfall::curseforge_client`]：有没有 key
     /// 取决于构建与进程环境，测试要稳定地造出「没有 key」只能从这里注入。
     async fn check_updates_with(
         &self,
@@ -312,13 +312,13 @@ impl Aurora {
         }
 
         if !listed_targets.is_empty() {
-            let aurora = self.clone();
+            let petalfall = self.clone();
             let found = bounded_map(listed_targets, NETWORK_CONCURRENCY, move |(key, entry)| {
-                let aurora = aurora.clone();
+                let petalfall = petalfall.clone();
                 let mc_version = mc_version.clone();
                 let loaders = loaders.clone();
                 async move {
-                    let listed = aurora
+                    let listed = petalfall
                         .list_mod_versions(
                             entry.platform,
                             &entry.project_id,
@@ -549,7 +549,7 @@ impl Aurora {
         }
         let client = match self.curseforge_client() {
             Ok(client) => client,
-            Err(CoreError::ModPlatform(aurora_modplatform::Error::CurseForgeKeyMissing)) => {
+            Err(CoreError::ModPlatform(petalfall_modplatform::Error::CurseForgeKeyMissing)) => {
                 tracing::info!("未配置 CurseForge API key，跳过指纹反查");
                 return Ok(HashMap::new());
             }
@@ -569,7 +569,7 @@ impl Aurora {
 async fn hash_unless_gone(path: &std::path::Path) -> Result<Option<ModHashes>> {
     match hash_mod_file(path).await {
         Ok(hashes) => Ok(Some(hashes)),
-        Err(aurora_modplatform::Error::Base(aurora_base::Error::Io { source, .. }))
+        Err(petalfall_modplatform::Error::Base(petalfall_base::Error::Io { source, .. }))
             if source.kind() == std::io::ErrorKind::NotFound =>
         {
             tracing::info!(path = %path.display(), "文件在检查更新途中不见了，跳过");
@@ -582,7 +582,7 @@ async fn hash_unless_gone(path: &std::path::Path) -> Result<Option<ModHashes>> {
 /// CurseForge 来源的更新查不查得了。
 ///
 /// 未配置 API key 时这部分整体跳过并记 info：缺一把可选的钥匙不该让 Modrinth 那部分已经查到的更新
-/// 一并丢掉，与 [`Aurora::curseforge_fingerprint_lookup`] 停用指纹反查是同一约定。构造客户端的其它
+/// 一并丢掉，与 [`Petalfall::curseforge_fingerprint_lookup`] 停用指纹反查是同一约定。构造客户端的其它
 /// 失败照常冒泡。
 fn curseforge_ready(
     curseforge: impl FnOnce() -> Result<CurseForgeClient>,
@@ -590,7 +590,7 @@ fn curseforge_ready(
 ) -> Result<bool> {
     match curseforge() {
         Ok(_) => Ok(true),
-        Err(CoreError::ModPlatform(aurora_modplatform::Error::CurseForgeKeyMissing)) => {
+        Err(CoreError::ModPlatform(petalfall_modplatform::Error::CurseForgeKeyMissing)) => {
             tracing::info!(
                 pending,
                 "未配置 CurseForge API key，跳过 CurseForge 来源 Mod 的更新检查"
@@ -655,10 +655,10 @@ fn index_by_fingerprint(matches: Vec<CurseForgeFingerprintMatch>) -> HashMap<u32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use crate::ledger::Ledger;
-    use aurora_instance::IsolationPolicy;
-    use aurora_modplatform::ReleaseChannel;
+    use petalfall_instance::IsolationPolicy;
+    use petalfall_modplatform::ReleaseChannel;
     use sha1::{Digest, Sha1};
     use std::path::{Path, PathBuf};
     use wiremock::matchers::{body_partial_json, method, path};
@@ -701,12 +701,17 @@ mod tests {
         (path, sha1)
     }
 
-    fn aurora_at(mc: &Path, base: &str) -> Aurora {
-        let mut aurora =
-            Aurora::for_test(AuroraConfig::default(), mc.to_path_buf(), mc.to_path_buf());
-        aurora.set_isolation_policy(IsolationPolicy::All);
+    fn petalfall_at(mc: &Path, base: &str) -> Petalfall {
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
+            mc.to_path_buf(),
+            mc.to_path_buf(),
+        );
+        petalfall.set_isolation_policy(IsolationPolicy::All);
         // CurseForge 端点也指向 mock：测试机若恰好配了 API key，也不会打到生产端点。
-        aurora.with_modrinth_base(base).with_curseforge_base(base)
+        petalfall
+            .with_modrinth_base(base)
+            .with_curseforge_base(base)
     }
 
     fn ledger_entry(
@@ -730,12 +735,16 @@ mod tests {
         }
     }
 
-    async fn save_ledger(aurora: &Aurora, version_id: &str, entries: Vec<LedgerEntry>) {
+    async fn save_ledger(petalfall: &Petalfall, version_id: &str, entries: Vec<LedgerEntry>) {
         let mut ledger = Ledger::default();
         for entry in entries {
             ledger.upsert(entry);
         }
-        aurora.ledger_store(version_id).save(&ledger).await.unwrap();
+        petalfall
+            .ledger_store(version_id)
+            .save(&ledger)
+            .await
+            .unwrap();
     }
 
     /// 一条正式版的 Modrinth 版本 JSON（含单个主文件）。
@@ -837,9 +846,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-fabric",
             vec![
                 ledger_entry("sodium-0.5.3.jar", "AANobbMI", "old1", None),
@@ -848,7 +857,7 @@ mod tests {
         )
         .await;
 
-        let found = aurora.check_updates("1.20.1-fabric").await.unwrap();
+        let found = petalfall.check_updates("1.20.1-fabric").await.unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].file_name, "sodium-0.5.3.jar");
         assert_eq!(found[0].title.as_deref(), Some("Sodium"));
@@ -911,9 +920,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-quilt",
             vec![ledger_entry(
                 "installed.jar",
@@ -923,7 +932,7 @@ mod tests {
             )],
         )
         .await;
-        aurora.check_updates("1.20.1-quilt").await.unwrap()
+        petalfall.check_updates("1.20.1-quilt").await.unwrap()
     }
 
     /// 真实数据：AppleSkin 2.5.0+mc1.20 之后的版本只标 fabric，只拿 quilt 去问平台就报不出更新。
@@ -1076,9 +1085,9 @@ mod tests {
         )
         .await;
 
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-fabric",
             vec![ledger_entry(
                 "sodium-beta.jar",
@@ -1089,7 +1098,7 @@ mod tests {
         )
         .await;
         assert!(
-            aurora
+            petalfall
                 .check_updates("1.20.1-fabric")
                 .await
                 .unwrap()
@@ -1124,9 +1133,9 @@ mod tests {
         )
         .await;
 
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-fabric",
             vec![ledger_entry(
                 "lithium-0.9.0.jar",
@@ -1137,7 +1146,7 @@ mod tests {
         )
         .await;
         assert!(
-            aurora
+            petalfall
                 .check_updates("1.20.1-fabric")
                 .await
                 .unwrap()
@@ -1157,15 +1166,15 @@ mod tests {
         mount_post(&server, "/version_files", "{}".to_owned()).await;
         mount_post(&server, "/version_files/update", "{}".to_owned()).await;
 
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-fabric",
             vec![ledger_entry("sodium-0.5.3.jar", "AANobbMI", "old1", None)],
         )
         .await;
         assert!(
-            aurora
+            petalfall
                 .check_updates("1.20.1-fabric")
                 .await
                 .unwrap()
@@ -1181,15 +1190,15 @@ mod tests {
         let mc = tmp.path();
         put_version(mc, "1.20.1", VANILLA_JSON).await;
         put_mod(mc, "1.20.1", "sodium.jar", b"sodium-payload").await;
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1",
             vec![ledger_entry("sodium.jar", "AANobbMI", "old1", None)],
         )
         .await;
 
-        assert!(aurora.check_updates("1.20.1").await.unwrap().is_empty());
+        assert!(petalfall.check_updates("1.20.1").await.unwrap().is_empty());
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
@@ -1260,8 +1269,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let aurora = aurora_at(mc, &server.uri());
-        let found = aurora.check_updates("1.20.1-fabric").await.unwrap();
+        let petalfall = petalfall_at(mc, &server.uri());
+        let found = petalfall.check_updates("1.20.1-fabric").await.unwrap();
         assert_eq!(found.len(), 1);
         // 禁用态文件按启用态名字报出（卷宗的 join 键）。
         assert_eq!(found[0].file_name, "mystery.jar");
@@ -1269,7 +1278,11 @@ mod tests {
         assert_eq!(found[0].title.as_deref(), Some("Sodium"));
         assert_eq!(found[0].latest.version_id, "new2");
 
-        let ledger = aurora.ledger_store("1.20.1-fabric").load().await.unwrap();
+        let ledger = petalfall
+            .ledger_store("1.20.1-fabric")
+            .load()
+            .await
+            .unwrap();
         let entry = ledger.find("mystery.jar").expect("反查到的身份应写入卷宗");
         assert_eq!(entry.platform, Platform::Modrinth);
         assert_eq!(entry.project_id, "AANobbMI");
@@ -1284,7 +1297,7 @@ mod tests {
         assert_eq!(entry.installed_as_dependency_of, None);
 
         // 列表随即带上来源与图标。
-        let listed = aurora.list_mods("1.20.1-fabric").await.unwrap();
+        let listed = petalfall.list_mods("1.20.1-fabric").await.unwrap();
         assert_eq!(
             listed[0].source.as_ref().unwrap().title.as_deref(),
             Some("Sodium")
@@ -1330,10 +1343,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let aurora = aurora_at(mc, &server.uri());
-        aurora.check_updates("1.20.1-fabric").await.unwrap();
+        let petalfall = petalfall_at(mc, &server.uri());
+        petalfall.check_updates("1.20.1-fabric").await.unwrap();
 
-        let ledger = aurora.ledger_store("1.20.1-fabric").load().await.unwrap();
+        let ledger = petalfall
+            .ledger_store("1.20.1-fabric")
+            .load()
+            .await
+            .unwrap();
         assert!(ledger.find("mystery.jar").is_none());
     }
 
@@ -1355,15 +1372,15 @@ mod tests {
         )
         .await;
 
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         assert!(
-            aurora
+            petalfall
                 .check_updates("1.20.1-fabric")
                 .await
                 .unwrap()
                 .is_empty()
         );
-        let ledger_path = aurora.ledger_store("1.20.1-fabric").path().to_path_buf();
+        let ledger_path = petalfall.ledger_store("1.20.1-fabric").path().to_path_buf();
         assert!(!tokio::fs::try_exists(&ledger_path).await.unwrap());
         // 没有任何已知身份，最新版本查询一次都不该发。
         let requests = server.received_requests().await.unwrap();
@@ -1415,9 +1432,9 @@ mod tests {
         )
         .await;
 
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-fabric",
             vec![
                 ledger_entry("sodium-0.5.3.jar", "AANobbMI", "old1", None),
@@ -1426,13 +1443,13 @@ mod tests {
         )
         .await;
 
-        let dirs = aurora.resolved_dirs("1.20.1-fabric").await.unwrap();
+        let dirs = petalfall.resolved_dirs("1.20.1-fabric").await.unwrap();
         let scanned = scan_installed(&dirs).await.unwrap();
         assert_eq!(scanned.len(), 3);
         tokio::fs::remove_file(&unknown).await.unwrap();
         tokio::fs::remove_file(&known).await.unwrap();
 
-        let found = aurora
+        let found = petalfall
             .check_scanned(
                 "1.20.1-fabric",
                 &dirs,
@@ -1464,7 +1481,7 @@ mod tests {
         assert!(
             matches!(
                 err,
-                CoreError::ModPlatform(aurora_modplatform::Error::Base(_))
+                CoreError::ModPlatform(petalfall_modplatform::Error::Base(_))
             ),
             "目录不是文件，读取失败要原样报出来，得到 {err:?}"
         );
@@ -1477,7 +1494,7 @@ mod tests {
     }
 
     /// 一个实例里同时有 Modrinth 与 CurseForge 来源的 Mod：后者的卷宗条目是 JEI（238222，文件 100）。
-    async fn mixed_platform_instance(mc: &Path, server: &MockServer) -> Aurora {
+    async fn mixed_platform_instance(mc: &Path, server: &MockServer) -> Petalfall {
         put_version(mc, "1.20.1-fabric", FABRIC_JSON).await;
         let (_, sha1) = put_mod(mc, "1.20.1-fabric", "sodium-0.5.3.jar", b"sodium-payload").await;
         put_mod(mc, "1.20.1-fabric", "jei-100.jar", b"jei-payload").await;
@@ -1513,12 +1530,12 @@ mod tests {
             ),
         )
         .await;
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         let mut jei = ledger_entry("jei-100.jar", "238222", "100", None);
         jei.platform = Platform::CurseForge;
         jei.title = Some("JEI".to_owned());
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-fabric",
             vec![
                 ledger_entry("sodium-0.5.3.jar", "AANobbMI", "old1", Some(&sha1)),
@@ -1526,12 +1543,12 @@ mod tests {
             ],
         )
         .await;
-        aurora
+        petalfall
     }
 
-    fn key_missing() -> Result<aurora_modplatform::CurseForgeClient> {
+    fn key_missing() -> Result<petalfall_modplatform::CurseForgeClient> {
         Err(CoreError::ModPlatform(
-            aurora_modplatform::Error::CurseForgeKeyMissing,
+            petalfall_modplatform::Error::CurseForgeKeyMissing,
         ))
     }
 
@@ -1541,9 +1558,9 @@ mod tests {
     async fn check_updates_without_curseforge_key_keeps_modrinth_results() {
         let tmp = tempfile::tempdir().unwrap();
         let server = MockServer::start().await;
-        let aurora = mixed_platform_instance(tmp.path(), &server).await;
+        let petalfall = mixed_platform_instance(tmp.path(), &server).await;
 
-        let found = aurora
+        let found = petalfall
             .check_updates_with("1.20.1-fabric", key_missing)
             .await
             .unwrap();
@@ -1592,7 +1609,7 @@ mod tests {
             )))
             .mount(&server)
             .await;
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         let mut jei = ledger_entry("jei-100.jar", "238222", "100", None);
         jei.platform = Platform::CurseForge;
         let pinned = LedgerEntry {
@@ -1601,9 +1618,9 @@ mod tests {
             }),
             ..ledger_entry("sodium.jar", "AANobbMI", "v1", Some(&sha1))
         };
-        save_ledger(&aurora, "1.20.1-fabric", vec![pinned, jei]).await;
+        save_ledger(&petalfall, "1.20.1-fabric", vec![pinned, jei]).await;
 
-        let found = aurora
+        let found = petalfall
             .check_updates_with("1.20.1-fabric", key_missing)
             .await
             .unwrap();
@@ -1625,21 +1642,23 @@ mod tests {
     async fn check_updates_surfaces_other_curseforge_client_errors() {
         let tmp = tempfile::tempdir().unwrap();
         let server = MockServer::start().await;
-        let aurora = mixed_platform_instance(tmp.path(), &server).await;
+        let petalfall = mixed_platform_instance(tmp.path(), &server).await;
 
-        let err = aurora
+        let err = petalfall
             .check_updates_with("1.20.1-fabric", || {
-                Err(CoreError::ModPlatform(aurora_modplatform::Error::Status {
-                    url: "https://api.curseforge.com".to_owned(),
-                    status: 500,
-                }))
+                Err(CoreError::ModPlatform(
+                    petalfall_modplatform::Error::Status {
+                        url: "https://api.curseforge.com".to_owned(),
+                        status: 500,
+                    },
+                ))
             })
             .await
             .unwrap_err();
         assert!(
             matches!(
                 err,
-                CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 500, .. })
+                CoreError::ModPlatform(petalfall_modplatform::Error::Status { status: 500, .. })
             ),
             "实得 {err:?}"
         );
@@ -1669,11 +1688,11 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let aurora = mixed_platform_instance(tmp.path(), &server)
+        let petalfall = mixed_platform_instance(tmp.path(), &server)
             .await
             .with_curseforge_key("test-key");
 
-        let found = aurora.check_updates("1.20.1-fabric").await.unwrap();
+        let found = petalfall.check_updates("1.20.1-fabric").await.unwrap();
         let names: Vec<(&str, &str)> = found
             .iter()
             .map(|c| (c.file_name.as_str(), c.latest.version_id.as_str()))
@@ -1703,11 +1722,11 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let aurora = mixed_platform_instance(tmp.path(), &server)
+        let petalfall = mixed_platform_instance(tmp.path(), &server)
             .await
             .with_curseforge_key("test-key");
         put_mod(tmp.path(), "1.20.1-fabric", "gone.jar", b"gone-payload").await;
-        let store = aurora.ledger_store("1.20.1-fabric");
+        let store = petalfall.ledger_store("1.20.1-fabric");
         let mut ledger = store.load().await.unwrap();
         ledger.upsert(LedgerEntry {
             update_hold: Some(UpdateHold::Pinned {
@@ -1717,7 +1736,7 @@ mod tests {
         });
         store.save(&ledger).await.unwrap();
 
-        let found = aurora.check_updates("1.20.1-fabric").await.unwrap();
+        let found = petalfall.check_updates("1.20.1-fabric").await.unwrap();
 
         let names: Vec<&str> = found.iter().map(|c| c.file_name.as_str()).collect();
         assert_eq!(names, vec!["sodium-0.5.3.jar"]);
@@ -1734,15 +1753,15 @@ mod tests {
             .respond_with(ResponseTemplate::new(403))
             .mount(&server)
             .await;
-        let aurora = mixed_platform_instance(tmp.path(), &server)
+        let petalfall = mixed_platform_instance(tmp.path(), &server)
             .await
             .with_curseforge_key("test-key");
 
-        let err = aurora.check_updates("1.20.1-fabric").await.unwrap_err();
+        let err = petalfall.check_updates("1.20.1-fabric").await.unwrap_err();
         assert!(
             matches!(
                 err,
-                CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 403, .. })
+                CoreError::ModPlatform(petalfall_modplatform::Error::Status { status: 403, .. })
             ),
             "实得 {err:?}"
         );
@@ -1751,8 +1770,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn check_updates_on_uninstalled_version_errors() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path(), "http://127.0.0.1:1");
-        let err = aurora.check_updates("ghost").await.unwrap_err();
+        let petalfall = petalfall_at(tmp.path(), "http://127.0.0.1:1");
+        let err = petalfall.check_updates("ghost").await.unwrap_err();
         assert!(matches!(err, CoreError::VersionNotInstalled { id } if id == "ghost"));
     }
 
@@ -1928,9 +1947,9 @@ mod tests {
         )
         .await;
 
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-fabric",
             vec![
                 LedgerEntry {
@@ -1942,7 +1961,7 @@ mod tests {
         )
         .await;
 
-        let found = aurora.check_updates("1.20.1-fabric").await.unwrap();
+        let found = petalfall.check_updates("1.20.1-fabric").await.unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].file_name, "lithium.jar");
         assert_eq!(found[0].latest.version_id, "l2");
@@ -1965,7 +1984,7 @@ mod tests {
             .unwrap();
         server.reset().await;
         assert!(
-            aurora
+            petalfall
                 .check_updates("1.20.1-fabric")
                 .await
                 .unwrap()
@@ -2016,16 +2035,16 @@ mod tests {
             .mount(&server)
             .await;
 
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         let pinned = |v: &str| LedgerEntry {
             update_hold: Some(UpdateHold::Pinned {
                 version_id: v.to_owned(),
             }),
             ..ledger_entry("sodium.jar", "AANobbMI", "v1", Some(&sha1))
         };
-        save_ledger(&aurora, "1.20.1-fabric", vec![pinned("v2")]).await;
+        save_ledger(&petalfall, "1.20.1-fabric", vec![pinned("v2")]).await;
 
-        let found = aurora.check_updates("1.20.1-fabric").await.unwrap();
+        let found = petalfall.check_updates("1.20.1-fabric").await.unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].current_version_id, "v1");
         assert_eq!(found[0].latest.version_id, "v2");
@@ -2034,9 +2053,9 @@ mod tests {
         assert_eq!(count_requests(&requests, "/version_files"), 0);
         assert_eq!(count_requests(&requests, "/project/AANobbMI/version"), 1);
 
-        save_ledger(&aurora, "1.20.1-fabric", vec![pinned("v1")]).await;
+        save_ledger(&petalfall, "1.20.1-fabric", vec![pinned("v1")]).await;
         assert!(
-            aurora
+            petalfall
                 .check_updates("1.20.1-fabric")
                 .await
                 .unwrap()
@@ -2071,7 +2090,7 @@ mod tests {
         put_mod(mc, "1.20.1-fabric", "sodium.jar", b"sodium").await;
 
         let server = MockServer::start().await;
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         let held = |entry: LedgerEntry, hold: UpdateHold| LedgerEntry {
             update_hold: Some(hold),
             ..entry
@@ -2079,7 +2098,7 @@ mod tests {
         let sodium = ledger_entry("sodium.jar", "AANobbMI", "s1", None);
         let iris = ledger_entry("iris.jar", "YL57xq9U", "i1", Some(&iris_sha1));
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-fabric",
             vec![
                 held(
@@ -2099,7 +2118,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/version_files"))
             .respond_with(RewriteLedgerThenRespond {
-                ledger_path: aurora.ledger_store("1.20.1-fabric").path().to_path_buf(),
+                ledger_path: petalfall.ledger_store("1.20.1-fabric").path().to_path_buf(),
                 ledger: serde_json::to_vec(&lifted).unwrap(),
                 body: format!(
                     r#"{{"{lithium_sha1}":{}}}"#,
@@ -2184,7 +2203,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let found = aurora.check_updates("1.20.1-fabric").await.unwrap();
+        let found = petalfall.check_updates("1.20.1-fabric").await.unwrap();
         assert_eq!(
             found
                 .iter()
@@ -2204,7 +2223,11 @@ mod tests {
         assert_eq!(update.len(), 1);
         assert_eq!(update[0]["hashes"], serde_json::json!([lithium_sha1]));
         // 反查补上的身份照常写回，恢复检查的设置不被覆盖。
-        let ledger = aurora.ledger_store("1.20.1-fabric").load().await.unwrap();
+        let ledger = petalfall
+            .ledger_store("1.20.1-fabric")
+            .load()
+            .await
+            .unwrap();
         assert_eq!(ledger.find("lithium.jar").unwrap().version_id, "l1");
         assert_eq!(ledger.find("sodium.jar").unwrap().update_hold, None);
         assert_eq!(ledger.find("iris.jar").unwrap().update_hold, None);
@@ -2288,9 +2311,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-fabric",
             vec![
                 ledger_entry("sodium.jar", "AANobbMI", "s1", Some(&sodium_sha1)),
@@ -2299,7 +2322,7 @@ mod tests {
         )
         .await;
 
-        let found = aurora.check_updates("1.20.1-fabric").await.unwrap();
+        let found = petalfall.check_updates("1.20.1-fabric").await.unwrap();
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].file_name, "iris.jar");
         assert_eq!(found[0].latest.version_id, "i2");
@@ -2361,15 +2384,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-fabric",
             vec![ledger_entry("sodium.jar", "AANobbMI", "s1", Some(&sha1))],
         )
         .await;
         assert!(
-            aurora
+            petalfall
                 .check_updates("1.20.1-fabric")
                 .await
                 .unwrap()
@@ -2379,7 +2402,7 @@ mod tests {
 
     fn io_refusal(err: &CoreError) -> (std::io::ErrorKind, String) {
         match err {
-            CoreError::Base(aurora_base::Error::Io { source, .. }) => {
+            CoreError::Base(petalfall_base::Error::Io { source, .. }) => {
                 (source.kind(), source.to_string())
             }
             other => panic!("期望 IO 拒绝，得到 {other:?}"),
@@ -2429,15 +2452,15 @@ mod tests {
             .mount(&server)
             .await;
 
-        let aurora = aurora_at(mc, &server.uri());
+        let petalfall = petalfall_at(mc, &server.uri());
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-fabric",
             vec![ledger_entry("sodium.jar", "AANobbMI", "old1", None)],
         )
         .await;
 
-        let got = aurora
+        let got = petalfall
             .mod_update_changelog("1.20.1-fabric", "sodium.jar.disabled", "new2")
             .await
             .unwrap();
@@ -2450,7 +2473,7 @@ mod tests {
             }
         );
         for empty in ["blank", "null"] {
-            let got = aurora
+            let got = petalfall
                 .mod_update_changelog("1.20.1-fabric", "sodium.jar", empty)
                 .await
                 .unwrap();
@@ -2458,7 +2481,7 @@ mod tests {
             assert_eq!(got.format, BodyFormat::Markdown);
         }
         for wrong in ["other", "ghost"] {
-            let err = aurora
+            let err = petalfall
                 .mod_update_changelog("1.20.1-fabric", "sodium.jar", wrong)
                 .await
                 .unwrap_err();
@@ -2496,9 +2519,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let aurora = aurora_at(mc, &server.uri()).with_curseforge_key("test-key");
+        let petalfall = petalfall_at(mc, &server.uri()).with_curseforge_key("test-key");
         save_ledger(
-            &aurora,
+            &petalfall,
             "1.20.1-fabric",
             vec![LedgerEntry {
                 platform: Platform::CurseForge,
@@ -2507,7 +2530,7 @@ mod tests {
         )
         .await;
 
-        let got = aurora
+        let got = petalfall
             .mod_update_changelog("1.20.1-fabric", "jei.jar", "5001")
             .await
             .unwrap();
@@ -2518,7 +2541,7 @@ mod tests {
             Some("<p>JEI 15.3</p><ul><li>修复配方查找</li></ul>")
         );
 
-        let err = aurora
+        let err = petalfall
             .mod_update_changelog("1.20.1-fabric", "jei.jar", "not-a-number")
             .await
             .unwrap_err();
@@ -2528,7 +2551,7 @@ mod tests {
             "{err:?}"
         );
 
-        let err = aurora
+        let err = petalfall
             .mod_update_changelog("1.20.1-fabric", "manual.jar", "5001")
             .await
             .unwrap_err();
@@ -2536,7 +2559,7 @@ mod tests {
         assert_eq!(kind, std::io::ErrorKind::NotFound);
         assert!(reason.contains("manual.jar 没有平台来源记录"), "{reason}");
 
-        let err = aurora
+        let err = petalfall
             .mod_update_changelog("1.20.1-fabric", "config.toml", "5001")
             .await
             .unwrap_err();

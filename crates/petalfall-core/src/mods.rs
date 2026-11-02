@@ -18,15 +18,17 @@
 //! 所有改动 mods 目录的操作都在该目录的写锁下进行，并在动第一个文件前探测占用（游戏运行时 jar 被
 //! JVM 打开着，Windows 上既不能改名也不能删）。
 //!
-//! 玩家拖进来的本地 jar 走 [`Aurora::add_local_mods`]：同样先进暂存再移进 `mods/`、同样在写锁下、同样记
+//! 玩家拖进来的本地 jar 走 [`Petalfall::add_local_mods`]：同样先进暂存再移进 `mods/`、同样在写锁下、同样记
 //! 历史，但没有平台版本可记，所以不写卷宗，也不顶替已有文件。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use aurora_download::DownloadTask;
-use aurora_instance::{AURORA_META_DIR, DiscoveredVersion, VersionSettingsStore, discover_version};
-use aurora_modplatform::{
+use petalfall_download::DownloadTask;
+use petalfall_instance::{
+    DiscoveredVersion, PETALFALL_META_DIR, VersionSettingsStore, discover_version,
+};
+use petalfall_modplatform::{
     DISABLED_SUFFIX, InstalledMod, ModVersionInfo, Platform, disable_mod, enable_mod,
     parse_mod_metadata, scan_mods_dir_cached,
 };
@@ -36,7 +38,7 @@ use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed, single_blocked};
 use crate::deps::{InstallPlan, PlannedItem};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::history::HistoryEvent;
 use crate::ledger::{Ledger, LedgerEntry, UpdateHold};
 use crate::modfs::{
@@ -185,13 +187,13 @@ struct Placement {
     backup_file: Option<String>,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 按安装计划把某平台上的一个模组版本（连同它的必需前置）安装到指定实例的 mods 目录。
     ///
     /// `project_id` / `mod_version_id` 的语义随平台而定：Modrinth 为工程 id/slug 与版本 id；CurseForge
     /// 为数字 modId 与 fileId（以十进制字符串传入）。
     ///
-    /// 流程：[`Aurora::plan_install`] 算出计划 -> 全部文件下到暂存区 -> 逐个校验 sha1/大小 -> 全过才
+    /// 流程：[`Petalfall::plan_install`] 算出计划 -> 全部文件下到暂存区 -> 逐个校验 sha1/大小 -> 全过才
     /// 移入 `mods/` -> 写卷宗与变更历史 -> 报成功。校验没全过就一个文件都不移，清掉暂存并冒泡错误。
     /// 计划里 `already_satisfied` 的项直接跳过：同工程同版本的文件已经躺在 `mods/` 里。
     pub async fn install_mod(
@@ -222,7 +224,7 @@ impl Aurora {
     }
 
     /// 把实例里某个已识别来源的 Mod 换成同工程的 `mod_version_id`（通常取自
-    /// [`Aurora::check_updates`] 给出的最新版）。
+    /// [`Petalfall::check_updates`] 给出的最新版）。
     ///
     /// 走与安装同一条管线：旧文件改名为 `.old` 留作回滚凭据，历史记一条更新事件，新版本声明的必需前置
     /// 一并补齐，补不齐的记进结果的 `skipped`。`file_name` 是列表里的磁盘文件名（禁用态带 `.disabled`
@@ -329,7 +331,7 @@ impl Aurora {
 
     /// 启用或禁用指定实例里的某个模组，返回切换后的新路径。
     ///
-    /// `file_name` 应为 [`Aurora::list_mods`] 返回的磁盘文件名（禁用态带 `.disabled` 后缀）。启禁以文件
+    /// `file_name` 应为 [`Petalfall::list_mods`] 返回的磁盘文件名（禁用态带 `.disabled` 后缀）。启禁以文件
     /// 重命名实现，卷宗按启用态文件名记账，因此无需改写卷宗；目标名已存在会冒泡冲突错误。
     pub async fn set_mod_enabled(
         &self,
@@ -421,7 +423,7 @@ impl Aurora {
         ensure_not_held(vec![path.clone()]).await?;
         tokio::fs::remove_file(&path)
             .await
-            .map_err(|source| aurora_base::Error::Io {
+            .map_err(|source| petalfall_base::Error::Io {
                 path: path.clone(),
                 source,
             })?;
@@ -480,13 +482,13 @@ impl Aurora {
         Ok(InstanceDirs {
             mods_dir: working_dir.join(MODS_DIR),
             metadata_cache: working_dir
-                .join(AURORA_META_DIR)
+                .join(PETALFALL_META_DIR)
                 .join(MOD_METADATA_CACHE_FILE),
             working_dir,
         })
     }
 
-    /// [`Aurora::resolve_instance`] + [`Aurora::instance_dirs`]。
+    /// [`Petalfall::resolve_instance`] + [`Petalfall::instance_dirs`]。
     pub(crate) async fn resolved_dirs(&self, version_id: &str) -> Result<InstanceDirs> {
         let version = self.resolve_instance(version_id).await?;
         self.instance_dirs(&version).await
@@ -558,13 +560,13 @@ impl Aurora {
         // 落位与记账放进独立任务：命令层取消后会在宽限期满时丢弃本 future，若这一段跟着被丢弃，
         // 就会留下「文件已移进 mods、卷宗与历史还没写」的半截状态。下载阶段可以取消，落位阶段一旦
         // 开始必须走完。
-        let aurora = self.clone();
+        let petalfall = self.clone();
         let owned_version = version_id.to_owned();
         let mods_dir = dirs.mods_dir.clone();
         let metadata_cache = dirs.metadata_cache.clone();
         let sink = events.cloned();
         let placed_main = tokio::spawn(async move {
-            let outcome = aurora
+            let outcome = petalfall
                 .commit_staged(
                     &owned_version,
                     &mods_dir,
@@ -665,7 +667,7 @@ impl Aurora {
                         project_id: mod_id,
                         file_id,
                         file_name: version.file_name.clone(),
-                        web_url: aurora_modplatform::curseforge::file_page_url(project, file_id),
+                        web_url: petalfall_modplatform::curseforge::file_page_url(project, file_id),
                         destination: format!("{MODS_DIR}/{}", version.file_name),
                         sha1: version.sha1.clone(),
                         fingerprint: 0,
@@ -720,7 +722,7 @@ impl Aurora {
             if item.sha1.is_none() {
                 // 平台没给 SHA-1 的文件（部分 CurseForge 老文件）记实测值：卷宗里的哈希是之后按
                 // 哈希批量查更新的钥匙，留空就等于放弃这个文件的更新检查。
-                item.sha1 = Some(aurora_base::fs::sha1_hex(&item.task.dest).await?);
+                item.sha1 = Some(petalfall_base::fs::sha1_hex(&item.task.dest).await?);
             }
             emit(
                 events,
@@ -770,7 +772,7 @@ impl Aurora {
 
         tokio::fs::create_dir_all(mods_dir)
             .await
-            .map_err(|source| aurora_base::Error::Io {
+            .map_err(|source| petalfall_base::Error::Io {
                 path: mods_dir.to_owned(),
                 source,
             })?;
@@ -999,12 +1001,13 @@ fn ensure_unique_targets(staged: &[StagedItem], mods_dir: &Path) -> Result<()> {
 /// 里躺着的就是对的东西」之上。平台两样都没给时能验的只剩「不是个空壳」——0 字节的 jar 必然是错误页
 /// 或断流，装进去只会在启动时报一句看不懂的异常。
 async fn verify_staged(task: &DownloadTask) -> Result<()> {
-    let meta = tokio::fs::metadata(&task.dest)
-        .await
-        .map_err(|source| aurora_base::Error::Io {
-            path: task.dest.clone(),
-            source,
-        })?;
+    let meta =
+        tokio::fs::metadata(&task.dest)
+            .await
+            .map_err(|source| petalfall_base::Error::Io {
+                path: task.dest.clone(),
+                source,
+            })?;
     if meta.len() == 0 {
         return Err(refuse(
             &task.dest,
@@ -1015,7 +1018,7 @@ async fn verify_staged(task: &DownloadTask) -> Result<()> {
     if let Some(expected) = task.size
         && meta.len() != expected
     {
-        return Err(aurora_download::Error::SizeMismatch {
+        return Err(petalfall_download::Error::SizeMismatch {
             url: task.url.clone(),
             expected,
             actual: meta.len(),
@@ -1023,7 +1026,7 @@ async fn verify_staged(task: &DownloadTask) -> Result<()> {
         .into());
     }
     if let Some(sha1) = &task.sha1 {
-        aurora_base::fs::verify_sha1(&task.dest, sha1).await?;
+        petalfall_base::fs::verify_sha1(&task.dest, sha1).await?;
     }
     Ok(())
 }
@@ -1156,7 +1159,7 @@ async fn installed_mod_ids(dirs: &InstanceDirs) -> Result<HashMap<String, String
 /// 本次改动独占的暂存子目录，见 [`STAGING_DIR`]。
 fn new_staging_dir(working_dir: &Path) -> PathBuf {
     working_dir
-        .join(AURORA_META_DIR)
+        .join(PETALFALL_META_DIR)
         .join(STAGING_DIR)
         .join(format!("{}-{:08x}", now_unix(), fastrand::u32(..)))
 }
@@ -1200,7 +1203,7 @@ async fn add_local_jar(
     let file_name = local_jar_name(source)?;
     let meta = tokio::fs::metadata(source)
         .await
-        .map_err(|err| aurora_base::Error::Io {
+        .map_err(|err| petalfall_base::Error::Io {
             path: source.to_owned(),
             source: err,
         })?;
@@ -1228,14 +1231,14 @@ async fn add_local_jar(
     copy_as_new_file(source, &staged).await?;
     tokio::fs::create_dir_all(mods_dir)
         .await
-        .map_err(|err| aurora_base::Error::Io {
+        .map_err(|err| petalfall_base::Error::Io {
             path: mods_dir.to_owned(),
             source: err,
         })?;
     let dest = mods_dir.join(&file_name);
     tokio::fs::rename(&staged, &dest)
         .await
-        .map_err(|err| aurora_base::Error::Io {
+        .map_err(|err| petalfall_base::Error::Io {
             path: dest,
             source: err,
         })?;
@@ -1251,18 +1254,19 @@ async fn copy_as_new_file(source: &Path, dest: &Path) -> Result<()> {
     if let Some(dir) = dest.parent() {
         tokio::fs::create_dir_all(dir)
             .await
-            .map_err(|err| aurora_base::Error::Io {
+            .map_err(|err| petalfall_base::Error::Io {
                 path: dir.to_owned(),
                 source: err,
             })?;
     }
-    let mut reader = tokio::fs::File::open(source)
-        .await
-        .map_err(|err| aurora_base::Error::Io {
-            path: source.to_owned(),
-            source: err,
-        })?;
-    let dest_error = |err| aurora_base::Error::Io {
+    let mut reader =
+        tokio::fs::File::open(source)
+            .await
+            .map_err(|err| petalfall_base::Error::Io {
+                path: source.to_owned(),
+                source: err,
+            })?;
+    let dest_error = |err| petalfall_base::Error::Io {
         path: dest.to_owned(),
         source: err,
     };
@@ -1295,7 +1299,7 @@ async fn place_file(
     let dest = mods_dir.join(&disk_name);
     tokio::fs::rename(&item.task.dest, &dest)
         .await
-        .map_err(|source| aurora_base::Error::Io {
+        .map_err(|source| petalfall_base::Error::Io {
             path: dest.clone(),
             source,
         })?;
@@ -1338,7 +1342,7 @@ async fn backup_previous(mods_dir: &Path, old_file: &str) -> Result<(String, boo
             Ok(()) => return Ok((backup_file, disabled)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(source) => {
-                return Err(aurora_base::Error::Io {
+                return Err(petalfall_base::Error::Io {
                     path: candidate,
                     source,
                 }
@@ -1387,8 +1391,8 @@ async fn discard_staging(staging_dir: &Path, events: Option<&EventSink>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
-    use aurora_instance::{IsolationOverride, IsolationPolicy, VersionSettings};
+    use crate::config::PetalfallConfig;
+    use petalfall_instance::{IsolationOverride, IsolationPolicy, VersionSettings};
     use sha1::{Digest, Sha1};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1481,11 +1485,14 @@ mod tests {
     }
 
     /// 造一个隔离档位为 All 的测试门面。
-    fn isolated_aurora(mc: &Path, base: String) -> Aurora {
-        let mut aurora =
-            Aurora::for_test(AuroraConfig::default(), mc.to_path_buf(), mc.to_path_buf());
-        aurora.set_isolation_policy(IsolationPolicy::All);
-        aurora.with_modrinth_base(base)
+    fn isolated_petalfall(mc: &Path, base: String) -> Petalfall {
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
+            mc.to_path_buf(),
+            mc.to_path_buf(),
+        );
+        petalfall.set_isolation_policy(IsolationPolicy::All);
+        petalfall.with_modrinth_base(base)
     }
 
     /// 挂好「sodium v1 一个文件、无依赖」的全套端点，返回 jar 字节。
@@ -1516,7 +1523,7 @@ mod tests {
 
     fn refusal(err: &CoreError) -> (PathBuf, String) {
         match err {
-            CoreError::Base(aurora_base::Error::Io { path, source }) => {
+            CoreError::Base(petalfall_base::Error::Io { path, source }) => {
                 (path.clone(), source.to_string())
             }
             other => panic!("期望拒绝错误，得到 {other:?}"),
@@ -1532,9 +1539,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
 
-        let outcome = aurora
+        let outcome = petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
@@ -1549,11 +1556,11 @@ mod tests {
             .path()
             .join("versions")
             .join("1.21")
-            .join(AURORA_META_DIR)
+            .join(PETALFALL_META_DIR)
             .join(STAGING_DIR);
         assert!(dir_names(&staging).await.is_empty());
 
-        let listed = aurora.list_mods("1.21").await.unwrap();
+        let listed = petalfall.list_mods("1.21").await.unwrap();
         assert_eq!(listed.len(), 1);
         assert!(listed[0].installed.enabled);
         assert_eq!(listed[0].installed.size, jar.len() as u64);
@@ -1575,16 +1582,16 @@ mod tests {
         assert_eq!(json["source"]["platform"], "modrinth");
         assert_eq!(json["icon_url"], "https://cdn.example.invalid/sodium.png");
 
-        let disabled = aurora
+        let disabled = petalfall
             .set_mod_enabled("1.21", "sodium-v1.jar", false)
             .await
             .unwrap();
         assert_eq!(disabled, mods_dir.join("sodium-v1.jar.disabled"));
-        let listed = aurora.list_mods("1.21").await.unwrap();
+        let listed = petalfall.list_mods("1.21").await.unwrap();
         assert!(!listed[0].installed.enabled);
         // 禁用只改文件名，卷宗身份照样 join 得上。
         assert_eq!(listed[0].source.as_ref().unwrap().version_id, "v1");
-        aurora
+        petalfall
             .set_mod_enabled("1.21", "sodium-v1.jar.disabled", true)
             .await
             .unwrap();
@@ -1599,21 +1606,21 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let mut aurora = Aurora::for_test(
-            AuroraConfig::default(),
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             tmp.path().to_path_buf(),
         );
-        aurora.set_isolation_policy(IsolationPolicy::Disabled);
-        let aurora = aurora.with_modrinth_base(server.uri());
+        petalfall.set_isolation_policy(IsolationPolicy::Disabled);
+        let petalfall = petalfall.with_modrinth_base(server.uri());
 
-        let outcome = aurora
+        let outcome = petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
         assert_eq!(outcome.path, tmp.path().join("mods").join("sodium-v1.jar"));
         // 卷宗与历史仍挂在版本目录下：它们记的是这个版本的事实，不随工作目录漂移。
-        let ledger = aurora.ledger_store("1.21").load().await.unwrap();
+        let ledger = petalfall.ledger_store("1.21").load().await.unwrap();
         assert_eq!(ledger.entries.len(), 1);
         // 工程摘要端点没给标题：标题与图标如实留空，不编造。
         assert_eq!(ledger.entries[0].title, None);
@@ -1637,15 +1644,15 @@ mod tests {
             })
             .await
             .unwrap();
-        let mut aurora = Aurora::for_test(
-            AuroraConfig::default(),
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             tmp.path().to_path_buf(),
         );
-        aurora.set_isolation_policy(IsolationPolicy::Disabled);
-        let aurora = aurora.with_modrinth_base(server.uri());
+        petalfall.set_isolation_policy(IsolationPolicy::Disabled);
+        let petalfall = petalfall.with_modrinth_base(server.uri());
 
-        let outcome = aurora
+        let outcome = petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
@@ -1658,10 +1665,10 @@ mod tests {
         // 不挂任何端点：一旦实现先去联网，得到的会是别的错误。
         let server = MockServer::start().await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = isolated_aurora(tmp.path(), server.uri());
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
 
         for id in ["ghost", "../escape", ""] {
-            let err = aurora
+            let err = petalfall
                 .install_mod(id, Platform::Modrinth, "sodium", "v1", None)
                 .await
                 .unwrap_err();
@@ -1671,11 +1678,11 @@ mod tests {
             );
         }
         assert!(matches!(
-            aurora.list_mods("ghost").await.unwrap_err(),
+            petalfall.list_mods("ghost").await.unwrap_err(),
             CoreError::VersionNotInstalled { .. }
         ));
         assert!(matches!(
-            aurora.remove_mod("ghost", "a.jar").await.unwrap_err(),
+            petalfall.remove_mod("ghost", "a.jar").await.unwrap_err(),
             CoreError::VersionNotInstalled { .. }
         ));
         assert!(server.received_requests().await.unwrap().is_empty());
@@ -1690,9 +1697,9 @@ mod tests {
         tokio::fs::write(dir.join("broken.json"), b"{ not json")
             .await
             .unwrap();
-        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let petalfall = isolated_petalfall(tmp.path(), "http://127.0.0.1:9".to_owned());
         assert!(matches!(
-            aurora.resolve_instance("broken").await.unwrap_err(),
+            petalfall.resolve_instance("broken").await.unwrap_err(),
             CoreError::VersionNotInstalled { id } if id == "broken"
         ));
     }
@@ -1708,9 +1715,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
 
-        let err = aurora
+        let err = petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "nope", None)
             .await
             .unwrap_err();
@@ -1785,11 +1792,11 @@ mod tests {
             mount_curseforge_file(&server, download_url.clone(), fallback).await;
             let tmp = tempfile::tempdir().unwrap();
             put_version(tmp.path(), "1.21").await;
-            let aurora = isolated_aurora(tmp.path(), server.uri())
+            let petalfall = isolated_petalfall(tmp.path(), server.uri())
                 .with_curseforge_base(server.uri())
                 .with_curseforge_key("test-key");
 
-            let err = aurora
+            let err = petalfall
                 .install_mod("1.21", Platform::CurseForge, "238222", "5000", None)
                 .await
                 .unwrap_err();
@@ -1810,7 +1817,7 @@ mod tests {
                 }],
                 "直链 {download_url}"
             );
-            let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+            let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
             assert!(!try_exists(&mods_dir.join("jei-1.21.jar")).await.unwrap());
         }
     }
@@ -1819,8 +1826,8 @@ mod tests {
     async fn list_mods_on_version_without_mods_dir_is_empty() {
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
-        assert!(aurora.list_mods("1.21").await.unwrap().is_empty());
+        let petalfall = isolated_petalfall(tmp.path(), "http://127.0.0.1:9".to_owned());
+        assert!(petalfall.list_mods("1.21").await.unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1860,19 +1867,19 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        let outcome = aurora
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        let outcome = petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
         assert_eq!(outcome.file_name, "sodium-v1.jar");
 
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         assert_eq!(
             dir_names(&mods_dir).await,
             vec!["fabric-api-d1.jar", "sodium-v1.jar"]
         );
-        let ledger = aurora.ledger_store("1.21").load().await.unwrap();
+        let ledger = petalfall.ledger_store("1.21").load().await.unwrap();
         let dep = ledger.find("fabric-api-d1.jar").unwrap();
         assert_eq!(dep.installed_as_dependency_of.as_deref(), Some("sodium"));
         assert_eq!(dep.title.as_deref(), Some("Fabric API"));
@@ -1880,7 +1887,7 @@ mod tests {
         assert_eq!(main.installed_as_dependency_of, None);
 
         // 一次安装一条事件，列出全部落盘文件（主项在前）。
-        let history = aurora.history("1.21").await.unwrap();
+        let history = petalfall.history("1.21").await.unwrap();
         assert_eq!(history.events.len(), 1);
         match &history.events[0] {
             HistoryEvent::Install { files, .. } => {
@@ -1914,8 +1921,8 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        aurora
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap_err();
@@ -1923,11 +1930,11 @@ mod tests {
         let version_dir = tmp.path().join("versions").join("1.21");
         assert!(!version_dir.join("mods").join("sodium-v1.jar").exists());
         assert_eq!(
-            aurora.ledger_store("1.21").load().await.unwrap(),
+            petalfall.ledger_store("1.21").load().await.unwrap(),
             Ledger::default()
         );
-        assert!(aurora.history("1.21").await.unwrap().events.is_empty());
-        let staging = version_dir.join(AURORA_META_DIR).join(STAGING_DIR);
+        assert!(petalfall.history("1.21").await.unwrap().events.is_empty());
+        let staging = version_dir.join(PETALFALL_META_DIR).join(STAGING_DIR);
         assert!(dir_names(&staging).await.is_empty(), "暂存子目录必须被清掉");
     }
 
@@ -1946,8 +1953,8 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        let err = aurora
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        let err = petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap_err();
@@ -1975,8 +1982,8 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        let err = aurora
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        let err = petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap_err();
@@ -1997,35 +2004,35 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        aurora
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
         // 玩家把旧版禁用过：备份时禁用态那份也要认得出来。
-        aurora
+        petalfall
             .set_mod_enabled("1.21", "sodium-v1.jar", false)
             .await
             .unwrap();
 
         // 装进实例的时刻定在过去，好与「现在」区分；更新设置经禁用态文件名设上。
-        let store = aurora.ledger_store("1.21");
+        let store = petalfall.ledger_store("1.21");
         let mut ledger = store.load().await.unwrap();
         ledger.find_mut("sodium-v1.jar").unwrap().installed_at = 1_600_000_000;
         store.save(&ledger).await.unwrap();
         let pin = UpdateHold::Pinned {
             version_id: "v2".to_owned(),
         };
-        aurora
+        petalfall
             .set_mod_update_hold("1.21", "sodium-v1.jar.disabled", Some(pin.clone()))
             .await
             .unwrap();
 
-        let outcome = aurora
+        let outcome = petalfall
             .update_mod("1.21", "sodium-v1.jar.disabled", "v2", None)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         // 玩家停用它自有原因（多半是它让游戏起不来），全部更新不能悄悄把它重新启用。
         assert_eq!(outcome.file_name, "sodium-v2.jar.disabled");
         assert_eq!(outcome.path, mods_dir.join("sodium-v2.jar.disabled"));
@@ -2033,7 +2040,7 @@ mod tests {
             dir_names(&mods_dir).await,
             vec!["sodium-v1.jar.old", "sodium-v2.jar.disabled"]
         );
-        let listed = aurora.list_mods("1.21").await.unwrap();
+        let listed = petalfall.list_mods("1.21").await.unwrap();
         assert_eq!(listed.len(), 1);
         assert!(!listed[0].installed.enabled);
         assert_eq!(listed[0].source.as_ref().unwrap().version_id, "v2");
@@ -2044,11 +2051,11 @@ mod tests {
             old_jar
         );
         assert_eq!(
-            aurora.backup_size("1.21").await.unwrap(),
+            petalfall.backup_size("1.21").await.unwrap(),
             old_jar.len() as u64
         );
 
-        let ledger = aurora.ledger_store("1.21").load().await.unwrap();
+        let ledger = petalfall.ledger_store("1.21").load().await.unwrap();
         assert_eq!(ledger.entries.len(), 1, "旧文件名的条目必须摘掉");
         let entry = ledger.find("sodium-v2.jar").unwrap();
         assert_eq!(entry.version_id, "v2");
@@ -2057,7 +2064,7 @@ mod tests {
         assert_eq!(entry.installed_at, 1_600_000_000);
         assert_eq!(entry.update_hold, Some(pin.clone()));
 
-        let history = aurora.history("1.21").await.unwrap();
+        let history = petalfall.history("1.21").await.unwrap();
         assert_eq!(history.events.len(), 2);
         match &history.events[1] {
             HistoryEvent::Update {
@@ -2082,12 +2089,12 @@ mod tests {
         }
 
         // 回滚凭据成立：这条更新可以回滚，回滚后旧版回来。
-        let checks = aurora.rollback_checks("1.21").await.unwrap();
+        let checks = petalfall.rollback_checks("1.21").await.unwrap();
         assert!(checks[1].can_rollback);
         let update_id = history.events[1].id().to_owned();
-        aurora.rollback("1.21", &update_id).await.unwrap();
+        petalfall.rollback("1.21", &update_id).await.unwrap();
         assert_eq!(dir_names(&mods_dir).await, vec!["sodium-v1.jar.disabled"]);
-        let ledger = aurora.ledger_store("1.21").load().await.unwrap();
+        let ledger = petalfall.ledger_store("1.21").load().await.unwrap();
         let restored = ledger.find("sodium-v1.jar").unwrap();
         assert_eq!(restored.version_number.as_deref(), Some("v1.0"));
         // 回滚同样不改装进实例的时刻，更新设置也还在。
@@ -2150,21 +2157,21 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        aurora
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
-        aurora
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "lib", "d1", None)
             .await
             .unwrap();
-        aurora
+        petalfall
             .set_mod_update_hold("1.21", "lib-d1.jar", Some(UpdateHold::Ignored))
             .await
             .unwrap();
 
-        let outcome = aurora
+        let outcome = petalfall
             .update_mod("1.21", "sodium-v1.jar", "v2", None)
             .await
             .unwrap();
@@ -2220,30 +2227,30 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        aurora
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
 
-        aurora
+        petalfall
             .update_mod("1.21", "lib-d1.jar", "d2", None)
             .await
             .unwrap();
-        let ledger = aurora.ledger_store("1.21").load().await.unwrap();
+        let ledger = petalfall.ledger_store("1.21").load().await.unwrap();
         let lib = ledger.find("lib-d2.jar").unwrap();
         assert_eq!(lib.installed_as_dependency_of.as_deref(), Some("sodium"));
 
         // 玩家把它改记成自己装的之后，别的 Mod 的前置计划把它换回 d1，也不改这个身份。
-        let store = aurora.ledger_store("1.21");
+        let store = petalfall.ledger_store("1.21");
         let mut ledger = store.load().await.unwrap();
         ledger
             .find_mut("lib-d2.jar")
             .unwrap()
             .installed_as_dependency_of = None;
         store.save(&ledger).await.unwrap();
-        aurora.remove_mod("1.21", "sodium-v1.jar").await.unwrap();
-        aurora
+        petalfall.remove_mod("1.21", "sodium-v1.jar").await.unwrap();
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
@@ -2262,24 +2269,24 @@ mod tests {
         mount_projects(&server, &[("sodium", "Sodium")]).await;
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
 
-        aurora
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
-        let enabled = aurora
+        let enabled = petalfall
             .update_mod("1.21", "sodium.jar", "v2", None)
             .await
             .unwrap();
         assert_eq!(enabled.path, mods_dir.join("sodium.jar"));
 
-        aurora
+        petalfall
             .set_mod_enabled("1.21", "sodium.jar", false)
             .await
             .unwrap();
-        let disabled = aurora
+        let disabled = petalfall
             .update_mod("1.21", "sodium.jar", "v3", None)
             .await
             .unwrap();
@@ -2289,7 +2296,7 @@ mod tests {
             b"three-3-3".to_vec()
         );
         assert!(!mods_dir.join("sodium.jar").exists());
-        let ledger = aurora.ledger_store("1.21").load().await.unwrap();
+        let ledger = petalfall.ledger_store("1.21").load().await.unwrap();
         assert_eq!(ledger.find("sodium.jar").unwrap().version_id, "v3");
     }
 
@@ -2322,23 +2329,23 @@ mod tests {
         mount_projects(&server, &[("sodium", "Sodium")]).await;
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
 
-        aurora
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
-        let store = aurora.ledger_store("1.21");
+        let store = petalfall.ledger_store("1.21");
         let mut ledger = store.load().await.unwrap();
         let entry = ledger.find_mut("sodium.jar").unwrap();
         entry.installed_at = 1_500_000_000;
         entry.update_hold = Some(UpdateHold::Ignored);
         store.save(&ledger).await.unwrap();
-        aurora
+        petalfall
             .update_mod("1.21", "sodium.jar", "v2", None)
             .await
             .unwrap();
-        aurora
+        petalfall
             .update_mod("1.21", "sodium.jar", "v3", None)
             .await
             .unwrap();
@@ -2354,7 +2361,7 @@ mod tests {
         assert_eq!(entry.installed_at, 1_500_000_000);
         assert_eq!(entry.update_hold, Some(UpdateHold::Ignored));
 
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         assert_eq!(
             dir_names(&mods_dir).await,
             vec!["sodium.jar", "sodium.jar.2.old", "sodium.jar.old"]
@@ -2364,11 +2371,11 @@ mod tests {
         assert_eq!(read("sodium.jar.2.old"), v2);
         assert_eq!(read("sodium.jar"), v3);
         assert_eq!(
-            aurora.backup_size("1.21").await.unwrap(),
+            petalfall.backup_size("1.21").await.unwrap(),
             (v1.len() + v2.len()) as u64
         );
 
-        let history = aurora.history("1.21").await.unwrap();
+        let history = petalfall.history("1.21").await.unwrap();
         let updates: Vec<(String, Option<String>)> = history
             .events
             .iter()
@@ -2382,25 +2389,25 @@ mod tests {
         assert_eq!(updates.len(), 2);
         assert_eq!(updates[0].1.as_deref(), Some("sodium.jar.old"));
         assert_eq!(updates[1].1.as_deref(), Some("sodium.jar.2.old"));
-        let checks = aurora.rollback_checks("1.21").await.unwrap();
+        let checks = petalfall.rollback_checks("1.21").await.unwrap();
         assert_eq!(
             checks.iter().map(|c| c.can_rollback).collect::<Vec<_>>(),
             vec![false, false, true],
             "安装不可回滚，第一次更新被第二次盖过"
         );
-        assert!(aurora.rollback("1.21", &updates[0].0).await.is_err());
+        assert!(petalfall.rollback("1.21", &updates[0].0).await.is_err());
         assert_eq!(read("sodium.jar"), v3);
 
-        aurora.rollback("1.21", &updates[1].0).await.unwrap();
+        petalfall.rollback("1.21", &updates[1].0).await.unwrap();
         assert_eq!(read("sodium.jar"), v2);
         assert_eq!(
             dir_names(&mods_dir).await,
             vec!["sodium.jar", "sodium.jar.old"]
         );
-        aurora.rollback("1.21", &updates[0].0).await.unwrap();
+        petalfall.rollback("1.21", &updates[0].0).await.unwrap();
         assert_eq!(dir_names(&mods_dir).await, vec!["sodium.jar"]);
         assert_eq!(read("sodium.jar"), v1);
-        let ledger = aurora.ledger_store("1.21").load().await.unwrap();
+        let ledger = petalfall.ledger_store("1.21").load().await.unwrap();
         let entry = ledger.find("sodium.jar").unwrap();
         assert_eq!(entry.version_id, "v1");
         assert_eq!(entry.version_number.as_deref(), Some("v1.0"));
@@ -2417,33 +2424,33 @@ mod tests {
         mount_projects(&server, &[("sodium", "Sodium")]).await;
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        aurora
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
-        aurora
+        petalfall
             .update_mod("1.21", "sodium-v1.jar", "v2", None)
             .await
             .unwrap();
-        aurora
+        petalfall
             .update_mod("1.21", "sodium-v2.jar", "v3", None)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         let before = dir_names(&mods_dir).await;
         assert_eq!(
             before,
             vec!["sodium-v1.jar.old", "sodium-v2.jar.old", "sodium-v3.jar"]
         );
 
-        let first_update = aurora.history("1.21").await.unwrap().events[1]
+        let first_update = petalfall.history("1.21").await.unwrap().events[1]
             .id()
             .to_owned();
-        let err = aurora.rollback("1.21", &first_update).await.unwrap_err();
+        let err = petalfall.rollback("1.21", &first_update).await.unwrap_err();
         assert!(refusal(&err).1.contains("先回滚之后的那次更新"), "{err:?}");
         assert_eq!(dir_names(&mods_dir).await, before);
-        let jars: Vec<_> = aurora
+        let jars: Vec<_> = petalfall
             .list_mods("1.21")
             .await
             .unwrap()
@@ -2458,14 +2465,14 @@ mod tests {
     async fn update_mod_without_ledger_identity_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let petalfall = isolated_petalfall(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("manual.jar"), b"x")
             .await
             .unwrap();
 
-        let err = aurora
+        let err = petalfall
             .update_mod("1.21", "manual.jar", "v2", None)
             .await
             .unwrap_err();
@@ -2500,23 +2507,23 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        aurora
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
-        let ledger_before = aurora.ledger_store("1.21").load().await.unwrap();
+        let ledger_before = petalfall.ledger_store("1.21").load().await.unwrap();
 
-        let outcome = aurora
+        let outcome = petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
         assert_eq!(outcome.file_name, "sodium-v1.jar");
         assert_eq!(
-            aurora.ledger_store("1.21").load().await.unwrap(),
+            petalfall.ledger_store("1.21").load().await.unwrap(),
             ledger_before
         );
-        assert_eq!(aurora.history("1.21").await.unwrap().events.len(), 1);
+        assert_eq!(petalfall.history("1.21").await.unwrap().events.len(), 1);
     }
 
     /// 移除：文件删掉、卷宗条目摘掉、历史追加一条移除事件。
@@ -2528,29 +2535,29 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        aurora
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         // 一个手动丢进来、卷宗里没有的 jar：照样能移除，照样记历史。
         tokio::fs::write(mods_dir.join("manual.jar.disabled"), b"m")
             .await
             .unwrap();
 
-        aurora.remove_mod("1.21", "sodium-v1.jar").await.unwrap();
-        aurora
+        petalfall.remove_mod("1.21", "sodium-v1.jar").await.unwrap();
+        petalfall
             .remove_mod("1.21", "manual.jar.disabled")
             .await
             .unwrap();
 
         assert!(dir_names(&mods_dir).await.is_empty());
         assert_eq!(
-            aurora.ledger_store("1.21").load().await.unwrap(),
+            petalfall.ledger_store("1.21").load().await.unwrap(),
             Ledger::default()
         );
-        let history = aurora.history("1.21").await.unwrap();
+        let history = petalfall.history("1.21").await.unwrap();
         let removed: Vec<Vec<String>> = history
             .events
             .iter()
@@ -2566,7 +2573,7 @@ mod tests {
                 vec!["manual.jar.disabled".to_owned()]
             ]
         );
-        let checks = aurora.rollback_checks("1.21").await.unwrap();
+        let checks = petalfall.rollback_checks("1.21").await.unwrap();
         assert_eq!(
             checks[1].reason.as_deref(),
             Some("移除事件不支持回滚，文件已从磁盘删除")
@@ -2578,8 +2585,8 @@ mod tests {
     async fn removing_one_of_two_copies_keeps_the_identity() {
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let petalfall = isolated_petalfall(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("a.jar"), b"1")
             .await
@@ -2601,13 +2608,16 @@ mod tests {
             installed_as_dependency_of: None,
             update_hold: None,
         });
-        aurora.ledger_store("1.21").save(&ledger).await.unwrap();
+        petalfall.ledger_store("1.21").save(&ledger).await.unwrap();
 
-        aurora.remove_mod("1.21", "a.jar.disabled").await.unwrap();
-        assert_eq!(aurora.ledger_store("1.21").load().await.unwrap(), ledger);
-        aurora.remove_mod("1.21", "a.jar").await.unwrap();
+        petalfall
+            .remove_mod("1.21", "a.jar.disabled")
+            .await
+            .unwrap();
+        assert_eq!(petalfall.ledger_store("1.21").load().await.unwrap(), ledger);
+        petalfall.remove_mod("1.21", "a.jar").await.unwrap();
         assert_eq!(
-            aurora.ledger_store("1.21").load().await.unwrap(),
+            petalfall.ledger_store("1.21").load().await.unwrap(),
             Ledger::default()
         );
     }
@@ -2617,8 +2627,8 @@ mod tests {
     async fn remove_and_toggle_refuse_anything_but_a_mod_file_name() {
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let petalfall = isolated_petalfall(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("a.jar.old"), b"backup")
             .await
@@ -2628,21 +2638,21 @@ mod tests {
             .unwrap();
 
         for bad in ["a.jar.old", "../../../outside.jar", "config.toml", ""] {
-            let err = aurora.remove_mod("1.21", bad).await.unwrap_err();
+            let err = petalfall.remove_mod("1.21", bad).await.unwrap_err();
             let (_, reason) = refusal(&err);
             assert!(
                 reason.contains("不是 mods 目录里的 Mod 文件名"),
                 "{bad:?}: {reason}"
             );
-            assert!(aurora.set_mod_enabled("1.21", bad, false).await.is_err());
+            assert!(petalfall.set_mod_enabled("1.21", bad, false).await.is_err());
         }
         assert!(mods_dir.join("a.jar.old").exists());
         assert!(tmp.path().join("outside.jar").exists());
 
         // 不存在的文件：明确拒绝，不记历史。
-        let err = aurora.remove_mod("1.21", "ghost.jar").await.unwrap_err();
+        let err = petalfall.remove_mod("1.21", "ghost.jar").await.unwrap_err();
         assert!(refusal(&err).1.contains("没有 ghost.jar"));
-        assert!(aurora.history("1.21").await.unwrap().events.is_empty());
+        assert!(petalfall.history("1.21").await.unwrap().events.is_empty());
     }
 
     /// 批量启停：逐个给出结果、顺序同入参；单个失败不影响其余；已是目标状态的原样返回路径；不写历史。
@@ -2650,8 +2660,8 @@ mod tests {
     async fn set_mods_enabled_reports_each_file_in_order() {
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let petalfall = isolated_petalfall(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         for name in ["a.jar", "b.jar.disabled", "c.jar"] {
             tokio::fs::write(mods_dir.join(name), name.as_bytes())
@@ -2669,7 +2679,7 @@ mod tests {
         .into_iter()
         .map(str::to_owned)
         .collect();
-        let outcomes = aurora
+        let outcomes = petalfall
             .set_mods_enabled("1.21", &names, false)
             .await
             .unwrap();
@@ -2707,21 +2717,24 @@ mod tests {
             dir_names(&mods_dir).await,
             vec!["a.jar.disabled", "b.jar.disabled", "c.jar.disabled"]
         );
-        assert!(aurora.history("1.21").await.unwrap().events.is_empty());
+        assert!(petalfall.history("1.21").await.unwrap().events.is_empty());
 
         // 反向批量启用。
         let back: Vec<String> = ["a.jar.disabled", "c.jar.disabled"]
             .into_iter()
             .map(str::to_owned)
             .collect();
-        let outcomes = aurora.set_mods_enabled("1.21", &back, true).await.unwrap();
+        let outcomes = petalfall
+            .set_mods_enabled("1.21", &back, true)
+            .await
+            .unwrap();
         assert!(outcomes.iter().all(|o| o.result.is_ok()));
         assert_eq!(
             dir_names(&mods_dir).await,
             vec!["a.jar", "b.jar.disabled", "c.jar"]
         );
 
-        let err = aurora
+        let err = petalfall
             .set_mods_enabled("ghost", &back, true)
             .await
             .unwrap_err();
@@ -2733,8 +2746,8 @@ mod tests {
     async fn set_mod_update_hold_writes_ledger_and_skips_unchanged_values() {
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let petalfall = isolated_petalfall(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("sodium.jar.disabled"), b"jar")
             .await
@@ -2742,7 +2755,7 @@ mod tests {
         tokio::fs::write(mods_dir.join("manual.jar"), b"jar")
             .await
             .unwrap();
-        let store = aurora.ledger_store("1.21");
+        let store = petalfall.ledger_store("1.21");
         let mut ledger = Ledger::default();
         for (file_name, project_id) in [("sodium.jar", "AANobbMI"), ("gone.jar", "P7dR8mSH")] {
             ledger.upsert(LedgerEntry {
@@ -2761,7 +2774,7 @@ mod tests {
         }
         store.save(&ledger).await.unwrap();
 
-        aurora
+        petalfall
             .set_mod_update_hold("1.21", "sodium.jar.disabled", Some(UpdateHold::Ignored))
             .await
             .unwrap();
@@ -2775,7 +2788,7 @@ mod tests {
         // 值相同不落盘：先把文件换成紧凑写法，真的改写过就会变回带缩进的格式。
         let compact = serde_json::to_vec(&after).unwrap();
         tokio::fs::write(store.path(), &compact).await.unwrap();
-        aurora
+        petalfall
             .set_mod_update_hold("1.21", "sodium.jar", Some(UpdateHold::Ignored))
             .await
             .unwrap();
@@ -2785,7 +2798,7 @@ mod tests {
         let pin = UpdateHold::Pinned {
             version_id: "v9".to_owned(),
         };
-        aurora
+        petalfall
             .set_mod_update_hold("1.21", "sodium.jar", Some(pin.clone()))
             .await
             .unwrap();
@@ -2799,7 +2812,7 @@ mod tests {
                 .update_hold,
             Some(pin)
         );
-        aurora
+        petalfall
             .set_mod_update_hold("1.21", "sodium.jar", None)
             .await
             .unwrap();
@@ -2816,7 +2829,7 @@ mod tests {
 
         let before = tokio::fs::read(store.path()).await.unwrap();
         // 卷宗里有、盘上没有：按已被移除拒绝。
-        let err = aurora
+        let err = petalfall
             .set_mod_update_hold("1.21", "gone.jar", Some(UpdateHold::Ignored))
             .await
             .unwrap_err();
@@ -2824,7 +2837,7 @@ mod tests {
         assert_eq!(path, mods_dir.join("gone.jar"));
         assert!(reason.contains("mods 目录里没有 gone.jar"), "{reason}");
         // 盘上有、卷宗没有：本地文件不参与更新检查。
-        let err = aurora
+        let err = petalfall
             .set_mod_update_hold("1.21", "manual.jar", Some(UpdateHold::Ignored))
             .await
             .unwrap_err();
@@ -2834,7 +2847,7 @@ mod tests {
                 .contains("manual.jar 没有平台来源记录，不能设置更新检查"),
             "{err:?}"
         );
-        let err = aurora
+        let err = petalfall
             .set_mod_update_hold("1.21", "a.jar.old", None)
             .await
             .unwrap_err();
@@ -2847,8 +2860,8 @@ mod tests {
     async fn listed_source_carries_installed_at_and_update_hold() {
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let petalfall = isolated_petalfall(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("a.jar"), b"a")
             .await
@@ -2875,9 +2888,9 @@ mod tests {
                 update_hold: hold,
             });
         }
-        aurora.ledger_store("1.21").save(&ledger).await.unwrap();
+        petalfall.ledger_store("1.21").save(&ledger).await.unwrap();
 
-        let mut listed = aurora.list_mods("1.21").await.unwrap();
+        let mut listed = petalfall.list_mods("1.21").await.unwrap();
         listed.sort_by(|x, y| x.installed.file_name.cmp(&y.installed.file_name));
         let a = serde_json::to_value(listed[0].source.as_ref().unwrap()).unwrap();
         assert_eq!(a["installed_at"], 1_700_000_001);
@@ -2896,8 +2909,8 @@ mod tests {
         const COUNT: usize = 16;
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let petalfall = isolated_petalfall(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         let mut ledger = Ledger::default();
         for i in 0..COUNT {
@@ -2917,23 +2930,27 @@ mod tests {
                 update_hold: None,
             });
         }
-        aurora.ledger_store("1.21").save(&ledger).await.unwrap();
+        petalfall.ledger_store("1.21").save(&ledger).await.unwrap();
 
         let mut set = tokio::task::JoinSet::new();
         for i in 0..COUNT {
-            let aurora = aurora.clone();
-            set.spawn(async move { aurora.remove_mod("1.21", &format!("mod-{i:02}.jar")).await });
+            let petalfall = petalfall.clone();
+            set.spawn(async move {
+                petalfall
+                    .remove_mod("1.21", &format!("mod-{i:02}.jar"))
+                    .await
+            });
         }
         while let Some(joined) = set.join_next().await {
             joined.unwrap().unwrap();
         }
 
-        let history = aurora.history("1.21").await.unwrap();
+        let history = petalfall.history("1.21").await.unwrap();
         assert_eq!(history.events.len(), COUNT);
         let ids: HashSet<&str> = history.events.iter().map(HistoryEvent::id).collect();
         assert_eq!(ids.len(), COUNT, "事件 id 必须两两不同");
         assert!(
-            aurora
+            petalfall
                 .ledger_store("1.21")
                 .load()
                 .await
@@ -2952,8 +2969,8 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), "http://127.0.0.1:9".to_owned());
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let petalfall = isolated_petalfall(tmp.path(), "http://127.0.0.1:9".to_owned());
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("a.jar"), b"x")
             .await
@@ -2964,19 +2981,19 @@ mod tests {
             .share_mode(0x1 | 0x2)
             .open(mods_dir.join("a.jar"))
             .unwrap();
-        let err = aurora.remove_mod("1.21", "a.jar").await.unwrap_err();
+        let err = petalfall.remove_mod("1.21", "a.jar").await.unwrap_err();
         assert!(crate::modfs::is_mod_file_busy(&err), "实得 {err:?}");
         assert!(refusal(&err).1.contains("正被其它程序占用"));
-        let err = aurora
+        let err = petalfall
             .set_mod_enabled("1.21", "a.jar", false)
             .await
             .unwrap_err();
         assert!(crate::modfs::is_mod_file_busy(&err), "实得 {err:?}");
         assert_eq!(dir_names(&mods_dir).await, vec!["a.jar"]);
-        assert!(aurora.history("1.21").await.unwrap().events.is_empty());
+        assert!(petalfall.history("1.21").await.unwrap().events.is_empty());
 
         drop(held);
-        aurora.remove_mod("1.21", "a.jar").await.unwrap();
+        petalfall.remove_mod("1.21", "a.jar").await.unwrap();
         assert!(dir_names(&mods_dir).await.is_empty());
     }
 
@@ -2996,13 +3013,13 @@ mod tests {
     }
 
     /// 一个隔离实例加一个放拖入文件的下载目录，模拟玩家从外面拖 jar 进来。
-    async fn local_add_fixture(mc: &Path) -> (Aurora, PathBuf, PathBuf) {
+    async fn local_add_fixture(mc: &Path) -> (Petalfall, PathBuf, PathBuf) {
         put_version(mc, "1.21").await;
-        let aurora = isolated_aurora(mc, "http://127.0.0.1:9".to_owned());
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let petalfall = isolated_petalfall(mc, "http://127.0.0.1:9".to_owned());
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         let downloads = mc.join("downloads");
         tokio::fs::create_dir_all(&downloads).await.unwrap();
-        (aurora, mods_dir, downloads)
+        (petalfall, mods_dir, downloads)
     }
 
     fn added_name(outcome: &LocalModOutcome) -> &str {
@@ -3026,12 +3043,12 @@ mod tests {
     #[tokio::test]
     async fn local_jars_are_copied_into_mods_as_local_files_with_one_install_event() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        let (petalfall, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
         let (sodium, lithium) = (downloads.join("sodium.jar"), downloads.join("lithium.jar"));
         build_mod_jar(&sodium, "sodium");
         build_mod_jar(&lithium, "lithium");
 
-        let outcomes = aurora
+        let outcomes = petalfall
             .add_local_mods("1.21", &[sodium.clone(), lithium.clone()])
             .await
             .unwrap();
@@ -3049,11 +3066,11 @@ mod tests {
             std::fs::read(&sodium).unwrap()
         );
 
-        let listed = aurora.list_mods("1.21").await.unwrap();
+        let listed = petalfall.list_mods("1.21").await.unwrap();
         assert_eq!(listed.len(), 2);
         assert!(listed.iter().all(|m| m.source.is_none()), "{listed:?}");
 
-        let history = aurora.history("1.21").await.unwrap();
+        let history = petalfall.history("1.21").await.unwrap();
         assert_eq!(history.events.len(), 1);
         match &history.events[0] {
             HistoryEvent::Install { files, .. } => {
@@ -3068,7 +3085,7 @@ mod tests {
         let staging = mods_dir
             .parent()
             .unwrap()
-            .join(AURORA_META_DIR)
+            .join(PETALFALL_META_DIR)
             .join(STAGING_DIR);
         assert!(dir_names(&staging).await.is_empty());
     }
@@ -3077,7 +3094,7 @@ mod tests {
     #[tokio::test]
     async fn one_refused_jar_does_not_stop_the_rest_of_the_batch() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        let (petalfall, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         std::fs::write(mods_dir.join("taken.jar"), b"installed bytes").unwrap();
         std::fs::write(mods_dir.join("off.jar.disabled"), b"disabled bytes").unwrap();
@@ -3096,7 +3113,7 @@ mod tests {
         std::fs::create_dir(&folder).unwrap();
         build_mod_jar(&fresh, "fresh");
 
-        let outcomes = aurora
+        let outcomes = petalfall
             .add_local_mods(
                 "1.21",
                 &[taken, off, blank, notes, ghost, folder, fresh.clone()],
@@ -3117,7 +3134,7 @@ mod tests {
         assert!(
             matches!(
                 &outcomes[4].result,
-                Err(CoreError::Base(aurora_base::Error::Io { source, .. }))
+                Err(CoreError::Base(petalfall_base::Error::Io { source, .. }))
                     if source.kind() == std::io::ErrorKind::NotFound
             ),
             "{:?}",
@@ -3138,7 +3155,7 @@ mod tests {
             std::fs::read(mods_dir.join("off.jar.disabled")).unwrap(),
             b"disabled bytes"
         );
-        let history = aurora.history("1.21").await.unwrap();
+        let history = petalfall.history("1.21").await.unwrap();
         assert_eq!(history.events.len(), 1);
         assert!(
             matches!(&history.events[0], HistoryEvent::Install { files, .. } if files == &vec!["fresh.jar".to_owned()]),
@@ -3151,14 +3168,14 @@ mod tests {
     #[tokio::test]
     async fn nothing_added_writes_no_history() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        let (petalfall, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
         let notes = downloads.join("notes.txt");
         std::fs::write(&notes, b"not a mod").unwrap();
 
-        let outcomes = aurora.add_local_mods("1.21", &[notes]).await.unwrap();
+        let outcomes = petalfall.add_local_mods("1.21", &[notes]).await.unwrap();
 
         assert_eq!(refused_reason(&outcomes[0]), "notes.txt 不是 .jar 文件");
-        assert!(aurora.history("1.21").await.unwrap().events.is_empty());
+        assert!(petalfall.history("1.21").await.unwrap().events.is_empty());
         if mods_dir.exists() {
             assert!(dir_names(&mods_dir).await.is_empty());
         }
@@ -3168,7 +3185,7 @@ mod tests {
     #[tokio::test]
     async fn local_jar_with_an_installed_mod_id_is_refused_naming_that_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        let (petalfall, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         build_mod_jar(&mods_dir.join("sodium-manual.jar"), "sodium");
         build_mod_jar(&mods_dir.join("iris-old.jar.disabled"), "iris");
@@ -3182,7 +3199,7 @@ mod tests {
         build_mod_jar(&first, "twin");
         build_mod_jar(&second, "twin");
 
-        let outcomes = aurora
+        let outcomes = petalfall
             .add_local_mods("1.21", &[newer_sodium, newer_iris, first, second])
             .await
             .unwrap();
@@ -3210,11 +3227,11 @@ mod tests {
     #[tokio::test]
     async fn local_jar_without_a_descriptor_is_accepted() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        let (petalfall, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
         let optifine = downloads.join("OptiFine_1.21.jar");
         std::fs::write(&optifine, b"PK-not-really-a-descriptor").unwrap();
 
-        let outcomes = aurora.add_local_mods("1.21", &[optifine]).await.unwrap();
+        let outcomes = petalfall.add_local_mods("1.21", &[optifine]).await.unwrap();
 
         assert_eq!(added_name(&outcomes[0]), "OptiFine_1.21.jar");
         assert_eq!(dir_names(&mods_dir).await, vec!["OptiFine_1.21.jar"]);
@@ -3224,15 +3241,15 @@ mod tests {
     #[tokio::test]
     async fn local_jar_extension_is_lowercased_so_the_list_can_see_it() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        let (petalfall, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
         let shouting = downloads.join("Sodium.JAR");
         build_mod_jar(&shouting, "sodium");
 
-        let outcomes = aurora.add_local_mods("1.21", &[shouting]).await.unwrap();
+        let outcomes = petalfall.add_local_mods("1.21", &[shouting]).await.unwrap();
 
         assert_eq!(added_name(&outcomes[0]), "Sodium.jar");
         assert_eq!(dir_names(&mods_dir).await, vec!["Sodium.jar"]);
-        let listed = aurora.list_mods("1.21").await.unwrap();
+        let listed = petalfall.list_mods("1.21").await.unwrap();
         assert_eq!(listed[0].installed.file_name, "Sodium.jar");
     }
 
@@ -3240,7 +3257,7 @@ mod tests {
     #[tokio::test]
     async fn added_local_jar_is_stamped_with_the_time_it_was_added() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
+        let (petalfall, mods_dir, downloads) = local_add_fixture(tmp.path()).await;
         let old = downloads.join("old.jar");
         build_mod_jar(&old, "old");
         let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
@@ -3251,7 +3268,7 @@ mod tests {
             .set_modified(long_ago)
             .unwrap();
 
-        aurora.add_local_mods("1.21", &[old]).await.unwrap();
+        petalfall.add_local_mods("1.21", &[old]).await.unwrap();
 
         let stamped = std::fs::metadata(mods_dir.join("old.jar"))
             .unwrap()
@@ -3267,11 +3284,11 @@ mod tests {
     #[tokio::test]
     async fn adding_to_a_missing_instance_fails_as_a_whole() {
         let tmp = tempfile::tempdir().unwrap();
-        let (aurora, _, downloads) = local_add_fixture(tmp.path()).await;
+        let (petalfall, _, downloads) = local_add_fixture(tmp.path()).await;
         let jar = downloads.join("a.jar");
         build_mod_jar(&jar, "a");
 
-        let err = aurora
+        let err = petalfall
             .add_local_mods("没有这个实例", &[jar])
             .await
             .unwrap_err();
@@ -3288,8 +3305,8 @@ mod tests {
         let server = MockServer::start().await;
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         // 手动丢进来的旧拷贝（卷宗里没有）。
         build_mod_jar(&mods_dir.join("sodium-manual.jar"), "sodium");
@@ -3300,7 +3317,7 @@ mod tests {
         mount_sodium(&server, "v2", "sodium-v2.jar", &jar).await;
         mount_projects(&server, &[]).await;
 
-        aurora
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v2", None)
             .await
             .unwrap();
@@ -3308,7 +3325,7 @@ mod tests {
             dir_names(&mods_dir).await,
             vec!["sodium-manual.jar.old", "sodium-v2.jar"]
         );
-        match &aurora.history("1.21").await.unwrap().events[0] {
+        match &petalfall.history("1.21").await.unwrap().events[0] {
             HistoryEvent::Update {
                 old_file,
                 from_version,
@@ -3331,17 +3348,17 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_version(tmp.path(), "1.21").await;
-        let aurora = isolated_aurora(tmp.path(), server.uri());
-        aurora
+        let petalfall = isolated_petalfall(tmp.path(), server.uri());
+        petalfall
             .install_mod("1.21", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         tokio::fs::write(mods_dir.join("sodium-v2.jar"), b"player")
             .await
             .unwrap();
 
-        let err = aurora
+        let err = petalfall
             .update_mod("1.21", "sodium-v1.jar", "v2", None)
             .await
             .unwrap_err();
@@ -3406,12 +3423,12 @@ mod tests {
             .mount(&server)
             .await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = isolated_aurora(tmp.path(), uri.clone())
+        let petalfall = isolated_petalfall(tmp.path(), uri.clone())
             .with_curseforge_base(&uri)
             .with_curseforge_key("k");
         let staging = tmp.path().join("staging");
 
-        let modrinth = aurora
+        let modrinth = petalfall
             .stage_item(
                 planned(version_info(
                     "modrinth",
@@ -3424,7 +3441,7 @@ mod tests {
             .await
             .unwrap();
         assert!(modrinth.task.credential.is_none());
-        let direct = aurora
+        let direct = petalfall
             .stage_item(
                 planned(version_info(
                     "curseforge",
@@ -3436,7 +3453,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let fallback = aurora
+        let fallback = petalfall
             .stage_item(
                 planned(version_info("curseforge", "8", "80", None)),
                 &staging,
@@ -3452,7 +3469,7 @@ mod tests {
                 .expect("CurseForge 任务应带凭据");
             assert_eq!(
                 credential.realm(),
-                aurora_download::CredentialRealm::CurseForge
+                petalfall_download::CredentialRealm::CurseForge
             );
         }
     }
@@ -3478,13 +3495,13 @@ mod tests {
             .await;
         let tmp = tempfile::tempdir().unwrap();
         let uri = server.uri();
-        let aurora = isolated_aurora(tmp.path(), uri.clone())
+        let petalfall = isolated_petalfall(tmp.path(), uri.clone())
             .with_curseforge_base(&uri)
             .with_curseforge_key("k");
         let mut version = version_info("curseforge", "9", "90", None);
         version.sha1 = Some("a".repeat(40));
 
-        let err = aurora
+        let err = petalfall
             .stage_item(planned(version), &tmp.path().join("staging"))
             .await
             .err()
@@ -3557,13 +3574,13 @@ mod tests {
     }
 
     /// 把受限文件放进「下载文件夹」再认领，走和界面一样的入口进暂存位。
-    async fn claim(aurora: &Aurora, tmp: &Path, file: &BlockedFile, bytes: &[u8]) {
+    async fn claim(petalfall: &Petalfall, tmp: &Path, file: &BlockedFile, bytes: &[u8]) {
         let downloads = tmp.join("Downloads");
         tokio::fs::create_dir_all(&downloads).await.unwrap();
         tokio::fs::write(downloads.join(&file.file_name), bytes)
             .await
             .unwrap();
-        let report = aurora
+        let report = petalfall
             .claim_blocked_files(&downloads, std::slice::from_ref(file))
             .await
             .unwrap();
@@ -3580,13 +3597,13 @@ mod tests {
         let mc = tmp.path();
         put_version(mc, "1.21").await;
         let uri = server.uri();
-        let aurora = isolated_aurora(mc, uri.clone())
+        let petalfall = isolated_petalfall(mc, uri.clone())
             .with_curseforge_base(&uri)
             .with_curseforge_key("k");
         let bytes: &[u8] = b"claimed-jar";
-        claim(&aurora, mc, &blocked_file(9, 90, bytes), bytes).await;
+        claim(&petalfall, mc, &blocked_file(9, 90, bytes), bytes).await;
 
-        let outcome = aurora
+        let outcome = petalfall
             .install_planned(
                 "1.21",
                 plan_of(vec![planned(blocked_version(9, 90, bytes))]),
@@ -3597,17 +3614,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.file_name, "9-90.jar");
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         assert_eq!(dir_names(&mods_dir).await, vec!["9-90.jar"]);
         assert_eq!(tokio::fs::read(&outcome.path).await.unwrap(), bytes);
-        let listed = aurora.list_mods("1.21").await.unwrap();
+        let listed = petalfall.list_mods("1.21").await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(
             listed[0].source.as_ref().map(|s| s.project_id.as_str()),
             Some("9")
         );
         assert!(
-            aurora
+            petalfall
                 .blocked_claims_dir()
                 .join("curseforge-90/9-90.jar")
                 .is_file()
@@ -3623,19 +3640,21 @@ mod tests {
         let mc = tmp.path();
         put_version(mc, "1.21").await;
         let uri = server.uri();
-        let aurora = isolated_aurora(mc, uri.clone())
+        let petalfall = isolated_petalfall(mc, uri.clone())
             .with_curseforge_base(&uri)
             .with_curseforge_key("k");
         let bytes: &[u8] = b"claimed-jar";
-        claim(&aurora, mc, &blocked_file(9, 90, bytes), bytes).await;
+        claim(&petalfall, mc, &blocked_file(9, 90, bytes), bytes).await;
         tokio::fs::write(
-            aurora.blocked_claims_dir().join("curseforge-90/9-90.jar"),
+            petalfall
+                .blocked_claims_dir()
+                .join("curseforge-90/9-90.jar"),
             b"tampered",
         )
         .await
         .unwrap();
 
-        let err = aurora
+        let err = petalfall
             .install_planned(
                 "1.21",
                 plan_of(vec![planned(blocked_version(9, 90, bytes))]),
@@ -3649,7 +3668,7 @@ mod tests {
             matches!(err, CoreError::FileDistributionBlocked { .. }),
             "{err:?}"
         );
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         assert!(!mods_dir.join("9-90.jar").exists());
     }
 
@@ -3664,13 +3683,13 @@ mod tests {
         let mc = tmp.path();
         put_version(mc, "1.21").await;
         let uri = server.uri();
-        let aurora = isolated_aurora(mc, uri.clone())
+        let petalfall = isolated_petalfall(mc, uri.clone())
             .with_curseforge_base(&uri)
             .with_curseforge_key("k");
         let bytes: &[u8] = b"claimed-jar";
-        claim(&aurora, mc, &blocked_file(10, 100, bytes), bytes).await;
+        claim(&petalfall, mc, &blocked_file(10, 100, bytes), bytes).await;
 
-        let err = aurora
+        let err = petalfall
             .install_planned(
                 "1.21",
                 plan_of(vec![
@@ -3694,7 +3713,7 @@ mod tests {
                 blocked_file(11, 110, b"third")
             ]
         );
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         assert!(!mods_dir.join("10-100.jar").exists());
     }
 
@@ -3738,15 +3757,15 @@ mod tests {
         let mc = tmp.path();
         put_version(mc, "1.21").await;
         let port = server.address().port();
-        let aurora = isolated_aurora(mc, uri.clone())
+        let petalfall = isolated_petalfall(mc, uri.clone())
             .with_curseforge_base(&uri)
             .with_curseforge_key("k")
-            .with_curseforge_cdn_scope(aurora_download::CredentialScope::new(
+            .with_curseforge_cdn_scope(petalfall_download::CredentialScope::new(
                 [format!("127.0.0.1:{port}")],
                 false,
             ));
 
-        let err = aurora
+        let err = petalfall
             .install_mod("1.21", Platform::CurseForge, "238222", "3040523", None)
             .await
             .unwrap_err();
@@ -3755,10 +3774,10 @@ mod tests {
         };
         assert_eq!(
             download.credential_rejection(),
-            Some(aurora_download::CredentialRealm::CurseForge)
+            Some(petalfall_download::CredentialRealm::CurseForge)
         );
         assert!(
-            matches!(download, aurora_download::Error::CredentialRejected { url, status: 401, .. } if url == &cdn),
+            matches!(download, petalfall_download::Error::CredentialRejected { url, status: 401, .. } if url == &cdn),
             "{download:?}"
         );
         server.verify().await;
@@ -3770,7 +3789,7 @@ mod tests {
             .filter(|r| r.url.path() == "/files/3040/523/jei.jar")
             .count();
         assert_eq!(cdn_hits, 1);
-        let mods_dir = aurora.resolve_mods_dir("1.21").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         assert!(!mods_dir.join("jei.jar").exists());
     }
 }

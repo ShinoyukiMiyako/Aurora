@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use crate::path::PathValidationError;
 
-/// aurora-modpack 对外错误。
+/// petalfall-modpack 对外错误。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// 扩展名既不是 `.mrpack` 也不是 `.zip`。

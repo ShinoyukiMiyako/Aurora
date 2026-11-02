@@ -50,7 +50,7 @@ describe("previewErrorText", () => {
     expect(previewErrorText(new IpcError("modpack_corrupt", "zip 头损坏"))).toBe("文件不完整或已损坏，重新下载一份再试");
     expect(previewErrorText(new IpcError("modpack_manifest_invalid", "缺少 minecraft 字段"))).toBe("整合包清单读不出来：缺少 minecraft 字段");
     expect(previewErrorText(new IpcError("curseforge_key_missing", "CurseForge API key 未配置"))).toBe(
-      "有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY",
+      "有文件只能从 CurseForge 下载，需要先设置环境变量 PETALFALL_CURSEFORGE_API_KEY",
     );
     expect(previewErrorText(new IpcError("curseforge_key_rejected", "403"))).toContain("CurseForge 拒绝了下载密钥");
     expect(previewErrorText(new IpcError("io", "读文件失败"))).toBe("读文件失败");

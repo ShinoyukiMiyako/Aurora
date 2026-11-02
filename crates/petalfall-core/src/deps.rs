@@ -21,7 +21,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use aurora_modplatform::{DependencyKind, ModLoader, ModVersionInfo, Platform, ReleaseChannel};
+use petalfall_modplatform::{DependencyKind, ModLoader, ModVersionInfo, Platform, ReleaseChannel};
 use serde::Serialize;
 
 use crate::compat::{
@@ -29,7 +29,7 @@ use crate::compat::{
     prefer_quilt_builds,
 };
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::ledger::{Ledger, LedgerEntry, UpdateHold};
 use crate::modfs::present;
 use crate::modversions::sort_by_published_desc;
@@ -306,7 +306,7 @@ impl PlannedItem {
     }
 }
 
-impl Aurora {
+impl Petalfall {
     /// 解析依赖并产出安装计划。
     ///
     /// 栈式深度优先展开，`visited` 按 project_id 去重：真实数据里存在 A 依赖 B、B 又反过来声明依赖 A
@@ -473,8 +473,8 @@ impl Aurora {
     /// 解析一条必需依赖，连同作者钉的版本没被采用的原因（有的话）一起交回。
     ///
     /// 依赖声明里带了精确版本号时优先采用，不再择优：实例里没有这个前置时，那是作者测过的搭配。但它
-    /// 说的是「发版时用的这一版」，不是「只能用这一版」，所以有两种情况不照做，见 [`Aurora::reject_pin`]。
-    /// 没钉版本或钉的版本没被采用时，走 [`Aurora::resolve_unpinned`]。
+    /// 说的是「发版时用的这一版」，不是「只能用这一版」，所以有两种情况不照做，见 [`Petalfall::reject_pin`]。
+    /// 没钉版本或钉的版本没被采用时，走 [`Petalfall::resolve_unpinned`]。
     async fn resolve_required(
         &self,
         platform: Platform,
@@ -646,7 +646,7 @@ async fn quilt_stand_in(
 pub(crate) fn project_gone(err: &CoreError) -> bool {
     matches!(
         err,
-        CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 404, .. })
+        CoreError::ModPlatform(petalfall_modplatform::Error::Status { status: 404, .. })
             | CoreError::ModVersionNotFound { .. }
     )
 }
@@ -744,8 +744,8 @@ async fn held_back(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
-    use aurora_modplatform::ReleaseChannel;
+    use crate::config::PetalfallConfig;
+    use petalfall_modplatform::ReleaseChannel;
     use std::collections::HashMap;
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -847,11 +847,14 @@ mod tests {
         .unwrap();
     }
 
-    fn aurora_at(mc: &Path, modrinth_base: String) -> Aurora {
-        let mut aurora =
-            Aurora::for_test(AuroraConfig::default(), mc.to_path_buf(), mc.to_path_buf());
-        aurora.set_isolation_policy(aurora_instance::IsolationPolicy::All);
-        aurora.with_modrinth_base(modrinth_base)
+    fn petalfall_at(mc: &Path, modrinth_base: String) -> Petalfall {
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
+            mc.to_path_buf(),
+            mc.to_path_buf(),
+        );
+        petalfall.set_isolation_policy(petalfall_instance::IsolationPolicy::All);
+        petalfall.with_modrinth_base(modrinth_base)
     }
 
     fn entry(file_name: &str, project_id: &str, version_id: &str) -> LedgerEntry {
@@ -990,9 +993,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -1062,9 +1065,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -1111,9 +1114,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "alpha", "a1")
             .await
             .unwrap();
@@ -1158,9 +1161,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -1220,9 +1223,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -1279,9 +1282,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -1392,9 +1395,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_quilt_instance(tmp.path(), "1.20.1-quilt").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-quilt", Platform::Modrinth, "needs-lib", "v1")
             .await
             .unwrap();
@@ -1413,21 +1416,21 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_quilt_instance(tmp.path(), "1.20.1-quilt").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
         let mut ledger = Ledger::default();
         ledger.upsert(entry("qfapi.jar", QFAPI_PROJECT, "qfapi-old"));
-        aurora
+        petalfall
             .ledger_store("1.20.1-quilt")
             .save(&ledger)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.20.1-quilt").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.20.1-quilt").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("qfapi.jar"), b"jar")
             .await
             .unwrap();
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-quilt", Platform::Modrinth, "appleskin", "v1")
             .await
             .unwrap();
@@ -1449,9 +1452,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_quilt_instance(tmp.path(), "1.20.1-quilt").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-quilt", Platform::Modrinth, "appleskin", "v1")
             .await
             .unwrap();
@@ -1471,21 +1474,21 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_quilt_instance(tmp.path(), "1.20.1-quilt").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
         let mut ledger = Ledger::default();
         ledger.upsert(entry("fapi.jar", FABRIC_API_PROJECT, "fapi-pinned"));
-        aurora
+        petalfall
             .ledger_store("1.20.1-quilt")
             .save(&ledger)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.20.1-quilt").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.20.1-quilt").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("fapi.jar"), b"jar")
             .await
             .unwrap();
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-quilt", Platform::Modrinth, "appleskin", "v1")
             .await
             .unwrap();
@@ -1503,9 +1506,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "appleskin", "v1")
             .await
             .unwrap();
@@ -1538,9 +1541,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -1572,9 +1575,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -1619,26 +1622,26 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
         // 卷宗声称两个都装过。
         let mut ledger = Ledger::default();
         ledger.upsert(entry("sodium-v1.jar", "sodium", "v1"));
         ledger.upsert(entry("fabric-api-ok1.jar", "fabric-api", "ok1"));
-        aurora
+        petalfall
             .ledger_store("1.20.1-fabric")
             .save(&ledger)
             .await
             .unwrap();
 
         // 磁盘上只有主 Mod，且是禁用态。
-        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.20.1-fabric").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("sodium-v1.jar.disabled"), b"jar")
             .await
             .unwrap();
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -1650,7 +1653,7 @@ mod tests {
         tokio::fs::write(mods_dir.join("fabric-api-ok1.jar"), b"jar")
             .await
             .unwrap();
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -1700,21 +1703,21 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
         let mut ledger = Ledger::default();
         ledger.upsert(entry("fabric-api-old.jar", "fabric-api", "old"));
-        aurora
+        petalfall
             .ledger_store("1.20.1-fabric")
             .save(&ledger)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.20.1-fabric").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("fabric-api-old.jar"), b"jar")
             .await
             .unwrap();
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -1750,9 +1753,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -1790,16 +1793,16 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let err = aurora
+        let err = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap_err();
         assert!(
             matches!(
                 err,
-                CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 403, .. })
+                CoreError::ModPlatform(petalfall_modplatform::Error::Status { status: 403, .. })
             ),
             "实得 {err:?}"
         );
@@ -1848,23 +1851,23 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
         let mut kept = entry("fabric-api-current.jar", "fabric-api", "current");
         kept.update_hold = Some(hold);
         let mut ledger = Ledger::default();
         ledger.upsert(kept);
-        aurora
+        petalfall
             .ledger_store("1.20.1-fabric")
             .save(&ledger)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.20.1-fabric").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("fabric-api-current.jar"), b"jar")
             .await
             .unwrap();
 
-        aurora
+        petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap()
@@ -1951,23 +1954,23 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
         if let Some(version_id) = installed {
             let mut ledger = Ledger::default();
             ledger.upsert(entry("fabric-api.jar", "fabric-api", version_id));
-            aurora
+            petalfall
                 .ledger_store("1.20.1-fabric")
                 .save(&ledger)
                 .await
                 .unwrap();
-            let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+            let mods_dir = petalfall.resolve_mods_dir("1.20.1-fabric").await.unwrap();
             tokio::fs::create_dir_all(&mods_dir).await.unwrap();
             tokio::fs::write(mods_dir.join("fabric-api.jar"), b"jar")
                 .await
                 .unwrap();
         }
 
-        aurora
+        petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "appleskin", "v1")
             .await
             .unwrap()
@@ -2052,9 +2055,9 @@ mod tests {
         .await;
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "appleskin", "v1")
             .await
             .unwrap();
@@ -2144,7 +2147,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
         let mut kept = entry("fabric-api-0.92.0.jar", "fabric-api", "delisted");
         kept.version_number = Some("0.92.0+1.20.1".to_owned());
         kept.title = Some("Fabric API".to_owned());
@@ -2152,19 +2155,19 @@ mod tests {
         kept.sha1 = Some("0123456789abcdef0123456789abcdef01234567".to_owned());
         let mut ledger = Ledger::default();
         ledger.upsert(kept);
-        aurora
+        petalfall
             .ledger_store("1.20.1-fabric")
             .save(&ledger)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.20.1-fabric").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         // 禁用态也算装着。
         tokio::fs::write(mods_dir.join("fabric-api-0.92.0.jar.disabled"), b"jar")
             .await
             .unwrap();
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -2233,23 +2236,23 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
         let mut kept = entry("fabric-api.jar", "fabric-api", "gone1");
         kept.title = Some("旧标题".to_owned());
         let mut ledger = Ledger::default();
         ledger.upsert(kept);
-        aurora
+        petalfall
             .ledger_store("1.20.1-fabric")
             .save(&ledger)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.20.1-fabric").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("fabric-api.jar"), b"jar")
             .await
             .unwrap();
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -2288,21 +2291,21 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
         let mut ledger = Ledger::default();
         ledger.upsert(entry("fabric-api-pinned.jar", "fabric-api", "pinned"));
-        aurora
+        petalfall
             .ledger_store("1.20.1-fabric")
             .save(&ledger)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.20.1-fabric").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("fabric-api-pinned.jar"), b"jar")
             .await
             .unwrap();
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -2314,7 +2317,7 @@ mod tests {
         // 装着的是同工程的另一版时，钉的那一版仍是「已不存在」，照旧如实说明。
         let mut ledger = Ledger::default();
         ledger.upsert(entry("fabric-api-other.jar", "fabric-api", "other"));
-        aurora
+        petalfall
             .ledger_store("1.20.1-fabric")
             .save(&ledger)
             .await
@@ -2322,7 +2325,7 @@ mod tests {
         tokio::fs::write(mods_dir.join("fabric-api-other.jar"), b"jar")
             .await
             .unwrap();
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -2358,28 +2361,28 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
         let mut ledger = Ledger::default();
         ledger.upsert(entry("fabric-api.jar", "fabric-api", "kept"));
-        aurora
+        petalfall
             .ledger_store("1.20.1-fabric")
             .save(&ledger)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.20.1-fabric").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("fabric-api.jar"), b"jar")
             .await
             .unwrap();
 
-        let err = aurora
+        let err = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap_err();
         assert!(
             matches!(
                 err,
-                CoreError::ModPlatform(aurora_modplatform::Error::Status { status: 403, .. })
+                CoreError::ModPlatform(petalfall_modplatform::Error::Status { status: 403, .. })
             ),
             "实得 {err:?}"
         );
@@ -2430,21 +2433,21 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
         let mut ledger = Ledger::default();
         ledger.upsert(entry("fabric-api-old.jar", "fabric-api", "delisted"));
-        aurora
+        petalfall
             .ledger_store("1.20.1-fabric")
             .save(&ledger)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.20.1-fabric").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("fabric-api-old.jar"), b"kept-dependency")
             .await
             .unwrap();
 
-        let outcome = aurora
+        let outcome = petalfall
             .install_mod("1.20.1-fabric", Platform::Modrinth, "sodium", "v1", None)
             .await
             .unwrap();
@@ -2461,7 +2464,11 @@ mod tests {
                 .unwrap(),
             b"kept-dependency"
         );
-        let ledger = aurora.ledger_store("1.20.1-fabric").load().await.unwrap();
+        let ledger = petalfall
+            .ledger_store("1.20.1-fabric")
+            .load()
+            .await
+            .unwrap();
         assert_eq!(
             ledger.find("sodium-v1.jar").map(|e| e.version_id.as_str()),
             Some("v1")
@@ -2492,21 +2499,21 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
         let mut ledger = Ledger::default();
         ledger.upsert(entry("sodium-v1.jar", "sodium", "v1"));
-        aurora
+        petalfall
             .ledger_store("1.20.1-fabric")
             .save(&ledger)
             .await
             .unwrap();
-        let mods_dir = aurora.resolve_mods_dir("1.20.1-fabric").await.unwrap();
+        let mods_dir = petalfall.resolve_mods_dir("1.20.1-fabric").await.unwrap();
         tokio::fs::create_dir_all(&mods_dir).await.unwrap();
         tokio::fs::write(mods_dir.join("sodium-v1.jar"), b"jar")
             .await
             .unwrap();
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v2")
             .await
             .unwrap();
@@ -2554,9 +2561,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();
@@ -2580,9 +2587,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        match aurora
+        match petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "nope")
             .await
             .unwrap_err()
@@ -2604,9 +2611,9 @@ mod tests {
     async fn uninstalled_instance_errors_before_network() {
         let server = MockServer::start().await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let err = aurora
+        let err = petalfall
             .plan_install("ghost", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap_err();
@@ -2671,9 +2678,9 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         put_fabric_instance(tmp.path(), "1.20.1-fabric").await;
-        let aurora = aurora_at(tmp.path(), server.uri());
+        let petalfall = petalfall_at(tmp.path(), server.uri());
 
-        let plan = aurora
+        let plan = petalfall
             .plan_install("1.20.1-fabric", Platform::Modrinth, "sodium", "v1")
             .await
             .unwrap();

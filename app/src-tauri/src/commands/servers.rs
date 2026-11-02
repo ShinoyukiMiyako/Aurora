@@ -1,6 +1,6 @@
 //! 主页固定的服务器：固定列表（含「加入」时记住的实例）、游戏多人列表与状态查询。
 
-use aurora_core::{KnownServer, PinnedServer, ServerMonitor, ServerStatus};
+use petalfall_core::{KnownServer, PinnedServer, ServerMonitor, ServerStatus};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -64,9 +64,9 @@ pub(crate) async fn set_pinned_servers_with(
         })
         .collect();
     facade
-        .update(|aurora| {
-            aurora.set_pinned_servers(servers)?;
-            Ok(aurora.pinned_servers().iter().map(pinned_dto).collect())
+        .update(|petalfall| {
+            petalfall.set_pinned_servers(servers)?;
+            Ok(petalfall.pinned_servers().iter().map(pinned_dto).collect())
         })
         .await
 }
@@ -94,9 +94,9 @@ pub(crate) async fn set_pinned_server_instance_with(
         facade.snapshot().await.existing_instance_dir(id).await?;
     }
     facade
-        .update(|aurora| {
-            aurora.set_pinned_server_instance(&address, instance)?;
-            Ok(aurora.pinned_servers().iter().map(pinned_dto).collect())
+        .update(|petalfall| {
+            petalfall.set_pinned_server_instance(&address, instance)?;
+            Ok(petalfall.pinned_servers().iter().map(pinned_dto).collect())
         })
         .await
 }
@@ -106,8 +106,8 @@ pub(crate) async fn set_pinned_server_instance_with(
 pub async fn list_known_servers(
     facade: State<'_, Facade>,
 ) -> Result<Vec<KnownServer>, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.known_servers().await?)
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.known_servers().await?)
 }
 
 /// 查询服务器状态，结果与入参顺序一致；不给 `addresses` 时查全部固定的服务器。
@@ -143,12 +143,12 @@ pub(crate) async fn ping_servers_with(
 mod tests {
     use super::*;
     use crate::commands::error::code;
-    use aurora_core::{Aurora, AuroraConfig};
+    use petalfall_core::{Petalfall, PetalfallConfig};
 
     fn facade_in(dir: &std::path::Path) -> Facade {
         Facade::new(
-            Aurora::open(
-                AuroraConfig::default(),
+            Petalfall::open(
+                PetalfallConfig::default(),
                 dir.to_path_buf(),
                 dir.join("config.json"),
             )
@@ -185,7 +185,7 @@ mod tests {
                 instance: None,
             }]
         );
-        let on_disk = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+        let on_disk = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
             .load()
             .await
             .unwrap();
@@ -214,8 +214,8 @@ mod tests {
         }
     }
 
-    async fn pinned_on_disk(dir: &std::path::Path) -> Vec<aurora_core::PinnedServer> {
-        aurora_core::ConfigStore::at(dir.join("config.json"))
+    async fn pinned_on_disk(dir: &std::path::Path) -> Vec<petalfall_core::PinnedServer> {
+        petalfall_core::ConfigStore::at(dir.join("config.json"))
             .load()
             .await
             .unwrap()

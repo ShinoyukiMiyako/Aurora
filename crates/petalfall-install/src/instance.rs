@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use aurora_version::{VersionJson, resolve};
+use petalfall_version::{VersionJson, resolve};
 
 use crate::error::{Error, Result};
 use crate::layout::GameLayout;
@@ -45,7 +45,7 @@ pub async fn write_instance_json(layout: &GameLayout, version: &VersionJson) -> 
         context: "实例版本 JSON".to_owned(),
         source,
     })?;
-    aurora_base::fs::atomic_write(layout.version_json(&version.id), &bytes).await?;
+    petalfall_base::fs::atomic_write(layout.version_json(&version.id), &bytes).await?;
     Ok(())
 }
 
@@ -86,7 +86,7 @@ mod tests {
             Some("net.minecraft.client.main.Main")
         );
         assert_eq!(
-            aurora_version::identify_mc_version(&merged)
+            petalfall_version::identify_mc_version(&merged)
                 .value
                 .as_deref(),
             Some("1.21.1")
@@ -117,8 +117,8 @@ mod tests {
         assert_eq!(merged.java_version.as_ref().unwrap().major_version, 21);
         let jvm = &merged.arguments.as_ref().unwrap().jvm;
         assert_eq!(jvm.len(), 2, "原版在前、加载器在后拼接");
-        let loaders = aurora_version::detect_loaders(&merged);
-        assert_eq!(loaders[0].kind, aurora_version::LoaderKind::Fabric);
+        let loaders = petalfall_version::detect_loaders(&merged);
+        assert_eq!(loaders[0].kind, petalfall_version::LoaderKind::Fabric);
     }
 
     #[test]

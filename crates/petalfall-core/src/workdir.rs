@@ -6,17 +6,17 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_instance::{
+use petalfall_instance::{
     DiscoveredVersion, IsolationOverride, ResolvedIsolation, VERSIONS_DIR, VersionSettings,
     VersionSettingsStore,
 };
-use aurora_launch::resolve_game_directory;
-use aurora_version::{VersionJson, detect_loaders};
+use petalfall_launch::resolve_game_directory;
+use petalfall_version::{VersionJson, detect_loaders};
 
 use crate::error::Result;
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
-impl Aurora {
+impl Petalfall {
     /// 版本目录 `versions/<id>`（不检查是否存在）。
     pub fn version_dir(&self, version_id: &str) -> PathBuf {
         self.game_dir().join(VERSIONS_DIR).join(version_id)
@@ -84,9 +84,9 @@ pub(crate) async fn read_version_json(
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(aurora_base::Error::Io { path, source }.into()),
+        Err(source) => return Err(petalfall_base::Error::Io { path, source }.into()),
     };
-    let json = serde_json::from_slice(&bytes).map_err(|source| aurora_version::Error::Json {
+    let json = serde_json::from_slice(&bytes).map_err(|source| petalfall_version::Error::Json {
         context: "版本 JSON",
         source,
     })?;
@@ -109,30 +109,30 @@ pub(crate) fn discovered(versions_dir: &Path, id: &str, json: VersionJson) -> Di
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use crate::error::CoreError;
-    use aurora_instance::IsolationPolicy;
+    use petalfall_instance::IsolationPolicy;
 
     #[tokio::test]
     async fn version_override_beats_global_policy() {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().join(".minecraft");
         std::fs::create_dir_all(mc.join("versions").join("1.21")).unwrap();
-        let mut aurora = Aurora::for_test(
-            AuroraConfig::default(),
+        let mut petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             mc.clone(),
         );
-        aurora.set_isolation_policy(IsolationPolicy::Disabled);
+        petalfall.set_isolation_policy(IsolationPolicy::Disabled);
 
-        let shared = aurora
+        let shared = petalfall
             .resolve_working_dir_from("1.21", IsolationOverride::FollowGlobal, false, true)
             .await
             .unwrap();
         assert_eq!(shared.working_dir, mc);
         assert!(!shared.isolated);
 
-        let isolated = aurora
+        let isolated = petalfall
             .resolve_working_dir_from("1.21", IsolationOverride::Enabled, false, true)
             .await
             .unwrap();
@@ -165,15 +165,15 @@ mod tests {
             "24w14a",
             r#"{"id":"24w14a","type":"snapshot","mainClass":"m"}"#,
         );
-        let aurora = Aurora::for_test(
-            AuroraConfig::default(),
+        let petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             mc.clone(),
         );
 
         // 默认档位隔离加载器版本与非正式版，原版正式版共用根目录。
         assert_eq!(
-            aurora
+            petalfall
                 .resolve_working_dir("1.21")
                 .await
                 .unwrap()
@@ -181,7 +181,7 @@ mod tests {
             mc
         );
         assert_eq!(
-            aurora
+            petalfall
                 .resolve_working_dir("fabric-1.21")
                 .await
                 .unwrap()
@@ -189,7 +189,7 @@ mod tests {
             mc.join("versions").join("fabric-1.21")
         );
         assert_eq!(
-            aurora
+            petalfall
                 .resolve_working_dir("24w14a")
                 .await
                 .unwrap()
@@ -201,11 +201,11 @@ mod tests {
         let meta = mc
             .join("versions")
             .join("1.21")
-            .join(aurora_instance::AURORA_META_DIR);
+            .join(petalfall_instance::PETALFALL_META_DIR);
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(meta.join("settings.json"), r#"{"isolation":"enabled"}"#).unwrap();
         assert_eq!(
-            aurora
+            petalfall
                 .resolve_working_dir("1.21")
                 .await
                 .unwrap()
@@ -219,13 +219,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().join(".minecraft");
         put_version(&mc, "broken", "{ not json");
-        let aurora = Aurora::for_test(AuroraConfig::default(), tmp.path().to_path_buf(), mc);
+        let petalfall =
+            Petalfall::for_test(PetalfallConfig::default(), tmp.path().to_path_buf(), mc);
         assert!(matches!(
-            aurora.resolve_working_dir("ghost").await.unwrap_err(),
+            petalfall.resolve_working_dir("ghost").await.unwrap_err(),
             CoreError::VersionNotInstalled { id } if id == "ghost"
         ));
         assert!(matches!(
-            aurora.resolve_working_dir("broken").await.unwrap_err(),
+            petalfall.resolve_working_dir("broken").await.unwrap_err(),
             CoreError::Instance(crate::InstanceError::Broken { id, .. }) if id == "broken"
         ));
     }
@@ -237,10 +238,11 @@ mod tests {
         let meta = mc
             .join("versions")
             .join("1.21")
-            .join(aurora_instance::AURORA_META_DIR);
+            .join(petalfall_instance::PETALFALL_META_DIR);
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(meta.join("settings.json"), "{ broken").unwrap();
-        let aurora = Aurora::for_test(AuroraConfig::default(), tmp.path().to_path_buf(), mc);
-        assert!(aurora.version_settings("1.21").await.is_err());
+        let petalfall =
+            Petalfall::for_test(PetalfallConfig::default(), tmp.path().to_path_buf(), mc);
+        assert!(petalfall.version_settings("1.21").await.is_err());
     }
 }

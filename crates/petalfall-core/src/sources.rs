@@ -1,19 +1,19 @@
 //! 下载源计划：把三档策略落成具体的源顺序。
 //!
 //! 尽量官方 / 尽量镜像是静态顺序；自动档按门面上共享的测速结论排序，没有结论时取兜底顺序（镜像在前）。
-//! 测速只在下载 Mojang 产物的长任务入口做（[`Aurora::prepare_sources`]），元数据与界面列表只读缓存：
+//! 测速只在下载 Mojang 产物的长任务入口做（[`Petalfall::prepare_sources`]），元数据与界面列表只读缓存：
 //! 新建实例页这类首屏若也等探针，网络不佳时每次打开都要多等一个探针超时。
 //!
 //! 熔断沉底不在这里做：下载引擎对每个文件的候选地址都会按共享的源健康表重排，测速顺序与熔断自然叠加。
 
-use aurora_base::mirror::MirrorSource;
-use aurora_download::SourcePlan;
+use petalfall_base::mirror::MirrorSource;
+use petalfall_download::SourcePlan;
 
 use crate::config::DownloadSourcePolicy;
 use crate::error::Result;
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
-impl Aurora {
+impl Petalfall {
     /// 生成下载计划前调用：文件下载源或版本列表源任一为自动时，确保持有未过期的测速结论（TTL 内直接
     /// 返回，同一时刻只测一轮）。
     ///
@@ -37,7 +37,7 @@ impl Aurora {
                 token
                     .run_until_cancelled(measure)
                     .await
-                    .ok_or(aurora_download::Error::Cancelled)??;
+                    .ok_or(petalfall_download::Error::Cancelled)??;
             }
             None => {
                 measure.await?;
@@ -78,12 +78,12 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use aurora_download::SourceResolver;
+    use petalfall_download::SourceResolver;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
 
     /// 测速样本（版本清单）的路径；两台 mock 只认带 `Range: bytes=0-0` 的探针。
     const SAMPLE_PATH: &str = "/mc/game/version_manifest_v2.json";
@@ -98,7 +98,7 @@ pub(crate) mod tests {
     }
 
     impl SourceResolver for Routes {
-        fn resolve(&self, url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+        fn resolve(&self, url: &str, source: MirrorSource) -> petalfall_download::Result<String> {
             let (_, rest) = url.split_once("://").expect("测试只解析绝对地址");
             let path = rest.find('/').map_or("/", |at| &rest[at..]);
             let base = match source {
@@ -141,32 +141,32 @@ pub(crate) mod tests {
         })
     }
 
-    fn aurora_with(
-        config: AuroraConfig,
+    fn petalfall_with(
+        config: PetalfallConfig,
         official: &MockServer,
         mirror: &MockServer,
         ttl: Duration,
-    ) -> Aurora {
+    ) -> Petalfall {
         let dir = PathBuf::from("/data");
-        Aurora::for_test(config, dir.clone(), dir.join(".minecraft")).with_source_routes(
+        Petalfall::for_test(config, dir.clone(), dir.join(".minecraft")).with_source_routes(
             routes(official, mirror),
             ttl,
             PROBE_TIMEOUT,
         )
     }
 
-    fn aurora_between(
+    fn petalfall_between(
         official: &MockServer,
         mirror: &MockServer,
         policy: DownloadSourcePolicy,
         ttl: Duration,
-    ) -> Aurora {
-        let config = AuroraConfig {
+    ) -> Petalfall {
+        let config = PetalfallConfig {
             download_source: policy,
             version_list_source: policy,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        aurora_with(config, official, mirror, ttl)
+        petalfall_with(config, official, mirror, ttl)
     }
 
     fn partial() -> ResponseTemplate {
@@ -174,7 +174,7 @@ pub(crate) mod tests {
     }
 
     /// 官方探不通、镜像答得上：自动档测速后镜像在前，下载引擎拿到的方案同序。
-    /// 时延谁大谁小的比较由 aurora-download 的测速用例钉住，这里只看结论接到了各处，
+    /// 时延谁大谁小的比较由 petalfall-download 的测速用例钉住，这里只看结论接到了各处，
     /// 所以让一方探不通，先后不用跟调度抖动赛跑。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auto_puts_the_mirror_first_when_only_it_answers() {
@@ -182,14 +182,14 @@ pub(crate) mod tests {
         let mirror = MockServer::start().await;
         mount_probe(&official, ResponseTemplate::new(503)).await;
         mount_probe(&mirror, partial()).await;
-        let aurora = aurora_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL);
+        let petalfall = petalfall_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL);
 
-        aurora.prepare_sources().await.unwrap();
+        petalfall.prepare_sources().await.unwrap();
         let expected = vec![MirrorSource::BmclApi, MirrorSource::Official];
-        assert_eq!(aurora.source_order(DownloadSourcePolicy::Auto), expected);
-        assert_eq!(aurora.download_config().sources.sources, expected);
+        assert_eq!(petalfall.source_order(DownloadSourcePolicy::Auto), expected);
+        assert_eq!(petalfall.download_config().sources.sources, expected);
         assert_eq!(
-            aurora.preferred_source(DownloadSourcePolicy::Auto),
+            petalfall.preferred_source(DownloadSourcePolicy::Auto),
             MirrorSource::BmclApi
         );
         assert_eq!(
@@ -205,15 +205,15 @@ pub(crate) mod tests {
         let mirror = MockServer::start().await;
         mount_probe(&official, partial()).await;
         mount_probe(&mirror, ResponseTemplate::new(503)).await;
-        let aurora = aurora_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL);
+        let petalfall = petalfall_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL);
 
-        aurora.prepare_sources().await.unwrap();
+        petalfall.prepare_sources().await.unwrap();
         let expected = vec![MirrorSource::Official, MirrorSource::BmclApi];
-        assert_eq!(aurora.source_order(DownloadSourcePolicy::Auto), expected);
-        assert_eq!(aurora.download_config().sources.sources, expected);
-        let first = aurora
+        assert_eq!(petalfall.source_order(DownloadSourcePolicy::Auto), expected);
+        assert_eq!(petalfall.download_config().sources.sources, expected);
+        let first = petalfall
             .source_plan(DownloadSourcePolicy::Auto)
-            .candidates(aurora_install::VERSION_MANIFEST_V2)
+            .candidates(petalfall_install::VERSION_MANIFEST_V2)
             .unwrap()
             .remove(0);
         assert_eq!(first, format!("{}{SAMPLE_PATH}", official.uri()));
@@ -226,14 +226,14 @@ pub(crate) mod tests {
         let mirror = MockServer::start().await;
         mount_probe(&official, ResponseTemplate::new(503)).await;
         mount_probe(&mirror, ResponseTemplate::new(503)).await;
-        let aurora = aurora_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL);
+        let petalfall = petalfall_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL);
 
-        aurora.prepare_sources().await.unwrap();
+        petalfall.prepare_sources().await.unwrap();
         assert_eq!(
-            aurora.source_order(DownloadSourcePolicy::Auto),
+            petalfall.source_order(DownloadSourcePolicy::Auto),
             vec![MirrorSource::BmclApi, MirrorSource::Official]
         );
-        aurora.prepare_sources().await.unwrap();
+        petalfall.prepare_sources().await.unwrap();
         assert_eq!(
             (probe_count(&official).await, probe_count(&mirror).await),
             (2, 2)
@@ -257,12 +257,12 @@ pub(crate) mod tests {
             let mirror = MockServer::start().await;
             mount_probe(&official, partial()).await;
             mount_probe(&mirror, partial().set_delay(Duration::from_millis(300))).await;
-            let aurora = aurora_between(&official, &mirror, policy, LONG_TTL);
+            let petalfall = petalfall_between(&official, &mirror, policy, LONG_TTL);
 
-            aurora.prepare_sources().await.unwrap();
-            assert_eq!(aurora.source_order(policy), expected, "{policy:?}");
+            petalfall.prepare_sources().await.unwrap();
+            assert_eq!(petalfall.source_order(policy), expected, "{policy:?}");
             assert_eq!(
-                aurora.download_config().sources.sources,
+                petalfall.download_config().sources.sources,
                 expected,
                 "{policy:?}"
             );
@@ -283,10 +283,10 @@ pub(crate) mod tests {
             let mirror = MockServer::start().await;
             mount_probe(&official, partial()).await;
             mount_probe(&mirror, partial()).await;
-            let aurora = aurora_between(&official, &mirror, DownloadSourcePolicy::Auto, ttl);
+            let petalfall = petalfall_between(&official, &mirror, DownloadSourcePolicy::Auto, ttl);
 
-            aurora.prepare_sources().await.unwrap();
-            aurora.prepare_sources().await.unwrap();
+            petalfall.prepare_sources().await.unwrap();
+            petalfall.prepare_sources().await.unwrap();
             assert_eq!(
                 (probe_count(&official).await, probe_count(&mirror).await),
                 (rounds, rounds),
@@ -311,24 +311,24 @@ pub(crate) mod tests {
                 .mount(server)
                 .await;
         }
-        let aurora = aurora_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL);
-        aurora.prepare_sources().await.unwrap();
+        let petalfall = petalfall_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL);
+        petalfall.prepare_sources().await.unwrap();
         assert_eq!(
-            aurora.source_order(DownloadSourcePolicy::Auto),
+            petalfall.source_order(DownloadSourcePolicy::Auto),
             vec![MirrorSource::BmclApi, MirrorSource::Official]
         );
         let mirror_file = format!("{}{file_path}", mirror.uri());
         for _ in 0..3 {
-            aurora.source_health().record_failure(&mirror_file, true);
+            petalfall.source_health().record_failure(&mirror_file, true);
         }
 
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("lib-1.0.jar");
-        let task = aurora_download::DownloadTask::new(
+        let task = petalfall_download::DownloadTask::new(
             format!("https://libraries.minecraft.net{file_path}"),
             &dest,
         );
-        let report = aurora
+        let report = petalfall
             .download_pool()
             .download_all(vec![task], None)
             .await
@@ -353,50 +353,64 @@ pub(crate) mod tests {
         const MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
         const MIRROR: &str = "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json";
         let dir = PathBuf::from("/data");
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             download_source: DownloadSourcePolicy::MirrorFirst,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = Aurora::for_test(config, dir.clone(), dir.join(".minecraft"));
+        let petalfall = Petalfall::for_test(config, dir.clone(), dir.join(".minecraft"));
         let java_candidates = || {
-            aurora
-                .java_installer(aurora_java::MOJANG_JAVA_RUNTIME_ALL)
-                .candidates(aurora_java::MOJANG_JAVA_RUNTIME_ALL)
+            petalfall
+                .java_installer(petalfall_java::MOJANG_JAVA_RUNTIME_ALL)
+                .candidates(petalfall_java::MOJANG_JAVA_RUNTIME_ALL)
                 .unwrap()
         };
-        let plan = aurora.source_plan(DownloadSourcePolicy::MirrorFirst);
+        let plan = petalfall.source_plan(DownloadSourcePolicy::MirrorFirst);
         assert_eq!(plan.candidates(MANIFEST).unwrap()[0], MIRROR);
-        assert_ne!(java_candidates()[0], aurora_java::MOJANG_JAVA_RUNTIME_ALL);
+        assert_ne!(
+            java_candidates()[0],
+            petalfall_java::MOJANG_JAVA_RUNTIME_ALL
+        );
 
         for _ in 0..3 {
-            aurora.source_health().record_failure(MIRROR, true);
+            petalfall.source_health().record_failure(MIRROR, true);
         }
 
         assert_eq!(plan.candidates(MANIFEST).unwrap()[0], MANIFEST);
-        assert_eq!(java_candidates()[0], aurora_java::MOJANG_JAVA_RUNTIME_ALL);
+        assert_eq!(
+            java_candidates()[0],
+            petalfall_java::MOJANG_JAVA_RUNTIME_ALL
+        );
     }
 
     /// 快照与常驻门面共用同一张健康表：一个任务记下的熔断，别的任务装配的下载池也看得到。
     #[test]
     fn clones_share_one_health_table() {
         let dir = PathBuf::from("/data");
-        let aurora = Aurora::for_test(AuroraConfig::default(), dir.clone(), dir.join(".minecraft"));
-        let snapshot = aurora
+        let petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
+            dir.clone(),
+            dir.join(".minecraft"),
+        );
+        let snapshot = petalfall
             .clone()
-            .with_cancel(aurora_download::CancellationToken::new());
+            .with_cancel(petalfall_download::CancellationToken::new());
         assert!(Arc::ptr_eq(
-            aurora.source_health(),
+            petalfall.source_health(),
             snapshot.source_health()
         ));
         let url = "https://bmclapi2.bangbang93.com/maven/a.jar";
         for _ in 0..3 {
             snapshot.source_health().record_failure(url, true);
         }
-        assert!(aurora.source_health().is_tripped(url));
+        assert!(petalfall.source_health().is_tripped(url));
         assert!(
-            !Aurora::for_test(AuroraConfig::default(), dir.clone(), dir.join(".minecraft"))
-                .source_health()
-                .is_tripped(url),
+            !Petalfall::for_test(
+                PetalfallConfig::default(),
+                dir.clone(),
+                dir.join(".minecraft")
+            )
+            .source_health()
+            .is_tripped(url),
             "各自新建的门面不串用"
         );
     }
@@ -409,8 +423,8 @@ pub(crate) mod tests {
         let mirror = MockServer::start().await;
         mount_probe(&official, partial().set_delay(PROBE_TIMEOUT * 2)).await;
         mount_probe(&mirror, partial().set_delay(PROBE_TIMEOUT * 2)).await;
-        let token = aurora_download::CancellationToken::new();
-        let aurora = aurora_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL)
+        let token = petalfall_download::CancellationToken::new();
+        let petalfall = petalfall_between(&official, &mirror, DownloadSourcePolicy::Auto, LONG_TTL)
             .with_cancel(token.clone());
         let cancel_once_probing = async {
             tokio::time::timeout(Duration::from_secs(15), async {
@@ -423,11 +437,11 @@ pub(crate) mod tests {
             token.cancel();
         };
 
-        let (measured, ()) = tokio::join!(aurora.prepare_sources(), cancel_once_probing);
+        let (measured, ()) = tokio::join!(petalfall.prepare_sources(), cancel_once_probing);
 
         let err = measured.expect_err("取消后不该当作测完返回");
         assert!(err.is_cancelled(), "实际：{err:?}");
-        assert!(!aurora.source_speed.is_fresh(), "取消的一轮不留结论");
+        assert!(!petalfall.source_speed.is_fresh(), "取消的一轮不留结论");
     }
 
     /// 只有版本列表源是自动时也要测：版本清单的源顺序同样取自这份结论，文件下载仍按固定档。
@@ -437,20 +451,20 @@ pub(crate) mod tests {
         let mirror = MockServer::start().await;
         mount_probe(&official, partial()).await;
         mount_probe(&mirror, ResponseTemplate::new(503)).await;
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             download_source: DownloadSourcePolicy::MirrorFirst,
             version_list_source: DownloadSourcePolicy::Auto,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = aurora_with(config, &official, &mirror, LONG_TTL);
+        let petalfall = petalfall_with(config, &official, &mirror, LONG_TTL);
 
-        aurora.prepare_sources().await.unwrap();
+        petalfall.prepare_sources().await.unwrap();
         assert_eq!(
-            aurora.source_order(DownloadSourcePolicy::Auto),
+            petalfall.source_order(DownloadSourcePolicy::Auto),
             vec![MirrorSource::Official, MirrorSource::BmclApi]
         );
         assert_eq!(
-            aurora.download_config().sources.sources,
+            petalfall.download_config().sources.sources,
             vec![MirrorSource::BmclApi, MirrorSource::Official]
         );
         assert_eq!(

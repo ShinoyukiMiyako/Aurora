@@ -33,9 +33,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use aurora_base::PathLocks;
-use aurora_base::fs::Sha1Hasher;
-use aurora_base::retry::{RetryPolicy, retry_async, retry_async_until};
+use petalfall_base::PathLocks;
+use petalfall_base::fs::Sha1Hasher;
+use petalfall_base::retry::{RetryPolicy, retry_async, retry_async_until};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
@@ -75,7 +75,7 @@ pub struct Downloader {
 }
 
 impl Downloader {
-    /// 用给定客户端与配置构造。客户端应由 [`aurora_base::http::build_client`] 统一构建。
+    /// 用给定客户端与配置构造。客户端应由 [`petalfall_base::http::build_client`] 统一构建。
     pub fn new(client: reqwest::Client, config: DownloadConfig) -> Self {
         Self::with_health(client, config, Arc::new(SourceHealth::new()))
     }
@@ -95,7 +95,7 @@ impl Downloader {
         }
     }
 
-    /// 装上不自动跟随跳转的客户端，应由 [`aurora_base::http::build_manual_redirect_client`] 构建。
+    /// 装上不自动跟随跳转的客户端，应由 [`petalfall_base::http::build_manual_redirect_client`] 构建。
     /// 共享客户端跟随跳转时会把自定义头原样带到下一跳，带凭据的任务因此只能走这个客户端。
     pub fn with_manual_redirect_client(mut self, client: reqwest::Client) -> Self {
         self.manual_client = Some(client);
@@ -874,9 +874,9 @@ impl Downloader {
             return Ok(None);
         }
         match &task.sha1 {
-            Some(sha1) => match aurora_base::fs::verify_sha1(&task.dest, sha1).await {
+            Some(sha1) => match petalfall_base::fs::verify_sha1(&task.dest, sha1).await {
                 Ok(()) => Ok(Some(len)),
-                Err(aurora_base::Error::HashMismatch { .. }) => Ok(None),
+                Err(petalfall_base::Error::HashMismatch { .. }) => Ok(None),
                 Err(err) => Err(err.into()),
             },
             None => Ok(task.size.map(|_| len)),
@@ -973,7 +973,7 @@ impl<'a> Landing<'a> {
     }
 
     /// 比对摘要；任务没有 sha1 时无可比对。
-    fn verify(self) -> aurora_base::Result<()> {
+    fn verify(self) -> petalfall_base::Result<()> {
         match self.sha1 {
             Some((expected, hasher)) => hasher.verify(expected),
             None => Ok(()),
@@ -1056,7 +1056,7 @@ async fn follow_redirects(
     cancel: Option<&CancellationToken>,
 ) -> Result<reqwest::Response> {
     let mut hop = reqwest::Url::parse(url).map_err(|source| {
-        Error::Base(aurora_base::Error::UrlParse {
+        Error::Base(petalfall_base::Error::UrlParse {
             url: url.to_owned(),
             source,
         })
@@ -1123,7 +1123,7 @@ async fn follow_redirects(
 /// 引擎之外的少量带凭据读取（如整合包摘要按范围读包尾）用的单次 GET：与下载任务同一套逐跳规则，
 /// 每一跳按作用域决定带不带密钥，`range` 每一跳都带同一个值，带了密钥的那一跳回 401 报
 /// [`Error::CredentialRejected`]。`client` 必须是不自动跳转的客户端
-/// （`aurora_base::http::build_manual_redirect_client`），否则 reqwest 会把密钥原样带到跳转的下一跳。
+/// （`petalfall_base::http::build_manual_redirect_client`），否则 reqwest 会把密钥原样带到跳转的下一跳。
 /// 返回跳转链末端的响应，状态码交给调用方判定。
 pub async fn credentialed_get(
     client: &reqwest::Client,
@@ -1438,7 +1438,7 @@ async fn cleanup(temp: &Path, parts: &[PathBuf]) {
 
 /// 把 IO 错误包成携带路径的 crate 错误。
 fn io_error(path: &Path, source: std::io::Error) -> Error {
-    Error::Base(aurora_base::Error::Io {
+    Error::Base(petalfall_base::Error::Io {
         path: path.to_owned(),
         source,
     })
@@ -1453,14 +1453,14 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
 
 /// 合并临时文件路径：`<dest>.petalfall-tmp`。
 fn temp_path(dest: &Path) -> PathBuf {
-    append_suffix(dest, concat!(".", aurora_base::app_slug!(), "-tmp"))
+    append_suffix(dest, concat!(".", petalfall_base::app_slug!(), "-tmp"))
 }
 
 /// 分片文件路径：`<dest>.petalfall-partN`（确定性命名，供断点续传定位）。
 fn part_path(dest: &Path, index: usize) -> PathBuf {
     append_suffix(
         dest,
-        &format!(".{}-part{index}", aurora_base::brand::APP_SLUG),
+        &format!(".{}-part{index}", petalfall_base::brand::APP_SLUG),
     )
 }
 

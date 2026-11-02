@@ -1,7 +1,7 @@
-//! aurora-launch（L3 启动链路）
+//! petalfall-launch（L3 启动链路）
 //!
 //! 把「账户 + 已合并版本 JSON + Java + 路径」拼装成一条可执行的启动命令并驱动游戏进程。本 crate 只做拼装与
-//! 进程编排，不发网络请求、不下载文件（补全交给 aurora-install，探测交给 aurora-java，登录交给 aurora-auth）。
+//! 进程编排，不发网络请求、不下载文件（补全交给 petalfall-install，探测交给 petalfall-java，登录交给 petalfall-auth）。
 //!
 //! 模块划分：
 //! - [`placeholder`]：`${}` 占位符替换引擎（ArgumentReplace）。
@@ -18,7 +18,7 @@
 //! - [`quickplay`]：直达存档与服务器（Quick Play 与旧版 `--server` / `--port`）的支持判定。
 //! - [`workspace`]：游戏工作目录（版本隔离）解析。
 //!
-//! 错误统一归口到 [`LaunchError`]，下游可 `#[from] aurora_launch::LaunchError` 冒泡。
+//! 错误统一归口到 [`LaunchError`]，下游可 `#[from] petalfall_launch::LaunchError` 冒泡。
 
 pub mod account;
 pub mod args;

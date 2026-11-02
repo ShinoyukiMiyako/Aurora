@@ -435,7 +435,7 @@ fn required_text(document: &'static str, field: &str, value: &str) -> Result<Str
 /// 加载器版本号会原样拼进安装器的下载地址、缓存文件名与版本 id，必须是单个安全的路径段。
 fn loader_version(document: &'static str, field: &str, value: &str) -> Result<String> {
     let version = required_text(document, field, value)?;
-    aurora_version::check_path_segment(&version).map_err(|problem| {
+    petalfall_version::check_path_segment(&version).map_err(|problem| {
         Error::invalid(
             document,
             format!("{field} 的加载器版本号「{version}」不能用：{problem}"),
@@ -897,7 +897,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(traversal, Error::UnsafePath { .. }));
 
-        let meta = format!("{}/modpack.json", aurora_instance::AURORA_META_DIR);
+        let meta = format!("{}/modpack.json", petalfall_instance::PETALFALL_META_DIR);
         let into_meta = PackManifest::parse_modrinth(&index(
             serde_json::json!([file(&meta, None, CDN)]),
             deps.clone(),

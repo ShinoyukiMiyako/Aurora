@@ -1,7 +1,7 @@
 //! 工程可用版本列表、单个版本与工程摘要（跨平台统一视图）。
 //!
 //! Modrinth 的 `GET /project/{id}/version` 与 CurseForge 的 `GET /mods/{id}/files` 返回两套形状完全
-//! 不同的 JSON，归一动作已经在 [`aurora_modplatform::version`] 里做完。本模块只负责门面这一层的编排：
+//! 不同的 JSON，归一动作已经在 [`petalfall_modplatform::version`] 里做完。本模块只负责门面这一层的编排：
 //! 按平台选客户端、拿列表、按调用方给的 MC 版本与加载器过滤，最后统一成
 //! [`ModVersionInfo`] 交给兼容判定、依赖解析与更新检查复用——上层不该再见到任何平台分支。
 //!
@@ -12,21 +12,21 @@
 //! Mod 一次）会在几秒内反复问同一个工程的版本列表，没有缓存就全靠令牌桶在客户端排队。缓存里有该工程
 //! 完整的不过滤列表时，带过滤的查询直接在它上面本地过滤，不再问平台。
 //!
-//! CurseForge 的文件列表按页给，客户端翻到页数上限为止（[`aurora_modplatform::MOD_FILES_MAX_PAGES`]），
+//! CurseForge 的文件列表按页给，客户端翻到页数上限为止（[`petalfall_modplatform::MOD_FILES_MAX_PAGES`]），
 //! 翻不完时列表标明截断（[`ModVersionList::truncated`]）。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aurora_modplatform::{
+use petalfall_modplatform::{
     CurseForgeClient, CurseForgeFile, ModLoader, ModVersionInfo, ModrinthClient, ModrinthVersion,
     Platform,
 };
 use serde::Serialize;
 
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 /// 版本列表缓存的有效期。平台上新版本的发布频率以天计，五分钟的陈旧度换来的是一次装 Mod 流程里
 /// 同一工程只问一次平台。
@@ -53,7 +53,7 @@ pub struct ModVersionList {
     pub truncated: bool,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 列出某工程的可用版本（跨平台统一模型），按发布时间倒序；不关心列表全不全的调用方用。
     /// 口径与缓存同 [`mod_version_list`](Self::mod_version_list)。
     pub async fn list_mod_versions(
@@ -199,7 +199,7 @@ impl Aurora {
         ModrinthClient::new(self.http()).with_base_url(self.modrinth_base())
     }
 
-    /// CurseForge 客户端；未配置 API key 时报 [`aurora_modplatform::Error::CurseForgeKeyMissing`]。
+    /// CurseForge 客户端；未配置 API key 时报 [`petalfall_modplatform::Error::CurseForgeKeyMissing`]。
     pub(crate) fn curseforge_client(&self) -> Result<CurseForgeClient> {
         #[cfg(test)]
         if let Some(key) = self.injected_curseforge_key() {
@@ -215,7 +215,7 @@ impl Aurora {
     pub(crate) fn curseforge_credential(
         &self,
         client: &CurseForgeClient,
-    ) -> Result<aurora_download::DownloadCredential> {
+    ) -> Result<petalfall_download::DownloadCredential> {
         let credential = client.download_credential()?;
         #[cfg(test)]
         if let Some(scope) = self.injected_curseforge_cdn_scope() {
@@ -250,7 +250,7 @@ async fn fetch_modrinth(
 /// 拉取 CurseForge 工程文件并归一。
 ///
 /// `/mods/{id}/files` 的 `gameVersion` 与 `modLoaderType` 都只收单值，因此只有该维度恰好请求一个取值
-/// 时才下推。这不只是省流量：该端点是分页的，客户端最多翻 [`aurora_modplatform::MOD_FILES_MAX_PAGES`]
+/// 时才下推。这不只是省流量：该端点是分页的，客户端最多翻 [`petalfall_modplatform::MOD_FILES_MAX_PAGES`]
 /// 页，不下推游戏版本时，一个有上千个文件的大 Mod 翻到上限也可能不含目标 MC 版本的文件，列表会
 /// 「明明有版本却是空的」。
 async fn fetch_curseforge(
@@ -499,8 +499,8 @@ impl VersionListCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
-    use aurora_modplatform::{
+    use crate::config::PetalfallConfig;
+    use petalfall_modplatform::{
         DependencyKind, Error as PlatformError, ModDependency, ReleaseChannel,
     };
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
@@ -550,9 +550,9 @@ mod tests {
         versions.iter().map(|v| v.version_id.as_str()).collect()
     }
 
-    fn test_aurora(base: &str) -> Aurora {
+    fn test_petalfall(base: &str) -> Petalfall {
         let tmp = std::env::temp_dir().join("petalfall-modversions-tests");
-        Aurora::for_test(AuroraConfig::default(), tmp.clone(), tmp)
+        Petalfall::for_test(PetalfallConfig::default(), tmp.clone(), tmp)
             .with_modrinth_base(base)
             .with_curseforge_base(base)
     }
@@ -560,7 +560,7 @@ mod tests {
     /// 直接建一个带 key 的 CurseForge 客户端：`from_env` 依赖进程级环境变量，测试里改全局环境
     /// （edition 2024 下还是 unsafe）会污染同进程的其它测试，故只覆盖到客户端之后的逻辑。
     fn curseforge_client(base: &str) -> CurseForgeClient {
-        let http = aurora_base::http::build_client().expect("构建测试 HTTP 客户端");
+        let http = petalfall_base::http::build_client().expect("构建测试 HTTP 客户端");
         CurseForgeClient::new(http, "test-key").with_base_url(base)
     }
 
@@ -830,7 +830,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let list = test_aurora(&server.uri())
+        let list = test_petalfall(&server.uri())
             .list_mod_versions(Platform::Modrinth, "AANobbMI", &[], &[])
             .await
             .unwrap();
@@ -862,7 +862,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let list = test_aurora(&server.uri())
+        let list = test_petalfall(&server.uri())
             .list_mod_versions(
                 Platform::Modrinth,
                 "AANobbMI",
@@ -884,20 +884,20 @@ mod tests {
             .expect(2)
             .mount(&server)
             .await;
-        let aurora = test_aurora(&server.uri());
+        let petalfall = test_petalfall(&server.uri());
 
         for _ in 0..3 {
-            let list = aurora
+            let list = petalfall
                 .list_mod_versions(Platform::Modrinth, "cached-proj", &[], &[])
                 .await
                 .unwrap();
             assert_eq!(ids(&list), vec!["new", "old"]);
         }
         // 快照与原门面共享同一份缓存：在克隆上失效，原门面同样看得见。
-        aurora
+        petalfall
             .clone()
             .invalidate_mod_versions(Platform::Modrinth, "cached-proj");
-        aurora
+        petalfall
             .list_mod_versions(Platform::Modrinth, "cached-proj", &[], &[])
             .await
             .unwrap();
@@ -913,7 +913,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = test_aurora(&server.uri())
+        let err = test_petalfall(&server.uri())
             .list_mod_versions(Platform::Modrinth, "ghost", &[], &[])
             .await
             .unwrap_err();
@@ -938,16 +938,16 @@ mod tests {
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
-        let aurora = test_aurora(&server.uri());
+        let petalfall = test_petalfall(&server.uri());
 
-        let got = aurora
+        let got = petalfall
             .get_mod_version(Platform::Modrinth, "sodium", "new")
             .await
             .unwrap();
         assert_eq!(got.version_id, "new");
         assert_eq!(got.file_name, "new.jar");
 
-        let err = aurora
+        let err = petalfall
             .get_mod_version(Platform::Modrinth, "sodium", "gone")
             .await
             .unwrap_err();
@@ -977,7 +977,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let infos = test_aurora(&server.uri())
+        let infos = test_petalfall(&server.uri())
             .project_infos(Platform::Modrinth, &["AANobbMI".to_owned(), "x".to_owned()])
             .await
             .unwrap();
@@ -1156,9 +1156,9 @@ mod tests {
             let files = range.map(|k| mixed_file(119 - k)).collect();
             mount_cf_page(&server, page * 50, files, 120).await;
         }
-        let aurora = test_aurora(&server.uri()).with_curseforge_key("test-key");
+        let petalfall = test_petalfall(&server.uri()).with_curseforge_key("test-key");
 
-        let all = aurora
+        let all = petalfall
             .mod_version_list(Platform::CurseForge, "238222", &[], &[])
             .await
             .unwrap();
@@ -1168,7 +1168,7 @@ mod tests {
         assert_eq!(all.versions[119].version_id, "10000");
         assert_eq!(requests(&server).await, 3);
 
-        let old = aurora
+        let old = petalfall
             .mod_version_list(
                 Platform::CurseForge,
                 "238222",
@@ -1204,9 +1204,9 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let aurora = test_aurora(&server.uri()).with_curseforge_key("test-key");
+        let petalfall = test_petalfall(&server.uri()).with_curseforge_key("test-key");
 
-        let all = aurora
+        let all = petalfall
             .mod_version_list(Platform::CurseForge, "238222", &[], &[])
             .await
             .unwrap();
@@ -1215,14 +1215,14 @@ mod tests {
         assert_eq!(all.versions[499].version_id, "11500");
         assert_eq!(requests(&server).await, 10);
         // 截断标记跟着缓存走：再问一次不发请求，照样标截断。
-        let cached = aurora
+        let cached = petalfall
             .mod_version_list(Platform::CurseForge, "238222", &[], &[])
             .await
             .unwrap();
         assert_eq!(cached, all);
         assert_eq!(requests(&server).await, 10);
 
-        let old = aurora
+        let old = petalfall
             .list_mod_versions(Platform::CurseForge, "238222", &["1.12.2".to_owned()], &[])
             .await
             .unwrap();

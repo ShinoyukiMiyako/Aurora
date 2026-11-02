@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 const M: u32 = 0x5bd1_e995;
 const R: u32 = 24;
 
-/// 分块读取缓冲区大小（64 KiB）：与 aurora-base 的流式哈希同一取舍。
+/// 分块读取缓冲区大小（64 KiB）：与 petalfall-base 的流式哈希同一取舍。
 const READ_CHUNK: usize = 64 * 1024;
 
 /// MurmurHash2（32 位，Austin Appleby 原版）。`seed` 与 `data` 长度共同决定初值。
@@ -134,7 +134,7 @@ pub async fn hash_mod_file(path: impl AsRef<Path>) -> Result<ModHashes> {
     let path = path.as_ref().to_owned();
     tokio::task::spawn_blocking(move || hash_mod_file_blocking(&path))
         .await
-        .map_err(|source| Error::Base(aurora_base::Error::HashTaskJoin(source)))?
+        .map_err(|source| Error::Base(petalfall_base::Error::HashTaskJoin(source)))?
 }
 
 /// 只算 CurseForge 指纹，少算一遍 SHA-1：受限文件的校验只有 fingerprint 时用，整合包本体可能几百 MB。
@@ -142,7 +142,7 @@ pub async fn fingerprint_file(path: impl AsRef<Path>) -> Result<u32> {
     let path = path.as_ref().to_owned();
     tokio::task::spawn_blocking(move || fingerprint_stream(&path, |_| {}))
         .await
-        .map_err(|source| Error::Base(aurora_base::Error::HashTaskJoin(source)))?
+        .map_err(|source| Error::Base(petalfall_base::Error::HashTaskJoin(source)))?
 }
 
 fn hash_mod_file_blocking(path: &Path) -> Result<ModHashes> {
@@ -157,7 +157,7 @@ fn hash_mod_file_blocking(path: &Path) -> Result<ModHashes> {
 /// 两趟流式算指纹。`first_pass` 看得到第一趟读到的每一块，算别的哈希不用再读一遍。
 fn fingerprint_stream(path: &Path, mut first_pass: impl FnMut(&[u8])) -> Result<u32> {
     let io_err = |source: std::io::Error| {
-        Error::Base(aurora_base::Error::Io {
+        Error::Base(petalfall_base::Error::Io {
             path: path.to_owned(),
             source,
         })
@@ -306,7 +306,7 @@ mod tests {
 
         let missing = dir.path().join("ghost.jar");
         match fingerprint_file(&missing).await.unwrap_err() {
-            Error::Base(aurora_base::Error::Io { path, .. }) => assert_eq!(path, missing),
+            Error::Base(petalfall_base::Error::Io { path, .. }) => assert_eq!(path, missing),
             other => panic!("期望 IO 错误，得到 {other:?}"),
         }
     }
@@ -317,7 +317,7 @@ mod tests {
         let missing = dir.path().join("ghost.jar");
         let err = hash_mod_file(&missing).await.unwrap_err();
         match err {
-            Error::Base(aurora_base::Error::Io { path, .. }) => assert_eq!(path, missing),
+            Error::Base(petalfall_base::Error::Io { path, .. }) => assert_eq!(path, missing),
             other => panic!("期望 IO 错误，得到 {other:?}"),
         }
     }

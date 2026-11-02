@@ -3,7 +3,7 @@
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use aurora_download::{MirrorSource, SourceResolver, SourceSpeedCache, probe_latencies};
+use petalfall_download::{MirrorSource, SourceResolver, SourceSpeedCache, probe_latencies};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
@@ -17,7 +17,7 @@ const MIRROR_FIRST: [MirrorSource; 2] = [MirrorSource::BmclApi, MirrorSource::Of
 const UNREACHED_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn client() -> reqwest::Client {
-    aurora_base::http::build_client().expect("构建客户端")
+    petalfall_base::http::build_client().expect("构建客户端")
 }
 
 /// 把两个源分别钉到两台本地服务器；`broken_mirror` 时镜像侧解析失败。
@@ -28,11 +28,11 @@ struct PinnedResolver {
 }
 
 impl SourceResolver for PinnedResolver {
-    fn resolve(&self, _url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+    fn resolve(&self, _url: &str, source: MirrorSource) -> petalfall_download::Result<String> {
         match source {
             MirrorSource::Official => Ok(self.official.clone()),
             MirrorSource::BmclApi if self.broken_mirror => {
-                Err(aurora_base::Error::UrlMissingHost(self.bmcl.clone()).into())
+                Err(petalfall_base::Error::UrlMissingHost(self.bmcl.clone()).into())
             }
             MirrorSource::BmclApi => Ok(self.bmcl.clone()),
         }
@@ -330,7 +330,7 @@ async fn resolve_failure_is_an_error_and_sends_nothing() {
     assert!(
         matches!(
             err,
-            aurora_download::Error::Base(aurora_base::Error::UrlMissingHost(_))
+            petalfall_download::Error::Base(petalfall_base::Error::UrlMissingHost(_))
         ),
         "实际：{err:?}"
     );

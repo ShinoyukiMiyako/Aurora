@@ -6,8 +6,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use aurora_base::retry::RetryPolicy;
-use aurora_download::{
+use petalfall_base::retry::RetryPolicy;
+use petalfall_download::{
     ChunkConfig, ChunkPlan, CredentialRealm, CredentialScope, DownloadConfig, DownloadCredential,
     DownloadTask, Downloader, Error, MirrorSource, SourceHealth, SourcePlan, SourceResolver,
     WatchdogConfig,
@@ -23,11 +23,11 @@ fn without_range(request: &Request) -> bool {
 }
 
 fn client() -> reqwest::Client {
-    aurora_base::http::build_client().expect("构建共享客户端")
+    petalfall_base::http::build_client().expect("构建共享客户端")
 }
 
 fn manual_client() -> reqwest::Client {
-    aurora_base::http::build_manual_redirect_client().expect("构建不跳转客户端")
+    petalfall_base::http::build_manual_redirect_client().expect("构建不跳转客户端")
 }
 
 fn fast_policy() -> RetryPolicy {
@@ -373,7 +373,7 @@ struct MirrorPair {
 }
 
 impl SourceResolver for MirrorPair {
-    fn resolve(&self, _url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+    fn resolve(&self, _url: &str, source: MirrorSource) -> petalfall_download::Result<String> {
         Ok(match source {
             MirrorSource::Official => format!("{}/data/x.jar", self.modrinth),
             MirrorSource::BmclApi => format!("{}/maven/x.jar", self.bmclapi),
@@ -749,7 +749,7 @@ async fn credentialed_get_follows_hops_with_the_same_rules_as_tasks() {
 
     let manual = manual_client();
     let credential = credential_for(&origin);
-    let response = aurora_download::credentialed_get(
+    let response = petalfall_download::credentialed_get(
         &manual,
         &credential,
         &format!("{}/pack.zip", origin.uri()),
@@ -768,7 +768,7 @@ async fn credentialed_get_follows_hops_with_the_same_rules_as_tasks() {
     assert_eq!(key_of(&second[0]), None, "作用域外的一跳不带密钥");
 
     let locked = format!("{}/locked.zip", origin.uri());
-    let err = aurora_download::credentialed_get(&manual, &credential, &locked, None)
+    let err = petalfall_download::credentialed_get(&manual, &credential, &locked, None)
         .await
         .unwrap_err();
     assert!(

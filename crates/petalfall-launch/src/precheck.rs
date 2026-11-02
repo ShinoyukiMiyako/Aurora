@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use aurora_version::{LoaderInfo, LoaderKind, VersionJson};
+use petalfall_version::{LoaderInfo, LoaderKind, VersionJson};
 use regex::Regex;
 
 use crate::memory::MemoryConfig;

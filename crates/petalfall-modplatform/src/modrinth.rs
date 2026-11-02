@@ -7,8 +7,8 @@
 
 use std::path::PathBuf;
 
-use aurora_base::retry::RetryPolicy;
-use aurora_download::DownloadTask;
+use petalfall_base::retry::RetryPolicy;
+use petalfall_download::DownloadTask;
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
@@ -824,7 +824,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client(server: &MockServer) -> ModrinthClient {
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         ModrinthClient::new(http).with_base_url(server.uri())
     }
 
@@ -1072,7 +1072,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         let client = ModrinthClient::new(http).with_base_url(format!("{}/v2", server.uri()));
         let got = client
             .organizations(&["LjcZDkRW".to_owned(), "missing1".to_owned()])

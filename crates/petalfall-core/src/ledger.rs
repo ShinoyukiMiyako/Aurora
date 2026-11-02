@@ -15,12 +15,12 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_instance::{AURORA_META_DIR, VERSIONS_DIR};
-use aurora_modplatform::Platform;
+use petalfall_instance::{PETALFALL_META_DIR, VERSIONS_DIR};
+use petalfall_modplatform::Platform;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 /// 卷宗文件名。
 const LEDGER_FILE: &str = "ledger.json";
@@ -122,7 +122,7 @@ impl LedgerStore {
     /// 默认路径：`version_dir/<元数据目录>/ledger.json`（`version_dir` 即 `versions/<id>`）。
     pub fn for_version_dir(version_dir: &Path) -> Self {
         Self {
-            path: version_dir.join(AURORA_META_DIR).join(LEDGER_FILE),
+            path: version_dir.join(PETALFALL_META_DIR).join(LEDGER_FILE),
         }
     }
 
@@ -144,7 +144,7 @@ impl LedgerStore {
                 source,
             }),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Ledger::default()),
-            Err(source) => Err(aurora_base::Error::Io {
+            Err(source) => Err(petalfall_base::Error::Io {
                 path: self.path.clone(),
                 source,
             }
@@ -155,12 +155,12 @@ impl LedgerStore {
     /// 原子写入卷宗。
     pub async fn save(&self, ledger: &Ledger) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(ledger).map_err(CoreError::ConfigSerialize)?;
-        aurora_base::fs::atomic_write(&self.path, &bytes).await?;
+        petalfall_base::fs::atomic_write(&self.path, &bytes).await?;
         Ok(())
     }
 }
 
-impl Aurora {
+impl Petalfall {
     /// 该实例的卷宗句柄：`versions/<id>/<元数据目录>/ledger.json`。
     ///
     /// 路径只由版本 id 决定，不随隔离档位漂移。卷宗记的是「这个版本装了哪些 Mod」这件版本自身的事实，
@@ -173,7 +173,7 @@ impl Aurora {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
 
     fn entry(file_name: &str, version_id: &str) -> LedgerEntry {
         LedgerEntry {
@@ -254,7 +254,7 @@ mod tests {
         let store = LedgerStore::for_version_dir(tmp.path());
         assert_eq!(
             store.path(),
-            tmp.path().join(AURORA_META_DIR).join("ledger.json")
+            tmp.path().join(PETALFALL_META_DIR).join("ledger.json")
         );
         assert_eq!(store.load().await.unwrap(), Ledger::default());
     }
@@ -397,20 +397,20 @@ mod tests {
     }
 
     #[test]
-    fn aurora_ledger_store_points_into_version_meta_dir() {
+    fn petalfall_ledger_store_points_into_version_meta_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let mc = tmp.path().join(".minecraft");
-        let aurora = Aurora::for_test(
-            AuroraConfig::default(),
+        let petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             mc.clone(),
         );
 
         assert_eq!(
-            aurora.ledger_store("1.20.1-Forge_47.4.20").path(),
+            petalfall.ledger_store("1.20.1-Forge_47.4.20").path(),
             mc.join("versions")
                 .join("1.20.1-Forge_47.4.20")
-                .join(AURORA_META_DIR)
+                .join(PETALFALL_META_DIR)
                 .join("ledger.json")
         );
     }

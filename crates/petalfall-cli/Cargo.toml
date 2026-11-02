@@ -1,13 +1,13 @@
 [package]
-name = "aurora-cli"
+name = "petalfall-cli"
 version = "0.1.0"
 edition = "2024"
 license.workspace = true
 
 [dependencies]
-aurora-core = { path = "../aurora-core" }
-# --help 里的产品名取自 aurora-base 的 brand 模块。
-aurora-base = { path = "../aurora-base" }
+petalfall-core = { path = "../petalfall-core" }
+# --help 里的产品名取自 petalfall-base 的 brand 模块。
+petalfall-base = { path = "../petalfall-base" }
 # 子命令解析（derive API）。
 clap = { version = "4", features = ["derive"] }
 # 端到端异步驱动 + 事件/日志 channel。

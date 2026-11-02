@@ -40,8 +40,8 @@ function snake(name: string): string {
   return name.replace(/[A-Z]/g, (c, i: number) => (i === 0 ? c.toLowerCase() : `_${c.toLowerCase()}`));
 }
 
-const crashRs = readFileSync(new URL("../../../crates/aurora-launch/src/crash.rs", import.meta.url), "utf8");
-const launchRs = readFileSync(new URL("../../../crates/aurora-core/src/launch.rs", import.meta.url), "utf8");
+const crashRs = readFileSync(new URL("../../../crates/petalfall-launch/src/crash.rs", import.meta.url), "utf8");
+const launchRs = readFileSync(new URL("../../../crates/petalfall-core/src/launch.rs", import.meta.url), "utf8");
 
 describe("与后端的枚举对齐", () => {
   it("变体名换算与 serde 一致", () => {

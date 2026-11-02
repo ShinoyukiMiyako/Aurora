@@ -8,8 +8,8 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use aurora_base::retry::RetryPolicy;
-use aurora_download::{
+use petalfall_base::retry::RetryPolicy;
+use petalfall_download::{
     CancellationToken, ChunkConfig, DownloadConfig, DownloadPool, DownloadProgress, DownloadTask,
     Downloader, MirrorSource, SourcePlan, WatchdogConfig,
 };
@@ -22,7 +22,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const STALL: Duration = Duration::from_secs(60);
 
 fn client() -> reqwest::Client {
-    aurora_base::http::build_client().expect("构建客户端")
+    petalfall_base::http::build_client().expect("构建客户端")
 }
 
 fn config(chunk: ChunkConfig) -> DownloadConfig {

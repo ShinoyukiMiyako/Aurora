@@ -2,18 +2,18 @@
 //!
 //! Modrinth 无需鉴权直连；CurseForge 需 API key（运行期环境变量或构建期内嵌，见
 //! [`CurseForgeClient::from_env`]）。没有 key 时 CurseForge 不参与，并在结果的 `skipped` 里如实报出
-//! 「未配置密钥」，而不是悄悄只剩 Modrinth。聚合、合并、翻页逻辑在 aurora-modplatform，门面只负责
+//! 「未配置密钥」，而不是悄悄只剩 Modrinth。聚合、合并、翻页逻辑在 petalfall-modplatform，门面只负责
 //! 按配置构建两个客户端并转调。
 
-use aurora_modplatform::{
+use petalfall_modplatform::{
     AggregateResult, CurseForgeClient, CurseForgeSource, ModrinthClient, Platform, ProjectDetail,
     SearchCursor, SearchQuery, SkipReason, aggregate_search, curseforge_detail, modrinth_detail,
 };
 
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
-impl Aurora {
+impl Petalfall {
     /// 聚合搜索第一页，两个平台都参与（CurseForge 仍受密钥与分类换算约束）。
     pub async fn search(&self, query: &SearchQuery) -> Result<AggregateResult> {
         self.search_page(query, None, None).await
@@ -73,7 +73,7 @@ impl Aurora {
     pub(crate) fn configured_curseforge_client(&self) -> Result<Option<CurseForgeClient>> {
         match CurseForgeClient::from_env(self.http()) {
             Ok(client) => Ok(Some(client.with_base_url(self.curseforge_base()))),
-            Err(aurora_modplatform::Error::CurseForgeKeyMissing) => {
+            Err(petalfall_modplatform::Error::CurseForgeKeyMissing) => {
                 tracing::info!("没有可用的 CurseForge API key，CurseForge 不参与");
                 Ok(None)
             }
@@ -84,9 +84,9 @@ impl Aurora {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::AuroraConfig;
-    use crate::facade::Aurora;
-    use aurora_modplatform::{Platform, SearchQuery, SkipReason};
+    use crate::config::PetalfallConfig;
+    use crate::facade::Petalfall;
+    use petalfall_modplatform::{Platform, SearchQuery, SkipReason};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -115,15 +115,15 @@ mod tests {
             .await;
 
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = Aurora::for_test(
-            AuroraConfig::default(),
+        let petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             tmp.path().to_path_buf(),
         )
         .with_modrinth_base(server.uri())
         .with_curseforge_base(server.uri());
 
-        let result = aurora.search(&SearchQuery::new("sodium")).await.unwrap();
+        let result = petalfall.search(&SearchQuery::new("sodium")).await.unwrap();
 
         let hit = result
             .hits
@@ -134,7 +134,7 @@ mod tests {
         assert_eq!(hit.downloads, 123456);
         assert_eq!(hit.title, "Sodium");
         // 有没有 key 取决于运行环境；两种情况都必须有明确交代：要么 CurseForge 参与，要么报未配置。
-        let curseforge_configured = aurora.configured_curseforge_client().unwrap().is_some();
+        let curseforge_configured = petalfall.configured_curseforge_client().unwrap().is_some();
         let reported_missing = result
             .skipped
             .iter()
@@ -151,15 +151,15 @@ mod tests {
             .mount(&server)
             .await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = Aurora::for_test(
-            AuroraConfig::default(),
+        let petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             tmp.path().to_path_buf(),
         )
         .with_modrinth_base(server.uri())
         .with_curseforge_base(server.uri());
 
-        let result = aurora
+        let result = petalfall
             .search_page(&SearchQuery::new("sodium"), Some(Platform::Modrinth), None)
             .await
             .unwrap();
@@ -173,12 +173,12 @@ mod tests {
     #[tokio::test]
     async fn curseforge_detail_rejects_non_numeric_id_before_network() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = Aurora::for_test(
-            AuroraConfig::default(),
+        let petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
             tmp.path().to_path_buf(),
             tmp.path().to_path_buf(),
         );
-        let err = aurora
+        let err = petalfall
             .project_detail(Platform::CurseForge, "jei")
             .await
             .unwrap_err();

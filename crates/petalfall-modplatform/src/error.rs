@@ -1,22 +1,22 @@
 //! crate 统一错误类型。
 //!
-//! 本 crate 在 [`aurora_base::Error`] 之上叠加 Mod 平台专属的失败形态（HTTP 状态、JSON/TOML
+//! 本 crate 在 [`petalfall_base::Error`] 之上叠加 Mod 平台专属的失败形态（HTTP 状态、JSON/TOML
 //! 解析、jar 读取、CurseForge 未配置密钥、模组启禁冲突等）。底层的哈希/IO/URL 错误经
-//! [`Error::Base`] 直接冒泡，下游只需 `#[from] aurora_modplatform::Error` 一处承接。
+//! [`Error::Base`] 直接冒泡，下游只需 `#[from] petalfall_modplatform::Error` 一处承接。
 //!
 //! 可重试性实现在 [`RetryableError`] 上：区分「换个时机或换个源可能就好」的瞬时故障与
-//! 「重试也是白搭」的确定性失败，喂给 [`aurora_base::retry::retry_async`] 精确控制退避。
+//! 「重试也是白搭」的确定性失败，喂给 [`petalfall_base::retry::retry_async`] 精确控制退避。
 
 use std::path::PathBuf;
 
-use aurora_base::retry::RetryableError;
+use petalfall_base::retry::RetryableError;
 
-/// aurora-modplatform 对外统一错误。
+/// petalfall-modplatform 对外统一错误。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// 底层设施错误（文件 IO、哈希、URL 改写等），来自 aurora-base。
+    /// 底层设施错误（文件 IO、哈希、URL 改写等），来自 petalfall-base。
     #[error(transparent)]
-    Base(#[from] aurora_base::Error),
+    Base(#[from] petalfall_base::Error),
 
     /// 发送请求或读取响应体时的传输层错误（连接、超时、读到一半断开）。context 标明是哪一次调用。
     #[error("HTTP 请求失败: {context}")]
@@ -54,9 +54,9 @@ pub enum Error {
         source: zip::result::ZipError,
     },
 
-    /// CurseForge 需要 API key 才能访问，但环境变量 `AURORA_CURSEFORGE_API_KEY` 缺失或为空。
+    /// CurseForge 需要 API key 才能访问，但环境变量 `PETALFALL_CURSEFORGE_API_KEY` 缺失或为空。
     /// 该源被明确禁用，而非静默降级——调用方据此决定是否只走 Modrinth。
-    #[error("CurseForge API key 未配置（环境变量 AURORA_CURSEFORGE_API_KEY 缺失），该源已禁用")]
+    #[error("CurseForge API key 未配置（环境变量 PETALFALL_CURSEFORGE_API_KEY 缺失），该源已禁用")]
     CurseForgeKeyMissing,
 
     /// 切换模组启用/禁用状态时，目标文件名已存在（同名启用与禁用副本冲突）。
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn base_hash_mismatch_bubbles_as_retryable() {
-        let base = aurora_base::Error::HashMismatch {
+        let base = petalfall_base::Error::HashMismatch {
             algorithm: "SHA-1",
             expected: "aa".into(),
             actual: "bb".into(),
@@ -148,7 +148,7 @@ mod tests {
         assert_eq!(err.to_string(), "HTTP 状态码 503: http://host/v2/search");
         assert_eq!(
             Error::CurseForgeKeyMissing.to_string(),
-            "CurseForge API key 未配置（环境变量 AURORA_CURSEFORGE_API_KEY 缺失），该源已禁用"
+            "CurseForge API key 未配置（环境变量 PETALFALL_CURSEFORGE_API_KEY 缺失），该源已禁用"
         );
         // 原文直接作批量启停部分失败通知的正文，叫法与标点要和界面一致
         let conflict = Error::ModStateConflict {

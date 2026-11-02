@@ -80,7 +80,7 @@ const COLOR_LITERAL = [/#[0-9a-fA-F]{3,8}\b/, /\brgba?\(/, /\bhsla?\(/, /\boklch
 
 const COMMENT_LINE = /^\s*(\/\/|\/\*|\*|\{\/\*)/;
 
-const PRODUCT_NAMES = /落樱|Petalfall|Aurora/;
+const PRODUCT_NAMES = /落樱|Petalfall/;
 
 const MOTION_LITERAL = /\bstiffness\b|\bdamping\b|\bduration\s*:|cubic-bezier/;
 // transition / animation 声明常跨多行书写，声明开头到分号之间的每一行都要查字面时长
@@ -243,7 +243,7 @@ function checkSourceFile(srcRel, text, allowedUiLiterals, report) {
 
     if (!isTest) {
       const textureDir = zone === "mc" || ART_TEXTURE_DIRS.some((dir) => within(srcRel, dir));
-      if (!textureDir && /\b(artUrl|skinUrl|thumbUrl)\(|aurora-tex/.test(line)) report(i, "T7", line);
+      if (!textureDir && /\b(artUrl|skinUrl|thumbUrl)\(|petalfall-tex/.test(line)) report(i, "T7", line);
       if (/\/mc\/textures|particle\//.test(line)) report(i, "T7", line);
     }
 

@@ -17,16 +17,16 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use aurora_auth::{Account, AccountCredentials, AccountStatus};
-use aurora_base::error_with_causes;
-use aurora_download::{BatchReport, DownloadTask};
-use aurora_install::GameLayout;
-use aurora_instance::{
+use petalfall_auth::{Account, AccountCredentials, AccountStatus};
+use petalfall_base::error_with_causes;
+use petalfall_download::{BatchReport, DownloadTask};
+use petalfall_install::GameLayout;
+use petalfall_instance::{
     DiscoveredVersion, IsolationOverride, JavaSelection, VERSIONS_DIR, VersionSettings,
 };
-use aurora_java::{DetectSource, JavaInstallation, select_for_major};
-use aurora_launch::logfile::{SessionOutcome, logs_dir};
-use aurora_launch::{
+use petalfall_java::{DetectSource, JavaInstallation, select_for_major};
+use petalfall_launch::logfile::{SessionOutcome, logs_dir};
+use petalfall_launch::{
     AuthValues, AuthlibInjector, CommandBuilder, GamePaths, GameSession, JvmMemoryIssue,
     LaunchCommand, LauncherLevel, LogBatchSink, LogSource, MemoryConfig, PathWarning,
     QuickPlayMode, QuickPlayTarget, SessionClock, SessionLog, SyncProvider, effective_max_heap_mb,
@@ -34,7 +34,7 @@ use aurora_launch::{
     path_warnings, quick_play_support, recommended_max_mb, required_java_major, sync_folder,
     sync_roots_from_env,
 };
-use aurora_version::{
+use petalfall_version::{
     AssetLayout, AssetObjectsIndex, RuntimeContext, VersionJson, detect_loaders, resolve,
 };
 use serde::Serialize;
@@ -44,7 +44,7 @@ use tokio::sync::mpsc;
 use crate::config::MemorySettings;
 use crate::error::{CoreError, OfflineFallbackRefusal};
 use crate::event::{CoreEvent, DownloadProgress};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::session::GameRun;
 use crate::workdir::{discovered, read_version_json};
 
@@ -335,13 +335,13 @@ macro_rules! via_core_error {
 }
 
 via_core_error!(
-    aurora_base::Error,
-    aurora_auth::AuthError,
-    aurora_download::Error,
-    aurora_install::Error,
-    aurora_instance::Error,
-    aurora_java::Error,
-    aurora_launch::LaunchError,
+    petalfall_base::Error,
+    petalfall_auth::AuthError,
+    petalfall_download::Error,
+    petalfall_install::Error,
+    petalfall_instance::Error,
+    petalfall_java::Error,
+    petalfall_launch::LaunchError,
     tokio::task::JoinError,
 );
 
@@ -414,7 +414,7 @@ impl InstanceLaunchSettings {
             },
             // 设置里原样保存玩家输入的整行参数。按引号切分而不是按空白：带空格的路径（Program Files
             // 下的 -javaagent）与带空格的属性值要写成引号括起来的一个参数，引号本身不交给 JVM。
-            jvm_args: aurora_launch::split_args(&jvm_args),
+            jvm_args: petalfall_launch::split_args(&jvm_args),
             // 全屏时窗口尺寸参数没有意义，不传，免得部分版本先按尺寸开窗再切全屏。
             resolution: (!fullscreen).then_some((resolution.width, resolution.height)),
             fullscreen,
@@ -515,8 +515,8 @@ async fn read_chain_member(
 
 /// 启动前查出加载器自带的库缺失：玩家能针对性处理（重新安装加载器），收敛成失败码；完整路径放进参数，
 /// 与任务失败时的错误详情同一个键。
-fn loader_library_missing(err: aurora_install::Error) -> LaunchFailed {
-    let aurora_install::Error::LoaderLibraryMissing { path } = &err else {
+fn loader_library_missing(err: petalfall_install::Error) -> LaunchFailed {
+    let petalfall_install::Error::LoaderLibraryMissing { path } = &err else {
         return LaunchFailed::Core(err.into());
     };
     let path = path.display().to_string();
@@ -633,7 +633,7 @@ impl Reporter<'_> {
     }
 }
 
-impl Aurora {
+impl Petalfall {
     /// 启动一个已安装版本，返回运行中的游戏。
     pub async fn launch(
         &self,
@@ -825,7 +825,7 @@ impl Aurora {
         let working_dir = resolved.working_dir.clone();
         tokio::fs::create_dir_all(&working_dir)
             .await
-            .map_err(|source| aurora_base::Error::Io {
+            .map_err(|source| petalfall_base::Error::Io {
                 path: working_dir.clone(),
                 source,
             })?;
@@ -890,16 +890,16 @@ impl Aurora {
 
         // -- 2 补全库文件
         reporter.stage(LaunchStage::CompleteLibraries).await;
-        let libraries = aurora_install::plan::library_tasks(merged, self.runtime(), &layout)?;
+        let libraries = petalfall_install::plan::library_tasks(merged, self.runtime(), &layout)?;
         plan.files.extend(libraries);
-        if let Some(logging) = aurora_install::plan::logging_task(merged, &layout)? {
+        if let Some(logging) = petalfall_install::plan::logging_task(merged, &layout)? {
             plan.files.push(logging);
         }
         let mut plan = DownloadPlan {
             files: missing_files(plan.files).await?,
             asset_index_missing: plan.asset_index_missing,
         };
-        aurora_install::complete::reject_missing_bundled(&plan.files)
+        petalfall_install::complete::reject_missing_bundled(&plan.files)
             .map_err(loader_library_missing)?;
 
         // -- 3 下载缺失文件（游戏文件、托管 Java、authlib-injector）
@@ -956,7 +956,7 @@ impl Aurora {
 
         // -- 4 解压本地库
         reporter.stage(LaunchStage::ExtractNatives).await;
-        aurora_install::natives::extract_all_natives(
+        petalfall_install::natives::extract_all_natives(
             merged,
             self.runtime(),
             &layout,
@@ -1027,7 +1027,7 @@ impl Aurora {
         // -- 6 启动游戏进程。这里是最后一个可取消的点：进程一旦起来就归运行中的会话管，不再随取消丢弃。
         reporter.stage(LaunchStage::SpawnProcess).await;
         if self.is_cancelled() {
-            return Err(CoreError::from(aurora_download::Error::Cancelled).into());
+            return Err(CoreError::from(petalfall_download::Error::Cancelled).into());
         }
         // 放在取消检查之后：取消或中途失败的启动不碰玩家的设置，这时资源索引也一定在本地了。
         self.fill_missing_options(merged, &layout, &working_dir, reporter)
@@ -1315,7 +1315,7 @@ impl Aurora {
             .join(if cfg!(windows) { "java.exe" } else { "java" });
         if tokio::fs::try_exists(&managed)
             .await
-            .map_err(|source| aurora_base::Error::Io {
+            .map_err(|source| petalfall_base::Error::Io {
                 path: managed.clone(),
                 source,
             })?
@@ -1388,7 +1388,7 @@ impl Aurora {
         if merged.asset_index.is_none() {
             return Ok(None);
         }
-        let index_task = aurora_install::plan::asset_index_task(merged, layout)?;
+        let index_task = petalfall_install::plan::asset_index_task(merged, layout)?;
         if path_exists(&index_task.dest).await? {
             plan.files.push(index_task);
             let (objects, legacy) = self.asset_object_tasks(merged, layout, working_dir).await?;
@@ -1413,7 +1413,7 @@ impl Aurora {
             .as_ref()
             .expect("调用方已确认 assetIndex 存在");
         let index = read_asset_index(layout, &asset_index.id).await?;
-        let tasks = aurora_install::plan::asset_object_tasks(&index, layout)?;
+        let tasks = petalfall_install::plan::asset_object_tasks(&index, layout)?;
         let target_dir = match index.layout() {
             AssetLayout::Standard => return Ok((tasks, None)),
             AssetLayout::Virtual => layout.asset_virtual_dir(&asset_index.id)?,
@@ -1447,10 +1447,11 @@ impl Aurora {
             .objects
             .iter()
             .map(|(logical, object)| {
-                let dest = aurora_install::layout::materialized_asset_path(&target_dir, logical)?;
+                let dest =
+                    petalfall_install::layout::materialized_asset_path(&target_dir, logical)?;
                 Ok(DownloadTask::new(String::new(), dest).with_size(object.size))
             })
-            .collect::<Result<_, aurora_install::Error>>()?;
+            .collect::<Result<_, petalfall_install::Error>>()?;
         let missing = missing_files(expanded).await?.len();
         if missing == 0 {
             return Ok(());
@@ -1458,7 +1459,7 @@ impl Aurora {
         reporter
             .info(format!("旧版资源目录缺少 {missing} 个文件，从资源库补齐"))
             .await;
-        aurora_install::complete::materialize_objects(
+        petalfall_install::complete::materialize_objects(
             layout,
             &index,
             &target_dir,
@@ -1501,7 +1502,7 @@ impl Aurora {
         let count = files.len();
         if let Some(needed) = files.iter().map(|task| task.size).sum::<Option<u64>>() {
             let available =
-                fs2::available_space(root).map_err(|source| aurora_base::Error::Io {
+                fs2::available_space(root).map_err(|source| petalfall_base::Error::Io {
                     path: root.to_path_buf(),
                     source,
                 })?;
@@ -1589,7 +1590,7 @@ impl Aurora {
         let agent = self.ensure_authlib_agent(reporter).await?;
         let http = self.http();
         let metadata = self
-            .until_cancelled(aurora_auth::yggdrasil::prefetch_metadata(
+            .until_cancelled(petalfall_auth::yggdrasil::prefetch_metadata(
                 &http,
                 api_root,
                 crate::auth::AUTH_SERVER_TIMEOUT,
@@ -1640,7 +1641,7 @@ impl Aurora {
             // 校验不过的文件当场删掉：离线回落只认目录里现成的 jar，留着它会在下次离线时被当成好文件用。
             tokio::fs::remove_file(&jar)
                 .await
-                .map_err(|source| aurora_base::Error::Io {
+                .map_err(|source| petalfall_base::Error::Io {
                     path: jar.clone(),
                     source,
                 })?;
@@ -1656,7 +1657,7 @@ impl Aurora {
     }
 }
 
-impl Aurora {
+impl Petalfall {
     fn authlib_latest_urls(&self) -> Vec<String> {
         #[cfg(test)]
         if let Some(url) = self.injected_authlib_latest_url() {
@@ -1677,7 +1678,7 @@ impl Aurora {
             Some(token) => token
                 .run_until_cancelled(work)
                 .await
-                .ok_or_else(|| aurora_download::Error::Cancelled.into()),
+                .ok_or_else(|| petalfall_download::Error::Cancelled.into()),
             None => Ok(work.await),
         }
     }
@@ -1712,7 +1713,7 @@ async fn quick_play_target(
 ) -> Result<QuickPlayTarget, LaunchFailed> {
     let mode = quick_play.mode();
     if !quick_play_support(merged).supports(mode) {
-        return Err(aurora_launch::LaunchError::QuickPlayUnsupported {
+        return Err(petalfall_launch::LaunchError::QuickPlayUnsupported {
             version: version_id.to_owned(),
             mode,
         }
@@ -1733,7 +1734,7 @@ async fn quick_play_target(
                 Ok(meta) => meta.is_dir(),
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
                 Err(source) => {
-                    return Err(aurora_base::Error::Io {
+                    return Err(petalfall_base::Error::Io {
                         path: world_dir,
                         source,
                     }
@@ -1743,7 +1744,7 @@ async fn quick_play_target(
             if !is_dir {
                 return Err(not_found().into());
             }
-            if let Some(ch) = aurora_launch::quick_play_lost_char(&world_dir_name) {
+            if let Some(ch) = petalfall_launch::quick_play_lost_char(&world_dir_name) {
                 return Err(CoreError::WorldNameUnencodable {
                     version_id: version_id.to_owned(),
                     world: world_dir_name,
@@ -1792,9 +1793,9 @@ fn spawn_game(
     log: &mut Option<SessionLog>,
     game_log: Option<LogBatchSink>,
 ) -> Result<GameSession, LaunchFailed> {
-    aurora_launch::spawn(command, clock, log, game_log).map_err(|err| {
+    petalfall_launch::spawn(command, clock, log, game_log).map_err(|err| {
         let message = match &err {
-            aurora_launch::LaunchError::Spawn { program, source } => {
+            petalfall_launch::LaunchError::Spawn { program, source } => {
                 format!("无法启动 {}：{source}", program.display())
             }
             other => other.to_string(),
@@ -1810,19 +1811,19 @@ fn spawn_game(
 /// 失败：账户还是好的，可以稍后重试或先以离线方式进单人，形状与续期失败相同。服务器回错误页、地址不是
 /// 验证服务器之类的失败重新登录也解决不了，按门面错误原样报出原文，不提示重新登录。
 fn authlib_metadata_failure(
-    err: aurora_auth::AuthError,
+    err: petalfall_auth::AuthError,
     api_root: &str,
     account_name: &str,
 ) -> LaunchFailed {
     let message = format!("读取验证服务器 {api_root} 的信息失败：{err}");
     match err {
-        aurora_auth::AuthError::Http { .. } => {
+        petalfall_auth::AuthError::Http { .. } => {
             LaunchFailure::new(FailureCode::AccountRefreshNetwork, message)
                 .param("server", api_root)
                 .caused_by(err)
                 .into()
         }
-        aurora_auth::AuthError::ServiceUnavailable { status, .. } => {
+        petalfall_auth::AuthError::ServiceUnavailable { status, .. } => {
             LaunchFailure::new(FailureCode::AccountServiceDown, message)
                 .param("account", account_name)
                 .param("status", u64::from(status))
@@ -1842,13 +1843,13 @@ fn authlib_metadata_failure(
 /// 记下会盖掉门面记下的上一次服务或网络故障，让紧接着的以离线方式进单人被错拒。
 fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
     match &err {
-        CoreError::Auth(aurora_auth::AuthError::Http { .. }) => LaunchFailure::new(
+        CoreError::Auth(petalfall_auth::AuthError::Http { .. }) => LaunchFailure::new(
             FailureCode::AccountRefreshNetwork,
             format!("刷新 {account_name} 的登录失败：{err}"),
         )
         .caused_by(err)
         .into(),
-        CoreError::Auth(aurora_auth::AuthError::ServiceUnavailable { status, .. }) => {
+        CoreError::Auth(petalfall_auth::AuthError::ServiceUnavailable { status, .. }) => {
             let status = u64::from(*status);
             LaunchFailure::new(
                 FailureCode::AccountServiceDown,
@@ -1859,14 +1860,14 @@ fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
             .caused_by(err)
             .into()
         }
-        CoreError::Auth(aurora_auth::AuthError::ReloginRequired) => LaunchFailure::new(
+        CoreError::Auth(petalfall_auth::AuthError::ReloginRequired) => LaunchFailure::new(
             FailureCode::AccountRelogin,
             format!("{account_name} 的登录已失效：{err}"),
         )
         .param("account", account_name)
         .caused_by(err)
         .into(),
-        CoreError::Auth(aurora_auth::AuthError::AppNotApproved) => LaunchFailure::new(
+        CoreError::Auth(petalfall_auth::AuthError::AppNotApproved) => LaunchFailure::new(
             FailureCode::AccountAppNotApproved,
             format!("刷新 {account_name} 的登录失败：{err}"),
         )
@@ -1882,7 +1883,7 @@ async fn probe_java(
     path: PathBuf,
     source: DetectSource,
 ) -> Result<Result<JavaInstallation, String>, LaunchFailed> {
-    let probed = tokio::task::spawn_blocking(move || aurora_java::probe(&path, source)).await?;
+    let probed = tokio::task::spawn_blocking(move || petalfall_java::probe(&path, source)).await?;
     Ok(probed.map_err(|err| err.to_string()))
 }
 
@@ -1894,17 +1895,17 @@ pub(crate) async fn read_asset_index(
     let path = layout.asset_index_json(id)?;
     let bytes = tokio::fs::read(&path)
         .await
-        .map_err(|source| aurora_base::Error::Io {
+        .map_err(|source| petalfall_base::Error::Io {
             path: path.clone(),
             source,
         })?;
     AssetObjectsIndex::from_json_str(&String::from_utf8_lossy(&bytes))
-        .map_err(|err| aurora_install::Error::from(err).into())
+        .map_err(|err| petalfall_install::Error::from(err).into())
 }
 
 async fn path_exists(path: &Path) -> Result<bool, LaunchFailed> {
     tokio::fs::try_exists(path).await.map_err(|source| {
-        aurora_base::Error::Io {
+        petalfall_base::Error::Io {
             path: path.to_path_buf(),
             source,
         }
@@ -1925,7 +1926,7 @@ async fn missing_files(tasks: Vec<DownloadTask>) -> Result<Vec<DownloadTask>, La
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => missing.push(task),
                 Err(source) => {
-                    return Err(aurora_base::Error::Io {
+                    return Err(petalfall_base::Error::Io {
                         path: task.dest.clone(),
                         source,
                     });
@@ -1945,10 +1946,12 @@ fn classify_download(report: &BatchReport, planned: usize, game_dir: &Path) -> L
         let needed = failures.iter().filter_map(|f| f.task.size).sum::<u64>();
         return disk_full(game_dir, needed);
     }
-    if failures
-        .iter()
-        .all(|f| matches!(innermost(&f.error), aurora_download::Error::Request { .. }))
-    {
+    if failures.iter().all(|f| {
+        matches!(
+            innermost(&f.error),
+            petalfall_download::Error::Request { .. }
+        )
+    }) {
         return LaunchFailure::new(
             FailureCode::FilesOffline,
             format!("还缺 {planned} 个文件，下载源都连不上"),
@@ -1971,7 +1974,7 @@ fn classify_download(report: &BatchReport, planned: usize, game_dir: &Path) -> L
 ///
 /// 离线与否沿原因链找 HTTP 层错误，而不是只认某个变体：清单在多个源之间回退时，HTTP 错误包在
 /// 聚合错误的下层，只看顶层会把「每个源都连不上」误判成文件问题。
-fn java_download_failure(major: u32, err: aurora_java::Error) -> LaunchFailed {
+fn java_download_failure(major: u32, err: petalfall_java::Error) -> LaunchFailed {
     if err.is_cancelled() {
         return CoreError::from(err).into();
     }
@@ -2000,14 +2003,14 @@ fn has_http_cause(err: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 /// 换源下载全部失败时，真正的原因在最后一个源的错误里。
-fn innermost(err: &aurora_download::Error) -> &aurora_download::Error {
+fn innermost(err: &petalfall_download::Error) -> &petalfall_download::Error {
     match err {
-        aurora_download::Error::AllSourcesExhausted { last, .. } => innermost(last),
+        petalfall_download::Error::AllSourcesExhausted { last, .. } => innermost(last),
         other => other,
     }
 }
 
-fn is_storage_full(err: &aurora_download::Error) -> bool {
+fn is_storage_full(err: &petalfall_download::Error) -> bool {
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
     while let Some(cause) = current {
         if let Some(io) = cause.downcast_ref::<std::io::Error>()
@@ -2081,9 +2084,9 @@ fn assemble_command(
         builder = builder.with_quick_play(target);
     }
     builder.build().map_err(|err| match err {
-        aurora_launch::LaunchError::MissingMainClass { .. }
-        | aurora_launch::LaunchError::InvalidLibraryCoordinate { .. }
-        | aurora_launch::LaunchError::UnsafePath { .. } => {
+        petalfall_launch::LaunchError::MissingMainClass { .. }
+        | petalfall_launch::LaunchError::InvalidLibraryCoordinate { .. }
+        | petalfall_launch::LaunchError::UnsafePath { .. } => {
             version_broken(err.to_string()).caused_by(err).into()
         }
         other => other.into(),
@@ -2093,9 +2096,9 @@ fn assemble_command(
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
-    use aurora_download::CancellationToken;
-    use aurora_launch::logfile::SessionOutcome;
+    use crate::config::PetalfallConfig;
+    use petalfall_download::CancellationToken;
+    use petalfall_launch::logfile::SessionOutcome;
     use std::sync::Arc;
 
     const VERSION: &str = "1.20.1";
@@ -2151,7 +2154,7 @@ mod tests {
     struct Fixture {
         _tmp: tempfile::TempDir,
         root: PathBuf,
-        aurora: Aurora,
+        petalfall: Petalfall,
     }
 
     fn fixture() -> Fixture {
@@ -2163,18 +2166,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         // 关掉自动分配：最大堆取全局的固定值，断言才不随本机此刻的空闲内存漂移。
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             memory: MemorySettings {
                 auto: false,
                 ..MemorySettings::default()
             },
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = Aurora::for_test(config, root.clone(), root.join(game_dir));
+        let petalfall = Petalfall::for_test(config, root.clone(), root.join(game_dir));
         Fixture {
             _tmp: tmp,
             root,
-            aurora,
+            petalfall,
         }
     }
 
@@ -2192,37 +2195,37 @@ mod tests {
 
     /// 发起一次启动并收齐它推出的全部事件。
     async fn launch(
-        aurora: &Aurora,
+        petalfall: &Petalfall,
         java: PathBuf,
     ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
-        launch_request(aurora, request(), java).await
+        launch_request(petalfall, request(), java).await
     }
 
     async fn launch_request(
-        aurora: &Aurora,
+        petalfall: &Petalfall,
         request: LaunchRequest,
         java: PathBuf,
     ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
-        launch_mode(aurora, request, false, java).await
+        launch_mode(petalfall, request, false, java).await
     }
 
     /// 以离线方式进单人发起一次启动。
     async fn launch_fallback(
-        aurora: &Aurora,
+        petalfall: &Petalfall,
         request: LaunchRequest,
         java: PathBuf,
     ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
-        launch_mode(aurora, request, true, java).await
+        launch_mode(petalfall, request, true, java).await
     }
 
     async fn launch_mode(
-        aurora: &Aurora,
+        petalfall: &Petalfall,
         request: LaunchRequest,
         offline_fallback: bool,
         java: PathBuf,
     ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let result = aurora
+        let result = petalfall
             .launch_with_java(request, offline_fallback, &tx, java)
             .await;
         drop(tx);
@@ -2259,7 +2262,7 @@ mod tests {
         let mut account = Account::new(
             MS_UUID,
             MS_NAME,
-            AccountCredentials::Microsoft(aurora_auth::MicrosoftCredentials {
+            AccountCredentials::Microsoft(petalfall_auth::MicrosoftCredentials {
                 refresh_token: "CACHED-REFRESH".into(),
                 minecraft_token: Some("CACHED-MC".into()),
                 minecraft_expires_at: Some(1),
@@ -2316,8 +2319,8 @@ mod tests {
         }
     }
 
-    fn msa_endpoints(server: &wiremock::MockServer) -> aurora_auth::MsaEndpoints {
-        aurora_auth::MsaEndpoints {
+    fn msa_endpoints(server: &wiremock::MockServer) -> petalfall_auth::MsaEndpoints {
+        petalfall_auth::MsaEndpoints {
             oauth_base: server.uri(),
             xbl_authenticate: format!("{}/xbl", server.uri()),
             xsts_authorize: format!("{}/xsts", server.uri()),
@@ -2349,7 +2352,7 @@ mod tests {
     }
 
     /// 门面上布置一个过期的微软账户、指向 mock 的登录端点，返回落库后的账户。
-    fn with_stale_account(fx: &Fixture, server: &wiremock::MockServer) -> (Aurora, Account) {
+    fn with_stale_account(fx: &Fixture, server: &wiremock::MockServer) -> (Petalfall, Account) {
         with_stale_account_as(fx, server, MS_UUID)
     }
 
@@ -2359,12 +2362,15 @@ mod tests {
         fx: &Fixture,
         server: &wiremock::MockServer,
         uuid: &str,
-    ) -> (Aurora, Account) {
-        let aurora = fx.aurora.clone().with_msa_endpoints(msa_endpoints(server));
+    ) -> (Petalfall, Account) {
+        let petalfall = fx
+            .petalfall
+            .clone()
+            .with_msa_endpoints(msa_endpoints(server));
         let mut account = stale_microsoft();
         account.uuid = uuid.to_owned();
-        let stored = aurora.store_account_for_test(account).unwrap();
-        (aurora, stored)
+        let stored = petalfall.store_account_for_test(account).unwrap();
+        (petalfall, stored)
     }
 
     /// 冒充 java 的批处理：报 Java 17；当作游戏时把收到的全部参数回显成一行游戏输出。
@@ -2436,7 +2442,7 @@ mod tests {
             ..request()
         };
 
-        let (result, _) = launch_request(&fx.aurora, request, java).await;
+        let (result, _) = launch_request(&fx.petalfall, request, java).await;
         let Ok(run) = result else {
             panic!("应启动成功");
         };
@@ -2449,7 +2455,12 @@ mod tests {
             std::fs::read(resources.join("sound").join("step").join("grass1.ogg")).unwrap(),
             b"ogg!"
         );
-        let log = fx.aurora.last_launch_log("b1.7.3").await.unwrap().unwrap();
+        let log = fx
+            .petalfall
+            .last_launch_log("b1.7.3")
+            .await
+            .unwrap()
+            .unwrap();
         let args = log
             .lines
             .iter()
@@ -2476,7 +2487,7 @@ mod tests {
             ..super::tests::request()
         };
 
-        let (first, _) = launch_request(&fx.aurora, request(), java.clone()).await;
+        let (first, _) = launch_request(&fx.petalfall, request(), java.clone()).await;
         let Ok(run) = first else {
             panic!("第一次应启动成功");
         };
@@ -2490,7 +2501,7 @@ mod tests {
             .join("grass1.ogg");
         std::fs::remove_file(&copied).unwrap();
 
-        let (second, _) = launch_request(&fx.aurora, request(), java).await;
+        let (second, _) = launch_request(&fx.petalfall, request(), java).await;
         let Ok(run) = second else {
             panic!("第二次应启动成功");
         };
@@ -2518,13 +2529,18 @@ mod tests {
             version_id: id.to_owned(),
             ..request()
         };
-        let (result, events) = launch_request(&fx.aurora, request, java).await;
+        let (result, events) = launch_request(&fx.petalfall, request, java).await;
         let Ok(run) = result else {
             panic!("{id} 应启动成功");
         };
         let finished = run.finish().await;
         assert!(finished.problems.is_empty(), "{:?}", finished.problems);
-        let crash = fx.aurora.last_crash(id).await.unwrap().expect("崩溃应落盘");
+        let crash = fx
+            .petalfall
+            .last_crash(id)
+            .await
+            .unwrap()
+            .expect("崩溃应落盘");
         let texts = events
             .iter()
             .filter_map(|event| match event {
@@ -2634,7 +2650,7 @@ mod tests {
         let meta = mc
             .join("versions")
             .join(id)
-            .join(aurora_instance::AURORA_META_DIR);
+            .join(petalfall_instance::PETALFALL_META_DIR);
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(meta.join("settings.json"), r#"{"isolation":"disabled"}"#).unwrap();
 
@@ -2713,7 +2729,7 @@ mod tests {
         // 扩展 B 区的汉字，不在任何 ANSI 代码页里。
         let id = "\u{20BB7}";
         // 系统代码页切成 UTF-8 的机器上这条路径是合法的。
-        if aurora_launch::path_char_outside_code_page(Path::new(id)).is_none() {
+        if petalfall_launch::path_char_outside_code_page(Path::new(id)).is_none() {
             return;
         }
         let fx = fixture();
@@ -2725,7 +2741,7 @@ mod tests {
             ..super::tests::request()
         };
 
-        let (result, _) = launch_request(&fx.aurora, request, java).await;
+        let (result, _) = launch_request(&fx.petalfall, request, java).await;
 
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::PathUnsupported);
@@ -2790,8 +2806,8 @@ mod tests {
         }
     }
 
-    fn failures_of(aurora: &Aurora) -> HashMap<String, FailureCode> {
-        aurora.account_failures.lock().unwrap().clone()
+    fn failures_of(petalfall: &Petalfall) -> HashMap<String, FailureCode> {
+        petalfall.account_failures.lock().unwrap().clone()
     }
 
     #[test]
@@ -2820,19 +2836,20 @@ mod tests {
         mount_token(&server, outage_page()).await;
         let fx = fixture();
         install_legacy_args_version(&fx.root.join(".minecraft"));
-        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (petalfall, stored) = with_stale_account(&fx, &server);
         let java = echo_java(&fx.root);
 
         let (result, _) =
-            launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
+            launch_request(&petalfall, stored_request(stored.clone()), java.clone()).await;
         assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
         assert_eq!(
-            failures_of(&aurora).get(MS_UUID),
+            failures_of(&petalfall).get(MS_UUID),
             Some(&FailureCode::AccountServiceDown)
         );
         let before = server.received_requests().await.unwrap().len();
 
-        let (result, events) = launch_fallback(&aurora, stored_request(stored.clone()), java).await;
+        let (result, events) =
+            launch_fallback(&petalfall, stored_request(stored.clone()), java).await;
         let run = expect_run(result);
         assert!(run.offline());
         // 不续期、不校验：这一局没有打到任何登录端点。
@@ -2848,11 +2865,16 @@ mod tests {
             "{events:?}"
         );
         // 记录取出即消耗，降级成功也不会再写回。
-        assert!(failures_of(&aurora).is_empty());
+        assert!(failures_of(&petalfall).is_empty());
 
         let finished = run.finish().await;
         assert_eq!(finished.exit.exit_code, Some(0));
-        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        let log = fx
+            .petalfall
+            .last_launch_log(VERSION)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             log.lines.iter().any(|l| l.source == LogSource::Launcher
                 && l.level == Some(LauncherLevel::Warn)
@@ -2875,7 +2897,7 @@ mod tests {
         }
 
         // 账户状态与凭据不变：降级不写账户库。
-        let after = aurora
+        let after = petalfall
             .find_account(MS_UUID)
             .unwrap()
             .expect("账户应仍在库中");
@@ -2888,21 +2910,22 @@ mod tests {
         install_version(&fx.root.join(".minecraft"), 17, true);
         let java = fake_java(&fx.root, 17, 0);
 
-        let (result, events) = launch_fallback(&fx.aurora, request(), java.clone()).await;
+        let (result, events) = launch_fallback(&fx.petalfall, request(), java.clone()).await;
         assert_eq!(
             refusal(result),
             ("Steve".to_owned(), OfflineFallbackRefusal::OfflineAccount)
         );
         assert_eq!(stage_indices(&events), vec![0]);
 
-        let library = fx.aurora.add_offline_account("Alex", None).unwrap();
+        let library = fx.petalfall.add_offline_account("Alex", None).unwrap();
         // 即便门面记着它的一次失败，离线账户也没有验证可降级。
-        fx.aurora
+        fx.petalfall
             .account_failures
             .lock()
             .unwrap()
             .insert(library.uuid.clone(), FailureCode::AccountServiceDown);
-        let (result, _) = launch_fallback(&fx.aurora, stored_request(library.clone()), java).await;
+        let (result, _) =
+            launch_fallback(&fx.petalfall, stored_request(library.clone()), java).await;
         assert_eq!(
             refusal(result),
             ("Alex".to_owned(), OfflineFallbackRefusal::OfflineAccount)
@@ -2917,20 +2940,20 @@ mod tests {
         let fx = fixture();
         install_version(&fx.root.join(".minecraft"), 17, true);
         let java = fake_java(&fx.root, 17, 0);
-        let (aurora, stored) = with_stale_account(&fx, &server);
-        let (result, _) = launch_request(&aurora, stored_request(stored), java.clone()).await;
+        let (petalfall, stored) = with_stale_account(&fx, &server);
+        let (result, _) = launch_request(&petalfall, stored_request(stored), java.clone()).await;
         assert_eq!(expect_failure(result).code, FailureCode::AccountRelogin);
-        let expired = aurora.find_account(MS_UUID).unwrap().unwrap();
+        let expired = petalfall.find_account(MS_UUID).unwrap().unwrap();
         assert_eq!(expired.status, AccountStatus::Expired);
         let before = server.received_requests().await.unwrap().len();
         let (result, _) =
-            launch_fallback(&aurora, stored_request(expired.clone()), java.clone()).await;
+            launch_fallback(&petalfall, stored_request(expired.clone()), java.clone()).await;
         assert_eq!(
             refusal(result),
             (MS_NAME.to_owned(), OfflineFallbackRefusal::ReloginRequired)
         );
         assert_eq!(server.received_requests().await.unwrap().len(), before);
-        assert_eq!(aurora.find_account(MS_UUID).unwrap().unwrap(), expired);
+        assert_eq!(petalfall.find_account(MS_UUID).unwrap().unwrap(), expired);
 
         // 应用未获批准：重新登录也解决不了，单独给失败码指向 client_id 设置，不记账户失败，账户也没被
         // 标成失效；没有服务或网络故障的记录，降级按「没有最近的失败」拒绝。
@@ -2944,8 +2967,9 @@ mod tests {
         .await;
         let fx = fixture();
         install_version(&fx.root.join(".minecraft"), 17, true);
-        let (aurora, stored) = with_stale_account(&fx, &server);
-        let (result, events) = launch_request(&aurora, stored_request(stored), java.clone()).await;
+        let (petalfall, stored) = with_stale_account(&fx, &server);
+        let (result, events) =
+            launch_request(&petalfall, stored_request(stored), java.clone()).await;
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::AccountAppNotApproved);
         assert_eq!(failure.params.get("account"), Some(&Value::from(MS_NAME)));
@@ -2956,10 +2980,10 @@ mod tests {
             failure.message
         );
         assert_eq!(stage_indices(&events), vec![0]);
-        assert!(failures_of(&aurora).is_empty());
-        let current = aurora.find_account(MS_UUID).unwrap().unwrap();
+        assert!(failures_of(&petalfall).is_empty());
+        let current = petalfall.find_account(MS_UUID).unwrap().unwrap();
         assert_eq!(current.status, AccountStatus::Ok);
-        let (result, _) = launch_fallback(&aurora, stored_request(current), java).await;
+        let (result, _) = launch_fallback(&petalfall, stored_request(current), java).await;
         assert_eq!(
             refusal(result),
             (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
@@ -2973,11 +2997,11 @@ mod tests {
         let fx = fixture();
         install_version(&fx.root.join(".minecraft"), 17, true);
         let java = fake_java(&fx.root, 17, 0);
-        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (petalfall, stored) = with_stale_account(&fx, &server);
 
         // 没有先前失败：不放行，也不联网。
         let (result, events) =
-            launch_fallback(&aurora, stored_request(stored.clone()), java.clone()).await;
+            launch_fallback(&petalfall, stored_request(stored.clone()), java.clone()).await;
         assert_eq!(
             refusal(result),
             (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
@@ -2986,12 +3010,12 @@ mod tests {
         assert!(server.received_requests().await.unwrap().is_empty());
 
         let (result, _) =
-            launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
+            launch_request(&petalfall, stored_request(stored.clone()), java.clone()).await;
         assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
 
         // 重开门面（同一数据目录）：记录只在内存里，不作数。
-        let reopened = Aurora::for_test(
-            fx.aurora.config().clone(),
+        let reopened = Petalfall::for_test(
+            fx.petalfall.config().clone(),
             fx.root.clone(),
             fx.root.join(".minecraft"),
         )
@@ -3004,7 +3028,7 @@ mod tests {
         );
 
         // 快照克隆共享同一份记录：在克隆上降级成功，原门面上的记录随之消耗。
-        let snapshot = aurora.clone();
+        let snapshot = petalfall.clone();
         let (result, _) =
             launch_fallback(&snapshot, stored_request(stored.clone()), java.clone()).await;
         let run = expect_run(result);
@@ -3012,7 +3036,7 @@ mod tests {
         run.finish().await;
 
         // 一次性：紧接着再降级一次就没有可用的失败记录了。
-        let (result, _) = launch_fallback(&aurora, stored_request(stored), java).await;
+        let (result, _) = launch_fallback(&petalfall, stored_request(stored), java).await;
         assert_eq!(
             refusal(result),
             (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
@@ -3041,20 +3065,23 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join(format!("{NEW_VERSION}.jar")), b"jar").unwrap();
-        let aurora = fx.aurora.clone().with_msa_endpoints(msa_endpoints(&server));
+        let petalfall = fx
+            .petalfall
+            .clone()
+            .with_msa_endpoints(msa_endpoints(&server));
         let mut account = stale_microsoft();
         account.name = LONG_NAME.to_owned();
-        let stored = aurora.store_account_for_test(account).unwrap();
+        let stored = petalfall.store_account_for_test(account).unwrap();
         let java = complete_fake_java(&fx.root, 17, 3);
         let request = || LaunchRequest {
             version_id: NEW_VERSION.to_owned(),
             ..stored_request(stored.clone())
         };
 
-        let (result, _) = launch_request(&aurora, request(), java.clone()).await;
+        let (result, _) = launch_request(&petalfall, request(), java.clone()).await;
         assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
 
-        let (result, events) = launch_fallback(&aurora, request(), java).await;
+        let (result, events) = launch_fallback(&petalfall, request(), java).await;
         let run = expect_run(result);
         assert!(run.offline());
         let mut stage = None;
@@ -3088,7 +3115,7 @@ mod tests {
 
         let finished = run.finish().await;
         assert!(finished.problems.is_empty(), "{:?}", finished.problems);
-        let crash = aurora
+        let crash = petalfall
             .last_crash(NEW_VERSION)
             .await
             .unwrap()
@@ -3106,10 +3133,13 @@ mod tests {
         mount_token(&server, outage_page()).await;
         let fx = fixture();
         let java = complete_fake_java(&fx.root, 17, 3);
-        let aurora = fx.aurora.clone().with_msa_endpoints(msa_endpoints(&server));
+        let petalfall = fx
+            .petalfall
+            .clone()
+            .with_msa_endpoints(msa_endpoints(&server));
         let mut account = stale_microsoft();
         account.name = LONG_NAME.to_owned();
-        let stored = aurora.store_account_for_test(account).unwrap();
+        let stored = petalfall.store_account_for_test(account).unwrap();
 
         let mut warned = Vec::new();
         for (renamed, client_version) in [("生存 服", "1.21.1"), ("老 存档", "1.20.2")] {
@@ -3127,9 +3157,9 @@ mod tests {
                 version_id: renamed.to_owned(),
                 ..stored_request(stored.clone())
             };
-            let (result, _) = launch_request(&aurora, request(), java.clone()).await;
+            let (result, _) = launch_request(&petalfall, request(), java.clone()).await;
             assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
-            let (result, events) = launch_fallback(&aurora, request(), java.clone()).await;
+            let (result, events) = launch_fallback(&petalfall, request(), java.clone()).await;
             let run = expect_run(result);
             let long_name_warns = events
                 .iter()
@@ -3138,7 +3168,7 @@ mod tests {
                 })
                 .count();
             run.finish().await;
-            let crash = aurora
+            let crash = petalfall
                 .last_crash(renamed)
                 .await
                 .unwrap()
@@ -3173,7 +3203,7 @@ mod tests {
         };
 
         let java = fake_java(&fx.root, 17, 0);
-        let (result, _) = launch_request(&fx.aurora, request(), java).await;
+        let (result, _) = launch_request(&fx.petalfall, request(), java).await;
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::JavaTooOld);
         assert_eq!(
@@ -3193,7 +3223,7 @@ mod tests {
         let mc = fx.root.join(".minecraft");
         install_version(&mc, 17, true);
         // 命令行超过 Windows 的长度上限：Java 探测照常通过，到拉起进程这一步才被系统拒绝。
-        aurora_instance::VersionSettingsStore::for_version_dir(
+        petalfall_instance::VersionSettingsStore::for_version_dir(
             &mc.join(VERSIONS_DIR).join(VERSION),
         )
         .save(&VersionSettings {
@@ -3203,12 +3233,17 @@ mod tests {
         .await
         .unwrap();
 
-        let (result, events) = launch(&fx.aurora, fake_java(&fx.root, 17, 0)).await;
+        let (result, events) = launch(&fx.petalfall, fake_java(&fx.root, 17, 0)).await;
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::SpawnFailed);
         assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6]);
 
-        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        let log = fx
+            .petalfall
+            .last_launch_log(VERSION)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(log.ended.map(|e| e.outcome), Some(SessionOutcome::Failed));
         let lines: Vec<(Option<LauncherLevel>, &str)> = log
             .lines
@@ -3231,9 +3266,9 @@ mod tests {
         let fx = fixture();
         install_version(&fx.root.join(".minecraft"), 17, true);
         let java = fake_java(&fx.root, 17, 0);
-        let (aurora, stored) = with_stale_account(&fx, &down);
+        let (petalfall, stored) = with_stale_account(&fx, &down);
         let (result, _) =
-            launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
+            launch_request(&petalfall, stored_request(stored.clone()), java.clone()).await;
         assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
 
         // 服务恢复：普通启动续期成功并跑起来，清掉记下的失败。
@@ -3246,15 +3281,15 @@ mod tests {
             })),
         )
         .await;
-        let recovered = aurora.clone().with_msa_endpoints(msa_endpoints(&up));
+        let recovered = petalfall.clone().with_msa_endpoints(msa_endpoints(&up));
         let (result, _) =
             launch_request(&recovered, stored_request(stored.clone()), java.clone()).await;
         let run = expect_run(result);
         assert!(!run.offline());
         run.finish().await;
-        assert!(failures_of(&aurora).is_empty());
+        assert!(failures_of(&petalfall).is_empty());
 
-        let (result, _) = launch_fallback(&aurora, stored_request(stored), java).await;
+        let (result, _) = launch_fallback(&petalfall, stored_request(stored), java).await;
         assert_eq!(
             refusal(result),
             (MS_NAME.to_owned(), OfflineFallbackRefusal::NoRecentFailure)
@@ -3263,7 +3298,7 @@ mod tests {
 
     #[test]
     fn refresh_failures_split_into_relogin_outage_and_network() {
-        let outage = CoreError::Auth(aurora_auth::AuthError::ServiceUnavailable {
+        let outage = CoreError::Auth(petalfall_auth::AuthError::ServiceUnavailable {
             step: "刷新令牌",
             status: 503,
         });
@@ -3277,7 +3312,7 @@ mod tests {
         assert!(failure.message.contains("HTTP 503"), "{}", failure.message);
         assert!(failure.source.is_some());
 
-        let relogin = CoreError::Auth(aurora_auth::AuthError::ReloginRequired);
+        let relogin = CoreError::Auth(petalfall_auth::AuthError::ReloginRequired);
         let LaunchFailed::Failure(failure) = classify_refresh(relogin, MS_NAME) else {
             panic!("凭据被判失效应是可处理的启动失败");
         };
@@ -3286,7 +3321,7 @@ mod tests {
         assert_eq!(failure.params.get("status"), None);
 
         // 应用未获批准有自己的失败码，不冒充凭据失效，也不带服务故障的状态码。
-        let unapproved = CoreError::Auth(aurora_auth::AuthError::AppNotApproved);
+        let unapproved = CoreError::Auth(petalfall_auth::AuthError::AppNotApproved);
         let LaunchFailed::Failure(failure) = classify_refresh(unapproved, MS_NAME) else {
             panic!("应用未获批准应是可处理的启动失败");
         };
@@ -3296,7 +3331,7 @@ mod tests {
         assert!(failure.source.is_some());
 
         // 其余重新登录解决不了的账户错误原样报出，不冒充凭据失效。
-        let terminal = aurora_auth::AuthError::MinecraftProfileNotFound;
+        let terminal = petalfall_auth::AuthError::MinecraftProfileNotFound;
         let failed = classify_refresh(CoreError::Auth(terminal), MS_NAME);
         assert!(
             matches!(failed, LaunchFailed::Core(CoreError::Auth(_))),
@@ -3317,10 +3352,10 @@ mod tests {
         mount_token(&server, outage_page()).await;
         let fx = fixture();
         install_version(&fx.root.join(".minecraft"), 17, true);
-        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (petalfall, stored) = with_stale_account(&fx, &server);
 
         let (result, events) = launch_request(
-            &aurora,
+            &petalfall,
             stored_request(stored.clone()),
             fake_java(&fx.root, 17, 0),
         )
@@ -3334,15 +3369,15 @@ mod tests {
         // 服务故障值得按退避重试：默认策略的每一次机会都打到了令牌端点。
         assert_eq!(
             server.received_requests().await.unwrap().len(),
-            aurora_base::retry::RetryPolicy::default().max_attempts as usize
+            petalfall_base::retry::RetryPolicy::default().max_attempts as usize
         );
 
         // 账户还在、状态正常、凭据一个字没动。
-        let after = aurora
+        let after = petalfall
             .find_account(MS_UUID)
             .unwrap()
             .expect("账户应仍在库中");
-        assert_eq!(after.status, aurora_auth::AccountStatus::Ok);
+        assert_eq!(after.status, petalfall_auth::AccountStatus::Ok);
         assert_eq!(after, stored);
     }
 
@@ -3352,10 +3387,10 @@ mod tests {
         mount_token(&server, invalid_grant()).await;
         let fx = fixture();
         install_version(&fx.root.join(".minecraft"), 17, true);
-        let (aurora, stored) = with_stale_account(&fx, &server);
+        let (petalfall, stored) = with_stale_account(&fx, &server);
 
         let (result, _) = launch_request(
-            &aurora,
+            &petalfall,
             stored_request(stored.clone()),
             fake_java(&fx.root, 17, 0),
         )
@@ -3366,11 +3401,11 @@ mod tests {
         // 凭据失效不重试。
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
 
-        let after = aurora
+        let after = petalfall
             .find_account(MS_UUID)
             .unwrap()
             .expect("账户应仍在库中");
-        assert_eq!(after.status, aurora_auth::AccountStatus::Expired);
+        assert_eq!(after.status, petalfall_auth::AccountStatus::Expired);
         assert_eq!(after.credentials, stored.credentials);
     }
 
@@ -3384,9 +3419,9 @@ mod tests {
         let fx = fixture();
         install_version(&fx.root.join(".minecraft"), 17, true);
         let java = fake_java(&fx.root, 17, 0);
-        let (aurora, stored) = with_stale_account_as(&fx, &server, CANCEL_UUID);
+        let (petalfall, stored) = with_stale_account_as(&fx, &server, CANCEL_UUID);
         let (result, _) =
-            launch_request(&aurora, stored_request(stored.clone()), java.clone()).await;
+            launch_request(&petalfall, stored_request(stored.clone()), java.clone()).await;
         assert_eq!(expect_failure(result).code, FailureCode::AccountServiceDown);
 
         server.reset().await;
@@ -3396,7 +3431,7 @@ mod tests {
         )
         .await;
         let token = CancellationToken::new();
-        let cancelling = aurora.clone().with_cancel(token.clone());
+        let cancelling = petalfall.clone().with_cancel(token.clone());
         // 等续期请求真的发出才取消：定时取消在满载时会赶在请求之前，测的就不是「等回音时被取消」了。
         let cancel_once_sent = async {
             tokio::time::timeout(std::time::Duration::from_secs(15), async {
@@ -3419,18 +3454,26 @@ mod tests {
         assert_eq!(stage_indices(&events), vec![0]);
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         assert_eq!(
-            failures_of(&aurora).get(CANCEL_UUID),
+            failures_of(&petalfall).get(CANCEL_UUID),
             Some(&FailureCode::AccountServiceDown)
         );
-        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        let log = fx
+            .petalfall
+            .last_launch_log(VERSION)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             log.ended.map(|e| e.outcome),
             Some(SessionOutcome::Cancelled)
         );
-        assert_eq!(aurora.find_account(CANCEL_UUID).unwrap().unwrap(), stored);
+        assert_eq!(
+            petalfall.find_account(CANCEL_UUID).unwrap().unwrap(),
+            stored
+        );
 
         // 记录完好：降级照常放行。
-        let (result, _) = launch_fallback(&aurora, stored_request(stored), java).await;
+        let (result, _) = launch_fallback(&petalfall, stored_request(stored), java).await;
         let run = expect_run(result);
         assert!(run.offline());
         run.finish().await;
@@ -3461,14 +3504,14 @@ mod tests {
         let java = fake_java(&fx.root, 17, 0);
 
         let (result, events) = launch_request(
-            &fx.aurora,
+            &fx.petalfall,
             quick_request("1.12.2", singleplayer("New World")),
             java,
         )
         .await;
         match result {
             Err(LaunchFailed::Core(CoreError::Launch(
-                aurora_launch::LaunchError::QuickPlayUnsupported { version, mode },
+                petalfall_launch::LaunchError::QuickPlayUnsupported { version, mode },
             ))) => {
                 assert_eq!(version, "1.12.2");
                 assert_eq!(mode, QuickPlayMode::Singleplayer);
@@ -3480,7 +3523,12 @@ mod tests {
             !events.iter().any(|e| matches!(e, LaunchEvent::Download(_))),
             "不该推出下载进度：{events:?}"
         );
-        let log = fx.aurora.last_launch_log("1.12.2").await.unwrap().unwrap();
+        let log = fx
+            .petalfall
+            .last_launch_log("1.12.2")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(log.ended.map(|e| e.outcome), Some(SessionOutcome::Failed));
     }
 
@@ -3496,7 +3544,7 @@ mod tests {
 
         for world in ["New World", "../New World", "只是文件", ""] {
             let (result, events) = launch_request(
-                &fx.aurora,
+                &fx.petalfall,
                 quick_request(VERSION, singleplayer(world)),
                 java.clone(),
             )
@@ -3521,7 +3569,7 @@ mod tests {
     #[tokio::test]
     async fn world_name_outside_the_system_code_page_is_refused_before_the_game_starts() {
         const WORLD: &str = "𠮷野の里";
-        let Some(lost) = aurora_launch::quick_play_lost_char(WORLD) else {
+        let Some(lost) = petalfall_launch::quick_play_lost_char(WORLD) else {
             return;
         };
         let fx = fixture();
@@ -3531,7 +3579,7 @@ mod tests {
         let java = fake_java(&fx.root, 17, 0);
 
         let (result, events) = launch_request(
-            &fx.aurora,
+            &fx.petalfall,
             quick_request(VERSION, singleplayer(WORLD)),
             java,
         )
@@ -3562,7 +3610,7 @@ mod tests {
         );
         let java = fake_java(&fx.root, 17, 0);
         let (result, events) = launch_request(
-            &fx.aurora,
+            &fx.petalfall,
             quick_request(
                 VERSION,
                 QuickPlay::Multiplayer {
@@ -3590,7 +3638,7 @@ mod tests {
         let java = fake_java(&fx.root, 17, 0);
 
         let (result, events) = launch_request(
-            &fx.aurora,
+            &fx.petalfall,
             quick_request(VERSION, singleplayer("New World")),
             java.clone(),
         )
@@ -3608,7 +3656,7 @@ mod tests {
         run.finish().await;
 
         let (result, events) = launch_request(
-            &fx.aurora,
+            &fx.petalfall,
             quick_request(
                 VERSION,
                 QuickPlay::Multiplayer {
@@ -3637,7 +3685,7 @@ mod tests {
         let root = PathBuf::from(r"D:\mc\.minecraft");
         assemble_command(
             merged,
-            &RuntimeContext::new(aurora_version::OsName::Windows, "x86_64", 64),
+            &RuntimeContext::new(petalfall_version::OsName::Windows, "x86_64", 64),
             Path::new(r"C:\jdk\bin\java.exe"),
             GamePaths::standard(&root, &merged.id),
             &root,
@@ -3740,7 +3788,7 @@ mod tests {
             matches!(
                 &result,
                 Err(LaunchFailed::Core(CoreError::Launch(
-                    aurora_launch::LaunchError::QuickPlayUnsupported { version, mode: QuickPlayMode::Singleplayer }
+                    petalfall_launch::LaunchError::QuickPlayUnsupported { version, mode: QuickPlayMode::Singleplayer }
                 ))) if version == "1.12.2"
             ),
             "{:?}",
@@ -3818,7 +3866,7 @@ mod tests {
             memory_mb: Some(6144),
             java: JavaSelection::Path(PathBuf::from(r"C:\jdk\bin\java.exe")),
             jvm_args: "  -XX:+UseG1GC\t-Dfoo=bar \n".into(),
-            resolution: aurora_instance::Resolution {
+            resolution: petalfall_instance::Resolution {
                 width: 1920,
                 height: 1080,
             },
@@ -3848,12 +3896,12 @@ mod tests {
     }
 
     /// 一个真实的 reqwest 错误：地址解析失败，不联网。
-    fn http_error() -> aurora_auth::AuthError {
+    fn http_error() -> petalfall_auth::AuthError {
         let source = reqwest::Client::new()
             .get("not a url")
             .build()
             .expect_err("非法地址应当构造失败");
-        aurora_auth::AuthError::Http {
+        petalfall_auth::AuthError::Http {
             context: "测试",
             source,
         }
@@ -3861,7 +3909,7 @@ mod tests {
 
     #[test]
     fn only_rejected_credentials_ask_for_relogin_before_launch() {
-        use aurora_auth::AuthError;
+        use petalfall_auth::AuthError;
         let relogin = classify_refresh(CoreError::Auth(AuthError::ReloginRequired), "Steve");
         let LaunchFailed::Failure(failure) = relogin else {
             panic!("凭据被判失效应给出失败码：{relogin:?}");
@@ -3912,7 +3960,7 @@ mod tests {
         assert_eq!(failure.params["server"], Value::from(SERVER));
 
         let not_yggdrasil = authlib_metadata_failure(
-            aurora_auth::AuthError::NotYggdrasilServer {
+            petalfall_auth::AuthError::NotYggdrasilServer {
                 url: SERVER.into(),
                 detail: "API 根地址返回 HTTP 502 Bad Gateway".into(),
             },
@@ -3923,7 +3971,7 @@ mod tests {
             matches!(
                 not_yggdrasil,
                 LaunchFailed::Core(CoreError::Auth(
-                    aurora_auth::AuthError::NotYggdrasilServer { .. }
+                    petalfall_auth::AuthError::NotYggdrasilServer { .. }
                 ))
             ),
             "服务器回错页不该提示重新登录：{not_yggdrasil:?}"
@@ -3931,7 +3979,7 @@ mod tests {
 
         // 服务故障和续期时一样归到登录服务故障：账户是好的，玩家可以稍后重试或先以离线方式进单人。
         let outage = authlib_metadata_failure(
-            aurora_auth::AuthError::ServiceUnavailable {
+            petalfall_auth::AuthError::ServiceUnavailable {
                 step: "读取验证服务器信息",
                 status: 503,
             },
@@ -3978,8 +4026,8 @@ mod tests {
             std::fs::write(crate::authlib::agent_jar(&dir, 1), b"agent").unwrap();
 
             let token = CancellationToken::new();
-            let aurora = fx
-                .aurora
+            let petalfall = fx
+                .petalfall
                 .clone()
                 .with_authlib_latest_url(format!("{}/latest", server.uri()))
                 .with_cancel(token.clone());
@@ -4010,7 +4058,7 @@ mod tests {
             let (_, result) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
                 tokio::join!(
                     cancel_once_stuck,
-                    aurora.prepare_authlib(&api_root, "Steve", &mut reporter)
+                    petalfall.prepare_authlib(&api_root, "Steve", &mut reporter)
                 )
             })
             .await
@@ -4047,7 +4095,7 @@ mod tests {
         install_version(&fx.root.join(".minecraft"), 17, true);
         let java = fake_java(&fx.root, 17, 3);
 
-        let (result, events) = launch(&fx.aurora, java.clone()).await;
+        let (result, events) = launch(&fx.petalfall, java.clone()).await;
         let run = match result {
             Ok(run) => run,
             Err(err) => panic!("启动应成功：{err:?}"),
@@ -4076,7 +4124,7 @@ mod tests {
         assert!(!exit.killed);
 
         let crash = fx
-            .aurora
+            .petalfall
             .last_crash(VERSION)
             .await
             .unwrap()
@@ -4090,7 +4138,12 @@ mod tests {
         assert_eq!(crash.max_memory_mb, Some(4096));
         assert!(crash.log_path.is_some());
 
-        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        let log = fx
+            .petalfall
+            .last_launch_log(VERSION)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(log.ended.map(|e| e.outcome), Some(SessionOutcome::Crashed));
         assert!(
             log.lines
@@ -4101,7 +4154,7 @@ mod tests {
         );
         // 跑起来过的会话才记游玩。
         assert!(
-            fx.aurora
+            fx.petalfall
                 .play_summaries()
                 .await
                 .unwrap()
@@ -4140,7 +4193,7 @@ mod tests {
     #[test]
     fn memory_issues_map_to_their_warning_and_log_text() {
         assert_eq!(
-            memory_warning(aurora_launch::JvmMemoryIssue::BadUnit {
+            memory_warning(petalfall_launch::JvmMemoryIssue::BadUnit {
                 arg: "-Xmx4GB".into()
             }),
             (
@@ -4150,7 +4203,7 @@ mod tests {
             )
         );
         assert_eq!(
-            memory_warning(aurora_launch::JvmMemoryIssue::MinOverMax {
+            memory_warning(petalfall_launch::JvmMemoryIssue::MinOverMax {
                 min_mb: 4096,
                 max_mb: 2048
             }),
@@ -4161,7 +4214,7 @@ mod tests {
             )
         );
         assert_eq!(
-            memory_warning(aurora_launch::JvmMemoryIssue::MaxTooLow { max_mb: 256 }),
+            memory_warning(petalfall_launch::JvmMemoryIssue::MaxTooLow { max_mb: 256 }),
             (
                 LaunchWarning::JvmMaxTooLow,
                 "最大内存只有 256 MB，低于 512 MB，游戏多半进不了主界面".to_owned()
@@ -4174,16 +4227,16 @@ mod tests {
     async fn crash_report_records_the_max_heap_that_actually_applied() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             memory: MemorySettings {
                 auto: false,
                 ..MemorySettings::default()
             },
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = Aurora::for_test(config, root.clone(), root.join(".minecraft"));
+        let petalfall = Petalfall::for_test(config, root.clone(), root.join(".minecraft"));
         install_version(&root.join(".minecraft"), 17, true);
-        aurora_instance::VersionSettingsStore::for_version_dir(
+        petalfall_instance::VersionSettingsStore::for_version_dir(
             &root.join(".minecraft").join(VERSIONS_DIR).join(VERSION),
         )
         .save(&VersionSettings {
@@ -4194,19 +4247,19 @@ mod tests {
         .unwrap();
         let java = complete_fake_java(&root, 17, 3);
 
-        let (result, _) = launch(&aurora, java).await;
+        let (result, _) = launch(&petalfall, java).await;
         let run = match result {
             Ok(run) => run,
             Err(err) => panic!("过小的 -Xmx 只提醒，不阻断启动：{err:?}"),
         };
         assert!(run.finish().await.exit.crashed);
-        let crash = aurora
+        let crash = petalfall
             .last_crash(VERSION)
             .await
             .unwrap()
             .expect("崩溃应落盘");
         assert_eq!(crash.max_memory_mb, Some(64));
-        let log = aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        let log = petalfall.last_launch_log(VERSION).await.unwrap().unwrap();
         assert!(
             log.lines.iter().any(|l| l.text.contains("最大内存 64 MB")),
             "{:?}",
@@ -4219,16 +4272,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("OneDrive").join("games");
         std::fs::create_dir_all(&root).unwrap();
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             memory: MemorySettings {
                 auto: false,
                 ..MemorySettings::default()
             },
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = Aurora::for_test(config, root.clone(), root.join(".minecraft"));
+        let petalfall = Petalfall::for_test(config, root.clone(), root.join(".minecraft"));
         install_version(&root.join(".minecraft"), 17, true);
-        aurora_instance::VersionSettingsStore::for_version_dir(
+        petalfall_instance::VersionSettingsStore::for_version_dir(
             &root.join(".minecraft").join(VERSIONS_DIR).join(VERSION),
         )
         .save(&VersionSettings {
@@ -4239,7 +4292,7 @@ mod tests {
         .unwrap();
         let java = complete_fake_java(&root, 17, 3);
 
-        let (result, events) = launch(&aurora, java).await;
+        let (result, events) = launch(&petalfall, java).await;
         let run = match result {
             Ok(run) => run,
             Err(err) => panic!("提醒不阻断启动：{err:?}"),
@@ -4279,7 +4332,7 @@ mod tests {
 
         let finished = run.finish().await;
         assert!(finished.problems.is_empty(), "{:?}", finished.problems);
-        let crash = aurora
+        let crash = petalfall
             .last_crash(VERSION)
             .await
             .unwrap()
@@ -4296,17 +4349,22 @@ mod tests {
         install_version(&fx.root.join(".minecraft"), 17, false);
         let java = fake_java(&fx.root, 17, 0);
 
-        let (result, events) = launch(&fx.aurora, java).await;
+        let (result, events) = launch(&fx.petalfall, java).await;
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::FilesFailed);
         assert_eq!(failure.params.get("count"), Some(&Value::from(1)));
         // 停在阶段 1（校验游戏文件），不会走到后面的阶段。
         assert_eq!(stage_indices(&events), vec![0, 1]);
-        assert!(fx.aurora.play_summaries().await.unwrap().is_empty());
+        assert!(fx.petalfall.play_summaries().await.unwrap().is_empty());
         assert!(!fx.root.join(crate::playtime::PLAYTIME_FILE).exists());
-        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        let log = fx
+            .petalfall
+            .last_launch_log(VERSION)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(log.ended.map(|e| e.outcome), Some(SessionOutcome::Failed));
-        assert_eq!(fx.aurora.last_crash(VERSION).await.unwrap(), None);
+        assert_eq!(fx.petalfall.last_crash(VERSION).await.unwrap(), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4316,20 +4374,25 @@ mod tests {
         let java = fake_java(&fx.root, 17, 0);
         let token = CancellationToken::new();
         token.cancel();
-        let aurora = fx.aurora.clone().with_cancel(token);
+        let petalfall = fx.petalfall.clone().with_cancel(token);
 
-        let (result, events) = launch(&aurora, java).await;
+        let (result, events) = launch(&petalfall, java).await;
         match result {
             Err(err) => assert!(err.is_cancelled(), "{err:?}"),
             Ok(_) => panic!("取消后不应拉起进程"),
         }
         assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6]);
-        let log = fx.aurora.last_launch_log(VERSION).await.unwrap().unwrap();
+        let log = fx
+            .petalfall
+            .last_launch_log(VERSION)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             log.ended.map(|e| e.outcome),
             Some(SessionOutcome::Cancelled)
         );
-        assert!(fx.aurora.play_summaries().await.unwrap().is_empty());
+        assert!(fx.petalfall.play_summaries().await.unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4338,7 +4401,7 @@ mod tests {
         install_version(&fx.root.join(".minecraft"), 21, true);
 
         let missing = fx.root.join("no-such-java.exe");
-        let (result, _) = launch(&fx.aurora, missing.clone()).await;
+        let (result, _) = launch(&fx.petalfall, missing.clone()).await;
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::JavaPinnedMissing);
         assert_eq!(
@@ -4355,7 +4418,7 @@ mod tests {
             failure.message
         );
 
-        let (result, _) = launch(&fx.aurora, fake_java(&fx.root, 17, 0)).await;
+        let (result, _) = launch(&fx.petalfall, fake_java(&fx.root, 17, 0)).await;
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::JavaTooOld);
         assert_eq!(failure.params.get("current"), Some(&Value::from(17)));
@@ -4375,12 +4438,12 @@ mod tests {
         let mut fx = fixture();
         install_version(&fx.root.join(".minecraft"), 21, true);
         let old = fake_java(&fx.root, 17, 0);
-        fx.aurora.set_default_java(Some(old.clone()));
+        fx.petalfall.set_default_java(Some(old.clone()));
 
         // 实例没有指定 Java：全局固定的 Java 17 被当作指定的 Java，版本不够时报出来，
         // 而不是悄悄换成自动挑选的另一个。
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let result = fx.aurora.launch(request(), &tx).await;
+        let result = fx.petalfall.launch(request(), &tx).await;
         drop(tx);
         while rx.recv().await.is_some() {}
         let failure = expect_failure(result);
@@ -4398,9 +4461,9 @@ mod tests {
         );
 
         let missing = fx.root.join("gone").join("java.exe");
-        fx.aurora.set_default_java(Some(missing.clone()));
+        fx.petalfall.set_default_java(Some(missing.clone()));
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let result = fx.aurora.launch(request(), &tx).await;
+        let result = fx.petalfall.launch(request(), &tx).await;
         drop(tx);
         while rx.recv().await.is_some() {}
         let failure = expect_failure(result);
@@ -4439,9 +4502,9 @@ mod tests {
         enabled: bool,
         java: PathBuf,
     ) -> Vec<LaunchEvent> {
-        let mut aurora = fx.aurora.clone().with_gpu_preference_store(store);
-        aurora.set_prefer_dedicated_gpu(enabled);
-        let (result, events) = launch(&aurora, java).await;
+        let mut petalfall = fx.petalfall.clone().with_gpu_preference_store(store);
+        petalfall.set_prefer_dedicated_gpu(enabled);
+        let (result, events) = launch(&petalfall, java).await;
         match result {
             Ok(run) => {
                 run.finish().await;
@@ -4565,7 +4628,7 @@ mod tests {
     async fn unknown_and_broken_versions_fail_before_any_stage() {
         let fx = fixture();
         let java = fake_java(&fx.root, 17, 0);
-        let (result, events) = launch(&fx.aurora, java.clone()).await;
+        let (result, events) = launch(&fx.petalfall, java.clone()).await;
         assert!(
             matches!(&result, Err(LaunchFailed::Core(CoreError::VersionNotInstalled { id })) if id == VERSION),
             "{:?}",
@@ -4576,7 +4639,7 @@ mod tests {
         let dir = fx.root.join(".minecraft").join("versions").join(VERSION);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{VERSION}.json")), "{ not json").unwrap();
-        let (result, _) = launch(&fx.aurora, java).await;
+        let (result, _) = launch(&fx.petalfall, java).await;
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::VersionBroken);
         assert!(failure.params.contains_key("reason"));
@@ -4606,7 +4669,7 @@ mod tests {
         std::fs::write(dir.join(format!("{VERSION}.json")), json.to_string()).unwrap();
         let java = fake_java(&fx.root, 17, 0);
 
-        let (result, _) = launch(&fx.aurora, java).await;
+        let (result, _) = launch(&fx.petalfall, java).await;
 
         let expected = mc
             .join("libraries")
@@ -4653,8 +4716,8 @@ mod tests {
         }
     }
 
-    fn failed(error: aurora_download::Error) -> aurora_download::TaskFailure {
-        aurora_download::TaskFailure {
+    fn failed(error: petalfall_download::Error) -> petalfall_download::TaskFailure {
+        petalfall_download::TaskFailure {
             task: DownloadTask::new("https://libraries.minecraft.net/a.jar", "D:/mc/a.jar")
                 .with_size(2048),
             error,
@@ -4665,18 +4728,19 @@ mod tests {
     /// 内容读不懂判文件失败。
     #[tokio::test]
     async fn java_manifest_failures_are_classified_by_http_cause() {
-        let all_sources_failed = |last: aurora_java::Error| aurora_java::Error::AllSourcesFailed {
-            context: "Java 运行时总清单",
-            attempts: vec![
-                "https://piston-meta.mojang.com/all.json：HTTP 请求失败".to_owned(),
-                format!("https://bmclapi2.bangbang93.com/all.json：{last}"),
-            ],
-            last: Box::new(last),
-        };
+        let all_sources_failed =
+            |last: petalfall_java::Error| petalfall_java::Error::AllSourcesFailed {
+                context: "Java 运行时总清单",
+                attempts: vec![
+                    "https://piston-meta.mojang.com/all.json：HTTP 请求失败".to_owned(),
+                    format!("https://bmclapi2.bangbang93.com/all.json：{last}"),
+                ],
+                last: Box::new(last),
+            };
 
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         let unreachable = || async {
-            aurora_java::Error::Http {
+            petalfall_java::Error::Http {
                 url: "::not-a-url".into(),
                 source: http.get("::not-a-url").send().await.unwrap_err(),
             }
@@ -4690,7 +4754,7 @@ mod tests {
             code_of(java_download_failure(17, unreachable().await)),
             FailureCode::FilesOffline
         );
-        let garbled = aurora_java::Error::Json {
+        let garbled = petalfall_java::Error::Json {
             context: "all.json".into(),
             source: serde_json::from_str::<serde_json::Value>("<html>").unwrap_err(),
         };
@@ -4706,7 +4770,7 @@ mod tests {
             )),
             FailureCode::FilesOffline
         );
-        let garbled = aurora_java::Error::Json {
+        let garbled = petalfall_java::Error::Json {
             context: "all.json".into(),
             source: serde_json::from_str::<serde_json::Value>("<html>").unwrap_err(),
         };
@@ -4718,17 +4782,17 @@ mod tests {
 
     #[tokio::test]
     async fn download_failures_are_classified_through_source_fallback() {
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         // 变体才是归类的依据；用解析不了的地址造一个传输层错误，不必真的去等一次连接超时。
         let unreachable = || async {
             let source = http.get("::not-a-url").send().await.unwrap_err();
-            aurora_download::Error::Request {
+            petalfall_download::Error::Request {
                 url: "::not-a-url".into(),
                 source,
             }
         };
         // 官方源与镜像都连不上：换源层把最后一个源的错误包在里面，仍应认作离线。
-        let exhausted = aurora_download::Error::AllSourcesExhausted {
+        let exhausted = petalfall_download::Error::AllSourcesExhausted {
             url: "https://libraries.minecraft.net/a.jar".into(),
             last: Box::new(unreachable().await),
         };
@@ -4742,9 +4806,9 @@ mod tests {
         assert_eq!(offline.params.get("count"), Some(&Value::from(3)));
 
         // 有一个源回了 404：不是离线，报下载失败并带上真正的原因。
-        let not_found = aurora_download::Error::AllSourcesExhausted {
+        let not_found = petalfall_download::Error::AllSourcesExhausted {
             url: "https://libraries.minecraft.net/a.jar".into(),
-            last: Box::new(aurora_download::Error::Status {
+            last: Box::new(petalfall_download::Error::Status {
                 url: "https://bmclapi2.bangbang93.com/maven/a.jar".into(),
                 status: 404,
             }),
@@ -4797,7 +4861,7 @@ mod tests {
                 "bin/{exe}":{{"type":"file","executable":true,"downloads":{{"raw":{{"sha1":"{s0}","size":{n0},"url":"{base}/objects/java"}}}}}},
                 "lib/modules":{{"type":"file","executable":false,"downloads":{{"raw":{{"sha1":"{s1}","size":{n1},"url":"{base}/objects/modules"}}}}}}
             }}}}"#,
-            exe = aurora_java::JAVA_EXE,
+            exe = petalfall_java::JAVA_EXE,
             s0 = hex(&files[0]),
             n0 = files[0].len(),
             s1 = hex(&files[1]),
@@ -4805,7 +4869,7 @@ mod tests {
         );
         let all = format!(
             r#"{{"{platform}":{{"java-runtime-gamma":[{{"manifest":{{"sha1":"{sha}","url":"{base}/gamma.json"}},"version":{{"name":"17.0.8"}}}}]}}}}"#,
-            platform = aurora_java::current_platform(),
+            platform = petalfall_java::current_platform(),
             sha = hex(component.as_bytes()),
         );
         for (route, body) in [
@@ -4887,15 +4951,15 @@ mod tests {
         install_json(mc, id, &json);
     }
 
-    fn chinese_system(fx: &Fixture) -> Aurora {
-        fx.aurora
+    fn chinese_system(fx: &Fixture) -> Petalfall {
+        fx.petalfall
             .clone()
             .with_system_language(|| Some("zh-CN".to_owned()))
     }
 
     /// 启动到游戏退出，返回游戏的输出与启动过程的事件。
     async fn play_to_exit(
-        aurora: &Aurora,
+        petalfall: &Petalfall,
         id: &str,
         java: PathBuf,
     ) -> (Vec<String>, Vec<LaunchEvent>) {
@@ -4903,12 +4967,12 @@ mod tests {
             version_id: id.to_owned(),
             ..request()
         };
-        let (result, events) = launch_request(aurora, request, java).await;
+        let (result, events) = launch_request(petalfall, request, java).await;
         let Ok(run) = result else {
             panic!("应启动成功");
         };
         assert_eq!(run.finish().await.exit.exit_code, Some(0));
-        let log = aurora.last_launch_log(id).await.unwrap().unwrap();
+        let log = petalfall.last_launch_log(id).await.unwrap().unwrap();
         let game = log
             .lines
             .iter()
@@ -4965,10 +5029,10 @@ mod tests {
         let mc = fx.root.join(".minecraft");
         install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
         let java = options_reading_java(&fx.root);
-        let mut aurora = chinese_system(&fx);
-        aurora.set_skip_accessibility_onboarding(false);
+        let mut petalfall = chinese_system(&fx);
+        petalfall.set_skip_accessibility_onboarding(false);
 
-        let (game, _) = play_to_exit(&aurora, VERSION, java).await;
+        let (game, _) = play_to_exit(&petalfall, VERSION, java).await;
 
         assert_eq!(
             std::fs::read(mc.join("options.txt")).unwrap(),
@@ -4984,10 +5048,10 @@ mod tests {
         let mc = fx.root.join(".minecraft");
         install_with_language(&mc, "14w21b", "snapshot", "minecraft/lang/zh_CN.lang");
         let java = fake_java(&fx.root, 17, 0);
-        let mut aurora = chinese_system(&fx);
-        aurora.set_skip_accessibility_onboarding(false);
+        let mut petalfall = chinese_system(&fx);
+        petalfall.set_skip_accessibility_onboarding(false);
 
-        play_to_exit(&aurora, "14w21b", java).await;
+        play_to_exit(&petalfall, "14w21b", java).await;
 
         assert_eq!(
             std::fs::read(mc.join("versions").join("14w21b").join("options.txt")).unwrap(),
@@ -5003,13 +5067,13 @@ mod tests {
         let mc = fx.root.join(".minecraft");
         install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
         let java = fake_java(&fx.root, 17, 0);
-        let mut aurora = fx
-            .aurora
+        let mut petalfall = fx
+            .petalfall
             .clone()
             .with_system_language(|| Some("en-US".to_owned()));
-        aurora.set_skip_accessibility_onboarding(false);
+        petalfall.set_skip_accessibility_onboarding(false);
 
-        play_to_exit(&aurora, VERSION, java).await;
+        play_to_exit(&petalfall, VERSION, java).await;
 
         assert!(!mc.join("options.txt").exists());
     }
@@ -5021,12 +5085,12 @@ mod tests {
         let mc = fx.root.join(".minecraft");
         install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
         let java = fake_java(&fx.root, 17, 0);
-        let aurora = fx
-            .aurora
+        let petalfall = fx
+            .petalfall
             .clone()
             .with_system_language(|| Some("en-US".to_owned()));
 
-        play_to_exit(&aurora, VERSION, java).await;
+        play_to_exit(&petalfall, VERSION, java).await;
 
         assert_eq!(
             std::fs::read(mc.join("options.txt")).unwrap(),
@@ -5196,10 +5260,10 @@ mod tests {
         install_with_language(&mc, VERSION, "release", "minecraft/lang/zh_cn.json");
         let token = CancellationToken::new();
         token.cancel();
-        let aurora = chinese_system(&fx).with_cancel(token);
+        let petalfall = chinese_system(&fx).with_cancel(token);
         let java = fake_java(&fx.root, 17, 0);
 
-        let (result, _) = launch(&aurora, java).await;
+        let (result, _) = launch(&petalfall, java).await;
 
         assert!(result.err().is_some_and(|err| err.is_cancelled()));
         assert!(!mc.join("options.txt").exists());
@@ -5219,7 +5283,10 @@ mod tests {
             log: None,
         };
 
-        let result = fx.aurora.download_java(17, &manifest, &mut reporter).await;
+        let result = fx
+            .petalfall
+            .download_java(17, &manifest, &mut reporter)
+            .await;
         drop(reporter);
         drop(tx);
 
@@ -5231,7 +5298,7 @@ mod tests {
         assert!(failure.message.contains("无法运行"), "{}", failure.message);
         let home = crate::java::runtime_install_dir(&fx.root, 17);
         assert_eq!(
-            std::fs::read(aurora_java::java_exe_in_home(&home)).unwrap(),
+            std::fs::read(petalfall_java::java_exe_in_home(&home)).unwrap(),
             files[0]
         );
         assert_eq!(

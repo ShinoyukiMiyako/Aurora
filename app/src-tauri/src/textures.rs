@@ -1,4 +1,4 @@
-//! 原版材质的自定义协议 `aurora-tex`。Windows 上 WebView 访问的是 `http://aurora-tex.localhost/<路径>`。
+//! 原版材质的自定义协议 `petalfall-tex`。Windows 上 WebView 访问的是 `http://petalfall-tex.localhost/<路径>`。
 //!
 //! 用自定义协议而不是 asset 协议：asset 协议要把玩家任意位置的游戏目录整片放进作用域，也读不了
 //! jar 内部条目；走 IPC 传字节又绕开了 WebView 的 HTTP 缓存。协议处理只碰独立的
@@ -7,7 +7,7 @@
 //! 所有响应都带 `Access-Control-Allow-Origin: *`：前端要把材质画进 Canvas 逐像素染色，而协议源与
 //! 页面源不同源，缺这个头 Canvas 就会被污染、`getImageData` 直接抛错。
 
-use aurora_core::{ArtStatus, TexResponse, TextureService};
+use petalfall_core::{ArtStatus, TexResponse, TextureService};
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri::{App, AppHandle, Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 
@@ -16,15 +16,15 @@ use crate::events;
 use crate::facade::Facade;
 
 /// 协议名。
-pub const SCHEME: &str = "aurora-tex";
+pub const SCHEME: &str = "petalfall-tex";
 
 /// 材质源或全景可用性变化时推送，负载为 [`ArtStatusDto`]。前端收到后清空位图缓存并重绘。
-pub const ART_CHANGED_EVENT: &str = "aurora://art-changed";
+pub const ART_CHANGED_EVENT: &str = "petalfall://art-changed";
 
 /// 装配材质服务并在后台做启动时的一轮准备：选材质源、清理旧皮肤与过期缩略图。
 pub fn setup(app: &App) {
-    let aurora = tauri::async_runtime::block_on(app.state::<Facade>().snapshot());
-    app.manage(aurora.texture_service());
+    let petalfall = tauri::async_runtime::block_on(app.state::<Facade>().snapshot());
+    app.manage(petalfall.texture_service());
     let handle = app.handle().clone();
     tauri::async_runtime::spawn(async move {
         refresh(&handle).await;
@@ -58,8 +58,8 @@ pub async fn refresh_on_success<T, E>(app: &AppHandle, outcome: &Result<T, E>) {
 /// 删掉不再被任何账户引用的皮肤缓存与过期缩略图。读不了账户库时跳过皮肤清理并记 warn。
 async fn prune_caches(app: &AppHandle) {
     let service = app.state::<TextureService>();
-    let aurora = app.state::<Facade>().snapshot().await;
-    match tokio::task::spawn_blocking(move || aurora.accounts()).await {
+    let petalfall = app.state::<Facade>().snapshot().await;
+    match tokio::task::spawn_blocking(move || petalfall.accounts()).await {
         Ok(Ok(accounts)) => {
             let urls: Vec<String> = accounts
                 .into_iter()
@@ -174,9 +174,9 @@ mod tests {
     #[test]
     fn frontend_whitelist_mirrors_the_backend() {
         let ts = include_str!("../../src/ipc/art.ts");
-        let backend: Vec<&str> = aurora_core::art::whitelist::BLOCK_TEXTURES
+        let backend: Vec<&str> = petalfall_core::art::whitelist::BLOCK_TEXTURES
             .iter()
-            .chain(aurora_core::art::whitelist::SKIN_TEXTURES.iter())
+            .chain(petalfall_core::art::whitelist::SKIN_TEXTURES.iter())
             .copied()
             .collect();
         for path in &backend {
@@ -195,10 +195,10 @@ mod tests {
         let frontend_hosts = hosts_line.matches('"').count() / 2;
         assert_eq!(
             frontend_hosts,
-            aurora_core::art::THUMB_HOSTS.len(),
+            petalfall_core::art::THUMB_HOSTS.len(),
             "{hosts_line}"
         );
-        for host in aurora_core::art::THUMB_HOSTS {
+        for host in petalfall_core::art::THUMB_HOSTS {
             assert!(
                 hosts_line.contains(&format!("\"{host}\"")),
                 "THUMB_HOSTS 缺少 {host}"

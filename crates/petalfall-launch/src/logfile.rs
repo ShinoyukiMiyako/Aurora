@@ -37,7 +37,7 @@ pub const KEEP_SESSIONS: usize = 5;
 /// 写缓冲：游戏启动期每秒能吐上千行，逐行落盘的系统调用开销比日志本身还大。
 const WRITE_BUFFER_BYTES: usize = 8 * 1024;
 /// 文件第一行，标明格式与版本；读到别的东西说明这不是本模块写出的文件。
-const HEADER_MAGIC: &str = concat!("# ", aurora_base::app_slug!(), "-launch-log 1");
+const HEADER_MAGIC: &str = concat!("# ", petalfall_base::app_slug!(), "-launch-log 1");
 const HEADER_STARTED_AT: &str = "# started_at ";
 const HEADER_INSTANCE: &str = "# instance ";
 const TRAILER_ENDED: &str = "# ended ";
@@ -192,7 +192,7 @@ impl LogEntry {
 /// 某实例会话日志所在目录：`<版本目录>/<元数据目录>/logs`。
 pub fn logs_dir(version_dir: &Path) -> PathBuf {
     version_dir
-        .join(aurora_instance::AURORA_META_DIR)
+        .join(petalfall_instance::PETALFALL_META_DIR)
         .join(LOGS_DIR)
 }
 

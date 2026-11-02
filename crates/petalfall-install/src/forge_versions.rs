@@ -11,8 +11,8 @@
 
 use std::cmp::Ordering;
 
-use aurora_base::retry::RetryPolicy;
-use aurora_download::{CancellationToken, SourcePlan};
+use petalfall_base::retry::RetryPolicy;
+use petalfall_download::{CancellationToken, SourcePlan};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -234,7 +234,7 @@ mod tests {
             ))
             .mount(&server)
             .await;
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let policy = RetryPolicy {
             max_attempts: 1,
             initial_delay: std::time::Duration::from_millis(1),

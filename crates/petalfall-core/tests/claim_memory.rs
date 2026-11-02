@@ -5,8 +5,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use aurora_core::{Aurora, AuroraConfig, BlockedFile};
-use aurora_modplatform::curseforge_fingerprint;
+use petalfall_core::{BlockedFile, Petalfall, PetalfallConfig};
+use petalfall_modplatform::curseforge_fingerprint;
 
 const FILE_BYTES: usize = 16 * 1024 * 1024;
 /// 读缓冲、异步运行时与路径字符串的零头，比文件小一个量级。
@@ -61,8 +61,8 @@ async fn claiming_by_fingerprint_keeps_memory_independent_of_the_file_size() {
     };
     drop(bytes);
     let data = tmp.path().join("data");
-    let aurora = Aurora::open(
-        AuroraConfig::default(),
+    let petalfall = Petalfall::open(
+        PetalfallConfig::default(),
         data.clone(),
         data.join("config.json"),
     )
@@ -70,7 +70,7 @@ async fn claiming_by_fingerprint_keeps_memory_independent_of_the_file_size() {
 
     let baseline = LIVE.load(Ordering::Relaxed);
     PEAK.store(baseline, Ordering::Relaxed);
-    let report = aurora
+    let report = petalfall
         .claim_blocked_files(&downloads, &[file])
         .await
         .unwrap();

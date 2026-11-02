@@ -38,7 +38,7 @@
         "style-src": "'self' 'unsafe-inline'",
         "img-src": "'self'",
         "font-src": "'self'",
-        "connect-src": "'self' ipc: http://ipc.localhost aurora-tex: http://aurora-tex.localhost data:",
+        "connect-src": "'self' ipc: http://ipc.localhost petalfall-tex: http://petalfall-tex.localhost data:",
         "base-uri": "'none'",
         "form-action": "'none'",
         "frame-ancestors": "'none'"

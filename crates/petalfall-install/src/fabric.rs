@@ -7,7 +7,7 @@
 //! Quilt 走 v3。
 //! `GET {base}/{apiver}/versions/game` 列出该加载器支持的全部游戏版本。
 
-use aurora_download::SourcePlan;
+use petalfall_download::SourcePlan;
 use serde::Deserialize;
 
 use crate::context::InstallContext;
@@ -16,7 +16,7 @@ use crate::forge_versions::compare_versions;
 use crate::layout::checked_segment;
 use crate::net;
 use crate::plan;
-use aurora_version::VersionJson;
+use petalfall_version::VersionJson;
 
 /// 加载器风味：决定 meta 基址、API 版本段与显示名。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,7 +250,7 @@ impl<'a> LoaderInstaller<'a> {
         // 版本列表只凭版本 JSON 认版本，库都就绪了才让它出现，失败或取消时这个加载器就是没装上。
         // 原样落盘，保留未建模字段。
         let json_path = self.cx.layout.version_json(&id);
-        aurora_base::fs::atomic_write(&json_path, &raw).await?;
+        petalfall_base::fs::atomic_write(&json_path, &raw).await?;
 
         Ok(LoaderSummary {
             id,
@@ -263,9 +263,9 @@ impl<'a> LoaderInstaller<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_base::retry::RetryPolicy;
-    use aurora_download::{DownloadPool, Downloader};
-    use aurora_version::{OsName, RuntimeContext};
+    use petalfall_base::retry::RetryPolicy;
+    use petalfall_download::{DownloadPool, Downloader};
+    use petalfall_version::{OsName, RuntimeContext};
     use std::time::Duration;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -302,7 +302,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
         let layout = crate::layout::GameLayout::new(std::env::temp_dir());
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
@@ -333,7 +333,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
         let layout = crate::layout::GameLayout::new(std::env::temp_dir());
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
@@ -369,7 +369,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
         let layout = crate::layout::GameLayout::new(std::env::temp_dir());
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
@@ -415,7 +415,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
         let layout = crate::layout::GameLayout::new(std::env::temp_dir());
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
@@ -462,7 +462,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
         let layout = crate::layout::GameLayout::new(std::env::temp_dir());
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
@@ -500,7 +500,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
         let layout = crate::layout::GameLayout::new(std::env::temp_dir());
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);
@@ -567,7 +567,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
         let dir = tempfile::tempdir().unwrap();
         let layout = crate::layout::GameLayout::new(dir.path());
@@ -621,7 +621,7 @@ mod tests {
         let server = MockServer::start().await;
         mount_profile(&server, ResponseTemplate::new(404)).await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
         let dir = tempfile::tempdir().unwrap();
         let layout = crate::layout::GameLayout::new(dir.path());
@@ -648,8 +648,8 @@ mod tests {
             .set_delay(Duration::from_secs(30));
         mount_profile(&server, stalled).await;
 
-        let client = aurora_base::http::build_client().unwrap();
-        let token = aurora_download::CancellationToken::new();
+        let client = petalfall_base::http::build_client().unwrap();
+        let token = petalfall_download::CancellationToken::new();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4)
             .with_cancel(token.clone());
         let dir = tempfile::tempdir().unwrap();
@@ -706,7 +706,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = DownloadPool::new(Downloader::with_defaults(client.clone()), 4);
         let dir = tempfile::tempdir().unwrap();
         let layout = crate::layout::GameLayout::new(dir.path());

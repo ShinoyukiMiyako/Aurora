@@ -1,7 +1,7 @@
 //! 本 crate 的错误枚举。
 //!
 //! 启动链路只在少数几处真正产生错误：classpath 组装时坐标非法、版本缺主类、账户无可用令牌、
-//! 子进程 spawn/等待失败，以及委派给 [`aurora_instance`] 的隔离解析冒泡上来的 IO 错误。其余全部
+//! 子进程 spawn/等待失败，以及委派给 [`petalfall_instance`] 的隔离解析冒泡上来的 IO 错误。其余全部
 //! 是纯拼装逻辑（不失败）。错误自然向上冒泡，兜底展示归 CLI/前端层。
 
 use std::path::PathBuf;
@@ -25,7 +25,7 @@ pub enum LaunchError {
         entry: String,
         path: String,
         #[source]
-        problem: aurora_version::UnsafePath,
+        problem: petalfall_version::UnsafePath,
     },
 
     /// 版本 JSON 缺少 mainClass，无从确定启动入口。
@@ -90,7 +90,7 @@ pub enum LaunchError {
 
     /// 隔离解析（探盘 mods/saves）冒泡上来的实例层错误。
     #[error(transparent)]
-    Instance(#[from] aurora_instance::Error),
+    Instance(#[from] petalfall_instance::Error),
 }
 
 /// 本 crate 的结果别名。

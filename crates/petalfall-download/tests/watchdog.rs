@@ -9,9 +9,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aurora_base::retry::RetryPolicy;
-use aurora_download::watchdog::WATCHDOG_MIN_FILE_SIZE;
-use aurora_download::{
+use petalfall_base::retry::RetryPolicy;
+use petalfall_download::watchdog::WATCHDOG_MIN_FILE_SIZE;
+use petalfall_download::{
     CancellationToken, ChunkConfig, CredentialScope, DownloadConfig, DownloadCredential,
     DownloadPool, DownloadTask, Downloader, MirrorSource, SourceHealth, SourcePlan, SourceResolver,
     WatchdogConfig,
@@ -76,7 +76,7 @@ fn single_source() -> SourcePlan {
 }
 
 fn client() -> reqwest::Client {
-    aurora_base::http::build_client().expect("构建客户端")
+    petalfall_base::http::build_client().expect("构建客户端")
 }
 
 /// 确定性但不规则的负载：拼错分片的位置会改变 sha1。
@@ -89,7 +89,7 @@ fn payload(size: u64) -> Arc<Vec<u8>> {
 }
 
 async fn sha1_of_file(file: &Path) -> String {
-    aurora_base::fs::sha1_hex(file).await.unwrap()
+    petalfall_base::fs::sha1_hex(file).await.unwrap()
 }
 
 async fn sha1_of(bytes: &[u8]) -> String {
@@ -452,7 +452,7 @@ struct TwoSources {
 }
 
 impl SourceResolver for TwoSources {
-    fn resolve(&self, _url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+    fn resolve(&self, _url: &str, source: MirrorSource) -> petalfall_download::Result<String> {
         Ok(match source {
             MirrorSource::Official => self.official.clone(),
             MirrorSource::BmclApi => self.mirror.clone(),
@@ -907,7 +907,7 @@ fn scoped_credential(hosts: &[String]) -> DownloadCredential {
 
 fn credentialed_downloader(chunk: ChunkConfig) -> Downloader {
     Downloader::new(client(), config(chunk, single_source())).with_manual_redirect_client(
-        aurora_base::http::build_manual_redirect_client().expect("构建不跳转客户端"),
+        petalfall_base::http::build_manual_redirect_client().expect("构建不跳转客户端"),
     )
 }
 
@@ -1100,7 +1100,7 @@ struct SlowAmongSteady {
 }
 
 impl SourceResolver for SlowAmongSteady {
-    fn resolve(&self, url: &str, source: MirrorSource) -> aurora_download::Result<String> {
+    fn resolve(&self, url: &str, source: MirrorSource) -> petalfall_download::Result<String> {
         Ok(match (url.ends_with("/slow.jar"), source) {
             (true, MirrorSource::Official) => self.slow.clone(),
             (true, MirrorSource::BmclApi) => self.mirror.clone(),

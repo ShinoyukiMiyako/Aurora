@@ -61,7 +61,7 @@ pub enum ThumbError {
         source: std::io::Error,
     },
     #[error("写入缩略图缓存失败")]
-    Write(#[from] aurora_base::Error),
+    Write(#[from] petalfall_base::Error),
 }
 
 /// 40 位小写十六进制的 SHA-1。
@@ -309,7 +309,7 @@ mod tests {
     const HUGE: usize = 4 * 1024 * 1024;
 
     fn http() -> reqwest::Client {
-        aurora_base::http::build_client().unwrap()
+        petalfall_base::http::build_client().unwrap()
     }
 
     async fn serve(server: &MockServer, route: &str, response: ResponseTemplate) -> String {

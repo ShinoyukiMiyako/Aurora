@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::AURORA_META_DIR;
+use crate::PETALFALL_META_DIR;
 use crate::error::{Error, Result};
 
 const MARKER_FILE: &str = "incomplete.json";
@@ -95,7 +95,7 @@ impl MarkerStore {
     /// `version_dir/.petalfall/incomplete.json`。
     pub fn for_version_dir(version_dir: &Path) -> Self {
         Self {
-            path: version_dir.join(AURORA_META_DIR).join(MARKER_FILE),
+            path: version_dir.join(PETALFALL_META_DIR).join(MARKER_FILE),
         }
     }
 
@@ -128,7 +128,7 @@ impl MarkerStore {
             path: self.path.clone(),
             source,
         })?;
-        aurora_base::fs::atomic_write(&self.path, &bytes).await?;
+        petalfall_base::fs::atomic_write(&self.path, &bytes).await?;
         Ok(())
     }
 
@@ -157,7 +157,9 @@ impl InstallRecordStore {
     /// `version_dir/.petalfall/install-record.json`。
     pub fn for_version_dir(version_dir: &Path) -> Self {
         Self {
-            path: version_dir.join(AURORA_META_DIR).join(INSTALL_RECORD_FILE),
+            path: version_dir
+                .join(PETALFALL_META_DIR)
+                .join(INSTALL_RECORD_FILE),
         }
     }
 
@@ -186,7 +188,7 @@ impl InstallRecordStore {
             path: self.path.clone(),
             source,
         })?;
-        aurora_base::fs::atomic_write(&self.path, &bytes).await?;
+        petalfall_base::fs::atomic_write(&self.path, &bytes).await?;
         Ok(())
     }
 }

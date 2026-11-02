@@ -1,6 +1,6 @@
 //! 崩溃诊断与启动日志的读取。
 //!
-//! 规则匹配在 [`aurora_launch::analyze_lines`]。这里补门面才做得到的事：给每条线索配上整份日志里的行号
+//! 规则匹配在 [`petalfall_launch::analyze_lines`]。这里补门面才做得到的事：给每条线索配上整份日志里的行号
 //! 与前两行上下文；把日志点名的 mod id 对到该实例 mods 目录里的具体文件（玩家没法拿一个 `sodium`
 //! 字符串去停用文件）；保存每个实例最近一次的崩溃报告，并找回那一次的会话日志。
 //!
@@ -14,18 +14,18 @@
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use aurora_launch::logfile::{LATEST_LOG, logs_dir};
-use aurora_launch::{
+use petalfall_launch::logfile::{LATEST_LOG, logs_dir};
+use petalfall_launch::{
     CrashCategory, ExitCodeNote, LogEntry, LogTail, SessionEnded, analyze_lines, exit_code_clue,
     explain_exit_code, extract_mod_ids, has_crash_marker, jvm_exception_clue, read_log_tail,
     session_log_path, suspected_mods,
 };
-use aurora_modplatform::{InstalledMod, scan_mods_dir};
+use petalfall_modplatform::{InstalledMod, scan_mods_dir};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
 use crate::error::Result;
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 use crate::launch::LaunchWarning;
 use crate::modfs::ledger_key;
 use crate::session::JavaUsed;
@@ -294,7 +294,7 @@ impl CrashReport {
         let exists =
             tokio::fs::try_exists(&mods_dir)
                 .await
-                .map_err(|source| aurora_base::Error::Io {
+                .map_err(|source| petalfall_base::Error::Io {
                     path: mods_dir.clone(),
                     source,
                 })?;
@@ -383,10 +383,12 @@ pub(crate) async fn read_tail_for_diagnosis(path: &Path) -> Result<LogTail> {
 /// 文件修改时间的 Unix 毫秒。早于 1970 年的时间戳（文件系统或复制工具写坏的）按 0 算，它必然早于
 /// 任何一次会话，结论与「不是这一次写的」一致。
 fn modified_millis(meta: &std::fs::Metadata, path: &Path) -> Result<u64> {
-    let modified = meta.modified().map_err(|source| aurora_base::Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let modified = meta
+        .modified()
+        .map_err(|source| petalfall_base::Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
     Ok(modified.duration_since(UNIX_EPOCH).map_or(0, |elapsed| {
         u64::try_from(elapsed.as_millis()).expect("毫秒数在 u64 范围内")
     }))
@@ -397,7 +399,7 @@ async fn metadata_if_exists(path: &Path) -> Result<Option<std::fs::Metadata>> {
     match tokio::fs::metadata(path).await {
         Ok(meta) => Ok(Some(meta)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(aurora_base::Error::Io {
+        Err(source) => Err(petalfall_base::Error::Io {
             path: path.to_path_buf(),
             source,
         }
@@ -441,9 +443,9 @@ pub(crate) async fn find_crash_report(
     let mut entries = match tokio::fs::read_dir(&dir).await {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(aurora_base::Error::Io { path: dir, source }.into()),
+        Err(source) => return Err(petalfall_base::Error::Io { path: dir, source }.into()),
     };
-    let io_err = |source| aurora_base::Error::Io {
+    let io_err = |source| petalfall_base::Error::Io {
         path: dir.clone(),
         source,
     };
@@ -458,7 +460,7 @@ pub(crate) async fn find_crash_report(
         let meta = entry
             .metadata()
             .await
-            .map_err(|source| aurora_base::Error::Io {
+            .map_err(|source| petalfall_base::Error::Io {
                 path: path.clone(),
                 source,
             })?;
@@ -475,7 +477,7 @@ pub(crate) async fn find_crash_report(
 
 /// 读 hs_err 或崩溃报告的开头供诊断。它们由 JVM 与游戏按系统默认编码写，可能不是 UTF-8，按有损解码读。
 pub(crate) async fn read_head_for_diagnosis(path: &Path) -> Result<String> {
-    let io_err = |source| aurora_base::Error::Io {
+    let io_err = |source| petalfall_base::Error::Io {
         path: path.to_path_buf(),
         source,
     };
@@ -490,7 +492,7 @@ pub(crate) async fn read_head_for_diagnosis(path: &Path) -> Result<String> {
 
 fn crash_report_path(version_dir: &Path) -> PathBuf {
     version_dir
-        .join(aurora_instance::AURORA_META_DIR)
+        .join(petalfall_instance::PETALFALL_META_DIR)
         .join(CRASH_REPORT_FILE)
 }
 
@@ -512,16 +514,16 @@ async fn load_crash_file<R: serde::de::DeserializeOwned>(version_dir: &Path) -> 
     let bytes = match tokio::fs::read(&path).await {
         Ok(bytes) => bytes,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(aurora_base::Error::Io { path, source }.into()),
+        Err(source) => return Err(petalfall_base::Error::Io { path, source }.into()),
     };
     let file: CrashReportFile<R> =
-        serde_json::from_slice(&bytes).map_err(|source| aurora_instance::Error::Json {
+        serde_json::from_slice(&bytes).map_err(|source| petalfall_instance::Error::Json {
             context: "崩溃报告",
             path: path.clone(),
             source,
         })?;
     if !READABLE_FORMATS.contains(&file.format) {
-        return Err(aurora_instance::Error::Json {
+        return Err(petalfall_instance::Error::Json {
             context: "崩溃报告",
             path,
             source: serde::de::Error::custom(format!(
@@ -559,12 +561,12 @@ pub(crate) async fn save_crash_report(version_dir: &Path, report: &CrashReport) 
         format: CRASH_REPORT_FORMAT,
         report: stored,
     })
-    .map_err(|source| aurora_instance::Error::Json {
+    .map_err(|source| petalfall_instance::Error::Json {
         context: "崩溃报告",
         path: path.clone(),
         source,
     })?;
-    aurora_base::fs::atomic_write(&path, &bytes).await?;
+    petalfall_base::fs::atomic_write(&path, &bytes).await?;
     Ok(())
 }
 
@@ -584,7 +586,7 @@ pub struct LaunchLog {
 // 读崩溃记录与日志前的实例目录一律经 existing_instance_dir：它先拦下带路径成分的 id（否则
 // `..\..\某目录` 能读出游戏目录之外的文件），再要求目录存在——对不存在的实例回「没有记录」会把
 // 拼错的 id 伪装成正常的空状态。
-impl Aurora {
+impl Petalfall {
     /// 该实例最近一次的崩溃报告；从没崩溃过为 `None`。
     pub async fn last_crash(&self, version_id: &str) -> Result<Option<CrashReport>> {
         let version_dir = self.existing_instance_dir(version_id).await?;
@@ -631,7 +633,7 @@ impl Aurora {
         let exists =
             tokio::fs::try_exists(&path)
                 .await
-                .map_err(|source| aurora_base::Error::Io {
+                .map_err(|source| petalfall_base::Error::Io {
                     path: path.clone(),
                     source,
                 })?;
@@ -652,10 +654,10 @@ impl Aurora {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use crate::error::CoreError;
-    use aurora_launch::logfile::SessionOutcome;
-    use aurora_launch::{LogSource, SessionLog};
+    use petalfall_launch::logfile::SessionOutcome;
+    use petalfall_launch::{LogSource, SessionLog};
 
     const FABRIC_MISSING_DEPENDENCY: &[&str] = &[
         "[19:32:11] [main/INFO]: Loading Minecraft 1.20.1 with Fabric Loader 0.15.7",
@@ -721,9 +723,9 @@ mod tests {
         )
     }
 
-    fn aurora_at(root: &Path) -> Aurora {
-        Aurora::for_test(
-            AuroraConfig::default(),
+    fn petalfall_at(root: &Path) -> Petalfall {
+        Petalfall::for_test(
+            PetalfallConfig::default(),
             root.to_path_buf(),
             root.join(".minecraft"),
         )
@@ -1001,9 +1003,9 @@ mod tests {
     #[tokio::test]
     async fn saved_report_round_trips_and_finds_its_log_after_rotation() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let version_dir = put_version(tmp.path(), "1.20.1-fabric");
-        assert_eq!(aurora.last_crash("1.20.1-fabric").await.unwrap(), None);
+        assert_eq!(petalfall.last_crash("1.20.1-fabric").await.unwrap(), None);
 
         let logs = logs_dir(&version_dir);
         let mut log = SessionLog::create(&logs, "1.20.1-fabric", 1_000)
@@ -1023,7 +1025,11 @@ mod tests {
         report.log_path = Some("不会被存下来".into());
         save_crash_report(&version_dir, &report).await.unwrap();
 
-        let loaded = aurora.last_crash("1.20.1-fabric").await.unwrap().unwrap();
+        let loaded = petalfall
+            .last_crash("1.20.1-fabric")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.exit_code, Some(-1));
         assert_eq!(loaded.max_memory_mb, Some(4096));
         assert_eq!(loaded.warnings, vec![LaunchWarning::GamePath]);
@@ -1037,7 +1043,11 @@ mod tests {
         SessionLog::create(&logs, "1.20.1-fabric", 9_000)
             .await
             .unwrap();
-        let loaded = aurora.last_crash("1.20.1-fabric").await.unwrap().unwrap();
+        let loaded = petalfall
+            .last_crash("1.20.1-fabric")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(
             loaded.log_path,
             Some(logs.join("1000.log").display().to_string())
@@ -1047,11 +1057,11 @@ mod tests {
     #[tokio::test]
     async fn unknown_instance_is_an_error_not_an_empty_record() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         for err in [
-            aurora.last_crash("ghost").await.unwrap_err(),
-            aurora.last_launch_log("ghost").await.unwrap_err(),
-            aurora.diagnose_crash("ghost", "x").await.unwrap_err(),
+            petalfall.last_crash("ghost").await.unwrap_err(),
+            petalfall.last_launch_log("ghost").await.unwrap_err(),
+            petalfall.diagnose_crash("ghost", "x").await.unwrap_err(),
         ] {
             assert!(
                 matches!(&err, CoreError::VersionNotInstalled { id } if id == "ghost"),
@@ -1064,7 +1074,7 @@ mod tests {
     #[tokio::test]
     async fn unsafe_instance_id_is_rejected_before_touching_the_disk() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         put_version(tmp.path(), "1.21");
         let outside = tmp.path().join("outside");
         let report_path = crash_report_path(&outside);
@@ -1079,8 +1089,8 @@ mod tests {
 
         for id in [r"..\..\outside", "../../outside", r"..\outside"] {
             for err in [
-                aurora.last_crash(id).await.unwrap_err(),
-                aurora.last_launch_log(id).await.unwrap_err(),
+                petalfall.last_crash(id).await.unwrap_err(),
+                petalfall.last_launch_log(id).await.unwrap_err(),
             ] {
                 assert!(
                     matches!(&err, CoreError::Instance(crate::InstanceError::InvalidId { id: bad }) if bad == id),
@@ -1093,20 +1103,20 @@ mod tests {
     #[tokio::test]
     async fn corrupt_report_file_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let version_dir = put_version(tmp.path(), "1.21");
         let path = crash_report_path(&version_dir);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, r#"{"format":99,"report":{}}"#).unwrap();
-        assert!(aurora.last_crash("1.21").await.is_err());
+        assert!(petalfall.last_crash("1.21").await.is_err());
         std::fs::write(&path, "{ broken").unwrap();
-        assert!(aurora.last_crash("1.21").await.is_err());
+        assert!(petalfall.last_crash("1.21").await.is_err());
     }
 
     #[tokio::test]
     async fn diagnose_crash_joins_against_the_instance_mods() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         put_version(tmp.path(), "1.20.1");
         // 原版正式版在默认隔离档位下共用 .minecraft 根。
         put_fabric_mod(
@@ -1114,7 +1124,7 @@ mod tests {
             "s.jar",
             "sodium",
         );
-        let report = aurora
+        let report = petalfall
             .diagnose_crash("1.20.1", &FABRIC_MISSING_DEPENDENCY.join("\n"))
             .await
             .unwrap();
@@ -1128,7 +1138,7 @@ mod tests {
     }
 
     fn now_ms() -> u64 {
-        aurora_launch::unix_millis().unwrap()
+        petalfall_launch::unix_millis().unwrap()
     }
 
     /// 写一个文件并把修改时间设为某个 Unix 毫秒。
@@ -1369,7 +1379,7 @@ mod tests {
         // 退出码 1 只给说明。
         assert_eq!(
             report.exit_code_note.map(|n| n.kind),
-            Some(aurora_launch::ExitCodeKind::GenericFailure)
+            Some(petalfall_launch::ExitCodeKind::GenericFailure)
         );
         // 没有路径的来源不进参与扫描的文件。
         assert_eq!(report.scanned_files.len(), 1);
@@ -1382,12 +1392,12 @@ mod tests {
             (
                 -1_073_741_819,
                 "0xC0000005",
-                aurora_launch::ExitCodeKind::AccessViolation,
+                petalfall_launch::ExitCodeKind::AccessViolation,
             ),
             (
                 -1_073_740_791,
                 "0xC0000409",
-                aurora_launch::ExitCodeKind::StackBufferOverrun,
+                petalfall_launch::ExitCodeKind::StackBufferOverrun,
             ),
         ] {
             let report = CrashReport::from_sources(
@@ -1460,7 +1470,7 @@ mod tests {
     #[tokio::test]
     async fn format_1_report_reads_with_defaults() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let version_dir = put_version(tmp.path(), "1.20.1");
         let path = crash_report_path(&version_dir);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1472,7 +1482,7 @@ mod tests {
                 "suspects":[{"mod_id":"sodium","file_name":null}],"java":null,"max_memory_mb":2048,"warnings":["game_path"]}}"#,
         )
         .unwrap();
-        let report = aurora.last_crash("1.20.1").await.unwrap().unwrap();
+        let report = petalfall.last_crash("1.20.1").await.unwrap().unwrap();
         assert_eq!(report.warnings, vec![LaunchWarning::GamePath]);
         assert_eq!(report.diagnoses.len(), 1);
         assert_eq!(report.diagnoses[0].source, CrashSource::SessionLog);
@@ -1480,14 +1490,17 @@ mod tests {
         assert!(report.scanned_files.is_empty());
         let note = report.exit_code_note.expect("退出码说明按退出码现算");
         assert_eq!(note.hex, "0xC0000409");
-        assert_eq!(note.kind, aurora_launch::ExitCodeKind::StackBufferOverrun);
+        assert_eq!(
+            note.kind,
+            petalfall_launch::ExitCodeKind::StackBufferOverrun
+        );
         assert_eq!(last_crash_at(&version_dir).await.unwrap(), Some(2000));
     }
 
     #[tokio::test]
     async fn saved_report_keeps_crash_files_and_refinds_the_session_log() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let version_dir = put_version(tmp.path(), "1.20.1");
         let logs = logs_dir(&version_dir);
         let log = SessionLog::create(&logs, "1.20.1", 1_000).await.unwrap();
@@ -1530,7 +1543,7 @@ mod tests {
             ])
         );
 
-        let loaded = aurora.last_crash("1.20.1").await.unwrap().unwrap();
+        let loaded = petalfall.last_crash("1.20.1").await.unwrap().unwrap();
         let kinds: Vec<CrashSource> = loaded.scanned_files.iter().map(|f| f.kind).collect();
         assert_eq!(
             kinds,
@@ -1549,7 +1562,7 @@ mod tests {
 
         // 日志被滚动淘汰后，会话日志一项随之消失，崩溃文件照旧。
         std::fs::remove_dir_all(&logs).unwrap();
-        let loaded = aurora.last_crash("1.20.1").await.unwrap().unwrap();
+        let loaded = petalfall.last_crash("1.20.1").await.unwrap().unwrap();
         let kinds: Vec<CrashSource> = loaded.scanned_files.iter().map(|f| f.kind).collect();
         assert_eq!(kinds, vec![CrashSource::CrashReport, CrashSource::HsErr]);
     }
@@ -1559,7 +1572,7 @@ mod tests {
     #[tokio::test]
     async fn scanned_files_inside_the_instance_follow_a_rename() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let old_dir = put_version(tmp.path(), "整合包 旧");
         let inside_report = old_dir
             .join(CRASH_REPORTS_DIR)
@@ -1588,10 +1601,10 @@ mod tests {
         save_crash_report(&old_dir, &report).await.unwrap();
 
         // 改名前读出的仍是完整路径。
-        let before = aurora.last_crash("整合包 旧").await.unwrap().unwrap();
+        let before = petalfall.last_crash("整合包 旧").await.unwrap().unwrap();
         assert_eq!(before.scanned_files, report.scanned_files);
 
-        aurora
+        petalfall
             .rename_instance_files("整合包 旧", "整合包 新")
             .await
             .unwrap();
@@ -1600,7 +1613,7 @@ mod tests {
             .join(".minecraft")
             .join("versions")
             .join("整合包 新");
-        let loaded = aurora.last_crash("整合包 新").await.unwrap().unwrap();
+        let loaded = petalfall.last_crash("整合包 新").await.unwrap().unwrap();
         assert_eq!(
             loaded.scanned_files,
             vec![
@@ -1628,9 +1641,9 @@ mod tests {
     #[tokio::test]
     async fn last_launch_log_returns_tail_with_outcome() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let version_dir = put_version(tmp.path(), "1.21");
-        assert_eq!(aurora.last_launch_log("1.21").await.unwrap(), None);
+        assert_eq!(petalfall.last_launch_log("1.21").await.unwrap(), None);
 
         let mut log = SessionLog::create(&logs_dir(&version_dir), "1.21", 5_000)
             .await
@@ -1647,7 +1660,7 @@ mod tests {
         }
         log.finish(99_000, SessionOutcome::Exited).await.unwrap();
 
-        let got = aurora.last_launch_log("1.21").await.unwrap().unwrap();
+        let got = petalfall.last_launch_log("1.21").await.unwrap().unwrap();
         assert_eq!(got.started_at, 5_000);
         assert_eq!(got.lines.len(), LAUNCH_LOG_MAX_LINES);
         assert_eq!(got.omitted, 3);

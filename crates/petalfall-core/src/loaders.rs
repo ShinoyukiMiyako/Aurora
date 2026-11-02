@@ -5,25 +5,25 @@
 //! 调用方展示。没有缓存可退时照常报错。
 //!
 //! 加载器支持的游戏版本：Fabric / Quilt 的 meta 有现成接口；Forge / NeoForge 只有 Maven 元数据，
-//! 由 [`aurora_install::forge_versions`] 从构建版本号里推出游戏版本。
+//! 由 [`petalfall_install::forge_versions`] 从构建版本号里推出游戏版本。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use aurora_install::{
+use petalfall_install::{
     FORGE_MAVEN_METADATA, LoaderBuild, LoaderFlavor, LoaderInstaller,
     NEOFORGE_LEGACY_MAVEN_METADATA, NEOFORGE_MAVEN_METADATA, VanillaInstaller, builds_for,
     fetch_maven_versions, forge_builds, neoforge_builds,
 };
-use aurora_version::{RuntimeContext, VersionJson, VersionManifest, select_libraries};
+use petalfall_version::{RuntimeContext, VersionJson, VersionManifest, select_libraries};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
 use crate::error::Result;
-use crate::facade::{Aurora, make_context};
+use crate::facade::{Petalfall, make_context};
 use crate::install::LoaderChoice;
 use crate::instances::LEGACY_JAVA_MAJOR;
 
@@ -85,7 +85,7 @@ struct CacheEntry<T> {
     data: T,
 }
 
-impl Aurora {
+impl Petalfall {
     /// 生产用的加载器元数据地址。
     pub fn loader_endpoints(&self) -> LoaderEndpoints {
         LoaderEndpoints {
@@ -401,7 +401,7 @@ impl Aurora {
                 // 缓存只是断网时的退路：写不进去不影响这次已经拿到的结果，记一笔日志即可。
                 match serde_json::to_vec(&entry) {
                     Ok(bytes) => {
-                        if let Err(err) = aurora_base::fs::atomic_write(&path, &bytes).await {
+                        if let Err(err) = petalfall_base::fs::atomic_write(&path, &bytes).await {
                             tracing::warn!(path = %path.display(), error = %err, "元数据缓存写入失败");
                         }
                     }
@@ -498,7 +498,7 @@ fn now_millis() -> u64 {
 mod tests {
     use super::*;
     use crate::error::CoreError;
-    use crate::instances::tests::aurora_at;
+    use crate::instances::tests::petalfall_at;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -598,10 +598,10 @@ mod tests {
         let server = MockServer::start().await;
         mount_all(&server).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora =
-            aurora_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", server.uri()));
+        let petalfall =
+            petalfall_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", server.uri()));
 
-        let overview = aurora
+        let overview = petalfall
             .manifest_overview_at(&endpoints(&server))
             .await
             .unwrap();
@@ -630,18 +630,18 @@ mod tests {
         let server = MockServer::start().await;
         mount_all(&server).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora =
-            aurora_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", server.uri()));
-        let online = aurora
+        let petalfall =
+            petalfall_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", server.uri()));
+        let online = petalfall
             .manifest_overview_at(&endpoints(&server))
             .await
             .unwrap();
 
         // 端点全部失效：清单与加载器列表都从缓存来。
         let dead = MockServer::start().await;
-        let offline_aurora =
-            aurora_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", dead.uri()));
-        let offline = offline_aurora
+        let offline_petalfall =
+            petalfall_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", dead.uri()));
+        let offline = offline_petalfall
             .manifest_overview_at(&endpoints(&dead))
             .await
             .unwrap();
@@ -652,7 +652,7 @@ mod tests {
 
         // 没有缓存可退时如实报错。
         let empty = tempfile::tempdir().unwrap();
-        let err = aurora_at(empty.path())
+        let err = petalfall_at(empty.path())
             .with_manifest_url(format!("{}/manifest.json", dead.uri()))
             .manifest_overview_at(&endpoints(&dead))
             .await
@@ -665,10 +665,10 @@ mod tests {
         let server = MockServer::start().await;
         mount_all(&server).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let ep = endpoints(&server);
 
-        let fabric = aurora
+        let fabric = petalfall
             .list_loader_versions_at(&ep, LoaderChoice::Fabric, "1.21.1")
             .await
             .unwrap();
@@ -685,13 +685,13 @@ mod tests {
                 },
             ]
         );
-        let forge = aurora
+        let forge = petalfall
             .list_loader_versions_at(&ep, LoaderChoice::Forge, "1.20.1")
             .await
             .unwrap();
         let forge: Vec<&str> = forge.iter().map(|v| v.version.as_str()).collect();
         assert_eq!(forge, vec!["47.10.1", "47.3.0"], "按数字而不是字典序排");
-        let neo = aurora
+        let neo = petalfall
             .list_loader_versions_at(&ep, LoaderChoice::NeoForge, "1.21.1")
             .await
             .unwrap();
@@ -708,13 +708,13 @@ mod tests {
                 },
             ]
         );
-        let legacy = aurora
+        let legacy = petalfall
             .list_loader_versions_at(&ep, LoaderChoice::NeoForge, "1.20.1")
             .await
             .unwrap();
         assert_eq!(legacy[0].version, "47.1.106");
         assert!(
-            aurora
+            petalfall
                 .list_loader_versions_at(&ep, LoaderChoice::Forge, "1.5.2")
                 .await
                 .unwrap()
@@ -727,17 +727,17 @@ mod tests {
         let server = MockServer::start().await;
         mount_all(&server).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora =
-            aurora_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", server.uri()));
-        assert_eq!(aurora.required_java("1.21.1").await.unwrap(), 21);
+        let petalfall =
+            petalfall_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", server.uri()));
+        assert_eq!(petalfall.required_java("1.21.1").await.unwrap(), 21);
         assert_eq!(
-            aurora.required_java("1.5.2").await.unwrap(),
+            petalfall.required_java("1.5.2").await.unwrap(),
             LEGACY_JAVA_MAJOR
         );
-        let err = aurora.required_java("9.9.9").await.unwrap_err();
+        let err = petalfall.required_java("9.9.9").await.unwrap_err();
         assert!(matches!(
             err,
-            CoreError::Install(aurora_install::Error::InstallerEntryMissing { .. })
+            CoreError::Install(petalfall_install::Error::InstallerEntryMissing { .. })
         ));
     }
 
@@ -758,9 +758,9 @@ mod tests {
         )
         .await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora =
-            aurora_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", server.uri()));
-        let os = aurora.runtime().os_name.as_mojang();
+        let petalfall =
+            petalfall_at(tmp.path()).with_manifest_url(format!("{}/manifest.json", server.uri()));
+        let os = petalfall.runtime().os_name.as_mojang();
         let other_os = if os == "windows" { "osx" } else { "windows" };
         mount(
             &server,
@@ -817,15 +817,15 @@ mod tests {
         )
         .await;
 
-        let full = aurora.version_requirements("req-full").await.unwrap();
+        let full = petalfall.version_requirements("req-full").await.unwrap();
         assert_eq!(full.java_major, 21);
         assert_eq!(
             full.download_bytes,
             Some(1000 + 300 + 50_000 + 7 + 20 + 3 + 400 + 5 + 60)
         );
-        assert_eq!(aurora.required_java("req-full").await.unwrap(), 21);
+        assert_eq!(petalfall.required_java("req-full").await.unwrap(), 21);
 
-        let maven = aurora.version_requirements("req-maven").await.unwrap();
+        let maven = petalfall.version_requirements("req-maven").await.unwrap();
         assert_eq!(maven.java_major, LEGACY_JAVA_MAJOR);
         assert_eq!(maven.download_bytes, None);
     }
@@ -844,20 +844,20 @@ mod tests {
     /// 元数据直接传）：端点迟迟不回时立即以已取消返回，也不退回缓存冒充结果。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelling_a_loader_listing_returns_promptly_instead_of_the_cache() {
-        use aurora_download::CancellationToken;
+        use petalfall_download::CancellationToken;
         use std::time::{Duration, Instant};
 
         let server = MockServer::start().await;
         mount_all(&server).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
         let cases = [
             (LoaderChoice::Forge, "1.20.1"),
             (LoaderChoice::Fabric, "1.21.1"),
         ];
         // 先在线拉一遍，让缓存里有可退的数据。
         for (loader, mc) in cases {
-            aurora
+            petalfall
                 .list_loader_versions_at(&endpoints(&server), loader, mc)
                 .await
                 .unwrap();
@@ -872,7 +872,7 @@ mod tests {
         let stalled_endpoints = endpoints(&stalled);
         for (loader, mc) in cases {
             let token = CancellationToken::new();
-            let snapshot = aurora.clone().with_cancel(token.clone());
+            let snapshot = petalfall.clone().with_cancel(token.clone());
             let listing = snapshot.list_loader_versions_at(&stalled_endpoints, loader, mc);
             tokio::pin!(listing);
             assert!(

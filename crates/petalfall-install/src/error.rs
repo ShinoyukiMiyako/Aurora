@@ -1,28 +1,28 @@
 //! crate 统一错误类型。
 //!
-//! 与 workspace 其它 crate 一致，只暴露一个 [`Error`] 枚举，下游用 `#[from] aurora_install::Error`
-//! 一处冒泡。下层 aurora-base / aurora-download / aurora-version 的错误各自透传，并把它们的
+//! 与 workspace 其它 crate 一致，只暴露一个 [`Error`] 枚举，下游用 `#[from] petalfall_install::Error`
+//! 一处冒泡。下层 petalfall-base / petalfall-download / petalfall-version 的错误各自透传，并把它们的
 //! 可重试性继承过来。安装是「先下载再本地加工」的两段式流程，故错误面既覆盖网络/下载，也覆盖
 //! zip 解包、子进程执行与 install_profile 结构异常。
 
 use std::path::PathBuf;
 
-use aurora_base::retry::RetryableError;
+use petalfall_base::retry::RetryableError;
 
-/// aurora-install 对外统一错误。
+/// petalfall-install 对外统一错误。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// 来自 aurora-base 的错误（镜像改写 / 原子写入 / sha1 校验等）原样透传。
+    /// 来自 petalfall-base 的错误（镜像改写 / 原子写入 / sha1 校验等）原样透传。
     #[error(transparent)]
-    Base(#[from] aurora_base::Error),
+    Base(#[from] petalfall_base::Error),
 
-    /// 来自 aurora-download 的错误（单文件下载 / 换源耗尽等）原样透传。
+    /// 来自 petalfall-download 的错误（单文件下载 / 换源耗尽等）原样透传。
     #[error(transparent)]
-    Download(#[from] aurora_download::Error),
+    Download(#[from] petalfall_download::Error),
 
-    /// 来自 aurora-version 的错误（版本 JSON 解析 / 继承合并）原样透传。
+    /// 来自 petalfall-version 的错误（版本 JSON 解析 / 继承合并）原样透传。
     #[error(transparent)]
-    Version(#[from] aurora_version::Error),
+    Version(#[from] petalfall_version::Error),
 
     /// 抓取元数据（Fabric/Quilt meta、版本 JSON、maven-metadata）时的 HTTP 层错误。
     #[error("HTTP 请求失败: {url}")]
@@ -85,7 +85,7 @@ pub enum Error {
         /// 其中一个文件的最终错误：有网络层失败时取它，否则取第一个。挂在 source 上，
         /// 上层才能沿原因链认出这批失败是不是断网造成的。
         #[source]
-        cause: Box<aurora_download::Error>,
+        cause: Box<petalfall_download::Error>,
     },
 
     /// 版本 JSON 缺少客户端主件下载信息，无法确定 client.jar 来源。
@@ -166,7 +166,7 @@ pub enum Error {
         path: PathBuf,
         /// 写入失败时的原始错误。
         #[source]
-        source: aurora_base::Error,
+        source: petalfall_base::Error,
     },
 
     /// 版本 JSON、资源索引给出的相对路径（库路径、maven 坐标的某一段、资源 hash、索引 id、日志配置名、
@@ -177,7 +177,7 @@ pub enum Error {
         entry: String,
         path: String,
         #[source]
-        problem: aurora_version::UnsafePath,
+        problem: petalfall_version::UnsafePath,
     },
 
     /// 加载器安装器自带的库（版本 JSON 里声明了下载件、地址留空）缺失或已损坏。它只在安装加载器时从
@@ -239,11 +239,11 @@ impl RetryableError for Error {
     }
 }
 
-/// 判断一个 reqwest 错误是否值得重试（与 aurora-java 同策略）。
+/// 判断一个 reqwest 错误是否值得重试（与 petalfall-java 同策略）。
 ///
 /// 读响应体时连接被重置或提前关闭也算瞬时故障：reqwest 把读体失败包成 decode 类（`Response::bytes`
 /// 里统一经 `error::decode`），只认 body 类会把读到一半断开的请求当成永久失败、不再同源重试。
-/// 工作区里 aurora-base 开了 gzip 解压（特性按工作区合并），坏掉的压缩流也会落在 decode 类：那是
+/// 工作区里 petalfall-base 开了 gzip 解压（特性按工作区合并），坏掉的压缩流也会落在 decode 类：那是
 /// 确定性失败，但重试有次数上限，代价只是多试几次。
 fn is_retryable_http(err: &reqwest::Error) -> bool {
     if err.is_timeout() || err.is_connect() || err.is_request() || err.is_body() || err.is_decode()
@@ -259,7 +259,7 @@ fn is_retryable_http(err: &reqwest::Error) -> bool {
 }
 
 impl Error {
-    /// 是否由取消令牌引起。取消一律以 [`aurora_download::Error::Cancelled`] 冒上来，不论停在下载、
+    /// 是否由取消令牌引起。取消一律以 [`petalfall_download::Error::Cancelled`] 冒上来，不论停在下载、
     /// 元数据抓取、排队还是处理器上；换源与兜底逻辑据此不把它当成某个源的故障。
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Error::Download(inner) if inner.is_cancelled())
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn base_hash_mismatch_is_retryable_through_delegation() {
-        let err = Error::Base(aurora_base::Error::HashMismatch {
+        let err = Error::Base(petalfall_base::Error::HashMismatch {
             algorithm: "SHA-1",
             expected: "aa".into(),
             actual: "bb".into(),
@@ -346,7 +346,7 @@ mod tests {
             stage: "库",
             total: 40,
             failed: 3,
-            cause: Box::new(aurora_download::Error::Status {
+            cause: Box::new(petalfall_download::Error::Status {
                 url: "https://libraries.minecraft.net/a.jar".into(),
                 status: 404,
             }),

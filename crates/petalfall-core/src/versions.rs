@@ -1,13 +1,13 @@
 //! 版本清单抓取与本地已安装版本发现。
 
-use aurora_install::VanillaInstaller;
-use aurora_instance::{VersionScan, discover_versions};
-use aurora_version::VersionManifest;
+use petalfall_install::VanillaInstaller;
+use petalfall_instance::{VersionScan, discover_versions};
+use petalfall_version::VersionManifest;
 
 use crate::error::Result;
-use crate::facade::{Aurora, make_context};
+use crate::facade::{Petalfall, make_context};
 
-impl Aurora {
+impl Petalfall {
     /// 抓取远端版本清单（version_manifest_v2）。按「版本列表源」的源计划在官方与镜像之间逐源回退；
     /// 只读测速缓存、不现测：新建实例页首屏走这里，不能被探针超时拖住。
     pub async fn list_manifest(&self) -> Result<VersionManifest> {
@@ -43,15 +43,15 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::config::{AuroraConfig, DownloadSourcePolicy};
+    use crate::config::{DownloadSourcePolicy, PetalfallConfig};
     use crate::error::CoreError;
-    use crate::facade::Aurora;
+    use crate::facade::Petalfall;
     use crate::sources::tests::Routes;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn aurora_for(server: &MockServer, game_dir: std::path::PathBuf) -> Aurora {
-        Aurora::for_test(AuroraConfig::default(), game_dir.clone(), game_dir)
+    fn petalfall_for(server: &MockServer, game_dir: std::path::PathBuf) -> Petalfall {
+        Petalfall::for_test(PetalfallConfig::default(), game_dir.clone(), game_dir)
             .with_manifest_url(format!("{}/manifest.json", server.uri()))
     }
 
@@ -76,8 +76,8 @@ mod tests {
             .await;
 
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_for(&server, tmp.path().to_path_buf());
-        let manifest = aurora.list_manifest().await.unwrap();
+        let petalfall = petalfall_for(&server, tmp.path().to_path_buf());
+        let manifest = petalfall.list_manifest().await.unwrap();
 
         assert_eq!(manifest.latest.release, "1.21");
         assert_eq!(manifest.versions.len(), 2);
@@ -90,17 +90,17 @@ mod tests {
 
     /// 官方与镜像钉到两台 mock，两项源策略都是尽量官方。清单的「官方地址」用解析不了的域名：源计划
     /// 没生效、直接请求它时测试当场失败，不会连到真实网络。
-    fn aurora_routed(
+    fn petalfall_routed(
         official: &MockServer,
         mirror: &MockServer,
         game_dir: std::path::PathBuf,
-    ) -> Aurora {
-        let config = AuroraConfig {
+    ) -> Petalfall {
+        let config = PetalfallConfig {
             download_source: DownloadSourcePolicy::OfficialFirst,
             version_list_source: DownloadSourcePolicy::OfficialFirst,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        Aurora::for_test(config, game_dir.clone(), game_dir)
+        Petalfall::for_test(config, game_dir.clone(), game_dir)
             .with_source_routes(
                 Arc::new(Routes {
                     official: official.uri(),
@@ -137,7 +137,7 @@ mod tests {
             .await;
 
         let tmp = tempfile::tempdir().unwrap();
-        let manifest = aurora_routed(&official, &mirror, tmp.path().to_path_buf())
+        let manifest = petalfall_routed(&official, &mirror, tmp.path().to_path_buf())
             .list_manifest()
             .await
             .unwrap();
@@ -165,14 +165,14 @@ mod tests {
             .await;
 
         let tmp = tempfile::tempdir().unwrap();
-        let err = aurora_routed(&official, &mirror, tmp.path().to_path_buf())
+        let err = petalfall_routed(&official, &mirror, tmp.path().to_path_buf())
             .list_manifest()
             .await
             .unwrap_err();
         assert!(
             matches!(
                 err,
-                CoreError::Install(aurora_install::Error::AllSourcesFailed { .. })
+                CoreError::Install(petalfall_install::Error::AllSourcesFailed { .. })
             ),
             "实际：{err:?}"
         );
@@ -213,8 +213,12 @@ mod tests {
         .await
         .unwrap();
 
-        let aurora = Aurora::for_test(AuroraConfig::default(), mc.to_path_buf(), mc.to_path_buf());
-        let scan = aurora.list_installed().await.unwrap();
+        let petalfall = Petalfall::for_test(
+            PetalfallConfig::default(),
+            mc.to_path_buf(),
+            mc.to_path_buf(),
+        );
+        let scan = petalfall.list_installed().await.unwrap();
         assert_eq!(scan.versions.len(), 1);
         assert_eq!(scan.versions[0].id, "1.21");
         assert!(scan.broken.is_empty());

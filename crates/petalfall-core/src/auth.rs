@@ -1,11 +1,11 @@
 //! 账户：离线账户、微软设备码登录、外置登录、刷新与多账户读写。
 //!
 //! 账户分两个库：带凭据的（微软/外置）落 DPAPI 加密的 `credentials.bin`，离线账户落明文
-//! `offline_accounts.json`（理由见 [`aurora_auth::offline_store`]）。对外的读取/切换/删除方法跨两库
+//! `offline_accounts.json`（理由见 [`petalfall_auth::offline_store`]）。对外的读取/切换/删除方法跨两库
 //! 统一寻址；凭据加密只有 Windows 实现，非 Windows 上凭据库那一半恒为空，登录直接报不支持。
 //!
 //! 当前账户的仲裁只有一条规则：离线库里存着选中项时它就是全局当前账户。成立的前提是切到、登录到
-//! 微软/外置账户时都会清掉离线选中项（[`Aurora::adopt_as_current`]），两个库的选择因此永远只有一处。
+//! 微软/外置账户时都会清掉离线选中项（[`Petalfall::adopt_as_current`]），两个库的选择因此永远只有一处。
 //!
 //! 读写库的方法是同步的（文件极小、DPAPI 是同步系统调用），由异步上下文调用时要放进
 //! `spawn_blocking`；本模块的异步方法自己这样做。登录、刷新这类要联网的流程先跑完网络、再开库写入：
@@ -15,7 +15,7 @@
 //! 调用方被取消也照样跑完落盘（`renew_detached`）；新凭据一到手就写回，不等后面的步骤。
 //!
 //! 凭据库读不出来（换了机器或 Windows 用户、文件被改坏）时原文件改名留存、按空库继续，经过供启动提示取用
-//! （[`Aurora::credential_recoveries`]）。
+//! （[`Petalfall::credential_recoveries`]）。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
-use aurora_auth::{
+use petalfall_auth::{
     Account, AccountCredentials, AccountManager, AccountStatus, AuthError, DeviceCodeResponse,
     GameProfile, MicrosoftAuth, MicrosoftCredentials, MicrosoftSession, OfflineAccountStore,
     SkinRef, UsernameCheck, YggdrasilClient, YggdrasilCredentials, offline_account, unix_millis,
@@ -33,10 +33,10 @@ use aurora_auth::{
 
 use crate::error::Result;
 use crate::event::{CoreEvent, EventSink, emit};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 /// 环境变量名：微软登录 client_id 的覆盖来源。
-pub const MSA_CLIENT_ID_ENV: &str = "AURORA_MSA_CLIENT_ID";
+pub const MSA_CLIENT_ID_ENV: &str = "PETALFALL_MSA_CLIENT_ID";
 
 /// 内置默认微软登录 client_id：启动器自有的 Azure AD 公共客户端应用（受支持账户类型为个人 Microsoft 账户）。
 ///
@@ -149,7 +149,7 @@ fn preserve_unreadable_credentials_at(
     );
     let io_error = |path: &Path| {
         let path = path.to_owned();
-        move |source| aurora_base::Error::Io { path, source }
+        move |source| petalfall_base::Error::Io { path, source }
     };
     let mut candidate = PathBuf::from(&base);
     let mut attempt = 1u32;
@@ -177,7 +177,7 @@ pub struct AuthServerInfo {
 pub enum AuthlibLogin {
     /// 已绑定角色并落库，成为当前账户。
     LoggedIn(Account),
-    /// 账户下有多个角色且服务器没有替用户选定：等用户选一个后调 [`Aurora::select_authlib_profile`]。
+    /// 账户下有多个角色且服务器没有替用户选定：等用户选一个后调 [`Petalfall::select_authlib_profile`]。
     SelectProfile(AuthlibPending),
 }
 
@@ -263,10 +263,10 @@ fn authlib_account(
 
 /// 外置刷新被服务器以「令牌无效」拒绝，等同于凭据失效。
 fn is_rejected_token(err: &AuthError) -> bool {
-    matches!(err, AuthError::Yggdrasil { error, .. } if error == aurora_auth::yggdrasil::FORBIDDEN_OPERATION)
+    matches!(err, AuthError::Yggdrasil { error, .. } if error == petalfall_auth::yggdrasil::FORBIDDEN_OPERATION)
 }
 
-impl Aurora {
+impl Petalfall {
     /// 解析微软登录 client_id：优先配置，其次环境变量，最后回落到内置默认（[`DEFAULT_MSA_CLIENT_ID`]），
     /// 保证正版登录开箱可用。
     pub(crate) fn msa_client_id(&self) -> String {
@@ -281,7 +281,7 @@ impl Aurora {
             .unwrap_or_else(|| DEFAULT_MSA_CLIENT_ID.to_owned())
     }
 
-    /// 装配不挂取消令牌的微软客户端。续期用它：令牌链一开跑就要走完，见 [`Aurora::renew_detached`]。
+    /// 装配不挂取消令牌的微软客户端。续期用它：令牌链一开跑就要走完，见 [`Petalfall::renew_detached`]。
     fn msa_client(&self) -> MicrosoftAuth {
         MicrosoftAuth::new(self.http(), self.msa_client_id())
             .with_endpoints(self.msa_endpoints().clone())
@@ -316,7 +316,7 @@ impl Aurora {
     /// 在阻塞线程池上跑一段账户库读写，供异步流程调用。
     async fn blocking<T: Send + 'static>(
         &self,
-        work: impl FnOnce(&Aurora) -> Result<T> + Send + 'static,
+        work: impl FnOnce(&Petalfall) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let this = self.clone();
         tokio::task::spawn_blocking(move || work(&this)).await?
@@ -325,7 +325,7 @@ impl Aurora {
     /// 就地造一个离线账户（不落库，供「给个名字直接开」的即用即弃场景）。
     ///
     /// 用户名先过硬性校验（空/引号/超长直接报错），软性告警（含非标准字符）经事件通道上抛。
-    /// 要让账户在下次打开启动器时还在，用 [`Aurora::add_offline_account`]。
+    /// 要让账户在下次打开启动器时还在，用 [`Petalfall::add_offline_account`]。
     pub fn create_offline_account(
         &self,
         name: &str,
@@ -340,7 +340,7 @@ impl Aurora {
 
     /// 保存一个离线账户并把它设为当前账户，返回落库后的账户。
     ///
-    /// 校验与告警走与 [`Aurora::create_offline_account`] 同一条路，保证两条入口对用户名的判定一致。
+    /// 校验与告警走与 [`Petalfall::create_offline_account`] 同一条路，保证两条入口对用户名的判定一致。
     /// 同名重复保存是幂等的。离线库的选中项在仲裁里优先，所以保存即成为全局当前账户。
     pub fn add_offline_account(&self, name: &str, events: Option<&EventSink>) -> Result<Account> {
         let UsernameCheck { warnings } = validate_username(name)?;
@@ -364,9 +364,9 @@ impl Aurora {
     /// 先打开一次凭据库：坏文件要是还没被哪条命令碰到，就在这一刻处置。启动提示调用它，不必赶在
     /// 账户列表之前。
     pub async fn credential_recoveries(&self) -> Result<Vec<CredentialRecovery>> {
-        self.blocking(|aurora| {
+        self.blocking(|petalfall| {
             let _guard = lock_account_db();
-            aurora.credential_recoveries_unlocked()
+            petalfall.credential_recoveries_unlocked()
         })
         .await
     }
@@ -423,14 +423,14 @@ impl Aurora {
     ) -> Result<Account> {
         Self::ensure_credential_store()?;
         let account = perform_microsoft_login(&self.microsoft_auth(), on_code).await?;
-        self.blocking(move |aurora| aurora.store_login(account))
+        self.blocking(move |petalfall| petalfall.store_login(account))
             .await
     }
 
     /// 探测外置登录服务器：按 authlib-injector 的 API 地址指示解析出 API 根地址并取元数据，
     /// 总时限 [`AUTH_SERVER_TIMEOUT`]。`server_url` 须已是带协议头的完整地址。
     pub async fn probe_auth_server(&self, server_url: &str) -> Result<AuthServerInfo> {
-        let ali = aurora_auth::yggdrasil::prefetch_metadata(
+        let ali = petalfall_auth::yggdrasil::prefetch_metadata(
             &self.http(),
             server_url,
             AUTH_SERVER_TIMEOUT,
@@ -590,7 +590,7 @@ impl Aurora {
     ) -> Result<Account> {
         let skin = profile_skin_or_warn(client, &profile.id).await;
         let account = authlib_account(server, username, access_token, client_token, profile, skin);
-        self.blocking(move |aurora| aurora.store_login(account))
+        self.blocking(move |petalfall| petalfall.store_login(account))
             .await
     }
 
@@ -605,11 +605,11 @@ impl Aurora {
     /// [`AuthError::ReloginRequired`]；网络故障原样冒泡、状态不变。
     ///
     /// 刷新跑在独立任务里：调用方被取消时以 [`AuthError::Cancelled`] 返回，刷新照样跑完落盘
-    /// （见 [`Aurora::renew_detached`]）。
+    /// （见 [`Petalfall::renew_detached`]）。
     pub async fn refresh_account(&self, uuid: &str) -> Result<Account> {
         let target = uuid.to_owned();
-        self.renew_detached(uuid, |aurora| async move {
-            aurora.refresh_account_now(&target).await
+        self.renew_detached(uuid, |petalfall| async move {
+            petalfall.refresh_account_now(&target).await
         })
         .await
     }
@@ -645,7 +645,7 @@ impl Aurora {
     ///
     /// 要联网时先排进这个账户的续期闸，再以库里此刻的记录为准：排队期间别处可能刚续过，
     /// 传进来的那份凭据已经作废。联网的部分跑在独立任务里：启动被取消时以 [`AuthError::Cancelled`]
-    /// 返回，续期照样跑完落盘（见 [`Aurora::renew_detached`]）。
+    /// 返回，续期照样跑完落盘（见 [`Petalfall::renew_detached`]）。
     pub async fn ensure_account_fresh(&self, account: &Account) -> Result<Account> {
         match &account.credentials {
             AccountCredentials::Microsoft(creds)
@@ -657,8 +657,8 @@ impl Aurora {
             AccountCredentials::Microsoft(_) | AccountCredentials::AuthlibInjector(_) => {}
         }
         let target = account.uuid.clone();
-        self.renew_detached(&account.uuid, |aurora| async move {
-            aurora.ensure_account_fresh_now(&target).await
+        self.renew_detached(&account.uuid, |petalfall| async move {
+            petalfall.ensure_account_fresh_now(&target).await
         })
         .await
     }
@@ -673,7 +673,7 @@ impl Aurora {
     async fn renew_detached<F>(
         &self,
         uuid: &str,
-        renewal: impl FnOnce(Aurora) -> F,
+        renewal: impl FnOnce(Petalfall) -> F,
     ) -> Result<Account>
     where
         F: std::future::Future<Output = Result<Account>> + Send + 'static,
@@ -722,8 +722,8 @@ impl Aurora {
                 {
                     let uuid = account.uuid.clone();
                     return self
-                        .blocking(move |aurora| {
-                            aurora.update_credential_account(&uuid, |stored| {
+                        .blocking(move |petalfall| {
+                            petalfall.update_credential_account(&uuid, |stored| {
                                 stored.last_verified_at = Some(unix_millis());
                                 stored.status = AccountStatus::Ok;
                             })
@@ -739,7 +739,7 @@ impl Aurora {
     /// 在阻塞线程池上按 uuid 取库里的账户，不存在即报 [`AuthError::AccountNotFound`]。
     async fn stored_account(&self, uuid: &str) -> Result<Account> {
         let lookup = uuid.to_owned();
-        self.blocking(move |aurora| aurora.find_account(&lookup))
+        self.blocking(move |petalfall| petalfall.find_account(&lookup))
             .await?
             .ok_or_else(|| AuthError::AccountNotFound(uuid.to_owned()).into())
     }
@@ -756,8 +756,8 @@ impl Aurora {
         let session = auth.complete_login(&msa).await?;
         let fresh = account_from_session(&session);
         let uuid = account.uuid.clone();
-        self.blocking(move |aurora| {
-            aurora.update_credential_account(&uuid, |stored| {
+        self.blocking(move |petalfall| {
+            petalfall.update_credential_account(&uuid, |stored| {
                 // 整条替换但保留加入时刻；档案 uuid 不会变，名字与皮肤以这次取到的为准。
                 let added_at = stored.added_at;
                 *stored = Account { added_at, ..fresh };
@@ -779,8 +779,8 @@ impl Aurora {
         let uuid = uuid.to_owned();
         let used = used.to_owned();
         let rotated = rotated.to_owned();
-        self.blocking(move |aurora| {
-            aurora.update_credential_account(&uuid, |stored| {
+        self.blocking(move |petalfall| {
+            petalfall.update_credential_account(&uuid, |stored| {
                 if let AccountCredentials::Microsoft(creds) = &mut stored.credentials
                     && creds.refresh_token == used
                 {
@@ -811,8 +811,8 @@ impl Aurora {
         let uuid = account.uuid.clone();
         let api_root = creds.api_root.clone();
         let username = creds.username.clone();
-        self.blocking(move |aurora| {
-            aurora.update_credential_account(&uuid, |stored| {
+        self.blocking(move |petalfall| {
+            petalfall.update_credential_account(&uuid, |stored| {
                 stored.credentials = AccountCredentials::AuthlibInjector(YggdrasilCredentials {
                     api_root,
                     access_token: resp.access_token,
@@ -847,8 +847,8 @@ impl Aurora {
             }
         };
         let uuid = account.uuid.clone();
-        self.blocking(move |aurora| {
-            aurora.update_credential_account(&uuid, |stored| {
+        self.blocking(move |petalfall| {
+            petalfall.update_credential_account(&uuid, |stored| {
                 match profile {
                     Some(Some(profile)) => {
                         if let Some(name) = profile.name {
@@ -875,9 +875,9 @@ impl Aurora {
         let target = rejected.uuid.clone();
         let rejected_credentials = rejected.credentials.clone();
         let (stored, expired) = self
-            .blocking(move |aurora| {
+            .blocking(move |petalfall| {
                 let mut expired = false;
-                let stored = aurora.update_credential_account(&target, |stored| {
+                let stored = petalfall.update_credential_account(&target, |stored| {
                     if stored.credentials == rejected_credentials {
                         stored.status = AccountStatus::Expired;
                         expired = true;
@@ -950,7 +950,7 @@ impl Aurora {
 }
 
 #[cfg(all(test, windows))]
-impl Aurora {
+impl Petalfall {
     /// 不走登录链，直接把账户写进凭据库并选为当前账户：启动等其它模块的门面级测试据此布置账户现场。
     pub(crate) fn store_account_for_test(&self, account: Account) -> Result<Account> {
         self.store_login(account)
@@ -974,7 +974,7 @@ async fn profile_skin_or_warn(client: &YggdrasilClient, profile_id: &str) -> Opt
 // 任何凭据账户，这是如实回答而非兜底掩盖；登录则一开始就报不支持，不白跑一趟网络。
 
 #[cfg(windows)]
-impl Aurora {
+impl Petalfall {
     fn ensure_credential_store() -> Result<()> {
         Ok(())
     }
@@ -982,15 +982,15 @@ impl Aurora {
     /// 打开凭据库。文件读到了却还原不出来（换了机器或 Windows 用户、文件被改坏）时不报错：原文件改名留存，
     /// 按空库继续，经过记进本进程的留存表。离线账户在另一个库里，不受影响；微软与外置登录账户要重新登录。
     /// 读文件本身失败、改名失败仍然报错。
-    fn open_credentials(&self) -> Result<AccountManager<aurora_auth::DpapiCredentialStore>> {
+    fn open_credentials(&self) -> Result<AccountManager<petalfall_auth::DpapiCredentialStore>> {
         let path = self.data_dir().join(CREDENTIALS_FILE);
-        let err = match AccountManager::load(aurora_auth::DpapiCredentialStore::at(&path)) {
+        let err = match AccountManager::load(petalfall_auth::DpapiCredentialStore::at(&path)) {
             Ok(manager) => return Ok(manager),
             Err(err) if err.is_unreadable_credentials() => err,
             Err(err) => return Err(err.into()),
         };
         let preserved = preserve_unreadable_credentials(&path)?;
-        let error = aurora_base::error_with_causes(&err);
+        let error = petalfall_base::error_with_causes(&err);
         tracing::error!(
             path = %path.display(),
             preserved = %preserved.display(),
@@ -999,7 +999,7 @@ impl Aurora {
         );
         record_credential_recovery(&path, CredentialRecovery { preserved, error });
         Ok(AccountManager::load(
-            aurora_auth::DpapiCredentialStore::at(&path),
+            petalfall_auth::DpapiCredentialStore::at(&path),
         )?)
     }
 
@@ -1036,7 +1036,7 @@ impl Aurora {
 }
 
 #[cfg(not(windows))]
-impl Aurora {
+impl Petalfall {
     fn ensure_credential_store() -> Result<()> {
         Err(crate::error::CoreError::PlatformUnsupported)
     }
@@ -1074,25 +1074,25 @@ impl Aurora {
 mod tests {
     use super::*;
     use crate::error::CoreError;
-    use aurora_auth::{AccountType, SkinModel};
+    use petalfall_auth::{AccountType, SkinModel};
     use serde_json::json;
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// 用同一个数据目录重开一个门面，等价于「关掉启动器再打开」。
-    fn aurora_at(data_dir: &std::path::Path) -> Aurora {
-        Aurora::for_test(
-            crate::config::AuroraConfig {
+    fn petalfall_at(data_dir: &std::path::Path) -> Petalfall {
+        Petalfall::for_test(
+            crate::config::PetalfallConfig {
                 msa_client_id: Some("test-client-id".into()),
-                ..crate::config::AuroraConfig::default()
+                ..crate::config::PetalfallConfig::default()
             },
             data_dir.to_path_buf(),
             data_dir.to_path_buf(),
         )
     }
 
-    fn msa_endpoints(server: &MockServer) -> aurora_auth::MsaEndpoints {
-        aurora_auth::MsaEndpoints {
+    fn msa_endpoints(server: &MockServer) -> petalfall_auth::MsaEndpoints {
+        petalfall_auth::MsaEndpoints {
             oauth_base: server.uri(),
             xbl_authenticate: format!("{}/xbl", server.uri()),
             xsts_authorize: format!("{}/xsts", server.uri()),
@@ -1164,11 +1164,11 @@ mod tests {
         let server = MockServer::start().await;
         mount_full_login(&server, 200).await;
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+        let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
 
         let mut shown = None;
         let before = unix_millis();
-        let account = perform_microsoft_login(&aurora.microsoft_auth(), |dc| {
+        let account = perform_microsoft_login(&petalfall.microsoft_auth(), |dc| {
             shown = Some(dc.user_code.clone());
         })
         .await
@@ -1195,10 +1195,10 @@ mod tests {
     #[test]
     fn offline_account_creation_validates_and_yields_stable_uuid() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
 
         // 合法用户名 -> 稳定离线 UUID（与原版一致）。
-        let account = aurora.create_offline_account("Steve", None).unwrap();
+        let account = petalfall.create_offline_account("Steve", None).unwrap();
         assert_eq!(account.uuid, "5627dd98e6be3c21b8a8e92344183641");
         assert_eq!(account.account_type, AccountType::Offline);
         // 即用即弃：不落库。
@@ -1206,7 +1206,9 @@ mod tests {
 
         // 含非标准字符 -> 通过但发出告警事件。
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let _ = aurora.create_offline_account("玩家一", Some(&tx)).unwrap();
+        let _ = petalfall
+            .create_offline_account("玩家一", Some(&tx))
+            .unwrap();
         drop(tx);
         let mut warned = false;
         while let Ok(ev) = rx.try_recv() {
@@ -1218,7 +1220,7 @@ mod tests {
 
         // 非法用户名（空）冒泡。
         assert!(matches!(
-            aurora.create_offline_account("", None),
+            petalfall.create_offline_account("", None),
             Err(CoreError::Auth(_))
         ));
     }
@@ -1227,13 +1229,13 @@ mod tests {
     fn added_offline_accounts_survive_restart_with_selection() {
         let tmp = tempfile::tempdir().unwrap();
         {
-            let aurora = aurora_at(tmp.path());
-            aurora.add_offline_account("Steve", None).unwrap();
-            aurora.add_offline_account("Alex", None).unwrap();
+            let petalfall = petalfall_at(tmp.path());
+            petalfall.add_offline_account("Steve", None).unwrap();
+            petalfall.add_offline_account("Alex", None).unwrap();
         }
 
         // 换一个门面实例重新读盘：账户与当前选中都必须还在（删掉 add 的落盘此断言即挂）。
-        let restarted = aurora_at(tmp.path());
+        let restarted = petalfall_at(tmp.path());
         let names: Vec<_> = restarted
             .accounts()
             .unwrap()
@@ -1248,13 +1250,13 @@ mod tests {
     #[test]
     fn switching_and_removing_offline_accounts_moves_the_selection() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
-        let steve = aurora.add_offline_account("Steve", None).unwrap();
-        let alex = aurora.add_offline_account("Alex", None).unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let steve = petalfall.add_offline_account("Steve", None).unwrap();
+        let alex = petalfall.add_offline_account("Alex", None).unwrap();
 
-        aurora.set_current_account(&steve.uuid).unwrap();
+        petalfall.set_current_account(&steve.uuid).unwrap();
         assert_eq!(
-            aurora_at(tmp.path())
+            petalfall_at(tmp.path())
                 .current_account()
                 .unwrap()
                 .unwrap()
@@ -1263,8 +1265,8 @@ mod tests {
         );
 
         // 删掉当前选中项 -> 回落到剩下的第一个，且这一回落也要落盘。
-        aurora.remove_account(&steve.uuid).unwrap();
-        let restarted = aurora_at(tmp.path());
+        petalfall.remove_account(&steve.uuid).unwrap();
+        let restarted = petalfall_at(tmp.path());
         assert_eq!(
             restarted.current_account().unwrap().unwrap().uuid,
             alex.uuid
@@ -1280,22 +1282,22 @@ mod tests {
     #[test]
     fn add_offline_account_validates_like_the_ephemeral_path() {
         let tmp = tempfile::tempdir().unwrap();
-        let aurora = aurora_at(tmp.path());
+        let petalfall = petalfall_at(tmp.path());
 
         // 非法用户名冒泡，且一个字节都不落盘。
         assert!(matches!(
-            aurora.add_offline_account("bad\"name", None),
+            petalfall.add_offline_account("bad\"name", None),
             Err(CoreError::Auth(AuthError::InvalidUsername(_)))
         ));
         assert!(!tmp.path().join(OFFLINE_ACCOUNTS_FILE).exists());
 
         // 含非标准字符：保存成功，同时经事件通道发出告警。
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let saved = aurora.add_offline_account("玩家一", Some(&tx)).unwrap();
+        let saved = petalfall.add_offline_account("玩家一", Some(&tx)).unwrap();
         drop(tx);
         assert_eq!(saved.name, "玩家一");
         assert!(matches!(rx.try_recv(), Ok(CoreEvent::Warning(_))));
-        let found = aurora_at(tmp.path())
+        let found = petalfall_at(tmp.path())
             .find_account(&saved.uuid)
             .unwrap()
             .expect("已保存的离线账户应能按 uuid 查到");
@@ -1305,16 +1307,17 @@ mod tests {
     #[test]
     fn client_id_prefers_config_then_falls_back_to_builtin_default() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(aurora_at(tmp.path()).msa_client_id(), "test-client-id");
+        assert_eq!(petalfall_at(tmp.path()).msa_client_id(), "test-client-id");
 
-        let config = crate::config::AuroraConfig {
+        let config = crate::config::PetalfallConfig {
             msa_client_id: None,
-            ..crate::config::AuroraConfig::default()
+            ..crate::config::PetalfallConfig::default()
         };
-        let aurora = Aurora::for_test(config, tmp.path().to_path_buf(), tmp.path().to_path_buf());
+        let petalfall =
+            Petalfall::for_test(config, tmp.path().to_path_buf(), tmp.path().to_path_buf());
         // 未配置且无环境变量时回落到内置 client_id，保证正版登录开箱可用；删掉回落此断言即挂。
         if std::env::var(MSA_CLIENT_ID_ENV).is_err() {
-            assert_eq!(aurora.msa_client_id(), DEFAULT_MSA_CLIENT_ID);
+            assert_eq!(petalfall.msa_client_id(), DEFAULT_MSA_CLIENT_ID);
         }
     }
 
@@ -1387,15 +1390,15 @@ mod tests {
             let server = MockServer::start().await;
             mount_full_login(&server, 200).await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
-            let offline = aurora.add_offline_account("Steve", None).unwrap();
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let offline = petalfall.add_offline_account("Steve", None).unwrap();
 
-            let account = aurora.microsoft_login(|_| {}).await.unwrap();
+            let account = petalfall.microsoft_login(|_| {}).await.unwrap();
             assert_eq!(account.uuid, MS_UUID);
 
             // 重开门面读盘：当前账户已换成刚登录的微软账户，离线号还在但不再被选中。
             // 把 store_login 里的 adopt_as_current 删掉，当前账户仍是 Steve，本断言即挂。
-            let restarted = aurora_at(tmp.path());
+            let restarted = petalfall_at(tmp.path());
             let current = restarted.current_account().unwrap().unwrap();
             assert_eq!(current.uuid, MS_UUID);
             assert_eq!(current.account_type, AccountType::Microsoft);
@@ -1411,7 +1414,7 @@ mod tests {
             // 反向再切回离线号仍然成立。
             restarted.set_current_account(&offline.uuid).unwrap();
             assert_eq!(
-                aurora_at(tmp.path())
+                petalfall_at(tmp.path())
                     .current_account()
                     .unwrap()
                     .unwrap()
@@ -1425,10 +1428,10 @@ mod tests {
             let server = MockServer::start().await;
             mount_full_login(&server, 200).await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
 
-            let first = aurora.microsoft_login(|_| {}).await.unwrap();
-            aurora
+            let first = petalfall.microsoft_login(|_| {}).await.unwrap();
+            petalfall
                 .open_credentials()
                 .unwrap()
                 .update(MS_UUID, |a| {
@@ -1437,12 +1440,12 @@ mod tests {
                 })
                 .unwrap();
 
-            let again = aurora.microsoft_login(|_| {}).await.unwrap();
+            let again = petalfall.microsoft_login(|_| {}).await.unwrap();
             assert_eq!(again.added_at, 1_000, "重新登录不该刷新加入时刻");
             assert_eq!(again.status, AccountStatus::Ok);
             assert!(again.last_verified_at.unwrap() >= first.last_verified_at.unwrap());
             assert_eq!(
-                aurora.accounts().unwrap().len(),
+                petalfall.accounts().unwrap().len(),
                 1,
                 "同 uuid 覆盖而不是新增"
             );
@@ -1469,12 +1472,12 @@ mod tests {
                 .await;
             let tmp = tempfile::tempdir().unwrap();
             let token = crate::CancellationToken::new();
-            let aurora = aurora_at(tmp.path())
+            let petalfall = petalfall_at(tmp.path())
                 .with_msa_endpoints(msa_endpoints(&server))
                 .with_cancel(token.clone());
 
             let trigger = token.clone();
-            let err = aurora
+            let err = petalfall
                 .microsoft_login(move |_| trigger.cancel())
                 .await
                 .unwrap_err();
@@ -1487,7 +1490,7 @@ mod tests {
             let server = MockServer::start().await;
             mount_full_login(&server, 400).await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
             let mut stale = Account::new(
                 MS_UUID,
                 "PetalPlayer",
@@ -1498,13 +1501,13 @@ mod tests {
                 }),
             );
             stale.last_verified_at = Some(7);
-            aurora.store_login(stale.clone()).unwrap();
+            petalfall.store_login(stale.clone()).unwrap();
 
             // 启动路径：令牌过期 -> 续期 -> invalid_grant -> 需重登。
-            let err = aurora.ensure_account_fresh(&stale).await.unwrap_err();
+            let err = petalfall.ensure_account_fresh(&stale).await.unwrap_err();
             assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
             // 状态已落盘；删掉 expire 里的写库，本断言即挂。
-            let stored = aurora_at(tmp.path())
+            let stored = petalfall_at(tmp.path())
                 .find_account(MS_UUID)
                 .unwrap()
                 .unwrap();
@@ -1512,7 +1515,7 @@ mod tests {
             assert_eq!(stored.last_verified_at, Some(7), "失败的续期不算一次验证");
 
             // 手动刷新同样落成失效。
-            let err = aurora.refresh_account(MS_UUID).await.unwrap_err();
+            let err = petalfall.refresh_account(MS_UUID).await.unwrap_err();
             assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
         }
 
@@ -1588,7 +1591,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
             let ms_account = |refresh: &str, expires_at: u64| {
                 Account::new(
                     MS_UUID,
@@ -1600,27 +1603,29 @@ mod tests {
                     }),
                 )
             };
-            let stale = aurora.store_login(ms_account("dead-refresh", 1)).unwrap();
+            let stale = petalfall
+                .store_login(ms_account("dead-refresh", 1))
+                .unwrap();
 
             // 等续期请求真正到了令牌端点（库里的旧凭据已经读出）才重新登录。按固定时延排先后的话，
             // 机器满载时读库会晚于重新登录，续期直接拿到新凭据、根本不发请求。新登录落盘之后才放令牌端点
             // 回话，拒绝一定落在新凭据之后。
             let relogin = async {
                 gate.arrived().await;
-                let aurora = aurora.clone();
+                let petalfall = petalfall.clone();
                 let fresh = ms_account("new-refresh", u64::MAX);
-                let stored = tokio::task::spawn_blocking(move || aurora.store_login(fresh))
+                let stored = tokio::task::spawn_blocking(move || petalfall.store_login(fresh))
                     .await
                     .unwrap()
                     .unwrap();
                 gate.release();
                 stored
             };
-            let (refreshed, _) = tokio::join!(aurora.ensure_account_fresh(&stale), relogin);
+            let (refreshed, _) = tokio::join!(petalfall.ensure_account_fresh(&stale), relogin);
             let err = refreshed.unwrap_err();
             assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
 
-            let stored = aurora_at(tmp.path())
+            let stored = petalfall_at(tmp.path())
                 .find_account(MS_UUID)
                 .unwrap()
                 .unwrap();
@@ -1636,7 +1641,7 @@ mod tests {
             let server = MockServer::start().await;
             mount_full_login(&server, 200).await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
             let stale = Account::new(
                 MS_UUID,
                 "OldName",
@@ -1646,12 +1651,12 @@ mod tests {
                     minecraft_expires_at: Some(1),
                 }),
             );
-            let stored = aurora.store_login(stale.clone()).unwrap();
+            let stored = petalfall.store_login(stale.clone()).unwrap();
 
-            let fresh = aurora.ensure_account_fresh(&stored).await.unwrap();
+            let fresh = petalfall.ensure_account_fresh(&stored).await.unwrap();
             assert_eq!(fresh.name, "PetalPlayer");
             assert_eq!(fresh.added_at, stored.added_at);
-            match &aurora_at(tmp.path())
+            match &petalfall_at(tmp.path())
                 .find_account(MS_UUID)
                 .unwrap()
                 .unwrap()
@@ -1666,7 +1671,7 @@ mod tests {
 
             // 令牌仍有效时不联网：把令牌端点改成拒绝也照样原样返回。
             server.reset().await;
-            let valid = aurora.ensure_account_fresh(&fresh).await.unwrap();
+            let valid = petalfall.ensure_account_fresh(&fresh).await.unwrap();
             assert_eq!(valid, fresh);
             assert!(server.received_requests().await.unwrap().is_empty());
         }
@@ -1684,10 +1689,10 @@ mod tests {
             )
             .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
 
             let account = logged_in(
-                aurora
+                petalfall
                     .authlib_login(&server.uri(), "user@example.com", "pw")
                     .await
                     .unwrap(),
@@ -1705,7 +1710,7 @@ mod tests {
                 }
                 other => panic!("期望外置凭据，得到 {other:?}"),
             }
-            let current = aurora_at(tmp.path()).current_account().unwrap().unwrap();
+            let current = petalfall_at(tmp.path()).current_account().unwrap().unwrap();
             assert_eq!(current.uuid, HERO);
         }
 
@@ -1753,19 +1758,23 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
 
-            let pending = match aurora.authlib_login(&server.uri(), "u", "p").await.unwrap() {
+            let pending = match petalfall
+                .authlib_login(&server.uri(), "u", "p")
+                .await
+                .unwrap()
+            {
                 AuthlibLogin::SelectProfile(pending) => pending,
                 AuthlibLogin::LoggedIn(a) => panic!("多角色不该直接登录，却登录了 {}", a.name),
             };
             assert_eq!(pending.profiles.len(), 2);
             assert_eq!(pending.server.server_name, "Petal Skin");
             // 等待选择期间什么都没落库。
-            assert!(aurora.accounts().unwrap().is_empty());
+            assert!(petalfall.accounts().unwrap().is_empty());
 
             // 角色列表的皮肤与角色一一对应：Hero 没有（204），Alt 是细臂皮肤。
-            let skins = aurora.authlib_profile_skins(&pending).await;
+            let skins = petalfall.authlib_profile_skins(&pending).await;
             assert_eq!(
                 skins,
                 vec![
@@ -1778,7 +1787,10 @@ mod tests {
             );
 
             let alt = pending.profiles[1].clone();
-            let account = aurora.select_authlib_profile(&pending, &alt).await.unwrap();
+            let account = petalfall
+                .select_authlib_profile(&pending, &alt)
+                .await
+                .unwrap();
             assert_eq!(account.uuid, ALT);
             assert_eq!(
                 account.skin.as_ref().unwrap().url,
@@ -1791,7 +1803,7 @@ mod tests {
                 }
                 other => panic!("期望外置凭据，得到 {other:?}"),
             }
-            assert_eq!(aurora.current_account().unwrap().unwrap().uuid, ALT);
+            assert_eq!(petalfall.current_account().unwrap().unwrap().uuid, ALT);
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1819,7 +1831,7 @@ mod tests {
                 .await;
             let tmp = tempfile::tempdir().unwrap();
             let account = logged_in(
-                aurora_at(tmp.path())
+                petalfall_at(tmp.path())
                     .authlib_login(&server.uri(), "u", "p")
                     .await
                     .unwrap(),
@@ -1840,7 +1852,7 @@ mod tests {
             )
             .await;
             let tmp = tempfile::tempdir().unwrap();
-            let err = aurora_at(tmp.path())
+            let err = petalfall_at(tmp.path())
                 .authlib_login(&server.uri(), "u", "p")
                 .await
                 .err()
@@ -1870,13 +1882,13 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
             let info = AuthServerInfo {
                 api_root: format!("{}/", server.uri()),
                 server_name: "Petal Skin".into(),
                 host: "127.0.0.1".into(),
             };
-            let account = aurora
+            let account = petalfall
                 .store_login(authlib_account(
                     &info,
                     "hero@example.com",
@@ -1890,9 +1902,12 @@ mod tests {
                 ))
                 .unwrap();
 
-            let err = aurora.ensure_account_fresh(&account).await.unwrap_err();
+            let err = petalfall.ensure_account_fresh(&account).await.unwrap_err();
             assert!(matches!(err, CoreError::Auth(AuthError::ReloginRequired)));
-            let stored = aurora_at(tmp.path()).find_account(HERO).unwrap().unwrap();
+            let stored = petalfall_at(tmp.path())
+                .find_account(HERO)
+                .unwrap()
+                .unwrap();
             assert_eq!(stored.status, AccountStatus::Expired);
         }
 
@@ -1954,13 +1969,13 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
             let info = AuthServerInfo {
                 api_root: format!("{}/", server.uri()),
                 server_name: "Petal Skin".into(),
                 host: "127.0.0.1".into(),
             };
-            let account = aurora
+            let account = petalfall
                 .store_login(authlib_account(
                     &info,
                     "hero@example.com",
@@ -1975,8 +1990,8 @@ mod tests {
                 .unwrap();
 
             let (launch, manual) = tokio::join!(
-                aurora.ensure_account_fresh(&account),
-                aurora.refresh_account(HERO)
+                petalfall.ensure_account_fresh(&account),
+                petalfall.refresh_account(HERO)
             );
             let launch = launch.expect("启动前的续期不该被另一次刷新拖成需重登");
             let manual = manual.expect("手动刷新不该被另一次续期拖成需重登");
@@ -1986,7 +2001,10 @@ mod tests {
                     other => panic!("期望外置凭据，得到 {other:?}"),
                 }
             }
-            let stored = aurora_at(tmp.path()).find_account(HERO).unwrap().unwrap();
+            let stored = petalfall_at(tmp.path())
+                .find_account(HERO)
+                .unwrap()
+                .unwrap();
             assert_eq!(stored.status, AccountStatus::Ok);
             let stale_refreshes = server
                 .received_requests()
@@ -2025,13 +2043,13 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
             let info = AuthServerInfo {
                 api_root: format!("{}/", server.uri()),
                 server_name: "Petal Skin".into(),
                 host: "127.0.0.1".into(),
             };
-            aurora
+            petalfall
                 .store_login(authlib_account(
                     &info,
                     "hero@example.com",
@@ -2045,8 +2063,11 @@ mod tests {
                 ))
                 .unwrap();
 
-            aurora.refresh_account(HERO).await.unwrap();
-            let stored = aurora_at(tmp.path()).find_account(HERO).unwrap().unwrap();
+            petalfall.refresh_account(HERO).await.unwrap();
+            let stored = petalfall_at(tmp.path())
+                .find_account(HERO)
+                .unwrap()
+                .unwrap();
             match &stored.credentials {
                 AccountCredentials::AuthlibInjector(c) => {
                     assert_eq!(c.access_token, "fresh");
@@ -2097,7 +2118,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
             let info = AuthServerInfo {
                 api_root: format!("{}/", server.uri()),
                 server_name: "Petal Skin".into(),
@@ -2115,9 +2136,9 @@ mod tests {
                 None,
             );
             account.last_verified_at = Some(1);
-            let before = aurora.store_login(account).unwrap();
+            let before = petalfall.store_login(account).unwrap();
 
-            let refreshed = aurora.refresh_account(STILL_VALID).await.unwrap();
+            let refreshed = petalfall.refresh_account(STILL_VALID).await.unwrap();
             assert_eq!(refreshed.name, "HeroRenamed");
             assert_eq!(
                 refreshed.skin,
@@ -2128,7 +2149,7 @@ mod tests {
             );
             assert_eq!(refreshed.credentials, before.credentials, "令牌不该被轮换");
             assert!(refreshed.last_verified_at.unwrap() > 1);
-            let stored = aurora_at(tmp.path())
+            let stored = petalfall_at(tmp.path())
                 .find_account(STILL_VALID)
                 .unwrap()
                 .unwrap();
@@ -2160,7 +2181,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
             let info = AuthServerInfo {
                 api_root: format!("{}/", server.uri()),
                 server_name: "Petal Skin".into(),
@@ -2170,7 +2191,7 @@ mod tests {
                 url: "https://skins.example/hero.png".into(),
                 model: SkinModel::Wide,
             };
-            let before = aurora
+            let before = petalfall
                 .store_login(authlib_account(
                     &info,
                     "hero@example.com",
@@ -2184,7 +2205,7 @@ mod tests {
                 ))
                 .unwrap();
 
-            let refreshed = aurora.refresh_account(PROFILE_DOWN).await.unwrap();
+            let refreshed = petalfall.refresh_account(PROFILE_DOWN).await.unwrap();
             assert_eq!(refreshed.name, "Hero");
             assert_eq!(refreshed.skin, Some(skin));
             assert_eq!(refreshed.credentials, before.credentials);
@@ -2220,7 +2241,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
             let info = AuthServerInfo {
                 api_root: format!("{}/", server.uri()),
                 server_name: "Petal Skin".into(),
@@ -2230,7 +2251,7 @@ mod tests {
                 url: "https://skins.example/hero.png".into(),
                 model: SkinModel::Slim,
             };
-            aurora
+            petalfall
                 .store_login(authlib_account(
                     &info,
                     "hero@example.com",
@@ -2244,14 +2265,17 @@ mod tests {
                 ))
                 .unwrap();
 
-            let refreshed = aurora.refresh_account(ROTATED_PROFILE_DOWN).await.unwrap();
+            let refreshed = petalfall
+                .refresh_account(ROTATED_PROFILE_DOWN)
+                .await
+                .unwrap();
             assert_eq!(refreshed.name, "HeroRenamed");
             assert_eq!(refreshed.skin, Some(skin), "档案取不到时皮肤不该被清掉");
             let AccountCredentials::AuthlibInjector(creds) = &refreshed.credentials else {
                 panic!("应仍是外置账户：{:?}", refreshed.credentials);
             };
             assert_eq!(creds.access_token, "rotated");
-            let stored = aurora_at(tmp.path())
+            let stored = petalfall_at(tmp.path())
                 .find_account(ROTATED_PROFILE_DOWN)
                 .unwrap()
                 .unwrap();
@@ -2267,7 +2291,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
             let info = AuthServerInfo {
                 api_root: format!("{}/", server.uri()),
                 server_name: "Petal Skin".into(),
@@ -2285,12 +2309,12 @@ mod tests {
                 None,
             );
             account.last_verified_at = Some(1);
-            let account = aurora.store_login(account).unwrap();
+            let account = petalfall.store_login(account).unwrap();
 
-            let checked = aurora.ensure_account_fresh(&account).await.unwrap();
+            let checked = petalfall.ensure_account_fresh(&account).await.unwrap();
             assert!(checked.last_verified_at.unwrap() > 1);
             assert_eq!(
-                aurora_at(tmp.path())
+                petalfall_at(tmp.path())
                     .find_account(HERO)
                     .unwrap()
                     .unwrap()
@@ -2336,8 +2360,8 @@ mod tests {
                 .await;
             let (slow_dir, quick_dir) =
                 (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-            let held = aurora_at(slow_dir.path()).with_msa_endpoints(msa_endpoints(&slow));
-            let other = aurora_at(quick_dir.path()).with_msa_endpoints(msa_endpoints(&quick));
+            let held = petalfall_at(slow_dir.path()).with_msa_endpoints(msa_endpoints(&slow));
+            let other = petalfall_at(quick_dir.path()).with_msa_endpoints(msa_endpoints(&quick));
             let stale = Account::new(
                 SHARED_UUID,
                 "PetalPlayer",
@@ -2391,13 +2415,13 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
             let info = AuthServerInfo {
                 api_root: format!("{}/", server.uri()),
                 server_name: "Petal Skin".into(),
                 host: "127.0.0.1".into(),
             };
-            let stale = aurora
+            let stale = petalfall
                 .store_login(authlib_account(
                     &info,
                     "hero@example.com",
@@ -2412,11 +2436,11 @@ mod tests {
                 .unwrap();
 
             let renewal = {
-                let aurora = aurora.clone();
-                tokio::spawn(async move { aurora.ensure_account_fresh(&stale).await })
+                let petalfall = petalfall.clone();
+                tokio::spawn(async move { petalfall.ensure_account_fresh(&stale).await })
             };
             until_requested(&server, &profile).await;
-            let stored = aurora.find_account(HERO).unwrap().unwrap();
+            let stored = petalfall.find_account(HERO).unwrap().unwrap();
             assert_eq!(stored_authlib_token(&stored), "rotated");
             assert_eq!(stored.status, AccountStatus::Ok);
             renewal.abort();
@@ -2462,7 +2486,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
             let mut stale = Account::new(
                 MS_UUID,
                 "PetalPlayer",
@@ -2473,9 +2497,9 @@ mod tests {
                 }),
             );
             stale.last_verified_at = Some(7);
-            let stale = aurora.store_login(stale).unwrap();
+            let stale = petalfall.store_login(stale).unwrap();
 
-            let err = aurora.ensure_account_fresh(&stale).await.unwrap_err();
+            let err = petalfall.ensure_account_fresh(&stale).await.unwrap_err();
             assert!(
                 matches!(
                     err,
@@ -2486,7 +2510,7 @@ mod tests {
                 ),
                 "{err:?}"
             );
-            let stored = aurora_at(tmp.path())
+            let stored = petalfall_at(tmp.path())
                 .find_account(MS_UUID)
                 .unwrap()
                 .unwrap();
@@ -2514,7 +2538,7 @@ mod tests {
                 .respond_with(ResponseTemplate::new(400))
                 .mount(&server)
                 .await;
-            aurora.ensure_account_fresh(&stale).await.unwrap_err();
+            petalfall.ensure_account_fresh(&stale).await.unwrap_err();
             let requests = token_requests(&server).await;
             assert_eq!(requests.len(), 1, "{requests:?}");
             assert!(
@@ -2543,7 +2567,7 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
             let ms_account = |refresh: &str| {
                 Account::new(
                     MS_UUID,
@@ -2555,24 +2579,24 @@ mod tests {
                     }),
                 )
             };
-            let stale = aurora.store_login(ms_account("old-refresh")).unwrap();
+            let stale = petalfall.store_login(ms_account("old-refresh")).unwrap();
 
             // 新登录落盘之后才放令牌端点回话，换出来的令牌一定晚于新凭据。
             let relogin = async {
                 gate.arrived().await;
-                let aurora = aurora.clone();
+                let petalfall = petalfall.clone();
                 let fresh = ms_account("new-refresh");
-                let stored = tokio::task::spawn_blocking(move || aurora.store_login(fresh))
+                let stored = tokio::task::spawn_blocking(move || petalfall.store_login(fresh))
                     .await
                     .unwrap()
                     .unwrap();
                 gate.release();
                 stored
             };
-            let (refreshed, _) = tokio::join!(aurora.ensure_account_fresh(&stale), relogin);
+            let (refreshed, _) = tokio::join!(petalfall.ensure_account_fresh(&stale), relogin);
             refreshed.unwrap_err();
 
-            let stored = aurora_at(tmp.path())
+            let stored = petalfall_at(tmp.path())
                 .find_account(MS_UUID)
                 .unwrap()
                 .unwrap();
@@ -2587,7 +2611,7 @@ mod tests {
         ) -> Account {
             let deadline = std::time::Instant::now() + Duration::from_secs(15);
             loop {
-                let stored = aurora_at(data_dir).find_account(uuid).unwrap().unwrap();
+                let stored = petalfall_at(data_dir).find_account(uuid).unwrap().unwrap();
                 if done(&stored) {
                     return stored;
                 }
@@ -2633,13 +2657,13 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
             let info = AuthServerInfo {
                 api_root: format!("{}/", server.uri()),
                 server_name: "Petal Skin".into(),
                 host: "127.0.0.1".into(),
             };
-            let account = aurora
+            let account = petalfall
                 .store_login(authlib_account(
                     &info,
                     "hero@example.com",
@@ -2654,8 +2678,8 @@ mod tests {
                 .unwrap();
 
             let launch = {
-                let aurora = aurora.clone();
-                tokio::spawn(async move { aurora.ensure_account_fresh(&account).await })
+                let petalfall = petalfall.clone();
+                tokio::spawn(async move { petalfall.ensure_account_fresh(&account).await })
             };
             gate.arrived().await;
             launch.abort();
@@ -2689,8 +2713,8 @@ mod tests {
                 .await;
             let tmp = tempfile::tempdir().unwrap();
             let token = crate::CancellationToken::new();
-            let aurora = aurora_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
-            let stale = aurora
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let stale = petalfall
                 .store_login(Account::new(
                     MS_UUID,
                     "PetalPlayer",
@@ -2703,7 +2727,7 @@ mod tests {
                 .unwrap();
 
             let launch = {
-                let snapshot = aurora.clone().with_cancel(token.clone());
+                let snapshot = petalfall.clone().with_cancel(token.clone());
                 tokio::spawn(async move { snapshot.ensure_account_fresh(&stale).await })
             };
             gate.arrived().await;
@@ -2751,13 +2775,13 @@ mod tests {
                 .mount(&server)
                 .await;
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
             let info = AuthServerInfo {
                 api_root: format!("{}/", server.uri()),
                 server_name: "Petal Skin".into(),
                 host: "127.0.0.1".into(),
             };
-            aurora
+            petalfall
                 .store_login(authlib_account(
                     &info,
                     "hero@example.com",
@@ -2773,7 +2797,7 @@ mod tests {
 
             let precancelled = crate::CancellationToken::new();
             precancelled.cancel();
-            let err = aurora
+            let err = petalfall
                 .clone()
                 .with_cancel(precancelled)
                 .refresh_account(CANCELLED_REFRESH)
@@ -2784,7 +2808,7 @@ mod tests {
 
             let token = crate::CancellationToken::new();
             let refresh = {
-                let snapshot = aurora.clone().with_cancel(token.clone());
+                let snapshot = petalfall.clone().with_cancel(token.clone());
                 tokio::spawn(async move { snapshot.refresh_account(CANCELLED_REFRESH).await })
             };
             gate.arrived().await;
@@ -2811,11 +2835,11 @@ mod tests {
         #[test]
         fn removing_the_last_credential_account_hands_the_selection_back_to_offline() {
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
-            let offline = aurora.add_offline_account("Alex", None).unwrap();
+            let petalfall = petalfall_at(tmp.path());
+            let offline = petalfall.add_offline_account("Alex", None).unwrap();
 
             let credential_account = |uuid: &str, name: &str| {
-                aurora
+                petalfall
                     .store_login(Account::new(
                         uuid,
                         name,
@@ -2830,12 +2854,12 @@ mod tests {
             let first = credential_account(MS_UUID, "PetalPlayer");
             let second = credential_account("fedcba9876543210fedcba9876543210", "PetalBackup");
 
-            aurora.remove_account(&second.uuid).unwrap();
-            let after_first_removal = aurora.current_account().unwrap().unwrap();
+            petalfall.remove_account(&second.uuid).unwrap();
+            let after_first_removal = petalfall.current_account().unwrap().unwrap();
             assert_eq!(after_first_removal.uuid, first.uuid);
 
-            aurora.remove_account(&first.uuid).unwrap();
-            let restarted = aurora_at(tmp.path());
+            petalfall.remove_account(&first.uuid).unwrap();
+            let restarted = petalfall_at(tmp.path());
             let current = restarted
                 .current_account()
                 .unwrap()
@@ -2863,11 +2887,11 @@ mod tests {
         /// 三种读不出来的凭据库：空文件、随机字节（换了机器或 Windows 用户后的密文在这台机器上就是这样）、
         /// 能解密但解出来不是账户库。
         fn unreadable_credential_files(dir: &std::path::Path) -> Vec<(&'static str, Vec<u8>)> {
-            use aurora_auth::CredentialStore as _;
+            use petalfall_auth::CredentialStore as _;
             let mut noise = vec![0u8; fastrand::usize(1..=512)];
             fastrand::fill(&mut noise);
             let foreign = dir.join("foreign.bin");
-            aurora_auth::DpapiCredentialStore::at(&foreign)
+            petalfall_auth::DpapiCredentialStore::at(&foreign)
                 .save(br#"{"accounts": "not-a-list"}"#)
                 .unwrap();
             let not_a_database = std::fs::read(&foreign).unwrap();
@@ -2887,12 +2911,12 @@ mod tests {
             let scratch = tempfile::tempdir().unwrap();
             for (case, garbage) in unreadable_credential_files(scratch.path()) {
                 let tmp = tempfile::tempdir().unwrap();
-                let aurora = aurora_at(tmp.path());
-                let steve = aurora.add_offline_account("Steve", None).unwrap();
+                let petalfall = petalfall_at(tmp.path());
+                let steve = petalfall.add_offline_account("Steve", None).unwrap();
                 let credentials = tmp.path().join(CREDENTIALS_FILE);
                 std::fs::write(&credentials, &garbage).unwrap();
 
-                let listed: Vec<_> = aurora
+                let listed: Vec<_> = petalfall
                     .accounts()
                     .unwrap_or_else(|err| panic!("{case}：凭据库读不出来时离线账户也列不出：{err}"))
                     .into_iter()
@@ -2900,7 +2924,7 @@ mod tests {
                     .collect();
                 assert_eq!(listed, std::slice::from_ref(&steve.uuid), "{case}");
                 assert_eq!(
-                    aurora.current_account().unwrap().unwrap().uuid,
+                    petalfall.current_account().unwrap().unwrap().uuid,
                     steve.uuid,
                     "{case}"
                 );
@@ -2909,7 +2933,7 @@ mod tests {
                 assert_eq!(preserved.len(), 1, "{case}：只留存一份：{preserved:?}");
                 assert_eq!(std::fs::read(&preserved[0]).unwrap(), garbage, "{case}");
 
-                aurora
+                petalfall
                     .store_login(Account::new(
                         MS_UUID,
                         "PetalPlayer",
@@ -2920,7 +2944,7 @@ mod tests {
                         }),
                     ))
                     .unwrap();
-                let restarted = aurora_at(tmp.path());
+                let restarted = petalfall_at(tmp.path());
                 let stored = restarted.find_account(MS_UUID).unwrap().expect(case);
                 match &stored.credentials {
                     AccountCredentials::Microsoft(c) => {
@@ -2942,14 +2966,14 @@ mod tests {
             for (case, garbage) in unreadable_credential_files(scratch.path()) {
                 for listed_first in [false, true] {
                     let tmp = tempfile::tempdir().unwrap();
-                    let aurora = aurora_at(tmp.path());
-                    assert!(aurora.credential_recoveries().await.unwrap().is_empty());
+                    let petalfall = petalfall_at(tmp.path());
+                    assert!(petalfall.credential_recoveries().await.unwrap().is_empty());
                     std::fs::write(tmp.path().join(CREDENTIALS_FILE), &garbage).unwrap();
                     if listed_first {
-                        assert!(aurora.accounts().unwrap().is_empty(), "{case}");
+                        assert!(petalfall.accounts().unwrap().is_empty(), "{case}");
                     }
 
-                    let recoveries = aurora.credential_recoveries().await.unwrap();
+                    let recoveries = petalfall.credential_recoveries().await.unwrap();
                     let preserved = preserved_credentials(tmp.path());
                     assert_eq!(preserved.len(), 1, "{case}");
                     assert_eq!(recoveries.len(), 1, "{case}：{recoveries:?}");
@@ -2982,7 +3006,7 @@ mod tests {
                         );
                     }
 
-                    assert_eq!(aurora.credential_recoveries().await.unwrap(), recoveries);
+                    assert_eq!(petalfall.credential_recoveries().await.unwrap(), recoveries);
                     assert_eq!(preserved_credentials(tmp.path()), preserved);
                 }
             }
@@ -3024,14 +3048,14 @@ mod tests {
         #[test]
         fn credential_store_that_cannot_be_read_is_reported_not_moved() {
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
             let credentials = tmp.path().join(CREDENTIALS_FILE);
             std::fs::create_dir(&credentials).unwrap();
-            let err = aurora.accounts().unwrap_err();
+            let err = petalfall.accounts().unwrap_err();
             assert!(
                 matches!(
                     &err,
-                    CoreError::Auth(AuthError::Base(aurora_base::Error::Io { .. }))
+                    CoreError::Auth(AuthError::Base(petalfall_base::Error::Io { .. }))
                 ),
                 "{err:?}"
             );
@@ -3044,9 +3068,9 @@ mod tests {
         #[test]
         fn recovery_does_not_hand_the_selection_to_an_offline_account() {
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
-            let offline = aurora.add_offline_account("Alex", None).unwrap();
-            aurora
+            let petalfall = petalfall_at(tmp.path());
+            let offline = petalfall.add_offline_account("Alex", None).unwrap();
+            petalfall
                 .store_login(Account::new(
                     MS_UUID,
                     "PetalPlayer",
@@ -3057,11 +3081,11 @@ mod tests {
                     }),
                 ))
                 .unwrap();
-            assert_eq!(aurora.current_account().unwrap().unwrap().uuid, MS_UUID);
+            assert_eq!(petalfall.current_account().unwrap().unwrap().uuid, MS_UUID);
             std::fs::write(tmp.path().join(CREDENTIALS_FILE), b"moved from another PC").unwrap();
 
-            assert!(aurora.current_account().unwrap().is_none());
-            let listed: Vec<_> = aurora
+            assert!(petalfall.current_account().unwrap().is_none());
+            let listed: Vec<_> = petalfall
                 .accounts()
                 .unwrap()
                 .into_iter()
@@ -3075,12 +3099,12 @@ mod tests {
         #[test]
         fn concurrent_logins_do_not_lose_each_other() {
             let tmp = tempfile::tempdir().unwrap();
-            let aurora = aurora_at(tmp.path());
+            let petalfall = petalfall_at(tmp.path());
             std::thread::scope(|scope| {
                 for i in 0..8u8 {
-                    let aurora = aurora.clone();
+                    let petalfall = petalfall.clone();
                     scope.spawn(move || {
-                        aurora
+                        petalfall
                             .store_login(Account::new(
                                 format!("{i:032x}"),
                                 format!("P{i}"),
@@ -3094,7 +3118,7 @@ mod tests {
                     });
                 }
             });
-            assert_eq!(aurora_at(tmp.path()).accounts().unwrap().len(), 8);
+            assert_eq!(petalfall_at(tmp.path()).accounts().unwrap().len(), 8);
         }
     }
 }

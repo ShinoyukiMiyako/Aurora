@@ -1,16 +1,16 @@
 //! 安装流程的共享上下文与批量下载收口。
 //!
 //! 各安装器（原版 / Fabric / Quilt / Forge）都需要同一组协作对象：注入的 HTTP 客户端（读元数据）、
-//! aurora-download 并发池（下文件）、目录布局、运行环境与重试策略。[`InstallContext`] 把它们打成一束
+//! petalfall-download 并发池（下文件）、目录布局、运行环境与重试策略。[`InstallContext`] 把它们打成一束
 //! 借用引用（整体 `Copy`，按值传递零成本），避免每个方法拖一长串参数。
 //!
 //! 取消令牌也在这一束里：下文件由下载池自己的令牌停下，读元数据、Forge 排队与处理器子进程不经过
 //! 下载池，各自从这里拿令牌。挂在上下文上而不是各安装器上，造上下文的地方给一次就覆盖整条链路。
 
-use aurora_base::http::network_failure;
-use aurora_base::retry::RetryPolicy;
-use aurora_download::{CancellationToken, DownloadPool, DownloadProgress, DownloadTask};
-use aurora_version::RuntimeContext;
+use petalfall_base::http::network_failure;
+use petalfall_base::retry::RetryPolicy;
+use petalfall_download::{CancellationToken, DownloadPool, DownloadProgress, DownloadTask};
+use petalfall_version::RuntimeContext;
 use tokio::sync::watch;
 
 use crate::error::{Error, Result};
@@ -19,7 +19,7 @@ use crate::layout::GameLayout;
 /// 安装流程共享的协作对象（全为借用，`Copy`）。
 #[derive(Clone, Copy)]
 pub struct InstallContext<'a> {
-    /// 读元数据用的 HTTP 客户端（由 aurora-base 工厂构建）。
+    /// 读元数据用的 HTTP 客户端（由 petalfall-base 工厂构建）。
     pub client: &'a reqwest::Client,
     /// 下文件用的并发池（内含单文件引擎与镜像源调度）。
     pub pool: &'a DownloadPool,
@@ -27,7 +27,7 @@ pub struct InstallContext<'a> {
     pub layout: &'a GameLayout,
     /// 运行环境（决定 library rules 与 natives classifier）。
     pub runtime: &'a RuntimeContext,
-    /// 元数据抓取的退避重试策略（文件下载自有 aurora-download 的策略）。
+    /// 元数据抓取的退避重试策略（文件下载自有 petalfall-download 的策略）。
     pub policy: &'a RetryPolicy,
     /// 安装的取消令牌：元数据抓取（等连接、读响应体、退避）、Forge 安装排队与处理器子进程都看它。
     /// 应与 `pool` 上挂的是同一个令牌。
@@ -61,7 +61,7 @@ impl<'a> InstallContext<'a> {
 
     /// 跑一批下载并把「有文件最终失败」收敛为 [`Error::BatchIncomplete`]。
     ///
-    /// aurora-download 的批量池对单文件失败返回 `Ok(report)` 而非 `Err`，故这里必须显式检查
+    /// petalfall-download 的批量池对单文件失败返回 `Ok(report)` 而非 `Err`，故这里必须显式检查
     /// `is_success()`，绝不放过部分失败（缺文件会在启动时才炸，代价更高）。
     pub(crate) async fn run_batch(
         &self,
@@ -97,9 +97,9 @@ impl<'a> InstallContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_base::http::{NetworkFailure, network_failure};
-    use aurora_download::{DownloadConfig, Downloader, MirrorSource, SourcePlan};
-    use aurora_version::OsName;
+    use petalfall_base::http::{NetworkFailure, network_failure};
+    use petalfall_download::{DownloadConfig, Downloader, MirrorSource, SourcePlan};
+    use petalfall_version::OsName;
     use std::time::Duration;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -131,7 +131,7 @@ mod tests {
 
     async fn batch_error(tasks: impl FnOnce(&std::path::Path) -> Vec<DownloadTask>) -> Error {
         let dir = tempfile::tempdir().unwrap();
-        let client = aurora_base::http::build_client().unwrap();
+        let client = petalfall_base::http::build_client().unwrap();
         let pool = single_shot_pool(&client);
         let layout = GameLayout::new(dir.path());
         let runtime = RuntimeContext::new(OsName::Windows, "x86_64", 64);

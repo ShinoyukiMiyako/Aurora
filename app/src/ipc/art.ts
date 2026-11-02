@@ -5,7 +5,7 @@
 import { invoke, listen, type UnlistenFn } from "./bridge";
 
 /** 材质源或全景可用性变化时推送，负载为 ArtStatusDto。收到后清空位图缓存并重绘点缀位。 */
-export const ART_CHANGED_EVENT = "aurora://art-changed";
+export const ART_CHANGED_EVENT = "petalfall://art-changed";
 
 export interface ArtSourceDto {
   version_id: string;

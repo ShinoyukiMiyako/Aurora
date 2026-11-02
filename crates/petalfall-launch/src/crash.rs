@@ -160,7 +160,7 @@ const RULES: &[Rule] = &[
         summary: "Java 版本与游戏或 Mod 不匹配",
         advice: concat!(
             "改用目标版本要求的 Java：较新的 Minecraft 需要 Java 17 或 21，1.16 及更早需要 Java 8。可在设置中切换，或让",
-            aurora_base::app_name!(),
+            petalfall_base::app_name!(),
             "自动下载匹配的运行时。"
         ),
     },
@@ -301,7 +301,7 @@ const RULES: &[Rule] = &[
         summary: "本地库（natives）缺失或加载失败",
         advice: concat!(
             "重新补全该版本的 natives（",
-            aurora_base::app_name!(),
+            petalfall_base::app_name!(),
             "可重新解压），并确认游戏路径不含特殊字符或过深。"
         ),
     },
@@ -342,7 +342,7 @@ const RULES: &[Rule] = &[
         summary: "游戏或库文件损坏（jar 不完整或被修改）",
         advice: concat!(
             "让",
-            aurora_base::app_name!(),
+            petalfall_base::app_name!(),
             "重新校验并补全文件，或删除损坏的 jar 后重新下载。"
         ),
     },
@@ -357,9 +357,9 @@ const RULES: &[Rule] = &[
         summary: "Java 建不起本机回环连接",
         advice: concat!(
             "从 AI 工具、打包版终端这类打包应用里拉起",
-            aurora_base::app_name!(),
+            petalfall_base::app_name!(),
             "时，写进临时目录的文件会被系统重定向，Java 连不上自己。从开始菜单直接打开",
-            aurora_base::app_name!(),
+            petalfall_base::app_name!(),
             "再试，或把环境变量 TEMP 改到 AppData 之外；安全软件拦截时也会这样，可以把 Java 加入白名单再试。"
         ),
     },
@@ -1088,7 +1088,7 @@ mod tests {
         assert_eq!(diags[0].line, 1);
         let advice = &diags[0].advice;
         for fix in [
-            concat!("从开始菜单直接打开", aurora_base::app_name!()),
+            concat!("从开始菜单直接打开", petalfall_base::app_name!()),
             "把环境变量 TEMP 改到 AppData 之外",
         ] {
             assert!(advice.contains(fix), "{advice}");

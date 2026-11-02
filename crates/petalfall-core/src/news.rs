@@ -18,11 +18,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aurora_base::brand::REPO_URL;
+use petalfall_base::brand::REPO_URL;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
-use crate::facade::Aurora;
+use crate::facade::Petalfall;
 
 /// 内容源与图片的根地址；条目里的图片地址是相对它的路径。
 pub const LAUNCHER_CONTENT_BASE: &str = "https://launchercontent.mojang.com";
@@ -289,7 +289,7 @@ fn plan_releases(state: LauncherState, now: u64, retry: bool) -> ReleasePlan {
     }
 }
 
-impl Aurora {
+impl Petalfall {
     /// 取资讯：官方资讯与启动器资讯各按自己的缓存规则取，合并后按发布时刻倒序。
     /// 官方资讯连缓存都没有才报错；启动器资讯的失败只记在 [`NewsFeed::launcher_error`]。
     /// `retry` 为真时启动器资讯不等失败后的退避期满，立即再请求一次。
@@ -819,7 +819,7 @@ async fn load_cache(path: &Path) -> Option<CachedFeed> {
 async fn save_cache(path: &Path, cache: &CachedFeed) {
     match serde_json::to_vec(cache) {
         Ok(bytes) => {
-            if let Err(err) = aurora_base::fs::atomic_write(path, &bytes).await {
+            if let Err(err) = petalfall_base::fs::atomic_write(path, &bytes).await {
                 tracing::warn!(path = %path.display(), error = %err, "资讯缓存写盘失败");
             }
         }
@@ -837,7 +837,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AuroraConfig;
+    use crate::config::PetalfallConfig;
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1122,9 +1122,9 @@ mod tests {
             .collect()
     }
 
-    fn aurora_in(dir: &Path) -> Aurora {
-        Aurora::for_test(
-            AuroraConfig::default(),
+    fn petalfall_in(dir: &Path) -> Petalfall {
+        Petalfall::for_test(
+            PetalfallConfig::default(),
             dir.to_path_buf(),
             dir.join(".minecraft"),
         )
@@ -1137,11 +1137,11 @@ mod tests {
         mount_feeds(&remote.official, NEWS_FIXTURE, NOTES_FIXTURE).await;
         mount_releases(&remote.github, "[]").await;
         let dir = tempfile::tempdir().unwrap();
-        let aurora = aurora_in(dir.path());
+        let petalfall = petalfall_in(dir.path());
         let base = &remote.official_uri;
         let channel = LauncherChannel::Stable;
 
-        let first = aurora
+        let first = petalfall
             .list_news_from(&remote.sources(), channel, OCT_30, false)
             .await
             .unwrap();
@@ -1158,7 +1158,7 @@ mod tests {
         assert_eq!(remote.official.received_requests().await.unwrap().len(), 2);
 
         let ttl = duration_ms(CACHE_TTL);
-        let cached = aurora
+        let cached = petalfall
             .list_news_from(&remote.sources(), channel, OCT_30 + ttl - 1, false)
             .await
             .unwrap();
@@ -1172,7 +1172,7 @@ mod tests {
         );
 
         remote.official.reset().await;
-        let offline = aurora
+        let offline = petalfall
             .list_news_from(&remote.sources(), channel, OCT_30 + ttl, false)
             .await
             .unwrap();
@@ -1181,7 +1181,7 @@ mod tests {
         assert_eq!(offline.fetched_at, OCT_30);
 
         let empty = tempfile::tempdir().unwrap();
-        let err = aurora_in(empty.path())
+        let err = petalfall_in(empty.path())
             .list_news_from(&remote.sources(), channel, OCT_30, false)
             .await
             .unwrap_err();
@@ -1194,7 +1194,7 @@ mod tests {
         mount_feeds(&remote.official, "<html>maintenance</html>", NOTES_FIXTURE).await;
         mount_releases(&remote.github, RELEASES_FIXTURE).await;
         let dir = tempfile::tempdir().unwrap();
-        let err = aurora_in(dir.path())
+        let err = petalfall_in(dir.path())
             .list_news_from(&remote.sources(), LauncherChannel::Stable, OCT_30, false)
             .await
             .unwrap_err();
@@ -1208,9 +1208,9 @@ mod tests {
         mount_feeds(&remote.official, NEWS_FIXTURE, NOTES_FIXTURE).await;
         mount_releases(&remote.github, &shuffled_releases()).await;
         let dir = tempfile::tempdir().unwrap();
-        let aurora = aurora_in(dir.path());
+        let petalfall = petalfall_in(dir.path());
 
-        let stable = aurora
+        let stable = petalfall
             .list_news_from(&remote.sources(), LauncherChannel::Stable, OCT_30, false)
             .await
             .unwrap();
@@ -1231,7 +1231,7 @@ mod tests {
         );
         assert_eq!(remote.github_requests().await, 1);
 
-        let preview = aurora
+        let preview = petalfall
             .list_news_from(
                 &remote.sources(),
                 LauncherChannel::Prerelease,
@@ -1252,7 +1252,7 @@ mod tests {
         assert_eq!(remote.github_requests().await, 1, "切通道不重新联网");
 
         let ttl = duration_ms(LAUNCHER_CACHE_TTL);
-        aurora
+        petalfall
             .list_news_from(
                 &remote.sources(),
                 LauncherChannel::Stable,
@@ -1262,7 +1262,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remote.github_requests().await, 1, "一小时内不再请求 GitHub");
-        let refreshed = aurora
+        let refreshed = petalfall
             .list_news_from(
                 &remote.sources(),
                 LauncherChannel::Stable,
@@ -1334,13 +1334,13 @@ mod tests {
         mount_feeds(&remote.official, NEWS_FIXTURE, NOTES_FIXTURE).await;
         mount_github_unavailable(&remote.github).await;
         let dir = tempfile::tempdir().unwrap();
-        let aurora = aurora_in(dir.path());
+        let petalfall = petalfall_in(dir.path());
         let channel = LauncherChannel::Stable;
         let at = |now: u64, retry: bool| {
-            let aurora = &aurora;
+            let petalfall = &petalfall;
             let sources = remote.sources();
             async move {
-                aurora
+                petalfall
                     .list_news_from(&sources, channel, now, retry)
                     .await
                     .unwrap()
@@ -1434,11 +1434,11 @@ mod tests {
             .mount(&remote.github)
             .await;
         let dir = tempfile::tempdir().unwrap();
-        let aurora = aurora_in(dir.path());
+        let petalfall = petalfall_in(dir.path());
         let channel = LauncherChannel::Prerelease;
         let releases_url = format!("{}{RELEASES_PATH}?per_page=20", remote.github_uri);
 
-        let refused = aurora
+        let refused = petalfall
             .list_news_from(&remote.sources(), channel, OCT_30, false)
             .await
             .unwrap();
@@ -1457,7 +1457,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string("<html>unicorn</html>"))
             .mount(&remote.github)
             .await;
-        let garbled = aurora
+        let garbled = petalfall
             .list_news_from(&remote.sources(), channel, OCT_30 + 1, true)
             .await
             .unwrap();
@@ -1470,14 +1470,14 @@ mod tests {
 
         remote.github.reset().await;
         mount_releases(&remote.github, RELEASES_FIXTURE).await;
-        let fresh = aurora
+        let fresh = petalfall
             .list_news_from(&remote.sources(), channel, OCT_30 + 2, true)
             .await
             .unwrap();
         assert_eq!(launcher_ids(&fresh).len(), 3);
 
         remote.github.reset().await;
-        let stale = aurora
+        let stale = petalfall
             .list_news_from(
                 &remote.sources(),
                 channel,
@@ -1506,7 +1506,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(padded.clone()))
             .mount(&server)
             .await;
-        let http = aurora_base::http::build_client().unwrap();
+        let http = petalfall_base::http::build_client().unwrap();
         let url = format!("{}{NEWS_PATH}", server.uri());
 
         let err = match fetch_json(&http, &url).await {

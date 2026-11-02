@@ -1,4 +1,4 @@
-//! aurora-modpack（L2 整合包文件格式）
+//! petalfall-modpack（L2 整合包文件格式）
 //!
 //! 读两种平台整合包：Modrinth 的 `.mrpack`（根目录 `modrinth.index.json`）与 CurseForge 导出的
 //! `.zip`（根目录 `manifest.json`），归一到 [`PackManifest`]：MC 版本、加载器、要下载的远程文件、

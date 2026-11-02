@@ -5,13 +5,13 @@ import { invoke, listen, type UnlistenFn } from "./bridge";
 import { IpcError } from "./errors";
 
 /** 启动阶段推进与阶段 3 的下载进度。 */
-export const LAUNCH_PHASE_EVENT = "aurora://launch-phase";
+export const LAUNCH_PHASE_EVENT = "petalfall://launch-phase";
 /** 游戏进程退出；游玩时长、上次游玩与崩溃报告在推送前已由后端写好。 */
-export const GAME_EXIT_EVENT = "aurora://game-exit";
+export const GAME_EXIT_EVENT = "petalfall://game-exit";
 /** 启动器日志与游戏输出，成批推送。 */
-export const GAME_LOG_EVENT = "aurora://game-log";
+export const GAME_LOG_EVENT = "petalfall://game-log";
 /** 游戏退出后的自动备份做完。开着自动备份时每局都推（这局没进过存档时两个列表都空），关着时不推。 */
-export const WORLD_BACKUP_EVENT = "aurora://world-backup";
+export const WORLD_BACKUP_EVENT = "petalfall://world-backup";
 
 /** 已有游戏在加载或运行时 launchGame 的错误码，detail 为 BusyDetail。同一时间只运行一个游戏。 */
 export const BUSY_ERROR_CODE = "busy";
