@@ -3233,6 +3233,7 @@ dependencies = [
  "percent-encoding",
  "petalfall-base",
  "petalfall-core",
+ "semver",
  "serde",
  "serde_json",
  "tauri",

@@ -9,7 +9,7 @@
 //! [`commands`] 下；各领域共用的设施——门面锁 [`facade`]、长任务登记与取消 [`tasks`]、
 //! 事件转发 [`events`]、主窗口启动期处理 [`window`]、主窗口原生拖放 [`drop`]、渲染进程故障后的
 //! 自动重载 [`renderer`]、最小化时的页面可见性 [`page_visibility`]、同一数据目录只跑一个启动器
-//! [`single_instance`]——各自成模块。
+//! [`single_instance`]、更新插件留下的安装包目录的清扫 [`update_leftovers`]——各自成模块。
 //!
 //! 新增命令时在 `generate_handler!` 里本领域的分块内追加，块之间以 `// -- 领域 --` 分隔；
 //! 新增 managed state 同样写在 setup 里本领域的分块内。
@@ -28,6 +28,8 @@ mod renderer;
 mod single_instance;
 mod tasks;
 mod textures;
+#[cfg(windows)]
+mod update_leftovers;
 mod window;
 
 use petalfall_core::{Petalfall, ServerMonitor};
@@ -117,6 +119,11 @@ pub fn run() {
             app.manage(commands::system::FirstRunBaselineSlot::default());
             app.manage(server_monitor);
             app.manage(UpdaterState::new(updater_support));
+            // 只有装了插件的构建才会留下这些目录；开发构建不碰，本机正式安装的更新包轮不到它来删
+            #[cfg(windows)]
+            if updater_support == UpdaterSupport::Supported {
+                update_leftovers::sweep_in_background(app.package_info().name.clone());
+            }
             window::setup_main_window(app)?;
             #[cfg(windows)]
             if let Some(instance) = instance {
