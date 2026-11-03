@@ -42,6 +42,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }
 # 自定义协议的路径解码：实例 id 可含中文与空格，WebView 发来的是百分号编码形式。
 percent-encoding = "2"
+# 认更新插件留在临时目录里的目录名：中间一段是新版本号（update_leftovers.rs）。
+semver = "1"
 
 # 生产构建关闭 WebView2 浏览器加速键要直接调 ICoreWebView2Settings3。
 # 两者版本必须与 Cargo.lock 里 wry 所用的一致：Tauri 升级带来版本错位时这里会编译失败，
