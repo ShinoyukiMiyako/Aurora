@@ -1,7 +1,7 @@
 // 设置页与启动器更新的文案。产品名一律经 APP_NAME 拼入。
 
 import type { IconName } from "../../art/Icon";
-import { APP_LICENSE, APP_NAME, COPYRIGHT_HOLDER, FIRST_RELEASE_YEAR } from "../../lib/app-info";
+import { APP_LICENSE, APP_NAME, APP_NAME_EN, ASSET_LICENSE, COPYRIGHT_HOLDER, FIRST_RELEASE_YEAR } from "../../lib/app-info";
 import type { SettingsSection } from "../../state/route";
 
 export const SETTINGS_TITLE = "设置";
@@ -280,10 +280,11 @@ export const ABOUT_COPY = {
   channelRow: "发布通道",
   builtRow: "构建日期",
   licenseRow: "开源协议",
+  assetLicenseRow: "素材许可",
   sourceRow: "源代码",
   /** 「复制」整段版本信息时写进剪贴板的文字，反馈问题时直接贴出来。 */
-  infoText: (rows: { name: string; version: string; channel: string; built: string; license: string; source: string }) =>
-    [`${rows.name} ${rows.version}`, `发布通道：${rows.channel}`, `构建日期：${rows.built}`, `开源协议：${rows.license}`, `源代码：${rows.source}`].join("\n"),
+  infoText: (rows: { name: string; version: string; channel: string; built: string; license: string; assetLicense: string; source: string }) =>
+    [`${rows.name} ${rows.version}`, `发布通道：${rows.channel}`, `构建日期：${rows.built}`, `开源协议：${rows.license}`, `素材许可：${rows.assetLicense}`, `源代码：${rows.source}`].join("\n"),
   supportTitle: "支持",
   openLogs: "打开日志目录",
   openLogsDesc: "反馈问题时把这里的最新日志一起发来",
@@ -305,13 +306,29 @@ export const ABOUT_COPY = {
   licenseTextSubtitle: `${APP_LICENSE}，协议全文只有英文版`,
   licenseTextLoading: "正在读取协议全文…",
   licenseTextFailed: "协议全文读不出来",
+  additionalTerms: "附加条款",
+  additionalTermsDesc: "AGPL 第 7 条的附加条款：保留署名、修改版改名换图标、不授予商标权",
+  additionalTermsSubtitle: "中文为准，附英文对照",
+  additionalTermsLoading: "正在读取附加条款…",
+  additionalTermsFailed: "附加条款读不出来",
+  assetLicense: "素材许可",
+  assetLicenseDesc: `美术与品牌素材按 ${ASSET_LICENSE} 授权的范围与署名方式`,
+  assetLicenseSubtitle: "中文为准，附英文对照",
+  assetLicenseLoading: "正在读取素材许可…",
+  assetLicenseFailed: "素材许可读不出来",
   feedback: "问题反馈",
   feedbackDesc: "在仓库的 Issues 页提交问题或建议，会用系统浏览器打开",
   feedbackFailed: "没能打开问题反馈页",
   // 版权符号写成转义：它在 Unicode 里属于 Extended_Pictographic，令牌守卫的 Emoji 规则按码位判断会把它算进去
   copyright: `Copyright \u00A9 ${FIRST_RELEASE_YEAR} ${COPYRIGHT_HOLDER}`,
-  /** 与引导程序协议页的 legal.freeSoftware 同一个意思：AGPL 第 5(d) 条要界面上写明无担保、可按协议转发。 */
-  freeSoftware: `${APP_NAME}是自由软件，你可以按 ${APP_LICENSE} 转发和修改它。它按现状提供，不提供任何担保。`,
+  /**
+   * 与引导程序协议页的 legal.freeSoftware 同一个意思：AGPL 第 5(d) 条要界面上写明无担保、可按协议转发。
+   * 只说程序代码：素材不按 AGPL 授权，说成整个程序可按 AGPL 转发和修改，会被当成素材也随 AGPL 授出。
+   */
+  freeSoftware: `${APP_NAME}的程序代码是自由软件，你可以按 ${APP_LICENSE} 及其附加条款转发和修改它。它按现状提供，不提供任何担保。`,
+  // 字标只是用第三方字体排出的产品名，素材许可不把它列为素材，只受附加条款的商标一节约束，这里不能把它算进去
+  assetsNotice: `应用图标、像素花瓣徽记等列在素材许可里的美术素材另按 ${ASSET_LICENSE} 授权：可以非商业地原样转发并署名，不能商用，也不能改作后发布。`,
+  brandNotice: `「${APP_NAME}」「${APP_NAME_EN}」的名称与徽记不授予商标权。向他人提供修改版的构建产物时，须改用不会混淆的名称与图标，并写明它不出自原作者。`,
   disclaimer: `Minecraft 是 Mojang Studios 的商标。实例图标、皮肤与全景图这些原版图案读取自你本机的游戏文件，不随${APP_NAME}分发。Mod 与整合包的信息和文件来自 Modrinth 与 CurseForge。${APP_NAME}是社区开源项目，与 Mojang Studios 和 Microsoft 没有关联。`,
   infoFailed: "版本信息读不出来",
 } as const;

@@ -2,7 +2,18 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { APP_LICENSE, ISSUES_URL, REPO_URL, buildInfo, loadThirdPartyLicenses, type ThirdPartyManifest } from "./app-info";
+import {
+  APP_LICENSE,
+  ASSET_LICENSE,
+  ISSUES_URL,
+  REPO_URL,
+  buildInfo,
+  loadAdditionalTerms,
+  loadAssetLicense,
+  loadLicenseText,
+  loadThirdPartyLicenses,
+  type ThirdPartyManifest,
+} from "./app-info";
 
 const MANIFEST: ThirdPartyManifest = {
   packages: [
@@ -27,6 +38,14 @@ describe("仓库与协议", () => {
     const license = readFileSync(join(REPO_ROOT, "LICENSE"), "utf8");
     expect(license).toMatch(/^\s*GNU AFFERO GENERAL PUBLIC LICENSE\s+Version 3,/);
     expect(APP_LICENSE).toBe("AGPL-3.0-only");
+  });
+
+  // 界面上说素材按这个许可授权，说法得和随产物分发的素材许可正文对得上
+  it("素材许可与仓库根目录的素材许可正文一致：CC BY-NC-ND 4.0", () => {
+    const assets = readFileSync(join(REPO_ROOT, "LICENSE-ASSETS.md"), "utf8");
+    expect(ASSET_LICENSE).toBe("CC BY-NC-ND 4.0");
+    expect(assets).toContain(ASSET_LICENSE);
+    expect(assets).toContain("https://creativecommons.org/licenses/by-nc-nd/4.0/");
   });
 
   it("README 的许可一节只声明第 3 版，没有「或任何更高版本」的授权", () => {
@@ -59,5 +78,25 @@ describe("第三方许可清单", () => {
   it("文件不在（产物不是经 vite 构建出来的）时报错，带上地址与状态码", async () => {
     vi.stubGlobal("fetch", async () => new Response("Not Found", { status: 404 }));
     await expect(loadThirdPartyLicenses()).rejects.toThrow("第三方许可清单读不出来：/third-party-licenses.json 返回 404");
+  });
+});
+
+describe.each([
+  { name: "协议全文", load: loadLicenseText, url: "/LICENSE.txt" },
+  { name: "附加条款", load: loadAdditionalTerms, url: "/LICENSE-ADDITIONAL-TERMS.md" },
+  { name: "素材许可", load: loadAssetLicense, url: "/LICENSE-ASSETS.md" },
+])("$name", ({ name, load, url }) => {
+  it("从产物根目录读构建时写出的文本，原样返回", async () => {
+    // 随机一行：返回的必须是读回来的那份
+    const text = `# ${name}\n\n  ${Math.random().toString(36).slice(2)}\n`;
+    const fetch = vi.fn(async () => new Response(text, { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(load()).resolves.toBe(text);
+    expect(fetch.mock.calls).toEqual([[url]]);
+  });
+
+  it("文件不在时报错，带上称呼、地址与状态码", async () => {
+    vi.stubGlobal("fetch", async () => new Response("Not Found", { status: 404 }));
+    await expect(load()).rejects.toThrow(`${name}读不出来：${url} 返回 404`);
   });
 });

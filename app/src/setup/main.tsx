@@ -1,3 +1,8 @@
+// Copyright (C) 2026 Shinoyuki_Miyako
+// SPDX-License-Identifier: AGPL-3.0-only
+// 本程序代码按 AGPL-3.0-only 授权，另附 AGPL 第 7 条的附加条款；两者见源代码根目录的 LICENSE 与 LICENSE-ADDITIONAL-TERMS.md。
+// Licensed under AGPL-3.0-only with additional terms under section 7 of the AGPL; see LICENSE and LICENSE-ADDITIONAL-TERMS.md at the root of the source code.
+
 // 引导程序的入口。窗口以不可见状态创建：先查 WebView 能力、加载字体，再渲染；App 探测完、首帧画好后才通知 Rust 显示窗口，
 // Rust 另有 3 秒兜底，前端出问题时窗口不会永远不可见。
 // 浏览器里（pnpm dev:setup）没有 Rust，开发构建换假 bridge，?state= 与 ?lang= 选状态。

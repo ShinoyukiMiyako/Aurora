@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { APP_LICENSE, APP_NAME, APP_NAME_EN } from "../lib/app-info";
+import { APP_LICENSE, APP_NAME, APP_NAME_EN, ASSET_LICENSE, COPYRIGHT_HOLDER, FIRST_RELEASE_YEAR } from "../lib/app-info";
 import { COPY, formatBytes, pickLang, type SetupCopy } from "./copy";
 
 /** 把文案表里的全部字符串展开：函数代入样例参数后取结果。 */
@@ -58,9 +58,11 @@ describe("文案表", () => {
     expect(COPY.en.done.open).toBe(`Open ${APP_NAME_EN}`);
   });
 
-  it("法律声明写明协议、无担保和可转发", () => {
-    expect(COPY.zh.welcome.legalNote).toBe(`${APP_NAME}按 ${APP_LICENSE} 开源，不提供任何担保，你可以按协议转发。`);
-    expect(COPY.en.welcome.legalNote).toBe(`${APP_NAME_EN} is open source under ${APP_LICENSE} and comes with no warranty. You may redistribute it under that license.`);
+  it("法律声明写明代码与素材各自的协议、无担保和可转发", () => {
+    expect(COPY.zh.welcome.legalNote).toBe(`${APP_NAME}的代码按 ${APP_LICENSE} 及其附加条款开源，美术素材按 ${ASSET_LICENSE} 授权，不提供任何担保，你可以按协议转发。`);
+    expect(COPY.en.welcome.legalNote).toBe(
+      `${APP_NAME_EN}'s code is open source under ${APP_LICENSE} with additional terms, and its art assets are licensed under ${ASSET_LICENSE}. It comes with no warranty. You may redistribute it under those licenses.`,
+    );
     expect(COPY.zh.installed.legalNote).toBe(COPY.zh.welcome.legalNote);
     expect(COPY.en.installed.legalNote).toBe(COPY.en.welcome.legalNote);
   });
@@ -99,8 +101,13 @@ describe("文案表", () => {
     expect(COPY.en.location.space("40 MB", "12.0 GB")).toBe("Needs about 40 MB, 12.0 GB free on this drive");
   });
 
-  it("不写版权持有人：这一行由作者定，不放占位", () => {
-    expect(strings(COPY.zh).concat(strings(COPY.en)).filter((text) => /copyright/i.test(text))).toEqual([]);
+  // 附加条款第 2 节把协议页算作引导程序的适当法律声明，版权行只在这一处，两种语言同一行，与关于页的写法相同
+  it("版权行只出现在协议页，中英文都是同一个持有人与年份", () => {
+    const line = `Copyright \u00A9 ${FIRST_RELEASE_YEAR} ${COPYRIGHT_HOLDER}`;
+    expect(line).toBe("Copyright \u00A9 2026 Shinoyuki_Miyako");
+    expect(COPY.zh.legal.copyright).toBe(line);
+    expect(COPY.en.legal.copyright).toBe(line);
+    expect(strings(COPY.zh).concat(strings(COPY.en)).filter((text) => /copyright|版权|\(C\)/i.test(text))).toEqual([line, line]);
   });
 });
 

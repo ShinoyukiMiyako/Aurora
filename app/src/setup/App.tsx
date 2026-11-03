@@ -336,6 +336,8 @@ function CurrentView({ flow, bridge, copy }: ViewProps) {
         <Legal
           copy={copy}
           loadLicenseText={() => bridge.loadLicenseText()}
+          loadAdditionalTerms={() => bridge.loadAdditionalTerms()}
+          loadAssetLicense={() => bridge.loadAssetLicense()}
           loadThirdParty={() => bridge.loadThirdParty()}
           onOpenExternal={(url) => attempt(() => bridge.openExternal(url))}
           onBack={() => dispatch({ type: "close_legal" })}

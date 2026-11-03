@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
-import { loadLicenseText, loadThirdPartyLicenses, type ThirdPartyManifest } from "../lib/app-info";
+import { loadAdditionalTerms, loadAssetLicense, loadLicenseText, loadThirdPartyLicenses, type ThirdPartyManifest } from "../lib/app-info";
 import { PROGRESS_EVENT, type DirCheck, type InstallPlan, type Probe, type Progress } from "./contract";
 
 export type Unlisten = () => void;
@@ -27,6 +27,8 @@ export interface SetupBridge {
   pickFolder(title: string, defaultPath: string): Promise<string | null>;
   openExternal(url: string): Promise<void>;
   loadLicenseText(): Promise<string>;
+  loadAdditionalTerms(): Promise<string>;
+  loadAssetLicense(): Promise<string>;
   loadThirdParty(): Promise<ThirdPartyManifest>;
   minimize(): Promise<void>;
   /** 走关闭请求，和 Alt+F4 同一条路，所以安装中同样被拦。 */
@@ -61,6 +63,8 @@ export function createTauriBridge(): SetupBridge {
       await invoke<void>(OPEN_URL_COMMAND, { url: parsed.href });
     },
     loadLicenseText,
+    loadAdditionalTerms,
+    loadAssetLicense,
     loadThirdParty: loadThirdPartyLicenses,
     minimize: () => win.minimize(),
     close: () => win.close(),

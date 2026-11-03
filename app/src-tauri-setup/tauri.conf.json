@@ -48,6 +48,7 @@
   "bundle": {
     "active": false,
     "publisher": "Shinoyuki_Miyako",
+    "copyright": "Copyright (C) 2026 Shinoyuki_Miyako",
     "icon": ["../src-tauri/icons/icon.ico"]
   }
 }

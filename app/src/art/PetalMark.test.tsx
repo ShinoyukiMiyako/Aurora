@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { APP_NAME_EN } from "../lib/app-info";
 import { render, stubMatchMedia, type MediaQueryStub, type Rendered } from "../test/dom";
@@ -46,6 +47,12 @@ describe("petal-mark.json", () => {
     const rows = master[grid];
     expect(rows).toHaveLength(side);
     for (const row of rows) expect(row).toMatch(new RegExp(`^[.OSMLH]{${side}}$`));
+  });
+
+  // 下面的位图期望从这份 JSON 现算，只抽查了十来个像素，改了形状照样通过，只有摘要守得住。按解析后的对象算，
+  // 不受换行符与缩进影响；摘要不是素材本身，钉在代码里不会把素材数据带回来
+  it("内容摘要钉死：改动素材即有意重绘，须同时更新摘要，新素材按素材许可另行发布", () => {
+    expect(createHash("sha256").update(JSON.stringify(master)).digest("hex")).toBe("fe2008dddc9cbe783c49b497ca0f0b05b30f34bc65cd4c30c1eed10b50a9122a");
   });
 });
 

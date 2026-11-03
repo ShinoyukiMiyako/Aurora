@@ -120,6 +120,14 @@ export function createFakeBridge(overrides: Partial<FakeScenario> = {}): FakeBri
       record("loadLicenseText");
       return "GNU AFFERO GENERAL PUBLIC LICENSE\nVersion 3, 19 November 2007\n";
     },
+    loadAdditionalTerms: async () => {
+      record("loadAdditionalTerms");
+      return "# 附加条款\n\n- AGPL 第 7 条\n";
+    },
+    loadAssetLicense: async () => {
+      record("loadAssetLicense");
+      return "# 美术与品牌素材许可\n\nCC BY-NC-ND 4.0\n";
+    },
     loadThirdParty: async () => {
       record("loadThirdParty");
       return { packages: [{ ecosystem: "npm", name: "react", version: "19.1.0", license: "MIT" }] };

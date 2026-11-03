@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import data from "../blossom-branch.json";
 import {
@@ -75,6 +76,12 @@ describe("branchCell", () => {
 });
 
 describe("blossom-branch.json", () => {
+  // 其余断言的期望值大多从这份 JSON 现算，改了精灵照样通过，只有摘要守得住。按解析后的对象算，不受换行符与缩进影响；
+  // 摘要不是素材本身，钉在代码里不会把素材数据带回来
+  it("内容摘要钉死：改动素材即有意重绘，须同时更新摘要，新素材按素材许可另行发布", () => {
+    expect(createHash("sha256").update(JSON.stringify(data)).digest("hex")).toBe("d51081cbda3824817a48273bd3c4164b7ce0cdd8bc5b6fc13ba08e5ff7d86673");
+  });
+
   it("调色板全是 #RRGGBB，精灵每行等宽、只用调色板里的键", () => {
     for (const hex of Object.values(data.palette)) expect(hex).toMatch(/^#[0-9A-F]{6}$/);
     for (const name of SPRITE_NAMES) {

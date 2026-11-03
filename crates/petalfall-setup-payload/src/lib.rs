@@ -1,3 +1,8 @@
+// Copyright (C) 2026 Shinoyuki_Miyako
+// SPDX-License-Identifier: AGPL-3.0-only
+// 本程序代码按 AGPL-3.0-only 授权，另附 AGPL 第 7 条的附加条款；两者见源代码根目录的 LICENSE 与 LICENSE-ADDITIONAL-TERMS.md。
+// Licensed under AGPL-3.0-only with additional terms under section 7 of the AGPL; see LICENSE and LICENSE-ADDITIONAL-TERMS.md at the root of the source code.
+
 //! 引导程序的载荷格式：可执行文件节末端之后依次是 136 字节头和 NSIS 原样字节。
 //!
 //! 头放在节末端而不是文件末尾：外层代码签名会在文件尾补零并追加证书表，文件尾的位置签名后就变了，

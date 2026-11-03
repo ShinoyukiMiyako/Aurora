@@ -99,6 +99,8 @@ pnpm tauri build
 
 请不要在这些版本里使用落樱的 client_id，包括从落樱发行包里取出的值。原样转发落樱官方发布的安装包不在此列。
 
+向他人提供修改过代码的构建时，附加条款还要求改用不会与落樱混淆的名称与图标，见下文「品牌」与「许可」两节。
+
 ## 目录结构
 
 ```
@@ -143,8 +145,13 @@ pnpm tauri build
 
 游戏目录里的元数据目录名由 `petalfall_instance::PETALFALL_META_DIR` 给出（`.petalfall`）。crate 名、Rust 类型名、IPC 事件名前缀 `petalfall://`、材质协议 `petalfall-tex` 与环境变量名 `PETALFALL_*` 直接写成字面量，不引用品牌常量。前四者只在同一份构建内部使用；环境变量名是对外接口，改名后机器上设着的旧名不再生效。
 
+向他人提供修改版的构建产物时，附加条款要求改用不会混淆的名称，并换掉像素花瓣徽记与应用图标（[LICENSE-ADDITIONAL-TERMS.md](LICENSE-ADDITIONAL-TERMS.md) 第 3 节），上面这些内部标识符不在此列。改名从上面两处常量入手，两份 `tauri.conf.json` 与 `index.html`、`setup.html` 里的产品名各写一份，也要跟着改；徽记的母版是 `app/src/art/petal-mark.json`，换掉后运行 `pnpm build:icons` 重新生成 `app/src-tauri/icons/`。
+
 ## 许可
 
-本项目以 GNU Affero General Public License v3.0 发布，全文见 [LICENSE](LICENSE)。
-
-Minecraft 是 Mojang Studios 的商标。本项目与 Mojang、Microsoft 无关，也未获得它们的认可。
+- **代码**：落樱的程序代码以 GNU Affero General Public License v3.0 授权，只授权第 3 版（SPDX：`AGPL-3.0-only`），全文见 [LICENSE](LICENSE)。
+- **附加条款**：依 AGPL 第 7 条，代码另附三项条款：保留版权与署名声明；向他人提供修改版的构建产物时，须改用不会与「落樱」「Petalfall」混淆的名称与图标，并写明它不出自原作者；不授予名称与徽记的商标权。全文见 [LICENSE-ADDITIONAL-TERMS.md](LICENSE-ADDITIONAL-TERMS.md)。
+- **素材**：应用图标、像素花瓣徽记等列在 [LICENSE-ASSETS.md](LICENSE-ASSETS.md) 里的原创美术与品牌素材不按 AGPL 授权，另以 [CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/deed.zh-hans) 授权：可以非商业地原样转发并署名，不得商用，不得分享改作后的版本；安装包里的素材同样如此。适用的文件与署名方式见 [LICENSE-ASSETS.md](LICENSE-ASSETS.md)，协议法律文本见 [LICENSES/CC-BY-NC-ND-4.0.txt](LICENSES/CC-BY-NC-ND-4.0.txt)。
+- **适用时间**：附加条款与素材许可按出处判断：从 https://github.com/ShinoyukiMiyako/Petalfall 加入这两个文件的那次提交及以它为祖先的提交取得的代码与素材，以及用它们构建的程序，都适用，复制进别的仓库、改写历史或删掉这两个文件也一样。从那次提交之前已经存在的提交或 dev.18 及之前的发行版取得的内容，仍按当时随附的许可，不受影响。
+- **第三方**：依赖与字体按各自的许可，清单由 `app/scripts/third-party-licenses.mjs` 在构建时从依赖树生成，可以在应用的「设置 · 关于 · 第三方许可」里查看。
+- **Minecraft**：Minecraft 是 Mojang Studios 的商标。本项目与 Mojang、Microsoft 无关，也未获得它们的认可。
