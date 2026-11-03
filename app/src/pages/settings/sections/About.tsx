@@ -1,5 +1,5 @@
-// 关于：品牌卡、启动器更新卡、版本信息、支持入口（日志目录、协议全文、第三方许可、问题反馈）、
-// 页尾的版权与无担保声明（AGPL 第 5(d) 条要求界面上有），以及商标、原版图案与数据来源的声明。
+// 关于：品牌卡、启动器更新卡、版本信息、支持入口（日志目录、协议全文、附加条款、素材许可、第三方许可、问题反馈）、
+// 页尾的版权与无担保声明（AGPL 第 5(d) 条要求界面上有）、素材许可与名称商标的声明，以及商标、原版图案与数据来源的声明。
 // 更新面板由外壳挂载。版本、发布通道与构建日期取构建时注入的构建信息：它和安装包、更新器比较用的是同一个版本号。
 
 import { useState, type ReactNode } from "react";
@@ -8,11 +8,11 @@ import { Spinner } from "../../../art/Spinner";
 import { RELEASE_CHANNEL_LABEL } from "../../../copy/flows";
 import { formatDate } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
-import { APP_LICENSE, APP_NAME, APP_NAME_EN, buildInfo, ISSUES_URL, REPO_URL, type BuildInfo } from "../../../lib/app-info";
+import { APP_LICENSE, APP_NAME, APP_NAME_EN, ASSET_LICENSE, buildInfo, ISSUES_URL, REPO_URL, type BuildInfo } from "../../../lib/app-info";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncherActions } from "../../../state/launcher";
-import { useLicenseText, useThirdPartyLicenses, type ThirdPartyPackage } from "../../../state/queries/about";
+import { useAdditionalTerms, useAssetLicense, useLicenseText, useThirdPartyLicenses, type ThirdPartyPackage } from "../../../state/queries/about";
 import type { ResourceResult } from "../../../state/resource";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
@@ -58,7 +58,7 @@ function VersionCard({ build }: { build: BuildInfo }) {
   const { copyText } = useShell();
   const channel = RELEASE_CHANNEL_LABEL[build.channel];
   const built = builtDate(build);
-  const text = ABOUT_COPY.infoText({ name: APP_NAME_EN, version: build.version, channel, built, license: APP_LICENSE, source: REPO_URL });
+  const text = ABOUT_COPY.infoText({ name: APP_NAME_EN, version: build.version, channel, built, license: APP_LICENSE, assetLicense: ASSET_LICENSE, source: REPO_URL });
   return (
     <Card>
       <CardHeader
@@ -74,6 +74,7 @@ function VersionCard({ build }: { build: BuildInfo }) {
           { label: ABOUT_COPY.channelRow, value: channel },
           { label: ABOUT_COPY.builtRow, value: built },
           { label: ABOUT_COPY.licenseRow, value: APP_LICENSE },
+          { label: ABOUT_COPY.assetLicenseRow, value: ASSET_LICENSE },
           { label: ABOUT_COPY.sourceRow, value: <span className={s.mono}>{REPO_URL}</span>, copy: REPO_URL },
         ]}
       />
@@ -151,18 +152,26 @@ function LicensesDialog({ open, onClose }: { open: boolean; onClose: () => void 
   );
 }
 
+/** 弹窗里一份随产物分发的文本的说法：标题（也是原文块的名字）、副标题、读取中与读失败。 */
+interface TextDialogCopy {
+  title: string;
+  subtitle: string;
+  loading: string;
+  failed: string;
+}
+
 /**
- * 协议全文随产物分发（构建时写出 LICENSE.txt），弹窗打开时才去读；读过一次之后整个会话复用。
+ * 协议全文、附加条款与素材许可都随产物分发（构建时写进产物根目录），弹窗打开时才去读；读过一次之后整个会话复用。
+ * 原样放进原文块，不按 Markdown 渲染：法律文本要逐字可查，受限富文本会丢掉引用块之类的节点。
  * 弹窗主体自己滚动，原文块可聚焦，键盘聚焦到它就能翻页。lg 宽才放得下原文 80 列左右的排版，不至于行行折断。
  */
-function LicenseTextDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const license = useLicenseText(open);
+function TextFileDialog({ open, onClose, text, copy }: { open: boolean; onClose: () => void; text: ResourceResult<string>; copy: TextDialogCopy }) {
   return (
-    <Modal open={open} onClose={onClose} size="lg" icon="file-text" title={ABOUT_COPY.licenseText} subtitle={ABOUT_COPY.licenseTextSubtitle}>
-      <LoadedBody resource={license} loading={ABOUT_COPY.licenseTextLoading} failed={ABOUT_COPY.licenseTextFailed}>
-        {(text) => (
-          <pre className={s.licenseText} role="region" aria-label={ABOUT_COPY.licenseText} tabIndex={0}>
-            {text}
+    <Modal open={open} onClose={onClose} size="lg" icon="file-text" title={copy.title} subtitle={copy.subtitle}>
+      <LoadedBody resource={text} loading={copy.loading} failed={copy.failed}>
+        {(value) => (
+          <pre className={s.licenseText} role="region" aria-label={copy.title} tabIndex={0}>
+            {value}
           </pre>
         )}
       </LoadedBody>
@@ -170,12 +179,48 @@ function LicenseTextDialog({ open, onClose }: { open: boolean; onClose: () => vo
   );
 }
 
+const LICENSE_TEXT_COPY: TextDialogCopy = {
+  title: ABOUT_COPY.licenseText,
+  subtitle: ABOUT_COPY.licenseTextSubtitle,
+  loading: ABOUT_COPY.licenseTextLoading,
+  failed: ABOUT_COPY.licenseTextFailed,
+};
+
+const ADDITIONAL_TERMS_COPY: TextDialogCopy = {
+  title: ABOUT_COPY.additionalTerms,
+  subtitle: ABOUT_COPY.additionalTermsSubtitle,
+  loading: ABOUT_COPY.additionalTermsLoading,
+  failed: ABOUT_COPY.additionalTermsFailed,
+};
+
+const ASSET_LICENSE_COPY: TextDialogCopy = {
+  title: ABOUT_COPY.assetLicense,
+  subtitle: ABOUT_COPY.assetLicenseSubtitle,
+  loading: ABOUT_COPY.assetLicenseLoading,
+  failed: ABOUT_COPY.assetLicenseFailed,
+};
+
+function LicenseTextDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  return <TextFileDialog open={open} onClose={onClose} text={useLicenseText(open)} copy={LICENSE_TEXT_COPY} />;
+}
+
+function AdditionalTermsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  return <TextFileDialog open={open} onClose={onClose} text={useAdditionalTerms(open)} copy={ADDITIONAL_TERMS_COPY} />;
+}
+
+function AssetLicenseDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  return <TextFileDialog open={open} onClose={onClose} text={useAssetLicense(open)} copy={ASSET_LICENSE_COPY} />;
+}
+
+/** 支持卡上能打开的弹窗；同一时刻只开一个。 */
+type SupportDialog = "license-text" | "additional-terms" | "asset-license" | "third-party";
+
 function SupportCard() {
   const run = useRunner();
   const actions = useLauncherActions();
   const commands = useSettingsCommands();
-  const [licenseTextOpen, setLicenseTextOpen] = useState(false);
-  const [licensesOpen, setLicensesOpen] = useState(false);
+  const [dialog, setDialog] = useState<SupportDialog | null>(null);
+  const close = () => setDialog(null);
   return (
     <Card>
       <CardHeader title={ABOUT_COPY.supportTitle} icon="help" />
@@ -185,12 +230,22 @@ function SupportCard() {
         </Button>
       </SettingRow>
       <SettingRow title={ABOUT_COPY.licenseText} description={ABOUT_COPY.licenseTextDesc}>
-        <Button size="sm" variant="ghost" icon="file-text" onClick={() => setLicenseTextOpen(true)}>
+        <Button size="sm" variant="ghost" icon="file-text" onClick={() => setDialog("license-text")}>
+          {ABOUT_COPY.view}
+        </Button>
+      </SettingRow>
+      <SettingRow title={ABOUT_COPY.additionalTerms} description={ABOUT_COPY.additionalTermsDesc}>
+        <Button size="sm" variant="ghost" icon="file-text" onClick={() => setDialog("additional-terms")}>
+          {ABOUT_COPY.view}
+        </Button>
+      </SettingRow>
+      <SettingRow title={ABOUT_COPY.assetLicense} description={ABOUT_COPY.assetLicenseDesc}>
+        <Button size="sm" variant="ghost" icon="file-text" onClick={() => setDialog("asset-license")}>
           {ABOUT_COPY.view}
         </Button>
       </SettingRow>
       <SettingRow title={ABOUT_COPY.licenses} description={ABOUT_COPY.licensesDesc}>
-        <Button size="sm" variant="ghost" icon="file-text" onClick={() => setLicensesOpen(true)}>
+        <Button size="sm" variant="ghost" icon="file-text" onClick={() => setDialog("third-party")}>
           {ABOUT_COPY.view}
         </Button>
       </SettingRow>
@@ -199,8 +254,10 @@ function SupportCard() {
           {ABOUT_COPY.open}
         </Button>
       </SettingRow>
-      <LicenseTextDialog open={licenseTextOpen} onClose={() => setLicenseTextOpen(false)} />
-      <LicensesDialog open={licensesOpen} onClose={() => setLicensesOpen(false)} />
+      <LicenseTextDialog open={dialog === "license-text"} onClose={close} />
+      <AdditionalTermsDialog open={dialog === "additional-terms"} onClose={close} />
+      <AssetLicenseDialog open={dialog === "asset-license"} onClose={close} />
+      <LicensesDialog open={dialog === "third-party"} onClose={close} />
     </Card>
   );
 }
@@ -216,6 +273,8 @@ export function AboutSection() {
       <Inset className={s.notices}>
         <p className={s.disclaimer}>{ABOUT_COPY.copyright}</p>
         <p className={s.disclaimer}>{ABOUT_COPY.freeSoftware}</p>
+        <p className={s.disclaimer}>{ABOUT_COPY.assetsNotice}</p>
+        <p className={s.disclaimer}>{ABOUT_COPY.brandNotice}</p>
         <p className={s.disclaimer}>{ABOUT_COPY.disclaimer}</p>
       </Inset>
     </>

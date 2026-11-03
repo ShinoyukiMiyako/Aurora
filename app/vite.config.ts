@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { readBuildInfo } from "./scripts/build-info.mjs";
 import { buildTarget } from "./scripts/build-target.mjs";
 import { thirdPartyManifest } from "./scripts/third-party-licenses.mjs";
-import { LICENSE_TEXT_FILE, THIRD_PARTY_LICENSES_FILE } from "./scripts/licenses-file.mjs";
+import { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE, LICENSE_TEXT_FILE, THIRD_PARTY_LICENSES_FILE } from "./scripts/licenses-file.mjs";
 
 const host = process.env.TAURI_DEV_HOST;
 
@@ -33,22 +33,32 @@ function thirdPartyLicenses(rootPackage: string): Plugin {
   };
 }
 
+/** 随两个前端分发的许可文本：仓库根目录下的源文件、产物根目录下的文件名、开发服务器给的类型。 */
+const LEGAL_TEXTS: readonly { source: string; file: string; contentType: string }[] = [
+  { source: "LICENSE", file: LICENSE_TEXT_FILE, contentType: "text/plain; charset=utf-8" },
+  { source: ADDITIONAL_TERMS_FILE, file: ADDITIONAL_TERMS_FILE, contentType: "text/markdown; charset=utf-8" },
+  { source: ASSET_LICENSE_FILE, file: ASSET_LICENSE_FILE, contentType: "text/markdown; charset=utf-8" },
+];
+
 /**
- * 协议全文随启动器与引导程序一起分发：AGPL 第 5(d) 条要界面上能看到协议，离线也要能看。
+ * 协议全文、附加条款与素材许可随启动器与引导程序一起分发：AGPL 第 5(d) 条要界面上能看到协议，
+ * 附加条款与素材许可要和协议在同一处能查到，离线也要能看。
  * 不用 ?raw 导入：路径出了 src，开发服务器还得放开 fs.allow。
  */
 function licenseText(): Plugin {
-  const text = () => readFileSync(join(APP_DIR, "..", "LICENSE"), "utf8");
+  const text = (source: string) => readFileSync(join(APP_DIR, "..", source), "utf8");
   return {
     name: "petalfall:license-text",
     configureServer(server) {
-      server.middlewares.use(`/${LICENSE_TEXT_FILE}`, (_req, res) => {
-        res.setHeader("Content-Type", "text/plain; charset=utf-8");
-        res.end(text());
-      });
+      for (const { source, file, contentType } of LEGAL_TEXTS) {
+        server.middlewares.use(`/${file}`, (_req, res) => {
+          res.setHeader("Content-Type", contentType);
+          res.end(text(source));
+        });
+      }
     },
     generateBundle() {
-      this.emitFile({ type: "asset", fileName: LICENSE_TEXT_FILE, source: text() });
+      for (const { source, file } of LEGAL_TEXTS) this.emitFile({ type: "asset", fileName: file, source: text(source) });
     },
   };
 }

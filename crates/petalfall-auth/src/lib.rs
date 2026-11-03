@@ -1,3 +1,8 @@
+// Copyright (C) 2026 Shinoyuki_Miyako
+// SPDX-License-Identifier: AGPL-3.0-only
+// 本程序代码按 AGPL-3.0-only 授权，另附 AGPL 第 7 条的附加条款；两者见源代码根目录的 LICENSE 与 LICENSE-ADDITIONAL-TERMS.md。
+// Licensed under AGPL-3.0-only with additional terms under section 7 of the AGPL; see LICENSE and LICENSE-ADDITIONAL-TERMS.md at the root of the source code.
+
 //! petalfall-auth（L1 账户体系）
 //!
 //! 三类登录方式的后端状态机：微软正版、离线、Authlib-Injector（Yggdrasil）。

@@ -426,6 +426,16 @@ describe("协议页", () => {
     button(copy.legal.back).click();
     await seeHeading(copy.welcome.title);
   });
+
+  it("进去时经 bridge 读协议全文、附加条款、素材许可与第三方清单", async () => {
+    const fake = start();
+    await seeHeading(copy.welcome.title);
+    expect(fake.calls.filter((call) => call.name.startsWith("load"))).toEqual([]);
+    button(copy.frame.legalLink).click();
+    await seeHeading(copy.legal.title);
+    const loaded = () => [...new Set(fake.calls.map((call) => call.name).filter((name) => name.startsWith("load")))].sort();
+    await vi.waitFor(() => expect(loaded()).toEqual(["loadAdditionalTerms", "loadAssetLicense", "loadLicenseText", "loadThirdParty"]), WAIT);
+  });
 });
 
 describe("窗口", () => {

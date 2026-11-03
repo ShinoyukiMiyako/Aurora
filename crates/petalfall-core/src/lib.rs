@@ -1,3 +1,8 @@
+// Copyright (C) 2026 Shinoyuki_Miyako
+// SPDX-License-Identifier: AGPL-3.0-only
+// 本程序代码按 AGPL-3.0-only 授权，另附 AGPL 第 7 条的附加条款；两者见源代码根目录的 LICENSE 与 LICENSE-ADDITIONAL-TERMS.md。
+// Licensed under AGPL-3.0-only with additional terms under section 7 of the AGPL; see LICENSE and LICENSE-ADDITIONAL-TERMS.md at the root of the source code.
+
 //! petalfall-core（L4 门面）
 //!
 //! 组合下层各 crate，向 Tauri 外壳与 CLI 暴露一套粗粒度异步 API：版本清单/发现、版本安装（原版 +

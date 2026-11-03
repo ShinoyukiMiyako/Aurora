@@ -1455,15 +1455,90 @@ describe("设置页：关于与启动器更新", () => {
     expect(commands.calls).toEqual(["open-logs"]);
   });
 
-  // AGPL 第 5(d) 条要界面上有版权声明、无担保与可按协议转发的说明，以及看协议全文的入口（入口见下面的协议全文用例）
-  it("页尾依次写版权声明、自由软件与无担保声明、商标与数据来源声明", async () => {
+  // AGPL 第 5(d) 条要界面上有版权声明、无担保与可按协议转发的说明，以及看协议全文的入口（入口见下面的协议全文用例）；
+  // 素材不按 AGPL 授权，所以自由软件一句只说程序代码，素材许可与名称商标另起两句
+  it("页尾依次写版权声明、代码的自由软件与无担保声明、素材许可、名称商标、Minecraft 商标与数据来源声明", async () => {
     await mount("about");
     expect(all('[class*="disclaimer"]').map((p) => p.textContent)).toEqual([
       "Copyright \u00A9 2026 Shinoyuki_Miyako",
-      `${APP_NAME}是自由软件，你可以按 AGPL-3.0-only 转发和修改它。它按现状提供，不提供任何担保。`,
+      `${APP_NAME}的程序代码是自由软件，你可以按 AGPL-3.0-only 及其附加条款转发和修改它。它按现状提供，不提供任何担保。`,
+      "应用图标、像素花瓣徽记等列在素材许可里的美术素材另按 CC BY-NC-ND 4.0 授权：可以非商业地原样转发并署名，不能商用，也不能改作后发布。",
+      `「${APP_NAME}」「${APP_NAME_EN}」的名称与徽记不授予商标权。向他人提供修改版的构建产物时，须改用不会混淆的名称与图标，并写明它不出自原作者。`,
       `Minecraft 是 Mojang Studios 的商标。实例图标、皮肤与全景图这些原版图案读取自你本机的游戏文件，不随${APP_NAME}分发。` +
         `Mod 与整合包的信息和文件来自 Modrinth 与 CurseForge。${APP_NAME}是社区开源项目，与 Mojang Studios 和 Microsoft 没有关联。`,
     ]);
+  });
+
+  it("支持卡依次列出日志目录、协议全文、附加条款、素材许可、第三方许可与问题反馈", async () => {
+    await mount("about");
+    const titles = [...section("支持").querySelectorAll("button")].map((b) => b.closest('[class*="row"]')?.firstElementChild?.firstElementChild?.textContent);
+    expect(titles).toEqual(["打开日志目录", "协议全文", "附加条款", "素材许可", "第三方许可", "问题反馈"]);
+  });
+
+  describe.each([
+    { title: "附加条款", url: "/LICENSE-ADDITIONAL-TERMS.md" },
+    { title: "素材许可", url: "/LICENSE-ASSETS.md" },
+  ])("$title", ({ title, url }) => {
+    it("打开弹窗时才读产物里的文件，Markdown 原样显示；关上再开不重读", async () => {
+      // 随机一行：显示的必须是读回来的那份，而不是哪里写死的文本
+      const body = `# ${title}\n\nCopyright (C) 2026 维护者\n\n> ${Math.random().toString(36).slice(2)}\n\n- 一\n- 二\n`;
+      const fetchMock = vi.fn(async (_url: string) => ({ ok: true, status: 200, text: async () => body }));
+      vi.stubGlobal("fetch", fetchMock);
+      await mount("about");
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      await click(rowButton(title, "查看"));
+      expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([url]);
+      const [dialog] = openDialogs();
+      expect(dialog.querySelector("h2")?.textContent).toBe(title);
+      expect(dialog.querySelector("h2 + p")?.textContent).toBe("中文为准，附英文对照");
+      const region = dialog.querySelector<HTMLElement>('pre[role="region"]');
+      expect(region?.getAttribute("aria-label")).toBe(title);
+      expect(region?.tabIndex).toBe(0);
+      expect(region?.textContent).toBe(body);
+
+      await click(button("关闭"));
+      expect(openDialogs()).toHaveLength(0);
+      await click(rowButton(title, "查看"));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(openDialogs()[0]?.querySelector('pre[role="region"]')?.textContent).toBe(body);
+    });
+
+    it("读不出来：弹窗里写明原因与请求地址，不留白；重试再读一次", async () => {
+      const body = `# ${title}\n`;
+      const fetchMock = vi
+        .fn(async (_url: string) => ({ ok: true, status: 200, text: async () => body }))
+        .mockResolvedValueOnce({ ok: false, status: 404, text: async () => "Not Found" });
+      vi.stubGlobal("fetch", fetchMock);
+      await mount("about");
+      await click(rowButton(title, "查看"));
+
+      const [dialog] = openDialogs();
+      const alert = dialog.querySelector('[role="alert"]');
+      expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe(`${title}读不出来`);
+      expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`${title}读不出来：${url} 返回 404`);
+      expect(dialog.querySelector("pre")).toBeNull();
+
+      await click(all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === "重试") as HTMLButtonElement);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(openDialogs()[0]?.querySelector('pre[role="region"]')?.textContent).toBe(body);
+    });
+  });
+
+  it("协议全文、附加条款与素材许可各读各的文件，先开过一份不影响另一份", async () => {
+    const fetchMock = vi.fn(async (url: string) => ({ ok: true, status: 200, text: async () => `正文 ${url}` }));
+    vi.stubGlobal("fetch", fetchMock);
+    await mount("about");
+    for (const [title, url] of [
+      ["协议全文", "/LICENSE.txt"],
+      ["附加条款", "/LICENSE-ADDITIONAL-TERMS.md"],
+      ["素材许可", "/LICENSE-ASSETS.md"],
+    ]) {
+      await click(rowButton(title, "查看"));
+      expect(openDialogs()[0]?.querySelector('pre[role="region"]')?.textContent).toBe(`正文 ${url}`);
+      await click(button("关闭"));
+    }
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual(["/LICENSE.txt", "/LICENSE-ADDITIONAL-TERMS.md", "/LICENSE-ASSETS.md"]);
   });
 
   it("协议全文：打开弹窗时才读 LICENSE.txt，换行与缩进原样显示；关上再开不重读", async () => {
@@ -1514,7 +1589,7 @@ describe("设置页：关于与启动器更新", () => {
     expect(openDialogs()[0]?.querySelector('pre[role="region"]')?.textContent).toBe(license);
   });
 
-  it("品牌卡与版本信息取构建信息：版本、发布通道、构建日期、协议与仓库地址；可复制整段或只复制仓库地址", async () => {
+  it("品牌卡与版本信息取构建信息：版本、发布通道、构建日期、协议、素材许可与仓库地址；可复制整段或只复制仓库地址", async () => {
     const writeText = vi.fn(async (_text: string) => undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     await mount("about");
@@ -1526,6 +1601,7 @@ describe("设置页：关于与启动器更新", () => {
       ["发布通道", "预览版"],
       ["构建日期", "2026年10月30日"],
       ["开源协议", "AGPL-3.0-only"],
+      ["素材许可", "CC BY-NC-ND 4.0"],
       ["源代码", REPO_URL],
     ]);
     const copies = [...card.querySelectorAll<HTMLButtonElement>('button[aria-label="复制"]')];
@@ -1534,7 +1610,7 @@ describe("设置页：关于与启动器更新", () => {
     await click(copies[0]);
     expect(writeText.mock.calls.map((c) => c[0])).toEqual([
       REPO_URL,
-      [`${APP_NAME_EN} 0.3.0-preview.2`, "发布通道：预览版", "构建日期：2026年10月30日", "开源协议：AGPL-3.0-only", `源代码：${REPO_URL}`].join("\n"),
+      [`${APP_NAME_EN} 0.3.0-preview.2`, "发布通道：预览版", "构建日期：2026年10月30日", "开源协议：AGPL-3.0-only", "素材许可：CC BY-NC-ND 4.0", `源代码：${REPO_URL}`].join("\n"),
     ]);
   });
 

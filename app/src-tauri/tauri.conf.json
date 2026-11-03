@@ -49,9 +49,12 @@
     "active": true,
     "targets": "all",
     "publisher": "Shinoyuki_Miyako",
+    "copyright": "Copyright (C) 2026 Shinoyuki_Miyako",
     "licenseFile": "../../LICENSE",
     "resources": {
-      "../../LICENSE": "LICENSE"
+      "../../LICENSE": "LICENSE",
+      "../../LICENSE-ADDITIONAL-TERMS.md": "LICENSE-ADDITIONAL-TERMS.md",
+      "../../LICENSE-ASSETS.md": "LICENSE-ASSETS.md"
     },
     "icon": [
       "icons/32x32.png",

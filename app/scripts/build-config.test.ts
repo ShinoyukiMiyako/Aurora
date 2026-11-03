@@ -5,8 +5,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfigFromFile, type ConfigEnv, type Plugin, type PluginOption } from "vite";
 import { describe, expect, it } from "vitest";
-import { LICENSE_TEXT_FILE as appInfoLicenseFile, THIRD_PARTY_LICENSES_FILE as appInfoFile } from "../src/lib/app-info";
-import { LICENSE_TEXT_FILE as scriptLicenseFile, THIRD_PARTY_LICENSES_FILE as scriptFile } from "./licenses-file.mjs";
+import * as appInfo from "../src/lib/app-info";
+import { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE, LICENSE_TEXT_FILE as scriptLicenseFile, THIRD_PARTY_LICENSES_FILE as scriptFile } from "./licenses-file.mjs";
 
 const APP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TSC = createRequire(import.meta.url).resolve("typescript/bin/tsc");
@@ -46,38 +46,56 @@ describe("构建配置", () => {
 
   it("前端读取许可清单用的文件名与构建时写出的是同一个", () => {
     expect(scriptFile).toBe("third-party-licenses.json");
-    expect(appInfoFile).toBe(scriptFile);
+    expect(appInfo.THIRD_PARTY_LICENSES_FILE).toBe(scriptFile);
   });
 
   it("前端读取协议全文用的文件名与构建时写出的是同一个", () => {
     expect(scriptLicenseFile).toBe("LICENSE.txt");
-    expect(appInfoLicenseFile).toBe(scriptLicenseFile);
+    expect(appInfo.LICENSE_TEXT_FILE).toBe(scriptLicenseFile);
+  });
+
+  // 条文按文件名互相指引，产物里的名字跟仓库根目录走
+  it("前端读取附加条款与素材许可用的文件名与构建时写出的是同一个，也和仓库根目录的文件同名", () => {
+    expect(ADDITIONAL_TERMS_FILE).toBe("LICENSE-ADDITIONAL-TERMS.md");
+    expect(ASSET_LICENSE_FILE).toBe("LICENSE-ASSETS.md");
+    expect(appInfo.ADDITIONAL_TERMS_FILE).toBe(ADDITIONAL_TERMS_FILE);
+    expect(appInfo.ASSET_LICENSE_FILE).toBe(ASSET_LICENSE_FILE);
+    expect(existsSync(join(APP_DIR, "..", ADDITIONAL_TERMS_FILE))).toBe(true);
+    expect(existsSync(join(APP_DIR, "..", ASSET_LICENSE_FILE))).toBe(true);
   });
 });
 
-// 关于页与引导程序的协议页都按这个文件名去读；哪个产物漏了它，界面上的协议全文就打不开
-describe("协议全文随两个前端分发", () => {
-  const license = readFileSync(join(APP_DIR, "..", "LICENSE"), "utf8");
+// 关于页与引导程序的协议页都按这些文件名去读；哪个产物漏了哪份，界面上那份就打不开
+describe("协议全文、附加条款与素材许可随两个前端分发", () => {
+  const root = (file: string) => readFileSync(join(APP_DIR, "..", file), "utf8");
+  // 产物文件名、仓库根目录的源文件、开发服务器给的类型
+  const texts: readonly [file: string, source: string, contentType: string][] = [
+    ["LICENSE.txt", "LICENSE", "text/plain; charset=utf-8"],
+    ["LICENSE-ADDITIONAL-TERMS.md", "LICENSE-ADDITIONAL-TERMS.md", "text/markdown; charset=utf-8"],
+    ["LICENSE-ASSETS.md", "LICENSE-ASSETS.md", "text/markdown; charset=utf-8"],
+  ];
 
-  it.each(["production", "setup"])("%s 模式构建时把仓库根目录的 LICENSE 写成产物根目录的 LICENSE.txt", async (mode) => {
+  it.each(["production", "setup"])("%s 模式构建时把仓库根目录的三份文本逐字写进产物根目录", async (mode) => {
     const plugin = await licenseTextPlugin({ command: "build", mode });
     const emitted: unknown[] = [];
     const generateBundle = plugin.generateBundle as unknown as (this: { emitFile(file: unknown): void }) => void;
     generateBundle.call({ emitFile: (file) => emitted.push(file) });
-    expect(emitted).toEqual([{ type: "asset", fileName: "LICENSE.txt", source: license }]);
+    expect(emitted).toEqual(texts.map(([file, source]) => ({ type: "asset", fileName: file, source: root(source) })));
   }, 30_000);
 
-  it.each(["development", "setup"])("%s 模式的开发服务器在 /LICENSE.txt 上按纯文本给出同一份协议", async (mode) => {
+  it.each(["development", "setup"])("%s 模式的开发服务器在同名路径上给出同一份文本", async (mode) => {
     const plugin = await licenseTextPlugin({ command: "serve", mode });
     const mounted = new Map<string, Middleware>();
     const configureServer = plugin.configureServer as unknown as (server: { middlewares: { use(path: string, handler: Middleware): void } }) => void;
     configureServer({ middlewares: { use: (path, handler) => mounted.set(path, handler) } });
-    expect([...mounted.keys()]).toEqual(["/LICENSE.txt"]);
+    expect([...mounted.keys()]).toEqual(texts.map(([file]) => `/${file}`));
 
-    const headers: [string, string][] = [];
-    let body: string | undefined;
-    mounted.get("/LICENSE.txt")?.({}, { setHeader: (name, value) => headers.push([name, value]), end: (text) => (body = text) });
-    expect(headers).toEqual([["Content-Type", "text/plain; charset=utf-8"]]);
-    expect(body).toBe(license);
+    for (const [file, source, contentType] of texts) {
+      const headers: [string, string][] = [];
+      let body: string | undefined;
+      mounted.get(`/${file}`)?.({}, { setHeader: (name, value) => headers.push([name, value]), end: (text) => (body = text) });
+      expect(headers).toEqual([["Content-Type", contentType]]);
+      expect(body).toBe(root(source));
+    }
   }, 30_000);
 });

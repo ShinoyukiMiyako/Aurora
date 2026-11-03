@@ -1,3 +1,8 @@
+// Copyright (C) 2026 Shinoyuki_Miyako
+// SPDX-License-Identifier: AGPL-3.0-only
+// 本程序代码按 AGPL-3.0-only 授权，另附 AGPL 第 7 条的附加条款；两者见源代码根目录的 LICENSE 与 LICENSE-ADDITIONAL-TERMS.md。
+// Licensed under AGPL-3.0-only with additional terms under section 7 of the AGPL; see LICENSE and LICENSE-ADDITIONAL-TERMS.md at the root of the source code.
+
 //! petalfall-download（L1 下载引擎与镜像源调度）
 //!
 //! 在 [`petalfall_base`] 的 HTTP 工厂、镜像改写表、流式校验与退避重试之上，构建一个面向 Minecraft

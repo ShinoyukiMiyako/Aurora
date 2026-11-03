@@ -1,3 +1,8 @@
+// Copyright (C) 2026 Shinoyuki_Miyako
+// SPDX-License-Identifier: AGPL-3.0-only
+// 本程序代码按 AGPL-3.0-only 授权，另附 AGPL 第 7 条的附加条款；两者见源代码根目录的 LICENSE 与 LICENSE-ADDITIONAL-TERMS.md。
+// Licensed under AGPL-3.0-only with additional terms under section 7 of the AGPL; see LICENSE and LICENSE-ADDITIONAL-TERMS.md at the root of the source code.
+
 //! Petalfall 的 Tauri 外壳。
 //!
 //! 本文件只做装配：日志、插件、managed state、主窗口兜底、命令注册与退出收尾（[`exit`]）。命令实现按领域分在

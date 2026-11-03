@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE } from "./licenses-file.mjs";
 
 const APP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const REPO_DIR = join(APP_DIR, "..");
@@ -185,10 +186,21 @@ describe("安装包配置", () => {
   });
 
   it("协议全文同时进向导和安装目录", () => {
-    expect(conf.bundle.resources).toEqual({ [conf.bundle.licenseFile]: "LICENSE" });
+    expect(conf.bundle.resources[conf.bundle.licenseFile]).toBe("LICENSE");
     const license = join(TAURI_DIR, conf.bundle.licenseFile);
     expect(existsSync(license)).toBe(true);
     expect(readFileSync(license, "utf8")).toContain("GNU AFFERO GENERAL PUBLIC LICENSE");
+  });
+
+  // 向导的许可页只有一页，放逐字的 AGPL；附加条款与素材许可随安装目录分发，离线也查得到，文件名与仓库根目录一致，条文互相指引才对得上
+  it("附加条款与素材许可进安装目录，安装目录里只有这三份许可文件", () => {
+    expect(conf.bundle.resources).toEqual({
+      "../../LICENSE": "LICENSE",
+      [`../../${ADDITIONAL_TERMS_FILE}`]: ADDITIONAL_TERMS_FILE,
+      [`../../${ASSET_LICENSE_FILE}`]: ASSET_LICENSE_FILE,
+    });
+    expect(readFileSync(join(TAURI_DIR, "../..", ADDITIONAL_TERMS_FILE), "utf8")).toMatch(/^# .*附加条款/);
+    expect(readFileSync(join(TAURI_DIR, "../..", ASSET_LICENSE_FILE), "utf8")).toMatch(/^# .*素材许可/);
   });
 });
 

@@ -1,5 +1,6 @@
 // 字标组合 Logo 与五瓣樱花 SakuraMark。品牌图形是 PetalMark 像素花瓣，Logo 用它；SakuraMark 只留给 Spinner。
-// SakuraMark 每瓣带樱花特有的尖端缺刻，全部代码绘制，不使用任何商标图形。
+// SakuraMark 每瓣带樱花特有的尖端缺刻，全部代码绘制，不使用任何商标图形。花瓣轮廓与 16 px 像素母版是美术素材，
+// 与代码分开授权，所以放在 sakura-mark.json，按文件划界；排布角度与花心半径没有独创性，留在代码里。
 // 生产代码只用 mono 单色形：花瓣与镂空花心随 currentColor 走，Spinner 用它，任何尺寸都画矢量（像素图旋转会抖）。
 // 按显示尺寸选的三种彩色形态目前只在组件画廊里出现：≥ 28 完整形（渐变花瓣、花心、花蕊）；20-27 简化形（平涂花瓣、
 // 镂空花心）；16 只用逐像素母版——矢量五瓣在 16 px 会糊成一团。17-19 px 与 16 px 以下没有可用形态，直接抛错。
@@ -9,9 +10,10 @@ import { APP_NAME_EN } from "../lib/app-info";
 import { cx } from "../lib/util";
 import styles from "./Logo.module.css";
 import { PetalMark } from "./PetalMark";
+import sakura from "./sakura-mark.json";
 
 /** 一片花瓣：瓣根半径 1.2，瓣尖半径 13.6，缺刻底在半径 11.6。坐标原点为花心，第一瓣朝正上。 */
-const PETAL = "M0 -1.2 C -4.4 -4.4 -6.4 -9.6 -3.6 -13.6 L 0 -11.6 L 3.6 -13.6 C 6.4 -9.6 4.4 -4.4 0 -1.2 Z";
+const PETAL = sakura.petal;
 const PETAL_ANGLES = [0, 72, 144, 216, 288] as const;
 /** 花蕊落在两瓣之间。 */
 const STAMEN_ANGLES = [36, 108, 180, 252, 324] as const;
@@ -24,22 +26,7 @@ const HEART_R = 2.6;
 const HEART_CUTOUT = `M-16 -16H16V16H-16Z M${-HEART_R} 0a${HEART_R} ${HEART_R} 0 1 0 ${2 * HEART_R} 0a${HEART_R} ${HEART_R} 0 1 0 ${-2 * HEART_R} 0Z`;
 
 /** 16 px 像素母版：15 × 14 有效区，放在 16 × 16 画布的 (0, 1)。# 为强调色，o 为花心，. 透明。 */
-const PIXEL_MASTER = [
-  ".....##.##.....",
-  ".....#####.....",
-  ".....#####.....",
-  ".##...###...##.",
-  "####...#...####",
-  "#####.....#####",
-  ".####.ooo.####.",
-  "..##.ooooo.##..",
-  ".....ooooo.....",
-  "....##.o.##....",
-  "...###...###...",
-  "..####...####..",
-  "..####...####..",
-  "..###.....###..",
-] as const;
+const PIXEL_MASTER = sakura.pixel16;
 
 function pixelPath(cell: "#" | "o"): string {
   let d = "";

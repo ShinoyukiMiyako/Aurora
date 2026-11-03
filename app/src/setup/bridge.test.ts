@@ -107,6 +107,19 @@ describe("真实 bridge", () => {
     expect(tauri.win.minimize).toHaveBeenCalledTimes(1);
     expect(tauri.win.close).toHaveBeenCalledTimes(1);
   });
+
+  // 三份原文都由构建写进引导程序自己的产物，不经 Rust 命令
+  it("协议全文、附加条款与素材许可从产物根目录读，不走命令", async () => {
+    const fetch = vi.fn(async (url: string) => new Response(`正文 ${url}`, { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const bridge = createTauriBridge();
+    await expect(bridge.loadLicenseText()).resolves.toBe("正文 /LICENSE.txt");
+    await expect(bridge.loadAdditionalTerms()).resolves.toBe("正文 /LICENSE-ADDITIONAL-TERMS.md");
+    await expect(bridge.loadAssetLicense()).resolves.toBe("正文 /LICENSE-ASSETS.md");
+    expect(fetch.mock.calls.map((c) => c[0])).toEqual(["/LICENSE.txt", "/LICENSE-ADDITIONAL-TERMS.md", "/LICENSE-ASSETS.md"]);
+    expect(tauri.invoke).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
 });
 
 describe("inTauri", () => {

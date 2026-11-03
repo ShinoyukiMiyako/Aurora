@@ -1,7 +1,7 @@
 // 引导程序的全部界面文案。启动器的文案表带着状态层的依赖进不来，这里单独一份。
 // 语言跟随系统：zh 开头走中文，其余一律英文，不提供切换。ZH、EN 两张表都标注 SetupCopy，缺键由 tsc 报错。
 
-import { APP_LICENSE, APP_NAME, APP_NAME_EN } from "../lib/app-info";
+import { APP_LICENSE, APP_NAME, APP_NAME_EN, ASSET_LICENSE, COPYRIGHT_HOLDER, FIRST_RELEASE_YEAR } from "../lib/app-info";
 import type { DirIssue, ExistingKind, FailureCode, InstallMode, Phase } from "./contract";
 import type { FailureRecovery } from "./model";
 
@@ -115,13 +115,24 @@ export interface SetupCopy {
   legal: {
     title: string;
     freeSoftware: string;
+    /** 三份原文之间切换的标签组的名字。 */
+    documents: string;
     licenseHeading: string;
     englishOnly: string;
     licenseFailed: string;
+    termsHeading: string;
+    termsFailed: string;
+    assetsHeading: string;
+    assetsFailed: string;
+    /** 附加条款与素材许可两份原文的语言说明。 */
+    chinesePrevails: string;
     sourceLink: string;
     thirdPartyHeading: string;
     thirdPartyLoading: string;
     thirdPartyFailed: string;
+    /** 附加条款第 2 节要求在适当法律声明里显示的版权行，与启动器关于页同一行。 */
+    copyright: string;
+    assets: string;
     trademark: string;
     back: string;
   };
@@ -132,8 +143,9 @@ export interface SetupCopy {
   };
 }
 
-const LEGAL_NOTE_ZH = `${APP_NAME}按 ${APP_LICENSE} 开源，不提供任何担保，你可以按协议转发。`;
-const LEGAL_NOTE_EN = `${APP_NAME_EN} is open source under ${APP_LICENSE} and comes with no warranty. You may redistribute it under that license.`;
+// 只说代码按 AGPL 开源：美术素材另按素材许可授权，说成整个程序都按 AGPL 就成了对素材的默示许可
+const LEGAL_NOTE_ZH = `${APP_NAME}的代码按 ${APP_LICENSE} 及其附加条款开源，美术素材按 ${ASSET_LICENSE} 授权，不提供任何担保，你可以按协议转发。`;
+const LEGAL_NOTE_EN = `${APP_NAME_EN}'s code is open source under ${APP_LICENSE} with additional terms, and its art assets are licensed under ${ASSET_LICENSE}. It comes with no warranty. You may redistribute it under those licenses.`;
 const DATA_UNTOUCHED_ZH = "设置、账户和游戏文件都不动。";
 const DATA_UNTOUCHED_EN = "Your settings, accounts and game files stay as they are.";
 /** 覆盖安装换位置等于搬数据目录，这时不能叫人换文件夹。 */
@@ -258,14 +270,23 @@ const ZH: SetupCopy = {
   },
   legal: {
     title: "协议与源代码",
-    freeSoftware: `${APP_NAME}是自由软件，你可以按 ${APP_LICENSE} 转发和修改它。它按现状提供，不提供任何担保。`,
+    freeSoftware: `${APP_NAME}的程序代码是自由软件，你可以按 ${APP_LICENSE} 及其附加条款转发和修改它。它按现状提供，不提供任何担保。`,
+    documents: "协议原文",
     licenseHeading: "协议全文",
     englishOnly: "协议全文只有英文版",
     licenseFailed: "协议全文读不出来",
+    termsHeading: "附加条款",
+    termsFailed: "附加条款读不出来",
+    assetsHeading: "素材许可",
+    assetsFailed: "素材许可读不出来",
+    chinesePrevails: "中文为准，附英文对照",
     sourceLink: "查看源代码",
     thirdPartyHeading: "第三方许可",
     thirdPartyLoading: "正在读取许可清单…",
     thirdPartyFailed: "第三方许可清单读不出来",
+    // 版权符号写成转义：它在 Unicode 里属于 Extended_Pictographic，令牌守卫的 Emoji 规则按码位判断会把它算进去
+    copyright: `Copyright \u00A9 ${FIRST_RELEASE_YEAR} ${COPYRIGHT_HOLDER}`,
+    assets: `应用图标、像素花瓣徽记等列在素材许可里的美术素材另按 ${ASSET_LICENSE} 授权：可以非商业地原样转发并署名，不能商用，也不能改作后发布。`,
     trademark: `Minecraft 是 Mojang Studios 的商标。${APP_NAME}是社区开源项目，与 Mojang Studios 和 Microsoft 没有关联。`,
     back: "返回",
   },
@@ -394,14 +415,23 @@ const EN: SetupCopy = {
   },
   legal: {
     title: "License and source",
-    freeSoftware: `${APP_NAME_EN} is free software. You may redistribute and modify it under ${APP_LICENSE}. It is provided as is, with no warranty.`,
+    freeSoftware: `${APP_NAME_EN}'s program code is free software. You may redistribute and modify it under ${APP_LICENSE} and its additional terms. It is provided as is, with no warranty.`,
+    documents: "License texts",
     licenseHeading: "Full license",
     englishOnly: "The full license is available in English only",
     licenseFailed: "Couldn't read the full license",
+    termsHeading: "Additional terms",
+    termsFailed: "Couldn't read the additional terms",
+    assetsHeading: "Asset license",
+    assetsFailed: "Couldn't read the asset license",
+    chinesePrevails: "Chinese text prevails, English included",
     sourceLink: "View source code",
     thirdPartyHeading: "Third-party licenses",
     thirdPartyLoading: "Reading the license list…",
     thirdPartyFailed: "Couldn't read the third-party license list",
+    // 版权符号写成转义：它在 Unicode 里属于 Extended_Pictographic，令牌守卫的 Emoji 规则按码位判断会把它算进去
+    copyright: `Copyright \u00A9 ${FIRST_RELEASE_YEAR} ${COPYRIGHT_HOLDER}`,
+    assets: `The app icon, the pixel petal mark and the other art assets listed in the asset license are licensed separately under ${ASSET_LICENSE}: you may share them unmodified for non-commercial purposes with attribution, but may not use them commercially or share modified versions.`,
     trademark: `Minecraft is a trademark of Mojang Studios. ${APP_NAME_EN} is a community open source project, not affiliated with Mojang Studios or Microsoft.`,
     back: "Back",
   },
