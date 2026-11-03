@@ -3,7 +3,7 @@
 
 import { APP_NAME_EN } from "../lib/app-info";
 import type { SetupBridge, Unlisten } from "./bridge";
-import type { DirCheck, Existing, ExistingKind, Failure, FailureCode, InstallMode, InstallPlan, Probe, Progress } from "./contract";
+import type { DirCheck, Existing, ExistingKind, Failure, FailureCode, InstallMode, InstallPlan, Probe, Progress, UpdateLaunch } from "./contract";
 import { initialState, replay, type SetupEvent, type SetupState } from "./model";
 
 const DEFAULT_DIR = `C:\\Users\\Player\\AppData\\Local\\${APP_NAME_EN}`;
@@ -15,6 +15,7 @@ export const FAKE_PROBE: Probe = {
   existing: null,
   interrupted: false,
   elevated: false,
+  update: null,
 };
 
 /** 一次走完三个阶段的进度。 */
@@ -176,16 +177,28 @@ const STATES = ["welcome", "location", "installed", "blocked", "installing", "sl
 const MODES: readonly InstallMode[] = ["fresh", "upgrade", "repair"];
 const FAILURE_CODES = Object.keys(FAILURE_DETAIL) as FailureCode[];
 
-/** ?state= 视图；?kind= 现有安装（installed）；?mode= 安装种类；?code= 失败原因；?elevated=1；?interrupted=1；?lang=。 */
+/**
+ * ?state= 视图；?kind= 现有安装（installed）；?mode= 安装种类；?code= 失败原因；?elevated=1；?interrupted=1；?lang=。
+ * ?update 模拟更新插件拉起（?norelaunch 是没带 /R）：现有安装默认 upgrade，?kind= 可换成别的看退回交互流程。
+ * 更新模式是 App 从 boot 自己走的，?state= 不写，或者写 blocked（落樱一直不退出）、failed（按 ?code= 装失败）。
+ */
 export function fakeFromQuery(search: string): FakeRuntime {
   const query = new URLSearchParams(search);
   const state = pick(query.get("state"), STATES, "welcome");
   const mode = pick(query.get("mode"), MODES, "fresh");
   const failure: Failure = { code: pick(query.get("code"), FAILURE_CODES, "payload_exit"), detail: "" };
   failure.detail = FAILURE_DETAIL[failure.code];
+  const update: UpdateLaunch | null = query.has("update") ? { relaunch: !query.has("norelaunch") } : null;
 
-  const kind = state === "installed" ? pick(query.get("kind"), EXISTING_KINDS, "upgrade") : mode === "upgrade" ? "upgrade" : mode === "repair" ? "same" : null;
-  const probe: Probe = { ...FAKE_PROBE, existing: kind === null ? null : existingOf(kind), elevated: query.has("elevated"), interrupted: query.has("interrupted") };
+  const kind = state === "installed" || update !== null ? pick(query.get("kind"), EXISTING_KINDS, "upgrade") : mode === "upgrade" ? "upgrade" : mode === "repair" ? "same" : null;
+  const probe: Probe = { ...FAKE_PROBE, existing: kind === null ? null : existingOf(kind), elevated: query.has("elevated"), interrupted: query.has("interrupted"), update };
+
+  if (update !== null) {
+    if (state !== "welcome" && state !== "blocked" && state !== "failed") throw new Error(`?update 从 boot 开始走，?state= 只能不写或是 blocked、failed，不能是 ${state}`);
+    // 没有人点按钮，安装得真的结束，才看得到完成页和自动打开
+    const bridge = createFakeBridge({ probe, running: state === "blocked", outcome: state === "failed" ? failure : "ok", progress: FAKE_PROGRESS, stepMs: 900 });
+    return { bridge, initial: initialState, lang: query.get("lang") };
+  }
 
   const probed: SetupEvent = { type: "probed", probe };
   const install = requestOf(mode, false);

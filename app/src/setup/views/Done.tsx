@@ -19,7 +19,8 @@ export interface DoneProps {
 }
 
 /**
- * 不自动打开：由用户点击，引导程序才掌握退出时机。焦点落在下一步最该按的按钮上，Enter 直接生效。
+ * 视图自己不打开：由用户点击，引导程序才掌握退出时机；更新模式下 App 替用户走同一条打开的路，这里照样只显示加载。
+ * 焦点落在下一步最该按的按钮上，Enter 直接生效。
  * 提权时不给打开：提权启动和普通启动用的是两个数据根。
  */
 export function Done({ copy, mode, version, keptData, elevated, opening, onOpen, onClose }: DoneProps) {

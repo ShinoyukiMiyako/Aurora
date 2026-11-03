@@ -3,6 +3,7 @@
 //! 不带 `async` 的命令跑在窗口线程上。碰盘、等进程的活都走 [`on_worker`]，否则窗口会跟着卡住。
 //! 除 `install` 外，拒绝一律是字符串：前端把它们当意外，进致命错误页显示原文。
 
+use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use std::io;
 use std::path::Path;
@@ -13,7 +14,10 @@ use tauri::ipc::InvokeError;
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 
 use crate::boot::{self, Instance};
-use crate::contract::{DirCheck, Failure, InstallPlan, PROGRESS_EVENT, Probe, Progress};
+use crate::cli::{Launch, UpdateRequest};
+use crate::contract::{
+    DirCheck, Failure, InstallPlan, PROGRESS_EVENT, Probe, Progress, UpdateLaunch,
+};
 use crate::existing::{self, Registry};
 use crate::journal::{self, Recovery};
 use crate::launcher::Opened;
@@ -35,19 +39,26 @@ pub struct SetupContext {
     session: Session,
     instance: Arc<Instance>,
     log: Arc<SetupLog>,
+    launch: Launch,
     located: Mutex<Located>,
-    /// 用户选了原生向导。窗口关掉后进程还要等它退出：临时文件要靠守卫句柄钉到那时。
+    /// 用户选了原生向导，或窗口起不来时的退路。窗口关掉后进程还要等它退出：临时文件要靠守卫句柄钉到那时。
     wizard: Mutex<Option<StandardRun>>,
     /// F5 和右键菜单的刷新是 WebView2 自带的：页面一重载，进度和关窗拦截都没了，载荷却还在写。
     installing: AtomicBool,
 }
 
 impl SetupContext {
-    pub fn new(session: Session, instance: Arc<Instance>, log: Arc<SetupLog>) -> Self {
+    pub fn new(
+        session: Session,
+        instance: Arc<Instance>,
+        log: Arc<SetupLog>,
+        launch: Launch,
+    ) -> Self {
         Self {
             session,
             instance,
             log,
+            launch,
             located: Mutex::default(),
             wizard: Mutex::default(),
             installing: AtomicBool::new(false),
@@ -114,6 +125,7 @@ impl SetupContext {
             default_dir.clone(),
             recovery,
             boot::is_elevated()?,
+            self.launch.update().map(UpdateRequest::launch_info),
         )?;
         self.log.info(format_args!("探测结果：{probe:?}"));
 
@@ -159,17 +171,35 @@ impl SetupContext {
         outcome
     }
 
+    /// 更新模式把启动器被更新前带着的参数还给它，不论前端是自动打开还是用户在完成页上点的。
     pub fn open_launcher(&self, dir: &Path) -> io::Result<Opened> {
-        let opened = self.session.open_launcher(dir, &self.instance)?;
-        self.log.info(format_args!("打开启动器：{opened:?}"));
+        let args: &[OsString] = match &self.launch {
+            Launch::Interactive => &[],
+            Launch::Update(request) => &request.launcher_args,
+        };
+        let opened = self.session.open_launcher(dir, args, &self.instance)?;
+        self.log
+            .info(format_args!("打开启动器，参数 {args:?}：{opened:?}"));
         Ok(opened)
     }
 
     /// 启动原生向导，不等它结束：调用方随后关窗。要等结束时用 [`Self::wait_for_wizard`]。
+    /// 失败页上的按钮走这里，更新模式也不带插件那串参数：用户点它是要自己在向导里选。
     pub fn start_wizard(&self) -> Result<(), Failure> {
-        let wizard = self.session.start_standard()?;
-        self.log
-            .info(format_args!("原生向导已启动，pid {}", wizard.pid()));
+        self.start_standard(OsStr::new(""))
+    }
+
+    /// 窗口起不来时的退路，参数见 [`fallback_arguments`]。同样不等结束。
+    pub fn start_fallback(&self) -> Result<(), Failure> {
+        self.start_standard(&fallback_arguments(&self.launch))
+    }
+
+    fn start_standard(&self, arguments: &OsStr) -> Result<(), Failure> {
+        let wizard = self.session.start_standard(arguments)?;
+        self.log.info(format_args!(
+            "原生向导已启动，pid {}，参数 {arguments:?}",
+            wizard.pid()
+        ));
         *self.wizard.lock().unwrap_or_else(PoisonError::into_inner) = Some(wizard);
         Ok(())
     }
@@ -198,6 +228,7 @@ fn assemble_probe(
     default_dir: String,
     recovery: Recovery,
     elevated: bool,
+    update: Option<UpdateLaunch>,
 ) -> io::Result<Probe> {
     let existing = existing::detect(registry, payload_version)?;
     let leftover = match existing {
@@ -211,11 +242,21 @@ fn assemble_probe(
         existing,
         interrupted: false,
         elevated,
+        update,
     };
     Ok(match recovery {
         Recovery::Interrupted { journal, .. } => journal::mark_interrupted(probe, &journal),
         Recovery::Clean | Recovery::Completed | Recovery::Discarded { .. } => probe,
     })
+}
+
+/// 窗口起不来时交给 NSIS 的参数。更新模式照插件的样子拼，NSIS 包走它自己的更新流程，也就是引导程序接管
+/// 更新之前的行为；交互模式是无参的原生向导。
+fn fallback_arguments(launch: &Launch) -> OsString {
+    match launch {
+        Launch::Interactive => OsString::new(),
+        Launch::Update(request) => request.passive_arguments(),
+    }
 }
 
 /// 校验时认作落樱自己的目录。默认目录同时是启动器写不进 exe 旁边时的数据目录：没写过 config.json 之前
@@ -373,6 +414,7 @@ mod tests {
             DEFAULT_DIR.to_owned(),
             recovery,
             false,
+            None,
         )
         .unwrap()
     }
@@ -404,6 +446,7 @@ mod tests {
                 existing: None,
                 interrupted: false,
                 elevated: false,
+                update: None,
             }
         );
     }
@@ -417,10 +460,73 @@ mod tests {
             DEFAULT_DIR.to_owned(),
             Recovery::Clean,
             true,
+            None,
         )
         .unwrap();
 
         assert!(probe.elevated);
+    }
+
+    /// 前端靠这个字段决定跳过向导；断在半截的升级也可能是插件拉起的，盖上半装记录后字段不能丢。
+    #[test]
+    fn the_update_request_reaches_the_probe_through_every_recovery() {
+        let (_guard, dir) = app_dir();
+        let fresh_half = Path::new(r"D:\游戏 目录\Petalfall");
+        for update in [
+            None,
+            Some(UpdateLaunch { relaunch: true }),
+            Some(UpdateLaunch { relaunch: false }),
+        ] {
+            let cases = [
+                (Table::installed(&dir, "0.1.0"), Recovery::Clean),
+                (Table::default(), interrupted(fresh_half, true)),
+                (
+                    Table::installed(&dir, "0.1.0"),
+                    interrupted(Path::new(&dir), false),
+                ),
+            ];
+            for (registry, recovery) in cases {
+                let probe = assemble_probe(
+                    &registry,
+                    PAYLOAD,
+                    REQUIRED,
+                    DEFAULT_DIR.to_owned(),
+                    recovery,
+                    false,
+                    update,
+                )
+                .unwrap();
+
+                assert_eq!(probe.update, update, "{probe:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_fallback_is_the_bare_wizard_unless_the_updater_launched_us() {
+        assert_eq!(fallback_arguments(&Launch::Interactive), OsString::new());
+
+        let relaunching = Launch::Update(UpdateRequest {
+            relaunch: true,
+            launcher_args: vec![
+                OsString::from("--minimized"),
+                OsString::from("some space"),
+                OsString::new(),
+            ],
+        });
+        assert_eq!(
+            fallback_arguments(&relaunching),
+            OsString::from(r#"/P /R /UPDATE /ARGS --minimized "some space" """#)
+        );
+
+        let staying = Launch::Update(UpdateRequest {
+            relaunch: false,
+            launcher_args: Vec::new(),
+        });
+        assert_eq!(
+            fallback_arguments(&staying),
+            OsString::from("/P /UPDATE /ARGS")
+        );
     }
 
     #[test]
@@ -601,6 +707,16 @@ mod tests {
         );
     }
 
+    /// main 里给上下文传个写死的交互启动、回退时调成无参向导，编译都不报，只有插件真拉起时才看得出来。
+    #[test]
+    fn main_hands_the_parsed_launch_to_the_context_and_the_fallback() {
+        let main = include_str!("main.rs");
+        assert!(main.contains("cli::parse(std::env::args_os().skip(1))"));
+        assert!(main.contains("parsed.launch,"));
+        assert!(main.contains("context.start_fallback()?"));
+        assert!(!main.contains("start_wizard"));
+    }
+
     #[test]
     fn the_frontend_listens_on_the_event_the_backend_emits() {
         let needle = format!("PROGRESS_EVENT = \"{PROGRESS_EVENT}\"");
@@ -615,8 +731,10 @@ mod tests {
         use super::*;
         use crate::boot::{Claim, test_claim};
         use crate::contract::{FailureCode, InstallMode};
+        use crate::extract::hex;
         use crate::journal::JournalStore;
-        use crate::runner::fake::{self, Fake, Outcome};
+        use crate::overlay::test_support::random_bytes;
+        use crate::runner::fake::{self, Fake, Opening, Outcome, Received};
         use crate::runner::test_support::Recording;
         use crate::target::Volume;
 
@@ -657,21 +775,46 @@ mod tests {
         struct Rig {
             sandbox: tempfile::TempDir,
             context: SetupContext,
+            received: Arc<Mutex<Received>>,
         }
 
         fn rig(test: &str) -> Rig {
+            launched(test, Launch::Interactive)
+        }
+
+        fn launched(test: &str, launch: Launch) -> Rig {
             let sandbox = tempfile::tempdir().unwrap();
-            let session = fake::session(
-                Fake::new(Outcome::Ok, Duration::from_millis(5)),
-                sandbox.path(),
-            )
-            .unwrap();
+            let fake = Fake::new(Outcome::Ok, Duration::from_millis(5));
+            let received = fake.received();
+            let session = fake::session(fake, sandbox.path()).unwrap();
             let Claim::First(instance) = test_claim(&format!("commands-{test}")) else {
                 panic!("{test} 上不该已有实例");
             };
             let log = SetupLog::open(&sandbox.path().join("log")).unwrap();
-            let context = SetupContext::new(session, Arc::new(instance), Arc::new(log));
-            Rig { sandbox, context }
+            let context = SetupContext::new(session, Arc::new(instance), Arc::new(log), launch);
+            Rig {
+                sandbox,
+                context,
+                received,
+            }
+        }
+
+        /// 启动器被更新时带着的参数。头一个每次跑都不一样，免得碰巧和哪里写死的值对上；其余是转义的边界：
+        /// 空串、带空格的路径和末尾反斜杠、带引号的值。
+        fn launcher_args() -> Vec<OsString> {
+            vec![
+                OsString::from(format!("--nonce={}", hex(&random_bytes(8)))),
+                OsString::new(),
+                OsString::from(r"C:\游戏 目录\"),
+                OsString::from("--arg=\"wrapped space\""),
+            ]
+        }
+
+        fn update(relaunch: bool, launcher_args: Vec<OsString>) -> Launch {
+            Launch::Update(UpdateRequest {
+                relaunch,
+                launcher_args,
+            })
         }
 
         impl Rig {
@@ -753,7 +896,12 @@ mod tests {
                 panic!("这个名字上不该已有实例");
             };
             let log = SetupLog::open(&sandbox.path().join("log")).unwrap();
-            let context = SetupContext::new(session, Arc::new(instance), Arc::new(log));
+            let context = SetupContext::new(
+                session,
+                Arc::new(instance),
+                Arc::new(log),
+                Launch::Interactive,
+            );
 
             let spy = NavigationSpy::new(&context);
             context.install(&fresh(r"D:\Petalfall"), &spy).unwrap_err();
@@ -896,7 +1044,12 @@ mod tests {
                 panic!("这个名字上不该已有实例");
             };
             let log = SetupLog::open(&sandbox.path().join("log")).unwrap();
-            let context = SetupContext::new(session, Arc::new(instance), Arc::new(log));
+            let context = SetupContext::new(
+                session,
+                Arc::new(instance),
+                Arc::new(log),
+                Launch::Interactive,
+            );
 
             let failure = context
                 .install(&fresh(r"D:\Petalfall"), &Recording::default())
@@ -908,11 +1061,36 @@ mod tests {
         #[test]
         fn opening_the_launcher_stays_inside_the_fake() {
             let rig = rig("open");
+            let dir = Path::new(r"D:\没有这个目录");
 
-            let opened = rig.context.open_launcher(Path::new(r"D:\没有这个目录"));
+            let opened = rig.context.open_launcher(dir);
 
             assert_eq!(opened.unwrap(), Opened::Exited(None));
+            assert_eq!(
+                rig.received.lock().unwrap().openings,
+                [Opening {
+                    dir: dir.to_owned(),
+                    args: Vec::new(),
+                }]
+            );
             assert!(rig.logged().contains("打开启动器"));
+        }
+
+        #[test]
+        fn an_update_hands_the_launcher_its_own_arguments_back() {
+            for (test, relaunch) in [("open-update-relaunch", true), ("open-update-stay", false)] {
+                let args = launcher_args();
+                let rig = launched(test, update(relaunch, args.clone()));
+                let dir = rig.sandbox.path().join("instdir");
+
+                rig.context.open_launcher(&dir).unwrap();
+
+                assert_eq!(
+                    rig.received.lock().unwrap().openings,
+                    [Opening { dir, args }],
+                    "{test}"
+                );
+            }
         }
 
         #[test]
@@ -924,6 +1102,65 @@ mod tests {
             assert_eq!(rig.context.wait_for_wizard().unwrap(), Some(0));
             assert_eq!(rig.context.wait_for_wizard().unwrap(), None);
             assert!(rig.logged().contains("原生向导已退出：0"));
+        }
+
+        #[test]
+        fn the_wizard_button_stays_a_bare_wizard_during_an_update() {
+            let rig = launched("wizard-update", update(true, launcher_args()));
+
+            rig.context.start_wizard().unwrap();
+            assert_eq!(rig.context.wait_for_wizard().unwrap(), Some(0));
+
+            assert_eq!(rig.received.lock().unwrap().launches, [OsString::new()]);
+        }
+
+        #[test]
+        fn the_fallback_of_an_update_runs_nsis_with_the_plugin_arguments() {
+            let args = launcher_args();
+            let nonce = args[0].to_str().unwrap().to_owned();
+            let rig = launched("fallback-update", update(true, args));
+
+            rig.context.start_fallback().unwrap();
+            assert_eq!(rig.context.wait_for_wizard().unwrap(), Some(0));
+
+            assert_eq!(
+                rig.received.lock().unwrap().launches,
+                [OsString::from(format!(
+                    r#"/P /R /UPDATE /ARGS {nonce} "" "C:\游戏 目录\\" "--arg=\"wrapped space\"""#
+                ))]
+            );
+            assert!(rig.received.lock().unwrap().openings.is_empty());
+        }
+
+        #[test]
+        fn the_fallback_of_an_interactive_launch_is_the_bare_wizard() {
+            let rig = rig("fallback-interactive");
+
+            rig.context.start_fallback().unwrap();
+            assert_eq!(rig.context.wait_for_wizard().unwrap(), Some(0));
+
+            assert_eq!(rig.received.lock().unwrap().launches, [OsString::new()]);
+        }
+
+        #[test]
+        fn the_probe_tells_the_frontend_how_it_was_launched() {
+            for (test, launch, expected) in [
+                ("probe-interactive", Launch::Interactive, None),
+                (
+                    "probe-update-relaunch",
+                    update(true, launcher_args()),
+                    Some(UpdateLaunch { relaunch: true }),
+                ),
+                (
+                    "probe-update-stay",
+                    update(false, Vec::new()),
+                    Some(UpdateLaunch { relaunch: false }),
+                ),
+            ] {
+                let rig = launched(test, launch);
+
+                assert_eq!(rig.context.probe().unwrap().update, expected, "{test}");
+            }
         }
 
         #[test]

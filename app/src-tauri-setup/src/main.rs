@@ -7,15 +7,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use petalfall_setup_lib::boot::{self, Claim, DesktopUser, Notice, Webview};
+use petalfall_setup_lib::cli;
 use petalfall_setup_lib::commands::{self, SetupContext};
+use petalfall_setup_lib::extract::WEBVIEW_DATA_PREFIX;
 use petalfall_setup_lib::log::{self, SetupLog};
 use petalfall_setup_lib::overlay;
 use petalfall_setup_lib::runner::Session;
 use tauri::{App, WebviewWindow, WebviewWindowBuilder};
 use tempfile::TempDir;
-
-/// 默认的 WebView2 数据目录会永远留在 `%LOCALAPPDATA%`：引导程序没有卸载流程。
-const WEBVIEW_DATA_PREFIX: &str = "petalfall-setup-webview-";
 
 struct Interface {
     app: App,
@@ -110,6 +109,15 @@ fn main() -> ExitCode {
 
 fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>> {
     log.info(format_args!("启动，WebView2：{webview:?}"));
+    // 赶在互斥那关之前记下：被转发掉的那个进程带的是什么参数，日志里也要查得到
+    let parsed = cli::parse(std::env::args_os().skip(1));
+    log.info(format_args!("启动方式：{:?}", parsed.launch));
+    if !parsed.ignored.is_empty() {
+        log.warn(format_args!(
+            "这些参数不起作用，已忽略：{:?}",
+            parsed.ignored
+        ));
+    }
     let instance = match boot::claim()? {
         Claim::First(instance) => Arc::new(instance),
         Claim::Forwarded => {
@@ -141,6 +149,7 @@ fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>
         session,
         Arc::clone(&instance),
         Arc::clone(log),
+        parsed.launch,
     ));
 
     if let Webview::Unavailable { reason } = &webview {
@@ -157,7 +166,7 @@ fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>
 }
 
 fn fall_back(context: &SetupContext) -> Result<ExitCode, Box<dyn Error>> {
-    context.start_wizard()?;
+    context.start_fallback()?;
     let code = context.wait_for_wizard()?;
     Ok(code.map_or(ExitCode::FAILURE, exit_code))
 }

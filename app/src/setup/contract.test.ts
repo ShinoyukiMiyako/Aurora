@@ -17,6 +17,7 @@ import {
   type Phase,
   type Probe,
   type Progress,
+  type UpdateLaunch,
 } from "./contract";
 
 const RUST = readFileSync(new URL("../../src-tauri-setup/src/contract.rs", import.meta.url), "utf8");
@@ -34,11 +35,12 @@ const rustFields = (name: string) => [...rustBody("struct", name).matchAll(/pub 
 const rustVariants = (name: string) => [...rustBody("enum", name).matchAll(/^\s*(\w+),\s*$/gm)].map((m) => snake(m[1])).sort();
 
 const EXISTING: Existing = { kind: "upgrade", version: "", dir: "" };
-const PROBE: Probe = { payloadVersion: "", defaultDir: "", requiredBytes: 0, existing: null, interrupted: false, elevated: false };
+const PROBE: Probe = { payloadVersion: "", defaultDir: "", requiredBytes: 0, existing: null, interrupted: false, elevated: false, update: null };
 const PLAN: InstallPlan = { mode: "fresh", dir: null, desktopShortcut: true };
 const CHECK: DirCheck = { normalized: "", issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 0 };
 const PROGRESS: Progress = { phase: "unpack", percent: 0, slow: false };
 const FAILURE: Failure = { code: "disk_full", detail: "" };
+const UPDATE: UpdateLaunch = { relaunch: true };
 
 const EXISTING_KINDS: Record<ExistingKind, true> = { upgrade: true, same: true, newer: true, broken: true };
 const INSTALL_MODES: Record<InstallMode, true> = { fresh: true, upgrade: true, repair: true };
@@ -54,6 +56,7 @@ describe("前后端契约", () => {
     ["DirCheck", CHECK],
     ["Progress", PROGRESS],
     ["Failure", FAILURE],
+    ["UpdateLaunch", UPDATE],
   ])("结构 %s 两边字段一致", (name, sample) => {
     expect(rustFields(name)).toEqual(Object.keys(sample).sort());
   });

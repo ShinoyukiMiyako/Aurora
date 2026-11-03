@@ -12,6 +12,12 @@ export interface Existing {
   dir: string;
 }
 
+/** 启动器的更新插件拉起时才有：命令行带了 /UPDATE。 */
+export interface UpdateLaunch {
+  /** 带了 /R：装完替用户重新打开启动器。 */
+  relaunch: boolean;
+}
+
 export interface Probe {
   payloadVersion: string;
   defaultDir: string;
@@ -19,6 +25,8 @@ export interface Probe {
   existing: Existing | null;
   interrupted: boolean;
   elevated: boolean;
+  /** 交互启动时是 null。 */
+  update: UpdateLaunch | null;
 }
 
 export type InstallMode = "fresh" | "upgrade" | "repair";

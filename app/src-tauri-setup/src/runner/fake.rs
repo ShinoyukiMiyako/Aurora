@@ -4,7 +4,7 @@
 //! 请求的安装目录会被换成沙箱内的目录，注册表换成内存表，开发机上真实的安装和桌面都不受影响。
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -62,6 +62,21 @@ impl Outcome {
     }
 }
 
+/// 打开启动器的一次请求。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opening {
+    pub dir: PathBuf,
+    pub args: Vec<OsString>,
+}
+
+/// 假载荷和假启动器收到过的参数。沙箱里既没有真的 NSIS 也没有真的启动器，参数有没有原样送到只能看这里。
+#[derive(Debug, Default)]
+pub struct Received {
+    /// 每次启动载荷的整串参数。
+    pub launches: Vec<OsString>,
+    pub openings: Vec<Opening>,
+}
+
 #[derive(Debug)]
 pub struct Fake {
     outcome: Outcome,
@@ -69,6 +84,7 @@ pub struct Fake {
     header: Header,
     payload: Vec<u8>,
     exe: Arc<Vec<u8>>,
+    received: Arc<Mutex<Received>>,
 }
 
 impl Fake {
@@ -83,7 +99,13 @@ impl Fake {
             header,
             payload,
             exe: Arc::new(exe),
+            received: Arc::default(),
         }
+    }
+
+    /// 交给 [`session`] 之后这份假载荷就拿不回来了，要看收到的参数得先留一份。
+    pub fn received(&self) -> Arc<Mutex<Received>> {
+        Arc::clone(&self.received)
     }
 
     /// 环境变量写错直接 panic：这是开发者的开关，悄悄回退到 ok 只会让人以为失败路径测过了。
@@ -146,9 +168,18 @@ struct FakeLauncher {
     exe: Arc<Vec<u8>>,
     version: String,
     registry: Arc<MemoryRegistry>,
+    received: Arc<Mutex<Received>>,
 }
 
 impl FakeLauncher {
+    fn record(&self, note: impl FnOnce(&mut Received)) {
+        let mut received = self
+            .received
+            .lock()
+            .expect("参数记录的锁被 panic 的线程占着");
+        note(&mut received);
+    }
+
     fn perform(&self) -> io::Result<i32> {
         thread::sleep(self.work_time);
         if self.outcome == Outcome::Fail {
@@ -171,6 +202,7 @@ impl FakeLauncher {
 
 impl Launcher for FakeLauncher {
     fn launch(&self, _exe: &Path, _cwd: &Path, arguments: &OsStr) -> io::Result<Box<dyn Running>> {
+        self.record(|received| received.launches.push(arguments.to_owned()));
         let script = self.clone();
         // 空参数是非静默向导：假载荷没有向导可显示，等一下就结束
         let wizard = arguments.is_empty();
@@ -195,8 +227,14 @@ impl Launcher for FakeLauncher {
         Ok(false)
     }
 
-    /// 沙箱里写的不是真程序，没有什么可打开的。
-    fn open_app(&self, _dir: &Path, _instance: &Instance) -> io::Result<Opened> {
+    /// 沙箱里写的不是真程序，没有什么可打开的，只记下要打开哪里、带什么参数。
+    fn open_app(&self, dir: &Path, args: &[OsString], _instance: &Instance) -> io::Result<Opened> {
+        self.record(|received| {
+            received.openings.push(Opening {
+                dir: dir.to_owned(),
+                args: args.to_vec(),
+            });
+        });
         Ok(Opened::Exited(None))
     }
 }
@@ -237,6 +275,7 @@ pub fn session(fake: Fake, sandbox: &Path) -> io::Result<Session> {
         exe: Arc::clone(&fake.exe),
         version: fake.header.version.clone(),
         registry: Arc::clone(&registry),
+        received: fake.received(),
     };
     Ok(Session::new(
         Source::Fake(fake),
@@ -252,6 +291,7 @@ mod tests {
     use super::*;
     use crate::contract::{FailureCode, InstallMode, Phase};
     use crate::journal::Recovery;
+    use crate::overlay::test_support::random_bytes;
     use crate::runner::Target;
     use crate::runner::test_support::Recording;
 
@@ -441,35 +481,79 @@ mod tests {
         );
     }
 
+    fn recorded_session(sandbox: &Path) -> (Session, Arc<Mutex<Received>>) {
+        let fake = Fake::new(Outcome::Ok, Duration::from_millis(5));
+        let received = fake.received();
+        (session(fake, sandbox).unwrap(), received)
+    }
+
+    /// 每次跑都不一样的一段，免得参数碰巧和哪里写死的值对上。
+    fn nonce() -> String {
+        format!("--nonce={}", crate::extract::hex(&random_bytes(8)))
+    }
+
     #[test]
     fn nothing_real_is_opened() {
         let sandbox = tempfile::tempdir().unwrap();
-        let session = session_for(Outcome::Ok, sandbox.path());
+        let (session, received) = recorded_session(sandbox.path());
         let crate::boot::Claim::First(instance) = crate::boot::test_claim("fake-open") else {
             panic!("这个名字上不该已有实例");
         };
+        let dir = Path::new(r"D:\没有这个目录");
+        let args = vec![
+            OsString::from("some space"),
+            OsString::new(),
+            OsString::from(nonce()),
+        ];
 
         assert!(!session.launcher_running().unwrap());
         assert_eq!(
-            session
-                .open_launcher(Path::new(r"D:\没有这个目录"), &instance)
-                .unwrap(),
+            session.open_launcher(dir, &args, &instance).unwrap(),
             Opened::Exited(None)
+        );
+        assert_eq!(
+            received.lock().unwrap().openings,
+            [Opening {
+                dir: dir.to_owned(),
+                args,
+            }]
         );
     }
 
     #[test]
     fn the_standard_run_does_not_touch_the_install_directory() {
         let sandbox = tempfile::tempdir().unwrap();
-        let session = session_for(Outcome::Ok, sandbox.path());
+        let (session, received) = recorded_session(sandbox.path());
 
         let code = session
-            .start_standard()
+            .start_standard(OsStr::new(""))
             .unwrap()
             .wait_and_clean(&Recording::default())
             .unwrap();
 
         assert_eq!(code, 0);
         assert!(!sandbox.path().join("instdir").exists());
+        assert_eq!(received.lock().unwrap().launches, [OsString::new()]);
+    }
+
+    #[test]
+    fn update_arguments_reach_the_fake_payload_unchanged() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let (session, received) = recorded_session(sandbox.path());
+        let arguments = OsString::from(format!(
+            r#"/P /R /UPDATE /ARGS "C:\游戏 目录\\" "" {}"#,
+            nonce()
+        ));
+
+        let code = session
+            .start_standard(&arguments)
+            .unwrap()
+            .wait_and_clean(&Recording::default())
+            .unwrap();
+
+        assert_eq!(code, 0);
+        assert_eq!(received.lock().unwrap().launches, [arguments]);
+        // 带参数的是 NSIS 自己的安装，不是向导：假载荷照样把文件写进沙箱
+        assert!(sandbox.path().join("instdir").join(APP_EXE).exists());
     }
 }

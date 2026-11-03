@@ -26,6 +26,14 @@ pub struct Existing {
     pub dir: String,
 }
 
+/// 启动器的更新插件拉起时才有：命令行带了 `/UPDATE`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateLaunch {
+    /// 带了 `/R`：装完替用户重新打开启动器。
+    pub relaunch: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Probe {
@@ -35,6 +43,8 @@ pub struct Probe {
     pub existing: Option<Existing>,
     pub interrupted: bool,
     pub elevated: bool,
+    /// 交互启动时是 `None`。
+    pub update: Option<UpdateLaunch>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +156,7 @@ mod tests {
             }),
             interrupted: true,
             elevated: false,
+            update: Some(UpdateLaunch { relaunch: true }),
         };
         assert_eq!(
             serde_json::to_value(&probe).unwrap(),
@@ -156,12 +167,13 @@ mod tests {
                 "existing": { "kind": "upgrade", "version": "0.1.0", "dir": r"E:\Games\Petalfall" },
                 "interrupted": true,
                 "elevated": false,
+                "update": { "relaunch": true },
             })
         );
     }
 
     #[test]
-    fn probe_without_existing_install_sends_null() {
+    fn probe_without_existing_install_or_update_sends_null() {
         let probe = Probe {
             payload_version: "0.2.0".into(),
             default_dir: "C:".into(),
@@ -169,11 +181,11 @@ mod tests {
             existing: None,
             interrupted: false,
             elevated: true,
+            update: None,
         };
-        assert_eq!(
-            serde_json::to_value(&probe).unwrap()["existing"],
-            json!(null)
-        );
+        let value = serde_json::to_value(&probe).unwrap();
+        assert_eq!(value["existing"], json!(null));
+        assert_eq!(value["update"], json!(null));
     }
 
     #[test]

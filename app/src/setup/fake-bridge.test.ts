@@ -53,6 +53,41 @@ describe("fakeFromQuery", () => {
     await expect(fakeFromQuery("?state=blocked").bridge.launcherRunning()).resolves.toBe(true);
     await expect(fakeFromQuery("?state=done").bridge.launcherRunning()).resolves.toBe(false);
   });
+
+  it("不写 ?update 时是交互启动", async () => {
+    expect((await fakeFromQuery("").bridge.probe()).update).toBeNull();
+    expect((await fakeFromQuery("?state=installed&kind=upgrade").bridge.probe()).update).toBeNull();
+  });
+
+  it("?update 从 boot 开始，探测带上 /R 和能升级的现有安装，启动器没开，安装会真的成功", async () => {
+    const fake = fakeFromQuery("?update");
+    expect(fake.initial.view).toBe("boot");
+    const probe = await fake.bridge.probe();
+    expect(probe.update).toEqual({ relaunch: true });
+    expect(probe.existing?.kind).toBe("upgrade");
+    await expect(fake.bridge.launcherRunning()).resolves.toBe(false);
+    expect(fake.bridge.scenario.outcome).toBe("ok");
+  });
+
+  it("?norelaunch 是没带 /R，?elevated 照常进探测结果，?kind= 换现有安装看退回交互流程", async () => {
+    const probe = await fakeFromQuery("?update&norelaunch&elevated=1&kind=same").bridge.probe();
+    expect(probe.update).toEqual({ relaunch: false });
+    expect(probe.elevated).toBe(true);
+    expect(probe.existing?.kind).toBe("same");
+  });
+
+  it("?update&state=blocked 时启动器一直开着，state=failed 时按 ?code= 装失败，都从 boot 开始", async () => {
+    const blocked = fakeFromQuery("?update&state=blocked");
+    expect(blocked.initial.view).toBe("boot");
+    await expect(blocked.bridge.launcherRunning()).resolves.toBe(true);
+    const failed = fakeFromQuery("?update&state=failed&code=disk_full");
+    expect(failed.initial.view).toBe("boot");
+    expect(failed.bridge.scenario.outcome).toEqual({ code: "disk_full", detail: "os error 112" });
+  });
+
+  it.each(["done", "installed", "location"])("?update 配 ?state=%s 时抛错：更新模式不能直达别的视图", (state) => {
+    expect(() => fakeFromQuery(`?update&state=${state}`)).toThrow("?update 从 boot 开始走");
+  });
 });
 
 describe("createFakeBridge", () => {

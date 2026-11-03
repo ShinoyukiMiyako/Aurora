@@ -10,8 +10,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, stubPetalTokens } from "../art/petals/test-canvas";
 import { stubMatchMedia, stubResizeObserver } from "../test/dom";
-import App, { BLOCKED_POLL_MS, MIN_INSTALLING_MS } from "./App";
-import type { Existing, ExistingKind, Failure, Probe } from "./contract";
+import App, { BLOCKED_POLL_MS, MIN_INSTALLING_MS, UPDATE_EXIT_POLL_MS, UPDATE_EXIT_WAIT_MS } from "./App";
+import type { Existing, ExistingKind, Failure, InstallPlan, Probe } from "./contract";
 import { COPY } from "./copy";
 import { FAKE_PROBE, createFakeBridge, type FakeBridge, type FakeScenario } from "./fake-bridge";
 import { replay, type SetupEvent, type SetupState } from "./model";
@@ -27,6 +27,7 @@ const freshEvent = (fake: FakeBridge): SetupEvent => ({ type: "install_requested
 
 let root: Root | null = null;
 let host: HTMLElement | null = null;
+let headingLog: MutationObserver | null = null;
 
 function mount(ui: ReactElement): void {
   host = document.createElement("div");
@@ -53,6 +54,17 @@ function button(name: string): HTMLButtonElement {
 
 const seeHeading = (text: string) => vi.waitFor(() => expect(heading()).toBe(text), WAIT);
 
+/** 按出现顺序记下每个画出来过的标题：断言没有经过某一页。挂载之前调用。 */
+function recordHeadings(): readonly string[] {
+  const seen: string[] = [];
+  headingLog = new MutationObserver(() => {
+    const text = heading();
+    if (text !== null && seen.at(-1) !== text) seen.push(text);
+  });
+  headingLog.observe(document.body, { childList: true, subtree: true, characterData: true });
+  return seen;
+}
+
 beforeAll(() => {
   MotionGlobalConfig.skipAnimations = true;
 });
@@ -70,6 +82,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  headingLog?.disconnect();
+  headingLog = null;
   root?.unmount();
   host?.remove();
   root = null;
@@ -415,6 +429,161 @@ describe("打开启动器", () => {
     expect(buttonNamed(copy.done.open)).toBeUndefined();
     expect(document.querySelector("main")?.textContent).toContain(copy.done.elevated);
   });
+});
+
+describe("更新模式", () => {
+  const updateProbe = (extra: Partial<Probe> = {}) => probeOf("upgrade", { update: { relaunch: true }, ...extra });
+  const UPGRADE_PLAN: InstallPlan = { mode: "upgrade", dir: null, desktopShortcut: false };
+  const upgrading = copy.installing.title.upgrade("0.2.0");
+  const upgraded = copy.done.title.upgrade("0.2.0");
+  /** 晚到的自动动作有没有发生：等过这么久还没有就是没有。 */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+  it("不经欢迎页和已安装页直接升级，装回登记目录，不校验目录", async () => {
+    const seen = recordHeadings();
+    const fake = start({ probe: updateProbe(), outcome: "hang", progress: [] });
+    await seeHeading(upgrading);
+    await vi.waitFor(() => expect(fake.callsOf("install")).toEqual([[UPGRADE_PLAN]]), WAIT);
+    expect(seen).toEqual([upgrading]);
+    expect(fake.callsOf("checkDir")).toEqual([]);
+    await vi.waitFor(() => expect(fake.callsOf("windowReady")).toHaveLength(1), WAIT);
+  });
+
+  it("启动器几轮之后退出：一退出就开始安装，不经过「请先关闭」页", async () => {
+    const seen = recordHeadings();
+    const fake = createFakeBridge({ probe: updateProbe(), outcome: "hang", progress: [] });
+    let checks = 0;
+    fake.launcherRunning = async () => {
+      checks += 1;
+      return checks < 3;
+    };
+    mount(<App bridge={fake} copy={copy} />);
+    await seeHeading(upgrading);
+    await vi.waitFor(() => expect(fake.callsOf("install")).toEqual([[UPGRADE_PLAN]]), WAIT);
+    expect(checks).toBe(3);
+    expect(seen).toEqual([upgrading]);
+  });
+
+  it("启动器一直不退出：等待期间窗口已显示着升级页，等满时长才进「请先关闭」页，关掉后自动继续升级", async () => {
+    const fake = start({ probe: updateProbe(), running: true, outcome: "hang", progress: [] });
+    const startedAt = performance.now();
+    await vi.waitFor(() => expect(fake.callsOf("launcherRunning").length).toBeGreaterThanOrEqual(3), WAIT);
+    expect(heading()).toBe(upgrading);
+    expect(fake.callsOf("windowReady")).toHaveLength(1);
+
+    await vi.waitFor(() => expect(heading()).toBe(copy.blocked.title), { timeout: UPDATE_EXIT_WAIT_MS * 2, interval: 10 });
+    // 定时器精度留 50 ms 余量
+    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(UPDATE_EXIT_WAIT_MS - 50);
+    // 每个间隔查一次，外加开头一次；定时器早到一两毫秒时，截止前还会补一次短等后的检查
+    expect(fake.callsOf("launcherRunning").length).toBeLessThanOrEqual(UPDATE_EXIT_WAIT_MS / UPDATE_EXIT_POLL_MS + 2);
+    expect(fake.callsOf("install")).toEqual([]);
+    await vi.waitFor(() => expect(fake.callsOf("windowReady")).toHaveLength(1), WAIT);
+
+    fake.scenario.running = false;
+    await vi.waitFor(() => expect(heading()).toBe(upgrading), { timeout: BLOCKED_POLL_MS * 3, interval: 10 });
+    await vi.waitFor(() => expect(fake.callsOf("install")).toEqual([[UPGRADE_PLAN]]), WAIT);
+  });
+
+  it("「请先关闭」页返回落在已安装页", async () => {
+    const fake = createFakeBridge({ probe: updateProbe(), running: true });
+    mount(<App bridge={fake} copy={copy} initial={replay([{ type: "probed", probe: fake.scenario.probe }, { type: "update_started", running: true }])} />);
+    await seeHeading(copy.blocked.title);
+    button(copy.blocked.back).click();
+    await seeHeading(copy.installed.kind.upgrade.title("0.1.0"));
+    expect(fake.callsOf("install")).toEqual([]);
+  });
+
+  it("装完自动打开恰好一次，打开的是登记目录，启动器起来后关掉自己；StrictMode 下也只等一轮、装一次", async () => {
+    const fake = createFakeBridge({ probe: updateProbe(), progress: [] });
+    mount(
+      <StrictMode>
+        <App bridge={fake} copy={copy} />
+      </StrictMode>,
+    );
+    await seeHeading(upgraded);
+    await vi.waitFor(() => expect(fake.callsOf("close")).toEqual([[true]]), WAIT);
+    expect(fake.callsOf("openLauncher")).toEqual([["E:\\app"]]);
+    // 假桥的打开与关窗都是立即兑现的微任务，React 的重渲染排在它们后面，忙碌态要等它画出来
+    await vi.waitFor(() => expect(button(copy.done.open).getAttribute("aria-busy")).toBe("true"), WAIT);
+    await settle();
+    expect(fake.callsOf("openLauncher")).toHaveLength(1);
+    expect(fake.callsOf("launcherRunning")).toHaveLength(1);
+    expect(fake.callsOf("install")).toEqual([[UPGRADE_PLAN]]);
+  });
+
+  it("StrictMode 下一挂载就在完成页时也只自动打开一次", async () => {
+    const fake = createFakeBridge({ probe: updateProbe() });
+    const initial = replay([{ type: "probed", probe: fake.scenario.probe }, { type: "update_started", running: false }, { type: "install_succeeded" }]);
+    mount(
+      <StrictMode>
+        <App bridge={fake} copy={copy} initial={initial} />
+      </StrictMode>,
+    );
+    await seeHeading(upgraded);
+    await vi.waitFor(() => expect(fake.callsOf("openLauncher")).toEqual([["E:\\app"]]), WAIT);
+    await settle();
+    expect(fake.callsOf("openLauncher")).toHaveLength(1);
+  });
+
+  it("提权运行时装完不自动打开，停在完成页提示从开始菜单打开", async () => {
+    const fake = start({ probe: updateProbe({ elevated: true }), progress: [] });
+    await seeHeading(upgraded);
+    await settle();
+    expect(fake.callsOf("openLauncher")).toEqual([]);
+    expect(fake.callsOf("close")).toEqual([]);
+    expect(buttonNamed(copy.done.open)).toBeUndefined();
+    expect(document.querySelector("main")?.textContent).toContain(copy.done.elevated);
+  });
+
+  it("没带 /R 时装完停在完成页，用户点了才打开", async () => {
+    const fake = start({ probe: updateProbe({ update: { relaunch: false } }), progress: [] });
+    await seeHeading(upgraded);
+    await settle();
+    expect(fake.callsOf("openLauncher")).toEqual([]);
+    expect(fake.callsOf("close")).toEqual([]);
+    button(copy.done.open).click();
+    await vi.waitFor(() => expect(fake.callsOf("openLauncher")).toEqual([["E:\\app"]]), WAIT);
+  });
+
+  it("失败后重试仍按升级再装一遍，成功后照样自动打开", async () => {
+    const fake = start({ probe: updateProbe(), outcome: FAILURE, progress: [] });
+    await seeHeading(copy.failed.reason.verify_failed.title);
+    expect(fake.callsOf("install")).toEqual([[UPGRADE_PLAN]]);
+    expect(fake.callsOf("openLauncher")).toEqual([]);
+
+    fake.scenario.outcome = "ok";
+    button(copy.failed.retry).click();
+    await seeHeading(upgraded);
+    expect(fake.callsOf("install")).toEqual([[UPGRADE_PLAN], [UPGRADE_PLAN]]);
+    await vi.waitFor(() => expect(fake.callsOf("openLauncher")).toEqual([["E:\\app"]]), WAIT);
+  });
+
+  it("失败页返回落在已安装页", async () => {
+    start({ probe: updateProbe(), outcome: FAILURE, progress: [] });
+    await seeHeading(copy.failed.reason.verify_failed.title);
+    button(copy.failed.back).click();
+    await seeHeading(copy.installed.kind.upgrade.title("0.1.0"));
+  });
+
+  it("现有安装不能升级时按交互流程走：不等启动器退出、不自动安装", async () => {
+    const fake = start({ probe: probeOf("same", { update: { relaunch: true } }) });
+    await seeHeading(copy.installed.kind.same.title("0.1.0"));
+    await settle();
+    expect(fake.callsOf("launcherRunning")).toEqual([]);
+    expect(fake.callsOf("install")).toEqual([]);
+  });
+
+  it("查进程被拒绝时进致命错误页并照常显示窗口", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const fake = createFakeBridge({ probe: updateProbe() });
+    fake.launcherRunning = () => Promise.reject(new Error("进程列表读不出来"));
+    mount(<App bridge={fake} copy={copy} />);
+    await seeHeading(copy.fatal.title);
+    expect(document.querySelector("pre")?.textContent).toContain("进程列表读不出来");
+    await vi.waitFor(() => expect(fake.callsOf("windowReady")).toHaveLength(1), WAIT);
+    expect(fake.callsOf("install")).toEqual([]);
+  });
+
 });
 
 describe("协议页", () => {
