@@ -17,15 +17,25 @@ const art = (path: string, version = "1.21.1") => `${ORIGIN}/art/${path}.png?v=$
 let view: Rendered | undefined;
 let fetchMock: ReturnType<typeof vi.fn>;
 let missing: Set<string>;
+/** 解码出的尺寸不是 16 × 16 的地址。 */
+let sizes: Map<string, [number, number]>;
 let warn: MockInstance<typeof console.warn>;
 let last: BlockSource | null;
 
 beforeEach(() => {
   vi.stubGlobal("navigator", { userAgent: "Windows" });
   missing = new Set();
+  sizes = new Map();
   fetchMock = vi.fn(async (url: string) => ({ ok: !missing.has(url), status: missing.has(url) ? 404 : 200, blob: async () => new Blob([url]) }));
   vi.stubGlobal("fetch", fetchMock);
-  vi.stubGlobal("createImageBitmap", vi.fn(async (blob: Blob) => ({ width: 16, height: 16, url: await blob.text() })));
+  vi.stubGlobal(
+    "createImageBitmap",
+    vi.fn(async (blob: Blob) => {
+      const url = await blob.text();
+      const [width, height] = sizes.get(url) ?? [16, 16];
+      return { width, height, url };
+    }),
+  );
   warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
   last = null;
 });
@@ -241,6 +251,42 @@ describe("useBlockSource：玩家图片", () => {
     view = render(<Probe cover={cover("blue_ice", IMAGE)} />);
     await settle();
     expect(last).toBeNull();
+    expect(fetched()).toEqual([IMAGE]);
+  });
+
+  it("图片取到了但尺寸不合规（手放或损坏的文件）：按读不到处理，回到方块 id 的材质，同一张图只警告一次", async () => {
+    // 警告记录是模块级的、跨用例保留：用一张别的用例没用过的图
+    const odd = `${ORIGIN}/cover/${"ef".repeat(20)}`;
+    sizes.set(odd, [24, 24]);
+    withSource();
+    view = render(<Probe cover={cover("blue_ice", odd)} />);
+    await settle();
+    expect(summary(last)).toEqual({ key: "block|1.21.1|blue_ice", top: art("block/blue_ice"), side: art("block/blue_ice"), front: null, topTint: null, sideTint: null });
+    expect(fetched()).toEqual([art("block/blue_ice"), odd]);
+
+    view.rerender(<Probe cover={cover("blue_ice", odd)} />);
+    await settle();
+    expect(last?.key).toBe("block|1.21.1|blue_ice");
+    const warned = warn.mock.calls.filter((c) => String(c[0]).includes(odd));
+    expect(warned).toHaveLength(1);
+    expect(String(warned[0][0])).toContain("24x24");
+  });
+
+  it("图片尺寸不合规、方块也读不到：为 null（画徽记）", async () => {
+    const odd = `${ORIGIN}/cover/${"12".repeat(20)}`;
+    sizes.set(odd, [16, 20]);
+    view = render(<Probe cover={cover("blue_ice", odd)} />);
+    await settle();
+    expect(last).toBeNull();
+    expect(fetched()).toEqual([odd]);
+  });
+
+  it("竖排动画帧的图片（宽 16、高为 16 的整数倍）与方块材质同样合规，照常用图片", async () => {
+    sizes.set(IMAGE, [16, 32]);
+    withSource();
+    view = render(<Probe cover={cover("blue_ice", IMAGE)} />);
+    await settle();
+    expect(last?.key).toBe(`image|${IMAGE}`);
     expect(fetched()).toEqual([IMAGE]);
   });
 });

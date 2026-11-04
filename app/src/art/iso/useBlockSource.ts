@@ -3,6 +3,7 @@ import { useBlockCatalog, type BlockCatalog } from "../../mc/catalog";
 import { peekArt, useArt } from "../../mc/useArt";
 import { coverTexture, type Rgb } from "../../mc/whitelist";
 import type { InstanceCover } from "./covers";
+import { validTextureSize } from "./pixels";
 import type { BlockSource } from "./render";
 
 interface BlockFaces {
@@ -33,10 +34,25 @@ function blockFaces(block: string, versionId: string, catalog: BlockCatalog | nu
   return null;
 }
 
+const warnedImages = new Set<string>();
+
+/**
+ * 玩家图片的尺寸合不合方块材质。导入时已重采样成 16 × 16，不合规的是手放或损坏的文件：下游按不合规直接画徽记或渐变，
+ * 所以在这里就按读不到处理，好退回方块 id 的材质；同一张图只警告一次。
+ */
+function imageFits(url: string, bitmap: ImageBitmap): boolean {
+  if (validTextureSize(bitmap.width, bitmap.height)) return true;
+  if (!warnedImages.has(url)) {
+    warnedImages.add(url);
+    console.warn(`[art] 封面图片 ${url} 的尺寸 ${bitmap.width}x${bitmap.height} 不是宽 16 的方块材质，按读不到处理，改用封面方块的材质`);
+  }
+  return false;
+}
+
 /**
  * 实例封面方块的真材质，读不到时为 null（画实例徽记）。顺序：
  * 1. 有玩家图片时取图片（16 × 16），三面同一张、不染色；图片不依赖本机材质源。
- * 2. 没有图片或图片读不到时，按方块 id 取本机材质：顶面、侧面（有正面的连正面）都取到才算。
+ * 2. 没有图片、图片读不到或尺寸不合规时，按方块 id 取本机材质：顶面、侧面（有正面的连正面）都取到才算。
  * 图片还在取时不取方块材质，免得先闪一下方块再换成图片。cover 为 null（调用方这次不画方块）时恒为 null，不发请求。
  */
 export function useBlockSource(cover: InstanceCover | null): BlockSource | null {
@@ -45,15 +61,16 @@ export function useBlockSource(cover: InstanceCover | null): BlockSource | null 
   const imageUrl = cover?.image ?? null;
   const image = useArt(imageUrl);
   const versionId = status.source?.versionId ?? null;
+  const imageBitmap = imageUrl !== null && image.kind === "ready" && imageFits(imageUrl, image.bitmap) ? image.bitmap : null;
   // 取图失败的结果会缓存下来：useArt 给 missing 而缓存里已有定论，就是读不到；缓存里没有则还在取
-  const wantBlock = imageUrl === null || peekArt(imageUrl)?.kind === "missing";
+  const wantBlock = imageUrl === null || peekArt(imageUrl)?.kind === "missing" || (image.kind === "ready" && imageBitmap === null);
   const faces = cover !== null && wantBlock && versionId !== null ? blockFaces(cover.block, versionId, catalog) : null;
   const top = useArt(faces ? artUrl(faces.top) : null);
   const side = useArt(faces ? artUrl(faces.side) : null);
   const front = useArt(faces?.front ? artUrl(faces.front) : null);
 
-  if (imageUrl !== null && image.kind === "ready") {
-    return { key: `image|${imageUrl}`, top: image.bitmap, side: image.bitmap, front: null, topTint: null, sideTint: null };
+  if (imageUrl !== null && imageBitmap !== null) {
+    return { key: `image|${imageUrl}`, top: imageBitmap, side: imageBitmap, front: null, topTint: null, sideTint: null };
   }
   if (cover === null || faces === null || top.kind !== "ready" || side.kind !== "ready") return null;
   if (faces.front !== null && front.kind !== "ready") return null;
