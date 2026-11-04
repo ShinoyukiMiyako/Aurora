@@ -9,7 +9,11 @@
 //! （[`Petalfall::move_instance_files`]）先补依赖，同卷一次改名提交，跨卷先复制进目标盘的暂存、读回比对，再两步
 //! 改名提交；启动收尾（[`Petalfall::recover_instance_moves`]）按移动日志与盘面把中断的移动回滚或补完。提交之前
 //! 原件一直在原位，失败与取消只删暂存；提交之后不再回头，记录迁移与清理失败只记跟进项。执行成功后的收尾与
-//! 启动收尾是同一个函数，可以重入。
+//! 启动收尾是同一个函数，可以重入。调用方改好配置后经 [`Petalfall::confirm_instance_move`] 确认，日志这才删。
+//!
+//! 提交那一刻原备份（跨卷时连同原件）按 token 改名进原游戏目录的 `.petalfall/moving/<token>`，之后只按这个路径
+//! 处理它们，再也不按实例 id 去动原游戏目录：收尾可能推迟到下次启动，那时原目录里可能已经有了同名的新实例，
+//! 按 id 删备份、迁游玩记录就会删掉、搬走它的。
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -20,24 +24,27 @@ use std::time::{Duration, Instant};
 
 use petalfall_base::error_with_causes;
 use petalfall_download::CancellationToken;
-use petalfall_instance::{VERSIONS_DIR, discover_versions, is_backup_file_name, list_version_dirs};
+use petalfall_instance::{
+    VERSIONS_DIR, discover_versions, is_backup_file_name, is_safe_instance_id, list_version_dirs,
+};
 use tokio::sync::{RwLock, RwLockReadGuard};
 
 use crate::InstanceError;
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, DownloadProgress, EventSink, InstallPhase, emit};
 use crate::facade::Petalfall;
-use crate::folders::{DIR_PROBE_TIMEOUT, validate_game_dir};
-use crate::instances::{dependents_in, forget_unlanded_base_versions_in, record_base_versions_in};
+use crate::folders::{DIR_PROBE_TIMEOUT, same_path, validate_game_dir};
+use crate::instances::{
+    dependents_in, forget_base_versions_in, forget_unlanded_base_versions_in,
+    record_base_versions_in,
+};
 use crate::move_copy::{
-    CopyControl, Sha1Digest, TreeScan, available_space, copy_file, copy_tree, remove_tree,
-    rename_no_replace, same_volume, scan_tree, verify_tree,
+    CopyControl, Sha1Digest, TreeScan, available_space, copy_file, copy_tree, flush_dir,
+    remove_tree, rename_no_replace, same_volume, scan_tree, verify_tree,
 };
 use crate::move_deps::{DependencyFile, DependencyPlan, plan_dependencies};
 use crate::move_journal::{self, JournalEntry, MoveJournal, MoveStage};
-use crate::world_backup::{
-    instance_backups_dir_in, merge_staged_backups, move_backups_between, remove_instance_backups_in,
-};
+use crate::world_backup::{instance_backups_dir_in, merge_staged_backups};
 
 /// 拦着一次移动的问题。预检把它们全列出来给界面；执行前重新预检，遇到的第一个报
 /// [`CoreError::InstanceMoveBlocked`](crate::CoreError::InstanceMoveBlocked)。
@@ -58,7 +65,8 @@ pub enum MoveBlocker {
     BaseConflict(Vec<String>),
     /// 目标盘空间不够：这次要写的字节加上余量，与目标盘剩余的字节。
     InsufficientSpace { needed: u64, available: u64 },
-    /// 这个实例有一次中断的移动还没收尾（当时有目录访问不到），收尾前不能再移。
+    /// 同名（不分大小写）实例有一次移动还没彻底完成（没收拾完，或调用方还没确认），它的源或目标就是这次的源或
+    /// 目标，完成前不能再移。
     Pending,
     /// 请求发起时实例所在的游戏目录不是现在的当前目录：同名实例在别的游戏目录里是另一个实例，不能按旧请求移它。
     SourceChanged,
@@ -136,12 +144,13 @@ pub struct MoveRequest {
 /// 移动已经完成，但没跟过去、要提示玩家的一项。带的字符串是人类可读的原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveFollowUp {
-    /// 游玩记录没挪过去：已记下待补，之后读写游玩记录时补上。
+    /// 游玩记录没挪过去：迁移出错时下次启动再迁；原游戏目录里已经有了同名的新实例时不再迁，原账下这个名字的记录
+    /// 分不清是谁的，留给新实例。
     PlayRecords(String),
-    /// 备份没挪过去，留在原游戏目录。
+    /// 备份没全部挪过去：原备份按这次移动收在原游戏目录的 `.petalfall/moving/<token>/backups`（原因里带着路径），
+    /// 没并过去之前不删。
     WorldBackups(String),
-    /// 移动留下的旧文件没删干净（路径）。原件改名后的旧目录与目标盘上的暂存下次启动时再清；原游戏目录里
-    /// 已经并过去的备份不再自动清（那时原目录里可能已有同名的新实例），留给玩家处理。
+    /// 移动留下的旧文件没删干净（路径），下次启动时再清。
     Cleanup { path: PathBuf, reason: String },
 }
 
@@ -153,10 +162,11 @@ pub struct MoveOutcome {
     pub target_game_dir: PathBuf,
     /// 为空即全部跟过去了。
     pub follow_ups: Vec<MoveFollowUp>,
-    /// 这次移动的日志编号。调用方把配置改好、落了盘，再经 `confirm_instance_move` 确认；确认之前日志留着，
-    /// 进程在中间退出时启动收尾会再交出一次 [`MoveRecovery::Completed`]。
+    /// 这次移动的日志编号。调用方把配置改好、落了盘，再经 [`Petalfall::confirm_instance_move`] 确认；确认之前
+    /// 日志留着，进程在中间退出时启动收尾会再交出一次 [`MoveRecovery::Completed`]。
     pub token: String,
-    /// 能不能去掉原游戏目录在配置里对它的引用：原目录里此后又有了同名的新实例时为假，那些引用是新实例的。
+    /// 能不能去掉原游戏目录在配置里对它的引用：原目录里此后又有了同名的新实例时为假，那些引用是新实例的。执行
+    /// 的结果恒为真。
     pub forget_source_refs: bool,
 }
 
@@ -169,17 +179,18 @@ pub enum MoveRecovery {
         source_game_dir: PathBuf,
         target_game_dir: PathBuf,
     },
-    /// 提交已经完成：补做了记录迁移与清理。调用方据此去掉原游戏目录在配置里对它的引用。
+    /// 提交已经完成、调用方还没确认：补做了记录迁移与清理。调用方据此改配置（按
+    /// [`MoveOutcome::forget_source_refs`] 决定去不去掉原游戏目录的引用），落了盘再确认。
     Completed(MoveOutcome),
-    /// 记录早已迁完（那一次已经交出过 `Completed` 或执行结果），这次只删掉了上次没删干净的旧目录与暂存。配置里的
-    /// 引用当时已经改过，调用方不要再改：原游戏目录里此后可能有了同名的新实例。
+    /// 调用方早已确认（配置当时已经改过），这次补完了剩下的记录迁移或残留清理，什么都不剩了。调用方不要再改配置：
+    /// 原游戏目录里此后可能有了同名的新实例。
     Settled {
         id: String,
         source_game_dir: PathBuf,
         target_game_dir: PathBuf,
     },
-    /// 有目录访问不到、收尾中途出错、残留还是删不掉，或盘面与日志对不上不敢动（`reason` 里带着各处路径），日志
-    /// 留着，下次启动再试。
+    /// 有目录访问不到、收尾中途出错、有事没做成（残留删不掉、记录没迁上），或盘面与日志对不上不敢动（`reason` 里
+    /// 带着各处路径）。日志还在的下次启动再试。
     Deferred { id: String, reason: String },
 }
 
@@ -187,9 +198,6 @@ pub enum MoveRecovery {
 
 /// 目标盘写完之后至少还要剩下的字节：盘写满时游戏的存档与日志都会写坏。
 const SPACE_MARGIN: u64 = 256 * 1024 * 1024;
-/// 暂存目录里实例副本与备份副本的位置。
-const STAGED_INSTANCE: &str = "instance";
-const STAGED_BACKUPS: &str = "backups";
 /// 字节进度事件的最小间隔，与下载进度的节流一致。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 /// 补共用文件时同时复制的文件数：资源对象是几千个小文件，每个都要落盘再读回比对，一个接一个太慢。
@@ -199,8 +207,8 @@ const DEPENDENCY_WORKERS: usize = 4;
 /// 能点移动；不隔开的话，收尾会把正在进行的那次移动的日志当成中断的，回滚掉它的暂存甚至原件。
 static MOVE_GATE: RwLock<()> = RwLock::const_new(());
 
-/// 预检与执行里随环境而定的几项。生产全部自动判断；测试强制走跨卷的复制路径、改写目标盘的剩余空间、往复制里
-/// 注入故障。
+/// 预检与执行里随环境而定的几项。生产全部自动判断；测试强制走跨卷的复制路径、改写目标盘的剩余空间、往复制与
+/// 刷盘里注入故障。
 #[derive(Clone, Default)]
 pub(crate) struct MoveEnv {
     volume: VolumeMode,
@@ -208,9 +216,12 @@ pub(crate) struct MoveEnv {
     available_space: Option<u64>,
     #[cfg(test)]
     fault: Option<SharedFault>,
+    /// 刷盘前以要刷的目录调用；返回 Err 时这次刷盘以它失败。
+    #[cfg(test)]
+    flush_fault: Option<SharedFault>,
 }
 
-/// 测试注入的写后钩子（见 [`CopyControl::with_fault`]）。要带进阻塞线程，所以是 `Arc` 且 `Send`。
+/// 测试注入的钩子（写后钩子见 [`CopyControl::with_fault`]）。要带进阻塞线程，所以是 `Arc` 且 `Send`。
 #[cfg(test)]
 type SharedFault = Arc<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>;
 
@@ -253,6 +264,15 @@ impl MoveEnv {
         }
         CopyControl::new(cancel, progress)
     }
+
+    /// 把目录刷到盘上（阻塞）。
+    fn flush_dir(&self, path: &Path) -> Result<()> {
+        #[cfg(test)]
+        if let Some(fault) = &self.flush_fault {
+            fault(path).map_err(|source| io_error(path, source))?;
+        }
+        flush_dir(path)
+    }
 }
 
 // ---- 预检 ----
@@ -289,9 +309,10 @@ impl Petalfall {
             .preview)
     }
 
-    /// 执行。先重新预检，有拦截项报 [`CoreError::InstanceMoveBlocked`]（第一个）。`events` 推步骤与进度；取消看
-    /// 门面快照上的令牌，提交开始后不再理会。只处理文件与记录，配置里的引用由调用方随后经
-    /// [`Petalfall::forget_moved_instance`] 改掉并落盘。
+    /// 执行。请求里的源目录已经不是当前目录报 [`MoveBlocker::SourceChanged`]；再重新预检，有拦截项报
+    /// [`CoreError::InstanceMoveBlocked`]（第一个）。`events` 推步骤与进度；取消看门面快照上的令牌，提交开始后
+    /// 不再理会。只处理文件与记录，配置里的引用由调用方随后经 [`Petalfall::forget_moved_instance`] 改掉并落盘，
+    /// 再经 [`Petalfall::confirm_instance_move`] 确认。
     ///
     /// 提交之前失败或取消时原件不动、暂存与日志删掉再报错；提交之后的记录迁移与清理失败记进
     /// [`MoveOutcome::follow_ups`]，照常返回成功。
@@ -309,10 +330,13 @@ impl Petalfall {
     /// 只有读不了日志目录本身才报错。
     pub async fn recover_instance_moves(&self) -> Result<Vec<MoveRecovery>> {
         let _gate = MOVE_GATE.write().await;
+        let env = MoveEnv::default();
         let mut recovered = Vec::new();
         for entry in move_journal::list(self.data_dir()).await? {
             match entry {
-                JournalEntry::Read(journal) => recovered.push(self.recover_move(journal).await),
+                JournalEntry::Read(journal) => {
+                    recovered.push(self.recover_move(journal, &env).await)
+                }
                 JournalEntry::Unreadable { path, reason } => {
                     tracing::warn!(path = %path.display(), reason, "移动日志读不懂，改名留着");
                     if let Err(err) = move_journal::quarantine(&path).await {
@@ -323,6 +347,26 @@ impl Petalfall {
             }
         }
         Ok(recovered)
+    }
+
+    /// 调用方把移动后的配置改好、落了盘之后确认（`token` 即 [`MoveOutcome::token`]）：记下已确认；记录收拾完了、
+    /// 旧目录与暂存也都不在了就删掉日志，否则写回日志，留给启动收尾接着做。`token` 不是移动日志的编号（带路径
+    /// 分隔符之类）报错；日志已经不在算成功（重复确认）。与执行一样占门的读那一侧：启动收尾正在改日志时等它。
+    pub async fn confirm_instance_move(&self, token: &str) -> Result<()> {
+        let _gate = MOVE_GATE.read().await;
+        let Some(mut journal) = move_journal::read(self.data_dir(), token).await? else {
+            return Ok(());
+        };
+        journal.config_done = true;
+        let mut leftovers = path_exists(&journal.old_dir).await?;
+        if let Some(staging) = &journal.staging_dir {
+            leftovers |= path_exists(staging).await?;
+        }
+        if journal.stage == MoveStage::Settled && !leftovers {
+            move_journal::remove(self.data_dir(), token).await
+        } else {
+            move_journal::write(self.data_dir(), &journal).await
+        }
     }
 
     async fn inspect_move(&self, id: &str, target: &Path, env: &MoveEnv) -> Result<Inspection> {
@@ -347,7 +391,7 @@ impl Petalfall {
         let dependents = dependents_in(&discover_versions(&source).await?, id);
         let name_taken = name_taken(&target, id).await?;
         let isolated = self.resolve_working_dir(id).await?.isolated;
-        let pending = move_journal::is_held(self.data_dir(), id, &source).await?;
+        let pending = move_journal::is_held(self.data_dir(), id, &source, &target).await?;
         let indexed_backups = self.instance_backup_count(id).await;
         let footprint = footprint.await??;
 
@@ -579,7 +623,7 @@ struct Staged {
 enum CommitError {
     /// 原件在原位：删暂存与日志即可。
     Restored(CoreError),
-    /// 原件停在旧目录、改不回去：日志留给启动收尾。
+    /// 有东西停在旧目录、改不回去：日志留给启动收尾。
     Stranded(CoreError),
 }
 
@@ -591,6 +635,13 @@ impl Petalfall {
         events: Option<EventSink>,
         env: &MoveEnv,
     ) -> Result<MoveOutcome> {
+        // 切换过游戏目录后，同名实例在当前目录里是另一个实例：按发起时的请求移它就移错了。
+        if !same_path(&request.source_game_dir, self.game_dir()) {
+            return Err(CoreError::InstanceMoveBlocked {
+                id: request.id.clone(),
+                blocker: MoveBlocker::SourceChanged,
+            });
+        }
         let _gate = self.enter_move_gate().await?;
         let inspection = self
             .inspect_move(&request.id, &request.target_game_dir, env)
@@ -660,6 +711,14 @@ impl Petalfall {
                 .abandon(&journal, InstanceError::Cancelled.into())
                 .await);
         }
+        // 目标那本账下同名的记录只可能属于那边一个已经不在的同名实例（重名会被拦下），提交后并进来的却是累加：先丢掉。
+        // 只能在提交之前做，这时目标里一定没有它；提交之后目标里玩出来的记录就分不开了。
+        if let Err(err) = self
+            .forget_play_records_in(&preview.target_game_dir, &preview.id)
+            .await
+        {
+            return Err(self.abandon(&journal, err).await);
+        }
         journal.stage = MoveStage::Committing;
         if let Err(err) = move_journal::write(self.data_dir(), &journal).await {
             // 原子写失败时盘上还是上一版（复制中），原件没动，照提交前失败处理。
@@ -673,7 +732,8 @@ impl Petalfall {
             let error = error_with_causes(&err);
             tracing::error!(id = %journal.id, %error, "移动日志没记上已提交，接着收尾");
         }
-        Ok(self.settle(journal).await)
+        // 刚提交完、还占着这个实例：原游戏目录里不会有同名的新实例。
+        Ok(self.settle(journal, env, false).await.outcome)
     }
 
     /// 占执行那一侧的门；等的时候响应取消。
@@ -725,7 +785,7 @@ impl Petalfall {
         events: Option<&EventSink>,
         env: &MoveEnv,
     ) -> Result<Staged> {
-        let staging = staging_dir(journal);
+        let (staging, staged_instance, staged_backups) = staging_paths(journal);
         let id = journal.id.clone();
         let source = journal.source_game_dir.clone();
         let instance_dir = inspection.instance_dir.clone();
@@ -751,16 +811,10 @@ impl Petalfall {
             let report = |bytes, files| progress.advance(bytes, files);
             let control = env.control(cancel.as_ref(), &report);
             std::fs::create_dir_all(&staging).map_err(|source| io_error(&staging, source))?;
-            let instance_digests = copy_tree(
-                &instance_dir,
-                &staging.join(STAGED_INSTANCE),
-                &instance,
-                &control,
-            )?;
+            let instance_digests = copy_tree(&instance_dir, &staged_instance, &instance, &control)?;
             let backups = match backups {
                 Some(scan) => {
-                    let digests =
-                        copy_tree(&backups_dir, &staging.join(STAGED_BACKUPS), &scan, &control)?;
+                    let digests = copy_tree(&backups_dir, &staged_backups, &scan, &control)?;
                     Some((scan, digests))
                 }
                 None => None,
@@ -785,7 +839,7 @@ impl Petalfall {
         events: Option<&EventSink>,
         env: &MoveEnv,
     ) -> Result<()> {
-        let staging = staging_dir(journal);
+        let (_, staged_instance, staged_backups) = staging_paths(journal);
         let instance_dir = inspection.instance_dir.clone();
         let backups_dir = inspection.backups_dir.clone();
         let cancel = self.cancel_token().cloned();
@@ -801,13 +855,13 @@ impl Petalfall {
             let report = |bytes, files| progress.advance(bytes, files);
             let control = env.control(cancel.as_ref(), &report);
             verify_tree(
-                &staging.join(STAGED_INSTANCE),
+                &staged_instance,
                 &staged.instance,
                 &staged.instance_digests,
                 &control,
             )?;
             if let Some((scan, digests)) = &staged.backups {
-                verify_tree(&staging.join(STAGED_BACKUPS), scan, digests, &control)?;
+                verify_tree(&staged_backups, scan, digests, &control)?;
             }
             ensure_unchanged(&instance_dir, Some(&staged.instance))?;
             ensure_unchanged(&backups_dir, staged.backups.as_ref().map(|b| &b.0))?;
@@ -817,27 +871,31 @@ impl Petalfall {
         .await
     }
 
-    /// 提交：同卷一次改名到目标；跨卷先把原件改名到旧目录，再把暂存改名到目标，第二步失败时把原件改回原位。
-    /// 原件在原位的失败删掉暂存与日志再报错；原件改不回去时日志留给启动收尾，报错里带上两边的路径。
+    /// 提交。同卷：原备份（有的话）改名进旧目录，再把实例改名到目标。跨卷：原件改名进旧目录，原备份（有的话）
+    /// 跟进去，再把暂存里的副本改名到目标。哪一步失败都按相反的顺序改回去：都改回去了就删暂存与日志再报错；有改
+    /// 不回去的，日志留给启动收尾，报错里带上各处路径。
     async fn commit(&self, inspection: &Inspection, journal: &MoveJournal) -> Result<()> {
-        let original = inspection.instance_dir.clone();
-        let dest = journal.target_game_dir.join(VERSIONS_DIR).join(&journal.id);
-        let outcome = match (journal.staging_dir.clone(), journal.old_dir.clone()) {
-            (Some(staging), Some(old)) => {
-                let staged = staging.join(STAGED_INSTANCE);
-                tokio::task::spawn_blocking(move || commit_cross(&original, &old, &staged, &dest))
-                    .await?
-            }
-            _ => tokio::task::spawn_blocking(move || rename_no_replace(&original, &dest))
-                .await?
-                .map_err(CommitError::Restored),
+        let paths = CommitPaths {
+            original: inspection.instance_dir.clone(),
+            original_backups: inspection.backups_dir.clone(),
+            dest: journal.target_game_dir.join(VERSIONS_DIR).join(&journal.id),
+            old_dir: journal.old_dir.clone(),
+            old_instance: journal.old_instance(),
+            old_backups: journal.old_backups(),
         };
+        let staged = journal.staged_instance();
+        let backups_staged = journal.backups_staged;
+        let outcome = tokio::task::spawn_blocking(move || match &staged {
+            Some(staged) => commit_cross(&paths, staged, backups_staged),
+            None => commit_same(&paths),
+        })
+        .await?;
         match outcome {
             Ok(()) => Ok(()),
             Err(CommitError::Restored(err)) => Err(self.abandon(journal, err).await),
             Err(CommitError::Stranded(err)) => {
                 let error = error_with_causes(&err);
-                tracing::error!(id = %journal.id, %error, "提交失败且原件没能改回原位，日志留给启动收尾");
+                tracing::error!(id = %journal.id, %error, "提交失败且没能全部改回原位，日志留给启动收尾");
                 Err(err)
             }
         }
@@ -853,15 +911,20 @@ impl Petalfall {
         err
     }
 
-    /// 回滚的收拾：删暂存，从目标的依赖版本记录里收回目录没落下的基底版本（不收回的话，日后玩家在那边装出同名
-    /// 版本会被当成依赖版本藏起来），两样都成了再删日志（日志删不掉只记日志：再来一遍做的是同样的事）。
+    /// 回滚的收拾：收进旧目录的原备份改回原位；删暂存；要带的基底版本里没复制完的目录（没有版本 JSON 的只有这次
+    /// 复制的一部分）整个删掉，再从目标的依赖版本记录里收回没落下的（不收回的话，日后玩家在那边装出同名版本会被
+    /// 当成依赖版本藏起来）；旧目录空了删掉。都成了再删日志（日志删不掉只记日志：再来一遍做的是同样的事）。原件
+    /// 改回原位由调用方先做：旧目录里还有东西时删不掉它，报错，日志留着。
     async fn discard(&self, journal: &MoveJournal) -> Result<()> {
+        restore_original_backups(journal).await?;
         if let Some(staging) = journal.staging_dir.clone() {
             blocking(move || remove_tree(&staging)).await?;
         }
         if !journal.bases.is_empty() {
+            remove_partial_bases(&journal.target_game_dir, &journal.bases).await?;
             forget_unlanded_base_versions_in(&journal.target_game_dir, &journal.bases).await?;
         }
+        remove_empty_dir(&journal.old_dir).await?;
         self.drop_journal(journal).await;
         prune_moving_dirs(journal).await;
         Ok(())
@@ -874,121 +937,407 @@ impl Petalfall {
         }
     }
 
-    /// 提交之后的收尾：备份、游玩记录、删旧目录与暂存、删日志。执行成功后与启动收尾都走这里，可以重入：记录迁移
-    /// 在已经迁过的盘面上什么都不做，迁完记下 [`MoveStage::Settled`]，之后再来只做清理。失败只记跟进项：实例已经
-    /// 在目标里，不能再报移动失败。清理没做完时日志留着，下次启动再清。
-    async fn settle(&self, mut journal: MoveJournal) -> MoveOutcome {
+    /// 提交之后的收尾：备份、游玩记录、目标的依赖版本记录，再删旧目录与暂存。执行成功后与启动收尾都走这里，可以
+    /// 重入：备份只并按 token 收着、还没并过去的，游玩记录迁过一次就记进日志，三样都收拾完记下
+    /// [`MoveStage::Settled`]，之后再来只做清理。失败只记跟进项：实例已经在目标里，不能再报移动失败。调用方确认过、
+    /// 收拾完了、残留也清完了才删日志。
+    ///
+    /// `source_reused`：原位置此刻有同名的目录，即原游戏目录里有了同名的新实例。这时原账下这个名字的游玩记录分不清
+    /// 是谁的，不迁；结果里告诉调用方别去掉原游戏目录的配置引用。
+    async fn settle(
+        &self,
+        mut journal: MoveJournal,
+        env: &MoveEnv,
+        source_reused: bool,
+    ) -> Settlement {
         let mut follow_ups = Vec::new();
-        let mut staging_safe = true;
+        let mut unfinished = Vec::new();
+        let backups_carried = settle_backups(&journal, env, &mut follow_ups).await;
         if journal.stage != MoveStage::Settled {
-            carry_backups(&journal, &mut follow_ups).await;
-            if let Err(err) = self
-                .move_play_records(
-                    &journal.id,
-                    &journal.source_game_dir,
-                    &journal.target_game_dir,
-                )
-                .await
+            let records_done = self
+                .settle_records(&mut journal, source_reused, &mut follow_ups)
+                .await;
+            let bases_done = match forget_base_versions_in(
+                &journal.target_game_dir,
+                std::slice::from_ref(&journal.id),
+            )
+            .await
             {
-                let reason = error_with_causes(&err);
-                tracing::warn!(id = %journal.id, %reason, "游玩记录没挪过去，已记下待补");
-                follow_ups.push(MoveFollowUp::PlayRecords(reason));
-            }
-            journal.stage = MoveStage::Settled;
-            if let Err(err) = move_journal::write(self.data_dir(), &journal).await {
-                // 下次启动会把记录再迁一遍；那时并备份读的正是暂存里的备份副本，这次删到一半的话，原目录里没并过去
-                // 的那些就会跟着被当成并完删掉。所以没记上之前不删暂存。
-                let error = error_with_causes(&err);
-                tracing::error!(id = %journal.id, %error, "移动日志没记上记录已迁完，暂存留到下次启动");
-                staging_safe = false;
-            }
-        }
-        let mut leftovers_remain = false;
-        if let Some(old) = journal.old_dir.clone() {
-            leftovers_remain |= !remove_leftover(&journal.id, old, &mut follow_ups).await;
-        }
-        if let Some(staging) = journal.staging_dir.clone() {
-            if staging_safe {
-                leftovers_remain |= !remove_leftover(&journal.id, staging, &mut follow_ups).await;
+                Ok(()) => true,
+                Err(err) => {
+                    // 目标那边陈旧的同名依赖版本记录会把移过去的实例藏起来；没去掉就停在已提交，下次启动再去。
+                    let error = error_with_causes(&err);
+                    tracing::warn!(id = %journal.id, %error, "目标的依赖版本记录没去掉它，下次启动再去");
+                    unfinished.push(format!("目标的依赖版本记录里还记着它：{error}"));
+                    false
+                }
+            };
+            journal.stage = if backups_carried && records_done && bases_done {
+                MoveStage::Settled
             } else {
-                follow_ups.push(MoveFollowUp::Cleanup {
-                    path: staging,
-                    reason: "移动日志没写成，留到下次启动再删".to_owned(),
-                });
-                leftovers_remain = true;
+                MoveStage::Committed
+            };
+            if let Err(err) = move_journal::write(self.data_dir(), &journal).await {
+                // 下次启动按盘上的旧进度再来一遍也对：并备份只并还没并过去的，游玩记录在原账下已经没有它时什么都不做。
+                let error = error_with_causes(&err);
+                tracing::error!(id = %journal.id, %error, "移动日志没记上收尾进度，下次启动再来一遍");
             }
         }
-        if !leftovers_remain {
+        let leftovers_remain = clean_up(&journal, env, &mut follow_ups).await;
+        if leftovers_remain {
+            unfinished.push("旧目录或暂存还没删完".to_owned());
+        }
+        if journal.stage != MoveStage::Settled {
+            unfinished.push("备份或游玩记录还没收拾完".to_owned());
+        }
+        if journal.config_done && unfinished.is_empty() {
             self.drop_journal(&journal).await;
         }
         prune_moving_dirs(&journal).await;
-        tracing::info!(id = %journal.id, follow_ups = follow_ups.len(), "实例移动收尾完成");
-        MoveOutcome {
-            token: journal.token.clone(),
-            id: journal.id,
-            source_game_dir: journal.source_game_dir,
-            target_game_dir: journal.target_game_dir,
-            follow_ups,
-            forget_source_refs: true,
+        tracing::info!(
+            id = %journal.id,
+            stage = ?journal.stage,
+            follow_ups = follow_ups.len(),
+            unfinished = unfinished.len(),
+            "实例移动收尾完成"
+        );
+        Settlement {
+            outcome: MoveOutcome {
+                token: journal.token.clone(),
+                id: journal.id,
+                source_game_dir: journal.source_game_dir,
+                target_game_dir: journal.target_game_dir,
+                follow_ups,
+                forget_source_refs: !source_reused,
+            },
+            unfinished,
+        }
+    }
+
+    /// 游玩记录并进目标那本账（累加，原账清掉），返回这一项收拾完了没有。原游戏目录里有了同名的新实例时不迁也算完。
+    async fn settle_records(
+        &self,
+        journal: &mut MoveJournal,
+        source_reused: bool,
+        follow_ups: &mut Vec<MoveFollowUp>,
+    ) -> bool {
+        if journal.records_moved {
+            return true;
+        }
+        if source_reused {
+            let reason = format!(
+                "原游戏目录里已经有了同名的新实例（{}），原账下这个名字的游玩记录分不清是谁的，留在原游戏目录",
+                journal
+                    .source_game_dir
+                    .join(VERSIONS_DIR)
+                    .join(&journal.id)
+                    .display()
+            );
+            tracing::warn!(id = %journal.id, %reason, "游玩记录不迁");
+            follow_ups.push(MoveFollowUp::PlayRecords(reason));
+            return true;
+        }
+        match self
+            .move_play_records(
+                &journal.id,
+                &journal.source_game_dir,
+                &journal.target_game_dir,
+            )
+            .await
+        {
+            Ok(()) => {
+                journal.records_moved = true;
+                true
+            }
+            Err(err) => {
+                let reason = error_with_causes(&err);
+                tracing::warn!(id = %journal.id, %reason, "游玩记录没挪过去，下次启动再迁");
+                follow_ups.push(MoveFollowUp::PlayRecords(reason));
+                false
+            }
         }
     }
 }
 
-/// 备份跟过去。同卷直接把 `instances/<id>` 并过去。跨卷把暂存里的副本并进目标，并成了才删原游戏目录里的那份；
-/// 并不成时原件留着，记跟进项。没复制过备份（当时没有）就什么都不碰：原目录里那时没有它的备份，现在有的也不是它的。
-async fn carry_backups(journal: &MoveJournal, follow_ups: &mut Vec<MoveFollowUp>) {
-    let (source, target, id) = (
-        &journal.source_game_dir,
-        &journal.target_game_dir,
-        journal.id.as_str(),
-    );
-    if journal.same_volume {
-        if let Err(err) = move_backups_between(source, target, id).await {
-            let reason = error_with_causes(&err);
-            tracing::warn!(id, %reason, "备份没挪过去，留在原游戏目录");
-            follow_ups.push(MoveFollowUp::WorldBackups(reason));
+/// 一次收尾的结局。
+struct Settlement {
+    outcome: MoveOutcome,
+    /// 日志还得留着的原因（备份或记录没收拾完、依赖版本记录没改上、残留没删完）；都做完了为空。跟进项另在 `outcome` 里。
+    unfinished: Vec<String>,
+}
+
+/// 备份跟过去，返回该并的都并过去了没有。原备份在提交时按 token 收进了旧目录，这里只按 token 路径处理，绝不按实例
+/// id 去动原游戏目录：那里此时可能已经有了同名的新实例和它的备份。同卷并的就是原备份本身；跨卷并的是暂存里校验
+/// 过的副本，副本全部并过去、目标里有、刷到盘上之后才删原备份，否则原备份留着、记跟进项。只剩清理时
+/// （[`MoveStage::Settled`]）不再并：那时还有没并过去的，只能是盘面后来变过，不敢再动，留给玩家。
+async fn settle_backups(
+    journal: &MoveJournal,
+    env: &MoveEnv,
+    follow_ups: &mut Vec<MoveFollowUp>,
+) -> bool {
+    let (target, id) = (&journal.target_game_dir, journal.id.as_str());
+    let original = journal.old_backups();
+    let pending = journal.staged_backups().unwrap_or_else(|| original.clone());
+    let mut cause = None;
+    if journal.stage != MoveStage::Settled
+        && (journal.same_volume || journal.backups_staged)
+        && let Err(err) = merge_staged_backups(&pending, target, id).await
+    {
+        let reason = error_with_causes(&err);
+        tracing::warn!(id, %reason, "备份没全部并进目标");
+        cause = Some(reason);
+    }
+    let left = match has_entries(&pending).await {
+        Ok(left) => left,
+        Err(err) => {
+            cause.get_or_insert_with(|| error_with_causes(&err));
+            true
         }
-        return;
+    };
+    let with_cause = |what: String, cause: Option<String>| match cause {
+        Some(cause) => format!("{what}：{cause}"),
+        None => what,
+    };
+    if left {
+        let what = if journal.same_volume {
+            format!("原备份没全部并进目标，留在 {}", pending.display())
+        } else {
+            format!(
+                "暂存里还有没并进目标的备份（{}），原备份留在 {}",
+                pending.display(),
+                original.display()
+            )
+        };
+        follow_ups.push(MoveFollowUp::WorldBackups(with_cause(what, cause)));
+        return false;
+    }
+    if journal.same_volume {
+        return true;
+    }
+    match path_exists(&original).await {
+        Ok(false) => return true,
+        Ok(true) => {}
+        Err(err) => {
+            follow_ups.push(MoveFollowUp::Cleanup {
+                path: original,
+                reason: error_with_causes(&err),
+            });
+            return true;
+        }
     }
     if !journal.backups_staged {
-        return;
+        // 提交时核对过原备份在不在与有没有副本一致，到这里只能是盘面后来变过：没有副本的原备份不删。
+        follow_ups.push(MoveFollowUp::WorldBackups(format!(
+            "原备份没有复制过副本，留在 {}",
+            original.display()
+        )));
+        return true;
     }
-    let staged = staging_dir(journal).join(STAGED_BACKUPS);
-    if let Err(err) = merge_staged_backups(&staged, target, id).await {
-        let reason = error_with_causes(&err);
-        tracing::warn!(id, %reason, "暂存里的备份没并进目标，原游戏目录里的留着");
-        follow_ups.push(MoveFollowUp::WorldBackups(reason));
-        return;
-    }
-    // 暂存里没有副本时合并什么都不做也算成；这时目标里也没有就说明副本没了（目标那边被删过），原游戏目录里的是
-    // 唯一的一份，不能删。
+    // 副本全部并过去了也可能不在目标里（目标那边被删过）：这时原备份是唯一的一份。
     let merged = instance_backups_dir_in(target, id);
     match path_exists(&merged).await {
         Ok(true) => {}
         Ok(false) => {
-            let reason = format!(
-                "目标里没有这份备份（{}），原游戏目录里的留着",
-                merged.display()
-            );
-            tracing::warn!(id, %reason, "备份副本不见了");
-            follow_ups.push(MoveFollowUp::WorldBackups(reason));
-            return;
+            follow_ups.push(MoveFollowUp::WorldBackups(format!(
+                "目标里没有这份备份（{}），原备份留在 {}",
+                merged.display(),
+                original.display()
+            )));
+            return true;
         }
         Err(err) => {
-            let reason = error_with_causes(&err);
-            tracing::warn!(id, %reason, "看不了目标里的备份，原游戏目录里的留着");
-            follow_ups.push(MoveFollowUp::WorldBackups(reason));
-            return;
+            follow_ups.push(MoveFollowUp::WorldBackups(format!(
+                "看不了目标里的备份（{}），原备份留在 {}",
+                error_with_causes(&err),
+                original.display()
+            )));
+            return true;
         }
     }
-    if let Err(err) = remove_instance_backups_in(source, id).await {
-        let reason = error_with_causes(&err);
-        tracing::warn!(id, %reason, "备份已并进目标，原游戏目录里的那份没删掉");
+    // 副本是改名并进目标的；两边不在一个卷上，原备份这边的删除先落了盘、目标那边的改名没落盘，断电后副本回到暂存，
+    // 而日志可能已经说收拾完了：先把目标那边刷到盘上。
+    let flushed = {
+        let env = env.clone();
+        let merged = merged.clone();
+        blocking(move || {
+            env.flush_dir(&merged)?;
+            match merged.parent() {
+                Some(parent) => env.flush_dir(parent),
+                None => Ok(()),
+            }
+        })
+        .await
+    };
+    if let Err(err) = flushed {
+        let reason = format!(
+            "目标里的备份没能刷到盘上，原备份留到下次启动再删：{}",
+            error_with_causes(&err)
+        );
+        tracing::warn!(id, %reason, "原备份先不删");
         follow_ups.push(MoveFollowUp::Cleanup {
-            path: instance_backups_dir_in(source, id),
+            path: original,
             reason,
         });
+        return true;
     }
+    remove_leftover(id, original, follow_ups).await;
+    true
+}
+
+/// 删旧目录与暂存里能删的，返回还有没有残留。原件（旧目录里的 `instance/`）要等目标里的实例刷到盘上才删：两边不在
+/// 一个卷上，原件这边的删除先落了盘、目标那边的改名没落盘，断电后两边就都没有了。暂存里的实例副本在目标里没有
+/// 实例时不删：那时它可能是唯一的一份。两处备份由 [`settle_backups`] 处理；这里删掉空了的容器，容器里不认得的东西
+/// 不删。
+async fn clean_up(
+    journal: &MoveJournal,
+    env: &MoveEnv,
+    follow_ups: &mut Vec<MoveFollowUp>,
+) -> bool {
+    let id = journal.id.as_str();
+    if let Some(staged) = journal.staged_instance() {
+        let versions = journal.target_game_dir.join(VERSIONS_DIR);
+        let dest = versions.join(id);
+        let dest_state = path_exists(&dest)
+            .await
+            .map_err(|err| format!("看不了目标里的实例（{}）", error_with_causes(&err)));
+        let original = journal.old_instance();
+        if present(&original, follow_ups).await {
+            match &dest_state {
+                Ok(true) => {
+                    let flushed = {
+                        let env = env.clone();
+                        let (dest, versions) = (dest.clone(), versions.clone());
+                        blocking(move || {
+                            env.flush_dir(&dest)?;
+                            env.flush_dir(&versions)
+                        })
+                        .await
+                    };
+                    match flushed {
+                        Ok(()) => {
+                            remove_leftover(id, original, follow_ups).await;
+                        }
+                        Err(err) => {
+                            let reason = format!(
+                                "目标里的实例没能刷到盘上，原件留到下次启动再删：{}",
+                                error_with_causes(&err)
+                            );
+                            tracing::warn!(id, %reason, "原件先不删");
+                            follow_ups.push(MoveFollowUp::Cleanup {
+                                path: original,
+                                reason,
+                            });
+                        }
+                    }
+                }
+                Ok(false) => follow_ups.push(MoveFollowUp::Cleanup {
+                    path: original,
+                    reason: "目标里没有这个实例，原件留着".to_owned(),
+                }),
+                Err(reason) => follow_ups.push(MoveFollowUp::Cleanup {
+                    path: original,
+                    reason: format!("{reason}，原件留着"),
+                }),
+            }
+        }
+        if present(&staged, follow_ups).await {
+            match &dest_state {
+                Ok(true) => {
+                    remove_leftover(id, staged, follow_ups).await;
+                }
+                Ok(false) => follow_ups.push(MoveFollowUp::Cleanup {
+                    path: staged,
+                    reason: "目标里没有这个实例，暂存里的副本可能是唯一的一份，没有删".to_owned(),
+                }),
+                Err(reason) => follow_ups.push(MoveFollowUp::Cleanup {
+                    path: staged,
+                    reason: format!("{reason}，暂存里的副本没有删"),
+                }),
+            }
+        }
+    }
+    let mut remain = remove_container(
+        &journal.old_dir,
+        &[journal.old_instance(), journal.old_backups()],
+        follow_ups,
+    )
+    .await;
+    if let (Some(staging), Some(instance), Some(backups)) = (
+        &journal.staging_dir,
+        journal.staged_instance(),
+        journal.staged_backups(),
+    ) {
+        remain |= remove_container(staging, &[instance, backups], follow_ups).await;
+    }
+    remain
+}
+
+/// 路径上有没有东西；看不了时记跟进项，按没有处理（不去动它）。
+async fn present(path: &Path, follow_ups: &mut Vec<MoveFollowUp>) -> bool {
+    match path_exists(path).await {
+        Ok(present) => present,
+        Err(err) => {
+            follow_ups.push(MoveFollowUp::Cleanup {
+                path: path.to_path_buf(),
+                reason: error_with_causes(&err),
+            });
+            false
+        }
+    }
+}
+
+/// 旧目录或暂存这样的容器空了就删掉，返回它还在不在。`known` 是容器里这次移动放的东西（留着的都已记过跟进项）；
+/// 别的东西不是这次移动放的，记跟进项、不删。
+async fn remove_container(
+    dir: &Path,
+    known: &[PathBuf],
+    follow_ups: &mut Vec<MoveFollowUp>,
+) -> bool {
+    let mut read = match tokio::fs::read_dir(dir).await {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(source) => {
+            follow_ups.push(MoveFollowUp::Cleanup {
+                path: dir.to_path_buf(),
+                reason: error_with_causes(&io_error(dir, source)),
+            });
+            return true;
+        }
+    };
+    let mut entries = Vec::new();
+    loop {
+        match read.next_entry().await {
+            Ok(Some(entry)) => entries.push(entry.path()),
+            Ok(None) => break,
+            Err(source) => {
+                follow_ups.push(MoveFollowUp::Cleanup {
+                    path: dir.to_path_buf(),
+                    reason: error_with_causes(&io_error(dir, source)),
+                });
+                return true;
+            }
+        }
+    }
+    drop(read);
+    if entries.is_empty() {
+        return match remove_empty_dir(dir).await {
+            Ok(()) => false,
+            Err(err) => {
+                follow_ups.push(MoveFollowUp::Cleanup {
+                    path: dir.to_path_buf(),
+                    reason: error_with_causes(&err),
+                });
+                true
+            }
+        };
+    }
+    for path in entries.into_iter().filter(|path| !known.contains(path)) {
+        follow_ups.push(MoveFollowUp::Cleanup {
+            path,
+            reason: "不是这次移动放的，没有删".to_owned(),
+        });
+    }
+    true
 }
 
 /// 删移动留下的一个中间目录；删不掉记跟进项。返回删干净了没有。
@@ -1005,12 +1354,88 @@ async fn remove_leftover(id: &str, dir: PathBuf, follow_ups: &mut Vec<MoveFollow
     }
 }
 
+/// 回滚时把收进旧目录的原备份改回原位。原位已经有东西时改名失败、报错：那不是这个实例的备份，不能盖掉。
+async fn restore_original_backups(journal: &MoveJournal) -> Result<()> {
+    let stashed = journal.old_backups();
+    let original = instance_backups_dir_in(&journal.source_game_dir, &journal.id);
+    blocking(move || {
+        if !path_exists_blocking(&stashed)? {
+            return Ok(());
+        }
+        if let Some(parent) = original.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+        }
+        rename_no_replace(&stashed, &original)
+    })
+    .await
+}
+
+/// 回滚时删掉要带的基底版本里没复制完的目录。它们移动前在目标里没有（有的话会算作冲突或可复用），版本 JSON 最后
+/// 复制，所以没有 JSON 的目录里只有这次复制的一部分；留着的话，下次预检会把它当成内容不同的同名基底拦下。
+async fn remove_partial_bases(target: &Path, bases: &[String]) -> Result<()> {
+    let versions = target.join(VERSIONS_DIR);
+    let bases = bases.to_vec();
+    blocking(move || {
+        for base in &bases {
+            if !is_safe_instance_id(base) {
+                return Err(InstanceError::InvalidId { id: base.clone() }.into());
+            }
+            let dir = versions.join(base);
+            if !path_exists_blocking(&dir)? {
+                continue;
+            }
+            let json = dir.join(format!("{base}.json"));
+            let landed = match std::fs::metadata(&json) {
+                Ok(meta) => meta.is_file(),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+                Err(source) => return Err(io_error(&json, source)),
+            };
+            if !landed {
+                tracing::info!(base, path = %dir.display(), "回滚：删掉没复制完的基底版本目录");
+                remove_tree(&dir)?;
+            }
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// 目录里还有没有东西；不在或空着为没有，空着的顺手删掉。
+async fn has_entries(dir: &Path) -> Result<bool> {
+    let mut read = match tokio::fs::read_dir(dir).await {
+        Ok(read) => read,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(io_error(dir, source)),
+    };
+    if read
+        .next_entry()
+        .await
+        .map_err(|source| io_error(dir, source))?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    drop(read);
+    remove_empty_dir(dir).await?;
+    Ok(false)
+}
+
+/// 删一个空目录；不在算成功，不空照实报错。
+async fn remove_empty_dir(dir: &Path) -> Result<()> {
+    match tokio::fs::remove_dir(dir).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(io_error(dir, source)),
+    }
+}
+
 /// 两边游戏目录里的 `.petalfall/moving` 空了就删掉。只删空目录：别的移动可能正在里面放东西。删不掉只记日志，空
 /// 目录不碍事。
 async fn prune_moving_dirs(journal: &MoveJournal) {
-    let parents = [&journal.staging_dir, &journal.old_dir]
-        .into_iter()
-        .flatten()
+    let parents = journal
+        .staging_dir
+        .iter()
+        .chain(std::iter::once(&journal.old_dir))
         .filter_map(|dir| dir.parent());
     for dir in parents {
         match tokio::fs::remove_dir(dir).await {
@@ -1027,12 +1452,14 @@ async fn prune_moving_dirs(journal: &MoveJournal) {
     }
 }
 
-/// 跨卷日志的暂存目录。
-fn staging_dir(journal: &MoveJournal) -> PathBuf {
-    journal
-        .staging_dir
-        .clone()
-        .expect("跨卷移动的日志由 MoveJournal::new 带上暂存目录")
+/// 跨卷日志的暂存目录，与里面实例副本、备份副本的位置。
+fn staging_paths(journal: &MoveJournal) -> (PathBuf, PathBuf, PathBuf) {
+    const CROSS: &str = "跨卷移动的日志由 MoveJournal::new 带上暂存目录";
+    (
+        journal.staging_dir.clone().expect(CROSS),
+        journal.staged_instance().expect(CROSS),
+        journal.staged_backups().expect(CROSS),
+    )
 }
 
 /// 基底版本的复制顺序：由远及近，每个版本的 JSON 最后。中途断了时，目标里有 JSON 的基底版本一定齐全、它的父版本
@@ -1166,37 +1593,95 @@ fn first_difference(before: &TreeScan, after: &TreeScan) -> Option<PathBuf> {
         .cloned()
 }
 
-/// 跨卷的两步改名。
-fn commit_cross(
-    original: &Path,
-    old: &Path,
-    staged: &Path,
-    dest: &Path,
-) -> std::result::Result<(), CommitError> {
-    if let Some(parent) = old.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|source| CommitError::Restored(io_error(parent, source)))?;
+/// 提交要动的几处位置。
+struct CommitPaths {
+    /// 原件 `<源>/versions/<id>` 与原备份 `<源>/.petalfall/backups/instances/<id>`。
+    original: PathBuf,
+    original_backups: PathBuf,
+    /// 目标位置 `<目标>/versions/<id>`。
+    dest: PathBuf,
+    /// 原游戏目录里按 token 收东西的旧目录，与原件、原备份在里面的位置。
+    old_dir: PathBuf,
+    old_instance: PathBuf,
+    old_backups: PathBuf,
+}
+
+/// 同卷：原备份（有的话）改名进旧目录，再把实例改名到目标。
+fn commit_same(paths: &CommitPaths) -> std::result::Result<(), CommitError> {
+    let mut moved = Vec::new();
+    if path_exists_blocking(&paths.original_backups).map_err(CommitError::Restored)? {
+        std::fs::create_dir_all(&paths.old_dir)
+            .map_err(|source| CommitError::Restored(io_error(&paths.old_dir, source)))?;
+        rename_no_replace(&paths.original_backups, &paths.old_backups)
+            .map_err(CommitError::Restored)?;
+        moved.push((&paths.old_backups, &paths.original_backups));
     }
-    rename_no_replace(original, old).map_err(CommitError::Restored)?;
-    let Err(err) = rename_no_replace(staged, dest) else {
-        return Ok(());
-    };
-    match rename_no_replace(old, original) {
-        Ok(()) => Err(CommitError::Restored(err)),
-        Err(back) => {
-            let message = format!(
-                "实例目录已改名到 {}，改回 {} 失败（{}），下次启动时再改回；提交失败的原因：{}",
-                old.display(),
-                original.display(),
-                error_with_causes(&back),
-                error_with_causes(&err),
-            );
-            Err(CommitError::Stranded(io_error(
-                old,
-                std::io::Error::other(message),
-            )))
+    match rename_no_replace(&paths.original, &paths.dest) {
+        Ok(()) => Ok(()),
+        Err(err) => put_back(err, &moved),
+    }
+}
+
+/// 跨卷：原件改名进旧目录，原备份（有的话）跟进去，再把暂存里的副本改名到目标。
+fn commit_cross(
+    paths: &CommitPaths,
+    staged: &Path,
+    backups_staged: bool,
+) -> std::result::Result<(), CommitError> {
+    let has_backups =
+        path_exists_blocking(&paths.original_backups).map_err(CommitError::Restored)?;
+    if has_backups != backups_staged {
+        // 校验之后原备份冒出来或没了，与暂存里的副本对不上：照样提交的话，收尾会把没有副本的原备份当成并过去删掉，
+        // 或者把已经删掉的备份并回去。
+        return Err(CommitError::Restored(CoreError::InstanceMoveVerifyFailed {
+            path: paths.original_backups.clone(),
+        }));
+    }
+    std::fs::create_dir_all(&paths.old_dir)
+        .map_err(|source| CommitError::Restored(io_error(&paths.old_dir, source)))?;
+    rename_no_replace(&paths.original, &paths.old_instance).map_err(CommitError::Restored)?;
+    let mut moved = vec![(&paths.old_instance, &paths.original)];
+    if has_backups {
+        if let Err(err) = rename_no_replace(&paths.original_backups, &paths.old_backups) {
+            return put_back(err, &moved);
+        }
+        moved.push((&paths.old_backups, &paths.original_backups));
+    }
+    match rename_no_replace(staged, &paths.dest) {
+        Ok(()) => Ok(()),
+        Err(err) => put_back(err, &moved),
+    }
+}
+
+/// 提交中途失败：已经改了名的（现在的位置，原来的位置）按相反的顺序改回去。都改回去了原件就在原位；有改不回去的，
+/// 日志留给启动收尾，报错里带上两边的路径。
+fn put_back(
+    err: CoreError,
+    moved: &[(&PathBuf, &PathBuf)],
+) -> std::result::Result<(), CommitError> {
+    let mut stuck = Vec::new();
+    for (now, back) in moved.iter().rev() {
+        if let Err(again) = rename_no_replace(now, back) {
+            stuck.push(format!(
+                "{} 改回 {} 失败（{}）",
+                now.display(),
+                back.display(),
+                error_with_causes(&again)
+            ));
         }
     }
+    let Some((first, _)) = moved.first().filter(|_| !stuck.is_empty()) else {
+        return Err(CommitError::Restored(err));
+    };
+    let message = format!(
+        "{}，下次启动时再改回；提交失败的原因：{}",
+        stuck.join("；"),
+        error_with_causes(&err)
+    );
+    Err(CommitError::Stranded(io_error(
+        first,
+        std::io::Error::other(message),
+    )))
 }
 
 fn scan_if_present(dir: &Path) -> Result<Option<TreeScan>> {
@@ -1361,11 +1846,11 @@ impl StepProgress {
 /// 一份日志涉及的几处位置此刻在不在。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Disk {
-    /// 原位置 `<源>/versions/<id>`。
+    /// 原位置 `<源>/versions/<id>`。提交之后它在，就是原游戏目录里有了同名的新实例（或改名没落盘）。
     source: bool,
     /// 目标位置 `<目标>/versions/<id>`。
     target: bool,
-    /// 跨卷时原件提交中改名到的旧目录。
+    /// 跨卷时原件提交中改名到的位置（旧目录里的 `instance/`）。
     old: bool,
     /// 跨卷时暂存里的实例副本。
     staged: bool,
@@ -1378,25 +1863,25 @@ struct Disk {
 enum Verdict {
     /// 已经提交：补做记录迁移与清理。
     Finish,
-    /// 提交到一半、原件已不在，只剩校验过的暂存副本：改名到目标，再补做记录迁移与清理。
+    /// 已经提交、目标里却没有，只剩校验过的暂存副本：改名到目标，再补做记录迁移与清理。
     RollForward,
-    /// 原件停在旧目录：改回原位，再删暂存。
+    /// 原件停在旧目录：改回原位，原备份也改回去，再删暂存。
     RenameBack,
-    /// 原件在原位（或没有我们的东西可保）：删暂存。
+    /// 原件在原位（或没有我们的东西可保）：原备份改回原位，删暂存。
     Discard,
     /// 盘面与日志对不上，动哪边都可能删掉唯一的一份：不动，留给玩家。
     Stuck(&'static str),
 }
 
-/// 收尾办法。原则：原件或它唯一的副本绝不删；能确认提交过才补完，否则回滚。
+/// 收尾办法。原则：原件或它唯一的副本绝不删；能确认提交过才补完，否则回滚；复制阶段的暂存没校验过，绝不往前补完。
 fn judge(stage: MoveStage, same_volume: bool, disk: Disk) -> Verdict {
     let verdict = if same_volume {
         judge_same_volume(stage, disk)
     } else {
         judge_cross_volume(stage, disk)
     };
-    // 目标游戏目录整个不在了（被删了，盘还在）：补完会在原处重新建出它，跨卷时还会把原游戏目录里的备份当成并过去
-    // 了删掉，而它们这时是唯一的一份。只剩清理的不受影响：清理只删两边以 token 命名的中间目录。
+    // 目标游戏目录整个不在了（被删了，盘还在）：补完会在原处重新建出它（并备份、改依赖版本记录都要建目录），把
+    // 记录迁进一个已经没有的地方。只剩清理的不受影响：清理只删两边以 token 命名的中间目录。
     if !disk.target_root
         && stage != MoveStage::Settled
         && matches!(verdict, Verdict::Finish | Verdict::RollForward)
@@ -1410,6 +1895,11 @@ fn judge_same_volume(stage: MoveStage, disk: Disk) -> Verdict {
     use MoveStage::{Committed, Committing, Copying, Settled};
     // 同卷的提交是一次改名，要么在原位要么在目标。
     match stage {
+        // 实例在原位、不在目标：可能是改名没落盘，那原位置的就是它本身，补完会把它的备份并去目标；也可能是目标里的
+        // 被删了、原目录里又建了同名的新实例。分不清，不动。
+        Committed if !disk.target && disk.source => {
+            Verdict::Stuck("日志说已提交，可目标里没有这个实例，原位置却有")
+        }
         Committed | Settled => Verdict::Finish,
         Committing if disk.target && !disk.source => Verdict::Finish,
         Copying | Committing => Verdict::Discard,
@@ -1419,6 +1909,9 @@ fn judge_same_volume(stage: MoveStage, disk: Disk) -> Verdict {
 fn judge_cross_volume(stage: MoveStage, disk: Disk) -> Verdict {
     use MoveStage::{Committed, Committing, Copying, Settled};
     match stage {
+        // 「已提交」写在两步改名都成了之后，暂存副本是校验过的：目标里没有、暂存里还有，是第二步改名没落盘（两边不在
+        // 一个卷上，各自落盘），补做这一步。原件在不在旧目录都一样：原件要等目标刷到盘上才删。
+        Committed | Settled if !disk.target && disk.staged => Verdict::RollForward,
         Committed | Settled if !disk.target && disk.old => {
             Verdict::Stuck("日志说已提交，可目标里没有这个实例，原件的旧目录还在")
         }
@@ -1465,7 +1958,7 @@ async fn probe_reachable(path: &Path) -> bool {
 }
 
 impl Petalfall {
-    async fn recover_move(&self, journal: MoveJournal) -> MoveRecovery {
+    async fn recover_move(&self, journal: MoveJournal, env: &MoveEnv) -> MoveRecovery {
         let id = journal.id.clone();
         for dir in [&journal.source_game_dir, &journal.target_game_dir] {
             if !probe_reachable(dir).await {
@@ -1476,7 +1969,7 @@ impl Petalfall {
                 };
             }
         }
-        match self.resume_move(journal).await {
+        match self.resume_move(journal, env).await {
             Ok(recovery) => recovery,
             Err(err) => {
                 let reason = error_with_causes(&err);
@@ -1486,17 +1979,15 @@ impl Petalfall {
         }
     }
 
-    async fn resume_move(&self, journal: MoveJournal) -> Result<MoveRecovery> {
+    async fn resume_move(&self, journal: MoveJournal, env: &MoveEnv) -> Result<MoveRecovery> {
         let original = journal.source_game_dir.join(VERSIONS_DIR).join(&journal.id);
         let dest = journal.target_game_dir.join(VERSIONS_DIR).join(&journal.id);
-        let staged = journal
-            .staging_dir
-            .as_ref()
-            .map(|staging| staging.join(STAGED_INSTANCE));
+        let staged = journal.staged_instance();
+        let old = (!journal.same_volume).then(|| journal.old_instance());
         let disk = Disk {
             source: path_exists(&original).await?,
             target: path_exists(&dest).await?,
-            old: match &journal.old_dir {
+            old: match &old {
                 Some(old) => path_exists(old).await?,
                 None => false,
             },
@@ -1507,17 +1998,27 @@ impl Petalfall {
             target_root: path_exists(&journal.target_game_dir).await?,
         };
         let verdict = judge(journal.stage, journal.same_volume, disk);
-        tracing::info!(id = %journal.id, stage = ?journal.stage, ?disk, ?verdict, "收尾中断的移动");
+        tracing::info!(id = %journal.id, stage = ?journal.stage, config_done = journal.config_done, ?disk, ?verdict, "收尾中断的移动");
         let rolled_back = |journal: &MoveJournal| MoveRecovery::RolledBack {
             id: journal.id.clone(),
             source_game_dir: journal.source_game_dir.clone(),
             target_game_dir: journal.target_game_dir.clone(),
         };
         match verdict {
-            Verdict::Finish if journal.stage == MoveStage::Settled => {
-                // 记录早已迁完、配置引用也已改过，这次只清残留，不能再交出 Completed 让调用方重改一遍。
-                let outcome = self.settle(journal).await;
-                if outcome.follow_ups.is_empty() {
+            Verdict::Finish | Verdict::RollForward => {
+                if verdict == Verdict::RollForward {
+                    let staged = staged.expect("跨卷日志带暂存目录");
+                    blocking(move || rename_no_replace(&staged, &dest)).await?;
+                }
+                let config_done = journal.config_done;
+                // 提交之后原位置又有了同名目录：那是原游戏目录里的同名新实例，按 id 动原目录的事一概不做。
+                let settlement = self.settle(journal, env, disk.source).await;
+                if !config_done {
+                    return Ok(MoveRecovery::Completed(settlement.outcome));
+                }
+                // 调用方早已确认、配置当时改过：这次只补完记录与清理，不能再交出 Completed 让调用方重改一遍。
+                let outcome = settlement.outcome;
+                if outcome.follow_ups.is_empty() && settlement.unfinished.is_empty() {
                     return Ok(MoveRecovery::Settled {
                         id: outcome.id,
                         source_game_dir: outcome.source_game_dir,
@@ -1535,20 +2036,15 @@ impl Petalfall {
                             reason.clone()
                         }
                     })
+                    .chain(settlement.unfinished)
                     .collect();
                 Ok(MoveRecovery::Deferred {
                     id: outcome.id,
-                    reason: format!("上次移动留下的目录还是删不掉：{}", left.join("；")),
+                    reason: format!("上次移动还有没收完的：{}", left.join("；")),
                 })
             }
-            Verdict::Finish => Ok(MoveRecovery::Completed(self.settle(journal).await)),
-            Verdict::RollForward => {
-                let staged = staged.expect("跨卷日志带暂存目录");
-                blocking(move || rename_no_replace(&staged, &dest)).await?;
-                Ok(MoveRecovery::Completed(self.settle(journal).await))
-            }
             Verdict::RenameBack => {
-                let old = journal.old_dir.clone().expect("跨卷日志带旧目录");
+                let old = old.expect("只有跨卷日志判出改回原位");
                 blocking(move || rename_no_replace(&old, &original)).await?;
                 self.discard(&journal).await?;
                 Ok(rolled_back(&journal))
@@ -1557,21 +2053,16 @@ impl Petalfall {
                 self.discard(&journal).await?;
                 Ok(rolled_back(&journal))
             }
-            Verdict::Stuck(why) => {
-                let shown = |path: Option<&PathBuf>| {
-                    path.map_or_else(|| "无".to_owned(), |path| path.display().to_string())
-                };
-                Ok(MoveRecovery::Deferred {
-                    id: journal.id.clone(),
-                    reason: format!(
-                        "{why}，没有动它：原位置 {}，目标 {}，旧目录 {}，暂存 {}",
-                        original.display(),
-                        dest.display(),
-                        shown(journal.old_dir.as_ref()),
-                        shown(staged.as_ref()),
-                    ),
-                })
-            }
+            Verdict::Stuck(why) => Ok(MoveRecovery::Deferred {
+                id: journal.id.clone(),
+                reason: format!(
+                    "{why}，没有动它：原位置 {}，目标 {}，旧目录 {}，暂存 {}",
+                    original.display(),
+                    dest.display(),
+                    journal.old_dir.display(),
+                    staged.map_or_else(|| "无".to_owned(), |path| path.display().to_string()),
+                ),
+            }),
         }
     }
 }
@@ -1878,9 +2369,10 @@ mod tests {
         assert_eq!(minutes(dirs, &dirs.target).await, None);
     }
 
-    /// 实例、依赖、备份与记录都到了目标，原处与中间目录都清干净了。
+    /// 实例、依赖、备份与记录都到了目标，原处与中间目录都清干净了；日志等调用方确认，确认后删掉。
     async fn assert_moved(
         dirs: &Dirs,
+        moved: &MoveOutcome,
         instance: &BTreeMap<String, Vec<u8>>,
         backups: &BTreeMap<String, Vec<u8>>,
     ) {
@@ -1909,18 +2401,28 @@ mod tests {
         assert!(!dirs.backups_in(&dirs.source).exists());
         assert_eq!(minutes(dirs, &dirs.target).await, Some(60));
         assert_eq!(minutes(dirs, &dirs.source).await, None);
-        assert!(journals(dirs).is_empty(), "{:?}", journals(dirs));
         assert_no_moving_dir(&dirs.target);
         assert_no_moving_dir(&dirs.source);
+        assert_eq!(journals(dirs), [journal_file(&moved.token)]);
+        dirs.petalfall()
+            .confirm_instance_move(&moved.token)
+            .await
+            .unwrap();
+        assert!(journals(dirs).is_empty(), "{:?}", journals(dirs));
     }
 
-    fn outcome(dirs: &Dirs) -> MoveOutcome {
+    fn journal_file(token: &str) -> String {
+        format!("{token}.json")
+    }
+
+    /// 全部跟过去、能去掉原游戏目录引用的结果。
+    fn outcome(dirs: &Dirs, token: &str) -> MoveOutcome {
         MoveOutcome {
             id: ID.to_owned(),
             source_game_dir: dirs.source.clone(),
             target_game_dir: dirs.target.clone(),
             follow_ups: Vec::new(),
-            token: String::new(),
+            token: token.to_owned(),
             forget_source_refs: true,
         }
     }
@@ -2001,8 +2503,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(moved, outcome(&dirs));
-        assert_moved(&dirs, &instance, &backups).await;
+        assert!(!moved.token.is_empty());
+        assert_eq!(moved, outcome(&dirs, &moved.token));
+        assert_moved(&dirs, &moved, &instance, &backups).await;
         let steps = steps_of(&drain(&mut rx));
         let phases: Vec<InstallPhase> = steps.iter().map(|(phase, _)| *phase).collect();
         assert_eq!(
@@ -2042,8 +2545,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(moved, outcome(&dirs));
-        assert_moved(&dirs, &instance, &backups).await;
+        assert!(!moved.token.is_empty());
+        assert_eq!(moved, outcome(&dirs, &moved.token));
+        assert_moved(&dirs, &moved, &instance, &backups).await;
         let moved_options = dirs.instance_in(&dirs.target).join("options.txt");
         assert_eq!(
             std::fs::metadata(moved_options)
@@ -2298,6 +2802,7 @@ mod tests {
         let dirs = Dirs::new();
         build_instance(&dirs).await;
         let instance = snapshot(&dirs.instance_in(&dirs.source));
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
         let squatter = dirs.instance_in(&dirs.target);
         let creator = squatter.clone();
         let env = with_fault(MoveEnv::default(), move |path| {
@@ -2319,6 +2824,9 @@ mod tests {
             "{err:?}"
         );
         assert_eq!(snapshot(&dirs.instance_in(&dirs.source)), instance);
+        // 同卷提交先把原备份收进旧目录：实例改名失败后改回原位。
+        assert_eq!(snapshot(&dirs.backups_in(&dirs.source)), backups);
+        assert_no_moving_dir(&dirs.source);
         assert!(squatter.is_dir() && snapshot(&squatter).is_empty());
         assert!(journals(&dirs).is_empty());
         assert_eq!(minutes(&dirs, &dirs.source).await, Some(60));
@@ -2582,6 +3090,38 @@ mod tests {
         assert_eq!(journals(&dirs).len(), 1);
     }
 
+    /// 另一个同名实例从目标移走、还没确认：这时移进目标也要等它完成，否则它的收尾会把移进来的当成原目录里的同名新实例。
+    #[tokio::test]
+    async fn an_unfinished_move_out_of_the_target_blocks_moving_in() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let mut journal = MoveJournal::new(
+            move_journal::new_token().unwrap(),
+            ID,
+            &dirs.target,
+            &dirs.tmp.path().join("别的").join(".minecraft"),
+            true,
+            1,
+        );
+        journal.stage = MoveStage::Settled;
+        move_journal::write(&dirs.data, &journal).await.unwrap();
+        let preview = dirs
+            .petalfall()
+            .preview_instance_move(ID, &dirs.target)
+            .await
+            .unwrap();
+        assert_eq!(preview.blockers, [MoveBlocker::Pending]);
+
+        journal.config_done = true;
+        move_journal::write(&dirs.data, &journal).await.unwrap();
+        let preview = dirs
+            .petalfall()
+            .preview_instance_move(ID, &dirs.target)
+            .await
+            .unwrap();
+        assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+    }
+
     #[tokio::test]
     async fn an_unisolated_instance_previews_as_shared() {
         let dirs = Dirs::new();
@@ -2648,7 +3188,10 @@ mod tests {
         let mut journal = dirs.journal(false);
         journal.bases = vec![BASE.to_owned()];
         let staging = journal.staging_dir.clone().unwrap();
-        put(&staging.join(STAGED_INSTANCE).join("options.txt"), b"half");
+        put(
+            &journal.staged_instance().unwrap().join("options.txt"),
+            b"half",
+        );
         record_base_versions_in(&dirs.target, &[BASE.to_owned(), "别人的".to_owned()])
             .await
             .unwrap();
@@ -2666,6 +3209,7 @@ mod tests {
         assert_untouched(&dirs, &instance, &backups).await;
     }
 
+    /// 原件与原备份都已收进旧目录、暂存还没改名到目标：两样都改回原位。
     #[tokio::test]
     async fn a_commit_interrupted_after_the_first_rename_puts_the_original_back() {
         let dirs = Dirs::new();
@@ -2674,15 +3218,21 @@ mod tests {
         let backups = snapshot(&dirs.backups_in(&dirs.source));
         let mut journal = dirs.journal(false);
         journal.stage = MoveStage::Committing;
+        journal.backups_staged = true;
         let (staging, old) = (
             journal.staging_dir.clone().unwrap(),
-            journal.old_dir.clone().unwrap(),
+            journal.old_dir.clone(),
         );
         copy_all(
             &dirs.instance_in(&dirs.source),
-            &staging.join(STAGED_INSTANCE),
+            &journal.staged_instance().unwrap(),
         );
-        rename(&dirs.instance_in(&dirs.source), &old);
+        copy_all(
+            &dirs.backups_in(&dirs.source),
+            &journal.staged_backups().unwrap(),
+        );
+        rename(&dirs.instance_in(&dirs.source), &journal.old_instance());
+        rename(&dirs.backups_in(&dirs.source), &journal.old_backups());
         move_journal::write(&dirs.data, &journal).await.unwrap();
 
         let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
@@ -2704,32 +3254,45 @@ mod tests {
         journal.backups_staged = true;
         let (staging, old) = (
             journal.staging_dir.clone().unwrap(),
-            journal.old_dir.clone().unwrap(),
+            journal.old_dir.clone(),
         );
         copy_all(
             &dirs.backups_in(&dirs.source),
-            &staging.join(STAGED_BACKUPS),
+            &journal.staged_backups().unwrap(),
         );
         copy_all(
             &dirs.instance_in(&dirs.source),
             &dirs.instance_in(&dirs.target),
         );
-        rename(&dirs.instance_in(&dirs.source), &old);
+        rename(&dirs.instance_in(&dirs.source), &journal.old_instance());
+        rename(&dirs.backups_in(&dirs.source), &journal.old_backups());
         move_journal::write(&dirs.data, &journal).await.unwrap();
 
         let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
 
-        assert_eq!(recovered, [MoveRecovery::Completed(outcome(&dirs))]);
+        assert_eq!(
+            recovered,
+            [MoveRecovery::Completed(outcome(&dirs, &journal.token))]
+        );
         assert!(!old.exists() && !staging.exists());
         assert_eq!(snapshot(&dirs.instance_in(&dirs.target)), instance);
         assert_eq!(snapshot(&dirs.backups_in(&dirs.target)), backups);
         assert!(!dirs.backups_in(&dirs.source).exists());
         assert_eq!(minutes(&dirs, &dirs.target).await, Some(60));
         assert_eq!(minutes(&dirs, &dirs.source).await, None);
-        assert!(journals(&dirs).is_empty());
+        // 调用方还没确认：日志留着，记下已经收拾完。
+        assert_eq!(journals(&dirs), [journal_file(&journal.token)]);
+        let left = move_journal::read(&dirs.data, &journal.token)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (left.stage, left.records_moved, left.config_done),
+            (MoveStage::Settled, true, false)
+        );
     }
 
-    /// 复制过备份、可暂存与目标里都没有那份副本（目标那边被人删过）：原游戏目录里的备份是唯一的一份，不删，记跟进项。
+    /// 复制过备份、可暂存与目标里都没有那份副本（目标那边被人删过）：收在旧目录里的原备份是唯一的一份，不删，记跟进项。
     #[tokio::test]
     async fn source_backups_stay_when_their_staged_copy_is_gone() {
         let dirs = Dirs::new();
@@ -2743,6 +3306,7 @@ mod tests {
             &dirs.instance_in(&dirs.target),
         );
         std::fs::remove_dir_all(dirs.instance_in(&dirs.source)).unwrap();
+        rename(&dirs.backups_in(&dirs.source), &journal.old_backups());
         move_journal::write(&dirs.data, &journal).await.unwrap();
 
         let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
@@ -2752,57 +3316,80 @@ mod tests {
         };
         assert!(
             matches!(&outcome.follow_ups[..], [MoveFollowUp::WorldBackups(reason)]
-                if reason.contains(&dirs.backups_in(&dirs.target).display().to_string())),
+                if reason.contains(&dirs.backups_in(&dirs.target).display().to_string())
+                    && reason.contains(&journal.old_backups().display().to_string())),
             "{:?}",
             outcome.follow_ups
         );
-        assert_eq!(snapshot(&dirs.backups_in(&dirs.source)), backups);
+        assert_eq!(snapshot(&journal.old_backups()), backups);
+        assert!(!dirs.backups_in(&dirs.source).exists());
         assert_eq!(minutes(&dirs, &dirs.target).await, Some(60));
-        assert!(journals(&dirs).is_empty());
+        // 原备份还在旧目录里：确认之后日志也留着，下次启动再看。
+        dirs.petalfall()
+            .confirm_instance_move(&journal.token)
+            .await
+            .unwrap();
+        assert_eq!(journals(&dirs), [journal_file(&journal.token)]);
     }
 
-    /// 已提交、旧目录还在：补完收尾；同一份日志再收一遍（日志没删掉的情形）什么都不多做。
+    /// 已提交、旧目录还在：补完收尾；没确认之前再收一遍，同样交出 Completed，什么都不多做（游玩记录不会再并一次）；
+    /// 确认之后日志删掉，再收什么都没有。
     #[tokio::test]
     async fn a_committed_move_with_the_old_directory_left_is_completed_and_reentrant() {
         let dirs = Dirs::new();
         build_instance(&dirs).await;
         let instance = snapshot(&dirs.instance_in(&dirs.source));
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
         let mut journal = dirs.journal(false);
         journal.stage = MoveStage::Committed;
-        let old = journal.old_dir.clone().unwrap();
+        let old = journal.old_dir.clone();
         copy_all(
             &dirs.instance_in(&dirs.source),
             &dirs.instance_in(&dirs.target),
         );
-        rename(&dirs.instance_in(&dirs.source), &old);
+        rename(&dirs.instance_in(&dirs.source), &journal.old_instance());
         move_journal::write(&dirs.data, &journal).await.unwrap();
 
         let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
 
-        assert_eq!(recovered, [MoveRecovery::Completed(outcome(&dirs))]);
+        let completed = MoveRecovery::Completed(outcome(&dirs, &journal.token));
+        assert_eq!(recovered, std::slice::from_ref(&completed));
         assert!(!old.exists());
         assert_eq!(snapshot(&dirs.instance_in(&dirs.target)), instance);
         assert_eq!(minutes(&dirs, &dirs.target).await, Some(60));
-        // 当时没有复制备份：原游戏目录里那份不碰。
-        assert!(dirs.backups_in(&dirs.source).exists());
-        assert!(journals(&dirs).is_empty());
+        // 收尾只按 token 路径处理备份：原游戏目录里按 id 放着的那份不碰。
+        assert_eq!(snapshot(&dirs.backups_in(&dirs.source)), backups);
+        assert_eq!(journals(&dirs), [journal_file(&journal.token)]);
 
-        move_journal::write(&dirs.data, &journal).await.unwrap();
         let again = dirs.petalfall().recover_instance_moves().await.unwrap();
-        assert_eq!(again, [MoveRecovery::Completed(outcome(&dirs))]);
+        assert_eq!(again, [completed]);
         assert_eq!(minutes(&dirs, &dirs.target).await, Some(60));
+        assert_eq!(journals(&dirs), [journal_file(&journal.token)]);
+
+        dirs.petalfall()
+            .confirm_instance_move(&journal.token)
+            .await
+            .unwrap();
         assert!(journals(&dirs).is_empty());
+        assert!(
+            dirs.petalfall()
+                .recover_instance_moves()
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
-    /// 只剩清理的日志再收时不再迁记录：原游戏目录里这时的同名实例的记录是它自己的。
+    /// 确认过、只剩清理的日志再收时不再迁记录：原游戏目录里这时的同名实例的记录是它自己的。
     #[tokio::test]
     async fn a_settled_move_only_cleans_up() {
         let dirs = Dirs::new();
         build_instance(&dirs).await;
         let mut journal = dirs.journal(false);
         journal.stage = MoveStage::Settled;
-        let old = journal.old_dir.clone().unwrap();
-        put(&old.join("leftover.txt"), b"x");
+        journal.config_done = true;
+        let old = journal.old_dir.clone();
+        put(&journal.old_instance().join("leftover.txt"), b"x");
         copy_all(
             &dirs.instance_in(&dirs.source),
             &dirs.instance_in(&dirs.target),
@@ -2836,21 +3423,23 @@ mod tests {
         build_instance(&dirs).await;
         let mut journal = dirs.journal(false);
         journal.stage = MoveStage::Settled;
-        let old = journal.old_dir.clone().unwrap();
-        put(&old.join("locked.txt"), b"x");
+        journal.config_done = true;
+        let old = journal.old_dir.clone();
+        let locked = journal.old_instance().join("locked.txt");
+        put(&locked, b"x");
         copy_all(
             &dirs.instance_in(&dirs.source),
             &dirs.instance_in(&dirs.target),
         );
         move_journal::write(&dirs.data, &journal).await.unwrap();
-        let held = hold_exclusively(&old.join("locked.txt"));
+        let held = hold_exclusively(&locked);
 
         let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
 
         drop(held);
         assert!(
             matches!(&recovered[..], [MoveRecovery::Deferred { id, reason }]
-                if id == ID && reason.contains(&old.display().to_string())),
+                if id == ID && reason.contains(&journal.old_instance().display().to_string())),
             "{recovered:?}"
         );
         assert_eq!(journals(&dirs).len(), 1);
@@ -2892,8 +3481,8 @@ mod tests {
         let backups = snapshot(&dirs.backups_in(&dirs.source));
         let mut journal = dirs.journal(false);
         journal.stage = MoveStage::Committing;
-        let old = journal.old_dir.clone().unwrap();
-        rename(&dirs.instance_in(&dirs.source), &old);
+        let old = journal.old_dir.clone();
+        rename(&dirs.instance_in(&dirs.source), &journal.old_instance());
         move_journal::write(&dirs.data, &journal).await.unwrap();
 
         let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
@@ -2944,11 +3533,14 @@ mod tests {
 
         let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
 
-        assert_eq!(recovered, [MoveRecovery::Completed(outcome(&dirs))]);
+        assert_eq!(
+            recovered,
+            [MoveRecovery::Completed(outcome(&dirs, &journal.token))]
+        );
         assert_eq!(snapshot(&dirs.instance_in(&dirs.target)), instance);
         assert_eq!(minutes(&dirs, &dirs.target).await, Some(60));
         assert!(!dirs.source.exists(), "不在原处重新建出源目录");
-        assert!(journals(&dirs).is_empty());
+        assert_eq!(journals(&dirs), [journal_file(&journal.token)]);
     }
 
     /// 一个此刻没有分配的盘符。
@@ -3008,7 +3600,7 @@ mod tests {
         let instance = snapshot(&dirs.instance_in(&dirs.source));
         let mut journal = dirs.journal(false);
         journal.stage = MoveStage::Committed;
-        let old = journal.old_dir.clone().unwrap();
+        let old = journal.old_instance();
         rename(&dirs.instance_in(&dirs.source), &old);
         move_journal::write(&dirs.data, &journal).await.unwrap();
 
@@ -3016,11 +3608,675 @@ mod tests {
 
         assert!(
             matches!(&recovered[..], [MoveRecovery::Deferred { id, reason }]
-                if id == ID && reason.contains(&old.display().to_string())),
+                if id == ID && reason.contains(&journal.old_dir.display().to_string())),
             "{recovered:?}"
         );
         assert_eq!(snapshot(&old), instance);
         assert_eq!(journals(&dirs).len(), 1);
+        assert_eq!(minutes(&dirs, &dirs.source).await, Some(60));
+    }
+
+    // ---- 审查修复：按 token 收起原件与原备份、原目录里的同名新实例、确认协议 ----
+
+    /// 原游戏目录里新建一个同名的实例：自己的存档、一份备份（清单加 zip）、半小时游玩记录（记在原账下）。返回它的
+    /// 实例目录与备份目录的快照。
+    async fn build_newcomer(dirs: &Dirs) -> (BTreeMap<String, Vec<u8>>, BTreeMap<String, Vec<u8>>) {
+        assert!(!dirs.instance_in(&dirs.source).exists());
+        assert!(!dirs.backups_in(&dirs.source).exists());
+        let dir = write_version(&dirs.source, ID, &instance_json());
+        put(&dir.join("options.txt"), b"lang:en_us\n");
+        put(
+            &dir.join("saves").join("w").join("level.dat"),
+            b"newcomer-level",
+        );
+        dirs.petalfall()
+            .backup_world(ID, "w", BackupKind::Manual, None)
+            .await
+            .unwrap();
+        let now = move_journal::now_millis().unwrap();
+        crate::playtime::record_play(&dirs.data, &dirs.source, ID, now - HOUR / 2, now)
+            .await
+            .unwrap();
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
+        assert!(
+            backups.keys().any(|key| key.ends_with(".zip")),
+            "{:?}",
+            backups.keys()
+        );
+        (snapshot(&dir), backups)
+    }
+
+    /// 推迟收尾期间（跨卷，日志停在已提交、游玩记录没迁）原游戏目录里建了同名的新实例，带着它的备份与游玩记录。收尾
+    /// 照常补完这次移动，但原目录里按 id 的东西一样不碰：新实例、它的备份、原账下的时长原样留着，调用方被告知别去掉
+    /// 原目录的配置引用。
+    #[tokio::test]
+    async fn a_newcomer_with_the_same_name_survives_a_deferred_cross_volume_finish() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let instance = snapshot(&dirs.instance_in(&dirs.source));
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
+        let mut journal = dirs.journal(false);
+        journal.stage = MoveStage::Committed;
+        journal.backups_staged = true;
+        copy_all(
+            &dirs.instance_in(&dirs.source),
+            &dirs.instance_in(&dirs.target),
+        );
+        copy_all(
+            &dirs.backups_in(&dirs.source),
+            &journal.staged_backups().unwrap(),
+        );
+        rename(&dirs.instance_in(&dirs.source), &journal.old_instance());
+        rename(&dirs.backups_in(&dirs.source), &journal.old_backups());
+        move_journal::write(&dirs.data, &journal).await.unwrap();
+        let (newcomer, newcomer_backups) = build_newcomer(&dirs).await;
+        assert_eq!(minutes(&dirs, &dirs.source).await, Some(90));
+
+        let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
+
+        let [MoveRecovery::Completed(outcome)] = &recovered[..] else {
+            panic!("{recovered:?}");
+        };
+        assert!(!outcome.forget_source_refs);
+        assert_eq!(outcome.token, journal.token);
+        assert!(
+            matches!(&outcome.follow_ups[..], [MoveFollowUp::PlayRecords(reason)]
+                if reason.contains("同名的新实例")),
+            "{:?}",
+            outcome.follow_ups
+        );
+        assert_eq!(snapshot(&dirs.instance_in(&dirs.source)), newcomer);
+        assert_eq!(snapshot(&dirs.backups_in(&dirs.source)), newcomer_backups);
+        assert_eq!(minutes(&dirs, &dirs.source).await, Some(90));
+        assert_eq!(minutes(&dirs, &dirs.target).await, None);
+        // 移过去的那个照常补完：备份副本并进目标，旧目录里的原件与原备份删掉。
+        assert_eq!(snapshot(&dirs.instance_in(&dirs.target)), instance);
+        assert_eq!(snapshot(&dirs.backups_in(&dirs.target)), backups);
+        assert!(!journal.old_dir.exists());
+        assert_no_moving_dir(&dirs.source);
+        assert_no_moving_dir(&dirs.target);
+        assert_eq!(journals(&dirs), [journal_file(&journal.token)]);
+    }
+
+    /// 同卷版本：原备份在提交时收进了旧目录，收尾把它并进目标；原目录里新实例的备份与时长不动。
+    #[tokio::test]
+    async fn a_newcomer_with_the_same_name_survives_a_deferred_same_volume_finish() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let instance = snapshot(&dirs.instance_in(&dirs.source));
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
+        let mut journal = dirs.journal(true);
+        journal.stage = MoveStage::Committed;
+        rename(&dirs.backups_in(&dirs.source), &journal.old_backups());
+        rename(
+            &dirs.instance_in(&dirs.source),
+            &dirs.instance_in(&dirs.target),
+        );
+        move_journal::write(&dirs.data, &journal).await.unwrap();
+        let (newcomer, newcomer_backups) = build_newcomer(&dirs).await;
+
+        let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
+
+        let [MoveRecovery::Completed(outcome)] = &recovered[..] else {
+            panic!("{recovered:?}");
+        };
+        assert!(!outcome.forget_source_refs);
+        assert!(
+            matches!(&outcome.follow_ups[..], [MoveFollowUp::PlayRecords(_)]),
+            "{:?}",
+            outcome.follow_ups
+        );
+        assert_eq!(snapshot(&dirs.instance_in(&dirs.source)), newcomer);
+        assert_eq!(snapshot(&dirs.backups_in(&dirs.source)), newcomer_backups);
+        assert_eq!(minutes(&dirs, &dirs.source).await, Some(90));
+        assert_eq!(minutes(&dirs, &dirs.target).await, None);
+        assert_eq!(snapshot(&dirs.instance_in(&dirs.target)), instance);
+        assert_eq!(snapshot(&dirs.backups_in(&dirs.target)), backups);
+        assert!(!journal.old_dir.exists());
+        assert_no_moving_dir(&dirs.source);
+    }
+
+    /// 日志说已提交（或已收拾完），目标里却没有实例、暂存里还有、旧目录里的原件也没了：第二步改名没落盘，从校验过的
+    /// 暂存往前补完，目标里的实例逐字节完整。
+    #[tokio::test]
+    async fn a_lost_second_rename_is_rolled_forward_from_the_verified_staging() {
+        for (stage, config_done) in [
+            (MoveStage::Committed, false),
+            (MoveStage::Settled, false),
+            (MoveStage::Settled, true),
+        ] {
+            let dirs = Dirs::new();
+            build_instance(&dirs).await;
+            let instance = snapshot(&dirs.instance_in(&dirs.source));
+            std::fs::create_dir_all(dirs.target.join("versions")).unwrap();
+            let mut journal = dirs.journal(false);
+            journal.stage = stage;
+            journal.records_moved = stage == MoveStage::Settled;
+            journal.config_done = config_done;
+            copy_all(
+                &dirs.instance_in(&dirs.source),
+                &journal.staged_instance().unwrap(),
+            );
+            std::fs::remove_dir_all(dirs.instance_in(&dirs.source)).unwrap();
+            move_journal::write(&dirs.data, &journal).await.unwrap();
+
+            let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
+
+            let expected = if config_done {
+                MoveRecovery::Settled {
+                    id: ID.to_owned(),
+                    source_game_dir: dirs.source.clone(),
+                    target_game_dir: dirs.target.clone(),
+                }
+            } else {
+                MoveRecovery::Completed(outcome(&dirs, &journal.token))
+            };
+            assert_eq!(recovered, [expected], "{stage:?}");
+            assert_eq!(
+                snapshot(&dirs.instance_in(&dirs.target)),
+                instance,
+                "{stage:?}"
+            );
+            assert_no_moving_dir(&dirs.target);
+            assert_eq!(journals(&dirs).is_empty(), config_done, "{stage:?}");
+        }
+    }
+
+    /// 复制阶段中断时暂存看着齐全也没校验过：删暂存，原件不动，绝不往前补完。
+    #[tokio::test]
+    async fn an_interrupted_copy_is_never_rolled_forward() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let instance = snapshot(&dirs.instance_in(&dirs.source));
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
+        let journal = dirs.journal(false);
+        copy_all(
+            &dirs.instance_in(&dirs.source),
+            &journal.staged_instance().unwrap(),
+        );
+        copy_all(
+            &dirs.backups_in(&dirs.source),
+            &journal.staged_backups().unwrap(),
+        );
+        move_journal::write(&dirs.data, &journal).await.unwrap();
+
+        let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
+
+        assert_eq!(recovered, [rolled_back(&dirs)]);
+        assert_untouched(&dirs, &instance, &backups).await;
+    }
+
+    /// 切换过游戏目录后，按发起时的请求移的是另一个目录里的同名实例：报 SourceChanged，什么都不动。同一个目录换个
+    /// 写法（大小写、末尾分隔符）不算换了。
+    #[tokio::test]
+    async fn a_request_made_in_another_current_directory_is_refused_before_anything_moves() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let instance = snapshot(&dirs.instance_in(&dirs.source));
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
+        let stale = MoveRequest {
+            source_game_dir: dirs.tmp.path().join("别的").join(".minecraft"),
+            ..dirs.request()
+        };
+
+        let err = dirs
+            .petalfall()
+            .move_instance_files(&stale, None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, CoreError::InstanceMoveBlocked { id, blocker: MoveBlocker::SourceChanged } if id == ID),
+            "{err:?}"
+        );
+        assert!(!dirs.target.exists());
+        assert_untouched(&dirs, &instance, &backups).await;
+
+        let alias = MoveRequest {
+            source_game_dir: PathBuf::from(format!(
+                "{}/",
+                dirs.source.display().to_string().to_uppercase()
+            )),
+            ..dirs.request()
+        };
+        let moved = dirs
+            .petalfall()
+            .move_instance_files(&alias, None)
+            .await
+            .unwrap();
+        assert_eq!(moved, outcome(&dirs, &moved.token));
+    }
+
+    /// 跨卷提交后目标没能刷到盘上：原件留在旧目录、日志留着（确认了也留着），下次启动刷成了再删。那时原目录里新建的
+    /// 同名实例与它的备份不受影响：收尾只认 token 路径。
+    #[tokio::test]
+    async fn an_unflushed_target_keeps_the_original_until_the_next_start() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let instance = snapshot(&dirs.instance_in(&dirs.source));
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
+        let dest = dirs.instance_in(&dirs.target);
+        let refused = dest.clone();
+        let env = MoveEnv {
+            flush_fault: Some(Arc::new(move |path: &Path| {
+                if path == refused {
+                    return Err(std::io::Error::other("注入的刷盘失败"));
+                }
+                Ok(())
+            })),
+            ..cross_volume()
+        };
+
+        let moved = dirs
+            .petalfall()
+            .move_instance_files_with(&dirs.request(), None, &env)
+            .await
+            .unwrap();
+
+        let journal = move_journal::read(&dirs.data, &moved.token)
+            .await
+            .unwrap()
+            .unwrap();
+        let original = journal.old_instance();
+        assert!(
+            matches!(&moved.follow_ups[..], [MoveFollowUp::Cleanup { path, reason }]
+                if *path == original && reason.contains("注入的刷盘失败")),
+            "{:?}",
+            moved.follow_ups
+        );
+        assert_eq!(snapshot(&original), instance);
+        assert_eq!(snapshot(&dest), instance);
+        // 备份那边刷成了：原备份照常删掉。
+        assert_eq!(snapshot(&dirs.backups_in(&dirs.target)), backups);
+        assert!(!journal.old_backups().exists());
+        assert_eq!(minutes(&dirs, &dirs.target).await, Some(60));
+        assert_no_moving_dir(&dirs.target);
+        dirs.petalfall()
+            .confirm_instance_move(&moved.token)
+            .await
+            .unwrap();
+        assert_eq!(journals(&dirs), [journal_file(&moved.token)]);
+        let (newcomer, newcomer_backups) = build_newcomer(&dirs).await;
+
+        let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
+
+        assert_eq!(
+            recovered,
+            [MoveRecovery::Settled {
+                id: ID.to_owned(),
+                source_game_dir: dirs.source.clone(),
+                target_game_dir: dirs.target.clone(),
+            }]
+        );
+        assert!(!journal.old_dir.exists());
+        assert_no_moving_dir(&dirs.source);
+        assert!(journals(&dirs).is_empty());
+        assert_eq!(snapshot(&dest), instance);
+        assert_eq!(snapshot(&dirs.instance_in(&dirs.source)), newcomer);
+        assert_eq!(snapshot(&dirs.backups_in(&dirs.source)), newcomer_backups);
+        assert_eq!(minutes(&dirs, &dirs.source).await, Some(30));
+        assert_eq!(minutes(&dirs, &dirs.target).await, Some(60));
+    }
+
+    /// 回滚时，要带的基底版本里只复制了 jar、还没有版本 JSON 的目录整个删掉、记录收回；JSON 已经落下的留着。
+    #[tokio::test]
+    async fn a_rollback_removes_bases_left_without_their_json() {
+        const LANDED: &str = "1.20.1";
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let instance = snapshot(&dirs.instance_in(&dirs.source));
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
+        put(
+            &at(&dirs.target, &format!("versions/{BASE}/{BASE}.jar")),
+            b"client-jar",
+        );
+        write_version(&dirs.target, LANDED, &vanilla_json(LANDED));
+        record_base_versions_in(
+            &dirs.target,
+            &[BASE.to_owned(), LANDED.to_owned(), "别人的".to_owned()],
+        )
+        .await
+        .unwrap();
+        let mut journal = dirs.journal(false);
+        journal.bases = vec![BASE.to_owned(), LANDED.to_owned()];
+        move_journal::write(&dirs.data, &journal).await.unwrap();
+
+        let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
+
+        assert_eq!(recovered, [rolled_back(&dirs)]);
+        assert!(!at(&dirs.target, &format!("versions/{BASE}")).exists());
+        assert!(at(&dirs.target, &format!("versions/{LANDED}/{LANDED}.json")).is_file());
+        assert_eq!(
+            base_record(&dirs.target),
+            Some(json!({"versions": [LANDED, "别人的"]}))
+        );
+        assert_untouched(&dirs, &instance, &backups).await;
+    }
+
+    /// 执行中复制基底版本的 JSON 时失败：只有 jar 的基底目录随回滚删掉，记录收回。
+    #[tokio::test]
+    async fn a_failed_base_copy_leaves_no_half_base_behind() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let instance = snapshot(&dirs.instance_in(&dirs.source));
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
+        let base_json_temp = format!("{BASE}.json.");
+        let env = with_fault(MoveEnv::default(), move |path| {
+            if path.to_string_lossy().contains(&base_json_temp) {
+                return Err(std::io::Error::other("注入的写失败"));
+            }
+            Ok(())
+        });
+
+        let err = dirs
+            .petalfall()
+            .move_instance_files_with(&dirs.request(), None, &env)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, CoreError::Base(petalfall_base::Error::Io { path, .. })
+                if path.to_string_lossy().contains(&format!("{BASE}.json."))),
+            "{err:?}"
+        );
+        assert!(!at(&dirs.target, &format!("versions/{BASE}")).exists());
+        assert_eq!(base_record(&dirs.target), Some(json!({"versions": []})));
+        assert_untouched(&dirs, &instance, &backups).await;
+    }
+
+    /// 推迟收尾期间在目标里玩过：收尾把原账的时长并进目标那本账，不盖掉在目标里新玩的。
+    #[tokio::test]
+    async fn time_played_in_the_target_before_a_deferred_finish_is_kept() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let mut journal = dirs.journal(true);
+        journal.stage = MoveStage::Committed;
+        rename(&dirs.backups_in(&dirs.source), &journal.old_backups());
+        rename(
+            &dirs.instance_in(&dirs.source),
+            &dirs.instance_in(&dirs.target),
+        );
+        move_journal::write(&dirs.data, &journal).await.unwrap();
+        let now = move_journal::now_millis().unwrap();
+        crate::playtime::record_play(&dirs.data, &dirs.target, ID, now - HOUR / 2, now)
+            .await
+            .unwrap();
+
+        let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
+
+        assert_eq!(
+            recovered,
+            [MoveRecovery::Completed(outcome(&dirs, &journal.token))]
+        );
+        assert_eq!(minutes(&dirs, &dirs.target).await, Some(90));
+        assert_eq!(minutes(&dirs, &dirs.source).await, None);
+    }
+
+    /// 游玩记录没迁上（记录文件读不懂）：记跟进项，日志停在已提交，确认了也留着；记录文件好了之后下次启动再迁，迁完
+    /// 才算收拾完、删日志。
+    #[tokio::test]
+    async fn a_failed_play_record_move_stays_committed_and_is_retried() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let mut journal = dirs.journal(true);
+        journal.stage = MoveStage::Committed;
+        rename(&dirs.backups_in(&dirs.source), &journal.old_backups());
+        rename(
+            &dirs.instance_in(&dirs.source),
+            &dirs.instance_in(&dirs.target),
+        );
+        move_journal::write(&dirs.data, &journal).await.unwrap();
+        let book = dirs.data.join(crate::playtime::PLAYTIME_FILE);
+        let good = std::fs::read(&book).unwrap();
+        std::fs::write(&book, b"{ not json").unwrap();
+
+        let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
+
+        let [MoveRecovery::Completed(outcome)] = &recovered[..] else {
+            panic!("{recovered:?}");
+        };
+        assert!(outcome.forget_source_refs);
+        assert!(
+            matches!(&outcome.follow_ups[..], [MoveFollowUp::PlayRecords(_)]),
+            "{:?}",
+            outcome.follow_ups
+        );
+        let left = move_journal::read(&dirs.data, &journal.token)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (left.stage, left.records_moved),
+            (MoveStage::Committed, false)
+        );
+        dirs.petalfall()
+            .confirm_instance_move(&journal.token)
+            .await
+            .unwrap();
+        assert_eq!(journals(&dirs), [journal_file(&journal.token)]);
+
+        std::fs::write(&book, good).unwrap();
+        let again = dirs.petalfall().recover_instance_moves().await.unwrap();
+
+        assert_eq!(
+            again,
+            [MoveRecovery::Settled {
+                id: ID.to_owned(),
+                source_game_dir: dirs.source.clone(),
+                target_game_dir: dirs.target.clone(),
+            }]
+        );
+        assert!(journals(&dirs).is_empty());
+        assert_eq!(minutes(&dirs, &dirs.target).await, Some(60));
+        assert_eq!(minutes(&dirs, &dirs.source).await, None);
+    }
+
+    /// 目标那本账里有已经不在的同名实例留下的时长：提交前丢掉，移过去的实例只带着自己的时长。
+    #[tokio::test]
+    async fn stale_time_under_the_same_name_in_the_target_is_dropped_before_the_commit() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let now = move_journal::now_millis().unwrap();
+        crate::playtime::record_play(&dirs.data, &dirs.target, ID, now - 4 * HOUR, now - 3 * HOUR)
+            .await
+            .unwrap();
+        assert_eq!(minutes(&dirs, &dirs.target).await, Some(60));
+        let ours = dirs.petalfall().play_summaries().await.unwrap()[ID].last_played_at;
+
+        let moved = dirs
+            .petalfall()
+            .move_instance_files(&dirs.request(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(moved, outcome(&dirs, &moved.token));
+        assert_eq!(minutes(&dirs, &dirs.target).await, Some(60));
+        assert_eq!(minutes(&dirs, &dirs.source).await, None);
+        // 留下的是移过去的那一局，不是旧的那一局（三小时前就结束了）。
+        let summaries = dirs.facade(&dirs.target).play_summaries().await.unwrap();
+        assert_eq!(summaries[ID].last_played_at, ours);
+        assert_ne!(ours, now - 3 * HOUR);
+    }
+
+    /// 目标的依赖版本记录里留着同名的陈旧记录（那边以前有个同名的依赖版本）：收尾时去掉，否则移过去的实例会被当成
+    /// 依赖版本藏起来。别的记录不动。
+    #[tokio::test]
+    async fn a_stale_base_record_under_the_same_name_in_the_target_is_dropped() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        record_base_versions_in(&dirs.target, &[ID.to_owned(), "别人的".to_owned()])
+            .await
+            .unwrap();
+
+        let moved = dirs
+            .petalfall()
+            .move_instance_files(&dirs.request(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(moved, outcome(&dirs, &moved.token));
+        assert_eq!(
+            base_record(&dirs.target),
+            Some(json!({"versions": ["别人的", BASE]}))
+        );
+    }
+
+    /// 执行完日志留着、挡住同一个实例再移，等调用方确认；没确认就退出的，启动收尾再交出 Completed；确认后日志删掉，
+    /// 再收尾什么都没有。重复确认算成功，不像日志编号的确认报错。
+    #[tokio::test]
+    async fn the_journal_waits_for_the_callers_confirmation() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let elsewhere = dirs.tmp.path().join("别处").join(".minecraft");
+
+        let moved = dirs
+            .petalfall()
+            .move_instance_files(&dirs.request(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(journals(&dirs), [journal_file(&moved.token)]);
+        let from_target = dirs.facade(&dirs.target);
+        let preview = from_target
+            .preview_instance_move(ID, &elsewhere)
+            .await
+            .unwrap();
+        assert_eq!(preview.blockers, [MoveBlocker::Pending]);
+
+        let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
+        assert_eq!(
+            recovered,
+            [MoveRecovery::Completed(outcome(&dirs, &moved.token))]
+        );
+        assert_eq!(minutes(&dirs, &dirs.target).await, Some(60));
+        assert_eq!(journals(&dirs), [journal_file(&moved.token)]);
+
+        dirs.petalfall()
+            .confirm_instance_move(&moved.token)
+            .await
+            .unwrap();
+        assert!(journals(&dirs).is_empty());
+        assert!(
+            dirs.petalfall()
+                .recover_instance_moves()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let preview = from_target
+            .preview_instance_move(ID, &elsewhere)
+            .await
+            .unwrap();
+        assert!(preview.blockers.is_empty(), "{:?}", preview.blockers);
+        dirs.petalfall()
+            .confirm_instance_move(&moved.token)
+            .await
+            .unwrap();
+        let err = dirs
+            .petalfall()
+            .confirm_instance_move(r"..\moves")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::Base(petalfall_base::Error::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::InvalidInput),
+            "{err:?}"
+        );
+    }
+
+    /// 暂存里的备份副本有并不过去的（清单外的文件）：原备份留在旧目录、记跟进项，日志停在已提交，确认了也留着。
+    #[tokio::test]
+    async fn backups_left_in_the_staging_keep_the_original_backups() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
+        let mut journal = dirs.journal(false);
+        journal.stage = MoveStage::Committed;
+        journal.backups_staged = true;
+        let staged_backups = journal.staged_backups().unwrap();
+        copy_all(
+            &dirs.instance_in(&dirs.source),
+            &dirs.instance_in(&dirs.target),
+        );
+        write_version(&dirs.target, BASE, &base_json());
+        copy_all(&dirs.backups_in(&dirs.source), &staged_backups);
+        put(&staged_backups.join("w").join("stray.txt"), b"stray");
+        rename(&dirs.instance_in(&dirs.source), &journal.old_instance());
+        rename(&dirs.backups_in(&dirs.source), &journal.old_backups());
+        // 目标里已有这个存档的备份目录：合并逐个挪 zip，清单外的文件挪不走。
+        dirs.facade(&dirs.target)
+            .backup_world(ID, "w", BackupKind::Manual, None)
+            .await
+            .unwrap();
+        move_journal::write(&dirs.data, &journal).await.unwrap();
+
+        let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
+
+        let [MoveRecovery::Completed(outcome)] = &recovered[..] else {
+            panic!("{recovered:?}");
+        };
+        assert!(
+            matches!(&outcome.follow_ups[..], [MoveFollowUp::WorldBackups(reason)]
+                if reason.contains(&staged_backups.display().to_string())
+                    && reason.contains(&journal.old_backups().display().to_string())),
+            "{:?}",
+            outcome.follow_ups
+        );
+        assert_eq!(snapshot(&journal.old_backups()), backups);
+        assert_eq!(
+            snapshot(&staged_backups).into_keys().collect::<Vec<_>>(),
+            ["w/", "w/stray.txt"]
+        );
+        // 原件那边照常收拾：目标在，旧目录里的原件删掉。
+        assert!(!journal.old_instance().exists());
+        let left = move_journal::read(&dirs.data, &journal.token)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (left.stage, left.records_moved),
+            (MoveStage::Committed, true)
+        );
+        dirs.petalfall()
+            .confirm_instance_move(&journal.token)
+            .await
+            .unwrap();
+        assert_eq!(journals(&dirs), [journal_file(&journal.token)]);
+    }
+
+    /// 跨卷提交到最后一步（暂存改名到目标）才失败：原备份与原件按相反的顺序改回原位，暂存与日志删掉。
+    #[tokio::test]
+    async fn a_cross_volume_commit_failing_at_the_last_rename_puts_both_back() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let instance = snapshot(&dirs.instance_in(&dirs.source));
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
+        let squatter = dirs.instance_in(&dirs.target);
+        let creator = squatter.clone();
+        let env = with_fault(cross_volume(), move |path| {
+            if in_staging(path) && path.ends_with("options.txt") {
+                std::fs::create_dir_all(&creator)?;
+            }
+            Ok(())
+        });
+
+        let err = dirs
+            .petalfall()
+            .move_instance_files_with(&dirs.request(), None, &env)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, CoreError::Base(petalfall_base::Error::Io { path, source })
+                if *path == squatter && source.kind() == std::io::ErrorKind::AlreadyExists),
+            "{err:?}"
+        );
+        assert_eq!(snapshot(&dirs.instance_in(&dirs.source)), instance);
+        assert_eq!(snapshot(&dirs.backups_in(&dirs.source)), backups);
+        assert!(squatter.is_dir() && snapshot(&squatter).is_empty());
+        assert_no_moving_dir(&dirs.source);
+        assert_no_moving_dir(&dirs.target);
+        assert!(journals(&dirs).is_empty());
         assert_eq!(minutes(&dirs, &dirs.source).await, Some(60));
     }
 
@@ -3076,6 +4332,26 @@ mod tests {
                 disk(false, true, false, false),
                 Verdict::Finish,
             ),
+            // 原目录里有了同名的新实例：目标里在就照常补完（收尾不碰原目录里按 id 的东西）；目标里不在，分不清是改名
+            // 没落盘还是新实例，不动。
+            (
+                Committed,
+                true,
+                disk(true, true, false, false),
+                Verdict::Finish,
+            ),
+            (
+                Committed,
+                true,
+                disk(true, false, false, false),
+                Verdict::Stuck("日志说已提交，可目标里没有这个实例，原位置却有"),
+            ),
+            (
+                Settled,
+                true,
+                disk(true, false, false, false),
+                Verdict::Finish,
+            ),
             // 跨卷复制中：原件在原位，删暂存。
             (
                 Copying,
@@ -3090,6 +4366,14 @@ mod tests {
                 Verdict::RenameBack,
             ),
             (Copying, false, disk(false, false, false, true), only_staged),
+            // 复制阶段的暂存没校验过：目标里有东西也不往前补完。
+            (
+                Copying,
+                false,
+                disk(true, true, false, true),
+                Verdict::Discard,
+            ),
+            (Copying, false, disk(false, true, false, true), only_staged),
             // 跨卷提交中的各个时刻。
             (
                 Committing,
@@ -3157,6 +4441,38 @@ mod tests {
                 false,
                 disk(false, false, true, false),
                 Verdict::Stuck("日志说已提交，可目标里没有这个实例，原件的旧目录还在"),
+            ),
+            (
+                Committed,
+                false,
+                disk(true, true, false, false),
+                Verdict::Finish,
+            ),
+            // 已提交、目标里没有、暂存里还有：第二步改名没落盘，往前补完；原件在不在旧目录、原目录里有没有同名的新
+            // 实例都一样。
+            (
+                Committed,
+                false,
+                disk(false, false, false, true),
+                Verdict::RollForward,
+            ),
+            (
+                Settled,
+                false,
+                disk(false, false, false, true),
+                Verdict::RollForward,
+            ),
+            (
+                Committed,
+                false,
+                disk(false, false, true, true),
+                Verdict::RollForward,
+            ),
+            (
+                Committed,
+                false,
+                disk(true, false, false, true),
+                Verdict::RollForward,
             ),
             // 目标游戏目录整个不在：回滚照常，补完一律不做；只剩清理的照常清理。
             (Copying, false, no_target(true, false), Verdict::Discard),

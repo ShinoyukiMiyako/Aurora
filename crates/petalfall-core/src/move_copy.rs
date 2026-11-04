@@ -665,8 +665,6 @@ pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> Result<()> {
 
 /// 把目录的元数据（比如刚在里面做的改名）刷到盘上。删原件前对目标调它：改名若还只在系统缓存里，断电后目标那边
 /// 的改名会丢，原件却已经删了。
-// 删原件前由实例移动编排调用；编排接上之前没有调用方。
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn flush_dir(path: &Path) -> Result<()> {
     let dir = open_dir_for_flush(path).map_err(|source| io_error(path, source))?;
     let meta = dir.metadata().map_err(|source| io_error(path, source))?;
