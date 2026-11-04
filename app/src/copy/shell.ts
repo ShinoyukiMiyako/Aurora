@@ -195,6 +195,7 @@ export const STARTUP_NOTICE_COPY = {
       isolation_policy: "版本隔离",
       "appearance.mode": "外观明暗",
       "appearance.accent": "强调色",
+      "appearance.cover_background": "实例卡面默认背景",
       after_launch: "游戏启动后",
       language: "界面语言",
     } satisfies Readonly<Record<ConfigEnumField, string>>,

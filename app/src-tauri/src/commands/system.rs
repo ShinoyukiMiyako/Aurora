@@ -151,7 +151,8 @@ pub enum StartupNoticeDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConfigFieldResetDto {
     /// 字段在 config.json 里的位置，嵌套用点号连接：download_source、version_list_source、
-    /// isolation_policy、appearance.mode、appearance.accent、after_launch、language。
+    /// isolation_policy、appearance.mode、appearance.accent、appearance.cover_background、after_launch、
+    /// language。
     pub field: &'static str,
     /// 文件里写的原值。
     pub value: String,
