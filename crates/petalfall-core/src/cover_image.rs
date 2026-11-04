@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
-use image::imageops::FilterType;
 use image::{
     DynamicImage, ExtendedColorType, GenericImageView, ImageDecoder, ImageEncoder, ImageError,
     ImageFormat, ImageReader, Limits, Rgba, RgbaImage,
@@ -201,6 +200,11 @@ fn background_size(width: u32, height: u32) -> (u32, u32) {
 }
 
 /// 背景：全不透明存 JPEG，带透明存 PNG。返回编码后的字节与扩展名。
+///
+/// 缩小用预乘透明度的面积平均（[`box_average`]），不用 image 的 Lanczos3：那边假定输入已经预乘，直通透明度的
+/// PNG 交过去，全透明像素的颜色（多半是黑）会渗进相邻的不透明像素，边缘发黑；它还要先竖向滤出一张源宽 ×
+/// 目标高的 Rgba32F 中间图，8192 宽时 320 MiB，叠上解码缓冲峰值到 600 MiB 左右。面积平均直接逐像素读解码
+/// 缓冲，峰值是解码缓冲加上几份输出大小的拷贝（缩放结果、透明度检查与 JPEG 前的转换）。
 fn encode_background(
     image: &DynamicImage,
 ) -> std::result::Result<(Vec<u8>, &'static str), CoverImageError> {
@@ -208,7 +212,7 @@ fn encode_background(
     let resized = if (width, height) == image.dimensions() {
         Cow::Borrowed(image)
     } else {
-        Cow::Owned(image.resize_exact(width, height, FilterType::Lanczos3))
+        Cow::Owned(DynamicImage::ImageRgba8(box_average(image, width, height)))
     };
     // 带透明通道但每个像素都不透明的（常见于截图另存的 PNG）也存 JPEG。
     let translucent = resized
@@ -237,7 +241,7 @@ fn encode_block(image: &DynamicImage) -> std::result::Result<Vec<u8>, CoverImage
     let (width, height) = image.dimensions();
     let side = width.min(height);
     let square = image.view((width - side) / 2, (height - side) / 2, side, side);
-    let block = box_average(&*square, BLOCK_SIDE);
+    let block = box_average(&*square, BLOCK_SIDE, BLOCK_SIDE);
     let mut bytes = Vec::new();
     write_png(&block, &mut bytes)?;
     Ok(bytes)
@@ -271,20 +275,27 @@ fn axis_coverage(src: u32, out: u32) -> Vec<Vec<(u32, u64)>> {
         .collect()
 }
 
-/// 把正方形 `image` 按面积平均缩放成 `out` 见方：每个输出像素取它覆盖的源区域的加权平均，边上只盖住一部分的
-/// 源像素按覆盖面积计权。image 自带的 thumbnail 在比例不整除时按整像素取边界，不是真正的面积平均。
+/// 把 `image` 按面积平均缩放成 `out_width × out_height`：每个输出像素取它覆盖的源区域的加权平均，边上只盖住
+/// 一部分的源像素按覆盖面积计权。两条轴各算各的覆盖，宽高比例不同也成立。image 自带的 thumbnail 在比例不整除时
+/// 按整像素取边界，不是真正的面积平均。
 ///
 /// 颜色按透明度加权（预乘）再平均，全透明像素的颜色不会把边缘染暗；整格全透明时输出 (0, 0, 0, 0)。
-/// 源比 `out` 小时同一套算法就是放大，每个源像素铺满它覆盖的那些格。
-fn box_average<I: GenericImageView<Pixel = Rgba<u8>>>(image: &I, out: u32) -> RgbaImage {
-    let (src, height) = image.dimensions();
-    assert_eq!(src, height, "面积平均只处理正方形");
-    let coverage = axis_coverage(src, out);
-    let area = u64::from(src) * u64::from(src);
-    RgbaImage::from_fn(out, out, |ox, oy| {
+/// 源比输出小时同一套算法就是放大，每个源像素铺满它覆盖的那些格。只逐像素读源图，除输出外只分配两条轴的
+/// 覆盖表（与输出边长同量级），不复制源图。
+fn box_average<I: GenericImageView<Pixel = Rgba<u8>>>(
+    image: &I,
+    out_width: u32,
+    out_height: u32,
+) -> RgbaImage {
+    let (src_width, src_height) = image.dimensions();
+    let columns = axis_coverage(src_width, out_width);
+    let rows = axis_coverage(src_height, out_height);
+    // 每格两条轴的权重和分别恒为源宽、源高，乘起来就是每格的总权重。
+    let area = u64::from(src_width) * u64::from(src_height);
+    RgbaImage::from_fn(out_width, out_height, |ox, oy| {
         let (mut alpha, mut color) = (0u64, [0u64; 3]);
-        for &(sy, wy) in &coverage[oy as usize] {
-            for &(sx, wx) in &coverage[ox as usize] {
+        for &(sy, wy) in &rows[oy as usize] {
+            for &(sx, wx) in &columns[ox as usize] {
                 let Rgba([r, g, b, a]) = image.get_pixel(sx, sy);
                 let weighted = u64::from(a) * wx * wy;
                 alpha += weighted;
@@ -608,6 +619,58 @@ mod tests {
         );
     }
 
+    /// PNG 的一个块：长度、类型、数据，再加类型与数据的 CRC-32。
+    fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let mut crc = flate2::Crc::new();
+        crc.update(kind);
+        crc.update(data);
+        out.extend_from_slice(&crc.sum().to_be_bytes());
+    }
+
+    /// 边长 8192 不超限，但 16 位深的 RGBA 解码要 8192 × 8192 × 8 = 512 MiB，超过 256 MiB 的解码内存上限，
+    /// 在分配输出缓冲之前按内存超限拒。文件只有文件头和一小段图像数据：内存检查放过的话，会先分配 512 MiB
+    /// 再去解，报的是内容损坏。
+    #[test]
+    fn deep_images_over_the_memory_budget_are_refused_before_decoding() {
+        use std::io::Write;
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&8192u32.to_be_bytes());
+        ihdr.extend_from_slice(&8192u32.to_be_bytes());
+        // 位深 16、颜色类型 6（RGBA），压缩、滤波、隔行取 0
+        ihdr.extend_from_slice(&[16, 6, 0, 0, 0]);
+        let mut idat = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        idat.write_all(&[0; 64]).unwrap();
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        png_chunk(&mut bytes, b"IHDR", &ihdr);
+        png_chunk(&mut bytes, b"IDAT", &idat.finish().unwrap());
+        png_chunk(&mut bytes, b"IEND", &[]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = source(tmp.path(), "deep.png", &bytes);
+        let err = encode_cover_image(&path, CoverImageSlot::Background).unwrap_err();
+        match &err {
+            CoverImageError::Decode {
+                source: ImageError::Limits(limit),
+                ..
+            } => assert_eq!(
+                limit.kind(),
+                image::error::LimitErrorKind::InsufficientMemory
+            ),
+            other => panic!("期望解码内存超限，得到 {other:?}"),
+        }
+        assert_eq!(err.code(), "decode_failed");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "图片边长超过 8192 像素，或解码要的内存超出上限：{}",
+                path.display()
+            )
+        );
+    }
+
     #[test]
     fn corrupt_body_behind_a_valid_header_fails_to_decode() {
         let tmp = tempfile::tempdir().unwrap();
@@ -680,6 +743,35 @@ mod tests {
         assert_eq!(back.get_pixel(0, 0), &Rgba([30, 60, 90, 255]));
     }
 
+    /// 带透明的大图缩小：全透明的黑与不透明的白每 3 列相间，2601 → 2560 不整除，许多输出格横跨两种像素。
+    /// 颜色按透明度加权，半透明的格仍是纯白；直通透明度交给假定已预乘的滤波（Lanczos3）会被拉暗成灰。
+    #[test]
+    fn shrinking_a_translucent_background_does_not_darken_its_edges() {
+        let white = Rgba([255, 255, 255, 255]);
+        let clear = Rgba([0, 0, 0, 0]);
+        let image = RgbaImage::from_fn(
+            2601,
+            40,
+            |x, _| if (x / 3) % 2 == 0 { clear } else { white },
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let path = source(tmp.path(), "stripes.png", &png(&image));
+        let encoded = encode_cover_image(&path, CoverImageSlot::Background).unwrap();
+        assert!(encoded.file_name.ends_with(".png"));
+        let back = decoded(&encoded.bytes).to_rgba8();
+        assert_eq!(back.dimensions(), (2560, 39));
+        let mixed = back
+            .pixels()
+            .filter(|pixel| (1..255).contains(&pixel[3]))
+            .count();
+        assert!(mixed > 1000, "横跨两种像素的格应当很多，实际 {mixed}");
+        for (x, y, pixel) in back.enumerate_pixels() {
+            if pixel[3] > 0 {
+                assert_eq!(pixel.0[..3], [255, 255, 255], "({x}, {y}) {pixel:?}");
+            }
+        }
+    }
+
     /// EXIF 方向 6（顺时针转 90 度）的 40 × 20 照片按 20 × 40 存。
     #[test]
     fn exif_orientation_is_applied_before_encoding() {
@@ -716,7 +808,7 @@ mod tests {
                 image.put_pixel(x, y, Rgba([0, 0, 0, 0]));
             }
         }
-        let block = box_average(&image, 16);
+        let block = box_average(&image, 16, 16);
         assert_eq!(block.dimensions(), (16, 16));
         assert_eq!(block.get_pixel(0, 0), &Rgba([255, 0, 0, 128]));
         assert_eq!(block.get_pixel(1, 0), &Rgba([75, 25, 25, 255]));
@@ -733,7 +825,7 @@ mod tests {
         image.put_pixel(1, 0, Rgba([100, 0, 0, 255]));
         image.put_pixel(0, 1, Rgba([100, 0, 0, 255]));
         image.put_pixel(2, 0, Rgba([160, 0, 0, 255]));
-        let block = box_average(&image, 16);
+        let block = box_average(&image, 16, 16);
         // (200 × 1 + 100 × 0.5 + 100 × 0.5 + 0 × 0.25) / 2.25 = 133.3
         assert_eq!(block.get_pixel(0, 0), &Rgba([133, 0, 0, 255]));
         // 横向盖住 x1 的一半与整个 x2：(100 × 0.5 + 160 × 1) × 1 / 2.25 = 93.3（y1 那行都是 0）
@@ -756,15 +848,30 @@ mod tests {
     #[test]
     fn block_average_enlarges_small_sources() {
         let image = RgbaImage::from_fn(8, 8, |x, y| Rgba([x as u8 * 30, y as u8 * 30, 7, 255]));
-        let block = box_average(&image, 16);
+        let block = box_average(&image, 16, 16);
         for (x, y) in [(0, 0), (1, 1), (2, 3), (15, 14)] {
             assert_eq!(
                 block.get_pixel(x, y),
                 &Rgba([(x / 2) as u8 * 30, (y / 2) as u8 * 30, 7, 255])
             );
         }
-        let single = box_average(&RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 4])), 16);
+        let single = box_average(&RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 4])), 16, 16);
         assert!(single.pixels().all(|pixel| *pixel == Rgba([1, 2, 3, 4])));
+    }
+
+    /// 两条轴各算各的覆盖：3 × 2 缩成 2 × 1，横向每格盖住一个整像素加半个，竖向两行各占一半。
+    #[test]
+    fn area_average_handles_unequal_axes() {
+        // 第一行 30 60 90，第二行 90 120 150
+        let image = RgbaImage::from_fn(3, 2, |x, y| {
+            Rgba([30 + 30 * x as u8 + 60 * y as u8, 0, 0, 255])
+        });
+        let out = box_average(&image, 2, 1);
+        assert_eq!(out.dimensions(), (2, 1));
+        // (30 × 1 + 60 × 0.5 + 90 × 1 + 120 × 0.5) / 3 = 70
+        assert_eq!(out.get_pixel(0, 0), &Rgba([70, 0, 0, 255]));
+        // (60 × 0.5 + 90 × 1 + 120 × 0.5 + 150 × 1) / 3 = 110
+        assert_eq!(out.get_pixel(1, 0), &Rgba([110, 0, 0, 255]));
     }
 
     /// 方块居中裁成正方形：50 × 32 只取中间第 9 到 40 列，两边各 9 列（与另一个方向的 9 行）一点都不混进来。
