@@ -84,6 +84,10 @@ jobs:
           pnpm lint:tokens
           pnpm test --maxWorkers=4
 
+      # node --test 不认目录参数，这里由 shell 展开成文件列表。
+      - name: 工作流脚本测试
+        run: node --test .github/scripts/*.test.mjs
+
       # 许可清单用 cargo metadata --frozen 现取，crate 必须先下好。
       - name: 下载 Rust 依赖
         run: cargo fetch --locked
