@@ -125,6 +125,7 @@ export const DROP_COPY = {
 export const FILE_PICK_COPY = {
   modpack: { title: "选择整合包文件", filter: "整合包" },
   java: { title: "选择 java.exe 或 javaw.exe", filter: "Java 可执行文件" },
+  image: { title: "选择一张图片", filter: "图片（PNG、JPEG、WebP）" },
 } as const;
 
 /** 系统保存对话框。Windows 的类型下拉原样显示过滤名，不会自己补「（*.mrpack）」，所以写进名字里。 */

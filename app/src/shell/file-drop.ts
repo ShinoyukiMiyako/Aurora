@@ -35,6 +35,8 @@ export const FILE_KINDS = {
   modpack: { extensions: ["mrpack", "zip"] },
   // 对话框只列 .exe；限定 java.exe / javaw.exe 由后端校验，文件名过滤做不到
   java: { extensions: ["exe"] },
+  // 实例卡面的背景与方块图片；后端按文件头再认一遍，扩展名只用来过滤对话框
+  image: { extensions: ["png", "jpg", "jpeg", "webp"] },
 } as const satisfies Record<string, { extensions: readonly string[] }>;
 
 export type FileKind = keyof typeof FILE_KINDS;

@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { IpcError } from "../../ipc/errors";
 import { APP_NAME, APP_NAME_EN, ISSUES_URL, REPO_URL } from "../../lib/app-info";
 import type { GpuAdapterDto, JavaInstallationDto } from "../../ipc/java";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { setMockGpuAdapters, setMockJavaInstallations } from "../../ipc/mock/handlers/java";
+import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickFile } from "../../shell/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
@@ -27,6 +28,11 @@ vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridg
 vi.mock("../../shell/platform", async (orig) => {
   const actual = await orig<typeof import("../../shell/platform")>();
   return { ...actual, pickFile: vi.fn(actual.pickFile) };
+});
+// 「下载原版材质」由它自己的测试覆盖；外观分区只管放不放、放在哪、用不用紧凑版
+vi.mock("../shared/cover-picker/ArtDownload", async () => {
+  const { createElement } = await import("react");
+  return { ArtDownload: ({ compact }: { compact?: boolean }) => createElement("div", { "data-art-download": compact === true ? "compact" : "full" }) };
 });
 
 let view: Rendered | undefined;
@@ -1253,6 +1259,26 @@ describe("设置页：外观", () => {
     expect(text()).toContain("本机还没有带樱花林全景的游戏版本");
     await click(button("飘落花瓣"));
     expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { mode: "night" } }, { patch: { petals: false } }]);
+  });
+
+  it("实例卡面默认背景：两档各写出外观补丁；本机没有原版材质时这一行下面放紧凑的材质下载，有了就收起", async () => {
+    onTestFinished(() => setBlockCatalog(null));
+    await mount("appearance");
+    expect(radio("方块平铺").getAttribute("aria-checked")).toBe("true");
+    expect(text()).toContain("本机还没有原版材质，方块平铺先画成渐变花瓣。");
+    const download = all("[data-art-download]");
+    expect(download.map((d) => d.getAttribute("data-art-download"))).toEqual(["compact"]);
+    expect(download[0].previousElementSibling?.textContent).toMatch(/^实例卡面默认背景/);
+
+    await click(radio("渐变花瓣"));
+    expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { cover_background: "art" } }]);
+    expect(radio("渐变花瓣").getAttribute("aria-checked")).toBe("true");
+    await click(radio("方块平铺"));
+    expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { cover_background: "art" } }, { patch: { cover_background: "texture" } }]);
+
+    act(() => setBlockCatalog(catalogFromDto({ version_id: "1.21.1", blocks: [] })));
+    expect(all("[data-art-download]")).toEqual([]);
+    expect(text()).toContain("方块平铺取封面方块的材质，读取自你本机的游戏文件。");
   });
 });
 

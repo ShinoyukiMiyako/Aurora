@@ -403,8 +403,9 @@ export const setInstanceSettings = (id: string, settings: InstanceSettingsDto): 
 
 /**
  * 把本机一张图片用作卡面背景或封面方块：后端解码、重新编码进实例目录，把文件名写进实例设置（背景位同时把
- * background 设为 image），返回写下的设置；被换下的旧图随之删除。只认 PNG、JPEG、WebP，原文件不超过 20 MB、
- * 边长不超过 8192。读不了或不是图片报 invalid_argument（detail.field 为 path），实例忙碌报 instance_busy。
+ * background 设为 image），返回写下的设置；被换下的旧图随之删除。只认 PNG、JPEG、WebP，原文件不超过 20 MiB、
+ * 边长不超过 8192。图片读不了、太大、格式不认、解码失败报 invalid_argument（detail.field 为 path，detail.reason
+ * 区分原因）；slot 不认识报 invalid_argument（field 为 slot）；重新编码失败报 internal；实例忙碌报 instance_busy。
  */
 export const importCoverImage = (id: string, slot: CoverImageSlotDto, path: string): Promise<InstanceSettingsDto> =>
   invoke<InstanceSettingsDto>("import_cover_image", { id, slot, path });

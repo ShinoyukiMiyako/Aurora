@@ -1,4 +1,4 @@
-// 实例设置：内存、Java、JVM 参数、版本隔离与窗口、实例管理。
+// 实例设置：外观、内存、Java、JVM 参数、版本隔离与窗口、实例管理。
 // 除 JVM 参数外都是改了立即保存：JVM 参数是自由文本，留一个显式的保存，免得半句参数被存下来。
 // 保存是乐观的：控件先显示新值，失败时统一错误处理报错、控件回到磁盘上的值。
 
@@ -35,6 +35,7 @@ import { Tag } from "../../ui/Tag";
 import { Textarea } from "../../ui/Textarea";
 import { TextInput } from "../../ui/TextInput";
 import { Toggle } from "../../ui/Toggle";
+import { AppearanceCard } from "./AppearanceCard";
 import { ISOLATION_POLICY_LABEL, JVM_PRESET_LABEL, SETTINGS_COPY } from "./copy";
 import { useJavaInfo, useMemoryInfo, type JavaInfo, type JavaInfoSource, type MemoryInfo } from "./hooks";
 import styles from "./instance.module.css";
@@ -63,7 +64,7 @@ export interface SettingsTabProps {
   ops: InstanceOps;
 }
 
-interface SettingsEditor {
+export interface SettingsEditor {
   /** 磁盘上的值叠加还没回来的乐观补丁。 */
   value: InstanceSettings;
   /** 此刻写不了实例设置的原因（安装、补全、改名、删除进行中）；能写为 undefined。锁住时各控件不触发 save。 */
@@ -113,6 +114,7 @@ export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
       {ops.busy && <Banner tone="info" title={SETTINGS_COPY.runningNote} />}
       {ops.settingsReason !== undefined && <Banner tone="info" title={ops.settingsReason} />}
       <div className={styles.settingsGrid}>
+        <AppearanceCard inst={inst} editor={editor} placeholder={placeholder} slow={gate.slow} />
         <MemoryCard inst={inst} editor={editor} memory={memory} placeholder={placeholder} />
         <JavaCard inst={inst} editor={editor} java={java} placeholder={placeholder} />
         {placeholder !== null || editor === null || java.status === "loading" ? (

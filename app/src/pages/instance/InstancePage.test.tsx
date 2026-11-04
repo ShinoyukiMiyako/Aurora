@@ -18,6 +18,7 @@ import { pickSaveFile } from "../../shell/platform";
 import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
 import { PickFolderProvider } from "../discover/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
+import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
@@ -70,16 +71,18 @@ function Routed() {
 
 function Providers({ children }: { children: ReactNode }) {
   return (
-    <LauncherProvider>
-      <ShellProvider>
-        <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
-          <PickFolderProvider value={() => Promise.resolve(MOCK_DOWNLOADS_DIR)}>
-            {children}
-            <OverlayRoot />
-          </PickFolderProvider>
-        </RemoteImageProvider>
-      </ShellProvider>
-    </LauncherProvider>
+    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+      <LauncherProvider>
+        <ShellProvider>
+          <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
+            <PickFolderProvider value={() => Promise.resolve(MOCK_DOWNLOADS_DIR)}>
+              {children}
+              <OverlayRoot />
+            </PickFolderProvider>
+          </RemoteImageProvider>
+        </ShellProvider>
+      </LauncherProvider>
+    </AppearanceProvider>
   );
 }
 

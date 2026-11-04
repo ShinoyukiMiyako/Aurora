@@ -4,6 +4,7 @@ import {
   LOADER_CHOICES,
   type BackupKind,
   type BackupResultDto,
+  type CoverImageSlotDto,
   type DeletionPreviewDto,
   type ExportResultDto,
   type FolderTarget,
@@ -121,6 +122,8 @@ interface MockInstance {
   content: InstanceContentDto;
   sizeBytes: number;
   fileCount: number;
+  /** 实例卡面图片目录（.petalfall/cover/）里此刻在盘上的文件名：设置可以引用盘上没有的名字，列表给取图键只认在盘上的。 */
+  coverFiles: string[];
 }
 
 function defaultSettings(): InstanceSettingsDto {
@@ -193,6 +196,7 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 31 * MB,
       fileCount: 4,
+      coverFiles: [],
     },
     {
       dto: readyDto("樱花生存", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, now - 12 * DAY),
@@ -232,6 +236,7 @@ function seedInstances(): MockInstance[] {
       },
       sizeBytes: 420 * MB,
       fileCount: 1830,
+      coverFiles: [],
     },
     // 下面四个实例是 Mod、发现与启动各自 mock 里种好数据的实例：浏览器里从实例列表点进去，各页看到的是同一批实例。
     {
@@ -242,6 +247,7 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 96 * MB,
       fileCount: 410,
+      coverFiles: [],
     },
     {
       dto: readyDto("1.20.1-Forge", "1.20.1", [{ kind: "forge", version: "47.2.0" }], 17, now - 55 * DAY),
@@ -251,6 +257,7 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 120 * MB,
       fileCount: 520,
+      coverFiles: [],
     },
     {
       dto: readyDto("1.21", "1.21", [], 21, now - 50 * DAY),
@@ -260,6 +267,7 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 30 * MB,
       fileCount: 4,
+      coverFiles: [],
     },
     {
       dto: readyDto("1.21.1-Fabric", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, now - 20 * DAY),
@@ -294,6 +302,7 @@ function seedInstances(): MockInstance[] {
       },
       sizeBytes: 210 * MB,
       fileCount: 900,
+      coverFiles: [],
     },
     {
       dto: readyDto("RLCraft", "1.12.2", [{ kind: "forge", version: "14.23.5.2860" }], 8, now - 90 * DAY),
@@ -303,6 +312,7 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 1300 * MB,
       fileCount: 9200,
+      coverFiles: [],
     },
     {
       dto: {
@@ -331,6 +341,7 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 12 * MB,
       fileCount: 3,
+      coverFiles: [],
     },
   ];
 }
@@ -686,6 +697,29 @@ function isolatedOf(instance: MockInstance): boolean {
   return instance.dto.loaders.some((l) => l.kind !== "optifine" && l.kind !== "liteloader") || !instance.dto.is_release;
 }
 
+/** 同一输入得同一串 length 位小写十六进制：每 8 位一轮 FNV-1a，各轮只靠输入前缀的轮次区分。 */
+function stableHex(text: string, length: number): string {
+  let out = "";
+  for (let round = 0; out.length < length; round++) {
+    let hash = 0x811c9dc5;
+    for (const ch of `${round}:${text}`) {
+      hash ^= ch.codePointAt(0) as number;
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    out += hash.toString(16).padStart(8, "0");
+  }
+  return out.slice(0, length);
+}
+
+/**
+ * 卡面图片的取图键：文件不在盘上（没导入过、被换掉清理了、被手动删了）为 null，与后端列实例时的登记一致。
+ * 后端的键是图片路径的 SHA-1；mock 没有真实路径，按实例与文件名给出同样形状（40 位小写十六进制）的确定性键，换名即换键。
+ */
+function coverImageKey(instance: MockInstance, file: string | null): string | null {
+  if (file === null || !instance.coverFiles.includes(file)) return null;
+  return stableHex(`${instance.dto.id}/${file}`, 40);
+}
+
 function toDto(instance: MockInstance): InstanceDto {
   const playError = mockPlayRecordsError();
   const play = playError === null ? mockPlaySummary(instance.dto.id) : null;
@@ -695,9 +729,9 @@ function toDto(instance: MockInstance): InstanceDto {
     ...instance.dto,
     description: instance.settings.description,
     cover: instance.settings.cover,
-    cover_image: null,
+    cover_image: coverImageKey(instance, instance.settings.cover_image),
     background: instance.settings.background,
-    background_image: null,
+    background_image: coverImageKey(instance, instance.settings.background_image),
     memory_mb: instance.settings.memory_mb,
     // 与 list_mods 数的是同一份文件表，两边不会对不上。
     mod_count: ready ? mockModFileCount(instance.dto.id) : null,
@@ -744,6 +778,7 @@ export function addMockInstance(
     content: emptyContent(),
     sizeBytes: 0,
     fileCount: 0,
+    coverFiles: [],
   });
 }
 
@@ -751,6 +786,13 @@ export function addMockInstance(
 export function loseMockLoaderLibrary(id: string, fileName: string): void {
   const message = `加载器自带的库 ${fileName} 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器`;
   requireInstance(id).dto.incomplete = { kind: "repair", outcome: "failed", started_at: Date.now(), spec: null, error: { code: "loader_library_missing", message } };
+}
+
+/** 模拟卡面图片在启动器外被删：设置照旧引用它，列表里的取图键变成 null。 */
+export function loseMockCoverImage(id: string, file: string): void {
+  const instance = requireInstance(id);
+  if (!instance.coverFiles.includes(file)) throw new Error(`mock 实例 ${id} 的卡面图片目录里没有 ${file}`);
+  instance.coverFiles = instance.coverFiles.filter((f) => f !== file);
 }
 
 /** 给实例加一个空存档（模拟游戏里新建的）。 */
@@ -927,6 +969,13 @@ function validateSettings(s: InstanceSettingsDto): void {
   if (s.cover !== null && !/^[a-z0-9_]{1,64}$/.test(s.cover)) {
     throw violation("cover", `封面预设 id 只能由小写字母、数字与下划线组成（1 到 64 个）：${JSON.stringify(s.cover)}`);
   }
+  if (s.cover_image !== null && !COVER_IMAGE_NAME.block.test(s.cover_image)) {
+    throw violation("cover_image", `封面方块图片应形如 block-<16 位十六进制>.png：${JSON.stringify(s.cover_image)}`);
+  }
+  if (s.background_image !== null && !COVER_IMAGE_NAME.background.test(s.background_image)) {
+    throw violation("background_image", `卡面背景图片应形如 background-<16 位十六进制>.png 或 .jpg：${JSON.stringify(s.background_image)}`);
+  }
+  if (s.background === "image" && s.background_image === null) throw violation("background", "背景设为图片时 background_image 不能为空");
   if (s.memory_mb !== null && (s.memory_mb < 1024 || s.memory_mb % 512 !== 0)) {
     throw violation("memory_mb", `内存至少 1024 MB 且为 512 的整数倍，收到 ${s.memory_mb}`);
   }
@@ -937,6 +986,55 @@ function validateSettings(s: InstanceSettingsDto): void {
   if (width < 320 || width > 7680 || height < 240 || height > 4320) {
     throw violation("resolution", `宽应在 320-7680、高应在 240-4320 之间，收到 ${width}×${height}`);
   }
+}
+
+// ---------------------------------------------------------------- 卡面图片
+
+/** 与后端 CoverImageSlot::accepts 一致：前缀 + 16 位小写十六进制 + 这个位置认的扩展名，同时挡住路径穿越。 */
+const COVER_IMAGE_NAME: Record<CoverImageSlotDto, RegExp> = {
+  background: /^background-[0-9a-f]{16}\.(png|jpg)$/,
+  block: /^block-[0-9a-f]{16}\.png$/,
+};
+
+/**
+ * 原图扩展名 -> 背景存下的格式。后端按文件头认图、按有没有透明决定存 JPEG 还是 PNG；mock 读不了文件，
+ * 按扩展名代替：JPEG 本来就不透明，PNG 与 WebP 可能带透明。方块一律存 PNG。
+ */
+const COVER_IMAGE_SOURCES: Readonly<Record<string, "png" | "jpg">> = { png: "png", jpg: "jpg", jpeg: "jpg", webp: "png" };
+
+function coverSlot(raw: unknown): CoverImageSlotDto {
+  if (raw !== "background" && raw !== "block") throw new Error(`mock：slot 应为 background 或 block，收到 ${JSON.stringify(raw)}`);
+  return raw;
+}
+
+/** 落下一份设置，并像后端保存后那样清掉卡面图片目录里不再被引用的文件。 */
+function commitSettings(instance: MockInstance, settings: InstanceSettingsDto): void {
+  instance.settings = settings;
+  instance.coverFiles = instance.coverFiles.filter((f) => f === settings.cover_image || f === settings.background_image);
+}
+
+/**
+ * 与后端同序：先认图（扩展名代替文件头），再占住实例（改名、删除、新建、补全进行中报 instance_busy），之后才认实例。
+ * 文件名的哈希段由位置与原图路径推出（后端取内容哈希），同一张图重复导入得同一个名字。
+ */
+function importCoverImage(args: MockArgs): InstanceSettingsDto {
+  const id = str(args, "id");
+  const slot = coverSlot(args.slot);
+  const path = str(args, "path");
+  const dot = path.lastIndexOf(".");
+  const ext = dot < 0 ? "" : path.slice(dot + 1).toLowerCase();
+  const stored = Object.hasOwn(COVER_IMAGE_SOURCES, ext) ? COVER_IMAGE_SOURCES[ext] : null;
+  if (stored === null) throw invalid("path", "not_image", `只能用 PNG、JPEG 或 WebP 图片：${path}`);
+  return withMockInstance(id, "modifying", () => {
+    const instance = requireInstance(id);
+    const hash = stableHex(`${slot}:${path}`, 16);
+    const file = slot === "block" ? `block-${hash}.png` : `background-${hash}.${stored}`;
+    const settings: InstanceSettingsDto =
+      slot === "block" ? { ...instance.settings, cover_image: file } : { ...instance.settings, background: "image", background_image: file };
+    if (!instance.coverFiles.includes(file)) instance.coverFiles = [...instance.coverFiles, file];
+    commitSettings(instance, settings);
+    return settings;
+  });
 }
 
 // ---------------------------------------------------------------- 命令
@@ -1039,6 +1137,7 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
     content: emptyContent(),
     sizeBytes: 0,
     fileCount: 0,
+    coverFiles: [],
   };
   instances.push(instance);
   // 与后端一样，名字下还留着的记录属于已经不在的同名旧实例（浏览器里刷新后游玩记录重新播种就会这样），新实例从零开始；
@@ -1595,10 +1694,12 @@ export const handlers: MockHandlers = {
     return withMockInstance(id, "modifying", () => {
       validateSettings(settings);
       const instance = requireInstance(id);
-      instance.settings = settings;
+      commitSettings(instance, settings);
       return settings;
     });
   },
+
+  import_cover_image: importCoverImage,
 
   list_instance_content: (args) => {
     const id = str(args, "id");
@@ -1847,9 +1948,9 @@ interface InstancesSnapshot {
 }
 
 // 实例此刻在做的事只在进程内有意义：刷新等于启动器重启，不存。默认设置在后端存于数据目录，跟着实例一起存。
-// 版本 4：实例多了直达能力，另存存档备份表与默认设置。
+// 版本 4：实例多了直达能力，另存存档备份表与默认设置。版本 5：实例多了卡面图片目录里的文件。
 export const persist: MockPersist = {
-  version: 4,
+  version: 5,
   snapshot: (): InstancesSnapshot => ({ instances, pins, template, backups }),
   restore: (data) => {
     const saved = data as InstancesSnapshot;

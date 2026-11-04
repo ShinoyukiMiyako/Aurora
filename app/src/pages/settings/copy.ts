@@ -1,6 +1,7 @@
 // 设置页与启动器更新的文案。产品名一律经 APP_NAME 拼入。
 
 import type { IconName } from "../../art/Icon";
+import type { CoverStyle } from "../../domain/types";
 import { APP_LICENSE, APP_NAME, APP_NAME_EN, ASSET_LICENSE, COPYRIGHT_HOLDER, FIRST_RELEASE_YEAR } from "../../lib/app-info";
 import type { SettingsSection } from "../../state/route";
 
@@ -267,7 +268,16 @@ export const APPEARANCE_COPY = {
   reduceMotion: "减少动画",
   reduceMotionDesc: "停掉花瓣飘落、卡面视差与页面过渡。系统开了「减少动态效果」时无论这里怎么设都会生效。",
   systemReduced: "系统已开启",
+  coverBackground: "实例卡面默认背景",
+  coverBackgroundDesc: "实例的卡面背景设为跟随时用它。方块平铺取封面方块的材质，读取自你本机的游戏文件。",
+  coverBackgroundNoArt: "实例的卡面背景设为跟随时用它。本机还没有原版材质，方块平铺先画成渐变花瓣。",
 } as const;
+
+/** 实例卡面的两种默认背景；实例设置的「外观」卡也按这套说法写出当前默认。 */
+export const COVER_STYLE_LABEL: Readonly<Record<CoverStyle, string>> = {
+  art: "渐变花瓣",
+  texture: "方块平铺",
+};
 
 // ---------------------------------------------------------------- 关于
 

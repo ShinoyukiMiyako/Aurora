@@ -17,6 +17,7 @@ import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
 import { CORE_EVENT } from "../../ipc/tasks";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
+import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
@@ -168,17 +169,19 @@ const flush = () =>
 
 async function open(tab: InstanceTab, id = ID) {
   view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
-          <Probe />
-          <Profiler id="page" onRender={() => void (commits += 1)}>
-            <Routed />
-          </Profiler>
-          <OverlayRoot />
-        </RemoteImageProvider>
-      </ShellProvider>
-    </LauncherProvider>,
+    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+      <LauncherProvider>
+        <ShellProvider>
+          <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
+            <Probe />
+            <Profiler id="page" onRender={() => void (commits += 1)}>
+              <Routed />
+            </Profiler>
+            <OverlayRoot />
+          </RemoteImageProvider>
+        </ShellProvider>
+      </LauncherProvider>
+    </AppearanceProvider>,
   );
   await flush();
   act(() => nav.go({ page: "instance", id, tab }));
