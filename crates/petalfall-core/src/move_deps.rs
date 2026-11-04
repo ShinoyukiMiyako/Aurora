@@ -1,8 +1,8 @@
 //! 移动实例时要补到目标游戏目录的共用文件：库、资源、日志配置、加载器处理器产物与继承链上的基底版本。
 //!
-//! 清单与启动时的文件计划同一套规则：继承链合并后按运行环境筛出的库（含 natives）、日志配置、资源索引与索引里的
-//! 对象。只看存在不看大小与哈希：目标里已有的文件可能正被那边的别的实例使用，一律不碰；源里的文件按原样带过去，
-//! 坏了的由目标那边启动时的校验补下载。
+//! 清单与启动时的文件计划同一套规则：继承链合并后按运行环境筛出的库（含 natives）、启动解压 natives 时读的
+//! jar、日志配置、资源索引与索引里的对象。只看存在不看大小与哈希：目标里已有的文件可能正被那边的别的实例
+//! 使用，一律不碰；源里的文件按原样带过去，坏了的由目标那边启动时的校验补下载。
 //!
 //! 1.20.4 之前的 Forge 补丁 jar 与反混淆产物是安装时处理器在本地生成的，不在库清单里，也下载不回来，只能按
 //! 合并后版本 JSON 的 `--fml.*` 启动参数推出产物所在的库目录，整目录带上。旧版资源布局的展开目录不带：启动时
@@ -12,10 +12,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use petalfall_install::GameLayout;
+use petalfall_install::natives::native_jar_relpath;
 use petalfall_install::plan::{asset_object_tasks, library_tasks, logging_task};
 use petalfall_instance::is_safe_instance_id;
 use petalfall_version::loader::{arg_tokens, flag_value};
-use petalfall_version::{RuntimeContext, VersionJson, check_path_segment, resolve};
+use petalfall_version::{
+    RuntimeContext, VersionJson, check_path_segment, resolve, select_libraries,
+};
 use serde_json::Value;
 
 use crate::InstanceError;
@@ -51,9 +54,9 @@ pub(crate) struct DependencyPlan {
     pub files: Vec<DependencyFile>,
     /// 目标里没有、要带过去的基底版本（只带版本 JSON 与客户端 jar），由近及远。
     pub bases: Vec<BaseVersionCopy>,
-    /// 目标里已有、版本 JSON 内容相同的基底版本。
+    /// 目标里已有、可以当成同一个基底复用的基底版本（判法见 [`same_base`]）。
     pub reused_bases: Vec<String>,
-    /// 目标里已有同名目录、版本 JSON 内容不同（或缺版本 JSON）的基底版本。
+    /// 目标里已有同名目录、不能复用（或缺版本 JSON、版本 JSON 坏了）的基底版本。
     pub conflicting_bases: Vec<String>,
     /// 源里也缺的共用文件数。
     pub missing_in_source: u64,
@@ -91,6 +94,7 @@ pub(crate) async fn plan_dependencies(
         .into_iter()
         .map(|task| task.dest)
         .collect();
+    listed.extend(native_jars(&merged, runtime, &source)?);
     if let Some(task) = logging_task(&merged, &source)? {
         listed.push(task.dest);
     }
@@ -203,6 +207,26 @@ fn without_blank_parent(mut json: VersionJson) -> VersionJson {
         json.inherits_from = None;
     }
     json
+}
+
+/// 启动解压 natives 时读的 jar，口径同 `petalfall_install::natives::extract_all_natives`。旧式 natives 库只写了
+/// `natives` 映射、没有 `downloads.classifiers` 时下载计划不给它排任务，解压却按坐标拼出 jar 去读：漏带了，目标
+/// 那边启动卡在解压本地库，补全也补不回来。
+fn native_jars(
+    merged: &VersionJson,
+    runtime: &RuntimeContext,
+    layout: &GameLayout,
+) -> Result<Vec<PathBuf>> {
+    let mut jars = Vec::new();
+    for lib in select_libraries(merged, runtime) {
+        if !merged.extracts_native(lib) {
+            continue;
+        }
+        if let Some(relative) = native_jar_relpath(lib, runtime)? {
+            jars.push(layout.checked_library_path(&lib.name, &relative)?);
+        }
+    }
+    Ok(jars)
 }
 
 /// 加载器处理器产物所在的库目录，按合并后版本 JSON 的 `--fml.*` 启动参数推出。处理器的产物按 `[坐标]` 落到
@@ -372,7 +396,7 @@ fn files_under(dir: &Path) -> Result<Vec<(PathBuf, u64)>> {
     Ok(files)
 }
 
-/// 一个基底版本在目标里的处境：没有就带过去，有同名目录时比较两份版本 JSON 的内容。
+/// 一个基底版本在目标里的处境：没有就带过去，有同名目录时按 [`same_base`] 比较两份版本 JSON。
 async fn classify_base(
     source: &GameLayout,
     target: &GameLayout,
@@ -382,7 +406,7 @@ async fn classify_base(
     let source_json = source.version_json(id);
     if try_exists(&target.version_dir(id)).await? {
         let same = match target_json_value(&target.version_json(id)).await? {
-            Some(theirs) => theirs == source_json_value(&source_json).await?,
+            Some(theirs) => same_base(theirs, source_json_value(&source_json).await?),
             None => false,
         };
         if same {
@@ -407,6 +431,38 @@ async fn classify_base(
         files,
     });
     Ok(())
+}
+
+/// 目标里的同名基底能不能当成源里的那个复用。同一个原版 id 的 JSON Mojang 会重发（2021-12 的 log4j 修补改了
+/// logging 与 time），两个目录在不同时期装的同一原版整份比一定不同，玩家又解不开这个冲突：链根两边都声明了
+/// 客户端 jar 的 sha1 时，按它认是不是同一个游戏本体。其余情况（加载器基底、没声明 sha1 的链根）比较去掉顶层
+/// `time` 与 `releaseTime` 后的整份：这两个键只记录发布与安装的时间，别的启动器装的时候常常重写。
+fn same_base(theirs: Value, ours: Value) -> bool {
+    if let (Some(theirs), Some(ours)) = (root_client_sha1(&theirs), root_client_sha1(&ours)) {
+        return theirs == ours;
+    }
+    without_times(theirs) == without_times(ours)
+}
+
+/// 链根（没有 `inheritsFrom`，空白的同 [`without_blank_parent`] 算没有）声明的客户端 jar sha1。
+fn root_client_sha1(json: &Value) -> Option<&str> {
+    let root = match json.get("inheritsFrom") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(parent)) => parent.trim().is_empty(),
+        Some(_) => false,
+    };
+    if !root {
+        return None;
+    }
+    json.pointer("/downloads/client/sha1")?.as_str()
+}
+
+fn without_times(mut json: Value) -> Value {
+    if let Some(object) = json.as_object_mut() {
+        object.remove("time");
+        object.remove("releaseTime");
+    }
+    json
 }
 
 /// 目标里同名基底的版本 JSON 解析成的值；文件不存在或解析不了时为 `None`。解析不了的那份已经坏了，和缺了一样
@@ -856,6 +912,160 @@ mod tests {
         assert!(plan.bases.is_empty() && plan.reused_bases.is_empty());
     }
 
+    /// 1.12.2 的原版 JSON：日志配置与 time 随 Mojang 重发而变，releaseTime 与客户端 jar 不变。
+    fn vanilla_1_12_2(client_sha1: &str, logging_sha1: &str, time: &str) -> Value {
+        json!({
+            "id": "1.12.2",
+            "type": "release",
+            "time": time,
+            "releaseTime": "2017-09-18T08:39:46+00:00",
+            "mainClass": "net.minecraft.client.main.Main",
+            "minecraftArguments": "--username ${auth_player_name} --version ${version_name}",
+            "downloads": {"client": {
+                "sha1": client_sha1, "size": 10180113,
+                "url": format!("https://example.invalid/{client_sha1}/client.jar")
+            }},
+            "logging": {"client": {
+                "argument": "-Dlog4j.configurationFile=${path}", "type": "log4j2-xml",
+                "file": {
+                    "id": "client-1.12.xml", "sha1": logging_sha1, "size": 888,
+                    "url": format!("https://example.invalid/{logging_sha1}/client-1.12.xml")
+                }
+            }}
+        })
+    }
+
+    /// Mojang 在 2021-12 为 log4j 漏洞重发过一批原版 JSON（改了 logging 与 time）：两个目录在不同时期装的同一个
+    /// 原版，JSON 不再一样。链根两边都声明了客户端 jar 的 sha1 时按它判同；sha1 不同是另一个游戏本体，仍算冲突；
+    /// 目标那份带了 inheritsFrom 就不是链根，不走 sha1，整份比较不同即冲突。
+    #[tokio::test]
+    async fn a_reissued_vanilla_json_is_reused_when_the_client_jar_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("源");
+        let client = hash('c');
+        let patched = vanilla_1_12_2(&client, &hash('b'), "2021-12-15T15:44:15+00:00");
+        put_version(&source, "1.12.2", &patched.to_string());
+        put_version(&source, "空岛", r#"{"id":"空岛","inheritsFrom":"1.12.2"}"#);
+        let classify = async |target: &Path| {
+            let plan = plan_between(&source, target, "空岛").await;
+            assert!(plan.bases.is_empty());
+            (plan.reused_bases, plan.conflicting_bases)
+        };
+        let reused = || (vec!["1.12.2".to_owned()], Vec::<String>::new());
+        let conflicting = || (Vec::<String>::new(), vec!["1.12.2".to_owned()]);
+
+        let old = tmp.path().join("2021 年前装的");
+        put_version(
+            &old,
+            "1.12.2",
+            &vanilla_1_12_2(&client, &hash('e'), "2017-09-18T08:39:46+00:00").to_string(),
+        );
+        assert_eq!(classify(&old).await, reused());
+
+        let other_client = tmp.path().join("另一个本体");
+        put_version(
+            &other_client,
+            "1.12.2",
+            &vanilla_1_12_2(&hash('d'), &hash('b'), "2021-12-15T15:44:15+00:00").to_string(),
+        );
+        assert_eq!(classify(&other_client).await, conflicting());
+
+        let not_root = tmp.path().join("目标那份不是链根");
+        let mut inheriting = patched.clone();
+        inheriting["inheritsFrom"] = json!("1.12");
+        put_version(&not_root, "1.12.2", &inheriting.to_string());
+        assert_eq!(classify(&not_root).await, conflicting());
+    }
+
+    /// 加载器基底没有客户端 jar 可比：去掉顶层 time 与 releaseTime 再比，装的时候写进去的时间不同（或一边没写）
+    /// 不算不同；别的字段不同仍算冲突。链根两边都没声明客户端 sha1 时同样这么比。
+    #[tokio::test]
+    async fn a_loader_base_differing_only_in_times_is_reused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("源");
+        let forge_id = "1.12.2-forge-14.23.5.2860";
+        let forge = |time: Option<&str>, tweak: &str| {
+            let mut json = json!({
+                "id": forge_id,
+                "inheritsFrom": "1.12.2",
+                "releaseTime": "1960-01-01T00:00:00-0700",
+                "mainClass": "net.minecraft.launchwrapper.Launch",
+                "minecraftArguments": format!("--username ${{auth_player_name}} --tweakClass {tweak}"),
+                "libraries": [{"name": "net.minecraftforge:forge:1.12.2-14.23.5.2860"}]
+            });
+            if let Some(time) = time {
+                json["time"] = json!(time);
+            }
+            json.to_string()
+        };
+        let fml = "net.minecraftforge.fml.common.launcher.FMLTweaker";
+        // 链根两边都没有 downloads.client：也按去掉时间后的整份比。
+        let bare_vanilla = |time: &str| {
+            json!({"id": "1.12.2", "type": "release", "time": time, "releaseTime": time})
+                .to_string()
+        };
+        put_version(
+            &source,
+            "1.12.2",
+            &bare_vanilla("2021-12-15T15:44:15+00:00"),
+        );
+        put_version(
+            &source,
+            forge_id,
+            &forge(Some("2024-05-01T10:00:00+08:00"), fml),
+        );
+        put_version(
+            &source,
+            "格雷科技",
+            &format!(r#"{{"id":"格雷科技","inheritsFrom":"{forge_id}"}}"#),
+        );
+
+        let same = tmp.path().join("只差时间");
+        put_version(&same, "1.12.2", &bare_vanilla("2017-09-18T08:39:46+00:00"));
+        put_version(
+            &same,
+            forge_id,
+            &forge(Some("2019-02-03T04:05:06+08:00"), fml),
+        );
+        let plan = plan_between(&source, &same, "格雷科技").await;
+        assert_eq!(
+            plan.reused_bases,
+            vec![forge_id.to_owned(), "1.12.2".to_owned()]
+        );
+        assert!(plan.conflicting_bases.is_empty() && plan.bases.is_empty());
+
+        let untimed = tmp.path().join("没写 time");
+        put_version(
+            &untimed,
+            "1.12.2",
+            &bare_vanilla("2017-09-18T08:39:46+00:00"),
+        );
+        put_version(&untimed, forge_id, &forge(None, fml));
+        let plan = plan_between(&source, &untimed, "格雷科技").await;
+        assert_eq!(
+            plan.reused_bases,
+            vec![forge_id.to_owned(), "1.12.2".to_owned()]
+        );
+
+        let differs = tmp.path().join("参数不同");
+        put_version(
+            &differs,
+            "1.12.2",
+            &bare_vanilla("2017-09-18T08:39:46+00:00"),
+        );
+        put_version(
+            &differs,
+            forge_id,
+            &forge(
+                Some("2024-05-01T10:00:00+08:00"),
+                "optifine.OptiFineTweaker",
+            ),
+        );
+        let plan = plan_between(&source, &differs, "格雷科技").await;
+        assert_eq!(plan.reused_bases, vec!["1.12.2".to_owned()]);
+        assert_eq!(plan.conflicting_bases, vec![forge_id.to_owned()]);
+    }
+
     /// 只给别的平台的库按规则筛掉，源里有文件也不列。
     #[tokio::test]
     async fn libraries_ruled_out_for_this_platform_are_not_listed() {
@@ -901,6 +1111,76 @@ mod tests {
             vec![(lwjgl.to_owned(), 5)]
         );
         assert_eq!(plan.missing_in_source, 0);
+    }
+
+    /// 旧版 Forge 等版本 JSON 里的旧式 natives 库只写了 `natives` 映射、没有 `downloads.classifiers`：下载计划不给
+    /// 它排任务，启动解压却按坐标拼出 natives jar 去读。按解压的口径带上：源里有就带，目标已有就跳过，源里也缺的
+    /// 计数；`${arch}` 换成位数；当前平台没有映射的、规则筛掉的不列；带 classifiers 的照旧只列一次。
+    #[tokio::test]
+    async fn old_style_natives_without_classifiers_follow_the_extraction_paths() {
+        use std::collections::hash_map::RandomState;
+        use std::hash::BuildHasher;
+
+        let (_tmp, source, target) = game_dirs();
+        let instance = json!({
+            "id": "1.7.10-Forge",
+            "libraries": [
+                {"name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.1", "natives": {"windows": "natives-windows"}},
+                {"name": "net.java.jinput:jinput-platform:2.0.5", "natives": {"windows": "natives-windows"}},
+                {"name": "tv.twitch:twitch-platform:5.16", "natives": {"windows": "natives-windows-${arch}"}},
+                {"name": "ca.weblite:java-objc-bridge:1.0.0", "natives": {"osx": "natives-osx"}},
+                {
+                    "name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.1-nightly-20130708-debug3",
+                    "natives": {"windows": "natives-windows"},
+                    "rules": [{"action": "allow", "os": {"name": "osx"}}]
+                },
+                {
+                    "name": "org.lwjgl:lwjgl:3.2.2",
+                    "natives": {"windows": "natives-windows"},
+                    "downloads": {"classifiers": {"natives-windows": {
+                        "path": "org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar",
+                        "sha1": "0", "size": 1, "url": "https://example.invalid/n.jar"
+                    }}}
+                }
+            ]
+        });
+        put_version(&source, "1.7.10-Forge", &instance.to_string());
+        let lwjgl2 = "libraries/org/lwjgl/lwjgl/lwjgl-platform/2.9.1/lwjgl-platform-2.9.1-natives-windows.jar";
+        let jinput = "libraries/net/java/jinput/jinput-platform/2.0.5/jinput-platform-2.0.5-natives-windows.jar";
+        let lwjgl3 = "libraries/org/lwjgl/lwjgl/3.2.2/lwjgl-3.2.2-natives-windows.jar";
+        // 大小随机，免得清单碰巧对上一个写死的数。
+        let size = RandomState::new().hash_one("natives") % 4096 + 1;
+        put(&at(&source, lwjgl2), &vec![7u8; size as usize]);
+        put(&at(&source, jinput), b"jinput");
+        put(&at(&target, jinput), b"theirs");
+        put(&at(&source, lwjgl3), b"lwjgl3");
+        put(
+            &at(
+                &source,
+                "libraries/org/lwjgl/lwjgl/lwjgl-platform/2.9.1-nightly-20130708-debug3/\
+                 lwjgl-platform-2.9.1-nightly-20130708-debug3-natives-windows.jar",
+            ),
+            b"osx only",
+        );
+        put(
+            &at(
+                &source,
+                "libraries/ca/weblite/java-objc-bridge/1.0.0/java-objc-bridge-1.0.0-natives-osx.jar",
+            ),
+            b"osx",
+        );
+
+        let plan = plan_between(&source, &target, "1.7.10-Forge").await;
+
+        assert_eq!(
+            relative(&plan.files, &source, &target),
+            vec![(lwjgl3.to_owned(), 6), (lwjgl2.to_owned(), size)]
+        );
+        assert_eq!(
+            plan.missing_in_source, 1,
+            "twitch 的 natives-windows-64 源里也没有"
+        );
+        assert_eq!(plan.total_bytes(), 6 + size);
     }
 
     /// `--fml.*` 的取值要拼进库目录：带 `..`、分隔符或盘符的照实报错，指认是哪个参数。
