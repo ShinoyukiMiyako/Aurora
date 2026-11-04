@@ -13,6 +13,7 @@ const REPO_DIR = join(APP_DIR, "..");
 const TERMS = "LICENSE-ADDITIONAL-TERMS.md";
 const ASSETS = "LICENSE-ASSETS.md";
 const CC_TEXT = "LICENSES/CC-BY-NC-ND-4.0.txt";
+const CLA = "CLA.md";
 const COPYRIGHT = `Copyright (C) ${FIRST_RELEASE_YEAR} ${COPYRIGHT_HOLDER}`;
 
 // Windows 工作区检出的是 CRLF，内容按仓库里存的 LF 比对
@@ -26,6 +27,12 @@ function between(text: string, start: string, end: string): string {
   const to = text.indexOf(end, from + start.length);
   if (to < 0) throw new Error(`「${start}」之后没找到「${end}」`);
   return text.slice(from, to);
+}
+
+/** 一节里以空行分开的最后一段。 */
+function lastParagraph(section: string): string {
+  const paragraphs = section.trim().split(/\n{2,}/);
+  return paragraphs[paragraphs.length - 1];
 }
 
 /** 素材许可第 2 节（适用范围）里写进反引号的仓库路径与通配，中文与英文两段各取一次。 */
@@ -139,6 +146,75 @@ describe("适用时间", () => {
     expect(enSection).toContain("up to and including dev.18");
     expect(enSection).toContain("even if the same content later also appears in covered commits");
     expect(enSection).not.toMatch(/from the day|do not have that commit as an ancestor/);
+  });
+});
+
+describe("素材文件的贡献", () => {
+  const terms = readRepo(TERMS);
+  const assets = readRepo(ASSETS);
+  const enTitle = "\n# Petalfall Art and Brand Assets License\n";
+
+  // 第 1 节末段让贡献默认按 AGPL 授权，素材文件的贡献不除外，贡献后的版本就会整份落到 AGPL 下；
+  // 除外写的是「不适用本段」，必须和默认授权同在末段，挪到别的段，「本段」就指错了
+  it.each([
+    { lang: "中文", heading: "## 1. 本文件的性质", anchor: "对 LICENSE-ASSETS.md 第 2 节所列素材文件的贡献不适用本段" },
+    { lang: "英文", heading: "## 1. Nature of this document", anchor: "does not apply to contributions to the asset files listed in Section 2 of LICENSE-ASSETS.md" },
+  ])("附加条款$lang第 1 节末段把素材文件的贡献排除在 AGPL 默认授权之外", ({ heading, anchor }) => {
+    const section = between(terms, heading, "## 2.");
+    expect(section).toContain(anchor);
+    expect(lastParagraph(section)).toContain(anchor);
+  });
+
+  // 首次贡献者先开 PR、再在 PR 评论里签 CLA，素材许可第 2.1 节第三行又以「按 CLA 授权」为条件；
+  // 末段不写明不论签没签，提交那一刻新增的图片就不算第 2 节所列素材文件，落回本段的 AGPL 默认授权
+  it.each([
+    { lang: "中文", heading: "## 1. 本文件的性质", name: "CLA.md（《落樱（Petalfall）贡献者许可协议》", signing: "新增文件也属于这类贡献，不论贡献者提交时是否已经签署" },
+    { lang: "英文", heading: "## 1. Nature of this document", name: "the Petalfall Contributor License Agreement in CLA.md", signing: "are also such contributions, whether or not the contributor has signed" },
+  ])("附加条款$lang第 1 节末段指向 CLA.md，新增的素材类文件不论提交时是否已签 CLA 都在除外之列", ({ heading, name, signing }) => {
+    const last = lastParagraph(between(terms, heading, "## 2."));
+    expect(last).toContain(CLA);
+    expect(last).toContain(name);
+    expect(last).toContain(signing);
+  });
+
+  // 附加条款、CLA 与贡献指南都写「第 10 节」引用这条另行许可，每种语言只能有一个第 10 节
+  it("素材许可中英文各有一个第 10 节，标题照约定", () => {
+    expect(assets.match(/^## 10\..*$/gm)).toEqual(["## 10. 贡献", "## 10. Contributions"]);
+  });
+
+  // 另行许可只放行为提贡献而在 fork、分支与 PR 里公开改过的素材；落在第 9 节或英文部分，中文这句就不算数
+  it("中文第 10 节紧接第 9 节，是分隔线之前的最后一节，写明另行许可只为向本仓库提出贡献", () => {
+    const zh9 = assets.indexOf("## 9.");
+    const zh10 = assets.indexOf("## 10. 贡献");
+    const rule = assets.indexOf("\n---\n");
+    expect(zh9).toBeGreaterThan(-1);
+    expect(zh10).toBeGreaterThan(zh9);
+    expect(rule).toBeGreaterThan(zh10);
+    expect(assets.indexOf(enTitle)).toBeGreaterThan(rule);
+    expect(assets.slice(zh9, zh10)).not.toMatch(/\n## /);
+    const section = assets.slice(zh10, rule);
+    expect(section).not.toMatch(/\n## /);
+    expect(section).toContain("只为向本仓库提出贡献");
+  });
+
+  it("英文第 10 节紧接英文第 9 节，是英文部分的最后一节，写明另行许可 solely to propose a contribution to this repository", () => {
+    const en = assets.indexOf(enTitle);
+    expect(en).toBeGreaterThan(-1);
+    const en9 = assets.indexOf("## 9.", en);
+    const en10 = assets.indexOf("## 10. Contributions", en);
+    expect(en9).toBeGreaterThan(en);
+    expect(en10).toBeGreaterThan(en9);
+    expect(assets.slice(en9, en10)).not.toMatch(/\n## /);
+    const section = assets.slice(en10);
+    expect(section).not.toMatch(/\n## /);
+    expect(section).toContain("solely to propose a contribution to this repository");
+  });
+
+  // 第 1 节原先写素材都由维护者创作；接受素材贡献后，第 2 节所列文件里也会有贡献者按 CLA 授权维护者发布的内容
+  it("素材许可中英文第 1 节都指向 CLA.md，CLA.md 在仓库根目录", () => {
+    expect(existsSync(join(REPO_DIR, CLA))).toBe(true);
+    expect(between(assets, "## 1. 许可", "## 2. 适用范围")).toContain(CLA);
+    expect(between(assets, "## 1. License", "## 2. Scope")).toContain(CLA);
   });
 });
 
@@ -314,7 +390,7 @@ describe("界面上的素材说明", () => {
   // 字标只是用第三方字体排出的产品名，素材许可第 9 节把它排除在素材之外；界面说法与条文冲突，会削弱条文的确定性
   it("素材许可把字标排除在外，启动器关于页与引导程序协议页都不把字标算作素材，两处中文说的是同一句", () => {
     const assets = readRepo(ASSETS);
-    expect(between(assets, "## 9. 不属于素材的内容", "---")).toMatch(/「Petalfall」字标.*不是素材/);
+    expect(between(assets, "## 9. 不属于素材的内容", "## 10.")).toMatch(/「Petalfall」字标.*不是素材/);
     expect(ABOUT_COPY.assetsNotice).toBe(SETUP_COPY.zh.legal.assets);
     expect(ABOUT_COPY.assetsNotice).not.toContain("字标");
     expect(SETUP_COPY.en.legal.assets).not.toMatch(/wordmark/i);

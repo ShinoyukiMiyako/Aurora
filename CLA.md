@@ -1,7 +1,7 @@
 # 落樱（Petalfall）贡献者许可协议（CLA）
 
 - 版本：1
-- 日期：2026-11-01
+- 日期：2026-11-04
 
 本文件包含中文文本和英文文本，中文在前。**以中文文本为准，英文文本仅供参考。**
 
@@ -16,7 +16,7 @@ The Chinese text comes first and is the binding version. The English text is for
 > - **可以闭源和商业再许可。** 维护者及其继受者可以用任何许可证再许可你的贡献，包括闭源许可和商业许可，也可以更换本项目的许可证，不需要再问你（第四条）。这是本协议存在的原因。
 > - **无偿。** 你得不到任何报酬，维护者或其他人靠你的贡献获得收入时也不向你分成（第三条）。
 >
-> 此外请留意署名方式的约定（第五条第二款）、保护作品完整权的不主张约定（第五条第五款）、专利许可及其诉讼终止（第六条）、单位与年龄声明（第八条、第九条）、责任限制（第十一条）、适用法律（第十五条）和语言（第十六条）。
+> 此外请留意授权维护者以自己名义维权的约定（第三条第七款：维护者就其作为被许可人的利益取得的所得归维护者，维护者不代你主张、也不受领你作为著作权人的赔偿，不处分你本人的赔偿请求；双方就同一侵权行为分别维权的，应当互相告知）、素材文件的贡献经维护者合并后按 CC BY-NC-ND 4.0 发布及你公开改动版本的限制（第四条第三款）、为展示个人作品公开素材贡献的许可（第四条第四款：已合并的按该款署名并注明许可即可公开，不需要另行申请；没有合并、含有本项目素材中不是你创作的内容（维护者原作或其他贡献者的贡献）的改动版本须另行取得维护者书面同意；不含徽记母版与应用图标；你独立创作、不含这类内容的部分不受此限，见第二条、第四条第三款）、署名方式的约定（第五条第二款）、保护作品完整权的不主张约定（第五条第五款）、专利许可及其诉讼终止（第六条）、人工智能生成内容的披露义务（第七条第四款）、单位与年龄声明（第八条、第九条）、责任限制（第十一条）、适用法律（第十五条）和语言（第十六条）。
 >
 > 有不明白的地方，签署前在 Pull Request（PR）里提问，维护者会解释。不同意就不要签署；未签署的贡献不会被合并。
 
@@ -57,12 +57,20 @@ The Chinese text comes first and is the binding version. The English text is for
 4. **永久**是指许可在上述权利的整个保护期内持续有效。
 5. **无偿**是指你不因本协议或贡献的使用取得任何报酬。维护者或被许可人通过销售、服务、再许可或其他方式获得收入的，也不需要向你支付费用或分成。
 6. **不可撤销**是指许可生效后你不能撤回或终止。你停止参与本项目、关闭 PR、删除分支或注销账号，都不影响已经授予的权利。
+7. **你授权维护者以自己的名义，就第三方对你的贡献以及含有你的贡献的本项目内容的侵权行为采取维权措施**，包括发出侵权通知、提起诉讼或者申请仲裁、和解。维权的费用由维护者承担，维护者就其作为被许可人的利益取得的赔偿与其他所得归维护者。维护者不代你主张赔偿，也不受领你作为著作权人应得的赔偿。维护者的维权与和解只及于维护者被许可的权利，不处分你本人的赔偿请求，也不妨碍你自己维权。维护者在和解中向侵权人授予的许可不溯及既往，不免除侵权人对和解前已发生的侵权行为向你承担的责任。双方就同一侵权行为分别维权的，应当互相告知，以便协调。维护者请求时，你在力所能及的范围内提供必要的配合，例如出具你是作者的说明；配合产生的合理费用由维护者承担。配合维权时可能需要向法院、仲裁机构或平台提供你的身份证明或作者证明，维护者只在维权必要的范围内使用这些信息。这项授权与本条第一款的许可一样不可撤销，也不使维护者负有维权的义务。
 
 ### 第四条 以任何许可证再许可
 
 1. **维护者可以用任何许可证或其他条款再许可你的贡献，包括 AGPL-3.0-only 以外的开源许可证、闭源许可、私有软件许可和商业许可；可以收取费用；也可以更换本项目的许可证。这是本协议存在的原因。**
 2. 被许可人可以按其取得的授权继续再许可。
-3. **本项目目前以 AGPL-3.0-only 发布，但维护者不承诺今后继续以这一许可证或任何开源许可证发布本项目或你的贡献。** 已经按某一许可证发布的版本，接收者依该许可证享有的权利不受影响。
+3. **本项目的程序代码目前以 AGPL-3.0-only 发布，美术与品牌素材目前以 CC BY-NC-ND 4.0 发布（见 LICENSE-ASSETS.md），但维护者不承诺今后继续以这些许可证或任何开源许可证发布本项目或你的贡献。** 已经按某一许可证发布的版本，接收者依该许可证享有的权利不受影响。
+
+   **你对素材文件（属于 LICENSE-ASSETS.md 第 2 节所列类型、且不在该节排除之列的文件）的贡献，目前在被维护者合并进本仓库（定义见 LICENSE-ASSETS.md 第 2.1 节）后，由维护者按 CC BY-NC-ND 4.0 发布，不按 AGPL-3.0-only 发布。** 没有被维护者合并的贡献，维护者不按 CC BY-NC-ND 4.0 向他人授权。这一许可不允许分享演绎作品（见 LICENSE-ASSETS.md 第 4 节），而你对现有素材所作的具有独创性的改动，通常构成以原素材为基础的演绎作品。所以，以按 CC BY-NC-ND 4.0 取得的素材为基础，你要在本项目之外公开含有本项目素材中不是你创作的内容（维护者原作或其他贡献者的贡献）的演绎作品，仍须取得维护者的许可，但 LICENSE-ASSETS.md 第 10 节和本条第四款允许的情形除外。下列两种情形也不受本段限制：LICENSE-ASSETS.md 第 8 节所述、按当时随附的许可取得的内容，按那一许可使用；依法无需许可的使用。你独立创作、不含本项目素材中不是你创作的内容的部分，著作权仍按第二条归你，你可以自行使用和许可。
+4. 维护者许可你为展示个人作品的非商业目的，例如放进作品集或简历，公开已被维护者合并进本仓库（定义见 LICENSE-ASSETS.md 第 2.1 节）的、你对素材文件的贡献，以及含有该贡献、由维护者发布的素材。公开时要按 LICENSE-ASSETS.md 第 3 节署名，并注明素材以 CC BY-NC-ND 4.0 授权。
+
+   对没有被维护者合并的贡献，只有另行取得维护者的书面同意，本款才许可你为同样的目的公开含有本项目素材中不是你创作的内容（维护者原作或其他贡献者的贡献）的改动版本。公开这样的版本时，要写明它是基于本项目素材的改动版本，没有按本项目的许可发布，他人不因此取得任何许可。
+
+   本款不适用于对徽记母版与应用图标（`app/src/art/petal-mark.json` 与 `app/src-tauri/icons/` 下的全部文件）的改动，也不许可你公开用素材构建的程序，例如安装包和可执行文件。本款的许可不包括商业性使用，也不允许你声称或暗示你的使用与维护者有关联或得到维护者的认可。
 
 ### 第五条 著作人身权
 
@@ -70,7 +78,7 @@ The Chinese text comes first and is the binding version. The English text is for
 2. **署名。** 你保留署名权。双方约定的署名方式是：在本项目的贡献者名单或提交历史中，以你提交时使用的名称或 GitHub 登录名表明你的身份。按这种方式署名后，维护者和被许可人不需要在软件界面、文档、安装包或再许可的版本中另行为你署名。
 3. **发表。** 你同意维护者和被许可人发表你的贡献。
 4. **修改。** 你授权维护者和被许可人修改你的贡献，也授权他们再授权他人修改。
-5. **保护作品完整权。** 你保留保护作品完整权。在法律允许的范围内，对于出于开发、修复、重构、移植、集成或再许可的需要而对贡献作出的修改，你同意不以保护作品完整权受到侵害为由提出主张。这项约定不适用于歪曲、篡改贡献并损害你声誉的行为。
+5. **保护作品完整权。** 你保留保护作品完整权。在法律允许的范围内，对于维护者和被许可人在本项目及其再许可版本中，出于开发、修复、重构、移植、集成或再许可的需要对贡献所作的修改，包括重绘、改色、缩放、裁切、与其他图形组合、统一风格、替换或删除，你同意不以保护作品完整权受到侵害为由提出主张。这项约定不适用于歪曲、篡改贡献并损害你声誉的行为。
 
 ### 第六条 专利许可
 
@@ -83,6 +91,8 @@ The Chinese text comes first and is the binding version. The English text is for
 1. 你声明：每项贡献都是你本人的原创作品，或者已经按本条第三款处理。
 2. 你声明：就你所知，贡献不受任何第三方的许可要求、权利负担或其他限制，已经按本条第三款说明的除外。
 3. 不是你原创的内容，包括第三方代码和资源，必须与你的原创内容分开提交，并在 PR 说明中写明来源、原作者、适用的许可证和你所知道的限制，同时保留原有的版权和许可声明。本协议的许可对这部分内容只在你有权许可的范围内生效。维护者可以决定是否接受这部分内容。
+4. 贡献中有由人工智能生成或者辅助生成的内容的，你要在 PR 说明中写明是哪些部分、用了什么工具。本款所称人工智能生成或者辅助生成的内容，指由人工智能工具产出并进入贡献的代码、文字或图形；整行或整段由工具补全、并被你采纳的内容也在此列，只做拼写检查或格式化的工具不在此列。维护者可以拒绝接受这类内容。按本款写明的部分，不因它不是你本人的原创作品而违反第一款的声明，也不适用第三款关于分开提交和写明原作者、许可证的要求；工具产出中可以辨认出的第三方内容，仍按第三款处理。
+5. 你不得在贡献中描摹、临摹或者复制第三方的作品，包括 Minecraft 的原版纹理与图案。描摹、临摹得到的内容即使由你亲手绘制，也不属于你的原创作品。按第三款单独提交并写明来源与许可的第三方内容不受本款限制，是否接受由维护者决定。
 
 ### 第八条 雇主与其他单位
 
@@ -130,8 +140,8 @@ The Chinese text comes first and is the binding version. The English text is for
 
 1. 签署时只记录五项信息：GitHub 登录名、GitHub 数字 ID、所签 CLA 的版本、签署时间和所在 PR 的链接。
 2. 这些记录公开存放在本项目仓库的 `cla-signatures` 分支，任何人都能查看，用于证明授权来源和判断你是否已经签署。记录存放在 GitHub 平台上，可能位于你所在地之外。贡献还在使用期间，记录会一直保留。
-3. **本项目不收集你的真实姓名、邮箱、住址、证件号码或雇主信息，也不要求你在签署时提供。** 请不要把这些内容写进签署评论。
-4. 你按第八条或第九条另行提供的材料，只用于确认相应的授权。
+3. **签署时，本项目不收集你的真实姓名、邮箱、住址、证件号码或雇主信息，也不要求你提供。** 请不要把这些内容写进签署评论。你按第三条第七款、第八条或第九条另行提供的材料，见第四款。
+4. 你按第三条第七款、第八条或第九条另行提供的材料，只用于相应的维权或授权确认。
 5. 你的 git 提交里的作者名和邮箱是提交本身的一部分，不属于签署记录，会随提交公开。不想公开邮箱的，可以使用 GitHub 提供的 noreply 地址。
 
 ### 第十四条 协议版本
@@ -160,7 +170,7 @@ The Chinese text comes first and is the binding version. The English text is for
 > - **Closed-source and commercial relicensing is allowed.** The Maintainer and its successors may relicense your Contribution under any license, including closed-source and commercial licenses, and may change the license of the Project, without asking you again (Section 4). This is the reason this Agreement exists.
 > - **Free of charge.** You receive no payment, and no share of any income that the Maintainer or anyone else earns from your Contribution (Section 3).
 >
-> Please also note the agreed form of attribution (Section 5, paragraph 2), the limited agreement not to assert the right of integrity (Section 5, paragraph 5), the patent license and its litigation termination (Section 6), the employer and age statements (Sections 8 and 9), the limitation of liability (Section 11), the governing law (Section 15) and the language clause (Section 16).
+> Please also note the authorization for the Maintainer to enforce rights in its own name (Section 3, paragraph 7: the Maintainer keeps what it recovers for its own interest as a licensee, does not claim on your behalf or receive the damages owed to you as the copyright owner, and does not dispose of your own claims for damages; if you and the Maintainer each take action against the same infringement, each must inform the other), the release of Contributions to the asset files under CC BY-NC-ND 4.0 once the Maintainer has merged them, together with the limits on publishing your modified versions (Section 4, paragraph 3), the permission to publish your asset Contributions to show your own work (Section 4, paragraph 4: merged Contributions may be published under that paragraph, with the attribution and license notice it requires, without further consent; a modified version that has not been merged and contains content of the Project's assets that you did not create (the Maintainer's original work or other contributors' contributions) needs the Maintainer's separate written consent; the petal mark master and the application icons are excluded; these limits do not apply to parts you independently created that contain no such content, see Section 2 and Section 4, paragraph 3), the agreed form of attribution (Section 5, paragraph 2), the limited agreement not to assert the right of integrity (Section 5, paragraph 5), the patent license and its litigation termination (Section 6), the duty to disclose content generated by artificial intelligence (Section 7, paragraph 4), the employer and age statements (Sections 8 and 9), the limitation of liability (Section 11), the governing law (Section 15) and the language clause (Section 16).
 >
 > If anything is unclear, ask in the pull request (PR) before signing and the Maintainer will explain it. If you do not agree, do not sign; unsigned Contributions will not be merged.
 
@@ -199,12 +209,20 @@ This Agreement is a copyright license and not a transfer of copyright. The copyr
 4. **Perpetual** means the license lasts for the whole term of protection of these rights.
 5. **Free of charge** means you receive no payment for this Agreement or for any use of your Contribution. If the Maintainer or a Licensee earns income through sales, services, sublicensing or otherwise, they owe you no fee or share of that income.
 6. **Irrevocable** means that once the license takes effect you cannot withdraw or end it. Leaving the Project, closing a PR, deleting a branch or deleting your account does not affect rights already granted.
+7. **You authorize the Maintainer to take action in its own name against any third party that infringes your Contribution or Project content that contains your Contribution.** This includes sending infringement notices, bringing a lawsuit or starting arbitration, and settling. The Maintainer bears the costs of such action, and damages and anything else the Maintainer recovers for its own interest as a licensee belong to the Maintainer. The Maintainer does not claim damages on your behalf and does not receive the damages owed to you as the copyright owner. Such action and any settlement by the Maintainer extend only to the rights licensed to the Maintainer; they do not dispose of your own claims for damages and do not prevent you from taking action yourself. A license that the Maintainer grants to an infringer in a settlement does not apply retroactively, and does not release the infringer from liability to you for infringement that occurred before the settlement. If you and the Maintainer each take action against the same infringement, each must inform the other so that the actions can be coordinated. When the Maintainer asks, you will give the necessary help as far as you reasonably can, such as a statement that you are the author; the Maintainer bears your reasonable costs of doing so. Such help may require you to provide proof of your identity or authorship to a court, an arbitral institution or a platform, and the Maintainer will use that information only as far as the action requires. Like the license in paragraph 1 of this Section, this authorization is irrevocable, and it does not oblige the Maintainer to take any action.
 
 ### Section 4. Relicensing under any license
 
 1. **The Maintainer may relicense your Contribution under any license or other terms, including open source licenses other than AGPL-3.0-only, closed-source licenses, proprietary licenses and commercial licenses. The Maintainer may charge for this and may change the license of the Project. This is the reason this Agreement exists.**
 2. Licensees may sublicense further as far as their own grant allows.
-3. **The Project is currently released under AGPL-3.0-only, but the Maintainer does not promise to keep releasing the Project or your Contribution under that license or under any open source license.** Recipients of a version already released under a license keep whatever rights that license gives them.
+3. **The Project's program code is currently released under AGPL-3.0-only and its art and brand assets under CC BY-NC-ND 4.0 (see LICENSE-ASSETS.md), but the Maintainer does not promise to keep releasing the Project or your Contribution under those licenses or under any open source license.** Recipients of a version already released under a license keep whatever rights that license gives them.
+
+   **Once the Maintainer has merged your Contributions to the asset files (files of a type listed in Section 2 of LICENSE-ASSETS.md and not excluded by that Section) into this repository (as defined in Section 2.1 of LICENSE-ASSETS.md), the Maintainer currently releases them under CC BY-NC-ND 4.0, not under AGPL-3.0-only.** The Maintainer does not license Contributions that it has not merged to anyone under CC BY-NC-ND 4.0. That license does not allow Sharing Adapted Material (see Section 4 of LICENSE-ASSETS.md), and original changes you make to existing assets usually produce Adapted Material based on those assets. So, to publish outside the Project Adapted Material that is based on assets obtained under CC BY-NC-ND 4.0 and contains content of the Project's assets that you did not create (the Maintainer's original work or other contributors' contributions), you still need the Maintainer's permission, except as Section 10 of LICENSE-ASSETS.md or paragraph 4 of this Section allows. This paragraph also does not restrict the following: content obtained under the license that accompanied it at the time, as described in Section 8 of LICENSE-ASSETS.md, which may be used under that license; and uses that the law allows without permission. The copyright in any part that you independently created and that contains no content of the Project's assets that you did not create stays with you under Section 2, and you may use and license that part yourself.
+4. The Maintainer permits you, for the non-commercial purpose of showing your own work, for example in a portfolio or CV, to publish your Contributions to the asset files that the Maintainer has merged into this repository (as defined in Section 2.1 of LICENSE-ASSETS.md), and the assets released by the Maintainer that contain them. When you do so, you must give attribution as described in Section 3 of LICENSE-ASSETS.md and state that the assets are licensed under CC BY-NC-ND 4.0.
+
+   For a Contribution that the Maintainer has not merged, this paragraph permits you to publish, for the same purpose, a modified version that contains content of the Project's assets that you did not create (the Maintainer's original work or other contributors' contributions) only if you first obtain the Maintainer's separate written consent. When you publish such a version, you must state that it is a modified version based on the Project's assets, that it is not released under the Project's licenses, and that no one else obtains any license from it.
+
+   This paragraph does not apply to changes to the petal mark master and the application icons (`app/src/art/petal-mark.json` and all files in the `app/src-tauri/icons/` directory), and does not permit you to publish programs built with the assets, such as installers and executables. This paragraph does not cover commercial use, and does not allow you to claim or imply that your use is connected with or endorsed by the Maintainer.
 
 ### Section 5. Moral rights
 
@@ -212,7 +230,7 @@ This Agreement is a copyright license and not a transfer of copyright. The copyr
 2. **Attribution.** You keep the right of attribution. The parties agree on this form of attribution: your name as used when submitting, or your GitHub login, is shown in the Project's contributor list or commit history. Once you are credited this way, the Maintainer and Licensees do not need to credit you separately in the software interface, documentation, installers or relicensed versions.
 3. **Publication.** You agree that the Maintainer and Licensees may publish your Contribution.
 4. **Modification.** You authorize the Maintainer and Licensees to modify your Contribution, and to authorize others to modify it.
-5. **Integrity.** You keep the right to protect the integrity of your work. To the extent the law allows, you agree not to claim that this right has been infringed by changes made to your Contribution for development, repair, refactoring, porting, integration or relicensing. This agreement does not cover distorting or tampering with your Contribution in a way that harms your reputation.
+5. **Integrity.** You keep the right to protect the integrity of your work. To the extent the law allows, you agree not to claim that this right has been infringed by changes that the Maintainer and Licensees make to your Contribution, in the Project and its relicensed versions, for development, repair, refactoring, porting, integration or relicensing, including redrawing, recoloring, scaling or cropping it, combining it with other graphics, harmonizing its style, and replacing or removing it. This agreement does not cover distorting or tampering with your Contribution in a way that harms your reputation.
 
 ### Section 6. Patent license
 
@@ -225,6 +243,8 @@ This Agreement is a copyright license and not a transfer of copyright. The copyr
 1. You state that each Contribution is your own original work, or has been handled as paragraph 3 of this Section requires.
 2. You state that, as far as you know, your Contribution is free of third-party license requirements, encumbrances and other restrictions, except those disclosed under paragraph 3 of this Section.
 3. Content that is not your original work, including third-party code and resources, must be submitted separately from your original work. The PR description must give its source, original author, applicable license and any restrictions you know of, and the existing copyright and license notices must be kept. The licenses in this Agreement apply to such content only as far as you are able to license it. The Maintainer decides whether to accept it.
+4. If your Contribution contains content generated by artificial intelligence, or generated with its help, you must state in the PR description which parts these are and which tools you used. In this paragraph, content generated by artificial intelligence, or generated with its help, means code, text or graphics produced by an artificial intelligence tool that end up in your Contribution. This includes a whole line or block completed by a tool and accepted by you, but not changes made by tools that only check spelling or format content. The Maintainer may refuse to accept such content. A part disclosed under this paragraph does not breach your statement in paragraph 1 merely because it is not your own original work, and the requirements of paragraph 3 to submit content separately and to give its original author and license do not apply to it; third-party content that can be recognized in a tool's output is still handled under paragraph 3.
+5. You must not trace, hand-copy or copy third-party works in your Contribution, including vanilla Minecraft textures and imagery. Content produced by tracing or hand-copying is not your original work, even if you drew it yourself. This paragraph does not restrict third-party content submitted separately with its source and license under paragraph 3; the Maintainer decides whether to accept such content.
 
 ### Section 8. Employers and other organizations
 
@@ -272,8 +292,8 @@ The Maintainer has no duty to review, accept, merge, use or keep your Contributi
 
 1. Only five items are recorded at signing: your GitHub login, your numeric GitHub ID, the CLA version signed, the signing time and the link to the PR.
 2. These records are kept publicly on the `cla-signatures` branch of the Project's repository, where anyone can read them. They serve to prove where the license came from and to determine whether you have signed. They are stored on the GitHub platform, which may be outside your location. They are kept for as long as your Contribution remains in use.
-3. **The Project does not collect your real name, email address, home address, identity document number or employer details, and does not ask you for them at signing.** Please do not put them in your signing comment.
-4. Any material you provide separately under Section 8 or Section 9 is used only to confirm the authorization concerned.
+3. **At signing, the Project does not collect your real name, email address, home address, identity document number or employer details, and does not ask you for them.** Please do not put them in your signing comment. For material you provide separately under Section 3, paragraph 7, Section 8 or Section 9, see paragraph 4.
+4. Any material you provide separately under Section 3, paragraph 7, Section 8 or Section 9 is used only for the enforcement action or the confirmation of authorization concerned.
 5. The author name and email in your git commits are part of the commits, not of the signing record, and become public with them. If you do not want your email to be public, you can use the noreply address GitHub provides.
 
 ### Section 14. Versions of this Agreement
