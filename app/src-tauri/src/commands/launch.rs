@@ -8,15 +8,23 @@
 //! 命令即返回，监控任务等它退出，收尾记账写完后先放开占用槽、再推 [`GAME_EXIT_EVENT`]——前端收到退出
 //! 事件就可能立刻启动下一个实例。开着自动备份时，实例占用在退出事件之前转成「备份」、基底随之放开，把这次
 //! 玩过的存档各备份一份后才放开实例，结果经 [`WORLD_BACKUP_EVENT`] 推送。
+//!
+//! 游戏进程起来后写下接回记录（[`petalfall_core::reattach`]），收尾记账做完后删掉：落樱在游戏运行中关闭、
+//! 再打开时，启动期间在后台按记录接回那一局（[`reattach_in_background`]），之后与这次启动的游戏一样被监控。
+//! 前端开机时用 [`running_game`] 问此刻有没有在跑的游戏，渲染进程重载后也凭它找回运行态。落樱退出时先在
+//! 会话日志里留一行说明并落盘（[`mark_on_exit`]）。
 
 use std::future::Future;
-use std::time::SystemTime;
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use petalfall_base::error_with_causes;
 use petalfall_core::{
-    game_line_level, AutoBackupOutcome, DownloadProgress, Finished, GameExit, GameRun, GameSlot,
-    LaunchAccount, LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage,
-    LauncherLevel, LogLine, LogSource, Petalfall, PlayRange, PlayStats, QuickPlay, SlotBusy,
-    SlotReservation, SlotTicket,
+    game_line_level, AccountType, AutoBackupOutcome, DownloadProgress, Finished, GameExit, GameRun,
+    GameSlot, LaunchAccount, LaunchEvent, LaunchFailed, LaunchPhase, LaunchRequest, LaunchStage,
+    LauncherLevel, LogLine, LogMarker, LogSource, Petalfall, PlayRange, PlayStats, QuickPlay,
+    RecordLoad, RunningRecord, SlotBusy, SlotReservation, SlotTicket,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -43,15 +51,128 @@ pub const GAME_EXIT_EVENT: &str = "petalfall://game-exit";
 /// 记着 backing_up，前端要靠这条事件知道它已放开、重读实例列表。
 pub const WORLD_BACKUP_EVENT: &str = "petalfall://world-backup";
 
-/// 运行中游戏的占用槽。与门面分列两个 managed state：会话生命周期独立于门面，启动后门面锁应立即可用。
-#[derive(Default)]
-pub struct RunningGame(GameSlot);
+/// 运行中游戏的占用槽，连同前端开机时要问的那一局的样子。与门面分列两个 managed state：会话生命周期独立于
+/// 门面，启动后门面锁应立即可用。
+pub struct RunningGame {
+    slot: GameSlot,
+    current: Mutex<Option<Current>>,
+    /// 开机时的接回尝试做完了没有。前端开机就来问，要等它做完才答得准。
+    startup_done: tokio::sync::watch::Sender<bool>,
+    /// 开机时读不出的接回记录，只交给第一个来问的。
+    broken_record: Mutex<Option<BrokenRecordDto>>,
+}
+
+/// 已经跑起来的那一局。
+struct Current {
+    ticket: SlotTicket,
+    info: RunningGameInfoDto,
+    marker: LogMarker,
+    game_log_file: PathBuf,
+}
+
+impl Default for RunningGame {
+    fn default() -> Self {
+        Self {
+            slot: GameSlot::default(),
+            current: Mutex::new(None),
+            startup_done: tokio::sync::watch::channel(false).0,
+            broken_record: Mutex::new(None),
+        }
+    }
+}
 
 impl RunningGame {
     /// 槽本身：存档备份要看此刻是哪个实例在跑游戏。
     pub(crate) fn slot(&self) -> &GameSlot {
-        &self.0
+        &self.slot
     }
+
+    fn current(&self) -> MutexGuard<'_, Option<Current>> {
+        // 临界区里只有字段赋值与克隆，不会 panic；真中毒说明程序已处于未知状态，直接崩。
+        self.current.lock().expect("运行中游戏的锁已中毒")
+    }
+
+    /// 进程起来、占用转为运行中之后记下这一局。
+    fn set_running(&self, ticket: SlotTicket, run: &GameRun) {
+        let account = run.account();
+        *self.current() = Some(Current {
+            ticket,
+            info: RunningGameInfoDto {
+                version_id: run.version_id().to_owned(),
+                pid: run.pid(),
+                started_at: run.started_at(),
+                running_since: run.running_since(),
+                offline: run.offline(),
+                reattached: run.reattached(),
+                account: RunningGameAccountDto {
+                    uuid: account.uuid.clone(),
+                    name: account.name.clone(),
+                    account_type: account.account_type,
+                },
+            },
+            marker: run.log_marker(),
+            game_log_file: run.game_log_file(),
+        });
+    }
+
+    /// 放开运行中的占用。凭据过期（槽已换了主人）时什么都不做。
+    fn release(&self, ticket: SlotTicket) {
+        {
+            let mut current = self.current();
+            if current.as_ref().is_some_and(|c| c.ticket == ticket) {
+                *current = None;
+            }
+        }
+        self.slot.release(ticket);
+    }
+
+    fn mark_startup_done(&self) {
+        self.startup_done.send_replace(true);
+    }
+
+    fn broken_record(&self) -> MutexGuard<'_, Option<BrokenRecordDto>> {
+        self.broken_record.lock().expect("接回记录的锁已中毒")
+    }
+}
+
+/// 此刻在跑的那一局的账户。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunningGameAccountDto {
+    pub uuid: String,
+    pub name: String,
+    pub account_type: AccountType,
+}
+
+/// 此刻已经跑起来的那一局。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunningGameInfoDto {
+    pub version_id: String,
+    pub pid: Option<u32>,
+    /// 这次启动开始（会话日志开始）的 Unix 毫秒。
+    pub started_at: u64,
+    /// 游戏进程起来的 Unix 毫秒，游玩时长从这里算。
+    pub running_since: u64,
+    pub offline: bool,
+    /// 落樱关闭前启动、这次打开后接回的；`false` 是这个落樱进程自己启动的。
+    pub reattached: bool,
+    pub account: RunningGameAccountDto,
+}
+
+/// 开机时读不出的接回记录。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BrokenRecordDto {
+    pub path: String,
+    /// 改名留存到的路径；改名也失败（或文件本身就读不了）时为 `null`。
+    pub moved_to: Option<String>,
+    /// 读不出的原因原文。
+    pub message: String,
+}
+
+/// [`running_game`] 的结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RunningGameDto {
+    pub game: Option<RunningGameInfoDto>,
+    pub broken_record: Option<BrokenRecordDto>,
 }
 
 /// 启动成功：进程已经起来。
@@ -366,6 +487,11 @@ async fn watch(
         instance,
     } = watched;
     let exit = settle(finish).await;
+    // 收尾记账做完才删：删在前面的话，这期间落樱退出，下次打开就既认不出这一局、也补不上它的记账。
+    // 删不掉的记录指向一个已经退出的进程，下次打开时按「进程已退出」丢弃。
+    if let Err(err) = facade.snapshot().await.remove_running_record().await {
+        tracing::error!(version = %version_id, error = %err, "删除接回记录失败");
+    }
     let auto = facade.read().await.config().world_backup.auto;
     if !auto {
         drop(instance);
@@ -406,7 +532,7 @@ fn spawn_watch(
                 instance,
             },
             run.finish(),
-            || app.state::<RunningGame>().0.release(ticket),
+            || app.state::<RunningGame>().release(ticket),
             |exit| events::emit(&app, GAME_EXIT_EVENT, exit),
             |backup| events::emit(&app, WORLD_BACKUP_EVENT, backup),
         )
@@ -424,7 +550,7 @@ async fn reserve_launch<'a>(
     petalfall: &Petalfall,
     version_id: &str,
 ) -> Result<(SlotReservation<'a>, ChainGuard), CommandError> {
-    let reservation = running.0.reserve(version_id).map_err(busy)?;
+    let reservation = running.slot.reserve(version_id).map_err(busy)?;
     let instance = locks
         .acquire_with_chain(version_id, InstanceActivity::Launching, async {
             Ok(petalfall.inheritance_chain(version_id).await?)
@@ -492,14 +618,8 @@ pub async fn launch_game(
         }
     });
     // 游戏输出的转发寿命随进程：管道关闭后汇流任务放掉发送端，循环自然结束，所以这里不 await。
-    let (log_tx, mut log_rx) = mpsc::unbounded_channel::<Vec<LogLine>>();
-    let log_app = app.clone();
-    let log_version = version_id.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Some(batch) = log_rx.recv().await {
-            events::emit(&log_app, GAME_LOG_EVENT, game_log(&log_version, batch));
-        }
-    });
+    let (log_tx, log_rx) = mpsc::unbounded_channel::<Vec<LogLine>>();
+    forward_game_log(&app, version_id.clone(), log_rx);
 
     // 在拉起进程之前取：这之后被写过 level.dat 的存档，就是这一局进过的存档。
     let session_started = SystemTime::now();
@@ -531,22 +651,262 @@ pub async fn launch_game(
         tracing::error!(error = %err, "启动阶段转发任务异常结束");
     }
     let run = launched?;
+    if let Err(err) = save_record(&petalfall, &run, session_started).await {
+        // 写不成不挡这一局：游戏照常运行、照常监控，只是落樱在这期间关掉的话，再打开时认不出它。
+        let text = format!(
+            "这一局的接回记录没写成（{}），游戏运行中关闭落樱后再打开将认不出这一局",
+            error_with_causes(&err)
+        );
+        tracing::warn!(version = %version_id, "{text}");
+        if let Err(mark_err) = run
+            .log_marker()
+            .mark(LauncherLevel::Warn, text.clone())
+            .await
+        {
+            tracing::warn!(error = %mark_err, "会话日志里记不下接回记录没写成");
+        }
+        events::emit(
+            &app,
+            GAME_LOG_EVENT,
+            launcher_line(&version_id, run.now(), LauncherLevel::Warn, text),
+        );
+    }
 
     let launched = LaunchedDto {
         pid: run.pid(),
         offline: run.offline(),
     };
     let ticket = reservation.occupy(run.kill_switch());
+    running.set_running(ticket, &run);
     instance.set_activity(InstanceActivity::Running);
     spawn_watch(app, ticket, instance, run, session_started);
     Ok(launched)
+}
+
+/// 写下这一局的接回记录。
+async fn save_record(
+    petalfall: &Petalfall,
+    run: &GameRun,
+    session_started: SystemTime,
+) -> petalfall_core::Result<()> {
+    let backup_since = session_started
+        .duration_since(UNIX_EPOCH)
+        .map_err(petalfall_core::CoreError::SystemClock)?;
+    let backup_since = u64::try_from(backup_since.as_millis()).expect("毫秒数在 u64 范围内");
+    petalfall
+        .save_running_record(&run.running_record(backup_since)?)
+        .await
+}
+
+/// 一行启动器日志，推给前端。
+fn launcher_line(version_id: &str, at: u64, level: LauncherLevel, text: String) -> GameLogDto {
+    GameLogDto {
+        version_id: version_id.to_owned(),
+        lines: vec![LogLineDto {
+            at,
+            source: LogSource::Launcher,
+            level,
+            text,
+        }],
+    }
+}
+
+/// 此刻已经跑起来的那一局（这次启动的与开机接回的都算，还在加载的不算），连同开机时读不出的接回记录
+/// （只交给第一次调用）。先等开机时的接回尝试做完，否则开机就来问的前端会错过接回的那一局。
+#[tauri::command]
+pub async fn running_game(running: State<'_, RunningGame>) -> Result<RunningGameDto, CommandError> {
+    running_game_now(&running).await
+}
+
+async fn running_game_now(running: &RunningGame) -> Result<RunningGameDto, CommandError> {
+    let mut done = running.startup_done.subscribe();
+    done.wait_for(|done| *done).await.map_err(|_| {
+        CommandError::new(
+            crate::commands::error::code::INTERNAL,
+            "开机接回的完成信号已经不在了",
+        )
+    })?;
+    let game = running
+        .current()
+        .as_ref()
+        .map(|current| current.info.clone());
+    let broken_record = running.broken_record().take();
+    Ok(RunningGameDto {
+        game,
+        broken_record,
+    })
+}
+
+/// 开机时在后台按接回记录接回落樱关闭前启动、此刻仍在运行的游戏。在 setup 里调：前端加载要几百毫秒，这期间
+/// 已经接回并占住槽，玩家抢先点启动也会被「正在运行」挡住。
+pub fn reattach_in_background(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let running = app.state::<RunningGame>();
+        if let Err(err) = reattach_recorded(&app).await {
+            tracing::error!(error = %err, causes = ?crate::commands::error::source_chain(&err), "接回上次关闭前在跑的游戏失败");
+        }
+        running.mark_startup_done();
+    });
+}
+
+/// 读接回记录、核对进程、接回并开始监控。记录读不出时留给 [`running_game`] 交给前端；进程已不在或对不上时
+/// 删掉记录。文件本身读不了等意外的失败冒泡：记录留着，下次打开再试。
+async fn reattach_recorded(app: &AppHandle) -> petalfall_core::Result<()> {
+    let facade = app.state::<Facade>();
+    let petalfall = facade.snapshot().await;
+    let running = app.state::<RunningGame>();
+    let record = match petalfall.load_running_record().await {
+        Ok(RecordLoad::Missing) => return Ok(()),
+        Ok(RecordLoad::Loaded(record)) => record,
+        Ok(RecordLoad::Broken {
+            path,
+            moved_to,
+            error,
+        }) => {
+            tracing::error!(path = %path.display(), moved_to = ?moved_to, error = %error_with_causes(&error), "接回记录读不出来，改名留存");
+            *running.broken_record() = Some(BrokenRecordDto {
+                path: path.display().to_string(),
+                moved_to: moved_to.map(|path| path.display().to_string()),
+                message: error_with_causes(&error),
+            });
+            return Ok(());
+        }
+        Err(err) => {
+            // 文件在、却读不了（权限、磁盘）：没有移走，告诉前端这一局不会补记。
+            *running.broken_record() = Some(BrokenRecordDto {
+                path: petalfall.running_record_path().display().to_string(),
+                moved_to: None,
+                message: error_with_causes(&err),
+            });
+            return Err(err);
+        }
+    };
+    let process = match record.open_process()? {
+        Ok(process) => process,
+        Err(refusal) => {
+            tracing::info!(version = %record.instance_id, pid = record.process.pid, %refusal, "上次关闭前在跑的游戏没有接回");
+            return petalfall.remove_running_record().await;
+        }
+    };
+    let reservation = match running.slot.reserve(&record.instance_id) {
+        Ok(reservation) => reservation,
+        Err(busy) => {
+            // 开机时还没有前端，没有谁能先占住槽；真走到这里说明装配顺序出了问题。记录留着，下次再接。
+            tracing::error!(version = %record.instance_id, error = %busy, "开机接回时占用槽已被占着，不接回");
+            return Ok(());
+        }
+    };
+    let Some(instance) = hold_reattached(&app.state::<InstanceLocks>(), &petalfall, &record).await
+    else {
+        // 开机时不该有人占着实例；占不住就不接，记录留着，下次打开再试。
+        return Ok(());
+    };
+    let (log_tx, log_rx) = mpsc::unbounded_channel::<Vec<LogLine>>();
+    forward_game_log(app, record.instance_id.clone(), log_rx);
+    let run = petalfall.reattach(&record, process, Some(log_tx)).await?;
+    let ticket = reservation.occupy(run.kill_switch());
+    running.set_running(ticket, &run);
+    instance.set_activity(InstanceActivity::Running);
+    tracing::info!(version = %record.instance_id, pid = record.process.pid, "接回了上次关闭前在跑的游戏");
+    let session_started = UNIX_EPOCH + Duration::from_millis(record.backup_since);
+    spawn_watch(app.clone(), ticket, instance, run, session_started);
+    Ok(())
+}
+
+/// 接回的那一局占住实例与基底，与启动时一样防它在运行期间被改名、删除、补全。基底按当前游戏目录读继承链：
+/// 记录里的游戏目录不是当前的、或继承链读不出（实例的版本 JSON 已经不在）时只占实例自己。连实例自己都占不住
+/// 时为 `None`。
+async fn hold_reattached(
+    locks: &InstanceLocks,
+    petalfall: &Petalfall,
+    record: &RunningRecord,
+) -> Option<ChainGuard> {
+    let id = record.instance_id.as_str();
+    if petalfall_core::folders::same_path(&record.game_dir, petalfall.game_dir()) {
+        match locks
+            .acquire_with_chain(id, InstanceActivity::Launching, async {
+                Ok(petalfall.inheritance_chain(id).await?)
+            })
+            .await
+        {
+            Ok(guard) => return Some(guard),
+            Err(err) => {
+                tracing::warn!(version = id, error = %err.message, "接回的实例读不出继承链，只占实例自己");
+            }
+        }
+    }
+    match locks
+        .acquire_with_chain(id, InstanceActivity::Launching, async { Ok(Vec::new()) })
+        .await
+    {
+        Ok(guard) => Some(guard),
+        Err(err) => {
+            tracing::error!(version = id, error = %err.message, "接回的实例占不住，不接回");
+            None
+        }
+    }
+}
+
+/// 落樱退出时给会话日志留说明最多等这么久。写的只是一行加一次落盘，正常是毫秒级；磁盘卡住时不能让窗口关掉
+/// 之后的进程一直挂着。
+pub const EXIT_MARK_DEADLINE: Duration = Duration::from_secs(2);
+
+/// 落樱退出时游戏还在跑：在会话日志里留一行说明并把写缓冲落盘。不落盘的话缓冲里最后几行随进程没了，日志里也
+/// 看不出从哪一刻起不再记录。在 `RunEvent::Exit` 里调，结果只进启动器日志。
+pub fn mark_on_exit(app: &AppHandle) {
+    let marked = app
+        .state::<RunningGame>()
+        .current()
+        .as_ref()
+        .map(|current| {
+            (
+                current.marker.clone(),
+                current.game_log_file.clone(),
+                current.info.version_id.clone(),
+            )
+        });
+    let Some((marker, game_log, version)) = marked else {
+        return;
+    };
+    let text = format!(
+        "落樱已关闭，游戏仍在运行；之后的游戏输出不在这份日志里，见 {}。游戏结束前重新打开落樱会接回这一局",
+        game_log.display()
+    );
+    let marking = tokio::time::timeout(EXIT_MARK_DEADLINE, marker.mark(LauncherLevel::Warn, text));
+    match tauri::async_runtime::block_on(marking) {
+        Ok(Ok(true)) => tracing::info!(version, "落樱退出时游戏仍在运行，会话日志已留下说明并落盘"),
+        Ok(Ok(false)) => tracing::info!(version, "落樱退出时游戏仍在运行，这一局没有会话日志可写"),
+        Ok(Err(err)) => {
+            tracing::warn!(version, error = %err, "落樱退出时会话日志写入失败，缓冲里最后的输出随退出丢失")
+        }
+        Err(_) => tracing::warn!(
+            version,
+            deadline_ms = EXIT_MARK_DEADLINE.as_millis() as u64,
+            "落樱退出时会话日志落盘超时，缓冲里最后的输出随退出丢失"
+        ),
+    }
+}
+
+/// 把一批批游戏输出推给前端。寿命随汇流任务：会话结束后发送端放掉，循环自然结束。
+fn forward_game_log(
+    app: &AppHandle,
+    version_id: String,
+    mut rx: mpsc::UnboundedReceiver<Vec<LogLine>>,
+) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(batch) = rx.recv().await {
+            events::emit(&app, GAME_LOG_EVENT, game_log(&version_id, batch));
+        }
+    });
 }
 
 /// 结束运行中的游戏，等结束动作执行完才返回；退出结果经 [`GAME_EXIT_EVENT`] 推送。没有运行中的游戏时
 /// 为空操作（加载中的启动用 `cancel_task` 取消）。
 #[tauri::command]
 pub async fn stop_game(running: State<'_, RunningGame>) -> Result<(), CommandError> {
-    let Some(kill) = running.0.kill_switch() else {
+    let Some(kill) = running.slot.kill_switch() else {
         tracing::info!("结束游戏：没有运行中的游戏");
         return Ok(());
     };
@@ -705,6 +1065,72 @@ mod tests {
                     { "at": 10, "source": "game", "level": "info", "text": "[main/INFO]: hi" },
                     { "at": 11, "source": "game", "level": "error", "text": "[Render thread/ERROR]: boom" }
                 ]
+            })
+        );
+    }
+
+    /// 开机就来问的前端要等接回尝试做完；读不出的记录只交给第一次调用。
+    #[tokio::test]
+    async fn running_game_waits_for_the_startup_attempt_and_hands_the_broken_record_once() {
+        let running = std::sync::Arc::new(RunningGame::default());
+        *running.broken_record() = Some(BrokenRecordDto {
+            path: "C:/Petalfall/running-game.json".into(),
+            moved_to: Some("C:/Petalfall/running-game.broken.json".into()),
+            message: "读不懂 running-game.json：missing field `pid`".into(),
+        });
+        let asking = tokio::spawn({
+            let running = running.clone();
+            async move { running_game_now(&running).await.unwrap() }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!asking.is_finished(), "接回尝试做完之前不应作答");
+        running.mark_startup_done();
+        let first = asking.await.unwrap();
+        assert_eq!(first.game, None);
+        assert_eq!(
+            first.broken_record.map(|broken| broken.moved_to),
+            Some(Some("C:/Petalfall/running-game.broken.json".to_owned()))
+        );
+        let second = running_game_now(&running).await.unwrap();
+        assert_eq!(second.broken_record, None);
+    }
+
+    /// 与前端 ipc/launch.ts 的 RunningGameDto 一致的键名与取值。
+    #[test]
+    fn running_game_payload_matches_the_frontend_contract() {
+        let dto = RunningGameDto {
+            game: Some(RunningGameInfoDto {
+                version_id: "1.20.1-fabric".into(),
+                pid: Some(4242),
+                started_at: 1_798_000_000_123,
+                running_since: 1_798_000_004_567,
+                offline: false,
+                reattached: true,
+                account: RunningGameAccountDto {
+                    uuid: "0123456789abcdef0123456789abcdef".into(),
+                    name: "Steve".into(),
+                    account_type: AccountType::AuthlibInjector,
+                },
+            }),
+            broken_record: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&dto).unwrap(),
+            json!({
+                "game": {
+                    "version_id": "1.20.1-fabric",
+                    "pid": 4242,
+                    "started_at": 1_798_000_000_123_u64,
+                    "running_since": 1_798_000_004_567_u64,
+                    "offline": false,
+                    "reattached": true,
+                    "account": {
+                        "uuid": "0123456789abcdef0123456789abcdef",
+                        "name": "Steve",
+                        "account_type": "authlib_injector"
+                    }
+                },
+                "broken_record": null
             })
         );
     }
@@ -1283,6 +1709,9 @@ mod tests {
         let guard = locks
             .acquire_with_bases("1.21", InstanceActivity::Running, &["原版".to_owned()])
             .unwrap();
+        // 这一局的接回记录：收尾做完、放开占用槽之前就该删掉，下次打开落樱不再去认一个已经退出的进程。
+        let record = dir.path().join(petalfall_core::reattach::RUNNING_GAME_FILE);
+        std::fs::write(&record, b"{}").unwrap();
         let order = std::cell::RefCell::new(Vec::new());
         watch(
             &facade,
@@ -1292,7 +1721,10 @@ mod tests {
                 instance: guard,
             },
             async { finished("1.21") },
-            || order.borrow_mut().push("release".to_owned()),
+            || {
+                assert!(!record.exists(), "放开占用槽之前接回记录已删");
+                order.borrow_mut().push("release".to_owned())
+            },
             |exit| {
                 assert_eq!(locks.activity("1.21"), None, "退出事件之前实例已放开");
                 assert_eq!(locks.activity("原版"), None, "退出事件之前基底已放开");
