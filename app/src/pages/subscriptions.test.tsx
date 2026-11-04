@@ -11,6 +11,7 @@ import { resetMocks } from "../ipc/mock";
 import { CORE_EVENT } from "../ipc/tasks";
 import { OverlayRoot } from "../shell/overlay";
 import { ShellProvider } from "../shell/shell";
+import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcArgs, IpcRecorder } from "../test/fake-bridge";
@@ -147,21 +148,23 @@ const flush = () =>
 
 async function mount(page: ReactNode) {
   view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <RemoteImageProvider resolve={async (url) => url}>
-          <PickFolderProvider value={async () => null}>
-            <Probe />
-            <div style={{ overflowY: "auto" }}>
-              <Profiler id="page" onRender={() => void (commits += 1)}>
-                {page}
-              </Profiler>
-            </div>
-          </PickFolderProvider>
-        </RemoteImageProvider>
-        <OverlayRoot />
-      </ShellProvider>
-    </LauncherProvider>,
+    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+      <LauncherProvider>
+        <ShellProvider>
+          <RemoteImageProvider resolve={async (url) => url}>
+            <PickFolderProvider value={async () => null}>
+              <Probe />
+              <div style={{ overflowY: "auto" }}>
+                <Profiler id="page" onRender={() => void (commits += 1)}>
+                  {page}
+                </Profiler>
+              </div>
+            </PickFolderProvider>
+          </RemoteImageProvider>
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </AppearanceProvider>,
   );
   await flush();
 }

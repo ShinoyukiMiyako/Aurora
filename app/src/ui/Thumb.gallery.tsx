@@ -76,6 +76,19 @@ export const gallery: GalleryEntry = {
           <Cover hue={118} seed="资讯" height={132} remoteUrl="sample:missing" />
         </span>
       </GalleryRow>
+      <GalleryRow label="卡面：材质平铺（悬停对焦与视差，左侧压暗）/ 远程图加载中显示平铺 / 远程图失败回落平铺；本机没有材质时都回落 art">
+        <span style={{ display: "block", width: 320 }} data-sk-hover-host="">
+          <Cover hue={345} seed="周末生存" height={132} texture={{ block: "cherry_planks", hue: 345, image: null }} shade="left">
+            <strong style={{ display: "block", padding: 16 }}>周末生存</strong>
+          </Cover>
+        </span>
+        <span style={{ display: "block", width: 320 }} data-sk-hover-host="">
+          <Cover hue={118} seed="草方块" height={132} remoteUrl="sample:pending" texture={{ block: "grass_block", hue: 118, image: null }} />
+        </span>
+        <span style={{ display: "block", width: 320 }} data-sk-hover-host="">
+          <Cover hue={205} seed="蓝冰" height={132} remoteUrl="sample:missing" texture={{ block: "blue_ice", hue: 205, image: null }} />
+        </span>
+      </GalleryRow>
     </RemoteImageProvider>
   ),
 };

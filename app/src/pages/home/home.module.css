@@ -275,6 +275,27 @@
   padding: var(--sk-space-20) var(--sk-space-24) var(--sk-space-22);
 }
 
+/*
+ * 内容不在卡面内部，接不到卡面的媒体文字色：卡面显示材质平铺或玩家图片时在这里换。
+ * 只换直接压在卡面上的文字与没有底的描边标签，有底的标签与按钮不动，也不加文字阴影。
+ */
+.heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) {
+  --tag-ink: var(--sk-on-media-2);
+  --tag-line: var(--sk-on-media-2);
+}
+
+.heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) :is(.heroName, .heroWhen, .heroLine) {
+  text-shadow: var(--sk-media-text-shadow);
+}
+
+.heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) .heroName {
+  color: var(--sk-on-media);
+}
+
+.heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) :is(.heroWhen, .heroLine) {
+  color: var(--sk-on-media-2);
+}
+
 .heroTop {
   display: flex;
   align-items: center;

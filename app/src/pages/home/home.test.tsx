@@ -11,6 +11,7 @@ import { APP_NAME } from "../../lib/app-info";
 import type { KnownServerDto, NewsItemDto, PinnedServerDto, PlayDayDto, ServerStatusDto } from "../../state/queries/home";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
+import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
@@ -50,15 +51,17 @@ const flush = () =>
 
 async function mount() {
   view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <RemoteImageProvider resolve={async (url) => url}>
-          <Probe />
-          <HomePage route={{ page: "home" }} />
-        </RemoteImageProvider>
-        <OverlayRoot />
-      </ShellProvider>
-    </LauncherProvider>,
+    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+      <LauncherProvider>
+        <ShellProvider>
+          <RemoteImageProvider resolve={async (url) => url}>
+            <Probe />
+            <HomePage route={{ page: "home" }} />
+          </RemoteImageProvider>
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </AppearanceProvider>,
   );
   await flush();
 }

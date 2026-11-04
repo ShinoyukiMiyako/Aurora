@@ -5,6 +5,7 @@ import { coverPreset, DEFAULT_COVER, type InstanceCover } from "../art/iso/cover
 import { hueOf } from "../art/illustrations/seed";
 import type { InstanceSummary } from "../domain/adapt";
 import type { CoverStyle } from "../domain/types";
+import { useAppearance } from "../state/appearance";
 
 /** 已警告过的问题：头像每次渲染都会解析封面，同一个问题只报一次。 */
 const warned = new Set<string>();
@@ -54,5 +55,29 @@ export function instanceBackdrop(inst: Pick<InstanceSummary, "id" | "background"
       if (inst.backgroundImage !== null) return { kind: "image", url: coverImageUrl(inst.backgroundImage) };
       warnOnce(`${inst.id}:background`, `实例 ${inst.id} 的卡面背景图片不见了，回落渐变花瓣`);
       return { kind: "art" };
+  }
+}
+
+/** 卡面背景的两个参数，直接展开给 <Cover>。 */
+export interface CoverBackdropProps {
+  remoteUrl: string | null;
+  texture: InstanceCover | null;
+}
+
+/**
+ * 组件里用：按实例设置与外观里的默认背景解析卡面背景。图片背景不带平铺：图片加载中与读不到时卡面画渐变花瓣，
+ * 与列表给不出取图键时的回落一致。
+ */
+export function useCoverBackdrop(inst: Pick<InstanceSummary, "id" | "cover" | "coverImage" | "background" | "backgroundImage">): CoverBackdropProps {
+  const fallback = useAppearance().appearance.coverBackground;
+  const cover = useInstanceCover(inst);
+  const backdrop = instanceBackdrop(inst, fallback);
+  switch (backdrop.kind) {
+    case "art":
+      return { remoteUrl: null, texture: null };
+    case "texture":
+      return { remoteUrl: null, texture: cover };
+    case "image":
+      return { remoteUrl: backdrop.url, texture: null };
   }
 }

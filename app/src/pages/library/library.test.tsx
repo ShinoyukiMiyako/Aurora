@@ -8,6 +8,7 @@ import type { GameDirectoryDto } from "../../ipc/config";
 import type { InstanceDto, WorldDto } from "../../ipc/instances";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
+import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import { emulateFocusFixup } from "../../test/focus-fixup";
@@ -55,13 +56,15 @@ let instances: InstanceDto[];
 
 async function mount() {
   view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <Probe />
-        <LibraryPage />
-        <OverlayRoot />
-      </ShellProvider>
-    </LauncherProvider>,
+    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          <LibraryPage />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </AppearanceProvider>,
   );
   await flush();
 }

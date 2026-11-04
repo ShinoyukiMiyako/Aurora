@@ -48,8 +48,12 @@
   color: var(--sk-info);
 }
 
-/* 描边画在内侧：外框尺寸与有底色的色调一致 */
+/*
+ * 描边画在内侧：外框尺寸与有底色的色调一致。描边标签没有底，压在图片或材质平铺的卡面上时，
+ * 卡面（或内容不在卡面里的页面）把 --tag-ink、--tag-line 换成媒体文字色，否则灰字在深色底上看不清。
+ */
 .tag[data-tone="outline"] {
   background: transparent;
-  box-shadow: inset 0 0 0 1px var(--sk-line-2);
+  color: var(--tag-ink, var(--sk-text-2));
+  box-shadow: inset 0 0 0 1px var(--tag-line, var(--sk-line-2));
 }

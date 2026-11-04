@@ -7,6 +7,7 @@ import { IpcError } from "../../ipc/errors";
 import type { InstanceSettingsDto } from "../../ipc/instances";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
+import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
@@ -54,14 +55,16 @@ function Routed() {
 
 function Providers({ children }: { children: ReactNode }) {
   return (
-    <LauncherProvider>
-      <ShellProvider>
-        <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
-          {children}
-          <OverlayRoot />
-        </RemoteImageProvider>
-      </ShellProvider>
-    </LauncherProvider>
+    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+      <LauncherProvider>
+        <ShellProvider>
+          <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
+            {children}
+            <OverlayRoot />
+          </RemoteImageProvider>
+        </ShellProvider>
+      </LauncherProvider>
+    </AppearanceProvider>
   );
 }
 

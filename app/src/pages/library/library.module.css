@@ -138,6 +138,12 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 标签行与卡面是同格的兄弟，接不到卡面的媒体文字色：卡面显示材质平铺或玩家图片时在这里换 */
+.coverArea:has(> .cover:is([data-source="texture"], [data-source="remote"])) .coverVersion {
+  color: var(--sk-on-media);
+  text-shadow: var(--sk-media-text-shadow);
+}
+
 /* ---------------------------------------------------------------- 卡身 */
 
 /* 不设定位：标题按钮的覆盖层要以卡片为包含块铺满整卡 */

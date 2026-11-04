@@ -12,7 +12,7 @@ import { ACTION_ERROR, lockReason, modpackLabel, TOAST_COPY } from "../../copy/f
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatPlaytimeShort, formatRelative } from "../../domain/format";
 import { locksOf } from "../../domain/instance-locks";
-import { useInstanceCover } from "../../launch/cover";
+import { useCoverBackdrop, useInstanceCover } from "../../launch/cover";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import { launchView } from "../../launch/launchView";
 import { useNav } from "../../shell/shell";
@@ -63,6 +63,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const deleteReason = lockReason(locksOf(inst, busy).delete, "delete");
   const pinAllowed = inst.pinned || canPin;
   const cover = useInstanceCover(inst);
+  const backdrop = useCoverBackdrop(inst);
   const justCrashed = viewKind === "crashed";
   const hasCrash = justCrashed || inst.lastCrashAt !== null || inst.lastCrashError !== null;
   const crashActive = justCrashed || (viewKind !== null && isCrashActive(inst.lastCrashAt, inst.lastPlayedAt, viewKind));
@@ -157,7 +158,8 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   return (
     <Card padding="none" clip selected={current} className={styles.card} as="article">
       <div className={styles.coverArea}>
-        <Cover hue={cover.hue} seed={id} height={CARD_COVER_HEIGHT} className={styles.cover} />
+        {/* 卡面上的文字只有压在下沿的版本号；顶上的标签与图钉有自己的底 */}
+        <Cover hue={cover.hue} seed={id} height={CARD_COVER_HEIGHT} {...backdrop} shade="bottom" className={styles.cover} />
         <div className={styles.coverOverlay}>
           <div className={styles.coverTop}>
             <LoaderTag loader={inst.loader} version={inst.loaderVersion} size="sm" className={styles.chip} />
