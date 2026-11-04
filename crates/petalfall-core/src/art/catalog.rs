@@ -828,23 +828,30 @@ mod tests {
 
     #[test]
     fn operator_and_technical_blocks_are_left_out() {
-        let blocks = derive_from(vec![
-            state("command_block", "minecraft:block/command_block"),
-            model(
-                "block/command_block",
-                json!({ "parent": "minecraft:block/cube_all", "textures": { "all": "minecraft:block/command_block_front" } }),
-            ),
-            state("frosted_ice", "minecraft:block/frosted_ice_0"),
-            model(
-                "block/frosted_ice_0",
-                json!({ "parent": "minecraft:block/cube_all", "textures": { "all": "minecraft:block/frosted_ice_0" } }),
-            ),
-            state("stone", "minecraft:block/stone"),
-            model(
-                "block/stone",
-                json!({ "parent": "minecraft:block/cube_all", "textures": { "all": "minecraft:block/stone" } }),
-            ),
-        ]);
+        // 逐项写死而不是遍历 EXCLUDED：名单里删掉哪一项，那一项就会进目录、断言挂掉
+        let operator = [
+            "command_block",
+            "chain_command_block",
+            "repeating_command_block",
+            "structure_block",
+            "jigsaw",
+            "test_block",
+            "test_instance_block",
+            "frosted_ice",
+        ];
+        // 名单新加的项也得在上面给模型，否则它有没有被排除没人测
+        for id in EXCLUDED {
+            assert!(operator.contains(&id), "{id} 在 EXCLUDED 里却没被测到");
+        }
+        let mut entries = Vec::new();
+        for id in operator.into_iter().chain(["stone"]) {
+            entries.push(state(id, &format!("minecraft:block/{id}")));
+            entries.push(model(
+                &format!("block/{id}"),
+                json!({ "parent": "minecraft:block/cube_all", "textures": { "all": format!("minecraft:block/{id}") } }),
+            ));
+        }
+        let blocks = derive_from(entries);
         assert_eq!(
             blocks.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(),
             ["stone"]
