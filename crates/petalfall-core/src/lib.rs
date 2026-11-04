@@ -134,6 +134,7 @@ pub use world_backup::{
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
+pub use art::{ArtDownloadProgress, ArtDownloadStage};
 pub use art::{
     ArtStatus, DefaultSkin, DownloadedClient, SkinInfo, TexResponse, TextureService, ThumbError,
     default_skin,

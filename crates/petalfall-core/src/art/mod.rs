@@ -15,6 +15,7 @@
 
 pub mod default_skin;
 mod disk_cache;
+mod download;
 mod image_rules;
 mod lru;
 mod remote;
@@ -28,6 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use petalfall_auth::{SkinModel, SkinRef};
 
 pub use default_skin::{DefaultSkin, default_skin};
+pub use download::{ArtDownloadProgress, ArtDownloadStage};
 pub use remote::{THUMB_HOSTS, ThumbError};
 pub use source::{JarOpener, default_opener};
 
