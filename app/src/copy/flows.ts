@@ -1066,6 +1066,13 @@ export const TOAST_COPY = {
   /** 改名已完成，存档备份还留在旧名下。 */
   backupsNotMoved: (name: string, path: string) => ({ title: `「${name}」的存档备份没能跟着改名`, body: `备份还在 ${path}` }),
   backupDeleted: { title: "已删除一份备份", body: "已移入回收站" },
+  /** 关闭前启动的游戏还在运行，这次打开后接了回来。 */
+  gameReattached: (name: string) => `已接回还在运行的「${name}」`,
+  /** 上次关闭前在跑的那局游戏的记录读不出来：后端把它改名留存到 movedTo，改名也失败时为 null，记录还在 path。 */
+  brokenGameRecord: (path: string, movedTo: string | null) => ({
+    title: "上次关闭前那局游戏的记录读不出来",
+    body: `${movedTo === null ? `记录没能移走，还在 ${path}` : `记录已移到 ${movedTo}`}，这一局的游玩时长与崩溃诊断不会补记`,
+  }),
   copyErrorAction: "复制错误信息",
   openFolderAction: "打开文件夹",
 } as const;
@@ -1122,6 +1129,10 @@ export const ACTION_ERROR = {
   firstRun: "首次设置没有保存",
   saveJournal: "下载任务记录没有保存",
   loadCrash: "崩溃报告读不出来",
+  /** 开机时问后端有没有还在运行的游戏，没问出结果。 */
+  recoverGame: "没能接回还在运行的游戏",
+  /** 接回的一局，接回之前的日志没能垫进日志面板。 */
+  backfillSessionLog: "这一局接回之前的日志读不出来",
   refreshInstances: "实例列表没能刷新",
   refreshAccounts: "账户列表没能刷新",
   artStatus: "原版材质状态读不出来",
@@ -1220,7 +1231,7 @@ export const CONFIRM_COPY = {
     body: `存档会回到 ${moment} 备份时的样子，现在的存档会移入回收站，需要时可以从回收站找回。`,
     confirmLabel: "恢复备份",
   }),
-  closeWithSession: `游戏会继续运行，但之后的日志和崩溃诊断不会被记录。`,
+  closeWithSession: `游戏会继续运行。游戏结束前重新打开${APP_NAME}可以接回这一局，否则这一局的游玩时长与崩溃诊断不会记下。`,
   closeWithTasks: (count: number, downloads: number) => `还有 ${count} 个${downloads === count ? "下载" : "任务"}没完成，关闭后会中断，下次打开可以重试。`,
   closeWithBackups: (count: number) => `有 ${count} 个实例正在自动备份存档，关闭后这次备份不会完成。`,
   closeTitle: `关闭${APP_NAME}？`,

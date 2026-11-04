@@ -227,7 +227,7 @@ describe("设置页：常规", () => {
     expect(callsOf(ipc, "update_config")).toEqual([{ afterLaunch: "close" }]);
     expect(radio(`关闭${APP_NAME}`).getAttribute("aria-checked")).toBe("true");
     const desc = all("span[data-tone='warn']").map((e) => e.textContent);
-    expect(desc).toContain(`游戏启动后${APP_NAME}退出，游戏日志与崩溃诊断将不可用`);
+    expect(desc).toContain(`游戏启动后${APP_NAME}退出；游戏结束前重新打开${APP_NAME}可接回这一局，否则这一局的游玩时长与崩溃诊断不会记下`);
   });
 
   it("写入失败：控件回到原值，error 通知标题点名设置项、正文给原因", async () => {

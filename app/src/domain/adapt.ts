@@ -51,9 +51,14 @@ const ACCOUNT_KIND: Readonly<Record<AccountType, AccountKind>> = {
   authlib_injector: "authlib",
 };
 
+/** 账户 DTO 与接回的那局游戏的账户快照共用同一套 account_type 取值。 */
+export function accountKindFromDto(type: AccountType): AccountKind {
+  if (!Object.hasOwn(ACCOUNT_KIND, type)) throw new Error(`未知的账户类型：${String(type)}`);
+  return ACCOUNT_KIND[type];
+}
+
 export function accountFromDto(dto: AccountDto): Account {
-  if (!Object.hasOwn(ACCOUNT_KIND, dto.account_type)) throw new Error(`未知的账户类型：${String(dto.account_type)}`);
-  const kind = ACCOUNT_KIND[dto.account_type];
+  const kind = accountKindFromDto(dto.account_type);
   if (kind === "authlib" && dto.auth_server === null) throw new Error(`外置登录账户 ${dto.name} 缺少验证服务器名`);
   if (kind === "authlib" && dto.server_url === null) throw new Error(`外置登录账户 ${dto.name} 缺少验证服务器地址`);
   return {

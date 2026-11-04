@@ -7,6 +7,7 @@ import type { AccountDto } from "../ipc/accounts";
 import type { ConfigDto } from "../ipc/config";
 import { CANCELLED_ERROR_CODE, IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
+import type { RunningGameDto, RunningGameInfoDto } from "../ipc/launch";
 import { clearMockEventListeners, emitMockEvent } from "../ipc/mock/events";
 import type { MemoryAdviceDto } from "../ipc/system";
 import type { TaskRecordDto } from "../ipc/tasks";
@@ -147,6 +148,20 @@ export function configDto(overrides: Partial<ConfigDto> = {}): ConfigDto {
   };
 }
 
+/** 关闭前启动、这次打开后接回的一局：「生存」，进程比会话日志晚起来 9 秒。 */
+export function runningGameInfo(overrides: Partial<RunningGameInfoDto> = {}): RunningGameInfoDto {
+  return {
+    version_id: "生存",
+    pid: 4242,
+    started_at: 1_719_999_000_000,
+    running_since: 1_719_999_009_000,
+    offline: false,
+    reattached: true,
+    account: { uuid: "00000000-0000-0000-0000-00000000a001", name: "Steve", account_type: "microsoft" },
+    ...overrides,
+  };
+}
+
 export interface BootData {
   accounts?: AccountDto[];
   /** 缺省为 accounts 的第一个；显式 null 表示没有当前账户。 */
@@ -158,9 +173,11 @@ export interface BootData {
   journalSeq?: number;
   firstRun?: boolean;
   config?: ConfigDto;
+  /** 开机时问到的运行中游戏，缺省为没有游戏、也没有读不出的记录。 */
+  runningGame?: RunningGameDto;
 }
 
-/** 首查的六个切片与常用写命令改写成确定的样本。 */
+/** 首查的六个切片、开机找回运行中的游戏与常用写命令改写成确定的样本。 */
 export function bootOverrides(ipc: IpcRecorder, data: BootData = {}): void {
   const accounts = data.accounts === undefined ? [accountDto()] : data.accounts;
   const current = data.current === undefined ? (accounts.length === 0 ? null : accounts[0]) : data.current;
@@ -174,6 +191,7 @@ export function bootOverrides(ipc: IpcRecorder, data: BootData = {}): void {
     tasks: data.journal === undefined ? [] : data.journal,
   }));
   ipc.overrides.set("is_first_run", () => (data.firstRun === undefined ? false : data.firstRun));
+  ipc.overrides.set("running_game", (): RunningGameDto => (data.runningGame === undefined ? { game: null, broken_record: null } : data.runningGame));
   ipc.overrides.set("save_task_journal", () => null);
   ipc.overrides.set("update_config", () => null);
 }

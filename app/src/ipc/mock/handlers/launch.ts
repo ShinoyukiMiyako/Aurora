@@ -28,6 +28,7 @@ import {
   type PlayStatsDto,
   type QuickPlayArg,
   type QuickPlayUnsupportedDetail,
+  type RunningGameDto,
   type WorldBackupEvent,
 } from "../../launch";
 import { emitMockEvent } from "../events";
@@ -705,6 +706,8 @@ export const handlers: MockHandlers = {
   stop_game: () => {
     if (occupant?.phase === "running") finishGame(1, true, Date.now() - occupant.runningSince);
   },
+  // 页面刷新即后端重开，内存里的游戏随之没了，也没有上次留下的记录：开机这一问永远是空的。接回的样子由测试改写这条命令来看
+  running_game: (): RunningGameDto => ({ game: null, broken_record: null }),
   play_stats: playStats,
 };
 

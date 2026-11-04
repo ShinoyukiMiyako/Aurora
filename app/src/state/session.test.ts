@@ -4,8 +4,19 @@ import { percent } from "../domain/format";
 import { GAME_EXIT_EVENT, LAUNCH_PHASE_EVENT, type GameExitEvent, type LaunchPhaseEvent } from "../ipc/launch";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, cancelledError, deferred, emit, resetRecorder, settle, startedStore } from "../test/launcher";
+import { SESSION_LOG_LIMIT } from "../domain/limits";
 import type { LogLine } from "../domain/types";
-import { appendSessionLogs, applyPhase, sessionExited, sessionLaunched, startSession, type SessionState } from "./session";
+import {
+  appendSessionLogs,
+  applyPhase,
+  backfillSessionLogs,
+  reattachedSession,
+  sessionExited,
+  sessionLaunched,
+  sessionPlayedMinutes,
+  startSession,
+  type SessionState,
+} from "./session";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -104,6 +115,77 @@ describe("会话退出", () => {
 
   it("别的实例的退出事件不影响会话", () => {
     expect(sessionExited(running, { versionId: "创造", crashed: true, killed: false }, T0)).toBe(running);
+  });
+});
+
+describe("从后端找回的会话", () => {
+  const times = { startedAt: T0 - 60_000, runningSince: T0 - 51_000 };
+
+  it("直接是运行态：时长从后端记下的进程起来时刻算，阶段起点是此刻", () => {
+    const s = reattachedSession("生存", "reattach-1", ACCOUNT, times, T0);
+    expect(s).toMatchObject({
+      instanceId: "生存",
+      taskId: "reattach-1",
+      accountUuid: "u-1",
+      accountName: "Steve",
+      accountKind: "microsoft",
+      quickPlay: null,
+      phase: "running",
+      stageIndex: 7,
+      progress: 1,
+      startedAt: T0 - 60_000,
+      runningSince: T0 - 51_000,
+      phaseSince: T0,
+      logs: [],
+      reattached: true,
+    });
+    // 找回之前已经跑了 51 秒，再过 9 秒正好满 1 分钟
+    expect(sessionPlayedMinutes(s, T0 + 8_999)).toBe(0);
+    expect(sessionPlayedMinutes(s, T0 + 9_000)).toBe(1);
+    expect(startSession("生存", "launch-1", ACCOUNT, T0, null).reattached).toBe(false);
+  });
+
+  it("退出照常结算，运行起点保持后端给的那一刻", () => {
+    const s = reattachedSession("生存", "reattach-1", ACCOUNT, times, T0);
+    expect(sessionExited(s, { versionId: "生存", crashed: true, killed: false }, T0 + 5000)).toMatchObject({ phase: "crashed", runningSince: T0 - 51_000, crash: { status: "pending" } });
+    expect(sessionExited(s, { versionId: "生存", crashed: false, killed: true }, T0 + 5000)).toMatchObject({ phase: "stopped", stopReason: "killed", phaseSince: T0 + 5000 });
+  });
+});
+
+describe("找回的会话垫上日志文件的尾部", () => {
+  const at = (i: number) => T0 + i;
+  const line = (i: number, text = `第 ${i} 行`): LogLine => ({ at: at(i), level: "info", source: "game", text });
+  const base = () => reattachedSession("生存", "reattach-1", ACCOUNT, { startedAt: T0, runningSince: T0 }, T0);
+
+  it("推来的新行接在文件尾部后面；读文件期间推来、文件里也有的那几行只留一份", () => {
+    const live = appendSessionLogs(base(), "生存", [line(3), line(4), line(5)]);
+    const s = backfillSessionLogs(live, "reattach-1", [line(1), line(2), line(3), line(4)]);
+    expect(s.logs.map((l) => l.at)).toEqual([at(1), at(2), at(3), at(4), at(5)]);
+  });
+
+  it("没有重合时整段垫上；同一时刻同一正文才算同一行", () => {
+    const live = appendSessionLogs(base(), "生存", [line(4, "同一时刻的另一行"), line(5)]);
+    const s = backfillSessionLogs(live, "reattach-1", [line(3), line(4)]);
+    expect(s.logs.map((l) => l.text)).toEqual(["第 3 行", "第 4 行", "同一时刻的另一行", "第 5 行"]);
+  });
+
+  it("内存里还没有新行时就是文件尾部本身", () => {
+    expect(backfillSessionLogs(base(), "reattach-1", [line(1), line(2)]).logs).toEqual([line(1), line(2)]);
+  });
+
+  it("合并后只留最近 SESSION_LOG_LIMIT 行，丢的是文件里更早的", () => {
+    const earlier = Array.from({ length: SESSION_LOG_LIMIT }, (_, i) => line(i));
+    const live = appendSessionLogs(base(), "生存", [line(SESSION_LOG_LIMIT), line(SESSION_LOG_LIMIT + 1)]);
+    const s = backfillSessionLogs(live, "reattach-1", earlier);
+    expect(s.logs).toHaveLength(SESSION_LOG_LIMIT);
+    expect(s.logs[0].at).toBe(at(2));
+    expect(s.logs.at(-1)?.at).toBe(at(SESSION_LOG_LIMIT + 1));
+  });
+
+  it("会话已换成别的一局，或文件里一行都没有：原样返回", () => {
+    const s = base();
+    expect(backfillSessionLogs(s, "reattach-0", [line(1)])).toBe(s);
+    expect(backfillSessionLogs(s, "reattach-1", [])).toBe(s);
   });
 });
 
