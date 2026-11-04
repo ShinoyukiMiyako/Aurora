@@ -36,6 +36,35 @@ const SEARCH_WIDTH = (() => {
   return Number(m[1]);
 })();
 
+/** 某条规则的声明块，选择器按字面匹配。 */
+function ruleBody(css: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rule = new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`).exec(css);
+  if (rule === null) throw new Error(`没有 ${selector} 规则`);
+  return rule[1];
+}
+
+/** 规则里写成 Npx 或 var(--sk-space-N) 的长度；规则里没写这条属性时为 null。 */
+function lengthOf(css: string, selector: string, property: string): number | null {
+  const m = new RegExp(`(?:^|[\\s;])${property}:\\s*(?:(\\d+)px|var\\(--sk-(space-\\d+)\\))`).exec(ruleBody(css, selector));
+  if (m === null) return null;
+  return m[1] !== undefined ? Number(m[1]) : token(m[2]);
+}
+
+function requiredLength(css: string, selector: string, property: string): number {
+  const value = lengthOf(css, selector, property);
+  if (value === null) throw new Error(`${selector} 没有写 ${property}`);
+  return value;
+}
+
+/** 窗口三键的几何：最小化与最大化的命中区宽、关闭键的命中区宽、圆的直径、关闭键的圆离命中区左缘的距离。 */
+const WIN = {
+  button: requiredLength(titleBar, ".winButton", "width"),
+  close: requiredLength(titleBar, ".winButton[data-close]", "width"),
+  face: requiredLength(titleBar, ".winFace", "width"),
+  closeInset: requiredLength(titleBar, ".winButton[data-close] .winFace", "margin-left"),
+};
+
 /** 真机量出来的「Ctrl」「K」两枚键帽连间距的宽度，jsdom 量不了。 */
 const KEY_HINT_WIDTH = 53;
 const ICON_WIDTH = 16;
@@ -54,7 +83,7 @@ describe("标题栏搜索入口的宽度", () => {
 
   it("最窄的 regular 窗口、状态岛开到最宽时，左列放得下两个历史键和四个字的页面名", () => {
     const ACCOUNT_CAPSULE = 140;
-    const WINDOW_CONTROLS = 134;
+    const WINDOW_CONTROLS = 2 * WIN.button + WIN.close;
     const ISLAND_MAX = 280;
     const ICON_BUTTON = 34;
     const HISTORY = 62;
@@ -80,5 +109,34 @@ describe("左上角品牌与后退键", () => {
     expect(/(?:^|\s)color:/.test(wordmark[1])).toBe(false);
     expect(/(?:^|\n)\.logo\s*\{[^}]*\scolor: var\(--sk-text\);/.test(logoCss)).toBe(true);
     expect(/\.brand\[data-blurred\] \.stripLogo\s*\{\s*color: var\(--sk-text-2\);/.test(shell)).toBe(true);
+  });
+});
+
+describe("窗口三键", () => {
+  it("三个圆之间等距，关闭键的圆离窗口右缘也是这个距离", () => {
+    // 关闭键前面另加的空隙和在命中区里居中，正是三键看着不等距的来由
+    expect(lengthOf(titleBar, ".winButton[data-close]", "margin-left")).toBeNull();
+    expect(ruleBody(titleBar, ".winButton[data-close]")).toMatch(/\sjustify-items:\s*start;/);
+    const side = (WIN.button - WIN.face) / 2;
+    const minToMax = 2 * side;
+    const maxToClose = side + WIN.closeInset;
+    const toEdge = WIN.close - WIN.closeInset - WIN.face;
+    expect(minToMax).toBe(token("space-8"));
+    expect(maxToClose).toBe(minToMax);
+    expect(toEdge).toBe(minToMax);
+  });
+
+  it("可见底色是正圆", () => {
+    expect(requiredLength(titleBar, ".winFace", "height")).toBe(WIN.face);
+    expect(ruleBody(titleBar, ".winFace")).toMatch(/\sborder-radius:\s*var\(--sk-r-pill\);/);
+  });
+
+  it("关闭键悬停只染浅红，按下才转正红", () => {
+    const hover = ruleBody(titleBar, ".winButton[data-close]:hover .winFace");
+    expect(hover).toMatch(/\sbackground:\s*var\(--sk-danger-soft\);/);
+    expect(hover).toMatch(/\scolor:\s*var\(--sk-danger\);/);
+    const active = ruleBody(titleBar, ".winButton[data-close]:active .winFace");
+    expect(active).toMatch(/\sbackground:\s*var\(--sk-win-close\);/);
+    expect(active).toMatch(/\scolor:\s*var\(--sk-win-close-ink\);/);
   });
 });
