@@ -364,3 +364,58 @@ describe("资源详情：前置说明", () => {
     expect([...text.children].map((line) => line.textContent)).toEqual(["前置说明：", ...lines]);
   });
 });
+
+describe("资源详情：后端原文不截断", () => {
+  const SINGLE: DetailTarget = { platform: "modrinth", projectId: "AANobbMI", sources: [], listedType: "mod" };
+
+  /** 以 prefix 开头的提示框里的文字容器；带 data-full 才说明它按实际行数显示，而不是截成两行。 */
+  function fullTextOf(tone: "warn" | "danger", prefix: string): HTMLElement {
+    const box = [...dialog().querySelectorAll<HTMLElement>(`[data-tone="${tone}"]`)].find((el) => el.textContent?.startsWith(prefix) === true);
+    if (box === undefined) throw new Error(`没有以「${prefix}」开头的提示框`);
+    const text = box.querySelector<HTMLElement>("[data-full]");
+    if (text === null) throw new Error(`「${prefix}」提示框仍按两行截断`);
+    return text;
+  }
+
+  it("版本列表没取到：失败原因整句列出，提示框不截成两行", async () => {
+    const reason = "Modrinth 接口返回 503：服务暂时不可用，版本列表请求在重试三次后仍然失败，请稍后再试或检查网络代理设置是否拦截了 api.modrinth.com";
+    ipc.overrides.set("list_mod_versions", () => {
+      throw new IpcError("network_failed", reason);
+    });
+    await mount(SINGLE);
+    const versionsTab = [...dialog().querySelectorAll<HTMLElement>('[role="tab"]')].find((t) => t.textContent === "版本");
+    if (versionsTab === undefined) throw new Error("没有版本标签");
+    act(() => versionsTab.click());
+    await flush();
+
+    expect(fullTextOf("danger", "版本列表没加载出来").textContent).toBe(`版本列表没加载出来${reason}`);
+  });
+
+  it("安装计划没算出来：失败原因整句列出，提示框不截成两行", async () => {
+    const reason = "前置 Fabric API 的版本 0.92.2 要求 Minecraft 1.20.1，与实例「生存」的 1.21.1 不符，平台上也没有找到任何一个同时满足其余前置约束的候选版本";
+    ipc.overrides.set("plan_install", () => {
+      throw new IpcError("plan_failed", reason);
+    });
+    await mount(SINGLE);
+    expect(target("生存").getAttribute("aria-checked")).toBe("true");
+
+    expect(fullTextOf("danger", "没能算出要一起安装的文件").textContent).toBe(`没能算出要一起安装的文件${reason}`);
+  });
+
+  it("勾上只是可能可行的实例：后端给的原因整句列出，提示框不截成两行", async () => {
+    const reason = "平台没有标注这个版本支持的加载器，只能按文件名推断它可能是给 Fabric 用的，装进去后若游戏启动报错请到实例的 Mod 页把它停用";
+    const best = modVersion("modrinth-v1", { project_id: "AANobbMI" });
+    ipc.overrides.set("match_instances", () => [
+      match("生存", { state: "maybe", compatibility: { kind: "unknown", reason }, best_version: best }),
+      match("创造", { best_version: best }),
+    ]);
+    await mount(SINGLE);
+    // 可能可行的实例不会被默认勾上，提醒只在用户自己勾选后出现
+    expect(target("生存").getAttribute("aria-checked")).toBe("false");
+    act(() => target("生存").click());
+    await flush();
+    expect(target("生存").getAttribute("aria-checked")).toBe("true");
+
+    expect(fullTextOf("warn", "「生存」").textContent).toBe(`「生存」只是可能可行：${reason}`);
+  });
+});

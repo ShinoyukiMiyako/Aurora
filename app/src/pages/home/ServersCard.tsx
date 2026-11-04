@@ -237,6 +237,7 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
         {status.status === "error" && (
           <Callout
             tone="danger"
+            fullText
             action={
               <Button variant="ghost" size="sm" icon="refresh" onClick={status.reload}>
                 {HOME_COPY.retry}

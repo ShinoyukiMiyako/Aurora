@@ -976,6 +976,20 @@ describe("主页：固定的服务器", () => {
     expect(text()).toContain("还没有固定服务器");
     expect(text()).toContain("把常去的服务器放这里");
   });
+
+  it("延迟测不出来：危险提示写出后端给的完整原因，不截成两行", async () => {
+    const reason = "服务器地址 play.example:99999 不合法：端口必须是 1 到 65535 之间的整数，冒号后面只能写数字，IPv6 地址要用方括号括起来再写端口";
+    ipc.overrides.set("ping_servers", () => {
+      throw new IpcError("invalid_argument", reason);
+    });
+    await mount();
+    const callouts = [...document.querySelectorAll<HTMLElement>('[data-tone="danger"]')];
+    expect(callouts).toHaveLength(1);
+    // jsdom 不排版，截不截成两行只能看文字容器上的 data-full；原因是后端原文，截掉后半句就看不出该怎么改地址
+    const body = callouts[0].querySelector<HTMLElement>("[data-full]");
+    expect(body?.getAttribute("data-full")).toBe("true");
+    expect(body?.textContent).toBe(`延迟测不出来：${reason}`);
+  });
 });
 
 describe("主页：固定服务器的「加入」", () => {

@@ -237,7 +237,7 @@ function DiscoveredBlock({ known, current }: { known: readonly GameDirectoryDto[
   if (discovered.status === "loading") return null;
   if (discovered.status === "error") {
     return (
-      <Callout tone="danger" announce>
+      <Callout tone="danger" announce fullText>
         <span className={s.calloutTitle}>{GAME_DIR_COPY.discoverFailed}</span>
         <span className={s.errorText}>{discovered.error.message}</span>
       </Callout>

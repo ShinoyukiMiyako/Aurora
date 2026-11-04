@@ -354,7 +354,7 @@ export function AuthlibDialog({ prefill, dropped }: { prefill: AuthlibPrefill | 
               </Callout>
             )}
             {loginError !== null && loginError.kind === "rejected" && (
-              <Callout tone="danger" announce>
+              <Callout tone="danger" announce fullText>
                 {loginError.message}
               </Callout>
             )}
