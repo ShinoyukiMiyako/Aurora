@@ -117,7 +117,7 @@ import {
   applyTaskDownload,
   applyTaskPhase,
   attemptTaskId,
-  awaitsManualFiles,
+  batchRetryable,
   clearFinished,
   completeCompositeStep,
   compositeProgress,
@@ -135,7 +135,6 @@ import {
   newTask,
   restoreJournal,
   retryTask,
-  settledOnRestart,
   sharedSavesKeys,
   startComposite,
   taskByAttempt,
@@ -468,10 +467,11 @@ export interface LauncherActions {
   /** 入队一个导出任务：把存档打包到 dest（系统保存对话框选定的 .zip）。 */
   exportWorld(instanceId: string, world: string, name: string, dest: string): Promise<void>;
   /**
-   * 把实例移到 target 这个游戏目录：入队一个挂在实例上的任务，返回任务 id（同一件事已在队列里时返回那个任务的 id）。
-   * targetName 是预检给出的目标显示名，只写进任务详情。期间实例算「移动中」，什么都做不了。
+   * 把实例从 source 移到 target 这个游戏目录：入队一个挂在实例上的任务，返回任务 id（同一件事已在队列里时返回那个任务的 id）。
+   * source 与 targetName 都取自玩家确认的那份预检：source 随任务参数记下，切换游戏目录之后再重试时后端据此拒绝，
+   * 不去动新目录里同名的实例；targetName 只写进任务详情。期间实例算「移动中」，什么都做不了。
    */
-  moveInstance(id: string, target: string, targetName: string): Promise<string>;
+  moveInstance(id: string, source: string, target: string, targetName: string): Promise<string>;
   /** 把一份备份移入回收站（不经任务队列，不确认）。 */
   deleteWorldBackup(instanceId: string, world: string, file: string): Promise<void>;
   listWorldBackups(instanceId: string, world: string): Promise<WorldBackupListDto>;
@@ -481,7 +481,7 @@ export interface LauncherActions {
   cancelTask(id: string): Promise<void>;
   cancelAllTasks(): Promise<void>;
   retryTask(id: string): void;
-  /** 把全部失败的任务重新排进队列（已有同一件事在队列里的跳过），返回重新排进去的个数。 */
+  /** 把失败的任务重新排进队列（已有同一件事在队列里的跳过；移动与要手动下载的不收，见 batchRetryable），返回重新排进去的个数。 */
   retryFailedTasks(): number;
   clearFinishedTasks(): void;
   /** 打开下载快览或进入下载任务页时调用：此刻的失败都算看过了。 */
@@ -1532,7 +1532,7 @@ export class LauncherStore {
 
   /** 由离线转回在线：发「网络已恢复」；有失败的下载时正文写个数，操作为全部重试。 */
   private announceRecovered(): void {
-    const failed = this.raw.tasks.filter((t) => t.status === "failed" && !awaitsManualFiles(t) && !settledOnRestart(t)).length;
+    const failed = this.raw.tasks.filter(batchRetryable).length;
     const copy = TOAST_COPY.networkRestored(failed);
     const action: ToastAction | undefined =
       failed === 0 ? undefined : { label: TOAST_COPY.retryAllAction, run: () => void this.actions.retryFailedTasks(), errorTitle: ACTION_ERROR.install };
@@ -2450,8 +2450,8 @@ export class LauncherStore {
 
   /**
    * 移动完成：实例已不在当前游戏目录，按删除的口径撤掉挂在它身上的通知动作、结束了的会话与按需数据；后端随移动去掉了
-   * 侧栏固定与当前选中，一并重读。重扫结果与 lastMove 在同一次更新里到达，外壳据此把开着的实例页送回实例库。
-   * 目标目录的版本数变了，新记进列表的目录也要出现，目录列表一并失效。
+   * 侧栏固定与当前选中（配置没存上时留到下次打开再去，跟进项里有 config），一并重读。重扫结果与 lastMove 在同一次更新里
+   * 到达，外壳据此把开着的实例页送回实例库。目标目录的版本数变了，新记进列表的目录也要出现，目录列表一并失效。
    */
   private async landMove(outcome: MoveOutcomeDto): Promise<void> {
     const id = outcome.id;
@@ -2994,10 +2994,10 @@ export class LauncherStore {
         store.pushToast("info", copy.title, copy.body);
         return task.id;
       },
-      async moveInstance(id, target, targetName) {
+      async moveInstance(id, source, target, targetName) {
         if (store.sessionActiveFor(id)) throw new Error(`「${id}」的游戏正在运行，先结束游戏`);
         const title = TASK_TEXT.moveTitle(id);
-        const spec = { command: MOVE_TASK_COMMAND, args: { id, target } };
+        const spec = { command: MOVE_TASK_COMMAND, args: { id, source, target } };
         const task = store.enqueue({ kind: "instance_move", title, detail: TASK_TEXT.moveDetail(targetName, target), instanceId: id, spec }, { type: "move", instanceId: id }, title);
         if (task === null) {
           const existing = findDuplicate(store.raw.tasks, spec);
@@ -3485,7 +3485,7 @@ export class LauncherStore {
       retryFailedTasks() {
         let retried = 0;
         try {
-          for (const task of store.raw.tasks.filter((t) => t.status === "failed" && !awaitsManualFiles(t) && !settledOnRestart(t))) {
+          for (const task of store.raw.tasks.filter(batchRetryable)) {
             const leftover = store.leftoverOfFailedCreate(task);
             if (leftover !== null) {
               // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复

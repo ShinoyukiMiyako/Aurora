@@ -87,7 +87,7 @@ export function MoveInstanceModal({ inst, lockReason, onRename, onClose }: MoveI
   const submit = async () => {
     if (ready === null) throw new Error("没有预检结果时不能移动");
     onClose();
-    await run(() => actions.moveInstance(inst.id, ready.target, ready.target_name), ACTION_ERROR.moveInstance);
+    await run(() => actions.moveInstance(inst.id, ready.source, ready.target, ready.target_name), ACTION_ERROR.moveInstance);
   };
 
   const footer = (

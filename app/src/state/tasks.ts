@@ -150,7 +150,10 @@ export const INSTANCE_TASK_COMMANDS: ReadonlySet<string> = new Set(["install_ver
 /** 备份、导出与恢复存档的任务命令；它们都带着 id（实例）与 world（存档文件夹名）两个参数。 */
 export const WORLD_TASK_COMMANDS: ReadonlySet<string> = new Set(["backup_world", "export_world", "restore_world_backup"]);
 
-/** 把实例移到别的游戏目录的任务命令，带着 id（实例）与 target（目标游戏目录）两个参数。后端记为 moving，与这个实例上的一切互斥。 */
+/**
+ * 把实例移到别的游戏目录的任务命令，带着 id（实例）、source（发起时实例所在的游戏目录）与 target（目标游戏目录）三个参数。
+ * 后端记为 moving，与这个实例上的一切互斥；执行时当前游戏目录已不是 source 就拒绝。
+ */
 export const MOVE_TASK_COMMAND = "move_instance";
 
 /**
@@ -493,6 +496,15 @@ export function awaitsManualFiles(task: Task): boolean {
  */
 export function settledOnRestart(task: Task): boolean {
   return task.error !== null && task.error.code === MOVE_INTERRUPTED_CODE;
+}
+
+/**
+ * 「全部重试」与断网恢复的批量重试收不收这个任务。要走手动下载清单的不收（见 awaitsManualFiles）。移动一律不收：它不需要
+ * 网络，是玩家逐个确认过的大动作，批量里没人看着它从哪移到哪；发起之后可能已切换了游戏目录，单条重试由玩家自己点，
+ * 源目录对不上时后端以 source_changed 拒绝。
+ */
+export function batchRetryable(task: Task): boolean {
+  return task.status === "failed" && !awaitsManualFiles(task) && task.spec.command !== MOVE_TASK_COMMAND;
 }
 
 /** 重试：同一任务回到排队并移到队尾，尝试次数加一。只有失败的任务能重试，重启后已由后端收尾的移动不算。 */

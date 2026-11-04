@@ -1673,6 +1673,17 @@ function previewMove(id: string, rawTarget: string): MovePreviewDto {
   };
 }
 
+/** 下一次移动提交后配置存不上的原因；null 为照常。 */
+let pendingMoveConfigFailure: string | null = null;
+
+/**
+ * 下一次移动提交后配置存不上（模拟配置文件被占用）：与后端一样照成功返回，跟进项多一项 config；原目录里对它的引用
+ * （侧栏固定、当前选中、固定服务器）不动，新目标也不记进游戏目录列表，留给下次打开时按移动日志补。
+ */
+export function failNextMockMoveConfig(cause = "拒绝访问。 (os error 5)"): void {
+  pendingMoveConfigFailure = cause;
+}
+
 /** 一步里的假复制：文件数为 0 时这一步没有可报的下载。 */
 async function fakeCopy(taskId: string, files: number, bytes: number): Promise<void> {
   if (files === 0) return;
@@ -1682,6 +1693,7 @@ async function fakeCopy(taskId: string, files: number, bytes: number): Promise<v
 async function moveInstance(args: MockArgs): Promise<MoveOutcomeDto> {
   const taskId = str(args, "taskId");
   const id = str(args, "id");
+  const source = str(args, "source");
   const rawTarget = str(args, "target");
   requireInstance(id);
   // 与后端一样，移动期间连同继承链上的基底一起占住：要从基底读客户端 jar 带过去
@@ -1693,6 +1705,11 @@ async function moveInstance(args: MockArgs): Promise<MoveOutcomeDto> {
     throw error;
   }
   try {
+    // 发起之后切换过游戏目录：当前目录里同名的是另一个实例，别的检查都无从谈起
+    if (!samePath(source, mockGameDir())) {
+      const blocker: MoveBlockerDto = { kind: "source_changed" };
+      throw new IpcError(INSTANCE_MOVE_BLOCKED_ERROR_CODE, `实例 ${id} 不能移到 ${rawTarget}：当前游戏目录已经换了，不是发起移动时的那个`, { id, blocker });
+    }
     const preview = previewMove(id, rawTarget);
     const blocker = preview.blockers[0];
     if (blocker !== undefined) {
@@ -1715,9 +1732,6 @@ async function moveInstance(args: MockArgs): Promise<MoveOutcomeDto> {
     instances = instances.filter((i) => i.dto.id !== id);
     forgetMockMods(id);
     forgetMockLaunchRecords(id);
-    pins = pins.filter((pin) => pin !== id);
-    forgetMockPinnedInstance(id);
-    followMockSelection(id, null);
     const followUps: MoveFollowUpDto[] = [];
     // 与改名共用同一处失败注入：游玩记录、存档备份没跟过去时照成功返回，记成待提示的一项
     const lag = takeMockPlayRecordsFailure();
@@ -1726,9 +1740,17 @@ async function moveInstance(args: MockArgs): Promise<MoveOutcomeDto> {
     pendingBackupsMoveFailure = null;
     if (stuck === null) delete backups[id];
     else followUps.push({ kind: "world_backups", reason: stuck });
-    const registered = !preview.target_registered;
-    if (registered) addExtraDirectory(preview.target_name, preview.target);
     recordMockMovedVersions(preview.target, [id, ...preview.bases_to_copy]);
+    // 配置在文件与记录都移好之后才改、才存；存不上同样照成功返回，原目录里的引用与目录列表都还是移动前的样子
+    const configFailure = pendingMoveConfigFailure;
+    pendingMoveConfigFailure = null;
+    const registered = configFailure === null && !preview.target_registered;
+    if (configFailure === null) {
+      pins = pins.filter((pin) => pin !== id);
+      forgetMockPinnedInstance(id);
+      followMockSelection(id, null);
+      if (registered) addExtraDirectory(preview.target_name, preview.target);
+    } else followUps.push({ kind: "config", reason: configFailure });
     return { id, source: preview.source, target: preview.target, target_name: preview.target_name, registered, follow_ups: followUps };
   } finally {
     endMockTask(taskId);
@@ -1995,6 +2017,7 @@ export function reset(): void {
   backups = seedBackups();
   holds.clear();
   pendingBackupsMoveFailure = null;
+  pendingMoveConfigFailure = null;
   savesReaders.length = 0;
   savesWriters.length = 0;
   mockRevealedPaths.length = 0;

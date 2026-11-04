@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-// 移到另一个游戏目录的任务：入队参数、步骤文案、实例与基底的占用、完成后的落地与通知、失败原因与重启后的收尾。
+// 移到另一个游戏目录的任务：入队参数、步骤文案、实例与基底的占用、完成后的落地与通知、失败原因、切换游戏目录之后的重试
+// 与重启后的收尾。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { taskPhaseText } from "../copy/flows";
 import { locksOf } from "../domain/instance-locks";
@@ -11,8 +12,9 @@ import { IpcError } from "../ipc/errors";
 import type { InstanceDto, MoveOutcomeDto } from "../ipc/instances";
 import { CORE_EVENT, type TaskRecordDto } from "../ipc/tasks";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle, startedStore } from "../test/launcher";
-import type { LauncherStore } from "./store";
+import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle, startedStore } from "../test/launcher";
+import { NetworkMonitor } from "./online";
+import { LauncherStore } from "./store";
 import type { Toast } from "./toasts";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -31,12 +33,19 @@ function outcome(over: Partial<MoveOutcomeDto> = {}): MoveOutcomeDto {
 let store: LauncherStore;
 let instances: InstanceDto[];
 
-async function boot(journal: TaskRecordDto[] = []): Promise<void> {
+/** network 给出时用它判断在线与否（断网恢复的通知要它），否则用全局的那个。 */
+async function boot(journal: TaskRecordDto[] = [], network?: NetworkMonitor): Promise<void> {
   resetRecorder(ipc);
   instances = [instanceDto("生存", { loaders: [{ kind: "fabric", version: "0.16.10" }] }), instanceDto("创造")];
-  bootOverrides(ipc, { instances, pins: ["生存"], journal });
+  bootOverrides(ipc, { instances, pins: ["生存"], journal, config: configDto({ game_dir: SOURCE }) });
   ipc.overrides.set("list_instances", () => instances);
-  store = await startedStore();
+  if (network === undefined) {
+    store = await startedStore();
+    return;
+  }
+  store = new LauncherStore({ network });
+  store.start();
+  await settle();
 }
 
 beforeEach(async () => {
@@ -84,17 +93,17 @@ function moveRecord(id: string, status: TaskRecordDto["status"], error: TaskReco
     error,
     created_at: T0 - 60_000,
     finished_at: status === "running" ? null : T0 - 1000,
-    spec: { command: "move_instance", args: { id: "生存", target: TARGET } },
+    spec: { command: "move_instance", args: { id: "生存", source: SOURCE, target: TARGET } },
   };
 }
 
 describe("入队与进行中", () => {
-  it("命令参数为 taskId、id 与 target；任务挂在实例上，详情写目标名与路径；期间实例记为移动中、一切都锁住", async () => {
+  it("命令参数为 taskId、id、source 与 target；任务挂在实例上，详情写目标名与路径；期间实例记为移动中、一切都锁住", async () => {
     const pending = deferred<MoveOutcomeDto>();
     ipc.overrides.set("move_instance", () => pending.promise);
-    const id = await store.actions.moveInstance("生存", TARGET, "HMCL");
+    const id = await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
     await settle();
-    expect(callsOf(ipc, "move_instance")).toEqual([{ taskId: `${id}#1`, id: "生存", target: TARGET }]);
+    expect(callsOf(ipc, "move_instance")).toEqual([{ taskId: `${id}#1`, id: "生存", source: SOURCE, target: TARGET }]);
     expect(store.getState().tasks.find((t) => t.id === id)).toMatchObject({ kind: "instance_move", title: "移动「生存」", detail: `移到 HMCL · ${TARGET}`, instanceId: "生存", status: "running" });
     const inst = store.getState().instances.find((i) => i.id === "生存");
     if (inst === undefined) throw new Error("实例不见了");
@@ -108,7 +117,7 @@ describe("入队与进行中", () => {
   it("步骤事件：第一步到达时重扫一次（基底此刻已被占住），进度按四步折算、只进不退，步骤文案写这一步", async () => {
     const pending = deferred<MoveOutcomeDto>();
     ipc.overrides.set("move_instance", () => pending.promise);
-    const id = await store.actions.moveInstance("生存", TARGET, "HMCL");
+    const id = await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
     await settle();
     const scans = callsOf(ipc, "list_instances").length;
     emit(CORE_EVENT, { task_id: `${id}#1`, kind: "phase", plan: [...CROSS], index: 0 });
@@ -143,7 +152,7 @@ describe("入队与进行中", () => {
     const pending = deferred<MoveOutcomeDto>();
     ipc.overrides.set("move_instance", () => pending.promise);
     ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
-    await store.actions.moveInstance("生存", TARGET, "HMCL");
+    await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
     await settle();
     await store.actions.repairInstance("生存");
     await store.actions.repairInstance("创造");
@@ -159,8 +168,8 @@ describe("入队与进行中", () => {
 
   it("同一件事已在队列里时不重复入队，交回那个任务的 id", async () => {
     ipc.overrides.set("move_instance", () => new Promise(() => undefined));
-    const first = await store.actions.moveInstance("生存", TARGET, "HMCL");
-    expect(await store.actions.moveInstance("生存", TARGET, "HMCL")).toBe(first);
+    const first = await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
+    expect(await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL")).toBe(first);
     expect(store.getState().tasks.filter((t) => t.kind === "instance_move")).toHaveLength(1);
     expect(lastToast().title).toBe("移动「生存」 已在下载队列里");
   });
@@ -177,7 +186,7 @@ describe("完成", () => {
     store.subscribe(() => {
       if (store.getState().lastMove !== null) frames.push(store.getState().instances.map((i) => i.id));
     });
-    const id = await store.actions.moveInstance("生存", TARGET, "HMCL");
+    const id = await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
     await settle();
     expect(store.getState().tasks.find((t) => t.id === id)?.status).toBe("done");
     expect(store.getState().instances.map((i) => i.id)).toEqual(["创造"]);
@@ -197,9 +206,9 @@ describe("完成", () => {
 
   it("「切换过去」在还有任务进行时不切，原因经通知动作的错误处理报出", async () => {
     ipc.overrides.set("move_instance", (args) => (args.id === "生存" ? outcome() : new Promise(() => undefined)));
-    await store.actions.moveInstance("生存", TARGET, "HMCL");
+    await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
     await settle();
-    await store.actions.moveInstance("创造", TARGET, "HMCL");
+    await store.actions.moveInstance("创造", SOURCE, TARGET, "HMCL");
     await settle();
     await expect(runAction(toastOf("已移到「HMCL」"))).rejects.toThrow("有游戏或下载在进行，结束后再切换");
     expect(callsOf(ipc, "set_game_directory")).toEqual([]);
@@ -214,13 +223,30 @@ describe("完成", () => {
         ],
       }),
     );
-    await store.actions.moveInstance("生存", TARGET, "HMCL");
+    await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
     await settle();
     const warning = lastToast();
     expect([warning.tone, warning.title, warning.body]).toEqual([
       "warning",
       "「生存」已移过去，有 2 项要留意",
       "游玩记录没跟过去：记录文件被占用；原处还留着 D:\\Games\\.minecraft\\.petalfall\\moving\\a1，没能删掉：拒绝访问。 (os error 5)",
+    ]);
+  });
+
+  it("配置没存上：后端照成功返回、跟进项里多一项 config；任务按完成落地，补一条 warning 写清下次打开时补上", async () => {
+    ipc.overrides.set("move_instance", () => {
+      instances = instances.filter((i) => i.id !== "生存");
+      return outcome({ follow_ups: [{ kind: "config", reason: "拒绝访问。 (os error 5)" }] });
+    });
+    const id = await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
+    await settle();
+    expect(store.getState().tasks.find((t) => t.id === id)).toMatchObject({ status: "done", error: null });
+    expect(store.getState().instances.map((i) => i.id)).toEqual(["创造"]);
+    expect(store.getState().lastMove).toEqual({ id: "生存", seq: 1 });
+    expect(store.getState().toasts.map((t) => [t.tone, t.title, t.body])).toEqual([
+      ["info", "已开始移动「生存」", "进度见下载任务"],
+      ["success", "已移到「HMCL」", "「生存」已不在当前游戏目录里，切换过去就能玩"],
+      ["warning", "「生存」已移过去，有 1 项要留意", `配置没存上，下次打开${APP_NAME}时会补上：拒绝访问。 (os error 5)`],
     ]);
   });
 });
@@ -233,7 +259,7 @@ describe("失败", () => {
         blocker: { kind: "insufficient_space", needed: 3 * GIB, available: GIB },
       });
     });
-    const id = await store.actions.moveInstance("生存", TARGET, "HMCL");
+    const id = await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
     await settle();
     const reason = `目标盘空间不够：需要 ${formatBytes(3 * GIB)}，只剩 ${formatBytes(GIB)}`;
     expect(store.getState().tasks.find((t) => t.id === id)).toMatchObject({ status: "failed", error: { code: "instance_move_blocked", move_blocker: { kind: "insufficient_space", needed: 3 * GIB, available: GIB } } });
@@ -247,9 +273,78 @@ describe("失败", () => {
     ipc.overrides.set("move_instance", () => {
       throw new IpcError("instance_move_verify_failed", "副本与原件不一致：E:\\HMCL\\.minecraft\\.petalfall\\moving\\t\\instance\\x.jar", { path: "x.jar" });
     });
-    await store.actions.moveInstance("生存", TARGET, "HMCL");
+    await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
     await settle();
     expect(lastToast().body).toBe("复制出的文件和原件对不上，这次移动已放弃，原件没动");
+  });
+});
+
+describe("切换游戏目录之后", () => {
+  const OTHER = "D:\\Other\\.minecraft";
+
+  /** 一次失败的移动，随后切到另一个游戏目录；那边恰好也有一个叫「生存」的实例（列表照旧）。返回移动任务的 id。 */
+  async function failedMoveThenSwitch(): Promise<string> {
+    ipc.overrides.set("move_instance", () => {
+      throw new IpcError("io", "目标盘拒绝访问");
+    });
+    const id = await store.actions.moveInstance("生存", SOURCE, TARGET, "HMCL");
+    await settle();
+    expect(store.getState().tasks.find((t) => t.id === id)?.status).toBe("failed");
+    ipc.overrides.set("set_game_directory", () => null);
+    ipc.overrides.set("get_config", () => configDto({ game_dir: OTHER }));
+    await store.actions.setGameDirectory(OTHER);
+    await settle();
+    expect(store.getState().settings?.gameDir).toBe(OTHER);
+    return id;
+  }
+
+  it("单条重试照发起时的源目录发出；后端认出当前目录换了、以 source_changed 拒绝，原因写清切回去再移", async () => {
+    const id = await failedMoveThenSwitch();
+    ipc.overrides.set("move_instance", () => {
+      throw new IpcError("instance_move_blocked", `实例 生存 不能移到 ${TARGET}：当前游戏目录已经换了，不是发起移动时的那个`, { id: "生存", blocker: { kind: "source_changed" } });
+    });
+    store.actions.retryTask(id);
+    await settle();
+    expect(callsOf(ipc, "move_instance")).toEqual([
+      { taskId: `${id}#1`, id: "生存", source: SOURCE, target: TARGET },
+      { taskId: `${id}#2`, id: "生存", source: SOURCE, target: TARGET },
+    ]);
+    expect(store.getState().tasks.find((t) => t.id === id)).toMatchObject({ status: "failed", attempt: 2, error: { code: "instance_move_blocked", move_blocker: { kind: "source_changed" } } });
+    expect([lastToast().tone, lastToast().title, lastToast().body, lastToast().action?.label]).toEqual(["error", "移动「生存」没有完成", "当前游戏目录已经换了，切回发起移动时的游戏目录再重试", "重试"]);
+  });
+
+  it("「全部重试」与断网恢复的批量重试都不收移动：恢复通知只数别的失败，全部重试只把它们排回去", async () => {
+    store.stop();
+    let online = true;
+    vi.spyOn(navigator, "onLine", "get").mockImplementation(() => online);
+    await boot([], new NetworkMonitor(async () => online, { navigatorOnline: () => online, target: () => window }));
+    const id = await failedMoveThenSwitch();
+    ipc.overrides.set("install_java", () => {
+      throw new IpcError("java_failed", "网络连接失败", { network: "connect" });
+    });
+    online = false;
+    window.dispatchEvent(new Event("offline"));
+    await store.actions.installJava(21);
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.kind, t.status])).toEqual([
+      ["instance_move", "failed"],
+      ["java", "failed"],
+    ]);
+
+    ipc.overrides.set("install_java", () => new Promise(() => undefined));
+    online = true;
+    window.dispatchEvent(new Event("online"));
+    const toast = toastOf("网络已恢复");
+    expect([toast.body, toast.action?.label]).toEqual(["有 1 个下载失败", "全部重试"]);
+    await runAction(toast);
+    await settle();
+    expect(store.getState().tasks.map((t) => [t.kind, t.status, t.attempt])).toEqual([
+      ["instance_move", "failed", 1],
+      ["java", "running", 2],
+    ]);
+    expect(store.actions.retryFailedTasks()).toBe(0);
+    await settle();
+    expect(callsOf(ipc, "move_instance")).toEqual([{ taskId: `${id}#1`, id: "生存", source: SOURCE, target: TARGET }]);
   });
 });
 
@@ -283,7 +378,7 @@ describe("重启之后", () => {
     ipc.overrides.set("move_instance", () => new Promise(() => undefined));
     store.actions.retryTask("task-queued");
     await settle();
-    expect(callsOf(ipc, "move_instance")).toEqual([{ taskId: "task-queued#2", id: "生存", target: TARGET }]);
+    expect(callsOf(ipc, "move_instance")).toEqual([{ taskId: "task-queued#2", id: "生存", source: SOURCE, target: TARGET }]);
   });
 
   it("日志里被拦下的移动：拦截项逐项校验后读回；形状不对按日志损坏报错", async () => {
@@ -308,10 +403,10 @@ describe("重启之后", () => {
     });
     await store.actions.renameInstance("生存", "生存二");
     await settle();
-    expect(store.getState().tasks[0]).toMatchObject({ title: "移动「生存二」", instanceId: "生存二", spec: { command: "move_instance", args: { id: "生存二", target: TARGET } } });
+    expect(store.getState().tasks[0]).toMatchObject({ title: "移动「生存二」", instanceId: "生存二", spec: { command: "move_instance", args: { id: "生存二", source: SOURCE, target: TARGET } } });
     ipc.overrides.set("move_instance", () => new Promise(() => undefined));
     store.actions.retryTask("task-old");
     await settle();
-    expect(callsOf(ipc, "move_instance")).toEqual([{ taskId: "task-old#2", id: "生存二", target: TARGET }]);
+    expect(callsOf(ipc, "move_instance")).toEqual([{ taskId: "task-old#2", id: "生存二", source: SOURCE, target: TARGET }]);
   });
 });
