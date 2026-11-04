@@ -259,7 +259,7 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
       <Cover hue={cover.hue} seed={inst.id} height={height} {...backdrop} shade="left" className={s.heroCover} />
       <div className={s.heroInner}>
         <div className={s.heroTop}>
-          <Tag tone="accent" size="sm" icon="play">
+          <Tag tone="accent" size="sm" icon="play" className={s.heroTag}>
             {HOME_COPY.continueTag}
           </Tag>
           <span className={s.heroWhen}>{when}</span>

@@ -277,7 +277,7 @@
 
 /*
  * 内容不在卡面内部，接不到卡面的媒体文字色：卡面显示材质平铺或玩家图片时在这里换。
- * 只换直接压在卡面上的文字与没有底的描边标签，有底的标签与按钮不动，也不加文字阴影。
+ * 只换直接压在卡面上的文字与没有底的描边标签，不透明底的按钮不动，也不加文字阴影；半透明底的标签另垫表面色（见下）。
  */
 .heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) {
   --tag-ink: var(--sk-on-media-2);
@@ -295,6 +295,11 @@
 
 .heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) :is(.heroWhen, .heroLine) {
   color: var(--sk-on-media-2);
+}
+
+/* 「继续游玩」标签的柔色底是半透明的，压在深色压暗上粉字读不清：垫一层表面色，字照常用强调色 */
+.heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) .heroTag {
+  background-color: var(--sk-surface);
 }
 
 .heroTop {
