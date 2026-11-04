@@ -32,8 +32,9 @@ fastrand = "2"
 # 读整合包（.mrpack / CurseForge .zip）与 jar 内的 Mod 图标。只留纯 Rust 的 deflate 后端，
 # 规避 Windows 无 C 编译器时的构建失败；与 petalfall-modplatform 同一选择。
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
-# 皮肤帽层判定要读 PNG 像素；只开 png 解码，其余格式用不到。
-image = { version = "0.25", default-features = false, features = ["png"] }
+# 皮肤帽层判定要读 PNG 像素；卡面玩家图片要解码 PNG、JPEG、WebP，并重新编码成 PNG 或 JPEG
+# （jpeg 特性同时带解码与编码，webp 特性只用到解码）。其余格式不开，按文件头认出来也解不了。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # 游玩记录按本地日期切分每日时长，需要系统时区（clock）；其余特性用不到。
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # 原版材质服务：校验客户端 jar 与全景对象的哈希、给远程皮肤与缩略图按地址取缓存键。

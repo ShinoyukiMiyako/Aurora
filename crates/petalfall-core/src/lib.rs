@@ -34,6 +34,7 @@ mod authlib;
 pub mod blocked;
 pub mod compat;
 pub mod config;
+pub mod cover_image;
 pub mod crashdiag;
 pub mod deps;
 pub mod error;
@@ -84,6 +85,7 @@ pub use config::{
     MemorySettings, NamedDirectory, ParkedDirectory, PetalfallConfig, PinnedServer,
     WorldBackupSettings,
 };
+pub use cover_image::CoverImageError;
 pub use crashdiag::{CrashClue, CrashReport, CrashSource, CrashSuspect, LaunchLog, ScannedFile};
 pub use deps::{InstallPlan, PlannedItem};
 pub use error::{CoreError, GameDirProblem, JavaPathProblem, OfflineFallbackRefusal, Result};
