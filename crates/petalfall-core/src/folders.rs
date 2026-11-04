@@ -439,7 +439,7 @@ where
 /// 路径等价判定：Windows 下大小写不敏感，且要抹平 `\` 与 `/` 的混用与末尾分隔符。
 ///
 /// 不走 `canonicalize`：那需要路径真实存在，而这里要比的恰恰包含「记着但盘已经拔了」的条目。
-pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
+pub fn same_path(a: &Path, b: &Path) -> bool {
     fn norm(p: &Path) -> String {
         p.to_string_lossy()
             .replace('/', "\\")
