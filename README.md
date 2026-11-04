@@ -81,8 +81,8 @@ pnpm tauri build
 | 来源 | 说明 |
 | --- | --- |
 | `PETALFALL_MSA_CLIENT_ID` | 微软登录 client_id。构建时设置会内嵌进二进制，运行期设置会覆盖内嵌的值，`config.json` 里的 `msa_client_id`（设置的「常规 · 高级」）又优先于两者。三处都没有时微软登录显示为不可用，登录报 `MsaClientIdMissing`。仓库里不放这个值，见下文「微软登录与 fork」 |
-| `PETALFALL_OFFICIAL_BUILD` | 构建时环境变量，标明这是落樱官方发布的构建，取值不论，设了就算。设了它，`PETALFALL_MSA_CLIENT_ID` 却没设或只有空白时编译直接失败，不会打出微软登录不可用的包；dev 分支的 CI 两个都设。fork 与本机构建不用设 |
-| `PETALFALL_CURSEFORGE_API_KEY` | CurseForge API key，优先读运行期环境变量，其次读构建时嵌入的值，API 请求与 CDN 下载都用它。两处都没有时 CurseForge 源会被明确禁用；Modrinth 的搜索与安装不受影响，但 `.mrpack` 里有文件只有 forgecdn 地址时，导入会在准备阶段报 `curseforge_key_missing`（每个文件都另有别的地址时照常导入，forgecdn 那个地址失败后换备用地址）。CDN 拒绝这个 key 时下载任务直接失败（`curseforge_key_rejected`），不换源重试 |
+| `PETALFALL_OFFICIAL_BUILD` | 构建时环境变量，标明这是落樱官方发布的构建，取值不论，设了就算。设了它，`PETALFALL_MSA_CLIENT_ID` 或 `PETALFALL_CURSEFORGE_API_KEY` 没设或只有空白时编译直接失败，不会打出微软登录或 CurseForge 不可用的包；dev 分支的 CI 三个都设。fork 与本机构建不用设 |
+| `PETALFALL_CURSEFORGE_API_KEY` | CurseForge API key，优先读运行期环境变量，其次读构建时嵌入的值，API 请求与 CDN 下载都用它。两处都没有时 CurseForge 源会被明确禁用；Modrinth 的搜索与安装不受影响，但 `.mrpack` 里有文件只有 forgecdn 地址时，导入会在准备阶段报 `curseforge_key_missing`（每个文件都另有别的地址时照常导入，forgecdn 那个地址失败后换备用地址）。CDN 拒绝这个 key 时下载任务直接失败（`curseforge_key_rejected`），不换源重试。dev 构建由 CI 从仓库 secret `PETALFALL_CURSEFORGE_API_KEY` 注入；fork 与自行构建请用自己在 CurseForge for Studios 控制台申请的 key |
 | `tauri.conf.json` 的 `plugins.updater` | 自更新需要在发布构建里配置签名公钥，仓库里的配置不带。dev 分支的 CI 打包时写入开发版公钥（`.github/dev-updater.pub`），并用仓库密钥 `DEV_UPDATER_PRIVATE_KEY` 签名更新包。签的是首装引导程序（`Petalfall-Installer-<版本>-x64.exe`），不是 NSIS 包：插件拉起它时带着 `/UPDATE`，现有安装可以升级时它据此直接升级，其余情况退回交互向导，见 `docs/architecture.md` 里「装配与状态」的启动器更新一条；版本号带 `-dev.N` 的包只检查滚动预发布 `dev-build` 上的 `latest.json`，其余版本检查 petalfall.org。没有公钥时，或在 debug 构建里，自更新显示为不可用 |
 
 数据目录存放配置、加密凭据、任务日志、托管 Java、新实例的默认设置（`templates/default/`）与日志。可执行文件所在目录可写时使用该目录（便携模式），否则使用 `%LOCALAPPDATA%\Petalfall`。目录里已有读得进来的 `config.json` 时数据就在这里，即使这次写不进去也不换地方，启动后提示原因。debug 构建一律不走便携模式。存档备份不在数据目录里，放在游戏目录的 `.petalfall/backups/` 下。
