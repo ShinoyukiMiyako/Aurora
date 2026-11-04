@@ -17,7 +17,7 @@ Copyright (C) 2026 Shinoyuki_Miyako（GitHub 账号 ShinoyukiMiyako）
 
 本代码指本仓库中按 AGPL 授权、由维护者享有著作权的程序代码与文档。第三方依赖、第三方字体以及他人享有著作权、未按下一段授权的内容不适用本文件，按其各自的许可。本程序的美术与品牌素材不按 AGPL 授权，另见 LICENSE-ASSETS.md。
 
-向本仓库提交的贡献，除贡献者在提交时另有明确的书面声明外，按 AGPL 及本文件授权，本文件对它们的适用与对本代码相同。
+向本仓库提交的贡献，除贡献者在提交时另有明确的书面声明外，按 AGPL 及本文件授权，本文件对它们的适用与对本代码相同。对 LICENSE-ASSETS.md 第 2 节所列素材文件的贡献不适用本段第一句，包括其中「另有明确的书面声明」的例外。向本仓库提交的、属于 LICENSE-ASSETS.md 第 2 节所列类型、且不在该节排除之列的新增文件也属于这类贡献，不论贡献者提交时是否已经签署仓库根目录的 CLA.md（《落樱（Petalfall）贡献者许可协议》，下称「CLA」），也不论这些文件是否已被合并。这类贡献只按 CLA 授权维护者，不按 AGPL 授权，经维护者合并进本仓库（定义见 LICENSE-ASSETS.md 第 2.1 节）后，由维护者按 LICENSE-ASSETS.md 以 CC BY-NC-ND 4.0 发布；本仓库也不按贡献者另行声明的许可接收这类贡献。见 LICENSE-ASSETS.md 第 10 节。
 
 ## 2. 保留版权与署名声明（第 7 条 b 项）
 
@@ -90,7 +90,7 @@ As the copyright holder of the Code (defined below), the maintainer, Shinoyuki_M
 
 "The Code" means the program code and documentation in this repository that are licensed under the AGPL and in which the maintainer holds the copyright. Third-party dependencies, third-party fonts and other content in which others hold the copyright and that is not licensed under the next paragraph are not covered by this document and remain under their own licenses. The art and brand assets of the Program are not licensed under the AGPL; see LICENSE-ASSETS.md.
 
-Contributions submitted to this repository are licensed under the AGPL and this document, unless the contributor makes an express written statement to the contrary when submitting them; this document applies to them as it does to the Code.
+Contributions submitted to this repository are licensed under the AGPL and this document, unless the contributor makes an express written statement to the contrary when submitting them; this document applies to them as it does to the Code. The first sentence of this paragraph, including its exception for an express written statement, does not apply to contributions to the asset files listed in Section 2 of LICENSE-ASSETS.md. New files submitted to this repository that are of a type listed in Section 2 of LICENSE-ASSETS.md and not excluded by that Section are also such contributions, whether or not the contributor has signed the Petalfall Contributor License Agreement in CLA.md at the root of the repository ("the CLA") at the time of submission, and whether or not those files have been merged. Such contributions are licensed to the maintainer only under the CLA, not under the AGPL, and are released by the maintainer under CC BY-NC-ND 4.0 as set out in LICENSE-ASSETS.md once the maintainer has merged them into this repository (as defined in Section 2.1 of LICENSE-ASSETS.md); nor does this repository accept such contributions under any other license the contributor states. See Section 10 of LICENSE-ASSETS.md.
 
 ## 2. Preservation of copyright and attribution notices (Section 7, item b)
 

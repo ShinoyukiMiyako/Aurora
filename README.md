@@ -151,7 +151,8 @@ pnpm tauri build
 
 - **代码**：落樱的程序代码以 GNU Affero General Public License v3.0 授权，只授权第 3 版（SPDX：`AGPL-3.0-only`），全文见 [LICENSE](LICENSE)。
 - **附加条款**：依 AGPL 第 7 条，代码另附三项条款：保留版权与署名声明；向他人提供修改版的构建产物时，须改用不会与「落樱」「Petalfall」混淆的名称与图标，并写明它不出自原作者；不授予名称与徽记的商标权。全文见 [LICENSE-ADDITIONAL-TERMS.md](LICENSE-ADDITIONAL-TERMS.md)。
-- **素材**：应用图标、像素花瓣徽记等列在 [LICENSE-ASSETS.md](LICENSE-ASSETS.md) 里的原创美术与品牌素材不按 AGPL 授权，另以 [CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/deed.zh-hans) 授权：可以非商业地原样转发并署名，不得商用，不得分享改作后的版本；安装包里的素材同样如此。适用的文件与署名方式见 [LICENSE-ASSETS.md](LICENSE-ASSETS.md)，协议法律文本见 [LICENSES/CC-BY-NC-ND-4.0.txt](LICENSES/CC-BY-NC-ND-4.0.txt)。
+- **素材**：应用图标、像素花瓣徽记等列在 [LICENSE-ASSETS.md](LICENSE-ASSETS.md) 里的原创美术与品牌素材不按 AGPL 授权，另以 [CC BY-NC-ND 4.0](https://creativecommons.org/licenses/by-nc-nd/4.0/deed.zh-hans) 授权：可以非商业地原样转发并署名，不得商用，不得分享改作后的版本（例外：[LICENSE-ASSETS.md](LICENSE-ASSETS.md) 第 10 节第二段所列的机械改动可以非商业地原样分享；只为向本仓库提出贡献，可以在 GitHub 上本仓库的 fork、分支与 PR 中公开其他修改，徽记母版与应用图标除外，期限与其他限制见该节）；安装包里的素材同样如此。适用的文件与署名方式见 [LICENSE-ASSETS.md](LICENSE-ASSETS.md)，协议法律文本见 [LICENSES/CC-BY-NC-ND-4.0.txt](LICENSES/CC-BY-NC-ND-4.0.txt)。
 - **适用时间**：附加条款与素材许可按出处判断：从 https://github.com/ShinoyukiMiyako/Petalfall 加入这两个文件的那次提交及以它为祖先的提交取得的代码与素材，以及用它们构建的程序，都适用，复制进别的仓库、改写历史或删掉这两个文件也一样。从那次提交之前已经存在的提交或 dev.18 及之前的发行版取得的内容，仍按当时随附的许可，不受影响。
 - **第三方**：依赖与字体按各自的许可，清单由 `app/scripts/third-party-licenses.mjs` 在构建时从依赖树生成，可以在应用的「设置 · 关于 · 第三方许可」里查看。
+- **贡献**：向本项目提交贡献前要先签署[贡献者许可协议（CLA）](CLA.md)，流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。素材文件的贡献只经 CLA 授权维护者，被维护者合并进本仓库（定义见 LICENSE-ASSETS.md 第 2.1 节）后由维护者按 CC BY-NC-ND 4.0 发布，见 CONTRIBUTING.md 的「素材」一节。
 - **Minecraft**：Minecraft 是 Mojang Studios 的商标。本项目与 Mojang、Microsoft 无关，也未获得它们的认可。
