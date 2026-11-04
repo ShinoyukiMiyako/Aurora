@@ -349,3 +349,18 @@ describe("资源详情：合并卡切换来源", () => {
     expect(dialog().textContent).not.toContain("资源详情没加载出来");
   });
 });
+
+describe("资源详情：前置说明", () => {
+  it("计划里跳过的前置逐条照原文列出，提示框不截成两行", async () => {
+    const lines = ["可选前置 Roughly Enough Items (REI) 未自动安装，需要时手动添加", "工具类关联 Mod Menu 未自动安装"];
+    ipc.overrides.set("plan_install", () => ({ items: [], skipped: lines }));
+    await mount({ platform: "modrinth", projectId: "AANobbMI", sources: [], listedType: "mod" });
+    expect(target("生存").getAttribute("aria-checked")).toBe("true");
+
+    const note = [...dialog().querySelectorAll<HTMLElement>('[data-tone="warn"]')].find((el) => el.textContent?.startsWith("前置说明") === true);
+    if (note === undefined) throw new Error("没有前置说明");
+    const text = note.querySelector<HTMLElement>("[data-full]");
+    if (text === null) throw new Error("前置说明仍按两行截断");
+    expect([...text.children].map((line) => line.textContent)).toEqual(["前置说明：", ...lines]);
+  });
+});

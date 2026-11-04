@@ -489,7 +489,7 @@ function ModPlanGroup({ row, detail, showHead, coveredByIris, onReport }: PlanGr
           </div>
         ))}
       {data !== null && data.skipped.length > 0 && (
-        <Callout tone="warn">
+        <Callout tone="warn" fullText>
           <span className={styles.errorTitle}>{INSTALL_COPY.skipped}</span>
           {data.skipped.map((line, i) => (
             <span key={i} className={styles.errorText}>
