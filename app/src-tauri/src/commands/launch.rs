@@ -873,8 +873,7 @@ pub fn mark_on_exit(app: &AppHandle) {
         "落樱已关闭，游戏仍在运行；之后的游戏输出不在这份日志里，见 {}。游戏结束前重新打开落樱会接回这一局",
         game_log.display()
     );
-    let marking = tokio::time::timeout(EXIT_MARK_DEADLINE, marker.mark(LauncherLevel::Warn, text));
-    match tauri::async_runtime::block_on(marking) {
+    match block_on_within(EXIT_MARK_DEADLINE, marker.mark(LauncherLevel::Warn, text)) {
         Ok(Ok(true)) => tracing::info!(version, "落樱退出时游戏仍在运行，会话日志已留下说明并落盘"),
         Ok(Ok(false)) => tracing::info!(version, "落樱退出时游戏仍在运行，这一局没有会话日志可写"),
         Ok(Err(err)) => {
@@ -886,6 +885,15 @@ pub fn mark_on_exit(app: &AppHandle) {
             "落樱退出时会话日志落盘超时，缓冲里最后的输出随退出丢失"
         ),
     }
+}
+
+/// 在运行时之外（`RunEvent::Exit` 的主线程上）限时等一个异步动作。计时器要在运行时里建：在外面建会因为
+/// 找不到运行时直接 panic，退出钩子后面的补写游玩记录、退出时安装更新都跟着做不成。
+fn block_on_within<F: Future>(
+    deadline: Duration,
+    work: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    tauri::async_runtime::block_on(async move { tokio::time::timeout(deadline, work).await })
 }
 
 /// 把一批批游戏输出推给前端。寿命随汇流任务：会话结束后发送端放掉，循环自然结束。
@@ -1093,6 +1101,16 @@ mod tests {
         );
         let second = running_game_now(&running).await.unwrap();
         assert_eq!(second.broken_record, None);
+    }
+
+    /// 退出钩子跑在主线程上、不在运行时里：限时等待照样能用，超时如实报超时，而不是因为在运行时之外建计时器 panic。
+    #[test]
+    fn deadline_wait_works_outside_the_runtime_and_reports_the_timeout() {
+        assert_eq!(
+            block_on_within(Duration::from_secs(1), async { 42 }).unwrap(),
+            42
+        );
+        assert!(block_on_within(Duration::from_millis(50), std::future::pending::<()>()).is_err());
     }
 
     /// 与前端 ipc/launch.ts 的 RunningGameDto 一致的键名与取值。
