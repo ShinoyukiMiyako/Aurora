@@ -3,9 +3,12 @@
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
-import { lastCrash, type CrashReportDto } from "../../ipc/diagnostics";
+import { getConfig, updateConfig } from "../../ipc/config";
+import { lastCrash, type CrashClueDto, type CrashReportDto } from "../../ipc/diagnostics";
+import { IpcError } from "../../ipc/errors";
 import { launchGame } from "../../ipc/launch";
 import { resetMocks } from "../../ipc/mock";
+import { setMockGpuAdapters } from "../../ipc/mock/handlers/java";
 import { endMockGame, mockCrashReport, setMockLaunchWarnings } from "../../ipc/mock/handlers/launch";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
@@ -364,9 +367,10 @@ describe("崩溃诊断：参与扫描的文件", () => {
     expect(writeText.mock.calls).toEqual([[CRASH_REPORT_PATH], [LOG_PATH]]);
 
     expect(text()).toContain("命中的日志行 · JVM 错误日志 第 9 行");
-    // Intel 显卡驱动与进程异常退出只共用一条处理办法，标题取先出现的那一类
+    // Intel 显卡驱动与进程异常退出只共用一条处理办法，标题取先出现的那一类；mock 是双显卡笔记本，这一行先提改用独立显卡
     expect(buttons("查看处理办法")).toHaveLength(1);
-    expect(text()).toContain("Intel 显卡驱动没有自动修复，按下面三步排查");
+    expect(buttons("改用独立显卡")).toHaveLength(1);
+    expect(text()).toContain("Intel 显卡驱动游戏可能跑在核显上，可以先改用独立显卡");
   });
 
   it("对粘贴文本的诊断没有扫描文件：整块不出现", async () => {
@@ -483,5 +487,154 @@ describe("崩溃诊断：这次启动时的提醒", () => {
     await open("crash");
     expect(document.querySelector('section[aria-label="这次启动时的提醒"]')).toBeNull();
     expect(buttons("更换游戏目录")).toHaveLength(0);
+  });
+});
+
+describe("崩溃诊断：改用独立显卡", () => {
+  /** mock 崩溃报告里记的那个 java。 */
+  const JAVA = "C:/Program Files/Java/jdk-21/bin/java.exe";
+  const MANUAL_STEP = "把 java.exe 设为「高性能」";
+  const CLUES: Readonly<Record<"graphics_driver" | "intel_graphics_driver", CrashClueDto>> = {
+    graphics_driver: {
+      category: "graphics_driver",
+      summary: "",
+      advice: "",
+      detail: null,
+      matched: "[LWJGL] GLFW_API_UNAVAILABLE error: WGL: The driver does not appear to support OpenGL",
+      line: 57,
+      context: [],
+      source: "session_log",
+    },
+    intel_graphics_driver: {
+      category: "intel_graphics_driver",
+      summary: "",
+      advice: "",
+      detail: "ig9icd64.dll",
+      matched: "# C  [ig9icd64.dll+0x57a41c]",
+      line: 11,
+      context: [],
+      source: "hs_err",
+    },
+  };
+
+  /** 下一次读到的崩溃报告只有这一条显卡线索，其余照 mock 生成的报告。 */
+  function crashOnGraphics(category: keyof typeof CLUES) {
+    ipc.overrides.set("last_crash", (args) => {
+      const base = mockCrashReport(String(args.versionId));
+      if (base === null) throw new Error("mock 里应有崩溃报告");
+      const report: CrashReportDto = { ...base, diagnoses: [CLUES[category]] };
+      return report;
+    });
+  }
+
+  function toasts() {
+    return launcher.state.toasts.map((t) => [t.tone, t.title, t.body]);
+  }
+
+  it("Intel 核显驱动崩溃、双显卡、独显偏好没开：点了写下这次的 java、打开独显偏好，行变完成态，处理办法还留着", async () => {
+    await crashWith(-1073741819);
+    crashOnGraphics("intel_graphics_driver");
+    await open("crash");
+    expect(text()).toContain("游戏可能跑在核显上，可以先改用独立显卡");
+
+    click(button("改用独立显卡"));
+    await flush();
+
+    expect(callsOf(ipc, "switch_to_dedicated_gpu")).toEqual([{ javaPath: JAVA }]);
+    expect((await getConfig()).prefer_dedicated_gpu).toBe(true);
+    // 设置跟着重读：设置页的开关会是开着的
+    expect(launcher.state.settings?.preferDedicatedGpu).toBe(true);
+    expect(toasts()).toContainEqual([
+      "success",
+      "已改用独立显卡",
+      "下次启动游戏时用 NVIDIA GeForce RTX 4060 Laptop GPU。要改回，见设置 Java 分区的「显卡」。",
+    ]);
+    expect(text()).toContain("已改用独立显卡，下次启动生效");
+    expect(buttons("改用独立显卡")).toHaveLength(0);
+    // 改设置的一键尝试才给撤销；这一条要改回走设置页的开关
+    expect(buttons("撤销")).toHaveLength(0);
+
+    click(button("查看处理办法"));
+    await flush();
+    expect(text()).toContain("到显卡厂商官网更新驱动");
+    expect(text()).not.toContain(MANUAL_STEP);
+    expect(buttons("复制 java.exe 路径")).toHaveLength(0);
+  });
+
+  it("系统偏好写不进去：报出原因，不进完成态，独显偏好保持关着", async () => {
+    await crashWith(-1073741819);
+    crashOnGraphics("graphics_driver");
+    ipc.overrides.set("switch_to_dedicated_gpu", () => {
+      throw new IpcError("io", `写入 ${JAVA} 的显卡偏好失败`, { path: JAVA, causes: ["拒绝访问。 (os error 5)"] });
+    });
+    await open("crash");
+
+    click(button("改用独立显卡"));
+    await flush();
+
+    expect(callsOf(ipc, "switch_to_dedicated_gpu")).toEqual([{ javaPath: JAVA }]);
+    expect(toasts()).toContainEqual(["error", "没能改用独立显卡", `写入 ${JAVA} 的显卡偏好失败`]);
+    expect(text()).not.toContain("已改用独立显卡");
+    expect(buttons("改用独立显卡")).toHaveLength(1);
+    expect((await getConfig()).prefer_dedicated_gpu).toBe(false);
+    expect(launcher.state.settings?.preferDedicatedGpu).toBe(false);
+  });
+
+  it("只有一块显卡：不出按钮，处理办法照旧写手动设高性能和 java 路径", async () => {
+    setMockGpuAdapters({
+      adapters: [{ name: "AMD Radeon RX 7800 XT", vendor_id: 0x1002, dedicated_video_memory_mb: 16368, high_performance: true, power_saving: true }],
+      switchable: false,
+    });
+    await crashWith(-1073741819);
+    crashOnGraphics("graphics_driver");
+    await open("crash");
+
+    expect(callsOf(ipc, "gpu_adapters")).toHaveLength(1);
+    expect(buttons("改用独立显卡")).toHaveLength(0);
+    expect(text()).toContain("没有自动修复，按下面三步排查");
+    click(button("查看处理办法"));
+    await flush();
+    expect(text()).toContain(MANUAL_STEP);
+    expect(buttons("复制 java.exe 路径")).toHaveLength(1);
+  });
+
+  it("独显偏好已经开着：不出按钮", async () => {
+    await updateConfig({ preferDedicatedGpu: true });
+    await crashWith(-1073741819);
+    crashOnGraphics("intel_graphics_driver");
+    await open("crash");
+
+    expect(buttons("改用独立显卡")).toHaveLength(0);
+    expect(buttons("查看处理办法")).toHaveLength(1);
+    expect(callsOf(ipc, "switch_to_dedicated_gpu")).toHaveLength(0);
+  });
+
+  it("没有显卡线索的崩溃不去读显卡信息，也不出按钮", async () => {
+    await crashWith(-1073741819);
+    await open("crash");
+
+    expect(text()).toContain("进程异常退出");
+    expect(buttons("查看处理办法")).toHaveLength(1);
+    expect(buttons("改用独立显卡")).toHaveLength(0);
+    expect(callsOf(ipc, "gpu_adapters")).toHaveLength(0);
+  });
+
+  it("读不到显卡信息：一键尝试整卡说读不到显卡信息，重试读到了才出按钮", async () => {
+    await crashWith(-1073741819);
+    crashOnGraphics("graphics_driver");
+    ipc.overrides.set("gpu_adapters", () => {
+      throw new IpcError("gpu_query_failed", "读不到显卡信息：不支持此接口", { hresult: "0x80004002" });
+    });
+    await open("crash");
+
+    expect(text()).toContain("读不到显卡信息");
+    expect(buttons("改用独立显卡")).toHaveLength(0);
+    expect(buttons("对照完整日志")).toHaveLength(0);
+
+    ipc.overrides.delete("gpu_adapters");
+    click(button("重试"));
+    await flush();
+    expect(callsOf(ipc, "gpu_adapters")).toHaveLength(2);
+    expect(buttons("改用独立显卡")).toHaveLength(1);
   });
 });

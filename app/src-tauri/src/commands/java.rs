@@ -250,6 +250,43 @@ pub async fn gpu_adapters() -> Result<GpuAdaptersDto, CommandError> {
     Ok(gpu_adapters_dto(summary))
 }
 
+/// 崩溃页「改用独立显卡」：把这次崩溃用的 java 立即设为 Windows 图形设置里的高性能，再打开独显偏好并落盘，
+/// 之后每次启动按选中的 java 补写。
+///
+/// 先写系统偏好再改开关：写不进去时开关原样关着，界面不会显示成已改用。开关落盘失败同样报错，
+/// 这时那个 java 已是高性能，正是玩家要的，不回退。
+#[tauri::command]
+pub async fn switch_to_dedicated_gpu(
+    java_path: String,
+    facade: State<'_, Facade>,
+) -> Result<(), CommandError> {
+    switch_to_dedicated_gpu_with(&facade, &java_path).await
+}
+
+pub(crate) async fn switch_to_dedicated_gpu_with(
+    facade: &Facade,
+    java_path: &str,
+) -> Result<(), CommandError> {
+    let exe = Path::new(java_path.trim());
+    if exe.as_os_str().is_empty() {
+        return Err(CommandError::new(
+            code::INVALID_ARGUMENT,
+            "改用独立显卡要给出 java 可执行文件的路径",
+        ));
+    }
+    facade
+        .snapshot()
+        .await
+        .prefer_high_performance_gpu(exe)
+        .await?;
+    facade
+        .update(|petalfall| {
+            petalfall.set_prefer_dedicated_gpu(true);
+            Ok::<_, CommandError>(())
+        })
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,5 +466,21 @@ mod tests {
                 "switchable": true
             })
         );
+    }
+
+    /// 没给 java 路径：报 invalid_argument，不碰系统显卡偏好，独显偏好不开、不落盘。
+    /// 给了路径的分支要写真实注册表，测试门面换不了写入器，在 petalfall-core 里用替身测。
+    #[tokio::test]
+    async fn switch_to_dedicated_gpu_rejects_an_empty_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_with(petalfall_core::PetalfallConfig::default(), dir.path());
+
+        let err = switch_to_dedicated_gpu_with(&facade, "  ")
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert!(!facade.read().await.config().prefer_dedicated_gpu);
+        assert!(!dir.path().join("config.json").exists(), "报错时不该落盘");
     }
 }

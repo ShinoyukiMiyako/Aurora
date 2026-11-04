@@ -28,8 +28,8 @@ import { javaMajorFromDetail } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { useLauncherActions, useNow } from "../../state/launcher";
-import { useJavaRuntimes } from "../../state/queries/catalog";
+import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
+import { useGpuAdapters, useJavaRuntimes } from "../../state/queries/catalog";
 import { useInstanceMods, useInstanceSettings, type CrashClueDto, type CrashReportDto, type InstalledMod } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
 import type { InstanceTab } from "../../state/route";
@@ -47,7 +47,7 @@ import { Tooltip } from "../../ui/Tooltip";
 import { CRASH_PAGE_COPY, MODS_COPY, SETTINGS_COPY } from "./copy";
 import { useMemoryInfo, useRequiredMajor } from "./hooks";
 import styles from "./instance.module.css";
-import { crashFixes, crashFixKey, disabledFileName, enabledFileName, matchSuspect, modName, type CrashFix } from "./model";
+import { crashFixes, crashFixKey, disabledFileName, enabledFileName, hasGraphicsClue, matchSuspect, modName, type CrashFix } from "./model";
 import type { InstanceOps } from "./ops";
 import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
 
@@ -453,14 +453,25 @@ function FixesCard({
   const memory = useMemoryInfo(inst, settings, queryId);
   const runtimes = useJavaRuntimes();
   const required = useRequiredMajor(inst);
+  // 改用独立显卡只跟显卡线索走：别的崩溃不去查显卡，查显卡失败也不该挡住它们的一键尝试
+  const graphics = hasGraphicsClue(report);
+  const gpu = useGpuAdapters(graphics);
+  const preferDedicatedGpu = useLauncherSelector((s) => (s.settings === null ? null : s.settings.preferDedicatedGpu));
   // 完成态只在这次停留在本页时有效：离开再回来，按当时的设置重新推一遍
   const [done, setDone] = useState<ReadonlyMap<string, Done>>(new Map());
   const [frozen, setFrozen] = useState<CrashFix[] | null>(null);
 
-  const ready = settings.status === "ready" && memory.status === "ready" && runtimes.status === "ready" && required.status === "ready" && modsReady;
-  // 推一次就定住：点了「停用」之后 Mod 列表会变，再推会让刚完成的那一行消失
+  const ready =
+    settings.status === "ready" &&
+    memory.status === "ready" &&
+    runtimes.status === "ready" &&
+    required.status === "ready" &&
+    modsReady &&
+    (!graphics || gpu.status === "ready") &&
+    preferDedicatedGpu !== null;
+  // 推一次就定住：点了「停用」之后 Mod 列表会变，再推会让刚完成的那一行消失；改用独立显卡之后独显偏好变了，同理
   useEffect(() => {
-    if (!ready || frozen !== null || settings.status !== "ready" || memory.status !== "ready" || runtimes.status !== "ready" || required.status !== "ready") return;
+    if (!ready || frozen !== null || settings.status !== "ready" || memory.status !== "ready" || runtimes.status !== "ready" || required.status !== "ready" || preferDedicatedGpu === null) return;
     setFrozen(
       crashFixes(report, {
         memoryMb: memory.value.effectiveMb,
@@ -470,9 +481,11 @@ function FixesCard({
         mods,
         runtimes: runtimes.data,
         requiredJava: required.value,
+        gpu: gpu.status === "ready" ? gpu.data : null,
+        preferDedicatedGpu,
       }),
     );
-  }, [frozen, memory, mods, ready, report, required, runtimes, settings]);
+  }, [frozen, gpu, memory, mods, preferDedicatedGpu, ready, report, required, runtimes, settings]);
 
   // 推一键尝试要的每一样都可能读不出来；漏掉任何一样，ready 永远等不到，卡片就一直停在骨架上。
   // 实例设置读不出来时内存也跟着报同一个错，所以设置排在内存前面，标题才对得上真正没读出来的那一样
@@ -482,6 +495,7 @@ function FixesCard({
     [CRASH_PAGE_COPY.readError.javaList, runtimes],
     [CRASH_PAGE_COPY.readError.javaRequired, required],
     [CRASH_PAGE_COPY.readError.mods, modsError],
+    [CRASH_PAGE_COPY.readError.gpu, graphics ? gpu : null],
   ]);
 
   return (
@@ -613,6 +627,8 @@ function FixRow({
   let note: string;
   let action: ReactNode = null;
   let extra: ReactNode = null;
+  /** 完成前后都留着的按钮。 */
+  let trailing: ReactNode = null;
   switch (fix.kind) {
     case "raise_memory":
       note = CRASH_COPY.memoryNote(fix.currentMb, fix.followsGlobal);
@@ -723,14 +739,32 @@ function FixRow({
         </>
       );
       break;
-    case "driver_steps":
-      note = CRASH_PAGE_COPY.driverNote;
-      action = (
+    case "driver_steps": {
+      const toggle = (
         <Button variant="ghost" size="sm" iconRight={expanded ? "chevron-up" : "chevron-down"} aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
           {CRASH_PAGE_COPY.driverSteps}
         </Button>
       );
+      const offer = fix.gpu;
+      if (offer === null) {
+        note = CRASH_PAGE_COPY.driverNote;
+        action = toggle;
+        break;
+      }
+      note = CRASH_PAGE_COPY.gpuNote;
+      action = button(CRASH_PAGE_COPY.switchGpu, () => {
+        setBusy(true);
+        void run(() => actions.switchToDedicatedGpu(offer.javaPath), ACTION_ERROR.dedicatedGpu).then((outcome) => {
+          setBusy(false);
+          if (!outcome.ok) return;
+          actions.toast("success", CRASH_PAGE_COPY.gpuToast, CRASH_PAGE_COPY.gpuToastBody(offer.highPerformance));
+          onDone({ note: CRASH_PAGE_COPY.gpuDone, undo: null });
+        });
+      });
+      // 改用独立显卡之后还崩溃，更新驱动就是下一步：处理办法在完成态里也留着
+      trailing = toggle;
       break;
+    }
     case "compare_log":
       note = CRASH_PAGE_COPY.compareLogNote;
       action = button(CRASH_PAGE_COPY.open, () => onTab("logs"));
@@ -758,13 +792,15 @@ function FixRow({
               )
             : action}
           {!isDone && extra}
+          {trailing}
         </div>
       </div>
       {fix.kind === "driver_steps" && expanded && (
         <ol className={styles.steps}>
           <li>{CRASH_PAGE_COPY.driverStep1}</li>
-          <li>{CRASH_PAGE_COPY.driverStep2}</li>
-          {fix.javaPath !== null && (
+          {/* 有「改用独立显卡」时手动去 Windows 里设高性能就是同一件事，不再列 */}
+          {fix.gpu === null && <li>{CRASH_PAGE_COPY.driverStep2}</li>}
+          {fix.gpu === null && fix.javaPath !== null && (
             <li className={styles.stepCopy}>
               <code className={styles.path}>{fix.javaPath}</code>
               <CopyButton text={fix.javaPath} label={CRASH_PAGE_COPY.copyJava} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />

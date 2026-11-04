@@ -155,6 +155,7 @@ pub fn run() {
             commands::java::add_java_path,
             commands::java::remove_java_path,
             commands::java::gpu_adapters,
+            commands::java::switch_to_dedicated_gpu,
             // -- accounts --
             commands::accounts::current_account,
             commands::accounts::create_offline_account,

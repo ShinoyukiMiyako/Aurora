@@ -2,10 +2,11 @@
 // 跨页面共用的文案（启动、崩溃类别、确认框、通知）取自 copy/flows，这里只放本页私有的部分。
 // 插值一律经 domain/format 格式化；产品名取自 app-info。
 
-import { cluePointer, CRASH_SOURCE_LABEL, LOADER_NAME, RELEASE_CHANNEL_LABEL } from "../../copy/flows";
+import { cluePointer, CRASH_SOURCE_LABEL, LOADER_NAME, RELEASE_CHANNEL_LABEL, SETTINGS_SECTION_LABEL } from "../../copy/flows";
 import { formatBytes, formatMemory, formatPlaytime, formatRelative } from "../../domain/format";
 import type { LoaderKind } from "../../domain/types";
 import { APP_NAME } from "../../lib/app-info";
+import { GPU_COPY } from "../settings/copy";
 
 export const PAGE_COPY = {
   tabsLabel: "实例详情",
@@ -660,6 +661,14 @@ export const CRASH_PAGE_COPY = {
   driverStep1: "到显卡厂商官网更新驱动",
   driverStep2: "打开 Windows 图形设置（Windows 10：设置 → 系统 → 显示 → 图形设置；Windows 11：设置 → 系统 → 屏幕 → 显示卡），把 java.exe 设为「高性能」",
   copyJava: "复制 java.exe 路径",
+  switchGpu: "改用独立显卡",
+  // 副标题单行截断，显卡名字太长放不下，写进完成后的通知里
+  gpuNote: "游戏可能跑在核显上，可以先改用独立显卡",
+  gpuDone: "已改用独立显卡，下次启动生效",
+  gpuToast: "已改用独立显卡",
+  gpuToastBody: (highPerformance: string) =>
+    // 关掉开关只是以后不再写，已经写进 Windows 的那一条要另外改回，办法写在设置的显卡卡片里
+    `下次启动游戏时用 ${highPerformance}。要改回，见设置 ${SETTINGS_SECTION_LABEL.java} 分区的「${GPU_COPY.title}」。`,
   memoryItem: "内存",
   javaItem: "Java",
 
@@ -682,6 +691,7 @@ export const CRASH_PAGE_COPY = {
     javaList: SETTINGS_COPY.javaError,
     javaRequired: SETTINGS_COPY.javaRequiredError,
     mods: "读不到 Mod 列表",
+    gpu: GPU_COPY.readFailed,
   },
   retry: "重试",
 } as const;

@@ -10,6 +10,7 @@
 use std::path::Path;
 
 use crate::error::Result;
+use crate::facade::Petalfall;
 
 /// 按程序显卡偏好所在的键（当前用户）。
 pub(crate) const USER_GPU_PREFERENCES_KEY: &str = r"Software\Microsoft\DirectX\UserGpuPreferences";
@@ -163,6 +164,28 @@ pub(crate) fn prefer_high_performance(
     let value = with_high_performance(previous.as_deref());
     store.write(exe, &value)?;
     Ok(GpuPreferenceChange::Written { previous, value })
+}
+
+impl Petalfall {
+    /// 现在就把这个程序设为高性能显卡，崩溃页「改用独立显卡」用。
+    ///
+    /// 与启动前那次写入不同：那次写不进去只记警告、不挡启动；这次是玩家点出来的，写不进去必须照实报错，
+    /// 否则按钮显示成功、下次启动照旧跑在核显上。
+    pub async fn prefer_high_performance_gpu(&self, exe: &Path) -> Result<()> {
+        let store = self.gpu_preferences();
+        let path = exe.to_path_buf();
+        let change =
+            tokio::task::spawn_blocking(move || prefer_high_performance(&*store, &path)).await??;
+        match change {
+            GpuPreferenceChange::Written { previous, value } => {
+                tracing::info!(path = %exe.display(), ?previous, %value, "已写入显卡偏好");
+            }
+            GpuPreferenceChange::Unchanged => {
+                tracing::info!(path = %exe.display(), "显卡偏好已是高性能，未改动");
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -337,5 +360,75 @@ mod tests {
             matches!(&err, crate::error::CoreError::GpuPreferenceWrite { path, .. } if path == &exe),
             "实际：{err:?}"
         );
+    }
+
+    fn facade_with(store: std::sync::Arc<MemoryGpuPreferences>, dir: &Path) -> Petalfall {
+        Petalfall::for_test(
+            crate::config::PetalfallConfig::default(),
+            dir.to_path_buf(),
+            dir.to_path_buf(),
+        )
+        .with_gpu_preference_store(store)
+    }
+
+    /// 崩溃页点「改用独立显卡」：写的正是传进来的那个 java，别的片段原样保留；独显开关不归它管，
+    /// 由命令层在写成功之后再打开。
+    #[tokio::test]
+    async fn facade_writes_high_performance_for_the_given_java_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe =
+            PathBuf::from(r"C:\Users\p\AppData\Roaming\.petalfall\runtime\java-17\bin\java.exe");
+        let other = PathBuf::from(r"D:\jdk-21\bin\java.exe");
+        let store = std::sync::Arc::new(MemoryGpuPreferences::with_value(
+            &exe,
+            "AppStatus=0;GpuPreference=1;",
+        ));
+        let petalfall = facade_with(store.clone(), tmp.path());
+
+        petalfall.prefer_high_performance_gpu(&exe).await.unwrap();
+
+        assert_eq!(
+            store.writes(),
+            vec![(exe.clone(), "AppStatus=0;GpuPreference=2;".to_owned())]
+        );
+        assert_eq!(store.read(&other).unwrap(), None, "别的 java 不该被改");
+        assert!(!petalfall.config().prefer_dedicated_gpu);
+    }
+
+    /// 已经是高性能（玩家在 Windows 里自己设过）：照样算成功，不再写一遍。
+    #[tokio::test]
+    async fn facade_leaves_an_existing_high_performance_entry_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = PathBuf::from(r"D:\jdk-17\bin\javaw.exe");
+        let store = std::sync::Arc::new(MemoryGpuPreferences::with_value(&exe, "GpuPreference=2;"));
+        facade_with(store.clone(), tmp.path())
+            .prefer_high_performance_gpu(&exe)
+            .await
+            .unwrap();
+        assert!(store.writes().is_empty());
+        assert_eq!(
+            store.read(&exe).unwrap().as_deref(),
+            Some("GpuPreference=2;")
+        );
+    }
+
+    /// 写不进去要报错，带上是哪个程序：按钮不能在没写成的时候显示成功。
+    #[tokio::test]
+    async fn facade_write_failure_is_reported_with_the_java_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = PathBuf::from(r"E:\games\jre-8\bin\java.exe");
+        let store = std::sync::Arc::new(MemoryGpuPreferences::failing());
+        let err = facade_with(store.clone(), tmp.path())
+            .prefer_high_performance_gpu(&exe)
+            .await
+            .unwrap_err();
+        match &err {
+            crate::error::CoreError::GpuPreferenceWrite { path, source } => {
+                assert_eq!(path, &exe);
+                assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+            }
+            other => panic!("应为写入显卡偏好失败，实际：{other:?}"),
+        }
+        assert!(store.writes().is_empty());
     }
 }

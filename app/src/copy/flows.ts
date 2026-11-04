@@ -1118,6 +1118,7 @@ export const ACTION_ERROR = {
   exportWorld: "没能开始导出存档",
   deleteWorldBackup: "没能删除这份备份",
   installJava: "没能开始下载 Java",
+  dedicatedGpu: "没能改用独立显卡",
   servers: "服务器列表没有保存",
   firstRun: "首次设置没有保存",
   saveJournal: "下载任务记录没有保存",

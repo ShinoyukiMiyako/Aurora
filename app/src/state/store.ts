@@ -472,6 +472,8 @@ export interface LauncherActions {
   addJavaPath(path: string): Promise<JavaInstallationDto>;
   /** 移除一条手动添加的 Java；默认 Java 可能随之改回自动选择，所以同样重读设置。 */
   removeJavaPath(path: string): Promise<RemoveJavaPathDto>;
+  /** 崩溃页改用独立显卡：立即把这个 java 设为高性能并打开独显偏好；成功后重读设置，设置页的开关跟着亮。 */
+  switchToDedicatedGpu(javaPath: string): Promise<void>;
   setGameDirectory(path: string): Promise<void>;
   /**
    * 首次启动向导第一步的提交：后端校验并落下游戏目录、收下勾选的文件夹、记下向导已完成（此后关窗口，下次直接进主页）。
@@ -3416,6 +3418,10 @@ export class LauncherStore {
         invalidateResources("java");
         await store.fetchSettings();
         return result;
+      },
+      async switchToDedicatedGpu(javaPath) {
+        await javaIpc.switchToDedicatedGpu(javaPath);
+        await store.fetchSettings();
       },
       async setGameDirectory(path) {
         await configIpc.setGameDirectory(path);

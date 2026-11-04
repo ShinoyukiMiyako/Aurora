@@ -2,7 +2,7 @@ import { IpcError } from "../../errors";
 import type { GpuAdaptersDto, InstalledRuntimeDto, JavaInstallationDto, JavaPathProblem, JavaVersionDto, RemoveJavaPathDto } from "../../java";
 import { JAVA_PATH_INVALID, JAVA_RUNTIME_INCOMPLETE } from "../../java";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
-import { addMockExtraJavaPath, MOCK_DATA_DIR, removeMockExtraJavaPath, requireString, samePath, setMockJavaPaths, tauriArgError } from "./config";
+import { addMockExtraJavaPath, enableMockDedicatedGpu, MOCK_DATA_DIR, removeMockExtraJavaPath, requireString, samePath, setMockJavaPaths, tauriArgError } from "./config";
 import { simulateMockDownload } from "./system";
 import { beginMockTask, endMockTask } from "./tasks";
 
@@ -154,12 +154,20 @@ function removeJavaPath(args: MockArgs): RemoveJavaPathDto {
   return result;
 }
 
+// 假后端不记系统显卡偏好：写入在真后端里只影响下次启动用哪块显卡，界面看得到的只有独显偏好被打开
+function switchToDedicatedGpu(args: MockArgs): void {
+  const path = requireString(args, "javaPath", "switch_to_dedicated_gpu").trim();
+  if (path === "") throw new IpcError("invalid_argument", "改用独立显卡要给出 java 可执行文件的路径");
+  enableMockDedicatedGpu();
+}
+
 export const handlers: MockHandlers = {
   detect_java: () => installations,
   install_java: (args) => installJava(args),
   add_java_path: (args) => addJavaPath(args),
   remove_java_path: (args) => removeJavaPath(args),
   gpu_adapters: () => gpu,
+  switch_to_dedicated_gpu: (args) => switchToDedicatedGpu(args),
 };
 
 export function reset(): void {

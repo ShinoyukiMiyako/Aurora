@@ -336,6 +336,11 @@ function updateConfig(args: MockArgs): void {
   config = next;
 }
 
+/** 崩溃页改用独立显卡写成功之后打开独显偏好，与 update_config 改的是同一个字段。 */
+export function enableMockDedicatedGpu(): void {
+  config = { ...config, prefer_dedicated_gpu: true };
+}
+
 function requireBoolean(args: MockArgs, key: string): boolean {
   const value = args[key];
   if (typeof value !== "boolean") throw tauriArgError("update_config", key, "expected a boolean");

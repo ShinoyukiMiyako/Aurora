@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getConfig, updateConfig } from "./config";
 import { IpcError } from "./errors";
-import { addJavaPath, detectJava, installJava, JAVA_PATH_INVALID, JAVA_RUNTIME_INCOMPLETE, removeJavaPath } from "./java";
+import { addJavaPath, detectJava, installJava, JAVA_PATH_INVALID, JAVA_RUNTIME_INCOMPLETE, removeJavaPath, switchToDedicatedGpu } from "./java";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
 import { onCoreEvent, type CoreEvent } from "./tasks";
@@ -93,5 +93,21 @@ describe("手动添加的 Java", () => {
     expect([config.default_java, config.extra_java_paths]).toEqual(["auto", []]);
     expect((await detectJava()).some((j) => j.source === "manual")).toBe(false);
     expect(await removeJavaPath(added.path)).toEqual({ removed: false, default_reset: false });
+  });
+});
+
+describe("改用独立显卡", () => {
+  it("给出 java 时打开独显偏好；路径为空报 invalid_argument，偏好不动", async () => {
+    expect((await getConfig()).prefer_dedicated_gpu).toBe(false);
+    const empty = await switchToDedicatedGpu("  ").catch((e: unknown) => e);
+    expect(empty).toBeInstanceOf(IpcError);
+    expect((empty as IpcError).code).toBe("invalid_argument");
+    expect((await getConfig()).prefer_dedicated_gpu).toBe(false);
+
+    await switchToDedicatedGpu("C:/Program Files/Java/jdk-21/bin/java.exe");
+    expect((await getConfig()).prefer_dedicated_gpu).toBe(true);
+    // 设置页能照常关掉，两条路改的是同一个字段
+    await updateConfig({ preferDedicatedGpu: false });
+    expect((await getConfig()).prefer_dedicated_gpu).toBe(false);
   });
 });
