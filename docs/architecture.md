@@ -151,10 +151,11 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | `textures.rs` | 自定义协议 `petalfall-tex`：从游戏 jar 读取原版材质给前端，不经过门面锁 |
 | `logging.rs` | tracing subscriber，每次启动写一个日志文件 |
 | `window.rs` | 主窗口兜底显示；生产构建关闭 WebView2 浏览器快捷键；装上原生拖放、渲染进程故障后的自动重载与页面可见性同步 |
+| `window_state.rs` | 主窗口记住大小、位置与是否最大化，存在 `<数据目录>/window-state.json`：记常态时客户区的屏幕物理矩形与当时的缩放比例，最小化期间的变化不记。启动时在窗口隐藏期间摆回去：落到与记下的矩形重叠最多的那块屏，尺寸按逻辑像素换到那块屏现在的缩放，再整个夹进它的工作区；哪块屏都不重叠就居中到主屏。上次是最大化的，隐藏期间先撑到工作区大小，前端首帧后经 `reveal_main_window` 一次 `SetWindowPlacement(SW_SHOWMAXIMIZED)` 直接最大化地显示，还原矩形设成记下的常态矩形；不在隐藏时调 tao 的最大化，它会先显示、激活窗口再藏回去。窗口停止变化 1 秒后原子写一次，退出时再补一次；文件读不出按首次启动处理并记 warn，不拦启动 |
 | `page_visibility.rs` | 主窗口最小化时把 WebView2 的 `IsVisible` 设为假，还原时设回真：WebView2 收不到顶层窗口的这两个消息，不告诉它就一直按可见出帧。只在状态翻转时才碰 controller，JS 与事件在隐藏期间照常运行 |
 | `drop.rs` | 主窗口原生拖放：在 WebView2 的子窗口上注册自己的 `IDropTarget`，读拖入的文件列表与 authlib-injector 服务器链接，经 `petalfall://window-drop` 推给前端 |
 | `renderer.rs` | 主窗口 WebView2 渲染进程退出或无响应时自动重载页面，60 秒内最多 2 次；用完即停下并记 error，之后安静满 60 秒才重新计数。停下后网页里的标题栏与关闭键都没了，关闭请求（Alt+F4、任务栏）由后端直接销毁窗口 |
-| `exit.rs` | 正常退出（`RunEvent::Exit`）时的收尾：先补写游玩记录里待补的改动（限时 3 秒），再按需拉起更新安装程序 |
+| `exit.rs` | 正常退出（`RunEvent::Exit`）时的收尾：先补写游玩记录里待补的改动（限时 3 秒）与主窗口状态（限时 1 秒），再按需拉起更新安装程序 |
 | `gpu.rs` | 经 DXGI 列出本机硬件显卡，看出 Windows 按高性能与省电偏好各挑哪一块（`gpu_adapters` 命令用）；Windows 10 1803 之前没有按偏好枚举，退回系统顺序且不标首选；非 Windows 为空 |
 | `single_instance.rs`（仅 Windows） | 同一数据目录只跑一个启动器：再次启动时把已有窗口叫到前台（`window.rs` 的 `front_on_second_launch`：先还原最小化，再取得焦点），新进程直接退出。占位与唤醒是同一个具名事件 `Local\Petalfall-<小写且反斜杠换成斜杠的数据目录>`：由系统保证只有一个进程创建成功，进程退出（包括崩溃）后系统回收，下一次启动不会被残留挡住；后来者对它 `SetEvent`，先来者的监听线程醒来叫窗口，事件自动复位，先来者还没开始监听时的那次唤醒留到开始监听时生效。按数据目录而不是按应用标识占位，两份便携版的数据互不相干，可以各开各的。占位在日志初始化之前执行（每次启动都开一份新日志、清掉最旧的，连点几下图标会把正在用的那份挤掉）；占位失败只记 error 日志、不拦启动，拦下来就是双击后什么都没有，而这只是少了一层防重复打开 |
 

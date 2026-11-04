@@ -102,6 +102,7 @@ FunctionEnd
     Delete "${ROOT}\tasks.json"
     Delete "${ROOT}\playtime.json"
     Delete "${ROOT}\java-probe-cache.json"
+    Delete "${ROOT}\window-state.json"
     ; 原子写和可写探针在进程崩溃时留下的文件
     Delete "${ROOT}\.*.tmp"
     Delete "${ROOT}\.petalfall-write-probe"
