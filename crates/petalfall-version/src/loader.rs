@@ -140,7 +140,7 @@ pub fn detect_loaders(version: &VersionJson) -> Vec<LoaderInfo> {
 
 /// 收集所有 "扁平字符串" 参数（旧式 minecraftArguments 分词 + 新式 game/jvm 的纯字符串项），
 /// 用于按序查找 `--flag value` 或包含 tweakClass 特征串。
-fn arg_tokens(version: &VersionJson) -> Vec<String> {
+pub fn arg_tokens(version: &VersionJson) -> Vec<String> {
     let mut tokens = Vec::new();
     if let Some(mc) = &version.minecraft_arguments {
         tokens.extend(mc.split_whitespace().map(|s| s.to_string()));
@@ -156,7 +156,7 @@ fn arg_tokens(version: &VersionJson) -> Vec<String> {
 }
 
 /// 在 token 序列里定位 `flag`，返回其后一个 token 作为取值。
-fn flag_value(tokens: &[String], flag: &str) -> Option<String> {
+pub fn flag_value(tokens: &[String], flag: &str) -> Option<String> {
     tokens
         .iter()
         .position(|t| t == flag)
