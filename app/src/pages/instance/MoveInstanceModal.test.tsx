@@ -272,7 +272,7 @@ describe("移到其他游戏目录：入口", () => {
   it("前端排着这个实例的移动任务：入口禁用，原因与后端报的一致", async () => {
     await openPage();
     await act(async () => {
-      await launcher.actions.moveInstance(ID, HMCL, "HMCL");
+      await launcher.actions.moveInstance(ID, CURRENT, HMCL, "HMCL");
     });
     await flush();
     click(button("更多操作"));
@@ -320,7 +320,8 @@ describe("移到其他游戏目录：弹窗", () => {
     await flush();
     const task = launcher.state.tasks.find((t) => t.kind === "instance_move");
     if (task === undefined) throw new Error("没有入队移动任务");
-    expect(callsOf(ipc, "move_instance")).toEqual([{ taskId: `${task.id}#1`, id: ID, target: HMCL }]);
+    // source 取预检报的源目录（玩家确认的就是从这里移走），不取设置里的写法（D:/Games/.minecraft）
+    expect(callsOf(ipc, "move_instance")).toEqual([{ taskId: `${task.id}#1`, id: ID, source: CURRENT, target: HMCL }]);
     expect(task.detail).toBe(`移到 HMCL · ${HMCL}`);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);

@@ -522,7 +522,8 @@ export const revealInFolder = (path: string): Promise<void> => invoke<void>("rev
  * detail.blocker 是同一形状。same_directory：目标就是实例现在所在的游戏目录；target_inside_source：目标在实例目录里面；
  * name_taken：目标里已有同名（不分大小写）的版本；has_dependents：别的实例经 inheritsFrom 依赖它；links：实例目录或它的
  * 备份目录里有符号链接、目录联接；base_conflict：目标里已有同名、内容不同的基底版本；insufficient_space：要写的字节加
- * 256 MiB 余量超过目标盘剩余；pending：上一次移动中断后还没收尾。
+ * 256 MiB 余量超过目标盘剩余；pending：上一次移动中断后还没收尾；source_changed：只在执行时出现，当前游戏目录已不是
+ * 发起移动时带上的 source（发起之后切换过），不动当前目录里同名的实例。
  */
 export type MoveBlockerDto =
   | { kind: "same_directory" }
@@ -532,11 +533,13 @@ export type MoveBlockerDto =
   | { kind: "links"; paths: string[] }
   | { kind: "base_conflict"; bases: string[] }
   | { kind: "insufficient_space"; needed: number; available: number }
-  | { kind: "pending" };
+  | { kind: "pending" }
+  | { kind: "source_changed" };
 
 /** 移动前的预检，不写盘、不占实例。源是当前游戏目录，目标可以还不存在。 */
 export interface MovePreviewDto {
   id: string;
+  /** 实例此刻所在的游戏目录。发起移动时原样作为 source 交回，后端据此认出发起之后有没有切换过游戏目录。 */
   source: string;
   target: string;
   /** 目标在游戏目录列表里的显示名；还没记录的新文件夹按同一规则推出。 */
@@ -569,11 +572,15 @@ export interface MovePreviewDto {
   blockers: MoveBlockerDto[];
 }
 
-/** 移动已经完成、只是有一项没跟过去要告诉玩家；reason 是人读的原因。 */
+/**
+ * 移动已经完成、只是有一项没跟过去要告诉玩家；reason 是人读的原因。config：实例已经移好，配置（原目录里对它的引用、
+ * 目标记进游戏目录列表）没存上，下次打开时后端按移动日志补上。
+ */
 export type MoveFollowUpDto =
   | { kind: "play_records"; reason: string }
   | { kind: "world_backups"; reason: string }
-  | { kind: "cleanup"; path: string; reason: string };
+  | { kind: "cleanup"; path: string; reason: string }
+  | { kind: "config"; reason: string };
 
 export interface MoveOutcomeDto {
   id: string;
@@ -596,11 +603,14 @@ export const INSTANCE_MOVE_VERIFY_FAILED_ERROR_CODE = "instance_move_verify_fail
 export const previewInstanceMove = (id: string, target: string): Promise<MovePreviewDto> => invoke<MovePreviewDto>("preview_instance_move", { id, target });
 
 /**
- * 长任务：把实例移到 target。实例记为 moving，继承链上的基底按 inherited 占住；进度经 core-event 推 Phase 与 Download
- * （Download 的 total、finished 为文件数，bytes、total_bytes 为字节，每一步重新计数）。可用 cancelTask(taskId) 取消，
- * 进入提交后取消不再生效、照常成功返回。侧栏固定由后端随移动去掉。
+ * 长任务：把实例从 source（发起时的游戏目录，取自预检）移到 target。执行时当前游戏目录已不是 source 就以
+ * instance_move_blocked 拒绝（blocker 为 source_changed）。实例记为 moving，继承链上的基底按 inherited 占住；进度经
+ * core-event 推 Phase 与 Download（Download 的 total、finished 为文件数，bytes、total_bytes 为字节，每一步重新计数）。
+ * 可用 cancelTask(taskId) 取消，进入提交后取消不再生效、照常成功返回。侧栏固定由后端随移动去掉；这份配置没存上时
+ * 照样成功返回，follow_ups 里带一项 config。
  */
-export const moveInstance = (taskId: string, id: string, target: string): Promise<MoveOutcomeDto> => invoke<MoveOutcomeDto>("move_instance", { taskId, id, target });
+export const moveInstance = (taskId: string, id: string, source: string, target: string): Promise<MoveOutcomeDto> =>
+  invoke<MoveOutcomeDto>("move_instance", { taskId, id, source, target });
 
 function stringList(raw: unknown, what: string): string[] {
   if (!Array.isArray(raw) || raw.some((item) => typeof item !== "string")) throw new Error(`${what} 应是字符串数组，实为 ${JSON.stringify(raw)}`);
@@ -621,6 +631,7 @@ export function parseMoveBlocker(raw: unknown, where: string): MoveBlockerDto {
     case "target_inside_source":
     case "name_taken":
     case "pending":
+    case "source_changed":
       return { kind: r.kind };
     case "has_dependents":
       return { kind: r.kind, dependents: stringList(r.dependents, `${where}.dependents`) };

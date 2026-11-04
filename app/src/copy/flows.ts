@@ -930,6 +930,9 @@ function moveFollowUpText(item: MoveFollowUpDto): string {
       return `存档备份没跟过去：${item.reason}`;
     case "cleanup":
       return `原处还留着 ${item.path}，没能删掉：${item.reason}`;
+    // 实例已经在目标里，没存上的只是配置；下次打开时后端按移动日志补上，玩家不用做什么
+    case "config":
+      return `配置没存上，下次打开${APP_NAME}时会补上：${item.reason}`;
   }
 }
 
@@ -955,6 +958,9 @@ export function moveBlockerReason(blocker: MoveBlockerDto): string {
       return `目标盘空间不够：需要 ${formatBytes(blocker.needed)}，只剩 ${formatBytes(blocker.available)}`;
     case "pending":
       return `这个实例上次的移动中断后还没收尾，两个游戏目录都能访问时重新打开${APP_NAME}，会自动收尾`;
+    // 只在执行时出现：任务带着发起时的游戏目录，切换之后重试会被后端拦下，不去动新目录里同名的实例
+    case "source_changed":
+      return "当前游戏目录已经换了，切回发起移动时的游戏目录再重试";
   }
 }
 

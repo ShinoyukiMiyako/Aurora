@@ -6,7 +6,7 @@ import { getSidebarPins, listInstances, moveBlockerOf, moveInstance, parseMoveBl
 import { cancelTask, CORE_EVENT } from "../tasks";
 import { resetMocks } from ".";
 import { clearMockEventListeners, subscribeMockEvent } from "./events";
-import { addMockInstance, failNextMockBackupsMove, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./handlers/instances";
+import { addMockInstance, failNextMockBackupsMove, failNextMockMoveConfig, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./handlers/instances";
 import { failNextMockPlayRecords } from "./handlers/launch";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -134,6 +134,7 @@ describe("拦截项的形状", () => {
   it("逐项校验：认得的种类原样读回，种类不认识或字段类型不对都抛错", () => {
     expect(parseMoveBlocker({ kind: "links", paths: ["saves\联接"] }, "x")).toEqual({ kind: "links", paths: ["saves\联接"] });
     expect(parseMoveBlocker({ kind: "insufficient_space", needed: 10, available: 3 }, "x")).toEqual({ kind: "insufficient_space", needed: 10, available: 3 });
+    expect(parseMoveBlocker({ kind: "source_changed" }, "x")).toEqual({ kind: "source_changed" });
     expect(() => parseMoveBlocker({ kind: "moved_away" }, "x")).toThrow("x 的种类不认识");
     expect(() => parseMoveBlocker({ kind: "base_conflict", bases: "1.21" }, "x")).toThrow("x.bases 应是字符串数组");
     expect(() => parseMoveBlocker({ kind: "insufficient_space", needed: -1, available: 3 }, "x")).toThrow("x.needed 应是非负整数");
@@ -151,7 +152,7 @@ describe("执行", () => {
     vi.useFakeTimers();
     await addGameDirectory("官方启动器", OFFICIAL);
     const events = recordEvents("t-cross");
-    const pending = moveInstance("t-cross", "樱花生存", OFFICIAL);
+    const pending = moveInstance("t-cross", "樱花生存", SOURCE, OFFICIAL);
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
     expect((await listInstances()).find((i) => i.id === "樱花生存")?.activity).toBe("moving");
     expect((await rejection(renameInstance("樱花生存", "换个名"))).detail).toEqual({ id: "樱花生存", activity: "moving" });
@@ -175,7 +176,7 @@ describe("执行", () => {
     vi.useFakeTimers();
     const target = "D:\\新家\\.minecraft";
     const events = recordEvents("t-same");
-    const pending = moveInstance("t-same", "1.21", target);
+    const pending = moveInstance("t-same", "1.21", SOURCE, target);
     await vi.advanceTimersByTimeAsync(PHASE_MS + 2 * MOCK_STEP_MS);
     expect(await pending).toMatchObject({ target, target_name: "新家", registered: true, follow_ups: [] });
     expect(events.phases.map((p) => p.plan)).toEqual([
@@ -190,16 +191,33 @@ describe("执行", () => {
 
   it("开工前重新预检：有拦截项时以 instance_move_blocked 拒绝，detail.blocker 是第一项，实例原样留着", async () => {
     await addGameDirectory("HMCL", HMCL);
-    const error = await rejection(moveInstance("t-blocked", "樱花生存", HMCL));
+    const error = await rejection(moveInstance("t-blocked", "樱花生存", SOURCE, HMCL));
     expect(error.code).toBe("instance_move_blocked");
     expect(error.detail).toEqual({ id: "樱花生存", blocker: { kind: "name_taken" } });
     expect(moveBlockerOf(error)).toEqual({ kind: "name_taken" });
     expect((await listInstances()).find((i) => i.id === "樱花生存")?.activity).toBeNull();
   });
 
+  it("发起时的源目录已不是当前游戏目录：以 instance_move_blocked 拒绝，blocker 为 source_changed，当前目录里的同名实例原样留着", async () => {
+    const error = await rejection(moveInstance("t-source", "樱花生存", "E:\\旧家\\.minecraft", OFFICIAL));
+    expect(error.code).toBe("instance_move_blocked");
+    expect(error.detail).toEqual({ id: "樱花生存", blocker: { kind: "source_changed" } });
+    expect(moveBlockerOf(error)).toEqual({ kind: "source_changed" });
+    const kept = (await listInstances()).find((i) => i.id === "樱花生存");
+    expect(kept?.activity).toBeNull();
+    expect(await getSidebarPins()).toEqual(["樱花生存", "1.21.1"]);
+  });
+
+  it("源目录按同一路径的口径比：大小写、斜杠与末尾分隔符不同照样认作当前目录", async () => {
+    vi.useFakeTimers();
+    const pending = moveInstance("t-spelling", "1.21", "d:/games/launcher/.minecraft/", "D:\\新家\\.minecraft");
+    await vi.advanceTimersByTimeAsync(PHASE_MS + 2 * MOCK_STEP_MS);
+    expect(await pending).toMatchObject({ id: "1.21", source: SOURCE, follow_ups: [] });
+  });
+
   it("复制途中取消：以 cancelled 拒绝，实例还在原处；进入提交后再取消不再生效", async () => {
     vi.useFakeTimers();
-    const first = rejection(moveInstance("t-cancel", "1.21", OFFICIAL));
+    const first = rejection(moveInstance("t-cancel", "1.21", SOURCE, OFFICIAL));
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
     expect(await cancelTask("t-cancel")).toBe(true);
     await vi.advanceTimersByTimeAsync(MOCK_STEP_MS);
@@ -207,7 +225,7 @@ describe("执行", () => {
     expect((await listInstances()).map((i) => i.id)).toContain("1.21");
 
     const events = recordEvents("t-late");
-    const second = moveInstance("t-late", "1.21", OFFICIAL);
+    const second = moveInstance("t-late", "1.21", SOURCE, OFFICIAL);
     await vi.advanceTimersByTimeAsync(3 * PHASE_MS);
     expect(events.phases.at(-1)).toEqual({ plan: ["move_dependencies", "move_copy", "move_verify", "move_commit"], index: 3 });
     await cancelTask("t-late");
@@ -220,11 +238,27 @@ describe("执行", () => {
     vi.useFakeTimers();
     failNextMockPlayRecords("记录文件被占用");
     failNextMockBackupsMove("拒绝访问。 (os error 5)");
-    const pending = moveInstance("t-follow", "樱花生存", "C:\\新家\\.minecraft");
+    const pending = moveInstance("t-follow", "樱花生存", SOURCE, "C:\\新家\\.minecraft");
     await vi.advanceTimersByTimeAsync(3 * PHASE_MS + MOCK_STEP_MS);
     expect((await pending).follow_ups).toEqual([
       { kind: "play_records", reason: "记录文件被占用" },
       { kind: "world_backups", reason: "拒绝访问。 (os error 5)" },
     ]);
+  });
+
+  it("配置没存上：照成功返回，follow_ups 多一项 config；新目标没记进游戏目录列表，开关只管一次", async () => {
+    vi.useFakeTimers();
+    failNextMockMoveConfig("拒绝访问。 (os error 5)");
+    const target = "D:\\新家\\.minecraft";
+    const first = moveInstance("t-config", "1.21", SOURCE, target);
+    await vi.advanceTimersByTimeAsync(PHASE_MS + 2 * MOCK_STEP_MS);
+    expect(await first).toEqual({ id: "1.21", source: SOURCE, target, target_name: "新家", registered: false, follow_ups: [{ kind: "config", reason: "拒绝访问。 (os error 5)" }] });
+    expect((await listInstances()).map((i) => i.id)).not.toContain("1.21");
+    expect((await listGameDirectories()).map((d) => d.path)).not.toContain(target);
+
+    const second = moveInstance("t-config-2", "1.21.1", SOURCE, target);
+    await vi.advanceTimersByTimeAsync(PHASE_MS + 2 * MOCK_STEP_MS);
+    expect(await second).toMatchObject({ registered: true, follow_ups: [] });
+    expect((await listGameDirectories()).map((d) => d.path)).toContain(target);
   });
 });
