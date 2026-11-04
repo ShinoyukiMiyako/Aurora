@@ -11,6 +11,7 @@ import { artBlocks, artStatus, onArtChanged } from "../ipc/art";
 import { endBreathWindow, startBreathWindow } from "../launch/breath";
 import { LaunchHostProvider, type ConfirmOptions, type LaunchHost } from "../launch/host";
 import { bindArtStatus } from "../mc/binding";
+import { registerCatalogReload, settleArtDownload } from "../state/art-download";
 import type { CreateInstancePreset } from "../state/flows";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { routeInstanceId, sameRoute, type Route } from "../state/route";
@@ -562,6 +563,8 @@ function ShellCore({ children }: { children: ReactNode }) {
       loadCatalog: artBlocks,
       listenChanged: (handler) => onArtChanged(() => handler()),
       onError: report,
+      onCatalog: settleArtDownload,
+      reloadRequests: registerCatalogReload,
     }).then(
       (release) => {
         if (disposed) release();

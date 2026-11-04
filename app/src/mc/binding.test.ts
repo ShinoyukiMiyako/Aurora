@@ -44,6 +44,9 @@ function block(id: string, extra: Partial<CatalogBlockDto> = {}): CatalogBlockDt
 
 const catalogDto = (versionId: string, ...ids: string[]): BlockCatalogDto => ({ version_id: versionId, blocks: ids.map((id) => block(id)) });
 
+/** 目录载入结果的回报与重查入口：不关心它们的用例用这份。 */
+const hooks = () => ({ onCatalog: vi.fn(), reloadRequests: vi.fn(() => () => undefined) });
+
 /** 目录查询恒为 null：只关心材质状态的用例用它。 */
 const noCatalog = () => vi.fn(async (): Promise<BlockCatalogDto | null> => null);
 
@@ -64,7 +67,7 @@ describe("bindArtStatus", () => {
       order.push("catalog");
       return catalogDto("1.21.1", "oak_log");
     });
-    const dispose = await bindArtStatus({ load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
+    const dispose = await bindArtStatus({ ...hooks(),  load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     await flush();
     expect(order).toEqual(["listen", "load", "catalog"]);
     expect(getArtStatus()).toEqual({ source: { versionId: "1.21.1" }, panorama: false });
@@ -82,7 +85,7 @@ describe("bindArtStatus", () => {
       version_id: "1.21.1",
       blocks: [block("furnace", { top: "block/furnace_top", side: "block/furnace_side", front: "block/furnace_front", hue: 0, name_zh: "熔炉" }), block("oak_log", { top: "block/oak_log_top" })],
     }));
-    await bindArtStatus({ load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
+    await bindArtStatus({ ...hooks(),  load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     await flush();
     const catalog = getBlockCatalog();
     expect(catalog?.versionId).toBe("1.21.1");
@@ -95,7 +98,7 @@ describe("bindArtStatus", () => {
   it("没有材质源时不预加载任何图，也不查目录", async () => {
     const events = eventSource();
     const loadCatalog = noCatalog();
-    await bindArtStatus({ load: async () => ({ source: null, panorama: true }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
+    await bindArtStatus({ ...hooks(),  load: async () => ({ source: null, panorama: true }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     await flush();
     expect(getArtStatus()).toEqual({ source: null, panorama: true });
     expect(fetchMock).not.toHaveBeenCalled();
@@ -110,7 +113,7 @@ describe("bindArtStatus", () => {
       .mockResolvedValueOnce({ source: null, panorama: false })
       .mockResolvedValueOnce({ source: { version_id: "1.20.1" }, panorama: true });
     const loadCatalog = vi.fn(async () => catalogDto("1.20.1", "oak_log"));
-    await bindArtStatus({ load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
+    await bindArtStatus({ ...hooks(),  load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     expect(getArtStatus().source).toBeNull();
     expect(loadCatalog).not.toHaveBeenCalled();
     events.fire();
@@ -128,7 +131,7 @@ describe("bindArtStatus", () => {
       .mockResolvedValueOnce({ source: { version_id: "1.21.1" }, panorama: false })
       .mockResolvedValueOnce({ source: null, panorama: false });
     const loadCatalog = vi.fn(async () => catalogDto("1.21.1", "oak_log"));
-    await bindArtStatus({ load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
+    await bindArtStatus({ ...hooks(),  load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     await flush();
     expect(getBlockCatalog()?.byId.has("oak_log")).toBe(true);
     events.fire();
@@ -145,7 +148,7 @@ describe("bindArtStatus", () => {
       .mockResolvedValueOnce({ source: { version_id: "1.20.1" }, panorama: false })
       .mockResolvedValueOnce({ source: { version_id: "1.21.4" }, panorama: false });
     const loadCatalog = vi.fn<() => Promise<BlockCatalogDto | null>>().mockResolvedValueOnce(catalogDto("1.20.1", "oak_log")).mockResolvedValueOnce(catalogDto("1.21.4", "pale_oak_log"));
-    await bindArtStatus({ load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
+    await bindArtStatus({ ...hooks(),  load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     await flush();
     const first = getBlockCatalog();
     events.fire();
@@ -162,7 +165,7 @@ describe("bindArtStatus", () => {
     const failure = new Error("目录不可用");
     const load = vi.fn(async (): Promise<ArtStatusDto> => ({ source: { version_id: "1.21.1" }, panorama: false }));
     const loadCatalog = vi.fn<() => Promise<BlockCatalogDto | null>>().mockRejectedValueOnce(failure).mockResolvedValueOnce(catalogDto("1.21.1", "oak_log"));
-    await bindArtStatus({ load, loadCatalog, listenChanged: events.listenChanged, onError });
+    await bindArtStatus({ ...hooks(),  load, loadCatalog, listenChanged: events.listenChanged, onError });
     await flush();
     expect(onError).toHaveBeenCalledWith(failure);
     expect(getArtStatus().source).toEqual({ versionId: "1.21.1" });
@@ -182,7 +185,7 @@ describe("bindArtStatus", () => {
       .fn<() => Promise<BlockCatalogDto | null>>()
       .mockResolvedValueOnce(catalogDto("1.21.1", "oak_log"))
       .mockResolvedValueOnce({ version_id: "1.21.1", blocks: [block("oak_log", { side: "item/apple" })] });
-    await bindArtStatus({ load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError });
+    await bindArtStatus({ ...hooks(),  load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError });
     await flush();
     const before = getBlockCatalog();
     events.fire();
@@ -194,7 +197,7 @@ describe("bindArtStatus", () => {
 
   it("目录与材质源版本对不上时照实放进去并记 warn", async () => {
     const events = eventSource();
-    await bindArtStatus({
+    await bindArtStatus({ ...hooks(), 
       load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }),
       loadCatalog: async () => catalogDto("1.21.4", "oak_log"),
       listenChanged: events.listenChanged,
@@ -218,7 +221,7 @@ describe("bindArtStatus", () => {
       .fn<() => Promise<BlockCatalogDto | null>>()
       .mockImplementationOnce(() => new Promise((resolve) => (releaseOld = resolve)))
       .mockResolvedValueOnce(catalogDto("1.21.4", "pale_oak_log"));
-    await bindArtStatus({ load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
+    await bindArtStatus({ ...hooks(),  load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     events.fire();
     await flush();
     expect(getBlockCatalog()?.versionId).toBe("1.21.4");
@@ -236,7 +239,7 @@ describe("bindArtStatus", () => {
       .mockResolvedValueOnce({ source: null, panorama: false });
     let release: ((dto: BlockCatalogDto) => void) | undefined;
     const loadCatalog = vi.fn(() => new Promise<BlockCatalogDto | null>((resolve) => (release = resolve)));
-    await bindArtStatus({ load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
+    await bindArtStatus({ ...hooks(),  load, loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     events.fire();
     await flush();
     release?.(catalogDto("1.21.1", "oak_log"));
@@ -249,7 +252,7 @@ describe("bindArtStatus", () => {
     const onError = vi.fn();
     const failure = new Error("后端不可用");
     const load = vi.fn<() => Promise<ArtStatusDto>>().mockResolvedValueOnce({ source: { version_id: "1.21.1" }, panorama: false }).mockRejectedValueOnce(failure);
-    await bindArtStatus({ load, loadCatalog: noCatalog(), listenChanged: events.listenChanged, onError });
+    await bindArtStatus({ ...hooks(),  load, loadCatalog: noCatalog(), listenChanged: events.listenChanged, onError });
     events.fire();
     await flush();
     expect(onError).toHaveBeenCalledWith(failure);
@@ -258,11 +261,11 @@ describe("bindArtStatus", () => {
 
   it("首查失败撤销订阅并抛出；返回值形状不对同样抛出", async () => {
     const events = eventSource();
-    await expect(bindArtStatus({ load: async () => Promise.reject(new Error("拒绝")), loadCatalog: noCatalog(), listenChanged: events.listenChanged, onError: vi.fn() })).rejects.toThrow("拒绝");
+    await expect(bindArtStatus({ ...hooks(),  load: async () => Promise.reject(new Error("拒绝")), loadCatalog: noCatalog(), listenChanged: events.listenChanged, onError: vi.fn() })).rejects.toThrow("拒绝");
     expect(events.unlisten).toHaveBeenCalledTimes(1);
 
     const bad = eventSource();
-    await expect(bindArtStatus({ load: async () => ({ source: "1.21" }) as never, loadCatalog: noCatalog(), listenChanged: bad.listenChanged, onError: vi.fn() })).rejects.toThrow("panorama");
+    await expect(bindArtStatus({ ...hooks(),  load: async () => ({ source: "1.21" }) as never, loadCatalog: noCatalog(), listenChanged: bad.listenChanged, onError: vi.fn() })).rejects.toThrow("panorama");
     expect(bad.unlisten).toHaveBeenCalledTimes(1);
   });
 
@@ -273,7 +276,7 @@ describe("bindArtStatus", () => {
       .fn<() => Promise<ArtStatusDto>>()
       .mockResolvedValueOnce({ source: null, panorama: false })
       .mockImplementationOnce(() => new Promise((resolve) => (release = resolve)));
-    const dispose = await bindArtStatus({ load, loadCatalog: noCatalog(), listenChanged: events.listenChanged, onError: vi.fn() });
+    const dispose = await bindArtStatus({ ...hooks(),  load, loadCatalog: noCatalog(), listenChanged: events.listenChanged, onError: vi.fn() });
     events.fire();
     dispose();
     release?.({ source: { version_id: "1.21.1" }, panorama: true });
@@ -281,11 +284,86 @@ describe("bindArtStatus", () => {
     expect(getArtStatus()).toEqual(NO_ART);
   });
 
+  it("每次查询报告目录载没载入：载入了为 true，材质源为空、目录查询失败、状态查询失败都为 false", async () => {
+    const events = eventSource();
+    const onCatalog = vi.fn();
+    const onError = vi.fn();
+    const load = vi
+      .fn<() => Promise<ArtStatusDto>>()
+      .mockResolvedValueOnce({ source: { version_id: "1.21.1" }, panorama: false })
+      .mockResolvedValueOnce({ source: null, panorama: false })
+      .mockResolvedValueOnce({ source: { version_id: "1.21.1" }, panorama: false })
+      .mockRejectedValueOnce(new Error("后端不可用"));
+    const loadCatalog = vi
+      .fn<() => Promise<BlockCatalogDto | null>>()
+      .mockResolvedValueOnce(catalogDto("1.21.1", "oak_log"))
+      .mockResolvedValueOnce({ version_id: "1.21.1", blocks: [block("Bad Id")] });
+    await bindArtStatus({ ...hooks(), load, loadCatalog, listenChanged: events.listenChanged, onError, onCatalog });
+    await vi.waitFor(() => expect(onCatalog).toHaveBeenCalledTimes(1));
+    expect(onCatalog).toHaveBeenLastCalledWith(true);
+
+    events.fire();
+    await vi.waitFor(() => expect(onCatalog).toHaveBeenCalledTimes(2));
+    expect(onCatalog).toHaveBeenLastCalledWith(false);
+
+    // 目录校验被拒：报 false，错误照常交给 onError
+    events.fire();
+    await vi.waitFor(() => expect(onCatalog).toHaveBeenCalledTimes(3));
+    expect(onCatalog).toHaveBeenLastCalledWith(false);
+    expect(onError).toHaveBeenCalledTimes(1);
+
+    events.fire();
+    await vi.waitFor(() => expect(onCatalog).toHaveBeenCalledTimes(4));
+    expect(onCatalog).toHaveBeenLastCalledWith(false);
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenLastCalledWith(new Error("后端不可用"));
+  });
+
+  it("被更新的查询作废的结果不报", async () => {
+    const events = eventSource();
+    const onCatalog = vi.fn();
+    let releaseFirst: ((dto: BlockCatalogDto) => void) | undefined;
+    const loadCatalog = vi
+      .fn<() => Promise<BlockCatalogDto | null>>()
+      .mockImplementationOnce(() => new Promise((resolve) => (releaseFirst = resolve)))
+      .mockResolvedValueOnce(catalogDto("1.21.1", "oak_log"));
+    await bindArtStatus({ ...hooks(), load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn(), onCatalog });
+    events.fire();
+    await vi.waitFor(() => expect(onCatalog).toHaveBeenCalledTimes(1));
+    releaseFirst?.(catalogDto("1.21.1", "stone"));
+    await flush();
+    expect(onCatalog).toHaveBeenCalledTimes(1);
+    expect(getBlockCatalog()?.blocks.map((b) => b.id)).toEqual(["oak_log"]);
+  });
+
+  it("登记的重查入口触发一次完整查询；解除绑定时注销，首查失败时也注销", async () => {
+    const events = eventSource();
+    const unregister = vi.fn();
+    let reload: (() => void) | undefined;
+    const reloadRequests = vi.fn((r: () => void) => {
+      reload = r;
+      return unregister;
+    });
+    const load = vi.fn(async (): Promise<ArtStatusDto> => ({ source: null, panorama: false }));
+    const dispose = await bindArtStatus({ ...hooks(), load, loadCatalog: noCatalog(), listenChanged: events.listenChanged, onError: vi.fn(), reloadRequests });
+    expect(load).toHaveBeenCalledTimes(1);
+    reload?.();
+    await vi.waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    dispose();
+    expect(unregister).toHaveBeenCalledTimes(1);
+
+    const failedUnregister = vi.fn();
+    await expect(
+      bindArtStatus({ ...hooks(), load: async () => Promise.reject(new Error("拒绝")), loadCatalog: noCatalog(), listenChanged: eventSource().listenChanged, onError: vi.fn(), reloadRequests: () => failedUnregister }),
+    ).rejects.toThrow("拒绝");
+    expect(failedUnregister).toHaveBeenCalledTimes(1);
+  });
+
   it("解除绑定后迟到的目录不再写入", async () => {
     const events = eventSource();
     let release: ((dto: BlockCatalogDto) => void) | undefined;
     const loadCatalog = vi.fn(() => new Promise<BlockCatalogDto | null>((resolve) => (release = resolve)));
-    const dispose = await bindArtStatus({ load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
+    const dispose = await bindArtStatus({ ...hooks(),  load: async () => ({ source: { version_id: "1.21.1" }, panorama: false }), loadCatalog, listenChanged: events.listenChanged, onError: vi.fn() });
     dispose();
     release?.(catalogDto("1.21.1", "oak_log"));
     await flush();

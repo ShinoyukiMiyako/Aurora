@@ -5,7 +5,7 @@ import type { ArtDownloadProgressDto, ArtStatusDto } from "../../../ipc/art";
 import { IpcError } from "../../../ipc/errors";
 import { catalogFromDto, setBlockCatalog } from "../../../mc/catalog";
 import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
-import { getArtDownloadState } from "../../../state/art-download";
+import { getArtDownloadState, settleArtDownload } from "../../../state/art-download";
 import { render, stubMatchMedia, type Rendered } from "../../../test/dom";
 import { ArtDownload } from "./ArtDownload";
 
@@ -65,7 +65,9 @@ afterEach(() => {
   view = undefined;
   setBlockCatalog(null);
   vi.restoreAllMocks();
-  expect(getArtDownloadState()).toEqual({ running: false });
+  // 每个用例结束时不能还在下；收尾时替材质绑定报告目录载入了，把下完后的等待与失败都清回 idle
+  settleArtDownload(true);
+  expect(getArtDownloadState()).toEqual({ phase: "idle" });
 });
 
 function mount(compact = false) {
@@ -121,7 +123,7 @@ describe("下载原版材质部件", () => {
     mount();
     expect(text()).toContain("本机还没有原版材质");
     expect(text()).toContain("Mojang 官方源或镜像");
-    expect(text()).toContain("整包约 20 到 40 MB，下完只留方块相关的几 MB");
+    expect(text()).toContain("整包约 20 到 40 MB，下完只留方块相关的部分，不到 1 MB");
 
     await startDownload();
     expect(art.log).toEqual(["listen", "invoke"]);
@@ -174,7 +176,7 @@ describe("下载原版材质部件", () => {
     expect(text()).toContain("正在载入材质…");
   });
 
-  it("下载中卸载再挂上，进度还在", async () => {
+  it("下载中卸载再挂上，进度还在；下完后新挂上的部件同样显示正在载入，不再露出下载按钮", async () => {
     mount();
     await startDownload();
     emit({ stage: "client", downloaded: 2 * 1024 * 1024, total: 8 * 1024 * 1024 });
@@ -184,12 +186,50 @@ describe("下载原版材质部件", () => {
     expect(text()).toContain("已下载 2.0 MB，共 8.0 MB");
     await act(async () => art.pending[0].resolve(READY));
     await flush();
+    expect(text()).toContain("正在载入材质…");
+    expect(() => button("下载原版材质")).toThrow("找不到按钮 下载原版材质");
+
+    view?.unmount();
+    mount();
+    expect(text()).toContain("正在载入材质…");
+    expect(view?.container.querySelector("button")).toBeNull();
+  });
+
+  it("下完后目录没能载入：离开正在载入，按钮换成重试并写明下好了；错误由材质绑定报出，部件不再另报；重试只重查、不重下", async () => {
+    mount();
+    await startDownload();
+    await act(async () => art.pending[0].resolve(READY));
+    await flush();
+    expect(text()).toContain("正在载入材质…");
+
+    act(() => settleArtDownload(false));
+    expect(text()).not.toContain("正在载入材质…");
+    expect(text()).toContain("下好了，但没能载入");
+    expect(text()).not.toContain("上次没下完");
+    expect(art.reported).toEqual([]);
+
+    await act(async () => button("重试").click());
+    await flush();
+    expect(text()).not.toContain("下好了，但没能载入");
+    expect(text()).toContain("正在载入材质…");
+    expect(art.pending).toHaveLength(1);
+  });
+
+  it("紧凑档：等目录时只有正在载入，目录没能载入时说明与重试一起回来", async () => {
+    mount(true);
+    await startDownload();
+    await act(async () => art.pending[0].resolve(READY));
+    await flush();
+    expect(text()).toBe("正在载入材质…");
+    act(() => settleArtDownload(false));
+    expect(text()).toContain("从 Mojang 官方源或镜像下载原版材质");
+    expect(button("重试")).toBeDefined();
   });
 
   it("紧凑档：没有标题，一句话说明加按钮", () => {
     mount(true);
     expect(text()).not.toContain("本机还没有原版材质");
-    expect(text()).toContain("从 Mojang 官方源或镜像下载原版材质，整包约 20 到 40 MB，下完只留几 MB。");
+    expect(text()).toContain("从 Mojang 官方源或镜像下载原版材质，整包约 20 到 40 MB，下完只留不到 1 MB。");
     expect(button("下载原版材质")).toBeDefined();
   });
 });

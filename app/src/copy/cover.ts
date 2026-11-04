@@ -43,11 +43,13 @@ export const BLOCK_PICKER_COPY = {
 
 export const ART_DOWNLOAD_COPY = {
   title: "本机还没有原版材质",
-  body: "下载后可以从全部完整方块里挑。按「设置 → 下载」里的文件下载源从 Mojang 官方源或镜像下载，整包约 20 到 40 MB，下完只留方块相关的几 MB。",
-  compactBody: "从 Mojang 官方源或镜像下载原版材质，整包约 20 到 40 MB，下完只留几 MB。",
+  body: "下载后可以从全部完整方块里挑。按「设置 → 下载」里的文件下载源从 Mojang 官方源或镜像下载，整包约 20 到 40 MB，下完只留方块相关的部分，不到 1 MB。",
+  compactBody: "从 Mojang 官方源或镜像下载原版材质，整包约 20 到 40 MB，下完只留不到 1 MB。",
   download: "下载原版材质",
   retry: "重试",
   failedNote: "上次没下完",
+  /** 下完了，方块目录没能载入；错误原文由材质状态的统一错误处理报出。 */
+  catalogFailedNote: "下好了，但没能载入",
   /** 失败通知的标题，正文是错误原文。 */
   failed: "没能下载原版材质",
   /** 进度事件到来之前。 */
