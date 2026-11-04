@@ -311,6 +311,7 @@ pub(crate) fn move_blocker_json(blocker: &MoveBlocker) -> Value {
             "available": available,
         }),
         MoveBlocker::Pending => json!({ "kind": "pending" }),
+        MoveBlocker::SourceChanged => json!({ "kind": "source_changed" }),
     }
 }
 

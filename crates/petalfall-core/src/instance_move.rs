@@ -60,6 +60,8 @@ pub enum MoveBlocker {
     InsufficientSpace { needed: u64, available: u64 },
     /// 这个实例有一次中断的移动还没收尾（当时有目录访问不到），收尾前不能再移。
     Pending,
+    /// 请求发起时实例所在的游戏目录不是现在的当前目录：同名实例在别的游戏目录里是另一个实例，不能按旧请求移它。
+    SourceChanged,
 }
 
 impl fmt::Display for MoveBlocker {
@@ -82,6 +84,7 @@ impl fmt::Display for MoveBlocker {
                 write!(f, "目标盘空间不够：要 {needed} 字节，剩 {available} 字节")
             }
             MoveBlocker::Pending => f.write_str("上一次移动还没收尾"),
+            MoveBlocker::SourceChanged => f.write_str("当前游戏目录已经换了，不是发起移动时的那个"),
         }
     }
 }
@@ -125,6 +128,8 @@ pub struct MovePreview {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MoveRequest {
     pub id: String,
+    /// 发起时实例所在的游戏目录。执行时当前目录已经不是它就报 [`MoveBlocker::SourceChanged`]。
+    pub source_game_dir: PathBuf,
     pub target_game_dir: PathBuf,
 }
 
@@ -148,6 +153,11 @@ pub struct MoveOutcome {
     pub target_game_dir: PathBuf,
     /// 为空即全部跟过去了。
     pub follow_ups: Vec<MoveFollowUp>,
+    /// 这次移动的日志编号。调用方把配置改好、落了盘，再经 `confirm_instance_move` 确认；确认之前日志留着，
+    /// 进程在中间退出时启动收尾会再交出一次 [`MoveRecovery::Completed`]。
+    pub token: String,
+    /// 能不能去掉原游戏目录在配置里对它的引用：原目录里此后又有了同名的新实例时为假，那些引用是新实例的。
+    pub forget_source_refs: bool,
 }
 
 /// 启动时收尾一份中断的移动的结论。
@@ -914,10 +924,12 @@ impl Petalfall {
         prune_moving_dirs(&journal).await;
         tracing::info!(id = %journal.id, follow_ups = follow_ups.len(), "实例移动收尾完成");
         MoveOutcome {
+            token: journal.token.clone(),
             id: journal.id,
             source_game_dir: journal.source_game_dir,
             target_game_dir: journal.target_game_dir,
             follow_ups,
+            forget_source_refs: true,
         }
     }
 }
@@ -1616,6 +1628,7 @@ mod tests {
         fn request(&self) -> MoveRequest {
             MoveRequest {
                 id: ID.to_owned(),
+                source_game_dir: self.source.clone(),
                 target_game_dir: self.target.clone(),
             }
         }
@@ -1907,6 +1920,8 @@ mod tests {
             source_game_dir: dirs.source.clone(),
             target_game_dir: dirs.target.clone(),
             follow_ups: Vec::new(),
+            token: String::new(),
+            forget_source_refs: true,
         }
     }
 
@@ -2354,6 +2369,7 @@ mod tests {
         assert_eq!(preview.blockers, expected);
         let request = MoveRequest {
             id: ID.to_owned(),
+            source_game_dir: petalfall.game_dir().to_path_buf(),
             target_game_dir: target.to_path_buf(),
         };
         let err = petalfall

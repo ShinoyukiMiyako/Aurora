@@ -2056,6 +2056,7 @@ pub(crate) async fn move_instance_with(
         .move_instance_files(
             &MoveRequest {
                 id: id.to_owned(),
+                source_game_dir: petalfall.game_dir().to_path_buf(),
                 target_game_dir: target,
             },
             Some(events.clone()),
@@ -7605,6 +7606,8 @@ mod tests {
             source_game_dir: env.game_dir(),
             target_game_dir: target.clone(),
             follow_ups: vec![MoveFollowUp::PlayRecords("游玩记录读不出来".into())],
+            token: "0".into(),
+            forget_source_refs: true,
         });
         settle_move_recovery(&env.facade, completed.clone()).await;
         let saved = env.saved_config().await;
