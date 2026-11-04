@@ -226,7 +226,8 @@ impl Petalfall {
         Ok(VersionSettingsStore::for_version_dir(&dir).load().await?)
     }
 
-    /// 整份写入实例设置；任一字段不合法报 [`InstanceError::InvalidSettings`]，不改动文件。
+    /// 整份写入实例设置；任一字段不合法报 [`InstanceError::InvalidSettings`]，不改动文件。保存后删掉
+    /// 卡面图片目录里不再被引用的图片（玩家清除图片、换回方块时旧文件随之删掉）。
     pub async fn set_instance_settings(&self, id: &str, settings: &VersionSettings) -> Result<()> {
         settings
             .validate()
@@ -235,10 +236,7 @@ impl Petalfall {
                 reason: violation.reason,
             })?;
         let dir = self.existing_instance_dir(id).await?;
-        VersionSettingsStore::for_version_dir(&dir)
-            .save(settings)
-            .await?;
-        Ok(())
+        crate::cover_image::save_settings_and_prune(&dir, settings).await
     }
 
     /// 版本 JSON 可用的实例；目录不在报未安装，JSON 缺失或损坏报 [`InstanceError::Broken`]。

@@ -80,3 +80,5 @@ tempfile = "3"
 wiremock = "0.6"
 # 整合包导入的命令层测试要现场打一个 .mrpack；特性与 petalfall-modpack 一致，不引入 C 依赖的压缩后端。
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+# 卡面图片导入的命令层测试要现场编码一张 PNG；与 petalfall-core 同一版本，不多拉格式。
+image = { version = "0.25", default-features = false, features = ["png"] }

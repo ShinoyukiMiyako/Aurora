@@ -14,8 +14,9 @@
 use std::error::Error as StdError;
 
 use petalfall_core::{
-    AuthError, BaseError, CoreError, CredentialRealm, DownloadError, InstallError, InstanceError,
-    JavaError, LaunchError, ModPlatformError, ModpackError, VersionError, TEMPLATE_FILES,
+    AuthError, BaseError, CoreError, CoverImageError, CredentialRealm, DownloadError, InstallError,
+    InstanceError, JavaError, LaunchError, ModPlatformError, ModpackError, VersionError,
+    TEMPLATE_FILES,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -352,6 +353,9 @@ fn core_code(err: &CoreError) -> &'static str {
         // 降级被拒说明这次传入的 offlineFallback 不成立，按参数错误报；拒绝原因放在 detail 里供前端分支。
         CoreError::OfflineFallbackRefused { .. } => code::INVALID_ARGUMENT,
         CoreError::ModpackExportUnsupported { .. } => code::MODPACK_EXPORT_UNSUPPORTED,
+        // 重新编码失败不是玩家选错了图，是启动器自己的问题；其余都是传进来的那张图用不了。
+        CoreError::CoverImage(CoverImageError::Encode(_)) => code::INTERNAL,
+        CoreError::CoverImage(_) => code::INVALID_ARGUMENT,
     }
 }
 
@@ -741,6 +745,12 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::TemplateSourceEmpty { id } => {
             detail.insert("id".to_owned(), json!(id));
             detail.insert("files".to_owned(), json!(TEMPLATE_FILES));
+        }
+        CoreError::CoverImage(image) => {
+            if !matches!(image, CoverImageError::Encode(_)) {
+                detail.insert("field".to_owned(), json!("path"));
+            }
+            detail.insert("reason".to_owned(), json!(image.code()));
         }
         _ => {}
     }
@@ -1764,5 +1774,64 @@ mod tests {
         let detail = err.detail.unwrap();
         assert_eq!(detail["path"], json!("C:/data/tasks.json"));
         assert_eq!(detail["causes"], json!(["拒绝访问"]));
+    }
+
+    /// 卡面图片用不了是传进来的路径有问题：invalid_argument、detail.field 为 path、detail.reason 为原因码。
+    /// 重新编码失败是启动器自己的问题，报 internal，不指向参数。
+    #[test]
+    fn cover_image_errors_point_at_the_path_except_encoding() {
+        let path = PathBuf::from("D:/图片/photo.png");
+        let image_error = || image::ImageError::IoError(std::io::Error::other("磁盘出错"));
+        for (err, reason, causes) in [
+            (
+                CoverImageError::Unreadable {
+                    path: path.clone(),
+                    source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "拒绝访问"),
+                },
+                "unreadable",
+                Some(json!(["拒绝访问"])),
+            ),
+            (
+                CoverImageError::TooLarge {
+                    path: path.clone(),
+                    size: 20 * 1024 * 1024 + 1,
+                    limit: 20 * 1024 * 1024,
+                },
+                "too_large",
+                None,
+            ),
+            (
+                CoverImageError::UnsupportedFormat { path: path.clone() },
+                "unsupported_format",
+                None,
+            ),
+            (
+                CoverImageError::Decode {
+                    path: path.clone(),
+                    source: image_error(),
+                },
+                "decode_failed",
+                Some(json!(["磁盘出错"])),
+            ),
+        ] {
+            let message = err.to_string();
+            let mapped: CommandError = CoreError::CoverImage(err).into();
+            assert_eq!(mapped.code, code::INVALID_ARGUMENT, "{reason}");
+            assert_eq!(mapped.message, message);
+            let mut expected = json!({ "field": "path", "reason": reason });
+            if let Some(causes) = causes {
+                expected["causes"] = causes;
+            }
+            assert_eq!(mapped.detail, Some(expected));
+        }
+
+        let mapped: CommandError =
+            CoreError::CoverImage(CoverImageError::Encode(image_error())).into();
+        assert_eq!(mapped.code, code::INTERNAL);
+        assert_eq!(mapped.message, "卡面图片重新编码失败");
+        assert_eq!(
+            mapped.detail,
+            Some(json!({ "reason": "encode_failed", "causes": ["磁盘出错"] }))
+        );
     }
 }
