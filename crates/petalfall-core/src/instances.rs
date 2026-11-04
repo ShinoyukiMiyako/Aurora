@@ -877,8 +877,11 @@ impl Petalfall {
     }
 }
 
-/// 在 `game_dir` 的依赖版本记录里收回 `ids` 中目录没落下的，排队同 [`update_base_record`]。实例移动在补依赖前
+/// 在 `game_dir` 的依赖版本记录里收回 `ids` 中没落下的，排队同 [`update_base_record`]。实例移动在补依赖前
 /// 先记下要带的基底版本，没补成时由它收回。
+///
+/// 落下以 `versions/<id>/<id>.json` 是文件为准，不看目录：安装器与移动都最后才放版本 JSON，目录在、JSON 不在的
+/// 是半截（复制到一半只剩 jar），留着记录会把这个修不了的目录一直藏起来，日后再带同名基底过来也只会撞上冲突。
 pub(crate) async fn forget_unlanded_base_versions_in(
     game_dir: &Path,
     ids: &[String],
@@ -886,12 +889,24 @@ pub(crate) async fn forget_unlanded_base_versions_in(
     let layout = petalfall_install::GameLayout::new(game_dir);
     let mut unlanded = Vec::new();
     for id in ids {
-        if !try_exists(&layout.version_dir(id)).await? {
-            unlanded.push(id);
+        let json = layout.version_json(id);
+        let landed = match tokio::fs::metadata(&json).await {
+            Ok(meta) => meta.is_file(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(source) => return Err(petalfall_base::Error::Io { path: json, source }.into()),
+        };
+        if !landed {
+            unlanded.push(id.clone());
         }
     }
+    forget_base_versions_in(game_dir, &unlanded).await
+}
+
+/// 从 `game_dir` 的依赖版本记录里去掉 `ids`，不看盘上有什么，排队同 [`update_base_record`]。实例移进目标之后对它
+/// 自己的 id 调用：目标里同名的记录是那边早已不在的依赖版本留下的，留着会把移过去的实例当成依赖版本藏起来。
+pub(crate) async fn forget_base_versions_in(game_dir: &Path, ids: &[String]) -> Result<()> {
     update_base_record(game_dir, |versions| {
-        versions.retain(|id| !unlanded.contains(&id));
+        versions.retain(|id| !ids.contains(id));
     })
     .await
 }
@@ -1957,6 +1972,71 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(read_base_record(&fresh).await.unwrap().versions, ["1.21.1"]);
+    }
+
+    /// 基底版本以版本 JSON 为落下的标志：复制到一半只留下 jar 的目录、空目录、JSON 的位置是个目录的、目录都没有的
+    /// 一律收回；JSON 在的留着；不在这次 ids 里的记录不碰。收回之后那些半截目录照常列成损坏，玩家看得见、删得掉。
+    #[tokio::test]
+    async fn unlanded_bases_are_judged_by_their_version_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        let half = game.join("versions").join("1.20.1");
+        std::fs::create_dir_all(&half).unwrap();
+        std::fs::write(half.join("1.20.1.jar"), b"client").unwrap();
+        std::fs::create_dir_all(game.join("versions").join("空目录")).unwrap();
+        std::fs::create_dir_all(game.join("versions").join("怪目录").join("怪目录.json")).unwrap();
+        write_base_record(
+            &game,
+            &["别人的", "1.21.1", "1.20.1", "空目录", "怪目录", "没建的"],
+        );
+        assert!(listed_ids(&petalfall).await.is_empty());
+
+        let ids: Vec<String> = ["1.21.1", "1.20.1", "空目录", "怪目录", "没建的"]
+            .map(str::to_owned)
+            .to_vec();
+        petalfall.forget_unlanded_base_versions(&ids).await.unwrap();
+
+        assert_eq!(
+            read_base_record(&game).await.unwrap().versions,
+            ["别人的", "1.21.1"]
+        );
+        let mut listed = listed_ids(&petalfall).await;
+        listed.sort();
+        assert_eq!(listed, ["1.20.1", "怪目录", "空目录"]);
+    }
+
+    /// 无条件去掉给定 id：目录与版本 JSON 都在也去掉（移过去的实例不能被目标里陈旧的同名记录藏起来），不在记录里的
+    /// id 不算错，别的 id 与别的游戏目录的记录不碰；那边还没有记录文件时不凭空建出来。
+    #[tokio::test]
+    async fn forgetting_base_versions_drops_exactly_the_given_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let target = petalfall.game_dir().to_path_buf();
+        let elsewhere = tmp.path().join("别处").join(".minecraft");
+        write_version(&target, "1.21.1", &vanilla_json("1.21.1"));
+        write_version(&target, "移过来的", &vanilla_json("移过来的"));
+        write_base_record(&target, &["1.21.1", "移过来的", "neoforge-21.1.265"]);
+        write_base_record(&elsewhere, &["移过来的"]);
+        assert!(listed_ids(&petalfall).await.is_empty());
+
+        let ids = ["移过来的".to_owned(), "不在记录里的".to_owned()];
+        forget_base_versions_in(&target, &ids).await.unwrap();
+
+        assert_eq!(
+            read_base_record(&target).await.unwrap().versions,
+            ["1.21.1", "neoforge-21.1.265"]
+        );
+        assert_eq!(
+            read_base_record(&elsewhere).await.unwrap().versions,
+            ["移过来的"]
+        );
+        assert_eq!(listed_ids(&petalfall).await, ["移过来的"]);
+
+        let fresh = tmp.path().join("新盘").join(".minecraft");
+        forget_base_versions_in(&fresh, &ids).await.unwrap();
+        assert!(!base_record_path(&fresh).exists());
     }
 
     /// 记录读不懂时认不出哪些是依赖版本：宁可多列一个，也不把看不清的目录藏起来；继承规则不看记录，列表照常返回。

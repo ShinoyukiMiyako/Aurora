@@ -834,6 +834,8 @@ pub enum MoveFollowUpDto {
     WorldBackups { reason: String },
     /// 原游戏目录里的旧文件没删干净，下次启动再清。
     Cleanup { path: String, reason: String },
+    /// 实例已经移好，配置没存上：原目录的侧栏固定与当前选中还在，目标也还没记进游戏目录列表，下次启动补上。
+    Config { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -843,7 +845,7 @@ pub struct MoveOutcomeDto {
     pub target: String,
     /// 目标在游戏目录列表里的显示名。
     pub target_name: String,
-    /// 目标是这次新记进游戏目录列表的。
+    /// 目标是这次新记进游戏目录列表的；配置没存上时为 false（见 config 跟进项）。
     pub registered: bool,
     /// 为空即全部跟过去了。
     pub follow_ups: Vec<MoveFollowUpDto>,
@@ -1998,18 +2000,24 @@ pub(crate) async fn preview_instance_move_with(
     ))
 }
 
-/// 把实例从当前游戏目录移到 `target`：实例目录、存档备份与游玩记录跟过去，目标缺的库、资源与基底版本从原目录
+/// 把实例从 `source` 移到 `target`：实例目录、存档备份与游玩记录跟过去，目标缺的库、资源与基底版本从原目录
 /// 补过去；原目录里的侧栏固定与当前选中去掉，目标还没记录时记进游戏目录列表。长任务：进度经 core-event 推送并带
 /// `task_id`，提交开始之前可经 `cancel_task(taskId)` 取消，之后不再理会取消、照常成功返回。
 ///
+/// `source` 是发起时实例所在的游戏目录（入队那一刻的当前目录）。同名实例在别的游戏目录里是另一个实例：执行时
+/// 当前目录已经不是它（切换目录后重试）就报 `instance_move_blocked`，detail.blocker 为 `source_changed`，什么都不动。
+///
 /// 实例在忙报 `instance_busy`；执行前重新预检有拦着的问题报 `instance_move_blocked`（detail.blocker 同预检
 /// 的一项）；跨盘复制读回比对不上报 `instance_move_verify_failed`，已回滚、原件没动。文件已经移好、只是配置没能
-/// 落盘时报配置的错误，message 说明实例已在目标里，detail.moved_to 为目标目录。
+/// 落盘时照常成功返回，follow_ups 带一项 config：这时原目录的固定与选中还在、目标也没记进列表（registered 为
+/// false），下次启动收尾时补上。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn move_instance(
     app: AppHandle,
     task_id: String,
     id: String,
+    source: String,
     target: String,
     facade: State<'_, Facade>,
     tasks: State<'_, TaskRegistry>,
@@ -2021,8 +2029,11 @@ pub async fn move_instance(
         &tasks,
         &locks,
         &task_id,
-        &id,
-        &target,
+        MoveArgs {
+            id: &id,
+            source: &source,
+            target: &target,
+        },
         events.sink(),
     )
     .await;
@@ -2031,16 +2042,24 @@ pub async fn move_instance(
     outcome
 }
 
+/// `move_instance` 的参数，两个目录还没校验。
+pub(crate) struct MoveArgs<'a> {
+    pub id: &'a str,
+    pub source: &'a str,
+    pub target: &'a str,
+}
+
 pub(crate) async fn move_instance_with(
     facade: &Facade,
     tasks: &TaskRegistry,
     locks: &InstanceLocks,
     task_id: &str,
-    id: &str,
-    target: &str,
+    args: MoveArgs<'_>,
     events: &EventSink,
 ) -> Result<MoveOutcomeDto, CommandError> {
-    let target = validate_game_dir(target)?;
+    let source = validate_game_dir(args.source)?;
+    let target = validate_game_dir(args.target)?;
+    let id = args.id;
     let snapshot = facade.snapshot().await;
     // 基底的版本 JSON 与客户端 jar 要补到目标里：移动期间基底不能被删、改名或补全。
     let _guard = locks
@@ -2056,58 +2075,54 @@ pub(crate) async fn move_instance_with(
         .move_instance_files(
             &MoveRequest {
                 id: id.to_owned(),
-                source_game_dir: petalfall.game_dir().to_path_buf(),
+                source_game_dir: source,
                 target_game_dir: target,
             },
             Some(events.clone()),
         )
         .await
         .map_err(instance_error)?;
-    let mut applied = None;
-    let saved = facade
-        .update_if_changed(|petalfall| {
-            let refs = apply_move_refs(
-                petalfall,
-                &outcome.id,
-                &outcome.source_game_dir,
-                &outcome.target_game_dir,
-            );
-            let changed = refs.changed;
-            applied = Some(refs);
-            changed
-        })
-        .await;
-    let applied = applied.expect("update_if_changed 总会调用改动闭包");
-    if let Err(err) = saved {
-        return Err(move_refs_not_saved(err, &outcome, &applied.target_name));
-    }
+    let (refs, saved) = settle_move_refs(facade, &outcome).await;
+    let mut follow_ups: Vec<MoveFollowUpDto> = outcome
+        .follow_ups
+        .into_iter()
+        .map(move_follow_up_dto)
+        .collect();
+    // 文件已经在目标里、原件已删，报错只会让玩家以为没移成；配置等启动收尾补，这里如实告诉他差了哪一步。
+    let registered = match saved {
+        Ok(()) => refs.registered,
+        Err(err) => {
+            let reason = petalfall_base::error_with_causes(&err);
+            tracing::warn!(id = outcome.id, %reason, "实例已移好，配置没存上，下次启动补");
+            follow_ups.push(MoveFollowUpDto::Config { reason });
+            false
+        }
+    };
     Ok(MoveOutcomeDto {
         id: outcome.id,
         source: outcome.source_game_dir.display().to_string(),
         target: outcome.target_game_dir.display().to_string(),
-        target_name: applied.target_name,
-        registered: applied.registered,
-        follow_ups: outcome
-            .follow_ups
-            .into_iter()
-            .map(move_follow_up_dto)
-            .collect(),
+        target_name: refs.target_name,
+        registered,
+        follow_ups,
     })
 }
 
 /// 一次提交了的移动改在配置上的结果。
 struct MovedRefs {
     changed: bool,
-    /// 目标是这次新记进游戏目录列表的。
+    /// 目标不在游戏目录列表里、这次要记进去。
     registered: bool,
     target_name: String,
 }
 
-/// 移动提交后改配置：去掉 `source` 里对实例的引用；目标还不在游戏目录列表里就以推出的名字记进去，否则移过去的
-/// 实例在哪个列表里都找不到。在门面的可变副本上现场判断，不用开工时的快照：移动期间玩家可能切换了当前目录，
-/// 甚至切到了目标。
-fn apply_move_refs(petalfall: &mut Petalfall, id: &str, source: &Path, target: &Path) -> MovedRefs {
-    let forgot = petalfall.forget_moved_instance(id, source);
+/// 移动提交后改配置：`forget_source_refs` 为真才去掉原目录里对实例的引用，为假时原目录里此后又有了同名的新实例，
+/// 那些固定与选中是新实例的；目标还不在游戏目录列表里就以推出的名字记进去，否则移过去的实例在哪个列表里都找不到。
+/// 在门面的可变副本上现场判断，不用开工时的快照：移动期间玩家可能切换了当前目录，甚至切到了目标。
+fn apply_move_refs(petalfall: &mut Petalfall, outcome: &MoveOutcome) -> MovedRefs {
+    let forgot = outcome.forget_source_refs
+        && petalfall.forget_moved_instance(&outcome.id, &outcome.source_game_dir);
+    let target = &outcome.target_game_dir;
     let registered = !petalfall.is_known_game_directory(target);
     let target_name = petalfall.game_directory_name(target);
     if registered {
@@ -2120,20 +2135,43 @@ fn apply_move_refs(petalfall: &mut Petalfall, id: &str, source: &Path, target: &
     }
 }
 
-/// 文件与记录都已移好、只差配置没落盘：码照配置的错误，message 与 detail 说清实例已经在目标里，前端照成功
-/// 刷新列表再提示。门面没换进这次改动，原目录的侧栏固定与当前选中还指着已经不在的它，目标也还没记进列表。
-fn move_refs_not_saved(err: CoreError, outcome: &MoveOutcome, target_name: &str) -> CommandError {
-    if !outcome.follow_ups.is_empty() {
-        tracing::warn!(id = outcome.id, follow_ups = ?outcome.follow_ups, "移动后有没跟过去的项");
+/// 把提交了的移动落到配置上，存好了（或本来就不用改）才确认。存不上时不确认：移动日志留着，下次启动收尾再交出
+/// Completed，照这里再做一遍。返回改动与存盘的结果；存盘失败时门面没换进改动，`registered` 不作数。
+async fn settle_move_refs(
+    facade: &Facade,
+    outcome: &MoveOutcome,
+) -> (MovedRefs, Result<(), CoreError>) {
+    let mut applied = None;
+    let saved = facade
+        .update_if_changed(|petalfall| {
+            let refs = apply_move_refs(petalfall, outcome);
+            let changed = refs.changed;
+            applied = Some(refs);
+            changed
+        })
+        .await;
+    let applied = applied.expect("update_if_changed 总会调用改动闭包");
+    if saved.is_ok() {
+        confirm_move(facade, outcome).await;
     }
-    let target = outcome.target_game_dir.display().to_string();
-    let mut mapped = CommandError::from(err);
-    mapped.message = format!(
-        "实例已移到「{target_name}」（{target}），但配置没能保存：{}",
-        mapped.message
-    );
-    merge_detail(&mut mapped, json!({ "id": outcome.id, "moved_to": target }));
-    mapped
+    (applied, saved.map(drop))
+}
+
+/// 确认失败只记日志：配置已经存好，日志留着的话下次启动收尾再交出一次 Completed，按同样的口径再改一遍不会多改。
+async fn confirm_move(facade: &Facade, outcome: &MoveOutcome) {
+    let confirmed = facade
+        .snapshot()
+        .await
+        .confirm_instance_move(&outcome.token)
+        .await;
+    if let Err(err) = confirmed {
+        tracing::warn!(
+            id = outcome.id,
+            token = outcome.token,
+            error = %petalfall_base::error_with_causes(&err),
+            "移动的配置已存好，日志没删掉，下次启动再确认"
+        );
+    }
 }
 
 /// 启动时在后台收尾上次中断的移动。
@@ -2160,7 +2198,7 @@ pub(crate) async fn recover_moves(facade: &Facade) {
     }
 }
 
-/// 只有 Completed 改配置，照正常移动的口径：命令当时在改配置之前就中断了。
+/// 只有 Completed 改配置并确认，照正常移动的口径：命令当时没能把配置存好并确认（中途退出了，或配置存不上）。
 async fn settle_move_recovery(facade: &Facade, recovery: MoveRecovery) {
     match recovery {
         MoveRecovery::RolledBack {
@@ -2174,25 +2212,14 @@ async fn settle_move_recovery(facade: &Facade, recovery: MoveRecovery) {
             "中断的实例移动已回滚，实例留在原游戏目录"
         ),
         MoveRecovery::Completed(outcome) => {
-            let mut registered = false;
-            let saved = facade
-                .update_if_changed(|petalfall| {
-                    let refs = apply_move_refs(
-                        petalfall,
-                        &outcome.id,
-                        &outcome.source_game_dir,
-                        &outcome.target_game_dir,
-                    );
-                    registered = refs.registered;
-                    refs.changed
-                })
-                .await;
+            let (refs, saved) = settle_move_refs(facade, &outcome).await;
             match saved {
-                Ok(_) => tracing::info!(
+                Ok(()) => tracing::info!(
                     id = outcome.id,
                     source = %outcome.source_game_dir.display(),
                     target = %outcome.target_game_dir.display(),
-                    registered,
+                    forget_source_refs = outcome.forget_source_refs,
+                    registered = refs.registered,
                     follow_ups = ?outcome.follow_ups,
                     "中断的实例移动已补完"
                 ),
@@ -2200,12 +2227,12 @@ async fn settle_move_recovery(facade: &Facade, recovery: MoveRecovery) {
                     id = outcome.id,
                     source = %outcome.source_game_dir.display(),
                     target = %outcome.target_game_dir.display(),
-                    error = %err,
-                    "中断的实例移动已补完，但配置没能保存"
+                    error = %petalfall_base::error_with_causes(&err),
+                    "中断的实例移动已补完，但配置没能保存，下次启动再补"
                 ),
             }
         }
-        // 引用在交出 Completed 或执行结果的那一次已经改过；再改的话，原目录里此后新建的同名实例会被摘掉固定与选中。
+        // 配置在确认的那一次已经存好；再改的话，原目录里此后新建的同名实例会被摘掉固定与选中。
         MoveRecovery::Settled {
             id,
             source_game_dir,
@@ -7157,6 +7184,17 @@ mod tests {
         path.display().to_string()
     }
 
+    /// 数据目录下还留着的移动日志的文件名；目录不在为空。
+    fn move_journals(env: &Env) -> Vec<String> {
+        match std::fs::read_dir(env.dir.path().join("moves")) {
+            Ok(entries) => entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(err) => panic!("读不了移动日志目录：{err}"),
+        }
+    }
+
     /// 预检的每一种拦截项按 kind 出 JSON，带上各自的参数，顺序照门面给的；其余字段原样搬过来。
     #[test]
     fn move_preview_dto_carries_every_blocker_kind() {
@@ -7269,6 +7307,13 @@ mod tests {
                 },
             ])
         );
+        assert_eq!(
+            serde_json::to_value(MoveFollowUpDto::Config {
+                reason: "配置文件被占用".into(),
+            })
+            .unwrap(),
+            json!({ "kind": "config", "reason": "配置文件被占用" })
+        );
     }
 
     /// 真实门面上的预检：目标还不存在时按推出的名字报、没登记；目标就是当前目录时报 same_directory、已登记；
@@ -7328,8 +7373,11 @@ mod tests {
             &tasks,
             &locks,
             "mv",
-            "生存",
-            &path_text(&target),
+            MoveArgs {
+                id: "生存",
+                source: &path_text(&env.game_dir()),
+                target: &path_text(&target),
+            },
             &events,
         )
         .await
@@ -7344,11 +7392,41 @@ mod tests {
         assert_eq!(locks.activity("生存"), Some(InstanceActivity::Running));
         drop(game);
 
-        let err = move_instance_with(&env.facade, &tasks, &locks, "mv", "生存", "", &events)
-            .await
-            .unwrap_err();
+        let err = move_instance_with(
+            &env.facade,
+            &tasks,
+            &locks,
+            "mv",
+            MoveArgs {
+                id: "生存",
+                source: &path_text(&env.game_dir()),
+                target: "",
+            },
+            &events,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, code::INVALID_GAME_DIRECTORY);
         assert_eq!(locks.activity("生存"), None, "路径不合法时不占实例");
+
+        let err = move_instance_with(
+            &env.facade,
+            &tasks,
+            &locks,
+            "mv",
+            MoveArgs {
+                id: "生存",
+                source: "相对/路径",
+                target: &path_text(&target),
+            },
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INVALID_GAME_DIRECTORY);
+        assert_eq!(err.detail.unwrap()["problem"], "not_absolute");
+        assert!(dir.join("生存.json").is_file());
+        assert_eq!(locks.activity("生存"), None, "源不合法时同样不占实例");
     }
 
     /// 移到还没记录的文件夹：实例目录整个过去，原目录里它的侧栏固定与当前选中去掉、别的实例不动，目标以推出的
@@ -7378,8 +7456,11 @@ mod tests {
             &tasks,
             &locks,
             "mv",
-            "生存",
-            &path_text(&target),
+            MoveArgs {
+                id: "生存",
+                source: &path_text(&env.game_dir()),
+                target: &path_text(&target),
+            },
             &events,
         )
         .await
@@ -7413,6 +7494,21 @@ mod tests {
             "门面里的配置同步更新"
         );
         assert_eq!(
+            move_journals(&env),
+            Vec::<String>::new(),
+            "配置存好后已确认"
+        );
+        assert_eq!(
+            env.facade
+                .snapshot()
+                .await
+                .recover_instance_moves()
+                .await
+                .unwrap(),
+            Vec::new(),
+            "确认过的移动启动收尾不再交出"
+        );
+        assert_eq!(
             (locks.activity("生存"), tasks.is_running("mv")),
             (None, false)
         );
@@ -7443,8 +7539,11 @@ mod tests {
             &tasks,
             &locks,
             "mv2",
-            "也走",
-            &path_text(&target),
+            MoveArgs {
+                id: "也走",
+                source: &path_text(&env.game_dir()),
+                target: &path_text(&target),
+            },
             &events,
         )
         .await
@@ -7483,8 +7582,11 @@ mod tests {
             &tasks,
             &locks,
             "mv",
-            "生存",
-            &path_text(&target),
+            MoveArgs {
+                id: "生存",
+                source: &path_text(&env.game_dir()),
+                target: &path_text(&target),
+            },
             &events,
         )
         .await
@@ -7503,15 +7605,74 @@ mod tests {
         drop(tasks.register("mv").unwrap());
     }
 
-    /// 文件已经移好、配置落不了盘（配置文件的位置被同名文件夹占着）：报配置的错误，message 说清实例已在目标里，
-    /// detail.moved_to 为目标；门面不换进这次改动，实例照常放开。
+    /// 发起时的源已经不是当前目录（切换目录后重试）：报 instance_move_blocked，detail.blocker 为 source_changed。
+    /// 当前目录里没有它、有个同名的另一个实例，两种情况都一样：两边的实例与目标都没动，配置不变，没留日志，实例与
+    /// 任务 id 随之放开。
     #[tokio::test]
-    async fn a_move_whose_config_cannot_be_saved_says_the_instance_is_already_there() {
+    async fn a_move_from_a_directory_that_is_no_longer_current_is_blocked() {
+        let env = Env::new();
+        let elsewhere = env.dir.path().join("别处").join(".minecraft");
+        let theirs = elsewhere.join("versions").join("生存");
+        std::fs::create_dir_all(&theirs).unwrap();
+        let their_json = r#"{"id":"生存","type":"release","mainClass":"Elsewhere"}"#;
+        std::fs::write(theirs.join("生存.json"), their_json).unwrap();
+        let target = new_home(&env);
+        let before = env.saved_config().await;
+        let (tasks, locks) = (TaskRegistry::default(), InstanceLocks::default());
+        let (events, _rx) = sink();
+
+        let mut here = None;
+        for same_name_here in [false, true] {
+            if same_name_here {
+                here = Some(env.vanilla("生存"));
+            }
+            let err = move_instance_with(
+                &env.facade,
+                &tasks,
+                &locks,
+                "mv",
+                MoveArgs {
+                    id: "生存",
+                    source: &path_text(&elsewhere),
+                    target: &path_text(&target),
+                },
+                &events,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_MOVE_BLOCKED, "{err:?}");
+            assert_eq!(
+                err.detail.unwrap(),
+                json!({ "id": "生存", "blocker": { "kind": "source_changed" } })
+            );
+            assert_eq!(
+                std::fs::read_to_string(theirs.join("生存.json")).unwrap(),
+                their_json
+            );
+            if let Some(here) = &here {
+                assert!(here.join("生存.json").is_file());
+            }
+            assert!(!target.exists());
+            assert_eq!(env.saved_config().await, before);
+            assert_eq!(move_journals(&env), Vec::<String>::new());
+            assert_eq!(locks.activity("生存"), None);
+            drop(tasks.register("mv").unwrap());
+        }
+    }
+
+    /// 文件已经移好、配置落不了盘（配置文件的位置被同名文件夹占着）：命令照常成功，registered 为 false，跟进项多一条
+    /// config；门面不换进这次改动，实例照常放开，日志没确认、留着。配置还是存不上时启动收尾同样不确认；能存了以后
+    /// 启动收尾交出 Completed，照命令的口径补好配置（原目录的固定与选中去掉、别的实例不动、目标记进列表）并确认，
+    /// 再收尾什么都不改。
+    #[tokio::test]
+    async fn a_move_whose_config_cannot_be_saved_succeeds_and_startup_settles_it() {
         let env = Env::new();
         let dir = env.vanilla("生存");
+        env.vanilla("留下");
         env.facade
             .update(|petalfall| {
-                petalfall.set_sidebar_pins(vec!["生存".into()]);
+                petalfall.set_sidebar_pins(vec!["生存".into(), "留下".into()]);
+                petalfall.set_selected_version(Some("生存".into()));
                 Ok::<_, CommandError>(())
             })
             .await
@@ -7519,40 +7680,121 @@ mod tests {
         let config_path = env.dir.path().join("config.json");
         std::fs::remove_file(&config_path).unwrap();
         std::fs::create_dir_all(&config_path).unwrap();
+        let unsaved = env.facade.read().await.config().clone();
         let target = new_home(&env);
         let (tasks, locks) = (TaskRegistry::default(), InstanceLocks::default());
         let (events, _rx) = sink();
 
-        let err = move_instance_with(
+        let outcome = move_instance_with(
             &env.facade,
             &tasks,
             &locks,
             "mv",
-            "生存",
-            &path_text(&target),
+            MoveArgs {
+                id: "生存",
+                source: &path_text(&env.game_dir()),
+                target: &path_text(&target),
+            },
             &events,
         )
         .await
-        .unwrap_err();
-        assert_eq!(err.code, common::IO);
-        let prefix = format!(
-            "实例已移到「新家」（{}），但配置没能保存：",
-            path_text(&target)
+        .unwrap();
+        assert_eq!(
+            (
+                outcome.id.as_str(),
+                outcome.source.as_str(),
+                outcome.target.as_str(),
+                outcome.target_name.as_str(),
+                outcome.registered,
+            ),
+            (
+                "生存",
+                path_text(&env.game_dir()).as_str(),
+                path_text(&target).as_str(),
+                "新家",
+                false,
+            )
         );
-        assert!(err.message.starts_with(&prefix), "{}", err.message);
-        let detail = err.detail.unwrap();
-        assert_eq!(detail["id"], "生存");
-        assert_eq!(detail["moved_to"], path_text(&target));
+        let [MoveFollowUpDto::Config { reason }] = outcome.follow_ups.as_slice() else {
+            panic!("应当只有一条 config 跟进项：{:?}", outcome.follow_ups);
+        };
+        assert!(reason.contains(&path_text(&config_path)), "{reason}");
         assert!(target
             .join("versions")
             .join("生存")
             .join("生存.json")
             .is_file());
         assert!(!dir.exists());
-        let config = env.facade.read().await.config().clone();
-        assert_eq!(config.sidebar_pins, vec!["生存".to_owned()]);
-        assert!(config.extra_game_directories.is_empty());
+        assert_eq!(env.facade.read().await.config(), &unsaved);
         assert_eq!(locks.activity("生存"), None);
+        assert_eq!(move_journals(&env).len(), 1, "配置没存上，不确认");
+
+        recover_moves(&env.facade).await;
+        assert_eq!(env.facade.read().await.config(), &unsaved);
+        assert_eq!(
+            move_journals(&env).len(),
+            1,
+            "收尾时配置还是存不上，照样不确认"
+        );
+
+        std::fs::remove_dir(&config_path).unwrap();
+        recover_moves(&env.facade).await;
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, vec!["留下".to_owned()]);
+        assert_eq!(saved.selected_version, None);
+        assert_eq!(
+            saved.extra_game_directories,
+            vec![petalfall_core::NamedDirectory {
+                name: "新家".into(),
+                path: target.clone(),
+            }]
+        );
+        assert_eq!(&saved, env.facade.read().await.config());
+        assert_eq!(move_journals(&env), Vec::<String>::new(), "存好后已确认");
+
+        recover_moves(&env.facade).await;
+        assert_eq!(env.saved_config().await, saved);
+    }
+
+    /// 启动收尾交出 Completed，但原目录里此后又有了同名的新实例（forget_source_refs 为假）：原目录里的侧栏固定与当前
+    /// 选中是新实例的，原样留着；目标照样记进游戏目录列表，落到盘上、门面里同步。
+    #[tokio::test]
+    async fn recovering_a_move_whose_name_was_reused_keeps_the_new_instance_refs() {
+        let env = Env::new();
+        env.vanilla("生存");
+        env.facade
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["生存".into()]);
+                petalfall.set_selected_version(Some("生存".into()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+        let target = new_home(&env);
+
+        settle_move_recovery(
+            &env.facade,
+            MoveRecovery::Completed(MoveOutcome {
+                id: "生存".into(),
+                source_game_dir: env.game_dir(),
+                target_game_dir: target.clone(),
+                follow_ups: Vec::new(),
+                token: "1".into(),
+                forget_source_refs: false,
+            }),
+        )
+        .await;
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, vec!["生存".to_owned()]);
+        assert_eq!(saved.selected_version.as_deref(), Some("生存"));
+        assert_eq!(
+            saved.extra_game_directories,
+            vec![petalfall_core::NamedDirectory {
+                name: "新家".into(),
+                path: target,
+            }]
+        );
+        assert_eq!(&saved, env.facade.read().await.config());
     }
 
     /// 启动收尾：没有中断的移动时什么都不改；提交已完成的照正常移动的口径改配置（原目录的固定与选中去掉、目标记进

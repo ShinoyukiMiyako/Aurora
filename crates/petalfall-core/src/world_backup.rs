@@ -4,7 +4,6 @@
 //! 进度事件与取消。快照之间共享两类锁，写法与下载引擎按目标路径加锁相同：按存档的备份目录加的锁在
 //! 整个备份、恢复、导出、删除期间持有；备份根锁在清单读改写、清理与改名搬运期间持有，同时要两把时
 //! 先存档锁后根锁。不隔离的实例共用同一份存档，两个实例同时操作它时就靠这两把锁排队。等锁期间响应取消。
-//! 实例移到另一个游戏目录时要两个游戏目录的备份根锁，按路径排序依次加，见 [`acquire_roots`]。
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -26,7 +25,6 @@ use crate::config::WorldBackupSettings;
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, DownloadProgress, EventSink, emit};
 use crate::facade::Petalfall;
-use crate::folders::same_path;
 
 /// 字节进度事件的最小间隔，与下载进度的节流一致。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -496,31 +494,9 @@ pub(crate) fn instance_backups_dir_in(game_dir: &Path, id: &str) -> PathBuf {
     BackupLayout::new(game_dir).instance_dir(id)
 }
 
-/// 同卷移动：把 `from_game_dir` 下 `instances/<id>` 的备份并进 `to_game_dir` 下 `instances/<id>`，合并规则同改名
-/// （[`merge_scope_dir`]），全程占着两个备份根的锁。`from` 下没有时什么都不做；两边是同一个游戏目录时也什么都
-/// 不做：同一个目录并进它自己会把每份备份改个名再记一遍，最后删掉的源清单就是目标清单。
-pub(crate) async fn move_backups_between(
-    from_game_dir: &Path,
-    to_game_dir: &Path,
-    id: &str,
-) -> Result<()> {
-    check_instance_id(id)?;
-    if same_path(from_game_dir, to_game_dir) {
-        return Ok(());
-    }
-    let from_root = BackupLayout::new(from_game_dir).root().to_path_buf();
-    let to_root = BackupLayout::new(to_game_dir).root().to_path_buf();
-    let _roots = acquire_roots(&from_root, &to_root).await?;
-    merge_scope_dir(
-        &instance_backups_dir_in(from_game_dir, id),
-        &instance_backups_dir_in(to_game_dir, id),
-    )
-    .await?;
-    Ok(())
-}
-
-/// 跨卷移动：把目标盘暂存里的备份副本 `staged`（形状同 `instances/<id>`）并进 `to_game_dir` 下 `instances/<id>`，
-/// 合并规则同改名，占着目标备份根的锁。`staged` 不存在时什么都不做。
+/// 实例移动：把按 token 收着的备份 `staged`（形状同 `instances/<id>`；跨卷是目标盘暂存里的副本，同卷是原游戏目录
+/// 旧目录里的原备份）并进 `to_game_dir` 下 `instances/<id>`，合并规则同改名，占着目标备份根的锁。`staged` 不存在
+/// 时什么都不做。
 pub(crate) async fn merge_staged_backups(
     staged: &Path,
     to_game_dir: &Path,
@@ -531,19 +507,6 @@ pub(crate) async fn merge_staged_backups(
     let _root = acquire(&ROOT_LOCKS, &root, None).await?;
     merge_scope_dir(staged, &instance_backups_dir_in(to_game_dir, id)).await?;
     Ok(())
-}
-
-/// 跨卷移动提交后删掉原游戏目录下 `instances/<id>`，占着那个备份根的锁。不存在算成功。
-pub(crate) async fn remove_instance_backups_in(game_dir: &Path, id: &str) -> Result<()> {
-    check_instance_id(id)?;
-    let root = BackupLayout::new(game_dir).root().to_path_buf();
-    let _root = acquire(&ROOT_LOCKS, &root, None).await?;
-    let dir = instance_backups_dir_in(game_dir, id);
-    match tokio::fs::remove_dir_all(&dir).await {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(petalfall_base::Error::Io { path: dir, source }.into()),
-    }
 }
 
 fn check_instance_id(id: &str) -> Result<()> {
@@ -792,19 +755,6 @@ async fn acquire(
             .ok_or_else(|| InstanceError::Cancelled.into()),
         None => Ok(slot.lock_owned().await),
     }
-}
-
-/// 占住两个备份根的锁，不响应取消（只在移动提交阶段用）。按锁表的键（路径不分大小写）排序后依次加：两次方向相反
-/// 的移动同时进行时，各自先拿到一把再等另一把就互相卡死。两个根是同一把锁时只加一次：锁不可重入，加两次会卡死
-/// 自己。
-async fn acquire_roots(a: &Path, b: &Path) -> Result<Vec<OwnedMutexGuard<()>>> {
-    let key = |path: &Path| path.to_string_lossy().to_lowercase();
-    let (first, second) = if key(a) <= key(b) { (a, b) } else { (b, a) };
-    let mut guards = vec![acquire(&ROOT_LOCKS, first, None).await?];
-    if key(first) != key(second) {
-        guards.push(acquire(&ROOT_LOCKS, second, None).await?);
-    }
-    Ok(guards)
 }
 
 // ---- 进度 ----
@@ -2027,136 +1977,6 @@ mod tests {
         (zips_in(dir), listed)
     }
 
-    /// 同卷移动：目标下还没有这个实例的备份时整目录挪过去、内容一字不差；已经有同名存档目录时合并，zip 都在、
-    /// 清单条目数相加。源不存在时什么都不做；两边是同一个游戏目录（写法不同）时也什么都不动。
-    #[tokio::test]
-    async fn moving_backups_takes_the_whole_directory_or_merges_clashing_worlds() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source = petalfall_at(&tmp.path().join("源"));
-        let target = petalfall_at(&tmp.path().join("目标"));
-        let saves = isolated(&source, "生存");
-        world(&saves, "w", "w");
-        world(&saves, "另一个", "另一个");
-        for (name, kind) in [
-            ("w", BackupKind::Manual),
-            ("w", BackupKind::Auto),
-            ("另一个", BackupKind::Manual),
-        ] {
-            source.backup_world("生存", name, kind, None).await.unwrap();
-        }
-        let from = source.instance_backups_dir("生存").unwrap();
-        let to = instance_backups_dir_in(target.game_dir(), "生存");
-        assert_eq!(
-            to,
-            backups_root(&target).join("instances").join("生存"),
-            "与门面上的同一个目录"
-        );
-        let whole = snapshot(&from);
-
-        move_backups_between(source.game_dir(), target.game_dir(), "生存")
-            .await
-            .unwrap();
-        assert!(!from.exists());
-        assert_eq!(snapshot(&to), whole);
-        move_backups_between(source.game_dir(), target.game_dir(), "生存")
-            .await
-            .unwrap();
-        assert_eq!(snapshot(&to), whole);
-
-        // 源目录里又有了同名实例的备份：同名存档并进去，目标里没有的存档整个挪过去。
-        let third = world(&saves, "第三个", "第三个");
-        source
-            .backup_world("生存", "w", BackupKind::Manual, None)
-            .await
-            .unwrap();
-        source
-            .backup_world("生存", "第三个", BackupKind::Manual, None)
-            .await
-            .unwrap();
-        move_backups_between(source.game_dir(), target.game_dir(), "生存")
-            .await
-            .unwrap();
-        assert!(!from.exists());
-        let (zips, listed) = backed_up(&to.join("w")).await;
-        assert_eq!(zips.len(), 3);
-        assert_eq!(listed, zips);
-        let (zips, listed) = backed_up(&to.join("另一个")).await;
-        assert_eq!((zips.len(), listed.len()), (1, 1));
-        let (zips, listed) = backed_up(&to.join("第三个")).await;
-        assert_eq!((zips.len(), listed.len()), (1, 1));
-        assert!(third.exists(), "只搬备份，存档本身不动");
-
-        let merged = snapshot(&to);
-        let alias = PathBuf::from(
-            target
-                .game_dir()
-                .display()
-                .to_string()
-                .to_uppercase()
-                .replace('\\', "/"),
-        );
-        move_backups_between(target.game_dir(), &alias, "生存")
-            .await
-            .unwrap();
-        assert_eq!(snapshot(&to), merged);
-
-        let err = move_backups_between(source.game_dir(), target.game_dir(), "..")
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(&err, CoreError::Instance(InstanceError::InvalidId { id }) if id == ".."),
-            "{err:?}"
-        );
-    }
-
-    /// 方向相反的两次移动同时进行也不会互相卡死：锁按路径顺序加。占住排在前面的 a，再发起 b 到 a 的移动，
-    /// 它要先等 a，不能先把 b 占着。
-    #[tokio::test]
-    async fn moves_take_the_two_root_locks_in_path_order() {
-        let tmp = tempfile::tempdir().unwrap();
-        let a = tmp.path().join("a").join(".minecraft");
-        let b = tmp.path().join("b").join(".minecraft");
-        let root_a = BackupLayout::new(&a).root().to_path_buf();
-        let root_b = BackupLayout::new(&b).root().to_path_buf();
-
-        let held = acquire(&ROOT_LOCKS, &root_a, None).await.unwrap();
-        let moving = tokio::spawn({
-            let (a, b) = (a.clone(), b.clone());
-            async move { move_backups_between(&b, &a, "生存").await }
-        });
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let free = tokio::time::timeout(
-            Duration::from_millis(200),
-            acquire(&ROOT_LOCKS, &root_b, None),
-        )
-        .await
-        .expect("等 a 的时候不该占着 b")
-        .unwrap();
-        drop(free);
-        assert!(!moving.is_finished(), "a 还被占着，移动不该已经做完");
-        drop(held);
-        tokio::time::timeout(Duration::from_secs(5), moving)
-            .await
-            .expect("放开 a 之后移动应当做完")
-            .unwrap()
-            .unwrap();
-    }
-
-    /// 两个根其实是同一把锁（只差大小写）时只加一次，不卡死自己。
-    #[tokio::test]
-    async fn one_root_spelled_twice_is_locked_once() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = BackupLayout::new(&tmp.path().join(".minecraft"))
-            .root()
-            .to_path_buf();
-        let upper = PathBuf::from(root.display().to_string().to_uppercase());
-        let guards = tokio::time::timeout(Duration::from_secs(5), acquire_roots(&root, &upper))
-            .await
-            .expect("同一把锁加两次会卡死自己")
-            .unwrap();
-        assert_eq!(guards.len(), 1);
-    }
-
     /// 跨卷移动：暂存里的备份副本并进目标，同名存档合并，暂存清空；暂存不存在时什么都不做。
     #[tokio::test]
     async fn staged_backups_merge_into_the_target_and_leave_the_stage_empty() {
@@ -2207,41 +2027,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(snapshot(&to), merged);
-    }
-
-    /// 提交后删原目录下的备份：只删这个实例的，别的实例的备份原样；再删一次不报错；id 不安全时什么都不碰。
-    #[tokio::test]
-    async fn removing_moved_away_backups_leaves_other_instances_alone() {
-        let tmp = tempfile::tempdir().unwrap();
-        let petalfall = petalfall_at(tmp.path());
-        for id in ["走了的", "留下的"] {
-            let saves = isolated(&petalfall, id);
-            world(&saves, "w", "w");
-            petalfall
-                .backup_world(id, "w", BackupKind::Manual, None)
-                .await
-                .unwrap();
-        }
-        let gone = petalfall.instance_backups_dir("走了的").unwrap();
-        let kept = petalfall.instance_backups_dir("留下的").unwrap();
-        let before = snapshot(&kept);
-
-        remove_instance_backups_in(petalfall.game_dir(), "走了的")
-            .await
-            .unwrap();
-        assert!(!gone.exists());
-        assert_eq!(snapshot(&kept), before);
-        remove_instance_backups_in(petalfall.game_dir(), "走了的")
-            .await
-            .unwrap();
-
-        let err = remove_instance_backups_in(petalfall.game_dir(), "..")
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(&err, CoreError::Instance(InstanceError::InvalidId { .. })),
-            "{err:?}"
-        );
-        assert_eq!(snapshot(&kept), before);
     }
 }
