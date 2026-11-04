@@ -7,6 +7,7 @@ import { IpcError } from "../../ipc/errors";
 import type { InstanceSettingsDto } from "../../ipc/instances";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
+import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
@@ -24,6 +25,9 @@ const HANAMI = "6a1f0c0e4b5d4c3e9f2a7b8c9d0e1f20";
 const SETTINGS: InstanceSettingsDto = {
   description: null,
   cover: null,
+  cover_image: null,
+  background: "follow",
+  background_image: null,
   isolation: "follow_global",
   memory_mb: null,
   java: "auto",
@@ -51,14 +55,16 @@ function Routed() {
 
 function Providers({ children }: { children: ReactNode }) {
   return (
-    <LauncherProvider>
-      <ShellProvider>
-        <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
-          {children}
-          <OverlayRoot />
-        </RemoteImageProvider>
-      </ShellProvider>
-    </LauncherProvider>
+    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+      <LauncherProvider>
+        <ShellProvider>
+          <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
+            {children}
+            <OverlayRoot />
+          </RemoteImageProvider>
+        </ShellProvider>
+      </LauncherProvider>
+    </AppearanceProvider>
   );
 }
 

@@ -279,9 +279,18 @@ async fn only_whitelisted_paths_are_served() {
         .await;
     assert_eq!(ok.status(), 200);
     assert_eq!(dims(&body(ok)), (16, 16));
+    // 方块面按形状放行：形状合法但缓存里没有的是 404，不是 400。
+    assert_eq!(
+        fx.service
+            .respond("/art/block/dirt.png", Some("1.21.1"))
+            .await
+            .status(),
+        404
+    );
 
     for rejected in [
-        "/art/block/dirt.png",
+        "/art/block/Dirt.png",
+        "/art/block/sub/dirt.png",
         "/art/block/../x.png",
         "/art/item/apple.png",
         "/art/particle/cherry_0.png",
@@ -350,11 +359,13 @@ async fn disk_cache_is_keyed_by_jar_hash_and_old_versions_are_removed() {
         json!(remote::sha1_hex(&std::fs::read(&jar).unwrap()))
     );
     assert_eq!(manifest["versionId"], json!("1.21.1"));
+    assert_eq!(manifest["format"], json!(2));
+    assert_eq!(manifest["origin"], json!("local"));
     assert_eq!(
         manifest["files"],
         json!([
-            "block/cherry_planks",
             "block/blue_ice",
+            "block/cherry_planks",
             "entity/player/wide/steve"
         ])
     );
@@ -623,6 +634,64 @@ async fn thumbs_are_limited_to_known_hosts_and_served_from_cache() {
     }
 }
 
+#[tokio::test]
+async fn cover_images_are_served_only_after_registration() {
+    let fx = fixture();
+    let dir = fx.cache.join("instance-cover");
+    std::fs::create_dir_all(&dir).unwrap();
+    let png_path = dir.join("block-0123456789abcdef.png");
+    let jpeg_path = dir.join("background-0123456789abcdef.jpg");
+    let gif_path = dir.join("background-fedcba9876543210.png");
+    let pixels = png(16, 16, |_, _| PINK);
+    std::fs::write(&png_path, &pixels).unwrap();
+    // 协议只按文件头认类型，不解码：JPEG 的 SOI 加 APP0 标记就够
+    std::fs::write(
+        &jpeg_path,
+        [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'],
+    )
+    .unwrap();
+    std::fs::write(&gif_path, b"GIF89a not really").unwrap();
+
+    // 键由路径决定；没登记过的键一律 404，不按路径猜文件
+    let key = remote::sha1_hex(png_path.to_string_lossy().as_bytes());
+    assert!(matches!(
+        fx.service.respond(&format!("/cover/{key}"), None).await,
+        TexResponse::NotFound(_)
+    ));
+    assert_eq!(fx.service.register_cover(&png_path), key);
+    match fx.service.respond(&format!("/cover/{key}"), None).await {
+        TexResponse::Found { content_type, body } => {
+            assert_eq!(content_type, "image/png");
+            assert_eq!(body.as_ref(), &pixels);
+        }
+        other => panic!("期望 200，得到 {other:?}"),
+    }
+    let jpeg_key = fx.service.register_cover(&jpeg_path);
+    match fx
+        .service
+        .respond(&format!("/cover/{jpeg_key}"), None)
+        .await
+    {
+        TexResponse::Found { content_type, .. } => assert_eq!(content_type, "image/jpeg"),
+        other => panic!("期望 200，得到 {other:?}"),
+    }
+    let gif_key = fx.service.register_cover(&gif_path);
+    assert!(matches!(
+        fx.service.respond(&format!("/cover/{gif_key}"), None).await,
+        TexResponse::Failed(_)
+    ));
+    // 登记后文件被删：404，界面回落
+    std::fs::remove_file(&png_path).unwrap();
+    assert!(matches!(
+        fx.service.respond(&format!("/cover/{key}"), None).await,
+        TexResponse::NotFound(_)
+    ));
+    assert!(matches!(
+        fx.service.respond("/cover/../settings.json", None).await,
+        TexResponse::BadRequest(_)
+    ));
+}
+
 #[test]
 fn candidates_start_with_the_configured_game_dir() {
     let tmp = tempfile::tempdir().unwrap();
@@ -655,4 +724,780 @@ fn candidates_start_with_the_configured_game_dir() {
     let service = petalfall.texture_service();
     assert_eq!(service.inner.cache_root, tmp.path().join("cache"));
     assert_eq!(service.status(), ArtStatus::default());
+}
+
+// ---- 方块目录与下载缓存 ----
+
+const GRAY: [u8; 4] = [128, 128, 128, 255];
+const ICE: [u8; 4] = [40, 120, 220, 255];
+const LOG_TOP: [u8; 4] = [180, 150, 90, 255];
+
+fn json_bytes(value: serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&value).unwrap()
+}
+
+fn blockstate(id: &str, model: &str) -> (String, Vec<u8>) {
+    (
+        format!("assets/minecraft/blockstates/{id}.json"),
+        json_bytes(json!({ "variants": { "": { "model": model } } })),
+    )
+}
+
+fn block_model(path: &str, value: serde_json::Value) -> (String, Vec<u8>) {
+    (
+        format!("assets/minecraft/models/{path}.json"),
+        json_bytes(value),
+    )
+}
+
+fn texture(path: &str, rgba: [u8; 4]) -> (String, Vec<u8>) {
+    (tex(path), png(16, 16, move |_, _| rgba))
+}
+
+/// 一个能推出方块目录的客户端 jar：几个原版模板、各类方块、英文语言文件与它们的材质。`items` 为 false 时
+/// 模拟 1.21.4 之前没有物品定义的 jar。
+fn catalog_jar(items: bool) -> Vec<(String, Vec<u8>)> {
+    let cube = json!([{ "from": [0, 0, 0], "to": [16, 16, 16] }]);
+    let mut entries = vec![
+        block_model("block/block", json!({})),
+        block_model(
+            "block/cube",
+            json!({ "parent": "block/block", "elements": cube }),
+        ),
+        block_model(
+            "block/cube_all",
+            json!({ "parent": "block/cube", "textures": { "up": "#all", "north": "#all", "east": "#all" } }),
+        ),
+        block_model(
+            "block/cube_column",
+            json!({ "parent": "block/cube", "textures": { "up": "#end", "north": "#side", "east": "#side" } }),
+        ),
+        block_model(
+            "block/orientable_with_bottom",
+            json!({ "parent": "block/cube", "textures": { "up": "#top", "north": "#front", "east": "#side" } }),
+        ),
+        block_model(
+            "block/orientable",
+            json!({ "parent": "block/orientable_with_bottom", "textures": { "bottom": "#top" } }),
+        ),
+        block_model(
+            "block/leaves",
+            json!({ "parent": "block/block", "elements": cube }),
+        ),
+        block_model(
+            "block/cross",
+            json!({ "parent": "block/block", "elements": cube }),
+        ),
+        blockstate("stone", "minecraft:block/stone"),
+        block_model(
+            "block/stone",
+            json!({ "parent": "minecraft:block/cube_all", "textures": { "all": "minecraft:block/stone" } }),
+        ),
+        blockstate("blue_ice", "minecraft:block/blue_ice"),
+        block_model(
+            "block/blue_ice",
+            json!({ "parent": "minecraft:block/cube_all", "textures": { "all": "minecraft:block/blue_ice" } }),
+        ),
+        blockstate("oak_log", "minecraft:block/oak_log"),
+        block_model(
+            "block/oak_log",
+            json!({ "parent": "minecraft:block/cube_column", "textures": { "end": "minecraft:block/oak_log_top", "side": "minecraft:block/oak_log" } }),
+        ),
+        blockstate("furnace", "minecraft:block/furnace"),
+        block_model(
+            "block/furnace",
+            json!({ "parent": "minecraft:block/orientable", "textures": {
+                "top": "minecraft:block/furnace_top",
+                "side": "minecraft:block/furnace_side",
+                "front": "minecraft:block/furnace_front"
+            } }),
+        ),
+        blockstate("crafting_table", "minecraft:block/crafting_table"),
+        block_model(
+            "block/crafting_table",
+            json!({ "parent": "minecraft:block/cube", "textures": {
+                "up": "minecraft:block/crafting_table_top",
+                "north": "minecraft:block/crafting_table_front",
+                "east": "minecraft:block/crafting_table_side"
+            } }),
+        ),
+        blockstate("oak_leaves", "minecraft:block/oak_leaves"),
+        block_model(
+            "block/oak_leaves",
+            json!({ "parent": "minecraft:block/leaves", "textures": { "all": "minecraft:block/oak_leaves" } }),
+        ),
+        blockstate("spruce_leaves", "minecraft:block/spruce_leaves"),
+        block_model(
+            "block/spruce_leaves",
+            json!({ "parent": "minecraft:block/leaves", "textures": { "all": "minecraft:block/spruce_leaves" } }),
+        ),
+        blockstate("grass_block", "minecraft:block/grass_block"),
+        block_model(
+            "block/grass_block",
+            json!({ "parent": "block/block", "textures": { "top": "block/grass_block_top" }, "elements": cube }),
+        ),
+        // 交叉植物：材质在 jar 里，但不是完整方块。
+        blockstate("poppy", "minecraft:block/poppy"),
+        block_model(
+            "block/poppy",
+            json!({ "parent": "minecraft:block/cross", "textures": { "cross": "minecraft:block/poppy" } }),
+        ),
+        (
+            "assets/minecraft/blockstates/oak_fence.json".to_owned(),
+            json_bytes(
+                json!({ "multipart": [{ "apply": { "model": "minecraft:block/oak_fence_post" } }] }),
+            ),
+        ),
+        // 侧面材质不在 jar 里：推得出来，但抽不到图，不进目录。
+        blockstate("bookshelf", "minecraft:block/bookshelf"),
+        block_model(
+            "block/bookshelf",
+            json!({ "parent": "minecraft:block/cube_column", "textures": { "end": "minecraft:block/stone", "side": "minecraft:block/bookshelf" } }),
+        ),
+        (
+            "assets/minecraft/lang/en_us.json".to_owned(),
+            json_bytes(json!({
+                "block.minecraft.stone": "Stone",
+                "block.minecraft.oak_log": "Oak Log",
+                "block.minecraft.crafting_table": "Crafting Table",
+                "block.minecraft.grass_block": "Grass Block",
+                "block.minecraft.oak_leaves": "Oak Leaves"
+            })),
+        ),
+        // 完整材质集的标志，也是预设必抽名单里的一张。
+        texture("block/cherry_planks", PINK),
+        texture("block/stone", [120, 120, 120, 255]),
+        (
+            tex("block/blue_ice"),
+            png(16, 32, |_, y| if y < 16 { ICE } else { [255, 0, 0, 255] }),
+        ),
+        (
+            format!("{}.mcmeta", tex("block/blue_ice")),
+            br#"{"animation":{}}"#.to_vec(),
+        ),
+        texture("block/oak_log_top", LOG_TOP),
+        texture("block/oak_log", [100, 80, 50, 255]),
+        texture("block/furnace_top", GRAY),
+        texture("block/furnace_side", [200, 100, 0, 255]),
+        texture("block/furnace_front", [50, 50, 50, 255]),
+        texture("block/crafting_table_top", GRAY),
+        texture("block/crafting_table_front", GRAY),
+        texture("block/crafting_table_side", [20, 60, 40, 255]),
+        texture("block/oak_leaves", GRAY),
+        texture("block/spruce_leaves", GRAY),
+        texture("block/grass_block_top", GRAY),
+        texture("block/grass_block_side", [134, 96, 67, 255]),
+        texture("block/poppy", [200, 0, 0, 255]),
+        (tex("entity/player/wide/steve"), png(64, 64, |_, _| PINK)),
+    ];
+    if items {
+        entries.push((
+            "assets/minecraft/items/oak_leaves.json".to_owned(),
+            json_bytes(json!({ "model": {
+                "type": "minecraft:model",
+                "model": "minecraft:block/oak_leaves",
+                "tints": [{ "type": "minecraft:constant", "value": -12012264 }]
+            } })),
+        ));
+        entries.push((
+            "assets/minecraft/items/spruce_leaves.json".to_owned(),
+            json_bytes(
+                json!({ "model": { "type": "minecraft:model", "model": "minecraft:block/spruce_leaves" } }),
+            ),
+        ));
+    }
+    entries
+}
+
+fn zh_cn_lang() -> Vec<u8> {
+    json_bytes(json!({
+        "block.minecraft.stone": "石头",
+        "block.minecraft.oak_log": "橡木原木",
+        "block.minecraft.furnace": "熔炉",
+        "block.minecraft.grass_block": "草方块"
+    }))
+}
+
+fn put_catalog_version(
+    game_dir: &Path,
+    id: &str,
+    release_time: &str,
+    entries: &[(String, Vec<u8>)],
+) {
+    put_version(
+        game_dir,
+        VersionSpec {
+            id,
+            kind: "release",
+            release_time,
+            inherits_from: None,
+            wrong_sha1: false,
+            entries: entries
+                .iter()
+                .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+                .collect(),
+        },
+    );
+}
+
+/// 给版本 JSON 写上资源索引，并在游戏目录的 assets 里放好索引与 zh_cn 对象。`corrupt` 为 true 时对象内容
+/// 与索引声明的 SHA-1 不符。
+fn put_zh_cn(game_dir: &Path, version: &str, corrupt: bool) {
+    let json_path = game_dir
+        .join("versions")
+        .join(version)
+        .join(format!("{version}.json"));
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    json["assetIndex"] = json!({
+        "id": "29",
+        "sha1": "0000000000000000000000000000000000000000",
+        "size": 1,
+        "url": "https://example.invalid/29.json"
+    });
+    std::fs::write(&json_path, json.to_string()).unwrap();
+
+    let lang = zh_cn_lang();
+    let hash = remote::sha1_hex(&lang);
+    let index =
+        json!({ "objects": { "minecraft/lang/zh_cn.json": { "hash": hash, "size": lang.len() } } });
+    let indexes = game_dir.join("assets/indexes");
+    std::fs::create_dir_all(&indexes).unwrap();
+    std::fs::write(indexes.join("29.json"), index.to_string()).unwrap();
+    let object = game_dir.join("assets/objects").join(&hash[..2]).join(&hash);
+    std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+    let mut stored = lang;
+    if corrupt {
+        stored.push(b' ');
+    }
+    std::fs::write(object, stored).unwrap();
+}
+
+struct CatalogFixture {
+    _root: tempfile::TempDir,
+    root: PathBuf,
+    game: PathBuf,
+    cache: PathBuf,
+    opens: Arc<AtomicUsize>,
+    service: TextureService,
+}
+
+impl CatalogFixture {
+    async fn refresh(&self) -> ArtStatus {
+        self.service.refresh(std::slice::from_ref(&self.game)).await
+    }
+
+    fn opens(&self) -> usize {
+        self.opens.load(Ordering::SeqCst)
+    }
+
+    fn art(&self, path: &str) -> PathBuf {
+        self.cache.join("vanilla-art").join(path)
+    }
+
+    /// 在游戏目录外放一个「下载来的」jar 与中文语言文件，交给服务抽进下载缓存，然后像调用方那样删掉它们。
+    async fn adopt(&self, version_id: &str, with_zh: bool) {
+        let dir = self.root.join("download").join(version_id);
+        let jar = dir.join("client.jar");
+        let entries = catalog_jar(true);
+        let borrowed: Vec<(&str, Vec<u8>)> = entries
+            .iter()
+            .map(|(name, bytes)| (name.as_str(), bytes.clone()))
+            .collect();
+        write_jar(&jar, &borrowed);
+        let zh_cn = with_zh.then(|| {
+            let path = dir.join("zh_cn.json");
+            std::fs::write(&path, zh_cn_lang()).unwrap();
+            path
+        });
+        let client = DownloadedClient {
+            version_id: version_id.to_owned(),
+            jar_sha1: remote::sha1_hex(&std::fs::read(&jar).unwrap()),
+            jar,
+            zh_cn,
+        };
+        self.service.adopt_download(client).await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+fn catalog_fixture() -> CatalogFixture {
+    let root = tempfile::tempdir().unwrap();
+    let game = root.path().join("game");
+    let cache = root.path().join("cache");
+    std::fs::create_dir_all(&game).unwrap();
+    let opens = Arc::new(AtomicUsize::new(0));
+    let counter = opens.clone();
+    let opener: JarOpener = Arc::new(move |path| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        std::fs::File::open(path)
+    });
+    let service = TextureService::with_parts(
+        cache.clone(),
+        petalfall_base::http::build_client().unwrap(),
+        PanoramaSpec::default(),
+        opener,
+    );
+    CatalogFixture {
+        root: root.path().to_owned(),
+        _root: root,
+        game,
+        cache,
+        opens,
+        service,
+    }
+}
+
+/// 没有正面、不染色、没有名称的方块；其余字段在调用处用结构体更新语法覆盖。
+fn plain(id: &str, top: &str, side: &str, hue: u16) -> CatalogBlock {
+    CatalogBlock {
+        id: id.to_owned(),
+        top: top.to_owned(),
+        side: side.to_owned(),
+        front: None,
+        top_tint: None,
+        side_tint: None,
+        hue,
+        name_en: None,
+        name_zh: None,
+    }
+}
+
+fn name(text: &str) -> Option<String> {
+    Some(text.to_owned())
+}
+
+/// [`catalog_jar`]（带物品定义）配上可用的中文名推出的目录。
+fn expected_blocks() -> Vec<CatalogBlock> {
+    let oak_tint = Some([72, 181, 24]);
+    vec![
+        // 动画材质的色相只看首帧 (40, 120, 220)，第二帧的红不参与。
+        plain("blue_ice", "block/blue_ice", "block/blue_ice", 213),
+        CatalogBlock {
+            front: name("block/crafting_table_front"),
+            name_en: name("Crafting Table"),
+            ..plain(
+                "crafting_table",
+                "block/crafting_table_top",
+                "block/crafting_table_side",
+                150,
+            )
+        },
+        CatalogBlock {
+            front: name("block/furnace_front"),
+            name_zh: name("熔炉"),
+            ..plain("furnace", "block/furnace_top", "block/furnace_side", 30)
+        },
+        CatalogBlock {
+            top_tint: Some([124, 189, 107]),
+            name_en: name("Grass Block"),
+            name_zh: name("草方块"),
+            ..plain(
+                "grass_block",
+                "block/grass_block_top",
+                "block/grass_block_side",
+                26,
+            )
+        },
+        // 灰度材质乘物品定义里的固定染色，色相 102。
+        CatalogBlock {
+            top_tint: oak_tint,
+            side_tint: oak_tint,
+            name_en: name("Oak Leaves"),
+            ..plain("oak_leaves", "block/oak_leaves", "block/oak_leaves", 102)
+        },
+        CatalogBlock {
+            name_en: name("Oak Log"),
+            name_zh: name("橡木原木"),
+            ..plain("oak_log", "block/oak_log_top", "block/oak_log", 36)
+        },
+        // 有物品定义但没有固定染色：不染，不查表。
+        plain(
+            "spruce_leaves",
+            "block/spruce_leaves",
+            "block/spruce_leaves",
+            0,
+        ),
+        CatalogBlock {
+            name_en: name("Stone"),
+            name_zh: name("石头"),
+            ..plain("stone", "block/stone", "block/stone", 0)
+        },
+    ]
+}
+
+fn expected_blocks_without_zh() -> Vec<CatalogBlock> {
+    expected_blocks()
+        .into_iter()
+        .map(|block| CatalogBlock {
+            name_zh: None,
+            ..block
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn catalog_lists_full_cubes_with_faces_tints_hues_and_names() {
+    let fx = catalog_fixture();
+    assert_eq!(fx.service.catalog(), None, "没有材质源时没有目录");
+    put_catalog_version(
+        &fx.game,
+        "26.3",
+        "2026-10-20T00:00:00+00:00",
+        &catalog_jar(true),
+    );
+    put_zh_cn(&fx.game, "26.3", false);
+
+    assert_eq!(fx.refresh().await.source.as_deref(), Some("26.3"));
+    let catalog = fx.service.catalog().expect("有材质源就有目录");
+    assert_eq!(
+        catalog,
+        BlockCatalog {
+            version_id: "26.3".to_owned(),
+            blocks: expected_blocks(),
+        }
+    );
+
+    // 抽的是目录引用到的面 + 预设必抽里 jar 有的 + 皮肤；交叉植物与缺侧面的书架都不在。
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fx.art("26.3/manifest.json")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["files"],
+        json!([
+            "block/blue_ice",
+            "block/cherry_planks",
+            "block/crafting_table_front",
+            "block/crafting_table_side",
+            "block/crafting_table_top",
+            "block/furnace_front",
+            "block/furnace_side",
+            "block/furnace_top",
+            "block/grass_block_side",
+            "block/grass_block_top",
+            "block/oak_leaves",
+            "block/oak_log",
+            "block/oak_log_top",
+            "block/spruce_leaves",
+            "block/stone",
+            "entity/player/wide/steve"
+        ])
+    );
+    // 磁盘上的目录与内存里的一致，下次刷新直接读它。
+    let on_disk: BlockCatalog =
+        serde_json::from_slice(&std::fs::read(fx.art("26.3/catalog.json")).unwrap()).unwrap();
+    assert_eq!(on_disk, catalog);
+    let before = fx.opens();
+    fx.refresh().await;
+    assert_eq!(fx.opens() - before, 1, "缓存可用时只为看标志打开一次 jar");
+    assert_eq!(fx.service.catalog(), Some(catalog));
+}
+
+#[tokio::test]
+async fn old_jars_without_item_definitions_tint_leaves_from_the_table() {
+    let fx = catalog_fixture();
+    put_catalog_version(
+        &fx.game,
+        "1.21.1",
+        "2024-08-08T12:24:45+00:00",
+        &catalog_jar(false),
+    );
+    fx.refresh().await;
+    let catalog = fx.service.catalog().unwrap();
+    let find = |id: &str| {
+        catalog
+            .blocks
+            .iter()
+            .find(|b| b.id == id)
+            .unwrap_or_else(|| panic!("目录里应有 {id}"))
+    };
+    let oak = find("oak_leaves");
+    assert_eq!(
+        (oak.top_tint, oak.side_tint),
+        (Some([72, 181, 24]), Some([72, 181, 24]))
+    );
+    let spruce = find("spruce_leaves");
+    assert_eq!(
+        (spruce.top_tint, spruce.side_tint),
+        (Some([97, 153, 97]), Some([97, 153, 97]))
+    );
+    assert_eq!(spruce.hue, 120);
+    // 版本 JSON 没有资源索引：只有英文名。
+    assert_eq!(find("stone").name_en.as_deref(), Some("Stone"));
+    assert!(catalog.blocks.iter().all(|b| b.name_zh.is_none()));
+}
+
+#[tokio::test]
+async fn chinese_names_need_an_asset_object_with_the_indexed_sha1() {
+    let fx = catalog_fixture();
+    put_catalog_version(
+        &fx.game,
+        "26.3",
+        "2026-10-20T00:00:00+00:00",
+        &catalog_jar(true),
+    );
+    put_zh_cn(&fx.game, "26.3", true);
+    fx.refresh().await;
+    let catalog = fx.service.catalog().unwrap();
+    assert_eq!(
+        catalog.blocks,
+        expected_blocks_without_zh(),
+        "SHA-1 不符时只有英文名，其余不变"
+    );
+}
+
+/// 先有 jar、后来才补下资源：jar 没变也重抽一次补上中文名；之后缓存里有中文名就不再重抽。
+/// 选源时看标志文件也要打开 jar，所以按「每次刷新打开几次」比：比空转的刷新多出来的就是重抽。
+#[tokio::test]
+async fn chinese_names_arrive_once_the_assets_are_downloaded_later() {
+    let fx = catalog_fixture();
+    put_catalog_version(
+        &fx.game,
+        "26.3",
+        "2026-10-20T00:00:00+00:00",
+        &catalog_jar(true),
+    );
+    fx.refresh().await;
+    let name_zh = |id: &str| {
+        fx.service
+            .catalog()
+            .unwrap()
+            .blocks
+            .into_iter()
+            .find(|b| b.id == id)
+            .unwrap()
+            .name_zh
+    };
+    let opens_per_refresh = || async {
+        let before = fx.opens();
+        fx.refresh().await;
+        fx.opens() - before
+    };
+    assert_eq!(name_zh("furnace"), None);
+    let idle = opens_per_refresh().await;
+    // 资源对象坏着：缓存缺中文名也不重抽
+    put_zh_cn(&fx.game, "26.3", true);
+    assert_eq!(opens_per_refresh().await, idle, "资源对象坏着时不该重抽");
+    assert_eq!(name_zh("furnace"), None);
+    put_zh_cn(&fx.game, "26.3", false);
+    assert!(opens_per_refresh().await > idle, "补上资源后应重抽一次");
+    assert_eq!(name_zh("furnace").as_deref(), Some("熔炉"));
+    assert_eq!(opens_per_refresh().await, idle, "缓存已有中文名，不再重抽");
+}
+
+#[tokio::test]
+async fn catalog_faces_are_served_and_everything_else_is_404_or_400() {
+    let fx = catalog_fixture();
+    put_catalog_version(
+        &fx.game,
+        "26.3",
+        "2026-10-20T00:00:00+00:00",
+        &catalog_jar(true),
+    );
+    fx.refresh().await;
+    let before = fx.opens();
+
+    // 预设名单外、目录引用到的面。
+    let log_top = body(
+        fx.service
+            .respond("/art/block/oak_log_top.png", Some("26.3"))
+            .await,
+    );
+    let rgba = image::load_from_memory(&log_top).unwrap().to_rgba8();
+    assert!(rgba.pixels().all(|p| p.0 == LOG_TOP));
+    // 动画材质只留首帧。
+    let ice = body(
+        fx.service
+            .respond("/art/block/blue_ice.png", Some("26.3"))
+            .await,
+    );
+    assert_eq!(dims(&ice), (16, 16));
+    let rgba = image::load_from_memory(&ice).unwrap().to_rgba8();
+    assert!(rgba.pixels().all(|p| p.0 == ICE));
+
+    // 形状合法、但不在缓存里：交叉植物（材质在 jar 里也不给）、缺图的书架、根本没有的方块。
+    for missing in ["poppy", "bookshelf", "dirt"] {
+        let response = fx
+            .service
+            .respond(&format!("/art/block/{missing}.png"), Some("26.3"))
+            .await;
+        assert_eq!(response.status(), 404, "block/{missing} 应为 404");
+    }
+    for rejected in [
+        "/art/block/Stone.png",
+        "/art/block/sub/stone.png",
+        "/art/block/.png",
+        "/art/item/apple.png",
+        "/art/entity/pig.png",
+        "/art/blockstates/stone.png",
+    ] {
+        let response = fx.service.respond(rejected, Some("26.3")).await;
+        assert_eq!(response.status(), 400, "{rejected} 应为 400");
+    }
+    assert_eq!(fx.opens(), before, "请求路径不该打开 jar");
+}
+
+#[tokio::test]
+async fn source_priority_is_local_full_then_download_then_local_degraded() {
+    let fx = catalog_fixture();
+    put_catalog_version(
+        &fx.game,
+        "26.3",
+        "2026-10-20T00:00:00+00:00",
+        &catalog_jar(true),
+    );
+    put_catalog_version(
+        &fx.game,
+        "1.16.5",
+        "2021-01-14T16:05:32+00:00",
+        &[texture("block/stone", GRAY)],
+    );
+    fx.adopt("26.4", true).await;
+
+    // 本机完整集优先，即使下载来的更新；下载缓存留着。
+    assert_eq!(fx.refresh().await.source.as_deref(), Some("26.3"));
+    assert!(fx.art(".download-cache/manifest.json").is_file());
+
+    // 本机只剩降级集：用下载缓存，本机旧缓存被清掉。
+    std::fs::remove_dir_all(fx.game.join("versions/26.3")).unwrap();
+    assert_eq!(fx.refresh().await.source.as_deref(), Some("26.4"));
+    assert_eq!(fx.service.catalog().unwrap().version_id, "26.4");
+    assert!(!fx.art("26.3").exists());
+
+    // 下载缓存也没了：退到本机降级集。
+    std::fs::remove_dir_all(fx.art(".download-cache")).unwrap();
+    assert_eq!(fx.refresh().await.source.as_deref(), Some("1.16.5"));
+    let degraded = fx.service.catalog().unwrap();
+    assert_eq!(degraded.version_id, "1.16.5");
+    assert_eq!(degraded.blocks, Vec::new(), "降级源的 jar 里没有方块状态");
+}
+
+#[tokio::test]
+async fn adopted_download_is_served_without_the_jar() {
+    let fx = catalog_fixture();
+    let before = fx.opens();
+    fx.adopt("26.4", true).await;
+    assert_eq!(fx.opens() - before, 1, "抽取只打开一次 jar");
+    // jar 已删、游戏目录是空的：照样选中下载缓存。
+    let opened = fx.opens();
+    assert_eq!(fx.refresh().await.source.as_deref(), Some("26.4"));
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(fx.art(".download-cache/manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["origin"], json!("download"));
+    assert_eq!(manifest["versionId"], json!("26.4"));
+    assert_eq!(
+        fx.service.catalog().unwrap(),
+        BlockCatalog {
+            version_id: "26.4".to_owned(),
+            blocks: expected_blocks(),
+        },
+        "中文名来自下载来的语言文件"
+    );
+    let log_top = body(
+        fx.service
+            .respond("/art/block/oak_log_top.png", Some("26.4"))
+            .await,
+    );
+    assert!(
+        image::load_from_memory(&log_top)
+            .unwrap()
+            .to_rgba8()
+            .pixels()
+            .all(|p| p.0 == LOG_TOP)
+    );
+    assert_eq!(fx.opens(), opened, "选源与取图都不碰 jar");
+
+    // 再下一次（这回没拿到中文名）：替换掉之前那份。
+    fx.adopt("26.5", false).await;
+    assert_eq!(fx.refresh().await.source.as_deref(), Some("26.5"));
+    let catalog = fx.service.catalog().unwrap();
+    assert!(catalog.blocks.iter().all(|b| b.name_zh.is_none()));
+    assert_eq!(
+        catalog
+            .blocks
+            .iter()
+            .find(|b| b.id == "stone")
+            .unwrap()
+            .name_en
+            .as_deref(),
+        Some("Stone")
+    );
+}
+
+#[tokio::test]
+async fn caches_in_an_older_format_are_extracted_again() {
+    let fx = catalog_fixture();
+    put_catalog_version(
+        &fx.game,
+        "26.3",
+        "2026-10-20T00:00:00+00:00",
+        &catalog_jar(true),
+    );
+    fx.refresh().await;
+    let manifest_path = fx.art("26.3/manifest.json");
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+
+    // 第一版缓存：清单里没有格式号，也没有方块目录，jarSha1 却与 jar 一致。
+    for old in [None, Some(1)] {
+        let mut manifest = json!({
+            "versionId": "26.3",
+            "jarSha1": current["jarSha1"],
+            "files": ["block/cherry_planks"]
+        });
+        if let Some(format) = old {
+            manifest["format"] = json!(format);
+        }
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+        std::fs::remove_file(fx.art("26.3/catalog.json")).ok();
+
+        let before = fx.opens();
+        fx.refresh().await;
+        assert_eq!(fx.opens() - before, 2, "看标志一次、重新抽取一次");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest, current, "格式 {old:?} 的缓存应整份重抽");
+        assert!(fx.art("26.3/catalog.json").is_file());
+        assert_eq!(
+            fx.service.catalog().unwrap().blocks,
+            expected_blocks_without_zh()
+        );
+    }
+
+    // 格式是当前的，但方块目录被删了：也整份重抽。
+    std::fs::remove_file(fx.art("26.3/catalog.json")).unwrap();
+    let before = fx.opens();
+    fx.refresh().await;
+    assert_eq!(fx.opens() - before, 2);
+    assert!(fx.art("26.3/catalog.json").is_file());
+}
+
+#[tokio::test]
+async fn stale_caches_go_but_the_download_staging_dir_stays() {
+    let fx = catalog_fixture();
+    put_catalog_version(
+        &fx.game,
+        "26.3",
+        "2026-10-20T00:00:00+00:00",
+        &catalog_jar(true),
+    );
+    // 另一个任务正在往暂存目录里下 jar；还有一份别的版本的旧缓存与半途的临时目录。
+    let staging = fx.service.download_dir().join("client.jar");
+    std::fs::create_dir_all(staging.parent().unwrap()).unwrap();
+    std::fs::write(&staging, b"partial").unwrap();
+    std::fs::create_dir_all(fx.art("1.20.1/textures")).unwrap();
+    std::fs::create_dir_all(fx.art(".tmp-1.20.1-1-2/textures")).unwrap();
+
+    assert_eq!(fx.refresh().await.source.as_deref(), Some("26.3"));
+    assert_eq!(std::fs::read(&staging).unwrap(), b"partial");
+    assert!(!fx.art("1.20.1").exists());
+    assert!(!fx.art(".tmp-1.20.1-1-2").exists());
+    assert!(fx.art("26.3/manifest.json").is_file());
+
+    // 选中下载缓存时同样不动暂存目录。
+    fx.adopt("26.4", true).await;
+    std::fs::remove_dir_all(fx.game.join("versions/26.3")).unwrap();
+    assert_eq!(fx.refresh().await.source.as_deref(), Some("26.4"));
+    assert_eq!(std::fs::read(&staging).unwrap(), b"partial");
+    assert!(!fx.art("26.3").exists());
 }

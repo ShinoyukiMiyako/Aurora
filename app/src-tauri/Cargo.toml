@@ -82,3 +82,5 @@ wiremock = "0.6"
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 # 窗口摆放的随机化用例：固定种子，挂了能复现。
 fastrand = "2"
+# 卡面图片导入的命令层测试要现场编码一张 PNG；与 petalfall-core 同一版本，不多拉格式。
+image = { version = "0.25", default-features = false, features = ["png"] }

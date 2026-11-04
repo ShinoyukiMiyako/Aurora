@@ -7,10 +7,11 @@
 
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ACTION_ERROR, TOAST_COPY } from "../copy/flows";
-import { artStatus, onArtChanged } from "../ipc/art";
+import { artBlocks, artStatus, onArtChanged } from "../ipc/art";
 import { endBreathWindow, startBreathWindow } from "../launch/breath";
 import { LaunchHostProvider, type ConfirmOptions, type LaunchHost } from "../launch/host";
 import { bindArtStatus } from "../mc/binding";
+import { registerCatalogReload, settleArtDownload } from "../state/art-download";
 import type { CreateInstancePreset } from "../state/flows";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { LIBRARY_ROUTE, routeInstanceId, sameRoute, type Route } from "../state/route";
@@ -568,8 +569,11 @@ function ShellCore({ children }: { children: ReactNode }) {
     let unbind: (() => void) | null = null;
     bindArtStatus({
       load: artStatus,
+      loadCatalog: artBlocks,
       listenChanged: (handler) => onArtChanged(() => handler()),
       onError: report,
+      onCatalog: settleArtDownload,
+      reloadRequests: registerCatalogReload,
     }).then(
       (release) => {
         if (disposed) release();

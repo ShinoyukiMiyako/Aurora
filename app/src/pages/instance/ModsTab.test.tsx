@@ -13,6 +13,7 @@ import { LOADING_DELAY_MS } from "../../domain/limits";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type WindowPort } from "../../shell/window";
+import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
@@ -53,14 +54,16 @@ function Routed() {
 function Providers({ children }: { children: ReactNode }) {
   return (
     <WindowPortProvider port={port}>
-      <LauncherProvider>
-        <ShellProvider>
-          <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
-            {children}
-            <OverlayRoot />
-          </RemoteImageProvider>
-        </ShellProvider>
-      </LauncherProvider>
+      <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+        <LauncherProvider>
+          <ShellProvider>
+            <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
+              {children}
+              <OverlayRoot />
+            </RemoteImageProvider>
+          </ShellProvider>
+        </LauncherProvider>
+      </AppearanceProvider>
     </WindowPortProvider>
   );
 }

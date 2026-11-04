@@ -8,7 +8,7 @@ import { InstanceBlock } from "../../art/iso/InstanceBlock";
 import { ACTION_ERROR, BOOT_SLICE_ERROR, GAME_DIR_SWITCH_COPY, gameDirSwitchReason, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatRelative } from "../../domain/format";
-import { instanceCover } from "../../launch/cover";
+import { useCoverBackdrop, useInstanceCover } from "../../launch/cover";
 import { LaunchCapsule } from "../../launch/LaunchCapsule";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { fade } from "../../lib/motion";
@@ -225,7 +225,8 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
   const { tier } = useShell();
   const run = useRunner();
   const now = useNow(30_000);
-  const cover = instanceCover(inst);
+  const cover = useInstanceCover(inst);
+  const backdrop = useCoverBackdrop(inst);
 
   // 游戏退出后状态层作废这个实例的存档缓存，这里订阅着就会重取，信息行里的存档名才是刚玩的那个。
   // 实例列表已数过 saves/：一个存档都没有就不必读目录（信息行本来就省略这一段）；数不出来时照常去读。
@@ -254,10 +255,11 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
 
   return (
     <>
-      <Cover hue={cover.hue} seed={inst.id} height={height} className={s.heroCover} />
+      {/* 名称与信息压在大卡左侧，右侧是等距方块 */}
+      <Cover hue={cover.hue} seed={inst.id} height={height} {...backdrop} shade="left" className={s.heroCover} />
       <div className={s.heroInner}>
         <div className={s.heroTop}>
-          <Tag tone="accent" size="sm" icon="play">
+          <Tag tone="accent" size="sm" icon="play" className={s.heroTag}>
             {HOME_COPY.continueTag}
           </Tag>
           <span className={s.heroWhen}>{when}</span>

@@ -404,6 +404,9 @@ impl InstanceLaunchSettings {
         let VersionSettings {
             description: _,
             cover: _,
+            cover_image: _,
+            background: _,
+            background_image: _,
             isolation,
             memory_mb,
             java,
@@ -3950,6 +3953,9 @@ mod tests {
         let windowed = InstanceLaunchSettings::from_settings(VersionSettings {
             description: Some("周末生存".into()),
             cover: Some("cherry_planks".into()),
+            cover_image: Some("block-0123456789abcdef.png".into()),
+            background: petalfall_instance::CoverBackground::Texture,
+            background_image: None,
             isolation: IsolationOverride::Enabled,
             memory_mb: Some(6144),
             java: JavaSelection::Path(PathBuf::from(r"C:\jdk\bin\java.exe")),

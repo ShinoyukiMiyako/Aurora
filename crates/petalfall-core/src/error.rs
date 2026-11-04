@@ -233,6 +233,9 @@ pub enum CoreError {
         reason: crate::export::ExportBlock,
         loader: Option<String>,
     },
+    /// 卡面玩家图片读不了、太大、格式不认、解不开或重新编码失败。
+    #[error(transparent)]
+    CoverImage(#[from] crate::cover_image::CoverImageError),
 }
 
 /// 不能以离线方式进单人的原因。[`OfflineFallbackRefusal::as_str`] 是给前端分支用的稳定码。

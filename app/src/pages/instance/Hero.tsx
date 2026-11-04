@@ -11,7 +11,7 @@ import type { InstanceSummary } from "../../domain/adapt";
 import { percent } from "../../domain/format";
 import { needsReimport } from "../../domain/rules";
 import { isImeComposing } from "../../lib/util";
-import { instanceCover } from "../../launch/cover";
+import { useCoverBackdrop, useInstanceCover } from "../../launch/cover";
 import { LaunchCapsule } from "../../launch/LaunchCapsule";
 import type { LaunchView } from "../../launch/launchView";
 import { useNav, useShell } from "../../shell/shell";
@@ -50,7 +50,8 @@ export interface HeroProps {
 export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange }: HeroProps) {
   const { tier } = useShell();
   const { go } = useNav();
-  const cover = instanceCover(inst);
+  const cover = useInstanceCover(inst);
+  const backdrop = useCoverBackdrop(inst);
   const pinBlocked = useLauncherSelector((s) => !inst.pinned && !canPinMore(s));
   const renameReason = lockReason(ops.locks.rename, "rename");
   const repairReason = lockReason(ops.locks.repair, "repair");
@@ -91,7 +92,8 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   return (
     <Card padding="none" clip as="section" className={styles.hero}>
       <div className={styles.heroHost} data-sk-hover-host="">
-        <Cover hue={cover.hue} seed={inst.id} height={HERO_HEIGHT[tier]}>
+        {/* 方块、名称与标签在左侧，右侧的图钉、菜单与启动胶囊有自己的底 */}
+        <Cover hue={cover.hue} seed={inst.id} height={HERO_HEIGHT[tier]} {...backdrop} shade="left" className={styles.heroCover}>
           <div className={styles.heroInner}>
             <span className={styles.heroBlock}>
               <InstanceBlock instanceId={inst.id} cover={cover} width={HERO_BLOCK[tier]} lift />

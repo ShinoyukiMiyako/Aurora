@@ -2,6 +2,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { NO_ART, setArtStatus } from "../../mc/art";
+import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { clearArtCache } from "../../mc/useArt";
 import { render, stubMatchMedia, type Rendered } from "../../test/dom";
 import { stubCanvas, type CanvasStub } from "../illustrations/test-canvas";
@@ -30,6 +31,7 @@ afterEach(() => {
   view?.unmount();
   view = undefined;
   setArtStatus(NO_ART);
+  setBlockCatalog(null);
   clearArtCache();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -40,7 +42,7 @@ const block = () => view?.container.querySelector<HTMLElement>("[data-sk-art='is
 
 describe("InstanceBlock", () => {
   it("没有材质源：画实例徽记，不发请求；方框为 W × ceil(H)", async () => {
-    view = render(<InstanceBlock instanceId="周末生存" cover={{ block: "grass_block", hue: 118 }} width={64} />);
+    view = render(<InstanceBlock instanceId="周末生存" cover={{ block: "grass_block", hue: 118, image: null }} width={64} />);
     await settle();
     expect(block().dataset.art).toBe("emblem");
     expect(block().style.width).toBe("64px");
@@ -50,7 +52,7 @@ describe("InstanceBlock", () => {
 
   it("有材质源：取顶面与侧面，换成真材质；草方块顶面与侧面是两张图", async () => {
     setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
-    view = render(<InstanceBlock instanceId="周末生存" cover={{ block: "grass_block", hue: 118 }} width={32} />);
+    view = render(<InstanceBlock instanceId="周末生存" cover={{ block: "grass_block", hue: 118, image: null }} width={32} />);
     expect(block().dataset.art).toBe("emblem");
     await settle();
     expect(fetchMock.mock.calls.map((c) => c[0]).sort()).toEqual([
@@ -68,7 +70,7 @@ describe("InstanceBlock", () => {
   it("动画材质（16 × 48）当作方块材质，只读首帧 16 × 16", async () => {
     setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
     textureSize = { width: 16, height: 48 };
-    view = render(<InstanceBlock instanceId="i0" cover={{ block: "prismarine_bricks", hue: 175 }} width={20} />);
+    view = render(<InstanceBlock instanceId="i0" cover={{ block: "prismarine_bricks", hue: 175, image: null }} width={20} />);
     await settle();
     expect(block().dataset.art).toBe("texture");
     const reads = canvas.draws.filter((d) => d.canvas.width === 16 && d.canvas.height === 16 && (d.source as { url?: string }).url !== undefined);
@@ -78,25 +80,53 @@ describe("InstanceBlock", () => {
   it("宽不是 16 的材质回落徽记，并只记一次 warn", async () => {
     setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
     textureSize = { width: 32, height: 32 };
-    view = render(<InstanceBlock instanceId="i1" cover={{ block: "blue_ice", hue: 205 }} width={32} />);
+    view = render(<InstanceBlock instanceId="i1" cover={{ block: "blue_ice", hue: 205, image: null }} width={32} />);
     await settle();
     expect(block().dataset.art).toBe("emblem");
-    view.rerender(<InstanceBlock instanceId="i1" cover={{ block: "blue_ice", hue: 205 }} width={64} />);
+    view.rerender(<InstanceBlock instanceId="i1" cover={{ block: "blue_ice", hue: 205, image: null }} width={64} />);
     expect(warn.mock.calls.filter((c) => String(c[0]).includes("blue_ice")).length).toBe(1);
   });
 
-  it("白名单外的封面显示徽记，不请求任何材质", async () => {
+  it("不在预设也不在本机方块目录里的封面显示徽记，不请求任何材质", async () => {
     setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
-    view = render(<InstanceBlock instanceId="i2" cover={{ block: "diamond_block", hue: 180 }} width={24} />);
+    setBlockCatalog(catalogFromDto({ version_id: "1.21.1", blocks: [] }));
+    view = render(<InstanceBlock instanceId="i2" cover={{ block: "diamond_block", hue: 180, image: null }} width={24} />);
     await settle();
     expect(block().dataset.art).toBe("emblem");
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warn.mock.calls.some((c) => String(c[0]).includes("diamond_block"))).toBe(true);
   });
 
+  it("目录里的有朝向方块：取顶面、侧面、正面三张图画成真材质", async () => {
+    setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
+    setBlockCatalog(
+      catalogFromDto({
+        version_id: "1.21.1",
+        blocks: [{ id: "furnace", top: "block/furnace_top", side: "block/furnace_side", front: "block/furnace_front", top_tint: null, side_tint: null, hue: 0, name_en: "Furnace", name_zh: "熔炉" }],
+      }),
+    );
+    view = render(<InstanceBlock instanceId="i4" cover={{ block: "furnace", hue: 0, image: null }} width={32} />);
+    await settle();
+    expect(block().dataset.art).toBe("texture");
+    const reads = canvas.draws.filter((d) => d.canvas.width === 16 && d.canvas.height === 16 && (d.source as { url?: string }).url !== undefined);
+    expect(reads.map((d) => (d.source as { url: string }).url).sort()).toEqual([
+      "http://petalfall-tex.localhost/art/block/furnace_front.png?v=1.21.1",
+      "http://petalfall-tex.localhost/art/block/furnace_side.png?v=1.21.1",
+      "http://petalfall-tex.localhost/art/block/furnace_top.png?v=1.21.1",
+    ]);
+  });
+
+  it("玩家图片：没有材质源也画成真材质，只取这一张图", async () => {
+    const image = `http://petalfall-tex.localhost/cover/${"e".repeat(40)}`;
+    view = render(<InstanceBlock instanceId="i5" cover={{ block: "grass_block", hue: 118, image }} width={32} />);
+    await settle();
+    expect(block().dataset.art).toBe("texture");
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([image]);
+  });
+
   it("不允许的宽度直接抛错", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
-    expect(() => render(<InstanceBlock instanceId="i3" cover={{ block: "cherry_planks", hue: 345 }} width={48 as never} />)).toThrow("不允许");
+    expect(() => render(<InstanceBlock instanceId="i3" cover={{ block: "cherry_planks", hue: 345, image: null }} width={48 as never} />)).toThrow("不允许");
   });
 });
 
@@ -108,7 +138,7 @@ describe("InstanceAvatarBase", () => {
     [44, 28, 13],
     [56, 32, 17],
   ] as const)("边长 %d：方块宽 %d、圆角 %d", (size, blockWidth, radius) => {
-    view = render(<InstanceAvatarBase instanceId="i" cover={{ block: "cherry_planks", hue: 345 }} size={size} />);
+    view = render(<InstanceAvatarBase instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} size={size} />);
     const avatar = view.container.firstElementChild as HTMLElement;
     expect(avatar.style.width).toBe(`${size}px`);
     expect(avatar.style.borderRadius).toBe(`${radius}px`);
@@ -121,7 +151,7 @@ describe("InstanceAvatarBase", () => {
 
   it("中性底座、选中外环与叠加的状态层", () => {
     view = render(
-      <InstanceAvatarBase instanceId="i" cover={{ block: "cherry_planks", hue: 345 }} size={40} base="neutral" selected>
+      <InstanceAvatarBase instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} size={40} base="neutral" selected>
         <span data-testid="ring" />
       </InstanceAvatarBase>,
     );
@@ -141,13 +171,13 @@ describe("AssemblingBlock", () => {
       act(() => {
         vi.advanceTimersByTime(ms);
       });
-    view = render(<AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345 }} placed={1} />);
+    view = render(<AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} placed={1} />);
     const root = () => view?.container.firstElementChild as HTMLElement;
     expect(root().dataset.placed).toBe("1");
     expect(root().style.width).toBe("28px");
     expect(root().style.height).toBe("32px");
     expect(root().querySelectorAll("[data-face]").length).toBe(3);
-    view.rerender(<AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345 }} placed={3} />);
+    view.rerender(<AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} placed={3} />);
     // 挂载时已落的面不算一次落位，第一个新面不用等间隔
     expect(root().dataset.placed).toBe("1");
     advance(0);
@@ -156,7 +186,7 @@ describe("AssemblingBlock", () => {
     expect(root().dataset.placed).toBe("2");
     advance(1);
     expect(root().dataset.placed).toBe("3");
-    view.rerender(<AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345 }} placed={0} />);
+    view.rerender(<AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} placed={0} />);
     expect(root().dataset.placed).toBe("0");
   });
 });

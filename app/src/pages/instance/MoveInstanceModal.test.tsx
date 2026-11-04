@@ -10,6 +10,7 @@ import { IpcError } from "../../ipc/errors";
 import type { InstanceDto, MoveOutcomeDto, MovePreviewDto } from "../../ipc/instances";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
+import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
@@ -77,16 +78,18 @@ function Routed() {
 
 function Providers({ children }: { children: ReactNode }) {
   return (
-    <LauncherProvider>
-      <ShellProvider>
-        <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
-          <PickFolderProvider value={pickFolder}>
-            {children}
-            <OverlayRoot />
-          </PickFolderProvider>
-        </RemoteImageProvider>
-      </ShellProvider>
-    </LauncherProvider>
+    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+      <LauncherProvider>
+        <ShellProvider>
+          <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
+            <PickFolderProvider value={pickFolder}>
+              {children}
+              <OverlayRoot />
+            </PickFolderProvider>
+          </RemoteImageProvider>
+        </ShellProvider>
+      </LauncherProvider>
+    </AppearanceProvider>
   );
 }
 
@@ -214,6 +217,9 @@ beforeEach(() => {
   ipc.overrides.set("get_instance_settings", () => ({
     description: null,
     cover: null,
+    cover_image: null,
+    background: "follow",
+    background_image: null,
     isolation: "follow_global",
     memory_mb: null,
     java: "auto",

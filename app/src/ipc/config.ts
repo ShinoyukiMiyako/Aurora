@@ -25,6 +25,7 @@ export type ConfigEnumField =
   | "isolation_policy"
   | "appearance.mode"
   | "appearance.accent"
+  | "appearance.cover_background"
   | "after_launch"
   | "language";
 

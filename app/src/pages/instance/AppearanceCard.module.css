@@ -1,0 +1,55 @@
+/* 左侧预览卡面、右侧设置行；窄档上下堆叠，预览在上 */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  gap: var(--sk-gap);
+  align-items: start;
+}
+
+:root[data-sk-tier="compact"] .layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.preview {
+  overflow: hidden;
+  border: 1px solid var(--sk-line);
+  border-radius: var(--sk-r-lg);
+  box-shadow: var(--sk-shadow-sm);
+}
+
+/* 名称落在卡面左下；右侧让出身份方块（宽 64、距右 24）的位置。颜色随卡面形态（art 或媒体）继承 */
+.previewText {
+  --ac-preview-clear: 96px;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  box-sizing: border-box;
+  height: 100%;
+  min-width: 0;
+  padding: var(--sk-space-14) var(--ac-preview-clear) var(--sk-space-12) var(--sk-space-14);
+}
+
+.previewName {
+  overflow: hidden;
+  font-size: var(--sk-fs-section);
+  font-weight: var(--sk-w-title);
+  line-height: var(--sk-lh-section);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.current {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+}
+
+.blockName {
+  overflow: hidden;
+  color: var(--sk-text);
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

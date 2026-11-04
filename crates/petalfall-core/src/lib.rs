@@ -34,6 +34,7 @@ mod authlib;
 pub mod blocked;
 pub mod compat;
 pub mod config;
+pub mod cover_image;
 pub mod crashdiag;
 pub mod deps;
 pub mod error;
@@ -79,7 +80,7 @@ mod workdir;
 pub mod world_backup;
 
 // ---- 门面自身的公开类型 ----
-pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
+pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch, CoverStyle};
 pub use blocked::{BlockedFile, ClaimReport, ClaimedFile};
 pub use compat::{
     Compatibility, InstalledCopy, InstalledSource, InstanceMatch, InstanceSources, MatchState,
@@ -89,6 +90,7 @@ pub use config::{
     MemorySettings, NamedDirectory, ParkedDirectory, PetalfallConfig, PinnedServer,
     WorldBackupSettings,
 };
+pub use cover_image::CoverImageError;
 pub use crashdiag::{CrashClue, CrashReport, CrashSource, CrashSuspect, LaunchLog, ScannedFile};
 pub use deps::{InstallPlan, PlannedItem};
 pub use error::{CoreError, GameDirProblem, JavaPathProblem, OfflineFallbackRefusal, Result};
@@ -143,8 +145,10 @@ pub use world_backup::{
 
 pub use auth::{MSA_CLIENT_ID_ENV, perform_microsoft_login};
 
+pub use art::{ArtDownloadProgress, ArtDownloadStage};
 pub use art::{
-    ArtStatus, DefaultSkin, SkinInfo, TexResponse, TextureService, ThumbError, default_skin,
+    ArtStatus, DefaultSkin, DownloadedClient, SkinInfo, TexResponse, TextureService, ThumbError,
+    default_skin,
 };
 pub use auth::{AuthServerInfo, AuthlibLogin, AuthlibPending};
 
@@ -197,11 +201,11 @@ pub use instances::{
 };
 pub use loaders::{LoaderEndpoints, LoaderVersionInfo, ManifestOverview, VersionRequirements};
 pub use petalfall_instance::{
-    Disposer, GameMode, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallSpec,
-    InstanceContent, IsolationOverride, JavaSelection, LevelInfo, LevelSummary, MarkerError,
-    MarkerStore, NameViolation, PackEntry, PinsViolation, RecycleBin, Resolution,
-    ResolvedIsolation, ResourcePackEntry, SettingsViolation, ShaderPackEntry, VersionSettings,
-    WorldEntry, is_safe_instance_id,
+    CoverBackground, CoverImageSlot, Disposer, GameMode, IncompleteKind, IncompleteMarker,
+    IncompleteOutcome, InstallSpec, InstanceContent, IsolationOverride, JavaSelection, LevelInfo,
+    LevelSummary, MarkerError, MarkerStore, NameViolation, PackEntry, PinsViolation, RecycleBin,
+    Resolution, ResolvedIsolation, ResourcePackEntry, SettingsViolation, ShaderPackEntry,
+    VersionSettings, WorldEntry, cover_image_dir, is_safe_instance_id,
 };
 
 // 各下层 crate 的错误类型：上层（命令边界）要把每一种都映射成稳定的错误码，故全部透传。

@@ -1,4 +1,4 @@
-//! 外观偏好：明暗（日樱 / 夜樱）、强调色、花瓣、樱花林全景背景与减少动画。
+//! 外观偏好：明暗（日樱 / 夜樱）、强调色、花瓣、樱花林全景背景、实例卡面的默认背景与减少动画。
 //!
 //! 偏好跟随本机而非账户，写在全局配置 `appearance` 段里随数据目录走：重装 WebView2、清浏览器
 //! 存储都不会丢。前端在首帧渲染前读它，把明暗与强调色写到根元素上，窗口显示时就是最终外观。
@@ -33,6 +33,19 @@ pub enum AccentColor {
     Moss,
 }
 
+/// 实例卡面的默认背景：实例自己设为「跟随」时用它。
+///
+/// 默认平铺方块材质；本机没有原版材质可读时，界面照样回落成渐变花瓣。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverStyle {
+    /// 色相渐变加像素花瓣。
+    Art,
+    /// 封面方块的材质平铺。
+    #[default]
+    Texture,
+}
+
 /// 完整的外观偏好。配置里缺的字段取默认值，便于以后增项时旧配置照常载入。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -47,6 +60,8 @@ pub struct Appearance {
     pub panorama: bool,
     /// 是否减少动画（与系统的减少动态效果设置取或）。
     pub reduce_motion: bool,
+    /// 实例卡面的默认背景。排在最后：段写成数组形式时，前面几项的位置不能变。
+    pub cover_background: CoverStyle,
 }
 
 impl Default for Appearance {
@@ -57,6 +72,7 @@ impl Default for Appearance {
             petals: true,
             panorama: false,
             reduce_motion: false,
+            cover_background: CoverStyle::Texture,
         }
     }
 }
@@ -72,6 +88,7 @@ pub struct AppearancePatch {
     pub petals: Option<bool>,
     pub panorama: Option<bool>,
     pub reduce_motion: Option<bool>,
+    pub cover_background: Option<CoverStyle>,
 }
 
 impl Appearance {
@@ -88,6 +105,9 @@ impl Appearance {
         }
         if let Some(panorama) = patch.panorama {
             self.panorama = panorama;
+        }
+        if let Some(cover_background) = patch.cover_background {
+            self.cover_background = cover_background;
         }
         if let Some(reduce_motion) = patch.reduce_motion {
             self.reduce_motion = reduce_motion;
@@ -106,6 +126,7 @@ mod tests {
         assert_eq!(a.accent, AccentColor::Sakura);
         assert!(a.petals);
         assert!(!a.panorama);
+        assert_eq!(a.cover_background, CoverStyle::Texture);
         assert!(!a.reduce_motion);
     }
 
@@ -117,6 +138,7 @@ mod tests {
             petals: false,
             panorama: true,
             reduce_motion: true,
+            cover_background: CoverStyle::Art,
         };
         let json = serde_json::to_value(a).unwrap();
         assert_eq!(
@@ -126,6 +148,7 @@ mod tests {
                 "accent": "amethyst",
                 "petals": false,
                 "panorama": true,
+                "cover_background": "art",
                 "reduce_motion": true
             })
         );
@@ -148,6 +171,7 @@ mod tests {
             r#"{"accent":"Sakura"}"#,
             r#"{"mode":"dark"}"#,
             r#"{"mode":""}"#,
+            r#"{"cover_background":"tiles"}"#,
         ] {
             assert!(
                 serde_json::from_str::<Appearance>(bad).is_err(),
@@ -183,6 +207,13 @@ mod tests {
         let before = a;
         a.apply(AppearancePatch::default());
         assert_eq!(a, before);
+
+        a.apply(AppearancePatch {
+            cover_background: Some(CoverStyle::Art),
+            ..AppearancePatch::default()
+        });
+        assert_eq!(a.cover_background, CoverStyle::Art);
+        assert_eq!(a.mode, AppearanceMode::Night);
 
         // 布尔字段能改回 false（区分「不改」与「改成 false」）。
         a.apply(AppearancePatch {

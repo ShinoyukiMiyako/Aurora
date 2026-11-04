@@ -31,6 +31,15 @@ pub fn process_block(bytes: &[u8], has_mcmeta: bool) -> Result<Vec<u8>, String> 
     Ok(bytes.to_vec())
 }
 
+/// 卡面图片的类型：启动器只写 PNG 与 JPEG，其余一律不认。
+pub fn cover_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    match image::guess_format(bytes).ok()? {
+        ImageFormat::Png => Some("image/png"),
+        ImageFormat::Jpeg => Some("image/jpeg"),
+        _ => None,
+    }
+}
+
 /// 校验皮肤图：必须是 64 × 64 或 64 × 32 的 PNG。返回解码后的 RGBA 图供后续取帽子层。
 pub fn validate_skin(bytes: &[u8]) -> Result<RgbaImage, String> {
     let image = decode_png(bytes)?;

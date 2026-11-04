@@ -128,7 +128,7 @@ describe("入队上下文与未看过的失败随任务一起清掉", () => {
       return { id: "新世界" };
     });
     ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
-    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
     ipc.overrides.set("get_instance_settings", () => settings);
     ipc.overrides.set("set_instance_settings", (args) => args.settings);
     const landingScan = deferred<InstanceDto[]>();

@@ -168,6 +168,15 @@
   white-space: nowrap;
 }
 
+/* 名称与眉题自己写了文字色，盖过卡面给的媒体文字色：卡面显示材质平铺或玩家图片时在这里换 */
+.heroCover:is([data-source="texture"], [data-source="remote"]) .heroName {
+  color: var(--sk-on-media);
+}
+
+.heroCover:is([data-source="texture"], [data-source="remote"]) :is(.heroEyebrow, .soft) {
+  color: var(--sk-on-media-2);
+}
+
 /* 改名钮平时隐藏，悬停头图或聚焦时出现；用透明度而不是 display，保留键盘可达 */
 .heroEdit {
   opacity: 0;

@@ -76,7 +76,7 @@ describe("installDevDiagnostics", () => {
     const api = installDevDiagnostics(target);
     await mockInvoke("set_appearance", { patch: { mode: "night", accent: "moss", petals: false, panorama: true, reduce_motion: true } });
     await api.resetMockData();
-    expect(await mockInvoke("get_appearance")).toEqual({ mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false });
+    expect(await mockInvoke("get_appearance")).toEqual({ mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false, cover_background: "texture" });
     expect(reload).toHaveBeenCalledTimes(1);
   });
 

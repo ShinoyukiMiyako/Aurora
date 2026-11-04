@@ -1368,7 +1368,13 @@ mod tests {
         }
 
         assert_eq!(locks.activity("导入中"), Some(InstanceActivity::Installing));
-        let listed = list_instances_with(&facade, &locks).await.unwrap();
+        let listed = list_instances_with(
+            &facade,
+            &locks,
+            &crate::commands::instances::test_textures(),
+        )
+        .await
+        .unwrap();
         let entry = listed.iter().find(|i| i.id == "导入中").unwrap();
         assert_eq!(entry.activity, Some(InstanceActivity::Installing));
         let err = delete_instance_with(&facade, &locks, "导入中", NeverDispose)
@@ -1486,7 +1492,13 @@ mod tests {
         let install = spawn_import("mp-base", "导入中");
         wait_for_dir("导入中").await;
 
-        let listed = list_instances_with(&facade, &locks).await.unwrap();
+        let listed = list_instances_with(
+            &facade,
+            &locks,
+            &crate::commands::instances::test_textures(),
+        )
+        .await
+        .unwrap();
         for (id, new_name) in [("1.20.1", "原版"), (LOADER, "加载器")] {
             let in_use =
                 serde_json::json!({ "id": id, "activity": "inherited", "used_by": "导入中" });
@@ -1609,7 +1621,13 @@ mod tests {
         assert_eq!(err.code, code::CANCELLED);
         assert!(instance.is_dir(), "文件被占着，半成品还在");
         assert_eq!(locks.activity("删不掉"), None, "导入结束后实例名放开");
-        let listed = list_instances_with(&facade, &locks).await.unwrap();
+        let listed = list_instances_with(
+            &facade,
+            &locks,
+            &crate::commands::instances::test_textures(),
+        )
+        .await
+        .unwrap();
         let entry = listed.iter().find(|i| i.id == "删不掉").unwrap();
         let incomplete = entry.incomplete.as_ref().expect("应带未完成标记");
         assert_eq!(incomplete.kind, "modpack");

@@ -295,6 +295,7 @@ type TaskMeta =
   | { type: "move"; instanceId: string };
 
 export type { WorldBackupDto, WorldBackupListDto } from "../ipc/instances";
+export type { CoverImageSlotDto } from "../ipc/instances";
 
 /** 存档备份列表的查询 key：world-backups:<实例 id>:<存档文件夹名>。共用存档的几个实例看到同一份，失效时按前缀整个失效。 */
 export const WORLD_BACKUPS_RESOURCE = "world-backups";
@@ -411,6 +412,11 @@ export interface LauncherActions {
   deleteInstance(id: string, worldCount: number): Promise<void>;
   renameInstance(id: string, name: string): Promise<string>;
   updateInstanceSettings(id: string, patch: Partial<InstanceSettings>): Promise<InstanceSettings>;
+  /**
+   * 把本机一张图片用作卡面背景或封面方块，返回写下的设置（背景位同时把背景设为图片）。与 updateInstanceSettings
+   * 排同一条读改写链；完成后实例设置的查询失效、实例列表重扫（取图键只由列表给出）。失败原样抛给调用方。
+   */
+  importCoverImage(id: string, slot: instancesIpc.CoverImageSlotDto, path: string): Promise<InstanceSettings>;
   /** reinstallLoader：把加载器原样重装一遍，走同一个补全任务；游戏版本、Mod、配置与存档都不变。 */
   repairInstance(id: string, opts?: { launchAfter?: boolean; reinstallLoader?: boolean }): Promise<void>;
   /** 把实例的设置文件存为新实例的默认设置；成功后默认设置的查询失效并通知。 */
@@ -537,10 +543,10 @@ const TASK_COMMANDS = new Set([
 ]);
 
 /**
- * 实例列表里带着结果的实例设置，改了要重扫列表：简介与封面直接显示；隔离会换掉工作目录，列表里的隔离生效值、
- * 存档数与 Mod 数随之变；自定内存直接给出 memoryMb。
+ * 实例列表里带着结果的实例设置，改了要重扫列表：简介、封面与卡面背景直接显示（图片的取图键由列表登记）；
+ * 隔离会换掉工作目录，列表里的隔离生效值、存档数与 Mod 数随之变；自定内存直接给出 memoryMb。
  */
-const LISTED_INSTANCE_SETTINGS = ["description", "cover", "isolation", "memoryMb"] as const;
+const LISTED_INSTANCE_SETTINGS = ["description", "cover", "coverImage", "background", "backgroundImage", "isolation", "memoryMb"] as const;
 
 /** 前端的组合任务：逐项调后端命令，中途失败或取消时前面几项已经落盘。 */
 const COMPOSITE_TASKS = new Set(["install_mods", "update_mods"]);
@@ -1055,6 +1061,9 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
     quickPlay: null,
     description: null,
     cover: meta.cover,
+    coverImage: null,
+    background: "follow",
+    backgroundImage: null,
     pinned,
     status: "installing",
     brokenReason: null,
@@ -3140,6 +3149,14 @@ export class LauncherStore {
         });
         invalidateResources(`settings:${id}`);
         if (LISTED_INSTANCE_SETTINGS.some((key) => key in patch)) await store.fetchInstances();
+        return saved;
+      },
+      async importCoverImage(id, slot, path) {
+        // 导入也写实例设置：与设置的读改写交错时，读改写拿导入之前读到的设置写回会冲掉新图的文件名，
+        // 后端保存后随即清掉这张不再被引用的新图，所以排进同一条链
+        const saved = await store.queueInstanceSettings(id, async () => instanceSettingsFromDto(await instancesIpc.importCoverImage(id, slot, path)));
+        invalidateResources(`settings:${id}`);
+        await store.fetchInstances();
         return saved;
       },
       async repairInstance(id, opts = {}) {

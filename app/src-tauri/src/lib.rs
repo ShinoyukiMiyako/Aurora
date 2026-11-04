@@ -109,6 +109,7 @@ pub fn run() {
             app.manage(TaskJournal::default());
             // -- instances --
             app.manage(commands::instances::InstanceLocks::default());
+            app.manage(commands::art::ArtDownloadSlot::default());
             app.manage(commands::instances::ExportedFiles::default());
             // 上次在提交前后被打断的移动：回滚或补完，配置里的引用跟着改。
             commands::instances::recover_moves_in_background(app.handle());
@@ -179,12 +180,15 @@ pub fn run() {
             commands::accounts::refresh_account,
             // -- art --
             commands::art::art_status,
+            commands::art::art_blocks,
+            commands::art::art_download,
             commands::art::skin_info,
             commands::art::thumb_register,
             // -- instances --
             commands::instances::list_instances,
             commands::instances::get_instance_settings,
             commands::instances::set_instance_settings,
+            commands::instances::import_cover_image,
             commands::instances::list_instance_content,
             commands::instances::get_sidebar_pins,
             commands::instances::set_sidebar_pins,

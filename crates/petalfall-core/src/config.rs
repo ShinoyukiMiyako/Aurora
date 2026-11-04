@@ -451,6 +451,7 @@ const ENUM_FIELDS: &[EnumField] = &[
     EnumField::of::<IsolationPolicy>("isolation_policy"),
     EnumField::of::<crate::appearance::AppearanceMode>("appearance.mode"),
     EnumField::of::<crate::appearance::AccentColor>("appearance.accent"),
+    EnumField::of::<crate::appearance::CoverStyle>("appearance.cover_background"),
     EnumField::of::<AfterLaunch>("after_launch"),
     EnumField::of::<UiLanguage>("language"),
 ];
@@ -1153,6 +1154,7 @@ mod tests {
                 petals: false,
                 panorama: true,
                 reduce_motion: true,
+                cover_background: crate::appearance::CoverStyle::Art,
             },
             ..PetalfallConfig::default()
         };
@@ -1447,6 +1449,7 @@ mod tests {
             ),
             ("appearance.mode", &["day", "night"]),
             ("appearance.accent", &["sakura", "amethyst", "moss"]),
+            ("appearance.cover_background", &["art", "texture"]),
             ("after_launch", &["keep", "minimize", "close"]),
             ("language", &["zh-CN", "en-US"]),
         ];
@@ -1710,6 +1713,7 @@ mod tests {
                 "accent": "moss",
                 "petals": true,
                 "panorama": false,
+                "cover_background": "texture",
                 "reduce_motion": false,
                 "glow": glow,
                 "petal_density": 0,
@@ -1839,7 +1843,14 @@ mod tests {
         let config = ConfigStore::at(&path).load().await.unwrap();
         let mut petalfall =
             Petalfall::for_test(config, dir.path().to_path_buf(), dir.path().to_path_buf());
-        let appearance_keys = ["accent", "mode", "panorama", "petals", "reduce_motion"];
+        let appearance_keys = [
+            "accent",
+            "cover_background",
+            "mode",
+            "panorama",
+            "petals",
+            "reduce_motion",
+        ];
         let keys =
             |value: Value| -> Vec<String> { value.as_object().unwrap().keys().cloned().collect() };
         assert_eq!(
@@ -2056,6 +2067,7 @@ mod tests {
                 "accent": "moss",
                 "petals": true,
                 "panorama": false,
+                "cover_background": "texture",
                 "reduce_motion": false,
                 "glow": true
             })

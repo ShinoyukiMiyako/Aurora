@@ -1190,6 +1190,7 @@ export const ACTION_ERROR = {
   deleteInstance: (name: string) => `没能删除「${name}」`,
   renameInstance: "没能重命名实例",
   instanceSettings: "实例设置没有保存",
+  importCoverImage: "图片没能用到卡面上",
   settings: "设置没有保存",
   gameDirectory: "没能切换游戏目录",
   pin: "侧栏固定没有保存",

@@ -60,7 +60,7 @@ async function create(id: string): Promise<void> {
     return { id };
   });
   ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
-  const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+  const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
   ipc.overrides.set("get_instance_settings", () => settings);
   ipc.overrides.set("set_instance_settings", (args) => args.settings);
   await store.actions.createInstance({ name: id, mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
@@ -166,7 +166,7 @@ describe("发通知之前的等待里落盘的改名：按新名字发", () => {
   });
 
   it("Java 装好后写设置期间改名：通知与启动动作落到新名字", async () => {
-    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
     const written = deferred<void>();
     ipc.overrides.set("install_java", () => JDK_21);
     ipc.overrides.set("get_instance_settings", () => settings);
@@ -289,7 +289,7 @@ describe("改名后点击留着的通知：启动失败的修复动作", () => {
   });
 
   it("改为自动选择 Java：写新名字的实例设置，接着启动新名字", async () => {
-    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "D:/jdk/bin/java.exe", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "D:/jdk/bin/java.exe", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
     ipc.overrides.set("get_instance_settings", () => settings);
     ipc.overrides.set("set_instance_settings", (args) => args.settings);
     await failLaunch("生存", "java_pinned_missing", { path: "D:/jdk/bin/java.exe", pinned_by: "instance" });

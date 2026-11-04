@@ -14,14 +14,14 @@ use std::sync::{Arc, Mutex};
 
 use petalfall_core::folders::validate_game_dir;
 use petalfall_core::{
-    is_safe_instance_id, BackupKind, CoreError, DeletionPreview, Disposer, EventSink, GameSlot,
-    IncompleteKind, IncompleteMarker, IncompleteOutcome, InstanceContent, InstanceError,
-    InstanceInstallOutcome, InstanceRequest, InstanceSummary, InstanceVersion, IsolationOverride,
-    JavaSelection, LevelInfo, LoaderChoice, LoaderKind, ManifestOverview, MarkerError,
-    MarkerSettlement, MoveFollowUp, MoveOutcome, MovePreview, MoveRecovery, MoveRequest, PackEntry,
-    Petalfall, Platform, PlaySummary, Readable, RecycleBin, RepairOutcome, Resolution,
-    TemplateInfo, TemplateOutcome, TemplateSkip, VersionSettings, WorldBackup, WorldBackupList,
-    WorldEntry, WorldScope,
+    is_safe_instance_id, BackupKind, CoreError, CoverBackground, CoverImageSlot, DeletionPreview,
+    Disposer, EventSink, GameSlot, IncompleteKind, IncompleteMarker, IncompleteOutcome,
+    InstanceContent, InstanceError, InstanceInstallOutcome, InstanceRequest, InstanceSummary,
+    InstanceVersion, IsolationOverride, JavaSelection, LevelInfo, LoaderChoice, LoaderKind,
+    ManifestOverview, MarkerError, MarkerSettlement, MoveFollowUp, MoveOutcome, MovePreview,
+    MoveRecovery, MoveRequest, PackEntry, Petalfall, Platform, PlaySummary, Readable, RecycleBin,
+    RepairOutcome, Resolution, TemplateInfo, TemplateOutcome, TemplateSkip, TextureService,
+    VersionSettings, WorldBackup, WorldBackupList, WorldEntry, WorldScope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -615,6 +615,12 @@ pub struct InstanceDto {
     pub isolated: Option<bool>,
     pub description: Option<String>,
     pub cover: Option<String>,
+    /// 封面方块用的玩家图片在材质协议 `/cover/` 下的取图键；没设、设置读不出或文件不见了为 null。
+    pub cover_image: Option<String>,
+    /// 卡面背景：follow / art / texture / image；设置读不出时为 follow。
+    pub background: CoverBackground,
+    /// 卡面背景图片的取图键；何时为 null 同 cover_image。
+    pub background_image: Option<String>,
     /// 实例设置里的最大内存 MB；null 为跟随全局（或设置读不出）。
     pub memory_mb: Option<u32>,
     /// 实例设置文件读不出来的原因；此时 description、cover、memory_mb 为 null。
@@ -667,8 +673,14 @@ pub struct QuickPlaySupportDto {
 #[serde(deny_unknown_fields)]
 pub struct InstanceSettingsDto {
     pub description: Option<String>,
-    /// 封面预设 id（小写字母、数字、下划线）；null 时界面按默认规则推导。
+    /// 封面方块 id（小写字母、数字、下划线）；null 时界面按默认规则推导。
     pub cover: Option<String>,
+    /// 封面方块用的玩家图片文件名（block-<16 位十六进制>.png）；由导入命令写下。
+    pub cover_image: Option<String>,
+    /// 卡面背景：follow / art / texture / image。
+    pub background: CoverBackground,
+    /// 卡面背景图片文件名（background-<16 位十六进制>.png 或 .jpg）；由导入命令写下。
+    pub background_image: Option<String>,
     /// follow_global / enabled / disabled。
     pub isolation: IsolationOverride,
     /// 最大内存 MB；null 跟随全局。
@@ -685,6 +697,9 @@ impl From<VersionSettings> for InstanceSettingsDto {
         Self {
             description: s.description,
             cover: s.cover,
+            cover_image: s.cover_image,
+            background: s.background,
+            background_image: s.background_image,
             isolation: s.isolation,
             memory_mb: s.memory_mb,
             java: s.java,
@@ -700,6 +715,9 @@ impl From<InstanceSettingsDto> for VersionSettings {
         Self {
             description: s.description,
             cover: s.cover,
+            cover_image: s.cover_image,
+            background: s.background,
+            background_image: s.background_image,
             isolation: s.isolation,
             memory_mb: s.memory_mb,
             java: s.java,
@@ -1047,14 +1065,15 @@ fn instance_dto(
     activity: Option<InstanceActivity>,
     play: Readable<Option<&PlaySummary>>,
 ) -> InstanceDto {
-    let (description, cover, memory_mb, settings_error) = match summary.settings {
+    let (description, cover, background, memory_mb, settings_error) = match summary.settings {
         Readable::Read(settings) => (
             settings.description,
             settings.cover,
+            settings.background,
             settings.memory_mb,
             None,
         ),
-        Readable::Unreadable(error) => (None, None, None, Some(error)),
+        Readable::Unreadable(error) => (None, None, CoverBackground::Follow, None, Some(error)),
     };
     let (modpack, modpack_error) = match summary.modpack {
         Readable::Read(modpack) => (
@@ -1096,6 +1115,10 @@ fn instance_dto(
         isolated: None,
         description,
         cover,
+        // 取图键要登记进材质服务，由 list_instances_with 补上
+        cover_image: None,
+        background,
+        background_image: None,
         memory_mb,
         settings_error,
         modpack,
@@ -1331,13 +1354,15 @@ fn parse_loader_choice(name: &str) -> Result<LoaderChoice, CommandError> {
 pub async fn list_instances(
     facade: State<'_, Facade>,
     locks: State<'_, InstanceLocks>,
+    textures: State<'_, TextureService>,
 ) -> Result<Vec<InstanceDto>, CommandError> {
-    list_instances_with(&facade, &locks).await
+    list_instances_with(&facade, &locks, &textures).await
 }
 
 pub(crate) async fn list_instances_with(
     facade: &Facade,
     locks: &InstanceLocks,
+    textures: &TextureService,
 ) -> Result<Vec<InstanceDto>, CommandError> {
     let petalfall = facade.snapshot().await;
     let list = petalfall.list_instances().await.map_err(instance_error)?;
@@ -1362,13 +1387,46 @@ pub(crate) async fn list_instances_with(
                 Readable::Read(plays) => Readable::Read(plays.get(&summary.id)),
                 Readable::Unreadable(reason) => Readable::Unreadable(reason.clone()),
             };
+            let (cover_image, background_image) = match &summary.settings {
+                Readable::Read(settings) => (
+                    cover_image_key(textures, &summary, settings.cover_image.as_deref()),
+                    cover_image_key(textures, &summary, settings.background_image.as_deref()),
+                ),
+                Readable::Unreadable(_) => (None, None),
+            };
             InstanceDto {
                 used_by,
                 base_busy,
+                cover_image,
+                background_image,
                 ..instance_dto(summary, activity, play)
             }
         })
         .collect())
+}
+
+/// 测试里列实例用的材质服务：列实例只往里登记路径、不写缓存目录，给一个不存在的目录即可。
+#[cfg(test)]
+pub(crate) fn test_textures() -> TextureService {
+    TextureService::new(
+        PathBuf::from("unused-cache"),
+        petalfall_base::http::build_client().expect("测试用 HTTP 客户端构建失败"),
+    )
+}
+
+/// 设置里引用的卡面图片：文件在就登记给材质协议、返回取图键；不在时记 warn 并给 null，卡面回落。
+fn cover_image_key(
+    textures: &TextureService,
+    summary: &InstanceSummary,
+    file: Option<&str>,
+) -> Option<String> {
+    let path = petalfall_core::cover_image_dir(&summary.dir).join(file?);
+    if path.is_file() {
+        Some(textures.register_cover(&path))
+    } else {
+        tracing::warn!(id = %summary.id, path = %path.display(), "设置里引用的卡面图片不见了，卡面回落");
+        None
+    }
 }
 
 /// 读取实例设置；没有自定义过时为默认值。
@@ -1417,6 +1475,48 @@ pub(crate) async fn set_instance_settings_with(
         .await
         .map_err(instance_error)?;
     Ok(settings.into())
+}
+
+/// 把本机一张图片导入成卡面背景（slot 为 background，同时把 background 设为 image）或封面方块（block），
+/// 返回写下的设置；被换下的旧图随之删掉。slot 不认识、path 不是绝对路径，或图片读不了、超过 20 MB、
+/// 不是 PNG/JPEG/WebP、解不开（含边长超过 8192）时报 `invalid_argument`，detail.field 指出是哪一项，
+/// detail.reason 为原因码；设置不变。与写设置同一把占用：改名、删除、新建、补全进行中报 `instance_busy`。
+#[tauri::command]
+pub async fn import_cover_image(
+    id: String,
+    slot: String,
+    path: String,
+    facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
+) -> Result<InstanceSettingsDto, CommandError> {
+    import_cover_image_with(&facade, &locks, &id, &slot, &path).await
+}
+
+pub(crate) async fn import_cover_image_with(
+    facade: &Facade,
+    locks: &InstanceLocks,
+    id: &str,
+    slot: &str,
+    path: &str,
+) -> Result<InstanceSettingsDto, CommandError> {
+    let slot: CoverImageSlot = serde_json::from_value(json!(slot))
+        .map_err(|_| invalid_field("slot", "unknown", format!("不认识的卡面图片位置：{slot}")))?;
+    let source = Path::new(path);
+    // 路径来自系统选择文件对话框；相对路径会按启动器进程的当前目录解析，读到的不是玩家选的那张。
+    if !source.is_absolute() {
+        return Err(invalid_field(
+            "path",
+            "not_absolute",
+            format!("图片路径须是绝对路径：{path}"),
+        ));
+    }
+    let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
+        .import_cover_image(id, slot, source)
+        .await
+        .map_err(instance_error)?
+        .into())
 }
 
 /// 实例的资源包、光影包与存档（从实例运行时的工作目录读）。
@@ -3431,7 +3531,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, common::INSTALL_FAILED);
 
-        let list = list_instances_with(&env.facade, &InstanceLocks::default())
+        let list = list_instances_with(&env.facade, &InstanceLocks::default(), &test_textures())
             .await
             .unwrap();
         assert_eq!(list.len(), 1);
@@ -3658,7 +3758,9 @@ mod tests {
             .unwrap();
         assert!(!outcome.reinstalled);
         assert!(dir.is_dir());
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(list[0].incomplete, None, "补全成功后标记清除");
         let mut saw_marker_stage = false;
         while let Ok(event) = rx.try_recv() {
@@ -3680,7 +3782,9 @@ mod tests {
             .await
             .unwrap_err();
         assert_ne!(err.code, common::CANCELLED);
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let broken = list.iter().find(|i| i.id == "坏库").unwrap();
         let incomplete = broken.incomplete.as_ref().unwrap();
         assert_eq!((incomplete.kind, incomplete.outcome), ("repair", "failed"));
@@ -3735,7 +3839,9 @@ mod tests {
             .unwrap_err();
         assert_ne!(err.code, common::CANCELLED);
         assert_eq!(stage_messages(&mut rx), vec!["查找原版 1.21.1".to_owned()]);
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let incomplete = list[0].incomplete.as_ref().unwrap();
         assert_eq!((incomplete.kind, incomplete.outcome), ("install", "failed"));
         assert_eq!(
@@ -3773,7 +3879,9 @@ mod tests {
             stage_messages(&mut rx),
             vec!["补全实例 FAB 的文件".to_owned()]
         );
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let incomplete = list[0].incomplete.as_ref().unwrap();
         assert_eq!((incomplete.kind, incomplete.outcome), ("repair", "failed"));
         assert_eq!(
@@ -3944,7 +4052,9 @@ mod tests {
         }
 
         assert_eq!(locks.activity("1.20.1"), Some(InstanceActivity::Inherited));
-        let listed = list_instances_with(&env.facade, &locks).await.unwrap();
+        let listed = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let base = listed.iter().find(|i| i.id == "1.20.1").unwrap();
         assert_eq!(base.activity, Some(InstanceActivity::Inherited));
         assert_eq!(base.used_by.as_deref(), Some("FAB"));
@@ -4052,7 +4162,9 @@ mod tests {
             .unwrap();
         let locks = InstanceLocks::default();
 
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(list.len(), 1);
         let entry = &list[0];
         assert_eq!(entry.id, "RLCraft");
@@ -4075,7 +4187,7 @@ mod tests {
         assert!(!dir.exists());
         snapshot.ensure_modpack_name_free("RLCraft").await.unwrap();
         snapshot.check_new_instance_name("RLCraft").await.unwrap();
-        assert!(list_instances_with(&env.facade, &locks)
+        assert!(list_instances_with(&env.facade, &locks, &test_textures())
             .await
             .unwrap()
             .is_empty());
@@ -4150,7 +4262,9 @@ mod tests {
         assert_eq!(locks.activity("生存"), None);
         assert_eq!(locks.activity("1.21.1"), None);
 
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(list[0].id, "生存");
         assert_eq!(list[0].mc_version.as_deref(), Some("1.21.1"));
     }
@@ -4181,7 +4295,9 @@ mod tests {
         rename_instance_with(&env.facade, &locks, "周末生存", "生存服")
             .await
             .unwrap();
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let renamed = list.iter().find(|i| i.id == "生存服").unwrap();
         assert_eq!(renamed.playtime_min, Some(90));
         assert_eq!(renamed.last_played_at, Some(1_761_832_800_000));
@@ -4204,7 +4320,9 @@ mod tests {
             .await
             .unwrap();
         env.vanilla("生存服");
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let fresh = list.iter().find(|i| i.id == "生存服").unwrap();
         assert_eq!(
             fresh.playtime_min,
@@ -4255,11 +4373,15 @@ mod tests {
         };
         let day = || petalfall_core::PlayRange::parse("2026-10-30", "2026-10-30").unwrap();
 
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(played(&list), (Some(90), Some(1_761_832_800_000)));
 
         switch_game_dir(&env, &other).await;
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(
             played(&list),
             (Some(0), None),
@@ -4276,7 +4398,9 @@ mod tests {
             .unwrap();
 
         switch_game_dir(&env, &home).await;
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(played(&list), (Some(90), Some(1_761_832_800_000)));
         let stats = env.facade.snapshot().await.play_stats(day()).await.unwrap();
         assert_eq!(stats.total_minutes, 90);
@@ -4293,7 +4417,9 @@ mod tests {
         write_playtime(&env, "{ broken");
         let locks = InstanceLocks::default();
 
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
 
         let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b"]);
@@ -4311,7 +4437,9 @@ mod tests {
             &env,
             r#"{"format":1,"book":{"instances":{"a":{"total_ms":600000,"last_played_at":1761800000000}},"days":{}}}"#,
         );
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(list[0].playtime_min, Some(10));
         assert_eq!(list[0].last_played_at, Some(1_761_800_000_000));
         assert_eq!(list[0].play_error, None);
@@ -4327,7 +4455,7 @@ mod tests {
         env.vanilla("a");
         write_playtime(&env, r#"{"format":9,"directories":[]}"#);
 
-        let list = list_instances_with(&env.facade, &InstanceLocks::default())
+        let list = list_instances_with(&env.facade, &InstanceLocks::default(), &test_textures())
             .await
             .unwrap();
 
@@ -4429,19 +4557,25 @@ mod tests {
             .share_mode(FILE_SHARE_READ)
             .open(&path)
             .unwrap();
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(played(&list, "a"), (Some(10), Some(1_761_800_000_000)));
         let err = rename_instance_with(&env.facade, &locks, "a", "b")
             .await
             .unwrap_err();
         assert_eq!(err.code, code::PLAY_RECORDS_FAILED);
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(played(&list, "b"), (Some(10), Some(1_761_800_000_000)));
         assert_eq!(played(&list, "留下"), (Some(0), None));
         drop(held);
 
-        list_instances_with(&env.facade, &locks).await.unwrap();
+        list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["format"], 2);
         let ids: Vec<&String> = saved["directories"][0]["book"]["instances"]
@@ -4570,6 +4704,9 @@ mod tests {
         let settings = json!({
             "description": "和朋友的周末",
             "cover": "cherry_planks",
+            "cover_image": null,
+            "background": "texture",
+            "background_image": null,
             "isolation": "enabled",
             "memory_mb": 6144,
             "java": "auto",
@@ -4643,7 +4780,9 @@ mod tests {
         .unwrap();
         let locks = InstanceLocks::default();
         let _guard = locks.acquire("fab", InstanceActivity::Launching).unwrap();
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let fab = list.iter().find(|i| i.id == "fab").unwrap();
         assert_eq!(fab.activity, Some(InstanceActivity::Launching));
         assert_eq!(
@@ -4662,6 +4801,42 @@ mod tests {
         assert_eq!(vanilla.mod_count, Some(0));
         assert_eq!(vanilla.playtime_min, Some(0));
         assert_eq!(vanilla.last_played_at, None);
+    }
+
+    /// 卡面图片：文件在就登记成协议取图键（与材质服务的登记一致），设置里引用了却不见了的给 null。
+    #[tokio::test]
+    async fn list_registers_cover_images_that_exist() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let covers = petalfall_core::cover_image_dir(&dir);
+        std::fs::create_dir_all(&covers).unwrap();
+        std::fs::write(covers.join("block-0123456789abcdef.png"), b"png").unwrap();
+        let settings = VersionSettings {
+            cover: Some("oak_log".into()),
+            cover_image: Some("block-0123456789abcdef.png".into()),
+            background: CoverBackground::Image,
+            background_image: Some("background-0123456789abcdef.jpg".into()),
+            ..VersionSettings::default()
+        };
+        env.facade
+            .snapshot()
+            .await
+            .set_instance_settings("1.21.1", &settings)
+            .await
+            .unwrap();
+
+        let textures = test_textures();
+        let list = list_instances_with(&env.facade, &InstanceLocks::default(), &textures)
+            .await
+            .unwrap();
+        let dto = &list[0];
+        let expected = textures.register_cover(&covers.join("block-0123456789abcdef.png"));
+        assert_eq!(dto.cover_image.as_deref(), Some(expected.as_str()));
+        assert_eq!(dto.background, CoverBackground::Image);
+        assert_eq!(dto.background_image, None);
+        assert_eq!(dto.cover.as_deref(), Some("oak_log"));
+        let value = serde_json::to_value(dto).unwrap();
+        assert_eq!(value["background"], json!("image"));
     }
 
     /// 列表 DTO 带上整合包来源、最近崩溃、存档数、隔离生效值与自定内存；附属文件读不出时
@@ -4795,7 +4970,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let list = list_instances_with(&env.facade, &InstanceLocks::default())
+        let list = list_instances_with(&env.facade, &InstanceLocks::default(), &test_textures())
             .await
             .unwrap();
         let pack = list.iter().find(|i| i.id == "整合包").unwrap();
@@ -4904,7 +5079,8 @@ mod tests {
         let dir = env.vanilla("1.21.1");
         let locks = InstanceLocks::default();
         let settings = json!({
-            "description": "改名途中写进来的", "cover": null, "isolation": "enabled",
+            "description": "改名途中写进来的", "cover": null, "cover_image": null,
+            "background": "follow", "background_image": null, "isolation": "enabled",
             "memory_mb": null, "java": "auto", "jvm_args": "",
             "resolution": { "width": 854, "height": 480 }, "fullscreen": false
         });
@@ -4955,6 +5131,134 @@ mod tests {
             .unwrap();
         assert_eq!(mods, dir.join("mods"));
         assert!(mods.is_dir());
+        assert_eq!(locks.activity("1.21.1"), Some(InstanceActivity::Running));
+    }
+
+    fn opaque_png(path: &Path, width: u32, height: u32) {
+        image::RgbImage::from_pixel(width, height, image::Rgb([40, 160, 90]))
+            .save(path)
+            .unwrap();
+    }
+
+    /// 导入卡面图片返回写下的设置：背景位把 background 切到 image 并记下文件名，方块位记下 cover_image，
+    /// 文件落在实例的卡面图片目录里。
+    #[tokio::test]
+    async fn import_cover_image_returns_the_written_settings() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let locks = InstanceLocks::default();
+        let photo = env.dir.path().join("photo.png");
+        opaque_png(&photo, 30, 20);
+        let photo = photo.to_string_lossy().into_owned();
+
+        let saved = import_cover_image_with(&env.facade, &locks, "1.21.1", "background", &photo)
+            .await
+            .unwrap();
+        assert_eq!(saved.background, CoverBackground::Image);
+        let name = saved.background_image.clone().unwrap();
+        assert!(
+            name.starts_with("background-") && name.ends_with(".jpg") && name.len() == 31,
+            "{name}"
+        );
+        assert!(petalfall_core::cover_image_dir(&dir).join(&name).is_file());
+        assert_eq!(saved.cover_image, None);
+
+        let saved = import_cover_image_with(&env.facade, &locks, "1.21.1", "block", &photo)
+            .await
+            .unwrap();
+        let block = saved.cover_image.clone().unwrap();
+        assert!(
+            block.starts_with("block-") && block.ends_with(".png"),
+            "{block}"
+        );
+        assert_eq!(saved.background_image.as_deref(), Some(name.as_str()));
+        let stored = env
+            .facade
+            .snapshot()
+            .await
+            .instance_settings("1.21.1")
+            .await
+            .unwrap();
+        assert_eq!(InstanceSettingsDto::from(stored), saved);
+    }
+
+    /// 图片与参数的问题都报 invalid_argument，detail.field 指出是哪一项、detail.reason 给原因码；
+    /// 实例不在报 version_not_installed。
+    #[tokio::test]
+    async fn import_cover_image_reports_which_argument_is_wrong() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let locks = InstanceLocks::default();
+        let notes = env.dir.path().join("notes.png");
+        std::fs::write(&notes, "不是图片").unwrap();
+        let photo = env.dir.path().join("photo.png");
+        opaque_png(&photo, 4, 4);
+        let path = |p: &Path| p.to_string_lossy().into_owned();
+        let missing = path(&env.dir.path().join("gone.png"));
+
+        for (slot, file, field, reason) in [
+            ("background", path(&notes), "path", "unsupported_format"),
+            ("block", missing, "path", "unreadable"),
+            ("background", "photo.png".to_owned(), "path", "not_absolute"),
+            ("icon", path(&photo), "slot", "unknown"),
+        ] {
+            let err = import_cover_image_with(&env.facade, &locks, "1.21.1", slot, &file)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, common::INVALID_ARGUMENT, "{file}");
+            let detail = err.detail.unwrap();
+            assert_eq!(detail["field"], field, "{file}");
+            assert_eq!(detail["reason"], reason, "{file}");
+        }
+        assert!(
+            !petalfall_core::cover_image_dir(&dir).exists(),
+            "被拒绝的导入什么都不写"
+        );
+
+        let err = import_cover_image_with(&env.facade, &locks, "不存在", "block", &path(&photo))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, common::VERSION_NOT_INSTALLED);
+    }
+
+    /// 与写设置同一把占用：改名或删除进行中报 instance_busy，图片不写、设置不变；游戏运行中照常可以导入。
+    #[tokio::test]
+    async fn import_cover_image_waits_for_rename_and_delete_but_not_for_the_game() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let locks = InstanceLocks::default();
+        let photo = env.dir.path().join("photo.png");
+        opaque_png(&photo, 8, 8);
+        let photo = photo.to_string_lossy().into_owned();
+
+        for activity in [InstanceActivity::Renaming, InstanceActivity::Deleting] {
+            let held = locks.acquire("1.21.1", activity).unwrap();
+            let err = import_cover_image_with(&env.facade, &locks, "1.21.1", "background", &photo)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            let detail = err.detail.unwrap();
+            assert_eq!(detail["activity"], serde_json::to_value(activity).unwrap());
+            assert_eq!(detail["id"], "1.21.1");
+            drop(held);
+        }
+        assert!(!petalfall_core::cover_image_dir(&dir).exists());
+        let settings = env
+            .facade
+            .snapshot()
+            .await
+            .instance_settings("1.21.1")
+            .await
+            .unwrap();
+        assert_eq!(settings, VersionSettings::default());
+
+        let _game = locks.acquire("1.21.1", InstanceActivity::Running).unwrap();
+        let saved = import_cover_image_with(&env.facade, &locks, "1.21.1", "block", &photo)
+            .await
+            .unwrap();
+        let block = saved.cover_image.unwrap();
+        assert!(block.starts_with("block-"), "{block}");
+        assert!(petalfall_core::cover_image_dir(&dir).join(&block).is_file());
         assert_eq!(locks.activity("1.21.1"), Some(InstanceActivity::Running));
     }
 
@@ -5047,7 +5351,9 @@ mod tests {
         let listed = |id: &'static str| {
             let (facade, locks) = (env.facade.clone(), locks.clone());
             async move {
-                let list = list_instances_with(&facade, &locks).await.unwrap();
+                let list = list_instances_with(&facade, &locks, &test_textures())
+                    .await
+                    .unwrap();
                 list.into_iter()
                     .find(|i| i.id == id)
                     .unwrap_or_else(|| panic!("列表里没有 {id}"))
@@ -7525,7 +7831,7 @@ mod tests {
             ]),
             "{plans:?}"
         );
-        let listed: Vec<String> = list_instances_with(&env.facade, &locks)
+        let listed: Vec<String> = list_instances_with(&env.facade, &locks, &test_textures())
             .await
             .unwrap()
             .into_iter()

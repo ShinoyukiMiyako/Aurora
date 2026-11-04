@@ -484,6 +484,26 @@ export const UPDATE_PREVIEW_COPY = {
 export const SETTINGS_COPY = {
   runningNote: "游戏正在运行，这里的改动会在下次启动时生效。",
 
+  appearanceTitle: "外观",
+  appearanceSubtitle: "实例卡片的背景与封面方块",
+  background: "卡面背景",
+  backgroundFollow: "跟随默认",
+  backgroundImage: "我的图片",
+  backgroundFollowNote: (style: string) => `跟随设置里「外观」选的默认背景，现在是「${style}」。`,
+  backgroundTextureNote: "平铺封面方块的侧面材质，本机读不到材质时画渐变花瓣。",
+  backgroundImageTitle: "背景图片",
+  backgroundImageNote: "居中裁切铺满卡面。换成别的背景时图片还留着，切回来不用重选。",
+  /** 设置里还记着背景图而文件找不到了；inUse 为背景此刻正用着它。 */
+  backgroundImageMissing: (inUse: boolean) =>
+    inUse ? "图片文件找不到了，卡面先画渐变花瓣。换一张，或把它移除。" : "图片文件找不到了，切回「我的图片」时要重新选一张；也可以把它移除。",
+  changeImage: "更换图片",
+  removeImage: "移除图片",
+  block: "封面方块",
+  blockNote: "画在卡面右侧、侧栏与实例库里。",
+  blockImage: "我的图片",
+  pickBlock: "选择方块",
+  pickImageFailed: "没能打开选择图片的对话框",
+
   memoryTitle: "内存",
   memorySubtitle: "分配给 Java 虚拟机的最大内存",
   memoryMode: "内存分配方式",

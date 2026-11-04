@@ -59,7 +59,8 @@ pub use naming::{
 };
 
 pub use settings::{
-    JavaSelection, Resolution, SettingsViolation, VersionSettings, VersionSettingsStore,
+    COVER_IMAGE_DIR, CoverBackground, CoverImageSlot, JavaSelection, Resolution, SettingsViolation,
+    VersionSettings, VersionSettingsStore, cover_image_dir,
 };
 
 pub use marker::{

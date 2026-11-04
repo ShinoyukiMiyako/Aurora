@@ -757,7 +757,7 @@ describe("下载队列：状态容器", () => {
   });
 
   it("下载 Java 时指定了实例：装好后把它的 Java 固定为新装的运行时，通知写明", async () => {
-    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
     ipc.overrides.set("get_instance_settings", () => settings);
     ipc.overrides.set("set_instance_settings", (args) => args.settings);
     const store = await startedStore();
