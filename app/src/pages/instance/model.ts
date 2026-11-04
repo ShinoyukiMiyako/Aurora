@@ -8,10 +8,11 @@ import { samePath } from "../../domain/paths";
 import { bestLocalRuntime, isHeapReserveFailure, javaMajorFromDetail, memoryLowerTarget, memoryTarget } from "../../domain/rules";
 import type { Task, TaskError, TaskStatus } from "../../domain/types";
 import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
-import type { JavaInstallationDto } from "../../state/queries/catalog";
-import type { CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, UpdateHold, WorldDto } from "../../state/queries/instance";
+import type { GpuAdaptersDto, JavaInstallationDto } from "../../state/queries/catalog";
+import type { CrashClueDto, CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, UpdateHold, WorldDto } from "../../state/queries/instance";
 import { isActiveTask } from "../../state/tasks";
 import type { TableSort } from "../../ui/Table";
+import { gpuSummary } from "../settings/java-model";
 import { MODS_COPY, OVERVIEW_COPY } from "./copy";
 
 // ---------------------------------------------------------------- 上次崩溃
@@ -41,17 +42,17 @@ export function deletableWorldCount(inst: Pick<InstanceSummary, "isolated" | "wo
 // ---------------------------------------------------------------- 锁定
 
 /** 打开工作子目录与写实例设置被什么挡住。 */
-export type WorkLock = "installing" | "renaming" | "deleting";
+export type WorkLock = "installing" | "renaming" | "deleting" | "moving";
 
 /**
  * 打开 mods、saves、logs 这类工作子目录（缺了要先建出来）与写实例设置时，后端以「改动中」占住实例：
- * 与安装、补全、改名、删除互斥，与启动、运行和别的改动兼容。所以游戏运行中照常可用，只有这几种活动挡住它们；
+ * 与安装、补全、改名、删除、移到别的游戏目录互斥，与启动、运行和别的改动兼容。所以游戏运行中照常可用，只有这几种活动挡住它们；
  * 不提前禁用的话只能等后端以 instance_busy 拒绝后再报错。
- * installing：本实例的安装或补全任务在排队或进行中（前端任务表或后端报告的活动）。
+ * installing：本实例的安装或补全任务在排队或进行中（前端任务表或后端报告的活动）。排着的移动任务由状态层记成 moving。
  */
 export function workLock(installing: boolean, activity: InstanceSummary["activity"]): WorkLock | null {
   if (installing) return "installing";
-  return activity === "renaming" || activity === "deleting" ? activity : null;
+  return activity === "renaming" || activity === "deleting" || activity === "moving" ? activity : null;
 }
 
 // ---------------------------------------------------------------- 整页订阅的启动视图
@@ -101,13 +102,13 @@ export function overviewBanner(view: LaunchViewKind, crashActive: boolean): Over
 
 // ---------------------------------------------------------------- 存档直达
 
-export type EnterWorldBlock = "installing" | "broken" | "unknownVersion" | "legacy" | "backingUp" | InheritedLock | "launching" | "running";
+export type EnterWorldBlock = "installing" | "broken" | "unknownVersion" | "legacy" | "moving" | "backingUp" | InheritedLock | "launching" | "running";
 
 /**
  * 存档行「进入」此刻为什么不能点；能点为 null。自上而下取第一条：实例自身的状态先于版本能力，版本能力先于进行中的
  * 备份与这一局的会话。另一个实例占着游戏进程时照常能点，由启动拦截弹替换确认。
  *
- * 备份或恢复期间、别的实例正以它为基底时后端以 instance_busy 拒绝启动，这里提前禁用。worldTask 是前端排着或进行中的
+ * 移到别的游戏目录、备份或恢复期间、别的实例正以它为基底时后端以 instance_busy 拒绝启动，这里提前禁用。worldTask 是前端排着或进行中的
  * 存档任务：后端还没报 backing_up 时就点进入，会正好撞上马上要占实例的那个任务。
  */
 export function enterWorldBlock(inst: Pick<InstanceSummary, "status" | "quickPlay" | "activity" | "usedBy">, view: LaunchViewKind, worldTask: boolean): EnterWorldBlock | null {
@@ -115,6 +116,7 @@ export function enterWorldBlock(inst: Pick<InstanceSummary, "status" | "quickPla
   if (inst.status === "broken") return "broken";
   if (inst.quickPlay === null) return "unknownVersion";
   if (!inst.quickPlay.singleplayer) return "legacy";
+  if (inst.activity === "moving") return "moving";
   if (inst.activity === "backing_up" || worldTask) return "backingUp";
   if (inst.usedBy !== null) return { kind: "inherited", usedBy: inst.usedBy };
   if (view === "loading") return "launching";
@@ -713,9 +715,27 @@ export type CrashFix =
   | { kind: "view_mod"; category: DisableCategory | "dependency_version_mismatch"; fileName: string; name: string }
   | { kind: "keep_latest"; disable: { fileName: string; name: string }[] }
   | { kind: "repair"; category: "native_library_missing" | "corrupted_jar"; changeGameDir: boolean; renameInstance: boolean }
-  /** category 是这份报告里第一条显卡或本地崩溃类线索的类别，三类共用这一条。 */
-  | { kind: "driver_steps"; category: "graphics_driver" | "intel_graphics_driver" | "native_crash"; javaPath: string | null }
+  /**
+   * category 是这份报告里第一条显卡或本地崩溃类线索的类别，三类共用这一条。
+   * gpu 不为 null 时这一行的主按钮是「改用独立显卡」，条件见 {@link dedicatedGpuOffer}。
+   */
+  | { kind: "driver_steps"; category: "graphics_driver" | "intel_graphics_driver" | "native_crash"; javaPath: string | null; gpu: DedicatedGpuOffer | null }
   | { kind: "compare_log" };
+
+/** 改用独立显卡的提议：写哪个 java，以及说明里两块显卡的名字。 */
+export interface DedicatedGpuOffer {
+  javaPath: string;
+  highPerformance: string;
+  powerSaving: string;
+}
+
+/** 直接指向显卡的线索：游戏没能用上 OpenGL，或死在 Intel 核显的驱动里。本地崩溃只是没找到原因的兜底，不算。 */
+const GRAPHICS_CATEGORIES: readonly CrashClueDto["category"][] = ["graphics_driver", "intel_graphics_driver"];
+
+/** 报告里有直接指向显卡的线索：只有这时才要读本机显卡，推「改用独立显卡」。 */
+export function hasGraphicsClue(report: CrashReportDto): boolean {
+  return report.diagnoses.some((clue) => GRAPHICS_CATEGORIES.includes(clue.category));
+}
 
 export interface CrashFixContext {
   /** 实例当前生效的最大内存与是否跟随全局。 */
@@ -728,6 +748,22 @@ export interface CrashFixContext {
   runtimes: readonly JavaInstallationDto[];
   /** 游戏版本要求的主版本（detail 推不出时用）；版本读不出时为 null。 */
   requiredJava: number | null;
+  /** 本机显卡；报告里没有显卡线索时不读，为 null。 */
+  gpu: GpuAdaptersDto | null;
+  /** 全局的独显偏好是否已开。 */
+  preferDedicatedGpu: boolean;
+}
+
+/**
+ * 改用独立显卡只在真能换显卡时才提：两块能切换的显卡、独显偏好还没开、知道这次崩溃用的是哪个 java（要立即把它设成高性能）。
+ * 独显偏好已开时游戏本就该跑在独显上，再点一次什么也不会变。
+ */
+function dedicatedGpuOffer(report: CrashReportDto, ctx: CrashFixContext): DedicatedGpuOffer | null {
+  if (ctx.gpu === null) throw new Error("报告里有显卡线索，推一键尝试前必须先读到本机显卡");
+  if (ctx.preferDedicatedGpu || report.java === null) return null;
+  const summary = gpuSummary(ctx.gpu);
+  if (summary.kind !== "switchable") return null;
+  return { javaPath: report.java.path, highPerformance: summary.highPerformance.name, powerSaving: summary.powerSaving.name };
 }
 
 /** mods 目录里的 jar：命中行里出现的路径落在 mods/ 下时，对到那个文件。 */
@@ -764,7 +800,8 @@ function isPrerequisite(target: InstalledMod, mods: readonly InstalledMod[]): bo
 /**
  * 按线索推出的一键尝试，同一类别只出一条（取第一条线索），末尾固定「对照完整日志」。
  * 不同类别推出同一个动作（比如两条线索都指向停用同一个文件）时只留第一条，键不重复。
- * 一键尝试只改实例设置（可撤销）或建任务（可在任务里取消），不改全局设置、不删除文件。
+ * 一键尝试只改实例设置（可撤销）或建任务（可在任务里取消），不删除文件。唯一改全局设置的是改用独立显卡：显卡偏好本来就只有
+ * 全局一个开关，还会写进 Windows 图形设置，所以不给撤销，改回去走设置页的开关。
  */
 export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashFix[] {
   const fixes: CrashFix[] = [];
@@ -869,9 +906,11 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         break;
       case "graphics_driver":
       case "intel_graphics_driver":
+        // 与本地崩溃的处理办法相同，键都是 driver_steps：只留第一条出现的类别
+        push({ kind: "driver_steps", category: clue.category, javaPath: report.java === null ? null : report.java.path, gpu: dedicatedGpuOffer(report, ctx) });
+        break;
       case "native_crash":
-        // 三类的处理办法相同，键都是 driver_steps：只留第一条出现的类别
-        push({ kind: "driver_steps", category: clue.category, javaPath: report.java === null ? null : report.java.path });
+        push({ kind: "driver_steps", category: clue.category, javaPath: report.java === null ? null : report.java.path, gpu: null });
         break;
       case "corrupted_jar": {
         const mod = corruptedModFile(clue.matched, ctx.mods);
@@ -879,6 +918,9 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
         else push({ kind: "repair", category: "corrupted_jar", changeGameDir: false, renameInstance: false });
         break;
       }
+      case "manual_debug_crash":
+        // 玩家自己按出来的崩溃没有要修的东西
+        break;
       case "loopback_unavailable":
         // 卡在玩家系统的临时目录或安全软件上，实例设置与任务都够不着，线索卡的解释就是全部办法
         break;

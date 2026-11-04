@@ -5,7 +5,7 @@ import { TASK_KIND_LABEL, taskStatusLabel } from "../../copy/flows";
 import { percent } from "../../domain/format";
 import type { Task, TaskStatus } from "../../domain/types";
 import { cx } from "../../lib/util";
-import { isActiveTask, progressTrack } from "../../state/tasks";
+import { isActiveTask, progressTrack, settledOnRestart } from "../../state/tasks";
 import { Button } from "../../ui/Button";
 import { IconButton } from "../../ui/IconButton";
 import { ListRow } from "../../ui/ListRow";
@@ -109,8 +109,9 @@ export function TaskRow({ task, meta, hasInstance, retryBlocked, onCancel, onRet
         <span className={styles.side}>
           {task.status === "running" && <span className={styles.pct}>{percent(task.progress)}</span>}
           {active && <IconButton icon="x" label={TASKS_COPY.row.cancel} size="sm" onClick={onCancel} />}
-          {/* 文件没到手时重试必然还是这个结果：清单找齐后由它重排任务 */}
+          {/* 文件没到手时重试必然还是这个结果：清单找齐后由它重排任务。关闭时中断的移动已由后端收尾，没有可重试的 */}
           {task.status === "failed" &&
+            !settledOnRestart(task) &&
             (task.error?.blocked_files === undefined ? (
               <Button variant="secondary" size="sm" disabledReason={retryBlocked} onClick={onRetry}>
                 {TASKS_COPY.row.retry}

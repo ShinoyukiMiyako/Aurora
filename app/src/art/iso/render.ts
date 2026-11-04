@@ -10,13 +10,26 @@ export type FaceSet = Readonly<Record<IsoFace, Pixels>>;
 
 const DRAW_ORDER: readonly IsoFace[] = ["left", "right", "top"];
 
-/** 真材质：染色 -> 明暗 -> 小尺寸档重采样到 n × n。 */
-export function prepareFaces(top: Pixels, side: Pixels, topTint: Rgb | null, n: number): FaceSet {
+/** 一块方块三类面的原始像素（16 × 16）与染色。 */
+export interface FacePixels {
+  top: Pixels;
+  side: Pixels;
+  /** 有朝向的方块（熔炉等）的正面；没有时左面也画侧面。 */
+  front: Pixels | null;
+  topTint: Rgb | null;
+  /** 侧面与正面共用的乘色（树叶）。 */
+  sideTint: Rgb | null;
+}
+
+/** 真材质：染色 -> 明暗 -> 小尺寸档重采样到 n × n。有正面时画在左面，右面仍是侧面。 */
+export function prepareFaces(faces: FacePixels, n: number): FaceSet {
   const fit = (p: Pixels) => (n === p.width ? p : resampleArea(p, n));
-  const topBase = topTint ? tintPixels(top, topTint) : top;
+  const tinted = (p: Pixels, tint: Rgb | null) => (tint ? tintPixels(p, tint) : p);
+  const side = tinted(faces.side, faces.sideTint);
+  const front = faces.front ? tinted(faces.front, faces.sideTint) : side;
   return {
-    top: fit(shadePixels(topBase, FACE_SHADE.top)),
-    left: fit(shadePixels(side, FACE_SHADE.left)),
+    top: fit(shadePixels(tinted(faces.top, faces.topTint), FACE_SHADE.top)),
+    left: fit(shadePixels(front, FACE_SHADE.left)),
     right: fit(shadePixels(side, FACE_SHADE.right)),
   };
 }
@@ -90,7 +103,7 @@ export class LruCache<K, V> {
   }
 }
 
-/** 尺寸不合规的材质（材质源版本 | 方块）：只记一次 warn，之后直接回落。 */
+/** 尺寸不合规的方块来源（按来源键）：只记一次 warn，之后直接回落。 */
 const invalidSources = new Set<string>();
 
 // 被挤出的位图不主动 close：同一次提交里可能还有组件拿着它等待绘制，交给垃圾回收
@@ -110,29 +123,40 @@ export function emblemBitmap(instanceId: string, hue: number, layout: IsoLayout,
 }
 
 export interface BlockSource {
-  /** 材质源版本：换版本即换缓存键。 */
-  versionId: string;
-  coverId: string;
-  topTint: Rgb | null;
+  /**
+   * 来源键：本机材质为 block|材质源版本|方块 id，玩家图片为 image|协议地址（文件名带内容哈希，换图即换地址）。
+   * 同一个键必须对应同样的面与染色，位图缓存靠它命中。
+   */
+  key: string;
   top: ImageBitmap;
   side: ImageBitmap;
+  /** 正面，画在等距方块的左面；没有为 null。 */
+  front: ImageBitmap | null;
+  topTint: Rgb | null;
+  /** 侧面与正面的乘色。 */
+  sideTint: Rgb | null;
 }
 
 /**
- * 真材质方块，键为 材质源版本 | 方块 | 宽度 | dpr（| 单面）。材质尺寸不合规时返回 null 并记 warn，
+ * 真材质方块，键为 来源键 | 宽度 | dpr（| 单面）。材质尺寸不合规时返回 null 并记 warn，
  * 调用方显示实例徽记。
  */
 export function blockBitmap(source: BlockSource, layout: IsoLayout, dpr: number, only?: IsoFace): ImageBitmap | null {
-  const sourceKey = `${source.versionId}|${source.coverId}`;
-  if (invalidSources.has(sourceKey)) return null;
-  for (const [name, bitmap] of [["顶面", source.top], ["侧面", source.side]] as const) {
-    if (!validTextureSize(bitmap.width, bitmap.height)) {
-      invalidSources.add(sourceKey);
-      console.warn(`[art] ${source.coverId} 的${name}材质尺寸 ${bitmap.width}x${bitmap.height} 不是宽 16 的方块材质，改用实例徽记`);
+  if (invalidSources.has(source.key)) return null;
+  for (const [name, bitmap] of [["顶面", source.top], ["侧面", source.side], ["正面", source.front]] as const) {
+    if (bitmap !== null && !validTextureSize(bitmap.width, bitmap.height)) {
+      invalidSources.add(source.key);
+      console.warn(`[art] ${source.key} 的${name}材质尺寸 ${bitmap.width}x${bitmap.height} 不是宽 16 的方块材质，改用实例徽记`);
       return null;
     }
   }
-  return cached(`${source.versionId}|${source.coverId}|${layout.width}|${dpr}|${only ?? "all"}`, () =>
-    renderIso(prepareFaces(readPixels(source.top, 0, 0, 16, 16), readPixels(source.side, 0, 0, 16, 16), source.topTint, layout.n), layout, dpr, only),
+  const read = (bitmap: ImageBitmap) => readPixels(bitmap, 0, 0, 16, 16);
+  return cached(`${source.key}|${layout.width}|${dpr}|${only ?? "all"}`, () =>
+    renderIso(
+      prepareFaces({ top: read(source.top), side: read(source.side), front: source.front === null ? null : read(source.front), topTint: source.topTint, sideTint: source.sideTint }, layout.n),
+      layout,
+      dpr,
+      only,
+    ),
   );
 }

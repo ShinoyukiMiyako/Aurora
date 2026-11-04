@@ -79,9 +79,11 @@ export function worldLockReasons(input: WorldLockInput): { backup: string | unde
         ? WORLD_BLOCKER_LABEL.renaming
         : input.activity === "deleting"
           ? WORLD_BLOCKER_LABEL.deleting
-          : input.activity === "backing_up" || input.worldTask
-            ? WORLD_BLOCKER_LABEL.backing_up
-            : null;
+          : input.activity === "moving"
+            ? WORLD_BLOCKER_LABEL.moving
+            : input.activity === "backing_up" || input.worldTask
+              ? WORLD_BLOCKER_LABEL.backing_up
+              : null;
   if (blocker === null) {
     return { backup: undefined, restore: input.savesExport ? COPY.blocked(input.name, WORLD_BLOCKER_LABEL.exporting) : undefined };
   }

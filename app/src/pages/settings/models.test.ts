@@ -3,7 +3,7 @@ import { instanceFromDto } from "../../domain/adapt";
 import { runtimeComplete } from "../../domain/rules";
 import type { GpuAdapterDto, JavaInstallationDto } from "../../state/queries/catalog";
 import { instanceDto } from "../../test/launcher";
-import { dirName, hasBang, overAvailable, unrecorded } from "./game-model";
+import { overAvailable, unrecorded } from "./game-model";
 import {
   defaultDownloadMajor,
   gpuSummary,
@@ -220,26 +220,13 @@ describe("显卡说明", () => {
 });
 
 describe("游戏目录推导", () => {
-  it("「!」会被拒绝", () => {
-    expect(hasBang("D:/Games/Hi!/.minecraft")).toBe(true);
-    expect(hasBang("D:/Games/.minecraft")).toBe(false);
-  });
-
-  it("显示名取最后一段，.minecraft 取上一级；空路径抛错", () => {
-    expect(dirName("D:\\Games\\PCL\\.minecraft\\")).toBe("PCL");
-    expect(dirName("D:\\Games\\Modded")).toBe("Modded");
-    expect(dirName("E:/.minecraft")).toBe("E:");
-    expect(dirName("E:/")).toBe("E:");
-    expect(() => dirName("  ")).toThrow("没有可显示的名称");
-  });
-
   it("未登记的探测结果去掉当前目录与已登记的目录", () => {
     const discovered = [
       { name: "当前", path: "D:/Games/.minecraft" },
       { name: "PCL", path: "E:\\PCL\\.minecraft" },
       { name: "官方", path: "C:/Users/me/AppData/Roaming/.minecraft" },
     ];
-    const known = [{ name: "PCL", path: "e:/pcl/.minecraft", is_current: false, available: true }];
+    const known = [{ name: "PCL", path: "e:/pcl/.minecraft", is_current: false, available: true, version_count: 3 }];
     expect(unrecorded(discovered, known, "d:\\games\\.minecraft")).toEqual([discovered[2]]);
   });
 

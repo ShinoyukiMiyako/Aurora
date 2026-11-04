@@ -6,8 +6,8 @@
 .home {
   /* 第一排（问候、继续游玩，wide 档还有洞察）的最小高度 */
   --home-row-one: 300px;
-  /* 问候卡底栏右侧给角色立绘让出的宽度 */
-  --home-figure-room: 112px;
+  /* 问候卡底栏右侧给角色立绘让出的宽度：6 倍档投影外框的左缘离卡片右缘 124 */
+  --home-figure-room: 124px;
   /* 继续游玩标题区给右侧方块让出的宽度，以及方块离右边缘的距离 */
   --home-block-room: 150px;
   --home-block-right: 40px;
@@ -31,6 +31,11 @@
   --home-signal-3: 13px;
   --home-signal-4: 16px;
   --home-online-dot: 6px;
+}
+
+/* 紧凑档立绘是 5 倍，外框左缘只到 106 */
+:global(:root[data-sk-tier="compact"]) .home {
+  --home-figure-room: 112px;
 }
 
 :global(:root[data-sk-tier="wide"]) .home {
@@ -228,6 +233,13 @@
   justify-content: center;
 }
 
+.emptyActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sk-space-10);
+}
+
 .heroFrame {
   position: relative;
   display: flex;
@@ -261,6 +273,33 @@
   gap: var(--sk-space-14);
   min-width: 0;
   padding: var(--sk-space-20) var(--sk-space-24) var(--sk-space-22);
+}
+
+/*
+ * 内容不在卡面内部，接不到卡面的媒体文字色：卡面显示材质平铺或玩家图片时在这里换。
+ * 只换直接压在卡面上的文字与没有底的描边标签，不透明底的按钮不动，也不加文字阴影；半透明底的标签另垫表面色（见下）。
+ */
+.heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) {
+  --tag-ink: var(--sk-on-media-2);
+  --tag-ink-strong: var(--sk-on-media);
+  --tag-line: var(--sk-on-media-2);
+}
+
+.heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) :is(.heroName, .heroWhen, .heroLine) {
+  text-shadow: var(--sk-media-text-shadow);
+}
+
+.heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) .heroName {
+  color: var(--sk-on-media);
+}
+
+.heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) :is(.heroWhen, .heroLine) {
+  color: var(--sk-on-media-2);
+}
+
+/* 「继续游玩」标签的柔色底是半透明的，压在深色压暗上粉字读不清：垫一层表面色，字照常用强调色 */
+.heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) .heroTag {
+  background-color: var(--sk-surface);
 }
 
 .heroTop {

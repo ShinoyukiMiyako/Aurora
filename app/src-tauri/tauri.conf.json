@@ -38,7 +38,7 @@
         "style-src": "'self' 'unsafe-inline'",
         "img-src": "'self'",
         "font-src": "'self'",
-        "connect-src": "'self' ipc: http://ipc.localhost aurora-tex: http://aurora-tex.localhost data:",
+        "connect-src": "'self' ipc: http://ipc.localhost petalfall-tex: http://petalfall-tex.localhost data:",
         "base-uri": "'none'",
         "form-action": "'none'",
         "frame-ancestors": "'none'"
@@ -48,6 +48,14 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Shinoyuki_Miyako",
+    "copyright": "Copyright (C) 2026 Shinoyuki_Miyako",
+    "licenseFile": "../../LICENSE",
+    "resources": {
+      "../../LICENSE": "LICENSE",
+      "../../LICENSE-ADDITIONAL-TERMS.md": "LICENSE-ADDITIONAL-TERMS.md",
+      "../../LICENSE-ASSETS.md": "LICENSE-ASSETS.md"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -56,6 +64,15 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "languages": ["English", "SimpChinese"],
+        "installerHooks": "installer-hooks.nsh"
+      },
       "wix": {
         "upgradeCode": "193d3334-0a08-54d3-aeaa-cd60d51b2f6a"
       }

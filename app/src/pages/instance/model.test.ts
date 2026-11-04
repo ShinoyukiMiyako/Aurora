@@ -3,7 +3,7 @@ import { CRASH_CATEGORIES, type CrashCategoryName } from "../../copy/flows";
 import { bestLocalRuntime, runtimeComplete } from "../../domain/rules";
 import type { Task } from "../../domain/types";
 import type { LaunchView } from "../../launch/launchView";
-import type { JavaInstallationDto } from "../../state/queries/catalog";
+import type { GpuAdapterDto, GpuAdaptersDto, JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashClueDto, CrashReportDto, HistoryEvent, InstalledMod, UpdateCandidate, UpdateHold, WorldDto } from "../../state/queries/instance";
 import { applyPhase, sessionLaunched, startSession } from "../../state/session";
 import { newTask } from "../../state/tasks";
@@ -25,6 +25,7 @@ import {
   enabledFileName,
   filterMods,
   hasFlags,
+  hasGraphicsClue,
   historyItems,
   installStage,
   instanceFolderPath,
@@ -136,6 +137,21 @@ function report(diagnoses: CrashClueDto[], over: Partial<CrashReportDto> = {}): 
   };
 }
 
+function gpuAdapter(name: string, over: Partial<GpuAdapterDto> = {}): GpuAdapterDto {
+  return { name, vendor_id: 0x10de, dedicated_video_memory_mb: 8188, high_performance: false, power_saving: false, ...over };
+}
+
+/** 台式机只接一块独显：两种偏好挑的是同一块，开不开独显偏好都不换显卡。 */
+const SINGLE_GPU: GpuAdaptersDto = { adapters: [gpuAdapter("AMD Radeon RX 7800 XT", { vendor_id: 0x1002, high_performance: true, power_saving: true })], switchable: false };
+/** 笔记本的核显加独显：省电偏好挑核显，高性能偏好挑独显。 */
+const HYBRID_GPU: GpuAdaptersDto = {
+  adapters: [
+    gpuAdapter("NVIDIA GeForce RTX 4060 Laptop GPU", { high_performance: true }),
+    gpuAdapter("Intel(R) UHD Graphics", { vendor_id: 0x8086, dedicated_video_memory_mb: 128, power_saving: true }),
+  ],
+  switchable: true,
+};
+
 const ctx = (over: Partial<CrashFixContext> = {}): CrashFixContext => ({
   memoryMb: 4096,
   followsGlobal: true,
@@ -144,6 +160,8 @@ const ctx = (over: Partial<CrashFixContext> = {}): CrashFixContext => ({
   jvmArgs: "",
   runtimes: [],
   requiredJava: 21,
+  gpu: SINGLE_GPU,
+  preferDedicatedGpu: false,
   ...over,
 });
 
@@ -850,7 +868,7 @@ describe("一键尝试", () => {
       changeGameDir: true,
       renameInstance: true,
     });
-    expect(crashFixes(report([clue("graphics_driver")]), ctx())[0]).toEqual({ kind: "driver_steps", category: "graphics_driver", javaPath: "C:/jdk/bin/java.exe" });
+    expect(crashFixes(report([clue("graphics_driver")]), ctx())[0]).toEqual({ kind: "driver_steps", category: "graphics_driver", javaPath: "C:/jdk/bin/java.exe", gpu: null });
     const mods = [mod("badmod-1.jar")];
     expect(crashFixes(report([clue("corrupted_jar", { matched: "zip END header not found D:\\mc\\mods\\badmod-1.jar" })]), ctx({ mods }))[0]).toEqual({
       kind: "disable_mod",
@@ -875,6 +893,7 @@ describe("一键尝试", () => {
 describe("一键尝试：每个诊断类别都有落点", () => {
   // CRASH_CATEGORIES 在 crash-sync.test.ts 里与后端枚举对齐，所以后端新增类别时这张表编译不过或遍历挂掉，不会等到玩家的崩溃页才炸
   const BARE_CLUE_FIXES: Readonly<Record<CrashCategoryName, readonly CrashFix["kind"][]>> = {
+    manual_debug_crash: ["compare_log"],
     java_version_mismatch: ["download_java", "compare_log"],
     out_of_memory: ["raise_memory", "compare_log"],
     jvm_args_invalid: ["jvm_args", "compare_log"],
@@ -1098,14 +1117,15 @@ describe("一键尝试：版本、语言支持、OptiFine 与本地崩溃", () =
       kind: "driver_steps",
       category: "intel_graphics_driver",
       javaPath: "C:/jdk/bin/java.exe",
+      gpu: null,
     });
     const nativeClue = clue("native_crash", { detail: "0xC0000005", matched: "", line: 0, source: "exit_code" });
-    expect(crashFixes(report([nativeClue], { java: null }), ctx())).toEqual([{ kind: "driver_steps", category: "native_crash", javaPath: null }, { kind: "compare_log" }]);
+    expect(crashFixes(report([nativeClue], { java: null }), ctx())).toEqual([{ kind: "driver_steps", category: "native_crash", javaPath: null, gpu: null }, { kind: "compare_log" }]);
   });
 
   it("显卡、Intel 显卡与本地崩溃同在一份报告里只出一条处理办法，取第一条出现的类别", () => {
     const fixes = crashFixes(report([clue("intel_graphics_driver"), clue("graphics_driver"), clue("native_crash", { source: "exit_code" })]), ctx());
-    expect(fixes).toEqual([{ kind: "driver_steps", category: "intel_graphics_driver", javaPath: "C:/jdk/bin/java.exe" }, { kind: "compare_log" }]);
+    expect(fixes).toEqual([{ kind: "driver_steps", category: "intel_graphics_driver", javaPath: "C:/jdk/bin/java.exe", gpu: null }, { kind: "compare_log" }]);
     const reversed = crashFixes(report([clue("graphics_driver"), clue("intel_graphics_driver")]), ctx());
     expect(reversed.map((f) => (f.kind === "driver_steps" ? f.category : f.kind))).toEqual(["graphics_driver", "compare_log"]);
   });
@@ -1145,5 +1165,72 @@ describe("一键尝试：版本、语言支持、OptiFine 与本地崩溃", () =
       "disable_mod:badmod-1.jar",
       "compare_log",
     ]);
+  });
+});
+
+describe("一键尝试：改用独立显卡", () => {
+  const HYBRID_OFFER = { javaPath: "C:/jdk/bin/java.exe", highPerformance: "NVIDIA GeForce RTX 4060 Laptop GPU", powerSaving: "Intel(R) UHD Graphics" };
+  const gpuOf = (fixes: CrashFix[]) => {
+    const steps = fixes.find((f) => f.kind === "driver_steps");
+    if (steps === undefined || steps.kind !== "driver_steps") throw new Error("应有处理办法这一行");
+    return steps.gpu;
+  };
+
+  it.each(["graphics_driver", "intel_graphics_driver"] as const)("%s：双显卡、独显偏好没开、报告记着 java，主按钮写这个 java 并报出两块显卡", (category) => {
+    const fixes = crashFixes(report([clue(category)]), ctx({ gpu: HYBRID_GPU }));
+    expect(fixes).toEqual([{ kind: "driver_steps", category, javaPath: "C:/jdk/bin/java.exe", gpu: HYBRID_OFFER }, { kind: "compare_log" }]);
+    expect(crashFixKey(fixes[0])).toBe("driver_steps");
+  });
+
+  it("显卡名字按偏好标志取，与列表顺序无关", () => {
+    const shuffled: GpuAdaptersDto = { adapters: [...HYBRID_GPU.adapters].reverse(), switchable: true };
+    expect(gpuOf(crashFixes(report([clue("graphics_driver")]), ctx({ gpu: shuffled })))).toEqual(HYBRID_OFFER);
+  });
+
+  it("用的是报告里那一次崩溃的 java，不是本机别的 Java", () => {
+    const javaPath = "D:/games/runtime/java-runtime-delta/bin/javaw.exe";
+    const fixes = crashFixes(report([clue("intel_graphics_driver")], { java: { major: 21, path: javaPath, is_64bit: true } }), ctx({ gpu: HYBRID_GPU, runtimes: [java("C:/jdk/bin/java.exe", 21, 5)] }));
+    expect(gpuOf(fixes)).toEqual({ ...HYBRID_OFFER, javaPath });
+  });
+
+  it("换不了显卡时不出按钮，处理办法照旧", () => {
+    const twoButSame: GpuAdaptersDto = {
+      adapters: [gpuAdapter("NVIDIA GeForce RTX 3070", { high_performance: true, power_saving: true }), gpuAdapter("Intel(R) UHD Graphics 770", { vendor_id: 0x8086 })],
+      switchable: false,
+    };
+    const cases: [string, CrashReportDto, CrashFixContext][] = [
+      ["只有一块显卡", report([clue("graphics_driver")]), ctx({ gpu: SINGLE_GPU })],
+      ["两块但两种偏好挑同一块", report([clue("graphics_driver")]), ctx({ gpu: twoButSame })],
+      ["一块显卡都没找到", report([clue("graphics_driver")]), ctx({ gpu: { adapters: [], switchable: false } })],
+      ["独显偏好已开", report([clue("intel_graphics_driver")]), ctx({ gpu: HYBRID_GPU, preferDedicatedGpu: true })],
+      ["报告里没记 java", report([clue("intel_graphics_driver")], { java: null }), ctx({ gpu: HYBRID_GPU })],
+    ];
+    for (const [name, r, c] of cases) {
+      expect(gpuOf(crashFixes(r, c)), name).toBeNull();
+    }
+  });
+
+  it("本地崩溃不是显卡诊断：双显卡也不出按钮，也不要显卡信息", () => {
+    const nativeClue = clue("native_crash", { detail: "0xC0000005", matched: "", line: 0, source: "exit_code" });
+    expect(gpuOf(crashFixes(report([nativeClue]), ctx({ gpu: HYBRID_GPU })))).toBeNull();
+    expect(gpuOf(crashFixes(report([nativeClue]), ctx({ gpu: null })))).toBeNull();
+    expect(hasGraphicsClue(report([nativeClue]))).toBe(false);
+  });
+
+  it("同一份报告里显卡线索排在别的线索后面也照样出按钮", () => {
+    const fixes = crashFixes(report([clue("out_of_memory"), clue("intel_graphics_driver"), clue("graphics_driver")]), ctx({ gpu: HYBRID_GPU }));
+    expect(fixes.map((f) => f.kind)).toEqual(["raise_memory", "driver_steps", "compare_log"]);
+    expect(gpuOf(fixes)).toEqual(HYBRID_OFFER);
+  });
+
+  it("有显卡线索却没读显卡信息是调用方的缺陷，直接报错", () => {
+    expect(() => crashFixes(report([clue("graphics_driver")]), ctx({ gpu: null }))).toThrow("必须先读到本机显卡");
+  });
+
+  it("只有显卡与 Intel 显卡线索才要读显卡信息", () => {
+    expect(hasGraphicsClue(report([clue("graphics_driver")]))).toBe(true);
+    expect(hasGraphicsClue(report([clue("out_of_memory"), clue("intel_graphics_driver")]))).toBe(true);
+    expect(hasGraphicsClue(report([clue("out_of_memory"), clue("corrupted_jar")]))).toBe(false);
+    expect(hasGraphicsClue(report([]))).toBe(false);
   });
 });

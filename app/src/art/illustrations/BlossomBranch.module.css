@@ -12,21 +12,11 @@
   opacity: 0.5;
 }
 
+/* 弹窗入场的缩放动画期间位图会被临时再缩放，保持最近邻，不让像素画发糊 */
 .art {
   position: absolute;
-  inset: 0;
+  top: 0;
+  left: 0;
   display: block;
-  overflow: visible;
-}
-
-.wood {
-  fill: var(--sk-wood);
-}
-
-.bud {
-  fill: var(--sk-accent-2);
-}
-
-.petal {
-  position: absolute;
+  image-rendering: pixelated;
 }

@@ -33,9 +33,11 @@
   opacity: 0.8;
 }
 
+/* 颜色写在外层、字标继承：外壳在窗口失焦时给 Logo 换色，写在字标上就传不到文字 */
 .logo {
   display: inline-flex;
   align-items: center;
+  color: var(--sk-text);
 }
 
 /* 字标：产品英文名，Outfit 标题字重，字距收紧到 -0.02em，行高 1 */
@@ -44,6 +46,5 @@
   font-weight: var(--sk-w-title);
   letter-spacing: -0.02em;
   line-height: 1;
-  color: var(--sk-text);
   white-space: nowrap;
 }

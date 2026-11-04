@@ -18,8 +18,8 @@ export interface BaseBusyLock {
   activity: BaseBlockingActivity;
 }
 
-/** 锁的来源：本实例的游戏会话、安装或补全任务、后端正在改动 Mod、资源或设置，正在备份、恢复、导出存档，或别的实例正以它为基底。 */
-export type InstanceLock = "running" | "installing" | "modifying" | "backing_up" | InheritedLock;
+/** 锁的来源：本实例的游戏会话、安装或补全任务、正在移到别的游戏目录、后端正在改动 Mod、资源或设置，正在备份、恢复、导出存档，或别的实例正以它为基底。 */
+export type InstanceLock = "running" | "installing" | "moving" | "modifying" | "backing_up" | InheritedLock;
 
 /** 后端占着实例、又不挡 Mod 操作的两种活动。 */
 type HeldActivity = "modifying" | "backing_up";
@@ -27,13 +27,15 @@ type HeldActivity = "modifying" | "backing_up";
 /** 实例忙碌时各类操作的锁：null 为可用，否则为禁用原因的种类。 */
 export interface InstanceLocks {
   /** 启用、停用、更新、移除 Mod 与回滚。 */
-  mods: "running" | "installing" | null;
+  mods: "running" | "installing" | "moving" | null;
   rename: InstanceLock | null;
   /** 补全游戏文件：安装中显示「进行中」而不是禁用原因。只有它要占基底，所以只有它看基底忙不忙。 */
   repair: InstanceLock | BaseBusyLock | null;
-  delete: "running" | HeldActivity | InheritedLock | null;
-  /** 启动：只有被当作基底会挡住。存档正忙另由 savesBusy 判定，它还要看前端排着的存档任务。 */
-  launch: InheritedLock | null;
+  delete: "running" | "moving" | HeldActivity | InheritedLock | null;
+  /** 启动：正在移走或被当作基底会挡住。存档正忙另由 savesBusy 判定，它还要看前端排着的存档任务。 */
+  launch: InheritedLock | "moving" | null;
+  /** 移到别的游戏目录：要读整个实例目录并从继承链上的基底带走客户端 jar，所以与补全一样也看基底忙不忙。 */
+  move: InstanceLock | BaseBusyLock | null;
 }
 
 /**
@@ -45,15 +47,33 @@ export interface InstanceLocks {
  * usedBy：正以它为基底的实例。基底照样能改动 Mod，所以不锁 Mod 操作；改名、删除、补全会挪走或重写它的目录，
  * 与之互斥；启动也互斥，游戏映射着 natives 时用它的实例写不了。几种原因同时在时报实例自己的事。
  * baseBusy：继承链上容不下基底占用的基底。后端先占实例自己、再占基底，所以它排在所有实例自己的原因之后。
+ * moving：实例正被移到别的游戏目录（前端排着的移动任务也算），后端记为与一切互斥，什么都做不了；排在游戏与安装之后，
+ * 它们在跑时移动根本开不了工。
  */
-export function instanceLocks(busy: boolean, installing: boolean, modifying: boolean, usedBy: string | null, backingUp: boolean, baseBusy: InstanceSummary["baseBusy"]): InstanceLocks {
+export function instanceLocks(
+  busy: boolean,
+  installing: boolean,
+  modifying: boolean,
+  usedBy: string | null,
+  backingUp: boolean,
+  baseBusy: InstanceSummary["baseBusy"],
+  moving: boolean,
+): InstanceLocks {
   const held: HeldActivity | null = backingUp ? "backing_up" : modifying ? "modifying" : null;
   const inherited: InheritedLock | null = usedBy === null ? null : { kind: "inherited", usedBy };
   const occupied = held !== null ? held : inherited;
-  const fileLock = busy ? "running" : installing ? "installing" : null;
+  const fileLock = busy ? "running" : installing ? "installing" : moving ? "moving" : null;
   const dirLock = fileLock !== null ? fileLock : occupied;
   const baseLock: BaseBusyLock | null = baseBusy === null ? null : { kind: "base_busy", base: baseBusy.id, activity: baseBusy.activity };
-  return { mods: fileLock, rename: dirLock, repair: dirLock !== null ? dirLock : baseLock, delete: busy ? "running" : occupied, launch: inherited };
+  const chainLock = dirLock !== null ? dirLock : baseLock;
+  return {
+    mods: fileLock,
+    rename: dirLock,
+    repair: chainLock,
+    delete: busy ? "running" : moving ? "moving" : occupied,
+    launch: moving ? "moving" : inherited,
+    move: chainLock,
+  };
 }
 
 /**
@@ -62,5 +82,5 @@ export function instanceLocks(busy: boolean, installing: boolean, modifying: boo
  */
 export function locksOf(inst: Pick<InstanceSummary, "status" | "activity" | "usedBy" | "baseBusy">, busy: boolean): InstanceLocks {
   const running = busy || inst.activity === "launching" || inst.activity === "running";
-  return instanceLocks(running, inst.status === "installing", inst.activity === "modifying", inst.usedBy, inst.activity === "backing_up", inst.baseBusy);
+  return instanceLocks(running, inst.status === "installing", inst.activity === "modifying", inst.usedBy, inst.activity === "backing_up", inst.baseBusy, inst.activity === "moving");
 }

@@ -1,0 +1,37 @@
+[package]
+name = "petalfall-auth"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+petalfall-base = { path = "../petalfall-base" }
+# 需要 json（Xbox/Minecraft/Yggdrasil 请求体）与 form（微软 OAuth 端点用 x-www-form-urlencoded）。
+# rustls/http2 等由 petalfall-base 在同一 workspace 内统一开启（特性并集）。
+reqwest = { version = "0.13", default-features = false, features = ["json", "form"] }
+# 设备码轮询需要 sleep + Instant，故只取 time 特性；DPAPI 为同步系统调用，无需 rt。
+tokio = { version = "1", default-features = false, features = ["time"] }
+# 设备码轮询与令牌链要能被「取消登录」打断；与下载引擎共用同一种取消令牌，上层一处触发即可。
+tokio-util = { version = "0.7", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+# 离线 UUID 走 md5("OfflinePlayer:"+name)，与原版 UUID.nameUUIDFromBytes 一致；沿用 petalfall-base 的 RustCrypto 0.11 系。
+md-5 = "0.11"
+uuid = "1"
+# authlib-injector 元数据预取需 Base64 编码 JSON 明文。
+base64 = "0.22"
+tracing = "0.1"
+
+# DPAPI 只在 Windows 上有实现（跨平台缝：其它平台不提供凭据加密后端）。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Security_Cryptography",
+    "Win32_Foundation",
+] }
+
+[dev-dependencies]
+# 测试用 multi_thread flavor 跑 wiremock 后台服务，并复用 time 做超时断言。
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "time"] }
+wiremock = "0.6"
+tempfile = "3"

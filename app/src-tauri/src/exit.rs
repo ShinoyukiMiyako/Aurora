@@ -1,4 +1,5 @@
-//! 启动器正常退出（`RunEvent::Exit`）时的收尾：补写游玩记录里还没落盘的改动，再按需拉起更新安装程序。
+//! 启动器正常退出（`RunEvent::Exit`）时的收尾：游戏还在跑时先让它的会话日志落盘，再补写游玩记录里还没落盘的
+//! 改动与主窗口状态，最后按需拉起更新安装程序。
 //!
 //! 实例改名、删除时游玩记录没写进去的改动只记在进程内，之后哪次读写游玩记录时补上；没等到那一次就退出，
 //! 它们就丢了，旧名下的时长从此不对应任何实例。所以退出前再补写一次。退出路径上没有前端可以报错，结果只进日志。
@@ -16,8 +17,11 @@ pub const PLAY_RECORDS_DEADLINE: Duration = Duration::from_secs(3);
 
 /// 在 `RunEvent::Exit` 里调用。
 pub fn on_exit(app: &AppHandle) {
+    // 排在最前：游戏还在跑时会话日志缓冲里攒着最后的输出，越早落盘越好。
+    crate::commands::launch::mark_on_exit(app);
     let facade = app.state::<Facade>();
     tauri::async_runtime::block_on(save_play_records(&facade, PLAY_RECORDS_DEADLINE));
+    crate::window_state::flush_on_exit(app);
     // 安装程序拉起后进程随即退出，所以排在补写之后。
     crate::commands::updater::install_on_exit(app);
 }
@@ -69,8 +73,8 @@ pub async fn save_play_records(facade: &Facade, deadline: Duration) -> PlayRecor
 mod tests {
     use std::path::Path;
 
-    use aurora_core::playtime::PLAYTIME_FILE;
-    use aurora_core::{Aurora, AuroraConfig};
+    use petalfall_core::playtime::PLAYTIME_FILE;
+    use petalfall_core::{Petalfall, PetalfallConfig};
     use serde_json::Value;
 
     use super::*;
@@ -78,8 +82,8 @@ mod tests {
     /// 数据目录在 `dir`、游戏目录取默认（数据目录下）的门面。
     fn facade_in(dir: &Path) -> Facade {
         Facade::new(
-            Aurora::open(
-                AuroraConfig::default(),
+            Petalfall::open(
+                PetalfallConfig::default(),
                 dir.to_path_buf(),
                 dir.join("config.json"),
             )
@@ -114,9 +118,9 @@ mod tests {
         let path = dir.path().join(PLAYTIME_FILE);
         let facade = facade_in(dir.path());
         std::fs::write(&path, "{ broken").unwrap();
-        let aurora = facade.snapshot().await;
-        assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
-        assert!(aurora.forget_play_records("删掉的").await.is_err());
+        let petalfall = facade.snapshot().await;
+        assert!(petalfall.rename_play_records("旧名", "新名").await.is_err());
+        assert!(petalfall.forget_play_records("删掉的").await.is_err());
         std::fs::write(&path, RECORDS).unwrap();
 
         let outcome = save_play_records(&facade, PLAY_RECORDS_DEADLINE).await;
@@ -180,8 +184,8 @@ mod tests {
             .share_mode(FILE_SHARE_READ)
             .open(&path)
             .unwrap();
-        let aurora = facade.snapshot().await;
-        assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
+        let petalfall = facade.snapshot().await;
+        assert!(petalfall.rename_play_records("旧名", "新名").await.is_err());
 
         let outcome = save_play_records(&facade, PLAY_RECORDS_DEADLINE).await;
         assert!(matches!(outcome, PlayRecordsSave::Failed), "{outcome:?}");

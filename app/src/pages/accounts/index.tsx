@@ -3,13 +3,13 @@
 // 所以从标题栏、启动拦截发起的登录进到本页同样可见。
 
 import { useId } from "react";
-import { ACTION_ERROR, BOOT_SLICE_ERROR, SLOW_LOADING_HINT } from "../../copy/flows";
+import { ACTION_ERROR, BOOT_SLICE_ERROR, MSA_CLIENT_ID_MISSING, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { AccountKind } from "../../domain/types";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import type { PageProps } from "../../state/route";
-import { activeAccount } from "../../state/selectors";
+import { activeAccount, microsoftLoginUnavailable } from "../../state/selectors";
 import { Banner } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
@@ -47,12 +47,14 @@ export default function AccountsPage(_props: PageProps<"accounts">) {
   const actions = useLauncherActions();
   const run = useRunner();
   const online = useOnline();
+  const microsoftUnavailable = useLauncherSelector(microsoftLoginUnavailable);
   const act = useAccountActions();
   const gate = useLoadingGate(status.kind === "loading");
   const skeleton = gate.view === "skeleton";
   const ready = status.kind === "ready" && !skeleton;
   const current = ready ? me : null;
   const offlineReason = online ? undefined : ACCOUNTS_COPY.offline.needsNetwork;
+  const microsoftReason = microsoftUnavailable ? MSA_CLIENT_ID_MISSING.reason : offlineReason;
 
   const openLogin = (kind: AccountKind) => void run(() => actions.openLogin(kind), OPEN_LOGIN_ERROR[kind]);
 
@@ -80,7 +82,7 @@ export default function AccountsPage(_props: PageProps<"accounts">) {
               </Button>
             )}
           />
-          <Button variant={headerPrimary ? "primary" : "secondary"} icon="plus" disabledReason={offlineReason} onClick={() => openLogin("microsoft")}>
+          <Button variant={headerPrimary ? "primary" : "secondary"} icon="plus" disabledReason={microsoftReason} onClick={() => openLogin("microsoft")}>
             {ACCOUNTS_COPY.addMicrosoft}
           </Button>
         </>
@@ -140,7 +142,7 @@ export default function AccountsPage(_props: PageProps<"accounts">) {
             {accounts.map((account) => (
               <AccountCard key={account.uuid} account={account} current={account.uuid === currentAccountId} online={online} act={act} />
             ))}
-            <AddCard online={online} onAdd={openLogin} />
+            <AddCard online={online} microsoftUnavailable={microsoftUnavailable} onAdd={openLogin} />
           </div>
         </EntranceBlock>
       )}

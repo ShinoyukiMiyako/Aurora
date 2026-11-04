@@ -5,7 +5,7 @@ import { Icon } from "../../art/Icon";
 import { LAUNCH_COPY, LOADER_NAME, PHASE_LABEL, STOPPED_LABEL, AVATAR_LINE } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatRelative, percent } from "../../domain/format";
-import { instanceCover } from "../../launch/cover";
+import { useCoverBackdrop, useInstanceCover } from "../../launch/cover";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import { brokenAction } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
@@ -81,12 +81,14 @@ function RecentSkeleton() {
 function RecentCard({ inst }: { inst: InstanceSummary }) {
   const { go } = useNav();
   const now = useNow(30_000);
-  const cover = instanceCover(inst);
+  const cover = useInstanceCover(inst);
+  const backdrop = useCoverBackdrop(inst);
   // lastPlayedAt 在 recentInstances 里已筛掉 null
   if (inst.lastPlayedAt === null) throw new Error(`最近游玩里出现了从没玩过的实例 ${inst.id}`);
   return (
     <Card padding="none" clip className={s.recentCard}>
-      <Cover hue={cover.hue} seed={inst.id} height={RECENT_COVER_HEIGHT} />
+      {/* 名称与信息在卡面下方的卡身里，卡面上没有文字，不压暗 */}
+      <Cover hue={cover.hue} seed={inst.id} height={RECENT_COVER_HEIGHT} {...backdrop} />
       <div className={s.recentBody}>
         <InstanceAvatar instance={inst} size={40} className={s.recentAvatar} />
         <CardTitleButton className={s.recentName} ariaLabel={HOME_COPY.openInstance(inst.name)} onClick={() => go({ page: "instance", id: inst.id, tab: "overview" })}>

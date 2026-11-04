@@ -1,0 +1,43 @@
+.meter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+}
+
+.caption {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sk-space-16);
+}
+
+/* 第一个事件到之前没有字，先占住一行，字出现时下面不跳 */
+.status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+  min-height: var(--sk-lh-small);
+}
+
+.phase {
+  margin: 0;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text);
+}
+
+.slow {
+  margin: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}
+
+.closeNote {
+  flex: none;
+  margin: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}

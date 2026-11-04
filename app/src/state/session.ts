@@ -26,6 +26,11 @@ export interface SessionState extends Session {
    * 状态岛的阶段清单在该阶段右侧写「N 条提醒」。
    */
   stageWarnings: readonly number[];
+  /**
+   * 这一局不是这个渲染进程点启动建的，而是从后端找回的：关闭前启动、这次打开后接回的，或渲染进程重载前就在跑的。
+   * 进入运行的那一刻早已过去，「游戏启动后」的最小化与关闭不再执行。
+   */
+  reattached: boolean;
 }
 
 /** 各阶段的起点；阶段 7 恒为 1。 */
@@ -84,6 +89,29 @@ export function startSession(instanceId: string, taskId: string, account: { uuid
     failure: null,
     crash: null,
     stageWarnings: STAGE_START.map(() => 0),
+    reattached: false,
+  };
+}
+
+/**
+ * 从后端找回的、已经在运行的一局：加载阶段在找回之前就过去了，直接是运行态。游玩时长从后端记下的进程起来的时刻算，
+ * 不从此刻算；阶段起点取此刻，界面上「运行中」的停留从找回时起算。
+ */
+export function reattachedSession(
+  instanceId: string,
+  taskId: string,
+  account: { uuid: string; name: string; kind: AccountKind },
+  times: { startedAt: number; runningSince: number },
+  now: number,
+): SessionState {
+  return {
+    ...startSession(instanceId, taskId, account, times.startedAt, null),
+    phase: "running",
+    stageIndex: RUNNING_STAGE,
+    progress: 1,
+    runningSince: times.runningSince,
+    phaseSince: now,
+    reattached: true,
   };
 }
 
@@ -169,6 +197,32 @@ export function appendSessionLogs(session: SessionState, versionId: string, line
   const warned = isLoadingPhase(session.phase) ? lines.filter((l) => l.source === "launcher" && l.level === "warn").length : 0;
   const stageWarnings = warned === 0 ? session.stageWarnings : session.stageWarnings.map((n, i) => (i === session.stageIndex ? n + warned : n));
   return { ...session, logs: logs.length > SESSION_LOG_LIMIT ? logs.slice(logs.length - SESSION_LOG_LIMIT) : logs, stageWarnings };
+}
+
+function sameLine(a: LogLine, b: LogLine): boolean {
+  return a.at === b.at && a.source === b.source && a.level === b.level && a.text === b.text;
+}
+
+/** earlier 的末尾与 later 的开头有几行是同一批。 */
+function overlapLength(earlier: readonly LogLine[], later: readonly LogLine[]): number {
+  for (let k = Math.min(earlier.length, later.length); k > 0; k--) {
+    const start = earlier.length - k;
+    let i = 0;
+    while (i < k && sameLine(earlier[start + i], later[i])) i += 1;
+    if (i === k) return k;
+  }
+  return 0;
+}
+
+/**
+ * 给找回的一局垫上会话日志文件的尾部，日志面板与状态岛才不是空的。内存里已有的是找回之后才推来的新行，
+ * 读文件期间推来的那几行文件里可能也有，重合的部分只留一份。只认这一局（taskId），合并后同样只留最近 SESSION_LOG_LIMIT 行。
+ */
+export function backfillSessionLogs(session: SessionState, taskId: string, earlier: readonly LogLine[]): SessionState {
+  if (taskId !== session.taskId || earlier.length === 0) return session;
+  const overlap = overlapLength(earlier, session.logs);
+  const logs = earlier.slice(0, earlier.length - overlap).concat(session.logs);
+  return { ...session, logs: logs.length > SESSION_LOG_LIMIT ? logs.slice(logs.length - SESSION_LOG_LIMIT) : logs };
 }
 
 /** 运行了多少分钟（向下取整）；没进过运行为 null。stopped 时以进入 stopped 的时刻为终点。 */

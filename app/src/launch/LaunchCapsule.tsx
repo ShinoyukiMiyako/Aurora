@@ -12,7 +12,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { Icon } from "../art/Icon";
 import { ASSEMBLY_TIMING, AssemblingBlock, type AssemblyExit } from "../art/iso/AssemblingBlock";
 import { Spinner } from "../art/Spinner";
-import { LAUNCH_COPY, PHASE_LABEL, SESSION_COPY } from "../copy/flows";
+import { LAUNCH_COPY, PHASE_LABEL, SESSION_COPY, taskPhaseText } from "../copy/flows";
 import { percent } from "../domain/format";
 import { fade, springs } from "../lib/motion";
 import { cx } from "../lib/util";
@@ -22,7 +22,7 @@ import { softDisabledProps } from "../ui/Button";
 import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
 import { Tooltip } from "../ui/Tooltip";
 import { useBreathPhase } from "./breath";
-import { instanceCover } from "./cover";
+import { useInstanceCover } from "./cover";
 import styles from "./LaunchCapsule.module.css";
 import { brokenAction, sessionDetail, sessionPhaseLabel, stageLabel, type LaunchView } from "./launchView";
 import { useLaunch, type LaunchEntry } from "./useLaunch";
@@ -228,7 +228,7 @@ function BreathGlow() {
 }
 
 function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: LaunchEntry; exit: AssemblyExit | null; seat: boolean; relaunch: boolean }) {
-  const cover = instanceCover(entry.instance);
+  const cover = useInstanceCover(entry.instance);
   const id = entry.instance.id;
   switch (face.kind) {
     case "ready": {
@@ -327,7 +327,7 @@ function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: 
           {queued ? (
             <Text title={LAUNCH_COPY.queuedTitle} sub={face.queuePosition === null ? null : LAUNCH_COPY.queuedDetail(face.queuePosition)} />
           ) : (
-            <InstallingText progress={seat ? 1 : task.progress} track={progressTrack(task)} sub={task.title} />
+            <InstallingText progress={seat ? 1 : task.progress} track={progressTrack(task)} sub={task.phase === null ? task.title : taskPhaseText(task.phase, "short")} />
           )}
         </>
       );

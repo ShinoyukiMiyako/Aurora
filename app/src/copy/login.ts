@@ -24,7 +24,7 @@ export const OFFLINE_DIALOG_COPY = {
   uuidEmpty: "输入用户名后生成",
   note: "同一个用户名在任何电脑上算出的 UUID 都相同，单人存档里的物品与进度跟着它走；改名就是换了一个人。",
   preview: (name: string) => `${name} 的角色预览`,
-  previewEmpty: "角色预览",
+  previewEmpty: "角色预览：史蒂夫与艾利克斯",
   cancel: "取消",
 } as const;
 

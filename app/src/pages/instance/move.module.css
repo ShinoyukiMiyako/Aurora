@@ -1,0 +1,51 @@
+/* 移到其他游戏目录弹窗 */
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-16);
+  min-width: 0;
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-8);
+  min-width: 0;
+}
+
+/* 选择其他文件夹：接在目录列表之后，像列表的最后一项那样左对齐 */
+.pick {
+  align-self: flex-start;
+}
+
+.hint {
+  margin: 0;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+.checking {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-10);
+  min-height: 64px;
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  color: var(--sk-text-2);
+}
+
+.path {
+  overflow-wrap: anywhere;
+}
+
+/* 拦截项逐条列在说明块之后：说明块只容两行，几条原因写不下 */
+.blockers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}

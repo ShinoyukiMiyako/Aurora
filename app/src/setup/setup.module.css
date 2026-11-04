@@ -1,0 +1,288 @@
+/*
+ * 引导程序的窗口骨架。不引用 onboarding.module.css：两边数值相同，但向导那份带着步骤条和分档，
+ * 这里窗口尺寸写死 880 x 580，只有一档。
+ */
+
+.root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--sk-surface);
+}
+
+.frame {
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+}
+
+/* ---------------------------------------------------------------- 左栏 */
+
+.side {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--sk-bg-2);
+}
+
+.brand {
+  padding: var(--sk-space-24) var(--sk-space-24) 0;
+}
+
+/* 花瓣画布以这一块为宿主铺满；花枝贴底，给上方留出落花的空间 */
+.stage {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.branch {
+  position: relative;
+  z-index: var(--sk-z-page);
+}
+
+.sideFoot {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sk-space-4);
+  padding: var(--sk-space-12) var(--sk-space-24) var(--sk-space-20);
+}
+
+.sideMeta {
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.legalLink {
+  padding: 0;
+  border: 0;
+  border-radius: var(--sk-r-xs);
+  background: transparent;
+  color: var(--sk-accent-strong);
+  font: inherit;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  outline: none;
+  cursor: pointer;
+}
+
+.legalLink:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.legalLink:focus-visible {
+  box-shadow: var(--sk-focus);
+}
+
+.legalLink:disabled {
+  color: var(--sk-text-3);
+  cursor: default;
+}
+
+/* ---------------------------------------------------------------- 主列 */
+
+.main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--sk-space-28) var(--sk-space-32) var(--sk-space-24);
+}
+
+.head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  margin-bottom: var(--sk-space-18);
+  /* 右上角的窗口按钮不压标题 */
+  padding-right: var(--sk-space-64);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--sk-fs-title);
+  line-height: var(--sk-lh-title);
+  font-weight: var(--sk-w-title);
+  letter-spacing: var(--sk-ls-title);
+  color: var(--sk-text);
+}
+
+.lead {
+  margin: 0;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+/* 外扩的内边距抵消掉自身的裁切：贴边控件的焦点环有 4px，overflow 会把它切掉 */
+.body {
+  flex: 1;
+  min-height: 0;
+  margin: calc(-1 * var(--sk-space-4));
+  padding: var(--sk-space-4);
+  overflow-y: auto;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sk-space-12);
+  padding: var(--sk-space-16) 0 0;
+}
+
+.footerStart,
+.footerEnd {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+/* ---------------------------------------------------------------- 窗口按钮 */
+
+.windowControls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+}
+
+.winButton {
+  display: inline-grid;
+  place-items: center;
+  width: 42px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--sk-text-2);
+  cursor: default;
+  outline: none;
+}
+
+.winFace {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 30px;
+  border-radius: var(--sk-r-sm);
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease),
+    box-shadow var(--sk-dur-hover) var(--sk-ease);
+}
+
+.winButton:hover .winFace {
+  background: var(--sk-bg-3);
+  color: var(--sk-text);
+}
+
+.winButton:active .winFace {
+  background: var(--sk-fill-press);
+}
+
+.winButton[data-close]:hover .winFace {
+  background: var(--sk-win-close);
+  color: var(--sk-win-close-ink);
+}
+
+.winButton[data-close]:active .winFace {
+  background: var(--sk-win-close-active);
+  color: var(--sk-win-close-ink);
+}
+
+.winButton[data-disabled] {
+  color: var(--sk-text-3);
+}
+
+.winButton[data-disabled]:hover .winFace,
+.winButton[data-disabled]:active .winFace {
+  background: transparent;
+  color: var(--sk-text-3);
+}
+
+.winButton:focus-visible .winFace {
+  box-shadow: var(--sk-focus);
+}
+
+/* ---------------------------------------------------------------- 安装位置 */
+
+/*
+ * 欢迎页、已安装页的只读位置和选目录页的路径输入框是同一行：标签同 Field，框同 TextInput 的 lg 档，按钮也用 lg。
+ * 从欢迎页点「更改」过去，路径原地变成可编辑，字号、框高、文字起点都不跳。
+ * 只读框不做成只读输入框（只读页不该长得像能改），数值只能照抄 lg 档，path-layout.test.ts 钉住两边相等。
+ */
+.pathRow {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sk-space-8);
+}
+
+.pathField {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+  min-width: 0;
+  margin: 0;
+}
+
+.pathLabel {
+  color: var(--sk-text);
+  font-size: var(--sk-fs-small);
+  font-weight: var(--sk-w-medium);
+  line-height: var(--sk-lh-small);
+}
+
+/* 透明描边也占 1px：文字起点和输入框的「描边 + 内边距」对齐；上下内边距加行高正好凑满框高，单行竖直居中 */
+.pathBox {
+  box-sizing: border-box;
+  height: 44px;
+  margin: 0;
+  padding: var(--sk-space-10) var(--sk-space-14);
+  border: 1px solid transparent;
+  border-radius: var(--sk-r);
+  background: var(--sk-bg-2);
+  overflow: hidden;
+  color: var(--sk-text);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.pathInput {
+  flex: 1;
+  min-width: 0;
+}
+
+.pathInput input {
+  font-family: var(--sk-mono);
+}
+
+/* ---------------------------------------------------------------- 致命错误 */
+
+.fatalDetail {
+  margin: 0;
+  padding: var(--sk-space-12);
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+  color: var(--sk-text-2);
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono);
+  line-height: var(--sk-lh-mono);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+}

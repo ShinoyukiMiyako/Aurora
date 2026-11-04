@@ -7,7 +7,7 @@ import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
 import { LauncherProvider } from "../state/launcher";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { accountDto, bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { accountDto, bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { ChromeProvider, type ChromeApi } from "./chrome";
 import { CommandPalette } from "./CommandPalette";
 import { PALETTE_COPY } from "../copy/shell";
@@ -135,6 +135,18 @@ describe("命令面板", () => {
     expect(callsOf(ipc, "set_current_account")).toEqual([{ uuid: "00000000-0000-0000-0000-00000000a002" }]);
     expect(nav.route).toEqual({ page: "home" });
     expect(chrome.focusContent).not.toHaveBeenCalled();
+  });
+
+  it("构建里没有微软登录 client_id：「添加微软账户」写明原因，执行后去设置的常规分区，不发起登录", async () => {
+    ipc.overrides.set("get_config", () => configDto({ has_client_id: false, microsoft_login_available: false }));
+    await mount();
+    act(() => shell.openPalette("weiruan"));
+    await flush();
+    expect(activeLabel()).toBe(`${PALETTE_COPY.addMicrosoft}这个版本没有内置微软登录，在设置里填入 client_id 后可用`);
+    keydown(input(), "Enter");
+    await flush();
+    expect(nav.route).toEqual({ page: "settings", section: "general" });
+    expect(callsOf(ipc, "microsoft_login")).toEqual([]);
   });
 
   it("Tab 不把焦点带出输入框；Esc 关闭并把焦点还给打开前的元素", async () => {

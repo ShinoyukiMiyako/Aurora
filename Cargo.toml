@@ -1,7 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "app/src-tauri"]
+members = ["crates/*", "app/src-tauri", "app/src-tauri-setup"]
 
 # 根目录 LICENSE 与 README 只授权 AGPL 第 3 版，没有「或任何更高版本」的条款，故写 -only。
+# 这里只描述 crate 源码：AGPL 第 7 条的附加条款见 LICENSE-ADDITIONAL-TERMS.md，不改变 SPDX 标识；
+# 按 CC BY-NC-ND 4.0 授权的美术素材（LICENSE-ASSETS.md）按文件划界，不是 crate 源码：应用图标虽在 app/src-tauri/icons、
+# 也编进两个外壳的产物，仍只按素材许可；写成 AND 表达式会误称每个 crate 的源码都受它约束。
 [workspace.package]
 license = "AGPL-3.0-only"

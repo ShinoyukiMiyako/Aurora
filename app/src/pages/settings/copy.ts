@@ -1,7 +1,8 @@
 // 设置页与启动器更新的文案。产品名一律经 APP_NAME 拼入。
 
 import type { IconName } from "../../art/Icon";
-import { APP_NAME } from "../../lib/app-info";
+import type { CoverStyle } from "../../domain/types";
+import { APP_LICENSE, APP_NAME, APP_NAME_EN, ASSET_LICENSE, COPYRIGHT_HOLDER, FIRST_RELEASE_YEAR } from "../../lib/app-info";
 import type { SettingsSection } from "../../state/route";
 
 export const SETTINGS_TITLE = "设置";
@@ -49,13 +50,23 @@ export const GENERAL_COPY = {
   cancel: "取消",
   save: "保存",
   clientIdSaved: "client_id 已保存",
+  clientIdClear: "清除",
+  clientIdCleared: "已清除自定义的 client_id",
+  clientIdClearFailed: "没能清除自定义的 client_id",
+  // 微软发的续期凭据认 client_id：换回内置的以后，用自定义 client_id 登录的账户续不上
+  clientIdClearConfirm: {
+    title: "清除自定义的 client_id？",
+    body: "清除后改用这个版本内置的 client_id，没有内置时微软登录不可用。用自定义 client_id 登录的微软账户之后续期会被拒，需要重新登录。",
+    confirm: "清除",
+    cancel: "取消",
+  },
 } as const;
 
 export const AFTER_LAUNCH_OPTIONS = [
   { value: "keep", label: "保持打开", desc: `游戏运行时${APP_NAME}留在原处，方便看日志` },
   // 最小化发生在拿到进程的那一刻，游戏窗口这时还没出来，不能写成窗口出现后
   { value: "minimize", label: "最小化", desc: `游戏进程起来后${APP_NAME}缩到任务栏，结束后再弹回来` },
-  { value: "close", label: `关闭${APP_NAME}`, desc: `游戏启动后${APP_NAME}退出，游戏日志与崩溃诊断将不可用` },
+  { value: "close", label: `关闭${APP_NAME}`, desc: `游戏启动后${APP_NAME}退出；游戏结束前重新打开${APP_NAME}可接回这一局，否则这一局的游玩时长与崩溃诊断不会记下` },
 ] as const;
 
 /** 自动备份由产品在游戏退出时做，这时它已经关了：开关开着也不会发生。写在「游戏启动后」与「自动备份」两行下面。 */
@@ -171,19 +182,14 @@ export const MEMORY_COPY = {
   title: "内存",
   subtitle: (total: string) => `本机共 ${total}，这里是所有实例的默认值`,
   auto: "自动分配",
-  autoDesc: (tier: string, recommended: string) => `按实例类型与开机时的空闲内存决定；当前按「${tier}」档给 ${recommended}`,
+  autoDesc: (current: string) => `按每个实例的 Mod 数量、整合包推荐值与视距估算；${current}`,
+  currentInstance: (name: string, summary: string) => `当前实例「${name}」：${summary}`,
+  noInstance: (recommended: string) => `没有当前实例，按原版估算，建议 ${recommended}`,
   max: "最大内存",
-  recommendedTip: (tier: string, mb: string) => `「${tier}」档推荐 ${mb}`,
   available: (mb: string) => `现在空闲 ${mb}`,
   custom: (n: number) => `${n} 个实例用自定义内存，不受这里影响`,
   overAvailable: (value: string, available: string) => `给游戏 ${value} 已经超过现在的空闲内存 ${available}，浏览器、语音软件开多了容易卡顿。`,
   readFailed: "读不到本机内存信息",
-} as const;
-
-export const MEMORY_TIER_LABEL = {
-  vanilla: "原版",
-  modded: "装 Mod",
-  large_modpack: "大型整合",
 } as const;
 
 export const ISOLATION_COPY = {
@@ -219,13 +225,6 @@ export const GAME_DIR_COPY = {
   discoveredTitle: "发现未记录的文件夹",
   add: "添加",
   dataDir: "数据目录",
-  busyReason: "有游戏或下载在进行，结束后再切换",
-  unavailableReason: "位置访问不到，无法切过去",
-  bangError: "路径里不能有「!」，Java 会读不出里面的游戏文件",
-  confirmTitle: (name: string) => `切换到「${name}」？`,
-  confirmBody: "实例库会换成这个目录里的实例，原目录的文件不会被移动或删除。",
-  confirmLabel: "切换",
-  switchFailed: "没能切换游戏目录",
   addFailed: "没能添加文件夹",
   removeFailed: "没能移除文件夹",
   pickFailed: "没能打开文件夹选择框",
@@ -269,7 +268,16 @@ export const APPEARANCE_COPY = {
   reduceMotion: "减少动画",
   reduceMotionDesc: "停掉花瓣飘落、卡面视差与页面过渡。系统开了「减少动态效果」时无论这里怎么设都会生效。",
   systemReduced: "系统已开启",
+  coverBackground: "实例卡面默认背景",
+  coverBackgroundDesc: "实例的卡面背景设为跟随时用它。方块平铺取封面方块的材质，读取自你本机的游戏文件。",
+  coverBackgroundNoArt: "实例的卡面背景设为跟随时用它。本机还没有原版材质，方块平铺先画成渐变花瓣。",
 } as const;
+
+/** 实例卡面的两种默认背景；实例设置的「外观」卡也按这套说法写出当前默认。 */
+export const COVER_STYLE_LABEL: Readonly<Record<CoverStyle, string>> = {
+  art: "渐变花瓣",
+  texture: "方块平铺",
+};
 
 // ---------------------------------------------------------------- 关于
 
@@ -282,10 +290,11 @@ export const ABOUT_COPY = {
   channelRow: "发布通道",
   builtRow: "构建日期",
   licenseRow: "开源协议",
+  assetLicenseRow: "素材许可",
   sourceRow: "源代码",
   /** 「复制」整段版本信息时写进剪贴板的文字，反馈问题时直接贴出来。 */
-  infoText: (rows: { name: string; version: string; channel: string; built: string; license: string; source: string }) =>
-    [`${rows.name} ${rows.version}`, `发布通道：${rows.channel}`, `构建日期：${rows.built}`, `开源协议：${rows.license}`, `源代码：${rows.source}`].join("\n"),
+  infoText: (rows: { name: string; version: string; channel: string; built: string; license: string; assetLicense: string; source: string }) =>
+    [`${rows.name} ${rows.version}`, `发布通道：${rows.channel}`, `构建日期：${rows.built}`, `开源协议：${rows.license}`, `素材许可：${rows.assetLicense}`, `源代码：${rows.source}`].join("\n"),
   supportTitle: "支持",
   openLogs: "打开日志目录",
   openLogsDesc: "反馈问题时把这里的最新日志一起发来",
@@ -302,9 +311,34 @@ export const ABOUT_COPY = {
   licensesHeadName: "名称",
   licensesHeadVersion: "版本",
   licensesHeadLicense: "许可证",
+  licenseText: "协议全文",
+  licenseTextDesc: `${APP_LICENSE} 的英文原文，随应用分发`,
+  licenseTextSubtitle: `${APP_LICENSE}，协议全文只有英文版`,
+  licenseTextLoading: "正在读取协议全文…",
+  licenseTextFailed: "协议全文读不出来",
+  additionalTerms: "附加条款",
+  additionalTermsDesc: "AGPL 第 7 条的附加条款：保留署名、修改版改名换图标、不授予商标权",
+  additionalTermsSubtitle: "中文为准，附英文对照",
+  additionalTermsLoading: "正在读取附加条款…",
+  additionalTermsFailed: "附加条款读不出来",
+  assetLicense: "素材许可",
+  assetLicenseDesc: `美术与品牌素材按 ${ASSET_LICENSE} 授权的范围与署名方式`,
+  assetLicenseSubtitle: "中文为准，附英文对照",
+  assetLicenseLoading: "正在读取素材许可…",
+  assetLicenseFailed: "素材许可读不出来",
   feedback: "问题反馈",
   feedbackDesc: "在仓库的 Issues 页提交问题或建议，会用系统浏览器打开",
   feedbackFailed: "没能打开问题反馈页",
-  disclaimer: `实例图标、皮肤与全景图这些原版图案读取自你本机的游戏文件，不随${APP_NAME}分发。${APP_NAME}是社区开源项目，与 Mojang Studios 和 Microsoft 没有关联。`,
+  // 版权符号写成转义：它在 Unicode 里属于 Extended_Pictographic，令牌守卫的 Emoji 规则按码位判断会把它算进去
+  copyright: `Copyright \u00A9 ${FIRST_RELEASE_YEAR} ${COPYRIGHT_HOLDER}`,
+  /**
+   * 与引导程序协议页的 legal.freeSoftware 同一个意思：AGPL 第 5(d) 条要界面上写明无担保、可按协议转发。
+   * 只说程序代码：素材不按 AGPL 授权，说成整个程序可按 AGPL 转发和修改，会被当成素材也随 AGPL 授出。
+   */
+  freeSoftware: `${APP_NAME}的程序代码是自由软件，你可以按 ${APP_LICENSE} 及其附加条款转发和修改它。它按现状提供，不提供任何担保。`,
+  // 字标只是用第三方字体排出的产品名，素材许可不把它列为素材，只受附加条款的商标一节约束，这里不能把它算进去
+  assetsNotice: `应用图标、像素花瓣徽记等列在素材许可里的美术素材另按 ${ASSET_LICENSE} 授权：可以非商业地原样转发并署名，不能商用，也不能改作后发布。`,
+  brandNotice: `「${APP_NAME}」「${APP_NAME_EN}」的名称与徽记不授予商标权。向他人提供修改版的构建产物时，须改用不会混淆的名称与图标，并写明它不出自原作者。`,
+  disclaimer: `Minecraft 是 Mojang Studios 的商标。实例图标、皮肤与全景图这些原版图案读取自你本机的游戏文件，不随${APP_NAME}分发。Mod 与整合包的信息和文件来自 Modrinth 与 CurseForge。${APP_NAME}是社区开源项目，与 Mojang Studios 和 Microsoft 没有关联。`,
   infoFailed: "版本信息读不出来",
 } as const;

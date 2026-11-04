@@ -6,6 +6,7 @@ import { useState } from "react";
 import { INTERFACE_COPY, LANGUAGE_OPTIONS } from "../../../copy/settings";
 import type { Settings } from "../../../domain/adapt";
 import { autoBackupOutcome } from "../../../domain/rules";
+import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import type { LauncherState } from "../../../state/store";
@@ -112,9 +113,11 @@ function ClientIdRow() {
   const hasClientId = useLauncherSelector(selectHasClientId);
   const actions = useLauncherActions();
   const run = useRunner();
+  const { confirm } = useShell();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const value = draft.trim();
 
   const save = async () => {
@@ -129,12 +132,28 @@ function ClientIdRow() {
     setDraft("");
   };
 
+  const clear = async () => {
+    const ask = GENERAL_COPY.clientIdClearConfirm;
+    if (!(await confirm({ title: ask.title, body: ask.body, confirmLabel: ask.confirm, cancelLabel: ask.cancel, tone: "danger" }))) return;
+    setClearing(true);
+    const result = await run(() => actions.updateSettings({ clearClientId: true }), GENERAL_COPY.clientIdClearFailed);
+    setClearing(false);
+    if (!result.ok) return;
+    actions.toast("success", GENERAL_COPY.clientIdCleared);
+  };
+
   return (
     <div className={s.stackRow}>
       <SettingRow title={GENERAL_COPY.clientId} description={GENERAL_COPY.clientIdDesc}>
         <Tag tone={hasClientId ? "ok" : "neutral"}>{hasClientId ? GENERAL_COPY.clientIdSet : GENERAL_COPY.clientIdUnset}</Tag>
+        {!editing && hasClientId && (
+          <Button size="sm" variant="ghost" loading={clearing} onClick={() => void clear()}>
+            {GENERAL_COPY.clientIdClear}
+          </Button>
+        )}
         {!editing && (
-          <Button size="sm" onClick={() => setEditing(true)}>
+          // 清除还没回来时不让改：两次写入并发，结果就看谁后到
+          <Button size="sm" disabled={clearing} onClick={() => setEditing(true)}>
             {GENERAL_COPY.clientIdEdit}
           </Button>
         )}

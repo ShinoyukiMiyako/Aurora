@@ -1,5 +1,5 @@
-// 主页花瓣场用的字模与色调视图。字模与色调数据只有一份，在 illustrations/petal-glyphs.ts，静态插画与
-// 花瓣场共用；这里把它换成粒子模拟方便取用的形状：按下标取字模、格值放进 Uint8Array、色调换成五阶色下标。
+// 主页花瓣场用的字模与色调视图。P1-P4 字模在 ../petal-glyphs.json，P5 与色调表在 ../illustrations/petal-glyphs.ts，
+// 由它解析、与静态插画共用；这里换成粒子模拟方便取用的形状：按下标取字模、格值放进 Uint8Array、色调换成五阶色下标。
 
 import { PETAL_CELL, PETAL_GLYPHS, PETAL_TONES, type PetalGlyphName, type PetalShade, type PetalTone } from "../illustrations/petal-glyphs";
 

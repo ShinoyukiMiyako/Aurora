@@ -108,7 +108,7 @@ describe("跳过首次无障碍引导", () => {
 
 describe("游戏目录", () => {
   it("发现只报告盘上存在且未记录的目录，添加后不再出现", async () => {
-    expect(await listGameDirectories()).toEqual([{ name: "默认目录", path: DEFAULT_DIR, is_current: true, available: true }]);
+    expect(await listGameDirectories()).toEqual([{ name: "默认目录", path: DEFAULT_DIR, is_current: true, available: true, version_count: 0 }]);
     expect(await discoverGameDirectories()).toEqual([
       { name: "官方启动器", path: OFFICIAL },
       { name: "HMCL", path: HMCL },
@@ -118,8 +118,8 @@ describe("游戏目录", () => {
     // 同路径（大小写、分隔符不同）只改名字
     await addGameDirectory("我的 HMCL", "d:/hmcl/.minecraft/");
     expect(await listGameDirectories()).toEqual([
-      { name: "默认目录", path: DEFAULT_DIR, is_current: true, available: true },
-      { name: "我的 HMCL", path: HMCL, is_current: false, available: true },
+      { name: "默认目录", path: DEFAULT_DIR, is_current: true, available: true, version_count: 0 },
+      { name: "我的 HMCL", path: HMCL, is_current: false, available: true, version_count: 12 },
     ]);
   });
 
@@ -127,8 +127,8 @@ describe("游戏目录", () => {
     await setGameDirectory(OFFICIAL);
     expect((await getConfig()).game_dir).toBe(OFFICIAL);
     expect(await listGameDirectories()).toEqual([
-      { name: "Roaming", path: OFFICIAL, is_current: true, available: true },
-      { name: "默认目录", path: DEFAULT_DIR, is_current: false, available: true },
+      { name: "Roaming", path: OFFICIAL, is_current: true, available: true, version_count: 3 },
+      { name: "默认目录", path: DEFAULT_DIR, is_current: false, available: true, version_count: 0 },
     ]);
 
     const unavailable = await rejection(setGameDirectory("E:\\Nope\\.minecraft"));
@@ -138,6 +138,14 @@ describe("游戏目录", () => {
     expect((await rejection(setGameDirectory("games\\.minecraft"))).detail).toMatchObject({ problem: "not_absolute" });
     expect((await rejection(setGameDirectory("   "))).detail).toEqual({ path: "", problem: "empty" });
     expect((await getConfig()).game_dir).toBe(OFFICIAL);
+  });
+
+  it("访问不到的目录说不上有几个版本：版本数为 null，不是 0；可达但没有 versions 的才是 0", async () => {
+    await addGameDirectory("移动硬盘", "F:\\.minecraft");
+    expect(await listGameDirectories()).toEqual([
+      { name: "默认目录", path: DEFAULT_DIR, is_current: true, available: true, version_count: 0 },
+      { name: "移动硬盘", path: "F:\\.minecraft", is_current: false, available: false, version_count: null },
+    ]);
   });
 
   it("移除只摘记录，返回是否真的移除了一条", async () => {
@@ -239,7 +247,7 @@ describe("界面语言", () => {
     vi.resetModules();
     const third = await import("./mock");
     expect(() => third.enableMockPersistence(stale, "slug")).toThrow(`快照版本是 ${snapshot.version - 1}，当前是 ${snapshot.version}`);
-    expect(snapshot.version).toBe(3);
+    expect(snapshot.version).toBe(4);
   });
 });
 

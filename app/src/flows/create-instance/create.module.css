@@ -87,6 +87,15 @@
   vertical-align: middle;
 }
 
+/* 名称与版本行自己写了文字色，盖过卡面给的媒体文字色：卡面显示材质平铺时在这里换 */
+.previewCover[data-source="texture"] .previewName {
+  color: var(--sk-on-media);
+}
+
+.previewCover[data-source="texture"] .previewMeta {
+  color: var(--sk-on-media-2);
+}
+
 .steps {
   display: flex;
   flex-direction: column;

@@ -242,7 +242,8 @@
   background: var(--sk-bg-2);
 }
 
-.stageBranch {
+/* 花枝组件自身的 position: relative 和这里同优先级，谁赢看样式表加载顺序；输了花枝进文档流，把立绘挤出舞台 */
+.stage .stageBranch {
   position: absolute;
   top: 0;
   left: 0;
@@ -251,6 +252,13 @@
 .stageFigure {
   position: relative;
   margin-bottom: var(--sk-space-16);
+}
+
+.stagePair {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sk-space-8);
 }
 
 .offlineForm {

@@ -4,6 +4,7 @@ import {
   LOADER_CHOICES,
   type BackupKind,
   type BackupResultDto,
+  type CoverImageSlotDto,
   type DeletionPreviewDto,
   type ExportResultDto,
   type FolderTarget,
@@ -26,21 +27,39 @@ import {
   type VersionRequirementsDto,
   TEMPLATE_FILES,
   TEMPLATE_SOURCE_EMPTY_ERROR_CODE,
+  INSTANCE_MOVE_BLOCKED_ERROR_CODE,
+  type MoveBlockerDto,
+  type MoveFollowUpDto,
+  type MoveOutcomeDto,
+  type MovePreviewDto,
   type RestoreResultDto,
   type WorldBackupDto,
   type WorldBackupListDto,
   type WorldDto,
 } from "../../instances";
+import type { InstallPhase } from "../../../domain/types";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
-import { followMockSelection, mockWorldBackupSettings } from "./config";
+import {
+  addExtraDirectory,
+  followMockSelection,
+  isKnownMockGameDirectory,
+  isMockPathWithin,
+  mockDirectoryVersions,
+  mockGameDir,
+  mockGameDirectoryName,
+  mockWorldBackupSettings,
+  recordMockMovedVersions,
+  samePath,
+  validateMockMoveTarget,
+} from "./config";
 import { forgetMockLaunchRecords, mockCrashReport, mockPlayRecordsError, mockPlaySummary, renameMockLaunchRecords, takeMockPlayRecordsFailure } from "./launch";
 import { forgetMockMods, mockModFileCount, renameMockMods } from "./mods";
 import { forgetMockPinnedInstance, renameMockPinnedInstance } from "./system";
 import { beginMockTask, endMockTask, isMockTaskCancelled } from "./tasks";
 
 // ipc/ 只能以类型方式引用别的模块，事件名与上限在这里按后端各写一份。
-const CORE_EVENT = "aurora://core-event";
+const CORE_EVENT = "petalfall://core-event";
 const SIDEBAR_PIN_MAX = 5;
 const FOLDER_TARGETS: readonly FolderTarget[] = [
   "game_dir",
@@ -94,6 +113,9 @@ type DerivedField =
   | "base_busy"
   | "description"
   | "cover"
+  | "cover_image"
+  | "background"
+  | "background_image"
   | "memory_mb"
   | "playtime_min"
   | "last_played_at"
@@ -117,12 +139,17 @@ interface MockInstance {
   content: InstanceContentDto;
   sizeBytes: number;
   fileCount: number;
+  /** 实例卡面图片目录（.petalfall/cover/）里此刻在盘上的文件名：设置可以引用盘上没有的名字，列表给取图键只认在盘上的。 */
+  coverFiles: string[];
 }
 
 function defaultSettings(): InstanceSettingsDto {
   return {
     description: null,
     cover: null,
+    cover_image: null,
+    background: "follow",
+    background_image: null,
     isolation: "follow_global",
     memory_mb: null,
     java: "auto",
@@ -186,6 +213,7 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 31 * MB,
       fileCount: 4,
+      coverFiles: [],
     },
     {
       dto: readyDto("樱花生存", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, now - 12 * DAY),
@@ -225,6 +253,7 @@ function seedInstances(): MockInstance[] {
       },
       sizeBytes: 420 * MB,
       fileCount: 1830,
+      coverFiles: [],
     },
     // 下面四个实例是 Mod、发现与启动各自 mock 里种好数据的实例：浏览器里从实例列表点进去，各页看到的是同一批实例。
     {
@@ -235,6 +264,7 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 96 * MB,
       fileCount: 410,
+      coverFiles: [],
     },
     {
       dto: readyDto("1.20.1-Forge", "1.20.1", [{ kind: "forge", version: "47.2.0" }], 17, now - 55 * DAY),
@@ -244,6 +274,7 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 120 * MB,
       fileCount: 520,
+      coverFiles: [],
     },
     {
       dto: readyDto("1.21", "1.21", [], 21, now - 50 * DAY),
@@ -253,6 +284,7 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 30 * MB,
       fileCount: 4,
+      coverFiles: [],
     },
     {
       dto: readyDto("1.21.1-Fabric", "1.21.1", [{ kind: "fabric", version: "0.16.10" }], 21, now - 20 * DAY),
@@ -287,6 +319,7 @@ function seedInstances(): MockInstance[] {
       },
       sizeBytes: 210 * MB,
       fileCount: 900,
+      coverFiles: [],
     },
     {
       dto: readyDto("RLCraft", "1.12.2", [{ kind: "forge", version: "14.23.5.2860" }], 8, now - 90 * DAY),
@@ -296,6 +329,7 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 1300 * MB,
       fileCount: 9200,
+      coverFiles: [],
     },
     {
       dto: {
@@ -324,6 +358,7 @@ function seedInstances(): MockInstance[] {
       content: emptyContent(),
       sizeBytes: 12 * MB,
       fileCount: 3,
+      coverFiles: [],
     },
   ];
 }
@@ -515,13 +550,15 @@ const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
   modifying: "改动 Mod、资源或设置",
   inherited: "被其他实例使用",
   backing_up: "备份或恢复存档",
+  moving: "移到其他游戏目录",
 };
 
 /**
  * 两件事能否同时在一个实例上进行，与后端 InstanceActivity::compatible_with 同一张表：Mod、资源与设置的改动彼此兼容，
  * 也与启动、运行中的游戏、存档备份兼容；被别的实例当作基底时，基底照样能改动、备份存档，几个实例也能同时以它为基底，基底自己的
  * 启动、运行与之互斥（游戏映射着 natives，用它的实例写不了）；备份要读整个存档，游戏开着会边写边打包，所以与启动、运行互斥，
- * 同一实例也只备份一份，兼容集合比运行宽，游戏退出后才能原地转过去；新建、补全、改名、删除会挪走或重写整个目录，与任何事都互斥。
+ * 同一实例也只备份一份，兼容集合比运行宽，游戏退出后才能原地转过去；新建、补全、改名、删除、移到别的游戏目录会挪走或重写整个目录，
+ * 与任何事都互斥。
  */
 function compatible(a: InstanceActivity, b: InstanceActivity): boolean {
   if (a === "modifying") return b === "modifying" || b === "launching" || b === "running" || b === "backing_up" || b === "inherited";
@@ -679,6 +716,29 @@ function isolatedOf(instance: MockInstance): boolean {
   return instance.dto.loaders.some((l) => l.kind !== "optifine" && l.kind !== "liteloader") || !instance.dto.is_release;
 }
 
+/** 同一输入得同一串 length 位小写十六进制：每 8 位一轮 FNV-1a，各轮只靠输入前缀的轮次区分。 */
+function stableHex(text: string, length: number): string {
+  let out = "";
+  for (let round = 0; out.length < length; round++) {
+    let hash = 0x811c9dc5;
+    for (const ch of `${round}:${text}`) {
+      hash ^= ch.codePointAt(0) as number;
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    out += hash.toString(16).padStart(8, "0");
+  }
+  return out.slice(0, length);
+}
+
+/**
+ * 卡面图片的取图键：文件不在盘上（没导入过、被换掉清理了、被手动删了）为 null，与后端列实例时的登记一致。
+ * 后端的键是图片路径的 SHA-1；mock 没有真实路径，按实例与文件名给出同样形状（40 位小写十六进制）的确定性键，换名即换键。
+ */
+function coverImageKey(instance: MockInstance, file: string | null): string | null {
+  if (file === null || !instance.coverFiles.includes(file)) return null;
+  return stableHex(`${instance.dto.id}/${file}`, 40);
+}
+
 function toDto(instance: MockInstance): InstanceDto {
   const playError = mockPlayRecordsError();
   const play = playError === null ? mockPlaySummary(instance.dto.id) : null;
@@ -688,6 +748,9 @@ function toDto(instance: MockInstance): InstanceDto {
     ...instance.dto,
     description: instance.settings.description,
     cover: instance.settings.cover,
+    cover_image: coverImageKey(instance, instance.settings.cover_image),
+    background: instance.settings.background,
+    background_image: coverImageKey(instance, instance.settings.background_image),
     memory_mb: instance.settings.memory_mb,
     // 与 list_mods 数的是同一份文件表，两边不会对不上。
     mod_count: ready ? mockModFileCount(instance.dto.id) : null,
@@ -734,6 +797,7 @@ export function addMockInstance(
     content: emptyContent(),
     sizeBytes: 0,
     fileCount: 0,
+    coverFiles: [],
   });
 }
 
@@ -741,6 +805,13 @@ export function addMockInstance(
 export function loseMockLoaderLibrary(id: string, fileName: string): void {
   const message = `加载器自带的库 ${fileName} 缺失或已损坏，它只能由加载器安装器生成，需要重新安装加载器`;
   requireInstance(id).dto.incomplete = { kind: "repair", outcome: "failed", started_at: Date.now(), spec: null, error: { code: "loader_library_missing", message } };
+}
+
+/** 模拟卡面图片在启动器外被删：设置照旧引用它，列表里的取图键变成 null。 */
+export function loseMockCoverImage(id: string, file: string): void {
+  const instance = requireInstance(id);
+  if (!instance.coverFiles.includes(file)) throw new Error(`mock 实例 ${id} 的卡面图片目录里没有 ${file}`);
+  instance.coverFiles = instance.coverFiles.filter((f) => f !== file);
 }
 
 /** 给实例加一个空存档（模拟游戏里新建的）。 */
@@ -810,6 +881,30 @@ function stage(taskId: string, message: string): void {
   emitMockEvent(CORE_EVENT, { kind: "stage", task_id: taskId, message });
 }
 
+/** 与后端 install_plan 同一份步骤表：Forge / NeoForge 先补齐原版再装加载器，装好后照合并后的版本 JSON 再校验一遍。 */
+function mockInstallPlan(loader: LoaderChoice | null, useTemplate: boolean): InstallPhase[] {
+  const plan: InstallPhase[] = ["metadata"];
+  if (loader === "fabric" || loader === "quilt") plan.push("loader_profile", "libraries", "assets", "natives");
+  else if (loader === "forge" || loader === "neoforge") plan.push("libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify");
+  else plan.push("libraries", "assets", "natives");
+  if (useTemplate) plan.push("template");
+  return plan;
+}
+
+/** 只补全、不重装时的步骤表，与后端 repair_instance 的 Complete 一致。 */
+const MOCK_COMPLETE_PLAN: readonly InstallPhase[] = ["libraries", "assets", "natives"];
+
+function phase(taskId: string, plan: readonly InstallPhase[], key: InstallPhase): void {
+  const index = plan.indexOf(key);
+  if (index === -1) throw new Error(`步骤 ${key} 不在这次的步骤表 ${plan.join()} 里`);
+  emitMockEvent(CORE_EVENT, { kind: "phase", task_id: taskId, plan: [...plan], index });
+}
+
+/** 假后端只在「本体与库」那一步真的推下载进度，之后各步（模板除外，它跟着套模板报）接着报出来，进度条照样按步走。 */
+function phasesAfterLibraries(taskId: string, plan: readonly InstallPhase[]): void {
+  for (const key of plan.slice(plan.indexOf("libraries") + 1)) if (key !== "template") phase(taskId, plan, key);
+}
+
 /** 一段假下载：逐步推进度，期间被取消即以 cancelled 拒绝。 */
 async function fakeDownload(taskId: string, files: number, bytesPerFile: number): Promise<void> {
   for (let step = 1; step <= MOCK_INSTALL_STEPS; step++) {
@@ -831,7 +926,7 @@ async function fakeDownload(taskId: string, files: number, bytesPerFile: number)
 
 // ---------------------------------------------------------------- 设置校验（与后端逐项一致）
 
-const SETTINGS_KEYS = ["description", "cover", "isolation", "memory_mb", "java", "jvm_args", "resolution", "fullscreen"] as const;
+const SETTINGS_KEYS = ["description", "cover", "cover_image", "background", "background_image", "isolation", "memory_mb", "java", "jvm_args", "resolution", "fullscreen"] as const;
 
 function malformed(message: string): IpcError {
   return invalid("settings", "malformed", `实例设置格式不对：${message}`);
@@ -850,6 +945,8 @@ function parseSettings(raw: unknown): InstanceSettingsDto {
   };
   const isolation = s.isolation;
   if (isolation !== "follow_global" && isolation !== "enabled" && isolation !== "disabled") throw malformed("isolation 取值不对");
+  const background = s.background;
+  if (background !== "follow" && background !== "art" && background !== "texture" && background !== "image") throw malformed("background 取值不对");
   const memory = s.memory_mb;
   if (memory !== null && memory !== undefined && (typeof memory !== "number" || !Number.isInteger(memory) || memory < 0)) {
     throw malformed("memory_mb 应为非负整数或 null");
@@ -871,6 +968,9 @@ function parseSettings(raw: unknown): InstanceSettingsDto {
   return {
     description: nullableString("description"),
     cover: nullableString("cover"),
+    cover_image: nullableString("cover_image"),
+    background,
+    background_image: nullableString("background_image"),
     isolation,
     // 与后端 serde 一致：Option 字段缺省即 null。
     memory_mb: typeof memory === "number" ? memory : null,
@@ -888,6 +988,13 @@ function validateSettings(s: InstanceSettingsDto): void {
   if (s.cover !== null && !/^[a-z0-9_]{1,64}$/.test(s.cover)) {
     throw violation("cover", `封面预设 id 只能由小写字母、数字与下划线组成（1 到 64 个）：${JSON.stringify(s.cover)}`);
   }
+  if (s.cover_image !== null && !COVER_IMAGE_NAME.block.test(s.cover_image)) {
+    throw violation("cover_image", `封面方块图片应形如 block-<16 位十六进制>.png：${JSON.stringify(s.cover_image)}`);
+  }
+  if (s.background_image !== null && !COVER_IMAGE_NAME.background.test(s.background_image)) {
+    throw violation("background_image", `卡面背景图片应形如 background-<16 位十六进制>.png 或 .jpg：${JSON.stringify(s.background_image)}`);
+  }
+  if (s.background === "image" && s.background_image === null) throw violation("background", "背景设为图片时 background_image 不能为空");
   if (s.memory_mb !== null && (s.memory_mb < 1024 || s.memory_mb % 512 !== 0)) {
     throw violation("memory_mb", `内存至少 1024 MB 且为 512 的整数倍，收到 ${s.memory_mb}`);
   }
@@ -898,6 +1005,57 @@ function validateSettings(s: InstanceSettingsDto): void {
   if (width < 320 || width > 7680 || height < 240 || height > 4320) {
     throw violation("resolution", `宽应在 320-7680、高应在 240-4320 之间，收到 ${width}×${height}`);
   }
+}
+
+// ---------------------------------------------------------------- 卡面图片
+
+/** 与后端 CoverImageSlot::accepts 一致：前缀 + 16 位小写十六进制 + 这个位置认的扩展名，同时挡住路径穿越。 */
+const COVER_IMAGE_NAME: Record<CoverImageSlotDto, RegExp> = {
+  background: /^background-[0-9a-f]{16}\.(png|jpg)$/,
+  block: /^block-[0-9a-f]{16}\.png$/,
+};
+
+/**
+ * 原图扩展名 -> 背景存下的格式。后端按文件头认图、按有没有透明决定存 JPEG 还是 PNG；mock 读不了文件，
+ * 按扩展名代替：JPEG 本来就不透明，PNG 与 WebP 可能带透明。方块一律存 PNG。
+ */
+const COVER_IMAGE_SOURCES: Readonly<Record<string, "png" | "jpg">> = { png: "png", jpg: "jpg", jpeg: "jpg", webp: "png" };
+
+/** 与后端把 slot 解成 CoverImageSlot 一致：不认识的位置报 invalid_argument，detail.field 为 slot。 */
+function coverSlot(raw: string): CoverImageSlotDto {
+  if (raw !== "background" && raw !== "block") throw invalid("slot", "unknown", `不认识的卡面图片位置：${raw}`);
+  return raw;
+}
+
+/** 落下一份设置，并像后端保存后那样清掉卡面图片目录里不再被引用的文件。 */
+function commitSettings(instance: MockInstance, settings: InstanceSettingsDto): void {
+  instance.settings = settings;
+  instance.coverFiles = instance.coverFiles.filter((f) => f === settings.cover_image || f === settings.background_image);
+}
+
+/**
+ * 与后端同序：先认位置，再认绝对路径，然后占住实例（改名、删除、新建、补全进行中报 instance_busy）、认实例，最后才认图
+ * （扩展名代替文件头）。文件名的哈希段由位置与原图路径推出（后端取内容哈希），同一张图重复导入得同一个名字。
+ */
+function importCoverImage(args: MockArgs): InstanceSettingsDto {
+  const id = str(args, "id");
+  const slot = coverSlot(str(args, "slot"));
+  const path = str(args, "path");
+  if (!/^([A-Za-z]:[\\/]|\\\\)/.test(path)) throw invalid("path", "not_absolute", `图片路径须是绝对路径：${path}`);
+  return withMockInstance(id, "modifying", () => {
+    const instance = requireInstance(id);
+    const dot = path.lastIndexOf(".");
+    const ext = dot < 0 ? "" : path.slice(dot + 1).toLowerCase();
+    const stored = Object.hasOwn(COVER_IMAGE_SOURCES, ext) ? COVER_IMAGE_SOURCES[ext] : null;
+    if (stored === null) throw invalid("path", "unsupported_format", `只能用 PNG、JPEG 或 WebP 图片：${path}`);
+    const hash = stableHex(`${slot}:${path}`, 16);
+    const file = slot === "block" ? `block-${hash}.png` : `background-${hash}.${stored}`;
+    const settings: InstanceSettingsDto =
+      slot === "block" ? { ...instance.settings, cover_image: file } : { ...instance.settings, background: "image", background_image: file };
+    if (!instance.coverFiles.includes(file)) instance.coverFiles = [...instance.coverFiles, file];
+    commitSettings(instance, settings);
+    return settings;
+  });
 }
 
 // ---------------------------------------------------------------- 命令
@@ -1000,19 +1158,23 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
     content: emptyContent(),
     sizeBytes: 0,
     fileCount: 0,
+    coverFiles: [],
   };
   instances.push(instance);
   // 与后端一样，名字下还留着的记录属于已经不在的同名旧实例（浏览器里刷新后游玩记录重新播种就会这样），新实例从零开始；
   // 会话日志与崩溃报告在后端存于实例目录，新目录里本来就没有。
   forgetMockLaunchRecords(name);
+  const plan = mockInstallPlan(loader, useTemplate);
   try {
     if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
+    phase(taskId, plan, "metadata");
     stage(taskId, `查找原版 ${mcVersion}`);
     await sleep(MOCK_STEP_MS);
     const entry = MANIFEST.find((v) => v.id === mcVersion);
     if (!entry) throw new IpcError("install_failed", `installer jar 内缺少条目: 版本清单中的 ${mcVersion}`);
     let loaderVersion: string | null = null;
     if (loader) {
+      if (plan.includes("loader_profile")) phase(taskId, plan, "loader_profile");
       const available = LOADER_VERSIONS[`${loader}:${mcVersion}`] ?? [];
       // 没给版本号时与后端一样取推荐版：最新稳定版，没有稳定版取最新的。
       const recommended = available.find((v) => v.stable) ?? available[0];
@@ -1023,7 +1185,9 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
       stage(taskId, `获取 ${LOADER_NAMES[loader]} 加载器信息`);
     }
     stage(taskId, "补全库、资源与 natives");
+    phase(taskId, plan, "libraries");
     await fakeDownload(taskId, 40, 512 * 1024);
+    phasesAfterLibraries(taskId, plan);
     instance.dto = {
       ...readyDto(name, mcVersion, loader && loaderVersion ? [{ kind: loader, version: loaderVersion }] : [], entry.java, createdAt),
       release_type: entry.type,
@@ -1032,6 +1196,7 @@ async function installVersion(args: MockArgs): Promise<InstallResultDto> {
     instance.sizeBytes = 40 * 512 * 1024;
     instance.fileCount = 40;
     // 与后端一样在补全之后、首次启动之前套模板：判断隔离要用到装好后才知道的版本类型
+    if (useTemplate) phase(taskId, plan, "template");
     const templateOutcome = useTemplate ? applyTemplate(instance) : null;
     if (templateOutcome !== null) stage(taskId, templateStage(templateOutcome));
     stage(taskId, `实例 ${name} 安装完成：库 40 / 资源 0 / natives 0`);
@@ -1120,6 +1285,9 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
       ? { kind: "install", outcome: "pending", started_at: startedAt, spec, error: null }
       : { kind: "repair", outcome: "pending", started_at: startedAt, spec: null, error: null };
     stage(taskId, `补全实例 ${id} 的文件`);
+    // 重装在后端就是走一遍新建（不套模板），步骤表也是新建那一份
+    const plan = spec ? mockInstallPlan(spec.loader, false) : MOCK_COMPLETE_PLAN;
+    for (const key of plan.slice(0, plan.indexOf("libraries") + 1)) phase(taskId, plan, key);
     try {
       await fakeDownload(taskId, 12, 256 * 1024);
     } catch (error) {
@@ -1133,6 +1301,7 @@ async function repairInstance(args: MockArgs): Promise<RepairResultDto> {
       }
       throw error;
     }
+    phasesAfterLibraries(taskId, plan);
     if (spec) {
       const entry = MANIFEST.find((v) => v.id === spec.mc_version);
       if (!entry) {
@@ -1529,6 +1698,181 @@ function revealInFolder(args: MockArgs): void {
   mockRevealedPaths.push(path);
 }
 
+// ---------------------------------------------------------------- 移到另一个游戏目录（与后端 instance_move 同一套规则）
+
+/** 目标盘除了要写的字节，至少还要留出这么多，与后端一致。 */
+const MOVE_MARGIN_BYTES = 256 * MB;
+/** 假磁盘各盘的剩余空间；E 盘故意很满，选到它上面的文件夹能看到空间不够。没列出的卷按很空算。 */
+const MOCK_FREE_BYTES: Readonly<Record<string, number>> = { "c:": 38 * GIB, "d:": 120 * GIB, "e:": 1536 * MB };
+const MOCK_FREE_BYTES_ELSEWHERE = 500 * GIB;
+/** 一个版本要的共用文件（库、资源、日志配置）的粗略量；目标里已有游戏文件时大多已在，只缺这个版本独有的那些。 */
+const MOCK_DEPENDENCIES_FULL = { files: 3460, bytes: 712 * MB };
+const MOCK_DEPENDENCIES_PARTIAL = { files: 186, bytes: 94 * MB };
+/** 带过去的基底版本只有版本 JSON 与客户端 jar。 */
+const MOCK_BASE_FILES = 2;
+const MOCK_BASE_BYTES = 26 * MB;
+/** 与后端同一份步骤表：跨卷先复制、读回校验再提交，同卷直接改名过去。 */
+const MOVE_CROSS_VOLUME_PLAN: readonly InstallPhase[] = ["move_dependencies", "move_copy", "move_verify", "move_commit"];
+const MOVE_SAME_VOLUME_PLAN: readonly InstallPhase[] = ["move_dependencies", "move_commit"];
+
+/** 卷：盘符，或 UNC 路径的 \\主机\共享。 */
+function volumeOf(path: string): string {
+  const unc = /^[\\/]{2}([^\\/]+)[\\/]([^\\/]+)/.exec(path);
+  return (unc === null ? path.slice(0, 2) : `\\\\${unc[1]}\\${unc[2]}`).toLowerCase();
+}
+
+function freeBytesOf(path: string): number {
+  const listed = MOCK_FREE_BYTES[volumeOf(path)];
+  return listed === undefined ? MOCK_FREE_BYTES_ELSEWHERE : listed;
+}
+
+/** 随实例走的存档备份：备份区里按实例 id 分的那一层，与后端 instances/<id> 同一个口径。 */
+function movedBackups(id: string): { count: number; bytes: number } {
+  const book = backups[id];
+  const lists = book === undefined ? [] : Object.values(book);
+  return {
+    count: lists.reduce((sum, list) => sum + list.length, 0),
+    bytes: lists.reduce((sum, list) => sum + list.reduce((total, b) => total + b.size_bytes, 0), 0),
+  };
+}
+
+function previewMove(id: string, rawTarget: string): MovePreviewDto {
+  const instance = requireInstance(id);
+  if (instance.dto.status === "broken") {
+    const reason = instance.dto.broken_reason ?? "版本 JSON 不可用";
+    throw new IpcError("instance_failed", `实例 ${id} 的版本 JSON 不可用：${reason}`, { id, reason });
+  }
+  const target = validateMockMoveTarget(rawTarget);
+  const source = mockGameDir();
+  const sameVolume = volumeOf(source) === volumeOf(target);
+  const targetVersions = mockDirectoryVersions(target);
+  const inTarget = (name: string) => targetVersions.some((v) => v.toLowerCase() === name.toLowerCase());
+  const chain = mockInheritanceChain(id);
+  const basesToCopy = chain.filter((base) => !inTarget(base));
+  const dependencies = targetVersions.length > 0 ? MOCK_DEPENDENCIES_PARTIAL : MOCK_DEPENDENCIES_FULL;
+  const moved = movedBackups(id);
+  const dependencyTotal = dependencies.bytes + basesToCopy.length * MOCK_BASE_BYTES;
+  // 同卷只算补过去的共用文件；跨卷实例与备份也要复制一份
+  const required = sameVolume ? dependencyTotal : dependencyTotal + instance.sizeBytes + moved.bytes;
+  const available = freeBytesOf(target);
+  const blockers: MoveBlockerDto[] = [];
+  // 目标就是原处或在实例目录里面时，别的检查都无从谈起
+  if (samePath(target, source)) blockers.push({ kind: "same_directory" });
+  else if (isMockPathWithin(target, `${source}\\versions\\${id}`)) blockers.push({ kind: "target_inside_source" });
+  else {
+    if (inTarget(id)) blockers.push({ kind: "name_taken" });
+    const dependents = dependentsOf(id);
+    if (dependents.length > 0) blockers.push({ kind: "has_dependents", dependents });
+    if (required + MOVE_MARGIN_BYTES > available) blockers.push({ kind: "insufficient_space", needed: required + MOVE_MARGIN_BYTES, available });
+  }
+  return {
+    id,
+    source,
+    target,
+    target_name: mockGameDirectoryName(target),
+    target_registered: isKnownMockGameDirectory(target),
+    same_volume: sameVolume,
+    instance_bytes: instance.sizeBytes,
+    instance_files: instance.fileCount,
+    backup_bytes: moved.bytes,
+    backup_count: moved.count,
+    dependency_files: dependencies.files,
+    dependency_bytes: dependencies.bytes,
+    bases_to_copy: basesToCopy,
+    reused_bases: chain.filter(inTarget),
+    missing_in_source: instance.dto.incomplete === null ? 0 : 12,
+    required_bytes: required,
+    available_bytes: available,
+    isolated: isolatedOf(instance),
+    blockers,
+  };
+}
+
+/** 下一次移动提交后配置存不上的原因；null 为照常。 */
+let pendingMoveConfigFailure: string | null = null;
+
+/**
+ * 下一次移动提交后配置存不上（模拟配置文件被占用）：与后端一样照成功返回，跟进项多一项 config；原目录里对它的引用
+ * （侧栏固定、当前选中、固定服务器）不动，新目标也不记进游戏目录列表，留给下次打开时按移动日志补。
+ */
+export function failNextMockMoveConfig(cause = "拒绝访问。 (os error 5)"): void {
+  pendingMoveConfigFailure = cause;
+}
+
+/** 一步里的假复制：文件数为 0 时这一步没有可报的下载。 */
+async function fakeCopy(taskId: string, files: number, bytes: number): Promise<void> {
+  if (files === 0) return;
+  await fakeDownload(taskId, files, Math.round(bytes / files));
+}
+
+async function moveInstance(args: MockArgs): Promise<MoveOutcomeDto> {
+  const taskId = str(args, "taskId");
+  const id = str(args, "id");
+  const source = str(args, "source");
+  const rawTarget = str(args, "target");
+  requireInstance(id);
+  // 与后端一样，移动期间连同继承链上的基底一起占住：要从基底读客户端 jar 带过去
+  const moveHold = acquireMockInstanceWithBases(id, "moving", mockInheritanceChain(id));
+  try {
+    beginMockTask(taskId);
+  } catch (error) {
+    moveHold.release();
+    throw error;
+  }
+  try {
+    // 发起之后切换过游戏目录：当前目录里同名的是另一个实例，别的检查都无从谈起
+    if (!samePath(source, mockGameDir())) {
+      const blocker: MoveBlockerDto = { kind: "source_changed" };
+      throw new IpcError(INSTANCE_MOVE_BLOCKED_ERROR_CODE, `实例 ${id} 不能移到 ${rawTarget}：当前游戏目录已经换了，不是发起移动时的那个`, { id, blocker });
+    }
+    const preview = previewMove(id, rawTarget);
+    const blocker = preview.blockers[0];
+    if (blocker !== undefined) {
+      throw new IpcError(INSTANCE_MOVE_BLOCKED_ERROR_CODE, `实例 ${id} 不能移到 ${preview.target}：${blocker.kind}`, { id, blocker });
+    }
+    const plan = preview.same_volume ? MOVE_SAME_VOLUME_PLAN : MOVE_CROSS_VOLUME_PLAN;
+    phase(taskId, plan, "move_dependencies");
+    await fakeCopy(taskId, preview.dependency_files + preview.bases_to_copy.length * MOCK_BASE_FILES, preview.dependency_bytes + preview.bases_to_copy.length * MOCK_BASE_BYTES);
+    if (!preview.same_volume) {
+      const files = preview.instance_files + preview.backup_count;
+      const bytes = preview.instance_bytes + preview.backup_bytes;
+      phase(taskId, plan, "move_copy");
+      await fakeCopy(taskId, files, bytes);
+      phase(taskId, plan, "move_verify");
+      await fakeCopy(taskId, files, bytes);
+    }
+    phase(taskId, plan, "move_commit");
+    // 提交开始后不再理会取消：这一步只等一拍，不查取消
+    await sleep(MOCK_STEP_MS);
+    instances = instances.filter((i) => i.dto.id !== id);
+    forgetMockMods(id);
+    forgetMockLaunchRecords(id);
+    const followUps: MoveFollowUpDto[] = [];
+    // 与改名共用同一处失败注入：游玩记录、存档备份没跟过去时照成功返回，记成待提示的一项
+    const lag = takeMockPlayRecordsFailure();
+    if (lag !== null) followUps.push({ kind: "play_records", reason: lag });
+    const stuck = pendingBackupsMoveFailure;
+    pendingBackupsMoveFailure = null;
+    if (stuck === null) delete backups[id];
+    else followUps.push({ kind: "world_backups", reason: stuck });
+    recordMockMovedVersions(preview.target, [id, ...preview.bases_to_copy]);
+    // 配置在文件与记录都移好之后才改、才存；存不上同样照成功返回，原目录里的引用与目录列表都还是移动前的样子
+    const configFailure = pendingMoveConfigFailure;
+    pendingMoveConfigFailure = null;
+    const registered = configFailure === null && !preview.target_registered;
+    if (configFailure === null) {
+      pins = pins.filter((pin) => pin !== id);
+      forgetMockPinnedInstance(id);
+      followMockSelection(id, null);
+      if (registered) addExtraDirectory(preview.target_name, preview.target);
+    } else followUps.push({ kind: "config", reason: configFailure });
+    return { id, source: preview.source, target: preview.target, target_name: preview.target_name, registered, follow_ups: followUps };
+  } finally {
+    endMockTask(taskId);
+    moveHold.release();
+  }
+}
+
 export const handlers: MockHandlers = {
   // 与后端一样按小写 id 的码位顺序排，不按语言区域排序。
   list_instances: () =>
@@ -1546,10 +1890,12 @@ export const handlers: MockHandlers = {
     return withMockInstance(id, "modifying", () => {
       validateSettings(settings);
       const instance = requireInstance(id);
-      instance.settings = settings;
+      commitSettings(instance, settings);
       return settings;
     });
   },
+
+  import_cover_image: importCoverImage,
 
   list_instance_content: (args) => {
     const id = str(args, "id");
@@ -1747,6 +2093,10 @@ export const handlers: MockHandlers = {
 
   export_world: exportWorld,
 
+  preview_instance_move: (args) => previewMove(str(args, "id"), str(args, "target")),
+
+  move_instance: moveInstance,
+
   reveal_in_folder: (args) => revealInFolder(args),
   open_folder: (args) => {
     const target = str(args, "target");
@@ -1784,6 +2134,7 @@ export function reset(): void {
   backups = seedBackups();
   holds.clear();
   pendingBackupsMoveFailure = null;
+  pendingMoveConfigFailure = null;
   savesReaders.length = 0;
   savesWriters.length = 0;
   mockRevealedPaths.length = 0;
@@ -1798,9 +2149,9 @@ interface InstancesSnapshot {
 }
 
 // 实例此刻在做的事只在进程内有意义：刷新等于启动器重启，不存。默认设置在后端存于数据目录，跟着实例一起存。
-// 版本 4：实例多了直达能力，另存存档备份表与默认设置。
+// 版本 4：实例多了直达能力，另存存档备份表与默认设置。版本 5：实例多了卡面图片目录里的文件。
 export const persist: MockPersist = {
-  version: 4,
+  version: 5,
   snapshot: (): InstancesSnapshot => ({ instances, pins, template, backups }),
   restore: (data) => {
     const saved = data as InstancesSnapshot;

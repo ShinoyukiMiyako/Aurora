@@ -17,11 +17,12 @@ import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
 import { CORE_EVENT } from "../../ipc/tasks";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
+import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, configDto, deferred, emit, instanceDto, memoryAdviceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import { HERO_COPY, OVERVIEW_COPY } from "./copy";
 import InstancePage from "./index";
@@ -168,17 +169,19 @@ const flush = () =>
 
 async function open(tab: InstanceTab, id = ID) {
   view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
-          <Probe />
-          <Profiler id="page" onRender={() => void (commits += 1)}>
-            <Routed />
-          </Profiler>
-          <OverlayRoot />
-        </RemoteImageProvider>
-      </ShellProvider>
-    </LauncherProvider>,
+    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+      <LauncherProvider>
+        <ShellProvider>
+          <RemoteImageProvider resolve={(url) => Promise.resolve(url)}>
+            <Probe />
+            <Profiler id="page" onRender={() => void (commits += 1)}>
+              <Routed />
+            </Profiler>
+            <OverlayRoot />
+          </RemoteImageProvider>
+        </ShellProvider>
+      </LauncherProvider>
+    </AppearanceProvider>,
   );
   await flush();
   act(() => nav.go({ page: "instance", id, tab }));
@@ -219,6 +222,9 @@ function mod(fileName: string, name: string): InstalledMod {
 const settings: InstanceSettingsDto = {
   description: null,
   cover: null,
+  cover_image: null,
+  background: "follow",
+  background_image: null,
   isolation: "follow_global",
   memory_mb: null,
   java: "auto",
@@ -294,7 +300,7 @@ beforeEach(() => {
     worlds: [{ dir_name: "w1", level_status: "ok", level_error: null, name: "新世界", mode: "survival", last_played: NOW - 60_000, size_bytes: 1024, modified_at: null }],
   }));
   ipc.overrides.set("detect_java", () => [{ path: "C:/Java/jdk-21/bin/java.exe", version: { major: 21, minor: 0, security: 5, build: 0, raw: "21.0.5" }, is_64bit: true, vendor: "Microsoft", source: "registry", missing_files: [] }]);
-  ipc.overrides.set("memory_advice", () => ({ total_mb: 32768, available_mb: 16000, tier: "modded", recommended_mb: 6144 }));
+  ipc.overrides.set("memory_advice", () => memoryAdviceDto({ version_id: ID }));
   ipc.overrides.set("last_crash", () => crash);
   ipc.overrides.set("last_launch_log", () => null);
   ipc.overrides.set("list_history", () => history);
@@ -414,6 +420,39 @@ describe("实例详情：本实例的进度在走", () => {
     }
     expect(document.body.textContent).toContain(HERO_COPY.installing("50%"));
     if (tab === "overview") expect(document.body.textContent).toContain(OVERVIEW_COPY.installProgress("50%", formatSpeed(1_000_000), formatBytes(40_000)));
+    expect(renders).toEqual(before);
+  });
+
+  it("新建报了在第几步，再来 20 次下载进度：横幅写整体百分比与第几步、不写这一批的总量，头图、标签条与概览不重渲染", async () => {
+    const name = "周末生存";
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await open("overview");
+    await act(async () => {
+      await launcher.actions.createInstance({ name, mcVersion: "1.21.1", loader: "fabric", loaderVersion: "0.16.10", cover: "cherry_planks" });
+      await settle(20);
+    });
+    act(() => nav.go({ page: "instance", id: name, tab: "overview" }));
+    await flush();
+    const task = launcher.state.tasks.find((t) => t.instanceId === name);
+    if (task === undefined || task.status !== "running") throw new Error("新建任务应在进行中");
+    const before = { ...renders };
+    act(() => {
+      emit(CORE_EVENT, { kind: "phase", task_id: `${task.id}#1`, plan: ["metadata", "loader_profile", "libraries", "assets", "natives"], index: 2 });
+    });
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: i, bytes: i * 1000, total_bytes: 40_000, transferred: i * 1000, speed: 1_000_000 });
+      });
+    }
+    // 权重 1 + 1 + 7 + 11 + 1 = 21，前两步占 2，库这一步走了一半：(2 + 3.5) / 21
+    const progress = launcher.state.tasks.find((t) => t.id === task.id)?.progress;
+    if (progress === undefined) throw new Error("新建任务不见了");
+    expect(progress).toBeCloseTo(5.5 / 21, 10);
+    expect(document.body.textContent).toContain(HERO_COPY.installing("26%"));
+    expect(document.body.textContent).toContain(OVERVIEW_COPY.installStepProgress("26%", "第 3 步，共 5 步：下载游戏本体与库文件", formatSpeed(1_000_000)));
+    expect(document.body.textContent).not.toContain(formatBytes(40_000));
+    // 头图胶囊的副行放不下整句，写短的
+    expect(document.body.textContent).toContain("下载游戏本体与库文件 · 第 3/5 步");
     expect(renders).toEqual(before);
   });
 

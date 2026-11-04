@@ -46,7 +46,7 @@ pub async fn discard_export_leftovers(dest: String) -> Result<(), CommandError> 
             "导出位置须是绝对路径：{dest}"
         )));
     }
-    aurora_core::discard_export_leftovers(path).await;
+    petalfall_core::discard_export_leftovers(path).await;
     Ok(())
 }
 

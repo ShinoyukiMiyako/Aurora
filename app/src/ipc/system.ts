@@ -5,19 +5,38 @@ import type { ConfigEnumField, NamedDirectoryDto } from "./config";
 
 // ---- 内存 ----
 
-export type MemoryTier = "vanilla" | "modded" | "large_modpack";
+/** 本机上限的来由：物理内存的一半；32 位 Java 最多 1 GB（只在启动时才知道用哪个 Java，内存建议里不会出现，但类型要覆盖）。 */
+export type MemoryLimitReason = "half_physical" | "java_32bit";
+
+/** 需求的组成项，按出现顺序展示。 */
+export type MemoryNeedFactor =
+  /** 基数：原版 / 只装 OptiFine / 装了 Mod 加载器。整合包写了推荐值时没有这一项。 */
+  | { kind: "base"; loader: "vanilla" | "optifine" | "modded"; mb: number }
+  /** 启用的 Mod 数与它们折算的内存；只在装了 Mod 加载器且没有整合包推荐值时出现，count 可能为 0。 */
+  | { kind: "mods"; count: number; mb: number }
+  /** 整合包作者写的推荐内存（CurseForge recommendedRam），替代 base 与 mods。 */
+  | { kind: "modpack"; mb: number }
+  /** options.txt 的视距超过默认 12 时多出来的区块折算；distance 是视距。 */
+  | { kind: "render_distance"; distance: number; mb: number }
+  /** 检测到 Distant Horizons：需求至少 floor_mb。 */
+  | { kind: "distant_horizons"; floor_mb: number };
 
 export interface MemoryAdviceDto {
   total_mb: number;
   /** 此刻空闲的物理内存。 */
   available_mb: number;
-  /** 推荐值按哪一档算。 */
-  tier: MemoryTier;
-  /** 自动分配此刻会给多少（MB），不超过物理内存的一半。 */
+  /** 按哪个实例估算：给了 versionId 就是它；没给时是主页选中的实例；没有选中（或选中的已不在）为 null，按原版估算。 */
+  version_id: string | null;
+  /** 实例需要多少（MB），已向上对齐到 512。 */
+  need_mb: number;
+  /** 本机上限。 */
+  limit: { mb: number; reason: MemoryLimitReason };
+  /** 自动分配会给多少 = min(need_mb, limit.mb)。 */
   recommended_mb: number;
+  factors: MemoryNeedFactor[];
 }
 
-/** 内存建议。给 versionId 按该实例定档（不存在报 version_not_installed）；不给按主页选中的实例，没选中按原版。 */
+/** 内存建议。给 versionId 按该实例估算（不存在报 version_not_installed）；不给按主页选中的实例，没选中按原版。 */
 export const memoryAdvice = (versionId?: string): Promise<MemoryAdviceDto> =>
   invoke<MemoryAdviceDto>("memory_advice", { versionId });
 
@@ -36,6 +55,15 @@ export const completeFirstRun = (gameDir: string, extraDirectories: NamedDirecto
 
 /** 启动时发生、要让用户知道的事，按 kind 区分。 */
 export type StartupNoticeDto =
+  | {
+      /**
+       * data_dir_unwritable：可执行文件所在目录这次写不进去，但里面有 config.json，数据就在这里，所以没有换到系统目录。
+       * 账户和实例都在原处，只是这次的改动可能存不下来。排在所有提示之前。
+       */
+      kind: "data_dir_unwritable";
+      /** 系统给的原因，不含路径。 */
+      reason: string;
+    }
   | {
       /** config_reset：config.json 读不出来，坏文件已改名留存，本次按默认配置启动（首次启动向导会重新出现）。 */
       kind: "config_reset";

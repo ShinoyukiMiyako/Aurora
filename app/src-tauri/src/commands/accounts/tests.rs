@@ -1,18 +1,18 @@
 use super::*;
 use std::path::Path;
 
-use aurora_core::{
-    AccountCredentials, AuroraConfig, GameProfile, MicrosoftCredentials, YggdrasilCredentials,
+use petalfall_core::{
+    AccountCredentials, GameProfile, MicrosoftCredentials, PetalfallConfig, YggdrasilCredentials,
 };
 use serde_json::json;
 
-fn open_aurora(dir: &Path) -> Aurora {
-    let config = AuroraConfig {
+fn open_petalfall(dir: &Path) -> Petalfall {
+    let config = PetalfallConfig {
         msa_client_id: Some("test-client".into()),
         game_directory: Some(dir.join(".minecraft")),
-        ..AuroraConfig::default()
+        ..PetalfallConfig::default()
     };
-    Aurora::open(config, dir.to_path_buf(), dir.join("config.json")).unwrap()
+    Petalfall::open(config, dir.to_path_buf(), dir.join("config.json")).unwrap()
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn microsoft_login_slot_supersedes_and_finishes_only_its_own_login() {
 #[tokio::test]
 async fn select_authlib_profile_rejects_stale_id_and_unknown_profile() {
     let dir = tempfile::tempdir().unwrap();
-    let facade = Facade::new(open_aurora(dir.path()));
+    let facade = Facade::new(open_petalfall(dir.path()));
     let slot = AuthlibPendingSlot::default();
 
     let stale = select_authlib_profile_with(&facade, &slot, "authlib-0", "aa")
@@ -196,15 +196,15 @@ async fn select_authlib_profile_rejects_stale_id_and_unknown_profile() {
 #[tokio::test(flavor = "current_thread")]
 async fn find_account_reads_the_store_off_the_async_thread() {
     let dir = tempfile::tempdir().unwrap();
-    let aurora = open_aurora(dir.path());
-    let saved = aurora.add_offline_account("Marisa", None).unwrap();
+    let petalfall = open_petalfall(dir.path());
+    let saved = petalfall.add_offline_account("Marisa", None).unwrap();
 
-    let found = find_account(&aurora, &saved.uuid).await.unwrap();
+    let found = find_account(&petalfall, &saved.uuid).await.unwrap();
     assert_eq!(found.uuid, saved.uuid);
     assert_eq!(found.name, "Marisa");
     assert_eq!(found.account_type, AccountType::Offline);
 
-    let missing = find_account(&aurora, "ffffffffffffffffffffffffffffffff")
+    let missing = find_account(&petalfall, "ffffffffffffffffffffffffffffffff")
         .await
         .unwrap_err();
     assert_eq!(missing.code, "AccountNotFound");
@@ -218,7 +218,7 @@ mod microsoft {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use aurora_core::MsaEndpoints;
+    use petalfall_core::MsaEndpoints;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -245,13 +245,13 @@ mod microsoft {
     }
 
     fn facade_against(server: &MockServer, dir: &Path) -> Arc<Facade> {
-        let aurora = open_aurora(dir).with_msa_endpoints(MsaEndpoints {
+        let petalfall = open_petalfall(dir).with_msa_endpoints(MsaEndpoints {
             oauth_base: server.uri(),
             xbl_authenticate: format!("{}/xbl", server.uri()),
             xsts_authorize: format!("{}/xsts", server.uri()),
             minecraft_base: server.uri(),
         });
-        Arc::new(Facade::new(aurora))
+        Arc::new(Facade::new(petalfall))
     }
 
     type LoginHandle = tokio::task::JoinHandle<Result<AccountDto, CommandError>>;

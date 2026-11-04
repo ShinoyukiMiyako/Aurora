@@ -1,6 +1,6 @@
 //! 发现与安装：聚合搜索 Modrinth + CurseForge、工程详情，把平台上的 Mod 版本装进实例。
 
-use aurora_core::{
+use petalfall_core::{
     AggregateResult, EventSink, ModLoader, Platform, ProjectDetail, ResourceInstallOutcome,
     ResourceTarget, ResourceType, SearchCursor, SearchEntry, SearchQuery, SkippedPlatform,
     SortField,
@@ -182,9 +182,9 @@ pub async fn search_resources(
         limit,
         cursor,
     })?;
-    let aurora = facade.snapshot().await;
+    let petalfall = facade.snapshot().await;
     Ok(search_result_dto(
-        aurora
+        petalfall
             .search_page(&search_query, only, cursor.as_ref())
             .await?,
     ))
@@ -201,8 +201,8 @@ pub async fn project_detail(
     if project_id.trim().is_empty() {
         return Err(CommandError::invalid_argument("工程 id 不能为空"));
     }
-    let aurora = facade.snapshot().await;
-    Ok(aurora.project_detail(platform, &project_id).await?)
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.project_detail(platform, &project_id).await?)
 }
 
 /// 把某平台上的一个 Mod 版本安装到指定实例的 mods 目录。长任务：进度经 core-event 推送并带
@@ -265,10 +265,10 @@ pub(crate) async fn install_mod_with(
 ) -> Result<ModInstallOutcomeDto, CommandError> {
     let _guard = locks.acquire(target.version_id, InstanceActivity::Modifying)?;
     let task = tasks.register(task_id)?;
-    let aurora = facade.snapshot().await.with_cancel(task.token().clone());
+    let petalfall = facade.snapshot().await.with_cancel(task.token().clone());
     let outcome = task
         .run(async {
-            Ok(aurora
+            Ok(petalfall
                 .install_mod(
                     target.version_id,
                     target.platform,
@@ -397,7 +397,7 @@ pub(crate) async fn install_resource_with(
         None
     };
     let task = tasks.register(task_id)?;
-    let aurora = snapshot.with_cancel(task.token().clone());
+    let petalfall = snapshot.with_cancel(task.token().clone());
     let target = ResourceTarget {
         version_id: args.version_id,
         resource_type,
@@ -405,7 +405,7 @@ pub(crate) async fn install_resource_with(
     };
     let outcome = task
         .run(async {
-            Ok(aurora
+            Ok(petalfall
                 .install_resource(
                     target,
                     platform,
@@ -529,15 +529,16 @@ mod tests {
     }
 
     fn facade_in(dir: &std::path::Path, base: &str) -> Facade {
-        let config = aurora_core::AuroraConfig {
+        let config = petalfall_core::PetalfallConfig {
             game_directory: Some(dir.join(".minecraft")),
-            isolation_policy: aurora_core::IsolationPolicy::All,
-            ..aurora_core::AuroraConfig::default()
+            isolation_policy: petalfall_core::IsolationPolicy::All,
+            ..petalfall_core::PetalfallConfig::default()
         };
-        let aurora = aurora_core::Aurora::open(config, dir.to_path_buf(), dir.join("config.json"))
-            .unwrap()
-            .with_platform_bases(base, base);
-        Facade::new(aurora)
+        let petalfall =
+            petalfall_core::Petalfall::open(config, dir.to_path_buf(), dir.join("config.json"))
+                .unwrap()
+                .with_platform_bases(base, base);
+        Facade::new(petalfall)
     }
 
     /// 端到端：资源包经命令装进实例的 resourcepacks/，事件都带本任务 id，任务随之注销。游戏运行中
@@ -998,8 +999,8 @@ mod tests {
     /// 测试里走不到真正的删除：实例被占着时删除命令必须在动目录之前就拒绝。
     struct NeverDispose;
 
-    impl aurora_core::Disposer for NeverDispose {
-        fn dispose(&self, dir: &std::path::Path) -> Result<(), aurora_core::InstanceError> {
+    impl petalfall_core::Disposer for NeverDispose {
+        fn dispose(&self, dir: &std::path::Path) -> Result<(), petalfall_core::InstanceError> {
             panic!("被占着的实例不该被删除：{}", dir.display());
         }
     }
@@ -1044,13 +1045,13 @@ mod tests {
     #[test]
     fn search_args_map_to_query_platform_and_cursor() {
         let cursor = SearchCursor {
-            modrinth: aurora_core::PlatformCursor {
+            modrinth: petalfall_core::PlatformCursor {
                 offset: 24,
                 exhausted: false,
                 total: Some(1240),
                 absorbed: vec![],
             },
-            curseforge: aurora_core::PlatformCursor {
+            curseforge: petalfall_core::PlatformCursor {
                 offset: 20,
                 exhausted: false,
                 total: Some(300),
@@ -1148,15 +1149,15 @@ mod tests {
     fn skipped_platform_serializes_with_snake_case_reason() {
         let skipped = SkippedPlatform {
             platform: Platform::CurseForge,
-            reason: aurora_core::SkipReason::CategoryUnmapped,
+            reason: petalfall_core::SkipReason::CategoryUnmapped,
         };
         assert_eq!(
             serde_json::to_value(skipped).unwrap(),
             serde_json::json!({"platform": "curseforge", "reason": "category_unmapped"})
         );
         for (reason, name) in [
-            (aurora_core::SkipReason::Filtered, "filtered"),
-            (aurora_core::SkipReason::KeyMissing, "key_missing"),
+            (petalfall_core::SkipReason::Filtered, "filtered"),
+            (petalfall_core::SkipReason::KeyMissing, "key_missing"),
         ] {
             assert_eq!(serde_json::to_value(reason).unwrap(), name);
         }

@@ -204,7 +204,7 @@ describe("直达走与启动相同的拦截链", () => {
 
   it("指定的 Java 不在了「改为自动选择」：改完设置立即重新启动，带着同一个 quickPlay", async () => {
     const s = await boot();
-    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "C:/jdk/bin/java.exe", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "C:/jdk/bin/java.exe", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
     ipc.overrides.set("get_instance_settings", () => settings);
     ipc.overrides.set("set_instance_settings", (args) => args.settings);
     ipc.overrides.set("launch_game", () => {

@@ -1,16 +1,17 @@
-// 原版材质与远程图片的取址入口。图片字节由后端的 aurora-tex 自定义协议提供：
-//   /art/<路径>.png?v=<材质源版本>   白名单内的方块面与默认皮肤
+// 原版材质与远程图片的取址入口。图片字节由后端的 petalfall-tex 自定义协议提供：
+//   /art/<路径>.png?v=<材质源版本>   方块材质与默认皮肤（规则见 whitelist）
 //   /panorama/0.png                  樱花林全景正面
 //   /skin/<sha1(皮肤 URL)>.png       已下载的远程皮肤
 //   /thumb/<sha1(远程图 URL)>        已登记并缓存的远程缩略图
+//   /cover/<sha1(本机路径)>          实例卡面的玩家图片（列实例时由后端登记）
 // 材质只从玩家本机的游戏文件读取：材质源为 null（还没装任何游戏）时 artUrl 返回 null，调用方直接画回落图形，
 // 一个请求都不发。材质源版本写进 v 参数，协议响应是 immutable 缓存，换版本时旧缓存自然失效。
 
 import { useSyncExternalStore } from "react";
 import { sha1Hex } from "./sha1";
-import { ART_PATHS } from "./whitelist";
+import { isArtPath } from "./whitelist";
 
-export const TEX_SCHEME = "aurora-tex";
+export const TEX_SCHEME = "petalfall-tex";
 
 /**
  * 自定义协议在页面里的源。Windows 与 Android 的 WebView 不认自定义 scheme，Tauri 改写成
@@ -85,10 +86,11 @@ export function useArtStatus(): ArtStatus {
 // ---------------------------------------------------------------- 地址
 
 /**
- * 原版材质的唯一取址函数。路径不在白名单是编程错误，直接抛；本机没有材质源时返回 null。
+ * 原版材质的唯一取址函数。路径不合取址规则是编程错误，直接抛；本机没有材质源时返回 null。
+ * 合规的方块材质在当前材质源里不一定存在（目录来自旧材质源、手改设置），取不到由取图层回落。
  */
 export function artUrl(path: string): string | null {
-  if (!ART_PATHS.has(path)) throw new Error(`原版材质路径不在白名单：${path}`);
+  if (!isArtPath(path)) throw new Error(`原版材质路径不在白名单：${path}`);
   if (status.source === null) return null;
   return `${texOrigin()}/art/${path}.png?v=${encodeURIComponent(status.source.versionId)}`;
 }
@@ -104,6 +106,12 @@ const SHA1_HEX = /^[0-9a-f]{40}$/;
 export function skinUrl(sha1: string): string {
   if (!SHA1_HEX.test(sha1)) throw new Error(`皮肤缓存键不是 40 位小写十六进制：${sha1}`);
   return `${texOrigin()}/skin/${sha1}.png`;
+}
+
+/** 实例卡面的玩家图片：键由实例列表给出（后端登记时算好）。 */
+export function coverImageUrl(key: string): string {
+  if (!SHA1_HEX.test(key)) throw new Error(`卡面图片的取图键不是 40 位小写十六进制：${key}`);
+  return `${texOrigin()}/cover/${key}`;
 }
 
 /** 远程缩略图在协议里的地址。只接受 http(s) 地址；地址要先经后端登记、下载进缓存才取得到。 */

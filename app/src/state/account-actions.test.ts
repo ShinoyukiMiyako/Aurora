@@ -75,6 +75,15 @@ describe("刷新账户", () => {
     expect(store.getState().toasts).toMatchObject([{ tone: "error", title: "登录应用未获批准", action: { label: "打开设置", to: { page: "settings", section: "general" } } }]);
   });
 
+  it("这个版本没有 client_id：通知说清缺的是什么并给去设置的入口，账户不当成失效", async () => {
+    ipc.overrides.set("refresh_account", () => {
+      throw new IpcError("MsaClientIdMissing", "这个版本没有内置微软登录 client_id");
+    });
+    expect(await store.actions.refreshAccount("ms-1")).toBe("no_client_id");
+    expect(store.getState().accounts.find((a) => a.uuid === "ms-1")?.status).not.toBe("expired");
+    expect(store.getState().toasts).toMatchObject([{ tone: "error", title: "这个版本没有内置微软登录", action: { label: "打开设置", to: { page: "settings", section: "general" } } }]);
+  });
+
   it("其余失败原样抛出", async () => {
     ipc.overrides.set("refresh_account", () => {
       throw new IpcError("Http", "网络连接失败");

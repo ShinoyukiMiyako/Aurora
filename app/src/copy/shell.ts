@@ -125,6 +125,7 @@ export const DROP_COPY = {
 export const FILE_PICK_COPY = {
   modpack: { title: "选择整合包文件", filter: "整合包" },
   java: { title: "选择 java.exe 或 javaw.exe", filter: "Java 可执行文件" },
+  image: { title: "选择一张图片", filter: "图片（PNG、JPEG、WebP）" },
 } as const;
 
 /** 系统保存对话框。Windows 的类型下拉原样显示过滤名，不会自己补「（*.mrpack）」，所以写进名字里。 */
@@ -172,6 +173,12 @@ export const SHELL_ACTION_ERROR = {
 
 /** 启动提示：后端在启动时遇到、但不妨碍继续运行的问题。标题说清出了什么事，正文说清结果。 */
 export const STARTUP_NOTICE_COPY = {
+  dataDirUnwritable: {
+    title: "数据还在原处，但这次写不进去",
+    /** 通知正文只显示三行，最窄档一行十六个字。原因是这条提示的要点，前面只留半句，路径交给「打开目录」。 */
+    body: (reason: string) => `账户和实例都没丢。原因：${reason}`,
+    action: "打开目录",
+  },
   configReset: {
     title: "配置文件损坏，已按默认设置启动",
     body: "原文件已改名，留在数据目录里",
@@ -188,6 +195,7 @@ export const STARTUP_NOTICE_COPY = {
       isolation_policy: "版本隔离",
       "appearance.mode": "外观明暗",
       "appearance.accent": "强调色",
+      "appearance.cover_background": "实例卡面默认背景",
       after_launch: "游戏启动后",
       language: "界面语言",
     } satisfies Readonly<Record<ConfigEnumField, string>>,

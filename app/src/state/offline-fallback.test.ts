@@ -130,6 +130,17 @@ describe("以离线方式进单人：状态容器", () => {
     expect(launchArgs()).toEqual([{ accountUuid: MOCK_PLAYER, offlineFallback: false }]);
   });
 
+  it("这个版本没有 client_id：落成失败会话，通知的修复动作去设置的常规分区，不再启动一次", async () => {
+    await loginMockPlayer();
+    const store = await storeWith(MOCK_PLAYER, "Mock_Player");
+    failNextMockLaunch("account_client_id_missing", { account: "Mock_Player" });
+    await store.actions.launch("生存");
+    expect(store.getState().session).toMatchObject({ phase: "failed", stageIndex: 0, failure: { code: "account_client_id_missing", params: { account: "Mock_Player" } } });
+    const toast = store.getState().toasts.find((t) => t.tone === "error");
+    expect(toast).toMatchObject({ title: "「生存」启动失败", body: "这个版本没有内置微软登录", action: { label: "打开设置", to: { page: "settings", section: "general" } } });
+    expect(launchArgs()).toEqual([{ accountUuid: MOCK_PLAYER, offlineFallback: false }]);
+  });
+
   it("账户已被判定需要重新登录而被拒绝降级：会话改为 failed(account_relogin)，失败卡给出「重新登录」", async () => {
     const store = await storeWith(YOZAKURA, "Yozakura", "authlib_injector");
     failNextMockLaunch("account_service_down", { account: "Yozakura", status: 503 });

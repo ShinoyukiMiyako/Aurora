@@ -1,6 +1,7 @@
-// 外观：明暗、强调色、花瓣、樱花林全景、减少动画。全部写进启动器配置（跟随本机），切换即时生效；
+// 外观：明暗、强调色、花瓣、樱花林全景、实例卡面的默认背景、减少动画。全部写进启动器配置（跟随本机），切换即时生效；
 // 写入失败时外观状态自己回到后端确认的值，这里只负责把原因交给外层提示。
 
+import { useBlockCatalog } from "../../../art/iso/catalog";
 import { usePanoramaAvailable } from "../../../art/panorama/PanoramaBackdrop";
 import { ACCENT_OPTIONS, MODE_OPTIONS } from "../../../copy/settings";
 import type { Appearance } from "../../../domain/types";
@@ -8,12 +9,14 @@ import { useRunner } from "../../../shell/useRunner";
 import { systemPrefersReducedMotion, useAppearance } from "../../../state/appearance";
 import { Card } from "../../../ui/Card";
 import { CardHeader } from "../../../ui/CardHeader";
+import { SegmentedControl } from "../../../ui/SegmentedControl";
 import { SettingRow } from "../../../ui/SettingRow";
 import { Tag } from "../../../ui/Tag";
 import { AccentSwatches } from "../../../ui/AccentSwatches";
 import { MODE_ICON, ModeCards } from "../../../ui/ModeCards";
 import { Toggle } from "../../../ui/Toggle";
-import { APPEARANCE_COPY, saveFailed } from "../copy";
+import { ArtDownload } from "../../shared/cover-picker/ArtDownload";
+import { APPEARANCE_COPY, COVER_STYLE_LABEL, saveFailed } from "../copy";
 import s from "../settings.module.css";
 
 function useAppearanceWrite() {
@@ -26,6 +29,8 @@ export function AppearanceSection() {
   const { appearance, reduced } = useAppearance();
   const write = useAppearanceWrite();
   const panoramaAvailable = usePanoramaAvailable();
+  // 方块目录随材质源来去：没有目录就是本机还没有材质源，方块平铺画不出来
+  const hasArt = useBlockCatalog() !== null;
   const systemReduced = systemPrefersReducedMotion();
   return (
     <>
@@ -61,6 +66,19 @@ export function AppearanceSection() {
             disabled={!panoramaAvailable}
           />
         </SettingRow>
+        <SettingRow title={APPEARANCE_COPY.coverBackground} description={hasArt ? APPEARANCE_COPY.coverBackgroundDesc : APPEARANCE_COPY.coverBackgroundNoArt}>
+          <SegmentedControl
+            size="sm"
+            value={appearance.coverBackground}
+            onChange={(coverBackground) => write(APPEARANCE_COPY.coverBackground, { coverBackground })}
+            ariaLabel={APPEARANCE_COPY.coverBackground}
+            options={[
+              { value: "art", label: COVER_STYLE_LABEL.art },
+              { value: "texture", label: COVER_STYLE_LABEL.texture },
+            ]}
+          />
+        </SettingRow>
+        {!hasArt && <ArtDownload compact />}
         <SettingRow
           title={
             <span className={s.titleWithTag}>

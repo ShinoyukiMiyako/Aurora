@@ -22,6 +22,19 @@ const DEFAULT_DIR_NAME = "默认目录";
 const SEED_DISK = [DEFAULT_GAME_DIR, "C:\\Users\\player\\AppData\\Roaming\\.minecraft", "D:\\HMCL\\.minecraft"];
 // 带 versions 文件夹（已有游戏文件）的目录。
 const SEED_WITH_VERSIONS = ["C:\\Users\\player\\AppData\\Roaming\\.minecraft", "D:\\HMCL\\.minecraft"];
+// 这些目录 versions 下的版本名。真后端逐个目录数盘，这里写死；移动实例按它判重名、认可复用的基底，移进来的实例记在后面。
+// 当前目录的实例由实例 mock 管，不在这里。
+const SEED_VERSIONS: readonly (readonly [path: string, names: readonly string[]])[] = [
+  ["C:\\Users\\player\\AppData\\Roaming\\.minecraft", ["1.21.1", "1.20.1", "1.8.9"]],
+  [
+    "D:\\HMCL\\.minecraft",
+    ["樱花生存", "1.21.1", "1.20.1", "1.19.2", "1.18.2", "1.16.5", "1.12.2", "1.7.10", "fabric-loader-0.16.5-1.21.1", "1.20.1-forge-47.3.0", "空岛生存", "建筑服"],
+  ],
+];
+
+function seedVersions(): Map<string, string[]> {
+  return new Map(SEED_VERSIONS.map(([path, names]) => [norm(path), [...names]]));
+}
 // 「发现其它启动器目录」会探到的候选；只报告盘上存在且尚未记录的。
 const DISCOVERABLE: NamedDirectoryDto[] = [
   { name: "官方启动器", path: "C:\\Users\\player\\AppData\\Roaming\\.minecraft" },
@@ -54,6 +67,7 @@ function seedConfig(): ConfigDto {
     memory: { max_mb: 4096, min_mb: null, auto: true },
     isolation_policy: "mod_loaders_and_non_release",
     has_client_id: true,
+    microsoft_login_available: true,
     auto_download_java: true,
     default_java: DEFAULT_JAVA_AUTO,
     after_launch: "minimize",
@@ -74,6 +88,7 @@ let config: ConfigDto = seedConfig();
 let extras: NamedDirectoryDto[] = [];
 let disk = new Set(SEED_DISK.map(norm));
 let withVersions = new Set(SEED_WITH_VERSIONS.map(norm));
+let versions = seedVersions();
 let firstRunCompleted = false;
 
 /**
@@ -96,6 +111,12 @@ function norm(path: string): string {
 
 export function samePath(a: string, b: string): boolean {
   return norm(a) === norm(b);
+}
+
+/** path 就是 dir 或在它下面，同一套大小写与分隔符口径。 */
+export function isMockPathWithin(path: string, dir: string): boolean {
+  const [p, d] = [norm(path), norm(dir)];
+  return p === d || p.startsWith(`${d}\\`);
 }
 
 /** 与后端 validate_game_dir 一致：去空白后不能为空、不能含 !、必须是绝对路径。返回规整后的路径。 */
@@ -128,6 +149,47 @@ function directoryName(path: string): string {
   const label = parts[parts.length - 1] === ".minecraft" ? parts[parts.length - 2] : parts[parts.length - 1];
   // 盘根这类没有任何一级名字的路径，显示路径本身。
   return label === undefined ? path : label;
+}
+
+/** 当前游戏目录。 */
+export function mockGameDir(): string {
+  return config.game_dir;
+}
+
+/** 游戏目录的显示名，与目录列表同一规则；还没记录的文件夹也按它推。 */
+export function mockGameDirectoryName(path: string): string {
+  return directoryName(path);
+}
+
+/** 当前目录或已记录的额外目录。 */
+export function isKnownMockGameDirectory(path: string): boolean {
+  return samePath(path, config.game_dir) || extras.some((d) => samePath(d.path, path));
+}
+
+/**
+ * 移动实例的目标，与后端同一口径：路径规则同游戏目录；已记录的目录此刻访问不到报 unavailable，
+ * 没记录的可以还不存在（移动时建出来）。返回规整后的路径。
+ */
+export function validateMockMoveTarget(raw: string): string {
+  const path = validateGameDir(raw);
+  if (isKnownMockGameDirectory(path) && !disk.has(norm(path))) throw invalidGameDir(path, "unavailable");
+  return path;
+}
+
+/** 别的游戏目录 versions 下的版本名；当前目录的实例由实例 mock 管，这里只有种子与移进来的。 */
+export function mockDirectoryVersions(path: string): readonly string[] {
+  const names = versions.get(norm(path));
+  return names === undefined ? [] : names;
+}
+
+/** 实例移进 path 后：目录建出来（含 versions），版本名记上，目录列表的版本数随之变。 */
+export function recordMockMovedVersions(path: string, names: readonly string[]): void {
+  const key = norm(path);
+  disk.add(key);
+  withVersions.add(key);
+  const listed = versions.get(key);
+  const known = listed === undefined ? [] : listed;
+  versions.set(key, [...known, ...names.filter((n) => !known.some((k) => k.toLowerCase() === n.toLowerCase()))]);
 }
 
 export function addExtraDirectory(name: string, path: string): void {
@@ -304,10 +366,15 @@ function updateConfig(args: MockArgs): void {
   if (args.isolationPolicy !== undefined) next.isolation_policy = oneOf(args.isolationPolicy, ISOLATION_POLICIES, "隔离档位");
   if (args.autoDownloadJava !== undefined) next.auto_download_java = requireBoolean(args, "autoDownloadJava");
   if (args.cacheDirectory !== undefined) next.cache_directory = requireString(args, "cacheDirectory", "update_config");
+  const clearClientId = args.clearClientId !== undefined && requireBoolean(args, "clearClientId");
+  if (args.clientId !== undefined && clearClientId) throw new IpcError("invalid_argument", "clientId 与 clearClientId 不能同时给");
   if (args.clientId !== undefined) {
     if (requireString(args, "clientId", "update_config").trim() === "") throw new IpcError("invalid_argument", "client_id 不能为空");
     next.has_client_id = true;
+    next.microsoft_login_available = true;
   }
+  // 假后端当作带着内嵌 client_id 的构建：清掉以后微软登录照常可用
+  if (clearClientId) next.has_client_id = false;
   if (args.selectedVersion !== undefined) next.selected_version = requireString(args, "selectedVersion", "update_config");
   if (args.afterLaunch !== undefined) next.after_launch = oneOf(args.afterLaunch, AFTER_LAUNCH, "的启动后行为");
   if (args.checkUpdates !== undefined) next.check_updates = requireBoolean(args, "checkUpdates");
@@ -325,6 +392,11 @@ function updateConfig(args: MockArgs): void {
   config = next;
 }
 
+/** 崩溃页改用独立显卡写成功之后打开独显偏好，与 update_config 改的是同一个字段。 */
+export function enableMockDedicatedGpu(): void {
+  config = { ...config, prefer_dedicated_gpu: true };
+}
+
 function requireBoolean(args: MockArgs, key: string): boolean {
   const value = args[key];
   if (typeof value !== "boolean") throw tauriArgError("update_config", key, "expected a boolean");
@@ -340,14 +412,20 @@ function parseDefaultJava(value: string): string {
   return value;
 }
 
+/** 与后端的目录记录一致：不可达说不上有几个版本，为 null；可达但没有 versions 文件夹是 0。 */
+function versionCount(path: string): number | null {
+  if (!disk.has(norm(path))) return null;
+  return mockDirectoryVersions(path).length;
+}
+
 function listGameDirectories(): GameDirectoryDto[] {
   const current = config.game_dir;
   const listed: GameDirectoryDto[] = [
-    { name: directoryName(current), path: current, is_current: true, available: disk.has(norm(current)) },
+    { name: directoryName(current), path: current, is_current: true, available: disk.has(norm(current)), version_count: versionCount(current) },
   ];
   for (const extra of extras) {
     if (samePath(extra.path, current)) continue;
-    listed.push({ name: extra.name, path: extra.path, is_current: false, available: disk.has(norm(extra.path)) });
+    listed.push({ name: extra.name, path: extra.path, is_current: false, available: disk.has(norm(extra.path)), version_count: versionCount(extra.path) });
   }
   return listed;
 }
@@ -391,6 +469,7 @@ export function reset(): void {
   extras = [];
   disk = new Set(SEED_DISK.map(norm));
   withVersions = new Set(SEED_WITH_VERSIONS.map(norm));
+  versions = seedVersions();
   firstRunCompleted = false;
   firstRunBaseline = null;
 }
@@ -400,6 +479,7 @@ interface ConfigSnapshot {
   extras: NamedDirectoryDto[];
   disk: string[];
   withVersions: string[];
+  versions: [path: string, names: string[]][];
   firstRunCompleted: boolean;
 }
 
@@ -408,9 +488,10 @@ type LaterConfigFields = "extra_java_paths" | "prefer_dedicated_gpu" | "skip_acc
 type StoredConfigSnapshot = Omit<ConfigSnapshot, "config"> & { config: Omit<ConfigDto, LaterConfigFields> & Partial<Pick<ConfigDto, LaterConfigFields>> };
 
 // 快照形状一变就升版本：旧快照里的配置缺字段，读回来会在 DTO 适配处出错，不如启用时就明确报版本不符。
+// 版本 4：另存各目录的版本名（移动实例会往里加）。
 export const persist: MockPersist = {
-  version: 3,
-  snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], firstRunCompleted }),
+  version: 4,
+  snapshot: (): ConfigSnapshot => ({ config, extras, disk: [...disk], withVersions: [...withVersions], versions: [...versions], firstRunCompleted }),
   restore: (data) => {
     const saved = data as StoredConfigSnapshot;
     // 与后端配置的 serde(default) 一致：手动 Java、独显偏好与跳过无障碍引导是后加的字段，之前存下的快照没有它们，按默认值读入
@@ -418,6 +499,7 @@ export const persist: MockPersist = {
     extras = saved.extras;
     disk = new Set(saved.disk);
     withVersions = new Set(saved.withVersions);
+    versions = new Map(saved.versions);
     firstRunCompleted = saved.firstRunCompleted;
   },
 };

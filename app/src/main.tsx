@@ -1,3 +1,8 @@
+// Copyright (C) 2026 Shinoyuki_Miyako
+// SPDX-License-Identifier: AGPL-3.0-only
+// 本程序代码按 AGPL-3.0-only 授权，另附 AGPL 第 7 条的附加条款；两者见源代码根目录的 LICENSE 与 LICENSE-ADDITIONAL-TERMS.md。
+// Licensed under AGPL-3.0-only with additional terms under section 7 of the AGPL; see LICENSE and LICENSE-ADDITIONAL-TERMS.md at the root of the source code.
+
 // 入口与首帧流程。窗口以不可见状态创建：先检查 WebView2 能力、加载字体、读外观偏好并把明暗与强调色
 // 写到 <html>、预载主页模块，再渲染；首帧布局完成后的下一帧才显示窗口（由外壳在知道要不要进首次启动向导之后显示），
 // 用户看不到任何中间态（夜樱下没有白帧）。

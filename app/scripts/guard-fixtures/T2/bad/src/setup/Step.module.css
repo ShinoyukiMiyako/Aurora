@@ -1,0 +1,4 @@
+.step {
+  padding: 12px; /* expect T2 */
+  font-size: 14px; /* expect T2 */
+}

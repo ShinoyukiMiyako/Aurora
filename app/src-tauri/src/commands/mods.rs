@@ -10,11 +10,11 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use aurora_core::modversions::ModVersionList;
-use aurora_core::{
-    is_mod_file_busy, Aurora, BaseError, BodyFormat, CoreError, EventSink, InstallPlan,
-    InstalledSource, InstanceMatch, InstanceMod, ModInstallOutcome, ModLoader, ModVersionInfo,
-    Platform, StarterGroup, StarterMissingReason, StarterMods, UpdateCandidate, UpdateHold,
+use petalfall_core::modversions::ModVersionList;
+use petalfall_core::{
+    is_mod_file_busy, BaseError, BodyFormat, CoreError, EventSink, InstallPlan, InstalledSource,
+    InstanceMatch, InstanceMod, ModInstallOutcome, ModLoader, ModVersionInfo, Petalfall, Platform,
+    StarterGroup, StarterMissingReason, StarterMods, UpdateCandidate, UpdateHold,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -56,8 +56,8 @@ pub async fn list_mods(
     version_id: String,
     facade: State<'_, Facade>,
 ) -> Result<Vec<InstanceMod>, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.list_mods(&version_id).await?)
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.list_mods(&version_id).await?)
 }
 
 /// 启用/禁用指定实例里的某个 Mod，返回切换后的磁盘路径。
@@ -81,8 +81,8 @@ pub(crate) async fn set_mod_enabled_with(
 ) -> Result<String, CommandError> {
     require_non_empty("file_name", file_name)?;
     let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
-    let aurora = facade.snapshot().await;
-    let path = aurora
+    let petalfall = facade.snapshot().await;
+    let path = petalfall
         .set_mod_enabled(version_id, file_name, enabled)
         .await
         .map_err(mods_error)?;
@@ -125,8 +125,8 @@ pub(crate) async fn set_mods_enabled_with(
 ) -> Result<Vec<ModToggleResultDto>, CommandError> {
     validate_file_names(file_names)?;
     let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
-    let aurora = facade.snapshot().await;
-    let outcomes = aurora
+    let petalfall = facade.snapshot().await;
+    let outcomes = petalfall
         .set_mods_enabled(version_id, file_names, enabled)
         .await
         .map_err(mods_error)?;
@@ -199,9 +199,9 @@ pub(crate) async fn add_local_mods_with(
         return Err(CommandError::invalid_argument("paths 里有空路径"));
     }
     let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
-    let aurora = facade.snapshot().await;
+    let petalfall = facade.snapshot().await;
     let sources: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-    let outcomes = aurora
+    let outcomes = petalfall
         .add_local_mods(version_id, &sources)
         .await
         .map_err(mods_error)?;
@@ -248,8 +248,8 @@ pub(crate) async fn set_mod_update_hold_with(
     }
     // 只写卷宗，但卷宗按实例名定位，改名或删除进行中写进去会把实例目录按旧名重新建出来。
     let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
-    let aurora = facade.snapshot().await;
-    aurora
+    let petalfall = facade.snapshot().await;
+    petalfall
         .set_mod_update_hold(version_id, file_name, hold)
         .await
         .map_err(mods_error)
@@ -293,8 +293,8 @@ pub(crate) async fn mod_update_changelog_with(
 ) -> Result<ModChangelogDto, CommandError> {
     require_non_empty("file_name", file_name)?;
     require_non_empty("mod_version_id", mod_version_id)?;
-    let aurora = facade.snapshot().await;
-    let changelog = aurora
+    let petalfall = facade.snapshot().await;
+    let changelog = petalfall
         .mod_update_changelog(version_id, file_name, mod_version_id)
         .await?;
     Ok(ModChangelogDto {
@@ -323,8 +323,8 @@ pub(crate) async fn remove_mod_with(
 ) -> Result<(), CommandError> {
     require_non_empty("file_name", file_name)?;
     let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
-    let aurora = facade.snapshot().await;
-    aurora
+    let petalfall = facade.snapshot().await;
+    petalfall
         .remove_mod(version_id, file_name)
         .await
         .map_err(mods_error)
@@ -347,8 +347,8 @@ pub(crate) async fn check_updates_with(
     version_id: &str,
 ) -> Result<Vec<UpdateCandidate>, CommandError> {
     let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
-    let aurora = facade.snapshot().await;
-    Ok(aurora.check_updates(version_id).await?)
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.check_updates(version_id).await?)
 }
 
 /// 把实例里的某个 Mod 换成同工程的 `mod_version_id`。长任务：进度经 core-event 推送并带 `task_id`，
@@ -407,10 +407,10 @@ pub(crate) async fn update_mod_with(
     validate_update_args(file_name, mod_version_id)?;
     let _guard = locks.acquire(version_id, InstanceActivity::Modifying)?;
     let task = tasks.register(task_id)?;
-    let aurora: Aurora = facade.snapshot().await.with_cancel(task.token().clone());
+    let petalfall: Petalfall = facade.snapshot().await.with_cancel(task.token().clone());
     let outcome = task
         .run(async {
-            aurora
+            petalfall
                 .update_mod(version_id, file_name, mod_version_id, events)
                 .await
                 .map_err(mods_error)
@@ -452,8 +452,8 @@ pub async fn list_mod_versions(
         .iter()
         .map(|name| parse_loader(name))
         .collect::<Result<Vec<_>, _>>()?;
-    let aurora = facade.snapshot().await;
-    Ok(aurora
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
         .mod_version_list(platform, &project_id, &game_versions, &loaders)
         .await?
         .into())
@@ -485,8 +485,8 @@ pub async fn installed_sources(
 pub(crate) async fn installed_sources_with(
     facade: &Facade,
 ) -> Result<Vec<InstanceSourcesDto>, CommandError> {
-    let aurora = facade.snapshot().await;
-    let all = aurora.installed_mod_sources().await?;
+    let petalfall = facade.snapshot().await;
+    let all = petalfall.installed_mod_sources().await?;
     Ok(all
         .into_iter()
         .map(|instance| match instance.sources {
@@ -518,8 +518,8 @@ pub async fn match_instances(
     if let Some(id) = &mod_version_id {
         require_non_empty("mod_version_id", id)?;
     }
-    let aurora = facade.snapshot().await;
-    Ok(aurora
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
         .match_instances(
             platform,
             &project_id,
@@ -541,8 +541,8 @@ pub async fn plan_install(
     let platform = parse_platform(&platform)?;
     require_non_empty("project_id", &project_id)?;
     require_non_empty("mod_version_id", &mod_version_id)?;
-    let aurora = facade.snapshot().await;
-    Ok(aurora
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
         .plan_install(&version_id, platform, &project_id, &mod_version_id)
         .await?)
 }
@@ -636,8 +636,8 @@ pub(crate) async fn starter_mods_with(
         return Err(CommandError::invalid_argument("mc_version 不能为空")
             .with_detail(json!({ "field": "mc_version", "reason": "empty" })));
     }
-    let aurora = facade.snapshot().await;
-    let mods = aurora
+    let petalfall = facade.snapshot().await;
+    let mods = petalfall
         .starter_mods(parsed, mc_version)
         .await
         .map_err(mods_error)?;
@@ -681,8 +681,8 @@ fn parse_loader(name: &str) -> Result<ModLoader, CommandError> {
 mod tests {
     use super::*;
     use crate::commands::error::code;
-    use aurora_core::{
-        AuroraConfig, HistoryEvent, IsolationPolicy, Ledger, LedgerEntry, ResourceType,
+    use petalfall_core::{
+        HistoryEvent, IsolationPolicy, Ledger, LedgerEntry, PetalfallConfig, ResourceType,
     };
     use std::path::{Path, PathBuf};
 
@@ -699,15 +699,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut aurora = Aurora::open(
-            AuroraConfig::default(),
+        let mut petalfall = Petalfall::open(
+            PetalfallConfig::default(),
             root.to_path_buf(),
             root.join("config.json"),
         )
         .unwrap();
-        aurora.set_game_dir(&mc);
-        aurora.set_isolation_policy(IsolationPolicy::All);
-        (Facade::new(aurora), dir.join("mods"))
+        petalfall.set_game_dir(&mc);
+        petalfall.set_isolation_policy(IsolationPolicy::All);
+        (Facade::new(petalfall), dir.join("mods"))
     }
 
     #[test]
@@ -768,7 +768,7 @@ mod tests {
         tokio::fs::write(mods_dir.join("sodium.jar"), b"jar")
             .await
             .unwrap();
-        let aurora = facade.snapshot().await;
+        let petalfall = facade.snapshot().await;
         let mut ledger = Ledger::default();
         ledger.upsert(LedgerEntry {
             file_name: "sodium.jar".to_owned(),
@@ -783,21 +783,25 @@ mod tests {
             installed_as_dependency_of: None,
             update_hold: None,
         });
-        aurora.ledger_store(VERSION_ID).save(&ledger).await.unwrap();
+        petalfall
+            .ledger_store(VERSION_ID)
+            .save(&ledger)
+            .await
+            .unwrap();
 
         remove_mod_with(&facade, &InstanceLocks::default(), VERSION_ID, "sodium.jar")
             .await
             .unwrap();
 
         assert!(!mods_dir.join("sodium.jar").exists());
-        assert!(aurora
+        assert!(petalfall
             .ledger_store(VERSION_ID)
             .load()
             .await
             .unwrap()
             .entries
             .is_empty());
-        let events = aurora.history(VERSION_ID).await.unwrap().events;
+        let events = petalfall.history(VERSION_ID).await.unwrap().events;
         assert_eq!(events.len(), 1);
         match &events[0] {
             HistoryEvent::Remove { files, .. } => assert_eq!(files, &vec!["sodium.jar".to_owned()]),
@@ -981,8 +985,13 @@ mod tests {
         }
         assert_eq!(tokio::fs::read(&jar).await.unwrap(), b"jar");
         assert!(!mods_dir.join("sodium.jar.disabled").exists());
-        let aurora = facade.snapshot().await;
-        assert!(aurora.history(VERSION_ID).await.unwrap().events.is_empty());
+        let petalfall = facade.snapshot().await;
+        assert!(petalfall
+            .history(VERSION_ID)
+            .await
+            .unwrap()
+            .events
+            .is_empty());
     }
 
     /// 游戏运行中照样能启停与移除（被游戏占着的文件另由占用探测拒绝）；命令结束后实例仍记为运行中。
@@ -1143,7 +1152,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
         put_jars(&mods_dir, &["a.jar", "b.jar"]).await;
-        let aurora = facade.snapshot().await;
+        let petalfall = facade.snapshot().await;
         let mut ledger = Ledger::default();
         ledger.upsert(LedgerEntry {
             file_name: "a.jar".to_owned(),
@@ -1158,7 +1167,11 @@ mod tests {
             installed_as_dependency_of: None,
             update_hold: None,
         });
-        aurora.ledger_store(VERSION_ID).save(&ledger).await.unwrap();
+        petalfall
+            .ledger_store(VERSION_ID)
+            .save(&ledger)
+            .await
+            .unwrap();
         let locks = InstanceLocks::default();
         let batch = names(&["a.jar", "b.jar"]);
 
@@ -1184,7 +1197,7 @@ mod tests {
         drop(renaming);
         assert!(mods_dir.join("a.jar").exists());
         assert_eq!(
-            aurora.ledger_store(VERSION_ID).load().await.unwrap(),
+            petalfall.ledger_store(VERSION_ID).load().await.unwrap(),
             ledger
         );
 
@@ -1209,7 +1222,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            aurora
+            petalfall
                 .ledger_store(VERSION_ID)
                 .load()
                 .await
@@ -1427,7 +1440,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (facade, mods_dir) = facade_with_instance(tmp.path()).await;
         put_jars(&mods_dir, &["sodium.jar"]).await;
-        let aurora = facade.snapshot().await;
+        let petalfall = facade.snapshot().await;
         let mut ledger = Ledger::default();
         ledger.upsert(LedgerEntry {
             file_name: "sodium.jar".to_owned(),
@@ -1442,9 +1455,13 @@ mod tests {
             installed_as_dependency_of: None,
             update_hold: None,
         });
-        aurora.ledger_store(VERSION_ID).save(&ledger).await.unwrap();
+        petalfall
+            .ledger_store(VERSION_ID)
+            .save(&ledger)
+            .await
+            .unwrap();
 
-        let listed = serde_json::to_value(aurora.list_mods(VERSION_ID).await.unwrap()).unwrap();
+        let listed = serde_json::to_value(petalfall.list_mods(VERSION_ID).await.unwrap()).unwrap();
         let source = &listed[0]["source"];
         assert_eq!(source["installed_at"], 1_700_000_123);
         assert!(source.as_object().unwrap().contains_key("update_hold"));
@@ -1467,7 +1484,7 @@ mod tests {
         tokio::fs::write(mods_dir.join("sodium.jar.disabled"), b"jar")
             .await
             .unwrap();
-        let aurora = facade.snapshot().await;
+        let petalfall = facade.snapshot().await;
         let mut ledger = Ledger::default();
         for (file_name, project_id) in [("sodium.jar", "AANobbMI"), ("gone.jar", "P7dR8mSH")] {
             ledger.upsert(LedgerEntry {
@@ -1484,9 +1501,13 @@ mod tests {
                 update_hold: None,
             });
         }
-        aurora.ledger_store(VERSION_ID).save(&ledger).await.unwrap();
+        petalfall
+            .ledger_store(VERSION_ID)
+            .save(&ledger)
+            .await
+            .unwrap();
 
-        let broken = aurora.game_dir().join("versions").join("broken");
+        let broken = petalfall.game_dir().join("versions").join("broken");
         tokio::fs::create_dir_all(&broken).await.unwrap();
         tokio::fs::write(
             broken.join("broken.json"),
@@ -1494,7 +1515,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let broken_ledger = aurora.ledger_store("broken");
+        let broken_ledger = petalfall.ledger_store("broken");
         tokio::fs::create_dir_all(broken_ledger.path().parent().unwrap())
             .await
             .unwrap();
@@ -1515,14 +1536,14 @@ mod tests {
     }
 
     fn starter_facade(root: &Path, modrinth: &str) -> Facade {
-        let aurora = Aurora::open(
-            AuroraConfig::default(),
+        let petalfall = Petalfall::open(
+            PetalfallConfig::default(),
             root.to_path_buf(),
             root.join("config.json"),
         )
         .unwrap()
         .with_platform_bases(modrinth, modrinth);
-        Facade::new(aurora)
+        Facade::new(petalfall)
     }
 
     /// 参数在联网之前校验：认不出的加载器、LiteLoader 与空的 MC 版本都报 invalid_argument。

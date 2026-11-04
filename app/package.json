@@ -1,16 +1,19 @@
 {
-  "name": "aurora-app",
+  "name": "petalfall-app",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "dev:setup": "vite --mode setup",
+    "build:setup": "tsc && vite build --mode setup",
     "preview": "vite preview",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint:tokens": "node scripts/check-tokens.mjs",
+    "build:icons": "node scripts/build-icons.mjs",
     "check": "pnpm typecheck && pnpm test && pnpm lint:tokens"
   },
   "dependencies": {

@@ -135,12 +135,42 @@ describe("连通性探测", () => {
 });
 
 describe("内存建议", () => {
-  it("按实例定档，推荐值不超过物理内存一半", async () => {
-    const vanilla = await memoryAdvice();
-    expect(vanilla).toEqual({ total_mb: 16384, available_mb: 9216, tier: "vanilla", recommended_mb: 3840 });
-    const modded = await memoryAdvice("1.21.4-fabric");
-    expect(modded.tier).toBe("modded");
-    expect(modded.recommended_mb * 2).toBeLessThanOrEqual(modded.total_mb);
+  const LIMIT = { mb: 8192, reason: "half_physical" } as const;
+
+  it("没给实例按原版估算，version_id 为 null", async () => {
+    expect(await memoryAdvice()).toEqual({
+      total_mb: 16384,
+      available_mb: 9216,
+      version_id: null,
+      need_mb: 2560,
+      limit: LIMIT,
+      recommended_mb: 2560,
+      factors: [{ kind: "base", loader: "vanilla", mb: 2560 }],
+    });
+  });
+
+  it("id 里带加载器名按基数加 Mod 数估算，需求向上对齐到 512；只带 OptiFine 的按 OptiFine 基数", async () => {
+    expect(await memoryAdvice("1.21.4-fabric")).toEqual({
+      total_mb: 16384,
+      available_mb: 9216,
+      version_id: "1.21.4-fabric",
+      need_mb: 4608,
+      limit: LIMIT,
+      recommended_mb: 4608,
+      factors: [
+        { kind: "base", loader: "modded", mb: 2765 },
+        { kind: "mods", count: 80, mb: 1638 },
+      ],
+    });
+    expect((await memoryAdvice("1.20.1-NeoForge")).factors[0]).toEqual({ kind: "base", loader: "modded", mb: 2765 });
+    const optifine = await memoryAdvice("1.20.1-OptiFine_HD_U_I6");
+    expect([optifine.need_mb, optifine.recommended_mb, optifine.factors]).toEqual([3072, 3072, [{ kind: "base", loader: "optifine", mb: 3072 }]]);
+    expect((await memoryAdvice("1.21.4")).factors).toEqual([{ kind: "base", loader: "vanilla", mb: 2560 }]);
+  });
+
+  it("versionId 不是字符串按 Tauri 参数错误拒绝", async () => {
+    const bad = await rejection(invoke("memory_advice", { versionId: 7 }));
+    expect([bad.code, bad.message]).toEqual(["unknown", "invalid args `versionId` for command `memory_advice`: expected a string"]);
   });
 });
 
@@ -161,9 +191,9 @@ describe("首次启动", () => {
     expect(await isFirstRun()).toBe(false);
     expect((await getConfig()).game_dir).toBe("D:\\Games\\New\\.minecraft");
     expect(await listGameDirectories()).toEqual([
-      { name: "New", path: "D:\\Games\\New\\.minecraft", is_current: true, available: true },
-      { name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: false, available: true },
-      { name: "HMCL", path: "D:\\HMCL\\.minecraft", is_current: false, available: true },
+      { name: "New", path: "D:\\Games\\New\\.minecraft", is_current: true, available: true, version_count: 0 },
+      { name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: false, available: true, version_count: 0 },
+      { name: "HMCL", path: "D:\\HMCL\\.minecraft", is_current: false, available: true, version_count: 12 },
     ]);
   });
 });

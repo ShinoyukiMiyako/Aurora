@@ -1,9 +1,15 @@
+// Copyright (C) 2026 Shinoyuki_Miyako
+// SPDX-License-Identifier: AGPL-3.0-only
+// 本程序代码按 AGPL-3.0-only 授权，另附 AGPL 第 7 条的附加条款；两者见源代码根目录的 LICENSE 与 LICENSE-ADDITIONAL-TERMS.md。
+// Licensed under AGPL-3.0-only with additional terms under section 7 of the AGPL; see LICENSE and LICENSE-ADDITIONAL-TERMS.md at the root of the source code.
+
 //! Petalfall 的 Tauri 外壳。
 //!
 //! 本文件只做装配：日志、插件、managed state、主窗口兜底、命令注册与退出收尾（[`exit`]）。命令实现按领域分在
 //! [`commands`] 下；各领域共用的设施——门面锁 [`facade`]、长任务登记与取消 [`tasks`]、
-//! 事件转发 [`events`]、主窗口启动期处理 [`window`]、主窗口原生拖放 [`drop`]、渲染进程故障后的
-//! 自动重载 [`renderer`]、同一数据目录只跑一个启动器 [`single_instance`]——各自成模块。
+//! 事件转发 [`events`]、主窗口启动期处理 [`window`]、主窗口记住大小与位置 [`window_state`]、主窗口原生拖放 [`drop`]、渲染进程故障后的
+//! 自动重载 [`renderer`]、最小化时的页面可见性 [`page_visibility`]、同一数据目录只跑一个启动器
+//! [`single_instance`]、更新插件留下的安装包目录的清扫 [`update_leftovers`]——各自成模块。
 //!
 //! 新增命令时在 `generate_handler!` 里本领域的分块内追加，块之间以 `// -- 领域 --` 分隔；
 //! 新增 managed state 同样写在 setup 里本领域的分块内。
@@ -15,14 +21,19 @@ mod exit;
 mod facade;
 mod gpu;
 mod logging;
+#[cfg(windows)]
+mod page_visibility;
 mod renderer;
 #[cfg(windows)]
 mod single_instance;
 mod tasks;
 mod textures;
+#[cfg(windows)]
+mod update_leftovers;
 mod window;
+mod window_state;
 
-use aurora_core::{Aurora, ServerMonitor};
+use petalfall_core::{Petalfall, ServerMonitor};
 use tauri::Manager;
 
 use crate::commands::updater::{UpdaterState, UpdaterSupport};
@@ -49,7 +60,7 @@ pub fn run() {
         version = %context.package_info().version,
         log = ?log_path,
         "{} 启动",
-        aurora_base::brand::APP_NAME_EN
+        petalfall_base::brand::APP_NAME_EN
     );
     log_data_dir();
 
@@ -83,19 +94,29 @@ pub fn run() {
             // config.json 读不出来时不终止：此刻还没有窗口，终止就是双击后什么都看不到，而且以后每次都这样。
             // 坏文件改名留存、按默认配置启动，经过记成启动提示，由前端查询后告诉用户。数据目录定位不到、
             // 坏文件改不了名这类错误仍然冒泡终止，避免带着半初始化的门面继续跑。
-            let (aurora, recovery) = tauri::async_runtime::block_on(Aurora::load_recovering())?;
-            let aurora = aurora.with_app_version(&app.package_info().version.to_string())?;
-            let server_monitor = ServerMonitor::new(aurora.data_dir());
-            app.manage(Facade::new(aurora));
-            app.manage(commands::system::StartupNotices::from_recovery(recovery));
+            let (petalfall, recovery) =
+                tauri::async_runtime::block_on(Petalfall::load_recovering())?;
+            let petalfall = petalfall.with_app_version(&app.package_info().version.to_string())?;
+            let server_monitor = ServerMonitor::new(petalfall.data_dir());
+            let data_dir = petalfall.data_dir().to_path_buf();
+            app.manage(Facade::new(petalfall));
+            app.manage(
+                commands::system::StartupNotices::from_recovery(recovery)
+                    .with_data_dir(&petalfall_base::fs::resolve_data_dir()?),
+            );
             // -- tasks --
             app.manage(TaskRegistry::default());
             app.manage(TaskJournal::default());
             // -- instances --
             app.manage(commands::instances::InstanceLocks::default());
+            app.manage(commands::art::ArtDownloadSlot::default());
             app.manage(commands::instances::ExportedFiles::default());
+            // 上次在提交前后被打断的移动：回滚或补完，配置里的引用跟着改。
+            commands::instances::recover_moves_in_background(app.handle());
             // -- launch --
             app.manage(commands::launch::RunningGame::default());
+            // 门面与实例占用表都已就位；前端加载要几百毫秒，接回赶在它之前占住占用槽。
+            commands::launch::reattach_in_background(app.handle());
             // -- accounts --
             app.manage(commands::accounts::MicrosoftLoginSlot::default());
             app.manage(commands::accounts::AuthlibPendingSlot::default());
@@ -105,6 +126,14 @@ pub fn run() {
             app.manage(commands::system::FirstRunBaselineSlot::default());
             app.manage(server_monitor);
             app.manage(UpdaterState::new(updater_support));
+            // 只有装了插件的构建才会留下这些目录；开发构建不碰，本机正式安装的更新包轮不到它来删
+            #[cfg(windows)]
+            if updater_support == UpdaterSupport::Supported {
+                update_leftovers::sweep_in_background(app.package_info().name.clone());
+            }
+            // -- window --
+            // 排在兜底显示之前：显示时要按这里记下的状态决定是否最大化
+            app.manage(window_state::install(app, &data_dir)?);
             window::setup_main_window(app)?;
             #[cfg(windows)]
             if let Some(instance) = instance {
@@ -136,6 +165,7 @@ pub fn run() {
             commands::java::add_java_path,
             commands::java::remove_java_path,
             commands::java::gpu_adapters,
+            commands::java::switch_to_dedicated_gpu,
             // -- accounts --
             commands::accounts::current_account,
             commands::accounts::create_offline_account,
@@ -150,12 +180,15 @@ pub fn run() {
             commands::accounts::refresh_account,
             // -- art --
             commands::art::art_status,
+            commands::art::art_blocks,
+            commands::art::art_download,
             commands::art::skin_info,
             commands::art::thumb_register,
             // -- instances --
             commands::instances::list_instances,
             commands::instances::get_instance_settings,
             commands::instances::set_instance_settings,
+            commands::instances::import_cover_image,
             commands::instances::list_instance_content,
             commands::instances::get_sidebar_pins,
             commands::instances::set_sidebar_pins,
@@ -164,6 +197,8 @@ pub fn run() {
             commands::instances::preview_instance_deletion,
             commands::instances::delete_instance,
             commands::instances::rename_instance,
+            commands::instances::preview_instance_move,
+            commands::instances::move_instance,
             commands::instances::list_manifest,
             commands::instances::list_loader_versions,
             commands::instances::required_java,
@@ -181,6 +216,7 @@ pub fn run() {
             // -- launch --
             commands::launch::launch_game,
             commands::launch::stop_game,
+            commands::launch::running_game,
             commands::launch::play_stats,
             // -- diagnostics --
             commands::diagnostics::last_crash,
@@ -237,6 +273,7 @@ pub fn run() {
             commands::updater::set_install_on_exit,
             // -- window --
             commands::window::restore_window_without_focus,
+            commands::window::reveal_main_window,
         ])
         .build(context)
         .expect("error while building tauri application")
@@ -273,15 +310,16 @@ fn log_panics() {
 
 /// 数据目录在日志装好之前就定位了（日志文件就落在里面），走了哪条路、为什么、花了多久在这里补记。
 fn log_data_dir() {
-    match aurora_base::fs::resolve_data_dir() {
+    match petalfall_base::fs::resolve_data_dir() {
         Ok(resolved) => tracing::info!(
             path = ?resolved.path,
             portable = resolved.portable,
             fallback_reason = ?resolved.fallback_reason,
+            write_failure = ?resolved.write_failure,
             elapsed_ms = resolved.elapsed.as_millis() as u64,
             "数据目录"
         ),
-        // 这里只记录；随后的 Aurora::load 会以同一个错误终止启动。
+        // 这里只记录；随后的 Petalfall::load 会以同一个错误终止启动。
         Err(err) => tracing::error!(error = %err, "定位数据目录失败"),
     }
 }
@@ -290,7 +328,7 @@ fn log_data_dir() {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use aurora_base::brand::{APP_NAME, APP_NAME_EN, APP_SLUG};
+    use petalfall_base::brand::{APP_NAME, APP_NAME_EN, APP_SLUG};
 
     /// 收集日志输出的写入端。
     #[derive(Clone, Default)]
@@ -336,7 +374,8 @@ mod tests {
     }
 
     // tauri.conf.json、index.html 与前端 TS 无法引用 Rust 常量，产品名只能各写一份，
-    // 由这条测试钉住它们与 aurora-base 的 brand 模块一致。identifier 发布后即成兼容契约，单独写死。
+    // 由这条测试钉住它们与 petalfall-base 的 brand 模块一致。identifier 和 publisher 发布后即成兼容契约，
+    // 单独写死：publisher 还决定 NSIS 记安装目录的注册表键，引导程序按它去读。
     #[test]
     fn product_name_is_consistent_across_config_html_and_frontend() {
         let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
@@ -345,6 +384,7 @@ mod tests {
         assert_eq!(conf["mainBinaryName"], APP_NAME_EN);
         assert_eq!(conf["app"]["windows"][0]["title"], APP_NAME_EN);
         assert_eq!(conf["identifier"], "org.petalfall.launcher");
+        assert_eq!(conf["bundle"]["publisher"], "Shinoyuki_Miyako");
 
         let title = format!("<title>{APP_NAME_EN}</title>");
         assert!(

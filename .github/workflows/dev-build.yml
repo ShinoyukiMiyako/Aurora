@@ -17,13 +17,47 @@ defaults:
   run:
     shell: bash
 
+# tag 名不能叫 dev：和分支同名后 git 引用会有歧义。dev 包按这个 tag 下的 latest.json 检查更新，
+# 改名要同时改启动器里的 DEV_RELEASE_TAG，否则已装的 dev 包再也收不到更新。
+env:
+  TAG: dev-build
+
 jobs:
+  # 自托管机只构建、不碰更新签名私钥：它跨任务常驻，私钥落在这里，一旦机器被污染就能给后门包签上合法签名。
   build:
     runs-on: [self-hosted, Linux, X64, petalfall]
     timeout-minutes: 30
-    permissions:
-      contents: write
+    # 微软登录 client_id 只在构建时内嵌，仓库里不放。它不是机密，每个安装包里都有，所以放仓库变量。
+    # CurseForge API key 同样要编进每个安装包，谁都能从 exe 里取出，到这台机器上不比 client_id 多泄露什么；
+    # 它放 secret 只为让公开的 Actions 日志遮住它。签名私钥这类真正的机密仍然不进这台机器。
+    # 放在 job 级：每一步编译看到的都是同一个值，缓存不会来回失效。
+    # PETALFALL_OFFICIAL_BUILD 让编译本身也检查 client_id 与 CurseForge key：以后的正式版流水线照抄这几行就有同样的兜底。
+    env:
+      PETALFALL_MSA_CLIENT_ID: ${{ vars.PETALFALL_MSA_CLIENT_ID }}
+      PETALFALL_CURSEFORGE_API_KEY: ${{ secrets.PETALFALL_CURSEFORGE_API_KEY }}
+      PETALFALL_OFFICIAL_BUILD: "1"
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      installer-name: ${{ steps.bundle.outputs.installer-name }}
+      bootstrap-name: ${{ steps.bootstrap.outputs.bootstrap-name }}
+      cli-version: ${{ steps.version.outputs.cli-version }}
     steps:
+      # 只认 GUID：空白或带换行的值会让启动器把它当成没有，下面在 exe 里的查找也会因此失效
+      - name: 检查微软登录 client_id
+        run: |
+          if ! [[ "$PETALFALL_MSA_CLIENT_ID" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::仓库变量 PETALFALL_MSA_CLIENT_ID 没有配置或不是 GUID，打出来的包登不了微软账户"
+            exit 1
+          fi
+
+      # 带空白的值启动器会当成没有，下面在 exe 里的查找也会因此失效
+      - name: 检查 CurseForge API key
+        run: |
+          if ! [[ "$PETALFALL_CURSEFORGE_API_KEY" =~ ^[[:graph:]]+$ ]]; then
+            echo "::error::仓库 secret PETALFALL_CURSEFORGE_API_KEY 没有配置或含空白，打出来的包用不了 CurseForge"
+            exit 1
+          fi
+
       # 同一块盘上还有别的项目的 Runner，余量不够就在这里失败，不能把盘写满。
       # 依赖升级后旧产物不会自己清掉；冷构建只要几分钟，缓存超过 4G 就直接重来。
       - name: 检查磁盘余量
@@ -55,6 +89,7 @@ jobs:
         run: cargo fetch --locked
 
       # 安装包和前端显示的版本号都以 tauri.conf.json 为准，只改这一处两边才一致。
+      # 签名在另一台机器上做，用的 CLI 版本要和这里锁定的一致，一并传出去。
       - name: 写入 dev 版本号
         id: version
         working-directory: app
@@ -68,6 +103,20 @@ jobs:
             fs.writeFileSync(path, JSON.stringify(conf, null, 2));
           " "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "cli-version=$(node -p "require('@tauri-apps/cli/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # 写进公钥插件才会注册，dev 包才能自更新。只写公钥、不开 createUpdaterArtifacts，打包就不要私钥；
+      # 仓库里的配置故意不带公钥，见启动器 commands/updater.rs 的模块说明。
+      - name: 写入开发版更新公钥
+        working-directory: app
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = 'src-tauri/tauri.conf.json';
+            const conf = JSON.parse(fs.readFileSync(path, 'utf8'));
+            conf.plugins = { ...conf.plugins, updater: { pubkey: fs.readFileSync('../.github/dev-updater.pub', 'utf8').trim() } };
+            fs.writeFileSync(path, JSON.stringify(conf, null, 2));
+          "
 
       # 工作区每次都被清空，构建缓存放在 CARGO_TARGET_DIR；旧安装包不清就会越积越多。
       - name: 构建 Windows 安装包
@@ -79,9 +128,44 @@ jobs:
           bundle_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle"
           rm -rf "$bundle_dir"
           pnpm tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
+          # 构建缓存里旧的编译产物要是没随这个变量重编，包里就没有 client_id；直接在 exe 里找一遍
+          if ! grep -qF -e "$PETALFALL_MSA_CLIENT_ID" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
+            echo "::error::Petalfall.exe 里没有内嵌微软登录 client_id"
+            exit 1
+          fi
+          if ! grep -qF -e "$PETALFALL_CURSEFORGE_API_KEY" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
+            echo "::error::Petalfall.exe 里没有内嵌 CurseForge API key"
+            exit 1
+          fi
           installer="$bundle_dir/nsis/Petalfall_${VERSION}_x64-setup.exe"
           test -f "$installer"
           echo "installer=$installer" >> "$GITHUB_OUTPUT"
+          echo "installer-name=$(basename "$installer")" >> "$GITHUB_OUTPUT"
+
+      # 壳不内嵌 NSIS，拼接放在最后：Runner 跑不了 Windows 程序，pack-setup 的自检是这条路上唯一的验证。
+      # 将来要签名的话，外层签名必须插在 pack-setup 之后。publish 里的更新签名又得排在外层签名之后：
+      # 引导程序就是更新包，外层签名会改写文件，更新签名必须签最终发出去的字节。
+      - name: 构建首装引导程序
+        id: bootstrap
+        working-directory: app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          INSTALLER: ${{ steps.bundle.outputs.installer }}
+        run: |
+          # 壳的版本号指向启动器的配置，构建脚本却只盯自己这份，不碰一下 exe 的版本资源会停在上一次。
+          touch src-tauri-setup/tauri.conf.json
+          TAURI_APP_PATH=src-tauri-setup pnpm tauri build --no-bundle --runner cargo-xwin --target x86_64-pc-windows-msvc
+          cargo test --release --locked -p petalfall-setup-payload
+          release_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release"
+          bootstrap_dir="$release_dir/bundle/installer"
+          bootstrap="$bootstrap_dir/Petalfall-Installer-${VERSION}-x64.exe"
+          mkdir -p "$bootstrap_dir"
+          cargo run --release --locked -p petalfall-setup-payload --bin pack-setup -- \
+            "$release_dir/petalfall-setup.exe" "$INSTALLER" "$release_dir/Petalfall.exe" "$VERSION" "$bootstrap"
+          test -f "$bootstrap"
+          echo "bootstrap=$bootstrap" >> "$GITHUB_OUTPUT"
+          echo "bootstrap-name=$(basename "$bootstrap")" >> "$GITHUB_OUTPUT"
+          du -sh "$CARGO_TARGET_DIR"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -91,20 +175,128 @@ jobs:
           overwrite: true
           retention-days: 14
 
-      # tag 名不能叫 dev：和分支同名后 git 引用会有歧义。
+      # archive: false 时一步只能传一个文件，两个包各占一步。
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.bootstrap.outputs.bootstrap }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+  # 签名与发布在 GitHub 托管的一次性机器上做，私钥只在这里出现，而且只给签名那一步。
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      INSTALLER: ${{ github.workspace }}/dist/${{ needs.build.outputs.installer-name }}
+      BOOTSTRAP: ${{ github.workspace }}/dist/${{ needs.build.outputs.bootstrap-name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.installer-name }}
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.bootstrap-name }}
+          path: dist
+
+      # 更新包是引导程序，不是 NSIS 包。更新插件把下载到的任何 PE 都当 NSIS 包，带着
+      # /P /R /UPDATE /ARGS <启动器参数> 拉起；引导程序认得 /UPDATE，现有安装判定为升级时直接升级到登记目录，
+      # 其余情况退回交互向导；等落樱退出、失败重试都用它自己的页面，WebView2 不可用或建窗失败时才把同样的
+      # 参数转给内嵌的 NSIS 包。
+      - name: 给更新包签名
+        env:
+          CLI_VERSION: ${{ needs.build.outputs.cli-version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.DEV_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.DEV_UPDATER_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "仓库密钥 DEV_UPDATER_PRIVATE_KEY 没有配置，dev 包签不了名" >&2
+            exit 1
+          fi
+          npm exec --yes --package="@tauri-apps/cli@$CLI_VERSION" -- tauri signer sign "$BOOTSTRAP"
+          test -s "$BOOTSTRAP.sig"
+
+      # 私钥和仓库里的公钥不是一对时 CLI 只打警告照样签，发出去的包所有 dev 用户都会拒收。
+      - name: 按公钥验签
+        run: node .github/scripts/verify-update-signature.mjs .github/dev-updater.pub "$BOOTSTRAP" "$BOOTSTRAP.sig"
+
+      # 插件只装比自己新的版本。工作流改名或重建会让运行序号从 1 重数，发出去的版本号比已装的小，
+      # dev 包会一直以为自己是最新，在这里挡下来。
+      - name: 检查版本号没有倒退
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          previous="$RUNNER_TEMP/previous.json"
+          if ! assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')" || ! grep -qx latest.json <<< "$assets"; then
+            echo "滚动预发布上还没有清单，跳过"
+            exit 0
+          fi
+          gh release download "$TAG" -p latest.json -O "$previous"
+          node -e "
+            const fs = require('fs');
+            const parse = (v) => {
+              const m = /^(\d+)\.(\d+)\.(\d+)(?:-dev\.(\d+))?$/.exec(v);
+              if (m === null) throw new Error('认不出的版本号 ' + v);
+              return [Number(m[1]), Number(m[2]), Number(m[3]), m[4] === undefined ? Infinity : Number(m[4])];
+            };
+            const before = JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).version;
+            const now = process.argv[2];
+            const [a, b] = [parse(now), parse(before)];
+            const i = a.findIndex((x, k) => x !== b[k]);
+            if (i === -1 || a[i] < b[i]) throw new Error('版本号 ' + now + ' 不比已发布的 ' + before + ' 新，dev 包不会更新过去');
+          " "$previous" "$VERSION"
+
+      # 更新包是上面签过名的引导程序，地址指向下面重建的同一个预发布；文件名带版本号，清单和包总是同一次构建的。
+      - name: 生成开发版更新清单
+        id: manifest
+        run: |
+          manifest="$RUNNER_TEMP/latest.json"
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const [version, bootstrap, repo, tag, sha, out] = process.argv.slice(1);
+            const manifest = {
+              version,
+              notes: 'dev 分支 ' + sha.slice(0, 8) + ' 的自动构建',
+              pub_date: new Date().toISOString(),
+              platforms: {
+                'windows-x86_64': {
+                  signature: fs.readFileSync(bootstrap + '.sig', 'utf8').trim(),
+                  url: 'https://github.com/' + repo + '/releases/download/' + tag + '/' + path.basename(bootstrap),
+                },
+              },
+            };
+            fs.writeFileSync(out, JSON.stringify(manifest, null, 2));
+          " "$VERSION" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest"
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+
       - name: 更新滚动预发布
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: dev-build
-          VERSION: ${{ steps.version.outputs.version }}
-          INSTALLER: ${{ steps.bundle.outputs.installer }}
+          MANIFEST: ${{ steps.manifest.outputs.manifest }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release delete "$TAG" --cleanup-tag --yes
           fi
-          gh release create "$TAG" "$INSTALLER" \
+          gh release create "$TAG" \
+            "$BOOTSTRAP#首次安装用这个，也是自动更新包" \
+            "$INSTALLER#原生 NSIS 包，引导程序内嵌的就是它，首装包被拦截时可用" \
+            "$MANIFEST#开发版自动更新清单" \
             --prerelease \
             --target "$GITHUB_SHA" \
             --title "Dev 构建 $VERSION" \
-            --notes "dev 分支 ${GITHUB_SHA::8} 的自动构建，用于内部试用。交叉编译，未签名，不含自动更新。"
+            --notes "dev 分支 ${GITHUB_SHA::8} 的自动构建，用于内部试用。首次安装用 Petalfall-Installer，被安全软件拦下时换原生 NSIS 包。交叉编译，没有代码签名证书；装好后启动器会从这里检查开发版更新，下载的更新包就是 Petalfall-Installer，另有签名校验。"

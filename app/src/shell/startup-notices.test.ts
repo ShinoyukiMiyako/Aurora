@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SHELL_ACTION_ERROR, STARTUP_NOTICE_COPY } from "../copy/shell";
 import type { ConfigEnumField } from "../ipc/config";
@@ -8,6 +9,8 @@ import { describeStartupNotice, loadStartupNotices } from "./startup-notices";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
+
+const configRs = readFileSync(new URL("../../../crates/petalfall-core/src/config.rs", import.meta.url), "utf8");
 
 const configReset: StartupNoticeDto = {
   kind: "config_reset",
@@ -54,6 +57,21 @@ describe("启动提示的呈现", () => {
     expect(callsOf(ipc, "open_folder")).toEqual([{ target: "data_dir", id: null, world: null }]);
   });
 
+  it("数据目录写不进去：标题说数据还在，正文说没丢并带上原因，动作打开数据目录", async () => {
+    ipc.overrides.set("open_folder", () => null);
+    const notice = describeStartupNotice({ kind: "data_dir_unwritable", reason: "拒绝访问。 (os error 5)" });
+    expect([notice.title, notice.body, notice.action?.label]).toEqual([
+      "数据还在原处，但这次写不进去",
+      "账户和实例都没丢。原因：拒绝访问。 (os error 5)",
+      "打开目录",
+    ]);
+    const action = notice.action;
+    if (action === undefined || !("run" in action)) throw new Error("数据目录写不进去的提示应当带一个执行命令的动作");
+    expect(action.errorTitle).toBe(SHELL_ACTION_ERROR.openDataDir);
+    await action.run();
+    expect(callsOf(ipc, "open_folder")).toEqual([{ target: "data_dir", id: null, world: null }]);
+  });
+
   it("配置与凭据库都出了事：按后端顺序各成一条", async () => {
     ipc.overrides.set("startup_notices", () => [
       configReset,
@@ -82,10 +100,20 @@ describe("启动提示的呈现", () => {
   });
 
   it("每个可能退回的字段都有设置名", () => {
-    const fields: ConfigEnumField[] = ["download_source", "version_list_source", "isolation_policy", "appearance.mode", "appearance.accent", "after_launch", "language"];
+    const fields: ConfigEnumField[] = ["download_source", "version_list_source", "isolation_policy", "appearance.mode", "appearance.accent", "appearance.cover_background", "after_launch", "language"];
     const notice = describeStartupNotice({ kind: "config_fields_reset", fields: fields.map((field) => ({ field, value: "x" })) });
-    expect(notice.title).toBe("7 项设置已暂用默认值");
-    expect(notice.body).toBe("当前版本不认识原值：文件下载源 x、版本列表源 x、版本隔离 x、外观明暗 x、强调色 x、游戏启动后 x、界面语言 x");
+    expect(notice.title).toBe("8 项设置已暂用默认值");
+    expect(notice.body).toBe("当前版本不认识原值：文件下载源 x、版本列表源 x、版本隔离 x、外观明暗 x、强调色 x、实例卡面默认背景 x、游戏启动后 x、界面语言 x");
+  });
+
+  it("设置名覆盖后端 ENUM_FIELDS 登记的全部字段，且不多出", () => {
+    // 前后端随同一个安装包发布：后端新登记的字段这里没有设置名，整批启动提示会因抛错一起丢掉，所以在测试里对齐
+    const head = configRs.indexOf("const ENUM_FIELDS: &[EnumField] = &[");
+    if (head < 0) throw new Error("config.rs 里找不到 ENUM_FIELDS");
+    const table = configRs.slice(head, configRs.indexOf("];", head));
+    const backend = [...table.matchAll(/EnumField::of::<[^>]+>\("([^"]+)"\)/g)].map((match) => match[1]);
+    expect(backend).toContain("appearance.cover_background");
+    expect([...backend].sort()).toEqual(Object.keys(STARTUP_NOTICE_COPY.configFieldsReset.fields).sort());
   });
 
   it("字段级重置里认不出的字段或空列表直接抛错", () => {

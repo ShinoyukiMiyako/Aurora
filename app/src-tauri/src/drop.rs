@@ -13,7 +13,7 @@ use percent_encoding::percent_decode_str;
 use serde::Serialize;
 
 /// 拖进、拖出、松开在主窗口上，负载为 [`WindowDropEvent`]。
-pub const WINDOW_DROP_EVENT: &str = "aurora://window-drop";
+pub const WINDOW_DROP_EVENT: &str = "petalfall://window-drop";
 
 /// authlib-injector 约定的拖拽链接前缀，后面跟 URL 编码过的认证服务器 API 地址。
 pub const AUTH_SERVER_LINK_PREFIX: &str = "authlib-injector:yggdrasil-server:";

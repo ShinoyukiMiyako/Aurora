@@ -2,6 +2,7 @@
 // 游戏不会自己退出：浏览器里看界面时用 endMockGame 模拟正常退出或崩溃，用 failNextMockLaunch 模拟启动失败，
 // 用 setMockLaunchWarnings 给下一份崩溃报告带上启动提醒。崩溃报告只扫会话日志，不模拟 hs_err 与 crash-reports 文件。
 
+import type { FailureCode } from "../../../domain/types";
 import type { ConfigDto } from "../../config";
 import type { CrashClueDto, CrashReportDto, ExitCodeKind, ExitCodeNoteDto, LaunchLogDto, LaunchWarningCode, SessionOutcome } from "../../diagnostics";
 import { IpcError } from "../../errors";
@@ -27,6 +28,7 @@ import {
   type PlayStatsDto,
   type QuickPlayArg,
   type QuickPlayUnsupportedDetail,
+  type RunningGameDto,
   type WorldBackupEvent,
 } from "../../launch";
 import { emitMockEvent } from "../events";
@@ -53,7 +55,7 @@ const STAGES: { phase: LaunchPhaseName; label: string }[] = [
 ];
 
 /** 每个失败码在哪个阶段出现，与后端检查它的阶段一致。 */
-const FAILURE_STAGE: Record<string, number> = {
+const FAILURE_STAGE: Readonly<Record<FailureCode, number>> = {
   java_missing: 0,
   java_pinned_missing: 0,
   java_too_old: 0,
@@ -61,6 +63,7 @@ const FAILURE_STAGE: Record<string, number> = {
   account_refresh_network: 0,
   account_service_down: 0,
   account_app_not_approved: 0,
+  account_client_id_missing: 0,
   version_broken: 1,
   path_unsupported: 1,
   loader_library_missing: 2,
@@ -147,7 +150,7 @@ interface Occupant {
 }
 
 interface PendingFailure {
-  code: string;
+  code: FailureCode;
   message: string;
   params: Record<string, string | number>;
 }
@@ -557,8 +560,12 @@ export function setMockLaunchWarnings(codes: LaunchWarningCode[]): void {
 
 /** 下一次启动在对应阶段以该失败码失败。 */
 export function failNextMockLaunch(code: string, params: Record<string, string | number>, message = `模拟的启动失败 ${code}`): void {
-  if (!(code in FAILURE_STAGE)) throw new Error(`未知的启动失败码 ${code}`);
+  if (!isFailureStageCode(code)) throw new Error(`未知的启动失败码 ${code}`);
   pendingFailure = { code, message, params };
+}
+
+function isFailureStageCode(code: string): code is FailureCode {
+  return Object.hasOwn(FAILURE_STAGE, code);
 }
 
 /** 最近一次通过了参数与直达检查的 launch_game 带的 quickPlay；普通启动为 null。 */
@@ -699,6 +706,8 @@ export const handlers: MockHandlers = {
   stop_game: () => {
     if (occupant?.phase === "running") finishGame(1, true, Date.now() - occupant.runningSince);
   },
+  // 页面刷新即后端重开，内存里的游戏随之没了，也没有上次留下的记录：开机这一问永远是空的。接回的样子由测试改写这条命令来看
+  running_game: (): RunningGameDto => ({ game: null, broken_record: null }),
   play_stats: playStats,
 };
 

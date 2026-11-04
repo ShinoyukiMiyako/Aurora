@@ -7,6 +7,8 @@
   --from-l: 97%;
   --to-s: 50%;
   --to-l: 90%;
+  --tile-x: 0px;
+  --tile-y: 0px;
   position: relative;
   overflow: hidden;
   isolation: isolate;
@@ -44,13 +46,28 @@
   animation: reveal var(--sk-dur-reveal) var(--sk-ease-out);
 }
 
+/*
+ * 材质平铺层比卡面四周各大出 --tile-overhang（由组件按视差上限给出），视差位移时不露边。
+ * 静止时微糊：8 px 一格的材质像素硬边很抢眼，压在上面的标题读起来吃力；2 px 正好化开格子边缘，
+ * 又还认得出是哪种方块，再大就糊成一片色块。悬停对焦清晰。
+ */
+.tile {
+  --tile-blur: 2px;
+  position: absolute;
+  top: calc(-1 * var(--tile-overhang));
+  left: calc(-1 * var(--tile-overhang));
+  display: block;
+  filter: blur(var(--tile-blur));
+  animation: reveal var(--sk-dur-reveal) var(--sk-ease-out);
+}
+
 @keyframes reveal {
   from {
     opacity: 0;
   }
 }
 
-/* 夜樱下大于 96 的远程图压暗一档 */
+/* 夜樱下大于 96 的远程图与材质平铺压暗一档 */
 .media::after {
   content: "";
   position: absolute;
@@ -58,7 +75,11 @@
   background: rgba(0, 0, 0, var(--sk-tex-dim));
 }
 
-.cover[data-source="remote"] {
+.cover[data-source="remote"],
+.cover[data-source="texture"] {
+  --tag-ink: var(--sk-on-media-2);
+  --tag-ink-strong: var(--sk-on-media);
+  --tag-line: var(--sk-on-media-2);
   background: var(--sk-bg-2);
   color: var(--sk-on-media);
   text-shadow: var(--sk-media-text-shadow);
@@ -94,10 +115,20 @@
   height: 100%;
 }
 
-/* ---- 悬停（在可点宿主内）：底纹上浮、远程图微放大，Settle；减少动画时没有悬停变化 ---- */
+/*
+ * ---- 悬停（在可点宿主内）：底纹上浮、远程图微放大，Settle；平铺对焦清晰并跟随指针反向位移（位移量由组件
+ * 按帧写进 --tile-x / --tile-y）。减少动画时没有悬停变化，平铺保持静止形态 ----
+ */
 :global(:root:not([data-sk-reduced])) .art,
 :global(:root:not([data-sk-reduced])) .image {
   transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+:global(:root:not([data-sk-reduced])) .tile {
+  translate: var(--tile-x) var(--tile-y);
+  transition:
+    filter var(--sk-dur-in) var(--sk-ease-out),
+    translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
 }
 
 :global(:root:not([data-sk-reduced]) :is(a, button, [role="button"], [data-sk-hover-host]):hover) .art {
@@ -106,4 +137,8 @@
 
 :global(:root:not([data-sk-reduced]) :is(a, button, [role="button"], [data-sk-hover-host]):hover) .image {
   transform: scale(1.03);
+}
+
+:global(:root:not([data-sk-reduced]) :is(a, button, [role="button"], [data-sk-hover-host]):hover) .tile {
+  filter: none;
 }

@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { IpcError } from "../../ipc/errors";
 import { APP_NAME, APP_NAME_EN, ISSUES_URL, REPO_URL } from "../../lib/app-info";
 import type { GpuAdapterDto, JavaInstallationDto } from "../../ipc/java";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { setMockGpuAdapters, setMockJavaInstallations } from "../../ipc/mock/handlers/java";
+import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickFile } from "../../shell/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
@@ -27,6 +28,11 @@ vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridg
 vi.mock("../../shell/platform", async (orig) => {
   const actual = await orig<typeof import("../../shell/platform")>();
   return { ...actual, pickFile: vi.fn(actual.pickFile) };
+});
+// 「下载原版材质」由它自己的测试覆盖；外观分区只管放不放、放在哪、用不用紧凑版
+vi.mock("../shared/cover-picker/ArtDownload", async () => {
+  const { createElement } = await import("react");
+  return { ArtDownload: ({ compact }: { compact?: boolean }) => createElement("div", { "data-art-download": compact === true ? "compact" : "full" }) };
 });
 
 let view: Rendered | undefined;
@@ -227,7 +233,7 @@ describe("设置页：常规", () => {
     expect(callsOf(ipc, "update_config")).toEqual([{ afterLaunch: "close" }]);
     expect(radio(`关闭${APP_NAME}`).getAttribute("aria-checked")).toBe("true");
     const desc = all("span[data-tone='warn']").map((e) => e.textContent);
-    expect(desc).toContain(`游戏启动后${APP_NAME}退出，游戏日志与崩溃诊断将不可用`);
+    expect(desc).toContain(`游戏启动后${APP_NAME}退出；游戏结束前重新打开${APP_NAME}可接回这一局，否则这一局的游玩时长与崩溃诊断不会记下`);
   });
 
   it("写入失败：控件回到原值，error 通知标题点名设置项、正文给原因", async () => {
@@ -307,6 +313,26 @@ describe("设置页：常规", () => {
     expect(callsOf(ipc, "update_config")).toEqual([{ clientId: "00000000-aaaa-bbbb-cccc-000000000001" }]);
     expect(toasts()).toContainEqual({ tone: "success", title: "client_id 已保存", body: undefined });
     expect(document.querySelector('input[aria-label="微软登录 client_id"]')).toBeNull();
+  });
+
+  it("client_id：已配置时可以清除，先确认会让用它登录的账户重新登录；取消不写，确认后写入并提示", async () => {
+    await mount("general");
+    const clear = () => contentButton("清除");
+    const dialogButton = (name: string) => all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === name) as HTMLButtonElement;
+
+    await click(clear());
+    expect(openDialogs()[0]?.querySelector("h2")?.textContent).toBe("清除自定义的 client_id？");
+    expect(openDialogs()[0]?.textContent).toContain("用自定义 client_id 登录的微软账户之后续期会被拒，需要重新登录");
+    await click(dialogButton("取消"));
+    expect(callsOf(ipc, "update_config")).toEqual([]);
+
+    await click(clear());
+    await click(dialogButton("清除"));
+    expect(callsOf(ipc, "update_config")).toEqual([{ clearClientId: true }]);
+    expect(toasts()).toContainEqual({ tone: "success", title: "已清除自定义的 client_id", body: undefined });
+    // 清掉以后显示未配置，也不再给「清除」
+    expect(text()).toContain("未配置");
+    expect(all<HTMLButtonElement>('[role="region"] button').some((b) => b.textContent?.trim() === "清除")).toBe(false);
   });
 
   it("client_id：保存还没回来时再按 Enter 不重复写入，只提示一次", async () => {
@@ -970,7 +996,7 @@ describe("设置页：游戏", () => {
   it("内存：数据来自内存建议；关掉自动分配写入整组内存设置", async () => {
     await mount("game");
     expect(text()).toContain("本机共 16 GB，这里是所有实例的默认值");
-    expect(text()).toContain("当前按「原版」档给 3.8 GB");
+    expect(text()).toContain("按每个实例的 Mod 数量、整合包推荐值与视距估算；没有当前实例，按原版估算，建议 2.5 GB");
     expect(text()).toContain("现在空闲 9 GB");
     await click(button("自动分配"));
     expect(callsOf(ipc, "update_config")).toEqual([{ memory: { max_mb: 4096, min_mb: null, auto: false } }]);
@@ -1014,6 +1040,80 @@ describe("设置页：游戏", () => {
     ]);
     for (const resolve of pending) act(() => resolve());
     await flush();
+  });
+
+  describe("内存：自动分配的估算依据", () => {
+    const ADVICE = {
+      total_mb: 16384,
+      available_mb: 9000,
+      version_id: "整合包A",
+      need_mb: 5632,
+      limit: { mb: 8192, reason: "half_physical" },
+      recommended_mb: 5632,
+      factors: [
+        { kind: "base", loader: "modded", mb: 2765 },
+        { kind: "mods", count: 120, mb: 2457 },
+        { kind: "render_distance", distance: 16, mb: 46 },
+      ],
+    };
+
+    beforeEach(() => {
+      ipc.overrides.set("list_instances", () => [instanceDto("整合包A", { mc_version: "1.20.1", loaders: [{ kind: "forge", version: "47.2.0" }], mod_count: 120 })]);
+    });
+
+    /** 悬停滑杆上的推荐标记，读出它的提示。 */
+    async function markerTip(): Promise<string | null> {
+      const marker = document.querySelector<HTMLElement>("[style*='--marker-p']");
+      if (marker === null) throw new Error("滑杆上没有推荐标记");
+      act(() => {
+        marker.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      const tip = document.querySelector('[role="tooltip"]');
+      if (tip === null) throw new Error("推荐标记没有弹出提示");
+      return tip.textContent;
+    }
+
+    it("说明写当前实例的依据整句，推荐标记的提示是同一句", async () => {
+      ipc.overrides.set("memory_advice", () => ADVICE);
+      await mount("game");
+      const card = section("内存");
+      expect(card.textContent).toContain("按每个实例的 Mod 数量、整合包推荐值与视距估算；当前实例「整合包A」：Forge 1.20.1 · 120 个 Mod · 视距 16，建议 5.5 GB");
+      expect(card.querySelector('[data-tone="warn"]')).toBeNull();
+      expect(await markerTip()).toBe("Forge 1.20.1 · 120 个 Mod · 视距 16，建议 5.5 GB");
+    });
+
+    it("按当前实例的 id 取内存建议，没有当前实例时不带 id", async () => {
+      ipc.overrides.set("memory_advice", () => ADVICE);
+      await mount("game");
+      expect(callsOf(ipc, "memory_advice")).toEqual([{ versionId: undefined }]);
+    });
+
+    it("有当前实例时带上它的 id：换当前实例、改名与 Mod 变化都随实例作用域的失效重取", async () => {
+      ipc.overrides.set("memory_advice", () => ADVICE);
+      ipc.overrides.set("get_config", async (args) => ({ ...(await mockInvoke<object>("get_config", args)), selected_version: "整合包A" }));
+      await mount("game");
+      expect(callsOf(ipc, "memory_advice")).toEqual([{ versionId: "整合包A" }]);
+    });
+
+    it("当前实例在实例列表里找不到：加载器与版本不编，从组成项写起", async () => {
+      ipc.overrides.set("memory_advice", () => ({ ...ADVICE, version_id: "已删" }));
+      await mount("game");
+      expect(section("内存").textContent).toContain("当前实例「已删」：120 个 Mod · 视距 16，建议 5.5 GB");
+    });
+
+    it("被封顶：开着自动分配时提示需要多少、本机最多给多少，提示整句补上原因；关掉后不再提示", async () => {
+      ipc.overrides.set("memory_advice", () => ({ ...ADVICE, need_mb: 13312, recommended_mb: 8192, factors: [ADVICE.factors[0], { kind: "mods", count: 1100, mb: 10437 }] }));
+      await mount("game");
+      const card = section("内存");
+      expect(card.textContent).toContain("当前实例「整合包A」：Forge 1.20.1 · 1100 个 Mod，建议 8 GB");
+      expect(card.querySelector('[data-tone="warn"]')?.textContent).toBe("需要 13 GB，本机最多给 8 GB（物理内存的一半），内存可能不够用。");
+      expect(await markerTip()).toBe("Forge 1.20.1 · 1100 个 Mod，建议 8 GB。需要 13 GB，本机最多给 8 GB（物理内存的一半）");
+      await click(button("自动分配"));
+      expect(section("内存").textContent).not.toContain("内存可能不够用");
+    });
   });
 
   it("版本隔离：关闭档的例外写目录里有内容，不写已有目录（隔离时启动一次就会建出空目录，空目录不强制隔离）", async () => {
@@ -1114,6 +1214,10 @@ describe("设置页：游戏", () => {
   });
 
   it("有下载在进行时「更改」「切换」带原因禁用", async () => {
+    ipc.overrides.set("list_game_directories", () => [
+      { name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: true, available: true, version_count: 0 },
+      { name: "HMCL", path: "D:\\HMCL\\.minecraft", is_current: false, available: true, version_count: 3 },
+    ]);
     await mount("game");
     await act(async () => {
       await launcher.actions.installJava(17);
@@ -1122,6 +1226,9 @@ describe("设置页：游戏", () => {
     expect(button("更改").getAttribute("aria-disabled")).toBe("true");
     await click(button("更改"));
     expect(commands.calls).toEqual([]);
+    expect(button("切换").getAttribute("aria-disabled")).toBe("true");
+    await click(button("切换"));
+    expect(openDialogs()).toEqual([]);
   });
 });
 
@@ -1153,6 +1260,26 @@ describe("设置页：外观", () => {
     await click(button("飘落花瓣"));
     expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { mode: "night" } }, { patch: { petals: false } }]);
   });
+
+  it("实例卡面默认背景：两档各写出外观补丁；本机没有原版材质时这一行下面放紧凑的材质下载，有了就收起", async () => {
+    onTestFinished(() => setBlockCatalog(null));
+    await mount("appearance");
+    expect(radio("方块平铺").getAttribute("aria-checked")).toBe("true");
+    expect(text()).toContain("本机还没有原版材质，方块平铺先画成渐变花瓣。");
+    const download = all("[data-art-download]");
+    expect(download.map((d) => d.getAttribute("data-art-download"))).toEqual(["compact"]);
+    expect(download[0].previousElementSibling?.textContent).toMatch(/^实例卡面默认背景/);
+
+    await click(radio("渐变花瓣"));
+    expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { cover_background: "art" } }]);
+    expect(radio("渐变花瓣").getAttribute("aria-checked")).toBe("true");
+    await click(radio("方块平铺"));
+    expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { cover_background: "art" } }, { patch: { cover_background: "texture" } }]);
+
+    act(() => setBlockCatalog(catalogFromDto({ version_id: "1.21.1", blocks: [] })));
+    expect(all("[data-art-download]")).toEqual([]);
+    expect(text()).toContain("方块平铺取封面方块的材质，读取自你本机的游戏文件。");
+  });
 });
 
 describe("设置页：关于与启动器更新", () => {
@@ -1167,6 +1294,7 @@ describe("设置页：关于与启动器更新", () => {
     await mount("about");
     expect(text()).toContain("当前是 0.1.0");
     expect(navItem("关于").textContent).toContain("版本 0.1.0");
+    expect(document.querySelector<HTMLCanvasElement>('[class*="brandMark"] canvas')?.style.width).toBe("48px");
     await click(button("检查更新"));
     expect(callsOf(ipc, "check_update")).toHaveLength(1);
     expect(text()).toContain("有新版本 0.2.0");
@@ -1347,14 +1475,147 @@ describe("设置页：关于与启动器更新", () => {
     expect(all("button").some((b) => b.textContent === "重试")).toBe(false);
   });
 
-  it("支持卡与声明", async () => {
+  it("支持卡：打开日志目录", async () => {
     await mount("about");
     await click(rowButton("打开日志目录", "打开"));
     expect(commands.calls).toEqual(["open-logs"]);
-    expect(text()).toContain("与 Mojang Studios 和 Microsoft 没有关联");
   });
 
-  it("品牌卡与版本信息取构建信息：版本、发布通道、构建日期、协议与仓库地址；可复制整段或只复制仓库地址", async () => {
+  // AGPL 第 5(d) 条要界面上有版权声明、无担保与可按协议转发的说明，以及看协议全文的入口（入口见下面的协议全文用例）；
+  // 素材不按 AGPL 授权，所以自由软件一句只说程序代码，素材许可与名称商标另起两句
+  it("页尾依次写版权声明、代码的自由软件与无担保声明、素材许可、名称商标、Minecraft 商标与数据来源声明", async () => {
+    await mount("about");
+    expect(all('[class*="disclaimer"]').map((p) => p.textContent)).toEqual([
+      "Copyright \u00A9 2026 Shinoyuki_Miyako",
+      `${APP_NAME}的程序代码是自由软件，你可以按 AGPL-3.0-only 及其附加条款转发和修改它。它按现状提供，不提供任何担保。`,
+      "应用图标、像素花瓣徽记等列在素材许可里的美术素材另按 CC BY-NC-ND 4.0 授权：可以非商业地原样转发并署名，不能商用，也不能改作后发布。",
+      `「${APP_NAME}」「${APP_NAME_EN}」的名称与徽记不授予商标权。向他人提供修改版的构建产物时，须改用不会混淆的名称与图标，并写明它不出自原作者。`,
+      `Minecraft 是 Mojang Studios 的商标。实例图标、皮肤与全景图这些原版图案读取自你本机的游戏文件，不随${APP_NAME}分发。` +
+        `Mod 与整合包的信息和文件来自 Modrinth 与 CurseForge。${APP_NAME}是社区开源项目，与 Mojang Studios 和 Microsoft 没有关联。`,
+    ]);
+  });
+
+  it("支持卡依次列出日志目录、协议全文、附加条款、素材许可、第三方许可与问题反馈", async () => {
+    await mount("about");
+    const titles = [...section("支持").querySelectorAll("button")].map((b) => b.closest('[class*="row"]')?.firstElementChild?.firstElementChild?.textContent);
+    expect(titles).toEqual(["打开日志目录", "协议全文", "附加条款", "素材许可", "第三方许可", "问题反馈"]);
+  });
+
+  describe.each([
+    { title: "附加条款", url: "/LICENSE-ADDITIONAL-TERMS.md" },
+    { title: "素材许可", url: "/LICENSE-ASSETS.md" },
+  ])("$title", ({ title, url }) => {
+    it("打开弹窗时才读产物里的文件，Markdown 原样显示；关上再开不重读", async () => {
+      // 随机一行：显示的必须是读回来的那份，而不是哪里写死的文本
+      const body = `# ${title}\n\nCopyright (C) 2026 维护者\n\n> ${Math.random().toString(36).slice(2)}\n\n- 一\n- 二\n`;
+      const fetchMock = vi.fn(async (_url: string) => ({ ok: true, status: 200, text: async () => body }));
+      vi.stubGlobal("fetch", fetchMock);
+      await mount("about");
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      await click(rowButton(title, "查看"));
+      expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([url]);
+      const [dialog] = openDialogs();
+      expect(dialog.querySelector("h2")?.textContent).toBe(title);
+      expect(dialog.querySelector("h2 + p")?.textContent).toBe("中文为准，附英文对照");
+      const region = dialog.querySelector<HTMLElement>('pre[role="region"]');
+      expect(region?.getAttribute("aria-label")).toBe(title);
+      expect(region?.tabIndex).toBe(0);
+      expect(region?.textContent).toBe(body);
+
+      await click(button("关闭"));
+      expect(openDialogs()).toHaveLength(0);
+      await click(rowButton(title, "查看"));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(openDialogs()[0]?.querySelector('pre[role="region"]')?.textContent).toBe(body);
+    });
+
+    it("读不出来：弹窗里写明原因与请求地址，不留白；重试再读一次", async () => {
+      const body = `# ${title}\n`;
+      const fetchMock = vi
+        .fn(async (_url: string) => ({ ok: true, status: 200, text: async () => body }))
+        .mockResolvedValueOnce({ ok: false, status: 404, text: async () => "Not Found" });
+      vi.stubGlobal("fetch", fetchMock);
+      await mount("about");
+      await click(rowButton(title, "查看"));
+
+      const [dialog] = openDialogs();
+      const alert = dialog.querySelector('[role="alert"]');
+      expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe(`${title}读不出来`);
+      expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe(`${title}读不出来：${url} 返回 404`);
+      expect(dialog.querySelector("pre")).toBeNull();
+
+      await click(all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === "重试") as HTMLButtonElement);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(openDialogs()[0]?.querySelector('pre[role="region"]')?.textContent).toBe(body);
+    });
+  });
+
+  it("协议全文、附加条款与素材许可各读各的文件，先开过一份不影响另一份", async () => {
+    const fetchMock = vi.fn(async (url: string) => ({ ok: true, status: 200, text: async () => `正文 ${url}` }));
+    vi.stubGlobal("fetch", fetchMock);
+    await mount("about");
+    for (const [title, url] of [
+      ["协议全文", "/LICENSE.txt"],
+      ["附加条款", "/LICENSE-ADDITIONAL-TERMS.md"],
+      ["素材许可", "/LICENSE-ASSETS.md"],
+    ]) {
+      await click(rowButton(title, "查看"));
+      expect(openDialogs()[0]?.querySelector('pre[role="region"]')?.textContent).toBe(`正文 ${url}`);
+      await click(button("关闭"));
+    }
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual(["/LICENSE.txt", "/LICENSE-ADDITIONAL-TERMS.md", "/LICENSE-ASSETS.md"]);
+  });
+
+  it("协议全文：打开弹窗时才读 LICENSE.txt，换行与缩进原样显示；关上再开不重读", async () => {
+    // 随机一行：显示的必须是读回来的那份，而不是哪里写死的文本
+    const marker = `  ${Math.random().toString(36).slice(2)}`;
+    const license = `                    GNU AFFERO GENERAL PUBLIC LICENSE\n                       Version 3, 19 November 2007\n\n${marker}\n\n  0. Definitions.\n`;
+    const fetchMock = vi.fn(async (_url: string) => ({ ok: true, status: 200, text: async () => license }));
+    vi.stubGlobal("fetch", fetchMock);
+    await mount("about");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await click(rowButton("协议全文", "查看"));
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual(["/LICENSE.txt"]);
+    const [dialog] = openDialogs();
+    expect(dialog.querySelector("h2")?.textContent).toBe("协议全文");
+    expect(dialog.querySelector("h2 + p")?.textContent).toBe("AGPL-3.0-only，协议全文只有英文版");
+    const region = dialog.querySelector<HTMLElement>('pre[role="region"]');
+    expect(region?.getAttribute("aria-label")).toBe("协议全文");
+    expect(region?.tabIndex).toBe(0);
+    expect(region?.textContent).toBe(license);
+
+    await click(button("关闭"));
+    expect(openDialogs()).toHaveLength(0);
+    await click(rowButton("协议全文", "查看"));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(openDialogs()[0]?.querySelector('pre[role="region"]')?.textContent).toBe(license);
+  });
+
+  it("协议全文读不出来：弹窗里写明原因与请求地址，不留白；重试再读一次", async () => {
+    const license = "GNU AFFERO GENERAL PUBLIC LICENSE\n";
+    const fetchMock = vi
+      .fn(async (_url: string) => ({ ok: true, status: 200, text: async () => license }))
+      .mockResolvedValueOnce({ ok: false, status: 404, text: async () => "Not Found" });
+    vi.stubGlobal("fetch", fetchMock);
+    await mount("about");
+    await click(rowButton("协议全文", "查看"));
+
+    const [dialog] = openDialogs();
+    const alert = dialog.querySelector('[role="alert"]');
+    expect(alert?.querySelector('[class*="calloutTitle"]')?.textContent).toBe("协议全文读不出来");
+    expect(alert?.querySelector('[class*="errorText"]')?.textContent).toBe("协议全文读不出来：/LICENSE.txt 返回 404");
+    expect(dialog.querySelector("pre")).toBeNull();
+    expect(dialog.textContent).not.toContain("Not Found");
+
+    await click(all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === "重试") as HTMLButtonElement);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(openDialogs()[0]?.querySelector('[role="alert"]')).toBeNull();
+    expect(openDialogs()[0]?.querySelector('pre[role="region"]')?.textContent).toBe(license);
+  });
+
+  it("品牌卡与版本信息取构建信息：版本、发布通道、构建日期、协议、素材许可与仓库地址；可复制整段或只复制仓库地址", async () => {
     const writeText = vi.fn(async (_text: string) => undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     await mount("about");
@@ -1366,6 +1627,7 @@ describe("设置页：关于与启动器更新", () => {
       ["发布通道", "预览版"],
       ["构建日期", "2026年10月30日"],
       ["开源协议", "AGPL-3.0-only"],
+      ["素材许可", "CC BY-NC-ND 4.0"],
       ["源代码", REPO_URL],
     ]);
     const copies = [...card.querySelectorAll<HTMLButtonElement>('button[aria-label="复制"]')];
@@ -1374,7 +1636,7 @@ describe("设置页：关于与启动器更新", () => {
     await click(copies[0]);
     expect(writeText.mock.calls.map((c) => c[0])).toEqual([
       REPO_URL,
-      [`${APP_NAME_EN} 0.3.0-preview.2`, "发布通道：预览版", "构建日期：2026年10月30日", "开源协议：AGPL-3.0-only", `源代码：${REPO_URL}`].join("\n"),
+      [`${APP_NAME_EN} 0.3.0-preview.2`, "发布通道：预览版", "构建日期：2026年10月30日", "开源协议：AGPL-3.0-only", "素材许可：CC BY-NC-ND 4.0", `源代码：${REPO_URL}`].join("\n"),
     ]);
   });
 

@@ -18,7 +18,23 @@ import type {
 } from "../ipc/instances";
 import type { LaunchDownloadDto, LogLineDto } from "../ipc/launch";
 import type { TaskRecordDto } from "../ipc/tasks";
-import { BASE_BLOCKING_ACTIVITIES, PLATFORMS, TASK_KINDS, TASK_STATUSES, type AccountKind, type BaseBlockingActivity, type LoaderKind, type LogLine, type Platform, type SessionDownload, type Task } from "./types";
+import {
+  BASE_BLOCKING_ACTIVITIES,
+  COVER_BACKGROUNDS,
+  INSTALL_PHASES,
+  PLATFORMS,
+  TASK_KINDS,
+  TASK_STATUSES,
+  type AccountKind,
+  type BaseBlockingActivity,
+  type CoverBackground,
+  type InstallPhase,
+  type LoaderKind,
+  type LogLine,
+  type Platform,
+  type SessionDownload,
+  type Task,
+} from "./types";
 
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], what: string): T {
   if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) throw new Error(`未知的${what}：${String(value)}`);
@@ -51,9 +67,14 @@ const ACCOUNT_KIND: Readonly<Record<AccountType, AccountKind>> = {
   authlib_injector: "authlib",
 };
 
+/** 账户 DTO 与接回的那局游戏的账户快照共用同一套 account_type 取值。 */
+export function accountKindFromDto(type: AccountType): AccountKind {
+  if (!Object.hasOwn(ACCOUNT_KIND, type)) throw new Error(`未知的账户类型：${String(type)}`);
+  return ACCOUNT_KIND[type];
+}
+
 export function accountFromDto(dto: AccountDto): Account {
-  if (!Object.hasOwn(ACCOUNT_KIND, dto.account_type)) throw new Error(`未知的账户类型：${String(dto.account_type)}`);
-  const kind = ACCOUNT_KIND[dto.account_type];
+  const kind = accountKindFromDto(dto.account_type);
   if (kind === "authlib" && dto.auth_server === null) throw new Error(`外置登录账户 ${dto.name} 缺少验证服务器名`);
   if (kind === "authlib" && dto.server_url === null) throw new Error(`外置登录账户 ${dto.name} 缺少验证服务器地址`);
   return {
@@ -135,8 +156,14 @@ export interface InstanceSummary {
   quickPlay: { singleplayer: boolean; multiplayer: boolean } | null;
   /** 实例设置里的描述；没写或设置读不出时为 null。 */
   description: string | null;
-  /** 封面预设 id；null 表示没设过，按默认封面规则画。 */
+  /** 封面方块 id；null 表示没设过，按默认封面规则画。 */
   cover: string | null;
+  /** 封面方块用的玩家图片在材质协议 /cover/ 下的取图键；没设或文件不见了为 null。 */
+  coverImage: string | null;
+  /** 卡面背景；follow 跟随外观设置里的默认。 */
+  background: CoverBackground;
+  /** 卡面背景图片的取图键；没设或文件不见了为 null。 */
+  backgroundImage: string | null;
   pinned: boolean;
   status: InstanceStatus;
   /** status 为 broken 时的原因；其余为 null。 */
@@ -262,6 +289,9 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     quickPlay: dto.quick_play === null ? null : { singleplayer: dto.quick_play.singleplayer, multiplayer: dto.quick_play.multiplayer },
     description: dto.description,
     cover: dto.cover,
+    coverImage: dto.cover_image,
+    background: oneOf(dto.background, COVER_BACKGROUNDS, "卡面背景"),
+    backgroundImage: dto.background_image,
     pinned: ctx.pins.includes(dto.id),
     status,
     brokenReason,
@@ -300,6 +330,11 @@ export function javaPinned(settings: InstanceSettings): boolean {
 export interface InstanceSettings {
   description: string | null;
   cover: string | null;
+  /** 封面方块图片的文件名；只由导入写下，界面只会把它清成 null。 */
+  coverImage: string | null;
+  background: CoverBackground;
+  /** 卡面背景图片的文件名；同上。 */
+  backgroundImage: string | null;
   isolation: IsolationOverride;
   /** null 跟随全局。 */
   memoryMb: number | null;
@@ -314,6 +349,9 @@ export function instanceSettingsFromDto(dto: InstanceSettingsDto): InstanceSetti
   return {
     description: dto.description,
     cover: dto.cover,
+    coverImage: dto.cover_image,
+    background: oneOf(dto.background, COVER_BACKGROUNDS, "卡面背景"),
+    backgroundImage: dto.background_image,
     isolation: oneOf(dto.isolation, ["follow_global", "enabled", "disabled"] as const, "隔离设置"),
     memoryMb: dto.memory_mb,
     java: dto.java,
@@ -327,6 +365,9 @@ export function instanceSettingsToDto(settings: InstanceSettings): InstanceSetti
   return {
     description: settings.description,
     cover: settings.cover,
+    cover_image: settings.coverImage,
+    background: settings.background,
+    background_image: settings.backgroundImage,
     isolation: settings.isolation,
     memory_mb: settings.memoryMb,
     java: settings.java,
@@ -349,6 +390,7 @@ export interface Settings {
   memory: { maxMb: number; minMb: number | null; auto: boolean };
   isolationPolicy: IsolationPolicy;
   hasClientId: boolean;
+  microsoftLoginAvailable: boolean;
   autoDownloadJava: boolean;
   /** "auto" 或 java 可执行文件绝对路径。 */
   defaultJava: string;
@@ -388,6 +430,7 @@ export function settingsFromDto(dto: ConfigDto): Settings {
     memory: { maxMb: dto.memory.max_mb, minMb: dto.memory.min_mb, auto: dto.memory.auto },
     isolationPolicy: oneOf(dto.isolation_policy, ISOLATION, "版本隔离策略"),
     hasClientId: dto.has_client_id,
+    microsoftLoginAvailable: dto.microsoft_login_available,
     autoDownloadJava: dto.auto_download_java,
     defaultJava: dto.default_java,
     afterLaunch: oneOf(dto.after_launch, AFTER_LAUNCH, "游戏启动后的窗口行为"),
@@ -414,6 +457,7 @@ export interface SettingsPatch {
   autoDownloadJava?: boolean;
   cacheDirectory?: string;
   clientId?: string;
+  clearClientId?: true;
   afterLaunch?: AfterLaunch;
   checkUpdates?: boolean;
   defaultJava?: string;
@@ -453,6 +497,13 @@ export function sessionDownloadFromDto(dto: LaunchDownloadDto): SessionDownload 
   return { done: dto.finished, total: dto.total, bytes: dto.bytes, totalBytes: dto.total_bytes, speedBps: dto.speed };
 }
 
+// ---------------------------------------------------------------- 任务进度
+
+/** 步骤表里有不认识的键，说明前后端的表对不上，算出的「第几步」与进度都不可信。 */
+export function installPhasesFromDto(plan: readonly string[]): InstallPhase[] {
+  return plan.map((key) => oneOf(key, INSTALL_PHASES, "安装步骤"));
+}
+
 // ---------------------------------------------------------------- 任务日志
 
 export function taskFromRecord(dto: TaskRecordDto): Task {
@@ -474,6 +525,7 @@ export function taskFromRecord(dto: TaskRecordDto): Task {
     transferredBytes: dto.transferred_bytes === undefined ? null : dto.transferred_bytes,
     batchTransferred: 0,
     batchFiles: 0,
+    phase: null,
     speedBps: dto.speed_bps,
     startedAt: dto.started_at === undefined ? null : dto.started_at,
     attempt: dto.attempt,

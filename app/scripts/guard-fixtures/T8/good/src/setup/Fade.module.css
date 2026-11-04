@@ -1,0 +1,3 @@
+.fade {
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}

@@ -19,7 +19,8 @@ export interface InstanceBlockProps {
 }
 
 /**
- * 实例的等距方块（无底座）：本机材质可读时是封面方块的真材质，否则是实例徽记，二者占完全相同的方框。
+ * 实例的等距方块（无底座）：玩家图片或本机材质可读时画它（来源与回落顺序见 useBlockSource），否则是实例徽记，
+ * 二者占完全相同的方框。
  * 材质晚到时交叉淡化，不发生布局位移。纯装饰，aria-hidden；可访问名称由宿主给出。
  */
 export function InstanceBlock({ instanceId, cover, width, lift = false, className }: InstanceBlockProps) {

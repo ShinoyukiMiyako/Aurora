@@ -18,7 +18,7 @@ import {
 vi.mock("../ipc/appearance", () => ({ getAppearance: vi.fn(), setAppearance: vi.fn() }));
 
 const html = document.documentElement;
-const DAY_DTO: AppearanceDto = { mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false };
+const DAY_DTO: AppearanceDto = { mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false, cover_background: "texture" };
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -58,16 +58,18 @@ afterEach(() => {
 
 describe("DTO 转换", () => {
   it("snake_case 转成领域字段", () => {
-    expect(appearanceFromDto({ mode: "night", accent: "moss", petals: false, panorama: true, reduce_motion: true })).toEqual({
+    expect(appearanceFromDto({ mode: "night", accent: "moss", petals: false, panorama: true, reduce_motion: true, cover_background: "art" })).toEqual({
       mode: "night",
       accent: "moss",
       petals: false,
       panorama: true,
       reduceMotion: true,
+      coverBackground: "art",
     });
   });
 
   it("未知取值直接抛错", () => {
+    expect(() => appearanceFromDto({ ...DAY_DTO, cover_background: "tiles" as never })).toThrow("未知的卡面默认背景：tiles");
     expect(() => appearanceFromDto({ ...DAY_DTO, accent: "rose" as never })).toThrow("未知的强调色：rose");
     expect(() => appearanceFromDto({ ...DAY_DTO, mode: "dusk" as never })).toThrow("未知的外观明暗：dusk");
     expect(() => appearanceFromDto({ ...DAY_DTO, petals: "yes" as never })).toThrow("外观字段 petals 应为布尔值");
@@ -77,6 +79,7 @@ describe("DTO 转换", () => {
     expect(appearancePatchToDto({ reduceMotion: true })).toEqual({ reduce_motion: true });
     expect(appearancePatchToDto({ mode: "night", accent: "amethyst" })).toEqual({ mode: "night", accent: "amethyst" });
     expect(appearancePatchToDto({})).toEqual({});
+    expect(appearancePatchToDto({ coverBackground: "art" })).toEqual({ cover_background: "art" });
     expect(() => appearancePatchToDto({ accent: "teal" as never })).toThrow("未知的强调色：teal");
   });
 

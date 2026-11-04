@@ -4,10 +4,10 @@
 // 「重试排到队尾」都不需要改写 createdAt。每次尝试的命令 taskId 是「任务 id + 尝试次数」：后端会记住
 // 「取消时不在运行」的 id，同 id 再登记会直接是已取消状态，重试必须换新 id。
 
-import { TASK_INTERRUPTED_CODE, taskFailureReason } from "../copy/flows";
+import { MOVE_INTERRUPTED_CODE, TASK_INTERRUPTED_CODE, taskFailureReason } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import { MAX_PARALLEL_TASKS, TASK_HISTORY_LIMIT } from "../domain/limits";
-import type { Task, TaskKind, TaskSpec } from "../domain/types";
+import type { InstallPhase, Task, TaskKind, TaskPhase, TaskSpec } from "../domain/types";
 
 export interface TaskDraft {
   id: string;
@@ -34,9 +34,11 @@ export function attemptTaskId(task: Pick<Task, "id" | "attempt">): string {
 /**
  * 任务进度条（进度环、百分比文字）的平滑标识：同一次尝试的同一批下载内只进不退；换了批次（总字节或文件数变了）或换了尝试
  * 直接跳到新值，否则新批次从 0 重新计起时，进度会停在上一批的最大值不动。文件数不能省：Fabric 的库没声明大小，
- * 版本 JSON 与本体加库两批的总字节都是未知。凡是画任务进度的地方都用它。
+ * 版本 JSON 与本体加库两批的总字节都是未知。分步任务的进度是整次尝试的，本身只进不退，整次尝试用同一个标识，
+ * 换批次时不跳。凡是画任务进度的地方都用它。
  */
 export function progressTrack(task: Task): string {
+  if (task.phase !== null) return `${attemptTaskId(task)}:phased`;
   return `${attemptTaskId(task)}:${task.totalBytes === null ? "count" : task.totalBytes}:${task.batchFiles}`;
 }
 
@@ -112,6 +114,7 @@ export function newTask(draft: TaskDraft, now: number): Task {
     transferredBytes: 0,
     batchTransferred: 0,
     batchFiles: 0,
+    phase: null,
     speedBps: 0,
     startedAt: null,
     attempt: 1,
@@ -122,7 +125,7 @@ export function newTask(draft: TaskDraft, now: number): Task {
 }
 
 /**
- * 这一类任务运行时是不是在下载。导出整合包是本地打包，备份与恢复存档是本地读写，只是同走一条队列；
+ * 这一类任务运行时是不是在下载。导出整合包是本地打包，备份与恢复存档、移到别的游戏目录是本地读写，只是同走一条队列；
  * 修复补的是游戏文件，算下载。逐类写全：以后加类别时由类型逼着定它算不算。
  */
 export const DOWNLOADS_WHEN_RUNNING: Readonly<Record<TaskKind, boolean>> = {
@@ -138,6 +141,7 @@ export const DOWNLOADS_WHEN_RUNNING: Readonly<Record<TaskKind, boolean>> = {
   world_backup: false,
   world_restore: false,
   modpack_export: false,
+  instance_move: false,
 };
 
 /** 写整个实例目录的命令（新建、导入、补全）：期间实例算「安装中」，后端的实例锁里它与这个实例上的任何别的事都互斥。 */
@@ -145,6 +149,12 @@ export const INSTANCE_TASK_COMMANDS: ReadonlySet<string> = new Set(["install_ver
 
 /** 备份、导出与恢复存档的任务命令；它们都带着 id（实例）与 world（存档文件夹名）两个参数。 */
 export const WORLD_TASK_COMMANDS: ReadonlySet<string> = new Set(["backup_world", "export_world", "restore_world_backup"]);
+
+/**
+ * 把实例移到别的游戏目录的任务命令，带着 id（实例）、source（发起时实例所在的游戏目录）与 target（目标游戏目录）三个参数。
+ * 后端记为 moving，与这个实例上的一切互斥；执行时当前游戏目录已不是 source 就拒绝。
+ */
+export const MOVE_TASK_COMMAND = "move_instance";
 
 /**
  * 共用一份存档的实例（不隔离）的锁键。隔离结果读不出来的（null）不算：拿不准时不排，撞上了后端照样拒绝，
@@ -164,7 +174,7 @@ function savesConflict(a: Task, b: Task): boolean {
 }
 
 /**
- * 两个任务后端不让同时进行。挂在同一实例（不分大小写，与后端的锁键一致）上时：至少一个要写整个目录；或都是存档任务
+ * 两个任务后端不让同时进行。挂在同一实例（不分大小写，与后端的锁键一致）上时：至少一个要写整个目录或把它移走；或都是存档任务
  * （backing_up 彼此互斥）；或在抢存档（savesConflict）。
  * 挂在共用存档的两个实例上时只有最后一种：实例锁只管各自的实例，后端另外看共用存档的实例有没有在备份、恢复、读写存档。
  */
@@ -177,6 +187,7 @@ function excludes(a: Task, b: Task, sharedSaves: ReadonlySet<string>): boolean {
   const keyB = b.instanceId.toLowerCase();
   if (keyA !== keyB) return saves && sharedSaves.has(keyA) && sharedSaves.has(keyB);
   if (INSTANCE_TASK_COMMANDS.has(a.spec.command) || INSTANCE_TASK_COMMANDS.has(b.spec.command)) return true;
+  if (a.spec.command === MOVE_TASK_COMMAND || b.spec.command === MOVE_TASK_COMMAND) return true;
   return (worldA && worldB) || saves;
 }
 
@@ -214,7 +225,7 @@ function update(tasks: readonly Task[], id: string, fn: (task: Task) => Task): T
 
 export function markRunning(tasks: readonly Task[], id: string, now: number): Task[] {
   return update(tasks, id, (t) =>
-    t.status === "queued" ? { ...t, status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, batchFiles: 0, speedBps: 0, startedAt: now } : t,
+    t.status === "queued" ? { ...t, status: "running", progress: 0, bytes: 0, totalBytes: null, doneBytes: 0, transferredBytes: 0, batchTransferred: 0, batchFiles: 0, phase: null, speedBps: 0, startedAt: now } : t,
   );
 }
 
@@ -249,17 +260,17 @@ function transferredAfter(task: Task, added: number): number {
 }
 
 /**
- * 一批下载的进度快照。一次安装连跑好几批，每批从 0 重新计：进度按当前批次如实显示，
- * 批次内只进不退，新批次（已下字节变少，或批次大小、文件数变了）从头开始。累计字节跨批次往上加。
+ * 一批下载的进度快照。一次安装连跑好几批，每批从 0 重新计。分步任务按步折成整体进度，只进不退（见 phaseBatch）；
+ * 其余任务按当前批次如实显示，批次内只进不退，新批次（已下字节变少，或批次大小、文件数变了）从头开始。
+ * 累计字节跨批次往上加，分步任务不算进当前一步的快照也照样记账。
  */
 export function applyTaskDownload(tasks: readonly Task[], attemptId: string, event: DownloadSnapshot): Task[] {
   return tasks.map((t) => {
     if (t.status !== "running" || attemptTaskId(t) !== attemptId) return t;
     const fraction = snapshotFraction(event);
     const sameBatch = event.totalBytes === t.totalBytes && event.total === t.batchFiles && event.bytes >= t.bytes;
-    return {
+    const counted: Task = {
       ...t,
-      progress: sameBatch ? Math.max(t.progress, fraction) : fraction,
       bytes: event.bytes,
       totalBytes: event.totalBytes,
       doneBytes: t.doneBytes + (sameBatch ? event.bytes - t.bytes : event.bytes),
@@ -268,7 +279,61 @@ export function applyTaskDownload(tasks: readonly Task[], attemptId: string, eve
       batchFiles: event.total,
       speedBps: event.speed,
     };
+    if (t.phase === null) return { ...counted, progress: sameBatch ? Math.max(t.progress, fraction) : fraction };
+    const phase = phaseBatch(t.phase, event);
+    return phase === null ? counted : { ...counted, phase, progress: Math.max(t.progress, phaseProgress(phase, fraction)) };
   });
+}
+
+// ---------------------------------------------------------------- 分步任务的进度
+
+/** 各步在整体进度条里占多宽，按常见耗时排；只决定进度条走得匀不匀，「第几步」不看它。 */
+export const PHASE_WEIGHT: Readonly<Record<InstallPhase, number>> = {
+  metadata: 1,
+  loader_profile: 1,
+  libraries: 7,
+  assets: 11,
+  natives: 1,
+  java: 4,
+  loader_installer: 1,
+  loader_libraries: 3,
+  loader_processors: 6,
+  verify: 2,
+  template: 1,
+  move_dependencies: 2,
+  move_copy: 6,
+  move_verify: 3,
+  move_commit: 1,
+};
+
+function phaseProgress(phase: TaskPhase, fraction: number): number {
+  const weights = phase.plan.map((key) => PHASE_WEIGHT[key]);
+  const whole = weights.reduce((sum, w) => sum + w, 0);
+  const before = weights.slice(0, phase.index).reduce((sum, w) => sum + w, 0);
+  return (before + weights[phase.index] * fraction) / whole;
+}
+
+/** 进入下一步：整体进度推到这一步的起点。步骤表中途变了、越界或没往前走是后端的契约错误，直接报错。 */
+export function applyTaskPhase(tasks: readonly Task[], attemptId: string, plan: readonly InstallPhase[], index: number): Task[] {
+  return tasks.map((t) => {
+    if (t.status !== "running" || attemptTaskId(t) !== attemptId) return t;
+    if (!Number.isInteger(index) || index < 0 || index >= plan.length) throw new Error(`任务 ${t.id} 的步骤表只有 ${plan.length} 步，收到了第 ${index} 步`);
+    if (t.phase !== null && t.phase.plan.join() !== plan.join()) throw new Error(`任务 ${t.id} 的步骤表中途变了：${t.phase.plan.join()} -> ${plan.join()}`);
+    if (t.phase !== null && index <= t.phase.index) throw new Error(`任务 ${t.id} 已在第 ${t.phase.index} 步，又收到了第 ${index} 步`);
+    const phase: TaskPhase = { plan, index, batch: null };
+    return { ...t, phase, progress: Math.max(t.progress, phaseProgress(phase, 0)) };
+  });
+}
+
+/**
+ * 这条快照算不算进当前这一步，算的话返回认下它那批之后的步骤，不算为 null。后端只在上一批返回之后才报下一步，
+ * 上一批晚到的快照都已下完：已下完、又不是这一步认下的那批，就是上一步的，不算。
+ * 一出现就已下完的批次（文件全都现成）同样不算，它那一步的份额在下一步开始时一并补上。
+ */
+function phaseBatch(phase: TaskPhase, event: DownloadSnapshot): TaskPhase | null {
+  if (phase.batch !== null && phase.batch.total === event.total && phase.batch.totalBytes === event.totalBytes) return phase;
+  if (event.finished >= event.total) return null;
+  return { ...phase, batch: { total: event.total, totalBytes: event.totalBytes } };
 }
 
 // ---------------------------------------------------------------- 组合任务的进度
@@ -425,11 +490,29 @@ export function awaitsManualFiles(task: Task): boolean {
   return task.error !== null && task.error.blocked_files !== undefined;
 }
 
-/** 重试：同一任务回到排队并移到队尾，尝试次数加一。只有失败的任务能重试。 */
+/**
+ * 上次关闭时正在跑的移动：后端在这次打开时已按移动日志收尾，实例要么已在目标里、要么还在原处，结局前端不知道。
+ * 照原参数重跑要么撞上「已不在这里」，要么替玩家又移一次，所以不能重试，任务行与「全部重试」都跳过它。
+ */
+export function settledOnRestart(task: Task): boolean {
+  return task.error !== null && task.error.code === MOVE_INTERRUPTED_CODE;
+}
+
+/**
+ * 「全部重试」与断网恢复的批量重试收不收这个任务。要走手动下载清单的不收（见 awaitsManualFiles）。移动一律不收：它不需要
+ * 网络，是玩家逐个确认过的大动作，批量里没人看着它从哪移到哪；发起之后可能已切换了游戏目录，单条重试由玩家自己点，
+ * 源目录对不上时后端以 source_changed 拒绝。
+ */
+export function batchRetryable(task: Task): boolean {
+  return task.status === "failed" && !awaitsManualFiles(task) && task.spec.command !== MOVE_TASK_COMMAND;
+}
+
+/** 重试：同一任务回到排队并移到队尾，尝试次数加一。只有失败的任务能重试，重启后已由后端收尾的移动不算。 */
 export function retryTask(tasks: readonly Task[], id: string): Task[] {
   const task = tasks.find((t) => t.id === id);
   if (task === undefined) throw new Error(`没有任务 ${id}`);
   if (task.status !== "failed") throw new Error(`任务 ${id} 是 ${task.status}，只有失败的任务能重试`);
+  if (settledOnRestart(task)) throw new Error(`任务 ${id} 是关闭时中断的移动，已在打开时收尾，不能重试`);
   const retried: Task = {
     ...task,
     status: "queued",
@@ -442,6 +525,7 @@ export function retryTask(tasks: readonly Task[], id: string): Task[] {
     transferredBytes: 0,
     batchTransferred: 0,
     batchFiles: 0,
+    phase: null,
     speedBps: 0,
     startedAt: null,
     finishedAt: null,
@@ -486,8 +570,13 @@ export function exportDestination(spec: TaskSpec): string | null {
   return typeof dest === "string" ? dest : null;
 }
 
-/** 上次关闭时还没完成的任务：记为失败，原因「落樱关闭时中断」，可以重试。 */
+/**
+ * 上次关闭时还没完成的任务：记为失败，原因「落樱关闭时中断」，可以重试。正在跑的移动例外：后端打开时自己按移动日志收尾，
+ * 记成不能重试的另一个码（见 settledOnRestart）；还在排队的移动没开过工，实例原样在原处，照常可以重试。
+ */
 export function restoreJournal(tasks: readonly Task[], now: number): Task[] {
-  const error = { code: TASK_INTERRUPTED_CODE, message: taskFailureReason({ code: TASK_INTERRUPTED_CODE, message: "" }) };
-  return tasks.map((t) => (isActiveTask(t) ? { ...t, status: "failed", speedBps: 0, error, finishedAt: now } : t));
+  const interrupted = (code: string) => ({ code, message: taskFailureReason({ code, message: "" }) });
+  const error = interrupted(TASK_INTERRUPTED_CODE);
+  const moveError = interrupted(MOVE_INTERRUPTED_CODE);
+  return tasks.map((t) => (isActiveTask(t) ? { ...t, status: "failed", speedBps: 0, error: t.status === "running" && t.spec.command === MOVE_TASK_COMMAND ? moveError : error, finishedAt: now } : t));
 }

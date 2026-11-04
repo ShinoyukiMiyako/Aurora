@@ -1,0 +1,6 @@
+.mark {
+  flex: none;
+  display: block;
+  /* 弹窗入场的缩放动画期间位图会被临时再缩放，保持最近邻，不让像素画发糊 */
+  image-rendering: pixelated;
+}

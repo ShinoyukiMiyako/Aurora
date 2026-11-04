@@ -1,0 +1,37 @@
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-16);
+}
+
+/* 空着也占一行：校验结果回来时下面的复选框不跳 */
+.hint {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sk-space-4);
+  min-height: var(--sk-lh-caption);
+}
+
+.hint[data-tone="ok"] {
+  color: var(--sk-ok);
+}
+
+.hint[data-tone="warn"] {
+  color: var(--sk-warn);
+}
+
+/* 14 的图标对齐 18 行高的第一行 */
+.hintIcon {
+  flex: none;
+  margin-top: var(--sk-space-2);
+}
+
+.finalPath {
+  margin: 0;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+  overflow-wrap: anywhere;
+  user-select: text;
+}

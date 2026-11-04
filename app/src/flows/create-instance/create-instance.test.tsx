@@ -14,6 +14,7 @@ import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import type { CreateInstancePreset } from "../../state/flows";
+import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { resources } from "../../state/resource";
 import { focusByKeyboard, keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
@@ -44,13 +45,15 @@ function Probe() {
 
 async function mount(preset: CreateInstancePreset | null = null) {
   view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <Probe />
-        <CreateInstanceFlow preset={preset} onClose={onClose} />
-        <OverlayRoot />
-      </ShellProvider>
-    </LauncherProvider>,
+    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          <CreateInstanceFlow preset={preset} onClose={onClose} />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </AppearanceProvider>,
   );
   await flush();
 }

@@ -2,13 +2,14 @@ import type { AppearanceDto } from "../../appearance";
 import { IpcError } from "../../errors";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
 
-const DEFAULTS: AppearanceDto = { mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false };
+const DEFAULTS: AppearanceDto = { mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false, cover_background: "texture" };
 
 let current: AppearanceDto = { ...DEFAULTS };
 
 // ipc/ 只能以类型方式引用领域模型，合法取值在这里按 DTO 类型各列一份。
 const MODES: readonly AppearanceDto["mode"][] = ["day", "night"];
 const ACCENTS: readonly AppearanceDto["accent"][] = ["sakura", "amethyst", "moss"];
+const COVER_STYLES: readonly AppearanceDto["cover_background"][] = ["art", "texture"];
 const BOOLEAN_KEYS = ["petals", "panorama", "reduce_motion"] as const;
 
 // 与后端对齐：缺 patch 参数是 Tauri 自身的参数错误（纯字符串，前端归为 unknown）；patch 不是对象、
@@ -25,6 +26,9 @@ function parsePatch(args: MockArgs): Partial<AppearanceDto> {
     } else if (key === "accent") {
       if (!ACCENTS.includes(value as never)) throw invalid(`unknown variant \`${String(value)}\` for accent`);
       patch.accent = value as AppearanceDto["accent"];
+    } else if (key === "cover_background") {
+      if (!COVER_STYLES.includes(value as never)) throw invalid(`unknown variant \`${String(value)}\` for cover_background`);
+      patch.cover_background = value as AppearanceDto["cover_background"];
     } else if ((BOOLEAN_KEYS as readonly string[]).includes(key)) {
       if (typeof value !== "boolean") throw invalid(`invalid type for ${key}, expected a boolean`);
       patch[key as (typeof BOOLEAN_KEYS)[number]] = value;

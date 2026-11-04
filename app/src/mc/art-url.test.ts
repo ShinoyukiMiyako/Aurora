@@ -13,11 +13,11 @@ import {
   texOrigin,
   thumbUrl,
 } from "./art";
-import { ART_PATHS, COVER_TEXTURES, coverTexture, DEFAULT_SKIN_PATHS } from "./whitelist";
+import { COVER_TEXTURES, coverTexture, DEFAULT_SKIN_PATHS, isArtPath, PRESET_FACE_PATHS } from "./whitelist";
 import { BLOCK_TEXTURES, SKIN_TEXTURES } from "../ipc/art";
 
 const WINDOWS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0";
-const ORIGIN = "http://aurora-tex.localhost";
+const ORIGIN = "http://petalfall-tex.localhost";
 
 beforeEach(() => {
   vi.stubGlobal("navigator", { userAgent: WINDOWS_UA });
@@ -32,23 +32,56 @@ describe("texOrigin", () => {
   it("Windows 与 Android 用 http://<scheme>.localhost，其余平台用 <scheme>://localhost", () => {
     expect(texOrigin(WINDOWS_UA)).toBe(ORIGIN);
     expect(texOrigin("Mozilla/5.0 (Linux; Android 14; Pixel 8)")).toBe(ORIGIN);
-    expect(texOrigin("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15")).toBe("aurora-tex://localhost");
-    expect(texOrigin("Mozilla/5.0 (X11; Linux x86_64)")).toBe("aurora-tex://localhost");
+    expect(texOrigin("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15")).toBe("petalfall-tex://localhost");
+    expect(texOrigin("Mozilla/5.0 (X11; Linux x86_64)")).toBe("petalfall-tex://localhost");
   });
 });
 
 describe("白名单", () => {
-  it("封面 16 种方块共 17 张面图，默认皮肤新式 18 张、旧式 2 张，合计 37", () => {
+  it("封面 16 种方块共 17 张面图，默认皮肤新式 18 张、旧式 2 张", () => {
     expect(COVER_TEXTURES).toHaveLength(16);
-    const faces = new Set(COVER_TEXTURES.flatMap((c) => [c.side, c.top]));
-    expect(faces.size).toBe(17);
+    expect(PRESET_FACE_PATHS).toHaveLength(17);
+    expect(new Set(PRESET_FACE_PATHS)).toEqual(new Set(COVER_TEXTURES.flatMap((c) => [c.side, c.top])));
     expect(DEFAULT_SKIN_PATHS).toHaveLength(20);
-    expect(ART_PATHS.size).toBe(37);
   });
 
-  // ipc/art.ts 的名单由后端测试逐项钉住；取图这边的名单与它对不上，就会请求到后端以 400 拒绝的路径。
-  it("与后端白名单逐项一致", () => {
-    expect([...ART_PATHS].sort()).toEqual([...BLOCK_TEXTURES, ...SKIN_TEXTURES].sort());
+  // ipc/art.ts 的名单由后端测试逐项钉住：预设的面与默认皮肤对不上，预设方块与离线皮肤就会取到不存在的文件。
+  it("预设的面与默认皮肤和后端名单逐项一致，且都合取址规则", () => {
+    expect([...PRESET_FACE_PATHS].sort()).toEqual([...BLOCK_TEXTURES].sort());
+    expect([...DEFAULT_SKIN_PATHS].sort()).toEqual([...SKIN_TEXTURES].sort());
+    for (const path of [...BLOCK_TEXTURES, ...SKIN_TEXTURES]) expect(isArtPath(path), path).toBe(true);
+  });
+
+  it("取址规则：任意 block/<id>（id 为 1-64 位小写字母、数字、下划线）与默认皮肤名单", () => {
+    for (const path of ["block/dirt", "block/oak_log_top", "block/furnace_front", "block/a", "block/0", `block/${"a".repeat(64)}`, "entity/steve", "entity/player/slim/zuri"]) {
+      expect(isArtPath(path), path).toBe(true);
+    }
+    for (const path of [
+      "block/",
+      `block/${"a".repeat(65)}`,
+      "block/Dirt",
+      "BLOCK/dirt",
+      "block/oak-log",
+      "block/oak log",
+      "block/sub/dirt",
+      "block/../x",
+      "block/..",
+      "/block/dirt",
+      "block/dirt.png",
+      "block/dirt?v=1",
+      " block/dirt",
+      "block/dirt\n",
+      "blocks/dirt",
+      "item/apple",
+      "particle/cherry_0",
+      "gui/widgets",
+      "entity/zombie",
+      "entity/player/wide/herobrine",
+      "entity/player/wide/steve.png",
+      "",
+    ]) {
+      expect(isArtPath(path), JSON.stringify(path)).toBe(false);
+    }
   });
 
   it("只有草方块分顶面与侧面，且只有它的顶面染色", () => {
@@ -67,8 +100,8 @@ describe("白名单", () => {
 });
 
 describe("artUrl", () => {
-  it.each(["block/dirt", "block/../x", "item/apple", "particle/cherry_0", "gui/widgets", "block/cherry_planks.png", "", "entity/player/wide/herobrine"])(
-    "白名单外的 %j 直接抛错（与有无材质源无关）",
+  it.each(["block/../x", "block/Dirt", "block/sub/dirt", `block/${"a".repeat(65)}`, "item/apple", "particle/cherry_0", "gui/widgets", "block/cherry_planks.png", "", "entity/player/wide/herobrine"])(
+    "不合取址规则的 %j 直接抛错（与有无材质源无关）",
     (path) => {
       expect(() => artUrl(path)).toThrow("不在白名单");
       setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
@@ -78,13 +111,16 @@ describe("artUrl", () => {
 
   it("材质源为 null 时返回 null：首次启动没装游戏，一个请求都不发", () => {
     expect(getArtStatus().source).toBeNull();
-    for (const path of ART_PATHS) expect(artUrl(path)).toBeNull();
+    for (const path of [...PRESET_FACE_PATHS, ...DEFAULT_SKIN_PATHS, "block/oak_log_top", "block/furnace_front"]) expect(artUrl(path)).toBeNull();
   });
 
   it("有材质源时带 v 戳，版本号按 URI 组件编码", () => {
     setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
     expect(artUrl("block/cherry_planks")).toBe(`${ORIGIN}/art/block/cherry_planks.png?v=1.21.1`);
     expect(artUrl("entity/player/slim/zuri")).toBe(`${ORIGIN}/art/entity/player/slim/zuri.png?v=1.21.1`);
+    // 预设以外的方块材质（目录方块、卡面平铺）同样可取
+    expect(artUrl("block/oak_log_top")).toBe(`${ORIGIN}/art/block/oak_log_top.png?v=1.21.1`);
+    expect(artUrl("block/furnace_front")).toBe(`${ORIGIN}/art/block/furnace_front.png?v=1.21.1`);
 
     setArtStatus({ source: { versionId: "1.20 Pre-Release 1&x" }, panorama: false });
     expect(artUrl("entity/steve")).toBe(`${ORIGIN}/art/entity/steve.png?v=1.20%20Pre-Release%201%26x`);

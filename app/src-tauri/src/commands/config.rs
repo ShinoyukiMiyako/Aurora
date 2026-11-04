@@ -2,13 +2,13 @@
 
 use std::path::{Path, PathBuf};
 
-use aurora_core::config::UiLanguage;
-use aurora_core::folders::{
+use petalfall_core::config::UiLanguage;
+use petalfall_core::folders::{
     default_game_dir, inspect_game_directory as inspect_dir, probe_dir, validate_game_dir,
 };
-use aurora_core::{
-    AfterLaunch, Aurora, CoreError, DownloadSourcePolicy, GameDirProblem, GameDirectoryEntry,
-    IsolationPolicy, MemorySettings, NamedDirectory, WorldBackupSettings,
+use petalfall_core::{
+    AfterLaunch, CoreError, DownloadSourcePolicy, GameDirProblem, GameDirectoryEntry,
+    IsolationPolicy, MemorySettings, NamedDirectory, Petalfall, WorldBackupSettings,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -34,7 +34,7 @@ const MAX_TOTAL_GB_RANGE: std::ops::RangeInclusive<u32> = 1..=1000;
 
 /// 全局配置 DTO。
 ///
-/// 枚举在 aurora-core 已 derive Serialize 且为 snake_case，直接内嵌即得稳定的 JSON 表示，
+/// 枚举在 petalfall-core 已 derive Serialize 且为 snake_case，直接内嵌即得稳定的 JSON 表示，
 /// 且与 `update_config` 的入参同名。
 #[derive(Debug, Serialize)]
 pub struct ConfigDto {
@@ -54,8 +54,10 @@ pub struct ConfigDto {
     pub memory: MemorySettings,
     /// 全局版本隔离档位。
     pub isolation_policy: IsolationPolicy,
-    /// 是否填了自定义的微软登录 client_id（不回传 id 本身）。没填时走内置默认，正版登录照常可用。
+    /// 是否填了自定义的微软登录 client_id（不回传 id 本身）。没填时用运行期环境变量或构建时内嵌的值。
     pub has_client_id: bool,
+    /// 微软登录能不能用：配置、环境变量、构建时内嵌三处至少有一个 client_id。
+    pub microsoft_login_available: bool,
     /// 找不到匹配 Java 时是否自动下载。
     pub auto_download_java: bool,
     /// 全局默认 Java：`"auto"` 或 java 可执行文件绝对路径。
@@ -84,18 +86,19 @@ pub struct ConfigDto {
     pub world_backup: WorldBackupSettings,
 }
 
-pub(crate) fn config_dto(aurora: &Aurora) -> ConfigDto {
-    let config = aurora.config();
+pub(crate) fn config_dto(petalfall: &Petalfall) -> ConfigDto {
+    let config = petalfall.config();
     ConfigDto {
-        game_dir: aurora.game_dir().display().to_string(),
-        default_game_dir: default_game_dir(aurora.data_dir()).display().to_string(),
-        data_dir: aurora.data_dir().display().to_string(),
+        game_dir: petalfall.game_dir().display().to_string(),
+        default_game_dir: default_game_dir(petalfall.data_dir()).display().to_string(),
+        data_dir: petalfall.data_dir().display().to_string(),
         download_source: config.download_source,
         version_list_source: config.version_list_source,
         download_concurrency: config.download_concurrency,
         memory: config.memory,
         isolation_policy: config.isolation_policy,
         has_client_id: config.msa_client_id.is_some(),
+        microsoft_login_available: petalfall.microsoft_login_available(),
         auto_download_java: config.auto_download_java,
         default_java: match &config.default_java {
             Some(path) => path.display().to_string(),
@@ -163,7 +166,8 @@ pub(crate) struct ConfigPatch {
     isolation_policy: Option<IsolationPolicy>,
     auto_download_java: Option<bool>,
     cache_directory: Option<PathBuf>,
-    client_id: Option<String>,
+    /// `Some(None)` 是清掉填过的 client_id。
+    client_id: Option<Option<String>>,
     selected_version: Option<String>,
     after_launch: Option<AfterLaunch>,
     check_updates: Option<bool>,
@@ -187,6 +191,7 @@ pub(crate) struct RawConfigPatch {
     pub auto_download_java: Option<bool>,
     pub cache_directory: Option<String>,
     pub client_id: Option<String>,
+    pub clear_client_id: Option<bool>,
     pub selected_version: Option<String>,
     pub after_launch: Option<String>,
     pub check_updates: Option<bool>,
@@ -212,6 +217,7 @@ pub async fn update_config(
     auto_download_java: Option<bool>,
     cache_directory: Option<String>,
     client_id: Option<String>,
+    clear_client_id: Option<bool>,
     selected_version: Option<String>,
     after_launch: Option<String>,
     check_updates: Option<bool>,
@@ -233,6 +239,7 @@ pub async fn update_config(
         auto_download_java,
         cache_directory,
         client_id,
+        clear_client_id,
         selected_version,
         after_launch,
         check_updates,
@@ -252,7 +259,9 @@ pub(crate) async fn update_config_with(
     raw: RawConfigPatch,
 ) -> Result<(), CommandError> {
     let patch = parse_patch(raw).await?;
-    facade.update(|aurora| apply_patch(aurora, patch)).await
+    facade
+        .update(|petalfall| apply_patch(petalfall, patch))
+        .await
 }
 
 async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
@@ -283,7 +292,7 @@ async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
             .transpose()?,
         auto_download_java: raw.auto_download_java,
         cache_directory: raw.cache_directory.map(PathBuf::from),
-        client_id: raw.client_id.map(validate_client_id).transpose()?,
+        client_id: parse_client_id(raw.client_id, raw.clear_client_id)?,
         selected_version: raw.selected_version,
         after_launch: raw
             .after_launch
@@ -301,60 +310,62 @@ async fn parse_patch(raw: RawConfigPatch) -> Result<ConfigPatch, CommandError> {
     })
 }
 
-fn apply_patch(aurora: &mut Aurora, patch: ConfigPatch) -> Result<(), CommandError> {
+fn apply_patch(petalfall: &mut Petalfall, patch: ConfigPatch) -> Result<(), CommandError> {
     if let Some(policy) = patch.download_source {
-        aurora.set_download_source(policy);
+        petalfall.set_download_source(policy);
     }
     if let Some(policy) = patch.version_list_source {
-        aurora.set_version_list_source(policy);
+        petalfall.set_version_list_source(policy);
     }
     if let Some(concurrency) = patch.download_concurrency {
-        aurora.set_download_concurrency(concurrency);
+        petalfall.set_download_concurrency(concurrency);
     }
     if let Some(memory) = patch.memory {
-        aurora.set_memory(memory);
+        petalfall.set_memory(memory);
     }
     if let Some(policy) = patch.isolation_policy {
-        aurora.set_isolation_policy(policy);
+        petalfall.set_isolation_policy(policy);
     }
     if let Some(enabled) = patch.auto_download_java {
-        aurora.set_auto_download_java(enabled);
+        petalfall.set_auto_download_java(enabled);
     }
     if let Some(dir) = patch.cache_directory {
-        aurora.set_cache_directory(Some(dir));
+        petalfall.set_cache_directory(Some(dir));
     }
-    if let Some(id) = patch.client_id {
-        aurora.set_client_id(id);
+    match patch.client_id {
+        Some(Some(id)) => petalfall.set_client_id(id),
+        Some(None) => petalfall.clear_client_id(),
+        None => {}
     }
     if let Some(id) = patch.selected_version {
-        aurora.set_selected_version(Some(id));
+        petalfall.set_selected_version(Some(id));
     }
     if let Some(after) = patch.after_launch {
-        aurora.set_after_launch(after);
+        petalfall.set_after_launch(after);
     }
     if let Some(enabled) = patch.check_updates {
-        aurora.set_check_updates(enabled);
+        petalfall.set_check_updates(enabled);
     }
     if let Some(java) = patch.default_java {
-        aurora.set_default_java(java);
+        petalfall.set_default_java(java);
     }
     if let Some(version) = patch.skipped_update_version {
-        aurora.set_skipped_update_version(Some(version));
+        petalfall.set_skipped_update_version(Some(version));
     }
     if let Some(version) = patch.notified_update_version {
-        aurora.set_notified_update_version(Some(version));
+        petalfall.set_notified_update_version(Some(version));
     }
     if let Some(language) = patch.language {
-        aurora.set_language(language);
+        petalfall.set_language(language);
     }
     if let Some(enabled) = patch.prefer_dedicated_gpu {
-        aurora.set_prefer_dedicated_gpu(enabled);
+        petalfall.set_prefer_dedicated_gpu(enabled);
     }
     if let Some(enabled) = patch.skip_accessibility_onboarding {
-        aurora.set_skip_accessibility_onboarding(enabled);
+        petalfall.set_skip_accessibility_onboarding(enabled);
     }
     if let Some(settings) = patch.world_backup {
-        aurora.set_world_backup(settings);
+        petalfall.set_world_backup(settings);
     }
     Ok(())
 }
@@ -474,6 +485,21 @@ fn validate_world_backup(input: WorldBackupInput) -> Result<WorldBackupSettings,
     })
 }
 
+/// 填新值与清掉二选一；`clearClientId: false` 等于没给。
+fn parse_client_id(
+    client_id: Option<String>,
+    clear: Option<bool>,
+) -> Result<Option<Option<String>>, CommandError> {
+    match (client_id, clear == Some(true)) {
+        (Some(_), true) => Err(CommandError::invalid_argument(
+            "clientId 与 clearClientId 不能同时给",
+        )),
+        (Some(id), false) => Ok(Some(Some(validate_client_id(id)?))),
+        (None, true) => Ok(Some(None)),
+        (None, false) => Ok(None),
+    }
+}
+
 fn validate_client_id(id: String) -> Result<String, CommandError> {
     let trimmed = id.trim();
     if trimmed.is_empty() {
@@ -515,6 +541,8 @@ pub struct GameDirectoryDto {
     pub is_current: bool,
     /// 此刻能否访问；为假时记录仍保留。
     pub available: bool,
+    /// `versions/` 下的版本目录数，没有 `versions/` 算 0。不可达、探测超时或读取失败时为 null，不等于 0。
+    pub version_count: Option<u32>,
 }
 
 /// 一条带名字的目录（探测结果与首次启动勾选项）。
@@ -539,6 +567,7 @@ fn game_directory_dto(entry: GameDirectoryEntry) -> GameDirectoryDto {
         path: entry.path.display().to_string(),
         is_current: entry.is_current,
         available: entry.available,
+        version_count: entry.version_count,
     }
 }
 
@@ -567,13 +596,13 @@ pub(crate) fn parse_named_directory(
     })
 }
 
-/// 列出全部已知游戏目录：当前目录在前，其余按记录顺序；各目录并发限时探测是否可达。
+/// 列出全部已知游戏目录：当前目录在前，其余按记录顺序；各目录并发限时探测是否可达与版本数。
 #[tauri::command]
 pub async fn list_game_directories(
     facade: State<'_, Facade>,
 ) -> Result<Vec<GameDirectoryDto>, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
         .game_directories()
         .await
         .into_iter()
@@ -586,8 +615,8 @@ pub async fn list_game_directories(
 pub async fn discover_game_directories(
     facade: State<'_, Facade>,
 ) -> Result<Vec<NamedDirectoryDto>, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
         .discover_game_directories()
         .await
         .into_iter()
@@ -615,8 +644,8 @@ pub(crate) async fn add_game_directory_with(
         path: path.to_owned(),
     })?;
     facade
-        .update(|aurora| {
-            aurora.add_game_directory(dir.name, dir.path);
+        .update(|petalfall| {
+            petalfall.add_game_directory(dir.name, dir.path);
             Ok::<_, CommandError>(())
         })
         .await
@@ -629,7 +658,7 @@ pub async fn remove_game_directory(
     facade: State<'_, Facade>,
 ) -> Result<bool, CommandError> {
     Ok(facade
-        .update_if_changed(|aurora| aurora.remove_game_directory(Path::new(path.trim())))
+        .update_if_changed(|petalfall| petalfall.remove_game_directory(Path::new(path.trim())))
         .await?)
 }
 
@@ -660,8 +689,8 @@ pub(crate) async fn set_game_directory_with(
     }
     let current = facade.snapshot().await.probe_current_game_dir().await;
     facade
-        .update(|aurora| {
-            aurora.switch_game_directory(target, &current);
+        .update(|petalfall| {
+            petalfall.switch_game_directory(target, &current);
             Ok::<_, CommandError>(())
         })
         .await
@@ -684,16 +713,16 @@ pub async fn inspect_game_directory(
 mod tests {
     use super::*;
     use crate::commands::error::code;
-    use aurora_core::AuroraConfig;
+    use petalfall_core::PetalfallConfig;
 
     fn facade_in(dir: &Path) -> Facade {
-        let aurora = Aurora::open(
-            AuroraConfig::default(),
+        let petalfall = Petalfall::open(
+            PetalfallConfig::default(),
             dir.to_path_buf(),
             dir.join("config.json"),
         )
         .unwrap();
-        Facade::new(aurora)
+        Facade::new(petalfall)
     }
 
     #[test]
@@ -896,7 +925,7 @@ mod tests {
             written["world_backup"],
             serde_json::json!({ "auto": false, "keep_per_world": 10, "max_total_gb": 50 })
         );
-        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+        let reloaded = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
             .load()
             .await
             .unwrap();
@@ -940,20 +969,98 @@ mod tests {
             r#"{"check_updates": false, "download_concurrency": 16}"#,
         )
         .unwrap();
-        let config = aurora_core::ConfigStore::at(path).load().await.unwrap();
+        let config = petalfall_core::ConfigStore::at(path).load().await.unwrap();
         assert!(!config.check_updates);
         assert_eq!(config.download_concurrency, 16);
-        let aurora = Aurora::open(
+        let petalfall = Petalfall::open(
             config,
             dir.path().to_path_buf(),
             dir.path().join("config.json"),
         )
         .unwrap();
-        let dto = serde_json::to_value(config_dto(&aurora)).unwrap();
+        let dto = serde_json::to_value(config_dto(&petalfall)).unwrap();
         assert_eq!(
             dto["world_backup"],
             serde_json::json!({ "auto": true, "keep_per_world": 5, "max_total_gb": 20 })
         );
+    }
+
+    /// 填进 client_id 后微软登录即可用；填之前与清掉之后可不可用，取决于这台机器设没设环境变量、编译时有没有内嵌。
+    #[tokio::test]
+    async fn microsoft_login_follows_a_saved_then_cleared_client_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let before = read_config(&facade).await;
+        assert!(!before.has_client_id);
+        let has_fallback = option_env!("PETALFALL_MSA_CLIENT_ID")
+            .is_some_and(|id| !id.trim().is_empty())
+            || std::env::var(petalfall_core::MSA_CLIENT_ID_ENV)
+                .is_ok_and(|id| !id.trim().is_empty());
+        assert_eq!(before.microsoft_login_available, has_fallback);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                client_id: Some(" my-azure-app ".into()),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let after = read_config(&facade).await;
+        assert!(after.has_client_id);
+        assert!(after.microsoft_login_available);
+
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                clear_client_id: Some(true),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let cleared = read_config(&facade).await;
+        assert!(!cleared.has_client_id);
+        // clearClientId 为 false 等于没给：单给它不动配置，和 clientId 一起给照常写入
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                clear_client_id: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!read_config(&facade).await.has_client_id);
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                client_id: Some("another-app".into()),
+                clear_client_id: Some(false),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(read_config(&facade).await.has_client_id);
+        update_config_with(
+            &facade,
+            RawConfigPatch {
+                clear_client_id: Some(true),
+                ..RawConfigPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(cleared.microsoft_login_available, has_fallback);
+        // 落盘的配置里也去掉了，重开启动器不会又冒出来
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("config.json")).unwrap())
+                .unwrap();
+        assert!(raw["msa_client_id"].is_null(), "{raw}");
     }
 
     /// 出参能原样作入参回传：拿 get_config 的值写回去，配置不变。
@@ -1016,7 +1123,7 @@ mod tests {
         );
 
         // 落了盘：重新载入得到同样的配置。
-        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+        let reloaded = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
             .load()
             .await
             .unwrap();
@@ -1054,7 +1161,7 @@ mod tests {
         .await
         .unwrap();
         assert!(read_config(&facade).await.prefer_dedicated_gpu);
-        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+        let reloaded = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
             .load()
             .await
             .unwrap();
@@ -1103,7 +1210,7 @@ mod tests {
         .unwrap();
         let dto = serde_json::to_value(read_config(&facade).await).unwrap();
         assert_eq!(dto["skip_accessibility_onboarding"], false);
-        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+        let reloaded = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
             .load()
             .await
             .unwrap();
@@ -1139,9 +1246,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         std::fs::write(&path, br#"{"download_concurrency": 12}"#).unwrap();
-        let config = aurora_core::ConfigStore::at(&path).load().await.unwrap();
-        let aurora = Aurora::open(config, dir.path().to_path_buf(), path.clone()).unwrap();
-        let facade = Facade::new(aurora);
+        let config = petalfall_core::ConfigStore::at(&path).load().await.unwrap();
+        let petalfall = Petalfall::open(config, dir.path().to_path_buf(), path.clone()).unwrap();
+        let facade = Facade::new(petalfall);
 
         let dto = serde_json::to_value(read_config(&facade).await).unwrap();
         assert_eq!(dto["skip_accessibility_onboarding"], true);
@@ -1180,6 +1287,12 @@ mod tests {
             RawConfigPatch {
                 check_updates: Some(false),
                 client_id: Some("   ".into()),
+                ..RawConfigPatch::default()
+            },
+            RawConfigPatch {
+                check_updates: Some(false),
+                client_id: Some("my-azure-app".into()),
+                clear_client_id: Some(true),
                 ..RawConfigPatch::default()
             },
             RawConfigPatch {
@@ -1237,7 +1350,7 @@ mod tests {
         let dto = read_config(&facade).await;
         assert_eq!(dto.language, UiLanguage::EnUs);
         assert_eq!(serde_json::to_value(&dto).unwrap()["language"], "en-US");
-        let reloaded = aurora_core::ConfigStore::at(dir.path().join("config.json"))
+        let reloaded = petalfall_core::ConfigStore::at(dir.path().join("config.json"))
             .load()
             .await
             .unwrap();
@@ -1334,6 +1447,43 @@ mod tests {
         assert_eq!(
             read_config(&facade).await.game_dir,
             target.display().to_string()
+        );
+    }
+
+    /// 版本数过 IPC 时 0 和 null 要分得开：null 是「不知道」，字段也得在，前端按 `number | null` 读。
+    #[tokio::test(start_paused = true)]
+    async fn game_directory_dto_tells_unknown_version_count_from_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let current = dir.path().join(".minecraft").join("versions");
+        std::fs::create_dir_all(current.join("1.21.1")).unwrap();
+        std::fs::create_dir_all(current.join("生存")).unwrap();
+        let empty = dir.path().join("PCL").join(".minecraft");
+        std::fs::create_dir_all(&empty).unwrap();
+        let unplugged = dir.path().join("unplugged").join(".minecraft");
+        add_game_directory_with(&facade, "PCL", &empty.display().to_string())
+            .await
+            .unwrap();
+        add_game_directory_with(&facade, "外置盘", &unplugged.display().to_string())
+            .await
+            .unwrap();
+
+        let listed: Vec<serde_json::Value> = facade
+            .snapshot()
+            .await
+            .game_directories()
+            .await
+            .into_iter()
+            .map(|entry| serde_json::to_value(game_directory_dto(entry)).unwrap())
+            .collect();
+
+        assert_eq!(listed.len(), 3);
+        assert_eq!(listed[0]["version_count"], 2);
+        assert_eq!(listed[1]["version_count"], 0);
+        assert_eq!(listed[2]["available"], false);
+        assert_eq!(
+            listed[2].get("version_count"),
+            Some(&serde_json::Value::Null)
         );
     }
 

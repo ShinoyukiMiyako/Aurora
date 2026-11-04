@@ -5,10 +5,10 @@ import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import { mockInvoke, resetMocks } from "../ipc/mock";
 import type { BlockedFileDto } from "../ipc/modpack";
-import type { TaskJournalDto, TaskRecordDto } from "../ipc/tasks";
+import { CORE_EVENT, type TaskJournalDto, type TaskRecordDto } from "../ipc/tasks";
 import { TASK_JOURNAL_DEBOUNCE_MS } from "../domain/limits";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
+import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle, startedStore, type Deferred } from "../test/launcher";
 import type { LauncherStore } from "./store";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -55,7 +55,7 @@ beforeEach(async () => {
   install = deferred<{ id: string }>();
   ipc.overrides.set("install_version", () => install.promise);
   ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
-  const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+  const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
   ipc.overrides.set("get_instance_settings", () => settings);
   ipc.overrides.set("set_instance_settings", (args) => args.settings);
   store = await startedStore();
@@ -377,6 +377,33 @@ describe("需要手动下载的文件清单随失败记录进任务日志", () =
     await settle();
     const [failed] = store.getState().tasks;
     expect(failed.error).toEqual({ code: "curseforge_key_rejected", message: "CurseForge 拒绝了下载密钥（HTTP 401）：https://edge.forgecdn.net/files/1/2/a.jar" });
-    expect(store.getState().toasts.map((t) => t.body)).toContain("CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试");
+    expect(store.getState().toasts.map((t) => t.body)).toContain("CurseForge 拒绝了下载密钥。设置环境变量 PETALFALL_CURSEFORGE_API_KEY 换一个可用的密钥后重试");
+  });
+});
+
+describe("分步任务的步骤不进任务日志", () => {
+  it("报过第几步之后写回的记录只有整体进度、没有步骤；重启读回时任务也没有步骤", async () => {
+    journal = () => ({ seq: 0, tasks: [] });
+    await store.actions.reload("tasks");
+    await store.actions.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
+    await settle();
+    const [task] = store.getState().tasks;
+    expect(task.status).toBe("running");
+    emit(CORE_EVENT, { kind: "phase", task_id: `${task.id}#1`, plan: ["metadata", "libraries", "assets", "natives"], index: 1 });
+    expect(store.getState().tasks[0].phase).toEqual({ plan: ["metadata", "libraries", "assets", "natives"], index: 1, batch: null });
+    await vi.advanceTimersByTimeAsync(TASK_JOURNAL_DEBOUNCE_MS);
+    const saved = callsOf(ipc, "save_task_journal").at(-1);
+    if (saved === undefined) throw new Error("新建入队后应写回任务日志");
+    const records = saved.tasks as TaskRecordDto[];
+    expect(records).toHaveLength(1);
+    expect(Object.keys(records[0])).not.toContain("phase");
+    // 原版四步的权重 1 / 7 / 11 / 1：进入第二步时整体进度是 1 / 20
+    expect(records[0].progress).toBeCloseTo(0.05, 10);
+
+    store.stop();
+    journal = () => ({ seq: 1, tasks: records });
+    store = await startedStore();
+    const [restored] = store.getState().tasks;
+    expect(restored).toMatchObject({ id: task.id, status: "failed", phase: null, error: { code: TASK_INTERRUPTED_CODE } });
   });
 });

@@ -39,13 +39,13 @@ function renameOnDisk(from: string, to: string): void {
 
 /** 新建实例装好时要写封面：实例设置按传入的原样存下。 */
 function stubInstanceSettings(): void {
-  const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+  const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
   ipc.overrides.set("get_instance_settings", () => settings);
   ipc.overrides.set("set_instance_settings", (args) => args.settings);
 }
 
 describe("改实例设置后按需重扫实例列表", () => {
-  const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+  const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
 
   it.each([
     ["隔离（换工作目录，存档数与 Mod 数跟着变）", { isolation: "enabled" as const }, 1],
@@ -65,7 +65,7 @@ describe("改实例设置后按需重扫实例列表", () => {
 });
 
 describe("同一实例的设置读改写按调用顺序串行", () => {
-  const initial = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+  const initial = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
   let disk: Record<string, Record<string, unknown>>;
 
   beforeEach(() => {
@@ -627,7 +627,7 @@ describe("改名迁移任务", () => {
     expect(callsOf(ipc, "install_resource").map((a) => a.versionId)).toEqual(["生存", "生存二"]);
     expect(store.getState().toasts.map((t) => t.body)).toContain("已设为「生存二」的当前光影");
 
-    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
     ipc.overrides.set("get_instance_settings", () => settings);
     ipc.overrides.set("set_instance_settings", (args) => args.settings);
     java.resolve({ component: "java-runtime-delta", version: { major: 21, minor: 0, security: 5, build: 11, raw: "21.0.5" }, java_executable: "C:/jdk21/bin/java.exe" });
@@ -933,7 +933,7 @@ describe("改名已落盘、之后的读取失败：内存里挂在旧 id 上的
     expect(state.toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["error", "实例列表没能刷新", "读取失败：拒绝访问。 (os error 5)"]);
     expect(error).toHaveBeenCalledWith("实例列表没能刷新", expect.objectContaining({ code: "io_error" }));
 
-    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
     ipc.overrides.set("get_instance_settings", () => settings);
     ipc.overrides.set("set_instance_settings", (args) => args.settings);
     java.resolve({ component: "java-runtime-delta", version: { major: 21, minor: 0, security: 5, build: 11, raw: "21.0.5" }, java_executable: "C:/jdk21/bin/java.exe" });
@@ -1045,7 +1045,7 @@ describe("新建实例入队即成为当前实例，侧栏有空位时安装期�
     install = deferred<{ id: string }>();
     ipc.overrides.set("install_version", () => install.promise);
     ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
-    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
     ipc.overrides.set("get_instance_settings", () => settings);
     ipc.overrides.set("set_instance_settings", (args) => args.settings);
     store = await startedStore();
@@ -1424,7 +1424,7 @@ describe("删除还在安装的新建实例", () => {
     install = deferred<{ id: string }>();
     ipc.overrides.set("install_version", () => install.promise);
     ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
-    const settings = { description: null, cover: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
+    const settings = { description: null, cover: null, cover_image: null, background: "follow", background_image: null, isolation: "follow_global", memory_mb: null, java: "auto", jvm_args: "", resolution: { width: 854, height: 480 }, fullscreen: false };
     ipc.overrides.set("get_instance_settings", () => settings);
     ipc.overrides.set("set_instance_settings", (args) => args.settings);
     ipc.overrides.set("delete_instance", (args) => {

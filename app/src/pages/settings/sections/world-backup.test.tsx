@@ -12,7 +12,7 @@ import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../../state/appearanc
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../../../test/launcher";
+import { bootOverrides, callsOf, configDto, instanceDto, memoryAdviceDto, resetRecorder, settle } from "../../../test/launcher";
 import SettingsPage from "../index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -106,7 +106,7 @@ beforeEach(() => {
     return null;
   });
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
-  ipc.overrides.set("memory_advice", () => ({ total_mb: 32768, available_mb: 16000, tier: "modded", recommended_mb: 6144 }));
+  ipc.overrides.set("memory_advice", () => memoryAdviceDto({ need_mb: 2560, recommended_mb: 2560, factors: [{ kind: "base", loader: "vanilla", mb: 2560 }] }));
   ipc.overrides.set("list_game_directories", () => [{ name: "默认目录", path: config.game_dir, is_current: true, available: true }]);
   ipc.overrides.set("discover_game_directories", () => []);
 });

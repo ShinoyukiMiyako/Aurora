@@ -13,7 +13,9 @@ import {
   BOOT_SLICE_ERROR,
   CONFIRM_COPY,
   DEVICE_CODE_TIMEOUT_CODE,
+  GAME_DIR_SWITCH_COPY,
   isCrashCategory,
+  MSA_CLIENT_ID_MISSING,
   NEXT_LAUNCH_SUFFIX,
   TASK_INTERRUPTED_CODE,
   TASK_TEXT,
@@ -21,7 +23,7 @@ import {
   TOAST_COPY,
   failureCopy,
   failureToastLabel,
-  crashCategoryLabel,
+  crashClueLine,
   taskFailureReason,
   SESSION_COPY,
   type CrashCategoryName,
@@ -29,8 +31,10 @@ import {
 } from "../copy/flows";
 import {
   accountFromDto,
+  accountKindFromDto,
   authServerFromDto,
   authlibProfileFromDto,
+  installPhasesFromDto,
   instanceFromDto,
   instanceSettingsFromDto,
   instanceSettingsToDto,
@@ -52,6 +56,7 @@ import {
 import {
   FAILURE_TOAST_MERGE_MS,
   INSTANCE_RESCAN_MIN_MS,
+  SESSION_LOG_LIMIT,
   SIDEBAR_PIN_LIMIT,
   STOP_TIMEOUT_MS,
   STOPPED_LINGER_MS,
@@ -63,7 +68,7 @@ import type { FailureCode, LoaderKind, Platform, Task, TaskError, TaskKind } fro
 import * as accountsIpc from "../ipc/accounts";
 import { invoke, type UnlistenFn } from "../ipc/bridge";
 import * as configIpc from "../ipc/config";
-import { lastCrash } from "../ipc/diagnostics";
+import { lastCrash, lastLaunchLog } from "../ipc/diagnostics";
 import { installMod, type InstallableResourceType, type ResourceInstallOutcomeDto } from "../ipc/discover";
 import { CANCELLED_ERROR_CODE, IpcError, isCancelled, isIpcError } from "../ipc/errors";
 import { listHistory, rollback as rollbackIpc, rollbackChecks } from "../ipc/history";
@@ -75,6 +80,7 @@ import type {
   FolderTarget,
   InstallResultDto,
   InstanceDto,
+  MoveOutcomeDto,
   RestoreResultDto,
   WorldBackupListDto,
 } from "../ipc/instances";
@@ -92,12 +98,15 @@ import { network as appNetwork, type NetworkMonitor } from "./online";
 import { MODPACK_SUMMARY_RESOURCE } from "./queries/discover";
 import { invalidate as invalidateResources, resources } from "./resource";
 import type { Route } from "./route";
+import { gameDirectoryBusy } from "./selectors";
 import {
   appendSessionLogs,
   applyPhase,
+  backfillSessionLogs,
   isFailureCode,
   isLoadingPhase,
   isSessionActive,
+  reattachedSession,
   sessionCancelled,
   sessionCrashClue,
   sessionExited,
@@ -110,8 +119,9 @@ import {
 import {
   applyCompositeDownload,
   applyTaskDownload,
+  applyTaskPhase,
   attemptTaskId,
-  awaitsManualFiles,
+  batchRetryable,
   clearFinished,
   completeCompositeStep,
   compositeProgress,
@@ -125,6 +135,7 @@ import {
   markFailed,
   markRunning,
   modFilesBeingUpdated,
+  MOVE_TASK_COMMAND,
   newTask,
   restoreJournal,
   retryTask,
@@ -279,12 +290,18 @@ type TaskMeta =
   /** 备份、导出、恢复存档。world 是存档文件夹名，name 是任务标题与通知里写的存档名。 */
   | { type: "world"; instanceId: string; world: string; name: string; op: "backup" | "restore" | "export" }
   /** name：整合包名称（完成通知用），与命令参数 options.name 相同。 */
-  | { type: "export"; name: string };
+  | { type: "export"; name: string }
+  /** 移到别的游戏目录。目标名与路径以命令的返回为准，这里只记挂在哪个实例上。 */
+  | { type: "move"; instanceId: string };
 
 export type { WorldBackupDto, WorldBackupListDto } from "../ipc/instances";
+export type { CoverImageSlotDto } from "../ipc/instances";
 
 /** 存档备份列表的查询 key：world-backups:<实例 id>:<存档文件夹名>。共用存档的几个实例看到同一份，失效时按前缀整个失效。 */
 export const WORLD_BACKUPS_RESOURCE = "world-backups";
+
+/** 游戏目录列表的查询 key（见 queries/catalog）。按前缀失效，连带发现与检查的条目。 */
+const GAME_DIRS_RESOURCE = "game-dirs";
 
 export function worldBackupsKey(instanceId: string, world: string): string {
   return `${WORLD_BACKUPS_RESOURCE}:${instanceId}:${world}`;
@@ -313,6 +330,7 @@ interface RawState {
   login: LoginState | null;
   launchPrompt: LaunchPrompt | null;
   lastRename: { from: string; to: string; seq: number } | null;
+  lastMove: { id: string; seq: number } | null;
 }
 
 export interface LauncherState {
@@ -340,6 +358,11 @@ export interface LauncherState {
   launchPrompt: LaunchPrompt | null;
   /** 最近一次重命名：外壳据此把历史里的旧 id 换成新 id，而不是当成实例被删除。 */
   lastRename: { from: string; to: string; seq: number } | null;
+  /**
+   * 最近一次移到别的游戏目录：与移走后的实例列表同一次到达。外壳据此把正开着的那个实例页送回实例库，
+   * 而不是像删除那样剪掉、落回上一页（上一页多半还是这个实例的别的标签）。
+   */
+  lastMove: { id: string; seq: number } | null;
 }
 
 /** 启动失败修复动作的落点：导航类给路由，命令类给要执行的函数与它失败时的通知标题。 */
@@ -362,7 +385,7 @@ export interface LauncherActions {
    * 刷新名字、皮肤与令牌。凭据被判失效不是操作失败：账户重新读出来已是 expired，原位显示「重新登录」，
    * 返回 "expired" 而不抛错；其余失败原样抛出。
    */
-  refreshAccount(uuid: string): Promise<"refreshed" | "expired" | "not_approved">;
+  refreshAccount(uuid: string): Promise<"refreshed" | "expired" | "not_approved" | "no_client_id">;
   addOfflineAccount(name: string): Promise<Account>;
   openLogin(kind: LoginKind, intent?: LoginIntent): Promise<void>;
   /** 拖进窗口的外置登录服务器链接：打开外置登录弹窗，填好这个地址并自动探测服务器。 */
@@ -389,6 +412,11 @@ export interface LauncherActions {
   deleteInstance(id: string, worldCount: number): Promise<void>;
   renameInstance(id: string, name: string): Promise<string>;
   updateInstanceSettings(id: string, patch: Partial<InstanceSettings>): Promise<InstanceSettings>;
+  /**
+   * 把本机一张图片用作卡面背景或封面方块，返回写下的设置（背景位同时把背景设为图片）。与 updateInstanceSettings
+   * 排同一条读改写链；完成后实例设置的查询失效、实例列表重扫（取图键只由列表给出）。失败原样抛给调用方。
+   */
+  importCoverImage(id: string, slot: instancesIpc.CoverImageSlotDto, path: string): Promise<InstanceSettings>;
   /** reinstallLoader：把加载器原样重装一遍，走同一个补全任务；游戏版本、Mod、配置与存档都不变。 */
   repairInstance(id: string, opts?: { launchAfter?: boolean; reinstallLoader?: boolean }): Promise<void>;
   /** 把实例的设置文件存为新实例的默认设置；成功后默认设置的查询失效并通知。 */
@@ -448,6 +476,12 @@ export interface LauncherActions {
   restoreWorldBackup(instanceId: string, world: string, name: string, file: string): Promise<void>;
   /** 入队一个导出任务：把存档打包到 dest（系统保存对话框选定的 .zip）。 */
   exportWorld(instanceId: string, world: string, name: string, dest: string): Promise<void>;
+  /**
+   * 把实例从 source 移到 target 这个游戏目录：入队一个挂在实例上的任务，返回任务 id（同一件事已在队列里时返回那个任务的 id）。
+   * source 与 targetName 都取自玩家确认的那份预检：source 随任务参数记下，切换游戏目录之后再重试时后端据此拒绝，
+   * 不去动新目录里同名的实例；targetName 只写进任务详情。期间实例算「移动中」，什么都做不了。
+   */
+  moveInstance(id: string, source: string, target: string, targetName: string): Promise<string>;
   /** 把一份备份移入回收站（不经任务队列，不确认）。 */
   deleteWorldBackup(instanceId: string, world: string, file: string): Promise<void>;
   listWorldBackups(instanceId: string, world: string): Promise<WorldBackupListDto>;
@@ -457,7 +491,7 @@ export interface LauncherActions {
   cancelTask(id: string): Promise<void>;
   cancelAllTasks(): Promise<void>;
   retryTask(id: string): void;
-  /** 把全部失败的任务重新排进队列（已有同一件事在队列里的跳过），返回重新排进去的个数。 */
+  /** 把失败的任务重新排进队列（已有同一件事在队列里的跳过；移动与要手动下载的不收，见 batchRetryable），返回重新排进去的个数。 */
   retryFailedTasks(): number;
   clearFinishedTasks(): void;
   /** 打开下载快览或进入下载任务页时调用：此刻的失败都算看过了。 */
@@ -469,6 +503,8 @@ export interface LauncherActions {
   addJavaPath(path: string): Promise<JavaInstallationDto>;
   /** 移除一条手动添加的 Java；默认 Java 可能随之改回自动选择，所以同样重读设置。 */
   removeJavaPath(path: string): Promise<RemoveJavaPathDto>;
+  /** 崩溃页改用独立显卡：立即把这个 java 设为高性能并打开独显偏好；成功后重读设置，设置页的开关跟着亮。 */
+  switchToDedicatedGpu(javaPath: string): Promise<void>;
   setGameDirectory(path: string): Promise<void>;
   /**
    * 首次启动向导第一步的提交：后端校验并落下游戏目录、收下勾选的文件夹、记下向导已完成（此后关窗口，下次直接进主页）。
@@ -503,13 +539,14 @@ const TASK_COMMANDS = new Set([
   "update_mods",
   ...WORLD_TASK_COMMANDS,
   "export_modpack",
+  MOVE_TASK_COMMAND,
 ]);
 
 /**
- * 实例列表里带着结果的实例设置，改了要重扫列表：简介与封面直接显示；隔离会换掉工作目录，列表里的隔离生效值、
- * 存档数与 Mod 数随之变；自定内存直接给出 memoryMb。
+ * 实例列表里带着结果的实例设置，改了要重扫列表：简介、封面与卡面背景直接显示（图片的取图键由列表登记）；
+ * 隔离会换掉工作目录，列表里的隔离生效值、存档数与 Mod 数随之变；自定内存直接给出 memoryMb。
  */
-const LISTED_INSTANCE_SETTINGS = ["description", "cover", "isolation", "memoryMb"] as const;
+const LISTED_INSTANCE_SETTINGS = ["description", "cover", "coverImage", "background", "backgroundImage", "isolation", "memoryMb"] as const;
 
 /** 前端的组合任务：逐项调后端命令，中途失败或取消时前面几项已经落盘。 */
 const COMPOSITE_TASKS = new Set(["install_mods", "update_mods"]);
@@ -520,9 +557,10 @@ const BASE_HOLDING_COMMANDS: ReadonlySet<string> = new Set(["repair_instance", "
 const OPEN_URL_COMMAND = "plugin:opener|open_url";
 
 
-/** refresh_account 判定凭据失效、只能重新登录时的错误码（aurora-auth 的变体名）。 */
+/** refresh_account 判定凭据失效、只能重新登录时的错误码（petalfall-auth 的变体名）。 */
 const RELOGIN_REQUIRED_CODE = "ReloginRequired";
 const APP_NOT_APPROVED_CODE = "AppNotApproved";
+const MSA_CLIENT_ID_MISSING_CODE = "MsaClientIdMissing";
 
 /** 读写本机文件失败的错误码；认领时多半是选的文件夹读不了。 */
 const IO_ERROR_CODE = "io";
@@ -573,21 +611,34 @@ function initialRaw(): RawState {
     login: null,
     launchPrompt: null,
     lastRename: null,
+    lastMove: null,
   };
 }
 
-/** 任务失败记录：需要手动下载的文件清单随记录进任务日志，失败态据此列出清单、重新检查后重试。 */
+/**
+ * 任务失败记录：需要手动下载的文件清单随记录进任务日志，失败态据此列出清单、重新检查后重试；移动被拦下时拦着它的那一项
+ * 也随记录存下，失败原因按它的种类写。
+ */
 function failureRecord(error: unknown): TaskError {
   const record = errorRecord(error);
   const blocked = blockedFilesOf(error);
-  return blocked === null ? record : { ...record, blocked_files: blocked };
+  const blocker = instancesIpc.moveBlockerOf(error);
+  return { ...record, ...(blocked === null ? {} : { blocked_files: blocked }), ...(blocker === null ? {} : { move_blocker: blocker }) };
 }
 
-/** 任务日志里读回的失败记录：带着清单时逐项校验，形状不对按日志损坏报错；较早的日志没有清单，原样读入。 */
+/** 任务日志里读回的失败记录：带着清单或拦截项时逐项校验，形状不对按日志损坏报错；较早的日志没有它们，原样读入。 */
 function journalTask(task: Task): Task {
   const error = task.error;
-  if (error === null || error.blocked_files === undefined) return task;
-  return { ...task, error: { ...error, blocked_files: parseBlockedFiles(error.blocked_files, `任务 ${task.id} 的 error.blocked_files`) } };
+  if (error === null || (error.blocked_files === undefined && error.move_blocker === undefined)) return task;
+  const where = `任务 ${task.id} 的 error`;
+  return {
+    ...task,
+    error: {
+      ...error,
+      ...(error.blocked_files === undefined ? {} : { blocked_files: parseBlockedFiles(error.blocked_files, `${where}.blocked_files`) }),
+      ...(error.move_blocker === undefined ? {} : { move_blocker: instancesIpc.parseMoveBlocker(error.move_blocker, `${where}.move_blocker`) }),
+    },
+  };
 }
 
 function strArg(args: Record<string, unknown>, key: string, command: string): string {
@@ -653,6 +704,8 @@ function metaFromSpec(task: Task): TaskMeta | null {
       if (typeof options !== "object" || options === null) throw new Error("任务 export_modpack 缺少 options");
       return { type: "export", name: strArg(options as Record<string, unknown>, "name", command) };
     }
+    case MOVE_TASK_COMMAND:
+      return { type: "move", instanceId: strArg(args, "id", command) };
     default:
       return null;
   }
@@ -817,6 +870,7 @@ const INSTANCE_ARG: Readonly<Record<string, string>> = {
   export_world: "id",
   restore_world_backup: "id",
   export_modpack: "id",
+  move_instance: "id",
 };
 
 /**
@@ -891,13 +945,19 @@ function renamedTo(err: IpcError): string {
 /**
  * 实例改名后任务里的实例 id 一并换掉：任务行的「查看实例」、重试时重新调用的命令参数都要指向新名字，行上写的实例名也一样。
  * 后端拒绝的是正占着实例的任务，这里换的是还没开始的（排队中）与已结束的（失败的可以重试）。
- * 标题只有补全任务写的是实例：别的写 Mod 或存档名，存档与实例同名时也不能跟着改。
+ * 标题只有补全与移动任务写的是实例：别的写 Mod 或存档名，存档与实例同名时也不能跟着改。
  */
+function renamedTitle(task: Task, to: string): string {
+  if (task.spec.command === MOVE_TASK_COMMAND) return TASK_TEXT.moveTitle(to);
+  if (task.spec.command !== "repair_instance") return task.title;
+  return task.spec.args.reinstallLoader === true ? TASK_TEXT.reinstallLoaderTitle(to) : TASK_TEXT.repairTitle(to);
+}
+
 function renamedTask(task: Task, from: string, to: string): Task {
   if (task.instanceId !== from) return task;
   const key = INSTANCE_ARG[task.spec.command];
   const args = key !== undefined && task.spec.args[key] === from ? { ...task.spec.args, [key]: to } : task.spec.args;
-  const title = task.spec.command !== "repair_instance" ? task.title : task.spec.args.reinstallLoader === true ? TASK_TEXT.reinstallLoaderTitle(to) : TASK_TEXT.repairTitle(to);
+  const title = renamedTitle(task, to);
   return { ...task, instanceId: to, title, detail: TASK_TEXT.renamedDetail(task.detail, from, to), spec: { ...task.spec, args } };
 }
 
@@ -911,6 +971,7 @@ function renamedMeta(meta: TaskMeta, from: string, to: string): TaskMeta {
     case "update":
     case "updates":
     case "world":
+    case "move":
       return meta.instanceId === from ? { ...meta, instanceId: to } : meta;
     case "java":
       return meta.launchAfter === from || meta.pinFor === from ? { ...meta, launchAfter: swap(meta.launchAfter), pinFor: swap(meta.pinFor) } : meta;
@@ -955,8 +1016,8 @@ function prunedTaskRefs(raw: RawState): Partial<RawState> {
   };
 }
 
-/** 活动任务对一个已扫描实例的影响：整个目录在写（安装中）、在备份或恢复存档，或者只在改动 Mod 与资源。 */
-type TaskEffect = "installing" | "backing_up" | "modifying" | null;
+/** 活动任务对一个已扫描实例的影响：整个目录在写（安装中）、正被移到别的游戏目录、在备份或恢复存档，或者只在改动 Mod 与资源。 */
+type TaskEffect = "installing" | "moving" | "backing_up" | "modifying" | null;
 
 type CreationMeta = Extract<TaskMeta, { type: "create" | "modpack" }>;
 
@@ -971,8 +1032,13 @@ function applyTaskEffect(base: InstanceSummary, pinned: boolean, effect: TaskEff
   }
   if (effect === null) return { ...base, pinned };
   // 列表是任务开始前扫的，后端那时还没记下占用；后端报的活动（例如运行中）比前端推断的更准，留着它。
-  // 排得比任务低的例外，与后端的排序一致：实例自己的事排在被当作基底前面，备份排在 Mod 改动前面。
-  const lower = base.activity === null || base.activity === "inherited" || (effect === "backing_up" && base.activity === "modifying");
+  // 排得比任务低的例外，与后端的排序一致：实例自己的事排在被当作基底前面，备份排在 Mod 改动前面。移动与一切互斥，
+  // 排着的移动要压过列表里扫到的改动与备份：它们一结束移动就开工，这期间再开别的事都会撞上它。
+  const lower =
+    base.activity === null ||
+    base.activity === "inherited" ||
+    (effect === "backing_up" && base.activity === "modifying") ||
+    (effect === "moving" && (base.activity === "modifying" || base.activity === "backing_up"));
   return { ...base, pinned, activity: lower ? effect : base.activity };
 }
 
@@ -995,6 +1061,9 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
     quickPlay: null,
     description: null,
     cover: meta.cover,
+    coverImage: null,
+    background: "follow",
+    backgroundImage: null,
     pinned,
     status: "installing",
     brokenReason: null,
@@ -1052,6 +1121,7 @@ class StateDeriver {
       login: raw.login,
       launchPrompt: raw.launchPrompt,
       lastRename: raw.lastRename,
+      lastMove: raw.lastMove,
     };
   }
 
@@ -1086,19 +1156,21 @@ class StateDeriver {
 
   private compute(raw: RawState, active: readonly Task[]): InstancesView {
     const installing = new Set<string>();
+    const moving = new Set<string>();
     const backingUp = new Set<string>();
     const modifying = new Set<string>();
     const creating = new Map<string, CreationMeta>();
     for (const t of active) {
       if (t.instanceId === null) continue;
-      (INSTANCE_TASK_COMMANDS.has(t.spec.command) ? installing : WORLD_TASK_COMMANDS.has(t.spec.command) ? backingUp : modifying).add(t.instanceId.toLowerCase());
+      const command = t.spec.command;
+      (INSTANCE_TASK_COMMANDS.has(command) ? installing : command === MOVE_TASK_COMMAND ? moving : WORLD_TASK_COMMANDS.has(command) ? backingUp : modifying).add(t.instanceId.toLowerCase());
       const meta = raw.taskMeta[t.id];
       if (meta !== undefined && (meta.type === "create" || meta.type === "modpack")) creating.set(meta.name.toLowerCase(), meta);
     }
     const scannedCache = new Map<string, { base: InstanceSummary; pinned: boolean; effect: TaskEffect; creation: CreationMeta | null; value: InstanceSummary }>();
     const instances: InstanceSummary[] = raw.scanned.map((base) => {
       const key = base.id.toLowerCase();
-      const effect: TaskEffect = installing.has(key) ? "installing" : backingUp.has(key) ? "backing_up" : modifying.has(key) ? "modifying" : null;
+      const effect: TaskEffect = installing.has(key) ? "installing" : moving.has(key) ? "moving" : backingUp.has(key) ? "backing_up" : modifying.has(key) ? "modifying" : null;
       const pinned = raw.pins.includes(base.id);
       const found = creating.get(key);
       const creation = found === undefined ? null : found;
@@ -1164,6 +1236,9 @@ export class LauncherStore {
   private lastScanAt = 0;
   /** 已经为之重扫过的那次启动（见 onLaunchPhase）。 */
   private launchScanned: string | null = null;
+  /** 收到过几次游戏退出，以及每个实例最近一次退出是第几次（见 adoptRunningGame）。 */
+  private exitSeq = 0;
+  private readonly lastExitSeq = new Map<string, number>();
   /** 实例重扫的发出序号与已采纳的最晚序号（见 fetchInstances）。 */
   private scanIssued = 0;
   private scanApplied = 0;
@@ -1182,6 +1257,7 @@ export class LauncherStore {
   private selectionWrite: { id: string; readsIssued: number } | null = null;
   private failureBatch: { toastId: string; startedAt: number; reasons: string[] } | null = null;
   private renameSeq = 0;
+  private moveSeq = 0;
   /** 这次运行里落盘过的改名，按先后：等着 IPC 的流程把手里的 id 跟到现在的名字（见 renamedSince）。 */
   private readonly renames: { from: string; to: string }[] = [];
   /**
@@ -1318,7 +1394,60 @@ export class LauncherStore {
       this.loadSlice("pins"),
       this.loadSlice("tasks"),
       this.loadSlice("firstRun"),
+      this.recoverRunningGame(),
     ]);
+  }
+
+  /** 找回此刻已经在运行的游戏；失败与首查的切片一样发通知，不往外抛。 */
+  private async recoverRunningGame(): Promise<void> {
+    await this.adoptRunningGame().catch((error: unknown) => this.report(ACTION_ERROR.recoverGame, error));
+  }
+
+  /**
+   * 会话只在内存里，开机与渲染进程重载后都是空的：问后端此刻有没有已经跑起来的游戏（关闭前启动、这次打开后接回的，
+   * 或这个后端进程自己启动的），有就建运行态会话。玩家在这期间点了启动、已有活动会话时不覆盖。
+   */
+  private async adoptRunningGame(): Promise<void> {
+    const exitsBefore = this.exitSeq;
+    const { game, broken_record: broken } = await launchIpc.runningGame();
+    if (broken !== null) this.announceBrokenRecord(broken);
+    if (game === null) return;
+    // 查询在路上时这一局已经退出：退出事件到的时候还没有会话，只做了失效与崩溃通知；再建运行态就会一直卡在运行中
+    const exited = this.lastExitSeq.get(game.version_id);
+    if (exited !== undefined && exited > exitsBefore) return;
+    if (isSessionActive(this.raw.session)) return;
+    const account = { uuid: game.account.uuid, name: game.account.name, kind: accountKindFromDto(game.account.account_type) };
+    const taskId = freshId("reattach");
+    const session = reattachedSession(game.version_id, taskId, account, { startedAt: game.started_at, runningSince: game.running_since }, Date.now());
+    this.set({ session });
+    if (game.reattached) this.pushToast("info", TOAST_COPY.gameReattached(game.version_id));
+    this.background(ACTION_ERROR.backfillSessionLog, this.backfillReattachedLogs(game.version_id, taskId, game.started_at));
+  }
+
+  /**
+   * 日志面板与状态岛只看会话里的日志，找回的会话是空的：读这一局的会话日志，把尾部垫在前面。
+   * 读回来时会话已换成别的一局就不写；读到的不是这一局的日志（开始时刻对不上）也不垫，免得把上一局的输出当成这一局的。
+   */
+  private async backfillReattachedLogs(instanceId: string, taskId: string, startedAt: number): Promise<void> {
+    const log = await lastLaunchLog(instanceId);
+    if (log === null) return;
+    if (log.started_at !== startedAt) {
+      console.warn(`「${instanceId}」最近一次的会话日志不是接回的这一局，不垫进日志面板`, { log: log.started_at, game: startedAt });
+      return;
+    }
+    const lines = log.lines.slice(-SESSION_LOG_LIMIT).map(logLineFromDto);
+    const s = this.raw.session;
+    if (s === null) return;
+    const next = backfillSessionLogs(s, taskId, lines);
+    if (next !== s) this.set({ session: next });
+  }
+
+  /** 上次关闭前在跑的那局记录读不出来：这一局的时长与诊断补不上了。原文与两个路径交给「复制错误信息」。 */
+  private announceBrokenRecord(broken: launchIpc.BrokenRecordDto): void {
+    console.warn(broken.message, broken);
+    const raw = [broken.message, broken.path, ...(broken.moved_to === null ? [] : [broken.moved_to])].join("\n");
+    const copy = TOAST_COPY.brokenGameRecord(broken.path, broken.moved_to);
+    this.pushToast("warning", copy.title, copy.body, { label: TOAST_COPY.copyErrorAction, run: () => navigator.clipboard.writeText(raw), errorTitle: TOAST_COPY.copyFailed });
   }
 
   private setStatus(slice: Slice, status: SliceStatus): void {
@@ -1453,8 +1582,9 @@ export class LauncherStore {
   }
 
   private readonly onWindowFocus = (): void => {
-    // 玩家手动往 mods 文件夹里放了 jar：概览的数字和 Mod 页读的是同一份，都要重扫
+    // 玩家手动往 mods 文件夹里放了 jar：概览的数字和 Mod 页读的是同一份，都要重扫；自动内存按启用的 Mod 估算，也跟着重读
     invalidateResources("mods");
+    invalidateResources("memory-advice");
     if (this.raw.status.instances.kind !== "ready") return;
     if (Date.now() - this.lastScanAt < INSTANCE_RESCAN_MIN_MS) return;
     // 本机 Java 也可能被挪走：探测要起进程，跟着实例重扫一起节流
@@ -1473,7 +1603,7 @@ export class LauncherStore {
 
   /** 由离线转回在线：发「网络已恢复」；有失败的下载时正文写个数，操作为全部重试。 */
   private announceRecovered(): void {
-    const failed = this.raw.tasks.filter((t) => t.status === "failed" && !awaitsManualFiles(t)).length;
+    const failed = this.raw.tasks.filter(batchRetryable).length;
     const copy = TOAST_COPY.networkRestored(failed);
     const action: ToastAction | undefined =
       failed === 0 ? undefined : { label: TOAST_COPY.retryAllAction, run: () => void this.actions.retryFailedTasks(), errorTitle: ACTION_ERROR.install };
@@ -1530,10 +1660,10 @@ export class LauncherStore {
   /**
    * 实例里的 Mod 变了：该实例的列表、历史、可更新项与安装计划失效。发现页的落位矩阵按「装没装、装的哪一版」判定可装与否，
    * 它的 key 按工程而不是按实例划分，装上的前置也会改变别的工程的判定，所以整个 match 前缀一起失效。
-   * 「已装入 n 个实例」一次读全部实例的已装来源，同样整个前缀失效。
+   * 「已装入 n 个实例」一次读全部实例的已装来源，同样整个前缀失效。自动内存按启用的 Mod 估算，内存建议跟着失效。
    */
   private modsChanged(instanceId: string): void {
-    for (const prefix of ["mods", "history", "mod-updates", "plan"]) invalidateResources(`${prefix}:${instanceId}`);
+    for (const prefix of ["mods", "history", "mod-updates", "plan", "memory-advice"]) invalidateResources(`${prefix}:${instanceId}`);
     invalidateResources("match");
     invalidateResources("installed-sources");
   }
@@ -1564,6 +1694,15 @@ export class LauncherStore {
   private onCoreEvent(event: CoreEvent): void {
     // 不带 task_id 的事件属于启动会话或非任务命令（离线用户名告警）；启动的进度走 launch-phase，日志走 game-log
     if (event.task_id === null) return;
+    // 基底的占用随阶段事件重扫（见 rescanHoldingBases），步骤事件不再多扫一遍
+    if (event.kind === "phase") {
+      const attemptId = event.task_id;
+      const index = event.index;
+      const plan = installPhasesFromDto(event.plan);
+      this.set((raw) => ({ tasks: applyTaskPhase(raw.tasks, attemptId, plan, index) }));
+      if (index === 0) this.rescanMovingBases(attemptId);
+      return;
+    }
     if (event.kind === "download") {
       const attemptId = event.task_id;
       const snapshot: DownloadSnapshot = { total: event.total, finished: event.finished, bytes: event.bytes, totalBytes: event.total_bytes, transferred: event.transferred, speed: event.speed };
@@ -1596,6 +1735,13 @@ export class LauncherStore {
   private rescanHoldingBases(attemptId: string): void {
     const task = taskByAttempt(this.raw.tasks, attemptId);
     if (task === undefined || !BASE_HOLDING_COMMANDS.has(task.spec.command)) return;
+    this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
+  }
+
+  /** 移动同样占着基底，但只推步骤与下载、没有阶段事件：后端占住基底之后才报第一步，第一步一到重扫一次。 */
+  private rescanMovingBases(attemptId: string): void {
+    const task = taskByAttempt(this.raw.tasks, attemptId);
+    if (task === undefined || task.spec.command !== MOVE_TASK_COMMAND) return;
     this.background(ACTION_ERROR.refreshInstances, this.fetchInstances());
   }
 
@@ -1645,6 +1791,8 @@ export class LauncherStore {
 
   private onGameExit(event: launchIpc.GameExitEvent): void {
     const id = event.version_id;
+    this.exitSeq += 1;
+    this.lastExitSeq.set(id, this.exitSeq);
     const s = this.raw.session;
     let crashedSession = false;
     if (s !== null && s.instanceId === id && isSessionActive(s)) {
@@ -1660,6 +1808,8 @@ export class LauncherStore {
     // 玩家常常在资源管理器里往 mods 目录放了文件就直接启动：诊断页要拿日志点名的 Mod 对列表，旧列表里没有它，
     // 开关与「停用」就都出不来
     invalidateResources(`mods:${id}`);
+    // 游戏里调过的视距写在 options.txt，自动内存按它估算
+    invalidateResources(`memory-advice:${id}`);
     invalidateResources("play-stats");
     // 启动时缺 Java，后端也会自己下载运行时
     invalidateResources("java");
@@ -1713,7 +1863,7 @@ export class LauncherStore {
       category = first;
     }
     setClue(report === null ? { status: "unavailable" } : { status: "known", category });
-    const body = category === null ? SESSION_COPY.noClue : SESSION_COPY.crashClue(crashCategoryLabel(category));
+    const body = category === null ? SESSION_COPY.noClue : crashClueLine(category);
     this.pushToast("error", TOAST_COPY.crashed(current()), body, toCrashPage());
   }
 
@@ -2066,6 +2216,11 @@ export class LauncherStore {
       this.pushToast("error", copy.title, copy.body, { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.exportModpack });
       return;
     }
+    if (task.kind === "instance_move") {
+      const copy = TASK_TOAST.moveFailed(task.title, reason);
+      this.pushToast("error", copy.title, copy.body, { label: TASK_TOAST.retryAction, run: () => this.actions.retryTask(task.id), errorTitle: ACTION_ERROR.moveInstance });
+      return;
+    }
     if (task.kind === "modpack") {
       const copy = TASK_TOAST.importFailed(strArg(task.spec.args, "name", task.spec.command), reason);
       this.pushToast("error", copy.title, copy.body, this.failedTaskAction(task, error));
@@ -2360,7 +2515,47 @@ export class LauncherStore {
         });
         return;
       }
+      case "move":
+        await this.landMove(result as MoveOutcomeDto);
+        return;
     }
+  }
+
+  /**
+   * 移动完成：实例已不在当前游戏目录，按删除的口径撤掉挂在它身上的通知动作、结束了的会话与按需数据；后端随移动去掉了
+   * 侧栏固定与当前选中（配置没存上时留到下次打开再去，跟进项里有 config），一并重读。重扫结果与 lastMove 在同一次更新里
+   * 到达，外壳据此把开着的实例页送回实例库。目标目录的版本数变了，新记进列表的目录也要出现，目录列表一并失效。
+   */
+  private async landMove(outcome: MoveOutcomeDto): Promise<void> {
+    const id = outcome.id;
+    this.moveSeq += 1;
+    const seq = this.moveSeq;
+    this.set((raw) => ({
+      toasts: detachToasts(raw.toasts, id),
+      session: raw.session !== null && raw.session.instanceId === id ? null : raw.session,
+    }));
+    await Promise.all([this.fetchInstances(() => ({ lastMove: { id, seq } })), this.fetchPins(), this.fetchSettings()]);
+    for (const prefix of INSTANCE_SCOPED_RESOURCES) invalidateResources(`${prefix}:${id}`);
+    // 游玩记录随实例挪到了目标目录那本账下，记住它的固定服务器也忘掉了
+    invalidateResources("play-stats");
+    invalidateResources("servers");
+    invalidateResources(GAME_DIRS_RESOURCE);
+    const copy = TASK_TOAST.moved(id, outcome.target_name);
+    this.pushToast("success", copy.title, copy.body, { label: TASK_TOAST.switchAction, run: () => this.switchToMoved(outcome.target), errorTitle: ACTION_ERROR.gameDirectory });
+    if (outcome.follow_ups.length > 0) {
+      const notes = TASK_TOAST.moveFollowUps(id, outcome.follow_ups);
+      this.pushToast("warning", notes.title, notes.body);
+    }
+  }
+
+  /**
+   * 移动完成通知上的「切换过去」。通知里已经说清楚实例在那边，点它就是要切，不再弹页面上那一步确认；游戏或任务在进行时
+   * 照页面上的规矩不切，原因经通知动作的统一错误处理报出来。
+   */
+  private async switchToMoved(target: string): Promise<void> {
+    if (gameDirectoryBusy(this.getState())) throw new Error(GAME_DIR_SWITCH_COPY.busyReason);
+    await this.actions.setGameDirectory(target);
+    invalidateResources(GAME_DIRS_RESOURCE);
   }
 
   /**
@@ -2639,6 +2834,7 @@ export class LauncherStore {
           (error: unknown) => {
             if (isIpcError(error) && error.code === RELOGIN_REQUIRED_CODE) return "expired" as const;
             if (isIpcError(error) && error.code === APP_NOT_APPROVED_CODE) return "not_approved" as const;
+            if (isIpcError(error) && error.code === MSA_CLIENT_ID_MISSING_CODE) return "no_client_id" as const;
             throw error;
           },
         );
@@ -2646,6 +2842,7 @@ export class LauncherStore {
         if (outcome === "refreshed") invalidateResources(`skin:${uuid}`);
         // 通用错误通知只有后端原文，玩家看不到换 client_id 的入口
         if (outcome === "not_approved") store.pushToast("error", APP_NOT_APPROVED.title, APP_NOT_APPROVED.body, { label: APP_NOT_APPROVED.fixLabel, to: { page: "settings", section: "general" } });
+        if (outcome === "no_client_id") store.pushToast("error", MSA_CLIENT_ID_MISSING.title, MSA_CLIENT_ID_MISSING.body, { label: MSA_CLIENT_ID_MISSING.fixLabel, to: { page: "settings", section: "general" } });
         return outcome;
       },
       async addOfflineAccount(name) {
@@ -2870,6 +3067,20 @@ export class LauncherStore {
         store.pushToast("info", copy.title, copy.body);
         return task.id;
       },
+      async moveInstance(id, source, target, targetName) {
+        if (store.sessionActiveFor(id)) throw new Error(`「${id}」的游戏正在运行，先结束游戏`);
+        const title = TASK_TEXT.moveTitle(id);
+        const spec = { command: MOVE_TASK_COMMAND, args: { id, source, target } };
+        const task = store.enqueue({ kind: "instance_move", title, detail: TASK_TEXT.moveDetail(targetName, target), instanceId: id, spec }, { type: "move", instanceId: id }, title);
+        if (task === null) {
+          const existing = findDuplicate(store.raw.tasks, spec);
+          if (existing === undefined) throw new Error(`${title}没有入队，队列里也没有同样的任务`);
+          return existing.id;
+        }
+        const copy = TASK_TOAST.moveStarted(id);
+        store.pushToast("info", copy.title, copy.body);
+        return task.id;
+      },
       async previewInstanceDeletion(id) {
         return instancesIpc.previewInstanceDeletion(id);
       },
@@ -2938,6 +3149,14 @@ export class LauncherStore {
         });
         invalidateResources(`settings:${id}`);
         if (LISTED_INSTANCE_SETTINGS.some((key) => key in patch)) await store.fetchInstances();
+        return saved;
+      },
+      async importCoverImage(id, slot, path) {
+        // 导入也写实例设置：与设置的读改写交错时，读改写拿导入之前读到的设置写回会冲掉新图的文件名，
+        // 后端保存后随即清掉这张不再被引用的新图，所以排进同一条链
+        const saved = await store.queueInstanceSettings(id, async () => instanceSettingsFromDto(await instancesIpc.importCoverImage(id, slot, path)));
+        invalidateResources(`settings:${id}`);
+        await store.fetchInstances();
         return saved;
       },
       async repairInstance(id, opts = {}) {
@@ -3347,7 +3566,7 @@ export class LauncherStore {
       retryFailedTasks() {
         let retried = 0;
         try {
-          for (const task of store.raw.tasks.filter((t) => t.status === "failed" && !awaitsManualFiles(t))) {
+          for (const task of store.raw.tasks.filter(batchRetryable)) {
             const leftover = store.leftoverOfFailedCreate(task);
             if (leftover !== null) {
               // 与下面一样，已在队列里的同一件事静默跳过，不逐条提示重复
@@ -3399,6 +3618,10 @@ export class LauncherStore {
         invalidateResources("java");
         await store.fetchSettings();
         return result;
+      },
+      async switchToDedicatedGpu(javaPath) {
+        await javaIpc.switchToDedicatedGpu(javaPath);
+        await store.fetchSettings();
       },
       async setGameDirectory(path) {
         await configIpc.setGameDirectory(path);

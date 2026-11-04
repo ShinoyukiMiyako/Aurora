@@ -1,8 +1,10 @@
-//! 主窗口的启动期处理：兜底显示、装上原生拖放（见 [`crate::drop`]）与渲染进程故障后的自动重载
-//! （见 [`crate::renderer`]）、生产构建关闭 WebView2 浏览器加速键，以及再次启动时把窗口叫到前台。
+//! 主窗口的启动期处理：兜底显示、装上原生拖放（见 [`crate::drop`]）、渲染进程故障后的自动重载
+//! （见 [`crate::renderer`]）与最小化时的页面可见性（见 [`crate::page_visibility`]）、生产构建关闭
+//! WebView2 浏览器加速键，以及再次启动时把窗口叫到前台。
 //!
 //! 窗口以 `visible: false` 创建：前端在首帧渲染前读外观、写好明暗与强调色，画完第一帧才自己
-//! `show()`，夜樱下也不会先闪一下白底。代价是前端一旦出错就永远不显示，所以这里留一道兜底。
+//! 显示窗口，夜樱下也不会先闪一下白底。代价是前端一旦出错就永远不显示，所以这里留一道兜底。显示都经
+//! [`crate::window_state::reveal`]：上次关掉时是最大化的，要直接最大化地显示。
 
 use std::fmt::Display;
 use std::time::Duration;
@@ -24,6 +26,8 @@ pub fn setup_main_window(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     crate::drop::install(&window)?;
     #[cfg(windows)]
     crate::renderer::install(&window)?;
+    #[cfg(windows)]
+    crate::page_visibility::install(&window);
 
     // 开发构建保留刷新与开发者工具。
     #[cfg(windows)]
@@ -32,7 +36,12 @@ pub fn setup_main_window(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tauri::async_runtime::spawn(async move {
-        show_if_still_hidden(SHOW_FALLBACK, || window.is_visible(), || window.show()).await;
+        show_if_still_hidden(
+            SHOW_FALLBACK,
+            || window.is_visible(),
+            || crate::window_state::reveal_later(&window),
+        )
+        .await;
     });
     Ok(())
 }
@@ -213,7 +222,8 @@ mod tests {
     /// opener 的两条给它注入的外链脚本用（target="_blank" 的链接交给系统浏览器）：一条放行 open_url 命令，
     /// 一条给出 http(s)、mailto、tel 的地址范围。前端用不到的不授予：自更新后的重启在 Rust 侧，WebView
     /// 不需要 process 插件的权限；恢复最小化的窗口走不激活窗口的后端命令，WebView 不需要会激活窗口的
-    /// unminimize；打开文件夹与在文件夹里选中都走后端命令，WebView 不需要 opener 的 reveal_item_in_dir——
+    /// unminimize；首帧后显示窗口走后端命令（上次是最大化的要直接最大化地显示），WebView 不需要 show；
+    /// 打开文件夹与在文件夹里选中都走后端命令，WebView 不需要 opener 的 reveal_item_in_dir——
     /// 它不受任何路径范围约束，`opener:default` 会连它一起授予，页面里一段注入的脚本就能让资源管理器定位到
     /// 任意路径。核心权限也逐条列出、不用 `core:default`：整套默认集还放行路径解析、事件发送、菜单、托盘等
     /// 命令，前端一条都不用，页面里注入的脚本却能借它们探路径、伪造事件。
@@ -244,7 +254,6 @@ mod tests {
             "core:window:allow-close",
             "core:window:allow-destroy",
             "core:window:allow-start-dragging",
-            "core:window:allow-show",
             "core:window:allow-request-user-attention",
             // 调试构建里 Ctrl+Shift+I 的注入脚本调用它；发布构建不编译这条命令，授权没有作用。
             "core:webview:allow-internal-toggle-devtools",
@@ -266,6 +275,10 @@ mod tests {
         assert!(
             !granted.contains(&"core:window:allow-unminimize"),
             "WebView 不该拿到会激活窗口的 unminimize"
+        );
+        assert!(
+            !granted.contains(&"core:window:allow-show"),
+            "WebView 不该拿到 show：显示要经后端按上次的状态决定是否最大化"
         );
         let defaults: Vec<&&str> = granted.iter().filter(|p| p.ends_with(":default")).collect();
         assert!(

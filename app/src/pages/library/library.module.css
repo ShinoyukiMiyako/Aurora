@@ -16,9 +16,10 @@
 
 /* ---------------------------------------------------------------- 工具条 */
 
-/* 一行放不下时搜索与排序整体换到第二行并右对齐，分段筛选独占第一行 */
+/* 一行放不下时搜索、目录与排序整体换到第二行并右对齐，分段筛选独占第一行 */
 .toolbar {
   --lib-search-width: 180px;
+  --lib-directory-width: 148px;
   --lib-sort-width: 132px;
   display: flex;
   flex-wrap: wrap;
@@ -40,6 +41,10 @@
 
 .search {
   width: var(--lib-search-width);
+}
+
+.directory {
+  width: var(--lib-directory-width);
 }
 
 .sort {
@@ -131,6 +136,21 @@
   font-weight: var(--sk-w-title);
   line-height: var(--sk-lh-heading);
   font-variant-numeric: tabular-nums;
+}
+
+/* 标签行与卡面是同格的兄弟，接不到卡面的媒体文字色：卡面显示材质平铺或玩家图片时在这里换 */
+.coverArea:has(> .cover:is([data-source="texture"], [data-source="remote"])) .coverVersion {
+  color: var(--sk-on-media);
+  text-shadow: var(--sk-media-text-shadow);
+}
+
+/*
+ * 顶上的标签与图钉也是卡面的兄弟，而卡面只在下沿压暗：描边标签与幽灵图钉没有底，柔色调的底是半透明的，
+ * 深浅材质上都可能读不清。垫一层表面色、字照常用正文色与色调色，日夜都在自己的表面上读。
+ * 未按下的图钉悬停时交回图标按钮自己的不透明悬停底；按下的图钉本来没有悬停变化，一直垫着。
+ */
+.coverArea:has(> .cover:is([data-source="texture"], [data-source="remote"])) :is(.chip, .currentTag, .pin:not(:hover), .pin[aria-pressed="true"]) {
+  background-color: var(--sk-surface);
 }
 
 /* ---------------------------------------------------------------- 卡身 */
