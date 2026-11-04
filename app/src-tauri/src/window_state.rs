@@ -633,19 +633,46 @@ fn show_maximized(window: &WebviewWindow, _normal: Rect) -> tauri::Result<()> {
 
 /// 在 `RunEvent::Exit` 里调用：窗口最后一次变化还没等到延迟写就退出了，在这里补上。
 pub fn flush_on_exit(app: &AppHandle) {
-    let memory = app.state::<WindowMemory>();
-    match tauri::async_runtime::block_on(tokio::time::timeout(EXIT_DEADLINE, memory.flush())) {
-        Ok(Ok(true)) => tracing::info!("退出前记下了主窗口状态"),
-        Ok(Ok(false)) => {}
-        Ok(Err(err)) => tracing::error!(
-            error = %err,
-            causes = ?source_chain(&err),
-            "退出前记下主窗口状态失败，下次启动按上一次记下的样子摆"
-        ),
-        Err(_) => tracing::error!(
-            deadline_ms = EXIT_DEADLINE.as_millis() as u64,
-            "退出前记下主窗口状态超时，下次启动按上一次记下的样子摆"
-        ),
+    flush_blocking(&app.state::<WindowMemory>(), EXIT_DEADLINE);
+}
+
+/// 退出时补写的结局。
+#[derive(Debug)]
+enum ExitFlush {
+    Written,
+    Unchanged,
+    Failed,
+    TimedOut,
+}
+
+/// 在没有 tokio 上下文的线程上（退出回调就在这样的线程上）限时补写并记日志。
+fn flush_blocking(memory: &WindowMemory, deadline: Duration) -> ExitFlush {
+    // timeout 在构造时就向当前运行时登记计时器，必须放进 async 块、在 block_on 里构造；直接当参数传进去的话
+    // 它在运行时之外构造，当场 panic
+    let outcome = tauri::async_runtime::block_on(async {
+        tokio::time::timeout(deadline, memory.flush()).await
+    });
+    match outcome {
+        Ok(Ok(true)) => {
+            tracing::info!("退出前记下了主窗口状态");
+            ExitFlush::Written
+        }
+        Ok(Ok(false)) => ExitFlush::Unchanged,
+        Ok(Err(err)) => {
+            tracing::error!(
+                error = %err,
+                causes = ?source_chain(&err),
+                "退出前记下主窗口状态失败，下次启动按上一次记下的样子摆"
+            );
+            ExitFlush::Failed
+        }
+        Err(_) => {
+            tracing::error!(
+                deadline_ms = deadline.as_millis() as u64,
+                "退出前记下主窗口状态超时，下次启动按上一次记下的样子摆"
+            );
+            ExitFlush::TimedOut
+        }
     }
 }
 
@@ -1082,6 +1109,37 @@ mod tests {
             read(&blocker.join(WINDOW_STATE_FILE)).unwrap(),
             Some(saved(5, 6, 1200, 760, 1.0))
         );
+    }
+
+    /// 退出回调所在的线程没有 tokio 上下文：限时补写的计时器要在运行时里创建，在外面创建会直接 panic，
+    /// 补写和排在后面的更新安装都跑不到。所以这里用普通的 `#[test]`，不进任何运行时。
+    #[test]
+    fn exit_flush_works_without_an_ambient_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = memory_in(dir.path());
+        memory.arm(|| Ok(normal(0, 0, 1120, 720)));
+        memory.observe(normal(7, 8, 1200, 760));
+        let outcome = flush_blocking(&memory, EXIT_DEADLINE);
+        assert!(matches!(outcome, ExitFlush::Written), "{outcome:?}");
+        assert_eq!(
+            read(&dir.path().join(WINDOW_STATE_FILE)).unwrap(),
+            Some(saved(7, 8, 1200, 760, 1.0))
+        );
+        let outcome = flush_blocking(&memory, EXIT_DEADLINE);
+        assert!(matches!(outcome, ExitFlush::Unchanged), "{outcome:?}");
+    }
+
+    /// 写不进去时如实报失败，不当成写好了。
+    #[test]
+    fn exit_flush_reports_a_failed_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-dir");
+        std::fs::write(&blocker, b"").unwrap();
+        let memory = WindowMemory::new(blocker.join(WINDOW_STATE_FILE), None, None);
+        memory.arm(|| Ok(normal(0, 0, 1120, 720)));
+        memory.observe(normal(5, 6, 1200, 760));
+        let outcome = flush_blocking(&memory, EXIT_DEADLINE);
+        assert!(matches!(outcome, ExitFlush::Failed), "{outcome:?}");
     }
 
     #[test]
