@@ -433,7 +433,9 @@ export const SETTINGS_COPY = {
   backgroundTextureNote: "平铺封面方块的侧面材质，本机读不到材质时画渐变花瓣。",
   backgroundImageTitle: "背景图片",
   backgroundImageNote: "居中裁切铺满卡面。换成别的背景时图片还留着，切回来不用重选。",
-  backgroundImageMissing: "图片文件找不到了，卡面先画渐变花瓣。换一张，或把它移除。",
+  /** 设置里还记着背景图而文件找不到了；inUse 为背景此刻正用着它。 */
+  backgroundImageMissing: (inUse: boolean) =>
+    inUse ? "图片文件找不到了，卡面先画渐变花瓣。换一张，或把它移除。" : "图片文件找不到了，切回「我的图片」时要重新选一张；也可以把它移除。",
   changeImage: "更换图片",
   removeImage: "移除图片",
   block: "封面方块",

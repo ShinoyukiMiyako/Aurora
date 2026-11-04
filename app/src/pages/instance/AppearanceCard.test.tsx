@@ -40,14 +40,15 @@ vi.mock("../shared/cover-picker/BlockPicker", async () => {
     value: { block: string; image: boolean };
     onPick(block: string): void;
     onPickImage(): void;
+    imageBusy: boolean;
     onClose(): void;
   }
   return {
-    BlockPicker: ({ open, instanceId, value, onPick, onPickImage, onClose }: StubProps) =>
+    BlockPicker: ({ open, instanceId, value, onPick, onPickImage, imageBusy, onClose }: StubProps) =>
       open
         ? createElement(
             "div",
-            { role: "dialog", "data-instance": instanceId, "data-block": value.block, "data-image": String(value.image) },
+            { role: "dialog", "data-instance": instanceId, "data-block": value.block, "data-image": String(value.image), "data-image-busy": String(imageBusy) },
             createElement("button", { type: "button", onClick: () => onPick("oak_log") }, "替身：选橡木原木"),
             createElement("button", { type: "button", onClick: onPickImage }, "替身：用图片"),
             createElement("button", { type: "button", onClick: onClose }, "替身：关闭"),
@@ -368,6 +369,42 @@ describe("实例设置：外观卡的卡面背景", () => {
     await openSettings();
     expect(textOf(row("背景图片"))).toContain("图片文件找不到了，卡面先画渐变花瓣");
   });
+
+  it("背景用着平铺而留着的背景图文件丢了：说明写找不到、不说图片还留着；选「我的图片」走导入，不直接写背景", async () => {
+    settings = { ...settings, background: "texture", background_image: BG_FILE };
+    patchInstance({ background: "texture", background_image: null });
+    vi.mocked(pickFile).mockResolvedValueOnce(PICKED);
+    await openSettings();
+    const note = textOf(row("背景图片"));
+    expect(note).toContain("图片文件找不到了，切回「我的图片」时要重新选一张");
+    expect(note).not.toContain("图片还留着");
+    await click(radio("我的图片"));
+    expect(vi.mocked(pickFile)).toHaveBeenCalledTimes(1);
+    expect(callsOf(ipc, "import_cover_image")).toEqual([{ id: ID, slot: "background", path: PICKED }]);
+    expect(written()).toEqual([]);
+    expect(checked()).toEqual(["我的图片"]);
+    expect(textOf(row("背景图片"))).toContain("居中裁切铺满卡面");
+  });
+
+  it("第一次导入背景图：重读的设置先于列表重扫回来时，不把还没有键的新图说成找不到", async () => {
+    vi.mocked(pickFile).mockResolvedValueOnce(PICKED);
+    await openSettings();
+    // 导入之后的列表重扫先挂住：新图已经写进设置，列表里还没有它的键
+    const listing = deferred<void>();
+    ipc.overrides.set("list_instances", async () => {
+      await listing.promise;
+      return instances;
+    });
+    await click(radio("我的图片"));
+    expect(callsOf(ipc, "import_cover_image")).toEqual([{ id: ID, slot: "background", path: PICKED }]);
+    expect(checked()).toEqual(["我的图片"]);
+    expect(textOf(row("背景图片"))).not.toContain("找不到");
+    await act(async () => {
+      listing.resolve();
+      await settle(20);
+    });
+    expect(textOf(row("背景图片"))).toContain("居中裁切铺满卡面");
+  });
 });
 
 describe("实例设置：外观卡的封面方块", () => {
@@ -421,6 +458,29 @@ describe("实例设置：外观卡的封面方块", () => {
     expect(written()).toEqual([]);
     expect(picker()).toBeNull();
     expect(textOf(row("封面方块"))).toContain("我的图片");
+  });
+
+  it("选择框里连点用图片：只弹一次选图、只导入一次；选图与导入期间交给选择框的忙状态一直为真", async () => {
+    const picking = deferred<string | null>();
+    vi.mocked(pickFile).mockReturnValueOnce(picking.promise);
+    await openSettings();
+    await click(button("选择方块", row("封面方块")));
+    expect(picker()?.dataset.imageBusy).toBe("false");
+    const use = button("替身：用图片", document);
+    act(() => {
+      use.click();
+      use.click();
+    });
+    await flush();
+    expect(vi.mocked(pickFile)).toHaveBeenCalledTimes(1);
+    expect(picker()?.dataset.imageBusy).toBe("true");
+    await act(async () => {
+      picking.resolve("D:/素材/方块.webp");
+      await settle(20);
+    });
+    expect(callsOf(ipc, "import_cover_image")).toEqual([{ id: ID, slot: "block", path: "D:/素材/方块.webp" }]);
+    expect(picker()).toBeNull();
+    expect(toastTitles()).toEqual([]);
   });
 
   it("没有方块图片时不出「移除图片」，也没有背景图片那一行", async () => {

@@ -66,8 +66,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function mount(value: BlockPickerProps["value"]) {
-  props = { open: true, instanceId: "周末生存", value, onPick: vi.fn(), onPickImage: vi.fn(), onClose: vi.fn() };
+function mount(value: BlockPickerProps["value"], imageBusy = false) {
+  props = { open: true, instanceId: "周末生存", value, onPick: vi.fn(), onPickImage: vi.fn(), imageBusy, onClose: vi.fn() };
   view = render(
     <OverlayProvider>
       <BlockPicker {...props} />
@@ -308,6 +308,16 @@ describe("有材质源", () => {
     act(() => button.click());
     expect(props.onPickImage).toHaveBeenCalledTimes(1);
     expect(props.onPick).not.toHaveBeenCalled();
+  });
+
+  it("调用方的选图与导入还没结束：选图按钮转圈，点了不再交给调用方", () => {
+    mount({ block: "cherry_planks", image: false }, true);
+    act(() => tab("我的图片").click());
+    const button = [...dialog().querySelectorAll("button")].find((b) => b.textContent === "选一张图片");
+    if (button === undefined) throw new Error("没有选图按钮");
+    expect(button.getAttribute("aria-busy")).toBe("true");
+    act(() => button.click());
+    expect(props.onPickImage).not.toHaveBeenCalled();
   });
 
   it("Esc 关闭选择框", () => {

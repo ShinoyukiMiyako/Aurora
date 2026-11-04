@@ -31,6 +31,8 @@ export interface BlockPickerProps {
   onPick(block: string): void;
   /** 「我的图片」页的「选一张图片」：由调用方打开文件对话框并导入。 */
   onPickImage(): void;
+  /** 调用方的选图与导入还没结束：按钮转圈、点了无效，免得连点弹出第二个选图框。 */
+  imageBusy: boolean;
   onClose(): void;
 }
 
@@ -156,15 +158,15 @@ function initialView(value: BlockPickerProps["value"], catalog: BlockCatalog | n
   return listed === undefined ? "recommended" : categoryOf(listed);
 }
 
-export function BlockPicker({ open, instanceId, value, onPick, onPickImage, onClose }: BlockPickerProps) {
+export function BlockPicker({ open, instanceId, value, onPick, onPickImage, imageBusy, onClose }: BlockPickerProps) {
   return (
     <Modal open={open} onClose={onClose} title={BLOCK_PICKER_COPY.title} size="md">
-      <PickerBody instanceId={instanceId} value={value} onPick={onPick} onPickImage={onPickImage} />
+      <PickerBody instanceId={instanceId} value={value} onPick={onPick} onPickImage={onPickImage} imageBusy={imageBusy} />
     </Modal>
   );
 }
 
-function PickerBody({ instanceId, value, onPick, onPickImage }: Omit<BlockPickerProps, "open" | "onClose">) {
+function PickerBody({ instanceId, value, onPick, onPickImage, imageBusy }: Omit<BlockPickerProps, "open" | "onClose">) {
   const catalog = useBlockCatalog();
   const lists = useMemo(() => (catalog === null ? null : catalogLists(catalog)), [catalog]);
   const [view, setView] = useState<PickerView>(() => initialView(value, catalog));
@@ -236,7 +238,7 @@ function PickerBody({ instanceId, value, onPick, onPickImage }: Omit<BlockPicker
               title={value.image ? BLOCK_PICKER_COPY.image.currentTitle : BLOCK_PICKER_COPY.image.title}
               body={value.image ? `${BLOCK_PICKER_COPY.image.currentBody}${BLOCK_PICKER_COPY.image.body}` : BLOCK_PICKER_COPY.image.body}
               action={
-                <Button icon="upload" onClick={() => onPickImage()} {...{ [AUTOFOCUS_ATTR]: "" }}>
+                <Button icon="upload" loading={imageBusy} onClick={() => onPickImage()} {...{ [AUTOFOCUS_ATTR]: "" }}>
                   {value.image ? BLOCK_PICKER_COPY.image.replace : BLOCK_PICKER_COPY.image.pick}
                 </Button>
               }
