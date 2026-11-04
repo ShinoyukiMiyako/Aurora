@@ -274,15 +274,19 @@ async fn resume_log(
             "。落樱上次没能正常关闭，这份日志末尾有 {dropped} 字节没写完，已截掉"
         ));
     }
-    match log
-        .write(
+    // 说明立刻落盘：界面接回后读这份文件垫日志面板，说明还在写缓冲里的话就看不到这一行，也看不出中间断过。
+    let written = async {
+        log.write(
             clock.now(),
             LogSource::Launcher,
             Some(LauncherLevel::Info),
             &text,
         )
-        .await
-    {
+        .await?;
+        log.flush().await
+    }
+    .await;
+    match written {
         Ok(()) => Some(log),
         Err(err) => {
             tracing::warn!(path = %path.display(), error = %err, "接回的这一局的会话日志写入失败，之后不再写日志");
@@ -466,6 +470,15 @@ mod tests {
             Err(refusal) => panic!("还在跑的进程应能接回：{refusal}"),
         };
         let run = petalfall.reattach(&loaded, process, None).await.unwrap();
+        // 接回说明一接回就落盘：界面紧接着读这份文件垫日志面板。
+        let on_disk = std::fs::read_to_string(logs_dir(&version_dir).join(LATEST_LOG)).unwrap();
+        assert!(
+            on_disk
+                .lines()
+                .last()
+                .is_some_and(|line| line.contains("落樱重新打开，接回了这一局")),
+            "{on_disk}"
+        );
         assert!(run.reattached());
         assert_eq!(run.started_at(), started_at);
         let finished = tokio::time::timeout(std::time::Duration::from_secs(30), run.finish())
