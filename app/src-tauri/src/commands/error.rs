@@ -15,7 +15,8 @@ use std::error::Error as StdError;
 
 use petalfall_core::{
     AuthError, BaseError, CoreError, CredentialRealm, DownloadError, InstallError, InstanceError,
-    JavaError, LaunchError, ModPlatformError, ModpackError, VersionError, TEMPLATE_FILES,
+    JavaError, LaunchError, ModPlatformError, ModpackError, MoveBlocker, VersionError,
+    TEMPLATE_FILES,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -185,6 +186,11 @@ pub mod code {
     pub const WORLD_BACKUPS_NOT_MOVED: &str = "world_backups_not_moved";
     /// 要改的服务器不在固定列表里。detail：`{ address }`。
     pub const SERVER_NOT_PINNED: &str = "server_not_pinned";
+    /// 实例移不了：执行前重新预检遇到的第一个问题。detail：`{ id, blocker }`，blocker 的形状同预检结果里的
+    /// 一项（[`move_blocker_json`]）。
+    pub const INSTANCE_MOVE_BLOCKED: &str = "instance_move_blocked";
+    /// 跨盘移动时复制出的文件读回比对不上，整次移动已回滚，原件没动。detail：`{ path }`，为对不上的副本。
+    pub const INSTANCE_MOVE_VERIFY_FAILED: &str = "instance_move_verify_failed";
     /// 实例的版本不支持这种直达方式。detail：`{ version_id, mode: "singleplayer" | "multiplayer" }`。
     pub const QUICK_PLAY_UNSUPPORTED: &str = "quick_play_unsupported";
 }
@@ -287,6 +293,28 @@ via_core_error!(
 );
 
 /// `source()` 链上每一层的描述（不含顶层，顶层已在 `message` 里）。
+/// 一个移动拦截项的 JSON：`{ kind, ... }`。预检结果的 blockers 与 instance_move_blocked 的 detail 共用这一种形状，
+/// 前端按 kind 分支取文案。
+pub(crate) fn move_blocker_json(blocker: &MoveBlocker) -> Value {
+    match blocker {
+        MoveBlocker::SameDirectory => json!({ "kind": "same_directory" }),
+        MoveBlocker::TargetInsideSource => json!({ "kind": "target_inside_source" }),
+        MoveBlocker::NameTaken => json!({ "kind": "name_taken" }),
+        MoveBlocker::HasDependents(ids) => json!({ "kind": "has_dependents", "dependents": ids }),
+        MoveBlocker::Links(paths) => json!({
+            "kind": "links",
+            "paths": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        }),
+        MoveBlocker::BaseConflict(ids) => json!({ "kind": "base_conflict", "bases": ids }),
+        MoveBlocker::InsufficientSpace { needed, available } => json!({
+            "kind": "insufficient_space",
+            "needed": needed,
+            "available": available,
+        }),
+        MoveBlocker::Pending => json!({ "kind": "pending" }),
+    }
+}
+
 pub(crate) fn source_chain(err: &dyn StdError) -> Vec<String> {
     let mut causes = Vec::new();
     let mut current = err.source();
@@ -343,6 +371,8 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
         CoreError::ServerNotPinned { .. } => code::SERVER_NOT_PINNED,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
+        CoreError::InstanceMoveBlocked { .. } => code::INSTANCE_MOVE_BLOCKED,
+        CoreError::InstanceMoveVerifyFailed { .. } => code::INSTANCE_MOVE_VERIFY_FAILED,
         CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
         CoreError::JavaPathInvalid { .. } => code::JAVA_PATH_INVALID,
         CoreError::JavaRuntimeIncomplete { .. } => code::JAVA_RUNTIME_INCOMPLETE,
@@ -722,6 +752,13 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::InvalidGameDirectory { path, problem } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
             detail.insert("problem".to_owned(), json!(problem.code()));
+        }
+        CoreError::InstanceMoveBlocked { id, blocker } => {
+            detail.insert("id".to_owned(), json!(id));
+            detail.insert("blocker".to_owned(), move_blocker_json(blocker));
+        }
+        CoreError::InstanceMoveVerifyFailed { path } => {
+            detail.insert("path".to_owned(), json!(path.display().to_string()));
         }
         CoreError::Install(InstallError::UnsafePath { entry, path, .. }) => {
             detail.insert("entry".to_owned(), json!(entry));

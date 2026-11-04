@@ -18,6 +18,9 @@ use crate::layout::GameLayout;
 
 /// 新建、补全实例一路上的各步，按执行先后排。下载批次之间的几步由安装器经 [`InstallContext::enter`]
 /// 报出，其余由门面报；整份步骤表由门面开工前按请求排定。
+///
+/// 把实例移到另一个游戏目录也是一份多步任务，借用同一套步骤事件让前端写「第几步，共几步」：末尾四步只出现在
+/// 移动的步骤表里，安装与补全不会排到它们。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallPhase {
     Metadata,
@@ -31,6 +34,14 @@ pub enum InstallPhase {
     LoaderProcessors,
     Verify,
     Template,
+    /// 移动：把目标游戏目录里缺的共用文件（库、资源、基底版本）补过去。
+    MoveDependencies,
+    /// 移动：把实例目录与它的备份复制到目标盘的暂存目录（跨盘才有）。
+    MoveCopy,
+    /// 移动：读回暂存副本逐个比对（跨盘才有）。
+    MoveVerify,
+    /// 移动：换位提交、迁记录、清原件。
+    MoveCommit,
 }
 
 impl InstallPhase {
@@ -48,6 +59,10 @@ impl InstallPhase {
             Self::LoaderProcessors => "loader_processors",
             Self::Verify => "verify",
             Self::Template => "template",
+            Self::MoveDependencies => "move_dependencies",
+            Self::MoveCopy => "move_copy",
+            Self::MoveVerify => "move_verify",
+            Self::MoveCommit => "move_commit",
         }
     }
 }

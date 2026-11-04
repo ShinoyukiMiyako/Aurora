@@ -46,6 +46,7 @@ mod gpu;
 pub mod history;
 pub mod install;
 pub mod instance_install;
+pub mod instance_move;
 pub mod instances;
 pub mod java;
 pub mod launch;
@@ -58,6 +59,8 @@ pub mod modpack;
 pub mod modpack_summary;
 pub mod mods;
 pub mod modversions;
+mod move_copy;
+mod move_deps;
 pub mod network;
 pub mod news;
 pub mod playtime;
@@ -97,6 +100,9 @@ pub use facade::Petalfall;
 pub use folders::{GameDirectoryEntry, GameDirectoryInspection};
 pub use history::{History, HistoryEvent, HistoryStore, RollbackCheck};
 pub use install::{InstallOutcome, LoaderChoice};
+pub use instance_move::{
+    MoveBlocker, MoveFollowUp, MoveOutcome, MovePreview, MoveRecovery, MoveRequest,
+};
 pub use java::RemovedJavaPath;
 pub use launch::{
     FailureCode, InstanceLaunchSettings, JavaChoice, LaunchAccount, LaunchEvent, LaunchEventSink,
