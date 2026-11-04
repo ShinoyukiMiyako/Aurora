@@ -51,6 +51,7 @@ export const LIBRARY_COPY = {
     unpin: "从侧栏取消固定",
     pinFull: "侧栏最多固定 5 个实例",
     openFolder: "打开实例文件夹",
+    move: "移到其他游戏目录…",
     mods: "Mod 管理",
     settings: "实例设置",
     logs: "日志与历史",

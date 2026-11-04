@@ -6,7 +6,7 @@ import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed }
 import type { BaseBusyLock, InstanceLock } from "../domain/instance-locks";
 import type { AccountKind, FailureCode, InstallPhase, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskPhase, TaskStatus } from "../domain/types";
 import type { CrashSource, ExitCodeKind, ExitCodeNoteDto, LaunchWarningCode } from "../ipc/diagnostics";
-import type { NameRule, TemplateSkipReason } from "../ipc/instances";
+import type { MoveBlockerDto, MoveFollowUpDto, NameRule, TemplateSkipReason } from "../ipc/instances";
 import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
 
 /** 启动失败（首帧之前出错）时错误页的文案。 */
@@ -229,6 +229,8 @@ export const LAUNCH_COPY = {
   busyElsewhere: "另一个游戏在运行",
   /** 存档备份或恢复进行中，启动入口的禁用原因。 */
   savesBusy: "正在备份或恢复存档，完成后再启动",
+  /** 实例正在移到别的游戏目录（排着的移动任务也算），启动入口的禁用原因。 */
+  moving: "实例正在移到其他游戏目录，完成后才能启动",
   group: (name: string) => `启动「${name}」`,
 } as const;
 
@@ -792,6 +794,7 @@ const LOCAL_RUNNING_LABEL: Readonly<Partial<Record<TaskKind, string>>> = {
   modpack_export: "打包中",
   world_backup: "打包中",
   world_restore: "恢复中",
+  instance_move: "移动中",
 };
 
 /** 一个任务此刻的状态标签：显示任务状态的地方都用它，不直接取 TASK_STATUS_LABEL。 */
@@ -814,6 +817,7 @@ export const TASK_KIND_LABEL: Readonly<Record<TaskKind, string>> = {
   world_backup: "存档",
   world_restore: "存档",
   modpack_export: "导出",
+  instance_move: "移动",
 };
 
 function versionWithLoader(mcVersion: string, loader: LoaderKind, loaderVersion: string | null, sep: string): string {
@@ -859,6 +863,9 @@ export const TASK_TEXT = {
   backupDetail: instanceMention,
   exportTitle: (name: string) => `导出整合包 ${name}`,
   exportDetail: (version: string, instance: string) => `${version} · ${instanceMention(instance)}`,
+  moveTitle: (instance: string) => `移动${instanceMention(instance)}`,
+  /** 移动任务的详情：目标目录的显示名与路径。不写实例名，改名时 renamedDetail 不会把与实例同名的目录名也换掉。 */
+  moveDetail: (targetName: string, target: string) => `${joinMixed("移到", targetName)} · ${target}`,
   /**
    * 实例改名后的详情：只换句子里的实例名。详情是写进任务日志的整句文案，版本号与前置数没有全都留在命令参数里，
    * 重启恢复的任务也没有入队上下文，所以不能按新名字重新生成。
@@ -881,6 +888,10 @@ export const INSTALL_PHASE_LABEL: Readonly<Record<InstallPhase, string>> = {
   loader_processors: "执行加载器安装器",
   verify: "校验游戏文件",
   template: "沿用默认设置",
+  move_dependencies: "补齐共用的游戏文件",
+  move_copy: "复制实例与存档备份",
+  move_verify: "校验复制出的文件",
+  move_commit: "移入目标游戏目录",
 };
 
 /** 分步任务当前在第几步。long 用在横幅这类整句处，short 用在胶囊、任务行这类窄处。 */
@@ -896,11 +907,69 @@ export function taskPhaseText(phase: Pick<TaskPhase, "plan" | "index">, form: "l
 /** 前端给「上次关闭时中断」的任务用的错误码。 */
 export const TASK_INTERRUPTED_CODE = "interrupted";
 
+/**
+ * 前端给「上次关闭时中断」的移动任务用的错误码。移动的结局由后端在下次打开时按移动日志收尾（做完或退回原处），
+ * 前端不重放它，所以与能重试的 TASK_INTERRUPTED_CODE 分开。
+ */
+export const MOVE_INTERRUPTED_CODE = "move_interrupted";
+
+function namedList(names: readonly string[], limit: number): string {
+  const named = names
+    .slice(0, limit)
+    .map((name) => `「${name}」`)
+    .join("");
+  return names.length > limit ? `${named}等 ${names.length} 个` : named;
+}
+
+/** 移动完成后要提示的一项，reason 是后端原文。 */
+function moveFollowUpText(item: MoveFollowUpDto): string {
+  switch (item.kind) {
+    case "play_records":
+      return `游玩记录没跟过去：${item.reason}`;
+    case "world_backups":
+      return `存档备份没跟过去：${item.reason}`;
+    case "cleanup":
+      return `原处还留着 ${item.path}，没能删掉：${item.reason}`;
+  }
+}
+
+/** 拦着一次移动的原因：预检弹窗逐条列出，执行时被拦下的失败原因也用它。 */
+export function moveBlockerReason(blocker: MoveBlockerDto): string {
+  switch (blocker.kind) {
+    case "same_directory":
+      return "目标就是它现在所在的游戏目录";
+    case "target_inside_source":
+      return "目标文件夹在这个实例的文件夹里面";
+    case "name_taken":
+      return "目标游戏目录里已有同名的版本，先给这个实例改个名字再移";
+    case "has_dependents":
+      return `实例${namedList(blocker.dependents, 2)}依赖它，先把依赖它的实例移走或删除`;
+    case "links": {
+      const shown = blocker.paths.slice(0, 3).join("、");
+      const listed = blocker.paths.length > 3 ? joinMixed(shown, `等 ${blocker.paths.length} 处`) : shown;
+      return `实例里有符号链接或目录联接：${listed}。复制与删除原件都处理不了它们，先换成普通文件夹`;
+    }
+    case "base_conflict":
+      return `目标游戏目录里已有同名、内容却不同的版本：${blocker.bases.join("、")}。它依赖的版本放不过去`;
+    case "insufficient_space":
+      return `目标盘空间不够：需要 ${formatBytes(blocker.needed)}，只剩 ${formatBytes(blocker.available)}`;
+    case "pending":
+      return `这个实例上次的移动中断后还没收尾，两个游戏目录都能访问时重新打开${APP_NAME}，会自动收尾`;
+  }
+}
+
 /** 任务失败原因（行内与 Toast 正文）。能归类的给统一说法，其余用后端原文。 */
 export function taskFailureReason(error: TaskError): string {
   switch (error.code) {
     case TASK_INTERRUPTED_CODE:
       return `${APP_NAME}关闭时中断`;
+    case MOVE_INTERRUPTED_CODE:
+      return `${APP_NAME}关闭时中断，重新打开时已自动收尾：实例要么已在目标游戏目录，要么留在原处`;
+    // 较早的任务日志没有 move_blocker，照后端原文给出
+    case "instance_move_blocked":
+      return error.move_blocker === undefined ? error.message : moveBlockerReason(error.move_blocker);
+    case "instance_move_verify_failed":
+      return "复制出的文件和原件对不上，这次移动已放弃，原件没动";
     case "network_failed":
       return "网络连接失败";
     case "hash_mismatch":
@@ -984,6 +1053,16 @@ export const TASK_TOAST = {
   exported: (name: string, bundled: number) =>
     bundled > 0 ? { title: `已导出「${name}」`, body: `${bundled} 个 Mod 打包进了文件，分享前确认作者允许转载` } : { title: `已导出「${name}」` },
   exportFailed: (title: string, reason: string) => ({ title: `导出失败：${title}`, body: reason }),
+  moveStarted: (instance: string) => ({ title: `已开始移动「${instance}」`, body: "进度见下载任务" }),
+  moved: (instance: string, targetName: string) => ({ title: `已移到「${targetName}」`, body: `「${instance}」已不在当前游戏目录里，切换过去就能玩` }),
+  /** 移动已经完成、有几项没跟过去：完成通知之后补一条，正文逐项写原因。 */
+  moveFollowUps: (instance: string, items: readonly MoveFollowUpDto[]) => ({
+    title: `「${instance}」已移过去，有 ${items.length} 项要留意`,
+    body: items.map(moveFollowUpText).join("；"),
+  }),
+  /** 移动不是下载，失败不并进「n 个下载失败」。 */
+  moveFailed: (title: string, reason: string) => ({ title: `${title}没有完成`, body: reason }),
+  switchAction: "切换过去",
   failedMany: (count: number, reasons: readonly string[]) => ({
     title: `${count} 个下载失败`,
     body: new Set(reasons).size === 1 ? reasons[0] : "原因各不相同",
@@ -1091,6 +1170,7 @@ export const ACTION_ERROR = {
   createInstance: "没能开始新建实例",
   importModpack: "没能开始导入整合包",
   exportModpack: "没能开始导出整合包",
+  moveInstance: "没能开始移动实例",
   revealExport: "没能打开导出文件所在的文件夹",
   repair: "没能开始补全游戏文件",
   reinstallLoader: `没能开始${REINSTALL_LOADER_LABEL}`,
@@ -1470,6 +1550,7 @@ export const INSTANCE_IN_USE_COPY = {
   reinstallLoader: (user: string) => `实例「${user}」正在使用它，结束后才能${REINSTALL_LOADER_LABEL}`,
   delete: (user: string) => `实例「${user}」正在使用它，结束后才能删除`,
   launch: (user: string) => `实例「${user}」正在使用它，结束后才能启动`,
+  move: (user: string) => `实例「${user}」正在使用它，结束后才能移动`,
 } as const;
 
 /** 依赖的实例在做什么，接在「正在」之后。 */
@@ -1480,6 +1561,7 @@ const BASE_ACTIVITY_LABEL: Readonly<Record<BaseBusyLock["activity"], string>> = 
   deleting: "删除",
   launching: "启动",
   running: "运行",
+  moving: "移到其他游戏目录",
 };
 
 /** 操作被实例锁挡住时的悬停提示与菜单项 hint。 */
@@ -1489,12 +1571,15 @@ const INSTANCE_LOCK_REASON = {
   installing: "实例正在补全文件",
   renameRunning: "游戏正在运行，结束后才能重命名",
   renameInstalling: "安装任务正在写这个实例的文件夹",
+  moveRunning: "游戏正在运行，结束后才能移动",
+  moveInstalling: "安装任务正在写这个实例的文件夹，完成后才能移动",
   repairInProgress: "进行中",
   modifying: {
     rename: "正在改动这个实例的 Mod、资源或设置，完成后才能重命名",
     repair: "正在改动这个实例的 Mod、资源或设置，完成后才能补全",
     reinstallLoader: `正在改动这个实例的 Mod、资源或设置，完成后才能${REINSTALL_LOADER_LABEL}`,
     delete: "正在改动这个实例的 Mod、资源或设置，完成后才能删除",
+    move: "正在改动这个实例的 Mod、资源或设置，完成后才能移动",
   },
   /** 备份、恢复或导出存档进行中，游戏退出后的自动备份也算。 */
   backingUp: {
@@ -1502,25 +1587,38 @@ const INSTANCE_LOCK_REASON = {
     repair: "正在备份或恢复这个实例的存档，完成后才能补全",
     reinstallLoader: `正在备份或恢复这个实例的存档，完成后才能${REINSTALL_LOADER_LABEL}`,
     delete: "正在备份或恢复这个实例的存档，完成后才能删除",
+    move: "正在备份或恢复这个实例的存档，完成后才能移动",
+  },
+  /** 移到别的游戏目录进行中（排着的移动任务也算），与一切互斥。 */
+  moving: {
+    mods: "实例正在移到其他游戏目录，完成后才能改动 Mod",
+    rename: "实例正在移到其他游戏目录，完成后才能重命名",
+    repair: "实例正在移到其他游戏目录，完成后才能补全",
+    reinstallLoader: `实例正在移到其他游戏目录，完成后才能${REINSTALL_LOADER_LABEL}`,
+    delete: "实例正在移到其他游戏目录，完成后才能删除",
+    move: "实例正在移到其他游戏目录",
   },
 } as const;
 
 /** 锁定原因的悬停文字；没有锁为 undefined，可以直接交给 disabledReason。 */
-export function lockReason(lock: InstanceLock | BaseBusyLock | null, kind: "mods" | "rename" | "repair" | "reinstallLoader" | "delete"): string | undefined {
+export function lockReason(lock: InstanceLock | BaseBusyLock | null, kind: "mods" | "rename" | "repair" | "reinstallLoader" | "delete" | "move"): string | undefined {
   if (lock === null) return undefined;
   if (typeof lock === "object") {
     if (lock.kind === "base_busy") {
-      if (kind !== "repair" && kind !== "reinstallLoader") throw new Error(`依赖的实例正忙只挡补全，不会锁住 ${kind}`);
-      return `它依赖的实例「${lock.base}」正在${BASE_ACTIVITY_LABEL[lock.activity]}，结束后才能${kind === "repair" ? "补全" : REINSTALL_LOADER_LABEL}`;
+      if (kind !== "repair" && kind !== "reinstallLoader" && kind !== "move") throw new Error(`依赖的实例正忙只挡补全与移动，不会锁住 ${kind}`);
+      const blocked = kind === "repair" ? "补全" : kind === "move" ? "移动" : REINSTALL_LOADER_LABEL;
+      return `它依赖的实例「${lock.base}」正在${BASE_ACTIVITY_LABEL[lock.activity]}，结束后才能${blocked}`;
     }
     if (kind === "mods") throw new Error("被别的实例当作基底时照样能改动 Mod，不会因此锁住 Mod 操作");
     return INSTANCE_IN_USE_COPY[kind](lock.usedBy);
   }
+  if (lock === "moving") return INSTANCE_LOCK_REASON.moving[kind];
   if (lock === "modifying" || lock === "backing_up") {
     if (kind === "mods") throw new Error(`${lock} 与改动 Mod 互相兼容，不会因此锁住 Mod 操作`);
     return lock === "modifying" ? INSTANCE_LOCK_REASON.modifying[kind] : INSTANCE_LOCK_REASON.backingUp[kind];
   }
   if (kind === "rename") return lock === "running" ? INSTANCE_LOCK_REASON.renameRunning : INSTANCE_LOCK_REASON.renameInstalling;
+  if (kind === "move") return lock === "running" ? INSTANCE_LOCK_REASON.moveRunning : INSTANCE_LOCK_REASON.moveInstalling;
   if (kind === "mods") return lock === "running" ? INSTANCE_LOCK_REASON.runningMods : INSTANCE_LOCK_REASON.installing;
   if ((kind === "repair" || kind === "reinstallLoader") && lock === "installing") return INSTANCE_LOCK_REASON.repairInProgress;
   return INSTANCE_LOCK_REASON.running;

@@ -41,17 +41,17 @@ export function deletableWorldCount(inst: Pick<InstanceSummary, "isolated" | "wo
 // ---------------------------------------------------------------- 锁定
 
 /** 打开工作子目录与写实例设置被什么挡住。 */
-export type WorkLock = "installing" | "renaming" | "deleting";
+export type WorkLock = "installing" | "renaming" | "deleting" | "moving";
 
 /**
  * 打开 mods、saves、logs 这类工作子目录（缺了要先建出来）与写实例设置时，后端以「改动中」占住实例：
- * 与安装、补全、改名、删除互斥，与启动、运行和别的改动兼容。所以游戏运行中照常可用，只有这几种活动挡住它们；
+ * 与安装、补全、改名、删除、移到别的游戏目录互斥，与启动、运行和别的改动兼容。所以游戏运行中照常可用，只有这几种活动挡住它们；
  * 不提前禁用的话只能等后端以 instance_busy 拒绝后再报错。
- * installing：本实例的安装或补全任务在排队或进行中（前端任务表或后端报告的活动）。
+ * installing：本实例的安装或补全任务在排队或进行中（前端任务表或后端报告的活动）。排着的移动任务由状态层记成 moving。
  */
 export function workLock(installing: boolean, activity: InstanceSummary["activity"]): WorkLock | null {
   if (installing) return "installing";
-  return activity === "renaming" || activity === "deleting" ? activity : null;
+  return activity === "renaming" || activity === "deleting" || activity === "moving" ? activity : null;
 }
 
 // ---------------------------------------------------------------- 整页订阅的启动视图
@@ -101,13 +101,13 @@ export function overviewBanner(view: LaunchViewKind, crashActive: boolean): Over
 
 // ---------------------------------------------------------------- 存档直达
 
-export type EnterWorldBlock = "installing" | "broken" | "unknownVersion" | "legacy" | "backingUp" | InheritedLock | "launching" | "running";
+export type EnterWorldBlock = "installing" | "broken" | "unknownVersion" | "legacy" | "moving" | "backingUp" | InheritedLock | "launching" | "running";
 
 /**
  * 存档行「进入」此刻为什么不能点；能点为 null。自上而下取第一条：实例自身的状态先于版本能力，版本能力先于进行中的
  * 备份与这一局的会话。另一个实例占着游戏进程时照常能点，由启动拦截弹替换确认。
  *
- * 备份或恢复期间、别的实例正以它为基底时后端以 instance_busy 拒绝启动，这里提前禁用。worldTask 是前端排着或进行中的
+ * 移到别的游戏目录、备份或恢复期间、别的实例正以它为基底时后端以 instance_busy 拒绝启动，这里提前禁用。worldTask 是前端排着或进行中的
  * 存档任务：后端还没报 backing_up 时就点进入，会正好撞上马上要占实例的那个任务。
  */
 export function enterWorldBlock(inst: Pick<InstanceSummary, "status" | "quickPlay" | "activity" | "usedBy">, view: LaunchViewKind, worldTask: boolean): EnterWorldBlock | null {
@@ -115,6 +115,7 @@ export function enterWorldBlock(inst: Pick<InstanceSummary, "status" | "quickPla
   if (inst.status === "broken") return "broken";
   if (inst.quickPlay === null) return "unknownVersion";
   if (!inst.quickPlay.singleplayer) return "legacy";
+  if (inst.activity === "moving") return "moving";
   if (inst.activity === "backing_up" || worldTask) return "backingUp";
   if (inst.usedBy !== null) return { kind: "inherited", usedBy: inst.usedBy };
   if (view === "loading") return "launching";

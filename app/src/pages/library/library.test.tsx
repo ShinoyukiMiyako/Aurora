@@ -594,6 +594,35 @@ describe("实例库：游戏目录", () => {
 });
 
 describe("实例库：动作", () => {
+  it("卡片菜单「移到其他游戏目录…」：正在移动的实例与损坏的实例禁用并写原因；能移时打开移动弹窗，列出别的游戏目录", async () => {
+    ipc.overrides.set("list_game_directories", (): GameDirectoryDto[] => [
+      { name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: true, available: true, version_count: 4 },
+      { name: "HMCL", path: "D:\\HMCL\\.minecraft", is_current: false, available: true, version_count: 12 },
+    ]);
+    instances = instances.map((i) => (i.id === "机械动力" ? { ...i, activity: "moving" } : i));
+    await mount();
+    click(byLabel("「机械动力」的更多操作"));
+    const moving = menuItem(LIBRARY_COPY.menu.move);
+    expect(moving.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(moving)).toBe("实例正在移到其他游戏目录");
+    keydown(document, "Escape");
+    await afterMotion();
+    click(byLabel("「坏掉的」的更多操作"));
+    expect(await reasonOf(menuItem(LIBRARY_COPY.menu.move))).toBe("实例文件不完整，修复后才能移动");
+    keydown(document, "Escape");
+    await afterMotion();
+
+    click(byLabel("「樱花生存」的更多操作"));
+    const item = menuItem(LIBRARY_COPY.menu.move);
+    expect(item.getAttribute("aria-disabled")).toBeNull();
+    click(item);
+    await flush();
+    const dialog = document.querySelector('[role="dialog"]');
+    if (dialog === null) throw new Error("没有打开移动弹窗");
+    expect(dialog.querySelector("h2")?.textContent).toBe("移到其他游戏目录");
+    expect([...dialog.querySelectorAll('[role="option"]')].map((o) => o.textContent)).toEqual(["HMCLD:\\HMCL\\.minecraft"]);
+  });
+
   it("修复横幅列出损坏实例，「立即修复」为它排一个补全任务", async () => {
     await mount();
     expect(document.body.textContent).toContain("1 个实例需要修复「坏掉的」缺少游戏文件，补全后就能启动。");

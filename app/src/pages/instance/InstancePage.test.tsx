@@ -547,10 +547,10 @@ describe("实例详情：后端正在改动实例", () => {
   const reason = (what: string) => `正在改动这个实例的 Mod、资源或设置，完成后才能${what}`;
 
   it.each([
-    ["compact", 1024, ["重命名", "固定到侧栏", "打开实例文件夹", "导出整合包", "补全游戏文件", "删除实例"]],
-    ["regular", 1200, ["重命名", "打开实例文件夹", "导出整合包", "补全游戏文件", "删除实例"]],
-    ["wide", 1440, ["重命名", "打开实例文件夹", "导出整合包", "补全游戏文件", "删除实例"]],
-  ])("%s 档：头图菜单的重命名、补全与删除提前禁用，每项只写标签、原因放进悬停的提示气泡；F2 不进入改名", async (_tier, width, labels) => {
+    ["compact", 1024, ["重命名", "固定到侧栏", "打开实例文件夹", "导出整合包", "移到其他游戏目录…", "补全游戏文件", "删除实例"]],
+    ["regular", 1200, ["重命名", "打开实例文件夹", "导出整合包", "移到其他游戏目录…", "补全游戏文件", "删除实例"]],
+    ["wide", 1440, ["重命名", "打开实例文件夹", "导出整合包", "移到其他游戏目录…", "补全游戏文件", "删除实例"]],
+  ])("%s 档：头图菜单的重命名、移动、补全与删除提前禁用，每项只写标签、原因放进悬停的提示气泡；F2 不进入改名", async (_tier, width, labels) => {
     vi.stubGlobal("innerWidth", width);
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "modifying" } : i));
     await open("overview");
@@ -563,6 +563,7 @@ describe("实例详情：后端正在改动实例", () => {
     expect(items.map(textOf)).toEqual(labels);
     for (const [label, what] of [
       ["重命名", "重命名"],
+      ["移到其他游戏目录…", "移动"],
       ["补全游戏文件", "补全"],
       ["删除实例", "删除"],
     ]) {
@@ -651,7 +652,7 @@ describe("实例详情：后端正在改动实例", () => {
     expect(launcher.state.tasks.filter((t) => t.spec.command === "repair_instance")).toEqual([]);
   });
 
-  it("别的实例正以它为基底：头图菜单的重命名、补全与删除带上是谁在用的原因禁用，Mod 开关照常可用", async () => {
+  it("别的实例正以它为基底：头图菜单的重命名、移动、补全与删除带上是谁在用的原因禁用，Mod 开关照常可用", async () => {
     vi.stubGlobal("innerWidth", 1200);
     instances = instances.map((i) => (i.id === ID ? { ...i, activity: "inherited", used_by: "Fabric 整合" } : i));
     await open("overview");
@@ -659,6 +660,7 @@ describe("实例详情：后端正在改动实例", () => {
     const items = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')];
     for (const [label, what] of [
       ["重命名", "重命名"],
+      ["移到其他游戏目录…", "移动"],
       ["补全游戏文件", "补全"],
       ["删除实例", "删除"],
     ]) {
