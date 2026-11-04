@@ -61,6 +61,7 @@ pub mod mods;
 pub mod modversions;
 mod move_copy;
 mod move_deps;
+mod move_journal;
 pub mod network;
 pub mod news;
 pub mod playtime;

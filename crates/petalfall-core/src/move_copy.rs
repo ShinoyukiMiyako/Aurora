@@ -4,9 +4,6 @@
 //! 读回比对通过才提交，所以这里的复制只管写对、写稳（每个文件落盘），失败时不清理：暂存由调用方整个删掉。
 //! 符号链接与目录联接一律不跟随：跟进去可能走出实例目录，复制或删除到别处去。
 
-// 这些函数只被实例移动编排调用。
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};

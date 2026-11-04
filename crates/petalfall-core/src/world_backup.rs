@@ -499,7 +499,6 @@ pub(crate) fn instance_backups_dir_in(game_dir: &Path, id: &str) -> PathBuf {
 /// 同卷移动：把 `from_game_dir` 下 `instances/<id>` 的备份并进 `to_game_dir` 下 `instances/<id>`，合并规则同改名
 /// （[`merge_scope_dir`]），全程占着两个备份根的锁。`from` 下没有时什么都不做；两边是同一个游戏目录时也什么都
 /// 不做：同一个目录并进它自己会把每份备份改个名再记一遍，最后删掉的源清单就是目标清单。
-#[allow(dead_code)] // 只被实例移动编排调用
 pub(crate) async fn move_backups_between(
     from_game_dir: &Path,
     to_game_dir: &Path,
@@ -522,7 +521,6 @@ pub(crate) async fn move_backups_between(
 
 /// 跨卷移动：把目标盘暂存里的备份副本 `staged`（形状同 `instances/<id>`）并进 `to_game_dir` 下 `instances/<id>`，
 /// 合并规则同改名，占着目标备份根的锁。`staged` 不存在时什么都不做。
-#[allow(dead_code)] // 只被实例移动编排调用
 pub(crate) async fn merge_staged_backups(
     staged: &Path,
     to_game_dir: &Path,
@@ -536,7 +534,6 @@ pub(crate) async fn merge_staged_backups(
 }
 
 /// 跨卷移动提交后删掉原游戏目录下 `instances/<id>`，占着那个备份根的锁。不存在算成功。
-#[allow(dead_code)] // 只被实例移动编排调用
 pub(crate) async fn remove_instance_backups_in(game_dir: &Path, id: &str) -> Result<()> {
     check_instance_id(id)?;
     let root = BackupLayout::new(game_dir).root().to_path_buf();

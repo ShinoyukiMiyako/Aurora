@@ -8,9 +8,6 @@
 //! 合并后版本 JSON 的 `--fml.*` 启动参数推出产物所在的库目录，整目录带上。旧版资源布局的展开目录不带：启动时
 //! 由资源对象重新展开。
 
-// 这些函数只被实例移动编排调用。
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
