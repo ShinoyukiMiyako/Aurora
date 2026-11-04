@@ -292,7 +292,6 @@ via_core_error!(
     VersionError,
 );
 
-/// `source()` 链上每一层的描述（不含顶层，顶层已在 `message` 里）。
 /// 一个移动拦截项的 JSON：`{ kind, ... }`。预检结果的 blockers 与 instance_move_blocked 的 detail 共用这一种形状，
 /// 前端按 kind 分支取文案。
 pub(crate) fn move_blocker_json(blocker: &MoveBlocker) -> Value {
@@ -315,6 +314,7 @@ pub(crate) fn move_blocker_json(blocker: &MoveBlocker) -> Value {
     }
 }
 
+/// `source()` 链上每一层的描述（不含顶层，顶层已在 `message` 里）。
 pub(crate) fn source_chain(err: &dyn StdError) -> Vec<String> {
     let mut causes = Vec::new();
     let mut current = err.source();
