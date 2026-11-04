@@ -7,44 +7,60 @@
 //! 所有响应都带 `Access-Control-Allow-Origin: *`：前端要把材质画进 Canvas 逐像素染色，而协议源与
 //! 页面源不同源，缺这个头 Canvas 就会被污染、`getImageData` 直接抛错。
 
+use std::path::PathBuf;
+
 use petalfall_core::{ArtStatus, TexResponse, TextureService};
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri::{App, AppHandle, Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 
-use crate::commands::art::ArtStatusDto;
+use crate::commands::art::{discard_staging, ArtDownloadSlot, ArtStatusDto};
 use crate::events;
 use crate::facade::Facade;
 
 /// 协议名。
 pub const SCHEME: &str = "petalfall-tex";
 
-/// 材质源或全景可用性变化时推送，负载为 [`ArtStatusDto`]。前端收到后清空位图缓存并重绘。
+/// 材质源、方块目录或全景可用性变化时推送，负载为 [`ArtStatusDto`]。前端收到后清空位图缓存并重绘。
 pub const ART_CHANGED_EVENT: &str = "petalfall://art-changed";
 
-/// 装配材质服务并在后台做启动时的一轮准备：选材质源、清理旧皮肤与过期缩略图。
+/// 装配材质服务并在后台做启动时的一轮准备：选材质源、清理下载暂存、旧皮肤与过期缩略图。
+/// 调用前须已托管 [`ArtDownloadSlot`]。
 pub fn setup(app: &App) {
     let petalfall = tauri::async_runtime::block_on(app.state::<Facade>().snapshot());
     app.manage(petalfall.texture_service());
     let handle = app.handle().clone();
     tauri::async_runtime::spawn(async move {
-        refresh(&handle).await;
+        let status = refresh(&handle).await;
+        let staging = handle.state::<TextureService>().download_dir();
+        if let Err(err) =
+            discard_staging(&handle.state::<ArtDownloadSlot>(), &status, &staging).await
+        {
+            tracing::warn!(dir = %staging.display(), error = %err, "清理原版材质下载暂存失败，下次启动再试");
+        }
         prune_caches(&handle).await;
     });
 }
 
-/// 重新选择材质源与全景；状态有变化就推送 [`ART_CHANGED_EVENT`]。返回新状态。
+/// 重新选择材质源与全景；状态或方块目录有变化就推送 [`ART_CHANGED_EVENT`]。返回新状态。
 ///
 /// 启动时与游戏目录变更、游戏版本装好或删掉之后调用。
 pub async fn refresh(app: &AppHandle) -> ArtStatus {
     let candidates = app.state::<Facade>().read().await.art_candidates();
-    let service = app.state::<TextureService>();
-    let before = service.status();
-    let after = service.refresh(&candidates).await;
-    if after != before {
-        tracing::info!(source = ?after.source, panorama = after.panorama, "原版材质状态变化");
+    let (after, changed) = reselect(&app.state::<TextureService>(), &candidates).await;
+    if changed {
+        tracing::info!(source = ?after.source, panorama = after.panorama, "原版材质状态或方块目录变化");
         events::emit(app, ART_CHANGED_EVENT, ArtStatusDto::from(after.clone()));
     }
     after
+}
+
+/// 重选材质源，返回新状态与前端要不要重取。同一版本也会重抽出不同的目录（本机后来补齐了中文语言文件，
+/// 缓存重抽补上中文名），只比状态的话前端会拿着旧目录直到重启，所以目录也要比。
+async fn reselect(service: &TextureService, candidates: &[PathBuf]) -> (ArtStatus, bool) {
+    let (status, catalog) = (service.status(), service.catalog());
+    let after = service.refresh(candidates).await;
+    let changed = after != status || service.catalog() != catalog;
+    (after, changed)
 }
 
 /// 命令成功后重选材质源：游戏目录换了、版本装好、删掉或改名之后，最合适的材质源可能变了，
@@ -168,6 +184,84 @@ mod tests {
             assert_eq!(built.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
             assert_eq!(built.headers()[header::CACHE_CONTROL], "no-store");
         }
+    }
+
+    /// 只有一种方块（石头）的客户端 jar：方块状态、模型、16x16 的面与英文名。
+    fn write_client_jar(jar: &std::path::Path, scratch: &std::path::Path) {
+        use std::io::Write;
+        let face = scratch.join("stone.png");
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([120, 120, 120, 255]))
+            .save(&face)
+            .unwrap();
+        let entries: [(&str, Vec<u8>); 5] = [
+            (
+                "assets/minecraft/blockstates/stone.json",
+                br#"{ "variants": { "": { "model": "minecraft:block/stone" } } }"#.to_vec(),
+            ),
+            (
+                "assets/minecraft/models/block/stone.json",
+                br#"{ "parent": "minecraft:block/cube_all", "textures": { "all": "minecraft:block/stone" } }"#.to_vec(),
+            ),
+            ("assets/minecraft/models/block/cube_all.json", b"{}".to_vec()),
+            (
+                "assets/minecraft/textures/block/stone.png",
+                std::fs::read(&face).unwrap(),
+            ),
+            (
+                "assets/minecraft/lang/en_us.json",
+                br#"{ "block.minecraft.stone": "Stone" }"#.to_vec(),
+            ),
+        ];
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(jar).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, bytes) in entries {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(&bytes).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    fn stone_name_zh(service: &TextureService) -> Option<String> {
+        let catalog = service.catalog().expect("应有材质源");
+        assert_eq!(catalog.blocks.len(), 1, "{catalog:?}");
+        catalog.blocks[0].name_zh.clone()
+    }
+
+    /// 同一版本重抽补上中文名：状态没变，但目录变了，前端得重取；什么都没变时不推。
+    #[tokio::test]
+    async fn catalog_change_alone_counts_as_a_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = TextureService::new(
+            tmp.path().join("cache"),
+            petalfall_base::http::build_client().unwrap(),
+        );
+        let jar = tmp.path().join("client.jar");
+        write_client_jar(&jar, tmp.path());
+        let zh_cn = tmp.path().join("zh_cn.json");
+        std::fs::write(&zh_cn, r#"{ "block.minecraft.stone": "石头" }"#).unwrap();
+        let client = |zh_cn: Option<PathBuf>| petalfall_core::DownloadedClient {
+            version_id: "26.1".into(),
+            jar: jar.clone(),
+            jar_sha1: "a9993e364706816aba3e25717850c26c9cd0d89d".into(),
+            zh_cn,
+        };
+
+        service.adopt_download(client(None)).await.unwrap();
+        let (first, changed) = reselect(&service, &[]).await;
+        assert_eq!(first.source.as_deref(), Some("26.1"));
+        assert!(changed, "从没有材质源到有");
+        assert_eq!(stone_name_zh(&service), None);
+
+        service.adopt_download(client(Some(zh_cn))).await.unwrap();
+        let (second, changed) = reselect(&service, &[]).await;
+        assert_eq!(second, first, "同一版本重抽，状态不变");
+        assert!(changed, "目录补上了中文名，应算作变化");
+        assert_eq!(stone_name_zh(&service).as_deref(), Some("石头"));
+
+        let (third, changed) = reselect(&service, &[]).await;
+        assert_eq!(third, first);
+        assert!(!changed, "什么都没变就不该推送");
     }
 
     /// 前端 `ipc/art.ts` 里有一份同样的名单（取 URL 前先校验），两边必须逐项一致。

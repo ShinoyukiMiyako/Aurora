@@ -1,10 +1,13 @@
 //! 原版材质服务的命令：状态查询、方块目录、下载原版材质、账户皮肤、远程缩略图登记。图本身经
 //! `petalfall-tex` 协议取（见 [`crate::textures`]），这里只回答「有没有、用哪个键去取」。
 
+use std::future::Future;
+use std::path::Path;
+
 use petalfall_core::art::BlockCatalog;
 use petalfall_core::{
-    default_skin, Account, AccountType, ArtDownloadProgress, ArtDownloadStage, ArtStatus, SkinInfo,
-    SkinModel, TextureService, ThumbError,
+    default_skin, Account, AccountType, ArtDownloadProgress, ArtDownloadStage, ArtStatus,
+    DownloadedClient, SkinInfo, SkinModel, TextureService, ThumbError,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -129,7 +132,7 @@ pub async fn art_status(textures: State<'_, TextureService>) -> Result<ArtStatus
 }
 
 /// 当前材质源的方块目录（只读内存）：材质源里全部完整立方体方块的各面、染色、色相与名称，按 id 排序；
-/// 没有材质源时为 null。材质源变了会推送 `petalfall://art-changed`，前端收到后重新取。
+/// 没有材质源时为 null。材质源或目录变了会推送 `petalfall://art-changed`，前端收到后重新取。
 #[tauri::command]
 pub async fn art_blocks(
     textures: State<'_, TextureService>,
@@ -149,26 +152,80 @@ pub async fn art_download(
     textures: State<'_, TextureService>,
     slot: State<'_, ArtDownloadSlot>,
 ) -> Result<ArtStatusDto, CommandError> {
-    let _running = slot.claim()?;
-    let dest = textures.download_dir();
-    let petalfall = facade.snapshot().await;
+    let service = textures.inner();
+    let dest = service.download_dir();
     let emitter = app.clone();
     let progress = move |p: ArtDownloadProgress| events::emit(&emitter, ART_DOWNLOAD_EVENT, p);
-    let client = petalfall.download_art_client(&dest, &progress).await?;
-    progress(ArtDownloadProgress {
-        stage: ArtDownloadStage::Extract,
-        downloaded: 0,
-        total: None,
-    });
-    textures.adopt_download(client).await.map_err(|reason| {
+    let progress = &progress;
+    let download = async {
+        let petalfall = facade.snapshot().await;
+        petalfall
+            .download_art_client(&dest, progress)
+            .await
+            .map_err(CommandError::from)
+    };
+    let extract = move |client| async move {
+        progress(ArtDownloadProgress {
+            stage: ArtDownloadStage::Extract,
+            downloaded: 0,
+            total: None,
+        });
+        service.adopt_download(client).await
+    };
+    run_download(&slot, &dest, download, extract).await?;
+    Ok(crate::textures::refresh(&app).await.into())
+}
+
+/// 一次下载的全过程：占住下载位，下进暂存 `dest`，抽进缓存，再删暂存。下载与抽取两步由调用方给，
+/// 命令里是门面下载与材质服务抽取；这里只管占位、两步的先后与暂存的去留，测试换上假的两步就能测到。
+/// `download` 是还没开始跑的 future，占到下载位之后才 await 它。
+async fn run_download<X, XF>(
+    slot: &ArtDownloadSlot,
+    dest: &Path,
+    download: impl Future<Output = Result<DownloadedClient, CommandError>>,
+    extract: X,
+) -> Result<(), CommandError>
+where
+    X: FnOnce(DownloadedClient) -> XF,
+    XF: Future<Output = Result<(), String>>,
+{
+    let _running = slot.claim()?;
+    let client = download.await?;
+    extract(client).await.map_err(|reason| {
         tracing::warn!(%reason, "抽取下载来的原版材质失败");
         CommandError::new(code::IO, format!("抽取原版材质失败：{reason}"))
     })?;
-    if let Err(err) = tokio::fs::remove_dir_all(&dest).await {
-        // 材质已经进了缓存，暂存只是占地方：删不掉留到下次成功再删，不让这次下载算失败
+    if let Err(err) = tokio::fs::remove_dir_all(dest).await {
+        // 材质已经进了缓存，暂存只是占地方：删不掉留到下次启动或下次成功再删，不让这次下载算失败
         tracing::warn!(dir = %dest.display(), error = %err, "清理原版材质下载暂存失败");
     }
-    Ok(crate::textures::refresh(&app).await.into())
+    Ok(())
+}
+
+/// 启动时第一轮选源之后清掉没人再用的下载暂存 `dir`：下载成功后暂存被杀软短暂占着没删掉，或下到一半
+/// 失败后玩家改去装了游戏，有了材质源前端就不再给下载入口，暂存再没有人清（选源时的旧缓存清理特意跳过它）。
+/// 没有材质源时留着，重试要续传；有下载在跑时暂存归它，它成功后自己删。清理期间占住下载位，免得刚开始的
+/// 下载往正被删的目录里写。暂存本来就不在时什么都不做。
+pub(crate) async fn discard_staging(
+    slot: &ArtDownloadSlot,
+    status: &ArtStatus,
+    dir: &Path,
+) -> std::io::Result<()> {
+    if status.source.is_none() {
+        return Ok(());
+    }
+    let Ok(_running) = slot.claim() else {
+        tracing::info!(dir = %dir.display(), "原版材质正在下载，下载暂存留给它");
+        return Ok(());
+    };
+    match tokio::fs::remove_dir_all(dir).await {
+        Ok(()) => {
+            tracing::info!(dir = %dir.display(), "已清理用不上的原版材质下载暂存");
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 /// 账户当前皮肤：远程皮肤就绪时返回取图键与模型；离线账户返回它进游戏后显示的原版默认皮肤；
@@ -386,6 +443,166 @@ mod tests {
         assert_eq!(slot.claim().unwrap_err().code, code::TASK_CONFLICT);
         drop(first);
         assert!(slot.claim().is_ok(), "上一次结束后可以再下");
+    }
+
+    /// 暂存目录里放一个下了一半的 jar，返回暂存目录。
+    fn staged(root: &Path) -> std::path::PathBuf {
+        let dest = root.join(".download");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("client.jar"), b"jar").unwrap();
+        dest
+    }
+
+    fn client_in(dest: &Path) -> DownloadedClient {
+        DownloadedClient {
+            version_id: "26.1".into(),
+            jar: dest.join("client.jar"),
+            jar_sha1: "a9993e364706816aba3e25717850c26c9cd0d89d".into(),
+            zh_cn: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_download_hands_the_client_over_then_drops_the_staging_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = staged(tmp.path());
+        let slot = ArtDownloadSlot::default();
+        let mut adopted = None;
+        run_download(
+            &slot,
+            &dest,
+            async { Ok(client_in(&dest)) },
+            |client: DownloadedClient| {
+                // 抽取时 jar 还得在：暂存要等抽完才删
+                adopted = Some((client.version_id.clone(), client.jar.is_file()));
+                async { Ok(()) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(adopted, Some(("26.1".to_owned(), true)));
+        assert!(!dest.exists(), "抽取成功后暂存目录应被删掉");
+    }
+
+    #[tokio::test]
+    async fn failed_steps_keep_the_staging_dir_for_resuming() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = staged(tmp.path());
+        let slot = ArtDownloadSlot::default();
+
+        let extract_failed =
+            run_download(&slot, &dest, async { Ok(client_in(&dest)) }, |_| async {
+                Err("磁盘满了".to_owned())
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(extract_failed.code, code::IO);
+        assert_eq!(extract_failed.message, "抽取原版材质失败：磁盘满了");
+        assert!(dest.join("client.jar").is_file(), "抽取失败时暂存要留着");
+
+        let mut extracted = false;
+        let download_failed = run_download(
+            &slot,
+            &dest,
+            async {
+                Err::<DownloadedClient, _>(CommandError::new(code::DOWNLOAD_FAILED, "连不上"))
+            },
+            |_| {
+                extracted = true;
+                async { Ok(()) }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(download_failed.code, code::DOWNLOAD_FAILED);
+        assert!(!extracted, "下载失败就不该抽取");
+        assert!(dest.join("client.jar").is_file(), "下载失败时暂存要留着");
+    }
+
+    #[tokio::test]
+    async fn a_second_download_conflicts_while_the_first_is_still_downloading() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = staged(tmp.path());
+        let slot = ArtDownloadSlot::default();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel::<()>();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let first = run_download(
+            &slot,
+            &dest,
+            async {
+                entered_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                Ok(client_in(&dest))
+            },
+            |_| async { Ok(()) },
+        );
+        let second = async {
+            entered_rx.await.unwrap();
+            // 下载位没占住的话这一次会跑下去，报的就是这里的 internal 而不是 task_conflict
+            let outcome = run_download(
+                &slot,
+                &dest,
+                async { Err::<DownloadedClient, _>(CommandError::new(code::INTERNAL, "撞车")) },
+                |_| async { Ok(()) },
+            )
+            .await;
+            release_tx.send(()).unwrap();
+            outcome
+        };
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(second.unwrap_err().code, code::TASK_CONFLICT);
+        first.unwrap();
+        assert!(!dest.exists());
+
+        let dest = staged(tmp.path());
+        run_download(&slot, &dest, async { Ok(client_in(&dest)) }, |_| async {
+            Ok(())
+        })
+        .await
+        .expect("上一次结束后可以再下");
+        assert!(!dest.exists());
+    }
+
+    fn with_source() -> ArtStatus {
+        ArtStatus {
+            source: Some("1.21.1".into()),
+            panorama: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn staging_is_dropped_at_startup_once_a_source_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = staged(tmp.path());
+        let slot = ArtDownloadSlot::default();
+        discard_staging(&slot, &with_source(), &dest).await.unwrap();
+        assert!(!dest.exists());
+        assert!(slot.claim().is_ok(), "清理完要放开下载位");
+        // 暂存本来就不在：什么都不做，也不报错
+        discard_staging(&slot, &with_source(), &dest).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn staging_stays_without_a_source_for_resuming() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = staged(tmp.path());
+        let slot = ArtDownloadSlot::default();
+        discard_staging(&slot, &ArtStatus::default(), &dest)
+            .await
+            .unwrap();
+        assert!(dest.join("client.jar").is_file());
+    }
+
+    #[tokio::test]
+    async fn staging_stays_while_a_download_holds_the_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = staged(tmp.path());
+        let slot = ArtDownloadSlot::default();
+        let running = slot.claim().unwrap();
+        discard_staging(&slot, &with_source(), &dest).await.unwrap();
+        assert!(dest.join("client.jar").is_file());
+        drop(running);
     }
 
     #[test]
