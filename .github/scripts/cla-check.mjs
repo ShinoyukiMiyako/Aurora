@@ -2,7 +2,7 @@
 
 export const CLA_VERSION = 1;
 // 和 CLA_VERSION 一起改。整条 PR 的评论都会被扫描，旧评论是对旧文本的同意，不能算进新版本。
-export const CLA_EFFECTIVE_AT = '2026-11-01T00:00:00Z';
+export const CLA_EFFECTIVE_AT = '2026-11-04T23:00:00Z';
 
 export const STATUS_CONTEXT = 'cla';
 export const SIGNATURE_BRANCH = 'cla-signatures';
