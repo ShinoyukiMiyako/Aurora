@@ -1,7 +1,8 @@
 //! 方块目录：从客户端 jar 的方块状态与模型推出哪些方块是完整立方体、各面用哪张材质、要不要染色，
 //! 实例卡面因此可以选材质源里任意一种完整方块，而不只是预设的 16 种。
 //!
-//! 只认方块状态的 variants 写法并取第一个变体（数组取第一个）；multipart 是栅栏、墙这类按连接拼出来的
+//! 只认方块状态的 variants 写法，取朝北的那个变体（物品栏里画的就是它；没有朝向的取第一个，数组取第一个）；
+//! 发射器、投掷器的第一个变体是朝下的竖放模型，取第一个会把顶面画成正面。multipart 是栅栏、墙这类按连接拼出来的
 //! 形状，不收。沿模型父链合并 textures（子覆盖父），直到碰上原版的立方体模板，由模板决定顶面、侧面、
 //! 正面各取哪个变量；先碰上带 elements 的别的模型就是自定义形状（台阶、花、按钮），不收。草方块的模型
 //! 带染色覆盖层，按规则是自定义形状，但它是最常见的封面，单独收录。
@@ -35,6 +36,19 @@ const LEGACY_LEAF_TINTS: [(&str, Rgb); 7] = [
     ("spruce_leaves", [97, 153, 97]),
     ("birch_leaves", [128, 167, 85]),
     ("mangrove_leaves", [146, 198, 72]),
+];
+
+/// 不进目录的方块：命令方块、结构方块、拼图方块、测试方块是管理员工具，霜冰只由冰霜行者临时生成，
+/// 创造模式物品栏里默认都看不到，放进选择框只会让玩家困惑。
+const EXCLUDED: [&str; 8] = [
+    "command_block",
+    "chain_command_block",
+    "repeating_command_block",
+    "structure_block",
+    "jigsaw",
+    "test_block",
+    "test_instance_block",
+    "frosted_ice",
 ];
 
 const BLOCKSTATES: &str = "assets/minecraft/blockstates/";
@@ -162,6 +176,9 @@ fn classify(
 ) -> Result<Option<BlockFaces>, String> {
     if !is_block_name(id) {
         return Err("方块 id 不是 1 到 64 个小写字母、数字或下划线".to_owned());
+    }
+    if EXCLUDED.contains(&id) {
+        return Ok(None);
     }
     if id == "grass_block" {
         return Ok(Some(BlockFaces {
@@ -441,7 +458,7 @@ impl TextureValue {
 #[derive(Deserialize)]
 struct BlockState {
     /// 没有 variants（multipart）为 None。
-    #[serde(default, deserialize_with = "first_variant")]
+    #[serde(default, deserialize_with = "preferred_variant")]
     variants: Option<Variant>,
 }
 
@@ -458,11 +475,14 @@ enum VariantEntry {
     Weighted(Vec<Variant>),
 }
 
-/// 取 variants 里按文件顺序的第一项：serde_json 的 Map 默认按键排序，不能先解析成 Map 再取第一个。
-fn first_variant<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Variant>, D::Error> {
-    struct First;
+/// 取 variants 里状态带 `facing=north` 的第一项，没有就取按文件顺序的第一项：serde_json 的 Map 默认按键排序，
+/// 不能先解析成 Map 再挑。
+fn preferred_variant<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Variant>, D::Error> {
+    struct Preferred;
 
-    impl<'de> Visitor<'de> for First {
+    impl<'de> Visitor<'de> for Preferred {
         type Value = Option<Variant>;
 
         fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -470,16 +490,31 @@ fn first_variant<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Va
         }
 
         fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-            let first = map.next_entry::<IgnoredAny, VariantEntry>()?;
-            while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
-            Ok(first.and_then(|(_, entry)| match entry {
-                VariantEntry::One(variant) => Some(variant),
-                VariantEntry::Weighted(list) => list.into_iter().next(),
-            }))
+            let mut first = None;
+            while let Some((state, entry)) = map.next_entry::<String, VariantEntry>()? {
+                let north = state.split(',').any(|pair| pair == "facing=north");
+                if north {
+                    while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                    return Ok(entry.into_first());
+                }
+                if first.is_none() {
+                    first = Some(entry);
+                }
+            }
+            Ok(first.and_then(VariantEntry::into_first))
         }
     }
 
-    deserializer.deserialize_map(First)
+    deserializer.deserialize_map(Preferred)
+}
+
+impl VariantEntry {
+    fn into_first(self) -> Option<Variant> {
+        match self {
+            VariantEntry::One(variant) => Some(variant),
+            VariantEntry::Weighted(list) => list.into_iter().next(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -754,6 +789,65 @@ mod tests {
         assert_eq!(
             derive(&entries),
             vec![faces("log", "block/log_top", "block/log", None, None)]
+        );
+    }
+
+    #[test]
+    fn north_facing_variant_wins_over_the_first_one() {
+        // 发射器的第一个变体是朝下的竖放模型：取它会把正面画成顶面
+        let raw = br#"{ "variants": {
+            "facing=down,triggered=false": { "model": "minecraft:block/dispenser_vertical", "x": 180 },
+            "facing=east,triggered=false": { "model": "minecraft:block/dispenser", "y": 90 },
+            "facing=north,triggered=false": { "model": "minecraft:block/dispenser" },
+            "facing=up,triggered=false": { "model": "minecraft:block/dispenser_vertical" }
+        } }"#;
+        let mut entries = files(&[]);
+        for (name, value) in templates() {
+            entries.insert(&name, serde_json::to_vec(&value).unwrap());
+        }
+        entries.insert(&format!("{BLOCKSTATES}dispenser.json"), raw.to_vec());
+        entries.insert(
+            &format!("{MODELS}block/dispenser.json"),
+            serde_json::to_vec(&json!({ "parent": "block/orientable", "textures": { "top": "block/furnace_top", "front": "block/dispenser_front", "side": "block/furnace_side" } })).unwrap(),
+        );
+        entries.insert(
+            &format!("{MODELS}block/dispenser_vertical.json"),
+            serde_json::to_vec(&json!({ "parent": "block/orientable", "textures": { "top": "block/dispenser_front_vertical", "front": "block/furnace_top", "side": "block/furnace_top" } })).unwrap(),
+        );
+        assert_eq!(
+            derive(&entries),
+            vec![faces(
+                "dispenser",
+                "block/furnace_top",
+                "block/furnace_side",
+                Some("block/dispenser_front"),
+                None
+            )]
+        );
+    }
+
+    #[test]
+    fn operator_and_technical_blocks_are_left_out() {
+        let blocks = derive_from(vec![
+            state("command_block", "minecraft:block/command_block"),
+            model(
+                "block/command_block",
+                json!({ "parent": "minecraft:block/cube_all", "textures": { "all": "minecraft:block/command_block_front" } }),
+            ),
+            state("frosted_ice", "minecraft:block/frosted_ice_0"),
+            model(
+                "block/frosted_ice_0",
+                json!({ "parent": "minecraft:block/cube_all", "textures": { "all": "minecraft:block/frosted_ice_0" } }),
+            ),
+            state("stone", "minecraft:block/stone"),
+            model(
+                "block/stone",
+                json!({ "parent": "minecraft:block/cube_all", "textures": { "all": "minecraft:block/stone" } }),
+            ),
+        ]);
+        assert_eq!(
+            blocks.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(),
+            ["stone"]
         );
     }
 
