@@ -873,17 +873,27 @@ impl Petalfall {
 
     /// 安装之后收回 `ids` 里目录没落下的：记录只管启动器落下的目录，日后别的启动器装出同名版本时，它是玩家的。
     pub(crate) async fn forget_unlanded_base_versions(&self, ids: &[String]) -> Result<()> {
-        let mut unlanded = Vec::new();
-        for id in ids {
-            if !try_exists(&self.layout().version_dir(id)).await? {
-                unlanded.push(id);
-            }
-        }
-        update_base_record(self.game_dir(), |versions| {
-            versions.retain(|id| !unlanded.contains(&id));
-        })
-        .await
+        forget_unlanded_base_versions_in(self.game_dir(), ids).await
     }
+}
+
+/// 在 `game_dir` 的依赖版本记录里收回 `ids` 中目录没落下的，排队同 [`update_base_record`]。实例移动在补依赖前
+/// 先记下要带的基底版本，没补成时由它收回。
+pub(crate) async fn forget_unlanded_base_versions_in(
+    game_dir: &Path,
+    ids: &[String],
+) -> Result<()> {
+    let layout = petalfall_install::GameLayout::new(game_dir);
+    let mut unlanded = Vec::new();
+    for id in ids {
+        if !try_exists(&layout.version_dir(id)).await? {
+            unlanded.push(id);
+        }
+    }
+    update_base_record(game_dir, |versions| {
+        versions.retain(|id| !unlanded.contains(&id));
+    })
+    .await
 }
 
 /// 从扫描结果里去掉玩家没建过的依赖版本目录，列出来它们就像凭空多了实例。实例库、安装目标与侧栏固定都经这里取实例。

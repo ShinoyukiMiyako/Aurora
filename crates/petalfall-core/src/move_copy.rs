@@ -447,10 +447,10 @@ fn copy_created(_src: &Path, _dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 改名到 dst，dst 已存在时报 AlreadyExists 而不是覆盖：std::fs::rename 在 Windows 上带着
-/// MOVEFILE_REPLACE_EXISTING，会盖掉目标目录里别的实例可能正在用的文件。
+/// 改名到 dst（文件，或 Windows 上同卷的目录），dst 已存在时报 AlreadyExists 而不是覆盖：std::fs::rename 在
+/// Windows 上带着 MOVEFILE_REPLACE_EXISTING，会盖掉目标目录里别的实例可能正在用的文件。
 #[cfg(windows)]
-fn rename_no_replace(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> Result<()> {
     use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
 
     let from_wide = verbatim_wide(from)?;
@@ -489,7 +489,7 @@ fn verbatim_wide(path: &Path) -> Result<Vec<u16>> {
 
 /// hard_link 在目标已存在时失败，不会覆盖；挂上后删掉临时名。
 #[cfg(not(windows))]
-fn rename_no_replace(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> Result<()> {
     fs::hard_link(from, to).map_err(|source| io_error(to, source))?;
     fs::remove_file(from).map_err(|source| io_error(from, source))
 }

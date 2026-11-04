@@ -57,6 +57,9 @@ pub(crate) struct MoveJournal {
     /// 没复制过就一概不碰，原目录里那时没有它的备份，后来有的也不是它的。
     #[serde(default)]
     pub backups_staged: bool,
+    /// 补依赖前记进目标依赖版本记录的基底版本。提交前失败或回滚时，收回其中目录没落下的那些。
+    #[serde(default)]
+    pub bases: Vec<String>,
     /// 开工时刻，Unix 毫秒。
     pub started_at: u64,
 }
@@ -89,6 +92,7 @@ impl MoveJournal {
             staging_dir,
             old_dir,
             backups_staged: false,
+            bases: Vec::new(),
             started_at,
         }
     }
