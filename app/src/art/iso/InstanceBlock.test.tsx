@@ -2,6 +2,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { NO_ART, setArtStatus } from "../../mc/art";
+import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { clearArtCache } from "../../mc/useArt";
 import { render, stubMatchMedia, type Rendered } from "../../test/dom";
 import { stubCanvas, type CanvasStub } from "../illustrations/test-canvas";
@@ -30,6 +31,7 @@ afterEach(() => {
   view?.unmount();
   view = undefined;
   setArtStatus(NO_ART);
+  setBlockCatalog(null);
   clearArtCache();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -85,13 +87,41 @@ describe("InstanceBlock", () => {
     expect(warn.mock.calls.filter((c) => String(c[0]).includes("blue_ice")).length).toBe(1);
   });
 
-  it("白名单外的封面显示徽记，不请求任何材质", async () => {
+  it("不在预设也不在本机方块目录里的封面显示徽记，不请求任何材质", async () => {
     setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
+    setBlockCatalog(catalogFromDto({ version_id: "1.21.1", blocks: [] }));
     view = render(<InstanceBlock instanceId="i2" cover={{ block: "diamond_block", hue: 180, image: null }} width={24} />);
     await settle();
     expect(block().dataset.art).toBe("emblem");
     expect(fetchMock).not.toHaveBeenCalled();
     expect(warn.mock.calls.some((c) => String(c[0]).includes("diamond_block"))).toBe(true);
+  });
+
+  it("目录里的有朝向方块：取顶面、侧面、正面三张图画成真材质", async () => {
+    setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
+    setBlockCatalog(
+      catalogFromDto({
+        version_id: "1.21.1",
+        blocks: [{ id: "furnace", top: "block/furnace_top", side: "block/furnace_side", front: "block/furnace_front", top_tint: null, side_tint: null, hue: 0, name_en: "Furnace", name_zh: "熔炉" }],
+      }),
+    );
+    view = render(<InstanceBlock instanceId="i4" cover={{ block: "furnace", hue: 0, image: null }} width={32} />);
+    await settle();
+    expect(block().dataset.art).toBe("texture");
+    const reads = canvas.draws.filter((d) => d.canvas.width === 16 && d.canvas.height === 16 && (d.source as { url?: string }).url !== undefined);
+    expect(reads.map((d) => (d.source as { url: string }).url).sort()).toEqual([
+      "http://petalfall-tex.localhost/art/block/furnace_front.png?v=1.21.1",
+      "http://petalfall-tex.localhost/art/block/furnace_side.png?v=1.21.1",
+      "http://petalfall-tex.localhost/art/block/furnace_top.png?v=1.21.1",
+    ]);
+  });
+
+  it("玩家图片：没有材质源也画成真材质，只取这一张图", async () => {
+    const image = `http://petalfall-tex.localhost/cover/${"e".repeat(40)}`;
+    view = render(<InstanceBlock instanceId="i5" cover={{ block: "grass_block", hue: 118, image }} width={32} />);
+    await settle();
+    expect(block().dataset.art).toBe("texture");
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([image]);
   });
 
   it("不允许的宽度直接抛错", () => {

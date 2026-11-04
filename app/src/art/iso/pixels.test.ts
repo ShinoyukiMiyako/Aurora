@@ -22,7 +22,7 @@ describe("染色与明暗", () => {
   it("三个面的明暗 1.0 / 0.8 / 0.6，透明像素保持透明", () => {
     const side = solid(16, 16, [250, 120, 60, 255]);
     side.data.set([10, 20, 30, 0], 0);
-    const faces = prepareFaces(solid(16, 16, [100, 100, 100, 255]), side, null, 16);
+    const faces = prepareFaces({ top: solid(16, 16, [100, 100, 100, 255]), side, front: null, topTint: null, sideTint: null }, 16);
     expect(px(faces.top, 3, 3)).toEqual([100, 100, 100, 255]);
     expect(px(faces.left, 3, 3)).toEqual([200, 96, 48, 255]);
     expect(px(faces.right, 3, 3)).toEqual([150, 72, 36, 255]);
@@ -30,11 +30,58 @@ describe("染色与明暗", () => {
     expect(() => shadePixels(side, 1.2)).toThrow("明暗系数");
   });
 
-  it("只有给了顶面染色时才染顶面，侧面从不染", () => {
+  it("顶面染色只染顶面", () => {
     const gray = solid(16, 16, [255, 255, 255, 255]);
-    const faces = prepareFaces(gray, gray, [124, 189, 107], 16);
+    const faces = prepareFaces({ top: gray, side: gray, front: null, topTint: [124, 189, 107], sideTint: null }, 16);
     expect(px(faces.top, 0, 0)).toEqual([124, 189, 107, 255]);
     expect(px(faces.left, 0, 0)).toEqual([204, 204, 204, 255]);
+    expect(px(faces.right, 0, 0)).toEqual([153, 153, 153, 255]);
+  });
+
+  it("侧面染色染左右两面（先染再乘明暗），不染顶面；透明像素保持透明", () => {
+    const gray = solid(16, 16, [255, 255, 255, 255]);
+    gray.data.set([200, 200, 200, 0], (5 * 16 + 7) * 4);
+    const faces = prepareFaces({ top: gray, side: gray, front: null, topTint: null, sideTint: [72, 181, 24] }, 16);
+    expect(px(faces.top, 0, 0)).toEqual([255, 255, 255, 255]);
+    // 72 × 0.8 = 57.6、181 × 0.8 = 144.8、24 × 0.8 = 19.2
+    expect(px(faces.left, 0, 0)).toEqual([58, 145, 19, 255]);
+    // 72 × 0.6 = 43.2、181 × 0.6 = 108.6、24 × 0.6 = 14.4
+    expect(px(faces.right, 0, 0)).toEqual([43, 109, 14, 255]);
+    expect(px(faces.left, 7, 5)[3]).toBe(0);
+  });
+
+  it("树叶式染色：顶面与侧面各用各的乘色", () => {
+    const gray = solid(16, 16, [255, 255, 255, 255]);
+    const faces = prepareFaces({ top: gray, side: gray, front: null, topTint: [128, 167, 85], sideTint: [10, 20, 30] }, 16);
+    expect(px(faces.top, 3, 3)).toEqual([128, 167, 85, 255]);
+    expect(px(faces.left, 3, 3)).toEqual([8, 16, 24, 255]);
+  });
+
+  it("正面画在左面、右面仍是侧面；没有正面时左面也是侧面", () => {
+    const top = solid(16, 16, [90, 90, 90, 255]);
+    const side = solid(16, 16, [0, 0, 250, 255]);
+    const front = solid(16, 16, [250, 0, 0, 255]);
+    const faces = prepareFaces({ top, side, front, topTint: null, sideTint: null }, 16);
+    expect(px(faces.left, 8, 8)).toEqual([200, 0, 0, 255]);
+    expect(px(faces.right, 8, 8)).toEqual([0, 0, 150, 255]);
+    expect(px(faces.top, 8, 8)).toEqual([90, 90, 90, 255]);
+    const plain = prepareFaces({ top, side, front: null, topTint: null, sideTint: null }, 16);
+    expect(px(plain.left, 8, 8)).toEqual([0, 0, 200, 255]);
+  });
+
+  it("正面同样吃侧面染色", () => {
+    const gray = solid(16, 16, [255, 255, 255, 255]);
+    const front = solid(16, 16, [255, 128, 0, 255]);
+    const faces = prepareFaces({ top: gray, side: gray, front, topTint: null, sideTint: [100, 200, 50] }, 16);
+    // 正面 255 × 100 / 255 = 100、128 × 200 / 255 = 100.4 -> 100、0；再乘 0.8
+    expect(px(faces.left, 0, 0)).toEqual([80, 80, 0, 255]);
+    expect(px(faces.right, 0, 0)).toEqual([60, 120, 30, 255]);
+  });
+
+  it("小尺寸档三面都重采样到 n × n，正面也不例外", () => {
+    const faces = prepareFaces({ top: solid(16, 16, [10, 10, 10, 255]), side: solid(16, 16, [20, 20, 20, 255]), front: solid(16, 16, [250, 0, 0, 255]), topTint: null, sideTint: null }, 10);
+    expect([faces.top.width, faces.left.width, faces.right.width]).toEqual([10, 10, 10]);
+    expect(px(faces.left, 9, 9)).toEqual([200, 0, 0, 255]);
   });
 });
 

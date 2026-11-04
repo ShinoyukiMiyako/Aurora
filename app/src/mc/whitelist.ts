@@ -1,7 +1,8 @@
-// 原版材质的白名单：前端只能按这里列出的路径向材质协议取图，与后端协议的常量白名单逐项一致。
-// 只有两类：实例封面方块的面（16 种方块共 17 张图）与默认皮肤（新式 18 张、旧式 2 张）。
-// 物品、粒子、界面精灵等一律不在其列，原版材质因此只能出现在实例方块与皮肤这两个点缀位上。
+// 原版材质的取址规则：前端只能按这里允许的路径向材质协议取图。
+// 只有两类：方块材质 block/<id>（实例封面方块的面、卡面的材质平铺、本机材质源里任意完整方块）与默认皮肤
+// （新式 18 张、旧式 2 张）。物品、粒子、界面精灵等一律不在其列，原版材质因此只能出现在实例方块、卡面与皮肤上。
 // 路径为材质根目录下去掉 .png 的相对路径，例如 block/cherry_planks。
+// 16 种封面预设的面（17 张图）与默认皮肤在 ipc/art.ts 另有一份常量名单，与后端逐项一致，由一致性测试钉住。
 
 export type Rgb = readonly [r: number, g: number, b: number];
 
@@ -65,5 +66,15 @@ export const DEFAULT_SKIN_PATHS: readonly string[] = [
   "entity/alex",
 ];
 
-/** 协议允许读取的全部原版材质路径。 */
-export const ART_PATHS: ReadonlySet<string> = new Set([...COVER_TEXTURES.flatMap((c) => [c.side, c.top]), ...DEFAULT_SKIN_PATHS]);
+/** 16 种封面预设用到的全部面（17 张图）：材质源就绪后预加载它们。 */
+export const PRESET_FACE_PATHS: readonly string[] = [...new Set(COVER_TEXTURES.flatMap((c) => [c.side, c.top]))];
+
+/** 方块材质路径：与方块目录（mc/catalog）校验面路径的规则相同；不含子目录与扩展名，也就没有路径穿越的余地。 */
+const BLOCK_PATH = /^block\/[a-z0-9_]{1,64}$/;
+
+const SKIN_PATHS: ReadonlySet<string> = new Set(DEFAULT_SKIN_PATHS);
+
+/** 协议允许读取的原版材质路径：任意方块材质与默认皮肤名单。比较逐字节进行，不做任何规范化。 */
+export function isArtPath(path: string): boolean {
+  return BLOCK_PATH.test(path) || SKIN_PATHS.has(path);
+}
