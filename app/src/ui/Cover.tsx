@@ -25,6 +25,13 @@ const PARALLAX_MAX_PX = 8;
  */
 const TILE_OVERHANG_PX = 12;
 
+/**
+ * 远程图解码上限的分档步长（设备像素）。上限一变，取图钩子就丢掉旧位图重新解码，卡面先闪回平铺或渐变再淡入；
+ * 按卡宽精确算时拖动窗口改宽逐帧都在闪。向上取整到档位，同一档内改宽只重画画布；一档 256 让多解出的边长不到 256，
+ * 整页几十张图常驻也多不了多少内存。
+ */
+const DECODE_EDGE_STEP_PX = 256;
+
 export interface CoverProps {
   /** 底色与底纹的色相：实例为封面色相，资源为资源色相。 */
   hue: number;
@@ -71,8 +78,9 @@ export function Cover({ hue, seed, height, remoteUrl = null, texture = null, ide
     return () => observer.disconnect();
   }, []);
 
-  // 宽度量出来之前不加载：解码尺寸按卡面最长边 × dpr × 2 封顶
-  const image = useRemoteImage(remoteUrl, near && width > 0, Math.ceil(Math.max(width, height) * dpr * 2));
+  // 宽度量出来之前不加载：解码尺寸按卡面最长边 × dpr × 2 封顶，再向上取整到档位
+  const maxEdge = Math.ceil((Math.max(width, height) * dpr * 2) / DECODE_EDGE_STEP_PX) * DECODE_EDGE_STEP_PX;
+  const image = useRemoteImage(remoteUrl, near && width > 0, maxEdge);
   const remote = image.status === "ready";
   const textured = !remote && tile !== null;
   const media = remote || textured;

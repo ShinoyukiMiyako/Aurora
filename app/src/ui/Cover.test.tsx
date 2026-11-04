@@ -143,6 +143,37 @@ describe("Cover", () => {
     expect(canvas.draws.at(-1)?.args).toEqual([0, 0, 1600, 900, 0, 0, 320, 180]);
   });
 
+  it("远程图解码上限按 256 设备像素分档：同一档内改宽只重画画布、不再解码，跨档才重新解码", async () => {
+    const resolve = vi.fn(async (url: string) => url);
+    view = render(
+      <RemoteImageProvider resolve={resolve}>
+        <Cover hue={20} seed="p" height={180} remoteUrl="https://cdn.modrinth.com/gallery/a.png" />
+      </RemoteImageProvider>,
+    );
+    intersect();
+    resize.resize(cover(), 320);
+    await settle();
+    // 最长边 320 × dpr 1 × 2 = 640，取整到 768：1600 × 900 的原图先整张解码，再缩到 768 × 432
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(createImageBitmap).toHaveBeenCalledTimes(2);
+    expect(createImageBitmap).toHaveBeenLastCalledWith(expect.anything(), { resizeWidth: 768, resizeHeight: 432, resizeQuality: "high" });
+
+    // 360 × 2 = 720 仍在 768 档：不丢位图、不闪回，只按新宽度重画
+    resize.resize(cover(), 360);
+    await settle();
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(createImageBitmap).toHaveBeenCalledTimes(2);
+    expect(cover().dataset.source).toBe("remote");
+    expect(canvas.draws.at(-1)?.args).toEqual([0, 50, 1600, 800, 0, 0, 360, 180]);
+
+    // 400 × 2 = 800 进了 1024 档：重新解码
+    resize.resize(cover(), 400);
+    await settle();
+    expect(resolve).toHaveBeenCalledTimes(2);
+    expect(createImageBitmap).toHaveBeenCalledTimes(4);
+    expect(createImageBitmap).toHaveBeenLastCalledWith(expect.anything(), { resizeWidth: 1024, resizeHeight: 576, resizeQuality: "high" });
+  });
+
   it("remote 读不到、又没有平铺：回落 art，不加压暗", async () => {
     view = render(
       <RemoteImageProvider resolve={async () => Promise.reject(new Error("离线"))}>
