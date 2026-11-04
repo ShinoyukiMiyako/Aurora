@@ -1,18 +1,22 @@
-//! 原版材质服务：运行时从玩家本机的游戏文件里读出界面点缀要用的那几张图，经自定义协议交给前端。
+//! 原版材质服务：运行时从玩家本机的游戏文件里读出界面点缀要用的图，经自定义协议交给前端。
 //!
-//! 安装包与仓库里不带任何原版文件；能读到什么取决于玩家装过什么，读不到时界面画代码绘制的回落件。
-//! 回落是设计内的正常路径，不打断用户，但每次回落的原因都以 warn 写进日志。
+//! 安装包与仓库里不带任何原版文件；能读到什么取决于玩家装过什么（或手动下载过什么），读不到时界面画
+//! 代码绘制的回落件。回落是设计内的正常路径，不打断用户，但每次回落的原因都以 warn 写进日志。
 //!
-//! - [`whitelist`]：允许读取的文件名单（17 张方块面 + 20 张默认皮肤）。
+//! - [`whitelist`]：允许读取的文件：`block/` 下的方块面（实例方块与卡面的材质平铺，可以是材质源里
+//!   任意完整方块）与 20 张默认皮肤；预设的 17 张方块面是必抽名单。
 //! - [`default_skin`]：没有自定义皮肤的玩家（离线账户）在原版里显示哪一套默认皮肤。
-//! - 材质源：候选游戏目录里最新的可信原版客户端 jar（选择规则见 `source`）。
-//! - 磁盘缓存：选中材质源后把名单内文件一次抽到 `<缓存目录>/vanilla-art/<版本>/`。
+//! - 材质源：按「本机完整集 > 下载缓存 > 本机降级集」取第一个可用的。本机的是候选游戏目录里最新的可信
+//!   原版客户端 jar（选择规则见 `source`），下载缓存是玩家手动下载、抽完即删 jar 的那一份。
+//! - 方块目录：从材质源的方块状态与模型推出全部完整立方体方块的各面、染色、色相与名称（见 `catalog`）。
+//! - 磁盘缓存：选中材质源后把目录引用到的方块面、必抽名单与皮肤一次抽到 `<缓存目录>/vanilla-art/<版本>/`。
 //! - 全景：只认一张固定哈希的资源对象，直接从 `assets/objects` 读。
 //! - 远程皮肤与缩略图：按 `sha1(url)` 缓存在 `<缓存目录>/skins`、`<缓存目录>/thumbs`。
 //! - 卡面图片：玩家给实例卡面选的图片存在实例自己的目录里，列实例时按 `sha1(路径)` 登记给 `/cover/`。
 //!
 //! [`TextureService`] 不依赖门面锁：长任务持锁时取图照常。它可以廉价克隆（内部是 `Arc`）。
 
+mod catalog;
 pub mod default_skin;
 mod disk_cache;
 mod download;
@@ -28,6 +32,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use petalfall_auth::{SkinModel, SkinRef};
 
+pub use catalog::{BlockCatalog, CatalogBlock};
 pub use default_skin::{DefaultSkin, default_skin};
 pub use download::{ArtDownloadProgress, ArtDownloadStage};
 pub use remote::{THUMB_HOSTS, ThumbError};
@@ -128,8 +133,10 @@ impl TexResponse {
 }
 
 struct Active {
-    source: SelectedSource,
+    /// 缓存目录：本机材质源是 `vanilla-art/<版本>`，下载来的是固定的下载缓存目录。
+    dir: PathBuf,
     files: BTreeSet<String>,
+    catalog: BlockCatalog,
 }
 
 struct State {
@@ -246,9 +253,17 @@ impl TextureService {
     pub fn status(&self) -> ArtStatus {
         let state = lock(&self.inner.state);
         ArtStatus {
-            source: state.active.as_ref().map(|a| a.source.version_id.clone()),
+            source: state.active.as_ref().map(|a| a.catalog.version_id.clone()),
             panorama: state.panorama.is_some(),
         }
+    }
+
+    /// 当前材质源的方块目录（只读内存）；没有材质源时为 None。
+    pub fn catalog(&self) -> Option<BlockCatalog> {
+        lock(&self.inner.state)
+            .active
+            .as_ref()
+            .map(|a| a.catalog.clone())
     }
 
     /// 重新选择材质源与全景并准备磁盘缓存，返回新状态；同时清空进程内缓存。
@@ -258,14 +273,11 @@ impl TextureService {
     pub async fn refresh(&self, candidates: &[PathBuf]) -> ArtStatus {
         let _running = self.inner.refreshing.lock().await;
         let mut hashes = std::mem::take(&mut lock(&self.inner.state).hashes);
-        let selected = source::select_source(candidates, &self.inner.opener, &mut hashes).await;
-        let active = match selected {
-            Some(source) => self.prepare_cache(source).await,
-            None => {
-                tracing::warn!(candidates = ?candidates, "候选游戏目录里没有可用的原版材质源，界面点缀全部回落");
-                None
-            }
-        };
+        let local = source::select_source(candidates, &self.inner.opener, &mut hashes).await;
+        let active = self.choose(local).await;
+        if active.is_none() {
+            tracing::warn!(candidates = ?candidates, "候选游戏目录里没有可用的原版材质源，也没有下载过的材质，界面点缀全部回落");
+        }
         let panorama = self.find_panorama(candidates).await;
         let mut state = lock(&self.inner.state);
         state.hashes = hashes;
@@ -273,28 +285,51 @@ impl TextureService {
         state.panorama = panorama;
         state.lru.clear();
         ArtStatus {
-            source: state.active.as_ref().map(|a| a.source.version_id.clone()),
+            source: state.active.as_ref().map(|a| a.catalog.version_id.clone()),
             panorama: state.panorama.is_some(),
         }
     }
 
-    async fn prepare_cache(&self, source: SelectedSource) -> Option<Active> {
+    /// 按「本机完整集 > 下载缓存 > 本机降级集」取第一个准备得起来的：下载的是某个时点最新正式版的完整
+    /// 材质，比本机老版本的降级集全；本机有完整集时用本机的，跟着玩家装的版本走。
+    async fn choose(&self, local: Option<SelectedSource>) -> Option<Active> {
+        let degraded = match local {
+            Some(source) if source.full => {
+                if let Some(active) = self.prepare_local(source).await {
+                    return Some(active);
+                }
+                None
+            }
+            other => other,
+        };
+        if let Some(active) = self.prepare_download().await {
+            return Some(active);
+        }
+        match degraded {
+            Some(source) => self.prepare_local(source).await,
+            None => None,
+        }
+    }
+
+    async fn prepare_local(&self, source: SelectedSource) -> Option<Active> {
         let root = self.art_root();
         let opener = self.inner.opener.clone();
         let job = source.clone();
         let prepared = tokio::task::spawn_blocking(move || {
             std::fs::create_dir_all(&root)
                 .map_err(|e| format!("创建材质缓存目录 {} 失败：{e}", root.display()))?;
-            disk_cache::ensure(&root, &job, &opener)
+            let prepared = disk_cache::ensure(&root, &job, &opener)?;
+            disk_cache::remove_stale(&root, &prepared.dir);
+            Ok::<_, String>(prepared)
         })
         .await;
         match prepared {
-            Ok(Ok(files)) => {
-                tracing::info!(version = %source.version_id, full = source.full, files = files.len(), "原版材质源就绪");
-                Some(Active { source, files })
+            Ok(Ok(prepared)) => {
+                tracing::info!(version = %source.version_id, full = source.full, files = prepared.files.len(), blocks = prepared.catalog.blocks.len(), "原版材质源就绪");
+                Some(active(prepared))
             }
             Ok(Err(reason)) => {
-                tracing::warn!(version = %source.version_id, %reason, "准备原版材质缓存失败，界面点缀全部回落");
+                tracing::warn!(version = %source.version_id, %reason, "准备原版材质缓存失败");
                 None
             }
             Err(err) => {
@@ -302,6 +337,47 @@ impl TextureService {
                 None
             }
         }
+    }
+
+    /// 用下载缓存：只读缓存目录，不需要 jar。
+    async fn prepare_download(&self) -> Option<Active> {
+        let root = self.art_root();
+        let loaded = tokio::task::spawn_blocking(move || {
+            let prepared = disk_cache::load_download(&root)?;
+            disk_cache::remove_stale(&root, &prepared.dir);
+            Some(prepared)
+        })
+        .await;
+        match loaded {
+            Ok(Some(prepared)) => {
+                tracing::info!(version = %prepared.catalog.version_id, files = prepared.files.len(), blocks = prepared.catalog.blocks.len(), "使用下载来的原版材质");
+                Some(active(prepared))
+            }
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(error = %err, "读取下载材质缓存的后台任务异常结束");
+                None
+            }
+        }
+    }
+
+    /// 把下载来的客户端 jar 抽进下载缓存并标记来源为下载，替换之前下载的那份；之后 [`Self::refresh`]
+    /// 在本机没有完整材质源时用它，取图与列目录都不再需要 jar。不改当前材质源，调用方随后调 `refresh`
+    /// 重选；jar 与中文语言文件也由调用方事后删除（这里抽完就关了 jar）。与 `refresh` 互斥。
+    pub async fn adopt_download(&self, client: DownloadedClient) -> Result<(), String> {
+        let _running = self.inner.refreshing.lock().await;
+        let root = self.art_root();
+        let opener = self.inner.opener.clone();
+        let version = client.version_id.clone();
+        let prepared = tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&root)
+                .map_err(|e| format!("创建材质缓存目录 {} 失败：{e}", root.display()))?;
+            disk_cache::adopt(&root, &client, &opener)
+        })
+        .await
+        .map_err(|e| format!("抽取下载材质的后台任务异常结束：{e}"))??;
+        tracing::info!(%version, files = prepared.files.len(), blocks = prepared.catalog.blocks.len(), "下载来的原版材质已抽进缓存");
+        Ok(())
     }
 
     async fn find_panorama(&self, candidates: &[PathBuf]) -> Option<PathBuf> {
@@ -380,20 +456,20 @@ impl TextureService {
             return TexResponse::BadRequest("缺少版本戳参数 v".to_owned());
         };
         let key = format!("art:{version}:{art_path}");
-        let listed = {
+        let dir = {
             let mut guard = lock(&self.inner.state);
             // 拆成字段级借用：下面要同时读 active、改 lru。
             let state: &mut State = &mut guard;
             let Some(active) = &state.active else {
                 return TexResponse::NotFound("没有可用的原版材质源".to_owned());
             };
-            if active.source.version_id != version {
+            if active.catalog.version_id != version {
                 return TexResponse::NotFound(format!(
                     "版本戳 {version} 已过期，当前材质源是 {}",
-                    active.source.version_id
+                    active.catalog.version_id
                 ));
             }
-            let listed = active.files.contains(art_path);
+            let listed = active.files.contains(art_path).then(|| active.dir.clone());
             match state.lru.get(&key) {
                 Some(Cached::Bytes(body)) => return png(body),
                 Some(Cached::Missing) => {
@@ -402,11 +478,11 @@ impl TextureService {
                 None => listed,
             }
         };
-        if !listed {
+        let Some(dir) = dir else {
             lock(&self.inner.state).lru.put(key, Cached::Missing);
             return TexResponse::NotFound("材质源里没有这个文件".to_owned());
-        }
-        let file = disk_cache::texture_file(&self.art_root(), version, art_path);
+        };
+        let file = disk_cache::texture_file(&dir, art_path);
         match tokio::fs::read(&file).await {
             Ok(bytes) => {
                 let body = Arc::new(bytes);
@@ -678,6 +754,14 @@ impl TextureService {
         }
         let mut state = lock(&self.inner.state);
         state.thumbs.retain(|_, path| !removed.contains(path));
+    }
+}
+
+fn active(prepared: disk_cache::Prepared) -> Active {
+    Active {
+        dir: prepared.dir,
+        files: prepared.files,
+        catalog: prepared.catalog,
     }
 }
 

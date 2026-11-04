@@ -1,6 +1,7 @@
-//! 原版材质服务的命令：状态查询、账户皮肤、远程缩略图登记。图本身经 `petalfall-tex` 协议取
+//! 原版材质服务的命令：状态查询、方块目录、账户皮肤、远程缩略图登记。图本身经 `petalfall-tex` 协议取
 //! （见 [`crate::textures`]），这里只回答「有没有、用哪个键去取」。
 
+use petalfall_core::art::BlockCatalog;
 use petalfall_core::{
     default_skin, Account, AccountType, ArtStatus, SkinInfo, SkinModel, TextureService, ThumbError,
 };
@@ -36,6 +37,10 @@ impl From<ArtStatus> for ArtStatusDto {
         }
     }
 }
+
+/// 方块目录 DTO，即前端的 `BlockCatalogDto`。门面的 [`BlockCatalog`] 序列化形状本来就是它（缓存里的
+/// catalog.json 也是这个形状），不另抄一份字段；形状由下面的测试钉住。
+pub type BlockCatalogDto = BlockCatalog;
 
 /// 账户皮肤 DTO。远程皮肤的 `sha1` 用来拼协议地址 `/skin/<sha1>.png`；默认皮肤的 `path` 是材质名单里的
 /// 路径，经 `/art/<path>.png` 从本机游戏文件读。
@@ -105,6 +110,15 @@ pub async fn art_status(textures: State<'_, TextureService>) -> Result<ArtStatus
     Ok(textures.status().into())
 }
 
+/// 当前材质源的方块目录（只读内存）：材质源里全部完整立方体方块的各面、染色、色相与名称，按 id 排序；
+/// 没有材质源时为 null。材质源变了会推送 `petalfall://art-changed`，前端收到后重新取。
+#[tauri::command]
+pub async fn art_blocks(
+    textures: State<'_, TextureService>,
+) -> Result<Option<BlockCatalogDto>, CommandError> {
+    Ok(textures.catalog())
+}
+
 /// 账户当前皮肤：远程皮肤就绪时返回取图键与模型；离线账户返回它进游戏后显示的原版默认皮肤；
 /// 正版与外置账户档案没有皮肤或下载失败时为 null，界面画剪影。
 #[tauri::command]
@@ -171,6 +185,72 @@ mod tests {
             }))
             .unwrap(),
             json!({ "source": { "version_id": "1.21.1" }, "panorama": true })
+        );
+    }
+
+    /// 前端 `ipc/art.ts` 的 `BlockCatalogDto` 按这个形状校验：字段名、null、染色是 [r, g, b] 数组、色相是整数。
+    #[test]
+    fn block_catalog_serializes_in_the_frontend_shape() {
+        let catalog: BlockCatalogDto = BlockCatalog {
+            version_id: "26.3".into(),
+            blocks: vec![
+                petalfall_core::art::CatalogBlock {
+                    id: "furnace".into(),
+                    top: "block/furnace_top".into(),
+                    side: "block/furnace_side".into(),
+                    front: Some("block/furnace_front".into()),
+                    top_tint: None,
+                    side_tint: None,
+                    hue: 30,
+                    name_en: Some("Furnace".into()),
+                    name_zh: Some("熔炉".into()),
+                },
+                petalfall_core::art::CatalogBlock {
+                    id: "oak_leaves".into(),
+                    top: "block/oak_leaves".into(),
+                    side: "block/oak_leaves".into(),
+                    front: None,
+                    top_tint: Some([72, 181, 24]),
+                    side_tint: Some([72, 181, 24]),
+                    hue: 102,
+                    name_en: None,
+                    name_zh: None,
+                },
+            ],
+        };
+        assert_eq!(
+            serde_json::to_value(Some(catalog)).unwrap(),
+            json!({
+                "version_id": "26.3",
+                "blocks": [
+                    {
+                        "id": "furnace",
+                        "top": "block/furnace_top",
+                        "side": "block/furnace_side",
+                        "front": "block/furnace_front",
+                        "top_tint": null,
+                        "side_tint": null,
+                        "hue": 30,
+                        "name_en": "Furnace",
+                        "name_zh": "熔炉"
+                    },
+                    {
+                        "id": "oak_leaves",
+                        "top": "block/oak_leaves",
+                        "side": "block/oak_leaves",
+                        "front": null,
+                        "top_tint": [72, 181, 24],
+                        "side_tint": [72, 181, 24],
+                        "hue": 102,
+                        "name_en": null,
+                        "name_zh": null
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(None::<BlockCatalogDto>).unwrap(),
+            json!(null)
         );
     }
 

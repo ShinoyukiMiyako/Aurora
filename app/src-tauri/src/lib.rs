@@ -169,6 +169,7 @@ pub fn run() {
             commands::accounts::refresh_account,
             // -- art --
             commands::art::art_status,
+            commands::art::art_blocks,
             commands::art::skin_info,
             commands::art::thumb_register,
             // -- instances --
