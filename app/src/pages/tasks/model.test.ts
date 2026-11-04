@@ -459,7 +459,7 @@ describe("页头副标题", () => {
   });
 
   it("除本地任务外的每一类运行时都算下载，修复补的是游戏文件", () => {
-    const local: readonly TaskKind[] = ["world_backup", "world_restore", "modpack_export"];
+    const local: readonly TaskKind[] = ["world_backup", "world_restore", "modpack_export", "instance_move"];
     for (const kind of TASK_KINDS.filter((k) => !local.includes(k))) {
       expect(subtitleOf(bucketTasks([running(kind)])), kind).toBe("1 个下载中，0 个排队 · 最多 3 个并行");
     }
@@ -480,8 +480,8 @@ describe("页头副标题", () => {
 });
 
 describe("重试要不要联网", () => {
-  it("备份与恢复存档只碰本机文件；导出要向平台反查 Mod，其余都要下载", () => {
-    const local: readonly TaskKind[] = ["world_backup", "world_restore"];
+  it("备份与恢复存档、移到别的游戏目录只碰本机文件；导出要向平台反查 Mod，其余都要下载", () => {
+    const local: readonly TaskKind[] = ["world_backup", "world_restore", "instance_move"];
     for (const kind of TASK_KINDS) expect(retryNeedsNetwork(task(kind, { kind })), kind).toBe(!local.includes(kind));
   });
 });

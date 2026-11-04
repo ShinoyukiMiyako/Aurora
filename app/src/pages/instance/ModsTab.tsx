@@ -494,7 +494,9 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
         <UpdateProgress instanceId={id} />
       </Inset>
 
-      {ops.locks.mods !== null && <Banner tone="info" title={ops.locks.mods === "running" ? MODS_COPY.bannerRunning : MODS_COPY.bannerInstalling} />}
+      {ops.locks.mods !== null && (
+        <Banner tone="info" title={ops.locks.mods === "running" ? MODS_COPY.bannerRunning : ops.locks.mods === "moving" ? MODS_COPY.bannerMoving : MODS_COPY.bannerInstalling} />
+      )}
 
       {load.view === "skeleton" && (
         <Card padding="none">

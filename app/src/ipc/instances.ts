@@ -10,6 +10,7 @@
 
 import { invoke } from "./bridge";
 import type { PlatformId } from "./discover";
+import { isIpcError } from "./errors";
 
 export type LoaderChoice = "fabric" | "quilt" | "forge" | "neoforge";
 export const LOADER_CHOICES: readonly LoaderChoice[] = ["fabric", "quilt", "forge", "neoforge"];
@@ -19,9 +20,10 @@ export type DetectedLoaderKind = LoaderChoice | "optifine" | "liteloader";
 
 /**
  * 实例此刻在做的事。inherited：别的实例正以它为基底（在那个实例的 inheritsFrom 链上），那个实例启动到游戏退出、
- * 补全或导入整合包期间，这个实例的启动、删除、改名、补全以 instance_busy 拒绝，detail.used_by 是正在用它的实例。
+ * 补全、导入整合包或移到别的游戏目录期间，这个实例的启动、删除、改名、补全以 instance_busy 拒绝，detail.used_by 是正在用它的实例。
+ * moving：正在移到另一个游戏目录，与一切互斥。
  */
-export type InstanceActivity = "installing" | "repairing" | "renaming" | "deleting" | "launching" | "running" | "modifying" | "inherited" | "backing_up";
+export type InstanceActivity = "installing" | "repairing" | "renaming" | "deleting" | "launching" | "running" | "modifying" | "inherited" | "backing_up" | "moving";
 
 export interface LoaderDto {
   kind: DetectedLoaderKind;
@@ -512,3 +514,131 @@ export const openFolder = (target: FolderTarget, id: string | null, world: strin
  * 旧备份目录），或这次运行里导出存档、导出整合包写成的文件。别的路径后端报 invalid_argument。
  */
 export const revealInFolder = (path: string): Promise<void> => invoke<void>("reveal_in_folder", { path });
+
+// ---------------------------------------------------------------- 移到另一个游戏目录
+
+/**
+ * 拦着一次移动的问题。预检把它们全列出来；执行前后端重新预检，遇到的第一个以 instance_move_blocked 拒绝，
+ * detail.blocker 是同一形状。same_directory：目标就是实例现在所在的游戏目录；target_inside_source：目标在实例目录里面；
+ * name_taken：目标里已有同名（不分大小写）的版本；has_dependents：别的实例经 inheritsFrom 依赖它；links：实例目录或它的
+ * 备份目录里有符号链接、目录联接；base_conflict：目标里已有同名、内容不同的基底版本；insufficient_space：要写的字节加
+ * 256 MiB 余量超过目标盘剩余；pending：上一次移动中断后还没收尾。
+ */
+export type MoveBlockerDto =
+  | { kind: "same_directory" }
+  | { kind: "target_inside_source" }
+  | { kind: "name_taken" }
+  | { kind: "has_dependents"; dependents: string[] }
+  | { kind: "links"; paths: string[] }
+  | { kind: "base_conflict"; bases: string[] }
+  | { kind: "insufficient_space"; needed: number; available: number }
+  | { kind: "pending" };
+
+/** 移动前的预检，不写盘、不占实例。源是当前游戏目录，目标可以还不存在。 */
+export interface MovePreviewDto {
+  id: string;
+  source: string;
+  target: string;
+  /** 目标在游戏目录列表里的显示名；还没记录的新文件夹按同一规则推出。 */
+  target_name: string;
+  /** 目标已在游戏目录列表里；为 false 时移动成功后会记进去。 */
+  target_registered: boolean;
+  /** 两个游戏目录在同一个卷上：实例目录与备份直接改名过去，不复制。 */
+  same_volume: boolean;
+  instance_bytes: number;
+  instance_files: number;
+  /** 随实例带走的存档备份。 */
+  backup_bytes: number;
+  backup_count: number;
+  /** 目标里缺、要从原目录补过去的共用文件（库、资源、日志配置），不含基底版本。 */
+  dependency_files: number;
+  dependency_bytes: number;
+  /** 目标里没有、要带过去的基底版本，由近及远。 */
+  bases_to_copy: string[];
+  /** 目标里已有、内容相同直接用的基底版本。 */
+  reused_bases: string[];
+  /** 原目录里也缺的共用文件数，下次启动时由补全下载。 */
+  missing_in_source: number;
+  /** 这次要写进目标盘的字节，不含余量。 */
+  required_bytes: number;
+  /** 目标盘剩余的字节。 */
+  available_bytes: number;
+  /** 不隔离时存档、Mod 与游戏设置在原游戏目录根下和别的实例共用，不跟着走。 */
+  isolated: boolean;
+  /** 为空才能移。 */
+  blockers: MoveBlockerDto[];
+}
+
+/** 移动已经完成、只是有一项没跟过去要告诉玩家；reason 是人读的原因。 */
+export type MoveFollowUpDto =
+  | { kind: "play_records"; reason: string }
+  | { kind: "world_backups"; reason: string }
+  | { kind: "cleanup"; path: string; reason: string };
+
+export interface MoveOutcomeDto {
+  id: string;
+  source: string;
+  target: string;
+  target_name: string;
+  /** 目标是这次新记进游戏目录列表的。 */
+  registered: boolean;
+  /** 为空即全部跟过去了。 */
+  follow_ups: MoveFollowUpDto[];
+}
+
+/** 执行前重新预检遇到了拦截项：detail 为 { id, blocker }，blocker 同 MoveBlockerDto。 */
+export const INSTANCE_MOVE_BLOCKED_ERROR_CODE = "instance_move_blocked";
+
+/** 跨盘复制出的文件读回比对不上：这次移动已放弃，原件没动。detail 为 { path }，是对不上的那份副本。 */
+export const INSTANCE_MOVE_VERIFY_FAILED_ERROR_CODE = "instance_move_verify_failed";
+
+/** 预检。target 不合法或访问不到时以 invalid_game_directory 拒绝。 */
+export const previewInstanceMove = (id: string, target: string): Promise<MovePreviewDto> => invoke<MovePreviewDto>("preview_instance_move", { id, target });
+
+/**
+ * 长任务：把实例移到 target。实例记为 moving，继承链上的基底按 inherited 占住；进度经 core-event 推 Phase 与 Download
+ * （Download 的 total、finished 为文件数，bytes、total_bytes 为字节，每一步重新计数）。可用 cancelTask(taskId) 取消，
+ * 进入提交后取消不再生效、照常成功返回。侧栏固定由后端随移动去掉。
+ */
+export const moveInstance = (taskId: string, id: string, target: string): Promise<MoveOutcomeDto> => invoke<MoveOutcomeDto>("move_instance", { taskId, id, target });
+
+function stringList(raw: unknown, what: string): string[] {
+  if (!Array.isArray(raw) || raw.some((item) => typeof item !== "string")) throw new Error(`${what} 应是字符串数组，实为 ${JSON.stringify(raw)}`);
+  return raw as string[];
+}
+
+function byteCount(raw: unknown, what: string): number {
+  if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0) throw new Error(`${what} 应是非负整数，实为 ${JSON.stringify(raw)}`);
+  return raw;
+}
+
+/** 逐项校验一个拦截项（来自错误详情或任务日志），形状不对就抛错。 */
+export function parseMoveBlocker(raw: unknown, where: string): MoveBlockerDto {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error(`${where} 应是对象，实为 ${JSON.stringify(raw)}`);
+  const r = raw as Record<string, unknown>;
+  switch (r.kind) {
+    case "same_directory":
+    case "target_inside_source":
+    case "name_taken":
+    case "pending":
+      return { kind: r.kind };
+    case "has_dependents":
+      return { kind: r.kind, dependents: stringList(r.dependents, `${where}.dependents`) };
+    case "links":
+      return { kind: r.kind, paths: stringList(r.paths, `${where}.paths`) };
+    case "base_conflict":
+      return { kind: r.kind, bases: stringList(r.bases, `${where}.bases`) };
+    case "insufficient_space":
+      return { kind: r.kind, needed: byteCount(r.needed, `${where}.needed`), available: byteCount(r.available, `${where}.available`) };
+    default:
+      throw new Error(`${where} 的种类不认识：${JSON.stringify(r.kind)}`);
+  }
+}
+
+/** 错误码是 instance_move_blocked 时校验并返回 detail.blocker，形状不对就抛错；其余错误返回 null。 */
+export function moveBlockerOf(error: unknown): MoveBlockerDto | null {
+  if (!isIpcError(error) || error.code !== INSTANCE_MOVE_BLOCKED_ERROR_CODE) return null;
+  const detail = error.detail;
+  if (typeof detail !== "object" || detail === null) throw new Error(`${INSTANCE_MOVE_BLOCKED_ERROR_CODE} 没有带 detail：${error.message}`);
+  return parseMoveBlocker((detail as Record<string, unknown>).blocker, `${INSTANCE_MOVE_BLOCKED_ERROR_CODE} 的 detail.blocker`);
+}

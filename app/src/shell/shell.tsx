@@ -13,7 +13,7 @@ import { LaunchHostProvider, type ConfirmOptions, type LaunchHost } from "../lau
 import { bindArtStatus } from "../mc/binding";
 import type { CreateInstancePreset } from "../state/flows";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../state/launcher";
-import { routeInstanceId, sameRoute, type Route } from "../state/route";
+import { LIBRARY_ROUTE, routeInstanceId, sameRoute, type Route } from "../state/route";
 import { activeDownloads, activeTasks, pinnedInstances } from "../state/selectors";
 import { launchPromptCopy } from "../state/store";
 import type { Toast } from "../state/toasts";
@@ -172,6 +172,7 @@ interface ConfirmRequest {
 function ShellCore({ children }: { children: ReactNode }) {
   // 外壳根只订阅自己用到的几片：每 100 ms 的下载进度与每批游戏日志都不让它重渲染
   const lastRename = useLauncherSelector((s) => s.lastRename);
+  const lastMove = useLauncherSelector((s) => s.lastMove);
   const instancesReady = useLauncherSelector((s) => s.status.instances.kind === "ready");
   const ids = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
   const crashedId = useLauncherSelector((s) => (s.session !== null && s.session.phase === "crashed" ? s.session.instanceId : null));
@@ -229,18 +230,26 @@ function ShellCore({ children }: { children: ReactNode }) {
   const rename = lastRename !== null && lastRename.seq !== appliedRename ? lastRename : null;
   const viewHistory = rename === null ? history : renameInHistory(history, rename.from, rename.to);
 
+  // 移走也不是删除：开着的正是移走的那个实例时去实例库，剪掉它的历史项后落回上一页的话，上一页多半还是它的别的标签，
+  // 一样会被剪掉，最后停在哪里说不准。移走与新列表同一次到达，这一帧 effectiveRoute 已按实例库渲染
+  const [appliedMove, setAppliedMove] = useState(() => (lastMove === null ? 0 : lastMove.seq));
+  const move = lastMove !== null && lastMove.seq !== appliedMove ? lastMove : null;
+
   const instanceIds = useMemo(() => new Set(ids), [ids]);
   useEffect(() => {
     let next = historyRef.current;
     if (rename !== null) next = renameInHistory(next, rename.from, rename.to);
+    const leaveMoved = move !== null && routeInstanceId(currentEntry(next).route) === move.id;
+    if (leaveMoved) next = navGo(next, LIBRARY_ROUTE);
     // 实例列表还没读到时不剪：此时列表为空，会把所有实例页都当成失效
     if (instancesReady) next = pruneHistory(next, (r) => {
       const id = routeInstanceId(r);
       return id === null || instanceIds.has(id);
     });
-    commit(next, null);
+    commit(next, leaveMoved ? "go" : null);
     if (rename !== null) setAppliedRename(rename.seq);
-  }, [commit, instanceIds, instancesReady, rename]);
+    if (move !== null) setAppliedMove(move.seq);
+  }, [commit, instanceIds, instancesReady, rename, move]);
 
   const current = currentEntry(viewHistory);
   const route = effectiveRoute(current.route, (id) => !instancesReady || instanceIds.has(id));

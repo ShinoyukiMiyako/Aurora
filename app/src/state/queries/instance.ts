@@ -4,14 +4,14 @@ import { useRef } from "react";
 import { instanceSettingsFromDto, type InstanceSettings } from "../../domain/adapt";
 import { lastCrash, lastLaunchLog, type CrashReportDto, type LaunchLogDto } from "../../ipc/diagnostics";
 import { listHistory, rollbackChecks, type HistoryEvent, type RollbackCheck } from "../../ipc/history";
-import { getInstanceSettings, listInstanceContent, type InstanceContentDto } from "../../ipc/instances";
+import { getInstanceSettings, listInstanceContent, previewInstanceMove, type InstanceContentDto, type MovePreviewDto } from "../../ipc/instances";
 import { previewModpackExport, type ModpackExportPreviewDto } from "../../ipc/modpack";
 import { checkUpdates, listMods, modUpdateChangelog, type InstalledMod, type ModChangelog, type UpdateCandidate } from "../../ipc/mods";
 import { invalidate, resources, useResource, type ResourceResult } from "../resource";
 
 export type { CrashClueDto, CrashReportDto, CrashSuspectDto, LaunchLogDto } from "../../ipc/diagnostics";
 export type { HistoryEvent, RollbackCheck } from "../../ipc/history";
-export type { InstanceContentDto, PackDto, ResourcePackDto, ShaderPackDto, WorldDto } from "../../ipc/instances";
+export type { InstanceContentDto, MoveBlockerDto, MovePreviewDto, PackDto, ResourcePackDto, ShaderPackDto, WorldDto } from "../../ipc/instances";
 export type { InstalledMod, ModChangelog, ModMetadata, ModSource, UpdateCandidate, UpdateHold } from "../../ipc/mods";
 export { EXPORT_EXTRAS } from "../../ipc/modpack";
 export type { ExportBundledModDto, ExportExtra, ExportExtraStatDto, ModpackExportOptions, ModpackExportPreviewDto } from "../../ipc/modpack";
@@ -85,6 +85,20 @@ export function useModpackExportPreview(id: string | null): ResourceResult<Modpa
     invalidate(k);
   }
   return useResource(k, () => previewModpackExport(need(id)));
+}
+
+/**
+ * move-preview:<id>:<目标路径> —— 移到别的游戏目录前的预检。盘面与目标盘的剩余空间随时会变，挂载者（移动弹窗）每选一次目标
+ * 都先丢掉旧结果再订阅，选回之前看过的目标也重读；target 为 null（还没选目标）时不请求。
+ */
+export function useInstanceMovePreview(id: string, target: string | null): ResourceResult<MovePreviewDto> {
+  const k = target === null ? null : key("move-preview", id, target);
+  const fresh = useRef<string | null>(null);
+  if (k !== null && fresh.current !== k) {
+    fresh.current = k;
+    invalidate(k);
+  }
+  return useResource(k, () => previewInstanceMove(id, need(target)));
 }
 
 /**

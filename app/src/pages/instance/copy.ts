@@ -49,28 +49,32 @@ export const HERO_COPY = {
 export const LOCK_REASON = {
   /** 新建或导入还没落盘的占位项：盘上可能还没有实例目录，打开哪个文件夹都只会报未安装。 */
   placeholderFolder: "新建的实例还没装好，装完后才能打开文件夹",
-  /** 打开工作子目录与改实例设置：安装、补全、改名、删除进行中时。 */
+  /** 打开工作子目录与改实例设置：安装、补全、改名、删除、移到别的游戏目录进行中时。 */
   work: {
     folder: {
       installing: "安装任务正在写这个实例的文件夹，完成后才能打开",
       renaming: "正在重命名这个实例，完成后才能打开",
       deleting: "正在删除这个实例",
+      moving: "实例正在移到其他游戏目录，完成后才能打开",
     },
     settings: {
       installing: "安装任务正在写这个实例的文件夹，完成后才能改设置",
       renaming: "正在重命名这个实例，完成后才能改设置",
       deleting: "正在删除这个实例",
+      moving: "实例正在移到其他游戏目录，完成后才能改设置",
     },
     checkUpdates: {
       installing: "安装任务正在写这个实例的文件夹，完成后才能检查更新",
       renaming: "正在重命名这个实例，完成后才能检查更新",
       deleting: "正在删除这个实例",
+      moving: "实例正在移到其他游戏目录，完成后才能检查更新",
     },
     /** 更新检查设置与确认更新预览。 */
     mods: {
       installing: "安装任务正在写这个实例的文件夹，完成后才能改动 Mod",
       renaming: "正在重命名这个实例，完成后才能改动 Mod",
       deleting: "正在删除这个实例",
+      moving: "实例正在移到其他游戏目录，完成后才能改动 Mod",
     },
   },
   /** 导出整合包：读的是此刻的文件，游戏运行、存档备份与 Mod 改动不挡；会挪走或重写整个目录的事挡。带上存档另看 savesInGame、savesBackingUp。 */
@@ -79,6 +83,7 @@ export const LOCK_REASON = {
     installing: "安装任务正在写这个实例的文件夹，完成后才能导出",
     renaming: "正在重命名这个实例，完成后才能导出",
     deleting: "正在删除这个实例",
+    moving: "实例正在移到其他游戏目录，完成后才能导出",
     broken: "实例文件不完整，修复后才能导出",
     savesInGame: "游戏开着时存档随时在写，退出后才能带上存档",
     savesBackingUp: "正在备份或恢复存档，完成后才能带上存档",
@@ -188,6 +193,7 @@ export const OVERVIEW_COPY = {
     broken: "实例需要先修复",
     unknownVersion: "这个实例的版本信息不完整",
     legacy: "1.20 之前的版本不能直接进入存档",
+    moving: "实例正在移到其他游戏目录，完成后才能启动",
     backingUp: "正在备份或恢复存档，完成后再启动",
     launching: "正在启动这个实例",
     running: "游戏正在运行",
@@ -259,6 +265,7 @@ export const WORLD_BLOCKER_LABEL = {
   repairing: "修复",
   renaming: "改名",
   deleting: "删除",
+  moving: "移到其他游戏目录",
   backing_up: "备份或恢复存档",
   /** 只挡恢复：导出整合包勾了存档时要读整份存档。 */
   exporting: "导出整合包",
@@ -328,6 +335,7 @@ export const MODS_COPY = {
   completeNote: (enabled: number, disabled: number) => `已启用 ${enabled} 个，停用 ${disabled} 个。`,
   bannerRunning: "游戏正在运行，Mod 文件被占用。结束游戏后再启用、停用、更新或移除。",
   bannerInstalling: "实例正在补全文件，完成后再改动 Mod。",
+  bannerMoving: "实例正在移到其他游戏目录，完成后再改动 Mod。",
   tableLabel: "已安装的 Mod",
   colMod: "Mod",
   colVersion: "版本",

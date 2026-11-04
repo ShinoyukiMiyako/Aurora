@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { APP_NAME } from "../lib/app-info";
-import { TASK_INTERRUPTED_CODE, taskFailureReason } from "./flows";
+import { MOVE_INTERRUPTED_CODE, TASK_INTERRUPTED_CODE, taskFailureReason } from "./flows";
 
 /** 插值位的占位符。 */
 const HOLE = "◇";
@@ -474,6 +474,7 @@ describe("任务失败原因与后端码表对齐", () => {
       world_backup_corrupt: "备份文件已损坏，无法恢复",
       world_in_use: "这个存档正被游戏打开",
       install_unsafe_path: "版本文件里有指向游戏目录之外的路径，已拒绝写入",
+      instance_move_verify_failed: "复制出的文件和原件对不上，这次移动已放弃，原件没动",
       loader_library_missing: "加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要重新安装加载器",
     });
   });
@@ -481,6 +482,18 @@ describe("任务失败原因与后端码表对齐", () => {
   it("关闭时中断是前端自己记的码，不与后端的码撞名", () => {
     expect(codes).not.toContain(TASK_INTERRUPTED_CODE);
     expect(taskFailureReason({ code: TASK_INTERRUPTED_CODE, message: RAW })).toBe(`${APP_NAME}关闭时中断`);
+  });
+
+  it("关闭时中断的移动同样是前端自己记的码，不与后端的码撞名，也不与能重试的中断码相同", () => {
+    expect(codes).not.toContain(MOVE_INTERRUPTED_CODE);
+    expect(MOVE_INTERRUPTED_CODE).not.toBe(TASK_INTERRUPTED_CODE);
+    expect(taskFailureReason({ code: MOVE_INTERRUPTED_CODE, message: RAW })).toBe(`${APP_NAME}关闭时中断，重新打开时已自动收尾：实例要么已在目标游戏目录，要么留在原处`);
+  });
+
+  it("移动被拦下：带着拦截项时按种类写，没带（较早的日志）时照后端原文", () => {
+    expect(codes).toContain("instance_move_blocked");
+    expect(taskFailureReason({ code: "instance_move_blocked", message: RAW, move_blocker: { kind: "name_taken" } })).toBe("目标游戏目录里已有同名的版本，先给这个实例改个名字再移");
+    expect(taskFailureReason({ code: "instance_move_blocked", message: RAW })).toBe(RAW);
   });
 
   it("码表解析本身：只认字符串常量", () => {

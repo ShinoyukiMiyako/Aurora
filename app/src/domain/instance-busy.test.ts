@@ -22,7 +22,7 @@ describe("instance_busy 的原因", () => {
     for (const activity of BUSY_ACTIVITIES.filter((a) => a !== "inherited")) {
       expect(instanceBusyFromError(busy({ id: "生存", activity }))).toEqual({ id: "生存", activity, usedBy: null });
     }
-    expect(BUSY_ACTIVITIES).toEqual(["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited", "backing_up"]);
+    expect(BUSY_ACTIVITIES).toEqual(["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited", "backing_up", "moving"]);
   });
 
   it("备份存档挡住的操作读得出来：与后端 busy 同形，不带 used_by，通知照后端原文", () => {

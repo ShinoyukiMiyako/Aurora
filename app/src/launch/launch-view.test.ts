@@ -67,6 +67,7 @@ function state(overrides: Partial<LauncherState>): LauncherState {
     login: null,
     launchPrompt: null,
     lastRename: null,
+    lastMove: null,
     ...overrides,
   };
 }
