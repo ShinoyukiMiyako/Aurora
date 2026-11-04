@@ -32,6 +32,7 @@ use crate::InstanceError;
 use crate::crashdiag::last_crash_at;
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
+use crate::folders::same_path;
 use crate::modfs::try_exists;
 use crate::modpack::{InstanceModpack, read_instance_modpack};
 use crate::workdir::read_version_json;
@@ -332,6 +333,31 @@ impl Petalfall {
         }
         let servers_changed = self.forget_pinned_instance(id);
         pins_changed || was_selected || servers_changed
+    }
+
+    /// 实例从 `from_game_dir` 移走后去掉配置对它的引用。`from` 是当前目录时同 [`Petalfall::forget_instance`]；
+    /// 否则只改 `parked_directories` 里 `from` 那条的固定与选中（固定服务器记的是当前目录的实例，不动），改完那条
+    /// 固定与选中都空了就整条删掉，同切换目录时收起它们的规则。返回配置是否有变化，有变化时调用方落盘。
+    pub fn forget_moved_instance(&mut self, id: &str, from_game_dir: &Path) -> bool {
+        if same_path(from_game_dir, self.game_dir()) {
+            return self.forget_instance(id);
+        }
+        let mut changed = false;
+        self.config_mut().parked_directories.retain_mut(|parked| {
+            if !same_path(&parked.path, from_game_dir) {
+                return true;
+            }
+            let pins = parked.sidebar_pins.len();
+            parked.sidebar_pins.retain(|pin| pin != id);
+            let mut touched = parked.sidebar_pins.len() != pins;
+            if parked.selected_version.as_deref() == Some(id) {
+                parked.selected_version = None;
+                touched = true;
+            }
+            changed |= touched;
+            !(touched && parked.sidebar_pins.is_empty() && parked.selected_version.is_none())
+        });
+        changed
     }
 
     /// 改名：实例目录、版本 JSON（文件名与其中的 `id`）、客户端 jar 与 natives 目录一起改。
@@ -826,17 +852,23 @@ async fn update_base_record(game_dir: &Path, change: impl FnOnce(&mut Vec<String
     Ok(())
 }
 
+/// 在 `game_dir` 的依赖版本记录里补记 `ids`（已有的不重复记），排队同 [`update_base_record`]。实例移动时带到目标
+/// 目录的基底版本也是启动器落下的，要记在目标目录名下。
+pub(crate) async fn record_base_versions_in(game_dir: &Path, ids: &[String]) -> Result<()> {
+    update_base_record(game_dir, |versions| {
+        for id in ids {
+            if !versions.contains(id) {
+                versions.push(id.clone());
+            }
+        }
+    })
+    .await
+}
+
 impl Petalfall {
     /// 记下导入落下的依赖版本目录。
     pub(crate) async fn record_base_versions(&self, ids: &[String]) -> Result<()> {
-        update_base_record(self.game_dir(), |versions| {
-            for id in ids {
-                if !versions.contains(id) {
-                    versions.push(id.clone());
-                }
-            }
-        })
-        .await
+        record_base_versions_in(self.game_dir(), ids).await
     }
 
     /// 安装之后收回 `ids` 里目录没落下的：记录只管启动器落下的目录，日后别的启动器装出同名版本时，它是玩家的。
@@ -928,7 +960,7 @@ async fn has_instance_traces(dir: &Path) -> Result<bool> {
 
 /// 经 `inheritsFrom` 直接依赖 `id` 的实例。不分大小写，与实例锁、[`Petalfall::inheritance_chain`] 判环和 Windows 的
 /// 目录名同一口径：`inheritsFrom` 写的大小写与目录名不同时，那个实例照样靠这个目录运行。
-fn dependents_in(scan: &VersionScan, id: &str) -> Vec<String> {
+pub(crate) fn dependents_in(scan: &VersionScan, id: &str) -> Vec<String> {
     let key = id.to_lowercase();
     scan.versions
         .iter()
@@ -943,7 +975,7 @@ fn dependents_in(scan: &VersionScan, id: &str) -> Vec<String> {
         .collect()
 }
 
-fn ensure_no_dependents(scan: &VersionScan, id: &str) -> Result<()> {
+pub(crate) fn ensure_no_dependents(scan: &VersionScan, id: &str) -> Result<()> {
     let dependents = dependents_in(scan, id);
     if dependents.is_empty() {
         return Ok(());
@@ -1891,6 +1923,32 @@ pub(crate) mod tests {
         assert_eq!(read_base_record(&game).await.unwrap().versions, ["1.21.1"]);
     }
 
+    /// 往指定游戏目录的依赖版本记录里补记：原有的保留，重复的只记一次，门面当前目录的记录不碰；那边还没有记录
+    /// 文件时新建。
+    #[tokio::test]
+    async fn base_versions_are_recorded_under_the_given_game_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let target = tmp.path().join("目标").join(".minecraft");
+        write_base_record(&target, &["1.20.1"]);
+
+        let ids: Vec<String> = ["1.21.1", "1.20.1", "neoforge-21.1.265", "1.21.1"]
+            .map(str::to_owned)
+            .to_vec();
+        record_base_versions_in(&target, &ids).await.unwrap();
+        assert_eq!(
+            read_base_record(&target).await.unwrap().versions,
+            ["1.20.1", "1.21.1", "neoforge-21.1.265"]
+        );
+        assert!(!base_record_path(petalfall.game_dir()).exists());
+
+        let fresh = tmp.path().join("新盘").join(".minecraft");
+        record_base_versions_in(&fresh, &["1.21.1".to_owned()])
+            .await
+            .unwrap();
+        assert_eq!(read_base_record(&fresh).await.unwrap().versions, ["1.21.1"]);
+    }
+
     /// 记录读不懂时认不出哪些是依赖版本：宁可多列一个，也不把看不清的目录藏起来；继承规则不看记录，列表照常返回。
     #[tokio::test]
     async fn unreadable_base_record_hides_nothing_of_its_own() {
@@ -2478,6 +2536,100 @@ pub(crate) mod tests {
             ]
         );
         assert!(!petalfall.forget_instance("生存 1.21.1"));
+    }
+
+    fn parked(path: &str, pins: &[&str], selected: Option<&str>) -> crate::config::ParkedDirectory {
+        crate::config::ParkedDirectory {
+            path: PathBuf::from(path),
+            sidebar_pins: pins.iter().map(|pin| (*pin).to_owned()).collect(),
+            selected_version: selected.map(str::to_owned),
+        }
+    }
+
+    /// 从当前目录移走（路径写法不同也算）：同删除，侧栏固定、当前选中、固定服务器记住的它都清掉；收起的别的目录
+    /// 里同名的引用不动，那是另一个实例。
+    #[test]
+    fn moving_out_of_the_current_directory_forgets_like_a_delete() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        petalfall.set_sidebar_pins(vec!["生存".to_owned(), "建筑".to_owned()]);
+        petalfall.set_selected_version(Some("生存".to_owned()));
+        petalfall
+            .set_pinned_servers(vec![
+                pinned("a.example", Some("生存")),
+                pinned("b.example", Some("建筑")),
+            ])
+            .unwrap();
+        let elsewhere = parked("E:/PCL2/.minecraft", &["生存"], Some("生存"));
+        petalfall.config_mut().parked_directories = vec![elsewhere.clone()];
+        let current = PathBuf::from(
+            petalfall
+                .game_dir()
+                .display()
+                .to_string()
+                .to_uppercase()
+                .replace('\\', "/"),
+        );
+
+        assert!(petalfall.forget_moved_instance("生存", &current));
+        assert_eq!(petalfall.config().sidebar_pins, vec!["建筑".to_owned()]);
+        assert_eq!(petalfall.config().selected_version, None);
+        assert_eq!(
+            pinned_instances(&petalfall),
+            vec![
+                ("a.example".to_owned(), None),
+                ("b.example".to_owned(), Some("建筑".to_owned())),
+            ]
+        );
+        assert_eq!(petalfall.config().parked_directories, vec![elsewhere]);
+        assert!(!petalfall.forget_moved_instance("生存", &current));
+    }
+
+    /// 从收起的目录移走：只改那条记录的固定与选中，当前目录的固定、选中与固定服务器都不动；改完固定与选中都空了的
+    /// 整条删掉，同切换目录时收起它们的规则。
+    #[test]
+    fn moving_out_of_a_parked_directory_only_edits_that_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut petalfall = petalfall_at(tmp.path());
+        petalfall.set_sidebar_pins(vec!["生存".to_owned()]);
+        petalfall.set_selected_version(Some("生存".to_owned()));
+        petalfall
+            .set_pinned_servers(vec![pinned("a.example", Some("生存"))])
+            .unwrap();
+        let hmcl = parked("E:/HMCL/.minecraft", &["生存"], None);
+        petalfall.config_mut().parked_directories = vec![
+            parked("E:/PCL2/.minecraft", &["生存", "创造"], Some("生存")),
+            hmcl.clone(),
+        ];
+
+        assert!(petalfall.forget_moved_instance("生存", Path::new("e:\\pcl2\\.minecraft\\")));
+        assert_eq!(
+            petalfall.config().parked_directories,
+            vec![parked("E:/PCL2/.minecraft", &["创造"], None), hmcl.clone()]
+        );
+        assert_eq!(petalfall.config().sidebar_pins, vec!["生存".to_owned()]);
+        assert_eq!(petalfall.config().selected_version.as_deref(), Some("生存"));
+        assert_eq!(
+            pinned_instances(&petalfall),
+            vec![("a.example".to_owned(), Some("生存".to_owned()))]
+        );
+        assert!(!petalfall.forget_moved_instance("生存", Path::new("E:/PCL2/.minecraft")));
+
+        assert!(petalfall.forget_moved_instance("生存", Path::new("E:/HMCL/.minecraft")));
+        assert_eq!(
+            petalfall.config().parked_directories,
+            vec![parked("E:/PCL2/.minecraft", &["创造"], None)]
+        );
+        petalfall
+            .config_mut()
+            .parked_directories
+            .push(parked("F:/mc", &[], Some("只选中")));
+        assert!(petalfall.forget_moved_instance("只选中", Path::new("F:/mc")));
+        assert_eq!(
+            petalfall.config().parked_directories,
+            vec![parked("E:/PCL2/.minecraft", &["创造"], None)]
+        );
+        assert!(!petalfall.forget_moved_instance("生存", Path::new("G:/没记过/.minecraft")));
     }
 
     #[tokio::test]
