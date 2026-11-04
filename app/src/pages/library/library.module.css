@@ -144,6 +144,15 @@
   text-shadow: var(--sk-media-text-shadow);
 }
 
+/*
+ * 顶上的标签与图钉也是卡面的兄弟，而卡面只在下沿压暗：描边标签与幽灵图钉没有底，柔色调的底是半透明的，
+ * 深浅材质上都可能读不清。垫一层表面色、字照常用正文色与色调色，日夜都在自己的表面上读。
+ * 未按下的图钉悬停时交回图标按钮自己的不透明悬停底；按下的图钉本来没有悬停变化，一直垫着。
+ */
+.coverArea:has(> .cover:is([data-source="texture"], [data-source="remote"])) :is(.chip, .currentTag, .pin:not(:hover), .pin[aria-pressed="true"]) {
+  background-color: var(--sk-surface);
+}
+
 /* ---------------------------------------------------------------- 卡身 */
 
 /* 不设定位：标题按钮的覆盖层要以卡片为包含块铺满整卡 */

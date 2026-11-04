@@ -158,7 +158,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   return (
     <Card padding="none" clip selected={current} className={styles.card} as="article">
       <div className={styles.coverArea}>
-        {/* 卡面上的文字只有压在下沿的版本号；顶上的标签与图钉有自己的底 */}
+        {/* 只压暗下沿的版本号：顶上的标签与图钉不在压暗区里，卡面是平铺或图片时由样式给它们垫表面色 */}
         <Cover hue={cover.hue} seed={id} height={CARD_COVER_HEIGHT} {...backdrop} shade="bottom" className={styles.cover} />
         <div className={styles.coverOverlay}>
           <div className={styles.coverTop}>

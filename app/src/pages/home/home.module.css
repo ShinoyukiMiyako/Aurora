@@ -281,6 +281,7 @@
  */
 .heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) {
   --tag-ink: var(--sk-on-media-2);
+  --tag-ink-strong: var(--sk-on-media);
   --tag-line: var(--sk-on-media-2);
 }
 
