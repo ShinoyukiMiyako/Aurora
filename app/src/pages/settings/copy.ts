@@ -65,7 +65,7 @@ export const AFTER_LAUNCH_OPTIONS = [
   { value: "keep", label: "保持打开", desc: `游戏运行时${APP_NAME}留在原处，方便看日志` },
   // 最小化发生在拿到进程的那一刻，游戏窗口这时还没出来，不能写成窗口出现后
   { value: "minimize", label: "最小化", desc: `游戏进程起来后${APP_NAME}缩到任务栏，结束后再弹回来` },
-  { value: "close", label: `关闭${APP_NAME}`, desc: `游戏启动后${APP_NAME}退出，游戏日志与崩溃诊断将不可用` },
+  { value: "close", label: `关闭${APP_NAME}`, desc: `游戏启动后${APP_NAME}退出；游戏结束前重新打开${APP_NAME}可接回这一局，否则这一局的游玩时长与崩溃诊断不会记下` },
 ] as const;
 
 /** 自动备份由产品在游戏退出时做，这时它已经关了：开关开着也不会发生。写在「游戏启动后」与「自动备份」两行下面。 */

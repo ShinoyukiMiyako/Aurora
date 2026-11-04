@@ -403,7 +403,8 @@ async fn launch(
             for line in batch {
                 match line.stream {
                     LogStream::Stderr => eprintln!("{}", line.text),
-                    LogStream::Stdout => println!("{}", line.text),
+                    // 命令行不接回游戏，这一项只为穷尽。
+                    LogStream::Stdout | LogStream::LogFile => println!("{}", line.text),
                 }
             }
         }

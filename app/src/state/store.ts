@@ -30,6 +30,7 @@ import {
 } from "../copy/flows";
 import {
   accountFromDto,
+  accountKindFromDto,
   authServerFromDto,
   authlibProfileFromDto,
   installPhasesFromDto,
@@ -54,6 +55,7 @@ import {
 import {
   FAILURE_TOAST_MERGE_MS,
   INSTANCE_RESCAN_MIN_MS,
+  SESSION_LOG_LIMIT,
   SIDEBAR_PIN_LIMIT,
   STOP_TIMEOUT_MS,
   STOPPED_LINGER_MS,
@@ -65,7 +67,7 @@ import type { FailureCode, LoaderKind, Platform, Task, TaskError, TaskKind } fro
 import * as accountsIpc from "../ipc/accounts";
 import { invoke, type UnlistenFn } from "../ipc/bridge";
 import * as configIpc from "../ipc/config";
-import { lastCrash } from "../ipc/diagnostics";
+import { lastCrash, lastLaunchLog } from "../ipc/diagnostics";
 import { installMod, type InstallableResourceType, type ResourceInstallOutcomeDto } from "../ipc/discover";
 import { CANCELLED_ERROR_CODE, IpcError, isCancelled, isIpcError } from "../ipc/errors";
 import { listHistory, rollback as rollbackIpc, rollbackChecks } from "../ipc/history";
@@ -97,9 +99,11 @@ import type { Route } from "./route";
 import {
   appendSessionLogs,
   applyPhase,
+  backfillSessionLogs,
   isFailureCode,
   isLoadingPhase,
   isSessionActive,
+  reattachedSession,
   sessionCancelled,
   sessionCrashClue,
   sessionExited,
@@ -1170,6 +1174,9 @@ export class LauncherStore {
   private lastScanAt = 0;
   /** 已经为之重扫过的那次启动（见 onLaunchPhase）。 */
   private launchScanned: string | null = null;
+  /** 收到过几次游戏退出，以及每个实例最近一次退出是第几次（见 adoptRunningGame）。 */
+  private exitSeq = 0;
+  private readonly lastExitSeq = new Map<string, number>();
   /** 实例重扫的发出序号与已采纳的最晚序号（见 fetchInstances）。 */
   private scanIssued = 0;
   private scanApplied = 0;
@@ -1324,7 +1331,60 @@ export class LauncherStore {
       this.loadSlice("pins"),
       this.loadSlice("tasks"),
       this.loadSlice("firstRun"),
+      this.recoverRunningGame(),
     ]);
+  }
+
+  /** 找回此刻已经在运行的游戏；失败与首查的切片一样发通知，不往外抛。 */
+  private async recoverRunningGame(): Promise<void> {
+    await this.adoptRunningGame().catch((error: unknown) => this.report(ACTION_ERROR.recoverGame, error));
+  }
+
+  /**
+   * 会话只在内存里，开机与渲染进程重载后都是空的：问后端此刻有没有已经跑起来的游戏（关闭前启动、这次打开后接回的，
+   * 或这个后端进程自己启动的），有就建运行态会话。玩家在这期间点了启动、已有活动会话时不覆盖。
+   */
+  private async adoptRunningGame(): Promise<void> {
+    const exitsBefore = this.exitSeq;
+    const { game, broken_record: broken } = await launchIpc.runningGame();
+    if (broken !== null) this.announceBrokenRecord(broken);
+    if (game === null) return;
+    // 查询在路上时这一局已经退出：退出事件到的时候还没有会话，只做了失效与崩溃通知；再建运行态就会一直卡在运行中
+    const exited = this.lastExitSeq.get(game.version_id);
+    if (exited !== undefined && exited > exitsBefore) return;
+    if (isSessionActive(this.raw.session)) return;
+    const account = { uuid: game.account.uuid, name: game.account.name, kind: accountKindFromDto(game.account.account_type) };
+    const taskId = freshId("reattach");
+    const session = reattachedSession(game.version_id, taskId, account, { startedAt: game.started_at, runningSince: game.running_since }, Date.now());
+    this.set({ session });
+    if (game.reattached) this.pushToast("info", TOAST_COPY.gameReattached(game.version_id));
+    this.background(ACTION_ERROR.backfillSessionLog, this.backfillReattachedLogs(game.version_id, taskId, game.started_at));
+  }
+
+  /**
+   * 日志面板与状态岛只看会话里的日志，找回的会话是空的：读这一局的会话日志，把尾部垫在前面。
+   * 读回来时会话已换成别的一局就不写；读到的不是这一局的日志（开始时刻对不上）也不垫，免得把上一局的输出当成这一局的。
+   */
+  private async backfillReattachedLogs(instanceId: string, taskId: string, startedAt: number): Promise<void> {
+    const log = await lastLaunchLog(instanceId);
+    if (log === null) return;
+    if (log.started_at !== startedAt) {
+      console.warn(`「${instanceId}」最近一次的会话日志不是接回的这一局，不垫进日志面板`, { log: log.started_at, game: startedAt });
+      return;
+    }
+    const lines = log.lines.slice(-SESSION_LOG_LIMIT).map(logLineFromDto);
+    const s = this.raw.session;
+    if (s === null) return;
+    const next = backfillSessionLogs(s, taskId, lines);
+    if (next !== s) this.set({ session: next });
+  }
+
+  /** 上次关闭前在跑的那局记录读不出来：这一局的时长与诊断补不上了。原文与两个路径交给「复制错误信息」。 */
+  private announceBrokenRecord(broken: launchIpc.BrokenRecordDto): void {
+    console.warn(broken.message, broken);
+    const raw = [broken.message, broken.path, ...(broken.moved_to === null ? [] : [broken.moved_to])].join("\n");
+    const copy = TOAST_COPY.brokenGameRecord(broken.path, broken.moved_to);
+    this.pushToast("warning", copy.title, copy.body, { label: TOAST_COPY.copyErrorAction, run: () => navigator.clipboard.writeText(raw), errorTitle: TOAST_COPY.copyFailed });
   }
 
   private setStatus(slice: Slice, status: SliceStatus): void {
@@ -1660,6 +1720,8 @@ export class LauncherStore {
 
   private onGameExit(event: launchIpc.GameExitEvent): void {
     const id = event.version_id;
+    this.exitSeq += 1;
+    this.lastExitSeq.set(id, this.exitSeq);
     const s = this.raw.session;
     let crashedSession = false;
     if (s !== null && s.instanceId === id && isSessionActive(s)) {

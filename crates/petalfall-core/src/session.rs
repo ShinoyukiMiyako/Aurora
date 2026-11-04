@@ -1,6 +1,9 @@
 //! 运行中的游戏：等它退出，收尾会话日志，判定崩溃并落盘诊断，记游玩时长；以及「同一时间只运行一个
 //! 游戏」的占用槽 [`GameSlot`]。
 //!
+//! 一局游戏可能是这个落樱进程自己拉起的子进程，也可能是落樱关闭前启动、重新打开后接回的进程（见
+//! [`crate::reattach`]）。两种会话的结束产物同形，收尾走同一条路。
+//!
 //! 收尾时的记账（游玩时长、崩溃报告）任何一项失败都不能吞掉「游戏已退出」这个事实：退出结果照常
 //! 交出，记账失败作为 [`Finished::problems`] 一并交给上层如实上报。等待游戏进程本身失败也一样：这一局
 //! 照样记时长、照崩溃判定存这一局的报告，否则界面拿去展示的是上一局的崩溃。
@@ -10,8 +13,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use petalfall_launch::logfile::SessionOutcome;
 use petalfall_launch::{
-    GameSession, KillSwitch, LauncherLevel, LogSource, SessionClock, SessionEnd, SessionLog,
-    detect_crash,
+    AttachedSession, GameSession, KillSwitch, LauncherLevel, LogMarker, LogSource, ProcessIdentity,
+    SessionClock, SessionEnd, SessionLog, detect_crash,
 };
 use serde::{Deserialize, Serialize};
 
@@ -47,12 +50,22 @@ pub(crate) struct RunInfo {
     pub pid: Option<u32>,
     /// 这一局以离线方式进单人，没有经过账户验证。
     pub offline: bool,
+    /// 这一局的会话日志；没开成时为 `None`。接回时要按它找回、接着写。
+    pub session_log: Option<PathBuf>,
+    /// 这一局用的账户。
+    pub account: crate::reattach::RecordAccount,
 }
 
 /// 一局运行中的游戏。
 pub struct GameRun {
     info: RunInfo,
-    session: GameSession,
+    session: Session,
+}
+
+/// 运行中的会话：自己拉起的子进程，或接回的进程。
+enum Session {
+    Spawned(GameSession),
+    Attached(AttachedSession),
 }
 
 /// 游戏退出的结果。
@@ -76,7 +89,52 @@ pub struct Finished {
 
 impl GameRun {
     pub(crate) fn new(info: RunInfo, session: GameSession) -> Self {
-        Self { info, session }
+        Self {
+            info,
+            session: Session::Spawned(session),
+        }
+    }
+
+    pub(crate) fn attached(info: RunInfo, session: AttachedSession) -> Self {
+        Self {
+            info,
+            session: Session::Attached(session),
+        }
+    }
+
+    pub(crate) fn info(&self) -> &RunInfo {
+        &self.info
+    }
+
+    /// 这一局是落樱关闭前启动、这次接回的。
+    pub fn reattached(&self) -> bool {
+        matches!(self.session, Session::Attached(_))
+    }
+
+    /// 这次启动开始（会话日志开始）的 Unix 毫秒。
+    pub fn started_at(&self) -> u64 {
+        self.info.clock.started_at()
+    }
+
+    /// 此刻的 Unix 毫秒，按这一局的会话时钟：与会话日志里记下的时刻同源。
+    pub fn now(&self) -> u64 {
+        self.info.clock.now()
+    }
+
+    /// 认这个进程的凭据。
+    pub fn identity(&self) -> Result<ProcessIdentity> {
+        match &self.session {
+            Session::Spawned(session) => Ok(session.identity()?),
+            Session::Attached(session) => Ok(session.identity().clone()),
+        }
+    }
+
+    /// 在会话日志里留说明并落盘的句柄。
+    pub fn log_marker(&self) -> LogMarker {
+        match &self.session {
+            Session::Spawned(session) => session.log_marker(),
+            Session::Attached(session) => session.log_marker(),
+        }
     }
 
     pub fn version_id(&self) -> &str {
@@ -98,14 +156,20 @@ impl GameRun {
 
     /// 结束游戏的句柄。
     pub fn kill_switch(&self) -> KillSwitch {
-        self.session.kill_switch()
+        match &self.session {
+            Session::Spawned(session) => session.kill_switch(),
+            Session::Attached(session) => session.kill_switch(),
+        }
     }
 
     /// 等游戏退出并收尾。等待进程本身失败或后台任务异常结束时同样收尾：退出码无从得知时按拿不到
     /// 退出码判定崩溃，玩家点过结束的仍算结束，那次失败排在 [`Finished::problems`] 的第一项。
     pub async fn finish(self) -> Finished {
         let GameRun { info, session } = self;
-        let end = session.wait().await;
+        let end = match session {
+            Session::Spawned(session) => session.wait().await,
+            Session::Attached(session) => session.wait().await,
+        };
         settle(info, end).await
     }
 }
@@ -391,6 +455,14 @@ mod tests {
     use petalfall_launch::{LaunchCommand, read_log_tail};
     use std::path::Path;
 
+    fn test_account() -> crate::reattach::RecordAccount {
+        crate::reattach::RecordAccount {
+            uuid: "0123456789abcdef0123456789abcdef".to_owned(),
+            name: "Steve".to_owned(),
+            account_type: petalfall_auth::AccountType::Microsoft,
+        }
+    }
+
     struct Started {
         _tmp: tempfile::TempDir,
         root: PathBuf,
@@ -431,6 +503,8 @@ mod tests {
             warnings: Vec::new(),
             pid: session.id(),
             offline: false,
+            session_log: Some(logs_dir(&version_dir).join(LATEST_LOG)),
+            account: test_account(),
         };
         Started {
             _tmp: tmp,
@@ -647,6 +721,8 @@ mod tests {
             warnings: Vec::new(),
             pid: None,
             offline: false,
+            session_log: Some(log_path.clone()),
+            account: test_account(),
         };
         let end = SessionEnd {
             report: ExitReport {

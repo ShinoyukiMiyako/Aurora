@@ -61,6 +61,7 @@ pub mod modversions;
 pub mod network;
 pub mod news;
 pub mod playtime;
+pub mod reattach;
 pub mod resources;
 pub mod search;
 pub mod servers;
@@ -116,6 +117,7 @@ pub use mods::{InstanceMod, LocalModOutcome, ModInstallOutcome, ModSource, ModTo
 pub use modversions::ProjectInfo;
 pub use news::{LauncherChannel, NewsFeed, NewsItem, NewsTag};
 pub use playtime::{InstanceMinutes, PlayDay, PlayRange, PlayStats, PlaySummary};
+pub use reattach::{RecordAccount, RecordLoad, RunningRecord};
 pub use resources::is_safe_file_name;
 pub use resources::{ResourceInstallOutcome, ResourceTarget};
 pub use servers::{KnownServer, ServerMonitor, ServerStatus};
@@ -153,10 +155,10 @@ pub use petalfall_instance::{
 pub use petalfall_java::{DetectSource, InstalledRuntime, JavaInstallation, JavaVersion};
 pub use petalfall_launch::{
     CrashCategory, CrashDiagnosis, ExitCodeKind, ExitCodeNote, ExitReport, KillSwitch,
-    LauncherLevel, LimitReason, LoaderClass, LogBatchSink, LogEntry, LogLine, LogSource, LogStream,
-    MemoryAdvice, MemoryEstimate, MemoryLimit, NeedFactor, QuickPlayMode, QuickPlaySupport,
-    QuickPlayTarget, SessionEnded, SessionOutcome, SystemMemory, analyze, detect_crash,
-    game_line_level, probe_system_memory,
+    LauncherLevel, LimitReason, LoaderClass, LogBatchSink, LogEntry, LogLine, LogMarker, LogSource,
+    LogStream, MemoryAdvice, MemoryEstimate, MemoryLimit, NeedFactor, QuickPlayMode,
+    QuickPlaySupport, QuickPlayTarget, SessionEnded, SessionOutcome, SystemMemory, analyze,
+    detect_crash, game_line_level, probe_system_memory,
 };
 pub use petalfall_modplatform::{
     AggregateResult, DependencyKind, InstalledMod, MetadataFormat, ModDependency, ModLoader,

@@ -76,6 +76,22 @@ pub enum LaunchError {
     #[error("会话日志 {path} 第 {line} 行格式不对")]
     LogFormat { path: PathBuf, line: u64 },
 
+    /// 接回游戏时要接着写的会话日志不是那一局还开着的日志。
+    #[error("会话日志 {path} 不能接着写：{reason}")]
+    LogNotResumable { path: PathBuf, reason: String },
+
+    /// 取不到认进程的凭据（创建时刻、映像路径），或按凭据打开、查询进程失败。
+    #[error("查询游戏进程 {pid} 失败")]
+    Process {
+        pid: u32,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// 游戏进程已经退出并被回收，没有句柄可取凭据了。
+    #[error("游戏进程已经退出并被回收，取不到认它的凭据")]
+    ProcessReaped,
+
     /// 系统时钟早于 1970 年：时间戳无从谈起。
     #[error("系统时钟早于 1970 年，请校正系统时间")]
     ClockBeforeEpoch,

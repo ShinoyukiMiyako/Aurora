@@ -112,6 +112,8 @@ pub fn run() {
             app.manage(commands::instances::ExportedFiles::default());
             // -- launch --
             app.manage(commands::launch::RunningGame::default());
+            // 门面与实例占用表都已就位；前端加载要几百毫秒，接回赶在它之前占住占用槽。
+            commands::launch::reattach_in_background(app.handle());
             // -- accounts --
             app.manage(commands::accounts::MicrosoftLoginSlot::default());
             app.manage(commands::accounts::AuthlibPendingSlot::default());
@@ -206,6 +208,7 @@ pub fn run() {
             // -- launch --
             commands::launch::launch_game,
             commands::launch::stop_game,
+            commands::launch::running_game,
             commands::launch::play_stats,
             // -- diagnostics --
             commands::diagnostics::last_crash,

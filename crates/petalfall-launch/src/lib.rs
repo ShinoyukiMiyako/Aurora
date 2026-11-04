@@ -28,6 +28,7 @@
 
 pub mod account;
 pub mod args;
+pub mod attach;
 pub mod classpath;
 pub mod command;
 pub mod crash;
@@ -44,6 +45,9 @@ pub mod workspace;
 
 pub use account::{AuthValues, AuthlibInjector, OFFLINE_ACCESS_TOKEN};
 pub use args::{dedup_jvm_args, ensure_client_jar_ignored, merge_game_args, split_args};
+pub use attach::{
+    AttachedProcess, AttachedSession, ProcessIdentity, Refusal, attach, open_process,
+};
 pub use classpath::{classpath_entries, classpath_separator, classpath_string};
 pub use command::{CommandBuilder, GamePaths, LaunchCommand};
 pub use crash::{
@@ -69,7 +73,7 @@ pub use precheck::{
     sync_folder, sync_roots_from_env,
 };
 pub use process::{
-    ExitReport, GameSession, KillSwitch, LogBatchSink, LogLine, LogStream, SessionEnd,
+    ExitReport, GameSession, KillSwitch, LogBatchSink, LogLine, LogMarker, LogStream, SessionEnd,
     SessionFailure, detect_crash, spawn,
 };
 pub use quickplay::{

@@ -218,6 +218,8 @@ struct LaunchIdentity {
     /// 外置登录账户的验证服务器 API 根；`None` 时不下载、不注入 authlib-injector。
     authlib_root: Option<String>,
     offline: bool,
+    /// 这一局用的账户，接回时界面要显示它。
+    account: crate::reattach::RecordAccount,
 }
 
 /// 玩家能针对性处理的启动失败码。
@@ -783,6 +785,7 @@ impl Petalfall {
             auth,
             authlib_root: authlib,
             offline,
+            account: record_account,
         } = self
             .launch_identity(account, offline_fallback, reporter)
             .await?;
@@ -1049,6 +1052,8 @@ impl Petalfall {
         // 放在取消检查之后：取消或中途失败的启动不碰玩家的设置，这时资源索引也一定在本地了。
         self.fill_missing_options(merged, &layout, &working_dir, reporter)
             .await;
+        // 拉起之后日志就归运行中的会话了，路径在这之前取。
+        let session_log = reporter.log.as_ref().map(|log| log.path().to_owned());
         let session = spawn_game(&command, reporter.clock, &mut reporter.log, game_log)?;
         let pid = session.id();
         let _ = reporter
@@ -1073,6 +1078,8 @@ impl Petalfall {
                 warnings,
                 pid,
                 offline,
+                session_log,
+                account: record_account,
             },
             session,
         ))
@@ -1204,6 +1211,7 @@ impl Petalfall {
             auth,
             authlib_root,
             offline: false,
+            account: crate::reattach::RecordAccount::of(&account),
         })
     }
 
@@ -1254,6 +1262,7 @@ impl Petalfall {
             "账户验证不可用，按玩家选择以离线方式启动"
         );
         Ok(LaunchIdentity {
+            account: crate::reattach::RecordAccount::of(&account),
             auth: AuthValues::offline(account.name, account.uuid),
             authlib_root: None,
             offline: true,

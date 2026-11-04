@@ -47,6 +47,8 @@ pub const MAX_LINE_BYTES: usize = 64 * 1024;
 pub enum LogStream {
     Stdout,
     Stderr,
+    /// 游戏自己写的 `logs/latest.log`：接回的会话没有输出管道，只能追读这份文件。
+    LogFile,
 }
 
 /// 一行游戏输出。
@@ -98,11 +100,46 @@ pub struct SessionFailure {
 }
 
 /// 结束请求：附一条回执，让请求方拿到结束动作的真实成败。
-type KillRequest = oneshot::Sender<Result<()>>;
+pub(crate) type KillRequest = oneshot::Sender<Result<()>>;
 
 /// 结束游戏的句柄，可克隆、可跨任务持有。会话本体留在等待退出的那一方手里。
 #[derive(Clone)]
-pub struct KillSwitch(mpsc::UnboundedSender<KillRequest>);
+pub struct KillSwitch(pub(crate) mpsc::UnboundedSender<KillRequest>);
+
+/// 往会话日志写一行启动器说明并落盘的请求，回执带回是否写成（这一局没有日志可写时为 `false`）。
+pub(crate) struct MarkRequest {
+    at: u64,
+    level: LauncherLevel,
+    text: String,
+    ack: oneshot::Sender<Result<bool>>,
+}
+
+/// 在会话日志里留一行说明并把写缓冲落盘的句柄，可克隆。落樱在游戏运行中退出时用它：写缓冲里攒着的
+/// 最后几行不落盘就随进程没了，日志里也看不出游戏是从哪一刻起不再被记录的。
+#[derive(Clone)]
+pub struct LogMarker {
+    pub(crate) tx: mpsc::UnboundedSender<MarkRequest>,
+    pub(crate) clock: SessionClock,
+}
+
+impl LogMarker {
+    /// 写一行启动器说明并落盘，等写完才返回。返回 `false` 表示这一局已经没有日志可写：日志没开成、
+    /// 中途写失败停写了，或会话已经收尾。
+    pub async fn mark(&self, level: LauncherLevel, text: impl Into<String>) -> Result<bool> {
+        let (ack, done) = oneshot::channel();
+        let request = MarkRequest {
+            at: self.clock.now(),
+            level,
+            text: text.into(),
+            ack,
+        };
+        if self.tx.send(request).is_err() {
+            return Ok(false);
+        }
+        // 汇流任务收到请求后、回执前收尾离开，说明会话已经结束。
+        done.await.unwrap_or(Ok(false))
+    }
+}
 
 impl KillSwitch {
     /// 请求结束进程并等结束动作执行完毕。返回 `false` 表示会话已经结束，没有可结束的进程。
@@ -127,6 +164,7 @@ pub struct GameSession {
     pump: JoinHandle<PumpOutcome>,
     kill_tx: mpsc::UnboundedSender<KillRequest>,
     kill_rx: mpsc::UnboundedReceiver<KillRequest>,
+    mark_tx: mpsc::UnboundedSender<MarkRequest>,
 }
 
 impl GameSession {
@@ -138,6 +176,20 @@ impl GameSession {
     /// 结束游戏的句柄。
     pub fn kill_switch(&self) -> KillSwitch {
         KillSwitch(self.kill_tx.clone())
+    }
+
+    /// 在会话日志里留说明并落盘的句柄。
+    pub fn log_marker(&self) -> LogMarker {
+        LogMarker {
+            tx: self.mark_tx.clone(),
+            clock: self.clock,
+        }
+    }
+
+    /// 认这个进程的凭据，落樱重新打开时凭它接回。用子进程自己的句柄取：句柄还开着，pid 就不会被别的
+    /// 进程复用，取到的一定是这个进程。等待退出之前都取得到。
+    pub fn identity(&self) -> Result<crate::attach::ProcessIdentity> {
+        crate::attach::identity_of_child(&self.child)
     }
 
     /// 等待进程退出，期间随时响应 [`KillSwitch`] 的结束请求；回收读取与汇流任务，产出退出报告。
@@ -172,9 +224,9 @@ impl GameSession {
 }
 
 /// 等进程退出的结果。等待本身可能失败，那时退出码无从得知。
-struct Exited {
-    status: std::io::Result<ExitStatus>,
-    terminated_by_launcher: bool,
+pub(crate) struct Exited {
+    pub(crate) status: std::io::Result<ExitStatus>,
+    pub(crate) terminated_by_launcher: bool,
 }
 
 /// 进程等完之后收尾：读完（或限时结束）两条输出流、收回汇流任务、产出退出报告。等待的结果由调用方
@@ -183,7 +235,7 @@ struct Exited {
 /// 等待本身失败、或后台任务异常结束时同样走完收尾，会话日志写下原因与结局并落盘之后才交出失败：提前
 /// 返回的话读取与汇流任务被扔在后台，日志缓冲里最后那几行与结局行都不会落盘。一切正常时日志保持打开
 /// 交还调用方，由它追加退出行再关闭。
-async fn conclude(
+pub(crate) async fn conclude(
     exited: Exited,
     clock: SessionClock,
     readers: Vec<JoinHandle<()>>,
@@ -384,7 +436,8 @@ pub fn spawn(
     if let Some(stderr) = child.stderr.take() {
         readers.push(spawn_reader(stderr, LogStream::Stderr, clock, line_tx));
     }
-    let pump = tokio::spawn(pump(line_rx, log.take(), forward));
+    let (mark_tx, mark_rx) = mpsc::unbounded_channel();
+    let pump = tokio::spawn(pump(line_rx, log.take(), forward, mark_rx));
     let (kill_tx, kill_rx) = mpsc::unbounded_channel();
 
     Ok(GameSession {
@@ -394,6 +447,7 @@ pub fn spawn(
         pump,
         kill_tx,
         kill_rx,
+        mark_tx,
     })
 }
 
@@ -494,7 +548,7 @@ where
 }
 
 /// 把字节流切成行：去掉行尾的 `\r`，单行只留前 [`MAX_LINE_BYTES`] 字节，其余的只计数。
-struct LineSplitter {
+pub(crate) struct LineSplitter {
     /// 当前行已留下的字节。容量一次给足上限且从不越过，长行不会让它增长。
     kept: Vec<u8>,
     /// 当前行超出上限、没有留下的字节数。
@@ -506,7 +560,7 @@ struct LineSplitter {
 }
 
 impl LineSplitter {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             kept: Vec::with_capacity(MAX_LINE_BYTES),
             dropped: 0,
@@ -516,7 +570,7 @@ impl LineSplitter {
     }
 
     /// 喂一段字节；这段里每结束一行就交给 `emit` 一次。
-    fn feed(&mut self, mut chunk: &[u8], emit: &mut impl FnMut(String)) {
+    pub(crate) fn feed(&mut self, mut chunk: &[u8], emit: &mut impl FnMut(String)) {
         while let Some(newline) = chunk.iter().position(|&b| b == b'\n') {
             self.push(&chunk[..newline]);
             emit(self.finish_line());
@@ -526,7 +580,7 @@ impl LineSplitter {
     }
 
     /// 流结束时还没收尾的半行。
-    fn take_pending(&mut self) -> Option<String> {
+    pub(crate) fn take_pending(&mut self) -> Option<String> {
         self.pending.then(|| self.finish_line())
     }
 
@@ -609,16 +663,17 @@ fn truncation_note(dropped: u64) -> String {
     )
 }
 
-struct PumpOutcome {
+pub(crate) struct PumpOutcome {
     recent: VecDeque<String>,
     log: Option<SessionLog>,
 }
 
-/// 汇流：写会话日志、留最近若干行、按时间窗批量转发。两条输出流都关闭（进程退出）后结束。
-async fn pump(
+/// 汇流：写会话日志、留最近若干行、按时间窗批量转发，并响应留说明的请求。所有输出来源都结束（进程退出）后结束。
+pub(crate) async fn pump(
     mut rx: mpsc::UnboundedReceiver<LogLine>,
     mut log: Option<SessionLog>,
     mut forward: Option<LogBatchSink>,
+    mut marks: mpsc::UnboundedReceiver<MarkRequest>,
 ) -> PumpOutcome {
     let mut recent = VecDeque::with_capacity(RECENT_LINE_CAPACITY);
     let mut batch: Vec<LogLine> = Vec::new();
@@ -626,6 +681,29 @@ async fn pump(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            Some(request) = marks.recv() => {
+                let MarkRequest { at, level, text, ack } = request;
+                let result = match log.as_mut() {
+                    None => Ok(false),
+                    Some(writer) => {
+                        let written = async {
+                            writer.write(at, LogSource::Launcher, Some(level), &text).await?;
+                            writer.flush().await
+                        }
+                        .await;
+                        match written {
+                            Ok(()) => Ok(true),
+                            Err(err) => {
+                                tracing::warn!(error = %err, "会话日志写入失败，本次会话停止写日志");
+                                log = None;
+                                Err(err)
+                            }
+                        }
+                    }
+                };
+                // 回执发不出去只说明请求方不等了，说明已经写下。
+                let _ = ack.send(result);
+            }
             line = rx.recv() => {
                 let Some(line) = line else { break };
                 if let Some(writer) = log.as_mut()
@@ -686,6 +764,11 @@ fn prepend_path(dirs: &[&Path]) -> std::ffi::OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 没有人会来请求留说明的汇流：发送端随即丢弃。
+    fn no_marks() -> mpsc::UnboundedReceiver<MarkRequest> {
+        mpsc::unbounded_channel().1
+    }
 
     fn report(code: Option<i32>, lines: &[&str], terminated_by_launcher: bool) -> ExitReport {
         ExitReport {
@@ -789,7 +872,7 @@ mod tests {
             .unwrap();
         }
         drop(tx);
-        let outcome = pump(rx, None, Some(fwd_tx)).await;
+        let outcome = pump(rx, None, Some(fwd_tx), no_marks()).await;
 
         // 环形缓冲只留最后 500 行。
         assert_eq!(outcome.recent.len(), RECENT_LINE_CAPACITY);
@@ -1048,7 +1131,7 @@ mod tests {
             clock,
             line_tx,
         );
-        let outcome = pump(line_rx, Some(log), Some(fwd_tx)).await;
+        let outcome = pump(line_rx, Some(log), Some(fwd_tx), no_marks()).await;
         reader.await.unwrap();
 
         let expected = "q".repeat(MAX_LINE_BYTES) + &truncation_note((MAX_LINE_BYTES * 2) as u64);
@@ -1106,7 +1189,7 @@ mod tests {
                 line_tx,
             ),
         ];
-        let outcome = pump(line_rx, Some(log), Some(fwd_tx)).await;
+        let outcome = pump(line_rx, Some(log), Some(fwd_tx), no_marks()).await;
         for reader in readers {
             reader.await.unwrap();
         }
@@ -1161,7 +1244,7 @@ mod tests {
             spawn_reader(stdout, LogStream::Stdout, clock, tx.clone()),
             spawn_reader(&b""[..], LogStream::Stderr, clock, tx),
         ];
-        let pump_task = tokio::spawn(pump(rx, Some(log), None));
+        let pump_task = tokio::spawn(pump(rx, Some(log), None, no_marks()));
         Output {
             _tmp: tmp,
             dir,
@@ -1540,6 +1623,57 @@ mod tests {
         assert!(!detect_crash(&end.report));
         // 会话结束后句柄还能用，只是报告没有可结束的进程。
         assert!(!switch.kill().await.unwrap());
+    }
+
+    /// 落樱在游戏运行中退出前留的说明：游戏还在跑时就已经落盘，读文件能看到它和之前的输出；会话收尾后
+    /// 再留说明报告没有日志可写。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn log_marker_writes_and_flushes_while_the_game_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clock = SessionClock::start().unwrap();
+        let log = SessionLog::create(tmp.path(), "t", clock.started_at())
+            .await
+            .unwrap();
+        let session = spawn(
+            // spawn 重排了 PATH，cmd 按名字找不到 ping，写全路径。
+            &cmd(r"echo BEFORE_MARK& %SystemRoot%\System32\ping.exe -n 30 127.0.0.1 >nul"),
+            clock,
+            &mut Some(log),
+            None,
+        )
+        .unwrap();
+        let marker = session.log_marker();
+        let switch = session.kill_switch();
+        let path = tmp.path().join(crate::logfile::LATEST_LOG);
+        // 等游戏那一行进了汇流，说明才排在它后面。
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(
+                marker
+                    .mark(LauncherLevel::Warn, "落樱已关闭，游戏仍在运行")
+                    .await
+                    .unwrap()
+            );
+            let content = std::fs::read_to_string(&path).unwrap();
+            if content.contains("[game] BEFORE_MARK") {
+                assert!(
+                    content.ends_with("[launcher/warn] 落樱已关闭，游戏仍在运行\n"),
+                    "{content}"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "游戏输出迟迟没有落盘：{content}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let waiter = tokio::spawn(session.wait());
+        assert!(switch.kill().await.unwrap());
+        let end = waiter.await.unwrap();
+        assert!(end.report.terminated_by_launcher);
+        assert!(!marker.mark(LauncherLevel::Info, "收尾之后").await.unwrap());
     }
 
     /// 游戏拉起的辅助进程继承了输出管道、比游戏活得久：游戏退出后最多等收尾时限就产出退出报告，

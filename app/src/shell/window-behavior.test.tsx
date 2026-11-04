@@ -9,7 +9,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launch
 import type { LauncherState } from "../state/store";
 import { render, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, runningGameInfo, settle } from "../test/launcher";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider } from "./shell";
 import { WindowPortProvider, type CloseRequestHandler, type WindowPort } from "./window";
@@ -374,6 +374,51 @@ describe("启动后的窗口行为与后台提醒", () => {
       expect(win.port.requestAttention).toHaveBeenCalledTimes(1);
       expect(launcher.state.session?.phase).toBe("crashed");
     });
+  });
+
+  it("设置为关闭：点启动的一局进入运行时写任务记录并销毁窗口", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")], config: configDto({ after_launch: "close" }) });
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+      await settle();
+    });
+    expect(callsOf(ipc, "save_task_journal")).toHaveLength(1);
+    expect(win.port.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("设置为关闭：开机接回的一局不再退出；它结束后点启动的下一局照常退出", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")], config: configDto({ after_launch: "close" }), runningGame: { game: runningGameInfo(), broken_record: null } });
+    ipc.overrides.set("last_launch_log", () => null);
+    await mount();
+    expect(launcher.state.session).toMatchObject({ phase: "running", runningSince: 1_719_999_009_000, reattached: true });
+    expect(win.port.destroy).not.toHaveBeenCalled();
+    expect(win.port.minimize).not.toHaveBeenCalled();
+    expect(callsOf(ipc, "save_task_journal")).toHaveLength(0);
+
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 1000 }));
+    await flush();
+    act(() => launcher.actions.dismissSession());
+    ipc.overrides.set("launch_game", () => ({ pid: 1 }));
+    await act(async () => {
+      await launcher.actions.launch("生存");
+      await settle();
+    });
+    expect(win.port.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("设置为最小化：渲染进程重载后找回的一局不最小化，退出时也不去动窗口", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")], config: configDto({ after_launch: "minimize" }), runningGame: { game: runningGameInfo({ reattached: false }), broken_record: null } });
+    ipc.overrides.set("last_launch_log", () => null);
+    await mount();
+    expect(launcher.state.session).toMatchObject({ phase: "running", reattached: true });
+    expect(win.port.minimize).not.toHaveBeenCalled();
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 0, crashed: false, killed: false, duration_ms: 1000 }));
+    await flush();
+    expect(launcher.state.session?.phase).toBe("stopped");
+    expect(win.port.restoreWithoutFocus).not.toHaveBeenCalled();
+    expect(win.port.destroy).not.toHaveBeenCalled();
   });
 
   it("设置为保持打开：进入运行时不动窗口", async () => {
