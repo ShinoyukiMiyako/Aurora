@@ -1245,6 +1245,45 @@ async fn chinese_names_need_an_asset_object_with_the_indexed_sha1() {
     );
 }
 
+/// 先有 jar、后来才补下资源：jar 没变也重抽一次补上中文名；之后缓存里有中文名就不再重抽。
+/// 选源时看标志文件也要打开 jar，所以按「每次刷新打开几次」比：比空转的刷新多出来的就是重抽。
+#[tokio::test]
+async fn chinese_names_arrive_once_the_assets_are_downloaded_later() {
+    let fx = catalog_fixture();
+    put_catalog_version(
+        &fx.game,
+        "26.3",
+        "2026-10-20T00:00:00+00:00",
+        &catalog_jar(true),
+    );
+    fx.refresh().await;
+    let name_zh = |id: &str| {
+        fx.service
+            .catalog()
+            .unwrap()
+            .blocks
+            .into_iter()
+            .find(|b| b.id == id)
+            .unwrap()
+            .name_zh
+    };
+    let opens_per_refresh = || async {
+        let before = fx.opens();
+        fx.refresh().await;
+        fx.opens() - before
+    };
+    assert_eq!(name_zh("furnace"), None);
+    let idle = opens_per_refresh().await;
+    // 资源对象坏着：缓存缺中文名也不重抽
+    put_zh_cn(&fx.game, "26.3", true);
+    assert_eq!(opens_per_refresh().await, idle, "资源对象坏着时不该重抽");
+    assert_eq!(name_zh("furnace"), None);
+    put_zh_cn(&fx.game, "26.3", false);
+    assert!(opens_per_refresh().await > idle, "补上资源后应重抽一次");
+    assert_eq!(name_zh("furnace").as_deref(), Some("熔炉"));
+    assert_eq!(opens_per_refresh().await, idle, "缓存已有中文名，不再重抽");
+}
+
 #[tokio::test]
 async fn catalog_faces_are_served_and_everything_else_is_404_or_400() {
     let fx = catalog_fixture();

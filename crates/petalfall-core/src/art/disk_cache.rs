@@ -60,6 +60,9 @@ pub struct Manifest {
     pub origin: Origin,
     pub version_id: String,
     pub jar_sha1: String,
+    /// 方块中文名取自的 zh_cn.json 的 SHA-1；抽取时没拿到中文名为 None。
+    #[serde(default)]
+    pub zh_cn_sha1: Option<String>,
     pub files: Vec<String>,
 }
 
@@ -113,7 +116,13 @@ pub fn ensure(
     opener: &JarOpener,
 ) -> Result<Prepared, String> {
     let dir = version_dir(root, &source.version_id);
-    if let Some(prepared) = load(&dir, |manifest| manifest.jar_sha1 == source.jar_sha1) {
+    // 缓存只认 jar，但中文名来自资源对象：先装了 jar、后来才补下资源时，jar 没变也要重抽一次把中文名补上。
+    // 只在缓存缺中文名时才去读、校验对象，对象坏着的时候也不会每次刷新都重抽。
+    if let Some(prepared) = load(&dir, |manifest| {
+        manifest.jar_sha1 == source.jar_sha1
+            && (manifest.zh_cn_sha1.is_some()
+                || local_zh_cn(&source.game_dir, source.asset_index.as_deref()).is_err())
+    }) {
         return Ok(prepared);
     }
     let job = Job {
@@ -314,7 +323,10 @@ fn extract_into(
     }
     drop(archive);
 
-    let zh_cn = zh_cn_names(&job.version_id, &job.zh_cn);
+    let (zh_cn, zh_cn_sha1) = match zh_cn_names(&job.version_id, &job.zh_cn) {
+        Some((lang, sha1)) => (Some(lang), Some(sha1)),
+        None => (None, None),
+    };
     let mut blocks = Vec::with_capacity(faces.len());
     for block in &faces {
         if let Some(missing) = block.textures().find(|path| !blocks_png.contains_key(path)) {
@@ -357,6 +369,7 @@ fn extract_into(
         origin: job.origin,
         version_id: job.version_id.clone(),
         jar_sha1: job.jar_sha1.clone(),
+        zh_cn_sha1,
         files: files.iter().cloned().collect(),
     };
     let bytes =
@@ -393,8 +406,8 @@ fn lang_or_warn(version: &str, language: &str, bytes: &[u8]) -> Option<HashMap<S
     }
 }
 
-/// 方块的中文名表；拿不到只记 warn，目录照常生成，中文名为空。
-fn zh_cn_names(version: &str, source: &ZhCn) -> Option<HashMap<String, String>> {
+/// 方块的中文名表与它取自的文件的 SHA-1；拿不到只记 warn，目录照常生成，中文名为空。
+fn zh_cn_names(version: &str, source: &ZhCn) -> Option<(HashMap<String, String>, String)> {
     let bytes = match source {
         // 下载阶段没拿到时，那边已经记过原因。
         ZhCn::File(None) => return None,
@@ -415,11 +428,29 @@ fn zh_cn_names(version: &str, source: &ZhCn) -> Option<HashMap<String, String>> 
             }
         }
     };
-    lang_or_warn(version, "中文", &bytes)
+    let sha1 = sha1_hex(&bytes);
+    lang_or_warn(version, "中文", &bytes).map(|lang| (lang, sha1))
 }
 
 /// 按资源索引找到本机的 zh_cn.json 并核对 SHA-1。语言文件不在 jar 里，只随资源对象下载。
 fn local_zh_cn(game_dir: &Path, index_id: Option<&str>) -> Result<Vec<u8>, String> {
+    let (path, expected) = local_zh_cn_object(game_dir, index_id)?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    let actual = sha1_hex(&bytes);
+    if actual != expected {
+        return Err(format!(
+            "{} 的 SHA-1 为 {actual}，与资源索引的 {expected} 不符",
+            path.display()
+        ));
+    }
+    Ok(bytes)
+}
+
+/// 资源索引里 zh_cn.json 对象的位置与声明的 SHA-1；对象文件不在本机时报错。只读索引，不读也不校验对象本身。
+fn local_zh_cn_object(
+    game_dir: &Path,
+    index_id: Option<&str>,
+) -> Result<(PathBuf, String), String> {
     let index_id = index_id.ok_or("版本 JSON 没有资源索引")?;
     check_path_segment(index_id).map_err(|e| format!("资源索引 id {index_id:?} 不合法：{e}"))?;
     let assets = game_dir.join("assets");
@@ -432,17 +463,11 @@ fn local_zh_cn(game_dir: &Path, index_id: Option<&str>) -> Result<Vec<u8>, Strin
         .objects
         .get(ZH_CN_OBJECT)
         .ok_or_else(|| format!("资源索引 {index_id} 里没有 {ZH_CN_OBJECT}"))?;
-    let expected = object.hash.to_ascii_lowercase();
     let path = assets.join("objects").join(object.object_path());
-    let bytes = std::fs::read(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
-    let actual = sha1_hex(&bytes);
-    if actual != expected {
-        return Err(format!(
-            "{} 的 SHA-1 为 {actual}，与资源索引的 {expected} 不符",
-            path.display()
-        ));
+    if !path.is_file() {
+        return Err(format!("{} 不在本机", path.display()));
     }
-    Ok(bytes)
+    Ok((path, object.hash.to_ascii_lowercase()))
 }
 
 /// 删掉当前用不到的缓存：别的材质源版本目录与残留的临时目录。下载暂存目录（另一个任务可能正在往里下）
