@@ -28,6 +28,10 @@ pub struct SelectedSource {
     pub jar_sha1: String,
     /// 是否含完整的 1.20 材质集；否则是降级源，名单里缺的方块由前端画徽记。
     pub full: bool,
+    /// jar 所在的候选游戏目录：方块的中文名到它的 assets 里按资源索引找。
+    pub game_dir: PathBuf,
+    /// 版本 JSON 里的资源索引 id；没有时方块名只有英文。
+    pub asset_index: Option<String>,
 }
 
 /// jar 的 SHA-1 校验结果缓存，键为（路径、大小、修改时间）：三者都没变就不重算。
@@ -67,6 +71,8 @@ struct Candidate {
     expected_sha1: String,
     /// 候选目录的先后（越小越优先），发布时间相同时用它定序。
     dir_rank: usize,
+    game_dir: PathBuf,
+    asset_index: Option<String>,
 }
 
 /// 在候选目录里选材质源。任何单个目录或版本读不了都只记 warn 并跳过，不影响其余候选。
@@ -109,6 +115,8 @@ pub async fn select_source(
                 jar: version.jar_path.clone(),
                 expected_sha1: client.sha1.to_ascii_lowercase(),
                 dir_rank,
+                game_dir: dir.clone(),
+                asset_index: json.asset_index.as_ref().map(|index| index.id.clone()),
             });
         }
     }
@@ -150,6 +158,8 @@ fn selected(candidate: &Candidate, full: bool) -> SelectedSource {
         jar: candidate.jar.clone(),
         jar_sha1: candidate.expected_sha1.clone(),
         full,
+        game_dir: candidate.game_dir.clone(),
+        asset_index: candidate.asset_index.clone(),
     }
 }
 
