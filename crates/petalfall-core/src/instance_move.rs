@@ -1902,6 +1902,11 @@ fn judge_same_volume(stage: MoveStage, disk: Disk) -> Verdict {
         }
         Committed | Settled => Verdict::Finish,
         Committing if disk.target && !disk.source => Verdict::Finish,
+        // 改名成了、「已提交」还没写上就被杀，之后原目录里又建出同名的新实例；也可能是改名前目标里先冒出了同名目录。
+        // 两边都在，分不清哪份是原件：回滚会把收起的备份改名给原位置那份，再删日志，目标里那份就没人认领了。
+        Committing if disk.target && disk.source => {
+            Verdict::Stuck("日志停在提交中，原位置和目标里都有这个实例")
+        }
         Copying | Committing => Verdict::Discard,
     }
 }
@@ -3736,6 +3741,67 @@ mod tests {
         assert_no_moving_dir(&dirs.source);
     }
 
+    /// 同卷提交改完名、还没记上「已提交」就被杀了，下次打开落樱之前，玩家用别的启动器玩了同名版本，原位置又建出了
+    /// 一个同名目录（没有落樱的备份）。日志停在「提交中」、两边都有这个实例，盘面证明不了哪份是原件：回滚会把收起的
+    /// 备份改名给原位置那个新实例，再删掉日志，目标里移过去的实例就没人认领了。所以不动，日志留着、原因里带上各处路径。
+    #[tokio::test]
+    async fn a_same_volume_commit_interrupted_before_committed_with_a_newcomer_is_left_alone() {
+        let dirs = Dirs::new();
+        build_instance(&dirs).await;
+        let instance = snapshot(&dirs.instance_in(&dirs.source));
+        let backups = snapshot(&dirs.backups_in(&dirs.source));
+        let source_minutes = minutes(&dirs, &dirs.source).await;
+        assert!(source_minutes.is_some());
+        let mut journal = dirs.journal(true);
+        journal.stage = MoveStage::Committing;
+        rename(&dirs.backups_in(&dirs.source), &journal.old_backups());
+        rename(
+            &dirs.instance_in(&dirs.source),
+            &dirs.instance_in(&dirs.target),
+        );
+        move_journal::write(&dirs.data, &journal).await.unwrap();
+        // 别的启动器建出的同名版本目录：只有版本 JSON 与它自己的文件，没有落樱的元数据与备份。
+        let newcomer_dir = write_version(&dirs.source, ID, &instance_json());
+        put(&newcomer_dir.join("options.txt"), b"lang:en_us\n");
+        let newcomer = snapshot(&newcomer_dir);
+
+        let recovered = dirs.petalfall().recover_instance_moves().await.unwrap();
+
+        let [MoveRecovery::Deferred { id, reason }] = &recovered[..] else {
+            panic!("{recovered:?}");
+        };
+        assert_eq!(id, ID);
+        for path in [
+            dirs.instance_in(&dirs.source),
+            dirs.instance_in(&dirs.target),
+        ] {
+            assert!(
+                reason.contains(&path.display().to_string()),
+                "原因里应有 {}：{reason}",
+                path.display()
+            );
+        }
+        assert_eq!(snapshot(&dirs.instance_in(&dirs.target)), instance);
+        assert_eq!(snapshot(&journal.old_backups()), backups);
+        assert!(
+            !dirs.backups_in(&dirs.source).exists(),
+            "收起的备份不能改名给原位置的新实例"
+        );
+        assert_eq!(snapshot(&newcomer_dir), newcomer);
+        assert_eq!(minutes(&dirs, &dirs.source).await, source_minutes);
+        assert_eq!(minutes(&dirs, &dirs.target).await, None);
+        assert_eq!(journals(&dirs).len(), 1, "日志要留着");
+
+        // 再收一遍结果相同，什么都不动。
+        let again = dirs.petalfall().recover_instance_moves().await.unwrap();
+        assert!(
+            matches!(&again[..], [MoveRecovery::Deferred { .. }]),
+            "{again:?}"
+        );
+        assert_eq!(snapshot(&journal.old_backups()), backups);
+        assert_eq!(snapshot(&dirs.instance_in(&dirs.target)), instance);
+    }
+
     /// 日志说已提交（或已收拾完），目标里却没有实例、暂存里还有、旧目录里的原件也没了：第二步改名没落盘，从校验过的
     /// 暂存往前补完，目标里的实例逐字节完整。
     #[tokio::test]
@@ -4320,11 +4386,12 @@ mod tests {
                 disk(true, false, false, false),
                 Verdict::Discard,
             ),
+            // 两边都有：可能是改名后原目录里又建了同名新实例，回滚会把收起的备份交给它，不动。
             (
                 Committing,
                 true,
                 disk(true, true, false, false),
-                Verdict::Discard,
+                Verdict::Stuck("日志停在提交中，原位置和目标里都有这个实例"),
             ),
             (
                 Committed,
