@@ -26,6 +26,17 @@ pub const MINECRAFT_GAME_ID: u32 = 432;
 /// 环境变量名：CurseForge API key。
 pub const API_KEY_ENV: &str = "PETALFALL_CURSEFORGE_API_KEY";
 
+/// 构建时经 [`API_KEY_ENV`] 内嵌的 key，发行版用户机器上只有这一份。
+const EMBEDDED_API_KEY: Option<&str> = option_env!("PETALFALL_CURSEFORGE_API_KEY");
+
+// 官方构建（流水线设了 PETALFALL_OFFICIAL_BUILD）必须内嵌 key：缺了在编译期就失败，不让发出去的包
+// 把 CurseForge 源整个禁用。fork 与本机构建不设这个变量，不受影响。
+const _: () = assert!(
+    option_env!("PETALFALL_OFFICIAL_BUILD").is_none()
+        || matches!(EMBEDDED_API_KEY, Some(key) if !key.trim_ascii().is_empty()),
+    "设了 PETALFALL_OFFICIAL_BUILD 的官方构建必须同时设置 PETALFALL_CURSEFORGE_API_KEY"
+);
+
 /// CurseForge 网站根地址，工程没给网页链接时用它拼文件页。
 const CURSEFORGE_WEBSITE: &str = "https://www.curseforge.com";
 
@@ -63,10 +74,7 @@ impl CurseForgeClient {
     /// 其次是构建时经同名环境变量内嵌进二进制的 key（发行版用户机器上没有这个变量，只能靠内嵌）。
     /// 两处都缺失或空白返回 [`Error::CurseForgeKeyMissing`]。
     pub fn from_env(http: reqwest::Client) -> Result<Self> {
-        let key = resolve_api_key(
-            std::env::var(API_KEY_ENV).ok(),
-            option_env!("PETALFALL_CURSEFORGE_API_KEY"),
-        )?;
+        let key = resolve_api_key(std::env::var(API_KEY_ENV).ok(), EMBEDDED_API_KEY)?;
         Ok(Self::new(http, key))
     }
 

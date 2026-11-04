@@ -27,11 +27,14 @@ jobs:
   build:
     runs-on: [self-hosted, Linux, X64, petalfall]
     timeout-minutes: 30
-    # 微软登录 client_id 只在构建时内嵌，仓库里不放。它不是机密，每个安装包里都有，所以放仓库变量，
-    # 这台机器上仍然不出现任何 secret。放在 job 级：每一步编译看到的都是同一个值，缓存不会来回失效。
-    # PETALFALL_OFFICIAL_BUILD 让编译本身也检查 client_id：以后的正式版流水线照抄这两行就有同样的兜底。
+    # 微软登录 client_id 只在构建时内嵌，仓库里不放。它不是机密，每个安装包里都有，所以放仓库变量。
+    # CurseForge API key 同样要编进每个安装包，谁都能从 exe 里取出，到这台机器上不比 client_id 多泄露什么；
+    # 它放 secret 只为让公开的 Actions 日志遮住它。签名私钥这类真正的机密仍然不进这台机器。
+    # 放在 job 级：每一步编译看到的都是同一个值，缓存不会来回失效。
+    # PETALFALL_OFFICIAL_BUILD 让编译本身也检查 client_id 与 CurseForge key：以后的正式版流水线照抄这几行就有同样的兜底。
     env:
       PETALFALL_MSA_CLIENT_ID: ${{ vars.PETALFALL_MSA_CLIENT_ID }}
+      PETALFALL_CURSEFORGE_API_KEY: ${{ secrets.PETALFALL_CURSEFORGE_API_KEY }}
       PETALFALL_OFFICIAL_BUILD: "1"
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -44,6 +47,14 @@ jobs:
         run: |
           if ! [[ "$PETALFALL_MSA_CLIENT_ID" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
             echo "::error::仓库变量 PETALFALL_MSA_CLIENT_ID 没有配置或不是 GUID，打出来的包登不了微软账户"
+            exit 1
+          fi
+
+      # 带空白的值启动器会当成没有，下面在 exe 里的查找也会因此失效
+      - name: 检查 CurseForge API key
+        run: |
+          if ! [[ "$PETALFALL_CURSEFORGE_API_KEY" =~ ^[[:graph:]]+$ ]]; then
+            echo "::error::仓库 secret PETALFALL_CURSEFORGE_API_KEY 没有配置或含空白，打出来的包用不了 CurseForge"
             exit 1
           fi
 
@@ -120,6 +131,10 @@ jobs:
           # 构建缓存里旧的编译产物要是没随这个变量重编，包里就没有 client_id；直接在 exe 里找一遍
           if ! grep -qF -e "$PETALFALL_MSA_CLIENT_ID" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
             echo "::error::Petalfall.exe 里没有内嵌微软登录 client_id"
+            exit 1
+          fi
+          if ! grep -qF -e "$PETALFALL_CURSEFORGE_API_KEY" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
+            echo "::error::Petalfall.exe 里没有内嵌 CurseForge API key"
             exit 1
           fi
           installer="$bundle_dir/nsis/Petalfall_${VERSION}_x64-setup.exe"
