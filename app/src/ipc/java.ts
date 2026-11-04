@@ -80,3 +80,9 @@ export const removeJavaPath = (path: string): Promise<RemoveJavaPathDto> => invo
 
 /** 本机硬件显卡与是否可切换；非 Windows 为空列表。 */
 export const gpuAdapters = (): Promise<GpuAdaptersDto> => invoke<GpuAdaptersDto>("gpu_adapters");
+
+/**
+ * 崩溃页「改用独立显卡」：立即把这个 java 设为 Windows 图形设置里的高性能，成功后打开独显偏好并落盘。
+ * 系统偏好写不进去报 io（detail.path 为这个 java），这时独显偏好不动。
+ */
+export const switchToDedicatedGpu = (javaPath: string): Promise<void> => invoke<void>("switch_to_dedicated_gpu", { javaPath });

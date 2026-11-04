@@ -62,9 +62,9 @@ export function useJavaRuntimes(): ResourceResult<JavaInstallationDto[]> {
   return useResource("java", detectJava);
 }
 
-/** gpu-adapters —— 本机硬件显卡与是否可切换，显卡卡片据此决定说明。 */
-export function useGpuAdapters(): ResourceResult<GpuAdaptersDto> {
-  return useResource("gpu-adapters", gpuAdapters);
+/** gpu-adapters —— 本机硬件显卡与是否可切换，显卡卡片据此决定说明；崩溃页只在有显卡线索时读（enabled 为 false 时不请求）。 */
+export function useGpuAdapters(enabled = true): ResourceResult<GpuAdaptersDto> {
+  return useResource(enabled ? "gpu-adapters" : null, gpuAdapters);
 }
 
 /** memory-advice:<id> 或 memory-advice（按主页当前实例 / 原版估算）。 */
