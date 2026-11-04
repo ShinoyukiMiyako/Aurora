@@ -74,7 +74,7 @@ mod workdir;
 pub mod world_backup;
 
 // ---- 门面自身的公开类型 ----
-pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch};
+pub use appearance::{AccentColor, Appearance, AppearanceMode, AppearancePatch, CoverStyle};
 pub use blocked::{BlockedFile, ClaimReport, ClaimedFile};
 pub use compat::{
     Compatibility, InstalledCopy, InstalledSource, InstanceMatch, InstanceSources, MatchState,
@@ -188,11 +188,11 @@ pub use instances::{
 };
 pub use loaders::{LoaderEndpoints, LoaderVersionInfo, ManifestOverview, VersionRequirements};
 pub use petalfall_instance::{
-    Disposer, GameMode, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstallSpec,
-    InstanceContent, IsolationOverride, JavaSelection, LevelInfo, LevelSummary, MarkerError,
-    MarkerStore, NameViolation, PackEntry, PinsViolation, RecycleBin, Resolution,
-    ResolvedIsolation, ResourcePackEntry, SettingsViolation, ShaderPackEntry, VersionSettings,
-    WorldEntry, is_safe_instance_id,
+    CoverBackground, CoverImageSlot, Disposer, GameMode, IncompleteKind, IncompleteMarker,
+    IncompleteOutcome, InstallSpec, InstanceContent, IsolationOverride, JavaSelection, LevelInfo,
+    LevelSummary, MarkerError, MarkerStore, NameViolation, PackEntry, PinsViolation, RecycleBin,
+    Resolution, ResolvedIsolation, ResourcePackEntry, SettingsViolation, ShaderPackEntry,
+    VersionSettings, WorldEntry, cover_image_dir, is_safe_instance_id,
 };
 
 // 各下层 crate 的错误类型：上层（命令边界）要把每一种都映射成稳定的错误码，故全部透传。

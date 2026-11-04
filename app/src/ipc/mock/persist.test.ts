@@ -93,7 +93,7 @@ describe("mock 持久化", () => {
     expect(await second.mockInvoke("is_first_run")).toBe(true);
     second.enableMockPersistence(storage, PREFIX);
     expect(await second.mockInvoke("is_first_run")).toBe(false);
-    expect(await second.mockInvoke("get_appearance")).toEqual({ mode: "night", accent: "moss", petals: false, panorama: true, reduce_motion: true });
+    expect(await second.mockInvoke("get_appearance")).toEqual({ mode: "night", accent: "moss", petals: false, panorama: true, reduce_motion: true, cover_background: "texture" });
     expect(await second.mockInvoke<{ download_concurrency: number }>("get_config")).toMatchObject({ download_concurrency: 16 });
     // 手动添加的 Java 在配置与探测结果里都还在，不会刷新后变成识别不出。
     const manualExe = "D:\\Portable\\jdk-17\\bin\\java.exe";

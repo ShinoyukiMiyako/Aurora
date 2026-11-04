@@ -20,8 +20,74 @@ pub const MEMORY_STEP_MB: u32 = 512;
 /// 窗口宽高的允许范围（像素）。
 pub const RESOLUTION_WIDTH: (u32, u32) = (320, 7680);
 pub const RESOLUTION_HEIGHT: (u32, u32) = (240, 4320);
-/// 封面预设 id 的最大长度。
+/// 封面方块 id 的最大长度。
 const COVER_MAX_LEN: usize = 64;
+/// 卡面图片在实例元数据目录下的子目录：`versions/<id>/.petalfall/cover/`。
+pub const COVER_IMAGE_DIR: &str = "cover";
+
+/// 卡面背景。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverBackground {
+    /// 跟随外观设置里的全局默认。
+    #[default]
+    Follow,
+    /// 色相渐变加像素花瓣。
+    Art,
+    /// 封面方块的材质平铺。
+    Texture,
+    /// 玩家自己的图片（见 [`VersionSettings::background_image`]）。
+    Image,
+}
+
+/// 卡面上用玩家图片的两个位置。图片由启动器重新编码后存进 [`COVER_IMAGE_DIR`]，文件名带内容哈希：
+/// 换图即换名，协议响应可以按不可变缓存。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverImageSlot {
+    /// 卡面背景：不透明的存 JPEG，带透明的存 PNG。
+    Background,
+    /// 封面方块的面：16 × 16 的 PNG。
+    Block,
+}
+
+impl CoverImageSlot {
+    fn prefix(self) -> &'static str {
+        match self {
+            CoverImageSlot::Background => "background-",
+            CoverImageSlot::Block => "block-",
+        }
+    }
+
+    fn extensions(self) -> &'static [&'static str] {
+        match self {
+            CoverImageSlot::Background => &[".png", ".jpg"],
+            CoverImageSlot::Block => &[".png"],
+        }
+    }
+
+    /// 由内容哈希的前 16 位十六进制与扩展名（不带点）拼出文件名；扩展名不属于这个位置时报错。
+    pub fn file_name(self, hash16: &str, extension: &str) -> std::result::Result<String, String> {
+        let name = format!("{}{hash16}.{extension}", self.prefix());
+        if self.accepts(&name) {
+            Ok(name)
+        } else {
+            Err(format!("{name} 不是合法的卡面图片文件名"))
+        }
+    }
+
+    /// 文件名是否形如 `<前缀><16 位小写十六进制>.<扩展名>`：既是格式校验，也挡住路径穿越。
+    pub fn accepts(self, name: &str) -> bool {
+        let Some(rest) = name.strip_prefix(self.prefix()) else {
+            return false;
+        };
+        self.extensions().iter().any(|ext| {
+            rest.strip_suffix(ext).is_some_and(|hash| {
+                hash.len() == 16 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            })
+        })
+    }
+}
 
 /// 一个实例的用户设置。新建实例的默认值：内存跟随全局、Java 自动、隔离跟随、1280×720、不全屏。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -29,8 +95,14 @@ const COVER_MAX_LEN: usize = 64;
 pub struct VersionSettings {
     /// 实例介绍；`None` 为没有介绍。
     pub description: Option<String>,
-    /// 封面预设 id（如 `cherry_planks`）；`None` 时由界面按默认封面规则推导。
+    /// 封面方块 id（如 `cherry_planks`，可以是本机材质源里的任意方块）；`None` 时由界面按默认封面规则推导。
     pub cover: Option<String>,
+    /// 封面方块用的玩家图片（[`COVER_IMAGE_DIR`] 下的文件名）；有值时方块画这张图，`cover` 只在图片读不到时兜底。
+    pub cover_image: Option<String>,
+    /// 卡面背景。
+    pub background: CoverBackground,
+    /// 卡面背景用的玩家图片（[`COVER_IMAGE_DIR`] 下的文件名）。背景换成别的样式时仍保留，换回来不用重选。
+    pub background_image: Option<String>,
     /// 版本级隔离覆盖（默认跟随全局）。
     pub isolation: IsolationOverride,
     /// 最大内存（MB）；`None` 跟随全局设置。
@@ -120,10 +192,32 @@ impl VersionSettings {
                 return violation(
                     "cover",
                     format!(
-                        "封面预设 id 只能由小写字母、数字与下划线组成（1 到 {COVER_MAX_LEN} 个）：{cover:?}"
+                        "封面方块 id 只能由小写字母、数字与下划线组成（1 到 {COVER_MAX_LEN} 个）：{cover:?}"
                     ),
                 );
             }
+        }
+        if let Some(name) = &self.cover_image
+            && !CoverImageSlot::Block.accepts(name)
+        {
+            return violation(
+                "cover_image",
+                format!("封面方块图片应形如 block-<16 位十六进制>.png：{name:?}"),
+            );
+        }
+        if let Some(name) = &self.background_image
+            && !CoverImageSlot::Background.accepts(name)
+        {
+            return violation(
+                "background_image",
+                format!("卡面背景图片应形如 background-<16 位十六进制>.png 或 .jpg：{name:?}"),
+            );
+        }
+        if self.background == CoverBackground::Image && self.background_image.is_none() {
+            return violation(
+                "background",
+                "背景设为图片时 background_image 不能为空".into(),
+            );
         }
         if let Some(memory) = self.memory_mb
             && (memory < MEMORY_MIN_MB || memory % MEMORY_STEP_MB != 0)
@@ -163,6 +257,20 @@ impl VersionSettings {
         }
         Ok(())
     }
+
+    /// 设置引用着的卡面图片文件名；[`COVER_IMAGE_DIR`] 里不在其中的文件都可以删。
+    pub fn cover_image_files(&self) -> Vec<&str> {
+        self.cover_image
+            .iter()
+            .chain(self.background_image.iter())
+            .map(String::as_str)
+            .collect()
+    }
+}
+
+/// 实例的卡面图片目录：`version_dir/.petalfall/cover/`。
+pub fn cover_image_dir(version_dir: &Path) -> PathBuf {
+    version_dir.join(PETALFALL_META_DIR).join(COVER_IMAGE_DIR)
 }
 
 /// 版本设置文件的读写句柄。
@@ -301,6 +409,41 @@ mod tests {
             ),
             (
                 VersionSettings {
+                    cover_image: Some("block-0123456789abcdef.jpg".into()),
+                    ..base.clone()
+                },
+                "cover_image",
+            ),
+            (
+                VersionSettings {
+                    cover_image: Some("../block-0123456789abcdef.png".into()),
+                    ..base.clone()
+                },
+                "cover_image",
+            ),
+            (
+                VersionSettings {
+                    background_image: Some("background-0123456789ABCDEF.png".into()),
+                    ..base.clone()
+                },
+                "background_image",
+            ),
+            (
+                VersionSettings {
+                    background_image: Some("block-0123456789abcdef.png".into()),
+                    ..base.clone()
+                },
+                "background_image",
+            ),
+            (
+                VersionSettings {
+                    background: CoverBackground::Image,
+                    ..base.clone()
+                },
+                "background",
+            ),
+            (
+                VersionSettings {
                     memory_mb: Some(512),
                     ..base.clone()
                 },
@@ -397,6 +540,76 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(s.validate(), Ok(()));
+        let s = VersionSettings {
+            cover: Some("oak_log".into()),
+            cover_image: Some("block-0123456789abcdef.png".into()),
+            background: CoverBackground::Image,
+            background_image: Some("background-fedcba9876543210.jpg".into()),
+            ..Default::default()
+        };
+        assert_eq!(s.validate(), Ok(()));
+        assert_eq!(
+            s.cover_image_files(),
+            [
+                "block-0123456789abcdef.png",
+                "background-fedcba9876543210.jpg"
+            ]
+        );
+        // 背景换成别的样式后图片仍留在设置里，换回图片不用重选
+        let kept = VersionSettings {
+            background: CoverBackground::Texture,
+            ..s
+        };
+        assert_eq!(kept.validate(), Ok(()));
+    }
+
+    #[test]
+    fn cover_image_names_follow_the_slot_pattern() {
+        let hash = "0123456789abcdef";
+        assert_eq!(
+            CoverImageSlot::Background.file_name(hash, "jpg").unwrap(),
+            "background-0123456789abcdef.jpg"
+        );
+        assert_eq!(
+            CoverImageSlot::Block.file_name(hash, "png").unwrap(),
+            "block-0123456789abcdef.png"
+        );
+        assert!(CoverImageSlot::Block.file_name(hash, "jpg").is_err());
+        assert!(CoverImageSlot::Background.file_name("0123", "png").is_err());
+        for rejected in [
+            "background-0123456789abcdef.gif",
+            "background-0123456789abcde.png",
+            "background-0123456789abcdefa.png",
+            "background-0123456789abcdeg.png",
+            "background-0123456789abcdef.png/..",
+            "Background-0123456789abcdef.png",
+            "",
+        ] {
+            assert!(!CoverImageSlot::Background.accepts(rejected), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn background_serializes_as_snake_case_words() {
+        for (background, word) in [
+            (CoverBackground::Follow, "follow"),
+            (CoverBackground::Art, "art"),
+            (CoverBackground::Texture, "texture"),
+            (CoverBackground::Image, "image"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(background).unwrap(),
+                serde_json::json!(word)
+            );
+        }
+        assert_eq!(
+            VersionSettings::default().background,
+            CoverBackground::Follow
+        );
+        assert_eq!(
+            cover_image_dir(Path::new("v")),
+            Path::new("v").join(crate::PETALFALL_META_DIR).join("cover")
+        );
     }
 
     #[tokio::test]
@@ -420,6 +633,9 @@ mod tests {
         let settings = VersionSettings {
             description: Some("测试整合包".into()),
             cover: Some("amethyst_block".into()),
+            cover_image: Some("block-0123456789abcdef.png".into()),
+            background: CoverBackground::Image,
+            background_image: Some("background-0123456789abcdef.png".into()),
             isolation: IsolationOverride::Disabled,
             memory_mb: Some(6144),
             java: JavaSelection::Path(absolute_java()),

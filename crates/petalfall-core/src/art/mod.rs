@@ -9,6 +9,7 @@
 //! - 磁盘缓存：选中材质源后把名单内文件一次抽到 `<缓存目录>/vanilla-art/<版本>/`。
 //! - 全景：只认一张固定哈希的资源对象，直接从 `assets/objects` 读。
 //! - 远程皮肤与缩略图：按 `sha1(url)` 缓存在 `<缓存目录>/skins`、`<缓存目录>/thumbs`。
+//! - 卡面图片：玩家给实例卡面选的图片存在实例自己的目录里，列实例时按 `sha1(路径)` 登记给 `/cover/`。
 //!
 //! [`TextureService`] 不依赖门面锁：长任务持锁时取图照常。它可以廉价克隆（内部是 `Arc`）。
 
@@ -121,6 +122,7 @@ struct State {
     hashes: JarHashCache,
     skins: HashMap<String, PathBuf>,
     thumbs: HashMap<String, PathBuf>,
+    covers: HashMap<String, PathBuf>,
 }
 
 struct Inner {
@@ -199,6 +201,7 @@ impl TextureService {
                     hashes: JarHashCache::default(),
                     skins: HashMap::new(),
                     thumbs: HashMap::new(),
+                    covers: HashMap::new(),
                 }),
                 refreshing: tokio::sync::Mutex::new(()),
             }),
@@ -324,6 +327,12 @@ impl TextureService {
             } else {
                 TexResponse::BadRequest(format!("缩略图路径不合法：{path}"))
             }
+        } else if let Some(key) = path.strip_prefix("/cover/") {
+            if remote::is_cache_key(key) {
+                self.respond_cover(key).await
+            } else {
+                TexResponse::BadRequest(format!("卡面图片路径不合法：{path}"))
+            }
         } else {
             TexResponse::BadRequest(format!("材质协议不提供这个路径：{path}"))
         };
@@ -448,6 +457,36 @@ impl TextureService {
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 TexResponse::NotFound(format!("缓存文件 {} 不见了", path.display()))
+            }
+            Err(err) => TexResponse::Failed(format!("读取 {} 失败：{err}", path.display())),
+        }
+    }
+
+    /// 登记一张卡面图片，返回协议 `/cover/` 路径用的键（`sha1(路径)`）。只记进内存，不碰磁盘：
+    /// 文件在不在由调用方先确认，事后被删掉时协议答 404、界面回落。图片文件名带内容哈希，
+    /// 同一路径的内容不会变，响应可以按不可变缓存。
+    pub fn register_cover(&self, path: &Path) -> String {
+        let key = remote::sha1_hex(path.to_string_lossy().as_bytes());
+        lock(&self.inner.state)
+            .covers
+            .insert(key.clone(), path.to_owned());
+        key
+    }
+
+    async fn respond_cover(&self, key: &str) -> TexResponse {
+        let Some(path) = lock(&self.inner.state).covers.get(key).cloned() else {
+            return TexResponse::NotFound(format!("卡面图片 {key} 没有登记过"));
+        };
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => match image_rules::cover_image_mime(&bytes) {
+                Some(content_type) => TexResponse::Found {
+                    content_type,
+                    body: Arc::new(bytes),
+                },
+                None => TexResponse::Failed(format!("{} 不是 PNG 或 JPEG", path.display())),
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                TexResponse::NotFound(format!("卡面图片 {} 不见了", path.display()))
             }
             Err(err) => TexResponse::Failed(format!("读取 {} 失败：{err}", path.display())),
         }

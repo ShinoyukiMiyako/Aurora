@@ -623,6 +623,64 @@ async fn thumbs_are_limited_to_known_hosts_and_served_from_cache() {
     }
 }
 
+#[tokio::test]
+async fn cover_images_are_served_only_after_registration() {
+    let fx = fixture();
+    let dir = fx.cache.join("instance-cover");
+    std::fs::create_dir_all(&dir).unwrap();
+    let png_path = dir.join("block-0123456789abcdef.png");
+    let jpeg_path = dir.join("background-0123456789abcdef.jpg");
+    let gif_path = dir.join("background-fedcba9876543210.png");
+    let pixels = png(16, 16, |_, _| PINK);
+    std::fs::write(&png_path, &pixels).unwrap();
+    // 协议只按文件头认类型，不解码：JPEG 的 SOI 加 APP0 标记就够
+    std::fs::write(
+        &jpeg_path,
+        [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'],
+    )
+    .unwrap();
+    std::fs::write(&gif_path, b"GIF89a not really").unwrap();
+
+    // 键由路径决定；没登记过的键一律 404，不按路径猜文件
+    let key = remote::sha1_hex(png_path.to_string_lossy().as_bytes());
+    assert!(matches!(
+        fx.service.respond(&format!("/cover/{key}"), None).await,
+        TexResponse::NotFound(_)
+    ));
+    assert_eq!(fx.service.register_cover(&png_path), key);
+    match fx.service.respond(&format!("/cover/{key}"), None).await {
+        TexResponse::Found { content_type, body } => {
+            assert_eq!(content_type, "image/png");
+            assert_eq!(body.as_ref(), &pixels);
+        }
+        other => panic!("期望 200，得到 {other:?}"),
+    }
+    let jpeg_key = fx.service.register_cover(&jpeg_path);
+    match fx
+        .service
+        .respond(&format!("/cover/{jpeg_key}"), None)
+        .await
+    {
+        TexResponse::Found { content_type, .. } => assert_eq!(content_type, "image/jpeg"),
+        other => panic!("期望 200，得到 {other:?}"),
+    }
+    let gif_key = fx.service.register_cover(&gif_path);
+    assert!(matches!(
+        fx.service.respond(&format!("/cover/{gif_key}"), None).await,
+        TexResponse::Failed(_)
+    ));
+    // 登记后文件被删：404，界面回落
+    std::fs::remove_file(&png_path).unwrap();
+    assert!(matches!(
+        fx.service.respond(&format!("/cover/{key}"), None).await,
+        TexResponse::NotFound(_)
+    ));
+    assert!(matches!(
+        fx.service.respond("/cover/../settings.json", None).await,
+        TexResponse::BadRequest(_)
+    ));
+}
+
 #[test]
 fn candidates_start_with_the_configured_game_dir() {
     let tmp = tempfile::tempdir().unwrap();

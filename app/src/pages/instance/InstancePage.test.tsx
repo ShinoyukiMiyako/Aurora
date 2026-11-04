@@ -234,6 +234,9 @@ beforeEach(() => {
   settings = {
     description: null,
     cover: null,
+    cover_image: null,
+    background: "follow",
+    background_image: null,
     isolation: "follow_global",
     memory_mb: null,
     java: "auto",

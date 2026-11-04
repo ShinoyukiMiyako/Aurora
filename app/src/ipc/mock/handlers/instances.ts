@@ -95,6 +95,9 @@ type DerivedField =
   | "base_busy"
   | "description"
   | "cover"
+  | "cover_image"
+  | "background"
+  | "background_image"
   | "memory_mb"
   | "playtime_min"
   | "last_played_at"
@@ -124,6 +127,9 @@ function defaultSettings(): InstanceSettingsDto {
   return {
     description: null,
     cover: null,
+    cover_image: null,
+    background: "follow",
+    background_image: null,
     isolation: "follow_global",
     memory_mb: null,
     java: "auto",
@@ -689,6 +695,9 @@ function toDto(instance: MockInstance): InstanceDto {
     ...instance.dto,
     description: instance.settings.description,
     cover: instance.settings.cover,
+    cover_image: null,
+    background: instance.settings.background,
+    background_image: null,
     memory_mb: instance.settings.memory_mb,
     // 与 list_mods 数的是同一份文件表，两边不会对不上。
     mod_count: ready ? mockModFileCount(instance.dto.id) : null,
@@ -856,7 +865,7 @@ async function fakeDownload(taskId: string, files: number, bytesPerFile: number)
 
 // ---------------------------------------------------------------- 设置校验（与后端逐项一致）
 
-const SETTINGS_KEYS = ["description", "cover", "isolation", "memory_mb", "java", "jvm_args", "resolution", "fullscreen"] as const;
+const SETTINGS_KEYS = ["description", "cover", "cover_image", "background", "background_image", "isolation", "memory_mb", "java", "jvm_args", "resolution", "fullscreen"] as const;
 
 function malformed(message: string): IpcError {
   return invalid("settings", "malformed", `实例设置格式不对：${message}`);
@@ -875,6 +884,8 @@ function parseSettings(raw: unknown): InstanceSettingsDto {
   };
   const isolation = s.isolation;
   if (isolation !== "follow_global" && isolation !== "enabled" && isolation !== "disabled") throw malformed("isolation 取值不对");
+  const background = s.background;
+  if (background !== "follow" && background !== "art" && background !== "texture" && background !== "image") throw malformed("background 取值不对");
   const memory = s.memory_mb;
   if (memory !== null && memory !== undefined && (typeof memory !== "number" || !Number.isInteger(memory) || memory < 0)) {
     throw malformed("memory_mb 应为非负整数或 null");
@@ -896,6 +907,9 @@ function parseSettings(raw: unknown): InstanceSettingsDto {
   return {
     description: nullableString("description"),
     cover: nullableString("cover"),
+    cover_image: nullableString("cover_image"),
+    background,
+    background_image: nullableString("background_image"),
     isolation,
     // 与后端 serde 一致：Option 字段缺省即 null。
     memory_mb: typeof memory === "number" ? memory : null,

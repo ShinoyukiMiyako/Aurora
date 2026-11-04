@@ -121,6 +121,9 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
     const settings: InstanceSettingsDto = {
       description: null,
       cover: null,
+      cover_image: null,
+      background: "follow",
+      background_image: null,
       isolation: "follow_global",
       memory_mb: null,
       java: "auto",

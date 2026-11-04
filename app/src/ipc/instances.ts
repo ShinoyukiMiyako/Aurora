@@ -88,8 +88,14 @@ export interface InstanceDto {
   /** 隔离的生效值（实例覆盖、全局档位与已有数据共同决定）；何时为 null 同 mod_count。 */
   isolated: boolean | null;
   description: string | null;
-  /** 封面预设 id；null 时按默认规则推导。 */
+  /** 封面方块 id；null 时按默认规则推导。 */
   cover: string | null;
+  /** 封面方块用的玩家图片在材质协议 /cover/ 下的取图键；没设、设置读不出或文件不见了为 null。 */
+  cover_image: string | null;
+  /** 卡面背景；设置读不出时为 follow。 */
+  background: CoverBackgroundDto;
+  /** 卡面背景图片的取图键；何时为 null 同 cover_image。 */
+  background_image: string | null;
   /** 实例设置里的最大内存 MB；null 为跟随全局（或设置读不出）。 */
   memory_mb: number | null;
   /** 实例设置读不出来的原因；此时 description、cover、memory_mb 为 null。 */
@@ -123,11 +129,22 @@ export interface InstanceDto {
 
 export type IsolationOverride = "follow_global" | "enabled" | "disabled";
 
+/** follow 跟随外观设置里的默认背景；image 用 background_image 指的玩家图片。 */
+export type CoverBackgroundDto = "follow" | "art" | "texture" | "image";
+
+/** 卡面上用玩家图片的位置：背景，或封面方块的面。 */
+export type CoverImageSlotDto = "background" | "block";
+
 /** 实例设置。读写同一形状，写入时多出或缺少字段都会被拒绝。 */
 export interface InstanceSettingsDto {
   description: string | null;
-  /** 小写字母、数字与下划线，1 到 64 个。 */
+  /** 封面方块 id：小写字母、数字与下划线，1 到 64 个。 */
   cover: string | null;
+  /** 封面方块用的玩家图片文件名（block-<16 位十六进制>.png），只由导入命令写下。 */
+  cover_image: string | null;
+  background: CoverBackgroundDto;
+  /** 卡面背景图片文件名（background-<16 位十六进制>.png 或 .jpg），只由导入命令写下；背景换成别的样式时仍保留。 */
+  background_image: string | null;
   isolation: IsolationOverride;
   /** 最大内存 MB，至少 1024 且为 512 的整数倍；null 跟随全局。 */
   memory_mb: number | null;
@@ -383,6 +400,14 @@ export const getInstanceSettings = (id: string): Promise<InstanceSettingsDto> =>
 /** 整份写入，返回写下的内容。任一字段不合法时整次不生效。 */
 export const setInstanceSettings = (id: string, settings: InstanceSettingsDto): Promise<InstanceSettingsDto> =>
   invoke<InstanceSettingsDto>("set_instance_settings", { id, settings });
+
+/**
+ * 把本机一张图片用作卡面背景或封面方块：后端解码、重新编码进实例目录，把文件名写进实例设置（背景位同时把
+ * background 设为 image），返回写下的设置；被换下的旧图随之删除。只认 PNG、JPEG、WebP，原文件不超过 20 MB、
+ * 边长不超过 8192。读不了或不是图片报 invalid_argument（detail.field 为 path），实例忙碌报 instance_busy。
+ */
+export const importCoverImage = (id: string, slot: CoverImageSlotDto, path: string): Promise<InstanceSettingsDto> =>
+  invoke<InstanceSettingsDto>("import_cover_image", { id, slot, path });
 
 /** 资源包、光影包与存档，从实例运行时的工作目录读。 */
 export const listInstanceContent = (id: string): Promise<InstanceContentDto> =>

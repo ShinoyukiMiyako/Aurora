@@ -12,7 +12,7 @@ import { ACTION_ERROR, lockReason, modpackLabel, TOAST_COPY } from "../../copy/f
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatPlaytimeShort, formatRelative } from "../../domain/format";
 import { locksOf } from "../../domain/instance-locks";
-import { instanceCover } from "../../launch/cover";
+import { useInstanceCover } from "../../launch/cover";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import { launchView } from "../../launch/launchView";
 import { useNav } from "../../shell/shell";
@@ -62,7 +62,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
 
   const deleteReason = lockReason(locksOf(inst, busy).delete, "delete");
   const pinAllowed = inst.pinned || canPin;
-  const cover = instanceCover(inst);
+  const cover = useInstanceCover(inst);
   const justCrashed = viewKind === "crashed";
   const hasCrash = justCrashed || inst.lastCrashAt !== null || inst.lastCrashError !== null;
   const crashActive = justCrashed || (viewKind !== null && isCrashActive(inst.lastCrashAt, inst.lastPlayedAt, viewKind));

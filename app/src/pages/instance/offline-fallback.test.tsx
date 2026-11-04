@@ -24,6 +24,9 @@ const HANAMI = "6a1f0c0e4b5d4c3e9f2a7b8c9d0e1f20";
 const SETTINGS: InstanceSettingsDto = {
   description: null,
   cover: null,
+  cover_image: null,
+  background: "follow",
+  background_image: null,
   isolation: "follow_global",
   memory_mb: null,
   java: "auto",

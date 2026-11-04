@@ -3,6 +3,7 @@
 //   /panorama/0.png                  樱花林全景正面
 //   /skin/<sha1(皮肤 URL)>.png       已下载的远程皮肤
 //   /thumb/<sha1(远程图 URL)>        已登记并缓存的远程缩略图
+//   /cover/<sha1(本机路径)>          实例卡面的玩家图片（列实例时由后端登记）
 // 材质只从玩家本机的游戏文件读取：材质源为 null（还没装任何游戏）时 artUrl 返回 null，调用方直接画回落图形，
 // 一个请求都不发。材质源版本写进 v 参数，协议响应是 immutable 缓存，换版本时旧缓存自然失效。
 
@@ -104,6 +105,12 @@ const SHA1_HEX = /^[0-9a-f]{40}$/;
 export function skinUrl(sha1: string): string {
   if (!SHA1_HEX.test(sha1)) throw new Error(`皮肤缓存键不是 40 位小写十六进制：${sha1}`);
   return `${texOrigin()}/skin/${sha1}.png`;
+}
+
+/** 实例卡面的玩家图片：键由实例列表给出（后端登记时算好）。 */
+export function coverImageUrl(key: string): string {
+  if (!SHA1_HEX.test(key)) throw new Error(`卡面图片的取图键不是 40 位小写十六进制：${key}`);
+  return `${texOrigin()}/cover/${key}`;
 }
 
 /** 远程缩略图在协议里的地址。只接受 http(s) 地址；地址要先经后端登记、下载进缓存才取得到。 */

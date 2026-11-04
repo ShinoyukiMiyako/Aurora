@@ -1159,7 +1159,13 @@ mod tests {
             .await
             .unwrap();
 
-        let list = list_instances_with(&facade, &locks).await.unwrap();
+        let list = list_instances_with(
+            &facade,
+            &locks,
+            &crate::commands::instances::test_textures(),
+        )
+        .await
+        .unwrap();
         let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["1.20.1", "OptiFabric"]);
         assert_eq!(list[0].used_by.as_deref(), Some("OptiFabric"));

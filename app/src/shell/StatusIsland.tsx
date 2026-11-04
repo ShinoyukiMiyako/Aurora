@@ -16,6 +16,7 @@ import type { InstanceSummary } from "../domain/adapt";
 import { clock, formatElapsed, formatSpeed, percent } from "../domain/format";
 import { useBreathPhase } from "../launch/breath";
 import { instanceCover } from "../launch/cover";
+import { useBlockCatalog } from "../mc/catalog";
 import { useLaunchHost } from "../launch/host";
 import { sessionDetail, sessionPhaseLabel } from "../launch/launchView";
 import { fade, shake, springs } from "../lib/motion";
@@ -130,6 +131,7 @@ const shakeVariants: Variants = {
 function Island({ session }: { session: SessionState }) {
   const actions = useLauncherActions();
   const instance = useLauncherSelector((s) => findInstance(s, session.instanceId));
+  const catalog = useBlockCatalog();
   const { tier } = useShell();
   const host = useLaunchHost();
   const now = useRunningNow(session.phase === "running");
@@ -197,7 +199,7 @@ function Island({ session }: { session: SessionState }) {
           animate={session.phase === "crashed" ? "shake" : "rest"}
         >
           <span className={styles.blockFrame} aria-hidden="true">
-            {instance !== undefined && <InstanceBlock instanceId={instance.id} cover={instanceCover(instance)} width={20} />}
+            {instance !== undefined && <InstanceBlock instanceId={instance.id} cover={instanceCover(instance, catalog)} width={20} />}
           </span>
           <span className={styles.name}>{name}</span>
           <span className={styles.second}>
@@ -243,10 +245,11 @@ function IslandBar({ session }: { session: SessionState }) {
 function DetailHead({ session, instance, name, now }: { session: SessionState; instance: InstanceSummary | undefined; name: string; now: number }) {
   const detail = sessionDetail(session, now);
   const phase = sessionPhaseLabel(session);
+  const catalog = useBlockCatalog();
   return (
     <div className={styles.head}>
       <span className={styles.headBlock} aria-hidden="true">
-        {instance !== undefined && <InstanceBlock instanceId={instance.id} cover={instanceCover(instance)} width={28} />}
+        {instance !== undefined && <InstanceBlock instanceId={instance.id} cover={instanceCover(instance, catalog)} width={28} />}
       </span>
       <div className={styles.headText}>
         <p className={styles.headName}>{name}</p>

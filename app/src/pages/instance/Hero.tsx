@@ -11,7 +11,7 @@ import type { InstanceSummary } from "../../domain/adapt";
 import { percent } from "../../domain/format";
 import { needsReimport } from "../../domain/rules";
 import { isImeComposing } from "../../lib/util";
-import { instanceCover } from "../../launch/cover";
+import { useInstanceCover } from "../../launch/cover";
 import { LaunchCapsule } from "../../launch/LaunchCapsule";
 import type { LaunchView } from "../../launch/launchView";
 import { useNav, useShell } from "../../shell/shell";
@@ -49,7 +49,7 @@ export interface HeroProps {
 export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange }: HeroProps) {
   const { tier } = useShell();
   const { go } = useNav();
-  const cover = instanceCover(inst);
+  const cover = useInstanceCover(inst);
   const pinBlocked = useLauncherSelector((s) => !inst.pinned && !canPinMore(s));
   const renameReason = lockReason(ops.locks.rename, "rename");
   const repairReason = lockReason(ops.locks.repair, "repair");

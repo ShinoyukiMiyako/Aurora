@@ -11,6 +11,14 @@ export type AppearanceMode = (typeof APPEARANCE_MODES)[number];
 export const ACCENT_NAMES = ["sakura", "amethyst", "moss"] as const;
 export type AccentName = (typeof ACCENT_NAMES)[number];
 
+/** 实例卡面的默认背景：渐变花瓣，或封面方块的材质平铺。 */
+export const COVER_STYLES = ["art", "texture"] as const;
+export type CoverStyle = (typeof COVER_STYLES)[number];
+
+/** 实例自己的卡面背景：follow 跟随外观里的默认，image 为玩家图片。 */
+export const COVER_BACKGROUNDS = ["follow", "art", "texture", "image"] as const;
+export type CoverBackground = (typeof COVER_BACKGROUNDS)[number];
+
 export interface Appearance {
   mode: AppearanceMode;
   accent: AccentName;
@@ -20,6 +28,8 @@ export interface Appearance {
   panorama: boolean;
   /** 应用内的「减少动画」开关；与系统偏好取或得到生效值。 */
   reduceMotion: boolean;
+  /** 实例卡面的默认背景：实例设为跟随时用它。 */
+  coverBackground: CoverStyle;
 }
 
 // ---------------------------------------------------------------- 资源与账户

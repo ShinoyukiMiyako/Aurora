@@ -54,7 +54,7 @@ describe("coverIdentityWidth", () => {
 describe("Cover", () => {
   it("art 形态：色相渐变底 + 底纹 4 片花瓣 + 右侧身份方块；高度由页面给定", () => {
     view = render(
-      <Cover hue={345} seed="inst-1" height={132} identity={{ instanceId: "inst-1", cover: { block: "cherry_planks", hue: 345 } }}>
+      <Cover hue={345} seed="inst-1" height={132} identity={{ instanceId: "inst-1", cover: { block: "cherry_planks", hue: 345, image: null } }}>
         <h2>周末生存</h2>
       </Cover>,
     );
@@ -76,7 +76,7 @@ describe("Cover", () => {
     const resolve = vi.fn(async (url: string) => url);
     view = render(
       <RemoteImageProvider resolve={resolve}>
-        <Cover hue={20} seed="p" height={180} remoteUrl="https://cdn.modrinth.com/gallery/a.png" shade="bottom" identity={{ instanceId: "i", cover: { block: "red_wool", hue: 355 } }} />
+        <Cover hue={20} seed="p" height={180} remoteUrl="https://cdn.modrinth.com/gallery/a.png" shade="bottom" identity={{ instanceId: "i", cover: { block: "red_wool", hue: 355, image: null } }} />
       </RemoteImageProvider>,
     );
     act(() => {

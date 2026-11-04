@@ -67,7 +67,7 @@ export const gallery: GalleryEntry = {
       </GalleryRow>
       <GalleryRow label="卡面：art（带身份方块）/ remote（下方压暗）/ remote 失败回落 art">
         <span style={{ display: "block", width: 320 }}>
-          <Cover hue={345} seed="周末生存" height={132} identity={{ instanceId: "周末生存", cover: { block: "cherry_planks", hue: 345 } }} />
+          <Cover hue={345} seed="周末生存" height={132} identity={{ instanceId: "周末生存", cover: { block: "cherry_planks", hue: 345, image: null } }} />
         </span>
         <span style={{ display: "block", width: 320 }}>
           <Cover hue={205} seed="整合包" height={132} remoteUrl="sample:wide" shade="bottom" />

@@ -18,7 +18,23 @@ import type {
 } from "../ipc/instances";
 import type { LaunchDownloadDto, LogLineDto } from "../ipc/launch";
 import type { TaskRecordDto } from "../ipc/tasks";
-import { BASE_BLOCKING_ACTIVITIES, INSTALL_PHASES, PLATFORMS, TASK_KINDS, TASK_STATUSES, type AccountKind, type BaseBlockingActivity, type InstallPhase, type LoaderKind, type LogLine, type Platform, type SessionDownload, type Task } from "./types";
+import {
+  BASE_BLOCKING_ACTIVITIES,
+  COVER_BACKGROUNDS,
+  INSTALL_PHASES,
+  PLATFORMS,
+  TASK_KINDS,
+  TASK_STATUSES,
+  type AccountKind,
+  type BaseBlockingActivity,
+  type CoverBackground,
+  type InstallPhase,
+  type LoaderKind,
+  type LogLine,
+  type Platform,
+  type SessionDownload,
+  type Task,
+} from "./types";
 
 function oneOf<T extends string>(value: unknown, allowed: readonly T[], what: string): T {
   if (typeof value !== "string" || !(allowed as readonly string[]).includes(value)) throw new Error(`未知的${what}：${String(value)}`);
@@ -135,8 +151,14 @@ export interface InstanceSummary {
   quickPlay: { singleplayer: boolean; multiplayer: boolean } | null;
   /** 实例设置里的描述；没写或设置读不出时为 null。 */
   description: string | null;
-  /** 封面预设 id；null 表示没设过，按默认封面规则画。 */
+  /** 封面方块 id；null 表示没设过，按默认封面规则画。 */
   cover: string | null;
+  /** 封面方块用的玩家图片在材质协议 /cover/ 下的取图键；没设或文件不见了为 null。 */
+  coverImage: string | null;
+  /** 卡面背景；follow 跟随外观设置里的默认。 */
+  background: CoverBackground;
+  /** 卡面背景图片的取图键；没设或文件不见了为 null。 */
+  backgroundImage: string | null;
   pinned: boolean;
   status: InstanceStatus;
   /** status 为 broken 时的原因；其余为 null。 */
@@ -262,6 +284,9 @@ export function instanceFromDto(dto: InstanceDto, ctx: InstanceContext): Instanc
     quickPlay: dto.quick_play === null ? null : { singleplayer: dto.quick_play.singleplayer, multiplayer: dto.quick_play.multiplayer },
     description: dto.description,
     cover: dto.cover,
+    coverImage: dto.cover_image,
+    background: oneOf(dto.background, COVER_BACKGROUNDS, "卡面背景"),
+    backgroundImage: dto.background_image,
     pinned: ctx.pins.includes(dto.id),
     status,
     brokenReason,
@@ -300,6 +325,11 @@ export function javaPinned(settings: InstanceSettings): boolean {
 export interface InstanceSettings {
   description: string | null;
   cover: string | null;
+  /** 封面方块图片的文件名；只由导入写下，界面只会把它清成 null。 */
+  coverImage: string | null;
+  background: CoverBackground;
+  /** 卡面背景图片的文件名；同上。 */
+  backgroundImage: string | null;
   isolation: IsolationOverride;
   /** null 跟随全局。 */
   memoryMb: number | null;
@@ -314,6 +344,9 @@ export function instanceSettingsFromDto(dto: InstanceSettingsDto): InstanceSetti
   return {
     description: dto.description,
     cover: dto.cover,
+    coverImage: dto.cover_image,
+    background: oneOf(dto.background, COVER_BACKGROUNDS, "卡面背景"),
+    backgroundImage: dto.background_image,
     isolation: oneOf(dto.isolation, ["follow_global", "enabled", "disabled"] as const, "隔离设置"),
     memoryMb: dto.memory_mb,
     java: dto.java,
@@ -327,6 +360,9 @@ export function instanceSettingsToDto(settings: InstanceSettings): InstanceSetti
   return {
     description: settings.description,
     cover: settings.cover,
+    cover_image: settings.coverImage,
+    background: settings.background,
+    background_image: settings.backgroundImage,
     isolation: settings.isolation,
     memory_mb: settings.memoryMb,
     java: settings.java,

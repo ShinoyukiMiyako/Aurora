@@ -5,7 +5,7 @@ import { Icon } from "../../art/Icon";
 import { LAUNCH_COPY, LOADER_NAME, PHASE_LABEL, STOPPED_LABEL, AVATAR_LINE } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatRelative, percent } from "../../domain/format";
-import { instanceCover } from "../../launch/cover";
+import { useInstanceCover } from "../../launch/cover";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import { brokenAction } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
@@ -81,7 +81,7 @@ function RecentSkeleton() {
 function RecentCard({ inst }: { inst: InstanceSummary }) {
   const { go } = useNav();
   const now = useNow(30_000);
-  const cover = instanceCover(inst);
+  const cover = useInstanceCover(inst);
   // lastPlayedAt 在 recentInstances 里已筛掉 null
   if (inst.lastPlayedAt === null) throw new Error(`最近游玩里出现了从没玩过的实例 ${inst.id}`);
   return (

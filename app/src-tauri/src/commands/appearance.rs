@@ -1,6 +1,6 @@
 //! 外观偏好：前端首帧渲染前读取，切换时写回配置。
 //!
-//! 出入参都是 `{ mode, accent, petals, panorama, reduce_motion }`（snake_case），取值见
+//! 出入参都是 `{ mode, accent, petals, panorama, cover_background, reduce_motion }`（snake_case），取值见
 //! petalfall-core 的 appearance 模块。
 
 use petalfall_core::{Appearance, AppearancePatch};
@@ -74,6 +74,7 @@ mod tests {
                 "accent": "sakura",
                 "petals": true,
                 "panorama": false,
+                "cover_background": "texture",
                 "reduce_motion": false
             })
         );

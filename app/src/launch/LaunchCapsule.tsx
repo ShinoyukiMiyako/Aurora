@@ -22,7 +22,7 @@ import { softDisabledProps } from "../ui/Button";
 import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
 import { Tooltip } from "../ui/Tooltip";
 import { useBreathPhase } from "./breath";
-import { instanceCover } from "./cover";
+import { useInstanceCover } from "./cover";
 import styles from "./LaunchCapsule.module.css";
 import { brokenAction, sessionDetail, sessionPhaseLabel, stageLabel, type LaunchView } from "./launchView";
 import { useLaunch, type LaunchEntry } from "./useLaunch";
@@ -228,7 +228,7 @@ function BreathGlow() {
 }
 
 function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: LaunchEntry; exit: AssemblyExit | null; seat: boolean; relaunch: boolean }) {
-  const cover = instanceCover(entry.instance);
+  const cover = useInstanceCover(entry.instance);
   const id = entry.instance.id;
   switch (face.kind) {
     case "ready": {

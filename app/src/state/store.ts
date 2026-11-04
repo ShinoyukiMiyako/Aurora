@@ -509,10 +509,10 @@ const TASK_COMMANDS = new Set([
 ]);
 
 /**
- * 实例列表里带着结果的实例设置，改了要重扫列表：简介与封面直接显示；隔离会换掉工作目录，列表里的隔离生效值、
- * 存档数与 Mod 数随之变；自定内存直接给出 memoryMb。
+ * 实例列表里带着结果的实例设置，改了要重扫列表：简介、封面与卡面背景直接显示（图片的取图键由列表登记）；
+ * 隔离会换掉工作目录，列表里的隔离生效值、存档数与 Mod 数随之变；自定内存直接给出 memoryMb。
  */
-const LISTED_INSTANCE_SETTINGS = ["description", "cover", "isolation", "memoryMb"] as const;
+const LISTED_INSTANCE_SETTINGS = ["description", "cover", "coverImage", "background", "backgroundImage", "isolation", "memoryMb"] as const;
 
 /** 前端的组合任务：逐项调后端命令，中途失败或取消时前面几项已经落盘。 */
 const COMPOSITE_TASKS = new Set(["install_mods", "update_mods"]);
@@ -999,6 +999,9 @@ function placeholderOf(meta: Extract<TaskMeta, { type: "create" | "modpack" }>, 
     quickPlay: null,
     description: null,
     cover: meta.cover,
+    coverImage: null,
+    background: "follow",
+    backgroundImage: null,
     pinned,
     status: "installing",
     brokenReason: null,

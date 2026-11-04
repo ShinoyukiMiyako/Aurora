@@ -77,9 +77,9 @@ describe("浏览器与测试环境走 mock", () => {
   });
 
   it("外观读写：补丁合并进完整状态，返回值与后续读取一致", async () => {
-    expect(await getAppearance()).toEqual({ mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false });
+    expect(await getAppearance()).toEqual({ mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false, cover_background: "texture" });
     const saved = await setAppearance({ mode: "night", accent: "moss" });
-    expect(saved).toEqual({ mode: "night", accent: "moss", petals: true, panorama: false, reduce_motion: false });
+    expect(saved).toEqual({ mode: "night", accent: "moss", petals: true, panorama: false, reduce_motion: false, cover_background: "texture" });
     expect(await getAppearance()).toEqual(saved);
     resetMocks();
     expect((await getAppearance()).mode).toBe("day");
@@ -99,7 +99,7 @@ describe("浏览器与测试环境走 mock", () => {
     // 缺参数是 Tauri 自己的参数错误，到前端是纯字符串，归一后为 unknown。
     const missing = await invoke("set_appearance", {}).catch((e: unknown) => e);
     expect(missing).toMatchObject({ code: "unknown" });
-    expect(await getAppearance()).toEqual({ mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false });
+    expect(await getAppearance()).toEqual({ mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false, cover_background: "texture" });
   });
 
   it("返回值经过序列化往返，改返回值改不到 mock 内部状态", async () => {

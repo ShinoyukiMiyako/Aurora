@@ -1,4 +1,4 @@
-// 外观偏好：明暗、强调色、花瓣、全景、减少动画。偏好持久化在后端配置，不用 localStorage。
+// 外观偏好：明暗、强调色、花瓣、全景、减少动画、实例卡面的默认背景。偏好持久化在后端配置，不用 localStorage。
 //
 // 切换时先改 <html> 上的属性（同一帧生效，颜色不做过渡），再写后端；写入失败把属性还原成后端最后确认的值，
 // 并把错误原样抛给调用方，由外层统一提示。连续快速切换时只有最后一次请求的结果决定界面，
@@ -6,11 +6,11 @@
 
 import { MotionConfig } from "framer-motion";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ACCENT_NAMES, APPEARANCE_MODES, type AccentName, type Appearance, type AppearanceMode } from "../domain/types";
+import { ACCENT_NAMES, APPEARANCE_MODES, COVER_STYLES, type AccentName, type Appearance, type AppearanceMode, type CoverStyle } from "../domain/types";
 import { getAppearance, setAppearance as persistAppearance, type AppearanceDto, type AppearancePatchDto } from "../ipc/appearance";
 import { rootTransition } from "../lib/motion";
 
-export const DEFAULT_APPEARANCE: Appearance = { mode: "day", accent: "sakura", petals: true, panorama: false, reduceMotion: false };
+export const DEFAULT_APPEARANCE: Appearance = { mode: "day", accent: "sakura", petals: true, panorama: false, reduceMotion: false, coverBackground: "texture" };
 
 const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 
@@ -22,6 +22,11 @@ function assertMode(value: unknown): AppearanceMode {
 function assertAccent(value: unknown): AccentName {
   if (!ACCENT_NAMES.includes(value as AccentName)) throw new Error(`未知的强调色：${String(value)}`);
   return value as AccentName;
+}
+
+function assertCoverStyle(value: unknown): CoverStyle {
+  if (!COVER_STYLES.includes(value as CoverStyle)) throw new Error(`未知的卡面默认背景：${String(value)}`);
+  return value as CoverStyle;
 }
 
 function assertBoolean(name: string, value: unknown): boolean {
@@ -36,6 +41,7 @@ export function appearanceFromDto(dto: AppearanceDto): Appearance {
     petals: assertBoolean("petals", dto.petals),
     panorama: assertBoolean("panorama", dto.panorama),
     reduceMotion: assertBoolean("reduce_motion", dto.reduce_motion),
+    coverBackground: assertCoverStyle(dto.cover_background),
   };
 }
 
@@ -47,6 +53,7 @@ export function appearancePatchToDto(patch: Partial<Appearance>): AppearancePatc
   if ("petals" in patch) dto.petals = assertBoolean("petals", patch.petals);
   if ("panorama" in patch) dto.panorama = assertBoolean("panorama", patch.panorama);
   if ("reduceMotion" in patch) dto.reduce_motion = assertBoolean("reduce_motion", patch.reduceMotion);
+  if ("coverBackground" in patch) dto.cover_background = assertCoverStyle(patch.coverBackground);
   return dto;
 }
 

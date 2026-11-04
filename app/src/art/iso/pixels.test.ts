@@ -151,15 +151,15 @@ describe("LruCache", () => {
 describe("封面预设", () => {
   it("16 块，默认樱花木板；按 id 查找，白名单外为 undefined", () => {
     expect(COVER_PRESETS).toHaveLength(16);
-    expect(DEFAULT_COVER).toEqual({ block: "cherry_planks", hue: 345 });
-    expect(coverPreset("purpur_block")).toEqual({ block: "purpur_block", hue: 290 });
+    expect(DEFAULT_COVER).toEqual({ block: "cherry_planks", hue: 345, image: null });
+    expect(coverPreset("purpur_block")).toEqual({ block: "purpur_block", hue: 290, image: null });
     expect(coverPreset("block/purpur_block")).toBeUndefined();
   });
 
   it("整合包默认封面取第 fnv1a32(项目 id) mod 16 项", () => {
     // fnv1a32("a") = 3826002220，mod 16 = 12 -> 蓝冰
-    expect(defaultModpackCover("a")).toEqual({ block: "blue_ice", hue: 205 });
+    expect(defaultModpackCover("a")).toEqual({ block: "blue_ice", hue: 205, image: null });
     // fnv1a32("foobar") = 3214735720，mod 16 = 8 -> 深板岩瓦
-    expect(defaultModpackCover("foobar")).toEqual({ block: "deepslate_tiles", hue: 210 });
+    expect(defaultModpackCover("foobar")).toEqual({ block: "deepslate_tiles", hue: 210, image: null });
   });
 });
