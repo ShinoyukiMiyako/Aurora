@@ -138,7 +138,8 @@ export const artBlocks = (): Promise<BlockCatalogDto | null> => invoke<BlockCata
 /**
  * 本机没有原版游戏时，从官方源（按文件下载源设置，镜像回退）下载最新正式版的客户端 jar，只抽方块材质、
  * 方块状态与模型、英文名进缓存，再下中文语言文件，然后删掉 jar。完成后重选材质源并推送 art-changed，
- * 返回新状态。上一次还没下完时再调用报 task_conflict；网络失败、校验不符报 download_failed。
+ * 返回新状态。上一次还没下完时再调用报 task_conflict；网络失败、校验不符多为 download_failed（版本 JSON 取不到时
+ * 为 install_failed），抽取失败报 io。同一阶段开头可能连着报两次 0 进度。
  */
 export const artDownload = (): Promise<ArtStatusDto> => invoke<ArtStatusDto>("art_download");
 

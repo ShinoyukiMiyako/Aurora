@@ -107,6 +107,7 @@ pub fn run() {
             app.manage(TaskJournal::default());
             // -- instances --
             app.manage(commands::instances::InstanceLocks::default());
+            app.manage(commands::art::ArtDownloadSlot::default());
             app.manage(commands::instances::ExportedFiles::default());
             // -- launch --
             app.manage(commands::launch::RunningGame::default());
@@ -170,6 +171,7 @@ pub fn run() {
             // -- art --
             commands::art::art_status,
             commands::art::art_blocks,
+            commands::art::art_download,
             commands::art::skin_info,
             commands::art::thumb_register,
             // -- instances --

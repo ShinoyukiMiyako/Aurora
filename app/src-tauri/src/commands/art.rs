@@ -1,18 +1,36 @@
-//! 原版材质服务的命令：状态查询、方块目录、账户皮肤、远程缩略图登记。图本身经 `petalfall-tex` 协议取
-//! （见 [`crate::textures`]），这里只回答「有没有、用哪个键去取」。
+//! 原版材质服务的命令：状态查询、方块目录、下载原版材质、账户皮肤、远程缩略图登记。图本身经
+//! `petalfall-tex` 协议取（见 [`crate::textures`]），这里只回答「有没有、用哪个键去取」。
 
 use petalfall_core::art::BlockCatalog;
 use petalfall_core::{
-    default_skin, Account, AccountType, ArtStatus, SkinInfo, SkinModel, TextureService, ThumbError,
+    default_skin, Account, AccountType, ArtDownloadProgress, ArtDownloadStage, ArtStatus, SkinInfo,
+    SkinModel, TextureService, ThumbError,
 };
 use serde::Serialize;
 use serde_json::json;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::commands::accounts::with_accounts;
 use crate::commands::error::code;
 use crate::commands::CommandError;
+use crate::events;
 use crate::facade::Facade;
+
+/// 下载原版材质的进度，负载为 [`ArtDownloadProgress`]。
+pub const ART_DOWNLOAD_EVENT: &str = "petalfall://art-download";
+
+/// 同一时刻只允许一次下载：两次并发会往同一个暂存目录写同一个 jar。
+#[derive(Default)]
+pub struct ArtDownloadSlot(tokio::sync::Mutex<()>);
+
+impl ArtDownloadSlot {
+    /// 占住下载位；上一次还没结束时报 `task_conflict`。
+    fn claim(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, CommandError> {
+        self.0
+            .try_lock()
+            .map_err(|_| CommandError::new(code::TASK_CONFLICT, "原版材质正在下载，等这一次结束"))
+    }
+}
 
 /// 材质源 DTO。
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -117,6 +135,40 @@ pub async fn art_blocks(
     textures: State<'_, TextureService>,
 ) -> Result<Option<BlockCatalogDto>, CommandError> {
     Ok(textures.catalog())
+}
+
+/// 本机没有原版游戏时，从官方源（按文件下载源设置，镜像回退）下载最新正式版的客户端，抽方块材质、
+/// 方块状态、模型与名称进缓存，然后重选材质源并返回新状态（状态变了同时推送 `petalfall://art-changed`）。
+///
+/// 只在玩家点下载时跑。上一次还没下完时报 `task_conflict`。暂存目录只在抽取成功后删：下载或抽取失败时
+/// 已下好的分片与 jar 留着，重试时续传、校验通过就不再重下；成功一次就连同旧版本残留一起清掉。
+#[tauri::command]
+pub async fn art_download(
+    app: AppHandle,
+    facade: State<'_, Facade>,
+    textures: State<'_, TextureService>,
+    slot: State<'_, ArtDownloadSlot>,
+) -> Result<ArtStatusDto, CommandError> {
+    let _running = slot.claim()?;
+    let dest = textures.download_dir();
+    let petalfall = facade.snapshot().await;
+    let emitter = app.clone();
+    let progress = move |p: ArtDownloadProgress| events::emit(&emitter, ART_DOWNLOAD_EVENT, p);
+    let client = petalfall.download_art_client(&dest, &progress).await?;
+    progress(ArtDownloadProgress {
+        stage: ArtDownloadStage::Extract,
+        downloaded: 0,
+        total: None,
+    });
+    textures.adopt_download(client).await.map_err(|reason| {
+        tracing::warn!(%reason, "抽取下载来的原版材质失败");
+        CommandError::new(code::IO, format!("抽取原版材质失败：{reason}"))
+    })?;
+    if let Err(err) = tokio::fs::remove_dir_all(&dest).await {
+        // 材质已经进了缓存，暂存只是占地方：删不掉留到下次成功再删，不让这次下载算失败
+        tracing::warn!(dir = %dest.display(), error = %err, "清理原版材质下载暂存失败");
+    }
+    Ok(crate::textures::refresh(&app).await.into())
 }
 
 /// 账户当前皮肤：远程皮肤就绪时返回取图键与模型；离线账户返回它进游戏后显示的原版默认皮肤；
@@ -324,6 +376,28 @@ mod tests {
         assert_eq!(
             skin_without_profile(&account).unwrap_err().code,
             code::INTERNAL
+        );
+    }
+
+    #[test]
+    fn only_one_art_download_runs_at_a_time() {
+        let slot = ArtDownloadSlot::default();
+        let first = slot.claim().unwrap();
+        assert_eq!(slot.claim().unwrap_err().code, code::TASK_CONFLICT);
+        drop(first);
+        assert!(slot.claim().is_ok(), "上一次结束后可以再下");
+    }
+
+    #[test]
+    fn art_download_progress_serializes_like_the_frontend_dto() {
+        assert_eq!(
+            serde_json::to_value(ArtDownloadProgress {
+                stage: ArtDownloadStage::Extract,
+                downloaded: 0,
+                total: None,
+            })
+            .unwrap(),
+            json!({ "stage": "extract", "downloaded": 0, "total": null })
         );
     }
 
