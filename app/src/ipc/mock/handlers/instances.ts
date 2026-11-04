@@ -1002,8 +1002,9 @@ const COVER_IMAGE_NAME: Record<CoverImageSlotDto, RegExp> = {
  */
 const COVER_IMAGE_SOURCES: Readonly<Record<string, "png" | "jpg">> = { png: "png", jpg: "jpg", jpeg: "jpg", webp: "png" };
 
-function coverSlot(raw: unknown): CoverImageSlotDto {
-  if (raw !== "background" && raw !== "block") throw new Error(`mock：slot 应为 background 或 block，收到 ${JSON.stringify(raw)}`);
+/** 与后端把 slot 解成 CoverImageSlot 一致：不认识的位置报 invalid_argument，detail.field 为 slot。 */
+function coverSlot(raw: string): CoverImageSlotDto {
+  if (raw !== "background" && raw !== "block") throw invalid("slot", "unknown", `不认识的卡面图片位置：${raw}`);
   return raw;
 }
 
@@ -1014,19 +1015,20 @@ function commitSettings(instance: MockInstance, settings: InstanceSettingsDto): 
 }
 
 /**
- * 与后端同序：先认图（扩展名代替文件头），再占住实例（改名、删除、新建、补全进行中报 instance_busy），之后才认实例。
- * 文件名的哈希段由位置与原图路径推出（后端取内容哈希），同一张图重复导入得同一个名字。
+ * 与后端同序：先认位置，再认绝对路径，然后占住实例（改名、删除、新建、补全进行中报 instance_busy）、认实例，最后才认图
+ * （扩展名代替文件头）。文件名的哈希段由位置与原图路径推出（后端取内容哈希），同一张图重复导入得同一个名字。
  */
 function importCoverImage(args: MockArgs): InstanceSettingsDto {
   const id = str(args, "id");
-  const slot = coverSlot(args.slot);
+  const slot = coverSlot(str(args, "slot"));
   const path = str(args, "path");
-  const dot = path.lastIndexOf(".");
-  const ext = dot < 0 ? "" : path.slice(dot + 1).toLowerCase();
-  const stored = Object.hasOwn(COVER_IMAGE_SOURCES, ext) ? COVER_IMAGE_SOURCES[ext] : null;
-  if (stored === null) throw invalid("path", "not_image", `只能用 PNG、JPEG 或 WebP 图片：${path}`);
+  if (!/^([A-Za-z]:[\\/]|\\\\)/.test(path)) throw invalid("path", "not_absolute", `图片路径须是绝对路径：${path}`);
   return withMockInstance(id, "modifying", () => {
     const instance = requireInstance(id);
+    const dot = path.lastIndexOf(".");
+    const ext = dot < 0 ? "" : path.slice(dot + 1).toLowerCase();
+    const stored = Object.hasOwn(COVER_IMAGE_SOURCES, ext) ? COVER_IMAGE_SOURCES[ext] : null;
+    if (stored === null) throw invalid("path", "unsupported_format", `只能用 PNG、JPEG 或 WebP 图片：${path}`);
     const hash = stableHex(`${slot}:${path}`, 16);
     const file = slot === "block" ? `block-${hash}.png` : `background-${hash}.${stored}`;
     const settings: InstanceSettingsDto =
