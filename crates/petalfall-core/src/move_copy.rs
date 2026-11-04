@@ -90,12 +90,18 @@ pub(crate) type Sha1Digest = [u8; 20];
 #[cfg(test)]
 pub(crate) type Fault<'a> = dyn Fn(&Path) -> io::Result<()> + Sync + 'a;
 
+/// 测试注入的读回钩子，见 [`CopyControl::with_readback_hook`]。
+#[cfg(test)]
+pub(crate) type ReadbackHook<'a> = dyn Fn(&Path, &File) -> io::Result<()> + Sync + 'a;
+
 /// 复制与校验的取消与进度。进度回调参数是（本次新增字节, 本次新完成文件数）。
 pub(crate) struct CopyControl<'a> {
     cancel: Option<&'a CancellationToken>,
     progress: &'a (dyn Fn(u64, u64) + Sync),
     #[cfg(test)]
     fault: Option<&'a Fault<'a>>,
+    #[cfg(test)]
+    readback: Option<&'a ReadbackHook<'a>>,
 }
 
 impl<'a> CopyControl<'a> {
@@ -108,6 +114,8 @@ impl<'a> CopyControl<'a> {
             progress,
             #[cfg(test)]
             fault: None,
+            #[cfg(test)]
+            readback: None,
         }
     }
 
@@ -116,6 +124,14 @@ impl<'a> CopyControl<'a> {
     #[cfg(test)]
     pub(crate) fn with_fault(mut self, fault: &'a Fault<'a>) -> Self {
         self.fault = Some(fault);
+        self
+    }
+
+    /// 测试注入：读回打开文件之后、开始读之前，以文件路径和读回用的句柄调用（用来认句柄是不是绕过了系统缓存）；
+    /// 返回 Err 时当作打开读回失败。
+    #[cfg(all(test, windows))]
+    pub(crate) fn with_readback_hook(mut self, hook: &'a ReadbackHook<'a>) -> Self {
+        self.readback = Some(hook);
         self
     }
 
@@ -140,6 +156,19 @@ impl<'a> CopyControl<'a> {
 
     #[cfg(not(test))]
     fn written(&self, _path: &Path) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn readback_opened(&self, path: &Path, file: &File) -> io::Result<()> {
+        match self.readback {
+            Some(hook) => hook(path, file),
+            None => Ok(()),
+        }
+    }
+
+    #[cfg(not(test))]
+    fn readback_opened(&self, _path: &Path, _file: &File) -> io::Result<()> {
         Ok(())
     }
 }
@@ -191,7 +220,7 @@ pub(crate) fn verify_tree(
         scan.files.len(),
         "摘要与清单不是同一次复制的"
     );
-    let mut buf = vec![0u8; CHUNK];
+    let mut buf = ReadBuf::new();
     for (file, expected) in scan.files.iter().zip(digests) {
         control.check()?;
         let path = dst_root.join(&file.rel);
@@ -242,8 +271,9 @@ fn place_verified(
     dst: &Path,
     control: &CopyControl<'_>,
 ) -> Result<()> {
-    let mut buf = vec![0u8; CHUNK];
-    let written = copy_contents(src, output, temp, &mut buf, control)?;
+    // 复制与读回共用一块缓冲：共用文件动辄上万个，每个各分配两块不值得。
+    let mut buf = ReadBuf::new();
+    let written = copy_contents(src, output, temp, buf.aligned(MIN_SECTOR), control)?;
     control.written(temp)?;
     // 共用目录里的文件别的实例会直接拿来用，写坏了的不能以正式文件名出现在那里。
     if hash_file(temp, &mut buf, control, false)? != written {
@@ -309,30 +339,169 @@ fn copy_contents(
         output.set_permissions(permissions).map_err(out_err)?;
     }
     output.sync_all().map_err(out_err)?;
+    // 读回前关掉写句柄：读回看的是这个句柄再也补不进东西之后的文件。
+    drop(output);
     Ok(hasher.finalize().into())
 }
 
-/// 读一遍文件算 SHA-1，按块检查取消；report 为真时按块报字节。
+/// 无缓冲读的对齐下限，查不到卷的扇区大小时就按它对齐。它是页大小，常见的 512 与 4096 字节扇区都整除它。
+const MIN_SECTOR: usize = 4096;
+
+/// 读回用的缓冲：无缓冲读要求缓冲区起始地址按扇区对齐。多分配一个对齐单位的余量，从里面切出对齐的一段。
+struct ReadBuf {
+    raw: Vec<u8>,
+}
+
+impl ReadBuf {
+    fn new() -> Self {
+        Self { raw: Vec::new() }
+    }
+
+    /// 起始地址按 unit 对齐、长 CHUNK 的一段；unit 是不超过 CHUNK 的 2 的幂。
+    fn aligned(&mut self, unit: usize) -> &mut [u8] {
+        if self.raw.len() < CHUNK + unit {
+            self.raw = vec![0u8; CHUNK + unit];
+        }
+        let misaligned = self.raw.as_ptr().addr() % unit;
+        let start = if misaligned == 0 {
+            0
+        } else {
+            unit - misaligned
+        };
+        &mut self.raw[start..start + CHUNK]
+    }
+}
+
+/// 读回一遍文件算 SHA-1，按块检查取消；report 为真时按块报字节。
+///
+/// 读回不经系统缓存：刚写完的内容还留在缓存里，经缓存读回只是把刚交给系统的那份再读一遍，证明不了盘上写对了。
 fn hash_file(
     path: &Path,
-    buf: &mut [u8],
+    buf: &mut ReadBuf,
     control: &CopyControl<'_>,
     report: bool,
 ) -> Result<Sha1Digest> {
-    let mut input = File::open(path).map_err(|source| io_error(path, source))?;
+    let failed = |source| io_error(path, readback_error(source));
+    let Readback { mut file, unit } = open_readback(path)
+        .and_then(|readback| {
+            control.readback_opened(path, &readback.file)?;
+            Ok(readback)
+        })
+        .map_err(failed)?;
+    let chunk = buf.aligned(unit);
     let mut hasher = Sha1::new();
     loop {
         control.check()?;
-        let read = read_chunk(&mut input, buf).map_err(|source| io_error(path, source))?;
-        if read == 0 {
-            break;
+        let read = read_chunk(&mut file, chunk).map_err(failed)?;
+        if read > 0 {
+            hasher.update(&chunk[..read]);
+            if report {
+                control.report(read as u64, 0);
+            }
         }
-        hasher.update(&buf[..read]);
-        if report {
-            control.report(read as u64, 0);
+        // 无缓冲读只在文件末尾读不满；读不满之后文件位置不再按扇区对齐，再读会被拒，所以到这里就读完了。
+        if read < chunk.len() {
+            break;
         }
     }
     Ok(hasher.finalize().into())
+}
+
+/// 读回用的句柄，与每次读的长度、缓冲区地址要对齐到的字节数。
+struct Readback {
+    file: File,
+    unit: usize,
+}
+
+/// 以 FILE_FLAG_NO_BUFFERING 打开：读直接到盘上取，不从系统缓存拿；代价是缓冲区地址与每次读的长度都得按扇区对齐。
+#[cfg(windows)]
+fn open_readback(path: &Path) -> io::Result<Readback> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_NO_BUFFERING;
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_NO_BUFFERING)
+        .open(path)?;
+    let unit = sector_unit(&file)?;
+    Ok(Readback { file, unit })
+}
+
+/// 落樱只发 Windows 版；别的平台只为编译与跑测试，读回走系统缓存。
+#[cfg(not(windows))]
+fn open_readback(path: &Path) -> io::Result<Readback> {
+    Ok(Readback {
+        file: File::open(path)?,
+        unit: MIN_SECTOR,
+    })
+}
+
+/// 无缓冲读要对齐到的字节数：卷的逻辑扇区（FILE_STORAGE_INFO 的文档说它是无缓冲 I/O 支持的最小单位），
+/// 不足 MIN_SECTOR 按 MIN_SECTOR。网络路径之类查不到时按 MIN_SECTOR。
+#[cfg(windows)]
+fn sector_unit(file: &File) -> io::Result<usize> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_STORAGE_INFO, FileStorageInfo, GetFileInformationByHandleEx,
+    };
+
+    let mut info = FILE_STORAGE_INFO::default();
+    // SAFETY: 句柄在调用期间有效；info 可写，长度如实给出；调用同步完成。
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileStorageInfo,
+            (&raw mut info).cast(),
+            size_of::<FILE_STORAGE_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        tracing::debug!(error = %io::Error::last_os_error(), "查不到扇区大小，读回按 {MIN_SECTOR} 字节对齐");
+        return Ok(MIN_SECTOR);
+    }
+    let unit = (info.LogicalBytesPerSector as usize).max(MIN_SECTOR);
+    // 读块的长度要是它的整数倍，缓冲区的余量也只留到读块那么大。
+    if !unit.is_power_of_two() || unit > CHUNK {
+        return Err(io::Error::new(
+            ErrorKind::Unsupported,
+            format!("卷的扇区大小 {unit} 字节，对不齐 {CHUNK} 字节的读块"),
+        ));
+    }
+    Ok(unit)
+}
+
+/// 文件系统不认无缓冲读：打开时或读时报参数错误、不支持之类。
+#[cfg(windows)]
+#[derive(Debug, thiserror::Error)]
+#[error("所在的文件系统不支持绕过系统缓存读取，读回校验没法确认文件已经写到盘上")]
+struct UncachedReadRefused(#[source] io::Error);
+
+/// 无缓冲读被拒时照实报错，不退回经缓存读：退回去校验就又只是读自己刚写进缓存的那份，而校验通过后原件会被
+/// 永久删除。换成说得清原因的错误，原来的系统错误留在来源链上；别的错误原样返回。
+#[cfg(windows)]
+fn readback_error(err: io::Error) -> io::Error {
+    use windows_sys::Win32::Foundation::{
+        ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
+    };
+
+    let refused = err.raw_os_error().is_some_and(|code| {
+        [
+            ERROR_INVALID_PARAMETER,
+            ERROR_NOT_SUPPORTED,
+            ERROR_INVALID_FUNCTION,
+        ]
+        .contains(&(code as u32))
+    });
+    if refused {
+        io::Error::new(ErrorKind::Unsupported, UncachedReadRefused(err))
+    } else {
+        err
+    }
+}
+
+#[cfg(not(windows))]
+fn readback_error(err: io::Error) -> io::Error {
+    err
 }
 
 fn read_chunk(input: &mut File, buf: &mut [u8]) -> io::Result<usize> {
@@ -494,6 +663,38 @@ pub(crate) fn rename_no_replace(from: &Path, to: &Path) -> Result<()> {
     fs::remove_file(from).map_err(|source| io_error(from, source))
 }
 
+/// 把目录的元数据（比如刚在里面做的改名）刷到盘上。删原件前对目标调它：改名若还只在系统缓存里，断电后目标那边
+/// 的改名会丢，原件却已经删了。
+// 删原件前由实例移动编排调用；编排接上之前没有调用方。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn flush_dir(path: &Path) -> Result<()> {
+    let dir = open_dir_for_flush(path).map_err(|source| io_error(path, source))?;
+    let meta = dir.metadata().map_err(|source| io_error(path, source))?;
+    if !meta.is_dir() {
+        return Err(io_error(path, ErrorKind::NotADirectory.into()));
+    }
+    // Windows 上 sync_all 就是 FlushFileBuffers。
+    dir.sync_all().map_err(|source| io_error(path, source))
+}
+
+/// 目录只能带 FILE_FLAG_BACKUP_SEMANTICS 打开；FlushFileBuffers 要求句柄有 GENERIC_WRITE，write(true) 给的就是它。
+#[cfg(windows)]
+fn open_dir_for_flush(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+
+    OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+/// 目录只能只读打开；对它 fsync 就把其中的改名与新建落盘。
+#[cfg(not(windows))]
+fn open_dir_for_flush(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
 /// 删整棵树：不存在算成功；清只读属性；遇到链接只删链接本身，不顺着删到别处。
 pub(crate) fn remove_tree(path: &Path) -> Result<()> {
     let meta = match fs::symlink_metadata(path) {
@@ -586,6 +787,8 @@ fn io_error(path: &Path, source: io::Error) -> CoreError {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    #[cfg(windows)]
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime};
 
@@ -1321,5 +1524,240 @@ mod tests {
         assert!(space > 0);
         // 同一个卷；两次读之间别的程序写盘会让数值略有出入。
         assert!(space.abs_diff(here) < 1 << 30, "space={space} here={here}");
+    }
+
+    /// 读回要覆盖的边界大小：空、一字节、差一字节满扇区、恰好一扇区、多一字节、恰好一块、多一字节的一块。
+    #[cfg(windows)]
+    const READBACK_SIZES: [usize; 7] = [0, 1, 4095, 4096, 4097, CHUNK, CHUNK + 1];
+
+    /// 按 READBACK_SIZES 在 dir 下各造一个随机内容的文件，返回相对路径到内容。
+    #[cfg(windows)]
+    fn readback_samples(dir: &Path, rng: &mut fastrand::Rng) -> BTreeMap<PathBuf, Vec<u8>> {
+        READBACK_SIZES
+            .iter()
+            .map(|&len| {
+                let name = PathBuf::from(format!("f{len}.bin"));
+                let bytes = random_bytes(rng, len);
+                write(&dir.join(&name), &bytes);
+                (name, bytes)
+            })
+            .collect()
+    }
+
+    /// 用无缓冲读的对齐要求认句柄是不是绕过了系统缓存：错开扇区读三个字节，经缓存的句柄照读，无缓冲的被拒。
+    /// 探完把位置挪回开头，不影响接下来的读回。
+    #[cfg(windows)]
+    fn bypasses_cache(file: &File) -> bool {
+        use std::io::{Seek, SeekFrom};
+        use std::os::windows::fs::FileExt;
+        use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
+
+        let mut probe = [0u8; 3];
+        let rejected = match file.seek_read(&mut probe, 1) {
+            Ok(_) => false,
+            Err(err) => {
+                assert_eq!(
+                    err.raw_os_error(),
+                    Some(ERROR_INVALID_PARAMETER as i32),
+                    "{err}"
+                );
+                true
+            }
+        };
+        let mut handle = file;
+        handle.seek(SeekFrom::Start(0)).unwrap();
+        rejected
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verify_tree_reads_back_around_the_system_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed = fastrand::u64(..);
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let src = tmp.path().join("src");
+        let expected = readback_samples(&src, &mut rng);
+        let dst = tmp.path().join("dst");
+        let progress = |_: u64, _: u64| {};
+        let scan = scan_tree(&src).unwrap();
+        let digests = copy_tree(&src, &dst, &scan, &CopyControl::new(None, &progress)).unwrap();
+        for (file, digest) in scan.files.iter().zip(&digests) {
+            assert_eq!(*digest, sha1_of(&expected[&file.rel]), "seed={seed}");
+        }
+
+        let probed = Mutex::new(BTreeMap::new());
+        let hook = |path: &Path, file: &File| {
+            let bypassed = bypasses_cache(file);
+            probed.lock().unwrap().insert(path.to_path_buf(), bypassed);
+            Ok(())
+        };
+        let tally = Tally::default();
+        let progress = |bytes, files| tally.record(bytes, files);
+        let control = CopyControl::new(None, &progress).with_readback_hook(&hook);
+        verify_tree(&dst, &scan, &digests, &control).unwrap();
+
+        let total: u64 = expected.values().map(|bytes| bytes.len() as u64).sum();
+        assert_eq!(tally.get(), (total, expected.len() as u64), "seed={seed}");
+        let want: BTreeMap<PathBuf, bool> =
+            expected.keys().map(|name| (dst.join(name), true)).collect();
+        assert_eq!(probed.into_inner().unwrap(), want);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copy_file_reads_back_around_the_system_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seed = fastrand::u64(..);
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let src = tmp.path().join("src");
+        let expected = readback_samples(&src, &mut rng);
+        let dir = tmp.path().join(rel("libraries/net/x/1.0"));
+        let progress = |_: u64, _: u64| {};
+
+        for (name, bytes) in &expected {
+            let dst = dir.join(name);
+            let probed = Mutex::new(Vec::new());
+            let hook = |path: &Path, file: &File| {
+                let bypassed = bypasses_cache(file);
+                probed.lock().unwrap().push((path.to_path_buf(), bypassed));
+                Ok(())
+            };
+            let control = CopyControl::new(None, &progress).with_readback_hook(&hook);
+            copy_file(&src.join(name), &dst, &control).unwrap();
+
+            assert_eq!(fs::read(&dst).unwrap(), *bytes, "seed={seed}");
+            let probed = probed.into_inner().unwrap();
+            assert_eq!(probed.len(), 1, "{probed:?}");
+            let (path, bypassed) = &probed[0];
+            // 读回的是改名前的临时文件。
+            assert_eq!(path.parent(), Some(dir.as_path()));
+            let temp_name = path.file_name().unwrap().to_string_lossy();
+            assert!(
+                temp_name.starts_with(&format!("{}.", name.display()))
+                    && temp_name.ends_with(".part"),
+                "{temp_name}"
+            );
+            assert!(bypassed, "{}", name.display());
+        }
+        let mut names_now: Vec<String> = expected
+            .keys()
+            .map(|name| name.display().to_string())
+            .collect();
+        names_now.sort();
+        assert_eq!(names(&dir), names_now);
+    }
+
+    #[test]
+    fn readback_catches_tampering_in_a_partial_last_sector() {
+        let seed = fastrand::u64(..);
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let tamper = |path: &Path| -> io::Result<()> {
+            let mut bytes = fs::read(path)?;
+            *bytes.last_mut().unwrap() ^= 0x5a;
+            fs::write(path, bytes)
+        };
+        for len in [1, 4097, CHUNK + 1] {
+            let tmp = tempfile::tempdir().unwrap();
+            let src = tmp.path().join("src");
+            write(&src.join("a.bin"), &random_bytes(&mut rng, len));
+            let dst = tmp.path().join("dst");
+            let victim = dst.join("a.bin");
+            let fault = |path: &Path| tamper(path);
+            let progress = |_: u64, _: u64| {};
+            let control = CopyControl::new(None, &progress).with_fault(&fault);
+            let scan = scan_tree(&src).unwrap();
+            let digests = copy_tree(&src, &dst, &scan, &control).unwrap();
+            match verify_tree(&dst, &scan, &digests, &control).unwrap_err() {
+                CoreError::InstanceMoveVerifyFailed { path } => {
+                    assert_eq!(path, victim, "len={len} seed={seed}");
+                }
+                other => panic!("len={len}：应为校验不一致，实际 {other:?}"),
+            }
+
+            let lib_dir = tmp.path().join("libraries");
+            let lib = lib_dir.join("a.jar");
+            match copy_file(&src.join("a.bin"), &lib, &control).unwrap_err() {
+                CoreError::InstanceMoveVerifyFailed { path } => {
+                    assert_eq!(path, lib, "len={len} seed={seed}");
+                }
+                other => panic!("len={len}：应为校验不一致，实际 {other:?}"),
+            }
+            assert!(names(&lib_dir).is_empty(), "{:?}", names(&lib_dir));
+        }
+    }
+
+    /// 文件系统不认无缓冲读时照实报错，不退回经缓存读；报的错说得清原因，原来的系统错误挂在来源链上。
+    #[cfg(windows)]
+    #[test]
+    fn readback_refused_by_the_file_system_fails_instead_of_falling_back() {
+        use windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        write(&src.join("a.bin"), b"abc");
+        let dst = tmp.path().join("dst");
+        let progress = |_: u64, _: u64| {};
+        let scan = scan_tree(&src).unwrap();
+        let digests = copy_tree(&src, &dst, &scan, &CopyControl::new(None, &progress)).unwrap();
+        let refuse =
+            |_: &Path, _: &File| Err(io::Error::from_raw_os_error(ERROR_INVALID_PARAMETER as i32));
+        let control = CopyControl::new(None, &progress).with_readback_hook(&refuse);
+        let refused_os_error = |source: &io::Error| {
+            std::error::Error::source(source)
+                .and_then(|inner| inner.downcast_ref::<io::Error>())
+                .and_then(io::Error::raw_os_error)
+        };
+
+        let (path, source) = io_parts(verify_tree(&dst, &scan, &digests, &control).unwrap_err());
+        assert_eq!(path, dst.join("a.bin"));
+        assert_eq!(source.kind(), ErrorKind::Unsupported, "{source}");
+        assert_eq!(
+            refused_os_error(&source),
+            Some(ERROR_INVALID_PARAMETER as i32)
+        );
+
+        let lib_dir = tmp.path().join("libraries");
+        let lib = lib_dir.join("a.jar");
+        let (path, source) = io_parts(copy_file(&src.join("a.bin"), &lib, &control).unwrap_err());
+        assert_eq!(path.parent(), Some(lib_dir.as_path()));
+        assert_eq!(source.kind(), ErrorKind::Unsupported, "{source}");
+        assert_eq!(
+            refused_os_error(&source),
+            Some(ERROR_INVALID_PARAMETER as i32)
+        );
+        assert!(names(&lib_dir).is_empty(), "{:?}", names(&lib_dir));
+
+        // 别的打开错误不改写。
+        let broken = |_: &Path, _: &File| Err(io::Error::other("注入的打开故障"));
+        let control = CopyControl::new(None, &progress).with_readback_hook(&broken);
+        let (_, source) = io_parts(verify_tree(&dst, &scan, &digests, &control).unwrap_err());
+        assert_eq!(source.kind(), ErrorKind::Other);
+        assert_eq!(source.to_string(), "注入的打开故障");
+    }
+
+    #[test]
+    fn flush_dir_flushes_directories_and_names_the_path_it_could_not_flush() {
+        let tmp = tempfile::tempdir().unwrap();
+        let versions = tmp.path().join("versions");
+        let staged = tmp.path().join(rel(".petalfall/moving/t/instance"));
+        write(&staged.join("实例.json"), b"{}");
+        fs::create_dir(&versions).unwrap();
+        let instance = versions.join("实例");
+        rename_no_replace(&staged, &instance).unwrap();
+
+        flush_dir(&versions).unwrap();
+        flush_dir(&instance).unwrap();
+        assert_eq!(names(&versions), ["实例"]);
+        assert_eq!(fs::read(instance.join("实例.json")).unwrap(), b"{}");
+
+        let missing = tmp.path().join("nope");
+        let (path, source) = io_parts(flush_dir(&missing).unwrap_err());
+        assert_eq!(path, missing);
+        assert_eq!(source.kind(), ErrorKind::NotFound);
+
+        let file = instance.join("实例.json");
+        let (path, source) = io_parts(flush_dir(&file).unwrap_err());
+        assert_eq!(path, file);
+        assert_eq!(source.kind(), ErrorKind::NotADirectory);
     }
 }
