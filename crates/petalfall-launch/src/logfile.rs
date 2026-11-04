@@ -59,6 +59,9 @@ pub fn unix_millis() -> Result<u64> {
 #[derive(Debug, Clone, Copy)]
 pub struct SessionClock {
     started_at: u64,
+    /// `origin` 那一刻距会话开始已过的毫秒：新开的会话为 0，接回的会话是关闭前后那段墙钟时长。
+    /// 记成偏移而不是把 `origin` 往前推：单调时钟往回减可能越过它的起点。
+    base: u64,
     origin: Instant,
 }
 
@@ -67,6 +70,17 @@ impl SessionClock {
     pub fn start() -> Result<Self> {
         Ok(Self {
             started_at: unix_millis()?,
+            base: 0,
+            origin: Instant::now(),
+        })
+    }
+
+    /// 接着一次早已开始的会话（落樱关闭前启动、重新打开后接回的游戏）。此刻以前的时长只能按墙钟算，
+    /// 之后照常按单调时钟累加。墙钟被调到会话开始之前时按刚开始算，不让时刻倒流。
+    pub fn resume(started_at: u64) -> Result<Self> {
+        Ok(Self {
+            started_at,
+            base: unix_millis()?.saturating_sub(started_at),
             origin: Instant::now(),
         })
     }
@@ -80,7 +94,7 @@ impl SessionClock {
     pub fn now(&self) -> u64 {
         let elapsed =
             u64::try_from(self.origin.elapsed().as_millis()).expect("会话时长在 u64 范围内");
-        self.started_at + elapsed
+        self.started_at + self.base + elapsed
     }
 }
 
@@ -264,6 +278,112 @@ impl SessionLog {
         self.write_raw(line.as_bytes()).await?;
         self.lines += 1;
         Ok(())
+    }
+
+    /// 把写缓冲落盘，文件保持打开。
+    pub async fn flush(&mut self) -> Result<()> {
+        self.writer
+            .flush()
+            .await
+            .map_err(|source| io_error(&self.path, source))
+    }
+
+    /// 接着一份进行中的会话日志写：落樱在游戏运行中关闭、重新打开后接回那一局时用。返回日志与截掉的
+    /// 字节数。
+    ///
+    /// 头部的 `started_at` 要对得上，日志也不能已经写下结局，否则说明这不是那一局还开着的日志。落樱被强行
+    /// 结束时写缓冲只落了一部分，文件常停在某行中间：这半行截掉再续写，否则它会和续写的第一行粘成一行，
+    /// 读回时整份日志都报格式错误。
+    pub async fn reopen(path: &Path, started_at: u64) -> Result<(Self, u64)> {
+        let header = read_header(path)
+            .await?
+            .ok_or_else(|| io_error(path, io::Error::from(io::ErrorKind::NotFound)))?;
+        if header.started_at != started_at {
+            return Err(LaunchError::LogNotResumable {
+                path: path.to_owned(),
+                reason: format!(
+                    "头部记的会话开始于 {}，不是要接回的 {started_at}",
+                    header.started_at
+                ),
+            });
+        }
+        let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .await
+            .map_err(|source| io_error(path, source))?;
+        let len = file
+            .metadata()
+            .await
+            .map_err(|source| io_error(path, source))?
+            .len();
+        let body_start = header.len as u64;
+        file.seek(io::SeekFrom::Start(body_start))
+            .await
+            .map_err(|source| io_error(path, source))?;
+        // 数完整的行，同时记下最后一个完整行的起点与终点：半行从终点截掉，结局行在最后一个完整行里。
+        let mut lines = 0u64;
+        let mut line_start = body_start;
+        let mut last_line_start = body_start;
+        let mut complete_end = body_start;
+        let mut pos = body_start;
+        let mut chunk = vec![0u8; COUNT_CHUNK_BYTES];
+        loop {
+            let n = file
+                .read(&mut chunk)
+                .await
+                .map_err(|source| io_error(path, source))?;
+            if n == 0 {
+                break;
+            }
+            for (index, byte) in chunk[..n].iter().enumerate() {
+                if *byte == b'\n' {
+                    lines += 1;
+                    last_line_start = line_start;
+                    complete_end = pos + index as u64 + 1;
+                    line_start = complete_end;
+                }
+            }
+            pos += n as u64;
+        }
+        if complete_end > last_line_start {
+            let probe =
+                usize::try_from((complete_end - last_line_start).min(HEADER_PROBE_BYTES as u64))
+                    .expect("探测长度在 usize 内");
+            let mut last = vec![0u8; probe];
+            file.seek(io::SeekFrom::Start(last_line_start))
+                .await
+                .map_err(|source| io_error(path, source))?;
+            file.read_exact(&mut last)
+                .await
+                .map_err(|source| io_error(path, source))?;
+            if last.starts_with(TRAILER_ENDED.as_bytes()) {
+                return Err(LaunchError::LogNotResumable {
+                    path: path.to_owned(),
+                    reason: "这一局已经写下了结局".to_owned(),
+                });
+            }
+        }
+        let dropped = len - complete_end;
+        if dropped > 0 {
+            file.set_len(complete_end)
+                .await
+                .map_err(|source| io_error(path, source))?;
+            tracing::warn!(path = %path.display(), dropped, "会话日志末尾有没写完的半行，截掉后续写");
+        }
+        file.seek(io::SeekFrom::End(0))
+            .await
+            .map_err(|source| io_error(path, source))?;
+        Ok((
+            Self {
+                writer: BufWriter::with_capacity(WRITE_BUFFER_BYTES, file),
+                path: path.to_owned(),
+                started_at,
+                lines,
+            },
+            dropped,
+        ))
     }
 
     /// 写下结局，把缓冲落盘并关闭文件。会话结束时必须调用：缓冲里可能正是崩溃前最后那几行。
@@ -1076,5 +1196,108 @@ mod tests {
         let clock = SessionClock::start().unwrap();
         assert!(clock.started_at() > 1_700_000_000_000);
         assert!(clock.now() >= clock.started_at());
+    }
+
+    /// 接回的会话：开始时刻照旧，此刻按墙钟接上关闭期间的那段。
+    #[test]
+    fn resumed_clock_keeps_the_start_and_counts_the_gap() {
+        let started_at = unix_millis().unwrap() - 90_000;
+        let clock = SessionClock::resume(started_at).unwrap();
+        assert_eq!(clock.started_at(), started_at);
+        let elapsed = clock.now() - started_at;
+        assert!((90_000..95_000).contains(&elapsed), "{elapsed}");
+        // 墙钟早于会话开始时不倒流。
+        let future = unix_millis().unwrap() + 60_000;
+        let clock = SessionClock::resume(future).unwrap();
+        assert!(clock.now() >= future);
+    }
+
+    /// 落樱在会话中途被强行结束：写缓冲只落了一部分，末尾停在半行。续写截掉半行再接着写，读回时行号连续、
+    /// 结局照常。
+    #[tokio::test]
+    async fn reopen_drops_the_half_line_and_continues_the_same_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs");
+        let mut log = SessionLog::create(&dir, "1.21", 1_000).await.unwrap();
+        log.write(1_010, LogSource::Game, None, "first")
+            .await
+            .unwrap();
+        log.write(1_020, LogSource::Game, None, "second")
+            .await
+            .unwrap();
+        log.flush().await.unwrap();
+        let path = log.path().to_owned();
+        drop(log);
+        let half = "[+0.030] [game] thi";
+        let mut content = std::fs::read(&path).unwrap();
+        content.extend_from_slice(half.as_bytes());
+        std::fs::write(&path, content).unwrap();
+
+        let (mut log, dropped) = SessionLog::reopen(&path, 1_000).await.unwrap();
+        assert_eq!(dropped, half.len() as u64);
+        assert_eq!(log.lines(), 2);
+        log.write(
+            5_000,
+            LogSource::Launcher,
+            Some(LauncherLevel::Info),
+            "接回",
+        )
+        .await
+        .unwrap();
+        log.write(5_010, LogSource::Game, None, "third")
+            .await
+            .unwrap();
+        let path = log.finish(6_000, SessionOutcome::Exited).await.unwrap();
+
+        let tail = read_log_tail(&path, 1 << 20, 100).await.unwrap();
+        let texts: Vec<&str> = tail.entries.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, ["first", "second", "接回", "third"]);
+        assert_eq!(tail.total_lines, 4);
+        assert_eq!(tail.entries[3].at, 5_010);
+        assert_eq!(
+            tail.ended,
+            Some(SessionEnded {
+                at: 6_000,
+                outcome: SessionOutcome::Exited
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn reopen_refuses_another_session_or_one_that_has_ended() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("logs");
+        let mut log = SessionLog::create(&dir, "1.21", 1_000).await.unwrap();
+        log.flush().await.unwrap();
+        let path = log.path().to_owned();
+        drop(log);
+        let err = SessionLog::reopen(&path, 2_000)
+            .await
+            .err()
+            .expect("别的会话应拒绝续写");
+        assert!(
+            matches!(&err, LaunchError::LogNotResumable { .. }),
+            "{err:?}"
+        );
+        // 没写过正文的日志可以续写，行数为 0。
+        let (log, dropped) = SessionLog::reopen(&path, 1_000).await.unwrap();
+        assert_eq!((log.lines(), dropped), (0, 0));
+        log.finish(3_000, SessionOutcome::Killed).await.unwrap();
+        let err = SessionLog::reopen(&path, 1_000)
+            .await
+            .err()
+            .expect("写下结局的应拒绝续写");
+        assert!(
+            matches!(&err, LaunchError::LogNotResumable { reason, .. } if reason.contains("结局")),
+            "{err:?}"
+        );
+        let err = SessionLog::reopen(&dir.join("missing.log"), 1_000)
+            .await
+            .err()
+            .expect("不存在的文件应报错");
+        assert!(
+            matches!(&err, LaunchError::Io { source, .. } if source.kind() == io::ErrorKind::NotFound),
+            "{err:?}"
+        );
     }
 }
