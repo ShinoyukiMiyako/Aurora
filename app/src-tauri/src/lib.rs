@@ -175,6 +175,7 @@ pub fn run() {
             commands::instances::list_instances,
             commands::instances::get_instance_settings,
             commands::instances::set_instance_settings,
+            commands::instances::import_cover_image,
             commands::instances::list_instance_content,
             commands::instances::get_sidebar_pins,
             commands::instances::set_sidebar_pins,

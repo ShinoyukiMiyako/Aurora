@@ -13,12 +13,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use petalfall_core::{
-    is_safe_instance_id, BackupKind, CoreError, CoverBackground, DeletionPreview, Disposer,
-    EventSink, GameSlot, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstanceContent,
-    InstanceError, InstanceInstallOutcome, InstanceRequest, InstanceSummary, InstanceVersion,
-    IsolationOverride, JavaSelection, LevelInfo, LoaderChoice, LoaderKind, ManifestOverview,
-    MarkerError, MarkerSettlement, PackEntry, Petalfall, Platform, PlaySummary, Readable,
-    RecycleBin, RepairOutcome, Resolution, TemplateInfo, TemplateOutcome, TemplateSkip,
+    is_safe_instance_id, BackupKind, CoreError, CoverBackground, CoverImageSlot, DeletionPreview,
+    Disposer, EventSink, GameSlot, IncompleteKind, IncompleteMarker, IncompleteOutcome,
+    InstanceContent, InstanceError, InstanceInstallOutcome, InstanceRequest, InstanceSummary,
+    InstanceVersion, IsolationOverride, JavaSelection, LevelInfo, LoaderChoice, LoaderKind,
+    ManifestOverview, MarkerError, MarkerSettlement, PackEntry, Petalfall, Platform, PlaySummary,
+    Readable, RecycleBin, RepairOutcome, Resolution, TemplateInfo, TemplateOutcome, TemplateSkip,
     TextureService, VersionSettings, WorldBackup, WorldBackupList, WorldEntry, WorldScope,
 };
 use serde::{Deserialize, Serialize};
@@ -1372,6 +1372,48 @@ pub(crate) async fn set_instance_settings_with(
         .await
         .map_err(instance_error)?;
     Ok(settings.into())
+}
+
+/// 把本机一张图片导入成卡面背景（slot 为 background，同时把 background 设为 image）或封面方块（block），
+/// 返回写下的设置；被换下的旧图随之删掉。slot 不认识、path 不是绝对路径，或图片读不了、超过 20 MB、
+/// 不是 PNG/JPEG/WebP、解不开（含边长超过 8192）时报 `invalid_argument`，detail.field 指出是哪一项，
+/// detail.reason 为原因码；设置不变。与写设置同一把占用：改名、删除、新建、补全进行中报 `instance_busy`。
+#[tauri::command]
+pub async fn import_cover_image(
+    id: String,
+    slot: String,
+    path: String,
+    facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
+) -> Result<InstanceSettingsDto, CommandError> {
+    import_cover_image_with(&facade, &locks, &id, &slot, &path).await
+}
+
+pub(crate) async fn import_cover_image_with(
+    facade: &Facade,
+    locks: &InstanceLocks,
+    id: &str,
+    slot: &str,
+    path: &str,
+) -> Result<InstanceSettingsDto, CommandError> {
+    let slot: CoverImageSlot = serde_json::from_value(json!(slot))
+        .map_err(|_| invalid_field("slot", "unknown", format!("不认识的卡面图片位置：{slot}")))?;
+    let source = Path::new(path);
+    // 路径来自系统选择文件对话框；相对路径会按启动器进程的当前目录解析，读到的不是玩家选的那张。
+    if !source.is_absolute() {
+        return Err(invalid_field(
+            "path",
+            "not_absolute",
+            format!("图片路径须是绝对路径：{path}"),
+        ));
+    }
+    let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
+        .import_cover_image(id, slot, source)
+        .await
+        .map_err(instance_error)?
+        .into())
 }
 
 /// 实例的资源包、光影包与存档（从实例运行时的工作目录读）。
@@ -4704,6 +4746,134 @@ mod tests {
             .unwrap();
         assert_eq!(mods, dir.join("mods"));
         assert!(mods.is_dir());
+        assert_eq!(locks.activity("1.21.1"), Some(InstanceActivity::Running));
+    }
+
+    fn opaque_png(path: &Path, width: u32, height: u32) {
+        image::RgbImage::from_pixel(width, height, image::Rgb([40, 160, 90]))
+            .save(path)
+            .unwrap();
+    }
+
+    /// 导入卡面图片返回写下的设置：背景位把 background 切到 image 并记下文件名，方块位记下 cover_image，
+    /// 文件落在实例的卡面图片目录里。
+    #[tokio::test]
+    async fn import_cover_image_returns_the_written_settings() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let locks = InstanceLocks::default();
+        let photo = env.dir.path().join("photo.png");
+        opaque_png(&photo, 30, 20);
+        let photo = photo.to_string_lossy().into_owned();
+
+        let saved = import_cover_image_with(&env.facade, &locks, "1.21.1", "background", &photo)
+            .await
+            .unwrap();
+        assert_eq!(saved.background, CoverBackground::Image);
+        let name = saved.background_image.clone().unwrap();
+        assert!(
+            name.starts_with("background-") && name.ends_with(".jpg") && name.len() == 31,
+            "{name}"
+        );
+        assert!(petalfall_core::cover_image_dir(&dir).join(&name).is_file());
+        assert_eq!(saved.cover_image, None);
+
+        let saved = import_cover_image_with(&env.facade, &locks, "1.21.1", "block", &photo)
+            .await
+            .unwrap();
+        let block = saved.cover_image.clone().unwrap();
+        assert!(
+            block.starts_with("block-") && block.ends_with(".png"),
+            "{block}"
+        );
+        assert_eq!(saved.background_image.as_deref(), Some(name.as_str()));
+        let stored = env
+            .facade
+            .snapshot()
+            .await
+            .instance_settings("1.21.1")
+            .await
+            .unwrap();
+        assert_eq!(InstanceSettingsDto::from(stored), saved);
+    }
+
+    /// 图片与参数的问题都报 invalid_argument，detail.field 指出是哪一项、detail.reason 给原因码；
+    /// 实例不在报 version_not_installed。
+    #[tokio::test]
+    async fn import_cover_image_reports_which_argument_is_wrong() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let locks = InstanceLocks::default();
+        let notes = env.dir.path().join("notes.png");
+        std::fs::write(&notes, "不是图片").unwrap();
+        let photo = env.dir.path().join("photo.png");
+        opaque_png(&photo, 4, 4);
+        let path = |p: &Path| p.to_string_lossy().into_owned();
+        let missing = path(&env.dir.path().join("gone.png"));
+
+        for (slot, file, field, reason) in [
+            ("background", path(&notes), "path", "unsupported_format"),
+            ("block", missing, "path", "unreadable"),
+            ("background", "photo.png".to_owned(), "path", "not_absolute"),
+            ("icon", path(&photo), "slot", "unknown"),
+        ] {
+            let err = import_cover_image_with(&env.facade, &locks, "1.21.1", slot, &file)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, common::INVALID_ARGUMENT, "{file}");
+            let detail = err.detail.unwrap();
+            assert_eq!(detail["field"], field, "{file}");
+            assert_eq!(detail["reason"], reason, "{file}");
+        }
+        assert!(
+            !petalfall_core::cover_image_dir(&dir).exists(),
+            "被拒绝的导入什么都不写"
+        );
+
+        let err = import_cover_image_with(&env.facade, &locks, "不存在", "block", &path(&photo))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, common::VERSION_NOT_INSTALLED);
+    }
+
+    /// 与写设置同一把占用：改名或删除进行中报 instance_busy，图片不写、设置不变；游戏运行中照常可以导入。
+    #[tokio::test]
+    async fn import_cover_image_waits_for_rename_and_delete_but_not_for_the_game() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let locks = InstanceLocks::default();
+        let photo = env.dir.path().join("photo.png");
+        opaque_png(&photo, 8, 8);
+        let photo = photo.to_string_lossy().into_owned();
+
+        for activity in [InstanceActivity::Renaming, InstanceActivity::Deleting] {
+            let held = locks.acquire("1.21.1", activity).unwrap();
+            let err = import_cover_image_with(&env.facade, &locks, "1.21.1", "background", &photo)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            let detail = err.detail.unwrap();
+            assert_eq!(detail["activity"], serde_json::to_value(activity).unwrap());
+            assert_eq!(detail["id"], "1.21.1");
+            drop(held);
+        }
+        assert!(!petalfall_core::cover_image_dir(&dir).exists());
+        let settings = env
+            .facade
+            .snapshot()
+            .await
+            .instance_settings("1.21.1")
+            .await
+            .unwrap();
+        assert_eq!(settings, VersionSettings::default());
+
+        let _game = locks.acquire("1.21.1", InstanceActivity::Running).unwrap();
+        let saved = import_cover_image_with(&env.facade, &locks, "1.21.1", "block", &photo)
+            .await
+            .unwrap();
+        let block = saved.cover_image.unwrap();
+        assert!(block.starts_with("block-"), "{block}");
+        assert!(petalfall_core::cover_image_dir(&dir).join(&block).is_file());
         assert_eq!(locks.activity("1.21.1"), Some(InstanceActivity::Running));
     }
 
