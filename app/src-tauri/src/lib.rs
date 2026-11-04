@@ -7,7 +7,7 @@
 //!
 //! 本文件只做装配：日志、插件、managed state、主窗口兜底、命令注册与退出收尾（[`exit`]）。命令实现按领域分在
 //! [`commands`] 下；各领域共用的设施——门面锁 [`facade`]、长任务登记与取消 [`tasks`]、
-//! 事件转发 [`events`]、主窗口启动期处理 [`window`]、主窗口原生拖放 [`drop`]、渲染进程故障后的
+//! 事件转发 [`events`]、主窗口启动期处理 [`window`]、主窗口记住大小与位置 [`window_state`]、主窗口原生拖放 [`drop`]、渲染进程故障后的
 //! 自动重载 [`renderer`]、最小化时的页面可见性 [`page_visibility`]、同一数据目录只跑一个启动器
 //! [`single_instance`]、更新插件留下的安装包目录的清扫 [`update_leftovers`]——各自成模块。
 //!
@@ -31,6 +31,7 @@ mod textures;
 #[cfg(windows)]
 mod update_leftovers;
 mod window;
+mod window_state;
 
 use petalfall_core::{Petalfall, ServerMonitor};
 use tauri::Manager;
@@ -97,6 +98,7 @@ pub fn run() {
                 tauri::async_runtime::block_on(Petalfall::load_recovering())?;
             let petalfall = petalfall.with_app_version(&app.package_info().version.to_string())?;
             let server_monitor = ServerMonitor::new(petalfall.data_dir());
+            let data_dir = petalfall.data_dir().to_path_buf();
             app.manage(Facade::new(petalfall));
             app.manage(
                 commands::system::StartupNotices::from_recovery(recovery)
@@ -124,6 +126,9 @@ pub fn run() {
             if updater_support == UpdaterSupport::Supported {
                 update_leftovers::sweep_in_background(app.package_info().name.clone());
             }
+            // -- window --
+            // 排在兜底显示之前：显示时要按这里记下的状态决定是否最大化
+            app.manage(window_state::install(app, &data_dir)?);
             window::setup_main_window(app)?;
             #[cfg(windows)]
             if let Some(instance) = instance {
@@ -256,6 +261,7 @@ pub fn run() {
             commands::updater::set_install_on_exit,
             // -- window --
             commands::window::restore_window_without_focus,
+            commands::window::reveal_main_window,
         ])
         .build(context)
         .expect("error while building tauri application")

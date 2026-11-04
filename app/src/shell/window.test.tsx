@@ -8,8 +8,8 @@ import { RevealWindow, tauriWindowPort, useRevealWindow, WindowPortProvider, typ
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
-/** Tauri 的当前窗口替身：只记恢复窗口会不会落到它会激活窗口的 unminimize 上。 */
-const tauriWindow = vi.hoisted(() => ({ unminimize: vi.fn(async () => {}) }));
+/** Tauri 的当前窗口替身：只记恢复窗口、显示窗口会不会落到它自己的 unminimize、show 上。 */
+const tauriWindow = vi.hoisted(() => ({ unminimize: vi.fn(async () => {}), show: vi.fn(async () => {}) }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => tauriWindow, UserAttentionType: { Critical: 1, Informational: 2 } }));
 
 let view: Rendered | undefined;
@@ -125,11 +125,18 @@ describe("tauriWindowPort", () => {
   beforeEach(() => {
     ipc.calls.length = 0;
     tauriWindow.unminimize.mockClear();
+    tauriWindow.show.mockClear();
   });
 
   it("恢复窗口走后端不激活窗口的命令，不调 Tauri 会激活窗口的 unminimize", async () => {
     await tauriWindowPort().restoreWithoutFocus();
     expect(ipc.calls).toEqual([{ cmd: "restore_window_without_focus", args: {} }]);
     expect(tauriWindow.unminimize).not.toHaveBeenCalled();
+  });
+
+  it("显示窗口走后端命令，由后端按上次的状态决定是否最大化，不调 Tauri 的 show", async () => {
+    await tauriWindowPort().show();
+    expect(ipc.calls).toEqual([{ cmd: "reveal_main_window", args: {} }]);
+    expect(tauriWindow.show).not.toHaveBeenCalled();
   });
 });

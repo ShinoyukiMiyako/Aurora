@@ -108,6 +108,7 @@ describe("卸载钩子的删除名单", () => {
         rustConst("app/src-tauri/src/tasks.rs", "TASK_JOURNAL_FILE"),
         rustConst("crates/petalfall-core/src/playtime.rs", "PLAYTIME_FILE"),
         rustConst("crates/petalfall-core/src/java.rs", "PROBE_CACHE_FILE"),
+        rustConst("app/src-tauri/src/window_state.rs", "WINDOW_STATE_FILE"),
         ".*.tmp",
         `.${slug}-write-probe`,
       ].sort(),

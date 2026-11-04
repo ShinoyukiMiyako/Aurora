@@ -1,4 +1,4 @@
-//! 启动器正常退出（`RunEvent::Exit`）时的收尾：补写游玩记录里还没落盘的改动，再按需拉起更新安装程序。
+//! 启动器正常退出（`RunEvent::Exit`）时的收尾：补写游玩记录里还没落盘的改动与主窗口状态，再按需拉起更新安装程序。
 //!
 //! 实例改名、删除时游玩记录没写进去的改动只记在进程内，之后哪次读写游玩记录时补上；没等到那一次就退出，
 //! 它们就丢了，旧名下的时长从此不对应任何实例。所以退出前再补写一次。退出路径上没有前端可以报错，结果只进日志。
@@ -18,6 +18,7 @@ pub const PLAY_RECORDS_DEADLINE: Duration = Duration::from_secs(3);
 pub fn on_exit(app: &AppHandle) {
     let facade = app.state::<Facade>();
     tauri::async_runtime::block_on(save_play_records(&facade, PLAY_RECORDS_DEADLINE));
+    crate::window_state::flush_on_exit(app);
     // 安装程序拉起后进程随即退出，所以排在补写之后。
     crate::commands::updater::install_on_exit(app);
 }

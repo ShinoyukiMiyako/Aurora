@@ -7,7 +7,7 @@
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import { createContext, createElement, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { inTauri } from "../ipc/bridge";
-import { restoreWindowWithoutFocus } from "../ipc/window";
+import { restoreWindowWithoutFocus, revealMainWindow } from "../ipc/window";
 import { onWindowDrop, type DropContentDto, type WindowDropEventDto } from "../ipc/window-drop";
 
 /** 关闭请求：挡住默认关闭后由外壳裁决，确认后再销毁窗口。 */
@@ -53,7 +53,8 @@ export function tauriWindowPort(): WindowPort {
   const win = getCurrentWindow();
   return {
     native: true,
-    show: () => win.show(),
+    // 后端记着上次是否最大化：要最大化的直接最大化地显示，不先以常态闪一下
+    show: () => revealMainWindow(),
     minimize: () => win.minimize(),
     // Tauri 的 unminimize 在 Windows 上会激活窗口，不激活的恢复只能由后端直接调系统接口
     restoreWithoutFocus: () => restoreWindowWithoutFocus(),

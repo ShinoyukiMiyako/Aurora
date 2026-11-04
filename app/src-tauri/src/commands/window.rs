@@ -14,6 +14,26 @@ pub async fn restore_window_without_focus(window: WebviewWindow) -> Result<(), C
     restore(window).await
 }
 
+/// 显示主窗口：前端画完第一帧后调用。上次关掉时是最大化的就直接最大化地显示（见 [`crate::window_state`]），
+/// 所以不用 Tauri 的 `show`。已经显示过时什么都不变。
+#[tauri::command]
+pub async fn reveal_main_window(window: WebviewWindow) -> Result<(), CommandError> {
+    let (done, outcome) = tokio::sync::oneshot::channel();
+    let target = window.clone();
+    // 最大化地显示与随后让 tao 记下窗口可见要在 UI 线程上连着做
+    window
+        .run_on_main_thread(move || {
+            let result = crate::window_state::reveal(&target).map_err(reveal_error);
+            if let Err(Err(err)) = done.send(result) {
+                tracing::warn!(message = %err.message, "显示窗口失败，命令已不再等结果");
+            }
+        })
+        .map_err(reveal_error)?;
+    outcome
+        .await
+        .map_err(|_| CommandError::new(code::INTERNAL, "事件循环已退出，窗口没有显示"))?
+}
+
 #[cfg(windows)]
 async fn restore(window: WebviewWindow) -> Result<(), CommandError> {
     let (done, outcome) = tokio::sync::oneshot::channel();
@@ -54,6 +74,13 @@ async fn restore(window: WebviewWindow) -> Result<(), CommandError> {
 /// 窗口操作失败只在窗口已销毁或事件循环已退出时发生，不是用户能处理的情况。
 fn window_error(err: tauri::Error) -> CommandError {
     let message = format!("恢复窗口失败：{err}");
+    tracing::warn!(%message, "窗口命令失败");
+    CommandError::new(code::INTERNAL, message)
+}
+
+/// 同 [`window_error`]，用于显示窗口。
+fn reveal_error(err: tauri::Error) -> CommandError {
+    let message = format!("显示窗口失败：{err}");
     tracing::warn!(%message, "窗口命令失败");
     CommandError::new(code::INTERNAL, message)
 }

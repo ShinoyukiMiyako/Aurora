@@ -15,7 +15,6 @@
     "core:window:allow-close",
     "core:window:allow-destroy",
     "core:window:allow-start-dragging",
-    "core:window:allow-show",
     "core:window:allow-request-user-attention",
     "core:webview:allow-internal-toggle-devtools",
     "opener:allow-open-url",

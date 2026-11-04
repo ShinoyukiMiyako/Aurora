@@ -3230,6 +3230,7 @@ dependencies = [
 name = "petalfall-tauri"
 version = "0.1.0"
 dependencies = [
+ "fastrand",
  "percent-encoding",
  "petalfall-base",
  "petalfall-core",
