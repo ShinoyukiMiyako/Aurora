@@ -26,6 +26,11 @@ import {
   type VersionRequirementsDto,
   TEMPLATE_FILES,
   TEMPLATE_SOURCE_EMPTY_ERROR_CODE,
+  INSTANCE_MOVE_BLOCKED_ERROR_CODE,
+  type MoveBlockerDto,
+  type MoveFollowUpDto,
+  type MoveOutcomeDto,
+  type MovePreviewDto,
   type RestoreResultDto,
   type WorldBackupDto,
   type WorldBackupListDto,
@@ -34,7 +39,19 @@ import {
 import type { InstallPhase } from "../../../domain/types";
 import { emitMockEvent } from "../events";
 import type { MockArgs, MockHandlers, MockPersist } from "../types";
-import { followMockSelection, mockWorldBackupSettings } from "./config";
+import {
+  addExtraDirectory,
+  followMockSelection,
+  isKnownMockGameDirectory,
+  isMockPathWithin,
+  mockDirectoryVersions,
+  mockGameDir,
+  mockGameDirectoryName,
+  mockWorldBackupSettings,
+  recordMockMovedVersions,
+  samePath,
+  validateMockMoveTarget,
+} from "./config";
 import { forgetMockLaunchRecords, mockCrashReport, mockPlayRecordsError, mockPlaySummary, renameMockLaunchRecords, takeMockPlayRecordsFailure } from "./launch";
 import { forgetMockMods, mockModFileCount, renameMockMods } from "./mods";
 import { forgetMockPinnedInstance, renameMockPinnedInstance } from "./system";
@@ -516,13 +533,15 @@ const ACTIVITY_LABELS: Record<InstanceActivity, string> = {
   modifying: "改动 Mod、资源或设置",
   inherited: "被其他实例使用",
   backing_up: "备份或恢复存档",
+  moving: "移到其他游戏目录",
 };
 
 /**
  * 两件事能否同时在一个实例上进行，与后端 InstanceActivity::compatible_with 同一张表：Mod、资源与设置的改动彼此兼容，
  * 也与启动、运行中的游戏、存档备份兼容；被别的实例当作基底时，基底照样能改动、备份存档，几个实例也能同时以它为基底，基底自己的
  * 启动、运行与之互斥（游戏映射着 natives，用它的实例写不了）；备份要读整个存档，游戏开着会边写边打包，所以与启动、运行互斥，
- * 同一实例也只备份一份，兼容集合比运行宽，游戏退出后才能原地转过去；新建、补全、改名、删除会挪走或重写整个目录，与任何事都互斥。
+ * 同一实例也只备份一份，兼容集合比运行宽，游戏退出后才能原地转过去；新建、补全、改名、删除、移到别的游戏目录会挪走或重写整个目录，
+ * 与任何事都互斥。
  */
 function compatible(a: InstanceActivity, b: InstanceActivity): boolean {
   if (a === "modifying") return b === "modifying" || b === "launching" || b === "running" || b === "backing_up" || b === "inherited";
@@ -1564,6 +1583,181 @@ function revealInFolder(args: MockArgs): void {
   mockRevealedPaths.push(path);
 }
 
+// ---------------------------------------------------------------- 移到另一个游戏目录（与后端 instance_move 同一套规则）
+
+/** 目标盘除了要写的字节，至少还要留出这么多，与后端一致。 */
+const MOVE_MARGIN_BYTES = 256 * MB;
+/** 假磁盘各盘的剩余空间；E 盘故意很满，选到它上面的文件夹能看到空间不够。没列出的卷按很空算。 */
+const MOCK_FREE_BYTES: Readonly<Record<string, number>> = { "c:": 38 * GIB, "d:": 120 * GIB, "e:": 1536 * MB };
+const MOCK_FREE_BYTES_ELSEWHERE = 500 * GIB;
+/** 一个版本要的共用文件（库、资源、日志配置）的粗略量；目标里已有游戏文件时大多已在，只缺这个版本独有的那些。 */
+const MOCK_DEPENDENCIES_FULL = { files: 3460, bytes: 712 * MB };
+const MOCK_DEPENDENCIES_PARTIAL = { files: 186, bytes: 94 * MB };
+/** 带过去的基底版本只有版本 JSON 与客户端 jar。 */
+const MOCK_BASE_FILES = 2;
+const MOCK_BASE_BYTES = 26 * MB;
+/** 与后端同一份步骤表：跨卷先复制、读回校验再提交，同卷直接改名过去。 */
+const MOVE_CROSS_VOLUME_PLAN: readonly InstallPhase[] = ["move_dependencies", "move_copy", "move_verify", "move_commit"];
+const MOVE_SAME_VOLUME_PLAN: readonly InstallPhase[] = ["move_dependencies", "move_commit"];
+
+/** 卷：盘符，或 UNC 路径的 \\主机\共享。 */
+function volumeOf(path: string): string {
+  const unc = /^[\\/]{2}([^\\/]+)[\\/]([^\\/]+)/.exec(path);
+  return (unc === null ? path.slice(0, 2) : `\\\\${unc[1]}\\${unc[2]}`).toLowerCase();
+}
+
+function freeBytesOf(path: string): number {
+  const listed = MOCK_FREE_BYTES[volumeOf(path)];
+  return listed === undefined ? MOCK_FREE_BYTES_ELSEWHERE : listed;
+}
+
+/** 随实例走的存档备份：备份区里按实例 id 分的那一层，与后端 instances/<id> 同一个口径。 */
+function movedBackups(id: string): { count: number; bytes: number } {
+  const book = backups[id];
+  const lists = book === undefined ? [] : Object.values(book);
+  return {
+    count: lists.reduce((sum, list) => sum + list.length, 0),
+    bytes: lists.reduce((sum, list) => sum + list.reduce((total, b) => total + b.size_bytes, 0), 0),
+  };
+}
+
+function previewMove(id: string, rawTarget: string): MovePreviewDto {
+  const instance = requireInstance(id);
+  if (instance.dto.status === "broken") {
+    const reason = instance.dto.broken_reason ?? "版本 JSON 不可用";
+    throw new IpcError("instance_failed", `实例 ${id} 的版本 JSON 不可用：${reason}`, { id, reason });
+  }
+  const target = validateMockMoveTarget(rawTarget);
+  const source = mockGameDir();
+  const sameVolume = volumeOf(source) === volumeOf(target);
+  const targetVersions = mockDirectoryVersions(target);
+  const inTarget = (name: string) => targetVersions.some((v) => v.toLowerCase() === name.toLowerCase());
+  const chain = mockInheritanceChain(id);
+  const basesToCopy = chain.filter((base) => !inTarget(base));
+  const dependencies = targetVersions.length > 0 ? MOCK_DEPENDENCIES_PARTIAL : MOCK_DEPENDENCIES_FULL;
+  const moved = movedBackups(id);
+  const dependencyTotal = dependencies.bytes + basesToCopy.length * MOCK_BASE_BYTES;
+  // 同卷只算补过去的共用文件；跨卷实例与备份也要复制一份
+  const required = sameVolume ? dependencyTotal : dependencyTotal + instance.sizeBytes + moved.bytes;
+  const available = freeBytesOf(target);
+  const blockers: MoveBlockerDto[] = [];
+  // 目标就是原处或在实例目录里面时，别的检查都无从谈起
+  if (samePath(target, source)) blockers.push({ kind: "same_directory" });
+  else if (isMockPathWithin(target, `${source}\\versions\\${id}`)) blockers.push({ kind: "target_inside_source" });
+  else {
+    if (inTarget(id)) blockers.push({ kind: "name_taken" });
+    const dependents = dependentsOf(id);
+    if (dependents.length > 0) blockers.push({ kind: "has_dependents", dependents });
+    if (required + MOVE_MARGIN_BYTES > available) blockers.push({ kind: "insufficient_space", needed: required + MOVE_MARGIN_BYTES, available });
+  }
+  return {
+    id,
+    source,
+    target,
+    target_name: mockGameDirectoryName(target),
+    target_registered: isKnownMockGameDirectory(target),
+    same_volume: sameVolume,
+    instance_bytes: instance.sizeBytes,
+    instance_files: instance.fileCount,
+    backup_bytes: moved.bytes,
+    backup_count: moved.count,
+    dependency_files: dependencies.files,
+    dependency_bytes: dependencies.bytes,
+    bases_to_copy: basesToCopy,
+    reused_bases: chain.filter(inTarget),
+    missing_in_source: instance.dto.incomplete === null ? 0 : 12,
+    required_bytes: required,
+    available_bytes: available,
+    isolated: isolatedOf(instance),
+    blockers,
+  };
+}
+
+/** 下一次移动提交后配置存不上的原因；null 为照常。 */
+let pendingMoveConfigFailure: string | null = null;
+
+/**
+ * 下一次移动提交后配置存不上（模拟配置文件被占用）：与后端一样照成功返回，跟进项多一项 config；原目录里对它的引用
+ * （侧栏固定、当前选中、固定服务器）不动，新目标也不记进游戏目录列表，留给下次打开时按移动日志补。
+ */
+export function failNextMockMoveConfig(cause = "拒绝访问。 (os error 5)"): void {
+  pendingMoveConfigFailure = cause;
+}
+
+/** 一步里的假复制：文件数为 0 时这一步没有可报的下载。 */
+async function fakeCopy(taskId: string, files: number, bytes: number): Promise<void> {
+  if (files === 0) return;
+  await fakeDownload(taskId, files, Math.round(bytes / files));
+}
+
+async function moveInstance(args: MockArgs): Promise<MoveOutcomeDto> {
+  const taskId = str(args, "taskId");
+  const id = str(args, "id");
+  const source = str(args, "source");
+  const rawTarget = str(args, "target");
+  requireInstance(id);
+  // 与后端一样，移动期间连同继承链上的基底一起占住：要从基底读客户端 jar 带过去
+  const moveHold = acquireMockInstanceWithBases(id, "moving", mockInheritanceChain(id));
+  try {
+    beginMockTask(taskId);
+  } catch (error) {
+    moveHold.release();
+    throw error;
+  }
+  try {
+    // 发起之后切换过游戏目录：当前目录里同名的是另一个实例，别的检查都无从谈起
+    if (!samePath(source, mockGameDir())) {
+      const blocker: MoveBlockerDto = { kind: "source_changed" };
+      throw new IpcError(INSTANCE_MOVE_BLOCKED_ERROR_CODE, `实例 ${id} 不能移到 ${rawTarget}：当前游戏目录已经换了，不是发起移动时的那个`, { id, blocker });
+    }
+    const preview = previewMove(id, rawTarget);
+    const blocker = preview.blockers[0];
+    if (blocker !== undefined) {
+      throw new IpcError(INSTANCE_MOVE_BLOCKED_ERROR_CODE, `实例 ${id} 不能移到 ${preview.target}：${blocker.kind}`, { id, blocker });
+    }
+    const plan = preview.same_volume ? MOVE_SAME_VOLUME_PLAN : MOVE_CROSS_VOLUME_PLAN;
+    phase(taskId, plan, "move_dependencies");
+    await fakeCopy(taskId, preview.dependency_files + preview.bases_to_copy.length * MOCK_BASE_FILES, preview.dependency_bytes + preview.bases_to_copy.length * MOCK_BASE_BYTES);
+    if (!preview.same_volume) {
+      const files = preview.instance_files + preview.backup_count;
+      const bytes = preview.instance_bytes + preview.backup_bytes;
+      phase(taskId, plan, "move_copy");
+      await fakeCopy(taskId, files, bytes);
+      phase(taskId, plan, "move_verify");
+      await fakeCopy(taskId, files, bytes);
+    }
+    phase(taskId, plan, "move_commit");
+    // 提交开始后不再理会取消：这一步只等一拍，不查取消
+    await sleep(MOCK_STEP_MS);
+    instances = instances.filter((i) => i.dto.id !== id);
+    forgetMockMods(id);
+    forgetMockLaunchRecords(id);
+    const followUps: MoveFollowUpDto[] = [];
+    // 与改名共用同一处失败注入：游玩记录、存档备份没跟过去时照成功返回，记成待提示的一项
+    const lag = takeMockPlayRecordsFailure();
+    if (lag !== null) followUps.push({ kind: "play_records", reason: lag });
+    const stuck = pendingBackupsMoveFailure;
+    pendingBackupsMoveFailure = null;
+    if (stuck === null) delete backups[id];
+    else followUps.push({ kind: "world_backups", reason: stuck });
+    recordMockMovedVersions(preview.target, [id, ...preview.bases_to_copy]);
+    // 配置在文件与记录都移好之后才改、才存；存不上同样照成功返回，原目录里的引用与目录列表都还是移动前的样子
+    const configFailure = pendingMoveConfigFailure;
+    pendingMoveConfigFailure = null;
+    const registered = configFailure === null && !preview.target_registered;
+    if (configFailure === null) {
+      pins = pins.filter((pin) => pin !== id);
+      forgetMockPinnedInstance(id);
+      followMockSelection(id, null);
+      if (registered) addExtraDirectory(preview.target_name, preview.target);
+    } else followUps.push({ kind: "config", reason: configFailure });
+    return { id, source: preview.source, target: preview.target, target_name: preview.target_name, registered, follow_ups: followUps };
+  } finally {
+    endMockTask(taskId);
+    moveHold.release();
+  }
+}
+
 export const handlers: MockHandlers = {
   // 与后端一样按小写 id 的码位顺序排，不按语言区域排序。
   list_instances: () =>
@@ -1782,6 +1976,10 @@ export const handlers: MockHandlers = {
 
   export_world: exportWorld,
 
+  preview_instance_move: (args) => previewMove(str(args, "id"), str(args, "target")),
+
+  move_instance: moveInstance,
+
   reveal_in_folder: (args) => revealInFolder(args),
   open_folder: (args) => {
     const target = str(args, "target");
@@ -1819,6 +2017,7 @@ export function reset(): void {
   backups = seedBackups();
   holds.clear();
   pendingBackupsMoveFailure = null;
+  pendingMoveConfigFailure = null;
   savesReaders.length = 0;
   savesWriters.length = 0;
   mockRevealedPaths.length = 0;

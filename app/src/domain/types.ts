@@ -1,6 +1,7 @@
 // 前端领域模型的基础类型：界面与状态层只认这里的形状，DTO（snake_case）在状态层转换后再进来。
 // 取值集合写成 as const 数组再派生类型，运行期校验（未知取值即抛错）与类型共用同一份来源。
 
+import type { MoveBlockerDto } from "../ipc/instances";
 import type { BlockedFileDto } from "../ipc/modpack";
 
 // ---------------------------------------------------------------- 外观
@@ -95,8 +96,9 @@ export interface Session {
 /**
  * world_backup：备份与导出存档（都是打包）；world_restore：用备份恢复存档。两者都不算安装；后端在任务期间把实例记为
  * backing_up，只与 Mod 改动、被当作基底兼容，启动、改名、删除都要等它结束。
+ * instance_move：把实例移到另一个游戏目录，后端记为 moving，与一切互斥。
  */
-export const TASK_KINDS = ["game", "loader", "mod", "modpack", "java", "resourcepack", "shader", "datapack", "repair", "world_backup", "world_restore", "modpack_export"] as const;
+export const TASK_KINDS = ["game", "loader", "mod", "modpack", "java", "resourcepack", "shader", "datapack", "repair", "world_backup", "world_restore", "modpack_export", "instance_move"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 
 export const TASK_STATUSES = ["queued", "running", "done", "failed", "cancelled"] as const;
@@ -111,7 +113,7 @@ export interface TaskSpec {
   args: Record<string, unknown>;
 }
 
-/** 新建、补全实例的各步，取值与后端 InstallPhase::key 一一对应。 */
+/** 新建、补全实例的各步，取值与后端 InstallPhase::key 一一对应。移动实例借用同一套步骤事件，末尾四步只出现在移动的步骤表里。 */
 export const INSTALL_PHASES = [
   "metadata",
   "loader_profile",
@@ -124,6 +126,10 @@ export const INSTALL_PHASES = [
   "loader_processors",
   "verify",
   "template",
+  "move_dependencies",
+  "move_copy",
+  "move_verify",
+  "move_commit",
 ] as const;
 export type InstallPhase = (typeof INSTALL_PHASES)[number];
 
@@ -136,11 +142,15 @@ export interface TaskPhase {
   batch: { total: number; totalBytes: number | null } | null;
 }
 
-/** 任务失败记录：错误码与后端原文；以 distribution_blocked 失败时另带需要手动下载的文件清单，较早的日志里没有它。 */
+/**
+ * 任务失败记录：错误码与后端原文；以 distribution_blocked 失败时另带需要手动下载的文件清单，较早的日志里没有它；
+ * 以 instance_move_blocked 失败时另带拦着它的那一项，失败原因按它的种类写。
+ */
 export interface TaskError {
   code: string;
   message: string;
   blocked_files?: readonly BlockedFileDto[];
+  move_blocker?: MoveBlockerDto;
 }
 
 export interface Task {
@@ -182,12 +192,13 @@ export interface Task {
  * 后端实例锁表里一个实例可能被占着做的事（instance_busy 的 detail.activity，实例列表的 activity 同一套取值）。
  * inherited：别的实例正以它为基底（那个实例启动到游戏退出、补全、导入整合包期间），它的启动、删除、改名、补全被拒。
  * backing_up：备份、恢复或导出存档（含游戏退出后的自动备份），只与 Mod 改动、被当作基底兼容。
+ * moving：正在移到另一个游戏目录，与一切互斥。
  */
-export const BUSY_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited", "backing_up"] as const;
+export const BUSY_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited", "backing_up", "moving"] as const;
 export type BusyActivity = (typeof BUSY_ACTIVITIES)[number];
 
 /** 基底做着这些事时容不下基底占用：自己在启动、运行，或目录正被挪走、重写。改动、备份与别的实例的基底占用都和它兼容。 */
-export const BASE_BLOCKING_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running"] as const;
+export const BASE_BLOCKING_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "moving"] as const;
 export type BaseBlockingActivity = (typeof BASE_BLOCKING_ACTIVITIES)[number];
 
 /** instance_busy 拒绝的原因：被占着的实例与它在做的事；inherited 时 usedBy 是正以它为基底的实例，其余为 null。 */

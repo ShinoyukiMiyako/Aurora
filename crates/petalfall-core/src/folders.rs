@@ -376,6 +376,22 @@ impl Petalfall {
         }
     }
 
+    /// 游戏目录的显示名，与目录列表同一规则：记录里有名字用记录的；数据目录下的默认目录用产品名；叶子是
+    /// `.minecraft` 时取上一级目录名，否则取叶子名。还没记录的文件夹也按这个规则推出。
+    pub fn game_directory_name(&self, path: &Path) -> String {
+        self.directory_name(path)
+    }
+
+    /// `path` 是不是当前目录或已记录的额外目录（[`same_path`] 口径）。
+    pub fn is_known_game_directory(&self, path: &Path) -> bool {
+        same_path(path, self.game_dir())
+            || self
+                .config()
+                .extra_game_directories
+                .iter()
+                .any(|d| same_path(&d.path, path))
+    }
+
     /// 目录的显示名：记录里有名字用记录的；数据目录下的默认目录用产品名；
     /// 叶子是 `.minecraft` 时取上一级目录名，否则取叶子名。
     fn directory_name(&self, path: &Path) -> String {
@@ -973,6 +989,58 @@ mod tests {
             "Games"
         );
         assert_eq!(petalfall.directory_name(Path::new("E:/Games/mc")), "mc");
+    }
+
+    /// 公开的显示名与列表同一规则；还没记录的新文件夹也推得出名字。
+    #[test]
+    fn game_directory_name_follows_the_listing_rule_for_unrecorded_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(
+            tmp.path(),
+            &tmp.path().join(".minecraft"),
+            vec![named("我的整合", "D:/Packs/.minecraft")],
+        );
+        assert_eq!(
+            petalfall.game_directory_name(Path::new("D:/PACKS/.minecraft/")),
+            "我的整合"
+        );
+        assert_eq!(
+            petalfall.game_directory_name(&default_game_dir(tmp.path())),
+            petalfall_base::brand::APP_NAME
+        );
+        assert_eq!(
+            petalfall.game_directory_name(Path::new("F:/新盘/.minecraft")),
+            "新盘"
+        );
+        assert_eq!(
+            petalfall.game_directory_name(Path::new("F:/新盘/游戏")),
+            "游戏"
+        );
+    }
+
+    /// 当前目录与记录过的额外目录算已知，路径写法不同也认；没记过的不算。
+    #[test]
+    fn known_game_directories_are_the_current_and_recorded_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = tmp.path().join("Games").join(".minecraft");
+        let petalfall = petalfall_at(
+            tmp.path(),
+            &current,
+            vec![named("PCL2", "E:\\PCL2\\.minecraft")],
+        );
+        let alias = PathBuf::from(format!(
+            "{}/",
+            current
+                .display()
+                .to_string()
+                .to_uppercase()
+                .replace('\\', "/")
+        ));
+        assert!(petalfall.is_known_game_directory(&current));
+        assert!(petalfall.is_known_game_directory(&alias));
+        assert!(petalfall.is_known_game_directory(Path::new("e:/pcl2/.minecraft/")));
+        assert!(!petalfall.is_known_game_directory(Path::new("E:/PCL2")));
+        assert!(!petalfall.is_known_game_directory(&tmp.path().join("新文件夹")));
     }
 
     #[tokio::test(start_paused = true)]

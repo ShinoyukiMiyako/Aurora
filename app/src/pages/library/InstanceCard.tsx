@@ -4,9 +4,11 @@
 // 图钉、底栏按钮与菜单浮在覆盖层之上，各管各的。卡面上的标签行放在与卡面同格叠放的普通层里，
 // 不放进卡面组件内部：卡面自成层叠上下文，放进去的图钉会被标题按钮的覆盖层盖住。
 //
-// 卡片退场（删除、改名、取消安装）期间实例已不在状态里，这时底栏不再挂启动入口（它按 id 取实例，取不到会抛错），
-// 其余部分照最后一次的数据画完退场。
+// 卡片退场（删除、改名、取消安装、移到别的游戏目录）期间实例已不在状态里，这时底栏不再挂启动入口（它按 id 取实例，取不到会抛错），
+// 其余部分照最后一次的数据画完退场。「移到其他游戏目录」的弹窗只在打开期间挂载。
 
+import { AnimatePresence } from "framer-motion";
+import { useState } from "react";
 import { Icon, type IconName } from "../../art/Icon";
 import { ACTION_ERROR, lockReason, modpackLabel, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
@@ -31,6 +33,8 @@ import { Tooltip } from "../../ui/Tooltip";
 import { LOCK_REASON } from "../instance/copy";
 import { useDeleteInstance } from "../instance/delete";
 import { isCrashActive } from "../instance/model";
+import { MoveInstanceModal } from "../instance/MoveInstanceModal";
+import { moveReason } from "../instance/ops";
 import { CardStatus } from "./CardStatus";
 import { LIBRARY_COPY } from "./copy";
 import styles from "./library.module.css";
@@ -60,7 +64,10 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   const run = useRunner();
   const deleteInstance = useDeleteInstance();
 
-  const deleteReason = lockReason(locksOf(inst, busy).delete, "delete");
+  const [moving, setMoving] = useState(false);
+  const locks = locksOf(inst, busy);
+  const deleteReason = lockReason(locks.delete, "delete");
+  const moveBlocked = moveReason(inst, locks);
   const pinAllowed = inst.pinned || canPin;
   const cover = instanceCover(inst);
   const justCrashed = viewKind === "crashed";
@@ -108,6 +115,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
       disabledReason: inst.placeholder ? LOCK_REASON.placeholderFolder : undefined,
       onSelect: () => void run(() => actions.openFolder("instance", id), ACTION_ERROR.openFolder),
     },
+    { label: LIBRARY_COPY.menu.move, icon: "folder-open", disabled: moveBlocked !== undefined, disabledReason: moveBlocked, onSelect: () => setMoving(true) },
     { kind: "separator" },
     ...(inst.loader === "vanilla"
       ? []
@@ -199,6 +207,20 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
         {live ? <CardStatus inst={inst} /> : <div className={styles.status} />}
         <MoreMenu size="sm" label={LIBRARY_COPY.moreLabel(name)} items={menu} />
       </div>
+      <AnimatePresence>
+        {moving && (
+          <MoveInstanceModal
+            key="move"
+            inst={inst}
+            lockReason={moveBlocked}
+            onRename={() => {
+              setMoving(false);
+              open("settings");
+            }}
+            onClose={() => setMoving(false)}
+          />
+        )}
+      </AnimatePresence>
     </Card>
   );
 }

@@ -9,8 +9,8 @@
 //! 记录按游戏目录分开：实例 id 只在一个游戏目录里唯一，换到另一个游戏目录后，同名的是另一个实例，
 //! 不能继承这边的时长。读写一律针对门面当前的游戏目录。
 //!
-//! 实例改名、删除时记录要跟着改，这一步晚于目录操作，可能单独失败（文件被备份或杀毒软件占着、读不出来）。
-//! 失败的改动记在进程内、之后补上，见 [`PENDING`]。
+//! 实例改名、删除、移到别的游戏目录时记录要跟着改，这一步晚于目录操作，可能单独失败（文件被备份或杀毒软件
+//! 占着、读不出来）。失败的改动记在进程内、之后补上，见 [`PENDING`]。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -57,7 +57,7 @@ impl Pending {
     }
 }
 
-/// 改名、删除对一个游戏目录记录的改动。记成数据而不是直接改，落盘失败时才能留到下一次补上。
+/// 改名、删除、移动对游戏目录记录的改动。记成数据而不是直接改，落盘失败时才能留到下一次补上。
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BookChange {
     Rename {
@@ -67,6 +67,12 @@ enum BookChange {
     },
     Forget {
         game_dir: PathBuf,
+        id: String,
+    },
+    /// 实例从游戏目录 `from` 移到了 `to`，名字不变。
+    Move {
+        from: PathBuf,
+        to: PathBuf,
         id: String,
     },
 }
@@ -151,7 +157,7 @@ impl PlayLibrary {
         }
     }
 
-    /// 套用一次改名或删除；返回记录是否有变化。
+    /// 套用一次改名、删除或移动；返回记录是否有变化。
     fn apply(&mut self, change: &BookChange) -> bool {
         match change {
             BookChange::Rename { game_dir, old, new } => {
@@ -160,8 +166,37 @@ impl PlayLibrary {
             BookChange::Forget { game_dir, id } => {
                 self.change(game_dir, |book| book.forget_instance(id))
             }
+            BookChange::Move { from, to, id } => self.move_instance(from, to, id),
         }
     }
+
+    /// 实例移到另一个游戏目录：它在 `from` 账下的累计与每日记录摘下来并进 `to` 账（没记过的目录新开一本）。
+    /// 合并而不是覆盖：提交之后到套用这一步之间（收尾可能推迟到下次启动），玩家可能已经在 `to` 里玩过它，那几局
+    /// 记在 `to` 账下同名的记录里。那边已删除同名实例留下的旧记录由移动在提交前丢掉，不归这里管。
+    /// `from` 账下没有它时什么都不做：挪过一次后再套用，同一份时长不会再加一遍。返回记录是否有变化。
+    fn move_instance(&mut self, from: &Path, to: &Path, id: &str) -> bool {
+        if same_path(from, to) {
+            return false;
+        }
+        let Some(taken) = self
+            .directories
+            .iter_mut()
+            .find(|d| same_path(&d.game_dir, from))
+            .and_then(|d| d.book.take_instance(id))
+        else {
+            return false;
+        };
+        self.book_mut(to).merge_instance(id, taken);
+        true
+    }
+}
+
+/// 从一本账里摘下来的一个实例的全部记录。
+#[derive(Debug)]
+struct TakenRecords {
+    total: Option<InstanceRecord>,
+    /// 日期到当天的游玩毫秒。
+    days: BTreeMap<String, u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -352,6 +387,38 @@ impl PlayBook {
         changed
     }
 
+    /// 摘下一个实例的累计与每日记录，摘完只剩空记录的日子一并去掉（同 [`PlayBook::forget_instance`]）。
+    /// 一条记录都没有时为 `None`。
+    fn take_instance(&mut self, id: &str) -> Option<TakenRecords> {
+        let total = self.instances.remove(id);
+        let mut days = BTreeMap::new();
+        for (date, day) in &mut self.days {
+            if let Some(ms) = day.instances.remove(id) {
+                days.insert(date.clone(), ms);
+            }
+        }
+        self.days.retain(|_, day| !day.instances.is_empty());
+        (total.is_some() || !days.is_empty()).then_some(TakenRecords { total, days })
+    }
+
+    /// 并进摘下来的记录：累计与同一天的时长相加，上次游玩取晚的，与 [`PlayBook::add_session`] 记一局同一口径。
+    fn merge_instance(&mut self, id: &str, taken: TakenRecords) {
+        if let Some(total) = taken.total {
+            let record = self.instances.entry(id.to_owned()).or_default();
+            record.total_ms += total.total_ms;
+            record.last_played_at = record.last_played_at.max(total.last_played_at);
+        }
+        for (date, ms) in taken.days {
+            *self
+                .days
+                .entry(date)
+                .or_default()
+                .instances
+                .entry(id.to_owned())
+                .or_default() += ms;
+        }
+    }
+
     fn summaries(&self) -> BTreeMap<String, PlaySummary> {
         self.instances
             .iter()
@@ -526,7 +593,7 @@ async fn with_library<T>(
         tracing::warn!(
             path = %path.display(),
             pending = queued.changes.len(),
-            "游玩记录的改名、删除没能落盘，记下待补"
+            "游玩记录的改名、删除、移动没能落盘，记下待补"
         );
     }
     if !queued.is_empty() {
@@ -648,8 +715,38 @@ impl Petalfall {
 
     /// 实例删除后去掉它在当前游戏目录下的游玩记录。失败时同改名，记下待补。
     pub async fn forget_play_records(&self, id: &str) -> Result<()> {
+        self.forget_play_records_in(self.game_dir(), id).await
+    }
+
+    /// 去掉 `game_dir` 那本账下这个实例的游玩记录，同 [`Petalfall::forget_play_records`]，只是账不一定是当前游戏
+    /// 目录的：实例移进去之前，先丢掉那边已删除的同名实例留下的旧记录，之后并进来的才不会继承别人的时长。那个
+    /// 目录没记过时什么都不做。失败时同改名，记下待补。
+    pub async fn forget_play_records_in(&self, game_dir: &Path, id: &str) -> Result<()> {
         let change = BookChange::Forget {
-            game_dir: self.game_dir().to_path_buf(),
+            game_dir: game_dir.to_path_buf(),
+            id: id.to_owned(),
+        };
+        with_library(self.data_dir(), self.game_dir(), Some(change), |_| {
+            ((), false)
+        })
+        .await
+    }
+
+    /// 实例移到另一个游戏目录后，把它在 `from_game_dir` 那本账下的累计与每日记录并进 `to_game_dir` 那本账
+    /// （没有就新开），与那边同名的记录相加。from 账下没有它的记录时什么都不做，所以重复调用安全；两者是同一个
+    /// 目录（[`same_path`] 口径）时连文件都不读。失败时同改名，记下待补。
+    pub async fn move_play_records(
+        &self,
+        id: &str,
+        from_game_dir: &Path,
+        to_game_dir: &Path,
+    ) -> Result<()> {
+        if same_path(from_game_dir, to_game_dir) {
+            return Ok(());
+        }
+        let change = BookChange::Move {
+            from: from_game_dir.to_path_buf(),
+            to: to_game_dir.to_path_buf(),
             id: id.to_owned(),
         };
         with_library(self.data_dir(), self.game_dir(), Some(change), |_| {
@@ -1475,5 +1572,467 @@ mod tests {
         );
         assert_eq!(instance_ids(&file), vec!["b"]);
         assert!(!elsewhere.save_pending_play_records().await.unwrap());
+    }
+
+    /// 在 `game` 下记一局：东八区 `date` 那天 `hour:minute` 开始，玩 `minutes` 分钟。
+    async fn play(root: &Path, game: &Path, id: &str, date: &str, start: (u32, u32), minutes: u64) {
+        let begin = at(date, start.0, start.1);
+        record_play_in(
+            &utc8(),
+            root,
+            game,
+            id,
+            begin,
+            begin + minutes * MS_PER_MINUTE,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// 移到另一个游戏目录：累计、上次游玩与每日记录并进目标账，源账里没有了，只剩它的日子整条去掉。目标账下
+    /// 同名的记录是推迟收尾期间玩家在目标里玩出来的，与挪过去的相加而不是被替换：累计相加，同一天的分钟相加，
+    /// 上次游玩取晚的。再调一次、或者两边其实是同一个目录时什么都不变。
+    #[tokio::test]
+    async fn move_merges_totals_last_played_and_days_into_the_target_book() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("源").join(".minecraft");
+        let target = tmp.path().join("目标").join(".minecraft");
+        let at_home = petalfall_in(tmp.path(), &home);
+        let at_target = petalfall_in(tmp.path(), &target);
+        play(tmp.path(), &home, "生存", "2026-10-29", (20, 0), 90).await;
+        play(tmp.path(), &home, "生存", "2026-10-30", (20, 0), 45).await;
+        play(tmp.path(), &home, "别的", "2026-10-30", (9, 0), 10).await;
+        // 提交之后、收尾之前，玩家已经在目标里玩过它：一局与源账同一天，一局在之后一天。
+        play(tmp.path(), &target, "生存", "2026-10-30", (8, 0), 30).await;
+        play(tmp.path(), &target, "生存", "2026-10-31", (21, 0), 25).await;
+        play(tmp.path(), &target, "目标自己的", "2026-10-30", (10, 0), 20).await;
+
+        at_home
+            .move_play_records("生存", &home, &target)
+            .await
+            .unwrap();
+
+        let moved = at_target.play_summaries().await.unwrap();
+        assert_eq!(
+            moved["生存"],
+            PlaySummary {
+                playtime_min: 190,
+                last_played_at: at("2026-10-31", 21, 25)
+            }
+        );
+        assert_eq!(moved["目标自己的"].playtime_min, 20);
+        let stats = at_target
+            .play_stats(range("2026-10-01", "2026-10-31"))
+            .await
+            .unwrap();
+        let per_day: Vec<(&str, u64)> = stats
+            .days
+            .iter()
+            .map(|d| (d.date.as_str(), d.minutes))
+            .collect();
+        assert_eq!(
+            per_day,
+            vec![("2026-10-29", 90), ("2026-10-30", 95), ("2026-10-31", 25)]
+        );
+        assert_eq!(
+            stats.days[1].instances,
+            vec![
+                InstanceMinutes {
+                    version_id: "生存".into(),
+                    minutes: 75
+                },
+                InstanceMinutes {
+                    version_id: "目标自己的".into(),
+                    minutes: 20
+                },
+            ],
+            "同一天两边的分钟相加"
+        );
+        assert_eq!(stats.total_minutes, 210);
+        assert_eq!(
+            stats.instances,
+            vec![
+                InstanceMinutes {
+                    version_id: "生存".into(),
+                    minutes: 190
+                },
+                InstanceMinutes {
+                    version_id: "目标自己的".into(),
+                    minutes: 20
+                },
+            ]
+        );
+
+        let left = at_home.play_summaries().await.unwrap();
+        assert_eq!(left.keys().collect::<Vec<_>>(), vec!["别的"]);
+        let stats = at_home
+            .play_stats(range("2026-10-01", "2026-10-31"))
+            .await
+            .unwrap();
+        let dates: Vec<&str> = stats.days.iter().map(|d| d.date.as_str()).collect();
+        assert_eq!(dates, vec!["2026-10-30"], "只剩它的那天整条去掉");
+        assert_eq!(stats.total_minutes, 10);
+
+        // 源账下已经没有它：再调一次不改文件，同一份时长不会再加一遍。
+        let path = playtime_path(tmp.path());
+        let before = std::fs::read(&path).unwrap();
+        at_home
+            .move_play_records("生存", &home, &target)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            at_target.play_summaries().await.unwrap()["生存"].playtime_min,
+            190
+        );
+        // 同一个目录的另一种写法。
+        let alias = PathBuf::from(home.display().to_string().to_uppercase().replace('\\', "/"));
+        at_home
+            .move_play_records("别的", &home, &alias)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(
+            at_home.play_summaries().await.unwrap()["别的"].playtime_min,
+            10
+        );
+    }
+
+    /// 两边是同一个目录时，记录层本身也不动它：摘下来再放回同一本账会被当成有变化而白写一次文件。
+    #[test]
+    fn move_between_two_spellings_of_one_directory_is_no_change() {
+        let home = PathBuf::from("E:/Games/.minecraft");
+        let mut library = PlayLibrary::default();
+        library.book_mut(&home).add_session(
+            &utc8(),
+            "a",
+            at("2026-10-30", 20, 0),
+            at("2026-10-30", 21, 0),
+        );
+        let before = library.clone();
+        let change = BookChange::Move {
+            from: home,
+            to: PathBuf::from("e:\\games\\.minecraft\\"),
+            id: "a".into(),
+        };
+        assert!(!library.apply(&change));
+        assert_eq!(library, before);
+    }
+
+    /// 记录层的合并：上次游玩哪边晚取哪边，两边各自的日子都留下、同一天相加；源账清空，再套用一次不再加。
+    #[test]
+    fn move_keeps_the_later_last_played_whichever_book_has_it() {
+        let home = PathBuf::from("E:/Games/.minecraft");
+        let target = PathBuf::from("F:/Moved/.minecraft");
+        let mut library = PlayLibrary::default();
+        let source = library.book_mut(&home);
+        // a 在源账里玩得晚，b 在目标账里玩得晚。
+        source.add_session(
+            &utc8(),
+            "a",
+            at("2026-10-31", 20, 0),
+            at("2026-10-31", 21, 0),
+        );
+        source.add_session(
+            &utc8(),
+            "b",
+            at("2026-10-29", 8, 0),
+            at("2026-10-29", 8, 10),
+        );
+        let moved_to = library.book_mut(&target);
+        moved_to.add_session(
+            &utc8(),
+            "a",
+            at("2026-10-29", 8, 0),
+            at("2026-10-29", 8, 40),
+        );
+        moved_to.add_session(
+            &utc8(),
+            "b",
+            at("2026-10-29", 22, 0),
+            at("2026-10-29", 22, 30),
+        );
+        moved_to.add_session(
+            &utc8(),
+            "b",
+            at("2026-10-31", 23, 0),
+            at("2026-10-31", 23, 5),
+        );
+
+        for id in ["a", "b"] {
+            let change = BookChange::Move {
+                from: home.clone(),
+                to: target.clone(),
+                id: id.into(),
+            };
+            assert!(library.apply(&change), "{id}");
+        }
+
+        let merged = library.book(&target);
+        assert_eq!(
+            merged.instances["a"],
+            InstanceRecord {
+                total_ms: 100 * MS_PER_MINUTE,
+                last_played_at: at("2026-10-31", 21, 0)
+            }
+        );
+        assert_eq!(
+            merged.instances["b"],
+            InstanceRecord {
+                total_ms: 45 * MS_PER_MINUTE,
+                last_played_at: at("2026-10-31", 23, 5)
+            }
+        );
+        let per_day: Vec<(&str, u64, u64)> = merged
+            .days
+            .iter()
+            .map(|(date, day)| {
+                (
+                    date.as_str(),
+                    day.instances["a"] / MS_PER_MINUTE,
+                    day.instances["b"] / MS_PER_MINUTE,
+                )
+            })
+            .collect();
+        assert_eq!(per_day, vec![("2026-10-29", 40, 40), ("2026-10-31", 60, 5)]);
+        assert_eq!(library.book(&home), &PlayBook::default());
+
+        let before = library.clone();
+        let again = BookChange::Move {
+            from: home,
+            to: target,
+            id: "a".into(),
+        };
+        assert!(!library.apply(&again));
+        assert_eq!(library, before);
+    }
+
+    /// 目标目录从没记过：新开一本账。源账下没有这个实例时什么都不做，目标里同名的记录也不动。
+    #[tokio::test]
+    async fn move_opens_a_book_for_a_new_target_and_skips_instances_never_played() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("源").join(".minecraft");
+        let target = tmp.path().join("新盘").join(".minecraft");
+        let at_home = petalfall_in(tmp.path(), &home);
+        play(tmp.path(), &home, "生存", "2026-10-30", (20, 0), 30).await;
+
+        at_home
+            .move_play_records("没玩过", &home, &target)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_file(tmp.path())["directories"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "没有可挪的记录时不给目标凭空开账"
+        );
+
+        at_home
+            .move_play_records("生存", &home, &target)
+            .await
+            .unwrap();
+        let file = read_file(tmp.path());
+        let directories = file["directories"].as_array().unwrap();
+        assert_eq!(directories.len(), 2);
+        assert_eq!(directories[1]["game_dir"], target.display().to_string());
+        let book = &directories[1]["book"];
+        assert_eq!(book["instances"]["生存"]["total_ms"], 30 * MS_PER_MINUTE);
+        assert_eq!(
+            book["instances"]["生存"]["last_played_at"],
+            at("2026-10-30", 20, 30)
+        );
+        assert_eq!(
+            book["days"]["2026-10-30"]["instances"]["生存"],
+            30 * MS_PER_MINUTE
+        );
+        assert_eq!(
+            directories[0]["book"],
+            serde_json::json!({"instances": {}, "days": {}})
+        );
+
+        play(tmp.path(), &target, "目标的", "2026-10-31", (8, 0), 15).await;
+        at_home
+            .move_play_records("目标的", &home, &target)
+            .await
+            .unwrap();
+        assert_eq!(
+            petalfall_in(tmp.path(), &target)
+                .play_summaries()
+                .await
+                .unwrap()["目标的"]
+                .playtime_min,
+            15
+        );
+    }
+
+    /// 丢掉给定游戏目录账下的一个实例：只动那本账，门面当前目录与别的目录里同名的记录不碰，只剩它的日子整条去掉；
+    /// 那个目录没记过时不改文件、不凭空开账；文件读不出来时同删除，报错并记下待补，恢复后第一次读就补上。
+    #[tokio::test]
+    async fn forget_in_a_given_game_dir_touches_only_that_book() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("源").join(".minecraft");
+        let target = tmp.path().join("目标").join(".minecraft");
+        let at_home = petalfall_in(tmp.path(), &home);
+        let at_target = petalfall_in(tmp.path(), &target);
+        play(tmp.path(), &home, "生存", "2026-10-30", (20, 0), 60).await;
+        // 目标里已删除的同名实例留下的；那天只有它。
+        play(tmp.path(), &target, "生存", "2026-10-01", (8, 0), 30).await;
+        play(tmp.path(), &target, "别的", "2026-10-30", (9, 0), 10).await;
+
+        at_home
+            .forget_play_records_in(&target, "生存")
+            .await
+            .unwrap();
+
+        let left = at_target.play_summaries().await.unwrap();
+        assert_eq!(left.keys().collect::<Vec<_>>(), vec!["别的"]);
+        assert_eq!(left["别的"].playtime_min, 10);
+        let stats = at_target
+            .play_stats(range("2026-10-01", "2026-10-31"))
+            .await
+            .unwrap();
+        let dates: Vec<&str> = stats.days.iter().map(|d| d.date.as_str()).collect();
+        assert_eq!(dates, vec!["2026-10-30"]);
+        assert_eq!(
+            at_home.play_summaries().await.unwrap()["生存"],
+            PlaySummary {
+                playtime_min: 60,
+                last_played_at: at("2026-10-30", 21, 0)
+            }
+        );
+
+        let path = playtime_path(tmp.path());
+        let before = std::fs::read(&path).unwrap();
+        let fresh = tmp.path().join("新盘").join(".minecraft");
+        at_home
+            .forget_play_records_in(&fresh, "生存")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        std::fs::write(&path, "{ broken").unwrap();
+        let alias = PathBuf::from(
+            target
+                .display()
+                .to_string()
+                .to_uppercase()
+                .replace('\\', "/"),
+        );
+        assert!(
+            at_home
+                .forget_play_records_in(&alias, "别的")
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ broken");
+        std::fs::write(&path, &before).unwrap();
+        assert!(at_target.play_summaries().await.unwrap().is_empty());
+        assert_eq!(
+            at_home.play_summaries().await.unwrap()["生存"].playtime_min,
+            60
+        );
+        assert!(!at_home.save_pending_play_records().await.unwrap());
+    }
+
+    /// 记录文件读不出来时移动报错、记下待补；文件恢复后的第一次读就补上并落盘，与目标里同名的记录照样相加，
+    /// 且只加一次；补过之后不再重复套用，源目录里之后新玩的同名实例留在源账下。
+    #[tokio::test]
+    async fn failed_move_is_applied_once_the_file_reads_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("源").join(".minecraft");
+        let target = tmp.path().join("目标").join(".minecraft");
+        let at_home = petalfall_in(tmp.path(), &home);
+        let at_target = petalfall_in(tmp.path(), &target);
+        record_play_in(&utc8(), tmp.path(), &home, "生存", 0, 2 * HOUR)
+            .await
+            .unwrap();
+        record_play_in(&utc8(), tmp.path(), &target, "生存", 0, HOUR)
+            .await
+            .unwrap();
+        let path = playtime_path(tmp.path());
+        let intact = std::fs::read(&path).unwrap();
+
+        std::fs::write(&path, "{ broken").unwrap();
+        assert!(
+            at_home
+                .move_play_records("生存", &home, &target)
+                .await
+                .is_err()
+        );
+        assert!(at_target.play_summaries().await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{ broken");
+
+        std::fs::write(&path, &intact).unwrap();
+        let summaries = at_target.play_summaries().await.unwrap();
+        assert_eq!(summaries.keys().collect::<Vec<_>>(), vec!["生存"]);
+        assert_eq!(
+            summaries["生存"],
+            PlaySummary {
+                playtime_min: 180,
+                last_played_at: 2 * HOUR
+            }
+        );
+        assert!(at_home.play_summaries().await.unwrap().is_empty());
+        let (library, _) = load(&path, &home).await.unwrap();
+        assert_eq!(library.book(&target).instances["生存"].total_ms, 3 * HOUR);
+        assert!(library.book(&home).instances.is_empty());
+        assert!(library.book(&home).days.is_empty());
+
+        record_play_in(&utc8(), tmp.path(), &home, "生存", 3 * HOUR, 4 * HOUR)
+            .await
+            .unwrap();
+        assert_eq!(
+            at_home.play_summaries().await.unwrap()["生存"].playtime_min,
+            60
+        );
+        assert_eq!(
+            at_target.play_summaries().await.unwrap()["生存"].playtime_min,
+            180
+        );
+    }
+
+    /// 读得出、写不进：移动报错；写不进期间两边读到的已是挪过的样子，文件还是原样；放开后补写落盘。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn move_that_cannot_be_saved_reads_as_moved_until_it_is_saved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("源").join(".minecraft");
+        let target = tmp.path().join("目标").join(".minecraft");
+        let at_home = petalfall_in(tmp.path(), &home);
+        let at_target = petalfall_in(tmp.path(), &target);
+        record_play_in(&utc8(), tmp.path(), &home, "生存", 0, 2 * HOUR)
+            .await
+            .unwrap();
+        let path = playtime_path(tmp.path());
+
+        let held = hold_read_only(&path);
+        assert!(
+            at_home
+                .move_play_records("生存", &home, &target)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            at_target.play_summaries().await.unwrap()["生存"].playtime_min,
+            120
+        );
+        assert!(at_home.play_summaries().await.unwrap().is_empty());
+        assert_eq!(instance_ids(&read_file(tmp.path())), vec!["生存"]);
+        assert_eq!(
+            read_file(tmp.path())["directories"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(held);
+
+        assert!(at_home.save_pending_play_records().await.unwrap());
+        let (library, _) = load(&path, &home).await.unwrap();
+        assert_eq!(library.book(&target).instances["生存"].total_ms, 2 * HOUR);
+        assert!(library.book(&home).instances.is_empty());
+        assert!(!at_home.save_pending_play_records().await.unwrap());
     }
 }

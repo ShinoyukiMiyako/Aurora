@@ -179,7 +179,7 @@ fn native_jar_sha1(lib: &Library, ctx: &RuntimeContext) -> Option<String> {
 ///
 /// 坐标兜底与下载计划用同一份逐段校验：缺段报坐标非法、越界报路径越界，与下载时一致，
 /// 不再悄悄跳过（natives 缺了游戏会直接崩）。
-fn native_jar_relpath(lib: &Library, ctx: &RuntimeContext) -> Result<Option<String>> {
+pub fn native_jar_relpath(lib: &Library, ctx: &RuntimeContext) -> Result<Option<String>> {
     if lib.natives.is_some() {
         // 旧式：从 classifiers 里挑当前平台件。
         if let Some(artifact) = lib.native_artifact(ctx)

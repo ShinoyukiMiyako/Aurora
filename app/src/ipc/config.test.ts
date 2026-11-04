@@ -247,7 +247,7 @@ describe("界面语言", () => {
     vi.resetModules();
     const third = await import("./mock");
     expect(() => third.enableMockPersistence(stale, "slug")).toThrow(`快照版本是 ${snapshot.version - 1}，当前是 ${snapshot.version}`);
-    expect(snapshot.version).toBe(3);
+    expect(snapshot.version).toBe(4);
   });
 });
 

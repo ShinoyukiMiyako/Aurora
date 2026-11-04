@@ -4,7 +4,7 @@
 // 「重试排到队尾」都不需要改写 createdAt。每次尝试的命令 taskId 是「任务 id + 尝试次数」：后端会记住
 // 「取消时不在运行」的 id，同 id 再登记会直接是已取消状态，重试必须换新 id。
 
-import { TASK_INTERRUPTED_CODE, taskFailureReason } from "../copy/flows";
+import { MOVE_INTERRUPTED_CODE, TASK_INTERRUPTED_CODE, taskFailureReason } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import { MAX_PARALLEL_TASKS, TASK_HISTORY_LIMIT } from "../domain/limits";
 import type { InstallPhase, Task, TaskKind, TaskPhase, TaskSpec } from "../domain/types";
@@ -125,7 +125,7 @@ export function newTask(draft: TaskDraft, now: number): Task {
 }
 
 /**
- * 这一类任务运行时是不是在下载。导出整合包是本地打包，备份与恢复存档是本地读写，只是同走一条队列；
+ * 这一类任务运行时是不是在下载。导出整合包是本地打包，备份与恢复存档、移到别的游戏目录是本地读写，只是同走一条队列；
  * 修复补的是游戏文件，算下载。逐类写全：以后加类别时由类型逼着定它算不算。
  */
 export const DOWNLOADS_WHEN_RUNNING: Readonly<Record<TaskKind, boolean>> = {
@@ -141,6 +141,7 @@ export const DOWNLOADS_WHEN_RUNNING: Readonly<Record<TaskKind, boolean>> = {
   world_backup: false,
   world_restore: false,
   modpack_export: false,
+  instance_move: false,
 };
 
 /** 写整个实例目录的命令（新建、导入、补全）：期间实例算「安装中」，后端的实例锁里它与这个实例上的任何别的事都互斥。 */
@@ -148,6 +149,12 @@ export const INSTANCE_TASK_COMMANDS: ReadonlySet<string> = new Set(["install_ver
 
 /** 备份、导出与恢复存档的任务命令；它们都带着 id（实例）与 world（存档文件夹名）两个参数。 */
 export const WORLD_TASK_COMMANDS: ReadonlySet<string> = new Set(["backup_world", "export_world", "restore_world_backup"]);
+
+/**
+ * 把实例移到别的游戏目录的任务命令，带着 id（实例）、source（发起时实例所在的游戏目录）与 target（目标游戏目录）三个参数。
+ * 后端记为 moving，与这个实例上的一切互斥；执行时当前游戏目录已不是 source 就拒绝。
+ */
+export const MOVE_TASK_COMMAND = "move_instance";
 
 /**
  * 共用一份存档的实例（不隔离）的锁键。隔离结果读不出来的（null）不算：拿不准时不排，撞上了后端照样拒绝，
@@ -167,7 +174,7 @@ function savesConflict(a: Task, b: Task): boolean {
 }
 
 /**
- * 两个任务后端不让同时进行。挂在同一实例（不分大小写，与后端的锁键一致）上时：至少一个要写整个目录；或都是存档任务
+ * 两个任务后端不让同时进行。挂在同一实例（不分大小写，与后端的锁键一致）上时：至少一个要写整个目录或把它移走；或都是存档任务
  * （backing_up 彼此互斥）；或在抢存档（savesConflict）。
  * 挂在共用存档的两个实例上时只有最后一种：实例锁只管各自的实例，后端另外看共用存档的实例有没有在备份、恢复、读写存档。
  */
@@ -180,6 +187,7 @@ function excludes(a: Task, b: Task, sharedSaves: ReadonlySet<string>): boolean {
   const keyB = b.instanceId.toLowerCase();
   if (keyA !== keyB) return saves && sharedSaves.has(keyA) && sharedSaves.has(keyB);
   if (INSTANCE_TASK_COMMANDS.has(a.spec.command) || INSTANCE_TASK_COMMANDS.has(b.spec.command)) return true;
+  if (a.spec.command === MOVE_TASK_COMMAND || b.spec.command === MOVE_TASK_COMMAND) return true;
   return (worldA && worldB) || saves;
 }
 
@@ -292,6 +300,10 @@ export const PHASE_WEIGHT: Readonly<Record<InstallPhase, number>> = {
   loader_processors: 6,
   verify: 2,
   template: 1,
+  move_dependencies: 2,
+  move_copy: 6,
+  move_verify: 3,
+  move_commit: 1,
 };
 
 function phaseProgress(phase: TaskPhase, fraction: number): number {
@@ -478,11 +490,29 @@ export function awaitsManualFiles(task: Task): boolean {
   return task.error !== null && task.error.blocked_files !== undefined;
 }
 
-/** 重试：同一任务回到排队并移到队尾，尝试次数加一。只有失败的任务能重试。 */
+/**
+ * 上次关闭时正在跑的移动：后端在这次打开时已按移动日志收尾，实例要么已在目标里、要么还在原处，结局前端不知道。
+ * 照原参数重跑要么撞上「已不在这里」，要么替玩家又移一次，所以不能重试，任务行与「全部重试」都跳过它。
+ */
+export function settledOnRestart(task: Task): boolean {
+  return task.error !== null && task.error.code === MOVE_INTERRUPTED_CODE;
+}
+
+/**
+ * 「全部重试」与断网恢复的批量重试收不收这个任务。要走手动下载清单的不收（见 awaitsManualFiles）。移动一律不收：它不需要
+ * 网络，是玩家逐个确认过的大动作，批量里没人看着它从哪移到哪；发起之后可能已切换了游戏目录，单条重试由玩家自己点，
+ * 源目录对不上时后端以 source_changed 拒绝。
+ */
+export function batchRetryable(task: Task): boolean {
+  return task.status === "failed" && !awaitsManualFiles(task) && task.spec.command !== MOVE_TASK_COMMAND;
+}
+
+/** 重试：同一任务回到排队并移到队尾，尝试次数加一。只有失败的任务能重试，重启后已由后端收尾的移动不算。 */
 export function retryTask(tasks: readonly Task[], id: string): Task[] {
   const task = tasks.find((t) => t.id === id);
   if (task === undefined) throw new Error(`没有任务 ${id}`);
   if (task.status !== "failed") throw new Error(`任务 ${id} 是 ${task.status}，只有失败的任务能重试`);
+  if (settledOnRestart(task)) throw new Error(`任务 ${id} 是关闭时中断的移动，已在打开时收尾，不能重试`);
   const retried: Task = {
     ...task,
     status: "queued",
@@ -540,8 +570,13 @@ export function exportDestination(spec: TaskSpec): string | null {
   return typeof dest === "string" ? dest : null;
 }
 
-/** 上次关闭时还没完成的任务：记为失败，原因「落樱关闭时中断」，可以重试。 */
+/**
+ * 上次关闭时还没完成的任务：记为失败，原因「落樱关闭时中断」，可以重试。正在跑的移动例外：后端打开时自己按移动日志收尾，
+ * 记成不能重试的另一个码（见 settledOnRestart）；还在排队的移动没开过工，实例原样在原处，照常可以重试。
+ */
 export function restoreJournal(tasks: readonly Task[], now: number): Task[] {
-  const error = { code: TASK_INTERRUPTED_CODE, message: taskFailureReason({ code: TASK_INTERRUPTED_CODE, message: "" }) };
-  return tasks.map((t) => (isActiveTask(t) ? { ...t, status: "failed", speedBps: 0, error, finishedAt: now } : t));
+  const interrupted = (code: string) => ({ code, message: taskFailureReason({ code, message: "" }) });
+  const error = interrupted(TASK_INTERRUPTED_CODE);
+  const moveError = interrupted(MOVE_INTERRUPTED_CODE);
+  return tasks.map((t) => (isActiveTask(t) ? { ...t, status: "failed", speedBps: 0, error: t.status === "running" && t.spec.command === MOVE_TASK_COMMAND ? moveError : error, finishedAt: now } : t));
 }

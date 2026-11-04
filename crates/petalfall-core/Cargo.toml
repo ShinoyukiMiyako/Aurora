@@ -44,6 +44,10 @@ sys-locale = "0.3"
 # 启动前写 Windows 图形设置里的按程序显卡偏好（当前用户的注册表）；与 petalfall-java 同一版本。
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
+# 移动实例：取卷根判断是否同卷（GetVolumePathNameW）、不覆盖地改名（MoveFileExW）、改目录创建时间与刷目录时的
+# 打开标志、读回校验的无缓冲打开与扇区大小（GetFileInformationByHandleEx），认无缓冲读被拒的错误码（Foundation）；
+# 与 petalfall-install 同一版本。
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 flate2 = "1"

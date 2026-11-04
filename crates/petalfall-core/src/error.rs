@@ -187,6 +187,15 @@ pub enum CoreError {
         path: PathBuf,
         problem: GameDirProblem,
     },
+    /// 实例移动被预检拦下：执行前重新预检，遇到的第一个问题。
+    #[error("实例 {id} 不能移动：{blocker}")]
+    InstanceMoveBlocked {
+        id: String,
+        blocker: crate::instance_move::MoveBlocker,
+    },
+    /// 跨盘移动时暂存副本读回比对不上（大小或 SHA-1），整次移动回滚。
+    #[error("复制出的 {path} 与原文件不一致")]
+    InstanceMoveVerifyFailed { path: PathBuf },
     /// 读不到本机物理内存信息。
     #[error("读不到本机内存信息")]
     MemoryUnavailable,

@@ -25,10 +25,11 @@ export const KIND_ICON: Readonly<Record<TaskKind, IconName>> = {
   world_backup: "world",
   world_restore: "world",
   modpack_export: "modpack",
+  instance_move: "folder-open",
 };
 
-/** 备份与恢复存档只碰本机文件，断网时重试照样能成；导出要向平台反查 Mod，其余都要下载。 */
-const OFFLINE_RETRY_KINDS: ReadonlySet<TaskKind> = new Set(["world_backup", "world_restore"]);
+/** 备份与恢复存档、移到别的游戏目录只碰本机文件，断网时重试照样能成；导出要向平台反查 Mod，其余都要下载。 */
+const OFFLINE_RETRY_KINDS: ReadonlySet<TaskKind> = new Set(["world_backup", "world_restore", "instance_move"]);
 
 export function retryNeedsNetwork(task: Task): boolean {
   return !OFFLINE_RETRY_KINDS.has(task.kind);

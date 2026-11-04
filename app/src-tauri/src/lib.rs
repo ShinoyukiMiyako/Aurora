@@ -110,6 +110,8 @@ pub fn run() {
             // -- instances --
             app.manage(commands::instances::InstanceLocks::default());
             app.manage(commands::instances::ExportedFiles::default());
+            // 上次在提交前后被打断的移动：回滚或补完，配置里的引用跟着改。
+            commands::instances::recover_moves_in_background(app.handle());
             // -- launch --
             app.manage(commands::launch::RunningGame::default());
             // 门面与实例占用表都已就位；前端加载要几百毫秒，接回赶在它之前占住占用槽。
@@ -191,6 +193,8 @@ pub fn run() {
             commands::instances::preview_instance_deletion,
             commands::instances::delete_instance,
             commands::instances::rename_instance,
+            commands::instances::preview_instance_move,
+            commands::instances::move_instance,
             commands::instances::list_manifest,
             commands::instances::list_loader_versions,
             commands::instances::required_java,

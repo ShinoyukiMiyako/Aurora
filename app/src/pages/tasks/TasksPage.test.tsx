@@ -273,6 +273,25 @@ describe("下载任务页：历史", () => {
     expect(row("failed-java").textContent).toContain("等待数据");
   });
 
+  it("上次关闭时中断的移动：行上写已在打开时收尾，不给重试；同样中断的下载照常给重试", async () => {
+    bootOverrides(ipc, {
+      journal: [
+        record("move", "running", {
+          kind: "instance_move",
+          title: "移动「生存」",
+          detail: "移到 HMCL · D:\\HMCL\\.minecraft",
+          instance_id: "生存",
+          spec: { command: "move_instance", args: { id: "生存", target: "D:\\HMCL\\.minecraft" } },
+        }),
+        record("java", "running"),
+      ],
+    });
+    await mount();
+    expect(row("移动「生存」").textContent).toContain("重新打开时已自动收尾：实例要么已在目标游戏目录，要么留在原处");
+    expect([...row("移动「生存」").querySelectorAll("button")].map((b) => b.textContent)).not.toContain("重试");
+    expect([...row("下载 Java java").querySelectorAll("button")].map((b) => b.textContent)).toContain("重试");
+  });
+
   it("因需要手动下载的文件失败：行上是「查看这些文件」而不是重试，清单列出文件，都找到后重新安装这个任务", async () => {
     resetModpackMock();
     const file = (name: string, id: number) => ({

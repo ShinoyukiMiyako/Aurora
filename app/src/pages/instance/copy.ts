@@ -34,12 +34,15 @@ export const HERO_COPY = {
   installingQueued: "等待安装",
   /** 后端报告实例在备份、恢复或导出存档（游戏退出后的自动备份也算）。 */
   backingUp: "正在备份存档…",
+  /** 实例正在移到别的游戏目录，排着的移动任务也算。 */
+  moving: "正在移到其他游戏目录…",
   lastCrash: "上次崩溃",
   pin: "固定到侧栏",
   unpin: "从侧栏取消固定",
   more: "更多操作",
   openFolder: "打开实例文件夹",
   exportModpack: "导出整合包",
+  moveInstance: "移到其他游戏目录…",
   repair: "补全游戏文件",
   delete: "删除实例",
 } as const;
@@ -50,28 +53,32 @@ export const HERO_COPY = {
 export const LOCK_REASON = {
   /** 新建或导入还没落盘的占位项：盘上可能还没有实例目录，打开哪个文件夹都只会报未安装。 */
   placeholderFolder: "新建的实例还没装好，装完后才能打开文件夹",
-  /** 打开工作子目录与改实例设置：安装、补全、改名、删除进行中时。 */
+  /** 打开工作子目录与改实例设置：安装、补全、改名、删除、移到别的游戏目录进行中时。 */
   work: {
     folder: {
       installing: "安装任务正在写这个实例的文件夹，完成后才能打开",
       renaming: "正在重命名这个实例，完成后才能打开",
       deleting: "正在删除这个实例",
+      moving: "实例正在移到其他游戏目录，完成后才能打开",
     },
     settings: {
       installing: "安装任务正在写这个实例的文件夹，完成后才能改设置",
       renaming: "正在重命名这个实例，完成后才能改设置",
       deleting: "正在删除这个实例",
+      moving: "实例正在移到其他游戏目录，完成后才能改设置",
     },
     checkUpdates: {
       installing: "安装任务正在写这个实例的文件夹，完成后才能检查更新",
       renaming: "正在重命名这个实例，完成后才能检查更新",
       deleting: "正在删除这个实例",
+      moving: "实例正在移到其他游戏目录，完成后才能检查更新",
     },
     /** 更新检查设置与确认更新预览。 */
     mods: {
       installing: "安装任务正在写这个实例的文件夹，完成后才能改动 Mod",
       renaming: "正在重命名这个实例，完成后才能改动 Mod",
       deleting: "正在删除这个实例",
+      moving: "实例正在移到其他游戏目录，完成后才能改动 Mod",
     },
   },
   /** 导出整合包：读的是此刻的文件，游戏运行、存档备份与 Mod 改动不挡；会挪走或重写整个目录的事挡。带上存档另看 savesInGame、savesBackingUp。 */
@@ -80,10 +87,59 @@ export const LOCK_REASON = {
     installing: "安装任务正在写这个实例的文件夹，完成后才能导出",
     renaming: "正在重命名这个实例，完成后才能导出",
     deleting: "正在删除这个实例",
+    moving: "实例正在移到其他游戏目录，完成后才能导出",
     broken: "实例文件不完整，修复后才能导出",
     savesInGame: "游戏开着时存档随时在写，退出后才能带上存档",
     savesBackingUp: "正在备份或恢复存档，完成后才能带上存档",
   },
+  /** 移到别的游戏目录：活动与基底的锁走 lockReason，这里是它管不到的两种。 */
+  move: {
+    placeholder: "新建的实例还没装好，装完后才能移动",
+    broken: "实例文件不完整，修复后才能移动",
+  },
+} as const;
+
+// ---------------------------------------------------------------- 移到其他游戏目录
+
+export const MOVE_COPY = {
+  title: "移到其他游戏目录",
+  subtitle: (name: string) => `「${name}」会整个搬过去，包括它的存档备份`,
+  targetsLabel: "目标游戏目录",
+  unavailable: "这个位置现在访问不到",
+  noOthers: "还没有记下别的游戏目录，可以选一个文件夹作为目标。",
+  pickFolder: "选择其他文件夹…",
+  pickTitle: (name: string) => `把「${name}」移到哪个文件夹`,
+  pickError: "没能打开选择文件夹的对话框",
+  /** 选的文件夹还不在游戏目录列表里。 */
+  pickedNew: "移动后会记进游戏目录列表",
+  /** 选的正是当前所在的游戏目录：列表里不列它，选出来时照样交给预检报出原因。 */
+  pickedCurrent: "当前所在的游戏目录",
+  checking: "正在检查目标位置…",
+  previewError: "没能检查目标位置",
+  retry: "重试",
+  instance: "实例",
+  instanceValue: (bytes: number, files: number) => `${formatBytes(bytes)} · ${files} 个文件`,
+  backups: "存档备份",
+  backupsValue: (count: number, bytes: number) => (count === 0 ? "没有备份" : `${count} 份 · ${formatBytes(bytes)}`),
+  shared: "补齐的共用文件",
+  sharedValue: (files: number, bytes: number) => (files === 0 ? "目标里都有了" : `${files} 个 · ${formatBytes(bytes)}`),
+  bases: "一起带过去的版本",
+  reused: "目标里已有的版本",
+  write: "要写入目标盘",
+  free: "目标盘剩余",
+  sameVolume: "两个游戏目录在同一个盘上，实例与存档备份直接移过去，不必多占一份空间。",
+  crossVolume: "目标在另一个盘上：先把实例与存档备份复制过去，逐个文件校验无误后，再永久删除原来的文件，不进回收站。",
+  notIsolated: "这个实例没开版本隔离，存档、Mod 和游戏设置放在原游戏目录根下、和别的实例共用，不会跟着移走。",
+  missingInSource: (n: number) => `原游戏目录里也缺 ${n} 个共用文件，移过去后第一次启动时会下载补上。`,
+  pinned: "移走后它会从侧栏固定里去掉。",
+  blockedTitle: "现在还不能移",
+  renameAction: "去重命名",
+  cancel: "取消",
+  confirm: "移动实例",
+  needTarget: "先选一个目标游戏目录",
+  checkingReason: "正在检查目标位置",
+  previewFailedReason: "目标位置没检查成，重试后再移",
+  blockedReason: "先解决上面列出的问题",
 } as const;
 
 // ---------------------------------------------------------------- 导出整合包
@@ -189,6 +245,7 @@ export const OVERVIEW_COPY = {
     broken: "实例需要先修复",
     unknownVersion: "这个实例的版本信息不完整",
     legacy: "1.20 之前的版本不能直接进入存档",
+    moving: "实例正在移到其他游戏目录，完成后才能启动",
     backingUp: "正在备份或恢复存档，完成后再启动",
     launching: "正在启动这个实例",
     running: "游戏正在运行",
@@ -260,6 +317,7 @@ export const WORLD_BLOCKER_LABEL = {
   repairing: "修复",
   renaming: "改名",
   deleting: "删除",
+  moving: "移到其他游戏目录",
   backing_up: "备份或恢复存档",
   /** 只挡恢复：导出整合包勾了存档时要读整份存档。 */
   exporting: "导出整合包",
@@ -329,6 +387,7 @@ export const MODS_COPY = {
   completeNote: (enabled: number, disabled: number) => `已启用 ${enabled} 个，停用 ${disabled} 个。`,
   bannerRunning: "游戏正在运行，Mod 文件被占用。结束游戏后再启用、停用、更新或移除。",
   bannerInstalling: "实例正在补全文件，完成后再改动 Mod。",
+  bannerMoving: "实例正在移到其他游戏目录，完成后再改动 Mod。",
   tableLabel: "已安装的 Mod",
   colMod: "Mod",
   colVersion: "版本",

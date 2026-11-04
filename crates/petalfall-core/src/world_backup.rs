@@ -488,6 +488,35 @@ impl Petalfall {
     }
 }
 
+/// 隔离实例在某个游戏目录下全部备份的目录 `<game_dir>/.petalfall/backups/instances/<id>`（不检查是否存在）。
+/// `id` 由调用方先过 [`is_safe_instance_id`]。
+pub(crate) fn instance_backups_dir_in(game_dir: &Path, id: &str) -> PathBuf {
+    BackupLayout::new(game_dir).instance_dir(id)
+}
+
+/// 实例移动：把按 token 收着的备份 `staged`（形状同 `instances/<id>`；跨卷是目标盘暂存里的副本，同卷是原游戏目录
+/// 旧目录里的原备份）并进 `to_game_dir` 下 `instances/<id>`，合并规则同改名，占着目标备份根的锁。`staged` 不存在
+/// 时什么都不做。
+pub(crate) async fn merge_staged_backups(
+    staged: &Path,
+    to_game_dir: &Path,
+    id: &str,
+) -> Result<()> {
+    check_instance_id(id)?;
+    let root = BackupLayout::new(to_game_dir).root().to_path_buf();
+    let _root = acquire(&ROOT_LOCKS, &root, None).await?;
+    merge_scope_dir(staged, &instance_backups_dir_in(to_game_dir, id)).await?;
+    Ok(())
+}
+
+fn check_instance_id(id: &str) -> Result<()> {
+    if is_safe_instance_id(id) {
+        Ok(())
+    } else {
+        Err(InstanceError::InvalidId { id: id.to_owned() }.into())
+    }
+}
+
 fn scope_of(id: &str, resolved: &ResolvedIsolation) -> WorldScope {
     if resolved.isolated {
         WorldScope::Instance(id.to_owned())
@@ -1933,5 +1962,70 @@ mod tests {
             "{err:?}"
         );
         holder.unlock().unwrap();
+    }
+
+    /// 一个存档备份目录里的 zip 与清单条目：两者要对得上。
+    async fn backed_up(dir: &Path) -> (Vec<String>, Vec<String>) {
+        let mut listed: Vec<String> = read_backup_index(dir)
+            .await
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| entry.file)
+            .collect();
+        listed.sort();
+        (zips_in(dir), listed)
+    }
+
+    /// 跨卷移动：暂存里的备份副本并进目标，同名存档合并，暂存清空；暂存不存在时什么都不做。
+    #[tokio::test]
+    async fn staged_backups_merge_into_the_target_and_leave_the_stage_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = petalfall_at(&tmp.path().join("源"));
+        let target = petalfall_at(&tmp.path().join("目标"));
+        let saves = isolated(&source, "生存");
+        world(&saves, "w", "w");
+        world(&saves, "只在源里", "只在源里");
+        for name in ["w", "w", "只在源里"] {
+            source
+                .backup_world("生存", name, BackupKind::Manual, None)
+                .await
+                .unwrap();
+        }
+        let target_saves = isolated(&target, "生存");
+        world(&target_saves, "w", "w");
+        target
+            .backup_world("生存", "w", BackupKind::Auto, None)
+            .await
+            .unwrap();
+        let staged = tmp
+            .path()
+            .join("目标")
+            .join(".minecraft")
+            .join(".petalfall")
+            .join("moving")
+            .join("token")
+            .join("backups");
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::rename(source.instance_backups_dir("生存").unwrap(), &staged).unwrap();
+
+        merge_staged_backups(&staged, target.game_dir(), "生存")
+            .await
+            .unwrap();
+        assert!(!staged.exists());
+        let to = target.instance_backups_dir("生存").unwrap();
+        let (zips, listed) = backed_up(&to.join("w")).await;
+        assert_eq!(zips.len(), 3);
+        assert_eq!(listed, zips);
+        let list = target.list_world_backups("生存", "w").await.unwrap();
+        assert_eq!(list.backups.len(), 3);
+        let (zips, listed) = backed_up(&to.join("只在源里")).await;
+        assert_eq!((zips.len(), listed.len()), (1, 1));
+
+        let merged = snapshot(&to);
+        merge_staged_backups(&staged, target.game_dir(), "生存")
+            .await
+            .unwrap();
+        assert_eq!(snapshot(&to), merged);
     }
 }
