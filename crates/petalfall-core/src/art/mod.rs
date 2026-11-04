@@ -36,6 +36,9 @@ use source::{JarHashCache, SelectedSource};
 
 use crate::facade::Petalfall;
 
+/// 下载原版客户端的暂存子目录（在 vanilla-art 下）。点开头，不会被当成材质源版本目录。
+const DOWNLOAD_DIR: &str = ".download";
+
 /// 进程内缓存的条数上限。
 const LRU_MAX_ENTRIES: usize = 512;
 /// 进程内缓存的总字节上限（全景计入）。
@@ -73,6 +76,18 @@ pub struct ArtStatus {
     pub source: Option<String>,
     /// 标题全景对象是否在某个候选目录里且哈希正确。
     pub panorama: bool,
+}
+
+/// 从官方源下载、校验过的客户端 jar 与中文语言文件：交给 [`TextureService::adopt_download`] 抽进缓存，
+/// 之后由调用方删掉。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadedClient {
+    pub version_id: String,
+    pub jar: PathBuf,
+    /// jar 的 SHA-1（小写十六进制），已与版本 JSON 的声明核对过。
+    pub jar_sha1: String,
+    /// 资源索引里的 zh_cn.json，已按索引核对过 SHA-1；没下到为 None，方块名只有英文。
+    pub zh_cn: Option<PathBuf>,
 }
 
 /// 远程皮肤就绪后的描述：协议取图用的键、模型与头像要不要叠帽子层。
@@ -210,6 +225,11 @@ impl TextureService {
 
     fn art_root(&self) -> PathBuf {
         self.inner.cache_root.join("vanilla-art")
+    }
+
+    /// 下载原版客户端的暂存目录：`<缓存目录>/vanilla-art/.download`。
+    pub fn download_dir(&self) -> PathBuf {
+        self.art_root().join(DOWNLOAD_DIR)
     }
 
     fn skins_dir(&self) -> PathBuf {
