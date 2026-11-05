@@ -1,8 +1,8 @@
 // 由 .github/workflows/cla.yml 加载。工作流只从默认分支取这个文件，PR 改不到运行中的版本。
 
-export const CLA_VERSION = 1;
+export const CLA_VERSION = 2;
 // 和 CLA_VERSION 一起改。整条 PR 的评论都会被扫描，旧评论是对旧文本的同意，不能算进新版本。
-export const CLA_EFFECTIVE_AT = '2026-11-04T23:00:00Z';
+export const CLA_EFFECTIVE_AT = '2026-11-05T00:40:00Z';
 
 export const STATUS_CONTEXT = 'cla';
 export const SIGNATURE_BRANCH = 'cla-signatures';
