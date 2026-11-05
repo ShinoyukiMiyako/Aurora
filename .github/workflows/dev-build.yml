@@ -1,5 +1,8 @@
 name: Dev 构建
 
+# 更新清单本身没有签名，防降级靠两处配套：签名用 signer sign --app-version 把版本写进可信注释，
+# 打包时给更新插件注入 requireSignedVersion: true。以后的正式版、测试版流水线也必须同时带上这两处。
+
 # 这台是内网自托管机，公开仓库绝不能在这里加 pull_request 触发：那等于让任何 fork 在内网跑代码。
 on:
   push:
@@ -94,6 +97,7 @@ jobs:
 
       # 安装包和前端显示的版本号都以 tauri.conf.json 为准，只改这一处两边才一致。
       # 签名在另一台机器上做，用的 CLI 版本要和这里锁定的一致，一并传出去。
+      # 锁定的 CLI 必须支持 signer sign --app-version；正式版、测试版流水线同样要带它并注入 requireSignedVersion。
       - name: 写入 dev 版本号
         id: version
         working-directory: app
@@ -111,6 +115,8 @@ jobs:
 
       # 写进公钥插件才会注册，dev 包才能自更新。只写公钥、不开 createUpdaterArtifacts，打包就不要私钥；
       # 仓库里的配置故意不带公钥，见启动器 commands/updater.rs 的模块说明。
+      # requireSignedVersion 让客户端拒收签名里没有版本、或签的版本和清单不同的更新。它必须和下面
+      # signer sign --app-version 同版或更晚上线：CI 要是退回不写版本的旧 CLI，所有新客户端都会拒收更新。
       - name: 写入开发版更新公钥
         working-directory: app
         run: |
@@ -118,7 +124,7 @@ jobs:
             const fs = require('fs');
             const path = 'src-tauri/tauri.conf.json';
             const conf = JSON.parse(fs.readFileSync(path, 'utf8'));
-            conf.plugins = { ...conf.plugins, updater: { pubkey: fs.readFileSync('../.github/dev-updater.pub', 'utf8').trim() } };
+            conf.plugins = { ...conf.plugins, updater: { pubkey: fs.readFileSync('../.github/dev-updater.pub', 'utf8').trim(), requireSignedVersion: true } };
             fs.writeFileSync(path, JSON.stringify(conf, null, 2));
           "
 
@@ -215,10 +221,14 @@ jobs:
           name: ${{ needs.build.outputs.bootstrap-name }}
           path: dist
 
-      # 更新包是引导程序，不是 NSIS 包。更新插件把下载到的任何 PE 都当 NSIS 包，带着
-      # /P /R /UPDATE /ARGS <启动器参数> 拉起；引导程序认得 /UPDATE，现有安装判定为升级时直接升级到登记目录，
-      # 其余情况退回交互向导；等落樱退出、失败重试都用它自己的页面，WebView2 不可用或建窗失败时才把同样的
-      # 参数转给内嵌的 NSIS 包。
+      # 更新包是引导程序，不是 NSIS 包。更新插件把下载到的任何 PE 都当 NSIS 包，按默认的 passive 模式和
+      # restart_after_install（默认 true）拼成 /P /UPDATE /R /ARGS <启动器参数> 拉起，配置了 installerArgs 才会再往后接；
+      # 引导程序认得 /UPDATE，现有安装判定为升级时直接升级到登记目录，
+      # 其余情况退回交互向导；等落樱退出、失败重试都用它自己的页面。WebView2 不可用或建窗失败时才以插件默认会带的
+      # 开关和照样转义的启动器参数（/P[ /R] /UPDATE /ARGS <…>）拉起内嵌的 NSIS 包，开关顺序与 2.12.0 不同，
+      # NSIS 模板按 GetOptions 逐个找开关、不看顺序。
+      # --app-version 把版本写进可信注释，受全局签名保护；客户端开了 requireSignedVersion，拿它和清单里的
+      # version 比，伪造清单给旧包配上更高的版本号也骗不到降级。漏传时 CLI 只打警告照样签，靠下一步验签挡下。
       - name: 给更新包签名
         env:
           CLI_VERSION: ${{ needs.build.outputs.cli-version }}
@@ -229,12 +239,13 @@ jobs:
             echo "仓库密钥 DEV_UPDATER_PRIVATE_KEY 没有配置，dev 包签不了名" >&2
             exit 1
           fi
-          npm exec --yes --package="@tauri-apps/cli@$CLI_VERSION" -- tauri signer sign "$BOOTSTRAP"
+          npm exec --yes --package="@tauri-apps/cli@$CLI_VERSION" -- tauri signer sign --app-version "$VERSION" "$BOOTSTRAP"
           test -s "$BOOTSTRAP.sig"
 
       # 私钥和仓库里的公钥不是一对时 CLI 只打警告照样签，发出去的包所有 dev 用户都会拒收。
+      # 签名里的版本和文件名也在这里核对：版本对不上，开了 requireSignedVersion 的客户端同样会拒收。
       - name: 按公钥验签
-        run: node .github/scripts/verify-update-signature.mjs .github/dev-updater.pub "$BOOTSTRAP" "$BOOTSTRAP.sig"
+        run: node .github/scripts/verify-update-signature.mjs .github/dev-updater.pub "$BOOTSTRAP" "$BOOTSTRAP.sig" "$VERSION"
 
       # 插件只装比自己新的版本。工作流改名或重建会让运行序号从 1 重数，发出去的版本号比已装的小，
       # dev 包会一直以为自己是最新，在这里挡下来。
@@ -286,6 +297,26 @@ jobs:
             fs.writeFileSync(out, JSON.stringify(manifest, null, 2));
           " "$VERSION" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest"
           echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+
+      # 客户端拿来比对的是清单里的 version 和 signature，不是上面的 .sig 文件。从写好的清单里取出这一对
+      # 按同一脚本再验一遍，清单拼错字段、读错文件时在发布前挡下。
+      - name: 按清单验签
+        env:
+          MANIFEST: ${{ steps.manifest.outputs.manifest }}
+        run: |
+          signature="$RUNNER_TEMP/manifest.sig"
+          manifest_version="$(node -e "
+            const fs = require('fs');
+            const [manifestPath, signaturePath] = process.argv.slice(1);
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            const { signature } = manifest.platforms['windows-x86_64'];
+            if (typeof manifest.version !== 'string' || typeof signature !== 'string') {
+              throw new Error('清单缺 version 或 windows-x86_64 的 signature');
+            }
+            fs.writeFileSync(signaturePath, signature);
+            process.stdout.write(manifest.version);
+          " "$MANIFEST" "$signature")"
+          node .github/scripts/verify-update-signature.mjs .github/dev-updater.pub "$BOOTSTRAP" "$signature" "$manifest_version"
 
       - name: 更新滚动预发布
         env:
