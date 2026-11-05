@@ -80,6 +80,23 @@ describe("文案表", () => {
     expect(newer).toContain("0.2.0");
   });
 
+  // 卸载时勾了删除数据会清掉各通道共用的账户和设置，复选框要按卸载程序上的原文点名；系统「应用」里的卸载项叫英文名
+  it.each([
+    ["zh", `Windows 设置的「应用」里卸载 ${APP_NAME_EN}`, "不要勾选「删除应用程序数据」", "沿用默认的安装位置"],
+    ["en", `uninstall ${APP_NAME_EN} from Apps in Windows Settings`, `leaving "Delete the application data" unchecked`, "keep the default location"],
+  ] as const)("%s 表的 newer 说明给出换回预览版的步骤", (lang, uninstall, checkbox, location) => {
+    const { kind } = COPY[lang].installed;
+    const lead = kind.newer.lead("1.0.0-beta.1", "0.1.0-dev.40");
+    expect(lead).toContain(uninstall);
+    expect(lead).toContain(checkbox);
+    expect(lead).toContain(location);
+    // 指引排在不能往回装那句之后，先说为什么再说怎么办
+    expect(lead.indexOf("0.1.0-dev.40")).toBeLessThan(lead.indexOf(checkbox));
+    for (const other of ["upgrade", "same", "broken"] as const) {
+      expect(kind[other].lead("0.1.0-dev.40", "1.0.0-beta.1")).not.toContain(checkbox);
+    }
+  });
+
   it.each(["zh", "en"] as const)("%s 表的退出码落进说明", (lang) => {
     expect(COPY[lang].failed.reason.payload_exit.body("2", "retry")).toContain("2");
   });

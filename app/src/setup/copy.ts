@@ -151,6 +151,11 @@ const DATA_UNTOUCHED_EN = "Your settings, accounts and game files stay as they a
 /** 覆盖安装换位置等于搬数据目录，这时不能叫人换文件夹。 */
 const LOCKED_LOCATION_ZH = "现有的安装位置不能换。";
 const LOCKED_LOCATION_EN = "The existing install can't move.";
+// 各通道共用一套安装身份，装着测试版再装预览版就是这一页，换回去只能先卸载。卸载项在系统「应用」里叫产品英文名。
+// 复选框原文取自 Tauri CLI 2.11.5 NSIS 模板的 deleteAppData，升级 CLI 要对一遍。不勾时卸载只删程序文件、快捷方式和卸载项，
+// 数据和记下的安装目录都留着，引导程序首装时默认装回原处，所以要叫人沿用默认位置。
+const CHANNEL_BACK_ZH = `从测试版换回预览版时，先在 Windows 设置的「应用」里卸载 ${APP_NAME_EN}，卸载时不要勾选「删除应用程序数据」；再运行这个安装包并沿用默认的安装位置，设置、账户和游戏文件都会保留。`;
+const CHANNEL_BACK_EN = `To switch from Beta back to Preview, first uninstall ${APP_NAME_EN} from Apps in Windows Settings, leaving "Delete the application data" unchecked. Then run this installer again and keep the default location. Your settings, accounts and game files will be kept.`;
 
 const ZH: SetupCopy = {
   frame: {
@@ -255,7 +260,7 @@ const ZH: SetupCopy = {
       },
       newer: {
         title: () => `这台电脑上的${APP_NAME}更新`,
-        lead: (installed, payload) => `已安装 ${installed}，这个安装包是 ${payload}，不能往回装。`,
+        lead: (installed, payload) => `已安装 ${installed}，这个安装包是 ${payload}，不能往回装。${CHANNEL_BACK_ZH}`,
       },
       broken: {
         title: () => "上次的安装不完整",
@@ -400,7 +405,7 @@ const EN: SetupCopy = {
       },
       newer: {
         title: () => `A newer ${APP_NAME_EN} is installed`,
-        lead: (installed, payload) => `${installed} is installed and this installer is ${payload}, so it can't go back.`,
+        lead: (installed, payload) => `${installed} is installed and this installer is ${payload}, so it can't go back. ${CHANNEL_BACK_EN}`,
       },
       broken: {
         title: () => "The last install is incomplete",
