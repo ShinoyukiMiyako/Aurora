@@ -92,6 +92,10 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 
 新凭据一到手先落盘，再做后面的联网：微软 refresh token 换出来就写库，令牌链后面（XBL、XSTS）失败也不丢；外置刷新成功后先写令牌，再查会话服务器的角色档案。这两处写回都以库里还是换出它的那一份为条件，等回音期间用户重新登录过的话新登录优先。
 
+启动器开着时还会在后台提前续期（`Petalfall::renew_current_ahead`，由外壳的 `renew_ahead_in_background` 驱动）：打开时查一次，之后每 15 分钟查一次，当前账户是微软账户、没被判定要重新登录、Minecraft 令牌 30 分钟内到期时就续。令牌只有一天的有效期，令牌链又是串行的几次 HTTPS 往返，不提前续的话一天玩一次的人每次点启动都要先等几秒。外置账户不提前续：令牌有没有失效在本地看不出来，启动时无论如何要校验一次。后台续期与启动前、手动刷新排同一把续期闸，点启动时后台正在续，启动等它落盘后直接用新令牌；后台续不了只记日志，启动时照常再续，失败按上面的失败码报给玩家。
+
+启动时账户验证单列为第 0 阶段「验证账户」。要联网时（微软令牌已过期，或外置账户）会话日志先写一行在续期或在校验，验证完再写一行用时；令牌链每一步的用时与重试记在启动器日志里，日志里不出现令牌。
+
 微软令牌端点回 `interaction_required` / `consent_required` 等需要用户在浏览器里操作的错误判为需要重新登录，回 `temporarily_unavailable` 按退避重试，退避用完报 `ServiceUnavailable`。外置账号密码认证回 429 时，带 Yggdrasil 错误体的原样报出且不重试（登录弹窗要原位显示服务器的说明），没有错误体的才算服务故障；刷新、校验的 429 一律算服务故障。启动前续期的失败只有五种给启动失败码：凭据失效（`ReloginRequired`）给 `account_relogin`，连不上（`Http`）给 `account_refresh_network`，登录服务故障（`ServiceUnavailable`：微软或外置验证服务器回 5xx、429，退避重试过仍不行）给 `account_service_down`，应用未获批准（`AppNotApproved`）给 `account_app_not_approved`，这个版本没有 `client_id`（`MsaClientIdMissing`）给 `account_client_id_missing`；`account_refresh_network`、`account_service_down` 不碰账户库，账户还是好的，可以稍后重试或先以离线方式进单人；`account_app_not_approved`、`account_client_id_missing` 同样不碰账户库，但换一个已获批准的 `client_id` 或填上一个才能解决，重试多少次都一样，也不放行以离线方式进单人。封禁、未购买、响应解析不了、凭据库读写失败、取消都不是重新登录能解决的，按账户错误码与原文原样报出。读外置验证服务器元数据失败时同理：连不上给 `account_refresh_network`，根地址回 5xx、429 报 `ServiceUnavailable`，给 `account_service_down`，都记进账户失败、可以以离线方式进单人；回别的非 2xx 或内容不对是 `NotYggdrasilServer`，按账户错误码原样报出。查 authlib-injector 最新构建与预取元数据不走下载池，各自包上取消令牌，点取消不用等连接超时。
 
 ### 安装、补全与启动的约定
