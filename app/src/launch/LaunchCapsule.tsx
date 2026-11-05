@@ -17,6 +17,7 @@ import { percent } from "../domain/format";
 import { fade, springs } from "../lib/motion";
 import { cx } from "../lib/util";
 import { useNow } from "../state/launcher";
+import { DOWNLOAD_STAGE } from "../state/session";
 import { progressTrack } from "../state/tasks";
 import { softDisabledProps } from "../ui/Button";
 import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
@@ -77,8 +78,8 @@ export function faceKey(view: LaunchView): string {
 
 /** 按会话阶段落面：准备 1、下载 2、启动 3。 */
 export function placedForStage(stageIndex: number): 0 | 1 | 2 | 3 {
-  if (stageIndex < 3) return 1;
-  if (stageIndex === 3) return 2;
+  if (stageIndex < DOWNLOAD_STAGE) return 1;
+  if (stageIndex === DOWNLOAD_STAGE) return 2;
   return 3;
 }
 

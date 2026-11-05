@@ -1,7 +1,7 @@
 //! 启动编排：版本 -> 账户 -> Java -> 文件校验与补全 -> natives -> 启动参数 -> 进程。
 //!
-//! 一次启动按八个阶段推进（[`LaunchStage`]），每进入一个阶段推一条 [`LaunchEvent::Stage`]，下标单调
-//! 递增；阶段 3 期间另推字节进度。内存、Java、JVM 参数、分辨率一律在这里按实例设置与全局设置解析，
+//! 一次启动按九个阶段推进（[`LaunchStage`]），每进入一个阶段推一条 [`LaunchEvent::Stage`]，下标单调
+//! 递增；阶段 4 期间另推字节进度。内存、Java、JVM 参数、分辨率一律在这里按实例设置与全局设置解析，
 //! 调用方只给版本、账户与取消令牌。
 //!
 //! 失败分两类：玩家能针对性处理的（找不到 Java、文件下载失败、磁盘满……）收敛为带失败码与插值参数的
@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use petalfall_auth::{Account, AccountCredentials, AccountStatus};
+use petalfall_auth::{Account, AccountCredentials, AccountStatus, unix_millis};
 use petalfall_base::error_with_causes;
 use petalfall_download::{BatchReport, DownloadTask};
 use petalfall_install::GameLayout;
@@ -48,18 +48,21 @@ use crate::facade::Petalfall;
 use crate::session::GameRun;
 use crate::workdir::{discovered, read_version_json};
 
-/// 启动的八个阶段，判别值即阶段下标。
+/// 启动的九个阶段，判别值即阶段下标。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LaunchStage {
-    CheckJava = 0,
-    VerifyFiles = 1,
-    CompleteLibraries = 2,
-    DownloadMissing = 3,
-    ExtractNatives = 4,
-    BuildArguments = 5,
-    SpawnProcess = 6,
-    Running = 7,
+    /// 微软令牌过期时的续期、外置令牌的校验都在这里。令牌链是串行的几次 HTTPS 往返，网络慢时开局的
+    /// 几秒都在等它，单列一段，界面上才看得出在等什么。
+    VerifyAccount = 0,
+    CheckJava = 1,
+    VerifyFiles = 2,
+    CompleteLibraries = 3,
+    DownloadMissing = 4,
+    ExtractNatives = 5,
+    BuildArguments = 6,
+    SpawnProcess = 7,
+    Running = 8,
 }
 
 impl LaunchStage {
@@ -70,9 +73,10 @@ impl LaunchStage {
     /// 阶段所属的会话阶段。
     pub fn phase(self) -> LaunchPhase {
         match self {
-            LaunchStage::CheckJava | LaunchStage::VerifyFiles | LaunchStage::CompleteLibraries => {
-                LaunchPhase::Preparing
-            }
+            LaunchStage::VerifyAccount
+            | LaunchStage::CheckJava
+            | LaunchStage::VerifyFiles
+            | LaunchStage::CompleteLibraries => LaunchPhase::Preparing,
             LaunchStage::DownloadMissing => LaunchPhase::Downloading,
             LaunchStage::ExtractNatives
             | LaunchStage::BuildArguments
@@ -84,6 +88,7 @@ impl LaunchStage {
     /// 写进会话日志的阶段名。
     fn label(self) -> &'static str {
         match self {
+            LaunchStage::VerifyAccount => "验证账户",
             LaunchStage::CheckJava => "检查 Java",
             LaunchStage::VerifyFiles => "校验游戏文件",
             LaunchStage::CompleteLibraries => "补全库文件",
@@ -111,7 +116,7 @@ pub enum LaunchPhase {
 pub enum LaunchEvent {
     /// 进入某阶段。
     Stage(LaunchStage),
-    /// 阶段 3 的下载进度快照；没有要下载的文件时推一条全零快照，表示这一阶段直接完成。
+    /// 阶段 4 的下载进度快照；没有要下载的文件时推一条全零快照，表示这一阶段直接完成。
     Download(DownloadProgress),
     /// 启动器日志行（同时写进会话日志），`at` 是写下它的 Unix 毫秒。
     Log {
@@ -579,7 +584,7 @@ async fn read_version_chain(
 /// 选定的 Java。
 enum JavaPlan {
     Ready(JavaInstallation),
-    /// 本机没有，阶段 3 下载托管运行时。
+    /// 本机没有，阶段 4 下载托管运行时。
     Download {
         major: u32,
     },
@@ -767,23 +772,8 @@ impl Petalfall {
         // 继承链根就是原版：加载器版本的 inheritsFrom 可能指向另一个加载器版本，不能直接当游戏版本号。
         let mc_version = chain.base_id.clone();
 
-        // -- 0 检查 Java（连同账户：令牌续期与 Java 探测都是开局就要知道能不能继续的事）
-        reporter.stage(LaunchStage::CheckJava).await;
-        let mut settings =
-            InstanceLaunchSettings::from_settings(self.version_settings(&version_id).await?);
-        if let Some(java) = java_override {
-            settings.java = java;
-        }
-        // 实例跟随全局、全局又固定了默认 Java 时，按固定路径对待：找不到或版本不够同样要报出来，
-        // 不能悄悄换成自动挑选的另一个 Java。失败时要说清固定在哪一层：实例本来就是自动选择时，
-        // 把实例改回自动选择什么也不会改变，界面得指向设置里的默认 Java。
-        let mut pinned_by = PinnedBy::Instance;
-        if settings.java == JavaChoice::Auto
-            && let Some(path) = &self.config().default_java
-        {
-            settings.java = JavaChoice::Path(path.clone());
-            pinned_by = PinnedBy::Global;
-        }
+        // -- 0 验证账户（与 1 检查 Java 一样是开局就要知道能不能继续的事，不能等文件都校验完才报）
+        reporter.stage(LaunchStage::VerifyAccount).await;
         let LaunchIdentity {
             auth,
             authlib_root: authlib,
@@ -811,6 +801,24 @@ impl Petalfall {
                 ))
                 .await;
         }
+
+        // -- 1 检查 Java
+        reporter.stage(LaunchStage::CheckJava).await;
+        let mut settings =
+            InstanceLaunchSettings::from_settings(self.version_settings(&version_id).await?);
+        if let Some(java) = java_override {
+            settings.java = java;
+        }
+        // 实例跟随全局、全局又固定了默认 Java 时，按固定路径对待：找不到或版本不够同样要报出来，
+        // 不能悄悄换成自动挑选的另一个 Java。失败时要说清固定在哪一层：实例本来就是自动选择时，
+        // 把实例改回自动选择什么也不会改变，界面得指向设置里的默认 Java。
+        let mut pinned_by = PinnedBy::Instance;
+        if settings.java == JavaChoice::Auto
+            && let Some(path) = &self.config().default_java
+        {
+            settings.java = JavaChoice::Path(path.clone());
+            pinned_by = PinnedBy::Global;
+        }
         let required_major = required_java_major(merged);
         let java_plan = self
             .plan_java(
@@ -822,7 +830,7 @@ impl Petalfall {
             )
             .await?;
 
-        // -- 1 校验游戏文件：工作目录、主类、客户端 jar 与资源
+        // -- 2 校验游戏文件：工作目录、主类、客户端 jar 与资源
         reporter.stage(LaunchStage::VerifyFiles).await;
         let resolved = self
             .resolve_working_dir_from(
@@ -898,7 +906,7 @@ impl Petalfall {
             .plan_game_files(merged, &chain.base_id, &layout, &working_dir, &mut plan)
             .await?;
 
-        // -- 2 补全库文件
+        // -- 3 补全库文件
         reporter.stage(LaunchStage::CompleteLibraries).await;
         let libraries = petalfall_install::plan::library_tasks(merged, self.runtime(), &layout)?;
         plan.files.extend(libraries);
@@ -912,7 +920,7 @@ impl Petalfall {
         petalfall_install::complete::reject_missing_bundled(&plan.files)
             .map_err(loader_library_missing)?;
 
-        // -- 3 下载缺失文件（游戏文件、托管 Java、authlib-injector）
+        // -- 4 下载缺失文件（游戏文件、托管 Java、authlib-injector）
         reporter.stage(LaunchStage::DownloadMissing).await;
         let nothing_to_download = plan.files.is_empty()
             && !plan.asset_index_missing
@@ -964,7 +972,7 @@ impl Petalfall {
             None => None,
         };
 
-        // -- 4 解压本地库
+        // -- 5 解压本地库
         reporter.stage(LaunchStage::ExtractNatives).await;
         petalfall_install::natives::extract_all_natives(
             merged,
@@ -985,7 +993,7 @@ impl Petalfall {
                 .into()
         })?;
 
-        // -- 5 生成启动参数
+        // -- 6 生成启动参数
         reporter.stage(LaunchStage::BuildArguments).await;
         let global_memory = self.config().memory;
         let auto = if settings.memory_mb.is_none() && global_memory.auto {
@@ -1047,7 +1055,7 @@ impl Petalfall {
             ))
             .await;
 
-        // -- 6 启动游戏进程。这里是最后一个可取消的点：进程一旦起来就归运行中的会话管，不再随取消丢弃。
+        // -- 7 启动游戏进程。这里是最后一个可取消的点：进程一旦起来就归运行中的会话管，不再随取消丢弃。
         reporter.stage(LaunchStage::SpawnProcess).await;
         if self.is_cancelled() {
             return Err(CoreError::from(petalfall_download::Error::Cancelled).into());
@@ -1203,7 +1211,7 @@ impl Petalfall {
                 }
                 account
             }
-            LaunchAccount::Stored(account) => self.refresh_for_launch(*account).await?,
+            LaunchAccount::Stored(account) => self.refresh_for_launch(*account, reporter).await?,
         };
         let auth = AuthValues::from_account(&account)?;
         let authlib_root = match &account.credentials {
@@ -1274,10 +1282,41 @@ impl Petalfall {
 
     /// 微软令牌过期就续期，外置令牌先校验、无效再刷新，离线原样返回。凭据被判定失效时账户库里
     /// 同时落为 `expired`，账户页据此提示重新登录。
-    async fn refresh_for_launch(&self, account: Account) -> Result<Account, LaunchFailed> {
-        self.ensure_account_fresh(&account)
+    ///
+    /// 要联网时会话日志记下开始与用时：开局慢了几秒，事后要能从日志里看出是在等账户验证。
+    async fn refresh_for_launch(
+        &self,
+        account: Account,
+        reporter: &mut Reporter<'_>,
+    ) -> Result<Account, LaunchFailed> {
+        let online = match &account.credentials {
+            AccountCredentials::Microsoft(creds)
+                if !creds.minecraft_token_valid_at(unix_millis() / 1000) =>
+            {
+                Some(format!("微软账户 {} 的令牌已过期，正在续期", account.name))
+            }
+            AccountCredentials::AuthlibInjector(_) => {
+                Some(format!("正在向外置登录服务器验证账户 {}", account.name))
+            }
+            AccountCredentials::Microsoft(_) | AccountCredentials::Offline => None,
+        };
+        let started = std::time::Instant::now();
+        if let Some(text) = &online {
+            reporter.info(text.as_str()).await;
+        }
+        let fresh = self
+            .ensure_account_fresh(&account)
             .await
-            .map_err(|err| classify_refresh(err, &account.name))
+            .map_err(|err| classify_refresh(err, &account.name))?;
+        if online.is_some() {
+            reporter
+                .info(format!(
+                    "账户验证完成，用时 {} 毫秒",
+                    started.elapsed().as_millis()
+                ))
+                .await;
+        }
+        Ok(fresh)
     }
 
     async fn plan_java(
@@ -1508,7 +1547,7 @@ impl Petalfall {
         Ok(())
     }
 
-    /// 下载一批游戏文件并把进度转成阶段 3 的事件。下载前先看游戏目录所在的盘够不够。
+    /// 下载一批游戏文件并把进度转成阶段 4 的事件。下载前先看游戏目录所在的盘够不够。
     async fn download_files(
         &self,
         files: Vec<DownloadTask>,
@@ -1518,7 +1557,7 @@ impl Petalfall {
             .await
     }
 
-    /// 下载一批落在 `root` 下的文件，进度转成阶段 3 的事件；下载前先看 `root` 所在的盘够不够。
+    /// 下载一批落在 `root` 下的文件，进度转成阶段 4 的事件；下载前先看 `root` 所在的盘够不够。
     async fn download_files_into(
         &self,
         files: Vec<DownloadTask>,
@@ -1571,7 +1610,7 @@ impl Petalfall {
     }
 
     /// 下载托管 Java：清单定出要哪些文件，文件交给下载池，与设置里手动安装是同一条路——并发、换源、
-    /// 已就绪的按 sha1 跳过，进度和游戏文件一样进阶段 3 的事件。运行时有几百个文件，逐个顺序下载时
+    /// 已就绪的按 sha1 跳过，进度和游戏文件一样进阶段 4 的事件。运行时有几百个文件，逐个顺序下载时
     /// 启动进度会停住几十秒到几分钟，首选源上一个文件失败就让整次启动失败。
     async fn download_java(
         &self,
@@ -2900,7 +2939,7 @@ mod tests {
         // 不续期、不校验：这一局没有打到任何登录端点。
         assert_eq!(server.received_requests().await.unwrap().len(), before);
         // 阶段推进与普通启动相同。
-        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
         let warning = format!("以离线方式进单人：{MS_NAME} 这一局不经账户验证，只能玩单人游戏");
         assert!(
             events.iter().any(|e| matches!(
@@ -3316,7 +3355,7 @@ mod tests {
         let (result, events) = launch(&fx.petalfall, fake_java(&fx.root, 17, 0)).await;
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::SpawnFailed);
-        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7]);
 
         let log = fx
             .petalfall
@@ -3472,6 +3511,91 @@ mod tests {
         assert_eq!(after, stored);
     }
 
+    /// 每行启动器日志连同它所在的阶段下标。
+    fn lines_by_stage(events: &[LaunchEvent]) -> Vec<(Option<u8>, String)> {
+        let mut stage = None;
+        let mut lines = Vec::new();
+        for event in events {
+            match event {
+                LaunchEvent::Stage(s) => stage = Some(s.index()),
+                LaunchEvent::Log { text, .. } => lines.push((stage, text.clone())),
+                LaunchEvent::Download(_) => {}
+            }
+        }
+        lines
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn expired_token_is_renewed_in_the_verify_account_stage_with_its_duration_logged() {
+        let server = wiremock::MockServer::start().await;
+        mount_chain(
+            &server,
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "MC-TOKEN",
+                "expires_in": 86400
+            })),
+        )
+        .await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let java = fake_java(&fx.root, 17, 0);
+        let (petalfall, stored) = with_stale_account(&fx, &server);
+
+        let (result, events) =
+            launch_request(&petalfall, stored_request(stored), java.clone()).await;
+        expect_run(result).finish().await;
+        let account_stage: Vec<String> = lines_by_stage(&events)
+            .into_iter()
+            .filter(|(stage, _)| *stage == Some(LaunchStage::VerifyAccount.index()))
+            .map(|(_, text)| text)
+            .collect();
+        let [entered, renewing, renewed] = account_stage.as_slice() else {
+            panic!("验证账户阶段应有三行：{account_stage:?}");
+        };
+        assert_eq!(entered, "验证账户");
+        assert_eq!(
+            renewing,
+            &format!("微软账户 {MS_NAME} 的令牌已过期，正在续期")
+        );
+        let millis = renewed
+            .strip_prefix("账户验证完成，用时 ")
+            .and_then(|rest| rest.strip_suffix(" 毫秒"))
+            .unwrap_or_else(|| panic!("续期完成的一行应写用时：{renewed}"));
+        assert!(millis.parse::<u64>().is_ok(), "{renewed}");
+        // 日志里只有账户名与用时，不带令牌。
+        assert!(
+            account_stage
+                .iter()
+                .all(|line| !line.contains("MC-TOKEN") && !line.contains("REFRESH")),
+            "{account_stage:?}"
+        );
+        assert_eq!(
+            lines_by_stage(&events)
+                .into_iter()
+                .find(|(stage, _)| *stage == Some(LaunchStage::CheckJava.index()))
+                .map(|(_, text)| text),
+            Some("检查 Java".to_owned())
+        );
+
+        // 库里的令牌已续好：下一次启动不联网，验证账户阶段只剩阶段名。
+        let requests = server.received_requests().await.unwrap().len();
+        let fresh = petalfall
+            .find_account(MS_UUID)
+            .unwrap()
+            .expect("账户应仍在库中");
+        let (result, events) = launch_request(&petalfall, stored_request(fresh), java).await;
+        expect_run(result).finish().await;
+        assert_eq!(server.received_requests().await.unwrap().len(), requests);
+        assert_eq!(
+            lines_by_stage(&events)
+                .into_iter()
+                .filter(|(stage, _)| *stage == Some(LaunchStage::VerifyAccount.index()))
+                .map(|(_, text)| text)
+                .collect::<Vec<_>>(),
+            vec!["验证账户".to_owned()]
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn invalid_grant_fails_as_relogin_and_marks_the_account_expired() {
         let server = wiremock::MockServer::start().await;
@@ -3609,7 +3733,7 @@ mod tests {
             }
             other => panic!("应报不支持直达存档，实际：{:?}", other.err()),
         }
-        assert_eq!(stage_indices(&events), vec![0, 1]);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2]);
         assert!(
             !events.iter().any(|e| matches!(e, LaunchEvent::Download(_))),
             "不该推出下载进度：{events:?}"
@@ -3650,7 +3774,7 @@ mod tests {
                 }
                 other => panic!("{world:?} 应报存档不存在，实际：{:?}", other.err()),
             }
-            assert_eq!(stage_indices(&events), vec![0, 1], "{world:?}");
+            assert_eq!(stage_indices(&events), vec![0, 1, 2], "{world:?}");
         }
     }
 
@@ -3688,7 +3812,7 @@ mod tests {
             }
             other => panic!("应报存档名带不过去，实际：{:?}", other.err()),
         }
-        assert_eq!(stage_indices(&events), vec![0, 1]);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2]);
     }
 
     #[tokio::test]
@@ -3716,10 +3840,10 @@ mod tests {
             "{:?}",
             result.as_ref().err()
         );
-        assert_eq!(stage_indices(&events), vec![0, 1]);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2]);
     }
 
-    /// 存档在的时候照常走完八个阶段，启动日志写明直达了哪个存档。
+    /// 存档在的时候照常走完九个阶段，启动日志写明直达了哪个存档。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn quick_play_into_an_existing_world_reaches_running() {
         let fx = fixture();
@@ -3738,7 +3862,7 @@ mod tests {
             Ok(run) => run,
             Err(err) => panic!("启动应成功：{err:?}"),
         };
-        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(
             launcher_lines(&events).contains(&"直接进入存档「New World」".to_owned()),
             "{:?}",
@@ -3890,6 +4014,7 @@ mod tests {
     #[test]
     fn stage_table_maps_to_phases_in_order() {
         let stages = [
+            LaunchStage::VerifyAccount,
             LaunchStage::CheckJava,
             LaunchStage::VerifyFiles,
             LaunchStage::CompleteLibraries,
@@ -3900,11 +4025,12 @@ mod tests {
             LaunchStage::Running,
         ];
         let indices: Vec<u8> = stages.iter().map(|s| s.index()).collect();
-        assert_eq!(indices, (0..8).collect::<Vec<u8>>());
+        assert_eq!(indices, (0..9).collect::<Vec<u8>>());
         let phases: Vec<LaunchPhase> = stages.iter().map(|s| s.phase()).collect();
         assert_eq!(
             phases,
             vec![
+                LaunchPhase::Preparing,
                 LaunchPhase::Preparing,
                 LaunchPhase::Preparing,
                 LaunchPhase::Preparing,
@@ -4194,19 +4320,19 @@ mod tests {
             Ok(run) => run,
             Err(err) => panic!("启动应成功：{err:?}"),
         };
-        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7]);
-        // 没有要下载的文件时，阶段 3 推一份全零进度后立刻进入阶段 4。
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        // 没有要下载的文件时，阶段 4 推一份全零进度后立刻进入阶段 5。
         let download_at = events
             .iter()
             .position(|e| matches!(e, LaunchEvent::Download(p) if p.total == 0 && p.total_bytes == Some(0)))
-            .expect("阶段 3 应推一份进度");
+            .expect("阶段 4 应推一份进度");
         let stage = |index: u8| {
             events
                 .iter()
                 .position(|e| matches!(e, LaunchEvent::Stage(s) if s.index() == index))
                 .unwrap()
         };
-        assert!(stage(3) < download_at && download_at < stage(4));
+        assert!(stage(4) < download_at && download_at < stage(5));
         assert!(run.pid().is_some());
 
         let finished = run.finish().await;
@@ -4483,7 +4609,7 @@ mod tests {
             }
         }
         assert_eq!(warns.len(), 2, "{warns:?}");
-        assert_eq!(warns[0].0, Some(1));
+        assert_eq!(warns[0].0, Some(2));
         assert!(
             warns[0]
                 .1
@@ -4495,7 +4621,7 @@ mod tests {
         assert_eq!(
             warns[1],
             (
-                Some(5),
+                Some(6),
                 "自定义 JVM 参数 -Xmx4GB 的写法 Java 不认，内存单位只能是 k、m、g、t，例如 -Xmx4g"
                     .to_owned()
             )
@@ -4524,8 +4650,8 @@ mod tests {
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::FilesFailed);
         assert_eq!(failure.params.get("count"), Some(&Value::from(1)));
-        // 停在阶段 1（校验游戏文件），不会走到后面的阶段。
-        assert_eq!(stage_indices(&events), vec![0, 1]);
+        // 停在阶段 2（校验游戏文件），不会走到后面的阶段。
+        assert_eq!(stage_indices(&events), vec![0, 1, 2]);
         assert!(fx.petalfall.play_summaries().await.unwrap().is_empty());
         assert!(!fx.root.join(crate::playtime::PLAYTIME_FILE).exists());
         let log = fx
@@ -4552,7 +4678,7 @@ mod tests {
             Err(err) => assert!(err.is_cancelled(), "{err:?}"),
             Ok(_) => panic!("取消后不应拉起进程"),
         }
-        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7]);
         let log = fx
             .petalfall
             .last_launch_log(VERSION)
@@ -4682,7 +4808,7 @@ mod tests {
             }
             Err(err) => panic!("启动应成功：{err:?}"),
         }
-        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
         events
     }
 
@@ -5444,7 +5570,7 @@ mod tests {
         assert!(!mc.join("options.txt").exists());
     }
 
-    /// 启动时缺 Java 自动下载走下载池：阶段 3 推出带总数与总字节的进度，文件落进托管目录。冒充的
+    /// 启动时缺 Java 自动下载走下载池：阶段 4 推出带总数与总字节的进度，文件落进托管目录。冒充的
     /// 运行时跑不起来，于是停在「刚下载的 Java 无法运行」——证明文件确实已经全部下完。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auto_java_download_runs_through_the_pool_and_reports_progress() {

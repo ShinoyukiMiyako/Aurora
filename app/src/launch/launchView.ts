@@ -143,7 +143,7 @@ export function sessionDetail(session: SessionState, now: number): string | null
 
 export function stageLabel(stageIndex: number): string {
   const label = LAUNCH_STAGES[stageIndex];
-  if (label === undefined) throw new Error(`阶段下标 ${stageIndex} 超出八阶段表`);
+  if (label === undefined) throw new Error(`阶段下标 ${stageIndex} 超出九阶段表`);
   return label;
 }
 

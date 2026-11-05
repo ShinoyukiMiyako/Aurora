@@ -90,18 +90,18 @@ describe("启动 mock", () => {
     vi.useRealTimers();
   });
 
-  it("阶段下标 0 到 7 单调推进，阶段 3 带一份下载进度，resolve 时已在运行", async () => {
+  it("阶段下标 0 到 8 单调推进，阶段 4 带一份下载进度，resolve 时已在运行", async () => {
     const { phases, logs } = await recordEvents();
     expect(await launchGame(offline("1.21", "t-1"))).toEqual({ pid: 4242, offline: false });
     const indices = phases.map((p) => p.stage_index);
-    expect(indices).toEqual([0, 1, 2, 3, 3, 4, 5, 6, 7]);
+    expect(indices).toEqual([0, 1, 2, 3, 4, 4, 5, 6, 7, 8]);
     expect(phases.every((p) => p.task_id === "t-1")).toBe(true);
-    expect(phases.map((p) => p.phase)).toEqual(["preparing", "preparing", "preparing", "downloading", "downloading", "launching", "launching", "launching", "running"]);
+    expect(phases.map((p) => p.phase)).toEqual(["preparing", "preparing", "preparing", "preparing", "downloading", "downloading", "launching", "launching", "launching", "running"]);
     expect(phases.filter((p) => p.download !== undefined)).toEqual([
-      { task_id: "t-1", phase: "downloading", stage_index: 3, download: { total: 0, finished: 0, bytes: 0, total_bytes: 0, speed: 0 } },
+      { task_id: "t-1", phase: "downloading", stage_index: 4, download: { total: 0, finished: 0, bytes: 0, total_bytes: 0, speed: 0 } },
     ]);
     const lines = logs.flatMap((batch) => batch.lines);
-    expect(lines.filter((l) => l.source === "launcher").map((l) => l.text)).toEqual(["检查 Java", "校验游戏文件", "补全库文件", "下载缺失文件", "解压本地库", "生成启动参数", "启动游戏进程"]);
+    expect(lines.filter((l) => l.source === "launcher").map((l) => l.text)).toEqual(["验证账户", "检查 Java", "校验游戏文件", "补全库文件", "下载缺失文件", "解压本地库", "生成启动参数", "启动游戏进程"]);
     expect(lines.at(-1)).toMatchObject({ source: "game", level: "info" });
     expect(logs.every((batch) => batch.version_id === "1.21")).toBe(true);
   });
@@ -171,7 +171,7 @@ describe("启动 mock", () => {
     await cancelTask("t-x");
     const error = await rejection(launching);
     expect(error.code).toBe("cancelled");
-    expect(phases.every((p) => p.stage_index < 7)).toBe(true);
+    expect(phases.every((p) => p.stage_index < 8)).toBe(true);
     expect((await lastLaunchLog("1.21"))?.ended?.outcome).toBe("cancelled");
     expect(await minutesToday()).toBe(0);
     expect(await launchGame(offline("1.21", "t-y"))).toEqual({ pid: 4242, offline: false });
@@ -183,13 +183,13 @@ describe("启动 mock", () => {
     const error = await rejection(launchGame(offline("1.21", "t-1")));
     expect(error.code).toBe("java_too_old");
     expect(error.detail).toEqual({ current: 17, major: 21, mc_version: "1.21", pinned_by: "instance" });
-    expect(phases.map((p) => p.stage_index)).toEqual([0]);
+    expect(phases.map((p) => p.stage_index)).toEqual([0, 1]);
     expect((await lastLaunchLog("1.21"))?.ended?.outcome).toBe("failed");
 
     failNextMockLaunch("disk_full", { drive: "D:", needed_bytes: 1024 });
     const disk = await rejection(launchGame(offline("1.21", "t-2")));
     expect(disk.code).toBe("disk_full");
-    expect(Math.max(...phases.slice(1).map((p) => p.stage_index))).toBe(3);
+    expect(Math.max(...phases.slice(2).map((p) => p.stage_index))).toBe(4);
 
     expect(await launchGame(offline("1.21", "t-3"))).toEqual({ pid: 4242, offline: false });
     expect(() => failNextMockLaunch("teapot", {})).toThrow("未知的启动失败码 teapot");
@@ -201,7 +201,7 @@ describe("启动 mock", () => {
     const error = await rejection(launchGame(offline("1.21", "t-1")));
     expect(error.code).toBe("loader_library_missing");
     expect(error.detail).toEqual({ path: "D:/mc/libraries/forge.jar" });
-    expect(phases.map((p) => p.stage_index)).toEqual([0, 1, 2]);
+    expect(phases.map((p) => p.stage_index)).toEqual([0, 1, 2, 3]);
   });
 
   it("账户必须二选一；参数类型不对是 Tauri 自己的参数错误", async () => {
@@ -241,12 +241,12 @@ describe("以离线方式进单人 mock", () => {
     await failWith(code);
     const { phases, logs } = await recordEvents();
     expect(await launchGame(stored(HANAMI, "t-off", true))).toEqual({ pid: 4242, offline: true });
-    expect(phases.map((p) => p.stage_index)).toEqual([0, 1, 2, 3, 3, 4, 5, 6, 7]);
+    expect(phases.map((p) => p.stage_index)).toEqual([0, 1, 2, 3, 4, 4, 5, 6, 7, 8]);
     const launcher = logs.flatMap((batch) => batch.lines).filter((l) => l.source === "launcher");
     expect(launcher.slice(0, 3).map((l) => [l.level, l.text])).toEqual([
-      ["info", "检查 Java"],
+      ["info", "验证账户"],
       ["warn", WARN_LINE],
-      ["info", "校验游戏文件"],
+      ["info", "检查 Java"],
     ]);
     expect(launcher.filter((l) => l.level === "warn")).toHaveLength(1);
 
@@ -350,12 +350,12 @@ describe("以离线方式进单人 mock", () => {
     expect(wrongType.message).toBe("invalid args `offlineFallback` for command `launch_game`");
   });
 
-  it("直达：单人按世界文件夹名、多人按地址原文通过检查后照常走完八个阶段，mock 记下这次的 quickPlay", async () => {
+  it("直达：单人按世界文件夹名、多人按地址原文通过检查后照常走完九个阶段，mock 记下这次的 quickPlay", async () => {
     const { phases } = await recordEvents();
     const world = { kind: "singleplayer", world_dir_name: "New World" } as const;
     expect(await launchGame({ ...offline("樱花生存", "t-sp"), quickPlay: world })).toEqual({ pid: 4242, offline: false });
     expect(lastMockQuickPlay()).toEqual(world);
-    expect(phases.map((p) => p.stage_index).at(-1)).toBe(7);
+    expect(phases.map((p) => p.stage_index).at(-1)).toBe(8);
     await stopGame();
     // 1.20 之前的版本只是不能直达存档，加入服务器照常
     const server = { kind: "multiplayer", address: " play.example:25570 " } as const;

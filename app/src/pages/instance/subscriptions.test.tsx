@@ -466,7 +466,7 @@ describe("实例详情：本实例的进度在走", () => {
     if (session === null) throw new Error("启动后应有会话");
     const step = (finished: number) =>
       act(() => {
-        emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 3, download: { finished, total: 100, bytes: 0, total_bytes: null, speed: 2048 } });
+        emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished, total: 100, bytes: 0, total_bytes: null, speed: 2048 } });
       });
     step(0);
     await flush();
@@ -488,7 +488,7 @@ describe("实例详情：本实例的进度在走", () => {
     if (session === null) throw new Error("启动后应有会话");
     const step = (finished: number) =>
       act(() => {
-        emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 3, download: { finished, total: 100, bytes: 0, total_bytes: null, speed: 2048 } });
+        emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished, total: 100, bytes: 0, total_bytes: null, speed: 2048 } });
       });
     step(0);
     await flush();

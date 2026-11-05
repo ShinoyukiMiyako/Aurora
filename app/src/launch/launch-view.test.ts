@@ -6,7 +6,7 @@ import type { LauncherState } from "../state/store";
 import { newTask } from "../state/tasks";
 import { avatarIndicator, ringGeometry } from "./InstanceAvatar";
 import { faceKey, fillOf, holdFor, placedForProgress, placedForStage, FACE_HOLD_MS } from "./LaunchCapsule";
-import { brokenAction, launchFailure, launchView, sessionDetail, type LaunchView } from "./launchView";
+import { brokenAction, launchFailure, launchView, sessionDetail, stageLabel, type LaunchView } from "./launchView";
 
 const T0 = 1_720_000_000_000;
 const ACCOUNT = { uuid: "u-1", name: "Steve", kind: "microsoft" as const };
@@ -77,7 +77,7 @@ function state(overrides: Partial<LauncherState>): LauncherState {
 
 const loading = (instanceId: string, stage = 0): SessionState => {
   const s = startSession(instanceId, "launch-1", ACCOUNT, T0, null);
-  return stage === 0 ? s : applyPhase(s, { taskId: "launch-1", phase: stage < 3 ? "preparing" : stage === 3 ? "downloading" : "launching", stageIndex: stage, download: null }, T0);
+  return stage === 0 ? s : applyPhase(s, { taskId: "launch-1", phase: stage < 4 ? "preparing" : stage === 4 ? "downloading" : "launching", stageIndex: stage, download: null }, T0);
 };
 const running = (instanceId: string) => sessionLaunched(loading(instanceId), "launch-1", T0 + 1000);
 
@@ -115,7 +115,7 @@ describe("启动视图判定", () => {
 
   it("会话各阶段对应各自的视图", () => {
     const a = inst("A");
-    expect(launchView(state({ session: loading("A", 3) }), a)).toMatchObject({ kind: "loading", phase: "downloading" });
+    expect(launchView(state({ session: loading("A", 4) }), a)).toMatchObject({ kind: "loading", phase: "downloading" });
     expect(launchView(state({ session: running("A") }), a).kind).toBe("running");
     expect(launchView(state({ session: sessionCancelled(loading("A"), "launch-1", T0) }), a)).toMatchObject({ kind: "stopped", reason: "cancelled" });
     const failed = sessionFailed(loading("A"), "launch-1", { code: "disk_full", params: { drive: "C:", needed_bytes: 1_073_741_824 } }, T0);
@@ -135,12 +135,18 @@ describe("启动视图判定", () => {
 
 describe("会话第二行文案", () => {
   it("准备与启动写阶段名，下载写文件数与速度，总数未知时写正在统计", () => {
-    expect(sessionDetail(loading("A", 1), T0)).toBe("校验游戏文件");
-    expect(sessionDetail(loading("A", 5), T0)).toBe("生成启动参数");
-    const counting = loading("A", 3);
+    expect(sessionDetail(loading("A"), T0)).toBe("验证账户");
+    expect(sessionDetail(loading("A", 2), T0)).toBe("校验游戏文件");
+    expect(sessionDetail(loading("A", 6), T0)).toBe("生成启动参数");
+    const counting = loading("A", 4);
     expect(sessionDetail(counting, T0)).toBe("正在统计缺失文件…");
-    const known = applyPhase(counting, { taskId: "launch-1", phase: "downloading", stageIndex: 3, download: { done: 120, total: 480, bytes: 1, totalBytes: 10, speedBps: 4.2 * 1024 * 1024 } }, T0);
+    const known = applyPhase(counting, { taskId: "launch-1", phase: "downloading", stageIndex: 4, download: { done: 120, total: 480, bytes: 1, totalBytes: 10, speedBps: 4.2 * 1024 * 1024 } }, T0);
     expect(sessionDetail(known, T0)).toBe("文件 120/480 · 4.2 MB/s");
+  });
+
+  it("阶段名按九阶段表取：下标 8 是游戏运行中，下标 9 越界", () => {
+    expect(stageLabel(8)).toBe("游戏运行中");
+    expect(() => stageLabel(9)).toThrow("阶段下标 9 超出九阶段表");
   });
 
   it("运行写已运行时长，结束写本次游玩分钟，取消写文件会保留", () => {
@@ -214,7 +220,7 @@ describe("会话第二行文案", () => {
 
 describe("头像指示与胶囊换面", () => {
   it("24 什么都不画，32 只画角标，40 起画环", () => {
-    const loadingView = launchView(state({ session: loading("A", 3) }), inst("A"));
+    const loadingView = launchView(state({ session: loading("A", 4) }), inst("A"));
     expect(avatarIndicator(loadingView, 24)).toEqual({ type: "none" });
     expect(avatarIndicator(loadingView, 32)).toEqual({ type: "none" });
     expect(avatarIndicator(loadingView, 40)).toEqual({ type: "ring", tone: "accent", progress: 0.3, track: "launch-1" });
@@ -261,20 +267,20 @@ describe("头像指示与胶囊换面", () => {
   });
 
   it("方块按阶段落面：准备 1、下载 2、启动 3；安装按进度三分", () => {
-    expect([0, 2, 3, 4, 6].map(placedForStage)).toEqual([1, 1, 2, 3, 3]);
+    expect([0, 3, 4, 5, 7].map(placedForStage)).toEqual([1, 1, 2, 3, 3]);
     expect([0, 0.33, 1 / 3, 0.66, 2 / 3, 1].map(placedForProgress)).toEqual([1, 1, 2, 2, 3, 3]);
   });
 
   it("加载换到取消、失败、运行时先留住旧面演完方块动画；其余直接换", () => {
     const a = inst("A");
-    const prev = launchView(state({ session: loading("A", 3) }), a);
-    const cancelled = launchView(state({ session: sessionCancelled(loading("A", 3), "launch-1", T0) }), a);
+    const prev = launchView(state({ session: loading("A", 4) }), a);
+    const cancelled = launchView(state({ session: sessionCancelled(loading("A", 4), "launch-1", T0) }), a);
     expect(holdFor(prev, cancelled)).toMatchObject({ exit: "disassemble", seat: false, ms: FACE_HOLD_MS.disassemble });
     const failed = launchView(state({ session: sessionFailed(loading("A"), "launch-1", { code: "version_broken", params: {} }, T0) }), a);
     expect(holdFor(prev, failed)).toMatchObject({ exit: "collapse", ms: FACE_HOLD_MS.collapse });
     // 下载阶段已落 2 面：剩 1 面立即落下，120 ms 后坐定，再过 200 ms 换到运行面
     expect(holdFor(prev, launchView(state({ session: running("A") }), a))).toMatchObject({ exit: null, seat: true, ms: 120 + 200 });
-    const launchingPrev = launchView(state({ session: loading("A", 6) }), a);
+    const launchingPrev = launchView(state({ session: loading("A", 7) }), a);
     expect(holdFor(launchingPrev, launchView(state({ session: running("A") }), a))?.ms).toBe(200);
     expect(holdFor({ kind: "ready", busyElsewhere: false }, prev)).toBeNull();
     expect(faceKey(cancelled)).toBe("stopped:cancelled");

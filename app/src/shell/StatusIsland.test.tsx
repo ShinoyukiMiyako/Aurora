@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
-import { CONFIRM_COPY, LAUNCH_COPY, LAUNCH_STAGES, PHASE_LABEL, SESSION_COPY, STOPPED_LABEL } from "../copy/flows";
+import { CONFIRM_COPY, LAUNCH_COPY, PHASE_LABEL, SESSION_COPY, STOPPED_LABEL } from "../copy/flows";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { GAME_LOG_EVENT, LAUNCH_PHASE_EVENT } from "../ipc/launch";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
@@ -54,7 +54,7 @@ function session(patch: Partial<SessionState>): SessionState {
 
 describe("状态岛收起态的第二段", () => {
   it("加载阶段：regular 档写阶段名与百分比，封顶 99%", () => {
-    const s = session({ phase: "downloading", stageIndex: 3, progress: 0.995 });
+    const s = session({ phase: "downloading", stageIndex: 4, progress: 0.995 });
     expect(islandSecond(s, "regular", T0, false)).toEqual({ label: PHASE_LABEL.downloading, value: "99%" });
   });
 
@@ -64,7 +64,7 @@ describe("状态岛收起态的第二段", () => {
   });
 
   it("运行中：regular 写「已运行」加计时，计时进数字槽；compact 只留计时", () => {
-    const s = session({ phase: "running", runningSince: T0, stageIndex: 7, progress: 1 });
+    const s = session({ phase: "running", runningSince: T0, stageIndex: 8, progress: 1 });
     const regular = islandSecond(s, "regular", T0 + 65_000, false);
     expect(regular).toEqual({ label: SESSION_COPY.runningLabel, value: "01:05" });
     // 读屏读到的整句与详情头的「已运行 mm:ss」一字不差
@@ -105,7 +105,7 @@ describe("状态岛收起态的第二段", () => {
 
 describe("胶囊的布局依赖", () => {
   const ALL_TIERS: Tier[] = ["compact", "regular", "wide"];
-  const runningSession = session({ phase: "running", runningSince: T0, stageIndex: 7, progress: 1 });
+  const runningSession = session({ phase: "running", runningSince: T0, stageIndex: 8, progress: 1 });
 
   function keyAt(s: SessionState, tier: Tier, elapsedMs: number, stopping = false): string {
     return islandLayoutKey(s, tier, "生存", islandSecond(s, tier, T0 + elapsedMs, stopping));
@@ -145,7 +145,7 @@ describe("胶囊的布局依赖", () => {
   });
 
   it("加载中：百分比走动不换 layoutKey，从一位数进到两位数才换", () => {
-    const at = (progress: number) => keyAt(session({ phase: "downloading", stageIndex: 3, progress }), "regular", 0);
+    const at = (progress: number) => keyAt(session({ phase: "downloading", stageIndex: 4, progress }), "regular", 0);
     expect(at(0.31)).toBe(at(0.87));
     expect(at(0.09)).not.toBe(at(0.1));
   });
@@ -157,20 +157,20 @@ describe("阶段清单", () => {
   });
 
   it("下载阶段进行中写文件数与速度；数量未知时不写", () => {
-    expect(downloadStageNote(session({ stageIndex: 3, download: { done: 12, total: 40, bytes: 0, totalBytes: null, speedBps: 2048 } }))).toBe("12/40 · 2.0 KB/s");
-    expect(downloadStageNote(session({ stageIndex: 3, download: { done: 0, total: null, bytes: 0, totalBytes: null, speedBps: 0 } }))).toBeNull();
+    expect(downloadStageNote(session({ stageIndex: 4, download: { done: 12, total: 40, bytes: 0, totalBytes: null, speedBps: 2048 } }))).toBe("12/40 · 2.0 KB/s");
+    expect(downloadStageNote(session({ stageIndex: 4, download: { done: 0, total: null, bytes: 0, totalBytes: null, speedBps: 0 } }))).toBeNull();
   });
 
   it("越过下载阶段且没有下载记录：写「无需下载」；还没到下载阶段不写", () => {
-    expect(downloadStageNote(session({ stageIndex: 5, download: null }))).toBe(SESSION_COPY.noDownload);
-    expect(downloadStageNote(session({ stageIndex: 1, download: null }))).toBeNull();
+    expect(downloadStageNote(session({ stageIndex: 6, download: null }))).toBe(SESSION_COPY.noDownload);
+    expect(downloadStageNote(session({ stageIndex: 2, download: null }))).toBeNull();
   });
 
   it("有启动器提醒的阶段写「N 条提醒」，没有的不写；下载阶段先写下载进度", () => {
-    const warned = session({ stageIndex: 5, download: null, stageWarnings: [0, 2, 0, 1, 0, 0, 0, 0] });
-    expect([0, 1, 2, 3, 4].map((i) => stageNote(warned, i))).toEqual([null, "2 条提醒", null, SESSION_COPY.noDownload, null]);
-    const quiet = session({ stageIndex: 4, download: { done: 3, total: 3, bytes: 0, totalBytes: null, speedBps: 0 }, stageWarnings: [0, 0, 0, 4, 0, 0, 0, 0] });
-    expect(stageNote(quiet, 3)).toBe("4 条提醒");
+    const warned = session({ stageIndex: 6, download: null, stageWarnings: [0, 0, 2, 0, 1, 0, 0, 0, 0] });
+    expect([0, 1, 2, 3, 4, 5].map((i) => stageNote(warned, i))).toEqual([null, null, "2 条提醒", null, SESSION_COPY.noDownload, null]);
+    const quiet = session({ stageIndex: 5, download: { done: 3, total: 3, bytes: 0, totalBytes: null, speedBps: 0 }, stageWarnings: [0, 0, 0, 0, 4, 0, 0, 0, 0] });
+    expect(stageNote(quiet, 4)).toBe("4 条提醒");
     expect(() => stageNote(session({ stageWarnings: [] }), 1)).toThrow("没有提醒计数");
   });
 });
@@ -225,24 +225,26 @@ describe("状态岛", () => {
     await flush();
     const session = launcher.state.session;
     if (session === null) throw new Error("启动后应有会话");
-    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 3, download: { finished: 2, total: 10, bytes: 0, total_bytes: null, speed: 1024 } }));
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished: 2, total: 10, bytes: 0, total_bytes: null, speed: 1024 } }));
     await flush();
 
     const island = document.querySelector<HTMLButtonElement>("[aria-haspopup='dialog']");
     if (island === null) throw new Error("状态岛没有出现");
-    // jsdom 窗口宽 1024，按 compact 档只留百分比；阶段 3 起点 0.3，按文件数 2/10 推进到 0.39
+    // jsdom 窗口宽 1024，按 compact 档只留百分比；阶段 4 起点 0.3，按文件数 2/10 推进到 0.39
     expect(island.getAttribute("aria-label")).toBe(ISLAND_COPY.label("生存", "39%"));
 
     act(() => island.click());
     await flush();
     const stages = [...document.querySelectorAll("[data-state]")].map((el) => [el.textContent, el.getAttribute("data-state")]);
-    expect(stages.slice(0, 4)).toEqual([
-      [LAUNCH_STAGES[0], "done"],
-      [LAUNCH_STAGES[1], "done"],
-      [LAUNCH_STAGES[2], "done"],
-      [`${LAUNCH_STAGES[3]}2/10 · 1.0 KB/s`, "now"],
+    expect(stages.slice(0, 5)).toEqual([
+      ["验证账户", "done"],
+      ["检查 Java", "done"],
+      ["校验游戏文件", "done"],
+      ["补全库文件", "done"],
+      ["下载缺失文件2/10 · 1.0 KB/s", "now"],
     ]);
-    expect(stages).toHaveLength(LAUNCH_STAGES.length - 1);
+    // 九个阶段去掉「游戏运行中」
+    expect(stages).toHaveLength(8);
 
     const cancel = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === LAUNCH_COPY.cancel);
     if (cancel === undefined) throw new Error("详情里没有取消启动");
@@ -339,7 +341,7 @@ describe("状态岛按片订阅", () => {
     expect(commits).toBe(0);
     const session = launcher.state.session;
     if (session === null) throw new Error("启动后应有会话");
-    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "running", stage_index: 7 }));
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "running", stage_index: 8 }));
     await flush();
     expect(launcher.state.session?.phase).toBe("running");
     expect(islandButton().getAttribute("aria-label")).toBe(ISLAND_COPY.label("生存", "00:00"));
@@ -361,14 +363,14 @@ describe("状态岛按片订阅", () => {
     await flush();
     const session = launcher.state.session;
     if (session === null) throw new Error("启动后应有会话");
-    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 3, download: { finished: 0, total: 100, bytes: 0, total_bytes: null, speed: 1024 } }));
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished: 0, total: 100, bytes: 0, total_bytes: null, speed: 1024 } }));
     await flush();
     const island = islandButton();
     expect(island.getAttribute("aria-label")).toBe(ISLAND_COPY.label("生存", "30%"));
     const rects = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
     commits = 0;
     for (let i = 1; i <= 20; i++) {
-      act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 3, download: { finished: i, total: 100, bytes: 0, total_bytes: null, speed: 1024 } }));
+      act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished: i, total: 100, bytes: 0, total_bytes: null, speed: 1024 } }));
       await act(async () => {
         await vi.advanceTimersByTimeAsync(20);
       });

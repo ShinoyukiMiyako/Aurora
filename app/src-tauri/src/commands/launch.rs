@@ -41,7 +41,7 @@ use crate::events::{self, GAME_LOG_EVENT};
 use crate::facade::Facade;
 use crate::tasks::TaskRegistry;
 
-/// 启动阶段推进与阶段 3 的下载进度。
+/// 启动阶段推进与阶段 4 的下载进度。
 pub const LAUNCH_PHASE_EVENT: &str = "petalfall://launch-phase";
 
 /// 游戏进程退出（收尾记账已写完）。
@@ -183,7 +183,7 @@ pub struct LaunchedDto {
     pub offline: bool,
 }
 
-/// 阶段 3 的下载进度。字段与 core-event 的下载进度一致，只少传输量：启动过程不报它。
+/// 阶段 4 的下载进度。字段与 core-event 的下载进度一致，只少传输量：启动过程不报它。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DownloadDto {
     pub total: u64,
@@ -208,13 +208,13 @@ impl From<DownloadProgress> for DownloadDto {
     }
 }
 
-/// [`LAUNCH_PHASE_EVENT`] 的负载。`stage_index` 对应八阶段表，同一次启动内单调不减。
+/// [`LAUNCH_PHASE_EVENT`] 的负载。`stage_index` 对应九阶段表，同一次启动内单调不减。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LaunchPhaseDto {
     pub task_id: String,
     pub phase: LaunchPhase,
     pub stage_index: u8,
-    /// 只有阶段 3 的进度快照带这一项。
+    /// 只有阶段 4 的进度快照带这一项。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download: Option<DownloadDto>,
 }
@@ -371,7 +371,7 @@ impl PhaseTranslator {
         Self {
             task_id,
             version_id,
-            stage: LaunchStage::CheckJava,
+            stage: LaunchStage::VerifyAccount,
         }
     }
 
@@ -968,9 +968,10 @@ mod tests {
     }
 
     #[test]
-    fn translated_stage_index_never_goes_back_and_downloads_belong_to_stage_three() {
+    fn translated_stage_index_never_goes_back_and_downloads_belong_to_stage_four() {
         let mut translator = PhaseTranslator::new("t-1".into(), "1.21".into());
         let script = vec![
+            LaunchEvent::Stage(LaunchStage::VerifyAccount),
             LaunchEvent::Stage(LaunchStage::CheckJava),
             LaunchEvent::Log {
                 at: 5,
@@ -992,14 +993,14 @@ mod tests {
             if let Outgoing::Phase(payload) = translator.translate(event) {
                 assert_eq!(payload.task_id, "t-1");
                 if let Some(download) = &payload.download {
-                    assert_eq!(payload.stage_index, 3);
+                    assert_eq!(payload.stage_index, 4);
                     assert_eq!(payload.phase, LaunchPhase::Downloading);
                     assert_eq!(download.total, 10);
                 }
                 indices.push(payload.stage_index);
             }
         }
-        assert_eq!(indices, vec![0, 1, 2, 3, 3, 3, 4, 5, 6, 7]);
+        assert_eq!(indices, vec![0, 1, 2, 3, 4, 4, 4, 5, 6, 7, 8]);
         assert!(indices.windows(2).all(|w| w[0] <= w[1]));
     }
 
@@ -1013,7 +1014,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&stage).unwrap(),
-            json!({ "task_id": "t-9", "phase": "downloading", "stage_index": 3 })
+            json!({ "task_id": "t-9", "phase": "downloading", "stage_index": 4 })
         );
         let Outgoing::Phase(download) = translator.translate(LaunchEvent::Download(progress(4, 1)))
         else {
@@ -1024,7 +1025,7 @@ mod tests {
             json!({
                 "task_id": "t-9",
                 "phase": "downloading",
-                "stage_index": 3,
+                "stage_index": 4,
                 "download": { "total": 4, "finished": 1, "bytes": 100, "total_bytes": 400, "speed": 50 }
             })
         );

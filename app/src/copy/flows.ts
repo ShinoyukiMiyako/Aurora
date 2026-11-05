@@ -180,8 +180,9 @@ export function phaseLabel(phase: SessionPhase, stopReason: StopReason | null): 
   return STOPPED_LABEL[stopReason];
 }
 
-/** 八个阶段，下标即 session.stageIndex。 */
+/** 九个阶段，下标即 session.stageIndex。 */
 export const LAUNCH_STAGES = [
+  "验证账户",
   "检查 Java",
   "校验游戏文件",
   "补全库文件",

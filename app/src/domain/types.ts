@@ -89,7 +89,7 @@ export interface Session {
   phase: SessionPhase;
   /** 启动全程的总进度 0-1，单调不减；running 之后恒为 1。 */
   progress: number;
-  /** 当前阶段下标，对应八阶段表。 */
+  /** 当前阶段下标，对应九阶段表。 */
   stageIndex: number;
   startedAt: number;
   runningSince: number | null;

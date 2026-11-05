@@ -5,7 +5,7 @@ import type { AccountType } from "./accounts";
 import { invoke, listen, type UnlistenFn } from "./bridge";
 import { IpcError } from "./errors";
 
-/** 启动阶段推进与阶段 3 的下载进度。 */
+/** 启动阶段推进与阶段 4 的下载进度。 */
 export const LAUNCH_PHASE_EVENT = "petalfall://launch-phase";
 /** 游戏进程退出；游玩时长、上次游玩与崩溃报告在推送前已由后端写好。 */
 export const GAME_EXIT_EVENT = "petalfall://game-exit";
@@ -104,10 +104,10 @@ export function offlineFallbackRefusal(error: unknown): OfflineFallbackRefusedDe
   return { field: OFFLINE_FALLBACK_FIELD, reason: fields.reason, account: fields.account };
 }
 
-/** 加载阶段的分段；stage_index 0-2 为 preparing，3 为 downloading，4-6 为 launching，7 为 running。 */
+/** 加载阶段的分段；stage_index 0-3 为 preparing，4 为 downloading，5-7 为 launching，8 为 running。 */
 export type LaunchPhaseName = "preparing" | "downloading" | "launching" | "running";
 
-/** 阶段 3 的下载进度快照，字段与 core-event 的下载进度一致，只少传输量：启动过程不报它。 */
+/** 阶段 4 的下载进度快照，字段与 core-event 的下载进度一致，只少传输量：启动过程不报它。 */
 export interface LaunchDownloadDto {
   total: number;
   finished: number;
@@ -119,7 +119,7 @@ export interface LaunchDownloadDto {
   speed: number;
 }
 
-/** stage_index 对应八阶段表，同一次启动内单调不减；只有阶段 3 的进度快照带 download。 */
+/** stage_index 对应九阶段表，同一次启动内单调不减；只有阶段 4 的进度快照带 download。 */
 export interface LaunchPhaseEvent {
   task_id: string;
   phase: LaunchPhaseName;

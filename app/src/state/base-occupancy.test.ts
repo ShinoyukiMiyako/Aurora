@@ -103,7 +103,7 @@ describe("子实例开工后基底的占用立刻进列表", () => {
     expect(callsOf(ipc, "list_instances")).toHaveLength(before + 1);
 
     for (const finished of [1, 2, 3]) {
-      emit(LAUNCH_PHASE_EVENT, { task_id: taskId, phase: "downloading", stage_index: 3, download: { total: 480, finished, bytes: 250, total_bytes: 1000, speed: 4_200_000 } } satisfies LaunchPhaseEvent);
+      emit(LAUNCH_PHASE_EVENT, { task_id: taskId, phase: "downloading", stage_index: 4, download: { total: 480, finished, bytes: 250, total_bytes: 1000, speed: 4_200_000 } } satisfies LaunchPhaseEvent);
     }
     await settle();
     expect(callsOf(ipc, "list_instances")).toHaveLength(before + 1);

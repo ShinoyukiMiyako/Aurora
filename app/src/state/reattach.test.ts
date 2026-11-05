@@ -49,7 +49,7 @@ describe("开机找回运行中的游戏", () => {
     expect(s.getState().session).toMatchObject({
       instanceId: "生存",
       phase: "running",
-      stageIndex: 7,
+      stageIndex: 8,
       progress: 1,
       startedAt: 1_719_999_000_000,
       runningSince: 1_719_999_009_000,
