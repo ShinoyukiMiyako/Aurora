@@ -1,11 +1,14 @@
 //! 更新包的多源下载：从清单扩展字段解析候选源，判定单个源失败后换不换源，汇总全部已试源的失败。
 //!
-//! 清单本身不签名，扩展字段谁都能改，所以这里只信它给的下载地址候选与大小上限：签名与签名版本仍由插件
-//! 按清单标准字段校验，绝不从扩展字段取，包的完整性全靠这道验签。真去下载的每个地址都过同一道校验
-//! （[`check_source_url`]）：https、主机在白名单里、不带端口与用户信息。`x-sources` 的每一条如此，清单没给出
-//! 可用候选时退回的插件选中的标准 `url` 也如此，插件自己只校验清单端点、不校验下载地址，这道校验替它补上。
-//! x-sources 每条和回退地址都只比主机不比路径，白名单主机回的跳转照跟，完整性靠插件验签：白名单只限住清单能把
-//! 客户端直接引到哪些主机，字节对不上签名照样被插件拒掉。
+//! 清单本身不签名，扩展字段谁都能改，所以这里只信它给的下载地址候选与大小上限，大小上限还要再压到与清单无关的
+//! [`MAX_PACKAGE_SIZE`] 以内：签名与签名版本仍由插件按清单标准字段校验，绝不从扩展字段取，包的完整性全靠这道验签。
+//! 真去下载的每个地址都过同一道校验（[`check_source_url`]）：https、主机在白名单里、不带端口与用户信息，github.com
+//! 上的还得是本仓库 Releases 的附件。`x-sources` 的每一条如此，清单没给出可用候选时退回的插件选中的标准 `url`
+//! 也如此，插件自己只校验清单端点、不校验下载地址，这道校验替它补上。
+//! 除 github.com 外只比主机不比路径，白名单主机回的跳转照跟（插件的客户端开了 https_only，只跟到 https 地址），
+//! 完整性靠插件验签：白名单只限住清单能把客户端直接
+//! 引到哪些主机，字节对不上签名照样被插件拒掉。github.com 上谁都能发附件，只比主机的话，改得了清单就能让客户端
+//! 把任意仓库的大文件整份读进内存，所以那里多钉一层仓库路径。
 //!
 //! 插件和旧客户端都忽略多余的键，扩展字段放在平台条目里不影响它们：旧客户端只认标准的 `url`。
 
@@ -18,8 +21,11 @@ use tauri_plugin_updater::Error as UpdaterError;
 
 use crate::commands::error::{code, source_chain, CommandError};
 
+/// GitHub 的主机。它上面的地址除了主机还要过 [`in_repo_releases`]。
+const GITHUB_HOST: &str = "github.com";
+
 /// 候选源允许的主机。编译进客户端：`x-sources` 里写的主机不在这里就不用那一条，退回的插件选中地址不在这里就不下载；
-/// CI 推清单的脚本也按同一张表校验。
+/// CI 生成清单的脚本（`.github/scripts/dev-distribution.mjs`）也按同一张表校验，用例逐一比对两边。
 pub(crate) const ALLOWED_SOURCE_HOSTS: [&str; 4] = [
     concat!(
         petalfall_base::app_slug!(),
@@ -30,11 +36,26 @@ pub(crate) const ALLOWED_SOURCE_HOSTS: [&str; 4] = [
         "-dl.oss-cn-hongkong.aliyuncs.com"
     ),
     concat!("dl.", petalfall_base::app_slug!(), ".org"),
-    "github.com",
+    GITHUB_HOST,
+];
+
+/// 认得的源名与所在地区，先后与 [`ALLOWED_SOURCE_HOSTS`] 一一对应：第几个源名的包就放在第几个主机上。客户端只按
+/// 源名定地区、不核对源名与主机配不配对，配对由 CI 生成清单时校验；两边配得不一样，自动档就会把海外的主机当国内的排，
+/// 所以用例把这张表连同主机与 CI 的源表逐一比对。
+const SOURCE_REGIONS: [(&str, SourceRegion); 4] = [
+    ("cn", SourceRegion::Domestic),
+    ("hk", SourceRegion::Domestic),
+    ("global", SourceRegion::Overseas),
+    ("github", SourceRegion::Overseas),
 ];
 
 /// 清单最多列几个候选源，更靠后的不看。认得的源名只有四个，这个上限只防伪造清单塞进超长的列表。
 pub(crate) const MAX_SOURCES: usize = 6;
+
+/// 更新包大小的硬上限，与清单无关。插件把整个包读进内存，清单又不签名：x-size 缺失或写成天文数字时照单全收的话，
+/// 改得了清单就能让每次点击下载都读进几个 GiB。现在的包约 22 MB，256 MiB 留足了余量；包真涨到这个量级，这里要与
+/// CI、服务器的同一个取值一起调大。
+pub(crate) const MAX_PACKAGE_SIZE: u64 = 256 * 1024 * 1024;
 
 /// 平台条目里的候选源列表。
 const SOURCES_KEY: &str = "x-sources";
@@ -60,12 +81,15 @@ pub(crate) struct PackageSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PackagePlan {
     pub sources: Vec<PackageSource>,
+    /// [`package_plan`] 给出的总有值，不超过 [`MAX_PACKAGE_SIZE`]；留成 `Option` 是因为下载循环的大小上限按
+    /// 「可以不设限」写的，这里不再给它不设限的机会。
     pub size: Option<u64>,
 }
 
 /// 在 raw_json.platforms 里找 url 与 signature 都等于插件选中值的条目，读 x-sources 与 x-size；
 /// 不合法的候选逐条跳过并打 warn。x-sources 整段缺失、不是数组、一条都不剩，或在 platforms 里找不到这个条目时，
-/// 退回 [{name:"default", url: chosen_url, region: Domestic}]。
+/// 退回 [{name:"default", url: chosen_url, region: Domestic}]。大小取 x-size，缺失、不合法或超过
+/// [`MAX_PACKAGE_SIZE`] 时按 [`MAX_PACKAGE_SIZE`] 截断并打 warn，找不到条目时同样按它。
 ///
 /// 退回的 chosen_url 与 x-sources 的每一条过同一道 [`check_source_url`]。过不了就一个源都不试，直接返回
 /// [`sources_failed`] 汇总的 update_download_failed，detail.sources 是一条
@@ -78,10 +102,14 @@ pub(crate) fn package_plan(
     // 按插件选中的地址与签名反查，而不是按平台键：Update.target 只是操作系统名 windows，插件按
     // windows-x86_64-nsis、windows-x86_64 依次查；只有地址与签名能确定扩展字段与插件要校验的是同一个包。
     let Some(entry) = platform_entry(raw_json, chosen_url, signature) else {
-        tracing::warn!(url = %chosen_url, "清单里找不到插件选中的平台条目，只用插件给的地址");
+        tracing::warn!(
+            url = %chosen_url,
+            max = MAX_PACKAGE_SIZE,
+            "清单里找不到插件选中的平台条目，只用插件给的地址，大小按硬上限截断"
+        );
         return Ok(PackagePlan {
             sources: vec![default_source(chosen_url)?],
-            size: None,
+            size: Some(MAX_PACKAGE_SIZE),
         });
     };
     let mut sources = listed_sources(entry);
@@ -90,7 +118,7 @@ pub(crate) fn package_plan(
     }
     Ok(PackagePlan {
         sources,
-        size: package_size(entry),
+        size: Some(package_size(entry)),
     })
 }
 
@@ -192,8 +220,8 @@ fn listed_source(item: &Value, accepted: &[PackageSource]) -> Result<PackageSour
     })
 }
 
-/// 一个下载地址能不能用：x-sources 的每一条与退回的插件选中地址共用这一道。只比主机不比路径，白名单主机回的
-/// 跳转照跟（GitHub 的下载地址本来就会跳到别的主机），包的完整性靠插件验签。不能用时给出原因。
+/// 一个下载地址能不能用：x-sources 的每一条与退回的插件选中地址共用这一道。除 github.com 外只比主机不比路径，
+/// 白名单主机回的跳转照跟（GitHub 的下载地址本来就会跳到别的主机），包的完整性靠插件验签。不能用时给出原因。
 fn check_source_url(url: &Url) -> Result<(), &'static str> {
     if url.scheme() != "https" {
         return Err("地址不是 https");
@@ -209,15 +237,36 @@ fn check_source_url(url: &Url) -> Result<(), &'static str> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err("地址带了用户信息");
     }
+    if is_github(url) && !in_repo_releases(url) {
+        return Err("GitHub 上的地址不是本仓库 Releases 的附件");
+    }
     Ok(())
 }
 
+fn is_github(url: &Url) -> bool {
+    url.host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case(GITHUB_HOST))
+}
+
+/// 本仓库 Releases 附件的路径前缀，从 [`dev_endpoint`](crate::commands::updater::dev_endpoint) 用的同一个
+/// [`REPO_URL`](petalfall_base::brand::REPO_URL) 推出来：清单与更新包必须出自同一个仓库。
+fn release_asset_prefix() -> String {
+    let repo =
+        Url::parse(petalfall_base::brand::REPO_URL).expect("编译进来的仓库地址必须是合法 URL");
+    format!("{}/releases/download/", repo.path())
+}
+
+/// 路径以本仓库 Releases 附件的前缀开头。`Url` 解析时已经消掉了 `..`（含 `%2e%2e`），比的是规范化之后的路径，
+/// 写成「前缀 + 一串 `..`」也绕不到别的仓库去。
+fn in_repo_releases(url: &Url) -> bool {
+    url.path().starts_with(&release_asset_prefix())
+}
+
 fn region_of(name: &str) -> Option<SourceRegion> {
-    match name {
-        "cn" | "hk" => Some(SourceRegion::Domestic),
-        "global" | "github" => Some(SourceRegion::Overseas),
-        _ => None,
-    }
+    SOURCE_REGIONS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, region)| *region)
 }
 
 fn allowed_host(url: &Url) -> bool {
@@ -228,13 +277,34 @@ fn allowed_host(url: &Url) -> bool {
     })
 }
 
-fn package_size(entry: &Map<String, Value>) -> Option<u64> {
-    let value = entry.get(SIZE_KEY)?;
-    let size = value.as_u64();
-    if size.is_none() {
-        tracing::warn!(value = %value, "清单里的安装包大小不是非负整数，不按大小设上限");
+/// 清单声明的安装包大小，压在 [`MAX_PACKAGE_SIZE`] 以内。
+fn package_size(entry: &Map<String, Value>) -> u64 {
+    let Some(value) = entry.get(SIZE_KEY) else {
+        tracing::warn!(
+            max = MAX_PACKAGE_SIZE,
+            "清单没有给出安装包大小，按硬上限截断"
+        );
+        return MAX_PACKAGE_SIZE;
+    };
+    match value.as_u64() {
+        Some(size) if size <= MAX_PACKAGE_SIZE => size,
+        Some(size) => {
+            tracing::warn!(
+                size,
+                max = MAX_PACKAGE_SIZE,
+                "清单里的安装包大小超过硬上限，按硬上限截断"
+            );
+            MAX_PACKAGE_SIZE
+        }
+        None => {
+            tracing::warn!(
+                value = %value,
+                max = MAX_PACKAGE_SIZE,
+                "清单里的安装包大小不是非负整数，按硬上限截断"
+            );
+            MAX_PACKAGE_SIZE
+        }
     }
-    size
 }
 
 /// 一个源为什么失败，交给前端的稳定名字。
@@ -249,9 +319,9 @@ pub(crate) enum FailureKind {
     Http,
     /// 包被拒：字节对不上签名，或签名本身不合规。
     Signature,
-    /// 下载的数据超过了清单声明的大小。
+    /// 下载的数据超过了清单声明的大小，或超过了 [`MAX_PACKAGE_SIZE`]。
     TooLarge,
-    /// 本机这边的问题、清单给的下载地址没过校验，或插件新增的失败。
+    /// 本机这边的问题、清单给的下载地址没过校验、源的地址或它回的跳转建不成请求，或插件新增的失败。
     Other,
 }
 
@@ -297,7 +367,12 @@ pub(crate) fn judge(source: &PackageSource, err: AttemptError) -> SourceFailure 
         AttemptError::TooLarge { limit } => (
             FailureKind::TooLarge,
             Verdict::NextSource,
-            format!("下载的数据超过了清单声明的 {limit} 字节，已中止"),
+            // 上限压在硬上限上时，清单可能根本没声明大小，不能说成清单声明的。
+            if limit >= MAX_PACKAGE_SIZE {
+                format!("下载的数据超过了更新包大小的硬上限 {limit} 字节，已中止")
+            } else {
+                format!("下载的数据超过了清单声明的 {limit} 字节，已中止")
+            },
             Vec::new(),
         ),
         AttemptError::Plugin(err) => {
@@ -318,15 +393,25 @@ pub(crate) fn judge(source: &PackageSource, err: AttemptError) -> SourceFailure 
             (failure, verdict, err.to_string(), source_chain(&err))
         }
     };
-    tracing::warn!(
-        source = %source.name,
-        url = %source.url,
-        ?failure,
-        ?verdict,
-        %message,
-        ?causes,
-        "更新包下载源失败"
-    );
+    match verdict {
+        // 判了立即停的失败换哪个源都一样（签名本身、内置公钥、本机建不起请求），点名这个源会把排查引向它。
+        Verdict::Stop => tracing::warn!(
+            ?failure,
+            ?verdict,
+            %message,
+            ?causes,
+            "更新包下载失败，与下载源无关，不再换源"
+        ),
+        Verdict::NextSource => tracing::warn!(
+            source = %source.name,
+            url = %source.url,
+            ?failure,
+            ?verdict,
+            %message,
+            ?causes,
+            "更新包下载源失败"
+        ),
+    }
     SourceFailure {
         source: source.name.clone(),
         failure,
@@ -351,8 +436,15 @@ fn plugin_verdict(err: &UpdaterError) -> (FailureKind, Verdict) {
         | UpdaterError::SignatureUtf8(_)
         | UpdaterError::SignedVersionMismatch { .. }
         | UpdaterError::MissingSignedVersion => (FailureKind::Signature, Verdict::Stop),
-        // 客户端或请求建不起来是本机这边的问题，换源也一样。
-        UpdaterError::Reqwest(http) if http.is_builder() => (FailureKind::Other, Verdict::Stop),
+        // 不带地址的构建错误出在客户端本身（TLS 后端、代理配置），是本机这边的问题，换源也一样。
+        UpdaterError::Reqwest(http) if http.is_builder() && http.url().is_none() => {
+            (FailureKind::Other, Verdict::Stop)
+        }
+        // 带地址的构建错误出在这个源的地址或它回的跳转上：跳到 http、https 以外的协议，或地址超出 http::Uri 的长度
+        // 上限。换一个源就可能好，判停的话重试时排序不变，次次卡在这个源上。
+        UpdaterError::Reqwest(http) if http.is_builder() => {
+            (FailureKind::Other, Verdict::NextSource)
+        }
         // 插件的 Reqwest 变体是 transparent，顺着它的 source 链找不到 reqwest 错误本身，只能直接拿来判断。
         // 不在网络层的（回了响应头之后正文传到一半断掉之类）说明连得上这个源，算它的 HTTP 层失败。
         UpdaterError::Reqwest(http) => (
@@ -475,8 +567,12 @@ mod tests {
         package_url(ALLOWED_SOURCE_HOSTS[2])
     }
 
+    /// 前缀写成字面量，不从 [`release_asset_prefix`] 拼：这是与 CI、服务器约定的取值，推导出错时这里要挂。
     fn github_url() -> String {
-        package_url(ALLOWED_SOURCE_HOSTS[3])
+        format!(
+            "https://{}/ShinoyukiMiyako/Petalfall/releases/download/dev-build/pkg-0.1.0-dev.36-x64.exe",
+            ALLOWED_SOURCE_HOSTS[3]
+        )
     }
 
     fn url(raw: &str) -> Url {
@@ -562,11 +658,130 @@ mod tests {
         assert_eq!(MAX_SOURCES, 6);
     }
 
+    /// `lines` 里从 `opening` 那一行之后、到第一个 `closing` 行之前的那几行。找不到就挂：脚本改了写法时不能按空表放过。
+    fn js_block<'a>(lines: &[&'a str], opening: &str, closing: &str) -> Vec<&'a str> {
+        let start = lines
+            .iter()
+            .position(|line| *line == opening)
+            .unwrap_or_else(|| panic!("CI 脚本里找不到 {opening}"));
+        let rest = &lines[start + 1..];
+        let end = rest
+            .iter()
+            .position(|line| *line == closing)
+            .unwrap_or_else(|| panic!("CI 脚本里 {opening} 之后找不到收尾的 {closing}"));
+        rest[..end].to_vec()
+    }
+
+    /// `key: "value",` 这样一行里的 value。
+    fn js_string<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+        line.strip_prefix(key)?
+            .strip_prefix(": \"")?
+            .strip_suffix("\",")
+    }
+
+    /// CI 生成清单的脚本里的源表，按出现先后：MIRRORS 每一项的 name 与 host，再加 SOURCE_HOSTS 里在 MIRRORS 之外
+    /// 单列的那几项（现在只有 github）。
+    fn ci_source_hosts() -> Vec<(String, String)> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.github/scripts/dev-distribution.mjs"
+        );
+        let text = std::fs::read_to_string(path).unwrap_or_else(|err| panic!("{path}: {err}"));
+        // 只看真正执行的行：注释里写着同样的键值的话，删掉真正的那一行照样能过。
+        let lines: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect();
+
+        let mirrors = js_block(&lines, "const MIRRORS = Object.freeze([", "]);");
+        let entries = mirrors.iter().filter(|line| **line == "{").count();
+        let names: Vec<&str> = mirrors
+            .iter()
+            .filter_map(|line| js_string(line, "name"))
+            .collect();
+        let hosts: Vec<&str> = mirrors
+            .iter()
+            .filter_map(|line| js_string(line, "host"))
+            .collect();
+        assert!(entries > 0, "MIRRORS 一项都没认出来：{mirrors:?}");
+        // 有一项的 name 或 host 换了写法认不出来时，配对会整体错开，不能靠 zip 截掉了事
+        assert_eq!(
+            (names.len(), hosts.len()),
+            (entries, entries),
+            "MIRRORS 每一项都要有一行 name、一行 host：{mirrors:?}"
+        );
+        let mut table: Vec<(String, String)> = names
+            .into_iter()
+            .zip(hosts)
+            .map(|(name, host)| (name.to_owned(), host.to_owned()))
+            .collect();
+
+        let source_hosts = js_block(&lines, "export const SOURCE_HOSTS = Object.freeze({", "});");
+        let spread = "...Object.fromEntries(MIRRORS.map(({ name, host }) => [name, host])),";
+        assert!(
+            source_hosts.contains(&spread),
+            "SOURCE_HOSTS 不再由 MIRRORS 展开：{source_hosts:?}"
+        );
+        for line in source_hosts.into_iter().filter(|line| *line != spread) {
+            let (name, _) = line
+                .split_once(':')
+                .unwrap_or_else(|| panic!("SOURCE_HOSTS 里认不出的一行：{line}"));
+            let host = js_string(line, name)
+                .unwrap_or_else(|| panic!("SOURCE_HOSTS 里认不出的一行：{line}"));
+            table.push((name.to_owned(), host.to_owned()));
+        }
+        table
+    }
+
+    /// 源表三处各写一份：客户端这里、CI 生成清单的脚本、香港机的 put-manifest。CI 改了源名或主机而客户端没跟上时，
+    /// 两边各自的用例都照过，客户端却只打一条 warn 就悄悄少一个源；这里把客户端的源名、主机、两者的配对与地区划分
+    /// 和 CI 的源表逐一比对。put-manifest 不在这个仓库里，比不到。
+    #[test]
+    fn the_source_table_matches_the_ci_script() {
+        let mut ci = ci_source_hosts();
+        let mut client: Vec<(String, String)> = SOURCE_REGIONS
+            .iter()
+            .zip(ALLOWED_SOURCE_HOSTS)
+            .map(|((name, _), host)| ((*name).to_owned(), host.to_owned()))
+            .collect();
+        // CI 里的先后就是 x-sources 的先后，客户端排序只认源名不看它，所以只比配对、不比先后
+        ci.sort();
+        client.sort();
+        assert_eq!(ci, client);
+
+        // 地区划分是产品上定的，写成字面量：国内 cn、hk，海外 global、github
+        for (name, host) in &ci {
+            let expected = match name.as_str() {
+                "cn" | "hk" => SourceRegion::Domestic,
+                "global" | "github" => SourceRegion::Overseas,
+                other => panic!("CI 多了一个没定地区的源 {other}（{host}）"),
+            };
+            assert_eq!(region_of(name), Some(expected), "{name}");
+        }
+    }
+
+    /// GitHub 源只认本仓库 Releases 的附件，前缀是与 CI、服务器约定的那个；开发版在 GitHub 上的清单也在这个前缀下，
+    /// 清单与更新包出自同一个仓库。
+    #[test]
+    fn github_sources_are_pinned_to_this_repository() {
+        assert_eq!(
+            release_asset_prefix(),
+            "/ShinoyukiMiyako/Petalfall/releases/download/"
+        );
+        let manifest = url(&crate::commands::updater::dev_endpoint());
+        assert_eq!(manifest.host_str(), Some(GITHUB_HOST));
+        assert!(
+            manifest.path().starts_with(&release_asset_prefix()),
+            "{manifest}"
+        );
+    }
+
     #[test]
     fn manifest_without_extensions_uses_the_chosen_url_alone() {
         let plan = plan_of(&manifest_with(json!({})));
         assert_eq!(plan.sources, fallback());
-        assert_eq!(plan.size, None);
+        assert_eq!(plan.size, Some(MAX_PACKAGE_SIZE));
     }
 
     #[test]
@@ -673,6 +888,46 @@ mod tests {
         );
     }
 
+    /// github.com 上谁都能发附件：不是本仓库 Releases 附件的地址跳过，仓库名多一截、用 `..`（含百分号编码的）
+    /// 绕到别的仓库都不行。按主机认，不按源名认：别的源名写成 github.com 的地址也一样。
+    #[test]
+    fn github_sources_outside_this_repository_releases_are_skipped() {
+        let github = ALLOWED_SOURCE_HOSTS[3];
+        let file = "dev-build/pkg-0.1.0-dev.36-x64.exe";
+        let ours = "ShinoyukiMiyako/Petalfall/releases/download";
+        for raw in [
+            format!("https://{github}/attacker/repo/releases/download/{file}"),
+            format!("https://{github}/ShinoyukiMiyako/Petalfall-fork/releases/download/{file}"),
+            format!("https://{github}/ShinoyukiMiyako/Petalfall/archive/refs/heads/main.zip"),
+            format!("https://{github}/ShinoyukiMiyako/Petalfall/releases/download"),
+            format!("https://{github}/{ours}/../../../../attacker/repo/releases/download/{file}"),
+            format!(
+                "https://{github}/{ours}/%2e%2e/%2E%2E/%2e%2E/%2E%2e/attacker/repo/releases/download/{file}"
+            ),
+            format!("https://{github}/"),
+        ] {
+            let plan = plan_of(&manifest_with(json!({ "x-sources": [
+                listed("github", &raw),
+                listed("cn", &cn_url()),
+            ] })));
+            assert_eq!(names(&plan), ["cn"], "{raw}");
+
+            let plan = plan_of(&manifest_with(json!({ "x-sources": [
+                listed("hk", &raw),
+                listed("cn", &cn_url()),
+            ] })));
+            assert_eq!(names(&plan), ["cn"], "{raw}");
+        }
+
+        let plan = plan_of(&manifest_with(
+            json!({ "x-sources": [listed("github", &github_url())] }),
+        ));
+        assert_eq!(
+            plan.sources,
+            vec![source("github", &github_url(), SourceRegion::Overseas)]
+        );
+    }
+
     /// 源名只认四个，大小写不同、与兜底源同名都不行；条目缺名、缺地址、地址不合法、根本不是对象也跳过。
     #[test]
     fn unknown_or_malformed_sources_are_skipped() {
@@ -762,24 +1017,46 @@ mod tests {
         }
     }
 
-    /// 大小只认非负整数，0 和 u64 上限照收；别的写法当作没给，不设上限，候选源不受影响。
+    /// 大小只认不超过硬上限的非负整数，0 与硬上限本身照收；超过硬上限的、别的写法、没写的，一律按硬上限截断，
+    /// 候选源不受影响。硬上限是与 CI、服务器约定的 256 MiB。
     #[test]
-    fn size_must_be_a_non_negative_integer() {
+    fn size_must_be_a_non_negative_integer_within_the_cap() {
+        assert_eq!(MAX_PACKAGE_SIZE, 268_435_456);
         for (raw, expected) in [
-            (json!(0), Some(0)),
-            (json!(1), Some(1)),
-            (json!(u64::MAX), Some(u64::MAX)),
-            (json!(SIZE.to_string()), None),
-            (json!(-1), None),
-            (json!(1.5), None),
-            (json!(null), None),
-            (json!([SIZE]), None),
+            (json!(0), 0),
+            (json!(1), 1),
+            (json!(SIZE), SIZE),
+            (json!(MAX_PACKAGE_SIZE - 1), MAX_PACKAGE_SIZE - 1),
+            (json!(MAX_PACKAGE_SIZE), MAX_PACKAGE_SIZE),
+            (json!(MAX_PACKAGE_SIZE + 1), MAX_PACKAGE_SIZE),
+            (json!(i64::MAX), MAX_PACKAGE_SIZE),
+            (json!(u64::MAX), MAX_PACKAGE_SIZE),
+            (json!(SIZE.to_string()), MAX_PACKAGE_SIZE),
+            (json!(-1), MAX_PACKAGE_SIZE),
+            (json!(1.5), MAX_PACKAGE_SIZE),
+            (json!(null), MAX_PACKAGE_SIZE),
+            (json!([SIZE]), MAX_PACKAGE_SIZE),
         ] {
             let plan = plan_of(&manifest_with(
                 json!({ "x-size": raw, "x-sources": full_list() }),
             ));
-            assert_eq!(plan.size, expected, "{raw}");
+            assert_eq!(plan.size, Some(expected), "{raw}");
             assert_eq!(names(&plan), ["cn", "hk", "global", "github"], "{raw}");
+        }
+
+        let plan = plan_of(&manifest_with(json!({ "x-sources": full_list() })));
+        assert_eq!(plan.size, Some(MAX_PACKAGE_SIZE), "没写 x-size");
+
+        // 随机大小：硬上限两侧都抽到，结果总是两者中较小的那个
+        let mut rng = fastrand::Rng::with_seed(0x51_2e_ca_95);
+        for _ in 0..500 {
+            let size = if rng.bool() {
+                rng.u64(..=MAX_PACKAGE_SIZE * 2)
+            } else {
+                rng.u64(..)
+            };
+            let plan = plan_of(&manifest_with(json!({ "x-size": size })));
+            assert_eq!(plan.size, Some(size.min(MAX_PACKAGE_SIZE)), "{size}");
         }
     }
 
@@ -805,7 +1082,7 @@ mod tests {
         ] {
             let plan = plan_of(&manifest(platforms.clone()));
             assert_eq!(plan.sources, fallback(), "{platforms}");
-            assert_eq!(plan.size, None, "{platforms}");
+            assert_eq!(plan.size, Some(MAX_PACKAGE_SIZE), "{platforms}");
         }
         assert_eq!(
             plan_of(&json!({ "version": "0.1.0-dev.36" })).sources,
@@ -840,13 +1117,18 @@ mod tests {
         ]
     }
 
-    /// 退回的地址过的是与 x-sources 每条相同的校验：不是 https、主机不在白名单、带端口、带用户信息都被拒，四条退回的
-    /// 路上哪一条都一样。被拒时一个源都不试，报下载失败，detail.sources 只有一条 default，原文写明地址与原因。
+    /// 退回的地址过的是与 x-sources 每条相同的校验：不是 https、主机不在白名单、带端口、带用户信息、github.com 上不是
+    /// 本仓库的附件都被拒，四条退回的路上哪一条都一样。被拒时一个源都不试，报下载失败，detail.sources 只有一条
+    /// default，原文写明地址与原因。
     #[test]
     fn a_fallback_url_failing_the_source_checks_is_refused() {
         let github = ALLOWED_SOURCE_HOSTS[3];
         let path = "owner/repo/releases/download/dev-build/pkg-0.1.0-dev.36-x64.exe";
         for (chosen, reason) in [
+            (
+                format!("https://{github}/{path}"),
+                "GitHub 上的地址不是本仓库 Releases 的附件",
+            ),
             (format!("http://{github}/{path}"), "地址不是 https"),
             (
                 format!("https://downloads.example.com/{path}"),
@@ -948,8 +1230,8 @@ mod tests {
         UpdaterError::Reqwest(err)
     }
 
-    /// 回了 200 和声明的长度，正文送了一部分就关掉连接。
-    async fn cut_mid_body() -> UpdaterError {
+    /// 只接一个连接的本地服务：读完请求头，原样写回 `reply`，随即关掉连接。返回请求地址与服务线程。
+    fn serve_once(reply: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -962,11 +1244,16 @@ mod tests {
                 stream.read_exact(&mut byte).unwrap();
                 head.push(byte[0]);
             }
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n")
-                .unwrap();
-            stream.write_all(&[7u8; 512]).unwrap();
+            stream.write_all(&reply).unwrap();
         });
+        (url, server)
+    }
+
+    /// 回了 200 和声明的长度，正文送了一部分就关掉连接。
+    async fn cut_mid_body() -> UpdaterError {
+        let mut reply = b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n".to_vec();
+        reply.extend_from_slice(&[7u8; 512]);
+        let (url, server) = serve_once(reply);
         let response = petalfall_base::http::build_client()
             .unwrap()
             .get(&url)
@@ -978,6 +1265,7 @@ mod tests {
         UpdaterError::Reqwest(err)
     }
 
+    /// 地址解析不出来，reqwest 还没拿到地址就报构建错误：错误不带地址。
     async fn builder_failure() -> UpdaterError {
         let err = petalfall_base::http::build_client()
             .unwrap()
@@ -985,7 +1273,44 @@ mod tests {
             .send()
             .await
             .unwrap_err();
-        assert!(err.is_builder());
+        assert!(err.is_builder(), "{err:?}");
+        assert!(err.url().is_none(), "{err:?}");
+        UpdaterError::Reqwest(err)
+    }
+
+    /// 源回 302 跳到 ftp：reqwest 不跟 http、https 以外的跳转，报带着跳转目标的构建错误。
+    async fn redirected_off_http() -> UpdaterError {
+        let (url, server) = serve_once(
+            b"HTTP/1.1 302 Found\r\nLocation: ftp://x/\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        );
+        let err = petalfall_base::http::build_client()
+            .unwrap()
+            .get(&url)
+            .send()
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(err.is_builder(), "{err:?}");
+        assert_eq!(
+            err.url().map(|url| url.as_str()),
+            Some("ftp://x/"),
+            "{err:?}"
+        );
+        UpdaterError::Reqwest(err)
+    }
+
+    /// 地址长过 http::Uri 的上限（65534 字节）：解析成 `Url` 没问题，转成请求用的 Uri 时报带着这个地址的构建错误，
+    /// 请求根本没发出去。
+    async fn overlong_url() -> UpdaterError {
+        let raw = format!("http://127.0.0.1/{}", "a".repeat(70_000));
+        let err = petalfall_base::http::build_client()
+            .unwrap()
+            .get(&raw)
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_builder(), "{err:?}");
+        assert_eq!(err.url().map(|url| url.as_str()), Some(raw.as_str()));
         UpdaterError::Reqwest(err)
     }
 
@@ -1001,14 +1326,27 @@ mod tests {
         );
     }
 
+    /// 超过清单声明的大小与超过硬上限都换下一个源；压在硬上限上的不说成清单声明的，清单可能根本没写大小。
     #[test]
     fn an_oversized_download_moves_on_to_the_next_source() {
-        let (failure, verdict, message) = judged(AttemptError::TooLarge { limit: SIZE });
-        assert_eq!(
-            (failure, verdict),
-            (FailureKind::TooLarge, Verdict::NextSource)
-        );
-        assert_eq!(message, "下载的数据超过了清单声明的 22846361 字节，已中止");
+        for (limit, expected) in [
+            (SIZE, "下载的数据超过了清单声明的 22846361 字节，已中止"),
+            (
+                MAX_PACKAGE_SIZE - 1,
+                "下载的数据超过了清单声明的 268435455 字节，已中止",
+            ),
+            (
+                MAX_PACKAGE_SIZE,
+                "下载的数据超过了更新包大小的硬上限 268435456 字节，已中止",
+            ),
+        ] {
+            let (failure, verdict, message) = judged(AttemptError::TooLarge { limit });
+            assert_eq!(
+                (failure, verdict),
+                (FailureKind::TooLarge, Verdict::NextSource)
+            );
+            assert_eq!(message, expected);
+        }
     }
 
     /// 连不上、等不到、正文中途断开、回了错误状态码，都只是这一个源的问题，换下一个源；原文留在 message。
@@ -1044,10 +1382,22 @@ mod tests {
         );
     }
 
+    /// 清单的签名串不是合法 base64 时插件报的错：插件验签时用的就是标准字母表的这个引擎。
+    fn undecodable_signature() -> UpdaterError {
+        use base64::Engine;
+
+        let truncated = &SIGNATURE[..SIGNATURE.len() - 3];
+        let err = base64::engine::general_purpose::STANDARD
+            .decode(format!("{truncated}@"))
+            .unwrap_err();
+        UpdaterError::Base64(err)
+    }
+
     /// 签名串本身、签名版本出了问题，换哪个源都是同一个签名：立即停，记成签名失败。
     #[test]
     fn signature_problems_in_the_manifest_stop_at_once() {
         for err in [
+            undecodable_signature(),
             UpdaterError::SignatureUtf8("bad".into()),
             UpdaterError::SignedVersionMismatch {
                 signed: "0.1.0-dev.12".into(),
@@ -1109,7 +1459,20 @@ mod tests {
         }
     }
 
-    /// 本机建不起请求，换源也一样：立即停。
+    /// 带地址的构建错误出在这个源的地址或它回的跳转上，不是本机的问题：记成 other，换下一个源。
+    #[tokio::test]
+    async fn construction_failures_tied_to_the_source_url_move_on_to_the_next_source() {
+        for err in [redirected_off_http().await, overlong_url().await] {
+            let raw = err.to_string();
+            assert_eq!(
+                plugin(err),
+                (FailureKind::Other, Verdict::NextSource, raw.clone()),
+                "{raw}"
+            );
+        }
+    }
+
+    /// 本机建不起请求（构建错误不带地址），换源也一样：立即停。
     #[tokio::test]
     async fn request_construction_failures_stop_at_once() {
         let builder = builder_failure().await;
@@ -1472,16 +1835,22 @@ mod tests {
             Some(json!({ "network": "timeout", "sources": sources_json(&[failure]) }))
         );
 
-        let rejected = UpdaterError::SignatureUtf8("bad".into());
-        let raw = rejected.to_string();
-        let failure = judge(&cn_source(), AttemptError::Plugin(rejected));
-        let err = sources_failed(vec![failure.clone()]);
-        assert_eq!(err.code, code::UPDATE_SIGNATURE_INVALID);
-        assert_eq!(err.message, raw);
-        assert_eq!(
-            err.detail,
-            Some(json!({ "sources": sources_json(&[failure]) }))
-        );
+        for rejected in [
+            undecodable_signature(),
+            UpdaterError::SignatureUtf8("bad".into()),
+        ] {
+            let raw = rejected.to_string();
+            let failure = judge(&cn_source(), AttemptError::Plugin(rejected));
+            assert_eq!(failure.verdict, Verdict::Stop, "{raw}");
+            let err = sources_failed(vec![failure.clone()]);
+            assert_eq!(err.code, code::UPDATE_SIGNATURE_INVALID, "{raw}");
+            assert_eq!(err.message, raw);
+            assert_eq!(
+                err.detail,
+                Some(json!({ "sources": sources_json(&[failure]) })),
+                "{raw}"
+            );
+        }
 
         let status = UpdaterError::Network(
             "Download request failed with status: 503 Service Unavailable".into(),
@@ -1529,5 +1898,61 @@ mod tests {
     #[should_panic(expected = "至少要有一个已试的源")]
     fn summarising_no_tried_source_is_a_bug() {
         sources_failed(Vec::new());
+    }
+
+    /// 判了立即停的失败与源无关：通用的失败日志不写源名与地址，写明与下载源无关，免得排查的人去查那个源。
+    /// 换源的失败照旧点名源与地址。
+    #[tokio::test]
+    async fn failures_unrelated_to_the_source_are_logged_without_naming_it() {
+        let captured = crate::tests::Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let log_of = |err: AttemptError| {
+            captured.0.lock().unwrap().clear();
+            let verdict = judge(&cn_source(), err).verdict;
+            (
+                verdict,
+                String::from_utf8(captured.0.lock().unwrap().clone()).unwrap(),
+            )
+        };
+
+        let unrelated = [
+            UpdaterError::Minisign(minisign_verify::Error::UnexpectedKeyId),
+            undecodable_signature(),
+            UpdaterError::SignedVersionMismatch {
+                signed: "0.1.0-dev.12".into(),
+                announced: "0.1.0-dev.40".into(),
+            },
+            builder_failure().await,
+        ];
+        for err in unrelated {
+            let raw = err.to_string();
+            let (verdict, log) = log_of(AttemptError::Plugin(err));
+            assert_eq!(verdict, Verdict::Stop, "{raw}");
+            assert!(log.contains("WARN"), "{log}");
+            assert!(log.contains("与下载源无关"), "{log}");
+            assert!(log.contains(&raw), "{log}");
+            assert!(!log.contains("source="), "{log}");
+            assert!(!log.contains(ALLOWED_SOURCE_HOSTS[0]), "{log}");
+        }
+
+        for err in [
+            AttemptError::Plugin(UpdaterError::Minisign(
+                minisign_verify::Error::InvalidSignature,
+            )),
+            AttemptError::Stalled,
+            AttemptError::Plugin(redirected_off_http().await),
+        ] {
+            let (verdict, log) = log_of(err);
+            assert_eq!(verdict, Verdict::NextSource, "{log}");
+            assert!(log.contains("更新包下载源失败"), "{log}");
+            assert!(log.contains("source=cn"), "{log}");
+            assert!(log.contains(&cn_url()), "{log}");
+            assert!(!log.contains("与下载源无关"), "{log}");
+        }
     }
 }

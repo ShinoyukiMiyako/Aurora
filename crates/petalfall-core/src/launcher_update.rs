@@ -133,15 +133,32 @@ impl Petalfall {
             }
             _ => None,
         };
+        // 候选进了排序就换了先后，配对要趁它们还按探测时的先后排着
+        let probed = probes
+            .as_deref()
+            .map(|probes| named_probes(&candidates, probes));
         let ordered = order_package_sources(policy, candidates, probes.as_deref());
         tracing::info!(
             ?policy,
-            ?probes,
+            probes = ?probed,
             order = ?ordered.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
             "更新包下载源已排序"
         );
         ordered
     }
+}
+
+/// 探测时延按下标配上源名，进日志用。清单里的先后谁写都行，单列一串时延的话，与排序后的 order 对不上号，
+/// 看不出是哪个源测得慢、测不出。
+fn named_probes(
+    candidates: &[PackageCandidate],
+    probes: &[Option<Duration>],
+) -> Vec<(String, Option<Duration>)> {
+    candidates
+        .iter()
+        .map(|candidate| candidate.name.clone())
+        .zip(probes.iter().copied())
+        .collect()
 }
 
 /// 并发探测每个候选，结果与 `candidates` 一一对应。探测任务异常结束的按测不出处理。
@@ -512,6 +529,34 @@ mod tests {
                     None
                 )),
                 ["global", "hk", "cn"],
+                "{listed:?}"
+            );
+        }
+    }
+
+    /// 日志里的探测时延跟着源名走：清单怎么排，每个源名配到的都是它自己的时延，排序换掉先后之后也认得出来。
+    #[test]
+    fn probe_latencies_are_logged_with_their_source_names() {
+        let latency_of = |name: &str| match name {
+            "cn" => None,
+            "hk" => SLOW,
+            "global" => None,
+            "github" => FAST,
+            other => panic!("没给 {other} 定时延"),
+        };
+        for listed in permutations(&["cn", "hk", "global", "github"]) {
+            let candidates: Vec<PackageCandidate> = listed.iter().map(|name| named(name)).collect();
+            let probes: Vec<Option<Duration>> =
+                listed.iter().map(|name| latency_of(name)).collect();
+            let expected: Vec<(String, Option<Duration>)> = listed
+                .iter()
+                .map(|name| ((*name).to_owned(), latency_of(name)))
+                .collect();
+            assert_eq!(named_probes(&candidates, &probes), expected, "{listed:?}");
+            // 排完的先后与清单怎么写无关，日志里的 order 配不回探测时的下标，时延只能靠源名认
+            assert_eq!(
+                auto(candidates, &probes),
+                ["github", "hk", "global", "cn"],
                 "{listed:?}"
             );
         }

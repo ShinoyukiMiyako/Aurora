@@ -7,7 +7,7 @@
 //! 插件和旧客户端都不认、照常忽略，解析与换源的判定见 [`super::update_sources`]。换源只改下载地址，
 //! 验签和签名版本校验仍由插件按清单的 `signature` 与 `version` 做，扩展键里的东西不参与校验。
 //! 真去下载的地址都要过 https 与主机白名单：x-sources 每条和回退地址（插件选中的 `url`）都只比主机不比路径，
-//! 白名单主机回的跳转照跟，完整性靠插件验签。
+//! 白名单主机回的跳转照跟、但只跟到 https 地址（[`plugin_client`]），完整性靠插件验签。
 //!
 //! 插件只在配置了签名公钥、并要求签名带版本号（`requireSignedVersion: true`）的发行构建里注册
 //! （[`detect_support`]）。没有公钥时插件初始化本身就会失败，而且没有公钥就无从校验更新包，宁可整体不支持。
@@ -25,16 +25,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use petalfall_base::http::NetworkFailure;
 use petalfall_core::{CancellationToken, CoreEvent, DownloadProgress, EventSink, PackageCandidate};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State, Url};
-use tauri_plugin_updater::{Update, UpdaterExt};
+use tauri_plugin_updater::{Update, Updater, UpdaterExt};
 use tokio::sync::Notify;
 
 use crate::commands::error::{code, source_chain, CommandError};
 use crate::commands::update_sources::{
-    judge, package_plan, sources_failed, AttemptError, PackageSource, Verdict,
+    judge, package_plan, sources_failed, AttemptError, PackagePlan, PackageSource, Verdict,
 };
 use crate::commands::update_stall::{StallGuard, STALL_MIN_BYTES, STALL_WINDOW};
 use crate::events::CoreEventForwarder;
@@ -77,7 +78,7 @@ pub enum UpdateChannel {
     Release,
 }
 
-/// 这个通道按顺序交给插件的清单端点：前一个连不上或非 2xx 时插件自动试下一个。顺序固定、不探测：
+/// 这个通道的清单端点，按这个顺序逐个问（[`check_in_order`]）：前一个没给出清单就问下一个。顺序固定、不探测：
 /// 清单只有几百字节，测速省不下时间，反倒多一轮请求。
 fn channel_endpoints(channel: UpdateChannel) -> Vec<String> {
     match channel {
@@ -437,9 +438,9 @@ pub async fn updater_info(
     Ok(updater.info(app.package_info().version.to_string()))
 }
 
-/// 检查更新。端点见 [`channel_endpoints`]：开发版先问 [`DEV_ENDPOINT`] 再问 [`dev_endpoint`]，前一个连不上或
-/// 非 2xx 时插件自动试下一个；其余版本只问 [`PRIMARY_ENDPOINT`]。
-/// 已是最新返回 `null`；所有端点的清单都确认 404 不算失败，见 [`conclude_check`] 与 [`UpdateSlot::settle_check`]。
+/// 检查更新。端点见 [`channel_endpoints`]：开发版先问 [`DEV_ENDPOINT`] 再问 [`dev_endpoint`]，前一个没给出清单
+/// （连不上、超时、非 2xx、正文读不出或不成形）就问下一个；其余版本只问 [`PRIMARY_ENDPOINT`]。
+/// 已是最新返回 `null`；所有端点的清单都确认 404 不算失败，见 [`check_in_order`] 与 [`UpdateSlot::settle_check`]。
 /// 不看 `check_updates` 设置：那一项只管启动时要不要自动查，由前端决定。
 #[tauri::command]
 pub async fn check_update(
@@ -453,30 +454,35 @@ pub async fn check_update(
 }
 
 /// 取一次清单并下结论。检查和下载前的重查共用。
+///
+/// 每个端点各建一个只问它的检查器，由 [`check_in_order`] 逐个问，不把端点一次性交给插件：插件遇到 2xx 而正文
+/// 读不出（不是 JSON、读到一半断开或撞上总时限）、或清单里没有本平台的条目时直接返回，不再问下一个端点；
+/// 非 2xx 时只记一行不带地址与状态码的日志、不记成错误，最后报的是最后记下的那个错误。这样香港机的清单一坏，GitHub 上
+/// 字节相同的那份就问不到，香港机回的状态码也进不了 detail。
 async fn fetch_conclusion(app: &AppHandle) -> Result<CheckConclusion<Update>, CommandError> {
     let endpoints = channel_endpoints(UpdateChannel::of(app.package_info().version.pre.as_str()));
-    let urls = endpoint_urls(&endpoints);
+    let checkers = endpoints
+        .iter()
+        .map(|endpoint| manifest_checker(app, endpoint))
+        .collect::<tauri_plugin_updater::Result<Vec<_>>>()
+        .map_err(|err| check_failed(&endpoints, err))?;
+    let version = app.package_info().version.to_string();
+    check_in_order(&endpoints, &version, |index| checkers[index].check()).await
+}
+
+/// 只问 `endpoint` 这一个端点的检查器。签名公钥、requireSignedVersion 与版本比较由 `updater_builder` 从插件
+/// 状态带上，与把几个端点一次性交给插件时相同。
+fn manifest_checker(app: &AppHandle, endpoint: &str) -> tauri_plugin_updater::Result<Updater> {
     let http = petalfall_base::http::HttpConfig::default();
     let (connect, read) = (http.connect_timeout, http.read_timeout);
-    let checker = app
-        .updater_builder()
+    app.updater_builder()
         // 插件把这个回调放进上下文、随检查结果带进 Update，下载更新包也用它建客户端。插件自己的客户端一个超时
         // 都不设，终点不再送数据时下载会一直挂着；这里只补连接与读取超时，不设总时限：慢网下二十多兆的包要
         // 下好几分钟，总时限会把正常下载掐断。检查的总时限另由 CHECK_TIMEOUT 设。
-        .configure_client(move |client| with_transfer_timeouts(client, connect, read))
-        .endpoints(urls)
-        .and_then(|builder| builder.timeout(CHECK_TIMEOUT).build())
-        .map_err(|err| check_failed(&endpoints, err))?;
-    let checked = checker.check().await;
-    match &checked {
-        Ok(Some(update)) => {
-            tracing::info!(version = %update.version, ?endpoints, "发现可用更新")
-        }
-        Ok(None) => tracing::info!(?endpoints, "已是最新版本"),
-        Err(_) => {}
-    }
-    let version = app.package_info().version.to_string();
-    conclude_check(checked, &version, &endpoints).await
+        .configure_client(move |client| plugin_client(client, connect, read))
+        .endpoints(endpoint_urls(&[endpoint.to_owned()]))?
+        .timeout(CHECK_TIMEOUT)
+        .build()
 }
 
 /// 插件 `configure_client` 回调收发的 reqwest 构建器。这一层不直接依赖 reqwest，从插件公开的回调类型里取出
@@ -504,57 +510,233 @@ fn with_transfer_timeouts(
     client.connect_timeout(connect).read_timeout(read)
 }
 
-/// 把插件的检查结果变成给槽位的结论。
-///
-/// `ReleaseNotFound` 只说明所有端点都回了非 2xx，插件不报状态码，503、403 这类服务器故障也长这样。
-/// 所以自己再问一次，确认是 404 才算没有发布，否则服务器出故障时界面会显示已是最新。
-async fn conclude_check<U>(
-    checked: tauri_plugin_updater::Result<Option<U>>,
-    app_version: &str,
+/// 插件检查清单与下载更新包共用的客户端：传输超时见 [`with_transfer_timeouts`]，另外只走 https。插件的客户端
+/// 沿用 reqwest 默认的跳转策略，清单端点或白名单下载源回一个指向 http 的跳转，后面的请求就成了明文：链路上的人
+/// 看得到在下哪个版本，能替换包的字节，清单端点被跳过去时还能直接改写清单。`https_only` 让请求地址和跟的每一跳
+/// 都必须是 https，不是的报错。不放进 [`with_transfer_timeouts`]：卡住下载的那条单测要连本地的 http 服务。
+fn plugin_client(client: ClientBuilder, connect: Duration, read: Duration) -> ClientBuilder {
+    with_transfer_timeouts(client, connect, read).https_only(true)
+}
+
+/// 按 `endpoints` 的先后逐个问清单，`check(i)` 问第 i 个端点。哪个端点给出了清单（有新版本或已是最新）就以它为准，
+/// 后面的不再问；其余任何失败都记下、接着问下一个：连不上、超时、非 2xx、正文读不出或不成形、没有本平台的条目。
+/// 一个端点都没给出清单时的结论见 [`conclude_without_manifest`]。
+async fn check_in_order<U, Fut>(
     endpoints: &[String],
-) -> Result<CheckConclusion<U>, CommandError> {
-    match checked {
-        Ok(found) => Ok(CheckConclusion::Manifest(found)),
-        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {
-            confirm_manifest_missing(app_version, endpoints).await?;
-            Ok(CheckConclusion::NotPublished)
+    app_version: &str,
+    mut check: impl FnMut(usize) -> Fut,
+) -> Result<CheckConclusion<U>, CommandError>
+where
+    U: ReleaseVersion,
+    Fut: Future<Output = tauri_plugin_updater::Result<Option<U>>>,
+{
+    let mut misses = Vec::with_capacity(endpoints.len());
+    for (index, endpoint) in endpoints.iter().enumerate() {
+        let err = match check(index).await {
+            Ok(found) => {
+                match &found {
+                    Some(update) => {
+                        tracing::info!(endpoint, version = update.release_version(), "发现可用更新")
+                    }
+                    None => tracing::info!(endpoint, "已是最新版本"),
+                }
+                return Ok(CheckConclusion::Manifest(found));
+            }
+            Err(err) => err,
+        };
+        tracing::warn!(endpoint, error = %err, "清单端点没有给出清单");
+        misses.push(match err {
+            tauri_plugin_updater::Error::ReleaseNotFound => NoManifest::Unsuccessful(endpoint),
+            other => NoManifest::Failed(EndpointFailure::plugin(endpoint, &other)),
+        });
+    }
+    conclude_without_manifest(endpoints, app_version, misses).await
+}
+
+/// 一个端点为什么没给出清单。
+enum NoManifest<'a> {
+    /// 回了非 2xx。插件只报 `ReleaseNotFound`，不报状态码。
+    Unsuccessful(&'a str),
+    Failed(EndpointFailure),
+}
+
+/// 一个清单端点没给出清单的结果，按问的先后进 detail.attempts。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct EndpointFailure {
+    endpoint: String,
+    /// 回了非 2xx 时，再 GET 一次得到的状态码。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<u16>,
+    /// 败在网络层时的种类，取值与 detail.network 相同。
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "network_code"
+    )]
+    network: Option<NetworkFailure>,
+    message: String,
+    /// 错误 source 链上的各层原文，没有就不写这个键。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    causes: Vec<String>,
+}
+
+fn network_code<S: Serializer>(
+    network: &Option<NetworkFailure>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    network.map(NetworkFailure::code).serialize(serializer)
+}
+
+impl EndpointFailure {
+    fn plugin(endpoint: &str, err: &tauri_plugin_updater::Error) -> Self {
+        EndpointFailure {
+            endpoint: endpoint.to_owned(),
+            status: None,
+            network: plugin_network_failure(err),
+            message: err.to_string(),
+            causes: source_chain(err),
         }
-        Err(err) => Err(check_failed(endpoints, err)),
+    }
+
+    fn status(endpoint: &str, status: u16) -> Self {
+        let message = if status == MANIFEST_MISSING_STATUS {
+            "更新服务器上没有这份清单"
+        } else {
+            "更新服务器返回了异常状态"
+        };
+        EndpointFailure {
+            endpoint: endpoint.to_owned(),
+            status: Some(status),
+            network: None,
+            message: message.to_owned(),
+            causes: Vec::new(),
+        }
+    }
+
+    /// 多个端点时 message 里的一行。状态码写法与前端给单个端点的 detail.status 补上的一样。
+    fn line(&self) -> String {
+        match self.status {
+            Some(status) => format!("{}：{}（{status}）", self.endpoint, self.message),
+            None => format!("{}：{}", self.endpoint, self.message),
+        }
     }
 }
 
-/// 逐个端点再 GET 一次清单。只要有一个端点答不出 404，就说不清那个源上有没有新版本，只能算检查失败。
-async fn confirm_manifest_missing(
-    app_version: &str,
+/// 一个端点都没给出清单时的结论。回了非 2xx 的端点逐个再 GET 一次，问出状态码：全部端点都答 404 才算这个更新源上
+/// 还没有发布；有一个答不出 404，就说不清那个源上有没有新版本，只能算检查失败。插件把 503、403 这类服务器故障也
+/// 报成 `ReleaseNotFound`，不再问一次的话，服务器出故障时界面会显示已是最新。
+async fn conclude_without_manifest<U>(
     endpoints: &[String],
-) -> Result<(), CommandError> {
-    let http = petalfall_base::http::build_client_with(
-        &petalfall_base::http::HttpConfig::for_app_version(app_version),
-    )?;
-    for endpoint in endpoints {
-        let response = http
-            .get(endpoint)
-            .header("accept", "application/json")
-            .timeout(CHECK_TIMEOUT)
-            .send()
-            .await
-            .map_err(|err| check_failed(endpoints, tauri_plugin_updater::Error::Reqwest(err)))?;
-        let status = response.status().as_u16();
-        if status != MANIFEST_MISSING_STATUS {
-            tracing::warn!(
-                endpoint,
-                status,
-                "更新源没有给出清单，也不是 404，算检查失败"
-            );
-            return Err(
-                CommandError::new(code::UPDATE_CHECK_FAILED, "更新服务器返回了异常状态")
-                    .with_detail(json!({ "endpoints": endpoints, "status": status })),
-            );
+    app_version: &str,
+    misses: Vec<NoManifest<'_>>,
+) -> Result<CheckConclusion<U>, CommandError> {
+    assert!(!misses.is_empty(), "检查更新至少要问一个清单端点");
+    let failures = probe_unsuccessful(app_version, misses).await?;
+    if failures
+        .iter()
+        .all(|failure| failure.status == Some(MANIFEST_MISSING_STATUS))
+    {
+        // 界面上不算失败，日志要留痕。
+        tracing::warn!(?endpoints, "更新源上没有清单（404），按没有新版本处理");
+        return Ok(CheckConclusion::NotPublished);
+    }
+    Err(endpoints_failed(endpoints, failures))
+}
+
+/// 给回了非 2xx 的端点各 GET 一次问出状态码，与其余失败一起按问的先后排好。
+async fn probe_unsuccessful(
+    app_version: &str,
+    misses: Vec<NoManifest<'_>>,
+) -> Result<Vec<EndpointFailure>, CommandError> {
+    let needs_probe = misses
+        .iter()
+        .any(|miss| matches!(miss, NoManifest::Unsuccessful(_)));
+    let http = needs_probe
+        .then(|| {
+            petalfall_base::http::build_client_with(
+                &petalfall_base::http::HttpConfig::for_app_version(app_version),
+            )
+        })
+        .transpose()?;
+    let mut failures = Vec::with_capacity(misses.len());
+    for miss in misses {
+        let failure = match miss {
+            NoManifest::Failed(failure) => failure,
+            NoManifest::Unsuccessful(endpoint) => {
+                let probed = http
+                    .as_ref()
+                    .expect("有回了非 2xx 的端点时已建好客户端")
+                    .get(endpoint)
+                    .header("accept", "application/json")
+                    .timeout(CHECK_TIMEOUT)
+                    .send()
+                    .await;
+                match probed {
+                    Ok(response) => EndpointFailure::status(endpoint, response.status().as_u16()),
+                    Err(err) => EndpointFailure::plugin(
+                        endpoint,
+                        &tauri_plugin_updater::Error::Reqwest(err),
+                    ),
+                }
+            }
+        };
+        failures.push(failure);
+    }
+    Ok(failures)
+}
+
+/// 所有端点都没给出清单、又不全是 404 时的检查失败。只问了一个端点时与逐端点检查之前的形状一致：message 是那个
+/// 端点的原文，状态码在 detail.status，原因链在 detail.causes；多个端点时 message 逐行写成「端点：原文」，状态码与
+/// 原因链各自留在 detail.attempts 里，顶层不放 status：前端会把它补在整段 message 的末尾，分不清是哪个端点的。
+/// 全都败在网络层时标 detail.network，规则同下载源的汇总：全是超时为 timeout，混着连不上为 connect。
+fn endpoints_failed(endpoints: &[String], failures: Vec<EndpointFailure>) -> CommandError {
+    let message = match failures.as_slice() {
+        [only] => only.message.clone(),
+        many => many
+            .iter()
+            .map(EndpointFailure::line)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    let mut detail = Map::new();
+    detail.insert("endpoints".to_owned(), json!(endpoints));
+    if let Some(network) = network_layer(&failures) {
+        detail.insert("network".to_owned(), json!(network.code()));
+    }
+    if let [only] = failures.as_slice() {
+        if let Some(status) = only.status {
+            detail.insert("status".to_owned(), json!(status));
+        }
+        if !only.causes.is_empty() {
+            detail.insert("causes".to_owned(), json!(only.causes));
         }
     }
-    // 界面上不算失败，日志要留痕。
-    tracing::warn!(?endpoints, "更新源上没有清单（404），按没有新版本处理");
-    Ok(())
+    tracing::warn!(
+        code = code::UPDATE_CHECK_FAILED,
+        %message,
+        attempts = ?failures,
+        "没有一个清单端点给出清单，检查更新失败"
+    );
+    detail.insert("attempts".to_owned(), json!(failures));
+    CommandError {
+        code: code::UPDATE_CHECK_FAILED,
+        message,
+        detail: Some(Value::Object(detail)),
+    }
+}
+
+/// 全部端点都败在网络层时是哪一种。
+fn network_layer(failures: &[EndpointFailure]) -> Option<NetworkFailure> {
+    let kinds = failures
+        .iter()
+        .map(|failure| failure.network)
+        .collect::<Option<Vec<_>>>()?;
+    Some(
+        if kinds.iter().all(|kind| *kind == NetworkFailure::Timeout) {
+            NetworkFailure::Timeout
+        } else {
+            NetworkFailure::Connect
+        },
+    )
 }
 
 fn check_failed(endpoints: &[String], err: tauri_plugin_updater::Error) -> CommandError {
@@ -574,6 +756,7 @@ fn check_failed(endpoints: &[String], err: tauri_plugin_updater::Error) -> Comma
 /// 退回的插件选中地址又没过白名单时，一个源都不试，报 `update_download_failed`（见 [`package_plan`]）。下载期间
 /// 再次检查换了版本或已无更新时报 `update_not_available`，包同样丢弃。正文开始后长时间没有进展（见 [`StallWatch`]）
 /// 记为超时，下载的字节超过清单声明的大小记为 `too_large`，都换下一个源。
+/// 重查、解析候选源与排序（自动档要探测）也都看取消：令牌一置位就丢下手头这一步，报 `cancelled`。
 #[tauri::command]
 pub async fn download_update(
     task_id: String,
@@ -586,18 +769,18 @@ pub async fn download_update(
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
     let outcome = async {
         let task = tasks.register(&task_id)?;
+        let token = task.token();
         // 开发版的滚动预发布每次构建都删掉上一版安装包，检查时记下的地址过一阵就 404，重试也一样
-        let conclusion = fetch_conclusion(&app).await?;
+        let conclusion = unless_cancelled(token, fetch_conclusion(&app)).await?;
         let update = updater.slot().update_to_download(conclusion)?;
-        let plan = package_plan(&update.raw_json, &update.download_url, &update.signature)?;
-        let sources = ordered_sources(&facade, plan.sources).await;
+        let plan = unless_cancelled(token, download_plan(&facade, &update)).await?;
         let (bytes, source) = task
             .run(download_with_progress(
                 &update,
-                &sources,
+                &plan.sources,
                 plan.size,
                 events.sink(),
-                task.token(),
+                token,
                 || updater.slot().ensure_current(&update),
             ))
             .await?;
@@ -615,6 +798,30 @@ pub async fn download_update(
     .await;
     events.finish().await;
     outcome
+}
+
+/// 跑下载前的一步。令牌已经置位就不开始；跑到一半置位就丢下它，报 `cancelled`。这几步都在 [`TaskHandle::run`]
+/// 之外，不包这一层的话，取消要等它们自己结束：两个清单端点各等满 [`CHECK_TIMEOUT`]、再各问一次状态码，
+/// 加上自动档的探测，用户点了取消，界面要停在下载中好几十秒。
+///
+/// [`TaskHandle::run`]: crate::tasks::TaskHandle::run
+async fn unless_cancelled<T>(
+    token: &CancellationToken,
+    step: impl Future<Output = Result<T, CommandError>>,
+) -> Result<T, CommandError> {
+    match token.run_until_cancelled(step).await {
+        Some(outcome) => outcome,
+        None => Err(CommandError::cancelled()),
+    }
+}
+
+/// 清单给出的候选源与大小上限（[`package_plan`]），候选源按「文件下载源」策略排好先后（[`ordered_sources`]）。
+async fn download_plan(facade: &Facade, update: &Update) -> Result<PackagePlan, CommandError> {
+    let plan = package_plan(&update.raw_json, &update.download_url, &update.signature)?;
+    Ok(PackagePlan {
+        sources: ordered_sources(facade, plan.sources).await,
+        size: plan.size,
+    })
 }
 
 /// 按「文件下载源」策略给清单列出的源排先后。排序在门面里做（自动档要探测），这里只在两边的类型之间来回转换。
@@ -775,6 +982,11 @@ async fn download_with_progress<'s>(
     let count = sources.len();
     let mut failures = Vec::new();
     for (index, source) in sources.iter().enumerate() {
+        // 换源事件之前先看令牌：取消先于下载到达时 TaskHandle::run 照样在宽限期里跑这里一次，取消落在一个源刚失败
+        // 的那一刻时也会接着走到下一个源；不先看就会推一条换源事件，界面上像是换了个源，紧接着才报取消。
+        if cancel.is_cancelled() {
+            return Err(CommandError::cancelled());
+        }
         if index > 0 {
             still_current()?;
         }
@@ -846,8 +1058,9 @@ async fn attempt_download(
     Ok(bytes)
 }
 
-/// 更新包的大小上限，取清单的 `x-size`。插件把整个包读进内存、读到连接结束为止，一个不停吐数据的源能把内存吃满；
-/// 逐块回调里累计字节，一超过上限就让外层丢掉下载 future，连接随之关闭。清单没给大小时不设限。
+/// 更新包的大小上限，取 [`package_plan`] 给的大小：清单的 `x-size`，缺失、不合法或超过硬上限时按硬上限，所以总有值。
+/// 插件把整个包读进内存、读到连接结束为止，一个不停吐数据的源能把内存吃满；逐块回调里累计字节，一超过上限就让
+/// 外层丢掉下载 future，连接随之关闭。`limit` 为 None 时不设限，只有绕开 package_plan 的测试会这样传。
 struct SizeLimit {
     limit: Option<u64>,
     received: AtomicU64,
@@ -1056,13 +1269,7 @@ fn updater_error(
     if let Some(endpoints) = endpoints {
         detail.insert("endpoints".to_owned(), json!(endpoints));
     }
-    // 插件的 Reqwest 变体是 transparent：它的 source() 直接给出 reqwest 错误的下一层，
-    // 从插件错误顺着原因链找不到 reqwest 错误本身，只能在这里取出来判断。
-    let network = match &err {
-        UpdaterError::Reqwest(http) => petalfall_base::http::network_failure(http),
-        other => petalfall_base::http::network_failure(other),
-    };
-    if let Some(failure) = network {
+    if let Some(failure) = plugin_network_failure(&err) {
         detail.insert("network".to_owned(), json!(failure.code()));
     }
     if !causes.is_empty() {
@@ -1073,6 +1280,15 @@ fn updater_error(
         code,
         message,
         detail: (!detail.is_empty()).then_some(Value::Object(detail)),
+    }
+}
+
+/// 插件错误是不是败在网络层、是哪一种。插件的 Reqwest 变体是 transparent：它的 source() 直接给出 reqwest 错误的
+/// 下一层，从插件错误顺着原因链找不到 reqwest 错误本身，只能在这里取出来判断。
+fn plugin_network_failure(err: &tauri_plugin_updater::Error) -> Option<NetworkFailure> {
+    match err {
+        tauri_plugin_updater::Error::Reqwest(http) => petalfall_base::http::network_failure(http),
+        other => petalfall_base::http::network_failure(other),
     }
 }
 
@@ -1827,6 +2043,40 @@ mod tests {
         assert_eq!(err.detail.unwrap()["network"], json!("timeout"));
     }
 
+    /// 插件检查与下载用的客户端只走 https：明文地址当场拒掉，请求根本不发出去。跳转到 http 时拦在同一个开关上
+    /// （reqwest 的跳转策略见到 https_only 就拒绝非 https 的下一跳），单测里起不了 https 的本地服务，只能验到这一层。
+    /// 同一个本地服务用只套了超时的客户端是通的，拒掉它的正是这个开关。
+    #[tokio::test]
+    async fn the_plugin_client_only_speaks_https() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let url = format!("{}/Petalfall-setup.exe", server.uri());
+        let timeouts = (Duration::from_secs(5), Duration::from_secs(5));
+
+        let plain = with_transfer_timeouts(ClientBuilder::new(), timeouts.0, timeouts.1)
+            .build()
+            .unwrap();
+        let reached = plain.get(&url).send().await.unwrap();
+        assert_eq!(reached.status().as_u16(), 200);
+
+        let client = plugin_client(ClientBuilder::new(), timeouts.0, timeouts.1)
+            .build()
+            .unwrap();
+        let refused = client.get(&url).send().await.unwrap_err();
+        assert!(refused.is_builder(), "{refused:?}");
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "明文请求不该发到服务端"
+        );
+    }
+
     /// 测试用的卡死判定：10 秒窗口里不到 1000 字节算卡住。
     const TEST_WINDOW: Duration = Duration::from_secs(10);
     const TEST_MIN_BYTES: u64 = 1000;
@@ -2384,11 +2634,18 @@ mod tests {
     /// 同一个签名，后面的源一次都不试，报签名无效，原文是插件的原文。
     #[tokio::test(start_paused = true)]
     async fn signature_problems_of_the_manifest_stop_at_the_first_source() {
-        let rejections: [fn() -> UpdaterError; 4] = [
+        let rejections: [fn() -> UpdaterError; 5] = [
             downgrade,
             || UpdaterError::MissingSignedVersion,
             || UpdaterError::SignatureUtf8("bad".into()),
             || UpdaterError::Minisign(minisign_verify::Error::UnexpectedKeyId),
+            // 清单的签名串本身不是合法 base64：插件用同一个 STANDARD 引擎解它时报的就是这个。
+            || {
+                UpdaterError::Base64(
+                    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, "@")
+                        .unwrap_err(),
+                )
+            },
         ];
         for rejected in rejections {
             let raw = rejected().to_string();
@@ -2437,6 +2694,60 @@ mod tests {
         assert!(outcome.unwrap_err().is_cancelled());
         assert_eq!(started.elapsed(), cancel_at, "取消后没有立即返回");
         assert_eq!(package.called(), ["cn"]);
+    }
+
+    /// 取消先于下载到达（TaskHandle::run 在宽限期里照样跑下载一次）：一条换源事件都不推，一个源都不下，直接报取消。
+    #[tokio::test(start_paused = true)]
+    async fn a_download_cancelled_before_it_starts_announces_no_source() {
+        let (package, sources) = fake_sources(vec![
+            ("cn", Script::steady(1000, 2)),
+            ("hk", Script::steady(1000, 2)),
+        ]);
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let (outcome, received) =
+            download_until(&package, &sources, None, &cancel, || Ok(())).await;
+        assert!(outcome.unwrap_err().is_cancelled());
+        assert!(received.is_empty(), "{received:?}");
+        assert!(package.called().is_empty());
+    }
+
+    /// 下载前的几步（重查、排序）跑到一半用户取消：当场丢下，报取消，不等它自己结束；已经取消了就根本不开始。
+    #[tokio::test(start_paused = true)]
+    async fn a_step_before_the_download_stops_at_cancel() {
+        let cancel = CancellationToken::new();
+        let cancel_at = Duration::from_secs(1);
+        let started = tokio::time::Instant::now();
+        let (outcome, ()) = tokio::join!(
+            unless_cancelled(&cancel, async {
+                // 两个清单端点各等满总时限、再各问一次状态码
+                tokio::time::sleep(CHECK_TIMEOUT * 4).await;
+                Ok("重查完了")
+            }),
+            async {
+                tokio::time::sleep(cancel_at).await;
+                cancel.cancel();
+            }
+        );
+        assert!(outcome.unwrap_err().is_cancelled());
+        assert_eq!(started.elapsed(), cancel_at, "取消后没有立即返回");
+
+        let ran = std::cell::Cell::new(false);
+        let outcome = unless_cancelled(&cancel, async {
+            ran.set(true);
+            Ok(())
+        })
+        .await;
+        assert!(outcome.unwrap_err().is_cancelled());
+        assert!(!ran.get(), "已经取消了还开始跑");
+
+        let live = CancellationToken::new();
+        assert_eq!(
+            unless_cancelled(&live, async { Ok("重查完了") })
+                .await
+                .unwrap(),
+            "重查完了"
+        );
     }
 
     /// 第一个源失败时，下载期间的一次检查已经换了版本：换源之前问一句槽位，报没有可用更新，不再从下一个源白下一遍。
@@ -2709,7 +3020,10 @@ mod tests {
             "https://{}/dev/0.1.0-dev.36-1/installer.exe",
             crate::commands::update_sources::ALLOWED_SOURCE_HOSTS[0]
         );
-        let github = "https://github.com/owner/repo/releases/download/dev-build/installer.exe";
+        let github = format!(
+            "{}/releases/download/dev-build/installer.exe",
+            petalfall_base::brand::REPO_URL
+        );
         let manifest = json!({ "platforms": { "windows-x86_64": {
             "signature": "sig",
             "url": cn,
@@ -2753,19 +3067,57 @@ mod tests {
             );
         }
 
-        let workflow = code_lines(&read(std::path::Path::new(&format!(
+        // 两个作业各有一行同名的 env 和一条读这个地址的 curl：按作业切开再找，否则 publish 里版本检查的那两行就能
+        // 顶替 publish-hk 推送后的回读，回读整步删掉或地址改错都不会挂。
+        let workflow = read(std::path::Path::new(&format!(
             "{github_dir}/workflows/dev-build.yml"
-        ))));
+        )));
+        let hk_manifest_url = format!("HK_MANIFEST_URL: {DEV_ENDPOINT}");
+        let reads_hk_manifest =
+            |line: &String| line.contains("curl ") && line.contains("\"$HK_MANIFEST_URL\"");
+
+        let publish_hk = code_lines(&workflow_job(&workflow, "publish-hk"));
         assert!(
-            workflow.contains(&format!("HK_MANIFEST_URL: {DEV_ENDPOINT}")),
-            "CI 回读的香港清单地址不再是客户端先问的 {DEV_ENDPOINT}"
+            publish_hk.contains(&hk_manifest_url),
+            "publish-hk 回读的香港清单地址不再是客户端先问的 {DEV_ENDPOINT}"
         );
         assert!(
-            workflow
+            publish_hk
                 .iter()
-                .any(|line| line.contains("curl ") && line.contains("\"$HK_MANIFEST_URL\"")),
-            "CI 不再经公网回读香港清单"
+                .any(|line| reads_hk_manifest(line)
+                    && line.contains("--write-out '%{content_type}'")),
+            "publish-hk 推送之后不再经公网回读香港清单、核对 Content-Type"
         );
+
+        let publish = code_lines(&workflow_job(&workflow, "publish"));
+        assert!(
+            publish.contains(&hk_manifest_url),
+            "publish 版本检查读的香港清单地址不再是客户端先问的 {DEV_ENDPOINT}"
+        );
+        assert!(
+            publish.iter().any(reads_hk_manifest),
+            "publish 不再读香港清单检查版本号有没有倒退"
+        );
+    }
+
+    /// 工作流 `jobs` 下作业 `name` 的那一段：从 `  name:` 那一行起，到下一个同级作业或顶层键之前为止。
+    fn workflow_job(workflow: &str, name: &str) -> String {
+        let header = format!("  {name}:");
+        let mut lines = workflow
+            .lines()
+            .skip_while(|line| line.trim_end() != header);
+        let first = lines
+            .next()
+            .unwrap_or_else(|| panic!("工作流里找不到作业 {name}"));
+        let sibling = |line: &&str| {
+            let content = line.trim_start();
+            let indent = line.len() - content.len();
+            indent <= 2 && !content.is_empty() && !content.starts_with('#')
+        };
+        std::iter::once(first)
+            .chain(lines.take_while(|line| !sibling(line)))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// 插件拉起安装程序之前已经藏了窗口：「立即安装」失败时交给 [`install_after_persisting`] 的必须是真去显示主窗口的
@@ -2790,6 +3142,31 @@ mod tests {
             reshow.contains("crate::window::reshow_main_window(app).await"),
             "{reshow}"
         );
+    }
+
+    /// 命令层的接线单测里造不出来（要 AppHandle 与插件的 Update），钉住源码：下载前的重查与排序必须包在
+    /// [`unless_cancelled`] 里，否则取消要等它们自己结束；检查器必须用 [`plugin_client`] 建客户端，否则只剩超时、
+    /// 跟得到 http 跳转。两个函数各自的行为由上面的用例验证。
+    #[test]
+    fn download_steps_watch_the_token_and_checkers_use_the_plugin_client() {
+        let (source, _) = include_str!("updater.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap();
+        let download_update = top_level_fn(source, "pub async fn download_update(");
+        for step in [
+            "unless_cancelled(token, fetch_conclusion(&app)).await?",
+            "unless_cancelled(token, download_plan(&facade, &update)).await?",
+        ] {
+            assert!(download_update.contains(step), "{step}\n{download_update}");
+        }
+        let checker = top_level_fn(source, "fn manifest_checker(");
+        assert!(
+            checker
+                .contains(".configure_client(move |client| plugin_client(client, connect, read))"),
+            "{checker}"
+        );
+        let fetch = top_level_fn(source, "async fn fetch_conclusion(");
+        assert!(fetch.contains("manifest_checker(app, endpoint)"), "{fetch}");
     }
 
     /// `source` 里签名行以 `signature` 开头的顶层函数，从签名行到收尾那一行 `}`。
@@ -2913,16 +3290,129 @@ mod tests {
         (server, url)
     }
 
-    /// 插件报 `ReleaseNotFound` 之后的结论。
+    /// 一次逐端点检查的经过：结论，与按先后问过的端点下标。
+    type Checked = (Result<CheckConclusion<Fake>, CommandError>, Vec<usize>);
+
+    /// 第 i 个端点上插件的检查给出 `results[i]`，跑一遍逐端点检查。回了非 2xx 的端点之后还要再问一次状态码，
+    /// 这样的端点要用本地服务的地址。
+    async fn check_with(
+        endpoints: &[String],
+        results: Vec<tauri_plugin_updater::Result<Option<Fake>>>,
+    ) -> Checked {
+        assert_eq!(endpoints.len(), results.len(), "每个端点配一个检查结果");
+        let mut results = results.into_iter();
+        let mut asked = Vec::new();
+        let conclusion = check_in_order(endpoints, "0.1.0", |index| {
+            asked.push(index);
+            std::future::ready(results.next().expect("问的端点比配好的结果多"))
+        })
+        .await;
+        (conclusion, asked)
+    }
+
+    /// 每个端点都回了非 2xx：插件对每一个都只报 `ReleaseNotFound`。前一个没给出清单，后一个照样要问。
     async fn after_release_not_found(
         endpoints: &[String],
     ) -> Result<CheckConclusion<Fake>, CommandError> {
-        conclude_check(
-            Err(tauri_plugin_updater::Error::ReleaseNotFound),
-            "0.1.0",
-            endpoints,
-        )
-        .await
+        let results = endpoints
+            .iter()
+            .map(|_| Err(UpdaterError::ReleaseNotFound))
+            .collect();
+        let (conclusion, asked) = check_with(endpoints, results).await;
+        assert_eq!(asked, (0..endpoints.len()).collect::<Vec<_>>());
+        conclusion
+    }
+
+    /// 2xx 而正文不是 JSON（站点回退页、中间设备注入的页面）时插件报的错：插件对 2xx 的正文调 `json()`。
+    async fn undecodable() -> UpdaterError {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("<!doctype html><title>落樱</title>"),
+            )
+            .mount(&server)
+            .await;
+        let err = petalfall_base::http::build_client()
+            .unwrap()
+            .get(server.uri())
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap_err();
+        assert!(err.is_decode(), "{err:?}");
+        UpdaterError::Reqwest(err)
+    }
+
+    /// 回了 200 和响应头，正文读到一半撞上总时限时插件报的错。插件给检查设的是 reqwest 的总时限，建连、等首字节与
+    /// 读正文都算在里面，前面慢了，读正文时就会撞上。
+    async fn body_timed_out() -> UpdaterError {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}{MANIFEST}", listener.local_addr().unwrap());
+        // 只用来等对面丢掉发送端：拿到错误后放开连接，服务线程随之退出。
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                      Content-Length: 4096\r\n\r\n{\"version\":",
+                )
+                .unwrap();
+            released.recv().unwrap_err();
+        });
+        // 总时限也管着响应头阶段：给足余量，机器忙、服务线程迟迟排不上时也不会在请求头阶段就超时。
+        let response = petalfall_base::http::build_client()
+            .unwrap()
+            .get(&url)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .expect("请求头阶段就失败了，与被测的正文阶段超时无关");
+        let err = response.json::<Value>().await.unwrap_err();
+        drop(release);
+        server.join().unwrap();
+        assert!(err.is_timeout(), "{err:?}");
+        UpdaterError::Reqwest(err)
+    }
+
+    /// 连得上、却等不到响应头时插件报的错。不 accept 的监听端口照样完成握手，请求发出去就没有下文。
+    async fn timed_out() -> UpdaterError {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}{MANIFEST}", listener.local_addr().unwrap());
+        let err = petalfall_base::http::build_client()
+            .unwrap()
+            .get(&url)
+            .timeout(Duration::from_millis(200))
+            .send()
+            .await
+            .unwrap_err();
+        drop(listener);
+        assert!(err.is_timeout(), "{err:?}");
+        UpdaterError::Reqwest(err)
+    }
+
+    /// 刚关掉的本地端口：再问状态码时连不上。
+    fn closed_endpoint() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}{MANIFEST}",
+            listener.local_addr().unwrap().port()
+        );
+        drop(listener);
+        url
     }
 
     #[tokio::test]
@@ -2933,7 +3423,8 @@ mod tests {
     }
 
     /// 服务器故障不能显示成已是最新：404 以外的状态一律是检查失败，状态码进 detail 让界面写出来。
-    /// 200 是两次请求之间服务恢复了，这次同样没拿到清单，重试就好。
+    /// 200 是两次请求之间服务恢复了，这次同样没拿到清单，重试就好。只有一个端点时形状与逐端点检查之前一致，
+    /// 另带 detail.attempts。
     #[tokio::test]
     async fn other_statuses_behind_release_not_found_stay_check_failures() {
         for status in [200, 400, 401, 403, 405, 429, 500, 502, 503] {
@@ -2941,33 +3432,39 @@ mod tests {
             let endpoints = vec![url];
             let err = after_release_not_found(&endpoints).await.err().unwrap();
             assert_eq!(err.code, code::UPDATE_CHECK_FAILED, "{status}");
-            let detail = err.detail.unwrap();
-            assert_eq!(detail["status"], json!(status));
-            assert_eq!(detail["endpoints"], json!(endpoints));
-            assert!(detail.get("network").is_none(), "{status}");
+            assert_eq!(err.message, "更新服务器返回了异常状态", "{status}");
+            assert_eq!(
+                err.detail,
+                Some(json!({
+                    "endpoints": endpoints,
+                    "status": status,
+                    "attempts": [{
+                        "endpoint": endpoints[0],
+                        "status": status,
+                        "message": "更新服务器返回了异常状态",
+                    }],
+                })),
+                "{status}"
+            );
         }
     }
 
     /// 再问一次时连不上：和插件自己连不上一样是检查失败，照样标出网络层失败的种类。
     #[tokio::test]
     async fn probe_that_cannot_connect_stays_a_check_failure() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!(
-            "http://127.0.0.1:{}{MANIFEST}",
-            listener.local_addr().unwrap().port()
-        );
-        drop(listener);
-
-        let endpoints = vec![url];
+        let endpoints = vec![closed_endpoint()];
         let err = after_release_not_found(&endpoints).await.err().unwrap();
         assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
         let detail = err.detail.unwrap();
         assert_eq!(detail["network"], json!("connect"));
         assert_eq!(detail["endpoints"], json!(endpoints));
+        assert_eq!(detail["attempts"][0]["network"], json!("connect"));
+        assert!(detail["attempts"][0].get("status").is_none());
     }
 
     /// dev 通道有香港机与 GitHub 两个端点：两个都确认 404 才算没有发布，任一端点故障就说不清它上面有没有新版本。
-    /// 端点按 [`channel_endpoints`] 给的先后逐个问，两个顺序都试一遍。
+    /// 端点按 [`channel_endpoints`] 给的先后逐个问，两个顺序都试一遍；每个端点的状态码按问的先后进 detail.attempts，
+    /// message 逐行写明。一个端点 404、另一个根本没答上话（超时）也不算没有发布。
     #[tokio::test]
     async fn every_endpoint_has_to_confirm_404() {
         let (missing, missing_url) = source_answering(404).await;
@@ -2980,49 +3477,230 @@ mod tests {
         assert_eq!(other_missing.received_requests().await.unwrap().len(), 1);
 
         let (_broken, broken_url) = source_answering(503).await;
+        let status_of = |url: &String| if *url == broken_url { 503 } else { 404 };
+        let line_of = |url: &String| match status_of(url) {
+            503 => format!("{url}：更新服务器返回了异常状态（503）"),
+            _ => format!("{url}：更新服务器上没有这份清单（404）"),
+        };
         for endpoints in [
             [missing_url.clone(), broken_url.clone()],
             [broken_url.clone(), missing_url.clone()],
         ] {
             let err = after_release_not_found(&endpoints).await.err().unwrap();
             assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
-            assert_eq!(err.detail.unwrap()["status"], json!(503));
+            assert_eq!(
+                err.message,
+                format!("{}\n{}", line_of(&endpoints[0]), line_of(&endpoints[1]))
+            );
+            let detail = err.detail.unwrap();
+            let attempts: Vec<(String, u64)> = detail["attempts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|attempt| {
+                    (
+                        attempt["endpoint"].as_str().unwrap().to_owned(),
+                        attempt["status"].as_u64().unwrap(),
+                    )
+                })
+                .collect();
+            let expected: Vec<(String, u64)> = endpoints
+                .iter()
+                .map(|url| (url.clone(), status_of(url)))
+                .collect();
+            assert_eq!(attempts, expected);
+            // 前端会把顶层 status 补在整段 message 末尾，多个端点时分不清是谁的。
+            assert!(detail.get("status").is_none());
+            assert!(detail.get("network").is_none());
+        }
+
+        let endpoints = [closed_endpoint(), missing_url.clone()];
+        let (conclusion, asked) = check_with(
+            &endpoints,
+            vec![Err(timed_out().await), Err(UpdaterError::ReleaseNotFound)],
+        )
+        .await;
+        assert_eq!(asked, [0, 1]);
+        let err = conclusion
+            .err()
+            .expect("一个端点超时、另一个 404，不能算没有发布");
+        assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
+        let detail = err.detail.unwrap();
+        assert_eq!(detail["attempts"][0]["network"], json!("timeout"));
+        assert_eq!(detail["attempts"][1]["status"], json!(404));
+        assert!(detail.get("network").is_none());
+    }
+
+    /// 哪个端点先给出了清单就以它为准：后面的端点不再问，前面也没有谁要再问状态码。
+    #[tokio::test]
+    async fn the_first_endpoint_with_a_manifest_settles_the_check() {
+        let (first, first_url) = source_answering(503).await;
+        let (second, second_url) = source_answering(404).await;
+        let endpoints = vec![first_url, second_url];
+
+        let (found, asked) = check_with(
+            &endpoints,
+            vec![Ok(Some(Fake("0.2.0"))), Ok(Some(Fake("0.3.0")))],
+        )
+        .await;
+        assert!(matches!(
+            found.unwrap(),
+            CheckConclusion::Manifest(Some(Fake("0.2.0")))
+        ));
+        assert_eq!(asked, [0]);
+
+        // 已是最新（含端点回 204）同样是给出了清单：不去问 GitHub 有没有更新的。
+        let (latest, asked) = check_with(&endpoints, vec![Ok(None), Ok(Some(Fake("0.3.0")))]).await;
+        assert!(matches!(latest.unwrap(), CheckConclusion::Manifest(None)));
+        assert_eq!(asked, [0]);
+
+        assert!(first.received_requests().await.unwrap().is_empty());
+        assert!(second.received_requests().await.unwrap().is_empty());
+    }
+
+    /// 香港机没给出清单，不管是哪种失败，都接着问 GitHub，拿它的清单下结论；前面那个端点不必再问状态码。
+    /// 插件把几个端点一次性问时，正文不是 JSON、正文读到一半撞上总时限、没有本平台的条目这几种直接返回，
+    /// 字节相同的 GitHub 清单就问不到。
+    #[tokio::test]
+    async fn an_endpoint_without_a_manifest_hands_over_to_the_next() {
+        let failures = [
+            ("正文不是 JSON", undecodable().await),
+            ("正文读到一半撞上总时限", body_timed_out().await),
+            ("连不上", refused().await),
+            ("连得上、等不到响应", timed_out().await),
+            ("非 2xx", UpdaterError::ReleaseNotFound),
+            (
+                "清单不成形",
+                UpdaterError::Serialization(serde_json::from_str::<Value>("{").unwrap_err()),
+            ),
+            (
+                "没有本平台的条目",
+                UpdaterError::TargetsNotFound(vec![
+                    "windows-x86_64-nsis".into(),
+                    "windows-x86_64".into(),
+                ]),
+            ),
+        ];
+        for (case, failure) in failures {
+            let (hk, hk_url) = source_answering(503).await;
+            let endpoints = vec![hk_url, dev_endpoint()];
+            let (conclusion, asked) =
+                check_with(&endpoints, vec![Err(failure), Ok(Some(Fake("0.2.0")))]).await;
+            assert!(
+                matches!(
+                    conclusion,
+                    Ok(CheckConclusion::Manifest(Some(Fake("0.2.0"))))
+                ),
+                "{case}"
+            );
+            assert_eq!(asked, [0, 1], "{case}");
+            assert!(
+                hk.received_requests().await.unwrap().is_empty(),
+                "{case}：后面的端点给出了清单，前面的不必再问状态码"
+            );
         }
     }
 
+    /// 香港机回 403（落盘的清单 Caddy 读不了）、GitHub 又连不上：两个端点各自的结果按问的先后写进 detail.attempts
+    /// 与 message，香港机的状态码看得见；香港机答了话，就不是网络问题，不标 detail.network，界面不会写成连不上。
     #[tokio::test]
-    async fn check_results_with_a_manifest_need_no_probe() {
-        let (source, url) = source_answering(503).await;
-        let endpoints = vec![url];
+    async fn when_no_endpoint_gives_a_manifest_each_one_is_listed() {
+        let refused = refused().await;
+        let refused_raw = refused.to_string();
+        let refused_causes = source_chain(&refused);
+        let (hk, hk_url) = source_answering(403).await;
+        let endpoints = vec![hk_url.clone(), dev_endpoint()];
 
-        let found = conclude_check(Ok(Some(Fake("0.2.0"))), "0.1.0", &endpoints)
-            .await
-            .unwrap();
-        assert!(matches!(
-            found,
-            CheckConclusion::Manifest(Some(Fake("0.2.0")))
-        ));
-        let latest = conclude_check::<Fake>(Ok(None), "0.1.0", &endpoints)
-            .await
-            .unwrap();
-        assert!(matches!(latest, CheckConclusion::Manifest(None)));
-        assert!(source.received_requests().await.unwrap().is_empty());
+        let (conclusion, asked) = check_with(
+            &endpoints,
+            vec![Err(UpdaterError::ReleaseNotFound), Err(refused)],
+        )
+        .await;
+        assert_eq!(asked, [0, 1]);
+        let err = conclusion.err().unwrap();
+        assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
+        assert_eq!(
+            err.message,
+            format!(
+                "{hk_url}：更新服务器返回了异常状态（403）\n{}：{refused_raw}",
+                dev_endpoint()
+            )
+        );
+        let mut github = json!({
+            "endpoint": dev_endpoint(),
+            "network": "connect",
+            "message": refused_raw,
+        });
+        if !refused_causes.is_empty() {
+            github["causes"] = json!(refused_causes);
+        }
+        assert_eq!(
+            err.detail,
+            Some(json!({
+                "endpoints": endpoints,
+                "attempts": [
+                    { "endpoint": hk_url, "status": 403, "message": "更新服务器返回了异常状态" },
+                    github,
+                ],
+            }))
+        );
+        assert_eq!(hk.received_requests().await.unwrap().len(), 1);
     }
 
+    /// 全都败在网络层才标 detail.network：全是超时为 timeout，混着连不上为 connect；再问状态码时连不上也算连不上。
+    /// 有一个端点拿到了响应（正文不是 JSON 也是拿到了），就不标。
+    #[tokio::test]
+    async fn endpoints_failing_only_on_the_network_mark_detail_network() {
+        let unreachable = || vec![closed_endpoint(), closed_endpoint()];
+        for (results, network) in [
+            (
+                vec![Err(refused().await), Err(timed_out().await)],
+                Some("connect"),
+            ),
+            (
+                vec![Err(timed_out().await), Err(refused().await)],
+                Some("connect"),
+            ),
+            (
+                vec![Err(timed_out().await), Err(body_timed_out().await)],
+                Some("timeout"),
+            ),
+            (
+                vec![Err(UpdaterError::ReleaseNotFound), Err(timed_out().await)],
+                Some("connect"),
+            ),
+            (vec![Err(undecodable().await), Err(refused().await)], None),
+        ] {
+            let (conclusion, _) = check_with(&unreachable(), results).await;
+            let err = conclusion.err().unwrap();
+            assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
+            let detail = err.detail.unwrap();
+            assert_eq!(
+                detail.get("network"),
+                network.map(|kind| json!(kind)).as_ref()
+            );
+        }
+    }
+
+    /// 只有一个端点、插件报的又不是非 2xx：不必再问状态码，message 是插件的原文。
     #[tokio::test]
     async fn other_check_failures_stay_failures_without_a_probe() {
         let (source, url) = source_answering(404).await;
-        let err = conclude_check::<Fake>(
-            Err(tauri_plugin_updater::Error::TargetNotFound(
-                "windows-x86_64".into(),
-            )),
-            "0.1.0",
-            &[url],
-        )
-        .await
-        .err()
-        .unwrap();
+        let missing = UpdaterError::TargetNotFound("windows-x86_64".into());
+        let raw = missing.to_string();
+        let endpoints = vec![url];
+        let (conclusion, asked) = check_with(&endpoints, vec![Err(missing)]).await;
+        assert_eq!(asked, [0]);
+        let err = conclusion.err().unwrap();
         assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
+        assert_eq!(err.message, raw);
+        assert_eq!(
+            err.detail,
+            Some(json!({
+                "endpoints": endpoints,
+                "attempts": [{ "endpoint": endpoints[0], "message": raw }],
+            }))
+        );
         assert!(source.received_requests().await.unwrap().is_empty());
     }
 

@@ -238,7 +238,9 @@ export const updaterInfo = (): Promise<UpdaterInfoDto> => invoke<UpdaterInfoDto>
 
 /**
  * 检查更新，没有新版本返回 null。更新源上还没有发布（所有端点的清单都回 404）不算失败：本次会话已知的版本仍在就返回它，否则同样是 null。
- * 不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed：网络层失败带 detail.network，更新源回了 404 以外的非 2xx 带 detail.status。
+ * 不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed：全部端点都败在网络层时带 detail.network；
+ * detail.attempts 按顺序列出每个端点的结果。只有一个端点、它回了 404 以外的非 2xx 时带 detail.status；
+ * 有多个端点时状态码只写在各自那一条里，顶层不带，免得分不清是哪个端点的。
  */
 export const checkUpdate = (): Promise<UpdateDto | null> => invoke<UpdateDto | null>("check_update");
 

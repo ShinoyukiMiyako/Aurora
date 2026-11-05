@@ -93,3 +93,6 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 fastrand = "2"
 # 卡面图片导入的命令层测试要现场编码一张 PNG；与 petalfall-core 同一版本，不多拉格式。
 image = { version = "0.25", default-features = false, features = ["png"] }
+# 自更新换源的判定用例要造清单签名串不是合法 base64 时插件报的 Base64 错误，它包的是 base64 的 DecodeError；
+# 写 "0.22" 与插件的要求一致，两边解析到同一个 0.22.x，才是同一个类型。
+base64 = "0.22"
