@@ -185,13 +185,20 @@ describe("UpdaterController", () => {
     expect(c.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 3 });
   });
 
-  it("后端只列了一个源（或列表为空）：按 1 个源算，文案与单源一致", async () => {
-    for (const sources of [[{ source: "default", failure: "http", message: "404" }], []]) {
-      const c = controllerWith(fakePort({ download: async () => Promise.reject(new IpcError("update_download_failed", "404", { sources })) }));
+  it("后端只列了一个源、或没给逐源失败这一项：按 1 个源算，文案与单源一致", async () => {
+    for (const detail of [{ sources: [{ source: "default", failure: "http", message: "404" }] }, { network: null }]) {
+      const c = controllerWith(fakePort({ download: async () => Promise.reject(new IpcError("update_download_failed", "404", detail)) }));
       await c.check();
       await c.download();
-      expect(c.getState().phase).toMatchObject({ kind: "download_failed", sourcesTried: 1 });
+      expect(c.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: "404", signature: false, network: null, sourcesTried: 1 });
     }
+  });
+
+  it("后端列了逐源失败却一条都没有：是违约，先落进下载失败，再把违约抛给调用方，不当作 1 个源静默放过", async () => {
+    const c = controllerWith(fakePort({ download: async () => Promise.reject(new IpcError("update_download_failed", "x", { network: "connect", sources: [] })) }));
+    await c.check();
+    await expect(c.download()).rejects.toThrow("detail.sources 不成形");
+    expect(c.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: "x", signature: false, network: "connect", sourcesTried: 1 });
   });
 
   it("逐源明细不成形：先落进下载失败（不停在下载中），再把违约抛给调用方", async () => {

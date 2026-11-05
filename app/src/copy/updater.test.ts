@@ -34,13 +34,19 @@ describe("下载失败的写法", () => {
   });
 
   it("试过多个源、全都败在网络层：按种类说所有下载源，逐行原文另放", () => {
-    expect(downloadFailureCopy({ reason: raw, signature: false, network: "connect", sourcesTried: 2 })).toEqual({ summary: "下载失败：所有下载源都连不上", raw });
+    // connect 是「至少一个连不上」，其余源可能是超时，所以不说死都连不上
+    expect(downloadFailureCopy({ reason: raw, signature: false, network: "connect", sourcesTried: 2 })).toEqual({ summary: "下载失败：所有下载源都连不上或没有响应", raw });
     expect(downloadFailureCopy({ reason: raw, signature: false, network: "timeout", sourcesTried: 4 })).toEqual({ summary: "下载失败：所有下载源都没有响应", raw });
   });
 
   it("试过多个源、不全是网络层失败：写试了几个源都没下完", () => {
-    const tried = 2 + Math.floor(Math.random() * 3);
-    expect(downloadFailureCopy({ reason: raw, signature: false, network: null, sourcesTried: tried })).toEqual({ summary: `下载失败：${tried} 个下载源都没能下完`, raw });
+    // 2 是走多源说法的下界，6 超出现有 4 个源，个数照写不封顶
+    expect([2, 3, 4, 6].map((tried) => downloadFailureCopy({ reason: raw, signature: false, network: null, sourcesTried: tried }))).toEqual([
+      { summary: "下载失败：2 个下载源都没能下完", raw },
+      { summary: "下载失败：3 个下载源都没能下完", raw },
+      { summary: "下载失败：4 个下载源都没能下完", raw },
+      { summary: "下载失败：6 个下载源都没能下完", raw },
+    ]);
   });
 
   it("签名不符不论试了几个源都是固定说法，不另放原文", () => {

@@ -74,9 +74,12 @@ export const UPDATE_COPY = {
   installing: "正在启动安装程序…",
   downloadFailed: "下载失败",
   downloadFailedBecause: (reason: string) => `下载失败：${reason}`,
-  /** 试过多个下载源、全都败在网络层：后端只在全是超时时报 timeout，有一个连不上就报 connect。 */
+  /**
+   * 试过多个下载源、全都败在网络层：后端只在全是超时时报 timeout，有一个连不上就报 connect。
+   * 所以 connect 时其余源可能是超时（连上过、甚至传过一段数据），这一句不能说死都连不上。
+   */
   allSourcesFailed: {
-    connect: "所有下载源都连不上",
+    connect: "所有下载源都连不上或没有响应",
     timeout: "所有下载源都没有响应",
   },
   sourcesFailed: (tried: number) => `${tried} 个下载源都没能下完`,

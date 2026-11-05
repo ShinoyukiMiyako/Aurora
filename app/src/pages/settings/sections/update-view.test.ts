@@ -94,7 +94,7 @@ describe("更新卡各阶段", () => {
   it("试过多个下载源、全都败在网络层：次句说所有下载源，逐源原文另放一行", () => {
     const raw = "cn：error sending request for url (https://dl.petalfall.org/a.exe)\nhk：operation timed out";
     const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 2 }), CTX);
-    expect([connect.title, connect.sub, connect.subIsError, connect.raw]).toEqual(["有新版本 0.3.0", "下载失败：所有下载源都连不上", false, raw]);
+    expect([connect.title, connect.sub, connect.subIsError, connect.raw]).toEqual(["有新版本 0.3.0", "下载失败：所有下载源都连不上或没有响应", false, raw]);
     const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout", sourcesTried: 4 }), CTX);
     expect([timeout.sub, timeout.raw]).toEqual(["下载失败：所有下载源都没有响应", raw]);
   });

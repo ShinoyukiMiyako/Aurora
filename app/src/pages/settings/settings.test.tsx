@@ -14,6 +14,7 @@ import { OverlayRoot } from "../../shell/overlay";
 import { pickFile } from "../../shell/platform";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { UpdatePanelMount } from "../../shell/UpdatePanel";
+import panelStyles from "../../shell/UpdatePanel.module.css";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
@@ -22,6 +23,7 @@ import type { IpcRecorder } from "../../test/fake-bridge";
 import { callsOf, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { SettingsCommandsProvider, type SettingsCommands } from "./commands";
 import SettingsPage from "./index";
+import settingsStyles from "./settings.module.css";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -1485,14 +1487,20 @@ describe("设置页：关于与启动器更新", () => {
     await flush();
 
     const panel = openDialogs()[0];
-    expect(panel?.querySelector('[role="alert"]')?.textContent).toBe("下载失败：所有下载源都连不上");
-    expect(panel?.querySelector("[data-selectable]")?.textContent?.split("\n")).toEqual(lines);
+    expect(panel?.querySelector('[role="alert"]')?.textContent).toBe("下载失败：所有下载源都连不上或没有响应");
+    const panelRaw = panel?.querySelector("[data-selectable]");
+    expect(panelRaw?.textContent?.split("\n")).toEqual(lines);
+    // textContent 里的换行不论样式都在，屏幕上逐行显示靠 white-space: pre-line（update-failure-layout.test.ts 读样式表核对）；
+    // 这里核对原文节点挂的正是声明了它的那条规则的类
+    expect(panelRaw?.classList.contains(panelStyles.failureRaw)).toBe(true);
     expect(text()).not.toContain("连不上更新服务器");
 
     await click(button("稍后"));
-    expect(text()).toContain("下载失败：所有下载源都连不上");
+    expect(text()).toContain("下载失败：所有下载源都连不上或没有响应");
     const inCard = all("[data-selectable]").filter((el) => el.closest("[data-sk-modal-layer]") === null);
     expect(inCard.map((el) => el.textContent)).toEqual([raw]);
+    expect(inCard[0]?.classList.contains(settingsStyles.errorText)).toBe(true);
+    expect(inCard[0]?.parentElement?.classList.contains(settingsStyles.updateText)).toBe(true);
   });
 
   it("下载途中换了源：面板与卡片说换用了第几个备用源，进度从头接着报，下完照常", async () => {
@@ -1507,12 +1515,17 @@ describe("设置页：关于与启动器更新", () => {
     });
     expect(text()).toContain("2.4 MB / 12.0 MB");
     expect(text()).not.toContain("已换用备用下载源");
+    // 换源提示要让读屏念出来：status 节点在第一个源时就挂着、是空的，换源时只换文字
+    const panel = openDialogs()[0];
+    const liveRegions = Array.from(panel?.querySelectorAll('[role="status"]') ?? []);
+    expect(liveRegions.map((el) => el.textContent)).toEqual([""]);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(120);
     });
-    const panel = openDialogs()[0];
-    expect(panel?.textContent).toContain("已换用备用下载源（2/4）");
+    expect(openDialogs()[0]).toBe(panel);
+    expect(panel?.querySelector('[role="status"]')).toBe(liveRegions[0]);
+    expect(liveRegions[0]?.textContent).toBe("已换用备用下载源（2/4）");
     expect(panel?.textContent).not.toContain("2.4 MB");
     expect(text()).toContain("0 B · 已换用备用下载源（2/4）");
 

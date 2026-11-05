@@ -110,8 +110,9 @@ export class UpdaterController {
         this.dispatch({ type: "download_failed", taskId, reason: describeError(error), signature: code === SIGNATURE_INVALID_CODE, network: networkFailureOf(error), sourcesTried: tried });
       let sourcesTried: number;
       try {
-        // 只有一个源（或后端没列逐源失败）时文案与单源一致，所以至少按 1 个算
-        sourcesTried = Math.max(1, sourceFailuresOf(error).length);
+        const failures = sourceFailuresOf(error);
+        // 空列表只来自后端没列逐源失败（列了却为空时 sourceFailuresOf 已经抛出），这时与单源一样按 1 个算
+        sourcesTried = failures.length > 0 ? failures.length : 1;
       } catch (contract) {
         // 逐源明细不成形是后端违约：先落进失败状态，界面才不会停在下载中，再把违约抛给调用方（外层统一提示）
         failed(1);

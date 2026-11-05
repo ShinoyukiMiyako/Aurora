@@ -42,8 +42,9 @@ function isSourceFailure(value: unknown): value is UpdateSourceFailureDto {
 }
 
 /**
- * 自更新下载逐个源的失败：后端在 detail.sources 里按尝试顺序给出。不是后端错误或没有这一项时为空数组。
- * 前后端同包发布，这一项有却不成形是违约，直接抛出，不当作没有。
+ * 自更新下载逐个源的失败：后端在 detail.sources 里按尝试顺序给出。不是后端错误或没有这一项时为空数组，
+ * 所以返回空数组只表示「没有这一项」。
+ * 前后端同包发布，这一项有却不成形是违约，直接抛出，不当作没有；后端只在至少试过一个源后才汇总，列表为空同样算不成形。
  */
 export function sourceFailuresOf(error: unknown): UpdateSourceFailureDto[] {
   if (!isIpcError(error)) return [];
@@ -51,7 +52,7 @@ export function sourceFailuresOf(error: unknown): UpdateSourceFailureDto[] {
   if (typeof detail !== "object" || detail === null) return [];
   const { sources } = detail as Record<string, unknown>;
   if (sources === undefined) return [];
-  if (!Array.isArray(sources) || !sources.every(isSourceFailure)) throw new Error(`后端错误 ${error.code} 的 detail.sources 不成形：${JSON.stringify(sources)}`);
+  if (!Array.isArray(sources) || sources.length === 0 || !sources.every(isSourceFailure)) throw new Error(`后端错误 ${error.code} 的 detail.sources 不成形：${JSON.stringify(sources)}`);
   return sources;
 }
 

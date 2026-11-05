@@ -51,7 +51,8 @@ describe("自更新下载逐个源的失败", () => {
   });
 
   it("有这一项却不成形是后端违约：抛出，不当作没有", () => {
-    const bad: unknown[] = [{ list: true }, [{ source: "cn", failure: "dns", message: "x" }], [{ source: "cn", failure: "connect" }], [{ source: 1, failure: "other", message: "x" }], [null], [{ source: "cn", failure: "connect", message: "x", causes: "refused" }], [{ source: "cn", failure: "connect", message: "x", causes: ["refused", 10061] }]];
+    // 空列表：后端至少试过一个源才汇总，有这一项却一条没有同样是违约
+    const bad: unknown[] = [[], { list: true }, [{ source: "cn", failure: "dns", message: "x" }], [{ source: "cn", failure: "connect" }], [{ source: 1, failure: "other", message: "x" }], [null], [{ source: "cn", failure: "connect", message: "x", causes: "refused" }], [{ source: "cn", failure: "connect", message: "x", causes: ["refused", 10061] }]];
     for (const sources of bad) {
       expect(() => sourceFailuresOf(new IpcError("update_download_failed", "x", { sources }))).toThrow("detail.sources 不成形");
     }
