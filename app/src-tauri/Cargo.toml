@@ -27,7 +27,12 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "~2.7"
 # 启动器自更新：检查、下载、安装新版本；安装包由发布环境用私钥签名，客户端以内置公钥校验。
 # 装完后的重启用 tauri 自带的 AppHandle::restart，不需要 process 插件。
-tauri-plugin-updater = "~2.10"
+# 至少 2.12：从这一版起可以要求签名里带版本号（requireSignedVersion，由 CI 注入配置打开），
+# 伪造清单再也不能把旧版本的合法包配上新版本号诱导降级（CVE-2026-95625）。
+# 2.13 起要求 tauri 2.12，会连带 webview2-com 与 windows 升版，所以先锁在 2.12。
+# 关掉默认特性是为了不带上 2.11 起默认开的 system-proxy：它经特性合并会让全程序的
+# reqwest 客户端改走 Windows 系统代理，这是产品行为的变化，不能随依赖升级顺带发生。
+tauri-plugin-updater = { version = "~2.12", default-features = false, features = ["rustls-tls", "zip"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 门面：前端全部能力经此 crate 暴露，业务调用不直接依赖任何下层 crate。
