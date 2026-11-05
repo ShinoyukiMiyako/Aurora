@@ -30,6 +30,14 @@ pub enum CoreEvent {
         plan: Vec<InstallPhase>,
         index: usize,
     },
+    /// 自更新开始从某个下载源取更新包，每个源开始前发一次，第一个也发。`index` 是这个源在本次排好的候选表里的
+    /// 下标（从 0 起），`count` 是候选总数，`name` 是源名。前端据此写「第几个源，共几个」；每个源的下载进度各自
+    /// 从零算，换源时进度条跟着重来。
+    Source {
+        index: usize,
+        count: usize,
+        name: String,
+    },
 }
 
 impl CoreEvent {

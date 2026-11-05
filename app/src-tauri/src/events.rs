@@ -9,7 +9,7 @@ use petalfall_core::{CoreEvent, EventSink};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-/// 阶段、告警、下载进度与多步任务的步骤。
+/// 阶段、告警、下载进度、多步任务的步骤与自更新的换源。
 pub const CORE_EVENT: &str = "petalfall://core-event";
 
 /// 微软设备码登录拿到设备码时推送 user_code 与验证网址。
@@ -69,6 +69,13 @@ pub enum CoreEventKind {
         plan: Vec<&'static str>,
         index: usize,
     },
+    /// 自更新开始从某个下载源取更新包：`index` 是它在本次候选表里的下标（从 0 计），`count` 是候选总数，
+    /// `name` 是源名。每个源开始前一条，第一个也有；换源后从头下，之后的下载快照从 0 报起。
+    Source {
+        index: usize,
+        count: usize,
+        name: String,
+    },
 }
 
 impl From<CoreEvent> for CoreEventKind {
@@ -88,6 +95,9 @@ impl From<CoreEvent> for CoreEventKind {
                 plan: plan.into_iter().map(|phase| phase.key()).collect(),
                 index,
             },
+            CoreEvent::Source { index, count, name } => {
+                CoreEventKind::Source { index, count, name }
+            }
         }
     }
 }
@@ -230,6 +240,31 @@ mod tests {
                 "kind": "phase",
                 "plan": ["metadata", "libraries", "assets", "natives"],
                 "index": 2
+            })
+        );
+    }
+
+    /// 换源事件与其他事件一样平铺在负载里：前端按 kind 认出它，知道换了源、之后的下载进度从 0 报起。
+    #[test]
+    fn source_payload_carries_index_count_and_name() {
+        let payload = CoreEventPayload {
+            task_id: Some("update#3".into()),
+            step: None,
+            event: CoreEvent::Source {
+                index: 1,
+                count: 4,
+                name: "hk".into(),
+            }
+            .into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap(),
+            json!({
+                "task_id": "update#3",
+                "kind": "source",
+                "index": 1,
+                "count": 4,
+                "name": "hk"
             })
         );
     }

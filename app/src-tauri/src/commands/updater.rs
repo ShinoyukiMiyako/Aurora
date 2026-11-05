@@ -1,7 +1,13 @@
 //! 启动器自更新：检查、下载、安装，以及「退出时安装」。
 //!
-//! 走 Rust 侧命令而不是让前端直接调插件：端点要按「文件下载源」策略每次重排（主源与镜像谁先），
-//! 插件的 JS 接口只能用 tauri.conf.json 里写死的端点。
+//! 走 Rust 侧命令而不是让前端直接调插件：安装包要按「文件下载源」策略在清单列出的几个源之间排先后、
+//! 一个源失败换下一个，插件的 JS 接口只会从清单的 `url` 下载；清单端点也按版本号决定，不写在 tauri.conf.json 里。
+//!
+//! 清单的平台条目除了插件认的 `url` 与 `signature`，另带 `x-sources`（候选源）与 `x-size`（包大小）两个扩展键，
+//! 插件和旧客户端都不认、照常忽略，解析与换源的判定见 [`super::update_sources`]。换源只改下载地址，
+//! 验签和签名版本校验仍由插件按清单的 `signature` 与 `version` 做，扩展键里的东西不参与校验。
+//! 真去下载的地址都要过 https 与主机白名单：x-sources 每条和回退地址（插件选中的 `url`）都只比主机不比路径，
+//! 白名单主机回的跳转照跟，完整性靠插件验签。
 //!
 //! 插件只在配置了签名公钥、并要求签名带版本号（`requireSignedVersion: true`）的发行构建里注册
 //! （[`detect_support`]）。没有公钥时插件初始化本身就会失败，而且没有公钥就无从校验更新包，宁可整体不支持。
@@ -15,43 +21,46 @@
 //! 去哪取清单由版本号决定（[`UpdateChannel`]），与前端从版本号推发布通道同源，不另设配置。
 
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use petalfall_core::{CancellationToken, CoreEvent, DownloadProgress, EventSink};
+use petalfall_core::{CancellationToken, CoreEvent, DownloadProgress, EventSink, PackageCandidate};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State, Url};
 use tauri_plugin_updater::{Update, UpdaterExt};
+use tokio::sync::Notify;
 
 use crate::commands::error::{code, source_chain, CommandError};
+use crate::commands::update_sources::{
+    judge, package_plan, sources_failed, AttemptError, PackageSource, Verdict,
+};
 use crate::commands::update_stall::{StallGuard, STALL_MIN_BYTES, STALL_WINDOW};
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
 use crate::tasks::TaskRegistry;
 
-/// 主更新源的清单地址。
+/// 正式通道的清单地址，放在香港机上，是这个通道唯一的权威清单。
 pub const PRIMARY_ENDPOINT: &str = concat!(
     "https://",
     petalfall_base::app_slug!(),
-    ".org/updates/latest.json"
+    ".org/updates/stable/latest.json"
 );
 
-/// 国内镜像的清单地址。
-pub const MIRROR_ENDPOINT: &str = concat!(
+/// 开发版通道的权威清单地址，放在香港机上。国内连 GitHub 常常不通，清单先从这里取；
+/// CI 往这里和 [`dev_endpoint`] 发的是同一份文件，字节相同。
+pub const DEV_ENDPOINT: &str = concat!(
     "https://",
     petalfall_base::app_slug!(),
-    ".cn/updates/latest.json"
+    ".org/updates/dev/latest.json"
 );
-
-/// 镜像域名完成 ICP 备案前不能对外服务，先关着；打开后端点顺序按下载源策略排。
-pub const MIRROR_ENABLED: bool = false;
 
 /// dev 分支每次构建都重建的滚动预发布，CI 里的 tag 必须与它一致。
 const DEV_RELEASE_TAG: &str = "dev-build";
 
-/// 开发版通道的清单地址。dev 包本来就发在这个预发布上，清单和安装包放在一起，不用另找地方托管；
-/// 只有这一个源，也就不按下载源策略排序。
+/// 开发版通道在 GitHub 滚动预发布上的那份清单。dev.35 及更早的客户端只认这一个地址，CI 照旧往这里发；
+/// 新客户端把它排在 [`DEV_ENDPOINT`] 之后，香港机连不上时还能拿到清单。
 pub fn dev_endpoint() -> String {
     format!(
         "{}/releases/download/{DEV_RELEASE_TAG}/latest.json",
@@ -64,8 +73,17 @@ pub fn dev_endpoint() -> String {
 pub enum UpdateChannel {
     /// dev 分支的 CI 构建，版本号形如 `0.1.0-dev.12`。
     Dev,
-    /// 其余版本，走主源与镜像。
+    /// 其余版本，走正式通道的清单。
     Release,
+}
+
+/// 这个通道按顺序交给插件的清单端点：前一个连不上或非 2xx 时插件自动试下一个。顺序固定、不探测：
+/// 清单只有几百字节，测速省不下时间，反倒多一轮请求。
+fn channel_endpoints(channel: UpdateChannel) -> Vec<String> {
+    match channel {
+        UpdateChannel::Dev => vec![DEV_ENDPOINT.to_owned(), dev_endpoint()],
+        UpdateChannel::Release => vec![PRIMARY_ENDPOINT.to_owned()],
+    }
 }
 
 impl UpdateChannel {
@@ -297,28 +315,35 @@ impl<U: ReleaseVersion> UpdateSlot<U> {
         })
     }
 
-    /// 收下下载好的包。下载期间又检查过一次、结果换了版本或已无更新时不收：与 [`record_check`](Self::record_check)
-    /// 守的是同一件事，界面按最新的检查结果显示版本，退出时装上的却是旧包。
-    fn store_download(&mut self, update: U, bytes: Vec<u8>) -> Result<(), CommandError> {
+    /// 正在下载的 `update` 是否仍是最新的检查结果。下载期间又检查过一次、结果换了版本或已无更新时报
+    /// `update_not_available`：下好也收不得，换源前问一句就不必再从下一个源白下一遍。
+    fn ensure_current(&self, update: &U) -> Result<(), CommandError> {
         let latest = self.available.as_ref().map(ReleaseVersion::release_version);
-        if latest != Some(update.release_version()) {
-            tracing::info!(
-                downloaded = update.release_version(),
-                ?latest,
-                "下载期间检查结果已变化，丢弃刚下好的更新包"
-            );
-            let message = match latest {
-                Some(latest) => format!(
-                    "下载期间检查到了更新的版本 {latest}，刚下好的 {} 已作废，请重新下载",
-                    update.release_version()
-                ),
-                None => format!(
-                    "下载期间再次检查时已没有可用更新，刚下好的 {} 已作废",
-                    update.release_version()
-                ),
-            };
-            return Err(CommandError::new(code::UPDATE_NOT_AVAILABLE, message));
+        if latest == Some(update.release_version()) {
+            return Ok(());
         }
+        tracing::info!(
+            downloading = update.release_version(),
+            ?latest,
+            "下载期间检查结果已变化，这次下载的更新包作废"
+        );
+        let message = match latest {
+            Some(latest) => format!(
+                "下载期间检查到了更新的版本 {latest}，这次下载的 {} 已作废，请重新下载",
+                update.release_version()
+            ),
+            None => format!(
+                "下载期间再次检查时已没有可用更新，这次下载的 {} 已作废",
+                update.release_version()
+            ),
+        };
+        Err(CommandError::new(code::UPDATE_NOT_AVAILABLE, message))
+    }
+
+    /// 收下下载好的包。下载期间又检查过一次、结果换了版本或已无更新时不收（[`ensure_current`](Self::ensure_current)）：
+    /// 与 [`record_check`](Self::record_check) 守的是同一件事，界面按最新的检查结果显示版本，退出时装上的却是旧包。
+    fn store_download(&mut self, update: U, bytes: Vec<u8>) -> Result<(), CommandError> {
+        self.ensure_current(&update)?;
         self.downloaded = Some(Downloaded { update, bytes });
         Ok(())
     }
@@ -412,37 +437,24 @@ pub async fn updater_info(
     Ok(updater.info(app.package_info().version.to_string()))
 }
 
-/// 检查更新。开发版只问 [`dev_endpoint`]；其余版本的端点按「文件下载源」策略排序，前一个连不上或非 2xx 时
-/// 插件自动试下一个。
+/// 检查更新。端点见 [`channel_endpoints`]：开发版先问 [`DEV_ENDPOINT`] 再问 [`dev_endpoint`]，前一个连不上或
+/// 非 2xx 时插件自动试下一个；其余版本只问 [`PRIMARY_ENDPOINT`]。
 /// 已是最新返回 `null`；所有端点的清单都确认 404 不算失败，见 [`conclude_check`] 与 [`UpdateSlot::settle_check`]。
 /// 不看 `check_updates` 设置：那一项只管启动时要不要自动查，由前端决定。
 #[tauri::command]
 pub async fn check_update(
     app: AppHandle,
-    facade: State<'_, Facade>,
     updater: State<'_, UpdaterState>,
 ) -> Result<Option<UpdateDto>, CommandError> {
     updater.require_supported()?;
-    let conclusion = fetch_conclusion(&app, &facade).await?;
+    let conclusion = fetch_conclusion(&app).await?;
     let dto = updater.slot().settle_check(conclusion).map(update_dto);
     Ok(dto)
 }
 
 /// 取一次清单并下结论。检查和下载前的重查共用。
-async fn fetch_conclusion(
-    app: &AppHandle,
-    facade: &Facade,
-) -> Result<CheckConclusion<Update>, CommandError> {
-    let endpoints = match UpdateChannel::of(app.package_info().version.pre.as_str()) {
-        UpdateChannel::Dev => vec![dev_endpoint()],
-        UpdateChannel::Release => {
-            facade
-                .snapshot()
-                .await
-                .update_endpoints(PRIMARY_ENDPOINT, MIRROR_ENABLED.then_some(MIRROR_ENDPOINT))
-                .await
-        }
-    };
+async fn fetch_conclusion(app: &AppHandle) -> Result<CheckConclusion<Update>, CommandError> {
+    let endpoints = channel_endpoints(UpdateChannel::of(app.package_info().version.pre.as_str()));
     let urls = endpoint_urls(&endpoints);
     let http = petalfall_base::http::HttpConfig::default();
     let (connect, read) = (http.connect_timeout, http.read_timeout);
@@ -554,11 +566,14 @@ fn check_failed(endpoints: &[String], err: tauri_plugin_updater::Error) -> Comma
     )
 }
 
-/// 先按最新清单重查一次，再下载其中的更新并校验签名，返回实际下载的版本（可能比界面上记着的新）。
-/// 长任务：进度经 core-event 推送（`kind: "download"`，`total` 恒为 1，带 `task_id`），可经
-/// `cancel_task(taskId)` 取消。签名不符报 `update_signature_invalid`，包随即丢弃；下载期间再次检查换了版本
-/// 或已无更新时报 `update_not_available`，包同样丢弃。正文开始后长时间没有进展（见 [`StallWatch`]）
-/// 时中止下载，报 `update_download_failed`，`detail.network` 为 `timeout`。
+/// 先按最新清单重查一次，再按「文件下载源」策略把清单列出的源排好（[`ordered_sources`]），逐个下载并校验签名，
+/// 返回实际下载的版本（可能比界面上记着的新）。
+/// 长任务：每个源开始前推一条 core-event `kind: "source"`，之后推下载进度（`kind: "download"`，`total` 恒为 1），
+/// 都带 `task_id`；可经 `cancel_task(taskId)` 取消。一个源失败就换下一个，哪些失败换源、哪些立即停见
+/// [`judge`]；全部失败时按 [`sources_failed`] 汇总，`detail.sources` 逐个列出已试的源。清单没给出可用候选、
+/// 退回的插件选中地址又没过白名单时，一个源都不试，报 `update_download_failed`（见 [`package_plan`]）。下载期间
+/// 再次检查换了版本或已无更新时报 `update_not_available`，包同样丢弃。正文开始后长时间没有进展（见 [`StallWatch`]）
+/// 记为超时，下载的字节超过清单声明的大小记为 `too_large`，都换下一个源。
 #[tauri::command]
 pub async fn download_update(
     task_id: String,
@@ -572,19 +587,59 @@ pub async fn download_update(
     let outcome = async {
         let task = tasks.register(&task_id)?;
         // 开发版的滚动预发布每次构建都删掉上一版安装包，检查时记下的地址过一阵就 404，重试也一样
-        let conclusion = fetch_conclusion(&app, &facade).await?;
+        let conclusion = fetch_conclusion(&app).await?;
         let update = updater.slot().update_to_download(conclusion)?;
-        let bytes = task
-            .run(download_with_progress(&update, events.sink(), task.token()))
+        let plan = package_plan(&update.raw_json, &update.download_url, &update.signature)?;
+        let sources = ordered_sources(&facade, plan.sources).await;
+        let (bytes, source) = task
+            .run(download_with_progress(
+                &update,
+                &sources,
+                plan.size,
+                events.sink(),
+                task.token(),
+                || updater.slot().ensure_current(&update),
+            ))
             .await?;
         let dto = update_dto(&update);
-        tracing::info!(version = %update.version, size = bytes.len(), "更新包下载并校验完成");
+        tracing::info!(
+            version = %update.version,
+            source = %source.name,
+            size = bytes.len(),
+            "更新包下载并校验完成"
+        );
+        // 槽位里存的是清单原样的那份：安装只用字节，换源改过的下载地址留着没有用处。
         updater.slot().store_download(update, bytes)?;
         Ok(dto)
     }
     .await;
     events.finish().await;
     outcome
+}
+
+/// 按「文件下载源」策略给清单列出的源排先后。排序在门面里做（自动档要探测），这里只在两边的类型之间来回转换。
+async fn ordered_sources(facade: &Facade, sources: Vec<PackageSource>) -> Vec<PackageSource> {
+    let candidates = sources
+        .iter()
+        .map(|source| PackageCandidate {
+            name: source.name.clone(),
+            url: source.url.to_string(),
+            region: source.region,
+        })
+        .collect();
+    let ordered = facade.snapshot().await.package_sources(candidates).await;
+    let mut unordered = sources;
+    ordered
+        .into_iter()
+        .map(|candidate| {
+            // 源名在解析清单时已去过重，排序只换先后、不增删，按名字认得回原来那一条。
+            let at = unordered
+                .iter()
+                .position(|source| source.name == candidate.name)
+                .expect("门面排序只换先后，不会多出清单里没有的源");
+            unordered.swap_remove(at)
+        })
+        .collect()
 }
 
 /// 立即安装已下载的更新。Windows 上拉起安装程序后进程退出，前端收不到返回；拉不起来时先把主窗口重新显示
@@ -668,9 +723,12 @@ fn endpoint_urls(endpoints: &[String]) -> Vec<Url> {
         .collect()
 }
 
-/// 下载并校验更新包的那一步。抽成 trait 是为了单测能换上假的下载、按暂停的时钟喂逐块回调，钉住进度与
-/// 卡死检测接在回调上的那几处；插件的 `Update` 字段私有，单测造不出来。
-trait PackageDownload {
+/// 下载并校验更新包的那一步。抽成 trait 是为了单测能换上假的下载、按暂停的时钟喂逐块回调，钉住进度、
+/// 卡死检测与换源接在回调上的那几处；插件的 `Update` 字段私有，单测造不出来。
+trait PackageDownload: Sized {
+    /// 同一个更新换一个下载地址。只换地址：版本、签名和客户端配置原样，验签与签名版本校验照旧按清单的标准字段做。
+    fn with_download_url(&self, url: &Url) -> Self;
+
     fn download_package<C, D>(
         &self,
         on_chunk: C,
@@ -682,6 +740,12 @@ trait PackageDownload {
 }
 
 impl PackageDownload for Update {
+    fn with_download_url(&self, url: &Url) -> Self {
+        let mut update = self.clone();
+        update.download_url = url.clone();
+        update
+    }
+
     fn download_package<C, D>(
         &self,
         on_chunk: C,
@@ -695,17 +759,67 @@ impl PackageDownload for Update {
     }
 }
 
-async fn download_with_progress(
+/// 按 `sources` 的先后逐个源下载，返回第一个下好并通过校验的包与它的源。
+///
+/// 每个源开始前推一条 [`CoreEvent::Source`]；失败由 [`judge`] 判定换不换下一个，同一个源不重试。换下一个源之前
+/// 先问 `still_current`：下载期间又检查过、换了版本或已无更新时，再从下一个源下好也会被槽位拒收，白下一遍。
+/// 用户取消立即返回，后面的源一个都不再试。
+async fn download_with_progress<'s>(
     package: &impl PackageDownload,
+    sources: &'s [PackageSource],
+    size: Option<u64>,
     sink: &EventSink,
     cancel: &CancellationToken,
-) -> Result<Vec<u8>, CommandError> {
+    still_current: impl Fn() -> Result<(), CommandError>,
+) -> Result<(Vec<u8>, &'s PackageSource), CommandError> {
+    let count = sources.len();
+    let mut failures = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        if index > 0 {
+            still_current()?;
+        }
+        send(
+            sink,
+            CoreEvent::Source {
+                index,
+                count,
+                name: source.name.clone(),
+            },
+        );
+        let attempt = package.with_download_url(&source.url);
+        let outcome = cancel
+            .run_until_cancelled(attempt_download(&attempt, size, sink))
+            .await
+            .ok_or_else(CommandError::cancelled)?;
+        let err = match outcome {
+            Ok(bytes) => return Ok((bytes, source)),
+            Err(err) => err,
+        };
+        let failure = judge(source, err);
+        let stop = failure.verdict == Verdict::Stop;
+        failures.push(failure);
+        if stop {
+            break;
+        }
+    }
+    Err(sources_failed(failures))
+}
+
+/// 从一个源下载并校验更新包。进度计量与卡死检测每个源各建一份：换源后从零重下，进度与窗口都要从头算，
+/// 沿用上一个源的卡死检测会把新源还没开始的那几秒算成没有进展。
+async fn attempt_download(
+    package: &impl PackageDownload,
+    size: Option<u64>,
+    sink: &EventSink,
+) -> Result<Vec<u8>, AttemptError> {
     let mut meter = DownloadMeter::new(Instant::now(), PROGRESS_INTERVAL);
     let stall = StallWatch::new(STALL_WINDOW, STALL_MIN_BYTES);
+    let limit = SizeLimit::new(size);
     let verify_sink = sink.clone();
     let download = package.download_package(
         |len, content_length| {
             stall.record(len as u64, stall_clock());
+            limit.record(len as u64);
             if let Some(progress) = meter.chunk(len, content_length, Instant::now()) {
                 send(sink, CoreEvent::Download(progress));
             }
@@ -717,14 +831,68 @@ async fn download_with_progress(
             )
         },
     );
-    let bytes = cancel
-        .run_until_cancelled(unless_stalled(download, &stall, STALL_CHECK_INTERVAL))
-        .await
-        .ok_or_else(CommandError::cancelled)?
-        .ok_or_else(stalled_download)?
-        .map_err(|err| updater_error(code::UPDATE_DOWNLOAD_FAILED, "下载更新失败", None, err))?;
+    let Some(within_limit) =
+        unless_stalled(limit.cut_off(download), &stall, STALL_CHECK_INTERVAL).await
+    else {
+        tracing::warn!(
+            window_secs = STALL_WINDOW.as_secs(),
+            min_bytes = STALL_MIN_BYTES,
+            "更新包下载长时间没有进展，中止"
+        );
+        return Err(AttemptError::Stalled);
+    };
+    let bytes = within_limit?.map_err(AttemptError::Plugin)?;
     send(sink, CoreEvent::Download(meter.finish(Instant::now())));
     Ok(bytes)
+}
+
+/// 更新包的大小上限，取清单的 `x-size`。插件把整个包读进内存、读到连接结束为止，一个不停吐数据的源能把内存吃满；
+/// 逐块回调里累计字节，一超过上限就让外层丢掉下载 future，连接随之关闭。清单没给大小时不设限。
+struct SizeLimit {
+    limit: Option<u64>,
+    received: AtomicU64,
+    exceeded: Notify,
+}
+
+impl SizeLimit {
+    fn new(limit: Option<u64>) -> Self {
+        Self {
+            limit,
+            received: AtomicU64::new(0),
+            exceeded: Notify::new(),
+        }
+    }
+
+    fn record(&self, bytes: u64) {
+        // 逐块回调与外层的 select 在同一个任务里轮流跑，从不并发；用原子量只因命令的 future 要能跨线程，Relaxed 就够。
+        let received = self.received.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        if self.limit.is_some_and(|limit| received > limit) {
+            self.exceeded.notify_one();
+        }
+    }
+
+    fn exceeded(&self) -> bool {
+        self.limit
+            .is_some_and(|limit| self.received.load(Ordering::Relaxed) > limit)
+    }
+
+    /// 跑 `download`，累计字节一超过上限就丢掉它，报 [`AttemptError::TooLarge`]。
+    async fn cut_off<T>(&self, download: impl Future<Output = T>) -> Result<T, AttemptError> {
+        let Some(limit) = self.limit else {
+            return Ok(download.await);
+        };
+        tokio::select! {
+            biased;
+            () = self.exceeded.notified() => Err(AttemptError::TooLarge { limit }),
+            // 插件逐块读、手头有数据就不让出，越过上限的那一块和下载结束可能落在同一次轮询里：结束时再看一眼，
+            // 超过就是超过，不因为恰好读完了就收下。
+            outcome = download => if self.exceeded() {
+                Err(AttemptError::TooLarge { limit })
+            } else {
+                Ok(outcome)
+            },
+        }
+    }
 }
 
 /// 卡死检测的时钟。走 tokio 的时钟：线上与系统时钟一致，单测暂停时钟就能按定时器推进。
@@ -793,17 +961,6 @@ async fn unless_stalled<T>(
             }
         }
     }
-}
-
-/// 下载卡住时给前端的错误：与读超时一样标成网络超时，前端按同一套文案提示用户检查网络后重试。
-fn stalled_download() -> CommandError {
-    tracing::warn!(
-        window_secs = STALL_WINDOW.as_secs(),
-        min_bytes = STALL_MIN_BYTES,
-        "更新包下载长时间没有进展，中止"
-    );
-    CommandError::new(code::UPDATE_DOWNLOAD_FAILED, "下载长时间没有进展，已中止")
-        .with_detail(json!({ "network": petalfall_base::http::NetworkFailure::Timeout.code() }))
 }
 
 fn send(sink: &EventSink, event: CoreEvent) {
@@ -922,6 +1079,9 @@ fn updater_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use petalfall_core::SourceRegion;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     /// 立即安装在拉起安装程序之前就把待补的游玩记录写进了文件，安装的结果原样返回。
     #[tokio::test]
@@ -1270,17 +1430,32 @@ mod tests {
         assert_eq!(info["downloaded_version"], Value::Null);
     }
 
+    /// 两个通道的权威清单都在香港机上，按通道分目录：正式版与开发版各认各的，谁也拿不到对方的清单。
     #[test]
     fn endpoints_are_https_on_brand_domains() {
-        let urls = endpoint_urls(&[PRIMARY_ENDPOINT.to_owned(), MIRROR_ENDPOINT.to_owned()]);
-        assert_eq!(urls[0].scheme(), "https");
+        let host = format!("{}.org", petalfall_base::brand::APP_SLUG);
+        for (endpoint, path) in [
+            (PRIMARY_ENDPOINT, "/updates/stable/latest.json"),
+            (DEV_ENDPOINT, "/updates/dev/latest.json"),
+        ] {
+            let urls = endpoint_urls(&[endpoint.to_owned()]);
+            assert_eq!(urls[0].scheme(), "https", "{endpoint}");
+            assert_eq!(urls[0].host_str(), Some(host.as_str()), "{endpoint}");
+            assert_eq!(urls[0].path(), path, "{endpoint}");
+        }
+    }
+
+    /// dev 通道先问香港机、再问 GitHub：反过来的话，连不上 GitHub 的用户每次检查都要先等它超时。
+    /// 正式通道只有香港机一份。
+    #[test]
+    fn each_channel_asks_its_endpoints_in_a_fixed_order() {
         assert_eq!(
-            urls[0].host_str(),
-            Some(format!("{}.org", petalfall_base::brand::APP_SLUG).as_str())
+            channel_endpoints(UpdateChannel::Dev),
+            vec![DEV_ENDPOINT.to_owned(), dev_endpoint()]
         );
         assert_eq!(
-            urls[1].host_str(),
-            Some(format!("{}.cn", petalfall_base::brand::APP_SLUG).as_str())
+            channel_endpoints(UpdateChannel::Release),
+            vec![PRIMARY_ENDPOINT.to_owned()]
         );
     }
 
@@ -1779,19 +1954,133 @@ mod tests {
         assert_eq!(stall_clock() - started, Duration::from_secs(100));
     }
 
-    /// 假的更新包下载：先等 `head`（建连、跳转、等首字节），之后每秒到一块 `chunk` 字节、共 `chunks` 块；
-    /// `hang` 时最后一块之后再不送数据，否则下完交回 [`PACKAGE`]。
-    #[derive(Clone, Copy)]
-    struct FakePackage {
+    type UpdaterError = tauri_plugin_updater::Error;
+
+    /// 一个源的剧本：先等 `head`（建连、跳转、等首字节），之后每秒到一块 `chunk` 字节、共 `chunks` 块，再按 `ending` 收尾。
+    struct Script {
         head: Duration,
         chunk: usize,
         chunks: usize,
-        hang: bool,
+        ending: Ending,
     }
 
-    const PACKAGE: &[u8] = b"signed installer";
+    enum Ending {
+        /// 正文下完、验签通过，交回 [`package_from`] 这个源的包。
+        Verified,
+        /// 正文下完、验签不过：插件先报下载完成，再报这个错。
+        Rejected(UpdaterError),
+        /// 正文下完之前就出错：连不上、回了非 2xx。
+        Failed(UpdaterError),
+        /// 最后一块之后再不送数据，连接也不断。
+        Hang,
+    }
+
+    impl Script {
+        /// 一开始就有数据、按块下完、验签通过。
+        fn steady(chunk: usize, chunks: usize) -> Self {
+            Script {
+                head: Duration::ZERO,
+                chunk,
+                chunks,
+                ending: Ending::Verified,
+            }
+        }
+
+        /// 一个字节都没收到就失败。
+        fn failing(err: UpdaterError) -> Self {
+            Script {
+                head: Duration::ZERO,
+                chunk: 0,
+                chunks: 0,
+                ending: Ending::Failed(err),
+            }
+        }
+
+        /// 按块下完，字节或签名被插件拒掉。
+        fn rejected(chunk: usize, chunks: usize, err: UpdaterError) -> Self {
+            Script {
+                ending: Ending::Rejected(err),
+                ..Script::steady(chunk, chunks)
+            }
+        }
+    }
+
+    /// 插件对非 2xx 下载的报法。
+    fn status(status: &str) -> UpdaterError {
+        UpdaterError::Network(format!("Download request failed with status: {status}"))
+    }
+
+    /// 这个源的字节对不上签名。
+    fn bad_bytes() -> UpdaterError {
+        UpdaterError::Minisign(minisign_verify::Error::InvalidSignature)
+    }
+
+    /// 清单把旧版本的包配上了新版本号。
+    fn downgrade() -> UpdaterError {
+        UpdaterError::SignedVersionMismatch {
+            signed: "0.1.0-dev.12".into(),
+            announced: "0.1.0-dev.40".into(),
+        }
+    }
+
+    /// 连一个刚关掉的本地端口，拿一份真的「连接被拒」。要在暂停时钟之前拿：暂停后等真实 I/O 时 tokio 会把时钟拨到
+    /// 下一个定时器，连接超时可能抢在被拒之前到点。
+    async fn refused() -> UpdaterError {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/installer.exe",
+            listener.local_addr().unwrap().port()
+        );
+        drop(listener);
+        let err = petalfall_base::http::build_client()
+            .unwrap()
+            .get(&url)
+            .send()
+            .await
+            .unwrap_err();
+        UpdaterError::Reqwest(err)
+    }
+
+    /// 某个源下好、验签通过的包：带上源名，看得出交回的是哪个源的字节。
+    fn package_from(source: &str) -> Vec<u8> {
+        format!("signed installer from {source}").into_bytes()
+    }
+
+    /// 多源的假下载：每个源的地址各配一份剧本，记下按什么顺序、在什么时刻下过哪些源。剧本取一次就没了，
+    /// 同一个源下第二次直接挂：换源的约定是同一个源不重试。
+    #[derive(Clone)]
+    struct FakePackage {
+        url: Url,
+        scripts: Arc<Mutex<HashMap<Url, (String, Script)>>>,
+        calls: Arc<Mutex<Vec<(String, tokio::time::Instant)>>>,
+    }
+
+    impl FakePackage {
+        /// 下过的源名，按开始的先后。
+        fn called(&self) -> Vec<String> {
+            let calls = self.calls.lock().unwrap();
+            calls.iter().map(|(name, _)| name.clone()).collect()
+        }
+
+        /// 源 `name` 开始下载的时刻。
+        fn started(&self, name: &str) -> tokio::time::Instant {
+            let calls = self.calls.lock().unwrap();
+            let (_, at) = calls
+                .iter()
+                .find(|(called, _)| called == name)
+                .unwrap_or_else(|| panic!("{name} 没有下过"));
+            *at
+        }
+    }
 
     impl PackageDownload for FakePackage {
+        fn with_download_url(&self, url: &Url) -> Self {
+            FakePackage {
+                url: url.clone(),
+                ..self.clone()
+            }
+        }
+
         fn download_package<C, D>(
             &self,
             mut on_chunk: C,
@@ -1801,12 +2090,22 @@ mod tests {
             C: FnMut(usize, Option<u64>) + Send,
             D: FnOnce() + Send,
         {
-            let FakePackage {
+            let (name, script) = self
+                .scripts
+                .lock()
+                .unwrap()
+                .remove(&self.url)
+                .unwrap_or_else(|| panic!("{} 没有剧本，或同一个源下了第二次", self.url));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((name.clone(), tokio::time::Instant::now()));
+            let Script {
                 head,
                 chunk,
                 chunks,
-                hang,
-            } = *self;
+                ending,
+            } = script;
             let total = (chunk * chunks) as u64;
             async move {
                 tokio::time::sleep(head).await;
@@ -1814,39 +2113,140 @@ mod tests {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     on_chunk(chunk, Some(total));
                 }
-                if hang {
-                    std::future::pending::<()>().await;
+                match ending {
+                    Ending::Verified => {
+                        on_download_finish();
+                        Ok(package_from(&name))
+                    }
+                    Ending::Rejected(err) => {
+                        on_download_finish();
+                        Err(err)
+                    }
+                    Ending::Failed(err) => Err(err),
+                    Ending::Hang => std::future::pending().await,
                 }
-                on_download_finish();
-                Ok(PACKAGE.to_vec())
             }
         }
+    }
+
+    /// 按给出的先后排好的源，及给它们配好剧本的假下载。源名同时是地址的第一段路径；主机在解析清单时才查白名单，
+    /// 这里不经过。假下载自己的地址没有剧本：不经换源、直接拿插件选中的地址去下就会挂。
+    fn fake_sources(scripts: Vec<(&str, Script)>) -> (FakePackage, Vec<PackageSource>) {
+        let mut sources = Vec::new();
+        let mut by_url = HashMap::new();
+        for (name, script) in scripts {
+            let url = Url::parse(&format!("https://example.invalid/{name}/installer.exe")).unwrap();
+            sources.push(PackageSource {
+                name: name.to_owned(),
+                url: url.clone(),
+                region: SourceRegion::Domestic,
+            });
+            by_url.insert(url, (name.to_owned(), script));
+        }
+        let package = FakePackage {
+            url: Url::parse("https://example.invalid/chosen-by-plugin.exe").unwrap(),
+            scripts: Arc::new(Mutex::new(by_url)),
+            calls: Arc::default(),
+        };
+        (package, sources)
+    }
+
+    /// 一次多源下载的结局：成功时是交回的字节与源名。
+    type Outcome = Result<(Vec<u8>, String), CommandError>;
+
+    /// 跑一遍多源下载，返回结局与推出的全部事件。清单一直没变，也不取消。
+    async fn download_all(
+        package: &FakePackage,
+        sources: &[PackageSource],
+        size: Option<u64>,
+    ) -> (Outcome, Vec<CoreEvent>) {
+        download_until(package, sources, size, &CancellationToken::new(), || Ok(())).await
+    }
+
+    async fn download_until(
+        package: &FakePackage,
+        sources: &[PackageSource],
+        size: Option<u64>,
+        cancel: &CancellationToken,
+        still_current: impl Fn() -> Result<(), CommandError>,
+    ) -> (Outcome, Vec<CoreEvent>) {
+        let (sink, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = tokio::time::timeout(
+            NEVER,
+            download_with_progress(package, sources, size, &sink, cancel, still_current),
+        )
+        .await
+        .expect("多源下载一直没有收场")
+        .map(|(bytes, source)| (bytes, source.name.clone()));
+        drop(sink);
+        let mut received = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            received.push(event);
+        }
+        (outcome, received)
+    }
+
+    /// 事件里看得出先后的那几条：换源、阶段、收尾快照（带有效字节）。中途的进度快照按真实时钟节流，条数不定，略去。
+    fn milestones(events: &[CoreEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                CoreEvent::Source { index, count, name } => {
+                    Some(format!("source {index}/{count} {name}"))
+                }
+                CoreEvent::Stage(stage) => Some(format!("stage {stage}")),
+                CoreEvent::Download(progress) if progress.finished == 1 => {
+                    Some(format!("done {}", progress.bytes))
+                }
+                CoreEvent::Download(_) => None,
+                other => panic!("下载更新包不该推 {other:?}"),
+            })
+            .collect()
+    }
+
+    const VERIFYING: &str = "stage 更新包下载完成，正在校验签名";
+
+    /// detail.sources 里每一条的（源名，失败种类）。
+    fn failure_kinds(err: &CommandError) -> Vec<(String, String)> {
+        let detail = err.detail.as_ref().expect("下载失败没有带 detail");
+        detail["sources"]
+            .as_array()
+            .expect("detail.sources 不是数组")
+            .iter()
+            .map(|failure| {
+                (
+                    failure["source"].as_str().unwrap().to_owned(),
+                    failure["failure"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+        expected
+            .iter()
+            .map(|&(source, failure)| (source.to_owned(), failure.to_owned()))
+            .collect()
     }
 
     /// 建连、跳转加等首字节用了 27 秒，之后按 20 KB/s 稳定下载：窗口从第一块正文算起，这样的下载照常下完。
     /// 窗口要是从开始下载算起，第 30 秒时窗口里只有三块共 60 KB，不到 64 KiB 的下限，就被当成卡死掐掉了。
     #[tokio::test(start_paused = true)]
     async fn a_late_first_byte_does_not_count_against_a_steady_download() {
-        let package = FakePackage {
-            head: Duration::from_secs(27),
-            chunk: 20_000,
-            chunks: 60,
-            hang: false,
-        };
-        let (sink, mut events) = tokio::sync::mpsc::unbounded_channel();
-        let bytes = tokio::time::timeout(
-            NEVER,
-            download_with_progress(&package, &sink, &CancellationToken::new()),
-        )
-        .await
-        .expect("下完的包没有交回")
-        .unwrap();
-        assert_eq!(bytes, PACKAGE);
+        let (package, sources) = fake_sources(vec![(
+            "default",
+            Script {
+                head: Duration::from_secs(27),
+                ..Script::steady(20_000, 60)
+            },
+        )]);
+        let (outcome, received) = download_all(&package, &sources, None).await;
+        let (bytes, source) = outcome.expect("下完的包没有交回");
+        assert_eq!(
+            (bytes, source.as_str()),
+            (package_from("default"), "default")
+        );
 
-        let mut received = Vec::new();
-        while let Ok(event) = events.try_recv() {
-            received.push(event);
-        }
         // 收尾两件事：告诉前端在验签，再推 finished = 1 的快照。
         let [.., CoreEvent::Stage(stage), CoreEvent::Download(done)] = received.as_slice() else {
             panic!("{received:?}");
@@ -1858,27 +2258,36 @@ mod tests {
         );
     }
 
-    /// 正文下到一半再不送数据：最后一块之后看满一个窗口就中止，报网络超时。判定器只能从插件的逐块回调里看到字节，
-    /// 回调没把字节记给它时，它从不开始计时，这样的下载就会一直挂着。
+    /// 正文下到一半再不送数据：最后一块之后看满一个窗口就中止，记网络超时。判定器只能从插件的逐块回调里看到字节，
+    /// 回调没把字节记给它时，它从不开始计时，这样的下载就会一直挂着。只有一个源时报错与第一批相同：原文就是
+    /// 那个源的原文，`detail.network` 为 `timeout`，前端按网络超时的文案提示；另带上 `detail.sources`。
     #[tokio::test(start_paused = true)]
     async fn a_download_that_stops_mid_body_is_aborted_a_window_after_the_last_chunk() {
-        let package = FakePackage {
-            head: Duration::from_secs(3),
-            chunk: 100_000,
-            chunks: 10,
-            hang: true,
-        };
-        let (sink, _events) = tokio::sync::mpsc::unbounded_channel();
+        let (package, sources) = fake_sources(vec![(
+            "default",
+            Script {
+                head: Duration::from_secs(3),
+                chunk: 100_000,
+                chunks: 10,
+                ending: Ending::Hang,
+            },
+        )]);
         let started = stall_clock();
-        let err = tokio::time::timeout(
-            NEVER,
-            download_with_progress(&package, &sink, &CancellationToken::new()),
-        )
-        .await
-        .expect("停住的下载没有被中止")
-        .unwrap_err();
+        let (outcome, _) = download_all(&package, &sources, None).await;
+        let err = outcome.unwrap_err();
         assert_eq!(err.code, code::UPDATE_DOWNLOAD_FAILED);
-        assert_eq!(err.detail, Some(json!({ "network": "timeout" })));
+        assert_eq!(err.message, "下载长时间没有进展，已中止");
+        assert_eq!(
+            err.detail,
+            Some(json!({
+                "network": "timeout",
+                "sources": [{
+                    "source": "default",
+                    "failure": "timeout",
+                    "message": "下载长时间没有进展，已中止",
+                }],
+            }))
+        );
 
         let last_chunk = Duration::from_secs(3 + 10);
         let waited = stall_clock() - started;
@@ -1889,6 +2298,473 @@ mod tests {
         assert!(
             waited <= last_chunk + STALL_WINDOW + 2 * STALL_CHECK_INTERVAL,
             "停住后迟迟不中止：{waited:?}"
+        );
+    }
+
+    /// 第一个源回了 503：换到第二个源，交回的是第二个源的字节。每个源开始前各推一条换源事件，第一个也推，
+    /// 之后才是第二个源的验签与收尾快照。
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_source_hands_over_to_the_next_one() {
+        let (package, sources) = fake_sources(vec![
+            ("cn", Script::failing(status("503 Service Unavailable"))),
+            ("hk", Script::steady(1000, 3)),
+        ]);
+        let (outcome, received) = download_all(&package, &sources, None).await;
+        let (bytes, source) = outcome.unwrap();
+        assert_eq!((bytes, source.as_str()), (package_from("hk"), "hk"));
+        assert_eq!(package.called(), ["cn", "hk"]);
+        assert_eq!(
+            milestones(&received),
+            ["source 0/2 cn", "source 1/2 hk", VERIFYING, "done 3000"]
+        );
+    }
+
+    /// 第一个源的字节对不上签名：只说明这个源上的文件不对，换下一个源。进度每个源从零算，收尾快照只有第二个源的字节，
+    /// 不把第一个源白下的那些算进去。
+    #[tokio::test(start_paused = true)]
+    async fn bytes_failing_the_signature_move_on_and_progress_restarts_per_source() {
+        let (package, sources) = fake_sources(vec![
+            ("cn", Script::rejected(4000, 3, bad_bytes())),
+            ("hk", Script::steady(1000, 2)),
+        ]);
+        let (outcome, received) = download_all(&package, &sources, None).await;
+        assert_eq!(outcome.unwrap(), (package_from("hk"), "hk".to_owned()));
+        assert_eq!(package.called(), ["cn", "hk"]);
+        assert_eq!(
+            milestones(&received),
+            [
+                "source 0/2 cn",
+                VERIFYING,
+                "source 1/2 hk",
+                VERIFYING,
+                "done 2000"
+            ]
+        );
+    }
+
+    /// 第一个源下了几块后停住：看满一个窗口就换源，不等读取超时之外的任何东西。第二个源的卡死检测从头算：它还在等首字节
+    /// 的那几秒不能算成没有进展，沿用上一个源的检测的话，窗口早就看满了，第二个源一开始就会被判卡死。
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_source_is_left_a_window_after_its_last_chunk() {
+        let (package, sources) = fake_sources(vec![
+            (
+                "cn",
+                Script {
+                    head: Duration::from_secs(2),
+                    chunk: 100_000,
+                    chunks: 5,
+                    ending: Ending::Hang,
+                },
+            ),
+            (
+                "hk",
+                Script {
+                    head: Duration::from_secs(3),
+                    ..Script::steady(100_000, 2)
+                },
+            ),
+        ]);
+        let started = tokio::time::Instant::now();
+        let (outcome, _) = download_all(&package, &sources, None).await;
+        assert_eq!(outcome.unwrap(), (package_from("hk"), "hk".to_owned()));
+
+        let last_chunk = Duration::from_secs(2 + 5);
+        let switched = package.started("hk") - started;
+        assert!(
+            switched >= last_chunk + STALL_WINDOW,
+            "停住不满一个窗口就换源了：{switched:?}"
+        );
+        assert!(
+            switched <= last_chunk + STALL_WINDOW + 2 * STALL_CHECK_INTERVAL,
+            "停住后迟迟不换源：{switched:?}"
+        );
+    }
+
+    /// 签名串不合规、签名版本与清单不符、签名没带版本、签名用的不是内置公钥那把钥匙：问题出在清单，换哪个源都是
+    /// 同一个签名，后面的源一次都不试，报签名无效，原文是插件的原文。
+    #[tokio::test(start_paused = true)]
+    async fn signature_problems_of_the_manifest_stop_at_the_first_source() {
+        let rejections: [fn() -> UpdaterError; 4] = [
+            downgrade,
+            || UpdaterError::MissingSignedVersion,
+            || UpdaterError::SignatureUtf8("bad".into()),
+            || UpdaterError::Minisign(minisign_verify::Error::UnexpectedKeyId),
+        ];
+        for rejected in rejections {
+            let raw = rejected().to_string();
+            let (package, sources) = fake_sources(vec![
+                ("cn", Script::rejected(1000, 2, rejected())),
+                ("hk", Script::steady(1000, 2)),
+            ]);
+            let (outcome, _) = download_all(&package, &sources, None).await;
+            let err = outcome.unwrap_err();
+            assert_eq!(package.called(), ["cn"], "{raw}");
+            assert_eq!(err.code, code::UPDATE_SIGNATURE_INVALID, "{raw}");
+            assert_eq!(err.message, raw);
+            assert_eq!(
+                err.detail,
+                Some(json!({
+                    "sources": [{ "source": "cn", "failure": "signature", "message": raw }],
+                })),
+                "{raw}"
+            );
+        }
+    }
+
+    /// 下到一半用户取消：立即报取消，正在下的源随即丢下，后面的源一次都不试。
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_stops_without_trying_other_sources() {
+        let (package, sources) = fake_sources(vec![
+            (
+                "cn",
+                Script {
+                    head: Duration::from_secs(1),
+                    ..Script::steady(1000, 100)
+                },
+            ),
+            ("hk", Script::steady(1000, 2)),
+        ]);
+        let cancel = CancellationToken::new();
+        let cancel_at = Duration::from_secs(5);
+        let started = tokio::time::Instant::now();
+        let ((outcome, _), ()) = tokio::join!(
+            download_until(&package, &sources, None, &cancel, || Ok(())),
+            async {
+                tokio::time::sleep(cancel_at).await;
+                cancel.cancel();
+            }
+        );
+        assert!(outcome.unwrap_err().is_cancelled());
+        assert_eq!(started.elapsed(), cancel_at, "取消后没有立即返回");
+        assert_eq!(package.called(), ["cn"]);
+    }
+
+    /// 第一个源失败时，下载期间的一次检查已经换了版本：换源之前问一句槽位，报没有可用更新，不再从下一个源白下一遍。
+    /// 第一个源开始前不问：重查刚确认过。检查结果没变时照常换源。
+    #[tokio::test(start_paused = true)]
+    async fn a_changed_manifest_stops_before_the_next_source() {
+        let slot = Mutex::new(UpdateSlot::<Fake>::default());
+        slot.lock().unwrap().record_check(Some(Fake("0.2.0")));
+        let downloading = Fake("0.2.0");
+        let still_current = || slot.lock().unwrap().ensure_current(&downloading);
+        let fixture = || {
+            fake_sources(vec![
+                ("cn", Script::failing(status("404 Not Found"))),
+                ("hk", Script::steady(1000, 2)),
+            ])
+        };
+
+        let (package, sources) = fixture();
+        let cancel = CancellationToken::new();
+        let (outcome, _) = download_until(&package, &sources, None, &cancel, still_current).await;
+        assert_eq!(outcome.unwrap(), (package_from("hk"), "hk".to_owned()));
+
+        slot.lock().unwrap().record_check(Some(Fake("0.2.1")));
+        let (package, sources) = fixture();
+        let (outcome, _) = download_until(&package, &sources, None, &cancel, still_current).await;
+        let err = outcome.unwrap_err();
+        assert_eq!(err.code, code::UPDATE_NOT_AVAILABLE);
+        assert!(err.message.contains("0.2.1"), "{}", err.message);
+        assert!(err.message.contains("0.2.0"), "{}", err.message);
+        assert_eq!(package.called(), ["cn"]);
+    }
+
+    /// 一个源不停地吐数据：累计字节一越过清单声明的大小就在那一块丢掉它、换下一个源，不等它把内存吃满。
+    /// 正好等于声明大小的不算超。
+    #[tokio::test(start_paused = true)]
+    async fn an_endless_source_is_cut_off_at_the_chunk_past_the_size() {
+        let (package, sources) = fake_sources(vec![
+            ("cn", Script::steady(4000, 1000)),
+            ("hk", Script::steady(5000, 2)),
+        ]);
+        let started = tokio::time::Instant::now();
+        let (outcome, received) = download_all(&package, &sources, Some(10_000)).await;
+        assert_eq!(outcome.unwrap(), (package_from("hk"), "hk".to_owned()));
+        // 第 3 秒的那一块把累计推到 12000，越过了 10000。
+        assert_eq!(package.started("hk") - started, Duration::from_secs(3));
+        assert_eq!(
+            milestones(&received),
+            ["source 0/2 cn", "source 1/2 hk", VERIFYING, "done 10000"]
+        );
+    }
+
+    /// 越过声明大小的那一块正好是最后一块、插件当场下完：照样算超，不因为恰好读完了就收下。
+    #[tokio::test(start_paused = true)]
+    async fn a_download_finishing_past_the_size_is_still_too_large() {
+        let (package, sources) = fake_sources(vec![("cn", Script::steady(4000, 3))]);
+        let (outcome, _) = download_all(&package, &sources, Some(10_000)).await;
+        let err = outcome.unwrap_err();
+        assert_eq!(err.code, code::UPDATE_DOWNLOAD_FAILED);
+        assert_eq!(failure_kinds(&err), pairs(&[("cn", "too_large")]));
+        assert!(err.detail.unwrap().get("network").is_none());
+    }
+
+    /// 四个源各败各的：逐个试完才报下载失败，detail.sources 按尝试的先后逐个列出源名与失败种类；有不在网络层的失败，
+    /// 就不标 detail.network。原文逐行写成「源名：原文」。
+    #[tokio::test]
+    async fn when_every_source_fails_the_error_lists_each_one() {
+        let refused = refused().await;
+        let refused_raw = refused.to_string();
+        tokio::time::pause();
+        let (package, sources) = fake_sources(vec![
+            ("cn", Script::failing(status("503 Service Unavailable"))),
+            ("hk", Script::failing(refused)),
+            (
+                "global",
+                Script {
+                    ending: Ending::Hang,
+                    ..Script::steady(1000, 1)
+                },
+            ),
+            ("github", Script::steady(4000, 3)),
+        ]);
+        let (outcome, received) = download_all(&package, &sources, Some(10_000)).await;
+        let err = outcome.unwrap_err();
+        assert_eq!(package.called(), ["cn", "hk", "global", "github"]);
+        assert_eq!(err.code, code::UPDATE_DOWNLOAD_FAILED);
+        assert_eq!(
+            failure_kinds(&err),
+            pairs(&[
+                ("cn", "http"),
+                ("hk", "connect"),
+                ("global", "timeout"),
+                ("github", "too_large"),
+            ])
+        );
+        assert!(err.detail.as_ref().unwrap().get("network").is_none());
+        let lines: Vec<&str> = err.message.lines().collect();
+        assert_eq!(lines.len(), 4, "{}", err.message);
+        assert_eq!(
+            lines[0],
+            "cn：`Download request failed with status: 503 Service Unavailable`"
+        );
+        assert_eq!(lines[1], format!("hk：{refused_raw}"));
+        assert!(lines[2].starts_with("global："), "{}", lines[2]);
+        assert!(lines[3].starts_with("github："), "{}", lines[3]);
+        assert_eq!(
+            milestones(&received)
+                .into_iter()
+                .filter(|milestone| milestone.starts_with("source "))
+                .collect::<Vec<_>>(),
+            [
+                "source 0/4 cn",
+                "source 1/4 hk",
+                "source 2/4 global",
+                "source 3/4 github"
+            ]
+        );
+    }
+
+    /// 全都败在网络层：混着连不上就标 connect，全是超时才标 timeout，前端据此提示检查网络。
+    #[tokio::test]
+    async fn sources_failing_only_on_the_network_mark_detail_network() {
+        let refused = refused().await;
+        tokio::time::pause();
+        let hang = || Script {
+            ending: Ending::Hang,
+            ..Script::steady(1000, 1)
+        };
+
+        let (package, sources) =
+            fake_sources(vec![("hk", Script::failing(refused)), ("global", hang())]);
+        let (outcome, _) = download_all(&package, &sources, None).await;
+        let err = outcome.unwrap_err();
+        assert_eq!(err.code, code::UPDATE_DOWNLOAD_FAILED);
+        assert_eq!(
+            failure_kinds(&err),
+            pairs(&[("hk", "connect"), ("global", "timeout")])
+        );
+        assert_eq!(err.detail.unwrap()["network"], json!("connect"));
+
+        let (package, sources) = fake_sources(vec![("global", hang()), ("github", hang())]);
+        let (outcome, _) = download_all(&package, &sources, None).await;
+        let err = outcome.unwrap_err();
+        assert_eq!(err.detail.unwrap()["network"], json!("timeout"));
+    }
+
+    /// 每个源的字节都对不上签名：试完全部源，报签名无效；混着别的失败时只算下载失败。
+    #[tokio::test(start_paused = true)]
+    async fn every_source_rejecting_its_bytes_reads_as_an_invalid_signature() {
+        let (package, sources) = fake_sources(vec![
+            ("cn", Script::rejected(1000, 2, bad_bytes())),
+            ("hk", Script::rejected(1000, 2, bad_bytes())),
+        ]);
+        let (outcome, _) = download_all(&package, &sources, None).await;
+        let err = outcome.unwrap_err();
+        assert_eq!(package.called(), ["cn", "hk"]);
+        assert_eq!(err.code, code::UPDATE_SIGNATURE_INVALID);
+        assert_eq!(
+            failure_kinds(&err),
+            pairs(&[("cn", "signature"), ("hk", "signature")])
+        );
+
+        let (package, sources) = fake_sources(vec![
+            ("cn", Script::rejected(1000, 2, bad_bytes())),
+            ("hk", Script::failing(status("502 Bad Gateway"))),
+        ]);
+        let (outcome, _) = download_all(&package, &sources, None).await;
+        assert_eq!(outcome.unwrap_err().code, code::UPDATE_DOWNLOAD_FAILED);
+    }
+
+    /// 第一个源回了 503 换源，第二个源碰上签名版本与清单不符：问题出在清单，立即停、第三个源不再试；前一个源败在
+    /// HTTP 层也不改变结论，报签名无效。detail.sources 按尝试的先后列出这两条，判定不进去。
+    #[tokio::test(start_paused = true)]
+    async fn a_manifest_signature_problem_after_switching_sources_is_still_an_invalid_signature() {
+        let raw = downgrade().to_string();
+        let unavailable = "`Download request failed with status: 503 Service Unavailable`";
+        let (package, sources) = fake_sources(vec![
+            ("cn", Script::failing(status("503 Service Unavailable"))),
+            ("hk", Script::rejected(1000, 2, downgrade())),
+            ("global", Script::steady(1000, 2)),
+        ]);
+        let (outcome, _) = download_all(&package, &sources, None).await;
+        let err = outcome.unwrap_err();
+        assert_eq!(package.called(), ["cn", "hk"]);
+        assert_eq!(err.code, code::UPDATE_SIGNATURE_INVALID);
+        assert_eq!(err.message, format!("cn：{unavailable}\nhk：{raw}"));
+        assert_eq!(
+            err.detail,
+            Some(json!({
+                "sources": [
+                    { "source": "cn", "failure": "http", "message": unavailable },
+                    { "source": "hk", "failure": "signature", "message": raw },
+                ],
+            }))
+        );
+    }
+
+    /// 门面排好的先后带回到清单解析出的源上：每个地址仍跟着自己的源名，一个不多、一个不少。客户端只按源名排规范
+    /// 顺序，与清单里的先后无关：同一组源换几种写法，排出来都一样。
+    #[tokio::test]
+    async fn sources_are_ordered_by_the_download_source_policy() {
+        use petalfall_core::{DownloadSourcePolicy, Petalfall, PetalfallConfig};
+
+        let listed_as = |names: [&str; 4]| -> Vec<PackageSource> {
+            names
+                .into_iter()
+                .map(|name| PackageSource {
+                    name: name.to_owned(),
+                    url: Url::parse(&format!("https://example.invalid/{name}/installer.exe"))
+                        .unwrap(),
+                    region: match name {
+                        "cn" | "hk" => SourceRegion::Domestic,
+                        _ => SourceRegion::Overseas,
+                    },
+                })
+                .collect()
+        };
+        // 规范顺序、整个倒过来、两组交错：按清单先后排的话，后两种在两档下都排不出规范结果。
+        let listings = [
+            listed_as(["cn", "hk", "global", "github"]),
+            listed_as(["github", "global", "hk", "cn"]),
+            listed_as(["hk", "github", "cn", "global"]),
+        ];
+        // 非自动档不探测，不会真去连这些地址。
+        for (policy, expected) in [
+            (
+                DownloadSourcePolicy::OfficialFirst,
+                ["global", "github", "hk", "cn"],
+            ),
+            (
+                DownloadSourcePolicy::MirrorFirst,
+                ["cn", "hk", "global", "github"],
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = PetalfallConfig {
+                download_source: policy,
+                ..PetalfallConfig::default()
+            };
+            let facade = Facade::new(
+                Petalfall::open(
+                    config,
+                    dir.path().to_path_buf(),
+                    dir.path().join("config.json"),
+                )
+                .unwrap(),
+            );
+            for listed in &listings {
+                let ordered = ordered_sources(&facade, listed.clone()).await;
+                let names: Vec<&str> = ordered.iter().map(|source| source.name.as_str()).collect();
+                assert_eq!(names, expected, "{policy:?} {listed:?}");
+                for source in &ordered {
+                    let original = listed
+                        .iter()
+                        .find(|listed| listed.name == source.name)
+                        .unwrap();
+                    assert_eq!(source, original, "{policy:?}");
+                }
+            }
+        }
+    }
+
+    /// 清单扩展键是 CI 写、客户端读：任何一边改了键名，客户端就悄悄退回只用 `url` 一个源、也不设大小上限，
+    /// 哪里都不报错。客户端这边用 [`package_plan`] 真去读这两个键，CI 那边找生成清单的那两行；香港的 dev 清单地址
+    /// 同样两头钉住：CI 回读核对的必须正是客户端先问的那个地址。
+    #[test]
+    fn ci_writes_the_extension_keys_the_client_reads() {
+        const SOURCES_KEY: &str = "x-sources";
+        const SIZE_KEY: &str = "x-size";
+        let cn = format!(
+            "https://{}/dev/0.1.0-dev.36-1/installer.exe",
+            crate::commands::update_sources::ALLOWED_SOURCE_HOSTS[0]
+        );
+        let github = "https://github.com/owner/repo/releases/download/dev-build/installer.exe";
+        let manifest = json!({ "platforms": { "windows-x86_64": {
+            "signature": "sig",
+            "url": cn,
+            SIZE_KEY: 22_846_361,
+            SOURCES_KEY: [{ "name": "cn", "url": cn }, { "name": "github", "url": github }],
+        }}});
+        let plan = package_plan(&manifest, &Url::parse(&cn).unwrap(), "sig").unwrap();
+        assert_eq!(plan.size, Some(22_846_361));
+        let names: Vec<&str> = plan
+            .sources
+            .iter()
+            .map(|source| source.name.as_str())
+            .collect();
+        assert_eq!(names, ["cn", "github"]);
+
+        let github_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.github");
+        let read = |path: &std::path::Path| {
+            std::fs::read_to_string(path).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+        };
+        // 只看真正执行的行：注释里也写着这些键和地址，拿全文找子串的话，删掉真正的写入照样能过。
+        let code_lines = |text: &str| -> Vec<String> {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.starts_with('#') && !line.starts_with("//"))
+                .map(str::to_owned)
+                .collect()
+        };
+        let mut scripts = Vec::new();
+        for entry in std::fs::read_dir(format!("{github_dir}/scripts")).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if !name.contains(".test.") {
+                scripts.extend(code_lines(&read(&path)));
+            }
+        }
+        for key in [SOURCES_KEY, SIZE_KEY] {
+            let written = format!("\"{key}\":");
+            assert!(
+                scripts.iter().any(|line| line.starts_with(&written)),
+                "CI 生成清单时不再写 {key}"
+            );
+        }
+
+        let workflow = code_lines(&read(std::path::Path::new(&format!(
+            "{github_dir}/workflows/dev-build.yml"
+        ))));
+        assert!(
+            workflow.contains(&format!("HK_MANIFEST_URL: {DEV_ENDPOINT}")),
+            "CI 回读的香港清单地址不再是客户端先问的 {DEV_ENDPOINT}"
+        );
+        assert!(
+            workflow
+                .iter()
+                .any(|line| line.contains("curl ") && line.contains("\"$HK_MANIFEST_URL\"")),
+            "CI 不再经公网回读香港清单"
         );
     }
 
@@ -1930,15 +2806,6 @@ mod tests {
         }
         assert!(!body.is_empty(), "找不到 {signature}");
         body.join("\n")
-    }
-
-    /// 卡住时给前端的错误与读取超时同类：下载失败、网络超时，界面按同一套文案提示。
-    #[test]
-    fn a_stalled_download_reads_as_a_network_timeout() {
-        let err = stalled_download();
-        assert_eq!(err.code, code::UPDATE_DOWNLOAD_FAILED);
-        assert_eq!(err.message, "下载长时间没有进展，已中止");
-        assert_eq!(err.detail, Some(json!({ "network": "timeout" })));
     }
 
     /// 更新源都连不上时插件把最后一个 reqwest 错误包成 `Reqwest` 返回；它是 transparent 变体，
@@ -2099,7 +2966,8 @@ mod tests {
         assert_eq!(detail["endpoints"], json!(endpoints));
     }
 
-    /// 主源与镜像都开着时：每个端点都确认 404 才算没有发布，任一端点故障就说不清它上面有没有新版本。
+    /// dev 通道有香港机与 GitHub 两个端点：两个都确认 404 才算没有发布，任一端点故障就说不清它上面有没有新版本。
+    /// 端点按 [`channel_endpoints`] 给的先后逐个问，两个顺序都试一遍。
     #[tokio::test]
     async fn every_endpoint_has_to_confirm_404() {
         let (missing, missing_url) = source_answering(404).await;

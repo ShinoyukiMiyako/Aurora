@@ -518,6 +518,9 @@ fn spawn_event_printer() -> (EventSink, tokio::task::JoinHandle<()>) {
                 CoreEvent::Phase { plan, index } => {
                     println!("[步骤] {}/{} {}", index + 1, plan.len(), plan[index].key());
                 }
+                CoreEvent::Source { index, count, name } => {
+                    println!("[下载源] {}/{} {name}", index + 1, count);
+                }
                 CoreEvent::Download(progress) => {
                     eprintln!(
                         "[下载] {}/{} 文件，{} KiB，{} KiB/s",

@@ -811,7 +811,7 @@ mod tests {
             match event {
                 CoreEvent::Stage(message) => stages.push(message),
                 CoreEvent::Download(progress) => last_download = Some(progress),
-                CoreEvent::Warning(_) | CoreEvent::Phase { .. } => {}
+                CoreEvent::Warning(_) | CoreEvent::Phase { .. } | CoreEvent::Source { .. } => {}
             }
         }
         let progress = last_download.expect("应转发下载进度");

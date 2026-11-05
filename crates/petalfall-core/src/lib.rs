@@ -113,7 +113,7 @@ pub use launch::{
     LaunchFailed, LaunchFailure, LaunchPhase, LaunchRequest, LaunchStage, LaunchWarning, QuickPlay,
     resolve_memory,
 };
-pub use launcher_update::{UpdateSource, order_update_sources};
+pub use launcher_update::{PackageCandidate, SourceRegion, order_package_sources};
 pub use ledger::{Ledger, LedgerEntry, LedgerStore, UpdateHold};
 pub use modfs::is_mod_file_busy;
 pub use modpack::{

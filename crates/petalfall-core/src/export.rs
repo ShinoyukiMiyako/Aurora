@@ -2073,7 +2073,7 @@ mod tests {
                 CoreEvent::Stage(s) => stages.push(s),
                 CoreEvent::Warning(w) => warnings.push(w),
                 CoreEvent::Download(p) => downloads.push(p),
-                CoreEvent::Phase { .. } => {}
+                CoreEvent::Phase { .. } | CoreEvent::Source { .. } => {}
             }
         }
         assert_eq!(
