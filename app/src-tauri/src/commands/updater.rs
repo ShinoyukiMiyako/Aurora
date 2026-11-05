@@ -15,8 +15,9 @@
 //! 诱导降级（CVE-2026-95625），所以没打开这一项同样整体不支持。`allowDowngrades` 会把插件的版本比较从
 //! 「比当前新」放宽成「与当前不同」，伪造的清单照实写上旧版本号、指向旧版本的合法包，签名版本也对得上，
 //! 同样防不住降级，打开了也整体不支持。不支持时各命令报 `updater_unsupported`。
-//! 仓库里的配置两项都不带，dev 分支的 CI 打包时才写入开发版公钥（`.github/dev-updater.pub`）并打开
-//! `requireSignedVersion`，签名时用 `--app-version` 把版本号写进可信注释：本地和 fork 构建的包不会去认落樱的更新。
+//! 仓库里的配置两项都不带，dev、beta 分支的 CI 打包时才分别写入开发版公钥（`.github/dev-updater.pub`）、
+//! 发布公钥（`.github/release-updater.pub`）并打开 `requireSignedVersion`，签名时用 `--app-version` 把版本号写进
+//! 可信注释：本地和 fork 构建的包不会去认落樱的更新。
 //!
 //! 去哪取清单由版本号决定（[`UpdateChannel`]），与前端从版本号推发布通道同源，不另设配置。
 
@@ -57,6 +58,14 @@ pub const DEV_ENDPOINT: &str = concat!(
     ".org/updates/dev/latest.json"
 );
 
+/// 测试版通道的清单地址，放在香港机上，是这个通道唯一的清单来源。不像开发版那样再排一份 GitHub 上的：
+/// GitHub Release 能被 dev 的发布作业和 CLA 作业改写，不拿它当测试版的清单来源。
+pub const BETA_ENDPOINT: &str = concat!(
+    "https://",
+    petalfall_base::app_slug!(),
+    ".org/updates/beta/latest.json"
+);
+
 /// dev 分支每次构建都重建的滚动预发布，CI 里的 tag 必须与它一致。
 const DEV_RELEASE_TAG: &str = "dev-build";
 
@@ -74,8 +83,10 @@ pub fn dev_endpoint() -> String {
 pub enum UpdateChannel {
     /// dev 分支的 CI 构建，版本号形如 `0.1.0-dev.12`。
     Dev,
-    /// 其余版本，走正式通道的清单。
-    Release,
+    /// beta 分支的 CI 构建，版本号形如 `1.0.0-beta.3`。
+    Beta,
+    /// 不带预发布标识的正式版，版本号形如 `1.0.0`。
+    Stable,
 }
 
 /// 这个通道的清单端点，按这个顺序逐个问（[`check_in_order`]）：前一个没给出清单就问下一个。顺序固定、不探测：
@@ -83,27 +94,36 @@ pub enum UpdateChannel {
 fn channel_endpoints(channel: UpdateChannel) -> Vec<String> {
     match channel {
         UpdateChannel::Dev => vec![DEV_ENDPOINT.to_owned(), dev_endpoint()],
-        UpdateChannel::Release => vec![PRIMARY_ENDPOINT.to_owned()],
+        UpdateChannel::Beta => vec![BETA_ENDPOINT.to_owned()],
+        UpdateChannel::Stable => vec![PRIMARY_ENDPOINT.to_owned()],
     }
 }
 
 impl UpdateChannel {
-    /// 看版本号预发布标识的第一段：`dev` 后面只跟数字（或什么都不跟）的是开发版，大小写不论，
-    /// 与前端 build-info 认 dev 的规则一致。semver 的预发布标识只含 ASCII。
-    pub fn of(pre_release: &str) -> Self {
+    /// 没有预发布标识的是正式版；否则看标识的第一段：`dev`、`beta` 后面只跟数字（或什么都不跟）的分别是开发版、
+    /// 测试版，大小写不论，与前端 build-info 认这两种标识的规则一致。semver 的预发布标识只含 ASCII。
+    ///
+    /// 其余标识（rc、alpha 等）没有自己的清单，返回 `None`、由调用方判为不支持，不落到哪个通道顶上：
+    /// 落到正式通道的话，测试包会去问正式版的清单。
+    pub fn of(pre_release: &str) -> Option<Self> {
+        if pre_release.is_empty() {
+            return Some(UpdateChannel::Stable);
+        }
         let tag = pre_release
             .split_once('.')
             .map_or(pre_release, |(head, _)| head);
-        let is_dev = tag
-            .get(..3)
-            .is_some_and(|head| head.eq_ignore_ascii_case("dev"))
-            && tag[3..].bytes().all(|byte| byte.is_ascii_digit());
-        if is_dev {
-            UpdateChannel::Dev
-        } else {
-            UpdateChannel::Release
-        }
+        [("dev", UpdateChannel::Dev), ("beta", UpdateChannel::Beta)]
+            .into_iter()
+            .find(|(name, _)| names_channel(tag, name))
+            .map(|(_, channel)| channel)
     }
+}
+
+/// 预发布标识的第一段 `tag` 是不是 `name` 后面只跟数字（或什么都不跟），`name` 不分大小写。
+fn names_channel(tag: &str, name: &str) -> bool {
+    tag.get(..name.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(name))
+        && tag[name.len()..].bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// 单个端点取清单的时限。清单是一次性的小请求，比下载源探测放宽，慢网下也要能拿到。
@@ -132,9 +152,17 @@ pub enum UnsupportedReason {
     /// tauri.conf.json 的 `plugins.updater` 没有关掉 `allowDowngrades`：插件只要求清单版本与当前不同，
     /// 伪造清单指向旧版本的合法包也能装上。
     DowngradesAllowed,
+    /// 版本号的预发布标识认不出是哪个通道（[`UpdateChannel::of`]），不知道该去哪里取清单。
+    UnknownChannel,
 }
 
 impl UnsupportedReason {
+    /// 各命令报的 `updater_unsupported`，`detail.reason` 是这个原因。
+    fn error(self) -> CommandError {
+        CommandError::new(code::UPDATER_UNSUPPORTED, self.message())
+            .with_detail(json!({ "reason": self }))
+    }
+
     fn message(self) -> &'static str {
         match self {
             UnsupportedReason::DebugBuild => "开发构建不支持自更新",
@@ -146,6 +174,9 @@ impl UnsupportedReason {
             }
             UnsupportedReason::DowngradesAllowed => {
                 "更新配置允许装不比当前新的版本，防不住被诱导降级到旧版本，自更新已停用"
+            }
+            UnsupportedReason::UnknownChannel => {
+                "这个版本号不属于任何更新通道，不知道该去哪里检查更新，自更新已停用"
             }
         }
     }
@@ -171,10 +202,18 @@ fn values_of<'a>(updater_config: Option<&'a Value>, keys: [&str; 2]) -> Vec<&'a 
         .collect()
 }
 
-/// 由构建类型与 tauri.conf.json 的 `plugins.updater` 判定是否支持自更新，决定插件注册与否。
-pub fn detect_support(updater_config: Option<&Value>, debug_build: bool) -> UpdaterSupport {
+/// 由构建类型、版本号的预发布标识 `pre_release` 与 tauri.conf.json 的 `plugins.updater` 判定是否支持自更新，
+/// 决定插件注册与否。
+pub fn detect_support(
+    updater_config: Option<&Value>,
+    debug_build: bool,
+    pre_release: &str,
+) -> UpdaterSupport {
     if debug_build {
         return UpdaterSupport::Unsupported(UnsupportedReason::DebugBuild);
+    }
+    if UpdateChannel::of(pre_release).is_none() {
+        return UpdaterSupport::Unsupported(UnsupportedReason::UnknownChannel);
     }
     let has_pubkey = updater_config
         .and_then(|config| config.get("pubkey"))
@@ -225,7 +264,8 @@ fn update_dto(update: &Update) -> UpdateDto {
 pub struct UpdaterInfoDto {
     pub current_version: String,
     pub supported: bool,
-    /// debug_build / missing_pubkey / signed_version_not_required / downgrades_allowed；支持时为 `null`。
+    /// debug_build / missing_pubkey / signed_version_not_required / downgrades_allowed / unknown_channel；
+    /// 支持时为 `null`。
     pub unsupported_reason: Option<UnsupportedReason>,
     /// 本次会话最近一次检查的结果；没检查过或已是最新时为 `null`。
     pub available: Option<UpdateDto>,
@@ -392,11 +432,7 @@ impl UpdaterState {
     fn require_supported(&self) -> Result<(), CommandError> {
         match self.support {
             UpdaterSupport::Supported => Ok(()),
-            UpdaterSupport::Unsupported(reason) => Err(CommandError::new(
-                code::UPDATER_UNSUPPORTED,
-                reason.message(),
-            )
-            .with_detail(json!({ "reason": reason }))),
+            UpdaterSupport::Unsupported(reason) => Err(reason.error()),
         }
     }
 
@@ -439,7 +475,8 @@ pub async fn updater_info(
 }
 
 /// 检查更新。端点见 [`channel_endpoints`]：开发版先问 [`DEV_ENDPOINT`] 再问 [`dev_endpoint`]，前一个没给出清单
-/// （连不上、超时、非 2xx、正文读不出或不成形）就问下一个；其余版本只问 [`PRIMARY_ENDPOINT`]。
+/// （连不上、超时、非 2xx、正文读不出或不成形）就问下一个；测试版只问 [`BETA_ENDPOINT`]，
+/// 正式版只问 [`PRIMARY_ENDPOINT`]。
 /// 已是最新返回 `null`；所有端点的清单都确认 404 不算失败，见 [`check_in_order`] 与 [`UpdateSlot::settle_check`]。
 /// 不看 `check_updates` 设置：那一项只管启动时要不要自动查，由前端决定。
 #[tauri::command]
@@ -460,7 +497,7 @@ pub async fn check_update(
 /// 非 2xx 时只记一行不带地址与状态码的日志、不记成错误，最后报的是最后记下的那个错误。这样香港机的清单一坏，GitHub 上
 /// 字节相同的那份就问不到，香港机回的状态码也进不了 detail。
 async fn fetch_conclusion(app: &AppHandle) -> Result<CheckConclusion<Update>, CommandError> {
-    let endpoints = channel_endpoints(UpdateChannel::of(app.package_info().version.pre.as_str()));
+    let endpoints = version_endpoints(app.package_info().version.pre.as_str())?;
     let checkers = endpoints
         .iter()
         .map(|endpoint| manifest_checker(app, endpoint))
@@ -468,6 +505,15 @@ async fn fetch_conclusion(app: &AppHandle) -> Result<CheckConclusion<Update>, Co
         .map_err(|err| check_failed(&endpoints, err))?;
     let version = app.package_info().version.to_string();
     check_in_order(&endpoints, &version, |index| checkers[index].check()).await
+}
+
+/// 预发布标识为 `pre_release` 的版本该问的清单端点。认不出通道时报 `updater_unsupported`：[`detect_support`]
+/// 已把这种版本判为不支持、各命令先过 `require_supported`，走到这里说明两处判定对不上了，宁可报错也不拿哪个通道的
+/// 清单顶上。
+fn version_endpoints(pre_release: &str) -> Result<Vec<String>, CommandError> {
+    UpdateChannel::of(pre_release)
+        .map(channel_endpoints)
+        .ok_or_else(|| UnsupportedReason::UnknownChannel.error())
 }
 
 /// 只问 `endpoint` 这一个端点的检查器。签名公钥、requireSignedVersion 与版本比较由 `updater_builder` 从插件
@@ -1469,11 +1515,11 @@ mod tests {
     fn support_requires_release_build_and_non_empty_pubkey() {
         let with_key = json!({ "pubkey": PUBKEY, "requireSignedVersion": true });
         assert_eq!(
-            detect_support(Some(&with_key), false),
+            detect_support(Some(&with_key), false, ""),
             UpdaterSupport::Supported
         );
         assert_eq!(
-            detect_support(Some(&with_key), true),
+            detect_support(Some(&with_key), true, ""),
             UpdaterSupport::Unsupported(UnsupportedReason::DebugBuild)
         );
         for config in [
@@ -1483,13 +1529,13 @@ mod tests {
             json!({}),
         ] {
             assert_eq!(
-                detect_support(Some(&config), false),
+                detect_support(Some(&config), false, ""),
                 UpdaterSupport::Unsupported(UnsupportedReason::MissingPubkey),
                 "{config}"
             );
         }
         assert_eq!(
-            detect_support(None, false),
+            detect_support(None, false, ""),
             UpdaterSupport::Unsupported(UnsupportedReason::MissingPubkey)
         );
     }
@@ -1501,7 +1547,7 @@ mod tests {
         for key in REQUIRE_SIGNED_VERSION_KEYS {
             let config = json!({ "pubkey": PUBKEY, key: true });
             assert_eq!(
-                detect_support(Some(&config), false),
+                detect_support(Some(&config), false, ""),
                 UpdaterSupport::Supported,
                 "{config}"
             );
@@ -1517,7 +1563,7 @@ mod tests {
             json!({ "pubkey": PUBKEY, "requireSignedVersion": true, "require-signed-version": true }),
         ] {
             assert_eq!(
-                detect_support(Some(&config), false),
+                detect_support(Some(&config), false, ""),
                 UpdaterSupport::Unsupported(UnsupportedReason::SignedVersionNotRequired),
                 "{config}"
             );
@@ -1566,13 +1612,13 @@ mod tests {
         for key in ALLOW_DOWNGRADES_KEYS {
             let closed = json!({ "pubkey": PUBKEY, "requireSignedVersion": true, key: false });
             assert_eq!(
-                detect_support(Some(&closed), false),
+                detect_support(Some(&closed), false, ""),
                 UpdaterSupport::Supported,
                 "{closed}"
             );
             let open = json!({ "pubkey": PUBKEY, "requireSignedVersion": true, key: true });
             assert_eq!(
-                detect_support(Some(&open), false),
+                detect_support(Some(&open), false, ""),
                 UpdaterSupport::Unsupported(UnsupportedReason::DowngradesAllowed),
                 "{open}"
             );
@@ -1589,7 +1635,7 @@ mod tests {
             }),
         ] {
             assert_eq!(
-                detect_support(Some(&config), false),
+                detect_support(Some(&config), false, ""),
                 UpdaterSupport::Unsupported(UnsupportedReason::DowngradesAllowed),
                 "{config}"
             );
@@ -1629,6 +1675,41 @@ mod tests {
         }
     }
 
+    /// 配置齐全，版本号却认不出通道（rc、alpha 这类）：没有该问的清单，自更新整体停用，不落到正式通道去问正式版的
+    /// 清单。三个通道的版本照常支持；开发构建仍先按开发构建报。
+    #[test]
+    fn support_refuses_versions_outside_known_channels() {
+        let config = json!({ "pubkey": PUBKEY, "requireSignedVersion": true });
+        for known in ["", "dev.37", "beta.1", "BETA.2"] {
+            assert_eq!(
+                detect_support(Some(&config), false, known),
+                UpdaterSupport::Supported,
+                "{known}"
+            );
+        }
+        for unknown in ["rc.1", "alpha.1", "betax.1", "nightly", "dev-1"] {
+            assert_eq!(
+                detect_support(Some(&config), false, unknown),
+                UpdaterSupport::Unsupported(UnsupportedReason::UnknownChannel),
+                "{unknown}"
+            );
+        }
+        assert_eq!(
+            detect_support(Some(&config), true, "rc.1"),
+            UpdaterSupport::Unsupported(UnsupportedReason::DebugBuild)
+        );
+
+        let state = UpdaterState::new(UpdaterSupport::Unsupported(
+            UnsupportedReason::UnknownChannel,
+        ));
+        let err = state.require_supported().unwrap_err();
+        assert_eq!(err.code, code::UPDATER_UNSUPPORTED);
+        assert_eq!(err.detail.unwrap()["reason"], "unknown_channel");
+        let info = serde_json::to_value(state.info("1.0.0-rc.1".into())).unwrap();
+        assert_eq!(info["supported"], false);
+        assert_eq!(info["unsupported_reason"], "unknown_channel");
+    }
+
     #[test]
     fn unsupported_error_carries_reason() {
         let state = UpdaterState::new(UpdaterSupport::Unsupported(
@@ -1646,12 +1727,13 @@ mod tests {
         assert_eq!(info["downloaded_version"], Value::Null);
     }
 
-    /// 两个通道的权威清单都在香港机上，按通道分目录：正式版与开发版各认各的，谁也拿不到对方的清单。
+    /// 三个通道的权威清单都在香港机上，按通道分目录：正式版、测试版与开发版各认各的，谁也拿不到别的通道的清单。
     #[test]
     fn endpoints_are_https_on_brand_domains() {
         let host = format!("{}.org", petalfall_base::brand::APP_SLUG);
         for (endpoint, path) in [
             (PRIMARY_ENDPOINT, "/updates/stable/latest.json"),
+            (BETA_ENDPOINT, "/updates/beta/latest.json"),
             (DEV_ENDPOINT, "/updates/dev/latest.json"),
         ] {
             let urls = endpoint_urls(&[endpoint.to_owned()]);
@@ -1662,7 +1744,7 @@ mod tests {
     }
 
     /// dev 通道先问香港机、再问 GitHub：反过来的话，连不上 GitHub 的用户每次检查都要先等它超时。
-    /// 正式通道只有香港机一份。
+    /// 测试版与正式版各只有香港机一份，测试版不问 GitHub Release，也不问正式版的清单。
     #[test]
     fn each_channel_asks_its_endpoints_in_a_fixed_order() {
         assert_eq!(
@@ -1670,32 +1752,106 @@ mod tests {
             vec![DEV_ENDPOINT.to_owned(), dev_endpoint()]
         );
         assert_eq!(
-            channel_endpoints(UpdateChannel::Release),
+            channel_endpoints(UpdateChannel::Beta),
+            vec![BETA_ENDPOINT.to_owned()]
+        );
+        assert_eq!(
+            channel_endpoints(UpdateChannel::Stable),
             vec![PRIMARY_ENDPOINT.to_owned()]
         );
     }
 
     #[test]
     fn channel_follows_the_first_pre_release_identifier() {
+        assert_eq!(UpdateChannel::of(""), Some(UpdateChannel::Stable));
         for dev in ["dev.12", "dev", "dev3", "DEV.1", "Dev.7.rc"] {
-            assert_eq!(UpdateChannel::of(dev), UpdateChannel::Dev, "{dev}");
+            assert_eq!(UpdateChannel::of(dev), Some(UpdateChannel::Dev), "{dev}");
         }
-        for release in [
-            "",
-            "beta.1",
+        for beta in ["beta.1", "beta", "beta3", "BETA.2", "Beta.4.dev"] {
+            assert_eq!(UpdateChannel::of(beta), Some(UpdateChannel::Beta), "{beta}");
+        }
+        for unknown in [
+            "rc.1",
             "rc.2",
+            "alpha.1",
             "preview.3",
             "nightly",
             "devx.1",
             "dev-1",
             "de",
             "alpha.dev",
+            "betax.1",
+            "beta-1",
+            "bet",
+            "alpha.beta",
+            ".1",
         ] {
+            assert_eq!(UpdateChannel::of(unknown), None, "{unknown}");
+        }
+    }
+
+    /// 通道名的大小写怎么混、后面跟多少数字，判定都不变；通道名与数字之后只要多一个别的字符就认不出。
+    /// 固定种子，挂了能复现。
+    #[test]
+    fn channel_names_ignore_case_and_take_only_digits_after_them() {
+        let mut rng = fastrand::Rng::with_seed(0x5eed_be7a);
+        for _ in 0..300 {
+            for (name, channel) in [("dev", UpdateChannel::Dev), ("beta", UpdateChannel::Beta)] {
+                let cased: String = name
+                    .chars()
+                    .map(|c| {
+                        if rng.bool() {
+                            c.to_ascii_uppercase()
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
+                let digits = if rng.bool() {
+                    String::new()
+                } else {
+                    rng.u64(..).to_string()
+                };
+                let rest = if rng.bool() {
+                    String::new()
+                } else {
+                    format!(".{}", rng.u32(..))
+                };
+                let tagged = format!("{cased}{digits}{rest}");
+                assert_eq!(UpdateChannel::of(&tagged), Some(channel), "{tagged}");
+
+                let stray = if rng.bool() { rng.alphabetic() } else { '-' };
+                let polluted = format!("{cased}{digits}{stray}{rest}");
+                assert_eq!(UpdateChannel::of(&polluted), None, "{polluted}");
+            }
+        }
+    }
+
+    /// 检查与下载前的重查都按版本号取端点：三个通道各取各的，认不出通道时报 `updater_unsupported`，
+    /// 不拿哪个通道的清单顶上。
+    #[test]
+    fn version_endpoints_refuse_unknown_channels() {
+        assert_eq!(
+            version_endpoints("").unwrap(),
+            vec![PRIMARY_ENDPOINT.to_owned()]
+        );
+        assert_eq!(
+            version_endpoints("beta.1").unwrap(),
+            vec![BETA_ENDPOINT.to_owned()]
+        );
+        assert_eq!(
+            version_endpoints("dev.37").unwrap(),
+            vec![DEV_ENDPOINT.to_owned(), dev_endpoint()]
+        );
+        for unknown in ["rc.1", "alpha.1", "betax.1"] {
+            let err = version_endpoints(unknown).unwrap_err();
+            assert_eq!(err.code, code::UPDATER_UNSUPPORTED, "{unknown}");
             assert_eq!(
-                UpdateChannel::of(release),
-                UpdateChannel::Release,
-                "{release}"
+                err.detail.unwrap()["reason"],
+                "unknown_channel",
+                "{unknown}"
             );
+            assert!(err.message.contains("通道"), "{}", err.message);
         }
     }
 

@@ -87,6 +87,7 @@ pub fn run() {
     let updater_support = commands::updater::detect_support(
         context.config().plugins.0.get("updater"),
         cfg!(debug_assertions),
+        context.package_info().version.pre.as_str(),
     );
     tracing::info!(?updater_support, "自更新");
 
