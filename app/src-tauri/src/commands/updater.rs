@@ -517,23 +517,18 @@ pub async fn install_update(
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
     updater.require_supported()?;
-    // Windows 上安装程序一拉起进程就结束，不经过退出收尾，进行中的续期要在这之前等它落盘。
-    crate::commands::accounts::settle_renewals(
-        &facade,
-        crate::commands::accounts::RENEWALS_EXIT_DEADLINE,
-    )
-    .await;
-    install_after_saving_play_records(&facade, || updater.install_downloaded()).await?;
+    install_after_persisting(&facade, || updater.install_downloaded()).await?;
     app.restart()
 }
 
-/// 先补写游玩记录里还没落盘的改动再安装：Windows 上更新插件拉起安装程序后直接结束进程，不经过
-/// `RunEvent::Exit`，退出收尾里的那次补写赶不上。补写失败只记日志、照样安装，与正常退出时一致。
-pub(crate) async fn install_after_saving_play_records(
+/// 先做退出收尾里的落盘（[`crate::exit::persist_before_exit`]：等进行中的外置令牌轮换、补写游玩记录）再安装：
+/// Windows 上更新插件拉起安装程序后直接结束进程，不经过 `RunEvent::Exit`，退出收尾赶不上。等不到或补写失败
+/// 都只记日志、照样安装，与正常退出时一致。
+pub(crate) async fn install_after_persisting(
     facade: &Facade,
     install: impl FnOnce() -> Result<(), CommandError>,
 ) -> Result<(), CommandError> {
-    crate::exit::save_play_records(facade, crate::exit::PLAY_RECORDS_DEADLINE).await;
+    crate::exit::persist_before_exit(facade).await;
     install()
 }
 
@@ -740,7 +735,7 @@ mod tests {
         std::fs::write(&path, RECORDS).unwrap();
 
         let mut on_disk_at_install = None;
-        let result = install_after_saving_play_records(&facade, || {
+        let result = install_after_persisting(&facade, || {
             on_disk_at_install = Some(std::fs::read_to_string(&path).unwrap());
             Err(CommandError::new(
                 code::UPDATE_INSTALL_FAILED,
@@ -762,6 +757,25 @@ mod tests {
             .save_pending_play_records()
             .await
             .unwrap());
+    }
+
+    /// 外置账户正在刷新令牌时立即安装：拉起安装程序之前新令牌已经落盘。安装程序一拉起进程就结束，
+    /// 这里不等就没有别处会等，服务器那边已经作废了旧令牌，账户只能重新登录。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_now_waits_for_the_authlib_rotation_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let rotation = crate::exit::tests::authlib_rotation_in_flight(dir.path()).await;
+        assert_eq!(rotation.stored_token(), "stale");
+
+        let mut stored_at_install = None;
+        install_after_persisting(&rotation.facade, || {
+            stored_at_install = Some(rotation.stored_token());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(stored_at_install.as_deref(), Some("rotated"));
     }
 
     #[test]

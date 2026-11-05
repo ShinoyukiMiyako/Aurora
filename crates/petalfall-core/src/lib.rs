@@ -152,7 +152,7 @@ pub use art::{
 };
 pub use auth::{
     AheadOutcome, AuthServerInfo, AuthlibLogin, AuthlibPending, RENEW_AHEAD_CHECK_EVERY,
-    RENEW_AHEAD_WITHIN, SettledRenewals, VerifyTiming,
+    RENEW_AHEAD_WITHIN, SettledRotations, VerifyTiming,
 };
 
 // ---- 透传下层类型，让上层只依赖本 crate ----

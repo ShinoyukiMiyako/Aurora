@@ -129,38 +129,38 @@ pub struct VerifyTiming {
     pub reused_failure: bool,
 }
 
-/// 退出前等进行中的续期的结局，见 [`Petalfall::settle_renewals`]。
+/// 退出前等进行中的外置令牌轮换的结局，见 [`Petalfall::settle_rotations`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SettledRenewals {
-    /// 没有进行中的续期。
+pub enum SettledRotations {
+    /// 没有进行中的轮换。
     Idle,
-    /// 都跑完落盘了。
+    /// 都落盘了。
     Finished,
-    /// 到时限还有没跑完的，随退出放弃。
+    /// 到时限还有没落盘的，随退出放弃。
     TimedOut,
 }
 
-/// 进行中的续期个数。放在门面上随快照共享：退出时拿常驻门面就能等到各命令快照上开的续期。
+/// 进行中的外置令牌轮换个数。放在门面上随快照共享：退出时拿常驻门面就能等到各命令快照上开的轮换。
 #[derive(Clone)]
-pub(crate) struct RenewalsInFlight(Arc<tokio::sync::watch::Sender<usize>>);
+pub(crate) struct RotationsInFlight(Arc<tokio::sync::watch::Sender<usize>>);
 
-impl Default for RenewalsInFlight {
+impl Default for RotationsInFlight {
     fn default() -> Self {
         Self(Arc::new(tokio::sync::watch::channel(0).0))
     }
 }
 
-impl RenewalsInFlight {
-    fn begin(&self) -> RenewalInFlight {
+impl RotationsInFlight {
+    fn begin(&self) -> RotationInFlight {
         self.0.send_modify(|running| *running += 1);
-        RenewalInFlight(self.0.clone())
+        RotationInFlight(self.0.clone())
     }
 }
 
-/// 一次进行中的续期；放下即计数减一。
-struct RenewalInFlight(Arc<tokio::sync::watch::Sender<usize>>);
+/// 一次进行中的轮换；放下即计数减一。
+struct RotationInFlight(Arc<tokio::sync::watch::Sender<usize>>);
 
-impl Drop for RenewalInFlight {
+impl Drop for RotationInFlight {
     fn drop(&mut self) {
         self.0.send_modify(|running| *running -= 1);
     }
@@ -851,11 +851,17 @@ impl Petalfall {
         let timing = Arc::new(Mutex::new(VerifyTiming::default()));
         let record = timing.clone();
         let target = account.uuid.clone();
+        // 调用方还在等：这一帧返回（含被取消提前返回）或整个 future 被丢弃时放下，排着队的任务据此知道没人等了。
+        let waiting = Arc::new(());
+        let still_waiting = Arc::downgrade(&waiting);
         let fresh = self
             .renew_detached(&account.uuid, |petalfall| async move {
-                petalfall.ensure_account_fresh_now(&target, &record).await
+                petalfall
+                    .ensure_account_fresh_now(&target, &record, &still_waiting)
+                    .await
             })
             .await;
+        drop(waiting);
         let timing = *timing.lock().unwrap_or_else(PoisonError::into_inner);
         (fresh, timing)
     }
@@ -866,7 +872,8 @@ impl Petalfall {
     /// 续期要是跑在调用方的 future 里，启动被取消、命令层在宽限期满后丢掉 future 时，回音跟着被丢，
     /// 账户就只能重新登录。所以调用方被取消（快照上的取消令牌触发，或 future 被丢弃）时只是不再等，
     /// 续期照样跑完落盘；续期闸由任务自己持有，排在后面的续期等它落完盘才读库。令牌链因此不挂取消令牌。
-    /// 已经取消了才来的续期不开始。
+    /// 已经取消了才来的续期不开始；启动前的续期在排闸期间调用方走了的，拿到闸也不开始（见
+    /// [`Petalfall::ensure_account_fresh_timed`]）。
     async fn renew_detached<F, T>(
         &self,
         uuid: &str,
@@ -881,13 +888,12 @@ impl Petalfall {
         }
         let renewal = renewal(self.clone());
         let target = uuid.to_owned();
-        let in_flight = self.renewals.begin();
         let task = tokio::spawn(async move {
-            // 任务结束（含 panic）时才放下，退出前等的就是它，见 [`Petalfall::settle_renewals`]。
-            let _in_flight = in_flight;
             let outcome = renewal.await;
-            // 调用方这时可能已经走了，错误没有别的去处。
-            if let Err(err) = &outcome {
+            // 调用方这时可能已经走了，错误没有别的去处。取消不是续期的结论，不记。
+            if let Err(err) = &outcome
+                && !err.is_cancelled()
+            {
                 tracing::warn!(uuid = %target, error = %err, "续期失败");
             }
             outcome
@@ -909,10 +915,15 @@ impl Petalfall {
         &self,
         uuid: &str,
         timing: &Mutex<VerifyTiming>,
+        still_waiting: &std::sync::Weak<()>,
     ) -> Result<Account> {
         let asked = Instant::now();
         let (_gate, queued) = self.refresh_gate_queued(uuid).await;
         note(timing, |timing| timing.queued = queued);
+        if still_waiting.strong_count() == 0 {
+            // 排队期间启动被取消了：还没联网，不开始。后台留下的失败结论也不该被它取走，留给后面还在等的启动。
+            return Err(AuthError::Cancelled.into());
+        }
         let account = self.stored_account(uuid).await?;
         let started = Instant::now();
         let verified = match &account.credentials {
@@ -1007,20 +1018,21 @@ impl Petalfall {
         }
     }
 
-    /// 等进行中的续期（启动前、手动刷新、后台提前续期）都跑完落盘，最多等 `deadline`。退出前调：续期跑在
-    /// 独立任务里（[`Petalfall::renew_detached`]），进程一退，没落盘的新凭据就丢了。微软换发新令牌时不作废旧
-    /// refresh token，丢了也只是下次再续一遍；外置刷新会让旧令牌当场作废，丢了就要重新登录。
-    pub async fn settle_renewals(&self, deadline: Duration) -> SettledRenewals {
-        let mut idle = self.renewals.0.subscribe();
+    /// 等进行中的外置令牌轮换都落盘，最多等 `deadline`。退出前调：续期跑在独立任务里
+    /// （[`Petalfall::renew_detached`]），进程一退，没落盘的新凭据就丢了。只等外置刷新：它会让旧令牌当场作废，
+    /// 新令牌没落盘就只能重新登录。微软换发新令牌时不作废旧 refresh token，打断了也只是下次再续一遍，不值得
+    /// 让退出等它；退出拖得越久，期间再次打开落樱被转交给这个正在退出的进程、什么也打不开的机会越大。
+    pub async fn settle_rotations(&self, deadline: Duration) -> SettledRotations {
+        let mut idle = self.rotations.0.subscribe();
         if *idle.borrow_and_update() == 0 {
-            return SettledRenewals::Idle;
+            return SettledRotations::Idle;
         }
         match tokio::time::timeout(deadline, idle.wait_for(|running| *running == 0)).await {
             Ok(waited) => {
                 waited.expect("计数的发送端由门面自己拿着，不会先于等待方放下");
-                SettledRenewals::Finished
+                SettledRotations::Finished
             }
-            Err(_) => SettledRenewals::TimedOut,
+            Err(_) => SettledRotations::TimedOut,
         }
     }
 
@@ -1090,6 +1102,8 @@ impl Petalfall {
         creds: &YggdrasilCredentials,
     ) -> Result<Account> {
         let client = self.yggdrasil(&creds.api_root);
+        // 请求一发出旧令牌就可能作废，到新令牌落盘为止，退出都要等它（见 [`Petalfall::settle_rotations`]）。
+        let rotating = self.rotations.begin();
         let resp = match client
             .refresh(&creds.access_token, Some(&creds.client_token), None)
             .await
@@ -1119,6 +1133,8 @@ impl Petalfall {
             })
         })
         .await?;
+        // 新令牌已落盘，后面查档案的那一程打断了也不丢账户。
+        drop(rotating);
         self.sync_authlib_profile(&client, account).await
     }
 
@@ -2081,9 +2097,10 @@ mod tests {
             )
         }
 
-        /// 判定边界（提前量加 60 秒余量）往里 5 秒：照样提前续。往外 5 秒的见下一个用例。
+        /// 判定边界（提前量加 60 秒余量）往里 5 秒：照样提前续，用例跑得再慢也只会更往里。往外的见下一个用例，
+        /// 留 5 分钟：存进去到检查之间墙钟走过的时间都在吃这段余量，留少了机器一忙就跨进提前量。
         const JUST_INSIDE: u64 = RENEW_AHEAD_WITHIN.as_secs() + 60 - 5;
-        const JUST_OUTSIDE: u64 = RENEW_AHEAD_WITHIN.as_secs() + 60 + 5;
+        const JUST_OUTSIDE: u64 = RENEW_AHEAD_WITHIN.as_secs() + 60 + 300;
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn current_microsoft_token_about_to_expire_is_renewed_ahead_once() {
@@ -2264,57 +2281,188 @@ mod tests {
             assert_eq!(petalfall.find_account(MS_UUID).unwrap(), Some(stale));
         }
 
-        /// 退出前等进行中的续期：没有在跑的立即返回；在跑的等它落完盘；到时限还没完就放弃。
-        /// 删掉计数，在跑的那次会被当成没有，本用例即挂。
+        /// 排在后台续期后面的启动被取消了：它留在闸前的那次续期拿到闸也不开始，更不取走后台的失败结论，
+        /// 结论留给后面还在等的启动。删掉排队之后「调用方还在不在」的检查，被取消的那次会取走结论，
+        /// 后一个启动只能自己再重试一轮，令牌请求翻倍。
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-        async fn settle_renewals_waits_for_the_one_in_flight_until_the_deadline() {
+        async fn cancelled_launch_leaves_the_background_failure_to_the_next_one() {
+            let attempts = petalfall_base::retry::RetryPolicy::default().max_attempts as usize;
+            let server = MockServer::start().await;
+            mount_slow_token(&server, token_outage(), Duration::from_millis(100)).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            let stale = petalfall.store_login(microsoft_expiring_in(0)).unwrap();
+
+            let background = petalfall.clone();
+            let ahead = tokio::spawn(async move { background.renew_current_ahead().await });
+            until_requested(&server, "/token").await;
+            let token = crate::CancellationToken::new();
+            let leaving = {
+                let snapshot = petalfall.clone().with_cancel(token.clone());
+                let stale = stale.clone();
+                tokio::spawn(async move { snapshot.ensure_account_fresh_timed(&stale).await })
+            };
+            // 让它的续期先排进闸，再取消；后台这一轮带退避要跑好几秒，排完队它还没完。
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            token.cancel();
+            let (left, _) = leaving.await.unwrap();
+            assert!(
+                left.as_ref().is_err_and(CoreError::is_cancelled),
+                "{left:?}"
+            );
+
+            let (verified, timing) = petalfall.ensure_account_fresh_timed(&stale).await;
+            assert!(
+                matches!(
+                    verified,
+                    Err(CoreError::Auth(AuthError::ServiceUnavailable {
+                        status: 503,
+                        ..
+                    }))
+                ),
+                "{verified:?}"
+            );
+            assert!(timing.reused_failure, "{timing:?}");
+            assert_eq!(timing.online, None);
+            assert_eq!(ahead.await.unwrap().unwrap(), AheadOutcome::Unreachable);
+            assert_eq!(token_requests(&server).await.len(), attempts);
+        }
+
+        /// 后台续期连不上令牌端点（[`AuthError::Http`]）时，排在后面的启动同样沿用：网络这会儿断着，
+        /// 启动再连一轮也是一样。把 Http 从沿用的范围里拿掉，启动会自己再重试一轮，连接数翻倍。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn launch_reuses_a_background_connection_failure() {
+            let attempts = petalfall_base::retry::RetryPolicy::default().max_attempts as usize;
+            // 收下连接就断开，每次令牌请求都连不上。
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let first = Arc::new(tokio::sync::Notify::new());
+            {
+                let (accepted, first) = (accepted.clone(), first.clone());
+                std::thread::spawn(move || {
+                    for stream in listener.incoming() {
+                        drop(stream.unwrap());
+                        accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        first.notify_one();
+                    }
+                });
+            }
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall =
+                petalfall_at(tmp.path()).with_msa_endpoints(petalfall_auth::MsaEndpoints {
+                    oauth_base: base.clone(),
+                    xbl_authenticate: format!("{base}/xbl"),
+                    xsts_authorize: format!("{base}/xsts"),
+                    minecraft_base: base,
+                });
+            let stale = petalfall.store_login(microsoft_expiring_in(0)).unwrap();
+
+            let background = petalfall.clone();
+            let ahead = tokio::spawn(async move { background.renew_current_ahead().await });
+            first.notified().await;
+            let (verified, timing) = petalfall.ensure_account_fresh_timed(&stale).await;
+            assert!(
+                matches!(verified, Err(CoreError::Auth(AuthError::Http { .. }))),
+                "{verified:?}"
+            );
+            assert!(timing.reused_failure, "{timing:?}");
+            assert_eq!(timing.online, None);
+            assert_eq!(ahead.await.unwrap().unwrap(), AheadOutcome::Unreachable);
+            assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), attempts);
+        }
+
+        /// 退出前只等外置令牌的轮换：没有在跑的立即返回；外置刷新在跑，时限内没完就放弃，时限够就等到新令牌
+        /// 落盘。微软续期不算：中断它不丢账户，退出不该为它多等。删掉轮换计数，第三段会当成没有在跑的；
+        /// 把微软续期也算进去，第二段即挂。
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn settle_rotations_waits_only_for_authlib_rotations_until_the_deadline() {
             let server = MockServer::start().await;
             mount_slow_token(&server, rotated_token(), Duration::from_millis(400)).await;
             mount_full_login(&server, 200).await;
+            mount_yggdrasil(&server, json!({})).await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/validate"))
+                .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+                    "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/authserver/refresh"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({
+                            "accessToken": "rotated", "clientToken": "cli",
+                            "selectedProfile": { "id": HERO, "name": "Hero" }
+                        }))
+                        .set_delay(Duration::from_secs(1)),
+                )
+                .mount(&server)
+                .await;
             let tmp = tempfile::tempdir().unwrap();
             let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
-            petalfall.store_login(microsoft_expiring_in(0)).unwrap();
             assert_eq!(
-                petalfall.settle_renewals(Duration::from_secs(10)).await,
-                SettledRenewals::Idle
+                petalfall.settle_rotations(Duration::from_secs(10)).await,
+                SettledRotations::Idle
             );
 
+            // 微软账户的后台续期在跑：不等。
+            petalfall.store_login(microsoft_expiring_in(0)).unwrap();
             let background = petalfall.clone();
             let ahead = tokio::spawn(async move { background.renew_current_ahead().await });
             until_requested(&server, "/token").await;
             assert_eq!(
-                petalfall.settle_renewals(Duration::from_secs(10)).await,
-                SettledRenewals::Finished
+                petalfall.settle_rotations(Duration::from_secs(10)).await,
+                SettledRotations::Idle
             );
-            // 等到了就是落完盘了：重开门面读得到新凭据。
+            assert!(matches!(
+                ahead.await.unwrap().unwrap(),
+                AheadOutcome::Renewed(_)
+            ));
+
+            // 外置刷新在跑：时限不够就放弃，够就等到新令牌落盘。
+            let info = AuthServerInfo {
+                api_root: format!("{}/", server.uri()),
+                server_name: "Petal Skin".into(),
+                host: "127.0.0.1".into(),
+            };
+            let stale = petalfall
+                .store_login(authlib_account(
+                    &info,
+                    "hero@example.com",
+                    "stale".into(),
+                    "cli".into(),
+                    GameProfile {
+                        id: HERO.into(),
+                        name: "Hero".into(),
+                    },
+                    None,
+                ))
+                .unwrap();
+            let refreshing = {
+                let petalfall = petalfall.clone();
+                tokio::spawn(async move { petalfall.ensure_account_fresh(&stale).await })
+            };
+            until_requested(&server, "/authserver/refresh").await;
+            assert_eq!(
+                petalfall.settle_rotations(Duration::from_millis(50)).await,
+                SettledRotations::TimedOut
+            );
+            assert_eq!(
+                petalfall.settle_rotations(Duration::from_secs(10)).await,
+                SettledRotations::Finished
+            );
+            // 等到了就是落完盘了：重开门面读得到新令牌。
             let reopened = petalfall_at(tmp.path())
-                .find_account(MS_UUID)
+                .find_account(HERO)
                 .unwrap()
                 .unwrap();
-            assert_eq!(stored_refresh_token(&reopened), "rotated-refresh");
-            assert!(matches!(
-                ahead.await.unwrap().unwrap(),
-                AheadOutcome::Renewed(_)
-            ));
-
-            server.reset().await;
-            mount_slow_token(&server, rotated_token(), Duration::from_secs(2)).await;
-            mount_full_login(&server, 200).await;
-            petalfall.store_login(microsoft_expiring_in(0)).unwrap();
-            let background = petalfall.clone();
-            let ahead = tokio::spawn(async move { background.renew_current_ahead().await });
-            until_requested(&server, "/token").await;
+            assert_eq!(stored_authlib_token(&reopened), "rotated");
+            refreshing.await.unwrap().unwrap();
             assert_eq!(
-                petalfall.settle_renewals(Duration::from_millis(50)).await,
-                SettledRenewals::TimedOut
-            );
-            assert!(matches!(
-                ahead.await.unwrap().unwrap(),
-                AheadOutcome::Renewed(_)
-            ));
-            assert_eq!(
-                petalfall.settle_renewals(Duration::from_secs(10)).await,
-                SettledRenewals::Idle
+                petalfall.settle_rotations(Duration::from_secs(10)).await,
+                SettledRotations::Idle
             );
         }
 

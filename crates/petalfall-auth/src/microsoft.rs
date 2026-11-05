@@ -1850,7 +1850,8 @@ mod tests {
         let retries = captured.lines_with(RETRYING);
         assert_eq!(retries.len(), 1, "{retries:?}");
         assert!(retries[0].contains("WARN"), "{}", retries[0]);
-        assert!(retries[0].contains("XBL 认证"), "{}", retries[0]);
+        // 认的是 step 字段本身：错误原文里也带着步骤名，只查子串的话删掉 step 字段照样过。
+        assert!(retries[0].contains(r#"step="XBL 认证""#), "{}", retries[0]);
         assert!(retries[0].contains("attempt=1"), "{}", retries[0]);
         assert!(retries[0].contains("max=3"), "{}", retries[0]);
         assert!(retries[0].contains("HTTP 503"), "{}", retries[0]);
@@ -1866,7 +1867,7 @@ mod tests {
             "获取游戏档案",
         ]) {
             assert!(line.contains("INFO"), "{line}");
-            assert!(line.contains(step), "{line}");
+            assert!(line.contains(&format!("step=\"{step}\"")), "{line}");
             assert!(line.contains("elapsed_ms="), "{line}");
             let attempts = if step == "XBL 认证" { 2 } else { 1 };
             assert!(line.contains(&format!("attempts={attempts}")), "{line}");
@@ -1902,7 +1903,7 @@ mod tests {
             .collect();
         assert_eq!(failed.len(), 1, "{failed:?}");
         assert!(failed[0].contains("WARN"), "{}", failed[0]);
-        assert!(failed[0].contains("XSTS 授权"), "{}", failed[0]);
+        assert!(failed[0].contains(r#"step="XSTS 授权""#), "{}", failed[0]);
         assert!(failed[0].contains("attempts=1"), "{}", failed[0]);
         assert_eq!(captured.lines_with(STEP_DONE).len(), 1, "XBL 那一步走完了");
     }

@@ -76,6 +76,12 @@ impl Facade {
     pub fn is_unlocked(&self) -> bool {
         self.inner.try_write().is_ok()
     }
+
+    /// 测试用：拿住写锁不放，好比改配置时落盘卡住的 [`Facade::update`]。
+    #[cfg(test)]
+    pub async fn hold_write_lock(&self) -> tokio::sync::RwLockWriteGuard<'_, Petalfall> {
+        self.inner.write().await
+    }
 }
 
 #[cfg(test)]

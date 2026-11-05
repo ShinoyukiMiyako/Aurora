@@ -1914,12 +1914,6 @@ fn authlib_metadata_failure(
     }
 }
 
-/// 续期失败里只有五种给失败码：凭据被服务器判定失效（重新登录，账户由续期本身写库标成需要重登）、
-/// 连不上（联网后重试）、登录服务故障（5xx、429，稍后重试）、应用未获批准（换 client_id）与这个版本
-/// 没有 client_id（填一个）。连不上与服务故障不碰账户库，账户还是好的，玩家可以稍后重试或先以离线方式
-/// 进单人；后两种重试多少次都一样，失败码只为把玩家引到 client_id 设置。封禁、未购买、响应解析不了、
-/// 凭据库读写失败都不是重新登录能解决的，按门面错误原样报出原文与错误码。取消同样原样报出：它不是续期的结论，当成账户失败
-/// 记下会盖掉门面记下的上一次服务或网络故障，让紧接着的以离线方式进单人被错拒。
 /// 会话日志里账户验证用时的那一行：排队等别的续期与自己联网分开写，没排队就只写联网。
 fn verify_summary(head: &str, timing: &crate::auth::VerifyTiming) -> String {
     let queued = timing.queued.as_millis();
@@ -1937,6 +1931,12 @@ fn verify_summary(head: &str, timing: &crate::auth::VerifyTiming) -> String {
     }
 }
 
+/// 续期失败里只有五种给失败码：凭据被服务器判定失效（重新登录，账户由续期本身写库标成需要重登）、
+/// 连不上（联网后重试）、登录服务故障（5xx、429，稍后重试）、应用未获批准（换 client_id）与这个版本
+/// 没有 client_id（填一个）。连不上与服务故障不碰账户库，账户还是好的，玩家可以稍后重试或先以离线方式
+/// 进单人；后两种重试多少次都一样，失败码只为把玩家引到 client_id 设置。封禁、未购买、响应解析不了、
+/// 凭据库读写失败都不是重新登录能解决的，按门面错误原样报出原文与错误码。取消同样原样报出：它不是续期的结论，当成账户失败
+/// 记下会盖掉门面记下的上一次服务或网络故障，让紧接着的以离线方式进单人被错拒。
 fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
     match &err {
         CoreError::Auth(petalfall_auth::AuthError::Http { .. }) => LaunchFailure::new(
