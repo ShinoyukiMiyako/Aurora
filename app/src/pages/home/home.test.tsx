@@ -285,6 +285,9 @@ describe("主页：问候与继续游玩", () => {
   it("没有账户：写「还没有登录账户」，「添加账户」去账户页；没有实例：空状态的主按钮打开新建流程", async () => {
     bootOverrides(ipc, { accounts: [], instances: [] });
     instances = [];
+    // 空状态要等目录列表回来，这里必须显式给出：落到假后端的命令要等 ipc/mock 首次动态加载完，
+    // 单独跑本文件时那要一两秒真实时间，假定时器推不动，大卡会一直停在骨架
+    ipc.overrides.set("list_game_directories", () => [{ name: "默认目录", path: "D:\\Games\\Launcher\\.minecraft", is_current: true, available: true, version_count: 0 }]);
     await mount();
     expect(document.querySelector("h1")?.textContent).toBe("下午好");
     expect(text()).toContain("还没有登录账户");
