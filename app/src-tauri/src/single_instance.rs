@@ -9,11 +9,17 @@
 //! 下一次启动不会被残留挡住。后来者对它 `SetEvent`，先来者的监听线程醒来把窗口叫到前台。事件自动复位，
 //! 先来者还没开始监听时的那次唤醒留到开始监听时生效。
 //!
-//! 叫到了前台，先来者再置另一个具名事件应答，后来者收到才退出。先来者正在退出时（窗口已关，退出收尾还要
+//! 叫到了前台，先来者再置另一个具名事件应答，后来者看到才退出。先来者正在退出时（窗口已关，退出收尾还要
 //! 落几秒盘）叫不到窗口，也就不应答；后来者等它退出、占位被系统回收后自己接手，不然双击之后什么都打不开。
 //! 先来者退出之前不接手：两个进程不能同时写一份数据。
+//!
+//! 应答事件手动复位，置上之后所有在等的后来者都看得到：连点几下时唤醒会合并成一次，应答也只有一次。
+//! 后来者唤醒之前先把它清掉，免得把上一回的应答当成这一回的。除了先来者叫到窗口，还有两种情况会置上它：
+//! 等着的后来者里有一个接手了，其余的由它的窗口兑现，不该在它关掉之后再各开一个；先来者退出时要拉起安装程序，
+//! 安装完由安装程序重新打开落樱，等着的后来者抢先接手的话，安装程序替换文件时它就挡在那里。
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use petalfall_base::brand::APP_NAME_EN;
@@ -37,7 +43,7 @@ const POLL: Duration = Duration::from_millis(100);
 pub enum Claim {
     /// 这个数据目录上只有这一个启动器。
     First(Instance),
-    /// 已有启动器在跑，它已经把窗口叫到前台，这个进程该退出了。
+    /// 已有启动器在跑，它已经把窗口叫到前台（或交给了安装程序、另一个后来者），这个进程该退出了。
     Forwarded,
     /// 已有启动器占着，可在 [`TAKEOVER_WAIT`] 之内既没应答也没退出：卡住了，或是不会应答的旧版本（它照样
     /// 叫了窗口）。这个进程也退出，不和它同时用一份数据。
@@ -47,8 +53,10 @@ pub enum Claim {
 /// 关掉时释放的事件句柄。
 struct Event(HANDLE);
 
-// SAFETY: 事件句柄是进程级的内核对象句柄，不绑定创建它的线程。
+// SAFETY: 事件句柄是进程级的内核对象句柄，不绑定创建它的线程，多个线程同时置位、等待都由系统同步。
 unsafe impl Send for Event {}
+// SAFETY: 同上
+unsafe impl Sync for Event {}
 
 impl Drop for Event {
     fn drop(&mut self) {
@@ -59,24 +67,53 @@ impl Drop for Event {
     }
 }
 
-/// 打开具名的自动复位事件，不存在就新建。交回句柄与它是否已经存在。
-fn open_event(name: &str) -> windows_core::Result<(Event, bool)> {
+/// 打开具名事件，不存在就新建。交回句柄与它是否已经存在。
+fn open_event(name: &str, manual_reset: bool) -> windows_core::Result<(Event, bool)> {
     let name = HSTRING::from(name);
     // SAFETY: 只写当前线程的错误码。成功的 CreateEventW 用它区分「新建」与「已存在」，先清掉，免得读到这个线程
     // 上一次调用留下的值：后来者要反复试占位，上一轮正是「已存在」
     unsafe { SetLastError(ERROR_SUCCESS) };
     // SAFETY: name 在调用期间有效；不带安全描述符，由系统给默认的
-    let handle = unsafe { CreateEventW(None, false, false, PCWSTR(name.as_ptr())) }?;
+    let handle = unsafe { CreateEventW(None, manual_reset, false, PCWSTR(name.as_ptr())) }?;
     let event = Event(handle);
     // SAFETY: 读当前线程的错误码，中间没有别的系统调用
     let existed = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
     Ok((event, existed))
 }
 
+/// 应答事件：置上它，在等的后来者就都退出。
+#[derive(Clone)]
+pub struct Answer(Arc<Event>);
+
+impl Answer {
+    /// 让在等的后来者都退出。
+    pub fn release_waiting(&self) {
+        // SAFETY: 句柄由本结构持有，活到最后一个克隆放下
+        if let Err(err) = unsafe { SetEvent(self.0 .0) } {
+            tracing::error!(error = %err, "置应答事件失败，在等的后来者要等到超时才退出");
+        }
+    }
+
+    /// 最多等 `within`，看应答有没有置上。
+    fn is_set(&self, within: Duration) -> windows_core::Result<bool> {
+        // SAFETY: 同上
+        match unsafe { WaitForSingleObject(self.0 .0, within.as_millis() as u32) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            _ => Err(windows_core::Error::from_win32()),
+        }
+    }
+
+    fn clear(&self) -> windows_core::Result<()> {
+        // SAFETY: 同上
+        unsafe { ResetEvent(self.0 .0) }
+    }
+}
+
 /// 占着数据目录的事件与应答后来者的事件。监听线程持有它们活到进程退出。
 pub struct Instance {
     claim: Event,
-    answer: Event,
+    answer: Answer,
     waited_for_exit: Option<Duration>,
 }
 
@@ -84,6 +121,11 @@ impl Instance {
     /// 这次启动时同一数据目录上的上一个启动器正在退出，等它退出用了多久；没等过是 `None`。
     pub fn waited_for_exit(&self) -> Option<Duration> {
         self.waited_for_exit
+    }
+
+    /// 应答事件。退出时要拉起安装程序的，用它先打发走在等的后来者。
+    pub fn answer(&self) -> Answer {
+        self.answer.clone()
     }
 
     /// 在独立线程上等后来者，每来一次调用一次 `on_request`；它报告叫到了前台才应答，后来者据此退出。
@@ -99,12 +141,8 @@ impl Instance {
                     );
                     return;
                 }
-                if !on_request() {
-                    continue;
-                }
-                // SAFETY: answer 是本结构持有的有效句柄
-                if let Err(err) = unsafe { SetEvent(self.answer.0) } {
-                    tracing::error!(error = %err, "应答后来者失败，它要等到超时才退出");
+                if on_request() {
+                    self.answer.release_waiting();
                 }
             })?;
         Ok(())
@@ -136,38 +174,76 @@ fn answer_name(claim: &str) -> String {
 
 /// 占位；已被占着就唤醒先来者，等它应答或退出，最多等 `wait`。
 fn claim_name(name: &str, wait: Duration) -> windows_core::Result<Claim> {
+    match ask(name)? {
+        Asked::Free(instance) => Ok(Claim::First(instance)),
+        Asked::Taken(waiting) => waiting.wait(wait),
+    }
+}
+
+enum Asked {
+    /// 没人占着，占到了。
+    Free(Instance),
+    /// 有人占着，已经唤醒了它。
+    Taken(Waiting),
+}
+
+/// 已经唤醒先来者、等它应答或退出的后来者。
+struct Waiting {
+    name: String,
+    answer: Answer,
+    started: Instant,
+}
+
+fn ask(name: &str) -> windows_core::Result<Asked> {
     // 先于唤醒打开：先来者收到唤醒时，应答要落在后来者也拿着的这个对象上。
-    let (answer, _) = open_event(&answer_name(name))?;
-    let started = Instant::now();
-    let mut asked = false;
-    loop {
-        let (claim, existed) = open_event(name)?;
-        if !existed {
-            return Ok(Claim::First(Instance {
-                claim,
-                answer,
-                waited_for_exit: asked.then(|| started.elapsed()),
-            }));
-        }
-        // 只唤醒一次：不会应答的旧版本每收到一次都会把窗口抢到前台，反复唤醒就是一直抢焦点。
-        if !asked {
-            // 清掉没人收的旧应答（等到超时才来的、旧版本后来者没收的），免得错当成这次的。
-            // SAFETY: answer 与 claim 都是上面拿到的有效句柄
-            unsafe { ResetEvent(answer.0) }?;
-            // SAFETY: 同上
-            unsafe { SetEvent(claim.0) }?;
-            asked = true;
-        }
-        // 不拿着占位等：先来者退出时，只有所有句柄都关了系统才回收这个对象，后来者才占得到。
-        drop(claim);
-        // SAFETY: answer 是上面拿到的有效句柄
-        match unsafe { WaitForSingleObject(answer.0, POLL.as_millis() as u32) } {
-            WAIT_OBJECT_0 => return Ok(Claim::Forwarded),
-            WAIT_TIMEOUT => {}
-            _ => return Err(windows_core::Error::from_win32()),
-        }
-        if started.elapsed() >= wait {
-            return Ok(Claim::Unanswered);
+    let (answer, _) = open_event(&answer_name(name), true)?;
+    let answer = Answer(Arc::new(answer));
+    let (claim, existed) = open_event(name, false)?;
+    if !existed {
+        return Ok(Asked::Free(Instance {
+            claim,
+            answer,
+            waited_for_exit: None,
+        }));
+    }
+    answer.clear()?;
+    // SAFETY: claim 是上面拿到的有效句柄
+    unsafe { SetEvent(claim.0) }?;
+    // 不拿着占位等（函数返回时 claim 随之关掉）：先来者退出时，只有所有句柄都关了系统才回收这个对象，
+    // 后来者才占得到。
+    Ok(Asked::Taken(Waiting {
+        name: name.to_owned(),
+        answer,
+        started: Instant::now(),
+    }))
+}
+
+impl Waiting {
+    /// 只唤醒过那一次：不会应答的旧版本每收到一次唤醒都会把窗口抢到前台，反复唤醒就是一直抢焦点。
+    fn wait(self, wait: Duration) -> windows_core::Result<Claim> {
+        loop {
+            let (claim, existed) = open_event(&self.name, false)?;
+            if !existed {
+                // 先来者退出之前放过了行（要拉起安装程序），或者另一个后来者接手后又退出了：都不再开窗口，
+                // 刚占到的占位随返回放掉。
+                if self.answer.is_set(Duration::ZERO)? {
+                    return Ok(Claim::Forwarded);
+                }
+                // 其余还在等的后来者由这个进程的窗口兑现。
+                self.answer.release_waiting();
+                return Ok(Claim::First(Instance {
+                    claim,
+                    answer: self.answer,
+                    waited_for_exit: Some(self.started.elapsed()),
+                }));
+            }
+            drop(claim);
+            if self.answer.is_set(POLL)? {
+                return Ok(Claim::Forwarded);
+            }
+            if self.started.elapsed() >= wait {
+                return Ok(Claim::Unanswered);
+            }
         }
     }
 }
@@ -189,14 +265,21 @@ mod tests {
     const BRIEF: Duration = Duration::from_millis(300);
 
     fn first(name: &str) -> Instance {
-        match claim_name(name, BRIEF).unwrap() {
-            Claim::First(instance) => instance,
-            Claim::Forwarded | Claim::Unanswered => panic!("{name} 上不该已有启动器"),
+        match ask(name).unwrap() {
+            Asked::Free(instance) => instance,
+            Asked::Taken(_) => panic!("{name} 上不该已有启动器"),
         }
     }
 
-    fn outcome(name: &str, wait: Duration) -> &'static str {
-        match claim_name(name, wait).unwrap() {
+    fn waiting(name: &str) -> Waiting {
+        match ask(name).unwrap() {
+            Asked::Taken(waiting) => waiting,
+            Asked::Free(_) => panic!("{name} 上应已有启动器"),
+        }
+    }
+
+    fn outcome(claim: Claim) -> &'static str {
+        match claim {
             Claim::First(_) => "first",
             Claim::Forwarded => "forwarded",
             Claim::Unanswered => "unanswered",
@@ -220,7 +303,7 @@ mod tests {
         let name = unique("wake");
         let woken = listening(first(&name), true);
         for _ in 0..3 {
-            assert_eq!(outcome(&name, ENOUGH), "forwarded");
+            assert_eq!(outcome(claim_name(&name, ENOUGH).unwrap()), "forwarded");
             woken
                 .recv_timeout(Duration::from_secs(5))
                 .expect("后来者要唤醒先来者");
@@ -235,17 +318,12 @@ mod tests {
     #[test]
     fn a_start_before_listening_is_answered_once_listening_begins() {
         let name = unique("early");
-        let instance = first(&name);
-        let later = {
-            let name = name.clone();
-            std::thread::spawn(move || outcome(&name, ENOUGH))
-        };
-        std::thread::sleep(Duration::from_millis(300));
-        let woken = listening(instance, true);
-        woken
+        let owner = first(&name);
+        let later = waiting(&name);
+        listening(owner, true)
             .recv_timeout(Duration::from_secs(5))
             .expect("开始监听时要收到之前的那次唤醒");
-        assert_eq!(later.join().unwrap(), "forwarded");
+        assert_eq!(outcome(later.wait(ENOUGH).unwrap()), "forwarded");
     }
 
     /// 先来者正在退出、叫不到窗口：不应答，后来者等它退出（这里用 drop 代替）后自己占位，记下等了多久。
@@ -254,13 +332,9 @@ mod tests {
     fn a_start_while_the_owner_exits_takes_over_once_it_is_gone() {
         let name = unique("exiting");
         let owner = first(&name);
-        let later = {
-            let name = name.clone();
-            std::thread::spawn(move || claim_name(&name, ENOUGH).unwrap())
-        };
-        std::thread::sleep(Duration::from_millis(300));
+        let later = waiting(&name);
         drop(owner);
-        let Claim::First(successor) = later.join().unwrap() else {
+        let Claim::First(successor) = later.wait(ENOUGH).unwrap() else {
             panic!("先来者退出后，后来者应接手");
         };
         assert!(successor.waited_for_exit().is_some(), "等过先来者退出");
@@ -272,13 +346,41 @@ mod tests {
         );
     }
 
+    /// 先来者退出时连点了两下：一个后来者接手，另一个由它的窗口兑现。接手的那个很快又被关掉，另一个也不该
+    /// 再开一个窗口。删掉接手时的应答，第二个会在第一个退出后再接手一次。
+    #[test]
+    fn only_one_waiting_start_takes_over() {
+        let name = unique("twice");
+        let owner = first(&name);
+        let one = waiting(&name);
+        let other = waiting(&name);
+        drop(owner);
+        let Claim::First(successor) = one.wait(ENOUGH).unwrap() else {
+            panic!("先来者退出后，先等的后来者应接手");
+        };
+        drop(successor);
+        assert_eq!(outcome(other.wait(BRIEF).unwrap()), "forwarded");
+    }
+
+    /// 先来者退出时要拉起安装程序：先放走在等的后来者，再退出。后来者不能赶在安装程序之前占位。删掉占到之后
+    /// 对应答的复查，这里后来者会接手。
+    #[test]
+    fn waiting_starts_leave_when_the_owner_hands_over_to_the_installer() {
+        let name = unique("installer");
+        let owner = first(&name);
+        let later = waiting(&name);
+        owner.answer().release_waiting();
+        drop(owner);
+        assert_eq!(outcome(later.wait(ENOUGH).unwrap()), "forwarded");
+    }
+
     /// 先来者叫不到窗口、又一直不退出：后来者到时限就走，不和它同时用一份数据。等的这段时间只唤醒一次：
     /// 不会应答的旧版本每收到一次唤醒都会抢一次焦点。
     #[test]
     fn an_owner_that_neither_answers_nor_exits_is_woken_once_and_left_alone() {
         let name = unique("silent");
         let woken = listening(first(&name), false);
-        assert_eq!(outcome(&name, BRIEF), "unanswered");
+        assert_eq!(outcome(claim_name(&name, BRIEF).unwrap()), "unanswered");
         woken
             .recv_timeout(Duration::from_secs(5))
             .expect("后来者要唤醒先来者");
@@ -288,15 +390,14 @@ mod tests {
         );
     }
 
-    /// 上一个后来者没收走的应答不算数：先来者这回叫不到窗口，新来的后来者不能被旧应答打发走。
+    /// 上一个后来者收到后留着的应答不算数：先来者这回叫不到窗口，新来的后来者不能被旧应答打发走。
     #[test]
     fn a_stale_answer_does_not_send_a_later_start_away() {
         let name = unique("stale");
         let owner = first(&name);
-        // SAFETY: answer 是 owner 持有的有效句柄
-        unsafe { SetEvent(owner.answer.0) }.unwrap();
+        owner.answer().release_waiting();
         let _woken = listening(owner, false);
-        assert_eq!(outcome(&name, BRIEF), "unanswered");
+        assert_eq!(outcome(claim_name(&name, BRIEF).unwrap()), "unanswered");
     }
 
     #[test]
@@ -304,7 +405,11 @@ mod tests {
         let a = unique("dir-a");
         let b = unique("dir-b");
         let _first = first(&a);
-        assert_eq!(outcome(&b, BRIEF), "first", "别的数据目录不受影响");
+        assert_eq!(
+            outcome(claim_name(&b, BRIEF).unwrap()),
+            "first",
+            "别的数据目录不受影响"
+        );
     }
 
     /// 进程退出（包括崩溃）时系统关掉句柄，这里用 drop 代替：占位跟着进程走，不留残留挡住下次启动。
@@ -351,6 +456,6 @@ mod tests {
         let dir = format!(r"D:\游戏 目录\{}\Petalfall", std::process::id());
         let name = event_name(&PathBuf::from(dir));
         let _woken = listening(first(&name), true);
-        assert_eq!(outcome(&name, ENOUGH), "forwarded");
+        assert_eq!(outcome(claim_name(&name, ENOUGH).unwrap()), "forwarded");
     }
 }

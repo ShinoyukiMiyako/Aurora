@@ -60,22 +60,31 @@ pub fn front_on_second_launch(
         .ok_or_else(|| format!("找不到主窗口 {MAIN_WINDOW}，tauri.conf.json 与代码不一致"))?;
     instance.listen(move || {
         tracing::info!("又启动了一次，把已有窗口叫到前台");
-        match window
-            .unminimize()
-            .and_then(|()| window.set_focus())
-            .and_then(|()| window.is_visible())
-        {
-            Ok(_) => true,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "没能把主窗口叫到前台，多半是窗口已关、正在退出；新启动的落樱等这个进程退出后接手"
-                );
-                false
-            }
-        }
+        fronted(
+            || window.unminimize().and_then(|()| window.set_focus()),
+            || window.is_visible(),
+        )
     })?;
     Ok(())
+}
+
+/// 先叫窗口，再读一次可见性：读到了才算叫到了前台。可见与否不论，窗口还没显示时前端显示出来本来就在前台。
+#[cfg(windows)]
+fn fronted<E: Display>(
+    front: impl FnOnce() -> Result<(), E>,
+    is_visible: impl FnOnce() -> Result<bool, E>,
+) -> bool {
+    match front().and_then(|()| is_visible()) {
+        Ok(_) => true,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "没能把主窗口叫到前台，多半是窗口已关、正在退出：新启动的落樱等这个进程退出后接手，\
+                 等满 15 秒还没退出就不再等，自行退出"
+            );
+            false
+        }
+    }
 }
 
 /// 等 `delay` 后检查可见性，仍不可见就显示。返回是否做了强制显示。
@@ -134,6 +143,38 @@ fn disable_browser_accelerator_keys(window: &tauri::WebviewWindow) -> tauri::Res
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    /// 先叫窗口再读可见性，读到了（可见与否不论）才应答；叫完读不到说明窗口已经没了，不应答，后来者等着接手。
+    /// 只看叫窗口的结果不够：窗口销毁之后叫它照样报成功。
+    #[cfg(windows)]
+    #[test]
+    fn only_a_window_that_still_answers_counts_as_fronted() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let front = || {
+            order.borrow_mut().push("front");
+            Ok::<_, String>(())
+        };
+        assert!(fronted(front, || {
+            order.borrow_mut().push("read");
+            Ok(false)
+        }));
+        assert_eq!(*order.borrow(), ["front", "read"], "要在叫完之后读");
+
+        assert!(!fronted(
+            || Ok::<_, String>(()),
+            || Err("窗口已销毁".to_owned())
+        ));
+
+        let read = Cell::new(false);
+        assert!(!fronted(
+            || Err("事件循环已退出".to_owned()),
+            || {
+                read.set(true);
+                Ok(true)
+            }
+        ));
+        assert!(!read.get(), "叫窗口失败就不必再读");
+    }
 
     #[tokio::test]
     async fn hidden_window_is_shown_once_after_the_delay() {

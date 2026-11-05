@@ -552,6 +552,12 @@ pub fn install_on_exit(app: &AppHandle) {
     if !updater.slot().install_on_exit {
         return;
     }
+    // 正在等这个进程退出的后来者会赶在安装程序之前接手，安装程序替换文件时它就挡在那里：让它们退出，
+    // 安装完由安装程序重新打开落樱。
+    #[cfg(windows)]
+    if let Some(answer) = app.try_state::<crate::single_instance::Answer>() {
+        answer.release_waiting();
+    }
     // 退出路径上没有前端可以报错，只能记日志；下次启动检查更新时会再次提示。
     if let Err(err) = updater.install_downloaded() {
         tracing::error!(code = err.code, message = %err.message, "退出时安装更新失败");
