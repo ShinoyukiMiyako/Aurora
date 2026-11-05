@@ -78,18 +78,10 @@ PR 上只会自动跑 CLA 签署检查，不跑代码检查，下面这些要在
 - 不要描摹、临摹或复制第三方作品，包括 Minecraft 的原版纹理与图案（CLA 第七条第五款）。原版材质在运行期从玩家本机的游戏文件或官方客户端读取，经 `petalfall-tex` 协议交给前端；仓库里不放 Minecraft 的纹理、声音或其他游戏资源。
 - 不要把别的项目（包括其他启动器）的代码搬进来。确实需要时告诉贡献者，由他按 CLA 第七条第三款与原创内容分开提交，在 PR 说明里写明来源、原作者、许可证和已知限制，并保留原有的版权和许可声明；接不接受由维护者决定。你的产出里能认出来的第三方内容，同样按这一款处理。素材不走这条路：第三方的图片、像素图和图形数据一律不接受。
 
-## 安全与数据
-
-- `.github/workflows/cla.yml` 由 `pull_request_target` 和 `issue_comment` 触发，两者都只用默认分支上的工作流文件，作业带写权限响应 fork 的 PR。里面只调 API，只 checkout 并加载默认分支上的脚本，不能 checkout 或执行 PR 里的任何文件。PR 对 `.github/scripts/cla-check.mjs` 的改动要合入默认分支后才生效。
-- `.github/workflows/dev-build.yml` 的 `build` 作业跑在内网的自托管机上。fork 能触发的作业一律不能落到这台机器上：不要给 dev-build.yml 加 `pull_request`、`pull_request_target`、`issue_comment` 这类 fork 能触发的事件，其他工作流也不要用自托管机的 `runs-on` 标签。
-- 不要把密钥和令牌写进仓库。更新签名私钥只在 dev-build.yml 的 `publish` 作业（GitHub 托管机）里给更新包签名时出现，绝不能挪进自托管的 `build` 作业；本机构建不需要任何签名密钥。
-- 微软登录 client_id 和 CurseForge API key 由 dev 分支的 CI 在构建时注入，fork 与自行构建用自己的值，见 README 的「配置」。client_id 不是机密，但不进源码：修改过代码的构建要用自己注册的应用，不能用从落樱发行包里取出的值。
-- 测试和真机验证不碰贡献者本机的真实配置、账户与实例。真机运行时把 `LOCALAPPDATA`、`APPDATA` 和 `WEBVIEW2_USER_DATA_FOLDER` 指到临时目录，见 README 的「快速开始」。
-
 ## Claude Code
 
 这一节写给贡献者。Claude Code 从 2.1.277 起，在工作目录及其上级都没有 CLAUDE.md、CLAUDE.local.md 或 .claude 目录下的 CLAUDE.md 时读这份文件；经 Amazon Bedrock、Google Vertex AI、Microsoft Foundry、LLM 网关接入或关闭了遥测的，要 2.1.281 起。`/config` 的「Project instructions」可以改成两者都读。仓库不带这几个文件，根目录的 `CLAUDE.md` 已被 `.gitignore` 忽略。贡献者在根目录建了自己的 CLAUDE.md 时，在里面加一行 `@AGENTS.md` 导入这份文件即可；CLAUDE.local.md 和 .claude 目录没有被忽略，建了也不要提交。
 
 ## 维护
 
-这份文件随项目约定更新：改了 CONTRIBUTING.md、CLA、LICENSE-ASSETS.md、README.md、docs/architecture.md、PR 模板、`.github/workflows/` 或质量门时，要一并核对。`app/scripts/agents-md.test.ts` 只检查这里的链接、仓库路径、pnpm 脚本名和章节标题，CLA 条款号、许可章节号和工作流的行为要人工核对。发现它和代码、CLA、许可文件或上述文档对不上，以它们为准，并在 PR 里指出。
+这份文件随项目约定更新：改了 CONTRIBUTING.md、CLA、LICENSE-ASSETS.md、README.md、docs/architecture.md、PR 模板、`.github/workflows/` 或质量门时，要一并核对。`app/scripts/agents-md.test.ts` 只检查这里的链接、仓库路径、pnpm 脚本名和章节标题，CLA 条款号和许可章节号要人工核对。发现它和代码、CLA、许可文件或上述文档对不上，以它们为准，并在 PR 里指出。
