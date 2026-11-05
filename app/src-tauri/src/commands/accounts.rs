@@ -530,7 +530,7 @@ pub(crate) async fn renew_ahead_once(facade: &Facade) -> Option<AheadOutcome> {
 }
 
 /// 退出前最多等这么久，让进行中的外置令牌轮换落盘，取门面快照的时间也算在里面。外置刷新是一两次请求，正常远用
-/// 不了这么久；退出拖得越久，期间再次打开落樱被转交给这个正在退出的进程、什么也打不开的机会越大。
+/// 不了这么久；退出拖得越久，期间再次打开落樱的人就要等得越久：新进程等这个进程退出后才接手。
 pub const ROTATIONS_EXIT_DEADLINE: Duration = Duration::from_secs(3);
 
 /// 退出前（关窗、游戏启动后关闭、自更新拉起安装程序之前）等进行中的外置令牌轮换落盘（见

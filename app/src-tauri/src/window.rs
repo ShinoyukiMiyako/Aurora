@@ -47,6 +47,9 @@ pub fn setup_main_window(app: &App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 再次启动时把主窗口叫到前台：最小化的先还原。窗口还没显示时 `set_focus` 不做事，前端显示时它本来就在前台。
+///
+/// 还原与取得焦点是投递给事件循环的消息，窗口已经销毁时被静默丢掉、照样报成功；读一次可见性要等事件循环
+/// 回话，窗口不在就报错。读到了才算叫到了前台，这时才让后来者退出；正在退出时读不到，后来者等这个进程退出后接手。
 #[cfg(windows)]
 pub fn front_on_second_launch(
     app: &App,
@@ -57,8 +60,19 @@ pub fn front_on_second_launch(
         .ok_or_else(|| format!("找不到主窗口 {MAIN_WINDOW}，tauri.conf.json 与代码不一致"))?;
     instance.listen(move || {
         tracing::info!("又启动了一次，把已有窗口叫到前台");
-        if let Err(err) = window.unminimize().and_then(|()| window.set_focus()) {
-            tracing::error!(error = %err, "把主窗口叫到前台失败");
+        match window
+            .unminimize()
+            .and_then(|()| window.set_focus())
+            .and_then(|()| window.is_visible())
+        {
+            Ok(_) => true,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "没能把主窗口叫到前台，多半是窗口已关、正在退出；新启动的落樱等这个进程退出后接手"
+                );
+                false
+            }
         }
     })?;
     Ok(())

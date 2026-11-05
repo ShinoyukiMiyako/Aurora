@@ -1021,7 +1021,7 @@ impl Petalfall {
     /// 等进行中的外置令牌轮换都落盘，最多等 `deadline`。退出前调：续期跑在独立任务里
     /// （[`Petalfall::renew_detached`]），进程一退，没落盘的新凭据就丢了。只等外置刷新：它会让旧令牌当场作废，
     /// 新令牌没落盘就只能重新登录。微软换发新令牌时不作废旧 refresh token，打断了也只是下次再续一遍，不值得
-    /// 让退出等它；退出拖得越久，期间再次打开落樱被转交给这个正在退出的进程、什么也打不开的机会越大。
+    /// 让退出等它；退出拖得越久，期间再次打开落樱的人就要等得越久。
     pub async fn settle_rotations(&self, deadline: Duration) -> SettledRotations {
         let mut idle = self.rotations.0.subscribe();
         if *idle.borrow_and_update() == 0 {
