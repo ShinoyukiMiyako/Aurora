@@ -24,6 +24,7 @@ describe("自动检查的排期条件", () => {
     expect(autoCheckEnabled(INITIAL_UPDATER_STATE, ready)).toBe(false);
     expect(autoCheckEnabled(state({ kind: "unsupported", reason: "missing_pubkey" }), ready)).toBe(false);
     expect(autoCheckEnabled(state({ kind: "unsupported", reason: "debug_build" }), ready)).toBe(false);
+    expect(autoCheckEnabled(state({ kind: "unsupported", reason: "signed_version_not_required" }), ready)).toBe(false);
   });
 });
 
