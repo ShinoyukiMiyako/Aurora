@@ -529,35 +529,24 @@ pub(crate) async fn renew_ahead_once(facade: &Facade) -> Option<AheadOutcome> {
     }
 }
 
-/// 退出前最多等这么久，让进行中的外置令牌轮换落盘，取门面快照的时间也算在里面。外置刷新是一两次请求，正常远用
-/// 不了这么久；退出拖得越久，期间再次打开落樱的人就要等得越久：新进程等这个进程退出后才接手。
+/// 退出前最多等这么久，让进行中的外置令牌轮换落盘。外置刷新是一两次请求，正常远用不了这么久；退出拖得越久，
+/// 期间再次打开落樱的人就要等得越久：新进程等这个进程退出后才接手。
 pub const ROTATIONS_EXIT_DEADLINE: Duration = Duration::from_secs(3);
 
-/// 退出前（关窗、游戏启动后关闭、自更新拉起安装程序之前）等进行中的外置令牌轮换落盘（见
-/// [`Petalfall::settle_rotations`]），结果只进日志：退出路径上没有前端可以报错。不为此弹关窗确认：多数时候
-/// 没有在跑的。
-///
-/// 取快照也算在时限里：改配置时门面拿着写锁等配置落盘，磁盘或杀毒软件卡住时快照一直排着，退出不能跟着挂住。
-pub async fn settle_rotations(facade: &Facade, deadline: Duration) -> SettledRotations {
-    let settled = tokio::time::timeout(deadline, async {
-        facade.snapshot().await.settle_rotations(deadline).await
-    })
-    .await;
+/// 退出前（关窗、游戏启动后关闭、自更新拉起安装程序之前）关上外置令牌轮换的闸，再等进行中的落盘（见
+/// [`petalfall_core::RotationGate::stop`]），结果只进日志：退出路径上没有前端可以报错。不为此弹关窗确认：
+/// 多数时候没有在跑的。闸不经门面锁，改配置的写者卡在落盘上也挡不住退出。
+pub async fn stop_rotations(facade: &Facade, deadline: Duration) -> SettledRotations {
+    let settled = facade.rotation_gate().stop(deadline).await;
     match settled {
-        Ok(SettledRotations::Idle) => SettledRotations::Idle,
-        Ok(SettledRotations::Finished) => {
-            tracing::info!("退出前等进行中的外置令牌轮换落了盘");
-            SettledRotations::Finished
-        }
-        // 快照没取到也落到这里：那时有没有轮换在跑无从知道，照最坏的情况记。
-        Ok(SettledRotations::TimedOut) | Err(_) => {
-            tracing::warn!(
-                deadline_ms = deadline.as_millis() as u64,
-                "退出前没在时限内等到外置令牌轮换落盘，随退出放弃：正在刷新令牌的外置账户可能要重新登录"
-            );
-            SettledRotations::TimedOut
-        }
+        SettledRotations::Idle => {}
+        SettledRotations::Finished => tracing::info!("退出前等进行中的外置令牌轮换落了盘"),
+        SettledRotations::TimedOut => tracing::warn!(
+            deadline_ms = deadline.as_millis() as u64,
+            "退出前没在时限内等到外置令牌轮换落盘，随退出放弃：正在刷新令牌的外置账户可能要重新登录"
+        ),
     }
+    settled
 }
 
 #[cfg(test)]

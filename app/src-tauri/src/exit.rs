@@ -25,11 +25,11 @@ pub fn on_exit(app: &AppHandle) {
     crate::commands::updater::install_on_exit(app);
 }
 
-/// 进程结束前要做的落盘：等进行中的外置令牌轮换，再补写游玩记录。正常退出与自更新拉起安装程序之前
-/// （[`crate::commands::updater::install_after_persisting`]）都走这里。续期跑在独立任务里，进程一退就没了，
-/// 新令牌来不及落盘。两步各有时限，结果只进日志。
+/// 进程结束前要做的落盘：关上外置令牌轮换的闸、等进行中的轮换，再补写游玩记录。正常退出与自更新拉起安装程序
+/// 之前（[`crate::commands::updater::install_after_persisting`]）都走这里。续期跑在独立任务里，进程一退就没了，
+/// 新令牌来不及落盘；闸关上之后要刷新的外置令牌原样留着，下次再续。两步各有时限，结果只进日志。
 pub async fn persist_before_exit(facade: &Facade) {
-    crate::commands::accounts::settle_rotations(
+    crate::commands::accounts::stop_rotations(
         facade,
         crate::commands::accounts::ROTATIONS_EXIT_DEADLINE,
     )
@@ -218,23 +218,52 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exit_waits_for_the_authlib_rotation_in_flight() {
         let dir = tempfile::tempdir().unwrap();
-        let rotation = authlib_rotation_in_flight(dir.path()).await;
-        assert_eq!(rotation.stored_token(), "stale");
+        let account =
+            stale_authlib_account(dir.path(), Duration::ZERO, Duration::from_secs(1)).await;
+        let _renewal = account.renew_until("/authserver/refresh").await;
+        assert_eq!(account.stored_token(), "stale");
 
-        persist_before_exit(&rotation.facade).await;
-        assert_eq!(rotation.stored_token(), "rotated");
+        persist_before_exit(&account.facade).await;
+        assert_eq!(account.stored_token(), "rotated");
     }
 
-    /// 一次进行中的外置令牌刷新：刷新端点扣着回音，新令牌还没落盘。
+    /// 外置令牌还在校验时退出（账户页点了刷新马上关窗，或启动停在「验证账户」时关窗）：校验那一程不会让旧令牌
+    /// 作废，退出不等它；校验判失效之后也不再发刷新，旧令牌原样留着，下次再续。退出收尾不关闸的话，校验一完刷新
+    /// 照样发出，旧令牌作废，新令牌赶不上进程退出，下次启动账户就被登出了。
     #[cfg(windows)]
-    pub(crate) struct AuthlibRotation {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exit_during_validation_keeps_the_old_authlib_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let account =
+            stale_authlib_account(dir.path(), Duration::from_secs(1), Duration::ZERO).await;
+        let renewal = account.renew_until("/authserver/validate").await;
+
+        persist_before_exit(&account.facade).await;
+        let refused = renewal.await.unwrap();
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(petalfall_core::CoreError::is_cancelled),
+            "{refused:?}"
+        );
+        assert!(
+            !account.requested("/authserver/refresh").await,
+            "退出开始后不该再发刷新请求"
+        );
+        assert_eq!(account.stored_token(), "stale");
+    }
+
+    /// 一个旧令牌已失效的外置账户，连着它的登录服务器。
+    #[cfg(windows)]
+    pub(crate) struct StaleAuthlibAccount {
         pub(crate) facade: Facade,
+        account: petalfall_core::Account,
         dir: std::path::PathBuf,
-        _server: wiremock::MockServer,
+        server: wiremock::MockServer,
     }
 
     #[cfg(windows)]
-    impl AuthlibRotation {
+    impl StaleAuthlibAccount {
         /// 重开门面读到的令牌：落了盘的才读得到。
         pub(crate) fn stored_token(&self) -> String {
             let reopened = Petalfall::open(
@@ -248,14 +277,61 @@ pub(crate) mod tests {
                 other => panic!("期望外置凭据，得到 {other:?}"),
             }
         }
+
+        /// 在门面快照上续期，等到登录服务器收到发往 `endpoint` 的请求才返回，交回那次续期。
+        pub(crate) async fn renew_until(
+            &self,
+            endpoint: &str,
+        ) -> tokio::task::JoinHandle<Result<petalfall_core::Account, petalfall_core::CoreError>>
+        {
+            let renewal = self.renew_in_background().await;
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while !self.requested(endpoint).await {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("15 秒内没等到 {endpoint} 的请求"));
+            renewal
+        }
+
+        /// 在门面快照上续期并等它结束。
+        pub(crate) async fn renew(
+            &self,
+        ) -> Result<petalfall_core::Account, petalfall_core::CoreError> {
+            self.renew_in_background().await.await.unwrap()
+        }
+
+        async fn renew_in_background(
+            &self,
+        ) -> tokio::task::JoinHandle<Result<petalfall_core::Account, petalfall_core::CoreError>>
+        {
+            let petalfall = self.facade.snapshot().await;
+            let account = self.account.clone();
+            tokio::spawn(async move { petalfall.ensure_account_fresh(&account).await })
+        }
+
+        pub(crate) async fn requested(&self, endpoint: &str) -> bool {
+            self.server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.url.path() == endpoint)
+        }
     }
 
     #[cfg(windows)]
     const HERO: &str = "1111111111111111aaaaaaaaaaaaaaaa";
 
-    /// 在 `dir` 登录一个外置账户，再让它的令牌刷新停在等回音上（扣 1 秒），刷新请求发出后才返回。
+    /// 在 `dir` 登录一个外置账户。它的令牌之后校验都判失效（扣 `validate_delay`），刷新给出新令牌
+    /// （扣 `refresh_delay`）。
     #[cfg(windows)]
-    pub(crate) async fn authlib_rotation_in_flight(dir: &Path) -> AuthlibRotation {
+    pub(crate) async fn stale_authlib_account(
+        dir: &Path,
+        validate_delay: Duration,
+        refresh_delay: Duration,
+    ) -> StaleAuthlibAccount {
         use serde_json::json;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -287,9 +363,13 @@ pub(crate) mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/authserver/validate"))
-            .respond_with(ResponseTemplate::new(403).set_body_json(json!({
-                "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
-            })))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_json(json!({
+                        "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
+                    }))
+                    .set_delay(validate_delay),
+            )
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -300,41 +380,26 @@ pub(crate) mod tests {
                         "accessToken": "rotated", "clientToken": "cli",
                         "selectedProfile": { "id": HERO, "name": "Hero" }
                     }))
-                    .set_delay(Duration::from_secs(1)),
+                    .set_delay(refresh_delay),
             )
             .mount(&server)
             .await;
 
         let facade = facade_in(dir);
-        let petalfall = facade.snapshot().await;
-        let petalfall_core::AuthlibLogin::LoggedIn(account) = petalfall
+        let petalfall_core::AuthlibLogin::LoggedIn(account) = facade
+            .snapshot()
+            .await
             .authlib_login(&server.uri(), "hero@example.com", "pw")
             .await
             .unwrap()
         else {
             panic!("服务器替用户选定了角色，应直接登录");
         };
-        // 不等它：刷新跑在核心的独立任务里，落不落盘与这个调用方无关。
-        drop(tokio::spawn(async move {
-            petalfall.ensure_account_fresh(&account).await
-        }));
-        tokio::time::timeout(Duration::from_secs(15), async {
-            while !server
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .any(|r| r.url.path() == "/authserver/refresh")
-            {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("15 秒内没等到刷新请求");
-        AuthlibRotation {
+        StaleAuthlibAccount {
             facade,
+            account,
             dir: dir.to_path_buf(),
-            _server: server,
+            server,
         }
     }
 }

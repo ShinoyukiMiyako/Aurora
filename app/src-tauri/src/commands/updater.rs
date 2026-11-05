@@ -521,15 +521,19 @@ pub async fn install_update(
     app.restart()
 }
 
-/// 先做退出收尾里的落盘（[`crate::exit::persist_before_exit`]：等进行中的外置令牌轮换、补写游玩记录）再安装：
-/// Windows 上更新插件拉起安装程序后直接结束进程，不经过 `RunEvent::Exit`，退出收尾赶不上。等不到或补写失败
-/// 都只记日志、照样安装，与正常退出时一致。
+/// 先做退出收尾里的落盘（[`crate::exit::persist_before_exit`]：关闸并等进行中的外置令牌轮换、补写游玩记录）
+/// 再安装：Windows 上更新插件拉起安装程序后直接结束进程，不经过 `RunEvent::Exit`，退出收尾赶不上。等不到或
+/// 补写失败都只记日志、照样安装，与正常退出时一致。安装程序没拉起来时进程接着跑，重新开闸，外置令牌照常刷新。
 pub(crate) async fn install_after_persisting(
     facade: &Facade,
     install: impl FnOnce() -> Result<(), CommandError>,
 ) -> Result<(), CommandError> {
     crate::exit::persist_before_exit(facade).await;
-    install()
+    let installed = install();
+    if installed.is_err() {
+        facade.rotation_gate().resume();
+    }
+    installed
 }
 
 /// 开关「退出时安装」。打开前更新包必须已下载好（否则 `update_not_ready`）。
@@ -765,17 +769,49 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn install_now_waits_for_the_authlib_rotation_in_flight() {
         let dir = tempfile::tempdir().unwrap();
-        let rotation = crate::exit::tests::authlib_rotation_in_flight(dir.path()).await;
-        assert_eq!(rotation.stored_token(), "stale");
+        let account = crate::exit::tests::stale_authlib_account(
+            dir.path(),
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        let _renewal = account.renew_until("/authserver/refresh").await;
+        assert_eq!(account.stored_token(), "stale");
 
         let mut stored_at_install = None;
-        install_after_persisting(&rotation.facade, || {
-            stored_at_install = Some(rotation.stored_token());
+        install_after_persisting(&account.facade, || {
+            stored_at_install = Some(account.stored_token());
             Ok(())
         })
         .await
         .unwrap();
         assert_eq!(stored_at_install.as_deref(), Some("rotated"));
+    }
+
+    /// 安装程序没拉起来、进程接着跑：拉起之前关上的轮换闸要重新打开，外置令牌照常刷新。不开的话，之后每次
+    /// 刷新外置账户都以取消告终，直到重启落樱。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_install_lets_authlib_tokens_refresh_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = crate::exit::tests::stale_authlib_account(
+            dir.path(),
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        )
+        .await;
+
+        let failed = install_after_persisting(&account.facade, || {
+            Err(CommandError::new(
+                code::UPDATE_INSTALL_FAILED,
+                "启动更新安装失败",
+            ))
+        })
+        .await;
+        assert_eq!(failed.unwrap_err().code, code::UPDATE_INSTALL_FAILED);
+
+        account.renew().await.unwrap();
+        assert_eq!(account.stored_token(), "rotated");
     }
 
     #[test]
