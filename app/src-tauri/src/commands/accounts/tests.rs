@@ -211,6 +211,23 @@ async fn find_account_reads_the_store_off_the_async_thread() {
     assert!(missing.message.contains("ffffffffffffffffffffffffffffffff"));
 }
 
+/// 改配置的写者拿着门面写锁卡在落盘上时退出：关闸等轮换不经门面锁，照样立即返回，不跟着挂住。
+/// 改回从门面快照上关闸，这里要等到写锁放开才返回。
+#[tokio::test]
+async fn exit_stops_rotations_while_the_facade_stays_locked() {
+    let dir = tempfile::tempdir().unwrap();
+    let facade = Facade::new(open_petalfall(dir.path()));
+    let _writer = facade.hold_write_lock().await;
+
+    let settled = tokio::time::timeout(
+        Duration::from_secs(5),
+        stop_rotations(&facade, Duration::from_secs(10)),
+    )
+    .await
+    .expect("门面被占着时退出收尾挂住了");
+    assert_eq!(settled, SettledRotations::Idle);
+}
+
 /// 设备码登录要落 DPAPI 账户库，只在 Windows 上跑。
 #[cfg(windows)]
 mod microsoft {

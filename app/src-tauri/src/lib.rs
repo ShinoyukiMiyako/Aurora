@@ -45,7 +45,9 @@ pub fn run() {
     // 排在日志之前：每次启动都开一份新日志、清掉最旧的，连点几下图标就把正在用的那份挤掉了。
     #[cfg(windows)]
     let claimed = match single_instance::claim() {
-        Ok(single_instance::Claim::Forwarded) => return,
+        // 叫不到窗口又迟迟不退出的那个进程多半卡住了，这里也退出：不和它同时用一份数据。此时还没有日志，
+        // 每次启动开一份新日志，为这次什么都没做的启动开一份会挤掉一份有用的。
+        Ok(single_instance::Claim::Forwarded | single_instance::Claim::Unanswered) => return,
         Ok(single_instance::Claim::First(instance)) => Ok(instance),
         Err(err) => Err(err),
     };
@@ -71,6 +73,16 @@ pub fn run() {
             tracing::error!(error = %err, "同一数据目录的占位失败，这次启动不防重复打开");
         })
         .ok();
+    #[cfg(windows)]
+    if let Some(waited) = instance
+        .as_ref()
+        .and_then(single_instance::Instance::waited_for_exit)
+    {
+        tracing::info!(
+            waited_ms = waited.as_millis() as u64,
+            "同一数据目录上的上一个落樱正在退出，等它退出后才接手"
+        );
+    }
 
     let updater_support = commands::updater::detect_support(
         context.config().plugins.0.get("updater"),
@@ -138,6 +150,8 @@ pub fn run() {
             window::setup_main_window(app)?;
             #[cfg(windows)]
             if let Some(instance) = instance {
+                // 退出时要拉起安装程序的，先用它打发走在等的后来者（见 `install_on_exit`）。
+                app.manage(instance.answer());
                 window::front_on_second_launch(app, instance)?;
             }
             Ok(())

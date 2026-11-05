@@ -78,8 +78,9 @@ pub struct Petalfall {
     /// 各账户最近一次账户类启动失败，以离线方式进单人时据此放行。与工程版本缓存一样放在门面上：快照
     /// 克隆共享同一个句柄，重开门面即清空。
     pub(crate) account_failures: crate::launch::AccountFailures,
-    /// 进行中的续期个数，退出前据此等它们落盘。随快照共享：续期多半开在命令的快照上，退出时拿的是常驻门面。
-    pub(crate) renewals: crate::auth::RenewalsInFlight,
+    /// 外置令牌轮换的闸，退出前关上并等进行中的落盘（见 [`crate::auth::RotationGate`]）。随快照共享：轮换多半开在
+    /// 命令的快照上。
+    pub(crate) rotations: crate::auth::RotationGate,
     /// 测试注入的 CurseForge key：生产只认运行期环境变量与构建时内嵌的 key，测试改不了进程环境，
     /// 有了它 CurseForge 路径上的门面级行为才写得出端到端测试。
     #[cfg(test)]
@@ -151,7 +152,7 @@ impl Petalfall {
             gpu_preferences: Arc::new(RegistryGpuPreferences),
             system_language: sys_locale::get_locale,
             account_failures: Default::default(),
-            renewals: Default::default(),
+            rotations: Default::default(),
             #[cfg(test)]
             curseforge_key: None,
             #[cfg(test)]
@@ -573,7 +574,7 @@ impl Petalfall {
             gpu_preferences: Arc::new(crate::gpu::testing::UnsetGpuPreferences),
             system_language: || None,
             account_failures: Default::default(),
-            renewals: Default::default(),
+            rotations: Default::default(),
             curseforge_key: None,
             curseforge_cdn_scope: None,
             download_resolver: None,

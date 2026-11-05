@@ -517,24 +517,23 @@ pub async fn install_update(
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
     updater.require_supported()?;
-    // Windows 上安装程序一拉起进程就结束，不经过退出收尾，进行中的续期要在这之前等它落盘。
-    crate::commands::accounts::settle_renewals(
-        &facade,
-        crate::commands::accounts::RENEWALS_EXIT_DEADLINE,
-    )
-    .await;
-    install_after_saving_play_records(&facade, || updater.install_downloaded()).await?;
+    install_after_persisting(&facade, || updater.install_downloaded()).await?;
     app.restart()
 }
 
-/// 先补写游玩记录里还没落盘的改动再安装：Windows 上更新插件拉起安装程序后直接结束进程，不经过
-/// `RunEvent::Exit`，退出收尾里的那次补写赶不上。补写失败只记日志、照样安装，与正常退出时一致。
-pub(crate) async fn install_after_saving_play_records(
+/// 先做退出收尾里的落盘（[`crate::exit::persist_before_exit`]：关闸并等进行中的外置令牌轮换、补写游玩记录）
+/// 再安装：Windows 上更新插件拉起安装程序后直接结束进程，不经过 `RunEvent::Exit`，退出收尾赶不上。等不到或
+/// 补写失败都只记日志、照样安装，与正常退出时一致。安装程序没拉起来时进程接着跑，重新开闸，外置令牌照常刷新。
+pub(crate) async fn install_after_persisting(
     facade: &Facade,
     install: impl FnOnce() -> Result<(), CommandError>,
 ) -> Result<(), CommandError> {
-    crate::exit::save_play_records(facade, crate::exit::PLAY_RECORDS_DEADLINE).await;
-    install()
+    crate::exit::persist_before_exit(facade).await;
+    let installed = install();
+    if installed.is_err() {
+        facade.rotation_gate().resume();
+    }
+    installed
 }
 
 /// 开关「退出时安装」。打开前更新包必须已下载好（否则 `update_not_ready`）。
@@ -552,6 +551,12 @@ pub fn install_on_exit(app: &AppHandle) {
     let updater = app.state::<UpdaterState>();
     if !updater.slot().install_on_exit {
         return;
+    }
+    // 正在等这个进程退出的后来者会赶在安装程序之前接手，安装程序替换文件时它就挡在那里：让它们退出，
+    // 安装完由安装程序重新打开落樱。
+    #[cfg(windows)]
+    if let Some(answer) = app.try_state::<crate::single_instance::Answer>() {
+        answer.release_waiting();
     }
     // 退出路径上没有前端可以报错，只能记日志；下次启动检查更新时会再次提示。
     if let Err(err) = updater.install_downloaded() {
@@ -740,7 +745,7 @@ mod tests {
         std::fs::write(&path, RECORDS).unwrap();
 
         let mut on_disk_at_install = None;
-        let result = install_after_saving_play_records(&facade, || {
+        let result = install_after_persisting(&facade, || {
             on_disk_at_install = Some(std::fs::read_to_string(&path).unwrap());
             Err(CommandError::new(
                 code::UPDATE_INSTALL_FAILED,
@@ -762,6 +767,57 @@ mod tests {
             .save_pending_play_records()
             .await
             .unwrap());
+    }
+
+    /// 外置账户正在刷新令牌时立即安装：拉起安装程序之前新令牌已经落盘。安装程序一拉起进程就结束，
+    /// 这里不等就没有别处会等，服务器那边已经作废了旧令牌，账户只能重新登录。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_now_waits_for_the_authlib_rotation_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = crate::exit::tests::stale_authlib_account(
+            dir.path(),
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        let _renewal = account.renew_until("/authserver/refresh").await;
+        assert_eq!(account.stored_token(), "stale");
+
+        let mut stored_at_install = None;
+        install_after_persisting(&account.facade, || {
+            stored_at_install = Some(account.stored_token());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(stored_at_install.as_deref(), Some("rotated"));
+    }
+
+    /// 安装程序没拉起来、进程接着跑：拉起之前关上的轮换闸要重新打开，外置令牌照常刷新。不开的话，之后每次
+    /// 刷新外置账户都以取消告终，直到重启落樱。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_install_lets_authlib_tokens_refresh_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = crate::exit::tests::stale_authlib_account(
+            dir.path(),
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        )
+        .await;
+
+        let failed = install_after_persisting(&account.facade, || {
+            Err(CommandError::new(
+                code::UPDATE_INSTALL_FAILED,
+                "启动更新安装失败",
+            ))
+        })
+        .await;
+        assert_eq!(failed.unwrap_err().code, code::UPDATE_INSTALL_FAILED);
+
+        account.renew().await.unwrap();
+        assert_eq!(account.stored_token(), "rotated");
     }
 
     #[test]

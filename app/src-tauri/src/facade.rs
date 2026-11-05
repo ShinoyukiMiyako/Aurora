@@ -11,19 +11,27 @@
 //!   在快照上跑。门面克隆很便宜（HTTP 客户端内部是 `Arc`，其余是配置与路径）。
 //!   长任务还会在快照上挂取消令牌（`Petalfall::with_cancel`），常驻门面始终不挂。
 
-use petalfall_core::{CoreError, Petalfall};
+use petalfall_core::{CoreError, Petalfall, RotationGate};
 use tokio::sync::{RwLock, RwLockReadGuard};
 
 /// 放进 Tauri managed state 的门面。
 pub struct Facade {
     inner: RwLock<Petalfall>,
+    /// 与门面及其快照共用的外置令牌轮换闸。门面里的那份只会被自己的克隆替换，闸始终是同一道。
+    rotations: RotationGate,
 }
 
 impl Facade {
     pub fn new(petalfall: Petalfall) -> Self {
         Self {
+            rotations: petalfall.rotation_gate(),
             inner: RwLock::new(petalfall),
         }
+    }
+
+    /// 外置令牌轮换的闸。不经门面锁：退出时要关它，改配置的写者卡在落盘上也不能挡住。
+    pub fn rotation_gate(&self) -> &RotationGate {
+        &self.rotations
     }
 
     /// 只读访问。持有期间不要 await 网络或慢 IO（见模块文档）。
@@ -75,6 +83,12 @@ impl Facade {
     #[cfg(test)]
     pub fn is_unlocked(&self) -> bool {
         self.inner.try_write().is_ok()
+    }
+
+    /// 测试用：拿住写锁不放，好比改配置时落盘卡住的 [`Facade::update`]。
+    #[cfg(test)]
+    pub async fn hold_write_lock(&self) -> tokio::sync::RwLockWriteGuard<'_, Petalfall> {
+        self.inner.write().await
     }
 }
 
