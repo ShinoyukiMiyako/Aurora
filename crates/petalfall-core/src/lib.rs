@@ -150,7 +150,10 @@ pub use art::{
     ArtStatus, DefaultSkin, DownloadedClient, SkinInfo, TexResponse, TextureService, ThumbError,
     default_skin,
 };
-pub use auth::{AuthServerInfo, AuthlibLogin, AuthlibPending};
+pub use auth::{
+    AheadOutcome, AuthServerInfo, AuthlibLogin, AuthlibPending, RENEW_AHEAD_CHECK_EVERY,
+    RENEW_AHEAD_WITHIN, SettledRenewals, VerifyTiming,
+};
 
 // ---- 透传下层类型，让上层只依赖本 crate ----
 pub use petalfall_auth::{Account, AccountType, DeviceCodeResponse, GameProfile};

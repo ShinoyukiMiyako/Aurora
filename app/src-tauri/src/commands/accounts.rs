@@ -10,8 +10,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use petalfall_core::{
-    Account, AccountCredentials, AccountStatus, AccountType, AuthServerInfo, AuthlibLogin,
-    AuthlibPending, CancellationToken, DeviceCodeResponse, Petalfall, TextureService,
+    Account, AccountCredentials, AccountStatus, AccountType, AheadOutcome, AuthServerInfo,
+    AuthlibLogin, AuthlibPending, CancellationToken, DeviceCodeResponse, Petalfall,
+    SettledRenewals, TextureService, RENEW_AHEAD_CHECK_EVERY,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
@@ -492,36 +493,59 @@ pub(crate) async fn find_account(
     .ok_or_else(|| petalfall_core::AuthError::AccountNotFound(uuid.to_owned()).into())
 }
 
-/// 后台查一次当前账户令牌的间隔。
-const RENEW_CHECK_EVERY: Duration = Duration::from_secs(15 * 60);
-/// 令牌在这么久之内到期就提前续。比检查间隔长，两次检查之间令牌才不会过期。
-const RENEW_AHEAD: Duration = Duration::from_secs(30 * 60);
-
-/// 启动器打开时、以及开着期间每隔 [`RENEW_CHECK_EVERY`]，在后台给当前微软账户提前续期，点启动时不必先等
-/// 令牌链（见 [`Petalfall::renew_current_ahead`]）。每次都取门面的新快照：期间可能换了账户或数据目录。
-/// 续不了只记日志：启动时还会再续一次，那里的失败才报给玩家。
+/// 启动器打开时、以及开着期间每隔 [`RENEW_AHEAD_CHECK_EVERY`]，在后台给当前微软账户提前续期，点启动时不必
+/// 先等令牌链（见 [`Petalfall::renew_current_ahead`]）。每一次检查见 [`renew_ahead_once`]。
 pub fn renew_ahead_in_background(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let mut checks = tokio::time::interval(RENEW_CHECK_EVERY);
+        let mut checks = tokio::time::interval(RENEW_AHEAD_CHECK_EVERY);
         // 睡眠唤醒后补查一次就够，错过的几次不必连着补。
         checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             checks.tick().await;
-            let petalfall = app.state::<Facade>().snapshot().await;
-            match petalfall.renew_current_ahead(RENEW_AHEAD).await {
-                Ok(Some(account)) => {
-                    tracing::info!(uuid = %account.uuid, "已在后台提前续期当前微软账户的令牌");
-                }
-                Ok(None) => {}
-                Err(err) => tracing::warn!(
-                    error = %err,
-                    causes = ?crate::commands::error::source_chain(&err),
-                    "后台提前续期失败，启动时会再续"
-                ),
-            }
+            renew_ahead_once(&app.state::<Facade>()).await;
         }
     });
+}
+
+/// 后台提前续期的一次检查，交回结局供测试核对；续不了交回 `None`。每次都取门面的新快照：期间可能换了账户
+/// 或数据目录。续不了只记日志、不中断定时，下一次检查照常再看：启动时还会再续一次，那里的失败才报给玩家。
+pub(crate) async fn renew_ahead_once(facade: &Facade) -> Option<AheadOutcome> {
+    match facade.snapshot().await.renew_current_ahead().await {
+        Ok(outcome) => {
+            if let AheadOutcome::Renewed(account) = &outcome {
+                tracing::info!(uuid = %account.uuid, "已在后台提前续期当前微软账户的令牌");
+            }
+            Some(outcome)
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                causes = ?crate::commands::error::source_chain(&err),
+                "后台提前续期失败，下次检查或启动时再续"
+            );
+            None
+        }
+    }
+}
+
+/// 退出前最多等这么久，让进行中的续期落盘。微软换发新令牌时不作废旧 refresh token，等不到也只是下次再续一遍；
+/// 外置刷新会让旧令牌当场作废，等不到就要重新登录，但它是一两次请求，正常远用不了这么久。
+pub const RENEWALS_EXIT_DEADLINE: Duration = Duration::from_secs(3);
+
+/// 退出前（关窗、游戏启动后关闭、自更新拉起安装程序之前）等进行中的续期落盘，结果只进日志：退出路径上没有
+/// 前端可以报错。不为此弹关窗确认：多数只是后台提前续期，等不到也不丢账户。
+pub async fn settle_renewals(facade: &Facade, deadline: Duration) -> SettledRenewals {
+    let settled = facade.snapshot().await.settle_renewals(deadline).await;
+    match settled {
+        SettledRenewals::Idle => {}
+        SettledRenewals::Finished => tracing::info!("退出前等进行中的续期落了盘"),
+        SettledRenewals::TimedOut => tracing::warn!(
+            deadline_ms = deadline.as_millis() as u64,
+            "退出前续期没在时限内跑完，随退出放弃：微软账户下次启动再续，外置账户若正在刷新令牌可能要重新登录"
+        ),
+    }
+    settled
 }
 
 #[cfg(test)]

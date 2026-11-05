@@ -517,6 +517,12 @@ pub async fn install_update(
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
     updater.require_supported()?;
+    // Windows 上安装程序一拉起进程就结束，不经过退出收尾，进行中的续期要在这之前等它落盘。
+    crate::commands::accounts::settle_renewals(
+        &facade,
+        crate::commands::accounts::RENEWALS_EXIT_DEADLINE,
+    )
+    .await;
     install_after_saving_play_records(&facade, || updater.install_downloaded()).await?;
     app.restart()
 }
