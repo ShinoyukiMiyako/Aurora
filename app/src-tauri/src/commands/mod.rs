@@ -9,6 +9,8 @@
 pub mod accounts;
 pub mod appearance;
 pub mod art;
+#[cfg(test)]
+mod beta_release_contract;
 pub mod config;
 pub mod diagnostics;
 pub mod discover;
