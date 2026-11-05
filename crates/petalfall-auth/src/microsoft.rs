@@ -1759,6 +1759,11 @@ mod tests {
 
     impl Captured {
         fn install(&self) -> tracing::subscriber::DefaultGuard {
+            // 登记在册的订阅器只有一个时，tracing-core 给头一回碰到的调用点定兴趣，用的是碰到它的那条线程自己的订阅器，
+            // 结果全局缓存。并行的别的用例没装订阅器，先碰到令牌链的日志调用点，就把它缓存成「不感兴趣」，这里装的
+            // 订阅器就收不到那一行。另外常备一个空订阅器，让登记在册的总不止一个，兴趣按所有订阅器合起来算。
+            static SECOND: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+            SECOND.get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new()));
             let writer = self.clone();
             tracing::subscriber::set_default(
                 tracing_subscriber::fmt()
