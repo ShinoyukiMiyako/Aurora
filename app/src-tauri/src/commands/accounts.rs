@@ -7,13 +7,14 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use petalfall_core::{
     Account, AccountCredentials, AccountStatus, AccountType, AuthServerInfo, AuthlibLogin,
     AuthlibPending, CancellationToken, DeviceCodeResponse, Petalfall, TextureService,
 };
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::commands::art::{skin_info_dto, SkinInfoDto};
 use crate::commands::CommandError;
@@ -489,6 +490,38 @@ pub(crate) async fn find_account(
     })
     .await?
     .ok_or_else(|| petalfall_core::AuthError::AccountNotFound(uuid.to_owned()).into())
+}
+
+/// 后台查一次当前账户令牌的间隔。
+const RENEW_CHECK_EVERY: Duration = Duration::from_secs(15 * 60);
+/// 令牌在这么久之内到期就提前续。比检查间隔长，两次检查之间令牌才不会过期。
+const RENEW_AHEAD: Duration = Duration::from_secs(30 * 60);
+
+/// 启动器打开时、以及开着期间每隔 [`RENEW_CHECK_EVERY`]，在后台给当前微软账户提前续期，点启动时不必先等
+/// 令牌链（见 [`Petalfall::renew_current_ahead`]）。每次都取门面的新快照：期间可能换了账户或数据目录。
+/// 续不了只记日志：启动时还会再续一次，那里的失败才报给玩家。
+pub fn renew_ahead_in_background(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut checks = tokio::time::interval(RENEW_CHECK_EVERY);
+        // 睡眠唤醒后补查一次就够，错过的几次不必连着补。
+        checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            checks.tick().await;
+            let petalfall = app.state::<Facade>().snapshot().await;
+            match petalfall.renew_current_ahead(RENEW_AHEAD).await {
+                Ok(Some(account)) => {
+                    tracing::info!(uuid = %account.uuid, "已在后台提前续期当前微软账户的令牌");
+                }
+                Ok(None) => {}
+                Err(err) => tracing::warn!(
+                    error = %err,
+                    causes = ?crate::commands::error::source_chain(&err),
+                    "后台提前续期失败，启动时会再续"
+                ),
+            }
+        }
+    });
 }
 
 #[cfg(test)]

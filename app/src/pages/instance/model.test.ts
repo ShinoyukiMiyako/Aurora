@@ -203,7 +203,7 @@ describe("整页订阅的启动视图", () => {
   });
   const installing = (task: Task | null, queuePosition: number | null): LaunchView => ({ kind: "installing", task, queuePosition });
   const downloading = (done: number) => {
-    const session = applyPhase(startSession("生存", "launch-1", account, T0, null), { taskId: "launch-1", phase: "downloading", stageIndex: 3, download: { done, total: 100, bytes: 0, totalBytes: null, speedBps: 2048 } }, T0 + done);
+    const session = applyPhase(startSession("生存", "launch-1", account, T0, null), { taskId: "launch-1", phase: "downloading", stageIndex: 4, download: { done, total: 100, bytes: 0, totalBytes: null, speedBps: 2048 } }, T0 + done);
     if (session.phase !== "downloading") throw new Error("应在下载阶段");
     return { kind: "loading", session, phase: session.phase } as const satisfies LaunchView;
   };

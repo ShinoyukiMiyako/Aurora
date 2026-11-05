@@ -1,5 +1,5 @@
 // 启动会话的状态转移。全局同一时刻最多一个会话；每个输入都核对它属于哪一次启动（taskId）或哪个实例，
-// 迟到的旧事件原样丢弃。进度按八阶段表的区间计算，阶段 3 按字节线性推进，结果与旧值取最大（单调不减）。
+// 迟到的旧事件原样丢弃。进度按九阶段表的区间计算，阶段 4 按字节线性推进，结果与旧值取最大（单调不减）。
 
 import { SESSION_LOG_LIMIT } from "../domain/limits";
 import { FAILURE_CODES, type AccountKind, type FailureCode, type LogLine, type Session, type SessionDownload, type SessionPhase } from "../domain/types";
@@ -22,7 +22,7 @@ export interface SessionState extends Session {
   quickPlay: QuickPlayArg | null;
   crash: SessionCrash | null;
   /**
-   * 加载期间各阶段收到的提醒条数，下标对应八阶段表。准备阶段的检查项不通过但不阻断时，后端写一条启动器 warn 日志，
+   * 加载期间各阶段收到的提醒条数，下标对应九阶段表。准备阶段的检查项不通过但不阻断时，后端写一条启动器 warn 日志，
    * 状态岛的阶段清单在该阶段右侧写「N 条提醒」。
    */
   stageWarnings: readonly number[];
@@ -33,10 +33,10 @@ export interface SessionState extends Session {
   reattached: boolean;
 }
 
-/** 各阶段的起点；阶段 7 恒为 1。 */
-export const STAGE_START: readonly number[] = [0, 0.1, 0.2, 0.3, 0.75, 0.83, 0.91, 1];
-const DOWNLOAD_STAGE = 3;
-const RUNNING_STAGE = 7;
+/** 各阶段的起点；阶段 8 恒为 1。 */
+export const STAGE_START: readonly number[] = [0, 0.05, 0.1, 0.2, 0.3, 0.75, 0.83, 0.91, 1];
+export const DOWNLOAD_STAGE = 4;
+export const RUNNING_STAGE = 8;
 
 const LOADING: readonly SessionPhase[] = ["preparing", "downloading", "launching"];
 
@@ -53,7 +53,7 @@ export function isFailureCode(code: string): code is FailureCode {
   return (FAILURE_CODES as readonly string[]).includes(code);
 }
 
-/** 阶段 3 的字节比例；声明大小未知时退回文件数比例。有效字节可能越过声明大小，封顶到 1。 */
+/** 阶段 4 的字节比例；声明大小未知时退回文件数比例。有效字节可能越过声明大小，封顶到 1。 */
 export function downloadFraction(download: SessionDownload): number {
   if (download.totalBytes !== null && download.totalBytes > 0) return Math.min(1, download.bytes / download.totalBytes);
   if (download.total !== null && download.total > 0) return Math.min(1, download.done / download.total);
@@ -62,7 +62,7 @@ export function downloadFraction(download: SessionDownload): number {
 
 export function stageProgress(stageIndex: number, download: SessionDownload | null): number {
   const start = STAGE_START[stageIndex];
-  if (start === undefined) throw new Error(`阶段下标 ${stageIndex} 超出八阶段表`);
+  if (start === undefined) throw new Error(`阶段下标 ${stageIndex} 超出九阶段表`);
   if (stageIndex === DOWNLOAD_STAGE && download !== null) {
     return start + (STAGE_START[DOWNLOAD_STAGE + 1] - start) * downloadFraction(download);
   }

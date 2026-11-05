@@ -269,6 +269,19 @@ fn authlib_account(
     }
 }
 
+/// 值得提前续期的账户：没被判定要重新登录的微软账户，Minecraft 令牌没有或在 `within` 之内到期。
+fn microsoft_expiring_within(account: &Account, within: Duration) -> bool {
+    match &account.credentials {
+        AccountCredentials::Microsoft(creds) => {
+            account.status != AccountStatus::Expired
+                && !creds.minecraft_token_valid_at(
+                    (unix_millis() / 1000).saturating_add(within.as_secs()),
+                )
+        }
+        AccountCredentials::AuthlibInjector(_) | AccountCredentials::Offline => false,
+    }
+}
+
 /// 外置刷新被服务器以「令牌无效」拒绝，等同于凭据失效。
 fn is_rejected_token(err: &AuthError) -> bool {
     matches!(err, AuthError::Yggdrasil { error, .. } if error == petalfall_auth::yggdrasil::FORBIDDEN_OPERATION)
@@ -696,13 +709,14 @@ impl Petalfall {
     /// 账户就只能重新登录。所以调用方被取消（快照上的取消令牌触发，或 future 被丢弃）时只是不再等，
     /// 续期照样跑完落盘；续期闸由任务自己持有，排在后面的续期等它落完盘才读库。令牌链因此不挂取消令牌。
     /// 已经取消了才来的续期不开始。
-    async fn renew_detached<F>(
+    async fn renew_detached<F, T>(
         &self,
         uuid: &str,
         renewal: impl FnOnce(Petalfall) -> F,
-    ) -> Result<Account>
+    ) -> Result<T>
     where
-        F: std::future::Future<Output = Result<Account>> + Send + 'static,
+        F: std::future::Future<Output = Result<T>> + Send + 'static,
+        T: Send + 'static,
     {
         if self.is_cancelled() {
             return Err(AuthError::Cancelled.into());
@@ -759,6 +773,47 @@ impl Petalfall {
                 self.refresh_authlib(&account, creds).await
             }
             AccountCredentials::Offline => Ok(account.clone()),
+        }
+    }
+
+    /// 当前账户是微软账户、且 Minecraft 令牌在 `within` 之内就要到期时，提前续期。续了返回续期后的
+    /// 账户，不用续返回 `None`。
+    ///
+    /// Minecraft 令牌只有一天的有效期，一天玩一次的人每次点启动都要先等令牌链走完（串行几次 HTTPS
+    /// 往返，网络慢时好几秒）。启动器开着时在后台提前续掉，点启动时只剩一次读库。只管微软账户：外置
+    /// 令牌有没有失效在本地看不出来，启动时无论如何要向服务器校验一次，提前做省不了时间。已判定要重新
+    /// 登录的账户跳过，续了只会再被拒一次。
+    ///
+    /// 和启动前的续期排同一把闸：点启动时这边正在续，启动那边等它落盘后直接用新令牌。
+    pub async fn renew_current_ahead(&self, within: Duration) -> Result<Option<Account>> {
+        let Some(account) = self
+            .blocking(|petalfall| petalfall.current_account())
+            .await?
+        else {
+            return Ok(None);
+        };
+        if !microsoft_expiring_within(&account, within) {
+            return Ok(None);
+        }
+        let target = account.uuid.clone();
+        self.renew_detached(&account.uuid, |petalfall| async move {
+            petalfall.renew_ahead_now(&target, within).await
+        })
+        .await
+    }
+
+    async fn renew_ahead_now(&self, uuid: &str, within: Duration) -> Result<Option<Account>> {
+        let _gate = self.refresh_gate(uuid).await;
+        // 排队期间启动或账户页可能刚续过，以库里此刻的记录为准。
+        let account = self.stored_account(uuid).await?;
+        match &account.credentials {
+            AccountCredentials::Microsoft(creds) if microsoft_expiring_within(&account, within) => {
+                let refresh_token = creds.refresh_token.clone();
+                Ok(Some(
+                    self.refresh_microsoft(&account, &refresh_token).await?,
+                ))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -1754,6 +1809,100 @@ mod tests {
             server.reset().await;
             let valid = petalfall.ensure_account_fresh(&fresh).await.unwrap();
             assert_eq!(valid, fresh);
+            assert!(server.received_requests().await.unwrap().is_empty());
+        }
+
+        const RENEW_WINDOW: Duration = Duration::from_secs(30 * 60);
+
+        fn microsoft_expiring_in(secs: u64) -> Account {
+            Account::new(
+                MS_UUID,
+                "OldName",
+                AccountCredentials::Microsoft(MicrosoftCredentials {
+                    refresh_token: "old-refresh".into(),
+                    minecraft_token: Some("OLD-MC".into()),
+                    minecraft_expires_at: Some(unix_millis() / 1000 + secs),
+                }),
+            )
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn current_microsoft_token_about_to_expire_is_renewed_ahead_once() {
+            let server = MockServer::start().await;
+            mount_full_login(&server, 200).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+            // 还有 10 分钟才过期：启动时会照用，但已在提前量之内。
+            let stored = petalfall
+                .store_login(microsoft_expiring_in(10 * 60))
+                .unwrap();
+
+            let renewed = petalfall
+                .renew_current_ahead(RENEW_WINDOW)
+                .await
+                .unwrap()
+                .expect("10 分钟内到期的令牌应提前续期");
+            assert_eq!(renewed.name, "PetalPlayer");
+            assert_eq!(renewed.added_at, stored.added_at);
+            let reopened = petalfall_at(tmp.path())
+                .find_account(MS_UUID)
+                .unwrap()
+                .unwrap();
+            match &reopened.credentials {
+                AccountCredentials::Microsoft(c) => {
+                    assert_eq!(c.refresh_token, "rotated-refresh");
+                    assert_eq!(c.minecraft_token.as_deref(), Some("MC-TOKEN"));
+                    assert!(
+                        c.minecraft_token_valid_at(unix_millis() / 1000 + RENEW_WINDOW.as_secs())
+                    );
+                }
+                other => panic!("期望 Microsoft 凭据，得到 {other:?}"),
+            }
+
+            // 续过之后一天内都不在提前量里：再查一次不联网。
+            server.reset().await;
+            assert_eq!(
+                petalfall.renew_current_ahead(RENEW_WINDOW).await.unwrap(),
+                None
+            );
+            assert!(server.received_requests().await.unwrap().is_empty());
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn renew_ahead_skips_tokens_with_time_to_spare_relogin_and_offline_accounts() {
+            let server = MockServer::start().await;
+            mount_full_login(&server, 200).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path()).with_msa_endpoints(msa_endpoints(&server));
+
+            // 还有两小时：不在提前量里。
+            petalfall
+                .store_login(microsoft_expiring_in(2 * 60 * 60))
+                .unwrap();
+            assert_eq!(
+                petalfall.renew_current_ahead(RENEW_WINDOW).await.unwrap(),
+                None
+            );
+
+            // 令牌早已过期，但账户已判定要重新登录：续了只会再被拒一次。
+            petalfall.store_login(microsoft_expiring_in(0)).unwrap();
+            petalfall
+                .update_credential_account(MS_UUID, |stored| {
+                    stored.status = AccountStatus::Expired;
+                })
+                .unwrap();
+            assert_eq!(
+                petalfall.renew_current_ahead(RENEW_WINDOW).await.unwrap(),
+                None
+            );
+
+            // 当前账户是离线账户：没有可续的令牌。
+            petalfall.add_offline_account("Steve", None).unwrap();
+            assert_eq!(
+                petalfall.renew_current_ahead(RENEW_WINDOW).await.unwrap(),
+                None
+            );
+
             assert!(server.received_requests().await.unwrap().is_empty());
         }
 

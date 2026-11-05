@@ -22,7 +22,7 @@ import { sessionDetail, sessionPhaseLabel } from "../launch/launchView";
 import { fade, shake, springs } from "../lib/motion";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { findInstance } from "../state/selectors";
-import { isLoadingPhase, type SessionState } from "../state/session";
+import { DOWNLOAD_STAGE, isLoadingPhase, type SessionState } from "../state/session";
 import { Button } from "../ui/Button";
 import { Popover } from "../ui/Popover";
 import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
@@ -264,7 +264,6 @@ export type StageState = "done" | "now" | "todo";
 
 /** 阶段清单不含最后一项「游戏运行中」：清单只在加载阶段出现。 */
 const LOADING_STAGES = LAUNCH_STAGES.slice(0, -1);
-const DOWNLOAD_STAGE = 3;
 
 export function stageState(stageIndex: number, index: number): StageState {
   if (index < stageIndex) return "done";

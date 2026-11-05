@@ -120,6 +120,7 @@ pub fn run() {
             // -- accounts --
             app.manage(commands::accounts::MicrosoftLoginSlot::default());
             app.manage(commands::accounts::AuthlibPendingSlot::default());
+            commands::accounts::renew_ahead_in_background(app.handle());
             // -- art --
             textures::setup(app);
             // -- system --
