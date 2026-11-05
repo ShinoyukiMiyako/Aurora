@@ -151,8 +151,11 @@ describe("启动器更新：自动检查", () => {
     expect(foundToasts()).toEqual([]);
   });
 
-  it("没配公钥（不支持更新）：整个会话都不发检查请求", async () => {
-    info = { ...info, supported: false, unsupported_reason: "missing_pubkey" };
+  it.each([
+    ["没配公钥", "missing_pubkey"],
+    ["没要求签名带版本号", "signed_version_not_required"],
+  ] as const)("%s（不支持更新）：整个会话都不发检查请求", async (_, reason) => {
+    info = { ...info, supported: false, unsupported_reason: reason };
     await mount();
     await advance(AUTO_CHECK_DELAY_MS + AUTO_CHECK_INTERVAL_MS * 2);
     expect(callsOf(ipc, "updater_info").length).toBeGreaterThan(0);

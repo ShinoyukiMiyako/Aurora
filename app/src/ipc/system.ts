@@ -212,7 +212,7 @@ export const listNews = (options: ListNewsOptions = { retry: false }): Promise<N
 
 // ---- 启动器自更新 ----
 
-export type UpdaterUnsupportedReason = "debug_build" | "missing_pubkey";
+export type UpdaterUnsupportedReason = "debug_build" | "missing_pubkey" | "signed_version_not_required" | "downgrades_allowed";
 
 export interface UpdateDto {
   version: string;

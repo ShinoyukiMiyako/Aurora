@@ -127,7 +127,7 @@ pub mod code {
     pub const INVALID_GAME_DIRECTORY: &str = "invalid_game_directory";
     /// 读不到本机物理内存信息。
     pub const MEMORY_UNAVAILABLE: &str = "memory_unavailable";
-    /// 当前环境没有自更新能力，detail.reason 为 debug_build / missing_pubkey。
+    /// 当前环境没有自更新能力，detail.reason 为 debug_build / missing_pubkey / signed_version_not_required / downgrades_allowed。
     pub const UPDATER_UNSUPPORTED: &str = "updater_unsupported";
     /// 检查更新失败（连不上更新源、更新源回了 404 以外的非 2xx、清单不合法）。
     pub const UPDATE_CHECK_FAILED: &str = "update_check_failed";

@@ -1,6 +1,6 @@
 //! 主窗口的启动期处理：兜底显示、装上原生拖放（见 [`crate::drop`]）、渲染进程故障后的自动重载
 //! （见 [`crate::renderer`]）与最小化时的页面可见性（见 [`crate::page_visibility`]）、生产构建关闭
-//! WebView2 浏览器加速键，以及再次启动时把窗口叫到前台。
+//! WebView2 浏览器加速键，再次启动时把窗口叫到前台，以及更新安装程序没拉起来时把藏起的窗口重新显示出来。
 //!
 //! 窗口以 `visible: false` 创建：前端在首帧渲染前读外观、写好明暗与强调色，画完第一帧才自己
 //! 显示窗口，夜樱下也不会先闪一下白底。代价是前端一旦出错就永远不显示，所以这里留一道兜底。显示都经
@@ -9,7 +9,7 @@
 use std::fmt::Display;
 use std::time::Duration;
 
-use tauri::{App, Manager};
+use tauri::{App, AppHandle, Manager};
 
 /// 主窗口的 label，与 tauri.conf.json、能力文件一致。
 pub const MAIN_WINDOW: &str = "main";
@@ -66,6 +66,29 @@ pub fn front_on_second_launch(
         )
     })?;
     Ok(())
+}
+
+/// 把主窗口重新显示并取得焦点，等 UI 线程做完才返回。
+///
+/// 更新插件拉起安装程序之前先跑 tauri 的 `cleanup_before_exit`，它在 Windows 上把每个窗口都藏起来；
+/// 拉不起来时插件返回错误、进程接着跑，窗口不重新显示，用户就看不到报错。显示经
+/// [`crate::window_state::reveal`]，它只能在 UI 线程上调。
+pub async fn reshow_main_window(app: &AppHandle) -> tauri::Result<()> {
+    let window = app
+        .get_webview_window(MAIN_WINDOW)
+        .ok_or(tauri::Error::WindowNotFound)?;
+    let (done, shown) = tokio::sync::oneshot::channel();
+    let target = window.clone();
+    window.run_on_main_thread(move || {
+        let result = crate::window_state::reveal(&target).and_then(|()| target.set_focus());
+        if let Err(Err(err)) = done.send(result) {
+            tracing::warn!(error = %err, "重新显示主窗口失败，调用方已不再等结果");
+        }
+    })?;
+    // 回调没跑就被丢掉，只会是事件循环已经退出。
+    shown
+        .await
+        .map_err(|_| tauri::Error::FailedToReceiveMessage)?
 }
 
 /// 先叫窗口，再读一次可见性：读到了才算叫到了前台。可见与否不论，窗口还没显示时前端显示出来本来就在前台。

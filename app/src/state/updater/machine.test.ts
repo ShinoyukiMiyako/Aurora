@@ -40,6 +40,8 @@ describe("后端信息同步进状态机", () => {
     const next = run(INITIAL_UPDATER_STATE, { type: "info", info: info({ supported: false, unsupported_reason: "debug_build", available: UPDATE }) });
     expect(next.phase).toEqual({ kind: "unsupported", reason: "debug_build" });
     expect(next.currentVersion).toBe("0.2.0");
+    const unsigned = run(INITIAL_UPDATER_STATE, { type: "info", info: info({ supported: false, unsupported_reason: "signed_version_not_required", available: UPDATE }) });
+    expect(unsigned.phase).toEqual({ kind: "unsupported", reason: "signed_version_not_required" });
   });
 
   it("已下载的版本优先于检查结果；退出时安装为真时进入 install_on_exit", () => {

@@ -23,6 +23,7 @@ pub mod news;
 pub mod servers;
 pub mod system;
 pub mod tasks;
+pub(crate) mod update_stall;
 pub mod updater;
 pub mod window;
 

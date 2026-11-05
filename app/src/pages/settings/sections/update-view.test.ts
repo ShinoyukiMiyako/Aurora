@@ -102,6 +102,27 @@ describe("更新卡各阶段", () => {
     expect(() => updateCardView(state({ kind: "unsupported", reason: null }), CTX)).toThrow("没有给出原因");
   });
 
+  it("不支持更新的原因分开说：没要求签名带版本号时说清防不住换成旧版本，不说成没配公钥", () => {
+    const unsigned = updateCardView(state({ kind: "unsupported", reason: "signed_version_not_required" }), CTX);
+    expect([unsigned.title, unsigned.sub, unsigned.button.label, unsigned.button.disabled]).toEqual([
+      "当前环境不支持自动更新",
+      "这个版本没有要求更新包签名带上版本号，防不住被换成旧版本，所以不检查更新",
+      "检查更新",
+      true,
+    ]);
+    const subs = (["debug_build", "missing_pubkey", "signed_version_not_required", "downgrades_allowed"] as const).map((reason) => updateCardView(state({ kind: "unsupported", reason }), CTX).sub);
+    expect(new Set(subs).size).toBe(4);
+  });
+
+  it("配置允许装旧版本时同样不检查，说清防不住换成旧版本", () => {
+    const downgrades = updateCardView(state({ kind: "unsupported", reason: "downgrades_allowed" }), CTX);
+    expect([downgrades.title, downgrades.sub, downgrades.button.disabled]).toEqual([
+      "当前环境不支持自动更新",
+      "这个版本的更新配置允许装不比当前新的版本，防不住被换成旧版本，所以不检查更新",
+      true,
+    ]);
+  });
+
   it("后端信息到达之前不该渲染", () => {
     expect(() => updateCardView({ ...INITIAL_UPDATER_STATE }, CTX)).toThrow("更新信息到达之前");
   });

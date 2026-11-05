@@ -3,13 +3,18 @@
 //! 走 Rust 侧命令而不是让前端直接调插件：端点要按「文件下载源」策略每次重排（主源与镜像谁先），
 //! 插件的 JS 接口只能用 tauri.conf.json 里写死的端点。
 //!
-//! 插件只在配置了签名公钥的发行构建里注册（[`detect_support`]）。没有公钥时插件初始化本身就会失败，
-//! 而且没有公钥就无从校验更新包，宁可整体不支持；此时各命令报 `updater_unsupported`。
-//! 仓库里的配置不带公钥，dev 分支的 CI 打包时才写入开发版公钥（`.github/dev-updater.pub`）：
-//! 本地和 fork 构建的包不会去认落樱的更新。
+//! 插件只在配置了签名公钥、并要求签名带版本号（`requireSignedVersion: true`）的发行构建里注册
+//! （[`detect_support`]）。没有公钥时插件初始化本身就会失败，而且没有公钥就无从校验更新包，宁可整体不支持。
+//! 清单本身不签名，签名只盖住安装包：不要求签名带版本号，伪造的清单就能给旧版本的合法包配上更高的版本号，
+//! 诱导降级（CVE-2026-95625），所以没打开这一项同样整体不支持。`allowDowngrades` 会把插件的版本比较从
+//! 「比当前新」放宽成「与当前不同」，伪造的清单照实写上旧版本号、指向旧版本的合法包，签名版本也对得上，
+//! 同样防不住降级，打开了也整体不支持。不支持时各命令报 `updater_unsupported`。
+//! 仓库里的配置两项都不带，dev 分支的 CI 打包时才写入开发版公钥（`.github/dev-updater.pub`）并打开
+//! `requireSignedVersion`，签名时用 `--app-version` 把版本号写进可信注释：本地和 fork 构建的包不会去认落樱的更新。
 //!
 //! 去哪取清单由版本号决定（[`UpdateChannel`]），与前端从版本号推发布通道同源，不另设配置。
 
+use std::future::Future;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -20,6 +25,7 @@ use tauri::{AppHandle, Manager, State, Url};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::commands::error::{code, source_chain, CommandError};
+use crate::commands::update_stall::{StallGuard, STALL_MIN_BYTES, STALL_WINDOW};
 use crate::events::CoreEventForwarder;
 use crate::facade::Facade;
 use crate::tasks::TaskRegistry;
@@ -90,6 +96,9 @@ const MANIFEST_MISSING_STATUS: u16 = 404;
 /// 下载进度推送的最小间隔，与下载池的采样间隔一致，前端进度条观感相同。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
+/// 多久问一次下载有没有卡住。判定因此最多晚一秒，相对卡死检测的窗口可以忽略。
+const STALL_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
 /// 当前环境为什么没有自更新能力。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -98,6 +107,12 @@ pub enum UnsupportedReason {
     DebugBuild,
     /// tauri.conf.json 没有 `plugins.updater.pubkey`。
     MissingPubkey,
+    /// tauri.conf.json 的 `plugins.updater` 没有把 `requireSignedVersion` 设为 true：签名不必带版本号，
+    /// 伪造清单就能把旧版本的合法包配上更高的版本号，防不住降级。
+    SignedVersionNotRequired,
+    /// tauri.conf.json 的 `plugins.updater` 没有关掉 `allowDowngrades`：插件只要求清单版本与当前不同，
+    /// 伪造清单指向旧版本的合法包也能装上。
+    DowngradesAllowed,
 }
 
 impl UnsupportedReason {
@@ -106,6 +121,12 @@ impl UnsupportedReason {
             UnsupportedReason::DebugBuild => "开发构建不支持自更新",
             UnsupportedReason::MissingPubkey => {
                 "没有配置更新签名公钥，无法校验更新包，自更新已停用"
+            }
+            UnsupportedReason::SignedVersionNotRequired => {
+                "没有要求更新包的签名带版本号，防不住被诱导降级到旧版本，自更新已停用"
+            }
+            UnsupportedReason::DowngradesAllowed => {
+                "更新配置允许装不比当前新的版本，防不住被诱导降级到旧版本，自更新已停用"
             }
         }
     }
@@ -118,6 +139,19 @@ pub enum UpdaterSupport {
     Unsupported(UnsupportedReason),
 }
 
+/// 插件配置里 `requireSignedVersion` 认的两种键名：插件按 camelCase 反序列化，另设了 kebab-case 别名。
+const REQUIRE_SIGNED_VERSION_KEYS: [&str; 2] = ["requireSignedVersion", "require-signed-version"];
+
+/// 插件配置里 `allowDowngrades` 认的两种键名，规则与 [`REQUIRE_SIGNED_VERSION_KEYS`] 相同。
+const ALLOW_DOWNGRADES_KEYS: [&str; 2] = ["allowDowngrades", "allow-downgrades"];
+
+/// 配置里写了的那几种键名各自的值。
+fn values_of<'a>(updater_config: Option<&'a Value>, keys: [&str; 2]) -> Vec<&'a Value> {
+    keys.iter()
+        .filter_map(|key| updater_config.and_then(|config| config.get(key)))
+        .collect()
+}
+
 /// 由构建类型与 tauri.conf.json 的 `plugins.updater` 判定是否支持自更新，决定插件注册与否。
 pub fn detect_support(updater_config: Option<&Value>, debug_build: bool) -> UpdaterSupport {
     if debug_build {
@@ -127,10 +161,21 @@ pub fn detect_support(updater_config: Option<&Value>, debug_build: bool) -> Upda
         .and_then(|config| config.get("pubkey"))
         .and_then(Value::as_str)
         .is_some_and(|key| !key.trim().is_empty());
-    if has_pubkey {
+    if !has_pubkey {
+        return UpdaterSupport::Unsupported(UnsupportedReason::MissingPubkey);
+    }
+    // 两种键名同时出现、或值不是布尔，插件反序列化配置就会失败、整个应用起不来，也按没打开处理，不注册插件。
+    let required = values_of(updater_config, REQUIRE_SIGNED_VERSION_KEYS);
+    if !matches!(required.as_slice(), [flag] if flag.as_bool() == Some(true)) {
+        return UpdaterSupport::Unsupported(UnsupportedReason::SignedVersionNotRequired);
+    }
+    // 应用没设版本比较器，插件见到它打开就改用「与当前不同」比较。两种键名同时出现或值不是布尔时，
+    // 同样是插件拒收整份配置，不注册。
+    let downgrades = values_of(updater_config, ALLOW_DOWNGRADES_KEYS);
+    if matches!(downgrades.as_slice(), [] | [Value::Bool(false)]) {
         UpdaterSupport::Supported
     } else {
-        UpdaterSupport::Unsupported(UnsupportedReason::MissingPubkey)
+        UpdaterSupport::Unsupported(UnsupportedReason::DowngradesAllowed)
     }
 }
 
@@ -161,7 +206,7 @@ fn update_dto(update: &Update) -> UpdateDto {
 pub struct UpdaterInfoDto {
     pub current_version: String,
     pub supported: bool,
-    /// debug_build / missing_pubkey；支持时为 `null`。
+    /// debug_build / missing_pubkey / signed_version_not_required / downgrades_allowed；支持时为 `null`。
     pub unsupported_reason: Option<UnsupportedReason>,
     /// 本次会话最近一次检查的结果；没检查过或已是最新时为 `null`。
     pub available: Option<UpdateDto>,
@@ -345,7 +390,9 @@ impl UpdaterState {
         }
     }
 
-    /// 拉起已下载更新包的安装程序。Windows 上成功即退出进程，不会返回。
+    /// 拉起已下载更新包的安装程序。Windows 上成功即退出进程，不会返回；拉不起来（`ShellExecuteW` 失败）时
+    /// 插件返回错误，但它在拉起之前已经跑过默认的 `on_before_exit`（tauri 的 `cleanup_before_exit`），
+    /// 把所有窗口都藏了起来，见 [`install_after_persisting`]。
     fn install_downloaded(&self) -> Result<(), CommandError> {
         let slot = self.slot();
         let ready = slot.ready()?;
@@ -397,8 +444,14 @@ async fn fetch_conclusion(
         }
     };
     let urls = endpoint_urls(&endpoints);
+    let http = petalfall_base::http::HttpConfig::default();
+    let (connect, read) = (http.connect_timeout, http.read_timeout);
     let checker = app
         .updater_builder()
+        // 插件把这个回调放进上下文、随检查结果带进 Update，下载更新包也用它建客户端。插件自己的客户端一个超时
+        // 都不设，终点不再送数据时下载会一直挂着；这里只补连接与读取超时，不设总时限：慢网下二十多兆的包要
+        // 下好几分钟，总时限会把正常下载掐断。检查的总时限另由 CHECK_TIMEOUT 设。
+        .configure_client(move |client| with_transfer_timeouts(client, connect, read))
         .endpoints(urls)
         .and_then(|builder| builder.timeout(CHECK_TIMEOUT).build())
         .map_err(|err| check_failed(&endpoints, err))?;
@@ -412,6 +465,31 @@ async fn fetch_conclusion(
     }
     let version = app.package_info().version.to_string();
     conclude_check(checked, &version, &endpoints).await
+}
+
+/// 插件 `configure_client` 回调收发的 reqwest 构建器。这一层不直接依赖 reqwest，从插件公开的回调类型里取出
+/// 参数类型：版本永远是插件实际用的那一份，不会和插件错位。
+type ClientBuilder =
+    <<tauri_plugin_updater::OnBeforeRequest as std::ops::Deref>::Target as CallbackArg>::Arg;
+
+/// 取出 `Fn(A) -> A` 回调的参数类型 `A`，只为 [`ClientBuilder`]。
+trait CallbackArg {
+    type Arg;
+}
+
+impl<A> CallbackArg for dyn Fn(A) -> A + Send + Sync {
+    type Arg = A;
+}
+
+/// 给插件建的客户端套上连接与读取超时。读取超时在正文阶段是两次读到数据之间的最长静默，不限总时长；
+/// 在响应头阶段（含跳转）同一个值却是从发请求起算、中途不重置的总期限，建连、TLS、跳转和等首字节都算在里面。
+/// 时长由调用方给：线上用共享客户端的默认值，单测用短的读取超时验证卡住的下载会失败。
+fn with_transfer_timeouts(
+    client: ClientBuilder,
+    connect: Duration,
+    read: Duration,
+) -> ClientBuilder {
+    client.connect_timeout(connect).read_timeout(read)
 }
 
 /// 把插件的检查结果变成给槽位的结论。
@@ -479,7 +557,8 @@ fn check_failed(endpoints: &[String], err: tauri_plugin_updater::Error) -> Comma
 /// 先按最新清单重查一次，再下载其中的更新并校验签名，返回实际下载的版本（可能比界面上记着的新）。
 /// 长任务：进度经 core-event 推送（`kind: "download"`，`total` 恒为 1，带 `task_id`），可经
 /// `cancel_task(taskId)` 取消。签名不符报 `update_signature_invalid`，包随即丢弃；下载期间再次检查换了版本
-/// 或已无更新时报 `update_not_available`，包同样丢弃。
+/// 或已无更新时报 `update_not_available`，包同样丢弃。正文开始后长时间没有进展（见 [`StallWatch`]）
+/// 时中止下载，报 `update_download_failed`，`detail.network` 为 `timeout`。
 #[tauri::command]
 pub async fn download_update(
     task_id: String,
@@ -508,8 +587,8 @@ pub async fn download_update(
     outcome
 }
 
-/// 立即安装已下载的更新。Windows 上拉起安装程序后进程退出，前端收不到返回；
-/// 其它平台替换完文件后由这里重启。
+/// 立即安装已下载的更新。Windows 上拉起安装程序后进程退出，前端收不到返回；拉不起来时先把主窗口重新显示
+/// 出来再报错。其它平台替换完文件后由这里重启。
 #[tauri::command]
 pub async fn install_update(
     app: AppHandle,
@@ -517,21 +596,38 @@ pub async fn install_update(
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
     updater.require_supported()?;
-    install_after_persisting(&facade, || updater.install_downloaded()).await?;
+    install_after_persisting(
+        &facade,
+        || updater.install_downloaded(),
+        reshow_after_failed_install(&app),
+    )
+    .await?;
     app.restart()
+}
+
+async fn reshow_after_failed_install(app: &AppHandle) {
+    // 安装的错误才是要交给前端的那个，窗口没能显示只能记下来；此时用户多半看不到落樱，日志是唯一的线索。
+    if let Err(err) = crate::window::reshow_main_window(app).await {
+        tracing::error!(error = %err, "更新安装程序没拉起来，主窗口也没能重新显示");
+    }
 }
 
 /// 先做退出收尾里的落盘（[`crate::exit::persist_before_exit`]：关闸并等进行中的外置令牌轮换、补写游玩记录）
 /// 再安装：Windows 上更新插件拉起安装程序后直接结束进程，不经过 `RunEvent::Exit`，退出收尾赶不上。等不到或
 /// 补写失败都只记日志、照样安装，与正常退出时一致。安装程序没拉起来时进程接着跑，重新开闸，外置令牌照常刷新。
+///
+/// 插件拉起安装程序之前已经把窗口藏了，没拉起来时不重新显示，用户就看不到报错、以为落樱自己退出了。
+/// 所以失败时先等 `reshow` 跑完再返回错误；`reshow` 只在失败时才被 await，拉起成功时进程随即退出，不必显示。
 pub(crate) async fn install_after_persisting(
     facade: &Facade,
     install: impl FnOnce() -> Result<(), CommandError>,
+    reshow: impl Future<Output = ()>,
 ) -> Result<(), CommandError> {
     crate::exit::persist_before_exit(facade).await;
     let installed = install();
     if installed.is_err() {
         facade.rotation_gate().resume();
+        reshow.await;
     }
     installed
 }
@@ -558,7 +654,8 @@ pub fn install_on_exit(app: &AppHandle) {
     if let Some(answer) = app.try_state::<crate::single_instance::Answer>() {
         answer.release_waiting();
     }
-    // 退出路径上没有前端可以报错，只能记日志；下次启动检查更新时会再次提示。
+    // 退出路径上没有前端可以报错，只能记日志；下次启动检查更新时会再次提示。插件藏起的窗口也不重新显示：
+    // 进程本来就在退出。
     if let Err(err) = updater.install_downloaded() {
         tracing::error!(code = err.code, message = %err.message, "退出时安装更新失败");
     }
@@ -571,15 +668,44 @@ fn endpoint_urls(endpoints: &[String]) -> Vec<Url> {
         .collect()
 }
 
+/// 下载并校验更新包的那一步。抽成 trait 是为了单测能换上假的下载、按暂停的时钟喂逐块回调，钉住进度与
+/// 卡死检测接在回调上的那几处；插件的 `Update` 字段私有，单测造不出来。
+trait PackageDownload {
+    fn download_package<C, D>(
+        &self,
+        on_chunk: C,
+        on_download_finish: D,
+    ) -> impl Future<Output = tauri_plugin_updater::Result<Vec<u8>>> + Send
+    where
+        C: FnMut(usize, Option<u64>) + Send,
+        D: FnOnce() + Send;
+}
+
+impl PackageDownload for Update {
+    fn download_package<C, D>(
+        &self,
+        on_chunk: C,
+        on_download_finish: D,
+    ) -> impl Future<Output = tauri_plugin_updater::Result<Vec<u8>>> + Send
+    where
+        C: FnMut(usize, Option<u64>) + Send,
+        D: FnOnce() + Send,
+    {
+        self.download(on_chunk, on_download_finish)
+    }
+}
+
 async fn download_with_progress(
-    update: &Update,
+    package: &impl PackageDownload,
     sink: &EventSink,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, CommandError> {
     let mut meter = DownloadMeter::new(Instant::now(), PROGRESS_INTERVAL);
+    let stall = StallWatch::new(STALL_WINDOW, STALL_MIN_BYTES);
     let verify_sink = sink.clone();
-    let download = update.download(
+    let download = package.download_package(
         |len, content_length| {
+            stall.record(len as u64, stall_clock());
             if let Some(progress) = meter.chunk(len, content_length, Instant::now()) {
                 send(sink, CoreEvent::Download(progress));
             }
@@ -592,12 +718,92 @@ async fn download_with_progress(
         },
     );
     let bytes = cancel
-        .run_until_cancelled(download)
+        .run_until_cancelled(unless_stalled(download, &stall, STALL_CHECK_INTERVAL))
         .await
         .ok_or_else(CommandError::cancelled)?
+        .ok_or_else(stalled_download)?
         .map_err(|err| updater_error(code::UPDATE_DOWNLOAD_FAILED, "下载更新失败", None, err))?;
     send(sink, CoreEvent::Download(meter.finish(Instant::now())));
     Ok(bytes)
+}
+
+/// 卡死检测的时钟。走 tokio 的时钟：线上与系统时钟一致，单测暂停时钟就能按定时器推进。
+fn stall_clock() -> Instant {
+    tokio::time::Instant::now().into_std()
+}
+
+/// 更新包下载的卡死检测，窗口从收到第一块正文起才开始算。
+///
+/// 第一块之前是建连、TLS、跳转（dev 通道的包要从 github.com 302 到资源 CDN，握手两次）和等首字节。
+/// 这一段算进窗口的话，慢线路上它就能用掉二十多秒，窗口剩下的几秒里收不够下限，稳定速率是阈值好几倍的下载
+/// 也会被判卡死，重试还是一样。这一段交给套上的读取超时：响应头阶段它是从发请求起算的总期限；
+/// 回了响应头、正文却一个字节都不来时，它又是读间隔的上限。
+struct StallWatch {
+    window: Duration,
+    min_bytes: u64,
+    guard: Mutex<Option<StallGuard>>,
+}
+
+impl StallWatch {
+    fn new(window: Duration, min_bytes: u64) -> Self {
+        Self {
+            window,
+            min_bytes,
+            guard: Mutex::new(None),
+        }
+    }
+
+    /// 在 `now` 收到 `bytes` 字节；第一次记的时刻就是窗口的起点。
+    fn record(&self, bytes: u64, now: Instant) {
+        self.lock()
+            .get_or_insert_with(|| StallGuard::new(self.window, self.min_bytes, now))
+            .record(bytes, now);
+    }
+
+    /// 正文还没开始时一律不算卡住。
+    fn stalled(&self, now: Instant) -> bool {
+        self.lock().as_ref().is_some_and(|guard| guard.stalled(now))
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Option<StallGuard>> {
+        // 逐块回调与定时检查在同一个任务里轮流跑，从不争锁；用 Mutex 只因命令的 future 要能跨线程。
+        // 临界区里只有纯计算，真中毒说明程序已处于未知状态，直接崩。
+        self.guard.lock().expect("卡死检测的锁已中毒")
+    }
+}
+
+/// 跑 `download`，每隔 `every` 问一次 `stall` 有没有卡住。卡住时丢掉下载 future（连接随之关闭），返回 `None`。
+/// 判定要靠定时器来问：卡死的连接恰恰不再触发逐块回调。
+async fn unless_stalled<T>(
+    download: impl Future<Output = T>,
+    stall: &StallWatch,
+    every: Duration,
+) -> Option<T> {
+    let mut download = std::pin::pin!(download);
+    let mut checks = tokio::time::interval(every);
+    loop {
+        tokio::select! {
+            // 下载先问：同一轮里下载已出结果、检查也到点时，不能把下好的包当成卡住丢掉。
+            biased;
+            outcome = &mut download => return Some(outcome),
+            _ = checks.tick() => {
+                if stall.stalled(stall_clock()) {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// 下载卡住时给前端的错误：与读超时一样标成网络超时，前端按同一套文案提示用户检查网络后重试。
+fn stalled_download() -> CommandError {
+    tracing::warn!(
+        window_secs = STALL_WINDOW.as_secs(),
+        min_bytes = STALL_MIN_BYTES,
+        "更新包下载长时间没有进展，中止"
+    );
+    CommandError::new(code::UPDATE_DOWNLOAD_FAILED, "下载长时间没有进展，已中止")
+        .with_detail(json!({ "network": petalfall_base::http::NetworkFailure::Timeout.code() }))
 }
 
 fn send(sink: &EventSink, event: CoreEvent) {
@@ -679,9 +885,12 @@ fn updater_error(
 ) -> CommandError {
     use tauri_plugin_updater::Error as UpdaterError;
     let code = match err {
-        UpdaterError::Minisign(_) | UpdaterError::Base64(_) | UpdaterError::SignatureUtf8(_) => {
-            code::UPDATE_SIGNATURE_INVALID
-        }
+        // 签名版本与清单版本对不上、或签名没带版本号，是清单被篡改或包签错了，同样是包被拒。
+        UpdaterError::Minisign(_)
+        | UpdaterError::Base64(_)
+        | UpdaterError::SignatureUtf8(_)
+        | UpdaterError::SignedVersionMismatch { .. }
+        | UpdaterError::MissingSignedVersion => code::UPDATE_SIGNATURE_INVALID,
         _ => fallback,
     };
     let message = err.to_string();
@@ -745,13 +954,17 @@ mod tests {
         std::fs::write(&path, RECORDS).unwrap();
 
         let mut on_disk_at_install = None;
-        let result = install_after_persisting(&facade, || {
-            on_disk_at_install = Some(std::fs::read_to_string(&path).unwrap());
-            Err(CommandError::new(
-                code::UPDATE_INSTALL_FAILED,
-                "启动更新安装失败",
-            ))
-        })
+        let result = install_after_persisting(
+            &facade,
+            || {
+                on_disk_at_install = Some(std::fs::read_to_string(&path).unwrap());
+                Err(CommandError::new(
+                    code::UPDATE_INSTALL_FAILED,
+                    "启动更新安装失败",
+                ))
+            },
+            async {},
+        )
         .await;
 
         assert_eq!(result.unwrap_err().code, code::UPDATE_INSTALL_FAILED);
@@ -785,10 +998,14 @@ mod tests {
         assert_eq!(account.stored_token(), "stale");
 
         let mut stored_at_install = None;
-        install_after_persisting(&account.facade, || {
-            stored_at_install = Some(account.stored_token());
-            Ok(())
-        })
+        install_after_persisting(
+            &account.facade,
+            || {
+                stored_at_install = Some(account.stored_token());
+                Ok(())
+            },
+            async {},
+        )
         .await
         .unwrap();
         assert_eq!(stored_at_install.as_deref(), Some("rotated"));
@@ -807,12 +1024,16 @@ mod tests {
         )
         .await;
 
-        let failed = install_after_persisting(&account.facade, || {
-            Err(CommandError::new(
-                code::UPDATE_INSTALL_FAILED,
-                "启动更新安装失败",
-            ))
-        })
+        let failed = install_after_persisting(
+            &account.facade,
+            || {
+                Err(CommandError::new(
+                    code::UPDATE_INSTALL_FAILED,
+                    "启动更新安装失败",
+                ))
+            },
+            async {},
+        )
         .await;
         assert_eq!(failed.unwrap_err().code, code::UPDATE_INSTALL_FAILED);
 
@@ -820,9 +1041,57 @@ mod tests {
         assert_eq!(account.stored_token(), "rotated");
     }
 
+    /// 插件拉起安装程序之前已经把窗口藏了：没拉起来时先把窗口重新显示出来再报错，否则用户看不到报错、
+    /// 以为落樱自己退出了。拉起了就不显示：Windows 上进程随即退出。
+    #[tokio::test]
+    async fn only_a_failed_install_brings_the_window_back() {
+        use petalfall_core::{Petalfall, PetalfallConfig};
+
+        let dir = tempfile::tempdir().unwrap();
+        let facade = Facade::new(
+            Petalfall::open(
+                PetalfallConfig::default(),
+                dir.path().to_path_buf(),
+                dir.path().join("config.json"),
+            )
+            .unwrap(),
+        );
+        let steps = std::cell::RefCell::new(Vec::new());
+
+        let failed = install_after_persisting(
+            &facade,
+            || {
+                steps.borrow_mut().push("install");
+                Err(CommandError::new(
+                    code::UPDATE_INSTALL_FAILED,
+                    "启动更新安装失败",
+                ))
+            },
+            async { steps.borrow_mut().push("reshow") },
+        )
+        .await;
+        assert_eq!(failed.unwrap_err().code, code::UPDATE_INSTALL_FAILED);
+        assert_eq!(*steps.borrow(), ["install", "reshow"]);
+
+        steps.borrow_mut().clear();
+        install_after_persisting(
+            &facade,
+            || {
+                steps.borrow_mut().push("install");
+                Ok(())
+            },
+            async { steps.borrow_mut().push("reshow") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*steps.borrow(), ["install"], "拉起了就不该重新显示窗口");
+    }
+
+    const PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWdu";
+
     #[test]
     fn support_requires_release_build_and_non_empty_pubkey() {
-        let with_key = json!({ "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWdu" });
+        let with_key = json!({ "pubkey": PUBKEY, "requireSignedVersion": true });
         assert_eq!(
             detect_support(Some(&with_key), false),
             UpdaterSupport::Supported
@@ -831,7 +1100,12 @@ mod tests {
             detect_support(Some(&with_key), true),
             UpdaterSupport::Unsupported(UnsupportedReason::DebugBuild)
         );
-        for config in [json!({}), json!({ "pubkey": "  " }), json!({ "pubkey": 7 })] {
+        for config in [
+            json!({ "requireSignedVersion": true }),
+            json!({ "pubkey": "  ", "requireSignedVersion": true }),
+            json!({ "pubkey": 7, "requireSignedVersion": true }),
+            json!({}),
+        ] {
             assert_eq!(
                 detect_support(Some(&config), false),
                 UpdaterSupport::Unsupported(UnsupportedReason::MissingPubkey),
@@ -842,6 +1116,141 @@ mod tests {
             detect_support(None, false),
             UpdaterSupport::Unsupported(UnsupportedReason::MissingPubkey)
         );
+    }
+
+    /// 有公钥但没要求签名带版本号：伪造的清单能把旧版本的合法包配上新版本号，自更新整体停用。
+    /// 两种键名都认；同时出现或值不是布尔时插件拒绝整份配置，也不能注册插件。
+    #[test]
+    fn support_requires_signed_versions() {
+        for key in REQUIRE_SIGNED_VERSION_KEYS {
+            let config = json!({ "pubkey": PUBKEY, key: true });
+            assert_eq!(
+                detect_support(Some(&config), false),
+                UpdaterSupport::Supported,
+                "{config}"
+            );
+        }
+        for config in [
+            json!({ "pubkey": PUBKEY }),
+            json!({ "pubkey": PUBKEY, "requireSignedVersion": false }),
+            json!({ "pubkey": PUBKEY, "require-signed-version": false }),
+            json!({ "pubkey": PUBKEY, "requireSignedVersion": "true" }),
+            json!({ "pubkey": PUBKEY, "requireSignedVersion": 1 }),
+            json!({ "pubkey": PUBKEY, "requireSignedVersion": null }),
+            json!({ "pubkey": PUBKEY, "require_signed_version": true }),
+            json!({ "pubkey": PUBKEY, "requireSignedVersion": true, "require-signed-version": true }),
+        ] {
+            assert_eq!(
+                detect_support(Some(&config), false),
+                UpdaterSupport::Unsupported(UnsupportedReason::SignedVersionNotRequired),
+                "{config}"
+            );
+        }
+
+        let state = UpdaterState::new(UpdaterSupport::Unsupported(
+            UnsupportedReason::SignedVersionNotRequired,
+        ));
+        let err = state.require_supported().unwrap_err();
+        assert_eq!(err.code, code::UPDATER_UNSUPPORTED);
+        assert_eq!(err.detail.unwrap()["reason"], "signed_version_not_required");
+        assert!(err.message.contains("版本号"), "{}", err.message);
+        let info = serde_json::to_value(state.info("0.1.0".into())).unwrap();
+        assert_eq!(info["supported"], false);
+        assert_eq!(info["unsupported_reason"], "signed_version_not_required");
+    }
+
+    /// 认键名的规则照着插件的反序列化来：两种键名都打开要求，没写时不要求，同时出现或值不是布尔时整份配置被拒。
+    /// 插件改了这套规则，这里先挂，[`detect_support`] 跟着改。
+    #[test]
+    fn signed_version_keys_follow_the_plugin_config_rules() {
+        use tauri_plugin_updater::Config;
+
+        for key in REQUIRE_SIGNED_VERSION_KEYS {
+            let config: Config =
+                serde_json::from_value(json!({ "pubkey": PUBKEY, key: true })).unwrap();
+            assert!(config.require_signed_version, "{key}");
+        }
+        let absent: Config = serde_json::from_value(json!({ "pubkey": PUBKEY })).unwrap();
+        assert!(!absent.require_signed_version);
+        for rejected in [
+            json!({ "pubkey": PUBKEY, "requireSignedVersion": true, "require-signed-version": true }),
+            json!({ "pubkey": PUBKEY, "requireSignedVersion": "true" }),
+        ] {
+            assert!(
+                serde_json::from_value::<Config>(rejected.clone()).is_err(),
+                "{rejected}"
+            );
+        }
+    }
+
+    /// 签名带了版本号，配置却允许装旧版本：伪造的清单照实写上旧版本号、指向旧版本的合法包，签名版本对得上，
+    /// 插件的比较器又只要求「不同」，照样降级，所以同样整体停用。两种键名都认；关着或没写才支持。
+    #[test]
+    fn support_refuses_configs_that_allow_downgrades() {
+        for key in ALLOW_DOWNGRADES_KEYS {
+            let closed = json!({ "pubkey": PUBKEY, "requireSignedVersion": true, key: false });
+            assert_eq!(
+                detect_support(Some(&closed), false),
+                UpdaterSupport::Supported,
+                "{closed}"
+            );
+            let open = json!({ "pubkey": PUBKEY, "requireSignedVersion": true, key: true });
+            assert_eq!(
+                detect_support(Some(&open), false),
+                UpdaterSupport::Unsupported(UnsupportedReason::DowngradesAllowed),
+                "{open}"
+            );
+        }
+        for config in [
+            json!({ "pubkey": PUBKEY, "requireSignedVersion": true, "allowDowngrades": "false" }),
+            json!({ "pubkey": PUBKEY, "requireSignedVersion": true, "allowDowngrades": 0 }),
+            json!({ "pubkey": PUBKEY, "requireSignedVersion": true, "allowDowngrades": null }),
+            json!({
+                "pubkey": PUBKEY,
+                "requireSignedVersion": true,
+                "allowDowngrades": false,
+                "allow-downgrades": false,
+            }),
+        ] {
+            assert_eq!(
+                detect_support(Some(&config), false),
+                UpdaterSupport::Unsupported(UnsupportedReason::DowngradesAllowed),
+                "{config}"
+            );
+        }
+
+        let state = UpdaterState::new(UpdaterSupport::Unsupported(
+            UnsupportedReason::DowngradesAllowed,
+        ));
+        let err = state.require_supported().unwrap_err();
+        assert_eq!(err.code, code::UPDATER_UNSUPPORTED);
+        assert_eq!(err.detail.unwrap()["reason"], "downgrades_allowed");
+        let info = serde_json::to_value(state.info("0.1.0".into())).unwrap();
+        assert_eq!(info["unsupported_reason"], "downgrades_allowed");
+    }
+
+    /// `allowDowngrades` 的键名规则同样照着插件来：两种键名都打开，没写时关着，同时出现或值不是布尔时整份配置被拒。
+    #[test]
+    fn downgrade_keys_follow_the_plugin_config_rules() {
+        use tauri_plugin_updater::Config;
+
+        for key in ALLOW_DOWNGRADES_KEYS {
+            let config: Config =
+                serde_json::from_value(json!({ "pubkey": PUBKEY, key: true })).unwrap();
+            assert!(config.allow_downgrades, "{key}");
+        }
+        let absent: Config = serde_json::from_value(json!({ "pubkey": PUBKEY })).unwrap();
+        assert!(!absent.allow_downgrades);
+        for rejected in [
+            json!({ "pubkey": PUBKEY, "allowDowngrades": false, "allow-downgrades": false }),
+            json!({ "pubkey": PUBKEY, "allowDowngrades": "false" }),
+            json!({ "pubkey": PUBKEY, "allowDowngrades": null }),
+        ] {
+            assert!(
+                serde_json::from_value::<Config>(rejected.clone()).is_err(),
+                "{rejected}"
+            );
+        }
     }
 
     #[test]
@@ -910,14 +1319,39 @@ mod tests {
             "/ShinoyukiMiyako/Petalfall/releases/download/dev-build/latest.json"
         );
 
+        let raw = include_str!("../../../../.github/workflows/dev-build.yml");
         // Windows 检出的工作流是 CRLF，逐行比，不拿换行符做界
-        let workflow: Vec<&str> = include_str!("../../../../.github/workflows/dev-build.yml")
-            .lines()
-            .map(str::trim)
-            .collect();
+        let workflow: Vec<&str> = raw.lines().map(str::trim).collect();
         assert!(workflow.contains(&format!("TAG: {DEV_RELEASE_TAG}").as_str()));
         assert!(workflow.contains(&"manifest=\"$RUNNER_TEMP/latest.json\""));
         assert!(workflow.iter().any(|line| line.starts_with("\"$MANIFEST#")));
+
+        // 防降级要两头都在：客户端要求签名带版本号（否则 detect_support 不注册插件，dev 包收不到更新），
+        // 签名时把这次的版本号写进可信注释（否则插件拒收每一个 dev 包）。只看真正执行的行：文件头和步骤上方的
+        // 注释里也写着这两处，拿全文找子串的话，删掉真正的注入照样能过。整段比对更新插件的配置，写进别的层级、
+        // 或多带一项（比如 allowDowngrades）都要挂。
+        let steps: Vec<&str> = workflow
+            .iter()
+            .copied()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        let injected = steps
+            .iter()
+            .find(|line| line.starts_with("conf.plugins = "))
+            .expect("CI 不再往 tauri.conf.json 写更新插件的配置");
+        assert!(
+            injected.contains(
+                "updater: { pubkey: fs.readFileSync('../.github/dev-updater.pub', 'utf8').trim(), \
+                 requireSignedVersion: true }"
+            ),
+            "{injected}"
+        );
+        assert!(
+            steps
+                .iter()
+                .any(|line| line.contains("tauri signer sign --app-version \"$VERSION\" ")),
+            "签名不再把版本号写进可信注释"
+        );
     }
 
     #[derive(Clone)]
@@ -1052,6 +1486,22 @@ mod tests {
             tauri_plugin_updater::Error::SignatureUtf8("bad".into()).to_string()
         );
 
+        // 清单把旧版本的包配上了新版本号，或签名没带版本号：都是包被拒，不是下载失败。
+        let downgrade = || tauri_plugin_updater::Error::SignedVersionMismatch {
+            signed: "0.1.0-dev.12".into(),
+            announced: "0.1.0-dev.40".into(),
+        };
+        let unversioned = || tauri_plugin_updater::Error::MissingSignedVersion;
+        for (rejected, raw) in [
+            (downgrade(), downgrade().to_string()),
+            (unversioned(), unversioned().to_string()),
+        ] {
+            let err = updater_error(code::UPDATE_DOWNLOAD_FAILED, "下载更新失败", None, rejected);
+            assert_eq!(err.code, code::UPDATE_SIGNATURE_INVALID, "{raw}");
+            assert_eq!(err.message, raw);
+            assert_eq!(err.detail, None, "{raw}");
+        }
+
         let endpoints = vec![PRIMARY_ENDPOINT.to_owned()];
         let err = updater_error(
             code::UPDATE_CHECK_FAILED,
@@ -1128,6 +1578,367 @@ mod tests {
             "`Download request failed with status: 503 Service Unavailable`"
         );
         assert_eq!(err.detail, None);
+    }
+
+    /// 下到一半终点不再送数据、连接也不断：套上的读取超时内失败，标成网络超时，前端提示检查网络后重试，
+    /// 不会让进度条一直停在原地。插件下载时正是这样建客户端、逐块读正文的。
+    #[tokio::test]
+    async fn a_download_that_stops_mid_body_fails_within_the_read_timeout() {
+        use std::io::{Read, Write};
+
+        const PARTIAL: [u8; 512] = [7; 512];
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/Petalfall-setup.exe",
+            listener.local_addr().unwrap()
+        );
+        // 只用来等对面丢掉发送端：用例有了结论（或中途失败）时放开连接，服务线程随之退出。
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let reply = [
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n".as_slice(),
+                PARTIAL.as_slice(),
+            ]
+            .concat();
+            stream.write_all(&reply).unwrap();
+            released.recv().unwrap_err();
+        });
+
+        // 读取超时在响应头阶段是从发请求起算的总期限，服务线程 accept、逐字节读请求头、写回响应头都算在里面：
+        // 给足余量，机器忙、服务线程迟迟排不上时也不会在请求头阶段就超时。
+        let client = with_transfer_timeouts(
+            ClientBuilder::new(),
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        )
+        .build()
+        .unwrap();
+        // 外层时限只把「没套上读取超时、永远等下去」变成失败，远长于读取超时，不参与判定先后。
+        let (received, stalled) = tokio::time::timeout(Duration::from_secs(20), async {
+            let mut response = client
+                .get(&url)
+                .send()
+                .await
+                .expect("请求头阶段就失败了，与被测的正文中途卡住无关");
+            let mut received = 0;
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => received += chunk.len(),
+                    Ok(None) => panic!("正文没送完，读取不该正常结束"),
+                    Err(err) => return (received, err),
+                }
+            }
+        })
+        .await
+        .expect("卡住的下载没有在读取超时内失败");
+        drop(release);
+        server.join().unwrap();
+
+        assert_eq!(received, PARTIAL.len(), "卡在正文中途，不是等响应头");
+        let err = updater_error(
+            code::UPDATE_DOWNLOAD_FAILED,
+            "下载更新失败",
+            None,
+            tauri_plugin_updater::Error::Reqwest(stalled),
+        );
+        assert_eq!(err.code, code::UPDATE_DOWNLOAD_FAILED);
+        assert_eq!(err.detail.unwrap()["network"], json!("timeout"));
+    }
+
+    /// 测试用的卡死判定：10 秒窗口里不到 1000 字节算卡住。
+    const TEST_WINDOW: Duration = Duration::from_secs(10);
+    const TEST_MIN_BYTES: u64 = 1000;
+
+    /// 卡死检查的外层时限：暂停的时钟下瞬间走完，只把「检查没起作用、永远等下去」变成失败。
+    const NEVER: Duration = Duration::from_secs(3600);
+
+    /// 正文还没开始（建连、跳转、等首字节）时不判卡死，等多久都不判：这一段归读取超时管。
+    #[tokio::test(start_paused = true)]
+    async fn waiting_for_the_first_chunk_is_never_a_stall() {
+        let started = stall_clock();
+        let stall = StallWatch::new(TEST_WINDOW, TEST_MIN_BYTES);
+        let download = async {
+            tokio::time::sleep(TEST_WINDOW * 5).await;
+            "下完了"
+        };
+        let outcome = tokio::time::timeout(
+            NEVER,
+            unless_stalled(download, &stall, STALL_CHECK_INTERVAL),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Some("下完了"));
+        assert_eq!(stall_clock() - started, TEST_WINDOW * 5);
+    }
+
+    /// 窗口从第一块正文起算：第 5 秒来了一点就再没动静，看满第 5 秒之后的一个窗口才丢，不按开始下载的时刻算。
+    #[tokio::test(start_paused = true)]
+    async fn the_window_starts_at_the_first_chunk() {
+        let started = stall_clock();
+        let stall = StallWatch::new(TEST_WINDOW, TEST_MIN_BYTES);
+        let first_chunk = Duration::from_secs(5);
+        let download = async {
+            tokio::time::sleep(first_chunk).await;
+            stall.record(1, stall_clock());
+            std::future::pending::<()>().await
+        };
+        let outcome = tokio::time::timeout(
+            NEVER,
+            unless_stalled(download, &stall, STALL_CHECK_INTERVAL),
+        )
+        .await
+        .expect("停住的下载没有被丢掉");
+        assert_eq!(outcome, None);
+        let waited = stall_clock() - started;
+        assert!(
+            (first_chunk + TEST_WINDOW..=first_chunk + TEST_WINDOW + STALL_CHECK_INTERVAL)
+                .contains(&waited),
+            "{waited:?}"
+        );
+    }
+
+    /// 下载完成与判卡死落在同一刻：先认下载的结果。只来了第一块就再没动静、恰好看满一个窗口时下完，
+    /// 这一刻的检查本该判卡住，但下好的包不能丢。检查先被选中的话这条会挂，概率约一半。
+    #[tokio::test(start_paused = true)]
+    async fn a_download_finishing_as_the_window_closes_is_kept() {
+        let stall = StallWatch::new(TEST_WINDOW, TEST_MIN_BYTES);
+        let download = async {
+            stall.record(1, stall_clock());
+            tokio::time::sleep(TEST_WINDOW).await;
+            assert!(stall.stalled(stall_clock()), "这一刻的检查本该判卡住");
+            "下完了"
+        };
+        let outcome = tokio::time::timeout(
+            NEVER,
+            unless_stalled(download, &stall, STALL_CHECK_INTERVAL),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Some("下完了"));
+    }
+
+    /// 下了一阵后停住：停满一个窗口之前不丢，停满之后的下一两次检查就丢。
+    #[tokio::test(start_paused = true)]
+    async fn a_download_that_stops_moving_is_dropped_a_window_later() {
+        let started = stall_clock();
+        let stall = StallWatch::new(TEST_WINDOW, TEST_MIN_BYTES);
+        // 暂停的时钟下 sleep 只是排在定时器上的一个时刻，模拟每秒到一块。
+        let download = async {
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                stall.record(TEST_MIN_BYTES, stall_clock());
+            }
+            std::future::pending::<()>().await
+        };
+        let outcome = tokio::time::timeout(
+            NEVER,
+            unless_stalled(download, &stall, STALL_CHECK_INTERVAL),
+        )
+        .await
+        .expect("停住的下载没有被丢掉");
+        assert_eq!(outcome, None);
+        let last_chunk = Duration::from_secs(20);
+        let waited = stall_clock() - started;
+        assert!(
+            waited >= last_chunk + TEST_WINDOW,
+            "停住不满一个窗口就丢了：{waited:?}"
+        );
+        assert!(
+            waited <= last_chunk + TEST_WINDOW + 2 * STALL_CHECK_INTERVAL,
+            "停住后迟迟不丢：{waited:?}"
+        );
+    }
+
+    /// 慢但一直在动：下多久都不丢，下完照常交回结果。
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_but_moving_download_is_never_dropped() {
+        let started = stall_clock();
+        let stall = StallWatch::new(TEST_WINDOW, TEST_MIN_BYTES);
+        // 每秒 200 字节，任何一个 10 秒窗口里都有 2000 字节，是下限的两倍；一共下 10 个窗口。
+        let download = async {
+            for _ in 0..100 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                stall.record(200, stall_clock());
+            }
+            "下完了"
+        };
+        let outcome = tokio::time::timeout(
+            NEVER,
+            unless_stalled(download, &stall, STALL_CHECK_INTERVAL),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, Some("下完了"));
+        assert_eq!(stall_clock() - started, Duration::from_secs(100));
+    }
+
+    /// 假的更新包下载：先等 `head`（建连、跳转、等首字节），之后每秒到一块 `chunk` 字节、共 `chunks` 块；
+    /// `hang` 时最后一块之后再不送数据，否则下完交回 [`PACKAGE`]。
+    #[derive(Clone, Copy)]
+    struct FakePackage {
+        head: Duration,
+        chunk: usize,
+        chunks: usize,
+        hang: bool,
+    }
+
+    const PACKAGE: &[u8] = b"signed installer";
+
+    impl PackageDownload for FakePackage {
+        fn download_package<C, D>(
+            &self,
+            mut on_chunk: C,
+            on_download_finish: D,
+        ) -> impl Future<Output = tauri_plugin_updater::Result<Vec<u8>>> + Send
+        where
+            C: FnMut(usize, Option<u64>) + Send,
+            D: FnOnce() + Send,
+        {
+            let FakePackage {
+                head,
+                chunk,
+                chunks,
+                hang,
+            } = *self;
+            let total = (chunk * chunks) as u64;
+            async move {
+                tokio::time::sleep(head).await;
+                for _ in 0..chunks {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    on_chunk(chunk, Some(total));
+                }
+                if hang {
+                    std::future::pending::<()>().await;
+                }
+                on_download_finish();
+                Ok(PACKAGE.to_vec())
+            }
+        }
+    }
+
+    /// 建连、跳转加等首字节用了 27 秒，之后按 20 KB/s 稳定下载：窗口从第一块正文算起，这样的下载照常下完。
+    /// 窗口要是从开始下载算起，第 30 秒时窗口里只有三块共 60 KB，不到 64 KiB 的下限，就被当成卡死掐掉了。
+    #[tokio::test(start_paused = true)]
+    async fn a_late_first_byte_does_not_count_against_a_steady_download() {
+        let package = FakePackage {
+            head: Duration::from_secs(27),
+            chunk: 20_000,
+            chunks: 60,
+            hang: false,
+        };
+        let (sink, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let bytes = tokio::time::timeout(
+            NEVER,
+            download_with_progress(&package, &sink, &CancellationToken::new()),
+        )
+        .await
+        .expect("下完的包没有交回")
+        .unwrap();
+        assert_eq!(bytes, PACKAGE);
+
+        let mut received = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            received.push(event);
+        }
+        // 收尾两件事：告诉前端在验签，再推 finished = 1 的快照。
+        let [.., CoreEvent::Stage(stage), CoreEvent::Download(done)] = received.as_slice() else {
+            panic!("{received:?}");
+        };
+        assert_eq!(stage, "更新包下载完成，正在校验签名");
+        assert_eq!(
+            (done.finished, done.bytes, done.total_bytes),
+            (1, 1_200_000, Some(1_200_000))
+        );
+    }
+
+    /// 正文下到一半再不送数据：最后一块之后看满一个窗口就中止，报网络超时。判定器只能从插件的逐块回调里看到字节，
+    /// 回调没把字节记给它时，它从不开始计时，这样的下载就会一直挂着。
+    #[tokio::test(start_paused = true)]
+    async fn a_download_that_stops_mid_body_is_aborted_a_window_after_the_last_chunk() {
+        let package = FakePackage {
+            head: Duration::from_secs(3),
+            chunk: 100_000,
+            chunks: 10,
+            hang: true,
+        };
+        let (sink, _events) = tokio::sync::mpsc::unbounded_channel();
+        let started = stall_clock();
+        let err = tokio::time::timeout(
+            NEVER,
+            download_with_progress(&package, &sink, &CancellationToken::new()),
+        )
+        .await
+        .expect("停住的下载没有被中止")
+        .unwrap_err();
+        assert_eq!(err.code, code::UPDATE_DOWNLOAD_FAILED);
+        assert_eq!(err.detail, Some(json!({ "network": "timeout" })));
+
+        let last_chunk = Duration::from_secs(3 + 10);
+        let waited = stall_clock() - started;
+        assert!(
+            waited >= last_chunk + STALL_WINDOW,
+            "停住不满一个窗口就中止了：{waited:?}"
+        );
+        assert!(
+            waited <= last_chunk + STALL_WINDOW + 2 * STALL_CHECK_INTERVAL,
+            "停住后迟迟不中止：{waited:?}"
+        );
+    }
+
+    /// 插件拉起安装程序之前已经藏了窗口：「立即安装」失败时交给 [`install_after_persisting`] 的必须是真去显示主窗口的
+    /// 那个 future。换成空的 future 编译照过、上面的用例也照过，用户却会看着落樱像是自己退出了，所以钉住源码。
+    /// 主窗口是否真的显示出来，单测里没有 tauri 的事件循环，只能在沙箱或手工验证。
+    #[test]
+    fn a_failed_install_now_reshows_the_main_window() {
+        let (source, _) = include_str!("updater.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap();
+        let install_update = top_level_fn(source, "pub async fn install_update(");
+        assert!(
+            install_update.contains("install_after_persisting("),
+            "{install_update}"
+        );
+        assert!(
+            install_update.contains("reshow_after_failed_install(&app)"),
+            "{install_update}"
+        );
+        let reshow = top_level_fn(source, "async fn reshow_after_failed_install(");
+        assert!(
+            reshow.contains("crate::window::reshow_main_window(app).await"),
+            "{reshow}"
+        );
+    }
+
+    /// `source` 里签名行以 `signature` 开头的顶层函数，从签名行到收尾那一行 `}`。
+    fn top_level_fn(source: &str, signature: &str) -> String {
+        let mut body = Vec::new();
+        for line in source
+            .lines()
+            .skip_while(|line| !line.starts_with(signature))
+        {
+            body.push(line);
+            if line.trim_end() == "}" {
+                break;
+            }
+        }
+        assert!(!body.is_empty(), "找不到 {signature}");
+        body.join("\n")
+    }
+
+    /// 卡住时给前端的错误与读取超时同类：下载失败、网络超时，界面按同一套文案提示。
+    #[test]
+    fn a_stalled_download_reads_as_a_network_timeout() {
+        let err = stalled_download();
+        assert_eq!(err.code, code::UPDATE_DOWNLOAD_FAILED);
+        assert_eq!(err.message, "下载长时间没有进展，已中止");
+        assert_eq!(err.detail, Some(json!({ "network": "timeout" })));
     }
 
     /// 更新源都连不上时插件把最后一个 reqwest 错误包成 `Reqwest` 返回；它是 transparent 变体，

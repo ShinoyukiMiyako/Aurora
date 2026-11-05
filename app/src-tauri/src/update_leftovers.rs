@@ -1,7 +1,7 @@
 //! 清掉更新插件留在系统临时目录里的更新包。
 //!
 //! Windows 上插件把下好的更新包写进 `%TEMP%\{产品名}-{新版本}-updater-{6 位随机字母数字}\`，拉起后直接结束进程，
-//! 目录和里面约 22 MB 的引导程序从来不删：tauri-plugin-updater 2.10.1 的 `make_temp_dir` 对目录调了 `keep`，
+//! 目录和里面约 22 MB 的引导程序从来不删：tauri-plugin-updater 2.12.0 的 `make_temp_dir` 对目录调了 `keep`，
 //! 文件的删除守卫又被 `process::exit` 跳过。引导程序就跑在这个目录里，删不掉自己，所以由之后启动的启动器来清。
 
 use std::fs;
