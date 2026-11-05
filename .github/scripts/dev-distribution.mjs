@@ -14,7 +14,10 @@ const USAGE = [
   "  dev-distribution.mjs mirror-urls <对象键>",
   "  dev-distribution.mjs build <版本> <运行次数> <引导程序> <仓库> <tag> <提交> <输出清单> [说明文件]",
   "  dev-distribution.mjs validate <清单> <版本> <运行次数> <引导程序> <仓库> <tag>",
-  "build 的说明文件：beta 版本必须给，dev 版本不许给。",
+  "  dev-distribution.mjs compare <版本 a> <版本 b>",
+  "  dev-distribution.mjs next-beta <基础号> <tag 列表文件>",
+  "build 的说明文件：beta 版本必须给，dev 版本不许给。compare 按 semver 优先级打印 -1、0 或 1。",
+  "next-beta 打印 tag 列表（每行一个）里 v<基础号>-beta.<N> 的最大 N 加 1，没有就打印 1。",
 ].join("\n");
 
 const PLATFORM = "windows-x86_64";
@@ -28,6 +31,11 @@ const CHANNELS = Object.freeze({
   beta: new RegExp(`^${CORE}-beta\\.${NUM}$`),
 });
 const CHANNEL_NAMES = Object.freeze(Object.keys(CHANNELS));
+// 与 put-manifest 的 SEMVER 同一套形状；预发布里纯数字段的前导零另在 parseSemver 里拦
+const IDENT = "[0-9A-Za-z-]+";
+const SEMVER = new RegExp(`^(${NUM})\\.(${NUM})\\.(${NUM})(?:-(${IDENT}(?:\\.${IDENT})*))?(?:\\+${IDENT}(?:\\.${IDENT})*)?$`);
+const NUMERIC_IDENT = /^[0-9]+$/;
+const RELEASE_CORE = new RegExp(`^(${NUM})\\.${NUM}\\.${NUM}$`);
 // 与 put-manifest 的 MAX_NOTES_CHARS 一致。那边用 Python 的 len，数的是 Unicode 码位；JS 的 length 数 UTF-16 单元，
 // 增补平面的字符会多算一个，所以这里按码位数
 const MAX_NOTES_CHARS = 4000;
@@ -151,6 +159,58 @@ function releaseNotes(version, commit, notesFile) {
     default:
       throw new Error(`通道 ${channel} 没有定义说明从哪来`);
   }
+}
+
+function parseSemver(version) {
+  const match = typeof version === "string" ? SEMVER.exec(version) : null;
+  if (match === null) throw new Error(`不是 semver 版本号：${JSON.stringify(version)}`);
+  const pre = match[4] === undefined ? [] : match[4].split(".");
+  if (pre.some((ident) => NUMERIC_IDENT.test(ident) && ident.length > 1 && ident.startsWith("0"))) {
+    throw new Error(`${JSON.stringify(version)} 的预发布段有前导零`);
+  }
+  return { core: match.slice(1, 4).map(BigInt), pre };
+}
+
+const sign = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+function compareIdent(a, b) {
+  const numericA = NUMERIC_IDENT.test(a);
+  const numericB = NUMERIC_IDENT.test(b);
+  if (numericA && numericB) return sign(BigInt(a), BigInt(b));
+  if (numericA !== numericB) return numericA ? -1 : 1;
+  return sign(a, b);
+}
+
+// semver 2.0 第 11 条的优先级，与 put-manifest 的 precedence 同一套规则：先比三段核心；同核心时不带预发布段的更高；
+// 预发布段逐个比，纯数字段按数值比且低于含字母的段，含字母的段按 ASCII 比；前面都相同时段多的更高；构建元数据不参与。
+// 数值用 BigInt：版本号来自 tag 和清单，超过 2^53 时 Number 会把相邻的两个数当成相等。
+export function compareVersions(a, b) {
+  const x = parseSemver(a);
+  const y = parseSemver(b);
+  for (let i = 0; i < 3; i++) {
+    if (x.core[i] !== y.core[i]) return sign(x.core[i], y.core[i]);
+  }
+  if (x.pre.length === 0 || y.pre.length === 0) return sign(y.pre.length, x.pre.length);
+  for (let i = 0; i < Math.min(x.pre.length, y.pre.length); i++) {
+    const order = compareIdent(x.pre[i], y.pre[i]);
+    if (order !== 0) return order;
+  }
+  return sign(x.pre.length, y.pre.length);
+}
+
+// beta 序号取已发布的 v<基础号>-beta.N 里最大的加 1：被拒批、失败的运行和演练都不建 tag，所以不占号。
+// 基础号必须是主版本至少为 1 的纯 X.Y.Z：0.x.y-beta.N 比同基础号的 dev 版本小，装过 dev 的用户换它会被判为降级。
+export function nextBeta(base, tags) {
+  const match = typeof base === "string" ? RELEASE_CORE.exec(base) : null;
+  if (match === null) throw new Error(`基础号应为 X.Y.Z，数字段不带前导零：${JSON.stringify(base)}`);
+  if (match[1] === "0") throw new Error(`基础号 ${base} 的主版本小于 1：${base}-beta.N 比同基础号的 dev 版本小，装过 dev 的用户会被判为降级`);
+  const pattern = new RegExp(`^v${base.replaceAll(".", "\\.")}-beta\\.(${NUM})$`);
+  let max = 0n;
+  for (const tag of tags) {
+    const found = pattern.exec(tag);
+    if (found !== null && BigInt(found[1]) > max) max = BigInt(found[1]);
+  }
+  return String(max + 1n);
 }
 
 export function mirrorUrls(key) {
@@ -324,6 +384,15 @@ export function runCommand([command, ...args]) {
       const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
       validateManifest(manifest, { version, attempt, fileName: basename(bootstrap), size: statSync(bootstrap).size, repo, tag });
       return `清单校验通过：${version}，${manifest.platforms[PLATFORM]["x-sources"].map(({ name }) => name).join("、")}\n`;
+    }
+    case "compare": {
+      expectArgs(args, 2);
+      return `${compareVersions(...args)}\n`;
+    }
+    case "next-beta": {
+      expectArgs(args, 2);
+      const [base, tagsFile] = args;
+      return `${nextBeta(base, readFileSync(tagsFile, "utf8").split(/\r?\n/))}\n`;
     }
     default:
       throw new Error(USAGE);

@@ -12,8 +12,10 @@ import {
   SOURCE_NAMES,
   buildManifest,
   channelOf,
+  compareVersions,
   githubUrl,
   mirrorUrls,
+  nextBeta,
   objectKey,
   runCommand,
   sourceUrls,
@@ -445,6 +447,142 @@ describe("validateManifest", () => {
   }
 });
 
+describe("compareVersions", () => {
+  // 每条链从小到大排好，任取两项比出的都应是它们在链里的先后
+  const chains = [
+    // semver 2.0 第 11 条给的例子
+    ["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0"],
+    // 本项目的三个通道：同一基础号下 beta 低于 dev，dev 低于正式版；1.0.0-beta.1 高于现有的所有 0.1.0-dev.N
+    [
+      "0.1.0-dev.9",
+      "0.1.0-dev.10",
+      "0.1.0-dev.37",
+      "0.1.0",
+      "1.0.0-beta.0",
+      "1.0.0-beta.1",
+      "1.0.0-beta.2",
+      "1.0.0-beta.10",
+      "1.0.0-dev.1",
+      "1.0.0",
+      "1.0.1-beta.1",
+      "1.1.0-beta.1",
+      "1.1.0-dev.1",
+      "1.9.0",
+      "1.10.0",
+      "2.0.0-beta.1",
+      "10.0.0",
+    ],
+    // 纯数字段低于含字母的段（0a 含字母，按 ASCII 比）；ASCII 里大写字母排在小写前面；段多的更高
+    ["1.0.0-1", "1.0.0-99", "1.0.0-0a", "1.0.0-B", "1.0.0-a", "1.0.0-a.1", "1.0.0-a.1.0", "1.0.0-a-b"],
+  ];
+
+  for (const chain of chains) {
+    it(`按 semver 优先级排序：${chain[0]} 到 ${chain.at(-1)}`, () => {
+      for (const [i, a] of chain.entries()) {
+        for (const [j, b] of chain.entries()) {
+          assert.equal(compareVersions(a, b), Math.sign(i - j), `${a} 对 ${b}`);
+        }
+      }
+    });
+  }
+
+  it("预发布序号按数值比，不按字符串比", () => {
+    for (let round = 0; round < 50; round++) {
+      const n = randomInt(0, 1_000_000);
+      const m = randomInt(0, 1_000_000);
+      assert.equal(compareVersions(`1.0.0-beta.${n}`, `1.0.0-beta.${m}`), Math.sign(n - m), `${n} 对 ${m}`);
+      assert.equal(compareVersions(`${n}.0.0`, `${m}.0.0`), Math.sign(n - m), `${n} 对 ${m}`);
+    }
+  });
+
+  // 2^53 + 1 换成 Number 会舍入成 2^53，两边就成了相等
+  it("超过 2^53 的数字段照样比得出先后", () => {
+    assert.equal(compareVersions("9007199254740993.0.0", "9007199254740992.0.0"), 1);
+    assert.equal(compareVersions("1.0.0-beta.9007199254740992", "1.0.0-beta.9007199254740993"), -1);
+  });
+
+  it("构建元数据不参与比较", () => {
+    assert.equal(compareVersions("1.0.0+a", "1.0.0+b.1"), 0);
+    assert.equal(compareVersions("1.0.0-beta.1+x", "1.0.0-beta.1"), 0);
+    assert.equal(compareVersions("1.0.0-01a", "1.0.0-01a"), 0);
+  });
+
+  it("不是 semver 版本号时拒绝，两个参数哪个不合法都一样", () => {
+    for (const bad of ["v1.0.0", "1.0", "1", "01.0.0", "1.01.0", "1.0.00", "1.0.0-", "1.0.0-beta..1", "1.0.0-beta.", "1.0.0+", "1.0.0-β", " 1.0.0", "1.0.0 ", "", null]) {
+      const message = `不是 semver 版本号：${JSON.stringify(bad)}`;
+      assert.throws(() => compareVersions(bad, "1.0.0"), { message }, String(bad));
+      assert.throws(() => compareVersions("1.0.0", bad), { message }, String(bad));
+    }
+  });
+
+  it("预发布里的纯数字段带前导零时拒绝", () => {
+    for (const bad of ["1.0.0-beta.01", "1.0.0-00", "1.0.0-dev.007+x"]) {
+      assert.throws(() => compareVersions(bad, "1.0.0"), { message: `${JSON.stringify(bad)} 的预发布段有前导零` }, bad);
+    }
+  });
+});
+
+describe("nextBeta", () => {
+  it("只认 v<基础号>-beta.<N>，取最大的 N 加 1", () => {
+    const tags = [
+      "dev-build",
+      "v1.0.0-beta.1",
+      "v1.0.0-beta.3",
+      "v1.0.0-beta.10",
+      "v1.0.0-beta.2",
+      // 别的基础号、正式版、别的标识、不带 v、多一段、前导零、点没转义就会误认的形状，都不算
+      "v1.0.1-beta.20",
+      "v11.0.0-beta.30",
+      "v1.0.0",
+      "v1.0.0-dev.40",
+      "1.0.0-beta.50",
+      "v1.0.0-beta.60.1",
+      "v1.0.0-beta.70-x",
+      "v1.0.0-beta.080",
+      "v1a0a0-beta.90",
+      "xv1.0.0-beta.100",
+      "v1.0.0-beta.",
+      "",
+    ];
+    assert.equal(nextBeta("1.0.0", tags), "11");
+  });
+
+  it("一个都没有时是 1；只有 beta.0 时也是 1", () => {
+    assert.equal(nextBeta("1.0.0", []), "1");
+    assert.equal(nextBeta("1.0.0", ["", "dev-build", "v1.0.0"]), "1");
+    assert.equal(nextBeta("2.3.4", ["v2.3.4-beta.0"]), "1");
+  });
+
+  it("随机的基础号和序号，顺序打乱，混着只差一个字符就会被误认的行", () => {
+    const base = `${randomInt(1, 100)}.${randomInt(0, 100)}.${randomInt(0, 100)}`;
+    const numbers = Array.from({ length: randomInt(1, 30) }, () => randomInt(0, 100_000));
+    const noise = numbers.map((n) => `v${base}-beta.${n + 100_000}x`);
+    const tags = [...numbers.map((n) => `v${base}-beta.${n}`), ...noise];
+    for (let i = tags.length - 1; i > 0; i--) {
+      const j = randomInt(0, i + 1);
+      [tags[i], tags[j]] = [tags[j], tags[i]];
+    }
+    assert.equal(nextBeta(base, tags), String(Math.max(...numbers) + 1));
+  });
+
+  it("超过 2^53 的序号照样加 1", () => {
+    assert.equal(nextBeta("1.0.0", ["v1.0.0-beta.9007199254740993"]), "9007199254740994");
+  });
+
+  it("基础号不是 X.Y.Z 时拒绝", () => {
+    for (const base of ["1.0", "1.0.0.0", "v1.0.0", "1.0.0-beta.1", "01.0.0", "1.00.0", "1.0.0 ", "", null]) {
+      assert.throws(() => nextBeta(base, []), { message: `基础号应为 X.Y.Z，数字段不带前导零：${JSON.stringify(base)}` }, String(base));
+    }
+  });
+
+  // 0.x.y-beta.N 比 0.x.y-dev.N 小，装过 dev 的用户换它会被引导程序判为降级
+  it("基础号的主版本小于 1 时拒绝", () => {
+    for (const base of ["0.1.0", "0.0.0", `0.${randomInt(0, 100)}.${randomInt(0, 100)}`]) {
+      assert.throws(() => nextBeta(base, [`v${base}-beta.1`]), new RegExp(`^Error: 基础号 ${base.replaceAll(".", "\\.")} 的主版本小于 1`), base);
+    }
+  });
+});
+
 describe("命令行入口", () => {
   const run = (...args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8" });
   let nextCase = 0;
@@ -621,6 +759,52 @@ describe("命令行入口", () => {
     assert.throws(() => statSync(out), { code: "ENOENT" });
   });
 
+  it("compare 打印 -1、0 或 1", () => {
+    for (const [a, b, printed] of [
+      ["1.0.0-beta.2", "1.0.0-beta.10", "-1"],
+      ["1.0.0-beta.1", "0.1.0-dev.37", "1"],
+      ["1.0.0+a", "1.0.0", "0"],
+    ]) {
+      const result = run("compare", a, b);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, `${printed}\n`, `${a} 对 ${b}`);
+    }
+  });
+
+  it("compare 的参数不是 semver 时退出非 0，什么都不打印：工作流不能把它当成「不更新」", () => {
+    const result = run("compare", "v1.0.0-beta.1", "1.0.0-beta.1");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /不是 semver 版本号："v1\.0\.0-beta\.1"/);
+    assert.equal(result.stdout, "");
+  });
+
+  it("next-beta 从 tag 列表文件里算下一个序号，CRLF 换行照样认", () => {
+    for (const [content, printed] of [
+      ["v1.0.0-beta.1\nv1.0.0-beta.4\nv1.0.1-beta.9\ndev-build\n", "5"],
+      ["v1.0.0-beta.2\r\nv1.0.0-beta.7\r\n", "8"],
+      ["", "1"],
+    ]) {
+      const tags = notesFixture(content);
+      const result = run("next-beta", "1.0.0", tags);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, `${printed}\n`, JSON.stringify(content));
+    }
+  });
+
+  it("next-beta 的基础号不合法或 tag 列表文件不存在时退出非 0，什么都不打印", () => {
+    const tags = notesFixture("v0.1.0-beta.1\n");
+    for (const [args, message] of [
+      [["0.1.0", tags], /基础号 0\.1\.0 的主版本小于 1/],
+      [["1.0.0-beta.1", tags], /基础号应为 X\.Y\.Z/],
+      [["1.0.0", join(root, "missing-tags.txt")], /ENOENT/],
+    ]) {
+      const result = run("next-beta", ...args);
+      assert.notEqual(result.status, 0, args.join(" "));
+      assert.match(result.stderr, message);
+      assert.equal(result.stdout, "");
+    }
+  });
+
   it("参数个数不对或子命令不认识时退出非 0 并提示用法：工作流漏传参数不能被当成成功", () => {
     const build = ["build", VERSION, ATTEMPT, "boot.exe", REPO, TAG, "0".repeat(40)];
     for (const args of [
@@ -632,6 +816,10 @@ describe("命令行入口", () => {
       ["publish", KEY],
       build,
       [...build, "out.json", "notes.md", "extra"],
+      ["compare", "1.0.0"],
+      ["compare", "1.0.0", "1.0.0", "1.0.0"],
+      ["next-beta", "1.0.0"],
+      ["next-beta", "1.0.0", "tags.txt", "extra"],
     ]) {
       const result = run(...args);
       assert.notEqual(result.status, 0, args.join(" "));
