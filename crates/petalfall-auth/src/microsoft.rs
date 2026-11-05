@@ -19,7 +19,7 @@
 use std::time::{Duration, Instant};
 
 use petalfall_base::error_with_causes;
-use petalfall_base::retry::{RetryPolicy, RetryableError, retry_async};
+use petalfall_base::retry::{RetryPolicy, retry_async, retry_async_notify};
 use reqwest::StatusCode;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -312,35 +312,30 @@ impl MicrosoftAuth {
     ///
     /// 令牌链是串行的几次 HTTPS 往返，网络慢时启动开局的几秒都耗在这里，只有逐步的记录才分得清
     /// 是哪一步慢、是慢还是在重试。`retry_async` 自己的重试日志是 debug，下载等处也共用它，不能在那里
-    /// 统一提级。日志里只有步骤名、次数、用时与错误说明，不含令牌。
+    /// 统一提级。要不要重试由重试机制回调告知，这里不另判。日志里只有步骤名、次数、用时与错误说明，不含令牌。
     async fn chain_step<T, Fut>(&self, step: &'static str, mut op: impl FnMut() -> Fut) -> Result<T>
     where
         Fut: Future<Output = Result<T>>,
     {
         let started = Instant::now();
-        let max = self.retry.max_attempts.max(1);
         let mut attempts = 0u32;
-        let result = retry_async(&self.retry, || {
-            attempts += 1;
-            let attempt = attempts;
-            let pending = op();
-            async move {
-                let outcome = pending.await;
-                if let Err(err) = &outcome
-                    && attempt < max
-                    && err.is_retryable()
-                {
-                    tracing::warn!(
-                        step,
-                        attempt,
-                        max,
-                        error = %error_with_causes(err),
-                        "令牌链这一步失败，退避后重试"
-                    );
-                }
-                outcome
-            }
-        })
+        let result = retry_async_notify(
+            &self.retry,
+            || {
+                attempts += 1;
+                op()
+            },
+            |err, notice| {
+                tracing::warn!(
+                    step,
+                    attempt = notice.attempt,
+                    max = notice.max,
+                    delay_ms = notice.delay.as_millis() as u64,
+                    error = %error_with_causes(err),
+                    "令牌链这一步失败，退避后重试"
+                );
+            },
+        )
         .await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match &result {
@@ -1745,5 +1740,170 @@ mod tests {
         ));
         assert!(matches!(map_xerr(2148916238), AuthError::XstsChildAccount));
         assert!(matches!(map_xerr(1), AuthError::XstsUnknown(1)));
+    }
+
+    /// 收下当前线程上打出的日志（不带颜色）。用例跑在单线程运行时上，令牌链的日志都出在这条线程。
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Captured {
+        fn install(&self) -> tracing::subscriber::DefaultGuard {
+            let writer = self.clone();
+            tracing::subscriber::set_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::INFO)
+                    .with_writer(move || writer.clone())
+                    .finish(),
+            )
+        }
+
+        fn lines_with(&self, needle: &str) -> Vec<String> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .filter(|line| line.contains(needle))
+                .map(str::to_owned)
+                .collect()
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    const RETRYING: &str = "令牌链这一步失败，退避后重试";
+    const STEP_DONE: &str = "令牌链这一步完成";
+    const STEP_FAILED: &str = "令牌链这一步失败";
+
+    #[tokio::test]
+    async fn chain_steps_log_their_duration_and_warn_before_each_retry() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "SECRET-MSA-ACCESS",
+                "refresh_token": "SECRET-ROTATED-REFRESH",
+                "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+        // XBL 第一次回 503，第二次才放行。
+        Mock::given(method("POST"))
+            .and(path("/xbl"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/xbl"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "Token": "SECRET-XBL-TOKEN",
+                "DisplayClaims": { "xui": [ { "uhs": "uhs" } ] }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/xsts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "Token": "SECRET-XSTS-TOKEN",
+                "DisplayClaims": { "xui": [ { "uhs": "uhs" } ] }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/authentication/login_with_xbox"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "SECRET-MC-TOKEN",
+                "expires_in": 86400
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/minecraft/profile"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "0123456789abcdef0123456789abcdef",
+                "name": "PetalfallPlayer"
+            })))
+            .mount(&server)
+            .await;
+        let auth = auth_for(&server).with_retry(three_attempts());
+        let captured = Captured::default();
+        let _guard = captured.install();
+
+        let msa = auth.refresh("SECRET-OLD-REFRESH").await.unwrap();
+        auth.complete_login(&msa).await.unwrap();
+
+        // 重试前的 warn 只有 XBL 那一次，写明是第几次、最多几次。
+        let retries = captured.lines_with(RETRYING);
+        assert_eq!(retries.len(), 1, "{retries:?}");
+        assert!(retries[0].contains("WARN"), "{}", retries[0]);
+        assert!(retries[0].contains("XBL 认证"), "{}", retries[0]);
+        assert!(retries[0].contains("attempt=1"), "{}", retries[0]);
+        assert!(retries[0].contains("max=3"), "{}", retries[0]);
+        assert!(retries[0].contains("HTTP 503"), "{}", retries[0]);
+
+        // 五步各有一行完成记录，带用时；XBL 那一步试了两次。
+        let done = captured.lines_with(STEP_DONE);
+        assert_eq!(done.len(), 5, "{done:?}");
+        for (line, step) in done.iter().zip([
+            "刷新令牌",
+            "XBL 认证",
+            "XSTS 授权",
+            "Minecraft 登录",
+            "获取游戏档案",
+        ]) {
+            assert!(line.contains("INFO"), "{line}");
+            assert!(line.contains(step), "{line}");
+            assert!(line.contains("elapsed_ms="), "{line}");
+            let attempts = if step == "XBL 认证" { 2 } else { 1 };
+            assert!(line.contains(&format!("attempts={attempts}")), "{line}");
+        }
+        assert!(!captured.text().contains("SECRET-"), "日志里不该出现令牌");
+    }
+
+    #[tokio::test]
+    async fn step_that_cannot_be_retried_logs_one_failure_and_no_retry() {
+        let server = MockServer::start().await;
+        mount_xbl_ok(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/xsts"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "Identity": "0",
+                "XErr": 2148916233u64,
+                "Message": ""
+            })))
+            .mount(&server)
+            .await;
+        let auth = auth_for(&server).with_retry(three_attempts());
+        let captured = Captured::default();
+        let _guard = captured.install();
+
+        let err = auth.complete_login(&msa()).await.unwrap_err();
+        assert!(matches!(err, AuthError::XstsNoXboxAccount), "{err:?}");
+        assert_eq!(hits(&server, "/xsts").await, 1);
+        assert!(captured.lines_with(RETRYING).is_empty());
+        let failed: Vec<String> = captured
+            .lines_with(STEP_FAILED)
+            .into_iter()
+            .filter(|line| !line.contains(RETRYING))
+            .collect();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("WARN"), "{}", failed[0]);
+        assert!(failed[0].contains("XSTS 授权"), "{}", failed[0]);
+        assert!(failed[0].contains("attempts=1"), "{}", failed[0]);
+        assert_eq!(captured.lines_with(STEP_DONE).len(), 1, "XBL 那一步走完了");
     }
 }

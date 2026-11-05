@@ -345,4 +345,123 @@ mod microsoft {
         assert!(slot.cancel());
         assert_eq!(second.await.unwrap().unwrap_err().code, "cancelled");
     }
+
+    /// 设备码登录全链，Minecraft 令牌只有 60 秒：落库后马上就在提前续期的提前量里。
+    async fn mount_short_lived_login(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/devicecode"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"device_code":"DEV","user_code":"WXYZ-1234",
+                    "verification_uri":"https://microsoft.com/link","expires_in":900,"interval":1,
+                    "message":"输入 WXYZ-1234"}"#,
+            ))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"access_token":"AT","refresh_token":"rotated","expires_in":3600}"#,
+            ))
+            .mount(server)
+            .await;
+        for route in ["/xbl", "/xsts"] {
+            Mock::given(method("POST"))
+                .and(path(route))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_string(
+                        r#"{"Token":"xbox","DisplayClaims":{"xui":[{"uhs":"uhs"}]}}"#,
+                    ),
+                )
+                .mount(server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/authentication/login_with_xbox"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"access_token":"MC","expires_in":60}"#),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/minecraft/profile"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(r#"{"id":"0123456789abcdef0123456789abcdef","name":"Reimu"}"#),
+            )
+            .mount(server)
+            .await;
+    }
+
+    /// 后台提前续期的每一次检查：续不了只记日志、不报给谁，下一次检查照常再试。服务故障交回「没续成」；服务
+    /// 好了下一次就续上；凭据被判失效时记一条 warn、交回 `None`，账户落成要重新登录，再下一次就不续了。
+    /// 单线程运行时：续期跑在它派生的任务里，日志也要收得到。
+    #[tokio::test]
+    async fn renew_ahead_check_only_logs_failures_and_the_next_check_tries_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let healthy = MockServer::start().await;
+        mount_short_lived_login(&healthy).await;
+        let facade = facade_against(&healthy, dir.path());
+        facade
+            .snapshot()
+            .await
+            .microsoft_login(|_| {})
+            .await
+            .unwrap();
+        let down = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("Service Unavailable"))
+            .mount(&down)
+            .await;
+        let revoked = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_string(r#"{"error":"invalid_grant","error_description":"revoked"}"#),
+            )
+            .mount(&revoked)
+            .await;
+        let captured = crate::tests::Captured::default();
+        let writer = captured.clone();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || writer.clone())
+                .finish(),
+        );
+
+        assert_eq!(
+            renew_ahead_once(&facade_against(&down, dir.path())).await,
+            Some(AheadOutcome::Unreachable)
+        );
+        let Some(AheadOutcome::Renewed(renewed)) = renew_ahead_once(&facade).await else {
+            panic!("服务恢复后的下一次检查应续上");
+        };
+        assert_eq!(renewed.name, "Reimu");
+        // 续出来的令牌照样只有 60 秒，仍在提前量里，下一次检查还会续。
+        assert_eq!(
+            renew_ahead_once(&facade_against(&revoked, dir.path())).await,
+            None
+        );
+        assert_eq!(
+            renew_ahead_once(&facade).await,
+            Some(AheadOutcome::NotNeeded),
+            "已判定要重新登录的账户不再续"
+        );
+
+        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let warned = |needle: &str| {
+            log.lines()
+                .filter(|line| line.contains(needle))
+                .all(|line| line.contains("WARN"))
+                && log.contains(needle)
+        };
+        assert!(warned("后台提前续期因网络或登录服务故障没续成"), "{log}");
+        assert!(warned("后台提前续期失败，下次检查或启动时再续"), "{log}");
+        assert!(log.contains("已在后台提前续期当前微软账户的令牌"), "{log}");
+        let accounts = facade.snapshot().await.accounts().unwrap();
+        assert_eq!(accounts[0].status, AccountStatus::Expired);
+    }
 }

@@ -1283,7 +1283,8 @@ impl Petalfall {
     /// 微软令牌过期就续期，外置令牌先校验、无效再刷新，离线原样返回。凭据被判定失效时账户库里
     /// 同时落为 `expired`，账户页据此提示重新登录。
     ///
-    /// 要联网时会话日志记下开始与用时：开局慢了几秒，事后要能从日志里看出是在等账户验证。
+    /// 要联网时会话日志记下开始与用时：开局慢了几秒，事后要能从日志里看出是在等账户验证，以及是排在另一次
+    /// 续期（多半是后台提前续期）后面等，还是自己在联网。
     async fn refresh_for_launch(
         &self,
         account: Account,
@@ -1300,23 +1301,33 @@ impl Petalfall {
             }
             AccountCredentials::Microsoft(_) | AccountCredentials::Offline => None,
         };
-        let started = std::time::Instant::now();
         if let Some(text) = &online {
             reporter.info(text.as_str()).await;
         }
-        let fresh = self
-            .ensure_account_fresh(&account)
-            .await
-            .map_err(|err| classify_refresh(err, &account.name))?;
-        if online.is_some() {
-            reporter
-                .info(format!(
-                    "账户验证完成，用时 {} 毫秒",
-                    started.elapsed().as_millis()
-                ))
-                .await;
+        let (fresh, timing) = self.ensure_account_fresh_timed(&account).await;
+        match fresh {
+            Ok(fresh) => {
+                if online.is_some() {
+                    reporter.info(verify_summary("账户验证完成", &timing)).await;
+                }
+                Ok(fresh)
+            }
+            Err(err) => {
+                if timing.reused_failure {
+                    reporter
+                        .info(format!(
+                            "排在前面的后台提前续期刚因网络或登录服务故障没续成，这次启动沿用它的结果，没有再联网（排队 {} 毫秒）",
+                            timing.queued.as_millis()
+                        ))
+                        .await;
+                } else if timing.online.is_some() {
+                    reporter
+                        .info(verify_summary("账户验证没有完成", &timing))
+                        .await;
+                }
+                Err(classify_refresh(err, &account.name))
+            }
         }
-        Ok(fresh)
     }
 
     async fn plan_java(
@@ -1909,6 +1920,23 @@ fn authlib_metadata_failure(
 /// 进单人；后两种重试多少次都一样，失败码只为把玩家引到 client_id 设置。封禁、未购买、响应解析不了、
 /// 凭据库读写失败都不是重新登录能解决的，按门面错误原样报出原文与错误码。取消同样原样报出：它不是续期的结论，当成账户失败
 /// 记下会盖掉门面记下的上一次服务或网络故障，让紧接着的以离线方式进单人被错拒。
+/// 会话日志里账户验证用时的那一行：排队等别的续期与自己联网分开写，没排队就只写联网。
+fn verify_summary(head: &str, timing: &crate::auth::VerifyTiming) -> String {
+    let queued = timing.queued.as_millis();
+    match timing.online {
+        Some(online) if timing.queued.is_zero() => {
+            format!("{head}，联网用时 {} 毫秒", online.as_millis())
+        }
+        Some(online) => format!(
+            "{head}：排队等另一次续期 {queued} 毫秒，之后联网 {} 毫秒",
+            online.as_millis()
+        ),
+        None => {
+            format!("{head}：排队等另一次续期 {queued} 毫秒，库里的令牌已由它续好，这次没有联网")
+        }
+    }
+}
+
 fn classify_refresh(err: CoreError, account_name: &str) -> LaunchFailed {
     match &err {
         CoreError::Auth(petalfall_auth::AuthError::Http { .. }) => LaunchFailure::new(
@@ -3501,6 +3529,22 @@ mod tests {
             server.received_requests().await.unwrap().len(),
             petalfall_base::retry::RetryPolicy::default().max_attempts as usize
         );
+        // 会话日志写了在续期、续了多久没成，但不能写「验证完成」。
+        let lines = launcher_lines(&events);
+        assert!(
+            lines.contains(&format!("微软账户 {MS_NAME} 的令牌已过期，正在续期")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("账户验证没有完成，联网用时 ")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("账户验证完成")),
+            "{lines:?}"
+        );
 
         // 账户还在、状态正常、凭据一个字没动。
         let after = petalfall
@@ -3509,6 +3553,146 @@ mod tests {
             .expect("账户应仍在库中");
         assert_eq!(after.status, petalfall_auth::AccountStatus::Ok);
         assert_eq!(after, stored);
+    }
+
+    /// 启动排在一次后台提前续期后面，后台因服务故障失败：启动沿用这次失败直接报，不再重试一轮，日志写明
+    /// 是沿用的，没有「联网」那一行。删掉沿用，令牌端点会被打两轮。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launch_behind_a_failing_background_renewal_reports_its_failure_at_once() {
+        let server = wiremock::MockServer::start().await;
+        mount_token(
+            &server,
+            outage_page().set_delay(std::time::Duration::from_millis(100)),
+        )
+        .await;
+        let fx = fixture();
+        install_version(&fx.root.join(".minecraft"), 17, true);
+        let (petalfall, stored) = with_stale_account(&fx, &server);
+
+        let background = petalfall.clone();
+        let ahead = tokio::spawn(async move { background.renew_current_ahead().await });
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while server.received_requests().await.unwrap().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("后台续期应在 15 秒内打到令牌端点");
+        let (result, events) = launch_request(
+            &petalfall,
+            stored_request(stored.clone()),
+            fake_java(&fx.root, 17, 0),
+        )
+        .await;
+
+        let failure = expect_failure(result);
+        assert_eq!(failure.code, FailureCode::AccountServiceDown);
+        assert_eq!(failure.params.get("status"), Some(&Value::from(503u64)));
+        assert_eq!(
+            ahead.await.unwrap().unwrap(),
+            crate::auth::AheadOutcome::Unreachable
+        );
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            petalfall_base::retry::RetryPolicy::default().max_attempts as usize,
+            "只有后台那一轮"
+        );
+        let lines = launcher_lines(&events);
+        let reused = lines
+            .iter()
+            .find(|line| line.starts_with("排在前面的后台提前续期刚因网络或登录服务故障没续成"))
+            .unwrap_or_else(|| panic!("应写明沿用了后台的结果：{lines:?}"));
+        assert!(reused.ends_with(" 毫秒）"), "{reused}");
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("联网") && !line.contains("没有再联网")),
+            "{lines:?}"
+        );
+        // 沿用的失败照样记进账户失败，玩家可以接着以离线方式进单人。
+        assert_eq!(
+            failures_of(&petalfall).get(MS_UUID),
+            Some(&FailureCode::AccountServiceDown)
+        );
+    }
+
+    /// 外置账户每次启动都要向验证服务器校验一次：会话日志写开始与联网用时。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn authlib_account_is_verified_online_with_its_duration_logged() {
+        use wiremock::matchers::{method, path};
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/authserver/validate"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        let fx = fixture();
+        let account = fx
+            .petalfall
+            .store_account_for_test(Account::new(
+                MS_UUID,
+                "Hero",
+                AccountCredentials::AuthlibInjector(petalfall_auth::YggdrasilCredentials {
+                    api_root: format!("{}/", server.uri()),
+                    access_token: "SECRET-ACCESS".into(),
+                    client_token: "SECRET-CLIENT".into(),
+                    username: None,
+                }),
+            ))
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut reporter = Reporter {
+            events: &tx,
+            clock: SessionClock::start().unwrap(),
+            log: None,
+        };
+
+        let verified = fx
+            .petalfall
+            .refresh_for_launch(account, &mut reporter)
+            .await
+            .unwrap();
+        assert!(verified.last_verified_at.is_some());
+        drop(tx);
+        let mut lines = Vec::new();
+        while let Some(event) = rx.recv().await {
+            if let LaunchEvent::Log { text, .. } = event {
+                lines.push(text);
+            }
+        }
+        let [verifying, done] = lines.as_slice() else {
+            panic!("应有开始与完成两行：{lines:?}");
+        };
+        assert_eq!(verifying, "正在向外置登录服务器验证账户 Hero");
+        let millis = done
+            .strip_prefix("账户验证完成，联网用时 ")
+            .and_then(|rest| rest.strip_suffix(" 毫秒"))
+            .unwrap_or_else(|| panic!("完成的一行应写联网用时：{done}"));
+        assert!(millis.parse::<u64>().is_ok(), "{done}");
+        assert!(lines.iter().all(|line| !line.contains("SECRET-")));
+    }
+
+    /// 用时一行的三种写法：没排队只写联网；排了队再联网两段都写；排队期间别处续好了就写没有联网。
+    #[test]
+    fn verify_summary_splits_queueing_from_going_online() {
+        use std::time::Duration;
+        let timing = |queued: u64, online: Option<u64>| crate::auth::VerifyTiming {
+            queued: Duration::from_millis(queued),
+            online: online.map(Duration::from_millis),
+            reused_failure: false,
+        };
+        assert_eq!(
+            verify_summary("账户验证完成", &timing(0, Some(840))),
+            "账户验证完成，联网用时 840 毫秒"
+        );
+        assert_eq!(
+            verify_summary("账户验证完成", &timing(1200, Some(840))),
+            "账户验证完成：排队等另一次续期 1200 毫秒，之后联网 840 毫秒"
+        );
+        assert_eq!(
+            verify_summary("账户验证完成", &timing(3100, None)),
+            "账户验证完成：排队等另一次续期 3100 毫秒，库里的令牌已由它续好，这次没有联网"
+        );
     }
 
     /// 每行启动器日志连同它所在的阶段下标。
@@ -3558,7 +3742,7 @@ mod tests {
             &format!("微软账户 {MS_NAME} 的令牌已过期，正在续期")
         );
         let millis = renewed
-            .strip_prefix("账户验证完成，用时 ")
+            .strip_prefix("账户验证完成，联网用时 ")
             .and_then(|rest| rest.strip_suffix(" 毫秒"))
             .unwrap_or_else(|| panic!("续期完成的一行应写用时：{renewed}"));
         assert!(millis.parse::<u64>().is_ok(), "{renewed}");
