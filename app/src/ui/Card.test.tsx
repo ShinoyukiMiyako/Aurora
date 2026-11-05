@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Tier } from "../shell/tier";
@@ -158,6 +160,18 @@ describe("Card", () => {
     expect(whole.hasAttribute("data-sk-hover-host")).toBe(false);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     expect(() => render(<CardTitleButton onClick={() => undefined}>孤立</CardTitleButton>)).toThrow("CardTitleButton 只能放在 Card 里");
+  });
+
+  it("整卡可点与带标题按钮的卡片都自成层叠上下文，卡内的 z-index 不漏到页面上", () => {
+    const css = readFileSync(resolve(__dirname, "Card.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const isolated = [...css.matchAll(/(?:^|\n)([^{}\n][^{}]*)\{([^}]*)\}/g)]
+      .filter(([, , body]) => /\sisolation:\s*isolate;/.test(body))
+      .flatMap(([, selectors]) => selectors.split(",").map((s) => s.trim()));
+    expect(isolated).toEqual(expect.arrayContaining([".card[data-interactive]", ".card:has(.titleButton)"]));
+
+    // 选择器要真的落在整卡可点的卡片上：Card 给它的就是 data-interactive。
+    const whole = mount(<Card onClick={() => undefined} ariaLabel="打开「生存」">生存</Card>);
+    expect(whole.hasAttribute("data-interactive")).toBe(true);
   });
 });
 

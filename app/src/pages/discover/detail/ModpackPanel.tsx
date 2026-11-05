@@ -363,7 +363,11 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
         </>
       )}
       {progress !== null && progress.kind === "cancelled" && <Callout tone="info">{MODPACK_COPY.cancelled}</Callout>}
-      {progress !== null && progress.kind === "failed" && <Callout tone="danger">{MODPACK_COPY.failed(progress.reason)}</Callout>}
+      {progress !== null && progress.kind === "failed" && (
+        <Callout tone="danger" fullText>
+          {MODPACK_COPY.failed(progress.reason)}
+        </Callout>
+      )}
       {blocked !== null && (
         <BlockedFilesModal
           open={blocked.open}

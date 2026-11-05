@@ -576,6 +576,28 @@ describe("外置登录弹窗", () => {
     expect(launcher.state.toasts[0]?.title).toBe(TOAST_COPY.authlibAdded("multi_alt", "skin.example.com").title);
   });
 
+  it("服务器拒绝登录：危险提示框完整显示服务器给的原因，不截成两行", async () => {
+    const reason = "登录尝试过于频繁，为保护账户安全，本站已暂时冻结该账户的登录权限，请于三十分钟后再试；如非本人操作，请尽快登录皮肤站修改密码";
+    await openAuthlib();
+    typeInto(inputs()[0], "skin.example.com");
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    const [username, password] = inputs();
+    typeInto(username, "multi@example.com");
+    typeInto(password, "secret");
+    ipc.overrides.set("authlib_login", () => {
+      throw new IpcError("Yggdrasil", "第三方认证失败", { error: "TooManyRequests", error_message: reason });
+    });
+    act(() => button(AUTHLIB_COPY.login).click());
+    await flush();
+    const callouts = [...(dialog()?.querySelectorAll<HTMLElement>('[data-tone="danger"]') ?? [])];
+    expect(callouts).toHaveLength(1);
+    // jsdom 不排版，截不截成两行只能看文字容器上的 data-full
+    const text = callouts[0].querySelector<HTMLElement>("[data-full]");
+    expect(text?.getAttribute("data-full")).toBe("true");
+    expect(text?.textContent).toBe(reason);
+  });
+
   it("登录还没回来时不能退回上一步换服务器：回来的角色属于这一次的服务器", async () => {
     await openAuthlib();
     typeInto(inputs()[0], "skin.example.com");

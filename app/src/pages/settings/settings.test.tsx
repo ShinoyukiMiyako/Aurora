@@ -1189,6 +1189,20 @@ describe("设置页：游戏", () => {
     expect(commands.calls).toEqual(["add:HMCL:D:\\HMCL\\.minecraft"]);
   });
 
+  it("探测其他启动器的文件夹失败：提示框完整显示标题与后端原因，不截成两行", async () => {
+    const reason = "读取注册表 HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall 失败：拒绝访问，可能被安全软件拦截，请把启动器加入白名单后点「重新探测」";
+    ipc.overrides.set("discover_game_directories", () => {
+      throw new IpcError("io", reason);
+    });
+    await mount("game");
+    const callouts = [...section("游戏目录").querySelectorAll<HTMLElement>('[data-tone="danger"]')];
+    expect(callouts).toHaveLength(1);
+    // jsdom 不排版，截不截成两行只能看文字容器上的 data-full
+    const body = callouts[0].querySelector<HTMLElement>("[data-full]");
+    expect(body?.getAttribute("data-full")).toBe("true");
+    expect(body?.textContent).toBe(`没能探测其他启动器的文件夹${reason}`);
+  });
+
   it("更改目录：选到带「!」的路径直接拒绝，不切换", async () => {
     commands.pickDirectory = async () => "D:\\Hi!\\.minecraft";
     await mount("game");
