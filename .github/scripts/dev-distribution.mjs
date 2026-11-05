@@ -22,9 +22,9 @@ const SEGMENT = /^(?!\.\.?$)[A-Za-z0-9._-]+$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
-// 插件按 RFC 3339 解析 pub_date；toISOString 写出的就是这个形状
-const PUB_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 const R2_ACCOUNT_ID = /^[0-9a-f]{32}$/;
+// 客户端与香港机 put-manifest 用的是同一个更新包上限：超过它的包新客户端读不完，put-manifest 也不收，要在发布时就挂掉
+const MAX_PACKAGE_SIZE = 256 * 1024 * 1024;
 
 // 上传目标和匿名下载用的公网主机放在同一张表里。profile 是 AWS 配置文件里的段名，上传脚本按它挑凭据。
 // R2 的 S3 端点带账户 ID，账户 ID 是环境变量，所以端点写成函数。
@@ -154,12 +154,18 @@ function parseSourceUrl(name, raw) {
   return url;
 }
 
+// 插件按 RFC 3339 严格解析 pub_date，2 月 30 日、平年 2 月 29 日、24 点都拒收，整份清单作废；Date.parse 却把它们
+// 滚到下一天、不报 NaN。所以要求与 toISOString 往返后逐字相等：build 写出的就是这个形状，滚动过的日期往返后会变样。
+function isBuildPubDate(value) {
+  return typeof value === "string" && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value;
+}
+
 export function validateManifest(manifest, { version, attempt, fileName, size, repo, tag }) {
   requireKeys(manifest, ["version", "notes", "pub_date", "platforms"], "清单");
   if (manifest.version !== version) throw new Error(`清单的 version 是 ${JSON.stringify(manifest.version)}，应为 ${version}`);
   if (typeof manifest.notes !== "string" || manifest.notes === "") throw new Error("清单的 notes 应是非空字符串");
-  if (typeof manifest.pub_date !== "string" || !PUB_DATE.test(manifest.pub_date) || Number.isNaN(Date.parse(manifest.pub_date))) {
-    throw new Error(`清单的 pub_date 不是 RFC 3339 时间：${JSON.stringify(manifest.pub_date)}`);
+  if (!isBuildPubDate(manifest.pub_date)) {
+    throw new Error(`清单的 pub_date 应是真实存在的 UTC 时刻，形如 YYYY-MM-DDTHH:mm:ss.sssZ：${JSON.stringify(manifest.pub_date)}`);
   }
 
   requireKeys(manifest.platforms, [PLATFORM], "platforms");
@@ -167,6 +173,7 @@ export function validateManifest(manifest, { version, attempt, fileName, size, r
   requireKeys(entry, ["signature", "url", "x-size", "x-sources"], PLATFORM);
   if (typeof entry.signature !== "string" || !BASE64.test(entry.signature)) throw new Error("signature 应是非空的 base64 字符串");
   if (!Number.isSafeInteger(entry["x-size"]) || entry["x-size"] <= 0) throw new Error(`x-size 应是正整数：${JSON.stringify(entry["x-size"])}`);
+  if (entry["x-size"] > MAX_PACKAGE_SIZE) throw new Error(`x-size 是 ${entry["x-size"]}，超过更新包上限 ${MAX_PACKAGE_SIZE} 字节`);
   if (entry["x-size"] !== size) throw new Error(`x-size 是 ${entry["x-size"]}，引导程序实际 ${size} 字节`);
 
   const sources = entry["x-sources"];

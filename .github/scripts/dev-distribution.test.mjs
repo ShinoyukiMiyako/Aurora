@@ -41,7 +41,7 @@ after(() => rmSync(root, { recursive: true, force: true }));
 
 const expected = { version: VERSION, attempt: ATTEMPT, fileName: FILE_NAME, size: SIZE, repo: REPO, tag: TAG };
 
-function manifest() {
+function manifest(overrides = {}) {
   return buildManifest({
     version: VERSION,
     notes: "dev 分支 0123abcd 的自动构建",
@@ -52,6 +52,7 @@ function manifest() {
     fileName: FILE_NAME,
     repo: REPO,
     tag: TAG,
+    ...overrides,
   });
 }
 
@@ -192,6 +193,26 @@ describe("validateManifest", () => {
     assert.equal(validateManifest(m, expected), undefined);
   });
 
+  it("pub_date 是 toISOString 形状的真实时刻时通过：闰年的 2 月 29 日、一年最后一毫秒、随机时刻", () => {
+    const random = new Date(randomInt(Date.UTC(2000, 0, 1), Date.UTC(2100, 0, 1))).toISOString();
+    for (const pubDate of ["2028-02-29T00:00:00.000Z", "2026-12-31T23:59:59.999Z", "2026-01-01T00:00:00.000Z", random]) {
+      assert.equal(validateManifest(manifest({ pubDate }), expected), undefined, pubDate);
+    }
+  });
+
+  // 与客户端、put-manifest 共用的上限写成字面量：哪一处单独改了常量，这里会挂
+  it("x-size 恰好 268435456 字节时通过，再多 1 字节就拒绝，哪怕引导程序确实这么大", () => {
+    const limit = 268435456;
+    assert.equal(validateManifest(manifest({ size: limit }), { ...expected, size: limit }), undefined);
+    for (const size of [limit + 1, limit + randomInt(2, 2 ** 40), Number.MAX_SAFE_INTEGER]) {
+      assert.throws(
+        () => validateManifest(manifest({ size }), { ...expected, size }),
+        { message: `x-size 是 ${size}，超过更新包上限 ${limit} 字节` },
+        String(size),
+      );
+    }
+  });
+
   it("拒绝：清单不是对象", () => {
     for (const value of [null, [], "{}"]) {
       assert.throws(() => validateManifest(value, expected), { message: "清单应是对象" }, JSON.stringify(value));
@@ -204,8 +225,15 @@ describe("validateManifest", () => {
     ["顶层多一个键", (m) => Object.assign(m, { "x-note": "" }), /^清单的键应为 /],
     ["version 和期望不同", (m) => Object.assign(m, { version: VERSION.replace(/\d+$/, (n) => String(Number(n) + 1)) }), /^清单的 version 是 /],
     ["notes 为空", (m) => Object.assign(m, { notes: "" }), /^清单的 notes 应是非空字符串$/],
-    ["pub_date 不是 RFC 3339", (m) => Object.assign(m, { pub_date: "2026-11-04 12:00:00" }), /^清单的 pub_date 不是 RFC 3339 时间/],
-    ["pub_date 的日期不存在", (m) => Object.assign(m, { pub_date: "2026-13-40T00:00:00Z" }), /^清单的 pub_date 不是 RFC 3339 时间/],
+    ["pub_date 不是 RFC 3339", (m) => Object.assign(m, { pub_date: "2026-11-04 12:00:00" }), /^清单的 pub_date 应是真实存在的 UTC 时刻/],
+    ["pub_date 的月和日都越界", (m) => Object.assign(m, { pub_date: "2026-13-40T00:00:00Z" }), /^清单的 pub_date 应是真实存在的 UTC 时刻/],
+    // 下面四个 Date.parse 都不报 NaN，会滚到下一天；插件解析时拒收，整份清单作废。只坏日期一处，形状与 build 写出的一致
+    ...["2026-02-30T00:00:00.000Z", "2026-02-29T00:00:00.000Z", "2026-04-31T00:00:00.000Z", "2026-11-04T24:00:00.000Z"].map((pubDate) => [
+      `pub_date 是不存在的时刻 ${pubDate}`,
+      (m) => Object.assign(m, { pub_date: pubDate }),
+      new RegExp(`^清单的 pub_date 应是真实存在的 UTC 时刻，形如 YYYY-MM-DDTHH:mm:ss\\.sssZ："${pubDate.replaceAll(".", "\\.")}"$`),
+    ]),
+    ["pub_date 合乎 RFC 3339 但不是 build 写出的形状", (m) => Object.assign(m, { pub_date: "2026-11-04T12:00:00Z" }), /^清单的 pub_date 应是真实存在的 UTC 时刻/],
     ["多一个平台", (m) => Object.assign(m.platforms, { "darwin-aarch64": entryOf(m) }), /^platforms的键应为 windows-x86_64/],
     ["平台条目缺 x-size", (m) => delete entryOf(m)["x-size"], /^windows-x86_64的键应为 /],
     ["平台条目的扩展字段拼错", (m) => Object.assign(entryOf(m), { "x-source": entryOf(m)["x-sources"] }), /^windows-x86_64的键应为 /],

@@ -16,11 +16,8 @@ on:
   push:
     branches: [dev]
 
-# 滚动预发布只留最新一个包，排队的旧构建做完也会被覆盖，不如直接取消。
-concurrency:
-  group: dev-build
-  cancel-in-progress: true
-
+# 并发组按作业分，不设工作流级的：工作流级取消会把已经重建预发布、还没推完香港的运行整个掐掉，香港停在旧版，
+# 新客户端先查香港、拿到 2xx 就不再问 GitHub。三个组各自的取舍写在各作业上。
 permissions:
   contents: read
 
@@ -39,6 +36,11 @@ jobs:
   build:
     runs-on: [self-hosted, Linux, X64, petalfall]
     timeout-minutes: 30
+    # 新推送只取消还在构建的旧运行：滚动预发布只留最新一个包，旧构建做完也会被覆盖，不如直接取消。
+    # 旧运行过了这个作业就不再受新推送影响。反过来，重跑旧运行的 build 同样会取消新运行正在跑的构建。
+    concurrency:
+      group: dev-build
+      cancel-in-progress: true
     # 微软登录 client_id 只在构建时内嵌，仓库里不放。它不是机密，每个安装包里都有，所以放仓库变量。
     # CurseForge API key 同样要编进每个安装包，谁都能从 exe 里取出，到这台机器上不比 client_id 多泄露什么；
     # 它放 secret 只为让公开的 Actions 日志遮住它。签名私钥这类真正的机密仍然不进这台机器。
@@ -212,6 +214,12 @@ jobs:
     environment: updates-dev
     # 两个包各传三个桶再逐个读回，杭州和香港对 GitHub 托管机都是跨境，按慢的情况放宽
     timeout-minutes: 30
+    # 发布阶段不能半路取消：重建预发布是先删后建，掐在中间 GitHub 上就没有预发布，旧客户端检查更新只剩 404。
+    # 不取消也让各运行的 publish 串行，版本检查到重建之间不会有别的运行改预发布。同组只留一个排队者，
+    # 更新的运行排进来会顶掉还在排队的旧运行：旧版反正要被它覆盖，被顶掉的运行显示取消，不用补。
+    concurrency:
+      group: dev-publish
+      cancel-in-progress: false
     permissions:
       contents: write
     env:
@@ -234,6 +242,76 @@ jobs:
         with:
           name: ${{ needs.build.outputs.bootstrap-name }}
           path: dist
+
+      # 插件只装比自己新的版本。工作流改名或重建会让运行序号从 1 重数，发出去的版本号比已装的小，
+      # dev 包会一直以为自己是最新，在这里挡下来。新客户端先读香港清单，所以两处都要比；香港机上还没有清单时 404，跳过。
+      # 整体重跑（Re-run all jobs）时运行序号不变，GitHub 上已经是这个版本，同样在这里停下。
+      # 排在签名和上传之前：会在这里失败的运行不该先往三个桶各传两个包、再跨境读回一遍。检查之后隔着上传和读回才重建
+      # 预发布，这段时间别的运行改不了预发布：重建只在 publish 里做，publish 在 dev-publish 组里串行。
+      - name: 检查版本号没有倒退
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          previous=()
+          if assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')" && grep -qx latest.json <<< "$assets"; then
+            gh release download "$TAG" -p latest.json -O "$RUNNER_TEMP/previous-github.json"
+            previous+=("$RUNNER_TEMP/previous-github.json")
+          else
+            echo "滚动预发布上还没有清单，跳过"
+          fi
+          status="$(curl --silent --show-error --retry 3 --max-time 60 --output "$RUNNER_TEMP/previous-hk.json" --write-out '%{http_code}' "$HK_MANIFEST_URL")"
+          case "$status" in
+            200) previous+=("$RUNNER_TEMP/previous-hk.json") ;;
+            404) echo "香港机上还没有 dev 清单，跳过" ;;
+            *)
+              echo "::error::读香港清单 $HK_MANIFEST_URL 返回 HTTP $status"
+              exit 1
+              ;;
+          esac
+          if [ "${#previous[@]}" -eq 0 ]; then
+            exit 0
+          fi
+          # 整体重跑时 publish 停在这里，publish-hk 跟着跳过；产物又已被重编的字节覆盖，单独让 publish-hk 跑，
+          # 读回 GitHub 一般也对不上，这次运行推不了香港。第一次尝试就撞上 GitHub 同号，只能是别的运行发的。
+          # 报错按这些情况分别给出走得通的补法。
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const parse = (v) => {
+              const m = /^(\d+)\.(\d+)\.(\d+)(?:-dev\.(\d+))?$/.exec(v);
+              if (m === null) throw new Error('认不出的版本号 ' + v);
+              return [Number(m[1]), Number(m[2]), Number(m[3]), m[4] === undefined ? Infinity : Number(m[4])];
+            };
+            const [now, attempt, ...files] = process.argv.slice(1);
+            const current = parse(now);
+            const published = files.map((file) => ({ name: path.basename(file), version: JSON.parse(fs.readFileSync(file, 'utf8')).version }));
+            const firstDifference = (version) => {
+              const before = parse(version);
+              return current.findIndex((x, k) => x !== before[k]);
+            };
+            const sameVersion = (name) => {
+              if (name === 'previous-github.json') {
+                if (attempt === '1') {
+                  return 'GitHub 预发布上已经是版本 ' + now + '，可这是本运行的第一次尝试，发布它的是另一个同号的运行：运行序号被重数了（工作流改名或重建），dev 包不会更新过去';
+                }
+                const hk = published.find((entry) => entry.name === 'previous-hk.json');
+                if (hk !== undefined && firstDifference(hk.version) === -1) {
+                  return '版本号 ' + now + ' 在 GitHub 预发布和香港清单上都已发布：本运行在之前的尝试里已经发布完，这次整体重跑（Re-run all jobs）多余，不用再补';
+                }
+                return 'GitHub 预发布上已经是版本 ' + now + '：本运行在之前的尝试里发布过，这次是整体重跑（Re-run all jobs）。之前那次尝试要是只有 publish-hk 失败，本该在那次尝试上用 Re-run failed jobs 只重跑 publish-hk；整体重跑时 build 已重编并覆盖了引导程序产物，publish-hk 读回 GitHub 会对不上，而这次尝试里失败的是 publish，再点 Re-run failed jobs 也只会在这里再停一次。这次运行补不了香港：往 dev 推新提交出新版本，或者手工把发布过的那次尝试的 latest.json 产物（和预发布上的 latest.json 字节相同）推到香港';
+              }
+              if (name === 'previous-hk.json') {
+                return '香港清单上已经是版本 ' + now + '，GitHub 预发布上却不是：运行序号被重数了，或者推送香港之后预发布被手工删改过，dev 包不会更新过去';
+              }
+              throw new Error('不认识的已发布清单 ' + name);
+            };
+            for (const { name, version } of published) {
+              const i = firstDifference(version);
+              if (i === -1) throw new Error(sameVersion(name));
+              if (current[i] < parse(version)[i]) throw new Error('版本号 ' + now + ' 不比 ' + name + ' 里已发布的 ' + version + ' 新，dev 包不会更新过去');
+            }
+          " "$VERSION" "$GITHUB_RUN_ATTEMPT" "${previous[@]}"
 
       # 更新包是引导程序，不是 NSIS 包。更新插件把下载到的任何 PE 都当 NSIS 包，按默认的 passive 模式和
       # restart_after_install（默认 true）拼成 /P /UPDATE /R /ARGS <启动器参数> 拉起，配置了 installerArgs 才会再往后接；
@@ -324,51 +402,6 @@ jobs:
           " "$MANIFEST" "$signature")"
           node .github/scripts/verify-update-signature.mjs .github/dev-updater.pub "$BOOTSTRAP" "$signature" "$manifest_version"
 
-      # 插件只装比自己新的版本。工作流改名或重建会让运行序号从 1 重数，发出去的版本号比已装的小，
-      # dev 包会一直以为自己是最新，在这里挡下来。新客户端先读香港清单，所以两处都要比；香港机上还没有清单时 404，跳过。
-      # 重跑全部作业时运行序号不变，GitHub 上已经是这个版本，同样在这里停下：重建之后的失败只该重跑 publish-hk。
-      - name: 检查版本号没有倒退
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          previous=()
-          if assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')" && grep -qx latest.json <<< "$assets"; then
-            gh release download "$TAG" -p latest.json -O "$RUNNER_TEMP/previous-github.json"
-            previous+=("$RUNNER_TEMP/previous-github.json")
-          else
-            echo "滚动预发布上还没有清单，跳过"
-          fi
-          status="$(curl --silent --show-error --retry 3 --max-time 60 --output "$RUNNER_TEMP/previous-hk.json" --write-out '%{http_code}' "$HK_MANIFEST_URL")"
-          case "$status" in
-            200) previous+=("$RUNNER_TEMP/previous-hk.json") ;;
-            404) echo "香港机上还没有 dev 清单，跳过" ;;
-            *)
-              echo "::error::读香港清单 $HK_MANIFEST_URL 返回 HTTP $status"
-              exit 1
-              ;;
-          esac
-          if [ "${#previous[@]}" -eq 0 ]; then
-            exit 0
-          fi
-          node -e "
-            const fs = require('fs');
-            const path = require('path');
-            const parse = (v) => {
-              const m = /^(\d+)\.(\d+)\.(\d+)(?:-dev\.(\d+))?$/.exec(v);
-              if (m === null) throw new Error('认不出的版本号 ' + v);
-              return [Number(m[1]), Number(m[2]), Number(m[3]), m[4] === undefined ? Infinity : Number(m[4])];
-            };
-            const [now, ...files] = process.argv.slice(1);
-            for (const file of files) {
-              const before = JSON.parse(fs.readFileSync(file, 'utf8')).version;
-              const [a, b] = [parse(now), parse(before)];
-              const i = a.findIndex((x, k) => x !== b[k]);
-              if (i === -1) throw new Error('版本号 ' + now + ' 已在 ' + path.basename(file) + ' 里发布过：这次运行要是在重建预发布之后失败，用 Re-run failed jobs 只重跑 publish-hk；否则是运行序号被重数了，dev 包不会更新过去');
-              if (a[i] < b[i]) throw new Error('版本号 ' + now + ' 不比 ' + path.basename(file) + ' 里已发布的 ' + before + ' 新，dev 包不会更新过去');
-            }
-          " "$VERSION" "${previous[@]}"
-
       # publish-hk 推到香港的必须是下面发到 GitHub 的同一份字节，经产物交过去。要排在重建预发布之前：
       # 这一步失败时预发布还没动，publish 照常能重跑；重建是 publish 的最后一步，之后不再有会失败的步骤。
       # archive: false 时产物以文件名命名，publish-hk 按 latest.json 取。
@@ -403,13 +436,24 @@ jobs:
   # 放过它，重新生成的清单换了对象目录和 pub_date，put-manifest 也不收同版本、不同字节的清单。香港却还停在旧版，
   # 新客户端先查香港、拿到 2xx 就不再问 GitHub，一直看不到这次更新。所以这里失败时用 Re-run failed jobs
   # 只重跑这个作业：推的还是 publish 交来的同一份清单，香港机落后时照常替换，已经写进去时视为无变化。
+  # 不能点 Re-run all jobs：build 会重编并覆盖引导程序产物，这里读回 GitHub 时对不上，publish 又会在版本检查处停下，
+  # 这次运行就补不了香港了。
   publish-hk:
     needs: [build, publish]
     # 与 publish 同一个镜像
     runs-on: ubuntu-24.04
     environment: updates-dev
-    # 从 GitHub 读回 22 MB 的引导程序，加上推送和最多 5 次回读
-    timeout-minutes: 15
+    # 两次读回 GitHub（check-download.sh 每次最多 600 秒）、推送（ssh 最多 3 次）和最多 5 次回读，各步的上限加起来
+    # 超过 15 分钟；按最坏情况放到 30 分钟，免得每一步都还在自己的上限内、作业却先被时限掐掉。
+    timeout-minutes: 30
+    # 不和 publish 共用一个组：同组只留一个排队者，后排进来的会顶掉先排着的，共用时这里排进去会顶掉别的运行
+    # 排着的 publish，那一版就没人发了。不取消正在跑的：推送、回读做到一半被掐，香港会停在旧版。
+    # 和别的运行的 publish 并行是安全的：那边先重建了预发布，这里读回 GitHub 不符就失败、拒推，不会把旧清单推到香港；
+    # 读回之后那边才重建的，那个运行的 publish-hk 在这个组里排在后面，接着推上新版，两个运行不会同时推。
+    # 排着的这个作业被更新运行的同名作业顶掉时，香港由那个运行推上更新的版本，不用补。
+    concurrency:
+      group: dev-publish-hk
+      cancel-in-progress: false
     env:
       BOOTSTRAP: ${{ github.workspace }}/dist/${{ needs.build.outputs.bootstrap-name }}
       MANIFEST: ${{ github.workspace }}/dist/latest.json

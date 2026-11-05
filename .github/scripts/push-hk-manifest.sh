@@ -30,16 +30,43 @@ private_key="$(printf '%s' "$private_key")"
 unset private_key
 chmod 600 "$key_file"
 
-remote_sha="$(ssh -T \
-  -o IdentitiesOnly=yes \
-  -o IdentityAgent=none \
-  -o BatchMode=yes \
-  -o ConnectTimeout=30 \
-  -o StrictHostKeyChecking=yes \
-  -o GlobalKnownHostsFile=/dev/null \
-  -o UserKnownHostsFile="$known_hosts" \
-  -i "$key_file" \
-  petalfall-pub@8.210.200.215 < "$manifest")"
+# 跨境连香港机时一次丢包或重置会让 ssh 自身以 255 退出，只对它重试（认证失败、主机公钥对不上也是 255，
+# 多试两次只多花十几秒）；put-manifest 拒收（1）和参数错误（2）是确定的结论，重推也一样，立即失败。
+# 重推是安全的：上一次其实已经写入、只是回显丢在路上时，put-manifest 收到字节相同的清单视为无变化，照样回显 sha256。
+# ConnectTimeout 管不到连上之后的会话；ServerAlive 让中途断掉的会话约一分钟内以 255 报错，而不是挂到作业时限。
+# 每次都从清单文件重新接 stdin，私钥留到最后一次尝试之后再删。
+max_attempts=3
+retry_delay=5
+attempt=1
+while :; do
+  status=0
+  remote_sha="$(ssh -T \
+    -o IdentitiesOnly=yes \
+    -o IdentityAgent=none \
+    -o BatchMode=yes \
+    -o ConnectTimeout=30 \
+    -o ServerAliveInterval=15 \
+    -o ServerAliveCountMax=4 \
+    -o StrictHostKeyChecking=yes \
+    -o GlobalKnownHostsFile=/dev/null \
+    -o UserKnownHostsFile="$known_hosts" \
+    -i "$key_file" \
+    petalfall-pub@8.210.200.215 < "$manifest")" || status=$?
+  if [ "$status" -eq 0 ]; then
+    break
+  fi
+  if [ "$status" -ne 255 ]; then
+    echo "::error::香港机上的 put-manifest 以 $status 退出，没有收下这份清单，见上面它的报错" >&2
+    exit "$status"
+  fi
+  if [ "$attempt" -ge "$max_attempts" ]; then
+    echo "::error::ssh 连了 $attempt 次都以 255 退出（连接或认证出错），香港清单没有推上去" >&2
+    exit "$status"
+  fi
+  echo "::warning::ssh 第 $attempt 次以 255 退出（连接或认证出错），${retry_delay} 秒后重试" >&2
+  sleep "$retry_delay"
+  attempt=$(( attempt + 1 ))
+done
 rm -f "$key_file"
 
 local_sha="$(sha256sum < "$manifest" | cut -d' ' -f1)"
