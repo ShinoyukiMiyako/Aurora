@@ -4,9 +4,11 @@
 //!   常见目录 + PATH）。
 //! - [`Petalfall::inspect_manual_java`]：设置页「添加 Java」识别用户选的 java 可执行文件；记下它由
 //!   [`Petalfall::add_extra_java_path`] 写进配置，之后的全量探测把它算作手动添加的来源。
-//! - [`Petalfall::resolve_java`]：启动与安装器取 Java。只校验最终选中的那一个，不在启动路径上跑全量探测：
-//!   设置里固定了默认 Java 就用它；否则先在上次探测的结果里按主版本挑、再看托管目录里有没有这个主版本，
-//!   都没有才全量探测，仍没有且开着自动下载就下一个。
+//! - [`Petalfall::resolve_java`]：安装 Forge / NeoForge 时给官方安装器取 Java。只校验最终选中的那一个，
+//!   不先跑全量探测：设置里固定了默认 Java 就用它；否则先在上次探测的结果里按主版本挑、再看托管目录里有没有
+//!   这个主版本，都没有才全量探测，仍没有且开着自动下载就下一个。启动游戏不走这里：启动的「检查 Java」
+//!   阶段（`launch.rs` 的 `plan_java`）调带指纹缓存的 [`Petalfall::detect_java`]，Java 文件没变时每个候选
+//!   只剩一次 stat，新装的 Java 也能在下一次启动时被挑中。
 //! - [`Petalfall::install_java`]：把 Mojang 运行时下到托管目录 `<数据目录>/runtime/<主版本>`，
 //!   文件交给下载池并发下载（换源、进度、取消、已就绪文件按 sha1 跳过）。
 //!
