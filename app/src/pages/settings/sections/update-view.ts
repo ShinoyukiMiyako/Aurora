@@ -1,7 +1,7 @@
 // 关于页更新卡在各阶段的呈现：主句、次句、唯一的按钮。纯函数，便于逐状态核对。
 
 import { formatBytes, formatDate, formatRelative, percent } from "../../../domain/format";
-import { downloadFailureCopy, UPDATE_COPY } from "../../../copy/updater";
+import { downloadFailureCopy, sourceSwitchedCopy, UPDATE_COPY } from "../../../copy/updater";
 import { downloadFraction, type UpdaterState } from "../../../state/updater/machine";
 
 export type CardAction = "check" | "open_panel" | "install";
@@ -87,7 +87,10 @@ export function updateCardView(state: UpdaterState, ctx: CardContext): CardView 
     case "downloading": {
       const fraction = downloadFraction(phase.bytes, phase.totalBytes);
       const title = fraction === null ? UPDATE_COPY.downloading(phase.update.version) : UPDATE_COPY.downloadingPct(phase.update.version, percent(fraction));
-      const sub = phase.totalBytes === null ? formatBytes(phase.bytes) : UPDATE_COPY.progress(formatBytes(phase.bytes), formatBytes(phase.totalBytes));
+      const progress = phase.totalBytes === null ? formatBytes(phase.bytes) : UPDATE_COPY.progress(formatBytes(phase.bytes), formatBytes(phase.totalBytes));
+      const switched = sourceSwitchedCopy(phase.source);
+      // 换源后字节从 0 重新报起，不说一句的话看着像进度倒退了
+      const sub = switched === null ? progress : `${progress} · ${switched}`;
       return view(title, sub, button(UPDATE_COPY.viewProgress, "secondary", "open_panel"));
     }
     case "ready":

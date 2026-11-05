@@ -43,6 +43,21 @@ export type CoreEvent =
       transferred: number;
       /** 瞬时速度，字节每秒。 */
       speed: number;
+    }
+  | {
+      /**
+       * 启动器自更新的下载开始用某一个下载源：每个源开始前一条，第一个源也有。换源后从头下，
+       * 之后的下载进度从 0 报起，总量要等新源的第一条进度。
+       */
+      kind: "source";
+      task_id: string | null;
+      step?: number;
+      /** 这个源在本次候选表里的下标，从 0 计。 */
+      index: number;
+      /** 本次候选表里源的总数。 */
+      count: number;
+      /** 源的短名（cn、hk、global、github；清单没给候选表时为 default），只供日志，界面不显示。 */
+      name: string;
     };
 
 export interface TaskErrorDto {

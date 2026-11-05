@@ -4,6 +4,7 @@
 import { INSTANCE_IN_USE_COPY } from "../copy/flows";
 import { instanceBusyFromError, isInstanceBusy } from "../domain/instance-busy";
 import { IpcError, isIpcError, UNKNOWN_ERROR_CODE } from "../ipc/errors";
+import type { UpdateSourceFailureDto, UpdateSourceFailureKind } from "../ipc/system";
 
 function numericDetail(detail: unknown, key: string): number | null {
   if (typeof detail !== "object" || detail === null) return null;
@@ -28,6 +29,30 @@ export function networkFailureOf(error: unknown): NetworkFailure | null {
   if (typeof detail !== "object" || detail === null) return null;
   const kind = (detail as Record<string, unknown>).network;
   return kind === "connect" || kind === "timeout" ? kind : null;
+}
+
+// 写成以种类为键的表：后端加了种类、IPC 类型跟着加时，这里漏写会在编译期报出来
+const SOURCE_FAILURE_KINDS: Readonly<Record<UpdateSourceFailureKind, true>> = { connect: true, timeout: true, http: true, signature: true, too_large: true, other: true };
+
+function isSourceFailure(value: unknown): value is UpdateSourceFailureDto {
+  if (typeof value !== "object" || value === null) return false;
+  const { source, failure, message, causes } = value as Record<string, unknown>;
+  const causesOk = causes === undefined || (Array.isArray(causes) && causes.every((cause) => typeof cause === "string"));
+  return typeof source === "string" && typeof failure === "string" && Object.hasOwn(SOURCE_FAILURE_KINDS, failure) && typeof message === "string" && causesOk;
+}
+
+/**
+ * 自更新下载逐个源的失败：后端在 detail.sources 里按尝试顺序给出。不是后端错误或没有这一项时为空数组。
+ * 前后端同包发布，这一项有却不成形是违约，直接抛出，不当作没有。
+ */
+export function sourceFailuresOf(error: unknown): UpdateSourceFailureDto[] {
+  if (!isIpcError(error)) return [];
+  const { detail } = error;
+  if (typeof detail !== "object" || detail === null) return [];
+  const { sources } = detail as Record<string, unknown>;
+  if (sources === undefined) return [];
+  if (!Array.isArray(sources) || !sources.every(isSourceFailure)) throw new Error(`后端错误 ${error.code} 的 detail.sources 不成形：${JSON.stringify(sources)}`);
+  return sources;
 }
 
 export function describeError(error: unknown): string {

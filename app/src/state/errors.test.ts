@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { IpcError } from "../ipc/errors";
-import { describeError, errorDetail, errorDetailOf, itemFailureReason, networkFailureOf } from "./errors";
+import { describeError, errorDetail, errorDetailOf, itemFailureReason, networkFailureOf, sourceFailuresOf } from "./errors";
 
 describe("批量动作里一项失败的原因", () => {
   it("正文只有「文件 IO 失败: 路径」时写原因链，多层按后端的写法用全角冒号接起来", () => {
@@ -29,6 +29,32 @@ describe("网络层失败的种类", () => {
     expect(networkFailureOf(new IpcError("update_check_failed", "x", { endpoints: [] }))).toBeNull();
     expect(networkFailureOf(new IpcError("update_check_failed", "x"))).toBeNull();
     expect(networkFailureOf(new Error("编程错误"))).toBeNull();
+  });
+});
+
+describe("自更新下载逐个源的失败", () => {
+  it("按后端给的顺序原样取出 detail.sources 的每一条", () => {
+    const sources = [
+      { source: "cn", failure: "connect", message: "error sending request", causes: ["client error (Connect)", "由于目标计算机积极拒绝，无法连接。 (os error 10061)"] },
+      { source: "hk", failure: "too_large", message: "更新包超过清单声明的大小" },
+      { source: "global", failure: "signature", message: "signature verification failed" },
+      { source: "github", failure: "http", message: "404 Not Found" },
+    ];
+    expect(sourceFailuresOf(new IpcError("update_download_failed", "x", { network: "connect", sources }))).toEqual(sources);
+  });
+
+  it("后端没给这一项、不是后端错误：为空数组", () => {
+    expect(sourceFailuresOf(new IpcError("update_download_failed", "x", { network: "timeout" }))).toEqual([]);
+    expect(sourceFailuresOf(new IpcError("update_download_failed", "x"))).toEqual([]);
+    expect(sourceFailuresOf(new IpcError("update_download_failed", "x", "raw text"))).toEqual([]);
+    expect(sourceFailuresOf(new Error("编程错误"))).toEqual([]);
+  });
+
+  it("有这一项却不成形是后端违约：抛出，不当作没有", () => {
+    const bad: unknown[] = [{ list: true }, [{ source: "cn", failure: "dns", message: "x" }], [{ source: "cn", failure: "connect" }], [{ source: 1, failure: "other", message: "x" }], [null], [{ source: "cn", failure: "connect", message: "x", causes: "refused" }], [{ source: "cn", failure: "connect", message: "x", causes: ["refused", 10061] }]];
+    for (const sources of bad) {
+      expect(() => sourceFailuresOf(new IpcError("update_download_failed", "x", { sources }))).toThrow("detail.sources 不成形");
+    }
   });
 });
 

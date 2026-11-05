@@ -4,7 +4,7 @@
 import { useEffect, useMemo, type ReactNode } from "react";
 import { PetalMark } from "../art/PetalMark";
 import { Spinner } from "../art/Spinner";
-import { downloadFailureCopy, UPDATE_COPY } from "../copy/updater";
+import { downloadFailureCopy, sourceSwitchedCopy, UPDATE_COPY } from "../copy/updater";
 import { formatBytes, formatDate } from "../domain/format";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useOnline } from "../state/online";
@@ -42,11 +42,16 @@ function Notes({ notes }: { notes: string | null }) {
 function DownloadProgress({ phase }: { phase: Extract<UpdaterPhase, { kind: "downloading" }> }) {
   const fraction = downloadFraction(phase.bytes, phase.totalBytes);
   const label = phase.totalBytes === null ? formatBytes(phase.bytes) : UPDATE_COPY.progress(formatBytes(phase.bytes), formatBytes(phase.totalBytes));
+  // 换源后进度从 0 重来，说一句才不像是进度倒退了
+  const switched = sourceSwitchedCopy(phase.source);
   return (
-    <div className={s.progressRow}>
-      <ProgressBar value={fraction} size="md" label={UPDATE_COPY.downloading(phase.update.version)} className={s.progressBar} />
-      <span className={s.progressText}>{label}</span>
-    </div>
+    <>
+      <div className={s.progressRow}>
+        <ProgressBar value={fraction} size="md" label={UPDATE_COPY.downloading(phase.update.version)} className={s.progressBar} />
+        <span className={s.progressText}>{label}</span>
+      </div>
+      {switched !== null && <p className={s.muted}>{switched}</p>}
+    </>
   );
 }
 

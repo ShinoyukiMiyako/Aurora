@@ -360,6 +360,31 @@ const LATEST: Omit<UpdateDto, "current_version"> = {
   date: Date.UTC(2026, 9, 29, 8, 0, 0),
 };
 const UPDATE_SIZE = 12_582_912;
+/** 假清单里的候选下载源，顺序同后端的「国内在前」。 */
+const UPDATE_SOURCES = ["cn", "hk", "global", "github"] as const;
+
+let failingUpdateSources = 0;
+
+/** 模拟前 count 个下载源下到一部分就断开、换下一个源从头下（测试与界面调试用），至少留一个源能下完；reset 后恢复为第一个源就下完。 */
+export function setMockUpdateSourceFailures(count: number): void {
+  if (!Number.isInteger(count) || count < 0 || count >= UPDATE_SOURCES.length) throw new Error(`假后端只有 ${UPDATE_SOURCES.length} 个下载源，要留一个能下完：${count}`);
+  failingUpdateSources = count;
+}
+
+/** 与后端一样，每个源开始下载前推一条换源事件，第一个也推。 */
+function emitUpdateSource(taskId: string, index: number): void {
+  emitCore({ task_id: taskId, kind: "source", index, count: UPDATE_SOURCES.length, name: UPDATE_SOURCES[index] });
+}
+
+/** 一个下到五分之一就断开的源：只报一条进度，之后由调用方换源。 */
+async function simulateBrokenSource(taskId: string): Promise<void> {
+  const bytes = Math.round(UPDATE_SIZE / DOWNLOAD_STEPS);
+  await sleep(DOWNLOAD_STEP_MS);
+  if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
+  emitCore({ task_id: taskId, kind: "download", total: 1, finished: 0, bytes, total_bytes: UPDATE_SIZE, transferred: bytes, speed: Math.round(bytes / (DOWNLOAD_STEP_MS / 1000)) });
+  await sleep(DOWNLOAD_STEP_MS);
+  if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
+}
 
 interface UpdaterMockState {
   current: string;
@@ -406,6 +431,11 @@ async function downloadUpdate(args: MockArgs): Promise<UpdateDto> {
   try {
     const update = updater.available;
     if (update === null) throw new IpcError("update_not_available", "还没有检查到可用更新");
+    for (let index = 0; index < failingUpdateSources; index++) {
+      emitUpdateSource(taskId, index);
+      await simulateBrokenSource(taskId);
+    }
+    emitUpdateSource(taskId, failingUpdateSources);
     await simulateMockDownload(taskId, 1, UPDATE_SIZE);
     emitCore({ task_id: taskId, kind: "stage", message: "更新包下载完成，正在校验签名" });
     updater.downloaded = update.version;
@@ -452,6 +482,7 @@ export function reset(): void {
   networkReachable = true;
   pinned = SEED_PINNED.map((s) => ({ ...s }));
   updater = seedUpdater();
+  failingUpdateSources = 0;
 }
 
 // 固定的服务器在后端是配置的一部分；启动提示与更新状态每次启动重新得出，不存。

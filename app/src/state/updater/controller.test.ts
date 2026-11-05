@@ -16,8 +16,9 @@ function fakePort(overrides: Partial<UpdaterPort> = {}): UpdaterPort & { calls: 
       calls.push("check");
       return UPDATE;
     },
-    download: async (taskId, onProgress) => {
+    download: async (taskId, onProgress, onSource) => {
       calls.push(`download:${taskId}`);
+      onSource({ index: 0, count: 1, name: "default" });
       onProgress(300, 1200);
       onProgress(1200, 1200);
       return UPDATE;
@@ -110,7 +111,7 @@ describe("UpdaterController", () => {
     });
     await c.download();
     expect(port.calls).toEqual(["check", "download:task-1"]);
-    expect(progress).toEqual([0, 300, 1200]);
+    expect(progress).toEqual([0, 0, 300, 1200]);
     expect(c.getState().phase).toEqual({ kind: "ready", update: UPDATE });
   });
 
@@ -118,7 +119,7 @@ describe("UpdaterController", () => {
     const c = controllerWith(fakePort({ download: async () => Promise.reject(ipcError("update_signature_invalid", "签名校验失败")) }));
     await c.check();
     await c.download();
-    expect(c.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: "签名校验失败", signature: true, network: null });
+    expect(c.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: "签名校验失败", signature: true, network: null, sourcesTried: 1 });
   });
 
   it("下载的网络层失败：记下 detail.network 的种类，原文留在 reason", async () => {
@@ -127,11 +128,11 @@ describe("UpdaterController", () => {
     const connect = controllerWith(fakePort({ download: failWith("connect") }));
     await connect.check();
     await connect.download();
-    expect(connect.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect" });
+    expect(connect.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 1 });
     const timeout = controllerWith(fakePort({ download: failWith("timeout") }));
     await timeout.check();
     await timeout.download();
-    expect(timeout.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout" });
+    expect(timeout.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout", sourcesTried: 1 });
   });
 
   it("下载失败不是网络层的：network 为 null，原文照旧", async () => {
@@ -139,7 +140,65 @@ describe("UpdaterController", () => {
     const c = controllerWith(fakePort({ download: async () => Promise.reject(new IpcError("update_download_failed", raw)) }));
     await c.check();
     await c.download();
-    expect(c.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null });
+    expect(c.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null, sourcesTried: 1 });
+  });
+
+  it("换源：当前源写进状态，换源时字节归 0，之后的进度从新源接着写", async () => {
+    const seen: unknown[] = [];
+    const c = controllerWith(
+      fakePort({
+        download: async (_taskId, onProgress, onSource) => {
+          onSource({ index: 0, count: 4, name: "cn" });
+          onProgress(5_000_000, 22_846_361);
+          onSource({ index: 1, count: 4, name: "hk" });
+          onProgress(1_000_000, 22_846_361);
+          return UPDATE;
+        },
+      }),
+    );
+    await c.check();
+    c.subscribe(() => {
+      const p = c.getState().phase;
+      if (p.kind === "downloading") seen.push([p.source?.index, p.bytes, p.totalBytes]);
+    });
+    await c.download();
+    expect(seen).toEqual([
+      [undefined, 0, null],
+      [0, 0, null],
+      [0, 5_000_000, 22_846_361],
+      [1, 0, null],
+      [1, 1_000_000, 22_846_361],
+    ]);
+    expect(c.getState().phase).toEqual({ kind: "ready", update: UPDATE });
+  });
+
+  it("多个源都失败：试过的源数取 detail.sources 的条数，网络种类与逐行原文照旧", async () => {
+    const raw = "cn：error sending request\nhk：operation timed out\nglobal：error sending request";
+    const sources = [
+      { source: "cn", failure: "connect", message: "error sending request" },
+      { source: "hk", failure: "timeout", message: "operation timed out" },
+      { source: "global", failure: "connect", message: "error sending request" },
+    ];
+    const c = controllerWith(fakePort({ download: async () => Promise.reject(new IpcError("update_download_failed", raw, { network: "connect", sources })) }));
+    await c.check();
+    await c.download();
+    expect(c.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 3 });
+  });
+
+  it("后端只列了一个源（或列表为空）：按 1 个源算，文案与单源一致", async () => {
+    for (const sources of [[{ source: "default", failure: "http", message: "404" }], []]) {
+      const c = controllerWith(fakePort({ download: async () => Promise.reject(new IpcError("update_download_failed", "404", { sources })) }));
+      await c.check();
+      await c.download();
+      expect(c.getState().phase).toMatchObject({ kind: "download_failed", sourcesTried: 1 });
+    }
+  });
+
+  it("逐源明细不成形：先落进下载失败（不停在下载中），再把违约抛给调用方", async () => {
+    const c = controllerWith(fakePort({ download: async () => Promise.reject(new IpcError("update_download_failed", "x", { sources: [{ source: "cn", failure: "dns", message: "x" }] })) }));
+    await c.check();
+    await expect(c.download()).rejects.toThrow("detail.sources 不成形");
+    expect(c.getState().phase).toEqual({ kind: "download_failed", update: UPDATE, reason: "x", signature: false, network: null, sourcesTried: 1 });
   });
 
   it("用户取消下载：回到 available，不算失败、不写错误日志", async () => {

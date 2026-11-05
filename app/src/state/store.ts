@@ -1694,6 +1694,8 @@ export class LauncherStore {
   private onCoreEvent(event: CoreEvent): void {
     // 不带 task_id 的事件属于启动会话或非任务命令（离线用户名告警）；启动的进度走 launch-phase，日志走 game-log
     if (event.task_id === null) return;
+    // 换源只出现在启动器自更新的下载里，状态归更新状态机管（state/updater）；它不是任务，也不能当阶段事件去重扫基底
+    if (event.kind === "source") return;
     // 基底的占用随阶段事件重扫（见 rescanHoldingBases），步骤事件不再多扫一遍
     if (event.kind === "phase") {
       const attemptId = event.task_id;

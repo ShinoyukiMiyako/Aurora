@@ -8,6 +8,7 @@ import { APP_NAME, APP_NAME_EN, ISSUES_URL, REPO_URL } from "../../lib/app-info"
 import type { GpuAdapterDto, JavaInstallationDto } from "../../ipc/java";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { setMockGpuAdapters, setMockJavaInstallations } from "../../ipc/mock/handlers/java";
+import { setMockUpdateSourceFailures } from "../../ipc/mock/handlers/system";
 import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickFile } from "../../shell/platform";
@@ -1463,6 +1464,68 @@ describe("设置页：关于与启动器更新", () => {
     const panel = openDialogs()[0];
     expect(panel?.querySelector('[role="alert"]')?.textContent).toBe("下载失败");
     expect(panel?.querySelector("[data-selectable]")?.textContent).toBe(raw);
+  });
+
+  it("试过的下载源全都连不上：面板与卡片写所有下载源的说法，逐源原文按行另放且可选中", async () => {
+    const lines = ["cn：error sending request for url (https://dl.petalfall.org/dev/a.exe)", "hk：operation timed out", "global：error sending request", "github：error sending request"];
+    const raw = lines.join("\n");
+    const sources = [
+      { source: "cn", failure: "connect", message: "error sending request for url (https://dl.petalfall.org/dev/a.exe)" },
+      { source: "hk", failure: "timeout", message: "operation timed out" },
+      { source: "global", failure: "connect", message: "error sending request" },
+      { source: "github", failure: "connect", message: "error sending request" },
+    ];
+    ipc.overrides.set("download_update", () => {
+      throw new IpcError("update_download_failed", raw, { network: "connect", sources });
+    });
+    await mount("about");
+    await click(button("检查更新"));
+    await click(button("查看更新"));
+    await click(button("下载更新"));
+    await flush();
+
+    const panel = openDialogs()[0];
+    expect(panel?.querySelector('[role="alert"]')?.textContent).toBe("下载失败：所有下载源都连不上");
+    expect(panel?.querySelector("[data-selectable]")?.textContent?.split("\n")).toEqual(lines);
+    expect(text()).not.toContain("连不上更新服务器");
+
+    await click(button("稍后"));
+    expect(text()).toContain("下载失败：所有下载源都连不上");
+    const inCard = all("[data-selectable]").filter((el) => el.closest("[data-sk-modal-layer]") === null);
+    expect(inCard.map((el) => el.textContent)).toEqual([raw]);
+  });
+
+  it("下载途中换了源：面板与卡片说换用了第几个备用源，进度从头接着报，下完照常", async () => {
+    setMockUpdateSourceFailures(1);
+    await mount("about");
+    await click(button("检查更新"));
+    await click(button("查看更新"));
+    await click(button("下载更新"));
+    // 假后端：第一个源 120 ms 时报 2.4 MB，240 ms 时断开换第二个源，之后每 120 ms 报一次
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(130);
+    });
+    expect(text()).toContain("2.4 MB / 12.0 MB");
+    expect(text()).not.toContain("已换用备用下载源");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120);
+    });
+    const panel = openDialogs()[0];
+    expect(panel?.textContent).toContain("已换用备用下载源（2/4）");
+    expect(panel?.textContent).not.toContain("2.4 MB");
+    expect(text()).toContain("0 B · 已换用备用下载源（2/4）");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+    });
+    expect(text()).toContain("4.8 MB / 12.0 MB · 已换用备用下载源（2/4）");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    await flush();
+    expect(text()).toContain("新版本已经下好了。");
+    expect(text()).not.toContain("已换用备用下载源");
   });
 
   it("签名不符：说明块写固定原因，没有另放的原文", async () => {

@@ -1,16 +1,16 @@
 // 更新状态机的执行者：把检查、下载、安装几条后端命令接到状态机上，供更新卡与更新面板共用一份状态。
 // 与 React 无关（订阅接口照 useSyncExternalStore 的形状），测试可以直接实例化并注入假的后端。
 
-import { describeError, networkFailureOf } from "../errors";
+import { describeError, networkFailureOf, sourceFailuresOf } from "../errors";
 import type { UpdaterInfoDto } from "../queries/catalog";
-import { INITIAL_UPDATER_STATE, updaterReducer, type UpdateInfo, type UpdaterEvent, type UpdaterState } from "./machine";
+import { INITIAL_UPDATER_STATE, updaterReducer, type DownloadSource, type UpdateInfo, type UpdaterEvent, type UpdaterState } from "./machine";
 
-/** 更新相关的后端命令。语义与同名命令一致：download 的进度来自带同一 taskId 的下载事件。 */
+/** 更新相关的后端命令。语义与同名命令一致：download 的进度与换源来自带同一 taskId 的下载事件与换源事件。 */
 export interface UpdaterPort {
   /** check_update：没有新版本为 null。 */
   check(): Promise<UpdateInfo | null>;
-  /** download_update：下载最近一次检查到的版本并校验签名；被取消时以 cancelled 错误拒绝。 */
-  download(taskId: string, onProgress: (bytes: number, totalBytes: number | null) => void): Promise<UpdateInfo>;
+  /** download_update：下载最近一次检查到的版本并校验签名；被取消时以 cancelled 错误拒绝。每个下载源开始前调一次 onSource，第一个也调。 */
+  download(taskId: string, onProgress: (bytes: number, totalBytes: number | null) => void, onSource: (source: DownloadSource) => void): Promise<UpdateInfo>;
   /** cancel_task：取消进行中的下载。 */
   cancel(taskId: string): Promise<void>;
   /** install_update：Windows 上安装程序拉起后进程退出，这个调用不会返回。 */
@@ -92,7 +92,11 @@ export class UpdaterController {
     // 已在下载时再起一个会与进行中的那个抢同一个安装包，取消也只作用于状态里记着的那一个
     if (this.state === before || this.state.phase.kind !== "downloading") throw new Error(`当前阶段 ${before.phase.kind} 不能开始下载`);
     try {
-      const update = await this.port.download(taskId, (bytes, totalBytes) => this.dispatch({ type: "download_progress", taskId, bytes, totalBytes }));
+      const update = await this.port.download(
+        taskId,
+        (bytes, totalBytes) => this.dispatch({ type: "download_progress", taskId, bytes, totalBytes }),
+        (source) => this.dispatch({ type: "download_source", taskId, ...source }),
+      );
       this.dispatch({ type: "download_done", taskId, update });
     } catch (error) {
       const code = errorCode(error);
@@ -102,7 +106,18 @@ export class UpdaterController {
         return;
       }
       console.error("下载启动器更新失败", error);
-      this.dispatch({ type: "download_failed", taskId, reason: describeError(error), signature: code === SIGNATURE_INVALID_CODE, network: networkFailureOf(error) });
+      const failed = (tried: number) =>
+        this.dispatch({ type: "download_failed", taskId, reason: describeError(error), signature: code === SIGNATURE_INVALID_CODE, network: networkFailureOf(error), sourcesTried: tried });
+      let sourcesTried: number;
+      try {
+        // 只有一个源（或后端没列逐源失败）时文案与单源一致，所以至少按 1 个算
+        sourcesTried = Math.max(1, sourceFailuresOf(error).length);
+      } catch (contract) {
+        // 逐源明细不成形是后端违约：先落进失败状态，界面才不会停在下载中，再把违约抛给调用方（外层统一提示）
+        failed(1);
+        throw contract;
+      }
+      failed(sourcesTried);
     }
   }
 
