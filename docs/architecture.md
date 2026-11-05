@@ -41,7 +41,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | L2 | `petalfall-modplatform` | Modrinth v2（组织信息走 v3 的 `/organizations`，v2 没有组织路由）与 CurseForge v1 客户端、聚合搜索、本地 Mod 扫描与元数据缓存、CurseForge 的 CDN 下载凭据与文件指纹 | base, download |
 | L2 | `petalfall-modpack` | 读取 `.mrpack` 与 CurseForge `.zip`，统一成一份清单；把覆盖文件安全地解压到实例目录；把导出清单写成 `.mrpack` 并回读校验 | instance, version |
 | L3 | `petalfall-launch` | 启动命令拼装（参数、classpath、natives、authlib-injector、Quick Play）、游戏进程管理、会话日志、崩溃判定与退出码对照、启动前提醒的判断 | base, auth, version, instance |
-| L4 | `petalfall-core` | 门面 `Petalfall`：配置、实例、安装、下载源计划、整合包导入与导出、受限文件认领、Mod 与历史、发现、Java、账户、启动、崩溃诊断、存档备份、新实例默认设置与开局 Mod、游玩统计、新闻、服务器状态、外观、自更新检查 | 以上全部 |
+| L4 | `petalfall-core` | 门面 `Petalfall`：配置、实例、安装、下载源计划、整合包导入与导出、受限文件认领、Mod 与历史、发现、Java、账户、启动、崩溃诊断、存档备份、新实例默认设置与开局 Mod、游玩统计、新闻、服务器状态、外观、自更新包的选源 | 以上全部 |
 | 外层 | `petalfall-cli` | 调试命令行，用于端到端冒烟 | core, base |
 | 外层 | `petalfall-tauri` | 桌面外壳 | core, base |
 
@@ -154,6 +154,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | `commands/system.rs` 的 `StartupNotices` | 启动时遇到、但不妨碍继续运行的问题（见下文「启动提示」），setup 时装进 managed state |
 | `commands/error.rs` | 门面错误到 `{ code, message, detail? }` 的映射与错误码表 |
 | `commands/update_stall.rs` | 自更新下载的卡死判定：插件的逐块回调里记字节，`commands/updater.rs` 另起定时器来问，看满一个观察窗口后窗口内收到的字节低于下限即判卡住。卡死的连接不再触发回调，所以判定靠定时器，不靠回调 |
+| `commands/update_sources.rs` | 自更新包的多源下载规则：从清单平台条目的扩展字段 `x-sources`、`x-size` 解析候选源与大小上限（`package_plan`，含 https、主机白名单 `ALLOWED_SOURCE_HOSTS`、源名、去重与条数上限的校验），判定一个源失败后记成哪一类、换不换源（`judge`），汇总全部已试源的失败（`sources_failed`）。逐个源下载的循环在 `commands/updater.rs`，排先后在 `petalfall-core` 的 `launcher_update.rs`，见下文「自更新的清单与下载源」 |
 | `facade.rs` | 门面的读写锁与快照规矩 |
 | `tasks.rs` | 长任务登记与取消（`TaskRegistry`）、前端任务表的持久化（`TaskJournal`） |
 | `events.rs` | 门面事件转发成 Tauri 事件 |
@@ -167,6 +168,133 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | `exit.rs` | 正常退出（`RunEvent::Exit`）时的收尾：游戏还在跑时先让会话日志落盘（限时 2 秒），再关上外置令牌轮换的闸、等进行中的轮换落盘（限时 3 秒），补写游玩记录里待补的改动（限时 3 秒）与主窗口状态（限时 1 秒），最后按需拉起更新安装程序。中间的令牌与游玩记录两步是 `persist_before_exit`，自更新拉起安装程序之前也走它 |
 | `gpu.rs` | 经 DXGI 列出本机硬件显卡，看出 Windows 按高性能与省电偏好各挑哪一块（`gpu_adapters` 命令用）；Windows 10 1803 之前没有按偏好枚举，退回系统顺序且不标首选；非 Windows 为空 |
 | `single_instance.rs`（仅 Windows） | 同一数据目录只跑一个启动器：再次启动时把已有窗口叫到前台（`window.rs` 的 `front_on_second_launch`：先还原最小化，再取得焦点），新进程随后退出。占位与唤醒是同一个具名事件 `Local\Petalfall-<小写且反斜杠换成斜杠的数据目录>`：由系统保证只有一个进程创建成功，进程退出（包括崩溃）后系统回收，下一次启动不会被残留挡住；后来者对它 `SetEvent`，先来者的监听线程醒来叫窗口，事件自动复位，先来者还没开始监听时的那次唤醒留到开始监听时生效。叫到了前台，先来者再置应答事件（占位名后加 `|answer`，手动复位，在等的后来者都看得到），后来者看到才退出。还原与取得焦点是投递给事件循环的消息，窗口已销毁时照样报成功，所以叫完再读一次可见性，读到了才应答。先来者正在退出时（窗口已关，退出收尾还要落几秒盘）不应答，后来者每 100 毫秒看一次应答、试一次占位，等它退出、占位被系统回收后自己接手，启动器日志记下等了多久；先来者退出之前不接手，两个进程不能同时写一份数据。后来者只唤醒一次，不会应答的旧版本每收到一次唤醒都会抢一次焦点；唤醒前先清掉上一回的应答。等着的后来者里有一个接手后也置上应答，其余的由它的窗口兑现，不在它关掉之后各开一个。先来者退出时要拉起安装程序的（「退出时安装」），先置上应答打发走在等的后来者，安装完由安装程序重新打开落樱；后来者占到占位之后还要复查一次应答，免得先来者刚放过行就退出时被它抢先接手、挡住安装程序替换文件。先来者 15 秒（`TAKEOVER_WAIT`，用例核对它盖住退出收尾各段时限之和）内既不应答也不退出时，后来者同样退出，不留日志。按数据目录而不是按应用标识占位，两份便携版的数据互不相干，可以各开各的。占位在日志初始化之前执行（每次启动都开一份新日志、清掉最旧的，连点几下图标会把正在用的那份挤掉）；占位失败只记 error 日志、不拦启动，拦下来就是双击后什么都没有，而这只是少了一层防重复打开 |
+
+### 自更新的清单与下载源
+
+每个通道一份权威清单，放在香港机的 `/srv/petalfall/updates/<通道>/latest.json`，经公网 HTTPS 对外。端点按版本号选（`UpdateChannel`），按固定顺序交给插件，前一个连不上或回非 2xx 时插件自动试下一个：
+
+| 通道 | 端点（按顺序） | 哪些版本 |
+| --- | --- | --- |
+| dev | `https://petalfall.org/updates/dev/latest.json`（`DEV_ENDPOINT`），再是 GitHub 滚动预发布 `dev-build` 上的 `latest.json`（`dev_endpoint()`） | 预发布标识第一段是 `dev`（后面只跟数字）的版本 |
+| beta | `https://petalfall.org/updates/beta/latest.json` | 位置留着，暂不用 |
+| stable | `https://petalfall.org/updates/stable/latest.json`（`PRIMARY_ENDPOINT`），只有这一个 | 其余版本 |
+
+- 清单端点不探测，也不看「文件下载源」设置：清单只有几百字节，测速省不下时间，反倒多一轮请求。dev 清单先问香港机，国内连 GitHub 常常不通。
+- dev 清单在香港机与 GitHub 两处发布，是同一个文件、字节相同：dev.35 及更早的客户端只认 GitHub 那一份。现在只有 dev 通道由 CI 发布（见下文的发布链路）。
+
+清单是插件 2.12.0 的标准格式，平台条目里多两个扩展字段；插件和旧客户端都忽略多余的键（插件的清单结构没有 `deny_unknown_fields`）。以 dev 通道为例（`<VERSION>` 是版本号，`<RUN_ATTEMPT>` 是 CI 这次运行的重跑序号 `GITHUB_RUN_ATTEMPT`）：
+
+```json
+{
+  "version": "0.1.0-dev.N",
+  "notes": "...",
+  "pub_date": "...",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "<tauri .sig 的 base64>",
+      "url": "https://github.com/ShinoyukiMiyako/Petalfall/releases/download/dev-build/Petalfall-Installer-<VERSION>-x64.exe",
+      "x-size": 22846361,
+      "x-sources": [
+        { "name": "cn", "url": "https://petalfall-dl-cn.oss-cn-hangzhou.aliyuncs.com/dev/<VERSION>-<RUN_ATTEMPT>/Petalfall-Installer-<VERSION>-x64.exe" },
+        { "name": "hk", "url": "https://petalfall-dl.oss-cn-hongkong.aliyuncs.com/dev/<VERSION>-<RUN_ATTEMPT>/Petalfall-Installer-<VERSION>-x64.exe" },
+        { "name": "global", "url": "https://dl.petalfall.org/dev/<VERSION>-<RUN_ATTEMPT>/Petalfall-Installer-<VERSION>-x64.exe" },
+        { "name": "github", "url": "https://github.com/ShinoyukiMiyako/Petalfall/releases/download/dev-build/Petalfall-Installer-<VERSION>-x64.exe" }
+      ]
+    }
+  }
+}
+```
+
+- `url` 是 dev.35 及更早的客户端唯一的源，等于 `github` 那一条：三个桶里 `dev/` 下的对象 30 天后被生命周期规则删除，dev 停更超过 30 天时，指向桶的 `url` 会让旧客户端一直 404；`github` 的附件跟着当前的滚动预发布走，预发布不重建就一直在，不会过期。新客户端按 `x-sources` 换源，`url` 取哪个源不影响它们。`x-sources` 是完整的候选表，含 `url` 本身。
+- `x-size` 是更新包的字节数，下载时作上限。
+- 清单本身不签名，扩展字段谁都能改，所以只信它给的下载地址与大小上限：签名与签名版本仍由插件按标准字段 `signature`、`version` 校验，绝不从扩展字段取。真去下载的每个地址都过同一道校验：`x-sources` 的每一条如此，退回时用的插件选中地址也如此，要求 https、主机在白名单里、不带端口与用户信息。这道校验只比主机、不比路径，白名单主机回的跳转照跟（`github` 的附件地址会跳到 githubusercontent 的主机），所以它只限住清单能把客户端直接引到哪些主机；包的完整性靠插件验签，字节对不上签名照样被拒。
+
+源名只有四个，分国内与海外两组。主机白名单编译进客户端（`commands/update_sources.rs` 的 `ALLOWED_SOURCE_HOSTS`），香港机上的推送脚本按同一张表校验，一律要求 https：
+
+| 源名 | 组 | 主机 | 存放 |
+| --- | --- | --- | --- |
+| `cn` | 国内 | `petalfall-dl-cn.oss-cn-hangzhou.aliyuncs.com` | 阿里云 OSS 杭州的桶 `petalfall-dl-cn` |
+| `hk` | 国内 | `petalfall-dl.oss-cn-hongkong.aliyuncs.com` | 阿里云 OSS 香港的桶 `petalfall-dl` |
+| `global` | 海外 | `dl.petalfall.org` | Cloudflare R2 的桶 `petalfall-dl` |
+| `github` | 海外 | `github.com` | 滚动预发布 `dev-build` 的附件，随预发布每次重建而换掉 |
+
+三个桶里的对象路径带版本（`dev/<VERSION>-<RUN_ATTEMPT>/`），对象不可变：桶禁止覆盖写，`dev/` 前缀下的对象 30 天后由桶的生命周期规则自动删除。
+
+读扩展字段（`commands/update_sources.rs` 的 `package_plan`）：
+
+- 平台条目在 `Update.raw_json` 的 `platforms` 里找 `url` 与 `signature` 都等于插件选中值的那一条，不按 `Update.target`：它只是操作系统名（`windows`），插件实际依次找 `windows-x86_64-nsis` 与 `windows-x86_64`，只有地址与签名能确定扩展字段与插件要校验的是同一个包。找不到时打 warn，只用插件选中的地址，不设大小上限。
+- `x-sources` 逐条校验、保持清单里的先后，不合法的那条跳过并打 warn：没有源名或源名不在四个之列、没有地址或不是合法 URL、不是 https、主机不在白名单、带端口或用户信息、与前面的源重名或地址相同（同一个源不重试，列两遍只会把同一次失败再等一遍）。只看前 6 条（`MAX_SOURCES`），多出的打 warn 不用。
+- `x-sources` 整段缺失（扩展字段上线前发的清单，只记 info）、不是数组或一条都不剩时，退回只有一个源：`{ name: "default", url: 插件选中的 url }`。
+- 退回插件选中的 `url` 时（上面两种情形都是）也过同一道校验（https、主机白名单、不带端口与用户信息）：它同样出自不签名的清单，插件自己只校验清单端点、不校验下载地址。不过就一个源都不试、立即停，报 `update_download_failed`，`detail.sources` 是一条 `source` 为 `default`、`failure` 为 `other` 的记录，`message` 写明是哪个地址、为什么被拒。
+- `x-size` 不是非负整数时打 warn，不设上限。
+
+选源顺序（`petalfall-core` 的 `launcher_update.rs`：`Petalfall::package_sources` 按需探测，排序是纯函数 `order_package_sources`）复用「文件下载源」设置（`DownloadSourcePolicy`），不另设开关：
+
+- 两张规范顺序：国内在前 `cn, hk, global, github`；海外在前 `global, github, hk, cn`，国内组倒过来接在后面，香港离海外网络比杭州近。候选表里缺的源略过，余下的照表里的先后。清单里 `x-sources` 的先后不影响选源顺序，客户端只按源名排成规范顺序。
+- `MirrorFirst` 用国内在前，`OfficialFirst` 用海外在前，都不探测。
+- `Auto` 对全部候选并发发 `Range: bytes=0-0` 探针（`probe_latency`，每个限时 `UPDATE_PROBE_TIMEOUT`，1.5 秒），2xx 记下时延，连不上、非 2xx 与超时算测不出。比国内组与海外组各自最快的那个：海外更快、或只有海外测得出时用海外在前；一样快、只有国内测得出或全都测不出时用国内在前（国内网络连不上海外源的情况远比反过来常见）。测不出的源在选定的顺序里稳定地沉到末尾。时延只用来判国内还是海外，组内不按快慢重排：一个字节的探测只看得出首包时延，看不出吞吐。只有一个候选时不探测。
+
+下载与换源（`commands/updater.rs` 的 `download_update` 与 `download_with_progress`）：
+
+- 插件的 `Update` 可以克隆，`download_url` 是公开字段：对每个候选克隆一份、只改 `download_url`（`with_download_url`），再调插件的 `download()`，验签与签名版本的核对仍由插件做。
+- 每个源开始前推一条 core-event `kind: "source"`（第一个源也有，见「事件」），各用一份新的 `DownloadMeter` 与 `StallWatch`：换源后从头下，进度与卡死检测的窗口都从头算，沿用上一个源的会把新源还没开始的那几秒算成没有进展。
+- 有 `x-size` 时，逐块回调里累计字节，一超过它就丢掉这个源的下载、连接随之关闭，记 `too_large`：插件把整个包读进内存、读到连接结束为止，一个不停吐数据的源能把内存吃满。
+- 同一个源不重试。换下一个源之前先问一次会话里记着的检查结果（`ensure_current`）：下载期间又检查了一次、换了版本或已无更新时立即停，报 `update_not_available`，不必再从下一个源白下一遍。
+
+一个源失败之后（`judge`）：
+
+| 失败 | 记作 | 接下来 |
+| --- | --- | --- |
+| 卡死（`StallWatch`，见 `commands/update_stall.rs`） | `timeout` | 换下一个源 |
+| 累计字节超过 `x-size` | `too_large` | 换下一个源 |
+| 插件的 `Reqwest` 错误，在网络层（连不上、超时） | `connect` 或 `timeout` | 换下一个源 |
+| 插件的 `Reqwest` 错误，不在网络层（如回了响应头之后正文传到一半断掉），`is_builder` 除外 | `http` | 换下一个源 |
+| `Network`（非 2xx） | `http` | 换下一个源 |
+| `Minisign` 里的 `InvalidSignature`（字节对不上签名），另打 warn 写上源名与地址 | `signature` | 换下一个源：签名对得上别的源下来的包，单单这个源的文件被换过或已损坏。盖住可信注释的全局签名不过也是这个错误，分不出来，多试几个源最后照样全是 `signature` |
+| 插件将来新增的变体，以及下载时本不会出现的既有变体 | 认得出网络层的记 `connect` 或 `timeout`，其余 `other` | 换下一个源：说不清是不是这个源的问题，换源总比直接放弃强 |
+| `Minisign` 的其余错误（密钥号不符、算法不认、编码坏等） | `signature` | 立即停：与源无关，出在清单的签名或客户端的公钥，换源只会对着同一个签名再失败一次；不打点名源的 warn |
+| `Base64`、`SignatureUtf8`、`SignedVersionMismatch`、`MissingSignedVersion` | `signature` | 立即停：问题出在清单，换哪个源都是同一个签名 |
+| `Reqwest` 里 `is_builder` 为真的、`Http`、`InvalidHeaderValue`、`InvalidHeaderName` | `other` | 立即停：本机这边建不起请求，换源也一样 |
+| 用户取消 | 不记 | 立即停，报 `cancelled` |
+
+源都试完、或判定立即停时，按全部已试的源汇总成一个错误（`sources_failed`）：
+
+- 已试的源全是 `signature`，或最后一个源是判定立即停的 `signature`（签名本身出了与源无关的问题，前面的源败在哪都不改变「包被拒」的结论），报 `update_signature_invalid`；否则报 `update_download_failed`。
+- `detail.sources` 总是带上，按尝试顺序列出每个已试源的 `{ source, failure, message, causes }`，`failure` 取 `connect`、`timeout`、`http`、`signature`、`too_large`、`other`，`causes` 是插件错误的原因链，为空时不写这个键；前端经 `state/errors.ts` 的 `sourceFailuresOf` 读取。
+- 已试的源全败在网络层（`connect` 或 `timeout`）时给 `detail.network`：全是 `timeout` 报 `timeout`，否则报 `connect`；有一个源败在别处就不给。
+- 只试了一个源时 `message` 就是那个源的原文，原因链另放一份在 `detail.causes`（为空不写），与多源下载上线前相同；试了多个时 `message` 逐行写成「cn：原文」，不写 `detail.causes`，原因链各自留在 `detail.sources[i].causes`，混在一起就分不清是哪个源的底层原因。
+
+发布链路在 `.github/workflows/dev-build.yml` 里，拆成 `publish` 与 `publish-hk` 两个作业，都跑在 GitHub 托管机（`ubuntu-24.04`）上，自托管的构建机不碰任何发布凭据。`publish` 先给引导程序签名、按公钥验签，之后依次：
+
+1. 上传：引导程序与 NSIS 包按同一个对象键 `dev/<VERSION>-<RUN_ATTEMPT>/<文件名>` 传进三个桶（`.github/scripts/upload-to-mirrors.sh`，aws-cli 2 的 `s3api put-object`，带 `Content-MD5`，`Cache-Control` 标一年、immutable）。键里带运行次数：桶禁止覆盖写，整体重跑时换一个目录，不会撞上上次传了一半的对象。`put-object` 报错时（例如服务端已经写成、响应却在跨境路上丢了，aws-cli 自动重试同一个键，撞上桶的禁止覆盖写），按客户端会用的公网地址匿名读回，大小与 sha256 和本地一致就算已传上，否则失败：CI 的凭据只能写、查不了对象，OSS 的 S3 兼容层与 R2 对「已存在」各报什么码也核实不了，比字节不依赖错误码。排在签名之后，传上去的就是最终发出去的字节。
+2. 读回三个桶：不带凭据、按客户端会用的公网地址下载，比对大小与 sha256（`.github/scripts/check-download.sh`）。公共读没开、自定义域名配错时上传照样成功，只有这一步看得出来。
+3. 生成清单并从文件读回校验（`.github/scripts/dev-distribution.mjs` 的 `build` 与 `validate`）：键集合一字不差（拼错的键插件只会忽略，不会在任何地方报错）；四个源齐全、不重复，每个源名只认自己那台主机（比白名单更严）；https、规范形式的地址、带版本的路径；`url` 等于 `github`（旧客户端只认它，桶里的对象 30 天后过期，见上文）；`x-size` 等于引导程序的实际字节数。桶、端点、公网主机、对象键与清单里的地址都出自这个脚本的同一张表，传进哪个桶、从哪里读回、清单写哪个地址不会各算各的。源名与主机的表有三份：客户端的 `ALLOWED_SOURCE_HOSTS`、这个脚本、香港机上的 `put-manifest`，改一处要三处一起改。
+4. 从写好的清单里取出 `version` 与 `signature` 按公钥再验一次：客户端从哪个源下载，验的都是这一对。
+5. 版本号不倒退：GitHub 与香港机上已发布的清单都要比，新客户端先读香港那份；香港机上还没有清单（404）时跳过。与已发布的版本相同也在这里停下，报错里提示用 Re-run failed jobs 只重跑 `publish-hk`（见下文的重跑）。
+6. 把写好的清单作为产物 `latest.json` 上传，交给 `publish-hk`。排在重建预发布之前：这一步失败时预发布还没动。
+7. 重建滚动预发布 `dev-build`，附件是引导程序、NSIS 包和同一份 `latest.json`。这是 `publish` 的最后一步，之后不再有会失败的步骤。
+
+`publish-hk` 排在 `publish` 之后，取 `build` 传出的引导程序与 `publish` 交来的 `latest.json`，依次：
+
+1. 读回 GitHub 源：`github` 源只在预发布重建后才存在，这里按清单里的 `github` 地址下载引导程序，再按旧客户端用的地址下载预发布上的 `latest.json`，都与本地字节相同才往下走。更新的运行要是已经重建了预发布，这里对不上而失败，不会把旧清单推到香港。
+2. 推送香港清单（`.github/scripts/push-hk-manifest.sh`）：经 ssh 把清单从 stdin 送给香港机上用户 `petalfall-pub` 的强制命令 `/usr/local/lib/petalfall/put-manifest`，不传远程命令；写哪个通道由香港机 `authorized_keys` 里这把公钥那一行绑定，CI 的钥匙只能替换 dev 清单。脚本校验通过后原子替换 `/srv/petalfall/updates/<通道>/latest.json`，在 stdout 只打新文件的 sha256（字节相同的清单视为无变化，照样成功并回显），CI 核对它与本地清单一致。主机公钥钉在 `.github/petalfall-hk.known_hosts`，不信任首次连接，也不读机器上全局的 known_hosts。
+3. 经公网 HTTPS 回读 `https://petalfall.org/updates/dev/latest.json`：sha256 与本地清单一致、`Content-Type` 是 JSON 才算生效，最多试 5 次，都不符就让作业失败，这时新客户端读到的还是旧清单。
+
+重跑：
+
+- 重建预发布之前失败（`publish` 里重建之前的任何一步），整体重跑：运行次数变，对象换一个目录，不会撞上上次传了一半的对象；GitHub 与香港上都还是旧版，版本检查照常放行。
+- 重建预发布之后失败（`publish-hk` 里的任何一步），用 Re-run failed jobs 只重跑 `publish-hk`：推的是 `publish` 交来的同一份字节，香港机落后时照常替换，已经写进去时视为无变化。这时不能整体重跑：GitHub 上已是这个版本，版本检查会挡下；放过它，重新生成的清单换了对象目录和 `pub_date`，`put-manifest` 也不收同版本、不同字节的清单。香港停在旧版期间，新客户端先查香港、拿到 2xx 就不再问 GitHub，一直看不到这次更新。
+
+发布用的凭据放在 GitHub 环境 `updates-dev` 里，`publish` 与 `publish-hk` 两个作业都声明了这个环境才拿得到，每样只进用到它的那一步：存储桶凭据只进 `publish` 的上传，`HK_MANIFEST_SSH_KEY` 只进 `publish-hk` 的推送。环境的部署分支限制必须只放行 dev，挡住别的分支拿机密靠的是它。更新签名私钥照旧是仓库密钥 `DEV_UPDATER_PRIVATE_KEY`。
+
+| 名称 | 类型 | 用途与权限 |
+| --- | --- | --- |
+| `OSS_CI_ACCESS_KEY_ID`、`OSS_CI_ACCESS_KEY_SECRET` | 机密 | 阿里云 RAM 子用户，只有 `oss:PutObject`，资源限 `petalfall-dl-cn/dev/*` 与 `petalfall-dl/dev/*` |
+| `R2_CI_ACCESS_KEY_ID`、`R2_CI_SECRET_ACCESS_KEY` | 机密 | R2 的 S3 凭据，只授 `petalfall-dl` 一个桶 |
+| `HK_MANIFEST_SSH_KEY` | 机密 | 推送香港清单的 ed25519 私钥；脚本写到 `$RUNNER_TEMP`、权限 600，用完即删 |
+| `R2_ACCOUNT_ID` | 变量 | 拼 R2 的 S3 端点 |
+
+发版前可以在 dev 分支上手动跑 `.github/workflows/dist-trial.yml` 空跑分发链路：用同一套脚本往三个桶各传一个 1 MiB 的随机文件（放在 `dev/trial-<运行号>-<运行次数>/` 下，即 `GITHUB_RUN_ID` 与 `GITHUB_RUN_ATTEMPT`：重跑时运行号不变，桶又禁止覆盖写；随 `dev/` 前缀 30 天后删掉）并读回，再把香港机上现有的 dev 清单原样重推一次（字节相同，`put-manifest` 视为无变化），验凭据、跨境上传和香港机的 22 端口，不改客户端会读到的任何内容。
 
 ## IPC 约定
 
@@ -210,7 +338,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 
 前端的 `ipc/errors.ts` 把所有 rejection 统一成 `IpcError`。Tauri 自身产生的纯字符串错误归为 `unknown`。
 
-`download_update` 在两种情况下报 `update_not_available`：还没检查到更新；下载期间又检查了一次、换了版本或已无更新（`message` 写明新旧版本）。后者这次下载的包已丢弃，不会配着新版本的信息在退出时或立即安装时装上旧包，按最新的检查结果重新下载即可。
+`download_update` 在两种情况下报 `update_not_available`：还没检查到更新；下载期间又检查了一次、换了版本或已无更新（`message` 写明新旧版本）。后者这次下载的包已丢弃，不会配着新版本的信息在退出时或立即安装时装上旧包，按最新的检查结果重新下载即可。一个下载源失败、要换下一个源之前也先查一次，是后者就不再换源，直接报它。
 
 ### 长任务
 
@@ -389,7 +517,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 
 | 事件 | 负载 |
 | --- | --- |
-| `petalfall://core-event` | `{ task_id, step?, kind: "stage" \| "warning" \| "download", ... }`：阶段、告警、下载进度快照；`step` 只出现在作为组合任务一项调用的命令上。`download` 快照的 `bytes` 是有效字节，含跳过的完整文件，用来画进度；`transferred` 是网络上实际读到的字节，含重传，跳过的文件与复用的分片不算，本地任务（打包、备份）恒为 0，下载类任务完成后报的是这个量（一个字节都没传写「文件已就绪」），不能拿它画进度。两者都每批从 0 计起 |
+| `petalfall://core-event` | `{ task_id, step?, kind: "stage" \| "warning" \| "download" \| "source", ... }`：阶段、告警、下载进度快照、自更新换用的下载源；`step` 只出现在作为组合任务一项调用的命令上。`download` 快照的 `bytes` 是有效字节，含跳过的完整文件，用来画进度；`transferred` 是网络上实际读到的字节，含重传，跳过的文件与复用的分片不算，本地任务（打包、备份）恒为 0，下载类任务完成后报的是这个量（一个字节都没传写「文件已就绪」），不能拿它画进度。两者都每批从 0 计起。`source` 只出现在 `download_update` 上，每个下载源开始前一条，第一个源也有：`{ index, count, name }`，`index` 是这个源在本次候选表里的下标（从 0 计），`count` 是候选总数，`name` 是源名（`cn`、`hk`、`global`、`github`，清单没给候选表时为 `default`），只供日志，界面不显示；换源后从头下，之后的 `download` 快照从 0 报起，见「自更新的清单与下载源」 |
 | `petalfall://launch-phase` | 启动阶段与阶段内的下载进度 |
 | `petalfall://game-log` | 启动器日志与游戏进程的 stdout / stderr，成批推送 |
 | `petalfall://game-exit` | 游戏退出（收尾记账已写完）：退出码、是否崩溃、是否由启动器结束 |
@@ -475,7 +603,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 - 窗口拖放：外壳经窗口端口的 `onDrop` 订阅 `petalfall://window-drop`。页面或弹窗登记了接收方（`registerFileDrop`，例如本地整合包导入的投放区）时，最后登记的那个独占文件拖放，服务器链接不处理；没有接收方时，拖进整合包显示放置提示、松开导航到发现页并带上 `importFile`，拖进服务器链接显示放置提示、松开经 `openAuthlibServer` 打开外置登录弹窗，弹窗填好地址并自动执行一次「下一步」。首次启动向导期间与有浮层打开时外壳不处理也不提示。页面还可以登记 .jar 接收方（`registerJarDrop`，只有实例的 Mod 页这么做）：它不独占，只拿走拖进来的 .jar，整合包、别的文件和服务器链接仍按上面的规则走，也和外壳一样受首次启动向导与浮层的限制；它排在 `registerFileDrop` 的独占接收方之后，有独占接收方时 .jar 也归那一个。.jar 与整合包同时拖到收 .jar 的页面时 .jar 优先，整合包不处理。收 .jar 的页面此刻改不了 Mod（与页面上 Mod 文件操作的禁用原因同一条，原版实例也算）时不显示放置提示，松开后只说明这条原因。没有页面收 .jar 时，松开 .jar 说明要到实例的 Mod 页。
 - 窗口可见性：WebView2 窗口最小化时 `document.visibilityState` 仍是 `visible`，判断窗口此刻看不看得见要同时看 `WindowPort.isMinimized`。最小化与还原都会让窗口尺寸变化，外壳在尺寸变化时读一次，`shown = visible && !minimized`；通知暂停计时、运行呼吸窗口与花瓣暂停都按 `shown`，最小化期间到点的通知不消失，还原后按剩余时长继续走完。浏览器里的端口（`browserWindowPort`）用 `visibilityState` 代答；读不出窗口状态经外层统一错误处理报告。
 - 联网状态：`state/online.ts` 的 `NetworkMonitor` 全应用一份。浏览器报告断网，或某个请求以 `detail.network` 标明的连接类错误失败、随后 `probe_network` 也探测不通时判为离线；离线期间定时探测，通了即恢复。`probe_network` 按当前下载源的候选地址并行发 HEAD，任一地址有响应即算连通，量的是后端实际下载用的网络路径。
-- 启动器更新：状态机与控制器在 `state/updater/`，更新面板是外壳级浮层（`shell/UpdatePanel.tsx`），任何页面与通知经 `openUpdatePanel` 打开。首次启动向导走完、配置开着自动检查、当前构建支持更新时，启动后延迟一次、之后定时自动检查；查到的新版本每个版本只提示一次。去哪取清单由版本号决定：预发布标识第一段是 `dev`（后面只跟数字）的包只问 GitHub 滚动预发布 `dev-build` 上的 `latest.json`，由 dev 分支的 CI 随安装包一起上传；其余版本按「文件下载源」策略在主源与镜像间排序。`check_update` 的插件报 `ReleaseNotFound` 时（所有端点都回了非 2xx，插件不带状态码，503、403 这类服务器故障也是这个样子），后端再逐个端点 GET 一次清单读状态码：全部是 404 才算这个更新源上还没有发布，不算失败，不改写本次会话记着的版本、已下载的包和退出时安装，有记着的版本时返回它，否则返回 null，并打 warn 日志；有端点回了其余状态，报 `update_check_failed`，状态码在 `detail.status`；再次请求本身失败同样报 `update_check_failed`，网络层失败带 `detail.network`。有端点连不上、又没有任何端点给出清单时，插件报的是那个错误，仍报 `update_check_failed`。`check_failed` 阶段带 `network`（后端标在 `detail.network` 里的种类，其余失败为 null），更新卡按它写中文主句（`connect` 写「连不上更新服务器」，`timeout` 写「更新服务器没有响应」，其余仍是「检查更新失败」），后端原文放在可选中的次句。`updater_error` 的 `message` 只放原因，不带动作前缀：哪个动作失败由界面的主句或通知标题说。`download_failed` 阶段同样带 `network`（来源与 `check_failed` 相同，读 `detail.network`）：更新卡的次句与更新面板的说明块写「下载失败：连不上更新服务器」「下载失败：更新服务器没有响应」，其余写「下载失败」，后端原文另放一行可选中；说法集中在 `downloadFailureCopy`，卡片与面板共用。签名不符写固定原因，包已丢弃，原文对用户没有用，不另放。清单本身不签名，签名只盖住更新包：伪造的清单可以给旧版本的合法包配上更高的版本号诱导降级（CVE-2026-95625），所以签名要带版本号。CI 签名时用 `tauri signer sign --app-version` 把版本写进 minisign 的可信注释（受全局签名保护），打包时给 `plugins.updater` 注入 `requireSignedVersion: true`；插件下载完验签后核对签名里的版本与清单版本，对不上或签名没带版本都按签名不符报 `update_signature_invalid`。发行构建有公钥、却没把 `requireSignedVersion` 设为 true（缺这一项、值不是 true，或驼峰与短横线两种键名同时出现）时判为不支持自更新，原因是 `signed_version_not_required`，插件不注册，各命令报 `updater_unsupported`；打开了 `allowDowngrades`（插件见到它就只要求清单版本与当前不同，伪造清单可以直接指向旧版本的合法包）时同样判为不支持，原因是 `downgrades_allowed`；debug 构建与没有公钥照旧是 `debug_build`、`missing_pubkey`。下载更新包时给插件建的客户端套上连接与读取超时（经插件的 `configure_client`，复用 `petalfall_base::http::HttpConfig` 的默认值），不设总时限，慢网下的正常下载不会被掐断；另有卡死检测（`commands/update_stall.rs`）：从收到第一块正文起看满一个观察窗口后，窗口内收到的字节低于下限就中止下载，报 `update_download_failed`，`detail.network` 标成 `timeout`，界面照网络超时提示。Windows 上的更新包是首装引导程序（`app/src-tauri-setup`，NSIS 包作为载荷拼在它尾部），不是 NSIS 包：插件把下载到的任何 PE 都当 NSIS 包，以 `/P /UPDATE /R /ARGS <逐个转义的启动器参数>` 拉起后立即退出（插件 2.12.0 的拼法：`plugins.updater` 没配 `windows.installMode`，取默认的 passive，即 `/P`；装完重开（`restart_after_install`，默认开着）时才在 `/UPDATE` 之后接 `/R /ARGS` 和启动器参数，关掉时到 `/UPDATE` 为止）。插件拉起之前先跑 tauri 的 `cleanup_before_exit`，窗口都已藏起；安装程序没拉起来（`ShellExecuteW` 失败）时进程接着跑，「立即安装」先把主窗口重新显示出来再报错，退出时安装的那条路上进程本来就在退出，不重新显示。引导程序在 `/ARGS` 之前见到 `/UPDATE`（不分大小写）才进更新模式，否则照常走交互向导；`/ARGS` 之前的开关不看顺序，还在用插件 2.10.1 的旧启动器拼的 `/P /R /UPDATE /ARGS` 同样认得。更新模式下，现有安装判定为升级时不显示欢迎页与已安装页，直接按升级装回登记目录，桌面快捷方式保持原状；落樱还没退出时先等一会儿，等不到停在「请先关闭落樱」页，关掉后自动继续；装完带 `/R` 且不是提权运行时重开启动器，`/ARGS` 之后的参数原样带回，否则停在完成页；失败走失败页。已装的版本相同或更新、安装损坏或没有安装时退回交互向导。WebView2 不可用或建窗失败时，引导程序以插件默认会带的开关和照样转义的启动器参数（`/P[ /R] /UPDATE /ARGS <…>`，开关顺序与 2.12.0 不同，NSIS 模板逐个找开关、不看顺序）拉起内嵌的 NSIS 包，走它的被动模式。
+- 启动器更新：状态机与控制器在 `state/updater/`，更新面板是外壳级浮层（`shell/UpdatePanel.tsx`），任何页面与通知经 `openUpdatePanel` 打开。首次启动向导走完、配置开着自动检查、当前构建支持更新时，启动后延迟一次、之后定时自动检查；查到的新版本每个版本只提示一次。去哪取清单由版本号决定：预发布标识第一段是 `dev`（后面只跟数字）的包先问香港机上的 dev 清单，再问 GitHub 滚动预发布 `dev-build` 上的同一份 `latest.json`；其余版本只问 stable 清单。清单端点顺序固定、不探测，「文件下载源」策略只给更新包的几个下载源排先后；清单位置、扩展字段、选源、换源与发布链路见「Tauri 外壳」下的「自更新的清单与下载源」。`check_update` 的插件报 `ReleaseNotFound` 时（所有端点都回了非 2xx，插件不带状态码，503、403 这类服务器故障也是这个样子），后端再逐个端点 GET 一次清单读状态码：全部是 404 才算这个更新源上还没有发布，不算失败，不改写本次会话记着的版本、已下载的包和退出时安装，有记着的版本时返回它，否则返回 null，并打 warn 日志；有端点回了其余状态，报 `update_check_failed`，状态码在 `detail.status`；再次请求本身失败同样报 `update_check_failed`，网络层失败带 `detail.network`。有端点连不上、又没有任何端点给出清单时，插件报的是那个错误，仍报 `update_check_failed`。`check_failed` 阶段带 `network`（后端标在 `detail.network` 里的种类，其余失败为 null），更新卡按它写中文主句（`connect` 写「连不上更新服务器」，`timeout` 写「更新服务器没有响应」，其余仍是「检查更新失败」），后端原文放在可选中的次句。`updater_error` 的 `message` 只放原因，不带动作前缀：哪个动作失败由界面的主句或通知标题说。`download_failed` 阶段同样带 `network`（来源与 `check_failed` 相同，读 `detail.network`）：更新卡的次句与更新面板的说明块写「下载失败：连不上更新服务器」「下载失败：更新服务器没有响应」，其余写「下载失败」，后端原文另放一行可选中；说法集中在 `downloadFailureCopy`，卡片与面板共用。试过不止一个下载源、又不是签名不符时（个数取 `detail.sources` 的条数，经 `sourceFailuresOf` 读，这一项不成形是后端违约，先落进失败阶段再抛出）主句改写「下载失败：所有下载源都连不上」「下载失败：所有下载源都没有响应」，不全败在网络层时写「下载失败：N 个下载源都没能下完」，另放的原文逐行是各源的原文。下载中收到 `source` 事件时进度清零、总量等新源的第一条进度；换到第二个及以后的源时更新卡的次句与更新面板的进度下方多写一句「已换用备用下载源（第几个/共几个）」（`sourceSwitchedCopy`），不写源名与地址，不然进度从 0 重来看着像倒退。签名不符写固定原因，包已丢弃，原文对用户没有用，不另放。清单本身不签名，签名只盖住更新包：伪造的清单可以给旧版本的合法包配上更高的版本号诱导降级（CVE-2026-95625），所以签名要带版本号。CI 签名时用 `tauri signer sign --app-version` 把版本写进 minisign 的可信注释（受全局签名保护），打包时给 `plugins.updater` 注入 `requireSignedVersion: true`；插件下载完验签后核对签名里的版本与清单版本，对不上或签名没带版本都按签名不符报 `update_signature_invalid`。发行构建有公钥、却没把 `requireSignedVersion` 设为 true（缺这一项、值不是 true，或驼峰与短横线两种键名同时出现）时判为不支持自更新，原因是 `signed_version_not_required`，插件不注册，各命令报 `updater_unsupported`；打开了 `allowDowngrades`（插件见到它就只要求清单版本与当前不同，伪造清单可以直接指向旧版本的合法包）时同样判为不支持，原因是 `downgrades_allowed`；debug 构建与没有公钥照旧是 `debug_build`、`missing_pubkey`。下载更新包时给插件建的客户端套上连接与读取超时（经插件的 `configure_client`，复用 `petalfall_base::http::HttpConfig` 的默认值），不设总时限，慢网下的正常下载不会被掐断；另有卡死检测（`commands/update_stall.rs`，每个源各起一份）：从收到第一块正文起看满一个观察窗口后，窗口内收到的字节低于下限就中止这个源的下载，记作 `timeout` 换下一个源；源都试完仍没下成时按「自更新的清单与下载源」的汇总规则报错，试过的源全是卡死或超时时报 `update_download_failed`，`detail.network` 为 `timeout`，界面照网络超时提示。Windows 上的更新包是首装引导程序（`app/src-tauri-setup`，NSIS 包作为载荷拼在它尾部），不是 NSIS 包：插件把下载到的任何 PE 都当 NSIS 包，以 `/P /UPDATE /R /ARGS <逐个转义的启动器参数>` 拉起后立即退出（插件 2.12.0 的拼法：`plugins.updater` 没配 `windows.installMode`，取默认的 passive，即 `/P`；装完重开（`restart_after_install`，默认开着）时才在 `/UPDATE` 之后接 `/R /ARGS` 和启动器参数，关掉时到 `/UPDATE` 为止）。插件拉起之前先跑 tauri 的 `cleanup_before_exit`，窗口都已藏起；安装程序没拉起来（`ShellExecuteW` 失败）时进程接着跑，「立即安装」先把主窗口重新显示出来再报错，退出时安装的那条路上进程本来就在退出，不重新显示。引导程序在 `/ARGS` 之前见到 `/UPDATE`（不分大小写）才进更新模式，否则照常走交互向导；`/ARGS` 之前的开关不看顺序，还在用插件 2.10.1 的旧启动器拼的 `/P /R /UPDATE /ARGS` 同样认得。更新模式下，现有安装判定为升级时不显示欢迎页与已安装页，直接按升级装回登记目录，桌面快捷方式保持原状；落樱还没退出时先等一会儿，等不到停在「请先关闭落樱」页，关掉后自动继续；装完带 `/R` 且不是提权运行时重开启动器，`/ARGS` 之后的参数原样带回，否则停在完成页；失败走失败页。已装的版本相同或更新、安装损坏或没有安装时退回交互向导。WebView2 不可用或建窗失败时，引导程序以插件默认会带的开关和照样转义的启动器参数（`/P[ /R] /UPDATE /ARGS <…>`，开关顺序与 2.12.0 不同，NSIS 模板逐个找开关、不看顺序）拉起内嵌的 NSIS 包，走它的被动模式。
 - 实例 id 就是目录名，改名、删除后同一个 id 可能落到另一个实例上：状态容器在 id 换到新实例时丢掉旧 id 下没人订阅的按需缓存（Mod、内容、设置、历史、崩溃、日志、可更新项、安装计划、内存建议），游玩统计失效重取。侧栏固定的读改写（切换固定、整组写入、新实例落地自动固定）排成一条链串行执行，并发切换不互相覆盖。同一实例（键不分大小写）的设置读改写也排成一条链（连着改两项、Java 落地固定、新实例落地写封面），后写的不会把先写的那一项冲回去；前一次失败照常交给它自己的调用方，不挡后面排着的。通知动作里的实例引用同样跟着 id 走：改名时就地迁到新 id，路由是数据，直接改写，闭包经 `instanceAction` 用新 id 重造，不保留旧名到新名的映射；实例删除时只摘掉通知的动作、留下正文，之后有实例用上这个名字，点它不会落到新实例上。
 - 重叠的读取：实例重扫、账户读取、全局设置与侧栏固定的读取都可能被几处同时发起，先发出的那次可能后回来，只采纳比已采纳的那次更晚发出的结果（实例重扫晚到的旧结果仍把它的收尾动作套在新列表上）。写入同样要防读取：`writePins` 采纳后端返回的整份固定列表，并把写入发出之前已在路上的读取一并作废（已采纳序号推到写入发出时的 `pinsIssued`），写入之后才发出的读取照常按序号采纳。`selectInstance` 的写入不返回整份配置，晚到的旧读取里可能有改设置之后读到的别的字段，不能整份丢掉，所以记下 `selectionWrite`（写入的实例 id，与写入发出时设置读取已发出到第几次）：发出序号不晚于它的读取照常采纳，只把当前实例按写入改正。账户列表与当前账户分两条命令读，中间夹着另一路的增删时可能对不上，对不上就重读，连读 3 次仍对不上才报错。
 - 游戏退出与启动失败后的重读：游戏退出时除日志、内容外还失效 `mods:<id>`。玩家常常在资源管理器里往 mods 目录放了文件就直接启动，诊断页要拿日志点名的 Mod 对列表，旧列表里没有它，开关与「停用」就出不来。启动报 `version_not_installed`（版本 JSON 在启动器之外被删掉）时重扫实例列表，入口随之换成「修复并启动」，不然列表还当它完好，玩家只能对着通知一遍遍点启动。

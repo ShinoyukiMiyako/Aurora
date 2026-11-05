@@ -55,9 +55,9 @@ PR 上只会自动跑 CLA 签署检查，不跑代码检查，下面这些要在
 
 - 前端，在 `app/` 下：先 `pnpm install --frozen-lockfile`，再 `pnpm check`，后者依次执行 `pnpm typecheck`、`pnpm test` 和 `pnpm lint:tokens`。
 - Rust，在仓库根目录：`cargo test --workspace` 和 `cargo clippy --workspace --all-targets`。
-- 改了 `.github/scripts/` 下的脚本或 `.github/workflows/cla.yml`：在仓库根目录跑 `node --test .github/scripts/*.test.mjs`，其中的测试会读 `cla.yml`，核对权限、运行机和 checkout。
+- 改了 `.github/scripts/` 下的脚本或 `.github/workflows/cla.yml`：在仓库根目录跑 `node --test .github/scripts/*.test.mjs`，其中的测试会读 `cla.yml`，核对权限、运行机和 checkout。改了生成更新清单的 `.github/scripts/dev-distribution.mjs`，还要跑 `cargo test -p petalfall-tauri --lib commands::updater`。
 
-两侧的测试会读对方的源码：`app/src/ipc/bridge.test.ts` 读 Rust 的 `generate_handler!` 和能力文件，启动器外壳的 Rust 测试读 `app/index.html` 和 `app/src/lib/app-info.ts`，`app/src-tauri/src/commands/updater.rs` 的测试读 `.github/workflows/dev-build.yml`。拿不准改动会不会被另一侧读到，就两侧都跑。
+两侧的测试会读对方的源码：`app/src/ipc/bridge.test.ts` 读 Rust 的 `generate_handler!` 和能力文件，启动器外壳的 Rust 测试读 `app/index.html` 和 `app/src/lib/app-info.ts`，`app/src-tauri/src/commands/updater.rs` 的测试读 `.github/workflows/dev-build.yml`，其中也核对 CI 回读的香港清单地址，还读 `.github/scripts/` 下的非测试脚本，核对生成清单时写了客户端读的 `x-sources` 和 `x-size` 两个键。拿不准改动会不会被另一侧读到，就两侧都跑。
 
 跑过的命令和结果写进 PR 模板的「怎么验证的」一节。没有跑或者没跑通的，照实告诉贡献者，不要说成已经通过。
 
