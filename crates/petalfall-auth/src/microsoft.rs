@@ -18,7 +18,8 @@
 
 use std::time::{Duration, Instant};
 
-use petalfall_base::retry::{RetryPolicy, retry_async};
+use petalfall_base::error_with_causes;
+use petalfall_base::retry::{RetryPolicy, RetryableError, retry_async};
 use reqwest::StatusCode;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -254,7 +255,7 @@ impl MicrosoftAuth {
             ("grant_type", "refresh_token"),
             ("scope", SCOPE),
         ];
-        retry_async(&self.retry, || async {
+        self.chain_step("刷新令牌", || async {
             let (status, text) = self.send_form(&url, &params, "刷新令牌").await?;
             // invalid_grant 走的是 400，不会落进这里，仍归「需重登」。
             if let Some(err) = service_unavailable(status, "刷新令牌") {
@@ -281,12 +282,22 @@ impl MicrosoftAuth {
     }
 
     async fn complete_login_inner(&self, msa: &MsaToken) -> Result<MicrosoftSession> {
-        let xbl = retry_async(&self.retry, || self.xbl_authenticate(&msa.access_token)).await?;
-        let xsts = retry_async(&self.retry, || self.xsts_authorize(&xbl.token)).await?;
-        let minecraft =
-            retry_async(&self.retry, || self.login_with_xbox(&xsts.uhs, &xsts.token)).await?;
-        let (profile, skin) =
-            retry_async(&self.retry, || self.fetch_profile(&minecraft.access_token)).await?;
+        let xbl = self
+            .chain_step("XBL 认证", || self.xbl_authenticate(&msa.access_token))
+            .await?;
+        let xsts = self
+            .chain_step("XSTS 授权", || self.xsts_authorize(&xbl.token))
+            .await?;
+        let minecraft = self
+            .chain_step("Minecraft 登录", || {
+                self.login_with_xbox(&xsts.uhs, &xsts.token)
+            })
+            .await?;
+        let (profile, skin) = self
+            .chain_step("获取游戏档案", || {
+                self.fetch_profile(&minecraft.access_token)
+            })
+            .await?;
         Ok(MicrosoftSession {
             profile,
             minecraft_expires_at: now_unix().saturating_add(minecraft.expires_in),
@@ -295,6 +306,54 @@ impl MicrosoftAuth {
             skin,
             xuid: xsts.xid,
         })
+    }
+
+    /// 按重试策略跑令牌链的一步：要退避重试的失败记 warn，走完记这一步的用时与尝试次数。
+    ///
+    /// 令牌链是串行的几次 HTTPS 往返，网络慢时启动开局的几秒都耗在这里，只有逐步的记录才分得清
+    /// 是哪一步慢、是慢还是在重试。`retry_async` 自己的重试日志是 debug，下载等处也共用它，不能在那里
+    /// 统一提级。日志里只有步骤名、次数、用时与错误说明，不含令牌。
+    async fn chain_step<T, Fut>(&self, step: &'static str, mut op: impl FnMut() -> Fut) -> Result<T>
+    where
+        Fut: Future<Output = Result<T>>,
+    {
+        let started = Instant::now();
+        let max = self.retry.max_attempts.max(1);
+        let mut attempts = 0u32;
+        let result = retry_async(&self.retry, || {
+            attempts += 1;
+            let attempt = attempts;
+            let pending = op();
+            async move {
+                let outcome = pending.await;
+                if let Err(err) = &outcome
+                    && attempt < max
+                    && err.is_retryable()
+                {
+                    tracing::warn!(
+                        step,
+                        attempt,
+                        max,
+                        error = %error_with_causes(err),
+                        "令牌链这一步失败，退避后重试"
+                    );
+                }
+                outcome
+            }
+        })
+        .await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match &result {
+            Ok(_) => tracing::info!(step, attempts, elapsed_ms, "令牌链这一步完成"),
+            Err(err) => tracing::warn!(
+                step,
+                attempts,
+                elapsed_ms,
+                error = %error_with_causes(err),
+                "令牌链这一步失败"
+            ),
+        }
+        result
     }
 
     async fn xbl_authenticate(&self, msa_access_token: &str) -> Result<XblToken> {
