@@ -98,8 +98,8 @@ describe("AGENTS.md 的引用", () => {
   it("引用的章节在对应文档里都有同名标题", () => {
     const refs = sectionRefs(text);
     expect(refs).toContainEqual({ doc: "docs/architecture.md", heading: "错误形状" });
-    // AI 披露写在这一节（CLA 第七条第四款），模板改了标题而说明没跟上，助手就找不到披露的位置
-    expect(refs).toContainEqual({ doc: ".github/PULL_REQUEST_TEMPLATE.md", heading: "AI 生成内容" });
+    // 「PR 模板」以汉字结尾、和「的」之间没有空格，这条确认这种写法也被取到并核对
+    expect(refs).toContainEqual({ doc: ".github/PULL_REQUEST_TEMPLATE.md", heading: "怎么验证的" });
     expect(refs.filter((r) => !hasHeading(readRepo(r.doc), r.heading))).toEqual([]);
   });
 
