@@ -137,8 +137,8 @@ describe("更新卡各阶段", () => {
       "检查更新",
       true,
     ]);
-    const subs = (["debug_build", "missing_pubkey", "signed_version_not_required", "downgrades_allowed"] as const).map((reason) => updateCardView(state({ kind: "unsupported", reason }), CTX).sub);
-    expect(new Set(subs).size).toBe(4);
+    const subs = (["debug_build", "missing_pubkey", "signed_version_not_required", "downgrades_allowed", "unknown_channel"] as const).map((reason) => updateCardView(state({ kind: "unsupported", reason }), CTX).sub);
+    expect(new Set(subs).size).toBe(5);
   });
 
   it("配置允许装旧版本时同样不检查，说清防不住换成旧版本", () => {
@@ -146,6 +146,16 @@ describe("更新卡各阶段", () => {
     expect([downgrades.title, downgrades.sub, downgrades.button.disabled]).toEqual([
       "当前环境不支持自动更新",
       "这个版本的更新配置允许装不比当前新的版本，防不住被换成旧版本，所以不检查更新",
+      true,
+    ]);
+  });
+
+  it("版本号认不出发布通道时同样不检查，说清是认不出通道，不说成签名或配置的问题", () => {
+    const unknown = updateCardView(state({ kind: "unsupported", reason: "unknown_channel" }), CTX);
+    expect([unknown.title, unknown.sub, unknown.button.label, unknown.button.disabled]).toEqual([
+      "当前环境不支持自动更新",
+      "这个版本的版本号认不出是哪个发布通道，不知道该从哪里取更新，所以不检查更新",
+      "检查更新",
       true,
     ]);
   });
