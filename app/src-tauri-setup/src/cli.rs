@@ -1,12 +1,14 @@
 //! 引导程序的命令行：分清是启动器的更新插件拉起的还是用户自己打开的，拆出装完要带回启动器的参数。
 //!
-//! 插件（tauri-plugin-updater 2.10.1 src/updater.rs 的 `install_inner`）把下载到的 PE 一律当 NSIS 包拉起，
-//! 参数是「模式开关 /UPDATE /ARGS 逐个转义的启动器参数」，模式开关见同版本 src/config.rs 的 `nsis_args`：
-//! passive 是 `/P /R`，quiet 是 `/S /R`，basicUi 不带。转义按 Windows 标准规则来，std 拆 argv 就能还原，
-//! 所以 `/ARGS` 之后的记号原样就是启动器的参数。
+//! 插件（tauri-plugin-updater 2.12.0 src/updater.rs 的 `updater_parameters`）把下载到的 PE 一律当 NSIS 包拉起，
+//! 参数是「模式开关 /UPDATE」，`restart_after_install` 为真（默认）时再接「重启开关 /ARGS 逐个转义的启动器参数」，
+//! 为假时到 /UPDATE 为止。两组开关见同版本 src/config.rs：`nsis_args` 里 passive 是 `/P`，quiet 是 `/S`，basicUi
+//! 不带；`nsis_restart_after_install_args` 里 passive、quiet 是 `/R`，basicUi 不带。还在用 2.10.1 的旧启动器拉起
+//! 新引导程序时是「模式开关（passive、quiet 自带 /R）/UPDATE /ARGS 启动器参数」，所以 `/ARGS` 之前只认开关、不看顺序。
+//! 转义按 Windows 标准规则来，std 拆 argv 就能还原，所以 `/ARGS` 之后的记号原样就是启动器的参数。
 //!
-//! 这有个前提：启动器不配 `installer_args`。插件把它们接在启动器参数后面，格式上分不出来，配了就会被当成
-//! 启动器参数带回去，走原生回退时还会被转义成带引号的普通参数，NSIS 不再当开关认。
+//! 这有个前提：启动器不配 `installer_args`。插件把它们接在整串最后，带 `/ARGS` 时紧跟启动器参数，格式上分不出来，
+//! 配了就会被当成启动器参数带回去，走原生回退时还会被转义成带引号的普通参数，NSIS 不再当开关认。
 
 use std::ffi::{OsStr, OsString};
 
@@ -49,9 +51,10 @@ impl UpdateRequest {
         }
     }
 
-    /// 原生回退用：按插件的样子重拼「/P[ /R] /UPDATE /ARGS <转义参数>」，整串给 raw_arg
+    /// 原生回退用：拼「/P[ /R] /UPDATE /ARGS <转义参数>」，整串给 raw_arg。开关和插件默认的 passive 带的一样，
+    /// 顺序沿用 2.10.1：2.12.0 把 /R 挪到了 /UPDATE 之后，NSIS 模板用 GetOptions 在整条命令行里逐个找开关，不看顺序。
     pub fn passive_arguments(&self) -> OsString {
-        // 回退只为保住今天的行为：启动器没配 installMode，插件按默认的 passive 拉起，NSIS 包收到的就是这一串。
+        // 回退只为保住今天的行为：启动器没配 installMode，插件按默认的 passive 拉起，NSIS 包收到的就是这些开关和参数。
         // 来的是 /S 也拼 /P：解析时不保留模式，passive 至少留着进度条（插件 config.rs 的说明），用户看得到更新在进行。
         let mut arguments = OsString::from(PASSIVE);
         if self.relaunch {
@@ -126,27 +129,35 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Parsed {
     }
 }
 
-// 照搬 tauri-plugin-updater 2.10.1 src/updater.rs 的 escape_nsis_current_exe_arg，原文又改编自 Rust std 的
-// sys/args/windows.rs。只把参数从 &&OsStr 改成 &OsStr，函数体逐字保留，插件升级时好逐行比对。
-fn escape_nsis_current_exe_arg(arg: &OsStr) -> String {
-    let arg = arg.to_string_lossy();
-    let mut cmd: Vec<char> = Vec::new();
+// 照搬 tauri-plugin-updater 2.12.0 src/updater.rs 的 escape_nsis_current_exe_arg，原文又改编自 Rust std 的
+// sys/args/windows.rs。只去掉了 `#[cfg(windows)]`（本 crate 只在 Windows 上编），函数体逐字保留，插件升级时好逐行比对。
+// 2.10.1 是先 to_string_lossy 再按 char 走：要处理的字符全是 ASCII，合法 Unicode 下两版输出相同；未配对的代理项
+// 旧版换成 U+FFFD，这一版按 UTF-16 码元原样保留，和插件一致，回退带回的参数才不走样。
+fn escape_nsis_current_exe_arg(arg: impl AsRef<OsStr>) -> OsString {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let arg = arg.as_ref();
+    let mut cmd: Vec<u16> = Vec::new();
 
     // compared to std we additionally escape `/` so that nsis won't interpret them as a beginning of an nsis argument.
-    let quote = arg.chars().any(|c| c == ' ' || c == '\t' || c == '/') || arg.is_empty();
+    let quote = arg
+        .as_encoded_bytes()
+        .iter()
+        .any(|c| *c == b' ' || *c == b'\t' || *c == b'/')
+        || arg.is_empty();
     let escape = true;
     if quote {
-        cmd.push('"');
+        cmd.push('"' as u16);
     }
     let mut backslashes: usize = 0;
-    for x in arg.chars() {
+    for x in arg.encode_wide() {
         if escape {
-            if x == '\\' {
+            if x == '\\' as u16 {
                 backslashes += 1;
             } else {
-                if x == '"' {
+                if x == '"' as u16 {
                     // Add n+1 backslashes to total 2n+1 before internal '"'.
-                    cmd.extend((0..=backslashes).map(|_| '\\'));
+                    cmd.extend((0..=backslashes).map(|_| '\\' as u16));
                 }
                 backslashes = 0;
             }
@@ -155,10 +166,10 @@ fn escape_nsis_current_exe_arg(arg: &OsStr) -> String {
     }
     if quote {
         // Add n backslashes to total 2n before ending '"'.
-        cmd.extend((0..backslashes).map(|_| '\\'));
-        cmd.push('"');
+        cmd.extend((0..backslashes).map(|_| '\\' as u16));
+        cmd.push('"' as u16);
     }
-    cmd.into_iter().collect()
+    OsString::from_wide(&cmd)
 }
 
 #[cfg(test)]
@@ -175,29 +186,53 @@ mod tests {
 
     use super::*;
 
-    // 同版本插件 src/config.rs 的 nsis_args。
-    const PASSIVE_MODE: &[&str] = &["/P", "/R"];
-    const QUIET_MODE: &[&str] = &["/S", "/R"];
-    const BASIC_UI_MODE: &[&str] = &[];
+    /// 同版本插件 src/config.rs 的两组开关：`nsis_args` 和装完要重开时再加的 `nsis_restart_after_install_args`。
+    struct Mode {
+        switches: &'static [&'static str],
+        restart: &'static [&'static str],
+    }
+
+    const PASSIVE_MODE: Mode = Mode {
+        switches: &["/P"],
+        restart: &["/R"],
+    };
+    const QUIET_MODE: Mode = Mode {
+        switches: &["/S"],
+        restart: &["/R"],
+    };
+    const BASIC_UI_MODE: Mode = Mode {
+        switches: &[],
+        restart: &[],
+    };
 
     fn os(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
     }
 
-    /// 照插件 install_inner 的拼法：模式开关、/UPDATE、/ARGS、逐个转义的启动器参数，单个空格连接。
-    fn plugin_parameters(mode: &[&str], current_args: &[OsString]) -> OsString {
-        let escaped: Vec<String> = current_args
-            .iter()
-            .map(|arg| escape_nsis_current_exe_arg(arg))
-            .collect();
-        let parts: Vec<&OsStr> = mode
-            .iter()
-            .map(OsStr::new)
-            .chain(once(OsStr::new("/UPDATE")))
-            .chain(once(OsStr::new("/ARGS")))
-            .chain(escaped.iter().map(OsStr::new))
-            .collect();
+    /// 照插件 updater_parameters 的 NSIS 分支：模式开关、/UPDATE；`restart_after_install` 为真时再接重启开关、
+    /// /ARGS、逐个转义的启动器参数。单个空格连接。
+    fn plugin_parameters(
+        mode: &Mode,
+        restart_after_install: bool,
+        current_args: &[OsString],
+    ) -> OsString {
+        let mut parts: Vec<OsString> = mode.switches.iter().map(OsString::from).collect();
+        parts.push(OsString::from("/UPDATE"));
+        if restart_after_install {
+            parts.extend(mode.restart.iter().map(OsString::from));
+            parts.push(OsString::from("/ARGS"));
+            parts.extend(current_args.iter().map(escape_nsis_current_exe_arg));
+        }
         parts.join(OsStr::new(" "))
+    }
+
+    /// 回退串与插件串比对用：`/ARGS` 之前的开关排好序，连同 `/ARGS` 起的尾巴一起返回。
+    fn switches_and_tail(parameters: &OsStr) -> (Vec<&str>, &str) {
+        let parameters = parameters.to_str().unwrap();
+        let at = parameters.find(" /ARGS").unwrap();
+        let mut switches: Vec<&str> = parameters[..at].split(' ').collect();
+        switches.sort_unstable();
+        (switches, &parameters[at..])
     }
 
     /// 按 Windows 规则拆命令行。std 的 args_os 不走 CommandLineToArgvW，用自己的拆分器（sys/args/windows.rs 的
@@ -248,8 +283,9 @@ mod tests {
     }
 
     fn random_arg() -> OsString {
+        // 𠮷 在基本平面之外，UTF-16 下是一对代理项，转义按码元走时要整对原样过去。
         const ALPHABET: &[char] = &[
-            'a', 'Z', '0', '-', '=', ':', '.', ' ', '\t', '"', '\\', '/', '樱',
+            'a', 'Z', '0', '-', '=', ':', '.', ' ', '\t', '"', '\\', '/', '樱', '𠮷',
         ];
         let len = random_below(9);
         (0..len)
@@ -302,6 +338,9 @@ mod tests {
             (r"C:\a b\", r#""C:\a b\\""#),
             (r#"a\"b"#, r#"a\\\"b"#),
             ("tab\there", "\"tab\there\""),
+            ("𠮷", "𠮷"),
+            ("𠮷 樱", "\"𠮷 樱\""),
+            (r#"--name=𠮷\"樱"#, r#"--name=𠮷\\\"樱"#),
         ] {
             assert_eq!(escape_nsis_current_exe_arg(OsStr::new(orig)), escaped);
         }
@@ -310,7 +349,7 @@ mod tests {
     #[test]
     fn plugin_passive_launch_is_an_update_that_relaunches() {
         let current = os(&["--minimized", "some space"]);
-        let parsed = launched_with(&plugin_parameters(PASSIVE_MODE, &current));
+        let parsed = launched_with(&plugin_parameters(&PASSIVE_MODE, true, &current));
         assert_eq!(
             parsed,
             Parsed {
@@ -323,7 +362,7 @@ mod tests {
     #[test]
     fn plugin_quiet_launch_is_an_update_that_relaunches() {
         let current = os(&["--arg=\"wrapped space\""]);
-        let parsed = launched_with(&plugin_parameters(QUIET_MODE, &current));
+        let parsed = launched_with(&plugin_parameters(&QUIET_MODE, true, &current));
         assert_eq!(
             parsed,
             Parsed {
@@ -335,7 +374,7 @@ mod tests {
 
     #[test]
     fn plugin_basic_ui_launch_is_an_update_without_relaunch() {
-        let parsed = launched_with(&plugin_parameters(BASIC_UI_MODE, &[]));
+        let parsed = launched_with(&plugin_parameters(&BASIC_UI_MODE, true, &[]));
         assert_eq!(
             parsed,
             Parsed {
@@ -343,6 +382,55 @@ mod tests {
                 ignored: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn relaunch_after_update_is_recognised_like_the_old_order() {
+        let current = os(&["--minimized", "some space"]);
+        let plugin = plugin_parameters(&PASSIVE_MODE, true, &current);
+        assert_eq!(
+            plugin,
+            OsString::from(r#"/P /UPDATE /R /ARGS --minimized "some space""#)
+        );
+        let expected = Parsed {
+            launch: update(true, &["--minimized", "some space"]),
+            ignored: Vec::new(),
+        };
+        assert_eq!(launched_with(&plugin), expected);
+        // 还在用 2.10.1 的启动器拉起新引导程序时，/R 在 /UPDATE 前面。
+        assert_eq!(
+            launched_with(OsStr::new(
+                r#"/P /R /UPDATE /ARGS --minimized "some space""#
+            )),
+            expected
+        );
+    }
+
+    #[test]
+    fn plugin_without_restart_after_install_is_an_update_without_relaunch_or_args() {
+        let current = os(&["--minimized", "some space"]);
+        for (mode, expected) in [
+            (&PASSIVE_MODE, "/P /UPDATE"),
+            (&QUIET_MODE, "/S /UPDATE"),
+            (&BASIC_UI_MODE, "/UPDATE"),
+        ] {
+            let plugin = plugin_parameters(mode, false, &current);
+            assert_eq!(plugin, OsString::from(expected));
+            let parsed = launched_with(&plugin);
+            assert_eq!(
+                parsed,
+                Parsed {
+                    launch: update(false, &[]),
+                    ignored: Vec::new(),
+                },
+                "{expected}"
+            );
+            assert_eq!(
+                parsed.launch.update().unwrap().passive_arguments(),
+                OsString::from("/P /UPDATE /ARGS"),
+                "{expected}"
+            );
+        }
     }
 
     #[test]
@@ -444,28 +532,52 @@ mod tests {
             r#"a\"b"#,
             "tab\there",
             "樱 花",
+            r#"C:\𠮷 目录\"𠮷""#,
         ];
         let current = os(&tricky);
-        let parsed = launched_with(&plugin_parameters(PASSIVE_MODE, &current));
+        let parsed = launched_with(&plugin_parameters(&PASSIVE_MODE, true, &current));
         assert_eq!(parsed.launch, update(true, &tricky));
         assert_eq!(parsed.ignored, Vec::<OsString>::new());
     }
 
     #[test]
-    fn passive_arguments_match_the_plugin_byte_for_byte() {
-        let current = os(&["--flag", "some space", "", "/UPDATE", r"C:\Users\a b\"]);
-        let parsed = launched_with(&plugin_parameters(PASSIVE_MODE, &current));
-        let request = parsed.launch.update().unwrap();
+    fn unpaired_surrogates_survive_the_plugin_and_the_fallback() {
+        // Windows 的命令行和文件名都是不校验配对的 UTF-16，插件 2.12.0 按码元转义，原样交过来。
+        let current = vec![
+            OsString::from_wide(&[u16::from(b'a'), 0xD800, u16::from(b' '), 0xDC00]),
+            OsString::from_wide(&[0xDFFF]),
+        ];
+        let parsed = launched_with(&plugin_parameters(&PASSIVE_MODE, true, &current));
         assert_eq!(
-            request.passive_arguments(),
+            parsed.launch,
+            Launch::Update(UpdateRequest {
+                relaunch: true,
+                launcher_args: current.clone(),
+            })
+        );
+        let fallback = launched_with(&parsed.launch.update().unwrap().passive_arguments());
+        assert_eq!(fallback.launch, parsed.launch);
+    }
+
+    #[test]
+    fn passive_arguments_differ_from_the_plugin_only_in_switch_order() {
+        let current = os(&["--flag", "some space", "", "/UPDATE", r"C:\Users\a b\"]);
+        let plugin = plugin_parameters(&PASSIVE_MODE, true, &current);
+        assert_eq!(
+            plugin,
+            OsString::from(
+                r#"/P /UPDATE /R /ARGS --flag "some space" "" "/UPDATE" "C:\Users\a b\\""#
+            )
+        );
+        let parsed = launched_with(&plugin);
+        let fallback = parsed.launch.update().unwrap().passive_arguments();
+        assert_eq!(
+            fallback,
             OsString::from(
                 r#"/P /R /UPDATE /ARGS --flag "some space" "" "/UPDATE" "C:\Users\a b\\""#
             )
         );
-        assert_eq!(
-            request.passive_arguments(),
-            plugin_parameters(PASSIVE_MODE, &current)
-        );
+        assert_eq!(switches_and_tail(&fallback), switches_and_tail(&plugin));
     }
 
     #[test]
@@ -479,8 +591,8 @@ mod tests {
             OsString::from("/P /R /UPDATE /ARGS")
         );
         assert_eq!(
-            relaunching.passive_arguments(),
-            plugin_parameters(PASSIVE_MODE, &[])
+            switches_and_tail(&relaunching.passive_arguments()),
+            switches_and_tail(&plugin_parameters(&PASSIVE_MODE, true, &[]))
         );
         let staying = UpdateRequest {
             relaunch: false,
@@ -495,12 +607,12 @@ mod tests {
     #[test]
     fn quiet_and_basic_ui_fall_back_to_passive_arguments() {
         let current = os(&["--arg value"]);
-        let quiet = launched_with(&plugin_parameters(QUIET_MODE, &current));
+        let quiet = launched_with(&plugin_parameters(&QUIET_MODE, true, &current));
         assert_eq!(
             quiet.launch.update().unwrap().passive_arguments(),
             OsString::from(r#"/P /R /UPDATE /ARGS "--arg value""#)
         );
-        let basic = launched_with(&plugin_parameters(BASIC_UI_MODE, &current));
+        let basic = launched_with(&plugin_parameters(&BASIC_UI_MODE, true, &current));
         assert_eq!(
             basic.launch.update().unwrap().passive_arguments(),
             OsString::from(r#"/P /UPDATE /ARGS "--arg value""#)
@@ -526,14 +638,25 @@ mod tests {
     fn random_launcher_args_survive_the_plugin_and_the_fallback() {
         for _ in 0..300 {
             let current: Vec<OsString> = (0..random_below(6)).map(|_| random_arg()).collect();
-            let parsed = launched_with(&plugin_parameters(PASSIVE_MODE, &current));
+            // 不重开时插件不带 /R 也不带 /ARGS，启动器参数根本不进命令行。
+            let restart_after_install = random_below(2) == 1;
+            let parsed = launched_with(&plugin_parameters(
+                &PASSIVE_MODE,
+                restart_after_install,
+                &current,
+            ));
+            let carried = if restart_after_install {
+                current.clone()
+            } else {
+                Vec::new()
+            };
             assert_eq!(
                 parsed.launch,
                 Launch::Update(UpdateRequest {
-                    relaunch: true,
-                    launcher_args: current.clone(),
+                    relaunch: restart_after_install,
+                    launcher_args: carried,
                 }),
-                "{current:?}"
+                "{restart_after_install} {current:?}"
             );
             assert_eq!(parsed.ignored, Vec::<OsString>::new(), "{current:?}");
 

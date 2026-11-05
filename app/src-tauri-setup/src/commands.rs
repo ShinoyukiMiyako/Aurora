@@ -250,8 +250,8 @@ fn assemble_probe(
     })
 }
 
-/// 窗口起不来时交给 NSIS 的参数。更新模式照插件的样子拼，NSIS 包走它自己的更新流程，也就是引导程序接管
-/// 更新之前的行为；交互模式是无参的原生向导。
+/// 窗口起不来时交给 NSIS 的参数。更新模式的开关和插件默认 passive 带的一样，顺序沿用 2.10.1（见 cli.rs 的
+/// passive_arguments），NSIS 包走它自己的更新流程，也就是引导程序接管更新之前的行为；交互模式是无参的原生向导。
 fn fallback_arguments(launch: &Launch) -> OsString {
     match launch {
         Launch::Interactive => OsString::new(),
