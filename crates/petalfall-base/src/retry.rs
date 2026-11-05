@@ -89,7 +89,51 @@ where
 pub async fn retry_async_until<T, E, Op, Fut, Stop>(
     policy: &RetryPolicy,
     stop: Stop,
+    op: Op,
+) -> Option<std::result::Result<T, E>>
+where
+    E: RetryableError,
+    Op: FnMut() -> Fut,
+    Fut: Future<Output = std::result::Result<T, E>>,
+    Stop: Future<Output = ()>,
+{
+    retry_loop(policy, stop, op, |_, _| {}).await
+}
+
+/// 一次失败之后、退避之前交给 [`retry_async_notify`] 回调的说明。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryNotice {
+    /// 刚失败的是第几次尝试，从 1 计。
+    pub attempt: u32,
+    /// 最多尝试几次（含首次）。
+    pub max: u32,
+    /// 接下来要退避多久。
+    pub delay: Duration,
+}
+
+/// 与 [`retry_async`] 相同，另在每次「失败且还要重试」时、退避之前回调 `on_retry`：最后一次失败与不可重试的
+/// 失败不回调，它们由调用方从返回值里看到。调用方要按自己的级别记重试时用它，不必在外面复刻何时重试的规则。
+pub async fn retry_async_notify<T, E, Op, Fut>(
+    policy: &RetryPolicy,
+    op: Op,
+    on_retry: impl FnMut(&E, RetryNotice),
+) -> std::result::Result<T, E>
+where
+    E: RetryableError,
+    Op: FnMut() -> Fut,
+    Fut: Future<Output = std::result::Result<T, E>>,
+{
+    match retry_loop(policy, std::future::pending::<()>(), op, on_retry).await {
+        Some(result) => result,
+        None => unreachable!("pending() 永不完成，退避等待不可能被它打断"),
+    }
+}
+
+async fn retry_loop<T, E, Op, Fut, Stop>(
+    policy: &RetryPolicy,
+    stop: Stop,
     mut op: Op,
+    mut on_retry: impl FnMut(&E, RetryNotice),
 ) -> Option<std::result::Result<T, E>>
 where
     E: RetryableError,
@@ -109,6 +153,14 @@ where
                     return Some(Err(err));
                 }
                 let delay = policy.actual_delay(attempt);
+                on_retry(
+                    &err,
+                    RetryNotice {
+                        attempt: attempt + 1,
+                        max,
+                        delay,
+                    },
+                );
                 tracing::debug!(
                     attempt = attempt + 1,
                     max,
@@ -333,5 +385,59 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// 回调只报「失败了且还要重试」的那几次：耗尽次数的最后一次、不可重试的失败与成功都不报。
+    #[tokio::test]
+    async fn notify_reports_only_failures_that_will_be_retried() {
+        let mut notices = Vec::new();
+        let result: Result<u32, TestError> = retry_async_notify(
+            &fast_policy(3),
+            || async { Err(TestError { retryable: true }) },
+            |_, notice| notices.push(notice),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            notices,
+            vec![
+                RetryNotice {
+                    attempt: 1,
+                    max: 3,
+                    delay: Duration::from_millis(1)
+                },
+                RetryNotice {
+                    attempt: 2,
+                    max: 3,
+                    delay: Duration::from_millis(2)
+                },
+            ]
+        );
+
+        let mut notified = 0;
+        let result: Result<u32, TestError> = retry_async_notify(
+            &fast_policy(3),
+            || async { Err(TestError { retryable: false }) },
+            |_, _| notified += 1,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(notified, 0, "不可重试的失败不该报重试");
+
+        let calls = AtomicUsize::new(0);
+        let result: Result<u32, TestError> = retry_async_notify(
+            &fast_policy(3),
+            || async {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(TestError { retryable: true })
+                } else {
+                    Ok(9)
+                }
+            },
+            |_, _| notified += 1,
+        )
+        .await;
+        assert_eq!(result.unwrap(), 9);
+        assert_eq!(notified, 1, "成功前只失败过一次");
     }
 }

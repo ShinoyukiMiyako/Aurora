@@ -35,3 +35,5 @@ windows = { version = "0.62", features = [
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "time"] }
 wiremock = "0.6"
 tempfile = "3"
+# 断言令牌链逐步写下的日志：用例里装一个只收当前线程的 fmt 订阅器。
+tracing-subscriber = "0.3"
