@@ -3325,6 +3325,32 @@ mod tests {
         assert!(fetch.contains("manifest_checker(app, endpoint)"), "{fetch}");
     }
 
+    /// 取端点与支持判定都按应用自己的版本号认通道，接线要 AppHandle 与 tauri 上下文，单测造不出来，钉住源码：
+    /// 取端点必须经 [`version_endpoints`]，认不出通道时报错，不拿默认通道顶上；lib.rs 给 [`detect_support`] 传的
+    /// 必须是应用版本的预发布标识，写死的话认不出通道的版本也会注册插件、显示更新入口，到检查时才报不支持。
+    /// 两个函数的行为由上面的用例验证。
+    #[test]
+    fn channel_is_read_from_the_app_version() {
+        let (source, _) = include_str!("updater.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap();
+        let fetch = top_level_fn(source, "async fn fetch_conclusion(");
+        assert!(
+            fetch.contains(
+                "let endpoints = version_endpoints(app.package_info().version.pre.as_str())?;"
+            ),
+            "{fetch}"
+        );
+        let (_, call) = include_str!("../lib.rs")
+            .split_once("commands::updater::detect_support(")
+            .expect("lib.rs 不再调 detect_support");
+        let (args, _) = call.split_once(");").unwrap();
+        assert!(
+            args.contains("context.package_info().version.pre.as_str()"),
+            "{args}"
+        );
+    }
+
     /// `source` 里签名行以 `signature` 开头的顶层函数，从签名行到收尾那一行 `}`。
     fn top_level_fn(source: &str, signature: &str) -> String {
         let mut body = Vec::new();
