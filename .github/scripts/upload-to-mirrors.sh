@@ -3,7 +3,7 @@
 # 桶、端点、区域与公网主机都从 dev-distribution.mjs 的同一张表来，读回和清单用的是同一套地址。
 # 用法：bash upload-to-mirrors.sh <对象键> <本地文件>
 # 凭据只从调用它的那一步的环境变量来，缺任何一个都直接失败：
-#   OSS_CI_ACCESS_KEY_ID、OSS_CI_ACCESS_KEY_SECRET（RAM 子用户，只有 oss:PutObject，限两个桶的 dev/ 前缀）
+#   OSS_CI_ACCESS_KEY_ID、OSS_CI_ACCESS_KEY_SECRET（RAM 子用户，只有 oss:PutObject，限两个桶里本通道的前缀，每个通道一个子用户）
 #   R2_CI_ACCESS_KEY_ID、R2_CI_SECRET_ACCESS_KEY（R2 的 S3 凭据，只授 petalfall-dl 一个桶）
 #   R2_ACCOUNT_ID（拼 R2 的 S3 端点）
 set -euo pipefail
@@ -18,12 +18,13 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 for var in OSS_CI_ACCESS_KEY_ID OSS_CI_ACCESS_KEY_SECRET R2_CI_ACCESS_KEY_ID R2_CI_SECRET_ACCESS_KEY R2_ACCOUNT_ID; do
   if [ -z "${!var:-}" ]; then
-    echo "::error::环境 updates-dev 里没有配置 $var" >&2
+    echo "::error::作业所在的环境里没有配置 $var" >&2
     exit 1
   fi
 done
 test -f "$file"
-# 对象键必须是 dev/<目录>/<文件名>：OSS 的 RAM 策略只放行 dev/，R2 的凭据却能写整个桶，写偏了也不会被生命周期规则清掉。
+# 对象键必须是 <通道>/<目录>/<文件名>，通道只认 dev、beta：OSS 的 RAM 策略只放行本通道的前缀，R2 的凭据却能写整个桶，
+# 写偏了就落在桶的规则之外，dev/ 的 30 天过期、beta/ 的禁止覆盖写与锁都管不到它。
 # mirror-urls 用的就是这条校验；它给出的公网地址留给下面 put-object 报错时核对。
 public_urls="$(node "$script_dir/dev-distribution.mjs" mirror-urls "$key")"
 

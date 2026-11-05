@@ -11,8 +11,11 @@ import {
   SOURCE_HOSTS,
   SOURCE_NAMES,
   buildManifest,
+  channelOf,
+  compareVersions,
   githubUrl,
   mirrorUrls,
+  nextBeta,
   objectKey,
   runCommand,
   sourceUrls,
@@ -35,11 +38,25 @@ const GITHUB = `https://github.com/${REPO}/releases/download/${TAG}/${FILE_NAME}
 const SIZE = randomInt(1, 64 * 1024 * 1024);
 const SIGNATURE = randomBytes(randomInt(200, 400)).toString("base64");
 const ACCOUNT = randomBytes(16).toString("hex");
+// beta 分支上的主版本至少为 1；序号 0 是演练用的，同样要认
+const BETA_VERSION = `${randomInt(1, 50)}.${randomInt(0, 50)}.${randomInt(0, 50)}-beta.${randomInt(0, 100_000)}`;
+const BETA_TAG = `v${BETA_VERSION}`;
+const BETA_FILE = `Petalfall-Installer-${BETA_VERSION}-x64.exe`;
+const BETA_KEY = `beta/${BETA_VERSION}-${ATTEMPT}/${BETA_FILE}`;
+const BETA_GITHUB = `https://github.com/${REPO}/releases/download/${BETA_TAG}/${BETA_FILE}`;
+const BETA_SOURCES = [
+  { name: "cn", url: `https://petalfall-dl-cn.oss-cn-hangzhou.aliyuncs.com/${BETA_KEY}` },
+  { name: "hk", url: `https://petalfall-dl.oss-cn-hongkong.aliyuncs.com/${BETA_KEY}` },
+  { name: "global", url: `https://dl.petalfall.org/${BETA_KEY}` },
+  { name: "github", url: BETA_GITHUB },
+];
 
 const root = mkdtempSync(join(tmpdir(), "dev-distribution-"));
 after(() => rmSync(root, { recursive: true, force: true }));
 
 const expected = { version: VERSION, attempt: ATTEMPT, fileName: FILE_NAME, size: SIZE, repo: REPO, tag: TAG };
+const betaExpected = { ...expected, version: BETA_VERSION, fileName: BETA_FILE, tag: BETA_TAG };
+const betaOverrides = { version: BETA_VERSION, fileName: BETA_FILE, tag: BETA_TAG, notes: "修复了启动时的闪退" };
 
 function manifest(overrides = {}) {
   return buildManifest({
@@ -71,15 +88,66 @@ describe("源名与主机", () => {
   });
 });
 
+// 与香港机 put-manifest 的 VERSION_FORMATS 对齐：dev 与 beta 两种形状，数字段不带前导零，其余一律认不出
+const UNKNOWN_CHANNEL_VERSIONS = [
+  "0.1.0",
+  "1.0.0",
+  "1.0.0-rc.1",
+  "1.0.0-alpha.1",
+  "1.0.0-stable.1",
+  "1.0.0-Beta.1",
+  "1.0.0-beta",
+  "1.0.0-beta.",
+  "1.0.0-beta.1.2",
+  "1.0.0-beta.1+build.5",
+  "1.0.0-beta-1",
+  "1.0.0-beta.01",
+  "1.0.0-dev.007",
+  "01.0.0-beta.1",
+  "1.00.0-dev.1",
+  "1.0.00-beta.1",
+  "1.0-beta.1",
+  "１.0.0-dev.1",
+  `v${VERSION}`,
+  `${VERSION}.1`,
+  ` ${VERSION}`,
+  "",
+];
+
+describe("channelOf", () => {
+  it("-dev.N 是 dev，-beta.N 是 beta，各段为 0 也认", () => {
+    assert.equal(channelOf(VERSION), "dev");
+    assert.equal(channelOf(BETA_VERSION), "beta");
+    assert.equal(channelOf("0.0.0-dev.0"), "dev");
+    assert.equal(channelOf("0.0.0-beta.0"), "beta");
+    assert.equal(channelOf("10.20.30-beta.9007199254740993"), "beta");
+  });
+
+  it("没有预发布标识、标识认不出、数字段带前导零时拒绝", () => {
+    for (const version of [...UNKNOWN_CHANNEL_VERSIONS, 1, null, undefined]) {
+      assert.throws(
+        () => channelOf(version),
+        { message: `认不出版本号的通道：应为 X.Y.Z-<通道>.N，通道只能是 dev、beta，数字段不带前导零：${JSON.stringify(version)}` },
+        String(version),
+      );
+    }
+  });
+});
+
 describe("objectKey", () => {
-  it("是 dev/<版本>-<运行次数>/<文件名>", () => {
+  it("dev 版本是 dev/<版本>-<运行次数>/<文件名>", () => {
     assert.equal(objectKey(VERSION, ATTEMPT, FILE_NAME), KEY);
     assert.equal(objectKey(VERSION, "1", FILE_NAME), `dev/${VERSION}-1/${FILE_NAME}`);
   });
 
-  it("版本号不是 dev 版本时拒绝", () => {
-    for (const version of ["0.1.0", "0.1.0-beta.1", `v${VERSION}`, `${VERSION}.1`, ""]) {
-      assert.throws(() => objectKey(version, ATTEMPT, `x-${version}.exe`), /不是 dev 版本号/, version);
+  it("beta 版本是 beta/<版本>-<运行次数>/<文件名>", () => {
+    assert.equal(objectKey(BETA_VERSION, ATTEMPT, BETA_FILE), BETA_KEY);
+    assert.equal(objectKey("1.0.0-beta.1", "1", "Petalfall-Installer-1.0.0-beta.1-x64.exe"), "beta/1.0.0-beta.1-1/Petalfall-Installer-1.0.0-beta.1-x64.exe");
+  });
+
+  it("版本号认不出通道时拒绝", () => {
+    for (const version of UNKNOWN_CHANNEL_VERSIONS) {
+      assert.throws(() => objectKey(version, ATTEMPT, `x-${version}.exe`), /^Error: 认不出版本号的通道/, version);
     }
   });
 
@@ -113,9 +181,37 @@ describe("mirrorUrls", () => {
     assert.equal(mirrorUrls(`dev/trial-${run}/sample-${run}.bin`)[2].url, `https://dl.petalfall.org/dev/trial-${run}/sample-${run}.bin`);
   });
 
-  it("不在 dev/ 下、层数不对、带 .. 或要转义的字符时拒绝", () => {
-    for (const key of ["stable/a/b", `/${KEY}`, "dev/a", "dev/a/b/c", "dev/../b", "dev/a/..", "dev/./b", "dev/a/b c", "dev/a/%2e", ""]) {
-      assert.throws(() => mirrorUrls(key), /对象键应为 dev\/<目录>\/<文件名>/, key);
+  it("beta/ 下的键给出三个桶上同一个键的地址", () => {
+    assert.deepEqual(mirrorUrls(BETA_KEY), BETA_SOURCES.slice(0, 3));
+  });
+
+  // 前缀是白名单，不是「任意一段」：R2 的凭据能写整个桶，这条校验是它唯一的防线
+  it("不在 dev/ 或 beta/ 下、层数不对、带 .. 或要转义的字符时拒绝", () => {
+    const keys = [
+      "stable/a/b",
+      "release/a/b",
+      "Dev/a/b",
+      "BETA/a/b",
+      "betas/a/b",
+      "dev-beta/a/b",
+      "constructor/a/b",
+      "__proto__/a/b",
+      `/${KEY}`,
+      `/${BETA_KEY}`,
+      "dev/a",
+      "beta/a",
+      "dev/a/b/c",
+      "beta/a/b/c",
+      "dev/../b",
+      "beta/../b",
+      "dev/a/..",
+      "beta/./b",
+      "dev/a/b c",
+      "beta/a/%2e",
+      "",
+    ];
+    for (const key of keys) {
+      assert.throws(() => mirrorUrls(key), { message: `对象键应为 <通道>/<目录>/<文件名>，通道只能是 dev、beta：${JSON.stringify(key)}` }, key);
     }
   });
 });
@@ -155,6 +251,21 @@ describe("githubUrl 与 sourceUrls", () => {
       { name: "github", url: GITHUB },
     ]);
   });
+
+  it("beta 的桶源在 beta/ 下，github 源指向这一版自己的 Release v<版本>", () => {
+    assert.deepEqual(sourceUrls({ version: BETA_VERSION, attempt: ATTEMPT, fileName: BETA_FILE, repo: REPO, tag: BETA_TAG }), BETA_SOURCES);
+  });
+
+  it("beta 的 tag 不是 v<版本> 时拒绝：滚动预发布或别的版本的附件会被删、会对不上", () => {
+    const other = BETA_VERSION.replace(/\d+$/, (n) => String(Number(n) + 1));
+    for (const tag of [TAG, BETA_VERSION, `v${other}`, `V${BETA_VERSION}`, `${BETA_TAG}-1`]) {
+      assert.throws(
+        () => sourceUrls({ version: BETA_VERSION, attempt: ATTEMPT, fileName: BETA_FILE, repo: REPO, tag }),
+        { message: `beta 版本 ${BETA_VERSION} 的 tag 应为 ${BETA_TAG}，实际 ${JSON.stringify(tag)}` },
+        tag,
+      );
+    }
+  });
 });
 
 describe("buildManifest", () => {
@@ -180,11 +291,68 @@ describe("buildManifest", () => {
       },
     });
   });
+
+  it("beta 清单的桶源在 beta/ 下，url 等于这一版 Release 的附件", () => {
+    const built = manifest(betaOverrides);
+    assert.equal(built.version, BETA_VERSION);
+    assert.equal(built.notes, "修复了启动时的闪退");
+    assert.equal(entryOf(built).url, BETA_GITHUB);
+    assert.deepEqual(entryOf(built)["x-sources"], BETA_SOURCES);
+  });
 });
 
 describe("validateManifest", () => {
   it("生成的清单经 JSON 往返后通过", () => {
     assert.equal(validateManifest(JSON.parse(JSON.stringify(manifest())), expected), undefined);
+  });
+
+  it("生成的 beta 清单经 JSON 往返后通过", () => {
+    assert.equal(validateManifest(JSON.parse(JSON.stringify(manifest(betaOverrides))), betaExpected), undefined);
+  });
+
+  it("dev 清单拿 beta 的期望比时拒绝，反过来也拒绝：版本、前缀和 tag 都跟着通道走", () => {
+    assert.throws(() => validateManifest(manifest(), betaExpected), /^Error: 清单的 version 是 /);
+    assert.throws(() => validateManifest(manifest(betaOverrides), expected), /^Error: 清单的 version 是 /);
+    // 只把三个桶源的前缀换成 dev/，其余与合法的 beta 清单相同：只靠前缀拦下
+    const m = manifest(betaOverrides);
+    for (const source of entryOf(m)["x-sources"].slice(0, 3)) source.url = source.url.replace("/beta/", "/dev/");
+    assert.throws(() => validateManifest(m, betaExpected), {
+      message: `源 cn 的路径是 /dev/${BETA_VERSION}-${ATTEMPT}/${BETA_FILE}，应为 /${BETA_KEY}`,
+    });
+  });
+
+  it("beta 清单的 tag 不是 v<版本> 时拒绝，哪怕 github 源与传进来的 tag 一致", () => {
+    const m = manifest({ ...betaOverrides, tag: BETA_TAG });
+    const wrong = TAG;
+    entryOf(m)["x-sources"][3].url = BETA_GITHUB.replace(`/${BETA_TAG}/`, `/${wrong}/`);
+    entryOf(m).url = entryOf(m)["x-sources"][3].url;
+    assert.throws(() => validateManifest(m, { ...betaExpected, tag: wrong }), {
+      message: `beta 版本 ${BETA_VERSION} 的 tag 应为 ${BETA_TAG}，实际 ${JSON.stringify(wrong)}`,
+    });
+  });
+
+  // 上限与 put-manifest 一致，按 Unicode 码位数：增补平面的字符在 JS 里占两个 UTF-16 单元，按 length 数会在 2000 个时就误拒
+  it("notes 恰好 4000 个码位时通过，哪怕全是增补平面的字符；再多一个就拒绝", () => {
+    const clef = "\u{1D11E}";
+    for (const notes of ["说".repeat(4000), clef.repeat(4000), `${"a".repeat(3999)}${clef}`]) {
+      assert.equal(validateManifest(manifest({ ...betaOverrides, notes }), betaExpected), undefined, notes.length);
+    }
+    for (const notes of ["说".repeat(4001), clef.repeat(4001), `${clef.repeat(4000)}a`, "a".repeat(4000 + randomInt(1, 4000))]) {
+      const chars = [...notes].length;
+      assert.throws(
+        () => validateManifest(manifest({ ...betaOverrides, notes }), betaExpected),
+        { message: `清单的 notes 有 ${chars} 个字符，超过 4000` },
+        String(chars),
+      );
+    }
+  });
+
+  it("notes 含孤立的 UTF-16 代理项时拒绝：put-manifest 拒收，插件解析清单时会报错", () => {
+    for (const notes of ["修复\uD800", "\uDD1E修复", "a\uDBFFb", "\uDC00\uD800"]) {
+      assert.throws(() => validateManifest(manifest({ ...betaOverrides, notes }), betaExpected), {
+        message: "清单的 notes 含孤立的 UTF-16 代理项，插件解析清单时会报错",
+      });
+    }
   });
 
   it("x-sources 换了顺序照样通过：客户端按自己的规范顺序排，不看清单里的顺序", () => {
@@ -279,14 +447,150 @@ describe("validateManifest", () => {
   }
 });
 
+describe("compareVersions", () => {
+  // 每条链从小到大排好，任取两项比出的都应是它们在链里的先后
+  const chains = [
+    // semver 2.0 第 11 条给的例子
+    ["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0"],
+    // 本项目的三个通道：同一基础号下 beta 低于 dev，dev 低于正式版；1.0.0-beta.1 高于现有的所有 0.1.0-dev.N
+    [
+      "0.1.0-dev.9",
+      "0.1.0-dev.10",
+      "0.1.0-dev.37",
+      "0.1.0",
+      "1.0.0-beta.0",
+      "1.0.0-beta.1",
+      "1.0.0-beta.2",
+      "1.0.0-beta.10",
+      "1.0.0-dev.1",
+      "1.0.0",
+      "1.0.1-beta.1",
+      "1.1.0-beta.1",
+      "1.1.0-dev.1",
+      "1.9.0",
+      "1.10.0",
+      "2.0.0-beta.1",
+      "10.0.0",
+    ],
+    // 纯数字段低于含字母的段（0a 含字母，按 ASCII 比）；ASCII 里大写字母排在小写前面；段多的更高
+    ["1.0.0-1", "1.0.0-99", "1.0.0-0a", "1.0.0-B", "1.0.0-a", "1.0.0-a.1", "1.0.0-a.1.0", "1.0.0-a-b"],
+  ];
+
+  for (const chain of chains) {
+    it(`按 semver 优先级排序：${chain[0]} 到 ${chain.at(-1)}`, () => {
+      for (const [i, a] of chain.entries()) {
+        for (const [j, b] of chain.entries()) {
+          assert.equal(compareVersions(a, b), Math.sign(i - j), `${a} 对 ${b}`);
+        }
+      }
+    });
+  }
+
+  it("预发布序号按数值比，不按字符串比", () => {
+    for (let round = 0; round < 50; round++) {
+      const n = randomInt(0, 1_000_000);
+      const m = randomInt(0, 1_000_000);
+      assert.equal(compareVersions(`1.0.0-beta.${n}`, `1.0.0-beta.${m}`), Math.sign(n - m), `${n} 对 ${m}`);
+      assert.equal(compareVersions(`${n}.0.0`, `${m}.0.0`), Math.sign(n - m), `${n} 对 ${m}`);
+    }
+  });
+
+  // 2^53 + 1 换成 Number 会舍入成 2^53，两边就成了相等
+  it("超过 2^53 的数字段照样比得出先后", () => {
+    assert.equal(compareVersions("9007199254740993.0.0", "9007199254740992.0.0"), 1);
+    assert.equal(compareVersions("1.0.0-beta.9007199254740992", "1.0.0-beta.9007199254740993"), -1);
+  });
+
+  it("构建元数据不参与比较", () => {
+    assert.equal(compareVersions("1.0.0+a", "1.0.0+b.1"), 0);
+    assert.equal(compareVersions("1.0.0-beta.1+x", "1.0.0-beta.1"), 0);
+    assert.equal(compareVersions("1.0.0-01a", "1.0.0-01a"), 0);
+  });
+
+  it("不是 semver 版本号时拒绝，两个参数哪个不合法都一样", () => {
+    for (const bad of ["v1.0.0", "1.0", "1", "01.0.0", "1.01.0", "1.0.00", "1.0.0-", "1.0.0-beta..1", "1.0.0-beta.", "1.0.0+", "1.0.0-β", " 1.0.0", "1.0.0 ", "", null]) {
+      const message = `不是 semver 版本号：${JSON.stringify(bad)}`;
+      assert.throws(() => compareVersions(bad, "1.0.0"), { message }, String(bad));
+      assert.throws(() => compareVersions("1.0.0", bad), { message }, String(bad));
+    }
+  });
+
+  it("预发布里的纯数字段带前导零时拒绝", () => {
+    for (const bad of ["1.0.0-beta.01", "1.0.0-00", "1.0.0-dev.007+x"]) {
+      assert.throws(() => compareVersions(bad, "1.0.0"), { message: `${JSON.stringify(bad)} 的预发布段有前导零` }, bad);
+    }
+  });
+});
+
+describe("nextBeta", () => {
+  it("只认 v<基础号>-beta.<N>，取最大的 N 加 1", () => {
+    const tags = [
+      "dev-build",
+      "v1.0.0-beta.1",
+      "v1.0.0-beta.3",
+      "v1.0.0-beta.10",
+      "v1.0.0-beta.2",
+      // 别的基础号、正式版、别的标识、不带 v、多一段、前导零、点没转义就会误认的形状，都不算
+      "v1.0.1-beta.20",
+      "v11.0.0-beta.30",
+      "v1.0.0",
+      "v1.0.0-dev.40",
+      "1.0.0-beta.50",
+      "v1.0.0-beta.60.1",
+      "v1.0.0-beta.70-x",
+      "v1.0.0-beta.080",
+      "v1a0a0-beta.90",
+      "xv1.0.0-beta.100",
+      "v1.0.0-beta.",
+      "",
+    ];
+    assert.equal(nextBeta("1.0.0", tags), "11");
+  });
+
+  it("一个都没有时是 1；只有 beta.0 时也是 1", () => {
+    assert.equal(nextBeta("1.0.0", []), "1");
+    assert.equal(nextBeta("1.0.0", ["", "dev-build", "v1.0.0"]), "1");
+    assert.equal(nextBeta("2.3.4", ["v2.3.4-beta.0"]), "1");
+  });
+
+  it("随机的基础号和序号，顺序打乱，混着只差一个字符就会被误认的行", () => {
+    const base = `${randomInt(1, 100)}.${randomInt(0, 100)}.${randomInt(0, 100)}`;
+    const numbers = Array.from({ length: randomInt(1, 30) }, () => randomInt(0, 100_000));
+    const noise = numbers.map((n) => `v${base}-beta.${n + 100_000}x`);
+    const tags = [...numbers.map((n) => `v${base}-beta.${n}`), ...noise];
+    for (let i = tags.length - 1; i > 0; i--) {
+      const j = randomInt(0, i + 1);
+      [tags[i], tags[j]] = [tags[j], tags[i]];
+    }
+    assert.equal(nextBeta(base, tags), String(Math.max(...numbers) + 1));
+  });
+
+  it("超过 2^53 的序号照样加 1", () => {
+    assert.equal(nextBeta("1.0.0", ["v1.0.0-beta.9007199254740993"]), "9007199254740994");
+  });
+
+  it("基础号不是 X.Y.Z 时拒绝", () => {
+    for (const base of ["1.0", "1.0.0.0", "v1.0.0", "1.0.0-beta.1", "01.0.0", "1.00.0", "1.0.0 ", "", null]) {
+      assert.throws(() => nextBeta(base, []), { message: `基础号应为 X.Y.Z，数字段不带前导零：${JSON.stringify(base)}` }, String(base));
+    }
+  });
+
+  // 0.x.y-beta.N 比 0.x.y-dev.N 小，装过 dev 的用户换它会被引导程序判为降级
+  it("基础号的主版本小于 1 时拒绝", () => {
+    for (const base of ["0.1.0", "0.0.0", `0.${randomInt(0, 100)}.${randomInt(0, 100)}`]) {
+      assert.throws(() => nextBeta(base, [`v${base}-beta.1`]), new RegExp(`^Error: 基础号 ${base.replaceAll(".", "\\.")} 的主版本小于 1`), base);
+    }
+  });
+});
+
 describe("命令行入口", () => {
   const run = (...args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8" });
   let nextCase = 0;
 
-  function bootstrapFixture(bytes = randomBytes(randomInt(1, 8192))) {
+  function bootstrapFixture(bytes = randomBytes(randomInt(1, 8192)), fileName = FILE_NAME) {
     const dir = join(root, String(nextCase++));
     mkdirSync(dir);
-    const bootstrap = join(dir, FILE_NAME);
+    const bootstrap = join(dir, fileName);
     writeFileSync(bootstrap, bytes);
     writeFileSync(`${bootstrap}.sig`, `${SIGNATURE}\n`);
     return { dir, bootstrap, manifest: join(dir, "latest.json") };
@@ -376,8 +680,147 @@ describe("命令行入口", () => {
     assert.throws(() => statSync(out), { code: "ENOENT" });
   });
 
+  function notesFixture(content) {
+    const dir = join(root, String(nextCase++));
+    mkdirSync(dir);
+    const path = join(dir, "notes.md");
+    writeFileSync(path, content);
+    return path;
+  }
+
+  const commit = () => randomBytes(20).toString("hex");
+
+  it("build 给 beta 版本写出的清单带说明文件去掉首尾空白后的内容，validate 照它通过", () => {
+    const body = `修复了启动时的闪退 ${randomBytes(4).toString("hex")}\n\n- 第二条\n- 第三条`;
+    // 4000 个码位恰好在上限上；带 BOM 和首尾空白的文件同样只取正文
+    for (const [content, notes] of [
+      [`\n  ${body}\n\n`, body],
+      [`﻿${body}\n`, body],
+      [`\n${"说".repeat(4000)}\n`, "说".repeat(4000)],
+    ]) {
+      const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
+      const built = run("build", BETA_VERSION, ATTEMPT, bootstrap, REPO, BETA_TAG, commit(), out, notesFixture(content));
+      assert.equal(built.status, 0, built.stderr);
+      assert.equal(built.stdout, "");
+      const written = JSON.parse(readFileSync(out, "utf8"));
+      assert.equal(written.version, BETA_VERSION);
+      assert.equal(written.notes, notes);
+      assert.deepEqual(written.platforms, {
+        "windows-x86_64": { signature: SIGNATURE, url: BETA_GITHUB, "x-size": statSync(bootstrap).size, "x-sources": BETA_SOURCES },
+      });
+
+      const validated = run("validate", out, BETA_VERSION, ATTEMPT, bootstrap, REPO, BETA_TAG);
+      assert.equal(validated.status, 0, validated.stderr);
+      assert.equal(validated.stdout, `清单校验通过：${BETA_VERSION}，cn、hk、global、github\n`);
+    }
+  });
+
+  it("build 给 dev 版本传说明文件时退出非 0，不写清单：dev 的说明固定是提交号", () => {
+    const { bootstrap, manifest: out } = bootstrapFixture();
+    const notes = notesFixture("说明");
+    const result = run("build", VERSION, ATTEMPT, bootstrap, REPO, TAG, commit(), out, notes);
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes(`dev 版本的说明固定写提交号，不收说明文件：${notes}`), result.stderr);
+    assert.throws(() => statSync(out), { code: "ENOENT" });
+  });
+
+  it("build 给 beta 版本不传说明文件时退出非 0，不写清单", () => {
+    const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
+    const result = run("build", BETA_VERSION, ATTEMPT, bootstrap, REPO, BETA_TAG, commit(), out);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(`beta 版本 ${BETA_VERSION.replaceAll(".", "\\.")} 必须给说明文件`));
+    assert.throws(() => statSync(out), { code: "ENOENT" });
+  });
+
+  it("build 的 beta 说明文件为空、只有空白、超过 4000 个码位或不是 UTF-8 时退出非 0，不写清单", () => {
+    for (const [content, message] of [
+      ["", /去掉首尾空白后是空的/],
+      [" \n\t\r\n﻿", /去掉首尾空白后是空的/],
+      [`${"说".repeat(4001)}\n`, /有 4001 个字符，超过 4000/],
+      ["\u{1D11E}".repeat(4001), /有 4001 个字符，超过 4000/],
+      // 截断的多字节字符、UTF-8 编出来的代理项、单独的 0xff
+      [Buffer.from([0xe4, 0xbf, 0x0a]), /不是合法的 UTF-8/],
+      [Buffer.concat([Buffer.from("修复"), Buffer.from([0xed, 0xa0, 0x80])]), /不是合法的 UTF-8/],
+      [Buffer.from([0x61, 0xff]), /不是合法的 UTF-8/],
+    ]) {
+      const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
+      const result = run("build", BETA_VERSION, ATTEMPT, bootstrap, REPO, BETA_TAG, commit(), out, notesFixture(content));
+      assert.notEqual(result.status, 0, String(message));
+      assert.match(result.stderr, message);
+      assert.throws(() => statSync(out), { code: "ENOENT" });
+    }
+  });
+
+  it("build 的 beta tag 不是 v<版本> 时退出非 0，不写清单", () => {
+    const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
+    const result = run("build", BETA_VERSION, ATTEMPT, bootstrap, REPO, TAG, commit(), out, notesFixture("说明"));
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /的 tag 应为 v/);
+    assert.throws(() => statSync(out), { code: "ENOENT" });
+  });
+
+  it("compare 打印 -1、0 或 1", () => {
+    for (const [a, b, printed] of [
+      ["1.0.0-beta.2", "1.0.0-beta.10", "-1"],
+      ["1.0.0-beta.1", "0.1.0-dev.37", "1"],
+      ["1.0.0+a", "1.0.0", "0"],
+    ]) {
+      const result = run("compare", a, b);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, `${printed}\n`, `${a} 对 ${b}`);
+    }
+  });
+
+  it("compare 的参数不是 semver 时退出非 0，什么都不打印：工作流不能把它当成「不更新」", () => {
+    const result = run("compare", "v1.0.0-beta.1", "1.0.0-beta.1");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /不是 semver 版本号："v1\.0\.0-beta\.1"/);
+    assert.equal(result.stdout, "");
+  });
+
+  it("next-beta 从 tag 列表文件里算下一个序号，CRLF 换行照样认", () => {
+    for (const [content, printed] of [
+      ["v1.0.0-beta.1\nv1.0.0-beta.4\nv1.0.1-beta.9\ndev-build\n", "5"],
+      ["v1.0.0-beta.2\r\nv1.0.0-beta.7\r\n", "8"],
+      ["", "1"],
+    ]) {
+      const tags = notesFixture(content);
+      const result = run("next-beta", "1.0.0", tags);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, `${printed}\n`, JSON.stringify(content));
+    }
+  });
+
+  it("next-beta 的基础号不合法或 tag 列表文件不存在时退出非 0，什么都不打印", () => {
+    const tags = notesFixture("v0.1.0-beta.1\n");
+    for (const [args, message] of [
+      [["0.1.0", tags], /基础号 0\.1\.0 的主版本小于 1/],
+      [["1.0.0-beta.1", tags], /基础号应为 X\.Y\.Z/],
+      [["1.0.0", join(root, "missing-tags.txt")], /ENOENT/],
+    ]) {
+      const result = run("next-beta", ...args);
+      assert.notEqual(result.status, 0, args.join(" "));
+      assert.match(result.stderr, message);
+      assert.equal(result.stdout, "");
+    }
+  });
+
   it("参数个数不对或子命令不认识时退出非 0 并提示用法：工作流漏传参数不能被当成成功", () => {
-    for (const args of [[], ["key", VERSION, ATTEMPT], ["mirror-urls"], ["upload-targets", ACCOUNT, ACCOUNT], ["validate", "x"], ["publish", KEY]]) {
+    const build = ["build", VERSION, ATTEMPT, "boot.exe", REPO, TAG, "0".repeat(40)];
+    for (const args of [
+      [],
+      ["key", VERSION, ATTEMPT],
+      ["mirror-urls"],
+      ["upload-targets", ACCOUNT, ACCOUNT],
+      ["validate", "x"],
+      ["publish", KEY],
+      build,
+      [...build, "out.json", "notes.md", "extra"],
+      ["compare", "1.0.0"],
+      ["compare", "1.0.0", "1.0.0", "1.0.0"],
+      ["next-beta", "1.0.0"],
+      ["next-beta", "1.0.0", "tags.txt", "extra"],
+    ]) {
       const result = run(...args);
       assert.notEqual(result.status, 0, args.join(" "));
       assert.match(result.stderr, /用法：/);
@@ -385,7 +828,8 @@ describe("命令行入口", () => {
     }
   });
 
-  it("参数里有空串时同样拒绝", () => {
+  it("参数里有空串时同样拒绝，可选的说明文件也一样", () => {
     assert.throws(() => runCommand(["key", VERSION, "", FILE_NAME]), /^Error: 用法：/);
+    assert.throws(() => runCommand(["build", BETA_VERSION, ATTEMPT, "boot.exe", REPO, BETA_TAG, "0".repeat(40), "out.json", ""]), /^Error: 用法：/);
   });
 });

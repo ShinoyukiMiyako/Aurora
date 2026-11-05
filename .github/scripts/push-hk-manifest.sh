@@ -16,7 +16,7 @@ known_hosts="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/petalfall-hk.known
 test -f "$known_hosts"
 
 if [ -z "${HK_MANIFEST_SSH_KEY:-}" ]; then
-  echo "::error::环境 updates-dev 里没有配置 HK_MANIFEST_SSH_KEY" >&2
+  echo "::error::作业所在的环境里没有配置 HK_MANIFEST_SSH_KEY" >&2
   exit 1
 fi
 
