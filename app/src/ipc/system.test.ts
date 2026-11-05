@@ -24,7 +24,7 @@ import {
   startupNotices,
   updaterInfo,
 } from "./system";
-import { setMockNetworkReachable, setMockStartupNotices } from "./mock/handlers/system";
+import { setMockNetworkReachable, setMockStartupNotices, setMockUpdateSourceFailures } from "./mock/handlers/system";
 import { deleteInstance, listInstances, renameInstance } from "./instances";
 import { cancelTask, onCoreEvent, type CoreEvent } from "./tasks";
 
@@ -349,12 +349,39 @@ describe("自更新", () => {
     expect(downloads.every((e) => e.kind === "download" && e.total === 1 && e.bytes <= (e.total_bytes as number))).toBe(true);
     expect(downloads[downloads.length - 1]).toMatchObject({ finished: 1, bytes: 12_582_912 });
     expect(events[events.length - 1]).toMatchObject({ kind: "stage" });
+    // 与后端一样，第一个源开始前也推一条换源事件
+    expect(events[0]).toEqual({ task_id: "u-1", kind: "source", index: 0, count: 4, name: "cn" });
+    expect(events.filter((e) => e.kind === "source")).toHaveLength(1);
 
     await setInstallOnExit(true);
     expect(await updaterInfo()).toMatchObject({ downloaded_version: "0.2.0", install_on_exit: true });
     await installUpdate();
     expect(await updaterInfo()).toMatchObject({ current_version: "0.2.0", downloaded_version: null, install_on_exit: false });
     expect(await checkUpdate()).toBeNull();
+  });
+
+  it("模拟前几个源断开：每个源开始前一条换源事件，换源后进度从头报起，最后一个源下完", async () => {
+    vi.useFakeTimers();
+    setMockUpdateSourceFailures(2);
+    const update = await checkUpdate();
+    const events: CoreEvent[] = [];
+    await onCoreEvent((e) => events.push(e));
+    expect(await settle(downloadUpdate("u-3"))).toEqual(update);
+
+    const sourceAt = (index: number) => events.findIndex((e) => e.kind === "source" && e.index === index);
+    expect(events.filter((e) => e.kind === "source").map((e) => e.kind === "source" && e.name)).toEqual(["cn", "hk", "global"]);
+    const bytesBetween = (from: number, to: number) => events.slice(from, to).flatMap((e) => (e.kind === "download" ? [e.bytes] : []));
+    expect(bytesBetween(sourceAt(0), sourceAt(1))).toEqual([2_516_582]);
+    expect(bytesBetween(sourceAt(1), sourceAt(2))).toEqual([2_516_582]);
+    const last = bytesBetween(sourceAt(2), events.length);
+    expect(last[0]).toBe(2_516_582);
+    expect(last[last.length - 1]).toBe(12_582_912);
+    expect((await updaterInfo()).downloaded_version).toBe("0.2.0");
+  });
+
+  it("模拟断开的源至少留一个能下完，个数越界直接拒绝", () => {
+    expect(() => setMockUpdateSourceFailures(4)).toThrow("要留一个能下完");
+    expect(() => setMockUpdateSourceFailures(-1)).toThrow("要留一个能下完");
   });
 
   it("下载途中取消以 cancelled 结束，不留下已下载的包", async () => {

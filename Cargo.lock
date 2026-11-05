@@ -3245,8 +3245,10 @@ dependencies = [
 name = "petalfall-tauri"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "fastrand",
  "image",
+ "minisign-verify",
  "percent-encoding",
  "petalfall-base",
  "petalfall-core",

@@ -33,6 +33,10 @@ tauri-plugin-dialog = "~2.7"
 # 关掉默认特性是为了不带上 2.11 起默认开的 system-proxy：它经特性合并会让全程序的
 # reqwest 客户端改走 Windows 系统代理，这是产品行为的变化，不能随依赖升级顺带发生。
 tauri-plugin-updater = { version = "~2.12", default-features = false, features = ["rustls-tls", "zip"] }
+# 自更新换源要分清验签失败的种类：插件把验签错误原样包成 Minisign 变体，只有字节对不上签名
+# （InvalidSignature）才换下一个源，换了钥匙、签名解不开这些与源无关的立即停；这个错误类型只能从这个 crate 拿。
+# 写 "0.2" 与插件的要求一致，两边解析到同一个 0.2.x，才是同一个类型。
+minisign-verify = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 门面：前端全部能力经此 crate 暴露，业务调用不直接依赖任何下层 crate。
@@ -89,3 +93,6 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 fastrand = "2"
 # 卡面图片导入的命令层测试要现场编码一张 PNG；与 petalfall-core 同一版本，不多拉格式。
 image = { version = "0.25", default-features = false, features = ["png"] }
+# 自更新换源的判定用例要造清单签名串不是合法 base64 时插件报的 Base64 错误，它包的是 base64 的 DecodeError；
+# 写 "0.22" 与插件的要求一致，两边解析到同一个 0.22.x，才是同一个类型。
+base64 = "0.22"

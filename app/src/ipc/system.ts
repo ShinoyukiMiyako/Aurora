@@ -238,14 +238,37 @@ export const updaterInfo = (): Promise<UpdaterInfoDto> => invoke<UpdaterInfoDto>
 
 /**
  * 检查更新，没有新版本返回 null。更新源上还没有发布（所有端点的清单都回 404）不算失败：本次会话已知的版本仍在就返回它，否则同样是 null。
- * 不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed：网络层失败带 detail.network，更新源回了 404 以外的非 2xx 带 detail.status。
+ * 不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed：全部端点都败在网络层时带 detail.network；
+ * detail.attempts 按顺序列出每个端点的结果。只有一个端点、它回了 404 以外的非 2xx 时带 detail.status；
+ * 有多个端点时状态码只写在各自那一条里，顶层不带，免得分不清是哪个端点的。
  */
 export const checkUpdate = (): Promise<UpdateDto | null> => invoke<UpdateDto | null>("check_update");
 
+/** 一个下载源失败的种类。connect、timeout 是网络层失败；http 是非 2xx；signature 是包与签名对不上或签名本身不合法；too_large 是下载的字节超过清单声明的大小。 */
+export type UpdateSourceFailureKind = "connect" | "timeout" | "http" | "signature" | "too_large" | "other";
+
+/** 自更新下载里一个源的失败，见 downloadUpdate 的 detail.sources。 */
+export interface UpdateSourceFailureDto {
+  /** 源的短名，同 core-event kind source 的 name。 */
+  source: string;
+  failure: UpdateSourceFailureKind;
+  /** 这个源失败的后端原文。 */
+  message: string;
+  /** 这个源失败的原因链（DNS、TCP、TLS 那几层的原文）；没有原因链时后端不写这个键。 */
+  causes?: string[];
+}
+
 /**
  * 长任务：下载最近一次检查到的更新并校验签名，进度经 core-event（kind download，total 为 1）推送并带 task_id，
- * 可用 cancelTask(taskId) 取消。没检查到更新报 update_not_available，签名不符报 update_signature_invalid，
- * 下载失败报 update_download_failed，网络层失败带 detail.network。
+ * 可用 cancelTask(taskId) 取消。没检查到更新报 update_not_available。
+ * 清单给了多个下载源时按顺序逐个试，同一个源不重试：每个源开始前推一条 core-event（kind source），第一个也有；
+ * 换源后从头下，进度从 0 重新报起。
+ * 下载失败时 detail.sources 按尝试顺序列出已试的每个源（UpdateSourceFailureDto）。已试的源全是 signature，
+ * 或最后一个源的签名问题与源无关、当场停下（签名版本不符、签名换了钥匙等），报 update_signature_invalid，
+ * 否则报 update_download_failed。清单给的下载地址没过白名单时一个源都不试，报 update_download_failed，
+ * detail.sources 只有一条 default（failure 为 other）。全都败在网络层（connect 或 timeout）时另带
+ * detail.network：全是 timeout 为 timeout，否则为 connect。只试了一个源时 message 是那个源的原文，
+ * 试了多个时逐行写成「源名：原文」。
  * 下载期间再次检查换了版本或已无更新时同样报 update_not_available（message 写明新旧版本），这次下载的包已作废，
  * 按最新的检查结果重新下载即可。
  */

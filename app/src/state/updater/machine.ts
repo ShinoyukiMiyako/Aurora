@@ -13,6 +13,13 @@ export type UpdateInfo = NonNullable<UpdaterInfoDto["available"]>;
 
 export type UnsupportedReason = UpdaterInfoDto["unsupported_reason"];
 
+/** 正在用的下载源：index 从 0 计，count 是这次候选源的总数，name 是源的短名（只供日志，界面不显示）。 */
+export interface DownloadSource {
+  index: number;
+  count: number;
+  name: string;
+}
+
 export type UpdaterPhase =
   /** 当前环境没有更新能力（调试构建、没配公钥）：所有按钮禁用。 */
   | { kind: "unsupported"; reason: UnsupportedReason }
@@ -23,9 +30,10 @@ export type UpdaterPhase =
   /** message 是后端原文；network 是后端标明的网络层失败种类，其余失败为 null。 */
   | { kind: "check_failed"; message: string; network: NetworkFailure | null }
   | { kind: "available"; update: UpdateInfo }
-  | { kind: "downloading"; update: UpdateInfo; taskId: string; bytes: number; totalBytes: number | null }
-  /** reason 是后端原文；network 同 check_failed。 */
-  | { kind: "download_failed"; update: UpdateInfo; reason: string; signature: boolean; network: NetworkFailure | null }
+  /** source 是后端报的当前下载源；第一条换源事件到达之前为 null。 */
+  | { kind: "downloading"; update: UpdateInfo; taskId: string; bytes: number; totalBytes: number | null; source: DownloadSource | null }
+  /** reason 是后端原文；network 同 check_failed；sourcesTried 是试过的下载源个数，后端没列出逐源失败时按 1 个算。 */
+  | { kind: "download_failed"; update: UpdateInfo; reason: string; signature: boolean; network: NetworkFailure | null; sourcesTried: number }
   /** 已下载并通过签名校验，等用户决定何时安装。 */
   | { kind: "ready"; update: UpdateInfo }
   | { kind: "install_on_exit"; update: UpdateInfo }
@@ -48,8 +56,9 @@ export type UpdaterEvent =
   | { type: "check_failed"; message: string; network: NetworkFailure | null }
   | { type: "download_start"; taskId: string }
   | { type: "download_progress"; taskId: string; bytes: number; totalBytes: number | null }
+  | ({ type: "download_source"; taskId: string } & DownloadSource)
   | { type: "download_done"; taskId: string; update: UpdateInfo }
-  | { type: "download_failed"; taskId: string; reason: string; signature: boolean; network: NetworkFailure | null }
+  | { type: "download_failed"; taskId: string; reason: string; signature: boolean; network: NetworkFailure | null; sourcesTried: number }
   | { type: "download_cancelled"; taskId: string }
   | { type: "install_on_exit"; enabled: boolean }
   | { type: "install_start" }
@@ -120,17 +129,21 @@ export function updaterReducer(state: UpdaterState, event: UpdaterEvent): Update
     case "download_start": {
       const update = phaseUpdate(phase);
       if (update === null || (phase.kind !== "available" && phase.kind !== "download_failed")) return state;
-      return to({ kind: "downloading", update, taskId: event.taskId, bytes: 0, totalBytes: null });
+      return to({ kind: "downloading", update, taskId: event.taskId, bytes: 0, totalBytes: null, source: null });
     }
     case "download_progress":
       if (!sameTask(phase, event.taskId)) return state;
       return to({ ...phase, bytes: event.bytes, totalBytes: event.totalBytes });
+    case "download_source":
+      if (!sameTask(phase, event.taskId)) return state;
+      // 换源后从头下：上一个源下到的字节作废，总量等新源的第一条进度
+      return to({ ...phase, source: { index: event.index, count: event.count, name: event.name }, bytes: 0, totalBytes: null });
     case "download_done":
       if (!sameTask(phase, event.taskId)) return state;
       return to({ kind: "ready", update: event.update });
     case "download_failed":
       if (!sameTask(phase, event.taskId)) return state;
-      return to({ kind: "download_failed", update: phase.update, reason: event.reason, signature: event.signature, network: event.network });
+      return to({ kind: "download_failed", update: phase.update, reason: event.reason, signature: event.signature, network: event.network, sourcesTried: event.sourcesTried });
     case "download_cancelled":
       if (!sameTask(phase, event.taskId)) return state;
       return to({ kind: "available", update: phase.update });

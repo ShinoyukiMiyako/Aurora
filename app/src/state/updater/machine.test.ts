@@ -58,7 +58,7 @@ describe("后端信息同步进状态机", () => {
   });
 
   it("检查中、下载中、安装中不被后端信息覆盖", () => {
-    const downloading: UpdaterPhase = { kind: "downloading", update: UPDATE, taskId: "t1", bytes: 10, totalBytes: 100 };
+    const downloading: UpdaterPhase = { kind: "downloading", update: UPDATE, taskId: "t1", bytes: 10, totalBytes: 100, source: { index: 1, count: 4, name: "hk" } };
     for (const phase of [{ kind: "checking" } as const, downloading, { kind: "installing", update: UPDATE } as const]) {
       expect(run(at(phase), { type: "info", info: info({ available: UPDATE }) }).phase).toEqual(phase);
     }
@@ -73,7 +73,7 @@ describe("后端信息同步进状态机", () => {
   });
 
   it("同一版本下载失败后再同步，失败原因保留，重试入口不丢", () => {
-    const failed: UpdaterPhase = { kind: "download_failed", update: UPDATE, reason: "连接被重置", signature: false, network: "connect" };
+    const failed: UpdaterPhase = { kind: "download_failed", update: UPDATE, reason: "连接被重置", signature: false, network: "connect", sourcesTried: 3 };
     expect(run(at(failed), { type: "info", info: info({ available: UPDATE }) }).phase).toEqual(failed);
     expect(run(at(failed), { type: "info", info: info({ available: { ...UPDATE, version: "0.3.0" } }) }).phase).toEqual({
       kind: "available",
@@ -97,7 +97,7 @@ describe("检查", () => {
   it("不支持、下载中、已下载、安装中都不能检查", () => {
     const blocked: UpdaterPhase[] = [
       { kind: "unsupported", reason: "missing_pubkey" },
-      { kind: "downloading", update: UPDATE, taskId: "t", bytes: 0, totalBytes: null },
+      { kind: "downloading", update: UPDATE, taskId: "t", bytes: 0, totalBytes: null, source: null },
       { kind: "ready", update: UPDATE },
       { kind: "install_on_exit", update: UPDATE },
       { kind: "installing", update: UPDATE },
@@ -121,7 +121,7 @@ describe("下载", () => {
   const start = run(at({ kind: "available", update: UPDATE }), { type: "download_start", taskId: "t1" });
 
   it("从 available 开始，进度按任务号更新，别的任务的进度被忽略", () => {
-    expect(start.phase).toEqual({ kind: "downloading", update: UPDATE, taskId: "t1", bytes: 0, totalBytes: null });
+    expect(start.phase).toEqual({ kind: "downloading", update: UPDATE, taskId: "t1", bytes: 0, totalBytes: null, source: null });
     const progressed = run(start, { type: "download_progress", taskId: "t1", bytes: 512, totalBytes: 2048 });
     expect(progressed.phase).toMatchObject({ bytes: 512, totalBytes: 2048 });
     expect(run(progressed, { type: "download_progress", taskId: "stale", bytes: 9999, totalBytes: 9999 })).toBe(progressed);
@@ -129,25 +129,42 @@ describe("下载", () => {
 
   it("完成进入 ready；失败带原因与是否签名问题；取消回到 available", () => {
     expect(run(start, { type: "download_done", taskId: "t1", update: UPDATE }).phase).toEqual({ kind: "ready", update: UPDATE });
-    expect(run(start, { type: "download_failed", taskId: "t1", reason: "签名不符", signature: true, network: null }).phase).toEqual({
+    expect(run(start, { type: "download_failed", taskId: "t1", reason: "签名不符", signature: true, network: null, sourcesTried: 1 }).phase).toEqual({
       kind: "download_failed",
       update: UPDATE,
       reason: "签名不符",
       signature: true,
       network: null,
+      sourcesTried: 1,
     });
-    expect(run(start, { type: "download_failed", taskId: "t1", reason: "error sending request", signature: false, network: "timeout" }).phase).toMatchObject({
+    expect(run(start, { type: "download_failed", taskId: "t1", reason: "error sending request", signature: false, network: "timeout", sourcesTried: 4 }).phase).toMatchObject({
       reason: "error sending request",
       network: "timeout",
+      sourcesTried: 4,
     });
     expect(run(start, { type: "download_cancelled", taskId: "t1" }).phase).toEqual({ kind: "available", update: UPDATE });
   });
 
   it("下载失败后可以重试；没有可下的版本时不开始", () => {
-    const failed = run(start, { type: "download_failed", taskId: "t1", reason: "断网", signature: false, network: "connect" });
-    expect(run(failed, { type: "download_start", taskId: "t2" }).phase).toMatchObject({ kind: "downloading", taskId: "t2", bytes: 0 });
+    const failed = run(start, { type: "download_failed", taskId: "t1", reason: "断网", signature: false, network: "connect", sourcesTried: 2 });
+    expect(run(failed, { type: "download_start", taskId: "t2" }).phase).toEqual({ kind: "downloading", update: UPDATE, taskId: "t2", bytes: 0, totalBytes: null, source: null });
     const idle = at({ kind: "idle" });
     expect(run(idle, { type: "download_start", taskId: "t3" })).toBe(idle);
+  });
+
+  it("换源：记下第几个源，已下的字节归 0、总量回到未知，新源的进度从头接着写", () => {
+    const progressed = run(start, { type: "download_source", taskId: "t1", index: 0, count: 4, name: "cn" }, { type: "download_progress", taskId: "t1", bytes: 7_340_032, totalBytes: 22_846_361 });
+    expect(progressed.phase).toEqual({ kind: "downloading", update: UPDATE, taskId: "t1", bytes: 7_340_032, totalBytes: 22_846_361, source: { index: 0, count: 4, name: "cn" } });
+    const switched = run(progressed, { type: "download_source", taskId: "t1", index: 2, count: 4, name: "global" });
+    expect(switched.phase).toEqual({ kind: "downloading", update: UPDATE, taskId: "t1", bytes: 0, totalBytes: null, source: { index: 2, count: 4, name: "global" } });
+    expect(run(switched, { type: "download_progress", taskId: "t1", bytes: 1024, totalBytes: 22_846_361 }).phase).toMatchObject({ bytes: 1024, totalBytes: 22_846_361, source: { index: 2 } });
+  });
+
+  it("别的任务或不在下载中时到达的换源事件被丢弃", () => {
+    const progressed = run(start, { type: "download_progress", taskId: "t1", bytes: 512, totalBytes: 2048 });
+    expect(run(progressed, { type: "download_source", taskId: "stale", index: 1, count: 2, name: "hk" })).toBe(progressed);
+    const ready = at({ kind: "ready", update: UPDATE });
+    expect(run(ready, { type: "download_source", taskId: "t1", index: 1, count: 2, name: "hk" })).toBe(ready);
   });
 
   it("downloadFraction：总量未知或为 0 时为 null，并夹在 0 到 1", () => {

@@ -35,9 +35,9 @@ describe("更新卡各阶段", () => {
   });
 
   it("下载中：已知总量时写百分比与字节，未知时只写已下载字节", () => {
-    const known = updateCardView(state({ kind: "downloading", update: UPDATE, taskId: "t", bytes: 4 * 1024 * 1024, totalBytes: 16 * 1024 * 1024 }), CTX);
+    const known = updateCardView(state({ kind: "downloading", update: UPDATE, taskId: "t", bytes: 4 * 1024 * 1024, totalBytes: 16 * 1024 * 1024, source: null }), CTX);
     expect([known.title, known.sub, known.button.label]).toEqual(["正在下载 0.3.0 · 25%", "4.0 MB / 16.0 MB", "查看进度"]);
-    const unknown = updateCardView(state({ kind: "downloading", update: UPDATE, taskId: "t", bytes: 2048, totalBytes: null }), CTX);
+    const unknown = updateCardView(state({ kind: "downloading", update: UPDATE, taskId: "t", bytes: 2048, totalBytes: null, source: null }), CTX);
     expect([unknown.title, unknown.sub]).toEqual(["正在下载 0.3.0", "2.0 KB"]);
   });
 
@@ -52,7 +52,7 @@ describe("更新卡各阶段", () => {
     expect([onExit.button.label, onExit.button.variant, onExit.button.action]).toEqual(["现在安装", "secondary", "install"]);
     const failed = updateCardView(state({ kind: "check_failed", message: "清单里没有这个平台", network: null }), CTX);
     expect([failed.title, failed.sub, failed.subIsError, failed.button.label]).toEqual(["检查更新失败", "清单里没有这个平台", true, "重试"]);
-    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: null }), CTX);
+    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: null, sourcesTried: 1 }), CTX);
     expect([signature.sub, signature.raw]).toEqual(["下载失败：更新包签名校验不通过，已丢弃，不会安装", null]);
     const unsupported = updateCardView(state({ kind: "unsupported", reason: "debug_build" }), CTX);
     expect([unsupported.title, unsupported.sub, unsupported.button.disabled]).toEqual(["当前环境不支持自动更新", "开发环境或调试模式下不检查更新", true]);
@@ -74,20 +74,47 @@ describe("更新卡各阶段", () => {
 
   it("下载失败是网络层的：次句按种类写中文原因，英文原文另放一行，主句与按钮不变", () => {
     const raw = "error sending request for url (https://petalfall.org/updates/setup-0.3.0.exe)";
-    const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect" }), CTX);
+    const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 1 }), CTX);
     expect([connect.title, connect.accent, connect.sub, connect.subIsError, connect.raw, connect.button.action]).toEqual(["有新版本 0.3.0", true, "下载失败：连不上更新服务器", false, raw, "open_panel"]);
-    const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout" }), CTX);
+    const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout", sourcesTried: 1 }), CTX);
     expect([timeout.sub, timeout.raw]).toEqual(["下载失败：更新服务器没有响应", raw]);
+  });
+
+  it("下载中换过源：次句在字节后面说换用了第几个备用源，不写源的短名；还在用第一个源时不提", () => {
+    const downloading = (source: { index: number; count: number; name: string } | null, totalBytes: number | null) =>
+      updateCardView(state({ kind: "downloading", update: UPDATE, taskId: "t", bytes: 4 * 1024 * 1024, totalBytes, source }), CTX);
+    const switched = downloading({ index: 1, count: 4, name: "hk" }, 16 * 1024 * 1024);
+    expect([switched.title, switched.sub]).toEqual(["正在下载 0.3.0 · 25%", "4.0 MB / 16.0 MB · 已换用备用下载源（2/4）"]);
+    expect(switched.sub).not.toContain("hk");
+    expect(downloading({ index: 3, count: 4, name: "github" }, null).sub).toBe("4.0 MB · 已换用备用下载源（4/4）");
+    expect(downloading({ index: 0, count: 4, name: "cn" }, 16 * 1024 * 1024).sub).toBe("4.0 MB / 16.0 MB");
+    expect(downloading(null, 16 * 1024 * 1024).sub).toBe("4.0 MB / 16.0 MB");
+  });
+
+  it("试过多个下载源、全都败在网络层：次句说所有下载源，逐源原文另放一行", () => {
+    const raw = "cn：error sending request for url (https://dl.petalfall.org/a.exe)\nhk：operation timed out";
+    const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 2 }), CTX);
+    expect([connect.title, connect.sub, connect.subIsError, connect.raw]).toEqual(["有新版本 0.3.0", "下载失败：所有下载源都连不上或没有响应", false, raw]);
+    const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout", sourcesTried: 4 }), CTX);
+    expect([timeout.sub, timeout.raw]).toEqual(["下载失败：所有下载源都没有响应", raw]);
+  });
+
+  it("试过多个下载源、不全是网络层失败：次句写试了几个源都没下完；签名不符仍是固定说法", () => {
+    const raw = "cn：error sending request\nhk：Download request failed with status: 404 Not Found\nglobal：too large";
+    const mixed = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null, sourcesTried: 3 }), CTX);
+    expect([mixed.sub, mixed.raw]).toEqual(["下载失败：3 个下载源都没能下完", raw]);
+    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: true, network: null, sourcesTried: 3 }), CTX);
+    expect([signature.sub, signature.raw]).toEqual(["下载失败：更新包签名校验不通过，已丢弃，不会安装", null]);
   });
 
   it("下载失败不是网络层的：次句只说下载失败，不把后端原文拼进中文句子", () => {
     const raw = "`Download request failed with status: 503 Service Unavailable`";
-    const other = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null }), CTX);
+    const other = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null, sourcesTried: 1 }), CTX);
     expect([other.sub, other.raw]).toEqual(["下载失败", raw]);
   });
 
   it("签名不符优先于网络种类：原因固定，不另放原文", () => {
-    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: "connect" }), CTX);
+    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: "connect", sourcesTried: 1 }), CTX);
     expect([signature.sub, signature.raw]).toEqual(["下载失败：更新包签名校验不通过，已丢弃，不会安装", null]);
   });
 

@@ -52,13 +52,19 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* 说明块最多两行，后端原文可能更长，放在块外才不被截断 */
+/* 换源提示的读屏节点没换源时也挂着、是空的，与进度行包在一起，空着时才不多占一道面板间距；有字时补回同样的间距 */
+.sourceNote:not(:empty) {
+  margin-top: var(--sk-space-12);
+}
+
+/* 说明块最多两行，后端原文可能更长，放在块外才不被截断；试过多个下载源时原文逐行一个源，换行要保留 */
 .failureRaw {
   margin: 0;
   color: var(--sk-text-2);
   font-family: var(--sk-mono);
   font-size: var(--sk-fs-mono-sm);
   line-height: var(--sk-lh-mono-sm);
+  white-space: pre-line;
   overflow-wrap: anywhere;
   user-select: text;
 }

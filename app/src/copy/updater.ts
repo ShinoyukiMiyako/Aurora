@@ -24,6 +24,8 @@ export const UPDATE_COPY = {
   downloadingPct: (v: string, pct: string) => `正在下载 ${v} · ${pct}`,
   downloading: (v: string) => `正在下载 ${v}`,
   progress: (done: string, total: string) => `${done} / ${total}`,
+  /** 换到了第 index + 1 个下载源（index 从 0 计）。只说第几个、共几个，不写源的地址与短名。 */
+  sourceSwitched: (index: number, count: number) => `已换用备用下载源（${index + 1}/${count}）`,
   viewProgress: "查看进度",
   ready: (v: string) => `${v} 已下好，等待安装`,
   readySub: `安装时${APP_NAME}会短暂关闭`,
@@ -72,6 +74,15 @@ export const UPDATE_COPY = {
   installing: "正在启动安装程序…",
   downloadFailed: "下载失败",
   downloadFailedBecause: (reason: string) => `下载失败：${reason}`,
+  /**
+   * 试过多个下载源、全都败在网络层：后端只在全是超时时报 timeout，有一个连不上就报 connect。
+   * 所以 connect 时其余源可能是超时（连上过、甚至传过一段数据），这一句不能说死都连不上。
+   */
+  allSourcesFailed: {
+    connect: "所有下载源都连不上或没有响应",
+    timeout: "所有下载源都没有响应",
+  },
+  sourcesFailed: (tried: number) => `${tried} 个下载源都没能下完`,
   signatureInvalid: "更新包签名校验不通过，已丢弃，不会安装",
   /** 打包、备份这类本地任务不能说成下载：与关窗确认同一口径，有下载时取消键才写「继续下载」。 */
   restartConfirm: (tasks: number, downloads: number) => ({
@@ -95,16 +106,28 @@ interface DownloadFailure {
   reason: string;
   signature: boolean;
   network: keyof typeof UPDATE_COPY.networkFailed | null;
+  /** 试过的下载源个数，至少为 1。 */
+  sourcesTried: number;
 }
 
 /**
  * 下载失败的写法，更新卡与更新面板共用。summary 是中文说法；raw 是另放、可选中的后端原文，
- * 它多半是插件的英文，不拼进中文句子。签名不符时包已丢弃，原因是固定说法，没有要另放的。
+ * 它多半是插件的英文，不拼进中文句子；试过多个源时它逐行写着各源的原文。签名不符时包已丢弃，原因是固定说法，没有要另放的。
  */
-export function downloadFailureCopy({ reason, signature, network }: DownloadFailure): { summary: string; raw: string | null } {
+export function downloadFailureCopy({ reason, signature, network, sourcesTried }: DownloadFailure): { summary: string; raw: string | null } {
   if (signature) return { summary: UPDATE_COPY.downloadFailedBecause(UPDATE_COPY.signatureInvalid), raw: null };
+  if (sourcesTried > 1) {
+    const because = network === null ? UPDATE_COPY.sourcesFailed(sourcesTried) : UPDATE_COPY.allSourcesFailed[network];
+    return { summary: UPDATE_COPY.downloadFailedBecause(because), raw: reason };
+  }
   if (network !== null) return { summary: UPDATE_COPY.downloadFailedBecause(UPDATE_COPY.networkFailed[network]), raw: reason };
   return { summary: UPDATE_COPY.downloadFailed, raw: reason };
+}
+
+/** 下载中换过源时多说的一句；还在用第一个源（或后端还没报源）时为 null，界面不提源的事。 */
+export function sourceSwitchedCopy(source: { index: number; count: number } | null): string | null {
+  if (source === null || source.index === 0) return null;
+  return UPDATE_COPY.sourceSwitched(source.index, source.count);
 }
 
 /** 自动检查发现新版本时的通知：每个版本只弹一次，动作打开更新面板。 */

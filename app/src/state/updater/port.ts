@@ -1,5 +1,5 @@
-// 启动器自更新的几条后端命令，按状态机执行者要的形状接好。下载进度来自带同一 task_id 的 core-event，
-// 下载结束（含失败与取消）即退订，晚到的进度事件不会再写进状态。
+// 启动器自更新的几条后端命令，按状态机执行者要的形状接好。下载进度与换源来自带同一 task_id 的 core-event，
+// 下载结束（含失败与取消）即退订，晚到的进度与换源事件不会再写进状态。
 
 import { checkUpdate, downloadUpdate, installUpdate, setInstallOnExit } from "../../ipc/system";
 import { cancelTask, onCoreEvent } from "../../ipc/tasks";
@@ -7,9 +7,11 @@ import type { UpdaterPort } from "./controller";
 
 export const UPDATER_PORT: UpdaterPort = {
   check: () => checkUpdate(),
-  download: async (taskId, onProgress) => {
+  download: async (taskId, onProgress, onSource) => {
     const unlisten = await onCoreEvent((event) => {
-      if (event.kind === "download" && event.task_id === taskId) onProgress(event.bytes, event.total_bytes);
+      if (event.task_id !== taskId) return;
+      if (event.kind === "download") onProgress(event.bytes, event.total_bytes);
+      else if (event.kind === "source") onSource({ index: event.index, count: event.count, name: event.name });
     });
     try {
       return await downloadUpdate(taskId);
