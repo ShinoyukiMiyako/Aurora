@@ -322,7 +322,7 @@ const EXCEPTIONS: readonly { file: string; text: string; why: string }[] = [
   { file: "../state/errors.ts", text: "文件 IO 失败: ", why: "比对后端 Io 错误正文的前缀，不是界面文案，半角冒号是后端的原样" },
   {
     file: "../setup/copy.ts",
-    text: `从测试版换回预览版时，先在 Windows 设置的「应用」里卸载 ${HOLE}，卸载时不要勾选「删除应用程序数据」；再运行这个安装包并沿用默认的安装位置，设置、账户和游戏文件都会保留。`,
+    text: `从测试版换回预览版时，先关掉这个窗口，在 Windows 设置的「应用」里卸载 ${HOLE}，卸载时不要勾选「删除应用程序数据」；再重新运行这个安装包并沿用默认的安装位置，设置、账户和游戏文件都会保留。`,
     why: "教用户在 Windows 设置「应用」页里操作，系统自己的叫法就是卸载",
   },
 ];

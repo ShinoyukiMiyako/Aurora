@@ -154,8 +154,9 @@ const LOCKED_LOCATION_EN = "The existing install can't move.";
 // 各通道共用一套安装身份，装着测试版再装预览版就是这一页，换回去只能先卸载。卸载项在系统「应用」里叫产品英文名。
 // 复选框原文取自 Tauri CLI 2.11.5 NSIS 模板的 deleteAppData，升级 CLI 要对一遍。不勾时卸载只删程序文件、快捷方式和卸载项，
 // 数据和记下的安装目录都留着，引导程序首装时默认装回原处，所以要叫人沿用默认位置。
-const CHANNEL_BACK_ZH = `从测试版换回预览版时，先在 Windows 设置的「应用」里卸载 ${APP_NAME_EN}，卸载时不要勾选「删除应用程序数据」；再运行这个安装包并沿用默认的安装位置，设置、账户和游戏文件都会保留。`;
-const CHANNEL_BACK_EN = `To switch from Beta back to Preview, first uninstall ${APP_NAME_EN} from Apps in Windows Settings, leaving "Delete the application data" unchecked. Then run this installer again and keep the default location. Your settings, accounts and game files will be kept.`;
+// 引导程序是单实例的，这个窗口开着时再运行安装包只会把它叫回前台，它不会重新探测，所以要先叫人关掉它。
+const CHANNEL_BACK_ZH = `从测试版换回预览版时，先关掉这个窗口，在 Windows 设置的「应用」里卸载 ${APP_NAME_EN}，卸载时不要勾选「删除应用程序数据」；再重新运行这个安装包并沿用默认的安装位置，设置、账户和游戏文件都会保留。`;
+const CHANNEL_BACK_EN = `To switch from Beta back to Preview, close this window first, then uninstall ${APP_NAME_EN} from Apps in Windows Settings, leaving "Delete the application data" unchecked. Then run this installer again and keep the default location. Your settings, accounts and game files will be kept.`;
 
 const ZH: SetupCopy = {
   frame: {

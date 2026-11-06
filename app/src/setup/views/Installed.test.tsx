@@ -108,7 +108,7 @@ describe("标题和说明", () => {
     show("newer", { existing: { kind: "newer", version: "0.3.0", dir: LONG_DIR }, payloadVersion: "0.2.0" });
     expect(text("h1")).toBe(`这台电脑上的${APP_NAME}更新`);
     expect(text("header p")).toBe(
-      `已安装 0.3.0，这个安装包是 0.2.0，不能往回装。从测试版换回预览版时，先在 Windows 设置的「应用」里卸载 ${APP_NAME_EN}，卸载时不要勾选「删除应用程序数据」；再运行这个安装包并沿用默认的安装位置，设置、账户和游戏文件都会保留。`,
+      `已安装 0.3.0，这个安装包是 0.2.0，不能往回装。从测试版换回预览版时，先关掉这个窗口，在 Windows 设置的「应用」里卸载 ${APP_NAME_EN}，卸载时不要勾选「删除应用程序数据」；再重新运行这个安装包并沿用默认的安装位置，设置、账户和游戏文件都会保留。`,
     );
   });
 
@@ -122,7 +122,7 @@ describe("标题和说明", () => {
     show("newer", { existing: { kind: "newer", version: "0.3.0", dir: LONG_DIR }, payloadVersion: "0.2.0" }, "en");
     expect(text("h1")).toBe(`A newer ${APP_NAME_EN} is installed`);
     expect(text("header p")).toBe(
-      `0.3.0 is installed and this installer is 0.2.0, so it can't go back. To switch from Beta back to Preview, first uninstall ${APP_NAME_EN} from Apps in Windows Settings, leaving "Delete the application data" unchecked. Then run this installer again and keep the default location. Your settings, accounts and game files will be kept.`,
+      `0.3.0 is installed and this installer is 0.2.0, so it can't go back. To switch from Beta back to Preview, close this window first, then uninstall ${APP_NAME_EN} from Apps in Windows Settings, leaving "Delete the application data" unchecked. Then run this installer again and keep the default location. Your settings, accounts and game files will be kept.`,
     );
   });
 });
