@@ -6,12 +6,8 @@
 
 const WORKFLOW: &str = include_str!("../../../../.github/workflows/beta-release.yml");
 
-/// beta 客户端唯一会问的清单地址，写法与 updater 里的端点常量相同。
-const BETA_MANIFEST_URL: &str = concat!(
-    "https://",
-    petalfall_base::app_slug!(),
-    ".org/updates/beta/latest.json"
-);
+/// beta 客户端唯一会问的清单地址：直接取客户端的常量，工作流推到别处或客户端改了地址，这里都会挂。
+const BETA_MANIFEST_URL: &str = crate::commands::updater::BETA_ENDPOINT;
 
 const BETA_ONLY: &str = "if: github.ref == 'refs/heads/beta'";
 
