@@ -78,18 +78,40 @@ function isFromFork(pr) {
   return pr.head.repo?.id !== pr.base.repo.id;
 }
 
-// GitHub 验证的是提交者的签名，不是作者的：把作者填成维护者、再用自己的密钥签，照样显示已验证。网页上的提交由
-// GitHub 代签、提交者是 web-flow，签名只说明提交出自 GitHub，作者记成谁取决于当时的操作（压缩合并记成 PR 的开启者），
-// 也证明不了维护者本人经手。所以要提交者就是作者本人、签名也经 GitHub 验证，才认是维护者自己的提交；维护者在网页上
-// 给 fork 的 PR 更新分支产生的合并提交因此也会被点名，要改在本地签名后推送。Bot 不在此列：谁都能建 GitHub App
-// 装到自己的 fork 上，fork 里的工作流也能以 github-actions[bot] 的身份提交，这些提交的内容都由 fork 的主人决定，
-// 签名再真也证明不了出处。
+// GitHub 网页代签时的提交者账号，ID 由 gh api users/web-flow 查得。它的 type 是 User，按类型认不出来，只能按 ID 认。
+const WEB_FLOW_USER_ID = 19864447;
+
+// octokit/openapi 的 Signature verification object 表里，verification.reason 只有这两个说的是 GitHub 的验证服务
+// 本身出错：gpgverify_error 是与验证服务通信出错，gpgverify_unavailable 是验证服务暂时不可用。其余原因（expired_key、
+// not_signing_key、unsigned、unknown_signature_type、no_user、unverified_email、bad_email、unknown_key、
+// malformed_signature、invalid）说的都是签名、密钥或邮箱本身，照旧当作没有有效签名。
+const TRANSIENT_VERIFICATION_REASONS = new Set(['gpgverify_error', 'gpgverify_unavailable']);
+
+// fork 里作者显示为维护者或 Bot 的提交，作者是谁证明不了，改由提交者负责：把这个提交放进 fork 的是提交者，变基、拣选
+// 别人的提交，或者把作者冒填成维护者再用自己的账号提交，责任都在他，所以要他签署。维护者推到贡献者分支的签名提交，
+// 贡献者一变基，提交者就换成贡献者、签名也没了，这样判不会让贡献者把维护者写的代码记到自己名下。
+// 下面两类提交者替不了真人担责：网页上的提交由 GitHub 代签、提交者是 web-flow，签名只说明提交出自 GitHub，作者记成谁
+// 取决于当时的操作（压缩合并记成 PR 的开启者），维护者在网页上给 fork 的 PR 更新分支产生的合并提交因此会被点名，要改在
+// 本地签名后推送；谁都能建 GitHub App 装到自己的 fork 上，fork 里的工作流也能以 github-actions[bot] 的身份提交，这些
+// 提交的内容都由 fork 的主人决定，Bot 的签名再真也证明不了出处。
+function isAccountableCommitter(user) {
+  return user.id !== WEB_FLOW_USER_ID && !isExempt(user);
+}
+
+// 提交者是维护者时，要签名经 GitHub 验证才认是维护者本人经手：GitHub 验证的是提交者的签名（no_user、bad_email 都按
+// 提交者邮箱判），提交者邮箱同样谁都能填成维护者的。作者是 Bot 也一样认：签名证明了维护者本人把它放进来。
 function isProvenExemptCommit(commit) {
-  return (
-    EXEMPT_USER_IDS.has(commit.author.id) &&
-    commit.commit.verification.verified &&
-    commit.committer?.id === commit.author.id
-  );
+  if (!EXEMPT_USER_IDS.has(commit.committer.id)) {
+    return false;
+  }
+  const { verified, reason } = commit.commit.verification;
+  // 验证服务出错时维护者的真签名也显示未验证，判成冒用会冤枉人，而没有新的推送或评论就不会再查，所以让作业失败等重跑。
+  if (!verified && TRANSIENT_VERIFICATION_REASONS.has(reason)) {
+    throw new Error(
+      `GitHub 签名验证暂时不可用（verification.reason 为 ${reason}），无法确认提交 ${commit.sha} 是否经维护者本人签名，请稍后重跑本检查`,
+    );
+  }
+  return verified;
 }
 
 function collectContributors(pr, commits) {
@@ -103,19 +125,29 @@ function collectContributors(pr, commits) {
       required.set(user.id, user.login);
     }
   };
+  const addUnlinked = (sha, { email, name }) => {
+    if (!unlinkedByEmail.has(email)) {
+      unlinkedByEmail.set(email, { sha, name });
+    }
+  };
 
   // 开启者是建 PR 的登录账号，冒用不了，fork 的 PR 也照旧豁免。
   addSigner(pr.user);
   for (const commit of commits) {
     // 邮箱没关联账号时，接口可能给 null，也可能给空对象。
     if (commit.author?.id === undefined) {
-      const { email, name } = commit.commit.author;
-      if (!unlinkedByEmail.has(email)) {
-        unlinkedByEmail.set(email, { sha: commit.sha, name });
+      addUnlinked(commit.sha, commit.commit.author);
+    } else if (fromFork && isExempt(commit.author)) {
+      if (commit.committer?.id === undefined) {
+        // 提交者邮箱没关联账号，就找不到该负责的人，和作者邮箱没关联是一回事，关联邮箱或换已关联的邮箱重新提交都能解决，
+        // 所以并进未关联提交，列的是提交者的名字。
+        addUnlinked(commit.sha, commit.commit.committer);
+      } else if (isAccountableCommitter(commit.committer)) {
+        addSigner(commit.committer);
+      } else if (!isProvenExemptCommit(commit)) {
+        // 逐个列出而不按账号去重：要改的是这些提交本身。
+        unverified.push({ sha: commit.sha, login: commit.author.login, committer: commit.committer.login });
       }
-    } else if (fromFork && isExempt(commit.author) && !isProvenExemptCommit(commit)) {
-      // 逐个列出而不按账号去重：要改的是这些提交本身。
-      unverified.push({ sha: commit.sha, login: commit.author.login });
     } else {
       addSigner(commit.author);
     }
@@ -243,18 +275,21 @@ function pendingCommentBody(claUrl, missing, unlinked, unverified) {
   if (unlinked.length > 0) {
     const commits = unlinked.map(({ sha, name }) => `- ${codeSpan(sha.slice(0, 8))} ${codeSpan(name)}`);
     sections.push(
-      '下列提交的邮箱没有关联 GitHub 账号，无法确认作者。请把邮箱关联到账号后再发一条评论重新检查，或者改用已关联的邮箱重新提交。',
-      'The email on these commits is not linked to a GitHub account, so the author cannot be identified. Link the email to an account and comment here to re-check, or recommit with a linked email.',
+      '下列提交的邮箱没有关联 GitHub 账号，无法确认该由谁签署。请把邮箱关联到账号后再发一条评论重新检查，或者改用已关联的邮箱重新提交。',
+      'The email on these commits is not linked to a GitHub account, so it cannot be determined who needs to sign. Link the email to an account and comment here to re-check, or recommit with a linked email.',
       commits.join('\n'),
     );
   }
 
   if (unverified.length > 0) {
     // 登录名也进代码块：直接写会 @ 到维护者或 Bot。
-    const commits = unverified.map(({ sha, login }) => `- ${codeSpan(sha.slice(0, 8))} ${codeSpan(login)}`);
+    const commits = unverified.map(
+      ({ sha, login, committer }) =>
+        `- ${codeSpan(sha.slice(0, 8))} ${codeSpan(login)}（提交者 / committer ${codeSpan(committer)}）`,
+    );
     sections.push(
-      '下列提交来自 fork，作者显示为维护者或机器人账号，但没有该账号本人经 GitHub 验证的签名，无法确认作者。请改用你自己的账号作为作者重新提交这些改动，推送后会自动重新检查。',
-      "These commits come from a fork and are attributed to the maintainer or a bot account, but they lack a signature that GitHub verified as that account's own, so the author cannot be confirmed. Please recommit these changes with your own account as the author; the check reruns when you push.",
+      '下列提交来自 fork，作者显示为维护者或机器人账号，提交者却是 GitHub 网页代签的 `web-flow`、机器人账号，或者没有经 GitHub 验证签名的维护者账号，无法确认由谁负责。维护者本人的提交（包括维护者在网页上更新分支产生的合并提交）要由维护者在本地签名后重新推送。其余的请用你自己的账号在本地重写这些提交，例如 `git rebase --force-rebase <PR 的目标分支>` 后强制推送：作者不变，提交者换成你，这些提交改由你签署 CLA 负责。推送后会自动重新检查。',
+      "These commits come from a fork and are attributed to the maintainer or a bot account, but their committer is GitHub web signing (`web-flow`), a bot account, or the maintainer account without a signature verified by GitHub, so it cannot be confirmed who is responsible for them. Commits the maintainer made (including merge commits from updating the branch on the web) need to be signed locally and pushed again by the maintainer. For the rest, rewrite these commits locally with your own account, for example `git rebase --force-rebase <PR base branch>` followed by a force-push: the author stays the same, you become the committer, and you sign the CLA for them. The check reruns when you push.",
       commits.join('\n'),
     );
   }
