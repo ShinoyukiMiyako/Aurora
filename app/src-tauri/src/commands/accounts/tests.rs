@@ -440,7 +440,7 @@ mod microsoft {
             )
             .mount(&revoked)
             .await;
-        let captured = crate::tests::Captured::default();
+        let captured = crate::tests::Captured::new();
         let writer = captured.clone();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::fmt()

@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn default_filter_drops_the_updater_plugin_but_keeps_the_rest() {
-        let captured = crate::tests::Captured::default();
+        let captured = crate::tests::Captured::new();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::registry()
             .with(EnvFilter::new(DEFAULT_FILTER))

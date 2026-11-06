@@ -1192,7 +1192,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(WINDOW_STATE_FILE);
         std::fs::write(&path, "{ broken").unwrap();
-        let captured = crate::tests::Captured::default();
+        let captured = crate::tests::Captured::new();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
