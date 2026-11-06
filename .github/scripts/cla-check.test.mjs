@@ -19,6 +19,7 @@ const OWNER = 'ShinoyukiMiyako';
 const REPO = 'Petalfall';
 const NUMBER = randomInt(1, 100_000);
 const HEAD_SHA = 'a'.repeat(40);
+const BASE_SHA = 'b'.repeat(40);
 const SIGNED_AT = '2026-12-01T08:00:00Z';
 const CLA_URL = `https://github.com/${OWNER}/${REPO}/blob/dev/CLA.md`;
 
@@ -35,8 +36,6 @@ const mallory = person('mallory');
 const renovate = person('renovate[bot]', 'Bot');
 const actionsBot = person('github-actions[bot]', 'Bot');
 const maintainer = { id: 132777740, login: OWNER, type: 'User' };
-const BASE_REPO = { id: randomInt(1_000_000, 2_000_000) };
-const FORK_REPO = { id: randomInt(2_000_000, 3_000_000) };
 
 function commitBy(author, overrides = {}) {
   nextId += 1;
@@ -101,8 +100,7 @@ function createGitHub({
   fileExists = true,
   branchExists = true,
   prCommitCount,
-  headRef = 'feature',
-  headRepo = FORK_REPO,
+  compareCommits,
   beforeWrite,
 } = {}) {
   const repository = {
@@ -115,7 +113,7 @@ function createGitHub({
       this.signatures = next;
     },
   };
-  const calls = { writes: [], statuses: [], created: [], updated: [] };
+  const calls = { writes: [], statuses: [], created: [], updated: [], compared: [] };
 
   const pageOf = (items, { page = 1, per_page: perPage = 30 }) =>
     items.slice((page - 1) * perPage, page * perPage);
@@ -134,6 +132,14 @@ function createGitHub({
         }
       }
     },
+    // 比较接口：分页取完，总数在 total_commits。compareCommits 模拟比较结果比 PR 记的提交数少
+    async request(route, params) {
+      assert.equal(route, 'GET /repos/{owner}/{repo}/compare/{basehead}');
+      assert.equal(params.basehead, `${BASE_SHA}...${HEAD_SHA}`);
+      calls.compared.push(params.page);
+      const listed = compareCommits ?? commits;
+      return { data: { total_commits: listed.length, commits: pageOf(listed, params) } };
+    },
     rest: {
       pulls: {
         async get() {
@@ -141,8 +147,8 @@ function createGitHub({
             data: {
               number: NUMBER,
               user: opener,
-              head: { sha: HEAD_SHA, ref: headRef, repo: headRepo },
-              base: { ref: 'beta', repo: BASE_REPO },
+              head: { sha: HEAD_SHA },
+              base: { sha: BASE_SHA },
               commits: prCommitCount ?? commits.length,
             },
           };
@@ -383,97 +389,66 @@ describe('需要签署的人', () => {
     assert.deepEqual(result.missing, ['bob']);
   });
 
-  it('提交超过接口上限时报错，不写状态', async () => {
-    const commits = Array.from({ length: 251 }, () => commitBy(alice));
+  it('超过 250 个提交时改走比较接口，后面的作者照样核对', async () => {
+    const commits = Array.from({ length: 300 }, () => commitBy(alice));
+    commits.push(commitBy(bob));
     const github = createGitHub({ opener: alice, commits, signatures: [recordOf(alice)] });
 
-    await assert.rejects(run(github), /251 个提交，只取到 250 个/);
+    const result = await run(github);
+
+    assert.deepEqual(result.missing, ['bob']);
+    assert.deepEqual(github.calls.compared, [1, 2, 3, 4]);
+  });
+
+  it('比较接口取到的比 PR 记的少时报错，不写状态', async () => {
+    const commits = Array.from({ length: 300 }, () => commitBy(alice));
+    const github = createGitHub({
+      opener: alice,
+      commits,
+      compareCommits: commits.slice(0, 280),
+      signatures: [recordOf(alice)],
+    });
+
+    await assert.rejects(run(github), /300 个提交，只取到 280 个/);
     assert.deepEqual(github.calls.statuses, []);
   });
 
-  it('正好 250 个提交时正常判定', async () => {
+  it('正好 250 个提交时用列提交接口正常判定', async () => {
     const commits = Array.from({ length: 250 }, () => commitBy(alice));
     const github = createGitHub({ opener: alice, commits, signatures: [recordOf(alice)] });
 
     const result = await run(github);
 
     assert.equal(result.state, 'success');
+    assert.deepEqual(github.calls.compared, []);
   });
 });
 
+// dev 到 beta 的晋级 PR 有几百个提交，同样逐个核对作者：维护者在本地拣进没签的外部提交时，这里要拦得住。
 describe('晋级 PR', () => {
-  // 混进没签的作者和没关联邮箱的提交：晋级 PR 要是照常逐个核对，这里要么因超过上限报错，要么判失败。
-  function releaseHistory(length) {
-    const commits = Array.from({ length }, () => commitBy(maintainer));
-    commits.push(commitBy(bob), unlinkedCommit({ name: 'Old Email' }));
-    return commits;
-  }
-
-  for (const headRef of ['dev', 'beta']) {
-    it(`本仓库 ${headRef} 开出的 PR 只核对开启者，不受 250 个提交上限的限制`, async () => {
-      const github = createGitHub({
-        opener: maintainer,
-        commits: releaseHistory(300),
-        headRef,
-        headRepo: BASE_REPO,
-      });
-
-      const result = await run(github);
-
-      assert.deepEqual(result, { state: 'success', missing: [], unlinked: [] });
-      assert.equal(lastStatus(github).state, 'success');
-      assert.equal(lastStatus(github).sha, HEAD_SHA);
-      assert.deepEqual(github.comments, []);
-    });
-  }
-
-  it('开启者没签照样要签', async () => {
-    const github = createGitHub({
-      opener: alice,
-      commits: releaseHistory(10),
-      headRef: 'dev',
-      headRepo: BASE_REPO,
-    });
+  it('全是维护者和 Bot 的提交时通过，不发评论', async () => {
+    const commits = Array.from({ length: 320 }, (_, index) => commitBy(index % 40 === 0 ? renovate : maintainer));
+    const github = createGitHub({ opener: maintainer, commits });
 
     const result = await run(github);
 
-    assert.deepEqual(result.missing, ['alice']);
-    assert.deepEqual(result.unlinked, []);
-    assert.equal(lastStatus(github).state, 'failure');
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [] });
+    assert.equal(lastStatus(github).state, 'success');
+    assert.equal(lastStatus(github).sha, HEAD_SHA);
+    assert.deepEqual(github.comments, []);
   });
 
-  it('fork 上同名的 dev 分支照常逐个核对', async () => {
-    const github = createGitHub({ opener: alice, commits: releaseHistory(10), headRef: 'dev' });
-
-    const result = await run(github);
-
-    assert.deepEqual(result.missing, ['alice', 'bob']);
-    assert.equal(result.unlinked.length, 1);
-  });
-
-  it('来源 fork 已删除时照常逐个核对', async () => {
-    const github = createGitHub({
-      opener: alice,
-      commits: releaseHistory(300),
-      headRef: 'dev',
-      headRepo: null,
-    });
-
-    await assert.rejects(run(github), /只取到 250 个/);
-    assert.deepEqual(github.calls.statuses, []);
-  });
-
-  it('本仓库别的分支开出的 PR 照常逐个核对', async () => {
-    const github = createGitHub({
-      opener: maintainer,
-      commits: releaseHistory(10),
-      headRef: 'fix/updater',
-      headRepo: BASE_REPO,
-    });
+  it('混着没签的外部提交和没关联的邮箱时照样点名，开启者是维护者也不放行', async () => {
+    const commits = Array.from({ length: 300 }, () => commitBy(maintainer));
+    commits.splice(270, 0, commitBy(bob));
+    commits.push(unlinkedCommit({ name: 'Old Email' }));
+    const github = createGitHub({ opener: maintainer, commits });
 
     const result = await run(github);
 
     assert.deepEqual(result.missing, ['bob']);
+    assert.equal(result.unlinked.length, 1);
+    assert.equal(lastStatus(github).state, 'failure');
   });
 });
 

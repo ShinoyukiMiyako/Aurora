@@ -39,10 +39,33 @@ function isValidSignatureComment(comment) {
   );
 }
 
-// 晋级 PR（dev 到 beta、beta 到 main）的提交都已在发布分支上：这两个分支只有有写权限的人能推，
-// 别人的提交经 PR 合进去，那条 PR 已核对过 CLA。只认本仓库的分支，fork 里同名的分支谁都能推。
-function isPromotion(pr, defaultBranch) {
-  return pr.head.repo?.id === pr.base.repo.id && [defaultBranch, 'beta'].includes(pr.head.ref);
+// 列 PR 提交的接口最多给 250 个。超过时改用比较接口：带 page 参数可以分页取完，每页最多 100 个，
+// 总数在 total_commits。三点比较取的是 head 有、与 base 的合并基点之后的提交，和 PR 自己的提交列表一致；
+// base.sha 落后时只会多列，不会少列。晋级 PR（dev 到 beta 有几百个提交）就走这条路，照样逐个核对作者。
+const LIST_COMMITS_LIMIT = 250;
+const PAGE_SIZE = 100;
+
+async function listPullCommits(github, repository, pr) {
+  if (pr.commits <= LIST_COMMITS_LIMIT) {
+    return github.paginate(github.rest.pulls.listCommits, {
+      ...repository,
+      pull_number: pr.number,
+      per_page: PAGE_SIZE,
+    });
+  }
+  const commits = [];
+  for (let page = 1; ; page += 1) {
+    const { data } = await github.request('GET /repos/{owner}/{repo}/compare/{basehead}', {
+      ...repository,
+      basehead: `${pr.base.sha}...${pr.head.sha}`,
+      per_page: PAGE_SIZE,
+      page,
+    });
+    commits.push(...data.commits);
+    if (data.commits.length < PAGE_SIZE || commits.length >= data.total_commits) {
+      return commits;
+    }
+  }
 }
 
 function collectContributors(pr, commits) {
@@ -222,17 +245,9 @@ export async function runClaCheck({ github, context, core }) {
   const claUrl = `https://github.com/${owner}/${repo}/blob/${context.payload.repository.default_branch}/CLA.md`;
 
   const { data: pr } = await github.rest.pulls.get({ ...repository, pull_number: number });
-  // 晋级 PR 不逐个核对提交作者，只看开启者：它们常常超过下面接口 250 个提交的上限，逐个核对就永远判不下来。
-  const promotion = isPromotion(pr, context.payload.repository.default_branch);
-  const commits = promotion
-    ? []
-    : await github.paginate(github.rest.pulls.listCommits, {
-        ...repository,
-        pull_number: number,
-        per_page: 100,
-      });
-  // 这个接口最多返回 250 个提交。列不全就确认不了所有作者，不能放行。
-  if (!promotion && commits.length < pr.commits) {
+  const commits = await listPullCommits(github, repository, pr);
+  // 列不全就确认不了所有作者，不能放行。
+  if (commits.length < pr.commits) {
     throw new Error(`PR #${number} 有 ${pr.commits} 个提交，只取到 ${commits.length} 个，无法核对全部作者`);
   }
   // 每次都扫整条评论而不是只看触发事件：运行被取消或重跑后，结果仍然一致。
