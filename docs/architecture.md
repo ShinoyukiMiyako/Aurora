@@ -354,7 +354,7 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 | 环境 | 放什么 | 部署分支 | 审批 |
 | --- | --- | --- | --- |
-| `release-signing` | 只放发布签名私钥 `RELEASE_UPDATER_PRIVATE_KEY` 与它的口令 `RELEASE_UPDATER_KEY_PASSWORD` | beta、main | 必需审批人是维护者，关闭管理员绕过 |
+| `release-signing` | 只放发布签名私钥 `RELEASE_UPDATER_PRIVATE_KEY`，这把钥不设口令 | beta、main | 必需审批人是维护者，关闭管理员绕过 |
 | `updates-beta` | beta 专用的存储桶凭据、beta 的香港推送钥匙，以及变量 `R2_ACCOUNT_ID`，名称见下表 | beta | 不设审批，关闭管理员绕过 |
 
 - 只有签名的作业挂 `release-signing`，这个作业里没有任何上传或推送凭据；传桶、建 Release 与推送香港的作业挂 `updates-beta`；构建作业不挂环境，拿不到任何发布凭据，只读要编进包里的仓库级机密 `PETALFALL_CURSEFORGE_API_KEY` 与仓库变量 `PETALFALL_MSA_CLIENT_ID`，和 dev 构建相同。

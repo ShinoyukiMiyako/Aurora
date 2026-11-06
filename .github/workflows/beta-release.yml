@@ -516,18 +516,19 @@ jobs:
 
       # 更新包是引导程序，不是 NSIS 包，原因见 dev-build.yml 的同名步骤。--app-version 把版本写进可信注释，
       # 客户端开了 requireSignedVersion，拿它和清单里的 version 比，伪造清单给旧包配上更高的版本号也骗不到降级。
-      # 漏传时 CLI 只打警告照样签，靠下一步验签挡下。发布钥按要求带口令，口令为空就是机密配错了。
+      # 漏传时 CLI 只打警告照样签，靠下一步验签挡下。
+      # 发布钥不设口令：口令只能和私钥放在同一个环境里，拿得到一个就拿得到另一个，在 CI 这头多挡不了什么。
+      # --password '' 不能省：缺了这一项 CLI 会等终端输入口令，托管机上没有终端，作业会一直挂到超时。
       - name: 给更新包签名
         env:
           TAURI_CLI: ${{ steps.cli.outputs.tauri }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_UPDATER_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.RELEASE_UPDATER_KEY_PASSWORD }}
         run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] || [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
-            echo "::error::环境 release-signing 里没有配置 RELEASE_UPDATER_PRIVATE_KEY 或 RELEASE_UPDATER_KEY_PASSWORD" >&2
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::环境 release-signing 里没有配置 RELEASE_UPDATER_PRIVATE_KEY" >&2
             exit 1
           fi
-          node "$TAURI_CLI" signer sign --app-version "$VERSION" "$BOOTSTRAP"
+          node "$TAURI_CLI" signer sign --app-version "$VERSION" --password '' "$BOOTSTRAP"
           test -s "$BOOTSTRAP.sig"
 
       # 私钥和仓库里的公钥不是一对时 CLI 只打警告照样签，发出去的包所有 beta 用户都会拒收。

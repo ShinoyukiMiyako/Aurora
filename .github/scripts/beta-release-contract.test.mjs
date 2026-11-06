@@ -399,6 +399,8 @@ describe('beta 发布工作流的契约', () => {
     const signing = sign.filter((line) => line.includes('signer sign'));
     assert.equal(signing.length, 1, `sign 作业里应恰有一条签名命令：${signing}`);
     assert.ok(signing[0].includes('signer sign --app-version "$VERSION" '), `签名不再把版本号写进可信注释：${signing[0]}`);
+    // 发布钥不设口令，口令一项缺省时 CLI 会等终端输入，托管机上作业挂到超时。
+    assert.ok(signing[0].includes(" --password '' "), `签名命令没有显式传空口令：${signing[0]}`);
     assert.ok(
       sign.includes('run: node .github/scripts/verify-update-signature.mjs .github/release-updater.pub "$BOOTSTRAP" "$BOOTSTRAP.sig" "$VERSION"'),
       '签完不再按发布公钥验签、核对签名里的版本',
@@ -406,12 +408,12 @@ describe('beta 发布工作流的契约', () => {
   });
 
   // 持私钥的作业拿不到任何发布渠道：桶凭据、香港推送钥、能写仓库的令牌都不在这里，借道 sign 签出来的包自己发不出去。
-  it('sign 只拿发布私钥和口令，没有任何写权限', () => {
+  it('sign 只拿发布私钥，没有任何写权限', () => {
     const sign = job('sign');
     for (const prefix of ['OSS_', 'R2_', 'HK_']) {
       assert.deepEqual(sign.filter((line) => line.toUpperCase().includes(prefix)), [], `sign 作业里出现了 ${prefix} 开头的凭据`);
     }
-    assert.deepEqual(secretsIn(exposedOf(jobLines('sign'))), { names: ['RELEASE_UPDATER_KEY_PASSWORD', 'RELEASE_UPDATER_PRIVATE_KEY'], other: [] });
+    assert.deepEqual(secretsIn(exposedOf(jobLines('sign'))), { names: ['RELEASE_UPDATER_PRIVATE_KEY'], other: [] });
     assert.deepEqual(tokenRefs(exposedOf(jobLines('sign'))), [], 'sign 作业不该拿仓库令牌');
     assert.deepEqual(jobBlock('sign', 'permissions'), ['contents: read']);
   });
