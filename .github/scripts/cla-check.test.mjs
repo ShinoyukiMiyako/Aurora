@@ -128,6 +128,8 @@ function createGitHub({
   headRepo = BASE_REPO,
   prState = 'open',
   failStatus,
+  failGet = false,
+  failComment = false,
 } = {}) {
   const repository = {
     revision: 1,
@@ -178,6 +180,9 @@ function createGitHub({
     rest: {
       pulls: {
         async get() {
+          if (failGet) {
+            throw httpError(502);
+          }
           return {
             data: {
               number: NUMBER,
@@ -201,6 +206,9 @@ function createGitHub({
           return { data: pageOf(comments, params) };
         },
         async createComment({ issue_number: issueNumber, body }) {
+          if (failComment) {
+            throw httpError(502);
+          }
           nextId += 1;
           const created = commentBy(actionsBot, body, { id: nextId });
           calls.created.push({ issueNumber, body, id: created.id });
@@ -1952,6 +1960,51 @@ describe('关了的 PR 与出错时的状态', () => {
     assert.deepEqual(github.calls.writes, []);
     assert.deepEqual(botComments(github), []);
     assert.deepEqual(github.calls.compared, []);
+  });
+
+  it('关了的同仓库 PR 和 fork 还在的 PR 同样不重查', async () => {
+    for (const headRepo of [BASE_REPO, forkOwnedBy(alice)]) {
+      const github = createGitHub({
+        opener: alice,
+        headRepo,
+        commits: [commitBy(alice)],
+        signatures: [recordOf(alice)],
+        prState: 'closed',
+      });
+
+      assert.deepEqual(await run(github, issueCommentContext()), { state: 'skipped' });
+      assert.deepEqual(github.calls.statuses, []);
+      assert.deepEqual(botComments(github), []);
+    }
+  });
+
+  it('取 PR 失败时按 pull_request_target 载荷里的 head 把状态改成 error', async () => {
+    const github = createGitHub({ opener: alice, commits: [commitBy(alice)], failGet: true });
+    const context = pullRequestContext();
+    context.payload.pull_request.head = { sha: github.headSha() };
+
+    await assert.rejects(run(github, context), { status: 502 });
+
+    assert.deepEqual(github.calls.statuses, [erroredStatus(github)]);
+  });
+
+  it('评论触发时取 PR 失败，载荷里没有 head，只让作业失败、不写状态', async () => {
+    const github = createGitHub({ opener: alice, commits: [commitBy(alice)], failGet: true });
+
+    await assert.rejects(run(github, issueCommentContext()), { status: 502 });
+
+    assert.deepEqual(github.calls.statuses, []);
+  });
+
+  it('结论写上 head 之后同步评论失败，不把这次算出的结论改成 error', async () => {
+    const github = createGitHub({ opener: alice, commits: [commitBy(bob)], signatures: [recordOf(alice)], failComment: true });
+
+    await assert.rejects(run(github), { status: 502 });
+
+    assert.deepEqual(
+      github.calls.statuses.map((status) => status.state),
+      ['failure'],
+    );
   });
 
   it('重查出错时把 head 上上一次的 success 改成 error，不留着旧结论', async () => {

@@ -370,7 +370,18 @@ export async function runClaCheck({ github, context, core }) {
   const { owner, repo } = repository;
   const claUrl = `https://github.com/${owner}/${repo}/blob/${context.payload.repository.default_branch}/CLA.md`;
 
-  const { data: pr } = await github.rest.pulls.get({ ...repository, pull_number: number });
+  let pr;
+  try {
+    ({ data: pr } = await github.rest.pulls.get({ ...repository, pull_number: number }));
+  } catch (error) {
+    // 取不到 PR 时，pull_request_target 的载荷里还有触发时的 head，照样能把旧结论改成 error；issue_comment 的载荷里
+    // 没有 head，只能让作业失败。
+    const sha = context.payload.pull_request?.head?.sha;
+    if (sha !== undefined) {
+      await markErrored({ github, repository, context, sha, error });
+    }
+    throw error;
+  }
   // 关了的 PR 不再重查：已合并的 PR 下有人评论（报回归、致谢）也会触发检查，这时 fork 可能早删了，重判会在进了历史的提交上
   // 写 failure，还在已合并的 PR 下叫人重开；按同一个 head 重开的新 PR 也会被旧 PR 的评论改回 failure。重新打开会再查一次。
   // 代价是在关了的 PR 下发的签署评论不记录，下次开 PR 时再签。
@@ -379,52 +390,16 @@ export async function runClaCheck({ github, context, core }) {
     return { state: 'skipped' };
   }
 
+  // 只有判定途中出错才改成 error。结论写上 head 之后再出错（例如同步机器人评论失败），head 上那份就是这次算出的，
+  // 不是过时的，改成 error 反倒挡住合并，所以写状态和评论放在外面。
+  let verdict;
   try {
-    return await checkPull({ github, repository, core, pr, claUrl });
+    verdict = await judgePull({ github, repository, pr });
   } catch (error) {
-    await markErrored({ github, repository, context, pr, error });
+    await markErrored({ github, repository, context, sha: pr.head.sha, error });
     throw error;
   }
-}
-
-// 查到一半出错时 head 上可能还留着上一次的结论：改了目标分支后重查，旧基分支下算出的 success 原样留着照样能合并。
-// 先把状态改成 error 再让作业失败；写状态也失败时两个错误一起报，不丢原因。
-async function markErrored({ github, repository, context, pr, error }) {
-  try {
-    await github.rest.repos.createCommitStatus({
-      ...repository,
-      sha: pr.head.sha,
-      context: STATUS_CONTEXT,
-      state: 'error',
-      description: '检查出错，请重跑 / Check errored, re-run it',
-      target_url: `${context.serverUrl}/${repository.owner}/${repository.repo}/actions/runs/${context.runId}`,
-    });
-  } catch (statusError) {
-    throw new AggregateError([error, statusError], `CLA 检查出错，把状态改成 error 也失败了：${statusError.message}`);
-  }
-}
-
-async function checkPull({ github, repository, core, pr, claUrl }) {
-  const { number } = pr;
-  const commits = await listPullCommits(github, repository, pr);
-  // 列不全就确认不了所有作者，不能放行。
-  if (commits.length < pr.commits) {
-    throw new Error(`PR #${number} 有 ${pr.commits} 个提交，只取到 ${commits.length} 个，无法核对全部作者`);
-  }
-  assertCoversHead(pr, commits);
-  // 每次都扫整条评论而不是只看触发事件：运行被取消或重跑后，结果仍然一致。
-  const comments = await github.paginate(github.rest.issues.listComments, {
-    ...repository,
-    issue_number: number,
-    per_page: 100,
-  });
-
-  const { required, unlinked, unverified, forkDeleted } = collectContributors(pr, commits);
-  const candidates = signaturesFromComments(comments, required, number);
-  const signed = await recordSignatures(github, repository, number, candidates);
-
-  const missing = [...required].filter(([id]) => !signed.has(id)).map(([, login]) => login);
-  const passed = missing.length === 0 && unlinked.length === 0 && unverified.length === 0 && !forkDeleted;
+  const { comments, missing, unlinked, unverified, forkDeleted, passed } = verdict;
   const state = passed ? 'success' : 'failure';
 
   // 未签署不让作业失败：结果全在提交状态上，签署后不会残留红色的失败运行，也就不需要重跑权限。
@@ -447,4 +422,45 @@ async function checkPull({ github, repository, core, pr, claUrl }) {
     `PR #${number}: ${state}，待签署 ${missing.length} 人，未关联提交 ${unlinked.length} 个，提交者担不了责的 fork 提交 ${unverified.length} 个${forkDeleted ? '，fork 已删除、无法确认主人' : ''}`,
   );
   return { state, missing, unlinked, unverified, forkDeleted };
+}
+
+// 查到一半出错时 head 上可能还留着上一次的结论：改了目标分支后重查，旧基分支下算出的 success 原样留着照样能合并。
+// 先把状态改成 error 再让作业失败；写状态也失败时两个错误一起报，不丢原因。
+async function markErrored({ github, repository, context, sha, error }) {
+  try {
+    await github.rest.repos.createCommitStatus({
+      ...repository,
+      sha,
+      context: STATUS_CONTEXT,
+      state: 'error',
+      description: '检查出错，请重跑 / Check errored, re-run it',
+      target_url: `${context.serverUrl}/${repository.owner}/${repository.repo}/actions/runs/${context.runId}`,
+    });
+  } catch (statusError) {
+    throw new AggregateError([error, statusError], `CLA 检查出错，把状态改成 error 也失败了：${statusError.message}`);
+  }
+}
+
+async function judgePull({ github, repository, pr }) {
+  const { number } = pr;
+  const commits = await listPullCommits(github, repository, pr);
+  // 列不全就确认不了所有作者，不能放行。
+  if (commits.length < pr.commits) {
+    throw new Error(`PR #${number} 有 ${pr.commits} 个提交，只取到 ${commits.length} 个，无法核对全部作者`);
+  }
+  assertCoversHead(pr, commits);
+  // 每次都扫整条评论而不是只看触发事件：运行被取消或重跑后，结果仍然一致。
+  const comments = await github.paginate(github.rest.issues.listComments, {
+    ...repository,
+    issue_number: number,
+    per_page: 100,
+  });
+
+  const { required, unlinked, unverified, forkDeleted } = collectContributors(pr, commits);
+  const candidates = signaturesFromComments(comments, required, number);
+  const signed = await recordSignatures(github, repository, number, candidates);
+
+  const missing = [...required].filter(([id]) => !signed.has(id)).map(([, login]) => login);
+  const passed = missing.length === 0 && unlinked.length === 0 && unverified.length === 0 && !forkDeleted;
+  return { comments, missing, unlinked, unverified, forkDeleted, passed };
 }
