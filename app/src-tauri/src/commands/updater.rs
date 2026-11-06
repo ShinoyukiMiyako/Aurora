@@ -1742,6 +1742,12 @@ mod tests {
             assert_eq!(urls[0].host_str(), Some(host.as_str()), "{endpoint}");
             assert_eq!(urls[0].path(), path, "{endpoint}");
         }
+        // beta-release.yml 往这个地址推清单、再回读核对，.github/scripts/beta-release-contract.test.mjs 把工作流里的
+        // HK_MANIFEST_URL 钉成同一个字面量，并核对这一句还在：改地址要两边一起改。
+        assert_eq!(
+            BETA_ENDPOINT,
+            "https://petalfall.org/updates/beta/latest.json"
+        );
     }
 
     /// dev 通道先问香港机、再问 GitHub：反过来的话，连不上 GitHub 的用户每次检查都要先等它超时。

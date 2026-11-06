@@ -23,8 +23,6 @@ pub mod news;
 pub mod servers;
 pub mod system;
 pub mod tasks;
-#[cfg(test)]
-mod update_beta_contract;
 pub(crate) mod update_sources;
 pub(crate) mod update_stall;
 pub mod updater;
