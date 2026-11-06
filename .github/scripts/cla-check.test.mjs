@@ -18,7 +18,6 @@ import {
 const OWNER = 'ShinoyukiMiyako';
 const REPO = 'Petalfall';
 const NUMBER = randomInt(1, 100_000);
-const HEAD_SHA = 'a'.repeat(40);
 const BASE_SHA = 'b'.repeat(40);
 const SIGNED_AT = '2026-12-01T08:00:00Z';
 const CLA_URL = `https://github.com/${OWNER}/${REPO}/blob/dev/CLA.md`;
@@ -110,6 +109,7 @@ function createGitHub({
   branchExists = true,
   prCommitCount,
   compareCommits,
+  listedCommits,
   beforeWrite,
   headRepo = BASE_REPO,
 } = {}) {
@@ -127,6 +127,14 @@ function createGitHub({
 
   const pageOf = (items, { page = 1, per_page: perPage = 30 }) =>
     items.slice((page - 1) * perPage, page * perPage);
+  // 两个接口返回的提交都带 parents。没给 parents 的提交按数组顺序连成一条线，第一个接在 base 上。
+  const withParents = (items) =>
+    items.map((commit, index) => ({
+      ...commit,
+      parents: commit.parents ?? [{ sha: index === 0 ? BASE_SHA : items[index - 1].sha }],
+    }));
+  // head 是 commits 的最后一个，测试里改 commits 就相当于推送。
+  const headSha = () => commits.at(-1).sha;
 
   const github = {
     calls,
@@ -142,13 +150,13 @@ function createGitHub({
         }
       }
     },
-    // 比较接口：分页取完，总数在 total_commits。compareCommits 模拟比较结果比 PR 记的提交数少
+    // 比较接口：分页取完，总数在 total_commits。compareCommits 模拟比较结果与 PR 记的提交对不上
     async request(route, params) {
       assert.equal(route, 'GET /repos/{owner}/{repo}/compare/{basehead}');
-      assert.equal(params.basehead, `${BASE_SHA}...${HEAD_SHA}`);
+      assert.equal(params.basehead, `${BASE_SHA}...${headSha()}`);
       calls.compared.push(params.page);
       const listed = compareCommits ?? commits;
-      return { data: { total_commits: listed.length, commits: pageOf(listed, params) } };
+      return { data: { total_commits: listed.length, commits: pageOf(withParents(listed), params) } };
     },
     rest: {
       pulls: {
@@ -157,14 +165,17 @@ function createGitHub({
             data: {
               number: NUMBER,
               user: opener,
-              head: { sha: HEAD_SHA, repo: headRepo },
+              head: { sha: headSha(), repo: headRepo },
               base: { sha: BASE_SHA, repo: BASE_REPO },
               commits: prCommitCount ?? commits.length,
             },
           };
         },
+        // listedCommits 是调用那一刻 PR 上的提交，给函数时按页取，模拟两次调用之间或分页之间被推送。
+        // 实测超过 250 个时给的是最新的 250 个，最早的被丢掉。
         async listCommits(params) {
-          return { data: pageOf(commits.slice(0, 250), params) };
+          const listed = typeof listedCommits === 'function' ? listedCommits(params.page) : (listedCommits ?? commits);
+          return { data: pageOf(withParents(listed).slice(-250), params) };
         },
       },
       issues: {
@@ -295,9 +306,10 @@ describe('isSignature', () => {
 
 describe('需要签署的人', () => {
   it('开启者和提交作者都已签过时通过，不写签名也不发评论', async () => {
+    const commits = [commitBy(alice), commitBy(bob)];
     const github = createGitHub({
       opener: alice,
-      commits: [commitBy(alice), commitBy(bob)],
+      commits,
       signatures: [recordOf(alice), recordOf(bob)],
     });
 
@@ -308,7 +320,7 @@ describe('需要签署的人', () => {
     assert.deepEqual(lastStatus(github), {
       owner: OWNER,
       repo: REPO,
-      sha: HEAD_SHA,
+      sha: commits.at(-1).sha,
       context: STATUS_CONTEXT,
       state: 'success',
       description: 'CLA 已签署 / CLA signed',
@@ -319,9 +331,10 @@ describe('需要签署的人', () => {
   });
 
   it('提交作者没签时判失败并点名，已签的人不出现', async () => {
+    const commits = [commitBy(alice), commitBy(bob)];
     const github = createGitHub({
       opener: alice,
-      commits: [commitBy(alice), commitBy(bob)],
+      commits,
       signatures: [recordOf(alice)],
     });
 
@@ -330,7 +343,7 @@ describe('需要签署的人', () => {
     assert.equal(result.state, 'failure');
     assert.deepEqual(result.missing, ['bob']);
     assert.equal(lastStatus(github).state, 'failure');
-    assert.equal(lastStatus(github).sha, HEAD_SHA);
+    assert.equal(lastStatus(github).sha, commits.at(-1).sha);
     const [comment] = botComments(github);
     assert.match(comment.body, /@bob/);
     assert.doesNotMatch(comment.body, /@alice/);
@@ -444,7 +457,7 @@ describe('晋级 PR', () => {
 
     assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [] });
     assert.equal(lastStatus(github).state, 'success');
-    assert.equal(lastStatus(github).sha, HEAD_SHA);
+    assert.equal(lastStatus(github).sha, commits.at(-1).sha);
     assert.deepEqual(github.comments, []);
   });
 
@@ -459,6 +472,178 @@ describe('晋级 PR', () => {
     assert.deepEqual(result.missing, ['bob']);
     assert.equal(result.unlinked.length, 1);
     assert.equal(lastStatus(github).state, 'failure');
+  });
+});
+
+// 状态写在 pulls.get 取到的 head 上，列提交时 PR 可能已被推到别的 head。提交状态按 sha 共享，
+// 按别的 head 判出的 success 不能落到这个 head 上。
+describe('列出的提交要盖住 head', () => {
+  const forcePushed = '可能是检查过程中分支被强推，重跑本检查即可';
+  const pushed = '可能是检查过程中分支又有推送，重跑本检查即可';
+  const alices = (length) => Array.from({ length }, () => commitBy(alice));
+
+  it('列出的是不相干的 head 时报错，不写状态，待签署评论也不被改成已签署', async () => {
+    const commits = [commitBy(alice), commitBy(bob)];
+    let listed = commits;
+    const github = createGitHub({
+      opener: alice,
+      commits,
+      listedCommits: () => listed,
+      signatures: [recordOf(alice)],
+    });
+    await run(github);
+    const [pending] = botComments(github);
+    const pendingBody = pending.body;
+
+    listed = alices(2);
+    await assert.rejects(run(github), {
+      message: `PR #${NUMBER} 取到的提交里没有 head ${commits.at(-1).sha}，${forcePushed}`,
+    });
+
+    assert.equal(github.calls.statuses.length, 1);
+    assert.equal(lastStatus(github).state, 'failure');
+    assert.equal(github.calls.created.length, 1);
+    assert.deepEqual(github.calls.updated, []);
+    assert.equal(pending.body, pendingBody);
+    assert.match(pending.body, /@bob/);
+  });
+
+  it('列出的提交在 head 之后还有更新的提交时照常判定，状态写在 head 上', async () => {
+    const commits = alices(2);
+    const github = createGitHub({
+      opener: alice,
+      commits,
+      listedCommits: [...commits, commitBy(alice)],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [] });
+    assert.equal(github.calls.statuses.length, 1);
+    assert.equal(lastStatus(github).sha, commits.at(-1).sha);
+    assert.equal(lastStatus(github).state, 'success');
+    assert.deepEqual(github.comments, []);
+  });
+
+  it('head 之后更新的提交没签时按列出的提交判失败，状态写在 head 上', async () => {
+    const commits = alices(2);
+    const github = createGitHub({
+      opener: alice,
+      commits,
+      listedCommits: [...commits, commitBy(bob)],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.equal(result.state, 'failure');
+    assert.deepEqual(result.missing, ['bob']);
+    assert.equal(lastStatus(github).sha, commits.at(-1).sha);
+    assert.equal(lastStatus(github).state, 'failure');
+  });
+
+  it('后代超过 250 个、最早的提交被挤出列表时报错，不写状态也不发评论', async () => {
+    const commits = [commitBy(bob), ...alices(199)];
+    const github = createGitHub({
+      opener: alice,
+      commits,
+      listedCommits: [...commits, ...alices(51)],
+      signatures: [recordOf(alice)],
+    });
+
+    await assert.rejects(run(github), {
+      message: `PR #${NUMBER} 有 200 个提交，取到的提交里从 head ${commits.at(-1).sha} 只走得到 199 个，${pushed}`,
+    });
+
+    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.comments, []);
+    assert.deepEqual(github.calls.compared, []);
+  });
+
+  it('后代正好 250 个时没有提交被挤出，最早的提交照样核对', async () => {
+    const commits = [commitBy(bob), ...alices(199)];
+    const github = createGitHub({
+      opener: alice,
+      commits,
+      listedCommits: [...commits, ...alices(50)],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.equal(result.state, 'failure');
+    assert.deepEqual(result.missing, ['bob']);
+    assert.equal(lastStatus(github).sha, commits.at(-1).sha);
+  });
+
+  it('分页之间被强推、前一页来自别的 head 时报错，即使列表里有 head、数量也够', async () => {
+    const commits = [commitBy(bob), ...alices(149)];
+    const other = alices(150);
+    const github = createGitHub({
+      opener: alice,
+      commits,
+      listedCommits: (page) => (page === 1 ? other : commits),
+      signatures: [recordOf(alice)],
+    });
+
+    await assert.rejects(run(github), {
+      message: `PR #${NUMBER} 有 150 个提交，取到的提交里从 head ${commits.at(-1).sha} 只走得到 50 个，${pushed}`,
+    });
+
+    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.comments, []);
+  });
+
+  it('合并提交的每个父提交都沿着走，并进来的分支上的作者照样核对', async () => {
+    const side = { ...commitBy(bob), parents: [{ sha: BASE_SHA }] };
+    const trunk = { ...commitBy(alice), parents: [{ sha: BASE_SHA }] };
+    const merge = { ...commitBy(alice), parents: [{ sha: trunk.sha }, { sha: side.sha }] };
+    const github = createGitHub({ opener: alice, commits: [side, trunk, merge], signatures: [recordOf(alice)] });
+
+    const result = await run(github);
+
+    assert.equal(result.state, 'failure');
+    assert.deepEqual(result.missing, ['bob']);
+    assert.equal(lastStatus(github).sha, merge.sha);
+  });
+
+  it('比较接口取到的提交里没有 head 时同样报错，不写状态也不发评论', async () => {
+    const commits = alices(300);
+    const github = createGitHub({
+      opener: alice,
+      commits,
+      compareCommits: alices(300),
+      signatures: [recordOf(alice)],
+    });
+
+    await assert.rejects(run(github), {
+      message: `PR #${NUMBER} 取到的提交里没有 head ${commits.at(-1).sha}，${forcePushed}`,
+    });
+
+    assert.deepEqual(github.calls.compared, [1, 2, 3]);
+    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.comments, []);
+  });
+
+  it('比较接口取到的提交从 head 走不全时同样报错', async () => {
+    const commits = alices(300);
+    const github = createGitHub({
+      opener: alice,
+      commits,
+      // 中间一个提交被换掉，数量和 head 都对，但从 head 往前走到它就断了。
+      compareCommits: commits.map((commit, index) => ({
+        ...commit,
+        parents: [{ sha: index === 150 ? 'c'.repeat(40) : (commits[index - 1]?.sha ?? BASE_SHA) }],
+      })),
+      signatures: [recordOf(alice)],
+    });
+
+    await assert.rejects(run(github), {
+      message: `PR #${NUMBER} 有 300 个提交，取到的提交里从 head ${commits.at(-1).sha} 只走得到 150 个，${pushed}`,
+    });
+
+    assert.deepEqual(github.calls.statuses, []);
   });
 });
 
@@ -483,7 +668,7 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
     assert.deepEqual(result.unlinked, []);
     assert.deepEqual(result.unverified, [{ sha: spoofed.sha, login: 'github-actions[bot]' }]);
     assert.equal(lastStatus(github).state, 'failure');
-    assert.equal(lastStatus(github).sha, HEAD_SHA);
+    assert.equal(lastStatus(github).sha, spoofed.sha);
     const [comment] = botComments(github);
     assert.ok(comment.body.includes(`- \`${spoofed.sha.slice(0, 8)}\` \`github-actions[bot]\``));
     assert.doesNotMatch(comment.body, /@github-actions/);

@@ -68,6 +68,39 @@ async function listPullCommits(github, repository, pr) {
   }
 }
 
+// 状态写在 pulls.get 取到的 head.sha 上，提交却是另一次调用取的。列提交接口只认 PR 号，给的是调用那一刻 PR 上的提交，
+// 两次调用之间被强推，列出的就是别的 head 的提交。提交状态按 sha 共享，按别的 head 判出的 success 会落到另一个停在
+// head.sha、含未签提交的 PR 上。比较接口按 sha 取，本身对得上，也一并核对。
+//
+// 不要求 head.sha 排在最后：两个接口都按时间从旧到新排，时间由提交者自己填，排在最后的不一定是 head。新 head 是
+// head.sha 的后代时，它的提交包含 head.sha 的全部提交，按它判出的 success 对 head.sha 同样成立（failure 只会偏严），
+// 不必让人重跑；不是后代时，列表里没有 head.sha。
+//
+// 只查包含还不够：列提交接口超过 250 个时丢掉的是最早的，后代多出的提交会把 head.sha 的老提交挤出列表；分页之间被推送，
+// 各页也会来自不同的 head。这两种情况 head.sha 都还在。所以再从 head.sha 沿父提交在列表里走：走到的都是 head.sha 自己的
+// PR 提交，个数够 pr.commits 才一个不缺。PR 的任一提交与 head.sha 之间只隔着 PR 自己的提交，列全了一定走得到。
+function assertCoversHead(pr, commits) {
+  const bySha = new Map(commits.map((commit) => [commit.sha, commit]));
+  if (!bySha.has(pr.head.sha)) {
+    throw new Error(`PR #${pr.number} 取到的提交里没有 head ${pr.head.sha}，可能是检查过程中分支被强推，重跑本检查即可`);
+  }
+  const reached = new Set([pr.head.sha]);
+  const pending = [pr.head.sha];
+  while (pending.length > 0) {
+    for (const parent of bySha.get(pending.pop()).parents) {
+      if (bySha.has(parent.sha) && !reached.has(parent.sha)) {
+        reached.add(parent.sha);
+        pending.push(parent.sha);
+      }
+    }
+  }
+  if (reached.size < pr.commits) {
+    throw new Error(
+      `PR #${pr.number} 有 ${pr.commits} 个提交，取到的提交里从 head ${pr.head.sha} 只走得到 ${reached.size} 个，可能是检查过程中分支又有推送，重跑本检查即可`,
+    );
+  }
+}
+
 function isExempt(user) {
   return user.type === 'Bot' || EXEMPT_USER_IDS.has(user.id);
 }
@@ -290,6 +323,7 @@ export async function runClaCheck({ github, context, core }) {
   if (commits.length < pr.commits) {
     throw new Error(`PR #${number} 有 ${pr.commits} 个提交，只取到 ${commits.length} 个，无法核对全部作者`);
   }
+  assertCoversHead(pr, commits);
   // 每次都扫整条评论而不是只看触发事件：运行被取消或重跑后，结果仍然一致。
   const comments = await github.paginate(github.rest.issues.listComments, {
     ...repository,
