@@ -152,6 +152,8 @@ function collectContributors(pr, commits) {
   const unlinkedByEmail = new Map();
   const unverified = [];
   const fromFork = isFromFork(pr);
+  // fork 删掉后确认不了主人。这个状态不会自己恢复，所以判失败而不抛错：抛错只会让之后每次重查都红。
+  const forkDeleted = fromFork && pr.head.repo === null;
 
   const addSigner = (user) => {
     if (!isExempt(user)) {
@@ -166,6 +168,13 @@ function collectContributors(pr, commits) {
 
   // 开启者是建 PR 的登录账号，冒用不了，fork 的 PR 也照旧豁免。
   addSigner(pr.user);
+  // 提交作者按邮箱关联，没签的人在自己的 fork 里把作者邮箱填成已签者的，再请豁免的维护者代开 PR，就没人需要签了。
+  // fork 的分支归它的主人控制，这层归属改不了，所以 fork 的主人也要签。取 head.repo.owner 而不取 head.user：
+  // 前者是此刻持有分支的仓库的主人；后者在 fork 删掉后仍有值，但接口没写明含义，fork 转手后跟不跟着变也查不到。
+  // 组织没法发评论签署，归组织的 fork 不要求签。残留风险：组织 fork 里冒用已签者邮箱的提交，维护者代开时仍能通过。
+  if (fromFork && !forkDeleted && pr.head.repo.owner.type !== 'Organization') {
+    addSigner(pr.head.repo.owner);
+  }
   for (const commit of commits) {
     // 邮箱没关联账号时，接口可能给 null，也可能给空对象。
     if (commit.author?.id === undefined) {
@@ -186,7 +195,7 @@ function collectContributors(pr, commits) {
     }
   }
 
-  return { required, unlinked: [...unlinkedByEmail.values()], unverified };
+  return { required, unlinked: [...unlinkedByEmail.values()], unverified, forkDeleted };
 }
 
 // 记录的 ID 取自评论者本人，别人的评论只会产生别人的记录，代签不会落到被代签者头上。
@@ -293,8 +302,16 @@ function signedCommentBody(claUrl) {
   ].join('\n\n');
 }
 
-function pendingCommentBody(claUrl, missing, unlinked, unverified) {
+function pendingCommentBody(claUrl, missing, unlinked, unverified, forkDeleted) {
   const sections = [COMMENT_MARKER, '**CLA 尚未完成 / CLA not complete**'];
+
+  // 放在最前：签了也过不了，先说清出路。
+  if (forkDeleted) {
+    sections.push(
+      '本 PR 来源的 fork 已被删除，无法确认分支归谁所有。来自 fork 的 PR 需要 fork 的主人签署，这个 PR 因此无法通过检查。请从仍然存在的 fork 重新开一个 PR。',
+      "The fork this PR comes from has been deleted, so the owner of its branch cannot be confirmed. A PR from a fork needs the fork's owner to sign, so this PR cannot pass the check. Please open a new PR from a fork that still exists.",
+    );
+  }
 
   if (missing.length > 0) {
     sections.push(
@@ -366,12 +383,12 @@ export async function runClaCheck({ github, context, core }) {
     per_page: 100,
   });
 
-  const { required, unlinked, unverified } = collectContributors(pr, commits);
+  const { required, unlinked, unverified, forkDeleted } = collectContributors(pr, commits);
   const candidates = signaturesFromComments(comments, required, number);
   const signed = await recordSignatures(github, repository, number, candidates);
 
   const missing = [...required].filter(([id]) => !signed.has(id)).map(([, login]) => login);
-  const passed = missing.length === 0 && unlinked.length === 0 && unverified.length === 0;
+  const passed = missing.length === 0 && unlinked.length === 0 && unverified.length === 0 && !forkDeleted;
   const state = passed ? 'success' : 'failure';
 
   // 未签署不让作业失败：结果全在提交状态上，签署后不会残留红色的失败运行，也就不需要重跑权限。
@@ -384,12 +401,14 @@ export async function runClaCheck({ github, context, core }) {
     target_url: claUrl,
   });
 
-  const body = passed ? signedCommentBody(claUrl) : pendingCommentBody(claUrl, missing, unlinked, unverified);
+  const body = passed
+    ? signedCommentBody(claUrl)
+    : pendingCommentBody(claUrl, missing, unlinked, unverified, forkDeleted);
   await syncBotComment(github, repository, number, comments, body, passed);
 
   // 作者名不进日志：以 :: 开头的内容会被 runner 当成工作流命令。
   core.info(
-    `PR #${number}: ${state}，待签署 ${missing.length} 人，未关联提交 ${unlinked.length} 个，作者无法确认的 fork 提交 ${unverified.length} 个`,
+    `PR #${number}: ${state}，待签署 ${missing.length} 人，未关联提交 ${unlinked.length} 个，作者无法确认的 fork 提交 ${unverified.length} 个${forkDeleted ? '，fork 已删除、无法确认主人' : ''}`,
   );
-  return { state, missing, unlinked, unverified };
+  return { state, missing, unlinked, unverified, forkDeleted };
 }
