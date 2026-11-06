@@ -1001,6 +1001,11 @@ describe('工作流', () => {
     assert.match(workflow, /github\.event\.issue\.pull_request\)/);
   });
 
+  it('改目标分支时重查，只改标题、正文时不重查', () => {
+    assert.match(workflow, /^ {2}pull_request_target:\n(?: {4}#.*\n)* {4}types: \[opened, synchronize, reopened, edited\]$/m);
+    assert.match(workflow, /^ {6}\(github\.event\.action != 'edited' \|\| github\.event\.changes\.base\)$/m);
+  });
+
   it('作业名不和提交状态同名', () => {
     const jobNames = [...workflow.matchAll(/^ {4}name:\s*(.+)$/gm)].map((match) => match[1].trim().toLowerCase());
     const jobIds = [...workflow.matchAll(/^ {2}([a-z-]+):$/gm)].map((match) => match[1]);
