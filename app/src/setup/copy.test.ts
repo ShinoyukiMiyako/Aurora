@@ -100,6 +100,31 @@ describe("文案表", () => {
     }
   });
 
+  // 同通道的旧包、往正式版回退、认不出通道的版本，照着卸载重装就是降级，这时只说不能往回装
+  it.each([
+    ["0.1.0-dev.40", "0.1.0-dev.38"],
+    ["1.0.1-beta.1", "1.0.0-beta.3"],
+    ["1.0.1-beta.1", "1.0.0"],
+    ["1.0.0-rc.1", "0.1.0-dev.40"],
+    ["1.0.0-betax.1", "0.1.0-dev.40"],
+    ["1.0.0-beta.1", "0.1.0-devel.40"],
+    ["0.3.0", "0.2.0"],
+  ] as const)("已装 %s、安装包 %s 时不给换回步骤", (installed, payload) => {
+    expect(COPY.zh.installed.kind.newer.lead(installed, payload)).toBe(`已安装 ${installed}，这个安装包是 ${payload}，不能往回装。`);
+    expect(COPY.en.installed.kind.newer.lead(installed, payload)).toBe(`${installed} is installed and this installer is ${payload}, so it can't go back.`);
+  });
+
+  // 认通道的规则同启动器：第一段是 dev、beta 后面只跟数字或什么都不跟，大小写不论，构建元数据不算
+  it.each([
+    ["1.0.0-BETA.2", "0.1.0-Dev.3"],
+    ["1.0.0-beta", "0.1.0-dev"],
+    ["1.0.0-beta2.1", "0.1.0-dev7"],
+    ["1.0.0-beta.1+abc", "0.1.0-dev.40+x.y"],
+  ] as const)("已装 %s、安装包 %s 时给出换回步骤", (installed, payload) => {
+    expect(COPY.zh.installed.kind.newer.lead(installed, payload)).toContain("不要勾选「删除应用程序数据」");
+    expect(COPY.en.installed.kind.newer.lead(installed, payload)).toContain(`leaving "Delete the application data" unchecked`);
+  });
+
   it.each(["zh", "en"] as const)("%s 表的退出码落进说明", (lang) => {
     expect(COPY[lang].failed.reason.payload_exit.body("2", "retry")).toContain("2");
   });

@@ -157,6 +157,18 @@ const LOCKED_LOCATION_EN = "The existing install can't move.";
 // 引导程序是单实例的，这个窗口开着时再运行安装包只会把它叫回前台，它不会重新探测，所以要先叫人关掉它。
 const CHANNEL_BACK_ZH = `从测试版换回预览版时，先关掉这个窗口，在 Windows 设置的「应用」里卸载 ${APP_NAME_EN}，卸载时不要勾选「删除应用程序数据」；再重新运行这个安装包并沿用默认的安装位置，设置、账户和游戏文件都会保留。`;
 const CHANNEL_BACK_EN = `To switch from Beta back to Preview, close this window first, then uninstall ${APP_NAME_EN} from Apps in Windows Settings, leaving "Delete the application data" unchecked. Then run this installer again and keep the default location. Your settings, accounts and game files will be kept.`;
+/** 预发布标识的第一段是 dev、beta 后面只跟数字（或什么都不跟），不分大小写：同启动器 UpdateChannel::of 认通道的规则。 */
+const CHANNEL_TAG = { dev: /^dev\d*$/i, beta: /^beta\d*$/i } as const;
+function isChannel(version: string, channel: keyof typeof CHANNEL_TAG): boolean {
+  const dash = version.indexOf("-");
+  if (dash < 0) return false;
+  const tag = version.slice(dash + 1).split("+", 1)[0].split(".", 1)[0];
+  return CHANNEL_TAG[channel].test(tag);
+}
+/** 换回步骤只给装着测试版、手上是预览版包的人：同通道的旧包、或者往正式版回退，照做就是降级，不能叫人卸载重装。 */
+function channelBack(installed: string, payload: string, text: string): string {
+  return isChannel(installed, "beta") && isChannel(payload, "dev") ? text : "";
+}
 
 const ZH: SetupCopy = {
   frame: {
@@ -261,7 +273,7 @@ const ZH: SetupCopy = {
       },
       newer: {
         title: () => `这台电脑上的${APP_NAME}更新`,
-        lead: (installed, payload) => `已安装 ${installed}，这个安装包是 ${payload}，不能往回装。${CHANNEL_BACK_ZH}`,
+        lead: (installed, payload) => `已安装 ${installed}，这个安装包是 ${payload}，不能往回装。${channelBack(installed, payload, CHANNEL_BACK_ZH)}`,
       },
       broken: {
         title: () => "上次的安装不完整",
@@ -406,7 +418,7 @@ const EN: SetupCopy = {
       },
       newer: {
         title: () => `A newer ${APP_NAME_EN} is installed`,
-        lead: (installed, payload) => `${installed} is installed and this installer is ${payload}, so it can't go back. ${CHANNEL_BACK_EN}`,
+        lead: (installed, payload) => `${installed} is installed and this installer is ${payload}, so it can't go back.${channelBack(installed, payload, ` ${CHANNEL_BACK_EN}`)}`,
       },
       broken: {
         title: () => "The last install is incomplete",
