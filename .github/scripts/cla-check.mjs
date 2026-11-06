@@ -68,16 +68,43 @@ async function listPullCommits(github, repository, pr) {
   }
 }
 
+function isExempt(user) {
+  return user.type === 'Bot' || EXEMPT_USER_IDS.has(user.id);
+}
+
+// 提交作者是按邮箱关联出来的，谁都能把邮箱填成维护者的或 Bot 的。同仓库的分支只有维护者和维护者装的应用能推，
+// 照旧认关联结果；fork 的提交要另外证明。fork 删掉后 head.repo 为 null，来源同样确认不了，按 fork 处理。
+function isFromFork(pr) {
+  return pr.head.repo?.id !== pr.base.repo.id;
+}
+
+// GitHub 验证的是提交者的签名，不是作者的：把作者填成维护者、再用自己的密钥签，照样显示已验证。网页上的提交由
+// GitHub 代签、提交者是 web-flow，签名只说明提交出自 GitHub，作者记成谁取决于当时的操作（压缩合并记成 PR 的开启者），
+// 也证明不了维护者本人经手。所以要提交者就是作者本人、签名也经 GitHub 验证，才认是维护者自己的提交；维护者在网页上
+// 给 fork 的 PR 更新分支产生的合并提交因此也会被点名，要改在本地签名后推送。Bot 不在此列：谁都能建 GitHub App
+// 装到自己的 fork 上，fork 里的工作流也能以 github-actions[bot] 的身份提交，这些提交的内容都由 fork 的主人决定，
+// 签名再真也证明不了出处。
+function isProvenExemptCommit(commit) {
+  return (
+    EXEMPT_USER_IDS.has(commit.author.id) &&
+    commit.commit.verification.verified &&
+    commit.committer?.id === commit.author.id
+  );
+}
+
 function collectContributors(pr, commits) {
   const required = new Map();
   const unlinkedByEmail = new Map();
+  const unverified = [];
+  const fromFork = isFromFork(pr);
 
   const addSigner = (user) => {
-    if (user.type !== 'Bot' && !EXEMPT_USER_IDS.has(user.id)) {
+    if (!isExempt(user)) {
       required.set(user.id, user.login);
     }
   };
 
+  // 开启者是建 PR 的登录账号，冒用不了，fork 的 PR 也照旧豁免。
   addSigner(pr.user);
   for (const commit of commits) {
     // 邮箱没关联账号时，接口可能给 null，也可能给空对象。
@@ -86,12 +113,15 @@ function collectContributors(pr, commits) {
       if (!unlinkedByEmail.has(email)) {
         unlinkedByEmail.set(email, { sha: commit.sha, name });
       }
+    } else if (fromFork && isExempt(commit.author) && !isProvenExemptCommit(commit)) {
+      // 逐个列出而不按账号去重：要改的是这些提交本身。
+      unverified.push({ sha: commit.sha, login: commit.author.login });
     } else {
       addSigner(commit.author);
     }
   }
 
-  return { required, unlinked: [...unlinkedByEmail.values()] };
+  return { required, unlinked: [...unlinkedByEmail.values()], unverified };
 }
 
 // 记录的 ID 取自评论者本人，别人的评论只会产生别人的记录，代签不会落到被代签者头上。
@@ -198,7 +228,7 @@ function signedCommentBody(claUrl) {
   ].join('\n\n');
 }
 
-function pendingCommentBody(claUrl, missing, unlinked) {
+function pendingCommentBody(claUrl, missing, unlinked, unverified) {
   const sections = [COMMENT_MARKER, '**CLA 尚未完成 / CLA not complete**'];
 
   if (missing.length > 0) {
@@ -215,6 +245,16 @@ function pendingCommentBody(claUrl, missing, unlinked) {
     sections.push(
       '下列提交的邮箱没有关联 GitHub 账号，无法确认作者。请把邮箱关联到账号后再发一条评论重新检查，或者改用已关联的邮箱重新提交。',
       'The email on these commits is not linked to a GitHub account, so the author cannot be identified. Link the email to an account and comment here to re-check, or recommit with a linked email.',
+      commits.join('\n'),
+    );
+  }
+
+  if (unverified.length > 0) {
+    // 登录名也进代码块：直接写会 @ 到维护者或 Bot。
+    const commits = unverified.map(({ sha, login }) => `- ${codeSpan(sha.slice(0, 8))} ${codeSpan(login)}`);
+    sections.push(
+      '下列提交来自 fork，作者显示为维护者或机器人账号，但没有该账号本人经 GitHub 验证的签名，无法确认作者。请改用你自己的账号作为作者重新提交这些改动，推送后会自动重新检查。',
+      "These commits come from a fork and are attributed to the maintainer or a bot account, but they lack a signature that GitHub verified as that account's own, so the author cannot be confirmed. Please recommit these changes with your own account as the author; the check reruns when you push.",
       commits.join('\n'),
     );
   }
@@ -257,12 +297,12 @@ export async function runClaCheck({ github, context, core }) {
     per_page: 100,
   });
 
-  const { required, unlinked } = collectContributors(pr, commits);
+  const { required, unlinked, unverified } = collectContributors(pr, commits);
   const candidates = signaturesFromComments(comments, required, number);
   const signed = await recordSignatures(github, repository, number, candidates);
 
   const missing = [...required].filter(([id]) => !signed.has(id)).map(([, login]) => login);
-  const passed = missing.length === 0 && unlinked.length === 0;
+  const passed = missing.length === 0 && unlinked.length === 0 && unverified.length === 0;
   const state = passed ? 'success' : 'failure';
 
   // 未签署不让作业失败：结果全在提交状态上，签署后不会残留红色的失败运行，也就不需要重跑权限。
@@ -275,10 +315,12 @@ export async function runClaCheck({ github, context, core }) {
     target_url: claUrl,
   });
 
-  const body = passed ? signedCommentBody(claUrl) : pendingCommentBody(claUrl, missing, unlinked);
+  const body = passed ? signedCommentBody(claUrl) : pendingCommentBody(claUrl, missing, unlinked, unverified);
   await syncBotComment(github, repository, number, comments, body, passed);
 
   // 作者名不进日志：以 :: 开头的内容会被 runner 当成工作流命令。
-  core.info(`PR #${number}: ${state}，待签署 ${missing.length} 人，未关联提交 ${unlinked.length} 个`);
-  return { state, missing, unlinked };
+  core.info(
+    `PR #${number}: ${state}，待签署 ${missing.length} 人，未关联提交 ${unlinked.length} 个，作者无法确认的 fork 提交 ${unverified.length} 个`,
+  );
+  return { state, missing, unlinked, unverified };
 }
