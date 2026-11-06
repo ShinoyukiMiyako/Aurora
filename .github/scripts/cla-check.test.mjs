@@ -42,7 +42,7 @@ const BASE_REPO = { id: randomInt(1, 1_000_000), full_name: `${OWNER}/${REPO}` }
 const FORK_REPO = { id: BASE_REPO.id + 1, full_name: `mallory/${REPO}` };
 
 // 默认提交者就是作者、没有签名，和大多数贡献者的本地提交一样。
-function commitBy(author, { committer = author, verified = false } = {}) {
+function commitBy(author, { committer = author, verified = false, reason = verified ? 'valid' : 'unsigned' } = {}) {
   nextId += 1;
   return {
     sha: nextId.toString(16).padStart(40, '0'),
@@ -50,9 +50,17 @@ function commitBy(author, { committer = author, verified = false } = {}) {
     committer,
     commit: {
       author: { name: author?.login ?? 'someone', email: `${nextId}@example.com` },
-      verification: { verified, reason: verified ? 'valid' : 'unsigned' },
+      committer: { name: committer?.login ?? 'someone', email: `${nextId}.committer@example.com` },
+      verification: { verified, reason },
     },
   };
+}
+
+// 提交者邮箱没关联账号：接口给 null 或空对象，名字和邮箱只在 commit.commit.committer 里。
+function commitWithUnlinkedCommitter(author, { name, email = `${name}@example.com`, committer = null }) {
+  const commit = commitBy(author, { committer });
+  commit.commit.committer = { name, email };
+  return commit;
 }
 
 function unlinkedCommit({ name, email = `${name}@example.com`, author = null, sha }) {
@@ -647,12 +655,12 @@ describe('列出的提交要盖住 head', () => {
   });
 });
 
+function forkGitHub(options) {
+  return createGitHub({ headRepo: FORK_REPO, ...options });
+}
+
 // 提交作者按邮箱关联，把邮箱填成维护者或 Bot 的就会关联到它们。fork 的提交不能只凭关联结果豁免。
 describe('fork 里作者是维护者或 Bot 的提交', () => {
-  function forkGitHub(options) {
-    return createGitHub({ headRepo: FORK_REPO, ...options });
-  }
-
   it('冒用 Bot 邮箱的提交判失败并点名，开启者已签署也不放行', async () => {
     const spoofed = commitBy(actionsBot);
     const github = forkGitHub({
@@ -666,28 +674,30 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
     assert.equal(result.state, 'failure');
     assert.deepEqual(result.missing, []);
     assert.deepEqual(result.unlinked, []);
-    assert.deepEqual(result.unverified, [{ sha: spoofed.sha, login: 'github-actions[bot]' }]);
+    assert.deepEqual(result.unverified, [
+      { sha: spoofed.sha, login: 'github-actions[bot]', committer: 'github-actions[bot]' },
+    ]);
     assert.equal(lastStatus(github).state, 'failure');
     assert.equal(lastStatus(github).sha, spoofed.sha);
     const [comment] = botComments(github);
-    assert.ok(comment.body.includes(`- \`${spoofed.sha.slice(0, 8)}\` \`github-actions[bot]\``));
+    assert.ok(
+      comment.body.includes(
+        `- \`${spoofed.sha.slice(0, 8)}\` \`github-actions[bot]\`（提交者 / committer \`github-actions[bot]\`）`,
+      ),
+    );
     assert.doesNotMatch(comment.body, /@github-actions/);
     assert.doesNotMatch(comment.body, /Waiting for/);
   });
 
-  it('作者填成维护者、再用自己的密钥签名的提交，验证通过也判失败', async () => {
+  it('作者冒填成维护者、用自己的账号提交并签名的，改由提交者签署', async () => {
     const spoofed = commitBy(maintainer, { committer: mallory, verified: true });
     const github = forkGitHub({ opener: mallory, commits: [spoofed], signatures: [recordOf(mallory)] });
 
     const result = await run(github);
 
-    assert.equal(result.state, 'failure');
-    assert.deepEqual(result.missing, []);
-    assert.deepEqual(result.unverified, [{ sha: spoofed.sha, login: OWNER }]);
-    assert.equal(lastStatus(github).state, 'failure');
-    const [comment] = botComments(github);
-    assert.ok(comment.body.includes(`- \`${spoofed.sha.slice(0, 8)}\` \`${OWNER}\``));
-    assert.doesNotMatch(comment.body, new RegExp(`@${OWNER}`));
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [] });
+    assert.equal(lastStatus(github).state, 'success');
+    assert.deepEqual(github.comments, []);
   });
 
   it('提交者也填成维护者、签名没通过验证时判失败', async () => {
@@ -697,7 +707,11 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
     const result = await run(github);
 
     assert.equal(result.state, 'failure');
-    assert.deepEqual(result.unverified, [{ sha: spoofed.sha, login: OWNER }]);
+    assert.deepEqual(result.missing, []);
+    assert.deepEqual(result.unverified, [{ sha: spoofed.sha, login: OWNER, committer: OWNER }]);
+    const [comment] = botComments(github);
+    assert.ok(comment.body.includes(`- \`${spoofed.sha.slice(0, 8)}\` \`${OWNER}\`（提交者 / committer \`${OWNER}\`）`));
+    assert.doesNotMatch(comment.body, new RegExp(`@${OWNER}`));
   });
 
   it('网页上由 GitHub 代签、提交者是 web-flow 的维护者提交不算维护者本人的', async () => {
@@ -707,7 +721,24 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
     const result = await run(github);
 
     assert.equal(result.state, 'failure');
-    assert.deepEqual(result.unverified, [{ sha: webCommit.sha, login: OWNER }]);
+    assert.deepEqual(result.missing, []);
+    assert.deepEqual(result.unverified, [{ sha: webCommit.sha, login: OWNER, committer: 'web-flow' }]);
+    const [comment] = botComments(github);
+    assert.ok(comment.body.includes(`（提交者 / committer \`web-flow\`）`));
+    assert.doesNotMatch(comment.body, /@web-flow/);
+  });
+
+  it('web-flow 按数字 ID 认：改了登录名照样不担责，占用这个登录名的普通账号要签署', async () => {
+    const renamedWebFlow = { ...webFlow, login: 'web-flow-renamed' };
+    const squatter = person('web-flow');
+    const webCommit = commitBy(renovate, { committer: renamedWebFlow, verified: true });
+    const squatterCommit = commitBy(maintainer, { committer: squatter });
+    const github = forkGitHub({ opener: alice, commits: [webCommit, squatterCommit], signatures: [recordOf(alice)] });
+
+    const result = await run(github);
+
+    assert.deepEqual(result.unverified, [{ sha: webCommit.sha, login: 'renovate[bot]', committer: 'web-flow-renamed' }]);
+    assert.deepEqual(result.missing, ['web-flow']);
   });
 
   it('Bot 自己提交、签名经过验证的提交也不豁免', async () => {
@@ -717,7 +748,18 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
     const result = await run(github);
 
     assert.equal(result.state, 'failure');
-    assert.deepEqual(result.unverified, [{ sha: botCommit.sha, login: 'renovate[bot]' }]);
+    assert.deepEqual(result.unverified, [{ sha: botCommit.sha, login: 'renovate[bot]', committer: 'renovate[bot]' }]);
+  });
+
+  it('提交者是 Bot、作者是维护者时同样点名，Bot 的签名也不算', async () => {
+    const botCommitted = commitBy(maintainer, { committer: actionsBot, verified: true });
+    const github = forkGitHub({ opener: alice, commits: [botCommitted], signatures: [recordOf(alice)] });
+
+    const result = await run(github);
+
+    assert.equal(result.state, 'failure');
+    assert.deepEqual(result.missing, []);
+    assert.deepEqual(result.unverified, [{ sha: botCommitted.sha, login: OWNER, committer: 'github-actions[bot]' }]);
   });
 
   it('维护者本人签名、经 GitHub 验证的提交照旧豁免，不发评论', async () => {
@@ -734,7 +776,20 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
     assert.deepEqual(github.comments, []);
   });
 
-  it('同样的提交在同仓库 PR 里照旧豁免，在 fork PR 里逐个点名', async () => {
+  it('提交者是维护者、签名经过验证时，作者是 Bot 也豁免', async () => {
+    const github = forkGitHub({
+      opener: alice,
+      commits: [commitBy(renovate, { committer: maintainer, verified: true })],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [] });
+    assert.deepEqual(github.comments, []);
+  });
+
+  it('同样的提交在同仓库 PR 里照旧豁免，在 fork PR 里改看提交者', async () => {
     const makeCommits = () => [
       commitBy(alice),
       commitBy(actionsBot),
@@ -750,10 +805,11 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
 
     assert.deepEqual(sameRepoResult, { state: 'success', missing: [], unlinked: [], unverified: [] });
     assert.equal(forkResult.state, 'failure');
-    assert.deepEqual(
-      forkResult.unverified,
-      forkCommits.slice(1).map((commit) => ({ sha: commit.sha, login: commit.author.login })),
-    );
+    assert.deepEqual(forkResult.missing, ['mallory']);
+    assert.deepEqual(forkResult.unverified, [
+      { sha: forkCommits[1].sha, login: 'github-actions[bot]', committer: 'github-actions[bot]' },
+      { sha: forkCommits[2].sha, login: OWNER, committer: OWNER },
+    ]);
   });
 
   it('fork 已删除、head.repo 为 null 时按 fork 处理', async () => {
@@ -768,7 +824,7 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
     const result = await run(github);
 
     assert.equal(result.state, 'failure');
-    assert.deepEqual(result.unverified, [{ sha: spoofed.sha, login: OWNER }]);
+    assert.deepEqual(result.unverified, [{ sha: spoofed.sha, login: OWNER, committer: OWNER }]);
   });
 
   it('同时有人没签时两类都列出', async () => {
@@ -778,10 +834,31 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
     const result = await run(github);
 
     assert.deepEqual(result.missing, ['bob']);
-    assert.deepEqual(result.unverified, [{ sha: spoofed.sha, login: 'github-actions[bot]' }]);
+    assert.deepEqual(result.unverified, [
+      { sha: spoofed.sha, login: 'github-actions[bot]', committer: 'github-actions[bot]' },
+    ]);
     const [comment] = botComments(github);
     assert.match(comment.body, /Waiting for: @bob/);
     assert.ok(comment.body.includes(`\`${spoofed.sha.slice(0, 8)}\` \`github-actions[bot]\``));
+  });
+
+  it('点名的评论说明维护者要签名重推、其余由贡献者在本地重写', async () => {
+    const github = forkGitHub({
+      opener: alice,
+      commits: [commitBy(maintainer, { committer: webFlow, verified: true })],
+      signatures: [recordOf(alice)],
+    });
+
+    await run(github);
+
+    const [comment] = botComments(github);
+    assert.ok(comment.body.includes('维护者在本地签名后重新推送'));
+    assert.ok(comment.body.includes('signed locally and pushed again by the maintainer'));
+    assert.ok(comment.body.includes('`git rebase --force-rebase <PR 的目标分支>`'));
+    assert.ok(comment.body.includes('`git rebase --force-rebase <PR base branch>`'));
+    assert.ok(comment.body.includes('作者不变，提交者换成你'));
+    assert.ok(comment.body.includes('the author stays the same, you become the committer'));
+    assert.doesNotMatch(comment.body, /作为作者重新提交|as the author/);
   });
 
   it('改用自己的作者重新提交后转为通过，评论改成已签署', async () => {
@@ -798,6 +875,255 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
     assert.equal(github.calls.created.length, 1);
     assert.equal(botComments(github).length, 1);
     assert.match(botComments(github)[0].body, /已签署/);
+  });
+
+  it('按评论的办法在本地重写网页代签的提交后，改由贡献者签署并转为通过', async () => {
+    const commits = [commitBy(maintainer, { committer: webFlow, verified: true })];
+    const github = forkGitHub({ opener: alice, commits, signatures: [recordOf(alice)] });
+
+    const before = await run(github);
+    commits.splice(0, 1, commitBy(maintainer, { committer: alice }));
+    const after = await run(github);
+
+    assert.equal(before.state, 'failure');
+    assert.deepEqual(after, { state: 'success', missing: [], unlinked: [], unverified: [] });
+    assert.equal(lastStatus(github).state, 'success');
+    assert.equal(botComments(github).length, 1);
+    assert.match(botComments(github)[0].body, /已签署/);
+  });
+});
+
+// 维护者推到贡献者分支的签名提交，贡献者变基或拣选之后提交者换成贡献者、签名也丢了。
+describe('fork 里被贡献者变基过的维护者或 Bot 提交', () => {
+  it('提交者已签署时通过，不点名提交也不发评论', async () => {
+    const rebased = Array.from({ length: randomInt(1, 6) }, () => commitBy(maintainer, { committer: alice }));
+    const github = forkGitHub({
+      opener: alice,
+      commits: [commitBy(alice), ...rebased],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [] });
+    assert.equal(lastStatus(github).state, 'success');
+    assert.deepEqual(github.calls.writes, []);
+    assert.deepEqual(github.comments, []);
+  });
+
+  it('提交者没签时只要他签署，评论不再让他改作者', async () => {
+    const github = forkGitHub({
+      opener: alice,
+      commits: [commitBy(maintainer, { committer: alice }), commitBy(maintainer, { committer: alice })],
+    });
+
+    const result = await run(github);
+
+    assert.equal(result.state, 'failure');
+    assert.deepEqual(result.missing, ['alice']);
+    assert.deepEqual(result.unverified, []);
+    assert.equal(lastStatus(github).state, 'failure');
+    const [comment] = botComments(github);
+    assert.match(comment.body, /Waiting for: @alice$/m);
+    assert.doesNotMatch(comment.body, /@ShinoyukiMiyako|提交者 \/ committer|作为作者重新提交/);
+  });
+
+  it('提交者签署后转为通过，签名记在提交者名下', async () => {
+    const github = forkGitHub({ opener: alice, commits: [commitBy(maintainer, { committer: alice })] });
+
+    await run(github);
+    github.comments.push(commentBy(alice, ENGLISH_PHRASE));
+    const result = await run(github, issueCommentContext());
+
+    assert.equal(result.state, 'success');
+    assert.deepEqual(github.repository.signatures.map((record) => record.id), [alice.id]);
+    assert.match(botComments(github)[0].body, /已签署/);
+  });
+
+  it('拣选 Bot 提交的人不是开启者时也要签署', async () => {
+    const github = forkGitHub({
+      opener: alice,
+      commits: [commitBy(alice), commitBy(renovate, { committer: bob }), commitBy(actionsBot, { committer: bob })],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result.missing, ['bob']);
+    assert.deepEqual(result.unverified, []);
+    assert.deepEqual(result.unlinked, []);
+  });
+
+  it('提交者有自己的验证签名也照样要签署', async () => {
+    const github = forkGitHub({
+      opener: alice,
+      commits: [commitBy(maintainer, { committer: bob, verified: true })],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result.missing, ['bob']);
+    assert.deepEqual(result.unverified, []);
+  });
+
+  it('提交者是贡献者时签名验证服务出错也不影响判定', async () => {
+    const github = forkGitHub({
+      opener: alice,
+      commits: [commitBy(maintainer, { committer: alice, reason: 'gpgverify_unavailable' })],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.equal(result.state, 'success');
+  });
+
+  for (const committer of [null, {}]) {
+    it(`提交者邮箱没关联账号（接口给 ${JSON.stringify(committer)}）时并入未关联提交，列提交者的名字`, async () => {
+      const rebased = commitWithUnlinkedCommitter(maintainer, {
+        name: 'Local Rebaser',
+        email: 'rebaser-private@example.com',
+        committer,
+      });
+      const github = forkGitHub({ opener: alice, commits: [rebased], signatures: [recordOf(alice)] });
+
+      const result = await run(github);
+
+      assert.equal(result.state, 'failure');
+      assert.deepEqual(result.missing, []);
+      assert.deepEqual(result.unverified, []);
+      assert.deepEqual(result.unlinked, [{ sha: rebased.sha, name: 'Local Rebaser' }]);
+      assert.equal(lastStatus(github).state, 'failure');
+      const [comment] = botComments(github);
+      assert.ok(comment.body.includes(`- \`${rebased.sha.slice(0, 8)}\` \`Local Rebaser\``));
+      assert.ok(comment.body.includes('无法确认该由谁签署'));
+      assert.ok(comment.body.includes('it cannot be determined who needs to sign'));
+      assert.doesNotMatch(comment.body, /rebaser-private@example\.com|Waiting for/);
+    });
+  }
+
+  it('未关联的提交者邮箱和未关联的作者邮箱相同时只列一次', async () => {
+    const email = 'same-person@example.com';
+    const authored = unlinkedCommit({ name: 'Same Person', email });
+    const rebased = commitWithUnlinkedCommitter(renovate, { name: 'Same Person', email });
+    const github = forkGitHub({ opener: alice, commits: [authored, rebased], signatures: [recordOf(alice)] });
+
+    const result = await run(github);
+
+    assert.deepEqual(result.unlinked, [{ sha: authored.sha, name: 'Same Person' }]);
+    assert.deepEqual(result.unverified, []);
+  });
+
+  it('同仓库 PR 不看提交者', async () => {
+    const github = createGitHub({
+      opener: maintainer,
+      commits: [
+        commitBy(maintainer, { committer: alice }),
+        commitWithUnlinkedCommitter(maintainer, { name: 'Local Rebaser' }),
+        commitBy(maintainer, { committer: webFlow, verified: true }),
+      ],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [] });
+  });
+});
+
+// GitHub 的签名验证服务出错时，维护者本人的真签名也会显示未验证。
+describe('签名验证暂时不可用', () => {
+  const TRANSIENT_REASONS = ['gpgverify_error', 'gpgverify_unavailable'];
+  // octokit/openapi 列出的其余原因，说的都是签名、密钥或邮箱本身。
+  const PERMANENT_REASONS = [
+    'expired_key',
+    'not_signing_key',
+    'unsigned',
+    'unknown_signature_type',
+    'no_user',
+    'unverified_email',
+    'bad_email',
+    'unknown_key',
+    'malformed_signature',
+    'invalid',
+  ];
+
+  for (const reason of TRANSIENT_REASONS) {
+    it(`维护者本人的提交遇到 ${reason} 时报错，不写签名、状态和评论`, async () => {
+      const pending = commitBy(maintainer, { reason });
+      const github = forkGitHub({
+        opener: alice,
+        commits: [commitBy(alice), pending],
+        comments: [commentBy(alice, ENGLISH_PHRASE)],
+      });
+
+      await assert.rejects(run(github), (error) => {
+        assert.equal(
+          error.message,
+          `GitHub 签名验证暂时不可用（verification.reason 为 ${reason}），无法确认提交 ${pending.sha} 是否经维护者本人签名，请稍后重跑本检查`,
+        );
+        return true;
+      });
+      assert.deepEqual(github.calls.writes, []);
+      assert.deepEqual(github.calls.statuses, []);
+      assert.deepEqual(botComments(github), []);
+    });
+  }
+
+  it('提交者是维护者、作者是 Bot 时同样报错', async () => {
+    const pending = commitBy(renovate, { committer: maintainer, reason: 'gpgverify_error' });
+    const github = forkGitHub({ opener: alice, commits: [pending], signatures: [recordOf(alice)] });
+
+    await assert.rejects(run(github), /GitHub 签名验证暂时不可用（verification\.reason 为 gpgverify_error）/);
+    assert.deepEqual(github.calls.statuses, []);
+  });
+
+  it('稍后重跑、验证恢复后照常豁免', async () => {
+    const pending = commitBy(maintainer, { reason: 'gpgverify_unavailable' });
+    const github = forkGitHub({ opener: alice, commits: [pending], signatures: [recordOf(alice)] });
+
+    await assert.rejects(run(github), /稍后重跑本检查/);
+    pending.commit.verification = { verified: true, reason: 'valid' };
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [] });
+    assert.equal(github.calls.statuses.length, 1);
+  });
+
+  for (const reason of PERMANENT_REASONS) {
+    it(`签名本身有问题（${reason}）时照旧点名，不报错`, async () => {
+      const spoofed = commitBy(maintainer, { reason });
+      const github = forkGitHub({ opener: alice, commits: [spoofed], signatures: [recordOf(alice)] });
+
+      const result = await run(github);
+
+      assert.equal(result.state, 'failure');
+      assert.deepEqual(result.unverified, [{ sha: spoofed.sha, login: OWNER, committer: OWNER }]);
+      assert.equal(lastStatus(github).state, 'failure');
+    });
+  }
+
+  for (const committer of [webFlow, actionsBot]) {
+    it(`提交者是 ${committer.login} 时签名证明不了什么，验证服务出错也照旧点名`, async () => {
+      const commit = commitBy(maintainer, { committer, reason: 'gpgverify_unavailable' });
+      const github = forkGitHub({ opener: alice, commits: [commit], signatures: [recordOf(alice)] });
+
+      const result = await run(github);
+
+      assert.equal(result.state, 'failure');
+      assert.deepEqual(result.unverified, [{ sha: commit.sha, login: OWNER, committer: committer.login }]);
+    });
+  }
+
+  it('同仓库 PR 不看签名，验证服务出错也照常判定', async () => {
+    const github = createGitHub({
+      opener: maintainer,
+      commits: [commitBy(maintainer, { reason: 'gpgverify_unavailable' })],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [] });
   });
 });
 
