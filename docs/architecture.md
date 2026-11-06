@@ -179,7 +179,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | beta | `https://petalfall.org/updates/beta/latest.json`（`BETA_ENDPOINT`），只有这一个 | 预发布标识第一段是 `beta`（后面只跟数字）的版本 |
 | stable | `https://petalfall.org/updates/stable/latest.json`（`PRIMARY_ENDPOINT`），只有这一个 | 没有预发布标识的版本 |
 
-- 预发布标识的第一段既不是 `dev` 也不是 `beta`（`rc`、`alpha` 等）时，`UpdateChannel::of` 认不出通道，判为不支持自更新，原因是 `unknown_channel`（见「装配与状态」的启动器更新一条），一个端点都不问。认不出就关掉，不落到 stable：落到 stable 的话，这样的包会去问正式版的清单。关于页的通道标签另由 `app/scripts/build-info.mjs` 推出，那边把 `rc` 算作测试版，用到 `rc` 之前两边的规则要先对齐。
+- 预发布标识的第一段既不是 `dev` 也不是 `beta`（`rc`、`alpha` 等）时，`UpdateChannel::of` 认不出通道，判为不支持自更新，原因是 `unknown_channel`（见「装配与状态」的启动器更新一条），一个端点都不问。认不出就关掉，不落到 stable：落到 stable 的话，这样的包会去问正式版的清单。关于页的通道标签另由 `app/scripts/build-info.mjs` 推出，预发布标识同样只认 `dev`、`beta`，别的标识在构建时直接报错，所以 CI 出不了这种包，`unknown_channel` 只是兜底。两边只在不带预发布标识的 0.x 版本上不同：build-info 算预览版（还没有发过正式版），启动器按 stable 判。这种版本号只出现在本机构建里，本机构建不带更新公钥，自更新本来就不可用。
 - 清单端点不探测，也不看「文件下载源」设置：清单只有几百字节，测速省不下时间，反倒多一轮请求。dev 清单先问香港机，国内连 GitHub 常常不通。
 - dev 清单在香港机与 GitHub 两处发布，是同一个文件、字节相同：dev.35 及更早的客户端只认 GitHub 那一份。
 - beta 清单只认香港机这一处，不设 GitHub 后备。清单本身不签名，而 GitHub Releases 能被 dev 的 `publish` 作业与 CLA 作业改写（两者都有 `contents: write`）；只有一个来源时，香港机挂了只是暂时收不到更新，不影响启动和游戏，出了坏版本也只要撤这一处。这个地址编进了每个测试版，要长期保持可用。每版的预发布 `v<版本>` 上也附一份 `latest.json`，客户端不读它。
