@@ -1906,10 +1906,14 @@ mod tests {
     async fn failures_unrelated_to_the_source_are_logged_without_naming_it() {
         // tracing-core 0.1.36 只登记了一个调度器时，别的线程头一次走到某个日志点，按它自己线程上的默认调度器
         // （什么都不收）算兴趣，再全局缓存成「不启用」，这里的订阅者就收不到那条日志。只跑 commands::update
-        // 时其余并行的测试都不装订阅者，这个测试必挂。再登记一个什么都不收的调度器，凑够两个，兴趣就按所有
-        // 存活的调度器算。
-        let _second_dispatcher =
-            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        // 时其余并行的测试都不装订阅者，这个测试必挂。所以先登记一个级别上限为 OFF 的调度器：在它和下面的订阅者
+        // 之间，全局级别一直是 OFF，别的线程走不到登记日志点；订阅者登记时调度器已有两个，「只有一个」的标志
+        // 先关掉、再抬级别，之后谁头一次走到日志点，都按所有存活的调度器算兴趣。上限不能用 NoSubscriber：
+        // 它不报上限，按 TRACE 算，登记那一刻起别的线程就能按自己线程的默认调度器登记日志点。
+        use tracing_subscriber::layer::SubscriberExt as _;
+        let _second_dispatcher = tracing::Dispatch::new(
+            tracing_subscriber::registry().with(tracing_subscriber::filter::LevelFilter::OFF),
+        );
         let captured = crate::tests::Captured::default();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::fmt()
