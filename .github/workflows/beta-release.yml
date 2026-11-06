@@ -71,13 +71,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ./.github/actions/xwin-toolchain
+      - id: toolchain
+        uses: ./.github/actions/xwin-toolchain
 
       # 审批时要看到这次用的是哪套工具链。排在编译之前：缺了哪个工具在这里几秒就失败，不用白编半小时。
-      # xwin 的 CRT 与 SDK 版本由 cargo-xwin 按 XWIN_ 开头的环境变量取，一并记下。
+      # xwin 的 CRT 与 SDK 版本由 cargo-xwin 按 XWIN_ 开头的环境变量取，一并记下。同一个版本号下微软还会换补丁版的包，
+      # 缓存内容的摘要也记下，才说得清下到的是哪一份。
       - name: 记录工具链版本
         env:
           TOOLCHAIN: ${{ runner.temp }}/toolchain.json
+          CRT_SDK_SHA256: ${{ steps.toolchain.outputs.xwin-cache-sha256 }}
         run: |
           node - <<'EOF'
           const { execFileSync } = require("child_process");
@@ -104,7 +107,11 @@ jobs:
               .filter(([key]) => key.startsWith("XWIN_"))
               .sort(([a], [b]) => (a < b ? -1 : 1)),
           );
-          const toolchain = JSON.stringify({ tools, xwinEnv }, null, 2);
+          const xwinCacheSha256 = process.env.CRT_SDK_SHA256;
+          if (xwinCacheSha256 === undefined || !/^[0-9a-f]{64}$/.test(xwinCacheSha256)) {
+            throw new Error(`xwin-toolchain 没有给出 xwin 缓存摘要：${JSON.stringify(xwinCacheSha256)}`);
+          }
+          const toolchain = JSON.stringify({ tools, xwinEnv, xwinCacheSha256 }, null, 2);
           fs.writeFileSync(process.env.TOOLCHAIN, toolchain);
           console.log(toolchain);
           EOF
@@ -354,6 +361,7 @@ jobs:
             "| --- | --- |",
             ...Object.entries(info.toolchain.tools).map(([name, version]) => row(name, version)),
             ...Object.entries(info.toolchain.xwinEnv).map(([name, value]) => row(name, value)),
+            row("xwin 缓存 crt、sdk 摘要", info.toolchain.xwinCacheSha256),
           ];
           if (release) {
             // 原文放进代码块，审批时看到的就是发出去的字节，不经 Markdown 渲染；围栏比正文里最长的一串反引号还长一个
