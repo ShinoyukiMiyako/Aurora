@@ -1,0 +1,902 @@
+name: Beta 发布
+
+# beta 与正式版共用一把更新签名钥，这条流水线一旦被借道，签出来的包正式版客户端也认。所以四个作业各自隔开：
+# build 在一次性托管机上构建，不挂环境，拿不到任何发布凭据；sign 只拿签名私钥，签名前要维护者在网页上审批；
+# stage 只拿桶凭据，传包、建 Release；publish-hk 只拿香港 beta 推送钥。私钥、桶凭据、推送钥不在同一个作业里出现。
+# 防降级照 dev 的两处配套：签名带 --app-version，打包注入 requireSignedVersion: true。
+# beta 客户端只问香港机上的 beta 清单，GitHub Release 不当清单来源：dev 的 publish 和 CLA 作业都能改写 Releases。
+
+# 不加 pull_request，也不用 tag 触发：tag 触发时工作流取自被打 tag 的任意提交，环境放行 tag 就等于放行任意代码拿机密。
+# workflow_dispatch 只用来在 dev 上演练构建，挂环境的作业在 beta 之外一律跳过。
+on:
+  push:
+    branches: [beta]
+  workflow_dispatch:
+
+# 同一分支的运行串行，beta 序号按已发布的 tag 加 1，并行时两个运行会算出同一个号。不取消正在跑的：
+# 签名之后掐在半路，桶和 Release 会停在半成品上。排队中被更新的推送顶掉的运行无害，新推送已经包含旧提交。
+concurrency:
+  group: beta-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+# 默认不给任何权限，每个作业自己声明要什么，漏写的作业什么也做不了，而不是悄悄继承。
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # 不用自托管机：它跨任务常驻、保留构建缓存，一旦被污染，产出的包会被签上正式版也认的签名。
+  # 也不用 actions/cache：缓存能被别的分支的运行写入，同样会把污染带进来。
+  build:
+    runs-on: ubuntu-24.04
+    # 冷构建要从头编，耗时还没在托管机上实测过，先放宽，按演练结果再调
+    timeout-minutes: 60
+    # 读 PR 正文要 pull-requests 的读权限：按提交找 PR 的接口归在这一项下，只给 contents 时会被拒。
+    permissions:
+      contents: read
+      pull-requests: read
+    # 与 dev 的 build 相同：client_id 与 CurseForge key 只在构建时内嵌，PETALFALL_OFFICIAL_BUILD 让编译本身也查一遍。
+    env:
+      PETALFALL_MSA_CLIENT_ID: ${{ vars.PETALFALL_MSA_CLIENT_ID }}
+      PETALFALL_CURSEFORGE_API_KEY: ${{ secrets.PETALFALL_CURSEFORGE_API_KEY }}
+      PETALFALL_OFFICIAL_BUILD: "1"
+      STABLE_MANIFEST_URL: https://petalfall.org/updates/stable/latest.json
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      installer-name: ${{ steps.bundle.outputs.installer-name }}
+      bootstrap-name: ${{ steps.bootstrap.outputs.bootstrap-name }}
+      installer-sha256: ${{ steps.info.outputs.installer-sha256 }}
+      bootstrap-sha256: ${{ steps.info.outputs.bootstrap-sha256 }}
+      cli-version: ${{ steps.write-version.outputs.cli-version }}
+    steps:
+      # 只认 GUID：空白或带换行的值会让启动器把它当成没有，下面在 exe 里的查找也会因此失效
+      - name: 检查微软登录 client_id
+        run: |
+          if ! [[ "$PETALFALL_MSA_CLIENT_ID" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::仓库变量 PETALFALL_MSA_CLIENT_ID 没有配置或不是 GUID，打出来的包登不了微软账户"
+            exit 1
+          fi
+
+      # 带空白的值启动器会当成没有，下面在 exe 里的查找也会因此失效
+      - name: 检查 CurseForge API key
+        run: |
+          if ! [[ "$PETALFALL_CURSEFORGE_API_KEY" =~ ^[[:graph:]]+$ ]]; then
+            echo "::error::仓库 secret PETALFALL_CURSEFORGE_API_KEY 没有配置或含空白，打出来的包用不了 CurseForge"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/xwin-toolchain
+
+      # 审批时要看到这次用的是哪套工具链。排在编译之前：缺了哪个工具在这里几秒就失败，不用白编半小时。
+      # xwin 的 CRT 与 SDK 版本由 cargo-xwin 按 XWIN_ 开头的环境变量取，一并记下。
+      - name: 记录工具链版本
+        env:
+          TOOLCHAIN: ${{ runner.temp }}/toolchain.json
+        run: |
+          node - <<'EOF'
+          const { execFileSync } = require("child_process");
+          const fs = require("fs");
+          const probes = [
+            ["node", "node", ["--version"]],
+            ["pnpm", "pnpm", ["--version"]],
+            ["rustc", "rustc", ["--version"]],
+            ["cargo", "cargo", ["--version"]],
+            ["cargo-xwin", "cargo", ["xwin", "--version"]],
+            ["makensis", "makensis", ["-VERSION"]],
+            ["clang", "clang", ["--version"]],
+            ["lld-link", "lld-link", ["--version"]],
+            ["nasm", "nasm", ["-v"]],
+          ];
+          const tools = {};
+          for (const [name, command, args] of probes) {
+            const first = execFileSync(command, args, { encoding: "utf8" }).trim().split("\n")[0].trim();
+            if (first === "") throw new Error(`${command} ${args.join(" ")} 没有输出版本`);
+            tools[name] = first;
+          }
+          const xwinEnv = Object.fromEntries(
+            Object.entries(process.env)
+              .filter(([key]) => key.startsWith("XWIN_"))
+              .sort(([a], [b]) => (a < b ? -1 : 1)),
+          );
+          const toolchain = JSON.stringify({ tools, xwinEnv }, null, 2);
+          fs.writeFileSync(process.env.TOOLCHAIN, toolchain);
+          console.log(toolchain);
+          EOF
+
+      # 一次性机器上没有旧缓存要清。放在 RUNNER_TEMP 不进工作区；排在工具链之后，它装工具时的编译不落进这里。
+      - name: 设置构建目录
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/cargo-target" >> "$GITHUB_ENV"
+
+      # 版本号只认 tauri.conf.json 里的基础号。beta 序号取已发布的 v<基础号>-beta.N 里最大的加 1：被拒批、失败的运行
+      # 和演练都不建 tag，不占号。next-beta 同时拦下不是纯 X.Y.Z 或主版本小于 1 的基础号：0.x.y-beta.N 比同基础号的
+      # dev 版本小，装过 dev 的用户会被判为降级。演练固定用 -beta.0：build-info.mjs 认不出的预发布标识会直接报错。
+      # 排在编译之前，版本号定不下来时不用白编。
+      - name: 确定版本号
+        id: version
+        run: |
+          base="$(node -p "require('./app/src-tauri/tauri.conf.json').version")"
+          if [ "$GITHUB_REF" != refs/heads/beta ]; then
+            version="$base-beta.0"
+            echo "::notice::不在 beta 分支上（$GITHUB_REF），按 $version 演练构建，不签名、不发布"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 带 ^{} 的是附注 tag 剥到提交的那一行，GitHub 建 Release 时打的是轻量 tag，两种都认
+          git ls-remote --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" > "$RUNNER_TEMP/remote-tags.tsv"
+          # Re-run all jobs 会重算序号，把已经发出去的同一个提交再发成新的 beta.N+1；要补的是失败的作业时，只该重跑那几个
+          released="$(awk -F '\t' -v sha="$GITHUB_SHA" '$1 == sha && $2 ~ /^refs\/tags\/v/ { sub(/^refs\/tags\//, "", $2); sub(/\^\{\}$/, "", $2); print $2 }' "$RUNNER_TEMP/remote-tags.tsv")"
+          if [ -n "$released" ]; then
+            echo "::error::提交 $GITHUB_SHA 已经发布为 $released。整体重跑（Re-run all jobs）会把它再发成一个新序号；之前那次只是后面的作业失败的话，在那次运行上用 Re-run failed jobs 补"
+            exit 1
+          fi
+          awk -F '\t' '{ sub(/^refs\/tags\//, "", $2); sub(/\^\{\}$/, "", $2); print $2 }' "$RUNNER_TEMP/remote-tags.tsv" | sort -u > "$RUNNER_TEMP/tags.txt"
+          number="$(node .github/scripts/dev-distribution.mjs next-beta "$base" "$RUNNER_TEMP/tags.txt")"
+          version="$base-beta.$number"
+
+          # 这个基础号已经出过正式版，再发它的 beta 就比正式版旧。香港机上还没有正式版清单时 404，跳过。
+          status="$(curl --silent --show-error --retry 3 --max-time 60 --output "$RUNNER_TEMP/stable.json" --write-out '%{http_code}' "$STABLE_MANIFEST_URL")"
+          case "$status" in
+            200)
+              stable="$(node -e "
+                const version = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).version;
+                if (typeof version !== 'string') throw new Error('正式版清单里没有字符串形式的 version');
+                process.stdout.write(version);
+              " "$RUNNER_TEMP/stable.json")"
+              order="$(node .github/scripts/dev-distribution.mjs compare "$base" "$stable")"
+              if [ "$order" != 1 ]; then
+                echo "::error::正式版清单上已经是 $stable，基础号 $base 不比它新：这个基础号的 beta 发出去比正式版旧，先在晋级分支上调高基础号"
+                exit 1
+              fi
+              ;;
+            404) echo "香港机上还没有正式版清单，跳过" ;;
+            *)
+              echo "::error::读正式版清单 $STABLE_MANIFEST_URL 返回 HTTP $status"
+              exit 1
+              ;;
+          esac
+          echo "本次发布 $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # 更新面板显示的就是这段文字，签名前审批时在 job summary 里核对。取的是合并出这次推送的那个 PR：
+      # 合并提交就是它的 merge_commit_sha，目标分支是 beta。找不到或不止一个都不猜，直接失败。
+      # 排在编译之前：说明缺了、空了、超长了，几秒就失败，不用白编。
+      - name: 取更新说明
+        id: notes
+        if: github.ref == 'refs/heads/beta'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          numbers="$(gh api --paginate "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+            --jq ".[] | select(.merged_at != null and .merge_commit_sha == \"$GITHUB_SHA\" and .base.ref == \"$GITHUB_REF_NAME\") | .number")"
+          if [ -z "$numbers" ]; then
+            echo "::error::找不到合并出提交 $GITHUB_SHA 的 PR：beta 只能经 PR 用 merge commit 合入，更新说明取自那个 PR 的正文"
+            exit 1
+          fi
+          if [ "$(wc -l <<< "$numbers")" -ne 1 ]; then
+            echo "::error::合并出提交 $GITHUB_SHA 的 PR 不止一个：$(tr '\n' ' ' <<< "$numbers")"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$numbers" --jq .body > "$RUNNER_TEMP/pr-body.md"
+          node .github/scripts/release-notes.mjs "$RUNNER_TEMP/pr-body.md" "$RUNNER_TEMP/release-notes.md"
+          echo "pr=$numbers" >> "$GITHUB_OUTPUT"
+          echo "notes=$RUNNER_TEMP/release-notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: 安装依赖
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: 前端质量门
+        working-directory: app
+        run: |
+          pnpm typecheck
+          pnpm lint:tokens
+          pnpm test --maxWorkers=4
+
+      # node --test 不认目录参数，这里由 shell 展开成文件列表。
+      - name: 工作流脚本测试
+        run: node --test .github/scripts/*.test.mjs
+
+      # 许可清单用 cargo metadata --frozen 现取，crate 必须先下好。
+      - name: 下载 Rust 依赖
+        run: cargo fetch --locked
+
+      # 安装包和前端显示的版本号都以 tauri.conf.json 为准，只改这一处两边才一致。签名作业按锁文件取同一版 CLI，
+      # 这里把装上的版本传过去对账。
+      - name: 写入版本号
+        id: write-version
+        working-directory: app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = 'src-tauri/tauri.conf.json';
+            const conf = JSON.parse(fs.readFileSync(path, 'utf8'));
+            conf.version = process.argv[1];
+            fs.writeFileSync(path, JSON.stringify(conf, null, 2));
+          " "$VERSION"
+          echo "cli-version=$(node -p "require('@tauri-apps/cli/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # 公钥是发布钥的那一半，与正式版共用，不是 dev 那把。requireSignedVersion 让客户端拒收签名里没有版本、
+      # 或签的版本和清单不同的更新，与 sign 作业的 --app-version 配套。整行由 beta_release_contract 的测试钉住。
+      - name: 写入发布更新公钥
+        working-directory: app
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = 'src-tauri/tauri.conf.json';
+            const conf = JSON.parse(fs.readFileSync(path, 'utf8'));
+            conf.plugins = { ...conf.plugins, updater: { pubkey: fs.readFileSync('../.github/release-updater.pub', 'utf8').trim(), requireSignedVersion: true } };
+            fs.writeFileSync(path, JSON.stringify(conf, null, 2));
+          "
+
+      - name: 构建 Windows 安装包
+        id: bundle
+        working-directory: app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bundle_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle"
+          pnpm tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
+          # 环境变量没传进编译时包里就没有 client_id 与 CurseForge key；直接在 exe 里找一遍
+          if ! grep -qF -e "$PETALFALL_MSA_CLIENT_ID" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
+            echo "::error::Petalfall.exe 里没有内嵌微软登录 client_id"
+            exit 1
+          fi
+          if ! grep -qF -e "$PETALFALL_CURSEFORGE_API_KEY" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
+            echo "::error::Petalfall.exe 里没有内嵌 CurseForge API key"
+            exit 1
+          fi
+          installer="$bundle_dir/nsis/Petalfall_${VERSION}_x64-setup.exe"
+          test -f "$installer"
+          echo "installer=$installer" >> "$GITHUB_OUTPUT"
+          echo "installer-name=$(basename "$installer")" >> "$GITHUB_OUTPUT"
+
+      # 壳不内嵌 NSIS，拼接放在最后：Runner 跑不了 Windows 程序，pack-setup 的自检是这条路上唯一的验证。
+      # 将来要加外层签名，必须插在 pack-setup 之后、sign 作业的更新签名之前：更新签名要签最终发出去的字节。
+      - name: 构建首装引导程序
+        id: bootstrap
+        working-directory: app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          INSTALLER: ${{ steps.bundle.outputs.installer }}
+        run: |
+          TAURI_APP_PATH=src-tauri-setup pnpm tauri build --no-bundle --runner cargo-xwin --target x86_64-pc-windows-msvc
+          cargo test --release --locked -p petalfall-setup-payload
+          release_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release"
+          bootstrap_dir="$release_dir/bundle/installer"
+          bootstrap="$bootstrap_dir/Petalfall-Installer-${VERSION}-x64.exe"
+          mkdir -p "$bootstrap_dir"
+          cargo run --release --locked -p petalfall-setup-payload --bin pack-setup -- \
+            "$release_dir/petalfall-setup.exe" "$INSTALLER" "$release_dir/Petalfall.exe" "$VERSION" "$bootstrap"
+          test -f "$bootstrap"
+          echo "bootstrap=$bootstrap" >> "$GITHUB_OUTPUT"
+          echo "bootstrap-name=$(basename "$bootstrap")" >> "$GITHUB_OUTPUT"
+          du -sh "$CARGO_TARGET_DIR"
+
+      # 签名前审批看的就是这份 summary：版本、两个包的 SHA-256、工具链、两个锁文件的哈希和更新说明原文。
+      # build-info.json 是同一份内容，随 Release 发出去留档。锁文件哈希取工作区里的文件，先确认构建没改动它们，
+      # 记下的才是提交里的那一份。
+      - name: 写构建信息
+        id: info
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          CLI_VERSION: ${{ steps.write-version.outputs.cli-version }}
+          INSTALLER: ${{ steps.bundle.outputs.installer }}
+          BOOTSTRAP: ${{ steps.bootstrap.outputs.bootstrap }}
+          TOOLCHAIN: ${{ runner.temp }}/toolchain.json
+          BUILD_INFO: ${{ runner.temp }}/build-info.json
+          IS_BETA: ${{ github.ref == 'refs/heads/beta' }}
+          PR_NUMBER: ${{ steps.notes.outputs.pr }}
+          NOTES: ${{ steps.notes.outputs.notes }}
+        run: |
+          if ! git diff --quiet -- Cargo.lock app/pnpm-lock.yaml; then
+            echo "::error::构建改动了锁文件，记下的哈希不再是提交里的那一份"
+            git diff --stat -- Cargo.lock app/pnpm-lock.yaml
+            exit 1
+          fi
+          node - <<'EOF'
+          const crypto = require("crypto");
+          const fs = require("fs");
+          const path = require("path");
+
+          const need = (name) => {
+            const value = process.env[name];
+            if (value === undefined || value === "") throw new Error(`缺环境变量 ${name}`);
+            return value;
+          };
+          const sha256 = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+          const release = need("IS_BETA") === "true";
+          const [bootstrap, installer] = [need("BOOTSTRAP"), need("INSTALLER")].map((file) => ({
+            name: path.basename(file),
+            size: fs.statSync(file).size,
+            sha256: sha256(file),
+          }));
+          const info = {
+            version: need("VERSION"),
+            commit: need("GITHUB_SHA"),
+            ref: need("GITHUB_REF"),
+            run: `${need("GITHUB_SERVER_URL")}/${need("GITHUB_REPOSITORY")}/actions/runs/${need("GITHUB_RUN_ID")}/attempts/${need("GITHUB_RUN_ATTEMPT")}`,
+            packages: { bootstrap, installer },
+            lockfiles: Object.fromEntries(["Cargo.lock", "app/pnpm-lock.yaml"].map((file) => [file, sha256(file)])),
+            tauriCli: need("CLI_VERSION"),
+            toolchain: JSON.parse(fs.readFileSync(need("TOOLCHAIN"), "utf8")),
+          };
+          if (release) info.pullRequest = Number(need("PR_NUMBER"));
+          fs.writeFileSync(need("BUILD_INFO"), `${JSON.stringify(info, null, 2)}\n`);
+          fs.appendFileSync(need("GITHUB_OUTPUT"), `bootstrap-sha256=${bootstrap.sha256}\ninstaller-sha256=${installer.sha256}\n`);
+
+          const row = (key, value) => `| ${key} | \`${value}\` |`;
+          const lines = [
+            release ? `## 测试版 ${info.version}` : `## 演练构建 ${info.version}（不签名、不发布）`,
+            "",
+            "| 项 | 值 |",
+            "| --- | --- |",
+            row("版本", info.version),
+            row("提交", info.commit),
+            row("分支", info.ref),
+            row(`引导程序 ${bootstrap.name}（${bootstrap.size} 字节）`, bootstrap.sha256),
+            row(`NSIS 包 ${installer.name}（${installer.size} 字节）`, installer.sha256),
+            ...Object.entries(info.lockfiles).map(([file, hash]) => row(file, hash)),
+            row("签名 CLI", `@tauri-apps/cli ${info.tauriCli}`),
+            "",
+            "### 工具链",
+            "",
+            "| 工具 | 版本 |",
+            "| --- | --- |",
+            ...Object.entries(info.toolchain.tools).map(([name, version]) => row(name, version)),
+            ...Object.entries(info.toolchain.xwinEnv).map(([name, value]) => row(name, value)),
+          ];
+          if (release) {
+            // 原文放进代码块，审批时看到的就是发出去的字节，不经 Markdown 渲染；围栏比正文里最长的一串反引号还长一个
+            const notes = fs.readFileSync(need("NOTES"), "utf8");
+            const longest = Math.max(0, ...[...notes.matchAll(/`+/g)].map((match) => match[0].length));
+            const fence = "`".repeat(Math.max(3, longest + 1));
+            lines.push("", `### 更新说明（取自 PR #${info.pullRequest}）`, "", fence, notes, fence);
+          }
+          fs.appendFileSync(need("GITHUB_STEP_SUMMARY"), `${lines.join("\n")}\n`);
+          console.log(JSON.stringify(info, null, 2));
+          EOF
+          echo "build-info=$BUILD_INFO" >> "$GITHUB_OUTPUT"
+
+      # 审批前要下载引导程序进沙箱装一次，那就是最终发出去的字节；beta 永久保留，产物按上限留 90 天备查。
+      # archive: false 时一步只能传一个文件，产物以文件名命名。
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.bundle.outputs.installer }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.bootstrap.outputs.bootstrap }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.info.outputs.build-info }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.ref == 'refs/heads/beta'
+        with:
+          path: ${{ steps.notes.outputs.notes }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+
+  # 发布私钥只在这个作业里出现，而且只给签名那一步。release-signing 环境要求维护者审批，这是代理碰不到的那道确认；
+  # 审批之前 build 的产物就能下载，签名是分离的 .sig，不改引导程序的字节。这里不放任何上传或推送凭据：
+  # 签名的作业拿不到发布渠道，发布的作业拿不到私钥。
+  sign:
+    needs: build
+    if: github.ref == 'refs/heads/beta'
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      BOOTSTRAP: ${{ github.workspace }}/dist/${{ needs.build.outputs.bootstrap-name }}
+    steps:
+      # 持钥的机器上只放用得到的三个文件：验签脚本、公钥和锁定签名 CLI 的锁文件。非 cone 模式才能按文件取。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            /.github/release-updater.pub
+            /.github/scripts/verify-update-signature.mjs
+            /app/pnpm-lock.yaml
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.bootstrap-name }}
+          path: dist
+
+      # 签的必须是审批时 summary 上列的那一份字节
+      - name: 核对引导程序
+        env:
+          WANT: ${{ needs.build.outputs.bootstrap-sha256 }}
+        run: |
+          got="$(sha256sum "$BOOTSTRAP" | cut -d' ' -f1)"
+          if [ "$got" != "$WANT" ]; then
+            echo "::error::下载到的引导程序 sha256 是 $got，build 作业记下的是 $WANT"
+            exit 1
+          fi
+          echo "引导程序 sha256 $got"
+
+      # 持钥的作业里不跑包管理器：npm exec、pnpm install 按 registry 当下给的元数据取包，还会跑安装脚本，
+      # 拿到的不一定是锁文件里那一份。这里只取 CLI 本体和 Linux x64 的原生绑定两个 tarball，按锁文件记的 integrity
+      # 核对后直接解开，不执行任何脚本；绑定由 CLI 自己按 node_modules 的解析找到。
+      - name: 按锁文件取签名 CLI
+        id: cli
+        env:
+          CLI_VERSION: ${{ needs.build.outputs.cli-version }}
+        run: |
+          node - app/pnpm-lock.yaml "$CLI_VERSION" > "$RUNNER_TEMP/tauri-cli.tsv" <<'EOF'
+          const fs = require("fs");
+          const [lockPath, expected] = process.argv.slice(2);
+          const lines = fs.readFileSync(lockPath, "utf8").split(/\r?\n/);
+          const lineAt = (index) => {
+            if (index >= lines.length) throw new Error(`锁文件只有 ${lines.length} 行，读不到第 ${index + 1} 行`);
+            return lines[index];
+          };
+          const indexesOf = (text) => lines.flatMap((line, index) => (line === text ? [index] : []));
+
+          // importers 下 devDependencies 里的这一项缩进 6 格，snapshots 里引用它的行形如 'name': version，不会混进来
+          const importer = indexesOf("      '@tauri-apps/cli':");
+          if (importer.length !== 1) throw new Error(`锁文件里 @tauri-apps/cli 的依赖声明应有恰好一处，实际 ${importer.length} 处`);
+          if (!lineAt(importer[0] + 1).startsWith("        specifier: ")) throw new Error("锁文件里 @tauri-apps/cli 的依赖声明后面不是 specifier");
+          const locked = /^        version: (\S+)$/.exec(lineAt(importer[0] + 2));
+          if (locked === null) throw new Error(`锁文件里 @tauri-apps/cli 的 version 行认不出：${lineAt(importer[0] + 2)}`);
+          if (locked[1] !== expected) throw new Error(`锁文件锁定 @tauri-apps/cli ${locked[1]}，build 作业装的是 ${expected}`);
+
+          // packages 与 snapshots 各有一行同名的键，带 resolution 的那一行才是包本身；integrity 只认 sha512，
+          // 带 tarball 地址的（不是默认 registry）同样认不出，宁可失败
+          for (const name of ["cli", "cli-linux-x64-gnu"]) {
+            const found = indexesOf(`  '@tauri-apps/${name}@${expected}':`)
+              .map((index) => /^    resolution: \{integrity: (sha512-[A-Za-z0-9+/]+={0,2})\}$/.exec(lineAt(index + 1)))
+              .filter((match) => match !== null);
+            if (found.length !== 1) throw new Error(`锁文件里 @tauri-apps/${name}@${expected} 的 integrity 应有恰好一条，实际 ${found.length} 条`);
+            console.log(`${name}\t${found[0][1]}`);
+          }
+          EOF
+          cli_root="$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps"
+          while IFS=$'\t' read -r name integrity; do
+            tarball="$RUNNER_TEMP/$name-$CLI_VERSION.tgz"
+            curl --fail --silent --show-error --location --retry 3 --max-time 300 --output "$tarball" \
+              "https://registry.npmjs.org/@tauri-apps/$name/-/$name-$CLI_VERSION.tgz" < /dev/null
+            actual="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
+            if [ "$actual" != "$integrity" ]; then
+              echo "::error::@tauri-apps/$name@$CLI_VERSION 的 integrity 是 $actual，锁文件里记的是 $integrity"
+              exit 1
+            fi
+            mkdir -p "$cli_root/$name"
+            tar -xzf "$tarball" -C "$cli_root/$name" --strip-components=1
+            echo "@tauri-apps/$name@$CLI_VERSION 与锁文件一致：$integrity"
+          done < "$RUNNER_TEMP/tauri-cli.tsv"
+          test -f "$cli_root/cli/tauri.js"
+          test -f "$cli_root/cli-linux-x64-gnu/cli.linux-x64-gnu.node"
+          echo "tauri=$cli_root/cli/tauri.js" >> "$GITHUB_OUTPUT"
+
+      # 更新包是引导程序，不是 NSIS 包，原因见 dev-build.yml 的同名步骤。--app-version 把版本写进可信注释，
+      # 客户端开了 requireSignedVersion，拿它和清单里的 version 比，伪造清单给旧包配上更高的版本号也骗不到降级。
+      # 漏传时 CLI 只打警告照样签，靠下一步验签挡下。发布钥按要求带口令，口令为空就是机密配错了。
+      - name: 给更新包签名
+        env:
+          TAURI_CLI: ${{ steps.cli.outputs.tauri }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.RELEASE_UPDATER_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] || [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
+            echo "::error::环境 release-signing 里没有配置 RELEASE_UPDATER_PRIVATE_KEY 或 RELEASE_UPDATER_KEY_PASSWORD" >&2
+            exit 1
+          fi
+          node "$TAURI_CLI" signer sign --app-version "$VERSION" "$BOOTSTRAP"
+          test -s "$BOOTSTRAP.sig"
+
+      # 私钥和仓库里的公钥不是一对时 CLI 只打警告照样签，发出去的包所有 beta 用户都会拒收。
+      - name: 按公钥验签
+        run: node .github/scripts/verify-update-signature.mjs .github/release-updater.pub "$BOOTSTRAP" "$BOOTSTRAP.sig" "$VERSION"
+
+      # 只交出签名：引导程序的字节以 build 的产物为准，下游各自按 sha256 核对
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ env.BOOTSTRAP }}.sig
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+
+  # 传包、生成清单、建 Release。桶凭据放在 updates-beta 环境，只放行 beta 分支，各自只进用到它的那一步。
+  # 最后一步是把草稿转成 prerelease，之后不再有会失败的步骤：转正之后失败的话，重跑这个作业会被版本检查挡下
+  # （tag 已经在了），所以读回 GitHub 与推送香港都放在 publish-hk，失败时只用 Re-run failed jobs 重跑那个作业。
+  stage:
+    needs: [build, sign]
+    if: github.ref == 'refs/heads/beta'
+    runs-on: ubuntu-24.04
+    environment: updates-beta
+    # 两个包各传三个桶再逐个读回，杭州和香港对 GitHub 托管机都是跨境，按慢的情况放宽
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      TAG: v${{ needs.build.outputs.version }}
+      INSTALLER: ${{ github.workspace }}/dist/${{ needs.build.outputs.installer-name }}
+      BOOTSTRAP: ${{ github.workspace }}/dist/${{ needs.build.outputs.bootstrap-name }}
+      BUILD_INFO: ${{ github.workspace }}/dist/build-info.json
+      NOTES: ${{ github.workspace }}/dist/release-notes.md
+      SUMS: ${{ github.workspace }}/dist/SHA256SUMS
+      HK_MANIFEST_URL: https://petalfall.org/updates/beta/latest.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.installer-name }}
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.bootstrap-name }}
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.bootstrap-name }}.sig
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-info.json
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes.md
+          path: dist
+
+      # 发出去的必须是审批时 summary 上列的那两份字节
+      - name: 核对两个安装包
+        env:
+          WANT_BOOTSTRAP: ${{ needs.build.outputs.bootstrap-sha256 }}
+          WANT_INSTALLER: ${{ needs.build.outputs.installer-sha256 }}
+        run: |
+          check() {
+            local got
+            got="$(sha256sum "$1" | cut -d' ' -f1)"
+            if [ "$got" != "$2" ]; then
+              echo "::error::$(basename "$1") 的 sha256 是 $got，build 作业记下的是 $2"
+              exit 1
+            fi
+          }
+          check "$BOOTSTRAP" "$WANT_BOOTSTRAP"
+          check "$INSTALLER" "$WANT_INSTALLER"
+
+      # sign 作业交来的签名在这里按仓库公钥再验一次：产物在作业之间经过 GitHub 的存储，不默认可信
+      - name: 再次验签
+        run: node .github/scripts/verify-update-signature.mjs .github/release-updater.pub "$BOOTSTRAP" "$BOOTSTRAP.sig" "$VERSION"
+
+      # 插件只装比自己新的版本。香港清单是客户端唯一会问的地方，对照它；还没有时 404，跳过。
+      # 再对照所有 v* tag：香港清单被撤掉止血之后，这一条照样挡得住倒退，也挡得住同号重发。
+      # 排在上传之前：会在这里失败的运行不该先往三个桶各传两个包。
+      - name: 检查版本号没有倒退
+        run: |
+          status="$(curl --silent --show-error --retry 3 --max-time 60 --output "$RUNNER_TEMP/previous-hk.json" --write-out '%{http_code}' "$HK_MANIFEST_URL")"
+          case "$status" in
+            200)
+              previous="$(node -e "
+                const version = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).version;
+                if (typeof version !== 'string') throw new Error('香港 beta 清单里没有字符串形式的 version');
+                process.stdout.write(version);
+              " "$RUNNER_TEMP/previous-hk.json")"
+              order="$(node .github/scripts/dev-distribution.mjs compare "$VERSION" "$previous")"
+              if [ "$order" != 1 ]; then
+                echo "::error::版本号 $VERSION 不比香港 beta 清单上已发布的 $previous 新，beta 包不会更新过去"
+                exit 1
+              fi
+              ;;
+            404) echo "香港机上还没有 beta 清单，跳过" ;;
+            *)
+              echo "::error::读香港清单 $HK_MANIFEST_URL 返回 HTTP $status"
+              exit 1
+              ;;
+          esac
+          git ls-remote --tags --refs "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" | cut -f2 | sed 's#^refs/tags/##' > "$RUNNER_TEMP/tags.txt"
+          while IFS= read -r tag; do
+            case "$tag" in
+              "$TAG")
+                echo "::error::tag $TAG 已经存在：这个版本发布过了"
+                exit 1
+                ;;
+              v*)
+                order="$(node .github/scripts/dev-distribution.mjs compare "$VERSION" "${tag#v}" < /dev/null)"
+                if [ "$order" != 1 ]; then
+                  echo "::error::版本号 $VERSION 不比已有的 tag $tag 新"
+                  exit 1
+                fi
+                ;;
+            esac
+          done < "$RUNNER_TEMP/tags.txt"
+
+      # 对象键是 beta/<版本>-<运行次数>/<文件名>：重跑这个作业会换一个目录，不会撞上上次传了一半的对象。
+      # beta/ 不过期，测试版可能几周不更新，桶源不能先 404。必须排在验签之后，传上去的就是最终发出去的字节。
+      - name: 上传到三个存储桶
+        env:
+          OSS_CI_ACCESS_KEY_ID: ${{ secrets.OSS_CI_ACCESS_KEY_ID }}
+          OSS_CI_ACCESS_KEY_SECRET: ${{ secrets.OSS_CI_ACCESS_KEY_SECRET }}
+          R2_CI_ACCESS_KEY_ID: ${{ secrets.R2_CI_ACCESS_KEY_ID }}
+          R2_CI_SECRET_ACCESS_KEY: ${{ secrets.R2_CI_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+        run: |
+          for file in "$BOOTSTRAP" "$INSTALLER"; do
+            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
+            bash .github/scripts/upload-to-mirrors.sh "$key" "$file"
+          done
+
+      # 不带凭据，按客户端会用的公网地址读回：公共读没开、自定义域名配错时上传照样成功，只有这里看得出来。
+      - name: 读回三个存储桶
+        run: |
+          for file in "$BOOTSTRAP" "$INSTALLER"; do
+            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
+            urls="$(node .github/scripts/dev-distribution.mjs mirror-urls "$key")"
+            while IFS=$'\t' read -r name url; do
+              bash .github/scripts/check-download.sh "$name" "$url" "$file" < /dev/null
+            done <<< "$urls"
+          done
+
+      # url 取这一版 Release 的引导程序附件：每版一个 tag、永久保留，地址不会失效。github 源要等下面转正才存在，
+      # 由 publish-hk 读回。说明取自 build 交来的更新说明，beta 版本不给说明文件时脚本直接拒绝。
+      # 写完从文件读回来按确切的键集合、源名、主机白名单、https 和带版本的路径校验。
+      - name: 生成并校验测试版更新清单
+        id: manifest
+        run: |
+          manifest="$RUNNER_TEMP/latest.json"
+          node .github/scripts/dev-distribution.mjs build "$VERSION" "$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest" "$NOTES"
+          node .github/scripts/dev-distribution.mjs validate "$manifest" "$VERSION" "$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG"
+          cat "$manifest"
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+
+      # 客户端拿来比对的是清单里的 version 和 signature，不是上面的 .sig 文件。从写好的清单里取出这一对
+      # 按同一脚本再验一遍，清单拼错字段、读错文件时在发布前挡下。
+      - name: 按清单验签
+        env:
+          MANIFEST: ${{ steps.manifest.outputs.manifest }}
+        run: |
+          signature="$RUNNER_TEMP/manifest.sig"
+          manifest_version="$(node -e "
+            const fs = require('fs');
+            const [manifestPath, signaturePath] = process.argv.slice(1);
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            const { signature } = manifest.platforms['windows-x86_64'];
+            if (typeof manifest.version !== 'string' || typeof signature !== 'string') {
+              throw new Error('清单缺 version 或 windows-x86_64 的 signature');
+            }
+            fs.writeFileSync(signaturePath, signature);
+            process.stdout.write(manifest.version);
+          " "$MANIFEST" "$signature")"
+          node .github/scripts/verify-update-signature.mjs .github/release-updater.pub "$BOOTSTRAP" "$signature" "$manifest_version"
+
+      # Release 正文以更新说明开头：启动器资讯的摘要取正文第一行。SHA-256 同时写进正文和附件，没有代码签名，
+      # 用户手动下载时靠它核对。
+      - name: 生成 SHA256SUMS 与 Release 正文
+        id: body
+        run: |
+          (cd "$(dirname "$BOOTSTRAP")" && sha256sum -- "$(basename "$BOOTSTRAP")" "$(basename "$INSTALLER")") > "$SUMS"
+          body="$RUNNER_TEMP/release-body.md"
+          {
+            cat "$NOTES"
+            printf '\n\n---\n\n两个安装包的 SHA-256（与附件 SHA256SUMS 相同）：\n\n```\n'
+            cat "$SUMS"
+            printf '```\n\n'
+            echo "beta 分支 ${GITHUB_SHA::8} 的构建，构建记录见 $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID。首次安装用 Petalfall-Installer，被安全软件拦下时换原生 NSIS 包。交叉编译，没有代码签名证书。"
+          } > "$body"
+          cat "$body"
+          echo "body=$body" >> "$GITHUB_OUTPUT"
+
+      # publish-hk 推到香港、读回 GitHub 比对的必须是这里发到 Release 的同一份字节，经产物交过去。
+      # 排在建 Release 之前：这一步失败时 Release 还没动，这个作业照常能重跑。
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.manifest.outputs.manifest }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ env.SUMS }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 90
+
+      # 先建草稿传完附件，核对无误再转 prerelease：转正之前没有 tag，用户看不到半成品，失败了也不占版本号。
+      # 草稿只会是这个作业之前的尝试留下的（按 tag 名列出来只有 push 权限才看得到草稿），先删再建；已发布的同 tag
+      # 说明这个版本发过了，直接失败。tag 在转正时按 --target 指向本次提交创建。
+      - name: 建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MANIFEST: ${{ steps.manifest.outputs.manifest }}
+          BODY: ${{ steps.body.outputs.body }}
+        run: |
+          existing="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$TAG\") | [.id, .draft] | @tsv")"
+          while IFS=$'\t' read -r id draft; do
+            if [ -z "$id" ]; then
+              continue
+            fi
+            if [ "$draft" != true ]; then
+              echo "::error::$TAG 已经有发布过的 Release（id $id），这个版本发过了"
+              exit 1
+            fi
+            echo "删掉之前的尝试留下的草稿 $id"
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/$id" < /dev/null
+          done <<< "$existing"
+
+          gh release create "$TAG" \
+            "$BOOTSTRAP#首次安装用这个，也是自动更新包" \
+            "$INSTALLER#原生 NSIS 包，引导程序内嵌的就是它，首装包被拦截时可用" \
+            "$MANIFEST#测试版自动更新清单" \
+            "$SUMS#两个安装包的 SHA-256" \
+            "$BUILD_INFO#构建信息：提交、版本、工具链与锁文件哈希" \
+            --draft \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "测试版 $VERSION" \
+            --notes-file "$BODY"
+
+          draft_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$TAG\" and .draft) | .id")"
+          if ! [[ "$draft_id" =~ ^[0-9]+$ ]]; then
+            echo "::error::$TAG 的草稿应有恰好一个，实际是：$draft_id"
+            exit 1
+          fi
+          # 附件名、大小、状态逐个对上才转正：转正之后版本号就占掉了，缺附件只能再发一版
+          got="$(gh api "repos/$GITHUB_REPOSITORY/releases/$draft_id" --jq '.assets[] | [.name, .size, .state] | @tsv' | LC_ALL=C sort)"
+          want="$(for file in "$BOOTSTRAP" "$INSTALLER" "$MANIFEST" "$SUMS" "$BUILD_INFO"; do
+            printf '%s\t%s\tuploaded\n' "$(basename "$file")" "$(stat -c %s "$file")"
+          done | LC_ALL=C sort)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::草稿 $draft_id 的附件和本地文件对不上"
+            echo "草稿上：$got"
+            echo "本地：$want"
+            exit 1
+          fi
+          published="$(gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$draft_id" -F draft=false -F prerelease=true --jq '[.draft, .prerelease, .tag_name] | @tsv')"
+          if [ "$published" != "$(printf 'false\ttrue\t%s' "$TAG")" ]; then
+            echo "::error::Release $draft_id 转正后的状态是 $published"
+            exit 1
+          fi
+          echo "已发布 $TAG（Release $draft_id）"
+
+  # 转正之后的步骤单独成作业，失败时用 Re-run failed jobs 只重跑这里：推的还是 stage 交来的同一份清单，
+  # 香港机落后时照常替换，已经写进去时视为无变化。不能点 Re-run all jobs：stage 会在版本检查处停下（tag 已在），
+  # build 会因为这个提交已经发布而拒绝重算序号。
+  publish-hk:
+    needs: [build, stage]
+    if: github.ref == 'refs/heads/beta'
+    runs-on: ubuntu-24.04
+    environment: updates-beta
+    # 五次读回 GitHub（check-download.sh 每次最多 600 秒）、推送（ssh 最多 3 次）和最多 5 次回读，各步的上限加起来
+    # 约一小时，按最坏情况放，免得每一步都还在自己的上限内、作业却先被时限掐掉。
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      TAG: v${{ needs.build.outputs.version }}
+      INSTALLER: ${{ github.workspace }}/dist/${{ needs.build.outputs.installer-name }}
+      BOOTSTRAP: ${{ github.workspace }}/dist/${{ needs.build.outputs.bootstrap-name }}
+      BUILD_INFO: ${{ github.workspace }}/dist/build-info.json
+      SUMS: ${{ github.workspace }}/dist/SHA256SUMS
+      MANIFEST: ${{ github.workspace }}/dist/latest.json
+      HK_MANIFEST_URL: https://petalfall.org/updates/beta/latest.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.bootstrap-name }}
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.installer-name }}
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: build-info.json
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: SHA256SUMS
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: latest.json
+          path: dist
+
+      # tag 由转正时创建，--target 只在 tag 还不存在时起作用：版本检查之后要是有人抢先推了同名 tag，
+      # Release 会挂在别的提交上。附注 tag 取剥到提交的那一行。
+      - name: 核对 tag 指向本次提交
+        run: |
+          git ls-remote --tags "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" > "$RUNNER_TEMP/remote-tags.tsv"
+          commit="$(awk -F '\t' -v ref="refs/tags/$TAG" '$2 == ref { sha = $1 } $2 == (ref "^{}") { peeled = $1 } END { print (peeled != "" ? peeled : sha) }' "$RUNNER_TEMP/remote-tags.tsv")"
+          if [ "$commit" != "$GITHUB_SHA" ]; then
+            echo "::error::tag $TAG 指向 ${commit:-（不存在）}，本次提交是 $GITHUB_SHA"
+            exit 1
+          fi
+
+      # github 源转正后才存在。清单里的 github 源和其余附件都按公网地址读回，与 stage 交来的字节比对。
+      - name: 读回 GitHub 源
+        run: |
+          url="$(node -e "
+            const fs = require('fs');
+            const entry = JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).platforms['windows-x86_64'];
+            process.stdout.write(entry['x-sources'].find((source) => source.name === 'github').url);
+          " "$MANIFEST")"
+          bash .github/scripts/check-download.sh github "$url" "$BOOTSTRAP"
+          for file in "$INSTALLER" "$MANIFEST" "$SUMS" "$BUILD_INFO"; do
+            name="$(basename "$file")"
+            bash .github/scripts/check-download.sh "github $name" "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$name" "$file"
+          done
+
+      # beta 客户端只问这份清单。私钥只进这一步，脚本把它写到 $RUNNER_TEMP、权限 600、用完即删；
+      # 香港机上的强制命令把这把钥匙绑在 beta 通道，只能替换 beta 清单。主机公钥钉在 .github/petalfall-hk.known_hosts。
+      - name: 推送香港清单
+        env:
+          HK_MANIFEST_SSH_KEY: ${{ secrets.HK_MANIFEST_SSH_KEY }}
+        run: bash .github/scripts/push-hk-manifest.sh "$MANIFEST"
+
+      # 脚本回显的 sha256 只说明文件写对了；客户端读的是经公网 HTTPS 给出的那份，Content-Type 也得是 JSON。
+      # 最多试 5 次，都不符就让作业失败：这时 beta 客户端读到的还是旧清单，收不到这次更新，重跑这个作业补上。
+      - name: 经公网回读香港清单
+        run: |
+          want="$(sha256sum "$MANIFEST" | cut -d' ' -f1)"
+          fetched="$RUNNER_TEMP/hk-readback.json"
+          json_type='^application/json(;.*)?$'
+          for attempt in 1 2 3 4 5; do
+            if content_type="$(curl --fail --silent --show-error --max-time 60 --output "$fetched" --write-out '%{content_type}' "$HK_MANIFEST_URL")"; then
+              got="$(sha256sum "$fetched" | cut -d' ' -f1)"
+              if [ "$got" = "$want" ] && [[ "$content_type" =~ $json_type ]]; then
+                echo "香港清单已生效：sha256 $got，Content-Type $content_type"
+                exit 0
+              fi
+              echo "第 $attempt 次回读：sha256 $got，Content-Type $content_type，本地清单是 $want"
+            else
+              echo "第 $attempt 次回读失败"
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              sleep 5
+            fi
+          done
+          echo "::error::$HK_MANIFEST_URL 回读 5 次都和本地清单不符"
+          exit 1
