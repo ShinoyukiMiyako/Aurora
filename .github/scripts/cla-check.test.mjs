@@ -35,6 +35,8 @@ const mallory = person('mallory');
 const renovate = person('renovate[bot]', 'Bot');
 const actionsBot = person('github-actions[bot]', 'Bot');
 const maintainer = { id: 132777740, login: OWNER, type: 'User' };
+const BASE_REPO = { id: randomInt(1_000_000, 2_000_000) };
+const FORK_REPO = { id: randomInt(2_000_000, 3_000_000) };
 
 function commitBy(author, overrides = {}) {
   nextId += 1;
@@ -99,6 +101,8 @@ function createGitHub({
   fileExists = true,
   branchExists = true,
   prCommitCount,
+  headRef = 'feature',
+  headRepo = FORK_REPO,
   beforeWrite,
 } = {}) {
   const repository = {
@@ -137,7 +141,8 @@ function createGitHub({
             data: {
               number: NUMBER,
               user: opener,
-              head: { sha: HEAD_SHA },
+              head: { sha: HEAD_SHA, ref: headRef, repo: headRepo },
+              base: { ref: 'beta', repo: BASE_REPO },
               commits: prCommitCount ?? commits.length,
             },
           };
@@ -393,6 +398,82 @@ describe('需要签署的人', () => {
     const result = await run(github);
 
     assert.equal(result.state, 'success');
+  });
+});
+
+describe('晋级 PR', () => {
+  // 混进没签的作者和没关联邮箱的提交：晋级 PR 要是照常逐个核对，这里要么因超过上限报错，要么判失败。
+  function releaseHistory(length) {
+    const commits = Array.from({ length }, () => commitBy(maintainer));
+    commits.push(commitBy(bob), unlinkedCommit({ name: 'Old Email' }));
+    return commits;
+  }
+
+  for (const headRef of ['dev', 'beta']) {
+    it(`本仓库 ${headRef} 开出的 PR 只核对开启者，不受 250 个提交上限的限制`, async () => {
+      const github = createGitHub({
+        opener: maintainer,
+        commits: releaseHistory(300),
+        headRef,
+        headRepo: BASE_REPO,
+      });
+
+      const result = await run(github);
+
+      assert.deepEqual(result, { state: 'success', missing: [], unlinked: [] });
+      assert.equal(lastStatus(github).state, 'success');
+      assert.equal(lastStatus(github).sha, HEAD_SHA);
+      assert.deepEqual(github.comments, []);
+    });
+  }
+
+  it('开启者没签照样要签', async () => {
+    const github = createGitHub({
+      opener: alice,
+      commits: releaseHistory(10),
+      headRef: 'dev',
+      headRepo: BASE_REPO,
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result.missing, ['alice']);
+    assert.deepEqual(result.unlinked, []);
+    assert.equal(lastStatus(github).state, 'failure');
+  });
+
+  it('fork 上同名的 dev 分支照常逐个核对', async () => {
+    const github = createGitHub({ opener: alice, commits: releaseHistory(10), headRef: 'dev' });
+
+    const result = await run(github);
+
+    assert.deepEqual(result.missing, ['alice', 'bob']);
+    assert.equal(result.unlinked.length, 1);
+  });
+
+  it('来源 fork 已删除时照常逐个核对', async () => {
+    const github = createGitHub({
+      opener: alice,
+      commits: releaseHistory(300),
+      headRef: 'dev',
+      headRepo: null,
+    });
+
+    await assert.rejects(run(github), /只取到 250 个/);
+    assert.deepEqual(github.calls.statuses, []);
+  });
+
+  it('本仓库别的分支开出的 PR 照常逐个核对', async () => {
+    const github = createGitHub({
+      opener: maintainer,
+      commits: releaseHistory(10),
+      headRef: 'fix/updater',
+      headRepo: BASE_REPO,
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result.missing, ['bob']);
   });
 });
 
