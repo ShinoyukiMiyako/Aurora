@@ -40,7 +40,11 @@ const maintainer = { id: 132777740, login: OWNER, type: 'User' };
 const webFlow = { id: 19864447, login: 'web-flow', type: 'User' };
 
 const BASE_REPO = { id: randomInt(1, 1_000_000), full_name: `${OWNER}/${REPO}` };
-const FORK_REPO = { id: BASE_REPO.id + 1, full_name: `mallory/${REPO}` };
+// 检查只比较 head 和 base 是不是同一个仓库，fork 共用一个 id 不影响判定。
+function forkOwnedBy(owner) {
+  return { id: BASE_REPO.id + 1, full_name: `${owner.login}/${REPO}`, owner };
+}
+const FORK_REPO = forkOwnedBy(mallory);
 
 // 默认提交者就是作者、没有签名，和大多数贡献者的本地提交一样。
 function commitBy(author, { committer = author, verified = false } = {}) {
@@ -303,7 +307,7 @@ describe('需要签署的人', () => {
 
     const result = await run(github);
 
-    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [] });
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [], forkDeleted: false });
     assert.equal(github.calls.statuses.length, 1);
     assert.deepEqual(lastStatus(github), {
       owner: OWNER,
@@ -368,7 +372,7 @@ describe('需要签署的人', () => {
 
     const result = await run(github);
 
-    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [] });
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [], forkDeleted: false });
     assert.deepEqual(github.comments, []);
   });
 
@@ -442,7 +446,7 @@ describe('晋级 PR', () => {
 
     const result = await run(github);
 
-    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [] });
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [], forkDeleted: false });
     assert.equal(lastStatus(github).state, 'success');
     assert.equal(lastStatus(github).sha, HEAD_SHA);
     assert.deepEqual(github.comments, []);
@@ -464,8 +468,9 @@ describe('晋级 PR', () => {
 
 // 提交作者按邮箱关联，把邮箱填成维护者或 Bot 的就会关联到它们。fork 的提交不能只凭关联结果豁免。
 describe('fork 里作者是维护者或 Bot 的提交', () => {
+  // fork 归开启者所有，这是最常见的情况；fork 的主人另有专门的用例，这里只看提交作者。
   function forkGitHub(options) {
-    return createGitHub({ headRepo: FORK_REPO, ...options });
+    return createGitHub({ headRepo: forkOwnedBy(options.opener), ...options });
   }
 
   it('冒用 Bot 邮箱的提交判失败并点名，开启者已签署也不放行', async () => {
@@ -544,7 +549,7 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
 
     const result = await run(github);
 
-    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [] });
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [], forkDeleted: false });
     assert.equal(lastStatus(github).state, 'success');
     assert.deepEqual(github.comments, []);
   });
@@ -563,7 +568,13 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
     const sameRepoResult = await run(sameRepo);
     const forkResult = await run(fork);
 
-    assert.deepEqual(sameRepoResult, { state: 'success', missing: [], unlinked: [], unverified: [] });
+    assert.deepEqual(sameRepoResult, {
+      state: 'success',
+      missing: [],
+      unlinked: [],
+      unverified: [],
+      forkDeleted: false,
+    });
     assert.equal(forkResult.state, 'failure');
     assert.deepEqual(
       forkResult.unverified,
@@ -613,6 +624,238 @@ describe('fork 里作者是维护者或 Bot 的提交', () => {
     assert.equal(github.calls.created.length, 1);
     assert.equal(botComments(github).length, 1);
     assert.match(botComments(github)[0].body, /已签署/);
+  });
+});
+
+// 作者邮箱谁都能填成已签者的。fork 的分支归它的主人控制，PR 来自 fork 时主人也要签，开启者是维护者也一样。
+describe('fork 的主人', () => {
+  it('维护者代开、提交冒用已签 alice 的 fork PR：没签的 fork 主人被点名', async () => {
+    const github = createGitHub({
+      opener: maintainer,
+      headRepo: FORK_REPO,
+      commits: [commitBy(alice), commitBy(alice)],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, {
+      state: 'failure',
+      missing: ['mallory'],
+      unlinked: [],
+      unverified: [],
+      forkDeleted: false,
+    });
+    assert.equal(github.calls.statuses.length, 1);
+    assert.equal(lastStatus(github).state, 'failure');
+    assert.equal(lastStatus(github).sha, HEAD_SHA);
+    assert.deepEqual(github.calls.writes, []);
+    const [comment] = botComments(github);
+    assert.match(comment.body, /^待签署 \/ Waiting for: @mallory$/m);
+    assert.doesNotMatch(comment.body, /@alice/);
+    assert.doesNotMatch(comment.body, new RegExp(`@${OWNER}`));
+    assert.doesNotMatch(comment.body, /fork 已被删除/);
+  });
+
+  it('fork 的主人签过后通过，不写签名也不发评论', async () => {
+    const github = createGitHub({
+      opener: maintainer,
+      headRepo: FORK_REPO,
+      commits: [commitBy(alice)],
+      signatures: [recordOf(alice), recordOf(mallory)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [], forkDeleted: false });
+    assert.equal(lastStatus(github).state, 'success');
+    assert.deepEqual(github.calls.writes, []);
+    assert.deepEqual(github.comments, []);
+  });
+
+  it('fork 的主人在 PR 下评论签署后写入记录，转为通过', async () => {
+    const github = createGitHub({
+      opener: maintainer,
+      headRepo: FORK_REPO,
+      commits: [commitBy(alice)],
+      signatures: [recordOf(alice)],
+    });
+
+    const before = await run(github);
+    const signature = commentBy(mallory, ENGLISH_PHRASE);
+    github.comments.push(signature);
+    const after = await run(github, issueCommentContext());
+
+    assert.deepEqual(before.missing, ['mallory']);
+    assert.equal(after.state, 'success');
+    assert.deepEqual(after.missing, []);
+    assert.deepEqual(github.repository.signatures, [
+      recordOf(alice),
+      {
+        id: mallory.id,
+        login: 'mallory',
+        version: CLA_VERSION,
+        pr: NUMBER,
+        comment: signature.html_url,
+        at: SIGNED_AT,
+      },
+    ]);
+    assert.equal(lastStatus(github).state, 'success');
+    assert.equal(github.calls.created.length, 1);
+    assert.equal(botComments(github).length, 1);
+    assert.match(botComments(github)[0].body, /已签署/);
+  });
+
+  it('开启者就是 fork 的主人、也是提交作者时只点名一次', async () => {
+    const github = createGitHub({
+      opener: mallory,
+      headRepo: FORK_REPO,
+      commits: [commitBy(mallory), commitBy(mallory)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result.missing, ['mallory']);
+    const [comment] = botComments(github);
+    assert.equal(comment.body.match(/@mallory/g).length, 1);
+  });
+
+  it('开启者和 fork 的主人不是同一人时两人都要签，各点名一次', async () => {
+    const github = createGitHub({
+      opener: bob,
+      headRepo: FORK_REPO,
+      commits: [commitBy(alice), commitBy(bob), commitBy(mallory)],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result.missing, ['bob', 'mallory']);
+    assert.match(botComments(github)[0].body, /^待签署 \/ Waiting for: @bob @mallory$/m);
+  });
+
+  it('fork 的主人只签过旧版本时仍被点名', async () => {
+    const github = createGitHub({
+      opener: maintainer,
+      headRepo: FORK_REPO,
+      commits: [commitBy(alice)],
+      signatures: [recordOf(alice), recordOf(mallory, { version: CLA_VERSION - 1 })],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result.missing, ['mallory']);
+    assert.equal(lastStatus(github).state, 'failure');
+  });
+
+  it('fork 归组织所有时不要求组织签', async () => {
+    const org = person('acme', 'Organization');
+    const github = createGitHub({
+      opener: maintainer,
+      headRepo: forkOwnedBy(org),
+      commits: [commitBy(alice)],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [], forkDeleted: false });
+    assert.equal(lastStatus(github).state, 'success');
+    assert.deepEqual(github.comments, []);
+  });
+
+  it('组织的 fork 里，没签的开启者照样要签', async () => {
+    const org = person('acme', 'Organization');
+    const github = createGitHub({
+      opener: bob,
+      headRepo: forkOwnedBy(org),
+      commits: [commitBy(alice)],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result.missing, ['bob']);
+    assert.doesNotMatch(botComments(github)[0].body, /@acme/);
+  });
+
+  it('fork 归豁免账号所有时不要求签', async () => {
+    const github = createGitHub({
+      opener: alice,
+      headRepo: forkOwnedBy(maintainer),
+      commits: [commitBy(alice)],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [], forkDeleted: false });
+  });
+
+  it('fork 已删除时判失败并在评论里写明原因与出路，不抛错，重查结果不变', async () => {
+    const github = createGitHub({
+      opener: maintainer,
+      headRepo: null,
+      commits: [commitBy(alice)],
+      signatures: [recordOf(alice)],
+    });
+
+    const first = await run(github);
+    const second = await run(github, issueCommentContext());
+
+    const expected = { state: 'failure', missing: [], unlinked: [], unverified: [], forkDeleted: true };
+    assert.deepEqual(first, expected);
+    assert.deepEqual(second, expected);
+    assert.deepEqual(
+      github.calls.statuses.map((status) => [status.sha, status.state, status.description]),
+      [
+        [HEAD_SHA, 'failure', 'CLA 尚未完成，见 PR 评论 / See the PR comment'],
+        [HEAD_SHA, 'failure', 'CLA 尚未完成，见 PR 评论 / See the PR comment'],
+      ],
+    );
+    assert.deepEqual(github.calls.writes, []);
+    assert.equal(github.calls.created.length, 1);
+    assert.deepEqual(github.calls.updated, []);
+    const [comment] = botComments(github);
+    assert.ok(comment.body.includes('本 PR 来源的 fork 已被删除，无法确认分支归谁所有。'));
+    assert.ok(comment.body.includes('请从仍然存在的 fork 重新开一个 PR。'));
+    assert.ok(comment.body.includes('The fork this PR comes from has been deleted'));
+    assert.ok(comment.body.includes('Please open a new PR from a fork that still exists.'));
+    assert.doesNotMatch(comment.body, /Waiting for/);
+    assert.doesNotMatch(comment.body, /@/);
+  });
+
+  it('fork 已删除时没签的人照样点名，签了记录照写，但仍判失败', async () => {
+    const github = createGitHub({ opener: bob, headRepo: null, commits: [commitBy(bob)] });
+
+    const before = await run(github);
+    const beforeBody = github.calls.created[0].body;
+    github.comments.push(commentBy(bob, CHINESE_PHRASE));
+    const after = await run(github);
+
+    assert.deepEqual(before, { state: 'failure', missing: ['bob'], unlinked: [], unverified: [], forkDeleted: true });
+    const deletedAt = beforeBody.indexOf('fork 已被删除');
+    const waitingAt = beforeBody.indexOf('Waiting for: @bob');
+    assert.ok(deletedAt > 0 && waitingAt > deletedAt);
+    assert.deepEqual(after, { state: 'failure', missing: [], unlinked: [], unverified: [], forkDeleted: true });
+    assert.deepEqual(github.repository.signatures.map((record) => record.id), [bob.id]);
+    assert.equal(lastStatus(github).state, 'failure');
+    assert.match(botComments(github)[0].body, /fork 已被删除/);
+    assert.doesNotMatch(botComments(github)[0].body, /Waiting for/);
+  });
+
+  it('同仓库的 PR 不看仓库主人，维护者开的照旧只核对开启者和提交作者', async () => {
+    const github = createGitHub({
+      opener: maintainer,
+      commits: [commitBy(alice), commitBy(renovate), commitBy(maintainer)],
+      signatures: [recordOf(alice)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [], forkDeleted: false });
+    assert.equal(lastStatus(github).state, 'success');
+    assert.deepEqual(github.comments, []);
   });
 });
 
