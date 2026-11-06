@@ -392,6 +392,22 @@ describe('beta 发布工作流的契约', () => {
     );
   });
 
+  // 换钥时 CI 里打包、签名、验签都对得上，坏在已装旧版的用户那头：他们只认编进旧包的公钥，换钥之后发的更新全被拒收。
+  // 所以把密钥号钉死，换钥必须连这里一起改；顺带挡住把开发版公钥误当发布公钥提交。密钥号写成验签脚本输出的样子
+  // （小写十六进制，和 minisign 注释里那串字节序相反）。公钥文件是 minisign 公钥框整个再做一次 base64，
+  // 框的第二行解出 42 字节：算法 Ed、8 字节密钥号、32 字节 Ed25519 公钥。
+  it('发布公钥是记录在案的那把，不是开发版的', () => {
+    const keyNumber = (name) => {
+      const box = Buffer.from(readFileSync(new URL(`../${name}`, import.meta.url), 'utf8').trim(), 'base64').toString('utf8').split('\n');
+      const key = Buffer.from(box[1].trim(), 'base64');
+      assert.equal(key.length, 42, `${name} 解出的公钥不是 42 字节`);
+      assert.equal(key.subarray(0, 2).toString(), 'Ed', `${name} 的算法不是 Ed`);
+      return key.subarray(2, 10).toString('hex');
+    };
+    assert.equal(keyNumber('release-updater.pub'), 'aeeab33bdc36d624');
+    assert.notEqual(keyNumber('release-updater.pub'), keyNumber('dev-updater.pub'));
+  });
+
   // 客户端开了 requireSignedVersion，签名时不把版本号写进可信注释，插件拒收每一个 beta 包。
   // 签完按仓库里的发布公钥验签、核对签名里的版本，私钥配错或漏传版本在这里挡下，不等用户拒收。
   it('sign 把版本号写进可信注释，签完按发布公钥验签', () => {
