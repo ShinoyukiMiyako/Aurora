@@ -1912,12 +1912,9 @@ mod tests {
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
         let log_of = |err: AttemptError| {
-            captured.0.lock().unwrap().clear();
+            captured.clear();
             let verdict = judge(&cn_source(), err).verdict;
-            (
-                verdict,
-                String::from_utf8(captured.0.lock().unwrap().clone()).unwrap(),
-            )
+            (verdict, captured.text())
         };
 
         let unrelated = [

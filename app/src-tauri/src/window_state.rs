@@ -1200,7 +1200,7 @@ mod tests {
             .finish();
         let loaded = tracing::subscriber::with_default(subscriber, || load(&path));
         assert_eq!(loaded, None);
-        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let log = captured.text();
         assert!(log.contains("WARN"), "{log}");
         assert!(log.contains("窗口状态读不出来"), "{log}");
         assert!(log.contains(&path.display().to_string()), "{log}");

@@ -218,7 +218,7 @@ mod tests {
             tracing::info!(target: "reqwest::connect", "第三方的信息");
             tracing::error!(target: "tauri_plugin_dialog", "别的插件出错");
         });
-        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let log = captured.text();
         assert!(!log.contains("failed to check for updates"), "{log}");
         assert!(!log.contains("deb package"), "{log}");
         assert!(log.contains("清单端点没有给出清单"), "{log}");
