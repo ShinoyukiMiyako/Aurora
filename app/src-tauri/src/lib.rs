@@ -98,7 +98,8 @@ pub fn run() {
         // -- art --
         .register_asynchronous_uri_scheme_protocol(textures::SCHEME, textures::handle);
     // 插件配置里 pubkey 是必填项，缺了插件初始化就失败、整个应用起不来，所以只在支持时注册。
-    // 支持还要求打开 requireSignedVersion、不打开 allowDowngrades，否则防不住伪造清单诱导降级，见 detect_support。
+    // 支持还要求打开 requireSignedVersion、不打开 allowDowngrades，否则防不住伪造清单诱导降级；
+    // 版本号认不出通道时不知道去哪取清单，同样不注册。见 detect_support。
     if updater_support == UpdaterSupport::Supported {
         builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
