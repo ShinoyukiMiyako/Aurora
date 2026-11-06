@@ -225,7 +225,7 @@ jobs:
           echo "cli-version=$(node -p "require('@tauri-apps/cli/package.json').version")" >> "$GITHUB_OUTPUT"
 
       # 公钥是发布钥的那一半，与正式版共用，不是 dev 那把。requireSignedVersion 让客户端拒收签名里没有版本、
-      # 或签的版本和清单不同的更新，与 sign 作业的 --app-version 配套。整行由 beta_release_contract 的测试钉住。
+      # 或签的版本和清单不同的更新，与 sign 作业的 --app-version 配套。整行由 update_beta_contract 的测试钉住。
       - name: 写入发布更新公钥
         working-directory: app
         run: |
