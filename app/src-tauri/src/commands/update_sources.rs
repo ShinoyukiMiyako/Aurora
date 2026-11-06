@@ -1904,6 +1904,12 @@ mod tests {
     /// 换源的失败照旧点名源与地址。
     #[tokio::test]
     async fn failures_unrelated_to_the_source_are_logged_without_naming_it() {
+        // tracing-core 0.1.36 只登记了一个调度器时，别的线程头一次走到某个日志点，按它自己线程上的默认调度器
+        // （什么都不收）算兴趣，再全局缓存成「不启用」，这里的订阅者就收不到那条日志。只跑 commands::update
+        // 时其余并行的测试都不装订阅者，这个测试必挂。再登记一个什么都不收的调度器，凑够两个，兴趣就按所有
+        // 存活的调度器算。
+        let _second_dispatcher =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let captured = crate::tests::Captured::default();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::fmt()
