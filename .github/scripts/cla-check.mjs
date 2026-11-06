@@ -117,8 +117,9 @@ const WEB_FLOW_USER_ID = 19864447;
 // octokit/openapi 的 Signature verification object 表里，verification.reason 只有这两个说的是 GitHub 的验证服务
 // 本身出错：gpgverify_error 是与验证服务通信出错，gpgverify_unavailable 是验证服务暂时不可用。其余原因（expired_key、
 // not_signing_key、unsigned、unknown_signature_type、no_user、unverified_email、bad_email、unknown_key、
-// malformed_signature、invalid）说的都是签名、密钥或邮箱本身，照旧当作没有有效签名。
-const TRANSIENT_VERIFICATION_REASONS = new Set(['gpgverify_error', 'gpgverify_unavailable']);
+// malformed_signature、invalid）说的都是签名、密钥或邮箱本身，照旧当作没有有效签名。同一个验证对象在 webhook-status
+// 的枚举里还多两个 S/MIME 证书的原因：ocsp_pending 是证书吊销检查还没做完，也会自己恢复；bad_cert 是证书本身有问题。
+const TRANSIENT_VERIFICATION_REASONS = new Set(['gpgverify_error', 'gpgverify_unavailable', 'ocsp_pending']);
 
 // fork 里作者显示为维护者或 Bot 的提交，作者是谁证明不了，改由提交者负责：把这个提交放进 fork 的是提交者，变基、拣选
 // 别人的提交，或者把作者冒填成维护者再用自己的账号提交，责任都在他，所以要他签署。维护者推到贡献者分支的签名提交，
@@ -370,6 +371,41 @@ export async function runClaCheck({ github, context, core }) {
   const claUrl = `https://github.com/${owner}/${repo}/blob/${context.payload.repository.default_branch}/CLA.md`;
 
   const { data: pr } = await github.rest.pulls.get({ ...repository, pull_number: number });
+  // 关了的 PR 不再重查：已合并的 PR 下有人评论（报回归、致谢）也会触发检查，这时 fork 可能早删了，重判会在进了历史的提交上
+  // 写 failure，还在已合并的 PR 下叫人重开；按同一个 head 重开的新 PR 也会被旧 PR 的评论改回 failure。重新打开会再查一次。
+  // 代价是在关了的 PR 下发的签署评论不记录，下次开 PR 时再签。
+  if (pr.state !== 'open') {
+    core.info(`PR #${number} 已关闭，不重查`);
+    return { state: 'skipped' };
+  }
+
+  try {
+    return await checkPull({ github, repository, core, pr, claUrl });
+  } catch (error) {
+    await markErrored({ github, repository, context, pr, error });
+    throw error;
+  }
+}
+
+// 查到一半出错时 head 上可能还留着上一次的结论：改了目标分支后重查，旧基分支下算出的 success 原样留着照样能合并。
+// 先把状态改成 error 再让作业失败；写状态也失败时两个错误一起报，不丢原因。
+async function markErrored({ github, repository, context, pr, error }) {
+  try {
+    await github.rest.repos.createCommitStatus({
+      ...repository,
+      sha: pr.head.sha,
+      context: STATUS_CONTEXT,
+      state: 'error',
+      description: '检查出错，请重跑 / Check errored, re-run it',
+      target_url: `${context.serverUrl}/${repository.owner}/${repository.repo}/actions/runs/${context.runId}`,
+    });
+  } catch (statusError) {
+    throw new AggregateError([error, statusError], `CLA 检查出错，把状态改成 error 也失败了：${statusError.message}`);
+  }
+}
+
+async function checkPull({ github, repository, core, pr, claUrl }) {
+  const { number } = pr;
   const commits = await listPullCommits(github, repository, pr);
   // 列不全就确认不了所有作者，不能放行。
   if (commits.length < pr.commits) {
@@ -408,7 +444,7 @@ export async function runClaCheck({ github, context, core }) {
 
   // 作者名不进日志：以 :: 开头的内容会被 runner 当成工作流命令。
   core.info(
-    `PR #${number}: ${state}，待签署 ${missing.length} 人，未关联提交 ${unlinked.length} 个，作者无法确认的 fork 提交 ${unverified.length} 个${forkDeleted ? '，fork 已删除、无法确认主人' : ''}`,
+    `PR #${number}: ${state}，待签署 ${missing.length} 人，未关联提交 ${unlinked.length} 个，提交者担不了责的 fork 提交 ${unverified.length} 个${forkDeleted ? '，fork 已删除、无法确认主人' : ''}`,
   );
   return { state, missing, unlinked, unverified, forkDeleted };
 }

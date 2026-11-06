@@ -21,6 +21,8 @@ const NUMBER = randomInt(1, 100_000);
 const BASE_SHA = 'b'.repeat(40);
 const SIGNED_AT = '2026-12-01T08:00:00Z';
 const CLA_URL = `https://github.com/${OWNER}/${REPO}/blob/dev/CLA.md`;
+const RUN_ID = randomInt(1, 1_000_000_000);
+const RUN_URL = `https://github.com/${OWNER}/${REPO}/actions/runs/${RUN_ID}`;
 
 let nextId = randomInt(1_000, 1_000_000);
 
@@ -124,6 +126,8 @@ function createGitHub({
   listedCommits,
   beforeWrite,
   headRepo = BASE_REPO,
+  prState = 'open',
+  failStatus,
 } = {}) {
   const repository = {
     revision: 1,
@@ -152,6 +156,7 @@ function createGitHub({
     calls,
     repository,
     comments,
+    headSha,
     async paginate(method, params) {
       const items = [];
       for (let page = 1; ; page += 1) {
@@ -176,6 +181,7 @@ function createGitHub({
           return {
             data: {
               number: NUMBER,
+              state: prState,
               user: opener,
               head: { sha: headSha(), repo: headRepo },
               base: { sha: BASE_SHA, repo: BASE_REPO },
@@ -234,7 +240,11 @@ function createGitHub({
           repository.replace(JSON.parse(Buffer.from(content, 'base64').toString('utf8')));
           return { data: {} };
         },
+        // failStatus 模拟写状态失败，失败的不记进 calls.statuses。
         async createCommitStatus(status) {
+          if (failStatus?.(status)) {
+            throw httpError(500);
+          }
           calls.statuses.push(status);
           return { data: {} };
         },
@@ -249,6 +259,8 @@ const core = { info() {} };
 function pullRequestContext() {
   return {
     repo: { owner: OWNER, repo: REPO },
+    serverUrl: 'https://github.com',
+    runId: RUN_ID,
     payload: { pull_request: { number: NUMBER }, repository: { default_branch: 'dev' } },
   };
 }
@@ -256,6 +268,8 @@ function pullRequestContext() {
 function issueCommentContext() {
   return {
     repo: { owner: OWNER, repo: REPO },
+    serverUrl: 'https://github.com',
+    runId: RUN_ID,
     payload: {
       issue: { number: NUMBER, pull_request: { url: 'https://api.github.com/x' } },
       repository: { default_branch: 'dev' },
@@ -265,6 +279,19 @@ function issueCommentContext() {
 
 function run(github, context = pullRequestContext()) {
   return runClaCheck({ github, context, core });
+}
+
+// 抛错前写下的状态：head 上上一次的结论不能留着，链接指向这次运行的日志。
+function erroredStatus(github) {
+  return {
+    owner: OWNER,
+    repo: REPO,
+    sha: github.headSha(),
+    context: STATUS_CONTEXT,
+    state: 'error',
+    description: '检查出错，请重跑 / Check errored, re-run it',
+    target_url: RUN_URL,
+  };
 }
 
 function lastStatus(github) {
@@ -435,7 +462,7 @@ describe('需要签署的人', () => {
     assert.deepEqual(github.calls.compared, [1, 2, 3, 4]);
   });
 
-  it('比较接口取到的比 PR 记的少时报错，不写状态', async () => {
+  it('比较接口取到的比 PR 记的少时报错，状态改成 error', async () => {
     const commits = Array.from({ length: 300 }, () => commitBy(alice));
     const github = createGitHub({
       opener: alice,
@@ -445,7 +472,7 @@ describe('需要签署的人', () => {
     });
 
     await assert.rejects(run(github), /300 个提交，只取到 280 个/);
-    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.calls.statuses, [erroredStatus(github)]);
   });
 
   it('正好 250 个提交时用列提交接口正常判定', async () => {
@@ -494,7 +521,7 @@ describe('列出的提交要盖住 head', () => {
   const pushed = '可能是检查过程中分支又有推送，重跑本检查即可';
   const alices = (length) => Array.from({ length }, () => commitBy(alice));
 
-  it('列出的是不相干的 head 时报错，不写状态，待签署评论也不被改成已签署', async () => {
+  it('列出的是不相干的 head 时报错，状态改成 error，待签署评论也不被改成已签署', async () => {
     const commits = [commitBy(alice), commitBy(bob)];
     let listed = commits;
     const github = createGitHub({
@@ -512,8 +539,9 @@ describe('列出的提交要盖住 head', () => {
       message: `PR #${NUMBER} 取到的提交里没有 head ${commits.at(-1).sha}，${forcePushed}`,
     });
 
-    assert.equal(github.calls.statuses.length, 1);
-    assert.equal(lastStatus(github).state, 'failure');
+    assert.equal(github.calls.statuses.length, 2);
+    assert.equal(github.calls.statuses[0].state, 'failure');
+    assert.deepEqual(lastStatus(github), erroredStatus(github));
     assert.equal(github.calls.created.length, 1);
     assert.deepEqual(github.calls.updated, []);
     assert.equal(pending.body, pendingBody);
@@ -555,7 +583,7 @@ describe('列出的提交要盖住 head', () => {
     assert.equal(lastStatus(github).state, 'failure');
   });
 
-  it('后代超过 250 个、最早的提交被挤出列表时报错，不写状态也不发评论', async () => {
+  it('后代超过 250 个、最早的提交被挤出列表时报错，状态改成 error，不发评论', async () => {
     const commits = [commitBy(bob), ...alices(199)];
     const github = createGitHub({
       opener: alice,
@@ -568,7 +596,7 @@ describe('列出的提交要盖住 head', () => {
       message: `PR #${NUMBER} 有 200 个提交，取到的提交里从 head ${commits.at(-1).sha} 只走得到 199 个，${pushed}`,
     });
 
-    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.calls.statuses, [erroredStatus(github)]);
     assert.deepEqual(github.comments, []);
     assert.deepEqual(github.calls.compared, []);
   });
@@ -603,7 +631,7 @@ describe('列出的提交要盖住 head', () => {
       message: `PR #${NUMBER} 有 150 个提交，取到的提交里从 head ${commits.at(-1).sha} 只走得到 50 个，${pushed}`,
     });
 
-    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.calls.statuses, [erroredStatus(github)]);
     assert.deepEqual(github.comments, []);
   });
 
@@ -620,7 +648,7 @@ describe('列出的提交要盖住 head', () => {
     assert.equal(lastStatus(github).sha, merge.sha);
   });
 
-  it('比较接口取到的提交里没有 head 时同样报错，不写状态也不发评论', async () => {
+  it('比较接口取到的提交里没有 head 时同样报错，状态改成 error，不发评论', async () => {
     const commits = alices(300);
     const github = createGitHub({
       opener: alice,
@@ -634,7 +662,7 @@ describe('列出的提交要盖住 head', () => {
     });
 
     assert.deepEqual(github.calls.compared, [1, 2, 3]);
-    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.calls.statuses, [erroredStatus(github)]);
     assert.deepEqual(github.comments, []);
   });
 
@@ -655,7 +683,7 @@ describe('列出的提交要盖住 head', () => {
       message: `PR #${NUMBER} 有 300 个提交，取到的提交里从 head ${commits.at(-1).sha} 只走得到 150 个，${pushed}`,
     });
 
-    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.calls.statuses, [erroredStatus(github)]);
   });
 });
 
@@ -1044,7 +1072,7 @@ describe('fork 里被贡献者变基过的维护者或 Bot 提交', () => {
 
 // GitHub 的签名验证服务出错时，维护者本人的真签名也会显示未验证。
 describe('签名验证暂时不可用', () => {
-  const TRANSIENT_REASONS = ['gpgverify_error', 'gpgverify_unavailable'];
+  const TRANSIENT_REASONS = ['gpgverify_error', 'gpgverify_unavailable', 'ocsp_pending'];
   // octokit/openapi 列出的其余原因，说的都是签名、密钥或邮箱本身。
   const PERMANENT_REASONS = [
     'expired_key',
@@ -1057,10 +1085,11 @@ describe('签名验证暂时不可用', () => {
     'unknown_key',
     'malformed_signature',
     'invalid',
+    'bad_cert',
   ];
 
   for (const reason of TRANSIENT_REASONS) {
-    it(`维护者本人的提交遇到 ${reason} 时报错，不写签名、状态和评论`, async () => {
+    it(`维护者本人的提交遇到 ${reason} 时报错，不写签名和评论，状态改成 error`, async () => {
       const pending = commitBy(maintainer, { reason });
       const github = forkGitHub({
         opener: alice,
@@ -1076,7 +1105,7 @@ describe('签名验证暂时不可用', () => {
         return true;
       });
       assert.deepEqual(github.calls.writes, []);
-      assert.deepEqual(github.calls.statuses, []);
+      assert.deepEqual(github.calls.statuses, [erroredStatus(github)]);
       assert.deepEqual(botComments(github), []);
     });
   }
@@ -1086,7 +1115,7 @@ describe('签名验证暂时不可用', () => {
     const github = forkGitHub({ opener: alice, commits: [pending], signatures: [recordOf(alice)] });
 
     await assert.rejects(run(github), /GitHub 签名验证暂时不可用（verification\.reason 为 gpgverify_error）/);
-    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.calls.statuses, [erroredStatus(github)]);
   });
 
   it('稍后重跑、验证恢复后照常豁免', async () => {
@@ -1098,7 +1127,10 @@ describe('签名验证暂时不可用', () => {
     const result = await run(github);
 
     assert.deepEqual(result, { state: 'success', missing: [], unlinked: [], unverified: [], forkDeleted: false });
-    assert.equal(github.calls.statuses.length, 1);
+    assert.deepEqual(
+      github.calls.statuses.map((status) => status.state),
+      ['error', 'success'],
+    );
   });
 
   for (const reason of PERMANENT_REASONS) {
@@ -1709,7 +1741,7 @@ describe('写入冲突', () => {
     assert.equal(github.repository.signatures.length, 1);
   });
 
-  it('一直冲突时报错，不写状态', async () => {
+  it('一直冲突时报错，状态改成 error', async () => {
     const github = createGitHub({
       opener: alice,
       commits: [commitBy(alice)],
@@ -1721,7 +1753,7 @@ describe('写入冲突', () => {
 
     await assert.rejects(run(github), { status: 409 });
     assert.equal(github.calls.writes.length, 5);
-    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.calls.statuses, [erroredStatus(github)]);
   });
 
   it('其他写入错误不重试', async () => {
@@ -1740,7 +1772,7 @@ describe('写入冲突', () => {
 });
 
 describe('签名文件', () => {
-  it('分支不存在时明确报错，不写状态也不发评论', async () => {
+  it('分支不存在时明确报错，状态改成 error，不发评论', async () => {
     const github = createGitHub({
       opener: alice,
       commits: [commitBy(alice)],
@@ -1749,7 +1781,7 @@ describe('签名文件', () => {
     });
 
     await assert.rejects(run(github), /签名分支 cla-signatures 不存在/);
-    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.calls.statuses, [erroredStatus(github)]);
     assert.deepEqual(github.calls.writes, []);
     assert.deepEqual(botComments(github), []);
   });
@@ -1776,7 +1808,7 @@ describe('签名文件', () => {
     };
 
     await assert.rejects(run(github), { status: 500 });
-    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.calls.statuses, [erroredStatus(github)]);
   });
 
   it('文件内容损坏时报错，不覆盖', async () => {
@@ -1883,6 +1915,75 @@ describe('机器人评论', () => {
 
     assert.deepEqual(result.missing, ['alice']);
     assert.deepEqual(github.calls.writes, []);
+  });
+});
+
+// 已签的人代开别人的 fork：冒用已签者邮箱的提交没人担责，只有 fork 的主人能补上，开启者是不是维护者都一样。
+describe('fork 的主人与非豁免的开启者', () => {
+  it('已签的 bob 开 PR、提交冒用已签 alice、fork 归没签的 mallory：mallory 被点名', async () => {
+    const github = createGitHub({
+      opener: bob,
+      headRepo: FORK_REPO,
+      commits: [commitBy(alice)],
+      signatures: [recordOf(alice), recordOf(bob)],
+    });
+
+    const result = await run(github);
+
+    assert.deepEqual(result, { state: 'failure', missing: ['mallory'], unlinked: [], unverified: [], forkDeleted: false });
+    assert.equal(lastStatus(github).state, 'failure');
+  });
+});
+
+describe('关了的 PR 与出错时的状态', () => {
+  it('关了的 PR 下有人评论时不重查：不写状态、不写签名也不发评论', async () => {
+    const github = createGitHub({
+      opener: alice,
+      headRepo: null,
+      commits: [commitBy(alice)],
+      comments: [commentBy(alice, ENGLISH_PHRASE)],
+      prState: 'closed',
+    });
+
+    const result = await run(github, issueCommentContext());
+
+    assert.deepEqual(result, { state: 'skipped' });
+    assert.deepEqual(github.calls.statuses, []);
+    assert.deepEqual(github.calls.writes, []);
+    assert.deepEqual(botComments(github), []);
+    assert.deepEqual(github.calls.compared, []);
+  });
+
+  it('重查出错时把 head 上上一次的 success 改成 error，不留着旧结论', async () => {
+    const commit = commitBy(maintainer, { verified: true });
+    const github = forkGitHub({ opener: alice, commits: [commit], signatures: [recordOf(alice)] });
+
+    assert.equal((await run(github)).state, 'success');
+    commit.commit.verification = { verified: false, reason: 'gpgverify_unavailable' };
+    await assert.rejects(run(github), /GitHub 签名验证暂时不可用/);
+
+    assert.equal(github.calls.statuses.length, 2);
+    assert.equal(github.calls.statuses[0].state, 'success');
+    assert.deepEqual(lastStatus(github), erroredStatus(github));
+  });
+
+  it('写 error 状态也失败时两个错误一起报，原来的错误不丢', async () => {
+    const commit = commitBy(maintainer, { reason: 'gpgverify_error' });
+    const github = forkGitHub({
+      opener: alice,
+      commits: [commit],
+      signatures: [recordOf(alice)],
+      failStatus: (status) => status.state === 'error',
+    });
+
+    await assert.rejects(run(github), (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.equal(error.errors.length, 2);
+      assert.match(error.errors[0].message, /verification\.reason 为 gpgverify_error/);
+      assert.equal(error.errors[1].status, 500);
+      return true;
+    });
+    assert.deepEqual(github.calls.statuses, []);
   });
 });
 
