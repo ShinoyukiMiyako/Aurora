@@ -235,11 +235,11 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | `global` | 海外 | `dl.petalfall.org` | Cloudflare R2 的桶 `petalfall-dl` |
 | `github` | 海外 | `github.com` | dev：滚动预发布 `dev-build` 的附件，随预发布每次重建而换掉；beta：每版一个的预发布 `v<版本>` 的附件，永久保留 |
 
-三个桶里的对象路径带通道与版本（`dev/<VERSION>-<RUN_ATTEMPT>/`、`beta/<VERSION>-<RUN_ATTEMPT>/`），`dev/` 前缀下的对象 30 天后由桶的生命周期规则自动删除。`beta/` 前缀不设生命周期规则，对象长期保留：测试版可能几周不更新，对象过期的话，三个桶源就一直 404。对象能不能被改写，各桶对 `dev/` 的保护范围不一样：
+三个桶里的对象路径带通道与版本（`dev/<VERSION>-<RUN_ATTEMPT>/`、`beta/<VERSION>-<RUN_ATTEMPT>/`），`dev/` 前缀下的对象 30 天后由桶的生命周期规则自动删除。`beta/` 前缀不设生命周期规则，对象长期保留：测试版可能几周不更新，对象过期的话，三个桶源就一直 404。对象能不能被改写，各桶对两个前缀的保护不一样：
 
-- 两个 OSS 桶：`dev/` 前缀有一条对所有人生效的禁止覆盖写规则。CI 的 RAM 子用户只有 `oss:PutObject`，资源限两个桶的 `dev/*`，删不了对象，也写不进别的前缀。
-- R2 桶：没有禁止覆盖写，靠一把只锁 `dev/` 前缀、锁 25 天的保留锁，锁期内的对象不能覆盖、不能删除。生命周期第 30 天才删，所以第 25 到 30 天之间，`dev/` 下的对象可以被覆盖或删除。CI 的 R2 凭据只限这一个桶，但不限前缀，能写整个桶，也能删对象。
-- 所以 R2 凭据泄露时，客户端的验签挡得住被换掉的包，挡不住另外两件事：`dev/` 以外的键既不受锁、也不受生命周期管，写进去的任意文件经 `dl.petalfall.org` 长期公开，而这个主机就在客户端的白名单里；dev 停更超过 25 天时，当前版本的对象可以被换成等长的垃圾，海外在前的用户每次都先白下一遍、验签失败才换源。
+- 两个 OSS 桶：`dev/`、`beta/` 前缀各有一条对所有人生效的禁止覆盖写规则。两个通道各有一个 CI 的 RAM 子用户，都只有 `oss:PutObject`，资源各限两个桶里本通道的前缀（`dev/*` 或 `beta/*`），删不了对象，也写不进别的前缀。
+- R2 桶：没有禁止覆盖写，靠保留锁。`dev/` 锁 25 天，锁期内的对象不能覆盖、不能删除；生命周期第 30 天才删，所以第 25 到 30 天之间，`dev/` 下的对象可以被覆盖或删除。`beta/` 的锁没有期限，放进去的对象不能覆盖，也删不掉（要先撤掉锁规则）。两个通道各有一把 CI 的 R2 凭据，都只限这一个桶，但不限前缀，能写整个桶，也能删锁外的对象。
+- 所以哪个通道的 R2 凭据泄露，客户端的验签都挡得住被换掉的包，挡不住另外三件事：`dev/`、`beta/` 以外的键既不受锁、也不受生命周期管，写进去的任意文件经 `dl.petalfall.org` 长期公开，而这个主机就在客户端的白名单里；`beta/` 下没用过的键照样写得进去，写进去就被锁住，同样长期公开；dev 停更超过 25 天时，当前版本的对象可以被换成等长的垃圾，海外在前的用户每次都先白下一遍、验签失败才换源。
 
 读扩展字段（`commands/update_sources.rs` 的 `package_plan`）：
 
@@ -350,17 +350,17 @@ dev 的发布链路在 `.github/workflows/dev-build.yml` 里：自托管机上�
 
 dev 的发布凭据放在 GitHub 环境 `updates-dev` 里，`publish` 与 `publish-hk` 两个作业都声明了这个环境才拿得到，每样只进用到它的那一步：存储桶凭据只进 `publish` 的上传，`HK_MANIFEST_SSH_KEY` 只进 `publish-hk` 的推送。环境的部署分支限制必须只放行 dev，挡住别的分支拿机密靠的是它。dev 的更新签名私钥照旧是仓库密钥 `DEV_UPDATER_PRIVATE_KEY`。
 
-beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布分进两个环境，机密都放在环境里，不建仓库级的：仓库级的机密任何分支的工作流都拿得到。
+beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布分进两个环境，发布凭据（签名私钥、桶凭据、香港推送钥）都放在环境里，不建仓库级的：仓库级的机密任何分支的工作流都拿得到。
 
 | 环境 | 放什么 | 部署分支 | 审批 |
 | --- | --- | --- | --- |
 | `release-signing` | 只放发布签名私钥 `RELEASE_UPDATER_PRIVATE_KEY` 与它的口令 `RELEASE_UPDATER_KEY_PASSWORD` | beta、main | 必需审批人是维护者，关闭管理员绕过 |
 | `updates-beta` | beta 专用的存储桶凭据、beta 的香港推送钥匙，以及变量 `R2_ACCOUNT_ID`，名称见下表 | beta | 不设审批，关闭管理员绕过 |
 
-- 只有签名的作业挂 `release-signing`，这个作业里没有任何上传或推送凭据；传桶、建 Release 与推送香港的作业挂 `updates-beta`；构建作业不挂环境，碰不到任何机密。
+- 只有签名的作业挂 `release-signing`，这个作业里没有任何上传或推送凭据；传桶、建 Release 与推送香港的作业挂 `updates-beta`；构建作业不挂环境，拿不到任何发布凭据，只读要编进包里的仓库级机密 `PETALFALL_CURSEFORGE_API_KEY` 与仓库变量 `PETALFALL_MSA_CLIENT_ID`，和 dev 构建相同。
 - 每发一版，在签名之前审批一次。更新签名是分离的 `.sig` 文件，批准之前从构建产物里下载到的引导程序就是最终发出去的字节，可以先装一遍再批。不开 Prevent self-review（禁止自审）：只有一个维护者，批准人就是触发人。
-- 发布签名钥不复用 dev 那把，公钥是 `.github/release-updater.pub`，打包时注入，编进每个测试版。main 留给以后的正式版，正式版与测试版共用这把钥。
-- `updates-beta` 里的名称沿用 dev 的，`upload-to-mirrors.sh` 与 `push-hk-manifest.sh` 两个通道共用，不用改变量名；值是另一套，不复用 `updates-dev` 的：放宽 dev 那几把凭据的权限，等于让 dev 链路能写 beta 的包。
+- 发布签名钥不复用 dev 那把，公钥是 `.github/release-updater.pub`，打包时注入，编进每个测试版。这把钥由维护者在首个测试版之前亲手生成，公钥提交进仓库之前，beta 链路（含在 dev 上手动派发的演练）的构建会停在注入公钥这一步。main 留给以后的正式版，正式版与测试版共用这把钥。
+- `updates-beta` 里的名称沿用 dev 的，`upload-to-mirrors.sh` 与 `push-hk-manifest.sh` 两个通道共用，不用改变量名；值是另一套，不复用 `updates-dev` 的：OSS 子用户按通道限前缀，复用就等于让 dev 链路能往 `beta/` 传包；R2 凭据本来就不限前缀，分开只是让两个通道的凭据各自轮换、泄露时各自吊销，挡不住 dev 的 R2 凭据往 `beta/` 写没用过的键（已有的对象有锁）。
 
 两个环境里同名的几样：
 
