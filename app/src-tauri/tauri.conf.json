@@ -49,6 +49,7 @@
     "active": true,
     "targets": "all",
     "publisher": "Shinoyuki_Miyako",
+    "homepage": "https://petalfall.org",
     "copyright": "Copyright (C) 2026 Shinoyuki_Miyako",
     "licenseFile": "../../LICENSE",
     "resources": {

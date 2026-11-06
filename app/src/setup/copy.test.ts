@@ -80,6 +80,51 @@ describe("文案表", () => {
     expect(newer).toContain("0.2.0");
   });
 
+  // 卸载时勾了删除数据会清掉各通道共用的账户和设置，复选框要按卸载程序上的原文点名；系统「应用」里的卸载项叫英文名
+  it.each([
+    ["zh", "先关掉这个窗口", `Windows 设置的「应用」里卸载 ${APP_NAME_EN}`, "不要勾选「删除应用程序数据」", "沿用默认的安装位置"],
+    ["en", "close this window first", `uninstall ${APP_NAME_EN} from Apps in Windows Settings`, `leaving "Delete the application data" unchecked`, "keep the default location"],
+  ] as const)("%s 表的 newer 说明给出换回预览版的步骤", (lang, close, uninstall, checkbox, location) => {
+    const { kind } = COPY[lang].installed;
+    const lead = kind.newer.lead("1.0.0-beta.1", "0.1.0-dev.40");
+    expect(lead).toContain(uninstall);
+    // 引导程序单实例：窗口开着时再运行安装包只会把这一页叫回来，关窗口要排在卸载之前
+    expect(lead).toContain(close);
+    expect(lead.indexOf(close)).toBeLessThan(lead.indexOf(uninstall));
+    expect(lead).toContain(checkbox);
+    expect(lead).toContain(location);
+    // 指引排在不能往回装那句之后，先说为什么再说怎么办
+    expect(lead.indexOf("0.1.0-dev.40")).toBeLessThan(lead.indexOf(checkbox));
+    for (const other of ["upgrade", "same", "broken"] as const) {
+      expect(kind[other].lead("0.1.0-dev.40", "1.0.0-beta.1")).not.toContain(checkbox);
+    }
+  });
+
+  // 同通道的旧包、往正式版回退、认不出通道的版本，照着卸载重装就是降级，这时只说不能往回装
+  it.each([
+    ["0.1.0-dev.40", "0.1.0-dev.38"],
+    ["1.0.1-beta.1", "1.0.0-beta.3"],
+    ["1.0.1-beta.1", "1.0.0"],
+    ["1.0.0-rc.1", "0.1.0-dev.40"],
+    ["1.0.0-betax.1", "0.1.0-dev.40"],
+    ["1.0.0-beta.1", "0.1.0-devel.40"],
+    ["0.3.0", "0.2.0"],
+  ] as const)("已装 %s、安装包 %s 时不给换回步骤", (installed, payload) => {
+    expect(COPY.zh.installed.kind.newer.lead(installed, payload)).toBe(`已安装 ${installed}，这个安装包是 ${payload}，不能往回装。`);
+    expect(COPY.en.installed.kind.newer.lead(installed, payload)).toBe(`${installed} is installed and this installer is ${payload}, so it can't go back.`);
+  });
+
+  // 认通道的规则同启动器：第一段是 dev、beta 后面只跟数字或什么都不跟，大小写不论，构建元数据不算
+  it.each([
+    ["1.0.0-BETA.2", "0.1.0-Dev.3"],
+    ["1.0.0-beta", "0.1.0-dev"],
+    ["1.0.0-beta2.1", "0.1.0-dev7"],
+    ["1.0.0-beta.1+abc", "0.1.0-dev.40+x.y"],
+  ] as const)("已装 %s、安装包 %s 时给出换回步骤", (installed, payload) => {
+    expect(COPY.zh.installed.kind.newer.lead(installed, payload)).toContain("不要勾选「删除应用程序数据」");
+    expect(COPY.en.installed.kind.newer.lead(installed, payload)).toContain(`leaving "Delete the application data" unchecked`);
+  });
+
   it.each(["zh", "en"] as const)("%s 表的退出码落进说明", (lang) => {
     expect(COPY[lang].failed.reason.payload_exit.body("2", "retry")).toContain("2");
   });

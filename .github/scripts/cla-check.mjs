@@ -39,6 +39,12 @@ function isValidSignatureComment(comment) {
   );
 }
 
+// 晋级 PR（dev 到 beta、beta 到 main）的提交都已在发布分支上：这两个分支只有有写权限的人能推，
+// 别人的提交经 PR 合进去，那条 PR 已核对过 CLA。只认本仓库的分支，fork 里同名的分支谁都能推。
+function isPromotion(pr, defaultBranch) {
+  return pr.head.repo?.id === pr.base.repo.id && [defaultBranch, 'beta'].includes(pr.head.ref);
+}
+
 function collectContributors(pr, commits) {
   const required = new Map();
   const unlinkedByEmail = new Map();
@@ -216,13 +222,17 @@ export async function runClaCheck({ github, context, core }) {
   const claUrl = `https://github.com/${owner}/${repo}/blob/${context.payload.repository.default_branch}/CLA.md`;
 
   const { data: pr } = await github.rest.pulls.get({ ...repository, pull_number: number });
-  const commits = await github.paginate(github.rest.pulls.listCommits, {
-    ...repository,
-    pull_number: number,
-    per_page: 100,
-  });
+  // 晋级 PR 不逐个核对提交作者，只看开启者：它们常常超过下面接口 250 个提交的上限，逐个核对就永远判不下来。
+  const promotion = isPromotion(pr, context.payload.repository.default_branch);
+  const commits = promotion
+    ? []
+    : await github.paginate(github.rest.pulls.listCommits, {
+        ...repository,
+        pull_number: number,
+        per_page: 100,
+      });
   // 这个接口最多返回 250 个提交。列不全就确认不了所有作者，不能放行。
-  if (commits.length < pr.commits) {
+  if (!promotion && commits.length < pr.commits) {
     throw new Error(`PR #${number} 有 ${pr.commits} 个提交，只取到 ${commits.length} 个，无法核对全部作者`);
   }
   // 每次都扫整条评论而不是只看触发事件：运行被取消或重跑后，结果仍然一致。

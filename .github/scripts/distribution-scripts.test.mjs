@@ -511,7 +511,7 @@ describe("upload-to-mirrors.sh", () => {
         else env[missing] = value;
         const result = bash("upload-to-mirrors.sh", [KEY, file], env);
         assert.equal(result.status, 1, `${missing}=${value}`);
-        assert.equal(result.stderr, `::error::环境 updates-dev 里没有配置 ${missing}\n`);
+        assert.equal(result.stderr, `::error::作业所在的环境里没有配置 ${missing}\n`);
         assert.deepEqual(calls(log), []);
       }
     }
@@ -526,12 +526,23 @@ describe("upload-to-mirrors.sh", () => {
     assert.deepEqual(calls(log), []);
   });
 
-  it("对象键不在 dev/ 下时退出非 0，一个桶都不传：R2 的凭据能写整个桶，写偏了没有生命周期规则兜底", () => {
-    for (const key of ["stable/0.1.0/sample.bin", "sample.bin", "dev/../sample.bin", `/${KEY}`]) {
+  it("beta/ 下的对象键同样按原样传进三个桶", () => {
+    const { log, file, env } = setup();
+    const key = `beta/1.${randomInt(0, 50)}.${randomInt(0, 50)}-beta.${randomInt(1, 100_000)}-${randomInt(1, 5)}/sample.bin`;
+    const result = bash("upload-to-mirrors.sh", [key, file], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(
+      calls(log).map((call) => call[call.indexOf("--key") + 1]),
+      [key, key, key],
+    );
+  });
+
+  it("对象键不在 dev/ 或 beta/ 下时退出非 0，一个桶都不传：R2 的凭据能写整个桶，写偏了没有任何桶规则兜底", () => {
+    for (const key of ["stable/0.1.0/sample.bin", "Beta/1.0.0-beta.1-1/sample.bin", "betas/1.0.0-beta.1-1/sample.bin", "sample.bin", "dev/../sample.bin", "beta/../sample.bin", `/${KEY}`]) {
       const { log, file, env } = setup();
       const result = bash("upload-to-mirrors.sh", [key, file], env);
       assert.notEqual(result.status, 0, key);
-      assert.match(result.stderr, /对象键应为 dev\/<目录>\/<文件名>/);
+      assert.match(result.stderr, /对象键应为 <通道>\/<目录>\/<文件名>，通道只能是 dev、beta/);
       assert.deepEqual(calls(log), []);
     }
   });
@@ -675,7 +686,7 @@ describe("push-hk-manifest.sh", () => {
       else env.HK_MANIFEST_SSH_KEY = value;
       const result = bash("push-hk-manifest.sh", [manifest], env);
       assert.equal(result.status, 1, String(value));
-      assert.equal(result.stderr, "::error::环境 updates-dev 里没有配置 HK_MANIFEST_SSH_KEY\n");
+      assert.equal(result.stderr, "::error::作业所在的环境里没有配置 HK_MANIFEST_SSH_KEY\n");
       assert.deepEqual(calls(log), []);
       assert.deepEqual(readdirSync(runnerTemp), []);
     }
