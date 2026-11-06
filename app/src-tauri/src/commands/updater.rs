@@ -1743,7 +1743,8 @@ mod tests {
             assert_eq!(urls[0].path(), path, "{endpoint}");
         }
         // beta-release.yml 往这个地址推清单、再回读核对，.github/scripts/beta-release-contract.test.mjs 把工作流里的
-        // HK_MANIFEST_URL 钉成同一个字面量，并核对这一句还在：改地址要两边一起改。
+        // HK_MANIFEST_URL 钉成同一个字面量，并核对这一句还在：改地址要两边一起改。这一句只在本地 cargo test 时跑，
+        // CI 上由 beta-release.yml 打包后在 Petalfall.exe 里找这个地址兜底，所以 BETA_ENDPOINT 要保持编译期的整串。
         assert_eq!(
             BETA_ENDPOINT,
             "https://petalfall.org/updates/beta/latest.json"

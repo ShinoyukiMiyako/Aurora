@@ -232,8 +232,9 @@ jobs:
           echo "cli-version=$(node -p "require('@tauri-apps/cli/package.json').version")" >> "$GITHUB_OUTPUT"
 
       # 公钥是发布钥的那一半，与正式版共用，不是 dev 那把。requireSignedVersion 让客户端拒收签名里没有版本、
-      # 或签的版本和清单不同的更新，与 sign 作业的 --app-version 配套。整行、它排在打包之前、不带执行条件，
-      # 都由 .github/scripts/beta-release-contract.test.mjs 钉住；下面「工作流脚本测试」那一步跑的就是它。
+      # 或签的版本和清单不同的更新，与 sign 作业的 --app-version 配套。这一步的键与脚本逐行、它紧挨着打包那一步、
+      # 打包在 pnpm tauri build 之前不做别的，都由 .github/scripts/beta-release-contract.test.mjs 钉住；
+      # 前面「工作流脚本测试」那一步跑的就是它。
       - name: 写入发布更新公钥
         working-directory: app
         run: |
@@ -250,6 +251,7 @@ jobs:
         working-directory: app
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          BETA_MANIFEST_URL: https://petalfall.org/updates/beta/latest.json
         run: |
           bundle_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle"
           pnpm tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
@@ -260,6 +262,12 @@ jobs:
           fi
           if ! grep -qF -e "$PETALFALL_CURSEFORGE_API_KEY" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
             echo "::error::Petalfall.exe 里没有内嵌 CurseForge API key"
+            exit 1
+          fi
+          # beta 包只问这一个清单地址。契约测试只核对工作流与 updater.rs 的文本，客户端编进去的 BETA_ENDPOINT 是不是它，
+          # 只有在 exe 里找才知道；BETA_ENDPOINT 是编译期 concat! 出的整串，exe 里能找到完整的地址
+          if ! grep -qF -e "$BETA_MANIFEST_URL" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
+            echo "::error::Petalfall.exe 里没有测试版的更新清单地址 $BETA_MANIFEST_URL"
             exit 1
           fi
           installer="$bundle_dir/nsis/Petalfall_${VERSION}_x64-setup.exe"
