@@ -650,8 +650,10 @@ jobs:
             esac
           done < "$RUNNER_TEMP/tags.txt"
 
-      # 对象键是 beta/<版本>-<运行次数>/<文件名>：重跑这个作业会换一个目录，不会撞上上次传了一半的对象。
-      # beta/ 不过期，测试版可能几周不更新，桶源不能先 404。必须排在验签之后，传上去的就是最终发出去的字节。
+      # 对象键是 beta/<版本>-<运行标识>/<文件名>，运行标识是 <运行号>-<运行次数>，桶上同一个键只能写一次。传完包才失败的
+      # 运行不建 tag、不占 beta 序号，下一次运行算出同一个版本号，只带运行次数的话又从 1 起，撞上上次留下、覆盖不了的对象；
+      # 运行号分开各次运行，运行次数分开同一次运行的重跑。beta/ 不过期，测试版可能几周不更新，桶源不能先 404。
+      # 必须排在验签之后，传上去的就是最终发出去的字节。
       - name: 上传到三个存储桶
         env:
           OSS_CI_ACCESS_KEY_ID: ${{ secrets.OSS_CI_ACCESS_KEY_ID }}
@@ -661,7 +663,7 @@ jobs:
           R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
         run: |
           for file in "$BOOTSTRAP" "$INSTALLER"; do
-            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
+            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
             bash .github/scripts/upload-to-mirrors.sh "$key" "$file"
           done
 
@@ -669,7 +671,7 @@ jobs:
       - name: 读回三个存储桶
         run: |
           for file in "$BOOTSTRAP" "$INSTALLER"; do
-            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
+            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
             urls="$(node .github/scripts/dev-distribution.mjs mirror-urls "$key")"
             while IFS=$'\t' read -r name url; do
               bash .github/scripts/check-download.sh "$name" "$url" "$file" < /dev/null
@@ -683,8 +685,8 @@ jobs:
         id: manifest
         run: |
           manifest="$RUNNER_TEMP/latest.json"
-          node .github/scripts/dev-distribution.mjs build "$VERSION" "$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest" "$NOTES"
-          node .github/scripts/dev-distribution.mjs validate "$manifest" "$VERSION" "$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG"
+          node .github/scripts/dev-distribution.mjs build "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest" "$NOTES"
+          node .github/scripts/dev-distribution.mjs validate "$manifest" "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG"
           cat "$manifest"
           echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
 

@@ -9,13 +9,14 @@ import { pathToFileURL } from "node:url";
 
 const USAGE = [
   "用法：",
-  "  dev-distribution.mjs key <版本> <运行次数> <文件名>",
+  "  dev-distribution.mjs key <版本> <运行标识> <文件名>",
   "  dev-distribution.mjs upload-targets <R2 账户 ID>",
   "  dev-distribution.mjs mirror-urls <对象键>",
-  "  dev-distribution.mjs build <版本> <运行次数> <引导程序> <仓库> <tag> <提交> <输出清单> [说明文件]",
-  "  dev-distribution.mjs validate <清单> <版本> <运行次数> <引导程序> <仓库> <tag>",
+  "  dev-distribution.mjs build <版本> <运行标识> <引导程序> <仓库> <tag> <提交> <输出清单> [说明文件]",
+  "  dev-distribution.mjs validate <清单> <版本> <运行标识> <引导程序> <仓库> <tag>",
   "  dev-distribution.mjs compare <版本 a> <版本 b>",
   "  dev-distribution.mjs next-beta <基础号> <tag 列表文件>",
+  "运行标识是 <运行号>-<运行次数>，工作流里写成 \"$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT\"。",
   "build 的说明文件：beta 版本必须给，dev 版本不许给。compare 按 semver 优先级打印 -1、0 或 1。",
   "next-beta 打印 tag 列表（每行一个）里 v<基础号>-beta.<N> 的最大 N 加 1，没有就打印 1。",
 ].join("\n");
@@ -97,13 +98,21 @@ export function channelOf(version) {
   return channel;
 }
 
-// 带运行次数：桶上禁止覆盖写，重跑发布作业会换一个目录，不会撞上上一次传了一半的对象
-export function objectKey(version, attempt, fileName) {
+// 目录带运行标识 <运行号>-<运行次数>（GITHUB_RUN_ID 与 GITHUB_RUN_ATTEMPT）：桶上禁止覆盖写，同一个键只能写一次。
+// 只带运行次数不够：beta 序号只数已建的 tag，stage 传完包、建 tag 之前失败的运行不占号，下一次运行算出同一个版本号，
+// 运行次数又从 1 起，键就撞上上次留在 beta/ 下、覆盖不了也删不掉的对象，stage 报错，白用一次签名审批。
+// 运行号每次运行都不同、重跑时不变，运行次数再把同一次运行的各次重跑分开。dev 的版本号本身带运行序号，
+// 两条通道仍用同一套键规则。
+const RUN = /^[1-9][0-9]*-[1-9][0-9]*$/;
+
+export function objectKey(version, run, fileName) {
   const channel = channelOf(version);
-  if (typeof attempt !== "string" || !/^[1-9]\d*$/.test(attempt)) throw new Error(`运行次数应为正整数：${JSON.stringify(attempt)}`);
+  if (typeof run !== "string" || !RUN.test(run)) {
+    throw new Error(`运行标识应为 <运行号>-<运行次数>（$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT），两段都是不带前导零的正整数：${JSON.stringify(run)}`);
+  }
   requireSegment(fileName, "文件名");
   if (!fileName.includes(version)) throw new Error(`文件名 ${fileName} 里没有版本号 ${version}`);
-  return `${channel}/${version}-${attempt}/${fileName}`;
+  return `${channel}/${version}-${run}/${fileName}`;
 }
 
 // 前缀只认通道表里的几个，不放宽成任意前缀：OSS 的 RAM 子用户各自只放行本通道的前缀，R2 的凭据却能写整个桶，
@@ -232,17 +241,17 @@ export function githubUrl(repo, tag, fileName) {
   return `https://github.com/${repo}/releases/download/${tag}/${fileName}`;
 }
 
-export function sourceUrls({ version, attempt, fileName, repo, tag }) {
+export function sourceUrls({ version, run, fileName, repo, tag }) {
   requireReleaseTag(version, tag);
-  return [...mirrorUrls(objectKey(version, attempt, fileName)), { name: "github", url: githubUrl(repo, tag, fileName) }];
+  return [...mirrorUrls(objectKey(version, run, fileName)), { name: "github", url: githubUrl(repo, tag, fileName) }];
 }
 
 // url 是 dev.35 及更早的客户端唯一会用的源，取 github：三个桶里 dev/ 下的对象 30 天后被生命周期规则删掉，dev 停更
 // 超过 30 天时，指向桶的 url 会让旧客户端一直 404；github 附件跟着当前的滚动预发布走，预发布不重建就一直在、不会过期。
 // beta 没有旧客户端，照样取 github：每版一个永久保留的 Release，附件地址就是这一版的永久地址。
 // x-sources 是新客户端的完整候选表，含 url 本身；新客户端按它换源，url 取哪个源不影响它们。
-export function buildManifest({ version, notes, pubDate, signature, size, attempt, fileName, repo, tag }) {
-  const sources = sourceUrls({ version, attempt, fileName, repo, tag });
+export function buildManifest({ version, notes, pubDate, signature, size, run, fileName, repo, tag }) {
+  const sources = sourceUrls({ version, run, fileName, repo, tag });
   return {
     version,
     notes,
@@ -292,7 +301,7 @@ function isBuildPubDate(value) {
   return typeof value === "string" && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value;
 }
 
-export function validateManifest(manifest, { version, attempt, fileName, size, repo, tag }) {
+export function validateManifest(manifest, { version, run, fileName, size, repo, tag }) {
   requireKeys(manifest, ["version", "notes", "pub_date", "platforms"], "清单");
   if (manifest.version !== version) throw new Error(`清单的 version 是 ${JSON.stringify(manifest.version)}，应为 ${version}`);
   requireNotes(manifest.notes, "清单的 notes");
@@ -321,8 +330,8 @@ export function validateManifest(manifest, { version, attempt, fileName, size, r
   const missing = SOURCE_NAMES.filter((name) => !urls.has(name));
   if (missing.length > 0) throw new Error(`x-sources 缺源 ${missing.join("、")}`);
 
-  // 三个桶传的是同一个对象键，路径带版本和运行次数；GitHub 上的文件名本身带版本
-  const key = `/${objectKey(version, attempt, fileName)}`;
+  // 三个桶传的是同一个对象键，路径带版本和运行标识；GitHub 上的文件名本身带版本
+  const key = `/${objectKey(version, run, fileName)}`;
   for (const { name } of MIRRORS) {
     const { pathname } = urls.get(name);
     if (pathname !== key) throw new Error(`源 ${name} 的路径是 ${pathname}，应为 ${key}`);
@@ -362,7 +371,7 @@ export function runCommand([command, ...args]) {
     }
     case "build": {
       expectArgs(args, 7, 8);
-      const [version, attempt, bootstrap, repo, tag, commit, out, notesFile] = args;
+      const [version, run, bootstrap, repo, tag, commit, out, notesFile] = args;
       if (!COMMIT.test(commit)) throw new Error(`提交应为 40 位十六进制：${JSON.stringify(commit)}`);
       const manifest = buildManifest({
         version,
@@ -370,7 +379,7 @@ export function runCommand([command, ...args]) {
         pubDate: new Date().toISOString(),
         signature: readFileSync(`${bootstrap}.sig`, "utf8").trim(),
         size: statSync(bootstrap).size,
-        attempt,
+        run,
         fileName: basename(bootstrap),
         repo,
         tag,
@@ -380,9 +389,9 @@ export function runCommand([command, ...args]) {
     }
     case "validate": {
       expectArgs(args, 6);
-      const [manifestPath, version, attempt, bootstrap, repo, tag] = args;
+      const [manifestPath, version, run, bootstrap, repo, tag] = args;
       const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-      validateManifest(manifest, { version, attempt, fileName: basename(bootstrap), size: statSync(bootstrap).size, repo, tag });
+      validateManifest(manifest, { version, run, fileName: basename(bootstrap), size: statSync(bootstrap).size, repo, tag });
       return `清单校验通过：${version}，${manifest.platforms[PLATFORM]["x-sources"].map(({ name }) => name).join("、")}\n`;
     }
     case "compare": {
