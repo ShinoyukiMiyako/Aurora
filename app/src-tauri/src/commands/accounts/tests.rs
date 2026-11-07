@@ -440,7 +440,7 @@ mod microsoft {
             )
             .mount(&revoked)
             .await;
-        let captured = crate::tests::Captured::default();
+        let captured = crate::tests::Captured::new();
         let writer = captured.clone();
         let _guard = tracing::subscriber::set_default(
             tracing_subscriber::fmt()
@@ -468,7 +468,7 @@ mod microsoft {
             "已判定要重新登录的账户不再续"
         );
 
-        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let log = captured.text();
         let warned = |needle: &str| {
             log.lines()
                 .filter(|line| line.contains(needle))

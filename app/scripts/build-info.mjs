@@ -4,12 +4,14 @@
 import { readFileSync } from "node:fs";
 
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
-const PREVIEW_TAG = /^(alpha|preview|dev|nightly)\d*$/;
-const BETA_TAG = /^(beta|rc)\d*$/;
+const PREVIEW_TAG = /^dev\d*$/;
+const BETA_TAG = /^beta\d*$/;
 
 /**
- * 发布通道由版本号推出：预发布标识的第一段 alpha / preview / dev / nightly 为预览版，beta / rc 为测试版；
- * 没有预发布标识时 0.x 尚未发布过正式版，算预览版，1.0 起为正式版。认不出的预发布标识直接报错，不猜。
+ * 发布通道由版本号推出：预发布标识的第一段是 dev 为预览版、beta 为测试版，后面只跟数字或什么都不跟，不分大小写；
+ * 没有预发布标识时 0.x 尚未发布过正式版，算预览版，1.0 起为正式版。
+ * 预发布标识只认这两种，与启动器认更新通道的规则（Rust 侧的 UpdateChannel::of）一致：rc、alpha 这类标识没有清单，
+ * 启动器会判为不支持自更新，关于页再打上测试版或预览版就前后矛盾，所以直接报错，让构建停下，不猜。
  */
 export function releaseChannel(version) {
   const match = SEMVER.exec(version);

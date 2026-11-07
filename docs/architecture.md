@@ -179,7 +179,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | beta | `https://petalfall.org/updates/beta/latest.json`（`BETA_ENDPOINT`），只有这一个 | 预发布标识第一段是 `beta`（后面只跟数字）的版本 |
 | stable | `https://petalfall.org/updates/stable/latest.json`（`PRIMARY_ENDPOINT`），只有这一个 | 没有预发布标识的版本 |
 
-- 预发布标识的第一段既不是 `dev` 也不是 `beta`（`rc`、`alpha` 等）时，`UpdateChannel::of` 认不出通道，判为不支持自更新，原因是 `unknown_channel`（见「装配与状态」的启动器更新一条），一个端点都不问。认不出就关掉，不落到 stable：落到 stable 的话，这样的包会去问正式版的清单。关于页的通道标签另由 `app/scripts/build-info.mjs` 推出，那边把 `rc` 算作测试版，用到 `rc` 之前两边的规则要先对齐。
+- 预发布标识的第一段既不是 `dev` 也不是 `beta`（`rc`、`alpha` 等）时，`UpdateChannel::of` 认不出通道，判为不支持自更新，原因是 `unknown_channel`（见「装配与状态」的启动器更新一条），一个端点都不问。认不出就关掉，不落到 stable：落到 stable 的话，这样的包会去问正式版的清单。关于页的通道标签另由 `app/scripts/build-info.mjs` 推出，预发布标识同样只认 `dev`、`beta`，别的标识在构建时直接报错，所以 CI 出不了这种包，`unknown_channel` 只是兜底。两边只在不带预发布标识的 0.x 版本上不同：build-info 算预览版（还没有发过正式版），启动器按 stable 判。这种版本号只出现在本机构建里，本机构建不带更新公钥，自更新本来就不可用。
 - 清单端点不探测，也不看「文件下载源」设置：清单只有几百字节，测速省不下时间，反倒多一轮请求。dev 清单先问香港机，国内连 GitHub 常常不通。
 - dev 清单在香港机与 GitHub 两处发布，是同一个文件、字节相同：dev.35 及更早的客户端只认 GitHub 那一份。
 - beta 清单只认香港机这一处，不设 GitHub 后备。清单本身不签名，而 GitHub Releases 能被 dev 的 `publish` 作业与 CLA 作业改写（两者都有 `contents: write`）；只有一个来源时，香港机挂了只是暂时收不到更新，不影响启动和游戏，出了坏版本也只要撤这一处。这个地址编进了每个测试版，要长期保持可用。每版的预发布 `v<版本>` 上也附一份 `latest.json`，客户端不读它。
@@ -196,7 +196,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 - `detail.network` 只在所有端点都败在网络层时才给：全是超时为 `timeout`，否则为 `connect`；再 GET 一次时连不上也算败在网络层。有一个端点回了状态码，或败在正文与格式上，就不给。
 - 建检查器本身失败是本机的问题，一个端点都不问，直接报 `update_check_failed`，`detail` 只有 `endpoints` 与有才写的 `network`、`causes`，没有 `attempts`。
 
-清单是插件 2.12.0 的标准格式，平台条目里多两个扩展字段；插件和旧客户端都忽略多余的键（插件的清单结构没有 `deny_unknown_fields`）。以 dev 通道为例（`<VERSION>` 是版本号，`<RUN_ATTEMPT>` 是 CI 这次运行的重跑序号 `GITHUB_RUN_ATTEMPT`）：
+清单是插件 2.12.0 的标准格式，平台条目里多两个扩展字段；插件和旧客户端都忽略多余的键（插件的清单结构没有 `deny_unknown_fields`）。以 dev 通道为例（`<VERSION>` 是版本号，`<RUN_ID>` 与 `<RUN_ATTEMPT>` 是 CI 这次运行的运行号 `GITHUB_RUN_ID` 与重跑序号 `GITHUB_RUN_ATTEMPT`）：
 
 ```json
 {
@@ -209,9 +209,9 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
       "url": "https://github.com/ShinoyukiMiyako/Petalfall/releases/download/dev-build/Petalfall-Installer-<VERSION>-x64.exe",
       "x-size": 22846361,
       "x-sources": [
-        { "name": "cn", "url": "https://petalfall-dl-cn.oss-cn-hangzhou.aliyuncs.com/dev/<VERSION>-<RUN_ATTEMPT>/Petalfall-Installer-<VERSION>-x64.exe" },
-        { "name": "hk", "url": "https://petalfall-dl.oss-cn-hongkong.aliyuncs.com/dev/<VERSION>-<RUN_ATTEMPT>/Petalfall-Installer-<VERSION>-x64.exe" },
-        { "name": "global", "url": "https://dl.petalfall.org/dev/<VERSION>-<RUN_ATTEMPT>/Petalfall-Installer-<VERSION>-x64.exe" },
+        { "name": "cn", "url": "https://petalfall-dl-cn.oss-cn-hangzhou.aliyuncs.com/dev/<VERSION>-<RUN_ID>-<RUN_ATTEMPT>/Petalfall-Installer-<VERSION>-x64.exe" },
+        { "name": "hk", "url": "https://petalfall-dl.oss-cn-hongkong.aliyuncs.com/dev/<VERSION>-<RUN_ID>-<RUN_ATTEMPT>/Petalfall-Installer-<VERSION>-x64.exe" },
+        { "name": "global", "url": "https://dl.petalfall.org/dev/<VERSION>-<RUN_ID>-<RUN_ATTEMPT>/Petalfall-Installer-<VERSION>-x64.exe" },
         { "name": "github", "url": "https://github.com/ShinoyukiMiyako/Petalfall/releases/download/dev-build/Petalfall-Installer-<VERSION>-x64.exe" }
       ]
     }
@@ -235,7 +235,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | `global` | 海外 | `dl.petalfall.org` | Cloudflare R2 的桶 `petalfall-dl` |
 | `github` | 海外 | `github.com` | dev：滚动预发布 `dev-build` 的附件，随预发布每次重建而换掉；beta：每版一个的预发布 `v<版本>` 的附件，永久保留 |
 
-三个桶里的对象路径带通道与版本（`dev/<VERSION>-<RUN_ATTEMPT>/`、`beta/<VERSION>-<RUN_ATTEMPT>/`），`dev/` 前缀下的对象 30 天后由桶的生命周期规则自动删除。`beta/` 前缀不设生命周期规则，对象长期保留：测试版可能几周不更新，对象过期的话，三个桶源就一直 404。对象能不能被改写，各桶对两个前缀的保护不一样：
+三个桶里的对象路径带通道、版本与运行标识（`dev/<VERSION>-<RUN_ID>-<RUN_ATTEMPT>/`、`beta/<VERSION>-<RUN_ID>-<RUN_ATTEMPT>/`）。两个前缀下的对象都不能覆盖（见下），一个键只能写一次：运行次数让同一次运行的重跑换一个目录；运行号是为 beta 带的，beta 序号取已发布 tag 里最大的加 1，传完包、建 tag 之前失败的运行不占号，下一次运行会算出同一个版本号，运行次数又从 1 起，只带运行次数的话键与上次留在 `beta/` 下的对象相同，`put-object` 写不进去、读回的字节也对不上，这次运行白白用掉一次签名审批。dev 的版本号带运行序号，用不着运行号，两个通道仍用同一套键规则。`dev/` 前缀下的对象 30 天后由桶的生命周期规则自动删除。`beta/` 前缀不设生命周期规则，对象长期保留：测试版可能几周不更新，对象过期的话，三个桶源就一直 404。对象能不能被改写，各桶对两个前缀的保护不一样：
 
 - 两个 OSS 桶：`dev/`、`beta/` 前缀各有一条对所有人生效的禁止覆盖写规则。两个通道各有一个 CI 的 RAM 子用户，都只有 `oss:PutObject`，资源各限两个桶里本通道的前缀（`dev/*` 或 `beta/*`），删不了对象，也写不进别的前缀。
 - R2 桶：没有禁止覆盖写，靠保留锁。`dev/` 锁 25 天，锁期内的对象不能覆盖、不能删除；生命周期第 30 天才删，所以第 25 到 30 天之间，`dev/` 下的对象可以被覆盖或删除。`beta/` 的锁没有期限，放进去的对象不能覆盖，也删不掉（要先撤掉锁规则）。两个通道各有一把 CI 的 R2 凭据，都只限这一个桶，但不限前缀，能写整个桶，也能删锁外的对象。
@@ -298,7 +298,7 @@ dev 的发布链路在 `.github/workflows/dev-build.yml` 里：自托管机上�
    - GitHub 上已是这个版本，不是第一次尝试，香港落后或还没有清单：之前那次尝试重建了预发布、没推上香港，接着被整体重跑。`build` 已重编并覆盖了引导程序产物，`publish-hk` 读回 GitHub 一般会对不上；这次尝试里失败的又是 `publish`，再点 Re-run failed jobs 也只会在这里再停一次。这次运行补不了香港：往 dev 推新提交出新版本，或者手工把发布过的那次尝试留下的 `latest.json` 产物（与预发布上的 `latest.json` 字节相同，产物保留 14 天）推到香港。
    - 只有香港上已是这个版本：运行序号被重数，或推送香港之后预发布被手工删改过。
 2. 给引导程序签名（`tauri signer sign --app-version`），再按仓库里的公钥验签。
-3. 上传：引导程序与 NSIS 包按同一个对象键 `dev/<VERSION>-<RUN_ATTEMPT>/<文件名>` 传进三个桶（`.github/scripts/upload-to-mirrors.sh`，aws-cli 2 的 `s3api put-object`，带 `Content-MD5`，`Cache-Control` 标一年、immutable）。键里带运行次数：`dev/` 下的对象不能覆盖（各桶的保护范围见上文），重跑时换一个目录，不会撞上上次传了一半的对象。`put-object` 报错时（例如服务端已经写成、响应却在跨境路上丢了，aws-cli 自动重试同一个键，撞上不能覆盖的对象），按客户端会用的公网地址匿名读回（同样经 `check-download.sh`），大小与 sha256 和本地一致就算已传上，否则失败：不靠凭据去查，OSS 的凭据只能写，OSS 的 S3 兼容层与 R2 对「已存在」各报什么码也核实不了，比字节不依赖错误码。排在签名之后，传上去的就是最终发出去的字节。
+3. 上传：引导程序与 NSIS 包按同一个对象键 `dev/<VERSION>-<RUN_ID>-<RUN_ATTEMPT>/<文件名>` 传进三个桶（`.github/scripts/upload-to-mirrors.sh`，aws-cli 2 的 `s3api put-object`，带 `Content-MD5`，`Cache-Control` 标一年、immutable）。键里带运行号与运行次数（工作流传 `$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT`）：`dev/` 下的对象不能覆盖（各桶的保护范围见上文），重跑时运行次数加一、换一个目录，不会撞上上次传了一半的对象；运行号对 dev 不是必需的，是与 beta 共用的键规则（见上文）。`put-object` 报错时（例如服务端已经写成、响应却在跨境路上丢了，aws-cli 自动重试同一个键，撞上不能覆盖的对象），按客户端会用的公网地址匿名读回（同样经 `check-download.sh`），大小与 sha256 和本地一致就算已传上，否则失败：不靠凭据去查，OSS 的凭据只能写，OSS 的 S3 兼容层与 R2 对「已存在」各报什么码也核实不了，比字节不依赖错误码。排在签名之后，传上去的就是最终发出去的字节。
 4. 读回三个桶：不带凭据、按客户端会用的公网地址下载，比对大小与 sha256（`.github/scripts/check-download.sh`）。公共读没开、自定义域名配错时上传照样成功，只有这一步看得出来。
 5. 生成清单并从文件读回校验（`.github/scripts/dev-distribution.mjs` 的 `build` 与 `validate`）：键集合一字不差（拼错的键插件只会忽略，不会在任何地方报错）；四个源齐全、不重复，每个源名只认自己那台主机（比白名单更严）；https、规范形式的地址、带版本的路径；`url` 等于 `github`（旧客户端只认它，桶里的对象 30 天后过期，见上文）；`x-size` 等于引导程序的实际字节数，且不超过 256 MiB；`pub_date` 与 `toISOString` 往返后逐字相等，即 `build` 写出的 `YYYY-MM-DDTHH:mm:ss.sssZ` 形状、真实存在的 UTC 时刻（插件按 RFC 3339 严格解析，2 月 30 日、24 点这类会让整份清单作废，`Date.parse` 却把它们滚到下一天）。`github` 源的地址按工作流传入的 `$GITHUB_REPOSITORY` 拼出，`validate` 只要求它等于这样拼出的地址，没有另外钉死仓库前缀，在本仓库里跑时与客户端、`put-manifest` 钉的前缀相同。桶、端点、公网主机、对象键与清单里的地址都出自这个脚本的同一张表，传进哪个桶、从哪里读回、清单写哪个地址不会各算各的。
 6. 从写好的清单里取出 `version` 与 `signature` 按公钥再验一次：客户端从哪个源下载，验的都是这一对。
@@ -336,7 +336,7 @@ dev 的发布链路在 `.github/workflows/dev-build.yml` 里：自托管机上�
 
 重跑：
 
-- 重建预发布之前失败（`publish` 里重建之前的任何一步）：用 Re-run failed jobs 重跑，`publish` 与依赖它的 `publish-hk` 一起重跑。运行次数照样加一，对象换一个目录，不会撞上上次传了一半的对象；GitHub 与香港上都还是旧版，版本检查照常放行。不要整体重跑（Re-run all jobs）：它会重跑 `build`，有新运行正在构建时会把它取消（两者在同一个 `dev-build` 组里）。
+- 重建预发布之前失败（`publish` 里重建之前的任何一步）：用 Re-run failed jobs 重跑，`publish` 与依赖它的 `publish-hk` 一起重跑。运行号不变、运行次数照样加一，对象换一个目录，不会撞上上次传了一半的对象；GitHub 与香港上都还是旧版，版本检查照常放行。不要整体重跑（Re-run all jobs）：它会重跑 `build`，有新运行正在构建时会把它取消（两者在同一个 `dev-build` 组里）。
 - 重建预发布之后失败（`publish-hk` 里的任何一步）：用 Re-run failed jobs 只重跑 `publish-hk`。推的是 `publish` 交来的同一份字节，香港机落后时照常替换，已经写进去时视为无变化。不能整体重跑：`build` 会重编并覆盖引导程序产物，`publish` 又会在版本检查处停下，这次运行就补不了香港了（见上文版本检查的第三种报错）。香港停在旧版期间，新客户端先查香港、拿到 2xx 就不再问 GitHub，一直看不到这次更新。
 - `put-manifest` 以 1 拒收时（清单内容过不了它的校验，例如三份源表对不上），重跑也一样被拒，要先改好香港机上的脚本或 CI 再发版。
 - `publish-hk` 读回 GitHub 时发现预发布已被更新的运行重建、因此失败的，不用补：那个运行的 `publish-hk` 会推上更新的版本。
@@ -354,12 +354,12 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 
 | 环境 | 放什么 | 部署分支 | 审批 |
 | --- | --- | --- | --- |
-| `release-signing` | 只放发布签名私钥 `RELEASE_UPDATER_PRIVATE_KEY` 与它的口令 `RELEASE_UPDATER_KEY_PASSWORD` | beta、main | 必需审批人是维护者，关闭管理员绕过 |
+| `release-signing` | 只放发布签名私钥 `RELEASE_UPDATER_PRIVATE_KEY`，这把钥不设口令 | beta、main | 必需审批人是维护者，关闭管理员绕过 |
 | `updates-beta` | beta 专用的存储桶凭据、beta 的香港推送钥匙，以及变量 `R2_ACCOUNT_ID`，名称见下表 | beta | 不设审批，关闭管理员绕过 |
 
 - 只有签名的作业挂 `release-signing`，这个作业里没有任何上传或推送凭据；传桶、建 Release 与推送香港的作业挂 `updates-beta`；构建作业不挂环境，拿不到任何发布凭据，只读要编进包里的仓库级机密 `PETALFALL_CURSEFORGE_API_KEY` 与仓库变量 `PETALFALL_MSA_CLIENT_ID`，和 dev 构建相同。
 - 每发一版，在签名之前审批一次。更新签名是分离的 `.sig` 文件，批准之前从构建产物里下载到的引导程序就是最终发出去的字节，可以先装一遍再批。不开 Prevent self-review（禁止自审）：只有一个维护者，批准人就是触发人。
-- 发布签名钥不复用 dev 那把，公钥是 `.github/release-updater.pub`，打包时注入，编进每个测试版。这把钥由维护者在首个测试版之前亲手生成，公钥提交进仓库之前，beta 链路（含在 dev 上手动派发的演练）的构建会停在注入公钥这一步。main 留给以后的正式版，正式版与测试版共用这把钥。
+- 发布签名钥不复用 dev 那把，公钥是 `.github/release-updater.pub`，打包时注入，编进每个测试版。这把钥由维护者在首个测试版之前生成，`.github/scripts/beta-release-contract.test.mjs` 钉住了它的密钥号：首个测试版发出之后，已装的用户只认这把，换钥必须是有意的，连测试一起改。main 留给以后的正式版，正式版与测试版共用这把钥。
 - `updates-beta` 里的名称沿用 dev 的，`upload-to-mirrors.sh` 与 `push-hk-manifest.sh` 两个通道共用，不用改变量名；值是另一套，不复用 `updates-dev` 的：OSS 子用户按通道限前缀，复用就等于让 dev 链路能往 `beta/` 传包；R2 凭据本来就不限前缀，分开只是让两个通道的凭据各自轮换、泄露时各自吊销，挡不住 dev 的 R2 凭据往 `beta/` 写没用过的键（已有的对象有锁）。
 
 两个环境里同名的几样：

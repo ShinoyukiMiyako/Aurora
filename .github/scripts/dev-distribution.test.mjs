@@ -25,12 +25,14 @@ import {
 
 const SCRIPT = fileURLToPath(new URL("./dev-distribution.mjs", import.meta.url));
 const VERSION = `0.${randomInt(0, 50)}.${randomInt(0, 50)}-dev.${randomInt(1, 100_000)}`;
-// 第一次运行是 1，重跑才往上加；两种都要覆盖到
-const ATTEMPT = String(randomInt(1, 3) === 1 ? 1 : randomInt(2, 20));
+// 运行标识是 <运行号>-<运行次数>。运行号是仓库里递增的大整数；运行次数第一次运行是 1，重跑才往上加，两种都要覆盖到
+const RUN_ID = randomInt(1, 2 ** 40);
+const RUN_ATTEMPT = randomInt(1, 3) === 1 ? 1 : randomInt(2, 20);
+const RUN = `${RUN_ID}-${RUN_ATTEMPT}`;
 const FILE_NAME = `Petalfall-Installer-${VERSION}-x64.exe`;
 const REPO = "ShinoyukiMiyako/Petalfall";
 const TAG = "dev-build";
-const KEY = `dev/${VERSION}-${ATTEMPT}/${FILE_NAME}`;
+const KEY = `dev/${VERSION}-${RUN}/${FILE_NAME}`;
 const CN = `https://petalfall-dl-cn.oss-cn-hangzhou.aliyuncs.com/${KEY}`;
 const HK = `https://petalfall-dl.oss-cn-hongkong.aliyuncs.com/${KEY}`;
 const GLOBAL = `https://dl.petalfall.org/${KEY}`;
@@ -42,7 +44,7 @@ const ACCOUNT = randomBytes(16).toString("hex");
 const BETA_VERSION = `${randomInt(1, 50)}.${randomInt(0, 50)}.${randomInt(0, 50)}-beta.${randomInt(0, 100_000)}`;
 const BETA_TAG = `v${BETA_VERSION}`;
 const BETA_FILE = `Petalfall-Installer-${BETA_VERSION}-x64.exe`;
-const BETA_KEY = `beta/${BETA_VERSION}-${ATTEMPT}/${BETA_FILE}`;
+const BETA_KEY = `beta/${BETA_VERSION}-${RUN}/${BETA_FILE}`;
 const BETA_GITHUB = `https://github.com/${REPO}/releases/download/${BETA_TAG}/${BETA_FILE}`;
 const BETA_SOURCES = [
   { name: "cn", url: `https://petalfall-dl-cn.oss-cn-hangzhou.aliyuncs.com/${BETA_KEY}` },
@@ -54,7 +56,7 @@ const BETA_SOURCES = [
 const root = mkdtempSync(join(tmpdir(), "dev-distribution-"));
 after(() => rmSync(root, { recursive: true, force: true }));
 
-const expected = { version: VERSION, attempt: ATTEMPT, fileName: FILE_NAME, size: SIZE, repo: REPO, tag: TAG };
+const expected = { version: VERSION, run: RUN, fileName: FILE_NAME, size: SIZE, repo: REPO, tag: TAG };
 const betaExpected = { ...expected, version: BETA_VERSION, fileName: BETA_FILE, tag: BETA_TAG };
 const betaOverrides = { version: BETA_VERSION, fileName: BETA_FILE, tag: BETA_TAG, notes: "修复了启动时的闪退" };
 
@@ -65,7 +67,7 @@ function manifest(overrides = {}) {
     pubDate: new Date().toISOString(),
     signature: SIGNATURE,
     size: SIZE,
-    attempt: ATTEMPT,
+    run: RUN,
     fileName: FILE_NAME,
     repo: REPO,
     tag: TAG,
@@ -135,33 +137,106 @@ describe("channelOf", () => {
 });
 
 describe("objectKey", () => {
-  it("dev 版本是 dev/<版本>-<运行次数>/<文件名>", () => {
-    assert.equal(objectKey(VERSION, ATTEMPT, FILE_NAME), KEY);
-    assert.equal(objectKey(VERSION, "1", FILE_NAME), `dev/${VERSION}-1/${FILE_NAME}`);
+  it("dev 版本是 dev/<版本>-<运行号>-<运行次数>/<文件名>", () => {
+    assert.equal(objectKey(VERSION, RUN, FILE_NAME), KEY);
+    assert.equal(objectKey(VERSION, "1-1", FILE_NAME), `dev/${VERSION}-1-1/${FILE_NAME}`);
+    assert.equal(
+      objectKey("0.1.0-dev.38", "19283746501-2", "Petalfall-Installer-0.1.0-dev.38-x64.exe"),
+      "dev/0.1.0-dev.38-19283746501-2/Petalfall-Installer-0.1.0-dev.38-x64.exe",
+    );
   });
 
-  it("beta 版本是 beta/<版本>-<运行次数>/<文件名>", () => {
-    assert.equal(objectKey(BETA_VERSION, ATTEMPT, BETA_FILE), BETA_KEY);
-    assert.equal(objectKey("1.0.0-beta.1", "1", "Petalfall-Installer-1.0.0-beta.1-x64.exe"), "beta/1.0.0-beta.1-1/Petalfall-Installer-1.0.0-beta.1-x64.exe");
+  it("beta 版本是 beta/<版本>-<运行号>-<运行次数>/<文件名>", () => {
+    assert.equal(objectKey(BETA_VERSION, RUN, BETA_FILE), BETA_KEY);
+    assert.equal(
+      objectKey("1.0.0-beta.1", "19283746501-1", "Petalfall-Installer-1.0.0-beta.1-x64.exe"),
+      "beta/1.0.0-beta.1-19283746501-1/Petalfall-Installer-1.0.0-beta.1-x64.exe",
+    );
+  });
+
+  // 传完包才失败的 beta 运行不建 tag，下一次运行算出同一个版本号、运行次数又是 1，只有运行号不同；
+  // 键要是撞上，put-object 写不进 beta/ 下已有的对象，读回的字节也对不上
+  it("同一版本、运行次数相同而运行号不同时，键不同；同一运行号的各次重跑也各不相同", () => {
+    const later = RUN_ID + randomInt(1, 1000);
+    const first = objectKey(BETA_VERSION, `${RUN_ID}-1`, BETA_FILE);
+    const second = objectKey(BETA_VERSION, `${later}-1`, BETA_FILE);
+    assert.equal(first, `beta/${BETA_VERSION}-${RUN_ID}-1/${BETA_FILE}`);
+    assert.equal(second, `beta/${BETA_VERSION}-${later}-1/${BETA_FILE}`);
+    assert.notEqual(first, second);
+    assert.equal(objectKey(BETA_VERSION, `${RUN_ID}-2`, BETA_FILE), `beta/${BETA_VERSION}-${RUN_ID}-2/${BETA_FILE}`);
+    assert.equal(objectKey(VERSION, `${later}-${RUN_ATTEMPT}`, FILE_NAME), `dev/${VERSION}-${later}-${RUN_ATTEMPT}/${FILE_NAME}`);
+    assert.notEqual(objectKey(VERSION, `${later}-${RUN_ATTEMPT}`, FILE_NAME), KEY);
   });
 
   it("版本号认不出通道时拒绝", () => {
     for (const version of UNKNOWN_CHANNEL_VERSIONS) {
-      assert.throws(() => objectKey(version, ATTEMPT, `x-${version}.exe`), /^Error: 认不出版本号的通道/, version);
+      assert.throws(() => objectKey(version, RUN, `x-${version}.exe`), /^Error: 认不出版本号的通道/, version);
     }
   });
 
-  it("运行次数不是正整数字符串时拒绝", () => {
-    for (const attempt of ["0", "", "01", "1.5", "-1", 1]) {
-      assert.throws(() => objectKey(VERSION, attempt, FILE_NAME), /运行次数应为正整数/, String(attempt));
+  it("运行标识不是两段不带前导零的正整数时拒绝", () => {
+    const bad = [
+      // 只有一段：工作流照旧只传 $GITHUB_RUN_ATTEMPT，或只传了运行号
+      "1",
+      String(RUN_ATTEMPT),
+      String(RUN_ID),
+      // 前导零与 0
+      `0${RUN_ID}-1`,
+      `${RUN_ID}-01`,
+      "0-1",
+      "1-0",
+      "00-1",
+      // 非数字
+      "a-1",
+      "1-b",
+      "1.5-1",
+      "1-1.0",
+      "0x1F-1",
+      "1e3-1",
+      "１-1",
+      "1-１",
+      ` ${RUN}`,
+      `${RUN} `,
+      `${RUN}\n`,
+      "1_1",
+      "1+1",
+      // 空段
+      "",
+      "-",
+      "-1",
+      "1-",
+      "1--1",
+      // 多一段
+      "1-1-1",
+      `${RUN}-1`,
+      `${VERSION}-${RUN}`,
+      // 负号
+      "-1-1",
+      "1--2",
+      "-0-1",
+      "+1-1",
+      "1-+1",
+      // 不是字符串
+      1,
+      RUN_ID,
+      null,
+      undefined,
+    ];
+    for (const run of bad) {
+      assert.throws(
+        () => objectKey(VERSION, run, FILE_NAME),
+        { message: `运行标识应为 <运行号>-<运行次数>（$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT），两段都是不带前导零的正整数：${JSON.stringify(run)}` },
+        JSON.stringify(run),
+      );
+      assert.throws(() => objectKey(BETA_VERSION, run, BETA_FILE), /^Error: 运行标识应为 <运行号>-<运行次数>/, JSON.stringify(run));
     }
   });
 
   it("文件名带路径分隔、要转义的字符或不含版本号时拒绝", () => {
     for (const fileName of [`a/${FILE_NAME}`, `${FILE_NAME} `, `${FILE_NAME}?x`, "..", ""]) {
-      assert.throws(() => objectKey(VERSION, ATTEMPT, fileName), /文件名只能由/, fileName);
+      assert.throws(() => objectKey(VERSION, RUN, fileName), /文件名只能由/, fileName);
     }
-    assert.throws(() => objectKey(VERSION, ATTEMPT, "Petalfall-Installer-x64.exe"), {
+    assert.throws(() => objectKey(VERSION, RUN, "Petalfall-Installer-x64.exe"), {
       message: `文件名 Petalfall-Installer-x64.exe 里没有版本号 ${VERSION}`,
     });
   });
@@ -244,7 +319,7 @@ describe("githubUrl 与 sourceUrls", () => {
   });
 
   it("四个源依次是 cn、hk、global、github", () => {
-    assert.deepEqual(sourceUrls({ version: VERSION, attempt: ATTEMPT, fileName: FILE_NAME, repo: REPO, tag: TAG }), [
+    assert.deepEqual(sourceUrls({ version: VERSION, run: RUN, fileName: FILE_NAME, repo: REPO, tag: TAG }), [
       { name: "cn", url: CN },
       { name: "hk", url: HK },
       { name: "global", url: GLOBAL },
@@ -253,14 +328,14 @@ describe("githubUrl 与 sourceUrls", () => {
   });
 
   it("beta 的桶源在 beta/ 下，github 源指向这一版自己的 Release v<版本>", () => {
-    assert.deepEqual(sourceUrls({ version: BETA_VERSION, attempt: ATTEMPT, fileName: BETA_FILE, repo: REPO, tag: BETA_TAG }), BETA_SOURCES);
+    assert.deepEqual(sourceUrls({ version: BETA_VERSION, run: RUN, fileName: BETA_FILE, repo: REPO, tag: BETA_TAG }), BETA_SOURCES);
   });
 
   it("beta 的 tag 不是 v<版本> 时拒绝：滚动预发布或别的版本的附件会被删、会对不上", () => {
     const other = BETA_VERSION.replace(/\d+$/, (n) => String(Number(n) + 1));
     for (const tag of [TAG, BETA_VERSION, `v${other}`, `V${BETA_VERSION}`, `${BETA_TAG}-1`]) {
       assert.throws(
-        () => sourceUrls({ version: BETA_VERSION, attempt: ATTEMPT, fileName: BETA_FILE, repo: REPO, tag }),
+        () => sourceUrls({ version: BETA_VERSION, run: RUN, fileName: BETA_FILE, repo: REPO, tag }),
         { message: `beta 版本 ${BETA_VERSION} 的 tag 应为 ${BETA_TAG}，实际 ${JSON.stringify(tag)}` },
         tag,
       );
@@ -271,7 +346,7 @@ describe("githubUrl 与 sourceUrls", () => {
 describe("buildManifest", () => {
   it("插件的标准格式加 x-size 与 x-sources，url 等于不会过期的 github 源", () => {
     const pubDate = new Date(randomInt(1_700_000_000, 2_000_000_000) * 1000).toISOString();
-    const built = buildManifest({ version: VERSION, notes: "说明", pubDate, signature: SIGNATURE, size: SIZE, attempt: ATTEMPT, fileName: FILE_NAME, repo: REPO, tag: TAG });
+    const built = buildManifest({ version: VERSION, notes: "说明", pubDate, signature: SIGNATURE, size: SIZE, run: RUN, fileName: FILE_NAME, repo: REPO, tag: TAG });
     assert.deepEqual(built, {
       version: VERSION,
       notes: "说明",
@@ -317,7 +392,7 @@ describe("validateManifest", () => {
     const m = manifest(betaOverrides);
     for (const source of entryOf(m)["x-sources"].slice(0, 3)) source.url = source.url.replace("/beta/", "/dev/");
     assert.throws(() => validateManifest(m, betaExpected), {
-      message: `源 cn 的路径是 /dev/${BETA_VERSION}-${ATTEMPT}/${BETA_FILE}，应为 /${BETA_KEY}`,
+      message: `源 cn 的路径是 /dev/${BETA_VERSION}-${RUN}/${BETA_FILE}，应为 /${BETA_KEY}`,
     });
   });
 
@@ -387,7 +462,11 @@ describe("validateManifest", () => {
     }
   });
 
-  const other = (url) => url.replace(`/${VERSION}-${ATTEMPT}/`, `/${VERSION}-${Number(ATTEMPT) + 1}/`);
+  // 同一运行的下一次重跑，与运行号不同、运行次数相同的另一次运行（失败的 beta 运行之后，下一次运行就是这样）
+  const rerun = `${RUN_ID}-${RUN_ATTEMPT + 1}`;
+  const nextRun = `${RUN_ID + randomInt(1, 1000)}-${RUN_ATTEMPT}`;
+  const moved = (url, run) => url.replace(`/${VERSION}-${RUN}/`, `/${VERSION}-${run}/`);
+  const other = (url) => moved(url, rerun);
   // 每条只改一处，其余保持合法，确认拦下它的就是对应那条规则
   const cases = [
     ["顶层多一个键", (m) => Object.assign(m, { "x-note": "" }), /^清单的键应为 /],
@@ -428,6 +507,11 @@ describe("validateManifest", () => {
     ["主机大写", (m) => Object.assign(sourceOf(m, "global"), { url: `https://DL.petalfall.org/${KEY}` }), /^源 global 的地址不是规范形式/],
     ["桶里的路径不带版本", (m) => Object.assign(sourceOf(m, "hk"), { url: `https://petalfall-dl.oss-cn-hongkong.aliyuncs.com/dev/latest/${FILE_NAME}` }), /^源 hk 的路径是 \/dev\/latest\//],
     ["三个桶的路径不是同一次运行", (m) => Object.assign(sourceOf(m, "global"), { url: other(GLOBAL) }), /^源 global 的路径是 /],
+    [
+      "桶的路径是运行次数相同、运行号不同的另一次运行",
+      (m) => Object.assign(sourceOf(m, "hk"), { url: moved(HK, nextRun) }),
+      `源 hk 的路径是 /dev/${VERSION}-${nextRun}/${FILE_NAME}，应为 /${KEY}`,
+    ],
     ["github 源指向别的 tag", (m) => Object.assign(sourceOf(m, "github"), { url: GITHUB.replace(`/${TAG}/`, "/dev/") }), /^源 github 的路径是 /],
     ["url 不在 x-sources 里", (m) => Object.assign(entryOf(m), { url: other(CN) }), /^url 不在 x-sources 里/],
     // cn 是改指 github 之前的取法：桶里的对象 30 天后过期，dev 停更久了旧客户端会一直 404
@@ -597,9 +681,12 @@ describe("命令行入口", () => {
   }
 
   it("key 打印对象键", () => {
-    const result = run("key", VERSION, ATTEMPT, FILE_NAME);
+    const result = run("key", VERSION, RUN, FILE_NAME);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, `${KEY}\n`);
+    const beta = run("key", "1.0.0-beta.2", "19283746501-3", "Petalfall-Installer-1.0.0-beta.2-x64.exe");
+    assert.equal(beta.status, 0, beta.stderr);
+    assert.equal(beta.stdout, "beta/1.0.0-beta.2-19283746501-3/Petalfall-Installer-1.0.0-beta.2-x64.exe\n");
   });
 
   it("upload-targets 每个桶一行，字段用 tab 分隔", () => {
@@ -626,7 +713,7 @@ describe("命令行入口", () => {
     const { bootstrap, manifest: out } = bootstrapFixture();
     const commit = randomBytes(20).toString("hex");
     const before = Date.now();
-    const built = run("build", VERSION, ATTEMPT, bootstrap, REPO, TAG, commit, out);
+    const built = run("build", VERSION, RUN, bootstrap, REPO, TAG, commit, out);
     assert.equal(built.status, 0, built.stderr);
     assert.equal(built.stdout, "");
 
@@ -648,7 +735,7 @@ describe("命令行入口", () => {
       },
     });
 
-    const validated = run("validate", out, VERSION, ATTEMPT, bootstrap, REPO, TAG);
+    const validated = run("validate", out, VERSION, RUN, bootstrap, REPO, TAG);
     assert.equal(validated.status, 0, validated.stderr);
     assert.equal(validated.stdout, `清单校验通过：${VERSION}，cn、hk、global、github\n`);
   });
@@ -656,25 +743,51 @@ describe("命令行入口", () => {
   it("validate 拿另一个引导程序比时退出非 0：x-size 对不上", () => {
     const bytes = randomBytes(randomInt(2, 8192));
     const { bootstrap, manifest: out } = bootstrapFixture(bytes);
-    assert.equal(run("build", VERSION, ATTEMPT, bootstrap, REPO, TAG, randomBytes(20).toString("hex"), out).status, 0);
+    assert.equal(run("build", VERSION, RUN, bootstrap, REPO, TAG, randomBytes(20).toString("hex"), out).status, 0);
     writeFileSync(bootstrap, bytes.subarray(1));
-    const result = run("validate", out, VERSION, ATTEMPT, bootstrap, REPO, TAG);
+    const result = run("validate", out, VERSION, RUN, bootstrap, REPO, TAG);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, new RegExp(`x-size 是 ${bytes.length}，引导程序实际 ${bytes.length - 1} 字节`));
     assert.equal(result.stdout, "");
   });
 
-  it("validate 用另一次运行的次数比时退出非 0：读回验的和清单写的不是同一批对象", () => {
+  it("validate 用另一次运行的标识比时退出非 0：读回验的和清单写的不是同一批对象", () => {
     const { bootstrap, manifest: out } = bootstrapFixture();
-    assert.equal(run("build", VERSION, ATTEMPT, bootstrap, REPO, TAG, randomBytes(20).toString("hex"), out).status, 0);
-    const result = run("validate", out, VERSION, String(Number(ATTEMPT) + 1), bootstrap, REPO, TAG);
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /源 cn 的路径是 /);
+    assert.equal(run("build", VERSION, RUN, bootstrap, REPO, TAG, randomBytes(20).toString("hex"), out).status, 0);
+    // 同一运行的下一次重跑；运行次数相同、运行号不同的另一次运行
+    for (const other of [`${RUN_ID}-${RUN_ATTEMPT + 1}`, `${RUN_ID + randomInt(1, 1000)}-${RUN_ATTEMPT}`]) {
+      const result = run("validate", out, VERSION, other, bootstrap, REPO, TAG);
+      assert.notEqual(result.status, 0, other);
+      assert.ok(result.stderr.includes(`源 cn 的路径是 /${KEY}，应为 /dev/${VERSION}-${other}/${FILE_NAME}`), result.stderr);
+      assert.equal(result.stdout, "");
+    }
+  });
+
+  // 工作流漏改、照旧只传 $GITHUB_RUN_ATTEMPT 时要在上传之前停下，不能往桶里写出旧格式的键
+  it("key、build、validate 只拿到运行次数时退出非 0，build 不写清单", () => {
+    const attemptOnly = String(RUN_ATTEMPT);
+    const message = `运行标识应为 <运行号>-<运行次数>（$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT），两段都是不带前导零的正整数："${attemptOnly}"`;
+    const key = run("key", BETA_VERSION, attemptOnly, BETA_FILE);
+    assert.notEqual(key.status, 0);
+    assert.ok(key.stderr.includes(message), key.stderr);
+    assert.equal(key.stdout, "");
+
+    const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
+    const built = run("build", BETA_VERSION, attemptOnly, bootstrap, REPO, BETA_TAG, commit(), out, notesFixture("说明"));
+    assert.notEqual(built.status, 0);
+    assert.ok(built.stderr.includes(message), built.stderr);
+    assert.throws(() => statSync(out), { code: "ENOENT" });
+
+    assert.equal(run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), out, notesFixture("说明")).status, 0);
+    const validated = run("validate", out, BETA_VERSION, attemptOnly, bootstrap, REPO, BETA_TAG);
+    assert.notEqual(validated.status, 0);
+    assert.ok(validated.stderr.includes(message), validated.stderr);
+    assert.equal(validated.stdout, "");
   });
 
   it("build 的提交不是 40 位十六进制时退出非 0，不写清单", () => {
     const { bootstrap, manifest: out } = bootstrapFixture();
-    const result = run("build", VERSION, ATTEMPT, bootstrap, REPO, TAG, "0123abcd", out);
+    const result = run("build", VERSION, RUN, bootstrap, REPO, TAG, "0123abcd", out);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /提交应为 40 位十六进制/);
     assert.throws(() => statSync(out), { code: "ENOENT" });
@@ -699,7 +812,7 @@ describe("命令行入口", () => {
       [`\n${"说".repeat(4000)}\n`, "说".repeat(4000)],
     ]) {
       const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
-      const built = run("build", BETA_VERSION, ATTEMPT, bootstrap, REPO, BETA_TAG, commit(), out, notesFixture(content));
+      const built = run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), out, notesFixture(content));
       assert.equal(built.status, 0, built.stderr);
       assert.equal(built.stdout, "");
       const written = JSON.parse(readFileSync(out, "utf8"));
@@ -709,7 +822,7 @@ describe("命令行入口", () => {
         "windows-x86_64": { signature: SIGNATURE, url: BETA_GITHUB, "x-size": statSync(bootstrap).size, "x-sources": BETA_SOURCES },
       });
 
-      const validated = run("validate", out, BETA_VERSION, ATTEMPT, bootstrap, REPO, BETA_TAG);
+      const validated = run("validate", out, BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG);
       assert.equal(validated.status, 0, validated.stderr);
       assert.equal(validated.stdout, `清单校验通过：${BETA_VERSION}，cn、hk、global、github\n`);
     }
@@ -718,7 +831,7 @@ describe("命令行入口", () => {
   it("build 给 dev 版本传说明文件时退出非 0，不写清单：dev 的说明固定是提交号", () => {
     const { bootstrap, manifest: out } = bootstrapFixture();
     const notes = notesFixture("说明");
-    const result = run("build", VERSION, ATTEMPT, bootstrap, REPO, TAG, commit(), out, notes);
+    const result = run("build", VERSION, RUN, bootstrap, REPO, TAG, commit(), out, notes);
     assert.notEqual(result.status, 0);
     assert.ok(result.stderr.includes(`dev 版本的说明固定写提交号，不收说明文件：${notes}`), result.stderr);
     assert.throws(() => statSync(out), { code: "ENOENT" });
@@ -726,7 +839,7 @@ describe("命令行入口", () => {
 
   it("build 给 beta 版本不传说明文件时退出非 0，不写清单", () => {
     const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
-    const result = run("build", BETA_VERSION, ATTEMPT, bootstrap, REPO, BETA_TAG, commit(), out);
+    const result = run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), out);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, new RegExp(`beta 版本 ${BETA_VERSION.replaceAll(".", "\\.")} 必须给说明文件`));
     assert.throws(() => statSync(out), { code: "ENOENT" });
@@ -744,7 +857,7 @@ describe("命令行入口", () => {
       [Buffer.from([0x61, 0xff]), /不是合法的 UTF-8/],
     ]) {
       const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
-      const result = run("build", BETA_VERSION, ATTEMPT, bootstrap, REPO, BETA_TAG, commit(), out, notesFixture(content));
+      const result = run("build", BETA_VERSION, RUN, bootstrap, REPO, BETA_TAG, commit(), out, notesFixture(content));
       assert.notEqual(result.status, 0, String(message));
       assert.match(result.stderr, message);
       assert.throws(() => statSync(out), { code: "ENOENT" });
@@ -753,7 +866,7 @@ describe("命令行入口", () => {
 
   it("build 的 beta tag 不是 v<版本> 时退出非 0，不写清单", () => {
     const { bootstrap, manifest: out } = bootstrapFixture(undefined, BETA_FILE);
-    const result = run("build", BETA_VERSION, ATTEMPT, bootstrap, REPO, TAG, commit(), out, notesFixture("说明"));
+    const result = run("build", BETA_VERSION, RUN, bootstrap, REPO, TAG, commit(), out, notesFixture("说明"));
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /的 tag 应为 v/);
     assert.throws(() => statSync(out), { code: "ENOENT" });
@@ -806,10 +919,10 @@ describe("命令行入口", () => {
   });
 
   it("参数个数不对或子命令不认识时退出非 0 并提示用法：工作流漏传参数不能被当成成功", () => {
-    const build = ["build", VERSION, ATTEMPT, "boot.exe", REPO, TAG, "0".repeat(40)];
+    const build = ["build", VERSION, RUN, "boot.exe", REPO, TAG, "0".repeat(40)];
     for (const args of [
       [],
-      ["key", VERSION, ATTEMPT],
+      ["key", VERSION, RUN],
       ["mirror-urls"],
       ["upload-targets", ACCOUNT, ACCOUNT],
       ["validate", "x"],
@@ -830,6 +943,6 @@ describe("命令行入口", () => {
 
   it("参数里有空串时同样拒绝，可选的说明文件也一样", () => {
     assert.throws(() => runCommand(["key", VERSION, "", FILE_NAME]), /^Error: 用法：/);
-    assert.throws(() => runCommand(["build", BETA_VERSION, ATTEMPT, "boot.exe", REPO, BETA_TAG, "0".repeat(40), "out.json", ""]), /^Error: 用法：/);
+    assert.throws(() => runCommand(["build", BETA_VERSION, RUN, "boot.exe", REPO, BETA_TAG, "0".repeat(40), "out.json", ""]), /^Error: 用法：/);
   });
 });

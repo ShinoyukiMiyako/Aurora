@@ -55,10 +55,10 @@ PR 上只会自动跑 CLA 签署检查，不跑代码检查，下面这些要在
 
 - 前端，在 `app/` 下：先 `pnpm install --frozen-lockfile`，再 `pnpm check`，后者依次执行 `pnpm typecheck`、`pnpm test` 和 `pnpm lint:tokens`。
 - Rust，在仓库根目录：`cargo test --workspace` 和 `cargo clippy --workspace --all-targets`。
-- 改了 `.github/scripts/` 下的脚本或 `.github/workflows/cla.yml`：在仓库根目录跑 `node --test .github/scripts/*.test.mjs`，其中的测试会读 `cla.yml`，核对权限、运行机和 checkout。改了生成更新清单的 `.github/scripts/dev-distribution.mjs`，还要跑 `cargo test -p petalfall-tauri --lib commands::update`，它同时跑 `commands::updater` 与 `commands::update_sources` 的用例。
+- 改了 `.github/scripts/` 下的脚本、`.github/workflows/cla.yml` 或 `.github/workflows/beta-release.yml`：在仓库根目录跑 `node --test .github/scripts/*.test.mjs`，其中的测试会读 `cla.yml`，核对权限、运行机和 checkout，也会读 `beta-release.yml`，核对它与客户端的契约（见下文）。改了生成更新清单的 `.github/scripts/dev-distribution.mjs`，还要跑 `cargo test -p petalfall-tauri --lib commands::update`，它同时跑 `commands::updater` 与 `commands::update_sources` 的用例。
 - 上一条的 `node --test` 里，`.github/scripts/distribution-scripts.test.mjs` 会用 bash 执行分发链路的三个 shell 脚本，所以这条命令必须在 POSIX shell 里跑：要有 bash、openssl、sha256sum 与 GNU 的 stat（脚本用 `stat -c`，macOS 自带的 BSD stat 不认），还有 base64、awk 这类常用工具。Windows 上在 Git Bash 里跑，先用 `command -v bash` 确认 PATH 里的 bash 是 Git 自带的（例如 `/usr/bin/bash`），不是 WSL 的启动器 `bash.exe`。在 PowerShell 或 cmd 里直接跑时，bash 常常解析到 WSL 启动器，PATH 里也没有 openssl 和 sha256sum，大部分用例会以与改动无关的原因失败；这种失败不算你的改动出了问题，也不算验证通过，照实告诉贡献者。
 
-两侧的测试会读对方的源码：`app/src/ipc/bridge.test.ts` 读 Rust 的 `generate_handler!` 和能力文件，启动器外壳的 Rust 测试读 `app/index.html` 和 `app/src/lib/app-info.ts`，`app/src-tauri/src/commands/updater.rs` 的测试读 `.github/workflows/dev-build.yml`，按作业切开，核对 `publish` 的版本检查与 `publish-hk` 的公网回读用的都是客户端先问的香港清单地址，还读 `.github/scripts/` 下的非测试脚本，核对生成清单时写了客户端读的 `x-sources` 和 `x-size` 两个键；`app/src-tauri/src/commands/update_sources.rs` 的测试读 `.github/scripts/dev-distribution.mjs` 的源表，与客户端的源名、主机白名单和地区划分逐一比对。拿不准改动会不会被另一侧读到，就两侧都跑。
+两侧的测试会读对方的源码：`app/src/ipc/bridge.test.ts` 读 Rust 的 `generate_handler!` 和能力文件，启动器外壳的 Rust 测试读 `app/index.html` 和 `app/src/lib/app-info.ts`，`app/src-tauri/src/commands/updater.rs` 的测试读 `.github/workflows/dev-build.yml`，按作业切开，核对 `publish` 的版本检查与 `publish-hk` 的公网回读用的都是客户端先问的香港清单地址，还读 `.github/scripts/` 下的非测试脚本，核对生成清单时写了客户端读的 `x-sources` 和 `x-size` 两个键；`app/src-tauri/src/commands/update_sources.rs` 的测试读 `.github/scripts/dev-distribution.mjs` 的源表，与客户端的源名、主机白名单和地区划分逐一比对；反过来，`.github/scripts/beta-release-contract.test.mjs` 读 `.github/workflows/beta-release.yml`，按作业和步骤切开，核对发布公钥在打包前无条件注入、签名带版本、各作业只拿自己那份凭据、挂环境的作业只在 beta 上跑，以及香港清单地址，还读 `updater.rs`，核对那边把 `BETA_ENDPOINT` 钉成同一个地址。拿不准改动会不会被另一侧读到，就两侧都跑。
 
 跑过的命令和结果写进 PR 模板的「怎么验证的」一节。没有跑或者没跑通的，照实告诉贡献者，不要说成已经通过。
 
@@ -66,7 +66,7 @@ PR 上只会自动跑 CLA 签署检查，不跑代码检查，下面这些要在
 
 - 提交信息用中文，遵守 Conventional Commits，格式是 `类型(范围): 说明`；没有明确范围时可以省略括号，不要为了凑格式编一个。
 - **不写 AI 署名。** 提交信息和 PR 里都不加 AI 工具的 `Co-Authored-By` 行，也不加「由某某工具生成」之类的落款，你所在的工具默认会加的也要去掉。
-- 签署检查要求 PR 的发起者和每个提交的作者都已签署，按提交邮箱关联的 GitHub 账号对应签署人。提交作者用贡献者本人的、已关联其 GitHub 账号的邮箱，不要改 git 的 `user.name` 与 `user.email`；邮箱没关联账号的提交过不了检查。机器人账号作者的提交和它开的 PR 会被检查直接跳过，对应不到任何签署人，所以不要用你所在工具的机器人身份提交或开 PR；运行环境只能这样做时，停下来告诉贡献者。
+- 签署检查要求 PR 的发起者和每个提交的作者都已签署，按提交邮箱关联的 GitHub 账号对应签署人；PR 来自个人账号的 fork 时，fork 的主人也要签署（归组织的 fork 不要求）。提交作者用贡献者本人的、已关联其 GitHub 账号的邮箱，不要改 git 的 `user.name` 与 `user.email`；邮箱没关联账号的提交过不了检查。从 fork 发来的 PR 里，作者是维护者或机器人账号的提交改由提交者负责：提交者是普通账号时由提交者签署（贡献者变基、拣选维护者的提交后，提交者就是贡献者本人）；提交者是 GitHub 网页代签的 web-flow、机器人账号，或者是没有经 GitHub 验证签名的维护者账号时，检查失败。fork 被删除的 PR 过不了检查，要从仍然存在的 fork 重新开 PR。机器人账号开的 PR 会被检查跳过，对应不到任何签署人。所以不要用你所在工具的机器人身份提交或开 PR；运行环境只能这样做时，停下来告诉贡献者。
 - **不用 Emoji。** 代码、注释、提交信息、文档、测试和 PR 里都不用。严重度和状态用文字，清单用 `[x]` 和 `[ ]`。
 - 起草 PR 说明时按 [PR 模板](.github/PULL_REQUEST_TEMPLATE.md) 填写。
 - **不要替贡献者签署 CLA。** 签署语只能由贡献者本人读完 [CLA](CLA.md) 后，用自己的 GitHub 账号在 PR 下发出（CLA 第十二条）。不要替他发这条评论，也不要写脚本或流程自动发。

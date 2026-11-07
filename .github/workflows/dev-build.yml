@@ -340,8 +340,9 @@ jobs:
         run: node .github/scripts/verify-update-signature.mjs .github/dev-updater.pub "$BOOTSTRAP" "$BOOTSTRAP.sig" "$VERSION"
 
       # 引导程序是更新包，NSIS 包是首装被拦时的备用包，两个都进三个桶，桶、端点与公网主机见 dev-distribution.mjs。
-      # 对象键是 dev/<版本>-<运行次数>/<文件名>：桶上禁止覆盖写，publish 在重建预发布之前失败时，重跑它会换一个目录，
-      # 不会撞上上次传了一半的对象（重建之后的步骤在 publish-hk 里，重跑语义见那里）；
+      # 对象键是 dev/<版本>-<运行号>-<运行次数>/<文件名>：桶上禁止覆盖写，publish 在重建预发布之前失败时，重跑它会换一个目录，
+      # 不会撞上上次传了一半的对象（重建之后的步骤在 publish-hk 里，重跑语义见那里）。带运行号是与 beta 共用一套键规则：
+      # dev 的版本号本身带运行序号，beta 的版本号在传完包才失败的运行之后会重复，见 dev-distribution.mjs；
       # dev/ 前缀 30 天后由桶的生命周期规则删掉。必须排在签名与验签之后，传上去的就是最终发出去的字节。
       - name: 上传到三个存储桶
         env:
@@ -352,7 +353,7 @@ jobs:
           R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
         run: |
           for file in "$BOOTSTRAP" "$INSTALLER"; do
-            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
+            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
             bash .github/scripts/upload-to-mirrors.sh "$key" "$file"
           done
 
@@ -360,7 +361,7 @@ jobs:
       - name: 读回三个存储桶
         run: |
           for file in "$BOOTSTRAP" "$INSTALLER"; do
-            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
+            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
             urls="$(node .github/scripts/dev-distribution.mjs mirror-urls "$key")"
             while IFS=$'\t' read -r name url; do
               bash .github/scripts/check-download.sh "$name" "$url" "$file" < /dev/null
@@ -377,8 +378,8 @@ jobs:
         id: manifest
         run: |
           manifest="$RUNNER_TEMP/latest.json"
-          node .github/scripts/dev-distribution.mjs build "$VERSION" "$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest"
-          node .github/scripts/dev-distribution.mjs validate "$manifest" "$VERSION" "$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG"
+          node .github/scripts/dev-distribution.mjs build "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest"
+          node .github/scripts/dev-distribution.mjs validate "$manifest" "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG"
           cat "$manifest"
           echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
 

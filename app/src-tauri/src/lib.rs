@@ -344,22 +344,57 @@ fn log_data_dir() {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
     use petalfall_base::brand::{APP_NAME, APP_NAME_EN, APP_SLUG};
 
-    /// 收集日志输出的写入端。
-    #[derive(Clone, Default)]
-    pub(crate) struct Captured(pub(crate) Arc<Mutex<Vec<u8>>>);
+    pub(crate) use log_capture::Captured;
 
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
+    // 单独一个模块：字段只在这里可见，tests 里别的测试（包括本文件的）也只能经 new 构造，绕不过闸门。
+    mod log_capture {
+        use std::sync::{Arc, Mutex, OnceLock};
+
+        /// 收集日志输出的写入端。字段私有，构造只有 [`Captured::new`] 一条路，好让每个收日志的测试都先过闸门；
+        /// 收到的内容经 [`Captured::text`] 读、经 [`Captured::clear`] 清。
+        #[derive(Clone)]
+        pub(crate) struct Captured(Arc<Mutex<Vec<u8>>>);
+
+        impl Captured {
+            /// tracing-core 0.1.36 只登记了一个调度器时，别的线程头一次走到某个日志点，按它自己线程上的默认调度器
+            /// （什么都不收）算兴趣，再全局缓存成「不启用」，测试装的订阅者就收不到那条日志。并行的测试里别人先走到
+            /// 同一个日志点，断言就时挂时不挂；只跑一个模块时更容易撞上。所以先常驻登记一个级别上限为 OFF 的调度器：
+            /// 它和测试的订阅者之间全局级别一直是 OFF，别的线程走不到登记日志点；订阅者登记时调度器已有两个，
+            /// 「只有一个」的标志先关掉、再抬级别，之后谁头一次走到日志点，都按所有存活的调度器算兴趣。
+            /// 上限不能用 NoSubscriber：它不报上限，按 TRACE 算，登记那一刻起别的线程就能按自己线程的默认调度器登记日志点。
+            pub(crate) fn new() -> Self {
+                use tracing_subscriber::layer::SubscriberExt as _;
+                static GATE: OnceLock<tracing::Dispatch> = OnceLock::new();
+                GATE.get_or_init(|| {
+                    tracing::Dispatch::new(
+                        tracing_subscriber::registry()
+                            .with(tracing_subscriber::filter::LevelFilter::OFF),
+                    )
+                });
+                Self(Arc::default())
+            }
+
+            pub(crate) fn text(&self) -> String {
+                String::from_utf8(self.0.lock().expect("收日志的锁已中毒").clone())
+                    .expect("fmt 层写进来的是格式化好的整段文本，应是 UTF-8")
+            }
+
+            pub(crate) fn clear(&self) {
+                self.0.lock().expect("收日志的锁已中毒").clear();
+            }
         }
 
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
     }
 
@@ -368,7 +403,7 @@ mod tests {
     #[test]
     fn panics_are_written_to_the_session_log() {
         super::log_panics();
-        let captured = Captured::default();
+        let captured = Captured::new();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
@@ -381,7 +416,7 @@ mod tests {
             })
         });
         assert!(unwound.is_err(), "钩子不该吞掉 panic");
-        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let log = captured.text();
         assert!(log.contains("ERROR"), "{log}");
         assert!(log.contains("进程 panic"), "{log}");
         assert!(

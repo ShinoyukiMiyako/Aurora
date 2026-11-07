@@ -71,13 +71,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: ./.github/actions/xwin-toolchain
+      - id: toolchain
+        uses: ./.github/actions/xwin-toolchain
 
       # 审批时要看到这次用的是哪套工具链。排在编译之前：缺了哪个工具在这里几秒就失败，不用白编半小时。
-      # xwin 的 CRT 与 SDK 版本由 cargo-xwin 按 XWIN_ 开头的环境变量取，一并记下。
+      # xwin 的 CRT 与 SDK 版本由 cargo-xwin 按 XWIN_ 开头的环境变量取，一并记下。同一个版本号下微软还会换补丁版的包，
+      # 缓存内容的摘要也记下，才说得清下到的是哪一份。
       - name: 记录工具链版本
         env:
           TOOLCHAIN: ${{ runner.temp }}/toolchain.json
+          CRT_SDK_SHA256: ${{ steps.toolchain.outputs.xwin-cache-sha256 }}
         run: |
           node - <<'EOF'
           const { execFileSync } = require("child_process");
@@ -104,7 +107,11 @@ jobs:
               .filter(([key]) => key.startsWith("XWIN_"))
               .sort(([a], [b]) => (a < b ? -1 : 1)),
           );
-          const toolchain = JSON.stringify({ tools, xwinEnv }, null, 2);
+          const xwinCacheSha256 = process.env.CRT_SDK_SHA256;
+          if (xwinCacheSha256 === undefined || !/^[0-9a-f]{64}$/.test(xwinCacheSha256)) {
+            throw new Error(`xwin-toolchain 没有给出 xwin 缓存摘要：${JSON.stringify(xwinCacheSha256)}`);
+          }
+          const toolchain = JSON.stringify({ tools, xwinEnv, xwinCacheSha256 }, null, 2);
           fs.writeFileSync(process.env.TOOLCHAIN, toolchain);
           console.log(toolchain);
           EOF
@@ -225,7 +232,9 @@ jobs:
           echo "cli-version=$(node -p "require('@tauri-apps/cli/package.json').version")" >> "$GITHUB_OUTPUT"
 
       # 公钥是发布钥的那一半，与正式版共用，不是 dev 那把。requireSignedVersion 让客户端拒收签名里没有版本、
-      # 或签的版本和清单不同的更新，与 sign 作业的 --app-version 配套。整行由 update_beta_contract 的测试钉住。
+      # 或签的版本和清单不同的更新，与 sign 作业的 --app-version 配套。这一步的键与脚本逐行、它紧挨着打包那一步、
+      # 打包在 pnpm tauri build 之前不做别的，都由 .github/scripts/beta-release-contract.test.mjs 钉住；
+      # 前面「工作流脚本测试」那一步跑的就是它。
       - name: 写入发布更新公钥
         working-directory: app
         run: |
@@ -242,6 +251,7 @@ jobs:
         working-directory: app
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          BETA_MANIFEST_URL: https://petalfall.org/updates/beta/latest.json
         run: |
           bundle_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle"
           pnpm tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
@@ -252,6 +262,12 @@ jobs:
           fi
           if ! grep -qF -e "$PETALFALL_CURSEFORGE_API_KEY" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
             echo "::error::Petalfall.exe 里没有内嵌 CurseForge API key"
+            exit 1
+          fi
+          # beta 包只问这一个清单地址。契约测试只核对工作流与 updater.rs 的文本，客户端编进去的 BETA_ENDPOINT 是不是它，
+          # 只有在 exe 里找才知道；BETA_ENDPOINT 是编译期 concat! 出的整串，exe 里能找到完整的地址
+          if ! grep -qF -e "$BETA_MANIFEST_URL" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
+            echo "::error::Petalfall.exe 里没有测试版的更新清单地址 $BETA_MANIFEST_URL"
             exit 1
           fi
           installer="$bundle_dir/nsis/Petalfall_${VERSION}_x64-setup.exe"
@@ -353,6 +369,7 @@ jobs:
             "| --- | --- |",
             ...Object.entries(info.toolchain.tools).map(([name, version]) => row(name, version)),
             ...Object.entries(info.toolchain.xwinEnv).map(([name, value]) => row(name, value)),
+            row("xwin 缓存 crt、sdk 摘要", info.toolchain.xwinCacheSha256),
           ];
           if (release) {
             // 原文放进代码块，审批时看到的就是发出去的字节，不经 Markdown 渲染；围栏比正文里最长的一串反引号还长一个
@@ -499,18 +516,19 @@ jobs:
 
       # 更新包是引导程序，不是 NSIS 包，原因见 dev-build.yml 的同名步骤。--app-version 把版本写进可信注释，
       # 客户端开了 requireSignedVersion，拿它和清单里的 version 比，伪造清单给旧包配上更高的版本号也骗不到降级。
-      # 漏传时 CLI 只打警告照样签，靠下一步验签挡下。发布钥按要求带口令，口令为空就是机密配错了。
+      # 漏传时 CLI 只打警告照样签，靠下一步验签挡下。
+      # 发布钥不设口令：口令只能和私钥放在同一个环境里，拿得到一个就拿得到另一个，在 CI 这头多挡不了什么。
+      # --password '' 不能省：缺了这一项 CLI 会等终端输入口令，托管机上没有终端，作业会一直挂到超时。
       - name: 给更新包签名
         env:
           TAURI_CLI: ${{ steps.cli.outputs.tauri }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.RELEASE_UPDATER_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.RELEASE_UPDATER_KEY_PASSWORD }}
         run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ] || [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
-            echo "::error::环境 release-signing 里没有配置 RELEASE_UPDATER_PRIVATE_KEY 或 RELEASE_UPDATER_KEY_PASSWORD" >&2
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::环境 release-signing 里没有配置 RELEASE_UPDATER_PRIVATE_KEY" >&2
             exit 1
           fi
-          node "$TAURI_CLI" signer sign --app-version "$VERSION" "$BOOTSTRAP"
+          node "$TAURI_CLI" signer sign --app-version "$VERSION" --password '' "$BOOTSTRAP"
           test -s "$BOOTSTRAP.sig"
 
       # 私钥和仓库里的公钥不是一对时 CLI 只打警告照样签，发出去的包所有 beta 用户都会拒收。
@@ -641,8 +659,10 @@ jobs:
             esac
           done < "$RUNNER_TEMP/tags.txt"
 
-      # 对象键是 beta/<版本>-<运行次数>/<文件名>：重跑这个作业会换一个目录，不会撞上上次传了一半的对象。
-      # beta/ 不过期，测试版可能几周不更新，桶源不能先 404。必须排在验签之后，传上去的就是最终发出去的字节。
+      # 对象键是 beta/<版本>-<运行标识>/<文件名>，运行标识是 <运行号>-<运行次数>，桶上同一个键只能写一次。传完包才失败的
+      # 运行不建 tag、不占 beta 序号，下一次运行算出同一个版本号，只带运行次数的话又从 1 起，撞上上次留下、覆盖不了的对象；
+      # 运行号分开各次运行，运行次数分开同一次运行的重跑。beta/ 不过期，测试版可能几周不更新，桶源不能先 404。
+      # 必须排在验签之后，传上去的就是最终发出去的字节。
       - name: 上传到三个存储桶
         env:
           OSS_CI_ACCESS_KEY_ID: ${{ secrets.OSS_CI_ACCESS_KEY_ID }}
@@ -652,7 +672,7 @@ jobs:
           R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
         run: |
           for file in "$BOOTSTRAP" "$INSTALLER"; do
-            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
+            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
             bash .github/scripts/upload-to-mirrors.sh "$key" "$file"
           done
 
@@ -660,7 +680,7 @@ jobs:
       - name: 读回三个存储桶
         run: |
           for file in "$BOOTSTRAP" "$INSTALLER"; do
-            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
+            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
             urls="$(node .github/scripts/dev-distribution.mjs mirror-urls "$key")"
             while IFS=$'\t' read -r name url; do
               bash .github/scripts/check-download.sh "$name" "$url" "$file" < /dev/null
@@ -674,8 +694,8 @@ jobs:
         id: manifest
         run: |
           manifest="$RUNNER_TEMP/latest.json"
-          node .github/scripts/dev-distribution.mjs build "$VERSION" "$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest" "$NOTES"
-          node .github/scripts/dev-distribution.mjs validate "$manifest" "$VERSION" "$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG"
+          node .github/scripts/dev-distribution.mjs build "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest" "$NOTES"
+          node .github/scripts/dev-distribution.mjs validate "$manifest" "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG"
           cat "$manifest"
           echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
 

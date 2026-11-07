@@ -6,6 +6,11 @@ description: 在 GitHub 托管的 ubuntu-24.04 上装好钉住版本的交叉编
 # 这里取 noble 里最接近的 LLVM 20、NSIS 3.09、NASM 2.16.01。
 # cmake 不装，镜像自带的也不动：aws-lc-sys 在 Windows x86_64 上有预生成的绑定，选的是 cc 构建器，这次构建走不到 cmake。
 # 不用 actions/cache：缓存条目同仓库的其他工作流运行也能写入，要签发布签名的包每次都从干净的机器装起。
+# 摘要走输出不走 GITHUB_ENV：XWIN_ 开头的环境变量是 cargo-xwin 读的配置，工作流把它们原样记进构建信息，不混进别的。
+outputs:
+  xwin-cache-sha256:
+    description: xwin 缓存里 crt、sdk 下普通文件的 SHA-256 摘要，算法见「核对并记录工具链版本」一步
+    value: ${{ steps.verify.outputs.xwin-cache-sha256 }}
 runs:
   using: composite
   steps:
@@ -127,7 +132,8 @@ runs:
     # 同一个 CRT、SDK 版本号下微软还会换补丁版的包，版本号说明不了下到的是哪一份，另记一个缓存内容的摘要；
     # 在自托管机的 <XWIN_CACHE_DIR>/xwin 下按同样的命令算一遍就能比对；--text 让每行的格式不随平台的默认读取模式变。
     # 版本号的首行用 sed 取：head 提前关管道会让前面的命令收到 SIGPIPE，在 pipefail 下整步失败。
-    - name: 核对并记录工具链版本
+    - id: verify
+      name: 核对并记录工具链版本
       shell: bash
       env:
         NODE_INSTALLED: ${{ steps.node.outputs.node-version }}
@@ -175,3 +181,4 @@ runs:
           echo "$name=${!name}"
         done
         echo "xwin 缓存里 crt、sdk 下普通文件的 SHA-256 摘要：$xwin_digest"
+        echo "xwin-cache-sha256=$xwin_digest" >> "$GITHUB_OUTPUT"

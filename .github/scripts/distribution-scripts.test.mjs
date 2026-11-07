@@ -246,7 +246,7 @@ describe("check-download.sh", () => {
   function flaky(plan) {
     const { dir, log } = fakeBin();
     const bytes = randomBytes(randomInt(1, 64 * 1024));
-    const path = `dev/0.1.0-dev.${randomInt(1, 100_000)}-${randomInt(1, 5)}/Petalfall-Installer.exe`;
+    const path = `dev/0.1.0-dev.${randomInt(1, 100_000)}-${randomInt(1, 2 ** 40)}-${randomInt(1, 5)}/Petalfall-Installer.exe`;
     const served = join(dir, "public", "dl.petalfall.org", ...path.split("/"));
     mkdirSync(join(served, ".."), { recursive: true });
     writeFileSync(served, bytes);
@@ -349,7 +349,7 @@ describe("check-download.sh", () => {
 
 describe("upload-to-mirrors.sh", () => {
   const VARS = ["OSS_CI_ACCESS_KEY_ID", "OSS_CI_ACCESS_KEY_SECRET", "R2_CI_ACCESS_KEY_ID", "R2_CI_SECRET_ACCESS_KEY", "R2_ACCOUNT_ID"];
-  const KEY = `dev/0.1.0-dev.${randomInt(1, 100_000)}-${randomInt(1, 5)}/sample.bin`;
+  const KEY = `dev/0.1.0-dev.${randomInt(1, 100_000)}-${randomInt(1, 2 ** 40)}-${randomInt(1, 5)}/sample.bin`;
 
   function setup(versionLine = `aws-cli/2.${randomInt(0, 40)}.${randomInt(0, 40)} Python/3.13.0 Linux/6.8.0 exe/x86_64.ubuntu.24`) {
     const { dir, log } = fakeBin();
@@ -528,7 +528,7 @@ describe("upload-to-mirrors.sh", () => {
 
   it("beta/ 下的对象键同样按原样传进三个桶", () => {
     const { log, file, env } = setup();
-    const key = `beta/1.${randomInt(0, 50)}.${randomInt(0, 50)}-beta.${randomInt(1, 100_000)}-${randomInt(1, 5)}/sample.bin`;
+    const key = `beta/1.${randomInt(0, 50)}.${randomInt(0, 50)}-beta.${randomInt(1, 100_000)}-${randomInt(1, 2 ** 40)}-${randomInt(1, 5)}/sample.bin`;
     const result = bash("upload-to-mirrors.sh", [key, file], env);
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(

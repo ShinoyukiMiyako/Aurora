@@ -240,7 +240,7 @@ mod tests {
     /// 失败原因留在 debug 级。
     #[tokio::test]
     async fn unreadable_visibility_means_the_window_closed() {
-        let captured = crate::tests::Captured::default();
+        let captured = crate::tests::Captured::new();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
@@ -262,7 +262,7 @@ mod tests {
         assert!(!forced);
         assert_eq!(shown.get(), 0);
 
-        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let log = captured.text();
         assert!(!log.contains("ERROR"), "{log}");
         assert!(log.contains("DEBUG"), "{log}");
         assert!(log.contains("读取主窗口可见性失败"), "{log}");
