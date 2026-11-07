@@ -45,6 +45,8 @@ export const MIN_INSTALLING_MS = 1200;
 export const UPDATE_EXIT_POLL_MS = 200;
 /** 更新模式下最多等落樱退出多久，等不到再进「请先关闭」页。等的时候窗口已经显示着升级页。 */
 export const UPDATE_EXIT_WAIT_MS = 2000;
+/** 更新模式下最多查几次落樱还在不在：开头一次，之后每个间隔一次。 */
+export const UPDATE_EXIT_CHECKS = Math.ceil(UPDATE_EXIT_WAIT_MS / UPDATE_EXIT_POLL_MS) + 1;
 
 const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
 
@@ -209,10 +211,11 @@ function useSetupFlow(bridge: SetupBridge, initial: SetupState): SetupFlow {
     updateSent.current = true;
     const deadline = performance.now() + UPDATE_EXIT_WAIT_MS;
     const stillRunning = async (): Promise<boolean> => {
-      for (;;) {
+      for (let checks = 1; ; checks += 1) {
         if (!(await bridge.launcherRunning())) return false;
         const left = deadline - performance.now();
-        if (left <= 0) return true;
+        // 次数也封顶：定时器按毫秒取整、常常比 performance.now() 早到一点，只看剩余时间时，误差攒到截止前会接连短等、补查好几次
+        if (left <= 0 || checks >= UPDATE_EXIT_CHECKS) return true;
         await sleep(Math.min(UPDATE_EXIT_POLL_MS, left));
       }
     };

@@ -10,7 +10,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, stubPetalTokens } from "../art/petals/test-canvas";
 import { stubMatchMedia, stubResizeObserver } from "../test/dom";
-import App, { BLOCKED_POLL_MS, MIN_INSTALLING_MS, UPDATE_EXIT_POLL_MS, UPDATE_EXIT_WAIT_MS } from "./App";
+import App, { BLOCKED_POLL_MS, MIN_INSTALLING_MS, UPDATE_EXIT_CHECKS, UPDATE_EXIT_POLL_MS, UPDATE_EXIT_WAIT_MS } from "./App";
 import type { Existing, ExistingKind, Failure, InstallPlan, Probe } from "./contract";
 import { COPY } from "./copy";
 import { FAKE_PROBE, createFakeBridge, type FakeBridge, type FakeScenario } from "./fake-bridge";
@@ -474,14 +474,34 @@ describe("更新模式", () => {
     await vi.waitFor(() => expect(heading()).toBe(copy.blocked.title), { timeout: UPDATE_EXIT_WAIT_MS * 2, interval: 10 });
     // 定时器精度留 50 ms 余量
     expect(performance.now() - startedAt).toBeGreaterThanOrEqual(UPDATE_EXIT_WAIT_MS - 50);
-    // 每个间隔查一次，外加开头一次；定时器早到一两毫秒时，截止前还会补一次短等后的检查
-    expect(fake.callsOf("launcherRunning").length).toBeLessThanOrEqual(UPDATE_EXIT_WAIT_MS / UPDATE_EXIT_POLL_MS + 2);
+    // 开头一次，之后每个间隔一次，次数封顶
+    expect(UPDATE_EXIT_CHECKS).toBe(UPDATE_EXIT_WAIT_MS / UPDATE_EXIT_POLL_MS + 1);
+    expect(fake.callsOf("launcherRunning").length).toBeLessThanOrEqual(UPDATE_EXIT_CHECKS);
     expect(fake.callsOf("install")).toEqual([]);
     await vi.waitFor(() => expect(fake.callsOf("windowReady")).toHaveLength(1), WAIT);
 
     fake.scenario.running = false;
     await vi.waitFor(() => expect(heading()).toBe(upgrading), { timeout: BLOCKED_POLL_MS * 3, interval: 10 });
     await vi.waitFor(() => expect(fake.callsOf("install")).toEqual([[UPGRADE_PLAN]]), WAIT);
+  });
+
+  it("定时器每次都早到时，等启动器退出也只查封顶的次数，不在截止前接连补查", async () => {
+    // Linux 上 Node 的定时器按毫秒取整、按缓存的循环时钟起算，常常比 performance.now() 早到。这里放大成每次早到 20 ms：
+    // 只看剩余时间的循环会在截止前接连短等、多查好几次
+    const EARLY_MS = 20;
+    const realSetTimeout = window.setTimeout.bind(window);
+    const early = vi
+      .spyOn(window, "setTimeout")
+      .mockImplementation(((handler: TimerHandler, timeout?: number, ...rest: unknown[]) =>
+        realSetTimeout(handler, Math.max(0, (timeout ?? 0) - EARLY_MS), ...rest)) as typeof window.setTimeout);
+    try {
+      const fake = start({ probe: updateProbe(), running: true, outcome: "hang", progress: [] });
+      await vi.waitFor(() => expect(heading()).toBe(copy.blocked.title), { timeout: UPDATE_EXIT_WAIT_MS * 2, interval: 10 });
+      expect(fake.callsOf("launcherRunning").length).toBeLessThanOrEqual(UPDATE_EXIT_CHECKS);
+      expect(fake.callsOf("install")).toEqual([]);
+    } finally {
+      early.mockRestore();
+    }
   });
 
   it("「请先关闭」页返回落在已安装页", async () => {
