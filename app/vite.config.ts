@@ -1,11 +1,13 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readBuildInfo } from "./scripts/build-info.mjs";
+import { buildTarget } from "./scripts/build-target.mjs";
 import { thirdPartyManifest } from "./scripts/third-party-licenses.mjs";
-import { THIRD_PARTY_LICENSES_FILE } from "./scripts/licenses-file.mjs";
+import { ADDITIONAL_TERMS_FILE, ASSET_LICENSE_FILE, LICENSE_TEXT_FILE, THIRD_PARTY_LICENSES_FILE } from "./scripts/licenses-file.mjs";
 
 const host = process.env.TAURI_DEV_HOST;
 
@@ -15,8 +17,8 @@ const APP_DIR = dirname(fileURLToPath(import.meta.url));
  * 第三方许可清单只在关于页打开时才要：构建时作为静态文件写进产物，开发服务器上请求到才现生成。
  * 不做成模块：引入它的代码在测试里没有这个插件，按模块解析会让所有间接引入的测试一起失败；前端用 fetch 按需读取。
  */
-function thirdPartyLicenses(): Plugin {
-  const manifest = () => JSON.stringify(thirdPartyManifest({ appDir: APP_DIR, cargoManifest: join(APP_DIR, "..", "Cargo.toml"), rootPackage: "aurora-tauri" }));
+function thirdPartyLicenses(rootPackage: string): Plugin {
+  const manifest = () => JSON.stringify(thirdPartyManifest({ appDir: APP_DIR, cargoManifest: join(APP_DIR, "..", "Cargo.toml"), rootPackage, env: process.env }));
   return {
     name: "petalfall:third-party-licenses",
     configureServer(server) {
@@ -27,6 +29,36 @@ function thirdPartyLicenses(): Plugin {
     },
     generateBundle() {
       this.emitFile({ type: "asset", fileName: THIRD_PARTY_LICENSES_FILE, source: manifest() });
+    },
+  };
+}
+
+/** 随两个前端分发的许可文本：仓库根目录下的源文件、产物根目录下的文件名、开发服务器给的类型。 */
+const LEGAL_TEXTS: readonly { source: string; file: string; contentType: string }[] = [
+  { source: "LICENSE", file: LICENSE_TEXT_FILE, contentType: "text/plain; charset=utf-8" },
+  { source: ADDITIONAL_TERMS_FILE, file: ADDITIONAL_TERMS_FILE, contentType: "text/markdown; charset=utf-8" },
+  { source: ASSET_LICENSE_FILE, file: ASSET_LICENSE_FILE, contentType: "text/markdown; charset=utf-8" },
+];
+
+/**
+ * 协议全文、附加条款与素材许可随启动器与引导程序一起分发：AGPL 第 5(d) 条要界面上能看到协议，
+ * 附加条款与素材许可要和协议在同一处能查到，离线也要能看。
+ * 不用 ?raw 导入：路径出了 src，开发服务器还得放开 fs.allow。
+ */
+function licenseText(): Plugin {
+  const text = (source: string) => readFileSync(join(APP_DIR, "..", source), "utf8");
+  return {
+    name: "petalfall:license-text",
+    configureServer(server) {
+      for (const { source, file, contentType } of LEGAL_TEXTS) {
+        server.middlewares.use(`/${file}`, (_req, res) => {
+          res.setHeader("Content-Type", contentType);
+          res.end(text(source));
+        });
+      }
+    },
+    generateBundle() {
+      for (const { source, file } of LEGAL_TEXTS) this.emitFile({ type: "asset", fileName: file, source: text(source) });
     },
   };
 }
@@ -47,38 +79,43 @@ function vendorChunk(id: string): string | null {
 }
 
 // https://vite.dev/config/
-export default defineConfig(async () => ({
-  plugins: [react(), tailwindcss(), thirdPartyLicenses()],
+export default defineConfig(async ({ mode }) => {
+  const target = buildTarget(mode);
+  return {
+    plugins: [react(), tailwindcss(), thirdPartyLicenses(target.rootPackage), licenseText()],
 
-  define: {
-    __PETALFALL_BUILD__: JSON.stringify(readBuildInfo({ tauriConfPath: join(APP_DIR, "src-tauri", "tauri.conf.json"), env: process.env, now: new Date() })),
-  },
-
-  build: {
-    rollupOptions: {
-      output: { manualChunks: vendorChunk },
+    define: {
+      __PETALFALL_BUILD__: JSON.stringify(readBuildInfo({ tauriConfPath: join(APP_DIR, "src-tauri", "tauri.conf.json"), env: process.env, now: new Date() })),
     },
-  },
 
-  // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
-  //
-  // 1. prevent Vite from obscuring rust errors
-  clearScreen: false,
-  // 2. tauri expects a fixed port, fail if that port is not available
-  server: {
-    port: 1420,
-    strictPort: true,
-    host: host || false,
-    hmr: host
-      ? {
-          protocol: "ws",
-          host,
-          port: 1421,
-        }
-      : undefined,
-    watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+    build: {
+      outDir: target.outDir,
+      rollupOptions: {
+        input: join(APP_DIR, target.html),
+        output: { manualChunks: vendorChunk },
+      },
     },
-  },
-}));
+
+    // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
+    //
+    // 1. prevent Vite from obscuring rust errors
+    clearScreen: false,
+    // 2. tauri expects a fixed port, fail if that port is not available
+    server: {
+      port: target.port,
+      strictPort: true,
+      host: host || false,
+      hmr: host
+        ? {
+            protocol: "ws",
+            host,
+            port: target.hmrPort,
+          }
+        : undefined,
+      watch: {
+        // 3. tell Vite to ignore watching `src-tauri`
+        ignored: ["**/src-tauri/**", "**/src-tauri-setup/**"],
+      },
+    },
+  };
+});

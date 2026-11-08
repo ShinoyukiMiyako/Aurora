@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { artUrl, skinUrl, useArtStatus } from "../../mc/art";
 import { useArt } from "../../mc/useArt";
 import { skinFormat, type SkinRef } from "./layout";
@@ -14,15 +15,15 @@ export function useSkin(skin: SkinRef | null): LoadedSkin | null {
   useArtStatus();
   const url = skin === null ? null : skin.kind === "remote" ? skinUrl(skin.sha1) : artUrl(skin.path);
   const art = useArt(url);
-  if (skin === null || url === null || art.kind !== "ready") return null;
-  const format = skinFormat(art.bitmap.width, art.bitmap.height);
-  if (format === null) {
-    if (!warnedSizes.has(url)) {
-      warnedSizes.add(url);
-      console.warn(`[art] 皮肤尺寸 ${art.bitmap.width}x${art.bitmap.height} 不是 64x64 或 64x32，显示剪影：${url}`);
-    }
-    return null;
+  const bitmap = skin !== null && art.kind === "ready" ? art.bitmap : null;
+  const format = bitmap === null ? null : skinFormat(bitmap.width, bitmap.height);
+  if (bitmap !== null && format === null && url !== null && !warnedSizes.has(url)) {
+    warnedSizes.add(url);
+    console.warn(`[art] 皮肤尺寸 ${bitmap.width}x${bitmap.height} 不是 64x64 或 64x32，显示剪影：${url}`);
   }
+  const model = skin === null ? null : skin.model;
   // 默认皮肤的帽子层都是正常的透明外层，直接叠；远程皮肤由后端按像素判定
-  return { bitmap: art.bitmap, format, hat: skin.kind === "remote" ? skin.hat : true, model: skin.model };
+  const hat = skin?.kind === "remote" ? skin.hat : true;
+  // 引用要稳定：SpinningFigure 把皮肤变化当作重置姿态的信号，每次渲染给新对象的话，问候卡随下载进度一刷新，拖动就断了
+  return useMemo(() => (bitmap === null || format === null || model === null ? null : { bitmap, format, hat, model }), [bitmap, format, hat, model]);
 }

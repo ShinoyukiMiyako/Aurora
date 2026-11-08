@@ -12,7 +12,7 @@ import { useLauncherSelector } from "../state/launcher";
 import { progressTrack } from "../state/tasks";
 import { useSmoothProgress, visibleProgress } from "../ui/ProgressBar";
 import { useBreathPhase } from "./breath";
-import { instanceCover } from "./cover";
+import { useInstanceCover } from "./cover";
 import styles from "./InstanceAvatar.module.css";
 import { launchView, type LaunchView } from "./launchView";
 
@@ -103,8 +103,9 @@ function sameIndicator(a: AvatarIndicator, b: AvatarIndicator): boolean {
 export function InstanceAvatar({ instance, size, base = "hue", selected = false, lift = true, status = true, className }: InstanceAvatarProps) {
   // 只订阅这个头像上的指示：别的实例的下载进度、游戏日志都不让它重渲染
   const indicator = useLauncherSelector((s) => (status ? avatarIndicator(launchView(s, instance), size) : NO_INDICATOR), sameIndicator);
+  const cover = useInstanceCover(instance);
   return (
-    <InstanceAvatarBase instanceId={instance.id} cover={instanceCover(instance)} size={size} base={base} selected={selected} lift={lift} className={className}>
+    <InstanceAvatarBase instanceId={instance.id} cover={cover} size={size} base={base} selected={selected} lift={lift} className={className}>
       {indicator.type === "ring" && <ProgressRingOverlay size={size} tone={indicator.tone} progress={indicator.progress} track={indicator.track} />}
       {indicator.type === "queued" && <QueuedRing size={size} />}
       {indicator.type === "badge" && <Badge tone={indicator.tone} />}

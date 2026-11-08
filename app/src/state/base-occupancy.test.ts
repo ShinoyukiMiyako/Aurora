@@ -79,6 +79,21 @@ describe("子实例开工后基底的占用立刻进列表", () => {
     expect(repairLock()).toBeNull();
   });
 
+  it("换源事件只属于启动器自更新：带着任务号到达也不当作阶段事件去重扫实例", async () => {
+    const { taskId, finish } = await repairing();
+    const before = callsOf(ipc, "list_instances").length;
+    emit(CORE_EVENT, { kind: "source", task_id: taskId, index: 1, count: 4, name: "hk" } satisfies CoreEvent);
+    await settle();
+    expect(callsOf(ipc, "list_instances")).toHaveLength(before);
+
+    // 对照：同一个任务的阶段事件照常重扫，说明上面没扫不是因为任务不在
+    emit(CORE_EVENT, stage(taskId));
+    await settle();
+    expect(callsOf(ipc, "list_instances")).toHaveLength(before + 1);
+    finish({ reinstalled: false, libraries: 0, assets: 0, natives: 0 });
+    await settle();
+  });
+
   it("补全子实例失败：基底同样放开", async () => {
     const { taskId, fail } = await repairing();
     onDisk = occupied("repairing");
@@ -103,7 +118,7 @@ describe("子实例开工后基底的占用立刻进列表", () => {
     expect(callsOf(ipc, "list_instances")).toHaveLength(before + 1);
 
     for (const finished of [1, 2, 3]) {
-      emit(LAUNCH_PHASE_EVENT, { task_id: taskId, phase: "downloading", stage_index: 3, download: { total: 480, finished, bytes: 250, total_bytes: 1000, speed: 4_200_000 } } satisfies LaunchPhaseEvent);
+      emit(LAUNCH_PHASE_EVENT, { task_id: taskId, phase: "downloading", stage_index: 4, download: { total: 480, finished, bytes: 250, total_bytes: 1000, speed: 4_200_000 } } satisfies LaunchPhaseEvent);
     }
     await settle();
     expect(callsOf(ipc, "list_instances")).toHaveLength(before + 1);

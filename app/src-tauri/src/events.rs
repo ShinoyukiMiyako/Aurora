@@ -1,22 +1,22 @@
 //! 推给前端的事件：事件名、负载与把门面事件转成 Tauri 事件的转发器。
 //!
-//! aurora-core 与 UI 框架解耦，只认一个 `mpsc` 发送端作为事件出口（[`EventSink`]）。命令建一个
+//! petalfall-core 与 UI 框架解耦，只认一个 `mpsc` 发送端作为事件出口（[`EventSink`]）。命令建一个
 //! [`CoreEventForwarder`]，把它的发送端交给门面方法，转发任务把收到的每条 [`CoreEvent`] 译成
 //! [`CoreEventPayload`] 再 `emit` 出去。负载带 `task_id`：前端下载队列据此把进度归到对应任务，
 //! 不带 `task_id`（为 `null`）的事件只属于启动会话。
 
-use aurora_core::{CoreEvent, EventSink};
+use petalfall_core::{CoreEvent, EventSink};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-/// 阶段、告警与下载进度。
-pub const CORE_EVENT: &str = "aurora://core-event";
+/// 阶段、告警、下载进度、多步任务的步骤与自更新的换源。
+pub const CORE_EVENT: &str = "petalfall://core-event";
 
 /// 微软设备码登录拿到设备码时推送 user_code 与验证网址。
-pub const DEVICE_CODE_EVENT: &str = "aurora://device-code";
+pub const DEVICE_CODE_EVENT: &str = "petalfall://device-code";
 
 /// 游戏进程的每一行 stdout / stderr。
-pub const GAME_LOG_EVENT: &str = "aurora://game-log";
+pub const GAME_LOG_EVENT: &str = "petalfall://game-log";
 
 /// 推送一个事件；失败（窗口已关、无监听者）只记日志，不影响命令本身的结果。
 pub fn emit<S: Serialize + Clone>(app: &AppHandle, event: &str, payload: S) {
@@ -64,6 +64,18 @@ pub enum CoreEventKind {
         /// 瞬时速度，字节/秒。
         speed: u64,
     },
+    /// 进入多步任务的某一步：`plan` 是整份步骤表（各步的键），`index` 是这一步的下标。
+    Phase {
+        plan: Vec<&'static str>,
+        index: usize,
+    },
+    /// 自更新开始从某个下载源取更新包：`index` 是它在本次候选表里的下标（从 0 计），`count` 是候选总数，
+    /// `name` 是源名。每个源开始前一条，第一个也有；换源后从头下，之后的下载快照从 0 报起。
+    Source {
+        index: usize,
+        count: usize,
+        name: String,
+    },
 }
 
 impl From<CoreEvent> for CoreEventKind {
@@ -79,6 +91,13 @@ impl From<CoreEvent> for CoreEventKind {
                 transferred: p.transferred,
                 speed: p.speed,
             },
+            CoreEvent::Phase { plan, index } => CoreEventKind::Phase {
+                plan: plan.into_iter().map(|phase| phase.key()).collect(),
+                index,
+            },
+            CoreEvent::Source { index, count, name } => {
+                CoreEventKind::Source { index, count, name }
+            }
         }
     }
 }
@@ -151,7 +170,7 @@ impl CoreEventForwarder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_core::DownloadProgress;
+    use petalfall_core::DownloadProgress;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
@@ -193,6 +212,60 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&session).unwrap(),
             json!({ "task_id": null, "kind": "stage", "message": "开始安装原版 1.21" })
+        );
+    }
+
+    /// 步骤事件带整份步骤表的键与下标，前端按键取文案、按下标写「第几步，共几步」。
+    #[test]
+    fn phase_payload_carries_the_plan_keys_and_index() {
+        use petalfall_core::InstallPhase;
+        let payload = CoreEventPayload {
+            task_id: Some("t#1".into()),
+            step: None,
+            event: CoreEvent::Phase {
+                plan: vec![
+                    InstallPhase::Metadata,
+                    InstallPhase::Libraries,
+                    InstallPhase::Assets,
+                    InstallPhase::Natives,
+                ],
+                index: 2,
+            }
+            .into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap(),
+            json!({
+                "task_id": "t#1",
+                "kind": "phase",
+                "plan": ["metadata", "libraries", "assets", "natives"],
+                "index": 2
+            })
+        );
+    }
+
+    /// 换源事件与其他事件一样平铺在负载里：前端按 kind 认出它，知道换了源、之后的下载进度从 0 报起。
+    #[test]
+    fn source_payload_carries_index_count_and_name() {
+        let payload = CoreEventPayload {
+            task_id: Some("update#3".into()),
+            step: None,
+            event: CoreEvent::Source {
+                index: 1,
+                count: 4,
+                name: "hk".into(),
+            }
+            .into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap(),
+            json!({
+                "task_id": "update#3",
+                "kind": "source",
+                "index": 1,
+                "count": 4,
+                "name": "hk"
+            })
         );
     }
 

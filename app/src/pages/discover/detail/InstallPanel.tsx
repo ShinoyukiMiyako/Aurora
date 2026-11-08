@@ -432,7 +432,11 @@ interface PlanGroupProps {
 
 function MaybeNote({ row, coveredByIris }: { row: TargetRow; coveredByIris: boolean }) {
   if (row.verdict.kind !== "maybe" || coveredByIris || row.verdict.reason === null) return null;
-  return <Callout tone="warn">{INSTALL_COPY.maybeWarn(row.instance.name, row.verdict.reason)}</Callout>;
+  return (
+    <Callout tone="warn" fullText>
+      {INSTALL_COPY.maybeWarn(row.instance.name, row.verdict.reason)}
+    </Callout>
+  );
 }
 
 /** 计划行右端：待下载的给版本号；已满足的说明跳过，平台上已下架的那一版另行说明，版本号只是卷宗里记的。 */
@@ -470,7 +474,7 @@ function ModPlanGroup({ row, detail, showHead, coveredByIris, onReport }: PlanGr
       {showHead && <span className={styles.previewFor}>{INSTALL_COPY.previewGroup(row.instance.name)}</span>}
       {plan.status === "loading" && <span className={styles.panelHint}>{INSTALL_COPY.planLoading}</span>}
       {plan.status === "error" && (
-        <Callout tone="danger" action={<Button size="sm" variant="ghost" onClick={plan.reload}>{SEARCH_COPY.retry}</Button>}>
+        <Callout tone="danger" fullText action={<Button size="sm" variant="ghost" onClick={plan.reload}>{SEARCH_COPY.retry}</Button>}>
           <span className={styles.errorTitle}>{INSTALL_COPY.planFailed}</span>
           <span className={styles.errorText}>{plan.error.message}</span>
         </Callout>
@@ -489,7 +493,7 @@ function ModPlanGroup({ row, detail, showHead, coveredByIris, onReport }: PlanGr
           </div>
         ))}
       {data !== null && data.skipped.length > 0 && (
-        <Callout tone="warn">
+        <Callout tone="warn" fullText>
           <span className={styles.errorTitle}>{INSTALL_COPY.skipped}</span>
           {data.skipped.map((line, i) => (
             <span key={i} className={styles.errorText}>

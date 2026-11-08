@@ -2,6 +2,7 @@
 // 只被 *.test.ts(x) 引用。
 
 import { vi } from "vitest";
+import { stubCanvas as stubBitmapCanvas } from "../illustrations/test-canvas";
 
 export type CanvasOp =
   | { kind: "clear"; width: number; height: number }
@@ -58,6 +59,8 @@ export class FakeContext {
 
 /** 替换 getContext：每块画布一个 FakeContext；返回画布到上下文的表与精灵画布计数。 */
 export function stubCanvas(): { contextOf(canvas: HTMLCanvasElement): FakeContext; created(): number } {
+  // 花瓣和徽记同框：徽记的位图走 OffscreenCanvas，这里只接管页面上的画布
+  stubBitmapCanvas();
   const contexts = new Map<HTMLCanvasElement, FakeContext>();
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
     let ctx = contexts.get(this);

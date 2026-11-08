@@ -1,0 +1,54 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Petalfall Setup",
+  "mainBinaryName": "petalfall-setup",
+  "version": "../src-tauri/tauri.conf.json",
+  "identifier": "org.petalfall.setup",
+  "build": {
+    "beforeDevCommand": "pnpm dev:setup",
+    "devUrl": "http://localhost:1430",
+    "beforeBuildCommand": "pnpm build:setup",
+    "frontendDist": "../dist-setup"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "url": "setup.html",
+        "title": "Petalfall Setup",
+        "width": 880,
+        "height": 580,
+        "decorations": false,
+        "shadow": true,
+        "transparent": false,
+        "resizable": false,
+        "maximizable": false,
+        "center": true,
+        "visible": false,
+        "backgroundColor": "#FBF7F9",
+        "zoomHotkeysEnabled": false,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self'",
+        "font-src": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost",
+        "base-uri": "'none'",
+        "form-action": "'none'",
+        "frame-ancestors": "'none'"
+      }
+    }
+  },
+  "bundle": {
+    "active": false,
+    "publisher": "Shinoyuki_Miyako",
+    "copyright": "Copyright (C) 2026 Shinoyuki_Miyako",
+    "icon": ["../src-tauri/icons/icon.ico"]
+  }
+}

@@ -11,6 +11,7 @@ import { APP_NAME } from "../../lib/app-info";
 import type { KnownServerDto, NewsItemDto, PinnedServerDto, PlayDayDto, ServerStatusDto } from "../../state/queries/home";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
+import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcArgs, IpcRecorder } from "../../test/fake-bridge";
@@ -50,15 +51,17 @@ const flush = () =>
 
 async function mount() {
   view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <RemoteImageProvider resolve={async (url) => url}>
-          <Probe />
-          <HomePage route={{ page: "home" }} />
-        </RemoteImageProvider>
-        <OverlayRoot />
-      </ShellProvider>
-    </LauncherProvider>,
+    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+      <LauncherProvider>
+        <ShellProvider>
+          <RemoteImageProvider resolve={async (url) => url}>
+            <Probe />
+            <HomePage route={{ page: "home" }} />
+          </RemoteImageProvider>
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </AppearanceProvider>,
   );
   await flush();
 }
@@ -155,6 +158,13 @@ function setOnline(onLine: boolean) {
   vi.spyOn(navigator, "onLine", "get").mockReturnValue(onLine);
   act(() => {
     window.dispatchEvent(new Event(onLine ? "online" : "offline"));
+  });
+}
+/** 窗口最小化或还原：改读数后发出 visibilitychange，宿主把 WebView2 设为不可见或可见时页面收到的就是它。 */
+function setPageVisibility(state: DocumentVisibilityState) {
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue(state);
+  act(() => {
+    document.dispatchEvent(new Event("visibilitychange"));
   });
 }
 const buttonByLabel = (label: string) => {
@@ -284,6 +294,68 @@ describe("主页：问候与继续游玩", () => {
     expect(shell.createInstance).toEqual({ open: true, preset: null });
     click(buttonByText("添加账户"));
     expect(nav.route).toEqual({ page: "accounts" });
+  });
+});
+
+describe("主页：当前目录没有实例", () => {
+  const dir = (name: string, version_count: number | null, extra: { is_current?: boolean; available?: boolean } = {}) => ({
+    name,
+    path: `D:\\${name}\\.minecraft`,
+    is_current: extra.is_current === true,
+    available: extra.available !== false,
+    version_count,
+  });
+  const current = dir("默认目录", 0, { is_current: true });
+
+  beforeEach(() => {
+    bootOverrides(ipc, { instances: [] });
+    instances = [];
+  });
+
+  it("别的目录里有版本：点名它，主按钮切过去，新建实例退为次按钮", async () => {
+    ipc.overrides.set("list_game_directories", () => [current, dir("HMCL", 3), dir("PCL2", 12)]);
+    await mount();
+    expect(text()).toContain("这个目录还没有实例");
+    expect(text()).toContain("「PCL2」里有 12 个版本，切过去就能玩，文件不会被移动。");
+    expect(text()).not.toContain("还没有可以继续的实例");
+    expect(buttonByText("切到 PCL2").getAttribute("data-variant")).toBe("primary");
+    expect(buttonByText("新建实例").getAttribute("data-variant")).toBe("secondary");
+  });
+
+  it("主按钮走切换流程：确认之后才切到那个目录", async () => {
+    ipc.overrides.set("list_game_directories", () => [current, dir("PCL2", 12)]);
+    await mount();
+    click(buttonByText("切到 PCL2"));
+    await flush();
+    expect(text()).toContain("切换到「PCL2」？");
+    expect(callsOf(ipc, "set_game_directory")).toEqual([]);
+    click(buttonByText("切换"));
+    await flush();
+    expect(callsOf(ipc, "set_game_directory")).toEqual([{ path: "D:\\PCL2\\.minecraft" }]);
+  });
+
+  it("别的目录空着、访问不到或读不到版本数：维持原来的说法", async () => {
+    ipc.overrides.set("list_game_directories", () => [current, dir("空的", 0), dir("移动硬盘", 30, { available: false }), dir("读不到", null)]);
+    await mount();
+    expect(text()).toContain("还没有可以继续的实例");
+    expect(text()).not.toContain("切到");
+    expect(buttonByText("新建实例").getAttribute("data-variant")).toBe("primary");
+  });
+
+  it("目录列表读不出：不挡新建实例", async () => {
+    ipc.overrides.set("list_game_directories", () => {
+      throw new IpcError("io", "读不出");
+    });
+    await mount();
+    expect(text()).toContain("还没有可以继续的实例");
+    expect(buttonByText("新建实例").getAttribute("data-variant")).toBe("primary");
+  });
+
+  it("有实例时不读目录列表：探测目录要摸盘", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    instances = [instanceDto("生存")];
+    await mount();
+    expect(callsOf(ipc, "list_game_directories")).toEqual([]);
   });
 });
 
@@ -772,6 +844,63 @@ describe("主页：固定的服务器", () => {
     expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 2);
   });
 
+  it("窗口隐藏期间不重测；隐藏跨过了重测周期时，还原立即补测一次，之后周期照常", async () => {
+    await mount();
+    const before = callsOf(ipc, "ping_servers").length;
+    setPageVisibility("hidden");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+    });
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before);
+
+    setPageVisibility("visible");
+    await flush();
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 2);
+  });
+
+  it("隐藏没跨过重测周期：还原不多测，下一个周期到点才测", async () => {
+    await mount();
+    const before = callsOf(ipc, "ping_servers").length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    setPageVisibility("hidden");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+    setPageVisibility("visible");
+    await flush();
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
+  });
+
+  it("补测只补一次：还原后再隐藏、再还原，没有新跨过周期就不再测", async () => {
+    await mount();
+    const before = callsOf(ipc, "ping_servers").length;
+    setPageVisibility("hidden");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    setPageVisibility("visible");
+    await flush();
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
+
+    setPageVisibility("hidden");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    setPageVisibility("visible");
+    await flush();
+    expect(callsOf(ipc, "ping_servers")).toHaveLength(before + 1);
+  });
+
   // 单台测速分不出本机断网与服务器宕机：本机离线时整张卡说明本机离线，不把每台都标成连不上
   it("断网：整卡注明本机离线并暂停测速，每台都不下连通结论，在线人数取上次的结果；恢复联网立即重测一次", async () => {
     pinned = [
@@ -846,6 +975,20 @@ describe("主页：固定的服务器", () => {
     await mount();
     expect(text()).toContain("还没有固定服务器");
     expect(text()).toContain("把常去的服务器放这里");
+  });
+
+  it("延迟测不出来：危险提示写出后端给的完整原因，不截成两行", async () => {
+    const reason = "服务器地址 play.example:99999 不合法：端口必须是 1 到 65535 之间的整数，冒号后面只能写数字，IPv6 地址要用方括号括起来再写端口";
+    ipc.overrides.set("ping_servers", () => {
+      throw new IpcError("invalid_argument", reason);
+    });
+    await mount();
+    const callouts = [...document.querySelectorAll<HTMLElement>('[data-tone="danger"]')];
+    expect(callouts).toHaveLength(1);
+    // jsdom 不排版，截不截成两行只能看文字容器上的 data-full；原因是后端原文，截掉后半句就看不出该怎么改地址
+    const body = callouts[0].querySelector<HTMLElement>("[data-full]");
+    expect(body?.getAttribute("data-full")).toBe("true");
+    expect(body?.textContent).toBe(`延迟测不出来：${reason}`);
   });
 });
 
@@ -1203,6 +1346,18 @@ describe("主页：固定服务器的「加入」", () => {
 });
 
 describe("主页：账户皮肤", () => {
+  it("取到真皮肤时立绘能拖动转身，仍在「管理账户」按钮里", async () => {
+    ipc.overrides.set("skin_info", () => ({ kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["skin"]) })));
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 64, height: 64 })));
+    await mount();
+    await flush();
+    const figure = document.querySelector<HTMLElement>('[data-sk-art="skin"]');
+    expect(figure?.dataset.art).toBe("skin");
+    expect(figure?.querySelector('canvas[data-tauri-drag-region="false"]')).not.toBeNull();
+    expect(figure?.closest("button")?.getAttribute("aria-label")).toBe("管理账户");
+  });
+
   it("皮肤查询失败：照常画剪影立绘，不弹通知，原因写进控制台", async () => {
     const failure = new IpcError("io", "账户文件读不出来");
     ipc.overrides.set("skin_info", () => {

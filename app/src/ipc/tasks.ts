@@ -1,12 +1,13 @@
-// 长任务的关联、取消与任务日志，以及后端进度事件 aurora://core-event。
+// 长任务的关联、取消与任务日志，以及后端进度事件 petalfall://core-event。
 // 安装版本、装 Mod、装 Java、修复、整合包、启动这些长命令都带 taskId 参数；
 // 进度事件带 task_id 用来区分并行的任务，不带 task_id 的事件只属于启动会话。
 
 import type { TaskKind, TaskStatus } from "../domain/types";
 import { invoke, listen, type UnlistenFn } from "./bridge";
+import type { MoveBlockerDto } from "./instances";
 import type { BlockedFileDto } from "./modpack";
 
-export const CORE_EVENT = "aurora://core-event";
+export const CORE_EVENT = "petalfall://core-event";
 
 /**
  * step：命令作为组合任务的一项调用时，调用方给的「第几项」（从 0 计），后端原样标在这次调用的每条事件上。
@@ -16,6 +17,16 @@ export const CORE_EVENT = "aurora://core-event";
 export type CoreEvent =
   | { kind: "stage"; task_id: string | null; step?: number; message: string }
   | { kind: "warning"; task_id: string | null; step?: number; message: string }
+  | {
+      /** 新建、补全实例这类分步任务进入了某一步。后端只在上一批下载返回之后才报下一步。 */
+      kind: "phase";
+      task_id: string | null;
+      step?: number;
+      /** 整份步骤表的键（domain/types 的 INSTALL_PHASES），开工时排定、全程不变。 */
+      plan: string[];
+      /** 当前一步在 plan 里的下标，只增不减。 */
+      index: number;
+    }
   | {
       kind: "download";
       task_id: string | null;
@@ -32,6 +43,21 @@ export type CoreEvent =
       transferred: number;
       /** 瞬时速度，字节每秒。 */
       speed: number;
+    }
+  | {
+      /**
+       * 启动器自更新的下载开始用某一个下载源：每个源开始前一条，第一个源也有。换源后从头下，
+       * 之后的下载进度从 0 报起，总量要等新源的第一条进度。
+       */
+      kind: "source";
+      task_id: string | null;
+      step?: number;
+      /** 这个源在本次候选表里的下标，从 0 计。 */
+      index: number;
+      /** 本次候选表里源的总数。 */
+      count: number;
+      /** 源的短名（cn、hk、global、github；清单没给候选表时为 default），只供日志，界面不显示。 */
+      name: string;
     };
 
 export interface TaskErrorDto {
@@ -39,6 +65,8 @@ export interface TaskErrorDto {
   message: string;
   /** 以 distribution_blocked 失败时需要手动下载的文件清单；其余失败与较早写入的日志没有这一项。 */
   blocked_files?: readonly BlockedFileDto[];
+  /** 以 instance_move_blocked 失败时拦着它的那一项；其余失败没有这一项。 */
+  move_blocker?: MoveBlockerDto;
 }
 
 /** 重新执行该任务所需的命令与参数（不含 taskId）。 */

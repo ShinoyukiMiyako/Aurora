@@ -14,6 +14,10 @@ function download(taskId: string, bytes: number, totalBytes: number | null) {
   return { kind: "download", task_id: taskId, total: 1, finished: 0, bytes, total_bytes: totalBytes, speed: 0 };
 }
 
+function source(taskId: string, index: number, count: number, name: string) {
+  return { kind: "source", task_id: taskId, index, count, name };
+}
+
 beforeEach(() => {
   resetRecorder(ipc);
 });
@@ -23,7 +27,7 @@ describe("启动器更新命令", () => {
     const pending = deferred<typeof update>();
     ipc.overrides.set("download_update", () => pending.promise);
     const seen: [number, number | null][] = [];
-    const done = UPDATER_PORT.download("launcher-update-1", (bytes, total) => seen.push([bytes, total]));
+    const done = UPDATER_PORT.download("launcher-update-1", (bytes, total) => seen.push([bytes, total]), () => undefined);
     await vi.waitFor(() => expect(callsOf(ipc, "download_update")).toEqual([{ taskId: "launcher-update-1" }]));
 
     emit(CORE_EVENT, download("launcher-update-1", 0, 1200));
@@ -45,9 +49,33 @@ describe("启动器更新命令", () => {
       throw Object.assign(new Error("签名不符"), { code: "update_signature_invalid" });
     });
     const seen: number[] = [];
-    await expect(UPDATER_PORT.download("launcher-update-2", (bytes) => seen.push(bytes))).rejects.toMatchObject({ code: "update_signature_invalid" });
+    await expect(UPDATER_PORT.download("launcher-update-2", (bytes) => seen.push(bytes), (s) => seen.push(s.index))).rejects.toMatchObject({ code: "update_signature_invalid" });
     emit(CORE_EVENT, download("launcher-update-2", 10, null));
+    emit(CORE_EVENT, source("launcher-update-2", 1, 4, "hk"));
     expect(seen).toEqual([]);
+  });
+
+  it("换源只收同一 taskId 的换源事件，按到达顺序与进度交错转给调用方，下载结束即退订", async () => {
+    const pending = deferred<typeof update>();
+    ipc.overrides.set("download_update", () => pending.promise);
+    const seen: unknown[] = [];
+    const done = UPDATER_PORT.download(
+      "launcher-update-4",
+      (bytes) => seen.push(bytes),
+      (s) => seen.push(s),
+    );
+    await vi.waitFor(() => expect(callsOf(ipc, "download_update")).toEqual([{ taskId: "launcher-update-4" }]));
+
+    emit(CORE_EVENT, source("launcher-update-4", 0, 4, "cn"));
+    emit(CORE_EVENT, download("launcher-update-4", 700, 1200));
+    emit(CORE_EVENT, source("install-生存#1", 3, 4, "github"));
+    emit(CORE_EVENT, source("launcher-update-4", 1, 4, "hk"));
+    emit(CORE_EVENT, download("launcher-update-4", 100, 1200));
+    pending.resolve(update);
+    await done;
+
+    emit(CORE_EVENT, source("launcher-update-4", 2, 4, "global"));
+    expect(seen).toEqual([{ index: 0, count: 4, name: "cn" }, 700, { index: 1, count: 4, name: "hk" }, 100]);
   });
 
   it("检查、取消、安装与退出时安装各调一次对应命令", async () => {

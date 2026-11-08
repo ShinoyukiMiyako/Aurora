@@ -1,0 +1,3 @@
+# 香港分发机的主机公钥，推送清单时只信这一条。换机或重装系统后主机钥匙会变，按香港机上 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 打印的指纹逐字核对后再改。
+# SHA256:1rdT7cxMmhdocy5cG7iOrBuEU0scg8LmkJFFyLtNymA
+8.210.200.215 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKAfQfBG9I9Ku5R6Upb0amCPzd9tDOuD0vPGBuXwGQEG

@@ -3,7 +3,7 @@ import {
   SERVER_NOT_PINNED_CODE,
   type KnownServerDto,
   type MemoryAdviceDto,
-  type MemoryTier,
+  type MemoryNeedFactor,
   type NewsFeedDto,
   type NewsItemDto,
   type PinnedServerDto,
@@ -68,14 +68,32 @@ export async function simulateMockDownload(taskId: string, files: number, totalB
 
 const TOTAL_MB = 16384;
 const AVAILABLE_MB = 9216;
-const RECOMMENDED_MB: Record<MemoryTier, number> = { vanilla: 3840, modded: 4096, large_modpack: 6144 };
+type BaseLoader = Extract<MemoryNeedFactor, { kind: "base" }>["loader"];
+const BASE_MB: Record<BaseLoader, number> = { vanilla: 2560, optifine: 3072, modded: 2765 };
+/** 假后端不扫 mods/，装了加载器的实例一律按这么多个启用的 Mod 算；折算与后端同一斜率（每 50 个 1024 MB）。 */
+const MOCK_MOD_COUNT = 80;
+const MOCK_MODS_MB = Math.floor((MOCK_MOD_COUNT * 1024) / 50);
+const NEED_ALIGN_MB = 512;
 
 function memoryAdvice(args: MockArgs): MemoryAdviceDto {
   const id = args.versionId;
   if (id !== undefined && typeof id !== "string") throw tauriArgError("memory_advice", "versionId", "expected a string");
-  // 实例是否存在归实例领域的 mock 管，这里只按 id 里的加载器名定档。
-  const tier: MemoryTier = typeof id === "string" && /fabric|forge|quilt|optifine/i.test(id) ? "modded" : "vanilla";
-  return { total_mb: TOTAL_MB, available_mb: AVAILABLE_MB, tier, recommended_mb: Math.min(RECOMMENDED_MB[tier], TOTAL_MB / 2) };
+  // 实例是否存在归实例领域的 mock 管，这里只按 id 里的加载器名估算。
+  const loader: BaseLoader = typeof id !== "string" ? "vanilla" : /fabric|quilt|neoforge|forge/i.test(id) ? "modded" : /optifine/i.test(id) ? "optifine" : "vanilla";
+  const base = { kind: "base", loader, mb: BASE_MB[loader] } as const;
+  const mods = { kind: "mods", count: MOCK_MOD_COUNT, mb: MOCK_MODS_MB } as const;
+  const factors = loader === "modded" ? [base, mods] : [base];
+  const need = Math.ceil(factors.reduce((sum, f) => sum + f.mb, 0) / NEED_ALIGN_MB) * NEED_ALIGN_MB;
+  const limit = TOTAL_MB / 2;
+  return {
+    total_mb: TOTAL_MB,
+    available_mb: AVAILABLE_MB,
+    version_id: typeof id === "string" ? id : null,
+    need_mb: need,
+    limit: { mb: limit, reason: "half_physical" },
+    recommended_mb: Math.min(need, limit),
+    factors,
+  };
 }
 
 // ---- 启动提示 ----
@@ -342,6 +360,31 @@ const LATEST: Omit<UpdateDto, "current_version"> = {
   date: Date.UTC(2026, 9, 29, 8, 0, 0),
 };
 const UPDATE_SIZE = 12_582_912;
+/** 假清单里的候选下载源，顺序同后端的「国内在前」。 */
+const UPDATE_SOURCES = ["cn", "hk", "global", "github"] as const;
+
+let failingUpdateSources = 0;
+
+/** 模拟前 count 个下载源下到一部分就断开、换下一个源从头下（测试与界面调试用），至少留一个源能下完；reset 后恢复为第一个源就下完。 */
+export function setMockUpdateSourceFailures(count: number): void {
+  if (!Number.isInteger(count) || count < 0 || count >= UPDATE_SOURCES.length) throw new Error(`假后端只有 ${UPDATE_SOURCES.length} 个下载源，要留一个能下完：${count}`);
+  failingUpdateSources = count;
+}
+
+/** 与后端一样，每个源开始下载前推一条换源事件，第一个也推。 */
+function emitUpdateSource(taskId: string, index: number): void {
+  emitCore({ task_id: taskId, kind: "source", index, count: UPDATE_SOURCES.length, name: UPDATE_SOURCES[index] });
+}
+
+/** 一个下到五分之一就断开的源：只报一条进度，之后由调用方换源。 */
+async function simulateBrokenSource(taskId: string): Promise<void> {
+  const bytes = Math.round(UPDATE_SIZE / DOWNLOAD_STEPS);
+  await sleep(DOWNLOAD_STEP_MS);
+  if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
+  emitCore({ task_id: taskId, kind: "download", total: 1, finished: 0, bytes, total_bytes: UPDATE_SIZE, transferred: bytes, speed: Math.round(bytes / (DOWNLOAD_STEP_MS / 1000)) });
+  await sleep(DOWNLOAD_STEP_MS);
+  if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
+}
 
 interface UpdaterMockState {
   current: string;
@@ -388,6 +431,11 @@ async function downloadUpdate(args: MockArgs): Promise<UpdateDto> {
   try {
     const update = updater.available;
     if (update === null) throw new IpcError("update_not_available", "还没有检查到可用更新");
+    for (let index = 0; index < failingUpdateSources; index++) {
+      emitUpdateSource(taskId, index);
+      await simulateBrokenSource(taskId);
+    }
+    emitUpdateSource(taskId, failingUpdateSources);
     await simulateMockDownload(taskId, 1, UPDATE_SIZE);
     emitCore({ task_id: taskId, kind: "stage", message: "更新包下载完成，正在校验签名" });
     updater.downloaded = update.version;
@@ -434,6 +482,7 @@ export function reset(): void {
   networkReachable = true;
   pinned = SEED_PINNED.map((s) => ({ ...s }));
   updater = seedUpdater();
+  failingUpdateSources = 0;
 }
 
 // 固定的服务器在后端是配置的一部分；启动提示与更新状态每次启动重新得出，不存。

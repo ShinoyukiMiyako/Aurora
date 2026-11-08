@@ -1,0 +1,38 @@
+[package]
+name = "petalfall-modplatform"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+petalfall-base = { path = "../petalfall-base" }
+# 仅用其 DownloadTask 类型：把平台版本文件转成下载引擎可执行的任务，下载动作交给上层编排。
+petalfall-download = { path = "../petalfall-download" }
+# 客户端由 petalfall-base 工厂构建（rustls）；这里显式开 json（响应体反序列化）+ query（拼查询串，
+# reqwest 0.13 起 .query() 单独门控在此特性）。default-features=false 是刚需——否则 reqwest 默认拉
+# native-tls，与全局 rustls 决策冲突。
+reqwest = { version = "0.13", default-features = false, features = ["json", "query"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+# 解析 Forge/NeoForge 的 META-INF/*.toml 元数据；parse+serde 是 toml::from_str 的前置特性。
+toml = { version = "1", features = ["parse", "serde"] }
+# 读取 jar（zip）内的模组描述文件。default-features=false 关掉 bzip2/zstd/lzma 等 C 依赖后端，
+# 只留纯 Rust 的 deflate（flate2/miniz_oxide），规避 Windows 无 C 编译器时的构建失败。
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+thiserror = "2.0.18"
+tracing = "0.1"
+# 已装 Mod 的身份反查要同时算 SHA-1 与 CurseForge 指纹，两者在同一次流式读取里完成，
+# 所以不能借 petalfall-base 只认路径的 sha1_hex。版本与 petalfall-base 一致，不引入新包。
+sha1 = "0.11"
+base16ct = { version = "1", features = ["alloc"] }
+# 目录扫描(fs)、把 zip 阻塞读放进 spawn_blocking(rt)、聚合搜索并发用 tokio::join!(macros)。
+# 运行时风格由上层选择，不强制 rt-multi-thread。
+# 元数据请求的令牌桶节流闸要异步锁(sync)与等待(time)。
+tokio = { version = "1", default-features = false, features = ["fs", "rt", "macros", "sync", "time"] }
+
+[dev-dependencies]
+# wiremock 需真正后台运行时，测试用 multi_thread flavor，故补 macros/rt-multi-thread，并带 fs 便于建临时模组目录。
+# 节流闸的争抢用例暂停时钟才跑得确定，补 test-util。
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "fs", "test-util"] }
+wiremock = "0.6"
+tempfile = "3"

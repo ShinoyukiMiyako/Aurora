@@ -43,6 +43,14 @@
   color: var(--sk-text-2);
 }
 
+/* 后端原文不截断：被省略号吞掉的往往正是原因本身，逐条说明还会整条消失 */
+.text[data-full] {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+  line-clamp: none;
+}
+
 /* 小按钮比一行文字高：让按钮在首行中线上居中，而不是把整条撑高 */
 .action {
   flex: none;

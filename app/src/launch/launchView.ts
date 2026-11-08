@@ -2,7 +2,7 @@
 // 同一实例既有会话又有自身状态（安装中、损坏）时会话优先：正在跑的游戏比「已损坏」更值得说。
 
 import type { IconName } from "../art/Icon";
-import { failureCopy, LAUNCH_COPY, LAUNCH_STAGES, MODPACK_REIMPORT_COPY, phaseLabel, SESSION_COPY, crashCategoryLabel, type FailureCopy } from "../copy/flows";
+import { failureCopy, LAUNCH_COPY, LAUNCH_STAGES, MODPACK_REIMPORT_COPY, phaseLabel, SESSION_COPY, crashClueLine, type FailureCopy } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import { needsReimport } from "../domain/rules";
 import type { FailureCode, StopReason, Task } from "../domain/types";
@@ -136,14 +136,14 @@ export function sessionDetail(session: SessionState, now: number): string | null
       const crash = session.crash;
       if (crash === null || crash.status === "pending") return null;
       if (crash.status === "unavailable" || crash.category === null) return SESSION_COPY.noClue;
-      return SESSION_COPY.crashClue(crashCategoryLabel(crash.category));
+      return crashClueLine(crash.category);
     }
   }
 }
 
 export function stageLabel(stageIndex: number): string {
   const label = LAUNCH_STAGES[stageIndex];
-  if (label === undefined) throw new Error(`阶段下标 ${stageIndex} 超出八阶段表`);
+  if (label === undefined) throw new Error(`阶段下标 ${stageIndex} 超出九阶段表`);
   return label;
 }
 

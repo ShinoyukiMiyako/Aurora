@@ -12,7 +12,7 @@ import { ShellProvider } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { accountDto, bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { accountDto, bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import AccountsPage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -216,6 +216,17 @@ describe("账户页：皮肤", () => {
     expect(steveFigure?.getAttribute("data-art")).toBe("silhouette");
     // 离线账户同样问一次后端；后端对离线账户回 null（默认皮肤的推算规则未核对前不提供）
     expect(callsOf(ipc, "skin_info")).toContainEqual({ accountUuid: steve.uuid });
+  });
+
+  it("取到真皮肤时只有聚光卡的立绘能拖动转身，账户卡是静态的", async () => {
+    ipc.overrides.set("skin_info", () => ({ kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["skin"]) })));
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 64, height: 64 })));
+    await mount();
+    await flush();
+    const figures = [...page().querySelectorAll<HTMLElement>('[data-sk-art="skin"]')];
+    expect(figures.map((f) => f.dataset.art)).toEqual(["skin", "skin", "skin"]);
+    expect(figures.map((f) => f.querySelector('canvas[data-tauri-drag-region="false"]') !== null)).toEqual([true, false, false]);
   });
 
   it("皮肤查询失败：舞台照常画剪影立绘，不弹通知，原因写进控制台", async () => {
@@ -498,6 +509,36 @@ describe("账户页：断网、加载与读取失败", () => {
       window.dispatchEvent(new Event("online"));
     });
     expect(page().textContent).not.toContain("没有网络连接");
+  });
+
+  it("构建里没有微软登录 client_id：标题栏按钮与添加卡的微软一行置灰，原因写明去设置里填，点了不发起；其余照常", async () => {
+    ipc.overrides.set("get_config", () => configDto({ has_client_id: false, microsoft_login_available: false }));
+    await mount();
+    const header = page().querySelector("header") as HTMLElement;
+    const microsoft = buttonIn(header, "添加微软账户");
+    expect(microsoft.getAttribute("aria-disabled")).toBe("true");
+    act(() => {
+      microsoft.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const tipId = microsoft.getAttribute("aria-describedby");
+    expect(tipId === null ? null : document.getElementById(tipId)?.textContent).toBe("这个版本没有内置微软登录，在设置里填入 client_id 后可用");
+    await click(microsoft);
+    expect(launcher.state.login).toBeNull();
+
+    const add = [...page().querySelectorAll("h3")].find((h) => h.textContent === "添加账户")?.parentElement as HTMLElement;
+    const rows = [...add.querySelectorAll<HTMLButtonElement>("li > button")];
+    expect(rows.map((r) => [r.textContent, r.disabled])).toEqual([
+      ["微软账户这个版本没有内置微软登录，在设置里填入 client_id 后可用", true],
+      ["离线账户无需联网，单人与离线服使用", false],
+      ["外置登录LittleSkin 等第三方验证服务器", false],
+    ]);
+    await click(rows[0]);
+    expect(callsOf(ipc, "microsoft_login")).toEqual([]);
+    await click(rows[1]);
+    expect(launcher.state.login?.kind).toBe("offline");
   });
 
   it("断网：菜单里的刷新与外置登录只写标签并禁用，原因放进悬停的提示气泡；点了不发起", async () => {

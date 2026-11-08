@@ -1,0 +1,520 @@
+name: Dev 构建
+
+# 更新清单本身没有签名，防降级靠两处配套：签名用 signer sign --app-version 把版本写进可信注释，
+# 打包时给更新插件注入 requireSignedVersion: true。以后的正式版、测试版流水线也必须同时带上这两处。
+
+# 分发链路：自托管机只构建。publish 在 GitHub 托管机上签名，把引导程序和 NSIS 包传到杭州 OSS（国内主源 cn）、
+# 香港 OSS（国内备源 hk）和 R2（海外 global，经 dl.petalfall.org），按公网地址逐个匿名读回核对，再生成带 x-size
+# 与 x-sources 的清单。同一份清单发两处：滚动预发布 dev-build（dev.35 及更早的客户端只认这里，下载也只走清单的
+# url，即 github），和香港机上的 petalfall.org/updates/dev/latest.json（新客户端先查这里，再按「文件下载源」在
+# cn、hk、global、github 之间换源）。两处字节相同：publish 重建预发布，publish-hk 把同一份清单推到香港机，
+# 两处都从公网读回核对。换哪个源下载，验的都是清单里同一个签名，
+# 所以源本身不用可信：桶和 CDN 被换了包，插件验签会拒收，客户端接着换下一个源。
+
+# 这台是内网自托管机，公开仓库绝不能在这里加 pull_request 触发：那等于让任何 fork 在内网跑代码。
+on:
+  push:
+    branches: [dev]
+
+# 并发组按作业分，不设工作流级的：工作流级取消会把已经重建预发布、还没推完香港的运行整个掐掉，香港停在旧版，
+# 新客户端先查香港、拿到 2xx 就不再问 GitHub。三个组各自的取舍写在各作业上。
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+# tag 名不能叫 dev：和分支同名后 git 引用会有歧义。dev.35 及更早的 dev 包只按这个 tag 下的 latest.json 检查更新，
+# 新的把它排在香港清单之后作后备，清单里的 github 源也指向这个 tag；改名要同时改启动器里的 DEV_RELEASE_TAG，
+# 否则已装的 dev 包再也收不到更新。
+env:
+  TAG: dev-build
+
+jobs:
+  # 自托管机只构建、不碰更新签名私钥：它跨任务常驻，私钥落在这里，一旦机器被污染就能给后门包签上合法签名。
+  build:
+    runs-on: [self-hosted, Linux, X64, petalfall]
+    timeout-minutes: 30
+    # 新推送只取消还在构建的旧运行：滚动预发布只留最新一个包，旧构建做完也会被覆盖，不如直接取消。
+    # 旧运行过了这个作业就不再受新推送影响。反过来，重跑旧运行的 build 同样会取消新运行正在跑的构建。
+    concurrency:
+      group: dev-build
+      cancel-in-progress: true
+    # 微软登录 client_id 只在构建时内嵌，仓库里不放。它不是机密，每个安装包里都有，所以放仓库变量。
+    # CurseForge API key 同样要编进每个安装包，谁都能从 exe 里取出，到这台机器上不比 client_id 多泄露什么；
+    # 它放 secret 只为让公开的 Actions 日志遮住它。签名私钥这类真正的机密仍然不进这台机器。
+    # 放在 job 级：每一步编译看到的都是同一个值，缓存不会来回失效。
+    # PETALFALL_OFFICIAL_BUILD 让编译本身也检查 client_id 与 CurseForge key：以后的正式版流水线照抄这几行就有同样的兜底。
+    env:
+      PETALFALL_MSA_CLIENT_ID: ${{ vars.PETALFALL_MSA_CLIENT_ID }}
+      PETALFALL_CURSEFORGE_API_KEY: ${{ secrets.PETALFALL_CURSEFORGE_API_KEY }}
+      PETALFALL_OFFICIAL_BUILD: "1"
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      installer-name: ${{ steps.bundle.outputs.installer-name }}
+      bootstrap-name: ${{ steps.bootstrap.outputs.bootstrap-name }}
+      cli-version: ${{ steps.version.outputs.cli-version }}
+    steps:
+      # 只认 GUID：空白或带换行的值会让启动器把它当成没有，下面在 exe 里的查找也会因此失效
+      - name: 检查微软登录 client_id
+        run: |
+          if ! [[ "$PETALFALL_MSA_CLIENT_ID" =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::仓库变量 PETALFALL_MSA_CLIENT_ID 没有配置或不是 GUID，打出来的包登不了微软账户"
+            exit 1
+          fi
+
+      # 带空白的值启动器会当成没有，下面在 exe 里的查找也会因此失效
+      - name: 检查 CurseForge API key
+        run: |
+          if ! [[ "$PETALFALL_CURSEFORGE_API_KEY" =~ ^[[:graph:]]+$ ]]; then
+            echo "::error::仓库 secret PETALFALL_CURSEFORGE_API_KEY 没有配置或含空白，打出来的包用不了 CurseForge"
+            exit 1
+          fi
+
+      # 同一块盘上还有别的项目的 Runner，余量不够就在这里失败，不能把盘写满。
+      # 依赖升级后旧产物不会自己清掉；冷构建只要几分钟，缓存超过 4G 就直接重来。
+      - name: 检查磁盘余量
+        run: |
+          if [ -d "$CARGO_TARGET_DIR" ] && [ "$(du -s -BG "$CARGO_TARGET_DIR" | cut -f1 | tr -dc 0-9)" -gt 4 ]; then
+            rm -rf "$CARGO_TARGET_DIR"
+          fi
+          avail="$(df --output=avail -BG / | tail -1 | tr -dc 0-9)"
+          echo "磁盘余量 ${avail}G"
+          test "$avail" -ge 3
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 安装依赖
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: 前端质量门
+        working-directory: app
+        run: |
+          pnpm typecheck
+          pnpm lint:tokens
+          pnpm test --maxWorkers=4
+
+      # node --test 不认目录参数，这里由 shell 展开成文件列表。
+      - name: 工作流脚本测试
+        run: node --test .github/scripts/*.test.mjs
+
+      # 许可清单用 cargo metadata --frozen 现取，crate 必须先下好。
+      - name: 下载 Rust 依赖
+        run: cargo fetch --locked
+
+      # 安装包和前端显示的版本号都以 tauri.conf.json 为准，只改这一处两边才一致。
+      # 签名在另一台机器上做，用的 CLI 版本要和这里锁定的一致，一并传出去。
+      # 锁定的 CLI 必须支持 signer sign --app-version；正式版、测试版流水线同样要带它并注入 requireSignedVersion。
+      - name: 写入 dev 版本号
+        id: version
+        working-directory: app
+        run: |
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")-dev.$GITHUB_RUN_NUMBER"
+          node -e "
+            const fs = require('fs');
+            const path = 'src-tauri/tauri.conf.json';
+            const conf = JSON.parse(fs.readFileSync(path, 'utf8'));
+            conf.version = process.argv[1];
+            fs.writeFileSync(path, JSON.stringify(conf, null, 2));
+          " "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "cli-version=$(node -p "require('@tauri-apps/cli/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # 写进公钥插件才会注册，dev 包才能自更新。只写公钥、不开 createUpdaterArtifacts，打包就不要私钥；
+      # 仓库里的配置故意不带公钥，见启动器 commands/updater.rs 的模块说明。
+      # requireSignedVersion 让客户端拒收签名里没有版本、或签的版本和清单不同的更新。它必须和下面
+      # signer sign --app-version 同版或更晚上线：CI 要是退回不写版本的旧 CLI，所有新客户端都会拒收更新。
+      - name: 写入开发版更新公钥
+        working-directory: app
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = 'src-tauri/tauri.conf.json';
+            const conf = JSON.parse(fs.readFileSync(path, 'utf8'));
+            conf.plugins = { ...conf.plugins, updater: { pubkey: fs.readFileSync('../.github/dev-updater.pub', 'utf8').trim(), requireSignedVersion: true } };
+            fs.writeFileSync(path, JSON.stringify(conf, null, 2));
+          "
+
+      # 工作区每次都被清空，构建缓存放在 CARGO_TARGET_DIR；旧安装包不清就会越积越多。
+      - name: 构建 Windows 安装包
+        id: bundle
+        working-directory: app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bundle_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/bundle"
+          rm -rf "$bundle_dir"
+          pnpm tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
+          # 构建缓存里旧的编译产物要是没随这个变量重编，包里就没有 client_id；直接在 exe 里找一遍
+          if ! grep -qF -e "$PETALFALL_MSA_CLIENT_ID" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
+            echo "::error::Petalfall.exe 里没有内嵌微软登录 client_id"
+            exit 1
+          fi
+          if ! grep -qF -e "$PETALFALL_CURSEFORGE_API_KEY" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
+            echo "::error::Petalfall.exe 里没有内嵌 CurseForge API key"
+            exit 1
+          fi
+          installer="$bundle_dir/nsis/Petalfall_${VERSION}_x64-setup.exe"
+          test -f "$installer"
+          echo "installer=$installer" >> "$GITHUB_OUTPUT"
+          echo "installer-name=$(basename "$installer")" >> "$GITHUB_OUTPUT"
+
+      # 壳不内嵌 NSIS，拼接放在最后：Runner 跑不了 Windows 程序，pack-setup 的自检是这条路上唯一的验证。
+      # 将来要签名的话，外层签名必须插在 pack-setup 之后。publish 里的更新签名又得排在外层签名之后：
+      # 引导程序就是更新包，外层签名会改写文件，更新签名必须签最终发出去的字节。
+      - name: 构建首装引导程序
+        id: bootstrap
+        working-directory: app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          INSTALLER: ${{ steps.bundle.outputs.installer }}
+        run: |
+          # 壳的版本号指向启动器的配置，构建脚本却只盯自己这份，不碰一下 exe 的版本资源会停在上一次。
+          touch src-tauri-setup/tauri.conf.json
+          TAURI_APP_PATH=src-tauri-setup pnpm tauri build --no-bundle --runner cargo-xwin --target x86_64-pc-windows-msvc
+          cargo test --release --locked -p petalfall-setup-payload
+          release_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release"
+          bootstrap_dir="$release_dir/bundle/installer"
+          bootstrap="$bootstrap_dir/Petalfall-Installer-${VERSION}-x64.exe"
+          mkdir -p "$bootstrap_dir"
+          cargo run --release --locked -p petalfall-setup-payload --bin pack-setup -- \
+            "$release_dir/petalfall-setup.exe" "$INSTALLER" "$release_dir/Petalfall.exe" "$VERSION" "$bootstrap"
+          test -f "$bootstrap"
+          echo "bootstrap=$bootstrap" >> "$GITHUB_OUTPUT"
+          echo "bootstrap-name=$(basename "$bootstrap")" >> "$GITHUB_OUTPUT"
+          du -sh "$CARGO_TARGET_DIR"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.bundle.outputs.installer }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+      # archive: false 时一步只能传一个文件，两个包各占一步。
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.bootstrap.outputs.bootstrap }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+  # 签名与发布在 GitHub 托管的一次性机器上做，私钥只在这里出现，而且只给签名那一步。
+  # 存储桶凭据和香港推送私钥同理，各自只进用到它的那一步。它们放在 GitHub 环境 updates-dev 里，作业声明了环境才拿得到。
+  publish:
+    needs: build
+    # 上传用的是镜像预装的 aws-cli，publish-hk 推送用的是镜像里的 OpenSSH；固定镜像版本，免得 ubuntu-latest 换代时跟着悄悄变
+    runs-on: ubuntu-24.04
+    environment: updates-dev
+    # 两个包各传三个桶再逐个读回，杭州和香港对 GitHub 托管机都是跨境，按慢的情况放宽
+    timeout-minutes: 30
+    # 发布阶段不能半路取消：重建预发布是先删后建，掐在中间 GitHub 上就没有预发布，旧客户端检查更新只剩 404。
+    # 不取消也让各运行的 publish 串行，版本检查到重建之间不会有别的运行改预发布。同组只留一个排队者，
+    # 更新的运行排进来会顶掉还在排队的旧运行：旧版反正要被它覆盖，被顶掉的运行显示取消，不用补。
+    concurrency:
+      group: dev-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      INSTALLER: ${{ github.workspace }}/dist/${{ needs.build.outputs.installer-name }}
+      BOOTSTRAP: ${{ github.workspace }}/dist/${{ needs.build.outputs.bootstrap-name }}
+      HK_MANIFEST_URL: https://petalfall.org/updates/dev/latest.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.installer-name }}
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.bootstrap-name }}
+          path: dist
+
+      # 插件只装比自己新的版本。工作流改名或重建会让运行序号从 1 重数，发出去的版本号比已装的小，
+      # dev 包会一直以为自己是最新，在这里挡下来。新客户端先读香港清单，所以两处都要比；香港机上还没有清单时 404，跳过。
+      # 整体重跑（Re-run all jobs）时运行序号不变，GitHub 上已经是这个版本，同样在这里停下。
+      # 排在签名和上传之前：会在这里失败的运行不该先往三个桶各传两个包、再跨境读回一遍。检查之后隔着上传和读回才重建
+      # 预发布，这段时间别的运行改不了预发布：重建只在 publish 里做，publish 在 dev-publish 组里串行。
+      - name: 检查版本号没有倒退
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          previous=()
+          if assets="$(gh release view "$TAG" --json assets --jq '.assets[].name')" && grep -qx latest.json <<< "$assets"; then
+            gh release download "$TAG" -p latest.json -O "$RUNNER_TEMP/previous-github.json"
+            previous+=("$RUNNER_TEMP/previous-github.json")
+          else
+            echo "滚动预发布上还没有清单，跳过"
+          fi
+          status="$(curl --silent --show-error --retry 3 --max-time 60 --output "$RUNNER_TEMP/previous-hk.json" --write-out '%{http_code}' "$HK_MANIFEST_URL")"
+          case "$status" in
+            200) previous+=("$RUNNER_TEMP/previous-hk.json") ;;
+            404) echo "香港机上还没有 dev 清单，跳过" ;;
+            *)
+              echo "::error::读香港清单 $HK_MANIFEST_URL 返回 HTTP $status"
+              exit 1
+              ;;
+          esac
+          if [ "${#previous[@]}" -eq 0 ]; then
+            exit 0
+          fi
+          # 整体重跑时 publish 停在这里，publish-hk 跟着跳过；产物又已被重编的字节覆盖，单独让 publish-hk 跑，
+          # 读回 GitHub 一般也对不上，这次运行推不了香港。第一次尝试就撞上 GitHub 同号，只能是别的运行发的。
+          # 报错按这些情况分别给出走得通的补法。
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const parse = (v) => {
+              const m = /^(\d+)\.(\d+)\.(\d+)(?:-dev\.(\d+))?$/.exec(v);
+              if (m === null) throw new Error('认不出的版本号 ' + v);
+              return [Number(m[1]), Number(m[2]), Number(m[3]), m[4] === undefined ? Infinity : Number(m[4])];
+            };
+            const [now, attempt, ...files] = process.argv.slice(1);
+            const current = parse(now);
+            const published = files.map((file) => ({ name: path.basename(file), version: JSON.parse(fs.readFileSync(file, 'utf8')).version }));
+            const firstDifference = (version) => {
+              const before = parse(version);
+              return current.findIndex((x, k) => x !== before[k]);
+            };
+            const sameVersion = (name) => {
+              if (name === 'previous-github.json') {
+                if (attempt === '1') {
+                  return 'GitHub 预发布上已经是版本 ' + now + '，可这是本运行的第一次尝试，发布它的是另一个同号的运行：运行序号被重数了（工作流改名或重建），dev 包不会更新过去';
+                }
+                const hk = published.find((entry) => entry.name === 'previous-hk.json');
+                if (hk !== undefined && firstDifference(hk.version) === -1) {
+                  return '版本号 ' + now + ' 在 GitHub 预发布和香港清单上都已发布：本运行在之前的尝试里已经发布完，这次整体重跑（Re-run all jobs）多余，不用再补';
+                }
+                return 'GitHub 预发布上已经是版本 ' + now + '：本运行在之前的尝试里发布过，这次是整体重跑（Re-run all jobs）。之前那次尝试要是只有 publish-hk 失败，本该在那次尝试上用 Re-run failed jobs 只重跑 publish-hk；整体重跑时 build 已重编并覆盖了引导程序产物，publish-hk 读回 GitHub 会对不上，而这次尝试里失败的是 publish，再点 Re-run failed jobs 也只会在这里再停一次。这次运行补不了香港：往 dev 推新提交出新版本，或者手工把发布过的那次尝试的 latest.json 产物（和预发布上的 latest.json 字节相同）推到香港';
+              }
+              if (name === 'previous-hk.json') {
+                return '香港清单上已经是版本 ' + now + '，GitHub 预发布上却不是：运行序号被重数了，或者推送香港之后预发布被手工删改过，dev 包不会更新过去';
+              }
+              throw new Error('不认识的已发布清单 ' + name);
+            };
+            for (const { name, version } of published) {
+              const i = firstDifference(version);
+              if (i === -1) throw new Error(sameVersion(name));
+              if (current[i] < parse(version)[i]) throw new Error('版本号 ' + now + ' 不比 ' + name + ' 里已发布的 ' + version + ' 新，dev 包不会更新过去');
+            }
+          " "$VERSION" "$GITHUB_RUN_ATTEMPT" "${previous[@]}"
+
+      # 更新包是引导程序，不是 NSIS 包。更新插件把下载到的任何 PE 都当 NSIS 包，按默认的 passive 模式和
+      # restart_after_install（默认 true）拼成 /P /UPDATE /R /ARGS <启动器参数> 拉起，配置了 installerArgs 才会再往后接；
+      # 引导程序认得 /UPDATE，现有安装判定为升级时直接升级到登记目录，
+      # 其余情况退回交互向导；等落樱退出、失败重试都用它自己的页面。WebView2 不可用或建窗失败时才以插件默认会带的
+      # 开关和照样转义的启动器参数（/P[ /R] /UPDATE /ARGS <…>）拉起内嵌的 NSIS 包，开关顺序与 2.12.0 不同，
+      # NSIS 模板按 GetOptions 逐个找开关、不看顺序。
+      # --app-version 把版本写进可信注释，受全局签名保护；客户端开了 requireSignedVersion，拿它和清单里的
+      # version 比，伪造清单给旧包配上更高的版本号也骗不到降级。漏传时 CLI 只打警告照样签，靠下一步验签挡下。
+      - name: 给更新包签名
+        env:
+          CLI_VERSION: ${{ needs.build.outputs.cli-version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.DEV_UPDATER_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.DEV_UPDATER_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "仓库密钥 DEV_UPDATER_PRIVATE_KEY 没有配置，dev 包签不了名" >&2
+            exit 1
+          fi
+          npm exec --yes --package="@tauri-apps/cli@$CLI_VERSION" -- tauri signer sign --app-version "$VERSION" "$BOOTSTRAP"
+          test -s "$BOOTSTRAP.sig"
+
+      # 私钥和仓库里的公钥不是一对时 CLI 只打警告照样签，发出去的包所有 dev 用户都会拒收。
+      # 签名里的版本和文件名也在这里核对：版本对不上，开了 requireSignedVersion 的客户端同样会拒收。
+      - name: 按公钥验签
+        run: node .github/scripts/verify-update-signature.mjs .github/dev-updater.pub "$BOOTSTRAP" "$BOOTSTRAP.sig" "$VERSION"
+
+      # 引导程序是更新包，NSIS 包是首装被拦时的备用包，两个都进三个桶，桶、端点与公网主机见 dev-distribution.mjs。
+      # 对象键是 dev/<版本>-<运行号>-<运行次数>/<文件名>：桶上禁止覆盖写，publish 在重建预发布之前失败时，重跑它会换一个目录，
+      # 不会撞上上次传了一半的对象（重建之后的步骤在 publish-hk 里，重跑语义见那里）。带运行号是与 beta 共用一套键规则：
+      # dev 的版本号本身带运行序号，beta 的版本号在传完包才失败的运行之后会重复，见 dev-distribution.mjs；
+      # dev/ 前缀 30 天后由桶的生命周期规则删掉。必须排在签名与验签之后，传上去的就是最终发出去的字节。
+      - name: 上传到三个存储桶
+        env:
+          OSS_CI_ACCESS_KEY_ID: ${{ secrets.OSS_CI_ACCESS_KEY_ID }}
+          OSS_CI_ACCESS_KEY_SECRET: ${{ secrets.OSS_CI_ACCESS_KEY_SECRET }}
+          R2_CI_ACCESS_KEY_ID: ${{ secrets.R2_CI_ACCESS_KEY_ID }}
+          R2_CI_SECRET_ACCESS_KEY: ${{ secrets.R2_CI_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+        run: |
+          for file in "$BOOTSTRAP" "$INSTALLER"; do
+            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
+            bash .github/scripts/upload-to-mirrors.sh "$key" "$file"
+          done
+
+      # 不带凭据，按客户端会用的公网地址读回：公共读没开、自定义域名配错时上传照样成功，只有这里看得出来。
+      - name: 读回三个存储桶
+        run: |
+          for file in "$BOOTSTRAP" "$INSTALLER"; do
+            key="$(node .github/scripts/dev-distribution.mjs key "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$(basename "$file")")"
+            urls="$(node .github/scripts/dev-distribution.mjs mirror-urls "$key")"
+            while IFS=$'\t' read -r name url; do
+              bash .github/scripts/check-download.sh "$name" "$url" "$file" < /dev/null
+            done <<< "$urls"
+          done
+
+      # url 是 dev.35 及更早的客户端唯一会用的源，取 github：桶里 dev/ 下的对象 30 天后被删，dev 停更久了指向桶的 url
+      # 会让旧客户端一直 404，预发布附件跟着当前预发布走、不会过期。x-sources 列全 cn、hk、global、github 四个源，
+      # 新客户端按「文件下载源」排序，失败换下一个，不受 url 取哪个影响。x-size 是引导程序的字节数，客户端下载超过它就中止。
+      # github 源指向下面重建的同一个预发布，那时才存在，重建后再读回。文件名带版本号，清单和包总是同一次构建的。
+      # 写完从文件读回来按确切的键集合、源名、主机白名单、https 和带版本的路径校验：拼错的键插件只会忽略，
+      # 不会在任何地方报错。
+      - name: 生成并校验开发版更新清单
+        id: manifest
+        run: |
+          manifest="$RUNNER_TEMP/latest.json"
+          node .github/scripts/dev-distribution.mjs build "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG" "$GITHUB_SHA" "$manifest"
+          node .github/scripts/dev-distribution.mjs validate "$manifest" "$VERSION" "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$BOOTSTRAP" "$GITHUB_REPOSITORY" "$TAG"
+          cat "$manifest"
+          echo "manifest=$manifest" >> "$GITHUB_OUTPUT"
+
+      # 客户端拿来比对的是清单里的 version 和 signature，不是上面的 .sig 文件。从写好的清单里取出这一对
+      # 按同一脚本再验一遍，清单拼错字段、读错文件时在发布前挡下。客户端从哪个源下载，验的都是这一对。
+      - name: 按清单验签
+        env:
+          MANIFEST: ${{ steps.manifest.outputs.manifest }}
+        run: |
+          signature="$RUNNER_TEMP/manifest.sig"
+          manifest_version="$(node -e "
+            const fs = require('fs');
+            const [manifestPath, signaturePath] = process.argv.slice(1);
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            const { signature } = manifest.platforms['windows-x86_64'];
+            if (typeof manifest.version !== 'string' || typeof signature !== 'string') {
+              throw new Error('清单缺 version 或 windows-x86_64 的 signature');
+            }
+            fs.writeFileSync(signaturePath, signature);
+            process.stdout.write(manifest.version);
+          " "$MANIFEST" "$signature")"
+          node .github/scripts/verify-update-signature.mjs .github/dev-updater.pub "$BOOTSTRAP" "$signature" "$manifest_version"
+
+      # publish-hk 推到香港的必须是下面发到 GitHub 的同一份字节，经产物交过去。要排在重建预发布之前：
+      # 这一步失败时预发布还没动，publish 照常能重跑；重建是 publish 的最后一步，之后不再有会失败的步骤。
+      # archive: false 时产物以文件名命名，publish-hk 按 latest.json 取。
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ steps.manifest.outputs.manifest }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 14
+
+      # 资产里的 latest.json 就是上面校验过、publish-hk 推到香港的同一个文件。
+      - name: 更新滚动预发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          MANIFEST: ${{ steps.manifest.outputs.manifest }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --cleanup-tag --yes
+          fi
+          gh release create "$TAG" \
+            "$BOOTSTRAP#首次安装用这个，也是自动更新包" \
+            "$INSTALLER#原生 NSIS 包，引导程序内嵌的就是它，首装包被拦截时可用" \
+            "$MANIFEST#开发版自动更新清单" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "Dev 构建 $VERSION" \
+            --notes "dev 分支 ${GITHUB_SHA::8} 的自动构建，用于内部试用。首次安装用 Petalfall-Installer，被安全软件拦下时换原生 NSIS 包。交叉编译，没有代码签名证书；装好后启动器会自动检查开发版更新，下载的更新包就是 Petalfall-Installer，可能来自国内外几个下载源，都有签名校验。"
+
+  # 预发布重建之后的步骤单独成一个作业。这之后失败时 publish 不能重跑：GitHub 上已是这个版本，版本检查会挡下；
+  # 放过它，重新生成的清单换了对象目录和 pub_date，put-manifest 也不收同版本、不同字节的清单。香港却还停在旧版，
+  # 新客户端先查香港、拿到 2xx 就不再问 GitHub，一直看不到这次更新。所以这里失败时用 Re-run failed jobs
+  # 只重跑这个作业：推的还是 publish 交来的同一份清单，香港机落后时照常替换，已经写进去时视为无变化。
+  # 不能点 Re-run all jobs：build 会重编并覆盖引导程序产物，这里读回 GitHub 时对不上，publish 又会在版本检查处停下，
+  # 这次运行就补不了香港了。
+  publish-hk:
+    needs: [build, publish]
+    # 与 publish 同一个镜像
+    runs-on: ubuntu-24.04
+    environment: updates-dev
+    # 两次读回 GitHub（check-download.sh 每次最多 600 秒）、推送（ssh 最多 3 次）和最多 5 次回读，各步的上限加起来
+    # 超过 15 分钟；按最坏情况放到 30 分钟，免得每一步都还在自己的上限内、作业却先被时限掐掉。
+    timeout-minutes: 30
+    # 不和 publish 共用一个组：同组只留一个排队者，后排进来的会顶掉先排着的，共用时这里排进去会顶掉别的运行
+    # 排着的 publish，那一版就没人发了。不取消正在跑的：推送、回读做到一半被掐，香港会停在旧版。
+    # 和别的运行的 publish 并行是安全的：那边先重建了预发布，这里读回 GitHub 不符就失败、拒推，不会把旧清单推到香港；
+    # 读回之后那边才重建的，那个运行的 publish-hk 在这个组里排在后面，接着推上新版，两个运行不会同时推。
+    # 排着的这个作业被更新运行的同名作业顶掉时，香港由那个运行推上更新的版本，不用补。
+    concurrency:
+      group: dev-publish-hk
+      cancel-in-progress: false
+    env:
+      BOOTSTRAP: ${{ github.workspace }}/dist/${{ needs.build.outputs.bootstrap-name }}
+      MANIFEST: ${{ github.workspace }}/dist/latest.json
+      HK_MANIFEST_URL: https://petalfall.org/updates/dev/latest.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: .github
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.build.outputs.bootstrap-name }}
+          path: dist
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: latest.json
+          path: dist
+
+      # github 源只在预发布重建后才存在。资产里的 latest.json 也按旧客户端用的地址读回：它和香港那份必须字节相同。
+      # 重跑时更新的运行要是已经重建了预发布，这里对不上而失败，不会把旧清单推到香港。
+      - name: 读回 GitHub 源
+        run: |
+          url="$(node -e "
+            const fs = require('fs');
+            const entry = JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).platforms['windows-x86_64'];
+            process.stdout.write(entry['x-sources'].find((source) => source.name === 'github').url);
+          " "$MANIFEST")"
+          bash .github/scripts/check-download.sh github "$url" "$BOOTSTRAP"
+          bash .github/scripts/check-download.sh "github 清单" "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/latest.json" "$MANIFEST"
+
+      # 新客户端先查这份清单。私钥只进这一步，脚本把它写到 $RUNNER_TEMP、权限 600、用完即删；
+      # 香港机上的强制命令把这把钥匙绑在 dev 通道，只能替换 dev 清单。主机公钥钉在 .github/petalfall-hk.known_hosts。
+      - name: 推送香港清单
+        env:
+          HK_MANIFEST_SSH_KEY: ${{ secrets.HK_MANIFEST_SSH_KEY }}
+        run: bash .github/scripts/push-hk-manifest.sh "$MANIFEST"
+
+      # 脚本回显的 sha256 只说明文件写对了；客户端读的是经公网 HTTPS 给出的那份，Content-Type 也得是 JSON。
+      # 最多试 5 次，都不符就让作业失败：这时新客户端读到的还是旧清单，收不到这次更新，重跑这个作业补上。
+      - name: 经公网回读香港清单
+        run: |
+          want="$(sha256sum "$MANIFEST" | cut -d' ' -f1)"
+          fetched="$RUNNER_TEMP/hk-readback.json"
+          json_type='^application/json(;.*)?$'
+          for attempt in 1 2 3 4 5; do
+            if content_type="$(curl --fail --silent --show-error --max-time 60 --output "$fetched" --write-out '%{content_type}' "$HK_MANIFEST_URL")"; then
+              got="$(sha256sum "$fetched" | cut -d' ' -f1)"
+              if [ "$got" = "$want" ] && [[ "$content_type" =~ $json_type ]]; then
+                echo "香港清单已生效：sha256 $got，Content-Type $content_type"
+                exit 0
+              fi
+              echo "第 $attempt 次回读：sha256 $got，Content-Type $content_type，本地清单是 $want"
+            else
+              echo "第 $attempt 次回读失败"
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              sleep 5
+            fi
+          done
+          echo "::error::$HK_MANIFEST_URL 回读 5 次都和本地清单不符"
+          exit 1

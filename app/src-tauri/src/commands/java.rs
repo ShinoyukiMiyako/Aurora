@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use aurora_core::{CoreError, DetectSource, JavaInstallation, JavaVersion, RemovedJavaPath};
+use petalfall_core::{CoreError, DetectSource, JavaInstallation, JavaVersion, RemovedJavaPath};
 use serde::Serialize;
 use serde_json::json;
 use tauri::{AppHandle, State};
@@ -131,8 +131,8 @@ fn java_installation_dto(java: &JavaInstallation) -> JavaInstallationDto {
 pub async fn detect_java(
     facade: State<'_, Facade>,
 ) -> Result<Vec<JavaInstallationDto>, CommandError> {
-    let aurora = facade.snapshot().await;
-    let installations = aurora.detect_java().await?;
+    let petalfall = facade.snapshot().await;
+    let installations = petalfall.detect_java().await?;
     Ok(installations.iter().map(java_installation_dto).collect())
 }
 
@@ -149,9 +149,9 @@ pub async fn install_java(
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
     let outcome = async {
         let task = tasks.register(&task_id)?;
-        let aurora = facade.snapshot().await.with_cancel(task.token().clone());
+        let petalfall = facade.snapshot().await.with_cancel(task.token().clone());
         task.run(async {
-            Ok(aurora
+            Ok(petalfall
                 .install_java(required_major, Some(events.sink()))
                 .await?)
         })
@@ -183,8 +183,10 @@ pub(crate) async fn add_java_path_with(
     facade: &Facade,
     path: &str,
 ) -> Result<JavaInstallationDto, CommandError> {
-    let aurora = facade.snapshot().await;
-    let java = aurora.inspect_manual_java(Path::new(path.trim())).await?;
+    let petalfall = facade.snapshot().await;
+    let java = petalfall
+        .inspect_manual_java(Path::new(path.trim()))
+        .await?;
     remember_java_path(facade, &java).await?;
     Ok(java_installation_dto(&java))
 }
@@ -192,7 +194,7 @@ pub(crate) async fn add_java_path_with(
 /// 已在列表里时不落盘。
 async fn remember_java_path(facade: &Facade, java: &JavaInstallation) -> Result<bool, CoreError> {
     facade
-        .update_if_changed(|aurora| aurora.add_extra_java_path(java.path.clone()))
+        .update_if_changed(|petalfall| petalfall.add_extra_java_path(java.path.clone()))
         .await
 }
 
@@ -212,9 +214,9 @@ pub(crate) async fn remove_java_path_with(
 ) -> Result<RemoveJavaPathDto, CommandError> {
     let exe = Path::new(path.trim());
     let listed = {
-        let aurora = facade.read().await;
+        let petalfall = facade.read().await;
         let wanted = exe.to_string_lossy().to_lowercase();
-        aurora
+        petalfall
             .config()
             .extra_java_paths
             .iter()
@@ -230,7 +232,7 @@ pub(crate) async fn remove_java_path_with(
         removed,
         default_reset,
     } = facade
-        .update(|aurora| Ok::<_, CommandError>(aurora.remove_extra_java_path(exe)))
+        .update(|petalfall| Ok::<_, CommandError>(petalfall.remove_extra_java_path(exe)))
         .await?;
     Ok(RemoveJavaPathDto {
         removed,
@@ -246,6 +248,43 @@ pub async fn gpu_adapters() -> Result<GpuAdaptersDto, CommandError> {
         .map_err(CoreError::from)?
         .map_err(|err| gpu_query_failed(&err))?;
     Ok(gpu_adapters_dto(summary))
+}
+
+/// 崩溃页「改用独立显卡」：把这次崩溃用的 java 立即设为 Windows 图形设置里的高性能，再打开独显偏好并落盘，
+/// 之后每次启动按选中的 java 补写。
+///
+/// 先写系统偏好再改开关：写不进去时开关原样关着，界面不会显示成已改用。开关落盘失败同样报错，
+/// 这时那个 java 已是高性能，正是玩家要的，不回退。
+#[tauri::command]
+pub async fn switch_to_dedicated_gpu(
+    java_path: String,
+    facade: State<'_, Facade>,
+) -> Result<(), CommandError> {
+    switch_to_dedicated_gpu_with(&facade, &java_path).await
+}
+
+pub(crate) async fn switch_to_dedicated_gpu_with(
+    facade: &Facade,
+    java_path: &str,
+) -> Result<(), CommandError> {
+    let exe = Path::new(java_path.trim());
+    if exe.as_os_str().is_empty() {
+        return Err(CommandError::new(
+            code::INVALID_ARGUMENT,
+            "改用独立显卡要给出 java 可执行文件的路径",
+        ));
+    }
+    facade
+        .snapshot()
+        .await
+        .prefer_high_performance_gpu(exe)
+        .await?;
+    facade
+        .update(|petalfall| {
+            petalfall.set_prefer_dedicated_gpu(true);
+            Ok::<_, CommandError>(())
+        })
+        .await
 }
 
 #[cfg(test)]
@@ -267,9 +306,10 @@ mod tests {
         }
     }
 
-    fn facade_with(config: aurora_core::AuroraConfig, dir: &Path) -> Facade {
+    fn facade_with(config: petalfall_core::PetalfallConfig, dir: &Path) -> Facade {
         Facade::new(
-            aurora_core::Aurora::open(config, dir.to_path_buf(), dir.join("config.json")).unwrap(),
+            petalfall_core::Petalfall::open(config, dir.to_path_buf(), dir.join("config.json"))
+                .unwrap(),
         )
     }
 
@@ -277,7 +317,7 @@ mod tests {
     #[tokio::test]
     async fn add_java_path_rejects_a_text_file() {
         let dir = tempfile::tempdir().unwrap();
-        let facade = facade_with(aurora_core::AuroraConfig::default(), dir.path());
+        let facade = facade_with(petalfall_core::PetalfallConfig::default(), dir.path());
         let notes = dir.path().join("notes.txt");
         std::fs::write(&notes, b"not java").unwrap();
 
@@ -311,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn remembering_the_same_java_twice_saves_once() {
         let dir = tempfile::tempdir().unwrap();
-        let facade = facade_with(aurora_core::AuroraConfig::default(), dir.path());
+        let facade = facade_with(petalfall_core::PetalfallConfig::default(), dir.path());
         let java = |path: &str| JavaInstallation {
             path: path.into(),
             version: JavaVersion::parse("21.0.3").unwrap(),
@@ -326,7 +366,7 @@ mod tests {
                 .unwrap()
         );
         let config_file = dir.path().join("config.json");
-        let saved = aurora_core::ConfigStore::at(&config_file)
+        let saved = petalfall_core::ConfigStore::at(&config_file)
             .load()
             .await
             .unwrap();
@@ -350,10 +390,10 @@ mod tests {
     async fn removing_the_default_java_resets_it_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let exe = std::path::PathBuf::from(r"D:\Java\jdk-21\bin\java.exe");
-        let config = aurora_core::AuroraConfig {
+        let config = petalfall_core::PetalfallConfig {
             extra_java_paths: vec![exe.clone()],
             default_java: Some(exe.clone()),
-            ..aurora_core::AuroraConfig::default()
+            ..petalfall_core::PetalfallConfig::default()
         };
         let facade = facade_with(config, dir.path());
 
@@ -368,7 +408,7 @@ mod tests {
         assert_eq!(dto.default_java, crate::commands::config::DEFAULT_JAVA_AUTO);
         assert!(dto.extra_java_paths.is_empty());
         let config_file = dir.path().join("config.json");
-        let saved = aurora_core::ConfigStore::at(&config_file)
+        let saved = petalfall_core::ConfigStore::at(&config_file)
             .load()
             .await
             .unwrap();
@@ -426,5 +466,21 @@ mod tests {
                 "switchable": true
             })
         );
+    }
+
+    /// 没给 java 路径：报 invalid_argument，不碰系统显卡偏好，独显偏好不开、不落盘。
+    /// 给了路径的分支要写真实注册表，测试门面换不了写入器，在 petalfall-core 里用替身测。
+    #[tokio::test]
+    async fn switch_to_dedicated_gpu_rejects_an_empty_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_with(petalfall_core::PetalfallConfig::default(), dir.path());
+
+        let err = switch_to_dedicated_gpu_with(&facade, "  ")
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code, code::INVALID_ARGUMENT);
+        assert!(!facade.read().await.config().prefer_dedicated_gpu);
+        assert!(!dir.path().join("config.json").exists(), "报错时不该落盘");
     }
 }

@@ -7,7 +7,7 @@
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import { createContext, createElement, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { inTauri } from "../ipc/bridge";
-import { restoreWindowWithoutFocus } from "../ipc/window";
+import { restoreWindowWithoutFocus, revealMainWindow } from "../ipc/window";
 import { onWindowDrop, type DropContentDto, type WindowDropEventDto } from "../ipc/window-drop";
 
 /** 关闭请求：挡住默认关闭后由外壳裁决，确认后再销毁窗口。 */
@@ -53,7 +53,8 @@ export function tauriWindowPort(): WindowPort {
   const win = getCurrentWindow();
   return {
     native: true,
-    show: () => win.show(),
+    // 后端记着上次是否最大化：要最大化的直接最大化地显示，不先以常态闪一下
+    show: () => revealMainWindow(),
     minimize: () => win.minimize(),
     // Tauri 的 unminimize 在 Windows 上会激活窗口，不激活的恢复只能由后端直接调系统接口
     restoreWithoutFocus: () => restoreWindowWithoutFocus(),
@@ -155,6 +156,9 @@ export function useWindowPort(): WindowPort {
  *
  * 「已显示」在那一帧真正触发时才记下：开发构建的 StrictMode 会把布局 effect 装上、拆掉再装一次，
  * 拆掉时那一帧被取消，若提前记下，第二次安装会以为已经显示过而什么都不做，窗口只能等后端兜底。
+ *
+ * 页面 hidden 时这一帧不来，这里不另开出路：宿主只在最小化时把 WebView2 设为不可见，能最小化的窗口已经显示过，
+ * 晚到的 show() 是空操作；启动期 WebView2 在不可见的窗口里照常出帧，这一帧才等得到，宿主不能在显示前把它设为不可见。
  */
 export function useRevealWindow(ready: boolean): void {
   const port = useWindowPort();

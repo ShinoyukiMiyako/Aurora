@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { APP_NAME } from "../lib/app-info";
-import { TASK_INTERRUPTED_CODE, taskFailureReason } from "./flows";
+import { MOVE_INTERRUPTED_CODE, TASK_INTERRUPTED_CODE, taskFailureReason } from "./flows";
 
 /** 插值位的占位符。 */
 const HOLE = "◇";
@@ -310,6 +310,7 @@ const COPY_SOURCES = import.meta.glob<string>(["../**/*.{ts,tsx}", "!../**/*.tes
 /** 本来就该这么写的例外；text 是源码里的原样（转义保留）。每条都必须还能在原文件里找到：改掉了就从这里删掉，免得豁免越积越多。 */
 const EXCEPTIONS: readonly { file: string; text: string; why: string }[] = [
   { file: "./shell.ts", text: "还原", why: "标题栏窗口按钮沿用 Windows 自己的叫法，与存档的「恢复」不是一回事" },
+  { file: "./flows.ts", text: "你认真的吗...?", why: "彩蛋台词，半角的省略号和问号就是这句话的语气" },
   { file: "./flows.ts", text: '名称里不能有 \\\\ / : * ? " < > | 这些字符', why: "列出的就是 Windows 文件名里不能用的字符本身" },
   { file: "./flows.ts", text: "请家庭组管理员在 Microsoft 家庭中把这个账户加入家庭组，再回来重试。", why: "要家庭组管理员在微软那边操作" },
   { file: "./flows.ts", text: `会直接结束「${HOLE}」的游戏进程，没保存的进度可能丢失。正常退出请在游戏菜单里保存并退出。`, why: "要用户在游戏里操作" },
@@ -319,6 +320,11 @@ const EXCEPTIONS: readonly { file: string; text: string; why: string }[] = [
   { file: "../ui/ConfirmDialog.tsx", text: "确定", why: "列的就是确认键不许用的泛称" },
   { file: "../pages/settings/commands.ts", text: "打开启动器日志目录", why: "设置页没接上真实命令时抛给开发者的动作名" },
   { file: "../state/errors.ts", text: "文件 IO 失败: ", why: "比对后端 Io 错误正文的前缀，不是界面文案，半角冒号是后端的原样" },
+  {
+    file: "../setup/copy.ts",
+    text: `从测试版换回预览版时，先关掉这个窗口，在 Windows 设置的「应用」里卸载 ${HOLE}，卸载时不要勾选「删除应用程序数据」；再重新运行这个安装包并沿用默认的安装位置，设置、账户和游戏文件都会保留。`,
+    why: "教用户在 Windows 设置「应用」页里操作，系统自己的叫法就是卸载",
+  },
 ];
 
 function isExempt(entry: string): boolean {
@@ -463,8 +469,8 @@ describe("任务失败原因与后端码表对齐", () => {
     );
     expect(mapped).toEqual({
       hash_mismatch: "下载到的文件和官方记录不一致",
-      curseforge_key_rejected: "CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试",
-      curseforge_key_missing: "有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY",
+      curseforge_key_rejected: "CurseForge 拒绝了下载密钥。设置环境变量 PETALFALL_CURSEFORGE_API_KEY 换一个可用的密钥后重试",
+      curseforge_key_missing: "有文件只能从 CurseForge 下载，需要先设置环境变量 PETALFALL_CURSEFORGE_API_KEY",
       distribution_blocked: "有 0 个文件需要到 CurseForge 网页手动下载",
       modpack_unsupported_compression: "整合包用了不支持的压缩方式，用整合包作者发布的原始文件再试",
       network_failed: "网络连接失败",
@@ -473,6 +479,7 @@ describe("任务失败原因与后端码表对齐", () => {
       world_backup_corrupt: "备份文件已损坏，无法恢复",
       world_in_use: "这个存档正被游戏打开",
       install_unsafe_path: "版本文件里有指向游戏目录之外的路径，已拒绝写入",
+      instance_move_verify_failed: "复制出的文件和原件对不上，这次移动已放弃，原件没动",
       loader_library_missing: "加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要重新安装加载器",
     });
   });
@@ -480,6 +487,18 @@ describe("任务失败原因与后端码表对齐", () => {
   it("关闭时中断是前端自己记的码，不与后端的码撞名", () => {
     expect(codes).not.toContain(TASK_INTERRUPTED_CODE);
     expect(taskFailureReason({ code: TASK_INTERRUPTED_CODE, message: RAW })).toBe(`${APP_NAME}关闭时中断`);
+  });
+
+  it("关闭时中断的移动同样是前端自己记的码，不与后端的码撞名，也不与能重试的中断码相同", () => {
+    expect(codes).not.toContain(MOVE_INTERRUPTED_CODE);
+    expect(MOVE_INTERRUPTED_CODE).not.toBe(TASK_INTERRUPTED_CODE);
+    expect(taskFailureReason({ code: MOVE_INTERRUPTED_CODE, message: RAW })).toBe(`${APP_NAME}关闭时中断，重新打开时已自动收尾：实例要么已在目标游戏目录，要么留在原处`);
+  });
+
+  it("移动被拦下：带着拦截项时按种类写，没带（较早的日志）时照后端原文", () => {
+    expect(codes).toContain("instance_move_blocked");
+    expect(taskFailureReason({ code: "instance_move_blocked", message: RAW, move_blocker: { kind: "name_taken" } })).toBe("目标游戏目录里已有同名的版本，先给这个实例改个名字再移");
+    expect(taskFailureReason({ code: "instance_move_blocked", message: RAW })).toBe(RAW);
   });
 
   it("码表解析本身：只认字符串常量", () => {

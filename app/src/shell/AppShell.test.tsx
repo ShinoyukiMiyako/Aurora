@@ -4,6 +4,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { INSTANCE_TAB_LABEL, PAGE_LABEL } from "../copy/flows";
+import { APP_NAME_EN } from "../lib/app-info";
 import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
 import type { FlowProps } from "../state/flows";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
@@ -252,6 +253,55 @@ describe("外壳布局", () => {
     const slot = document.querySelector<HTMLElement>('[data-tauri-drag-region=""]');
     expect(slot).not.toBeNull();
     expect(slot?.style.opacity).toBe("0");
+  });
+
+  describe("左上角品牌", () => {
+    const brandRow = () => {
+      const row = document.querySelector<HTMLElement>('[data-tauri-drag-region=""] > [data-tauri-drag-region="deep"]');
+      if (row === null) throw new Error("侧栏槽位里没有品牌行");
+      return row;
+    };
+
+    it("侧栏槽位顶上是一行徽记加字标，整条是拖动区，胶囊排在它后面", async () => {
+      await mount();
+      const row = brandRow();
+      expect(row.textContent).toBe(APP_NAME_EN);
+      expect(row.querySelectorAll("canvas")).toHaveLength(1);
+      expect(row.nextElementSibling?.tagName).toBe("NAV");
+    });
+
+    it("品牌行不是 header：标题栏仍是主界面唯一的页眉", async () => {
+      await mount();
+      expect(brandRow().closest("header")).toBeNull();
+      expect(document.querySelectorAll("header")).toHaveLength(1);
+    });
+
+    it("窗口失焦时打上失焦标记，回到焦点摘掉", async () => {
+      const focusHandlers: ((focused: boolean) => void)[] = [];
+      port = {
+        ...port,
+        isFocused: async () => true,
+        onFocusChanged: async (handler) => {
+          focusHandlers.push(handler);
+          return () => undefined;
+        },
+      };
+      await mount();
+      const row = brandRow();
+      expect(row.hasAttribute("data-blurred")).toBe(false);
+      act(() => focusHandlers.forEach((handler) => handler(false)));
+      expect(row.getAttribute("data-blurred")).toBe("true");
+      act(() => focusHandlers.forEach((handler) => handler(true)));
+      expect(row.hasAttribute("data-blurred")).toBe(false);
+    });
+
+    it("向导里没有这一行：向导顶条自己带徽记，不重复", async () => {
+      bootOverrides(ipc, { instances: [], firstRun: true });
+      ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+      await mount({ onboarding: OnboardingStub });
+      expect(document.querySelector('[data-tauri-drag-region=""]')).toBeNull();
+      expect(document.querySelectorAll('[data-tauri-drag-region="deep"]')).toHaveLength(1);
+    });
   });
 
   it("文件拖过窗口时整窗显示放置提示", async () => {

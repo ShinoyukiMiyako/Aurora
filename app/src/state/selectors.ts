@@ -23,6 +23,21 @@ export function activeTasks(state: LauncherState): Task[] {
   return state.tasks.filter(isActiveTask);
 }
 
+/** 首次启动向导挂着：外壳只渲染向导，主界面（含设置页）没挂上。 */
+export function onboardingActive(state: LauncherState): boolean {
+  return state.firstRun === true;
+}
+
+/** 配置已读到，且这个构建没有任何可用的微软登录 client_id。配置还没读到时按可用算，真去登录时后端照样会拦下。 */
+export function microsoftLoginUnavailable(state: LauncherState): boolean {
+  return state.settings !== null && !state.settings.microsoftLoginAvailable;
+}
+
+/** 游戏在跑或有任务在下时不能换游戏目录。 */
+export function gameDirectoryBusy(state: LauncherState): boolean {
+  return busyInstanceId(state) !== null || activeTasks(state).length > 0;
+}
+
 /** 活动任务里下载类的个数：本地打包与备份不能说成下载。 */
 export function activeDownloads(state: LauncherState): number {
   return activeTasks(state).filter((t) => DOWNLOADS_WHEN_RUNNING[t.kind]).length;

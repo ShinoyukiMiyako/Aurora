@@ -1,0 +1,92 @@
+{
+  "palette": {
+    "w": "#4A2539",
+    "d": "#6A3650",
+    "m": "#874A68",
+    "l": "#A3647F",
+    "h": "#BD8099",
+    "O": "#A9578A",
+    "S": "#DE80B3",
+    "M": "#EFA5CB",
+    "L": "#F8C8DF",
+    "H": "#FFEAF4",
+    "p0": "#F4CDE0",
+    "p1": "#EBA8CA",
+    "p2": "#E17FB0",
+    "p3": "#D85597",
+    "p4": "#CF3080"
+  },
+  "sprites": {
+    "flower13": [
+      "...OOO.OOO...",
+      "...OHLOLMO...",
+      "OO.OLHLMLO.OO",
+      "OHO.OLMLO.OLO",
+      ".OLOSLMMSOMO.",
+      "OLMLMSMSMLMSO",
+      "OLLMMOSOMMSMO",
+      ".OMSMLSMMSMO.",
+      "..OLMMSMLMO..",
+      "..OHLO.OMSO..",
+      "..OOO...OOO..",
+      "..O.O...O.O.."
+    ],
+    "flower11": [
+      "...OO.OO...",
+      "...OHOLO...",
+      ".O..OLO..O.",
+      "OHO.OMO.OLO",
+      ".OLOSMSOMO.",
+      "OLMMOSOMMSO",
+      ".OMSMSMSMO.",
+      ".OLHO.OMSO.",
+      ".OMO...OSO.",
+      "..O.....O.."
+    ],
+    "flower9": [
+      "...O.O...",
+      "..OLOHO..",
+      "OO.OMO.OO",
+      "OLOMSMOLO",
+      ".OMSOSMO.",
+      "..OMSMO..",
+      ".OLMOMLO.",
+      ".OOO.OOO."
+    ],
+    "flower9down": [
+      ".OOO.OOO.",
+      ".OHLOLMO.",
+      "..OLSMO..",
+      ".OLSOSMO.",
+      "OLOMSMOSO",
+      "OO.OMO.OO",
+      "..OMOSO..",
+      "...O.O..."
+    ],
+    "half": [
+      ".O.O.O.",
+      "OLOHOMO",
+      "OLHLMSO",
+      "OLLMMSO",
+      ".OMMSO.",
+      "..OSO..",
+      "..dwd..",
+      "...d..."
+    ],
+    "bud": [
+      ".OO.",
+      "OLHO",
+      "OMLO",
+      "OSMO",
+      ".dd.",
+      "..d."
+    ],
+    "budTilt": [
+      "...OO",
+      "..OHO",
+      ".OMSO",
+      "dOOO.",
+      "d...."
+    ]
+  }
+}

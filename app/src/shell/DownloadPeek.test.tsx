@@ -22,6 +22,7 @@ function task(id: string, patch: Partial<Task> = {}): Task {
     transferredBytes: 0,
     batchTransferred: 0,
     batchFiles: 0,
+    phase: null,
     speedBps: 0,
     startedAt: null,
     attempt: 1,

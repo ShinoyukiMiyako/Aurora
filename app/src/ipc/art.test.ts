@@ -2,12 +2,28 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultSkin } from "../flows/login/default-skin";
-import { artStatus, BLOCK_TEXTURES, isArtPath, onArtChanged, SKIN_TEXTURES, skinInfo, THUMB_HOSTS, thumbRegister, type ArtStatusDto } from "./art";
+import { catalogFromDto } from "../mc/catalog";
+import { COVER_TEXTURES } from "../mc/whitelist";
+import {
+  artBlocks,
+  artDownload,
+  artStatus,
+  BLOCK_TEXTURES,
+  isArtPath,
+  onArtChanged,
+  onArtDownload,
+  SKIN_TEXTURES,
+  skinInfo,
+  THUMB_HOSTS,
+  thumbRegister,
+  type ArtDownloadProgressDto,
+  type ArtStatusDto,
+} from "./art";
 import { createOfflineAccount } from "./accounts";
 import { IpcError } from "./errors";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
-import { defaultSkin as mockDefaultSkin, setMockArtStatus } from "./mock/handlers/art";
+import { defaultSkin as mockDefaultSkin, MOCK_DOWNLOADED_VERSION, setMockArtStatus } from "./mock/handlers/art";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -19,6 +35,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 async function rejection(promise: Promise<unknown>): Promise<IpcError> {
@@ -135,6 +152,98 @@ describe("材质 mock", () => {
     expect(subdomain.detail).toEqual({ host: "x.cdn.modrinth.com" });
     expect((await rejection(thumbRegister("ftp://cdn.modrinth.com/a.png"))).code).toBe("invalid_argument");
     expect((await rejection(thumbRegister("not a url"))).code).toBe("invalid_argument");
+  });
+});
+
+describe("方块目录 mock", () => {
+  it("没有材质源时为 null", async () => {
+    expect(await artBlocks()).toBeNull();
+  });
+
+  it("有材质源时给一份合成目录：版本与材质源一致，按 id 排序，前端校验能通过", async () => {
+    setMockArtStatus({ source: { version_id: "1.21.1" }, panorama: false });
+    const dto = await artBlocks();
+    if (dto === null) throw new Error("有材质源时目录不应为 null");
+    expect(dto.version_id).toBe("1.21.1");
+    const ids = dto.blocks.map((b) => b.id);
+    expect(ids).toEqual([...ids].sort());
+    const catalog = catalogFromDto(dto);
+    expect(catalog.blocks).toHaveLength(28);
+    // 16 种预设全在，草方块的顶面与染色与预设表一致
+    for (const preset of COVER_TEXTURES) {
+      expect(catalog.byId.get(preset.id), preset.id).toMatchObject({ top: preset.top, side: preset.side, topTint: preset.topTint, hue: preset.hue });
+    }
+    expect(catalog.byId.get("oak_log")).toMatchObject({ top: "block/oak_log_top", side: "block/oak_log", front: null, topTint: null, sideTint: null, nameZh: "橡木原木" });
+    expect(catalog.byId.get("oak_leaves")).toMatchObject({ topTint: [72, 181, 24], sideTint: [72, 181, 24] });
+    expect(catalog.byId.get("birch_leaves")).toMatchObject({ topTint: [128, 167, 85], sideTint: [128, 167, 85] });
+    expect(catalog.byId.get("furnace")).toMatchObject({ top: "block/furnace_top", side: "block/furnace_side", front: "block/furnace_front", nameEn: "Furnace" });
+    expect(catalog.blocks.filter((b) => b.front !== null).map((b) => b.id)).toEqual(["furnace"]);
+    expect(catalog.blocks.filter((b) => b.sideTint !== null).map((b) => b.id)).toEqual(["birch_leaves", "oak_leaves"]);
+  });
+
+  it("每次返回独立的副本：改了返回值不影响下一次", async () => {
+    setMockArtStatus({ source: { version_id: "1.21.1" }, panorama: false });
+    const first = await artBlocks();
+    first?.blocks.splice(0);
+    expect((await artBlocks())?.blocks).toHaveLength(28);
+  });
+});
+
+describe("下载原版材质 mock", () => {
+  it("依次推送清单、客户端、中文名、抽取进度，下完换上材质源并推 art-changed，返回新状态", async () => {
+    vi.useFakeTimers();
+    const progress: ArtDownloadProgressDto[] = [];
+    const changed: ArtStatusDto[] = [];
+    const offProgress = await onArtDownload((p) => progress.push(p));
+    const offChanged = await onArtChanged((s) => changed.push(s));
+    const pending = artDownload();
+    await vi.advanceTimersByTimeAsync(120);
+    expect(progress).toEqual([{ stage: "manifest", downloaded: 0, total: null }]);
+    expect(changed).toEqual([]);
+    await vi.runAllTimersAsync();
+    const result = await pending;
+    expect(progress.map((p) => p.stage)).toEqual(["manifest", "client", "client", "client", "client", "names", "names", "extract"]);
+    const client = progress.filter((p) => p.stage === "client");
+    expect(client.map((p) => p.downloaded)).toEqual([6837504, 13675008, 20512512, 27350016]);
+    expect(client.every((p) => p.total === 27350016)).toBe(true);
+    expect(progress.at(-2)).toEqual({ stage: "names", downloaded: 684032, total: 684032 });
+    const expected: ArtStatusDto = { source: { version_id: MOCK_DOWNLOADED_VERSION }, panorama: false };
+    expect(result).toEqual(expected);
+    expect(changed).toEqual([expected]);
+    expect(await artStatus()).toEqual(expected);
+    expect((await artBlocks())?.version_id).toBe(MOCK_DOWNLOADED_VERSION);
+    offProgress();
+    offChanged();
+  });
+
+  it("全景可用性原样保留", async () => {
+    vi.useFakeTimers();
+    setMockArtStatus({ source: null, panorama: true });
+    const pending = artDownload();
+    await vi.runAllTimersAsync();
+    expect(await pending).toEqual({ source: { version_id: MOCK_DOWNLOADED_VERSION }, panorama: true });
+  });
+
+  it("上一次没下完再调报 task_conflict；下完之后可以再下", async () => {
+    vi.useFakeTimers();
+    const first = artDownload();
+    const conflict = await rejection(artDownload());
+    expect(conflict.code).toBe("task_conflict");
+    await vi.runAllTimersAsync();
+    await first;
+    const again = artDownload();
+    await vi.runAllTimersAsync();
+    expect((await again).source).toEqual({ version_id: MOCK_DOWNLOADED_VERSION });
+  });
+
+  it("重置后回到没有材质源", async () => {
+    vi.useFakeTimers();
+    const pending = artDownload();
+    await vi.runAllTimersAsync();
+    await pending;
+    resetMocks();
+    expect(await artStatus()).toEqual({ source: null, panorama: false });
+    expect(await artBlocks()).toBeNull();
   });
 });
 

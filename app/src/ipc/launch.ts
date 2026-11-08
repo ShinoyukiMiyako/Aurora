@@ -1,17 +1,18 @@
 // 启动与结束游戏、启动阶段与退出事件、启动日志的实时推送，以及游玩统计。
 // 内存、Java、JVM 参数与分辨率由后端按实例设置与全局设置解析，启动只给实例、账户与取消句柄。
 
+import type { AccountType } from "./accounts";
 import { invoke, listen, type UnlistenFn } from "./bridge";
 import { IpcError } from "./errors";
 
-/** 启动阶段推进与阶段 3 的下载进度。 */
-export const LAUNCH_PHASE_EVENT = "aurora://launch-phase";
+/** 启动阶段推进与阶段 4 的下载进度。 */
+export const LAUNCH_PHASE_EVENT = "petalfall://launch-phase";
 /** 游戏进程退出；游玩时长、上次游玩与崩溃报告在推送前已由后端写好。 */
-export const GAME_EXIT_EVENT = "aurora://game-exit";
+export const GAME_EXIT_EVENT = "petalfall://game-exit";
 /** 启动器日志与游戏输出，成批推送。 */
-export const GAME_LOG_EVENT = "aurora://game-log";
+export const GAME_LOG_EVENT = "petalfall://game-log";
 /** 游戏退出后的自动备份做完。开着自动备份时每局都推（这局没进过存档时两个列表都空），关着时不推。 */
-export const WORLD_BACKUP_EVENT = "aurora://world-backup";
+export const WORLD_BACKUP_EVENT = "petalfall://world-backup";
 
 /** 已有游戏在加载或运行时 launchGame 的错误码，detail 为 BusyDetail。同一时间只运行一个游戏。 */
 export const BUSY_ERROR_CODE = "busy";
@@ -103,10 +104,10 @@ export function offlineFallbackRefusal(error: unknown): OfflineFallbackRefusedDe
   return { field: OFFLINE_FALLBACK_FIELD, reason: fields.reason, account: fields.account };
 }
 
-/** 加载阶段的分段；stage_index 0-2 为 preparing，3 为 downloading，4-6 为 launching，7 为 running。 */
+/** 加载阶段的分段；stage_index 0-3 为 preparing，4 为 downloading，5-7 为 launching，8 为 running。 */
 export type LaunchPhaseName = "preparing" | "downloading" | "launching" | "running";
 
-/** 阶段 3 的下载进度快照，字段与 core-event 的下载进度一致，只少传输量：启动过程不报它。 */
+/** 阶段 4 的下载进度快照，字段与 core-event 的下载进度一致，只少传输量：启动过程不报它。 */
 export interface LaunchDownloadDto {
   total: number;
   finished: number;
@@ -118,7 +119,7 @@ export interface LaunchDownloadDto {
   speed: number;
 }
 
-/** stage_index 对应八阶段表，同一次启动内单调不减；只有阶段 3 的进度快照带 download。 */
+/** stage_index 对应九阶段表，同一次启动内单调不减；只有阶段 4 的进度快照带 download。 */
 export interface LaunchPhaseEvent {
   task_id: string;
   phase: LaunchPhaseName;
@@ -213,6 +214,49 @@ export const launchGame = (args: LaunchArgs): Promise<LaunchedDto> =>
     offlineName: args.offlineName,
     quickPlay: args.quickPlay,
   });
+
+/** 这一局所用的账户：启动时的快照，账户随后被删除也不丢。 */
+export interface RunningGameAccountDto {
+  uuid: string;
+  name: string;
+  account_type: AccountType;
+}
+
+export interface RunningGameInfoDto {
+  version_id: string;
+  pid: number | null;
+  /** 这次启动开始（会话日志开始）的 Unix 毫秒。 */
+  started_at: number;
+  /** 游戏进程起来的 Unix 毫秒，游玩时长从这里算。 */
+  running_since: number;
+  /** 这一局以离线方式进单人。 */
+  offline: boolean;
+  /** 关闭前启动、这次打开后接回的；false 表示这个后端进程自己启动的（渲染进程重载后找回）。 */
+  reattached: boolean;
+  account: RunningGameAccountDto;
+}
+
+/** 上次关闭前在跑的那局游戏的记录读不出来。 */
+export interface BrokenRecordDto {
+  /** 读不出的记录原来的路径。 */
+  path: string;
+  /** 改名留存到的路径；改名也失败时为 null。 */
+  moved_to: string | null;
+  /** 读不出的原因原文。 */
+  message: string;
+}
+
+export interface RunningGameDto {
+  game: RunningGameInfoDto | null;
+  /** 只在整个后端进程里第一次调用时给出，之后恒为 null。 */
+  broken_record: BrokenRecordDto | null;
+}
+
+/**
+ * 此刻已经跑起来的游戏：后端先等开机时的接回尝试做完再回答，正常启动的与接回的都算；还在加载阶段的不算，game 为 null。
+ * 前端会话只在内存里，开机与渲染进程重载后都靠它把运行态找回来。
+ */
+export const runningGame = (): Promise<RunningGameDto> => invoke<RunningGameDto>("running_game");
 
 /** 结束运行中的游戏；结局经 GAME_EXIT_EVENT 推送。没有运行中的游戏时为空操作，加载中的启动用 cancelTask 取消。 */
 export const stopGame = (): Promise<void> => invoke<void>("stop_game");

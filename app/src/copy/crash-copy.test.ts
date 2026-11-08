@@ -9,6 +9,7 @@ import {
   CRASH_COPY,
   CRASH_SOURCE_LABEL,
   crashCategoryLabel,
+  crashClueLine,
   EXIT_CODE_COPY,
   isForgeBuiltinProvider,
   joinCrashLabels,
@@ -25,10 +26,11 @@ const ACCESS_VIOLATION: ExitCodeNoteDto = { code: -1073741819, hex: "0xC0000005"
 const STACK_OVERRUN: ExitCodeNoteDto = { code: -1073740791, hex: "0xC0000409", kind: "stack_buffer_overrun", summary: "紧急中止" };
 
 describe("崩溃诊断文案", () => {
-  it("16 类诊断按后端规则优先级排好，各有标签与标题", () => {
-    expect(CRASH_CATEGORIES).toHaveLength(16);
-    expect(new Set(CRASH_CATEGORIES).size).toBe(16);
+  it("17 类诊断按后端规则优先级排好，各有标签与标题", () => {
+    expect(CRASH_CATEGORIES).toHaveLength(17);
+    expect(new Set(CRASH_CATEGORIES).size).toBe(17);
     expect(CRASH_CATEGORIES.map((c) => crashCategoryLabel(c))).toEqual([
+      "手动触发",
       "Java 版本不匹配",
       "内存不足",
       "JVM 参数有误",
@@ -137,6 +139,13 @@ describe("崩溃诊断文案", () => {
     expect(CRASH_COPY.headline(["out_of_memory"])).toBe("找到 1 条线索，日志指向内存不足");
     expect(CRASH_COPY.headline(["optifine_incompatible", "native_crash"])).toBe("找到 2 条线索，日志指向 OptiFine 不兼容与进程异常退出");
     expect(SESSION_COPY.crashClue(crashCategoryLabel("java_version_mismatch"))).toBe("日志指向 Java 版本不匹配");
+  });
+
+  it("手动触发的崩溃写彩蛋，不说日志指向，其余类别照旧", () => {
+    expect(crashClueLine("manual_debug_crash")).toBe("你认真的吗...?");
+    expect(CRASH_COPY.manualNote).toBe("这是按住 F3+C 十秒手动触发的崩溃，游戏本身没有问题。");
+    expect(CRASH_CATEGORY.manual_debug_crash.explain(BLANK)).toBe(CRASH_COPY.manualNote);
+    expect(crashClueLine("out_of_memory")).toBe("日志指向内存不足");
   });
 
   it("只有退出码兜底这一条线索时写「退出码指向」，四处通用句式一致", () => {

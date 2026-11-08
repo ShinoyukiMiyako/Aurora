@@ -25,6 +25,7 @@ export type ConfigEnumField =
   | "isolation_policy"
   | "appearance.mode"
   | "appearance.accent"
+  | "appearance.cover_background"
   | "after_launch"
   | "language";
 
@@ -60,6 +61,8 @@ export interface ConfigDto {
   memory: MemorySettings;
   isolation_policy: IsolationPolicy;
   has_client_id: boolean;
+  /** 配置、环境变量、构建时内嵌三处至少有一个微软登录 client_id；fork 与自行构建没有内嵌时为 false。 */
+  microsoft_login_available: boolean;
   auto_download_java: boolean;
   /** "auto" 或 java 可执行文件绝对路径。 */
   default_java: string;
@@ -97,6 +100,8 @@ export interface ConfigPatch {
   autoDownloadJava?: boolean;
   cacheDirectory?: string;
   clientId?: string;
+  /** 清掉填过的 client_id，回到运行期环境变量或构建时内嵌的值；与 clientId 同时给报 invalid_argument。 */
+  clearClientId?: true;
   selectedVersion?: string;
   afterLaunch?: AfterLaunch;
   checkUpdates?: boolean;
@@ -127,6 +132,11 @@ export interface GameDirectoryDto {
   is_current: boolean;
   /** 此刻能否访问；为假时记录仍保留（移动硬盘拔了之类）。 */
   available: boolean;
+  /**
+   * versions 下的版本目录数，跳过文件和点开头的目录，versions 不存在算 0。
+   * 目录不可达、探测超时或读取失败时为 null，这时说不上有几个，不能当成 0。
+   */
+  version_count: number | null;
 }
 
 export interface NamedDirectoryDto {
@@ -140,7 +150,7 @@ export interface GameDirectoryInspectionDto {
   has_versions: boolean;
 }
 
-/** 全部已知游戏目录：当前目录在前，其余按记录顺序，各目录限时探测是否可达。 */
+/** 全部已知游戏目录：当前目录在前，其余按记录顺序，各目录限时探测是否可达并数一遍版本。 */
 export const listGameDirectories = (): Promise<GameDirectoryDto[]> => invoke<GameDirectoryDto[]>("list_game_directories");
 
 /** 这台机器上尚未记录的其它启动器的 .minecraft。只报告不写入。 */

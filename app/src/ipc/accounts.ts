@@ -49,6 +49,8 @@ export type AuthErrorCode =
   | "ServiceUnavailable"
   /** Minecraft 服务拒绝了启动器所用的微软应用（client_id 未获批准）；没有 detail，重试只会得到同样的结果。 */
   | "AppNotApproved"
+  /** 这个构建没有可用的微软登录 client_id（没有内嵌，也没填）；没有 detail，填上 client_id 之前重试没用。 */
+  | "MsaClientIdMissing"
   | "ReloginRequired"
   | "InvalidUsername"
   | "Yggdrasil"
@@ -61,7 +63,7 @@ export type AuthErrorCode =
   | "OfflineStoreSerialize"
   | "OfflineStoreDeserialize";
 
-export const DEVICE_CODE_EVENT = "aurora://device-code";
+export const DEVICE_CODE_EVENT = "petalfall://device-code";
 
 /** 微软登录进入设备码阶段时推送，供界面展示待输入短码与验证网址。 */
 export interface DeviceCode {

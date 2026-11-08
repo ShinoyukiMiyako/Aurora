@@ -1,5 +1,6 @@
 // 添加离线账户。左侧是这个用户名进游戏后的样子：按它的离线 UUID 选出的原版默认皮肤（输入停顿后才换，
-// 免得每敲一个字闪一次；本机游戏文件里读不到这套皮肤时是按 UUID 着色的剪影），右侧是用户名、UUID 预览与说明。
+// 免得每敲一个字闪一次；本机游戏文件里读不到这套皮肤时是按 UUID 着色的剪影）；还没输入时并排站着史蒂夫与
+// 艾利克斯。右侧是用户名、UUID 预览与说明。
 // 校验与后端同一套规则：错误不能提交，提醒照常可以提交。
 // 「输入用户名」只在提交、或输入过之后离开输入框才出现：刚打开弹窗就标红没有意义。
 
@@ -16,7 +17,7 @@ import { Modal } from "../../ui/Modal";
 import { TextInput } from "../../ui/TextInput";
 import { LOGIN_ERROR, OFFLINE_DIALOG_COPY } from "../../copy/login";
 import styles from "./login.module.css";
-import { defaultSkin } from "./default-skin";
+import { defaultSkin, STARTER_SKINS } from "./default-skin";
 import { hyphenateUuid, offlineUuid } from "./offline-uuid";
 
 /** 立绘跟随输入的停顿时长（毫秒）。 */
@@ -90,7 +91,16 @@ export function OfflineDialog() {
       <div className={styles.offline}>
         <div className={styles.stage} role="img" aria-label={figureName === "" ? OFFLINE_DIALOG_COPY.previewEmpty : OFFLINE_DIALOG_COPY.preview(figureName)}>
           <BlossomBranch width={150} height={96} dim className={styles.stageBranch} />
-          <AccountFigure uuid={figureUuid} skin={figureName === "" ? null : defaultSkin(figureUuid)} scale={5} className={styles.stageFigure} />
+          {figureName === "" ? (
+            // 两个并排要缩一档才放得进舞台
+            <span className={styles.stagePair}>
+              {STARTER_SKINS.map((starter) => (
+                <AccountFigure key={starter.name} uuid={offlineUuid(starter.name)} skin={starter.skin} scale={4} className={styles.stageFigure} />
+              ))}
+            </span>
+          ) : (
+            <AccountFigure uuid={figureUuid} skin={defaultSkin(figureUuid)} scale={5} className={styles.stageFigure} />
+          )}
         </div>
         <div className={styles.offlineForm}>
           <Field

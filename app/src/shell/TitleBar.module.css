@@ -1,6 +1,7 @@
 /*
  * 三列网格：左右两列各占剩余宽度的一半，中列状态岛按内容宽度居中于主列。
  * 右列不小于自身内容宽（max-content），窗口变窄时先压缩左列的标题。
+ * 左内边距让开伸出侧栏槽位的品牌字标。
  */
 .bar {
   display: grid;
@@ -8,7 +9,7 @@
   align-items: center;
   gap: var(--sk-space-12);
   height: 56px;
-  padding-left: var(--sk-space-4);
+  padding-left: var(--sk-space-14);
 }
 
 .start {
@@ -175,7 +176,11 @@
   color: var(--sk-text);
 }
 
-/* ---- 窗口三键：命中区铺满栏高，可见底色只是中间 34×30 的圆角块 ---- */
+/*
+ * ---- 窗口三键：命中区铺满栏高，可见底色只是 34 的圆 ----
+ * 三个圆之间与关闭键到窗口右缘都是 8px：关闭键的圆贴命中区左侧 4px 放，多出的宽度留在右边，
+ * 鼠标甩到右上角仍落在关闭键上。关闭键悬停只染浅红，按下才转正红，免得指针路过时一块红色闪过。
+ */
 .window {
   display: flex;
   align-self: stretch;
@@ -196,6 +201,10 @@
 
 .winButton[data-close] {
   width: 46px;
+  justify-items: start;
+}
+
+.winButton[data-close] .winFace {
   margin-left: var(--sk-space-4);
 }
 
@@ -203,8 +212,8 @@
   display: inline-grid;
   place-items: center;
   width: 34px;
-  height: 30px;
-  border-radius: var(--sk-r-sm);
+  height: 34px;
+  border-radius: var(--sk-r-pill);
   transition:
     background-color var(--sk-dur-hover) var(--sk-ease),
     color var(--sk-dur-hover) var(--sk-ease),
@@ -212,8 +221,7 @@
 }
 
 .winButton:hover .winFace {
-  background: var(--sk-bg-3);
-  box-shadow: inset 0 0 0 1px var(--sk-line-2);
+  background: var(--sk-fill-hover);
   color: var(--sk-text);
 }
 
@@ -222,13 +230,12 @@
 }
 
 .winButton[data-close]:hover .winFace {
-  background: var(--sk-win-close);
-  box-shadow: none;
-  color: var(--sk-win-close-ink);
+  background: var(--sk-danger-soft);
+  color: var(--sk-danger);
 }
 
 .winButton[data-close]:active .winFace {
-  background: var(--sk-win-close-active);
+  background: var(--sk-win-close);
   color: var(--sk-win-close-ink);
 }
 

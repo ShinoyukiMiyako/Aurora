@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
-import { act } from "react";
+import { act, useLayoutEffect } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TOAST_COPY } from "../copy/flows";
 import { SHELL_ACTION_ERROR } from "../copy/shell";
@@ -413,7 +413,7 @@ describe("外壳：通知动作", () => {
 });
 
 describe("外壳：最小化期间的通知", () => {
-  // WebView2 最小化时 visibilityState 仍是 visible，所以这里只动窗口状态，不动 document
+  // 窗口状态与 visibilityState 是两路独立的信号：这里的用例只动窗口状态，不动 document，「两路同时变」单独写
   let minimized: boolean;
   let resized: () => void;
   const port = (): WindowPort => ({
@@ -484,6 +484,119 @@ describe("外壳：最小化期间的通知", () => {
     );
     await flush();
     expect(launcher.state.toasts.map((t) => [t.title, t.body])).toEqual([[SHELL_ACTION_ERROR.windowState, "窗口已销毁"]]);
+  });
+
+  describe("visibilityState 与窗口状态两路同时变化", () => {
+    const setVisibility = (state: DocumentVisibilityState) => {
+      vi.spyOn(document, "visibilityState", "get").mockReturnValue(state);
+      act(() => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+    };
+    let pausedLog: boolean[];
+    /** 花瓣暂停取决于窗口可见：记下每一次翻转，抖动就是多出来的项。 */
+    function PausedLog() {
+      const { petalsPaused } = useShell();
+      useLayoutEffect(() => {
+        pausedLog.push(petalsPaused);
+      }, [petalsPaused]);
+      return null;
+    }
+    const mountLogged = async () => {
+      view = render(
+        <WindowPortProvider port={port()}>
+          <LauncherProvider>
+            <ShellProvider>
+              <Probe />
+              <PausedLog />
+              <OverlayRoot />
+            </ShellProvider>
+          </LauncherProvider>
+        </WindowPortProvider>,
+      );
+      await flush();
+      act(() => {
+        window.dispatchEvent(new Event("focus"));
+      });
+      pausedLog = [];
+    };
+
+    beforeEach(() => {
+      pausedLog = [];
+    });
+
+    it.each([
+      ["hidden 先到，窗口状态后到", ["visibility", "window"]],
+      ["窗口状态先到，hidden 后到", ["window", "visibility"]],
+    ] as const)("最小化与还原都是%s：暂停只翻转一次，不抖动，还原不漏", async (_name, order) => {
+      await mountLogged();
+      const apply = async (signal: "visibility" | "window", down: boolean) => {
+        if (signal === "visibility") setVisibility(down ? "hidden" : "visible");
+        else await windowChanged(down);
+      };
+
+      for (const signal of order) await apply(signal, true);
+      expect(pausedLog).toEqual([true]);
+      for (const signal of order) await apply(signal, false);
+      expect(pausedLog).toEqual([true, false]);
+    });
+
+    it("还原时只回来一路：另一路没到之前仍算不可见，通知继续暂停", async () => {
+      await mountLogged();
+      await act(async () => launcher.actions.toast("info", "已停用 Sodium"));
+      setVisibility("hidden");
+      await windowChanged(true);
+      setVisibility("visible");
+      await act(async () => void vi.advanceTimersByTime(60_000));
+      expect(titles()).toEqual(["已停用 Sodium"]);
+
+      await windowChanged(false);
+      await act(async () => void vi.advanceTimersByTime(60_000));
+      expect(titles()).toEqual([]);
+    });
+
+    it("只有 hidden 一路（读不到最小化）：通知同样暂停，页面重新可见后走完", async () => {
+      await mountLogged();
+      await act(async () => launcher.actions.toast("info", "已停用 Sodium"));
+      setVisibility("hidden");
+      await act(async () => void vi.advanceTimersByTime(60_000));
+      expect(titles()).toEqual(["已停用 Sodium"]);
+
+      setVisibility("visible");
+      await act(async () => void vi.advanceTimersByTime(60_000));
+      expect(titles()).toEqual([]);
+    });
+  });
+
+  it("窗口状态的两次读取乱序回来：晚到的「已最小化」不盖掉后发的「已还原」，通知照常走完", async () => {
+    const reads: ((value: boolean) => void)[] = [];
+    view = render(
+      <WindowPortProvider port={{ ...port(), isMinimized: () => new Promise<boolean>((resolve) => reads.push(resolve)) }}>
+        <LauncherProvider>
+          <ShellProvider>
+            <Probe />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </WindowPortProvider>,
+    );
+    await flush();
+    expect(reads).toHaveLength(1);
+    reads[0](false);
+    await flush();
+    await act(async () => launcher.actions.toast("info", "已停用 Sodium"));
+
+    // 最小化紧接着还原：两次读取都还在路上
+    resized();
+    resized();
+    expect(reads).toHaveLength(3);
+    reads[2](false);
+    await flush();
+    reads[1](true);
+    await flush();
+
+    await act(async () => void vi.advanceTimersByTime(60_000));
+    expect(titles()).toEqual([]);
   });
 });
 

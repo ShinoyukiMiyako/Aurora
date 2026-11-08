@@ -128,7 +128,7 @@ export function GreetingCard({ span, play }: GreetingCardProps) {
         <Tooltip content={HOME_COPY.manageAccount} sub={accountKindLabel(account.kind, account.authServer)} side="left">
           <button type="button" className={s.figureButton} aria-label={HOME_COPY.manageAccount} onClick={() => go({ page: "accounts" })}>
             <PetalGround className={s.figureGround} />
-            <AccountFigure uuid={account.uuid} skin={skin.status === "ready" ? skin.data : null} scale={tier === "compact" ? 5 : 6} className={s.figure} />
+            <AccountFigure uuid={account.uuid} skin={skin.status === "ready" ? skin.data : null} scale={tier === "compact" ? 5 : 6} interactive className={s.figure} />
           </button>
         </Tooltip>
       )}

@@ -1,25 +1,27 @@
-//! 实例：列表、设置、内容、侧栏固定、新建（按实例名安装）、补全、删除、改名、打开文件夹、存档备份与恢复，
-//! 以及新建页要的版本清单、加载器版本与所需 Java。
+//! 实例：列表、设置、内容、侧栏固定、新建（按实例名安装）、补全、删除、改名、移到另一个游戏目录、打开文件夹、
+//! 存档备份与恢复，以及新建页要的版本清单、加载器版本与所需 Java。
 //!
-//! 会改动实例目录的操作（新建、整合包导入、补全、改名、删除，启动与运行中的游戏，装、删、启停、
+//! 会改动实例目录的操作（新建、整合包导入、补全、改名、删除、移动，启动与运行中的游戏，装、删、启停、
 //! 更新、回滚 Mod 与装资源，以及备份、恢复、导出存档与删除存档备份）经 [`InstanceLocks`] 互斥，冲突时报 `instance_busy`
 //! 并在 detail 里带上正在做的事。Mod 与资源的改动彼此之间、与启动和运行中的游戏、与存档备份之间可以并行
-//! （运行中改不了的文件由门面的占用探测把关），与其余操作互斥。启动到游戏退出、补全与导入整合包期间，实例继承链上的
+//! （运行中改不了的文件由门面的占用探测把关），与其余操作互斥。启动到游戏退出、补全、导入整合包与移动期间，实例继承链上的
 //! 基底版本（客户端 jar 与 natives 所在的原版，导入时还有它要写的加载器版本）以 inherited 一并占住，启动、删除、
-//! 改名、补全基底报 `instance_busy` 并带上正在用它的实例；基底自己开着游戏时，这几件事反过来被基底挡住。
+//! 改名、移动、补全基底报 `instance_busy` 并带上正在用它的实例；基底自己开着游戏时，这几件事反过来被基底挡住。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use aurora_core::{
-    is_safe_instance_id, Aurora, BackupKind, CoreError, DeletionPreview, Disposer, EventSink,
-    GameSlot, IncompleteKind, IncompleteMarker, IncompleteOutcome, InstanceContent, InstanceError,
-    InstanceInstallOutcome, InstanceRequest, InstanceSummary, InstanceVersion, IsolationOverride,
-    JavaSelection, LevelInfo, LoaderChoice, LoaderKind, ManifestOverview, MarkerError,
-    MarkerSettlement, PackEntry, Platform, PlaySummary, Readable, RecycleBin, RepairOutcome,
-    Resolution, TemplateInfo, TemplateOutcome, TemplateSkip, VersionSettings, WorldBackup,
-    WorldBackupList, WorldEntry, WorldScope,
+use petalfall_core::folders::validate_game_dir;
+use petalfall_core::{
+    is_safe_instance_id, BackupKind, CoreError, CoverBackground, CoverImageSlot, DeletionPreview,
+    Disposer, EventSink, GameSlot, IncompleteKind, IncompleteMarker, IncompleteOutcome,
+    InstanceContent, InstanceError, InstanceInstallOutcome, InstanceRequest, InstanceSummary,
+    InstanceVersion, IsolationOverride, JavaSelection, LevelInfo, LoaderChoice, LoaderKind,
+    ManifestOverview, MarkerError, MarkerSettlement, MoveFollowUp, MoveOutcome, MovePreview,
+    MoveRecovery, MoveRequest, PackEntry, Petalfall, Platform, PlaySummary, Readable, RecycleBin,
+    RepairOutcome, Resolution, TemplateInfo, TemplateOutcome, TemplateSkip, TextureService,
+    VersionSettings, WorldBackup, WorldBackupList, WorldEntry, WorldScope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -33,7 +35,7 @@ use crate::facade::Facade;
 use crate::tasks::{TaskHandle, TaskRegistry};
 
 // 本领域的 instance_busy、instance_has_dependents、open_failed 与通用码一起登记在 error::code。
-use crate::commands::error::code;
+use crate::commands::error::{code, move_blocker_json};
 
 // ---------------------------------------------------------------- 实例互斥
 
@@ -58,6 +60,9 @@ pub enum InstanceActivity {
     /// 备份、恢复或导出存档；游戏退出后的自动备份由启动命令把「运行」转成它，备份完才释放，基底在转的时候
     /// 就放开（[`ChainGuard::into_backup`]）。
     BackingUp,
+    /// 移到另一个游戏目录：整个实例目录连同它的存档备份挪走。继承链上的基底以 inherited 一并占住：要读它们的
+    /// 版本 JSON 与客户端 jar 补到目标里。
+    Moving,
 }
 
 impl InstanceActivity {
@@ -72,13 +77,14 @@ impl InstanceActivity {
             InstanceActivity::Modifying => "改动 Mod、资源或设置",
             InstanceActivity::Inherited => "被其他实例使用",
             InstanceActivity::BackingUp => "备份或恢复存档",
+            InstanceActivity::Moving => "移到另一个游戏目录",
         }
     }
 
     /// 两件事能否同时在一个实例上进行。
     ///
     /// Mod、资源与设置的改动只往实例目录里加删、改写文件，彼此不冲突；游戏运行中仍允许改动，
-    /// 被游戏占着的文件由门面在动手前探测并拒绝。改名、删除、新建、补全会挪走或重写整个目录，
+    /// 被游戏占着的文件由门面在动手前探测并拒绝。改名、删除、移动、新建、补全会挪走或重写整个目录，
     /// 与任何事都互斥，否则改动会按旧路径把目录重新建出来。被别的实例当作基底时，基底照样能改动、备份，
     /// 几个实例也可以同时以它为基底；挪走或重写它的目录则会让那些实例丢掉客户端 jar 与 natives。基底自己的
     /// 启动与运行也与基底占用互斥：游戏映射着 natives，补全或导入要重写它们时会写到一半报 IO 错误，提前报
@@ -114,7 +120,8 @@ impl InstanceActivity {
             | InstanceActivity::Deleting
             | InstanceActivity::Launching
             | InstanceActivity::Running
-            | InstanceActivity::BackingUp => 0,
+            | InstanceActivity::BackingUp
+            | InstanceActivity::Moving => 0,
         }
     }
 }
@@ -185,7 +192,7 @@ impl InstanceLocks {
     }
 
     /// 占住实例 `id` 做 `activity`，同时以它的名义占住继承链上的基底版本 `bases`
-    /// （[`aurora_core::Aurora::inheritance_chain`] 的结果，或导入要写的自然版本目录）。
+    /// （[`petalfall_core::Petalfall::inheritance_chain`] 的结果，或导入要写的自然版本目录）。
     ///
     /// 先占实例自己，再依次占基底；任一处冲突都报 `instance_busy`（基底被占时 detail 里的 id 是那个基底），
     /// 已占到的随返回的错误一起放开。基底里与 `id` 同名（链成环）或彼此重复（不分大小写）的只占一次。
@@ -608,6 +615,12 @@ pub struct InstanceDto {
     pub isolated: Option<bool>,
     pub description: Option<String>,
     pub cover: Option<String>,
+    /// 封面方块用的玩家图片在材质协议 `/cover/` 下的取图键；没设、设置读不出或文件不见了为 null。
+    pub cover_image: Option<String>,
+    /// 卡面背景：follow / art / texture / image；设置读不出时为 follow。
+    pub background: CoverBackground,
+    /// 卡面背景图片的取图键；何时为 null 同 cover_image。
+    pub background_image: Option<String>,
     /// 实例设置里的最大内存 MB；null 为跟随全局（或设置读不出）。
     pub memory_mb: Option<u32>,
     /// 实例设置文件读不出来的原因；此时 description、cover、memory_mb 为 null。
@@ -660,8 +673,14 @@ pub struct QuickPlaySupportDto {
 #[serde(deny_unknown_fields)]
 pub struct InstanceSettingsDto {
     pub description: Option<String>,
-    /// 封面预设 id（小写字母、数字、下划线）；null 时界面按默认规则推导。
+    /// 封面方块 id（小写字母、数字、下划线）；null 时界面按默认规则推导。
     pub cover: Option<String>,
+    /// 封面方块用的玩家图片文件名（block-<16 位十六进制>.png）；由导入命令写下。
+    pub cover_image: Option<String>,
+    /// 卡面背景：follow / art / texture / image。
+    pub background: CoverBackground,
+    /// 卡面背景图片文件名（background-<16 位十六进制>.png 或 .jpg）；由导入命令写下。
+    pub background_image: Option<String>,
     /// follow_global / enabled / disabled。
     pub isolation: IsolationOverride,
     /// 最大内存 MB；null 跟随全局。
@@ -678,6 +697,9 @@ impl From<VersionSettings> for InstanceSettingsDto {
         Self {
             description: s.description,
             cover: s.cover,
+            cover_image: s.cover_image,
+            background: s.background,
+            background_image: s.background_image,
             isolation: s.isolation,
             memory_mb: s.memory_mb,
             java: s.java,
@@ -693,6 +715,9 @@ impl From<InstanceSettingsDto> for VersionSettings {
         Self {
             description: s.description,
             cover: s.cover,
+            cover_image: s.cover_image,
+            background: s.background,
+            background_image: s.background_image,
             isolation: s.isolation,
             memory_mb: s.memory_mb,
             java: s.java,
@@ -785,6 +810,63 @@ pub struct DeleteOutcomeDto {
 pub struct RenameOutcomeDto {
     /// 新的实例 id。
     pub id: String,
+}
+
+/// 移到另一个游戏目录前的预检。字段含义同 [`MovePreview`]。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MovePreviewDto {
+    pub id: String,
+    /// 实例现在所在的游戏目录（当前目录）。
+    pub source: String,
+    pub target: String,
+    /// 目标在游戏目录列表里的显示名；还没记录的文件夹按同一规则推出，移动成功后就以这个名字记进列表。
+    pub target_name: String,
+    /// 目标是否已是当前目录或已记录的额外目录。
+    pub target_registered: bool,
+    pub same_volume: bool,
+    pub instance_bytes: u64,
+    pub instance_files: u64,
+    pub backup_bytes: u64,
+    pub backup_count: u32,
+    pub dependency_files: u64,
+    pub dependency_bytes: u64,
+    pub bases_to_copy: Vec<String>,
+    pub reused_bases: Vec<String>,
+    pub missing_in_source: u64,
+    /// 要写进目标盘的字节，不含余量；含余量的要求见 insufficient_space 拦截项的 needed。
+    pub required_bytes: u64,
+    /// 目标盘剩余的字节。
+    pub available_bytes: u64,
+    pub isolated: bool,
+    /// 形状同 instance_move_blocked 的 detail.blocker（`move_blocker_json`）；为空才能移。
+    pub blockers: Vec<Value>,
+}
+
+/// 移动完成后没跟过去、要提示玩家的一项。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MoveFollowUpDto {
+    /// 游玩记录没挪过去，已记下待补。
+    PlayRecords { reason: String },
+    /// 存档备份没挪过去，留在原游戏目录。
+    WorldBackups { reason: String },
+    /// 原游戏目录里的旧文件没删干净，下次启动再清。
+    Cleanup { path: String, reason: String },
+    /// 实例已经移好，配置没存上：原目录的侧栏固定与当前选中还在，目标也还没记进游戏目录列表，下次启动补上。
+    Config { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MoveOutcomeDto {
+    pub id: String,
+    pub source: String,
+    pub target: String,
+    /// 目标在游戏目录列表里的显示名。
+    pub target_name: String,
+    /// 目标是这次新记进游戏目录列表的；配置没存上时为 false（见 config 跟进项）。
+    pub registered: bool,
+    /// 为空即全部跟过去了。
+    pub follow_ups: Vec<MoveFollowUpDto>,
 }
 
 /// 装上的加载器。
@@ -983,14 +1065,15 @@ fn instance_dto(
     activity: Option<InstanceActivity>,
     play: Readable<Option<&PlaySummary>>,
 ) -> InstanceDto {
-    let (description, cover, memory_mb, settings_error) = match summary.settings {
+    let (description, cover, background, memory_mb, settings_error) = match summary.settings {
         Readable::Read(settings) => (
             settings.description,
             settings.cover,
+            settings.background,
             settings.memory_mb,
             None,
         ),
-        Readable::Unreadable(error) => (None, None, None, Some(error)),
+        Readable::Unreadable(error) => (None, None, CoverBackground::Follow, None, Some(error)),
     };
     let (modpack, modpack_error) = match summary.modpack {
         Readable::Read(modpack) => (
@@ -1032,6 +1115,10 @@ fn instance_dto(
         isolated: None,
         description,
         cover,
+        // 取图键要登记进材质服务，由 list_instances_with 补上
+        cover_image: None,
+        background,
+        background_image: None,
         memory_mb,
         settings_error,
         modpack,
@@ -1072,7 +1159,7 @@ fn instance_dto(
         }
         InstanceVersion::Broken(reason) => {
             dto.status = "broken";
-            dto.broken_reason = Some(aurora_core::broken_reason_text(&reason));
+            dto.broken_reason = Some(petalfall_core::broken_reason_text(&reason));
         }
     }
     dto
@@ -1146,6 +1233,45 @@ fn preview_dto(preview: DeletionPreview, locks: &InstanceLocks) -> DeletionPrevi
         dependents: preview.dependents,
         backups_dir: preview.backups_dir.display().to_string(),
         backup_count: preview.backup_count,
+    }
+}
+
+fn move_preview_dto(
+    preview: MovePreview,
+    target_name: String,
+    target_registered: bool,
+) -> MovePreviewDto {
+    MovePreviewDto {
+        id: preview.id,
+        source: preview.source_game_dir.display().to_string(),
+        target: preview.target_game_dir.display().to_string(),
+        target_name,
+        target_registered,
+        same_volume: preview.same_volume,
+        instance_bytes: preview.instance_bytes,
+        instance_files: preview.instance_files,
+        backup_bytes: preview.backup_bytes,
+        backup_count: preview.backup_count,
+        dependency_files: preview.dependency_files,
+        dependency_bytes: preview.dependency_bytes,
+        bases_to_copy: preview.bases_to_copy,
+        reused_bases: preview.reused_bases,
+        missing_in_source: preview.missing_in_source,
+        required_bytes: preview.required_bytes,
+        available_bytes: preview.available_bytes,
+        isolated: preview.isolated,
+        blockers: preview.blockers.iter().map(move_blocker_json).collect(),
+    }
+}
+
+fn move_follow_up_dto(follow_up: MoveFollowUp) -> MoveFollowUpDto {
+    match follow_up {
+        MoveFollowUp::PlayRecords(reason) => MoveFollowUpDto::PlayRecords { reason },
+        MoveFollowUp::WorldBackups(reason) => MoveFollowUpDto::WorldBackups { reason },
+        MoveFollowUp::Cleanup { path, reason } => MoveFollowUpDto::Cleanup {
+            path: path.display().to_string(),
+            reason,
+        },
     }
 }
 
@@ -1228,21 +1354,23 @@ fn parse_loader_choice(name: &str) -> Result<LoaderChoice, CommandError> {
 pub async fn list_instances(
     facade: State<'_, Facade>,
     locks: State<'_, InstanceLocks>,
+    textures: State<'_, TextureService>,
 ) -> Result<Vec<InstanceDto>, CommandError> {
-    list_instances_with(&facade, &locks).await
+    list_instances_with(&facade, &locks, &textures).await
 }
 
 pub(crate) async fn list_instances_with(
     facade: &Facade,
     locks: &InstanceLocks,
+    textures: &TextureService,
 ) -> Result<Vec<InstanceDto>, CommandError> {
-    let aurora = facade.snapshot().await;
-    let list = aurora.list_instances().await.map_err(instance_error)?;
+    let petalfall = facade.snapshot().await;
+    let list = petalfall.list_instances().await.map_err(instance_error)?;
     // 游玩记录只是实例的附属信息：读不懂时每个实例带上原因，列表照常给出，界面写「读不到」而不是 0。
-    let plays = match aurora.play_summaries().await {
+    let plays = match petalfall.play_summaries().await {
         Ok(plays) => Readable::Read(plays),
         Err(err) => {
-            let reason = aurora_base::error_with_causes(&err);
+            let reason = petalfall_base::error_with_causes(&err);
             tracing::warn!(error = %reason, "游玩记录读不出来");
             Readable::Unreadable(reason)
         }
@@ -1259,13 +1387,46 @@ pub(crate) async fn list_instances_with(
                 Readable::Read(plays) => Readable::Read(plays.get(&summary.id)),
                 Readable::Unreadable(reason) => Readable::Unreadable(reason.clone()),
             };
+            let (cover_image, background_image) = match &summary.settings {
+                Readable::Read(settings) => (
+                    cover_image_key(textures, &summary, settings.cover_image.as_deref()),
+                    cover_image_key(textures, &summary, settings.background_image.as_deref()),
+                ),
+                Readable::Unreadable(_) => (None, None),
+            };
             InstanceDto {
                 used_by,
                 base_busy,
+                cover_image,
+                background_image,
                 ..instance_dto(summary, activity, play)
             }
         })
         .collect())
+}
+
+/// 测试里列实例用的材质服务：列实例只往里登记路径、不写缓存目录，给一个不存在的目录即可。
+#[cfg(test)]
+pub(crate) fn test_textures() -> TextureService {
+    TextureService::new(
+        PathBuf::from("unused-cache"),
+        petalfall_base::http::build_client().expect("测试用 HTTP 客户端构建失败"),
+    )
+}
+
+/// 设置里引用的卡面图片：文件在就登记给材质协议、返回取图键；不在时记 warn 并给 null，卡面回落。
+fn cover_image_key(
+    textures: &TextureService,
+    summary: &InstanceSummary,
+    file: Option<&str>,
+) -> Option<String> {
+    let path = petalfall_core::cover_image_dir(&summary.dir).join(file?);
+    if path.is_file() {
+        Some(textures.register_cover(&path))
+    } else {
+        tracing::warn!(id = %summary.id, path = %path.display(), "设置里引用的卡面图片不见了，卡面回落");
+        None
+    }
 }
 
 /// 读取实例设置；没有自定义过时为默认值。
@@ -1274,8 +1435,8 @@ pub async fn get_instance_settings(
     id: String,
     facade: State<'_, Facade>,
 ) -> Result<InstanceSettingsDto, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
         .instance_settings(&id)
         .await
         .map_err(instance_error)?
@@ -1307,13 +1468,55 @@ pub(crate) async fn set_instance_settings_with(
         invalid_field("settings", "malformed", format!("实例设置格式不对：{err}"))
     })?;
     let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
-    let aurora = facade.snapshot().await;
+    let petalfall = facade.snapshot().await;
     let settings = VersionSettings::from(dto);
-    aurora
+    petalfall
         .set_instance_settings(id, &settings)
         .await
         .map_err(instance_error)?;
     Ok(settings.into())
+}
+
+/// 把本机一张图片导入成卡面背景（slot 为 background，同时把 background 设为 image）或封面方块（block），
+/// 返回写下的设置；被换下的旧图随之删掉。slot 不认识、path 不是绝对路径，或图片读不了、超过 20 MB、
+/// 不是 PNG/JPEG/WebP、解不开（含边长超过 8192）时报 `invalid_argument`，detail.field 指出是哪一项，
+/// detail.reason 为原因码；设置不变。与写设置同一把占用：改名、删除、新建、补全进行中报 `instance_busy`。
+#[tauri::command]
+pub async fn import_cover_image(
+    id: String,
+    slot: String,
+    path: String,
+    facade: State<'_, Facade>,
+    locks: State<'_, InstanceLocks>,
+) -> Result<InstanceSettingsDto, CommandError> {
+    import_cover_image_with(&facade, &locks, &id, &slot, &path).await
+}
+
+pub(crate) async fn import_cover_image_with(
+    facade: &Facade,
+    locks: &InstanceLocks,
+    id: &str,
+    slot: &str,
+    path: &str,
+) -> Result<InstanceSettingsDto, CommandError> {
+    let slot: CoverImageSlot = serde_json::from_value(json!(slot))
+        .map_err(|_| invalid_field("slot", "unknown", format!("不认识的卡面图片位置：{slot}")))?;
+    let source = Path::new(path);
+    // 路径来自系统选择文件对话框；相对路径会按启动器进程的当前目录解析，读到的不是玩家选的那张。
+    if !source.is_absolute() {
+        return Err(invalid_field(
+            "path",
+            "not_absolute",
+            format!("图片路径须是绝对路径：{path}"),
+        ));
+    }
+    let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
+        .import_cover_image(id, slot, source)
+        .await
+        .map_err(instance_error)?
+        .into())
 }
 
 /// 实例的资源包、光影包与存档（从实例运行时的工作目录读）。
@@ -1322,9 +1525,12 @@ pub async fn list_instance_content(
     id: String,
     facade: State<'_, Facade>,
 ) -> Result<InstanceContentDto, CommandError> {
-    let aurora = facade.snapshot().await;
+    let petalfall = facade.snapshot().await;
     Ok(content_dto(
-        aurora.instance_content(&id).await.map_err(instance_error)?,
+        petalfall
+            .instance_content(&id)
+            .await
+            .map_err(instance_error)?,
     ))
 }
 
@@ -1333,8 +1539,11 @@ pub async fn list_instance_content(
 /// 侧栏固定的实例（按顺序），已不存在或不在实例库里的不返回。
 #[tauri::command]
 pub async fn get_sidebar_pins(facade: State<'_, Facade>) -> Result<Vec<String>, CommandError> {
-    let aurora = facade.snapshot().await;
-    aurora.existing_sidebar_pins().await.map_err(instance_error)
+    let petalfall = facade.snapshot().await;
+    petalfall
+        .existing_sidebar_pins()
+        .await
+        .map_err(instance_error)
 }
 
 /// 整份设置侧栏固定列表并落盘，返回写下的列表。超过 5 个、重复或含不存在的实例报 `invalid_argument`，
@@ -1358,8 +1567,8 @@ pub(crate) async fn set_sidebar_pins_with(
         .await
         .map_err(instance_error)?;
     facade
-        .update(|aurora| {
-            aurora.set_sidebar_pins(pins.clone());
+        .update(|petalfall| {
+            petalfall.set_sidebar_pins(pins.clone());
             Ok::<_, CommandError>(())
         })
         .await?;
@@ -1441,21 +1650,21 @@ pub(crate) async fn install_version_with(
     };
     request.validate()?;
     let name = args.target_name;
-    let aurora = facade.snapshot().await;
-    aurora
+    let petalfall = facade.snapshot().await;
+    petalfall
         .check_new_instance_name(&name)
         .await
         .map_err(instance_error)?;
     let _guard = locks.acquire(&name, InstanceActivity::Installing)?;
     let task = tasks.register(task_id)?;
-    let aurora = aurora.with_cancel(task.token().clone());
-    let marker = aurora
+    let petalfall = petalfall.with_cancel(task.token().clone());
+    let marker = petalfall
         .create_instance_dir(&name, &request)
         .await
         .map_err(instance_error)?;
     let outcome = task
         .run(async {
-            aurora
+            petalfall
                 .install_instance(&name, &request, Some(events))
                 .await
                 .map_err(instance_error)
@@ -1463,21 +1672,21 @@ pub(crate) async fn install_version_with(
         .await;
     match outcome {
         Ok(outcome) => {
-            aurora
+            petalfall
                 .settle_instance_marker(&name, marker, MarkerSettlement::Succeeded)
                 .await
                 .map_err(instance_error)?;
             Ok(install_result_dto(outcome))
         }
         Err(err) if err.is_cancelled() => {
-            if let Err(abandon_err) = aurora.abandon_instance(&name).await {
+            if let Err(abandon_err) = petalfall.abandon_instance(&name).await {
                 tracing::warn!(name, error = %abandon_err, "取消后删除实例目录失败，改为记下已取消");
-                settle_quietly(&aurora, &name, marker, MarkerSettlement::Cancelled).await;
+                settle_quietly(&petalfall, &name, marker, MarkerSettlement::Cancelled).await;
             }
             Err(err)
         }
         Err(err) => {
-            settle_quietly(&aurora, &name, marker, failed(&err)).await;
+            settle_quietly(&petalfall, &name, marker, failed(&err)).await;
             Err(err)
         }
     }
@@ -1541,25 +1750,28 @@ async fn run_repair(
     reinstall_loader: bool,
     events: &EventSink,
 ) -> Result<RepairResultDto, CommandError> {
-    let aurora = facade.snapshot().await;
+    let petalfall = facade.snapshot().await;
     // 传统布局的加载器实例把客户端 jar 与 natives 补进继承链根的目录：补全期间基底不能被删、改名或补全。
     // 依赖检查只在删除、改名动手那一刻扫一次，挡不住补全中途的这些操作。
     let _guard = locks
         .acquire_with_chain(id, InstanceActivity::Repairing, async {
-            aurora.inheritance_chain(id).await.map_err(instance_error)
+            petalfall
+                .inheritance_chain(id)
+                .await
+                .map_err(instance_error)
         })
         .await?;
     let task = tasks.register(task_id)?;
-    let aurora = aurora.with_cancel(task.token().clone());
+    let petalfall = petalfall.with_cancel(task.token().clone());
     let begun = if reinstall_loader {
-        aurora.begin_loader_reinstall(id).await
+        petalfall.begin_loader_reinstall(id).await
     } else {
-        aurora.begin_repair(id).await
+        petalfall.begin_repair(id).await
     };
     let (plan, marker) = begun.map_err(instance_error)?;
     let outcome = task
         .run(async {
-            aurora
+            petalfall
                 .repair_instance(id, &plan, Some(events))
                 .await
                 .map_err(instance_error)
@@ -1567,7 +1779,7 @@ async fn run_repair(
         .await;
     match outcome {
         Ok(outcome) => {
-            aurora
+            petalfall
                 .settle_instance_marker(id, marker, MarkerSettlement::Succeeded)
                 .await
                 .map_err(instance_error)?;
@@ -1579,7 +1791,7 @@ async fn run_repair(
             } else {
                 failed(&err)
             };
-            settle_quietly(&aurora, id, marker, settlement).await;
+            settle_quietly(&petalfall, id, marker, settlement).await;
             Err(err)
         }
     }
@@ -1594,12 +1806,15 @@ fn failed(err: &CommandError) -> MarkerSettlement {
 
 /// 失败与取消后记结局：这时要返回给前端的是任务本身的错误，记结局再失败只能留日志。
 async fn settle_quietly(
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     id: &str,
     marker: IncompleteMarker,
     settlement: MarkerSettlement,
 ) {
-    if let Err(err) = aurora.settle_instance_marker(id, marker, settlement).await {
+    if let Err(err) = petalfall
+        .settle_instance_marker(id, marker, settlement)
+        .await
+    {
         tracing::error!(id, error = %err, "记录实例未完成标记失败");
     }
 }
@@ -1613,8 +1828,12 @@ pub async fn template_info(facade: State<'_, Facade>) -> Result<TemplateInfoDto,
 }
 
 pub(crate) async fn template_info_with(facade: &Facade) -> Result<TemplateInfoDto, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.template_info().await.map_err(instance_error)?.into())
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
+        .template_info()
+        .await
+        .map_err(instance_error)?
+        .into())
 }
 
 /// 把实例工作目录里的 options.txt、服务器列表等设置文件存成默认设置，整份替换旧的，返回新的状态。
@@ -1640,8 +1859,8 @@ pub(crate) async fn save_instance_as_template_with(
         return Err(CoreError::from(InstanceError::InvalidId { id: id.to_owned() }).into());
     }
     let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
-    let aurora = facade.snapshot().await;
-    Ok(aurora
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
         .save_template_from_instance(id)
         .await
         .map_err(instance_error)?
@@ -1655,8 +1874,8 @@ pub async fn clear_template(facade: State<'_, Facade>) -> Result<TemplateInfoDto
 }
 
 pub(crate) async fn clear_template_with(facade: &Facade) -> Result<TemplateInfoDto, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
         .clear_template()
         .await
         .map_err(instance_error)?
@@ -1673,8 +1892,11 @@ pub async fn preview_instance_deletion(
     facade: State<'_, Facade>,
     locks: State<'_, InstanceLocks>,
 ) -> Result<DeletionPreviewDto, CommandError> {
-    let aurora = facade.snapshot().await;
-    let preview = aurora.deletion_preview(&id).await.map_err(instance_error)?;
+    let petalfall = facade.snapshot().await;
+    let preview = petalfall
+        .deletion_preview(&id)
+        .await
+        .map_err(instance_error)?;
     Ok(preview_dto(preview, &locks))
 }
 
@@ -1708,7 +1930,7 @@ pub(crate) async fn delete_instance_with(
     // 目录已不在（重复删除、在启动器外删掉）时也清：残留的记录会被之后新建的同名实例继承。
     let records = snapshot.forget_play_records(id).await;
     let refs = facade
-        .update_if_changed(|aurora| aurora.forget_instance(id))
+        .update_if_changed(|petalfall| petalfall.forget_instance(id))
         .await;
     follow_up(refs, records, |err| {
         play_records_failed(err, "实例已删除", json!({ "id": id }))
@@ -1722,7 +1944,7 @@ pub(crate) async fn delete_instance_with(
 /// 改名还有第三路（存档备份），见 [`follow_up_backups`]。
 fn follow_up(
     refs: Result<bool, CoreError>,
-    records: aurora_core::Result<()>,
+    records: petalfall_core::Result<()>,
     records_failed: impl FnOnce(CoreError) -> CommandError,
 ) -> Result<(), CommandError> {
     match (refs, records) {
@@ -1749,7 +1971,7 @@ fn play_records_failed(err: CoreError, done: &str, extra: Value) -> CommandError
 /// 前两路也有失败时报前两路的错误（侧栏、列表与统计是界面上马上看得见的），备份的错误只进日志。
 fn follow_up_backups(
     earlier: Result<(), CommandError>,
-    backups: aurora_core::Result<()>,
+    backups: petalfall_core::Result<()>,
     not_moved: impl FnOnce(CoreError) -> CommandError,
 ) -> Result<(), CommandError> {
     match (earlier, backups) {
@@ -1830,7 +2052,7 @@ pub(crate) async fn rename_instance_with(
     // 备份按实例 id 分目录放，不跟着挪的话改名后的实例就看不到改名前的备份。
     let backups = snapshot.rename_world_backups(id, new_name).await;
     let refs = facade
-        .update_if_changed(|aurora| aurora.rename_instance_refs(id, new_name))
+        .update_if_changed(|petalfall| petalfall.rename_instance_refs(id, new_name))
         .await;
     let earlier = follow_up(refs, records, |err| {
         play_records_failed(
@@ -1847,13 +2069,293 @@ pub(crate) async fn rename_instance_with(
     })
 }
 
+// ---------------------------------------------------------------- 移到另一个游戏目录
+
+/// 把实例从当前游戏目录移到 `target` 前的预检，不写盘、不占实例：要搬多少、目标盘够不够、有没有拦着的问题。
+/// `target` 可以是还没记录、甚至还不存在的文件夹；不是绝对路径或含 `!` 时报 `invalid_game_directory`。
+#[tauri::command]
+pub async fn preview_instance_move(
+    id: String,
+    target: String,
+    facade: State<'_, Facade>,
+) -> Result<MovePreviewDto, CommandError> {
+    preview_instance_move_with(&facade, &id, &target).await
+}
+
+pub(crate) async fn preview_instance_move_with(
+    facade: &Facade,
+    id: &str,
+    target: &str,
+) -> Result<MovePreviewDto, CommandError> {
+    let target = validate_game_dir(target)?;
+    let snapshot = facade.snapshot().await;
+    let preview = snapshot
+        .preview_instance_move(id, &target)
+        .await
+        .map_err(instance_error)?;
+    Ok(move_preview_dto(
+        preview,
+        snapshot.game_directory_name(&target),
+        snapshot.is_known_game_directory(&target),
+    ))
+}
+
+/// 把实例从 `source` 移到 `target`：实例目录、存档备份与游玩记录跟过去，目标缺的库、资源与基底版本从原目录
+/// 补过去；原目录里的侧栏固定与当前选中去掉，目标还没记录时记进游戏目录列表。长任务：进度经 core-event 推送并带
+/// `task_id`，提交开始之前可经 `cancel_task(taskId)` 取消，之后不再理会取消、照常成功返回。
+///
+/// `source` 是发起时实例所在的游戏目录（入队那一刻的当前目录）。同名实例在别的游戏目录里是另一个实例：执行时
+/// 当前目录已经不是它（切换目录后重试）就报 `instance_move_blocked`，detail.blocker 为 `source_changed`，什么都不动。
+///
+/// 实例在忙报 `instance_busy`；执行前重新预检有拦着的问题报 `instance_move_blocked`（detail.blocker 同预检
+/// 的一项）；跨盘复制读回比对不上报 `instance_move_verify_failed`，已回滚、原件没动。文件已经移好、只是配置没能
+/// 落盘时照常成功返回，follow_ups 带一项 config：这时原目录的固定与选中还在、目标也没记进列表（registered 为
+/// false），下次启动收尾时补上。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn move_instance(
+    app: AppHandle,
+    task_id: String,
+    id: String,
+    source: String,
+    target: String,
+    facade: State<'_, Facade>,
+    tasks: State<'_, TaskRegistry>,
+    locks: State<'_, InstanceLocks>,
+) -> Result<MoveOutcomeDto, CommandError> {
+    let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
+    let outcome = move_instance_with(
+        &facade,
+        &tasks,
+        &locks,
+        &task_id,
+        MoveArgs {
+            id: &id,
+            source: &source,
+            target: &target,
+        },
+        events.sink(),
+    )
+    .await;
+    events.finish().await;
+    crate::textures::refresh_on_success(&app, &outcome).await;
+    outcome
+}
+
+/// `move_instance` 的参数，两个目录还没校验。
+pub(crate) struct MoveArgs<'a> {
+    pub id: &'a str,
+    pub source: &'a str,
+    pub target: &'a str,
+}
+
+pub(crate) async fn move_instance_with(
+    facade: &Facade,
+    tasks: &TaskRegistry,
+    locks: &InstanceLocks,
+    task_id: &str,
+    args: MoveArgs<'_>,
+    events: &EventSink,
+) -> Result<MoveOutcomeDto, CommandError> {
+    let source = validate_game_dir(args.source)?;
+    let target = validate_game_dir(args.target)?;
+    let id = args.id;
+    let snapshot = facade.snapshot().await;
+    // 基底的版本 JSON 与客户端 jar 要补到目标里：移动期间基底不能被删、改名或补全。
+    let _guard = locks
+        .acquire_with_chain(id, InstanceActivity::Moving, async {
+            snapshot.inheritance_chain(id).await.map_err(instance_error)
+        })
+        .await?;
+    let task = tasks.register(task_id)?;
+    let petalfall = snapshot.with_cancel(task.token().clone());
+    // 不走 TaskHandle::run：门面在提交开始前自己看令牌，提交一旦开始就要做完；宽限期满丢弃 future 只是不再等它，
+    // 后台线程照样把目录挪过去，用户却收到「已取消」，实例也放开了，配置里的引用更没人去改。
+    let outcome = petalfall
+        .move_instance_files(
+            &MoveRequest {
+                id: id.to_owned(),
+                source_game_dir: source,
+                target_game_dir: target,
+            },
+            Some(events.clone()),
+        )
+        .await
+        .map_err(instance_error)?;
+    let (refs, saved) = settle_move_refs(facade, &outcome).await;
+    let mut follow_ups: Vec<MoveFollowUpDto> = outcome
+        .follow_ups
+        .into_iter()
+        .map(move_follow_up_dto)
+        .collect();
+    // 文件已经在目标里、原件已删，报错只会让玩家以为没移成；配置等启动收尾补，这里如实告诉他差了哪一步。
+    let registered = match saved {
+        Ok(()) => refs.registered,
+        Err(err) => {
+            let reason = petalfall_base::error_with_causes(&err);
+            tracing::warn!(id = outcome.id, %reason, "实例已移好，配置没存上，下次启动补");
+            follow_ups.push(MoveFollowUpDto::Config { reason });
+            false
+        }
+    };
+    Ok(MoveOutcomeDto {
+        id: outcome.id,
+        source: outcome.source_game_dir.display().to_string(),
+        target: outcome.target_game_dir.display().to_string(),
+        target_name: refs.target_name,
+        registered,
+        follow_ups,
+    })
+}
+
+/// 一次提交了的移动改在配置上的结果。
+struct MovedRefs {
+    changed: bool,
+    /// 目标不在游戏目录列表里、这次要记进去。
+    registered: bool,
+    target_name: String,
+}
+
+/// 移动提交后改配置：`forget_source_refs` 为真才去掉原目录里对实例的引用，为假时原目录里此后又有了同名的新实例，
+/// 那些固定与选中是新实例的；目标还不在游戏目录列表里就以推出的名字记进去，否则移过去的实例在哪个列表里都找不到。
+/// 在门面的可变副本上现场判断，不用开工时的快照：移动期间玩家可能切换了当前目录，甚至切到了目标。
+fn apply_move_refs(petalfall: &mut Petalfall, outcome: &MoveOutcome) -> MovedRefs {
+    let forgot = outcome.forget_source_refs
+        && petalfall.forget_moved_instance(&outcome.id, &outcome.source_game_dir);
+    let target = &outcome.target_game_dir;
+    let registered = !petalfall.is_known_game_directory(target);
+    let target_name = petalfall.game_directory_name(target);
+    if registered {
+        petalfall.add_game_directory(target_name.clone(), target);
+    }
+    MovedRefs {
+        changed: forgot || registered,
+        registered,
+        target_name,
+    }
+}
+
+/// 把提交了的移动落到配置上，存好了（或本来就不用改）才确认。存不上时不确认：移动日志留着，下次启动收尾再交出
+/// Completed，照这里再做一遍。返回改动与存盘的结果；存盘失败时门面没换进改动，`registered` 不作数。
+async fn settle_move_refs(
+    facade: &Facade,
+    outcome: &MoveOutcome,
+) -> (MovedRefs, Result<(), CoreError>) {
+    let mut applied = None;
+    let saved = facade
+        .update_if_changed(|petalfall| {
+            let refs = apply_move_refs(petalfall, outcome);
+            let changed = refs.changed;
+            applied = Some(refs);
+            changed
+        })
+        .await;
+    let applied = applied.expect("update_if_changed 总会调用改动闭包");
+    if saved.is_ok() {
+        confirm_move(facade, outcome).await;
+    }
+    (applied, saved.map(drop))
+}
+
+/// 确认失败只记日志：配置已经存好，日志留着的话下次启动收尾再交出一次 Completed，按同样的口径再改一遍不会多改。
+async fn confirm_move(facade: &Facade, outcome: &MoveOutcome) {
+    let confirmed = facade
+        .snapshot()
+        .await
+        .confirm_instance_move(&outcome.token)
+        .await;
+    if let Err(err) = confirmed {
+        tracing::warn!(
+            id = outcome.id,
+            token = outcome.token,
+            error = %petalfall_base::error_with_causes(&err),
+            "移动的配置已存好，日志没删掉，下次启动再确认"
+        );
+    }
+}
+
+/// 启动时在后台收尾上次中断的移动。
+pub fn recover_moves_in_background(app: &AppHandle) {
+    use tauri::Manager;
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        recover_moves(&app.state::<Facade>()).await;
+    });
+}
+
+/// 结论与失败都只进日志：这时还没有界面能提示，而移动日志留着，下次启动会再收一次；为它拦住启动的话，
+/// 启动器就打不开了。
+pub(crate) async fn recover_moves(facade: &Facade) {
+    let recoveries = match facade.snapshot().await.recover_instance_moves().await {
+        Ok(recoveries) => recoveries,
+        Err(err) => {
+            tracing::error!(error = %err, "收尾中断的实例移动失败，下次启动再试");
+            return;
+        }
+    };
+    for recovery in recoveries {
+        settle_move_recovery(facade, recovery).await;
+    }
+}
+
+/// 只有 Completed 改配置并确认，照正常移动的口径：命令当时没能把配置存好并确认（中途退出了，或配置存不上）。
+async fn settle_move_recovery(facade: &Facade, recovery: MoveRecovery) {
+    match recovery {
+        MoveRecovery::RolledBack {
+            id,
+            source_game_dir,
+            target_game_dir,
+        } => tracing::info!(
+            id,
+            source = %source_game_dir.display(),
+            target = %target_game_dir.display(),
+            "中断的实例移动已回滚，实例留在原游戏目录"
+        ),
+        MoveRecovery::Completed(outcome) => {
+            let (refs, saved) = settle_move_refs(facade, &outcome).await;
+            match saved {
+                Ok(()) => tracing::info!(
+                    id = outcome.id,
+                    source = %outcome.source_game_dir.display(),
+                    target = %outcome.target_game_dir.display(),
+                    forget_source_refs = outcome.forget_source_refs,
+                    registered = refs.registered,
+                    follow_ups = ?outcome.follow_ups,
+                    "中断的实例移动已补完"
+                ),
+                Err(err) => tracing::error!(
+                    id = outcome.id,
+                    source = %outcome.source_game_dir.display(),
+                    target = %outcome.target_game_dir.display(),
+                    error = %petalfall_base::error_with_causes(&err),
+                    "中断的实例移动已补完，但配置没能保存，下次启动再补"
+                ),
+            }
+        }
+        // 配置在确认的那一次已经存好；再改的话，原目录里此后新建的同名实例会被摘掉固定与选中。
+        MoveRecovery::Settled {
+            id,
+            source_game_dir,
+            target_game_dir,
+        } => tracing::info!(
+            id,
+            source = %source_game_dir.display(),
+            target = %target_game_dir.display(),
+            "中断的实例移动早已迁完，这次清掉了残留"
+        ),
+        MoveRecovery::Deferred { id, reason } => {
+            tracing::warn!(id, reason, "中断的实例移动这次收不了尾，下次启动再试")
+        }
+    }
+}
+
 // ---------------------------------------------------------------- 新建页的元数据
 
 /// 版本清单，每个版本附带可安装的加载器。断网时退回上次的缓存，并给出缓存时刻与原因。
 #[tauri::command]
 pub async fn list_manifest(facade: State<'_, Facade>) -> Result<ManifestDto, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(manifest_dto(aurora.manifest_overview().await?))
+    let petalfall = facade.snapshot().await;
+    Ok(manifest_dto(petalfall.manifest_overview().await?))
 }
 
 /// 某加载器对某游戏版本的全部可用版本，新的在前。
@@ -1864,8 +2366,8 @@ pub async fn list_loader_versions(
     facade: State<'_, Facade>,
 ) -> Result<Vec<LoaderVersionDto>, CommandError> {
     let choice = parse_loader_choice(&loader)?;
-    let aurora = facade.snapshot().await;
-    Ok(aurora
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall
         .list_loader_versions(choice, &mc_version)
         .await?
         .into_iter()
@@ -1882,8 +2384,8 @@ pub async fn required_java(
     mc_version: String,
     facade: State<'_, Facade>,
 ) -> Result<u32, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.required_java(&mc_version).await?)
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.required_java(&mc_version).await?)
 }
 
 /// 新建这个游戏版本的实例要的 Java 主版本与全新下载体积。版本清单不带这两项，每个版本取一次
@@ -1893,8 +2395,8 @@ pub async fn version_requirements(
     mc_version: String,
     facade: State<'_, Facade>,
 ) -> Result<VersionRequirementsDto, CommandError> {
-    let aurora = facade.snapshot().await;
-    let requirements = aurora.version_requirements(&mc_version).await?;
+    let petalfall = facade.snapshot().await;
+    let requirements = petalfall.version_requirements(&mc_version).await?;
     Ok(VersionRequirementsDto {
         java_major: requirements.java_major,
         download_bytes: requirements.download_bytes,
@@ -2000,7 +2502,7 @@ fn reveal_target(
             "not_launcher_output",
             format!(
                 "只能定位{}自己产出的文件：{path}",
-                aurora_base::brand::APP_NAME
+                petalfall_base::brand::APP_NAME
             ),
         )
     };
@@ -2022,7 +2524,7 @@ fn existing_real_path(path: &Path) -> Result<Option<PathBuf>, CommandError> {
     match std::fs::canonicalize(path) {
         Ok(real) => Ok(Some(real)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(CommandError::from(aurora_core::BaseError::Io {
+        Err(source) => Err(CommandError::from(petalfall_core::BaseError::Io {
             path: path.to_path_buf(),
             source,
         })),
@@ -2046,26 +2548,26 @@ pub(crate) async fn folder_path(
     id: Option<&str>,
     world: Option<&str>,
 ) -> Result<PathBuf, CommandError> {
-    let aurora = facade.snapshot().await;
+    let petalfall = facade.snapshot().await;
     let require_id =
         || id.ok_or_else(|| invalid_field("id", "missing", format!("打开 {target} 需要实例 id")));
     match target {
         "game_dir" => {
-            let dir = aurora.game_dir().to_path_buf();
+            let dir = petalfall.game_dir().to_path_buf();
             ensure_dir(&dir).await?;
             Ok(dir)
         }
         "data_dir" => {
-            let dir = aurora.data_dir().to_path_buf();
+            let dir = petalfall.data_dir().to_path_buf();
             ensure_dir(&dir).await?;
             Ok(dir)
         }
         "launcher_logs" => {
-            let dir = aurora.data_dir().join(crate::logging::LOGS_DIR);
+            let dir = petalfall.data_dir().join(crate::logging::LOGS_DIR);
             ensure_dir(&dir).await?;
             Ok(dir)
         }
-        "instance" => Ok(aurora
+        "instance" => Ok(petalfall
             .existing_instance_dir(require_id()?)
             .await
             .map_err(instance_error)?),
@@ -2073,7 +2575,10 @@ pub(crate) async fn folder_path(
             let id = require_id()?;
             // 缺了要建出来：和工作子目录一样先占住实例，不然可能建进正在改名或删除的目录，留下一个空壳
             let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
-            let dir = aurora.session_logs_dir(id).await.map_err(instance_error)?;
+            let dir = petalfall
+                .session_logs_dir(id)
+                .await
+                .map_err(instance_error)?;
             ensure_dir(&dir).await?;
             Ok(dir)
         }
@@ -2087,7 +2592,7 @@ pub(crate) async fn folder_path(
                     format!("存档文件夹名不合法：{world:?}"),
                 ));
             }
-            let resolved = aurora
+            let resolved = petalfall
                 .resolve_working_dir(require_id()?)
                 .await
                 .map_err(instance_error)?;
@@ -2104,7 +2609,7 @@ pub(crate) async fn folder_path(
         sub if WORKING_SUBDIRS.contains(&sub) => {
             let id = require_id()?;
             let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
-            let resolved = aurora
+            let resolved = petalfall
                 .resolve_working_dir(id)
                 .await
                 .map_err(instance_error)?;
@@ -2122,7 +2627,7 @@ pub(crate) async fn folder_path(
 
 async fn ensure_dir(dir: &Path) -> Result<(), CommandError> {
     tokio::fs::create_dir_all(dir).await.map_err(|source| {
-        CommandError::from(aurora_core::BaseError::Io {
+        CommandError::from(petalfall_core::BaseError::Io {
             path: dir.to_path_buf(),
             source,
         })
@@ -2269,7 +2774,7 @@ fn check_export_dest(dest: &str) -> Result<PathBuf, CommandError> {
 /// 共用存档的跨实例检查。实例锁只管自己这个实例，可游戏同时只跑一个：另一个也不隔离的实例正开着游戏时，
 /// 它可能正打开着这份共用存档，打包会拿到半截、恢复会被它下次保存盖掉。
 async fn ensure_shared_world_free(
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     game: &GameSlot,
     id: &str,
 ) -> Result<(), CommandError> {
@@ -2280,10 +2785,15 @@ async fn ensure_shared_world_free(
     if lock_key(&other) == lock_key(id) {
         return Ok(());
     }
-    if aurora.world_scope(id).await.map_err(instance_error)? != WorldScope::Shared {
+    if petalfall.world_scope(id).await.map_err(instance_error)? != WorldScope::Shared {
         return Ok(());
     }
-    if aurora.world_scope(&other).await.map_err(instance_error)? != WorldScope::Shared {
+    if petalfall
+        .world_scope(&other)
+        .await
+        .map_err(instance_error)?
+        != WorldScope::Shared
+    {
         return Ok(());
     }
     let activity = if running {
@@ -2297,7 +2807,7 @@ async fn ensure_shared_world_free(
 /// 启动前的共用存档检查，与 [`ensure_shared_world_free`] 方向相反：另一个也不隔离的实例正在备份、恢复或
 /// 导出共用存档时，这个实例的游戏一起来就可能打开同一份存档，边写边打包得到的备份是半截的。
 pub(crate) async fn ensure_shared_worlds_settled(
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     locks: &InstanceLocks,
     id: &str,
 ) -> Result<(), CommandError> {
@@ -2310,11 +2820,16 @@ pub(crate) async fn ensure_shared_worlds_settled(
     if others.is_empty() {
         return Ok(());
     }
-    if aurora.world_scope(id).await.map_err(instance_error)? != WorldScope::Shared {
+    if petalfall.world_scope(id).await.map_err(instance_error)? != WorldScope::Shared {
         return Ok(());
     }
     for other in others {
-        if aurora.world_scope(&other).await.map_err(instance_error)? == WorldScope::Shared {
+        if petalfall
+            .world_scope(&other)
+            .await
+            .map_err(instance_error)?
+            == WorldScope::Shared
+        {
             return Err(busy(&other, InstanceActivity::BackingUp));
         }
     }
@@ -2324,7 +2839,7 @@ pub(crate) async fn ensure_shared_worlds_settled(
 /// 导出整合包要把存档整份读走：本实例在启动、运行、备份或恢复，或共用这份存档的别的实例开着游戏、在备份或
 /// 恢复时，存档随时在变，读到的是半截。调用方已占住自己并记下正在读存档，都是先写自己的、再读对方的。
 pub(crate) async fn ensure_saves_settled_for_reading(
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     locks: &InstanceLocks,
     game: &GameSlot,
     id: &str,
@@ -2340,44 +2855,44 @@ pub(crate) async fn ensure_saves_settled_for_reading(
     {
         return Err(busy(id, activity));
     }
-    ensure_shared_world_free(aurora, game, id).await?;
-    ensure_shared_worlds_settled(aurora, locks, id).await?;
-    ensure_saves_not_written(aurora, locks, id).await
+    ensure_shared_world_free(petalfall, game, id).await?;
+    ensure_shared_worlds_settled(petalfall, locks, id).await?;
+    ensure_saves_not_written(petalfall, locks, id).await
 }
 
 /// 装数据包写的是 `saves/<存档>/datapacks`：本实例或共用这份存档的实例在备份、恢复或把存档打进整合包时，写进去
 /// 的文件会让打包读到半截、让恢复的改名就位失败。调用方已占住自己并记下正在写存档。
 pub(crate) async fn ensure_saves_free_for_writing(
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     locks: &InstanceLocks,
     id: &str,
 ) -> Result<(), CommandError> {
     if locks.occupancy(id).0 == Some(InstanceActivity::BackingUp) {
         return Err(busy(id, InstanceActivity::BackingUp));
     }
-    ensure_shared_worlds_settled(aurora, locks, id).await?;
-    ensure_saves_not_read(aurora, locks, id).await
+    ensure_shared_worlds_settled(petalfall, locks, id).await?;
+    ensure_saves_not_read(petalfall, locks, id).await
 }
 
 /// 启动前的存档检查：别的不隔离实例在备份或恢复共用存档，或者本实例、共用这份存档的实例正把存档打进整合包时，
 /// 游戏一起来就可能写这份存档。调用方已占住自己，导出那边先记下再查，两边至少有一方看得到对方。
 pub(crate) async fn ensure_saves_free_for_launch(
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     locks: &InstanceLocks,
     id: &str,
 ) -> Result<(), CommandError> {
-    ensure_shared_worlds_settled(aurora, locks, id).await?;
-    ensure_saves_not_read(aurora, locks, id).await
+    ensure_shared_worlds_settled(petalfall, locks, id).await?;
+    ensure_saves_not_read(petalfall, locks, id).await
 }
 
 /// 恢复要替换存档：本实例，或共用这份存档的另一个不隔离实例，正在把存档打进整合包时报 instance_busy，
 /// detail 指向导出的那个实例。导出对外是「改动中」，所以 activity 报 modifying，正文写明是在导出。
 async fn ensure_saves_not_read(
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     locks: &InstanceLocks,
     id: &str,
 ) -> Result<(), CommandError> {
-    match saves_holder(aurora, id, locks.reading_saves()).await? {
+    match saves_holder(petalfall, id, locks.reading_saves()).await? {
         Some(reader) => Err(saves_busy(
             &reader,
             format!("实例 {reader} 正在导出带存档的整合包，请稍后再试"),
@@ -2389,11 +2904,11 @@ async fn ensure_saves_not_read(
 /// 备份、恢复、导出存档与带存档的导出整合包：本实例或共用这份存档的实例正在往存档里装数据包时报
 /// instance_busy，detail 指向装数据包的那个实例。
 async fn ensure_saves_not_written(
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     locks: &InstanceLocks,
     id: &str,
 ) -> Result<(), CommandError> {
-    match saves_holder(aurora, id, locks.writing_saves()).await? {
+    match saves_holder(petalfall, id, locks.writing_saves()).await? {
         Some(writer) => Err(saves_busy(
             &writer,
             format!("实例 {writer} 正在往存档里装数据包，请稍后再试"),
@@ -2404,7 +2919,7 @@ async fn ensure_saves_not_written(
 
 /// `marked` 里和实例 `id` 用同一份存档的那个实例：它自己，或者同为不隔离的实例。
 async fn saves_holder(
-    aurora: &Aurora,
+    petalfall: &Petalfall,
     id: &str,
     marked: Vec<String>,
 ) -> Result<Option<String>, CommandError> {
@@ -2415,11 +2930,16 @@ async fn saves_holder(
     if let Some(own) = marked.iter().find(|m| lock_key(m) == lock_key(id)) {
         return Ok(Some(own.clone()));
     }
-    if aurora.world_scope(id).await.map_err(instance_error)? != WorldScope::Shared {
+    if petalfall.world_scope(id).await.map_err(instance_error)? != WorldScope::Shared {
         return Ok(None);
     }
     for other in marked {
-        if aurora.world_scope(&other).await.map_err(instance_error)? == WorldScope::Shared {
+        if petalfall
+            .world_scope(&other)
+            .await
+            .map_err(instance_error)?
+            == WorldScope::Shared
+        {
             return Ok(Some(other));
         }
     }
@@ -2447,7 +2967,7 @@ async fn begin_world_task<'a>(
     task_id: &str,
     id: &str,
     replaces_saves: bool,
-) -> Result<(InstanceGuard, TaskHandle<'a>, Aurora), CommandError> {
+) -> Result<(InstanceGuard, TaskHandle<'a>, Petalfall), CommandError> {
     let guard = env.locks.acquire(id, InstanceActivity::BackingUp)?;
     let snapshot = env.facade.snapshot().await;
     ensure_shared_world_free(&snapshot, env.game, id).await?;
@@ -2457,8 +2977,8 @@ async fn begin_world_task<'a>(
     }
     ensure_saves_not_written(&snapshot, env.locks, id).await?;
     let task = env.tasks.register(task_id)?;
-    let aurora = snapshot.with_cancel(task.token().clone());
-    Ok((guard, task, aurora))
+    let petalfall = snapshot.with_cancel(task.token().clone());
+    Ok((guard, task, petalfall))
 }
 
 /// 手动备份一个存档（工作目录下 `saves/<world>`）。长任务：进度经 core-event 推送并带 `task_id`，可取消，
@@ -2500,10 +3020,10 @@ pub(crate) async fn backup_world_with(
 ) -> Result<BackupResultDto, CommandError> {
     check_instance_id(id)?;
     check_world(world)?;
-    let (_guard, task, aurora) = begin_world_task(env, task_id, id, false).await?;
+    let (_guard, task, petalfall) = begin_world_task(env, task_id, id, false).await?;
     let outcome = task
         .run(async {
-            aurora
+            petalfall
                 .backup_world(id, world, BackupKind::Manual, Some(events))
                 .await
                 .map_err(instance_error)
@@ -2531,8 +3051,8 @@ pub(crate) async fn list_world_backups_with(
     world: &str,
 ) -> Result<WorldBackupListDto, CommandError> {
     check_world(world)?;
-    let aurora = facade.snapshot().await;
-    let list = aurora
+    let petalfall = facade.snapshot().await;
+    let list = petalfall
         .list_world_backups(id, world)
         .await
         .map_err(instance_error)?;
@@ -2590,11 +3110,11 @@ pub(crate) async fn restore_world_backup_with(
     check_instance_id(id)?;
     check_world(world)?;
     check_backup_file(file)?;
-    let (_guard, _task, aurora) = begin_world_task(env, task_id, id, true).await?;
+    let (_guard, _task, petalfall) = begin_world_task(env, task_id, id, true).await?;
     // 不走 TaskHandle::run：解压阶段自己看令牌，取消时很快停下；换存档一旦开始就停不下来了，宽限期满丢弃
     // future 只是不再等它，后台线程照样换完，用户却收到「已取消」，实例也放开了，半途就能启动游戏。
     // 新副本没能就位时也得照实报出它在哪，不能被 run 盖成取消。
-    let outcome = aurora
+    let outcome = petalfall
         .restore_world_backup(id, world, file, disposer, Some(events))
         .await
         .map_err(instance_error)?;
@@ -2631,8 +3151,8 @@ pub(crate) async fn delete_world_backup_with(
     // 备份目录按实例名放，改名时整个挪走，挪的时候不看存档锁：不占住实例的话，这边删到一半，清单会按旧路径
     // 重新写出来，挪过去的清单里却还记着删掉的那份。
     let _guard = locks.acquire(id, InstanceActivity::Modifying)?;
-    let aurora = facade.snapshot().await;
-    aurora
+    let petalfall = facade.snapshot().await;
+    petalfall
         .delete_world_backup(id, world, file, disposer)
         .await
         .map_err(instance_error)
@@ -2682,10 +3202,10 @@ pub(crate) async fn export_world_with(
     check_instance_id(id)?;
     check_world(world)?;
     let dest = check_export_dest(dest)?;
-    let (_guard, task, aurora) = begin_world_task(env, task_id, id, false).await?;
+    let (_guard, task, petalfall) = begin_world_task(env, task_id, id, false).await?;
     let outcome = task
         .run(async {
-            aurora
+            petalfall
                 .export_world(id, world, &dest, Some(events))
                 .await
                 .map_err(instance_error)
@@ -2704,7 +3224,9 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::time::{Duration, Instant};
 
-    use aurora_core::{AuroraConfig, ConfigStore, CoreEvent, DownloadSourcePolicy};
+    use petalfall_core::{
+        ConfigStore, CoreEvent, DownloadSourcePolicy, MoveBlocker, PetalfallConfig,
+    };
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2772,22 +3294,22 @@ mod tests {
             Self::with(|a| a)
         }
 
-        fn with(customize: impl FnOnce(Aurora) -> Aurora) -> Self {
+        fn with(customize: impl FnOnce(Petalfall) -> Petalfall) -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let config = AuroraConfig {
+            let config = PetalfallConfig {
                 game_directory: Some(dir.path().join(".minecraft")),
                 download_source: DownloadSourcePolicy::OfficialFirst,
                 version_list_source: DownloadSourcePolicy::OfficialFirst,
-                ..AuroraConfig::default()
+                ..PetalfallConfig::default()
             };
-            let aurora = Aurora::open(
+            let petalfall = Petalfall::open(
                 config,
                 dir.path().to_path_buf(),
                 dir.path().join("config.json"),
             )
             .unwrap();
             Self {
-                facade: Arc::new(Facade::new(customize(aurora))),
+                facade: Arc::new(Facade::new(customize(petalfall))),
                 dir,
             }
         }
@@ -2810,7 +3332,7 @@ mod tests {
             )
         }
 
-        async fn saved_config(&self) -> AuroraConfig {
+        async fn saved_config(&self) -> PetalfallConfig {
             ConfigStore::at(self.dir.path().join("config.json"))
                 .load()
                 .await
@@ -3009,7 +3531,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.code, common::INSTALL_FAILED);
 
-        let list = list_instances_with(&env.facade, &InstanceLocks::default())
+        let list = list_instances_with(&env.facade, &InstanceLocks::default(), &test_textures())
             .await
             .unwrap();
         assert_eq!(list.len(), 1);
@@ -3046,7 +3568,7 @@ mod tests {
             .await;
         let uri = server.uri();
         let env = Env::with(|mut a| {
-            a.set_isolation_policy(aurora_core::IsolationPolicy::All);
+            a.set_isolation_policy(petalfall_core::IsolationPolicy::All);
             a.with_manifest_url(format!("{uri}/manifest.json"))
         });
         let template = env.dir.path().join("templates").join("default");
@@ -3236,7 +3758,9 @@ mod tests {
             .unwrap();
         assert!(!outcome.reinstalled);
         assert!(dir.is_dir());
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(list[0].incomplete, None, "补全成功后标记清除");
         let mut saw_marker_stage = false;
         while let Ok(event) = rx.try_recv() {
@@ -3258,7 +3782,9 @@ mod tests {
             .await
             .unwrap_err();
         assert_ne!(err.code, common::CANCELLED);
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let broken = list.iter().find(|i| i.id == "坏库").unwrap();
         let incomplete = broken.incomplete.as_ref().unwrap();
         assert_eq!((incomplete.kind, incomplete.outcome), ("repair", "failed"));
@@ -3313,7 +3839,9 @@ mod tests {
             .unwrap_err();
         assert_ne!(err.code, common::CANCELLED);
         assert_eq!(stage_messages(&mut rx), vec!["查找原版 1.21.1".to_owned()]);
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let incomplete = list[0].incomplete.as_ref().unwrap();
         assert_eq!((incomplete.kind, incomplete.outcome), ("install", "failed"));
         assert_eq!(
@@ -3351,7 +3879,9 @@ mod tests {
             stage_messages(&mut rx),
             vec!["补全实例 FAB 的文件".to_owned()]
         );
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let incomplete = list[0].incomplete.as_ref().unwrap();
         assert_eq!((incomplete.kind, incomplete.outcome), ("repair", "failed"));
         assert_eq!(
@@ -3404,7 +3934,7 @@ mod tests {
 
         assert!(!registry.is_running("r1"));
         assert!(!registry.is_running("r2"));
-        assert!(!aurora_core::MarkerStore::for_version_dir(&dir)
+        assert!(!petalfall_core::MarkerStore::for_version_dir(&dir)
             .path()
             .exists());
         assert_eq!(locks.activity("FAB"), None);
@@ -3431,7 +3961,7 @@ mod tests {
             err.detail.unwrap()["reason"],
             json!("没有装加载器，不需要重新安装")
         );
-        assert!(!aurora_core::MarkerStore::for_version_dir(&dir)
+        assert!(!petalfall_core::MarkerStore::for_version_dir(&dir)
             .path()
             .exists());
         assert_eq!(locks.activity("1.21.1"), None);
@@ -3522,7 +4052,9 @@ mod tests {
         }
 
         assert_eq!(locks.activity("1.20.1"), Some(InstanceActivity::Inherited));
-        let listed = list_instances_with(&env.facade, &locks).await.unwrap();
+        let listed = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let base = listed.iter().find(|i| i.id == "1.20.1").unwrap();
         assert_eq!(base.activity, Some(InstanceActivity::Inherited));
         assert_eq!(base.used_by.as_deref(), Some("FAB"));
@@ -3572,9 +4104,9 @@ mod tests {
         let dir = env.vanilla("旧档");
         env.vanilla("留下");
         env.facade
-            .update(|aurora| {
-                aurora.set_sidebar_pins(vec!["旧档".into(), "留下".into()]);
-                aurora.set_selected_version(Some("旧档".into()));
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["旧档".into(), "留下".into()]);
+                petalfall.set_selected_version(Some("旧档".into()));
                 Ok::<_, CommandError>(())
             })
             .await
@@ -3619,7 +4151,7 @@ mod tests {
     async fn half_import_left_by_a_closed_launcher_is_listed_and_deletable() {
         let env = Env::new();
         let dir = env.game_dir().join("versions").join("RLCraft");
-        aurora_core::MarkerStore::for_version_dir(&dir)
+        petalfall_core::MarkerStore::for_version_dir(&dir)
             .save(&IncompleteMarker::pending(
                 IncompleteKind::Modpack {
                     task_id: "mp#9".into(),
@@ -3630,7 +4162,9 @@ mod tests {
             .unwrap();
         let locks = InstanceLocks::default();
 
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(list.len(), 1);
         let entry = &list[0];
         assert_eq!(entry.id, "RLCraft");
@@ -3653,7 +4187,7 @@ mod tests {
         assert!(!dir.exists());
         snapshot.ensure_modpack_name_free("RLCraft").await.unwrap();
         snapshot.check_new_instance_name("RLCraft").await.unwrap();
-        assert!(list_instances_with(&env.facade, &locks)
+        assert!(list_instances_with(&env.facade, &locks, &test_textures())
             .await
             .unwrap()
             .is_empty());
@@ -3703,9 +4237,9 @@ mod tests {
         let dir = env.vanilla("1.21.1");
         std::fs::write(dir.join("1.21.1.jar"), b"jar").unwrap();
         env.facade
-            .update(|aurora| {
-                aurora.set_sidebar_pins(vec!["1.21.1".into()]);
-                aurora.set_selected_version(Some("1.21.1".into()));
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["1.21.1".into()]);
+                petalfall.set_selected_version(Some("1.21.1".into()));
                 Ok::<_, CommandError>(())
             })
             .await
@@ -3728,14 +4262,16 @@ mod tests {
         assert_eq!(locks.activity("生存"), None);
         assert_eq!(locks.activity("1.21.1"), None);
 
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(list[0].id, "生存");
         assert_eq!(list[0].mc_version.as_deref(), Some("1.21.1"));
     }
 
     fn write_playtime(env: &Env, json: &str) {
         std::fs::write(
-            env.dir.path().join(aurora_core::playtime::PLAYTIME_FILE),
+            env.dir.path().join(petalfall_core::playtime::PLAYTIME_FILE),
             json,
         )
         .unwrap();
@@ -3759,7 +4295,9 @@ mod tests {
         rename_instance_with(&env.facade, &locks, "周末生存", "生存服")
             .await
             .unwrap();
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let renamed = list.iter().find(|i| i.id == "生存服").unwrap();
         assert_eq!(renamed.playtime_min, Some(90));
         assert_eq!(renamed.last_played_at, Some(1_761_832_800_000));
@@ -3767,7 +4305,7 @@ mod tests {
             .facade
             .snapshot()
             .await
-            .play_stats(aurora_core::PlayRange::parse("2026-10-30", "2026-10-30").unwrap())
+            .play_stats(petalfall_core::PlayRange::parse("2026-10-30", "2026-10-30").unwrap())
             .await
             .unwrap();
         let ids: Vec<&str> = stats
@@ -3782,7 +4320,9 @@ mod tests {
             .await
             .unwrap();
         env.vanilla("生存服");
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let fresh = list.iter().find(|i| i.id == "生存服").unwrap();
         assert_eq!(
             fresh.playtime_min,
@@ -3797,8 +4337,8 @@ mod tests {
     async fn switch_game_dir(env: &Env, game_dir: &Path) {
         let current = env.facade.snapshot().await.probe_current_game_dir().await;
         env.facade
-            .update(|aurora| {
-                aurora.switch_game_directory(game_dir, &current);
+            .update(|petalfall| {
+                petalfall.switch_game_directory(game_dir, &current);
                 Ok::<_, CommandError>(())
             })
             .await
@@ -3831,13 +4371,17 @@ mod tests {
             let entry = list.iter().find(|i| i.id == "周末生存").unwrap();
             (entry.playtime_min, entry.last_played_at)
         };
-        let day = || aurora_core::PlayRange::parse("2026-10-30", "2026-10-30").unwrap();
+        let day = || petalfall_core::PlayRange::parse("2026-10-30", "2026-10-30").unwrap();
 
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(played(&list), (Some(90), Some(1_761_832_800_000)));
 
         switch_game_dir(&env, &other).await;
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(
             played(&list),
             (Some(0), None),
@@ -3854,7 +4398,9 @@ mod tests {
             .unwrap();
 
         switch_game_dir(&env, &home).await;
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(played(&list), (Some(90), Some(1_761_832_800_000)));
         let stats = env.facade.snapshot().await.play_stats(day()).await.unwrap();
         assert_eq!(stats.total_minutes, 90);
@@ -3871,7 +4417,9 @@ mod tests {
         write_playtime(&env, "{ broken");
         let locks = InstanceLocks::default();
 
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
 
         let ids: Vec<&str> = list.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b"]);
@@ -3889,7 +4437,9 @@ mod tests {
             &env,
             r#"{"format":1,"book":{"instances":{"a":{"total_ms":600000,"last_played_at":1761800000000}},"days":{}}}"#,
         );
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(list[0].playtime_min, Some(10));
         assert_eq!(list[0].last_played_at, Some(1_761_800_000_000));
         assert_eq!(list[0].play_error, None);
@@ -3905,7 +4455,7 @@ mod tests {
         env.vanilla("a");
         write_playtime(&env, r#"{"format":9,"directories":[]}"#);
 
-        let list = list_instances_with(&env.facade, &InstanceLocks::default())
+        let list = list_instances_with(&env.facade, &InstanceLocks::default(), &test_textures())
             .await
             .unwrap();
 
@@ -3922,9 +4472,9 @@ mod tests {
         let dir = env.vanilla("a");
         env.vanilla("留下");
         env.facade
-            .update(|aurora| {
-                aurora.set_sidebar_pins(vec!["a".into(), "留下".into()]);
-                aurora.set_selected_version(Some("a".into()));
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["a".into(), "留下".into()]);
+                petalfall.set_selected_version(Some("a".into()));
                 Ok::<_, CommandError>(())
             })
             .await
@@ -3972,7 +4522,7 @@ mod tests {
         assert_eq!(get_pins(&env).await, vec!["留下".to_owned()]);
         assert_eq!(locks.activity("b"), None);
         assert_eq!(
-            std::fs::read_to_string(env.dir.path().join(aurora_core::playtime::PLAYTIME_FILE))
+            std::fs::read_to_string(env.dir.path().join(petalfall_core::playtime::PLAYTIME_FILE))
                 .unwrap(),
             "{ broken"
         );
@@ -3995,7 +4545,7 @@ mod tests {
                 "instances":{"a":{"total_ms":600000,"last_played_at":1761800000000}},
                 "days":{"2026-10-30":{"instances":{"a":600000}}}}}"#,
         );
-        let path = env.dir.path().join(aurora_core::playtime::PLAYTIME_FILE);
+        let path = env.dir.path().join(petalfall_core::playtime::PLAYTIME_FILE);
         let locks = InstanceLocks::default();
         let played = |list: &[InstanceDto], id: &str| {
             let entry = list.iter().find(|i| i.id == id).unwrap();
@@ -4007,19 +4557,25 @@ mod tests {
             .share_mode(FILE_SHARE_READ)
             .open(&path)
             .unwrap();
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(played(&list, "a"), (Some(10), Some(1_761_800_000_000)));
         let err = rename_instance_with(&env.facade, &locks, "a", "b")
             .await
             .unwrap_err();
         assert_eq!(err.code, code::PLAY_RECORDS_FAILED);
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(played(&list, "b"), (Some(10), Some(1_761_800_000_000)));
         assert_eq!(played(&list, "留下"), (Some(0), None));
         drop(held);
 
-        list_instances_with(&env.facade, &locks).await.unwrap();
+        list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(saved["format"], 2);
         let ids: Vec<&String> = saved["directories"][0]["book"]["instances"]
@@ -4036,8 +4592,8 @@ mod tests {
         let env = Env::new();
         env.vanilla("a");
         env.facade
-            .update(|aurora| {
-                aurora.set_sidebar_pins(vec!["a".into()]);
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["a".into()]);
                 Ok::<_, CommandError>(())
             })
             .await
@@ -4148,6 +4704,9 @@ mod tests {
         let settings = json!({
             "description": "和朋友的周末",
             "cover": "cherry_planks",
+            "cover_image": null,
+            "background": "texture",
+            "background_image": null,
             "isolation": "enabled",
             "memory_mb": 6144,
             "java": "auto",
@@ -4215,13 +4774,15 @@ mod tests {
         );
         // fab 玩过 121 分 59 秒：分钟向下取整为 121；1.21.1 没玩过。
         std::fs::write(
-            env.dir.path().join(aurora_core::playtime::PLAYTIME_FILE),
+            env.dir.path().join(petalfall_core::playtime::PLAYTIME_FILE),
             r#"{"format":1,"book":{"instances":{"fab":{"total_ms":7319000,"last_played_at":1767225600000}},"days":{}}}"#,
         )
         .unwrap();
         let locks = InstanceLocks::default();
         let _guard = locks.acquire("fab", InstanceActivity::Launching).unwrap();
-        let list = list_instances_with(&env.facade, &locks).await.unwrap();
+        let list = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap();
         let fab = list.iter().find(|i| i.id == "fab").unwrap();
         assert_eq!(fab.activity, Some(InstanceActivity::Launching));
         assert_eq!(
@@ -4242,6 +4803,42 @@ mod tests {
         assert_eq!(vanilla.last_played_at, None);
     }
 
+    /// 卡面图片：文件在就登记成协议取图键（与材质服务的登记一致），设置里引用了却不见了的给 null。
+    #[tokio::test]
+    async fn list_registers_cover_images_that_exist() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let covers = petalfall_core::cover_image_dir(&dir);
+        std::fs::create_dir_all(&covers).unwrap();
+        std::fs::write(covers.join("block-0123456789abcdef.png"), b"png").unwrap();
+        let settings = VersionSettings {
+            cover: Some("oak_log".into()),
+            cover_image: Some("block-0123456789abcdef.png".into()),
+            background: CoverBackground::Image,
+            background_image: Some("background-0123456789abcdef.jpg".into()),
+            ..VersionSettings::default()
+        };
+        env.facade
+            .snapshot()
+            .await
+            .set_instance_settings("1.21.1", &settings)
+            .await
+            .unwrap();
+
+        let textures = test_textures();
+        let list = list_instances_with(&env.facade, &InstanceLocks::default(), &textures)
+            .await
+            .unwrap();
+        let dto = &list[0];
+        let expected = textures.register_cover(&covers.join("block-0123456789abcdef.png"));
+        assert_eq!(dto.cover_image.as_deref(), Some(expected.as_str()));
+        assert_eq!(dto.background, CoverBackground::Image);
+        assert_eq!(dto.background_image, None);
+        assert_eq!(dto.cover.as_deref(), Some("oak_log"));
+        let value = serde_json::to_value(dto).unwrap();
+        assert_eq!(value["background"], json!("image"));
+    }
+
     /// 列表 DTO 带上整合包来源、最近崩溃、存档数、隔离生效值与自定内存；附属文件读不出时
     /// 只把原因放进对应的 *_error，其余字段照常给。
     #[test]
@@ -4249,13 +4846,13 @@ mod tests {
         let summary = |modpack, last_crash_at, settings| InstanceSummary {
             id: "整合包".into(),
             dir: PathBuf::from("versions/整合包"),
-            version: InstanceVersion::Ready(aurora_core::ReadyVersion {
+            version: InstanceVersion::Ready(petalfall_core::ReadyVersion {
                 mc_version: Some("1.21.1".into()),
                 loaders: Vec::new(),
                 release_type: Some("release".into()),
                 is_release: true,
                 java_major: Some(21),
-                quick_play: Some(aurora_core::QuickPlaySupport {
+                quick_play: Some(petalfall_core::QuickPlaySupport {
                     singleplayer: true,
                     multiplayer: true,
                 }),
@@ -4271,9 +4868,9 @@ mod tests {
             modpack,
             last_crash_at,
         };
-        let pack = aurora_core::InstanceModpack {
+        let pack = petalfall_core::InstanceModpack {
             schema: 1,
-            format: aurora_core::PackFormat::Modrinth,
+            format: petalfall_core::PackFormat::Modrinth,
             platform: Some(Platform::Modrinth),
             project_id: Some("1KVo5zza".into()),
             version_id: Some("abc123".into()),
@@ -4284,6 +4881,7 @@ mod tests {
             remote_files: 80,
             override_files: 12,
             installed_at: 1,
+            recommended_ram_mb: None,
         };
         let settings = VersionSettings {
             memory_mb: Some(6144),
@@ -4351,7 +4949,7 @@ mod tests {
             Readable::Read(None),
             Readable::Read(VersionSettings::default()),
         );
-        missing_json.version = InstanceVersion::Broken(aurora_core::BrokenReason::MissingJson);
+        missing_json.version = InstanceVersion::Broken(petalfall_core::BrokenReason::MissingJson);
         let value =
             serde_json::to_value(instance_dto(missing_json, None, Readable::Read(None))).unwrap();
         assert_eq!(value["status"], json!("broken"));
@@ -4363,7 +4961,7 @@ mod tests {
     async fn interrupted_modpack_import_lists_as_modpack_incomplete() {
         let env = Env::new();
         let dir = env.vanilla("整合包");
-        aurora_core::MarkerStore::for_version_dir(&dir)
+        petalfall_core::MarkerStore::for_version_dir(&dir)
             .save(&IncompleteMarker::pending(
                 IncompleteKind::Modpack {
                     task_id: "mp#1".into(),
@@ -4372,7 +4970,7 @@ mod tests {
             ))
             .await
             .unwrap();
-        let list = list_instances_with(&env.facade, &InstanceLocks::default())
+        let list = list_instances_with(&env.facade, &InstanceLocks::default(), &test_textures())
             .await
             .unwrap();
         let pack = list.iter().find(|i| i.id == "整合包").unwrap();
@@ -4481,7 +5079,8 @@ mod tests {
         let dir = env.vanilla("1.21.1");
         let locks = InstanceLocks::default();
         let settings = json!({
-            "description": "改名途中写进来的", "cover": null, "isolation": "enabled",
+            "description": "改名途中写进来的", "cover": null, "cover_image": null,
+            "background": "follow", "background_image": null, "isolation": "enabled",
             "memory_mb": null, "java": "auto", "jvm_args": "",
             "resolution": { "width": 854, "height": 480 }, "fullscreen": false
         });
@@ -4532,6 +5131,134 @@ mod tests {
             .unwrap();
         assert_eq!(mods, dir.join("mods"));
         assert!(mods.is_dir());
+        assert_eq!(locks.activity("1.21.1"), Some(InstanceActivity::Running));
+    }
+
+    fn opaque_png(path: &Path, width: u32, height: u32) {
+        image::RgbImage::from_pixel(width, height, image::Rgb([40, 160, 90]))
+            .save(path)
+            .unwrap();
+    }
+
+    /// 导入卡面图片返回写下的设置：背景位把 background 切到 image 并记下文件名，方块位记下 cover_image，
+    /// 文件落在实例的卡面图片目录里。
+    #[tokio::test]
+    async fn import_cover_image_returns_the_written_settings() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let locks = InstanceLocks::default();
+        let photo = env.dir.path().join("photo.png");
+        opaque_png(&photo, 30, 20);
+        let photo = photo.to_string_lossy().into_owned();
+
+        let saved = import_cover_image_with(&env.facade, &locks, "1.21.1", "background", &photo)
+            .await
+            .unwrap();
+        assert_eq!(saved.background, CoverBackground::Image);
+        let name = saved.background_image.clone().unwrap();
+        assert!(
+            name.starts_with("background-") && name.ends_with(".jpg") && name.len() == 31,
+            "{name}"
+        );
+        assert!(petalfall_core::cover_image_dir(&dir).join(&name).is_file());
+        assert_eq!(saved.cover_image, None);
+
+        let saved = import_cover_image_with(&env.facade, &locks, "1.21.1", "block", &photo)
+            .await
+            .unwrap();
+        let block = saved.cover_image.clone().unwrap();
+        assert!(
+            block.starts_with("block-") && block.ends_with(".png"),
+            "{block}"
+        );
+        assert_eq!(saved.background_image.as_deref(), Some(name.as_str()));
+        let stored = env
+            .facade
+            .snapshot()
+            .await
+            .instance_settings("1.21.1")
+            .await
+            .unwrap();
+        assert_eq!(InstanceSettingsDto::from(stored), saved);
+    }
+
+    /// 图片与参数的问题都报 invalid_argument，detail.field 指出是哪一项、detail.reason 给原因码；
+    /// 实例不在报 version_not_installed。
+    #[tokio::test]
+    async fn import_cover_image_reports_which_argument_is_wrong() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let locks = InstanceLocks::default();
+        let notes = env.dir.path().join("notes.png");
+        std::fs::write(&notes, "不是图片").unwrap();
+        let photo = env.dir.path().join("photo.png");
+        opaque_png(&photo, 4, 4);
+        let path = |p: &Path| p.to_string_lossy().into_owned();
+        let missing = path(&env.dir.path().join("gone.png"));
+
+        for (slot, file, field, reason) in [
+            ("background", path(&notes), "path", "unsupported_format"),
+            ("block", missing, "path", "unreadable"),
+            ("background", "photo.png".to_owned(), "path", "not_absolute"),
+            ("icon", path(&photo), "slot", "unknown"),
+        ] {
+            let err = import_cover_image_with(&env.facade, &locks, "1.21.1", slot, &file)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, common::INVALID_ARGUMENT, "{file}");
+            let detail = err.detail.unwrap();
+            assert_eq!(detail["field"], field, "{file}");
+            assert_eq!(detail["reason"], reason, "{file}");
+        }
+        assert!(
+            !petalfall_core::cover_image_dir(&dir).exists(),
+            "被拒绝的导入什么都不写"
+        );
+
+        let err = import_cover_image_with(&env.facade, &locks, "不存在", "block", &path(&photo))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, common::VERSION_NOT_INSTALLED);
+    }
+
+    /// 与写设置同一把占用：改名或删除进行中报 instance_busy，图片不写、设置不变；游戏运行中照常可以导入。
+    #[tokio::test]
+    async fn import_cover_image_waits_for_rename_and_delete_but_not_for_the_game() {
+        let env = Env::new();
+        let dir = env.vanilla("1.21.1");
+        let locks = InstanceLocks::default();
+        let photo = env.dir.path().join("photo.png");
+        opaque_png(&photo, 8, 8);
+        let photo = photo.to_string_lossy().into_owned();
+
+        for activity in [InstanceActivity::Renaming, InstanceActivity::Deleting] {
+            let held = locks.acquire("1.21.1", activity).unwrap();
+            let err = import_cover_image_with(&env.facade, &locks, "1.21.1", "background", &photo)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_BUSY);
+            let detail = err.detail.unwrap();
+            assert_eq!(detail["activity"], serde_json::to_value(activity).unwrap());
+            assert_eq!(detail["id"], "1.21.1");
+            drop(held);
+        }
+        assert!(!petalfall_core::cover_image_dir(&dir).exists());
+        let settings = env
+            .facade
+            .snapshot()
+            .await
+            .instance_settings("1.21.1")
+            .await
+            .unwrap();
+        assert_eq!(settings, VersionSettings::default());
+
+        let _game = locks.acquire("1.21.1", InstanceActivity::Running).unwrap();
+        let saved = import_cover_image_with(&env.facade, &locks, "1.21.1", "block", &photo)
+            .await
+            .unwrap();
+        let block = saved.cover_image.unwrap();
+        assert!(block.starts_with("block-"), "{block}");
+        assert!(petalfall_core::cover_image_dir(&dir).join(&block).is_file());
         assert_eq!(locks.activity("1.21.1"), Some(InstanceActivity::Running));
     }
 
@@ -4624,7 +5351,9 @@ mod tests {
         let listed = |id: &'static str| {
             let (facade, locks) = (env.facade.clone(), locks.clone());
             async move {
-                let list = list_instances_with(&facade, &locks).await.unwrap();
+                let list = list_instances_with(&facade, &locks, &test_textures())
+                    .await
+                    .unwrap();
                 list.into_iter()
                     .find(|i| i.id == id)
                     .unwrap_or_else(|| panic!("列表里没有 {id}"))
@@ -4900,18 +5629,18 @@ mod tests {
         assert_eq!(locks.activity("pack"), None);
     }
 
-    /// 兼容矩阵是一张对称的表：新建、补全、改名、删除与一切互斥；启动、运行只与改动并行；备份与改动、基底占用
-    /// 并行；基底占用与改动、备份和它自己并行；改动除上面那四件之外都能并行。
+    /// 兼容矩阵是一张对称的表：新建、补全、改名、删除、移动与一切互斥；启动、运行只与改动并行；备份与改动、基底占用
+    /// 并行；基底占用与改动、备份和它自己并行；改动除上面那五件之外都能并行。
     #[test]
     fn compatibility_matrix_is_the_symmetric_table() {
         use InstanceActivity::*;
         let all = [
-            Installing, Repairing, Renaming, Deleting, Launching, Running, BackingUp, Modifying,
-            Inherited,
+            Installing, Repairing, Renaming, Deleting, Moving, Launching, Running, BackingUp,
+            Modifying, Inherited,
         ];
         let table = |activity| -> &[InstanceActivity] {
             match activity {
-                Installing | Repairing | Renaming | Deleting => &[],
+                Installing | Repairing | Renaming | Deleting | Moving => &[],
                 Launching | Running => &[Modifying],
                 BackingUp => &[Modifying, Inherited],
                 Inherited => &[BackingUp, Modifying, Inherited],
@@ -5141,7 +5870,7 @@ mod tests {
 
         fn backups_root(&self) -> PathBuf {
             self.game_dir()
-                .join(concat!(".", aurora_base::app_slug!()))
+                .join(concat!(".", petalfall_base::app_slug!()))
                 .join("backups")
         }
     }
@@ -5201,7 +5930,7 @@ mod tests {
             .mount(&server)
             .await;
         let uri = server.uri();
-        let env = Env::with(|aurora| aurora.with_platform_bases(&uri, &uri));
+        let env = Env::with(|petalfall| petalfall.with_platform_bases(&uri, &uri));
         env.vanilla("1.21.1");
         let instance = env.version(
             "织布",
@@ -5711,7 +6440,10 @@ mod tests {
         });
 
         let saves = world.parent().unwrap().to_path_buf();
-        let staging = saves.join(format!("新的世界.{}-restore", aurora_base::brand::APP_SLUG));
+        let staging = saves.join(format!(
+            "新的世界.{}-restore",
+            petalfall_base::brand::APP_SLUG
+        ));
         let deadline = Instant::now() + Duration::from_secs(20);
         while !staging.join("region").is_dir() {
             assert!(Instant::now() < deadline, "解压没有开始");
@@ -5856,10 +6588,10 @@ mod tests {
 
         let err = outcome.unwrap_err();
         assert_eq!(err.code, common::WORLD_RESTORE_INCOMPLETE);
-        let staged = world
-            .parent()
-            .unwrap()
-            .join(format!("新的世界.{}-restore", aurora_base::brand::APP_SLUG));
+        let staged = world.parent().unwrap().join(format!(
+            "新的世界.{}-restore",
+            petalfall_base::brand::APP_SLUG
+        ));
         assert_eq!(
             err.detail.unwrap()["staged"],
             json!(staged.display().to_string())
@@ -6182,14 +6914,14 @@ mod tests {
         env.vanilla("乙");
         env.isolated_world("丙", "自己的");
         let locks = InstanceLocks::default();
-        let aurora = env.facade.snapshot().await;
-        ensure_saves_free_for_writing(&aurora, &locks, "乙")
+        let petalfall = env.facade.snapshot().await;
+        ensure_saves_free_for_writing(&petalfall, &locks, "乙")
             .await
             .unwrap();
 
         let backing = locks.acquire("甲", InstanceActivity::BackingUp).unwrap();
         for id in ["甲", "乙"] {
-            let err = ensure_saves_free_for_writing(&aurora, &locks, id)
+            let err = ensure_saves_free_for_writing(&petalfall, &locks, id)
                 .await
                 .unwrap_err();
             assert_eq!(err.code, code::INSTANCE_BUSY, "{id}");
@@ -6199,13 +6931,13 @@ mod tests {
                 "{id}"
             );
         }
-        ensure_saves_free_for_writing(&aurora, &locks, "丙")
+        ensure_saves_free_for_writing(&petalfall, &locks, "丙")
             .await
             .unwrap();
         drop(backing);
 
         let reading = locks.read_saves("乙");
-        let err = ensure_saves_free_for_writing(&aurora, &locks, "甲")
+        let err = ensure_saves_free_for_writing(&petalfall, &locks, "甲")
             .await
             .unwrap_err();
         assert_eq!(
@@ -6334,13 +7066,13 @@ mod tests {
         env.vanilla("乙");
         env.isolated_world("丙", "自己的");
         let locks = InstanceLocks::default();
-        let aurora = env.facade.snapshot().await;
-        ensure_shared_worlds_settled(&aurora, &locks, "乙")
+        let petalfall = env.facade.snapshot().await;
+        ensure_shared_worlds_settled(&petalfall, &locks, "乙")
             .await
             .unwrap();
 
         let backing = locks.acquire("甲", InstanceActivity::BackingUp).unwrap();
-        let err = ensure_shared_worlds_settled(&aurora, &locks, "乙")
+        let err = ensure_shared_worlds_settled(&petalfall, &locks, "乙")
             .await
             .unwrap_err();
         assert_eq!(err.code, code::INSTANCE_BUSY);
@@ -6348,18 +7080,18 @@ mod tests {
             err.detail,
             Some(json!({ "id": "甲", "activity": "backing_up" }))
         );
-        ensure_shared_worlds_settled(&aurora, &locks, "丙")
+        ensure_shared_worlds_settled(&petalfall, &locks, "丙")
             .await
             .unwrap();
         // 自己在备份时由实例锁挡，这里不重复报。
-        ensure_shared_worlds_settled(&aurora, &locks, "甲")
+        ensure_shared_worlds_settled(&petalfall, &locks, "甲")
             .await
             .unwrap();
         drop(backing);
 
         let isolated = locks.acquire("丙", InstanceActivity::BackingUp).unwrap();
         let modifying = locks.acquire("甲", InstanceActivity::Modifying).unwrap();
-        ensure_shared_worlds_settled(&aurora, &locks, "乙")
+        ensure_shared_worlds_settled(&petalfall, &locks, "乙")
             .await
             .unwrap();
         drop((isolated, modifying));
@@ -6373,11 +7105,11 @@ mod tests {
         env.vanilla("乙");
         env.isolated_world("丙", "自己的");
         let locks = InstanceLocks::default();
-        let aurora = env.facade.snapshot().await;
+        let petalfall = env.facade.snapshot().await;
 
         let reading = locks.read_saves("甲");
         for id in ["甲", "乙"] {
-            let err = ensure_saves_free_for_launch(&aurora, &locks, id)
+            let err = ensure_saves_free_for_launch(&petalfall, &locks, id)
                 .await
                 .unwrap_err();
             assert_eq!(err.code, code::INSTANCE_BUSY, "{id}");
@@ -6392,12 +7124,12 @@ mod tests {
                 err.message
             );
         }
-        ensure_saves_free_for_launch(&aurora, &locks, "丙")
+        ensure_saves_free_for_launch(&petalfall, &locks, "丙")
             .await
             .unwrap();
         drop(reading);
 
-        ensure_saves_free_for_launch(&aurora, &locks, "甲")
+        ensure_saves_free_for_launch(&petalfall, &locks, "甲")
             .await
             .unwrap();
     }
@@ -6498,16 +7230,16 @@ mod tests {
                 "instances":{"周末生存":{"total_ms":5400000,"last_played_at":1761832800000}},
                 "days":{"2026-10-30":{"instances":{"周末生存":5400000}}}}}"#,
         );
-        let server = |address: &str, instance: &str| aurora_core::PinnedServer {
+        let server = |address: &str, instance: &str| petalfall_core::PinnedServer {
             name: address.to_owned(),
             address: address.to_owned(),
             instance: Some(instance.to_owned()),
         };
         env.facade
-            .update(|aurora| {
-                aurora.set_sidebar_pins(vec!["周末生存".into(), "别的".into()]);
-                aurora.set_selected_version(Some("周末生存".into()));
-                aurora.set_pinned_servers(vec![
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["周末生存".into(), "别的".into()]);
+                petalfall.set_selected_version(Some("周末生存".into()));
+                petalfall.set_pinned_servers(vec![
                     server("home.example", "周末生存"),
                     server("other.example", "别的"),
                 ])?;
@@ -6585,8 +7317,8 @@ mod tests {
             .await
             .unwrap();
         env.facade
-            .update(|aurora| {
-                aurora.set_sidebar_pins(vec!["a".into()]);
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["a".into()]);
                 Ok::<_, CommandError>(())
             })
             .await
@@ -6636,7 +7368,7 @@ mod tests {
 
     #[test]
     fn manifest_versions_carry_their_loaders_in_fixed_order() {
-        let manifest: aurora_core::VersionManifest = serde_json::from_str(
+        let manifest: petalfall_core::VersionManifest = serde_json::from_str(
             r#"{"latest":{"release":"1.21.1","snapshot":"24w14a"},"versions":[
                 {"id":"1.21.1","type":"release","url":"u","time":"t","releaseTime":"r1"},
                 {"id":"24w14a","type":"snapshot","url":"u","time":"t","releaseTime":"r2"}]}"#,
@@ -6658,5 +7390,785 @@ mod tests {
         assert_eq!(dto.loader_errors[0].loader, "forge");
         assert_eq!(dto.stale_since, Some(7));
         assert_eq!(dto.latest.snapshot, "24w14a");
+    }
+
+    // ---------------------------------------------------------------- 移到另一个游戏目录
+
+    /// 移动与一切互斥，两个方向都是：别的事碰到正在移动的实例报 moving，移动碰到在忙的实例报那件事，被别的实例
+    /// 当作基底时报 inherited 与使用者。移动以 inherited 占住继承链上的基底，基底这时只能改动、备份。
+    #[tokio::test]
+    async fn moving_excludes_everything_and_holds_its_bases_as_inherited() {
+        use InstanceActivity::*;
+        let others = [
+            Installing, Repairing, Renaming, Deleting, Moving, Launching, Running, BackingUp,
+            Modifying,
+        ];
+        let locks = InstanceLocks::default();
+        assert_eq!(serde_json::to_value(Moving).unwrap(), "moving");
+
+        let moving = locks.acquire("Pack", Moving).unwrap();
+        for activity in others {
+            let err = locks.acquire("pack", activity).err().unwrap();
+            assert_eq!(err.code, code::INSTANCE_BUSY, "{activity:?}");
+            assert_eq!(
+                err.detail.unwrap(),
+                json!({ "id": "pack", "activity": "moving" }),
+                "{activity:?}"
+            );
+            assert_eq!(err.message, "实例 pack 正在移到另一个游戏目录，请稍后再试");
+        }
+        let err = locks
+            .acquire_with_bases("Fabric", Launching, &["PACK".to_owned()])
+            .err()
+            .unwrap();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "PACK", "activity": "moving" })
+        );
+        assert_eq!(
+            locks.activity("Fabric"),
+            None,
+            "被基底挡住时自己的占用一并放开"
+        );
+        drop(moving);
+
+        for activity in others {
+            let held = locks.acquire("pack", activity).unwrap();
+            let err = locks.acquire("Pack", Moving).err().unwrap();
+            assert_eq!(
+                err.detail.unwrap()["activity"],
+                serde_json::to_value(activity).unwrap(),
+                "{activity:?}"
+            );
+            drop(held);
+        }
+        let user = locks
+            .acquire_with_bases("Fabric", Running, &["pack".to_owned()])
+            .unwrap();
+        let err = locks.acquire("pack", Moving).err().unwrap();
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "pack", "activity": "inherited", "used_by": "Fabric" })
+        );
+        drop(user);
+
+        let chain = locks
+            .acquire_with_chain("FAB", Moving, async {
+                Ok::<_, CommandError>(vec!["1.20.1".to_owned()])
+            })
+            .await
+            .unwrap();
+        assert_eq!(locks.activity("fab"), Some(Moving));
+        assert_eq!(
+            locks.occupancy("1.20.1"),
+            (Some(Inherited), Some("FAB".to_owned()))
+        );
+        for activity in [
+            Installing, Repairing, Renaming, Deleting, Moving, Launching, Running,
+        ] {
+            let err = locks.acquire("1.20.1", activity).err().unwrap();
+            assert_eq!(
+                err.detail.unwrap(),
+                json!({ "id": "1.20.1", "activity": "inherited", "used_by": "FAB" }),
+                "{activity:?}"
+            );
+        }
+        for activity in [Modifying, BackingUp] {
+            drop(locks.acquire("1.20.1", activity).unwrap());
+        }
+        drop(chain);
+        assert_eq!(locks.occupancy("1.20.1"), (None, None));
+        assert_eq!(locks.activity("FAB"), None);
+    }
+
+    /// 还没记录、也还不存在的 `<临时目录>/新家/.minecraft`：显示名按叶子是 .minecraft 取上一级。
+    fn new_home(env: &Env) -> PathBuf {
+        env.dir.path().join("新家").join(".minecraft")
+    }
+
+    fn path_text(path: &Path) -> String {
+        path.display().to_string()
+    }
+
+    /// 数据目录下还留着的移动日志的文件名；目录不在为空。
+    fn move_journals(env: &Env) -> Vec<String> {
+        match std::fs::read_dir(env.dir.path().join("moves")) {
+            Ok(entries) => entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(err) => panic!("读不了移动日志目录：{err}"),
+        }
+    }
+
+    /// 预检的每一种拦截项按 kind 出 JSON，带上各自的参数，顺序照门面给的；其余字段原样搬过来。
+    #[test]
+    fn move_preview_dto_carries_every_blocker_kind() {
+        let preview = MovePreview {
+            id: "生存".into(),
+            source_game_dir: PathBuf::from(r"C:\Games\.minecraft"),
+            target_game_dir: PathBuf::from(r"D:\新家\.minecraft"),
+            same_volume: false,
+            instance_bytes: 4_096,
+            instance_files: 3,
+            backup_bytes: 1_024,
+            backup_count: 2,
+            dependency_files: 17,
+            dependency_bytes: 65_536,
+            bases_to_copy: vec!["1.20.1".into()],
+            reused_bases: vec!["1.19.4".into()],
+            missing_in_source: 5,
+            required_bytes: 70_656,
+            available_bytes: 9,
+            isolated: false,
+            blockers: vec![
+                MoveBlocker::SameDirectory,
+                MoveBlocker::TargetInsideSource,
+                MoveBlocker::NameTaken,
+                MoveBlocker::HasDependents(vec!["fab".into()]),
+                MoveBlocker::Links(vec![PathBuf::from("mods").join("link")]),
+                MoveBlocker::BaseConflict(vec!["1.20.1".into()]),
+                MoveBlocker::InsufficientSpace {
+                    needed: 339_091_456,
+                    available: 9,
+                },
+                MoveBlocker::Pending,
+            ],
+        };
+        let json = serde_json::to_value(move_preview_dto(preview, "新家".into(), false)).unwrap();
+        assert_eq!(
+            json,
+            json!({
+                "id": "生存",
+                "source": r"C:\Games\.minecraft",
+                "target": r"D:\新家\.minecraft",
+                "target_name": "新家",
+                "target_registered": false,
+                "same_volume": false,
+                "instance_bytes": 4_096,
+                "instance_files": 3,
+                "backup_bytes": 1_024,
+                "backup_count": 2,
+                "dependency_files": 17,
+                "dependency_bytes": 65_536,
+                "bases_to_copy": ["1.20.1"],
+                "reused_bases": ["1.19.4"],
+                "missing_in_source": 5,
+                "required_bytes": 70_656,
+                "available_bytes": 9,
+                "isolated": false,
+                "blockers": [
+                    { "kind": "same_directory" },
+                    { "kind": "target_inside_source" },
+                    { "kind": "name_taken" },
+                    { "kind": "has_dependents", "dependents": ["fab"] },
+                    { "kind": "links", "paths": [path_text(&PathBuf::from("mods").join("link"))] },
+                    { "kind": "base_conflict", "bases": ["1.20.1"] },
+                    { "kind": "insufficient_space", "needed": 339_091_456, "available": 9 },
+                    { "kind": "pending" },
+                ],
+            })
+        );
+    }
+
+    /// 执行前被拦下时 detail 是 `{ id, blocker }`，blocker 与预检里的一项同形。
+    #[test]
+    fn instance_move_blocked_carries_the_id_and_the_blocker() {
+        let err = instance_error(CoreError::InstanceMoveBlocked {
+            id: "1.20.1".into(),
+            blocker: MoveBlocker::HasDependents(vec!["fab".into(), "叠层".into()]),
+        });
+        assert_eq!(err.code, code::INSTANCE_MOVE_BLOCKED);
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({
+                "id": "1.20.1",
+                "blocker": { "kind": "has_dependents", "dependents": ["fab", "叠层"] },
+            })
+        );
+    }
+
+    #[test]
+    fn move_follow_ups_serialize_by_kind() {
+        let follow_ups: Vec<MoveFollowUpDto> = [
+            MoveFollowUp::PlayRecords("游玩记录读不出来".into()),
+            MoveFollowUp::WorldBackups("备份目录被占用".into()),
+            MoveFollowUp::Cleanup {
+                path: PathBuf::from(r"C:\Games\.minecraft\.petalfall\moving\t1"),
+                reason: "拒绝访问".into(),
+            },
+        ]
+        .into_iter()
+        .map(move_follow_up_dto)
+        .collect();
+        assert_eq!(
+            serde_json::to_value(follow_ups).unwrap(),
+            json!([
+                { "kind": "play_records", "reason": "游玩记录读不出来" },
+                { "kind": "world_backups", "reason": "备份目录被占用" },
+                {
+                    "kind": "cleanup",
+                    "path": r"C:\Games\.minecraft\.petalfall\moving\t1",
+                    "reason": "拒绝访问",
+                },
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value(MoveFollowUpDto::Config {
+                reason: "配置文件被占用".into(),
+            })
+            .unwrap(),
+            json!({ "kind": "config", "reason": "配置文件被占用" })
+        );
+    }
+
+    /// 真实门面上的预检：目标还不存在时按推出的名字报、没登记；目标就是当前目录时报 same_directory、已登记；
+    /// 路径不合法在动手前报 invalid_game_directory。
+    #[tokio::test]
+    async fn move_preview_names_the_target_and_reports_its_registration() {
+        let env = Env::new();
+        let dir = env.vanilla("生存");
+        let json_len = std::fs::metadata(dir.join("生存.json")).unwrap().len();
+        let target = new_home(&env);
+
+        let preview = preview_instance_move_with(&env.facade, "生存", &path_text(&target))
+            .await
+            .unwrap();
+        assert_eq!(preview.id, "生存");
+        assert_eq!(preview.source, path_text(&env.game_dir()));
+        assert_eq!(preview.target, path_text(&target));
+        assert_eq!(preview.target_name, "新家");
+        assert!(!preview.target_registered);
+        assert!(preview.same_volume);
+        assert_eq!(
+            (preview.instance_files, preview.instance_bytes),
+            (1, json_len)
+        );
+        assert_eq!(preview.blockers, Vec::<Value>::new());
+        assert!(!target.exists(), "预检不写盘");
+
+        let same = preview_instance_move_with(&env.facade, "生存", &path_text(&env.game_dir()))
+            .await
+            .unwrap();
+        assert!(same.target_registered);
+        assert!(
+            same.blockers.contains(&json!({ "kind": "same_directory" })),
+            "{:?}",
+            same.blockers
+        );
+
+        let err = preview_instance_move_with(&env.facade, "生存", "相对/路径")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, code::INVALID_GAME_DIRECTORY);
+        assert_eq!(err.detail.unwrap()["problem"], "not_absolute");
+    }
+
+    /// 正在运行的实例移不了：报 instance_busy 与 running，什么都没动，游戏的占用原样留着。
+    #[tokio::test]
+    async fn moving_a_running_instance_is_refused_before_anything_moves() {
+        let env = Env::new();
+        let dir = env.vanilla("生存");
+        let target = new_home(&env);
+        let (tasks, locks) = (TaskRegistry::default(), InstanceLocks::default());
+        let (events, _rx) = sink();
+        let game = locks.acquire("生存", InstanceActivity::Running).unwrap();
+
+        let err = move_instance_with(
+            &env.facade,
+            &tasks,
+            &locks,
+            "mv",
+            MoveArgs {
+                id: "生存",
+                source: &path_text(&env.game_dir()),
+                target: &path_text(&target),
+            },
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_BUSY);
+        assert_eq!(
+            err.detail.unwrap(),
+            json!({ "id": "生存", "activity": "running" })
+        );
+        assert!(dir.join("生存.json").is_file());
+        assert!(!target.exists());
+        assert_eq!(locks.activity("生存"), Some(InstanceActivity::Running));
+        drop(game);
+
+        let err = move_instance_with(
+            &env.facade,
+            &tasks,
+            &locks,
+            "mv",
+            MoveArgs {
+                id: "生存",
+                source: &path_text(&env.game_dir()),
+                target: "",
+            },
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INVALID_GAME_DIRECTORY);
+        assert_eq!(locks.activity("生存"), None, "路径不合法时不占实例");
+
+        let err = move_instance_with(
+            &env.facade,
+            &tasks,
+            &locks,
+            "mv",
+            MoveArgs {
+                id: "生存",
+                source: "相对/路径",
+                target: &path_text(&target),
+            },
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INVALID_GAME_DIRECTORY);
+        assert_eq!(err.detail.unwrap()["problem"], "not_absolute");
+        assert!(dir.join("生存.json").is_file());
+        assert_eq!(locks.activity("生存"), None, "源不合法时同样不占实例");
+    }
+
+    /// 移到还没记录的文件夹：实例目录整个过去，原目录里它的侧栏固定与当前选中去掉、别的实例不动，目标以推出的
+    /// 名字记进游戏目录列表，落到盘上、门面里同步，进度事件带着同盘的步骤表；再移一个过去时目标已在列表里，
+    /// registered 为 false，列表不重复记。
+    #[tokio::test]
+    async fn move_carries_the_instance_and_settles_pins_selection_and_directories() {
+        let env = Env::new();
+        let dir = env.vanilla("生存");
+        std::fs::write(dir.join("生存.jar"), b"client").unwrap();
+        env.vanilla("留下");
+        env.vanilla("也走");
+        env.facade
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["生存".into(), "留下".into()]);
+                petalfall.set_selected_version(Some("生存".into()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+        let target = new_home(&env);
+        let (tasks, locks) = (TaskRegistry::default(), InstanceLocks::default());
+        let (events, mut rx) = sink();
+
+        let outcome = move_instance_with(
+            &env.facade,
+            &tasks,
+            &locks,
+            "mv",
+            MoveArgs {
+                id: "生存",
+                source: &path_text(&env.game_dir()),
+                target: &path_text(&target),
+            },
+            &events,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            outcome,
+            MoveOutcomeDto {
+                id: "生存".into(),
+                source: path_text(&env.game_dir()),
+                target: path_text(&target),
+                target_name: "新家".into(),
+                registered: true,
+                follow_ups: Vec::new(),
+            }
+        );
+        let moved = target.join("versions").join("生存");
+        assert_eq!(std::fs::read(moved.join("生存.jar")).unwrap(), b"client");
+        assert!(moved.join("生存.json").is_file());
+        assert!(!dir.exists());
+        let home = vec![petalfall_core::NamedDirectory {
+            name: "新家".into(),
+            path: target.clone(),
+        }];
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, vec!["留下".to_owned()]);
+        assert_eq!(saved.selected_version, None);
+        assert_eq!(saved.extra_game_directories, home);
+        assert_eq!(
+            &saved,
+            env.facade.read().await.config(),
+            "门面里的配置同步更新"
+        );
+        assert_eq!(
+            move_journals(&env),
+            Vec::<String>::new(),
+            "配置存好后已确认"
+        );
+        assert_eq!(
+            env.facade
+                .snapshot()
+                .await
+                .recover_instance_moves()
+                .await
+                .unwrap(),
+            Vec::new(),
+            "确认过的移动启动收尾不再交出"
+        );
+        assert_eq!(
+            (locks.activity("生存"), tasks.is_running("mv")),
+            (None, false)
+        );
+        let mut plans = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let CoreEvent::Phase { plan, .. } = event {
+                plans.push(plan);
+            }
+        }
+        assert!(
+            plans.contains(&vec![
+                petalfall_core::InstallPhase::MoveDependencies,
+                petalfall_core::InstallPhase::MoveCommit,
+            ]),
+            "{plans:?}"
+        );
+        let listed: Vec<String> = list_instances_with(&env.facade, &locks, &test_textures())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(listed.len(), 2);
+        assert!(!listed.contains(&"生存".to_owned()), "{listed:?}");
+
+        let again = move_instance_with(
+            &env.facade,
+            &tasks,
+            &locks,
+            "mv2",
+            MoveArgs {
+                id: "也走",
+                source: &path_text(&env.game_dir()),
+                target: &path_text(&target),
+            },
+            &events,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (again.target_name.as_str(), again.registered),
+            ("新家", false)
+        );
+        assert!(target.join("versions").join("也走").is_dir());
+        let saved = env.saved_config().await;
+        assert_eq!(saved.extra_game_directories, home);
+        assert_eq!(saved.sidebar_pins, vec!["留下".to_owned()]);
+    }
+
+    /// 目标里已有同名版本：预检列出 name_taken；执行报 instance_move_blocked，detail 带 id 与同形的拦截项；
+    /// 两边都没动，实例与任务 id 随之放开。
+    #[tokio::test]
+    async fn a_name_taken_in_the_target_blocks_the_move_with_the_preview_shape() {
+        let env = Env::new();
+        let dir = env.vanilla("生存");
+        let target = new_home(&env);
+        let taken = target.join("versions").join("生存");
+        std::fs::create_dir_all(&taken).unwrap();
+        let theirs = r#"{"id":"生存","type":"release","mainClass":"Theirs"}"#;
+        std::fs::write(taken.join("生存.json"), theirs).unwrap();
+        let (tasks, locks) = (TaskRegistry::default(), InstanceLocks::default());
+        let (events, _rx) = sink();
+
+        let preview = preview_instance_move_with(&env.facade, "生存", &path_text(&target))
+            .await
+            .unwrap();
+        assert_eq!(preview.blockers, vec![json!({ "kind": "name_taken" })]);
+
+        let err = move_instance_with(
+            &env.facade,
+            &tasks,
+            &locks,
+            "mv",
+            MoveArgs {
+                id: "生存",
+                source: &path_text(&env.game_dir()),
+                target: &path_text(&target),
+            },
+            &events,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, code::INSTANCE_MOVE_BLOCKED);
+        let detail = err.detail.unwrap();
+        assert_eq!(detail["id"], "生存");
+        assert_eq!(detail["blocker"], json!({ "kind": "name_taken" }));
+        assert!(dir.join("生存.json").is_file());
+        assert_eq!(
+            std::fs::read_to_string(taken.join("生存.json")).unwrap(),
+            theirs
+        );
+        assert_eq!(locks.activity("生存"), None);
+        assert!(env.saved_config().await.extra_game_directories.is_empty());
+        drop(tasks.register("mv").unwrap());
+    }
+
+    /// 发起时的源已经不是当前目录（切换目录后重试）：报 instance_move_blocked，detail.blocker 为 source_changed。
+    /// 当前目录里没有它、有个同名的另一个实例，两种情况都一样：两边的实例与目标都没动，配置不变，没留日志，实例与
+    /// 任务 id 随之放开。
+    #[tokio::test]
+    async fn a_move_from_a_directory_that_is_no_longer_current_is_blocked() {
+        let env = Env::new();
+        let elsewhere = env.dir.path().join("别处").join(".minecraft");
+        let theirs = elsewhere.join("versions").join("生存");
+        std::fs::create_dir_all(&theirs).unwrap();
+        let their_json = r#"{"id":"生存","type":"release","mainClass":"Elsewhere"}"#;
+        std::fs::write(theirs.join("生存.json"), their_json).unwrap();
+        let target = new_home(&env);
+        let before = env.saved_config().await;
+        let (tasks, locks) = (TaskRegistry::default(), InstanceLocks::default());
+        let (events, _rx) = sink();
+
+        let mut here = None;
+        for same_name_here in [false, true] {
+            if same_name_here {
+                here = Some(env.vanilla("生存"));
+            }
+            let err = move_instance_with(
+                &env.facade,
+                &tasks,
+                &locks,
+                "mv",
+                MoveArgs {
+                    id: "生存",
+                    source: &path_text(&elsewhere),
+                    target: &path_text(&target),
+                },
+                &events,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, code::INSTANCE_MOVE_BLOCKED, "{err:?}");
+            assert_eq!(
+                err.detail.unwrap(),
+                json!({ "id": "生存", "blocker": { "kind": "source_changed" } })
+            );
+            assert_eq!(
+                std::fs::read_to_string(theirs.join("生存.json")).unwrap(),
+                their_json
+            );
+            if let Some(here) = &here {
+                assert!(here.join("生存.json").is_file());
+            }
+            assert!(!target.exists());
+            assert_eq!(env.saved_config().await, before);
+            assert_eq!(move_journals(&env), Vec::<String>::new());
+            assert_eq!(locks.activity("生存"), None);
+            drop(tasks.register("mv").unwrap());
+        }
+    }
+
+    /// 文件已经移好、配置落不了盘（配置文件的位置被同名文件夹占着）：命令照常成功，registered 为 false，跟进项多一条
+    /// config；门面不换进这次改动，实例照常放开，日志没确认、留着。配置还是存不上时启动收尾同样不确认；能存了以后
+    /// 启动收尾交出 Completed，照命令的口径补好配置（原目录的固定与选中去掉、别的实例不动、目标记进列表）并确认，
+    /// 再收尾什么都不改。
+    #[tokio::test]
+    async fn a_move_whose_config_cannot_be_saved_succeeds_and_startup_settles_it() {
+        let env = Env::new();
+        let dir = env.vanilla("生存");
+        env.vanilla("留下");
+        env.facade
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["生存".into(), "留下".into()]);
+                petalfall.set_selected_version(Some("生存".into()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+        let config_path = env.dir.path().join("config.json");
+        std::fs::remove_file(&config_path).unwrap();
+        std::fs::create_dir_all(&config_path).unwrap();
+        let unsaved = env.facade.read().await.config().clone();
+        let target = new_home(&env);
+        let (tasks, locks) = (TaskRegistry::default(), InstanceLocks::default());
+        let (events, _rx) = sink();
+
+        let outcome = move_instance_with(
+            &env.facade,
+            &tasks,
+            &locks,
+            "mv",
+            MoveArgs {
+                id: "生存",
+                source: &path_text(&env.game_dir()),
+                target: &path_text(&target),
+            },
+            &events,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (
+                outcome.id.as_str(),
+                outcome.source.as_str(),
+                outcome.target.as_str(),
+                outcome.target_name.as_str(),
+                outcome.registered,
+            ),
+            (
+                "生存",
+                path_text(&env.game_dir()).as_str(),
+                path_text(&target).as_str(),
+                "新家",
+                false,
+            )
+        );
+        let [MoveFollowUpDto::Config { reason }] = outcome.follow_ups.as_slice() else {
+            panic!("应当只有一条 config 跟进项：{:?}", outcome.follow_ups);
+        };
+        assert!(reason.contains(&path_text(&config_path)), "{reason}");
+        assert!(target
+            .join("versions")
+            .join("生存")
+            .join("生存.json")
+            .is_file());
+        assert!(!dir.exists());
+        assert_eq!(env.facade.read().await.config(), &unsaved);
+        assert_eq!(locks.activity("生存"), None);
+        assert_eq!(move_journals(&env).len(), 1, "配置没存上，不确认");
+
+        recover_moves(&env.facade).await;
+        assert_eq!(env.facade.read().await.config(), &unsaved);
+        assert_eq!(
+            move_journals(&env).len(),
+            1,
+            "收尾时配置还是存不上，照样不确认"
+        );
+
+        std::fs::remove_dir(&config_path).unwrap();
+        recover_moves(&env.facade).await;
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, vec!["留下".to_owned()]);
+        assert_eq!(saved.selected_version, None);
+        assert_eq!(
+            saved.extra_game_directories,
+            vec![petalfall_core::NamedDirectory {
+                name: "新家".into(),
+                path: target.clone(),
+            }]
+        );
+        assert_eq!(&saved, env.facade.read().await.config());
+        assert_eq!(move_journals(&env), Vec::<String>::new(), "存好后已确认");
+
+        recover_moves(&env.facade).await;
+        assert_eq!(env.saved_config().await, saved);
+    }
+
+    /// 启动收尾交出 Completed，但原目录里此后又有了同名的新实例（forget_source_refs 为假）：原目录里的侧栏固定与当前
+    /// 选中是新实例的，原样留着；目标照样记进游戏目录列表，落到盘上、门面里同步。
+    #[tokio::test]
+    async fn recovering_a_move_whose_name_was_reused_keeps_the_new_instance_refs() {
+        let env = Env::new();
+        env.vanilla("生存");
+        env.facade
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["生存".into()]);
+                petalfall.set_selected_version(Some("生存".into()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+        let target = new_home(&env);
+
+        settle_move_recovery(
+            &env.facade,
+            MoveRecovery::Completed(MoveOutcome {
+                id: "生存".into(),
+                source_game_dir: env.game_dir(),
+                target_game_dir: target.clone(),
+                follow_ups: Vec::new(),
+                token: "1".into(),
+                forget_source_refs: false,
+            }),
+        )
+        .await;
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, vec!["生存".to_owned()]);
+        assert_eq!(saved.selected_version.as_deref(), Some("生存"));
+        assert_eq!(
+            saved.extra_game_directories,
+            vec![petalfall_core::NamedDirectory {
+                name: "新家".into(),
+                path: target,
+            }]
+        );
+        assert_eq!(&saved, env.facade.read().await.config());
+    }
+
+    /// 启动收尾：没有中断的移动时什么都不改；提交已完成的照正常移动的口径改配置（原目录的固定与选中去掉、目标记进
+    /// 列表），重复收尾不再改；回滚、推迟的不动配置，只清了残留的也不动：原目录里固定着、选中着的同名实例是此后新建的。
+    #[tokio::test]
+    async fn recovering_a_completed_move_settles_the_config_like_the_command() {
+        let env = Env::new();
+        env.vanilla("留下");
+        env.facade
+            .update(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["生存".into(), "留下".into()]);
+                petalfall.set_selected_version(Some("生存".into()));
+                Ok::<_, CommandError>(())
+            })
+            .await
+            .unwrap();
+        let before = env.saved_config().await;
+        let target = new_home(&env);
+
+        recover_moves(&env.facade).await;
+        settle_move_recovery(
+            &env.facade,
+            MoveRecovery::RolledBack {
+                id: "生存".into(),
+                source_game_dir: env.game_dir(),
+                target_game_dir: target.clone(),
+            },
+        )
+        .await;
+        settle_move_recovery(
+            &env.facade,
+            MoveRecovery::Settled {
+                id: "生存".into(),
+                source_game_dir: env.game_dir(),
+                target_game_dir: target.clone(),
+            },
+        )
+        .await;
+        settle_move_recovery(
+            &env.facade,
+            MoveRecovery::Deferred {
+                id: "生存".into(),
+                reason: "目标盘不在".into(),
+            },
+        )
+        .await;
+        assert_eq!(env.saved_config().await, before);
+
+        let completed = MoveRecovery::Completed(MoveOutcome {
+            id: "生存".into(),
+            source_game_dir: env.game_dir(),
+            target_game_dir: target.clone(),
+            follow_ups: vec![MoveFollowUp::PlayRecords("游玩记录读不出来".into())],
+            token: "0".into(),
+            forget_source_refs: true,
+        });
+        settle_move_recovery(&env.facade, completed.clone()).await;
+        let saved = env.saved_config().await;
+        assert_eq!(saved.sidebar_pins, vec!["留下".to_owned()]);
+        assert_eq!(saved.selected_version, None);
+        assert_eq!(
+            saved.extra_game_directories,
+            vec![petalfall_core::NamedDirectory {
+                name: "新家".into(),
+                path: target.clone(),
+            }]
+        );
+        settle_move_recovery(&env.facade, completed).await;
+        assert_eq!(env.saved_config().await, saved);
     }
 }

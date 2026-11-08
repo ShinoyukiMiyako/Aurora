@@ -12,6 +12,7 @@ import {
   exportWorld,
   getInstanceSettings,
   getSidebarPins,
+  importCoverImage,
   installVersion,
   listInstanceContent,
   listInstances,
@@ -34,7 +35,7 @@ import {
 } from "./instances";
 import { resetMocks } from "./mock";
 import { clearMockEventListeners } from "./mock/events";
-import { acquireMockInstance, addMockInstance, loseMockLoaderLibrary, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./mock/handlers/instances";
+import { acquireMockInstance, addMockInstance, loseMockCoverImage, loseMockLoaderLibrary, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./mock/handlers/instances";
 import { endMockGame, reset as resetLaunchMock, setMockPlayRecordsUnreadable } from "./mock/handlers/launch";
 import { launchGame, playStats } from "./launch";
 import { exportModpack } from "./modpack";
@@ -121,6 +122,9 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
     const settings: InstanceSettingsDto = {
       description: null,
       cover: null,
+      cover_image: null,
+      background: "follow",
+      background_image: null,
       isolation: "follow_global",
       memory_mb: null,
       java: "auto",
@@ -148,6 +152,7 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
     await templateInfo();
     await saveInstanceAsTemplate("a");
     await clearTemplate();
+    await importCoverImage("a", "block", "C:\\图片\\a.png");
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
       ["list_instances", undefined],
       ["get_instance_settings", { id: "a" }],
@@ -169,6 +174,7 @@ describe("Tauri 窗口里参数键与 Rust 形参一致", () => {
       ["template_info", undefined],
       ["save_instance_as_template", { id: "a" }],
       ["clear_template", undefined],
+      ["import_cover_image", { id: "a", slot: "block", path: "C:\\图片\\a.png" }],
     ]);
   });
 
@@ -337,6 +343,38 @@ describe("mock：新建与补全", () => {
     expect(events.every((e) => e.task_id === "t-new")).toBe(true);
     const last = events.filter((e) => e.kind === "download").at(-1);
     expect(last).toMatchObject({ finished: 40, total: 40 });
+  });
+
+  it("新建与补全按后端的步骤表逐步报出：每条都带整份表，本体与库那一步在下载之前，之后各步在下载之后", async () => {
+    vi.useFakeTimers();
+    const events: CoreEvent[] = [];
+    await onCoreEvent((e) => events.push(e));
+    const run = async <T>(promise: Promise<T>) => {
+      await vi.advanceTimersByTimeAsync(INSTALL_SPAN_MS);
+      return promise;
+    };
+    /** 这个任务报出的步骤（按 plan[index] 换成键），并核对每条的表都是同一份、下标从 0 依次加一。 */
+    const steps = (taskId: string) => {
+      const phases = events.flatMap((e) => (e.kind === "phase" && e.task_id === taskId ? [e] : []));
+      const plan = phases.length === 0 ? [] : phases[0].plan;
+      expect(phases.map((e) => [e.plan, e.index]), taskId).toEqual(plan.map((_, i) => [plan, i]));
+      return phases.map((e) => e.plan[e.index]);
+    };
+    await run(installVersion("t-fabric", "1.21.1", "fabric", null, "周末生存"));
+    expect(steps("t-fabric")).toEqual(["metadata", "loader_profile", "libraries", "assets", "natives"]);
+    const order = events.flatMap((e) => (e.task_id !== "t-fabric" ? [] : e.kind === "phase" ? [e.plan[e.index]] : e.kind === "download" ? ["download"] : []));
+    expect(order.indexOf("libraries")).toBeLessThan(order.indexOf("download"));
+    expect(order.lastIndexOf("download")).toBeLessThan(order.indexOf("assets"));
+
+    await run(installVersion("t-vanilla", "1.21.1", null, null, "原版", true));
+    expect(steps("t-vanilla")).toEqual(["metadata", "libraries", "assets", "natives", "template"]);
+    await run(installVersion("t-forge", "1.20.1", "forge", "47.2.0", "锻造"));
+    expect(steps("t-forge")).toEqual(["metadata", "libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"]);
+    // 只补全的实例走三步；照未完成标记重装的走新建那一份表，不套模板
+    await run(repairInstance("t-complete", "樱花生存"));
+    expect(steps("t-complete")).toEqual(["libraries", "assets", "natives"]);
+    await run(repairInstance("t-reinstall", "没装完"));
+    expect(steps("t-reinstall")).toEqual(["metadata", "libraries", "assets", "natives", "java", "loader_installer", "loader_libraries", "loader_processors", "verify"]);
   });
 
   it("新建的实例不继承已经不在的同名旧实例留下的游玩记录，别的实例的记录不动", async () => {
@@ -567,6 +605,114 @@ describe("mock：实例设置", () => {
     }
     expect(await getInstanceSettings("1.21.1")).toEqual(next);
     expect((await rejection(setInstanceSettings("ghost", next))).code).toBe("version_not_installed");
+  });
+
+  it("卡面图片文件名与后端同一条规则：前缀、16 位小写十六进制、各位置认的扩展名；背景设为图片必须有图", async () => {
+    const current = await getInstanceSettings("1.21.1");
+    const ok: InstanceSettingsDto = { ...current, cover_image: "block-0123456789abcdef.png", background: "image", background_image: "background-fedcba9876543210.jpg" };
+    expect(await setInstanceSettings("1.21.1", ok)).toEqual(ok);
+    expect(await setInstanceSettings("1.21.1", { ...ok, background_image: "background-0123456789abcdef.png" })).toMatchObject({ background_image: "background-0123456789abcdef.png" });
+    for (const [patch, field] of [
+      [{ cover_image: "block-0123456789abcdef.jpg" }, "cover_image"],
+      [{ cover_image: "../block-0123456789abcdef.png" }, "cover_image"],
+      [{ cover_image: "background-0123456789abcdef.png" }, "cover_image"],
+      [{ background_image: "background-0123456789ABCDEF.png" }, "background_image"],
+      [{ background_image: "background-0123456789abcde.png" }, "background_image"],
+      [{ background_image: "background-0123456789abcdefa.png" }, "background_image"],
+      [{ background_image: "background-0123456789abcdef.webp" }, "background_image"],
+      [{ background_image: "block-0123456789abcdef.png" }, "background_image"],
+      [{ background_image: null }, "background"],
+    ] as const) {
+      const error = await rejection(setInstanceSettings("1.21.1", { ...ok, ...patch }));
+      expect(error.code, JSON.stringify(patch)).toBe("invalid_argument");
+      expect(detail(error).field, JSON.stringify(patch)).toBe(field);
+    }
+    // 背景不是图片时图片可以留着，换回来不用重选
+    expect(await setInstanceSettings("1.21.1", { ...ok, background: "texture" })).toMatchObject({ background: "texture", background_image: "background-fedcba9876543210.jpg" });
+  });
+});
+
+describe("mock：卡面图片导入", () => {
+  const ID = "樱花生存";
+  const listed = async () => {
+    const found = (await listInstances()).find((i) => i.id === ID);
+    if (found === undefined) throw new Error(`列表里没有 ${ID}`);
+    return found;
+  };
+
+  it("背景位：按原图格式起名、把背景设为图片并写进设置；列表给出 40 位小写十六进制的取图键", async () => {
+    const saved = await importCoverImage(ID, "background", "C:\\图片\\落日.JPEG");
+    expect(saved.background).toBe("image");
+    expect(saved.background_image).toMatch(/^background-[0-9a-f]{16}\.jpg$/);
+    expect(saved).toMatchObject({ cover: "cherry_planks", cover_image: null, memory_mb: 6144 });
+    expect(await getInstanceSettings(ID)).toEqual(saved);
+    const dto = await listed();
+    expect(dto.background).toBe("image");
+    expect(dto.background_image).toMatch(/^[0-9a-f]{40}$/);
+    expect(dto.cover_image).toBeNull();
+    // 可能带透明的格式存 PNG
+    expect((await importCoverImage(ID, "background", "C:\\图片\\a.webp")).background_image).toMatch(/^background-[0-9a-f]{16}\.png$/);
+    expect((await importCoverImage(ID, "background", "C:\\图片\\a.png")).background_image).toMatch(/^background-[0-9a-f]{16}\.png$/);
+  });
+
+  it("方块位：一律存 PNG，只写 cover_image，背景不动；同一张图重复导入得同一个名字与键", async () => {
+    const first = await importCoverImage(ID, "block", "D:/素材/方块.jpg");
+    expect(first.cover_image).toMatch(/^block-[0-9a-f]{16}\.png$/);
+    expect(first).toMatchObject({ background: "follow", background_image: null, cover: "cherry_planks" });
+    const key = (await listed()).cover_image;
+    expect(key).toMatch(/^[0-9a-f]{40}$/);
+    const again = await importCoverImage(ID, "block", "D:/素材/方块.jpg");
+    expect(again.cover_image).toBe(first.cover_image);
+    expect((await listed()).cover_image).toBe(key);
+    const other = await importCoverImage(ID, "block", "D:/素材/另一张.png");
+    expect(other.cover_image).not.toBe(first.cover_image);
+    expect((await listed()).cover_image).not.toBe(key);
+  });
+
+  it("换图与清除：被换下、不再被引用的旧图随保存清掉，之后再写回旧名字也拿不到取图键", async () => {
+    const old = await importCoverImage(ID, "background", "C:\\a.png");
+    const replaced = await importCoverImage(ID, "background", "C:\\b.png");
+    expect(replaced.background_image).not.toBe(old.background_image);
+    // 拿改图之前读到的设置写回：名字合法、写得进去，但文件已经不在了
+    await setInstanceSettings(ID, old);
+    expect(await getInstanceSettings(ID)).toEqual(old);
+    expect((await listed()).background_image).toBeNull();
+
+    const kept = await importCoverImage(ID, "background", "C:\\c.png");
+    await setInstanceSettings(ID, { ...kept, background: "follow" });
+    expect((await listed()).background_image).toMatch(/^[0-9a-f]{40}$/);
+    await setInstanceSettings(ID, { ...kept, background: "follow", background_image: null });
+    await setInstanceSettings(ID, { ...kept, background: "follow" });
+    expect((await listed()).background_image).toBeNull();
+  });
+
+  it("文件在启动器外被删：设置照旧，列表的取图键为 null", async () => {
+    const saved = await importCoverImage(ID, "block", "C:\\a.png");
+    const file = saved.cover_image;
+    if (file === null) throw new Error("导入没写下文件名");
+    loseMockCoverImage(ID, file);
+    expect((await getInstanceSettings(ID)).cover_image).toBe(file);
+    expect((await listed()).cover_image).toBeNull();
+  });
+
+  it("不是 PNG、JPEG、WebP 报 invalid_argument（field 为 path），设置不动；实例忙碌报 instance_busy；不存在报 version_not_installed", async () => {
+    const before = await getInstanceSettings(ID);
+    for (const path of ["C:\\图片\\a.gif", "C:\\图片\\png", "C:\\图片\\a.png.txt", "C:\\图片\\a"]) {
+      const error = await rejection(importCoverImage(ID, "background", path));
+      expect(error.code, path).toBe("invalid_argument");
+      expect(detail(error).field, path).toBe("path");
+    }
+    const hold = acquireMockInstance(ID, "repairing");
+    const busy = await rejection(importCoverImage(ID, "block", "C:\\a.png"));
+    expect(busy.code).toBe("instance_busy");
+    expect(detail(busy)).toMatchObject({ id: ID, activity: "repairing" });
+    hold.release();
+    expect(await getInstanceSettings(ID)).toEqual(before);
+    // 与改设置一样和运行中的游戏兼容
+    const running = acquireMockInstance(ID, "running");
+    expect((await importCoverImage(ID, "block", "C:\\a.png")).cover_image).toMatch(/^block-/);
+    running.release();
+    expect((await rejection(importCoverImage("ghost", "block", "C:\\a.png"))).code).toBe("version_not_installed");
   });
 });
 

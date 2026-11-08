@@ -4,15 +4,17 @@ import { useState, type ReactNode } from "react";
 import type { InstanceSummary, Settings, WorldBackup } from "../../../domain/adapt";
 import { formatMemory } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
+import { memoryBasis } from "../../../domain/memory";
 import { samePath } from "../../../domain/paths";
 import { autoBackupOutcome } from "../../../domain/rules";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
-import { ACTION_ERROR } from "../../../copy/flows";
+import { ACTION_ERROR, gameDirSwitchReason, GAME_DIR_SWITCH_COPY } from "../../../copy/flows";
+import { MEMORY_BASIS_COPY } from "../../../copy/memory";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import { useDiscoveredGameDirectories, useGameDirectories, useMemoryAdvice, type GameDirectoryDto } from "../../../state/queries/catalog";
 import { invalidate } from "../../../state/resource";
-import { busyInstanceId, activeTasks } from "../../../state/selectors";
+import { gameDirectoryBusy } from "../../../state/selectors";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
 import { Card } from "../../../ui/Card";
@@ -26,6 +28,7 @@ import { Skeleton } from "../../../ui/Skeleton";
 import { Tag } from "../../../ui/Tag";
 import { Toggle } from "../../../ui/Toggle";
 import { Tooltip } from "../../../ui/Tooltip";
+import { useSwitchDirectory } from "../../shared/useSwitchDirectory";
 import { useSettingsCommands } from "../commands";
 import {
   AUTO_BACKUP_SKIPPED_NOTE,
@@ -36,11 +39,10 @@ import {
   LOAD_COPY,
   MAX_TOTAL_GB_OPTIONS,
   MEMORY_COPY,
-  MEMORY_TIER_LABEL,
   RECOMMENDED_ISOLATION,
   WORLD_BACKUP_COPY,
 } from "../copy";
-import { dirName, hasBang, overAvailable, unrecorded } from "../game-model";
+import { overAvailable, unrecorded } from "../game-model";
 import { InstanceStack } from "../InstanceStack";
 import { useLoadedSettings } from "../SettingsGate";
 import { useSettingWrite, type SettingWrite } from "../write";
@@ -65,9 +67,12 @@ function CustomMemoryLine({ instances }: { instances: readonly InstanceSummary[]
 function MemoryCard() {
   const settings = useLoadedSettings();
   const instances = useLauncherSelector((s) => s.instances);
+  const selectedInstanceId = useLauncherSelector((s) => s.selectedInstanceId);
   const actions = useLauncherActions();
   const run = useRunner();
-  const advice = useMemoryAdvice(null);
+  // 按当前实例的 id 取，不让后端自己去读主页选中了谁：缓存 key 带上实例 id，换当前实例、改名、删除与 Mod 变化
+  // 才会随实例作用域的失效一起重取，不会留着上一个实例的估算
+  const advice = useMemoryAdvice(selectedInstanceId);
   const memory = settings.memory;
   // 两项写的是同一组内存设置：一项还在写入时改另一项，要带上前一项正在写的值；按读到的旧配置拼整组，
   // 后到的这次就把前一项改回去了（刚关掉的自动分配又被打开，或刚调的最大内存退回原值）
@@ -112,14 +117,16 @@ function MemoryCard() {
     );
   }
 
-  const { total_mb: total, available_mb: available, recommended_mb: recommended, tier } = advice.data;
-  const tierLabel = MEMORY_TIER_LABEL[tier];
+  const { total_mb: total, available_mb: available, recommended_mb: recommended, version_id: versionId } = advice.data;
+  // 实例列表里还找不到当前实例时（重扫还没回来），加载器与版本只写组成项看得出来的部分
+  const basis = memoryBasis(advice.data, versionId === null ? null : (instances.find((i) => i.id === versionId) ?? null));
+  const current = versionId === null ? MEMORY_COPY.noInstance(formatMemory(recommended)) : MEMORY_COPY.currentInstance(versionId, basis.summary);
   const manual = dragging === null ? max.value : dragging;
   const value = auto.value ? recommended : manual;
   return (
     <Card>
       <CardHeader title={MEMORY_COPY.title} subtitle={MEMORY_COPY.subtitle(formatMemory(total))} icon="memory" />
-      <SettingRow title={MEMORY_COPY.auto} description={MEMORY_COPY.autoDesc(tierLabel, formatMemory(recommended))}>
+      <SettingRow title={MEMORY_COPY.auto} description={MEMORY_COPY.autoDesc(current)}>
         <Toggle checked={auto.value} onChange={auto.set} ariaLabel={MEMORY_COPY.auto} />
       </SettingRow>
       <div className={s.cardBody}>
@@ -128,7 +135,7 @@ function MemoryCard() {
           totalMb={total}
           value={value}
           disabled={auto.value}
-          recommended={{ mb: recommended, tip: MEMORY_COPY.recommendedTip(tierLabel, formatMemory(recommended)) }}
+          recommended={{ mb: recommended, tip: basis.sentence }}
           notes={[MEMORY_COPY.available(formatMemory(available))]}
           onChange={setDragging}
           onCommit={(mb) => {
@@ -137,6 +144,11 @@ function MemoryCard() {
           }}
         />
         <CustomMemoryLine instances={instances} />
+        {auto.value && basis.cap !== null && (
+          <Callout tone="warn" icon="alert" announce>
+            {MEMORY_BASIS_COPY.capNotice(basis.cap)}
+          </Callout>
+        )}
         {!auto.value && overAvailable(manual, available, total) && (
           <Callout tone="warn" icon="alert" announce>
             {MEMORY_COPY.overAvailable(formatMemory(manual), formatMemory(available))}
@@ -182,35 +194,10 @@ function IsolationCard() {
 
 // ---------------------------------------------------------------- 游戏目录
 
-/** 切换游戏目录前的共同步骤：查「!」、二次确认、切换、刷新目录列表。 */
-function useSwitchDirectory() {
-  const actions = useLauncherActions();
-  const { confirm } = useShell();
-  const run = useRunner();
-  return async (path: string, name: string = dirName(path)): Promise<void> => {
-    if (hasBang(path)) {
-      actions.toast("error", GAME_DIR_COPY.switchFailed, GAME_DIR_COPY.bangError);
-      return;
-    }
-    const ok = await confirm({
-      title: GAME_DIR_COPY.confirmTitle(name),
-      body: GAME_DIR_COPY.confirmBody,
-      confirmLabel: GAME_DIR_COPY.confirmLabel,
-      tone: "primary",
-    });
-    if (!ok) return;
-    await run(async () => {
-      await actions.setGameDirectory(path);
-      invalidate("game-dirs");
-    }, ACTION_ERROR.gameDirectory);
-  };
-}
-
-function OtherDirectoryRow({ dir, busyReason }: { dir: GameDirectoryDto; busyReason: string | undefined }) {
+function OtherDirectoryRow({ dir, busy }: { dir: GameDirectoryDto; busy: boolean }) {
   const run = useRunner();
   const commands = useSettingsCommands();
   const switchTo = useSwitchDirectory();
-  const reason = busyReason !== undefined ? busyReason : dir.available ? undefined : GAME_DIR_COPY.unavailableReason;
   const remove = () =>
     void run(async () => {
       await commands.removeGameDirectory(dir.path);
@@ -233,7 +220,7 @@ function OtherDirectoryRow({ dir, busyReason }: { dir: GameDirectoryDto; busyRea
         </span>
         <span className={s.dirPath}>{dir.path}</span>
       </span>
-      <Button size="sm" variant="ghost" disabledReason={reason} onClick={() => void switchTo(dir.path, dir.name)}>
+      <Button size="sm" variant="ghost" disabledReason={gameDirSwitchReason(busy, dir.available)} onClick={() => void switchTo(dir.path, dir.name)}>
         {GAME_DIR_COPY.switch}
       </Button>
       <Button size="sm" variant="ghost" onClick={remove}>
@@ -250,7 +237,7 @@ function DiscoveredBlock({ known, current }: { known: readonly GameDirectoryDto[
   if (discovered.status === "loading") return null;
   if (discovered.status === "error") {
     return (
-      <Callout tone="danger" announce>
+      <Callout tone="danger" announce fullText>
         <span className={s.calloutTitle}>{GAME_DIR_COPY.discoverFailed}</span>
         <span className={s.errorText}>{discovered.error.message}</span>
       </Callout>
@@ -289,8 +276,7 @@ function DiscoveredBlock({ known, current }: { known: readonly GameDirectoryDto[
 
 function GameDirectoryCard() {
   const settings = useLoadedSettings();
-  // 游戏在跑或有任务在下时不能换游戏目录
-  const busy = useLauncherSelector((s) => busyInstanceId(s) !== null || activeTasks(s).length > 0);
+  const busy = useLauncherSelector(gameDirectoryBusy);
   const actions = useLauncherActions();
   const run = useRunner();
   const commands = useSettingsCommands();
@@ -298,7 +284,6 @@ function GameDirectoryCard() {
   const discovered = useDiscoveredGameDirectories();
   const { copyText } = useShell();
   const switchTo = useSwitchDirectory();
-  const busyReason = busy ? GAME_DIR_COPY.busyReason : undefined;
 
   const change = () =>
     void run(async () => {
@@ -323,7 +308,7 @@ function GameDirectoryCard() {
           label={GAME_DIR_COPY.openFolder}
           onClick={() => void run(() => actions.openFolder("game_dir"), ACTION_ERROR.openFolder)}
         />
-        <Button icon="edit" disabledReason={busyReason} onClick={change}>
+        <Button icon="edit" disabledReason={busy ? GAME_DIR_SWITCH_COPY.busyReason : undefined} onClick={change}>
           {GAME_DIR_COPY.change}
         </Button>
       </div>
@@ -356,7 +341,7 @@ function GameDirectoryCard() {
         {others.length > 0 && (
           <ul className={s.dirList}>
             {others.map((d) => (
-              <OtherDirectoryRow key={d.path} dir={d} busyReason={busyReason} />
+              <OtherDirectoryRow key={d.path} dir={d} busy={busy} />
             ))}
           </ul>
         )}

@@ -31,12 +31,15 @@
   background: var(--sk-loader-neoforge);
 }
 
-/* 名称用正文色、版本退到次级色，两者在描边标签里才分得出主次 */
+/*
+ * 名称用正文色、版本退到次级色，两者在描边标签里才分得出主次。两者各自写字色，会盖过描边标签按 --tag-ink 给的字色，
+ * 所以也读卡面下发的变量：压在图片或材质平铺上时卡面给出 --tag-ink 与强一档的 --tag-ink-strong，主次换成媒体文字色的两档。
+ */
 .name {
-  color: var(--sk-text);
+  color: var(--tag-ink-strong, var(--sk-text));
 }
 
 .version {
-  color: var(--sk-text-2);
+  color: var(--tag-ink, var(--sk-text-2));
   font-variant-numeric: tabular-nums;
 }

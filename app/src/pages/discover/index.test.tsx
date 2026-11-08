@@ -918,7 +918,7 @@ describe("发现页：整合包", () => {
     ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
     ipc.overrides.set("summarize_platform_modpack", () => new Promise(() => {}));
     ipc.overrides.set("install_modpack", () => {
-      throw new IpcError("curseforge_key_missing", "CurseForge API key 未配置（环境变量 AURORA_CURSEFORGE_API_KEY 缺失），该源已禁用");
+      throw new IpcError("curseforge_key_missing", "CurseForge API key 未配置（环境变量 PETALFALL_CURSEFORGE_API_KEY 缺失），该源已禁用");
     });
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     await mount();
@@ -926,8 +926,12 @@ describe("发现页：整合包", () => {
     await flush();
     act(() => buttonByText("安装为新实例", dialog()).click());
     await flush();
-    expect(dialog().textContent).toContain("没装成：有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY");
+    expect(dialog().textContent).toContain("没装成：有文件只能从 CurseForge 下载，需要先设置环境变量 PETALFALL_CURSEFORGE_API_KEY");
     expect(dialog().textContent).not.toContain("该源已禁用");
+    // jsdom 不排版，截不截成两行只能看文字容器上的 data-full；这条原因最长，截成两行就看不到要设的环境变量名
+    expect([...dialog().querySelectorAll('[data-tone="danger"] [data-full]')].map((el) => el.textContent)).toEqual([
+      "没装成：有文件只能从 CurseForge 下载，需要先设置环境变量 PETALFALL_CURSEFORGE_API_KEY",
+    ]);
     expect(buttonByText("重试", dialog())).toBeDefined();
   });
 
@@ -1153,7 +1157,7 @@ describe("发现页：平台整合包的清单摘要与同包提醒", () => {
     });
     await openPack();
     expect(dialog().textContent).toContain("整合包清单没能提前读出来");
-    expect(dialog().textContent).toContain("CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试");
+    expect(dialog().textContent).toContain("CurseForge 拒绝了下载密钥。设置环境变量 PETALFALL_CURSEFORGE_API_KEY 换一个可用的密钥后重试");
     expect(dialog().textContent).not.toContain("HTTP 401");
   });
 
@@ -1279,6 +1283,7 @@ describe("发现页：平台整合包的清单摘要与同包提醒", () => {
       act(() => buttonByText("安装为新实例", dialog()).click());
       await flush();
       expect(callouts()).toEqual(["没装成：网络连接失败"]);
+      expect([...panel().querySelectorAll('[data-tone="danger"] [data-full]')].map((el) => el.textContent)).toEqual(["没装成：网络连接失败"]);
       expect(rows()).toEqual([]);
     });
   });

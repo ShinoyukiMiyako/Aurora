@@ -1,4 +1,5 @@
-//! 启动器正常退出（`RunEvent::Exit`）时的收尾：补写游玩记录里还没落盘的改动，再按需拉起更新安装程序。
+//! 启动器正常退出（`RunEvent::Exit`）时的收尾：游戏还在跑时先让它的会话日志落盘，再等进行中的外置令牌轮换落盘，
+//! 补写游玩记录里还没落盘的改动与主窗口状态，最后按需拉起更新安装程序。
 //!
 //! 实例改名、删除时游玩记录没写进去的改动只记在进程内，之后哪次读写游玩记录时补上；没等到那一次就退出，
 //! 它们就丢了，旧名下的时长从此不对应任何实例。所以退出前再补写一次。退出路径上没有前端可以报错，结果只进日志。
@@ -16,10 +17,24 @@ pub const PLAY_RECORDS_DEADLINE: Duration = Duration::from_secs(3);
 
 /// 在 `RunEvent::Exit` 里调用。
 pub fn on_exit(app: &AppHandle) {
-    let facade = app.state::<Facade>();
-    tauri::async_runtime::block_on(save_play_records(&facade, PLAY_RECORDS_DEADLINE));
+    // 排在最前：游戏还在跑时会话日志缓冲里攒着最后的输出，越早落盘越好。
+    crate::commands::launch::mark_on_exit(app);
+    tauri::async_runtime::block_on(persist_before_exit(&app.state::<Facade>()));
+    crate::window_state::flush_on_exit(app);
     // 安装程序拉起后进程随即退出，所以排在补写之后。
     crate::commands::updater::install_on_exit(app);
+}
+
+/// 进程结束前要做的落盘：关上外置令牌轮换的闸、等进行中的轮换，再补写游玩记录。正常退出与自更新拉起安装程序
+/// 之前（[`crate::commands::updater::install_after_persisting`]）都走这里。续期跑在独立任务里，进程一退就没了，
+/// 新令牌来不及落盘；闸关上之后要刷新的外置令牌原样留着，下次再续。两步各有时限，结果只进日志。
+pub async fn persist_before_exit(facade: &Facade) {
+    crate::commands::accounts::stop_rotations(
+        facade,
+        crate::commands::accounts::ROTATIONS_EXIT_DEADLINE,
+    )
+    .await;
+    save_play_records(facade, PLAY_RECORDS_DEADLINE).await;
 }
 
 /// 退出时补写游玩记录的结局。
@@ -66,11 +81,11 @@ pub async fn save_play_records(facade: &Facade, deadline: Duration) -> PlayRecor
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::Path;
 
-    use aurora_core::playtime::PLAYTIME_FILE;
-    use aurora_core::{Aurora, AuroraConfig};
+    use petalfall_core::playtime::PLAYTIME_FILE;
+    use petalfall_core::{Petalfall, PetalfallConfig};
     use serde_json::Value;
 
     use super::*;
@@ -78,8 +93,8 @@ mod tests {
     /// 数据目录在 `dir`、游戏目录取默认（数据目录下）的门面。
     fn facade_in(dir: &Path) -> Facade {
         Facade::new(
-            Aurora::open(
-                AuroraConfig::default(),
+            Petalfall::open(
+                PetalfallConfig::default(),
                 dir.to_path_buf(),
                 dir.join("config.json"),
             )
@@ -114,9 +129,9 @@ mod tests {
         let path = dir.path().join(PLAYTIME_FILE);
         let facade = facade_in(dir.path());
         std::fs::write(&path, "{ broken").unwrap();
-        let aurora = facade.snapshot().await;
-        assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
-        assert!(aurora.forget_play_records("删掉的").await.is_err());
+        let petalfall = facade.snapshot().await;
+        assert!(petalfall.rename_play_records("旧名", "新名").await.is_err());
+        assert!(petalfall.forget_play_records("删掉的").await.is_err());
         std::fs::write(&path, RECORDS).unwrap();
 
         let outcome = save_play_records(&facade, PLAY_RECORDS_DEADLINE).await;
@@ -180,8 +195,8 @@ mod tests {
             .share_mode(FILE_SHARE_READ)
             .open(&path)
             .unwrap();
-        let aurora = facade.snapshot().await;
-        assert!(aurora.rename_play_records("旧名", "新名").await.is_err());
+        let petalfall = facade.snapshot().await;
+        assert!(petalfall.rename_play_records("旧名", "新名").await.is_err());
 
         let outcome = save_play_records(&facade, PLAY_RECORDS_DEADLINE).await;
         assert!(matches!(outcome, PlayRecordsSave::Failed), "{outcome:?}");
@@ -195,5 +210,196 @@ mod tests {
             .await
             .unwrap());
         assert_eq!(saved_ids(&path), vec!["删掉的", "新名", "留下"]);
+    }
+
+    /// 外置账户正在刷新令牌时退出：退出收尾等到新令牌落了盘才往下走。服务器那边旧令牌已经作废，
+    /// 把等待从收尾里拿掉，重开读到的就是作废了的旧令牌，账户只能重新登录。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exit_waits_for_the_authlib_rotation_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let account =
+            stale_authlib_account(dir.path(), Duration::ZERO, Duration::from_secs(1)).await;
+        let _renewal = account.renew_until("/authserver/refresh").await;
+        assert_eq!(account.stored_token(), "stale");
+
+        persist_before_exit(&account.facade).await;
+        assert_eq!(account.stored_token(), "rotated");
+    }
+
+    /// 外置令牌还在校验时退出（账户页点了刷新马上关窗，或启动停在「验证账户」时关窗）：校验那一程不会让旧令牌
+    /// 作废，退出不等它；校验判失效之后也不再发刷新，旧令牌原样留着，下次再续。退出收尾不关闸的话，校验一完刷新
+    /// 照样发出，旧令牌作废，新令牌赶不上进程退出，下次启动账户就被登出了。
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exit_during_validation_keeps_the_old_authlib_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let account =
+            stale_authlib_account(dir.path(), Duration::from_secs(1), Duration::ZERO).await;
+        let renewal = account.renew_until("/authserver/validate").await;
+
+        persist_before_exit(&account.facade).await;
+        let refused = renewal.await.unwrap();
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(petalfall_core::CoreError::is_cancelled),
+            "{refused:?}"
+        );
+        assert!(
+            !account.requested("/authserver/refresh").await,
+            "退出开始后不该再发刷新请求"
+        );
+        assert_eq!(account.stored_token(), "stale");
+    }
+
+    /// 一个旧令牌已失效的外置账户，连着它的登录服务器。
+    #[cfg(windows)]
+    pub(crate) struct StaleAuthlibAccount {
+        pub(crate) facade: Facade,
+        account: petalfall_core::Account,
+        dir: std::path::PathBuf,
+        server: wiremock::MockServer,
+    }
+
+    #[cfg(windows)]
+    impl StaleAuthlibAccount {
+        /// 重开门面读到的令牌：落了盘的才读得到。
+        pub(crate) fn stored_token(&self) -> String {
+            let reopened = Petalfall::open(
+                PetalfallConfig::default(),
+                self.dir.clone(),
+                self.dir.join("config.json"),
+            )
+            .unwrap();
+            match reopened.find_account(HERO).unwrap().unwrap().credentials {
+                petalfall_core::AccountCredentials::AuthlibInjector(creds) => creds.access_token,
+                other => panic!("期望外置凭据，得到 {other:?}"),
+            }
+        }
+
+        /// 在门面快照上续期，等到登录服务器收到发往 `endpoint` 的请求才返回，交回那次续期。
+        pub(crate) async fn renew_until(
+            &self,
+            endpoint: &str,
+        ) -> tokio::task::JoinHandle<Result<petalfall_core::Account, petalfall_core::CoreError>>
+        {
+            let renewal = self.renew_in_background().await;
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while !self.requested(endpoint).await {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("15 秒内没等到 {endpoint} 的请求"));
+            renewal
+        }
+
+        /// 在门面快照上续期并等它结束。
+        pub(crate) async fn renew(
+            &self,
+        ) -> Result<petalfall_core::Account, petalfall_core::CoreError> {
+            self.renew_in_background().await.await.unwrap()
+        }
+
+        async fn renew_in_background(
+            &self,
+        ) -> tokio::task::JoinHandle<Result<petalfall_core::Account, petalfall_core::CoreError>>
+        {
+            let petalfall = self.facade.snapshot().await;
+            let account = self.account.clone();
+            tokio::spawn(async move { petalfall.ensure_account_fresh(&account).await })
+        }
+
+        pub(crate) async fn requested(&self, endpoint: &str) -> bool {
+            self.server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.url.path() == endpoint)
+        }
+    }
+
+    #[cfg(windows)]
+    const HERO: &str = "1111111111111111aaaaaaaaaaaaaaaa";
+
+    /// 在 `dir` 登录一个外置账户。它的令牌之后校验都判失效（扣 `validate_delay`），刷新给出新令牌
+    /// （扣 `refresh_delay`）。
+    #[cfg(windows)]
+    pub(crate) async fn stale_authlib_account(
+        dir: &Path,
+        validate_delay: Duration,
+        refresh_delay: Duration,
+    ) -> StaleAuthlibAccount {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "meta": { "serverName": "Petal Skin" },
+                "skinDomains": ["127.0.0.1"]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/authserver/authenticate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "accessToken": "stale", "clientToken": "cli",
+                "availableProfiles": [ { "id": HERO, "name": "Hero" } ],
+                "selectedProfile": { "id": HERO, "name": "Hero" }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/sessionserver/session/minecraft/profile/{HERO}"
+            )))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/authserver/validate"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_json(json!({
+                        "error": "ForbiddenOperationException", "errorMessage": "Invalid token."
+                    }))
+                    .set_delay(validate_delay),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/authserver/refresh"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({
+                        "accessToken": "rotated", "clientToken": "cli",
+                        "selectedProfile": { "id": HERO, "name": "Hero" }
+                    }))
+                    .set_delay(refresh_delay),
+            )
+            .mount(&server)
+            .await;
+
+        let facade = facade_in(dir);
+        let petalfall_core::AuthlibLogin::LoggedIn(account) = facade
+            .snapshot()
+            .await
+            .authlib_login(&server.uri(), "hero@example.com", "pw")
+            .await
+            .unwrap()
+        else {
+            panic!("服务器替用户选定了角色，应直接登录");
+        };
+        StaleAuthlibAccount {
+            facade,
+            account,
+            dir: dir.to_path_buf(),
+            server,
+        }
     }
 }

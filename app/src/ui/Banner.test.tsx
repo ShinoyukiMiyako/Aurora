@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Icon } from "../art/Icon";
@@ -100,5 +102,28 @@ describe("Callout", () => {
       </Callout>,
     ).firstElementChild as HTMLElement;
     expect(callout.getAttribute("role")).toBe("status");
+  });
+
+  it("默认截成两行；后端原文按实际行数显示", () => {
+    const css = readFileSync(resolve(__dirname, "Callout.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(/(?:^|\n)\.text\s*\{[^}]*\s-webkit-line-clamp:\s*2;/.test(css)).toBe(true);
+    const full = /(?:^|\n)\.text\[data-full\]\s*\{([^}]*)\}/.exec(css);
+    if (full === null) throw new Error("Callout.module.css 没有 .text[data-full] 规则");
+    expect(full[1]).toMatch(/\sdisplay:\s*block;/);
+    expect(full[1]).toMatch(/\s-webkit-line-clamp:\s*unset;/);
+
+    const text = (node: HTMLElement) => node.querySelector("svg + div") as HTMLElement;
+    const clamped = mount(<Callout tone="warn">前置说明</Callout>).firstElementChild as HTMLElement;
+    expect(text(clamped).dataset.full).toBeUndefined();
+    const lines = ["可选前置 Roughly Enough Items (REI) 未自动安装，需要时手动添加", "工具类关联 Mod Menu 未自动安装"];
+    const whole = mount(
+      <Callout tone="warn" fullText>
+        {lines.map((line) => (
+          <span key={line}>{line}</span>
+        ))}
+      </Callout>,
+    ).firstElementChild as HTMLElement;
+    expect(text(whole).dataset.full).toBe("true");
+    expect(text(whole).textContent).toBe(lines.join(""));
   });
 });

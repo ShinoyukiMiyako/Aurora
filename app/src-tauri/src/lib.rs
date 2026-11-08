@@ -1,9 +1,15 @@
+// Copyright (C) 2026 Shinoyuki_Miyako
+// SPDX-License-Identifier: AGPL-3.0-only
+// 本程序代码按 AGPL-3.0-only 授权，另附 AGPL 第 7 条的附加条款；两者见源代码根目录的 LICENSE 与 LICENSE-ADDITIONAL-TERMS.md。
+// Licensed under AGPL-3.0-only with additional terms under section 7 of the AGPL; see LICENSE and LICENSE-ADDITIONAL-TERMS.md at the root of the source code.
+
 //! Petalfall 的 Tauri 外壳。
 //!
 //! 本文件只做装配：日志、插件、managed state、主窗口兜底、命令注册与退出收尾（[`exit`]）。命令实现按领域分在
 //! [`commands`] 下；各领域共用的设施——门面锁 [`facade`]、长任务登记与取消 [`tasks`]、
-//! 事件转发 [`events`]、主窗口启动期处理 [`window`]、主窗口原生拖放 [`drop`]、渲染进程故障后的
-//! 自动重载 [`renderer`]、同一数据目录只跑一个启动器 [`single_instance`]——各自成模块。
+//! 事件转发 [`events`]、主窗口启动期处理 [`window`]、主窗口记住大小与位置 [`window_state`]、主窗口原生拖放 [`drop`]、渲染进程故障后的
+//! 自动重载 [`renderer`]、最小化时的页面可见性 [`page_visibility`]、同一数据目录只跑一个启动器
+//! [`single_instance`]、更新插件留下的安装包目录的清扫 [`update_leftovers`]——各自成模块。
 //!
 //! 新增命令时在 `generate_handler!` 里本领域的分块内追加，块之间以 `// -- 领域 --` 分隔；
 //! 新增 managed state 同样写在 setup 里本领域的分块内。
@@ -15,14 +21,19 @@ mod exit;
 mod facade;
 mod gpu;
 mod logging;
+#[cfg(windows)]
+mod page_visibility;
 mod renderer;
 #[cfg(windows)]
 mod single_instance;
 mod tasks;
 mod textures;
+#[cfg(windows)]
+mod update_leftovers;
 mod window;
+mod window_state;
 
-use aurora_core::{Aurora, ServerMonitor};
+use petalfall_core::{Petalfall, ServerMonitor};
 use tauri::Manager;
 
 use crate::commands::updater::{UpdaterState, UpdaterSupport};
@@ -34,7 +45,9 @@ pub fn run() {
     // 排在日志之前：每次启动都开一份新日志、清掉最旧的，连点几下图标就把正在用的那份挤掉了。
     #[cfg(windows)]
     let claimed = match single_instance::claim() {
-        Ok(single_instance::Claim::Forwarded) => return,
+        // 叫不到窗口又迟迟不退出的那个进程多半卡住了，这里也退出：不和它同时用一份数据。此时还没有日志，
+        // 每次启动开一份新日志，为这次什么都没做的启动开一份会挤掉一份有用的。
+        Ok(single_instance::Claim::Forwarded | single_instance::Claim::Unanswered) => return,
         Ok(single_instance::Claim::First(instance)) => Ok(instance),
         Err(err) => Err(err),
     };
@@ -43,11 +56,13 @@ pub fn run() {
     // 晚一步初始化，恰恰是最想看的那几行日志就丢了。
     let log_path = logging::init();
     log_panics();
+    // 版本号以 tauri.conf.json 为准：dev 包只改它，Cargo.toml 里的版本和实际发出去的包对不上。
+    let context = tauri::generate_context!();
     tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = %context.package_info().version,
         log = ?log_path,
         "{} 启动",
-        aurora_base::brand::APP_NAME_EN
+        petalfall_base::brand::APP_NAME_EN
     );
     log_data_dir();
 
@@ -58,11 +73,21 @@ pub fn run() {
             tracing::error!(error = %err, "同一数据目录的占位失败，这次启动不防重复打开");
         })
         .ok();
+    #[cfg(windows)]
+    if let Some(waited) = instance
+        .as_ref()
+        .and_then(single_instance::Instance::waited_for_exit)
+    {
+        tracing::info!(
+            waited_ms = waited.as_millis() as u64,
+            "同一数据目录上的上一个落樱正在退出，等它退出后才接手"
+        );
+    }
 
-    let context = tauri::generate_context!();
     let updater_support = commands::updater::detect_support(
         context.config().plugins.0.get("updater"),
         cfg!(debug_assertions),
+        context.package_info().version.pre.as_str(),
     );
     tracing::info!(?updater_support, "自更新");
 
@@ -73,6 +98,8 @@ pub fn run() {
         // -- art --
         .register_asynchronous_uri_scheme_protocol(textures::SCHEME, textures::handle);
     // 插件配置里 pubkey 是必填项，缺了插件初始化就失败、整个应用起不来，所以只在支持时注册。
+    // 支持还要求打开 requireSignedVersion、不打开 allowDowngrades，否则防不住伪造清单诱导降级；
+    // 版本号认不出通道时不知道去哪取清单，同样不注册。见 detect_support。
     if updater_support == UpdaterSupport::Supported {
         builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
@@ -82,31 +109,52 @@ pub fn run() {
             // config.json 读不出来时不终止：此刻还没有窗口，终止就是双击后什么都看不到，而且以后每次都这样。
             // 坏文件改名留存、按默认配置启动，经过记成启动提示，由前端查询后告诉用户。数据目录定位不到、
             // 坏文件改不了名这类错误仍然冒泡终止，避免带着半初始化的门面继续跑。
-            let (aurora, recovery) = tauri::async_runtime::block_on(Aurora::load_recovering())?;
-            let aurora = aurora.with_app_version(&app.package_info().version.to_string())?;
-            let server_monitor = ServerMonitor::new(aurora.data_dir());
-            app.manage(Facade::new(aurora));
-            app.manage(commands::system::StartupNotices::from_recovery(recovery));
+            let (petalfall, recovery) =
+                tauri::async_runtime::block_on(Petalfall::load_recovering())?;
+            let petalfall = petalfall.with_app_version(&app.package_info().version.to_string())?;
+            let server_monitor = ServerMonitor::new(petalfall.data_dir());
+            let data_dir = petalfall.data_dir().to_path_buf();
+            app.manage(Facade::new(petalfall));
+            app.manage(
+                commands::system::StartupNotices::from_recovery(recovery)
+                    .with_data_dir(&petalfall_base::fs::resolve_data_dir()?),
+            );
             // -- tasks --
             app.manage(TaskRegistry::default());
             app.manage(TaskJournal::default());
             // -- instances --
             app.manage(commands::instances::InstanceLocks::default());
+            app.manage(commands::art::ArtDownloadSlot::default());
             app.manage(commands::instances::ExportedFiles::default());
+            // 上次在提交前后被打断的移动：回滚或补完，配置里的引用跟着改。
+            commands::instances::recover_moves_in_background(app.handle());
             // -- launch --
             app.manage(commands::launch::RunningGame::default());
+            // 门面与实例占用表都已就位；前端加载要几百毫秒，接回赶在它之前占住占用槽。
+            commands::launch::reattach_in_background(app.handle());
             // -- accounts --
             app.manage(commands::accounts::MicrosoftLoginSlot::default());
             app.manage(commands::accounts::AuthlibPendingSlot::default());
+            commands::accounts::renew_ahead_in_background(app.handle());
             // -- art --
             textures::setup(app);
             // -- system --
             app.manage(commands::system::FirstRunBaselineSlot::default());
             app.manage(server_monitor);
             app.manage(UpdaterState::new(updater_support));
+            // 只有装了插件的构建才会留下这些目录；开发构建不碰，本机正式安装的更新包轮不到它来删
+            #[cfg(windows)]
+            if updater_support == UpdaterSupport::Supported {
+                update_leftovers::sweep_in_background(app.package_info().name.clone());
+            }
+            // -- window --
+            // 排在兜底显示之前：显示时要按这里记下的状态决定是否最大化
+            app.manage(window_state::install(app, &data_dir)?);
             window::setup_main_window(app)?;
             #[cfg(windows)]
             if let Some(instance) = instance {
+                // 退出时要拉起安装程序的，先用它打发走在等的后来者（见 `install_on_exit`）。
+                app.manage(instance.answer());
                 window::front_on_second_launch(app, instance)?;
             }
             Ok(())
@@ -135,6 +183,7 @@ pub fn run() {
             commands::java::add_java_path,
             commands::java::remove_java_path,
             commands::java::gpu_adapters,
+            commands::java::switch_to_dedicated_gpu,
             // -- accounts --
             commands::accounts::current_account,
             commands::accounts::create_offline_account,
@@ -149,12 +198,15 @@ pub fn run() {
             commands::accounts::refresh_account,
             // -- art --
             commands::art::art_status,
+            commands::art::art_blocks,
+            commands::art::art_download,
             commands::art::skin_info,
             commands::art::thumb_register,
             // -- instances --
             commands::instances::list_instances,
             commands::instances::get_instance_settings,
             commands::instances::set_instance_settings,
+            commands::instances::import_cover_image,
             commands::instances::list_instance_content,
             commands::instances::get_sidebar_pins,
             commands::instances::set_sidebar_pins,
@@ -163,6 +215,8 @@ pub fn run() {
             commands::instances::preview_instance_deletion,
             commands::instances::delete_instance,
             commands::instances::rename_instance,
+            commands::instances::preview_instance_move,
+            commands::instances::move_instance,
             commands::instances::list_manifest,
             commands::instances::list_loader_versions,
             commands::instances::required_java,
@@ -180,6 +234,7 @@ pub fn run() {
             // -- launch --
             commands::launch::launch_game,
             commands::launch::stop_game,
+            commands::launch::running_game,
             commands::launch::play_stats,
             // -- diagnostics --
             commands::diagnostics::last_crash,
@@ -236,6 +291,7 @@ pub fn run() {
             commands::updater::set_install_on_exit,
             // -- window --
             commands::window::restore_window_without_focus,
+            commands::window::reveal_main_window,
         ])
         .build(context)
         .expect("error while building tauri application")
@@ -272,37 +328,73 @@ fn log_panics() {
 
 /// 数据目录在日志装好之前就定位了（日志文件就落在里面），走了哪条路、为什么、花了多久在这里补记。
 fn log_data_dir() {
-    match aurora_base::fs::resolve_data_dir() {
+    match petalfall_base::fs::resolve_data_dir() {
         Ok(resolved) => tracing::info!(
             path = ?resolved.path,
             portable = resolved.portable,
             fallback_reason = ?resolved.fallback_reason,
+            write_failure = ?resolved.write_failure,
             elapsed_ms = resolved.elapsed.as_millis() as u64,
             "数据目录"
         ),
-        // 这里只记录；随后的 Aurora::load 会以同一个错误终止启动。
+        // 这里只记录；随后的 Petalfall::load 会以同一个错误终止启动。
         Err(err) => tracing::error!(error = %err, "定位数据目录失败"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use petalfall_base::brand::{APP_NAME, APP_NAME_EN, APP_SLUG};
 
-    use aurora_base::brand::{APP_NAME, APP_NAME_EN, APP_SLUG};
+    pub(crate) use log_capture::Captured;
 
-    /// 收集日志输出的写入端。
-    #[derive(Clone, Default)]
-    pub(crate) struct Captured(pub(crate) Arc<Mutex<Vec<u8>>>);
+    // 单独一个模块：字段只在这里可见，tests 里别的测试（包括本文件的）也只能经 new 构造，绕不过闸门。
+    mod log_capture {
+        use std::sync::{Arc, Mutex, OnceLock};
 
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
+        /// 收集日志输出的写入端。字段私有，构造只有 [`Captured::new`] 一条路，好让每个收日志的测试都先过闸门；
+        /// 收到的内容经 [`Captured::text`] 读、经 [`Captured::clear`] 清。
+        #[derive(Clone)]
+        pub(crate) struct Captured(Arc<Mutex<Vec<u8>>>);
+
+        impl Captured {
+            /// tracing-core 0.1.36 只登记了一个调度器时，别的线程头一次走到某个日志点，按它自己线程上的默认调度器
+            /// （什么都不收）算兴趣，再全局缓存成「不启用」，测试装的订阅者就收不到那条日志。并行的测试里别人先走到
+            /// 同一个日志点，断言就时挂时不挂；只跑一个模块时更容易撞上。所以先常驻登记一个级别上限为 OFF 的调度器：
+            /// 它和测试的订阅者之间全局级别一直是 OFF，别的线程走不到登记日志点；订阅者登记时调度器已有两个，
+            /// 「只有一个」的标志先关掉、再抬级别，之后谁头一次走到日志点，都按所有存活的调度器算兴趣。
+            /// 上限不能用 NoSubscriber：它不报上限，按 TRACE 算，登记那一刻起别的线程就能按自己线程的默认调度器登记日志点。
+            pub(crate) fn new() -> Self {
+                use tracing_subscriber::layer::SubscriberExt as _;
+                static GATE: OnceLock<tracing::Dispatch> = OnceLock::new();
+                GATE.get_or_init(|| {
+                    tracing::Dispatch::new(
+                        tracing_subscriber::registry()
+                            .with(tracing_subscriber::filter::LevelFilter::OFF),
+                    )
+                });
+                Self(Arc::default())
+            }
+
+            pub(crate) fn text(&self) -> String {
+                String::from_utf8(self.0.lock().expect("收日志的锁已中毒").clone())
+                    .expect("fmt 层写进来的是格式化好的整段文本，应是 UTF-8")
+            }
+
+            pub(crate) fn clear(&self) {
+                self.0.lock().expect("收日志的锁已中毒").clear();
+            }
         }
 
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
+        impl std::io::Write for Captured {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
     }
 
@@ -311,7 +403,7 @@ mod tests {
     #[test]
     fn panics_are_written_to_the_session_log() {
         super::log_panics();
-        let captured = Captured::default();
+        let captured = Captured::new();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
@@ -324,7 +416,7 @@ mod tests {
             })
         });
         assert!(unwound.is_err(), "钩子不该吞掉 panic");
-        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let log = captured.text();
         assert!(log.contains("ERROR"), "{log}");
         assert!(log.contains("进程 panic"), "{log}");
         assert!(
@@ -335,7 +427,8 @@ mod tests {
     }
 
     // tauri.conf.json、index.html 与前端 TS 无法引用 Rust 常量，产品名只能各写一份，
-    // 由这条测试钉住它们与 aurora-base 的 brand 模块一致。identifier 发布后即成兼容契约，单独写死。
+    // 由这条测试钉住它们与 petalfall-base 的 brand 模块一致。identifier 和 publisher 发布后即成兼容契约，
+    // 单独写死：publisher 还决定 NSIS 记安装目录的注册表键，引导程序按它去读。
     #[test]
     fn product_name_is_consistent_across_config_html_and_frontend() {
         let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
@@ -344,6 +437,7 @@ mod tests {
         assert_eq!(conf["mainBinaryName"], APP_NAME_EN);
         assert_eq!(conf["app"]["windows"][0]["title"], APP_NAME_EN);
         assert_eq!(conf["identifier"], "org.petalfall.launcher");
+        assert_eq!(conf["bundle"]["publisher"], "Shinoyuki_Miyako");
 
         let title = format!("<title>{APP_NAME_EN}</title>");
         assert!(

@@ -1,0 +1,5 @@
+/* 引导程序的全局样式：不引 theme.css 和 Tailwind 工具类，样式全走 CSS Modules 与令牌。
+ * 要预检是因为 ui 组件依赖它的 box-sizing。 */
+@import "tailwindcss/preflight.css" layer(base);
+@import "../styles/tokens.css";
+@import "../styles/base.css";

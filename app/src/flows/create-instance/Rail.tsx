@@ -4,6 +4,7 @@
 import { Icon } from "../../art/Icon";
 import type { InstanceCover } from "../../art/iso/covers";
 import type { LoaderKind } from "../../domain/types";
+import { useAppearance } from "../../state/appearance";
 import { Cover } from "../../ui/Cover";
 import { LoaderDot } from "../../ui/LoaderTag";
 import { CREATE_COPY, STEP_LABEL } from "./copy";
@@ -23,9 +24,12 @@ export interface PreviewProps {
 }
 
 export function Preview({ previewId, name, cover, mcVersion, loader, loaderVersion }: PreviewProps) {
+  // 实例还没建出来，没有自己的卡面设置：预览按外观里的默认背景
+  const texture = useAppearance().appearance.coverBackground === "texture" ? cover : null;
   return (
     <div className={styles.preview} data-sk-hover-host="">
-      <Cover hue={cover.hue} seed={previewId} height={PREVIEW_HEIGHT} identity={{ instanceId: previewId, cover }}>
+      {/* 名称与版本落在卡面左下，右侧让出身份方块 */}
+      <Cover hue={cover.hue} seed={previewId} height={PREVIEW_HEIGHT} texture={texture} identity={{ instanceId: previewId, cover }} shade="bottom" className={styles.previewCover}>
         <div className={styles.previewText}>
           <span className={styles.previewName}>{name === "" ? CREATE_COPY.untitled : name}</span>
           {mcVersion !== null && (

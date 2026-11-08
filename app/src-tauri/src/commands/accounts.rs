@@ -7,13 +7,15 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
-use aurora_core::{
-    Account, AccountCredentials, AccountStatus, AccountType, Aurora, AuthServerInfo, AuthlibLogin,
-    AuthlibPending, CancellationToken, DeviceCodeResponse, TextureService,
+use petalfall_core::{
+    Account, AccountCredentials, AccountStatus, AccountType, AheadOutcome, AuthServerInfo,
+    AuthlibLogin, AuthlibPending, CancellationToken, DeviceCodeResponse, Petalfall,
+    SettledRotations, TextureService, RENEW_AHEAD_CHECK_EVERY,
 };
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::commands::art::{skin_info_dto, SkinInfoDto};
 use crate::commands::CommandError;
@@ -209,7 +211,7 @@ impl AuthlibPendingSlot {
 /// 在快照上的阻塞线程池里读写账户库。
 pub(crate) async fn with_accounts<T: Send + 'static>(
     facade: &Facade,
-    work: impl FnOnce(&Aurora) -> aurora_core::Result<T> + Send + 'static,
+    work: impl FnOnce(&Petalfall) -> petalfall_core::Result<T> + Send + 'static,
 ) -> Result<T, CommandError> {
     on_blocking_pool(facade.snapshot().await, work).await
 }
@@ -217,11 +219,11 @@ pub(crate) async fn with_accounts<T: Send + 'static>(
 /// 账户库读写在进程级锁内做同步文件 IO 与 DPAPI 调用：放在异步工作线程上，锁被别处的写入占着时
 /// 会连同这个线程上的事件转发、取图一起卡住。
 async fn on_blocking_pool<T: Send + 'static>(
-    aurora: Aurora,
-    work: impl FnOnce(&Aurora) -> aurora_core::Result<T> + Send + 'static,
+    petalfall: Petalfall,
+    work: impl FnOnce(&Petalfall) -> petalfall_core::Result<T> + Send + 'static,
 ) -> Result<T, CommandError> {
-    let joined = tokio::task::spawn_blocking(move || work(&aurora)).await;
-    Ok(joined.map_err(aurora_core::CoreError::from)??)
+    let joined = tokio::task::spawn_blocking(move || work(&petalfall)).await;
+    Ok(joined.map_err(petalfall_core::CoreError::from)??)
 }
 
 /// 整理用户填的验证服务器地址：去空白、没写协议头时补 `https://`，只接受 http 与 https。
@@ -253,14 +255,14 @@ pub(crate) fn normalize_server_url(input: &str) -> Result<String, CommandError> 
 pub async fn current_account(
     facade: State<'_, Facade>,
 ) -> Result<Option<AccountDto>, CommandError> {
-    let current = with_accounts(&facade, |aurora| aurora.current_account()).await?;
+    let current = with_accounts(&facade, |petalfall| petalfall.current_account()).await?;
     Ok(current.as_ref().map(account_dto))
 }
 
 /// 全部账户：微软与外置在前，离线在后。
 #[tauri::command]
 pub async fn list_accounts(facade: State<'_, Facade>) -> Result<Vec<AccountDto>, CommandError> {
-    let accounts = with_accounts(&facade, |aurora| aurora.accounts()).await?;
+    let accounts = with_accounts(&facade, |petalfall| petalfall.accounts()).await?;
     Ok(accounts.iter().map(account_dto).collect())
 }
 
@@ -273,8 +275,8 @@ pub async fn create_offline_account(
 ) -> Result<AccountDto, CommandError> {
     let events = CoreEventForwarder::to_app(&app, None);
     let sink = events.sink().clone();
-    let added = with_accounts(&facade, move |aurora| {
-        aurora.add_offline_account(&name, Some(&sink))
+    let added = with_accounts(&facade, move |petalfall| {
+        petalfall.add_offline_account(&name, Some(&sink))
     })
     .await;
     events.finish().await;
@@ -306,8 +308,8 @@ pub(crate) async fn microsoft_login_with(
     // 先登记再做任何 await：取消紧跟在发起之后到达时，也要能找到这次登录。
     let (id, token) = slot.begin();
     let outcome = async {
-        let aurora = facade.snapshot().await.with_cancel(token);
-        Ok(account_dto(&aurora.microsoft_login(on_code).await?))
+        let petalfall = facade.snapshot().await.with_cancel(token);
+        Ok(account_dto(&petalfall.microsoft_login(on_code).await?))
     }
     .await;
     slot.finish(id);
@@ -332,8 +334,8 @@ pub async fn probe_auth_server(
     facade: State<'_, Facade>,
 ) -> Result<AuthServerDto, CommandError> {
     let url = normalize_server_url(&url)?;
-    let aurora = facade.snapshot().await;
-    Ok(aurora.probe_auth_server(&url).await?.into())
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.probe_auth_server(&url).await?.into())
 }
 
 /// 外置登录第一步：账号密码认证。能确定角色就直接登录；账户下多个角色时返回待选列表。
@@ -366,8 +368,8 @@ pub(crate) async fn authlib_login_with(
     password: &str,
 ) -> Result<AuthlibLoginDto, CommandError> {
     let server_url = normalize_server_url(server_url)?;
-    let aurora = facade.snapshot().await;
-    match aurora
+    let petalfall = facade.snapshot().await;
+    match petalfall
         .authlib_login(&server_url, username, password)
         .await?
     {
@@ -375,7 +377,7 @@ pub(crate) async fn authlib_login_with(
             account: account_dto(&account),
         }),
         AuthlibLogin::SelectProfile(pending) => {
-            let refs = aurora.authlib_profile_skins(&pending).await;
+            let refs = petalfall.authlib_profile_skins(&pending).await;
             let skins = textures.skin_infos(refs).await;
             let profiles = pending
                 .profiles
@@ -429,8 +431,8 @@ pub(crate) async fn select_authlib_profile_with(
         .ok_or_else(|| {
             CommandError::invalid_argument(format!("角色 {profile_uuid} 不在这次登录的角色列表里"))
         })?;
-    let aurora = facade.snapshot().await;
-    let account = aurora.select_authlib_profile(&pending, &profile).await?;
+    let petalfall = facade.snapshot().await;
+    let account = petalfall.select_authlib_profile(&pending, &profile).await?;
     pending_slot.clear(pending_id);
     Ok(account_dto(&account))
 }
@@ -444,16 +446,18 @@ pub async fn refresh_account(
     facade: State<'_, Facade>,
 ) -> Result<AccountDto, CommandError> {
     let lookup = uuid.clone();
-    let account = with_accounts(&facade, move |aurora| aurora.find_account(&lookup))
+    let account = with_accounts(&facade, move |petalfall| petalfall.find_account(&lookup))
         .await?
-        .ok_or_else(|| CommandError::from(aurora_core::AuthError::AccountNotFound(uuid.clone())))?;
+        .ok_or_else(|| {
+            CommandError::from(petalfall_core::AuthError::AccountNotFound(uuid.clone()))
+        })?;
     if account.account_type == AccountType::Offline {
         return Err(CommandError::invalid_argument(
             "离线账户没有可刷新的登录信息",
         ));
     }
-    let aurora = facade.snapshot().await;
-    Ok(account_dto(&aurora.refresh_account(&uuid).await?))
+    let petalfall = facade.snapshot().await;
+    Ok(account_dto(&petalfall.refresh_account(&uuid).await?))
 }
 
 /// 切换当前账户。
@@ -462,23 +466,87 @@ pub async fn set_current_account(
     uuid: String,
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
-    with_accounts(&facade, move |aurora| aurora.set_current_account(&uuid)).await
+    with_accounts(&facade, move |petalfall| {
+        petalfall.set_current_account(&uuid)
+    })
+    .await
 }
 
 /// 删除账户。
 #[tauri::command]
 pub async fn remove_account(uuid: String, facade: State<'_, Facade>) -> Result<(), CommandError> {
-    with_accounts(&facade, move |aurora| aurora.remove_account(&uuid)).await
+    with_accounts(&facade, move |petalfall| petalfall.remove_account(&uuid)).await
 }
 
 // ---- 供启动链使用 ----
 
 /// 按 uuid 取出完整账户（含令牌，仅供启动时注入命令行，绝不过 IPC）。在阻塞线程池上查。
-pub(crate) async fn find_account(aurora: &Aurora, uuid: &str) -> Result<Account, CommandError> {
+pub(crate) async fn find_account(
+    petalfall: &Petalfall,
+    uuid: &str,
+) -> Result<Account, CommandError> {
     let lookup = uuid.to_owned();
-    on_blocking_pool(aurora.clone(), move |aurora| aurora.find_account(&lookup))
-        .await?
-        .ok_or_else(|| aurora_core::AuthError::AccountNotFound(uuid.to_owned()).into())
+    on_blocking_pool(petalfall.clone(), move |petalfall| {
+        petalfall.find_account(&lookup)
+    })
+    .await?
+    .ok_or_else(|| petalfall_core::AuthError::AccountNotFound(uuid.to_owned()).into())
+}
+
+/// 启动器打开时、以及开着期间每隔 [`RENEW_AHEAD_CHECK_EVERY`]，在后台给当前微软账户提前续期，点启动时不必
+/// 先等令牌链（见 [`Petalfall::renew_current_ahead`]）。每一次检查见 [`renew_ahead_once`]。
+pub fn renew_ahead_in_background(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut checks = tokio::time::interval(RENEW_AHEAD_CHECK_EVERY);
+        // 睡眠唤醒后补查一次就够，错过的几次不必连着补。
+        checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            checks.tick().await;
+            renew_ahead_once(&app.state::<Facade>()).await;
+        }
+    });
+}
+
+/// 后台提前续期的一次检查，交回结局供测试核对；续不了交回 `None`。每次都取门面的新快照：期间可能换了账户
+/// 或数据目录。续不了只记日志、不中断定时，下一次检查照常再看：启动时还会再续一次，那里的失败才报给玩家。
+pub(crate) async fn renew_ahead_once(facade: &Facade) -> Option<AheadOutcome> {
+    match facade.snapshot().await.renew_current_ahead().await {
+        Ok(outcome) => {
+            if let AheadOutcome::Renewed(account) = &outcome {
+                tracing::info!(uuid = %account.uuid, "已在后台提前续期当前微软账户的令牌");
+            }
+            Some(outcome)
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                causes = ?crate::commands::error::source_chain(&err),
+                "后台提前续期失败，下次检查或启动时再续"
+            );
+            None
+        }
+    }
+}
+
+/// 退出前最多等这么久，让进行中的外置令牌轮换落盘。外置刷新是一两次请求，正常远用不了这么久；退出拖得越久，
+/// 期间再次打开落樱的人就要等得越久：新进程等这个进程退出后才接手。
+pub const ROTATIONS_EXIT_DEADLINE: Duration = Duration::from_secs(3);
+
+/// 退出前（关窗、游戏启动后关闭、自更新拉起安装程序之前）关上外置令牌轮换的闸，再等进行中的落盘（见
+/// [`petalfall_core::RotationGate::stop`]），结果只进日志：退出路径上没有前端可以报错。不为此弹关窗确认：
+/// 多数时候没有在跑的。闸不经门面锁，改配置的写者卡在落盘上也挡不住退出。
+pub async fn stop_rotations(facade: &Facade, deadline: Duration) -> SettledRotations {
+    let settled = facade.rotation_gate().stop(deadline).await;
+    match settled {
+        SettledRotations::Idle => {}
+        SettledRotations::Finished => tracing::info!("退出前等进行中的外置令牌轮换落了盘"),
+        SettledRotations::TimedOut => tracing::warn!(
+            deadline_ms = deadline.as_millis() as u64,
+            "退出前没在时限内等到外置令牌轮换落盘，随退出放弃：正在刷新令牌的外置账户可能要重新登录"
+        ),
+    }
+    settled
 }
 
 #[cfg(test)]

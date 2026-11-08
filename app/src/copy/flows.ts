@@ -1,11 +1,12 @@
 // 流程文案表。页面与组件只 import，不内联；产品名一律取自 app-info。
 // 插值一律经 domain/format 格式化；带插值的条目写成函数，参数缺失属于调用方的契约错误，直接抛出。
 
+import type { ExtraLoaderKind } from "../domain/adapt";
 import { formatBytes, formatElapsed, formatMemory, formatRelative, formatSpeed } from "../domain/format";
 import type { BaseBusyLock, InstanceLock } from "../domain/instance-locks";
-import type { AccountKind, FailureCode, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskStatus } from "../domain/types";
+import type { AccountKind, FailureCode, InstallPhase, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskPhase, TaskStatus } from "../domain/types";
 import type { CrashSource, ExitCodeKind, ExitCodeNoteDto, LaunchWarningCode } from "../ipc/diagnostics";
-import type { NameRule, TemplateSkipReason } from "../ipc/instances";
+import type { MoveBlockerDto, MoveFollowUpDto, NameRule, TemplateSkipReason } from "../ipc/instances";
 import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
 
 /** 启动失败（首帧之前出错）时错误页的文案。 */
@@ -98,6 +99,12 @@ export const LOADER_NAME: Readonly<Record<LoaderKind, string>> = {
   neoforge: "NeoForge",
 };
 
+/** 外部安装器写进版本的附加加载器，写法同上。 */
+export const EXTRA_LOADER_NAME: Readonly<Record<ExtraLoaderKind, string>> = {
+  optifine: "OptiFine",
+  liteloader: "LiteLoader",
+};
+
 /** 封面预设的中文名，键为封面预设 id（与方块白名单一致）。新建实例、整合包导入与实例设置换封面共用。 */
 const COVER_LABEL: Readonly<Record<string, string>> = {
   cherry_planks: "樱花木板",
@@ -173,8 +180,9 @@ export function phaseLabel(phase: SessionPhase, stopReason: StopReason | null): 
   return STOPPED_LABEL[stopReason];
 }
 
-/** 八个阶段，下标即 session.stageIndex。 */
+/** 九个阶段，下标即 session.stageIndex。 */
 export const LAUNCH_STAGES = [
+  "验证账户",
   "检查 Java",
   "校验游戏文件",
   "补全库文件",
@@ -185,10 +193,14 @@ export const LAUNCH_STAGES = [
   "游戏运行中",
 ] as const;
 
+const RUNNING_LABEL = "已运行";
+
 export const SESSION_COPY = {
   downloadProgress: (done: number, total: number, speedBps: number) => `文件 ${done}/${total} · ${formatSpeed(speedBps)}`,
   countingFiles: "正在统计缺失文件…",
-  running: (elapsedMs: number) => `已运行 ${formatElapsed(elapsedMs)}`,
+  running: (elapsedMs: number) => `${RUNNING_LABEL} ${formatElapsed(elapsedMs)}`,
+  /** 单独取出是给状态岛：文字与计时分开放，文字部分才不会每秒变。 */
+  runningLabel: RUNNING_LABEL,
   cancelledDetail: "已下载的文件会保留",
   played: (minutes: number) => (minutes < 1 ? "本次游玩不到 1 分钟" : `本次游玩 ${Math.floor(minutes)} 分钟`),
   crashClue: (label: string) => cluePointer([label]),
@@ -218,6 +230,8 @@ export const LAUNCH_COPY = {
   busyElsewhere: "另一个游戏在运行",
   /** 存档备份或恢复进行中，启动入口的禁用原因。 */
   savesBusy: "正在备份或恢复存档，完成后再启动",
+  /** 实例正在移到别的游戏目录（排着的移动任务也算），启动入口的禁用原因。 */
+  moving: "实例正在移到其他游戏目录，完成后才能启动",
   group: (name: string) => `启动「${name}」`,
 } as const;
 
@@ -302,6 +316,15 @@ export const APP_NOT_APPROVED = {
   body: `${APP_NAME}使用的微软应用（client_id）还没有获准访问 Minecraft 服务，不是你的账户或网络的问题。可以在「设置 · 常规 · 高级」里换成已获批准的 client_id。`,
   fixLabel: "打开设置",
 } as const;
+/** 构建时没有内嵌微软登录 client_id（fork 与自行构建）：登录失败卡与各登录入口的不可用原因共用。 */
+export const MSA_CLIENT_ID_MISSING = {
+  title: "这个版本没有内置微软登录",
+  body: `这个版本的${APP_NAME}没有内置微软应用的 client_id，自行构建和 fork 的版本都是这样。在「设置 · 常规 · 高级」里填入你自己注册并获准的 client_id 后就能登录。`,
+  reason: "这个版本没有内置微软登录，在设置里填入 client_id 后可用",
+  /** 首次启动向导里设置页还去不了。 */
+  onboardingReason: "这个版本没有内置微软登录，先走完向导，再到设置里填入 client_id",
+  fixLabel: "打开设置",
+} as const;
 
 /** 固定的 Java 是实例设置里指定的，还是设置里固定的默认 Java（参数 pinned_by）。 */
 function pinnedGlobally(params: FailureParams, code: FailureCode): boolean {
@@ -375,6 +398,9 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
     // 不给「重试」：同一个 client_id 重试只会得到同样的结果。不给以离线方式进单人：验证不是暂时不可用，后端也不放行
     case "account_app_not_approved":
       return { title: APP_NOT_APPROVED.title, body: APP_NOT_APPROVED.body, fix: { kind: "open_client_id_settings", label: APP_NOT_APPROVED.fixLabel }, secondary: null };
+    // 同上：填上 client_id 之前结果不会变，验证也不是暂时不可用
+    case "account_client_id_missing":
+      return { title: MSA_CLIENT_ID_MISSING.title, body: MSA_CLIENT_ID_MISSING.body, fix: { kind: "open_client_id_settings", label: MSA_CLIENT_ID_MISSING.fixLabel }, secondary: null };
     case "files_offline":
       return { title: "需要联网补全文件", body: `还缺 ${numParam(params, "count", code)} 个文件，当前没有网络连接。`, fix: RETRY, secondary: null };
     case "files_failed":
@@ -422,6 +448,7 @@ export function failureCopy(code: FailureCode, params: FailureParams, ctx: Failu
 
 /** 与后端规则的优先级同序；native_crash 只作兜底，排在最后。 */
 export const CRASH_CATEGORIES = [
+  "manual_debug_crash",
   "java_version_mismatch",
   "out_of_memory",
   "jvm_args_invalid",
@@ -502,7 +529,15 @@ export const EXIT_CODE_COPY: Readonly<Record<ExitCodeKind, { phrase: string; exp
 const NATIVE_EXCEPTION_CODE = /^0x[0-9A-F]{8}$/;
 const NATIVE_EXCEPTION_KIND: Readonly<Record<string, ExitCodeKind | undefined>> = { "0xC0000005": "access_violation", "0xC0000409": "stack_buffer_overrun" };
 
+/** 手动触发的崩溃不是故障，这句话顶替「日志指向」的句式。 */
+const MANUAL_CRASH_NOTE = "这是按住 F3+C 十秒手动触发的崩溃，游戏本身没有问题。";
+
 export const CRASH_CATEGORY: Readonly<Record<CrashCategoryName, CrashCategoryCopy>> = {
+  manual_debug_crash: {
+    label: "手动触发",
+    title: "你认真的吗...?",
+    explain: () => MANUAL_CRASH_NOTE,
+  },
   java_version_mismatch: {
     label: "Java 版本不匹配",
     title: "Java 版本与游戏或 Mod 不匹配",
@@ -639,7 +674,13 @@ export function cluePointer(labels: readonly string[]): string {
   return joinMixed(onlyExitCode ? "退出码指向" : "日志指向", joinCrashLabels(labels));
 }
 
+/** 会话副行与崩溃通知的一句话线索。手动触发的崩溃是玩家自己按出来的，不走「日志指向」的句式。 */
+export function crashClueLine(category: CrashCategoryName): string {
+  return category === "manual_debug_crash" ? CRASH_CATEGORY.manual_debug_crash.title : SESSION_COPY.crashClue(crashCategoryLabel(category));
+}
+
 export const CRASH_COPY = {
+  manualNote: MANUAL_CRASH_NOTE,
   noClueTitle: "没有匹配到已知原因",
   noClueExplain: "可以对照完整日志排查，崩溃前的警告往往能找到更早的源头。",
   headline: (categories: readonly string[]) =>
@@ -754,6 +795,7 @@ const LOCAL_RUNNING_LABEL: Readonly<Partial<Record<TaskKind, string>>> = {
   modpack_export: "打包中",
   world_backup: "打包中",
   world_restore: "恢复中",
+  instance_move: "移动中",
 };
 
 /** 一个任务此刻的状态标签：显示任务状态的地方都用它，不直接取 TASK_STATUS_LABEL。 */
@@ -776,6 +818,7 @@ export const TASK_KIND_LABEL: Readonly<Record<TaskKind, string>> = {
   world_backup: "存档",
   world_restore: "存档",
   modpack_export: "导出",
+  instance_move: "移动",
 };
 
 function versionWithLoader(mcVersion: string, loader: LoaderKind, loaderVersion: string | null, sep: string): string {
@@ -821,6 +864,9 @@ export const TASK_TEXT = {
   backupDetail: instanceMention,
   exportTitle: (name: string) => `导出整合包 ${name}`,
   exportDetail: (version: string, instance: string) => `${version} · ${instanceMention(instance)}`,
+  moveTitle: (instance: string) => `移动${instanceMention(instance)}`,
+  /** 移动任务的详情：目标目录的显示名与路径。不写实例名，改名时 renamedDetail 不会把与实例同名的目录名也换掉。 */
+  moveDetail: (targetName: string, target: string) => `${joinMixed("移到", targetName)} · ${target}`,
   /**
    * 实例改名后的详情：只换句子里的实例名。详情是写进任务日志的整句文案，版本号与前置数没有全都留在命令参数里，
    * 重启恢复的任务也没有入队上下文，所以不能按新名字重新生成。
@@ -830,14 +876,107 @@ export const TASK_TEXT = {
   attempt: (k: number) => `第 ${k} 次尝试`,
 } as const;
 
+/** 新建、补全实例的各步；键与后端 InstallPhase::key 一致。「校验游戏文件」「解压本地库」与启动阶段表同一说法。 */
+export const INSTALL_PHASE_LABEL: Readonly<Record<InstallPhase, string>> = {
+  metadata: "获取版本信息",
+  loader_profile: "获取加载器信息",
+  libraries: "下载游戏本体与库文件",
+  assets: "下载资源文件",
+  natives: "解压本地库",
+  java: "准备 Java",
+  loader_installer: "下载加载器安装器",
+  loader_libraries: "下载加载器的库文件",
+  loader_processors: "执行加载器安装器",
+  verify: "校验游戏文件",
+  template: "沿用默认设置",
+  move_dependencies: "补齐共用的游戏文件",
+  move_copy: "复制实例与存档备份",
+  move_verify: "校验复制出的文件",
+  move_commit: "移入目标游戏目录",
+};
+
+/** 分步任务当前在第几步。long 用在横幅这类整句处，short 用在胶囊、任务行这类窄处。 */
+export function taskPhaseText(phase: Pick<TaskPhase, "plan" | "index">, form: "long" | "short"): string {
+  const key = phase.plan[phase.index];
+  if (key === undefined) throw new Error(`步骤下标 ${phase.index} 超出步骤表 ${phase.plan.join()}`);
+  const at = phase.index + 1;
+  const count = phase.plan.length;
+  const label = INSTALL_PHASE_LABEL[key];
+  return form === "long" ? `第 ${at} 步，共 ${count} 步：${label}` : `${label} · 第 ${at}/${count} 步`;
+}
+
 /** 前端给「上次关闭时中断」的任务用的错误码。 */
 export const TASK_INTERRUPTED_CODE = "interrupted";
+
+/**
+ * 前端给「上次关闭时中断」的移动任务用的错误码。移动的结局由后端在下次打开时按移动日志收尾（做完或退回原处），
+ * 前端不重放它，所以与能重试的 TASK_INTERRUPTED_CODE 分开。
+ */
+export const MOVE_INTERRUPTED_CODE = "move_interrupted";
+
+function namedList(names: readonly string[], limit: number): string {
+  const named = names
+    .slice(0, limit)
+    .map((name) => `「${name}」`)
+    .join("");
+  return names.length > limit ? `${named}等 ${names.length} 个` : named;
+}
+
+/** 移动完成后要提示的一项，reason 是后端原文。 */
+function moveFollowUpText(item: MoveFollowUpDto): string {
+  switch (item.kind) {
+    case "play_records":
+      return `游玩记录没跟过去：${item.reason}`;
+    case "world_backups":
+      return `存档备份没跟过去：${item.reason}`;
+    case "cleanup":
+      return `原处还留着 ${item.path}，没能删掉：${item.reason}`;
+    // 实例已经在目标里，没存上的只是配置；下次打开时后端按移动日志补上，玩家不用做什么
+    case "config":
+      return `配置没存上，下次打开${APP_NAME}时会补上：${item.reason}`;
+  }
+}
+
+/** 拦着一次移动的原因：预检弹窗逐条列出，执行时被拦下的失败原因也用它。 */
+export function moveBlockerReason(blocker: MoveBlockerDto): string {
+  switch (blocker.kind) {
+    case "same_directory":
+      return "目标就是它现在所在的游戏目录";
+    case "target_inside_source":
+      return "目标文件夹在这个实例的文件夹里面";
+    case "name_taken":
+      return "目标游戏目录里已有同名的版本，先给这个实例改个名字再移";
+    case "has_dependents":
+      return `实例${namedList(blocker.dependents, 2)}依赖它，先把依赖它的实例移走或删除`;
+    case "links": {
+      const shown = blocker.paths.slice(0, 3).join("、");
+      const listed = blocker.paths.length > 3 ? joinMixed(shown, `等 ${blocker.paths.length} 处`) : shown;
+      return `实例里有符号链接或目录联接：${listed}。复制与删除原件都处理不了它们，先换成普通文件夹`;
+    }
+    case "base_conflict":
+      return `目标游戏目录里已有同名、内容却不同的版本：${blocker.bases.join("、")}。它依赖的版本放不过去`;
+    case "insufficient_space":
+      return `目标盘空间不够：需要 ${formatBytes(blocker.needed)}，只剩 ${formatBytes(blocker.available)}`;
+    case "pending":
+      return `这个实例上次的移动中断后还没收尾，两个游戏目录都能访问时重新打开${APP_NAME}，会自动收尾`;
+    // 只在执行时出现：任务带着发起时的游戏目录，切换之后重试会被后端拦下，不去动新目录里同名的实例
+    case "source_changed":
+      return "当前游戏目录已经换了，切回发起移动时的游戏目录再重试";
+  }
+}
 
 /** 任务失败原因（行内与 Toast 正文）。能归类的给统一说法，其余用后端原文。 */
 export function taskFailureReason(error: TaskError): string {
   switch (error.code) {
     case TASK_INTERRUPTED_CODE:
       return `${APP_NAME}关闭时中断`;
+    case MOVE_INTERRUPTED_CODE:
+      return `${APP_NAME}关闭时中断，重新打开时已自动收尾：实例要么已在目标游戏目录，要么留在原处`;
+    // 较早的任务日志没有 move_blocker，照后端原文给出
+    case "instance_move_blocked":
+      return error.move_blocker === undefined ? error.message : moveBlockerReason(error.move_blocker);
+    case "instance_move_verify_failed":
+      return "复制出的文件和原件对不上，这次移动已放弃，原件没动";
     case "network_failed":
       return "网络连接失败";
     case "hash_mismatch":
@@ -847,9 +986,9 @@ export function taskFailureReason(error: TaskError): string {
     case "loader_library_missing":
       return LOADER_LIBRARY_MISSING_REASON;
     case "curseforge_key_rejected":
-      return "CurseForge 拒绝了下载密钥。设置环境变量 AURORA_CURSEFORGE_API_KEY 换一个可用的密钥后重试";
+      return "CurseForge 拒绝了下载密钥。设置环境变量 PETALFALL_CURSEFORGE_API_KEY 换一个可用的密钥后重试";
     case "curseforge_key_missing":
-      return "有文件只能从 CurseForge 下载，需要先设置环境变量 AURORA_CURSEFORGE_API_KEY";
+      return "有文件只能从 CurseForge 下载，需要先设置环境变量 PETALFALL_CURSEFORGE_API_KEY";
     case "distribution_blocked":
       // 较早的任务日志只存了错误码与原文（原文里列着文件名），没有清单时照原文给出
       return error.blocked_files === undefined ? error.message : `有 ${error.blocked_files.length} 个文件需要到 CurseForge 网页手动下载`;
@@ -921,6 +1060,16 @@ export const TASK_TOAST = {
   exported: (name: string, bundled: number) =>
     bundled > 0 ? { title: `已导出「${name}」`, body: `${bundled} 个 Mod 打包进了文件，分享前确认作者允许转载` } : { title: `已导出「${name}」` },
   exportFailed: (title: string, reason: string) => ({ title: `导出失败：${title}`, body: reason }),
+  moveStarted: (instance: string) => ({ title: `已开始移动「${instance}」`, body: "进度见下载任务" }),
+  moved: (instance: string, targetName: string) => ({ title: `已移到「${targetName}」`, body: `「${instance}」已不在当前游戏目录里，切换过去就能玩` }),
+  /** 移动已经完成、有几项没跟过去：完成通知之后补一条，正文逐项写原因。 */
+  moveFollowUps: (instance: string, items: readonly MoveFollowUpDto[]) => ({
+    title: `「${instance}」已移过去，有 ${items.length} 项要留意`,
+    body: items.map(moveFollowUpText).join("；"),
+  }),
+  /** 移动不是下载，失败不并进「n 个下载失败」。 */
+  moveFailed: (title: string, reason: string) => ({ title: `${title}没有完成`, body: reason }),
+  switchAction: "切换过去",
   failedMany: (count: number, reasons: readonly string[]) => ({
     title: `${count} 个下载失败`,
     body: new Set(reasons).size === 1 ? reasons[0] : "原因各不相同",
@@ -1003,6 +1152,13 @@ export const TOAST_COPY = {
   /** 改名已完成，存档备份还留在旧名下。 */
   backupsNotMoved: (name: string, path: string) => ({ title: `「${name}」的存档备份没能跟着改名`, body: `备份还在 ${path}` }),
   backupDeleted: { title: "已删除一份备份", body: "已移入回收站" },
+  /** 关闭前启动的游戏还在运行，这次打开后接了回来。 */
+  gameReattached: (name: string) => `已接回还在运行的「${name}」`,
+  /** 上次关闭前在跑的那局游戏的记录读不出来：后端把它改名留存到 movedTo，改名也失败时为 null，记录还在 path。 */
+  brokenGameRecord: (path: string, movedTo: string | null) => ({
+    title: "上次关闭前那局游戏的记录读不出来",
+    body: `${movedTo === null ? `记录没能移走，还在 ${path}` : `记录已移到 ${movedTo}`}，这一局的游玩时长与崩溃诊断不会补记`,
+  }),
   copyErrorAction: "复制错误信息",
   openFolderAction: "打开文件夹",
 } as const;
@@ -1028,12 +1184,14 @@ export const ACTION_ERROR = {
   createInstance: "没能开始新建实例",
   importModpack: "没能开始导入整合包",
   exportModpack: "没能开始导出整合包",
+  moveInstance: "没能开始移动实例",
   revealExport: "没能打开导出文件所在的文件夹",
   repair: "没能开始补全游戏文件",
   reinstallLoader: `没能开始${REINSTALL_LOADER_LABEL}`,
   deleteInstance: (name: string) => `没能删除「${name}」`,
   renameInstance: "没能重命名实例",
   instanceSettings: "实例设置没有保存",
+  importCoverImage: "图片没能用到卡面上",
   settings: "设置没有保存",
   gameDirectory: "没能切换游戏目录",
   pin: "侧栏固定没有保存",
@@ -1055,10 +1213,15 @@ export const ACTION_ERROR = {
   exportWorld: "没能开始导出存档",
   deleteWorldBackup: "没能删除这份备份",
   installJava: "没能开始下载 Java",
+  dedicatedGpu: "没能改用独立显卡",
   servers: "服务器列表没有保存",
   firstRun: "首次设置没有保存",
   saveJournal: "下载任务记录没有保存",
   loadCrash: "崩溃报告读不出来",
+  /** 开机时问后端有没有还在运行的游戏，没问出结果。 */
+  recoverGame: "没能接回还在运行的游戏",
+  /** 接回的一局，接回之前的日志没能垫进日志面板。 */
+  backfillSessionLog: "这一局接回之前的日志读不出来",
   refreshInstances: "实例列表没能刷新",
   refreshAccounts: "账户列表没能刷新",
   artStatus: "原版材质状态读不出来",
@@ -1069,6 +1232,25 @@ export const ACTION_ERROR = {
   /** 任务本身已完成，完成后的落地（写封面、固定、刷新列表）出错。 */
   landTask: (title: string) => joinMixed(title, "已完成，后续设置没有写入"),
 } as const;
+
+/** 切换游戏目录：设置页的其他文件夹、实例库的目录选择与空状态走同一个流程，说法也是同一套。 */
+export const GAME_DIR_SWITCH_COPY = {
+  busyReason: "有游戏或下载在进行，结束后再切换",
+  unavailableReason: "位置访问不到，无法切过去",
+  bangError: "路径里不能有「!」，Java 会读不出里面的游戏文件",
+  confirmTitle: (name: string) => `切换到「${name}」？`,
+  confirmBody: "实例库会换成这个目录里的实例，原目录的文件不会被移动或删除。",
+  confirmLabel: "切换",
+  emptyTitle: "这个目录还没有实例",
+  emptyBody: (name: string, versions: number) => `「${name}」里有 ${versions} 个版本，切过去就能玩，文件不会被移动。`,
+  emptyAction: (name: string) => joinMixed("切到", name),
+} as const;
+
+/** 此刻切不到这个目录的原因，可以直接交给 disabledReason；能切时为 undefined。先说进行中的游戏与任务：等它们结束就能切。 */
+export function gameDirSwitchReason(busy: boolean, available: boolean): string | undefined {
+  if (busy) return GAME_DIR_SWITCH_COPY.busyReason;
+  return available ? undefined : GAME_DIR_SWITCH_COPY.unavailableReason;
+}
 
 /** 启动时首查各切片失败的通知标题。 */
 export const BOOT_SLICE_ERROR = {
@@ -1138,7 +1320,7 @@ export const CONFIRM_COPY = {
     body: `存档会回到 ${moment} 备份时的样子，现在的存档会移入回收站，需要时可以从回收站找回。`,
     confirmLabel: "恢复备份",
   }),
-  closeWithSession: `游戏会继续运行，但之后的日志和崩溃诊断不会被记录。`,
+  closeWithSession: `游戏会继续运行。游戏结束前重新打开${APP_NAME}可以接回这一局，否则这一局的游玩时长与崩溃诊断不会记下。`,
   closeWithTasks: (count: number, downloads: number) => `还有 ${count} 个${downloads === count ? "下载" : "任务"}没完成，关闭后会中断，下次打开可以重试。`,
   closeWithBackups: (count: number) => `有 ${count} 个实例正在自动备份存档，关闭后这次备份不会完成。`,
   closeTitle: `关闭${APP_NAME}？`,
@@ -1179,7 +1361,7 @@ export interface LoginFailureCopy {
   body: string | null;
   primary: LoginFailureAction | null;
   secondary: LoginFailureAction | null;
-  /** 只剩「关闭」时用幽灵按钮。 */
+  /** 没有主按钮：初始焦点落在「关闭」上。 */
   closeOnly: boolean;
 }
 
@@ -1239,9 +1421,30 @@ export function microsoftLoginFailure(code: string, message: string, detail: unk
     // 不给「重试」：同一个 client_id 重试只会得到同样的结果
     case "AppNotApproved":
       return plain(APP_NOT_APPROVED.title, APP_NOT_APPROVED.body, { kind: "open_client_id_settings", label: APP_NOT_APPROVED.fixLabel }, { kind: "copy_error", label: "复制错误信息" });
+    // 同上不给「重试」：填上 client_id 之前结果不会变
+    case "MsaClientIdMissing":
+      return plain(MSA_CLIENT_ID_MISSING.title, MSA_CLIENT_ID_MISSING.body, { kind: "open_client_id_settings", label: MSA_CLIENT_ID_MISSING.fixLabel });
     default:
       return plain("微软登录失败", `${message}（${code}）`, LOGIN_RETRY, { kind: "copy_error", label: "复制错误信息" });
   }
+}
+
+/**
+ * 首次启动向导期间主界面没挂上，「打开设置」去不了设置页：主次按钮里都去掉它，正文补一句先走完向导。
+ * 没有这个动作的失败原样返回。
+ */
+export function withoutSettingsAction(copy: LoginFailureCopy): LoginFailureCopy {
+  const opensSettings = (action: LoginFailureAction | null) => action !== null && action.kind === "open_client_id_settings";
+  if (!opensSettings(copy.primary) && !opensSettings(copy.secondary)) return copy;
+  const hint = "先走完向导，再到设置里填写或更换。";
+  const primary = opensSettings(copy.primary) ? null : copy.primary;
+  return {
+    ...copy,
+    body: copy.body === null ? hint : `${copy.body}${hint}`,
+    primary,
+    secondary: opensSettings(copy.secondary) ? null : copy.secondary,
+    closeOnly: primary === null,
+  };
 }
 
 export const LITTLESKIN_API = "https://littleskin.cn/api/yggdrasil";
@@ -1367,6 +1570,7 @@ export const INSTANCE_IN_USE_COPY = {
   reinstallLoader: (user: string) => `实例「${user}」正在使用它，结束后才能${REINSTALL_LOADER_LABEL}`,
   delete: (user: string) => `实例「${user}」正在使用它，结束后才能删除`,
   launch: (user: string) => `实例「${user}」正在使用它，结束后才能启动`,
+  move: (user: string) => `实例「${user}」正在使用它，结束后才能移动`,
 } as const;
 
 /** 依赖的实例在做什么，接在「正在」之后。 */
@@ -1377,6 +1581,7 @@ const BASE_ACTIVITY_LABEL: Readonly<Record<BaseBusyLock["activity"], string>> = 
   deleting: "删除",
   launching: "启动",
   running: "运行",
+  moving: "移到其他游戏目录",
 };
 
 /** 操作被实例锁挡住时的悬停提示与菜单项 hint。 */
@@ -1386,12 +1591,15 @@ const INSTANCE_LOCK_REASON = {
   installing: "实例正在补全文件",
   renameRunning: "游戏正在运行，结束后才能重命名",
   renameInstalling: "安装任务正在写这个实例的文件夹",
+  moveRunning: "游戏正在运行，结束后才能移动",
+  moveInstalling: "安装任务正在写这个实例的文件夹，完成后才能移动",
   repairInProgress: "进行中",
   modifying: {
     rename: "正在改动这个实例的 Mod、资源或设置，完成后才能重命名",
     repair: "正在改动这个实例的 Mod、资源或设置，完成后才能补全",
     reinstallLoader: `正在改动这个实例的 Mod、资源或设置，完成后才能${REINSTALL_LOADER_LABEL}`,
     delete: "正在改动这个实例的 Mod、资源或设置，完成后才能删除",
+    move: "正在改动这个实例的 Mod、资源或设置，完成后才能移动",
   },
   /** 备份、恢复或导出存档进行中，游戏退出后的自动备份也算。 */
   backingUp: {
@@ -1399,25 +1607,38 @@ const INSTANCE_LOCK_REASON = {
     repair: "正在备份或恢复这个实例的存档，完成后才能补全",
     reinstallLoader: `正在备份或恢复这个实例的存档，完成后才能${REINSTALL_LOADER_LABEL}`,
     delete: "正在备份或恢复这个实例的存档，完成后才能删除",
+    move: "正在备份或恢复这个实例的存档，完成后才能移动",
+  },
+  /** 移到别的游戏目录进行中（排着的移动任务也算），与一切互斥。 */
+  moving: {
+    mods: "实例正在移到其他游戏目录，完成后才能改动 Mod",
+    rename: "实例正在移到其他游戏目录，完成后才能重命名",
+    repair: "实例正在移到其他游戏目录，完成后才能补全",
+    reinstallLoader: `实例正在移到其他游戏目录，完成后才能${REINSTALL_LOADER_LABEL}`,
+    delete: "实例正在移到其他游戏目录，完成后才能删除",
+    move: "实例正在移到其他游戏目录",
   },
 } as const;
 
 /** 锁定原因的悬停文字；没有锁为 undefined，可以直接交给 disabledReason。 */
-export function lockReason(lock: InstanceLock | BaseBusyLock | null, kind: "mods" | "rename" | "repair" | "reinstallLoader" | "delete"): string | undefined {
+export function lockReason(lock: InstanceLock | BaseBusyLock | null, kind: "mods" | "rename" | "repair" | "reinstallLoader" | "delete" | "move"): string | undefined {
   if (lock === null) return undefined;
   if (typeof lock === "object") {
     if (lock.kind === "base_busy") {
-      if (kind !== "repair" && kind !== "reinstallLoader") throw new Error(`依赖的实例正忙只挡补全，不会锁住 ${kind}`);
-      return `它依赖的实例「${lock.base}」正在${BASE_ACTIVITY_LABEL[lock.activity]}，结束后才能${kind === "repair" ? "补全" : REINSTALL_LOADER_LABEL}`;
+      if (kind !== "repair" && kind !== "reinstallLoader" && kind !== "move") throw new Error(`依赖的实例正忙只挡补全与移动，不会锁住 ${kind}`);
+      const blocked = kind === "repair" ? "补全" : kind === "move" ? "移动" : REINSTALL_LOADER_LABEL;
+      return `它依赖的实例「${lock.base}」正在${BASE_ACTIVITY_LABEL[lock.activity]}，结束后才能${blocked}`;
     }
     if (kind === "mods") throw new Error("被别的实例当作基底时照样能改动 Mod，不会因此锁住 Mod 操作");
     return INSTANCE_IN_USE_COPY[kind](lock.usedBy);
   }
+  if (lock === "moving") return INSTANCE_LOCK_REASON.moving[kind];
   if (lock === "modifying" || lock === "backing_up") {
     if (kind === "mods") throw new Error(`${lock} 与改动 Mod 互相兼容，不会因此锁住 Mod 操作`);
     return lock === "modifying" ? INSTANCE_LOCK_REASON.modifying[kind] : INSTANCE_LOCK_REASON.backingUp[kind];
   }
   if (kind === "rename") return lock === "running" ? INSTANCE_LOCK_REASON.renameRunning : INSTANCE_LOCK_REASON.renameInstalling;
+  if (kind === "move") return lock === "running" ? INSTANCE_LOCK_REASON.moveRunning : INSTANCE_LOCK_REASON.moveInstalling;
   if (kind === "mods") return lock === "running" ? INSTANCE_LOCK_REASON.runningMods : INSTANCE_LOCK_REASON.installing;
   if ((kind === "repair" || kind === "reinstallLoader") && lock === "installing") return INSTANCE_LOCK_REASON.repairInProgress;
   return INSTANCE_LOCK_REASON.running;

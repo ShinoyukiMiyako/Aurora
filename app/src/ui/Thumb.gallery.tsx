@@ -67,13 +67,26 @@ export const gallery: GalleryEntry = {
       </GalleryRow>
       <GalleryRow label="卡面：art（带身份方块）/ remote（下方压暗）/ remote 失败回落 art">
         <span style={{ display: "block", width: 320 }}>
-          <Cover hue={345} seed="周末生存" height={132} identity={{ instanceId: "周末生存", cover: { block: "cherry_planks", hue: 345 } }} />
+          <Cover hue={345} seed="周末生存" height={132} identity={{ instanceId: "周末生存", cover: { block: "cherry_planks", hue: 345, image: null } }} />
         </span>
         <span style={{ display: "block", width: 320 }}>
           <Cover hue={205} seed="整合包" height={132} remoteUrl="sample:wide" shade="bottom" />
         </span>
         <span style={{ display: "block", width: 320 }}>
           <Cover hue={118} seed="资讯" height={132} remoteUrl="sample:missing" />
+        </span>
+      </GalleryRow>
+      <GalleryRow label="卡面：材质平铺（悬停对焦与视差，左侧压暗）/ 远程图加载中显示平铺 / 远程图失败回落平铺；本机没有材质时都回落 art">
+        <span style={{ display: "block", width: 320 }} data-sk-hover-host="">
+          <Cover hue={345} seed="周末生存" height={132} texture={{ block: "cherry_planks", hue: 345, image: null }} shade="left">
+            <strong style={{ display: "block", padding: 16 }}>周末生存</strong>
+          </Cover>
+        </span>
+        <span style={{ display: "block", width: 320 }} data-sk-hover-host="">
+          <Cover hue={118} seed="草方块" height={132} remoteUrl="sample:pending" texture={{ block: "grass_block", hue: 118, image: null }} />
+        </span>
+        <span style={{ display: "block", width: 320 }} data-sk-hover-host="">
+          <Cover hue={205} seed="蓝冰" height={132} remoteUrl="sample:missing" texture={{ block: "blue_ice", hue: 205, image: null }} />
         </span>
       </GalleryRow>
     </RemoteImageProvider>

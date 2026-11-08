@@ -14,7 +14,7 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import { MANUAL_LOGIN } from "../../state/login";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { accountDto, bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { accountDto, bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { AUTHLIB_DIALOG_COPY, DEVICE_DIALOG_COPY, OFFLINE_DIALOG_COPY } from "../../copy/login";
 import { NO_ART, setArtStatus } from "../../mc/art";
 import { clearArtCache } from "../../mc/useArt";
@@ -130,6 +130,28 @@ describe("还没有账户", () => {
     expect(launcher.state.login).toEqual({ kind: "offline", intent: { kind: "launch", instanceId: "生存", quickPlay: null } });
     expect(title()).toBe(OFFLINE_DIALOG_COPY.title);
   });
+
+  it("构建里没有微软登录 client_id：添加微软账户置灰并挂上原因，点了不发起登录", async () => {
+    bootOverrides(ipc, { accounts: [], instances: [instanceDto("生存")], config: configDto({ has_client_id: false, microsoft_login_available: false }) });
+    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    await mount();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+    });
+    await flush();
+    expect(title()).toBe(NO_ACCOUNT_COPY.title);
+    const microsoft = button(NO_ACCOUNT_COPY.addMicrosoft);
+    expect(microsoft.getAttribute("aria-disabled")).toBe("true");
+    // 主按钮与初始焦点让给能用的离线账户
+    const offline = button(NO_ACCOUNT_COPY.addOffline);
+    expect([offline.dataset.variant, microsoft.dataset.variant]).toEqual(["primary", "secondary"]);
+    expect([offline.hasAttribute("data-autofocus"), microsoft.hasAttribute("data-autofocus")]).toEqual([true, false]);
+    act(() => microsoft.click());
+    await flush();
+    expect(callsOf(ipc, "microsoft_login")).toEqual([]);
+    expect(title()).toBe(NO_ACCOUNT_COPY.title);
+    expect(button(NO_ACCOUNT_COPY.addOffline).getAttribute("aria-disabled")).toBeNull();
+  });
 });
 
 describe("离线账户弹窗", () => {
@@ -202,6 +224,8 @@ describe("离线账户弹窗", () => {
         await launcher.actions.openLogin("offline");
       });
       await flush();
+      // 打开时先读了史蒂夫与艾利克斯，这里只看输入之后读的
+      fetched.length = 0;
       typeInto(inputs()[0], name);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(FIGURE_DEBOUNCE_MS);
@@ -215,13 +239,42 @@ describe("离线账户弹窗", () => {
       expect(figure().dataset.art).toBe("skin");
     });
 
-    it("还没输入用户名：画剪影，不读任何皮肤", async () => {
+    const figures = () => [...(dialog()?.querySelectorAll<HTMLElement>('[data-sk-art="skin"]') ?? [])];
+    const stageLabel = () => dialog()?.querySelector('[role="img"]')?.getAttribute("aria-label");
+
+    async function openEmpty() {
       await mount();
       await act(async () => {
         await launcher.actions.openLogin("offline");
       });
-      await flush();
-      expect(figure().dataset.art).toBe("silhouette");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FIGURE_DEBOUNCE_MS);
+        await settle();
+      });
+    }
+
+    it("还没输入用户名：并排站着宽臂的史蒂夫与细臂的艾利克斯，皮肤从本机游戏文件读取；一输入就换成那个名字的", async () => {
+      await openEmpty();
+      expect(stageLabel()).toBe("角色预览：史蒂夫与艾利克斯");
+      expect(figures().map((f) => f.dataset.art)).toEqual(["skin", "skin"]);
+      expect(fetched.map((url) => new URL(url).pathname + new URL(url).search).sort()).toEqual([
+        "/art/entity/player/slim/alex.png?v=1.21.1",
+        "/art/entity/player/wide/steve.png?v=1.21.1",
+      ]);
+
+      typeInto(inputs()[0], "Steve");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(FIGURE_DEBOUNCE_MS);
+        await settle();
+      });
+      expect(figures()).toHaveLength(1);
+      expect(stageLabel()).toBe("Steve 的角色预览");
+    });
+
+    it("本机没有可用的游戏文件：两个位置都退回剪影，不读任何皮肤", async () => {
+      ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+      await openEmpty();
+      expect(figures().map((f) => f.dataset.art)).toEqual(["silhouette", "silhouette"]);
       expect(fetched).toEqual([]);
     });
 
@@ -339,6 +392,46 @@ describe("微软设备码弹窗", () => {
     expect(nav.route).toEqual({ page: "settings", section: "general" });
     // 登录已经失败，关弹窗不必再请后端取消
     expect(callsOf(ipc, "cancel_microsoft_login")).toEqual([]);
+  });
+
+  it("首次启动向导期间应用未获批准：不给「打开设置」（主界面没挂上，去不了），正文写先走完向导，只能关闭", async () => {
+    bootOverrides(ipc, { accounts: [], firstRun: true });
+    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    ipc.overrides.set("microsoft_login", () => {
+      throw new IpcError("AppNotApproved", "使用的微软应用未获准访问 Minecraft 服务（Invalid app registration）");
+    });
+    await mount();
+    expect(launcher.state.firstRun).toBe(true);
+    act(() => void launcher.actions.startMicrosoftLogin());
+    await flush();
+    expect(dialog()?.textContent).toContain("登录应用未获批准");
+    expect(dialog()?.textContent).toContain("先走完向导，再到设置里填写或更换。");
+    const labels = [...document.querySelectorAll<HTMLButtonElement>("[role='dialog'] button")].map((b) => b.textContent);
+    expect(labels).not.toContain("打开设置");
+    expect(labels).toContain("复制错误信息");
+    // 没有主按钮，初始焦点给「关闭」
+    expect(button("关闭").hasAttribute("data-autofocus")).toBe(true);
+    act(() => button("关闭").click());
+    await flush();
+    expect(launcher.state.login).toBeNull();
+  });
+
+  it("构建里没有 client_id：说明是这个版本没有内置微软登录，只给「打开设置」，不给重试", async () => {
+    ipc.overrides.set("microsoft_login", () => {
+      throw new IpcError("MsaClientIdMissing", "这个版本没有内置微软登录 client_id：在设置的「常规 · 高级」里填入，或者设环境变量 PETALFALL_MSA_CLIENT_ID");
+    });
+    await mount();
+    act(() => void launcher.actions.startMicrosoftLogin());
+    await flush();
+    expect(dialog()?.textContent).toContain("这个版本没有内置微软登录");
+    const labels = [...document.querySelectorAll<HTMLButtonElement>("[role='dialog'] button")].map((b) => b.textContent);
+    expect(labels).not.toContain("重试");
+    expect(labels).not.toContain("复制错误信息");
+
+    act(() => button("打开设置").click());
+    await flush();
+    expect(launcher.state.login).toBeNull();
+    expect(nav.route).toEqual({ page: "settings", section: "general" });
   });
 });
 
@@ -481,6 +574,28 @@ describe("外置登录弹窗", () => {
     expect(selected.pendingId).toMatch(/^authlib-/);
     expect(launcher.state.login).toBeNull();
     expect(launcher.state.toasts[0]?.title).toBe(TOAST_COPY.authlibAdded("multi_alt", "skin.example.com").title);
+  });
+
+  it("服务器拒绝登录：危险提示框完整显示服务器给的原因，不截成两行", async () => {
+    const reason = "登录尝试过于频繁，为保护账户安全，本站已暂时冻结该账户的登录权限，请于三十分钟后再试；如非本人操作，请尽快登录皮肤站修改密码";
+    await openAuthlib();
+    typeInto(inputs()[0], "skin.example.com");
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    const [username, password] = inputs();
+    typeInto(username, "multi@example.com");
+    typeInto(password, "secret");
+    ipc.overrides.set("authlib_login", () => {
+      throw new IpcError("Yggdrasil", "第三方认证失败", { error: "TooManyRequests", error_message: reason });
+    });
+    act(() => button(AUTHLIB_COPY.login).click());
+    await flush();
+    const callouts = [...(dialog()?.querySelectorAll<HTMLElement>('[data-tone="danger"]') ?? [])];
+    expect(callouts).toHaveLength(1);
+    // jsdom 不排版，截不截成两行只能看文字容器上的 data-full
+    const text = callouts[0].querySelector<HTMLElement>("[data-full]");
+    expect(text?.getAttribute("data-full")).toBe("true");
+    expect(text?.textContent).toBe(reason);
   });
 
   it("登录还没回来时不能退回上一步换服务器：回来的角色属于这一次的服务器", async () => {

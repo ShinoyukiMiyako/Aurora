@@ -1,4 +1,4 @@
-// 头图菜单、设置页「实例管理」与崩溃页共用的一组实例操作：重命名、固定、打开文件夹、导出整合包、补全与删除。
+// 头图菜单、设置页「实例管理」与崩溃页共用的一组实例操作：重命名、固定、打开文件夹、导出整合包、移到别的游戏目录、补全与删除。
 // 几处入口的锁定判断与反馈都从这里出，保证完全一致（删除确认与实例库共用 delete.tsx）。动作一律经外层统一错误处理执行。
 
 import { ACTION_ERROR, lockReason } from "../../copy/flows";
@@ -39,6 +39,8 @@ export interface InstanceOps {
   exportReason: string | undefined;
   /** 此刻不能把存档带进整合包的原因；能带为 undefined。 */
   exportSavesReason: string | undefined;
+  /** 此刻不能移到别的游戏目录的原因；能移为 undefined。菜单项与移动弹窗的主按钮共用它。 */
+  moveReason: string | undefined;
   /** 更新检查设置此刻改不了的原因：只写卷宗不碰 jar，游戏运行不挡；但要占住实例，安装、补全、改名、删除挡着。能改为 undefined。 */
   updateHoldReason: string | undefined;
   /** 此刻不能改动 Mod 的原因（启停、更新、移除、回滚）：既要换 jar（游戏运行、补全挡着），也要占住实例（改名、删除挡着）。能改动为 undefined。 */
@@ -66,6 +68,17 @@ export function exportReason(inst: InstanceSummary, work: WorkLock | null): stri
 export function exportSavesReason(inst: Pick<InstanceSummary, "activity">, busy: boolean): string | undefined {
   if (inst.activity === "backing_up") return LOCK_REASON.export.savesBackingUp;
   return busy || inst.activity === "launching" || inst.activity === "running" ? LOCK_REASON.export.savesInGame : undefined;
+}
+
+/**
+ * 移到别的游戏目录：要整份读走实例目录、从基底带走客户端 jar，实例与基底上的活动都挡它（见 InstanceLocks.move）。
+ * 占位项的目录还没落盘；损坏的实例读不出版本 JSON，算不出要带过去的共用文件。只有一个游戏目录时照样能开：可以选一个文件夹。
+ */
+export function moveReason(inst: InstanceSummary, locks: InstanceLocks): string | undefined {
+  if (inst.placeholder) return LOCK_REASON.move.placeholder;
+  const locked = lockReason(locks.move, "move");
+  if (locked !== undefined) return locked;
+  return inst.status === "broken" ? LOCK_REASON.move.broken : undefined;
 }
 
 export function useInstanceOps(inst: InstanceSummary): InstanceOps {
@@ -137,6 +150,7 @@ export function useInstanceOps(inst: InstanceSummary): InstanceOps {
     settingsReason,
     exportReason: exportReason(inst, work),
     exportSavesReason: exportSavesReason(inst, busy),
+    moveReason: moveReason(inst, locks),
     updateHoldReason,
     modsReason: modsLock !== undefined ? modsLock : updateHoldReason,
     repair,

@@ -1,7 +1,8 @@
 //! 系统：内存建议、首次启动、启动提示与连通性探测。
 
-use aurora_core::folders::{ensure_game_dir, probe_dir, validate_game_dir, FirstRunBaseline};
-use aurora_core::{ConfigRecovery, MemoryAdvice, MemoryTier};
+use petalfall_base::fs::DataDirResolution;
+use petalfall_core::folders::{ensure_game_dir, probe_dir, validate_game_dir, FirstRunBaseline};
+use petalfall_core::{ConfigRecovery, MemoryAdvice, MemoryLimit, NeedFactor};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -9,15 +10,21 @@ use crate::commands::config::{parse_named_directory, NamedDirectoryDto};
 use crate::commands::CommandError;
 use crate::facade::Facade;
 
-/// 设置页内存卡要的事实：物理内存总量、此刻空闲、推荐值按哪一档算、推荐值。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// 内存卡要的事实：物理内存总量、此刻空闲，以及自动分配给多少、为什么是这个数。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MemoryAdviceDto {
     pub total_mb: u32,
     pub available_mb: u32,
-    /// vanilla / modded / large_modpack。
-    pub tier: MemoryTier,
-    /// 自动分配此刻会给多少（MB），不超过物理内存一半。
+    /// 按哪个实例估算；没有选中实例时为 null，按原版。
+    pub version_id: Option<String>,
+    /// 实例需要多少（MB），已向上对齐到 512。
+    pub need_mb: u32,
+    /// 本机上限与它的来由（half_physical / java_32bit）。
+    pub limit: MemoryLimit,
+    /// 自动分配此刻会给多少（MB）：需求与上限取小。
     pub recommended_mb: u32,
+    /// 需求的组成项，按展示顺序。
+    pub factors: Vec<NeedFactor>,
 }
 
 impl From<MemoryAdvice> for MemoryAdviceDto {
@@ -25,21 +32,24 @@ impl From<MemoryAdvice> for MemoryAdviceDto {
         Self {
             total_mb: advice.total_mb,
             available_mb: advice.available_mb,
-            tier: advice.tier,
-            recommended_mb: advice.recommended_mb,
+            version_id: advice.version_id,
+            need_mb: advice.estimate.need_mb,
+            limit: advice.estimate.limit,
+            recommended_mb: advice.estimate.recommended_mb,
+            factors: advice.estimate.factors,
         }
     }
 }
 
-/// 内存建议。给出 `versionId` 按该实例定档；不给按主页当前选中的实例，没有选中按原版。
-/// 要扫版本目录，在快照上进行。
+/// 内存建议。给出 `versionId` 按该实例估算；不给按主页当前选中的实例，没有选中按原版。
+/// 要扫版本目录与 mods 目录，在快照上进行。
 #[tauri::command]
 pub async fn memory_advice(
     version_id: Option<String>,
     facade: State<'_, Facade>,
 ) -> Result<MemoryAdviceDto, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.memory_advice(version_id.as_deref()).await?.into())
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.memory_advice(version_id.as_deref()).await?.into())
 }
 
 /// 首次启动向导是否还没走过第一步。
@@ -85,9 +95,9 @@ pub(crate) async fn complete_first_run_with(
     let base = match slot.as_ref() {
         Some(base) => base.clone(),
         None => {
-            let aurora = facade.snapshot().await;
-            let current_exists = probe_dir(aurora.game_dir()).await;
-            let base = aurora.first_run_baseline(current_exists);
+            let petalfall = facade.snapshot().await;
+            let current_exists = probe_dir(petalfall.game_dir()).await;
+            let base = petalfall.first_run_baseline(current_exists);
             *slot = Some(base.clone());
             base
         }
@@ -95,8 +105,8 @@ pub(crate) async fn complete_first_run_with(
     // 建目录在拿写锁之前：盘慢或挂起时不连累其它命令。
     ensure_game_dir(&game_dir).await?;
     facade
-        .update(|aurora| {
-            aurora.complete_first_run(&base, game_dir, extras);
+        .update(|petalfall| {
+            petalfall.complete_first_run(&base, game_dir, extras);
             Ok::<_, CommandError>(())
         })
         .await
@@ -105,12 +115,15 @@ pub(crate) async fn complete_first_run_with(
 // ---- 启动提示 ----
 
 /// 启动时发生、要让用户知道的事。前端启动后查询一次，按 `kind` 展示。
-// 变体名就是前端分支用的 kind（config_reset、credentials_reset……），同一类「按默认或空库重来」的处置
-// 共用 Reset 后缀，比为了这条规则另起一套对不上的名字更好认。
-#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StartupNoticeDto {
+    /// 可执行文件所在目录这次写不进去，但里面有 config.json：数据就在这里，所以没有换到系统目录，
+    /// 账户和实例都在原处，只是这次的改动可能存不下来。
+    DataDirUnwritable {
+        /// 系统给的原因，不含路径。
+        reason: String,
+    },
     /// config.json 读不出来：坏文件已改名留存，本次按默认配置启动（首次启动向导会重新出现）。
     ConfigReset {
         /// 坏文件改名后的绝对路径，原样保留着用户的内容。
@@ -138,7 +151,8 @@ pub enum StartupNoticeDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConfigFieldResetDto {
     /// 字段在 config.json 里的位置，嵌套用点号连接：download_source、version_list_source、
-    /// isolation_policy、appearance.mode、appearance.accent、after_launch、language。
+    /// isolation_policy、appearance.mode、appearance.accent、appearance.cover_background、after_launch、
+    /// language。
     pub field: &'static str,
     /// 文件里写的原值。
     pub value: String,
@@ -146,6 +160,8 @@ pub struct ConfigFieldResetDto {
 
 /// 本次启动的提示（managed state）。头一次查询之后不再变化，查询多少次都返回同一份。
 pub struct StartupNotices {
+    /// 数据目录的处置，定位时就已知道。
+    data_dir: Option<StartupNoticeDto>,
     /// 配置文件的处置，门面构造时就已知道。
     config: Vec<StartupNoticeDto>,
     /// 凭据库的处置要开库才知道，头一次查询时取。哪条命令先碰上坏凭据库都只处置一次、经过记在核心里，
@@ -174,12 +190,23 @@ impl StartupNotices {
             })
             .collect();
         Self {
+            data_dir: None,
             config,
             credentials: tokio::sync::OnceCell::new(),
         }
     }
 
-    /// 配置的提示在前，凭据库的在后。开库本身失败（读文件失败）照实报错，下一次查询再试。
+    /// 收下数据目录定位的结果：便携目录写不进去时记一条提示。
+    pub fn with_data_dir(mut self, resolved: &DataDirResolution) -> Self {
+        self.data_dir = resolved
+            .write_failure
+            .clone()
+            .map(|reason| StartupNoticeDto::DataDirUnwritable { reason });
+        self
+    }
+
+    /// 数据目录的提示最先：后面的问题多半与它同因。接着是配置的，最后是凭据库的。
+    /// 开库本身失败（读文件失败）照实报错，下一次查询再试。
     pub(crate) async fn resolve(
         &self,
         facade: &Facade,
@@ -199,7 +226,13 @@ impl StartupNotices {
                 )
             })
             .await?;
-        Ok(self.config.iter().chain(credentials).cloned().collect())
+        Ok(self
+            .data_dir
+            .iter()
+            .chain(&self.config)
+            .chain(credentials)
+            .cloned()
+            .collect())
     }
 }
 
@@ -218,15 +251,15 @@ pub async fn startup_notices(
 /// 要联网，在快照上进行，不占门面锁。
 #[tauri::command]
 pub async fn probe_network(facade: State<'_, Facade>) -> Result<bool, CommandError> {
-    let aurora = facade.snapshot().await;
-    Ok(aurora.probe_network().await?)
+    let petalfall = facade.snapshot().await;
+    Ok(petalfall.probe_network().await?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::error::code;
-    use aurora_core::{Aurora, AuroraConfig, ConfigFieldReset, ConfigStore};
+    use petalfall_core::{ConfigFieldReset, ConfigStore, Petalfall, PetalfallConfig};
 
     #[test]
     fn config_recovery_becomes_a_config_reset_notice() {
@@ -297,8 +330,8 @@ mod tests {
 
     fn facade_in(dir: &std::path::Path) -> Facade {
         Facade::new(
-            Aurora::open(
-                AuroraConfig::default(),
+            Petalfall::open(
+                PetalfallConfig::default(),
                 dir.to_path_buf(),
                 dir.join("config.json"),
             )
@@ -357,6 +390,60 @@ mod tests {
             assert!(error.starts_with("Windows DPAPI 解密失败"), "{error}");
 
             assert_eq!(notices.resolve(&facade).await.unwrap(), first);
+        }
+    }
+
+    fn resolution(write_failure: Option<&str>) -> DataDirResolution {
+        DataDirResolution {
+            path: std::path::PathBuf::from(r"E:\Petalfall"),
+            portable: true,
+            fallback_reason: None,
+            write_failure: write_failure.map(str::to_owned),
+            elapsed: std::time::Duration::ZERO,
+        }
+    }
+
+    /// 便携目录写不进去：提示带着原因排在最前面，配置的提示照常跟在后面，查询多少次都是同一份。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unwritable_data_dir_becomes_the_first_startup_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let reason = "拒绝访问。 (os error 5)";
+        let notices = StartupNotices::from_recovery(Some(ConfigRecovery::Reset {
+            preserved: std::path::PathBuf::from(r"E:\Petalfall\config.json.broken-20261031-143025"),
+            error: "expected value at line 1 column 1".into(),
+        }))
+        .with_data_dir(&resolution(Some(reason)));
+
+        let first = notices.resolve(&facade).await.unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&first).unwrap(),
+            serde_json::json!([
+                { "kind": "data_dir_unwritable", "reason": reason },
+                {
+                    "kind": "config_reset",
+                    "preserved_path": r"E:\Petalfall\config.json.broken-20261031-143025",
+                    "error": "expected value at line 1 column 1"
+                }
+            ])
+        );
+        assert_eq!(notices.resolve(&facade).await.unwrap(), first);
+    }
+
+    /// 回落到系统目录或写得通的便携目录：数据目录没有要说的。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn usable_data_dir_adds_no_startup_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let fallen_back = DataDirResolution {
+            portable: false,
+            fallback_reason: Some(r"C:\Program Files\Petalfall 不可写：拒绝访问。".into()),
+            ..resolution(None)
+        };
+        for resolved in [resolution(None), fallen_back] {
+            let notices = StartupNotices::from_recovery(None).with_data_dir(&resolved);
+            assert_eq!(notices.resolve(&facade).await.unwrap(), Vec::new());
         }
     }
 
@@ -499,17 +586,25 @@ mod tests {
     #[tokio::test]
     async fn unknown_instance_in_memory_advice_is_version_not_installed() {
         let dir = tempfile::tempdir().unwrap();
-        let aurora = facade_in(dir.path()).snapshot().await;
-        let err: CommandError = aurora
+        let petalfall = facade_in(dir.path()).snapshot().await;
+        let err: CommandError = petalfall
             .memory_advice(Some("ghost"))
             .await
             .unwrap_err()
             .into();
         assert_eq!(err.code, code::VERSION_NOT_INSTALLED);
 
-        let advice: MemoryAdviceDto = aurora.memory_advice(None).await.unwrap().into();
+        let advice: MemoryAdviceDto = petalfall.memory_advice(None).await.unwrap().into();
         let json = serde_json::to_value(advice).unwrap();
-        assert_eq!(json["tier"], "vanilla");
-        assert!(json["recommended_mb"].as_u64().unwrap() * 2 <= json["total_mb"].as_u64().unwrap());
+        assert_eq!(json["version_id"], serde_json::Value::Null);
+        assert_eq!(json["need_mb"], 2560);
+        assert_eq!(
+            json["factors"],
+            serde_json::json!([{"kind": "base", "loader": "vanilla", "mb": 2560}])
+        );
+        assert_eq!(json["limit"]["reason"], "half_physical");
+        let limit = json["limit"]["mb"].as_u64().unwrap();
+        assert!(limit * 2 <= json["total_mb"].as_u64().unwrap());
+        assert_eq!(json["recommended_mb"].as_u64().unwrap(), limit.min(2560));
     }
 }

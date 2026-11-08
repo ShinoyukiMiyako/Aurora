@@ -5,19 +5,38 @@ import type { ConfigEnumField, NamedDirectoryDto } from "./config";
 
 // ---- 内存 ----
 
-export type MemoryTier = "vanilla" | "modded" | "large_modpack";
+/** 本机上限的来由：物理内存的一半；32 位 Java 最多 1 GB（只在启动时才知道用哪个 Java，内存建议里不会出现，但类型要覆盖）。 */
+export type MemoryLimitReason = "half_physical" | "java_32bit";
+
+/** 需求的组成项，按出现顺序展示。 */
+export type MemoryNeedFactor =
+  /** 基数：原版 / 只装 OptiFine / 装了 Mod 加载器。整合包写了推荐值时没有这一项。 */
+  | { kind: "base"; loader: "vanilla" | "optifine" | "modded"; mb: number }
+  /** 启用的 Mod 数与它们折算的内存；只在装了 Mod 加载器且没有整合包推荐值时出现，count 可能为 0。 */
+  | { kind: "mods"; count: number; mb: number }
+  /** 整合包作者写的推荐内存（CurseForge recommendedRam），替代 base 与 mods。 */
+  | { kind: "modpack"; mb: number }
+  /** options.txt 的视距超过默认 12 时多出来的区块折算；distance 是视距。 */
+  | { kind: "render_distance"; distance: number; mb: number }
+  /** 检测到 Distant Horizons：需求至少 floor_mb。 */
+  | { kind: "distant_horizons"; floor_mb: number };
 
 export interface MemoryAdviceDto {
   total_mb: number;
   /** 此刻空闲的物理内存。 */
   available_mb: number;
-  /** 推荐值按哪一档算。 */
-  tier: MemoryTier;
-  /** 自动分配此刻会给多少（MB），不超过物理内存的一半。 */
+  /** 按哪个实例估算：给了 versionId 就是它；没给时是主页选中的实例；没有选中（或选中的已不在）为 null，按原版估算。 */
+  version_id: string | null;
+  /** 实例需要多少（MB），已向上对齐到 512。 */
+  need_mb: number;
+  /** 本机上限。 */
+  limit: { mb: number; reason: MemoryLimitReason };
+  /** 自动分配会给多少 = min(need_mb, limit.mb)。 */
   recommended_mb: number;
+  factors: MemoryNeedFactor[];
 }
 
-/** 内存建议。给 versionId 按该实例定档（不存在报 version_not_installed）；不给按主页选中的实例，没选中按原版。 */
+/** 内存建议。给 versionId 按该实例估算（不存在报 version_not_installed）；不给按主页选中的实例，没选中按原版。 */
 export const memoryAdvice = (versionId?: string): Promise<MemoryAdviceDto> =>
   invoke<MemoryAdviceDto>("memory_advice", { versionId });
 
@@ -36,6 +55,15 @@ export const completeFirstRun = (gameDir: string, extraDirectories: NamedDirecto
 
 /** 启动时发生、要让用户知道的事，按 kind 区分。 */
 export type StartupNoticeDto =
+  | {
+      /**
+       * data_dir_unwritable：可执行文件所在目录这次写不进去，但里面有 config.json，数据就在这里，所以没有换到系统目录。
+       * 账户和实例都在原处，只是这次的改动可能存不下来。排在所有提示之前。
+       */
+      kind: "data_dir_unwritable";
+      /** 系统给的原因，不含路径。 */
+      reason: string;
+    }
   | {
       /** config_reset：config.json 读不出来，坏文件已改名留存，本次按默认配置启动（首次启动向导会重新出现）。 */
       kind: "config_reset";
@@ -184,7 +212,7 @@ export const listNews = (options: ListNewsOptions = { retry: false }): Promise<N
 
 // ---- 启动器自更新 ----
 
-export type UpdaterUnsupportedReason = "debug_build" | "missing_pubkey";
+export type UpdaterUnsupportedReason = "debug_build" | "missing_pubkey" | "signed_version_not_required" | "downgrades_allowed" | "unknown_channel";
 
 export interface UpdateDto {
   version: string;
@@ -210,14 +238,37 @@ export const updaterInfo = (): Promise<UpdaterInfoDto> => invoke<UpdaterInfoDto>
 
 /**
  * 检查更新，没有新版本返回 null。更新源上还没有发布（所有端点的清单都回 404）不算失败：本次会话已知的版本仍在就返回它，否则同样是 null。
- * 不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed：网络层失败带 detail.network，更新源回了 404 以外的非 2xx 带 detail.status。
+ * 不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed：全部端点都败在网络层时带 detail.network；
+ * detail.attempts 按顺序列出每个端点的结果。只有一个端点、它回了 404 以外的非 2xx 时带 detail.status；
+ * 有多个端点时状态码只写在各自那一条里，顶层不带，免得分不清是哪个端点的。
  */
 export const checkUpdate = (): Promise<UpdateDto | null> => invoke<UpdateDto | null>("check_update");
 
+/** 一个下载源失败的种类。connect、timeout 是网络层失败；http 是非 2xx；signature 是包与签名对不上或签名本身不合法；too_large 是下载的字节超过清单声明的大小。 */
+export type UpdateSourceFailureKind = "connect" | "timeout" | "http" | "signature" | "too_large" | "other";
+
+/** 自更新下载里一个源的失败，见 downloadUpdate 的 detail.sources。 */
+export interface UpdateSourceFailureDto {
+  /** 源的短名，同 core-event kind source 的 name。 */
+  source: string;
+  failure: UpdateSourceFailureKind;
+  /** 这个源失败的后端原文。 */
+  message: string;
+  /** 这个源失败的原因链（DNS、TCP、TLS 那几层的原文）；没有原因链时后端不写这个键。 */
+  causes?: string[];
+}
+
 /**
  * 长任务：下载最近一次检查到的更新并校验签名，进度经 core-event（kind download，total 为 1）推送并带 task_id，
- * 可用 cancelTask(taskId) 取消。没检查到更新报 update_not_available，签名不符报 update_signature_invalid，
- * 下载失败报 update_download_failed，网络层失败带 detail.network。
+ * 可用 cancelTask(taskId) 取消。没检查到更新报 update_not_available。
+ * 清单给了多个下载源时按顺序逐个试，同一个源不重试：每个源开始前推一条 core-event（kind source），第一个也有；
+ * 换源后从头下，进度从 0 重新报起。
+ * 下载失败时 detail.sources 按尝试顺序列出已试的每个源（UpdateSourceFailureDto）。已试的源全是 signature，
+ * 或最后一个源的签名问题与源无关、当场停下（签名版本不符、签名换了钥匙等），报 update_signature_invalid，
+ * 否则报 update_download_failed。清单给的下载地址没过白名单时一个源都不试，报 update_download_failed，
+ * detail.sources 只有一条 default（failure 为 other）。全都败在网络层（connect 或 timeout）时另带
+ * detail.network：全是 timeout 为 timeout，否则为 connect。只试了一个源时 message 是那个源的原文，
+ * 试了多个时逐行写成「源名：原文」。
  * 下载期间再次检查换了版本或已无更新时同样报 update_not_available（message 写明新旧版本），这次下载的包已作废，
  * 按最新的检查结果重新下载即可。
  */

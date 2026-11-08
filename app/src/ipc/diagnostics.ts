@@ -4,6 +4,8 @@ import { invoke } from "./bridge";
 import type { LogLineDto } from "./launch";
 
 export type CrashCategory =
+  /** 玩家按住 F3+C 十秒触发的调试崩溃，后端保证这时线索只有这一条。 */
+  | "manual_debug_crash"
   | "java_version_mismatch"
   | "out_of_memory"
   /** Java 不接受自定义的 JVM 参数。 */

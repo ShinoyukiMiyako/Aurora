@@ -1,0 +1,35 @@
+{
+  "palette": { "O": "#A9578A", "S": "#E08DB8", "M": "#F2AFD0", "L": "#F9CCE2", "H": "#FFEAF4" },
+  "grid16": [
+    "................",
+    "................",
+    ".........OO.OO..",
+    ".......OOLMOMSO.",
+    "......OLHLMLMSO.",
+    ".....OLLLMLMMSO.",
+    ".....OHLMLMMSO..",
+    "....OLLMLLMSSO..",
+    "....OLMLMMSMO...",
+    "...OLLMMLMSSO...",
+    "...OLMMSMSSO....",
+    "...OMMSMSOO.....",
+    "..OMSSOOO.......",
+    "..OOO...........",
+    "................",
+    "................"
+  ],
+  "grid12": [
+    "............",
+    ".......OO.O.",
+    ".....OOLMOSO",
+    "....OLHLMMSO",
+    "...OLLMLMSO.",
+    "...OHMLMSSO.",
+    "..OLMLMSSO..",
+    "..OLMMSSO...",
+    ".OLMSMOO....",
+    ".OMSOO......",
+    ".OOO........",
+    "............"
+  ]
+}

@@ -10,6 +10,7 @@
 
 import { invoke } from "./bridge";
 import type { PlatformId } from "./discover";
+import { isIpcError } from "./errors";
 
 export type LoaderChoice = "fabric" | "quilt" | "forge" | "neoforge";
 export const LOADER_CHOICES: readonly LoaderChoice[] = ["fabric", "quilt", "forge", "neoforge"];
@@ -19,9 +20,10 @@ export type DetectedLoaderKind = LoaderChoice | "optifine" | "liteloader";
 
 /**
  * 实例此刻在做的事。inherited：别的实例正以它为基底（在那个实例的 inheritsFrom 链上），那个实例启动到游戏退出、
- * 补全或导入整合包期间，这个实例的启动、删除、改名、补全以 instance_busy 拒绝，detail.used_by 是正在用它的实例。
+ * 补全、导入整合包或移到别的游戏目录期间，这个实例的启动、删除、改名、补全以 instance_busy 拒绝，detail.used_by 是正在用它的实例。
+ * moving：正在移到另一个游戏目录，与一切互斥。
  */
-export type InstanceActivity = "installing" | "repairing" | "renaming" | "deleting" | "launching" | "running" | "modifying" | "inherited" | "backing_up";
+export type InstanceActivity = "installing" | "repairing" | "renaming" | "deleting" | "launching" | "running" | "modifying" | "inherited" | "backing_up" | "moving";
 
 export interface LoaderDto {
   kind: DetectedLoaderKind;
@@ -88,8 +90,14 @@ export interface InstanceDto {
   /** 隔离的生效值（实例覆盖、全局档位与已有数据共同决定）；何时为 null 同 mod_count。 */
   isolated: boolean | null;
   description: string | null;
-  /** 封面预设 id；null 时按默认规则推导。 */
+  /** 封面方块 id；null 时按默认规则推导。 */
   cover: string | null;
+  /** 封面方块用的玩家图片在材质协议 /cover/ 下的取图键；没设、设置读不出或文件不见了为 null。 */
+  cover_image: string | null;
+  /** 卡面背景；设置读不出时为 follow。 */
+  background: CoverBackgroundDto;
+  /** 卡面背景图片的取图键；何时为 null 同 cover_image。 */
+  background_image: string | null;
   /** 实例设置里的最大内存 MB；null 为跟随全局（或设置读不出）。 */
   memory_mb: number | null;
   /** 实例设置读不出来的原因；此时 description、cover、memory_mb 为 null。 */
@@ -123,11 +131,22 @@ export interface InstanceDto {
 
 export type IsolationOverride = "follow_global" | "enabled" | "disabled";
 
+/** follow 跟随外观设置里的默认背景；image 用 background_image 指的玩家图片。 */
+export type CoverBackgroundDto = "follow" | "art" | "texture" | "image";
+
+/** 卡面上用玩家图片的位置：背景，或封面方块的面。 */
+export type CoverImageSlotDto = "background" | "block";
+
 /** 实例设置。读写同一形状，写入时多出或缺少字段都会被拒绝。 */
 export interface InstanceSettingsDto {
   description: string | null;
-  /** 小写字母、数字与下划线，1 到 64 个。 */
+  /** 封面方块 id：小写字母、数字与下划线，1 到 64 个。 */
   cover: string | null;
+  /** 封面方块用的玩家图片文件名（block-<16 位十六进制>.png），只由导入命令写下。 */
+  cover_image: string | null;
+  background: CoverBackgroundDto;
+  /** 卡面背景图片文件名（background-<16 位十六进制>.png 或 .jpg），只由导入命令写下；背景换成别的样式时仍保留。 */
+  background_image: string | null;
   isolation: IsolationOverride;
   /** 最大内存 MB，至少 1024 且为 512 的整数倍；null 跟随全局。 */
   memory_mb: number | null;
@@ -384,6 +403,15 @@ export const getInstanceSettings = (id: string): Promise<InstanceSettingsDto> =>
 export const setInstanceSettings = (id: string, settings: InstanceSettingsDto): Promise<InstanceSettingsDto> =>
   invoke<InstanceSettingsDto>("set_instance_settings", { id, settings });
 
+/**
+ * 把本机一张图片用作卡面背景或封面方块：后端解码、重新编码进实例目录，把文件名写进实例设置（背景位同时把
+ * background 设为 image），返回写下的设置；被换下的旧图随之删除。只认 PNG、JPEG、WebP，原文件不超过 20 MiB、
+ * 边长不超过 8192。图片读不了、太大、格式不认、解码失败报 invalid_argument（detail.field 为 path，detail.reason
+ * 区分原因）；slot 不认识报 invalid_argument（field 为 slot）；重新编码失败报 internal；实例忙碌报 instance_busy。
+ */
+export const importCoverImage = (id: string, slot: CoverImageSlotDto, path: string): Promise<InstanceSettingsDto> =>
+  invoke<InstanceSettingsDto>("import_cover_image", { id, slot, path });
+
 /** 资源包、光影包与存档，从实例运行时的工作目录读。 */
 export const listInstanceContent = (id: string): Promise<InstanceContentDto> =>
   invoke<InstanceContentDto>("list_instance_content", { id });
@@ -512,3 +540,142 @@ export const openFolder = (target: FolderTarget, id: string | null, world: strin
  * 旧备份目录），或这次运行里导出存档、导出整合包写成的文件。别的路径后端报 invalid_argument。
  */
 export const revealInFolder = (path: string): Promise<void> => invoke<void>("reveal_in_folder", { path });
+
+// ---------------------------------------------------------------- 移到另一个游戏目录
+
+/**
+ * 拦着一次移动的问题。预检把它们全列出来；执行前后端重新预检，遇到的第一个以 instance_move_blocked 拒绝，
+ * detail.blocker 是同一形状。same_directory：目标就是实例现在所在的游戏目录；target_inside_source：目标在实例目录里面；
+ * name_taken：目标里已有同名（不分大小写）的版本；has_dependents：别的实例经 inheritsFrom 依赖它；links：实例目录或它的
+ * 备份目录里有符号链接、目录联接；base_conflict：目标里已有同名、内容不同的基底版本；insufficient_space：要写的字节加
+ * 256 MiB 余量超过目标盘剩余；pending：上一次移动中断后还没收尾；source_changed：只在执行时出现，当前游戏目录已不是
+ * 发起移动时带上的 source（发起之后切换过），不动当前目录里同名的实例。
+ */
+export type MoveBlockerDto =
+  | { kind: "same_directory" }
+  | { kind: "target_inside_source" }
+  | { kind: "name_taken" }
+  | { kind: "has_dependents"; dependents: string[] }
+  | { kind: "links"; paths: string[] }
+  | { kind: "base_conflict"; bases: string[] }
+  | { kind: "insufficient_space"; needed: number; available: number }
+  | { kind: "pending" }
+  | { kind: "source_changed" };
+
+/** 移动前的预检，不写盘、不占实例。源是当前游戏目录，目标可以还不存在。 */
+export interface MovePreviewDto {
+  id: string;
+  /** 实例此刻所在的游戏目录。发起移动时原样作为 source 交回，后端据此认出发起之后有没有切换过游戏目录。 */
+  source: string;
+  target: string;
+  /** 目标在游戏目录列表里的显示名；还没记录的新文件夹按同一规则推出。 */
+  target_name: string;
+  /** 目标已在游戏目录列表里；为 false 时移动成功后会记进去。 */
+  target_registered: boolean;
+  /** 两个游戏目录在同一个卷上：实例目录与备份直接改名过去，不复制。 */
+  same_volume: boolean;
+  instance_bytes: number;
+  instance_files: number;
+  /** 随实例带走的存档备份。 */
+  backup_bytes: number;
+  backup_count: number;
+  /** 目标里缺、要从原目录补过去的共用文件（库、资源、日志配置），不含基底版本。 */
+  dependency_files: number;
+  dependency_bytes: number;
+  /** 目标里没有、要带过去的基底版本，由近及远。 */
+  bases_to_copy: string[];
+  /** 目标里已有、内容相同直接用的基底版本。 */
+  reused_bases: string[];
+  /** 原目录里也缺的共用文件数，下次启动时由补全下载。 */
+  missing_in_source: number;
+  /** 这次要写进目标盘的字节，不含余量。 */
+  required_bytes: number;
+  /** 目标盘剩余的字节。 */
+  available_bytes: number;
+  /** 不隔离时存档、Mod 与游戏设置在原游戏目录根下和别的实例共用，不跟着走。 */
+  isolated: boolean;
+  /** 为空才能移。 */
+  blockers: MoveBlockerDto[];
+}
+
+/**
+ * 移动已经完成、只是有一项没跟过去要告诉玩家；reason 是人读的原因。config：实例已经移好，配置（原目录里对它的引用、
+ * 目标记进游戏目录列表）没存上，下次打开时后端按移动日志补上。
+ */
+export type MoveFollowUpDto =
+  | { kind: "play_records"; reason: string }
+  | { kind: "world_backups"; reason: string }
+  | { kind: "cleanup"; path: string; reason: string }
+  | { kind: "config"; reason: string };
+
+export interface MoveOutcomeDto {
+  id: string;
+  source: string;
+  target: string;
+  target_name: string;
+  /** 目标是这次新记进游戏目录列表的。 */
+  registered: boolean;
+  /** 为空即全部跟过去了。 */
+  follow_ups: MoveFollowUpDto[];
+}
+
+/** 执行前重新预检遇到了拦截项：detail 为 { id, blocker }，blocker 同 MoveBlockerDto。 */
+export const INSTANCE_MOVE_BLOCKED_ERROR_CODE = "instance_move_blocked";
+
+/** 跨盘复制出的文件读回比对不上：这次移动已放弃，原件没动。detail 为 { path }，是对不上的那份副本。 */
+export const INSTANCE_MOVE_VERIFY_FAILED_ERROR_CODE = "instance_move_verify_failed";
+
+/** 预检。target 不合法或访问不到时以 invalid_game_directory 拒绝。 */
+export const previewInstanceMove = (id: string, target: string): Promise<MovePreviewDto> => invoke<MovePreviewDto>("preview_instance_move", { id, target });
+
+/**
+ * 长任务：把实例从 source（发起时的游戏目录，取自预检）移到 target。执行时当前游戏目录已不是 source 就以
+ * instance_move_blocked 拒绝（blocker 为 source_changed）。实例记为 moving，继承链上的基底按 inherited 占住；进度经
+ * core-event 推 Phase 与 Download（Download 的 total、finished 为文件数，bytes、total_bytes 为字节，每一步重新计数）。
+ * 可用 cancelTask(taskId) 取消，进入提交后取消不再生效、照常成功返回。侧栏固定由后端随移动去掉；这份配置没存上时
+ * 照样成功返回，follow_ups 里带一项 config。
+ */
+export const moveInstance = (taskId: string, id: string, source: string, target: string): Promise<MoveOutcomeDto> =>
+  invoke<MoveOutcomeDto>("move_instance", { taskId, id, source, target });
+
+function stringList(raw: unknown, what: string): string[] {
+  if (!Array.isArray(raw) || raw.some((item) => typeof item !== "string")) throw new Error(`${what} 应是字符串数组，实为 ${JSON.stringify(raw)}`);
+  return raw as string[];
+}
+
+function byteCount(raw: unknown, what: string): number {
+  if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 0) throw new Error(`${what} 应是非负整数，实为 ${JSON.stringify(raw)}`);
+  return raw;
+}
+
+/** 逐项校验一个拦截项（来自错误详情或任务日志），形状不对就抛错。 */
+export function parseMoveBlocker(raw: unknown, where: string): MoveBlockerDto {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error(`${where} 应是对象，实为 ${JSON.stringify(raw)}`);
+  const r = raw as Record<string, unknown>;
+  switch (r.kind) {
+    case "same_directory":
+    case "target_inside_source":
+    case "name_taken":
+    case "pending":
+    case "source_changed":
+      return { kind: r.kind };
+    case "has_dependents":
+      return { kind: r.kind, dependents: stringList(r.dependents, `${where}.dependents`) };
+    case "links":
+      return { kind: r.kind, paths: stringList(r.paths, `${where}.paths`) };
+    case "base_conflict":
+      return { kind: r.kind, bases: stringList(r.bases, `${where}.bases`) };
+    case "insufficient_space":
+      return { kind: r.kind, needed: byteCount(r.needed, `${where}.needed`), available: byteCount(r.available, `${where}.available`) };
+    default:
+      throw new Error(`${where} 的种类不认识：${JSON.stringify(r.kind)}`);
+  }
+}
+
+/** 错误码是 instance_move_blocked 时校验并返回 detail.blocker，形状不对就抛错；其余错误返回 null。 */
+export function moveBlockerOf(error: unknown): MoveBlockerDto | null {
+  if (!isIpcError(error) || error.code !== INSTANCE_MOVE_BLOCKED_ERROR_CODE) return null;
+  const detail = error.detail;
+  if (typeof detail !== "object" || detail === null) throw new Error(`${INSTANCE_MOVE_BLOCKED_ERROR_CODE} 没有带 detail：${error.message}`);
+  return parseMoveBlocker((detail as Record<string, unknown>).blocker, `${INSTANCE_MOVE_BLOCKED_ERROR_CODE} 的 detail.blocker`);
+}

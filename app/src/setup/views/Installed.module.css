@@ -1,0 +1,21 @@
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-16);
+  height: 100%;
+}
+
+.elevated {
+  margin: 0;
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text);
+}
+
+/* 贴着底栏：内容再少，声明的位置也不漂 */
+.legalNote {
+  margin: auto 0 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  color: var(--sk-text-2);
+}

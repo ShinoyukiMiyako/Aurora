@@ -2,7 +2,7 @@
 //!
 //! 前端下载队列给每次长命令调用（安装版本、装 Mod、装 Java、启动……）分配一个 `task_id`。命令开头
 //! 用 [`TaskRegistry::register`] 登记，拿到的 [`TaskHandle`] 持有取消令牌；令牌挂到门面快照上
-//! （`Aurora::with_cancel`），下载引擎在文件粒度观察它。`cancel_task` 触发令牌后，命令在
+//! （`Petalfall::with_cancel`），下载引擎在文件粒度观察它。`cancel_task` 触发令牌后，命令在
 //! [`CANCEL_DEADLINE`] 内以 `cancelled` 返回：协作取消通常几毫秒就停（Forge 处理器子进程也会被
 //! 结束并等它退出），个别不观察令牌的阶段（Java 探测）由 [`TaskHandle::run`] 在宽限期满后强行放弃。
 //!
@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use aurora_core::{BaseError, CancellationToken};
+use petalfall_core::{BaseError, CancellationToken};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -258,7 +258,7 @@ impl TaskJournal {
             tracing::debug!(seq, committed, "任务日志晚到的旧版本，已丢弃");
             return Ok(false);
         }
-        aurora_base::fs::atomic_write(&path, &bytes).await?;
+        petalfall_base::fs::atomic_write(&path, &bytes).await?;
         Ok(true)
     }
 

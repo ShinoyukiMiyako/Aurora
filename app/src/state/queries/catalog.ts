@@ -25,7 +25,7 @@ import { useResource, type ResourceResult } from "../resource";
 export type { GameDirectoryDto, GameDirectoryInspectionDto, GameDirectoryProblem, NamedDirectoryDto } from "../../ipc/config";
 export type { GpuAdapterDto, GpuAdaptersDto, JavaInstallationDto, JavaSource, JavaVersionDto } from "../../ipc/java";
 export type { LoaderChoice, LoaderVersionDto, ManifestDto, ManifestVersionDto, VersionRequirementsDto } from "../../ipc/instances";
-export type { MemoryAdviceDto, MemoryTier, UpdaterInfoDto } from "../../ipc/system";
+export type { MemoryAdviceDto, UpdaterInfoDto } from "../../ipc/system";
 
 /** manifest —— 每个版本附可装的加载器；断网时为缓存，stale_since 与 fetch_error 说明情况。 */
 export function useManifest(): ResourceResult<ManifestDto> {
@@ -62,12 +62,12 @@ export function useJavaRuntimes(): ResourceResult<JavaInstallationDto[]> {
   return useResource("java", detectJava);
 }
 
-/** gpu-adapters —— 本机硬件显卡与是否可切换，显卡卡片据此决定说明。 */
-export function useGpuAdapters(): ResourceResult<GpuAdaptersDto> {
-  return useResource("gpu-adapters", gpuAdapters);
+/** gpu-adapters —— 本机硬件显卡与是否可切换，显卡卡片据此决定说明；崩溃页只在有显卡线索时读（enabled 为 false 时不请求）。 */
+export function useGpuAdapters(enabled = true): ResourceResult<GpuAdaptersDto> {
+  return useResource(enabled ? "gpu-adapters" : null, gpuAdapters);
 }
 
-/** memory-advice:<id> 或 memory-advice（按主页当前实例 / 原版定档）。 */
+/** memory-advice:<id> 或 memory-advice（按主页当前实例 / 原版估算）。 */
 export function useMemoryAdvice(versionId: string | null): ResourceResult<MemoryAdviceDto> {
   return useResource(versionId === null ? "memory-advice" : `memory-advice:${versionId}`, () =>
     versionId === null ? memoryAdvice() : memoryAdvice(versionId),

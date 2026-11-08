@@ -1,7 +1,7 @@
 // 外观偏好的持久化命令。偏好落在后端配置的 appearance 段：随数据目录走，重装 WebView2 不丢。
 // 枚举取值非法时后端反序列化失败、命令报错，前端不做静默纠正。
 
-import type { AccentName, AppearanceMode } from "../domain/types";
+import type { AccentName, AppearanceMode, CoverStyle } from "../domain/types";
 import { invoke } from "./bridge";
 
 export interface AppearanceDto {
@@ -10,6 +10,7 @@ export interface AppearanceDto {
   petals: boolean;
   panorama: boolean;
   reduce_motion: boolean;
+  cover_background: CoverStyle;
 }
 
 /** 只写出要改的字段；未出现的字段保持后端现值。 */

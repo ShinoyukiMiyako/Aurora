@@ -115,7 +115,7 @@ export function useLaunch(instanceId: string): LaunchEntry {
 
   // 启动入口只在这个实例没有活动会话时才问这两项，损坏视图同样，会话这一项恒为 false
   const locks = locksOf(inst, false);
-  const blocked = busySaves ? LAUNCH_COPY.savesBusy : locks.launch === null ? null : INSTANCE_IN_USE_COPY.launch(locks.launch.usedBy);
+  const blocked = busySaves ? LAUNCH_COPY.savesBusy : locks.launch === null ? null : locks.launch === "moving" ? LAUNCH_COPY.moving : INSTANCE_IN_USE_COPY.launch(locks.launch.usedBy);
   const repairReason = isBroken && !reimport ? lockReason(locks.repair, "repair") : undefined;
   const repairBlocked = repairReason === undefined ? null : repairReason;
   return { instance: inst, view, stopping, failure, blocked, repairBlocked, launch, cancel, stop, dismiss, openCrash, openLogs, fix };

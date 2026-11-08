@@ -17,14 +17,17 @@ describe("发布通道", () => {
   it("预发布标识只看第一段，不分大小写，可带序号", () => {
     expect(releaseChannel("1.0.0-beta")).toBe("beta");
     expect(releaseChannel("2.3.4-beta.1")).toBe("beta");
-    expect(releaseChannel("1.0.0-RC2")).toBe("beta");
-    expect(releaseChannel("1.0.0-alpha.3")).toBe("preview");
-    expect(releaseChannel("1.0.0-Preview")).toBe("preview");
-    expect(releaseChannel("1.1.0-nightly.20261031")).toBe("preview");
+    expect(releaseChannel("1.0.0-BETA2")).toBe("beta");
     expect(releaseChannel("0.2.0-dev")).toBe("preview");
+    expect(releaseChannel("0.1.0-Dev.38")).toBe("preview");
+    expect(releaseChannel("0.1.0-dev7.1")).toBe("preview");
   });
 
+  // 启动器只给 dev、beta 两种预发布标识配了清单，别的标识它判为不支持自更新，这里同样不认
   it("认不出的预发布标识与不合语义化版本的写法直接报错", () => {
+    for (const tag of ["rc", "RC2", "alpha", "preview", "nightly", "devel", "betax"]) {
+      expect(() => releaseChannel(`1.0.0-${tag}.1`)).toThrow(`预发布标识「${tag.toLowerCase()}」不对应任何发布通道`);
+    }
     expect(() => releaseChannel("1.0.0-foo")).toThrow("预发布标识「foo」不对应任何发布通道");
     expect(() => releaseChannel("1.0.0-betaish")).toThrow("预发布标识「betaish」");
     expect(() => releaseChannel("1.0")).toThrow("不是语义化版本");

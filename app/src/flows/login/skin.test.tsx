@@ -47,7 +47,7 @@ describe("登录弹窗里的皮肤", () => {
   });
 
   it("读到了就给出皮肤", async () => {
-    const skin = { url: "aurora-tex://skin/u-2", model: "slim" };
+    const skin = { url: "petalfall-tex://skin/u-2", model: "slim" };
     ipc.overrides.set("skin_info", () => skin);
     view = render(<Probe uuid="u-2" />);
     await act(async () => {

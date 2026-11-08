@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { collectCargoPackages, collectNpmPackages, npmLicense } from "./third-party-licenses.mjs";
+import { collectCargoPackages, collectNpmPackages, distributionTarget, hostTarget, npmLicense } from "./third-party-licenses.mjs";
 
 const APP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -74,9 +74,21 @@ describe("前端依赖闭包", () => {
   });
 });
 
+describe("清单按哪个平台过滤 Rust 依赖", () => {
+  it("交叉编译时取 Tauri 传来的目标，不取构建机自己的平台", () => {
+    const target = hostTarget() === "x86_64-pc-windows-msvc" ? "x86_64-unknown-linux-gnu" : "x86_64-pc-windows-msvc";
+    expect(distributionTarget({ TAURI_ENV_TARGET_TRIPLE: target })).toBe(target);
+  });
+
+  it("不经 Tauri 直接构建时取本机平台，空值也算没传", () => {
+    expect(distributionTarget({})).toBe(hostTarget());
+    expect(distributionTarget({ TAURI_ENV_TARGET_TRIPLE: "" })).toBe(hostTarget());
+  });
+});
+
 describe("Rust 依赖闭包", () => {
-  const WS = "path+file:///repo/app/src-tauri#aurora-tauri@0.1.0";
-  const WS_LIB = "path+file:///repo/crates/aurora-base#0.1.0";
+  const WS = "path+file:///repo/app/src-tauri#petalfall-tauri@0.1.0";
+  const WS_LIB = "path+file:///repo/crates/petalfall-base#0.1.0";
   const reg = (name: string, version: string) => `registry+https://github.com/rust-lang/crates.io-index#${name}@${version}`;
   const pkg = (id: string, name: string, version: string, license: string | null, licenseFile: string | null = null) => ({
     id,
@@ -93,8 +105,8 @@ describe("Rust 依赖闭包", () => {
     return {
       workspace_members: [WS, WS_LIB],
       packages: [
-        pkg(WS, "aurora-tauri", "0.1.0", null),
-        pkg(WS_LIB, "aurora-base", "0.1.0", null),
+        pkg(WS, "petalfall-tauri", "0.1.0", null),
+        pkg(WS_LIB, "petalfall-base", "0.1.0", null),
         pkg(reg("serde", "1.0.228"), "serde", "1.0.228", overrides.serdeLicense === undefined ? "MIT OR Apache-2.0" : overrides.serdeLicense, overrides.serdeFile ?? null),
         pkg(reg("cc", "1.2.0"), "cc", "1.2.0", "MIT OR Apache-2.0"),
         pkg(reg("proptest", "1.5.0"), "proptest", "1.5.0", "MIT OR Apache-2.0"),
@@ -106,7 +118,7 @@ describe("Rust 依赖闭包", () => {
           {
             id: WS,
             deps: [
-              { name: "aurora_base", pkg: WS_LIB, dep_kinds: [normal] },
+              { name: "petalfall_base", pkg: WS_LIB, dep_kinds: [normal] },
               { name: "cc", pkg: reg("cc", "1.2.0"), dep_kinds: [build] },
               { name: "proptest", pkg: reg("proptest", "1.5.0"), dep_kinds: [dev] },
             ],
@@ -129,7 +141,7 @@ describe("Rust 依赖闭包", () => {
   }
 
   it("只走普通依赖（经工作区内的包传递也算），去掉工作区成员、build 与 dev 依赖；许可证原样照抄", () => {
-    expect(collectCargoPackages(metadata(), "aurora-tauri")).toEqual([
+    expect(collectCargoPackages(metadata(), "petalfall-tauri")).toEqual([
       { ecosystem: "cargo", name: "serde", version: "1.0.228", license: "MIT OR Apache-2.0" },
       { ecosystem: "cargo", name: "unicode-ident", version: "1.0.18", license: "(MIT OR Apache-2.0) AND Unicode-3.0" },
       { ecosystem: "cargo", name: "windows-sys", version: "0.59.0", license: "MIT OR Apache-2.0" },
@@ -137,11 +149,11 @@ describe("Rust 依赖闭包", () => {
   });
 
   it("依赖没声明 SPDX 许可证时报错，只给了许可文件的一并点出", () => {
-    expect(() => collectCargoPackages(metadata({ serdeLicense: null }), "aurora-tauri")).toThrow("serde@1.0.228 没有声明 SPDX 许可证");
-    expect(() => collectCargoPackages(metadata({ serdeLicense: null, serdeFile: "LICENSE-CUSTOM" }), "aurora-tauri")).toThrow("只给了许可文件 LICENSE-CUSTOM");
+    expect(() => collectCargoPackages(metadata({ serdeLicense: null }), "petalfall-tauri")).toThrow("serde@1.0.228 没有声明 SPDX 许可证");
+    expect(() => collectCargoPackages(metadata({ serdeLicense: null, serdeFile: "LICENSE-CUSTOM" }), "petalfall-tauri")).toThrow("只给了许可文件 LICENSE-CUSTOM");
   });
 
   it("应用包名在工作区里找不到时报错", () => {
-    expect(() => collectCargoPackages(metadata(), "aurora-app")).toThrow("名为 aurora-app 的包，实际 0 个");
+    expect(() => collectCargoPackages(metadata(), "petalfall-app")).toThrow("名为 petalfall-app 的包，实际 0 个");
   });
 });

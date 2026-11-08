@@ -5,12 +5,12 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use aurora_core::{
-    is_safe_file_name, Aurora, BlockedFile, BundleReason, ClaimReport, EventSink, ExportBundledMod,
+use petalfall_core::{
+    is_safe_file_name, BlockedFile, BundleReason, ClaimReport, EventSink, ExportBundledMod,
     ExportExtra, ExportMatch, GameSlot, ImportSelection, InstanceModpack, MarkerError,
     MarkerSettlement, ModpackExportOptions, ModpackExportOutcome, ModpackExportPreview,
     ModpackExportTarget, ModpackInstallOutcome, ModpackPreview, ModpackSource, ModpackSummary,
-    PackFileAvailability, PackFileOrigin, PackFormat, PackLoader, PackModEntry,
+    PackFileAvailability, PackFileOrigin, PackFormat, PackLoader, PackModEntry, Petalfall,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -192,9 +192,9 @@ pub async fn summarize_platform_modpack(
     let platform = parse_platform(&platform)?;
     let project_id = non_blank("project_id", &project_id)?;
     let version_id = non_blank("version_id", &version_id)?;
-    let aurora = facade.snapshot().await;
+    let petalfall = facade.snapshot().await;
     Ok(summary_dto(
-        aurora
+        petalfall
             .summarize_platform_modpack(platform, project_id, version_id)
             .await?,
     ))
@@ -240,9 +240,9 @@ pub(crate) async fn preview_modpack_with(
     path: &str,
 ) -> Result<ModpackPreviewDto, CommandError> {
     let path = non_blank("path", path)?;
-    let aurora = facade.snapshot().await;
+    let petalfall = facade.snapshot().await;
     Ok(preview_dto(
-        aurora.preview_modpack_file(Path::new(path)).await?,
+        petalfall.preview_modpack_file(Path::new(path)).await?,
     ))
 }
 
@@ -300,13 +300,13 @@ pub(crate) async fn install_modpack_with(
     let source = parse_source(source)?;
     let selection = parse_selection(excluded_optional)?;
     let task = tasks.register(task_id)?;
-    let aurora = facade.snapshot().await.with_cancel(task.token().clone());
+    let petalfall = facade.snapshot().await.with_cancel(task.token().clone());
     // 占用守卫与实例名放在导入的 future 之外：取消宽限期满时 run 会丢弃 future，实例名得一直占到下面
     // 按名字清理完半成品，否则清理前的空档里别的命令就能动这个目录。
     let reserved: Mutex<Option<(String, ChainGuard)>> = Mutex::new(None);
     let result = task
         .run(async {
-            let prepared = aurora
+            let prepared = petalfall
                 .prepare_modpack(&source, name, &selection, Some(events))
                 .await?;
             // 导入把原版与加载器装进它们的自然版本目录，导入出的实例继承前者、抄自后者；实例 JSON 要到它们都
@@ -325,13 +325,13 @@ pub(crate) async fn install_modpack_with(
             };
             // 准备阶段查重与占住之间，别的命令可能抢先建了同名实例；占住之后仍然空闲，名下之后出现的
             // 目录才能认定是这次导入建的，失败时才可以放心按名字删。
-            if let Err(taken) = aurora.ensure_modpack_name_free(prepared.name()).await {
+            if let Err(taken) = petalfall.ensure_modpack_name_free(prepared.name()).await {
                 prepared.discard().await;
                 return Err(taken.into());
             }
             *reserved.lock().expect("整合包导入的占用槽锁已中毒") =
                 Some((prepared.name().to_owned(), guard));
-            Ok(aurora
+            Ok(petalfall
                 .import_modpack(prepared, task_id, Some(events))
                 .await?)
         })
@@ -345,7 +345,7 @@ pub(crate) async fn install_modpack_with(
                 .as_ref()
                 .map(|(name, _)| name.clone());
             if let Some(name) = name {
-                discard_failed_import(&aurora, &name, task_id, &err).await;
+                discard_failed_import(&petalfall, &name, task_id, &err).await;
             }
             Err(err)
         }
@@ -356,8 +356,13 @@ pub(crate) async fn install_modpack_with(
 /// 导入的 future 被丢弃、清理代码没机会跑；删目录失败（文件被杀毒软件等占用）。还是删不掉就把未完成
 /// 标记落成这次导入的结局，列表里显示导入已经失败或取消，而不是一直停在进行中，用户可以自己删。
 /// 清理的问题只记日志：返回给前端的仍是导入本身的错误，用户要看到的是导入为什么没成。
-async fn discard_failed_import(aurora: &Aurora, name: &str, task_id: &str, err: &CommandError) {
-    let cleanup = match aurora.discard_modpack_import(name).await {
+async fn discard_failed_import(
+    petalfall: &Petalfall,
+    name: &str,
+    task_id: &str,
+    err: &CommandError,
+) {
+    let cleanup = match petalfall.discard_modpack_import(name).await {
         Ok(true) => {
             tracing::info!(task_id, name, "已删除导入未完成的实例");
             return;
@@ -374,7 +379,7 @@ async fn discard_failed_import(aurora: &Aurora, name: &str, task_id: &str, err: 
             message: err.message.clone(),
         })
     };
-    if let Err(settle) = aurora
+    if let Err(settle) = petalfall
         .settle_modpack_import(name, task_id, settlement)
         .await
     {
@@ -437,9 +442,9 @@ pub(crate) async fn claim_blocked_files_with(
         }
     }
     let files: Vec<BlockedFile> = files.into_iter().map(BlockedFile::from).collect();
-    let aurora = facade.snapshot().await;
+    let petalfall = facade.snapshot().await;
     Ok(claim_dto(
-        aurora
+        petalfall
             .claim_blocked_files(Path::new(folder), &files)
             .await?,
     ))
@@ -634,8 +639,10 @@ pub(crate) async fn preview_modpack_export_with(
     id: &str,
 ) -> Result<ModpackExportPreviewDto, CommandError> {
     let id = export_id(id)?;
-    let aurora = facade.snapshot().await;
-    Ok(export_preview_dto(aurora.preview_modpack_export(id).await?))
+    let petalfall = facade.snapshot().await;
+    Ok(export_preview_dto(
+        petalfall.preview_modpack_export(id).await?,
+    ))
 }
 
 /// 长任务：把实例导出为 `.mrpack`。进度经 core-event 推送并带 `task_id`，可用 cancel_task 取消；
@@ -702,12 +709,12 @@ pub(crate) async fn export_modpack_with(
         ensure_saves_settled_for_reading(&snapshot, locks, game, id).await?;
     }
     let task = tasks.register(task_id)?;
-    let aurora = snapshot.with_cancel(task.token().clone());
+    let petalfall = snapshot.with_cancel(task.token().clone());
     // 落点放在任务的 future 之外：取消宽限期满时 run 会丢弃 future，临时文件仍要在这里清掉。
     let target = ModpackExportTarget::new(destination);
     let result = task
         .run(async {
-            Ok(aurora
+            Ok(petalfall
                 .export_modpack(id, &options, &target, Some(events))
                 .await?)
         })
@@ -917,22 +924,22 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::time::{Duration, Instant};
 
-    use aurora_core::{Aurora, AuroraConfig, CoreEvent, DownloadSourcePolicy, Platform};
+    use petalfall_core::{CoreEvent, DownloadSourcePolicy, Petalfall, PetalfallConfig, Platform};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::commands::error::code;
 
     fn facade_in(dir: &Path, base: &str) -> Facade {
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             game_directory: Some(dir.join(".minecraft")),
             download_source: DownloadSourcePolicy::OfficialFirst,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = Aurora::open(config, dir.to_path_buf(), dir.join("config.json"))
+        let petalfall = Petalfall::open(config, dir.to_path_buf(), dir.join("config.json"))
             .unwrap()
             .with_platform_bases(base, base);
-        Facade::new(aurora)
+        Facade::new(petalfall)
     }
 
     fn file(path: &str) -> ModpackSourceArg {
@@ -1061,9 +1068,9 @@ mod tests {
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
         let versions = dir.path().join(".minecraft").join("versions");
         let other = versions.join("别人的");
-        aurora_core::MarkerStore::for_version_dir(&other)
-            .save(&aurora_core::IncompleteMarker::pending(
-                aurora_core::IncompleteKind::Modpack {
+        petalfall_core::MarkerStore::for_version_dir(&other)
+            .save(&petalfall_core::IncompleteMarker::pending(
+                petalfall_core::IncompleteKind::Modpack {
                     task_id: "mp#2".to_owned(),
                 },
                 1,
@@ -1156,8 +1163,8 @@ mod tests {
     /// 测试里走不到真正的删除：实例被占着时删除命令必须在动目录之前就拒绝。
     struct NeverDispose;
 
-    impl aurora_core::Disposer for NeverDispose {
-        fn dispose(&self, dir: &Path) -> Result<(), aurora_core::InstanceError> {
+    impl petalfall_core::Disposer for NeverDispose {
+        fn dispose(&self, dir: &Path) -> Result<(), petalfall_core::InstanceError> {
             panic!("导入中的实例不该被删除：{}", dir.display());
         }
     }
@@ -1318,20 +1325,20 @@ mod tests {
             .mount(&server)
             .await;
         let dir = tempfile::tempdir().unwrap();
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             game_directory: Some(dir.path().join(".minecraft")),
             download_source: DownloadSourcePolicy::OfficialFirst,
             version_list_source: DownloadSourcePolicy::OfficialFirst,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = Aurora::open(
+        let petalfall = Petalfall::open(
             config,
             dir.path().to_path_buf(),
             dir.path().join("config.json"),
         )
         .unwrap()
         .with_manifest_url(format!("{base}/manifest.json"));
-        let facade = std::sync::Arc::new(Facade::new(aurora));
+        let facade = std::sync::Arc::new(Facade::new(petalfall));
         let registry = std::sync::Arc::new(TaskRegistry::default());
         let locks = InstanceLocks::default();
         let pack = dir.path().join("pack.mrpack");
@@ -1351,7 +1358,7 @@ mod tests {
             .join(".minecraft")
             .join("versions")
             .join("导入中");
-        let marker = aurora_core::MarkerStore::for_version_dir(&instance)
+        let marker = petalfall_core::MarkerStore::for_version_dir(&instance)
             .path()
             .to_path_buf();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1361,7 +1368,13 @@ mod tests {
         }
 
         assert_eq!(locks.activity("导入中"), Some(InstanceActivity::Installing));
-        let listed = list_instances_with(&facade, &locks).await.unwrap();
+        let listed = list_instances_with(
+            &facade,
+            &locks,
+            &crate::commands::instances::test_textures(),
+        )
+        .await
+        .unwrap();
         let entry = listed.iter().find(|i| i.id == "导入中").unwrap();
         assert_eq!(entry.activity, Some(InstanceActivity::Installing));
         let err = delete_instance_with(&facade, &locks, "导入中", NeverDispose)
@@ -1422,20 +1435,20 @@ mod tests {
             .mount(&server)
             .await;
         let dir = tempfile::tempdir().unwrap();
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             game_directory: Some(dir.path().join(".minecraft")),
             download_source: DownloadSourcePolicy::OfficialFirst,
             version_list_source: DownloadSourcePolicy::OfficialFirst,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = Aurora::open(
+        let petalfall = Petalfall::open(
             config,
             dir.path().to_path_buf(),
             dir.path().join("config.json"),
         )
         .unwrap()
         .with_manifest_url(format!("{base}/manifest.json"));
-        let facade = std::sync::Arc::new(Facade::new(aurora));
+        let facade = std::sync::Arc::new(Facade::new(petalfall));
         // 用户手里已有的原版与加载器版本：导入把它们装进这两个自然版本目录，导入出的实例继承前者、照抄后者的
         // 版本 JSON。
         let versions = dir.path().join(".minecraft").join("versions");
@@ -1465,7 +1478,7 @@ mod tests {
             })
         };
         let wait_for_dir = |name: &str| {
-            let marker = aurora_core::MarkerStore::for_version_dir(&versions.join(name))
+            let marker = petalfall_core::MarkerStore::for_version_dir(&versions.join(name))
                 .path()
                 .to_path_buf();
             async move {
@@ -1479,7 +1492,13 @@ mod tests {
         let install = spawn_import("mp-base", "导入中");
         wait_for_dir("导入中").await;
 
-        let listed = list_instances_with(&facade, &locks).await.unwrap();
+        let listed = list_instances_with(
+            &facade,
+            &locks,
+            &crate::commands::instances::test_textures(),
+        )
+        .await
+        .unwrap();
         for (id, new_name) in [("1.20.1", "原版"), (LOADER, "加载器")] {
             let in_use =
                 serde_json::json!({ "id": id, "activity": "inherited", "used_by": "导入中" });
@@ -1550,20 +1569,20 @@ mod tests {
             .mount(&server)
             .await;
         let dir = tempfile::tempdir().unwrap();
-        let config = AuroraConfig {
+        let config = PetalfallConfig {
             game_directory: Some(dir.path().join(".minecraft")),
             download_source: DownloadSourcePolicy::OfficialFirst,
             version_list_source: DownloadSourcePolicy::OfficialFirst,
-            ..AuroraConfig::default()
+            ..PetalfallConfig::default()
         };
-        let aurora = Aurora::open(
+        let petalfall = Petalfall::open(
             config,
             dir.path().to_path_buf(),
             dir.path().join("config.json"),
         )
         .unwrap()
         .with_manifest_url(format!("{base}/manifest.json"));
-        let facade = std::sync::Arc::new(Facade::new(aurora));
+        let facade = std::sync::Arc::new(Facade::new(petalfall));
         let registry = std::sync::Arc::new(TaskRegistry::default());
         let locks = InstanceLocks::default();
         let pack = dir.path().join("pack.mrpack");
@@ -1582,7 +1601,7 @@ mod tests {
             .join(".minecraft")
             .join("versions")
             .join("删不掉");
-        let marker = aurora_core::MarkerStore::for_version_dir(&instance);
+        let marker = petalfall_core::MarkerStore::for_version_dir(&instance);
         let deadline = Instant::now() + Duration::from_secs(10);
         while !marker.path().is_file() {
             assert!(Instant::now() < deadline, "导入没有建出实例目录");
@@ -1602,7 +1621,13 @@ mod tests {
         assert_eq!(err.code, code::CANCELLED);
         assert!(instance.is_dir(), "文件被占着，半成品还在");
         assert_eq!(locks.activity("删不掉"), None, "导入结束后实例名放开");
-        let listed = list_instances_with(&facade, &locks).await.unwrap();
+        let listed = list_instances_with(
+            &facade,
+            &locks,
+            &crate::commands::instances::test_textures(),
+        )
+        .await
+        .unwrap();
         let entry = listed.iter().find(|i| i.id == "删不掉").unwrap();
         let incomplete = entry.incomplete.as_ref().expect("应带未完成标记");
         assert_eq!(incomplete.kind, "modpack");
@@ -1619,9 +1644,9 @@ mod tests {
     /// 测试里不往用户回收站塞东西：直接删掉。
     struct RemoveDir;
 
-    impl aurora_core::Disposer for RemoveDir {
-        fn dispose(&self, dir: &Path) -> Result<(), aurora_core::InstanceError> {
-            std::fs::remove_dir_all(dir).map_err(|source| aurora_core::InstanceError::Io {
+    impl petalfall_core::Disposer for RemoveDir {
+        fn dispose(&self, dir: &Path) -> Result<(), petalfall_core::InstanceError> {
+            std::fs::remove_dir_all(dir).map_err(|source| petalfall_core::InstanceError::Io {
                 path: dir.to_path_buf(),
                 source,
             })

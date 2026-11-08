@@ -1,6 +1,7 @@
 // 前端领域模型的基础类型：界面与状态层只认这里的形状，DTO（snake_case）在状态层转换后再进来。
 // 取值集合写成 as const 数组再派生类型，运行期校验（未知取值即抛错）与类型共用同一份来源。
 
+import type { MoveBlockerDto } from "../ipc/instances";
 import type { BlockedFileDto } from "../ipc/modpack";
 
 // ---------------------------------------------------------------- 外观
@@ -11,6 +12,14 @@ export type AppearanceMode = (typeof APPEARANCE_MODES)[number];
 export const ACCENT_NAMES = ["sakura", "amethyst", "moss"] as const;
 export type AccentName = (typeof ACCENT_NAMES)[number];
 
+/** 实例卡面的默认背景：渐变花瓣，或封面方块的材质平铺。 */
+export const COVER_STYLES = ["art", "texture"] as const;
+export type CoverStyle = (typeof COVER_STYLES)[number];
+
+/** 实例自己的卡面背景：follow 跟随外观里的默认，image 为玩家图片。 */
+export const COVER_BACKGROUNDS = ["follow", "art", "texture", "image"] as const;
+export type CoverBackground = (typeof COVER_BACKGROUNDS)[number];
+
 export interface Appearance {
   mode: AppearanceMode;
   accent: AccentName;
@@ -20,6 +29,8 @@ export interface Appearance {
   panorama: boolean;
   /** 应用内的「减少动画」开关；与系统偏好取或得到生效值。 */
   reduceMotion: boolean;
+  /** 实例卡面的默认背景：实例设为跟随时用它。 */
+  coverBackground: CoverStyle;
 }
 
 // ---------------------------------------------------------------- 资源与账户
@@ -45,6 +56,7 @@ export const FAILURE_CODES = [
   "account_refresh_network",
   "account_service_down",
   "account_app_not_approved",
+  "account_client_id_missing",
   "files_offline",
   "files_failed",
   "disk_full",
@@ -77,7 +89,7 @@ export interface Session {
   phase: SessionPhase;
   /** 启动全程的总进度 0-1，单调不减；running 之后恒为 1。 */
   progress: number;
-  /** 当前阶段下标，对应八阶段表。 */
+  /** 当前阶段下标，对应九阶段表。 */
   stageIndex: number;
   startedAt: number;
   runningSince: number | null;
@@ -94,8 +106,9 @@ export interface Session {
 /**
  * world_backup：备份与导出存档（都是打包）；world_restore：用备份恢复存档。两者都不算安装；后端在任务期间把实例记为
  * backing_up，只与 Mod 改动、被当作基底兼容，启动、改名、删除都要等它结束。
+ * instance_move：把实例移到另一个游戏目录，后端记为 moving，与一切互斥。
  */
-export const TASK_KINDS = ["game", "loader", "mod", "modpack", "java", "resourcepack", "shader", "datapack", "repair", "world_backup", "world_restore", "modpack_export"] as const;
+export const TASK_KINDS = ["game", "loader", "mod", "modpack", "java", "resourcepack", "shader", "datapack", "repair", "world_backup", "world_restore", "modpack_export", "instance_move"] as const;
 export type TaskKind = (typeof TASK_KINDS)[number];
 
 export const TASK_STATUSES = ["queued", "running", "done", "failed", "cancelled"] as const;
@@ -110,11 +123,44 @@ export interface TaskSpec {
   args: Record<string, unknown>;
 }
 
-/** 任务失败记录：错误码与后端原文；以 distribution_blocked 失败时另带需要手动下载的文件清单，较早的日志里没有它。 */
+/** 新建、补全实例的各步，取值与后端 InstallPhase::key 一一对应。移动实例借用同一套步骤事件，末尾四步只出现在移动的步骤表里。 */
+export const INSTALL_PHASES = [
+  "metadata",
+  "loader_profile",
+  "libraries",
+  "assets",
+  "natives",
+  "java",
+  "loader_installer",
+  "loader_libraries",
+  "loader_processors",
+  "verify",
+  "template",
+  "move_dependencies",
+  "move_copy",
+  "move_verify",
+  "move_commit",
+] as const;
+export type InstallPhase = (typeof INSTALL_PHASES)[number];
+
+export interface TaskPhase {
+  /** 这次尝试的整份步骤表，开工时由后端排定、全程不变。 */
+  plan: readonly InstallPhase[];
+  /** 当前一步在 plan 里的下标。 */
+  index: number;
+  /** 这一步认下的那批下载；还没认下为 null。上一步晚到的收尾快照不会被认下。 */
+  batch: { total: number; totalBytes: number | null } | null;
+}
+
+/**
+ * 任务失败记录：错误码与后端原文；以 distribution_blocked 失败时另带需要手动下载的文件清单，较早的日志里没有它；
+ * 以 instance_move_blocked 失败时另带拦着它的那一项，失败原因按它的种类写。
+ */
 export interface TaskError {
   code: string;
   message: string;
   blocked_files?: readonly BlockedFileDto[];
+  move_blocker?: MoveBlockerDto;
 }
 
 export interface Task {
@@ -124,7 +170,7 @@ export interface Task {
   detail: string;
   instanceId: string | null;
   status: TaskStatus;
-  /** 0-1。 */
+  /** 0-1。分步任务是这一次尝试的整体进度，只进不退；其余任务是当前这一批的进度。 */
   progress: number;
   /** 当前这一批下载已下的字节；一次安装连跑好几批，每批从 0 重新计。 */
   bytes: number;
@@ -137,6 +183,8 @@ export interface Task {
   batchTransferred: number;
   /** 当前这一批的文件数：有文件没声明大小时 totalBytes 是 null，前后两批只能靠它区分，不落盘；组合任务不用它，恒为 0。 */
   batchFiles: number;
+  /** 新建、补全实例这类分步任务当前在哪一步；别的任务或还没报第一步时为 null。不落盘：读回的任务都已结束。 */
+  phase: TaskPhase | null;
   speedBps: number;
   /** 这一次尝试开始运行的时刻；排队中、还没开始过为 null。「用时」是 finishedAt 减去它，不含排队等待。 */
   startedAt: number | null;
@@ -154,12 +202,13 @@ export interface Task {
  * 后端实例锁表里一个实例可能被占着做的事（instance_busy 的 detail.activity，实例列表的 activity 同一套取值）。
  * inherited：别的实例正以它为基底（那个实例启动到游戏退出、补全、导入整合包期间），它的启动、删除、改名、补全被拒。
  * backing_up：备份、恢复或导出存档（含游戏退出后的自动备份），只与 Mod 改动、被当作基底兼容。
+ * moving：正在移到另一个游戏目录，与一切互斥。
  */
-export const BUSY_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited", "backing_up"] as const;
+export const BUSY_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "modifying", "inherited", "backing_up", "moving"] as const;
 export type BusyActivity = (typeof BUSY_ACTIVITIES)[number];
 
 /** 基底做着这些事时容不下基底占用：自己在启动、运行，或目录正被挪走、重写。改动、备份与别的实例的基底占用都和它兼容。 */
-export const BASE_BLOCKING_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running"] as const;
+export const BASE_BLOCKING_ACTIVITIES = ["installing", "repairing", "renaming", "deleting", "launching", "running", "moving"] as const;
 export type BaseBlockingActivity = (typeof BASE_BLOCKING_ACTIVITIES)[number];
 
 /** instance_busy 拒绝的原因：被占着的实例与它在做的事；inherited 时 usedBy 是正以它为基底的实例，其余为 null。 */

@@ -567,11 +567,29 @@
   font-variant-numeric: tabular-nums;
 }
 
+.notices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-6);
+}
+
 .disclaimer {
   margin: 0;
   font-size: var(--sk-fs-caption);
   line-height: 1.65;
   color: var(--sk-text-2);
+}
+
+/* 协议原文靠换行与缩进分段，要原样保留；弹窗窄于原文行宽时在行内折行，不出横向滚动条 */
+.licenseText {
+  margin: 0;
+  font-family: var(--sk-mono);
+  font-size: var(--sk-fs-mono-sm);
+  line-height: var(--sk-lh-mono-sm);
+  color: var(--sk-text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
 }
 
 .licenses {
@@ -697,4 +715,9 @@
 
 .updateTitle[data-tone="accent"] {
   color: var(--sk-accent-strong);
+}
+
+/* 试过多个下载源都失败时，后端原文逐行一个源，换行要保留 */
+.updateText .errorText {
+  white-space: pre-line;
 }

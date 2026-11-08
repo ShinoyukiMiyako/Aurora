@@ -19,20 +19,21 @@ import { useWindowPort } from "./window";
 
 // ---------------------------------------------------------------- 订阅的片
 
-/** 会话是哪一次启动、在哪个阶段；日志与进度不在其中。 */
+/** 会话是哪一次启动、在哪个阶段、是不是从后端找回的；日志与进度不在其中。 */
 export interface SessionStep {
   taskId: string;
   phase: SessionPhase;
+  reattached: boolean;
 }
 
 export function sessionStep(state: Pick<LauncherState, "session">): SessionStep | null {
   const s = state.session;
-  return s === null ? null : { taskId: s.taskId, phase: s.phase };
+  return s === null ? null : { taskId: s.taskId, phase: s.phase, reattached: s.reattached };
 }
 
 export function sameSessionStep(a: SessionStep | null, b: SessionStep | null): boolean {
   if (a === null || b === null) return a === b;
-  return a.taskId === b.taskId && a.phase === b.phase;
+  return a.taskId === b.taskId && a.phase === b.phase && a.reattached === b.reattached;
 }
 
 // ---------------------------------------------------------------- 关闭确认
@@ -108,6 +109,7 @@ export function afterLaunchMove(setting: AfterLaunch, activeTaskCount: number): 
  * 进入运行时按设置最小化或退出；因此最小化过的窗口在这个会话的进程退出时恢复，好让用户看到结束或崩溃。
  * 恢复不激活窗口：游戏退出时用户可能已在别的窗口里打字，焦点不该被启动器抢走。
  * 「关闭启动器」的自动退出不弹关闭确认。设置还没读到时按「保持打开」处理。
+ * 从后端找回的一局（reattached）进入运行的那一刻早已过去，什么都不做：选了「关闭」的人重新打开来看这一局，不能又被立刻关掉。
  */
 export function useAfterLaunch(): void {
   const step = useLauncherSelector(sessionStep, sameSessionStep);
@@ -125,6 +127,7 @@ export function useAfterLaunch(): void {
     prevSession.current = next;
     const enteredRunning = next !== null && next.phase === "running" && (prev === null || prev.taskId !== next.taskId || prev.phase !== "running");
     if (enteredRunning) {
+      if (next.reattached) return;
       const move = afterLaunchMove(setting, activeCount);
       if (move === "minimize") {
         minimizedFor.current = next.taskId;

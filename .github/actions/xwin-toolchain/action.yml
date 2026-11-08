@@ -1,0 +1,184 @@
+name: Windows 交叉编译工具链
+description: 在 GitHub 托管的 ubuntu-24.04 上装好钉住版本的交叉编译工具链，让 dev 构建作业里打 NSIS 包和引导程序的命令设好 CARGO_TARGET_DIR 后照跑
+
+# 这里的版本要和 dev 自托管机上的一致，升级时两边一起改：node 24.21.0、pnpm 10.33.2、rustc 1.99.1、cargo-xwin 0.23.1。
+# 自托管机是 Ubuntu 26.04，系统层的 LLVM、NSIS、NASM 来自它的 apt（21、3.10、3.01）；noble 里没有这几个版本，
+# 这里取 noble 里最接近的 LLVM 20、NSIS 3.09、NASM 2.16.01。
+# cmake 不装，镜像自带的也不动：aws-lc-sys 在 Windows x86_64 上有预生成的绑定，选的是 cc 构建器，这次构建走不到 cmake。
+# 不用 actions/cache：缓存条目同仓库的其他工作流运行也能写入，要签发布签名的包每次都从干净的机器装起。
+# 摘要走输出不走 GITHUB_ENV：XWIN_ 开头的环境变量是 cargo-xwin 读的配置，工作流把它们原样记进构建信息，不混进别的。
+outputs:
+  xwin-cache-sha256:
+    description: xwin 缓存里 crt、sdk 下普通文件的 SHA-256 摘要，算法见「核对并记录工具链版本」一步
+    value: ${{ steps.verify.outputs.xwin-cache-sha256 }}
+runs:
+  using: composite
+  steps:
+    # 下面 apt 钉的版本只在 noble 的 amd64 上有；换了镜像在这里说清楚，不让 apt 只报一句找不到版本。
+    - name: 检查运行环境
+      shell: bash
+      run: |
+        . /etc/os-release
+        arch="$(dpkg --print-architecture)"
+        if [ "$ID" != ubuntu ] || [ "$VERSION_ID" != 24.04 ] || [ "$arch" != amd64 ]; then
+          echo "::error::这套工具链的 apt 版本按 Ubuntu 24.04 amd64 钉的，当前是 $PRETTY_NAME $arch"
+          exit 1
+        fi
+
+    # 排在最前：钉的版本被 Ubuntu 下架时几秒就失败，不用先等 cargo-xwin 编完。
+    # NASM 也要装：aws-lc-sys 找得到 nasm 就现场汇编，找不到才用 crate 自带的预编译目标文件，自托管机走的是前一条路。
+    # LLVM 装带版本号的包，再把 /usr/lib/llvm-<版本>/bin 放到 PATH 最前：镜像自带 clang 16 到 18，不带版本号的 clang 指向 18，
+    # 放在最前，构建拿到的 clang、lld-link、llvm-lib、llvm-rc 才都是这里钉的这一份。
+    # clang-cl 在 clang-tools-20 里，这里不装：cargo-xwin 本来就会在自己的缓存目录里建一个指向 PATH 上 clang 的 clang-cl，
+    # 但那个目录排在 PATH 最后；先在前面放一个同样的链接，镜像以后带上别的 clang-cl 也抢不到前面。
+    # LLVM 20 只在 noble-updates 和 noble-security 里，Ubuntu 发了新修订版旧的就会下架，那时 apt 报找不到版本，改钉新修订版即可。
+    - id: llvm
+      name: 安装 NSIS、NASM 与 LLVM
+      shell: bash
+      env:
+        NSIS_VERSION: "3.09-4ubuntu1"
+        NASM_VERSION: "2.16.01-1build1"
+        LLVM_MAJOR: "20"
+        LLVM_VERSION: "1:20.1.2-0ubuntu1~24.04.3"
+      run: |
+        sudo apt-get -o Acquire::Retries=3 update -q
+        sudo apt-get -o Acquire::Retries=3 install -y -q --no-install-recommends \
+          "nsis=$NSIS_VERSION" \
+          "nasm=$NASM_VERSION" \
+          "clang-$LLVM_MAJOR=$LLVM_VERSION" \
+          "lld-$LLVM_MAJOR=$LLVM_VERSION" \
+          "llvm-$LLVM_MAJOR=$LLVM_VERSION"
+        llvm_bin="/usr/lib/llvm-$LLVM_MAJOR/bin"
+        shim_bin="$RUNNER_TEMP/xwin-toolchain/bin"
+        mkdir -p "$shim_bin"
+        ln -sfn "$llvm_bin/clang" "$shim_bin/clang-cl"
+        echo "$llvm_bin" >> "$GITHUB_PATH"
+        echo "$shim_bin" >> "$GITHUB_PATH"
+        {
+          echo "llvm-major=$LLVM_MAJOR"
+          echo "llvm-bin=$llvm_bin"
+          echo "shim-bin=$shim_bin"
+        } >> "$GITHUB_OUTPUT"
+
+    # setup-node 见到 package.json 声明 npm 为包管理器时会自动开缓存；显式关掉，以后改了 package.json 也不会悄悄用上。
+    - id: node
+      uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: "24.21.0"
+        package-manager-cache: false
+
+    - name: 安装 pnpm
+      shell: bash
+      env:
+        PNPM_VERSION: "10.33.2"
+      run: |
+        npm install --global "pnpm@$PNPM_VERSION"
+        actual="$(pnpm --version)"
+        if [ "$actual" != "$PNPM_VERSION" ]; then
+          echo "::error::PATH 上的 pnpm 是 $actual，钉的是 $PNPM_VERSION"
+          exit 1
+        fi
+
+    # 镜像自带的 stable 会随镜像更新，这里另装一个按版本号命名的工具链并设为默认。
+    # 在工作区里核对：以后仓库加了 rust-toolchain.toml，构建实际用的就是它指定的那个，和这里对不上要在这里失败。
+    - name: 安装 Rust 工具链
+      shell: bash
+      env:
+        RUST_VERSION: "1.99.1"
+      run: |
+        rustup toolchain install "$RUST_VERSION" --profile minimal --target x86_64-pc-windows-msvc --no-self-update
+        rustup default "$RUST_VERSION"
+        actual="$(rustc --version)"
+        case "$actual" in
+          "rustc $RUST_VERSION "*) ;;
+          *)
+            echo "::error::工作区里的 rustc 是 $actual，钉的是 $RUST_VERSION"
+            exit 1
+            ;;
+        esac
+
+    # 设了 CARGO_TARGET_DIR 时 cargo install 会把编译产物写进去，和启动器的构建缓存混在一起；去掉它就用一次性的临时目录。
+    # 安装记录先存进变量再查：直接接 grep -q 会提前关管道，cargo 收到 SIGPIPE，在 pipefail 下明明装对了也判失败。
+    - name: 安装 cargo-xwin
+      shell: bash
+      env:
+        CARGO_XWIN_VERSION: "0.23.1"
+      run: |
+        env -u CARGO_TARGET_DIR cargo install --locked --version "$CARGO_XWIN_VERSION" cargo-xwin
+        installed="$(cargo install --list)"
+        if ! grep -qxF "cargo-xwin v$CARGO_XWIN_VERSION:" <<< "$installed"; then
+          echo "::error::cargo install 的记录里没有 cargo-xwin v$CARGO_XWIN_VERSION"
+          exit 1
+        fi
+
+    # cargo-xwin 默认取微软清单里最新的 CRT 和 SDK。自托管机的缓存是第一次构建时按当时的最新版下的，之后一直复用；
+    # 托管机每次都新下，不钉的话微软一更新清单，包就换了一套 CRT。钉的版本清单里没有时 cargo-xwin 直接报错。
+    # 预先下好：构建时 cargo-xwin 看到缓存里的 DONE 记录就不再联网。几个变量写进 GITHUB_ENV，构建用的才是这一份缓存。
+    # cargo-xwin 不像 xwin 命令行那样要显式接受许可：它的 README 写明用它即视为接受，源码里也没有这道开关。
+    # XWIN_ARCH 不设，取默认的 x86_64 与 aarch64，缓存内容才能和自托管机按默认下的直接比摘要。
+    - name: 预下载 MSVC CRT 与 Windows SDK
+      shell: bash
+      run: |
+        export XWIN_CACHE_DIR="$RUNNER_TEMP/cargo-xwin"
+        export XWIN_VERSION=17
+        export XWIN_CRT_VERSION=14.44.17.14
+        export XWIN_SDK_VERSION=10.0.26100
+        cargo xwin cache xwin
+        for name in XWIN_CACHE_DIR XWIN_VERSION XWIN_CRT_VERSION XWIN_SDK_VERSION; do
+          echo "$name=${!name}" >> "$GITHUB_ENV"
+        done
+
+    # GITHUB_PATH 只对后面的步骤生效，所以在这一步核对 PATH 上实际找到的是不是刚装的那份。
+    # 同一个 CRT、SDK 版本号下微软还会换补丁版的包，版本号说明不了下到的是哪一份，另记一个缓存内容的摘要；
+    # 在自托管机的 <XWIN_CACHE_DIR>/xwin 下按同样的命令算一遍就能比对；--text 让每行的格式不随平台的默认读取模式变。
+    # 版本号的首行用 sed 取：head 提前关管道会让前面的命令收到 SIGPIPE，在 pipefail 下整步失败。
+    - id: verify
+      name: 核对并记录工具链版本
+      shell: bash
+      env:
+        NODE_INSTALLED: ${{ steps.node.outputs.node-version }}
+        LLVM_MAJOR: ${{ steps.llvm.outputs.llvm-major }}
+        LLVM_BIN: ${{ steps.llvm.outputs.llvm-bin }}
+        SHIM_BIN: ${{ steps.llvm.outputs.shim-bin }}
+      run: |
+        expect_on_path() {
+          local found
+          if ! found="$(command -v "$1")"; then
+            echo "::error::PATH 上找不到 $1"
+            exit 1
+          fi
+          if [ "$found" != "$2" ]; then
+            echo "::error::PATH 上的 $1 是 $found，应为 $2"
+            exit 1
+          fi
+        }
+        expect_on_path clang-cl "$SHIM_BIN/clang-cl"
+        for tool in clang lld-link llvm-lib llvm-rc llvm-dlltool; do
+          expect_on_path "$tool" "$LLVM_BIN/$tool"
+        done
+        if [ "$(node --version)" != "$NODE_INSTALLED" ]; then
+          echo "::error::PATH 上的 node 是 $(node --version)，setup-node 装的是 $NODE_INSTALLED"
+          exit 1
+        fi
+        if [ ! -s "$XWIN_CACHE_DIR/xwin/DONE" ]; then
+          echo "::error::$XWIN_CACHE_DIR/xwin 下没有 cargo-xwin 的 DONE 记录，构建时会重新联网下载"
+          exit 1
+        fi
+        xwin_digest="$(cd "$XWIN_CACHE_DIR/xwin" && find crt sdk -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum --text | sha256sum | cut -d ' ' -f 1)"
+
+        echo "node $(node --version)，npm $(npm --version)，pnpm $(pnpm --version)（$(command -v pnpm)）"
+        rustup --version
+        rustc --version
+        cargo --version
+        rustup target list --installed
+        cargo xwin --version
+        clang-cl --version | sed -n 1p
+        lld-link --version
+        echo "makensis $(makensis -VERSION)"
+        nasm -v
+        dpkg-query -W nsis nasm "clang-$LLVM_MAJOR" "lld-$LLVM_MAJOR" "llvm-$LLVM_MAJOR"
+        for name in XWIN_CACHE_DIR XWIN_VERSION XWIN_CRT_VERSION XWIN_SDK_VERSION; do
+          echo "$name=${!name}"
+        done
+        echo "xwin 缓存里 crt、sdk 下普通文件的 SHA-256 摘要：$xwin_digest"
+        echo "xwin-cache-sha256=$xwin_digest" >> "$GITHUB_OUTPUT"

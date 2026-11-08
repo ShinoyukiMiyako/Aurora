@@ -18,6 +18,9 @@ export const LIBRARY_COPY = {
   searchPlaceholder: "搜索实例或整合包",
   sortLabel: "排序方式",
   sort: { recent: "最近游玩", name: "名称", playtime: "游玩时长" } satisfies Readonly<Record<SortKey, string>>,
+  directoryLabel: "游戏目录",
+  dirVersions: (count: number) => `${count} 个版本`,
+  dirVersionsUnknown: "版本数读不到",
 
   repairTitle: (count: number) => `${count} 个实例需要修复`,
   repairBody: (names: readonly string[]) => `${names.map((n) => `「${n}」`).join("")}缺少游戏文件，补全后就能启动。`,
@@ -48,6 +51,7 @@ export const LIBRARY_COPY = {
     unpin: "从侧栏取消固定",
     pinFull: "侧栏最多固定 5 个实例",
     openFolder: "打开实例文件夹",
+    move: "移到其他游戏目录…",
     mods: "Mod 管理",
     settings: "实例设置",
     logs: "日志与历史",

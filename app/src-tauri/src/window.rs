@@ -1,13 +1,15 @@
-//! 主窗口的启动期处理：兜底显示、装上原生拖放（见 [`crate::drop`]）与渲染进程故障后的自动重载
-//! （见 [`crate::renderer`]）、生产构建关闭 WebView2 浏览器加速键，以及再次启动时把窗口叫到前台。
+//! 主窗口的启动期处理：兜底显示、装上原生拖放（见 [`crate::drop`]）、渲染进程故障后的自动重载
+//! （见 [`crate::renderer`]）与最小化时的页面可见性（见 [`crate::page_visibility`]）、生产构建关闭
+//! WebView2 浏览器加速键，再次启动时把窗口叫到前台，以及更新安装程序没拉起来时把藏起的窗口重新显示出来。
 //!
 //! 窗口以 `visible: false` 创建：前端在首帧渲染前读外观、写好明暗与强调色，画完第一帧才自己
-//! `show()`，夜樱下也不会先闪一下白底。代价是前端一旦出错就永远不显示，所以这里留一道兜底。
+//! 显示窗口，夜樱下也不会先闪一下白底。代价是前端一旦出错就永远不显示，所以这里留一道兜底。显示都经
+//! [`crate::window_state::reveal`]：上次关掉时是最大化的，要直接最大化地显示。
 
 use std::fmt::Display;
 use std::time::Duration;
 
-use tauri::{App, Manager};
+use tauri::{App, AppHandle, Manager};
 
 /// 主窗口的 label，与 tauri.conf.json、能力文件一致。
 pub const MAIN_WINDOW: &str = "main";
@@ -24,6 +26,8 @@ pub fn setup_main_window(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     crate::drop::install(&window)?;
     #[cfg(windows)]
     crate::renderer::install(&window)?;
+    #[cfg(windows)]
+    crate::page_visibility::install(&window);
 
     // 开发构建保留刷新与开发者工具。
     #[cfg(windows)]
@@ -32,12 +36,20 @@ pub fn setup_main_window(app: &App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tauri::async_runtime::spawn(async move {
-        show_if_still_hidden(SHOW_FALLBACK, || window.is_visible(), || window.show()).await;
+        show_if_still_hidden(
+            SHOW_FALLBACK,
+            || window.is_visible(),
+            || crate::window_state::reveal_later(&window),
+        )
+        .await;
     });
     Ok(())
 }
 
 /// 再次启动时把主窗口叫到前台：最小化的先还原。窗口还没显示时 `set_focus` 不做事，前端显示时它本来就在前台。
+///
+/// 还原与取得焦点是投递给事件循环的消息，窗口已经销毁时被静默丢掉、照样报成功；读一次可见性要等事件循环
+/// 回话，窗口不在就报错。读到了才算叫到了前台，这时才让后来者退出；正在退出时读不到，后来者等这个进程退出后接手。
 #[cfg(windows)]
 pub fn front_on_second_launch(
     app: &App,
@@ -48,11 +60,54 @@ pub fn front_on_second_launch(
         .ok_or_else(|| format!("找不到主窗口 {MAIN_WINDOW}，tauri.conf.json 与代码不一致"))?;
     instance.listen(move || {
         tracing::info!("又启动了一次，把已有窗口叫到前台");
-        if let Err(err) = window.unminimize().and_then(|()| window.set_focus()) {
-            tracing::error!(error = %err, "把主窗口叫到前台失败");
-        }
+        fronted(
+            || window.unminimize().and_then(|()| window.set_focus()),
+            || window.is_visible(),
+        )
     })?;
     Ok(())
+}
+
+/// 把主窗口重新显示并取得焦点，等 UI 线程做完才返回。
+///
+/// 更新插件拉起安装程序之前先跑 tauri 的 `cleanup_before_exit`，它在 Windows 上把每个窗口都藏起来；
+/// 拉不起来时插件返回错误、进程接着跑，窗口不重新显示，用户就看不到报错。显示经
+/// [`crate::window_state::reveal`]，它只能在 UI 线程上调。
+pub async fn reshow_main_window(app: &AppHandle) -> tauri::Result<()> {
+    let window = app
+        .get_webview_window(MAIN_WINDOW)
+        .ok_or(tauri::Error::WindowNotFound)?;
+    let (done, shown) = tokio::sync::oneshot::channel();
+    let target = window.clone();
+    window.run_on_main_thread(move || {
+        let result = crate::window_state::reveal(&target).and_then(|()| target.set_focus());
+        if let Err(Err(err)) = done.send(result) {
+            tracing::warn!(error = %err, "重新显示主窗口失败，调用方已不再等结果");
+        }
+    })?;
+    // 回调没跑就被丢掉，只会是事件循环已经退出。
+    shown
+        .await
+        .map_err(|_| tauri::Error::FailedToReceiveMessage)?
+}
+
+/// 先叫窗口，再读一次可见性：读到了才算叫到了前台。可见与否不论，窗口还没显示时前端显示出来本来就在前台。
+#[cfg(windows)]
+fn fronted<E: Display>(
+    front: impl FnOnce() -> Result<(), E>,
+    is_visible: impl FnOnce() -> Result<bool, E>,
+) -> bool {
+    match front().and_then(|()| is_visible()) {
+        Ok(_) => true,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "没能把主窗口叫到前台，多半是窗口已关、正在退出：新启动的落樱等这个进程退出后接手，\
+                 等满 15 秒还没退出就不再等，自行退出"
+            );
+            false
+        }
+    }
 }
 
 /// 等 `delay` 后检查可见性，仍不可见就显示。返回是否做了强制显示。
@@ -112,6 +167,38 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    /// 先叫窗口再读可见性，读到了（可见与否不论）才应答；叫完读不到说明窗口已经没了，不应答，后来者等着接手。
+    /// 只看叫窗口的结果不够：窗口销毁之后叫它照样报成功。
+    #[cfg(windows)]
+    #[test]
+    fn only_a_window_that_still_answers_counts_as_fronted() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let front = || {
+            order.borrow_mut().push("front");
+            Ok::<_, String>(())
+        };
+        assert!(fronted(front, || {
+            order.borrow_mut().push("read");
+            Ok(false)
+        }));
+        assert_eq!(*order.borrow(), ["front", "read"], "要在叫完之后读");
+
+        assert!(!fronted(
+            || Ok::<_, String>(()),
+            || Err("窗口已销毁".to_owned())
+        ));
+
+        let read = Cell::new(false);
+        assert!(!fronted(
+            || Err("事件循环已退出".to_owned()),
+            || {
+                read.set(true);
+                Ok(true)
+            }
+        ));
+        assert!(!read.get(), "叫窗口失败就不必再读");
+    }
+
     #[tokio::test]
     async fn hidden_window_is_shown_once_after_the_delay() {
         let shown = Cell::new(0);
@@ -153,7 +240,7 @@ mod tests {
     /// 失败原因留在 debug 级。
     #[tokio::test]
     async fn unreadable_visibility_means_the_window_closed() {
-        let captured = crate::tests::Captured::default();
+        let captured = crate::tests::Captured::new();
         let writer = captured.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
@@ -175,7 +262,7 @@ mod tests {
         assert!(!forced);
         assert_eq!(shown.get(), 0);
 
-        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let log = captured.text();
         assert!(!log.contains("ERROR"), "{log}");
         assert!(log.contains("DEBUG"), "{log}");
         assert!(log.contains("读取主窗口可见性失败"), "{log}");
@@ -213,7 +300,8 @@ mod tests {
     /// opener 的两条给它注入的外链脚本用（target="_blank" 的链接交给系统浏览器）：一条放行 open_url 命令，
     /// 一条给出 http(s)、mailto、tel 的地址范围。前端用不到的不授予：自更新后的重启在 Rust 侧，WebView
     /// 不需要 process 插件的权限；恢复最小化的窗口走不激活窗口的后端命令，WebView 不需要会激活窗口的
-    /// unminimize；打开文件夹与在文件夹里选中都走后端命令，WebView 不需要 opener 的 reveal_item_in_dir——
+    /// unminimize；首帧后显示窗口走后端命令（上次是最大化的要直接最大化地显示），WebView 不需要 show；
+    /// 打开文件夹与在文件夹里选中都走后端命令，WebView 不需要 opener 的 reveal_item_in_dir——
     /// 它不受任何路径范围约束，`opener:default` 会连它一起授予，页面里一段注入的脚本就能让资源管理器定位到
     /// 任意路径。核心权限也逐条列出、不用 `core:default`：整套默认集还放行路径解析、事件发送、菜单、托盘等
     /// 命令，前端一条都不用，页面里注入的脚本却能借它们探路径、伪造事件。
@@ -244,7 +332,6 @@ mod tests {
             "core:window:allow-close",
             "core:window:allow-destroy",
             "core:window:allow-start-dragging",
-            "core:window:allow-show",
             "core:window:allow-request-user-attention",
             // 调试构建里 Ctrl+Shift+I 的注入脚本调用它；发布构建不编译这条命令，授权没有作用。
             "core:webview:allow-internal-toggle-devtools",
@@ -266,6 +353,10 @@ mod tests {
         assert!(
             !granted.contains(&"core:window:allow-unminimize"),
             "WebView 不该拿到会激活窗口的 unminimize"
+        );
+        assert!(
+            !granted.contains(&"core:window:allow-show"),
+            "WebView 不该拿到 show：显示要经后端按上次的状态决定是否最大化"
         );
         let defaults: Vec<&&str> = granted.iter().filter(|p| p.ends_with(":default")).collect();
         assert!(

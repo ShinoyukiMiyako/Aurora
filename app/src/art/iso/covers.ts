@@ -1,16 +1,21 @@
-// 实例封面预设：新建实例、换封面、整合包导入时可选的方块，与原版材质白名单同一张表。
+// 实例封面预设：新建实例、整合包导入时可选的推荐方块，与原版材质白名单同一张表。实例设置里还能换成
+// 本机材质源里的任意方块或玩家自己的图片，见 mc/catalog 与 launch/cover。
 // 预设的中文名属于文案，由使用方的文案表按 id 提供。
 
 import { COVER_TEXTURES } from "../../mc/whitelist";
 import { fnv1a32 } from "../illustrations/seed";
 
-/** 实例的封面：block 为封面预设 id，hue 为该预设的色相。 */
+/**
+ * 实例的封面方块：block 为方块 id（预设或本机材质源里的方块），hue 为它的色相（渐变底与徽记用）；
+ * image 为玩家图片在材质协议里的地址，有值时方块的面画这张图，读不到时再回到 block。
+ */
 export interface InstanceCover {
   block: string;
   hue: number;
+  image: string | null;
 }
 
-export const COVER_PRESETS: readonly InstanceCover[] = COVER_TEXTURES.map((c) => ({ block: c.id, hue: c.hue }));
+export const COVER_PRESETS: readonly InstanceCover[] = COVER_TEXTURES.map((c) => ({ block: c.id, hue: c.hue, image: null }));
 
 /** 新建实例的默认封面：樱花木板。 */
 export const DEFAULT_COVER: InstanceCover = COVER_PRESETS[0];

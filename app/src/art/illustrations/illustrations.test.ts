@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import glyphArt from "../petal-glyphs.json";
 import { coverRect } from "./canvas";
-import { hslToRgb } from "./color";
+import { hexToRgb, hslToRgb } from "./color";
 import { coverPetals } from "./CoverPattern";
 import { EMPTY_CATEGORIES, EMPTY_SCENES, emptyArtGeometry, sceneGlyphPath, type EmptyScene } from "./empty-art";
 import { glyphPath, PETAL_GLYPHS, PETAL_TONES, pickPetalTone, transformGlyph, type PetalGlyphName } from "./petal-glyphs";
@@ -62,11 +65,52 @@ describe("hslToRgb", () => {
   });
 });
 
+describe("hexToRgb", () => {
+  it("#RRGGBB 按十六进制拆成三个分量，大小写都认", () => {
+    expect(hexToRgb("#CF3080")).toEqual([207, 48, 128]);
+    expect(hexToRgb("#cf3080")).toEqual([207, 48, 128]);
+    expect(hexToRgb("#000000")).toEqual([0, 0, 0]);
+    expect(hexToRgb("#FFFFFF")).toEqual([255, 255, 255]);
+    expect(hexToRgb("#4A2539")).toEqual([74, 37, 57]);
+  });
+
+  // 不校验时这些值不会报错：短写被当成 0x000FFF，非十六进制解析成 NaN 后按位运算变成 0
+  it.each(["#FFF", "FFAABB", "#GG0000", "#CF30801", ""])("「%s」不是 #RRGGBB，抛错并带上原值", (hex) => {
+    expect(() => hexToRgb(hex)).toThrow(`调色板颜色应为 #RRGGBB，实为 ${hex}`);
+  });
+});
+
 describe("像素花瓣", () => {
   it("五种字模的尺寸", () => {
     const dims = Object.fromEntries(Object.entries(PETAL_GLYPHS).map(([k, g]) => [k, [g.width, g.height]]));
     expect(dims).toEqual({ P1: [7, 8], P2: [7, 7], P3: [7, 6], P4: [4, 4], P5: [3, 3] });
     for (const g of Object.values(PETAL_GLYPHS)) expect(g.cells).toHaveLength(g.width * g.height);
+  });
+
+  // app/src/art 下的 JSON 整类算素材：P5 与原版粒子同形，不是原创，进了素材文件就会被一并划成素材
+  it("P1-P4 按素材文件 petal-glyphs.json 解析，P5 不在素材文件里", () => {
+    const CHAR = [".", "#", "o", "+"];
+    const rows = (name: PetalGlyphName) => {
+      const { width, height, cells } = PETAL_GLYPHS[name];
+      return Array.from({ length: height }, (_, y) => cells.slice(y * width, (y + 1) * width).map((c) => CHAR[c]).join(""));
+    };
+    expect(Object.keys(glyphArt).sort()).toEqual(["P1", "P2", "P3", "P4"]);
+    for (const name of ["P1", "P2", "P3", "P4"] as const) expect(rows(name), name).toEqual(glyphArt[name]);
+    expect(rows("P5")).toEqual([".#+", "###", "##."]);
+  });
+
+  // 上一条的期望值也从这份 JSON 现算，改了字模照样通过，只有摘要守得住形状。按解析后的对象算，
+  // 不受换行符与缩进影响；摘要不是素材本身，钉在代码里不会把素材数据带回来
+  it("petal-glyphs.json 内容摘要钉死：改动素材即有意重绘，须同时更新摘要，新素材按素材许可另行发布", () => {
+    expect(createHash("sha256").update(JSON.stringify(glyphArt)).digest("hex")).toBe("9c74dd30085e1ecddf6fbd1a0f3e912fd81d9e9cb5a93a55e9926601fc7c4a74");
+  });
+
+  // 解析代码里另存一份与素材相同的字模时，上面两条照样通过，只能直接查源码
+  it("petal-glyphs.ts 源码里没有另存的 P1-P4 字模", () => {
+    const source = readFileSync(new URL("./petal-glyphs.ts", import.meta.url), "utf8");
+    // 不长于 P5 的短行会撞上留在源码里的 P5 字模，全是透明格的行在源码里也可能出现，查了都会误报
+    const guarded = Object.values(glyphArt).flat().filter((row) => row.length > PETAL_GLYPHS.P5.width && /[^.]/.test(row));
+    for (const row of guarded) expect(source, `字模行 ${row}`).not.toContain(row);
   });
 
   it("每片有且只有一个亮部像素（P4、P5 太小没有亮部），至少一个暗部像素", () => {

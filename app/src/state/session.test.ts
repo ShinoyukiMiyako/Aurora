@@ -4,8 +4,20 @@ import { percent } from "../domain/format";
 import { GAME_EXIT_EVENT, LAUNCH_PHASE_EVENT, type GameExitEvent, type LaunchPhaseEvent } from "../ipc/launch";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, cancelledError, deferred, emit, resetRecorder, settle, startedStore } from "../test/launcher";
+import { SESSION_LOG_LIMIT } from "../domain/limits";
 import type { LogLine } from "../domain/types";
-import { appendSessionLogs, applyPhase, sessionExited, sessionLaunched, startSession, type SessionState } from "./session";
+import {
+  appendSessionLogs,
+  applyPhase,
+  backfillSessionLogs,
+  reattachedSession,
+  sessionExited,
+  sessionLaunched,
+  sessionPlayedMinutes,
+  stageProgress,
+  startSession,
+  type SessionState,
+} from "./session";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -14,55 +26,57 @@ const T0 = 1_720_000_000_000;
 const ACCOUNT = { uuid: "u-1", name: "Steve", kind: "microsoft" as const };
 
 function phase(session: SessionState, stageIndex: number, download: SessionState["download"] = null, at = T0): SessionState {
-  const name = stageIndex < 3 ? "preparing" : stageIndex === 3 ? "downloading" : stageIndex < 7 ? "launching" : "running";
+  const name = stageIndex < 4 ? "preparing" : stageIndex === 4 ? "downloading" : stageIndex < 8 ? "launching" : "running";
   return applyPhase(session, { taskId: session.taskId, phase: name, stageIndex, download }, at);
 }
 
 const dl = (bytes: number, totalBytes: number | null, done = 0, total: number | null = 10) => ({ done, total, bytes, totalBytes, speedBps: 4_200_000 });
 
-describe("会话进度：八阶段区间", () => {
+describe("会话进度：九阶段区间", () => {
   const s0 = startSession("生存", "launch-1", ACCOUNT, T0, null);
 
-  it("各阶段起点：0 / 0.1 / 0.2 / 0.3 / 0.75 / 0.83 / 0.91", () => {
+  it("各阶段起点：0 / 0.05 / 0.1 / 0.2 / 0.3 / 0.75 / 0.83 / 0.91 / 1，下标 9 越界", () => {
     expect(s0).toMatchObject({ phase: "preparing", progress: 0, stageIndex: 0, accountName: "Steve" });
-    expect([1, 2, 3, 4, 5, 6].map((i) => phase(s0, i).progress)).toEqual([0.1, 0.2, 0.3, 0.75, 0.83, 0.91]);
-    expect(phase(s0, 2).phase).toBe("preparing");
-    expect(phase(s0, 3).phase).toBe("downloading");
-    expect(phase(s0, 5).phase).toBe("launching");
+    expect([1, 2, 3, 4, 5, 6, 7].map((i) => phase(s0, i).progress)).toEqual([0.05, 0.1, 0.2, 0.3, 0.75, 0.83, 0.91]);
+    expect(phase(s0, 3).phase).toBe("preparing");
+    expect(phase(s0, 4).phase).toBe("downloading");
+    expect(phase(s0, 6).phase).toBe("launching");
+    expect(stageProgress(8, null)).toBe(1);
+    expect(() => stageProgress(9, null)).toThrow("阶段下标 9 超出九阶段表");
   });
 
-  it("阶段 3 按字节线性推进：一半字节 = 0.3 + 0.45 × 0.5", () => {
-    expect(phase(s0, 3, dl(500, 1000)).progress).toBeCloseTo(0.525, 10);
+  it("阶段 4 按字节线性推进：一半字节 = 0.3 + 0.45 × 0.5", () => {
+    expect(phase(s0, 4, dl(500, 1000)).progress).toBeCloseTo(0.525, 10);
     // 声明大小未知时退回文件数比例
-    expect(phase(s0, 3, dl(999, null, 4, 10)).progress).toBeCloseTo(0.3 + 0.45 * 0.4, 10);
-    // 有效字节越过声明大小时封顶，不越过阶段 4 的起点
-    expect(phase(s0, 3, dl(1500, 1000)).progress).toBeCloseTo(0.75, 10);
+    expect(phase(s0, 4, dl(999, null, 4, 10)).progress).toBeCloseTo(0.3 + 0.45 * 0.4, 10);
+    // 有效字节越过声明大小时封顶，不越过阶段 5 的起点
+    expect(phase(s0, 4, dl(1500, 1000)).progress).toBeCloseTo(0.75, 10);
   });
 
   it("单调不减：更小的阶段下标与回落的字节都不让进度倒退", () => {
-    let s = phase(s0, 3, dl(800, 1000));
+    let s = phase(s0, 4, dl(800, 1000));
     const high = s.progress;
-    s = phase(s, 3, dl(100, 1000));
+    s = phase(s, 4, dl(100, 1000));
     expect(s.progress).toBe(high);
     s = phase(s, 1);
-    expect(s).toMatchObject({ stageIndex: 3, phase: "downloading", progress: high });
+    expect(s).toMatchObject({ stageIndex: 4, phase: "downloading", progress: high });
   });
 
-  it("没有缺失文件时从阶段 2 直接跳到 4：进度从 0.2 跳到 0.75", () => {
-    const s = phase(phase(s0, 2), 4);
-    expect(s).toMatchObject({ stageIndex: 4, phase: "launching", progress: 0.75 });
+  it("没有缺失文件时从阶段 3 直接跳到 5：进度从 0.2 跳到 0.75", () => {
+    const s = phase(phase(s0, 3), 5);
+    expect(s).toMatchObject({ stageIndex: 5, phase: "launching", progress: 0.75 });
   });
 
   it("加载阶段百分比封顶 99%，只有运行才算 100%", () => {
     expect(percent(0.995, true)).toBe("99%");
     expect(percent(0.999, true)).toBe("99%");
     expect(percent(0.5, true)).toBe("50%");
-    const running = sessionLaunched(phase(s0, 6), "launch-1", T0 + 9000);
-    expect(running).toMatchObject({ phase: "running", progress: 1, stageIndex: 7, runningSince: T0 + 9000 });
+    const running = sessionLaunched(phase(s0, 7), "launch-1", T0 + 9000);
+    expect(running).toMatchObject({ phase: "running", progress: 1, stageIndex: 8, runningSince: T0 + 9000 });
   });
 
   it("别的启动的阶段事件原样丢弃", () => {
-    const stale = applyPhase(s0, { taskId: "launch-0", phase: "launching", stageIndex: 6, download: null }, T0);
+    const stale = applyPhase(s0, { taskId: "launch-0", phase: "launching", stageIndex: 7, download: null }, T0);
     expect(stale).toBe(s0);
   });
 });
@@ -72,14 +86,14 @@ describe("准备阶段的提醒数", () => {
 
   it("加载期间启动器的 warn 行记到当前阶段；游戏输出、info 与 error 行不算；运行之后不再计", () => {
     let s = startSession("生存", "launch-1", ACCOUNT, T0, null);
-    expect(s.stageWarnings).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
-    s = appendSessionLogs(s, "生存", [line("warn", "launcher", "游戏路径含有非 ASCII 字符"), line("info", "launcher", "检查 Java"), line("warn", "game", "x")]);
+    expect(s.stageWarnings).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    s = appendSessionLogs(s, "生存", [line("warn", "launcher", "游戏路径含有非 ASCII 字符"), line("info", "launcher", "验证账户"), line("warn", "game", "x")]);
     s = phase(s, 2);
     s = appendSessionLogs(s, "生存", [line("warn", "launcher", "内存设置超过物理内存的一半"), line("warn", "launcher", "Mod 加载器版本较旧"), line("error", "launcher", "e")]);
-    expect(s.stageWarnings).toEqual([1, 0, 2, 0, 0, 0, 0, 0]);
+    expect(s.stageWarnings).toEqual([1, 0, 2, 0, 0, 0, 0, 0, 0]);
     s = sessionLaunched(s, "launch-1", T0 + 1000);
     s = appendSessionLogs(s, "生存", [line("warn", "launcher", "运行中的提醒不属于任何加载阶段")]);
-    expect(s.stageWarnings).toEqual([1, 0, 2, 0, 0, 0, 0, 0]);
+    expect(s.stageWarnings).toEqual([1, 0, 2, 0, 0, 0, 0, 0, 0]);
     expect(s.logs).toHaveLength(7);
   });
 
@@ -104,6 +118,77 @@ describe("会话退出", () => {
 
   it("别的实例的退出事件不影响会话", () => {
     expect(sessionExited(running, { versionId: "创造", crashed: true, killed: false }, T0)).toBe(running);
+  });
+});
+
+describe("从后端找回的会话", () => {
+  const times = { startedAt: T0 - 60_000, runningSince: T0 - 51_000 };
+
+  it("直接是运行态：时长从后端记下的进程起来时刻算，阶段起点是此刻", () => {
+    const s = reattachedSession("生存", "reattach-1", ACCOUNT, times, T0);
+    expect(s).toMatchObject({
+      instanceId: "生存",
+      taskId: "reattach-1",
+      accountUuid: "u-1",
+      accountName: "Steve",
+      accountKind: "microsoft",
+      quickPlay: null,
+      phase: "running",
+      stageIndex: 8,
+      progress: 1,
+      startedAt: T0 - 60_000,
+      runningSince: T0 - 51_000,
+      phaseSince: T0,
+      logs: [],
+      reattached: true,
+    });
+    // 找回之前已经跑了 51 秒，再过 9 秒正好满 1 分钟
+    expect(sessionPlayedMinutes(s, T0 + 8_999)).toBe(0);
+    expect(sessionPlayedMinutes(s, T0 + 9_000)).toBe(1);
+    expect(startSession("生存", "launch-1", ACCOUNT, T0, null).reattached).toBe(false);
+  });
+
+  it("退出照常结算，运行起点保持后端给的那一刻", () => {
+    const s = reattachedSession("生存", "reattach-1", ACCOUNT, times, T0);
+    expect(sessionExited(s, { versionId: "生存", crashed: true, killed: false }, T0 + 5000)).toMatchObject({ phase: "crashed", runningSince: T0 - 51_000, crash: { status: "pending" } });
+    expect(sessionExited(s, { versionId: "生存", crashed: false, killed: true }, T0 + 5000)).toMatchObject({ phase: "stopped", stopReason: "killed", phaseSince: T0 + 5000 });
+  });
+});
+
+describe("找回的会话垫上日志文件的尾部", () => {
+  const at = (i: number) => T0 + i;
+  const line = (i: number, text = `第 ${i} 行`): LogLine => ({ at: at(i), level: "info", source: "game", text });
+  const base = () => reattachedSession("生存", "reattach-1", ACCOUNT, { startedAt: T0, runningSince: T0 }, T0);
+
+  it("推来的新行接在文件尾部后面；读文件期间推来、文件里也有的那几行只留一份", () => {
+    const live = appendSessionLogs(base(), "生存", [line(3), line(4), line(5)]);
+    const s = backfillSessionLogs(live, "reattach-1", [line(1), line(2), line(3), line(4)]);
+    expect(s.logs.map((l) => l.at)).toEqual([at(1), at(2), at(3), at(4), at(5)]);
+  });
+
+  it("没有重合时整段垫上；同一时刻同一正文才算同一行", () => {
+    const live = appendSessionLogs(base(), "生存", [line(4, "同一时刻的另一行"), line(5)]);
+    const s = backfillSessionLogs(live, "reattach-1", [line(3), line(4)]);
+    expect(s.logs.map((l) => l.text)).toEqual(["第 3 行", "第 4 行", "同一时刻的另一行", "第 5 行"]);
+  });
+
+  it("内存里还没有新行时就是文件尾部本身", () => {
+    expect(backfillSessionLogs(base(), "reattach-1", [line(1), line(2)]).logs).toEqual([line(1), line(2)]);
+  });
+
+  it("合并后只留最近 SESSION_LOG_LIMIT 行，丢的是文件里更早的", () => {
+    const earlier = Array.from({ length: SESSION_LOG_LIMIT }, (_, i) => line(i));
+    const live = appendSessionLogs(base(), "生存", [line(SESSION_LOG_LIMIT), line(SESSION_LOG_LIMIT + 1)]);
+    const s = backfillSessionLogs(live, "reattach-1", earlier);
+    expect(s.logs).toHaveLength(SESSION_LOG_LIMIT);
+    expect(s.logs[0].at).toBe(at(2));
+    expect(s.logs.at(-1)?.at).toBe(at(SESSION_LOG_LIMIT + 1));
+  });
+
+  it("会话已换成别的一局，或文件里一行都没有：原样返回", () => {
+    const s = base();
+    expect(backfillSessionLogs(s, "reattach-0", [line(1)])).toBe(s);
+    expect(backfillSessionLogs(s, "reattach-1", [])).toBe(s);
   });
 });
 
@@ -134,7 +219,7 @@ describe("会话：状态容器里的启动与结束", () => {
     expect(callsOf(ipc, "launch_game")).toEqual([{ taskId, versionId: "生存", accountUuid: "00000000-0000-0000-0000-00000000a001", offlineFallback: false, offlineName: null, quickPlay: null }]);
     expect(store.getState().session).toMatchObject({ instanceId: "生存", phase: "preparing", progress: 0 });
 
-    emit(LAUNCH_PHASE_EVENT, { task_id: taskId, phase: "downloading", stage_index: 3, download: { total: 480, finished: 120, bytes: 250, total_bytes: 1000, speed: 4_200_000 } } satisfies LaunchPhaseEvent);
+    emit(LAUNCH_PHASE_EVENT, { task_id: taskId, phase: "downloading", stage_index: 4, download: { total: 480, finished: 120, bytes: 250, total_bytes: 1000, speed: 4_200_000 } } satisfies LaunchPhaseEvent);
     expect(store.getState().session).toMatchObject({ phase: "downloading", download: { done: 120, total: 480 } });
     expect(store.getState().session?.progress).toBeCloseTo(0.3 + 0.45 * 0.25, 10);
 

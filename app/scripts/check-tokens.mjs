@@ -80,7 +80,7 @@ const COLOR_LITERAL = [/#[0-9a-fA-F]{3,8}\b/, /\brgba?\(/, /\bhsla?\(/, /\boklch
 
 const COMMENT_LINE = /^\s*(\/\/|\/\*|\*|\{\/\*)/;
 
-const PRODUCT_NAMES = /落樱|Petalfall|Aurora/;
+const PRODUCT_NAMES = /落樱|Petalfall/;
 
 const MOTION_LITERAL = /\bstiffness\b|\bdamping\b|\bduration\s*:|cubic-bezier/;
 // transition / animation 声明常跨多行书写，声明开头到分号之间的每一行都要查字面时长
@@ -135,6 +135,7 @@ function isTokenValue(value) {
 // ---------------------------------------------------------------- 依赖方向
 
 const TAURI_CORE = /^@tauri-apps\/api\/(core|event)$/;
+const SETUP_BRIDGE = "setup/bridge.ts";
 const TAURI_WINDOW = /^@tauri-apps\/api\/window$/;
 const PAGE_SHELL_NAMES = new Set(["useShell", "useNav", "useRunner"]);
 
@@ -149,6 +150,8 @@ const DEPENDENCY_ALLOW = {
   shell: ["shell", "ui", "art", "launch", "state", "ipc", "mc", "domain", "copy", "lib", "dev", "styles"],
   state: ["state", "ipc", "domain", "copy", "lib"],
   ipc: ["ipc", "domain/types"],
+  // 引导程序不带启动器：状态层、IPC、页面都不许进来，shell 只放行不含应用状态的浮层机制与渲染错误边界
+  setup: ["setup", "ui", "art", "lib", "styles", "shell/overlay", "shell/ErrorBoundary", "shell/keys"],
 };
 const ART_TEXTURE_DIRS = ["art/iso", "art/skin", "art/panorama"];
 
@@ -170,9 +173,9 @@ function checkImports(srcRel, text, report) {
     const clause = m[3] ?? "";
     const typeOnly = m[2] !== undefined || (clause.startsWith("{") && clause.replace(/[{}\s]/g, "").split(",").filter(Boolean).every((s) => s.startsWith("type")));
 
-    if (TAURI_CORE.test(spec) && srcRel !== "ipc/bridge.ts") report(line, "T6", `${spec} 只允许在 ipc/bridge.ts 引入`);
-    if (TAURI_WINDOW.test(spec) && zone !== "shell" && srcRel !== "main.tsx") report(line, "T6", `${spec} 只允许在 shell/ 与 main.tsx 引入`);
-    if (spec.startsWith("@tauri-apps/") && (zone === "pages" || zone === "flows")) report(line, "T6", `${zone}/ 不允许引入 ${spec}`);
+    if (TAURI_CORE.test(spec) && srcRel !== "ipc/bridge.ts" && srcRel !== SETUP_BRIDGE) report(line, "T6", `${spec} 只允许在 ipc/bridge.ts 与 ${SETUP_BRIDGE} 引入`);
+    if (TAURI_WINDOW.test(spec) && zone !== "shell" && srcRel !== "main.tsx" && srcRel !== SETUP_BRIDGE) report(line, "T6", `${spec} 只允许在 shell/、main.tsx 与 ${SETUP_BRIDGE} 引入`);
+    if (spec.startsWith("@tauri-apps/") && (zone === "pages" || zone === "flows" || (zone === "setup" && srcRel !== SETUP_BRIDGE))) report(line, "T6", `${zone}/ 不允许引入 ${spec}`);
     if (!spec.startsWith(".")) continue;
 
     const target = posix.normalize(posix.join(fileDir, spec));
@@ -223,7 +226,7 @@ function checkSourceFile(srcRel, text, allowedUiLiterals, report) {
       if (COLOR_LITERAL.some((re) => re.test(scanned))) report(i, "T1", line);
     }
 
-    if (inZones("pages", "flows")) {
+    if (inZones("pages", "flows", "setup")) {
       if (isCss) {
         const decl = line.replace(/\/\*.*?\*\//g, "").match(/^\s*([a-z-]+)\s*:\s*([^;{}]+?)\s*;?\s*$/);
         if (decl && !decl[1].startsWith("--") && T2_PROPERTY.test(decl[1]) && !isTokenValue(decl[2])) report(i, "T2", line);
@@ -234,17 +237,17 @@ function checkSourceFile(srcRel, text, allowedUiLiterals, report) {
       }
     }
 
-    if (inZones("pages", "flows", "shell") && isTsx && TAILWIND_ARBITRARY.some((re) => re.test(line))) report(i, "T3", line);
+    if (inZones("pages", "flows", "shell", "setup") && isTsx && TAILWIND_ARBITRARY.some((re) => re.test(line))) report(i, "T3", line);
 
     if (isCss ? WIDTH_MEDIA.test(line) : VIEWPORT_VARIANT.test(line)) report(i, "T5", line);
 
     if (!isTest) {
       const textureDir = zone === "mc" || ART_TEXTURE_DIRS.some((dir) => within(srcRel, dir));
-      if (!textureDir && /\b(artUrl|skinUrl|thumbUrl)\(|aurora-tex/.test(line)) report(i, "T7", line);
+      if (!textureDir && /\b(artUrl|skinUrl|thumbUrl)\(|petalfall-tex/.test(line)) report(i, "T7", line);
       if (/\/mc\/textures|particle\//.test(line)) report(i, "T7", line);
     }
 
-    if (inZones("pages", "flows", "ui", "shell", "launch") && (MOTION_LITERAL.test(line) || (motionDeclLine && CSS_TIME_LITERAL.test(line)))) report(i, "T8", line);
+    if (inZones("pages", "flows", "ui", "shell", "launch", "setup") && (MOTION_LITERAL.test(line) || (motionDeclLine && CSS_TIME_LITERAL.test(line)))) report(i, "T8", line);
 
     if (/\p{Extended_Pictographic}/u.test(line)) report(i, "T9", line);
 
@@ -259,7 +262,7 @@ function checkSourceFile(srcRel, text, allowedUiLiterals, report) {
 }
 
 /**
- * 扫描 root 下的 src/（全部规则）、scripts/ 与 src-tauri/src/（只查 Emoji）。
+ * 扫描 root 下的 src/（全部规则）、scripts/、src-tauri/src/ 与 src-tauri-setup/src/（后三处只查 Emoji）。
  * 返回违规列表，file 为相对 root 的正斜杠路径，line 从 1 计。
  */
 export function checkTokens({ root }) {
@@ -289,7 +292,9 @@ export function checkTokens({ root }) {
       if (/\p{Extended_Pictographic}/u.test(line)) report(i, "T9", line);
     });
   for (const file of walk(join(root, "scripts"))) scan(file, emojiOnly);
-  for (const file of walk(join(root, "src-tauri", "src")).filter((f) => f.endsWith(".rs"))) scan(file, emojiOnly);
+  for (const crate of ["src-tauri", "src-tauri-setup"]) {
+    for (const file of walk(join(root, crate, "src")).filter((f) => f.endsWith(".rs"))) scan(file, emojiOnly);
+  }
 
   return violations.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.rule.localeCompare(b.rule));
 }

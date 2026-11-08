@@ -4,7 +4,7 @@
 import type { WorldBackupEvent } from "../launch";
 
 // ipc/launch.ts 引入了 bridge，bridge 又会动态加载 mock：事件名在这里按后端另写一份，免得两边互相引用。
-const WORLD_BACKUP_EVENT = "aurora://world-backup";
+const WORLD_BACKUP_EVENT = "petalfall://world-backup";
 
 type Listener = (payload: unknown) => void;
 

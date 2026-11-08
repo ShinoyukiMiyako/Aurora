@@ -523,7 +523,7 @@ function VersionsTab({ detail, versions, pinned, onPin }: VersionsTabProps) {
   if (versions.status === "loading") return <Skeleton shape="text" lines={6} />;
   if (versions.status === "error") {
     return (
-      <Callout tone="danger" action={<Button size="sm" variant="ghost" onClick={versions.reload}>{SEARCH_COPY.retry}</Button>}>
+      <Callout tone="danger" fullText action={<Button size="sm" variant="ghost" onClick={versions.reload}>{SEARCH_COPY.retry}</Button>}>
         <span className={styles.errorTitle}>{DETAIL_COPY.versionsFailed}</span>
         <span className={styles.errorText}>{versions.error.message}</span>
       </Callout>

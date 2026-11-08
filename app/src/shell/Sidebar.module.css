@@ -1,11 +1,12 @@
 /*
  * 胶囊相对外壳的侧栏槽位定位；nav 本身不定位、不占面积，槽位的空白仍是窗口拖动区。
+ * 顶端让出 56px 的品牌行，再落一个页面顶内边距：胶囊上沿与内容区首行平齐，差这几像素看着像没对上。
  * 胶囊内的每一行都铺满胶囊内宽：条目居中，指示条贴在行的左缘（即胶囊内缘），
  * 固定实例的滚动容器也就不会把指示条裁掉。
  */
 .capsule {
   position: absolute;
-  top: var(--sk-space-10);
+  top: calc(56px + var(--sk-page-pad-top));
   bottom: var(--sk-space-10);
   left: var(--sk-space-10);
   z-index: var(--sk-z-sidebar);

@@ -1,4 +1,4 @@
-//! 门面的 managed state：读写锁包着 [`Aurora`]。
+//! 门面的 managed state：读写锁包着 [`Petalfall`]。
 //!
 //! 取读写锁而不是互斥锁：几十个命令里只有改配置的少数几个需要可变借用，互斥锁会让所有命令全局
 //! 串行，一个慢请求就把界面上其余操作全堵住。
@@ -9,25 +9,33 @@
 //! - 改配置的命令用 [`Facade::update`]：在副本上改、落盘成功才换进门面，随即放锁；
 //! - 任何要等网络、扫磁盘、跑子进程的命令都先 [`Facade::snapshot`]：克隆一份门面立即放锁，
 //!   在快照上跑。门面克隆很便宜（HTTP 客户端内部是 `Arc`，其余是配置与路径）。
-//!   长任务还会在快照上挂取消令牌（`Aurora::with_cancel`），常驻门面始终不挂。
+//!   长任务还会在快照上挂取消令牌（`Petalfall::with_cancel`），常驻门面始终不挂。
 
-use aurora_core::{Aurora, CoreError};
+use petalfall_core::{CoreError, Petalfall, RotationGate};
 use tokio::sync::{RwLock, RwLockReadGuard};
 
 /// 放进 Tauri managed state 的门面。
 pub struct Facade {
-    inner: RwLock<Aurora>,
+    inner: RwLock<Petalfall>,
+    /// 与门面及其快照共用的外置令牌轮换闸。门面里的那份只会被自己的克隆替换，闸始终是同一道。
+    rotations: RotationGate,
 }
 
 impl Facade {
-    pub fn new(aurora: Aurora) -> Self {
+    pub fn new(petalfall: Petalfall) -> Self {
         Self {
-            inner: RwLock::new(aurora),
+            rotations: petalfall.rotation_gate(),
+            inner: RwLock::new(petalfall),
         }
     }
 
+    /// 外置令牌轮换的闸。不经门面锁：退出时要关它，改配置的写者卡在落盘上也不能挡住。
+    pub fn rotation_gate(&self) -> &RotationGate {
+        &self.rotations
+    }
+
     /// 只读访问。持有期间不要 await 网络或慢 IO（见模块文档）。
-    pub async fn read(&self) -> RwLockReadGuard<'_, Aurora> {
+    pub async fn read(&self) -> RwLockReadGuard<'_, Petalfall> {
         self.inner.read().await
     }
 
@@ -38,7 +46,7 @@ impl Facade {
     /// 无关的保存一并写进文件。
     pub async fn update<T, E>(
         &self,
-        change: impl FnOnce(&mut Aurora) -> Result<T, E>,
+        change: impl FnOnce(&mut Petalfall) -> Result<T, E>,
     ) -> Result<T, E>
     where
         E: From<CoreError>,
@@ -54,7 +62,7 @@ impl Facade {
     /// 同 [`Facade::update`]，`change` 报告配置没有变化时不落盘。返回是否有变化。
     pub async fn update_if_changed(
         &self,
-        change: impl FnOnce(&mut Aurora) -> bool,
+        change: impl FnOnce(&mut Petalfall) -> bool,
     ) -> Result<bool, CoreError> {
         let mut current = self.inner.write().await;
         let mut next = current.clone();
@@ -67,7 +75,7 @@ impl Facade {
     }
 
     /// 克隆一份门面快照并立即放锁。要等网络、扫磁盘的命令一律在快照上跑。
-    pub async fn snapshot(&self) -> Aurora {
+    pub async fn snapshot(&self) -> Petalfall {
         self.inner.read().await.clone()
     }
 
@@ -76,19 +84,25 @@ impl Facade {
     pub fn is_unlocked(&self) -> bool {
         self.inner.try_write().is_ok()
     }
+
+    /// 测试用：拿住写锁不放，好比改配置时落盘卡住的 [`Facade::update`]。
+    #[cfg(test)]
+    pub async fn hold_write_lock(&self) -> tokio::sync::RwLockWriteGuard<'_, Petalfall> {
+        self.inner.write().await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aurora_core::{AfterLaunch, AuroraConfig, ConfigStore};
+    use petalfall_core::{AfterLaunch, ConfigStore, PetalfallConfig};
 
     /// 配置文件的位置被同名文件夹占着：原子写入最后一步的改名必然失败。
     fn facade_with_blocked_config(dir: &std::path::Path) -> Facade {
         std::fs::create_dir_all(dir.join("config.json")).unwrap();
         Facade::new(
-            Aurora::open(
-                AuroraConfig::default(),
+            Petalfall::open(
+                PetalfallConfig::default(),
                 dir.to_path_buf(),
                 dir.join("config.json"),
             )
@@ -102,9 +116,9 @@ mod tests {
         let facade = facade_with_blocked_config(dir.path());
 
         let err = facade
-            .update(|aurora| {
-                aurora.set_after_launch(AfterLaunch::Close);
-                aurora.set_download_concurrency(8);
+            .update(|petalfall| {
+                petalfall.set_after_launch(AfterLaunch::Close);
+                petalfall.set_download_concurrency(8);
                 Ok::<_, CoreError>(())
             })
             .await
@@ -115,8 +129,8 @@ mod tests {
         assert_eq!(config.download_concurrency, 64);
 
         let changed = facade
-            .update_if_changed(|aurora| {
-                aurora.set_sidebar_pins(vec!["a".into()]);
+            .update_if_changed(|petalfall| {
+                petalfall.set_sidebar_pins(vec!["a".into()]);
                 true
             })
             .await;
@@ -130,8 +144,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let facade = facade_with_blocked_config(dir.path());
         assert!(facade
-            .update(|aurora| {
-                aurora.set_check_updates(false);
+            .update(|petalfall| {
+                petalfall.set_check_updates(false);
                 Ok::<_, CoreError>(())
             })
             .await
@@ -139,8 +153,8 @@ mod tests {
         std::fs::remove_dir(dir.path().join("config.json")).unwrap();
 
         let half: Result<(), CoreError> = facade
-            .update(|aurora| {
-                aurora.set_after_launch(AfterLaunch::Keep);
+            .update(|petalfall| {
+                petalfall.set_after_launch(AfterLaunch::Keep);
                 Err(CoreError::PlatformUnsupported)
             })
             .await;
@@ -148,8 +162,8 @@ mod tests {
         assert!(!dir.path().join("config.json").exists(), "报错的修改不落盘");
 
         facade
-            .update(|aurora| {
-                aurora.set_download_concurrency(32);
+            .update(|petalfall| {
+                petalfall.set_download_concurrency(32);
                 Ok::<_, CoreError>(())
             })
             .await

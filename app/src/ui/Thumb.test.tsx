@@ -109,7 +109,7 @@ describe("Thumb", () => {
   });
 
   it("进入视口（外扩 200 px）前是静止的占位、不解析；进入后才有扫光，解析、取图并画出像素风图标", async () => {
-    const resolve = vi.fn(async (url: string) => `http://aurora-tex.localhost/thumb/${url.length}`);
+    const resolve = vi.fn(async (url: string) => `http://petalfall-tex.localhost/thumb/${url.length}`);
     view = render(withResolver(resolve, <Thumb url="https://cdn.modrinth.com/data/x/icon.png" kind="mod" hue={1} size={48} alt="钠" />));
     expect(thumb().dataset.view).toBe("pending");
     expect(observers[0].options?.rootMargin).toBe("200px");
@@ -120,7 +120,7 @@ describe("Thumb", () => {
     expect(thumb().dataset.view).toBe("loading");
     await settle();
     expect(resolve).toHaveBeenCalledWith("https://cdn.modrinth.com/data/x/icon.png");
-    expect(fetchMock).toHaveBeenCalledWith("http://aurora-tex.localhost/thumb/40", { mode: "cors" });
+    expect(fetchMock).toHaveBeenCalledWith("http://petalfall-tex.localhost/thumb/40", { mode: "cors" });
     expect(thumb().dataset.view).toBe("image");
     expect(thumb().getAttribute("role")).toBe("img");
     expect(thumb().getAttribute("aria-label")).toBe("钠");

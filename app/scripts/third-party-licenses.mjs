@@ -3,7 +3,7 @@
 //
 // - 前端：从 package.json 的 dependencies 出发，沿各包的 dependencies 与已安装的 optionalDependencies 走完闭包；
 //   devDependencies 只参与构建，不随应用分发。目录按 Node 的解析规则逐级向上找，pnpm 的软链接取真实路径后再找。
-// - Rust：cargo metadata 按本机目标平台过滤，从应用包出发只走普通依赖（build、dev 依赖不进二进制），去掉工作区自己的包。
+// - Rust：cargo metadata 按分发目标平台过滤，从应用包出发只走普通依赖（build、dev 依赖不进二进制），去掉工作区自己的包。
 //   --frozen 不联网、不改锁文件：清单必须和锁文件里实际编进去的版本一致。
 // - 许可证原样照抄包里声明的字符串；没有声明的包直接报错，交给人去核实，不猜。
 
@@ -99,12 +99,18 @@ export function collectCargoPackages(metadata, rootPackage) {
     .sort(byNameThenVersion);
 }
 
-/** 本机 rustc 的目标三元组：应用在本机构建，分发的就是这个平台的依赖。 */
+/** 本机 rustc 的目标三元组。 */
 export function hostTarget() {
   const out = execFileSync("rustc", ["-vV"], { encoding: "utf8" });
   const line = out.split(/\r?\n/).find((l) => l.startsWith("host: "));
   if (line === undefined) throw new Error(`rustc -vV 的输出里没有 host 行：${out}`);
   return line.slice("host: ".length).trim();
+}
+
+/** 分发的是哪个平台的依赖：交叉编译时 Tauri 经 TAURI_ENV_TARGET_TRIPLE 告诉前置命令，不经 Tauri 时就在本机构建。 */
+export function distributionTarget(env) {
+  const target = env.TAURI_ENV_TARGET_TRIPLE;
+  return target === undefined || target === "" ? hostTarget() : target;
 }
 
 export function readCargoMetadata(manifestPath, target) {
@@ -115,7 +121,7 @@ export function readCargoMetadata(manifestPath, target) {
   return JSON.parse(out);
 }
 
-export function thirdPartyManifest({ appDir, cargoManifest, rootPackage }) {
-  const metadata = readCargoMetadata(cargoManifest, hostTarget());
+export function thirdPartyManifest({ appDir, cargoManifest, rootPackage, env }) {
+  const metadata = readCargoMetadata(cargoManifest, distributionTarget(env));
   return { packages: [...collectNpmPackages(appDir), ...collectCargoPackages(metadata, rootPackage)] };
 }

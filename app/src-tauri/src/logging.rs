@@ -23,9 +23,13 @@ pub(crate) const LOGS_DIR: &str = "logs";
 /// 保留的会话日志份数。十次启动够回溯到「昨天还好好的」，再多只是占地方。
 const KEEP_SESSIONS: usize = 10;
 
-/// 默认过滤级别。本工程各 crate（target 均以 aurora 开头）的 info 全收，第三方依赖只收 warn 以上——
+/// 默认过滤级别。本工程各 crate（target 均以 petalfall 开头）的 info 全收，第三方依赖只收 warn 以上——
 /// reqwest/hyper 的 debug 会把真正有用的行淹掉。设了 RUST_LOG 时以它为准。
-const DEFAULT_FILTER: &str = "warn,aurora=info";
+///
+/// 更新插件整个关掉：它检查清单时每个端点失败都自记一行 ERROR，换到下一个端点问成了也照记，玩家发来的日志里就多出
+/// 一行看着像出错、其实没事的记录。它的失败全都作为错误返回给 `commands::updater`，那里按端点记 WARN、全部失败再
+/// 汇总，插件自己的行只是重复；它在 Windows 上别的输出都是 debug，本来也不收。
+const DEFAULT_FILTER: &str = "warn,petalfall=info,tauri_plugin_updater=off";
 
 /// 装好 subscriber，返回本次会话的日志文件路径（目录不可写时为 `None`）。
 ///
@@ -63,7 +67,7 @@ pub fn init() -> Option<PathBuf> {
 
 /// 开一份本次会话的日志文件，顺带清掉过老的那些。
 fn open_session_log() -> Result<(PathBuf, File), Box<dyn Error>> {
-    let dir = aurora_base::fs::data_dir()?.join(LOGS_DIR);
+    let dir = petalfall_base::fs::data_dir()?.join(LOGS_DIR);
     std::fs::create_dir_all(&dir)?;
     prune_old_sessions(&dir);
 
@@ -188,6 +192,40 @@ mod tests {
             .filter(|n| n.ends_with(".log") && *n != "旧的.log")
             .count();
         assert_eq!(logs, KEEP_SESSIONS - 1);
+    }
+
+    #[test]
+    fn default_filter_drops_the_updater_plugin_but_keeps_the_rest() {
+        let captured = crate::tests::Captured::new();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(EnvFilter::new(DEFAULT_FILTER))
+            .with(
+                fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(move || writer.clone()),
+            );
+        tracing::subscriber::with_default(subscriber, || {
+            // 插件经 log 宏记日志，target 是它的模块路径；第一行是 2.12.0 换源时的原话。
+            tracing::error!(
+                target: "tauri_plugin_updater::updater",
+                "failed to check for updates: error sending request"
+            );
+            tracing::warn!(target: "tauri_plugin_updater::updater", "update is not a valid deb package");
+            tracing::warn!(target: "petalfall_tauri_lib::commands::updater", "清单端点没有给出清单");
+            tracing::info!(target: "petalfall_tauri_lib::commands::updater", "已是最新版本");
+            tracing::warn!(target: "reqwest::connect", "第三方的告警");
+            tracing::info!(target: "reqwest::connect", "第三方的信息");
+            tracing::error!(target: "tauri_plugin_dialog", "别的插件出错");
+        });
+        let log = captured.text();
+        assert!(!log.contains("failed to check for updates"), "{log}");
+        assert!(!log.contains("deb package"), "{log}");
+        assert!(log.contains("清单端点没有给出清单"), "{log}");
+        assert!(log.contains("已是最新版本"), "{log}");
+        assert!(log.contains("第三方的告警"), "{log}");
+        assert!(!log.contains("第三方的信息"), "{log}");
+        assert!(log.contains("别的插件出错"), "{log}");
     }
 
     #[test]

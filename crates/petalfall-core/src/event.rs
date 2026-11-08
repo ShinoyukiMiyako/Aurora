@@ -1,0 +1,60 @@
+//! 门面统一暴露的进度/事件。
+//!
+//! 各粗粒度操作（安装、启动、Java 下载等）在推进过程中通过一个可选的 [`EventSink`] 发出
+//! [`CoreEvent`]，供前端/CLI 实时展示阶段与告警。细粒度的下载字节进度由 petalfall-download 的
+//! [`DownloadProgress`] 表达，这里一并透传其类型定义，前端只依赖本 crate 即可拿到进度模型。
+
+use tokio::sync::mpsc;
+
+/// 门面事件通道的发送端。`None` 表示调用方不关心事件。
+pub type EventSink = mpsc::UnboundedSender<CoreEvent>;
+
+/// 下载进度快照（从 petalfall-download 透传，前端进度条直接消费）。
+pub use petalfall_download::DownloadProgress;
+
+/// 新建、补全实例的步骤（从 petalfall-install 透传，前端按它的键取文案）。
+pub use petalfall_install::InstallPhase;
+
+/// 一次操作过程中发出的事件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreEvent {
+    /// 阶段推进（人类可读的一句话，如「原版安装完成」）。
+    Stage(String),
+    /// 非阻断性告警（如离线用户名含非标准字符）。
+    Warning(String),
+    /// 批量下载进度快照。
+    Download(DownloadProgress),
+    /// 进入多步任务（新建、补全实例）的某一步。`plan` 是这次的整份步骤表，开工时排定、全程不变；`index`
+    /// 是这一步在表里的下标，只增不减。前端据此写「第几步，共几步」，并按步折算整体进度。
+    Phase {
+        plan: Vec<InstallPhase>,
+        index: usize,
+    },
+    /// 自更新开始从某个下载源取更新包，每个源开始前发一次，第一个也发。`index` 是这个源在本次排好的候选表里的
+    /// 下标（从 0 起），`count` 是候选总数，`name` 是源名。前端据此写「第几个源，共几个」；每个源的下载进度各自
+    /// 从零算，换源时进度条跟着重来。
+    Source {
+        index: usize,
+        count: usize,
+        name: String,
+    },
+}
+
+impl CoreEvent {
+    /// 构造一个阶段事件。
+    pub fn stage(message: impl Into<String>) -> Self {
+        CoreEvent::Stage(message.into())
+    }
+
+    /// 构造一个告警事件。
+    pub fn warning(message: impl Into<String>) -> Self {
+        CoreEvent::Warning(message.into())
+    }
+}
+
+/// 向可选的事件通道投递一条事件；无接收者或通道已关闭时静默忽略（事件是尽力而为的通知）。
+pub(crate) fn emit(sink: Option<&EventSink>, event: CoreEvent) {
+    if let Some(tx) = sink {
+        let _ = tx.send(event);
+    }
+}
