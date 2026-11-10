@@ -12,6 +12,7 @@ use petalfall_launch::{
     NeedFactor, SystemMemory, probe_system_memory,
 };
 
+use crate::data_format::GuardMode;
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
 use crate::modpack::read_instance_modpack;
@@ -43,7 +44,16 @@ const VANILLA_PROFILE: MemoryProfile = MemoryProfile {
 impl Petalfall {
     /// 内存建议。`version_id` 给出时按该实例估算；不给时按主页当前选中的实例；没有选中或选中的实例
     /// 已不在时按原版。
+    ///
+    /// 估算装了加载器的实例要扫 mods 目录，会把 jar 元数据缓存写进它的工作目录，所以要读实例时先以「使用」
+    /// 方式核对游戏目录的数据格式记号。关卡放在这里而不在 [`Petalfall::memory_profile`]：启动链路也调它，
+    /// 启动入口已经核对过。
     pub async fn memory_advice(&self, version_id: Option<&str>) -> Result<MemoryAdvice> {
+        // 找主页选中的实例本身就要读游戏目录（哪怕它已经不在），所以选中了就得先核对。两样都没有时只按原版
+        // 估算，只读配置与本机内存，游戏目录被拒也照常给出建议：此时报错，设置页会误说成内存读不到。
+        if version_id.is_some() || self.config().selected_version.is_some() {
+            self.guard_game_dir(GuardMode::Use).await?;
+        }
         let version = match version_id {
             Some(id) => Some(self.instance_version(id).await?),
             // 主页选中的实例已不在只是一条过期的界面记忆，不该让设置页的内存卡报错。
@@ -172,7 +182,10 @@ fn limit_text(reason: LimitReason) -> &'static str {
 mod tests {
     use super::*;
     use crate::config::PetalfallConfig;
+    use crate::data_format::testing::with_fixture;
+    use crate::instances::tests::{NEWER_STAMP, NEWER_WRITER, disk_state, own_format, write_stamp};
     use petalfall_launch::{MemoryLimit, estimate_memory, memory_limit};
+    use petalfall_release::data_format::{StampFile, StampRead, parse_stamp};
 
     fn write_version(game_dir: &Path, id: &str, json: &str) {
         let dir = game_dir.join("versions").join(id);
@@ -424,5 +437,108 @@ mod tests {
         );
         assert!(auto_memory_log(&estimate).ends_with("本机上限 1024 MB（32 位 Java），给 1024 MB"));
         assert_eq!(memory_limit(roomy, true).mb, 8192);
+    }
+
+    /// 估算装了加载器的实例要扫 mods 目录、写元数据缓存：记号比这一版新或读不懂时，指名实例与按主页选中的
+    /// 实例两种问法都在解析实例之前被挡下，带出记号的结论与游戏目录，游戏目录里一个文件都没被改、被碰或多出来。
+    #[tokio::test]
+    async fn advice_refuses_a_rejected_game_dir_before_scanning_mods() {
+        let dir = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_with(dir.path(), Some("fabric-1.20.1"));
+        let game = petalfall.game_dir().to_path_buf();
+        let wd = working_dir(&petalfall, "fabric-1.20.1").await;
+        write_mod_jar(&wd.join("mods").join("sodium.jar"), "sodium");
+        // 关卡缺席时两种问法都会扫这个实例的 mods 目录，写出这份缓存。
+        let cache = InstanceDirs::in_working_dir(wd).metadata_cache;
+        assert!(!cache.exists(), "{}", cache.display());
+        let asks = [Some("fabric-1.20.1"), None];
+
+        write_stamp(&game, NEWER_STAMP);
+        let before = disk_state(&game);
+        for ask in asks {
+            match with_fixture(own_format(2), petalfall.memory_advice(ask))
+                .await
+                .unwrap_err()
+            {
+                CoreError::GameDirDataTooNew {
+                    path,
+                    found,
+                    supported,
+                    written_by,
+                } => {
+                    assert_eq!(path, game, "{ask:?}");
+                    assert_eq!((found, supported), (3, 2), "{ask:?}");
+                    assert_eq!(written_by.as_deref(), Some(NEWER_WRITER), "{ask:?}");
+                }
+                other => panic!("{ask:?} 应报游戏目录太新，实际是 {other:?}"),
+            }
+            assert_eq!(disk_state(&game), before, "{ask:?}");
+        }
+
+        // 读不懂与号是多少无关：不换本版号，走生产的这条路。
+        let unreadable = r#"{"data_format":"3"}"#;
+        write_stamp(&game, unreadable);
+        let expected = match parse_stamp(StampFile::Contents(unreadable.as_bytes())) {
+            StampRead::Unreadable { reason } => reason,
+            other => panic!("夹具应当读不懂，实际是 {other:?}"),
+        };
+        let before = disk_state(&game);
+        for ask in asks {
+            match petalfall.memory_advice(ask).await.unwrap_err() {
+                CoreError::DataFormatUnreadable { path, reason } => {
+                    assert_eq!(path, game, "{ask:?}");
+                    assert_eq!(reason, expected, "{ask:?}");
+                }
+                other => panic!("{ask:?} 应报记号读不懂，实际是 {other:?}"),
+            }
+            assert_eq!(disk_state(&game), before, "{ask:?}");
+        }
+        assert!(!cache.exists(), "{}", cache.display());
+    }
+
+    /// 没指名、主页也没选中实例时只按原版估算，不读游戏目录：记号比这一版新或读不懂都照常给出建议，游戏目录
+    /// 里什么都没变。主页选中的实例哪怕已经不在，找它也要读游戏目录，照样被挡。
+    #[tokio::test]
+    async fn vanilla_advice_with_no_instance_to_read_ignores_a_rejected_game_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let unselected = petalfall_with(dir.path(), None);
+        let stale = petalfall_with(dir.path(), Some("deleted-instance"));
+        let game = unselected.game_dir().to_path_buf();
+        let vanilla = vec![NeedFactor::Base {
+            loader: LoaderClass::Vanilla,
+            mb: 2560,
+        }];
+
+        write_stamp(&game, NEWER_STAMP);
+        let before = disk_state(&game);
+        let advice = with_fixture(own_format(2), unselected.memory_advice(None))
+            .await
+            .unwrap();
+        assert_eq!(advice.version_id, None);
+        assert_eq!(advice.estimate.factors, vanilla);
+        assert_eq!(disk_state(&game), before);
+        match with_fixture(own_format(2), stale.memory_advice(None))
+            .await
+            .unwrap_err()
+        {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                ..
+            } => {
+                assert_eq!(path, game);
+                assert_eq!((found, supported), (3, 2));
+            }
+            other => panic!("选中了实例就要读游戏目录，应报游戏目录太新，实际是 {other:?}"),
+        }
+        assert_eq!(disk_state(&game), before);
+
+        write_stamp(&game, r#"{"data_format":"3"}"#);
+        let before = disk_state(&game);
+        let advice = unselected.memory_advice(None).await.unwrap();
+        assert_eq!(advice.version_id, None);
+        assert_eq!(advice.estimate.factors, vanilla);
+        assert_eq!(disk_state(&game), before);
     }
 }

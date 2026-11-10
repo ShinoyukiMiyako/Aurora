@@ -26,6 +26,7 @@ use petalfall_modplatform::{
 use petalfall_version::identify_mc_version;
 use serde::Serialize;
 
+use crate::data_format::GuardMode;
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
 use crate::instances::hide_base_versions;
@@ -454,6 +455,9 @@ impl Petalfall {
     /// 判定；逐实例的「装没装」要读卷宗与扫 mods 目录，
     /// 有界并发执行。逐实例发请求会让装了十来个实例的玩家在点开安装弹层时等上十几个网络来回，还会
     /// 撞上平台限流把后半截请求打成失败。
+    ///
+    /// 判 Mod 装没装要扫 mods 目录，会把 jar 元数据缓存写进各实例的工作目录，所以先以「使用」方式核对
+    /// 游戏目录的数据格式记号，再扫版本、发请求。
     pub async fn match_instances(
         &self,
         platform: Platform,
@@ -461,6 +465,7 @@ impl Petalfall {
         resource_type: ResourceType,
         mod_version_id: Option<&str>,
     ) -> Result<Vec<InstanceMatch>> {
+        self.guard_game_dir(GuardMode::Use).await?;
         if matches!(resource_type, ResourceType::Modpack | ResourceType::Plugin) {
             return Err(CoreError::InvalidResourceTarget(format!(
                 "{resource_type:?} 不装进已有实例，没有落位矩阵"
@@ -846,8 +851,11 @@ async fn find_data_pack(saves: &Path, known: &[ModVersionInfo]) -> Result<Option
 mod tests {
     use super::*;
     use crate::config::PetalfallConfig;
+    use crate::data_format::testing::with_fixture;
+    use crate::instances::tests::{NEWER_STAMP, NEWER_WRITER, disk_state, own_format, write_stamp};
     use crate::ledger::{Ledger, LedgerEntry, LedgerStore};
     use petalfall_modplatform::ReleaseChannel;
+    use petalfall_release::data_format::{StampFile, StampRead, parse_stamp};
     use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -2620,5 +2628,68 @@ mod tests {
                 "{kind:?} 得到 {err:?}"
             );
         }
+    }
+
+    /// 判 Mod 装没装要扫 mods 目录、写元数据缓存：记号比这一版新或读不懂时，矩阵在扫版本、问平台之前就被
+    /// 挡下，带出记号的结论与游戏目录，游戏目录里一个文件都没被改、被碰或多出来，平台一个请求都没收到。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn match_instances_refuses_a_rejected_game_dir_before_scanning_or_asking() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/project/sodium/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(SODIUM_VERSIONS))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path().to_path_buf();
+        // 关卡缺席时三个记着 sodium 的实例都会扫 mods 目录，各写出一份元数据缓存。
+        matrix_fixture(&mc).await;
+        let petalfall = isolated(&mc, server.uri());
+        let game = petalfall.game_dir().to_path_buf();
+        let cache = petalfall
+            .resolved_dirs("b-fabric-1.20.1")
+            .await
+            .unwrap()
+            .metadata_cache;
+        assert!(!cache.exists(), "{}", cache.display());
+        let matrix =
+            || petalfall.match_instances(Platform::Modrinth, "sodium", ResourceType::Mod, None);
+
+        write_stamp(&game, NEWER_STAMP);
+        let before = disk_state(&game);
+        match with_fixture(own_format(2), matrix()).await.unwrap_err() {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            } => {
+                assert_eq!(path, game);
+                assert_eq!((found, supported), (3, 2));
+                assert_eq!(written_by.as_deref(), Some(NEWER_WRITER));
+            }
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+        assert_eq!(disk_state(&game), before);
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+
+        // 读不懂与号是多少无关：不换本版号，走生产的这条路。
+        let unreadable = r#"{"data_format":"3"}"#;
+        write_stamp(&game, unreadable);
+        let expected = match parse_stamp(StampFile::Contents(unreadable.as_bytes())) {
+            StampRead::Unreadable { reason } => reason,
+            other => panic!("夹具应当读不懂，实际是 {other:?}"),
+        };
+        let before = disk_state(&game);
+        match matrix().await.unwrap_err() {
+            CoreError::DataFormatUnreadable { path, reason } => {
+                assert_eq!(path, game);
+                assert_eq!(reason, expected);
+            }
+            other => panic!("应报记号读不懂，实际是 {other:?}"),
+        }
+        assert_eq!(disk_state(&game), before);
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+        assert!(!cache.exists(), "{}", cache.display());
     }
 }
