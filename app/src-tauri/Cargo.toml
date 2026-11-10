@@ -37,6 +37,13 @@ tauri-plugin-updater = { version = "~2.12", default-features = false, features =
 # （InvalidSignature）才换下一个源，换了钥匙、签名解不开这些与源无关的立即停；这个错误类型只能从这个 crate 拿。
 # 写 "0.2" 与插件的要求一致，两边解析到同一个 0.2.x，才是同一个类型。
 minisign-verify = "0.2"
+# 检查更新时先验清单里那段包签名的全局签名（Ed25519），不必先把安装包下回来；minisign-verify 只给
+# 「拿着整个文件验」的接口，这一步得自己验。与 rustls 带进来的是同一个 0.17.x，不多一份编译。
+ring = "0.17"
+# 清单里的签名串与内嵌的公钥都是 base64 文本，验全局签名前要先解开。测试里还要造签名串不是合法 base64 时
+# 插件报的 Base64 错误，它包的是 base64 的 DecodeError；写 "0.22" 与插件的要求一致，两边解析到同一个
+# 0.22.x，才是同一个类型。
+base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 门面：前端全部能力经此 crate 暴露，业务调用不直接依赖任何下层 crate。
@@ -93,6 +100,3 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 fastrand = "2"
 # 卡面图片导入的命令层测试要现场编码一张 PNG；与 petalfall-core 同一版本，不多拉格式。
 image = { version = "0.25", default-features = false, features = ["png"] }
-# 自更新换源的判定用例要造清单签名串不是合法 base64 时插件报的 Base64 错误，它包的是 base64 的 DecodeError；
-# 写 "0.22" 与插件的要求一致，两边解析到同一个 0.22.x，才是同一个类型。
-base64 = "0.22"

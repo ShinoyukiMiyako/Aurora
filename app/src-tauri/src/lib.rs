@@ -14,7 +14,9 @@
 //! 新增命令时在 `generate_handler!` 里本领域的分块内追加，块之间以 `// -- 领域 --` 分隔；
 //! 新增 managed state 同样写在 setup 里本领域的分块内。
 
+mod channel_handoff;
 mod commands;
+mod data_gate;
 mod drop;
 mod events;
 mod exit;

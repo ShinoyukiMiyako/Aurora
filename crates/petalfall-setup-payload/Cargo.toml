@@ -5,5 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-# 打包工具在 Linux host 上跑、引导程序在 Windows 上跑，格式库两边共用，所以不碰任何系统接口，也不带别的依赖。
+# 打包工具在 Linux host 上跑、引导程序在 Windows 上跑，格式库两边共用，所以不碰任何系统接口，只带同样不碰系统接口的依赖。
 sha2 = "0.11"
+# 载荷头里的数据格式号取自这里的常量，打包工具写、引导程序与启动器读，三处同一个值。
+petalfall-release = { path = "../petalfall-release" }

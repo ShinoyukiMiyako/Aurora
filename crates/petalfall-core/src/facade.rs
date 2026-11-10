@@ -61,6 +61,9 @@ pub struct Petalfall {
     msa_fallback_client_id: Option<String>,
     /// 长任务快照上挂的取消令牌；常驻门面上恒为 `None`。
     cancel: Option<CancellationToken>,
+    /// 应用版本，写数据格式记号时记成「是哪个版本写的」。只有桌面应用经 [`Petalfall::with_app_version`]
+    /// 给得出；命令行与测试的门面为 `None`，写出的记号不带这一项。
+    pub(crate) app_version: Option<String>,
     /// 工程版本列表的短时缓存。放在门面上而不是进程全局：快照克隆的是同一个句柄，跨命令复用；
     /// 各自新建的门面（含测试）互不串用。
     pub(crate) mod_versions: crate::modversions::SharedVersionCache,
@@ -145,6 +148,7 @@ impl Petalfall {
             msa_endpoints: MsaEndpoints::default(),
             msa_fallback_client_id: crate::auth::fallback_msa_client_id(),
             cancel: None,
+            app_version: None,
             mod_versions: Default::default(),
             source_speed: Arc::new(SourceSpeedCache::new(VERSION_MANIFEST_V2)),
             source_resolver: Arc::new(MirrorResolver),
@@ -560,6 +564,7 @@ impl Petalfall {
             msa_endpoints: MsaEndpoints::default(),
             msa_fallback_client_id: None,
             cancel: None,
+            app_version: None,
             mod_versions: Default::default(),
             // 默认测速指向一个不会应答的本机地址且 1 毫秒即超时：走到生成下载计划的既有测试不连真实网络，
             // 也不吃 Windows 上连接被拒要等秒级的延迟；探针全超时即按兜底顺序、不写缓存。

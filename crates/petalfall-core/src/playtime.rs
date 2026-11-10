@@ -26,7 +26,7 @@ use crate::folders::same_path;
 /// 游玩记录文件名，位于数据目录下。
 pub const PLAYTIME_FILE: &str = "playtime.json";
 /// 文件格式版本；结构不兼容地变化时递增，认不得的版本读出即报错而不是被误读。
-const PLAYTIME_FORMAT: u32 = 2;
+pub(crate) const PLAYTIME_FORMAT: u32 = 2;
 /// 只按实例 id 记、不分游戏目录的旧版本。读到时整份归到当时的当前游戏目录，并当场改写成现行版本：
 /// 拖到下次写入才改写的话，中间换了游戏目录，旧记录就会归错地方。当场改写不成时，归属记在
 /// [`PENDING`] 里，之后的读写都按它迁移。
@@ -78,30 +78,30 @@ enum BookChange {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct PlayBook {
-    instances: BTreeMap<String, InstanceRecord>,
+pub(crate) struct PlayBook {
+    pub(crate) instances: BTreeMap<String, InstanceRecord>,
     /// 键是本地日期 `YYYY-MM-DD`：四位年份下字典序即时间序，区间查询直接按键取。
-    days: BTreeMap<String, DayRecord>,
+    pub(crate) days: BTreeMap<String, DayRecord>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct InstanceRecord {
-    total_ms: u64,
-    last_played_at: u64,
+pub(crate) struct InstanceRecord {
+    pub(crate) total_ms: u64,
+    pub(crate) last_played_at: u64,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct DayRecord {
+pub(crate) struct DayRecord {
     /// 实例 id 到当天的游玩毫秒。
-    instances: BTreeMap<String, u64>,
+    pub(crate) instances: BTreeMap<String, u64>,
 }
 
 /// 一个游戏目录的记录。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct DirectoryBook {
+pub(crate) struct DirectoryBook {
     /// 记下时的游戏目录；比对时与切换游戏目录一样，不分大小写与斜杠方向。
-    game_dir: PathBuf,
-    book: PlayBook,
+    pub(crate) game_dir: PathBuf,
+    pub(crate) book: PlayBook,
 }
 
 /// 全部游戏目录的记录。
@@ -200,9 +200,9 @@ struct TakenRecords {
 }
 
 #[derive(Serialize, Deserialize)]
-struct PlayFile {
-    format: u32,
-    directories: Vec<DirectoryBook>,
+pub(crate) struct PlayFile {
+    pub(crate) format: u32,
+    pub(crate) directories: Vec<DirectoryBook>,
 }
 
 #[derive(Deserialize)]

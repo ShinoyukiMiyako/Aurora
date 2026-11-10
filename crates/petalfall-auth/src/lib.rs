@@ -23,6 +23,8 @@
 
 pub mod account;
 pub mod credential;
+#[cfg(test)]
+mod data_format_snapshot;
 pub mod error;
 pub mod microsoft;
 pub mod offline;

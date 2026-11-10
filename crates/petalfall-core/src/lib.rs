@@ -37,6 +37,9 @@ pub mod compat;
 pub mod config;
 pub mod cover_image;
 pub mod crashdiag;
+pub mod data_format;
+#[cfg(test)]
+mod data_format_snapshot;
 pub mod deps;
 pub mod error;
 pub mod event;
@@ -75,6 +78,7 @@ pub mod session;
 mod sources;
 pub mod starter;
 pub mod template;
+pub mod update_prefs;
 pub mod updates;
 pub mod versions;
 mod workdir;
@@ -186,6 +190,9 @@ pub use petalfall_modplatform::{
     SearchEntry, SkipReason, SkippedPlatform,
 };
 pub use petalfall_version::{LoaderInfo, LoaderKind, ManifestVersion, VersionManifest};
+// 版本先后、发布通道、数据格式号这些发布规则只有 petalfall-release 一份实现；整个模块转出，
+// 外壳与 CLI 经这里用，不直接依赖它。
+pub use petalfall_release as release;
 
 // 微软登录端点表（集成测试经 [`Petalfall::with_msa_endpoints`] 注入本地 mock）与取消令牌
 // （长任务快照经 [`Petalfall::with_cancel`] 挂上，命令层用同一类型登记与触发取消）。

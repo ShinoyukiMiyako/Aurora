@@ -11,6 +11,7 @@ pub mod boot;
 pub mod cli;
 pub mod commands;
 pub mod contract;
+pub mod datamark;
 pub mod existing;
 pub mod extract;
 pub mod journal;

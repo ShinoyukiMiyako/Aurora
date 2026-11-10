@@ -25,6 +25,8 @@
 //! 错误统一归口到 [`Error`]，下游 `#[from]` 冒泡。
 
 pub mod content;
+#[cfg(test)]
+mod data_format_snapshot;
 pub mod discovery;
 pub mod error;
 pub mod folder;

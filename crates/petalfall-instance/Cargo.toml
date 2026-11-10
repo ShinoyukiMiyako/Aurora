@@ -28,3 +28,5 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shel
 # 目录/文件 IO 测试需要真正的运行时；tempfile 提供隔离的临时游戏目录。
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "fs"] }
 tempfile = "3"
+# 落盘类型的快照测试要按数据格式号核对冻结快照的集合；正式依赖不变。
+petalfall-release = { path = "../petalfall-release" }

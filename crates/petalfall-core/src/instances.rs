@@ -812,8 +812,8 @@ impl Petalfall {
 ///
 /// 目录本身看不出是导入落下的还是别的启动器装的，版本 JSON 一模一样，只有落下的那一刻知道，所以当场记下。
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct BaseRecord {
-    versions: Vec<String>,
+pub(crate) struct BaseRecord {
+    pub(crate) versions: Vec<String>,
 }
 
 fn base_record_path(game_dir: &Path) -> PathBuf {

@@ -33,7 +33,7 @@ use crate::session::JavaUsed;
 /// 每个实例最近一次崩溃报告的文件名，位于 `versions/<id>/<元数据目录>/`。
 pub const CRASH_REPORT_FILE: &str = "last-crash.json";
 /// 崩溃报告文件的格式版本；结构不兼容地变化时递增，旧文件读出即报错而不是被误读。
-const CRASH_REPORT_FORMAT: u32 = 2;
+pub(crate) const CRASH_REPORT_FORMAT: u32 = 2;
 /// 能读的格式版本。格式 2 只是在 1 上加了带默认值的字段（线索来源、扫描过的文件），1 照读。
 const READABLE_FORMATS: [u32; 2] = [1, CRASH_REPORT_FORMAT];
 /// 诊断时读日志末尾多少字节。崩溃报告本体（含系统信息与 Mod 列表）在百 KB 量级，取两倍余量，
@@ -502,9 +502,9 @@ fn crash_report_path(version_dir: &Path) -> PathBuf {
 }
 
 #[derive(Serialize, Deserialize)]
-struct CrashReportFile<R = CrashReport> {
-    format: u32,
-    report: R,
+pub(crate) struct CrashReportFile<R = CrashReport> {
+    pub(crate) format: u32,
+    pub(crate) report: R,
 }
 
 /// 列表只要崩溃时刻：只反序列化这一项，不把线索与上下文行整份建出来。

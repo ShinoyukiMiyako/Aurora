@@ -1,0 +1,16 @@
+[package]
+name = "petalfall-release"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[dependencies]
+# 版本先后、发布通道、数据格式号与安装判定表在启动器、安装引导程序、打包工具里都要用，只能有一份实现。
+# 打包工具在 Linux host 上跑，判定表的测试要在 CI 上跑，所以只带不碰系统接口的依赖。
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# 版本序与判定表的随机用例：固定种子，挂了能复现。
+fastrand = "2"

@@ -27,6 +27,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 载荷头的读写定位只有这一份实现，引导程序和打包工具共用。
 petalfall-setup-payload = { path = "../../crates/petalfall-setup-payload" }
+# 版本先后、发布通道、数据格式记号的读法与安装判定表：与启动器、打包工具共用同一份实现。
+petalfall-release = { path = "../../crates/petalfall-release" }
 # 解开载荷后核对哈希，安装后核对 Petalfall.exe。
 sha2 = "0.11"
 # 已安装版本与载荷版本比较：dev 包的预发布段要按 semver 规则比。

@@ -48,7 +48,7 @@ use crate::resources::{
 /// 实例目录里的整合包信息文件名（在启动器元数据目录下）。
 const MODPACK_INFO_FILE: &str = "modpack.json";
 /// 整合包信息的格式版本；字段不兼容地变化时递增。
-const MODPACK_INFO_SCHEMA: u32 = 1;
+pub(crate) const MODPACK_INFO_SCHEMA: u32 = 1;
 /// CurseForge 批量接口一次带多少个 id。接口文档没写上限，大整合包有四五百个文件，
 /// 分批是为了让单个请求体与响应都保持在常规大小。
 const CURSEFORGE_BATCH: usize = 200;

@@ -101,9 +101,9 @@ pub enum TemplateOutcome {
 /// `template.json` 的内容。字段都可缺：手写或旧版本写的元数据缺哪项就当不知道。
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct TemplateMeta {
-    source_instance: Option<String>,
-    saved_at: Option<u64>,
+pub(crate) struct TemplateMeta {
+    pub(crate) source_instance: Option<String>,
+    pub(crate) saved_at: Option<u64>,
 }
 
 /// 进程内的模板目录锁表，写法与 mods 目录锁相同。保存要先挪走旧目录再换上新目录，两步之间模板目录

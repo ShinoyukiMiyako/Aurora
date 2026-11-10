@@ -15,6 +15,10 @@ petalfall-install = { path = "../petalfall-install" }
 petalfall-modplatform = { path = "../petalfall-modplatform" }
 petalfall-modpack = { path = "../petalfall-modpack" }
 petalfall-launch = { path = "../petalfall-launch" }
+# 版本先后、发布通道与数据格式号的唯一实现；外壳与 CLI 经本 crate 转出使用。
+petalfall-release = { path = "../petalfall-release" }
+# 读安装包尾部的载荷头：自更新下好并验签之后要看包自带的数据格式号。外壳不直接依赖它。
+petalfall-setup-payload = { path = "../petalfall-setup-payload" }
 # 门面里持有由 petalfall-base 工厂构建的 reqwest::Client 并克隆分发；资讯直接用它发 GET（只用核心方法，
 # 不开 json 特性，自己走 serde_json）。TLS 等特性由 petalfall-base 统一开启（default-features=false 规避 native-tls）。
 reqwest = { version = "0.13", default-features = false }

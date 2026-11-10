@@ -3008,6 +3008,7 @@ dependencies = [
  "base64 0.22.1",
  "md-5",
  "petalfall-base",
+ "petalfall-release",
  "reqwest",
  "serde",
  "serde_json",
@@ -3071,6 +3072,8 @@ dependencies = [
  "petalfall-launch",
  "petalfall-modpack",
  "petalfall-modplatform",
+ "petalfall-release",
+ "petalfall-setup-payload",
  "petalfall-version",
  "reqwest",
  "serde",
@@ -3129,6 +3132,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "petalfall-base",
+ "petalfall-release",
  "petalfall-version",
  "serde",
  "serde_json",
@@ -3216,9 +3220,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "petalfall-release"
+version = "0.1.0"
+dependencies = [
+ "fastrand",
+ "semver",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "petalfall-setup"
 version = "0.1.0"
 dependencies = [
+ "petalfall-release",
  "petalfall-setup-payload",
  "semver",
  "serde",
@@ -3238,6 +3253,7 @@ dependencies = [
 name = "petalfall-setup-payload"
 version = "0.1.0"
 dependencies = [
+ "petalfall-release",
  "sha2 0.11.1",
 ]
 
@@ -3252,6 +3268,7 @@ dependencies = [
  "percent-encoding",
  "petalfall-base",
  "petalfall-core",
+ "ring",
  "semver",
  "serde",
  "serde_json",
