@@ -8,7 +8,8 @@
 //! [`CACHE_TTL`] 内直接用缓存；取不到时退回缓存并标记离线，连缓存都没有才报错。
 //!
 //! 启动器资讯取本启动器公开仓库（[`REPO_URL`]）的 GitHub Releases，免鉴权，进程内缓存
-//! [`LAUNCHER_CACHE_TTL`]；草稿一律不收，预发布只给预览版与测试版看（[`LauncherChannel`]）。
+//! [`LAUNCHER_CACHE_TTL`]；草稿一律不收，偏好的更新通道与安装包的通道都是正式版时不收预发布
+//! （[`LauncherChannel`]）。
 //! 取不到时同样退回缓存并标记离线；连缓存都没有时只在 [`NewsFeed::launcher_error`] 里报错，
 //! 官方资讯照常返回。取不到之后按 [`LAUNCHER_BACKOFF`] 退避：退避期内不请求 GitHub，直接给上次取到的
 //! 发布（标记离线）或上次的失败，主页不必每次都等满请求时限；调用方明确要求重试时（重试按钮、恢复联网
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
+use crate::release::order::Channel;
 
 /// 内容源与图片的根地址；条目里的图片地址是相对它的路径。
 pub const LAUNCHER_CONTENT_BASE: &str = "https://launchercontent.mojang.com";
@@ -68,23 +70,25 @@ pub enum NewsTag {
     Launcher,
 }
 
-/// 正在运行的启动器属于哪个发布通道，决定启动器资讯里显示不显示预发布。
+/// 启动器资讯里显示不显示预发布，由用户偏好的更新通道与安装包自带的通道一起定。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LauncherChannel {
-    /// 正式版：只看正式发布。
+    /// 生效的偏好与包的通道都是正式版：只看正式发布。
     Stable,
-    /// 预览版与测试版：本身就跑在预发布上，预发布也看。
+    /// 其余情形，预发布也看。
     Prerelease,
 }
 
 impl LauncherChannel {
-    /// 与前端构建信息推发布通道同一条规则：版本号带预发布标识、或主版本还是 0（尚未发布过正式版）的
-    /// 是预览版或测试版，其余是正式版。
-    pub fn from_version(major: u64, has_prerelease: bool) -> Self {
-        if has_prerelease || major == 0 {
-            Self::Prerelease
-        } else {
-            Self::Stable
+    /// `preference` 是存着的更新通道偏好（[`Petalfall::update_channel_preference`]），`None` 表示缺省、按包的
+    /// 通道算；`package` 是正在运行的版本号经 [`Channel::of_version`] 判出的通道，认不出时为 `None`。
+    ///
+    /// 只看包的通道不够：偏好测试版的人经跟随装上了正式版，仍想看到测试版的发布。只看偏好也不够：偏好改成
+    /// 正式版、还在等正式版追上来的人，跑的仍是预发布。认不出通道的包（`rc`、`alpha` 这类标识）同样是预发布。
+    pub fn from_channels(preference: Option<Channel>, package: Option<Channel>) -> Self {
+        match (preference.or(package), package) {
+            (Some(Channel::Stable), Some(Channel::Stable)) => Self::Stable,
+            _ => Self::Prerelease,
         }
     }
 
@@ -935,20 +939,43 @@ mod tests {
         );
     }
 
+    /// 生效的偏好与包的通道都是正式版才不看预发布。包的通道照正在运行的版本号判：主版本是 0 的正式版号同样
+    /// 是正式版，认不出通道的预发布标识不是正式版。
     #[test]
     fn launcher_channel_follows_build_channel_rule() {
+        use crate::release::install_policy::channel_of;
         use LauncherChannel::{Prerelease, Stable};
-        for (major, has_prerelease, expected) in [
-            (0, false, Prerelease),
-            (0, true, Prerelease),
-            (1, false, Stable),
-            (1, true, Prerelease),
-            (u64::MAX, false, Stable),
-        ] {
+
+        let stable_packages = ["1.0.0", "0.1.0", "18446744073709551615.0.0"];
+        let prerelease_packages = ["1.0.0-dev.3", "1.0.0-beta.2", "0.1.0-dev.41"];
+        let unrecognized_packages = ["1.0.0-rc.1", "1.0.0-alpha", "1.0.0-dev-1"];
+        for version in unrecognized_packages {
+            assert_eq!(channel_of(version), None, "{version} 应当认不出通道");
+        }
+
+        let mut cases = Vec::new();
+        for version in stable_packages {
+            cases.extend([
+                (None, version, Stable),
+                (Some(Channel::Stable), version, Stable),
+                (Some(Channel::Beta), version, Prerelease),
+                (Some(Channel::Dev), version, Prerelease),
+            ]);
+        }
+        let preferences = [
+            None,
+            Some(Channel::Stable),
+            Some(Channel::Beta),
+            Some(Channel::Dev),
+        ];
+        for version in prerelease_packages.into_iter().chain(unrecognized_packages) {
+            cases.extend(preferences.map(|preference| (preference, version, Prerelease)));
+        }
+        for (preference, version, expected) in cases {
             assert_eq!(
-                LauncherChannel::from_version(major, has_prerelease),
+                LauncherChannel::from_channels(preference, channel_of(version)),
                 expected,
-                "major={major} has_prerelease={has_prerelease}"
+                "preference={preference:?} package={version}"
             );
         }
     }
