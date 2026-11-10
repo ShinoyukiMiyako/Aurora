@@ -7,8 +7,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use petalfall_release::install_policy::channel_of;
-use semver::Version;
+use petalfall_release::install_policy::{channel_of, compare_lenient};
 
 use crate::contract::{Channel, Existing, ExistingKind};
 
@@ -73,20 +72,10 @@ fn app_exe_present(dir: &str) -> io::Result<bool> {
     }
 }
 
-/// 比较两个版本。容错和 NSIS 的 SemverCompare 一致：一侧非法时合法的更大，两侧都非法算相等。
-/// 构建元数据不参与比较：只差元数据的两个包是同一版本。
-fn compare(left: &str, right: &str) -> Ordering {
-    match (Version::parse(left), Version::parse(right)) {
-        (Ok(left), Ok(right)) => left.cmp_precedence(&right),
-        (Ok(_), Err(_)) => Ordering::Greater,
-        (Err(_), Ok(_)) => Ordering::Less,
-        (Err(_), Err(_)) => Ordering::Equal,
-    }
-}
-
-/// 程序文件完好时，已装版本相对载荷版本的三种情况。
+/// 程序文件完好时，已装版本相对载荷版本的三种情况，只看版本先后。先后与容错都按共用包的
+/// [`compare_lenient`]：判定表也用它，两处不会比出不同的先后。
 pub fn classify(installed: &str, payload: &str) -> ExistingKind {
-    match compare(installed, payload) {
+    match compare_lenient(installed, payload) {
         Ordering::Less => ExistingKind::Upgrade,
         Ordering::Equal => ExistingKind::Same,
         Ordering::Greater => ExistingKind::Newer,
@@ -299,55 +288,6 @@ mod tests {
         assert_eq!(classify("0.1.0", "0.2.0"), ExistingKind::Upgrade);
         assert_eq!(classify("0.2.0", "0.2.0"), ExistingKind::Same);
         assert_eq!(classify("0.3.0", "0.2.0"), ExistingKind::Newer);
-    }
-
-    #[test]
-    fn prerelease_numbers_compare_as_numbers() {
-        assert_eq!(
-            classify("0.2.0-dev.9", "0.2.0-dev.12"),
-            ExistingKind::Upgrade
-        );
-        assert_eq!(classify("0.2.0-dev.12", "0.2.0-dev.9"), ExistingKind::Newer);
-        assert_eq!(classify("0.2.0-dev.12", "0.2.0-dev.12"), ExistingKind::Same);
-    }
-
-    #[test]
-    fn a_release_outranks_its_own_prerelease() {
-        assert_eq!(classify("0.2.0-dev.12", "0.2.0"), ExistingKind::Upgrade);
-        assert_eq!(classify("0.2.0", "0.2.0-dev.12"), ExistingKind::Newer);
-    }
-
-    #[test]
-    fn build_metadata_does_not_make_a_version_newer() {
-        assert_eq!(classify("0.2.0+b", "0.2.0+a"), ExistingKind::Same);
-    }
-
-    #[test]
-    fn illegal_versions_follow_the_template_tolerance() {
-        assert_eq!(classify("not-a-version", "0.2.0"), ExistingKind::Upgrade);
-        assert_eq!(classify("0.2.0", "not-a-version"), ExistingKind::Newer);
-        assert_eq!(classify("garbage", "not-a-version"), ExistingKind::Same);
-        assert_eq!(classify("", "0.2.0"), ExistingKind::Upgrade);
-        assert_eq!(classify("1.2", "0.0.1"), ExistingKind::Upgrade);
-    }
-
-    #[test]
-    fn random_versions_order_like_their_numbers() {
-        for _ in 0..200 {
-            let installed = (random_below(3), random_below(3), random_below(3));
-            let payload = (random_below(3), random_below(3), random_below(3));
-            let expected = match installed.cmp(&payload) {
-                Ordering::Less => ExistingKind::Upgrade,
-                Ordering::Equal => ExistingKind::Same,
-                Ordering::Greater => ExistingKind::Newer,
-            };
-            let text = |(major, minor, patch): (u64, u64, u64)| format!("{major}.{minor}.{patch}");
-            assert_eq!(
-                classify(&text(installed), &text(payload)),
-                expected,
-                "{installed:?} 对 {payload:?}"
-            );
-        }
     }
 
     #[test]
