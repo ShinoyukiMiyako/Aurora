@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { autoCheckEnabled, updateToAnnounce } from "./auto-check";
-import { INITIAL_UPDATER_STATE, type UpdateInfo, type UpdaterPhase, type UpdaterState } from "./machine";
+import { INITIAL_UPDATER_STATE, type UpdateInfo, type UpdaterChannels, type UpdaterPhase, type UpdaterState } from "./machine";
 
 const UPDATE: UpdateInfo = { version: "0.3.0", current_version: "0.2.0", notes: null, date: null, channel: "stable" };
 
@@ -40,9 +40,21 @@ describe("查完之后要不要提示", () => {
     expect(updateToAnnounce(state({ kind: "available", update: UPDATE }, { seenVersion: "0.3.0" }), null, null)).toBeNull();
   });
 
+  it("别的通道的候选与同通道的一样提示：判断只看版本，不看通道", () => {
+    const beta: UpdateInfo = { version: "0.3.0-beta.1", current_version: "0.2.0", notes: null, date: null, channel: "beta" };
+    const channels: UpdaterChannels = { package_channel: "stable", preference: "beta", relation: "following", channel_heads: [], refused: [] };
+    expect(updateToAnnounce(state({ kind: "available", update: beta }, { channels }), null, null)).toEqual(beta);
+    expect(updateToAnnounce(state({ kind: "available", update: beta }, { channels }), null, "0.3.0-beta.1")).toBeNull();
+  });
+
+  it("更新源没跟上、下载被拒时不提示", () => {
+    expect(updateToAnnounce(state({ kind: "check_failed", message: "旧", network: null, staleChannel: "beta" }), null, null)).toBeNull();
+    expect(updateToAnnounce(state({ kind: "download_failed", update: UPDATE, reason: "读不了", signature: false, network: null, sourcesTried: 1, refusal: "data_too_new" }), null, null)).toBeNull();
+  });
+
   it("没查到新版本或检查失败时不提示", () => {
     expect(updateToAnnounce(state({ kind: "up_to_date", checkedAt: 5 }), null, null)).toBeNull();
-    expect(updateToAnnounce(state({ kind: "check_failed", message: "超时", network: "timeout" }), null, null)).toBeNull();
+    expect(updateToAnnounce(state({ kind: "check_failed", message: "超时", network: "timeout", staleChannel: null }), null, null)).toBeNull();
     expect(updateToAnnounce(state({ kind: "ready", update: UPDATE }), null, null)).toBeNull();
   });
 });

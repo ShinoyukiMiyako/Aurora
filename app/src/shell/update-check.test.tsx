@@ -189,7 +189,7 @@ describe("启动器更新：自动检查", () => {
   });
 
   it("已经下好等安装时跳过这一轮，不让再查丢掉下好的包", async () => {
-    info = { ...info, available: UPDATE, downloaded_version: "0.2.0" };
+    info = { ...info, available: UPDATE, downloaded_version: "0.2.0", downloaded_channel: "stable", downloaded_intent: "update" };
     await mount();
     await advance(AUTO_CHECK_DELAY_MS + AUTO_CHECK_INTERVAL_MS);
     expect(callsOf(ipc, "check_update")).toEqual([]);

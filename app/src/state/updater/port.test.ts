@@ -78,20 +78,31 @@ describe("启动器更新命令", () => {
     expect(seen).toEqual([{ index: 0, count: 4, name: "cn" }, 700, { index: 1, count: 4, name: "hk" }, 100]);
   });
 
-  it("检查、取消、安装与退出时安装各调一次对应命令", async () => {
+  it("检查、取消、安装、退出时安装与改更新通道各调一次对应命令", async () => {
+    const info = { current_version: "0.1.0", supported: true, unsupported_reason: null, package_channel: "stable", preference: "beta", relation: "following", available: null, channel_heads: [], refused: [], downloaded_version: null, downloaded_channel: null, downloaded_intent: null, install_on_exit: false };
     ipc.overrides.set("check_update", () => update);
     ipc.overrides.set("cancel_task", () => false);
     ipc.overrides.set("install_update", () => null);
     ipc.overrides.set("set_install_on_exit", () => null);
+    ipc.overrides.set("set_update_channel", () => info);
     await expect(UPDATER_PORT.check()).resolves.toEqual(update);
     await UPDATER_PORT.cancel("launcher-update-3");
     await UPDATER_PORT.install();
     await UPDATER_PORT.setInstallOnExit(true);
+    await expect(UPDATER_PORT.setChannel("beta")).resolves.toEqual(info);
     expect(ipc.calls.map((c) => [c.cmd, c.args])).toEqual([
       ["check_update", {}],
       ["cancel_task", { taskId: "launcher-update-3" }],
       ["install_update", {}],
       ["set_install_on_exit", { enabled: true }],
+      ["set_update_channel", { channel: "beta" }],
     ]);
+  });
+
+  it("改更新通道的错误原样抛出", async () => {
+    ipc.overrides.set("set_update_channel", () => {
+      throw Object.assign(new Error("已有更新包正在下载或安装"), { code: "update_busy" });
+    });
+    await expect(UPDATER_PORT.setChannel("dev")).rejects.toMatchObject({ code: "update_busy" });
   });
 });

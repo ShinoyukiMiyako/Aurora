@@ -206,7 +206,7 @@ describe("下载进度的文字", () => {
 describe("弹窗形变的依赖", () => {
   const update = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null, channel: "stable" as const };
   const downloading = (bytes: number, source: DownloadSource | null): UpdaterPhase => ({ kind: "downloading", update, taskId: "t", bytes, totalBytes: 1200, source });
-  const failed = (signature: boolean): UpdaterPhase => ({ kind: "download_failed", update, reason: "连接被重置", signature, network: null, sourcesTried: 1 });
+  const failed = (signature: boolean): UpdaterPhase => ({ kind: "download_failed", update, reason: "连接被重置", signature, network: null, sourcesTried: 1, refusal: null });
   const key = updatePanelLayoutKey;
 
   it("下载进度与仍在第一个源时不变；换过源之后再换也不变（同样多一行提示）", () => {

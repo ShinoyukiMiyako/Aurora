@@ -67,9 +67,9 @@ describe("更新卡各阶段", () => {
   it("退出时安装、检查失败、下载失败、不支持", () => {
     const onExit = updateCardView(state({ kind: "install_on_exit", update: UPDATE }), CTX);
     expect([onExit.button.label, onExit.button.variant, onExit.button.action]).toEqual(["现在安装", "secondary", "install"]);
-    const failed = updateCardView(state({ kind: "check_failed", message: "清单里没有这个平台", network: null }), CTX);
+    const failed = updateCardView(state({ kind: "check_failed", message: "清单里没有这个平台", network: null, staleChannel: null }), CTX);
     expect([failed.title, failed.sub, failed.subIsError, failed.button.label]).toEqual(["检查更新失败", "清单里没有这个平台", true, "重试"]);
-    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: null, sourcesTried: 1 }), CTX);
+    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: null, sourcesTried: 1, refusal: null }), CTX);
     expect([signature.sub, signature.raw]).toEqual(["下载失败：更新包签名校验不通过，已丢弃，不会安装", null]);
     const unsupported = updateCardView(state({ kind: "unsupported", reason: "debug_build" }), CTX);
     expect([unsupported.title, unsupported.sub, unsupported.button.disabled]).toEqual(["当前环境不支持自动更新", "开发环境或调试模式下不检查更新", true]);
@@ -77,23 +77,23 @@ describe("更新卡各阶段", () => {
 
   it("检查失败是网络层的：主句按种类写中文说明，英文原文放进可选中的次句，按钮仍是重试", () => {
     const raw = "error sending request for url (https://petalfall.org/updates/latest.json)";
-    const connect = updateCardView(state({ kind: "check_failed", message: raw, network: "connect" }), CTX);
+    const connect = updateCardView(state({ kind: "check_failed", message: raw, network: "connect", staleChannel: null }), CTX);
     expect([connect.title, connect.sub, connect.subIsError, connect.button.label, connect.button.action]).toEqual(["连不上更新服务器", raw, true, "重试", "check"]);
-    const timeout = updateCardView(state({ kind: "check_failed", message: raw, network: "timeout" }), CTX);
+    const timeout = updateCardView(state({ kind: "check_failed", message: raw, network: "timeout", staleChannel: null }), CTX);
     expect([timeout.title, timeout.sub, timeout.subIsError]).toEqual(["更新服务器没有响应", raw, true]);
   });
 
   it("更新域名 TLS 不通时后端标 connect：主句全是中文，也不把原因说成用户的网络", () => {
-    const { title } = updateCardView(state({ kind: "check_failed", message: "error sending request", network: "connect" }), CTX);
+    const { title } = updateCardView(state({ kind: "check_failed", message: "error sending request", network: "connect", staleChannel: null }), CTX);
     expect(title).not.toMatch(/[A-Za-z]/);
     expect(title).not.toContain("网络");
   });
 
   it("下载失败是网络层的：次句按种类写中文原因，英文原文另放一行，主句与按钮不变", () => {
     const raw = "error sending request for url (https://petalfall.org/updates/setup-0.3.0.exe)";
-    const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 1 }), CTX);
+    const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 1, refusal: null }), CTX);
     expect([connect.title, connect.accent, connect.sub, connect.subIsError, connect.raw, connect.button.action]).toEqual(["有新版本 0.3.0", true, "下载失败：连不上更新服务器", false, raw, "open_panel"]);
-    const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout", sourcesTried: 1 }), CTX);
+    const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout", sourcesTried: 1, refusal: null }), CTX);
     expect([timeout.sub, timeout.raw]).toEqual(["下载失败：更新服务器没有响应", raw]);
   });
 
@@ -110,33 +110,33 @@ describe("更新卡各阶段", () => {
 
   it("试过多个下载源、全都败在网络层：次句说所有下载源，逐源原文另放一行", () => {
     const raw = "cn：error sending request for url (https://dl.petalfall.org/a.exe)\nhk：operation timed out";
-    const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 2 }), CTX);
+    const connect = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "connect", sourcesTried: 2, refusal: null }), CTX);
     expect([connect.title, connect.sub, connect.subIsError, connect.raw]).toEqual(["有新版本 0.3.0", "下载失败：所有下载源都连不上或没有响应", false, raw]);
-    const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout", sourcesTried: 4 }), CTX);
+    const timeout = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: "timeout", sourcesTried: 4, refusal: null }), CTX);
     expect([timeout.sub, timeout.raw]).toEqual(["下载失败：所有下载源都没有响应", raw]);
   });
 
   it("试过多个下载源、不全是网络层失败：次句写试了几个源都没下完；签名不符仍是固定说法", () => {
     const raw = "cn：error sending request\nhk：Download request failed with status: 404 Not Found\nglobal：too large";
-    const mixed = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null, sourcesTried: 3 }), CTX);
+    const mixed = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null, sourcesTried: 3, refusal: null }), CTX);
     expect([mixed.sub, mixed.raw]).toEqual(["下载失败：3 个下载源都没能下完", raw]);
-    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: true, network: null, sourcesTried: 3 }), CTX);
+    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: true, network: null, sourcesTried: 3, refusal: null }), CTX);
     expect([signature.sub, signature.raw]).toEqual(["下载失败：更新包签名校验不通过，已丢弃，不会安装", null]);
   });
 
   it("下载失败不是网络层的：次句只说下载失败，不把后端原文拼进中文句子", () => {
     const raw = "`Download request failed with status: 503 Service Unavailable`";
-    const other = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null, sourcesTried: 1 }), CTX);
+    const other = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: raw, signature: false, network: null, sourcesTried: 1, refusal: null }), CTX);
     expect([other.sub, other.raw]).toEqual(["下载失败", raw]);
   });
 
   it("签名不符优先于网络种类：原因固定，不另放原文", () => {
-    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: "connect", sourcesTried: 1 }), CTX);
+    const signature = updateCardView(state({ kind: "download_failed", update: UPDATE, reason: "x", signature: true, network: "connect", sourcesTried: 1, refusal: null }), CTX);
     expect([signature.sub, signature.raw]).toEqual(["下载失败：更新包签名校验不通过，已丢弃，不会安装", null]);
   });
 
   it("只有下载失败才有另放的原文：检查失败的原文就是次句", () => {
-    const failed = updateCardView(state({ kind: "check_failed", message: "清单里没有这个平台", network: null }), CTX);
+    const failed = updateCardView(state({ kind: "check_failed", message: "清单里没有这个平台", network: null, staleChannel: null }), CTX);
     expect([failed.sub, failed.raw]).toEqual(["清单里没有这个平台", null]);
   });
 

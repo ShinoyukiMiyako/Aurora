@@ -101,3 +101,62 @@ describe("useUpdaterSelector", () => {
     expect(picked).toHaveLength(3);
   });
 });
+
+describe("useUpdater 改更新通道", () => {
+  async function mount() {
+    view = render(
+      <UpdaterProvider>
+        <Full />
+        <Picked />
+      </UpdaterProvider>,
+    );
+    await act(async () => {
+      await settle();
+    });
+  }
+
+  it("写完拿返回的信息同步、欠下一次检查，再以后端为准同步一次；只取提示点与当前版本的订阅方只为提示点熄灭重渲染一次", async () => {
+    const after: UpdaterInfoDto = { ...INFO, preference: "beta", relation: "following", available: null };
+    let served = INFO;
+    ipc.overrides.set("updater_info", () => served);
+    ipc.overrides.set("set_update_channel", () => {
+      served = after;
+      return after;
+    });
+    await mount();
+    expect(picked).toEqual([
+      { dot: false, current: null },
+      { dot: true, current: "0.1.0" },
+    ]);
+    const infoCalls = callsOf(ipc, "updater_info").length;
+
+    await act(async () => {
+      await api.setChannel("beta");
+      await settle();
+    });
+    expect(callsOf(ipc, "set_update_channel")).toEqual([{ channel: "beta" }]);
+    expect(callsOf(ipc, "updater_info")).toHaveLength(infoCalls + 1);
+    expect(api.snapshot()).toMatchObject({ phase: { kind: "idle" }, channels: { package_channel: "stable", preference: "beta", relation: "following" }, channelCheckDue: 1 });
+    expect(picked.slice(2)).toEqual([{ dot: false, current: "0.1.0" }]);
+  });
+
+  it("写失败：原错误抛给调用方，状态不动，照样以后端为准再同步一次", async () => {
+    ipc.overrides.set("updater_info", () => INFO);
+    ipc.overrides.set("set_update_channel", () => {
+      throw Object.assign(new Error("已有更新包正在下载或安装"), { code: "update_busy" });
+    });
+    await mount();
+    const infoCalls = callsOf(ipc, "updater_info").length;
+    let outcome: unknown = null;
+    await act(async () => {
+      outcome = await api.setChannel("dev").then(
+        () => "resolved",
+        (error: unknown) => error,
+      );
+      await settle();
+    });
+    expect(outcome).toMatchObject({ code: "update_busy" });
+    expect(callsOf(ipc, "updater_info")).toHaveLength(infoCalls + 1);
+    expect(api.snapshot()).toMatchObject({ phase: { kind: "available", update: UPDATE }, channels: { preference: "stable" }, channelCheckDue: null });
+  });
+});

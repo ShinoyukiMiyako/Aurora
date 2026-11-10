@@ -3,6 +3,7 @@
 // 后端更新信息经按需查询同步进状态机；每个改动后端状态的动作完成后让查询失效，以后端为准再同步一次。
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import type { UpdateChannel } from "../../ipc/system";
 import { useUpdaterInfo, type UpdaterInfoDto } from "../queries/catalog";
 import { invalidate, type ResourceResult } from "../resource";
 import { UpdaterController } from "./controller";
@@ -33,6 +34,8 @@ export interface UpdaterApi {
   cancelDownload(): Promise<void>;
   setInstallOnExit(enabled: boolean): Promise<void>;
   install(): Promise<void>;
+  /** 下载中会先取消下载、等它结束再写：界面要先请用户确认。写失败时抛出，界面把选项退回原值。 */
+  setChannel(channel: UpdateChannel): Promise<void>;
   markSeen(version: string): void;
 }
 
@@ -84,6 +87,7 @@ export function useUpdater(): UpdaterApi {
       cancelDownload: () => controller.cancelDownload(),
       setInstallOnExit: (enabled: boolean) => thenResync(controller.setInstallOnExit(enabled)),
       install: () => thenResync(controller.install()),
+      setChannel: (channel: UpdateChannel) => thenResync(controller.setChannel(channel)),
       markSeen: (version: string) => controller.markSeen(version),
     };
   }, [controller]);

@@ -324,7 +324,7 @@ describe("设置上的更新点", () => {
   const skipped = () => bootOverrides(ipc, { config: configDto({ skipped_update_version: "1.2.0" }), instances: [], pins: [] });
   const cases: [string, () => void, Record<string, unknown>, boolean][] = [
     ["跳过的版本不亮", skipped, { available: release("1.2.0") }, false],
-    ["跳过了但已下载待安装：照样亮", skipped, { available: release("1.2.0"), downloaded_version: "1.2.0" }, true],
+    ["跳过了但已下载待安装：照样亮", skipped, { available: release("1.2.0"), downloaded_version: "1.2.0", downloaded_channel: "stable", downloaded_intent: "update" }, true],
     ["不支持自动更新时不亮", () => undefined, { supported: false, unsupported_reason: "debug_build", available: release("1.2.0") }, false],
     ["没有新版本时不亮", () => undefined, {}, false],
   ];
