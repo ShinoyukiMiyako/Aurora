@@ -181,7 +181,7 @@
   font-weight: var(--sk-w-title);
   line-height: var(--sk-lh-heading);
   font-variant-numeric: tabular-nums;
-  transition: color var(--sk-dur-hover) var(--sk-ease);
+  transition: color var(--sk-dur-in) var(--sk-ease-out);
 }
 
 /* 标签行与卡面是同格的兄弟，接不到卡面的媒体文字色：卡面显示材质平铺或玩家图片时在这里换 */

@@ -279,6 +279,11 @@ export interface RowMetaContext {
   etaSpeed: number;
   /** 写出来的速度：平滑过、换字有节制的那个（lib/progress-display 的 useDisplaySpeed），不是每 100 ms 一跳的瞬时值。 */
   speed: number;
+  /**
+   * 写出来的已下字节：按节拍换字的那个（lib/progress-display 的 useDisplayCount），不是每 100 ms 一跳的原值。
+   * 只有运行中的行用到，已下大小与剩余时间都按它算。
+   */
+  bytes: number;
   /** 相对时间的参照时刻。 */
   now: number;
 }
@@ -290,18 +295,19 @@ function sizeOrPending(bytes: number | null): string {
 /**
  * 分步任务这一步还没认下下载批次时，字节与速度还是上一批留下的，写出来像在下这一步，所以只写在第几步；
  * 认下之后写的量与剩余时间都是这一步这一批的。
+ * 量与剩余时间都按写出来的已下字节算：剩余时间挨着已下大小，两段字同一拍换，不各跳各的。
  */
-function runningMeta(task: Task, speedForEta: number, shownSpeed: number): { left: string; right: string } {
+function runningMeta(task: Task, speedForEta: number, shownSpeed: number, shownBytes: number): { left: string; right: string } {
   if (task.phase !== null && task.phase.batch === null) return { left: taskPhaseText(task.phase, "short"), right: "" };
   const total = task.totalBytes;
   const amount =
-    total === null ? (task.bytes > 0 ? TASKS_COPY.row.transfer(formatBytes(task.bytes), TASKS_COPY.row.sizePending) : TASKS_COPY.row.sizePending) : TASKS_COPY.row.transfer(formatBytes(task.bytes), formatBytes(total));
+    total === null ? (shownBytes > 0 ? TASKS_COPY.row.transfer(formatBytes(shownBytes), TASKS_COPY.row.sizePending) : TASKS_COPY.row.sizePending) : TASKS_COPY.row.transfer(formatBytes(shownBytes), formatBytes(total));
   const left = task.phase === null ? amount : `${taskPhaseText(task.phase, "short")} · ${amount}`;
   if (task.speedBps <= 0) return { left, right: TASKS_COPY.row.waitingData };
   // 总量未知时估不出剩余时间，只报速度
   if (total === null) return { left, right: formatSpeed(shownSpeed) };
   const speed = speedForEta > 0 ? speedForEta : task.speedBps;
-  return { left, right: TASKS_COPY.row.speedEta(formatSpeed(shownSpeed), etaText(Math.max(0, total - task.bytes) / speed)) };
+  return { left, right: TASKS_COPY.row.speedEta(formatSpeed(shownSpeed), etaText(Math.max(0, total - shownBytes) / speed)) };
 }
 
 /**
@@ -336,7 +342,7 @@ export function rowMeta(task: Task, ctx: RowMetaContext): RowMeta {
   let meta: RowMeta;
   switch (task.status) {
     case "running":
-      meta = { ...runningMeta(task, ctx.etaSpeed, ctx.speed), danger: false };
+      meta = { ...runningMeta(task, ctx.etaSpeed, ctx.speed, ctx.bytes), danger: false };
       break;
     case "queued": {
       if (ctx.queuePosition === null) throw new Error(`排队中的任务 ${task.id} 没有队列位次`);
@@ -399,9 +405,12 @@ export function overviewTrack(active: readonly Task[]): string {
   return active.map(progressTrack).sort().join("\n");
 }
 
-/** 总览副行：剩余字节与剩余时间；没有任何下载流量时写「等待数据」。 */
-export function overviewRemaining(o: Overview, speedForEta: number): string {
-  const remaining = Math.max(0, o.total - o.downloaded);
+/**
+ * 总览副行：剩余字节与剩余时间；没有任何下载流量时写「等待数据」。downloaded 是写出来的已下字节（按节拍换字的那个，
+ * 与「已下载」小统计同一个），不是 o.downloaded 的原值：剩余字节与旁边的已下载同一拍换。
+ */
+export function overviewRemaining(o: Overview, downloaded: number, speedForEta: number): string {
+  const remaining = Math.max(0, o.total - downloaded);
   const speed = speedForEta > 0 ? speedForEta : o.speed;
   return TASKS_COPY.flow.remaining(formatBytes(remaining), speed > 0 ? etaText(remaining / speed) : TASKS_COPY.row.waitingData);
 }

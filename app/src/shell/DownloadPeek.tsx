@@ -8,8 +8,8 @@
 // 行里的进度文字与下载任务页同一套显示节流（lib/progress-display）：速度平滑、每秒最多换两次字，百分数与进度条同步走；
 // 任务完成时行先留在原处把进度推满、停一拍，再退场。
 
-import { AnimatePresence, motion, useReducedMotionConfig } from "framer-motion";
-import { useEffect, useReducer, useState } from "react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
+import { useEffect, useReducer, useState, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
 import { ACTION_ERROR, CONFIRM_COPY, taskPhaseText } from "../copy/flows";
 import { formatSpeed, percent } from "../domain/format";
@@ -261,7 +261,7 @@ function PeekList({ rows, finishing, onCancel, onSettled }: { rows: readonly Tas
     // 列表与空态先退后进：最后一行跟着列表一起淡出，空态再淡入；退场的列表不脱离布局，外框在换手的那一刻才形变
     <AnimatePresence mode="wait" onExitComplete={onSettled}>
       {rows.length > 0 ? (
-        <motion.div key="list" initial={mounted.current ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
+        <ListLayer key="list" enter={mounted.current}>
           <ul ref={list} className={styles.list}>
             {/*
              * 行退场时留在流里淡出，播完才移除，下面的行再滑上来，外框与主体同时形变到新高度。不用 popLayout：
@@ -273,7 +273,7 @@ function PeekList({ rows, finishing, onCancel, onSettled }: { rows: readonly Tas
               ))}
             </AnimatePresence>
           </ul>
-        </motion.div>
+        </ListLayer>
       ) : (
         <motion.p
           key="empty"
@@ -286,6 +286,19 @@ function PeekList({ rows, finishing, onCancel, onSettled }: { rows: readonly Tas
         </motion.p>
       )}
     </AnimatePresence>
+  );
+}
+
+/**
+ * 列表那一层。最后一行走掉时不是行自己退场，而是整块列表冻结在最后一帧、跟着这一层淡出：里面的行仍算在场，
+ * 所以退场期间 inert 要打在这一层上，跟着淡出的行同样点不到、聚焦不到。
+ */
+function ListLayer({ enter, children }: { enter: boolean; children: ReactNode }) {
+  const present = useIsPresent();
+  return (
+    <motion.div inert={!present} initial={enter ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
+      {children}
+    </motion.div>
   );
 }
 
@@ -356,6 +369,8 @@ function ActiveGlyph({ tasks }: { tasks: readonly Task[] }) {
 function PeekRow({ task, finishing, enter, onCancel }: { task: Task; finishing: boolean; enter: boolean; onCancel: () => void }) {
   // ul 的直接子项只能是 li，不能再包一层 Appear；减少动画时进出只留透明度，删掉的行不先缩一下再淡出
   const insert = useInsertItem();
+  // 退场时行留在流里淡出、播完才移除：这段时间带 inert，取消键点不到、聚焦不到，读屏也不再读它
+  const present = useIsPresent();
   const queued = task.status === "queued";
   // 写出来的速度是平滑过、每秒最多换两次字的那个，不是每 100 ms 一跳的瞬时值
   const live = useDisplaySpeed(task.speedBps);
@@ -368,7 +383,7 @@ function PeekRow({ task, finishing, enter, onCancel }: { task: Task; finishing: 
   const track = progressTrack(task);
   const [beforePercent, afterPercent] = aroundPercent(PEEK_COPY.progress(PERCENT_SLOT, formatSpeed(speed)));
   return (
-    <motion.li className={styles.row} initial={enter ? insert.initial : false} animate={insert.animate} exit={insert.exit}>
+    <motion.li className={styles.row} inert={!present} initial={enter ? insert.initial : false} animate={insert.animate} exit={insert.exit}>
       <div className={styles.rowHead}>
         <span className={styles.rowTitle} title={task.title}>
           {task.title}

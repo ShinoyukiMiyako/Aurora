@@ -57,7 +57,6 @@ import {
   overviewOf,
   overviewTrack,
   retryNeedsNetwork,
-  rowMeta,
   sameTaskLayout,
   subtitleOf,
   TASK_FILTERS,
@@ -350,12 +349,11 @@ function TaskListRow({ task: placed, finishing, queuePosition, now, handlers }: 
   const task = useLauncherSelector((s) => (running ? s.tasks.find((t) => t.id === placed.id) : placed));
   if (task === undefined) throw new Error(`任务 ${placed.id} 已不在任务表里，列表却还在画它`);
   const speed = useDisplaySpeed(task.speedBps);
-  const meta = rowMeta(task, { queuePosition, etaSpeed: running ? etaSpeed(readThroughputHistory(), task) : 0, speed, now });
   return (
     <TaskRow
       task={task}
       finishing={finishing}
-      meta={meta}
+      meta={{ queuePosition, etaSpeed: running ? etaSpeed(readThroughputHistory(), task) : 0, speed, now }}
       hasInstance={task.instanceId !== null && handlers.hasInstance(task.instanceId)}
       retryBlocked={retryNeedsNetwork(task) ? handlers.retryBlocked : undefined}
       onCancel={() => handlers.onCancel(task)}

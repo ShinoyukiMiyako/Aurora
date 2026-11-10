@@ -208,11 +208,14 @@ describe("下载入口", () => {
 });
 
 describe("快览的任务行", () => {
-  const row = (title: string) => {
-    const found = [...document.querySelectorAll<HTMLElement>("li")].filter((li) => li.textContent?.includes(title));
-    if (found.length !== 1) throw new Error(`「${title}」的行应当恰好一个，实为 ${found.length}`);
+  /** 标题含 title 的行，恰好一个：在场的，或正在退场的（自己或所在的列表在淡出，处在 inert 子树里）。 */
+  const find = (leaving: boolean, title: string) => {
+    const found = [...document.querySelectorAll<HTMLElement>("li")].filter((li) => li.textContent?.includes(title) && (li.closest("[inert]") !== null) === leaving);
+    if (found.length !== 1) throw new Error(`「${title}」${leaving ? "退场中" : "在场"}的行应当恰好一个，实为 ${found.length}`);
     return found[0];
   };
+  const row = (title: string) => find(false, title);
+  const leavingRow = (title: string) => find(true, title);
 
   it("打开时就在的行不单独淡入；开着期间新来的行淡入，结束的行留在流里淡出", async () => {
     const java21 = await startJava(21);
@@ -228,8 +231,27 @@ describe("快览的任务行", () => {
     await flush();
     expect(launcher.state.tasks.find((t) => t.id === java21.id)?.status).toBe("failed");
     // 已不在进行中的行还挂在列表里播退场，下面的行等它播完再滑上来
-    expect(row(java21.title)).toBe(leaving);
+    expect(leavingRow(java21.title)).toBe(leaving);
     expect(leaving.parentElement).toBe(row(java17.title).parentElement);
+    // 在场时不在 inert 子树里（上面按在场找到了它），退场这段时间行自己带上 inert：取消键点不到、聚焦不到
+    expect(leaving.hasAttribute("inert")).toBe(true);
+  });
+
+  it("最后一行走掉时跟着整块列表淡出：inert 打在列表那一层上，里面的行一起点不到、聚焦不到", async () => {
+    const java21 = await startJava(21);
+    act(() => entry().click());
+    await flush();
+    const last = row(java21.title);
+    const layer = only(document, `.${styles.list}`).parentElement;
+    if (layer === null) throw new Error("列表外面没有那一层");
+    expect(layer.hasAttribute("inert")).toBe(false);
+
+    runs.get(21)?.reject(new IpcError("java_failed", "运行时清单下载失败"));
+    await flush();
+    // 列表冻结在最后一帧整块淡出（jsdom 不播完）：行自己仍算在场、不单独退场，靠列表那一层的 inert 挡住
+    expect(leavingRow(java21.title)).toBe(last);
+    expect(last.hasAttribute("inert")).toBe(false);
+    expect(last.closest("[inert]")).toBe(layer);
   });
 
   it("减少动画：新来的行只淡入，进出的目标里只有透明度（缩放在减少动画下一步到位，删掉的行会先缩一下再淡出）", async () => {
@@ -266,7 +288,7 @@ describe("快览的任务行", () => {
     runs.get(21)?.reject(new IpcError("java_failed", "运行时清单下载失败"));
     await flush();
     // 已经在退场的那一行：留在流里，退场目标只有透明度
-    expect(row(java21.title)).toBe(leaving);
+    expect(leavingRow(java21.title)).toBe(leaving);
     expect(animated(leaving, "exit")).toEqual(["opacity"]);
   });
 

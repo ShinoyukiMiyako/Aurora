@@ -7,6 +7,7 @@ import { act, Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GAME_LOG_EVENT } from "../../ipc/launch";
 import { CORE_EVENT, type TaskRecordDto } from "../../ipc/tasks";
+import { SPEED_REFRESH_MS } from "../../lib/progress-display";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
@@ -228,6 +229,22 @@ describe("下载任务页按片订阅", () => {
       PageHeader: before.PageHeader,
       SegmentedControl: before.SegmentedControl,
     });
+  });
+
+  it("已下大小到点补字：只重画那一小段文字，任务行与吞吐卡本身都不重渲染", async () => {
+    const { running } = await mountBusy();
+    const [hot] = running;
+    act(() => {
+      emit(CORE_EVENT, { kind: "download", task_id: `${hot.id}#1`, total: 100, finished: 30, bytes: 30 * MB, total_bytes: 100 * MB, speed: 2 * MB });
+    });
+    // 事件到达的那一刻已下大小还是上一拍的
+    expect(rowText(hot.title)).toContain("0 B / 100 MB");
+    const rowsBefore = new Map(renders.rows);
+    const cardBefore = renders.ThroughputCard;
+    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS));
+    expect(rowText(hot.title)).toContain("30.0 MB / 100 MB");
+    expect(renders.rows.get(hot.id)).toBe(rowsBefore.get(hot.id));
+    expect(renders.ThroughputCard).toBe(cardBefore);
   });
 
   it("游戏运行中推 20 批日志：页面子树一次都不提交", async () => {

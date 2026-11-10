@@ -2,12 +2,13 @@
 
 import { useId } from "react";
 import { formatBytes, formatSpeed } from "../../domain/format";
+import { useDisplayCount } from "../../lib/progress-display";
 import { cssVars } from "../../lib/util";
 import { Card } from "../../ui/Card";
 import { ProgressRing } from "../../ui/ProgressRing";
 import { TASKS_COPY } from "./copy";
 import { CHART_STEP, CHART_VIEW, SAMPLE_INTERVAL_MS } from "./constants";
-import type { ChartFrame } from "./hooks";
+import { usePacedEtaSpeed, type ChartFrame } from "./hooks";
 import { chartGeometry, overviewRemaining, totalEtaSpeed, type Overview, type ThroughputSample } from "./model";
 import styles from "./tasks.module.css";
 
@@ -32,6 +33,35 @@ export interface ThroughputCardProps {
   frame: ChartFrame;
 }
 
+/**
+ * 卡上的文字：总速度、剩余字节与时间、两枚小统计。已下字节按节拍换字（lib/progress-display 的 useDisplayCount），
+ * 「已下载」与「剩余 …」用同一个值、同一拍换，剩余时间也跟着这一拍。节拍放在这一段里，到点补字时只重画文字，
+ * 进度环与曲线不跟着重渲染。
+ */
+function FlowFigures({ overview, speed, history }: Pick<ThroughputCardProps, "overview" | "speed" | "history">) {
+  const downloaded = useDisplayCount(overview.downloaded, overview.total);
+  const etaSpeed = usePacedEtaSpeed(downloaded, totalEtaSpeed(history, overview.speed));
+  return (
+    <>
+      <div className={styles.flowText}>
+        <span className={styles.flowLabel}>{TASKS_COPY.flow[overview.label]}</span>
+        <span className={styles.flowSpeed}>{formatSpeed(speed)}</span>
+        <span className={styles.flowSub}>{overview.label !== "idle" ? overviewRemaining(overview, downloaded, etaSpeed) : TASKS_COPY.flow.idleSub}</span>
+      </div>
+      <div className={styles.flowStats}>
+        <span className={styles.miniStat}>
+          <span className={styles.miniValue}>{formatBytes(downloaded)}</span>
+          <span className={styles.miniLabel}>{overview.localOnly ? TASKS_COPY.flow.processed : TASKS_COPY.flow.downloaded}</span>
+        </span>
+        <span className={styles.miniStat}>
+          <span className={styles.miniValue}>{formatBytes(overview.total)}</span>
+          <span className={styles.miniLabel}>{TASKS_COPY.flow.batchTotal}</span>
+        </span>
+      </div>
+    </>
+  );
+}
+
 export function ThroughputCard({ overview, speed, track, history, frame }: ThroughputCardProps) {
   // 渐变要按 id 引用；useId 的结果带冒号一类字符，在 url(#…) 里不合法
   const gradientId = `tasks-flow-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
@@ -49,21 +79,7 @@ export function ThroughputCard({ overview, speed, track, history, frame }: Throu
           label={TASKS_COPY.flow.ringLabel}
           emptyText={active ? TASKS_COPY.flow.ringEmpty.unknown : TASKS_COPY.flow.ringEmpty.idle}
         />
-        <div className={styles.flowText}>
-          <span className={styles.flowLabel}>{TASKS_COPY.flow[overview.label]}</span>
-          <span className={styles.flowSpeed}>{formatSpeed(speed)}</span>
-          <span className={styles.flowSub}>{active ? overviewRemaining(overview, totalEtaSpeed(history, overview.speed)) : TASKS_COPY.flow.idleSub}</span>
-        </div>
-        <div className={styles.flowStats}>
-          <span className={styles.miniStat}>
-            <span className={styles.miniValue}>{formatBytes(overview.downloaded)}</span>
-            <span className={styles.miniLabel}>{overview.localOnly ? TASKS_COPY.flow.processed : TASKS_COPY.flow.downloaded}</span>
-          </span>
-          <span className={styles.miniStat}>
-            <span className={styles.miniValue}>{formatBytes(overview.total)}</span>
-            <span className={styles.miniLabel}>{TASKS_COPY.flow.batchTotal}</span>
-          </span>
-        </div>
+        <FlowFigures overview={overview} speed={speed} history={history} />
       </div>
       <div className={styles.chart} style={CHART_SCROLL} aria-hidden="true">
         {/* 每个新采样换一次键：画布从头滑起，最新的一点从右缘外滑进来 */}

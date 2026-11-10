@@ -203,7 +203,8 @@ function Island({ session }: { session: SessionState }) {
   if (!open && stagesHeld) setStagesHeld(false);
   const stages = loading || stagesHeld;
   const detailKey = detailLayoutKey(session, stages);
-  const detailReflow = useReflow<HTMLDivElement>();
+  // 清单出没时外框沿 morph 形变，被挤开的日志区要走同一条弹簧，否则先于外框下沿到位、与它分开动
+  const detailReflow = useReflow<HTMLDivElement>("morph");
   const dotRef = useRef<HTMLSpanElement>(null);
   useBreathPhase(dotRef, tone === "running");
 

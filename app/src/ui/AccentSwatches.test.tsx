@@ -2,9 +2,11 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { MotionConfig } from "framer-motion";
 import { act, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ACCENT_NAMES } from "../domain/types";
+import { faceSwap } from "../lib/motion";
 import { keydown, render, type Rendered } from "../test/dom";
 import { AccentSwatches, type AccentOption } from "./AccentSwatches";
 import type { PreviewAccent } from "./ModeCards";
@@ -112,6 +114,22 @@ describe("AccentSwatches", () => {
     // 旧对勾还在 DOM 里走退场，等淡出完才移除
     expect(checkOf(0)).toBe(mounted);
     expect(checkOf(1)).toBeNull();
+  });
+
+  it.each([
+    ["never", `scale(${faceSwap.pop.initial.scale})`],
+    ["always", ""],
+  ] as const)("换选中项的新对勾平常从略小处弹出；减少动画（%s）时只淡入，入场起点不带缩放", (reducedMotion, transform) => {
+    view = render(
+      <MotionConfig reducedMotion={reducedMotion}>
+        <Controlled initial="sakura" onChange={vi.fn()} />
+      </MotionConfig>,
+    );
+    act(() => radios()[1].click());
+    const entering = swatchOf(radios()[1]).firstElementChild as HTMLElement | null;
+    expect(entering?.querySelector("svg")).not.toBeNull();
+    expect(entering?.style.opacity).toBe("0");
+    expect(entering?.style.transform).toBe(transform);
   });
 
   it("单选组以传入的名称命名，名称显示在色块下", () => {

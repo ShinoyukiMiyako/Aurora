@@ -490,7 +490,8 @@ function DetailBody({ entry, detail, onTitle, onClose, onOpenDependency, fitInst
             )}
           </Appear>
           <div className={styles.dimmable} data-stale={stale || undefined}>
-            <TabPanel tabsId={tabsId} value={tab}>
+            {/* 面板第一次挂载时随弹窗与加载层的淡入一起出现，不再叠一层自己的上移淡入；之后换标签照常播 */}
+            <TabPanel tabsId={tabsId} value={tab} initial={false}>
               {tab === "intro" ? (
                 // 换来源时整段重挂：正文的块按下标作 key，留着旧元素会被让位当成「同一段变高了」，段落与下面的小节一起滑
                 <IntroTab key={detailKey} detail={detail} onOpenDependency={onOpenDependency} />

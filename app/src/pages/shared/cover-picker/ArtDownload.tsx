@@ -7,6 +7,7 @@ import { useId, useState } from "react";
 import { Spinner } from "../../../art/Spinner";
 import { useBlockCatalog } from "../../../art/iso/catalog";
 import { ART_DOWNLOAD_COPY } from "../../../copy/cover";
+import { useDisplayCount } from "../../../lib/progress-display";
 import { cx } from "../../../lib/util";
 import { useRunner } from "../../../shell/useRunner";
 import { useArtDownload, type ArtDownloadProgress } from "../../../state/art-download";
@@ -86,9 +87,18 @@ function DownloadProgress({ progress, enter }: { progress: ArtDownloadProgress |
         <span id={stageId} role="status">
           {stage}
         </span>
-        {counted && <span className={styles.bytes}>{ART_DOWNLOAD_COPY.bytes(progress.downloaded, progress.total)}</span>}
+        {counted && <DownloadedBytes downloaded={progress.downloaded} total={progress.total} />}
       </div>
       <ProgressBar value={value} size="sm" track={progress?.stage} labelledBy={stageId} />
     </div>
   );
+}
+
+/**
+ * 已下大小：进度条按每条进度事件走，这里的字照事件原样换一秒跳十次、读不清，按共用的节拍换。
+ * 单独成一个组件：节拍到点补上最新值时只重画这一小段，进度条与阶段文字不跟着多画一次。
+ */
+function DownloadedBytes({ downloaded, total }: { downloaded: number; total: number | null }) {
+  const shown = useDisplayCount(downloaded, total);
+  return <span className={styles.bytes}>{ART_DOWNLOAD_COPY.bytes(shown, total)}</span>;
 }

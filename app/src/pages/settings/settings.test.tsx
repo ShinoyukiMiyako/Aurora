@@ -1478,14 +1478,18 @@ describe("设置页：关于与启动器更新", () => {
     await click(button("下载更新"));
     const [download] = callsOf(ipc, "download_update");
     expect(typeof download.taskId).toBe("string");
-    // 假后端每 120 ms 报一次进度，共 12 MB
+    // 假后端每 120 ms 报一次进度，共 12 MB。卡片主句的百分比条条都换，面板与卡片的已下大小按 500 ms 的节拍换字
     await act(async () => {
       await vi.advanceTimersByTimeAsync(250);
     });
-    expect(text()).toContain("4.8 MB / 12.0 MB");
+    expect(text()).toContain("正在下载 0.2.0 · 40%");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(text()).toContain("9.6 MB / 12.0 MB");
     expect(button("后台下载").textContent).toBe("后台下载");
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(600);
+      await vi.advanceTimersByTimeAsync(300);
     });
     await flush();
     expect(text()).toContain("新版本已经下好了。");
@@ -1681,7 +1685,8 @@ describe("设置页：关于与启动器更新", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(130);
     });
-    expect(text()).toContain("2.4 MB / 12.0 MB");
+    // 已下大小的字按 500 ms 的节拍换，第一个源报的这一条只在卡片主句的百分比上
+    expect(text()).toContain("正在下载 0.2.0 · 20%");
     expect(text()).not.toContain("已换用备用下载源");
     // 换源提示要让读屏念出来：status 节点在第一个源时就挂着、是空的，换源时只换文字
     const panel = openDialogs()[0];
@@ -1697,12 +1702,13 @@ describe("设置页：关于与启动器更新", () => {
     expect(panel?.textContent).not.toContain("2.4 MB");
     expect(text()).toContain("0 B · 已换用备用下载源（2/4）");
 
+    // 换源那一刻字回到 0 B，从那时起满 500 ms 换上最近报上来的一条
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(500);
     });
-    expect(text()).toContain("4.8 MB / 12.0 MB · 已换用备用下载源（2/4）");
+    expect(text()).toContain("9.6 MB / 12.0 MB · 已换用备用下载源（2/4）");
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(150);
     });
     await flush();
     expect(text()).toContain("新版本已经下好了。");

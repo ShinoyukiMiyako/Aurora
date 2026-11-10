@@ -1040,6 +1040,29 @@ describe("资源详情：前置层", () => {
   });
 });
 
+describe("资源详情：标签面板", () => {
+  it("弹窗打开时面板不另播入场，跟着弹窗与加载层一起出现；换标签后新面板照常从下方上移淡入", async () => {
+    await mount({ platform: "modrinth", projectId: "AANobbMI", sources: [], listedType: "mod" });
+    const panel = () => {
+      const found = [...dialog().querySelectorAll<HTMLElement>('[role="tabpanel"]')];
+      if (found.length !== 1) throw new Error(`应只有一个标签面板，实际有 ${found.length} 个`);
+      return found[0];
+    };
+    const intro = panel();
+    expect(intro.id).toMatch(/-panel-intro$/);
+    expect(intro.style.opacity).toBe("1");
+    expect(intro.style.transform).toBe("none");
+
+    const versionsTab = [...dialog().querySelectorAll<HTMLElement>('[role="tab"]')].find((t) => t.textContent === "版本");
+    if (versionsTab === undefined) throw new Error("没有版本标签");
+    act(() => versionsTab.click());
+    const versions = panel();
+    expect(versions.id).toMatch(/-panel-versions$/);
+    expect(versions.style.opacity).toBe("0");
+    expect(versions.style.transform).toBe("translateY(6px)");
+  });
+});
+
 describe("资源详情：整合包安装进度", () => {
   it("点安装后排队中是静态的空轨道，不是循环横扫的不定进度", async () => {
     const v = modVersion("mp-1", { project_id: "MP1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.21.1"] });

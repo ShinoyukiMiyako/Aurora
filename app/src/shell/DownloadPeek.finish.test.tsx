@@ -49,22 +49,32 @@ function panel(): HTMLElement {
   return found;
 }
 
-/** 快览里标题含 title 的行；没有时为 null。 */
-function rowOf(title: string): HTMLElement | null {
-  const found = [...panel().querySelectorAll<HTMLElement>("li")].filter((li) => li.textContent?.includes(title));
+/**
+ * 行在场，还是正在退场：行自己留在流里淡出，或者是最后一行、跟着整块列表淡出。两种退场都在 inert 子树里。
+ */
+type RowPresence = "present" | "leaving";
+
+/** 快览里标题含 title 的行，连同正在退场的。 */
+function rowsOf(title: string): HTMLElement[] {
+  return [...panel().querySelectorAll<HTMLElement>("li")].filter((li) => li.textContent?.includes(title));
+}
+
+/** 快览里标题含 title、处在 presence 状态的行；没有时为 null。 */
+function rowOf(title: string, presence: RowPresence = "present"): HTMLElement | null {
+  const found = rowsOf(title).filter((li) => (li.closest("[inert]") === null) === (presence === "present"));
   if (found.length > 1) throw new Error(`「${title}」的行不止一个`);
   return found.length === 0 ? null : found[0];
 }
 
-function row(title: string): HTMLElement {
-  const found = rowOf(title);
-  if (found === null) throw new Error(`快览里没有「${title}」的行`);
+function row(title: string, presence: RowPresence = "present"): HTMLElement {
+  const found = rowOf(title, presence);
+  if (found === null) throw new Error(`快览里没有「${title}」的行（${presence}）`);
   return found;
 }
 
 /** 行右侧正在显示的状态文字（不含叠在下面撑宽度的字样）。 */
-function stateText(title: string): string | null {
-  const text = row(title).querySelector(`.${styles.rowState} > .${styles.rowStateText}`);
+function stateText(title: string, presence: RowPresence = "present"): string | null {
+  const text = row(title, presence).querySelector(`.${styles.rowState} > .${styles.rowStateText}`);
   if (text === null) throw new Error(`「${title}」的行没有状态文字`);
   return text.textContent;
 }
@@ -191,14 +201,14 @@ describe("快览行的完成收尾", () => {
     expect(cancelKey(done.title)?.getAttribute("aria-disabled")).toBe("true");
     expect(cancelKey(other.title)?.getAttribute("aria-disabled")).toBeNull();
 
-    // 收尾还没结束（160 ms）：行一直在，还排在进行中的位置上
+    // 收尾还没结束（160 ms）：行一直在、仍可交互，还排在进行中的位置上
     await stepFrames(10);
     expect(rowOf(done.title)).not.toBeNull();
     expect(panelLayoutKey()[0]).toEqual([done.id, other.id]);
 
     // 收尾结束后照常退场：淡完从列表里拿掉，另一行留着
     await stepFrames(40);
-    expect(rowOf(done.title)).toBeNull();
+    expect(rowsOf(done.title)).toEqual([]);
     expect(panelLayoutKey()[0]).toEqual([other.id]);
     expect(rowOf(other.title)).not.toBeNull();
   });
@@ -213,8 +223,8 @@ describe("快览行收尾期间的速度", () => {
     await stepFrames(20);
     expect(stateText(java.title)).toBe(PEEK_COPY.progress("60%", formatSpeed(2_000_000)));
     /** 此刻百分数节点写着的字：它跟着进度条平滑走，这里只核对速度那半段。 */
-    const shownPercent = () => {
-      const node = row(java.title).querySelector(`.${styles.rowStateText} > span`);
+    const shownPercent = (presence: RowPresence = "present") => {
+      const node = row(java.title, presence).querySelector(`.${styles.rowStateText} > span`);
       if (node === null || node.textContent === null) throw new Error("状态文字里没有百分数");
       return node.textContent;
     };
@@ -231,10 +241,11 @@ describe("快览行收尾期间的速度", () => {
     expect(panelLayoutKey()[0]).toEqual([java.id]);
     expect(stateText(java.title)).toBe(PEEK_COPY.progress(shownPercent(), formatSpeed(2_000_000)));
 
-    // 收尾结束（260 ms）后行在淡出：数据里已经没有这一行，节点还在，写的仍是同一个速度
+    // 收尾结束（260 ms）后行跟着列表在淡出：数据里已经没有这一行，节点还在（处在 inert 子树里），写的仍是同一个速度
     await stepFrames(8);
     expect(panelLayoutKey()[0]).toEqual([]);
-    expect(stateText(java.title)).toBe(PEEK_COPY.progress(shownPercent(), formatSpeed(2_000_000)));
+    expect(rowOf(java.title)).toBeNull();
+    expect(stateText(java.title, "leaving")).toBe(PEEK_COPY.progress(shownPercent("leaving"), formatSpeed(2_000_000)));
   });
 });
 
@@ -253,11 +264,11 @@ describe("快览的布局键接线", () => {
 
     runs.get(21)?.reject(new IpcError("java_failed", "运行时清单下载失败"));
     await flush();
-    // 行还留在流里淡出：数据已经变了，这一笔还没记
-    expect(rowOf(first.title)).not.toBeNull();
+    // 行还留在流里淡出（处在 inert 子树里）：数据已经变了，这一笔还没记
+    expect(rowOf(first.title, "leaving")).not.toBeNull();
     expect(panelLayoutKey()).toEqual([[second.id], 0, true, true]);
     await stepFrames(30);
-    expect(rowOf(first.title)).toBeNull();
+    expect(rowsOf(first.title)).toEqual([]);
     expect(panelLayoutKey()).toEqual([[second.id], 1, true, true]);
 
     runs.get(17)?.reject(new IpcError("java_failed", "又失败了"));

@@ -64,21 +64,21 @@ vi.mock("../ui/Popover", async (orig) => {
   };
 });
 
-// 让位挂到了哪些容器上：jsdom 不做布局，让位本身在这里测不了，只核对它挂对了地方；挂载照常交给真实现
-const reflowed = vi.hoisted(() => new Set<Element>());
+// 让位挂到了哪些容器上、各走哪条弹簧：jsdom 不做布局，让位本身在这里测不了，只核对它挂对了地方；挂载照常交给真实现
+const reflowed = vi.hoisted(() => new Map<Element, string>());
 vi.mock("../lib/reflow", async (orig) => {
   const mod = await orig<typeof import("../lib/reflow")>();
   const { useCallback } = await import("react");
   return {
     ...mod,
-    useReflow: <T extends HTMLElement>() => {
-      const real = mod.useReflow<T>();
+    useReflow: <T extends HTMLElement>(spring: Parameters<typeof mod.useReflow>[0] = "settle") => {
+      const real = mod.useReflow<T>(spring);
       return useCallback(
         (el: T | null) => {
-          if (el !== null) reflowed.add(el);
+          if (el !== null) reflowed.set(el, spring);
           return real(el);
         },
-        [real],
+        [real, spring],
       );
     },
   };
@@ -663,7 +663,8 @@ describe("状态岛", () => {
     expect(reflowed.has(actions)).toBe(true);
     const detail = liveDetail().querySelector(`.${styles.detail}`);
     if (detail === null) throw new Error("详情里没有正文");
-    expect(reflowed.has(detail)).toBe(true);
+    // 清单出没时外框沿 morph 形变：正文的让位走同一条弹簧，被挤开的日志区与外框下沿一起到位
+    expect(reflowed.get(detail)).toBe("morph");
   });
 
   it("详情浮层随内容形变：正文在主体（滚动区）里，动作行在底部那一层、不随主体滚动", async () => {

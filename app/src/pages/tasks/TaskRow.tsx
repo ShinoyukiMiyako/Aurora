@@ -3,6 +3,7 @@
 import { Icon, type IconName } from "../../art/Icon";
 import { TASK_KIND_LABEL, taskStatusLabel } from "../../copy/flows";
 import type { Task, TaskStatus } from "../../domain/types";
+import { useDisplayCount } from "../../lib/progress-display";
 import { cx } from "../../lib/util";
 import { isActiveTask, progressTrack, settledOnRestart } from "../../state/tasks";
 import { Button } from "../../ui/Button";
@@ -11,7 +12,8 @@ import { ListRow } from "../../ui/ListRow";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { Tag } from "../../ui/Tag";
 import { TASKS_COPY } from "./copy";
-import { KIND_ICON, type RowMeta } from "./model";
+import { usePacedEtaSpeed } from "./hooks";
+import { KIND_ICON, rowMeta, type RowMetaContext } from "./model";
 import { SmoothPercent } from "../../ui/SmoothPercent";
 import styles from "./tasks.module.css";
 
@@ -45,6 +47,27 @@ function KindTile({ task, active }: { task: Task; active: boolean }) {
   );
 }
 
+/** 元信息行的输入里由行外给的那些；已下字节由元信息段自己按节拍取。 */
+export type TaskMetaContext = Omit<RowMetaContext, "bytes">;
+
+/**
+ * 元信息行。运行中的已下大小按节拍换字（lib/progress-display 的 useDisplayCount），剩余时间跟它同一拍：
+ * 节拍放在这一小段里，到点补字时只重画这一段，整行不跟着重渲染。
+ */
+function TaskMeta({ task, context }: { task: Task; context: TaskMetaContext }) {
+  const bytes = useDisplayCount(task.bytes, task.totalBytes);
+  const etaSpeed = usePacedEtaSpeed(bytes, context.etaSpeed);
+  const meta = rowMeta(task, { ...context, etaSpeed, bytes });
+  return (
+    <span className={styles.rowMeta}>
+      <span className={styles.rowMetaLeft} data-danger={meta.danger ? "" : undefined} title={meta.left}>
+        {meta.left}
+      </span>
+      <span className={styles.rowMetaRight}>{meta.right}</span>
+    </span>
+  );
+}
+
 export interface TaskRowProps {
   task: Task;
   /**
@@ -52,7 +75,7 @@ export interface TaskRowProps {
    * 尾部不变形（取消键照旧占位，但已不可用：任务已经完成，没有可取消的）；收尾结束后页面才把这一行换到已结束。
    */
   finishing: boolean;
-  meta: RowMeta;
+  meta: TaskMetaContext;
   /** 关联的实例还在实例列表里（新建被取消后实例已撤掉，就不给「查看实例」）。 */
   hasInstance: boolean;
   /** 重试眼下必然失败（断网）时的原因：按钮置灰并在悬停时说明；能重试为 undefined。 */
@@ -105,12 +128,7 @@ export function TaskRow({ task, finishing, meta, hasInstance, retryBlocked, onCa
               label={TASKS_COPY.row.progressLabel(task.title)}
             />
           )}
-          <span className={styles.rowMeta}>
-            <span className={styles.rowMetaLeft} data-danger={meta.danger ? "" : undefined} title={meta.left}>
-              {meta.left}
-            </span>
-            <span className={styles.rowMetaRight}>{meta.right}</span>
-          </span>
+          <TaskMeta task={task} context={meta} />
         </span>
       }
       trailing={

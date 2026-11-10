@@ -2,6 +2,7 @@
 // 状态行至少留出主句与一行次句的高度：检查中没有次句，那时状态行不变矮，下面的行与卡片不来回跳。
 
 import { useLoadingGate } from "../../../lib/loading-gate";
+import { useDisplayCount } from "../../../lib/progress-display";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../../state/launcher";
 import { busyInstanceId } from "../../../state/selectors";
 import { useShell } from "../../../shell/shell";
@@ -22,12 +23,21 @@ import { RowFlow } from "../Flow";
 import { useLoadedSettings } from "../SettingsGate";
 import { useSettingWrite } from "../write";
 import s from "../settings.module.css";
-import { updateCardView, type CardView } from "./update-view";
+import { downloadSub, updateCardView, type CardProgress, type CardView } from "./update-view";
 
 /** 相对时间「x 分钟前检查过」的刷新间隔。 */
 const RELATIVE_REFRESH_MS = 30_000;
 
-function StatusLine({ view, onAction }: { view: CardView; onAction: () => void }) {
+/**
+ * 下载中的次句。已下大小随进度事件约 100 ms 一涨，照原样换字一秒跳十次、读不清，与更新面板按同一个节拍换。
+ * 节流放在这一小段里：进度停下后到点补上最后一条时，只重渲染这一段，不带上状态行的主句与按钮。
+ */
+function DownloadSub({ progress }: { progress: CardProgress }) {
+  const bytes = useDisplayCount(progress.bytes, progress.totalBytes);
+  return <span className={s.mutedText}>{downloadSub({ ...progress, bytes })}</span>;
+}
+
+export function StatusLine({ view, onAction }: { view: CardView; onAction: () => void }) {
   const { button } = view;
   return (
     <div className={s.updateRow}>
@@ -40,6 +50,7 @@ function StatusLine({ view, onAction }: { view: CardView; onAction: () => void }
             {view.sub}
           </span>
         )}
+        {view.progress !== null && <DownloadSub progress={view.progress} />}
         {view.raw !== null && (
           <span className={s.errorText} data-selectable>
             {view.raw}

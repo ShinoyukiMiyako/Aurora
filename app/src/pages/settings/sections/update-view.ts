@@ -17,15 +17,26 @@ export interface CardButton {
   disabledReason: string | undefined;
 }
 
+/** 下载中的次句素材：已下大小要按显示节拍换字，由渲染它的组件节流后交给 downloadSub 拼成句子。 */
+export interface CardProgress {
+  bytes: number;
+  totalBytes: number | null;
+  /** 换过源时跟在字节后面的一句；还在第一个源时为 null。 */
+  switched: string | null;
+}
+
 export interface CardView {
   title: string;
   /** 有新版本时主句用强调色。 */
   accent: boolean;
+  /** 次句；下载中为 null，次句改由 progress 给出。 */
   sub: string | null;
   /** 次句是错误原文：可选中复制。 */
   subIsError: boolean;
   /** 次句是中文说法时另放一行的错误原文，同样可选中复制。 */
   raw: string | null;
+  /** 下载中的次句素材；其余阶段为 null。 */
+  progress: CardProgress | null;
   button: CardButton;
 }
 
@@ -42,18 +53,26 @@ function button(label: string, variant: CardButton["variant"], action: CardActio
   return { label, variant, action, loading: false, disabled: false, disabledReason: undefined, ...extra };
 }
 
+/** 下载中的次句：已下 / 总量（总量未知时只写已下），换过源时在后面说一句。bytes 由调用方给显示用的值。 */
+export function downloadSub(progress: CardProgress): string {
+  const size = progress.totalBytes === null ? formatBytes(progress.bytes) : UPDATE_COPY.progress(formatBytes(progress.bytes), formatBytes(progress.totalBytes));
+  // 换源后字节从 0 重新报起，不说一句的话看着像进度倒退了
+  return progress.switched === null ? size : `${size} · ${progress.switched}`;
+}
+
 export function updateCardView(state: UpdaterState, ctx: CardContext): CardView {
   const { phase } = state;
   const offline = ctx.online ? undefined : UPDATE_COPY.offlineReason;
   const check = (label: string = UPDATE_COPY.check) => button(label, "secondary", "check", { disabledReason: offline });
   const installReason = ctx.gameRunning ? UPDATE_COPY.gameRunningReason : undefined;
-  const view = (title: string, sub: string | null, btn: CardButton, extra: Partial<Pick<CardView, "accent" | "subIsError" | "raw">> = {}): CardView => ({
+  const view = (title: string, sub: string | null, btn: CardButton, extra: Partial<Pick<CardView, "accent" | "subIsError" | "raw" | "progress">> = {}): CardView => ({
     title,
     sub,
     button: btn,
     accent: false,
     subIsError: false,
     raw: null,
+    progress: null,
     ...extra,
   });
 
@@ -87,11 +106,9 @@ export function updateCardView(state: UpdaterState, ctx: CardContext): CardView 
     case "downloading": {
       const fraction = downloadFraction(phase.bytes, phase.totalBytes);
       const title = fraction === null ? UPDATE_COPY.downloading(phase.update.version) : UPDATE_COPY.downloadingPct(phase.update.version, percent(fraction));
-      const progress = phase.totalBytes === null ? formatBytes(phase.bytes) : UPDATE_COPY.progress(formatBytes(phase.bytes), formatBytes(phase.totalBytes));
-      const switched = sourceSwitchedCopy(phase.source);
-      // 换源后字节从 0 重新报起，不说一句的话看着像进度倒退了
-      const sub = switched === null ? progress : `${progress} · ${switched}`;
-      return view(title, sub, button(UPDATE_COPY.viewProgress, "secondary", "open_panel"));
+      // 已下大小随进度事件约 100 ms 一涨，次句不在这里定稿：交给组件按显示节拍换字
+      const progress = { bytes: phase.bytes, totalBytes: phase.totalBytes, switched: sourceSwitchedCopy(phase.source) };
+      return view(title, null, button(UPDATE_COPY.viewProgress, "secondary", "open_panel"), { progress });
     }
     case "ready":
       return view(UPDATE_COPY.ready(phase.update.version), UPDATE_COPY.readySub, button(UPDATE_COPY.restartInstall, "primary", "install", { disabledReason: installReason }));

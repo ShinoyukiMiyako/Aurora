@@ -34,9 +34,9 @@ export interface BadgeProps {
 
 /**
  * 角标的出现与消失是不是由一个 AnimatePresence 直接管着。只看有没有 PresenceContext 不够：外壳的主界面、弹窗、
- * 浮层都在 AnimatePresence 里，页面上每个角标都拿得到一个。直接管着时，外面最近的 motion 元素在那个 AnimatePresence
- * 之外，两者分属不同的出场单元；角标放在别的 motion 元素里面（主界面的两列、标签页徽标的外壳、下载入口的计数外壳）时
- * 同属一个，出现与消失归那一层管。
+ * 浮层都在 AnimatePresence 里，页面上每个角标都拿得到一个。直接管着时（下载入口的计数角标），外面最近的 motion 元素在那个
+ * AnimatePresence 之外，两者分属不同的出场单元，角标自己弹入、缩小淡出；角标放在别的 motion 元素里面（主界面的两列、
+ * 标签页徽标的外壳）时同属一个，出现与消失归那一层管。
  */
 function usePresenceOwned(): boolean {
   const presence = useContext(PresenceContext);

@@ -45,7 +45,7 @@ function task(id: string, overrides: Partial<Task> = {}): Task {
   };
 }
 
-const ctx = (over: Partial<Parameters<typeof rowMeta>[1]> = {}) => ({ queuePosition: null, etaSpeed: 0, speed: 0, now: T0 + 10 * 60_000, ...over });
+const ctx = (over: Partial<Parameters<typeof rowMeta>[1]> = {}) => ({ queuePosition: null, etaSpeed: 0, speed: 0, bytes: 0, now: T0 + 10 * 60_000, ...over });
 
 describe("剩余时间与用时", () => {
   it("剩余时间：秒按 5 向上取整，满 60 秒进到分钟，满 1 小时不再细说", () => {
@@ -192,22 +192,31 @@ describe("行内元信息", () => {
   it("运行中：已下 / 总量，速度 · 剩余时间（按平均速度估算）", () => {
     const t = task("r", { status: "running", bytes: 120 * MB, totalBytes: 612 * MB, speedBps: 12 * MB, progress: 0.2 });
     // 剩余 492 MB，平均 4 MB/s → 123 秒 → 约 3 分钟
-    expect(rowMeta(t, ctx({ etaSpeed: 4 * MB, speed: 12 * MB }))).toEqual({ left: "120 MB / 612 MB", right: "12.0 MB/s · 约 3 分钟", danger: false });
+    expect(rowMeta(t, ctx({ etaSpeed: 4 * MB, speed: 12 * MB, bytes: 120 * MB }))).toEqual({ left: "120 MB / 612 MB", right: "12.0 MB/s · 约 3 分钟", danger: false });
     // 平均速度还没有（0）时用瞬时速度：492 / 12 = 41 秒 → 约 45 秒
-    expect(rowMeta(t, ctx({ etaSpeed: 0, speed: 12 * MB })).right).toBe("12.0 MB/s · 约 45 秒");
+    expect(rowMeta(t, ctx({ etaSpeed: 0, speed: 12 * MB, bytes: 120 * MB })).right).toBe("12.0 MB/s · 约 45 秒");
   });
 
   it("运行中：写出来的是平滑过的显示速度，不是每 100 ms 一跳的瞬时值；等待数据仍按瞬时值判断", () => {
     const t = task("r", { status: "running", bytes: 120 * MB, totalBytes: 612 * MB, speedBps: 12 * MB, progress: 0.2 });
-    expect(rowMeta(t, ctx({ etaSpeed: 0, speed: 10 * MB })).right).toBe("10.0 MB/s · 约 45 秒");
-    expect(rowMeta({ ...t, totalBytes: null }, ctx({ speed: 10 * MB })).right).toBe("10.0 MB/s");
-    expect(rowMeta({ ...t, speedBps: 0 }, ctx({ speed: 10 * MB })).right).toBe("等待数据");
+    expect(rowMeta(t, ctx({ etaSpeed: 0, speed: 10 * MB, bytes: 120 * MB })).right).toBe("10.0 MB/s · 约 45 秒");
+    expect(rowMeta({ ...t, totalBytes: null }, ctx({ speed: 10 * MB, bytes: 120 * MB })).right).toBe("10.0 MB/s");
+    expect(rowMeta({ ...t, speedBps: 0 }, ctx({ speed: 10 * MB, bytes: 120 * MB })).right).toBe("等待数据");
+  });
+
+  it("运行中：已下大小与剩余时间按写出来的已下字节算（按节拍换字的那个），不是任务里最新报上来的原值", () => {
+    const t = task("r", { status: "running", bytes: 120 * MB, totalBytes: 612 * MB, speedBps: 12 * MB, progress: 0.2 });
+    // 写出来的还停在 60 MB：剩余 552 MB / 12 MB/s = 46 秒 → 约 50 秒；按原值算会是 41 秒 → 约 45 秒
+    expect(rowMeta(t, ctx({ speed: 12 * MB, bytes: 60 * MB }))).toEqual({ left: "60.0 MB / 612 MB", right: "12.0 MB/s · 约 50 秒", danger: false });
+    // 总量未知时同样写写出来的那个；还没写出过任何字节时仍是大小待定
+    expect(rowMeta({ ...t, totalBytes: null }, ctx({ speed: 12 * MB, bytes: 60 * MB })).left).toBe("60.0 MB / 大小待定");
+    expect(rowMeta({ ...t, totalBytes: null }, ctx({ speed: 12 * MB, bytes: 0 })).left).toBe("大小待定");
   });
 
   it("运行中：速度为 0 写等待数据；总量未知时写大小待定，只报速度", () => {
     expect(rowMeta(task("r", { status: "running", bytes: 0, totalBytes: 612 * MB, speedBps: 0 }), ctx()).right).toBe("等待数据");
     expect(rowMeta(task("r", { status: "running", bytes: 0, totalBytes: null, speedBps: 0 }), ctx())).toMatchObject({ left: "大小待定", right: "等待数据" });
-    expect(rowMeta(task("r", { status: "running", bytes: 3 * MB, totalBytes: null, speedBps: MB }), ctx({ speed: MB }))).toMatchObject({ left: "3.0 MB / 大小待定", right: "1.0 MB/s" });
+    expect(rowMeta(task("r", { status: "running", bytes: 3 * MB, totalBytes: null, speedBps: MB }), ctx({ speed: MB, bytes: 3 * MB }))).toMatchObject({ left: "3.0 MB / 大小待定", right: "1.0 MB/s" });
   });
 
   describe("运行中的分步任务", () => {
@@ -221,7 +230,7 @@ describe("行内元信息", () => {
 
     it("认下了这一步的那批：在第几步之后写这一批的量，右侧照常是速度与剩余时间", () => {
       const t = task("r", { kind: "game", status: "running", bytes: 24_800_000, totalBytes: 124_000_000, speedBps: 4 * MB, phase: { plan: VANILLA, index: 2, batch: { total: 3000, totalBytes: 124_000_000 } } });
-      const meta = rowMeta(t, ctx({ etaSpeed: 4 * MB, speed: 4 * MB }));
+      const meta = rowMeta(t, ctx({ etaSpeed: 4 * MB, speed: 4 * MB, bytes: 24_800_000 }));
       expect(meta.left).toBe(`下载资源文件 · 第 3/4 步 · ${TASKS_COPY.row.transfer(formatBytes(24_800_000), formatBytes(124_000_000))}`);
       // 剩余 99.2 MB（这一批的），4 MB/s → 23.7 秒 → 约 25 秒
       expect(meta.right).toBe("4.0 MB/s · 约 25 秒");
@@ -348,9 +357,11 @@ describe("吞吐采样与总览", () => {
     ]);
     const o = overviewOf(b);
     expect(o).toEqual({ label: "running", speed: 100, downloaded: 1300, total: 2000, fraction: 0.65, localOnly: false });
-    expect(overviewRemaining(o, 0)).toBe("剩余 700 B · 约 10 秒");
-    expect(overviewRemaining(o, 10)).toBe("剩余 700 B · 约 2 分钟");
-    expect(overviewRemaining({ ...o, speed: 0 }, 0)).toBe("剩余 700 B · 等待数据");
+    expect(overviewRemaining(o, o.downloaded, 0)).toBe("剩余 700 B · 约 10 秒");
+    expect(overviewRemaining(o, o.downloaded, 10)).toBe("剩余 700 B · 约 2 分钟");
+    expect(overviewRemaining({ ...o, speed: 0 }, o.downloaded, 0)).toBe("剩余 700 B · 等待数据");
+    // 剩余字节与剩余时间按写出来的已下字节（按节拍换字的那个）算：停在 300 时剩 1700，1700 / 10 = 170 秒 → 约 3 分钟
+    expect(overviewRemaining(o, 300, 10)).toBe("剩余 1.7 KB · 约 3 分钟");
     // 只有总量未知的排队任务、或没有任何活动任务：没有可显示的进度，而不是 0%
     expect(overviewOf(bucketTasks([task("q1")]))).toEqual({ label: "waiting", speed: 0, downloaded: 0, total: 0, fraction: null, localOnly: false });
     expect(overviewOf(bucketTasks([task("d1", { status: "done", finishedAt: T0 })]))).toEqual({ label: "idle", speed: 0, downloaded: 0, total: 0, fraction: null, localOnly: false });

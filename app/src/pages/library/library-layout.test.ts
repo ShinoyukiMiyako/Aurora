@@ -73,8 +73,8 @@ describe("卡面与新建卡的悬停", () => {
     for (const property of ["opacity", "transform", "background-color", "border-color", "color"]) expect(transition).toContain(`${property} var(`);
   });
 
-  it("卡面版本号的字色随卡面形态换时按悬停那一档淡过去；带模糊的文字阴影不过渡，随形态瞬切", () => {
-    expect(declarations(".coverVersion").transition).toBe("color var(--sk-dur-hover) var(--sk-ease)");
+  it("卡面版本号的字色随卡面形态换时与卡面、标签同一档淡过去（入场时长、减速曲线）；带模糊的文字阴影不过渡，随形态瞬切", () => {
+    expect(declarations(".coverVersion").transition).toBe("color var(--sk-dur-in) var(--sk-ease-out)");
     // 阴影仍随媒体形态挂上，只是不补间（那条规则的选择器里带逗号，declarations 按逗号拆分组匹配不到它）
     expect(css).toMatch(/\.coverVersion\s*\{[^}]*text-shadow: var\(--sk-media-text-shadow\);/);
   });

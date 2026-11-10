@@ -3,7 +3,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../../ipc/errors";
-import { COMPLETION_HOLD_S } from "../../lib/progress-display";
+import { COMPLETION_HOLD_S, SPEED_REFRESH_MS } from "../../lib/progress-display";
 import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
 import { CORE_EVENT, type TaskJournalDto, type TaskRecordDto } from "../../ipc/tasks";
 import { OverlayRoot } from "../../shell/overlay";
@@ -655,11 +655,13 @@ describe("下载任务页：进行中", () => {
     const present = `${ids[1]}#1`;
     // 大部分文件本就完整：有效字节 701 MB、走网络的只有 5.5 MB
     act(() => emit(CORE_EVENT, { kind: "download", task_id: repaired, total: 900, finished: 450, bytes: 350 * MB, total_bytes: 701 * MB, transferred: 2 * MB, speed: MB }));
-    expect(row("Java 8").textContent).toContain("350 MB / 701 MB");
     expect(progressOf(row("Java 8"))).toBe("50");
+    // 已下大小按节拍换字：等满一个间隔再读
+    await advance(SPEED_REFRESH_MS);
+    expect(row("Java 8").textContent).toContain("350 MB / 701 MB");
     act(() => emit(CORE_EVENT, { kind: "download", task_id: repaired, total: 900, finished: 900, bytes: 701 * MB, total_bytes: 701 * MB, transferred: 5.5 * MB, speed: MB }));
     act(() => emit(CORE_EVENT, { kind: "download", task_id: present, total: 900, finished: 900, bytes: 701 * MB, total_bytes: 701 * MB, transferred: 0, speed: 0 }));
-    await advance(2_000);
+    await advance(2_000 - SPEED_REFRESH_MS);
     const java = { component: "java-runtime-delta", version: { major: 8, minor: 0, security: 1, build: 1, raw: "1.8.0_1" }, java_executable: "C:/java8.exe" };
     javaRuns.get(repaired)?.resolve(java);
     javaRuns.get(present)?.resolve(java);
@@ -669,6 +671,57 @@ describe("下载任务页：进行中", () => {
     expect(row("Java 8").textContent).not.toContain("701 MB");
     expect(row("Java 17").textContent).toContain("文件已就绪 · 用时 2 秒");
     expect(row("Java 17").textContent).not.toContain("701 MB");
+  });
+
+  it("已下大小按节拍换字：事件到达的那一刻行内、已下载与剩余都不换，满间隔才换上最新值，剩余时间同一拍；传到总量与任务完成立即到位", async () => {
+    await mount();
+    await act(() => launcher.actions.installJava(8));
+    await flush();
+    const taskId = launcher.state.tasks[0].id;
+    const progress = (bytes: number, speed = 2 * MB) =>
+      act(() => emit(CORE_EVENT, { kind: "download", task_id: `${taskId}#1`, total: 100, finished: bytes / MB, bytes, total_bytes: 100 * MB, speed }));
+    const meta = () => row("Java 8").querySelector(`.${styles.rowMeta}`)?.textContent;
+    const downloaded = () => [...page().querySelectorAll(`.${styles.miniValue}`)].filter(live)[0]?.textContent;
+    const remaining = () => [...page().querySelectorAll(`.${styles.flowSub}`)].filter(live)[0]?.textContent;
+    const shown = () => [meta(), downloaded(), remaining()];
+
+    // 行与卡挂上还不到一个间隔：第一条事件的已下大小先不换，剩余时间按这一刻的速度估（剩 100 MB / 4 MB/s）
+    progress(10 * MB, 4 * MB);
+    expect(shown()).toEqual(["0 B / 100 MB4.0 MB/s · 约 25 秒", "0 B", "剩余 100 MB · 约 25 秒"]);
+    // 窗口里还没有采到这一次的速度，估速跟着瞬时速度走：已下大小没换字，剩余时间也不跟着跳（照算会是约 50 秒）
+    await advance(100);
+    progress(12 * MB);
+    expect(shown()).toEqual(["0 B / 100 MB4.0 MB/s · 约 25 秒", "0 B", "剩余 100 MB · 约 25 秒"]);
+
+    // 走到稳态：剩余时间的平均窗口里全是 2 MB/s，上一次换字已过了很久
+    await advance(4_900);
+    expect(shown()).toEqual(["12.0 MB / 100 MB2.0 MB/s · 约 45 秒", "12.0 MB", "剩余 88.0 MB · 约 45 秒"]);
+
+    // 离上次换字已满间隔：这一条立即换上
+    progress(30 * MB);
+    expect(shown()).toEqual(["30.0 MB / 100 MB2.0 MB/s · 约 35 秒", "30.0 MB", "剩余 70.0 MB · 约 35 秒"]);
+
+    // 不满间隔：进度条照事件走，字（连同剩余时间）都停在上一拍；照原值算剩余时间会是约 20 秒
+    await advance(100);
+    progress(60 * MB);
+    expect(progressOf(row("Java 8"))).toBe("60");
+    expect(shown()).toEqual(["30.0 MB / 100 MB2.0 MB/s · 约 35 秒", "30.0 MB", "剩余 70.0 MB · 约 35 秒"]);
+    await advance(SPEED_REFRESH_MS - 101);
+    expect(shown()).toEqual(["30.0 MB / 100 MB2.0 MB/s · 约 35 秒", "30.0 MB", "剩余 70.0 MB · 约 35 秒"]);
+    // 间隔满：没有新事件也补上最后报上来的值，剩余时间同一拍换
+    await advance(1);
+    expect(shown()).toEqual(["60.0 MB / 100 MB2.0 MB/s · 约 20 秒", "60.0 MB", "剩余 40.0 MB · 约 20 秒"]);
+
+    // 传到总量：不等间隔，与满格的进度条同时到位
+    await advance(100);
+    progress(100 * MB);
+    expect(shown()).toEqual(["100 MB / 100 MB2.0 MB/s · 即将完成", "100 MB", "剩余 0 B · 即将完成"]);
+
+    // 任务完成：总览立即不再计它，行换成完成说明
+    javaRuns.get(`${taskId}#1`)?.resolve({ component: "java-runtime-delta", version: { major: 8, minor: 0, security: 1, build: 1, raw: "1.8.0_1" }, java_executable: "C:/java8.exe" });
+    await flush();
+    expect(downloaded()).toBe("0 B");
+    expect(meta()).not.toContain("/ 100 MB");
   });
 
   it("取消排队中的任务不确认、不发命令；全部取消要确认，继续下载则什么都不做", async () => {

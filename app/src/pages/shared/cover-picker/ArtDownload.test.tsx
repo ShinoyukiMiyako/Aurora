@@ -6,6 +6,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ArtDownloadProgressDto, ArtStatusDto } from "../../../ipc/art";
 import { IpcError } from "../../../ipc/errors";
+import { SPEED_REFRESH_MS } from "../../../lib/progress-display";
 import { catalogFromDto, setBlockCatalog, useBlockCatalog } from "../../../mc/catalog";
 import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
 import { getArtDownloadState, settleArtDownload } from "../../../state/art-download";
@@ -235,6 +236,52 @@ describe("下载原版材质部件", () => {
     expect(text()).not.toContain("本机还没有原版材质");
     expect(text()).toContain("从 Mojang 官方源或镜像下载原版材质，整包约 20 到 40 MB，下完只留不到 1 MB。");
     expect(button("下载原版材质")).toBeDefined();
+  });
+});
+
+describe("下载原版材质部件的已下大小", () => {
+  const MB = 1024 * 1024;
+  const bytes = () => view?.container.querySelector('[class*="_bytes_"]')?.textContent ?? null;
+
+  // 用例在假时钟下停在下载中：先换回真实计时器，再替它下完，交给文件级的收尾回到空闲。
+  // 断言中途失败时同样如此，后面的用例不会被一个还在下的状态连带挂掉
+  afterEach(async () => {
+    vi.useRealTimers();
+    await act(async () => art.pending.forEach((p) => p.resolve(READY)));
+    await flush();
+  });
+
+  it("进度约每 100 ms 一条：进度条每条都走，已下大小每 500 ms 才换一次字；到总量与换阶段立即换上", async () => {
+    mount();
+    await startDownload();
+    // 只假墙钟与 setTimeout：framer-motion 的帧挂在 setInterval 上照真实时间走，换回真实计时器时没有一帧卡在假时钟上
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    emit({ stage: "client", downloaded: 1 * MB, total: 20 * MB });
+    expect(bytes()).toBe("已下载 1.0 MB，共 20.0 MB");
+    for (let i = 2; i <= 4; i++) {
+      act(() => void vi.advanceTimersByTime(100));
+      emit({ stage: "client", downloaded: i * MB, total: 20 * MB });
+      expect(bar()?.getAttribute("aria-valuenow")).toBe(String(i * 5));
+      expect(bytes()).toBe("已下载 1.0 MB，共 20.0 MB");
+    }
+    // 进度停在 4 MB：不等下一条，离上次换字满一个间隔时补上
+    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS - 300 - 1));
+    expect(bytes()).toBe("已下载 1.0 MB，共 20.0 MB");
+    act(() => void vi.advanceTimersByTime(1));
+    expect(bytes()).toBe("已下载 4.0 MB，共 20.0 MB");
+
+    // 传到总量：刚换过字也不等间隔，字与满格的进度条同时到
+    act(() => void vi.advanceTimersByTime(100));
+    emit({ stage: "client", downloaded: 20 * MB, total: 20 * MB });
+    expect(bar()?.getAttribute("aria-valuenow")).toBe("100");
+    expect(bytes()).toBe("已下载 20.0 MB，共 20.0 MB");
+
+    // 换阶段从 0 起算：起始那条没有字节，新阶段的第一个数直接显示
+    emit({ stage: "names", downloaded: 0, total: null });
+    expect(bytes()).toBeNull();
+    act(() => void vi.advanceTimersByTime(100));
+    emit({ stage: "names", downloaded: 300 * 1024, total: null });
+    expect(bytes()).toBe("已下载 300 KB");
   });
 });
 
