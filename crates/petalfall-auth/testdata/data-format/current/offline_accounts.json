@@ -1,0 +1,13 @@
+{
+  "accounts": [
+    {
+      "name": "Steve",
+      "added_at": 1767225600000
+    },
+    {
+      "name": "Alex",
+      "added_at": 1767232800000
+    }
+  ],
+  "current": "Alex"
+}
