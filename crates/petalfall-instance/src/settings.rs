@@ -13,7 +13,7 @@ use crate::PETALFALL_META_DIR;
 use crate::error::{Error, Result};
 use crate::isolation::IsolationOverride;
 
-const SETTINGS_FILE: &str = "settings.json";
+pub(crate) const SETTINGS_FILE: &str = "settings.json";
 
 /// 实例单独设置内存时允许的最小值与步长（MB），与界面滑杆一致。
 pub const MEMORY_MIN_MB: u32 = 1024;

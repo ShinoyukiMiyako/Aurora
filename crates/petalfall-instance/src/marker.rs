@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::PETALFALL_META_DIR;
 use crate::error::{Error, Result};
 
-const MARKER_FILE: &str = "incomplete.json";
-const INSTALL_RECORD_FILE: &str = "install-record.json";
+pub(crate) const MARKER_FILE: &str = "incomplete.json";
+pub(crate) const INSTALL_RECORD_FILE: &str = "install-record.json";
 
 /// 新建实例时要装的东西，修复一个没装完的实例时照此重新安装。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
