@@ -608,7 +608,10 @@ describe("更新通道", () => {
     await checkUpdate();
     const events: CoreEvent[] = [];
     await onCoreEvent((e) => events.push(e));
-    expect((await rejection(settle(downloadUpdate("c-6")))).code).toBe("update_data_too_new");
+    const refusal = await rejection(settle(downloadUpdate("c-6")));
+    expect(refusal.code).toBe("update_data_too_new");
+    // 与后端同形：被拒的那一版与它所属的通道
+    expect(refusal.detail).toEqual({ version: "1.0.0", channel: "stable" });
     expect(events[events.length - 1]).toMatchObject({ kind: "stage", message: "更新包下载完成，正在校验签名" });
     const refused = [{ version: "1.0.0", channel: "stable", reason: "data_too_new", intent: "update" }];
     expect(await updaterInfo()).toMatchObject({ downloaded_version: null, downloaded_channel: null, refused });

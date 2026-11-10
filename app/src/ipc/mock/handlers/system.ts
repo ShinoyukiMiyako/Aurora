@@ -678,7 +678,7 @@ async function downloadUpdate(args: MockArgs): Promise<UpdateDto> {
       emitCore({ task_id: taskId, kind: "stage", message: "更新包下载完成，正在校验签名" });
       if (dataTooNew.has(update.version)) {
         updater.refused = [...updater.refused, { version: update.version, channel: update.channel, reason: "data_too_new", intent: "update" }];
-        throw new IpcError("update_data_too_new", `${update.version} 读不了这台电脑上的数据，下好的包已丢弃`);
+        throw new IpcError("update_data_too_new", `${update.version} 读不了这台电脑上的数据，下好的包已丢弃`, { version: update.version, channel: update.channel });
       }
       updater.downloaded = { version: update.version, channel: update.channel };
       return update;
