@@ -516,8 +516,13 @@ function annotate(kind, message) {
   return `::${kind}::${message.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A")}`;
 }
 
-function expectArgs(args, count) {
-  if (args.length !== count || args.some((arg) => arg === "")) throw new UsageError(`参数应为 ${count} 个非空值，实际 ${args.length} 个`);
+// 工作流里的参数多半来自变量展开，变量没设时就是空串：报出空的是第几个、叫什么，才查得到是哪个变量没设
+function expectArgs(args, names) {
+  if (args.length !== names.length) {
+    throw new UsageError(`参数应为 ${names.length} 个（${names.map((name) => `<${name}>`).join(" ")}），实际 ${args.length} 个`);
+  }
+  const empty = names.map((name, index) => (args[index] === "" ? `第 ${index + 1} 个参数 <${name}>` : null)).filter((entry) => entry !== null);
+  if (empty.length > 0) throw new UsageError(`${empty.join("、")} 是空的`);
 }
 
 function channelAndMode(channel, mode) {
@@ -551,7 +556,7 @@ function writeOutputs(deps, entries) {
 async function dispatch([command, ...args], deps) {
   switch (command) {
     case "read": {
-      expectArgs(args, 2);
+      expectArgs(args, ["仓库", "heads 文件"]);
       const [repo, headsPath] = args;
       const heads = await readHeads(repo, deps);
       writeFileSync(headsPath, formatHeads(heads));
@@ -562,7 +567,7 @@ async function dispatch([command, ...args], deps) {
       return 0;
     }
     case "gate": {
-      expectArgs(args, 4);
+      expectArgs(args, ["dev|beta", "release|rehearsal", "本包版本", "heads 文件"]);
       const [channel, mode, version, headsPath] = args;
       channelAndMode(channel, mode);
       const heads = parseHeads(readFileSync(headsPath, "utf8"));
@@ -570,7 +575,7 @@ async function dispatch([command, ...args], deps) {
       return conclude(deps, result, mode, `版本先后检查通过：${version}`);
     }
     case "data-format": {
-      expectArgs(args, 4);
+      expectArgs(args, ["dev|beta", "release|rehearsal", "heads 文件", "仓库"]);
       const [channel, mode, headsPath, repo] = args;
       channelAndMode(channel, mode);
       requireRepo(repo);
@@ -583,7 +588,7 @@ async function dispatch([command, ...args], deps) {
       return conclude(deps, result, mode, `数据格式号检查通过：${result.current}`);
     }
     case "payload": {
-      expectArgs(args, 5);
+      expectArgs(args, ["本包版本", "magic", "版本", "data_format", "caps"]);
       const [version, magic, headerVersion, dataFormat, caps] = args;
       const source = parseDataFormat(deps.dataFormatSource(), DATA_FORMAT_PATH);
       const failures = payloadFailures({ version, magic, headerVersion, dataFormat, caps }, source);

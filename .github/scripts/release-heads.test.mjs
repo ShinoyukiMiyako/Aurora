@@ -672,7 +672,24 @@ describe("gate 命令行", () => {
       [["gate", "stable", "release", "1.0.0", path], '::error::通道只能是 dev 或 beta："stable"'],
       [["gate", "beta", "dry-run", "1.0.0-beta.1", path], '::error::模式只能是 release 或 rehearsal："dry-run"'],
       [["gate", "dev", "release", "1.0.0-beta.1", path], '::error::本包版本 "1.0.0-beta.1" 不是预览版的形状 X.Y.Z-dev.N'],
-      [["gate", "dev", "release", "1.0.0-dev.1"], "::error::参数应为 4 个非空值，实际 3 个"],
+      [["gate", "dev", "release", "1.0.0-dev.1"], "::error::参数应为 4 个（<dev|beta> <release|rehearsal> <本包版本> <heads 文件>），实际 3 个"],
+    ];
+    for (const [argv, message] of cases) {
+      const harness = makeDeps();
+      assert.equal(await main(argv, harness.deps), 2, argv.join(" "));
+      assert.equal(harness.err[0], message);
+      assert.match(harness.err[1], /^用法：/);
+    }
+  });
+
+  it("个数对、但有参数是空的时，报出空的是第几个、叫什么，以 2 退出", async () => {
+    // 工作流里没设的变量展开成空串，个数照样对得上
+    const path = headsFile(heads({}));
+    const cases = [
+      [["gate", "dev", "release", "", path], "::error::第 3 个参数 <本包版本> 是空的"],
+      [["data-format", "beta", "release", path, ""], "::error::第 4 个参数 <仓库> 是空的"],
+      [["read", "", ""], "::error::第 1 个参数 <仓库>、第 2 个参数 <heads 文件> 是空的"],
+      [["payload", "1.0.0-dev.5", "PFSETUP2", "1.0.0-dev.5", "", "1"], "::error::第 4 个参数 <data_format> 是空的"],
     ];
     for (const [argv, message] of cases) {
       const harness = makeDeps();
