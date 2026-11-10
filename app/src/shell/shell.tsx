@@ -16,7 +16,8 @@ import type { CreateInstancePreset } from "../state/flows";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { LIBRARY_ROUTE, routeInstanceId, routeKey, sameRoute, type Route } from "../state/route";
 import { activeDownloads, activeTasks, pinnedInstances } from "../state/selectors";
-import { launchPromptCopy } from "../state/store";
+import { gameDirDataRejectionOf } from "../state/errors";
+import { launchPromptCopy, type SliceStatus } from "../state/store";
 import type { Toast } from "../state/toasts";
 import { phaseUpdate } from "../state/updater/machine";
 import { UpdaterProvider, useUpdater, type UpdaterApi } from "../state/updater/useUpdater";
@@ -215,6 +216,14 @@ function assertAnchorInFlow(anchor: HTMLElement, scroller: HTMLElement): void {
   }
 }
 
+/**
+ * 实例列表是不是已知：读到了，或游戏目录因数据格式打不开（换目录之前列表就是空的，指向实例的页面都已失效）。
+ * 加载中与别的读取失败（网络盘暂时连不上等）不算：列表只是没读到，不能据此把人从实例页送走。
+ */
+function instanceListKnown(status: SliceStatus): boolean {
+  return status.kind === "ready" || (status.kind === "error" && gameDirDataRejectionOf(status.error) !== null);
+}
+
 function scrollMarginTop(el: HTMLElement): number {
   const raw = getComputedStyle(el).scrollMarginTop;
   // 浏览器总给出像素值；jsdom 对没声明的属性给空串，而这个属性的初始值就是 0
@@ -246,7 +255,7 @@ function ShellCore({ children }: { children: ReactNode }) {
   // 外壳根只订阅自己用到的几片：每 100 ms 的下载进度与每批游戏日志都不让它重渲染
   const lastRename = useLauncherSelector((s) => s.lastRename);
   const lastMove = useLauncherSelector((s) => s.lastMove);
-  const instancesReady = useLauncherSelector((s) => s.status.instances.kind === "ready");
+  const instancesKnown = useLauncherSelector((s) => instanceListKnown(s.status.instances));
   const ids = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
   const crashedId = useLauncherSelector((s) => (s.session !== null && s.session.phase === "crashed" ? s.session.instanceId : null));
   const runningSince = useLauncherSelector((s) => (s.session !== null && s.session.phase === "running" ? s.session.runningSince : null));
@@ -336,17 +345,17 @@ function ShellCore({ children }: { children: ReactNode }) {
     const leaveMoved = move !== null && routeInstanceId(currentEntry(next).route) === move.id;
     if (leaveMoved) next = navGo(next, LIBRARY_ROUTE);
     // 实例列表还没读到时不剪：此时列表为空，会把所有实例页都当成失效
-    if (instancesReady) next = pruneHistory(next, (r) => {
+    if (instancesKnown) next = pruneHistory(next, (r) => {
       const id = routeInstanceId(r);
       return id === null || instanceIds.has(id);
     });
     commit(next, leaveMoved ? "go" : null);
     if (rename !== null) setAppliedRename(rename.seq);
     if (move !== null) setAppliedMove(move.seq);
-  }, [commit, instanceIds, instancesReady, rename, move]);
+  }, [commit, instanceIds, instancesKnown, rename, move]);
 
   const current = currentEntry(viewHistory);
-  const route = effectiveRoute(current.route, (id) => !instancesReady || instanceIds.has(id));
+  const route = effectiveRoute(current.route, (id) => !instancesKnown || instanceIds.has(id));
 
   // 托底跟着页面走：换了页面（页面按路由键重挂，托着的页面根已经卸掉）就摘掉它的滚动监听
   const pageKey = routeKey(route);
