@@ -138,7 +138,11 @@ pub mod code {
     pub const MEMORY_UNAVAILABLE: &str = "memory_unavailable";
     /// 当前环境没有自更新能力，detail.reason 为 debug_build / missing_pubkey / signed_version_not_required / downgrades_allowed / unknown_channel / pubkey_mismatch。
     pub const UPDATER_UNSUPPORTED: &str = "updater_unsupported";
-    /// 检查更新失败（连不上更新源、更新源回了 404 以外的非 2xx、清单不合法）。
+    /// 检查更新失败（连不上更新源、更新源回了 404 以外的非 2xx、清单不合法、清单头没通过核验；几个端点里有的
+    /// 这样失败或回 404、其余旧于本机记录时也是它）。detail：
+    /// `{ channel, endpoints, attempts, status?, causes? }`，channel 是偏好通道，endpoints 是它的各个清单端点，
+    /// attempts 按问的先后列出各端点的 `{ endpoint, status?, network?, message, causes? }`；只问了一个端点时，
+    /// 它的状态码与原因链另放在顶层的 status、causes。
     pub const UPDATE_CHECK_FAILED: &str = "update_check_failed";
     /// 还没有检查到可用更新就要求下载，或下载期间再次检查换了版本、已无更新（下好的包随即作废）。
     pub const UPDATE_NOT_AVAILABLE: &str = "update_not_available";
@@ -154,10 +158,11 @@ pub mod code {
     pub const UPDATE_BUSY: &str = "update_busy";
     /// 检查期间更新通道改了，这次检查的结果作废、没有落下。
     pub const UPDATE_SUPERSEDED: &str = "update_superseded";
-    /// 偏好通道的每个更新源都给出了清单，但版本全都旧于本机记下的这个通道见过的最高版本。
+    /// 偏好通道的每个更新源都给出了清单，但版本全都旧于本机记下的这个通道见过的最高版本。detail：
+    /// `{ channel, offered: [{ endpoint, version }], seen }`，offered 按端点先后，seen 是见过的最高版本。
     pub const UPDATE_SOURCE_STALE: &str = "update_source_stale";
     /// 下载并验过签的更新包认得的数据格式比正在运行的这一版旧（不带格式号的旧包按 0 算），装上读不了现有数据，
-    /// 已丢弃。
+    /// 已丢弃。detail：`{ version, channel }`，是被拒的那一版与它所属的通道。
     pub const UPDATE_DATA_TOO_NEW: &str = "update_data_too_new";
     /// 已有游戏在加载或运行，同一时间只跑一个游戏。detail：`{ version_id, phase: loading | running }`。
     pub const BUSY: &str = "busy";
