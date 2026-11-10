@@ -8,7 +8,13 @@ import { APP_NAME, APP_NAME_EN, ISSUES_URL, REPO_URL } from "../../lib/app-info"
 import type { GpuAdapterDto, JavaInstallationDto } from "../../ipc/java";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { setMockGpuAdapters, setMockJavaInstallations } from "../../ipc/mock/handlers/java";
-import { setMockUpdateSourceFailures } from "../../ipc/mock/handlers/system";
+import {
+  setMockUpdateDataTooNew,
+  setMockUpdateManifest,
+  setMockUpdaterUnsupported,
+  setMockUpdaterVersion,
+  setMockUpdateSourceFailures,
+} from "../../ipc/mock/handlers/system";
 import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickFile } from "../../shell/platform";
@@ -1562,7 +1568,12 @@ describe("设置页：关于与启动器更新", () => {
     expect(layer.hasAttribute("data-pending")).toBe(true);
     // 主句、次句各一行，右边一个按钮
     expect(layer.querySelectorAll('[class*="updateTitle"], [class*="mutedText"]')).toHaveLength(2);
+    // 选项块按支持自更新画：小标题、两行说明、三个同高的块，与真实的选项块同在一块带分隔线的区域里
+    const channel = layer.querySelector(`.${settingsStyles.channelBlock}`);
+    expect(channel?.querySelectorAll(`.${settingsStyles.channelDesc} [data-last]`)).toHaveLength(1);
+    expect([...(channel?.querySelector(`.${settingsStyles.channelSkeleton}`)?.children ?? [])].map((block) => (block as HTMLElement).style.height)).toEqual(["86px", "86px", "86px"]);
     expect([...card.querySelectorAll("button")].some((b) => b.textContent === "检查更新")).toBe(false);
+    expect(card.querySelector('[role="radiogroup"]')).toBeNull();
 
     await act(async () => {
       info.resolve(await mockInvoke("updater_info", {}));
@@ -1570,6 +1581,7 @@ describe("设置页：关于与启动器更新", () => {
     });
     expect(card.textContent).toContain("当前是 0.1.0");
     expect(card.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(card.querySelector('[role="radiogroup"]')?.closest(`.${settingsStyles.channelBlock}`)).not.toBeNull();
   });
 
   it("检查失败：卡内如实显示后端原因并给出重试，重试成功后显示新版本", async () => {
@@ -1737,6 +1749,196 @@ describe("设置页：关于与启动器更新", () => {
     expect(text()).toContain("已是最新版本");
     expect(text()).not.toContain("检查更新失败");
     expect(all("button").some((b) => b.textContent === "重试")).toBe(false);
+  });
+
+  describe("更新通道", () => {
+    const card = () => section(`${APP_NAME}更新`);
+    /** 卡里在场的状态行（退场中的旧内容层带 inert）。 */
+    const statusLine = () => {
+      const found = live(`.${settingsStyles.updateRow}`).find((row) => card().contains(row));
+      if (found === undefined) throw new Error("更新卡里没有状态行");
+      return found;
+    };
+    const status = () => [statusLine().querySelector(`.${settingsStyles.updateTitle}`)?.textContent, statusLine().querySelector(`.${settingsStyles.mutedText}`)?.textContent];
+    const checkedTiles = () => live<HTMLButtonElement>('[role="radiogroup"] [role="radio"][aria-checked="true"]').map((t) => t.textContent?.slice(0, 3));
+    const dialogButton = (label: string) => {
+      const found = all<HTMLButtonElement>(OPEN_DIALOG + " button").find((b) => b.textContent === label);
+      if (found === undefined) throw new Error(`确认框里没有「${label}」`);
+      return found;
+    };
+    const commandOrder = (...cmds: string[]) => ipc.calls.filter((c) => cmds.includes(c.cmd)).map((c) => c.cmd);
+    const advance = (ms: number) =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+
+    it("放在状态行之下、「自动检查更新」之上；勾选生效的偏好，「现在装的」标在包的通道上", async () => {
+      await mount("about");
+      const group = card().querySelector<HTMLElement>('[role="radiogroup"]');
+      const toggle = card().querySelector<HTMLElement>('[role="switch"]');
+      if (group === null || toggle === null) throw new Error("更新卡里少了选项块或开关");
+      expect(group.getAttribute("aria-label")).toBe("更新通道");
+      expect(statusLine().compareDocumentPosition(group) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(group.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(group.closest(`.${settingsStyles.channelBlock}`)?.textContent).toContain(
+        "更新通道从选的这条线接收更新。选了更稳的线时，现在的版本先留着，等那条线出了更新的版本再换过去。",
+      );
+      expect(checkedTiles()).toEqual(["正式版"]);
+      expect(radio("正式版").textContent).toContain("现在装的");
+      expect([radio("预览版").textContent, radio("测试版").textContent].some((t) => t?.includes("现在装的"))).toBe(false);
+    });
+
+    it("选更快的线：马上写入、不弹确认；检查后状态行写出新版本属于哪条线", async () => {
+      await mount("about");
+      await click(radio("测试版"));
+      expect(callsOf(ipc, "set_update_channel")).toEqual([{ channel: "beta" }]);
+      expect(openDialogs()).toEqual([]);
+      expect(checkedTiles()).toEqual(["测试版"]);
+      expect(status()).toEqual(["当前是 0.1.0", "已开启启动时自动检查"]);
+
+      await click(button("检查更新"));
+      expect(status()).toEqual(["有新版本 0.3.0-beta.1", "属于测试版 · 发布于 2026年10月30日"]);
+    });
+
+    it("选更慢的线：不弹确认，状态行当场写明要等到哪个正式版、在那之前收不到哪条线的更新；检查过后照样这么写", async () => {
+      setMockUpdaterVersion("1.0.0-dev.60");
+      await mount("about");
+      expect(checkedTiles()).toEqual(["预览版"]);
+      expect(radio("预览版").textContent).toContain("现在装的");
+      await click(radio("测试版"));
+      expect(callsOf(ipc, "set_update_channel")).toEqual([{ channel: "beta" }]);
+      expect(openDialogs()).toEqual([]);
+      expect(status()).toEqual(["在等测试版追上来", "要等到正式版 1.0.0 发布，在那之前收不到预览版的更新"]);
+
+      await click(button("检查更新"));
+      const [title, sub] = status();
+      expect(title).toBe("在等测试版追上来");
+      expect(sub).toMatch(/^要等到正式版 1\.0\.0 发布，在那之前收不到预览版的更新 · .+检查过$/);
+    });
+
+    it("偏好选成还没发布的正式版：允许选，检查后状态行说发布之前收不到任何更新", async () => {
+      setMockUpdaterVersion("1.0.0-beta.3");
+      setMockUpdateManifest("stable", { state: "not_published" });
+      await mount("about");
+      await click(radio("正式版"));
+      expect(callsOf(ipc, "set_update_channel")).toEqual([{ channel: "stable" }]);
+      expect(status()).toEqual(["在等正式版追上来", "要等到正式版 1.0.0 发布，在那之前收不到测试版的更新"]);
+
+      await click(button("检查更新"));
+      const [title, sub] = status();
+      expect(title).toBe("正式版还没有发布");
+      expect(sub).toMatch(/^发布之前收不到任何更新 · .+检查过$/);
+    });
+
+    it("正在下载时改通道：先确认，继续下载则不写、下载照旧；确认后先取消下载、等它返回再写，状态行回到未检查", async () => {
+      await mount("about");
+      await click(button("检查更新"));
+      await click(button("查看更新"));
+      await click(button("下载更新"));
+      await advance(250);
+      await click(button("后台下载"));
+      expect(status()[0]).toBe("正在下载 0.2.0 · 40%");
+
+      await click(radio("测试版"));
+      expect(all(OPEN_DIALOG + " h2").map((h) => h.textContent)).toEqual(["把更新通道改成测试版？"]);
+      expect(openDialogs()[0]?.textContent).toContain("正在下载的 0.2.0 会被取消，之后按测试版检查更新。");
+      await click(dialogButton("继续下载"));
+      expect(callsOf(ipc, "set_update_channel")).toEqual([]);
+      expect(callsOf(ipc, "cancel_task")).toEqual([]);
+      expect(checkedTiles()).toEqual(["正式版"]);
+      expect(status()[0]).toMatch(/^正在下载 0\.2\.0/);
+
+      await click(radio("测试版"));
+      await click(dialogButton("改成测试版"));
+      // 假后端每 120 ms 才看一次取消，走过这一步下载命令才返回
+      await advance(150);
+      await flush();
+      expect(commandOrder("cancel_task", "set_update_channel")).toEqual(["cancel_task", "set_update_channel"]);
+      expect(callsOf(ipc, "set_update_channel")).toEqual([{ channel: "beta" }]);
+      expect(checkedTiles()).toEqual(["测试版"]);
+      expect(status()).toEqual(["当前是 0.1.0", "已开启启动时自动检查"]);
+    });
+
+    it("已下好时改通道：确认框说丢掉下好的那一版；确认后写入，不取消任何下载，状态行回到未检查", async () => {
+      await mount("about");
+      await click(button("检查更新"));
+      await click(button("查看更新"));
+      await click(button("下载更新"));
+      await advance(250);
+      await click(button("后台下载"));
+      await advance(1000);
+      await flush();
+      expect(status()[0]).toBe("0.2.0 已下好，等待安装");
+
+      await click(radio("预览版"));
+      expect(openDialogs()[0]?.textContent).toContain("已下好的 0.2.0 会被丢掉，之后按预览版检查更新。");
+      expect(all<HTMLButtonElement>(OPEN_DIALOG + " button").map((b) => b.textContent)).toEqual(["取消", "改成预览版"]);
+      await click(dialogButton("改成预览版"));
+      expect(callsOf(ipc, "set_update_channel")).toEqual([{ channel: "dev" }]);
+      expect(callsOf(ipc, "cancel_task")).toEqual([]);
+      expect(checkedTiles()).toEqual(["预览版"]);
+      expect(status()).toEqual(["当前是 0.1.0", "已开启启动时自动检查"]);
+    });
+
+    it("下好的那一版读不了这台电脑上的数据：状态行说暂时没有能装的、已丢弃；再检查时写被拒的那一版", async () => {
+      setMockUpdateDataTooNew(["0.2.0"]);
+      await mount("about");
+      await click(button("检查更新"));
+      await click(button("查看更新"));
+      await click(button("下载更新"));
+      await advance(250);
+      await click(button("后台下载"));
+      await advance(1000);
+      await flush();
+      expect(status()).toEqual(["暂时没有能装的新版本", "0.2.0 读不了这台电脑上的数据，已丢弃"]);
+      expect(statusLine().querySelector("button")?.textContent).toBe("检查更新");
+
+      await click(statusLine().querySelector("button") as HTMLButtonElement);
+      expect(callsOf(ipc, "check_update")).toHaveLength(2);
+      const [title, sub] = status();
+      expect(title).toBe("暂时没有能装的新版本");
+      expect(sub).toMatch(/^0\.2\.0 读不了这台电脑上的数据 · .+检查过$/);
+    });
+
+    it("偏好通道的更新源还没跟上：状态行用中性的说法，按钮是重试", async () => {
+      setMockUpdateManifest("stable", { state: "stale", version: "0.1.0", seen: "0.2.0" });
+      await mount("about");
+      await click(button("检查更新"));
+      expect(status()).toEqual(["正式版的更新源还没跟上", "它给出的版本比这台电脑以前拿到过的旧，过一阵再查"]);
+      expect(statusLine().querySelector("button")?.textContent).toBe("重试");
+      expect(all("[data-selectable]").filter((el) => card().contains(el))).toEqual([]);
+    });
+
+    it("写入失败：弹「没能保存「更新通道」」，选项回到原值", async () => {
+      ipc.overrides.set("set_update_channel", () => {
+        throw new IpcError("config_write_failed", "配置文件写不进去");
+      });
+      await mount("about");
+      await click(radio("测试版"));
+      expect(toasts()).toContainEqual({ tone: "error", title: "没能保存「更新通道」", body: "配置文件写不进去" });
+      expect(checkedTiles()).toEqual(["正式版"]);
+      expect(status()).toEqual(["当前是 0.1.0", "已开启启动时自动检查"]);
+    });
+
+    it.each([
+      { name: "没配签名公钥", setup: () => setMockUpdaterUnsupported("missing_pubkey"), sub: "这个版本没有配置更新签名公钥，验不了更新包，所以不检查更新" },
+      { name: "版本号认不出通道", setup: () => setMockUpdaterVersion("0.1.0-alpha.1"), sub: "这个版本的版本号认不出是哪个发布通道，不知道该从哪里取更新，所以不检查更新" },
+    ])("不支持自更新（$name）：没有选项块，状态行照旧说明原因", async ({ setup, sub }) => {
+      setup();
+      await mount("about");
+      expect(status()).toEqual(["当前环境不支持自动更新", sub]);
+      expect(card().querySelector('[role="radiogroup"]')).toBeNull();
+      expect(card().querySelector(`.${settingsStyles.channelBlock}`)).toBeNull();
+    });
+
+    it("更新信息读不出来：换成带重试的说明块，没有选项块", async () => {
+      ipc.overrides.set("updater_info", () => {
+        throw new IpcError("io", "读不到更新信息");
+      });
+      await mount("about");
+      expect(card().textContent).toContain("版本信息读不出来");
+      expect(card().querySelector('[role="radiogroup"]')).toBeNull();
+    });
   });
 
   it("支持卡：打开日志目录", async () => {

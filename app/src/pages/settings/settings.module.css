@@ -842,3 +842,50 @@
 .updateText .errorText {
   white-space: pre-line;
 }
+
+/*
+ * 更新通道：状态行与「自动检查更新」之间的一块。选项块放不进设置行六成宽的控件区，所以单独成块，
+ * 上下各一条与设置行之间同样的分隔线；上沿与状态行文字的距离补到与设置行的上下留白一样。
+ */
+.channelBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+  min-width: 0;
+  margin-top: var(--sk-space-10);
+  padding: var(--sk-space-14) 0;
+  border-top: 1px solid var(--sk-line);
+  border-bottom: 1px solid var(--sk-line);
+}
+
+/* 小标题与说明照设置行的文字列写 */
+.channelText {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.channelTitle {
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+  font-weight: var(--sk-w-medium);
+  color: var(--sk-text);
+}
+
+.channelDesc {
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
+  color: var(--sk-text-2);
+}
+
+/* 选项块的占位：与选项块网格同列数、同间距，compact 档同样两列 */
+.channelSkeleton {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sk-space-10);
+}
+
+:global([data-sk-tier="compact"]) .channelSkeleton {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}

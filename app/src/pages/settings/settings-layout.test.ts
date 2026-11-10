@@ -61,6 +61,28 @@ describe("许可弹窗", () => {
   });
 });
 
+describe("更新通道选项块", () => {
+  it("上下两条分隔线与设置行之间的那条同一个写法：状态行与「自动检查更新」之间像隔着一行设置", () => {
+    const rowCss = readFileSync(new URL("../../ui/SettingRow.module.css", import.meta.url), "utf8");
+    const rowLine = /\.row \+ \.row\s*\{[^}]*border-top:\s*([^;]+);/.exec(rowCss)?.[1];
+    expect(rowLine).toBe("1px solid var(--sk-line)");
+    const channel = block(".channelBlock");
+    expect([channel.get("border-top"), channel.get("border-bottom")]).toEqual([rowLine, rowLine]);
+    // 块内上下留白同设置行，上沿补到与状态行文字隔开同样的距离（状态行自带 4px 底边距）
+    expect(channel.get("padding")).toBe("var(--sk-space-14) 0");
+    expect(block(".updateRow").get("padding-bottom")).toBe("var(--sk-space-4)");
+    expect(channel.get("margin-top")).toBe("var(--sk-space-10)");
+  });
+
+  it("占位网格与选项块同列数、同间距，compact 档同样两列", () => {
+    expect(block(".channelSkeleton").get("grid-template-columns")).toBe("repeat(3, minmax(0, 1fr))");
+    expect(block(".channelSkeleton").get("gap")).toBe("var(--sk-space-10)");
+    expect(block(':global([data-sk-tier="compact"]) .channelSkeleton').get("grid-template-columns")).toBe("repeat(2, minmax(0, 1fr))");
+    const tileCss = readFileSync(new URL("../../ui/RadioTile.module.css", import.meta.url), "utf8");
+    expect(/\.grid\s*\{[^}]*gap:\s*([^;]+);/.exec(tileCss)?.[1]).toBe("var(--sk-space-10)");
+  });
+});
+
 describe("更新卡的状态行", () => {
   it("文字列至少是主句一行、间距、次句一行的高度：检查中没有次句时也不变矮", () => {
     const text = block(".updateText");

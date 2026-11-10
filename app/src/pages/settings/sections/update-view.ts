@@ -1,8 +1,14 @@
-// 关于页更新卡在各阶段的呈现：主句、次句、唯一的按钮。纯函数，便于逐状态核对。
+// 关于页更新卡在各阶段的呈现：主句、次句、唯一的按钮，以及更新通道选项块的取值与改通道前要不要确认。纯函数，便于逐状态核对。
 
 import { formatBytes, formatDate, formatRelative, percent } from "../../../domain/format";
-import { downloadFailureCopy, sourceSwitchedCopy, UPDATE_COPY } from "../../../copy/updater";
-import { downloadFraction, type UpdaterState } from "../../../state/updater/machine";
+import { downloadFailureCopy, refusalReasonCopy, sourceSwitchedCopy, UPDATE_COPY } from "../../../copy/updater";
+import { downloadFraction, type UpdaterChannels, type UpdaterPhase, type UpdaterState } from "../../../state/updater/machine";
+
+/** 后端的通道名（dev、beta、stable）。 */
+export type ChannelId = NonNullable<UpdaterChannels["package_channel"]>;
+
+/** 选项块从快到慢排：预览版、测试版、正式版。 */
+export const CHANNEL_ORDER: readonly ChannelId[] = ["dev", "beta", "stable"];
 
 export type CardAction = "check" | "open_panel" | "install";
 
@@ -53,6 +59,90 @@ function button(label: string, variant: CardButton["variant"], action: CardActio
   return { label, variant, action, loading: false, disabled: false, disabledReason: undefined, ...extra };
 }
 
+/** 支持自更新时后端必给的通道信息：包的通道、生效的偏好与两者的关系都不为空。 */
+interface KnownChannels {
+  packageChannel: ChannelId;
+  preference: ChannelId;
+  relation: NonNullable<UpdaterChannels["relation"]>;
+  heads: UpdaterChannels["channel_heads"];
+  refused: UpdaterChannels["refused"];
+}
+
+/** 支持自更新的阶段才调：那时更新信息已经到了，包的通道只在不支持时为空，空了是后端违约。 */
+function knownChannels(state: UpdaterState): KnownChannels {
+  const { channels } = state;
+  if (channels === null) throw new Error("更新信息到达之前不该渲染更新卡");
+  const { package_channel: packageChannel, preference, relation } = channels;
+  if (packageChannel === null || preference === null || relation === null) {
+    throw new Error(`支持自更新时 updater_info 应给出包的通道、偏好与关系，实为 ${JSON.stringify([packageChannel, preference, relation])}`);
+  }
+  return { packageChannel, preference, relation, heads: channels.channel_heads, refused: channels.refused };
+}
+
+/** 版本的核心号：去掉第一个「-」及之后的部分，1.1.0-dev.61 的核心号是 1.1.0。 */
+export function versionCore(version: string): string {
+  const dash = version.indexOf("-");
+  return dash < 0 ? version : version.slice(0, dash);
+}
+
+/**
+ * 没有可装版本时（未检查、已是最新）按通道换的说法；都不命中时为 null，照旧写。同时命中时取靠前的：
+ * 偏好是正式版而它还没发布；本次会话拒过普通更新（只在已是最新时，取最后一条）；偏好比包的通道慢、在等它追上来。
+ * 被拒排在等待前面：等待中被拒的若正是等着的那一版，「要等到」那句已经不成立。
+ * checkedAgo 是已是最新时的「x 分钟前检查过」，接在次句后面；未检查时为 null。
+ */
+function channelQuietLine(state: UpdaterState, version: string, checkedAgo: string | null): { title: string; sub: string } | null {
+  const ch = knownChannels(state);
+  const withChecked = (sub: string) => (checkedAgo === null ? sub : `${sub} · ${checkedAgo}`);
+  if (ch.preference === "stable" && ch.heads.some((head) => head.channel === "stable" && head.state === "not_published")) {
+    return { title: UPDATE_COPY.notPublished, sub: withChecked(UPDATE_COPY.notPublishedSub) };
+  }
+  // 被拒只在已是最新时说；换通道被拒的版本由换过去那一路自己说，不进状态行
+  if (checkedAgo !== null) {
+    const refused = ch.refused.filter((entry) => entry.intent === "update").at(-1);
+    if (refused !== undefined) return { title: UPDATE_COPY.nothingInstallable, sub: withChecked(refusalReasonCopy(refused)) };
+  }
+  if (ch.relation === "waiting") {
+    return { title: UPDATE_COPY.waiting(ch.preference), sub: withChecked(UPDATE_COPY.waitingSub(versionCore(version), ch.packageChannel)) };
+  }
+  return null;
+}
+
+/** 更新通道选项块要的取值；不支持自更新时为 null，整块不显示（状态行已说明原因）。 */
+export interface ChannelChoice {
+  /** 勾选的那一项：后端给的生效值，没选过或存的值认不出时就是包的通道，界面不自己推。 */
+  preference: ChannelId;
+  /** 标「现在装的」的那一项。 */
+  packageChannel: ChannelId;
+  /** 安装中整组不可用：窗口马上就关。 */
+  locked: boolean;
+}
+
+export function channelChoice(state: UpdaterState): ChannelChoice | null {
+  if (state.phase.kind === "unsupported") return null;
+  const ch = knownChannels(state);
+  return { preference: ch.preference, packageChannel: ch.packageChannel, locked: state.phase.kind === "installing" };
+}
+
+/** 改通道会丢掉的东西：正在下载的那一版，或已下好（含设了退出时安装）的那一版。 */
+export interface ChannelChangeCost {
+  version: string;
+  downloading: boolean;
+}
+
+/** 改通道前要不要先确认：下载中与已下好时后端会丢掉那个包，其余阶段直接写入。 */
+export function channelChangeCost(phase: UpdaterPhase): ChannelChangeCost | null {
+  switch (phase.kind) {
+    case "downloading":
+      return { version: phase.update.version, downloading: true };
+    case "ready":
+    case "install_on_exit":
+      return { version: phase.update.version, downloading: false };
+    default:
+      return null;
+  }
+}
+
 /** 下载中的次句：已下 / 总量（总量未知时只写已下），换过源时在后面说一句。bytes 由调用方给显示用的值。 */
 export function downloadSub(progress: CardProgress): string {
   const size = progress.totalBytes === null ? formatBytes(progress.bytes) : UPDATE_COPY.progress(formatBytes(progress.bytes), formatBytes(progress.totalBytes));
@@ -84,22 +174,38 @@ export function updateCardView(state: UpdaterState, ctx: CardContext): CardView 
     }
     case "idle": {
       if (state.currentVersion === null) throw new Error("更新信息到达之前不该渲染更新卡");
+      const line = channelQuietLine(state, state.currentVersion, null);
+      if (line !== null) return view(line.title, line.sub, check());
       return view(UPDATE_COPY.current(state.currentVersion), ctx.checkUpdates ? UPDATE_COPY.autoOn : UPDATE_COPY.autoOff, check());
     }
     case "checking":
       return view(UPDATE_COPY.checking, null, button(UPDATE_COPY.check, "secondary", "check", { loading: true }));
-    case "up_to_date":
-      return view(UPDATE_COPY.upToDate, UPDATE_COPY.checkedAgo(formatRelative(phase.checkedAt, ctx.now)), check());
+    case "up_to_date": {
+      if (state.currentVersion === null) throw new Error("更新信息到达之前不该渲染更新卡");
+      const checkedAgo = UPDATE_COPY.checkedAgo(formatRelative(phase.checkedAt, ctx.now));
+      const line = channelQuietLine(state, state.currentVersion, checkedAgo);
+      if (line !== null) return view(line.title, line.sub, check());
+      return view(UPDATE_COPY.upToDate, checkedAgo, check());
+    }
     case "check_failed":
+      // 更新源还没跟上是这台电脑记着的版本挡下的，不是后端原文能说清的失败：写中文说法，原文只进日志
+      if (phase.staleChannel !== null) return view(UPDATE_COPY.sourceStale(phase.staleChannel), UPDATE_COPY.sourceStaleSub, check(UPDATE_COPY.retry));
       return view(phase.network === null ? UPDATE_COPY.checkFailed : UPDATE_COPY.networkFailed[phase.network], phase.message, check(UPDATE_COPY.retry), { subIsError: true });
     case "available": {
       const parts: string[] = [];
+      // 新版本不属于包的通道时先写出它属于哪条线：装上它就离开了现在这条线，或换到了偏好的那条
+      if (phase.update.channel !== knownChannels(state).packageChannel) parts.push(UPDATE_COPY.fromChannel(phase.update.channel));
       if (phase.update.date !== null) parts.push(UPDATE_COPY.publishedAt(formatDate(phase.update.date)));
       if (ctx.skippedVersion === phase.update.version) parts.push(UPDATE_COPY.skipped);
       const sub = parts.length === 0 ? null : parts.join(" · ");
       return view(UPDATE_COPY.available(phase.update.version), sub, button(UPDATE_COPY.view, "primary", "open_panel"), { accent: true });
     }
     case "download_failed": {
+      // 下好、验过签却不能装：不是下载失败，也不给面板里的重试（再下必然同样被拒），按钮改为重新检查
+      if (phase.refusal !== null) {
+        const reason = refusalReasonCopy({ version: phase.update.version, channel: phase.update.channel, reason: phase.refusal });
+        return view(UPDATE_COPY.nothingInstallable, UPDATE_COPY.discarded(reason), check());
+      }
       const { summary, raw } = downloadFailureCopy(phase);
       return view(UPDATE_COPY.available(phase.update.version), summary, button(UPDATE_COPY.view, "primary", "open_panel"), { accent: true, raw });
     }
