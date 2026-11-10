@@ -6044,6 +6044,81 @@ mod tests {
         );
     }
 
+    /// 测试钥给 `text` 那一版签的签名串，第 1 行不可信注释后面补上 `fill` 个字符：那一行不受签名保护，清单头核验的
+    /// 签名部分与插件验签都照样通过，只是变长了。
+    fn padded_signature(text: &str, fill: usize) -> String {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        let inner = String::from_utf8(STANDARD.decode(signature_of(text)).unwrap()).unwrap();
+        let (untrusted, rest) = inner.split_once('\n').unwrap();
+        STANDARD.encode(format!("{untrusted}{}\n{rest}", "x".repeat(fill)))
+    }
+
+    /// 香港机给的清单头签名串被填充得超过长度上限：按清单异常跳过，接着问 GitHub，候选与见过的版本都取 GitHub 验过的
+    /// 那一版，香港机那份插件造出的更新不会被拿去下载，超长串也记不进配置。配置里已经存着的超长串读回时作废，这次
+    /// 验过的版本照常写下、把它换掉。
+    #[tokio::test]
+    async fn an_overlong_signature_is_a_bad_manifest_and_never_saved() {
+        let (_beta, beta_url) = source_answering(404).await;
+        let (_stable, stable_url) = source_answering(404).await;
+        let current = "1.0.0-dev.6";
+        let overlong = |text: &str| padded_signature(text, 8 * 1024);
+        let new_flow = |seen: Option<Value>| {
+            Flow::new(current, None, seen)
+                .with_endpoints(Channel::Beta, &[beta_url.as_str()])
+                .with_endpoints(Channel::Stable, &[stable_url.as_str()])
+        };
+        let slower_channels = || {
+            [
+                (beta_url.as_str(), EndpointAnswer::Unsuccessful),
+                (stable_url.as_str(), EndpointAnswer::Unsuccessful),
+            ]
+        };
+
+        let flow = new_flow(None);
+        let mut answers = vec![
+            (
+                HK_DEV,
+                EndpointAnswer::Head(ManifestHead {
+                    version: version("1.0.0-dev.12"),
+                    signature: overlong("1.0.0-dev.12"),
+                    date: Some(HEAD_DATE),
+                    update: Some(Fake("1.0.0-dev.12")),
+                }),
+            ),
+            (GITHUB_DEV, head("1.0.0-dev.8", current)),
+        ];
+        answers.extend(slower_channels());
+        let (found, asked) = flow.check(answers).await;
+        assert_eq!(found.unwrap(), Some(("1.0.0-dev.8", Channel::Dev)));
+        assert!(asked.contains(&GITHUB_DEV.to_owned()));
+        assert_eq!(
+            flow.heads()[0],
+            head_dto(
+                Channel::Dev,
+                ChannelHeadState::Published,
+                Some("1.0.0-dev.8")
+            )
+        );
+        assert_eq!(
+            flow.saved().unwrap()["seen_update_versions"],
+            json!({ "dev": seen_entry("1.0.0-dev.8") })
+        );
+
+        let flow = new_flow(Some(json!({
+            "dev": { "version": "1.0.0-dev.8", "signature": overlong("1.0.0-dev.8") },
+        })));
+        assert_eq!(flow.plan().await.seen_version(Channel::Dev), None);
+        let mut answers = vec![(HK_DEV, head("1.0.0-dev.7", current))];
+        answers.extend(slower_channels());
+        let (found, _) = flow.check(answers).await;
+        assert_eq!(found.unwrap(), Some(("1.0.0-dev.7", Channel::Dev)));
+        assert_eq!(
+            flow.saved().unwrap()["seen_update_versions"],
+            json!({ "dev": seen_entry("1.0.0-dev.7") })
+        );
+    }
+
     /// 测试版用户跟随同号正式版：挑中别的通道的候选、偏好又是缺省，同一次检查先把偏好写成本包的通道，与见过的版本
     /// 一起落盘。不写的话装上正式版之后包的通道变了，他会悄悄成为正式版用户。偏好已经显式选过时不必再写。
     #[tokio::test]

@@ -7,8 +7,8 @@
 //!
 //! - 形状：清单版本按通道规则判出的通道必须就是所问的通道。别的通道的合法包放进这份清单（测试版与正式版
 //!   共用一把钥，单靠签名分不出来）也认不得。
-//! - 签名：签名行的密钥号等于这个通道公钥的密钥号，全局签名验得过，验过之后可信注释里恰好一个 `version`
-//!   字段，且等于清单版本。
+//! - 签名：签名串不超过长度上限（[`MAX_SIGNATURE_LEN`]），签名行的密钥号等于这个通道公钥的密钥号，全局签名
+//!   验得过，验过之后可信注释里恰好一个 `version` 字段，且等于清单版本。
 //!
 //! config.json 里记下的见过的最高版本，读的时候逐项按同样两步重验：本机程序只能把记录删掉或改低，改不高。
 //!
@@ -40,6 +40,14 @@ const PUBLIC_KEY_LEN: usize = 42;
 const SIGNATURE_LINE_LEN: usize = 74;
 /// 全局签名行与文件签名都是 64 字节的 Ed25519 签名。
 const ED25519_SIGNATURE_LEN: usize = 64;
+
+/// 签名串（清单里 `signature` 的原样内容）最多多少字节。
+///
+/// 第 1 行的不可信注释与第 4 行之后的内容都不受签名保护：控制清单端点的人拿一份合法清单往里填几 MB，核验照样
+/// 通过，这串内容却要原样记进 config.json 的见过的版本，之后每次读写配置都带着它，启动器越来越慢。tauri 签出的
+/// 签名串约 450 字节（外层 base64 包着不可信注释、签名行、带时间戳文件名与版本号的可信注释、全局签名四行），
+/// 版本号三段与序号全取 u64 上限也不到 700 字节；取 4 KiB 留足余量，又远小于值得拿来填充的大小。
+const MAX_SIGNATURE_LEN: usize = 4096;
 
 /// 可信注释里版本字段的前缀。tauri 把可信注释写成 tab 分隔的 `键:值`。
 const VERSION_FIELD_PREFIX: &str = "version:";
@@ -127,6 +135,8 @@ pub(crate) enum HeadError {
     },
     /// 通道公钥的文本解不开。公钥编在程序里，出现这一种说明钥表本身坏了，换个端点也一样。
     PublicKey(MalformedText),
+    /// 签名串超过长度上限（[`MAX_SIGNATURE_LEN`]），多半被填充过：不解，不记。
+    SignatureTooLong { found: usize, limit: usize },
     /// 清单里的签名串解不开。
     Signature(MalformedText),
     /// 签名行的密钥号不是这个通道公钥的：别的钥签的包，例如预览版的包放进了测试版的清单。
@@ -162,6 +172,9 @@ impl fmt::Display for HeadError {
                 asked.as_str()
             ),
             Self::PublicKey(err) => write!(f, "通道公钥解不开：{err}"),
+            Self::SignatureTooLong { found, limit } => {
+                write!(f, "签名串有 {found} 字节，超过上限 {limit} 字节")
+            }
             Self::Signature(err) => write!(f, "签名串解不开：{err}"),
             Self::KeyIdMismatch { signed, expected } => {
                 write!(f, "签名的密钥号是 {signed}，通道公钥的是 {expected}")
@@ -226,6 +239,12 @@ fn check_shape(channel: Channel, version: &Version) -> Result<(), HeadError> {
 }
 
 fn check_signature(version: &Version, signature: &str, public_key: &str) -> Result<(), HeadError> {
+    if signature.len() > MAX_SIGNATURE_LEN {
+        return Err(HeadError::SignatureTooLong {
+            found: signature.len(),
+            limit: MAX_SIGNATURE_LEN,
+        });
+    }
     let key = decode_public_key(public_key).map_err(HeadError::PublicKey)?;
     let signature = decode_signature(signature).map_err(HeadError::Signature)?;
     if signature.key_id != key.id {
@@ -932,6 +951,61 @@ mod tests {
                 "留 {keep} 行"
             );
         }
+    }
+
+    /// 往第 1 行不可信注释后面补字符，把签名串填到外层正好 `len` 字节。外层 base64 每 3 字节编成 4 个字符，
+    /// `len` 须是 4 的倍数。
+    fn padded_to(signature: &str, len: usize) -> String {
+        let fill = len / 4 * 3 - unwrap(signature).len();
+        let padded = edit_lines(signature, |lines| lines[0].push_str(&"x".repeat(fill)));
+        assert_eq!(padded.len(), len);
+        padded
+    }
+
+    /// 签名串超过上限时不解、不验，按清单异常拒绝。第 1 行的不可信注释与第 4 行之后的内容都不受签名保护：填充过的
+    /// 签名串插件照样解得开、验得过，不拦的话这串内容会原样记进见过的版本。记进配置里的超长串读回时同样作废那一项。
+    /// 正好在上限上的照常通过。
+    #[test]
+    fn signature_text_longer_than_the_limit_is_refused() {
+        let at_limit = padded_to(DEV_7.signature, MAX_SIGNATURE_LEN);
+        assert_eq!(
+            check(Dev, "1.0.0-dev.7", &at_limit, DEV_KEY),
+            Ok(head(Dev, "1.0.0-dev.7", &at_limit))
+        );
+
+        let dev_key = minisign_verify::PublicKey::decode(&unwrap(DEV_KEY)).unwrap();
+        let padded = padded_to(DEV_7.signature, MAX_SIGNATURE_LEN + 4);
+        let appended = edit_lines(DEV_7.signature, |lines| {
+            lines.extend(std::iter::repeat_n("x".repeat(100), 40));
+        });
+        for signature in [padded, appended] {
+            let decoded = minisign_verify::Signature::decode(&unwrap(&signature))
+                .unwrap_or_else(|err| panic!("插件解不开填充过的签名串：{err}"));
+            dev_key
+                .verify(PAYLOAD, &decoded, true)
+                .unwrap_or_else(|err| panic!("插件验不过填充过的签名串：{err}"));
+            let too_long = HeadError::SignatureTooLong {
+                found: signature.len(),
+                limit: MAX_SIGNATURE_LEN,
+            };
+            assert!(signature.len() > MAX_SIGNATURE_LEN);
+            assert_eq!(
+                check(Dev, "1.0.0-dev.7", &signature, DEV_KEY),
+                Err(too_long.clone())
+            );
+            assert_eq!(
+                read_seen_entry(Dev, &entry("1.0.0-dev.7", &signature), DEV_KEY),
+                Err(SeenEntryError::Head(too_long))
+            );
+        }
+        assert_eq!(
+            HeadError::SignatureTooLong {
+                found: 4100,
+                limit: 4096
+            }
+            .to_string(),
+            "签名串有 4100 字节，超过上限 4096 字节"
+        );
     }
 
     #[test]
