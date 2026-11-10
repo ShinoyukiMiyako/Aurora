@@ -49,7 +49,7 @@ export const BLOCKED_POLL_MS = 1000;
 export const MIN_INSTALLING_MS = 1200;
 /** 更新模式下等落樱退出时多久查一次：更新插件拉起引导程序后立即退出，进程通常很快就消失，查得密一点能早些开始。 */
 export const UPDATE_EXIT_POLL_MS = 200;
-/** 更新模式下最多等落樱退出多久，等不到再进「请先关闭」页。等的时候窗口已经显示着升级页。 */
+/** 更新模式下最多等落樱退出多久，等不到再进「请先关闭」页。等的时候窗口已经显示着准备页。 */
 export const UPDATE_EXIT_WAIT_MS = 2000;
 /** 更新模式下最多查几次落樱还在不在：开头一次，之后每个间隔一次。 */
 export const UPDATE_EXIT_CHECKS = Math.ceil(UPDATE_EXIT_WAIT_MS / UPDATE_EXIT_POLL_MS) + 1;
@@ -210,7 +210,7 @@ function useSetupFlow(bridge: SetupBridge, initial: SetupState): SetupFlow {
     });
   }, [attempt, bridge]);
 
-  // 更新模式先在准备升级页等落樱自己退出：等到了直接开始升级，用户看不到「请先关闭」那一页
+  // 更新模式先在准备页等落樱自己退出：等到了直接按无人值守的模式（升级或带开关的换通道）开始安装，用户看不到「请先关闭」那一页
   const updateSent = useRef(false);
   useEffect(() => {
     if (state.view !== "preparing" || state.probe === null || unattendedMode(state.probe) === null || updateSent.current) return;
@@ -259,9 +259,10 @@ function CurrentView({ flow, bridge, copy }: ViewProps) {
     case "boot":
       return null;
     case "preparing": {
-      // 和安装中同一页，进度停在起点：等落樱退出只要一两秒，换页反而像跳了一下
+      // 和安装中同一页，进度停在起点：等落樱退出只要一两秒，换页反而像跳了一下。标题按随后要装的模式说，进了安装中也不变
       const probe = requireValue(state.probe, "探测结果", view);
-      return <Installing copy={copy} mode="upgrade" switching={null} version={probe.payloadVersion} run={state.run} progress={null} />;
+      const mode = requireValue(unattendedMode(probe), "无人值守的模式", view);
+      return <Installing copy={copy} mode={mode} switching={switchingTo(mode, probe)} version={probe.payloadVersion} run={state.run} progress={null} />;
     }
     case "welcome": {
       const probe = requireValue(state.probe, "探测结果", view);
