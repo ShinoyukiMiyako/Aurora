@@ -4887,7 +4887,8 @@ mod tests {
         let seen = seen.map(version);
         let answers = std::cell::RefCell::new(answers.into_iter().map(Some).collect::<Vec<_>>());
         let asked = std::cell::RefCell::new(Vec::new());
-        let ask = |_, endpoint: &str| {
+        let ask = |asked_channel: Channel, endpoint: &str| {
+            assert_eq!(asked_channel, channel, "问 {endpoint} 时交来的通道不对");
             let index = group
                 .endpoints
                 .iter()
@@ -5586,7 +5587,8 @@ mod tests {
                 .expect("用例里的版本都认得出通道")
         }
 
-        /// 按 `plan` 问一遍清单，`answers` 按端点地址给答案；交回各通道的结果，与问过的端点（按先后）。
+        /// 按 `plan` 问一遍清单，`answers` 按端点地址给答案；交回各通道的结果，与问过的端点（按先后）。问每个端点时
+        /// 交来的通道必须是这个端点所属的那个：生产里检查器按它取钥，错了就会拿别的通道的钥去验。
         async fn fetch(
             &self,
             plan: &CheckPlan,
@@ -5604,7 +5606,14 @@ mod tests {
                     .collect::<HashMap<_, _>>(),
             );
             let asked = std::cell::RefCell::new(Vec::new());
-            let fetched = fetch_channels(&groups, plan, |_, endpoint: &str| {
+            let fetched = fetch_channels(&groups, plan, |channel: Channel, endpoint: &str| {
+                assert!(
+                    self.endpoints[&channel]
+                        .iter()
+                        .any(|known| known == endpoint),
+                    "问 {endpoint} 时交来的通道是 {}，它不是这个通道的端点",
+                    channel.as_str()
+                );
                 asked.borrow_mut().push(endpoint.to_owned());
                 let answer = answers
                     .borrow_mut()
@@ -6233,6 +6242,50 @@ mod tests {
             .await;
         assert_eq!(found.unwrap(), Some(("1.0.0-dev.12", Channel::Dev)));
         assert_eq!(flow.refused(), [unsaved("1.1.0-beta.1", Channel::Beta)]);
+    }
+
+    /// 本次会话里因为认不得这台电脑上的数据而被拒的版本，下一次检查从槽位读出来交给挑候选的那一步：同样的清单下，
+    /// 它不再是候选，更低的那一版顶上来；记着的被拒版本原样留着。
+    #[tokio::test]
+    async fn a_version_refused_this_session_is_skipped_by_the_next_check() {
+        let (_stable, stable_url) = source_answering(404).await;
+        let current = "1.0.0-dev.6";
+        let flow =
+            Flow::new(current, None, None).with_endpoints(Channel::Stable, &[stable_url.as_str()]);
+        let answers = || {
+            vec![
+                (HK_DEV, head("1.0.0-dev.12", current)),
+                (HK_BETA, head("1.1.0-beta.1", current)),
+                (stable_url.as_str(), EndpointAnswer::Unsuccessful),
+            ]
+        };
+        let (found, _) = flow.check(answers()).await;
+        assert_eq!(
+            found.unwrap(),
+            Some(("1.1.0-beta.1", Channel::Beta)),
+            "没被拒时测试版那一版核心号更高，是候选"
+        );
+
+        let ticket = flow.ticket();
+        lock_slot(&flow.slot)
+            .refuse_update(
+                ticket,
+                "1.1.0-beta.1".to_owned(),
+                Channel::Beta,
+                RefusalReason::DataTooNew,
+            )
+            .unwrap();
+        let (found, _) = flow.check(answers()).await;
+        assert_eq!(found.unwrap(), Some(("1.0.0-dev.12", Channel::Dev)));
+        assert_eq!(
+            flow.refused(),
+            [RefusedUpdateDto {
+                version: "1.1.0-beta.1".to_owned(),
+                channel: Channel::Beta,
+                reason: RefusalReason::DataTooNew,
+                intent: UpdateIntent::Update,
+            }]
+        );
     }
 
     /// 读见过的版本时逐项重验：被改高的那一项（签名对不上版本）只废它自己，当这个通道没有记录，下次取到清单时覆盖；

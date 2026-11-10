@@ -441,6 +441,28 @@ mod tests {
         assert!(log.contains(&format!("lib.rs:{line}:")), "{log}");
     }
 
+    // 启动时消费换通道记录，传进去的「支不支持自更新」必须就是决定注册更新插件的那个判定：写死成 true 的话，开发构建
+    // 也会去动这台机器上正式安装留下的记录。setup 闭包要 AppHandle，单测造不出来，钉住源码。
+    #[test]
+    fn the_channel_handoff_is_consumed_only_when_self_update_is_supported() {
+        let (source, _) = include_str!("lib.rs").split_once("#[cfg(test)]").unwrap();
+        let call = "channel_handoff::consume_on_startup(";
+        assert_eq!(source.matches(call).count(), 1, "消费换通道记录只该有一处");
+        let (_, after) = source.split_once(call).unwrap();
+        let (args, _) = after.split_once("));").expect("找不到这次调用的结尾");
+        let args = args.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            args,
+            "&app.state::<Facade>(), &app.package_info().version, \
+             updater_support == UpdaterSupport::Supported,"
+        );
+        assert_eq!(source.matches("let updater_support =").count(), 1);
+        assert!(
+            source.contains("let updater_support = commands::updater::detect_support("),
+            "updater_support 应是 detect_support 的结果"
+        );
+    }
+
     // tauri.conf.json、index.html 与前端 TS 无法引用 Rust 常量，产品名只能各写一份，
     // 由这条测试钉住它们与 petalfall-base 的 brand 模块一致。identifier 和 publisher 发布后即成兼容契约，
     // 单独写死：publisher 还决定 NSIS 记安装目录的注册表键，引导程序按它去读。
