@@ -212,7 +212,45 @@ export const listNews = (options: ListNewsOptions = { retry: false }): Promise<N
 
 // ---- 启动器自更新 ----
 
-export type UpdaterUnsupportedReason = "debug_build" | "missing_pubkey" | "signed_version_not_required" | "downgrades_allowed" | "unknown_channel";
+export type UpdaterUnsupportedReason = "debug_build" | "missing_pubkey" | "signed_version_not_required" | "downgrades_allowed" | "unknown_channel" | "pubkey_mismatch";
+
+/** 更新接口里的发布通道名，与清单路径 /updates/<通道>/ 同名。界面用的 ReleaseChannel（lib/app-info）把 dev 叫作 preview。 */
+export type UpdateChannel = "dev" | "beta" | "stable";
+
+/** 生效的通道偏好与本包通道的关系：same 是两者相同，waiting 是偏好更慢（等那个通道追上来），following 是偏好更快。 */
+export type ChannelRelation = "same" | "waiting" | "following";
+
+/**
+ * 一个通道最近一次取清单的结果。published：有端点给出了验过的清单头；not_published：所有端点都确认 404；
+ * stale：每个端点都给出了清单头，但全都旧于本机记下的这个通道的最高版本；failed：其余情况。
+ */
+export type ChannelHeadState = "published" | "not_published" | "stale" | "failed";
+
+export interface ChannelHeadDto {
+  channel: UpdateChannel;
+  state: ChannelHeadState;
+  /** 验过的清单头的版本，比当前版本新旧都有可能；没取到清单头时为 null。 */
+  version: string | null;
+  /** 清单里的发布时间（清单不签名，只作显示），毫秒时间戳；没有时为 null。 */
+  date: number | null;
+}
+
+/** 下载的用意：普通更新，或换到另一个通道。 */
+export type UpdateIntent = "update" | "switch";
+
+/**
+ * 一个版本为什么被拒。data_too_new：包认得的数据格式比正在运行的这一版旧，两种用意都有；
+ * target_unsupported：包认不得换通道安装，只随 switch；preference_unsaved：跟随别的通道时没能保存偏好，只随 update。
+ */
+export type RefusalReason = "data_too_new" | "target_unsupported" | "preference_unsaved";
+
+/** 本次会话里不再作为候选的版本。 */
+export interface RefusedUpdateDto {
+  version: string;
+  channel: UpdateChannel;
+  reason: RefusalReason;
+  intent: UpdateIntent;
+}
 
 export interface UpdateDto {
   version: string;
@@ -220,16 +258,32 @@ export interface UpdateDto {
   notes: string | null;
   /** 发布时间，毫秒时间戳。 */
   date: number | null;
+  /** 这一版取自哪个通道的清单。 */
+  channel: UpdateChannel;
 }
 
 export interface UpdaterInfoDto {
   current_version: string;
   supported: boolean;
   unsupported_reason: UpdaterUnsupportedReason | null;
+  /** 本包的通道；版本号认不出通道时为 null。 */
+  package_channel: UpdateChannel | null;
+  /** 生效的通道偏好；package_channel 为 null 时也为 null。 */
+  preference: UpdateChannel | null;
+  /** package_channel 为 null 时也为 null。 */
+  relation: ChannelRelation | null;
   /** 本次会话最近一次检查到的更新。 */
   available: UpdateDto | null;
+  /** 要看的每个通道最近一次取清单的结果；本次会话没取过清单时为空数组。 */
+  channel_heads: ChannelHeadDto[];
+  /** 本次会话里被拒的版本。 */
+  refused: RefusedUpdateDto[];
   /** 已下载并通过签名校验、等待安装的版本。 */
   downloaded_version: string | null;
+  /** 已下载的包所属的通道；没有时为 null。 */
+  downloaded_channel: UpdateChannel | null;
+  /** 已下载的包的用意；没有时为 null。 */
+  downloaded_intent: UpdateIntent | null;
   install_on_exit: boolean;
 }
 

@@ -358,6 +358,7 @@ const LATEST: Omit<UpdateDto, "current_version"> = {
   version: "0.2.0",
   notes: "新增首次启动向导与主页服务器卡片。",
   date: Date.UTC(2026, 9, 29, 8, 0, 0),
+  channel: "stable",
 };
 const UPDATE_SIZE = 12_582_912;
 /** 假清单里的候选下载源，顺序同后端的「国内在前」。 */
@@ -408,8 +409,15 @@ function updaterInfo(): UpdaterInfoDto {
     current_version: updater.current,
     supported: true,
     unsupported_reason: null,
+    package_channel: "stable",
+    preference: "stable",
+    relation: "same",
     available: updater.available,
+    channel_heads: [],
+    refused: [],
     downloaded_version: updater.downloaded,
+    downloaded_channel: updater.downloaded === null ? null : "stable",
+    downloaded_intent: updater.downloaded === null ? null : "update",
     install_on_exit: updater.installOnExit,
   };
 }

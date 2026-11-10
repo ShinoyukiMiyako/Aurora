@@ -142,7 +142,7 @@ describe("外壳：重启并安装更新", () => {
 });
 
 describe("外壳：启动器更新的下载进度", () => {
-  const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null };
+  const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null, channel: "stable" };
 
   it("下载更新的进度事件不让外壳核心重渲染（连同其中的自动检查）；打开更新面板仍按此刻的阶段取版本", async () => {
     ipc.overrides.set("updater_info", () => ({ current_version: "0.1.0", supported: true, unsupported_reason: null, available: UPDATE, downloaded_version: null, install_on_exit: false }));

@@ -23,7 +23,7 @@ import styles from "./UpdatePanel.module.css";
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
-const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: "修复若干问题", date: null };
+const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: "修复若干问题", date: null, channel: "stable" };
 
 let view: Rendered | undefined;
 let shell: ShellApi;
@@ -80,7 +80,7 @@ beforeEach(() => {
   stubMatchMedia(false);
   stubCanvas();
   vi.spyOn(console, "info").mockImplementation(() => undefined);
-  info = { current_version: "0.1.0", supported: true, unsupported_reason: null, available: UPDATE, downloaded_version: UPDATE.version, install_on_exit: false };
+  info = { current_version: "0.1.0", supported: true, unsupported_reason: null, package_channel: "stable", preference: "stable", relation: "same", available: UPDATE, channel_heads: [], refused: [], downloaded_version: UPDATE.version, downloaded_channel: "stable", downloaded_intent: "update", install_on_exit: false };
   install = deferred<null>();
   bootOverrides(ipc);
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
@@ -204,7 +204,7 @@ describe("下载进度的文字", () => {
 });
 
 describe("弹窗形变的依赖", () => {
-  const update = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null };
+  const update = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null, channel: "stable" as const };
   const downloading = (bytes: number, source: DownloadSource | null): UpdaterPhase => ({ kind: "downloading", update, taskId: "t", bytes, totalBytes: 1200, source });
   const failed = (signature: boolean): UpdaterPhase => ({ kind: "download_failed", update, reason: "连接被重置", signature, network: null, sourcesTried: 1 });
   const key = updatePanelLayoutKey;

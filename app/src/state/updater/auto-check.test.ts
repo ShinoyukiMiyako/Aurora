@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { autoCheckEnabled, updateToAnnounce } from "./auto-check";
 import { INITIAL_UPDATER_STATE, type UpdateInfo, type UpdaterPhase, type UpdaterState } from "./machine";
 
-const UPDATE: UpdateInfo = { version: "0.3.0", current_version: "0.2.0", notes: null, date: null };
+const UPDATE: UpdateInfo = { version: "0.3.0", current_version: "0.2.0", notes: null, date: null, channel: "stable" };
 
 function state(phase: UpdaterPhase, extra: Partial<UpdaterState> = {}): UpdaterState {
   return { ...INITIAL_UPDATER_STATE, currentVersion: "0.2.0", phase, ...extra };

@@ -13,7 +13,7 @@ import { updateCardView, type CardContext } from "./update-view";
 const MB = 1024 * 1024;
 const TOTAL = 10 * MB;
 const T0 = 1_730_000_000_000;
-const UPDATE: UpdateInfo = { version: "0.3.0", current_version: "0.2.0", notes: null, date: null };
+const UPDATE: UpdateInfo = { version: "0.3.0", current_version: "0.2.0", notes: null, date: null, channel: "stable" };
 const CTX: CardContext = { checkUpdates: true, skippedVersion: null, now: T0, online: true, gameRunning: false };
 
 let view: Rendered | undefined;

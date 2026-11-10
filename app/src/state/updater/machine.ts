@@ -77,7 +77,8 @@ export function phaseUpdate(phase: UpdaterPhase): UpdateInfo | null {
 /** 后端只报了已下载的版本号、没有这一版的更新说明时（例如检查结果已被新一轮检查替换），按版本号补出一个。 */
 function downloadedUpdate(info: UpdaterInfoDto, version: string): UpdateInfo {
   if (info.available !== null && info.available.version === version) return info.available;
-  return { version, current_version: info.current_version, notes: null, date: null };
+  if (info.downloaded_channel === null) throw new Error(`后端报了已下载的 ${version}，却没报它所属的通道`);
+  return { version, current_version: info.current_version, notes: null, date: null, channel: info.downloaded_channel };
 }
 
 function fromInfo(prev: UpdaterPhase, info: UpdaterInfoDto): UpdaterPhase {

@@ -3,7 +3,7 @@ import { IpcError } from "../../ipc/errors";
 import { UpdaterController, type UpdaterPort } from "./controller";
 import type { UpdateInfo } from "./machine";
 
-const UPDATE: UpdateInfo = { version: "1.4.0", current_version: "1.3.2", notes: null, date: null };
+const UPDATE: UpdateInfo = { version: "1.4.0", current_version: "1.3.2", notes: null, date: null, channel: "stable" };
 
 function ipcError(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
@@ -39,7 +39,7 @@ function fakePort(overrides: Partial<UpdaterPort> = {}): UpdaterPort & { calls: 
 
 function controllerWith(port: UpdaterPort, now = 42_000): UpdaterController {
   const c = new UpdaterController(port, () => now, () => "task-1");
-  c.sync({ current_version: "1.3.2", supported: true, unsupported_reason: null, available: null, downloaded_version: null, install_on_exit: false });
+  c.sync({ current_version: "1.3.2", supported: true, unsupported_reason: null, package_channel: "stable", preference: "stable", relation: "same", available: null, channel_heads: [], refused: [], downloaded_version: null, downloaded_channel: null, downloaded_intent: null, install_on_exit: false });
   return c;
 }
 
@@ -95,7 +95,7 @@ describe("UpdaterController", () => {
   it("不能检查的阶段调用 check 直接抛错，不发命令", async () => {
     const port = fakePort();
     const c = controllerWith(port);
-    c.sync({ current_version: "1.3.2", supported: false, unsupported_reason: "debug_build", available: null, downloaded_version: null, install_on_exit: false });
+    c.sync({ current_version: "1.3.2", supported: false, unsupported_reason: "debug_build", package_channel: "stable", preference: "stable", relation: "same", available: null, channel_heads: [], refused: [], downloaded_version: null, downloaded_channel: null, downloaded_intent: null, install_on_exit: false });
     await expect(c.check()).rejects.toThrow("unsupported");
     expect(port.calls).toEqual([]);
   });
@@ -311,7 +311,7 @@ describe("UpdaterController：同一个动作进行中再发起一次", () => {
       if (id === undefined) throw new Error("多要了任务 id");
       return id;
     });
-    c.sync({ current_version: "1.3.2", supported: true, unsupported_reason: null, available: UPDATE, downloaded_version: null, install_on_exit: false });
+    c.sync({ current_version: "1.3.2", supported: true, unsupported_reason: null, package_channel: "stable", preference: "stable", relation: "same", available: UPDATE, channel_heads: [], refused: [], downloaded_version: null, downloaded_channel: null, downloaded_intent: null, install_on_exit: false });
     void c.download();
     await expect(c.download()).rejects.toThrow("当前阶段 downloading 不能开始下载");
     await c.cancelDownload();
@@ -326,7 +326,7 @@ describe("UpdaterController：同一个动作进行中再发起一次", () => {
       },
     });
     const c = controllerWith(port);
-    c.sync({ current_version: "1.3.2", supported: true, unsupported_reason: null, available: null, downloaded_version: "1.4.0", install_on_exit: false });
+    c.sync({ current_version: "1.3.2", supported: true, unsupported_reason: null, package_channel: "stable", preference: "stable", relation: "same", available: null, channel_heads: [], refused: [], downloaded_version: "1.4.0", downloaded_channel: "stable", downloaded_intent: "update", install_on_exit: false });
     void c.install();
     await expect(c.install()).rejects.toThrow("当前阶段 installing 不能安装更新");
     expect(port.calls).toEqual(["install"]);

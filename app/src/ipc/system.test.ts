@@ -326,8 +326,15 @@ describe("自更新", () => {
       current_version: "0.1.0",
       supported: true,
       unsupported_reason: null,
+      package_channel: "stable",
+      preference: "stable",
+      relation: "same",
       available: null,
+      channel_heads: [],
+      refused: [],
       downloaded_version: null,
+      downloaded_channel: null,
+      downloaded_intent: null,
       install_on_exit: false,
     });
     expect((await rejection(downloadUpdate("u-0"))).code).toBe("update_not_available");
@@ -338,7 +345,7 @@ describe("自更新", () => {
   it("检查、下载（进度带 task_id）、退出时安装、安装后为新版本", async () => {
     vi.useFakeTimers();
     const update = await checkUpdate();
-    expect(update).toMatchObject({ version: "0.2.0", current_version: "0.1.0" });
+    expect(update).toMatchObject({ version: "0.2.0", current_version: "0.1.0", channel: "stable" });
 
     const events: CoreEvent[] = [];
     await onCoreEvent((e) => events.push(e));
@@ -354,9 +361,9 @@ describe("自更新", () => {
     expect(events.filter((e) => e.kind === "source")).toHaveLength(1);
 
     await setInstallOnExit(true);
-    expect(await updaterInfo()).toMatchObject({ downloaded_version: "0.2.0", install_on_exit: true });
+    expect(await updaterInfo()).toMatchObject({ downloaded_version: "0.2.0", downloaded_channel: "stable", downloaded_intent: "update", install_on_exit: true });
     await installUpdate();
-    expect(await updaterInfo()).toMatchObject({ current_version: "0.2.0", downloaded_version: null, install_on_exit: false });
+    expect(await updaterInfo()).toMatchObject({ current_version: "0.2.0", downloaded_version: null, downloaded_channel: null, downloaded_intent: null, install_on_exit: false });
     expect(await checkUpdate()).toBeNull();
   });
 

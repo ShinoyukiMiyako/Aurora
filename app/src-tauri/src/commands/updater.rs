@@ -28,7 +28,9 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use petalfall_base::http::NetworkFailure;
+use petalfall_core::release::order::Channel;
 use petalfall_core::{CancellationToken, CoreEvent, DownloadProgress, EventSink, PackageCandidate};
+use semver::Version;
 use serde::{Serialize, Serializer};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State, Url};
@@ -248,6 +250,8 @@ pub struct UpdateDto {
     pub notes: Option<String>,
     /// 发布时间，Unix 毫秒；清单没写时为 `null`。
     pub date: Option<i64>,
+    /// 这一版取自哪个通道的清单。
+    pub channel: Channel,
 }
 
 fn update_dto(update: &Update) -> UpdateDto {
@@ -258,7 +262,90 @@ fn update_dto(update: &Update) -> UpdateDto {
         date: update
             .date
             .map(|date| date.unix_timestamp() * 1000 + i64::from(date.millisecond())),
+        // 现在只问本包通道的清单，候选必然来自本包的通道；认不出通道的版本建不出检查器（[`version_endpoints`]），
+        // 走不到这里。
+        channel: package_channel(&update.current_version)
+            .expect("候选只来自认得出通道的版本建的检查器"),
     }
+}
+
+/// 版本号 `version` 所属的发布通道，规则同 [`UpdateChannel::of`]；认不出时为 `None`。
+///
+/// `version` 只来自 `package_info` 的版本号（直接转成的字符串，或插件转成字符串后放进 `Update` 的），
+/// 必然是合法的 semver。
+fn package_channel(version: &str) -> Option<Channel> {
+    let version = Version::parse(version).expect("版本号来自 package_info，必然是合法的 semver");
+    UpdateChannel::of(version.pre.as_str()).map(|channel| match channel {
+        UpdateChannel::Dev => Channel::Dev,
+        UpdateChannel::Beta => Channel::Beta,
+        UpdateChannel::Stable => Channel::Stable,
+    })
+}
+
+/// 生效的通道偏好与本包通道之间的关系。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelRelation {
+    /// 偏好就是本包的通道。
+    Same,
+    /// 偏好比本包的通道慢：等那个通道追上本包的版本。
+    Waiting,
+    /// 偏好比本包的通道快，例如测试版用户跟随装上了正式版的包。
+    Following,
+}
+
+/// 一个通道最近一次取清单的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelHeadState {
+    /// 有端点给出了验过的清单头。
+    Published,
+    /// 所有端点都确认清单 404：这个通道还没有发布。
+    NotPublished,
+    /// 每个端点都给出了清单头，但全都旧于本机记下的这个通道的最高版本。
+    Stale,
+    /// 其余情况，含清单异常，以及有端点失败或 404、其余端点旧于本机记录的混合情形。
+    Failed,
+}
+
+/// `channel_heads` 的一项。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChannelHeadDto {
+    pub channel: Channel,
+    pub state: ChannelHeadState,
+    /// 验过的清单头的版本，比当前版本新旧都有可能；没取到清单头时为 `null`。
+    pub version: Option<String>,
+    /// 清单里的发布时间（清单不签名，只作显示），Unix 毫秒；没有时为 `null`。
+    pub date: Option<i64>,
+}
+
+/// 下载的用意：普通更新，或换到另一个通道。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateIntent {
+    Update,
+    Switch,
+}
+
+/// 一个版本在本次会话里为什么被拒。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalReason {
+    /// 包认得的数据格式比正在运行的这一版旧，装上读不了现有数据。普通更新与换通道都会有。
+    DataTooNew,
+    /// 包认不得换通道安装，只随换通道出现。
+    TargetUnsupported,
+    /// 跟随别的通道时没能把偏好写进配置，只随普通更新出现。
+    PreferenceUnsaved,
+}
+
+/// `refused` 的一项：本次会话里不再作为候选的版本。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RefusedUpdateDto {
+    pub version: String,
+    pub channel: Channel,
+    pub reason: RefusalReason,
+    pub intent: UpdateIntent,
 }
 
 /// 设置页「关于与更新」要的全部状态；前端重载后据此恢复「有更新 / 已下载待安装」。
@@ -269,10 +356,24 @@ pub struct UpdaterInfoDto {
     /// debug_build / missing_pubkey / signed_version_not_required / downgrades_allowed / unknown_channel；
     /// 支持时为 `null`。
     pub unsupported_reason: Option<UnsupportedReason>,
+    /// 本包的通道；版本号认不出通道时为 `null`。
+    pub package_channel: Option<Channel>,
+    /// 生效的通道偏好；`package_channel` 为 `null` 时也为 `null`。
+    pub preference: Option<Channel>,
+    /// `package_channel` 为 `null` 时也为 `null`。
+    pub relation: Option<ChannelRelation>,
     /// 本次会话最近一次检查的结果；没检查过或已是最新时为 `null`。
     pub available: Option<UpdateDto>,
+    /// 要看的每个通道最近一次取清单的结果；本次会话没取过清单时为空。
+    pub channel_heads: Vec<ChannelHeadDto>,
+    /// 本次会话里被拒的版本。
+    pub refused: Vec<RefusedUpdateDto>,
     /// 已下载并通过签名校验、等待安装的版本。
     pub downloaded_version: Option<String>,
+    /// 已下载的包所属的通道；没有时为 `null`。
+    pub downloaded_channel: Option<Channel>,
+    /// 已下载的包的用意；没有时为 `null`。
+    pub downloaded_intent: Option<UpdateIntent>,
     pub install_on_exit: bool,
 }
 
@@ -308,12 +409,23 @@ impl UpdaterState {
             UpdaterSupport::Supported => (true, None),
             UpdaterSupport::Unsupported(reason) => (false, Some(reason)),
         };
+        // 偏好还没有地方存，生效的就是本包的通道；检查只问本包通道的清单、不按通道记结果，下载也只有普通更新一种，
+        // 所以下好的包同样属于本包的通道。
+        let package_channel = package_channel(&current_version);
+        let downloaded_version = slot.downloaded_version();
         UpdaterInfoDto {
             current_version,
             supported,
             unsupported_reason,
+            package_channel,
+            preference: package_channel,
+            relation: package_channel.map(|_| ChannelRelation::Same),
             available: slot.available.as_ref().map(update_dto),
-            downloaded_version: slot.downloaded_version(),
+            channel_heads: Vec::new(),
+            refused: Vec::new(),
+            downloaded_channel: downloaded_version.as_ref().and(package_channel),
+            downloaded_intent: downloaded_version.as_ref().map(|_| UpdateIntent::Update),
+            downloaded_version,
             install_on_exit: slot.install_on_exit,
         }
     }
@@ -1592,6 +1704,39 @@ mod tests {
         assert_eq!(info["current_version"], "0.1.0");
         assert_eq!(info["available"], Value::Null);
         assert_eq!(info["downloaded_version"], Value::Null);
+    }
+
+    /// 偏好还没有地方存、清单也不按通道记结果：生效的偏好就是本包版本号所属的通道，关系为 same，各通道的结果与
+    /// 被拒的版本都为空，没下载时下好的包的通道与用意为 null。开发构建不支持自更新，但通道照样认得出；
+    /// 只有版本号认不出通道时，这三项才为 null。
+    #[test]
+    fn info_takes_the_package_channel_as_the_preference() {
+        let supported = UpdaterState::new(UpdaterSupport::Supported);
+        let debug = UpdaterState::new(UpdaterSupport::Unsupported(UnsupportedReason::DebugBuild));
+        for (state, version, channel) in [
+            (&supported, "1.0.0-dev.12", "dev"),
+            (&supported, "1.0.0-beta.3", "beta"),
+            (&supported, "1.0.0-BETA.2+build.7", "beta"),
+            (&supported, "1.0.0", "stable"),
+            (&debug, "0.1.0-dev.3", "dev"),
+        ] {
+            let info = serde_json::to_value(state.info(version.into())).unwrap();
+            assert_eq!(info["package_channel"], channel, "{version}");
+            assert_eq!(info["preference"], channel, "{version}");
+            assert_eq!(info["relation"], "same", "{version}");
+            assert_eq!(info["channel_heads"], json!([]), "{version}");
+            assert_eq!(info["refused"], json!([]), "{version}");
+            assert_eq!(info["downloaded_channel"], Value::Null, "{version}");
+            assert_eq!(info["downloaded_intent"], Value::Null, "{version}");
+        }
+
+        let unknown = UpdaterState::new(UpdaterSupport::Unsupported(
+            UnsupportedReason::UnknownChannel,
+        ));
+        let info = serde_json::to_value(unknown.info("1.0.0-rc.1".into())).unwrap();
+        for field in ["package_channel", "preference", "relation"] {
+            assert_eq!(info[field], Value::Null, "{field}");
+        }
     }
 
     /// 三个通道的权威清单都在香港机上，按通道分目录：正式版、测试版与开发版各认各的，谁也拿不到别的通道的清单。

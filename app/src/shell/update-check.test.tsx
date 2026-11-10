@@ -19,7 +19,7 @@ import { UpdatePanelMount } from "./UpdatePanel";
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
-const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: "修复若干问题", date: null };
+const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: "修复若干问题", date: null, channel: "stable" };
 
 let view: Rendered | undefined;
 let shell: ShellApi;
@@ -77,7 +77,7 @@ beforeEach(() => {
   vi.spyOn(navigator, "onLine", "get").mockImplementation(() => online);
   vi.spyOn(console, "info").mockImplementation(() => undefined);
   config = configDto();
-  info = { current_version: "0.1.0", supported: true, unsupported_reason: null, available: null, downloaded_version: null, install_on_exit: false };
+  info = { current_version: "0.1.0", supported: true, unsupported_reason: null, package_channel: "stable", preference: "stable", relation: "same", available: null, channel_heads: [], refused: [], downloaded_version: null, downloaded_channel: null, downloaded_intent: null, install_on_exit: false };
   bootOverrides(ipc);
   ipc.overrides.set("get_config", () => config);
   ipc.overrides.set("update_config", (args) => {

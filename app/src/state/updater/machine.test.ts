@@ -13,15 +13,22 @@ import {
   type UpdaterState,
 } from "./machine";
 
-const UPDATE: UpdateInfo = { version: "0.2.1", current_version: "0.2.0", notes: "修复若干问题", date: Date.UTC(2026, 9, 28) };
+const UPDATE: UpdateInfo = { version: "0.2.1", current_version: "0.2.0", notes: "修复若干问题", date: Date.UTC(2026, 9, 28), channel: "stable" };
 
 function info(overrides: Partial<UpdaterInfoDto> = {}): UpdaterInfoDto {
   return {
     current_version: "0.2.0",
     supported: true,
     unsupported_reason: null,
+    package_channel: "stable",
+    preference: "stable",
+    relation: "same",
     available: null,
+    channel_heads: [],
+    refused: [],
     downloaded_version: null,
+    downloaded_channel: null,
+    downloaded_intent: null,
     install_on_exit: false,
     ...overrides,
   };
@@ -53,8 +60,8 @@ describe("后端信息同步进状态机", () => {
   });
 
   it("已下载的版本与检查结果不是同一版时按版本号补出更新信息，不借用另一版的说明", () => {
-    const next = run(INITIAL_UPDATER_STATE, { type: "info", info: info({ available: { ...UPDATE, version: "0.2.2" }, downloaded_version: "0.2.1" }) });
-    expect(next.phase).toEqual({ kind: "ready", update: { version: "0.2.1", current_version: "0.2.0", notes: null, date: null } });
+    const next = run(INITIAL_UPDATER_STATE, { type: "info", info: info({ available: { ...UPDATE, version: "0.2.2" }, downloaded_version: "0.2.1", downloaded_channel: "stable", downloaded_intent: "update" }) });
+    expect(next.phase).toEqual({ kind: "ready", update: { version: "0.2.1", current_version: "0.2.0", notes: null, date: null, channel: "stable" } });
   });
 
   it("检查中、下载中、安装中不被后端信息覆盖", () => {

@@ -13,8 +13,8 @@ import { UpdaterProvider, useUpdater, useUpdaterSelector, type UpdaterApi } from
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
-const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null };
-const INFO: UpdaterInfoDto = { current_version: "0.1.0", supported: true, unsupported_reason: null, available: UPDATE, downloaded_version: null, install_on_exit: false };
+const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null, channel: "stable" };
+const INFO: UpdaterInfoDto = { current_version: "0.1.0", supported: true, unsupported_reason: null, package_channel: "stable", preference: "stable", relation: "same", available: UPDATE, channel_heads: [], refused: [], downloaded_version: null, downloaded_channel: null, downloaded_intent: null, install_on_exit: false };
 
 let view: Rendered | undefined;
 let api: UpdaterApi;

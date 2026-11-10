@@ -53,6 +53,7 @@ export const UPDATE_COPY = {
     signed_version_not_required: "这个版本没有要求更新包签名带上版本号，防不住被换成旧版本，所以不检查更新",
     downgrades_allowed: "这个版本的更新配置允许装不比当前新的版本，防不住被换成旧版本，所以不检查更新",
     unknown_channel: "这个版本的版本号认不出是哪个发布通道，不知道该从哪里取更新，所以不检查更新",
+    pubkey_mismatch: "这个版本配的更新签名公钥与它所属的发布通道对不上，验不了更新包，所以不检查更新",
   } satisfies Readonly<Record<UpdaterUnsupportedReason, string>>,
   installingCard: "正在启动安装程序…",
   // 更新面板
