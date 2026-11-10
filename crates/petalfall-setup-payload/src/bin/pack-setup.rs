@@ -3,9 +3,12 @@
 // 本程序代码按 AGPL-3.0-only 授权，另附 AGPL 第 7 条的附加条款；两者见源代码根目录的 LICENSE 与 LICENSE-ADDITIONAL-TERMS.md。
 // Licensed under AGPL-3.0-only with additional terms under section 7 of the AGPL; see LICENSE and LICENSE-ADDITIONAL-TERMS.md at the root of the source code.
 
-//! 把引导程序壳和 NSIS 安装包拼成首装包：`壳 + 136 字节头 + NSIS 原样字节`。
+//! 把引导程序壳和 NSIS 安装包拼成首装包：`壳 + 144 字节 PFSETUP2 头 + NSIS 原样字节`。
 //!
 //! 用法：`pack-setup <壳.exe> <NSIS 安装包> <Petalfall.exe> <版本号> <输出路径>`
+//!
+//! 头里的数据格式号取 `petalfall_release` 的 `DATA_FORMAT`，能力位取本版本的全部能力位，都不走参数：
+//! 号只有源码里这一个来源，CI 传不进别的值。
 //!
 //! 所有检查都是硬失败：CI 是 Linux，跑不了产物，拼错的包要等用户双击才露馅。
 //! 外层代码签名必须在这一步之后做，签完再追加载荷，签名就失效了。
@@ -18,8 +21,9 @@ use std::io::{self, Cursor};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use petalfall_release::data_format::DATA_FORMAT;
 use petalfall_setup_payload::{
-    Error as FormatError, HEADER_LEN, Header, locate, overlay_start, sha256,
+    Error as FormatError, HEADER_LEN_V2, Header, SHIPPED_CAPS, locate, overlay_start, sha256,
 };
 
 const USAGE: &str = "用法：pack-setup <壳.exe> <NSIS 安装包> <Petalfall.exe> <版本号> <输出路径>";
@@ -125,7 +129,7 @@ fn compose(
     let header = Header::new(payload, &exe, version).map_err(format_error("版本号不可用"))?;
     let header_bytes = header.to_bytes().map_err(format_error("载荷头写不出来"))?;
 
-    let mut bundle = Vec::with_capacity(stub.len() + HEADER_LEN + payload.len());
+    let mut bundle = Vec::with_capacity(stub.len() + HEADER_LEN_V2 + payload.len());
     bundle.extend_from_slice(stub);
     bundle.extend_from_slice(&header_bytes);
     bundle.extend_from_slice(payload);
@@ -137,10 +141,23 @@ fn compose(
 /// CI 跑不了 Windows 程序，这是验证 PE 定位在真实链接器产物上成立的唯一一步。
 fn verify(bundle: &[u8], header: &Header, stub_len: u64, payload: &[u8]) -> Result<(), PackError> {
     let located = locate(&mut Cursor::new(bundle)).map_err(format_error("输出定位不到载荷"))?;
+    // 单独对着常量核：只和写入的头比，写入前就算错的号与能力位也会原样通过
+    if located.header.data_format != Some(DATA_FORMAT) {
+        return Err(PackError::OutputMismatch(format!(
+            "数据格式号读回是 {:?}，应为 {DATA_FORMAT}",
+            located.header.data_format
+        )));
+    }
+    if located.header.caps != Some(SHIPPED_CAPS) {
+        return Err(PackError::OutputMismatch(format!(
+            "能力位读回是 {:?}，应为 {SHIPPED_CAPS}",
+            located.header.caps
+        )));
+    }
     if located.header != *header {
         return Err(PackError::OutputMismatch("载荷头和写入时不同".to_owned()));
     }
-    let expected_offset = stub_len + HEADER_LEN as u64;
+    let expected_offset = stub_len + HEADER_LEN_V2 as u64;
     if located.payload_offset != expected_offset {
         return Err(PackError::OutputMismatch(format!(
             "载荷在第 {} 字节，应在第 {expected_offset} 字节",
@@ -220,8 +237,9 @@ fn run(args: Vec<OsString>) -> Result<String, PackError> {
         nsis_path,
     )?;
 
+    // verify 已确认读回的号与能力位等于这两个常量
     Ok(format!(
-        "{}：{} 字节，版本 {}，载荷 {} 字节 sha256 {}，安装后 exe {} 字节 sha256 {}",
+        "{}：{} 字节，版本 {}，数据格式号 {DATA_FORMAT}，能力位 {SHIPPED_CAPS}，载荷 {} 字节 sha256 {}，安装后 exe {} 字节 sha256 {}",
         out_path.display(),
         bundle.len(),
         header.version,
@@ -272,6 +290,33 @@ mod tests {
         let (header, bundle) =
             compose(&stub, &payload, EXE_MARKER.to_vec(), "0.2.0-dev.9").unwrap();
         (stub, header, payload, bundle)
+    }
+
+    /// 用给定的头重新拼一份：头与文件一致，只有号或能力位和本版本的常量不同。
+    fn bundle_with(stub: &[u8], header: &Header, payload: &[u8]) -> Vec<u8> {
+        [stub, &header.to_bytes().unwrap()[..], payload].concat()
+    }
+
+    #[test]
+    fn verify_rejects_a_data_format_other_than_this_builds() {
+        let (stub, mut header, payload, _) = composed();
+        header.data_format = Some(DATA_FORMAT + 1);
+        let bundle = bundle_with(&stub, &header, &payload);
+        assert!(matches!(
+            verify(&bundle, &header, stub.len() as u64, &payload),
+            Err(PackError::OutputMismatch(what)) if what.contains("数据格式号")
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_caps_without_the_channel_switch_bit() {
+        let (stub, mut header, payload, _) = composed();
+        header.caps = Some(0);
+        let bundle = bundle_with(&stub, &header, &payload);
+        assert!(matches!(
+            verify(&bundle, &header, stub.len() as u64, &payload),
+            Err(PackError::OutputMismatch(what)) if what.contains("能力位")
+        ));
     }
 
     #[test]

@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use petalfall_setup_payload::{HEADER_LEN, Header, VERSION_FIELD_LEN, locate, sha256};
+use petalfall_release::data_format::DATA_FORMAT;
+use petalfall_setup_payload::{
+    CAP_CHANNEL_SWITCH, HEADER_LEN_V2, Header, SHIPPED_CAPS, VERSION_FIELD_LEN, locate, sha256,
+};
 
 const MARKER: &[u8] = b"__TAURI_BUNDLE_TYPE_VAR_UNK";
 const MARKER_NSIS: &[u8] = b"__TAURI_BUNDLE_TYPE_VAR_NSS";
@@ -121,17 +124,20 @@ fn bundle_is_stub_then_header_then_nsis_bytes() {
     assert!(output.status.success(), "{}", stderr(&output));
 
     let bundle = fs::read(workspace.out()).unwrap();
-    assert_eq!(bundle.len(), stub.len() + HEADER_LEN + nsis.len());
+    assert_eq!(HEADER_LEN_V2, 144);
+    assert_eq!(bundle.len(), stub.len() + 144 + nsis.len());
     assert_eq!(&bundle[..stub.len()], &stub[..]);
-    assert_eq!(&bundle[stub.len() + HEADER_LEN..], &nsis[..]);
+    assert_eq!(&bundle[stub.len() + 144..], &nsis[..]);
 
     let header = Header::parse(&bundle[stub.len()..]).unwrap();
     assert_eq!(header.payload_len, nsis.len() as u64);
     assert_eq!(header.payload_sha256, sha256(&nsis));
     assert_eq!(header.version, VERSION);
+    assert_eq!(header.data_format, Some(DATA_FORMAT));
+    assert_eq!(header.caps, Some(SHIPPED_CAPS));
 
     let located = locate(&mut Cursor::new(&bundle)).unwrap();
-    assert_eq!(located.payload_offset, (stub.len() + HEADER_LEN) as u64);
+    assert_eq!(located.payload_offset, (stub.len() + 144) as u64);
     assert_eq!(located.header, header);
     assert!(
         !workspace
@@ -140,6 +146,62 @@ fn bundle_is_stub_then_header_then_nsis_bytes() {
             .exists(),
         "成功后不留中间文件"
     );
+}
+
+#[test]
+fn header_carries_this_builds_data_format_and_the_channel_switch_bit_at_fixed_offsets() {
+    let workspace = Workspace::new();
+    let stub = stub();
+    let output = workspace.pack(&stub, &nsis(), &exe(), VERSION);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let bundle = fs::read(workspace.out()).unwrap();
+    let raw = &bundle[stub.len()..stub.len() + 144];
+    assert_eq!(&raw[0..8], b"PFSETUP2");
+    assert_eq!(&raw[136..140], &DATA_FORMAT.to_le_bytes());
+    let caps = u32::from_le_bytes(raw[140..144].try_into().unwrap());
+    assert_eq!(caps & 1, 1, "第 0 位必须置上");
+    assert_eq!(CAP_CHANNEL_SWITCH, 1);
+    assert_eq!(caps, SHIPPED_CAPS);
+
+    let summary = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        summary.contains(&format!("数据格式号 {DATA_FORMAT}，能力位 {SHIPPED_CAPS}")),
+        "{summary}"
+    );
+}
+
+/// 旧包的 136 字节头：按旧格式逐字段现场拼，pack-setup 已经不写这种头。
+fn v1_header(header: &Header) -> Vec<u8> {
+    let mut out = vec![0u8; 136];
+    out[0..8].copy_from_slice(b"PFSETUP1");
+    out[8..16].copy_from_slice(&header.payload_len.to_le_bytes());
+    out[16..48].copy_from_slice(&header.payload_sha256);
+    out[48..56].copy_from_slice(&header.exe_len.to_le_bytes());
+    out[56..88].copy_from_slice(&header.exe_sha256);
+    out[88..88 + header.version.len()].copy_from_slice(header.version.as_bytes());
+    out
+}
+
+#[test]
+fn older_v1_bundles_still_locate_with_no_data_format_and_no_caps() {
+    let workspace = Workspace::new();
+    let (stub, nsis) = (stub(), nsis());
+    let output = workspace.pack(&stub, &nsis, &exe(), VERSION);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let packed = locate(&mut Cursor::new(fs::read(workspace.out()).unwrap()))
+        .unwrap()
+        .header;
+
+    let old = [&stub[..], &v1_header(&packed), &nsis].concat();
+    let located = locate(&mut Cursor::new(&old)).unwrap();
+    assert_eq!(located.payload_offset, (stub.len() + 136) as u64);
+    assert_eq!(&old[located.payload_offset as usize..], &nsis[..]);
+    assert_eq!(located.header.version, VERSION);
+    assert_eq!(located.header.payload_sha256, sha256(&nsis));
+    assert_eq!(located.header.exe_sha256, packed.exe_sha256);
+    assert_eq!(located.header.data_format, None);
+    assert_eq!(located.header.caps, None);
 }
 
 #[test]
