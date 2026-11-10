@@ -1,8 +1,7 @@
 //! 读现有安装：卸载项登记的位置和版本、程序文件在不在。
 //!
 //! [`read_installation`] 只交出这些事实，种类由 `petalfall_release::install_policy::judge_kind` 拿事实连同
-//! 载荷版本、发起方式去判；[`detect`] 只按版本先后定种类，分不出换通道。静默安装不比版本也不拦降级，
-//! 降级保护全靠探测时的判定。
+//! 载荷版本、发起方式去判。静默安装不比版本也不拦降级，降级保护全靠探测时的判定。
 
 use std::cmp::Ordering;
 use std::fs;
@@ -150,21 +149,6 @@ pub fn read_installation(registry: &dyn Registry) -> io::Result<Option<Installat
         version,
         program_intact,
     }))
-}
-
-/// 这台电脑上的现有安装，种类只按版本先后定：分不出换通道，也不看是谁发起的。要按通道与发起方式定种类，
-/// 拿 [`read_installation`] 的事实去调 `install_policy::judge_kind`。
-///
-/// 有卸载项但程序文件不在是 broken：修复装回这里探测到的目录，界面只需要显示。
-pub fn detect(registry: &dyn Registry, payload_version: &str) -> io::Result<Option<Existing>> {
-    let Some(installation) = read_installation(registry)? else {
-        return Ok(None);
-    };
-    let kind = match &installation.version {
-        Some(version) if installation.program_intact => classify(version, payload_version),
-        _ => ExistingKind::Broken,
-    };
-    Ok(Some(installation.into_existing(kind)))
 }
 
 /// 卸载后留下的上次安装目录：程序没了数据还在时默认接着用，换到别处的话那份数据就成了孤儿。
@@ -341,65 +325,6 @@ mod tests {
     }
 
     #[test]
-    fn older_install_is_an_upgrade_and_keeps_the_unquoted_dir() {
-        let (_guard, dir) = installed_dir();
-        let registry = FakeRegistry::uninstall(&quoted(&dir), "0.1.0");
-        assert_eq!(
-            detect(&registry, PAYLOAD).unwrap(),
-            Some(Existing {
-                kind: ExistingKind::Upgrade,
-                version: "0.1.0".into(),
-                dir,
-                channel: Some(Channel::Stable),
-            })
-        );
-    }
-
-    #[test]
-    fn same_version_install_is_same() {
-        let (_guard, dir) = installed_dir();
-        let registry = FakeRegistry::uninstall(&quoted(&dir), PAYLOAD);
-        let existing = detect(&registry, PAYLOAD).unwrap().unwrap();
-        assert_eq!(existing.kind, ExistingKind::Same);
-    }
-
-    #[test]
-    fn newer_install_is_newer() {
-        let (_guard, dir) = installed_dir();
-        let registry = FakeRegistry::uninstall(&quoted(&dir), "0.3.0-dev.1");
-        let existing = detect(&registry, PAYLOAD).unwrap().unwrap();
-        assert_eq!(existing.kind, ExistingKind::Newer);
-        assert_eq!(existing.version, "0.3.0-dev.1");
-        assert_eq!(existing.channel, Some(Channel::Dev));
-    }
-
-    #[test]
-    fn installed_version_that_does_not_parse_can_still_be_upgraded() {
-        let (_guard, dir) = installed_dir();
-        let registry = FakeRegistry::uninstall(&quoted(&dir), "不是版本");
-        let existing = detect(&registry, PAYLOAD).unwrap().unwrap();
-        assert_eq!(existing.kind, ExistingKind::Upgrade);
-        assert_eq!(existing.version, "不是版本");
-        assert_eq!(existing.channel, None);
-    }
-
-    #[test]
-    fn missing_exe_is_broken_even_when_the_version_would_be_newer() {
-        let dir = tempfile::tempdir().unwrap();
-        let text = dir.path().to_str().unwrap().to_owned();
-        let registry = FakeRegistry::uninstall(&quoted(&text), "9.9.9");
-        assert_eq!(
-            detect(&registry, PAYLOAD).unwrap(),
-            Some(Existing {
-                kind: ExistingKind::Broken,
-                version: "9.9.9".into(),
-                dir: text,
-                channel: Some(Channel::Stable),
-            })
-        );
-    }
-
-    #[test]
     fn empty_exe_counts_as_missing() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(APP_EXE), b"").unwrap();
@@ -431,22 +356,6 @@ mod tests {
         let registry = FakeRegistry::uninstall(dir.path().to_str().unwrap(), PAYLOAD);
         let found = read_installation(&registry).unwrap().unwrap();
         assert!(!found.program_intact);
-    }
-
-    #[test]
-    fn record_without_a_version_is_broken() {
-        let (_guard, dir) = installed_dir();
-        let registry =
-            FakeRegistry::default().with(UNINSTALL_KEY, Some(INSTALL_LOCATION), &quoted(&dir));
-        assert_eq!(
-            detect(&registry, PAYLOAD).unwrap(),
-            Some(Existing {
-                kind: ExistingKind::Broken,
-                version: String::new(),
-                dir,
-                channel: None,
-            })
-        );
     }
 
     #[test]

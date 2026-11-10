@@ -473,7 +473,7 @@ mod tests {
         let session = session_for(Outcome::Ok, sandbox.path());
 
         assert_eq!(
-            crate::existing::detect(session.registry(), "0.1.0").unwrap(),
+            crate::existing::read_installation(session.registry()).unwrap(),
             None
         );
 
@@ -484,7 +484,7 @@ mod tests {
             )
             .unwrap();
 
-        let existing = crate::existing::detect(session.registry(), "0.1.0")
+        let existing = crate::existing::read_installation(session.registry())
             .unwrap()
             .unwrap();
         assert_eq!(
