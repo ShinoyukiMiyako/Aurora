@@ -14,13 +14,13 @@
 //! 清单本身不签名，签名只盖住安装包：不要求签名带版本号，伪造的清单就能给旧版本的合法包配上更高的版本号，
 //! 诱导降级（CVE-2026-95625），所以没打开这一项同样整体不支持。`allowDowngrades` 会把插件的版本比较从
 //! 「比当前新」放宽成「与当前不同」，伪造的清单照实写上旧版本号、指向旧版本的合法包，签名版本也对得上，
-//! 同样防不住降级，打开了也整体不支持。版本号的预发布标识认不出通道（[`UpdateChannel::of`]）时不知道该去哪取清单，
+//! 同样防不住降级，打开了也整体不支持。版本号的预发布标识认不出通道（[`Channel::of`]）时不知道该去哪取清单，
 //! 也整体不支持。不支持时各命令报 `updater_unsupported`。
 //! 仓库里的配置两项都不带，dev、beta 分支的 CI 打包时才分别写入开发版公钥（`.github/dev-updater.pub`）、
 //! 发布公钥（`.github/release-updater.pub`）并打开 `requireSignedVersion`，签名时用 `--app-version` 把版本号写进
 //! 可信注释：本地和 fork 构建的包不会去认落樱的更新。
 //!
-//! 去哪取清单由版本号决定（[`UpdateChannel`]），与前端从版本号推发布通道同源，不另设配置。
+//! 去哪取清单由版本号决定（[`Channel`]），与前端从版本号推发布通道同源，不另设配置。
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -84,52 +84,14 @@ pub fn dev_endpoint() -> String {
     )
 }
 
-/// 更新通道：决定去哪里取清单。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UpdateChannel {
-    /// dev 分支的 CI 构建，版本号形如 `0.1.0-dev.12`。
-    Dev,
-    /// beta 分支的 CI 构建，版本号形如 `1.0.0-beta.3`。
-    Beta,
-    /// 不带预发布标识的正式版，版本号形如 `1.0.0`。
-    Stable,
-}
-
 /// 这个通道的清单端点，按这个顺序逐个问（[`check_in_order`]）：前一个没给出清单就问下一个。顺序固定、不探测：
 /// 清单只有几百字节，测速省不下时间，反倒多一轮请求。
-fn channel_endpoints(channel: UpdateChannel) -> Vec<String> {
+fn channel_endpoints(channel: Channel) -> Vec<String> {
     match channel {
-        UpdateChannel::Dev => vec![DEV_ENDPOINT.to_owned(), dev_endpoint()],
-        UpdateChannel::Beta => vec![BETA_ENDPOINT.to_owned()],
-        UpdateChannel::Stable => vec![PRIMARY_ENDPOINT.to_owned()],
+        Channel::Dev => vec![DEV_ENDPOINT.to_owned(), dev_endpoint()],
+        Channel::Beta => vec![BETA_ENDPOINT.to_owned()],
+        Channel::Stable => vec![PRIMARY_ENDPOINT.to_owned()],
     }
-}
-
-impl UpdateChannel {
-    /// 没有预发布标识的是正式版；否则看标识的第一段：`dev`、`beta` 后面只跟数字（或什么都不跟）的分别是开发版、
-    /// 测试版，大小写不论，与前端 build-info 认这两种标识的规则一致。semver 的预发布标识只含 ASCII。
-    ///
-    /// 其余标识（rc、alpha 等）没有自己的清单，返回 `None`、由调用方判为不支持，不落到哪个通道顶上：
-    /// 落到正式通道的话，测试包会去问正式版的清单。
-    pub fn of(pre_release: &str) -> Option<Self> {
-        if pre_release.is_empty() {
-            return Some(UpdateChannel::Stable);
-        }
-        let tag = pre_release
-            .split_once('.')
-            .map_or(pre_release, |(head, _)| head);
-        [("dev", UpdateChannel::Dev), ("beta", UpdateChannel::Beta)]
-            .into_iter()
-            .find(|(name, _)| names_channel(tag, name))
-            .map(|(_, channel)| channel)
-    }
-}
-
-/// 预发布标识的第一段 `tag` 是不是 `name` 后面只跟数字（或什么都不跟），`name` 不分大小写。
-fn names_channel(tag: &str, name: &str) -> bool {
-    tag.get(..name.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(name))
-        && tag[name.len()..].bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// 单个端点取清单的时限。清单是一次性的小请求，比下载源探测放宽，慢网下也要能拿到。
@@ -158,7 +120,7 @@ pub enum UnsupportedReason {
     /// tauri.conf.json 的 `plugins.updater` 没有关掉 `allowDowngrades`：插件只要求清单版本与当前不同，
     /// 伪造清单指向旧版本的合法包也能装上。
     DowngradesAllowed,
-    /// 版本号的预发布标识认不出是哪个通道（[`UpdateChannel::of`]），不知道该去哪里取清单。
+    /// 版本号的预发布标识认不出是哪个通道（[`Channel::of`]），不知道该去哪里取清单。
     UnknownChannel,
 }
 
@@ -218,7 +180,7 @@ pub fn detect_support(
     if debug_build {
         return UpdaterSupport::Unsupported(UnsupportedReason::DebugBuild);
     }
-    if UpdateChannel::of(pre_release).is_none() {
+    if Channel::of(pre_release).is_none() {
         return UpdaterSupport::Unsupported(UnsupportedReason::UnknownChannel);
     }
     let has_pubkey = updater_config
@@ -271,17 +233,13 @@ fn update_dto(update: &Update) -> UpdateDto {
     }
 }
 
-/// 版本号 `version` 所属的发布通道，规则同 [`UpdateChannel::of`]；认不出时为 `None`。
+/// 版本号 `version` 所属的发布通道，规则同 [`Channel::of`]；认不出时为 `None`。
 ///
 /// `version` 只来自 `package_info` 的版本号（直接转成的字符串，或插件转成字符串后放进 `Update` 的），
 /// 必然是合法的 semver。
 fn package_channel(version: &str) -> Option<Channel> {
     let version = Version::parse(version).expect("版本号来自 package_info，必然是合法的 semver");
-    UpdateChannel::of(version.pre.as_str()).map(|channel| match channel {
-        UpdateChannel::Dev => Channel::Dev,
-        UpdateChannel::Beta => Channel::Beta,
-        UpdateChannel::Stable => Channel::Stable,
-    })
+    Channel::of_version(&version)
 }
 
 /// 生效的通道偏好与本包通道之间的关系。
@@ -534,7 +492,7 @@ async fn fetch_conclusion(app: &AppHandle) -> Result<CheckConclusion<Update>, Co
 /// 已把这种版本判为不支持、各命令先过 `require_supported`，走到这里说明两处判定对不上了，宁可报错也不拿哪个通道的
 /// 清单顶上。
 fn version_endpoints(pre_release: &str) -> Result<Vec<String>, CommandError> {
-    UpdateChannel::of(pre_release)
+    Channel::of(pre_release)
         .map(channel_endpoints)
         .ok_or_else(|| UnsupportedReason::UnknownChannel.error())
 }
@@ -1834,83 +1792,17 @@ mod tests {
     #[test]
     fn each_channel_asks_its_endpoints_in_a_fixed_order() {
         assert_eq!(
-            channel_endpoints(UpdateChannel::Dev),
+            channel_endpoints(Channel::Dev),
             vec![DEV_ENDPOINT.to_owned(), dev_endpoint()]
         );
         assert_eq!(
-            channel_endpoints(UpdateChannel::Beta),
+            channel_endpoints(Channel::Beta),
             vec![BETA_ENDPOINT.to_owned()]
         );
         assert_eq!(
-            channel_endpoints(UpdateChannel::Stable),
+            channel_endpoints(Channel::Stable),
             vec![PRIMARY_ENDPOINT.to_owned()]
         );
-    }
-
-    #[test]
-    fn channel_follows_the_first_pre_release_identifier() {
-        assert_eq!(UpdateChannel::of(""), Some(UpdateChannel::Stable));
-        for dev in ["dev.12", "dev", "dev3", "DEV.1", "Dev.7.rc"] {
-            assert_eq!(UpdateChannel::of(dev), Some(UpdateChannel::Dev), "{dev}");
-        }
-        for beta in ["beta.1", "beta", "beta3", "BETA.2", "Beta.4.dev"] {
-            assert_eq!(UpdateChannel::of(beta), Some(UpdateChannel::Beta), "{beta}");
-        }
-        for unknown in [
-            "rc.1",
-            "rc.2",
-            "alpha.1",
-            "preview.3",
-            "nightly",
-            "devx.1",
-            "dev-1",
-            "de",
-            "alpha.dev",
-            "betax.1",
-            "beta-1",
-            "bet",
-            "alpha.beta",
-            ".1",
-        ] {
-            assert_eq!(UpdateChannel::of(unknown), None, "{unknown}");
-        }
-    }
-
-    /// 通道名的大小写怎么混、后面跟多少数字，判定都不变；通道名与数字之后只要多一个别的字符就认不出。
-    /// 固定种子，挂了能复现。
-    #[test]
-    fn channel_names_ignore_case_and_take_only_digits_after_them() {
-        let mut rng = fastrand::Rng::with_seed(0x5eed_be7a);
-        for _ in 0..300 {
-            for (name, channel) in [("dev", UpdateChannel::Dev), ("beta", UpdateChannel::Beta)] {
-                let cased: String = name
-                    .chars()
-                    .map(|c| {
-                        if rng.bool() {
-                            c.to_ascii_uppercase()
-                        } else {
-                            c
-                        }
-                    })
-                    .collect();
-                let digits = if rng.bool() {
-                    String::new()
-                } else {
-                    rng.u64(..).to_string()
-                };
-                let rest = if rng.bool() {
-                    String::new()
-                } else {
-                    format!(".{}", rng.u32(..))
-                };
-                let tagged = format!("{cased}{digits}{rest}");
-                assert_eq!(UpdateChannel::of(&tagged), Some(channel), "{tagged}");
-
-                let stray = if rng.bool() { rng.alphabetic() } else { '-' };
-                let polluted = format!("{cased}{digits}{stray}{rest}");
-                assert_eq!(UpdateChannel::of(&polluted), None, "{polluted}");
-            }
-        }
     }
 
     /// 检查与下载前的重查都按版本号取端点：三个通道各取各的，认不出通道时报 `updater_unsupported`，
