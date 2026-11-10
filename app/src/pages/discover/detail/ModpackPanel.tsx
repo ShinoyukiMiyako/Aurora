@@ -190,6 +190,15 @@ export function DownloadingLine({ progress, track }: { progress: number; track: 
   );
 }
 
+/**
+ * 装好之后的启动胶囊。装好的那一块退场期间还挂着、照样订阅状态：新实例在这期间不在了（被删，或游戏目录因数据格式打不开、
+ * 列表被清空）时不画胶囊，胶囊按 id 取实例，取不到就抛错。
+ */
+function CreatedLaunch({ instanceId }: { instanceId: string }) {
+  const live = useLauncherSelector((s) => findInstance(s, instanceId) !== undefined);
+  return live ? <LaunchCapsule instanceId={instanceId} block /> : null;
+}
+
 export function ModpackPanel({ detail, origins, versions, pinned, onPin, online, showingPrevious, footerHost, onClose }: ModpackPanelProps) {
   const instances = useLauncherSelector((s) => s.instances);
   const actions = useLauncherActions();
@@ -403,7 +412,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
           {progress !== null && progress.kind === "ready" && createdId !== null && created !== undefined && (
             <div key="ready" className={styles.result}>
               <Callout tone="ok">{MODPACK_COPY.ready(createdId)}</Callout>
-              <LaunchCapsule instanceId={createdId} block />
+              <CreatedLaunch instanceId={createdId} />
             </div>
           )}
           {progress !== null && progress.kind === "cancelled" && (
