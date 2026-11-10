@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use petalfall_core::data_format::GuardMode;
 use petalfall_core::{
     is_safe_file_name, BlockedFile, BundleReason, ClaimReport, EventSink, ExportBundledMod,
     ExportExtra, ExportMatch, GameSlot, ImportSelection, InstanceModpack, MarkerError,
@@ -255,6 +256,9 @@ pub(crate) async fn preview_modpack_with(
 /// 整合包要求的原版与加载器版本同时以 inherited 占住，启动、删除、改名、补全它们报 `instance_busy`
 /// （detail.used_by 为实例名）；它们自己开着游戏时导入报 `instance_busy`（detail.id 为那个版本），这时写不动
 /// 原版的 natives，加载器目录也不该被重写。
+///
+/// 动手之前先核对当前游戏目录的数据格式记号：目录被更新的落樱用过报 `game_dir_data_too_new`，记号读不懂报
+/// `data_format_unreadable`，这时平台整合包不下载、平台接口不问。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn install_modpack(
@@ -306,6 +310,9 @@ pub(crate) async fn install_modpack_with(
     let reserved: Mutex<Option<(String, ChainGuard)>> = Mutex::new(None);
     let result = task
         .run(async {
+            // 准备阶段不核对游戏目录：平台整合包要整个下载到缓存，CurseForge 的包还要问平台接口，到导入那一步才被拒
+            // 就白下了一遍，每次重试都再下一遍。所以动手之前先核对；目录原本不在时照常往下，导入建好目录后自己补记号。
+            petalfall.guard_game_dir(GuardMode::Use).await?;
             let prepared = petalfall
                 .prepare_modpack(&source, name, &selection, Some(events))
                 .await?;
@@ -1748,6 +1755,81 @@ mod tests {
             .unwrap()
             .iter()
             .all(|p| p.task_id.as_deref() == Some("mp-slow")));
+    }
+
+    /// 游戏目录记着比这一版大的数据格式号时导入平台整合包：动手之前就以 game_dir_data_too_new 拒绝，不问版本接口、
+    /// 不下载整合包，模拟端点一个请求都没收到；任务注销，游戏目录里只有原来的记号。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn importing_a_platform_pack_into_a_newer_game_dir_downloads_nothing() {
+        use petalfall_core::data_format::DATA_FORMAT;
+
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let built = dir.path().join("built.mrpack");
+        write_vanilla_pack(&built);
+        let bytes = std::fs::read(&built).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/version/pv-newer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "pv-newer", "project_id": "proj", "name": "1.0", "version_number": "1.0",
+                "version_type": "release", "date_published": "2026-01-01T00:00:00Z",
+                "files": [{"hashes": {}, "url": format!("{}/pack.mrpack", server.uri()),
+                           "filename": "pack.mrpack", "primary": true, "size": bytes.len()}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/pack.mrpack"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+            .mount(&server)
+            .await;
+        let facade = facade_in(dir.path(), &server.uri());
+        let game_dir = dir.path().join(".minecraft");
+        let stamp = game_dir.join(".petalfall").join("data-format.json");
+        let newer = format!(r#"{{"data_format":{}}}"#, DATA_FORMAT + 1);
+        std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+        std::fs::write(&stamp, &newer).unwrap();
+        let registry = TaskRegistry::default();
+        let (sink, _rx) = tokio::sync::mpsc::unbounded_channel::<CoreEvent>();
+
+        let err = install_modpack_with(
+            &facade,
+            &registry,
+            &InstanceLocks::default(),
+            "mp-newer",
+            ModpackSourceArg::Platform {
+                platform: "modrinth".into(),
+                project_id: "proj".into(),
+                version_id: "pv-newer".into(),
+            },
+            None,
+            None,
+            &sink,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, code::GAME_DIR_DATA_TOO_NEW);
+        let detail = err.detail.unwrap();
+        assert_eq!(
+            detail["path"],
+            serde_json::json!(game_dir.display().to_string())
+        );
+        assert_eq!(
+            (&detail["found"], &detail["supported"]),
+            (
+                &serde_json::json!(DATA_FORMAT + 1),
+                &serde_json::json!(DATA_FORMAT)
+            )
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+        assert!(!registry.is_running("mp-newer"));
+        let entries: Vec<_> = std::fs::read_dir(&game_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, [".petalfall"]);
+        assert_eq!(std::fs::read_to_string(&stamp).unwrap(), newer);
     }
 
     /// 预览 DTO 的 Mod 清单、其他可选文件与受限清单都按 snake_case 出线；可选 Mod 标 optional，覆盖层的 jar
