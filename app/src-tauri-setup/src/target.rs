@@ -439,7 +439,9 @@ fn read_contents(dir: &Path) -> io::Result<Contents> {
 ///
 /// 建目录而不是只写文件：`C:\` 的默认权限许普通用户建目录、不许建文件，只写文件会把
 /// `C:\Petalfall` 误判成写不进。名字带随机后缀，上次崩溃留下的残骸不会让这次失败。
-fn probe_write(dir: &Path) -> io::Result<()> {
+///
+/// 安装前判断登记目录是不是启动器的数据根也用它，两处对「写得进」的认定才一致。
+pub(crate) fn probe_write(dir: &Path) -> io::Result<()> {
     let probe = tempfile::Builder::new()
         .prefix(WRITE_PROBE)
         .tempdir_in(dir)?;
