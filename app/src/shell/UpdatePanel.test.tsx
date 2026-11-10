@@ -6,15 +6,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { sourceSwitchedCopy, UPDATE_COPY } from "../copy/updater";
 import { formatBytes } from "../domain/format";
+import { IpcError } from "../ipc/errors";
 import type { UpdateDto, UpdaterInfoDto } from "../ipc/system";
 import { CORE_EVENT } from "../ipc/tasks";
 import { SPEED_REFRESH_MS } from "../lib/progress-display";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
 import { LauncherProvider } from "../state/launcher";
 import type { DownloadSource, UpdaterPhase } from "../state/updater/machine";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, deferred, emit, resetRecorder, settle, type Deferred } from "../test/launcher";
+import modalStyles from "../ui/Modal.module.css";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider, useShell, type ShellApi } from "./shell";
 import { UpdatePanelMount, updatePanelLayoutKey } from "./UpdatePanel";
@@ -88,9 +90,10 @@ beforeEach(() => {
   ipc.overrides.set("install_update", () => install.promise);
 });
 
-afterEach(() => {
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  await drainFrames();
   vi.useRealTimers();
 });
 
@@ -207,7 +210,8 @@ describe("弹窗形变的依赖", () => {
   const update = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null, channel: "stable" as const };
   const downloading = (bytes: number, source: DownloadSource | null): UpdaterPhase => ({ kind: "downloading", update, taskId: "t", bytes, totalBytes: 1200, source });
   const failed = (signature: boolean): UpdaterPhase => ({ kind: "download_failed", update, reason: "连接被重置", signature, network: null, sourcesTried: 1, refusal: null });
-  const key = updatePanelLayoutKey;
+  const refused = (reason: string): UpdaterPhase => ({ kind: "download_failed", update, reason, signature: false, network: null, sourcesTried: 1, refusal: "data_too_new" });
+  const key = (phase: UpdaterPhase, gameRunning: boolean, channelNote: string | null = null) => updatePanelLayoutKey(phase, gameRunning, channelNote);
 
   it("下载进度与仍在第一个源时不变；换过源之后再换也不变（同样多一行提示）", () => {
     expect(key(downloading(0, null), false)).toBe(key(downloading(900, { index: 0, count: 3, name: "cn" }), false));
@@ -221,6 +225,90 @@ describe("弹窗形变的依赖", () => {
     // 签名不符时只有说明、没有原文，比别的失败少一段
     expect(key(failed(true), false)).not.toBe(key(failed(false), false));
     expect(key({ kind: "available", update }, false)).not.toBe(key({ kind: "available", update: { ...update, version: "0.3.0" } }, false));
+  });
+
+  it("通道说明行有没有、说的是哪一句都变", () => {
+    const switches = "这一版属于测试版，装上以后就换到测试版了。";
+    const keeps = "这一版属于正式版，装上以后照常接收测试版的更新。";
+    const available: UpdaterPhase = { kind: "available", update };
+    expect(key(available, false, switches)).not.toBe(key(available, false, null));
+    expect(key(available, false, keeps)).not.toBe(key(available, false, null));
+    expect(key(available, false, switches)).not.toBe(key(available, false, keeps));
+    expect(key(available, false, switches)).toBe(key(available, false, switches));
+  });
+
+  it("被拒装与别的下载失败不同；被拒时后端原文不上面板，原文不同也不变", () => {
+    expect(key(refused("包读不了这里的数据"), false)).not.toBe(key(failed(false), false));
+    expect(key(refused("包读不了这里的数据"), false)).not.toBe(key(failed(true), false));
+    expect(key(refused("包读不了这里的数据"), false)).toBe(key(refused("另一段后端原文"), false));
+  });
+});
+
+describe("通道说明行", () => {
+  /** 正文从上到下的几块：更新说明、通道说明行（有时）、安装说明；available 阶段没有状态块。 */
+  const bodyBlocks = () => {
+    const body = dialog().querySelector(`.${styles.panelBody}`);
+    if (body === null) throw new Error("面板没有正文");
+    return [...body.children].map((el) => el.textContent);
+  };
+
+  it.each([
+    {
+      name: "新版本属于包的通道：没有这一行",
+      packageChannel: "stable",
+      preference: "stable",
+      update: UPDATE,
+      line: null,
+    },
+    {
+      name: "属于偏好的通道、不属于包的通道：装上以后就换过去",
+      packageChannel: "stable",
+      preference: "beta",
+      update: { version: "0.3.0-beta.1", current_version: "0.1.0", notes: "修复若干问题", date: null, channel: "beta" },
+      line: "这一版属于测试版，装上以后就换到测试版了。",
+    },
+    {
+      name: "偏好更快、收到了更慢的线上更新的版本：装上以后照常按偏好收更新",
+      packageChannel: "dev",
+      preference: "beta",
+      update: { version: "1.0.0", current_version: "1.0.0-dev.60", notes: "修复若干问题", date: null, channel: "stable" },
+      line: "这一版属于正式版，装上以后照常接收测试版的更新。",
+    },
+  ] as const)("$name", async ({ packageChannel, preference, update, line }) => {
+    const relation = packageChannel === preference ? "same" : packageChannel === "dev" ? "waiting" : "following";
+    info = { ...info, current_version: update.current_version, package_channel: packageChannel, preference, relation, available: update, downloaded_version: null, downloaded_channel: null, downloaded_intent: null };
+    await openReady();
+    const notes = `${UPDATE_COPY.notesTitle}${update.notes}`;
+    expect(bodyBlocks()).toEqual(line === null ? [notes, UPDATE_COPY.installNote] : [notes, line, UPDATE_COPY.installNote]);
+  });
+});
+
+describe("下好之后被拒装", () => {
+  const footerButtons = () => [...dialog().querySelectorAll<HTMLButtonElement>(`.${modalStyles.footer} button`)].map((b) => b.textContent);
+
+  it("说明块是红色的「读不了这台电脑上的数据」，不写下载失败、不放后端原文；底栏只有「关闭」，没有重试", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    info = { ...info, downloaded_version: null, downloaded_channel: null, downloaded_intent: null };
+    ipc.overrides.set("download_update", () => {
+      throw new IpcError("update_data_too_new", "0.2.0 认得的数据格式比这台电脑上的旧");
+    });
+    await openReady();
+    expect(footerButtons()).toEqual([UPDATE_COPY.skip, UPDATE_COPY.later, UPDATE_COPY.download]);
+    act(() => button(UPDATE_COPY.download).click());
+    await flush();
+
+    const blocks = statusBlocks();
+    expect(blocks.map((el) => el.textContent)).toEqual(["这一版读不了这台电脑上的数据，已丢弃，不会安装。"]);
+    const callout = blocks[0].querySelector("[data-tone]");
+    expect([callout?.getAttribute("data-tone"), callout?.getAttribute("role")]).toEqual(["danger", "alert"]);
+    expect(dialog().textContent).not.toContain(UPDATE_COPY.downloadFailed);
+    expect(dialog().textContent).not.toContain("认得的数据格式");
+    expect(footerButtons()).toEqual([UPDATE_COPY.close]);
+
+    act(() => button(UPDATE_COPY.close).click());
+    await flush();
+    expect(shell.updatePanelOpen).toBe(false);
+    expect(callsOf(ipc, "download_update")).toHaveLength(1);
   });
 });
 

@@ -7,7 +7,7 @@
 import { motion } from "framer-motion";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { PetalMark } from "../art/PetalMark";
-import { downloadFailureCopy, sourceSwitchedCopy, UPDATE_COPY } from "../copy/updater";
+import { downloadFailureCopy, sourceSwitchedCopy, UPDATE_COPY, updateChannelNote } from "../copy/updater";
 import { formatBytes, formatDate } from "../domain/format";
 import { insertItem } from "../lib/motion";
 import { useDisplayCount } from "../lib/progress-display";
@@ -16,7 +16,7 @@ import { cx } from "../lib/util";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useOnline } from "../state/online";
 import { busyInstanceId } from "../state/selectors";
-import { downloadFraction, hasPanel, phaseUpdate, type UpdateInfo, type UpdaterPhase } from "../state/updater/machine";
+import { downloadFraction, hasPanel, phaseUpdate, type DownloadRefusal, type UpdateInfo, type UpdaterChannels, type UpdaterPhase } from "../state/updater/machine";
 import { useUpdater } from "../state/updater/useUpdater";
 import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
@@ -83,16 +83,34 @@ function PhaseStatus({ phaseKey, children }: { phaseKey: string; children: React
 }
 
 /**
+ * 安装说明之前的通道说明行：新版本不属于包的通道时说清装上之后在哪条线上；属于包的通道时为 null，不占这一行。
+ * 有可查看的版本时更新信息早已到达，包的通道与偏好只在不支持自更新时为空，空了是后端违约。
+ */
+function channelNoteOf(update: UpdateInfo, channels: UpdaterChannels | null): string | null {
+  if (channels === null) throw new Error(`有可查看的 ${update.version} 时更新信息应当已经到达`);
+  const { package_channel: packageChannel, preference } = channels;
+  if (packageChannel === null || preference === null) {
+    throw new Error(`支持自更新时 updater_info 应给出包的通道与偏好，实为 ${JSON.stringify([packageChannel, preference])}`);
+  }
+  return updateChannelNote({ channel: update.channel, preference, packageChannel });
+}
+
+/** 下好、验过签却不能装时的说明块。下载本身是成功的，不沿用「下载失败：……」的说法。 */
+const REFUSAL_NOTE: Readonly<Record<DownloadRefusal, string>> = { data_too_new: UPDATE_COPY.dataTooNew };
+
+/**
  * 弹窗形变的依赖（Modal 的 layoutKey）：只放会改变弹窗高度的东西。下载进度约每 100 ms 回调一次、整个面板跟着重渲染，
  * 不传的话每次回调都要量一遍面板与头部、主体、底栏；已下大小在定宽的槽里，进度条长度固定，都不改高度。
- * 阶段决定状态块与底栏；已就绪时游戏在不在跑换两种说明；下载失败时有后端原文就多一段；下载中换过源多一行提示；
- * 新一轮检查换了一版时更新说明整段换掉。这几样一变，面板沿 morph 弹簧形变过去，上下沿不再各跳高度差的一半。
+ * 阶段决定状态块与底栏；已就绪时游戏在不在跑换两种说明；下载失败时有后端原文就多一段，被拒装时只有一句说明、底栏只剩关闭；
+ * 下载中换过源多一行提示；新一轮检查换了一版时更新说明整段换掉；通道说明行有没有、说的是哪一句（channelNote）。
+ * 这几样一变，面板沿 morph 弹簧形变过去，上下沿不再各跳高度差的一半。
  */
-export function updatePanelLayoutKey(phase: UpdaterPhase, gameRunning: boolean): string {
+export function updatePanelLayoutKey(phase: UpdaterPhase, gameRunning: boolean, channelNote: string | null): string {
   const update = phaseUpdate(phase);
-  const failureRaw = phase.kind === "download_failed" && downloadFailureCopy(phase).raw !== null;
+  const refused = phase.kind === "download_failed" && phase.refusal !== null;
+  const failureRaw = phase.kind === "download_failed" && !refused && downloadFailureCopy(phase).raw !== null;
   const switched = phase.kind === "downloading" && sourceSwitchedCopy(phase.source) !== null;
-  return JSON.stringify([phase.kind, update === null ? null : update.version, gameRunning, failureRaw, switched]);
+  return JSON.stringify([phase.kind, update === null ? null : update.version, gameRunning, failureRaw, refused, switched, channelNote]);
 }
 
 export interface UpdatePanelProps {
@@ -117,6 +135,7 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
   if ((phase.kind === "ready" || phase.kind === "install_on_exit") && phase.kind !== installFrom) setInstallFrom(phase.kind);
   const update = current !== null ? current : last;
   if (update === null) return null;
+  const channelNote = channelNoteOf(update, updater.state.channels);
 
   const installReason = gameRunning ? UPDATE_COPY.gameRunningReason : undefined;
   const offlineReason = online ? undefined : UPDATE_COPY.offlineReason;
@@ -164,6 +183,16 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
       );
       break;
     case "download_failed": {
+      if (phase.refusal !== null) {
+        // 再下必然同样被拒：不给重试，也没有可以「稍后」再做的事，底栏只留关闭
+        status = (
+          <Callout tone="danger" announce>
+            {REFUSAL_NOTE[phase.refusal]}
+          </Callout>
+        );
+        footer = <Button onClick={onClose}>{UPDATE_COPY.close}</Button>;
+        break;
+      }
       const { summary, raw } = downloadFailureCopy(phase);
       status = (
         <>
@@ -256,7 +285,7 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
     <Modal
       open={open && current !== null}
       onClose={onClose}
-      layoutKey={updatePanelLayoutKey(phase, gameRunning)}
+      layoutKey={updatePanelLayoutKey(phase, gameRunning, channelNote)}
       size="md"
       icon={<PetalMark size={32} />}
       title={UPDATE_COPY.panelTitle(update.version)}
@@ -267,6 +296,7 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
     >
       <div className={s.panelBody}>
         <Notes notes={update.notes} />
+        {channelNote !== null && <p className={s.muted}>{channelNote}</p>}
         <p className={s.muted}>{UPDATE_COPY.installNote}</p>
         <PhaseStatus phaseKey={statusKey}>{status}</PhaseStatus>
       </div>
