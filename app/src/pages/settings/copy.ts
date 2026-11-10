@@ -288,6 +288,8 @@ export const ABOUT_COPY = {
   copied: "已复制",
   versionRow: "版本",
   channelRow: "发布通道",
+  /** 没走发布流程的本机与 fork 构建（构建信息的通道为 local）：品牌卡的通道标、「发布通道」一行与复制文本都写它。 */
+  localBuild: "本机构建",
   builtRow: "构建日期",
   licenseRow: "开源协议",
   assetLicenseRow: "素材许可",

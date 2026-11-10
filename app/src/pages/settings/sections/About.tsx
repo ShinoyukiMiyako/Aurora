@@ -37,9 +37,12 @@ function builtDate(build: BuildInfo): string {
   return formatDate(ts);
 }
 
-/** 本机构建先按预览版标：它出自没走发布流程的源码，标成正式版会误导，也与它以前按版本号推出的显示一致。 */
+/**
+ * 构建信息里的通道在关于页的叫法。官方构建写它所属的发布通道，与旁边的版本号一致；本机与 fork 构建没走发布流程，
+ * 不属于任何一条发布线，按版本号标成哪条线都会误导，写「本机构建」。不把 local 加进 RELEASE_CHANNEL_LABEL：Mod 的版本档标签也引用它。
+ */
 function channelLabel(channel: BuildInfo["channel"]): string {
-  return RELEASE_CHANNEL_LABEL[channel === "local" ? "preview" : channel];
+  return channel === "local" ? ABOUT_COPY.localBuild : RELEASE_CHANNEL_LABEL[channel];
 }
 
 function BrandCard({ build }: { build: BuildInfo }) {

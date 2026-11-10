@@ -2157,6 +2157,24 @@ describe("设置页：关于与启动器更新", () => {
     ]);
   });
 
+  it("本机与 fork 构建（构建信息的通道为 local）：品牌卡的通道标、「发布通道」一行与复制文本都写本机构建", async () => {
+    vi.stubGlobal("__PETALFALL_BUILD__", { ...BUILD, version: "1.0.0", channel: "local" });
+    const writeText = vi.fn(async (_text: string) => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await mount("about");
+    expect(document.querySelector('[class*="brandName"] [data-tone]')?.textContent).toBe("本机构建");
+    const card = section("版本信息");
+    const rows = [...card.querySelectorAll("dl > div")].map((row) => [row.querySelector("dt")?.textContent, row.querySelector("dd")?.textContent]);
+    expect(rows.slice(0, 2)).toEqual([
+      ["版本", "1.0.0"],
+      ["发布通道", "本机构建"],
+    ]);
+    await click(card.querySelector<HTMLButtonElement>('button[aria-label="复制"]') as HTMLButtonElement);
+    expect(writeText.mock.calls.map((c) => c[0].split("\n").slice(0, 2))).toEqual([[`${APP_NAME_EN} 1.0.0`, "发布通道：本机构建"]]);
+    // 版本号像正式版也不标成正式版：本机构建推不出它属于哪条线
+    expect(document.querySelector('[class*="brandName"]')?.textContent).toBe(`${APP_NAME}${APP_NAME_EN}本机构建`);
+  });
+
   it("第三方许可：打开弹窗时才读清单，按前端与 Rust 分组列出名称、版本与许可证", async () => {
     const fetchMock = vi.fn(async (_url: string) => ({ ok: true, status: 200, json: async () => MANIFEST }));
     vi.stubGlobal("fetch", fetchMock);
