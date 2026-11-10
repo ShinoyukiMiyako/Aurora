@@ -22,8 +22,10 @@ import {
   offersStandardInstaller,
   reduce,
   relaunchesAfterUpdate,
+  remindsChannelRevert,
   stepDirection,
   stepKey,
+  switchingTo,
   unattendedMode,
   type SetupEvent,
   type SetupState,
@@ -260,7 +262,7 @@ function CurrentView({ flow, bridge, copy }: ViewProps) {
     case "preparing": {
       // 和安装中同一页，进度停在起点：等落樱退出只要一两秒，换页反而像跳了一下
       const probe = requireValue(state.probe, "探测结果", view);
-      return <Installing copy={copy} mode="upgrade" version={probe.payloadVersion} run={state.run} progress={null} />;
+      return <Installing copy={copy} mode="upgrade" switching={null} version={probe.payloadVersion} run={state.run} progress={null} />;
     }
     case "welcome": {
       const probe = requireValue(state.probe, "探测结果", view);
@@ -309,14 +311,27 @@ function CurrentView({ flow, bridge, copy }: ViewProps) {
     case "installing": {
       const probe = requireValue(state.probe, "探测结果", view);
       const plan = requireValue(state.plan, "安装计划", view);
-      return <Installing copy={copy} mode={plan.mode} version={probe.payloadVersion} run={state.run} progress={state.progress} />;
+      return <Installing copy={copy} mode={plan.mode} switching={switchingTo(plan.mode, probe)} version={probe.payloadVersion} run={state.run} progress={state.progress} />;
     }
     case "done": {
       const probe = requireValue(state.probe, "探测结果", view);
       const plan = requireValue(state.plan, "安装计划", view);
-      return <Done copy={copy} mode={plan.mode} version={probe.payloadVersion} keptData={state.keptData} elevated={probe.elevated} opening={state.opening} onOpen={openLauncher} onClose={close} />;
+      return (
+        <Done
+          copy={copy}
+          mode={plan.mode}
+          switching={switchingTo(plan.mode, probe)}
+          version={probe.payloadVersion}
+          keptData={state.keptData}
+          elevated={probe.elevated}
+          opening={state.opening}
+          onOpen={openLauncher}
+          onClose={close}
+        />
+      );
     }
     case "failed": {
+      const probe = requireValue(state.probe, "探测结果", view);
       const failure = requireValue(state.failure, "失败原因", view);
       const plan = requireValue(state.plan, "安装计划", view);
       const recovery = failureRecovery(failure.code, plan);
@@ -326,6 +341,7 @@ function CurrentView({ flow, bridge, copy }: ViewProps) {
           failure={failure}
           recovery={recovery}
           standardInstaller={offersStandardInstaller(failure.code, plan)}
+          channelRevert={remindsChannelRevert(plan, probe)}
           onRecover={() => (recovery === "retry" ? requestInstall(plan.mode) : dispatch({ type: "open_location" }))}
           onOpenLog={() => attempt(() => bridge.openLog())}
           onReport={() => attempt(() => bridge.openExternal(ISSUES_URL))}

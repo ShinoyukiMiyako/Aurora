@@ -30,7 +30,7 @@ function done(overrides: Partial<DoneProps> = {}) {
       <OverlayProvider>
         <FrameChromeProvider value={chromeOf(copy)}>
           <InShell>
-            <Done copy={copy} mode="fresh" version={VERSION} keptData={false} elevated={false} opening={false} onOpen={() => undefined} onClose={() => undefined} {...overrides} />
+            <Done copy={copy} mode="fresh" switching={null} version={VERSION} keptData={false} elevated={false} opening={false} onOpen={() => undefined} onClose={() => undefined} {...overrides} />
           </InShell>
           <OverlayRoot />
         </FrameChromeProvider>
@@ -70,6 +70,21 @@ describe("文案", () => {
   ] as const)("%s 的标题是「%s」", (mode: InstallMode, title) => {
     view = render(done({ mode }));
     expect(heading()).toBe(title);
+  });
+
+  it.each([
+    ["switch", "beta", "已换到测试版 0.2.0"],
+    // 在「换到」页上确认的升级：计划是 upgrade，标题照样说换到
+    ["upgrade", "dev", "已换到预览版 0.2.0"],
+  ] as const)("换通道的 %s 说换到哪个通道", (mode, switching, title) => {
+    view = render(done({ mode, switching, keptData: true }));
+    expect(heading()).toBe(title);
+    expect(lead()).toBe(zh.done.kept);
+  });
+
+  it("英文系统的换通道标题", () => {
+    view = render(done({ copy: COPY.en, mode: "switch", switching: "stable" }));
+    expect(heading()).toBe("Switched to Stable 0.2.0");
   });
 
   it("标题前有成功徽记：挂上时从透明处出来，读屏不念，标题文字照旧", () => {

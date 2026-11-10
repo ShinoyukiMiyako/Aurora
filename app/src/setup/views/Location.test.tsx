@@ -6,11 +6,11 @@ import { MotionGlobalConfig } from "framer-motion";
 import { act, useLayoutEffect, type ReactElement } from "react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, stubPetalTokens } from "../../art/petals/test-canvas";
-import { APP_NAME_EN } from "../../lib/app-info";
+import { APP_NAME, APP_NAME_EN } from "../../lib/app-info";
 import { OverlayProvider, OverlayRoot } from "../../shell/overlay";
 import { focusByKeyboard, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import App from "../App";
-import type { DirCheck, DirIssue } from "../contract";
+import type { Channel, DataBlock, DirCheck, DirIssue } from "../contract";
 import { COPY, formatBytes, welcomeLead } from "../copy";
 import { FAKE_PROBE, createFakeBridge } from "../fake-bridge";
 import { Frame, FrameChromeProvider, FrameShell, type FrameChrome } from "../Frame";
@@ -341,6 +341,73 @@ describe("提示按优先级只显示一条", () => {
   it("空着的提示行也占位，结果回来时下面的控件不跳", () => {
     mount();
     expect(noticeHint()).not.toBeNull();
+  });
+});
+
+describe("被数据关拦下", () => {
+  const PATH = `${DIR}\\data-format.json`;
+  const tooNew = (writtenBy: string | null, writtenByChannel: Channel | null): DataBlock => ({ problem: "too_new", path: PATH, recorded: 3, supported: 2, reason: null, writtenBy, writtenByChannel });
+  const UNREADABLE: DataBlock = { problem: "unreadable", path: PATH, recorded: null, supported: 2, reason: "缺 data_format", writtenBy: null, writtenByChannel: null };
+  // 同时有旧数据、有别的文件：拦下时这些提示都让位
+  const blocked = (dataBlock: DataBlock): DirCheck => okCheck({ issue: "data_incompatible", dataBlock, hasConfig: true, notEmpty: true, appended: true });
+
+  it.each<[string, DataBlock, string]>([
+    ["用过这份数据的那一版写得出来", tooNew("1.1.0-dev.61", "dev"), `这里的数据被更新的${APP_NAME}用过，这个安装包读不了。换一个位置，或者装预览版 1.1.0-dev.61 或更新的版本`],
+    ["那一版写不出来", tooNew(null, null), `这里的数据被更新的${APP_NAME}用过，这个安装包读不了。换一个位置，或者装更新的版本`],
+    ["数据格式记录读不懂", UNREADABLE, "这里的数据格式记录读不懂，换一个位置"],
+  ])("%s：只显示这一句，挡住点击和回车，按钮的原因也是这一句", async (_, block, message) => {
+    const { onInstall } = mount({ checkDir: vi.fn(async () => blocked(block)) });
+    await settle();
+    expect(noticeLine()).toBe(message);
+    expect(document.body.textContent).not.toContain(text.finalPath(DIR));
+
+    const primary = install();
+    expect(primary.getAttribute("aria-disabled")).toBe("true");
+    act(() => primary.click());
+    pressKey(pathInput(), "Enter");
+    expect(onInstall).not.toHaveBeenCalled();
+    focusByKeyboard(primary);
+    expect(document.querySelector("[role='tooltip']")?.textContent).toBe(message);
+  });
+
+  it("英文表的三种说法", async () => {
+    const en = COPY.en;
+    const cases: readonly [DataBlock, string][] = [
+      [tooNew("1.0.0-beta.6", "beta"), `Data here was used by a newer ${APP_NAME_EN} that this installer can't read. Pick another location, or install Beta 1.0.0-beta.6 or later`],
+      [tooNew(null, null), `Data here was used by a newer ${APP_NAME_EN} that this installer can't read. Pick another location, or install a newer version`],
+      [UNREADABLE, "The data format record here can't be read. Pick another location"],
+    ];
+    for (const [block, message] of cases) {
+      view = render(
+        <TestChrome copy={en}>
+          <Location {...props({ copy: en, checkDir: vi.fn(async () => blocked(block)) })} />
+        </TestChrome>,
+      );
+      await settle();
+      expect(noticeLine()).toBe(message);
+      view.unmount();
+      view = undefined;
+    }
+  });
+
+  it("首装点安装时目录被拦下：退回选目录页显示原因，不调 install", async () => {
+    const fake = createFakeBridge({ outcome: "hang", progress: [], checkDir: () => blocked(tooNew("1.1.0-dev.61", "dev")) });
+    view = render(<App bridge={fake} copy={copy} initial={replay([{ type: "probed", probe: FAKE_PROBE }])} />);
+    act(() => button(copy.welcome.install).click());
+    await pass(0);
+    expect(presentHeading()).toBe(text.title);
+    expect(noticeLine()).toBe(`这里的数据被更新的${APP_NAME}用过，这个安装包读不了。换一个位置，或者装预览版 1.1.0-dev.61 或更新的版本`);
+    expect(fake.callsOf("install")).toEqual([]);
+  });
+
+  it("拦下了却没带拦截详情时进致命错误页，不拿笼统的说法糊过去", async () => {
+    const fake = createFakeBridge({ checkDir: () => okCheck({ issue: "data_incompatible", dataBlock: null }) });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    view = render(<App bridge={fake} copy={copy} initial={replay([{ type: "probed", probe: FAKE_PROBE }, { type: "open_location" }])} />);
+    await settle();
+    expect(presentHeading()).toBe(copy.fatal.title);
+    expect(document.querySelector("pre")?.textContent).toContain("目录被数据关拦下，校验结果却没带拦截详情");
+    expect(logged).toHaveBeenCalled();
   });
 });
 

@@ -9,7 +9,7 @@ import { stubCanvas, stubPetalTokens } from "../../art/petals/test-canvas";
 import { OverlayProvider, OverlayRoot } from "../../shell/overlay";
 import { focusByKeyboard, render, stubMatchMedia, stubResizeObserver, waitForFrames, type Rendered } from "../../test/dom";
 import App from "../App";
-import type { InstallMode, Progress } from "../contract";
+import type { Channel, InstallMode, Progress } from "../contract";
 import { COPY, type SetupCopy } from "../copy";
 import { createFakeBridge, FAKE_PROBE } from "../fake-bridge";
 import { FrameChromeProvider, type FrameChrome } from "../Frame";
@@ -39,9 +39,9 @@ function harness(copy: SetupCopy, reduced: "always" | "never", ui: ReactNode) {
   );
 }
 
-function installing(progress: Progress | null, options: { copy?: SetupCopy; mode?: InstallMode; run?: number; reduced?: "always" | "never" } = {}) {
-  const { copy = zh, mode = "fresh", run = 1, reduced = "never" } = options;
-  return harness(copy, reduced, <Installing copy={copy} mode={mode} version={VERSION} run={run} progress={progress} />);
+function installing(progress: Progress | null, options: { copy?: SetupCopy; mode?: InstallMode; switching?: Channel | null; run?: number; reduced?: "always" | "never" } = {}) {
+  const { copy = zh, mode = "fresh", switching = null, run = 1, reduced = "never" } = options;
+  return harness(copy, reduced, <Installing copy={copy} mode={mode} switching={switching} version={VERSION} run={run} progress={progress} />);
 }
 
 function bar(): HTMLElement {
@@ -94,6 +94,17 @@ describe("标题", () => {
   it("升级的标题带目标版本", () => {
     view = render(installing(null, { mode: "upgrade" }));
     expect(document.querySelector("h1")?.textContent).toBe("正在升级到 0.2.0");
+  });
+
+  it("换通道安装说换到哪个通道", () => {
+    view = render(installing(null, { mode: "switch", switching: "beta" }));
+    expect(document.querySelector("h1")?.textContent).toBe("正在换到测试版 0.2.0");
+  });
+
+  // 用户在「换到」页上确认的升级：计划是 upgrade，标题照样说换到
+  it("确认换到更快通道的升级也说换到", () => {
+    view = render(installing(null, { mode: "upgrade", switching: "dev" }));
+    expect(document.querySelector("h1")?.textContent).toBe("正在换到预览版 0.2.0");
   });
 
   it("英文系统走英文表", () => {

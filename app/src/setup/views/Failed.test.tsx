@@ -6,16 +6,16 @@ import { MotionConfig } from "framer-motion";
 import { act, type ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, stubPetalTokens } from "../../art/petals/test-canvas";
-import { ISSUES_URL } from "../../lib/app-info";
+import { APP_NAME, APP_NAME_EN, ISSUES_URL } from "../../lib/app-info";
 import { OverlayProvider, OverlayRoot } from "../../shell/overlay";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import App from "../App";
-import type { Existing, Failure, FailureCode } from "../contract";
+import type { Existing, Failure, FailureCode, Probe } from "../contract";
 import { COPY, type SetupCopy } from "../copy";
 import { createFakeBridge, FAKE_PROBE, judgedProbe, type FakeBridge } from "../fake-bridge";
 import { Frame, FrameChromeProvider, FrameShell, type FrameChrome } from "../Frame";
 import { InShell } from "./test-chrome";
-import { replay, type FailureRecovery } from "../model";
+import { replay, type FailureRecovery, type SetupEvent } from "../model";
 import { Failed, type FailedProps } from "./Failed";
 
 const zh = COPY.zh;
@@ -35,7 +35,19 @@ function failed(overrides: Partial<FailedProps> = {}) {
       <OverlayProvider>
         <FrameChromeProvider value={chromeOf(copy)}>
           <InShell>
-            <Failed copy={copy} failure={FAILURE} recovery="retry" standardInstaller={false} onRecover={noop} onOpenLog={noop} onReport={noop} onStandardInstaller={noop} onBack={noop} {...overrides} />
+            <Failed
+              copy={copy}
+              failure={FAILURE}
+              recovery="retry"
+              standardInstaller={false}
+              channelRevert={false}
+              onRecover={noop}
+              onOpenLog={noop}
+              onReport={noop}
+              onStandardInstaller={noop}
+              onBack={noop}
+              {...overrides}
+            />
           </InShell>
           <OverlayRoot />
         </FrameChromeProvider>
@@ -108,6 +120,18 @@ describe("原因", () => {
     view = render(failed({ copy: COPY.en, failure: { code: "payload_exit", detail: "1603" } }));
     expect(heading()).toBe("The install didn't finish");
     expect(document.querySelector('[role="alert"]')?.textContent).toBe("The installer quit early with code 1603.");
+  });
+
+  it("要补回到原来通道的那句时接在原因说明后面", () => {
+    view = render(failed({ channelRevert: true, failure: { code: "disk_full", detail: "os error 112" } }));
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe(`现有的安装位置不能换。腾出空间后再试。想留在原来的通道，到${APP_NAME}的「设置 · 关于」把更新通道改回去。`);
+  });
+
+  it("英文的补句与原因之间空一格", () => {
+    view = render(failed({ copy: COPY.en, channelRevert: true, failure: { code: "payload_exit", detail: "1603" } }));
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+      `The installer quit early with code 1603. To stay on your previous channel, change the update channel back in ${APP_NAME_EN}'s Settings, About.`,
+    );
   });
 });
 
@@ -193,7 +217,9 @@ describe("按钮", () => {
   it("换步后这一页淡出的那一会儿 Esc 不再触发返回：这时的 Esc 归新的一页", () => {
     const onBack = vi.fn();
     const noop = () => undefined;
-    const page = <Failed copy={zh} failure={FAILURE} recovery="retry" standardInstaller={false} onRecover={noop} onOpenLog={noop} onReport={noop} onStandardInstaller={noop} onBack={onBack} />;
+    const page = (
+      <Failed copy={zh} failure={FAILURE} recovery="retry" standardInstaller={false} channelRevert={false} onRecover={noop} onOpenLog={noop} onReport={noop} onStandardInstaller={noop} onBack={onBack} />
+    );
     view = render(atStep("failed", page));
     keydown(document.body, "Escape");
     expect(onBack).toHaveBeenCalledTimes(1);
@@ -324,6 +350,45 @@ describe("接上流程", () => {
     expect(document.querySelector('[role="alert"]')?.textContent).toBe(body);
     expect(buttonNamed(zh.failed.retry)).toBeDefined();
     expect(buttonNamed(zh.failed.changeLocation)).toBeUndefined();
+  });
+
+  // 已装预览版，安装包是更慢通道上更早的测试版；同通道的升级作对照
+  const SWITCH_SIDES = { payloadVersion: "1.0.0-beta.5", payloadChannel: "beta" } as const;
+  const switchExisting: Existing = { kind: "switch", version: "1.1.0-dev.61", dir: String.raw`E:\app`, channel: "dev" };
+  const upgradeExisting: Existing = { kind: "upgrade", version: "0.1.0", dir: String.raw`E:\app`, channel: "stable" };
+  const alert = () => document.querySelector('[role="alert"]')?.textContent;
+  const body = zh.failed.reason.payload_exit.body("2", "retry");
+
+  function failedAfter(probe: Probe, start: SetupEvent): void {
+    const fake = createFakeBridge({ probe, outcome: "hang", progress: [] });
+    const initial = replay([{ type: "probed", probe }, start, { type: "install_failed", failure: FAILURE }]);
+    expect(initial.view).toBe("failed");
+    view = render(<App bridge={fake} copy={zh} initial={initial} />);
+  }
+
+  it("带换通道开关的更新模式装失败：补上回到原来通道的那句，也不给标准安装程序", () => {
+    const probe = judgedProbe({ ...FAKE_PROBE, ...SWITCH_SIDES, existing: switchExisting, update: { relaunch: true } });
+    expect(probe.unattended).toBe("switch");
+    failedAfter(probe, { type: "update_started", running: false });
+    expect(alert()).toBe(`${body}想留在原来的通道，到${APP_NAME}的「设置 · 关于」把更新通道改回去。`);
+    expect(buttonNamed(zh.failed.standardInstaller)).toBeUndefined();
+  });
+
+  it("交互确认的换通道装失败：更新通道没动过，不补那句；也不给标准安装程序", () => {
+    const probe = judgedProbe({ ...FAKE_PROBE, ...SWITCH_SIDES, existing: switchExisting });
+    failedAfter(probe, { type: "install_requested", mode: "switch", running: false });
+    expect(alert()).toBe(body);
+    expect(buttonNamed(zh.failed.standardInstaller)).toBeUndefined();
+  });
+
+  it.each<[string, Partial<Probe>, SetupEvent]>([
+    ["交互的升级", {}, { type: "install_requested", mode: "upgrade", running: false }],
+    ["更新模式的升级", { update: { relaunch: true } }, { type: "update_started", running: false }],
+  ])("%s装失败：不补那句，照常给标准安装程序", (_, extra, start) => {
+    const probe = judgedProbe({ ...FAKE_PROBE, existing: upgradeExisting, ...extra });
+    failedAfter(probe, start);
+    expect(alert()).toBe(body);
+    expect(buttonNamed(zh.failed.standardInstaller)).toBeDefined();
   });
 
   it("打开日志和问题反馈走到 bridge，反馈去 Issues", async () => {

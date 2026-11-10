@@ -3,14 +3,16 @@ import { Icon } from "../../art/Icon";
 import { fade, springs } from "../../lib/motion";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
-import type { InstallMode } from "../contract";
-import type { SetupCopy } from "../copy";
+import type { Channel, InstallMode } from "../contract";
+import { modeTitle, type SetupCopy } from "../copy";
 import { Frame } from "../Frame";
 import styles from "./Done.module.css";
 
 export interface DoneProps {
   copy: SetupCopy;
   mode: InstallMode;
+  /** 这次换到的通道（model 的 switchingTo），标题据此说「换到」；为 null 时按模式说。 */
+  switching: Channel | null;
   version: string;
   /** 为真时说明用 copy.done.kept，否则用 copy.done.firstRun。 */
   keptData: boolean;
@@ -27,8 +29,7 @@ export interface DoneProps {
  * 焦点落在下一步最该按的按钮上，Enter 直接生效。
  * 提权时不给打开：提权启动和普通启动用的是两个数据根。
  */
-export function Done({ copy, mode, version, keptData, elevated, opening, onOpen, onClose }: DoneProps) {
-  if (mode === "switch") throw new Error("没有发起换通道安装的入口，不该装 switch");
+export function Done({ copy, mode, switching, version, keptData, elevated, opening, onOpen, onClose }: DoneProps) {
   const text = copy.done;
   return (
     <Frame
@@ -38,7 +39,7 @@ export function Done({ copy, mode, version, keptData, elevated, opening, onOpen,
           <motion.span className={styles.mark} aria-hidden="true" initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } }}>
             <Icon name="check" size={18} />
           </motion.span>
-          {text.title[mode](version)}
+          {modeTitle(copy, text.title, mode, switching, version)}
         </span>
       }
       lead={keptData ? text.kept : text.firstRun}

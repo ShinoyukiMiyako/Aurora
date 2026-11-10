@@ -15,6 +15,8 @@ export interface FailedProps {
   recovery: FailureRecovery;
   /** 是否显示「改用标准安装程序」。 */
   standardInstaller: boolean;
+  /** 说明末尾要不要补怎么回到原来的通道，由 model 的 remindsChannelRevert 算好。 */
+  channelRevert: boolean;
   onRecover(): void;
   onOpenLog(): void;
   onReport(): void;
@@ -28,9 +30,10 @@ function selectContents(event: FocusEvent<HTMLElement>): void {
   window.getSelection()?.selectAllChildren(event.currentTarget);
 }
 
-export function Failed({ copy, failure, recovery, standardInstaller, onRecover, onOpenLog, onReport, onStandardInstaller, onBack }: FailedProps) {
+export function Failed({ copy, failure, recovery, standardInstaller, channelRevert, onRecover, onOpenLog, onReport, onStandardInstaller, onBack }: FailedProps) {
   const text = copy.failed;
   const reason = text.reason[failure.code];
+  const body = reason.body(failure.detail, recovery);
   // 重试和标准安装程序各起一个 NSIS，NSIS 之间没有互斥，同写一个目录只会留下半套文件，还会让窗口关不掉。
   // 所以选定一条路就关上别的路。两条路的结局都是离开这一页或关窗，出错进 fatal，这个状态不用复位
   const [leaving, setLeaving] = useState<"recover" | "standard" | null>(null);
@@ -41,7 +44,7 @@ export function Failed({ copy, failure, recovery, standardInstaller, onRecover, 
   return (
     <Frame
       title={reason.title}
-      lead={<span role="alert">{reason.body(failure.detail, recovery)}</span>}
+      lead={<span role="alert">{channelRevert ? text.channelRevert(body) : body}</span>}
       footerStart={
         <Button variant="ghost" disabled={leaving !== null} focusableWhenDisabled onClick={onBack}>
           {text.back}

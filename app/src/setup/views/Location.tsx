@@ -10,7 +10,7 @@ import { Checkbox } from "../../ui/Checkbox";
 import { Field } from "../../ui/Field";
 import { TextInput } from "../../ui/TextInput";
 import type { DirCheck } from "../contract";
-import { formatBytes, welcomeLead, type SetupCopy } from "../copy";
+import { dataWriter, formatBytes, welcomeLead, type SetupCopy } from "../copy";
 import { Frame } from "../Frame";
 import { dirNotice, withAppFolder } from "../model";
 import shared from "../setup.module.css";
@@ -54,6 +54,21 @@ function useDirCheck(dir: string, initialCheck: DirCheck | null, active: boolean
   }, [active, dir, initialCheck]);
 
   return settled;
+}
+
+/**
+ * 阻断问题的文案。被数据关拦下时按拦截详情说：读不懂、用过这份数据的那一版写得出来、写不出来，三种说法；
+ * 这时问题码只是个标志，没带详情就是契约坏了。
+ */
+function issueText(copy: SetupCopy, check: DirCheck): string | undefined {
+  if (check.issue === null) return undefined;
+  if (check.issue !== "data_incompatible") return copy.location.issue[check.issue];
+  const block = check.dataBlock;
+  if (block === null) throw new Error("目录被数据关拦下，校验结果却没带拦截详情");
+  const text = copy.location.dataIncompatible;
+  if (block.problem === "unreadable") return text.unreadable;
+  const writer = dataWriter(block);
+  return writer === null ? text.unnamed : text.named(copy.channel[writer.channel], writer.version);
 }
 
 interface DirHint {
@@ -103,7 +118,7 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
   const text = copy.location;
   const present = useIsPresent();
   const check = useDirCheck(dir, initialCheck, present, checkDir, attempt);
-  const issue = check === null || check.issue === null ? undefined : check.issue === "data_incompatible" ? text.dataIncompatible.unnamed : text.issue[check.issue];
+  const issue = check === null ? undefined : issueText(copy, check);
   const hint = check === null ? null : dirHint(text, check, requiredBytes);
   const reflow = useReflow<HTMLDivElement>();
 
