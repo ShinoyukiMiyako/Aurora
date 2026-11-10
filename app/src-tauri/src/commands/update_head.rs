@@ -18,7 +18,6 @@
 //!
 //! 全是纯函数：公钥文本、签名串、版本与所问的通道都由调用方传入，这里不发请求、不读配置。
 
-use std::collections::HashMap;
 use std::fmt;
 
 use base64::engine::general_purpose::STANDARD;
@@ -208,6 +207,7 @@ pub(crate) fn verify_head(
 }
 
 /// 公钥文本的密钥号。
+#[cfg(test)]
 pub(crate) fn public_key_id(public_key: &str) -> Result<KeyId, MalformedText> {
     decode_public_key(public_key).map(|key| key.id)
 }
@@ -397,28 +397,6 @@ impl fmt::Display for SeenEntryError {
     }
 }
 
-/// 见过的版本整张表不是对象。整张表当作没有记录，下次写入时换成新对象。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SeenTableNotObject {
-    /// 实际的 JSON 类型。
-    pub found: &'static str,
-}
-
-impl fmt::Display for SeenTableNotObject {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "见过的版本应为对象，实际是{}", self.found)
-    }
-}
-
-/// 逐项重验之后的见过的版本。
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct SeenVersions {
-    /// 重验通过的各通道记录。
-    pub heads: HashMap<Channel, VerifiedHead>,
-    /// 作废的项与原因，调用方逐条记 error 日志；这些通道当作没有记录。
-    pub rejected: Vec<(Channel, SeenEntryError)>,
-}
-
 /// 解析并重验见过的版本里一个通道的一项：`{"version": ..., "signature": ...}`，多出来的字段不管。
 ///
 /// `raw` 是配置里按原样存的 JSON 值，`public_key` 同 [`verify_head`]。
@@ -437,32 +415,6 @@ pub(crate) fn read_seen_entry(
         reason: err.to_string(),
     })?;
     verify_head(channel, &version, signature, public_key).map_err(SeenEntryError::Head)
-}
-
-/// 解析并逐项重验整张见过的版本 `{通道: {version, signature}}`。
-///
-/// 某一项坏了只废这一项，交回原因，别的通道照用。不认识的通道键跳过：可能是更新的版本写的，配置写回时
-/// 原样保留，这里不读也不报。`key_of` 给出每个通道该用的公钥文本。
-pub(crate) fn read_seen_versions<'k>(
-    raw: &Value,
-    key_of: impl Fn(Channel) -> &'k str,
-) -> Result<SeenVersions, SeenTableNotObject> {
-    let table = raw.as_object().ok_or(SeenTableNotObject {
-        found: json_kind(raw),
-    })?;
-    let mut seen = SeenVersions::default();
-    for (name, entry) in table {
-        let Some(channel) = Channel::from_name(name) else {
-            continue;
-        };
-        match read_seen_entry(channel, entry, key_of(channel)) {
-            Ok(head) => {
-                seen.heads.insert(channel, head);
-            }
-            Err(err) => seen.rejected.push((channel, err)),
-        }
-    }
-    Ok(seen)
 }
 
 fn string_field<'a>(
@@ -1104,36 +1056,18 @@ mod tests {
         json!({ "version": text, "signature": signature })
     }
 
-    fn full_table() -> Value {
-        json!({
-            "dev": entry("1.0.0-dev.7", DEV_7.signature),
-            "beta": entry("1.0.0-beta.3", BETA_3.signature),
-            "stable": entry("1.0.0", STABLE_1.signature),
-        })
-    }
-
-    fn full_heads() -> HashMap<Channel, VerifiedHead> {
-        HashMap::from([
-            (Dev, head(Dev, "1.0.0-dev.7", DEV_7.signature)),
-            (Beta, head(Beta, "1.0.0-beta.3", BETA_3.signature)),
-            (Stable, head(Stable, "1.0.0", STABLE_1.signature)),
-        ])
-    }
-
-    fn read(table: &Value) -> SeenVersions {
-        read_seen_versions(table, key_of).unwrap_or_else(|err| panic!("{err}"))
-    }
-
     #[test]
-    fn seen_versions_keep_every_entry_that_rechecks() {
-        assert_eq!(
-            read(&full_table()),
-            SeenVersions {
-                heads: full_heads(),
-                rejected: Vec::new(),
-            }
-        );
-        assert_eq!(read(&json!({})), SeenVersions::default());
+    fn seen_entries_that_recheck_are_read_back() {
+        for (channel, text, signature) in [
+            (Dev, "1.0.0-dev.7", DEV_7.signature),
+            (Beta, "1.0.0-beta.3", BETA_3.signature),
+            (Stable, "1.0.0", STABLE_1.signature),
+        ] {
+            assert_eq!(
+                read_seen_entry(channel, &entry(text, signature), key_of(channel)),
+                Ok(head(channel, text, signature))
+            );
+        }
         // 多出来的字段不管。
         let mut extra = entry("1.0.0-dev.7", DEV_7.signature);
         extra["seen_at"] = json!(1_762_761_600);
@@ -1144,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn a_broken_seen_entry_only_drops_itself() {
+    fn a_broken_seen_entry_is_refused_with_its_reason() {
         let tampered = edit_lines(BETA_3.signature, |lines| {
             lines[2] = lines[2].replace("beta.3", "beta.4");
         });
@@ -1187,10 +1121,24 @@ mod tests {
                 json!("1.0.0-dev.7"),
                 SeenEntryError::NotAnObject { found: "字符串" },
             ),
+            // 记录配上了另一把钥签的签名串：按这个通道的钥重验，密钥号就对不上。
+            (
+                Dev,
+                entry("1.0.0-dev.7", BETA_3.signature),
+                SeenEntryError::Head(HeadError::KeyIdMismatch {
+                    signed: id_of(RELEASE_KEY),
+                    expected: id_of(DEV_KEY),
+                }),
+            ),
             (
                 Dev,
                 json!(["1.0.0-dev.7", DEV_7.signature]),
                 SeenEntryError::NotAnObject { found: "数组" },
+            ),
+            (
+                Beta,
+                json!(true),
+                SeenEntryError::NotAnObject { found: "布尔值" },
             ),
             (
                 Beta,
@@ -1228,66 +1176,11 @@ mod tests {
             ),
         ];
         for (channel, broken, error) in cases {
-            let mut table = full_table();
-            table[channel.as_str()] = broken;
-            let mut heads = full_heads();
-            heads.remove(&channel);
             assert_eq!(
-                read(&table),
-                SeenVersions {
-                    heads,
-                    rejected: vec![(channel, error)],
-                }
+                read_seen_entry(channel, &broken, key_of(channel)),
+                Err(error),
+                "{broken}"
             );
         }
-    }
-
-    #[test]
-    fn unknown_seen_channel_keys_are_skipped() {
-        let mut table = full_table();
-        table["nightly"] = json!("什么都行");
-        table["Dev"] = entry("9.9.9-dev.1", IMPOSTOR.signature);
-        table["rc"] = entry("1.0.0-rc.1", DEV_7.signature);
-        assert_eq!(
-            read(&table),
-            SeenVersions {
-                heads: full_heads(),
-                rejected: Vec::new(),
-            }
-        );
-    }
-
-    #[test]
-    fn seen_table_that_is_not_an_object_counts_as_no_record() {
-        let cases = [
-            (json!(null), "null"),
-            (json!(true), "布尔值"),
-            (json!(3), "数字"),
-            (json!("dev"), "字符串"),
-            (json!([full_table()]), "数组"),
-        ];
-        for (raw, found) in cases {
-            assert_eq!(
-                read_seen_versions(&raw, key_of),
-                Err(SeenTableNotObject { found })
-            );
-        }
-    }
-
-    #[test]
-    fn each_seen_entry_is_rechecked_with_its_channel_key() {
-        let seen =
-            read_seen_versions(&full_table(), |_| DEV_KEY).unwrap_or_else(|err| panic!("{err}"));
-        let mismatch = SeenEntryError::Head(HeadError::KeyIdMismatch {
-            signed: id_of(RELEASE_KEY),
-            expected: id_of(DEV_KEY),
-        });
-        assert_eq!(
-            seen,
-            SeenVersions {
-                heads: HashMap::from([(Dev, head(Dev, "1.0.0-dev.7", DEV_7.signature))]),
-                rejected: vec![(Beta, mismatch.clone()), (Stable, mismatch)],
-            }
-        );
     }
 }

@@ -6140,6 +6140,35 @@ mod tests {
         );
     }
 
+    /// 见过的版本逐个通道读、各用这个通道的钥重验：测试版那一项被改高，只废它自己；预览版与正式版的照用，两者的钥
+    /// 不同，同一把钥验不过两项。键名大小写不同的不算这个通道，它记着更高的版本也顶不掉预览版那一项。
+    #[tokio::test]
+    async fn each_seen_entry_is_rechecked_alone_with_its_channel_key() {
+        let flow = Flow::new(
+            "1.0.0-dev.6",
+            None,
+            Some(json!({
+                "dev": seen_entry("1.0.0-dev.8"),
+                "Dev": seen_entry("1.0.0-dev.12"),
+                "beta": { "version": "1.1.0-beta.2", "signature": signature_of("1.1.0-beta.1") },
+                "stable": seen_entry("1.0.0"),
+            })),
+        );
+        let plan = flow.plan().await;
+        let verified = |channel: Channel, text: &str| VerifiedHead {
+            channel,
+            version: version(text),
+            signature: signature_of(text).to_owned(),
+        };
+        assert_eq!(
+            plan.seen,
+            HashMap::from([
+                (Channel::Dev, verified(Channel::Dev, "1.0.0-dev.8")),
+                (Channel::Stable, verified(Channel::Stable, "1.0.0")),
+            ])
+        );
+    }
+
     /// 几个通道同时问：每个端点都要 5 秒才答，三个通道问完也只花 5 秒，不是相加的 15 秒。
     #[tokio::test(start_paused = true)]
     async fn channels_are_asked_at_the_same_time() {
