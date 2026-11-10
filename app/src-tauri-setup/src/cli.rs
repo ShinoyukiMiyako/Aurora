@@ -7,8 +7,14 @@
 //! 新引导程序时是「模式开关（passive、quiet 自带 /R）/UPDATE /ARGS 启动器参数」，所以 `/ARGS` 之前只认开关、不看顺序。
 //! 转义按 Windows 标准规则来，std 拆 argv 就能还原，所以 `/ARGS` 之后的记号原样就是启动器的参数。
 //!
-//! 这有个前提：启动器不配 `installer_args`。插件把它们接在整串最后，带 `/ARGS` 时紧跟启动器参数，格式上分不出来，
-//! 配了就会被当成启动器参数带回去，走原生回退时还会被转义成带引号的普通参数，NSIS 不再当开关认。
+//! 这有个前提：启动器只在换通道的那个检查器上配 `installer_args`（`/R`、`/CHANNELSWITCH`），并且那个检查器关掉了
+//! `restart_after_install`。插件把 `installer_args` 原样接在整串最后：不重开时整串到 /UPDATE 为止，追加的开关紧跟
+//! 其后，仍在 `/ARGS` 之前，拼出 `/P /UPDATE /R /CHANNELSWITCH`；重开时它们紧跟启动器参数，格式上分不出来，只会被
+//! 当成启动器参数带回去，走原生回退时还会被转义成带引号的普通参数，NSIS 不再当开关认。
+//!
+//! `/CHANNELSWITCH` 表示启动器替用户发起了换到更慢通道的安装，引导程序据它放行装回较早版本的那一种，能从磁盘核实的
+//! 条件照样每次重查。规则随发出去的包固定：不带值，只认 `/ARGS` 之前的，只在带 `/UPDATE` 时生效。没有 `/UPDATE`
+//! 时和别的开关一样忽略：交互安装的同意只来自页面上的按钮，带开关的快捷方式绕不过页面。
 
 use std::ffi::{OsStr, OsString};
 
@@ -19,6 +25,7 @@ const SILENT: &str = "/S";
 const RELAUNCH: &str = "/R";
 const UPDATE: &str = "/UPDATE";
 const ARGS: &str = "/ARGS";
+const CHANNEL_SWITCH: &str = "/CHANNELSWITCH";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Launch {
@@ -53,6 +60,7 @@ impl UpdateRequest {
 
     /// 原生回退用：拼「/P[ /R] /UPDATE /ARGS <转义参数>」，整串给 raw_arg。开关和插件默认的 passive 带的一样，
     /// 顺序沿用 2.10.1：2.12.0 把 /R 挪到了 /UPDATE 之后，NSIS 模板用 GetOptions 在整条命令行里逐个找开关，不看顺序。
+    /// 不带 `/CHANNELSWITCH`：NSIS 不认它，装回较早版本只由引导程序自己判定后放行。
     pub fn passive_arguments(&self) -> OsString {
         // 回退只为保住今天的行为：启动器没配 installMode，插件按默认的 passive 拉起，NSIS 包收到的就是这些开关和参数。
         // 来的是 /S 也拼 /P：解析时不保留模式，passive 至少留着进度条（插件 config.rs 的说明），用户看得到更新在进行。
@@ -78,6 +86,8 @@ pub struct Parsed {
     pub launch: Launch,
     /// 只用来写日志。交互启动时是全部参数：没有 `/UPDATE` 时哪个开关都不起作用。
     pub ignored: Vec<OsString>,
+    /// `/ARGS` 之前带了 `/CHANNELSWITCH`：启动器为换到更慢的通道拉起。只在 `launch` 是更新模式时可能为真。
+    pub channel_switch: bool,
 }
 
 /// `args` 不含 argv[0]，调用方传 `std::env::args_os().skip(1)`。
@@ -106,16 +116,21 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Parsed {
         return Parsed {
             launch: Launch::Interactive,
             ignored,
+            channel_switch: false,
         };
     }
 
     let relaunch = switches
         .iter()
         .any(|token| token.eq_ignore_ascii_case(RELAUNCH));
+    // 整个记号相等才算：开关不带值，`/CHANNELSWITCH=…` 一类按不认得的开关忽略
+    let channel_switch = switches
+        .iter()
+        .any(|token| token.eq_ignore_ascii_case(CHANNEL_SWITCH));
     let ignored = switches
         .into_iter()
         .filter(|token| {
-            ![PASSIVE, SILENT, RELAUNCH, UPDATE]
+            ![PASSIVE, SILENT, RELAUNCH, UPDATE, CHANNEL_SWITCH]
                 .iter()
                 .any(|known| token.eq_ignore_ascii_case(known))
         })
@@ -126,6 +141,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Parsed {
             launcher_args: after_separator,
         }),
         ignored,
+        channel_switch,
     }
 }
 
@@ -174,8 +190,6 @@ fn escape_nsis_current_exe_arg(arg: impl AsRef<OsStr>) -> OsString {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
     use std::io;
     use std::iter::once;
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -209,12 +223,16 @@ mod tests {
         args.iter().map(OsString::from).collect()
     }
 
+    /// 换通道的检查器追加的安装程序参数。
+    const SWITCH_INSTALLER_ARGS: &[&str] = &["/R", "/CHANNELSWITCH"];
+
     /// 照插件 updater_parameters 的 NSIS 分支：模式开关、/UPDATE；`restart_after_install` 为真时再接重启开关、
-    /// /ARGS、逐个转义的启动器参数。单个空格连接。
+    /// /ARGS、逐个转义的启动器参数；最后不论重开与否都接上检查器配的 `installer_args`，原样不转义。单个空格连接。
     fn plugin_parameters(
         mode: &Mode,
         restart_after_install: bool,
         current_args: &[OsString],
+        installer_args: &[&str],
     ) -> OsString {
         let mut parts: Vec<OsString> = mode.switches.iter().map(OsString::from).collect();
         parts.push(OsString::from("/UPDATE"));
@@ -223,6 +241,7 @@ mod tests {
             parts.push(OsString::from("/ARGS"));
             parts.extend(current_args.iter().map(escape_nsis_current_exe_arg));
         }
+        parts.extend(installer_args.iter().map(OsString::from));
         parts.join(OsStr::new(" "))
     }
 
@@ -278,20 +297,52 @@ mod tests {
         })
     }
 
-    fn random_below(bound: u64) -> u64 {
-        RandomState::new().build_hasher().finish() % bound
+    fn parsed_as(launch: Launch, ignored: &[&str], channel_switch: bool) -> Parsed {
+        Parsed {
+            launch,
+            ignored: os(ignored),
+            channel_switch,
+        }
     }
 
-    fn random_arg() -> OsString {
-        // 𠮷 在基本平面之外，UTF-16 下是一对代理项，转义按码元走时要整对原样过去。
-        const ALPHABET: &[char] = &[
-            'a', 'Z', '0', '-', '=', ':', '.', ' ', '\t', '"', '\\', '/', '樱', '𠮷',
-        ];
-        let len = random_below(9);
-        (0..len)
-            .map(|_| ALPHABET[random_below(ALPHABET.len() as u64) as usize])
-            .collect::<String>()
-            .into()
+    /// 固定种子的 xorshift，失败时可复现。
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, bound: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % bound
+        }
+
+        fn pick<T: Copy>(&mut self, items: &[T]) -> T {
+            items[self.below(items.len() as u64) as usize]
+        }
+
+        fn arg(&mut self) -> OsString {
+            // 和开关同名的记号落在 /ARGS 之后，要原样回到启动器手里
+            const WHOLE: &[&str] = &[
+                "/CHANNELSWITCH",
+                "/channelswitch",
+                "/UPDATE",
+                "/ARGS",
+                "/R",
+                "",
+            ];
+            // 𠮷 在基本平面之外，UTF-16 下是一对代理项，转义按码元走时要整对原样过去。
+            const ALPHABET: &[char] = &[
+                'a', 'Z', '0', '-', '=', ':', '.', ' ', '\t', '"', '\\', '/', '樱', '𠮷',
+            ];
+            if self.below(4) == 0 {
+                return self.pick(WHOLE).into();
+            }
+            let len = self.below(9);
+            (0..len)
+                .map(|_| self.pick(ALPHABET))
+                .collect::<String>()
+                .into()
+        }
     }
 
     #[test]
@@ -349,12 +400,13 @@ mod tests {
     #[test]
     fn plugin_passive_launch_is_an_update_that_relaunches() {
         let current = os(&["--minimized", "some space"]);
-        let parsed = launched_with(&plugin_parameters(&PASSIVE_MODE, true, &current));
+        let parsed = launched_with(&plugin_parameters(&PASSIVE_MODE, true, &current, &[]));
         assert_eq!(
             parsed,
             Parsed {
                 launch: update(true, &["--minimized", "some space"]),
                 ignored: Vec::new(),
+                channel_switch: false,
             }
         );
     }
@@ -362,24 +414,26 @@ mod tests {
     #[test]
     fn plugin_quiet_launch_is_an_update_that_relaunches() {
         let current = os(&["--arg=\"wrapped space\""]);
-        let parsed = launched_with(&plugin_parameters(&QUIET_MODE, true, &current));
+        let parsed = launched_with(&plugin_parameters(&QUIET_MODE, true, &current, &[]));
         assert_eq!(
             parsed,
             Parsed {
                 launch: update(true, &["--arg=\"wrapped space\""]),
                 ignored: Vec::new(),
+                channel_switch: false,
             }
         );
     }
 
     #[test]
     fn plugin_basic_ui_launch_is_an_update_without_relaunch() {
-        let parsed = launched_with(&plugin_parameters(&BASIC_UI_MODE, true, &[]));
+        let parsed = launched_with(&plugin_parameters(&BASIC_UI_MODE, true, &[], &[]));
         assert_eq!(
             parsed,
             Parsed {
                 launch: update(false, &[]),
                 ignored: Vec::new(),
+                channel_switch: false,
             }
         );
     }
@@ -387,7 +441,7 @@ mod tests {
     #[test]
     fn relaunch_after_update_is_recognised_like_the_old_order() {
         let current = os(&["--minimized", "some space"]);
-        let plugin = plugin_parameters(&PASSIVE_MODE, true, &current);
+        let plugin = plugin_parameters(&PASSIVE_MODE, true, &current, &[]);
         assert_eq!(
             plugin,
             OsString::from(r#"/P /UPDATE /R /ARGS --minimized "some space""#)
@@ -395,6 +449,7 @@ mod tests {
         let expected = Parsed {
             launch: update(true, &["--minimized", "some space"]),
             ignored: Vec::new(),
+            channel_switch: false,
         };
         assert_eq!(launched_with(&plugin), expected);
         // 还在用 2.10.1 的启动器拉起新引导程序时，/R 在 /UPDATE 前面。
@@ -414,7 +469,7 @@ mod tests {
             (&QUIET_MODE, "/S /UPDATE"),
             (&BASIC_UI_MODE, "/UPDATE"),
         ] {
-            let plugin = plugin_parameters(mode, false, &current);
+            let plugin = plugin_parameters(mode, false, &current, &[]);
             assert_eq!(plugin, OsString::from(expected));
             let parsed = launched_with(&plugin);
             assert_eq!(
@@ -422,6 +477,7 @@ mod tests {
                 Parsed {
                     launch: update(false, &[]),
                     ignored: Vec::new(),
+                    channel_switch: false,
                 },
                 "{expected}"
             );
@@ -440,6 +496,7 @@ mod tests {
             Parsed {
                 launch: update(true, &["--flag"]),
                 ignored: Vec::new(),
+                channel_switch: false,
             }
         );
         assert_eq!(
@@ -447,6 +504,7 @@ mod tests {
             Parsed {
                 launch: update(false, &[]),
                 ignored: Vec::new(),
+                channel_switch: false,
             }
         );
     }
@@ -458,6 +516,7 @@ mod tests {
             Parsed {
                 launch: Launch::Interactive,
                 ignored: Vec::new(),
+                channel_switch: false,
             }
         );
     }
@@ -471,6 +530,7 @@ mod tests {
             Parsed {
                 launch: update(true, &["--a"]),
                 ignored: os(&["/NCRC", r"/D=C:\x"]),
+                channel_switch: false,
             }
         );
     }
@@ -482,6 +542,7 @@ mod tests {
             Parsed {
                 launch: Launch::Interactive,
                 ignored: os(&["/S", "/R", "/ARGS", "--a", "/UPDATE"]),
+                channel_switch: false,
             }
         );
         assert_eq!(
@@ -489,6 +550,7 @@ mod tests {
             Parsed {
                 launch: Launch::Interactive,
                 ignored: os(&["/P"]),
+                channel_switch: false,
             }
         );
     }
@@ -502,6 +564,7 @@ mod tests {
             Parsed {
                 launch: update(false, &["/UPDATE", "/ARGS", "/R", "/S"]),
                 ignored: Vec::new(),
+                channel_switch: false,
             }
         );
     }
@@ -513,6 +576,7 @@ mod tests {
             Parsed {
                 launch: update(true, &[]),
                 ignored: Vec::new(),
+                channel_switch: false,
             }
         );
     }
@@ -535,7 +599,7 @@ mod tests {
             r#"C:\𠮷 目录\"𠮷""#,
         ];
         let current = os(&tricky);
-        let parsed = launched_with(&plugin_parameters(&PASSIVE_MODE, true, &current));
+        let parsed = launched_with(&plugin_parameters(&PASSIVE_MODE, true, &current, &[]));
         assert_eq!(parsed.launch, update(true, &tricky));
         assert_eq!(parsed.ignored, Vec::<OsString>::new());
     }
@@ -547,7 +611,7 @@ mod tests {
             OsString::from_wide(&[u16::from(b'a'), 0xD800, u16::from(b' '), 0xDC00]),
             OsString::from_wide(&[0xDFFF]),
         ];
-        let parsed = launched_with(&plugin_parameters(&PASSIVE_MODE, true, &current));
+        let parsed = launched_with(&plugin_parameters(&PASSIVE_MODE, true, &current, &[]));
         assert_eq!(
             parsed.launch,
             Launch::Update(UpdateRequest {
@@ -562,7 +626,7 @@ mod tests {
     #[test]
     fn passive_arguments_differ_from_the_plugin_only_in_switch_order() {
         let current = os(&["--flag", "some space", "", "/UPDATE", r"C:\Users\a b\"]);
-        let plugin = plugin_parameters(&PASSIVE_MODE, true, &current);
+        let plugin = plugin_parameters(&PASSIVE_MODE, true, &current, &[]);
         assert_eq!(
             plugin,
             OsString::from(
@@ -592,7 +656,7 @@ mod tests {
         );
         assert_eq!(
             switches_and_tail(&relaunching.passive_arguments()),
-            switches_and_tail(&plugin_parameters(&PASSIVE_MODE, true, &[]))
+            switches_and_tail(&plugin_parameters(&PASSIVE_MODE, true, &[], &[]))
         );
         let staying = UpdateRequest {
             relaunch: false,
@@ -607,12 +671,12 @@ mod tests {
     #[test]
     fn quiet_and_basic_ui_fall_back_to_passive_arguments() {
         let current = os(&["--arg value"]);
-        let quiet = launched_with(&plugin_parameters(&QUIET_MODE, true, &current));
+        let quiet = launched_with(&plugin_parameters(&QUIET_MODE, true, &current, &[]));
         assert_eq!(
             quiet.launch.update().unwrap().passive_arguments(),
             OsString::from(r#"/P /R /UPDATE /ARGS "--arg value""#)
         );
-        let basic = launched_with(&plugin_parameters(&BASIC_UI_MODE, true, &current));
+        let basic = launched_with(&plugin_parameters(&BASIC_UI_MODE, true, &current, &[]));
         assert_eq!(
             basic.launch.update().unwrap().passive_arguments(),
             OsString::from(r#"/P /UPDATE /ARGS "--arg value""#)
@@ -635,34 +699,265 @@ mod tests {
     }
 
     #[test]
-    fn random_launcher_args_survive_the_plugin_and_the_fallback() {
-        for _ in 0..300 {
-            let current: Vec<OsString> = (0..random_below(6)).map(|_| random_arg()).collect();
-            // 不重开时插件不带 /R 也不带 /ARGS，启动器参数根本不进命令行。
-            let restart_after_install = random_below(2) == 1;
-            let parsed = launched_with(&plugin_parameters(
-                &PASSIVE_MODE,
-                restart_after_install,
-                &current,
-            ));
-            let carried = if restart_after_install {
-                current.clone()
-            } else {
-                Vec::new()
-            };
+    fn the_plugin_line_for_a_channel_switch_relaunches_without_launcher_args() {
+        let current = os(&["--minimized", "some space"]);
+        for (mode, expected) in [
+            (&PASSIVE_MODE, "/P /UPDATE /R /CHANNELSWITCH"),
+            (&QUIET_MODE, "/S /UPDATE /R /CHANNELSWITCH"),
+            (&BASIC_UI_MODE, "/UPDATE /R /CHANNELSWITCH"),
+        ] {
+            let plugin = plugin_parameters(mode, false, &current, SWITCH_INSTALLER_ARGS);
+            assert_eq!(plugin, OsString::from(expected));
+            let parsed = launched_with(&plugin);
             assert_eq!(
-                parsed.launch,
-                Launch::Update(UpdateRequest {
-                    relaunch: restart_after_install,
+                parsed,
+                parsed_as(update(true, &[]), &[], true),
+                "{expected}"
+            );
+            // 原生回退不转发开关
+            let fallback = parsed.launch.update().unwrap().passive_arguments();
+            assert_eq!(
+                fallback,
+                OsString::from("/P /R /UPDATE /ARGS"),
+                "{expected}"
+            );
+            assert_eq!(
+                launched_with(&fallback),
+                parsed_as(update(true, &[]), &[], false),
+                "{expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_channel_switch_counts_in_any_case_anywhere_before_the_separator() {
+        for line in [
+            "/P /UPDATE /R /CHANNELSWITCH",
+            "/CHANNELSWITCH /P /UPDATE /R",
+            "/P /CHANNELSWITCH /R /UPDATE",
+            "/p /update /r /channelswitch",
+            "/P /UPDATE /R /ChannelSwitch /CHANNELSWITCH",
+            "/P /UPDATE /R /CHANNELSWITCH /ARGS",
+        ] {
+            assert_eq!(
+                launched_with(OsStr::new(line)),
+                parsed_as(update(true, &[]), &[], true),
+                "{line}"
+            );
+        }
+        // 2.10.1 的旧顺序，带启动器参数时开关照样只看 /ARGS 之前
+        assert_eq!(
+            launched_with(OsStr::new("/P /R /CHANNELSWITCH /UPDATE /ARGS --a")),
+            parsed_as(update(true, &["--a"]), &[], true)
+        );
+    }
+
+    #[test]
+    fn the_channel_switch_takes_no_value_and_must_match_as_a_whole() {
+        for token in [
+            "/CHANNELSWITCH=1",
+            "/CHANNELSWITCH:beta",
+            "/CHANNELSWITCHES",
+            "/CHANNEL",
+            "CHANNELSWITCH",
+            "-CHANNELSWITCH",
+            "/CHANNELSWITCH ",
+            " /CHANNELSWITCH",
+            // 只按 ASCII 不分大小写：长 s 与土耳其语无点 i 不算
+            "/CHANNELſWITCH",
+            "/CHANNELSWıTCH",
+        ] {
+            assert_eq!(
+                parse(os(&["/P", "/UPDATE", "/R", token])),
+                parsed_as(update(true, &[]), &[token], false),
+                "{token:?}"
+            );
+        }
+        // 后面跟着的记号不算它的值，按不认得的开关忽略
+        assert_eq!(
+            parse(os(&["/P", "/UPDATE", "/CHANNELSWITCH", "beta", "/R"])),
+            parsed_as(update(true, &[]), &["beta"], true)
+        );
+    }
+
+    #[test]
+    fn a_channel_switch_after_the_separator_goes_back_to_the_launcher() {
+        // 开着重开再追加参数，开关落在 /ARGS 之后，与启动器参数分不开，只能当启动器参数带回去
+        let current = os(&["--minimized"]);
+        let plugin = plugin_parameters(&PASSIVE_MODE, true, &current, SWITCH_INSTALLER_ARGS);
+        assert_eq!(
+            plugin,
+            OsString::from("/P /UPDATE /R /ARGS --minimized /R /CHANNELSWITCH")
+        );
+        assert_eq!(
+            launched_with(&plugin),
+            parsed_as(
+                update(true, &["--minimized", "/R", "/CHANNELSWITCH"]),
+                &[],
+                false
+            )
+        );
+        assert_eq!(
+            parse(os(&[
+                "/P",
+                "/UPDATE",
+                "/ARGS",
+                "/CHANNELSWITCH",
+                "/channelswitch=1"
+            ])),
+            parsed_as(
+                update(false, &["/CHANNELSWITCH", "/channelswitch=1"]),
+                &[],
+                false
+            )
+        );
+        // 启动器自己带着这个参数时，插件转义、回退再转义，回来的仍是启动器参数
+        let parsed = launched_with(&plugin_parameters(
+            &PASSIVE_MODE,
+            true,
+            &os(&["/CHANNELSWITCH"]),
+            &[],
+        ));
+        assert_eq!(
+            parsed,
+            parsed_as(update(true, &["/CHANNELSWITCH"]), &[], false)
+        );
+        let fallback = parsed.launch.update().unwrap().passive_arguments();
+        assert_eq!(
+            fallback,
+            OsString::from(r#"/P /R /UPDATE /ARGS "/CHANNELSWITCH""#)
+        );
+        assert_eq!(launched_with(&fallback), parsed);
+    }
+
+    #[test]
+    fn without_update_the_channel_switch_is_ignored_like_any_other_switch() {
+        assert_eq!(
+            launched_with(OsStr::new("/P /R /CHANNELSWITCH")),
+            parsed_as(Launch::Interactive, &["/P", "/R", "/CHANNELSWITCH"], false)
+        );
+        for args in [
+            &["/CHANNELSWITCH"][..],
+            &["/channelswitch", "/ARGS", "/UPDATE"],
+            &["/R", "/CHANNELSWITCH", "/ARGS", "--a", "/UPDATE"],
+        ] {
+            assert_eq!(
+                parse(os(args)),
+                parsed_as(Launch::Interactive, args, false),
+                "{args:?}"
+            );
+        }
+    }
+
+    /// 检查器追加的参数，以及不重开时该解析出的结果。重开时它们落在 `/ARGS` 之后，一律是启动器参数。
+    struct Appended {
+        args: &'static [&'static str],
+        relaunch: bool,
+        channel_switch: bool,
+        ignored: &'static [&'static str],
+    }
+
+    const APPENDED: [Appended; 5] = [
+        Appended {
+            args: &[],
+            relaunch: false,
+            channel_switch: false,
+            ignored: &[],
+        },
+        Appended {
+            args: SWITCH_INSTALLER_ARGS,
+            relaunch: true,
+            channel_switch: true,
+            ignored: &[],
+        },
+        Appended {
+            args: &["/CHANNELSWITCH"],
+            relaunch: false,
+            channel_switch: true,
+            ignored: &[],
+        },
+        Appended {
+            args: &["/channelswitch", "/r"],
+            relaunch: true,
+            channel_switch: true,
+            ignored: &[],
+        },
+        Appended {
+            args: &["/CHANNELSWITCH=1"],
+            relaunch: false,
+            channel_switch: false,
+            ignored: &["/CHANNELSWITCH=1"],
+        },
+    ];
+
+    /// 插件拼出的命令行经 CommandLineToArgvW 拆开再解析，结果与按插件拼法推出的一致；原生回退再走一遍，
+    /// 启动器参数与重开不变，换通道开关不转发。
+    fn assert_round_trip(
+        mode: &Mode,
+        restart_after_install: bool,
+        current: &[OsString],
+        appended: &Appended,
+    ) {
+        let line = plugin_parameters(mode, restart_after_install, current, appended.args);
+        let parsed = launched_with(&line);
+        let expected = if restart_after_install {
+            let mut carried = current.to_vec();
+            carried.extend(os(appended.args));
+            Parsed {
+                launch: Launch::Update(UpdateRequest {
+                    relaunch: !mode.restart.is_empty(),
                     launcher_args: carried,
                 }),
-                "{restart_after_install} {current:?}"
-            );
-            assert_eq!(parsed.ignored, Vec::<OsString>::new(), "{current:?}");
+                ignored: Vec::new(),
+                channel_switch: false,
+            }
+        } else {
+            // 不重开时插件不带重启开关也不带 /ARGS，启动器参数根本不进命令行
+            parsed_as(
+                update(appended.relaunch, &[]),
+                appended.ignored,
+                appended.channel_switch,
+            )
+        };
+        assert_eq!(parsed, expected, "{line:?}");
 
-            let request = parsed.launch.update().unwrap();
-            let fallback = launched_with(&request.passive_arguments());
-            assert_eq!(fallback.launch, parsed.launch, "{current:?}");
+        let fallback = launched_with(&parsed.launch.update().unwrap().passive_arguments());
+        assert_eq!(
+            fallback,
+            Parsed {
+                launch: parsed.launch.clone(),
+                ignored: Vec::new(),
+                channel_switch: false,
+            },
+            "{line:?}"
+        );
+    }
+
+    #[test]
+    fn random_launcher_args_survive_the_plugin_and_the_fallback() {
+        let modes = [&PASSIVE_MODE, &QUIET_MODE, &BASIC_UI_MODE];
+        // 边界：没有启动器参数、只有一个空串、全是与开关同名的记号，每种组合都走一遍
+        for current in [
+            os(&[]),
+            os(&[""]),
+            os(&["/CHANNELSWITCH", "/channelswitch", "/UPDATE", "/ARGS", "/R"]),
+        ] {
+            for mode in modes {
+                for restart_after_install in [false, true] {
+                    for appended in &APPENDED {
+                        assert_round_trip(mode, restart_after_install, &current, appended);
+                    }
+                }
+            }
+        }
+
+        let mut rng = Rng(0x5EED_0C11);
+        for _ in 0..300 {
+            let current: Vec<OsString> = (0..rng.below(6)).map(|_| rng.arg()).collect();
+            let mode = rng.pick(&modes);
+            let restart_after_install = rng.below(2) == 1;
+            let appended = &APPENDED[rng.below(APPENDED.len() as u64) as usize];
+            assert_round_trip(mode, restart_after_install, &current, appended);
         }
     }
 }
