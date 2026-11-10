@@ -30,6 +30,7 @@ export interface InstalledProps {
 export function Installed({ copy, existing, payloadVersion, elevated, busy, opening, onUpdate, onReinstall, onOpen }: InstalledProps) {
   if (existing.kind === "switch") throw new Error("探测结果不该是 switch：现在的判定只按版本比");
   const text = copy.installed.kind[existing.kind];
+  const lead = existing.kind === "newer" ? copy.installed.kind.newer.lead.unknown_channel(existing.version, payloadVersion) : copy.installed.kind[existing.kind].lead(existing.version, payloadVersion);
   // 打开和发起安装互斥：查进程的间隙里把启动器开起来，覆盖安装会直接结束它
   const open = (variant: "primary" | "secondary") =>
     elevated ? undefined : (
@@ -64,7 +65,7 @@ export function Installed({ copy, existing, payloadVersion, elevated, busy, open
     broken: reinstall("primary"),
   }[existing.kind];
   return (
-    <Frame title={text.title(existing.version)} lead={text.lead(existing.version, payloadVersion)} footer={footer}>
+    <Frame title={text.title(existing.version)} lead={lead} footer={footer}>
       <div className={styles.content}>
         <PathRow label={copy.installed.locationLabel} path={existing.dir} />
         {elevated && existing.kind !== "broken" && <p className={styles.elevated}>{copy.done.elevated}</p>}

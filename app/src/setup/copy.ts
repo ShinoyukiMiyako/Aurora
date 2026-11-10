@@ -2,7 +2,7 @@
 // 语言跟随系统：zh 开头走中文，其余一律英文，不提供切换。ZH、EN 两张表都标注 SetupCopy，缺键由 tsc 报错。
 
 import { APP_LICENSE, APP_NAME, APP_NAME_EN, ASSET_LICENSE, COPYRIGHT_HOLDER, FIRST_RELEASE_YEAR } from "../lib/app-info";
-import type { DirIssue, ExistingKind, FailureCode, InstallMode, Phase } from "./contract";
+import type { Channel, DataBlock, DirIssue, FailureCode, InstallMode, NewerReason, Phase } from "./contract";
 import type { FailureRecovery } from "./model";
 
 export type Lang = "zh" | "en";
@@ -35,7 +35,21 @@ export interface InstalledText {
   lead(installed: string, payload: string): string;
 }
 
+/** 两边的通道都要说出来的说明：ci、cp 是已装的与这个安装包的通道名，installed、payload 是两边的版本。 */
+export type CrossLead = (ci: string, installed: string, cp: string, payload: string) => string;
+
+/** newer 的说明按后端给的原因挑：跨通道的两种要写出两边的通道，同通道与认不出通道的只写版本。 */
+export type NewerLeads = { readonly [R in NewerReason]: R extends "faster_channel" | "slower_channel" ? CrossLead : (installed: string, payload: string) => string };
+
+/**
+ * 安装中、完成页按模式的标题。switch 是「换到」的说法，channel 是换到的通道名：换通道安装、以及在「换到」页上确认的升级都用它，
+ * 由 modeTitle 按这次是不是换通道来挑。
+ */
+export type ModeTitles = { readonly [M in InstallMode]: M extends "switch" ? (channel: string, version: string) => string : (version: string) => string };
+
 export interface SetupCopy {
+  /** 通道名另放一份，不用启动器的那张表：那张只有中文，还被 Mod 的版本档标签引用着。 */
+  channel: Readonly<Record<Channel, string>>;
   frame: {
     minimize: string;
     close: string;
@@ -66,7 +80,13 @@ export interface SetupCopy {
     useDefault: string;
     back: string;
     installHere: string;
-    issue: Readonly<Record<DirIssue, string>>;
+    issue: Readonly<Record<Exclude<DirIssue, "data_incompatible">, string>>;
+    /** 被数据关拦下：说法看目录校验带回的拦截详情，用过这份数据的版本写得出来就写。 */
+    dataIncompatible: {
+      named(channel: string, writtenBy: string): string;
+      unnamed: string;
+      unreadable: string;
+    };
     resume: string;
     /** 目录里有别的文件、在里面另建了一层：说清楚会新建文件夹，实际路径由 finalPath 另起一行。 */
     nested: string;
@@ -82,13 +102,13 @@ export interface SetupCopy {
     back: string;
   };
   installing: {
-    title: Readonly<Record<Exclude<InstallMode, "switch">, (version: string) => string>>;
+    title: ModeTitles;
     phase: Readonly<Record<Phase, string>>;
     slow: string;
     progressLabel: string;
   };
   done: {
-    title: Readonly<Record<Exclude<InstallMode, "switch">, (version: string) => string>>;
+    title: ModeTitles;
     firstRun: string;
     kept: string;
     elevated: string;
@@ -97,6 +117,11 @@ export interface SetupCopy {
   };
   failed: {
     reason: Readonly<Record<FailureCode, FailureText>>;
+    /**
+     * 在原因说明末尾补一句怎么回到原来的通道：启动器带换通道开关拉起的那次装失败时，更新通道已经改成了目标通道。
+     * 文案冻结在每个安装包里，只指向启动器设置里一直都在的那个入口。
+     */
+    channelRevert(body: string): string;
     retry: string;
     changeLocation: string;
     openLog: string;
@@ -105,9 +130,38 @@ export interface SetupCopy {
     back: string;
   };
   installed: {
-    kind: Readonly<Record<Exclude<ExistingKind, "switch">, InstalledText>>;
+    kind: {
+      /** lead 是同通道或认不出通道的升级。 */
+      upgrade: InstalledText & {
+        /** 升到另一个通道上更新的版本、不换通道：之后照设置里选的更新通道检查更新，标题同 upgrade。 */
+        cross(cp: string, payload: string): string;
+        /** 升级时换到更快的通道，确认后落樱按 cp 检查更新；标题与按钮同 switch。 */
+        switching: CrossLead;
+      };
+      same: InstalledText;
+      newer: { title(installed: string): string; lead: NewerLeads };
+      broken: InstalledText;
+      /** 已装的更新，安装包是更慢通道上更早的版本：确认后换过去。 */
+      switch: { title(cp: string): string; lead: CrossLead };
+    };
+    /** 数据被更新的落樱用过，这个安装包读不了。 */
+    dataTooNew: {
+      title: string;
+      /** 用过这份数据的版本写得出来时：channel 是它的通道名。 */
+      named(channel: string, writtenBy: string, payload: string): string;
+      unnamed(payload: string): string;
+    };
+    /** 数据格式记录读不懂。path 是那个记号文件，页面把这段说明做成可选中的文字，反馈时好复制。 */
+    dataUnreadable: {
+      title: string;
+      lead(path: string, reason: string): string;
+    };
+    /** 更新模式下停在什么都装不了的那几页时，在说明末尾补一句：落樱是为这次更新关掉的，可以从这里重新打开。 */
+    closedForUpdate(lead: string): string;
     locationLabel: string;
     update: string;
+    /** 「换到」页的主按钮。 */
+    switchTo(cp: string): string;
     reinstall: string;
     open: string;
     legalNote: string;
@@ -149,6 +203,23 @@ export function welcomeLead(copy: SetupCopy): string {
   return languageNote === null ? lead : `${lead} ${languageNote}`;
 }
 
+/** 安装中、完成页的标题：这次是换到某个通道（model 的 switchingTo 给出）时说「换到」，否则按模式说。 */
+export function modeTitle(copy: SetupCopy, titles: ModeTitles, mode: InstallMode, switching: Channel | null, version: string): string {
+  if (switching !== null) return titles.switch(copy.channel[switching], version);
+  if (mode === "switch") throw new Error("换通道安装却没给出换到的通道");
+  return titles[mode](version);
+}
+
+/**
+ * 用过这份数据的那一版：后端只在版本号形状合格时给，连同它的通道一起；没给时说明改用笼统的说法。
+ * 给了版本却没给通道是契约坏了，不拿通道名去猜。
+ */
+export function dataWriter(block: DataBlock): { channel: Channel; version: string } | null {
+  if (block.writtenBy === null) return null;
+  if (block.writtenByChannel === null) throw new Error(`拦截详情给了用过数据的版本 ${block.writtenBy}，却没给它的通道`);
+  return { channel: block.writtenByChannel, version: block.writtenBy };
+}
+
 // 只说代码按 AGPL 开源：美术素材另按素材许可授权，说成整个程序都按 AGPL 就成了对素材的默示许可
 const LEGAL_NOTE_ZH = `${APP_NAME}的代码按 ${APP_LICENSE} 及其附加条款开源，美术素材按 ${ASSET_LICENSE} 授权，不提供任何担保，你可以按协议转发。`;
 const LEGAL_NOTE_EN = `${APP_NAME_EN}'s code is open source under ${APP_LICENSE} with additional terms, and its art assets are licensed under ${ASSET_LICENSE}. It comes with no warranty. You may redistribute it under those licenses.`;
@@ -157,26 +228,9 @@ const DATA_UNTOUCHED_EN = "Your settings, accounts and game files stay as they a
 /** 覆盖安装换位置等于搬数据目录，这时不能叫人换文件夹。 */
 const LOCKED_LOCATION_ZH = "现有的安装位置不能换。";
 const LOCKED_LOCATION_EN = "The existing install can't move.";
-// 各通道共用一套安装身份，装着测试版再装预览版就是这一页，换回去只能先卸载。卸载项在系统「应用」里叫产品英文名。
-// 复选框原文取自 Tauri CLI 2.11.5 NSIS 模板的 deleteAppData，升级 CLI 要对一遍。不勾时卸载只删程序文件、快捷方式和卸载项，
-// 数据和记下的安装目录都留着，引导程序首装时默认装回原处，所以要叫人沿用默认位置。
-// 引导程序是单实例的，这个窗口开着时再运行安装包只会把它叫回前台，它不会重新探测，所以要先叫人关掉它。
-const CHANNEL_BACK_ZH = `从测试版换回预览版时，先关掉这个窗口，在 Windows 设置的「应用」里卸载 ${APP_NAME_EN}，卸载时不要勾选「删除应用程序数据」；再重新运行这个安装包并沿用默认的安装位置，设置、账户和游戏文件都会保留。`;
-const CHANNEL_BACK_EN = `To switch from Beta back to Preview, close this window first, then uninstall ${APP_NAME_EN} from Apps in Windows Settings, leaving "Delete the application data" unchecked. Then run this installer again and keep the default location. Your settings, accounts and game files will be kept.`;
-/** 预发布标识的第一段是 dev、beta 后面只跟数字（或什么都不跟），不分大小写：同启动器 UpdateChannel::of 认通道的规则。 */
-const CHANNEL_TAG = { dev: /^dev\d*$/i, beta: /^beta\d*$/i } as const;
-function isChannel(version: string, channel: keyof typeof CHANNEL_TAG): boolean {
-  const dash = version.indexOf("-");
-  if (dash < 0) return false;
-  const tag = version.slice(dash + 1).split("+", 1)[0].split(".", 1)[0];
-  return CHANNEL_TAG[channel].test(tag);
-}
-/** 换回步骤只给装着测试版、手上是预览版包的人：同通道的旧包、或者往正式版回退，照做就是降级，不能叫人卸载重装。 */
-function channelBack(installed: string, payload: string, text: string): string {
-  return isChannel(installed, "beta") && isChannel(payload, "dev") ? text : "";
-}
 
 const ZH: SetupCopy = {
+  channel: { dev: "预览版", beta: "测试版", stable: "正式版" },
   frame: {
     minimize: "最小化",
     close: "关闭",
@@ -213,7 +267,11 @@ const ZH: SetupCopy = {
       network: "网络位置装不了，换一块本机的盘",
       unwritable: "这个位置写不进去，换一个你有权限的文件夹",
       no_space: "这块盘空间不够",
-      data_incompatible: `这里的数据被更新的${APP_NAME}用过，这个安装包读不了。换一个位置，或者装更新的版本`,
+    },
+    dataIncompatible: {
+      named: (channel, writtenBy) => `这里的数据被更新的${APP_NAME}用过，这个安装包读不了。换一个位置，或者装${channel} ${writtenBy} 或更新的版本`,
+      unnamed: `这里的数据被更新的${APP_NAME}用过，这个安装包读不了。换一个位置，或者装更新的版本`,
+      unreadable: "这里的数据格式记录读不懂，换一个位置",
     },
     resume: "这里有之前留下的设置和游戏文件，装好后接着用。",
     nested: `这个文件夹里已经有别的文件，会在里面新建一个 ${APP_NAME_EN} 文件夹来装`,
@@ -232,6 +290,7 @@ const ZH: SetupCopy = {
       fresh: () => `正在安装${APP_NAME}`,
       upgrade: (version) => `正在升级到 ${version}`,
       repair: () => `正在重新安装${APP_NAME}`,
+      switch: (channel, version) => `正在换到${channel} ${version}`,
     },
     phase: {
       unpack: "解开安装包",
@@ -246,6 +305,7 @@ const ZH: SetupCopy = {
       fresh: () => "装好了",
       upgrade: (version) => `已升级到 ${version}`,
       repair: () => "重新安装完成",
+      switch: (channel, version) => `已换到${channel} ${version}`,
     },
     firstRun: `第一次打开时，${APP_NAME}会带你设置游戏目录、Java 和账户。`,
     kept: "设置、账户和游戏文件都还在。",
@@ -261,6 +321,7 @@ const ZH: SetupCopy = {
       payload_exit: { title: "安装没有完成", body: (detail) => `安装程序提前退出了，返回码 ${detail}。` },
       verify_failed: { title: "安装没有完成", body: () => "安装程序报告成功，但事后检查没有通过，下面是没过的项。" },
     },
+    channelRevert: (body) => `${body}想留在原来的通道，到${APP_NAME}的「设置 · 关于」把更新通道改回去。`,
     retry: "重试",
     changeLocation: "换个位置",
     openLog: "打开日志",
@@ -273,6 +334,8 @@ const ZH: SetupCopy = {
       upgrade: {
         title: (installed) => `发现${APP_NAME} ${installed}`,
         lead: (_, payload) => `可以升级到 ${payload}，${DATA_UNTOUCHED_ZH}`,
+        cross: (cp, payload) => `可以升级到${cp} ${payload}，${DATA_UNTOUCHED_ZH}之后按${APP_NAME}设置里选的更新通道检查更新，没选过就按${cp}。`,
+        switching: (ci, installed, cp, payload) => `这台电脑上是${ci} ${installed}，可以换到${cp} ${payload}。换过去以后${APP_NAME}按${cp}检查更新，${DATA_UNTOUCHED_ZH}`,
       },
       same: {
         title: (installed) => `${APP_NAME} ${installed} 已经装好了`,
@@ -280,15 +343,39 @@ const ZH: SetupCopy = {
       },
       newer: {
         title: () => `这台电脑上的${APP_NAME}更新`,
-        lead: (installed, payload) => `已安装 ${installed}，这个安装包是 ${payload}，不能往回装。${channelBack(installed, payload, CHANNEL_BACK_ZH)}`,
+        lead: {
+          same_channel: (installed, payload) => `已安装 ${installed}，这个安装包是 ${payload}，版本更早，不能往回装。`,
+          slower_channel: (ci, installed, cp, payload) =>
+            `已安装${ci} ${installed}，这个安装包是版本更早的${cp} ${payload}。自动更新不会这样换过去，所以没有安装。要换到${cp}，直接运行${cp}的安装包。`,
+          faster_channel: (ci, installed, cp, payload) =>
+            `已安装${ci} ${installed}，这个安装包是${cp} ${payload}，版本更早，不能这样换过去。要换到${cp}，在${APP_NAME}的「设置 · 关于」里把更新通道选成${cp}，${cp}出了比 ${installed} 新的版本就会装上。`,
+          unknown_channel: (installed, payload) => `已安装 ${installed}，这个安装包是 ${payload}，不能往回装。`,
+        },
       },
       broken: {
         title: () => "上次的安装不完整",
         lead: () => `重新安装可以补全缺的文件，${DATA_UNTOUCHED_ZH}`,
       },
+      switch: {
+        title: (cp) => `换到${cp}`,
+        lead: (ci, installed, cp, payload) =>
+          `这台电脑上是${ci} ${installed}，这个安装包是版本更早的${cp} ${payload}。换过去以后${APP_NAME}按${cp}检查更新。账户和游戏文件都留着；${ci}里新加的设置项，在${cp}里改过设置后可能回到默认值。`,
+      },
     },
+    dataTooNew: {
+      title: "这个安装包读不了现在的数据",
+      named: (channel, writtenBy, payload) =>
+        `这台电脑上的数据已经被${channel} ${writtenBy} 用过，这个安装包（${payload}）读不了，所以没有安装，${APP_NAME}的程序和数据都没有改动。要接着用这些数据，装${channel} ${writtenBy} 或更新的版本。`,
+      unnamed: (payload) => `这台电脑上的数据已经被更新的${APP_NAME}用过，这个安装包（${payload}）读不了，所以没有安装，${APP_NAME}的程序和数据都没有改动。要接着用这些数据，装更新的版本。`,
+    },
+    dataUnreadable: {
+      title: "读不懂这台电脑上的数据格式记录",
+      lead: (path, reason) => `${path}：${reason}。判断不了这里的数据能不能用这个安装包，所以没有安装，${APP_NAME}的程序和数据都没有改动。反馈问题时带上这个路径和原因。`,
+    },
+    closedForUpdate: (lead) => `${lead}${APP_NAME}刚才为更新关掉了，可以从这里重新打开。`,
     locationLabel: "安装位置",
     update: "升级",
+    switchTo: (cp) => `换到${cp}`,
     reinstall: "重新安装",
     open: `打开${APP_NAME}`,
     legalNote: LEGAL_NOTE_ZH,
@@ -323,6 +410,7 @@ const ZH: SetupCopy = {
 };
 
 const EN: SetupCopy = {
+  channel: { dev: "Preview", beta: "Beta", stable: "Stable" },
   frame: {
     minimize: "Minimize",
     close: "Close",
@@ -359,7 +447,11 @@ const EN: SetupCopy = {
       network: "Network locations aren't supported. Pick a local drive",
       unwritable: "Can't write here. Pick a folder you have access to",
       no_space: "Not enough space on this drive",
-      data_incompatible: `Data here was used by a newer ${APP_NAME_EN} that this installer can't read. Pick another location, or install a newer version`,
+    },
+    dataIncompatible: {
+      named: (channel, writtenBy) => `Data here was used by a newer ${APP_NAME_EN} that this installer can't read. Pick another location, or install ${channel} ${writtenBy} or later`,
+      unnamed: `Data here was used by a newer ${APP_NAME_EN} that this installer can't read. Pick another location, or install a newer version`,
+      unreadable: "The data format record here can't be read. Pick another location",
     },
     resume: "This folder has settings and game files from before. They'll carry over.",
     nested: `This folder already has other files, so setup will make a ${APP_NAME_EN} folder inside it`,
@@ -378,6 +470,7 @@ const EN: SetupCopy = {
       fresh: () => `Installing ${APP_NAME_EN}`,
       upgrade: (version) => `Updating to ${version}`,
       repair: () => `Reinstalling ${APP_NAME_EN}`,
+      switch: (channel, version) => `Switching to ${channel} ${version}`,
     },
     phase: {
       unpack: "Unpacking",
@@ -392,6 +485,7 @@ const EN: SetupCopy = {
       fresh: () => "All set",
       upgrade: (version) => `Updated to ${version}`,
       repair: () => "Reinstalled",
+      switch: (channel, version) => `Switched to ${channel} ${version}`,
     },
     firstRun: `${APP_NAME_EN} will walk you through the game folder, Java and accounts on first launch.`,
     kept: "Your settings, accounts and game files are untouched.",
@@ -407,6 +501,7 @@ const EN: SetupCopy = {
       payload_exit: { title: "The install didn't finish", body: (detail) => `The installer quit early with code ${detail}.` },
       verify_failed: { title: "The install didn't finish", body: () => "The installer reported success, but the check afterwards failed. The failed items are below." },
     },
+    channelRevert: (body) => `${body} To stay on your previous channel, change the update channel back in ${APP_NAME_EN}'s Settings, About.`,
     retry: "Retry",
     changeLocation: "Choose another location",
     openLog: "Open log",
@@ -419,6 +514,9 @@ const EN: SetupCopy = {
       upgrade: {
         title: (installed) => `${APP_NAME_EN} ${installed} found`,
         lead: (_, payload) => `You can update to ${payload}. ${DATA_UNTOUCHED_EN}`,
+        cross: (cp, payload) =>
+          `You can update to ${cp} ${payload}. ${DATA_UNTOUCHED_EN} Afterwards ${APP_NAME_EN} checks for updates on the update channel chosen in its settings, or on ${cp} if none was chosen.`,
+        switching: (ci, installed, cp, payload) => `${ci} ${installed} is installed. You can switch to ${cp} ${payload}, and ${APP_NAME_EN} will then check for ${cp} updates. ${DATA_UNTOUCHED_EN}`,
       },
       same: {
         title: (installed) => `${APP_NAME_EN} ${installed} is already installed`,
@@ -426,15 +524,41 @@ const EN: SetupCopy = {
       },
       newer: {
         title: () => `A newer ${APP_NAME_EN} is installed`,
-        lead: (installed, payload) => `${installed} is installed and this installer is ${payload}, so it can't go back.${channelBack(installed, payload, ` ${CHANNEL_BACK_EN}`)}`,
+        lead: {
+          same_channel: (installed, payload) => `${installed} is installed and this installer is the earlier ${payload}, so it can't go back.`,
+          slower_channel: (ci, installed, cp, payload) =>
+            `${ci} ${installed} is installed and this installer is the earlier ${cp} ${payload}. Automatic updates don't switch channels this way, so nothing was installed. To move to ${cp}, run a ${cp} installer directly.`,
+          faster_channel: (ci, installed, cp, payload) =>
+            `${ci} ${installed} is installed and this installer is the earlier ${cp} ${payload}, so it can't switch this way. To move to ${cp}, choose ${cp} as the update channel in ${APP_NAME_EN}'s Settings, About; it installs once ${cp} has a version newer than ${installed}.`,
+          unknown_channel: (installed, payload) => `${installed} is installed and this installer is ${payload}, so it can't go back.`,
+        },
       },
       broken: {
         title: () => "The last install is incomplete",
         lead: () => `Reinstalling restores the missing files. ${DATA_UNTOUCHED_EN}`,
       },
+      switch: {
+        title: (cp) => `Switch to ${cp}`,
+        lead: (ci, installed, cp, payload) =>
+          `${ci} ${installed} is installed, and this installer has the earlier ${cp} ${payload}. After switching, ${APP_NAME_EN} checks for ${cp} updates. Your accounts and game files are kept; settings added in ${ci} may return to their defaults once you change settings in ${cp}.`,
+      },
     },
+    dataTooNew: {
+      title: "This installer can't read your current data",
+      named: (channel, writtenBy, payload) =>
+        `The data on this PC has been used by ${channel} ${writtenBy}, which this installer (${payload}) can't read, so nothing was installed and ${APP_NAME_EN}'s program files and data were left unchanged. To keep using this data, install ${channel} ${writtenBy} or later.`,
+      unnamed: (payload) =>
+        `The data on this PC has been used by a newer ${APP_NAME_EN}, which this installer (${payload}) can't read, so nothing was installed and ${APP_NAME_EN}'s program files and data were left unchanged. To keep using this data, install a newer version.`,
+    },
+    dataUnreadable: {
+      title: "Can't read the data format record on this PC",
+      lead: (path, reason) =>
+        `${path}: ${reason}. It's unclear whether this installer can use the data here, so nothing was installed and ${APP_NAME_EN}'s program files and data were left unchanged. Include this path and reason if you report the problem.`,
+    },
+    closedForUpdate: (lead) => `${lead} ${APP_NAME_EN} closed for the update. You can reopen it here.`,
     locationLabel: "Location",
     update: "Update",
+    switchTo: (cp) => `Switch to ${cp}`,
     reinstall: "Reinstall",
     open: `Open ${APP_NAME_EN}`,
     legalNote: LEGAL_NOTE_EN,

@@ -103,7 +103,7 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
   const text = copy.location;
   const present = useIsPresent();
   const check = useDirCheck(dir, initialCheck, present, checkDir, attempt);
-  const issue = check === null || check.issue === null ? undefined : text.issue[check.issue];
+  const issue = check === null || check.issue === null ? undefined : check.issue === "data_incompatible" ? text.dataIncompatible.unnamed : text.issue[check.issue];
   const hint = check === null ? null : dirHint(text, check, requiredBytes);
   const reflow = useReflow<HTMLDivElement>();
 
