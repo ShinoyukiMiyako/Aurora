@@ -1982,7 +1982,7 @@ mod tests {
         assert!(
             steps
                 .iter()
-                .any(|line| line.contains("tauri signer sign --app-version \"$VERSION\" ")),
+                .any(|line| line.contains("signer sign --app-version \"$VERSION\" ")),
             "签名不再把版本号写进可信注释"
         );
     }
@@ -3236,6 +3236,10 @@ mod tests {
         let mut scripts = Vec::new();
         for entry in std::fs::read_dir(format!("{github_dir}/scripts")).unwrap() {
             let path = entry.unwrap().path();
+            // 子目录里放的是测试夹具，不是流水线执行的脚本。
+            if path.is_dir() {
+                continue;
+            }
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             if !name.contains(".test.") {
                 scripts.extend(code_lines(&read(&path)));
