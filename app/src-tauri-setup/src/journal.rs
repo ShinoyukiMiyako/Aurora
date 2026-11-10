@@ -204,13 +204,15 @@ pub fn recover(
 /// 修复的目录取自登记，没有登记就没有现成的安装可修。
 ///
 /// 记录只有核验通过才删，标准安装程序、NSIS 原包和自更新都不碰它，所以它可能早已过期，这时以登记为准：
-/// 登记的版本比载荷新时，改成首装或修复都等于绕过降级保护；比记录新时那次安装早被盖过了，半装留下的登记只会比
+/// 登记的版本比载荷新时，改成首装或修复都等于绕过降级保护；换通道（switch）也是登记的比载荷新，改成修复就绕过了
+/// 装回较早版本要在「换到」页上确认的那一步，所以同样保持原判；比记录新时那次安装早被盖过了，半装留下的登记只会比
 /// 记录旧，这时藏起现有安装，用户在选目录页换个位置，那份数据就成了孤儿；登记在别的目录时，按记录走首装或修复
 /// 都会带着 /D= 把登记改指回记录的目录，原来那份成孤儿。
 pub fn mark_interrupted(probe: Probe, journal: &Journal) -> Probe {
     let dir = journal.instdir.to_string_lossy().into_owned();
     let superseded = probe.existing.as_ref().is_some_and(|existing| {
         existing.kind == ExistingKind::Newer
+            || existing.kind == ExistingKind::Switch
             || classify(&existing.version, &journal.version) == ExistingKind::Newer
             || fold_dir(&existing.dir) != fold_dir(&dir)
     });
@@ -532,6 +534,139 @@ mod tests {
                 assert_eq!(mark_interrupted(found.clone(), &journal), found);
             }
         }
+    }
+
+    fn payload_with(version: &str, channel: Channel, existing: Existing) -> Probe {
+        Probe {
+            payload_version: version.into(),
+            payload_channel: Some(channel),
+            ..probe(Some(existing))
+        }
+    }
+
+    #[test]
+    fn a_switch_keeps_its_consent_page_whatever_the_record_says() {
+        // 记录不比登记旧时只有种类在挡：记录正是登记的版本（更早一次升级没装完），或比登记还新
+        for was_fresh in [true, false] {
+            for version in ["1.1.0-dev.61", "1.2.0-dev.1"] {
+                let journal = Journal {
+                    was_fresh,
+                    version: version.into(),
+                    ..sample(None)
+                };
+                for dir in [r"D:\游戏 目录\Petalfall", r"E:\Elsewhere"] {
+                    let found = payload_with(
+                        "1.0.0-beta.5",
+                        Channel::Beta,
+                        Existing {
+                            kind: ExistingKind::Switch,
+                            version: "1.1.0-dev.61".into(),
+                            dir: dir.into(),
+                            channel: Some(Channel::Dev),
+                        },
+                    );
+
+                    assert_eq!(
+                        mark_interrupted(found.clone(), &journal),
+                        found,
+                        "{was_fresh} {version} {dir}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 换通道装到一半，不论卸载项改没改，重跑目标包或原来的包都有路可走。
+    #[test]
+    fn a_half_switch_is_finished_or_undone_by_rerunning_either_package() {
+        let journal = Journal {
+            was_fresh: false,
+            version: "1.0.0-beta.5".into(),
+            ..sample(None)
+        };
+        let installed = |kind: ExistingKind, version: &str, channel: Channel| Existing {
+            kind,
+            version: version.into(),
+            dir: r"D:\游戏 目录\Petalfall".into(),
+            channel: Some(channel),
+        };
+
+        // 卸载项还是原来的预览版：重跑目标包仍得 switch，在「换到」页再确认一次；重跑原来的包是同版本，重新安装即恢复
+        for found in [
+            payload_with(
+                "1.0.0-beta.5",
+                Channel::Beta,
+                installed(ExistingKind::Switch, "1.1.0-dev.61", Channel::Dev),
+            ),
+            payload_with(
+                "1.1.0-dev.61",
+                Channel::Dev,
+                installed(ExistingKind::Same, "1.1.0-dev.61", Channel::Dev),
+            ),
+        ] {
+            assert_eq!(mark_interrupted(found.clone(), &journal), found);
+        }
+
+        // 卸载项已改成目标版本：重跑目标包是同版本、重跑原来的包是升级，都按半装走修复
+        for (payload, channel, kind) in [
+            ("1.0.0-beta.5", Channel::Beta, ExistingKind::Same),
+            ("1.1.0-dev.61", Channel::Dev, ExistingKind::Upgrade),
+        ] {
+            let marked = mark_interrupted(
+                payload_with(
+                    payload,
+                    channel,
+                    installed(kind, "1.0.0-beta.5", Channel::Beta),
+                ),
+                &journal,
+            );
+
+            assert_eq!(
+                marked.existing,
+                Some(installed(
+                    ExistingKind::Broken,
+                    "1.0.0-beta.5",
+                    Channel::Beta
+                )),
+                "{payload}"
+            );
+            assert!(marked.interrupted, "{payload}");
+        }
+    }
+
+    /// 已发出的引导程序留下的记录就是这五个键。加一个不带默认值的字段，它们留下的记录就读不出、被当成读不懂删掉，
+    /// 换通道的半装也用不着新字段。
+    #[test]
+    fn a_switch_install_writes_the_same_five_fields() {
+        let journal = Journal::begin(Path::new(r"D:\Petalfall"), false, "1.0.0-beta.5");
+
+        let value = serde_json::to_value(&journal).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "instdir",
+                "payload_pid",
+                "started_at",
+                "version",
+                "was_fresh"
+            ]
+        );
+        let shipped = br#"{"instdir":"D:\\Petalfall","was_fresh":false,"version":"1.0.0-beta.5","payload_pid":null,"started_at":1793000000}"#;
+        let read: Journal = serde_json::from_slice(shipped).unwrap();
+        assert_eq!(
+            read,
+            Journal {
+                started_at: 1_793_000_000,
+                ..journal
+            }
+        );
     }
 
     #[test]
