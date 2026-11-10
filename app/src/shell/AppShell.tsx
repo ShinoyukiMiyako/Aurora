@@ -1,6 +1,6 @@
 // 外壳布局：窗口背景层、左侧 84px 侧栏槽位（顶上一行品牌 + 胶囊）、主列（标题栏 + 内容区），以及始终挂着的通知、登录流程、
 // 新建实例流程、启动器更新面板、拖放提示与浮层根（应用根元素的最后一个子元素）。首次启动时整窗换成向导：只留一条带徽记与窗口三键的标题条。
-// 向导收尾时先播完它自己的退场（淡出并轻微放大），主界面再淡入；应用启动时已在的那一屏不播入场，窗口显示时就是成品。
+// 向导收尾时先播完它自己的退场（淡出并轻微放大），主界面再淡入；应用启动时已在的那一屏，侧栏与主列不播淡入，窗口显示时外壳就是成品。
 //
 // 页面与流程模块由 App 收集后传进来：外壳不引用 pages/ 与 flows/，依赖方向只从 App 指向两边。
 // 内容区按路由键挂载页面：同一实例换分页、设置换分区不重新挂载；每个页面各有一层错误边界。
@@ -91,6 +91,12 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
   if (firstRun && flows.onboarding === null) throw new Error(SHELL_DEFECT_COPY.missingOnboarding);
   const onboarding = firstRun ? flows.onboarding : null;
 
+  // 应用启动时就在的那一屏不播两列的淡入；之后才挂上的主界面（向导收尾）照常淡入
+  const booted = useRef(false);
+  useEffect(() => {
+    booted.current = true;
+  }, []);
+
   // 内容区滚动容器：交给外壳核心记录滚动位置，也给侧栏与命令面板用
   const scrollEl = useRef<HTMLDivElement | null>(null);
   const bindScroll = useCallback(
@@ -120,12 +126,16 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
             <div className={styles.backdrop} aria-hidden="true">
               <PanoramaBackdrop enabled={appearance.panorama} />
             </div>
-            {/* 向导收尾后先播完它自己的退场，再换成主界面：两者都占满整个网格，不能叠着同时出现 */}
-            <AnimatePresence mode="wait" initial={false}>
+            {/*
+              向导收尾后先播完它自己的退场，再换成主界面：两者都占满整个网格，不能叠着同时出现。
+              这里不能写 initial={false}：它会把「不播入场」记在首屏那一支的上下文里，整场会话不再更新，
+              之后在它下面挂载的每个页面、每个分页面板的入场都被一并跳过。启动那一屏不淡入改由 MainFrame 自己管。
+            */}
+            <AnimatePresence mode="wait">
               {onboarding !== null ? (
                 <OnboardingFrame key="onboarding" Flow={onboarding} />
               ) : (
-                <MainFrame key="main" pages={pages} bindScroll={bindScroll} />
+                <MainFrame key="main" pages={pages} bindScroll={bindScroll} enter={booted.current} />
               )}
             </AnimatePresence>
             <DropHint hint={fileDropHint} />
@@ -141,11 +151,16 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
   );
 }
 
-/** 主界面的两列各自淡入（它们是网格的直接子项，不能再包一层）；应用启动时由外层 initial={false} 跳过。 */
+/** 主界面的两列各自淡入（它们是网格的直接子项，不能再包一层）。 */
 const MAIN_ENTER = { initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in } } as const;
+/** 应用启动时就在的那一屏：两列一挂上就不透明。initial={false} 只管这两个元素自己，不波及里面的页面。 */
+const MAIN_STILL = { initial: false, animate: { opacity: 1, transition: fade.in } } as const;
 
-/** 只随路由、分档与外观重渲染：父级（外壳根、AnimatePresence）重渲染时 props 不变就跳过。 */
-const MainFrame = memo(function MainFrame({ pages, bindScroll }: { pages: PageRegistry; bindScroll: (el: HTMLDivElement | null) => void }) {
+/**
+ * 只随路由、分档与外观重渲染：父级（外壳根、AnimatePresence）重渲染时 props 不变就跳过。
+ * enter 只在挂载那一刻起作用：两列要不要淡入。
+ */
+const MainFrame = memo(function MainFrame({ pages, bindScroll, enter }: { pages: PageRegistry; bindScroll: (el: HTMLDivElement | null) => void; enter: boolean }) {
   const { route } = useNav();
   const { tier, petalsPaused } = useShell();
   const { appearance, reduced } = useAppearance();
@@ -159,14 +174,16 @@ const MainFrame = memo(function MainFrame({ pages, bindScroll }: { pages: PageRe
     [run],
   );
   const key = routeKey(route);
+  // 挂载之后 enter 再变不改已经定下的入场：记住挂载那一刻的取值
+  const [columns] = useState(() => (enter ? MAIN_ENTER : MAIN_STILL));
   return (
     <>
       {/* 槽位的空白是窗口拖动区（只认直接点在槽位上），侧栏胶囊本身不是 */}
-      <motion.div className={styles.sidebarSlot} data-tauri-drag-region="" {...MAIN_ENTER}>
+      <motion.div className={styles.sidebarSlot} data-tauri-drag-region="" {...columns}>
         <SidebarBrand />
         <Sidebar />
       </motion.div>
-      <motion.div className={styles.main} {...MAIN_ENTER}>
+      <motion.div className={styles.main} {...columns}>
         <TitleBar />
         <div className={styles.content}>
           <PetalCanvas

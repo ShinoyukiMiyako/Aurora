@@ -1,8 +1,7 @@
 /*
  * 胶囊相对外壳的侧栏槽位定位；nav 本身不定位、不占面积，槽位的空白仍是窗口拖动区。
  * 顶端让出 56px 的品牌行，再落一个页面顶内边距：胶囊上沿与内容区首行平齐，差这几像素看着像没对上。
- * 胶囊内的每一行都铺满胶囊内宽：条目居中，指示条贴在行的左缘（即胶囊内缘），
- * 固定实例的滚动容器也就不会把指示条裁掉。
+ * 胶囊内的每一行都铺满胶囊内宽，条目居中。
  */
 .capsule {
   position: absolute;
@@ -34,7 +33,50 @@
   width: 100%;
 }
 
-.indicator {
+/*
+ * ---- 选中滑块 ----
+ * 整根胶囊只有一块，叠在各行之下：强调浅底衬在选中条目的图标后面，指示条贴胶囊内缘。
+ * 纵向位置由组件写在 translate 上（沿弹簧滑动），这里只管外形与显隐。放在胶囊这一层而不是行里：
+ * 固定实例在滚动容器里，滑块若挂在行里，从主导航滑过来的大半程会被容器裁掉。
+ */
+.selection {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 44px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
+.selection[data-on] {
+  opacity: 1;
+}
+
+.selBlock {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--sk-r);
+  background: var(--sk-accent-soft);
+  transition:
+    opacity var(--sk-dur-hover) var(--sk-ease),
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap);
+}
+
+/* 落在固定实例上：头像自己有选中环，浅底让开，只留指示条 */
+.selection[data-kind="pin"] .selBlock {
+  opacity: 0;
+}
+
+/* 按住选中的条目：浅底跟着条目一起缩 */
+.capsule:has(.item[data-selected]:active) .selBlock {
+  scale: 0.94;
+}
+
+.selBar {
   position: absolute;
   top: 50%;
   left: 0;
@@ -43,7 +85,18 @@
   margin-top: -10px;
   border-radius: 0 var(--sk-r-pill) var(--sk-r-pill) 0;
   background: var(--sk-accent);
-  pointer-events: none;
+}
+
+/* 数据晚于首帧才到的那几行（固定区、新建）：出现时淡入一次 */
+.row[data-late],
+.pinScroll[data-late] {
+  animation: late-in var(--sk-dur-in) var(--sk-ease-out) backwards;
+}
+
+@keyframes late-in {
+  from {
+    opacity: 0;
+  }
 }
 
 .item,
@@ -64,6 +117,7 @@
   outline: none;
   transition:
     background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease),
     color var(--sk-dur-hover) var(--sk-ease),
     transform var(--sk-spring-tap-dur) var(--sk-spring-tap);
 }
@@ -75,11 +129,14 @@
 
 .item:active {
   background: var(--sk-fill-press);
-  transform: scale(0.96);
+  transform: scale(0.94);
 }
 
-.item[data-selected] {
-  background: var(--sk-accent-soft);
+/* 选中条目的浅底由滑块提供，条目自己不铺底：悬停、按下也不盖住它 */
+.item[data-selected],
+.item[data-selected]:hover,
+.item[data-selected]:active {
+  background: transparent;
   color: var(--sk-accent-strong);
 }
 
@@ -148,12 +205,23 @@
   touch-action: none;
 }
 
+/* 没溢出时不裁切：取消固定的那一项退场时已经脱离布局，列表先一步变矮，裁切会把它拦腰截断 */
+.pinScroll:not([data-overflow]) {
+  overflow: visible;
+}
+
+.row:not([data-dragging]) > .pin:active {
+  transform: scale(0.94);
+}
+
 .row[data-dragging] {
   z-index: 1;
 }
 
+/* 拿起来：比原位略大 */
 .row[data-dragging] .pin {
   cursor: grabbing;
+  transform: scale(1.04);
 }
 
 /* ---- 新建实例 ---- */
@@ -172,7 +240,16 @@
 }
 
 .create:active {
-  transform: scale(0.96);
+  transform: scale(0.94);
+}
+
+/* 减少动画：按下不缩，改为瞬时变淡 */
+:global([data-sk-reduced]) .item:active,
+:global([data-sk-reduced]) .create:active,
+:global([data-sk-reduced]) .row > .pin:active {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 .spacer {

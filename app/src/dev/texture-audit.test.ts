@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { currentPetalStats } from "../art/petals/engine";
-import { mockInvoke, resetMocks } from "../ipc/mock";
+import { mockInvoke, mockLatency, resetMocks, setMockLatency } from "../ipc/mock";
 import { styleBook } from "./diag-test-kit";
 import { auditTextures, installDevDiagnostics, textureProtocolPath } from "./diagnostics";
 
@@ -65,7 +65,7 @@ describe("installDevDiagnostics", () => {
   it("在 window 上挂 __sk；没有花瓣层时 petals() 为 null", () => {
     const api = installDevDiagnostics(window);
     expect(window.__sk).toBe(api);
-    expect(Object.keys(api).sort()).toEqual(["accentArea", "accentAreaDetail", "petals", "resetMockData", "textureAudit"]);
+    expect(Object.keys(api).sort()).toEqual(["accentArea", "accentAreaDetail", "mockLatency", "petals", "resetMockData", "textureAudit"]);
     expect(currentPetalStats()).toBeNull();
     expect(api.petals()).toBeNull();
   });
@@ -78,6 +78,27 @@ describe("installDevDiagnostics", () => {
     await api.resetMockData();
     expect(await mockInvoke("get_appearance")).toEqual({ mode: "day", accent: "sakura", petals: true, panorama: false, reduce_motion: false, cover_background: "texture" });
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("mockLatency：给模拟后端设上延迟，随后刷新页面一次", async () => {
+    const reload = vi.fn();
+    const api = installDevDiagnostics({ document, location: { reload } } as unknown as Window);
+    try {
+      await api.mockLatency(400);
+      expect(mockLatency()).toBe(400);
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      setMockLatency(0);
+    }
+  });
+
+  it("mockLatency：Tauri 窗口里没有模拟后端，直接报错且不刷新", async () => {
+    vi.stubGlobal("__TAURI_INTERNALS__", {});
+    const reload = vi.fn();
+    const api = installDevDiagnostics({ document, location: { reload } } as unknown as Window);
+    await expect(api.mockLatency(400)).rejects.toThrow("没有模拟延迟可调");
+    expect(reload).not.toHaveBeenCalled();
+    expect(mockLatency()).toBe(0);
   });
 
   it("resetMockData：Tauri 窗口里没有模拟后端，直接报错且不刷新", async () => {

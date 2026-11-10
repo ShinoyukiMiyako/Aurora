@@ -3,6 +3,7 @@
 // Bento 自己不参与页面入场，把序号转交给每张卡片：一级区块是卡片，不是网格。
 
 import type { ReactNode } from "react";
+import { useReflow } from "../lib/reflow";
 import { cssVars, cx } from "../lib/util";
 import styles from "./Bento.module.css";
 import { numberEntrance, useEntranceIndex } from "./Page";
@@ -18,8 +19,10 @@ export interface BentoProps {
 export function Bento({ rowHeight, className, children }: BentoProps) {
   if (rowHeight !== undefined && !(rowHeight > 0)) throw new Error(`Bento 行高必须为正数，收到 ${rowHeight}`);
   const start = useEntranceIndex();
+  // 卡片互相让位：行高随内容时，一张卡片变高会把后面的行往下推
+  const reflow = useReflow<HTMLDivElement>();
   return (
-    <div className={cx(styles.bento, className)} style={rowHeight === undefined ? undefined : cssVars({ "--bento-row": `${rowHeight}px` })} data-fixed-rows={rowHeight === undefined ? undefined : ""}>
+    <div ref={reflow} className={cx(styles.bento, className)} style={rowHeight === undefined ? undefined : cssVars({ "--bento-row": `${rowHeight}px` })} data-fixed-rows={rowHeight === undefined ? undefined : ""}>
       {numberEntrance(children, start)}
     </div>
   );

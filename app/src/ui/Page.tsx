@@ -9,6 +9,7 @@
 import { motion, useReducedMotionConfig, type Variants } from "framer-motion";
 import { Children, createContext, createElement, isValidElement, useContext, type ElementType, type HTMLAttributes, type ReactNode } from "react";
 import { fade, pageItem } from "../lib/motion";
+import { useReflow } from "../lib/reflow";
 import { cx } from "../lib/util";
 import styles from "./Page.module.css";
 
@@ -95,8 +96,11 @@ export interface PageProps {
 }
 
 export function Page({ width = "full", fill = false, className, children, ...aria }: PageProps) {
+  // 一级区块互相让位：某一块的数据晚到、变高，下面各块滑过去而不是一帧跳下去
+  const reflow = useReflow<HTMLDivElement>();
   return (
     <motion.div
+      ref={reflow}
       className={cx(styles.page, className)}
       data-width={width}
       data-fill={fill || undefined}

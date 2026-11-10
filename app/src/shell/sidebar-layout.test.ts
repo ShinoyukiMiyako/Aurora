@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { SIDEBAR_PIN_LIMIT } from "../domain/limits";
 import { RING_OUTSET } from "../launch/InstanceAvatar";
+import { PIN_STEP } from "./Sidebar";
 
 const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "");
 const css = strip(readFileSync(new URL("./Sidebar.module.css", import.meta.url), "utf8"));
@@ -113,5 +114,35 @@ describe("固定实例的滚动容器", () => {
     const margin = declaration(ruleOf(".pinScroll"), "margin");
     expect(margin).toMatch(/^calc\(-1 \* var\(--sk-space-\d+\)\) 0$/);
     expect(spaceToken(margin)).toBe(gutter);
+  });
+});
+
+describe("选中滑块与拖动步长", () => {
+  const itemRule = /\n\.item,\r?\n\.pin,\r?\n\.create \{([^}]*)\}/.exec(css)?.[1];
+  if (itemRule === undefined) throw new Error("没有 .item、.pin、.create 共用的规则");
+  const itemSize = px(declaration(itemRule, "height"));
+
+  it("滑块与行同高，浅底与条目同大：停在某一行上时正好衬在条目后面", () => {
+    expect(px(declaration(ruleOf(".selection"), "height"))).toBe(itemSize);
+    expect(px(declaration(ruleOf(".selBlock"), "width"))).toBe(px(declaration(itemRule, "width")));
+    expect(px(declaration(ruleOf(".selBlock"), "height"))).toBe(itemSize);
+    expect(declaration(ruleOf(".selBlock"), "border-radius")).toBe(declaration(itemRule, "border-radius"));
+  });
+
+  it("滑块不占流也不拦指针：只是一层衬底", () => {
+    const selection = ruleOf(".selection");
+    expect(declaration(selection, "position")).toBe("absolute");
+    expect(declaration(selection, "pointer-events")).toBe("none");
+  });
+
+  it("拖动排序的步长等于固定实例的行距（按钮高加列表间距）", () => {
+    const pitch = px(declaration(ruleOf(".pin"), "height")) + spaceToken(declaration(ruleOf(".pins"), "gap"));
+    expect(PIN_STEP).toBe(pitch);
+  });
+
+  it("没溢出时固定列表不裁切：退场中脱离布局的项不会被拦腰截断", () => {
+    const rule = /\.pinScroll:not\(\[data-overflow\]\) \{([^}]*)\}/.exec(css)?.[1];
+    if (rule === undefined) throw new Error("没有固定列表未溢出时的规则");
+    expect(declaration(rule, "overflow")).toBe("visible");
   });
 });

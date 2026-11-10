@@ -16,7 +16,7 @@ import { ChromeProvider, type ChromeApi } from "./chrome";
 import { SIDEBAR_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./shell";
-import { dragShift, dropIndex, moveItem, PIN_STEP, pinLaunchItem, pinLine, pinTarget, Sidebar, sidebarSelection } from "./Sidebar";
+import { dragShift, dropIndex, moveItem, PIN_STEP, pinLaunchItem, pinLine, pinTarget, Sidebar, sidebarSelection, topWithin } from "./Sidebar";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -87,6 +87,31 @@ describe("拖动排序的几何", () => {
   it("被越过的项朝反方向让一格，其余不动", () => {
     expect([0, 1, 2, 3].map((i) => dragShift(i, 0, 2))).toEqual([0, -PIN_STEP, -PIN_STEP, 0]);
     expect([0, 1, 2, 3].map((i) => dragShift(i, 3, 1))).toEqual([0, PIN_STEP, PIN_STEP, 0]);
+  });
+});
+
+describe("行在胶囊里的纵向位置", () => {
+  /** jsdom 不做布局：手工给出每个元素的 offsetTop、定位祖先与已滚过的距离。 */
+  function box(offsetTop: number, offsetParent: HTMLElement | null, scrollTop = 0): HTMLElement {
+    const el = document.createElement("div");
+    Object.defineProperty(el, "offsetTop", { value: offsetTop });
+    Object.defineProperty(el, "offsetParent", { value: offsetParent });
+    el.scrollTop = scrollTop;
+    Object.defineProperty(el, "scrollTop", { value: scrollTop });
+    return el;
+  }
+
+  it("主导航的行：定位祖先就是胶囊，直接取 offsetTop", () => {
+    const capsule = box(0, null);
+    expect(topWithin(box(160, capsule), capsule)).toBe(160);
+  });
+
+  it("固定实例的行：逐级累加，并扣掉滚动容器已滚过的距离", () => {
+    const capsule = box(0, null);
+    const scroller = box(221, capsule, 30);
+    const list = box(0, scroller);
+    const row = box(54, list);
+    expect(topWithin(row, capsule)).toBe(54 + 0 + 221 - 30);
   });
 });
 
@@ -175,6 +200,21 @@ const item = (key: string) => {
   if (el === null) throw new Error(`侧栏没有条目 ${key}`);
   return el;
 };
+
+const selection = () => {
+  const el = document.querySelector<HTMLElement>("[data-sidebar-selection]");
+  if (el === null) throw new Error("侧栏没有选中滑块");
+  return el;
+};
+
+/** 第 i 个可选中的行（主导航 0-3、固定实例、设置）排在 10 + 50i 处：jsdom 不做布局，滑块的位置靠它算。 */
+const rowTop = (index: number) => 10 + index * 50;
+function stubRowLayout(): void {
+  vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+    const index = [...document.querySelectorAll("[data-sidebar-row]")].indexOf(this);
+    return index < 0 ? 0 : rowTop(index);
+  });
+}
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -293,6 +333,138 @@ describe("侧栏", () => {
     } finally {
       delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture;
     }
+  });
+
+  it("选中滑块停在选中那一行上；落到固定实例上只留指示条；账户页没有选中项时收起", async () => {
+    stubRowLayout();
+    await mount();
+    expect(selection().hasAttribute("data-on")).toBe(true);
+    expect(selection().dataset.kind).toBe("nav");
+    expect(selection().style.translate).toBe(`0px ${rowTop(0)}px`);
+    // 选中条目自己不铺底：浅底由滑块给
+    expect(document.querySelectorAll("[data-sidebar-selection]")).toHaveLength(1);
+
+    act(() => item("discover").click());
+    expect(selection().style.translate).toBe(`0px ${rowTop(2)}px`);
+    expect(selection().dataset.kind).toBe("nav");
+
+    act(() => item("pin:创造").click());
+    expect(selection().style.translate).toBe(`0px ${rowTop(5)}px`);
+    expect(selection().dataset.kind).toBe("pin");
+
+    act(() => nav.go({ page: "accounts" }));
+    expect(selection().hasAttribute("data-on")).toBe(false);
+
+    act(() => nav.go({ page: "settings" }));
+    expect(selection().hasAttribute("data-on")).toBe(true);
+    expect(selection().dataset.kind).toBe("nav");
+    expect(selection().style.translate).toBe(`0px ${rowTop(7)}px`);
+  });
+
+  it("指针按下主导航条目：滑块先行出发；在别处松开没点成，就滑回当前选中项", async () => {
+    stubRowLayout();
+    await mount();
+    act(() => {
+      item("tasks").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }));
+    });
+    expect(selection().style.translate).toBe(`0px ${rowTop(3)}px`);
+    expect(nav.route).toEqual({ page: "home" });
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      vi.advanceTimersByTime(0);
+    });
+    expect(selection().style.translate).toBe(`0px ${rowTop(0)}px`);
+  });
+
+  it("按下后点成了：滑块留在新选中项上；右键按下不出发", async () => {
+    stubRowLayout();
+    await mount();
+    act(() => {
+      item("library").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 2 }));
+    });
+    expect(selection().style.translate).toBe(`0px ${rowTop(0)}px`);
+    act(() => {
+      item("library").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }));
+    });
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      item("library").click();
+      vi.advanceTimersByTime(0);
+    });
+    expect(nav.route).toEqual({ page: "library" });
+    expect(selection().style.translate).toBe(`0px ${rowTop(1)}px`);
+  });
+
+  it("取消固定：退场的那一项被抽出布局，其余项不必等它淡完再补位", async () => {
+    await mount();
+    const row = item("pin:生存").closest("li");
+    if (row === null) throw new Error("固定项不在列表项里");
+    // popLayout 要量到非零的宽高才抽出布局，jsdom 里没有布局，手工给出
+    row.style.width = "64px";
+    row.style.height = "44px";
+    act(() => item("pin:生存").focus());
+    keydown(item("pin:生存"), "ContextMenu");
+    await flush();
+    const unpin = [...document.querySelectorAll<HTMLElement>("[role='menuitem']")].find((el) => el.textContent === SIDEBAR_COPY.unpin);
+    if (unpin === undefined) throw new Error("菜单里没有取消固定");
+    act(() => unpin.click());
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["创造", "空岛"] }]);
+    // 这个标记由 popLayout 写在它拿到的元素上：固定项没把 ref 交出去时它拿不到元素，标记不会出现
+    expect(row.dataset.motionPopId).toMatch(/\S/);
+  });
+
+  it("分隔线常驻：一个固定实例都没有时也在", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")], pins: [] });
+    await mount();
+    expect(document.querySelectorAll("[data-sidebar-item^='pin:']")).toHaveLength(0);
+    expect(document.querySelectorAll("nav [role='separator']")).toHaveLength(1);
+  });
+
+  it("冷启动：实例还没读到时不画固定区与新建按钮，读到后一起出现并淡入", async () => {
+    let arrive: () => void = () => {
+      throw new Error("实例列表还没被请求");
+    };
+    ipc.overrides.set(
+      "list_instances",
+      () =>
+        new Promise((resolve) => {
+          arrive = () => resolve([instanceDto("生存"), instanceDto("创造"), instanceDto("空岛")]);
+        }),
+    );
+    await mount();
+    expect(document.querySelector("[data-sidebar-item='create']")).toBeNull();
+    expect(document.querySelectorAll("[data-sidebar-item^='pin:']")).toHaveLength(0);
+    // 主导航、分隔线与设置不等数据
+    expect(item("home").tabIndex).toBe(0);
+    expect(item("settings")).toBeInstanceOf(HTMLButtonElement);
+    expect(document.querySelectorAll("nav [role='separator']")).toHaveLength(1);
+
+    arrive();
+    await flush();
+    expect([...document.querySelectorAll<HTMLElement>("[data-sidebar-item^='pin:']")].map((el) => el.dataset.sidebarItem)).toEqual(["pin:生存", "pin:创造", "pin:空岛"]);
+    expect(item("create").closest("[data-late]")).not.toBeNull();
+    expect(item("pin:生存").closest("ul")?.parentElement?.hasAttribute("data-late")).toBe(true);
+  });
+
+  it("侧栏挂载前数据就读到了（首次启动向导收尾后才换上主界面）：固定区与新建按钮直接出现，不播淡入", async () => {
+    const tree = (withSidebar: boolean) => (
+      <LauncherProvider>
+        <ShellProvider>
+          <ChromeProvider value={chrome}>
+            <Probe />
+            {withSidebar && <Sidebar />}
+            <OverlayRoot />
+          </ChromeProvider>
+        </ShellProvider>
+      </LauncherProvider>
+    );
+    view = render(tree(false));
+    await flush();
+    view.rerender(tree(true));
+    await flush();
+    expect(item("create").closest("[data-late]")).toBeNull();
+    expect(item("pin:生存").closest("ul")?.parentElement?.hasAttribute("data-late")).toBe(false);
   });
 
   it("主导航条目的名称写页面名，快捷键写在 aria-keyshortcuts 上", async () => {

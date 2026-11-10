@@ -1,16 +1,19 @@
 // 侧栏：左侧 84px 槽位里浮着的一根竖胶囊。自上而下：四个主导航、分隔线、固定的实例（至多 5 个）、
 // 新建实例、留白、设置。槽位本身的空白是窗口拖动区，胶囊不是。
 //
-// - 选中：主导航条目铺强调浅底 + 图标强调色 + 左缘指示条；固定实例只有指示条（头像自己有选中态）。
-//   在没固定的实例里时选中「实例库」；在账户页时没有选中项。指示条用共享布局动画在条目之间滑动。
+// - 选中：整根胶囊只有一块选中滑块（强调浅底 + 左缘指示条），在条目之间沿弹簧滑动；落到固定实例上时浅底淡出、
+//   只留指示条（头像自己有选中态）。在没固定的实例里时选中「实例库」；在账户页时没有选中项，滑块原地淡出。
+//   滑块的位移走合成线程：换页时主线程正忙着渲染新页面，滑动不受它牵连。指针按下主导航的那一刻滑块就出发，不等松手。
 // - 键盘：整根侧栏只有一个 Tab 停靠点（选中项，没有选中项时是「主页」），↑↓ 逐项移动不循环，Home / End 到首尾。
 // - 再点一次当前所在的条目：内容区滚回顶部。
 // - 固定实例：右键或 Shift+F10 / 菜单键打开操作菜单；按住拖动超过 4px 进入排序，1:1 跟手，其余项让位；
 //   松手提交（先乐观改顺序，写入失败由状态层恢复并报错），Esc、指针取消或在侧栏外松手放弃并弹回原位。
 //   顺序与成员变化一律按「旧位置 -> 新位置」补间（FLIP），菜单里的上移下移、写入失败的恢复也是同一套。
+// - 固定区之外的行（新建按钮）随固定区变高变矮让位，不瞬移。
+// - 冷启动：实例与固定列表晚于窗口显示才读到，固定区与新建按钮等这两片数据到了再一起淡入，不先画空的再被顶开。
 
 import { AnimatePresence, animate, motion, useMotionValue, useReducedMotionConfig, type MotionValue } from "framer-motion";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type Ref } from "react";
 import { Icon, type IconName } from "../art/Icon";
 import { ACTION_ERROR, AVATAR_LINE, LAUNCH_COPY, PAGE_LABEL, STOPPED_LABEL } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
@@ -19,6 +22,8 @@ import { InstanceAvatar } from "../launch/InstanceAvatar";
 import { brokenAction, launchView, launchViewEqual, type LaunchView } from "../launch/launchView";
 import { useLaunch, type LaunchEntry } from "../launch/useLaunch";
 import { TOOLTIP_TIMING, fade, springs } from "../lib/motion";
+import { REFLOW_SKIP_ATTR, observeReflow } from "../lib/reflow";
+import { Slide } from "../lib/slide";
 import { clamp, isImeComposing } from "../lib/util";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../state/launcher";
 import { sameRoute, type Route } from "../state/route";
@@ -93,8 +98,8 @@ export function pinLine(view: LaunchView, inst: InstanceSummary, now: number): s
   }
 }
 
-/** 一个固定实例占的纵向距离：头像 40 + 间距 6。 */
-export const PIN_STEP = 46;
+/** 一个固定实例占的纵向距离：按钮 44 + 间距 6（头像 40 居中在按钮里）。样式表里的行距由 sidebar-layout 测试钉在这个数上。 */
+export const PIN_STEP = 50;
 /** 按下后移动超过这么多才算拖动，免得手抖把点击变成排序。 */
 export const DRAG_THRESHOLD = 4;
 
@@ -116,6 +121,23 @@ export function dragShift(index: number, from: number, over: number): number {
   if (from < over && index > from && index <= over) return -PIN_STEP;
   if (over < from && index >= over && index < from) return PIN_STEP;
   return 0;
+}
+
+/** 条目的键是不是固定实例。 */
+const isPinKey = (key: SidebarKey): key is `pin:${string}` => key.startsWith("pin:");
+
+/**
+ * el 相对 ancestor 的纵向布局位置：沿定位祖先逐级累加 offsetTop，途中的滚动容器扣掉已滚过的距离。
+ * 只看布局，不含任何位移（拖动、补间里的 transform 另算），所以不受位移写没写进 DOM 的时机影响。
+ */
+export function topWithin(el: HTMLElement, ancestor: HTMLElement): number {
+  let top = 0;
+  for (let node: Element | null = el; node instanceof HTMLElement && node !== ancestor; node = node.offsetParent) {
+    top += node.offsetTop;
+    const parent = node.offsetParent;
+    if (parent instanceof HTMLElement && parent !== ancestor) top -= parent.scrollTop;
+  }
+  return top;
 }
 
 // ---------------------------------------------------------------- 侧栏
@@ -153,7 +175,25 @@ export function Sidebar() {
   const run = useRunner();
   const reduced = useReducedMotionConfig() === true;
   const navRef = useRef<HTMLElement>(null);
-  const capsuleRef = useRef<HTMLDivElement>(null);
+  const capsuleRef = useRef<HTMLDivElement | null>(null);
+  // 胶囊的直接子项互相让位：固定区变高变矮时，新建按钮滑到新位置
+  const bindCapsule = useCallback((el: HTMLDivElement | null) => {
+    capsuleRef.current = el;
+    if (el === null) return;
+    const stop = observeReflow(el);
+    return () => {
+      stop();
+      capsuleRef.current = null;
+    };
+  }, []);
+
+  // 冷启动时实例与固定列表晚于窗口显示才读到：两片都离开过加载态之后才画固定区与新建按钮。
+  // 之后重读（reload 会把切片打回加载态）不再收起，所以锁存。
+  const slicesReady = useLauncherSelector((s) => s.status.instances.kind !== "loading" && s.status.pins.kind !== "loading");
+  const [pinsReady, setPinsReady] = useState(slicesReady);
+  if (slicesReady && !pinsReady) setPinsReady(true);
+  // 挂载时数据还没到：到了以后淡入一次。数据随首帧就在时不播，窗口显示时就是成品
+  const [late] = useState(!slicesReady);
 
   const pinIds = pins.map((p) => p.id);
   const selection = sidebarSelection(route, pinIds);
@@ -194,6 +234,87 @@ export function Sidebar() {
     if (handle === null) handles.current.delete(id);
     else handles.current.set(id, handle);
   }, []);
+
+  // ---- 选中滑块
+  const selectionEl = useRef<HTMLDivElement>(null);
+  const slide = useRef<Slide | null>(null);
+  /** 滑块此刻停在（或正滑向）哪一项；没显示时为 null。 */
+  const shown = useRef<SidebarKey | null>(null);
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  // 选中的固定项被拖动、或在重排补间途中时，滑块跟着它的位移走
+  const followY = useMotionValue(0);
+
+  const placeSelection = useCallback(
+    (key: SidebarKey | null, how: "slide" | "jump") => {
+      const el = selectionEl.current;
+      const capsule = capsuleRef.current;
+      const nav = navRef.current;
+      if (el === null || capsule === null || nav === null) return;
+      const item = key === null ? undefined : [...nav.querySelectorAll<HTMLElement>("[data-sidebar-item]")].find((candidate) => candidate.dataset.sidebarItem === key);
+      // 没有选中项（账户页），或选中的固定项还没画出来（冷启动时固定区晚到）：滑块原地淡出，等它挂上再摆
+      const row = item === undefined ? null : item.closest<HTMLElement>("[data-sidebar-row]");
+      if (key === null || row === null) {
+        el.removeAttribute("data-on");
+        shown.current = null;
+        return;
+      }
+      if (shown.current === key && how === "slide") return;
+      if (slide.current === null) slide.current = new Slide(el, "settle");
+      const top = topWithin(row, capsule);
+      // 从没显示到显示：直接出现在那一行上淡入，不从上一次停的地方飞过来
+      if (how === "jump" || shown.current === null || reduced) slide.current.jump(0, top);
+      else slide.current.to(0, top);
+      el.dataset.kind = isPinKey(key) ? "pin" : "nav";
+      el.setAttribute("data-on", "");
+      shown.current = key;
+    },
+    [reduced],
+  );
+
+  // 选中项变了：滑过去
+  useLayoutEffect(() => {
+    placeSelection(selection, "slide");
+  }, [placeSelection, selection]);
+  // 固定项增删换序、固定区刚挂上：行的位置变了，滑块直接跟到新位置（固定项自己的补间由 followY 带着走）
+  useLayoutEffect(() => {
+    placeSelection(selectionRef.current, "jump");
+  }, [placeSelection, orderKey, pinsReady]);
+  // 胶囊高度变了（窗口缩放）：设置那一行跟着底边走
+  useLayoutEffect(() => {
+    const capsule = capsuleRef.current;
+    if (capsule === null) return;
+    const observer = new ResizeObserver(() => placeSelection(selectionRef.current, "jump"));
+    observer.observe(capsule);
+    return () => observer.disconnect();
+  }, [placeSelection]);
+  useEffect(() => {
+    const handle = selection !== null && isPinKey(selection) ? handles.current.get(selection.slice("pin:".length)) : undefined;
+    if (handle === undefined) {
+      followY.set(0);
+      return;
+    }
+    followY.set(handle.y.get());
+    return handle.y.on("change", (value) => followY.set(value));
+  }, [followY, orderKey, pinsReady, selection]);
+
+  // 指针按下主导航：滑块立刻出发，不等松手后的点击。松开时没有换页（移出去了再松手）就滑回当前选中项
+  const previewSelection = useCallback(
+    (key: SidebarKey) => {
+      placeSelection(key, "slide");
+      const settleBack = () => {
+        window.removeEventListener("pointerup", settleBack);
+        window.removeEventListener("pointercancel", settleBack);
+        // 点击事件排在 pointerup 之后：等它处理完、选中项更新过，再看要不要滑回去
+        window.setTimeout(() => {
+          if (shown.current !== selectionRef.current) placeSelection(selectionRef.current, "slide");
+        }, 0);
+      };
+      window.addEventListener("pointerup", settleBack);
+      window.addEventListener("pointercancel", settleBack);
+    },
+    [placeSelection],
+  );
 
   const commitOrder = useCallback((ids: string[]) => void run(() => actions.setSidebarPins(ids), ACTION_ERROR.pin), [actions, run]);
 
@@ -333,7 +454,11 @@ export function Sidebar() {
 
   return (
     <nav ref={navRef} aria-label={SIDEBAR_COPY.nav} onKeyDown={onNavKeyDown}>
-      <div ref={capsuleRef} className={styles.capsule} data-dragging={dragging !== null || undefined}>
+      <div ref={bindCapsule} className={styles.capsule} data-dragging={dragging !== null || undefined}>
+        <motion.div ref={selectionEl} className={styles.selection} style={{ y: followY }} aria-hidden="true" data-sidebar-selection="" {...{ [REFLOW_SKIP_ATTR]: "" }}>
+          <span className={styles.selBlock} />
+          <span className={styles.selBar} />
+        </motion.div>
         {SHORTCUT_PAGES.map((page, i) => (
           <NavItem
             key={page}
@@ -346,40 +471,49 @@ export function Sidebar() {
             tabStop={tabStop === page}
             tooltipsOff={tooltipsOff}
             onActivate={() => activate({ page })}
+            onPress={previewSelection}
           />
         ))}
-        {pins.length > 0 && <div className={styles.separator} role="separator" />}
-        <PinList count={pins.length}>
-          <AnimatePresence mode="popLayout" initial={false}>
-            {pins.map((inst, index) => (
-              <PinItem
-                key={inst.id}
-                instance={inst}
-                index={index}
-                selected={selection === pinKey(inst.id)}
-                tabStop={tabStop === pinKey(inst.id)}
-                dragging={dragging === inst.id}
-                tooltipsOff={tooltipsOff}
-                register={register}
-                onPointerDown={onPinPointerDown}
-                onPointerMove={onPinPointerMove}
-                onPointerUp={onPinPointerUp}
-                onPointerCancel={cancelDrag}
-                onActivate={(target) => {
-                  if (suppressClick.current) {
-                    suppressClick.current = false;
-                    return;
-                  }
-                  activate(target);
-                }}
-                onMenu={(target, openedBy) => openMenu(inst.id, target, openedBy)}
-              />
-            ))}
-          </AnimatePresence>
-        </PinList>
-        <CreateItem tabStop={false} tooltipsOff={tooltipsOff} onActivate={() => openCreateInstance()} />
+        <div className={styles.separator} role="separator" />
+        {pinsReady && (
+          <PinList count={pins.length} late={late} onScroll={() => placeSelection(selectionRef.current, "jump")}>
+            <AnimatePresence mode="popLayout" initial={false}>
+              {pins.map((inst, index) => (
+                <PinItem
+                  key={inst.id}
+                  instance={inst}
+                  index={index}
+                  selected={selection === pinKey(inst.id)}
+                  tabStop={tabStop === pinKey(inst.id)}
+                  dragging={dragging === inst.id}
+                  tooltipsOff={tooltipsOff}
+                  register={register}
+                  onPointerDown={onPinPointerDown}
+                  onPointerMove={onPinPointerMove}
+                  onPointerUp={onPinPointerUp}
+                  onPointerCancel={cancelDrag}
+                  onActivate={(target) => {
+                    if (suppressClick.current) {
+                      suppressClick.current = false;
+                      return;
+                    }
+                    activate(target);
+                  }}
+                  onMenu={(target, openedBy) => openMenu(inst.id, target, openedBy)}
+                />
+              ))}
+            </AnimatePresence>
+          </PinList>
+        )}
+        {pinsReady && <CreateItem tabStop={false} tooltipsOff={tooltipsOff} late={late} onActivate={() => openCreateInstance()} />}
         <div className={styles.spacer} />
-        <SettingsItem selected={selection === "settings"} tabStop={tabStop === "settings"} tooltipsOff={tooltipsOff} onActivate={() => activate({ page: "settings" })} />
+        <SettingsItem
+          selected={selection === "settings"}
+          tabStop={tabStop === "settings"}
+          tooltipsOff={tooltipsOff}
+          onActivate={() => activate({ page: "settings" })}
+          onPress={previewSelection}
+        />
       </div>
       {menu !== null && menuInstance !== undefined && (
         <PinMenu key={menu.id} menu={menu} instance={menuInstance} pinIds={pinIds} onClose={closeMenu} onReorder={commitOrder} />
@@ -396,10 +530,6 @@ interface ItemBaseProps {
   tooltipsOff: boolean;
 }
 
-function Indicator() {
-  return <motion.span layoutId="sidebar-indicator" className={styles.indicator} transition={springs.settle} aria-hidden="true" />;
-}
-
 function NavItem({
   itemKey,
   icon,
@@ -410,12 +540,23 @@ function NavItem({
   tabStop,
   tooltipsOff,
   onActivate,
+  onPress,
   badge,
   ariaLabel,
-}: ItemBaseProps & { itemKey: SidebarKey; icon: IconName; label: string; sub: string; shortcut: string; onActivate: () => void; badge?: boolean; ariaLabel?: string }) {
+}: ItemBaseProps & {
+  itemKey: SidebarKey;
+  icon: IconName;
+  label: string;
+  sub: string;
+  shortcut: string;
+  onActivate: () => void;
+  /** 主键按下的那一刻：选中滑块先行出发。 */
+  onPress: (key: SidebarKey) => void;
+  badge?: boolean;
+  ariaLabel?: string;
+}) {
   return (
-    <div className={styles.row}>
-      {selected && <Indicator />}
+    <div className={styles.row} data-sidebar-row="">
       <Tooltip content={label} sub={sub} side="right" delay={TOOLTIP_TIMING.sidebarDelay} disabled={tooltipsOff}>
         <button
           type="button"
@@ -427,18 +568,31 @@ function NavItem({
           aria-current={selected ? "page" : undefined}
           aria-keyshortcuts={shortcut}
           onClick={onActivate}
+          onPointerDown={(event) => {
+            if (event.button === 0) onPress(itemKey);
+          }}
         >
           <Icon name={icon} size={20} />
-          {badge === true && <span className={styles.dot} aria-hidden="true" />}
+          <AnimatePresence initial={false}>
+            {badge === true && (
+              <motion.span
+                className={styles.dot}
+                aria-hidden="true"
+                initial={{ opacity: 0, scale: 0 }}
+                animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
+                exit={{ opacity: 0, scale: 0.6, transition: fade.out }}
+              />
+            )}
+          </AnimatePresence>
         </button>
       </Tooltip>
     </div>
   );
 }
 
-function CreateItem({ tabStop, tooltipsOff, onActivate }: ItemBaseProps & { onActivate: () => void }) {
+function CreateItem({ tabStop, tooltipsOff, late, onActivate }: ItemBaseProps & { late: boolean; onActivate: () => void }) {
   return (
-    <div className={styles.row}>
+    <div className={styles.row} data-late={late || undefined}>
       <Tooltip content={SIDEBAR_COPY.create} sub={SIDEBAR_COPY.createShortcut} side="right" delay={TOOLTIP_TIMING.sidebarDelay} disabled={tooltipsOff}>
         <button
           type="button"
@@ -460,7 +614,7 @@ function CreateItem({ tabStop, tooltipsOff, onActivate }: ItemBaseProps & { onAc
  * 设置上的更新点与设置导航「关于」上的同一条规则：已下载待安装一直亮；只是检查到新版本时，跳过的版本不亮，
  * 打开过更新面板看过的也不再亮。设置还没读出来时不知道跳过了哪个版本，先不亮。
  */
-function SettingsItem({ selected = false, tabStop, tooltipsOff, onActivate }: ItemBaseProps & { onActivate: () => void }) {
+function SettingsItem({ selected = false, tabStop, tooltipsOff, onActivate, onPress }: ItemBaseProps & { onActivate: () => void; onPress: (key: SidebarKey) => void }) {
   const updater = useUpdater();
   const skipped = useLauncherSelector((s) => (s.settings === null ? undefined : s.settings.skippedUpdateVersion));
   const run = useRunner();
@@ -480,14 +634,15 @@ function SettingsItem({ selected = false, tabStop, tooltipsOff, onActivate }: It
       tabStop={tabStop}
       tooltipsOff={tooltipsOff}
       onActivate={onActivate}
+      onPress={onPress}
       badge={update}
       ariaLabel={update ? SIDEBAR_COPY.settingsWithUpdate : PAGE_LABEL.settings}
     />
   );
 }
 
-/** 固定实例的滚动容器：放不下时可滚动，上下边缘淡出。 */
-function PinList({ count, children }: { count: number; children: ReactNode }) {
+/** 固定实例的滚动容器：放不下时可滚动，上下边缘淡出。late：数据晚于挂载才到，出现时淡入一次。 */
+function PinList({ count, late, onScroll, children }: { count: number; late: boolean; onScroll: () => void; children: ReactNode }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [overflow, setOverflow] = useState(false);
   useLayoutEffect(() => {
@@ -500,7 +655,7 @@ function PinList({ count, children }: { count: number; children: ReactNode }) {
     return () => observer.disconnect();
   }, [count]);
   return (
-    <motion.div ref={scrollRef} className={styles.pinScroll} data-overflow={overflow || undefined} layoutScroll>
+    <motion.div ref={scrollRef} className={styles.pinScroll} data-overflow={overflow || undefined} data-late={late || undefined} layoutScroll onScroll={onScroll}>
       <ul className={styles.pins} aria-label={SIDEBAR_COPY.pins}>
         {children}
       </ul>
@@ -509,6 +664,11 @@ function PinList({ count, children }: { count: number; children: ReactNode }) {
 }
 
 interface PinItemProps extends ItemBaseProps {
+  /**
+   * AnimatePresence 的 popLayout 经它拿到这一项的元素：退场时量出尺寸、把它抽出布局，其余项才能立刻让位。
+   * 不接的话退场项一直占着位，淡出结束那一帧下面各项一起上跳。
+   */
+  ref?: Ref<HTMLLIElement>;
   instance: InstanceSummary;
   index: number;
   dragging: boolean;
@@ -521,7 +681,7 @@ interface PinItemProps extends ItemBaseProps {
   onMenu(target: HTMLElement, openedBy: MenuOpenedBy): void;
 }
 
-function PinItem({ instance, index, selected = false, tabStop, tooltipsOff, dragging, register, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onActivate, onMenu }: PinItemProps) {
+function PinItem({ ref: presenceRef, instance, index, selected = false, tabStop, tooltipsOff, dragging, register, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onActivate, onMenu }: PinItemProps) {
   const y = useMotionValue(0);
   // 每个固定项只随自己的启动视图变：别的实例的下载进度、这一局的游戏日志不让它重渲染
   const view = useLauncherSelector((s) => launchView(s, instance), launchViewEqual);
@@ -529,8 +689,10 @@ function PinItem({ instance, index, selected = false, tabStop, tooltipsOff, drag
   const ref = useCallback(
     (el: HTMLLIElement | null) => {
       register(id, el === null ? null : { el, y });
+      if (typeof presenceRef === "function") presenceRef(el);
+      else if (presenceRef !== undefined && presenceRef !== null) presenceRef.current = el;
     },
-    [id, register, y],
+    [id, presenceRef, register, y],
   );
   const onKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
@@ -542,13 +704,13 @@ function PinItem({ instance, index, selected = false, tabStop, tooltipsOff, drag
     <motion.li
       ref={ref}
       className={styles.row}
+      data-sidebar-row=""
       data-dragging={dragging || undefined}
       style={{ y }}
-      initial={{ opacity: 0, scale: 0.8 }}
-      animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
+      initial={{ opacity: 0, scale: 0.6 }}
+      animate={{ opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } }}
       exit={{ opacity: 0, scale: 0.8, transition: fade.out }}
     >
-      {selected && <Indicator />}
       <Tooltip content={instance.name} sub={<PinLine view={view} instance={instance} />} side="right" delay={TOOLTIP_TIMING.sidebarDelay} disabled={tooltipsOff}>
         <button
           type="button"

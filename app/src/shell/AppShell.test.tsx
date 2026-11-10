@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
+import { motion } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
@@ -39,7 +40,14 @@ function pageTable(loads: PageId[], broken: Set<PageId>): PageTable {
       if (broken.has(page)) {
         throw new Error(`${page} 页渲染出错`);
       }
-      return <p data-page={page}>{`${page}:${JSON.stringify(route)}`}</p>;
+      return (
+        <p data-page={page}>
+          {`${page}:${JSON.stringify(route)}`}
+          {/* 入场探针：带 initial 的 motion 元素，内联透明度说明入场有没有被跳过。过渡拉得极长，用例跑完之前它都停在起点附近 */}
+          {/* sk-guard-allow T8: 探针要在整条用例期间停在入场起点，时长故意写成一小时，不是界面动效参数 */}
+          <motion.span data-entrance-probe="" initial={{ opacity: 0 }} animate={{ opacity: 1, transition: { duration: 3600, ease: "linear" } }} />
+        </p>
+      );
     }
     return [page, async () => {
       loads.push(page);
@@ -237,6 +245,24 @@ describe("外壳布局", () => {
     await mount();
     const slot = document.querySelector<HTMLElement>('[data-tauri-drag-region=""]');
     expect(slot?.style.opacity).toBe("1");
+  });
+
+  it("页面自己的入场不被外壳跳过：启动那一屏之后换到的每一页都从入场起点开始", async () => {
+    await mount();
+    const probe = () => {
+      const el = document.querySelector<HTMLElement>("[data-entrance-probe]");
+      if (el === null) throw new Error("页面里没有入场探针");
+      return el;
+    };
+    // 启动那一屏：外壳两列不淡入，页面区块的入场照播。入场被跳过时探针一挂上就是 1
+    expect(document.querySelector<HTMLElement>('[data-tauri-drag-region=""]')?.style.opacity).toBe("1");
+    expect(Number(probe().style.opacity)).toBeLessThan(0.01);
+    for (const page of ["library", "tasks", "home"] as const) {
+      act(() => nav.go({ page }));
+      await flush();
+      expect(pageShown()).toBe(page);
+      expect(Number(probe().style.opacity)).toBeLessThan(0.01);
+    }
   });
 
   it("向导收尾后主界面淡入：侧栏与主列从透明开始", async () => {

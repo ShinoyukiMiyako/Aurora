@@ -1,0 +1,19 @@
+/* 退场中的骨架脱离布局后以这里为定位基准，叠在内容上淡出 */
+.loadable {
+  position: relative;
+  min-width: 0;
+}
+
+.skeleton {
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+/* 等待期：占着位但看不见。用透明度而不是 visibility，到了该出现的时刻骨架是淡入的 */
+.skeleton[data-pending] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.content {
+  min-width: 0;
+}

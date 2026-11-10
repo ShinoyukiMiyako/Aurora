@@ -38,6 +38,28 @@ export const springs: Readonly<Record<SpringName, Transition>> = {
   base: twoParam(SPRING_PARAMS.base.duration, SPRING_PARAMS.base.bounce),
 };
 
+/**
+ * 两参弹簧从位移 x0、速度 v0（每秒）回到 0 的解析解：t 秒时的位移与速度。
+ * 给不经 framer-motion 的动画用（交给合成线程播的关键帧要事先算好整条轨迹）；带初速度，途中改目标时接着走而不是从零速重新起步。
+ */
+export function springAt(name: SpringName, x0: number, v0: number, t: number): { x: number; v: number } {
+  const { duration, bounce } = SPRING_PARAMS[name];
+  const omega = (2 * Math.PI) / duration;
+  const zeta = 1 - bounce;
+  if (zeta >= 1) {
+    const c = v0 + omega * x0;
+    const decay = Math.exp(-omega * t);
+    return { x: decay * (x0 + c * t), v: decay * (c - omega * (x0 + c * t)) };
+  }
+  const wd = omega * Math.sqrt(1 - zeta * zeta);
+  const b = (v0 + zeta * omega * x0) / wd;
+  const decay = Math.exp(-zeta * omega * t);
+  const cos = Math.cos(wd * t);
+  const sin = Math.sin(wd * t);
+  const x = decay * (x0 * cos + b * sin);
+  return { x, v: -zeta * omega * x + decay * wd * (b * cos - x0 * sin) };
+}
+
 /** 透明度一律用补间：弹簧作用在 opacity 上会过冲到 1 以上被截断，尾巴发闷。退场都用 out，不回弹。 */
 export const fade = {
   in: { duration: 0.2, ease: [0.16, 1, 0.3, 1] },
@@ -72,6 +94,16 @@ export const tabPanel: Variants = {
   hidden: { opacity: 0, y: 6 },
   show: { opacity: 1, y: 0, transition: { ...springs.settle, opacity: fade.in } },
 };
+
+/**
+ * 流内块的增删（列表行、提示条、校验错误、联动出现的选项）：新增淡入并从略小处落到位，删除淡出。
+ * 只管这一块自己；它腾出或占掉的位置由 popLayout 加兄弟让位（lib/reflow）处理，不动 height / margin。
+ */
+export const insertItem = {
+  initial: { opacity: 0, scale: 0.98 },
+  animate: { opacity: 1, scale: 1, transition: { ...springs.settle, opacity: fade.in } },
+  exit: { opacity: 0, scale: 0.98, transition: fade.out },
+} as const;
 
 /** 否定抖动：只用于会话崩溃时的状态岛与被拒绝的表单字段，每次只播一次，减少动画时不播。 */
 export const shake = {

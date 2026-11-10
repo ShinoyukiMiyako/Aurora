@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { fade, pageItem, rootTransition, SPRING_PARAMS, springs, tabPanel, TOOLTIP_TIMING, twoParam, type SpringName } from "./motion";
+import { fade, insertItem, pageItem, rootTransition, SPRING_PARAMS, springAt, springs, tabPanel, TOOLTIP_TIMING, twoParam, type SpringName } from "./motion";
 
 const TOKENS = readFileSync(new URL("../styles/tokens.css", import.meta.url), "utf8");
 
@@ -103,6 +103,47 @@ describe("CSS 弹簧近似与动效令牌", () => {
   });
 });
 
+describe("springAt：带初值的解析解", () => {
+  const NAMES: SpringName[] = ["tap", "settle", "pop", "soft", "morph", "base"];
+
+  it.each(NAMES)("%s：从 -1 静止出发，与 0 到 1 的阶跃解只差一个平移", (name) => {
+    const { duration, bounce } = SPRING_PARAMS[name];
+    for (const t of [0, 0.01, 0.05, 0.12, 0.3, 0.6]) {
+      expect(springAt(name, -1, 0, t).x).toBeCloseTo(position(t, duration, bounce) - 1, 9);
+    }
+  });
+
+  it.each(NAMES)("%s：t = 0 时原样给回初始位移与初速度", (name) => {
+    const at = springAt(name, -120, 640, 0);
+    expect(at.x).toBeCloseTo(-120, 9);
+    expect(at.v).toBeCloseTo(640, 9);
+  });
+
+  it.each(NAMES)("%s：速度是位移对时间的导数", (name) => {
+    const h = 1e-6;
+    for (const t of [0.003, 0.04, 0.11, 0.25]) {
+      const slope = (springAt(name, -80, 300, t + h).x - springAt(name, -80, 300, t - h).x) / (2 * h);
+      expect(springAt(name, -80, 300, t).v).toBeCloseTo(slope, 3);
+    }
+  });
+
+  it("途中接力：从某一刻的位移与速度重新出发，轨迹与不间断时相同", () => {
+    const mid = springAt("settle", -120, 0, 0.05);
+    const relay = springAt("settle", mid.x, mid.v, 0.07);
+    const straight = springAt("settle", -120, 0, 0.12);
+    expect(relay.x).toBeCloseTo(straight.x, 9);
+    expect(relay.v).toBeCloseTo(straight.v, 9);
+  });
+
+  it("最终回到 0 并停住", () => {
+    for (const name of NAMES) {
+      const end = springAt(name, 300, -900, 2);
+      expect(Math.abs(end.x)).toBeLessThan(1e-3);
+      expect(Math.abs(end.v)).toBeLessThan(1e-2);
+    }
+  });
+});
+
 describe("变体与时机", () => {
   it("根过渡：位移走 base 弹簧，透明度走淡入补间", () => {
     expect(rootTransition).toEqual({ ...springs.base, opacity: fade.in });
@@ -118,6 +159,12 @@ describe("变体与时机", () => {
 
   it("面板变体与页面区块同名，子元素才接得住编排", () => {
     expect(Object.keys(tabPanel).sort()).toEqual(Object.keys(pageItem).sort());
+  });
+
+  it("流内块增删：从 0.98 落到位走 settle，透明度走补间，退场只淡出不回弹", () => {
+    expect(insertItem.initial).toEqual({ opacity: 0, scale: 0.98 });
+    expect(insertItem.animate).toEqual({ opacity: 1, scale: 1, transition: { ...springs.settle, opacity: fade.in } });
+    expect(insertItem.exit).toEqual({ opacity: 0, scale: 0.98, transition: fade.out });
   });
 
   it("提示气泡时机", () => {

@@ -1,0 +1,14 @@
+.slot {
+  display: inline-grid;
+  justify-items: center;
+}
+
+.option {
+  grid-area: 1 / 1;
+  visibility: hidden;
+  white-space: nowrap;
+}
+
+.option[data-current] {
+  visibility: visible;
+}
