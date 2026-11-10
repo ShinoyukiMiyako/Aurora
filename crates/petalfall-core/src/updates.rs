@@ -27,6 +27,7 @@ use serde::Serialize;
 use crate::compat::{
     instance_mc_version, instance_mod_loaders, is_fabric_twin, prefer_quilt_builds,
 };
+use crate::data_format::GuardMode;
 use crate::deps::project_gone;
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
@@ -94,7 +95,10 @@ impl Petalfall {
     /// 有身份走精确查，无身份先做一轮哈希反查补身份（补上的身份写回卷宗，下次不必再查）。返回顺序按
     /// 文件名字典序，保证 UI 列表稳定。新旧一律按发布时间比，绝不比版本号字符串：两个平台的版本号
     /// 各家一套格式，字典序比出来的「更新」随时可能是一次降级。
+    ///
+    /// 补身份会写卷宗，所以与其它改实例的入口一样，先以「使用」方式核对游戏目录的数据格式记号，再扫盘、发请求。
     pub async fn check_updates(&self, version_id: &str) -> Result<Vec<UpdateCandidate>> {
+        self.guard_game_dir(GuardMode::Use).await?;
         self.check_updates_with(version_id, || self.curseforge_client())
             .await
     }
@@ -656,9 +660,12 @@ fn index_by_fingerprint(matches: Vec<CurseForgeFingerprintMatch>) -> HashMap<u32
 mod tests {
     use super::*;
     use crate::config::PetalfallConfig;
+    use crate::data_format::testing::with_fixture;
+    use crate::instances::tests::{NEWER_STAMP, NEWER_WRITER, disk_state, own_format, write_stamp};
     use crate::ledger::Ledger;
     use petalfall_instance::IsolationPolicy;
     use petalfall_modplatform::ReleaseChannel;
+    use petalfall_release::data_format::{StampFile, StampRead, parse_stamp};
     use sha1::{Digest, Sha1};
     use std::path::{Path, PathBuf};
     use wiremock::matchers::{body_partial_json, method, path};
@@ -2587,5 +2594,82 @@ mod tests {
         assert_eq!(index.get(&3_608_199_863).unwrap().mod_id, 238_222);
         // 超出 u32 的指纹不可能来自本次请求：丢弃，绝不截断成 705_032_704 去错配。
         assert!(!index.contains_key(&705_032_704));
+    }
+
+    /// 补身份要写卷宗：记号比这一版新或读不懂时，检查更新在扫盘与反查之前就被挡下，带出记号的结论与游戏
+    /// 目录，游戏目录里一个文件都没被改、被碰或多出来，平台一个请求都没收到。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn check_updates_refuses_a_rejected_game_dir_before_scanning_or_asking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.20.1-fabric", FABRIC_JSON).await;
+        let (_, sha1) = put_mod(mc, "1.20.1-fabric", "mystery.jar", b"mystery-payload").await;
+        let server = MockServer::start().await;
+        // 关卡缺席时 mystery.jar 会被按哈希认出来，身份连同标题写回卷宗。
+        mount_post(
+            &server,
+            "/version_files",
+            format!(
+                r#"{{"{sha1}":{}}}"#,
+                modrinth_version(
+                    "old1",
+                    "AANobbMI",
+                    "0.5.3",
+                    "2025-01-01T00:00:00Z",
+                    "mystery.jar",
+                    &sha1
+                )
+            ),
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"[{"id":"AANobbMI","title":"Sodium","description":"d","project_type":"mod",
+                     "downloads":1,"icon_url":null}]"#,
+            ))
+            .mount(&server)
+            .await;
+        let petalfall = petalfall_at(mc, &server.uri());
+        let game = petalfall.game_dir().to_path_buf();
+
+        write_stamp(&game, NEWER_STAMP);
+        let before = disk_state(&game);
+        match with_fixture(own_format(2), petalfall.check_updates("1.20.1-fabric"))
+            .await
+            .unwrap_err()
+        {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            } => {
+                assert_eq!(path, game);
+                assert_eq!((found, supported), (3, 2));
+                assert_eq!(written_by.as_deref(), Some(NEWER_WRITER));
+            }
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+        assert_eq!(disk_state(&game), before);
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+
+        // 读不懂与号是多少无关：不换本版号，走生产的这条路。
+        let unreadable = r#"{"data_format":"3"}"#;
+        write_stamp(&game, unreadable);
+        let expected = match parse_stamp(StampFile::Contents(unreadable.as_bytes())) {
+            StampRead::Unreadable { reason } => reason,
+            other => panic!("夹具应当读不懂，实际是 {other:?}"),
+        };
+        let before = disk_state(&game);
+        match petalfall.check_updates("1.20.1-fabric").await.unwrap_err() {
+            CoreError::DataFormatUnreadable { path, reason } => {
+                assert_eq!(path, game);
+                assert_eq!(reason, expected);
+            }
+            other => panic!("应报记号读不懂，实际是 {other:?}"),
+        }
+        assert_eq!(disk_state(&game), before);
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
     }
 }
