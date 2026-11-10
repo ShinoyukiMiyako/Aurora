@@ -76,6 +76,9 @@ export const LIBRARY_COPY = {
   loadErrorTitle: "读不到实例列表",
   retry: "重试",
   openGameDir: "打开游戏目录",
+  /** 游戏目录被更新的版本用过、或记数据格式的文件读不懂时的标题：正文说清原因，出路是换一个目录。 */
+  blockedTitle: "这个游戏目录现在打不开",
+  changeGameDir: "换一个游戏目录",
 
   gridLabel: "实例",
   loadingLabel: "正在读取实例列表",

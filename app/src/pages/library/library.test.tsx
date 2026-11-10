@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { CONFIRM_COPY, DELETE_INSTANCE_COPY, GAME_DIR_SWITCH_COPY, SLOW_LOADING_HINT, TOAST_COPY } from "../../copy/flows";
 import type { GameDirectoryDto } from "../../ipc/config";
+import { IpcError } from "../../ipc/errors";
 import type { InstanceDto, WorldDto } from "../../ipc/instances";
+import { APP_NAME } from "../../lib/app-info";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
@@ -549,6 +551,101 @@ describe("实例库：筛选、搜索与空状态", () => {
     click(byText("button", LIBRARY_COPY.retry));
     await flush();
     expect(callsOf(ipc, "list_instances").length).toBe(before + 1);
+    expect(cardNames()).toHaveLength(4);
+  });
+});
+
+describe("实例库：游戏目录的数据格式不合", () => {
+  const GAME_DIR = "D:\\Games\\.minecraft";
+  const tooNew = (written_by: string | null, written_by_channel: "dev" | "beta" | "stable" | null) =>
+    new IpcError("game_dir_data_too_new", `游戏目录 ${GAME_DIR} 的数据格式 3 比这一版认得的 2 新`, { path: GAME_DIR, found: 3, supported: 2, written_by, written_by_channel });
+  const unreadable = (reason: string) => new IpcError("data_format_unreadable", `游戏目录 ${GAME_DIR} 的数据格式记号读不懂`, { path: GAME_DIR, reason });
+  const listFailsWith = (error: Error) =>
+    ipc.overrides.set("list_instances", () => {
+      throw error;
+    });
+
+  /** 在场的元素：交叉淡化时退场的那一份带 inert 还留在文档里。 */
+  const live = (selector: string) => [...document.querySelectorAll<HTMLElement>(selector)].filter((el) => el.closest("[inert]") === null);
+  const errorTitles = () => live("h2").map((el) => el.textContent);
+  const errorActions = () =>
+    live("button")
+      .map((b) => b.textContent)
+      .filter((label) => label === LIBRARY_COPY.changeGameDir || label === LIBRARY_COPY.retry || label === LIBRARY_COPY.openGameDir);
+  const bodyShows = (text: string) => live("p").some((p) => p.textContent === text);
+
+  it("被预览版用过：标题说打不开，正文点名那一版和该装的版本，出路依次是换目录、重试、打开游戏目录", async () => {
+    listFailsWith(tooNew("1.1.0-dev.57", "dev"));
+    await mount();
+    expect(errorTitles()).toEqual(["这个游戏目录现在打不开"]);
+    expect(bodyShows("游戏目录 D:\\Games\\.minecraft 已经被预览版 1.1.0-dev.57 用过，这个版本读不了里面的实例。装上预览版 1.1.0-dev.57 或更新的版本，或者换一个游戏目录。")).toBe(true);
+    expect(errorActions()).toEqual(["换一个游戏目录", "重试", "打开游戏目录"]);
+    expect(cardNames()).toEqual([]);
+  });
+
+  it("被测试版用过：通道名取测试版", async () => {
+    listFailsWith(tooNew("1.2.0-beta.3", "beta"));
+    await mount();
+    expect(bodyShows("游戏目录 D:\\Games\\.minecraft 已经被测试版 1.2.0-beta.3 用过，这个版本读不了里面的实例。装上测试版 1.2.0-beta.3 或更新的版本，或者换一个游戏目录。")).toBe(true);
+  });
+
+  it("不知道是哪一版用过：正文说更新的产品名、装上更新的版本", async () => {
+    listFailsWith(tooNew(null, null));
+    await mount();
+    expect(errorTitles()).toEqual(["这个游戏目录现在打不开"]);
+    expect(bodyShows(`游戏目录 D:\\Games\\.minecraft 已经被更新的${APP_NAME}用过，这个版本读不了里面的实例。装上更新的版本，或者换一个游戏目录。`)).toBe(true);
+    expect(errorActions()).toEqual(["换一个游戏目录", "重试", "打开游戏目录"]);
+  });
+
+  it("格式记录读不懂：同一个标题，正文带出目录与原因原文", async () => {
+    listFailsWith(unreadable("expected value at line 1 column 1"));
+    await mount();
+    expect(errorTitles()).toEqual(["这个游戏目录现在打不开"]);
+    expect(bodyShows("游戏目录 D:\\Games\\.minecraft 里的格式记录读不懂（expected value at line 1 column 1），为了不弄坏里面的实例，这次没有打开它。")).toBe(true);
+    expect(errorActions()).toEqual(["换一个游戏目录", "重试", "打开游戏目录"]);
+  });
+
+  it.each([
+    ["数据格式太新", () => tooNew("1.1.0-dev.57", "dev")],
+    ["格式记录读不懂", () => unreadable("missing field `format`")],
+  ])("%s时点「换一个游戏目录」：去设置的游戏分区，不重读实例列表", async (_, error) => {
+    listFailsWith(error());
+    await mount();
+    expect(nav.route).toEqual({ page: "home" });
+    const reads = callsOf(ipc, "list_instances").length;
+    click(byText("button", LIBRARY_COPY.changeGameDir));
+    expect(nav.route).toEqual({ page: "settings", section: "game" });
+    await flush();
+    expect(callsOf(ipc, "list_instances")).toHaveLength(reads);
+  });
+
+  it("别的错误码照旧：标题是读不到实例列表，正文是后端原文，没有换目录的按钮", async () => {
+    listFailsWith(new IpcError("invalid_game_directory", `游戏目录 ${GAME_DIR} 不能用：访问被拒绝`, { path: GAME_DIR, problem: "unavailable" }));
+    await mount();
+    expect(errorTitles()).toEqual([LIBRARY_COPY.loadErrorTitle]);
+    expect(bodyShows("游戏目录 D:\\Games\\.minecraft 不能用：访问被拒绝")).toBe(true);
+    expect(errorActions()).toEqual(["重试", "打开游戏目录"]);
+  });
+
+  it("重试后换成别的失败：打不开的说法交叉换回读不到实例列表，换目录的按钮随之撤下；再重试成功出卡片", async () => {
+    listFailsWith(tooNew("1.1.0-dev.57", "dev"));
+    await mount();
+    expect(errorTitles()).toEqual(["这个游戏目录现在打不开"]);
+    listFailsWith(new Error("扫描 versions 目录失败"));
+    click(byText("button", LIBRARY_COPY.retry));
+    await flush();
+    // 两种失败各占一个键：换过去的那一刻旧场景还在、带 inert 原地淡出，不是同一个场景就地换字
+    const titles = () => [...document.querySelectorAll("h2")].map((h) => `${h.closest("[inert]") === null ? "live" : "leaving"}:${h.textContent}`);
+    expect(titles()).toEqual(["leaving:这个游戏目录现在打不开", `live:${LIBRARY_COPY.loadErrorTitle}`]);
+    await afterMotion();
+    expect(errorTitles()).toEqual([LIBRARY_COPY.loadErrorTitle]);
+    expect(bodyShows("扫描 versions 目录失败")).toBe(true);
+    expect(errorActions()).toEqual(["重试", "打开游戏目录"]);
+    ipc.overrides.set("list_instances", () => instances);
+    click(byText("button", LIBRARY_COPY.retry));
+    await flush();
+    await afterMotion();
+    expect(errorTitles()).toEqual([]);
     expect(cardNames()).toHaveLength(4);
   });
 });
