@@ -24,6 +24,8 @@ import {
 } from "./dev-distribution.mjs";
 
 const SCRIPT = fileURLToPath(new URL("./dev-distribution.mjs", import.meta.url));
+// 版本先后与认通道的共用向量，Rust 侧读的是同一份：各写各的用例可以同时通过，两边的规则却已经分叉
+const VERSION_VECTORS = JSON.parse(readFileSync(new URL("../../crates/petalfall-release/testdata/version-order.json", import.meta.url), "utf8"));
 const VERSION = `0.${randomInt(0, 50)}.${randomInt(0, 50)}-dev.${randomInt(1, 100_000)}`;
 // 运行标识是 <运行号>-<运行次数>。运行号是仓库里递增的大整数；运行次数第一次运行是 1，重跑才往上加，两种都要覆盖到
 const RUN_ID = randomInt(1, 2 ** 40);
@@ -123,6 +125,27 @@ describe("channelOf", () => {
     assert.equal(channelOf("0.0.0-dev.0"), "dev");
     assert.equal(channelOf("0.0.0-beta.0"), "beta");
     assert.equal(channelOf("10.20.30-beta.9007199254740993"), "beta");
+  });
+
+  // stable 条目先跳过：CHANNELS 里还没有 stable（正式版的流水线和桶上的规则都还没有）。给 CHANNELS 加上 stable 时，
+  // 这里要去掉跳过、照样逐条断言，UNKNOWN_CHANNEL_VERSIONS 里的 "1.0.0" 也要同时移走
+  it("与共用向量的通道条目逐条一致：dev、beta 认得出，null 的认不出、拒绝", () => {
+    const checked = new Set();
+    for (const { version, channel } of VERSION_VECTORS.channel) {
+      if (channel === "stable") continue;
+      if (channel === null) {
+        assert.throws(
+          () => channelOf(version),
+          { message: `认不出版本号的通道：应为 X.Y.Z-<通道>.N，通道只能是 dev、beta，数字段不带前导零：${JSON.stringify(version)}` },
+          version,
+        );
+      } else {
+        assert.equal(channelOf(version), channel, version);
+      }
+      checked.add(String(channel));
+    }
+    // 向量里缺了哪一类，上面的循环对那一类就是空转
+    assert.deepEqual([...checked].sort(), ["beta", "dev", "null"]);
   });
 
   it("没有预发布标识、标识认不出、数字段带前导零时拒绝", () => {
@@ -532,30 +555,22 @@ describe("validateManifest", () => {
 });
 
 describe("compareVersions", () => {
-  // 每条链从小到大排好，任取两项比出的都应是它们在链里的先后
+  // 本项目三个通道的先后（同一基础号下 beta 低于 dev，dev 低于正式版；抬基础号；序号按数值比）都在共用向量里
+  it("与共用向量的先后条目逐条一致，两个参数对调时结果取反", () => {
+    const checked = new Set();
+    for (const { a, b, cmp } of VERSION_VECTORS.order) {
+      assert.equal(compareVersions(a, b), cmp, `${a} 对 ${b}`);
+      assert.equal(compareVersions(b, a), cmp === 0 ? 0 : -cmp, `${b} 对 ${a}`);
+      checked.add(cmp);
+    }
+    // 向量里缺了哪一种结果，上面的循环对那一种就是空转
+    assert.deepEqual([...checked].sort((x, y) => x - y), [-1, 0, 1]);
+  });
+
+  // 下面是向量只放标准形状、覆盖不到的写法。每条链从小到大排好，任取两项比出的都应是它们在链里的先后
   const chains = [
     // semver 2.0 第 11 条给的例子
     ["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0"],
-    // 本项目的三个通道：同一基础号下 beta 低于 dev，dev 低于正式版；1.0.0-beta.1 高于现有的所有 0.1.0-dev.N
-    [
-      "0.1.0-dev.9",
-      "0.1.0-dev.10",
-      "0.1.0-dev.37",
-      "0.1.0",
-      "1.0.0-beta.0",
-      "1.0.0-beta.1",
-      "1.0.0-beta.2",
-      "1.0.0-beta.10",
-      "1.0.0-dev.1",
-      "1.0.0",
-      "1.0.1-beta.1",
-      "1.1.0-beta.1",
-      "1.1.0-dev.1",
-      "1.9.0",
-      "1.10.0",
-      "2.0.0-beta.1",
-      "10.0.0",
-    ],
     // 纯数字段低于含字母的段（0a 含字母，按 ASCII 比）；ASCII 里大写字母排在小写前面；段多的更高
     ["1.0.0-1", "1.0.0-99", "1.0.0-0a", "1.0.0-B", "1.0.0-a", "1.0.0-a.1", "1.0.0-a.1.0", "1.0.0-a-b"],
   ];
@@ -582,7 +597,6 @@ describe("compareVersions", () => {
   // 2^53 + 1 换成 Number 会舍入成 2^53，两边就成了相等
   it("超过 2^53 的数字段照样比得出先后", () => {
     assert.equal(compareVersions("9007199254740993.0.0", "9007199254740992.0.0"), 1);
-    assert.equal(compareVersions("1.0.0-beta.9007199254740992", "1.0.0-beta.9007199254740993"), -1);
   });
 
   it("构建元数据不参与比较", () => {
@@ -634,11 +648,11 @@ describe("nextBeta", () => {
   it("一个都没有时是 1；只有 beta.0 时也是 1", () => {
     assert.equal(nextBeta("1.0.0", []), "1");
     assert.equal(nextBeta("1.0.0", ["", "dev-build", "v1.0.0"]), "1");
-    assert.equal(nextBeta("2.3.4", ["v2.3.4-beta.0"]), "1");
+    assert.equal(nextBeta("2.3.0", ["v2.3.0-beta.0"]), "1");
   });
 
   it("随机的基础号和序号，顺序打乱，混着只差一个字符就会被误认的行", () => {
-    const base = `${randomInt(1, 100)}.${randomInt(0, 100)}.${randomInt(0, 100)}`;
+    const base = `${randomInt(1, 100)}.${randomInt(0, 100)}.0`;
     const numbers = Array.from({ length: randomInt(1, 30) }, () => randomInt(0, 100_000));
     const noise = numbers.map((n) => `v${base}-beta.${n + 100_000}x`);
     const tags = [...numbers.map((n) => `v${base}-beta.${n}`), ...noise];
@@ -659,10 +673,23 @@ describe("nextBeta", () => {
     }
   });
 
-  // 0.x.y-beta.N 比 0.x.y-dev.N 小，装过 dev 的用户换它会被引导程序判为降级
+  // dev 已在 1.0.0 及以上，0.x 的 beta 版本低于所有现行的 dev 版本
   it("基础号的主版本小于 1 时拒绝", () => {
     for (const base of ["0.1.0", "0.0.0", `0.${randomInt(0, 100)}.${randomInt(0, 100)}`]) {
       assert.throws(() => nextBeta(base, [`v${base}-beta.1`]), new RegExp(`^Error: 基础号 ${base.replaceAll(".", "\\.")} 的主版本小于 1`), base);
+    }
+  });
+
+  // 补丁段留给正式版补丁：基础号用过 X.Y.1，正式版补丁 X.Y.1 就与它撞号
+  it("基础号的补丁段不为 0 时拒绝，已有这个基础号的 tag 也一样", () => {
+    for (const base of ["1.0.1", "2.3.4", "1.10.1", "1.0.9007199254740993", `${randomInt(1, 100)}.${randomInt(0, 100)}.${randomInt(1, 100)}`]) {
+      assert.throws(
+        () => nextBeta(base, [`v${base}-beta.1`]),
+        {
+          message: `基础号 ${base} 的补丁段不为 0：基础号是下一个要发的正式版号，应为 X.Y.0；补丁段留给正式版补丁，拿它作基础号会与正式版补丁 ${base} 撞号`,
+        },
+        base,
+      );
     }
   });
 });
@@ -908,6 +935,7 @@ describe("命令行入口", () => {
     const tags = notesFixture("v0.1.0-beta.1\n");
     for (const [args, message] of [
       [["0.1.0", tags], /基础号 0\.1\.0 的主版本小于 1/],
+      [["1.0.1", tags], /基础号 1\.0\.1 的补丁段不为 0/],
       [["1.0.0-beta.1", tags], /基础号应为 X\.Y\.Z/],
       [["1.0.0", join(root, "missing-tags.txt")], /ENOENT/],
     ]) {

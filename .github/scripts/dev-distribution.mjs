@@ -36,7 +36,7 @@ const CHANNEL_NAMES = Object.freeze(Object.keys(CHANNELS));
 const IDENT = "[0-9A-Za-z-]+";
 const SEMVER = new RegExp(`^(${NUM})\\.(${NUM})\\.(${NUM})(?:-(${IDENT}(?:\\.${IDENT})*))?(?:\\+${IDENT}(?:\\.${IDENT})*)?$`);
 const NUMERIC_IDENT = /^[0-9]+$/;
-const RELEASE_CORE = new RegExp(`^(${NUM})\\.${NUM}\\.${NUM}$`);
+const RELEASE_CORE = new RegExp(`^(${NUM})\\.${NUM}\\.(${NUM})$`);
 // 与 put-manifest 的 MAX_NOTES_CHARS 一致。那边用 Python 的 len，数的是 Unicode 码位；JS 的 length 数 UTF-16 单元，
 // 增补平面的字符会多算一个，所以这里按码位数
 const MAX_NOTES_CHARS = 4000;
@@ -208,11 +208,17 @@ export function compareVersions(a, b) {
 }
 
 // beta 序号取已发布的 v<基础号>-beta.N 里最大的加 1：被拒批、失败的运行和演练都不建 tag，所以不占号。
-// 基础号必须是主版本至少为 1 的纯 X.Y.Z：0.x.y-beta.N 比同基础号的 dev 版本小，装过 dev 的用户换它会被判为降级。
+// 基础号是下一个要发的正式版号，必须是 X.Y.0、主版本至少为 1：dev 已在 1.0.0 及以上，0.x 的 beta 版本低于所有现行的
+// dev 版本；补丁段留给正式版补丁，基础号用过 X.Y.1，正式版补丁 X.Y.1 就与它撞号，而且比 X.Y.1-dev.N、X.Y.1-beta.N 都高。
 export function nextBeta(base, tags) {
   const match = typeof base === "string" ? RELEASE_CORE.exec(base) : null;
   if (match === null) throw new Error(`基础号应为 X.Y.Z，数字段不带前导零：${JSON.stringify(base)}`);
-  if (match[1] === "0") throw new Error(`基础号 ${base} 的主版本小于 1：${base}-beta.N 比同基础号的 dev 版本小，装过 dev 的用户会被判为降级`);
+  if (match[1] === "0") {
+    throw new Error(`基础号 ${base} 的主版本小于 1：基础号应为 X.Y.0 且主版本至少为 1，dev 已在 1.0.0 及以上，${base}-beta.N 低于所有现行的 dev 版本`);
+  }
+  if (match[2] !== "0") {
+    throw new Error(`基础号 ${base} 的补丁段不为 0：基础号是下一个要发的正式版号，应为 X.Y.0；补丁段留给正式版补丁，拿它作基础号会与正式版补丁 ${base} 撞号`);
+  }
   const pattern = new RegExp(`^v${base.replaceAll(".", "\\.")}-beta\\.(${NUM})$`);
   let max = 0n;
   for (const tag of tags) {
