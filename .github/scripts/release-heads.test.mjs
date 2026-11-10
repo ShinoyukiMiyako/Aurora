@@ -8,6 +8,7 @@ import { after, before, describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
+  DATA_FORMAT_LINE,
   DATA_FORMAT_PATH,
   DEV_RELEASE_TAG,
   FETCH_RETRIES,
@@ -20,12 +21,16 @@ import {
   devGate,
   formatHeads,
   main,
+  parseDataFormat,
   parseHeads,
+  payloadFailures,
   readHeads,
   releaseManifestUrl,
 } from "./release-heads.mjs";
 
+const SCRIPT = fileURLToPath(new URL("./release-heads.mjs", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+const DATA_FORMAT_FILE = join(REPO_ROOT, DATA_FORMAT_PATH);
 const VECTOR = JSON.parse(readFileSync(join(REPO_ROOT, "crates/petalfall-release/testdata/version-order.json"), "utf8"));
 const FIXTURE_TAGS = readFileSync(fileURLToPath(new URL("./testdata/release-heads/ls-remote-tags.txt", import.meta.url)), "utf8")
   .split(/\r?\n/)
@@ -160,6 +165,7 @@ function makeDeps({ fetch = unexpected("联网"), git = unexpected("跑 git"), e
     },
     remote,
     pubkey: (channel) => PUBKEYS[channel],
+    dataFormatSource: () => readFileSync(DATA_FORMAT_FILE, "utf8"),
     env,
     out: (line) => out.push(line),
     err: (line) => err.push(line),
@@ -680,6 +686,83 @@ describe("gate 命令行", () => {
     const harness = makeDeps();
     assert.equal(await main(["gate", "dev", "release", "1.0.0-dev.1", path], harness.deps), 1);
     assert.deepEqual(harness.err, ["::error::heads 文件的键应恰好是 dev、beta、stable"]);
+  });
+});
+
+describe("payload：核对安装包的载荷头", () => {
+  const source = readFileSync(DATA_FORMAT_FILE, "utf8");
+  const current = parseDataFormat(source, DATA_FORMAT_PATH);
+  const version = `1.0.0-dev.${randomInt(42, 100_000)}`;
+  const good = { version, magic: "PFSETUP2", headerVersion: version, dataFormat: String(current), caps: "1" };
+
+  it("DATA_FORMAT 的正则在现有源码里恰好命中一行", () => {
+    const hits = source.split(/\r?\n/).filter((line) => DATA_FORMAT_LINE.test(line));
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0], `pub const DATA_FORMAT: u32 = ${current};`);
+    assert.ok(Number.isSafeInteger(current) && current >= 1);
+  });
+
+  it("正则没命中、命中两行、写法变了都报错，不悄悄跳过", () => {
+    const what = "样例";
+    for (const [text, hits] of [
+      ["", 0],
+      ["pub const DATA_FORMAT: u32 = 0;\n", 0],
+      ["pub const DATA_FORMAT: u64 = 2;\n", 0],
+      ["    pub const DATA_FORMAT: u32 = 2;\n", 0],
+      ["// pub const DATA_FORMAT: u32 = 2;\n", 0],
+      ["pub const DATA_FORMAT: u32 = 2;\npub const DATA_FORMAT: u32 = 3;\n", 2],
+    ]) {
+      assert.throws(() => parseDataFormat(text, what), { message: `样例 里应恰好有一行 pub const DATA_FORMAT: u32 = <正整数>;，实际 ${hits} 行` }, JSON.stringify(text));
+    }
+    assert.equal(parseDataFormat("//! 说明\r\npub const DATA_FORMAT: u32 = 12;\r\n", what), 12);
+    assert.throws(() => parseDataFormat("pub const DATA_FORMAT: u32 = 4294967296;\n", what), { message: "样例 里的 DATA_FORMAT 4294967296 超出 u32" });
+  });
+
+  it("四项都对时通过，caps 其他位不影响", () => {
+    for (const caps of ["1", "3", "4294967295"]) assert.deepEqual(payloadFailures({ ...good, caps }, current), []);
+  });
+
+  it("四项各错一项都失败", () => {
+    const cases = [
+      [{ magic: "PFSETUP1" }, ["载荷头的 magic 是 PFSETUP1，应为 PFSETUP2"]],
+      [{ headerVersion: "1.0.0-dev.41" }, [`载荷头里的版本是 1.0.0-dev.41，本包是 ${version}`]],
+      [{ dataFormat: String(current + 1) }, [`载荷头的 data_format 是 ${current + 1}，源码里的 DATA_FORMAT 是 ${current}`]],
+      [{ dataFormat: "0" }, [`载荷头的 data_format 是 0，源码里的 DATA_FORMAT 是 ${current}`]],
+      [{ dataFormat: `0${current}` }, [`载荷头的 data_format 应是 u32 的十进制写法："0${current}"`]],
+      [{ dataFormat: "4294967296" }, ['载荷头的 data_format 应是 u32 的十进制写法："4294967296"']],
+      [{ caps: "0" }, ["载荷头的 caps 是 0，第 0 位不是 1：引导程序不认得换通道安装"]],
+      [{ caps: "2" }, ["载荷头的 caps 是 2，第 0 位不是 1：引导程序不认得换通道安装"]],
+      [{ caps: "0x1" }, ['载荷头的 caps 应是 u32 的十进制写法："0x1"']],
+    ];
+    for (const [change, failures] of cases) assert.deepEqual(payloadFailures({ ...good, ...change }, current), failures, JSON.stringify(change));
+  });
+
+  it("命令行按源码里的常量核对，失败逐条打 ::error:: 并以 1 退出", async () => {
+    const passing = makeDeps();
+    assert.equal(await main(["payload", version, "PFSETUP2", version, String(current), "1"], passing.deps), 0);
+    assert.deepEqual(passing.out, [`载荷头核对通过：PFSETUP2\t${version}\t${current}\t1`]);
+    assert.deepEqual(passing.err, []);
+    // 旧引导程序读出来就是这样：PFSETUP1、包号 0、没有能力位
+    const legacy = makeDeps();
+    assert.equal(await main(["payload", version, "PFSETUP1", version, "0", "0"], legacy.deps), 1);
+    assert.deepEqual(legacy.err, [
+      "::error::载荷头的 magic 是 PFSETUP1，应为 PFSETUP2",
+      `::error::载荷头的 data_format 是 0，源码里的 DATA_FORMAT 是 ${current}`,
+      "::error::载荷头的 caps 是 0，第 0 位不是 1：引导程序不认得换通道安装",
+    ]);
+  });
+
+  it("作为脚本运行时退出码照样传出去；没实现的子命令按不认识报错", () => {
+    const pass = spawnSync(process.execPath, [SCRIPT, "payload", version, "PFSETUP2", version, String(current), "1"], { encoding: "utf8" });
+    assert.equal(pass.status, 0, pass.stderr);
+    const fail = spawnSync(process.execPath, [SCRIPT, "payload", version, "PFSETUP2", version, String(current), "2"], { encoding: "utf8" });
+    assert.equal(fail.status, 1);
+    assert.equal(fail.stderr, "::error::载荷头的 caps 是 2，第 0 位不是 1：引导程序不认得换通道安装\n");
+    for (const command of ["floors", "picks", "verify"]) {
+      const usage = spawnSync(process.execPath, [SCRIPT, command, "dev", "x"], { encoding: "utf8" });
+      assert.equal(usage.status, 2, command);
+      assert.match(usage.stderr, new RegExp(`^::error::不认识的子命令："${command}"\n用法：`));
+    }
   });
 });
 

@@ -1,4 +1,5 @@
-// 发布流水线在编译之前读出各通道真正发布过的最高版本，据此做版本先后检查与数据格式号不倒退的检查。
+// 发布流水线在编译之前读出各通道真正发布过的最高版本，据此做版本先后检查与数据格式号不倒退的检查；
+// 构建之后再核对安装包的载荷头。
 // 某个通道「发布过某个版本」只采信用该通道公钥验得过签名的清单或 Release 附件，tag 名只用来定位：
 // 伪造的 tag、乱写的清单都抬不高也压不低结果，最多让构建失败。
 // 用法见 USAGE。失败时打 ::error:: 并以非零退出；给 shell 读的输出一行一条，字段用 tab 分隔。
@@ -18,6 +19,7 @@ const USAGE = [
   "  release-heads.mjs read <仓库> <heads 文件>",
   "  release-heads.mjs gate <dev|beta> <release|rehearsal> <本包版本> <heads 文件>",
   "  release-heads.mjs data-format <dev|beta> <release|rehearsal> <heads 文件> <仓库>",
+  "  release-heads.mjs payload <本包版本> <magic> <版本> <data_format> <caps>",
   "仓库写成 owner/name。rehearsal 只给不在 beta 分支上的测试版演练用：版本先后与数据格式号的检查不过时只打 notice，",
   "读取出错照样失败；dev 没有演练。",
 ].join("\n");
@@ -47,6 +49,7 @@ export const MAX_MANIFEST_BYTES = 64 * 1024;
 export const FETCH_RETRIES = 3;
 export const FETCH_TIMEOUT_MS = 60_000;
 export const RETRY_DELAY_MS = 5_000;
+export const PAYLOAD_MAGIC = "PFSETUP2";
 
 const PLATFORM = "windows-x86_64";
 const U32_MAX = 0xffff_ffffn;
@@ -69,6 +72,7 @@ const SHUTTLE_BASE = /^[1-9][0-9]*\.(?:0|[1-9][0-9]*)\.0$/;
 const CORE_PREFIX = /^([0-9]+)\.([0-9]+)\.([0-9]+)/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 const MODES = Object.freeze(["release", "rehearsal"]);
 
 class UsageError extends Error {}
@@ -486,6 +490,27 @@ export function checkDataFormat({ channel, heads, remote }, deps) {
   return { current, previous, failures, notices };
 }
 
+function parseU32(value, what, failures) {
+  if (!DECIMAL.test(value) || BigInt(value) > U32_MAX) {
+    failures.push(`载荷头的 ${what} 应是 u32 的十进制写法：${JSON.stringify(value)}`);
+    return null;
+  }
+  return BigInt(value);
+}
+
+export function payloadFailures({ version, magic, headerVersion, dataFormat, caps }, sourceDataFormat) {
+  const failures = [];
+  if (magic !== PAYLOAD_MAGIC) failures.push(`载荷头的 magic 是 ${magic}，应为 ${PAYLOAD_MAGIC}`);
+  if (headerVersion !== version) failures.push(`载荷头里的版本是 ${headerVersion}，本包是 ${version}`);
+  const format = parseU32(dataFormat, "data_format", failures);
+  if (format !== null && format !== BigInt(sourceDataFormat)) {
+    failures.push(`载荷头的 data_format 是 ${format}，源码里的 DATA_FORMAT 是 ${sourceDataFormat}`);
+  }
+  const bits = parseU32(caps, "caps", failures);
+  if (bits !== null && (bits & 1n) === 0n) failures.push(`载荷头的 caps 是 ${bits}，第 0 位不是 1：引导程序不认得换通道安装`);
+  return failures;
+}
+
 // 工作流命令的数据里换行与 % 要转义，否则多行报错只剩第一行
 function annotate(kind, message) {
   return `::${kind}::${message.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A")}`;
@@ -557,6 +582,13 @@ async function dispatch([command, ...args], deps) {
       ]);
       return conclude(deps, result, mode, `数据格式号检查通过：${result.current}`);
     }
+    case "payload": {
+      expectArgs(args, 5);
+      const [version, magic, headerVersion, dataFormat, caps] = args;
+      const source = parseDataFormat(deps.dataFormatSource(), DATA_FORMAT_PATH);
+      const failures = payloadFailures({ version, magic, headerVersion, dataFormat, caps }, source);
+      return conclude(deps, { failures, notices: [] }, "release", `载荷头核对通过：${magic}\t${headerVersion}\t${dataFormat}\t${caps}`);
+    }
     default:
       throw new UsageError(`不认识的子命令：${JSON.stringify(command)}`);
   }
@@ -590,6 +622,7 @@ export function defaultDeps() {
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     remote: githubRemote,
     pubkey: (channel) => readFileSync(join(REPO_ROOT, PUBKEY_FILES[channel]), "utf8"),
+    dataFormatSource: () => readFileSync(join(REPO_ROOT, DATA_FORMAT_PATH), "utf8"),
     env: process.env,
     out: (line) => process.stdout.write(`${line}\n`),
     err: (line) => process.stderr.write(`${line}\n`),
