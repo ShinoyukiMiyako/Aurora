@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "seq": 42,
+  "tasks": [
+    {
+      "attempt": 2,
+      "id": "task-1",
+      "spec": {
+        "args": {
+          "ids": [
+            "a",
+            "b"
+          ]
+        },
+        "command": "example"
+      },
+      "status": "done"
+    }
+  ]
+}

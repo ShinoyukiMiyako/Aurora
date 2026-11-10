@@ -714,4 +714,129 @@ mod tests {
             }
         );
     }
+
+    mod data_format_snapshot {
+        //! 落盘类型的快照守卫：改了数据目录下 tasks.json 的形状或它自带的版本号，却忘了判断要不要加数据格式号时，
+        //! 这里的测试会挂。
+        //!
+        //! 较早的版本读到新写出的文件时，只要会报错拒读、读成别的意思，或者再保存时丢掉用户找不回来的内容，
+        //! 就必须把数据格式号加一。挂了怎么办：
+        //! - 快照比对：旧版本照样读得了的（例如只加了带默认值、不承载找不回内容的可选字段），把失败信息里打出的
+        //!   新内容更新进 `testdata/data-format/current/tasks.json`；读不了的先把数据格式号加一，把 `current/`
+        //!   复制成以旧号命名的目录冻结，再更新 `current/`。判断规则与步骤见 docs/architecture.md 的「数据格式号」。
+        //! - 版本号登记：较早的版本只认自己的任务日志版本号，改了它旧版本就拒读，按上一条加号后再改登记值。
+        //! - 冻结目录集合：冻结目录要恰好是 1 到数据格式号减一，多了少了都说明加号的步骤没做全。
+        //!
+        //! 任务的内容由前端定义（`app/src/ipc/tasks.ts` 的 `TaskRecordDto`），后端原样存取、不解读，所以样本只
+        //! 守住外层的版本号、序号与任务数组；任务内容不兼容地变化时，由改动的人递增 `TASK_JOURNAL_VERSION`，
+        //! 再按上面版本号登记那一条走。
+
+        use std::collections::BTreeSet;
+        use std::path::PathBuf;
+
+        use petalfall_core::release::data_format::DATA_FORMAT;
+
+        use super::*;
+
+        fn data_format_dir() -> PathBuf {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("testdata")
+                .join("data-format")
+        }
+
+        /// 每个字段都取非默认值：序号不为 0，任务表不为空。任务内容后端不解读，取一条带嵌套对象与数组的记录；
+        /// 键按字典序写，serde_json 无论按键排序还是保留插入顺序，写出来都一样。
+        fn full_sample() -> JournalFile {
+            let Value::Object(task) = json!({
+                "attempt": 2,
+                "id": "task-1",
+                "spec": { "args": { "ids": ["a", "b"] }, "command": "example" },
+                "status": "done"
+            }) else {
+                unreachable!()
+            };
+            JournalFile {
+                version: TASK_JOURNAL_VERSION,
+                seq: 42,
+                tasks: vec![task],
+            }
+        }
+
+        /// 与 [`TaskJournal::save`] 写盘用同一种序列化。
+        fn to_disk_text(file: &JournalFile) -> String {
+            String::from_utf8(serde_json::to_vec_pretty(file).unwrap()).unwrap()
+        }
+
+        #[test]
+        fn tasks_json_matches_current_snapshot() {
+            let path = data_format_dir().join("current").join(TASK_JOURNAL_FILE);
+            let expected = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("读不了快照样本 {}：{err}", path.display()))
+                .replace("\r\n", "\n");
+            let actual = format!("{}\n", to_disk_text(&full_sample()));
+            if actual != expected {
+                panic!(
+                    "数据目录下的任务日志 tasks.json 落盘形状变了，与快照样本 {} 不一致。\
+                     较早的版本读到新写出的文件时，只要会报错拒读、读成别的意思，或者再保存时丢掉用户找不回来的内容，\
+                     就必须把数据格式号加一。旧版本照样读得了的（例如只加了带默认值、不承载找不回内容的可选字段），\
+                     把下面的新内容更新进 current/；旧版本读不了的，先把数据格式号加一并把 current/ 冻结成以旧号命名的\
+                     目录，再更新 current/。判断规则与步骤见 docs/architecture.md 的「数据格式号」。\
+                     新序列化出的完整内容：\n{actual}",
+                    path.display()
+                );
+            }
+        }
+
+        /// 快照比对自己序列化样本，写盘的写法一变（例如换成紧凑格式）它就守不住真实落盘的形状，所以对拍一次。
+        #[tokio::test]
+        async fn sample_serialization_matches_what_save_writes() {
+            let dir = tempfile::tempdir().unwrap();
+            let sample = full_sample();
+            assert!(TaskJournal::default()
+                .save(dir.path(), sample.seq, sample.tasks.clone())
+                .await
+                .unwrap());
+            let written = std::fs::read_to_string(dir.path().join(TASK_JOURNAL_FILE)).unwrap();
+            assert_eq!(written, to_disk_text(&sample));
+        }
+
+        #[test]
+        fn task_journal_version_is_registered() {
+            assert_eq!(
+                TASK_JOURNAL_VERSION, 1,
+                "任务日志的版本号变了。较早的版本读到新版本号的 tasks.json 会当作版本不符拒读，这属于必须把数据格式号\
+                 加一的改动：按 docs/architecture.md「数据格式号」的步骤加号、冻结快照，再把这里的登记值改成新的版本号"
+            );
+        }
+
+        #[test]
+        fn frozen_snapshots_are_exactly_the_older_formats() {
+            let root = data_format_dir();
+            let mut frozen = BTreeSet::new();
+            for entry in std::fs::read_dir(&root)
+                .unwrap_or_else(|err| panic!("读不了 {}：{err}", root.display()))
+            {
+                let entry = entry.unwrap();
+                if !entry.file_type().unwrap().is_dir() {
+                    continue;
+                }
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .unwrap_or_else(|name| panic!("{name:?} 不是 UTF-8 目录名"));
+                if name != "current" {
+                    frozen.insert(name);
+                }
+            }
+            let expected: BTreeSet<String> = (1..DATA_FORMAT).map(|n| n.to_string()).collect();
+            assert_eq!(
+                frozen,
+                expected,
+                "{} 下的冻结快照目录要恰好是 1 到数据格式号减一（数据格式号现在是 {DATA_FORMAT}），\
+                 期望 {expected:?}，实际 {frozen:?}。加号时把 current/ 复制成以旧号命名的目录冻结；\
+                 号不能变小也不能跳号，见 docs/architecture.md 的「数据格式号」",
+                root.display()
+            );
+        }
+    }
 }
