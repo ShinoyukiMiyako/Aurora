@@ -295,6 +295,9 @@ export const updaterInfo = (): Promise<UpdaterInfoDto> => invoke<UpdaterInfoDto>
  * 不支持时报 updater_unsupported（detail.reason），失败报 update_check_failed：全部端点都败在网络层时带 detail.network；
  * detail.attempts 按顺序列出每个端点的结果。只有一个端点、它回了 404 以外的非 2xx 时带 detail.status；
  * 有多个端点时状态码只写在各自那一条里，顶层不带，免得分不清是哪个端点的。
+ * 看的是生效的偏好通道与比它慢的通道，各自的结果记进 updater_info 的 channel_heads。偏好通道的每个端点给出的版本
+ * 都旧于这台电脑记下的这个通道见过的最高版本时报 update_source_stale（detail.channel），不拿更慢通道的结果顶上；
+ * 检查期间改了更新通道报 update_superseded，这次的结果作废、没有落下。
  */
 export const checkUpdate = (): Promise<UpdateDto | null> => invoke<UpdateDto | null>("check_update");
 
@@ -325,6 +328,8 @@ export interface UpdateSourceFailureDto {
  * 试了多个时逐行写成「源名：原文」。
  * 下载期间再次检查换了版本或已无更新时同样报 update_not_available（message 写明新旧版本），这次下载的包已作废，
  * 按最新的检查结果重新下载即可。
+ * 已有更新包正在下载或安装时报 update_busy。验过签的包认得的数据格式比这台电脑上的数据旧时报 update_data_too_new：
+ * 包已丢弃，这一版记进 updater_info 的 refused，本次会话不再作为候选。
  */
 export const downloadUpdate = (taskId: string): Promise<UpdateDto> => invoke<UpdateDto>("download_update", { taskId });
 
@@ -333,3 +338,11 @@ export const installUpdate = (): Promise<void> => invoke<void>("install_update")
 
 /** 开关「退出时安装」；打开前须已下载好（否则 update_not_ready）。 */
 export const setInstallOnExit = (enabled: boolean): Promise<void> => invoke<void>("set_install_on_exit", { enabled });
+
+/**
+ * 写下用户选的更新通道，返回写完之后的更新信息。channel 不是 dev、beta、stable 之一报 invalid_argument；不支持自更新报
+ * updater_unsupported（detail.reason）；有更新包正在下载或安装报 update_busy，所以下载中要改通道得先取消、等下载命令返回再调。
+ * 生效的偏好变了时，本次会话按旧偏好得出的结果全部作废：候选、已下好的包、各通道的结果、refused 里 preference_unsaved
+ * 的条目都清掉，「退出时安装」随之关闭；没变时只写盘。
+ */
+export const setUpdateChannel = (channel: UpdateChannel): Promise<UpdaterInfoDto> => invoke<UpdaterInfoDto>("set_update_channel", { channel });

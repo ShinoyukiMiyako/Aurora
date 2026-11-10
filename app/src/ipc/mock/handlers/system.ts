@@ -1,16 +1,21 @@
 import { IpcError } from "../../errors";
 import {
   SERVER_NOT_PINNED_CODE,
+  type ChannelHeadDto,
+  type ChannelRelation,
   type KnownServerDto,
   type MemoryAdviceDto,
   type MemoryNeedFactor,
   type NewsFeedDto,
   type NewsItemDto,
   type PinnedServerDto,
+  type RefusedUpdateDto,
   type ServerStatusDto,
   type StartupNoticeDto,
+  type UpdateChannel,
   type UpdateDto,
   type UpdaterInfoDto,
+  type UpdaterUnsupportedReason,
 } from "../../system";
 import { CORE_EVENT, type CoreEvent } from "../../tasks";
 import { emitMockEvent } from "../events";
@@ -354,12 +359,6 @@ function listNews(args: MockArgs): NewsFeedDto {
 // ---- 自更新 ----
 
 const CURRENT_VERSION = "0.1.0";
-const LATEST: Omit<UpdateDto, "current_version"> = {
-  version: "0.2.0",
-  notes: "新增首次启动向导与主页服务器卡片。",
-  date: Date.UTC(2026, 9, 29, 8, 0, 0),
-  channel: "stable",
-};
 const UPDATE_SIZE = 12_582_912;
 /** 假清单里的候选下载源，顺序同后端的「国内在前」。 */
 const UPDATE_SOURCES = ["cn", "hk", "global", "github"] as const;
@@ -387,83 +386,344 @@ async function simulateBrokenSource(taskId: string): Promise<void> {
   if (isMockTaskCancelled(taskId)) throw new IpcError("cancelled", "已取消");
 }
 
+/** 通道按快到慢排：偏好要看的是它自己和比它慢的通道。 */
+const CHANNELS: readonly UpdateChannel[] = ["dev", "beta", "stable"];
+
+const VERSION = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+const NUMERIC_IDENTIFIER = /^\d+$/;
+
+interface ParsedVersion {
+  core: readonly [number, number, number];
+  pre: readonly string[];
+}
+
+/** 假后端只认 X.Y.Z 与 X.Y.Z-标识（不带构建元数据）；别的写法是用例写错了，直接报错。 */
+function parseVersion(version: string): ParsedVersion {
+  const match = VERSION.exec(version);
+  if (match === null) throw new Error(`假后端认不出版本号「${version}」：只认 X.Y.Z 与 X.Y.Z-标识`);
+  return { core: [Number(match[1]), Number(match[2]), Number(match[3])], pre: match[4] === undefined ? [] : match[4].split(".") };
+}
+
+/** semver 的预发布标识：纯数字的低于含字母的；纯数字按数值比（不带前导零，位数多的大，序号再大也不丢精度）；含字母的按 ASCII 比。 */
+function compareIdentifiers(a: string, b: string): number {
+  const numericA = NUMERIC_IDENTIFIER.test(a);
+  const numericB = NUMERIC_IDENTIFIER.test(b);
+  if (numericA !== numericB) return numericA ? -1 : 1;
+  if (numericA && a.length !== b.length) return a.length - b.length;
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function compareCores(a: ParsedVersion, b: ParsedVersion): number {
+  for (let i = 0; i < 3; i++) {
+    if (a.core[i] !== b.core[i]) return a.core[i] - b.core[i];
+  }
+  return 0;
+}
+
+/** 按 semver 比先后，与后端同一套：核心号相同时带预发布段的更早，预发布段逐段比，前面都相同时段少的更早。 */
+function compareVersions(a: string, b: string): number {
+  const x = parseVersion(a);
+  const y = parseVersion(b);
+  const core = compareCores(x, y);
+  if (core !== 0) return core;
+  if (x.pre.length === 0 || y.pre.length === 0) return y.pre.length - x.pre.length;
+  for (let i = 0; i < Math.min(x.pre.length, y.pre.length); i++) {
+    const order = compareIdentifiers(x.pre[i], y.pre[i]);
+    if (order !== 0) return order;
+  }
+  return x.pre.length - y.pre.length;
+}
+
+/** 包的通道：预发布标识第一段是 dev、beta 的为预览版、测试版，不带预发布段的为正式版，别的认不出。 */
+function channelOf(version: string): UpdateChannel | null {
+  const { pre } = parseVersion(version);
+  if (pre.length === 0) return "stable";
+  const tag = pre[0];
+  return tag === "dev" || tag === "beta" ? tag : null;
+}
+
+function isUpdateChannel(value: string): value is UpdateChannel {
+  return (CHANNELS as readonly string[]).includes(value);
+}
+
+/**
+ * 一个通道的清单此刻给出什么（测试与界面调试用）。published：给出验过签的清单头；not_published：所有端点都回 404，
+ * 这个通道还没有发布；stale：每个端点给出的版本 version 都旧于这台电脑记下的这个通道见过的最高版本 seen。
+ */
+export type MockUpdateManifest =
+  | { state: "published"; version: string; notes: string | null; date: number | null }
+  | { state: "not_published" }
+  | { state: "stale"; version: string; seen: string };
+
+// 默认的包是正式版 0.1.0，偏好没存过时只看正式版那份清单；另两份只在选了更快的通道时才看得到。
+function seedManifests(): Record<UpdateChannel, MockUpdateManifest> {
+  return {
+    dev: { state: "published", version: "0.3.0-dev.4", notes: "设置里可以选更新通道。", date: Date.UTC(2026, 9, 31, 8, 0, 0) },
+    beta: { state: "published", version: "0.3.0-beta.1", notes: "主页资讯加入启动器自己的发布。", date: Date.UTC(2026, 9, 30, 8, 0, 0) },
+    stable: { state: "published", version: "0.2.0", notes: "新增首次启动向导与主页服务器卡片。", date: Date.UTC(2026, 9, 29, 8, 0, 0) },
+  };
+}
+
+let manifests = seedManifests();
+
+/** 设定一个通道的清单（测试与界面调试用）。清单头的版本要属于这个通道，stale 的要真的旧于 seen；reset 后恢复种子。 */
+export function setMockUpdateManifest(channel: UpdateChannel, manifest: MockUpdateManifest): void {
+  if (manifest.state !== "not_published" && channelOf(manifest.version) !== channel) {
+    throw new Error(`${channel} 的清单头版本「${manifest.version}」不属于这个通道`);
+  }
+  if (manifest.state === "stale" && compareVersions(manifest.version, manifest.seen) >= 0) {
+    throw new Error(`旧于本机记录的清单头要比见过的版本旧：${manifest.version} 不旧于 ${manifest.seen}`);
+  }
+  manifests = { ...manifests, [channel]: { ...manifest } };
+}
+
+function manifestEndpoint(channel: UpdateChannel): string {
+  return `https://updates.example/${channel}/latest.json`;
+}
+
+let forcedUnsupported: UpdaterUnsupportedReason | null = null;
+
+/** 模拟不支持自更新（测试与界面调试用），null 为按版本号判：版本号认不出通道时本来就是 unknown_channel。reset 后恢复为 null。 */
+export function setMockUpdaterUnsupported(reason: UpdaterUnsupportedReason | null): void {
+  forcedUnsupported = reason;
+}
+
+let dataTooNew: ReadonlySet<string> = new Set();
+
+/**
+ * 模拟这几个版本的包认得的数据格式比这台电脑上的数据旧（测试与界面调试用）：和后端一样下完、验完签才发现，
+ * 下载报 update_data_too_new，那一版记进 refused。reset 后清空。
+ */
+export function setMockUpdateDataTooNew(versions: readonly string[]): void {
+  for (const version of versions) parseVersion(version);
+  dataTooNew = new Set(versions);
+}
+
 interface UpdaterMockState {
   current: string;
+  /** 配置里存的 update_channel；null 是没存过，按包的通道生效。 */
+  stored: UpdateChannel | null;
   available: UpdateDto | null;
-  downloaded: string | null;
+  heads: ChannelHeadDto[];
+  refused: RefusedUpdateDto[];
+  downloaded: { version: string; channel: UpdateChannel } | null;
   installOnExit: boolean;
+  /** 有更新包正在下载。 */
+  busy: boolean;
 }
 
 function seedUpdater(): UpdaterMockState {
-  return { current: CURRENT_VERSION, available: null, downloaded: null, installOnExit: false };
+  return { current: CURRENT_VERSION, stored: null, available: null, heads: [], refused: [], downloaded: null, installOnExit: false, busy: false };
 }
 
 let updater: UpdaterMockState = seedUpdater();
+
+/** 正在运行的这一版（测试与界面调试用），包的通道由它推出；在检查之前设。reset 后回到 0.1.0。 */
+export function setMockUpdaterVersion(version: string): void {
+  parseVersion(version);
+  updater.current = version;
+}
+
+/** 配置里已经存着的更新通道偏好（测试与界面调试用），null 为没存过；不经命令，相当于启动前就写在配置里。reset 后为 null。 */
+export function setMockUpdatePreference(channel: UpdateChannel | null): void {
+  updater.stored = channel;
+}
 
 function notReady(): IpcError {
   return new IpcError("update_not_ready", "更新包还没有下载完成");
 }
 
+function busy(): IpcError {
+  return new IpcError("update_busy", "已有更新包正在下载或安装");
+}
+
+type Support = { supported: true; channel: UpdateChannel } | { supported: false; reason: UpdaterUnsupportedReason };
+
+function support(): Support {
+  if (forcedUnsupported !== null) return { supported: false, reason: forcedUnsupported };
+  const channel = channelOf(updater.current);
+  return channel === null ? { supported: false, reason: "unknown_channel" } : { supported: true, channel };
+}
+
+/** 与后端一样，更新命令开头先确认支持自更新；返回包的通道。 */
+function requireSupported(): UpdateChannel {
+  const current = support();
+  if (!current.supported) throw new IpcError("updater_unsupported", `当前环境不支持自更新（${current.reason}）`, { reason: current.reason });
+  return current.channel;
+}
+
+function effectivePreference(packageChannel: UpdateChannel): UpdateChannel {
+  return updater.stored === null ? packageChannel : updater.stored;
+}
+
+function relationOf(preference: UpdateChannel, packageChannel: UpdateChannel): ChannelRelation {
+  if (preference === packageChannel) return "same";
+  return CHANNELS.indexOf(preference) > CHANNELS.indexOf(packageChannel) ? "waiting" : "following";
+}
+
 function updaterInfo(): UpdaterInfoDto {
+  const current = support();
+  const packageChannel = channelOf(updater.current);
+  const preference = packageChannel === null ? null : effectivePreference(packageChannel);
+  const downloaded = updater.downloaded;
   return {
     current_version: updater.current,
-    supported: true,
-    unsupported_reason: null,
-    package_channel: "stable",
-    preference: "stable",
-    relation: "same",
+    supported: current.supported,
+    unsupported_reason: current.supported ? null : current.reason,
+    package_channel: packageChannel,
+    preference,
+    relation: packageChannel === null || preference === null ? null : relationOf(preference, packageChannel),
     available: updater.available,
-    channel_heads: [],
-    refused: [],
-    downloaded_version: updater.downloaded,
-    downloaded_channel: updater.downloaded === null ? null : "stable",
-    downloaded_intent: updater.downloaded === null ? null : "update",
+    channel_heads: updater.heads,
+    refused: updater.refused,
+    downloaded_version: downloaded === null ? null : downloaded.version,
+    downloaded_channel: downloaded === null ? null : downloaded.channel,
+    downloaded_intent: downloaded === null ? null : "update",
     install_on_exit: updater.installOnExit,
   };
 }
 
+function headOf(channel: UpdateChannel): ChannelHeadDto {
+  const manifest = manifests[channel];
+  switch (manifest.state) {
+    case "published":
+      return { channel, state: "published", version: manifest.version, date: manifest.date };
+    case "stale":
+      return { channel, state: "stale", version: manifest.version, date: null };
+    case "not_published":
+      return { channel, state: "not_published", version: null, date: null };
+  }
+}
+
+/**
+ * 自动更新挑候选的规则，与后端同一套：要比当前新；关系不是等待、又跟到比包更慢的通道时，核心号要前进（测试版跟随同号
+ * 正式版例外：两者是同一份源码）；本次会话没拒过。
+ */
+function isCandidate(version: string, channel: UpdateChannel, packageChannel: UpdateChannel, relation: ChannelRelation): boolean {
+  if (compareVersions(version, updater.current) <= 0) return false;
+  const slower = CHANNELS.indexOf(channel) > CHANNELS.indexOf(packageChannel);
+  const sameSource = packageChannel === "beta" && channel === "stable";
+  if (relation !== "waiting" && slower && !sameSource && compareCores(parseVersion(version), parseVersion(updater.current)) <= 0) return false;
+  return !updater.refused.some((r) => r.version === version && r.channel === channel);
+}
+
 /** 与后端一致：已下载的包只有与新结果同版本才保留，否则丢弃并撤销「退出时安装」。 */
-function checkUpdate(): UpdateDto | null {
-  const found = LATEST.version === updater.current ? null : { ...LATEST, current_version: updater.current };
-  if (updater.downloaded !== null && updater.downloaded !== found?.version) {
+function settle(found: UpdateDto | null): void {
+  if (updater.downloaded !== null && updater.downloaded.version !== found?.version) {
     updater.downloaded = null;
     updater.installOnExit = false;
   }
   updater.available = found;
+}
+
+/**
+ * 看偏好通道和比它慢的通道，各自的结果记进 channel_heads。偏好通道的清单旧于本机记录时整次失败，不拿更慢的通道顶上。
+ * 挑中别的通道的候选、偏好又没存过时，同一次检查把当时包的通道写成偏好：装上那个通道的包之后仍按原来那条线收更新。
+ */
+function checkUpdate(): UpdateDto | null {
+  const packageChannel = requireSupported();
+  const preference = effectivePreference(packageChannel);
+  const relation = relationOf(preference, packageChannel);
+  const followed = CHANNELS.slice(CHANNELS.indexOf(preference));
+  updater.heads = followed.map(headOf);
+  const own = manifests[preference];
+  if (own.state === "stale") {
+    throw new IpcError("update_source_stale", `${preference} 的更新源给出的 ${own.version} 比这台电脑见过的 ${own.seen} 旧`, {
+      channel: preference,
+      offered: [{ endpoint: manifestEndpoint(preference), version: own.version }],
+      seen: own.seen,
+    });
+  }
+  const candidates = followed
+    .flatMap((channel) => {
+      const manifest = manifests[channel];
+      return manifest.state === "published" && isCandidate(manifest.version, channel, packageChannel, relation) ? [{ channel, manifest }] : [];
+    })
+    .sort((a, b) => compareVersions(b.manifest.version, a.manifest.version));
+  if (candidates.length === 0) {
+    // 偏好通道还没有发布、别的通道也没有候选：不算失败，本次会话已知的结果不动
+    if (own.state === "not_published") return updater.available;
+    settle(null);
+    return null;
+  }
+  const picked = candidates[0];
+  if (picked.channel !== packageChannel && updater.stored === null) updater.stored = packageChannel;
+  const found: UpdateDto = {
+    version: picked.manifest.version,
+    current_version: updater.current,
+    notes: picked.manifest.notes,
+    date: picked.manifest.date,
+    channel: picked.channel,
+  };
+  settle(found);
   return found;
 }
 
 async function downloadUpdate(args: MockArgs): Promise<UpdateDto> {
   const taskId = requireString(args, "taskId", "download_update");
+  requireSupported();
   beginMockTask(taskId);
   try {
+    if (updater.busy) throw busy();
     const update = updater.available;
     if (update === null) throw new IpcError("update_not_available", "还没有检查到可用更新");
-    for (let index = 0; index < failingUpdateSources; index++) {
-      emitUpdateSource(taskId, index);
-      await simulateBrokenSource(taskId);
+    updater.busy = true;
+    try {
+      for (let index = 0; index < failingUpdateSources; index++) {
+        emitUpdateSource(taskId, index);
+        await simulateBrokenSource(taskId);
+      }
+      emitUpdateSource(taskId, failingUpdateSources);
+      await simulateMockDownload(taskId, 1, UPDATE_SIZE);
+      emitCore({ task_id: taskId, kind: "stage", message: "更新包下载完成，正在校验签名" });
+      if (dataTooNew.has(update.version)) {
+        updater.refused = [...updater.refused, { version: update.version, channel: update.channel, reason: "data_too_new", intent: "update" }];
+        throw new IpcError("update_data_too_new", `${update.version} 读不了这台电脑上的数据，下好的包已丢弃`);
+      }
+      updater.downloaded = { version: update.version, channel: update.channel };
+      return update;
+    } finally {
+      updater.busy = false;
     }
-    emitUpdateSource(taskId, failingUpdateSources);
-    await simulateMockDownload(taskId, 1, UPDATE_SIZE);
-    emitCore({ task_id: taskId, kind: "stage", message: "更新包下载完成，正在校验签名" });
-    updater.downloaded = update.version;
-    return update;
   } finally {
     endMockTask(taskId);
   }
 }
 
-/** 真后端装完即退出或重启；mock 直接切到新版本，相当于重启后的状态。 */
+/** 真后端装完即退出或重启；mock 直接切到新版本，相当于重启后的状态：本次会话的结果都没了，配置里的偏好还在。 */
 function installUpdate(): void {
-  if (updater.downloaded === null) throw notReady();
-  updater = { ...seedUpdater(), current: updater.downloaded };
+  requireSupported();
+  const downloaded = updater.downloaded;
+  if (downloaded === null) throw notReady();
+  updater = { ...seedUpdater(), current: downloaded.version, stored: updater.stored };
 }
 
 function setInstallOnExit(args: MockArgs): void {
   const enabled = args.enabled;
   if (typeof enabled !== "boolean") throw tauriArgError("set_install_on_exit", "enabled", "missing required key enabled");
+  requireSupported();
   if (enabled && updater.downloaded === null) throw notReady();
   updater.installOnExit = enabled;
+}
+
+/**
+ * 与后端同序：先认通道名，再看支不支持自更新，再看有没有更新包在下载。生效的偏好变了才作废本次会话按旧偏好得出的结果。
+ * 后端这时还会清掉 refused 里 preference_unsaved 的条目；假后端不模拟写不进偏好，refused 里只有 data_too_new，它不随改通道清掉。
+ */
+function setUpdateChannel(args: MockArgs): UpdaterInfoDto {
+  const channel = requireString(args, "channel", "set_update_channel");
+  if (!isUpdateChannel(channel)) throw new IpcError("invalid_argument", `更新通道「${channel}」不是 dev、beta、stable 之一`);
+  const packageChannel = requireSupported();
+  if (updater.busy) throw busy();
+  const before = effectivePreference(packageChannel);
+  updater.stored = channel;
+  if (channel !== before) {
+    updater.available = null;
+    updater.downloaded = null;
+    updater.installOnExit = false;
+    updater.heads = [];
+  }
+  return updaterInfo();
 }
 
 export const handlers: MockHandlers = {
@@ -483,6 +743,7 @@ export const handlers: MockHandlers = {
   download_update: (args) => downloadUpdate(args),
   install_update: () => installUpdate(),
   set_install_on_exit: (args) => setInstallOnExit(args),
+  set_update_channel: (args) => setUpdateChannel(args),
 };
 
 export function reset(): void {
@@ -491,9 +752,13 @@ export function reset(): void {
   pinned = SEED_PINNED.map((s) => ({ ...s }));
   updater = seedUpdater();
   failingUpdateSources = 0;
+  manifests = seedManifests();
+  forcedUnsupported = null;
+  dataTooNew = new Set();
 }
 
 // 固定的服务器在后端是配置的一部分；启动提示与更新状态每次启动重新得出，不存。
+// 更新通道的偏好在后端也存在配置里，这里却不存：它是相对包的版本说的，而假后端的版本每次刷新都回到种子。
 // 版本 2：固定项多了记住的实例。
 export const persist: MockPersist = {
   version: 2,

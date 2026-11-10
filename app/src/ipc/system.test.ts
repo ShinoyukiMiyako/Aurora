@@ -21,12 +21,24 @@ import {
   setInstallOnExit,
   setPinnedServerInstance,
   setPinnedServers,
+  setUpdateChannel,
   startupNotices,
   updaterInfo,
 } from "./system";
-import { setMockNetworkReachable, setMockStartupNotices, setMockUpdateSourceFailures } from "./mock/handlers/system";
+import {
+  setMockNetworkReachable,
+  setMockStartupNotices,
+  setMockUpdateDataTooNew,
+  setMockUpdateManifest,
+  setMockUpdatePreference,
+  setMockUpdaterUnsupported,
+  setMockUpdaterVersion,
+  setMockUpdateSourceFailures,
+  type MockUpdateManifest,
+} from "./mock/handlers/system";
 import { deleteInstance, listInstances, renameInstance } from "./instances";
 import { cancelTask, onCoreEvent, type CoreEvent } from "./tasks";
+import { mulberry32 } from "../art/illustrations/seed";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -402,6 +414,263 @@ describe("自更新", () => {
   });
 });
 
+describe("更新通道", () => {
+  const published = (version: string, date: number | null): MockUpdateManifest => ({ state: "published", version, notes: null, date });
+  const headsOf = async () => (await updaterInfo()).channel_heads.map((h) => [h.channel, h.state, h.version]);
+
+  it("改成更快的通道：本次会话的候选、已下好的包、各通道结果都作废，退出时安装关掉；之后三条线一起看，挑最新的", async () => {
+    vi.useFakeTimers();
+    await checkUpdate();
+    await settle(downloadUpdate("c-1"));
+    await setInstallOnExit(true);
+    expect(await updaterInfo()).toMatchObject({
+      available: { version: "0.2.0", channel: "stable" },
+      channel_heads: [{ channel: "stable", state: "published", version: "0.2.0", date: Date.UTC(2026, 9, 29, 8, 0, 0) }],
+      downloaded_version: "0.2.0",
+      install_on_exit: true,
+    });
+
+    const info = await setUpdateChannel("dev");
+    expect(info).toMatchObject({
+      current_version: "0.1.0",
+      package_channel: "stable",
+      preference: "dev",
+      relation: "following",
+      available: null,
+      channel_heads: [],
+      downloaded_version: null,
+      downloaded_channel: null,
+      downloaded_intent: null,
+      install_on_exit: false,
+    });
+    expect(await updaterInfo()).toEqual(info);
+
+    expect(await checkUpdate()).toMatchObject({ version: "0.3.0-dev.4", channel: "dev", current_version: "0.1.0" });
+    expect(await headsOf()).toEqual([
+      ["dev", "published", "0.3.0-dev.4"],
+      ["beta", "published", "0.3.0-beta.1"],
+      ["stable", "published", "0.2.0"],
+    ]);
+  });
+
+  it("选的通道与生效的偏好相同：只写下偏好，本次会话的结果都留着", async () => {
+    vi.useFakeTimers();
+    await checkUpdate();
+    await settle(downloadUpdate("c-2"));
+    const before = await updaterInfo();
+    expect(await setUpdateChannel("stable")).toEqual(before);
+    // 写下的是 stable 本身，不是「跟着包走」：包换成预览版之后偏好仍是正式版
+    setMockUpdaterVersion("1.0.0-dev.3");
+    expect(await updaterInfo()).toMatchObject({ package_channel: "dev", preference: "stable", relation: "waiting" });
+  });
+
+  it("关系：没存过偏好时按包的通道，相同为 same，选更慢的为 waiting，选更快的为 following", async () => {
+    setMockUpdaterVersion("1.0.0-beta.4");
+    expect(await updaterInfo()).toMatchObject({ package_channel: "beta", preference: "beta", relation: "same" });
+    expect(await setUpdateChannel("stable")).toMatchObject({ package_channel: "beta", preference: "stable", relation: "waiting" });
+    expect(await setUpdateChannel("dev")).toMatchObject({ package_channel: "beta", preference: "dev", relation: "following" });
+    expect(await setUpdateChannel("beta")).toMatchObject({ package_channel: "beta", preference: "beta", relation: "same" });
+  });
+
+  it("通道名不对报 invalid_argument，先于不支持自更新；缺参数是 Tauri 的参数错误；都不改偏好", async () => {
+    for (const bad of ["nightly", "Dev", "preview", "release", ""]) {
+      const error = await rejection(invoke("set_update_channel", { channel: bad }));
+      expect(error.code, bad).toBe("invalid_argument");
+      expect(error.message).toContain(`「${bad}」`);
+    }
+    expect((await rejection(invoke("set_update_channel", {}))).code).toBe("unknown");
+    expect((await rejection(invoke("set_update_channel", { channel: 1 }))).code).toBe("unknown");
+    setMockUpdaterUnsupported("debug_build");
+    expect((await rejection(invoke("set_update_channel", { channel: "nightly" }))).code).toBe("invalid_argument");
+    expect((await updaterInfo()).preference).toBe("stable");
+  });
+
+  it("不支持自更新时改通道与其余更新命令都报 updater_unsupported（detail.reason），版本号认不出通道时通道、偏好与关系都为 null", async () => {
+    setMockUpdaterUnsupported("pubkey_mismatch");
+    expect(await rejection(setUpdateChannel("dev"))).toMatchObject({ code: "updater_unsupported", detail: { reason: "pubkey_mismatch" } });
+    expect(await updaterInfo()).toMatchObject({ supported: false, unsupported_reason: "pubkey_mismatch", package_channel: "stable", preference: "stable", relation: "same" });
+    for (const call of [() => checkUpdate(), () => downloadUpdate("c-u"), () => installUpdate(), () => setInstallOnExit(false)]) {
+      expect(await rejection(call())).toMatchObject({ code: "updater_unsupported", detail: { reason: "pubkey_mismatch" } });
+    }
+
+    setMockUpdaterUnsupported(null);
+    setMockUpdaterVersion("1.0.0-rc.1");
+    expect(await updaterInfo()).toMatchObject({ supported: false, unsupported_reason: "unknown_channel", package_channel: null, preference: null, relation: null });
+    expect(await rejection(setUpdateChannel("beta"))).toMatchObject({ code: "updater_unsupported", detail: { reason: "unknown_channel" } });
+  });
+
+  it("更新包下载中改通道或再开一次下载报 update_busy；取消后等下载命令返回，就能改了", async () => {
+    vi.useFakeTimers();
+    await checkUpdate();
+    const pending = downloadUpdate("c-3");
+    await vi.advanceTimersByTimeAsync(130);
+    expect((await rejection(setUpdateChannel("dev"))).code).toBe("update_busy");
+    expect((await rejection(downloadUpdate("c-4"))).code).toBe("update_busy");
+    expect((await updaterInfo()).preference).toBe("stable");
+    expect(await cancelTask("c-3")).toBe(true);
+    expect((await rejection(settle(pending))).code).toBe("cancelled");
+    expect(await setUpdateChannel("dev")).toMatchObject({ preference: "dev", relation: "following" });
+  });
+
+  it("偏好没存过时挑中更慢通道的候选：同一次检查把包的通道写成偏好，装上之后成了跟随，仍按原来那条线收更新", async () => {
+    vi.useFakeTimers();
+    setMockUpdaterVersion("1.0.0-beta.4");
+    setMockUpdateManifest("beta", published("1.0.0-beta.4", null));
+    setMockUpdateManifest("stable", published("1.0.0", Date.UTC(2026, 10, 20)));
+    // 测试版跟随同号正式版：核心号没前进也是候选
+    expect(await checkUpdate()).toMatchObject({ version: "1.0.0", channel: "stable", current_version: "1.0.0-beta.4", date: Date.UTC(2026, 10, 20) });
+    expect(await updaterInfo()).toMatchObject({ package_channel: "beta", preference: "beta", relation: "same" });
+    expect(await headsOf()).toEqual([
+      ["beta", "published", "1.0.0-beta.4"],
+      ["stable", "published", "1.0.0"],
+    ]);
+    await settle(downloadUpdate("c-5"));
+    expect(await updaterInfo()).toMatchObject({ downloaded_version: "1.0.0", downloaded_channel: "stable", downloaded_intent: "update" });
+    await installUpdate();
+    expect(await updaterInfo()).toMatchObject({ current_version: "1.0.0", package_channel: "stable", preference: "beta", relation: "following", available: null, channel_heads: [] });
+  });
+
+  it("候选就在包自己的通道里时不写偏好：包换了通道，偏好跟着包走", async () => {
+    setMockUpdaterVersion("1.0.0-beta.4");
+    setMockUpdateManifest("beta", published("1.0.0-beta.5", null));
+    setMockUpdateManifest("stable", { state: "not_published" });
+    expect(await checkUpdate()).toMatchObject({ version: "1.0.0-beta.5", channel: "beta" });
+    setMockUpdaterVersion("1.0.0");
+    expect(await updaterInfo()).toMatchObject({ package_channel: "stable", preference: "stable", relation: "same" });
+  });
+
+  it("跟到更慢的通道要核心号前进；等它追上来时不受这条限制，同号正式版就是在等的那一版", async () => {
+    setMockUpdaterVersion("1.0.0-dev.60");
+    setMockUpdateManifest("dev", published("1.0.0-dev.60", null));
+    setMockUpdateManifest("beta", published("1.0.0-beta.4", null));
+    setMockUpdateManifest("stable", published("1.0.0", null));
+    expect(await checkUpdate()).toBeNull();
+    expect(await headsOf()).toEqual([
+      ["dev", "published", "1.0.0-dev.60"],
+      ["beta", "published", "1.0.0-beta.4"],
+      ["stable", "published", "1.0.0"],
+    ]);
+
+    expect(await setUpdateChannel("beta")).toMatchObject({ relation: "waiting", channel_heads: [] });
+    expect(await checkUpdate()).toMatchObject({ version: "1.0.0", channel: "stable" });
+    // 等待中只看偏好与更慢的通道
+    expect(await headsOf()).toEqual([
+      ["beta", "published", "1.0.0-beta.4"],
+      ["stable", "published", "1.0.0"],
+    ]);
+  });
+
+  it("等它追上来：更快的通道再新也不看；偏好通道还没发布时不算失败，已知的结果不动", async () => {
+    setMockUpdaterVersion("1.0.0-dev.60");
+    setMockUpdatePreference("beta");
+    setMockUpdateManifest("dev", published("1.0.0-dev.61", null));
+    setMockUpdateManifest("beta", { state: "not_published" });
+    setMockUpdateManifest("stable", published("1.0.0", null));
+    expect(await updaterInfo()).toMatchObject({ package_channel: "dev", preference: "beta", relation: "waiting" });
+    const update = await checkUpdate();
+    expect(update).toMatchObject({ version: "1.0.0", channel: "stable" });
+
+    setMockUpdateManifest("stable", { state: "not_published" });
+    expect(await checkUpdate()).toEqual(update);
+    expect(await updaterInfo()).toMatchObject({
+      available: update,
+      channel_heads: [
+        { channel: "beta", state: "not_published", version: null, date: null },
+        { channel: "stable", state: "not_published", version: null, date: null },
+      ],
+    });
+
+    // 偏好通道发布了、没有比当前新的：已是最新，已知结果作废
+    setMockUpdateManifest("beta", published("1.0.0-beta.4", null));
+    expect(await checkUpdate()).toBeNull();
+    expect((await updaterInfo()).available).toBeNull();
+  });
+
+  it("偏好是正式版而正式版还没发布：已是最新，channel_heads 里正式版为 not_published", async () => {
+    setMockUpdaterVersion("1.0.0-beta.4");
+    setMockUpdatePreference("stable");
+    setMockUpdateManifest("stable", { state: "not_published" });
+    expect(await checkUpdate()).toBeNull();
+    expect(await updaterInfo()).toMatchObject({
+      relation: "waiting",
+      available: null,
+      channel_heads: [{ channel: "stable", state: "not_published", version: null, date: null }],
+    });
+  });
+
+  it("被拒：下完验过签才发现读不了本机数据，报 update_data_too_new、不留包、记进 refused，之后的检查不再挑它，改通道也不清掉", async () => {
+    vi.useFakeTimers();
+    setMockUpdaterVersion("1.0.0-dev.60");
+    setMockUpdatePreference("beta");
+    setMockUpdateManifest("beta", published("1.0.0-beta.4", null));
+    setMockUpdateManifest("stable", published("1.0.0", null));
+    setMockUpdateDataTooNew(["1.0.0"]);
+    await checkUpdate();
+    const events: CoreEvent[] = [];
+    await onCoreEvent((e) => events.push(e));
+    expect((await rejection(settle(downloadUpdate("c-6")))).code).toBe("update_data_too_new");
+    expect(events[events.length - 1]).toMatchObject({ kind: "stage", message: "更新包下载完成，正在校验签名" });
+    const refused = [{ version: "1.0.0", channel: "stable", reason: "data_too_new", intent: "update" }];
+    expect(await updaterInfo()).toMatchObject({ downloaded_version: null, downloaded_channel: null, refused });
+    expect(await checkUpdate()).toBeNull();
+    expect((await updaterInfo()).refused).toEqual(refused);
+    expect(await setUpdateChannel("stable")).toMatchObject({ preference: "stable", refused });
+    // 被拒的只是那一版：更新的正式版照样是候选
+    setMockUpdateManifest("stable", published("1.0.1", null));
+    expect(await checkUpdate()).toMatchObject({ version: "1.0.1", channel: "stable" });
+  });
+
+  it("偏好通道的更新源旧于本机记录：报 update_source_stale（detail.channel），不拿更慢的通道顶上，各通道结果照记", async () => {
+    setMockUpdaterVersion("1.0.0-dev.60");
+    setMockUpdatePreference("beta");
+    setMockUpdateManifest("beta", { state: "stale", version: "1.0.0-beta.3", seen: "1.0.0-beta.4" });
+    setMockUpdateManifest("stable", published("1.0.0", null));
+    expect(await rejection(checkUpdate())).toMatchObject({
+      code: "update_source_stale",
+      detail: { channel: "beta", offered: [{ version: "1.0.0-beta.3" }], seen: "1.0.0-beta.4" },
+    });
+    expect(await updaterInfo()).toMatchObject({ available: null });
+    expect(await headsOf()).toEqual([
+      ["beta", "stale", "1.0.0-beta.3"],
+      ["stable", "published", "1.0.0"],
+    ]);
+  });
+
+  it("预发布序号按数值比，位数多的大，超过 2^53 也分得清", async () => {
+    setMockUpdaterVersion("1.0.0-dev.9");
+    setMockUpdateManifest("dev", published("1.0.0-dev.10", null));
+    expect(await checkUpdate()).toMatchObject({ version: "1.0.0-dev.10" });
+    setMockUpdaterVersion("1.0.0-dev.9007199254740992");
+    setMockUpdateManifest("dev", published("1.0.0-dev.9007199254740993", null));
+    expect(await checkUpdate()).toMatchObject({ version: "1.0.0-dev.9007199254740993" });
+    setMockUpdateManifest("dev", published("1.0.0-dev.9007199254740992", null));
+    expect(await checkUpdate()).toBeNull();
+
+    const random = mulberry32(20261110);
+    const serial = () => {
+      const digits = 1 + Math.floor(random() * 20);
+      let text = String(1 + Math.floor(random() * 9));
+      while (text.length < digits) text += String(Math.floor(random() * 10));
+      return text;
+    };
+    for (let i = 0; i < 200; i++) {
+      const [current, offered] = [serial(), serial()];
+      setMockUpdaterVersion(`1.0.0-dev.${current}`);
+      setMockUpdateManifest("dev", published(`1.0.0-dev.${offered}`, null));
+      const found = await checkUpdate();
+      expect(found === null ? null : found.version, `${current} -> ${offered}`).toBe(BigInt(offered) > BigInt(current) ? `1.0.0-dev.${offered}` : null);
+    }
+  });
+
+  it("假后端的设定写错时直接报错，不按错的跑", () => {
+    expect(() => setMockUpdateManifest("beta", published("1.0.0-dev.3", null))).toThrow("不属于这个通道");
+    expect(() => setMockUpdateManifest("stable", published("1.0.0-beta.1", null))).toThrow("不属于这个通道");
+    expect(() => setMockUpdateManifest("dev", { state: "stale", version: "1.0.0-dev.5", seen: "1.0.0-dev.5" })).toThrow("不旧于");
+    expect(() => setMockUpdaterVersion("v1.0.0")).toThrow("认不出版本号");
+    expect(() => setMockUpdateDataTooNew(["1.0"])).toThrow("认不出版本号");
+  });
+});
+
 // 键名逐个对应 Rust 命令形参的 camelCase 形式；对不上时 Tauri 以参数错误拒绝整条命令。
 describe("Tauri 窗口里的参数键", () => {
   beforeEach(() => {
@@ -419,6 +688,7 @@ describe("Tauri 窗口里的参数键", () => {
     await pingServers(["a.example"]);
     await downloadUpdate("u-9");
     await setInstallOnExit(false);
+    await setUpdateChannel("beta");
     expect(vi.mocked(tauriInvoke).mock.calls).toEqual([
       ["update_config", { afterLaunch: "keep", checkUpdates: true, defaultJava: "auto", notifiedUpdateVersion: "0.2.0" }],
       ["add_game_directory", { name: "HMCL", path: "D:\\HMCL\\.minecraft" }],
@@ -429,6 +699,7 @@ describe("Tauri 窗口里的参数键", () => {
       ["ping_servers", { addresses: ["a.example"] }],
       ["download_update", { taskId: "u-9" }],
       ["set_install_on_exit", { enabled: false }],
+      ["set_update_channel", { channel: "beta" }],
     ]);
   });
 });
