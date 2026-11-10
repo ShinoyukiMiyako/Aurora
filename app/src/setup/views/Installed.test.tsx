@@ -40,7 +40,7 @@ function show(kind: ExistingKind, extra: Partial<InstalledProps> = {}, lang: Lan
   view = render(
     <FrameChromeProvider value={chrome}>
       <InShell>
-        <Installed copy={copy} existing={{ kind, version: "0.1.0", dir: LONG_DIR }} payloadVersion="0.2.0" elevated={false} busy={false} opening={false} {...handlers} {...extra} />
+        <Installed copy={copy} existing={{ kind, version: "0.1.0", dir: LONG_DIR, channel: "stable" }} payloadVersion="0.2.0" elevated={false} busy={false} opening={false} {...handlers} {...extra} />
       </InShell>
     </FrameChromeProvider>,
   );
@@ -96,44 +96,44 @@ describe.each(LANGS)("按钮（%s）", (lang) => {
 describe("标题和说明", () => {
   it("upgrade 的标题是现有版本，说明里是要升到的版本", () => {
     const [installed, payload] = [randomVersion(), `${randomVersion()}-beta.2`];
-    show("upgrade", { existing: { kind: "upgrade", version: installed, dir: LONG_DIR }, payloadVersion: payload });
+    show("upgrade", { existing: { kind: "upgrade", version: installed, dir: LONG_DIR, channel: "stable" }, payloadVersion: payload });
     expect(text("h1")).toBe(`发现${APP_NAME} ${installed}`);
     expect(text("header p")).toContain(`可以升级到 ${payload}`);
   });
 
   it("same 的标题带版本", () => {
     const version = randomVersion();
-    show("same", { existing: { kind: "same", version, dir: LONG_DIR }, payloadVersion: version });
+    show("same", { existing: { kind: "same", version, dir: LONG_DIR, channel: "stable" }, payloadVersion: version });
     expect(text("h1")).toBe(`${APP_NAME} ${version} 已经装好了`);
   });
 
   it("newer 的说明里两个版本不能写反", () => {
-    show("newer", { existing: { kind: "newer", version: "0.3.0", dir: LONG_DIR }, payloadVersion: "0.2.0" });
+    show("newer", { existing: { kind: "newer", version: "0.3.0", dir: LONG_DIR, channel: "stable" }, payloadVersion: "0.2.0" });
     expect(text("h1")).toBe(`这台电脑上的${APP_NAME}更新`);
     expect(text("header p")).toBe("已安装 0.3.0，这个安装包是 0.2.0，不能往回装。");
   });
 
   it("装着测试版运行预览版的包时，说明里接着给出换回步骤", () => {
-    show("newer", { existing: { kind: "newer", version: "1.0.0-beta.2", dir: LONG_DIR }, payloadVersion: "0.1.0-dev.40" });
+    show("newer", { existing: { kind: "newer", version: "1.0.0-beta.2", dir: LONG_DIR, channel: "beta" }, payloadVersion: "0.1.0-dev.40" });
     expect(text("header p")).toBe(
       `已安装 1.0.0-beta.2，这个安装包是 0.1.0-dev.40，不能往回装。从测试版换回预览版时，先关掉这个窗口，在 Windows 设置的「应用」里卸载 ${APP_NAME_EN}，卸载时不要勾选「删除应用程序数据」；再重新运行这个安装包并沿用默认的安装位置，设置、账户和游戏文件都会保留。`,
     );
   });
 
   it("broken 不写版本：记录里的版本已经不可信", () => {
-    show("broken", { existing: { kind: "broken", version: "0.1.0", dir: LONG_DIR } });
+    show("broken", { existing: { kind: "broken", version: "0.1.0", dir: LONG_DIR, channel: "stable" } });
     expect(text("h1")).toBe("上次的安装不完整");
     expect(document.querySelector("header")?.textContent).not.toContain("0.1.0");
   });
 
   it("英文表走英文文案", () => {
-    show("newer", { existing: { kind: "newer", version: "0.3.0", dir: LONG_DIR }, payloadVersion: "0.2.0" }, "en");
+    show("newer", { existing: { kind: "newer", version: "0.3.0", dir: LONG_DIR, channel: "stable" }, payloadVersion: "0.2.0" }, "en");
     expect(text("h1")).toBe(`A newer ${APP_NAME_EN} is installed`);
     expect(text("header p")).toBe("0.3.0 is installed and this installer is 0.2.0, so it can't go back.");
   });
 
   it("英文表的换回步骤", () => {
-    show("newer", { existing: { kind: "newer", version: "1.0.0-beta.2", dir: LONG_DIR }, payloadVersion: "0.1.0-dev.40" }, "en");
+    show("newer", { existing: { kind: "newer", version: "1.0.0-beta.2", dir: LONG_DIR, channel: "beta" }, payloadVersion: "0.1.0-dev.40" }, "en");
     expect(text("header p")).toBe(
       `1.0.0-beta.2 is installed and this installer is 0.1.0-dev.40, so it can't go back. To switch from Beta back to Preview, close this window first, then uninstall ${APP_NAME_EN} from Apps in Windows Settings, leaving "Delete the application data" unchecked. Then run this installer again and keep the default location. Your settings, accounts and game files will be kept.`,
     );

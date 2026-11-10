@@ -97,6 +97,7 @@ pub fn check_dir(input: &str, need: SpaceNeed, own_dirs: &[&str], env: &dyn Targ
         not_empty: false,
         appended: false,
         free_bytes: 0,
+        data_block: None,
     })
 }
 
@@ -178,6 +179,7 @@ fn evaluate(
         not_empty,
         appended,
         free_bytes: volume.free_bytes,
+        data_block: None,
     })
 }
 
@@ -1248,6 +1250,7 @@ mod tests {
                 not_empty: false,
                 appended: false,
                 free_bytes: 1 << 40,
+                data_block: None,
             }
         );
         assert_eq!(entries(dir.path()), Vec::<String>::new());
@@ -1411,6 +1414,7 @@ mod tests {
                 not_empty: false,
                 appended: false,
                 free_bytes: free,
+                data_block: None,
             }
         );
     }
@@ -1451,6 +1455,7 @@ mod tests {
                 not_empty: true,
                 appended: true,
                 free_bytes: 1 << 40,
+                data_block: None,
             }
         );
         assert!(!dir.path().join(APP_FOLDER).exists());
@@ -1536,6 +1541,7 @@ mod tests {
                 not_empty: true,
                 appended: true,
                 free_bytes: 1 << 40,
+                data_block: None,
             }
         );
         assert!(!dir.path().join(APP_FOLDER).exists());
@@ -1611,6 +1617,7 @@ mod tests {
                 not_empty: false,
                 appended: false,
                 free_bytes: 1 << 40,
+                data_block: None,
             }
         );
     }

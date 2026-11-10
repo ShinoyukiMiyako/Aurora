@@ -82,13 +82,13 @@ export interface SetupCopy {
     back: string;
   };
   installing: {
-    title: Readonly<Record<InstallMode, (version: string) => string>>;
+    title: Readonly<Record<Exclude<InstallMode, "switch">, (version: string) => string>>;
     phase: Readonly<Record<Phase, string>>;
     slow: string;
     progressLabel: string;
   };
   done: {
-    title: Readonly<Record<InstallMode, (version: string) => string>>;
+    title: Readonly<Record<Exclude<InstallMode, "switch">, (version: string) => string>>;
     firstRun: string;
     kept: string;
     elevated: string;
@@ -105,7 +105,7 @@ export interface SetupCopy {
     back: string;
   };
   installed: {
-    kind: Readonly<Record<ExistingKind, InstalledText>>;
+    kind: Readonly<Record<Exclude<ExistingKind, "switch">, InstalledText>>;
     locationLabel: string;
     update: string;
     reinstall: string;
@@ -213,6 +213,7 @@ const ZH: SetupCopy = {
       network: "网络位置装不了，换一块本机的盘",
       unwritable: "这个位置写不进去，换一个你有权限的文件夹",
       no_space: "这块盘空间不够",
+      data_incompatible: `这里的数据被更新的${APP_NAME}用过，这个安装包读不了。换一个位置，或者装更新的版本`,
     },
     resume: "这里有之前留下的设置和游戏文件，装好后接着用。",
     nested: `这个文件夹里已经有别的文件，会在里面新建一个 ${APP_NAME_EN} 文件夹来装`,
@@ -358,6 +359,7 @@ const EN: SetupCopy = {
       network: "Network locations aren't supported. Pick a local drive",
       unwritable: "Can't write here. Pick a folder you have access to",
       no_space: "Not enough space on this drive",
+      data_incompatible: `Data here was used by a newer ${APP_NAME_EN} that this installer can't read. Pick another location, or install a newer version`,
     },
     resume: "This folder has settings and game files from before. They'll carry over.",
     nested: `This folder already has other files, so setup will make a ${APP_NAME_EN} folder inside it`,

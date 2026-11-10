@@ -6,6 +6,9 @@ import { describe, expect, it } from "vitest";
 import {
   PROGRESS_EVENT,
   isFailure,
+  type Channel,
+  type DataBlock,
+  type DataProblem,
   type DirCheck,
   type DirIssue,
   type Existing,
@@ -14,6 +17,7 @@ import {
   type FailureCode,
   type InstallMode,
   type InstallPlan,
+  type NewerReason,
   type Phase,
   type Probe,
   type Progress,
@@ -34,23 +38,52 @@ const snake = (pascal: string) => pascal.replace(/[A-Z]/g, (c, at: number) => (a
 const rustFields = (name: string) => [...rustBody("struct", name).matchAll(/pub (\w+):/g)].map((m) => camel(m[1])).sort();
 const rustVariants = (name: string) => [...rustBody("enum", name).matchAll(/^\s*(\w+),\s*$/gm)].map((m) => snake(m[1])).sort();
 
-const EXISTING: Existing = { kind: "upgrade", version: "", dir: "" };
-const PROBE: Probe = { payloadVersion: "", defaultDir: "", requiredBytes: 0, existing: null, interrupted: false, elevated: false, update: null };
+const EXISTING: Existing = { kind: "upgrade", version: "", dir: "", channel: null };
+const DATA_BLOCK: DataBlock = { problem: "too_new", path: "", recorded: null, supported: 0, reason: null, writtenBy: null, writtenByChannel: null };
+const PROBE: Probe = {
+  payloadVersion: "",
+  payloadChannel: null,
+  defaultDir: "",
+  requiredBytes: 0,
+  existing: null,
+  interrupted: false,
+  elevated: false,
+  update: null,
+  newerReason: null,
+  allowedModes: [],
+  unattended: null,
+  handoff: false,
+  dataBlock: null,
+};
 const PLAN: InstallPlan = { mode: "fresh", dir: null, desktopShortcut: true };
-const CHECK: DirCheck = { normalized: "", issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 0 };
+const CHECK: DirCheck = { normalized: "", issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 0, dataBlock: null };
 const PROGRESS: Progress = { phase: "unpack", percent: 0, slow: false };
 const FAILURE: Failure = { code: "disk_full", detail: "" };
 const UPDATE: UpdateLaunch = { relaunch: true };
 
-const EXISTING_KINDS: Record<ExistingKind, true> = { upgrade: true, same: true, newer: true, broken: true };
-const INSTALL_MODES: Record<InstallMode, true> = { fresh: true, upgrade: true, repair: true };
-const DIR_ISSUES: Record<DirIssue, true> = { empty: true, relative: true, bang: true, forbidden: true, minecraft: true, network: true, unwritable: true, no_space: true };
+const CHANNELS: Record<Channel, true> = { dev: true, beta: true, stable: true };
+const EXISTING_KINDS: Record<ExistingKind, true> = { upgrade: true, same: true, newer: true, broken: true, switch: true };
+const NEWER_REASONS: Record<NewerReason, true> = { same_channel: true, faster_channel: true, slower_channel: true, unknown_channel: true };
+const DATA_PROBLEMS: Record<DataProblem, true> = { too_new: true, unreadable: true };
+const INSTALL_MODES: Record<InstallMode, true> = { fresh: true, upgrade: true, repair: true, switch: true };
+const DIR_ISSUES: Record<DirIssue, true> = {
+  empty: true,
+  relative: true,
+  bang: true,
+  forbidden: true,
+  minecraft: true,
+  network: true,
+  unwritable: true,
+  no_space: true,
+  data_incompatible: true,
+};
 const PHASES: Record<Phase, true> = { unpack: true, write: true, verify: true };
 const FAILURE_CODES: Record<FailureCode, true> = { dir_unwritable: true, disk_full: true, extract_failed: true, payload_exit: true, verify_failed: true };
 
 describe("前后端契约", () => {
   it.each([
     ["Existing", EXISTING],
+    ["DataBlock", DATA_BLOCK],
     ["Probe", PROBE],
     ["InstallPlan", PLAN],
     ["DirCheck", CHECK],
@@ -62,7 +95,10 @@ describe("前后端契约", () => {
   });
 
   it.each([
+    ["Channel", CHANNELS],
     ["ExistingKind", EXISTING_KINDS],
+    ["NewerReason", NEWER_REASONS],
+    ["DataProblem", DATA_PROBLEMS],
     ["InstallMode", INSTALL_MODES],
     ["DirIssue", DIR_ISSUES],
     ["Phase", PHASES],

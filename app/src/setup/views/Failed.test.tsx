@@ -312,7 +312,7 @@ describe("接上流程", () => {
     ["dir_unwritable", "upgrade", zh.failed.reason.dir_unwritable.body("x", "retry")],
     ["disk_full", "repair", zh.failed.reason.disk_full.body("x", "retry")],
   ])("%s 发生在 %s 时位置是锁定的：只给重试，也不叫人换位置", (code, mode, body) => {
-    const existing: Existing = { kind: mode === "upgrade" ? "upgrade" : "same", version: "0.1.0", dir: String.raw`E:\app` };
+    const existing: Existing = { kind: mode === "upgrade" ? "upgrade" : "same", version: "0.1.0", dir: String.raw`E:\app`, channel: "stable" };
     const probe = { ...FAKE_PROBE, existing };
     const fake = createFakeBridge({ probe, outcome: "hang", progress: [] });
     const initial = replay([

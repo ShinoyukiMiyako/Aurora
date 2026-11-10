@@ -10,12 +10,18 @@ const DEFAULT_DIR = `C:\\Users\\Player\\AppData\\Local\\${APP_NAME_EN}`;
 
 export const FAKE_PROBE: Probe = {
   payloadVersion: "0.2.0",
+  payloadChannel: "stable",
   defaultDir: DEFAULT_DIR,
   requiredBytes: 42 * 1024 * 1024,
   existing: null,
   interrupted: false,
   elevated: false,
   update: null,
+  newerReason: null,
+  allowedModes: ["fresh"],
+  unattended: null,
+  handoff: false,
+  dataBlock: null,
 };
 
 /** 一次走完三个阶段的进度。 */
@@ -53,7 +59,7 @@ export interface FakeBridge extends SetupBridge {
 }
 
 function okCheck(path: string): DirCheck {
-  return { normalized: path, issue: path === "" ? "empty" : null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 120 * 1024 * 1024 * 1024 };
+  return { normalized: path, issue: path === "" ? "empty" : null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 120 * 1024 * 1024 * 1024, dataBlock: null };
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -174,10 +180,11 @@ function pick<T extends string>(raw: string | null, allowed: readonly T[], fallb
 }
 
 function existingOf(kind: ExistingKind): Existing {
-  return { kind, version: kind === "newer" ? "0.3.0" : kind === "same" ? "0.2.0" : "0.1.0", dir: `E:\\${APP_NAME_EN}` };
+  return { kind, version: kind === "newer" ? "0.3.0" : kind === "same" ? "0.2.0" : "0.1.0", dir: `E:\\${APP_NAME_EN}`, channel: "stable" };
 }
 
 function requestOf(mode: InstallMode, running: boolean): SetupEvent {
+  if (mode === "switch") throw new Error("没有发起换通道安装的入口，不该收到 switch");
   return mode === "fresh" ? { type: "install_requested", mode, running, check: okCheck(DEFAULT_DIR) } : { type: "install_requested", mode, running };
 }
 

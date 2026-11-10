@@ -320,11 +320,11 @@ pub struct Target {
 }
 
 impl Target {
-    /// 首装的目录来自计划，升级和修复来自注册登记的目录（`Existing.dir`），计划里不带。
+    /// 首装的目录来自计划，升级、修复和换通道来自注册登记的目录（`Existing.dir`），计划里不带。
     pub fn from_plan(plan: &InstallPlan, registered_dir: Option<&str>) -> Result<Self, Failure> {
         let dir = match plan.mode {
             InstallMode::Fresh => plan.dir.as_deref(),
-            InstallMode::Upgrade | InstallMode::Repair => registered_dir,
+            InstallMode::Upgrade | InstallMode::Repair | InstallMode::Switch => registered_dir,
         };
         let Some(dir) = dir else {
             return Err(Failure {
@@ -1010,7 +1010,11 @@ mod tests {
 
     #[test]
     fn upgrade_and_repair_targets_use_the_registered_directory() {
-        for mode in [InstallMode::Upgrade, InstallMode::Repair] {
+        for mode in [
+            InstallMode::Upgrade,
+            InstallMode::Repair,
+            InstallMode::Switch,
+        ] {
             let target = Target::from_plan(
                 &plan(mode, Some(r"D:\ignored")),
                 Some(r"E:\Games\Petalfall"),
@@ -1027,6 +1031,7 @@ mod tests {
             (InstallMode::Fresh, Some(r"E:\Petalfall")),
             (InstallMode::Upgrade, None),
             (InstallMode::Repair, None),
+            (InstallMode::Switch, None),
         ] {
             let failure = Target::from_plan(&plan(mode, None), registered).unwrap_err();
 

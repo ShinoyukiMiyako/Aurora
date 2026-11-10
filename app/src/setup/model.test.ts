@@ -27,9 +27,27 @@ const ALL_VIEWS: readonly View[] = ["boot", "preparing", "welcome", "location", 
 const DEFAULT_DIR = String.raw`C:\Users\a\AppData\Local\app`;
 const CHOSEN_DIR = String.raw`D:\游戏 目录\app`;
 
-const probeOf = (existing: Existing | null, extra: Partial<Probe> = {}): Probe => ({ payloadVersion: "0.2.0", defaultDir: DEFAULT_DIR, requiredBytes: 41_943_040, existing, interrupted: false, elevated: false, update: null, ...extra });
-const existingOf = (kind: ExistingKind): Existing => ({ kind, version: "0.1.0", dir: String.raw`E:\app` });
-const checkOf = (extra: Partial<DirCheck> = {}): DirCheck => ({ normalized: CHOSEN_DIR, issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 1 << 30, ...extra });
+const probeOf = (existing: Existing | null, extra: Partial<Probe> = {}): Probe => {
+  const probe: Probe = {
+    payloadVersion: "0.2.0",
+    payloadChannel: "stable",
+    defaultDir: DEFAULT_DIR,
+    requiredBytes: 41_943_040,
+    existing,
+    interrupted: false,
+    elevated: false,
+    update: null,
+    newerReason: null,
+    allowedModes: [...allowedModes(existing)],
+    unattended: null,
+    handoff: false,
+    dataBlock: null,
+    ...extra,
+  };
+  return upgradesUnattended(probe) ? { ...probe, unattended: "upgrade" } : probe;
+};
+const existingOf = (kind: ExistingKind): Existing => ({ kind, version: "0.1.0", dir: String.raw`E:\app`, channel: "stable" });
+const checkOf = (extra: Partial<DirCheck> = {}): DirCheck => ({ normalized: CHOSEN_DIR, issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 1 << 30, dataBlock: null, ...extra });
 const FAILURE: Failure = { code: "payload_exit", detail: "2" };
 const PROGRESS: Progress = { phase: "write", percent: 40, slow: false };
 

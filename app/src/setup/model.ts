@@ -120,6 +120,8 @@ export function allowedModes(existing: Existing | null): readonly InstallMode[] 
       return ["repair"];
     case "newer":
       return [];
+    case "switch":
+      throw new Error("探测结果不该是 switch：现在的判定只按版本比");
   }
 }
 

@@ -10,13 +10,15 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use petalfall_release::install_policy::channel_of;
 use tauri::ipc::InvokeError;
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 
 use crate::boot::{self, Instance};
 use crate::cli::{Launch, UpdateRequest};
 use crate::contract::{
-    DirCheck, Failure, InstallPlan, PROGRESS_EVENT, Probe, Progress, UpdateLaunch,
+    Channel, DirCheck, ExistingKind, Failure, InstallMode, InstallPlan, PROGRESS_EVENT, Probe,
+    Progress, UpdateLaunch,
 };
 use crate::existing::{self, Registry};
 use crate::journal::{self, Recovery};
@@ -235,19 +237,46 @@ fn assemble_probe(
         Some(_) => None,
         None => existing::leftover_dir(registry)?,
     };
+    // 种类只按版本比：分不出 newer 的原因、判不出 switch，也不读数据格式记号、不写交接记录
     let probe = Probe {
         payload_version: payload_version.to_owned(),
+        payload_channel: channel_of(payload_version).map(Channel::from),
         default_dir: leftover.unwrap_or(default_dir),
         required_bytes,
         existing,
         interrupted: false,
         elevated,
         update,
+        newer_reason: None,
+        // 半装恢复可能改掉种类，允许的模式等它定了再算
+        allowed_modes: Vec::new(),
+        unattended: None,
+        handoff: false,
+        data_block: None,
     };
-    Ok(match recovery {
+    let probe = match recovery {
         Recovery::Interrupted { journal, .. } => journal::mark_interrupted(probe, &journal),
         Recovery::Clean | Recovery::Completed | Recovery::Discarded { .. } => probe,
-    })
+    };
+    Ok(with_allowed_modes(probe))
+}
+
+/// 按半装恢复之后的种类定允许的模式：newer 什么都不能装。更新插件拉起时只有升级不经页面直接装，
+/// 同版本、残缺和没有安装都说明插件看到的和登记的对不上，退回交互的页面让用户看清再定。
+fn with_allowed_modes(probe: Probe) -> Probe {
+    let mode = match probe.existing.as_ref().map(|existing| existing.kind) {
+        None => Some(InstallMode::Fresh),
+        Some(ExistingKind::Upgrade) => Some(InstallMode::Upgrade),
+        Some(ExistingKind::Same | ExistingKind::Broken) => Some(InstallMode::Repair),
+        Some(ExistingKind::Newer) => None,
+        Some(ExistingKind::Switch) => unreachable!("种类只按版本比，判不出 switch"),
+    };
+    let unattended = mode.filter(|mode| *mode == InstallMode::Upgrade && probe.update.is_some());
+    Probe {
+        allowed_modes: mode.into_iter().collect(),
+        unattended,
+        ..probe
+    }
 }
 
 /// 窗口起不来时交给 NSIS 的参数。更新模式的开关和插件默认 passive 带的一样，顺序沿用 2.10.1（见 cli.rs 的
@@ -441,12 +470,18 @@ mod tests {
             probe,
             Probe {
                 payload_version: PAYLOAD.to_owned(),
+                payload_channel: Some(Channel::Stable),
                 default_dir: DEFAULT_DIR.to_owned(),
                 required_bytes: REQUIRED,
                 existing: None,
                 interrupted: false,
                 elevated: false,
                 update: None,
+                newer_reason: None,
+                allowed_modes: vec![InstallMode::Fresh],
+                unattended: None,
+                handoff: false,
+                data_block: None,
             }
         );
     }
@@ -541,6 +576,7 @@ mod tests {
                 kind: ExistingKind::Upgrade,
                 version: "0.1.0".to_owned(),
                 dir,
+                channel: Some(Channel::Stable),
             })
         );
         assert_eq!(probe.default_dir, DEFAULT_DIR);
@@ -623,9 +659,108 @@ mod tests {
                 kind: ExistingKind::Broken,
                 version: "0.1.0".to_owned(),
                 dir,
+                channel: Some(Channel::Stable),
             })
         );
         assert!(probe.interrupted);
+    }
+
+    /// 允许的模式要按半装恢复之后的种类算：升级断在半截时注册表里还是能升级的样子，照恢复前的种类算，
+    /// 更新插件拉起的那次就会不经页面再走一次升级。
+    #[test]
+    fn allowed_modes_follow_the_kind_left_after_recovery() {
+        let (_guard, dir) = app_dir();
+        let update = Some(UpdateLaunch { relaunch: true });
+        let cases = [
+            (
+                Table::default(),
+                Recovery::Clean,
+                None,
+                vec![InstallMode::Fresh],
+                None,
+            ),
+            (
+                Table::installed(&dir, "0.1.0"),
+                Recovery::Clean,
+                None,
+                vec![InstallMode::Upgrade],
+                None,
+            ),
+            (
+                Table::installed(&dir, "0.1.0"),
+                Recovery::Clean,
+                update,
+                vec![InstallMode::Upgrade],
+                Some(InstallMode::Upgrade),
+            ),
+            (
+                Table::installed(&dir, PAYLOAD),
+                Recovery::Clean,
+                update,
+                vec![InstallMode::Repair],
+                None,
+            ),
+            (
+                Table::installed(&dir, "0.3.0-dev.1"),
+                Recovery::Clean,
+                update,
+                vec![],
+                None,
+            ),
+            (
+                Table::installed(&dir, "0.1.0"),
+                interrupted(Path::new(&dir), false),
+                update,
+                vec![InstallMode::Repair],
+                None,
+            ),
+            (
+                Table::installed(&dir, "0.1.0"),
+                interrupted(Path::new(&dir), true),
+                update,
+                vec![InstallMode::Fresh],
+                None,
+            ),
+        ];
+        for (registry, recovery, update, allowed, unattended) in cases {
+            let probe = assemble_probe(
+                &registry,
+                PAYLOAD,
+                REQUIRED,
+                DEFAULT_DIR.to_owned(),
+                recovery,
+                false,
+                update,
+            )
+            .unwrap();
+
+            assert_eq!(probe.allowed_modes, allowed, "{probe:?}");
+            assert_eq!(probe.unattended, unattended, "{probe:?}");
+            assert!(!probe.handoff, "{probe:?}");
+            assert_eq!(probe.newer_reason, None, "{probe:?}");
+            assert_eq!(probe.data_block, None, "{probe:?}");
+        }
+    }
+
+    #[test]
+    fn the_probe_names_the_channels_of_both_versions() {
+        let (_guard, dir) = app_dir();
+
+        let probe = assemble_probe(
+            &Table::installed(&dir, "1.1.0-dev.61"),
+            "1.0.0-beta.5",
+            REQUIRED,
+            DEFAULT_DIR.to_owned(),
+            Recovery::Clean,
+            false,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(probe.payload_channel, Some(Channel::Beta));
+        let existing = probe.existing.unwrap();
+        assert_eq!(existing.kind, ExistingKind::Newer);
+        assert_eq!(existing.channel, Some(Channel::Dev));
     }
 
     #[test]

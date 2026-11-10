@@ -28,6 +28,7 @@ export interface DoneProps {
  * 提权时不给打开：提权启动和普通启动用的是两个数据根。
  */
 export function Done({ copy, mode, version, keptData, elevated, opening, onOpen, onClose }: DoneProps) {
+  if (mode === "switch") throw new Error("没有发起换通道安装的入口，不该装 switch");
   const text = copy.done;
   return (
     <Frame

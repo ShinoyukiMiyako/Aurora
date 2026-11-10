@@ -7,9 +7,10 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use petalfall_release::install_policy::channel_of;
 use semver::Version;
 
-use crate::contract::{Existing, ExistingKind};
+use crate::contract::{Channel, Existing, ExistingKind};
 
 /// 安装后的主程序文件名。
 pub const APP_EXE: &str = "Petalfall.exe";
@@ -121,6 +122,7 @@ pub fn detect(registry: &dyn Registry, payload_version: &str) -> io::Result<Opti
     };
     Ok(Some(Existing {
         kind,
+        channel: version.as_deref().and_then(channel_of).map(Channel::from),
         version: version.unwrap_or_default(),
         dir,
     }))
@@ -358,6 +360,7 @@ mod tests {
                 kind: ExistingKind::Upgrade,
                 version: "0.1.0".into(),
                 dir,
+                channel: Some(Channel::Stable),
             })
         );
     }
@@ -377,6 +380,7 @@ mod tests {
         let existing = detect(&registry, PAYLOAD).unwrap().unwrap();
         assert_eq!(existing.kind, ExistingKind::Newer);
         assert_eq!(existing.version, "0.3.0-dev.1");
+        assert_eq!(existing.channel, Some(Channel::Dev));
     }
 
     #[test]
@@ -386,6 +390,7 @@ mod tests {
         let existing = detect(&registry, PAYLOAD).unwrap().unwrap();
         assert_eq!(existing.kind, ExistingKind::Upgrade);
         assert_eq!(existing.version, "不是版本");
+        assert_eq!(existing.channel, None);
     }
 
     #[test]
@@ -399,6 +404,7 @@ mod tests {
                 kind: ExistingKind::Broken,
                 version: "9.9.9".into(),
                 dir: text,
+                channel: Some(Channel::Stable),
             })
         );
     }
@@ -432,6 +438,7 @@ mod tests {
                 kind: ExistingKind::Broken,
                 version: String::new(),
                 dir,
+                channel: None,
             })
         );
     }
@@ -460,6 +467,7 @@ mod tests {
                 kind: ExistingKind::Broken,
                 version: String::new(),
                 dir,
+                channel: None,
             })
         );
     }
@@ -476,6 +484,7 @@ mod tests {
                 kind: ExistingKind::Upgrade,
                 version: "0.1.0".into(),
                 dir,
+                channel: Some(Channel::Stable),
             })
         );
     }
@@ -563,6 +572,7 @@ mod tests {
                 kind: ExistingKind::Upgrade,
                 version: "0.1.0".into(),
                 dir,
+                channel: Some(Channel::Stable),
             })
         );
     }

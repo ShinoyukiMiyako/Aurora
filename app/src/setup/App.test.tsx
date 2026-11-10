@@ -19,7 +19,7 @@ import { replay, type SetupEvent, type SetupState } from "./model";
 const copy = COPY.zh;
 const WAIT = { timeout: 5000, interval: 10 };
 
-const existingOf = (kind: ExistingKind): Existing => ({ kind, version: "0.1.0", dir: "E:\\app" });
+const existingOf = (kind: ExistingKind): Existing => ({ kind, version: "0.1.0", dir: "E:\\app", channel: "stable" });
 const probeOf = (kind: ExistingKind | null, extra: Partial<Probe> = {}): Probe => ({ ...FAKE_PROBE, existing: kind === null ? null : existingOf(kind), ...extra });
 const FAILURE: Failure = { code: "verify_failed", detail: "uninstall.exe 不存在" };
 
@@ -192,7 +192,7 @@ describe("右键菜单", () => {
 
 describe("发起安装", () => {
   it("首装的计划带校验规整后的目录，装完到完成页", async () => {
-    const fake = start({ checkDir: (path) => ({ normalized: `${path}-规整`, issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 1 }) });
+    const fake = start({ checkDir: (path) => ({ normalized: `${path}-规整`, issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: 1, dataBlock: null }) });
     await seeHeading(copy.welcome.title);
     button(copy.welcome.install).click();
     await seeHeading(copy.done.title.fresh(""));
@@ -218,7 +218,7 @@ describe("发起安装", () => {
   });
 
   it("目录没过校验时退回选目录页，不调 install", async () => {
-    const fake = start({ checkDir: (path) => ({ normalized: path, issue: "unwritable", hasConfig: false, notEmpty: false, appended: false, freeBytes: 0 }) });
+    const fake = start({ checkDir: (path) => ({ normalized: path, issue: "unwritable", hasConfig: false, notEmpty: false, appended: false, freeBytes: 0, dataBlock: null }) });
     await seeHeading(copy.welcome.title);
     button(copy.welcome.install).click();
     await seeHeading(copy.location.title);

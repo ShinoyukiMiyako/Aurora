@@ -21,6 +21,7 @@ export interface InstallingProps {
 
 /** 缓动和减少动画都由 ProgressBar 跟随 App 的 MotionConfig。没有取消按钮：中途结束安装包只会留下半套文件。 */
 export function Installing({ copy, mode, version, run, progress }: InstallingProps) {
+  if (mode === "switch") throw new Error("没有发起换通道安装的入口，不该装 switch");
   const text = copy.installing;
   return (
     <Frame title={text.title[mode](version)}>

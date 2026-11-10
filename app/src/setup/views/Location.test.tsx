@@ -33,7 +33,7 @@ const REQUIRED = 40 * 1024 * 1024;
 const FREE = 12 * GIB;
 const DIR = "D:\\Games\\App";
 
-const okCheck = (overrides: Partial<DirCheck> = {}): DirCheck => ({ normalized: DIR, issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: FREE, ...overrides });
+const okCheck = (overrides: Partial<DirCheck> = {}): DirCheck => ({ normalized: DIR, issue: null, hasConfig: false, notEmpty: false, appended: false, freeBytes: FREE, dataBlock: null, ...overrides });
 const issueCheck = (issue: DirIssue): DirCheck => okCheck({ issue });
 
 const ISSUES: readonly DirIssue[] = ["empty", "relative", "bang", "forbidden", "minecraft", "network", "unwritable", "no_space"];

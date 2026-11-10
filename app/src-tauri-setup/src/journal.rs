@@ -230,6 +230,7 @@ pub fn mark_interrupted(probe: Probe, journal: &Journal) -> Probe {
             kind: ExistingKind::Broken,
             version: existing.version,
             dir,
+            channel: existing.channel,
         }),
         interrupted: true,
         ..probe
@@ -246,6 +247,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::contract::Channel;
 
     fn sample(pid: Option<u32>) -> Journal {
         Journal {
@@ -464,12 +466,18 @@ mod tests {
     fn probe(existing: Option<Existing>) -> Probe {
         Probe {
             payload_version: "0.3.0".into(),
+            payload_channel: Some(Channel::Stable),
             default_dir: r"C:\Users\a\AppData\Local\Petalfall".into(),
             required_bytes: 123,
             existing,
             interrupted: false,
             elevated: true,
             update: None,
+            newer_reason: None,
+            allowed_modes: Vec::new(),
+            unattended: None,
+            handoff: false,
+            data_block: None,
         }
     }
 
@@ -479,6 +487,7 @@ mod tests {
             kind: ExistingKind::Upgrade,
             version: "0.2.0-dev.7".into(),
             dir: r"D:\游戏 目录\Petalfall".into(),
+            channel: Some(Channel::Dev),
         }));
 
         let marked = mark_interrupted(half_registered, &sample(None));
@@ -487,12 +496,18 @@ mod tests {
             marked,
             Probe {
                 payload_version: "0.3.0".into(),
+                payload_channel: Some(Channel::Stable),
                 default_dir: r"D:\游戏 目录\Petalfall".into(),
                 required_bytes: 123,
                 existing: None,
                 interrupted: true,
                 elevated: true,
                 update: None,
+                newer_reason: None,
+                allowed_modes: Vec::new(),
+                unattended: None,
+                handoff: false,
+                data_block: None,
             }
         );
     }
@@ -511,6 +526,7 @@ mod tests {
                     kind: ExistingKind::Newer,
                     version: "0.4.0".into(),
                     dir: dir.into(),
+                    channel: Some(Channel::Stable),
                 }));
 
                 assert_eq!(mark_interrupted(found.clone(), &journal), found);
@@ -525,6 +541,7 @@ mod tests {
             kind: ExistingKind::Upgrade,
             version: "0.2.0-dev.7".into(),
             dir: r"C:\Users\a\AppData\Local\Petalfall".into(),
+            channel: Some(Channel::Dev),
         }));
 
         assert_eq!(mark_interrupted(found.clone(), &sample(None)), found);
@@ -547,6 +564,7 @@ mod tests {
                     kind,
                     version: version.into(),
                     dir: r"D:\游戏 目录\Petalfall".into(),
+                    channel: Some(Channel::Stable),
                 }));
 
                 assert_eq!(mark_interrupted(found.clone(), &journal), found);
@@ -565,6 +583,7 @@ mod tests {
             kind: ExistingKind::Upgrade,
             version: "0.1.0".into(),
             dir: r"E:\Old".into(),
+            channel: Some(Channel::Stable),
         }));
 
         assert_eq!(mark_interrupted(found.clone(), &journal), found);
@@ -580,6 +599,7 @@ mod tests {
             kind: ExistingKind::Upgrade,
             version: "0.1.0".into(),
             dir: r"d:\游戏 目录\PETALFALL\".into(),
+            channel: Some(Channel::Stable),
         });
 
         let marked = mark_interrupted(probe(existing), &journal);
@@ -598,6 +618,7 @@ mod tests {
             kind: ExistingKind::Upgrade,
             version: "0.1.0".into(),
             dir: r"D:\游戏 目录\Petalfall".into(),
+            channel: Some(Channel::Stable),
         });
 
         let marked = mark_interrupted(probe(existing), &journal);
@@ -608,6 +629,7 @@ mod tests {
                 kind: ExistingKind::Broken,
                 version: "0.1.0".into(),
                 dir: r"D:\游戏 目录\Petalfall".into(),
+                channel: Some(Channel::Stable),
             })
         );
         assert!(marked.interrupted);

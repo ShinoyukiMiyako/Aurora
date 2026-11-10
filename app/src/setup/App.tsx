@@ -170,6 +170,7 @@ function useSetupFlow(bridge: SetupBridge, initial: SetupState): SetupFlow {
       requestingInstall.current = true;
       setBusy(true);
       const run = async () => {
+        if (mode === "switch") throw new Error("没有发起换通道安装的入口，不该收到 switch");
         if (mode === "fresh") {
           const check = await bridge.checkDir(latest.current.dir);
           dispatch({ type: "install_requested", mode, check, running: await bridge.launcherRunning() });
