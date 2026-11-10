@@ -303,6 +303,7 @@ pub fn run() {
             commands::updater::download_update,
             commands::updater::install_update,
             commands::updater::set_install_on_exit,
+            commands::updater::set_update_channel,
             // -- window --
             commands::window::restore_window_without_focus,
             commands::window::reveal_main_window,

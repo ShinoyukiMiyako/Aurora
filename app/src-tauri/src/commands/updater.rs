@@ -47,9 +47,9 @@ use tokio::sync::Notify;
 
 use crate::commands::error::{code, source_chain, CommandError};
 use crate::commands::update_channels::{
-    channel_outcome, channel_pubkey, conclude, effective_preference, endpoint_groups,
-    followed_channels, head_outcome, must_save_preference, ChannelEndpoints, ChannelOutcome,
-    ChannelReport, Conclusion, EndpointOutcome,
+    channel_outcome, channel_pubkey, channel_relation, conclude, effective_preference,
+    endpoint_groups, followed_channels, head_outcome, must_save_preference, ChannelEndpoints,
+    ChannelOutcome, ChannelReport, Conclusion, EndpointOutcome,
 };
 use crate::commands::update_head::{read_seen_entry, verify_head, VerifiedHead};
 use crate::commands::update_package::vet_download;
@@ -267,15 +267,6 @@ fn update_millis(update: &Update) -> Option<i64> {
         .map(|date| date.unix_timestamp() * 1000 + i64::from(date.millisecond()))
 }
 
-/// 版本号 `version` 所属的发布通道，规则同 [`Channel::of`]；认不出时为 `None`。
-///
-/// `version` 只来自 `package_info` 的版本号（直接转成的字符串，或插件转成字符串后放进 `Update` 的），
-/// 必然是合法的 semver。
-fn package_channel(version: &str) -> Option<Channel> {
-    let version = Version::parse(version).expect("版本号来自 package_info，必然是合法的 semver");
-    Channel::of_version(&version)
-}
-
 /// 生效的通道偏好与本包通道之间的关系。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -396,34 +387,9 @@ impl UpdaterState {
         }
     }
 
-    fn info(&self, current_version: String) -> UpdaterInfoDto {
-        let slot = self.slot();
-        let (supported, unsupported_reason) = match self.support {
-            UpdaterSupport::Supported => (true, None),
-            UpdaterSupport::Unsupported(reason) => (false, Some(reason)),
-        };
-        // 偏好还没有地方存，生效的就是本包的通道；检查只问本包通道的清单、不按通道记结果，下载也只有普通更新一种，
-        // 所以下好的包同样属于本包的通道。
-        let package_channel = package_channel(&current_version);
-        let downloaded_version = slot.downloaded_version();
-        UpdaterInfoDto {
-            current_version,
-            supported,
-            unsupported_reason,
-            package_channel,
-            preference: package_channel,
-            relation: package_channel.map(|_| ChannelRelation::Same),
-            available: slot
-                .available
-                .as_ref()
-                .map(|candidate| update_dto(&candidate.update, candidate.channel)),
-            channel_heads: Vec::new(),
-            refused: Vec::new(),
-            downloaded_channel: downloaded_version.as_ref().and(package_channel),
-            downloaded_intent: downloaded_version.as_ref().map(|_| UpdateIntent::Update),
-            downloaded_version,
-            install_on_exit: slot.install_on_exit,
-        }
+    /// 正在运行 `current`、配置里存着的偏好是 `stored` 时的自更新状态，见 [`info_of`]。
+    fn info(&self, current: &Version, stored: Option<Channel>) -> UpdaterInfoDto {
+        info_of(self.support, &self.slot(), current, stored, update_dto)
     }
 
     /// 拉起已下载更新包的安装程序，`current` 是正在运行的版本，先过安装前的关卡（[`installable`]）。Windows 上
@@ -482,6 +448,45 @@ fn installable<'s, U: ReleaseVersion>(
     Ok(ready)
 }
 
+/// 槽位里的进度连同通道偏好拼成 `updater_info`。`stored` 是配置里存着的偏好（缺省或认不出时为 `None`），生效的
+/// 偏好与关系由它和本包的通道定（[`effective_preference`]、[`channel_relation`]）；版本号认不出通道时三项都为
+/// `null`。`dto_of` 把候选转成 [`UpdateDto`]，生产传 [`update_dto`]；抽出来是为了单测能用假的更新。
+fn info_of<U: ReleaseVersion>(
+    support: UpdaterSupport,
+    slot: &UpdateSlot<U>,
+    current: &Version,
+    stored: Option<Channel>,
+    dto_of: impl Fn(&U, Channel) -> UpdateDto,
+) -> UpdaterInfoDto {
+    let (supported, unsupported_reason) = match support {
+        UpdaterSupport::Supported => (true, None),
+        UpdaterSupport::Unsupported(reason) => (false, Some(reason)),
+    };
+    let package_channel = Channel::of_version(current);
+    let preference = package_channel.map(|package| effective_preference(stored, package));
+    let downloaded = slot.ready().ok();
+    UpdaterInfoDto {
+        current_version: current.to_string(),
+        supported,
+        unsupported_reason,
+        package_channel,
+        preference,
+        relation: package_channel
+            .zip(preference)
+            .map(|(package, preference)| channel_relation(preference, package)),
+        available: slot
+            .available
+            .as_ref()
+            .map(|candidate| dto_of(&candidate.update, candidate.channel)),
+        channel_heads: slot.channel_heads().to_vec(),
+        refused: slot.refused().to_vec(),
+        downloaded_version: slot.downloaded_version(),
+        downloaded_channel: downloaded.map(|ready| ready.channel),
+        downloaded_intent: downloaded.map(|ready| ready.intent),
+        install_on_exit: slot.install_on_exit,
+    }
+}
+
 /// 拿槽位的锁。临界区里只有字段赋值与同步的安装调用，真中毒说明程序已处于未知状态，直接崩。
 fn lock_slot<U>(slot: &Mutex<UpdateSlot<U>>) -> MutexGuard<'_, UpdateSlot<U>> {
     slot.lock().expect("更新状态的锁已中毒")
@@ -522,13 +527,81 @@ impl From<SlotError> for CommandError {
     }
 }
 
-/// 自更新状态。不支持时也能调，前端据 `supported` 决定是否显示更新入口。
+/// 自更新状态。不支持时也能调，前端据 `supported` 决定是否显示更新入口。通道偏好读自配置（[`info_now`]）。
 #[tauri::command]
 pub async fn updater_info(
     app: AppHandle,
+    facade: State<'_, Facade>,
     updater: State<'_, UpdaterState>,
 ) -> Result<UpdaterInfoDto, CommandError> {
-    Ok(updater.info(app.package_info().version.to_string()))
+    Ok(info_now(&facade, &updater, &app.package_info().version).await)
+}
+
+/// 设置更新通道偏好，返回设置之后的 `updater_info`。`channel` 不是 `dev`、`beta`、`stable` 之一时报
+/// `invalid_argument`；不支持自更新报 `updater_unsupported`；有下载或安装正在进行报 `update_busy`。偏好照写进配置，
+/// 生效值变了才清掉本次会话的更新进度（[`apply_update_channel`]）。
+#[tauri::command]
+pub async fn set_update_channel(
+    channel: String,
+    app: AppHandle,
+    facade: State<'_, Facade>,
+    updater: State<'_, UpdaterState>,
+) -> Result<UpdaterInfoDto, CommandError> {
+    let channel = channel_named(&channel)?;
+    updater.require_supported()?;
+    let current = &app.package_info().version;
+    apply_update_channel(&facade, &updater.slot, current, channel).await?;
+    Ok(info_now(&facade, &updater, current).await)
+}
+
+/// 前端传来的通道名认成 [`Channel`]：只认 `dev`、`beta`、`stable` 这三个小写名（[`Channel::from_name`]），别的报
+/// `invalid_argument`。
+fn channel_named(name: &str) -> Result<Channel, CommandError> {
+    Channel::from_name(name).ok_or_else(|| {
+        CommandError::invalid_argument(format!("更新通道「{name}」不是 dev、beta、stable 之一"))
+    })
+}
+
+/// 把通道偏好写成 `channel`，`current` 是正在运行的版本，由它判出本包的通道（[`package_channel_of`]）。
+///
+/// 有下载或安装正在进行时报 `update_busy`、什么都不写：偏好一改，下到一半的包就得作废，交给安装程序的包则已经
+/// 收不回来。先写配置，再看生效值（[`effective_preference`]）变没变：变了才清掉槽位里按旧偏好得来的进度、代号加一
+/// （[`UpdateSlot::reset_for_new_preference`]），没变时只写盘，候选、下好的包与各通道的结果照旧。写不进配置时报错，
+/// 槽位不动。
+async fn apply_update_channel<U: ReleaseVersion>(
+    facade: &Facade,
+    slot: &Mutex<UpdateSlot<U>>,
+    current: &Version,
+    channel: Channel,
+) -> Result<(), CommandError> {
+    let package = package_channel_of(current)?;
+    lock_slot(slot).ensure_idle()?;
+    let mut before = None;
+    facade
+        .update_if_changed(|petalfall| {
+            before = Some(effective_preference(
+                petalfall.update_channel_preference(),
+                package,
+            ));
+            petalfall.set_update_channel_preference(channel)
+        })
+        .await?;
+    let before = before.expect("update_if_changed 总会调用改动闭包");
+    tracing::info!(
+        before = before.as_str(),
+        after = channel.as_str(),
+        "设置了更新通道偏好"
+    );
+    if before != channel {
+        lock_slot(slot).reset_for_new_preference();
+    }
+    Ok(())
+}
+
+/// 槽位里的进度连同配置里存着的偏好，拼成此刻的 `updater_info`。读锁里只读偏好。
+async fn info_now(facade: &Facade, updater: &UpdaterState, current: &Version) -> UpdaterInfoDto {
+    let stored = facade.read().await.update_channel_preference();
+    updater.info(current, stored)
 }
 
 /// 检查更新。按生效的通道偏好，同时问偏好通道与所有比它慢的通道（[`fetch_conclusion`]）；每个通道的端点见
@@ -2316,7 +2389,7 @@ mod tests {
         assert_eq!(err.code, code::UPDATER_UNSUPPORTED);
         assert_eq!(err.detail.unwrap()["reason"], "signed_version_not_required");
         assert!(err.message.contains("版本号"), "{}", err.message);
-        let info = serde_json::to_value(state.info("0.1.0".into())).unwrap();
+        let info = serde_json::to_value(state.info(&version("0.1.0"), None)).unwrap();
         assert_eq!(info["supported"], false);
         assert_eq!(info["unsupported_reason"], "signed_version_not_required");
     }
@@ -2388,7 +2461,7 @@ mod tests {
         let err = state.require_supported().unwrap_err();
         assert_eq!(err.code, code::UPDATER_UNSUPPORTED);
         assert_eq!(err.detail.unwrap()["reason"], "downgrades_allowed");
-        let info = serde_json::to_value(state.info("0.1.0".into())).unwrap();
+        let info = serde_json::to_value(state.info(&version("0.1.0"), None)).unwrap();
         assert_eq!(info["unsupported_reason"], "downgrades_allowed");
     }
 
@@ -2453,7 +2526,7 @@ mod tests {
         let err = state.require_supported().unwrap_err();
         assert_eq!(err.code, code::UPDATER_UNSUPPORTED);
         assert_eq!(err.detail.unwrap()["reason"], "unknown_channel");
-        let info = serde_json::to_value(state.info("1.0.0-rc.1".into())).unwrap();
+        let info = serde_json::to_value(state.info(&version("1.0.0-rc.1"), None)).unwrap();
         assert_eq!(info["supported"], false);
         assert_eq!(info["unsupported_reason"], "unknown_channel");
     }
@@ -2521,7 +2594,7 @@ mod tests {
         let err = state.require_supported().unwrap_err();
         assert_eq!(err.code, code::UPDATER_UNSUPPORTED);
         assert_eq!(err.detail.unwrap()["reason"], "pubkey_mismatch");
-        let info = serde_json::to_value(state.info("1.0.0-dev.12".into())).unwrap();
+        let info = serde_json::to_value(state.info(&version("1.0.0-dev.12"), None)).unwrap();
         assert_eq!(info["supported"], false);
         assert_eq!(info["unsupported_reason"], "pubkey_mismatch");
     }
@@ -2535,7 +2608,7 @@ mod tests {
         assert_eq!(err.code, code::UPDATER_UNSUPPORTED);
         assert_eq!(err.detail.unwrap()["reason"], "missing_pubkey");
 
-        let info = serde_json::to_value(state.info("0.1.0".into())).unwrap();
+        let info = serde_json::to_value(state.info(&version("0.1.0"), None)).unwrap();
         assert_eq!(info["supported"], false);
         assert_eq!(info["unsupported_reason"], "missing_pubkey");
         assert_eq!(info["current_version"], "0.1.0");
@@ -2543,36 +2616,86 @@ mod tests {
         assert_eq!(info["downloaded_version"], Value::Null);
     }
 
-    /// 偏好还没有地方存、清单也不按通道记结果：生效的偏好就是本包版本号所属的通道，关系为 same，各通道的结果与
-    /// 被拒的版本都为空，没下载时下好的包的通道与用意为 null。开发构建不支持自更新，但通道照样认得出；
-    /// 只有版本号认不出通道时，这三项才为 null。
+    /// 生效的偏好：配置里没存（或认不出）时就是本包版本号所属的通道，存了就是存的那个；关系按两者的快慢定。开发构建
+    /// 不支持自更新，通道照样认得出。版本号认不出通道时这三项都为 null，存了什么都一样。没检查、没下载时各通道的结果
+    /// 与被拒的版本为空，下好的包的通道与用意为 null。
     #[test]
-    fn info_takes_the_package_channel_as_the_preference() {
+    fn info_reports_the_effective_preference_and_its_relation() {
         let supported = UpdaterState::new(UpdaterSupport::Supported);
         let debug = UpdaterState::new(UpdaterSupport::Unsupported(UnsupportedReason::DebugBuild));
-        for (state, version, channel) in [
-            (&supported, "1.0.0-dev.12", "dev"),
-            (&supported, "1.0.0-beta.3", "beta"),
-            (&supported, "1.0.0-BETA.2+build.7", "beta"),
-            (&supported, "1.0.0", "stable"),
-            (&debug, "0.1.0-dev.3", "dev"),
+        for (state, current, stored, package, preference, relation) in [
+            (&supported, "1.0.0-dev.12", None, "dev", "dev", "same"),
+            (&supported, "1.0.0-beta.3", None, "beta", "beta", "same"),
+            (
+                &supported,
+                "1.0.0-BETA.2+build.7",
+                None,
+                "beta",
+                "beta",
+                "same",
+            ),
+            (&supported, "1.0.0", None, "stable", "stable", "same"),
+            (&debug, "0.1.0-dev.3", None, "dev", "dev", "same"),
+            (
+                &supported,
+                "1.0.0-beta.3",
+                Some(Channel::Beta),
+                "beta",
+                "beta",
+                "same",
+            ),
+            (
+                &supported,
+                "1.0.0-beta.3",
+                Some(Channel::Stable),
+                "beta",
+                "stable",
+                "waiting",
+            ),
+            (
+                &supported,
+                "1.0.0-beta.3",
+                Some(Channel::Dev),
+                "beta",
+                "dev",
+                "following",
+            ),
+            (
+                &supported,
+                "1.0.0",
+                Some(Channel::Beta),
+                "stable",
+                "beta",
+                "following",
+            ),
+            (
+                &supported,
+                "1.0.0-dev.12",
+                Some(Channel::Stable),
+                "dev",
+                "stable",
+                "waiting",
+            ),
         ] {
-            let info = serde_json::to_value(state.info(version.into())).unwrap();
-            assert_eq!(info["package_channel"], channel, "{version}");
-            assert_eq!(info["preference"], channel, "{version}");
-            assert_eq!(info["relation"], "same", "{version}");
-            assert_eq!(info["channel_heads"], json!([]), "{version}");
-            assert_eq!(info["refused"], json!([]), "{version}");
-            assert_eq!(info["downloaded_channel"], Value::Null, "{version}");
-            assert_eq!(info["downloaded_intent"], Value::Null, "{version}");
+            let info = serde_json::to_value(state.info(&version(current), stored)).unwrap();
+            let case = format!("{current} {stored:?}");
+            assert_eq!(info["package_channel"], package, "{case}");
+            assert_eq!(info["preference"], preference, "{case}");
+            assert_eq!(info["relation"], relation, "{case}");
+            assert_eq!(info["channel_heads"], json!([]), "{case}");
+            assert_eq!(info["refused"], json!([]), "{case}");
+            assert_eq!(info["downloaded_channel"], Value::Null, "{case}");
+            assert_eq!(info["downloaded_intent"], Value::Null, "{case}");
         }
 
         let unknown = UpdaterState::new(UpdaterSupport::Unsupported(
             UnsupportedReason::UnknownChannel,
         ));
-        let info = serde_json::to_value(unknown.info("1.0.0-rc.1".into())).unwrap();
-        for field in ["package_channel", "preference", "relation"] {
-            assert_eq!(info[field], Value::Null, "{field}");
+        for stored in [None, Some(Channel::Stable)] {
+            let info = serde_json::to_value(unknown.info(&version("1.0.0-rc.1"), stored)).unwrap();
+            for field in ["package_channel", "preference", "relation"] {
+                assert_eq!(info[field], Value::Null, "{field} {stored:?}");
+            }
         }
     }
 
@@ -4466,6 +4589,11 @@ mod tests {
                 ),
                 "{body}"
             );
+            // 每次取完清单都经同一处落结论，见过的版本跟着并进配置。
+            assert!(
+                body.contains("conclude_fetched(&facade, &updater.slot, &"),
+                "{body}"
+            );
         }
 
         let fetch = top_level_fn(source, "async fn fetch_conclusion(");
@@ -5482,6 +5610,65 @@ mod tests {
             )
             .unwrap();
         }
+
+        /// 此刻给前端的 `updater_info`：偏好照命令那样读自配置，候选按假的更新转成 DTO。
+        async fn info(&self) -> UpdaterInfoDto {
+            let stored = self.facade.read().await.update_channel_preference();
+            info_of(
+                UpdaterSupport::Supported,
+                &lock_slot(&self.slot),
+                &self.current,
+                stored,
+                |update: &Fake, channel| UpdateDto {
+                    version: update.0.to_owned(),
+                    current_version: self.current.to_string(),
+                    notes: None,
+                    date: None,
+                    channel,
+                },
+            )
+        }
+
+        /// 槽位里放上一次会话该有的进度：各通道的结果、测试版的候选与下好的包、退出时安装，以及两种原因被拒的版本。
+        fn fill_session(&self) {
+            let mut slot = lock_slot(&self.slot);
+            let ticket = slot.generation();
+            let candidate = || Candidate {
+                update: Fake("1.0.0-beta.5"),
+                channel: Channel::Beta,
+            };
+            let heads = vec![
+                head_dto(
+                    Channel::Beta,
+                    ChannelHeadState::Published,
+                    Some("1.0.0-beta.5"),
+                ),
+                head_dto(Channel::Stable, ChannelHeadState::NotPublished, None),
+            ];
+            slot.settle_check(ticket, heads, CheckConclusion::Found(candidate()))
+                .unwrap();
+            slot.store_download(ticket, candidate(), vec![5]).unwrap();
+            slot.set_install_on_exit(true).unwrap();
+            slot.refuse_update(
+                ticket,
+                "1.0.0-beta.6".to_owned(),
+                Channel::Beta,
+                RefusalReason::DataTooNew,
+            )
+            .unwrap();
+            slot.refuse_update(
+                ticket,
+                "1.0.0".to_owned(),
+                Channel::Stable,
+                RefusalReason::PreferenceUnsaved,
+            )
+            .unwrap();
+        }
+
+        /// 照 `set_update_channel` 把通道设成 `channel`。
+        async fn set_channel(&self, channel: Channel) -> Result<(), CommandError> {
+            apply_update_channel(&self.facade, &self.slot, &self.current, channel).await
+        }
     }
 
     /// 见过的版本里的一项：`text` 那一版连同测试钥签的签名串，与写入一方的形状相同。
@@ -5840,8 +6027,7 @@ mod tests {
         let ticket = flow.ticket();
         let plan = flow.plan().await;
         let (fetched, _) = flow.fetch(&plan, answers()).await;
-        flow.write_preference(Channel::Stable).await;
-        lock_slot(&flow.slot).reset_for_new_preference();
+        flow.set_channel(Channel::Stable).await.unwrap();
         let err = flow.settle(&plan, ticket, fetched).await.err().unwrap();
         assert_eq!(err.code, code::UPDATE_SUPERSEDED);
         let saved = flow.saved().unwrap();
@@ -6005,6 +6191,183 @@ mod tests {
                 (Channel::Stable, published("1.0.0")),
             ]
         );
+    }
+
+    /// 通道名只认 dev、beta、stable 三个小写名；大小写不同、带空白、不认识的名字与空串都报 `invalid_argument`，
+    /// 说法里带着原样的名字。
+    #[test]
+    fn update_channel_names_are_the_three_lowercase_ones() {
+        for (name, channel) in [
+            ("dev", Channel::Dev),
+            ("beta", Channel::Beta),
+            ("stable", Channel::Stable),
+        ] {
+            assert_eq!(channel_named(name), Ok(channel));
+        }
+        for name in ["", "Dev", "STABLE", " beta", "beta ", "nightly", "release"] {
+            let err = channel_named(name).unwrap_err();
+            assert_eq!(err.code, code::INVALID_ARGUMENT, "{name:?}");
+            assert!(
+                err.message.contains(&format!("「{name}」")),
+                "{}",
+                err.message
+            );
+        }
+    }
+
+    /// 命令层的接线单测里造不出来（要 AppHandle），钉住源码：设置通道先认通道名、再看支不支持自更新，然后才写偏好，
+    /// 交回写完之后从配置读出的状态；写偏好之前先看有没有下载或安装在进行，写完才清槽位。`updater_info` 同样从配置
+    /// 读偏好。命令在 lib.rs 里注册。各步的行为由下面的用例验证。
+    #[test]
+    fn setting_the_channel_checks_the_name_and_support_before_writing() {
+        let (source, _) = include_str!("updater.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap();
+        let in_order = |body: &str, steps: &[&str]| {
+            let positions: Vec<usize> = steps
+                .iter()
+                .map(|step| {
+                    body.find(step)
+                        .unwrap_or_else(|| panic!("找不到 {step}\n{body}"))
+                })
+                .collect();
+            assert!(
+                positions.windows(2).all(|pair| pair[0] < pair[1]),
+                "{steps:?} 的先后不对\n{body}"
+            );
+        };
+
+        let set = top_level_fn(source, "pub async fn set_update_channel(");
+        in_order(
+            &set,
+            &[
+                "let channel = channel_named(&channel)?;",
+                "updater.require_supported()?;",
+                "apply_update_channel(&facade, &updater.slot, current, channel).await?;",
+                "Ok(info_now(&facade, &updater, current).await)",
+            ],
+        );
+        let apply = top_level_fn(source, "async fn apply_update_channel<");
+        in_order(
+            &apply,
+            &[
+                "lock_slot(slot).ensure_idle()?;",
+                ".update_if_changed(",
+                "lock_slot(slot).reset_for_new_preference();",
+            ],
+        );
+        let info = top_level_fn(source, "pub async fn updater_info(");
+        assert!(
+            info.contains("info_now(&facade, &updater, &app.package_info().version).await"),
+            "{info}"
+        );
+        let now = top_level_fn(source, "async fn info_now(");
+        assert!(
+            now.contains("facade.read().await.update_channel_preference()"),
+            "{now}"
+        );
+        assert!(include_str!("../lib.rs").contains("commands::updater::set_update_channel,"));
+    }
+
+    /// 生效的通道变了：偏好写进配置，本次会话按旧偏好得来的进度全部作废（候选、下好的包、各通道的结果、因为没能写下
+    /// 偏好而被拒的版本），退出时不再安装，号加一；因为认不得数据而被拒的版本与偏好无关，留着。交回的状态按新偏好算。
+    #[tokio::test]
+    async fn a_new_effective_channel_clears_the_session_progress() {
+        for (target, relation) in [
+            (Channel::Stable, ChannelRelation::Waiting),
+            (Channel::Dev, ChannelRelation::Following),
+        ] {
+            let flow = Flow::new("1.0.0-beta.4", None, None);
+            flow.fill_session();
+            let ticket = flow.ticket();
+            flow.set_channel(target).await.unwrap();
+            assert_eq!(
+                flow.saved().unwrap()["update_channel"],
+                json!(target.as_str())
+            );
+            assert_ne!(flow.ticket(), ticket);
+            let info = flow.info().await;
+            assert_eq!(info.package_channel, Some(Channel::Beta));
+            assert_eq!(info.preference, Some(target));
+            assert_eq!(info.relation, Some(relation));
+            assert_eq!(info.available, None);
+            assert!(info.channel_heads.is_empty());
+            assert_eq!(info.downloaded_version, None);
+            assert_eq!(info.downloaded_channel, None);
+            assert_eq!(info.downloaded_intent, None);
+            assert!(!info.install_on_exit);
+            assert_eq!(
+                info.refused,
+                [RefusedUpdateDto {
+                    version: "1.0.0-beta.6".to_owned(),
+                    channel: Channel::Beta,
+                    reason: RefusalReason::DataTooNew,
+                    intent: UpdateIntent::Update,
+                }]
+            );
+        }
+    }
+
+    /// 生效的通道没变：只把偏好写进配置，号不变，槽位原样，交回的状态与写之前一样。偏好缺省时选本包的通道、配置里是
+    /// 认不出的值时选本包的通道，都算没变，配置里写下这个名字；已经存着同一个通道时连配置都不写。
+    #[tokio::test]
+    async fn an_unchanged_effective_channel_only_writes_the_preference() {
+        for (stored, written) in [
+            (None, true),
+            (Some(json!("nightly")), true),
+            (Some(json!("beta")), false),
+        ] {
+            let flow = Flow::new("1.0.0-beta.4", stored.clone(), None);
+            flow.fill_session();
+            let ticket = flow.ticket();
+            let before = flow.info().await;
+            assert_eq!(before.downloaded_version.as_deref(), Some("1.0.0-beta.5"));
+            flow.set_channel(Channel::Beta).await.unwrap();
+            assert_eq!(flow.ticket(), ticket, "{stored:?}");
+            assert_eq!(flow.info().await, before, "{stored:?}");
+            let saved = flow.saved().map(|saved| saved["update_channel"].clone());
+            assert_eq!(saved, written.then(|| json!("beta")), "{stored:?}");
+        }
+    }
+
+    /// 有下载或安装正在进行（忙碌标记被占着）时改不了通道：报 `update_busy`，配置与槽位都不动；那一次结束后就能改。
+    #[tokio::test]
+    async fn the_channel_stays_while_a_download_or_install_runs() {
+        let flow = Flow::new("1.0.0-beta.4", None, None);
+        flow.fill_session();
+        let ticket = flow.ticket();
+        let before = flow.info().await;
+        let running = lock_slot(&flow.slot).try_begin_busy().unwrap();
+        let err = flow.set_channel(Channel::Stable).await.unwrap_err();
+        assert_eq!(err.code, code::UPDATE_BUSY);
+        assert_eq!(flow.saved(), None);
+        assert_eq!(flow.ticket(), ticket);
+        assert_eq!(flow.info().await, before);
+
+        drop(running);
+        flow.set_channel(Channel::Stable).await.unwrap();
+        assert_eq!(flow.saved().unwrap()["update_channel"], json!("stable"));
+        assert_ne!(flow.ticket(), ticket);
+    }
+
+    /// 偏好写不进配置：照写配置失败报错，门面里的偏好不变，槽位与号都不动，免得界面按新通道显示、重启后却回到旧的。
+    #[tokio::test]
+    async fn a_channel_that_cannot_be_saved_changes_nothing() {
+        let flow = Flow::new("1.0.0-beta.4", None, None);
+        flow.fill_session();
+        flow.block_config_writes();
+        let ticket = flow.ticket();
+        let before = flow.info().await;
+        let err = flow.set_channel(Channel::Stable).await.unwrap_err();
+        let save_failed = flow
+            .facade
+            .update_if_changed(|petalfall| petalfall.set_update_channel_preference(Channel::Stable))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, CommandError::from(save_failed).code);
+        assert_eq!(flow.facade.read().await.update_channel_preference(), None);
+        assert_eq!(flow.ticket(), ticket);
+        assert_eq!(flow.info().await, before);
     }
 
     /// 更新域名 TLS 不通时的样子：TCP 连得上，握手时被对端掐断。要算 connect，前端才认得出这是连不上。
