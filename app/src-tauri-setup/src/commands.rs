@@ -5,6 +5,7 @@
 //! 前端进失败页。`install` 开工之前后端还要复核一遍：模式不在探测允许的集合里、或数据此刻过不了数据格式关时，
 //! 同样以字符串拒绝。装回较早的版本与数据比安装包新这两件事不能只靠前端的状态机拦。
 
+use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use std::io;
@@ -16,11 +17,12 @@ use petalfall_release::data_format::{DATA_FORMAT, StampVerdict};
 use petalfall_release::install_policy::{
     self, ChannelRelation, Initiation, KindJudgment, channel_of,
 };
+use petalfall_release::order;
 use semver::Version;
 use tauri::ipc::InvokeError;
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 
-use crate::boot::{self, Instance};
+use crate::boot::{self, Instance, Notice, Older};
 use crate::cli::{Launch, UpdateRequest};
 use crate::contract::{
     Channel, DirCheck, Existing, ExistingKind, Failure, InstallMode, InstallPlan, NewerReason,
@@ -331,13 +333,135 @@ impl SetupContext {
 
     /// 启动原生向导，不等它结束：调用方随后关窗。要等结束时用 [`Self::wait_for_wizard`]。
     /// 失败页上的按钮走这里，更新模式也不带插件那串参数：用户点它是要自己在向导里选。
-    pub fn start_wizard(&self) -> Result<(), Failure> {
+    ///
+    /// 向导里装什么由 NSIS 自己定，不再经过复核，所以先拒两种，都以字符串拒绝：探测允许的模式里没有首装、升级、
+    /// 修复（只允许换通道或什么都不允许）；此刻再判一次，结论不让交给 NSIS（例如探测之后数据被更新的版本用过）。
+    pub fn start_wizard(&self) -> Result<(), String> {
+        let allowed = self
+            .located
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .allowed
+            .clone();
+        let refuse = |reason: String| -> Result<(), String> {
+            self.log
+                .warn(format_args!("不能改用标准安装程序：{reason}"));
+            Err(reason)
+        };
+        if !allowed.iter().copied().any(standard_mode) {
+            return refuse(format!("探测允许的安装方式是 {allowed:?}"));
+        }
+        if let Standard::Refused { notice, .. } =
+            self.judge_standard().map_err(|err| err.to_string())?
+        {
+            return refuse(format!("{notice:?}"));
+        }
         self.start_standard(OsStr::new(""))
+            .map_err(|failure| failure.to_string())
     }
 
-    /// 窗口起不来时的退路，参数见 [`fallback_arguments`]。同样不等结束。
-    pub fn start_fallback(&self) -> Result<(), Failure> {
-        self.start_standard(&fallback_arguments(&self.launch))
+    /// 窗口起不来时的退路。判定能装的交给 NSIS 并等它退出，参数见 [`fallback_arguments`]；不能装的用 `alert`
+    /// 弹对话框说明，不交给 NSIS，更新模式下用户关掉对话框后按原参数重开登记目录里的启动器。
+    pub fn fall_back(&self, alert: impl FnOnce(&Notice)) -> Result<FallenBack, Box<dyn Error>> {
+        match self.judge_standard()? {
+            Standard::Allowed => {
+                self.start_standard(&fallback_arguments(&self.launch))?;
+                let code = self
+                    .wait_for_wizard()?
+                    .expect("刚启动的原生向导还没有人等过");
+                Ok(FallenBack::Ran(code))
+            }
+            Standard::Refused { notice, reopen } => {
+                self.log.warn(format_args!("不交给 NSIS：{notice:?}"));
+                alert(&notice);
+                if let Some(dir) = reopen {
+                    self.open_launcher(&dir)?;
+                }
+                Ok(FallenBack::Refused)
+            }
+        }
+    }
+
+    /// 不经窗口里的页面、直接交给 NSIS 之前的判定，判定表与探测同一套。不做半装恢复：恢复要等载荷进程、删记录，
+    /// 这条路上不做。首装的目录要在 NSIS 向导里才定，数据格式关按默认目录判，卸载留下的目录优先；用户在向导里
+    /// 另选了目录的，由启动器启动时那一关兜底。
+    fn judge_standard(&self) -> io::Result<Standard> {
+        let payload = self.session.header().version.clone();
+        let registry = self.session.registry();
+        let (found, judged) = judge_installed(registry, &payload, self.initiation)?;
+        let gate = match &found {
+            Some(found) => datamark::inspect_installed(
+                Path::new(&found.dir),
+                &self.local_app_data,
+                DATA_FORMAT,
+            ),
+            None => {
+                let default_dir = match existing::leftover_dir(registry)? {
+                    Some(dir) => PathBuf::from(dir),
+                    None => self.local_app_data.join(APP_FOLDER),
+                };
+                datamark::inspect_target(&default_dir, DATA_FORMAT)
+            }
+        };
+        self.log.info(format_args!(
+            "交给 NSIS 之前的判定：发起方式 {:?}，种类 {:?}，两边的通道 {:?}，newer 的原因 {:?}",
+            self.initiation, judged.kind, judged.relation, judged.newer_reason
+        ));
+        self.note_gate("交给 NSIS 之前", &gate);
+        let modes = install_policy::judge_modes(
+            judged.kind,
+            judged.relation,
+            &gate.verdict,
+            self.initiation,
+        );
+        // 更新模式下启动器是为这次安装关掉的，不装也要把它开回来；程序文件不在就没有可开的
+        let reopen = found
+            .as_ref()
+            .filter(|found| found.program_intact && self.launch.update().is_some())
+            .map(|found| PathBuf::from(&found.dir));
+        let reopens = reopen.is_some();
+        let notice = match (modes.data_block, judged.kind, found) {
+            (Some(block), ..) => Notice::DataBlocked {
+                block,
+                stamp: gate.stamp.to_string_lossy().into_owned(),
+                payload,
+                reopens,
+            },
+            (
+                None,
+                None
+                | Some(
+                    install_policy::ExistingKind::Upgrade
+                    | install_policy::ExistingKind::Same
+                    | install_policy::ExistingKind::Broken,
+                ),
+                _,
+            ) => return Ok(Standard::Allowed),
+            (None, Some(install_policy::ExistingKind::Switch), _) => {
+                Notice::NeedsWindow { reopens }
+            }
+            (
+                None,
+                Some(install_policy::ExistingKind::Newer),
+                Some(Installation {
+                    version: Some(installed),
+                    ..
+                }),
+            ) => Notice::Newer {
+                older: older_of(
+                    judged.newer_reason,
+                    channel_of(&installed),
+                    channel_of(&payload),
+                ),
+                installed,
+                payload,
+                reopens,
+            },
+            (None, Some(install_policy::ExistingKind::Newer), _) => {
+                unreachable!("newer 只出自卸载项里有版本的安装")
+            }
+        };
+        Ok(Standard::Refused { notice, reopen })
     }
 
     fn start_standard(&self, arguments: &OsStr) -> Result<(), Failure> {
@@ -363,6 +487,56 @@ impl SetupContext {
         let code = wizard.wait_and_clean(self.log.as_ref())?;
         self.log.info(format_args!("原生向导已退出：{code}"));
         Ok(Some(code))
+    }
+}
+
+/// 窗口起不来时的结局。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallenBack {
+    /// NSIS 跑完了，带它的退出码。
+    Ran(i32),
+    /// 判定不能装，对话框说明过，没有拉起 NSIS。
+    Refused,
+}
+
+/// 直接交给 NSIS 之前的判定结论。
+#[derive(Debug)]
+enum Standard {
+    Allowed,
+    /// 不能交给 NSIS：用这个对话框说明；`reopen` 有值时随后重开那里的启动器。
+    Refused {
+        notice: Notice,
+        reopen: Option<PathBuf>,
+    },
+}
+
+/// NSIS 自己的安装流程装得了的模式。换通道只走窗口里的流程。
+fn standard_mode(mode: InstallMode) -> bool {
+    match mode {
+        InstallMode::Fresh | InstallMode::Upgrade | InstallMode::Repair => true,
+        InstallMode::Switch => false,
+    }
+}
+
+/// newer 的原因连同两边的通道，交给对话框挑说明。判定表给出 newer 时一定带原因，分出快慢时两边的通道都认得。
+fn older_of(
+    reason: Option<install_policy::NewerReason>,
+    installed: Option<order::Channel>,
+    payload: Option<order::Channel>,
+) -> Older {
+    use install_policy::NewerReason as Reason;
+    match (reason, installed, payload) {
+        (Some(Reason::SameChannel), ..) => Older::SameChannel,
+        (Some(Reason::UnknownChannel), ..) => Older::UnknownChannel,
+        (Some(Reason::FasterChannel), Some(installed), Some(payload)) => {
+            Older::FasterChannel { installed, payload }
+        }
+        (Some(Reason::SlowerChannel), Some(installed), Some(payload)) => {
+            Older::SlowerChannel { installed, payload }
+        }
+        (reason, installed, payload) => unreachable!(
+            "判定表给出的 newer 与两边的通道对不上：{reason:?}，{installed:?}，{payload:?}"
+        ),
     }
 }
 
@@ -634,7 +808,6 @@ mod tests {
     use std::sync::Mutex;
 
     use petalfall_release::data_format::{STAMP_FILE, stamp_contents};
-    use petalfall_release::order;
 
     use super::*;
     use crate::contract::{DataBlock, DataProblem};
@@ -1550,7 +1723,7 @@ mod tests {
         assert!(main.contains("cli::parse(std::env::args_os().skip(1))"));
         assert!(main.contains("parsed.launch,"));
         assert!(main.contains("parsed.channel_switch,"));
-        assert!(main.contains("context.start_fallback()?"));
+        assert!(main.contains("context.fall_back(boot::alert)?"));
         assert!(!main.contains("start_wizard"));
     }
 
@@ -1953,6 +2126,7 @@ mod tests {
         #[test]
         fn the_wizard_is_waited_for_once() {
             let rig = rig("wizard");
+            rig.context.probe().unwrap();
 
             assert_eq!(rig.context.wait_for_wizard().unwrap(), None);
             rig.context.start_wizard().unwrap();
@@ -1964,11 +2138,16 @@ mod tests {
         #[test]
         fn the_wizard_button_stays_a_bare_wizard_during_an_update() {
             let rig = launched("wizard-update", update(true, launcher_args()));
+            rig.context.probe().unwrap();
 
             rig.context.start_wizard().unwrap();
             assert_eq!(rig.context.wait_for_wizard().unwrap(), Some(0));
 
             assert_eq!(rig.received.lock().unwrap().launches, [OsString::new()]);
+        }
+
+        fn no_alert(notice: &Notice) {
+            panic!("能装的时候不该弹对话框：{notice:?}");
         }
 
         #[test]
@@ -1977,8 +2156,7 @@ mod tests {
             let nonce = args[0].to_str().unwrap().to_owned();
             let rig = launched("fallback-update", update(true, args));
 
-            rig.context.start_fallback().unwrap();
-            assert_eq!(rig.context.wait_for_wizard().unwrap(), Some(0));
+            assert_eq!(rig.context.fall_back(no_alert).unwrap(), FallenBack::Ran(0));
 
             assert_eq!(
                 rig.received.lock().unwrap().launches,
@@ -1993,8 +2171,7 @@ mod tests {
         fn the_fallback_of_an_interactive_launch_is_the_bare_wizard() {
             let rig = rig("fallback-interactive");
 
-            rig.context.start_fallback().unwrap();
-            assert_eq!(rig.context.wait_for_wizard().unwrap(), Some(0));
+            assert_eq!(rig.context.fall_back(no_alert).unwrap(), FallenBack::Ran(0));
 
             assert_eq!(rig.received.lock().unwrap().launches, [OsString::new()]);
         }
@@ -2109,6 +2286,7 @@ mod tests {
 
         use super::*;
         use crate::boot::{Claim, test_claim};
+        use crate::extract::hex;
         use crate::journal::{JOURNAL_FILE, Processes};
         use crate::overlay::test_support::{packed_image, random_bytes};
         use crate::overlay::{Overlay, Source};
@@ -2237,13 +2415,22 @@ mod tests {
             })
         }
 
-        /// 三种发起方式对应的命令行。
-        fn launch_for(initiation: Initiation) -> (Launch, bool) {
+        /// 三种发起方式对应的命令行，更新模式带着启动器被更新时的参数。
+        fn launch_for(initiation: Initiation, launcher_args: Vec<OsString>) -> (Launch, bool) {
             match initiation {
                 Initiation::Interactive => (Launch::Interactive, false),
-                Initiation::Update => (update_launch(Vec::new()), false),
-                Initiation::UpdateWithSwitch => (update_launch(Vec::new()), true),
+                Initiation::Update => (update_launch(launcher_args), false),
+                Initiation::UpdateWithSwitch => (update_launch(launcher_args), true),
             }
+        }
+
+        /// 启动器被更新时带着的参数。头一个每次跑都不一样，免得碰巧和哪里写死的值对上；其余是转义的边界。
+        fn launcher_args() -> Vec<OsString> {
+            vec![
+                OsString::from(format!("--nonce={}", hex(&random_bytes(8)))),
+                OsString::new(),
+                OsString::from(r"C:\游戏 目录\"),
+            ]
         }
 
         /// 在一台空电脑上打开版本为 `payload` 的安装包。`test` 区分各用例的实例互斥名。
@@ -2305,6 +2492,38 @@ mod tests {
                     .set(UNINSTALL_KEY, Some(INSTALL_LOCATION), &format!("\"{dir}\""));
                 self.hive.set(UNINSTALL_KEY, Some(DISPLAY_VERSION), version);
                 dir
+            }
+
+            /// 卸载项写着版本 `version`，程序文件却不在，返回登记目录。
+            fn hollow(&self, version: &str) -> String {
+                let dir = self.installed(version);
+                fs::remove_file(Path::new(&dir).join(APP_EXE)).unwrap();
+                dir
+            }
+
+            /// 没有安装时的默认目录，也是启动器写不进登记目录时回落的数据根。
+            fn default_dir(&self) -> String {
+                self.root
+                    .path()
+                    .join("LocalAppData")
+                    .join(APP_FOLDER)
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            }
+
+            /// 走一遍窗口起不来时的退路，交回结局与弹过的对话框。
+            fn fall_back(&self) -> (FallenBack, Vec<Notice>) {
+                let mut shown = Vec::new();
+                let fallen = self
+                    .context
+                    .fall_back(|notice| shown.push(notice.clone()))
+                    .unwrap();
+                (fallen, shown)
+            }
+
+            fn openings(&self) -> Vec<(PathBuf, Vec<OsString>)> {
+                self.calls.lock().unwrap().openings.clone()
             }
 
             fn state(&self) -> PathBuf {
@@ -2544,7 +2763,7 @@ mod tests {
                 ("9", None, "1.0.0-dev.6", I::Interactive, M::Fresh, None),
             ];
             for (row, installed, payload, initiation, mode, channel) in cases {
-                let (launch, switch) = launch_for(initiation);
+                let (launch, switch) = launch_for(initiation, Vec::new());
                 let machine = machine(&format!("handoff-{row}"), payload, launch, switch);
                 let dir = match installed {
                     Some(version) => machine.installed(version),
@@ -2582,6 +2801,441 @@ mod tests {
                     !machine.state().join(JOURNAL_FILE).exists(),
                     "第 {row} 行装完要删半装记录"
                 );
+            }
+        }
+
+        fn newer_notice(older: Older, installed: &str, payload: &str, reopens: bool) -> Notice {
+            Notice::Newer {
+                older,
+                installed: installed.to_owned(),
+                payload: payload.to_owned(),
+                reopens,
+            }
+        }
+
+        fn too_new_block() -> install_policy::DataBlock {
+            install_policy::DataBlock::TooNew {
+                recorded: DATA_FORMAT + 1,
+                written_by: petalfall_release::data_format::trusted_written_by(RAISED_BY),
+            }
+        }
+
+        fn unreadable_block() -> install_policy::DataBlock {
+            install_policy::DataBlock::Unreadable {
+                reason: NO_NUMBER_REASON.to_owned(),
+            }
+        }
+
+        fn policy_block(stamp: Stamp) -> install_policy::DataBlock {
+            match stamp {
+                Stamp::TooNew => too_new_block(),
+                Stamp::Unreadable => unreadable_block(),
+            }
+        }
+
+        /// 窗口起不来时，第 5 行、newer 都不交给 NSIS，弹对应的对话框；更新模式下随后按原参数重开登记目录里的启动器。
+        #[test]
+        fn the_fallback_explains_an_earlier_package_and_never_runs_nsis() {
+            use Initiation as I;
+            use order::Channel as C;
+
+            let cases = [
+                (
+                    "5-interactive",
+                    "1.1.0-dev.61",
+                    "1.0.0-beta.5",
+                    I::Interactive,
+                    Notice::NeedsWindow { reopens: false },
+                ),
+                (
+                    "5-switch",
+                    "1.1.0-dev.61",
+                    "1.0.0-beta.5",
+                    I::UpdateWithSwitch,
+                    Notice::NeedsWindow { reopens: true },
+                ),
+                (
+                    "5-update",
+                    "1.1.0-dev.61",
+                    "1.0.0-beta.5",
+                    I::Update,
+                    newer_notice(
+                        Older::SlowerChannel {
+                            installed: C::Dev,
+                            payload: C::Beta,
+                        },
+                        "1.1.0-dev.61",
+                        "1.0.0-beta.5",
+                        true,
+                    ),
+                ),
+                (
+                    "4",
+                    "1.0.0-dev.60",
+                    "1.0.0-dev.55",
+                    I::Interactive,
+                    newer_notice(Older::SameChannel, "1.0.0-dev.60", "1.0.0-dev.55", false),
+                ),
+                (
+                    "6-update",
+                    "1.0.0",
+                    "1.0.0-beta.4",
+                    I::Update,
+                    newer_notice(
+                        Older::FasterChannel {
+                            installed: C::Stable,
+                            payload: C::Beta,
+                        },
+                        "1.0.0",
+                        "1.0.0-beta.4",
+                        true,
+                    ),
+                ),
+                (
+                    "7-switch",
+                    "2.0.0-rc.1",
+                    "1.0.0",
+                    I::UpdateWithSwitch,
+                    newer_notice(Older::UnknownChannel, "2.0.0-rc.1", "1.0.0", true),
+                ),
+            ];
+            for (row, installed, payload, initiation, expected) in cases {
+                let args = launcher_args();
+                let (launch, switch) = launch_for(initiation, args.clone());
+                let machine = machine(&format!("fallback-{row}"), payload, launch, switch);
+                let dir = machine.installed(installed);
+
+                let (fallen, shown) = machine.fall_back();
+
+                assert_eq!(fallen, FallenBack::Refused, "第 {row} 行");
+                assert_eq!(shown, vec![expected.clone()], "第 {row} 行");
+                let reopened = match initiation {
+                    I::Interactive => vec![],
+                    I::Update | I::UpdateWithSwitch => vec![(PathBuf::from(&dir), args)],
+                };
+                assert_eq!(machine.openings(), reopened, "第 {row} 行");
+                machine.assert_untouched(&format!("第 {row} 行"));
+            }
+        }
+
+        /// 数据格式关在原生回退上同样先于一切；首装按默认目录判，没有登记安装时没有启动器可重开。
+        #[test]
+        fn the_fallback_stops_at_the_data_gate() {
+            for stamp in [Stamp::TooNew, Stamp::Unreadable] {
+                for initiation in INITIATIONS {
+                    let test = format!("fallback-data-{stamp:?}-{initiation:?}");
+                    let args = launcher_args();
+                    let (launch, switch) = launch_for(initiation, args.clone());
+                    let machine = machine(&test, "1.0.0-dev.6", launch, switch);
+                    let dir = machine.installed("1.0.0-dev.5");
+                    stamp.put(&dir);
+
+                    let (fallen, shown) = machine.fall_back();
+
+                    let reopens = initiation != Initiation::Interactive;
+                    assert_eq!(fallen, FallenBack::Refused, "{test}");
+                    assert_eq!(
+                        shown,
+                        vec![Notice::DataBlocked {
+                            block: policy_block(stamp),
+                            stamp: stamp_path(&dir),
+                            payload: "1.0.0-dev.6".to_owned(),
+                            reopens,
+                        }],
+                        "{test}"
+                    );
+                    let reopened = if reopens {
+                        vec![(PathBuf::from(&dir), args)]
+                    } else {
+                        vec![]
+                    };
+                    assert_eq!(machine.openings(), reopened, "{test}");
+                    machine.assert_untouched(&test);
+
+                    let fresh = format!("fallback-fresh-{stamp:?}-{initiation:?}");
+                    let (launch, switch) = launch_for(initiation, launcher_args());
+                    let machine = machine_on_clean(&fresh, launch, switch);
+                    let default_dir = machine.default_dir();
+                    fs::create_dir_all(&default_dir).unwrap();
+                    stamp.put(&default_dir);
+
+                    let (fallen, shown) = machine.fall_back();
+
+                    assert_eq!(fallen, FallenBack::Refused, "{fresh}");
+                    assert_eq!(
+                        shown,
+                        vec![Notice::DataBlocked {
+                            block: policy_block(stamp),
+                            stamp: stamp_path(&default_dir),
+                            payload: "1.0.0-dev.6".to_owned(),
+                            reopens: false,
+                        }],
+                        "{fresh}"
+                    );
+                    assert_eq!(machine.openings(), vec![], "{fresh}");
+                    machine.assert_untouched(&fresh);
+                }
+            }
+        }
+
+        fn machine_on_clean(test: &str, launch: Launch, channel_switch: bool) -> Machine {
+            machine(test, "1.0.0-dev.6", launch, channel_switch)
+        }
+
+        /// 卸载留下的目录优先当首装的默认目录，数据格式关也读它。
+        #[test]
+        fn the_fallback_reads_the_dir_an_uninstall_left_behind() {
+            let machine = machine_on_clean("fallback-leftover", Launch::Interactive, false);
+            let leftover = machine.root.path().join("Old").join("Petalfall");
+            fs::create_dir_all(&leftover).unwrap();
+            fs::write(leftover.join(CONFIG_FILE), b"{}").unwrap();
+            let leftover = leftover.to_str().unwrap().to_owned();
+            machine.hive.set(LAST_DIR_KEY, None, &leftover);
+            Stamp::Unreadable.put(&leftover);
+
+            let (fallen, shown) = machine.fall_back();
+
+            assert_eq!(fallen, FallenBack::Refused);
+            assert_eq!(
+                shown,
+                vec![Notice::DataBlocked {
+                    block: unreadable_block(),
+                    stamp: stamp_path(&leftover),
+                    payload: "1.0.0-dev.6".to_owned(),
+                    reopens: false,
+                }]
+            );
+            machine.assert_untouched("卸载留下的目录");
+        }
+
+        /// 首装、第 1、2a、2b 行的升级、第 3 与第 8 行的修复交给 NSIS，参数与原来相同；没有「换到」页，第 2a 行
+        /// 也不写交接记录。
+        #[test]
+        fn the_fallback_hands_the_rest_to_nsis_without_a_handoff() {
+            use Initiation as I;
+
+            let cases = [
+                ("1", Some(("1.0.0-dev.5", true)), "1.0.0-dev.6", I::Update),
+                (
+                    "2a",
+                    Some(("1.0.0-beta.3", true)),
+                    "1.0.0-dev.60",
+                    I::Interactive,
+                ),
+                (
+                    "2a-update",
+                    Some(("1.0.0-beta.3", true)),
+                    "1.0.0-dev.60",
+                    I::Update,
+                ),
+                ("2b", Some(("1.0.0-beta.4", true)), "1.0.0", I::Interactive),
+                (
+                    "3",
+                    Some(("1.0.0-dev.6", true)),
+                    "1.0.0-dev.6",
+                    I::UpdateWithSwitch,
+                ),
+                (
+                    "8",
+                    Some(("1.0.0-dev.9", false)),
+                    "1.0.0-dev.6",
+                    I::Interactive,
+                ),
+                ("9", None, "1.0.0-dev.6", I::Update),
+            ];
+            for (row, installed, payload, initiation) in cases {
+                let (launch, switch) = launch_for(initiation, launcher_args());
+                let expected = fallback_arguments(&launch);
+                let machine = machine(&format!("fallback-nsis-{row}"), payload, launch, switch);
+                match installed {
+                    Some((version, true)) => {
+                        machine.installed(version);
+                    }
+                    Some((version, false)) => {
+                        machine.hollow(version);
+                    }
+                    None => {}
+                }
+
+                let (fallen, shown) = machine.fall_back();
+
+                assert_eq!(fallen, FallenBack::Ran(0), "第 {row} 行");
+                assert_eq!(shown, vec![], "第 {row} 行");
+                assert_eq!(machine.launches(), vec![expected], "第 {row} 行");
+                assert_eq!(machine.handoff(), None, "第 {row} 行");
+                assert_eq!(machine.openings(), vec![], "第 {row} 行");
+            }
+        }
+
+        /// 失败页的「改用标准安装程序」：探测只允许换通道或什么都不允许、或此刻数据过不了关时，以字符串拒绝。
+        #[test]
+        fn the_wizard_button_is_refused_without_a_mode_nsis_could_install() {
+            let switch_only = machine("wizard-switch", "1.0.0-beta.5", Launch::Interactive, false);
+            switch_only.installed("1.1.0-dev.61");
+            assert_eq!(
+                switch_only.context.probe().unwrap().allowed_modes,
+                vec![InstallMode::Switch]
+            );
+            assert_eq!(
+                switch_only.context.start_wizard().unwrap_err(),
+                "探测允许的安装方式是 [Switch]"
+            );
+            switch_only.assert_untouched("只允许换通道");
+
+            let nothing = machine("wizard-nothing", "1.0.0-dev.55", Launch::Interactive, false);
+            nothing.installed("1.0.0-dev.60");
+            nothing.context.probe().unwrap();
+            assert_eq!(
+                nothing.context.start_wizard().unwrap_err(),
+                "探测允许的安装方式是 []"
+            );
+            nothing.assert_untouched("什么都不允许");
+        }
+
+        /// 探测时数据还读得了，失败之后再点「改用标准安装程序」时记号已被抬高：此刻的判定拦下。
+        #[test]
+        fn the_wizard_button_is_refused_once_the_data_moved_past_the_package() {
+            let machine = machine("wizard-raised", "1.0.0-dev.6", Launch::Interactive, false);
+            let dir = machine.installed("1.0.0-dev.5");
+            machine.context.probe().unwrap();
+            Stamp::TooNew.put(&dir);
+
+            let refused = machine.context.start_wizard().unwrap_err();
+
+            let notice = Notice::DataBlocked {
+                block: too_new_block(),
+                stamp: stamp_path(&dir),
+                payload: "1.0.0-dev.6".to_owned(),
+                reopens: false,
+            };
+            assert_eq!(refused, format!("{notice:?}"));
+            machine.assert_untouched("记号被抬高");
+        }
+
+        #[test]
+        fn the_wizard_button_runs_the_bare_wizard_for_an_upgrade() {
+            let machine = machine("wizard-upgrade", "1.0.0-dev.6", Launch::Interactive, false);
+            machine.installed("1.0.0-dev.5");
+            machine.context.probe().unwrap();
+
+            machine.context.start_wizard().unwrap();
+
+            assert_eq!(machine.context.wait_for_wizard().unwrap(), Some(0));
+            assert_eq!(machine.launches(), vec![OsString::new()]);
+            assert_eq!(machine.handoff(), None);
+        }
+
+        /// 每一个能装的入口：窗口里按任一模式安装、改用标准安装程序、窗口起不来时的原生回退。
+        fn assert_no_entry_installs(machine: &Machine, context: &str) {
+            let elsewhere = machine.root.path().join("Elsewhere").join("Petalfall");
+            for plan in [
+                fresh_at(elsewhere.to_str().unwrap()),
+                fresh_at(&machine.default_dir()),
+                locked(InstallMode::Upgrade),
+                locked(InstallMode::Repair),
+                locked(InstallMode::Switch),
+            ] {
+                let refused = machine
+                    .context
+                    .reviewed_install(&plan, &Recording::default());
+                assert!(refused.is_err(), "{context}，{plan:?}：{refused:?}");
+            }
+            assert!(machine.context.start_wizard().is_err(), "{context}");
+            let (fallen, shown) = machine.fall_back();
+            assert_eq!(fallen, FallenBack::Refused, "{context}");
+            assert_eq!(shown.len(), 1, "{context}");
+            machine.assert_untouched(context);
+        }
+
+        /// 底线之一：同通道或更快通道上的旧包，交互、自动更新、带换通道开关的更新都装不了，经哪个入口都一样。
+        #[test]
+        fn an_earlier_package_on_the_same_or_a_faster_channel_installs_through_no_entry() {
+            let cases = [
+                (
+                    "same",
+                    "1.0.0-dev.60",
+                    "1.0.0-dev.55",
+                    NewerReason::SameChannel,
+                ),
+                (
+                    "faster",
+                    "1.0.0",
+                    "1.0.0-beta.4",
+                    NewerReason::FasterChannel,
+                ),
+                (
+                    "faster-dev",
+                    "1.1.0-beta.1",
+                    "1.0.0-dev.60",
+                    NewerReason::FasterChannel,
+                ),
+            ];
+            for (name, installed, payload, reason) in cases {
+                for initiation in INITIATIONS {
+                    let test = format!("floor-older-{name}-{initiation:?}");
+                    let (launch, switch) = launch_for(initiation, launcher_args());
+                    let machine = machine(&test, payload, launch, switch);
+                    machine.installed(installed);
+
+                    let probe = machine.context.probe().unwrap();
+
+                    assert_eq!(probe.allowed_modes, Vec::new(), "{test}");
+                    assert_eq!(probe.unattended, None, "{test}");
+                    assert_eq!(probe.newer_reason, Some(reason), "{test}");
+                    assert_no_entry_installs(&machine, &test);
+                }
+            }
+        }
+
+        /// 底线之二：数据比安装包新或记号读不懂时，升级、换通道、修复、首装都装不了，经哪个入口都一样。
+        #[test]
+        fn data_newer_than_the_package_or_unreadable_installs_through_no_entry() {
+            let rows = [
+                ("1", Some("1.0.0-dev.5"), "1.0.0-dev.6"),
+                ("5", Some("1.1.0-dev.61"), "1.0.0-beta.5"),
+                ("3", Some("1.0.0-dev.6"), "1.0.0-dev.6"),
+                ("9", None, "1.0.0-dev.6"),
+            ];
+            for (row, installed, payload) in rows {
+                for stamp in [Stamp::TooNew, Stamp::Unreadable] {
+                    for initiation in INITIATIONS {
+                        let test = format!("floor-data-{row}-{stamp:?}-{initiation:?}");
+                        let (launch, switch) = launch_for(initiation, launcher_args());
+                        let machine = machine(&test, payload, launch, switch);
+                        let data_root = match installed {
+                            Some(version) => machine.installed(version),
+                            None => {
+                                let dir = machine.default_dir();
+                                fs::create_dir_all(&dir).unwrap();
+                                dir
+                            }
+                        };
+                        stamp.put(&data_root);
+                        let elsewhere = machine.root.path().join("Elsewhere").join("Petalfall");
+                        fs::create_dir_all(&elsewhere).unwrap();
+                        stamp.put(elsewhere.to_str().unwrap());
+
+                        let probe = machine.context.probe().unwrap();
+
+                        match installed {
+                            Some(_) => {
+                                assert_eq!(probe.allowed_modes, Vec::new(), "{test}");
+                                assert_eq!(
+                                    probe.data_block,
+                                    Some(stamp.block_at(&data_root)),
+                                    "{test}"
+                                );
+                            }
+                            // 首装的数据关在最终目录上做，探测只给首装
+                            None => {
+                                assert_eq!(probe.allowed_modes, vec![InstallMode::Fresh], "{test}")
+                            }
+                        }
+                        assert_eq!(probe.unattended, None, "{test}");
+                        assert!(!probe.handoff, "{test}");
+                        assert_no_entry_installs(&machine, &test);
+                    }
+                }
             }
         }
     }

@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use petalfall_setup_lib::boot::{self, Claim, DesktopUser, Notice, Webview};
 use petalfall_setup_lib::cli;
-use petalfall_setup_lib::commands::{self, SetupContext};
+use petalfall_setup_lib::commands::{self, FallenBack, SetupContext};
 use petalfall_setup_lib::extract::WEBVIEW_DATA_PREFIX;
 use petalfall_setup_lib::log::{self, SetupLog};
 use petalfall_setup_lib::overlay;
@@ -176,9 +176,11 @@ fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>
 }
 
 fn fall_back(context: &SetupContext) -> Result<ExitCode, Box<dyn Error>> {
-    context.start_fallback()?;
-    let code = context.wait_for_wizard()?;
-    Ok(code.map_or(ExitCode::FAILURE, exit_code))
+    match context.fall_back(boot::alert)? {
+        FallenBack::Ran(code) => Ok(exit_code(code)),
+        // 判定不能装，什么都没装
+        FallenBack::Refused => Ok(ExitCode::FAILURE),
+    }
 }
 
 fn exit_code(code: i32) -> ExitCode {
