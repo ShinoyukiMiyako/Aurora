@@ -271,7 +271,7 @@ jobs:
           echo "installer=$installer" >> "$GITHUB_OUTPUT"
           echo "installer-name=$(basename "$installer")" >> "$GITHUB_OUTPUT"
 
-      # 壳不内嵌 NSIS，拼接放在最后：Runner 跑不了 Windows 程序，pack-setup 的自检是这条路上唯一的验证。
+      # 壳不内嵌 NSIS，拼接放在最后：Runner 跑不了 Windows 程序，pack-setup 的自检与后面两步核对是这条路上仅有的验证。
       # 将来要加外层签名，必须插在 pack-setup 之后、sign 作业的更新签名之前：更新签名要签最终发出去的字节。
       - name: 构建首装引导程序
         id: bootstrap
@@ -281,7 +281,7 @@ jobs:
           INSTALLER: ${{ steps.bundle.outputs.installer }}
         run: |
           TAURI_APP_PATH=src-tauri-setup pnpm tauri build --no-bundle --runner cargo-xwin --target x86_64-pc-windows-msvc
-          cargo test --release --locked -p petalfall-setup-payload
+          cargo test --release --locked -p petalfall-setup-payload -p petalfall-release
           release_dir="$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release"
           bootstrap_dir="$release_dir/bundle/installer"
           bootstrap="$bootstrap_dir/Petalfall-Installer-${VERSION}-x64.exe"
@@ -293,7 +293,40 @@ jobs:
           echo "bootstrap-name=$(basename "$bootstrap")" >> "$GITHUB_OUTPUT"
           du -sh "$CARGO_TARGET_DIR"
 
-      # 签名前审批看的就是这份 summary：版本、两个包的 SHA-256、工具链、两个锁文件的哈希和更新说明原文。
+      # 启动器下载验签之后只凭载荷头判断这个包的数据格式号、认不认得换通道安装，写错了要到用户那头才暴露。
+      # 读回的四项按源码核对：magic 是 PFSETUP2，版本是本包版本，数据格式号等于源码里的常量，能力位第 0 位为 1。
+      - name: 核对载荷头
+        id: payload
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BOOTSTRAP: ${{ steps.bootstrap.outputs.bootstrap }}
+        run: |
+          fields="$(cargo run --release --locked -p petalfall-setup-payload --bin inspect-setup -- "$BOOTSTRAP")"
+          IFS=$'\t' read -r magic header_version data_format caps <<< "$fields"
+          node .github/scripts/release-heads.mjs payload "$VERSION" "$magic" "$header_version" "$data_format" "$caps"
+          echo "magic=$magic" >> "$GITHUB_OUTPUT"
+          echo "data-format=$data_format" >> "$GITHUB_OUTPUT"
+          echo "caps=$caps" >> "$GITHUB_OUTPUT"
+
+      # 启动器按通道把两把公钥编进包里，验各通道的清单与包、判断能不能自更新都要用；漏编一把，编译与打包照样成功，
+      # 坏在用户那头。和打包那一步核对 client_id 一样，直接在 exe 里找公钥文件去掉首尾空白后的内容。
+      - name: 核对内嵌的更新公钥
+        run: |
+          for pub in .github/dev-updater.pub .github/release-updater.pub; do
+            key="$(node -p "require('fs').readFileSync(process.argv[1], 'utf8').trim()" "$pub")"
+            # 空串对 grep -F 处处命中，多行会被当成几个只要一个命中即可的模式，查找都会形同虚设
+            if ! [[ "$key" =~ ^[A-Za-z0-9+/]+=*$ ]]; then
+              echo "::error::$pub 去掉首尾空白后不是一行 base64"
+              exit 1
+            fi
+            if ! grep -qF -e "$key" -- "$CARGO_TARGET_DIR/x86_64-pc-windows-msvc/release/Petalfall.exe"; then
+              echo "::error::Petalfall.exe 里没有内嵌 $pub 里的更新公钥"
+              exit 1
+            fi
+          done
+
+      # 签名前审批看的就是这份 summary：版本、两个包的 SHA-256、载荷头、本包与上一个测试版的数据格式号、各通道已发布的版本、
+      # 工具链、两个锁文件的哈希和更新说明原文。
       # build-info.json 是同一份内容，随 Release 发出去留档。锁文件哈希取工作区里的文件，先确认构建没改动它们，
       # 记下的才是提交里的那一份。
       - name: 写构建信息
@@ -304,6 +337,11 @@ jobs:
           INSTALLER: ${{ steps.bundle.outputs.installer }}
           BOOTSTRAP: ${{ steps.bootstrap.outputs.bootstrap }}
           TOOLCHAIN: ${{ runner.temp }}/toolchain.json
+          HEADS: ${{ runner.temp }}/release-heads.json
+          PREVIOUS_DATA_FORMAT: ${{ steps.heads.outputs.previous-data-format }}
+          PAYLOAD_MAGIC: ${{ steps.payload.outputs.magic }}
+          PAYLOAD_DATA_FORMAT: ${{ steps.payload.outputs.data-format }}
+          PAYLOAD_CAPS: ${{ steps.payload.outputs.caps }}
           BUILD_INFO: ${{ runner.temp }}/build-info.json
           IS_BETA: ${{ github.ref == 'refs/heads/beta' }}
           PR_NUMBER: ${{ steps.notes.outputs.pr }}
@@ -324,8 +362,21 @@ jobs:
             if (value === undefined || value === "") throw new Error(`缺环境变量 ${name}`);
             return value;
           };
+          // 认不出说明上游步骤的输出改了名或改了形状，不能照着写进审批要看的摘要
+          const decimal = (name) => {
+            const value = need(name);
+            if (!/^(?:0|[1-9][0-9]*)$/.test(value)) throw new Error(`环境变量 ${name} 不是十进制整数：${value}`);
+            return Number(value);
+          };
           const sha256 = (file) => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
           const release = need("IS_BETA") === "true";
+          const channels = ["dev", "beta", "stable"];
+          const heads = JSON.parse(fs.readFileSync(need("HEADS"), "utf8"));
+          for (const channel of channels) {
+            if (heads[channel] === undefined) throw new Error(`heads 文件里没有 ${channel}`);
+          }
+          // 上一个测试版还没有验得过的发布、它的 tag 不在了、或那个提交里还没有数据格式号时，不倒退的检查跳过，这里照实写跳过
+          const previousBetaDataFormat = need("PREVIOUS_DATA_FORMAT") === "skipped" ? "skipped" : decimal("PREVIOUS_DATA_FORMAT");
           const [bootstrap, installer] = [need("BOOTSTRAP"), need("INSTALLER")].map((file) => ({
             name: path.basename(file),
             size: fs.statSync(file).size,
@@ -337,6 +388,9 @@ jobs:
             ref: need("GITHUB_REF"),
             run: `${need("GITHUB_SERVER_URL")}/${need("GITHUB_REPOSITORY")}/actions/runs/${need("GITHUB_RUN_ID")}/attempts/${need("GITHUB_RUN_ATTEMPT")}`,
             packages: { bootstrap, installer },
+            payload: { magic: need("PAYLOAD_MAGIC"), dataFormat: decimal("PAYLOAD_DATA_FORMAT"), caps: decimal("PAYLOAD_CAPS") },
+            previousBetaDataFormat,
+            heads: Object.fromEntries(channels.map((channel) => [channel, heads[channel]])),
             lockfiles: Object.fromEntries(["Cargo.lock", "app/pnpm-lock.yaml"].map((file) => [file, sha256(file)])),
             tauriCli: need("CLI_VERSION"),
             toolchain: JSON.parse(fs.readFileSync(need("TOOLCHAIN"), "utf8")),
@@ -356,8 +410,24 @@ jobs:
             row("分支", info.ref),
             row(`引导程序 ${bootstrap.name}（${bootstrap.size} 字节）`, bootstrap.sha256),
             row(`NSIS 包 ${installer.name}（${installer.size} 字节）`, installer.sha256),
+            row("载荷头 magic", info.payload.magic),
+            row("本包的数据格式号", info.payload.dataFormat),
+            row(
+              "上一个测试版的数据格式号",
+              info.previousBetaDataFormat === "skipped" ? "跳过，原因见「读出各通道已发布的版本」一步的 notice" : info.previousBetaDataFormat,
+            ),
+            row("载荷头能力位 caps", info.payload.caps),
             ...Object.entries(info.lockfiles).map(([file, hash]) => row(file, hash)),
             row("签名 CLI", `@tauri-apps/cli ${info.tauriCli}`),
+            "",
+            "### 各通道已发布的版本（只算验得过签名的）",
+            "",
+            "| 通道 | 版本与来源 |",
+            "| --- | --- |",
+            ...channels.map((channel) => {
+              const head = info.heads[channel];
+              return row(channel, head === null ? "没有验得过的发布" : `${head.version}，来源 ${head.source}`);
+            }),
             "",
             "### 工具链",
             "",
