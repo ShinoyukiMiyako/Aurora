@@ -1,19 +1,23 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { after, describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { after, before, describe, it } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
+  DATA_FORMAT_PATH,
   DEV_RELEASE_TAG,
   FETCH_RETRIES,
   HK_MANIFEST_URLS,
   MAX_MANIFEST_BYTES,
   RETRY_DELAY_MS,
+  betaGate,
   channelShapeOf,
   compareVersions,
+  devGate,
   formatHeads,
   main,
   parseHeads,
@@ -506,5 +510,391 @@ describe("heads 文件", () => {
     ];
     for (const [heads, message] of broken) assert.throws(() => parseHeads(JSON.stringify(heads)), { message });
     assert.throws(() => parseHeads("[]"), { message: "heads 文件的键应恰好是 dev、beta、stable" });
+  });
+});
+
+const heads = ({ dev = null, beta = null, stable = null }) => ({
+  dev: dev === null ? null : head(dev, "hk"),
+  beta: beta === null ? null : head(beta, `release:v${beta}`),
+  stable: stable === null ? null : head(stable, "hk"),
+});
+
+const BASE_FAILURE = (base) => `基础号 ${base} 应形如 X.Y.0、主版本至少为 1：补丁段留给正式版补丁，主版本 0 低于现行的所有版本`;
+const SPAN_FAILURE = (core, highest, successors) =>
+  `本包核心号 ${core} 应等于各通道已发布的最高核心号 ${highest}，或者是它的后继 ${successors}：基础号一次只能抬一格`;
+
+describe("gate dev：预览版的版本先后", () => {
+  const run = randomInt(42, 100_000);
+
+  it("基础号形如 X.Y.0、主版本至少为 1 时通过", () => {
+    assert.deepEqual(devGate(`1.0.0-dev.${run}`, heads({ dev: "1.0.0-dev.41", beta: "1.0.0-beta.3" })), { failures: [], notices: [] });
+  });
+
+  it("基础号补丁段不为 0、主版本为 0 时拒绝", () => {
+    assert.deepEqual(devGate(`1.0.1-dev.${run}`, heads({ beta: "1.0.0-beta.3" })).failures, [
+      BASE_FAILURE("1.0.1"),
+      SPAN_FAILURE("1.0.1", "1.0.0", "1.1.0、2.0.0"),
+    ]);
+    assert.deepEqual(devGate(`0.2.0-dev.${run}`, heads({ dev: "0.1.0-dev.41" })).failures, [BASE_FAILURE("0.2.0")]);
+  });
+
+  it("高于已发布的测试版与正式版时通过，不高于任一个时拒绝；为 null 的不比", () => {
+    assert.deepEqual(devGate("1.1.0-dev.1", heads({ beta: "1.1.0-beta.1", stable: "1.0.1" })).failures, []);
+    assert.deepEqual(devGate(`1.0.0-dev.${run}`, heads({ stable: "1.0.0" })).failures, [
+      "本包 " + `1.0.0-dev.${run}` + " 不高于已发布的正式版 1.0.0（来源 hk）：预览版必须高于测试版与正式版",
+    ]);
+    assert.deepEqual(devGate("1.0.0-dev.70", heads({ dev: "1.0.0-dev.60", beta: "1.1.0-beta.1" })).failures, [
+      "本包 1.0.0-dev.70 不高于已发布的测试版 1.1.0-beta.1（来源 release:v1.1.0-beta.1）：预览版必须高于测试版与正式版",
+      SPAN_FAILURE("1.0.0", "1.1.0", "1.2.0、2.0.0"),
+    ]);
+    assert.deepEqual(devGate("1.0.0-dev.1", heads({})).failures, []);
+  });
+
+  it("核心号等于最高核心号或它的两种后继时通过", () => {
+    const published = heads({ dev: "1.0.0-dev.60", beta: "1.0.0-beta.3" });
+    for (const version of ["1.0.0-dev.61", "1.1.0-dev.61", "2.0.0-dev.61"]) assert.deepEqual(devGate(version, published).failures, [], version);
+  });
+
+  it("基础号多抬一格或手误成 1.10.0 时拒绝", () => {
+    const published = heads({ dev: "1.0.0-dev.60", beta: "1.0.0-beta.3" });
+    for (const core of ["1.10.0", "1.2.0", "3.0.0"]) {
+      assert.deepEqual(devGate(`${core}-dev.61`, published).failures, [SPAN_FAILURE(core, "1.0.0", "1.1.0、2.0.0")], core);
+    }
+  });
+
+  it("最高核心号取三个通道里最大的，含正式版补丁", () => {
+    const published = heads({ dev: "1.1.0-dev.60", beta: "1.1.0-beta.1", stable: "1.0.1" });
+    assert.deepEqual(devGate("1.1.0-dev.61", published).failures, []);
+    assert.deepEqual(devGate("1.0.0-dev.61", published).failures, [
+      "本包 1.0.0-dev.61 不高于已发布的测试版 1.1.0-beta.1（来源 release:v1.1.0-beta.1）：预览版必须高于测试版与正式版",
+      "本包 1.0.0-dev.61 不高于已发布的正式版 1.0.1（来源 hk）：预览版必须高于测试版与正式版",
+      SPAN_FAILURE("1.0.0", "1.1.0", "1.2.0、2.0.0"),
+    ]);
+  });
+
+  it("从 0.1.0-dev.41 换到 1.0.0-dev.N 放行", () => {
+    assert.deepEqual(devGate(`1.0.0-dev.${run}`, heads({ dev: "0.1.0-dev.41", beta: "1.0.0-beta.2" })), { failures: [], notices: [] });
+    assert.deepEqual(devGate(`1.0.0-dev.${run}`, heads({ dev: "0.1.0-dev.41" })), { failures: [], notices: [] });
+  });
+
+  it("三个通道都没有发布过时不查跨度，打 notice", () => {
+    assert.deepEqual(devGate("7.3.0-dev.1", heads({})), { failures: [], notices: ["三个通道都还没有发布过，不查基础号的跨度"] });
+  });
+
+  it("本包版本不是预览版的形状时是用法错误", () => {
+    for (const version of ["1.0.0-beta.1", "1.0.0", "1.0.0-dev.01", "v1.0.0-dev.1"]) {
+      assert.throws(() => devGate(version, heads({})), { message: `本包版本 ${JSON.stringify(version)} 不是预览版的形状 X.Y.Z-dev.N` });
+    }
+  });
+});
+
+describe("gate beta：测试版的版本先后", () => {
+  it("低于预览版、核心号高于正式版、基础号形如 X.Y.0 时通过", () => {
+    assert.deepEqual(betaGate("1.0.0-beta.4", heads({ dev: "1.0.0-dev.60", beta: "1.0.0-beta.3" })), { failures: [], notices: [] });
+    assert.deepEqual(betaGate("1.1.0-beta.1", heads({ dev: "1.1.0-dev.61", stable: "1.0.1" })), { failures: [], notices: [] });
+  });
+
+  it("不低于已发布的预览版时拒绝", () => {
+    assert.deepEqual(betaGate("1.1.0-beta.1", heads({ dev: "1.0.0-dev.60" })).failures, [
+      "本包 1.1.0-beta.1 不低于已发布的预览版 1.0.0-dev.60（来源 hk）：测试版必须低于预览版",
+    ]);
+  });
+
+  it("预览版没有验得过的发布时不比，打 notice", () => {
+    assert.deepEqual(betaGate("1.0.0-beta.4", heads({})), { failures: [], notices: ["预览版还没有验得过的发布，不比本包是否低于预览版"] });
+  });
+
+  it("核心号不高于已发布的正式版时拒绝", () => {
+    for (const stable of ["1.0.0", "1.0.1", "1.1.0"]) {
+      assert.deepEqual(betaGate("1.0.0-beta.5", heads({ dev: "1.1.0-dev.3", stable })).failures, [
+        `本包核心号 1.0.0 不高于已发布的正式版 ${stable}（来源 hk）：这个基础号已经出过正式版`,
+      ]);
+    }
+  });
+
+  it("基础号补丁段不为 0、主版本为 0 时拒绝，1.10.0 照样放行", () => {
+    assert.deepEqual(betaGate("1.0.1-beta.1", heads({ dev: "1.1.0-dev.5" })).failures, [BASE_FAILURE("1.0.1")]);
+    assert.deepEqual(betaGate("0.2.0-beta.1", heads({ dev: "1.0.0-dev.60" })).failures, [BASE_FAILURE("0.2.0")]);
+    assert.deepEqual(betaGate("1.10.0-beta.1", heads({ dev: "1.10.0-dev.2", stable: "1.9.0" })).failures, []);
+  });
+
+  it("本包版本不是测试版的形状时是用法错误", () => {
+    assert.throws(() => betaGate("1.0.0-dev.1", heads({})), { message: '本包版本 "1.0.0-dev.1" 不是测试版的形状 X.Y.Z-beta.N' });
+  });
+});
+
+describe("gate 命令行", () => {
+  function headsFile(value) {
+    const path = tempPath("heads.json");
+    writeFileSync(path, formatHeads(value));
+    return path;
+  }
+
+  it("检查不过时逐条打 ::error:: 并以 1 退出", async () => {
+    const harness = makeDeps();
+    assert.equal(await main(["gate", "beta", "release", "1.1.0-beta.1", headsFile(heads({ dev: "1.0.0-dev.60", stable: "1.1.0" }))], harness.deps), 1);
+    assert.deepEqual(harness.err, [
+      "::error::本包 1.1.0-beta.1 不低于已发布的预览版 1.0.0-dev.60（来源 hk）：测试版必须低于预览版",
+      "::error::本包核心号 1.1.0 不高于已发布的正式版 1.1.0（来源 hk）：这个基础号已经出过正式版",
+    ]);
+  });
+
+  it("演练里检查不过只打 notice，以 0 退出", async () => {
+    // 演练时 dev 还停在 0.1.0-dev.41，1.0.0-beta.0 必然不低于它
+    const harness = makeDeps();
+    assert.equal(await main(["gate", "beta", "rehearsal", "1.0.0-beta.0", headsFile(heads({ dev: "0.1.0-dev.41", beta: "1.0.0-beta.2" }))], harness.deps), 0);
+    assert.deepEqual(harness.err, ["::notice::演练，不挡构建：本包 1.0.0-beta.0 不低于已发布的预览版 0.1.0-dev.41（来源 hk）：测试版必须低于预览版"]);
+    assert.deepEqual(harness.out, []);
+  });
+
+  it("通过时以 0 退出，notice 照打", async () => {
+    const harness = makeDeps();
+    assert.equal(await main(["gate", "beta", "release", "1.0.0-beta.4", headsFile(heads({}))], harness.deps), 0);
+    assert.deepEqual(harness.err, ["::notice::预览版还没有验得过的发布，不比本包是否低于预览版"]);
+    assert.deepEqual(harness.out, ["版本先后检查通过：1.0.0-beta.4"]);
+    const dev = makeDeps();
+    assert.equal(await main(["gate", "dev", "release", "1.0.0-dev.58", headsFile(heads({ dev: "1.0.0-dev.57" }))], dev.deps), 0);
+    assert.deepEqual(dev.err, []);
+  });
+
+  it("dev 没有演练模式，版本形状不对、参数个数不对都是用法错误，以 2 退出", async () => {
+    const path = headsFile(heads({}));
+    const cases = [
+      [["gate", "dev", "rehearsal", "1.0.0-dev.1", path], "::error::dev 没有演练模式，只能传 release"],
+      [["gate", "stable", "release", "1.0.0", path], '::error::通道只能是 dev 或 beta："stable"'],
+      [["gate", "beta", "dry-run", "1.0.0-beta.1", path], '::error::模式只能是 release 或 rehearsal："dry-run"'],
+      [["gate", "dev", "release", "1.0.0-beta.1", path], '::error::本包版本 "1.0.0-beta.1" 不是预览版的形状 X.Y.Z-dev.N'],
+      [["gate", "dev", "release", "1.0.0-dev.1"], "::error::参数应为 4 个非空值，实际 3 个"],
+    ];
+    for (const [argv, message] of cases) {
+      const harness = makeDeps();
+      assert.equal(await main(argv, harness.deps), 2, argv.join(" "));
+      assert.equal(harness.err[0], message);
+      assert.match(harness.err[1], /^用法：/);
+    }
+  });
+
+  it("heads 文件读不懂时以 1 退出", async () => {
+    const path = tempPath("heads.json");
+    writeFileSync(path, '{"dev":null}');
+    const harness = makeDeps();
+    assert.equal(await main(["gate", "dev", "release", "1.0.0-dev.1", path], harness.deps), 1);
+    assert.deepEqual(harness.err, ["::error::heads 文件的键应恰好是 dev、beta、stable"]);
+  });
+});
+
+// 测试用的 git 不读全局与系统配置：签名提交、钩子、默认分支名这些本机设置都不该影响结果
+const GIT_CONFIG_EMPTY = join(root, "empty-gitconfig");
+writeFileSync(GIT_CONFIG_EMPTY, "");
+const GIT_ENV = { ...process.env, GIT_CONFIG_GLOBAL: GIT_CONFIG_EMPTY, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" };
+
+function gitRunner(cwd) {
+  return (args) => {
+    const result = spawnSync("git", args, { cwd, env: GIT_ENV, encoding: "utf8" });
+    if (result.error !== undefined) throw result.error;
+    return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+  };
+}
+
+function git(cwd, ...args) {
+  const result = gitRunner(cwd)(args);
+  if (result.status !== 0) throw new Error(`git ${args.join(" ")} 以 ${result.status} 退出：${result.stderr}`);
+  return result.stdout.trim();
+}
+
+const dataFormatSource = (value) => `//! 数据格式号。\n\n/// 做了旧版本读不了的落盘改动就把它加一。\npub const DATA_FORMAT: u32 = ${value};\n`;
+
+describe("data-format：数据格式号不倒退与测试版的祖先判据（临时 git 仓库）", () => {
+  const origin = join(root, "origin");
+  const originUrl = pathToFileURL(origin).href;
+  const commits = {};
+  let nextClone = 0;
+
+  function commit(message, files) {
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(origin, path)), { recursive: true });
+      writeFileSync(join(origin, path), content);
+      git(origin, "add", "--", path);
+    }
+    git(origin, "commit", "--quiet", "-m", message);
+    return git(origin, "rev-parse", "HEAD");
+  }
+
+  before(() => {
+    mkdirSync(origin);
+    git(origin, "init", "--quiet", "--initial-branch=dev");
+    git(origin, "config", "user.name", "Release Heads Test");
+    git(origin, "config", "user.email", "release-heads-test@example.invalid");
+    // 按提交号浅取，GitHub 上是允许的
+    git(origin, "config", "uploadpack.allowAnySHA1InWant", "true");
+
+    commits.d0 = commit("这套机制之前的提交", { "README.md": "落樱\n" });
+    commits.d1 = commit("加入数据格式号", { [DATA_FORMAT_PATH]: dataFormatSource(1) });
+    commits.d2 = commit("无关改动", { "README.md": "落樱 2\n" });
+    git(origin, "checkout", "--quiet", "-b", "feature", commits.d2);
+    commits.f1 = commit("数据格式号加一", { [DATA_FORMAT_PATH]: dataFormatSource(2) });
+    git(origin, "checkout", "--quiet", "dev");
+    git(origin, "merge", "--quiet", "--no-ff", "-m", "合并加号的特性分支", "feature");
+    commits.d3 = git(origin, "rev-parse", "HEAD");
+    commits.d4 = commit("dev 上的后续改动", { "README.md": "落樱 3\n" });
+
+    // 晋级：beta 从上一个测试版的提交出发，把 dev 合并进来
+    git(origin, "checkout", "--quiet", "-b", "beta-merge", commits.d2);
+    git(origin, "merge", "--quiet", "--no-ff", "-m", "晋级", "dev");
+    commits.promoted = git(origin, "rev-parse", "HEAD");
+    // 把 dev 上的加号提交单独摘进 beta
+    git(origin, "checkout", "--quiet", "-b", "beta-pick", commits.d2);
+    git(origin, "cherry-pick", "-x", commits.f1);
+    commits.picked = git(origin, "rev-parse", "HEAD");
+    // beta 上自己加了一个 dev 上从没有过的号
+    git(origin, "checkout", "--quiet", "-b", "beta-unknown", commits.d2);
+    commits.unknown = commit("beta 上自己加号", { [DATA_FORMAT_PATH]: dataFormatSource(3) });
+    // 晋级之后把号退回去
+    git(origin, "checkout", "--quiet", "-b", "beta-revert", commits.promoted);
+    commits.betaReverted = commit("退回数据格式号", { [DATA_FORMAT_PATH]: dataFormatSource(1) });
+    git(origin, "checkout", "--quiet", "-b", "dev-revert", commits.d4);
+    commits.devReverted = commit("退回数据格式号", { [DATA_FORMAT_PATH]: dataFormatSource(1) });
+    git(origin, "checkout", "--quiet", "dev");
+
+    // 附注 tag：ls-remote 要剥到它所指的提交
+    git(origin, "tag", "-a", "-m", "测试版 0", "v1.0.0-beta.0", commits.d0);
+    git(origin, "tag", "v1.0.0-beta.1", commits.d2);
+    git(origin, "tag", "v1.0.0-beta.2", commits.promoted);
+  });
+
+  function setDevBuild(commit) {
+    git(origin, "tag", "--force", DEV_RELEASE_TAG, commit);
+  }
+
+  function dropDevBuild() {
+    if (git(origin, "tag", "--list", DEV_RELEASE_TAG) !== "") git(origin, "tag", "--delete", DEV_RELEASE_TAG);
+  }
+
+  // CI 里 checkout 是深度 1 的浅仓库，这里照样浅克隆
+  function cloneAt(branch) {
+    const dir = join(root, `clone-${nextClone++}`);
+    git(root, "clone", "--quiet", "--depth=1", "--branch", branch, originUrl, dir);
+    assert.equal(git(dir, "rev-parse", "--is-shallow-repository"), "true");
+    return dir;
+  }
+
+  async function dataFormat(branch, channel, beta, mode = "release") {
+    const clone = cloneAt(branch);
+    const headsPath = tempPath("heads.json");
+    writeFileSync(headsPath, formatHeads(heads({ dev: "1.0.0-dev.57", beta })));
+    const outputPath = tempPath("github-output");
+    writeFileSync(outputPath, "");
+    const remote = (repo) => {
+      assert.equal(repo, REPO);
+      return originUrl;
+    };
+    const harness = makeDeps({ git: gitRunner(clone), remote, env: { GITHUB_OUTPUT: outputPath } });
+    const code = await main(["data-format", channel, mode, headsPath, REPO], harness.deps);
+    return { code, err: harness.err, output: readFileSync(outputPath, "utf8"), clone };
+  }
+
+  const backwards = (current, previous) =>
+    `本提交的数据格式号 ${current} 小于上一次发布的 ${previous}：号只能随加号的提交往上走，回退掉加号的提交会让旧数据被当成新格式读`;
+
+  it("dev：不小于 dev-build 所指提交里的号时通过", async () => {
+    setDevBuild(commits.d3);
+    const { code, err, output } = await dataFormat("dev", "dev");
+    assert.deepEqual({ code, err, output }, { code: 0, err: [], output: "data-format=2\nprevious-data-format=2\n" });
+  });
+
+  it("dev：小于 dev-build 所指提交里的号时失败", async () => {
+    setDevBuild(commits.d4);
+    const { code, err, output } = await dataFormat("dev-revert", "dev");
+    assert.deepEqual({ code, err, output }, { code: 1, err: [`::error::${backwards(1, 2)}`], output: "data-format=1\nprevious-data-format=2\n" });
+  });
+
+  it("dev：dev-build 不存在、或所指提交里还没有 data_format.rs 时跳过并打 notice", async () => {
+    dropDevBuild();
+    const missing = await dataFormat("dev-revert", "dev");
+    assert.deepEqual(
+      { code: missing.code, err: missing.err, output: missing.output },
+      { code: 0, err: [`::notice::远端没有 tag ${DEV_RELEASE_TAG}，不查数据格式号是否倒退`], output: "data-format=1\nprevious-data-format=skipped\n" },
+    );
+    setDevBuild(commits.d0);
+    const early = await dataFormat("dev-revert", "dev");
+    assert.deepEqual(
+      { code: early.code, err: early.err, output: early.output },
+      {
+        code: 0,
+        err: [`::notice::tag ${DEV_RELEASE_TAG} 所指的提交 ${commits.d0} 里还没有 ${DATA_FORMAT_PATH}，不查数据格式号是否倒退`],
+        output: "data-format=1\nprevious-data-format=skipped\n",
+      },
+    );
+  });
+
+  it("beta：经晋级合并带进来的号通过，浅仓库被补全", async () => {
+    const { code, err, output, clone } = await dataFormat("beta-merge", "beta", "1.0.0-beta.1");
+    assert.deepEqual({ code, err, output }, { code: 0, err: [], output: "data-format=2\nprevious-data-format=1\n" });
+    assert.equal(git(clone, "rev-parse", "--is-shallow-repository"), "false");
+  });
+
+  it("beta：dev 上的加号提交被单独摘进来时失败，指出 dev 第一父链上加号的那个合并提交", async () => {
+    const { code, err, output } = await dataFormat("beta-pick", "beta", "1.0.0-beta.1");
+    assert.deepEqual(
+      { code, err, output },
+      {
+        code: 1,
+        err: [`::error::dev 上把数据格式号改成 2 的提交 ${commits.d3} 不是 HEAD 的祖先：加号的提交只能随晋级合并进入测试版，不能单独摘进来`],
+        output: "data-format=2\nprevious-data-format=1\n",
+      },
+    );
+  });
+
+  it("beta：dev 上找不到把号改成这个值的提交时失败", async () => {
+    const { code, err } = await dataFormat("beta-unknown", "beta", "1.0.0-beta.1");
+    assert.deepEqual({ code, err }, { code: 1, err: ["::error::dev 的第一父链上没有哪个提交把数据格式号改成 3：测试版只能拿 dev 上已有的号"] });
+  });
+
+  it("beta：小于上一个测试版所指提交里的号时失败", async () => {
+    const { code, err, output } = await dataFormat("beta-revert", "beta", "1.0.0-beta.2");
+    assert.deepEqual({ code, err, output }, { code: 1, err: [`::error::${backwards(1, 2)}`], output: "data-format=1\nprevious-data-format=2\n" });
+  });
+
+  it("beta：上一个测试版的 tag 不存在、所指提交里还没有 data_format.rs、或还没有测试版时跳过并打 notice", async () => {
+    const early = await dataFormat("beta-merge", "beta", "1.0.0-beta.0");
+    assert.deepEqual(
+      { code: early.code, err: early.err, output: early.output },
+      {
+        code: 0,
+        err: [`::notice::tag v1.0.0-beta.0 所指的提交 ${commits.d0} 里还没有 ${DATA_FORMAT_PATH}，不查数据格式号是否倒退`],
+        output: "data-format=2\nprevious-data-format=skipped\n",
+      },
+    );
+    const missing = await dataFormat("beta-merge", "beta", "1.0.0-beta.7");
+    assert.deepEqual(missing.err, ["::notice::远端没有 tag v1.0.0-beta.7，不查数据格式号是否倒退"]);
+    assert.equal(missing.code, 0);
+    const none = await dataFormat("beta-merge", "beta", null);
+    assert.deepEqual(
+      { code: none.code, err: none.err, output: none.output },
+      { code: 0, err: ["::notice::测试版还没有验得过的发布，不查数据格式号是否倒退"], output: "data-format=2\nprevious-data-format=skipped\n" },
+    );
+  });
+
+  it("演练里两条检查不过都只打 notice，以 0 退出", async () => {
+    const picked = await dataFormat("beta-pick", "beta", "1.0.0-beta.1", "rehearsal");
+    assert.deepEqual(
+      { code: picked.code, err: picked.err },
+      {
+        code: 0,
+        err: [`::notice::演练，不挡构建：dev 上把数据格式号改成 2 的提交 ${commits.d3} 不是 HEAD 的祖先：加号的提交只能随晋级合并进入测试版，不能单独摘进来`],
+      },
+    );
+    const reverted = await dataFormat("beta-revert", "beta", "1.0.0-beta.2", "rehearsal");
+    assert.deepEqual({ code: reverted.code, err: reverted.err }, { code: 0, err: [`::notice::演练，不挡构建：${backwards(1, 2)}`] });
+  });
+
+  it("取不到提交是读取出错，演练里照样失败", async () => {
+    const clone = cloneAt("beta-merge");
+    const headsPath = tempPath("heads.json");
+    writeFileSync(headsPath, formatHeads(heads({ beta: "1.0.0-beta.1" })));
+    const harness = makeDeps({ git: gitRunner(clone), remote: () => pathToFileURL(join(root, "no-such-origin")).href });
+    assert.equal(await main(["data-format", "beta", "rehearsal", headsPath, REPO], harness.deps), 1);
+    assert.equal(harness.err.length, 1);
+    assert.match(harness.err[0], /^::error::git ls-remote --tags file:\/\/.*no-such-origin 以 128 退出：/);
   });
 });

@@ -1,9 +1,9 @@
-// 发布流水线在编译之前读出各通道真正发布过的最高版本，供后面的版本先后检查与数据格式号检查使用。
+// 发布流水线在编译之前读出各通道真正发布过的最高版本，据此做版本先后检查与数据格式号不倒退的检查。
 // 某个通道「发布过某个版本」只采信用该通道公钥验得过签名的清单或 Release 附件，tag 名只用来定位：
 // 伪造的 tag、乱写的清单都抬不高也压不低结果，最多让构建失败。
 // 用法见 USAGE。失败时打 ::error:: 并以非零退出；给 shell 读的输出一行一条，字段用 tab 分隔。
 import { spawnSync } from "node:child_process";
-import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -16,7 +16,10 @@ export { compareVersions };
 const USAGE = [
   "用法：",
   "  release-heads.mjs read <仓库> <heads 文件>",
-  "仓库写成 owner/name。",
+  "  release-heads.mjs gate <dev|beta> <release|rehearsal> <本包版本> <heads 文件>",
+  "  release-heads.mjs data-format <dev|beta> <release|rehearsal> <heads 文件> <仓库>",
+  "仓库写成 owner/name。rehearsal 只给不在 beta 分支上的测试版演练用：版本先后与数据格式号的检查不过时只打 notice，",
+  "读取出错照样失败；dev 没有演练。",
 ].join("\n");
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -36,6 +39,9 @@ export const PUBKEY_FILES = Object.freeze({
   beta: ".github/release-updater.pub",
   stable: ".github/release-updater.pub",
 });
+export const DATA_FORMAT_PATH = "crates/petalfall-release/src/data_format.rs";
+// 要求恰好命中一行：常量的写法一改，这里就读不出号，CI 会挂而不是悄悄跳过
+export const DATA_FORMAT_LINE = /^pub const DATA_FORMAT: u32 = ([1-9][0-9]*);$/;
 // 与香港机 put-manifest 收清单的上限相同
 export const MAX_MANIFEST_BYTES = 64 * 1024;
 export const FETCH_RETRIES = 3;
@@ -43,6 +49,7 @@ export const FETCH_TIMEOUT_MS = 60_000;
 export const RETRY_DELAY_MS = 5_000;
 
 const PLATFORM = "windows-x86_64";
+const U32_MAX = 0xffff_ffffn;
 const NUM = "(?:0|[1-9][0-9]*)";
 const CORE = `${NUM}\\.${NUM}\\.${NUM}`;
 // 旧项目时期的 v0.1.0 到 v0.1.5 是主版本 0 的正式版 tag，测试版、正式版只认主版本至少为 1 的；
@@ -52,8 +59,17 @@ const SHAPES = Object.freeze({
   beta: new RegExp(`^[1-9][0-9]*\\.${NUM}\\.${NUM}-beta\\.${NUM}$`),
   stable: new RegExp(`^[1-9][0-9]*\\.${NUM}\\.${NUM}$`),
 });
+// 本包版本只按通道的预发布标识认形状，主版本与补丁段交给基础号那一条去拒，报错才说得出为什么
+const PACKAGE_SHAPES = Object.freeze({
+  dev: new RegExp(`^(${CORE})-dev\\.${NUM}$`),
+  beta: new RegExp(`^(${CORE})-beta\\.${NUM}$`),
+});
+// 补丁段留给正式版补丁：dev 一旦用 X.Y.(Z+1) 当基础号，正式版补丁就会撞号
+const SHUTTLE_BASE = /^[1-9][0-9]*\.(?:0|[1-9][0-9]*)\.0$/;
+const CORE_PREFIX = /^([0-9]+)\.([0-9]+)\.([0-9]+)/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+const MODES = Object.freeze(["release", "rehearsal"]);
 
 class UsageError extends Error {}
 
@@ -64,6 +80,21 @@ export function channelShapeOf(version) {
 }
 
 const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+function coreOf(version) {
+  const match = CORE_PREFIX.exec(version);
+  if (match === null) throw new Error(`版本号 ${version} 没有 X.Y.Z 核心号`);
+  return match.slice(1, 4).map(BigInt);
+}
+
+function compareCore(a, b) {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+const formatCore = (core) => core.join(".");
 
 export function githubRemote(repo) {
   return `https://github.com/${repo}.git`;
@@ -293,6 +324,168 @@ export function formatHeads(heads) {
   return `${JSON.stringify({ dev: heads.dev, beta: heads.beta, stable: heads.stable })}\n`;
 }
 
+const describeHead = (channel, head) => `已发布的${LABELS[channel]} ${head.version}（来源 ${head.source}）`;
+
+function requireBase(base, failures) {
+  if (!SHUTTLE_BASE.test(base)) {
+    failures.push(`基础号 ${base} 应形如 X.Y.0、主版本至少为 1：补丁段留给正式版补丁，主版本 0 低于现行的所有版本`);
+  }
+}
+
+function packageBase(channel, version) {
+  const match = typeof version === "string" ? PACKAGE_SHAPES[channel].exec(version) : null;
+  if (match === null) throw new UsageError(`本包版本 ${JSON.stringify(version)} 不是${LABELS[channel]}的形状 X.Y.Z-${channel}.N`);
+  return match[1];
+}
+
+// 同一基础号下 beta < dev < 正式版，「预览版不低于测试版不低于正式版」不能靠共用基础号自然成立，由这几条挡住违规的构建。
+// 基础号只能抬到 X.(Y+1).0 或 (X+1).0.0：把 1.1.0 手误写成 1.10.0 这种版本一发出，所有更快通道的用户都会接收，只能往前修。
+export function devGate(version, heads) {
+  const base = packageBase("dev", version);
+  const failures = [];
+  const notices = [];
+  requireBase(base, failures);
+  for (const channel of ["beta", "stable"]) {
+    const head = heads[channel];
+    if (head !== null && compareVersions(version, head.version) <= 0) {
+      failures.push(`本包 ${version} 不高于${describeHead(channel, head)}：预览版必须高于测试版与正式版`);
+    }
+  }
+  const cores = CHANNEL_NAMES.filter((channel) => heads[channel] !== null).map((channel) => coreOf(heads[channel].version));
+  if (cores.length === 0) {
+    notices.push("三个通道都还没有发布过，不查基础号的跨度");
+  } else {
+    const highest = cores.reduce((a, b) => (compareCore(a, b) >= 0 ? a : b));
+    const [major, minor] = highest;
+    const allowed = [highest, [major, minor + 1n, 0n], [major + 1n, 0n, 0n]];
+    const core = coreOf(version);
+    if (!allowed.some((candidate) => compareCore(candidate, core) === 0)) {
+      failures.push(
+        `本包核心号 ${formatCore(core)} 应等于各通道已发布的最高核心号 ${formatCore(highest)}，或者是它的后继 ${allowed
+          .slice(1)
+          .map(formatCore)
+          .join("、")}：基础号一次只能抬一格`,
+      );
+    }
+  }
+  return { failures, notices };
+}
+
+// 两处 dev 清单都没有时不比低于预览版：dev 止血、清单都撤掉时不该卡住测试版。读取本身出错在 read 那一步就已失败。
+export function betaGate(version, heads) {
+  const base = packageBase("beta", version);
+  const failures = [];
+  const notices = [];
+  if (heads.dev === null) {
+    notices.push("预览版还没有验得过的发布，不比本包是否低于预览版");
+  } else if (compareVersions(version, heads.dev.version) >= 0) {
+    failures.push(`本包 ${version} 不低于${describeHead("dev", heads.dev)}：测试版必须低于预览版`);
+  }
+  if (heads.stable !== null && compareCore(coreOf(version), coreOf(heads.stable.version)) <= 0) {
+    failures.push(`本包核心号 ${formatCore(coreOf(version))} 不高于${describeHead("stable", heads.stable)}：这个基础号已经出过正式版`);
+  }
+  requireBase(base, failures);
+  return { failures, notices };
+}
+
+export function parseDataFormat(text, what) {
+  const values = text
+    .split(/\r?\n/)
+    .map((line) => DATA_FORMAT_LINE.exec(line))
+    .filter((match) => match !== null)
+    .map((match) => match[1]);
+  if (values.length !== 1) throw new Error(`${what} 里应恰好有一行 pub const DATA_FORMAT: u32 = <正整数>;，实际 ${values.length} 行`);
+  if (BigInt(values[0]) > U32_MAX) throw new Error(`${what} 里的 DATA_FORMAT ${values[0]} 超出 u32`);
+  return Number(values[0]);
+}
+
+// 没有这个文件的提交（这套机制之前的发布）返回 null；提交本身取不到照样报错
+function dataFormatAt(deps, commit) {
+  if (runGit(deps, ["ls-tree", "--name-only", commit, "--", DATA_FORMAT_PATH]).trim() === "") return null;
+  return parseDataFormat(runGit(deps, ["show", `${commit}:${DATA_FORMAT_PATH}`]), `提交 ${commit} 的 ${DATA_FORMAT_PATH}`);
+}
+
+function remoteTagCommit(deps, remote, tag) {
+  const refs = parseLsRemote(runGit(deps, ["ls-remote", "--tags", remote]));
+  const peeled = refs.get(`refs/tags/${tag}^{}`);
+  if (peeled !== undefined) return peeled;
+  const direct = refs.get(`refs/tags/${tag}`);
+  return direct === undefined ? null : direct;
+}
+
+// 已在本地的提交不再按深度 1 取：完整的仓库按深度取一个已有的提交，会被改成浅仓库
+function ensureCommit(deps, commit) {
+  if (deps.git(["cat-file", "-e", `${commit}^{commit}`]).status === 0) return;
+  runGit(deps, ["fetch", "--depth=1", "origin", commit]);
+}
+
+// 「本通道上一次发布的那个提交」里的号：dev 是滚动预发布 tag 所指的提交，beta 是 v<已发布的最高测试版>。
+// tag 不存在（别的运行正在重建预发布）或那个提交里还没有这个文件时跳过，返回 null。
+function previousDataFormat(deps, { channel, heads, remote }, notices) {
+  let tag;
+  if (channel === "dev") {
+    tag = DEV_RELEASE_TAG;
+  } else if (heads.beta === null) {
+    notices.push("测试版还没有验得过的发布，不查数据格式号是否倒退");
+    return null;
+  } else {
+    tag = `v${heads.beta.version}`;
+  }
+  const commit = remoteTagCommit(deps, remote, tag);
+  if (commit === null) {
+    notices.push(`远端没有 tag ${tag}，不查数据格式号是否倒退`);
+    return null;
+  }
+  ensureCommit(deps, commit);
+  const value = dataFormatAt(deps, commit);
+  if (value === null) {
+    notices.push(`tag ${tag} 所指的提交 ${commit} 里还没有 ${DATA_FORMAT_PATH}，不查数据格式号是否倒退`);
+    return null;
+  }
+  deps.out(`上一次发布：tag ${tag} 所指的提交 ${commit}，数据格式号 ${value}`);
+  return value;
+}
+
+// 测试版只能拿 dev 上已有的号：dev 第一父链上第一次把号改成 N 的提交必须是 HEAD 的祖先。
+// 把 dev 上的加号提交单独摘进 beta 时，beta 上的是摘出来的新提交，dev 上那个提交不在 HEAD 的历史里；
+// 经晋级合并带进来的号，那个提交随合并成为祖先。
+function ancestorFailure(deps, current) {
+  const shallow = runGit(deps, ["rev-parse", "--is-shallow-repository"]).trim() === "true";
+  runGit(deps, ["fetch", ...(shallow ? ["--unshallow"] : []), "origin", "+refs/heads/dev:refs/remotes/origin/dev"]);
+  const commits = runGit(deps, ["log", "--first-parent", "--reverse", "--format=%H", "refs/remotes/origin/dev", "--", DATA_FORMAT_PATH])
+    .split(/\r?\n/)
+    .filter((line) => line !== "");
+  const introduced = commits.find((commit) => dataFormatAt(deps, commit) === current);
+  if (introduced === undefined) {
+    return `dev 的第一父链上没有哪个提交把数据格式号改成 ${current}：测试版只能拿 dev 上已有的号`;
+  }
+  const check = deps.git(["merge-base", "--is-ancestor", introduced, "HEAD"]);
+  if (check.status === 0) {
+    deps.out(`dev 上把数据格式号改成 ${current} 的提交 ${introduced} 是 HEAD 的祖先`);
+    return null;
+  }
+  if (check.status === 1) {
+    return `dev 上把数据格式号改成 ${current} 的提交 ${introduced} 不是 HEAD 的祖先：加号的提交只能随晋级合并进入测试版，不能单独摘进来`;
+  }
+  throw new Error(`git merge-base --is-ancestor ${introduced} HEAD 以 ${check.status} 退出：${check.stderr.trim()}`);
+}
+
+export function checkDataFormat({ channel, heads, remote }, deps) {
+  const failures = [];
+  const notices = [];
+  const current = dataFormatAt(deps, "HEAD");
+  if (current === null) throw new Error(`HEAD 里没有 ${DATA_FORMAT_PATH}`);
+  const previous = previousDataFormat(deps, { channel, heads, remote }, notices);
+  if (previous !== null && current < previous) {
+    failures.push(`本提交的数据格式号 ${current} 小于上一次发布的 ${previous}：号只能随加号的提交往上走，回退掉加号的提交会让旧数据被当成新格式读`);
+  }
+  if (channel === "beta") {
+    const failure = ancestorFailure(deps, current);
+    if (failure !== null) failures.push(failure);
+  }
+  return { current, previous, failures, notices };
+}
+
 // 工作流命令的数据里换行与 % 要转义，否则多行报错只剩第一行
 function annotate(kind, message) {
   return `::${kind}::${message.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A")}`;
@@ -300,6 +493,34 @@ function annotate(kind, message) {
 
 function expectArgs(args, count) {
   if (args.length !== count || args.some((arg) => arg === "")) throw new UsageError(`参数应为 ${count} 个非空值，实际 ${args.length} 个`);
+}
+
+function channelAndMode(channel, mode) {
+  if (channel !== "dev" && channel !== "beta") throw new UsageError(`通道只能是 dev 或 beta：${JSON.stringify(channel)}`);
+  if (!MODES.includes(mode)) throw new UsageError(`模式只能是 ${MODES.join(" 或 ")}：${JSON.stringify(mode)}`);
+  // dev 每次推送都发布，没有不发布的演练；把检查降成 notice 只会让违规的 dev 包发出去
+  if (channel === "dev" && mode !== "release") throw new UsageError("dev 没有演练模式，只能传 release");
+}
+
+// 演练的测试版本来就不发布；dev 还停在旧基础号、还没有数据格式号的时候也要能演练，所以检查不过只记下来、不挡构建
+function conclude(deps, { failures, notices }, mode, passed) {
+  for (const notice of notices) deps.err(annotate("notice", notice));
+  if (failures.length === 0) {
+    deps.out(passed);
+    return 0;
+  }
+  if (mode === "rehearsal") {
+    for (const failure of failures) deps.err(annotate("notice", `演练，不挡构建：${failure}`));
+    return 0;
+  }
+  for (const failure of failures) deps.err(annotate("error", failure));
+  return 1;
+}
+
+function writeOutputs(deps, entries) {
+  const path = deps.env.GITHUB_OUTPUT;
+  if (typeof path !== "string" || path === "") return;
+  appendFileSync(path, entries.map(([key, value]) => `${key}=${value}\n`).join(""));
 }
 
 async function dispatch([command, ...args], deps) {
@@ -315,12 +536,33 @@ async function dispatch([command, ...args], deps) {
       }
       return 0;
     }
+    case "gate": {
+      expectArgs(args, 4);
+      const [channel, mode, version, headsPath] = args;
+      channelAndMode(channel, mode);
+      const heads = parseHeads(readFileSync(headsPath, "utf8"));
+      const result = channel === "dev" ? devGate(version, heads) : betaGate(version, heads);
+      return conclude(deps, result, mode, `版本先后检查通过：${version}`);
+    }
+    case "data-format": {
+      expectArgs(args, 4);
+      const [channel, mode, headsPath, repo] = args;
+      channelAndMode(channel, mode);
+      requireRepo(repo);
+      const heads = parseHeads(readFileSync(headsPath, "utf8"));
+      const result = checkDataFormat({ channel, heads, remote: deps.remote(repo) }, deps);
+      writeOutputs(deps, [
+        ["data-format", String(result.current)],
+        ["previous-data-format", result.previous === null ? "skipped" : String(result.previous)],
+      ]);
+      return conclude(deps, result, mode, `数据格式号检查通过：${result.current}`);
+    }
     default:
       throw new UsageError(`不认识的子命令：${JSON.stringify(command)}`);
   }
 }
 
-// 返回退出码：0 通过，1 读取出错，2 用法错误
+// 返回退出码：0 通过（含演练里只打 notice 的情形），1 检查不过或读取出错，2 用法错误
 export async function main(argv, deps) {
   try {
     return await dispatch(argv, deps);
