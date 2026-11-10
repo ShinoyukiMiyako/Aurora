@@ -149,16 +149,6 @@ impl<U: ReleaseVersion> UpdateSlot<U> {
         Ok(BusyGuard(Arc::clone(&self.busy)))
     }
 
-    /// 没有下载或安装在进行，否则报 [`SlotError::Busy`]。改偏好要先问它：偏好一改，下到一半的包就得作废，
-    /// 交给安装程序的包则已经收不回来。
-    pub(crate) fn ensure_idle(&self) -> Result<(), SlotError> {
-        if self.busy.load(Ordering::SeqCst) {
-            Err(SlotError::Busy)
-        } else {
-            Ok(())
-        }
-    }
-
     /// 偏好的生效值变了：按旧偏好得来的候选、下好的包、各通道的结果，以及因为没能写下偏好而被拒的版本都作废，
     /// 退出时不再安装；代号加一，之前取号的检查与下载都落不进来。因为包认不得现有数据而被拒的版本与偏好无关，
     /// 留着，同一会话里不再白下一遍。
@@ -816,15 +806,20 @@ pub(crate) mod tests {
         Panic,
     }
 
+    /// 现在占得到忙碌标记吗。占到的守卫在这一句结束时就放掉，标记原样还回去；占不到时标记不动。
+    fn idle(slot: &UpdateSlot<Fake>) -> bool {
+        slot.try_begin_busy().is_ok()
+    }
+
     /// 一次下载：先置忙碌，忙碌期间再开一次下载与改偏好都被拒，然后按 `ending` 结束。
     fn download(slot: &Mutex<UpdateSlot<Fake>>, ending: Ending) -> Result<(), SlotError> {
         let _busy = slot.lock().unwrap().try_begin_busy()?;
         {
             let slot = slot.lock().unwrap();
             assert_eq!(slot.try_begin_busy().err(), Some(SlotError::Busy));
-            assert_eq!(slot.ensure_idle(), Err(SlotError::Busy));
+            assert!(!idle(&slot));
             // 被拒的那一次不能把标记清掉。
-            assert_eq!(slot.ensure_idle(), Err(SlotError::Busy));
+            assert!(!idle(&slot));
         }
         match ending {
             Ending::Success => Ok(()),
@@ -841,29 +836,29 @@ pub(crate) mod tests {
     #[test]
     fn busy_flag_clears_however_the_download_ends() {
         let slot = Mutex::new(UpdateSlot::<Fake>::default());
-        assert_eq!(slot.lock().unwrap().ensure_idle(), Ok(()));
+        assert!(idle(&slot.lock().unwrap()));
 
         assert_eq!(download(&slot, Ending::Success), Ok(()));
-        assert_eq!(slot.lock().unwrap().ensure_idle(), Ok(()));
+        assert!(idle(&slot.lock().unwrap()));
         assert_eq!(
             download(&slot, Ending::Failure),
             Err(SlotError::NoCandidate)
         );
-        assert_eq!(slot.lock().unwrap().ensure_idle(), Ok(()));
+        assert!(idle(&slot.lock().unwrap()));
         assert_eq!(
             download(&slot, Ending::EarlyReturn),
             Err(SlotError::NotReady)
         );
-        assert_eq!(slot.lock().unwrap().ensure_idle(), Ok(()));
+        assert!(idle(&slot.lock().unwrap()));
         let panicked = catch_unwind(AssertUnwindSafe(|| download(&slot, Ending::Panic)));
         assert!(panicked.is_err());
-        assert_eq!(slot.lock().unwrap().ensure_idle(), Ok(()));
+        assert!(idle(&slot.lock().unwrap()));
 
         let again = slot.lock().unwrap().try_begin_busy();
         assert!(again.is_ok());
-        assert_eq!(slot.lock().unwrap().ensure_idle(), Err(SlotError::Busy));
+        assert!(!idle(&slot.lock().unwrap()));
         drop(again);
-        assert_eq!(slot.lock().unwrap().ensure_idle(), Ok(()));
+        assert!(idle(&slot.lock().unwrap()));
     }
 
     /// 槽位里可比较的全部状态。
