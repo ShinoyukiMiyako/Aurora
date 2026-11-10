@@ -3,6 +3,7 @@
 //! 记录只在用户亲手确认「换到某个通道」时由引导程序写下，放在 `%LOCALAPPDATA%\Petalfall-Setup`，与数据目录无关：
 //! 便携安装、数据目录落在别处时都找得到。门面就位之后消费一次：版本与本程序相同，就把偏好写成记录里的通道、
 //! 再删掉记录；版本对不上（装失败了，或之后又装了别的版本）或读不懂，删掉；偏好写不进去，留着等下次启动再试。
+//! 删不掉时把它清空，免得下次启动又按它把偏好改回去。
 //! 哪一步出错都只进日志、不拦启动：最坏是偏好没跟上，用户还能在设置里自己选。
 //!
 //! 只在支持自更新的构建里消费：开发构建不该动这台机器上正式安装留下的记录。
@@ -25,8 +26,8 @@ pub enum Consumed {
     NotSupported,
     /// 没有记录。
     Absent,
-    /// 版本与本程序相同，偏好已写成记录里的通道。`removed` 为记录删掉了没有：没删掉的，下次启动按同样的规则
-    /// 再处理一遍。
+    /// 版本与本程序相同，偏好已写成记录里的通道。`removed` 为记录删掉了没有：没删掉的已尽量清空（[`remove`]），
+    /// 下次启动按读不懂再删。
     Adopted { channel: Channel, removed: bool },
     /// 读不懂（不是约定形状的 JSON，或通道名、版本号不合法），作废。
     Malformed { removed: bool },
@@ -155,13 +156,38 @@ where
     }
 }
 
-/// 删掉记录，交回删掉了没有。已经不在了算删掉；删不掉只记 warn，下次启动再处理。
+/// 删掉记录，交回删掉了没有。已经不在了算删掉。
+///
+/// 删不掉（被别的程序占着不许删、权限不许删）时把内容清空，记 warn：原样留着的话，版本对得上的那份下次启动又会被
+/// 采用，盖掉用户在这期间从设置里选的通道，程序版本变之前每次启动都这样。空文件下次按读不懂处理，会再试着删。
+/// 不改名：Windows 上改名与删除要的是同一种访问权，删不掉的多半也改不了名。清空也做不到时只能记 error。
 fn remove(path: &Path) -> bool {
-    match std::fs::remove_file(path) {
-        Ok(()) => true,
+    let removal = match std::fs::remove_file(path) {
+        Ok(()) => return true,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return true,
+        Err(err) => err,
+    };
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+    {
+        Ok(_) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %removal,
+                "换通道记录没删掉，已清空，下次启动按读不懂再删"
+            );
+            false
+        }
         Err(err) if err.kind() == io::ErrorKind::NotFound => true,
         Err(err) => {
-            tracing::warn!(path = %path.display(), error = %err, "换通道记录没删掉，下次启动再处理");
+            tracing::error!(
+                path = %path.display(),
+                error = %removal,
+                truncate_error = %err,
+                "换通道记录删不掉也清不空：版本对得上的那份下次启动还会被采用，把更新通道改回记录里的通道，直到记录删掉或程序版本变了"
+            );
             false
         }
     }
@@ -550,6 +576,8 @@ mod tests {
 
         /// winnt.h 的 FILE_SHARE_READ：别人能读，不能写、不能删。
         const FILE_SHARE_READ: u32 = 0x1;
+        /// winnt.h 的 FILE_SHARE_WRITE：别人能写。不带 FILE_SHARE_DELETE，所以仍不能删。
+        const FILE_SHARE_WRITE: u32 = 0x2;
 
         fn hold(path: &Path, share_mode: u32) -> File {
             OpenOptions::new()
@@ -579,9 +607,58 @@ mod tests {
             assert!(log.contains("换通道记录读不出来"), "{log}");
         }
 
-        /// 读得出、删不掉：照常判，删除失败只记 warn，不当成失败。
+        /// 读得出、删不掉、写得进（别的程序开着它，许别人读写、不许删）：照常判，记录清空，记 warn。版本对得上的那份
+        /// 清空之后，下次启动按读不懂处理、不再写偏好，用户在这期间从设置里选的通道不会被改回去；还删不掉时照样留着
+        /// 空文件，放开之后删掉。
         #[tokio::test]
-        async fn a_record_that_cannot_be_deleted_is_logged() {
+        async fn a_record_that_cannot_be_deleted_is_emptied_and_not_adopted_again() {
+            let own = version("1.0.0-beta.5");
+            for (contents, expected) in [
+                (
+                    record(Channel::Beta, "1.0.0-beta.5", 1),
+                    Consumed::Adopted {
+                        channel: Channel::Beta,
+                        removed: false,
+                    },
+                ),
+                (
+                    record(Channel::Beta, "1.0.0-beta.4", 1),
+                    Consumed::OtherVersion { removed: false },
+                ),
+                (b"garbage".to_vec(), Consumed::Malformed { removed: false }),
+            ] {
+                let (dir, path) = setup_dir_with(&contents);
+                let holder = hold(&path, FILE_SHARE_READ | FILE_SHARE_WRITE);
+                let (captured, _guard) = capture_logs();
+
+                let (consumed, _) = consume_recording(dir.path(), &own, true, true).await;
+
+                assert_eq!(consumed, expected);
+                assert_eq!(std::fs::read(&path).unwrap(), b"");
+                let log = captured.text();
+                assert!(log.contains("WARN"), "{log}");
+                assert!(
+                    log.contains("换通道记录没删掉，已清空，下次启动按读不懂再删"),
+                    "{log}"
+                );
+                assert!(!log.contains("ERROR"), "{log}");
+
+                let (again, calls) = consume_recording(dir.path(), &own, true, true).await;
+                assert_eq!(again, Consumed::Malformed { removed: false });
+                assert!(calls.is_empty(), "清空的记录不该再写偏好");
+                assert_eq!(std::fs::read(&path).unwrap(), b"");
+
+                drop(holder);
+                let (later, calls) = consume_recording(dir.path(), &own, true, true).await;
+                assert_eq!(later, Consumed::Malformed { removed: true });
+                assert!(calls.is_empty());
+                assert!(!path.exists());
+            }
+        }
+
+        /// 读得出、删不掉也写不进（别的程序开着它，只许别人读）：照常判，记录原样留着，记 error 写明后果。
+        #[tokio::test]
+        async fn a_record_that_can_be_neither_deleted_nor_emptied_is_an_error() {
             let own = version("1.0.0-beta.5");
             for (contents, expected) in [
                 (
@@ -607,8 +684,9 @@ mod tests {
                 assert_eq!(consumed, expected);
                 assert_eq!(std::fs::read(&path).unwrap(), contents);
                 let log = captured.text();
-                assert!(log.contains("WARN"), "{log}");
-                assert!(log.contains("换通道记录没删掉，下次启动再处理"), "{log}");
+                assert!(log.contains("ERROR"), "{log}");
+                assert!(log.contains("换通道记录删不掉也清不空"), "{log}");
+                assert!(log.contains("把更新通道改回记录里的通道"), "{log}");
             }
         }
     }
