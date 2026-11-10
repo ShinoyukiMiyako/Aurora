@@ -1,0 +1,66 @@
+[
+  {
+    "description": "樱花林里的生存档",
+    "cover": "cherry_planks",
+    "cover_image": "block-0123456789abcdef.png",
+    "background": "follow",
+    "background_image": "background-fedcba9876543210.jpg",
+    "isolation": "follow_global",
+    "memory_mb": 6144,
+    "java": "auto",
+    "jvm_args": "-XX:+UseG1GC -Dfile.encoding=UTF-8",
+    "resolution": {
+      "width": 1920,
+      "height": 1080
+    },
+    "fullscreen": true
+  },
+  {
+    "description": "樱花林里的生存档",
+    "cover": "cherry_planks",
+    "cover_image": "block-0123456789abcdef.png",
+    "background": "art",
+    "background_image": "background-fedcba9876543210.jpg",
+    "isolation": "enabled",
+    "memory_mb": 6144,
+    "java": "C:/Java/jdk-21/bin/javaw.exe",
+    "jvm_args": "-XX:+UseG1GC -Dfile.encoding=UTF-8",
+    "resolution": {
+      "width": 1920,
+      "height": 1080
+    },
+    "fullscreen": true
+  },
+  {
+    "description": "樱花林里的生存档",
+    "cover": "cherry_planks",
+    "cover_image": "block-0123456789abcdef.png",
+    "background": "texture",
+    "background_image": "background-fedcba9876543210.jpg",
+    "isolation": "disabled",
+    "memory_mb": 6144,
+    "java": "auto",
+    "jvm_args": "-XX:+UseG1GC -Dfile.encoding=UTF-8",
+    "resolution": {
+      "width": 1920,
+      "height": 1080
+    },
+    "fullscreen": true
+  },
+  {
+    "description": "樱花林里的生存档",
+    "cover": "cherry_planks",
+    "cover_image": "block-0123456789abcdef.png",
+    "background": "image",
+    "background_image": "background-fedcba9876543210.jpg",
+    "isolation": "follow_global",
+    "memory_mb": 6144,
+    "java": "C:/Java/jdk-21/bin/javaw.exe",
+    "jvm_args": "-XX:+UseG1GC -Dfile.encoding=UTF-8",
+    "resolution": {
+      "width": 1920,
+      "height": 1080
+    },
+    "fullscreen": true
+  }
+]

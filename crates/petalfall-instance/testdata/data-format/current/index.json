@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "file": "1700000000000-auto.zip",
+      "kind": "auto",
+      "created_at": 1700000000000,
+      "size_bytes": 4096,
+      "level_name": "樱花林"
+    },
+    {
+      "file": "1700000000001-manual.zip",
+      "kind": "manual",
+      "created_at": 1700000000001,
+      "size_bytes": 8192,
+      "level_name": "樱花林"
+    }
+  ]
+}
