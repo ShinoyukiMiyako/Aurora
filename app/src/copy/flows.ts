@@ -8,6 +8,7 @@ import type { AccountKind, FailureCode, InstallPhase, LoaderKind, SessionPhase, 
 import type { CrashSource, ExitCodeKind, ExitCodeNoteDto, LaunchWarningCode } from "../ipc/diagnostics";
 import type { MoveBlockerDto, MoveFollowUpDto, NameRule, TemplateSkipReason } from "../ipc/instances";
 import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
+import { DATA_FORMAT_TASK_FAILURE, moveTargetDataFormatUnreadableReason, moveTargetDataTooNewReason } from "./data-format";
 
 /** 启动失败（首帧之前出错）时错误页的文案。 */
 export const BOOT_FAILURE_COPY = {
@@ -962,6 +963,10 @@ export function moveBlockerReason(blocker: MoveBlockerDto): string {
     // 只在执行时出现：任务带着发起时的游戏目录，切换之后重试会被后端拦下，不去动新目录里同名的实例
     case "source_changed":
       return "当前游戏目录已经换了，切回发起移动时的游戏目录再重试";
+    case "data_too_new":
+      return moveTargetDataTooNewReason(blocker);
+    case "data_format_unreadable":
+      return moveTargetDataFormatUnreadableReason(blocker.reason);
   }
 }
 
@@ -1005,6 +1010,9 @@ export function taskFailureReason(error: TaskError): string {
       return error.message;
     case "modpack_export_check_failed":
       return "导出的文件没通过校验，已删除";
+    case "game_dir_data_too_new":
+    case "data_format_unreadable":
+      return DATA_FORMAT_TASK_FAILURE[error.code];
     default:
       return error.message;
   }

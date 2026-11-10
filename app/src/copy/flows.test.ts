@@ -7,7 +7,7 @@ import { INSTALL_COPY, SEARCH_COPY } from "../pages/discover/copy";
 import { HERO_COPY, OVERVIEW_COPY } from "../pages/instance/copy";
 import { GPU_COPY } from "../pages/settings/copy";
 import { TASKS_COPY } from "../pages/tasks/copy";
-import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, failureCopy, failureToastLabel, INSTALL_PHASE_LABEL, lockReason, microsoftLoginFailure, TASK_TEXT, TASK_TOAST, taskFailureReason, taskPhaseText, taskStatusLabel, TOAST_COPY, withoutSettingsAction, type FailureContext } from "./flows";
+import { ACTION_ERROR, CONFIRM_COPY, DELETE_INSTANCE_COPY, failureCopy, failureToastLabel, INSTALL_PHASE_LABEL, lockReason, microsoftLoginFailure, moveBlockerReason, TASK_TEXT, TASK_TOAST, taskFailureReason, taskPhaseText, taskStatusLabel, TOAST_COPY, withoutSettingsAction, type FailureContext } from "./flows";
 import { PEEK_COPY } from "./shell";
 
 /** 文案禁用词：语气词、客套、空泛的结果与按钮、归因措辞、占位说法、错别字与旧称，以及账户相关术语的禁用叫法。 */
@@ -172,6 +172,43 @@ describe("插值贴着中文时的混排", () => {
     expect(TASKS_COPY.row.progressLabel("安装 Sodium")).toBe("安装 Sodium 的进度");
     expect(TASKS_COPY.row.progressLabel("补全「生存」的游戏文件")).toBe("补全「生存」的游戏文件的进度");
     expect(TASKS_COPY.lanes.progressLabel("补全「生存」的游戏文件")).toBe("补全「生存」的游戏文件的进度");
+  });
+});
+
+describe("移动的拦截项：目标游戏目录的数据格式", () => {
+  const TARGET = "D:\\HMCL\\.minecraft";
+
+  it("目标被更新的版本用过：写出用过它的那一版，格式号与路径不出现", () => {
+    expect(moveBlockerReason({ kind: "data_too_new", path: TARGET, found: 3, supported: 1, written_by: "1.1.0-dev.57", written_by_channel: "dev" })).toBe(
+      "目标游戏目录已经被预览版 1.1.0-dev.57 用过，这个版本不能往里移",
+    );
+    expect(moveBlockerReason({ kind: "data_too_new", path: TARGET, found: 3, supported: 1, written_by: "1.2.0-beta.4", written_by_channel: "beta" })).toBe(
+      "目标游戏目录已经被测试版 1.2.0-beta.4 用过，这个版本不能往里移",
+    );
+  });
+
+  it("用过它的版本为空：写更新的产品名，不从别处推一个版本", () => {
+    expect(moveBlockerReason({ kind: "data_too_new", path: TARGET, found: 2, supported: 1, written_by: null, written_by_channel: null })).toBe(`目标游戏目录已经被更新的${APP_NAME}用过，这个版本不能往里移`);
+  });
+
+  it("目标的记号读不懂：原因原文放进括号", () => {
+    expect(moveBlockerReason({ kind: "data_format_unreadable", path: TARGET, reason: "expected `,` or `}` at line 1 column 14" })).toBe(
+      "目标游戏目录里的格式记录读不懂（expected `,` or `}` at line 1 column 14），为了不弄坏里面的实例，不往里移",
+    );
+  });
+
+  it("执行时被拦下的失败原因用同一句", () => {
+    const move_blocker = { kind: "data_too_new", path: TARGET, found: 2, supported: 1, written_by: "1.1.0", written_by_channel: "stable" } as const;
+    expect(taskFailureReason({ code: "instance_move_blocked", message: "后端原文", move_blocker })).toBe("目标游戏目录已经被正式版 1.1.0 用过，这个版本不能往里移");
+  });
+
+  it("不含禁用词", () => {
+    expect(
+      bannedIn([
+        moveBlockerReason({ kind: "data_too_new", path: TARGET, found: 2, supported: 1, written_by: null, written_by_channel: null }),
+        moveBlockerReason({ kind: "data_format_unreadable", path: TARGET, reason: "x" }),
+      ]),
+    ).toEqual([]);
   });
 });
 

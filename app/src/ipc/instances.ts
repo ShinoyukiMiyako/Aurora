@@ -11,6 +11,7 @@
 import { invoke } from "./bridge";
 import type { PlatformId } from "./discover";
 import { isIpcError } from "./errors";
+import type { UpdateChannel } from "./system";
 
 export type LoaderChoice = "fabric" | "quilt" | "forge" | "neoforge";
 export const LOADER_CHOICES: readonly LoaderChoice[] = ["fabric", "quilt", "forge", "neoforge"];
@@ -549,7 +550,9 @@ export const revealInFolder = (path: string): Promise<void> => invoke<void>("rev
  * name_taken：目标里已有同名（不分大小写）的版本；has_dependents：别的实例经 inheritsFrom 依赖它；links：实例目录或它的
  * 备份目录里有符号链接、目录联接；base_conflict：目标里已有同名、内容不同的基底版本；insufficient_space：要写的字节加
  * 256 MiB 余量超过目标盘剩余；pending：上一次移动中断后还没收尾；source_changed：只在执行时出现，当前游戏目录已不是
- * 发起移动时带上的 source（发起之后切换过），不动当前目录里同名的实例。
+ * 发起移动时带上的 source（发起之后切换过），不动当前目录里同名的实例；data_too_new：目标游戏目录被更新的版本用过，
+ * 字段同 game_dir_data_too_new 的 detail；data_format_unreadable：目标游戏目录里记数据格式的文件读不懂，字段同
+ * data_format_unreadable 的 detail。
  */
 export type MoveBlockerDto =
   | { kind: "same_directory" }
@@ -560,7 +563,9 @@ export type MoveBlockerDto =
   | { kind: "base_conflict"; bases: string[] }
   | { kind: "insufficient_space"; needed: number; available: number }
   | { kind: "pending" }
-  | { kind: "source_changed" };
+  | { kind: "source_changed" }
+  | ({ kind: "data_too_new" } & GameDirDataTooNewDto)
+  | ({ kind: "data_format_unreadable" } & DataFormatUnreadableDto);
 
 /** 移动前的预检，不写盘、不占实例。源是当前游戏目录，目标可以还不存在。 */
 export interface MovePreviewDto {
@@ -667,6 +672,10 @@ export function parseMoveBlocker(raw: unknown, where: string): MoveBlockerDto {
       return { kind: r.kind, bases: stringList(r.bases, `${where}.bases`) };
     case "insufficient_space":
       return { kind: r.kind, needed: byteCount(r.needed, `${where}.needed`), available: byteCount(r.available, `${where}.available`) };
+    case "data_too_new":
+      return { kind: r.kind, ...parseGameDirDataTooNew(r, where) };
+    case "data_format_unreadable":
+      return { kind: r.kind, ...parseDataFormatUnreadable(r, where) };
     default:
       throw new Error(`${where} 的种类不认识：${JSON.stringify(r.kind)}`);
   }
@@ -678,4 +687,70 @@ export function moveBlockerOf(error: unknown): MoveBlockerDto | null {
   const detail = error.detail;
   if (typeof detail !== "object" || detail === null) throw new Error(`${INSTANCE_MOVE_BLOCKED_ERROR_CODE} 没有带 detail：${error.message}`);
   return parseMoveBlocker((detail as Record<string, unknown>).blocker, `${INSTANCE_MOVE_BLOCKED_ERROR_CODE} 的 detail.blocker`);
+}
+
+// ---------------------------------------------------------------- 游戏目录的数据格式
+
+/**
+ * 游戏目录被更新的版本用过（记下的数据格式比这一版认得的新），这一版不读写里面的实例。列实例、启动、新建、导入整合包、
+ * 切换游戏目录与首次启动选目录都会报它；移动的预检遇到这种目标不报错，列为拦截项 data_too_new。
+ */
+export const GAME_DIR_DATA_TOO_NEW_ERROR_CODE = "game_dir_data_too_new";
+
+/** 游戏目录里记数据格式的文件读不懂，为了不弄坏里面的实例没有打开它。报它的命令同上；移动的预检遇到这种目标列为拦截项。 */
+export const DATA_FORMAT_UNREADABLE_ERROR_CODE = "data_format_unreadable";
+
+/**
+ * game_dir_data_too_new 的 detail，也是拦截项 data_too_new 的字段。path 是游戏目录；found、supported 是目录记下的与这一版
+ * 认得的数据格式号，只供排错，界面不显示；written_by 是后端核过形状的版本号，记号里没写或形状不对时为 null；
+ * written_by_channel 是这个版本所属的通道，由后端给出，written_by 为 null 时也为 null。
+ */
+export interface GameDirDataTooNewDto {
+  path: string;
+  found: number;
+  supported: number;
+  written_by: string | null;
+  written_by_channel: UpdateChannel | null;
+}
+
+/** data_format_unreadable 的 detail，也是拦截项 data_format_unreadable 的字段。path 是游戏目录，reason 是读不懂的原因原文。 */
+export interface DataFormatUnreadableDto {
+  path: string;
+  reason: string;
+}
+
+const UPDATE_CHANNELS: readonly UpdateChannel[] = ["dev", "beta", "stable"];
+
+function text(raw: unknown, what: string): string {
+  if (typeof raw !== "string") throw new Error(`${what} 应是字符串，实为 ${JSON.stringify(raw)}`);
+  return raw;
+}
+
+function updateChannel(raw: unknown, what: string): UpdateChannel {
+  const known = UPDATE_CHANNELS.find((channel) => channel === raw);
+  if (known === undefined) throw new Error(`${what} 不认识：${JSON.stringify(raw)}`);
+  return known;
+}
+
+function detailRecord(raw: unknown, where: string): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error(`${where} 应是对象，实为 ${JSON.stringify(raw)}`);
+  return raw as Record<string, unknown>;
+}
+
+/** 逐项校验游戏目录被更新的版本用过时的字段（错误详情或拦截项），形状不对就抛错。 */
+export function parseGameDirDataTooNew(raw: unknown, where: string): GameDirDataTooNewDto {
+  const r = detailRecord(raw, where);
+  return {
+    path: text(r.path, `${where}.path`),
+    found: byteCount(r.found, `${where}.found`),
+    supported: byteCount(r.supported, `${where}.supported`),
+    written_by: r.written_by === null ? null : text(r.written_by, `${where}.written_by`),
+    written_by_channel: r.written_by_channel === null ? null : updateChannel(r.written_by_channel, `${where}.written_by_channel`),
+  };
+}
+
+/** 逐项校验记数据格式的文件读不懂时的字段（错误详情或拦截项），形状不对就抛错。 */
+export function parseDataFormatUnreadable(raw: unknown, where: string): DataFormatUnreadableDto {
+  const r = detailRecord(raw, where);
+  return { path: text(r.path, `${where}.path`), reason: text(r.reason, `${where}.reason`) };
 }

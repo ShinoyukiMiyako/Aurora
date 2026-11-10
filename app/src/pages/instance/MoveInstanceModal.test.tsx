@@ -10,7 +10,8 @@ import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { formatBytes } from "../../domain/format";
 import type { GameDirectoryDto } from "../../ipc/config";
 import { IpcError } from "../../ipc/errors";
-import type { InstanceDto, MoveOutcomeDto, MovePreviewDto } from "../../ipc/instances";
+import type { InstanceDto, MoveBlockerDto, MoveOutcomeDto, MovePreviewDto } from "../../ipc/instances";
+import { APP_NAME } from "../../lib/app-info";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
@@ -420,6 +421,33 @@ describe("移到其他游戏目录：弹窗", () => {
     });
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(document.querySelector('input[aria-label="实例名称"]')).not.toBeNull();
+  });
+
+  it.each<[string, MoveBlockerDto, string]>([
+    [
+      "被更新的版本用过（知道是哪一版）",
+      { kind: "data_too_new", path: HMCL, found: 2, supported: 1, written_by: "1.1.0-dev.57", written_by_channel: "dev" },
+      "目标游戏目录已经被预览版 1.1.0-dev.57 用过，这个版本不能往里移",
+    ],
+    ["被更新的版本用过（版本不可信为空）", { kind: "data_too_new", path: HMCL, found: 2, supported: 1, written_by: null, written_by_channel: null }, `目标游戏目录已经被更新的${APP_NAME}用过，这个版本不能往里移`],
+    ["记号读不懂", { kind: "data_format_unreadable", path: HMCL, reason: "expected value at line 1 column 1" }, "目标游戏目录里的格式记录读不懂（expected value at line 1 column 1），为了不弄坏里面的实例，不往里移"],
+  ])("目标的数据格式%s：列在拦截项里、主按钮禁用；预检区照常写出摘要，红色提示只有「现在还不能移」，不是预检失败", async (_case, blocker, reason) => {
+    await openPage();
+    await openMove();
+    click(option("HMCL"));
+    await flush();
+    await answer(HMCL, previewDto(HMCL, { blockers: [blocker] }));
+    expect([...dialog().querySelectorAll('ul[aria-label="现在还不能移"] li')].map(textOf)).toEqual([reason]);
+    // 预检本身成功：摘要照常摆出，预检失败那条「没能检查目标位置」与它的「重试」都不出现
+    expect(kv("目标盘剩余")).toBe(formatBytes(120 * GIB));
+    expect([...dialog().querySelectorAll('[data-tone="danger"]')].map(textOf)).toEqual(["现在还不能移"]);
+    expect(textOf(dialog())).not.toContain("没能检查目标位置");
+    expect([...dialog().querySelectorAll("button")].map(textOf)).not.toContain("重试");
+    const confirm = button("移动实例", dialog());
+    expect(confirm.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(confirm)).toBe("先解决上面列出的问题");
+    // 没有同名拦截项，不给「去重命名」
+    expect([...dialog().querySelectorAll("button")].map(textOf)).not.toContain("去重命名");
   });
 
   it("选择其他文件夹：从当前游戏目录打开对话框；选的不在列表里就加一行并选中、按它预检，选的就是列表里的目录（大小写不同）则选中那一行", async () => {

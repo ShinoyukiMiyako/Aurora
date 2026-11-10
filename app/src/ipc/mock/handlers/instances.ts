@@ -28,6 +28,8 @@ import {
   TEMPLATE_FILES,
   TEMPLATE_SOURCE_EMPTY_ERROR_CODE,
   INSTANCE_MOVE_BLOCKED_ERROR_CODE,
+  type DataFormatUnreadableDto,
+  type GameDirDataTooNewDto,
   type MoveBlockerDto,
   type MoveFollowUpDto,
   type MoveOutcomeDto,
@@ -1726,6 +1728,34 @@ function freeBytesOf(path: string): number {
   return listed === undefined ? MOCK_FREE_BYTES_ELSEWHERE : listed;
 }
 
+/** 这一版认得的数据格式号，与后端第一个带这套机制的版本相同。 */
+const MOCK_DATA_FORMAT = 1;
+
+/** 假游戏目录里数据格式记号的问题：比这一版新（supported 取这一版的号），或记号读不懂。其余字段同对应的拦截项。 */
+export type MockGameDirDataProblem =
+  | ({ kind: "data_too_new" } & Omit<GameDirDataTooNewDto, "path" | "supported">)
+  | ({ kind: "data_format_unreadable" } & Omit<DataFormatUnreadableDto, "path">);
+
+/** 登记过记号问题的假游戏目录；没登记的目录，记号与这一版相符或还没有记号。 */
+let gameDirDataProblems: { path: string; problem: MockGameDirDataProblem }[] = [];
+
+/**
+ * 让一个假游戏目录的数据格式记号出问题（模拟被更新的版本用过，或记号文件坏了）：以它为目标的移动预检列出对应的拦截项，
+ * 执行前的重新预检照样拦下。同一目录再登记一次换成新的问题。
+ */
+export function setMockGameDirDataProblem(path: string, problem: MockGameDirDataProblem): void {
+  if (problem.kind === "data_too_new" && problem.found <= MOCK_DATA_FORMAT) throw new Error(`登记的数据格式号 ${problem.found} 不比这一版的 ${MOCK_DATA_FORMAT} 新`);
+  gameDirDataProblems = [...gameDirDataProblems.filter((entry) => !samePath(entry.path, path)), { path, problem }];
+}
+
+/** 目标游戏目录的记号问题对应的拦截项；没登记过问题时为 null。 */
+function dataFormatBlocker(target: string): MoveBlockerDto | null {
+  const entry = gameDirDataProblems.find((e) => samePath(e.path, target));
+  if (entry === undefined) return null;
+  const { problem } = entry;
+  return problem.kind === "data_too_new" ? { ...problem, path: target, supported: MOCK_DATA_FORMAT } : { ...problem, path: target };
+}
+
 /** 随实例走的存档备份：备份区里按实例 id 分的那一层，与后端 instances/<id> 同一个口径。 */
 function movedBackups(id: string): { count: number; bytes: number } {
   const book = backups[id];
@@ -1760,6 +1790,8 @@ function previewMove(id: string, rawTarget: string): MovePreviewDto {
   if (samePath(target, source)) blockers.push({ kind: "same_directory" });
   else if (isMockPathWithin(target, `${source}\\versions\\${id}`)) blockers.push({ kind: "target_inside_source" });
   else {
+    const dataFormat = dataFormatBlocker(target);
+    if (dataFormat !== null) blockers.push(dataFormat);
     if (inTarget(id)) blockers.push({ kind: "name_taken" });
     const dependents = dependentsOf(id);
     if (dependents.length > 0) blockers.push({ kind: "has_dependents", dependents });
@@ -2135,6 +2167,7 @@ export function reset(): void {
   holds.clear();
   pendingBackupsMoveFailure = null;
   pendingMoveConfigFailure = null;
+  gameDirDataProblems = [];
   savesReaders.length = 0;
   savesWriters.length = 0;
   mockRevealedPaths.length = 0;

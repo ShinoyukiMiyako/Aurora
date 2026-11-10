@@ -1,9 +1,11 @@
 // 错误进通知正文时的写法：后端原文原样给出，带错误码（XErr、HTTP 状态）时在末尾用全角括号附上。
 // 「复制错误信息」要的是完整的一份：错误名与错误码、原文、后端给的原因链与其余结构化细节，贴进反馈里就能定位。
 
+import { dataFormatUnreadableText, gameDirDataTooNewText } from "../copy/data-format";
 import { INSTANCE_IN_USE_COPY } from "../copy/flows";
 import { instanceBusyFromError, isInstanceBusy } from "../domain/instance-busy";
 import { IpcError, isIpcError, UNKNOWN_ERROR_CODE } from "../ipc/errors";
+import { DATA_FORMAT_UNREADABLE_ERROR_CODE, GAME_DIR_DATA_TOO_NEW_ERROR_CODE, parseDataFormatUnreadable, parseGameDirDataTooNew } from "../ipc/instances";
 import type { UpdateSourceFailureDto, UpdateSourceFailureKind } from "../ipc/system";
 
 function numericDetail(detail: unknown, key: string): number | null {
@@ -17,6 +19,22 @@ function inUseReason(error: IpcError): string | null {
   if (!isInstanceBusy(error)) return null;
   const { usedBy } = instanceBusyFromError(error);
   return usedBy === null ? null : INSTANCE_IN_USE_COPY.reason(usedBy);
+}
+
+/**
+ * 游戏目录的数据格式比这一版新、或记号读不懂时，界面不显示格式号，正文按 detail 写出是哪个目录、被哪一版用过，
+ * 不用后端原文。其余错误为 null。detail 不成形是前后端契约破坏，抛出，不退回后端原文。
+ */
+function dataFormatReason(error: IpcError): string | null {
+  const where = `${error.code} 的 detail`;
+  switch (error.code) {
+    case GAME_DIR_DATA_TOO_NEW_ERROR_CODE:
+      return gameDirDataTooNewText(parseGameDirDataTooNew(error.detail, where));
+    case DATA_FORMAT_UNREADABLE_ERROR_CODE:
+      return dataFormatUnreadableText(parseDataFormatUnreadable(error.detail, where));
+    default:
+      return null;
+  }
 }
 
 /** 网络层失败的种类：connect（DNS 解析失败、连接被拒、TLS 握手失败）或 timeout。 */
@@ -61,6 +79,8 @@ export function describeError(error: unknown): string {
   if (!isIpcError(error)) return error.message;
   const inUse = inUseReason(error);
   if (inUse !== null) return inUse;
+  const dataFormat = dataFormatReason(error);
+  if (dataFormat !== null) return dataFormat;
   const xerr = numericDetail(error.detail, "xerr");
   if (xerr !== null) return `${error.message}（XErr ${xerr}）`;
   const status = numericDetail(error.detail, "status");

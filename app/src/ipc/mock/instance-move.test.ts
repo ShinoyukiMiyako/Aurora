@@ -6,7 +6,7 @@ import { getSidebarPins, listInstances, moveBlockerOf, moveInstance, parseMoveBl
 import { cancelTask, CORE_EVENT } from "../tasks";
 import { resetMocks } from ".";
 import { clearMockEventListeners, subscribeMockEvent } from "./events";
-import { addMockInstance, failNextMockBackupsMove, failNextMockMoveConfig, MOCK_INSTALL_STEPS, MOCK_STEP_MS } from "./handlers/instances";
+import { addMockInstance, failNextMockBackupsMove, failNextMockMoveConfig, MOCK_INSTALL_STEPS, MOCK_STEP_MS, setMockGameDirDataProblem } from "./handlers/instances";
 import { failNextMockPlayRecords } from "./handlers/launch";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -128,6 +128,27 @@ describe("预检", () => {
   it("版本 JSON 坏了的实例：预检照实报错", async () => {
     expect((await rejection(previewInstanceMove("没装完", HMCL))).code).toBe("instance_failed");
   });
+
+  it("目标的数据格式记号比这一版新、或读不懂：列为拦截项而不是整次报错，与别的拦截项并列；同一目录再登记换成新的问题", async () => {
+    await addGameDirectory("HMCL", HMCL);
+    // 登记时的写法与预检时不同（大小写、斜杠、末尾分隔符），按同一路径的口径认作同一个目录
+    setMockGameDirDataProblem("d:/hmcl/.minecraft/", { kind: "data_too_new", found: 2, written_by: "1.1.0-dev.57", written_by_channel: "dev" });
+    expect((await previewInstanceMove("1.20.1-Fabric", HMCL)).blockers).toEqual([{ kind: "data_too_new", path: HMCL, found: 2, supported: 1, written_by: "1.1.0-dev.57", written_by_channel: "dev" }]);
+    expect((await previewInstanceMove("樱花生存", HMCL)).blockers).toEqual([
+      { kind: "data_too_new", path: HMCL, found: 2, supported: 1, written_by: "1.1.0-dev.57", written_by_channel: "dev" },
+      { kind: "name_taken" },
+    ]);
+    setMockGameDirDataProblem(HMCL, { kind: "data_too_new", found: 9, written_by: null, written_by_channel: null });
+    expect((await previewInstanceMove("1.20.1-Fabric", HMCL)).blockers).toEqual([{ kind: "data_too_new", path: HMCL, found: 9, supported: 1, written_by: null, written_by_channel: null }]);
+    setMockGameDirDataProblem(HMCL, { kind: "data_format_unreadable", reason: "expected value at line 1 column 1" });
+    expect((await previewInstanceMove("1.20.1-Fabric", HMCL)).blockers).toEqual([{ kind: "data_format_unreadable", path: HMCL, reason: "expected value at line 1 column 1" }]);
+    // 没登记过的目录不受影响
+    expect((await previewInstanceMove("1.20.1-Fabric", OFFICIAL)).blockers).toEqual([]);
+  });
+
+  it("登记的格式号不比这一版新是测试自己写错了：直接抛错", () => {
+    expect(() => setMockGameDirDataProblem(HMCL, { kind: "data_too_new", found: 1, written_by: null, written_by_channel: null })).toThrow("登记的数据格式号 1 不比这一版的 1 新");
+  });
 });
 
 describe("拦截项的形状", () => {
@@ -138,6 +159,18 @@ describe("拦截项的形状", () => {
     expect(() => parseMoveBlocker({ kind: "moved_away" }, "x")).toThrow("x 的种类不认识");
     expect(() => parseMoveBlocker({ kind: "base_conflict", bases: "1.21" }, "x")).toThrow("x.bases 应是字符串数组");
     expect(() => parseMoveBlocker({ kind: "insufficient_space", needed: -1, available: 3 }, "x")).toThrow("x.needed 应是非负整数");
+  });
+
+  it("目标游戏目录的数据格式两种：字段原样读回，版本与通道可以同为 null；字段缺失、类型不对或通道不认识都抛错", () => {
+    const tooNew = { kind: "data_too_new", path: HMCL, found: 2, supported: 1, written_by: "1.1.0-dev.57", written_by_channel: "dev" };
+    expect(parseMoveBlocker(tooNew, "x")).toEqual(tooNew);
+    expect(parseMoveBlocker({ ...tooNew, written_by: null, written_by_channel: null }, "x")).toEqual({ ...tooNew, written_by: null, written_by_channel: null });
+    expect(parseMoveBlocker({ kind: "data_format_unreadable", path: HMCL, reason: "expected value" }, "x")).toEqual({ kind: "data_format_unreadable", path: HMCL, reason: "expected value" });
+    expect(() => parseMoveBlocker({ ...tooNew, written_by_channel: "preview" }, "x")).toThrow("x.written_by_channel 不认识");
+    expect(() => parseMoveBlocker({ ...tooNew, found: 1.5 }, "x")).toThrow("x.found 应是非负整数");
+    expect(() => parseMoveBlocker({ ...tooNew, supported: undefined }, "x")).toThrow("x.supported 应是非负整数");
+    expect(() => parseMoveBlocker({ ...tooNew, path: 3 }, "x")).toThrow("x.path 应是字符串");
+    expect(() => parseMoveBlocker({ kind: "data_format_unreadable", path: HMCL }, "x")).toThrow("x.reason 应是字符串");
   });
 
   it("moveBlockerOf 只认 instance_move_blocked；带着它却没有 detail 是契约破坏", () => {
@@ -195,6 +228,16 @@ describe("执行", () => {
     expect(error.code).toBe("instance_move_blocked");
     expect(error.detail).toEqual({ id: "樱花生存", blocker: { kind: "name_taken" } });
     expect(moveBlockerOf(error)).toEqual({ kind: "name_taken" });
+    expect((await listInstances()).find((i) => i.id === "樱花生存")?.activity).toBeNull();
+  });
+
+  it("开工前重新预检时目标被更新的版本用过：以 instance_move_blocked 拒绝，blocker 带着用过它的版本，实例原样留着", async () => {
+    setMockGameDirDataProblem(OFFICIAL, { kind: "data_too_new", found: 3, written_by: "1.2.0-beta.1", written_by_channel: "beta" });
+    const error = await rejection(moveInstance("t-too-new", "樱花生存", SOURCE, OFFICIAL));
+    const blocker = { kind: "data_too_new", path: OFFICIAL, found: 3, supported: 1, written_by: "1.2.0-beta.1", written_by_channel: "beta" };
+    expect(error.code).toBe("instance_move_blocked");
+    expect(error.detail).toEqual({ id: "樱花生存", blocker });
+    expect(moveBlockerOf(error)).toEqual(blocker);
     expect((await listInstances()).find((i) => i.id === "樱花生存")?.activity).toBeNull();
   });
 
