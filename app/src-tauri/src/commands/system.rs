@@ -1,6 +1,7 @@
 //! 系统：内存建议、首次启动、启动提示与连通性探测。
 
 use petalfall_base::fs::DataDirResolution;
+use petalfall_core::data_format::GuardMode;
 use petalfall_core::folders::{ensure_game_dir, probe_dir, validate_game_dir, FirstRunBaseline};
 use petalfall_core::{ConfigRecovery, MemoryAdvice, MemoryLimit, NeedFactor};
 use serde::Serialize;
@@ -104,6 +105,13 @@ pub(crate) async fn complete_first_run_with(
     };
     // 建目录在拿写锁之前：盘慢或挂起时不连累其它命令。
     ensure_game_dir(&game_dir).await?;
+    // 选的目录可能被更新的落樱用过，或记号读不懂：核对不过就不收下它，配置与首次启动状态都不动，用户换一个
+    // 文件夹再提交。关卡要读写记号，在写锁之外的快照上做。
+    facade
+        .snapshot()
+        .await
+        .guard_game_dir_at(&game_dir, GuardMode::Use)
+        .await?;
     facade
         .update(|petalfall| {
             petalfall.complete_first_run(&base, game_dir, extras);
@@ -581,6 +589,97 @@ mod tests {
         assert!(!good.exists(), "校验失败不应建目录");
         assert!(facade.read().await.is_first_run());
         assert!(!dir.path().join("config.json").exists());
+    }
+
+    /// 选的目录被更新的落樱用过、或记号读不懂：不收下它，不写配置、仍是首次启动、当前目录照旧，记号也不动；
+    /// detail 的 path 是选的游戏目录。之后换一个记号等于这一版的文件夹再提交，照常完成。
+    #[tokio::test]
+    async fn first_run_refuses_a_game_dir_whose_data_format_it_cannot_use() {
+        use petalfall_core::data_format::DATA_FORMAT;
+
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let slot = FirstRunBaselineSlot::default();
+        let config_path = dir.path().join("config.json");
+        let default_dir = facade.read().await.game_dir().to_path_buf();
+        let write_stamp = |game_dir: &std::path::Path, contents: &str| {
+            let stamp = game_dir.join(".petalfall").join("data-format.json");
+            std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+            std::fs::write(&stamp, contents).unwrap();
+            stamp
+        };
+
+        let newer = dir.path().join("Newer").join(".minecraft");
+        let newer_stamp = write_stamp(
+            &newer,
+            &format!(
+                r#"{{"data_format":{},"written_by":"1.0.0-beta.5"}}"#,
+                DATA_FORMAT + 1
+            ),
+        );
+        let broken = dir.path().join("Broken").join(".minecraft");
+        let broken_stamp = write_stamp(&broken, "[2]");
+
+        for (target, stamp, expected_code, detail) in [
+            (
+                &newer,
+                &newer_stamp,
+                code::GAME_DIR_DATA_TOO_NEW,
+                serde_json::json!({
+                    "path": newer.display().to_string(),
+                    "found": DATA_FORMAT + 1,
+                    "supported": DATA_FORMAT,
+                    "written_by": "1.0.0-beta.5",
+                    "written_by_channel": "beta",
+                }),
+            ),
+            (
+                &broken,
+                &broken_stamp,
+                code::DATA_FORMAT_UNREADABLE,
+                serde_json::json!({
+                    "path": broken.display().to_string(),
+                    "reason": "不是 JSON 对象，而是数组",
+                }),
+            ),
+        ] {
+            let stamp_before = std::fs::read(stamp).unwrap();
+
+            let err = complete_first_run_with(
+                &facade,
+                &slot,
+                &target.display().to_string(),
+                vec![NamedDirectoryDto {
+                    name: "HMCL".into(),
+                    path: r"D:\HMCL\.minecraft".into(),
+                }],
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(err.code, expected_code, "{}", target.display());
+            assert_eq!(err.detail, Some(detail), "{}", target.display());
+            assert!(facade.read().await.is_first_run());
+            assert_eq!(facade.read().await.game_dir(), default_dir.as_path());
+            assert!(!config_path.exists());
+            assert_eq!(std::fs::read(stamp).unwrap(), stamp_before);
+        }
+
+        let chosen = dir.path().join("Chosen").join(".minecraft");
+        let chosen_contents = format!(r#"{{"data_format":{DATA_FORMAT}}}"#);
+        let chosen_stamp = write_stamp(&chosen, &chosen_contents);
+        complete_first_run_with(&facade, &slot, &chosen.display().to_string(), Vec::new())
+            .await
+            .unwrap();
+        assert!(!facade.read().await.is_first_run());
+        let saved = ConfigStore::at(&config_path).load().await.unwrap();
+        assert!(saved.first_run_completed);
+        assert_eq!(saved.game_directory.as_deref(), Some(chosen.as_path()));
+        assert!(saved.extra_game_directories.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(chosen_stamp).unwrap(),
+            chosen_contents
+        );
     }
 
     #[tokio::test]

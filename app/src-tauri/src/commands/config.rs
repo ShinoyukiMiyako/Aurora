@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use petalfall_core::config::UiLanguage;
+use petalfall_core::data_format::GuardMode;
 use petalfall_core::folders::{
     default_game_dir, inspect_game_directory as inspect_dir, probe_dir, validate_game_dir,
 };
@@ -687,7 +688,11 @@ pub(crate) async fn set_game_directory_with(
         }
         .into());
     }
-    let current = facade.snapshot().await.probe_current_game_dir().await;
+    // 目标可能被更新的落樱用过、或记号读不懂：这一版换过去就会读写里面的实例，核对不过就不换，配置不动。
+    // 关卡要读写记号，与探测一样在写锁之外的快照上做。
+    let snapshot = facade.snapshot().await;
+    snapshot.guard_game_dir_at(&target, GuardMode::Use).await?;
+    let current = snapshot.probe_current_game_dir().await;
     facade
         .update(|petalfall| {
             petalfall.switch_game_directory(target, &current);
@@ -1448,6 +1453,95 @@ mod tests {
             read_config(&facade).await.game_dir,
             target.display().to_string()
         );
+    }
+
+    /// 在游戏目录根下写数据格式记号，交回记号文件的路径。
+    fn write_stamp(game_dir: &Path, contents: &str) -> PathBuf {
+        let stamp = game_dir.join(".petalfall").join("data-format.json");
+        std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+        std::fs::write(&stamp, contents).unwrap();
+        stamp
+    }
+
+    /// 目标被更新的落樱用过、或记号读不懂：不换过去，配置文件一个字节不变，当前目录与目录列表照旧，目标里的记号
+    /// 也不动；detail 的 path 是要换到的游戏目录。记号等于这一版的目录照常换过去，记号不被改写。
+    #[tokio::test(start_paused = true)]
+    async fn set_game_directory_refuses_a_target_whose_data_format_it_cannot_use() {
+        use petalfall_core::data_format::DATA_FORMAT;
+
+        let dir = tempfile::tempdir().unwrap();
+        let facade = facade_in(dir.path());
+        let home = dir.path().join("Home").join(".minecraft");
+        std::fs::create_dir_all(&home).unwrap();
+        set_game_directory_with(&facade, &home.display().to_string())
+            .await
+            .unwrap();
+        let config_path = dir.path().join("config.json");
+        let saved = std::fs::read(&config_path).unwrap();
+        let listed = facade.snapshot().await.game_directories().await;
+
+        let newer = dir.path().join("Newer").join(".minecraft");
+        let newer_stamp = write_stamp(
+            &newer,
+            &format!(
+                r#"{{"data_format":{},"written_by":"1.1.0-dev.57"}}"#,
+                DATA_FORMAT + 1
+            ),
+        );
+        let broken = dir.path().join("Broken").join(".minecraft");
+        let broken_stamp = write_stamp(&broken, r#"{"written_by":"1.0.0"}"#);
+
+        for (target, stamp, expected_code, detail) in [
+            (
+                &newer,
+                &newer_stamp,
+                code::GAME_DIR_DATA_TOO_NEW,
+                serde_json::json!({
+                    "path": newer.display().to_string(),
+                    "found": DATA_FORMAT + 1,
+                    "supported": DATA_FORMAT,
+                    "written_by": "1.1.0-dev.57",
+                    "written_by_channel": "dev",
+                }),
+            ),
+            (
+                &broken,
+                &broken_stamp,
+                code::DATA_FORMAT_UNREADABLE,
+                serde_json::json!({
+                    "path": broken.display().to_string(),
+                    "reason": "缺 data_format",
+                }),
+            ),
+        ] {
+            let stamp_before = std::fs::read(stamp).unwrap();
+
+            let err = set_game_directory_with(&facade, &target.display().to_string())
+                .await
+                .unwrap_err();
+
+            assert_eq!(err.code, expected_code, "{}", target.display());
+            assert_eq!(err.detail, Some(detail), "{}", target.display());
+            assert_eq!(std::fs::read(&config_path).unwrap(), saved);
+            assert_eq!(
+                read_config(&facade).await.game_dir,
+                home.display().to_string()
+            );
+            assert_eq!(facade.snapshot().await.game_directories().await, listed);
+            assert_eq!(std::fs::read(stamp).unwrap(), stamp_before);
+        }
+
+        let same = dir.path().join("Same").join(".minecraft");
+        let same_contents = format!(r#"{{"data_format":{DATA_FORMAT}}}"#);
+        let same_stamp = write_stamp(&same, &same_contents);
+        set_game_directory_with(&facade, &same.display().to_string())
+            .await
+            .unwrap();
+        assert_eq!(
+            read_config(&facade).await.game_dir,
+            same.display().to_string()
+        );
+        assert_eq!(std::fs::read_to_string(same_stamp).unwrap(), same_contents);
     }
 
     /// 版本数过 IPC 时 0 和 null 要分得开：null 是「不知道」，字段也得在，前端按 `number | null` 读。
