@@ -1,0 +1,110 @@
+[
+  {
+    "format": 1,
+    "pid": 4242,
+    "created": 133000000000000000,
+    "exe": "C:/Java/jdk-21/bin/javaw.exe",
+    "instance_id": "1.21.1-Fabric",
+    "game_dir": "D:/Games/.minecraft",
+    "version_dir": "D:/Games/.minecraft/versions/1.21.1-Fabric",
+    "working_dir": "D:/Games/.minecraft/versions/1.21.1-Fabric",
+    "session_started_at": 1767225600000,
+    "running_since": 1767225601000,
+    "backup_since": 1767225600500,
+    "session_log": "D:/Games/.minecraft/versions/1.21.1-Fabric/.petalfall/logs/latest.log",
+    "java": {
+      "major": 21,
+      "path": "C:/Java/jdk-21/bin/javaw.exe",
+      "is_64bit": true
+    },
+    "max_memory_mb": 6144,
+    "warnings": [
+      "game_path",
+      "instance_name",
+      "onedrive_folder",
+      "icloud_folder",
+      "long_player_name",
+      "jvm_memory_unit",
+      "jvm_min_over_max",
+      "jvm_max_too_low"
+    ],
+    "offline": true,
+    "account": {
+      "uuid": "0123456789abcdef0123456789abcdef",
+      "name": "Steve",
+      "account_type": "microsoft"
+    }
+  },
+  {
+    "format": 1,
+    "pid": 4242,
+    "created": 133000000000000000,
+    "exe": "C:/Java/jdk-21/bin/javaw.exe",
+    "instance_id": "1.21.1-Fabric",
+    "game_dir": "D:/Games/.minecraft",
+    "version_dir": "D:/Games/.minecraft/versions/1.21.1-Fabric",
+    "working_dir": "D:/Games/.minecraft/versions/1.21.1-Fabric",
+    "session_started_at": 1767225600000,
+    "running_since": 1767225601000,
+    "backup_since": 1767225600500,
+    "session_log": "D:/Games/.minecraft/versions/1.21.1-Fabric/.petalfall/logs/latest.log",
+    "java": {
+      "major": 21,
+      "path": "C:/Java/jdk-21/bin/javaw.exe",
+      "is_64bit": true
+    },
+    "max_memory_mb": 6144,
+    "warnings": [
+      "game_path",
+      "instance_name",
+      "onedrive_folder",
+      "icloud_folder",
+      "long_player_name",
+      "jvm_memory_unit",
+      "jvm_min_over_max",
+      "jvm_max_too_low"
+    ],
+    "offline": true,
+    "account": {
+      "uuid": "0123456789abcdef0123456789abcdef",
+      "name": "Steve",
+      "account_type": "offline"
+    }
+  },
+  {
+    "format": 1,
+    "pid": 4242,
+    "created": 133000000000000000,
+    "exe": "C:/Java/jdk-21/bin/javaw.exe",
+    "instance_id": "1.21.1-Fabric",
+    "game_dir": "D:/Games/.minecraft",
+    "version_dir": "D:/Games/.minecraft/versions/1.21.1-Fabric",
+    "working_dir": "D:/Games/.minecraft/versions/1.21.1-Fabric",
+    "session_started_at": 1767225600000,
+    "running_since": 1767225601000,
+    "backup_since": 1767225600500,
+    "session_log": "D:/Games/.minecraft/versions/1.21.1-Fabric/.petalfall/logs/latest.log",
+    "java": {
+      "major": 21,
+      "path": "C:/Java/jdk-21/bin/javaw.exe",
+      "is_64bit": true
+    },
+    "max_memory_mb": 6144,
+    "warnings": [
+      "game_path",
+      "instance_name",
+      "onedrive_folder",
+      "icloud_folder",
+      "long_player_name",
+      "jvm_memory_unit",
+      "jvm_min_over_max",
+      "jvm_max_too_low"
+    ],
+    "offline": true,
+    "account": {
+      "uuid": "0123456789abcdef0123456789abcdef",
+      "name": "Steve",
+      "account_type": "authlib_injector"
+    }
+  }
+]

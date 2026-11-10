@@ -1,0 +1,74 @@
+[
+  {
+    "schema": 1,
+    "format": "modrinth",
+    "platform": "modrinth",
+    "project_id": "Sakura01",
+    "version_id": "Ver12345",
+    "name": "樱花整合包",
+    "version": "1.2.0",
+    "minecraft": "1.21.1",
+    "loader": {
+      "kind": "fabric",
+      "version": "0.16.10"
+    },
+    "remote_files": 120,
+    "override_files": 35,
+    "installed_at": 1767225600,
+    "recommended_ram_mb": 6144
+  },
+  {
+    "schema": 1,
+    "format": "curseforge",
+    "platform": "curseforge",
+    "project_id": "Sakura01",
+    "version_id": "Ver12345",
+    "name": "樱花整合包",
+    "version": "1.2.0",
+    "minecraft": "1.21.1",
+    "loader": {
+      "kind": "quilt",
+      "version": "0.16.10"
+    },
+    "remote_files": 120,
+    "override_files": 35,
+    "installed_at": 1767225600,
+    "recommended_ram_mb": 6144
+  },
+  {
+    "schema": 1,
+    "format": "modrinth",
+    "platform": "modrinth",
+    "project_id": "Sakura01",
+    "version_id": "Ver12345",
+    "name": "樱花整合包",
+    "version": "1.2.0",
+    "minecraft": "1.21.1",
+    "loader": {
+      "kind": "forge",
+      "version": "0.16.10"
+    },
+    "remote_files": 120,
+    "override_files": 35,
+    "installed_at": 1767225600,
+    "recommended_ram_mb": 6144
+  },
+  {
+    "schema": 1,
+    "format": "curseforge",
+    "platform": "curseforge",
+    "project_id": "Sakura01",
+    "version_id": "Ver12345",
+    "name": "樱花整合包",
+    "version": "1.2.0",
+    "minecraft": "1.21.1",
+    "loader": {
+      "kind": "neoforge",
+      "version": "0.16.10"
+    },
+    "remote_files": 120,
+    "override_files": 35,
+    "installed_at": 1767225600,
+    "recommended_ram_mb": 6144
+  }
+]

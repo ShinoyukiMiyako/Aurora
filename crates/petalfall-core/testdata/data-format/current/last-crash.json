@@ -1,0 +1,265 @@
+{
+  "format": 2,
+  "report": {
+    "at": 1767229200000,
+    "exit_code": 1,
+    "session_started_at": 1767225600000,
+    "log_path": null,
+    "diagnoses": [
+      {
+        "category": "manual_debug_crash",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: manual_debug_crash",
+        "line": 100,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "session_log"
+      },
+      {
+        "category": "java_version_mismatch",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: java_version_mismatch",
+        "line": 101,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "crash_report"
+      },
+      {
+        "category": "out_of_memory",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: out_of_memory",
+        "line": 102,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "hs_err"
+      },
+      {
+        "category": "jvm_args_invalid",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: jvm_args_invalid",
+        "line": 103,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "exit_code"
+      },
+      {
+        "category": "missing_language_provider",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: missing_language_provider",
+        "line": 104,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "session_log"
+      },
+      {
+        "category": "game_version_mismatch",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: game_version_mismatch",
+        "line": 105,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "crash_report"
+      },
+      {
+        "category": "dependency_version_mismatch",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: dependency_version_mismatch",
+        "line": 106,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "hs_err"
+      },
+      {
+        "category": "missing_dependency",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: missing_dependency",
+        "line": 107,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "exit_code"
+      },
+      {
+        "category": "optifine_incompatible",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: optifine_incompatible",
+        "line": 108,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "session_log"
+      },
+      {
+        "category": "mixin_failure",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: mixin_failure",
+        "line": 109,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "crash_report"
+      },
+      {
+        "category": "duplicate_mod",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: duplicate_mod",
+        "line": 110,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "hs_err"
+      },
+      {
+        "category": "native_library_missing",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: native_library_missing",
+        "line": 111,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "exit_code"
+      },
+      {
+        "category": "intel_graphics_driver",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: intel_graphics_driver",
+        "line": 112,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "session_log"
+      },
+      {
+        "category": "graphics_driver",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: graphics_driver",
+        "line": 113,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "crash_report"
+      },
+      {
+        "category": "corrupted_jar",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: corrupted_jar",
+        "line": 114,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "hs_err"
+      },
+      {
+        "category": "loopback_unavailable",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: loopback_unavailable",
+        "line": 115,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "exit_code"
+      },
+      {
+        "category": "native_crash",
+        "summary": "樱花林里的线索",
+        "advice": "先停用最近装的 Mod 再试",
+        "detail": "sodium",
+        "matched": "[main/ERROR]: native_crash",
+        "line": 116,
+        "context": [
+          "[main/INFO]: 前两行",
+          "[main/INFO]: 前一行"
+        ],
+        "source": "session_log"
+      }
+    ],
+    "suspects": [
+      {
+        "mod_id": "sodium",
+        "file_name": "sodium-fabric-0.6.0.jar"
+      }
+    ],
+    "java": {
+      "major": 21,
+      "path": "C:/Java/jdk-21/bin/javaw.exe",
+      "is_64bit": true
+    },
+    "max_memory_mb": 6144,
+    "warnings": [
+      "game_path",
+      "instance_name",
+      "onedrive_folder",
+      "icloud_folder",
+      "long_player_name",
+      "jvm_memory_unit",
+      "jvm_min_over_max",
+      "jvm_max_too_low"
+    ],
+    "exit_code_note": null,
+    "scanned_files": [
+      {
+        "kind": "crash_report",
+        "path": "crash-reports/crash-2026-01-01_10.00.00-client.txt"
+      },
+      {
+        "kind": "hs_err",
+        "path": "hs_err_pid4242.log"
+      }
+    ]
+  }
+}

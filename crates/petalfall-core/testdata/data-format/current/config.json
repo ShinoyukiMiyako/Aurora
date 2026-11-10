@@ -1,0 +1,417 @@
+[
+  {
+    "after_launch": "keep",
+    "appearance": {
+      "accent": "sakura",
+      "cover_background": "art",
+      "mode": "day",
+      "panorama": true,
+      "petals": false,
+      "reduce_motion": true
+    },
+    "auto_download_java": false,
+    "cache_directory": "D:/PetalfallCache",
+    "check_updates": false,
+    "default_java": "C:/Java/jdk-21/bin/javaw.exe",
+    "download_concurrency": 32,
+    "download_source": "auto",
+    "extra_game_directories": [
+      {
+        "name": "PCL2",
+        "path": "E:/PCL2/.minecraft"
+      }
+    ],
+    "extra_java_paths": [
+      "C:/Java/jdk-17/bin/java.exe"
+    ],
+    "first_run_completed": true,
+    "future_setting": {
+      "enabled": true,
+      "level": 3
+    },
+    "game_directory": "D:/Games/.minecraft",
+    "isolation_policy": "disabled",
+    "language": "zh-CN",
+    "memory": {
+      "auto": false,
+      "max_mb": 6144,
+      "min_mb": 1024
+    },
+    "msa_client_id": "11111111-2222-3333-4444-555555555555",
+    "new_instance_template": false,
+    "notified_update_version": "1.0.0-beta.4",
+    "parked_directories": [
+      {
+        "path": "F:/Old/.minecraft",
+        "selected_version": "1.20.1-Forge",
+        "sidebar_pins": [
+          "1.20.1-Forge"
+        ]
+      }
+    ],
+    "pinned_servers": [
+      {
+        "address": "mc.example.invalid:25565",
+        "instance": "1.21.1-Fabric",
+        "name": "樱花服务器"
+      }
+    ],
+    "prefer_dedicated_gpu": true,
+    "seen_update_versions": {
+      "beta": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IGJldGE=",
+        "version": "1.0.0-beta.4"
+      },
+      "dev": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IGRldg==",
+        "version": "1.0.0-dev.41"
+      }
+    },
+    "selected_version": "1.21.1-Fabric",
+    "sidebar_pins": [
+      "1.21.1-Fabric",
+      "樱花生存"
+    ],
+    "skip_accessibility_onboarding": false,
+    "skipped_update_version": "1.0.0-beta.3",
+    "update_channel": "beta",
+    "version_list_source": "official_first",
+    "world_backup": {
+      "auto": false,
+      "keep_per_world": 8,
+      "max_total_gb": 50
+    }
+  },
+  {
+    "after_launch": "minimize",
+    "appearance": {
+      "accent": "amethyst",
+      "cover_background": "texture",
+      "mode": "night",
+      "panorama": true,
+      "petals": false,
+      "reduce_motion": true
+    },
+    "auto_download_java": false,
+    "cache_directory": "D:/PetalfallCache",
+    "check_updates": false,
+    "default_java": "C:/Java/jdk-21/bin/javaw.exe",
+    "download_concurrency": 32,
+    "download_source": "official_first",
+    "extra_game_directories": [
+      {
+        "name": "PCL2",
+        "path": "E:/PCL2/.minecraft"
+      }
+    ],
+    "extra_java_paths": [
+      "C:/Java/jdk-17/bin/java.exe"
+    ],
+    "first_run_completed": true,
+    "future_setting": {
+      "enabled": true,
+      "level": 3
+    },
+    "game_directory": "D:/Games/.minecraft",
+    "isolation_policy": "mod_loaders_only",
+    "language": "en-US",
+    "memory": {
+      "auto": false,
+      "max_mb": 6144,
+      "min_mb": 1024
+    },
+    "msa_client_id": "11111111-2222-3333-4444-555555555555",
+    "new_instance_template": false,
+    "notified_update_version": "1.0.0-beta.4",
+    "parked_directories": [
+      {
+        "path": "F:/Old/.minecraft",
+        "selected_version": "1.20.1-Forge",
+        "sidebar_pins": [
+          "1.20.1-Forge"
+        ]
+      }
+    ],
+    "pinned_servers": [
+      {
+        "address": "mc.example.invalid:25565",
+        "instance": "1.21.1-Fabric",
+        "name": "樱花服务器"
+      }
+    ],
+    "prefer_dedicated_gpu": true,
+    "seen_update_versions": {
+      "beta": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IGJldGE=",
+        "version": "1.0.0-beta.4"
+      },
+      "dev": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IGRldg==",
+        "version": "1.0.0-dev.41"
+      }
+    },
+    "selected_version": "1.21.1-Fabric",
+    "sidebar_pins": [
+      "1.21.1-Fabric",
+      "樱花生存"
+    ],
+    "skip_accessibility_onboarding": false,
+    "skipped_update_version": "1.0.0-beta.3",
+    "update_channel": "beta",
+    "version_list_source": "mirror_first",
+    "world_backup": {
+      "auto": false,
+      "keep_per_world": 8,
+      "max_total_gb": 50
+    }
+  },
+  {
+    "after_launch": "close",
+    "appearance": {
+      "accent": "moss",
+      "cover_background": "art",
+      "mode": "day",
+      "panorama": true,
+      "petals": false,
+      "reduce_motion": true
+    },
+    "auto_download_java": false,
+    "cache_directory": "D:/PetalfallCache",
+    "check_updates": false,
+    "default_java": "C:/Java/jdk-21/bin/javaw.exe",
+    "download_concurrency": 32,
+    "download_source": "mirror_first",
+    "extra_game_directories": [
+      {
+        "name": "PCL2",
+        "path": "E:/PCL2/.minecraft"
+      }
+    ],
+    "extra_java_paths": [
+      "C:/Java/jdk-17/bin/java.exe"
+    ],
+    "first_run_completed": true,
+    "future_setting": {
+      "enabled": true,
+      "level": 3
+    },
+    "game_directory": "D:/Games/.minecraft",
+    "isolation_policy": "non_release_only",
+    "language": "zh-CN",
+    "memory": {
+      "auto": false,
+      "max_mb": 6144,
+      "min_mb": 1024
+    },
+    "msa_client_id": "11111111-2222-3333-4444-555555555555",
+    "new_instance_template": false,
+    "notified_update_version": "1.0.0-beta.4",
+    "parked_directories": [
+      {
+        "path": "F:/Old/.minecraft",
+        "selected_version": "1.20.1-Forge",
+        "sidebar_pins": [
+          "1.20.1-Forge"
+        ]
+      }
+    ],
+    "pinned_servers": [
+      {
+        "address": "mc.example.invalid:25565",
+        "instance": "1.21.1-Fabric",
+        "name": "樱花服务器"
+      }
+    ],
+    "prefer_dedicated_gpu": true,
+    "seen_update_versions": {
+      "beta": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IGJldGE=",
+        "version": "1.0.0-beta.4"
+      },
+      "dev": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IGRldg==",
+        "version": "1.0.0-dev.41"
+      }
+    },
+    "selected_version": "1.21.1-Fabric",
+    "sidebar_pins": [
+      "1.21.1-Fabric",
+      "樱花生存"
+    ],
+    "skip_accessibility_onboarding": false,
+    "skipped_update_version": "1.0.0-beta.3",
+    "update_channel": "beta",
+    "version_list_source": "auto",
+    "world_backup": {
+      "auto": false,
+      "keep_per_world": 8,
+      "max_total_gb": 50
+    }
+  },
+  {
+    "after_launch": "keep",
+    "appearance": {
+      "accent": "sakura",
+      "cover_background": "texture",
+      "mode": "night",
+      "panorama": true,
+      "petals": false,
+      "reduce_motion": true
+    },
+    "auto_download_java": false,
+    "cache_directory": "D:/PetalfallCache",
+    "check_updates": false,
+    "default_java": "C:/Java/jdk-21/bin/javaw.exe",
+    "download_concurrency": 32,
+    "download_source": "auto",
+    "extra_game_directories": [
+      {
+        "name": "PCL2",
+        "path": "E:/PCL2/.minecraft"
+      }
+    ],
+    "extra_java_paths": [
+      "C:/Java/jdk-17/bin/java.exe"
+    ],
+    "first_run_completed": true,
+    "future_setting": {
+      "enabled": true,
+      "level": 3
+    },
+    "game_directory": "D:/Games/.minecraft",
+    "isolation_policy": "mod_loaders_and_non_release",
+    "language": "en-US",
+    "memory": {
+      "auto": false,
+      "max_mb": 6144,
+      "min_mb": 1024
+    },
+    "msa_client_id": "11111111-2222-3333-4444-555555555555",
+    "new_instance_template": false,
+    "notified_update_version": "1.0.0-beta.4",
+    "parked_directories": [
+      {
+        "path": "F:/Old/.minecraft",
+        "selected_version": "1.20.1-Forge",
+        "sidebar_pins": [
+          "1.20.1-Forge"
+        ]
+      }
+    ],
+    "pinned_servers": [
+      {
+        "address": "mc.example.invalid:25565",
+        "instance": "1.21.1-Fabric",
+        "name": "樱花服务器"
+      }
+    ],
+    "prefer_dedicated_gpu": true,
+    "seen_update_versions": {
+      "beta": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IGJldGE=",
+        "version": "1.0.0-beta.4"
+      },
+      "dev": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IGRldg==",
+        "version": "1.0.0-dev.41"
+      }
+    },
+    "selected_version": "1.21.1-Fabric",
+    "sidebar_pins": [
+      "1.21.1-Fabric",
+      "樱花生存"
+    ],
+    "skip_accessibility_onboarding": false,
+    "skipped_update_version": "1.0.0-beta.3",
+    "update_channel": "beta",
+    "version_list_source": "official_first",
+    "world_backup": {
+      "auto": false,
+      "keep_per_world": 8,
+      "max_total_gb": 50
+    }
+  },
+  {
+    "after_launch": "minimize",
+    "appearance": {
+      "accent": "amethyst",
+      "cover_background": "art",
+      "mode": "day",
+      "panorama": true,
+      "petals": false,
+      "reduce_motion": true
+    },
+    "auto_download_java": false,
+    "cache_directory": "D:/PetalfallCache",
+    "check_updates": false,
+    "default_java": "C:/Java/jdk-21/bin/javaw.exe",
+    "download_concurrency": 32,
+    "download_source": "official_first",
+    "extra_game_directories": [
+      {
+        "name": "PCL2",
+        "path": "E:/PCL2/.minecraft"
+      }
+    ],
+    "extra_java_paths": [
+      "C:/Java/jdk-17/bin/java.exe"
+    ],
+    "first_run_completed": true,
+    "future_setting": {
+      "enabled": true,
+      "level": 3
+    },
+    "game_directory": "D:/Games/.minecraft",
+    "isolation_policy": "all",
+    "language": "zh-CN",
+    "memory": {
+      "auto": false,
+      "max_mb": 6144,
+      "min_mb": 1024
+    },
+    "msa_client_id": "11111111-2222-3333-4444-555555555555",
+    "new_instance_template": false,
+    "notified_update_version": "1.0.0-beta.4",
+    "parked_directories": [
+      {
+        "path": "F:/Old/.minecraft",
+        "selected_version": "1.20.1-Forge",
+        "sidebar_pins": [
+          "1.20.1-Forge"
+        ]
+      }
+    ],
+    "pinned_servers": [
+      {
+        "address": "mc.example.invalid:25565",
+        "instance": "1.21.1-Fabric",
+        "name": "樱花服务器"
+      }
+    ],
+    "prefer_dedicated_gpu": true,
+    "seen_update_versions": {
+      "beta": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IGJldGE=",
+        "version": "1.0.0-beta.4"
+      },
+      "dev": {
+        "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IGRldg==",
+        "version": "1.0.0-dev.41"
+      }
+    },
+    "selected_version": "1.21.1-Fabric",
+    "sidebar_pins": [
+      "1.21.1-Fabric",
+      "樱花生存"
+    ],
+    "skip_accessibility_onboarding": false,
+    "skipped_update_version": "1.0.0-beta.3",
+    "update_channel": "beta",
+    "version_list_source": "mirror_first",
+    "world_backup": {
+      "auto": false,
+      "keep_per_world": 8,
+      "max_total_gb": 50
+    }
+  }
+]

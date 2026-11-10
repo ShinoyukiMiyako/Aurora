@@ -1,0 +1,40 @@
+{
+  "events": [
+    {
+      "kind": "install",
+      "id": "1767225600-001",
+      "at": 1767225600,
+      "files": [
+        "sodium-fabric-0.5.13.jar",
+        "fabric-api-0.110.0.jar"
+      ]
+    },
+    {
+      "kind": "update",
+      "id": "1767229200-001",
+      "at": 1767229200,
+      "file_name": "sodium-fabric-0.6.0.jar",
+      "old_file": "sodium-fabric-0.5.13.jar",
+      "backup_file": "sodium-fabric-0.5.13.jar.1.old",
+      "from_version": "mc1.21.1-0.5.13",
+      "to_version": "mc1.21.1-0.6.0",
+      "title": "Sodium",
+      "from_version_number": "0.5.13",
+      "to_version_number": "0.6.0"
+    },
+    {
+      "kind": "rollback",
+      "id": "1767232800-001",
+      "at": 1767232800,
+      "reverted_event": "1767229200-001"
+    },
+    {
+      "kind": "remove",
+      "id": "1767236400-001",
+      "at": 1767236400,
+      "files": [
+        "fabric-api-0.110.0.jar.disabled"
+      ]
+    }
+  ]
+}

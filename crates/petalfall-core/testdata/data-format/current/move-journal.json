@@ -1,0 +1,74 @@
+[
+  {
+    "token": "1767225600000-0",
+    "id": "1.21.1-Fabric",
+    "source_game_dir": "D:/Games/.minecraft",
+    "target_game_dir": "E:/Games/.minecraft",
+    "same_volume": false,
+    "stage": "copying",
+    "staging_dir": "E:/Games/.minecraft/.petalfall/moving/1767225600000-0",
+    "old_dir": "D:/Games/.minecraft/.petalfall/moving/1767225600000-0",
+    "backups_staged": true,
+    "bases": [
+      "1.21.1",
+      "fabric-loader-0.16.10-1.21.1"
+    ],
+    "records_moved": true,
+    "config_done": true,
+    "started_at": 1767225600000
+  },
+  {
+    "token": "1767225600000-0",
+    "id": "1.21.1-Fabric",
+    "source_game_dir": "D:/Games/.minecraft",
+    "target_game_dir": "E:/Games/.minecraft",
+    "same_volume": false,
+    "stage": "committing",
+    "staging_dir": "E:/Games/.minecraft/.petalfall/moving/1767225600000-0",
+    "old_dir": "D:/Games/.minecraft/.petalfall/moving/1767225600000-0",
+    "backups_staged": true,
+    "bases": [
+      "1.21.1",
+      "fabric-loader-0.16.10-1.21.1"
+    ],
+    "records_moved": true,
+    "config_done": true,
+    "started_at": 1767225600000
+  },
+  {
+    "token": "1767225600000-0",
+    "id": "1.21.1-Fabric",
+    "source_game_dir": "D:/Games/.minecraft",
+    "target_game_dir": "E:/Games/.minecraft",
+    "same_volume": false,
+    "stage": "committed",
+    "staging_dir": "E:/Games/.minecraft/.petalfall/moving/1767225600000-0",
+    "old_dir": "D:/Games/.minecraft/.petalfall/moving/1767225600000-0",
+    "backups_staged": true,
+    "bases": [
+      "1.21.1",
+      "fabric-loader-0.16.10-1.21.1"
+    ],
+    "records_moved": true,
+    "config_done": true,
+    "started_at": 1767225600000
+  },
+  {
+    "token": "1767225600000-0",
+    "id": "1.21.1-Fabric",
+    "source_game_dir": "D:/Games/.minecraft",
+    "target_game_dir": "E:/Games/.minecraft",
+    "same_volume": false,
+    "stage": "settled",
+    "staging_dir": "E:/Games/.minecraft/.petalfall/moving/1767225600000-0",
+    "old_dir": "D:/Games/.minecraft/.petalfall/moving/1767225600000-0",
+    "backups_staged": true,
+    "bases": [
+      "1.21.1",
+      "fabric-loader-0.16.10-1.21.1"
+    ],
+    "records_moved": true,
+    "config_done": true,
+    "started_at": 1767225600000
+  }
+]

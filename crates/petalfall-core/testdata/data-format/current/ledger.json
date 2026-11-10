@@ -1,0 +1,35 @@
+{
+  "entries": [
+    {
+      "file_name": "mod-0.jar",
+      "platform": "modrinth",
+      "project_id": "project-0",
+      "version_id": "version-0",
+      "version_number": "0.6.0",
+      "title": "Sodium",
+      "icon_url": "https://cdn.example.invalid/icon.png",
+      "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+      "installed_at": 1767225600,
+      "installed_as_dependency_of": "parent-project",
+      "update_hold": {
+        "kind": "ignored"
+      }
+    },
+    {
+      "file_name": "mod-1.jar",
+      "platform": "curseforge",
+      "project_id": "project-1",
+      "version_id": "version-1",
+      "version_number": "0.6.0",
+      "title": "Sodium",
+      "icon_url": "https://cdn.example.invalid/icon.png",
+      "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+      "installed_at": 1767225600,
+      "installed_as_dependency_of": "parent-project",
+      "update_hold": {
+        "kind": "pinned",
+        "version_id": "mc1.21.1-0.6.0"
+      }
+    }
+  ]
+}
