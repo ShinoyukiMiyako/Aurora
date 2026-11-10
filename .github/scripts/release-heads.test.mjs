@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -14,6 +14,7 @@ import {
   FETCH_RETRIES,
   HK_MANIFEST_URLS,
   MAX_MANIFEST_BYTES,
+  PUBKEY_FILES,
   RETRY_DELAY_MS,
   betaGate,
   channelShapeOf,
@@ -27,6 +28,7 @@ import {
   readHeads,
   releaseManifestUrl,
 } from "./release-heads.mjs";
+import { codeOf, job, jobNames, parseWorkflow, stepKeys, steps } from "./workflow-lines.mjs";
 
 const SCRIPT = fileURLToPath(new URL("./release-heads.mjs", import.meta.url));
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
@@ -979,5 +981,175 @@ describe("data-format：数据格式号不倒退与测试版的祖先判据（�
     assert.equal(await main(["data-format", "beta", "rehearsal", headsPath, REPO], harness.deps), 1);
     assert.equal(harness.err.length, 1);
     assert.match(harness.err[0], /^::error::git ls-remote --tags file:\/\/.*no-such-origin 以 128 退出：/);
+  });
+});
+
+// 下面几条约定横跨启动器的 Rust 源码与两条流水线。两侧的测试各自只看得到自己那一边：Rust 的测试只在本地跑，
+// 工作流的契约测试不读 Rust。两边各改各的时每一侧的测试都照样通过，坏在发出去的包上，所以在这里对拍。
+// 读 Rust 源码一律按常量名、函数名找定义，不依赖行号与周围的代码。
+const KEY_TABLE_RS = "app/src-tauri/src/commands/update_channels.rs";
+const UPDATER_RS = "app/src-tauri/src/commands/updater.rs";
+const BRAND_RS = "crates/petalfall-base/src/brand.rs";
+const TAURI_CONF = "app/src-tauri/tauri.conf.json";
+const PIPELINES = { dev: ".github/workflows/dev-build.yml", beta: ".github/workflows/beta-release.yml" };
+const CHANNEL_LABELS = { dev: "预览版", beta: "测试版", stable: "正式版" };
+const ENDPOINT_CONSTS = { dev: "DEV_ENDPOINT", beta: "BETA_ENDPOINT", stable: "PRIMARY_ENDPOINT" };
+
+const readRepoText = (path) => readFileSync(join(REPO_ROOT, path), "utf8").replace(/\r\n/g, "\n");
+
+// 测试模块里也会写同样的常量与字面量，编进包里的只有它之前的那一段
+function nonTestSource(path) {
+  const text = readRepoText(path);
+  const tests = /^#\[cfg\(test\)\]\n(?:pub(?:\([^)]*\))? )?mod \w+ \{/m.exec(text);
+  return tests === null ? text : text.slice(0, tests.index);
+}
+
+const STR_CONST = (name) => new RegExp(`^[ \\t]*(?:pub(?:\\([^)]*\\))?[ \\t]+)?const[ \\t]+${name}[ \\t]*:[ \\t]*&(?:'static[ \\t]+)?str[ \\t]*=[ \\t]*([\\s\\S]*?);[ \\t]*$`, "gm");
+
+function constDefinition(path, name) {
+  const found = [...nonTestSource(path).matchAll(STR_CONST(name))];
+  assert.equal(found.length, 1, `${path} 的非测试代码里应恰好有一处 const ${name}: &str = …;，实际 ${found.length} 处`);
+  return found[0][1].trim();
+}
+
+function rustLiteral(token, where) {
+  const match = /^"([^"\\]*)"$/.exec(token);
+  assert.notEqual(match, null, `${where} 里的 ${token} 不是不带转义的字符串字面量，这里还原不了它的值`);
+  return match[1];
+}
+
+// brand.rs 里 app_slug! 宏展开成的那个字面量
+function appSlug() {
+  const found = [...readRepoText(BRAND_RS).matchAll(/macro_rules!\s*app_slug\s*\{\s*\(\)\s*=>\s*\{\s*("[^"]*")\s*;?\s*\}\s*;?\s*\}/g)];
+  assert.equal(found.length, 1, `${BRAND_RS} 里应恰好有一个只展开成字符串字面量的 app_slug! 宏，实际 ${found.length} 个`);
+  return rustLiteral(found[0][1], BRAND_RS);
+}
+
+// 把 const X: &str = concat!(…) 或直接写的字面量还原成编译后的整串；concat! 只认字符串字面量与 app_slug!()
+function rustStr(path, name) {
+  const expression = constDefinition(path, name);
+  const concat = /^concat!\(([\s\S]*)\)$/.exec(expression);
+  if (concat === null) return rustLiteral(expression, `${path} 的 ${name}`);
+  return concat[1]
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "")
+    .map((part) => (/^(?:(?:::)?petalfall_base::)?app_slug!\(\)$/.test(part) ? appSlug() : rustLiteral(part, `${path} 的 ${name}`)))
+    .join("");
+}
+
+// 钥表：每个通道编进的是仓库里的哪个文件（仓库相对路径）。include_str! 的相对路径按源文件所在目录解析。
+function keyTable() {
+  const source = nonTestSource(KEY_TABLE_RS);
+  const includes = [...source.matchAll(/include_str!\("([^"]*)"\)/g)].map((match) => match[1]);
+  const resolved = includes.map((path) => posix.normalize(posix.join(posix.dirname(KEY_TABLE_RS), path)));
+  const expected = [".github/dev-updater.pub", ".github/release-updater.pub"];
+  assert.deepEqual(
+    [...resolved].sort(),
+    expected,
+    `${KEY_TABLE_RS} 的非测试代码里应恰好有两行 include_str!，各编进 ${expected.join(" 与 ")} 一次，实际是 ${JSON.stringify(includes)}`,
+  );
+  const files = new Map();
+  for (const path of includes) {
+    const owners = [...source.matchAll(STR_CONST("(\\w+)"))].filter((match) => match[2].trim() === `include_str!("${path}")`);
+    assert.equal(owners.length, 1, `${KEY_TABLE_RS} 里 include_str!("${path}") 应恰好是一个 const 的值`);
+    files.set(owners[0][1], posix.normalize(posix.join(posix.dirname(KEY_TABLE_RS), path)));
+  }
+  const body = /fn channel_pubkey\([^)]*\)[^{]*\{([\s\S]*?)\n\}/.exec(source);
+  assert.notEqual(body, null, `${KEY_TABLE_RS} 里找不到 fn channel_pubkey`);
+  const table = {};
+  for (const [, variants, constant] of body[1].matchAll(/((?:Channel::\w+\s*\|\s*)*Channel::\w+)\s*=>\s*(\w+)/g)) {
+    assert.ok(files.has(constant), `channel_pubkey 的分支 ${variants} 用的 ${constant} 不是钥表里 include_str! 编进的常量`);
+    for (const [, variant] of variants.matchAll(/Channel::(\w+)/g)) table[variant.toLowerCase()] = files.get(constant);
+  }
+  return table;
+}
+
+// 工作流里真正执行的、注入插件配置的那一行，与它读的公钥文件（按那一步的 working-directory 解析成仓库相对路径）。
+// 写法是否解析得了由两份契约测试把关，这里只借解析结果切出执行的行与步骤，所以不传 flow 白名单、不看 problems。
+function injection(path) {
+  const lines = parseWorkflow(readRepoText(path), []).lines;
+  const owners = jobNames(lines).filter((name) => job(lines, name).some((line) => line.includes("conf.plugins")));
+  assert.equal(owners.length, 1, `${path} 里应恰好有一个作业注入插件配置，实际 ${JSON.stringify(owners)}`);
+  const found = steps(lines, owners[0]).flatMap((step) => codeOf(step).filter((line) => line.includes("conf.plugins")).map((line) => ({ step, line })));
+  assert.equal(found.length, 1, `${path} 里注入插件配置的行应恰好一处，实际 ${found.length} 处`);
+  const { step, line } = found[0];
+  const reads = [...line.matchAll(/readFileSync\('([^']*)'/g)].map((match) => match[1]);
+  assert.equal(reads.length, 1, `${path} 的注入行应恰好读一个公钥文件：${line}`);
+  const workdir = stepKeys(step)
+    .map((key) => /^working-directory:\s*(\S+)$/.exec(key))
+    .find((match) => match !== null);
+  const base = workdir === undefined ? "" : workdir[1];
+  return { line, file: posix.normalize(posix.join(base, reads[0])), code: codeOf(lines) };
+}
+
+describe("启动器与流水线两侧对拍", () => {
+  it("钥表两行 include_str! 编进的正是仓库里的两个 .pub：预览版用 dev 钥，测试版与正式版用发布钥", () => {
+    const table = keyTable();
+    assert.deepEqual(
+      table,
+      { dev: ".github/dev-updater.pub", beta: ".github/release-updater.pub", stable: ".github/release-updater.pub" },
+      `钥表给各通道的公钥文件是 ${JSON.stringify(table)}：预览版要用 dev 钥，测试版与正式版共用发布钥，拿错一把验跟随来的包就全对不上`,
+    );
+  });
+
+  it("两条流水线注入插件配置的公钥文件，就是钥表给本包通道的那一个", () => {
+    const table = keyTable();
+    for (const [channel, path] of Object.entries(PIPELINES)) {
+      const { file } = injection(path);
+      assert.equal(
+        file,
+        table[channel],
+        `${path} 给${CHANNEL_LABELS[channel]}包注入的公钥是 ${file}，钥表给${CHANNEL_LABELS[channel]}的是 ${table[channel]}：` +
+          "判定能不能自更新要求注入的那把等于钥表里本包通道的那一把，两处不一致时官方包会被判成不支持自更新",
+      );
+    }
+  });
+
+  it("release-heads 验各通道清单用的公钥文件与钥表一致", () => {
+    const table = keyTable();
+    for (const channel of Object.keys(CHANNEL_LABELS)) {
+      assert.equal(
+        PUBKEY_FILES[channel],
+        table[channel],
+        `release-heads 验${CHANNEL_LABELS[channel]}清单用的是 ${PUBKEY_FILES[channel]}，钥表给${CHANNEL_LABELS[channel]}的是 ${table[channel]}：` +
+          "流水线采信的版本必须是客户端用同一把钥验得过的版本，否则版本闸比的不是用户能收到的那些",
+      );
+    }
+  });
+
+  it("tauri.conf.json 与两条流水线的注入行都不含 installerArgs", () => {
+    // 更新插件构造每个检查器时都把 installerArgs 从配置抄进去：配置里一旦有它，自动检查的检查器也会带着它拉起安装程序，
+    // 只该由换通道安装带上的参数就混进了普通更新
+    assert.ok(!readRepoText(TAURI_CONF).includes("installerArgs"), `${TAURI_CONF} 里出现了 installerArgs，普通更新也会带着它拉起安装程序`);
+    for (const path of Object.values(PIPELINES)) {
+      const { line, code } = injection(path);
+      assert.ok(!line.includes("installerArgs"), `${path} 的注入行写进了 installerArgs，普通更新也会带着它拉起安装程序：${line}`);
+      const executed = code.filter((text) => text.includes("installerArgs"));
+      assert.deepEqual(executed, [], `${path} 里有真正执行的行提到 installerArgs，可能另外往插件配置里写了它`);
+    }
+  });
+
+  it("release-heads 读的三份香港清单地址就是启动器编译进去的那三个", () => {
+    assert.deepEqual(Object.keys(HK_MANIFEST_URLS).sort(), Object.keys(ENDPOINT_CONSTS).sort());
+    for (const [channel, name] of Object.entries(ENDPOINT_CONSTS)) {
+      const client = rustStr(UPDATER_RS, name);
+      assert.equal(
+        HK_MANIFEST_URLS[channel],
+        client,
+        `release-heads 读的${CHANNEL_LABELS[channel]}香港清单是 ${HK_MANIFEST_URLS[channel]}，${UPDATER_RS} 的 ${name} 是 ${client}：` +
+          "流水线核对的必须是客户端正在读的那一份，否则验过的版本不是用户看到的版本",
+      );
+    }
+  });
+
+  it("release-heads 读的滚动预发布 tag 就是启动器的 DEV_RELEASE_TAG", () => {
+    const client = rustStr(UPDATER_RS, "DEV_RELEASE_TAG");
+    assert.equal(
+      DEV_RELEASE_TAG,
+      client,
+      `release-heads 读的滚动预发布 tag 是 ${DEV_RELEASE_TAG}，${UPDATER_RS} 的 DEV_RELEASE_TAG 是 ${client}：` +
+        "客户端在 GitHub 上找的 dev 清单就挂在这个 tag 下，读别的 tag 会漏看客户端拿得到的版本",
+    );
   });
 });
