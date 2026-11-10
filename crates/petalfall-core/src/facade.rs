@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use petalfall_auth::MsaEndpoints;
+use petalfall_base::fs::DataDirResolution;
 use petalfall_base::retry::RetryPolicy;
 use petalfall_download::{
     CancellationToken, DownloadConfig, DownloadPool, DownloadProgress, Downloader, MirrorResolver,
@@ -27,6 +28,7 @@ use tokio::sync::watch;
 
 use crate::appearance::{Appearance, AppearancePatch};
 use crate::config::{AfterLaunch, DownloadSourcePolicy, MemorySettings, PetalfallConfig};
+use crate::data_format::{DATA_FORMAT, check_data_root};
 use crate::error::Result;
 use crate::event::{CoreEvent, EventSink};
 use crate::gpu::{GpuPreferenceStore, RegistryGpuPreferences};
@@ -103,19 +105,42 @@ pub struct Petalfall {
 impl Petalfall {
     /// 以默认数据目录构造：从 `<数据目录>/config.json` 载入配置，构建共享 HTTP 客户端。
     ///
-    /// 游戏目录取配置的 `game_directory`，缺省为 `<数据目录>/.minecraft`。
+    /// 游戏目录取配置的 `game_directory`，缺省为 `<数据目录>/.minecraft`。读配置之前先核对数据目录的数据格式
+    /// 记号（[`check_data_root`]），不放行时报 [`crate::error::CoreError::DataRootRefused`]。
     pub async fn load() -> Result<Self> {
-        let data_dir = petalfall_base::fs::data_dir()?;
-        let config_path = data_dir.join("config.json");
-        let config = crate::config::ConfigStore::at(&config_path).load().await?;
-        Self::open(config, data_dir, config_path)
+        Self::load_with(&petalfall_base::fs::resolve_data_dir()?, DATA_FORMAT).await
     }
 
     /// 同 [`Petalfall::load`]，但配置文件损坏时不报错：坏文件改名留存、按默认配置构造，并交回经过；
     /// 只是个别枚举取值不认识时文件不动，交回退回默认的那几项。
     /// 给桌面应用启动用：那时还没有窗口能显示错误，报错等于一声不响地打不开。
     pub async fn load_recovering() -> Result<(Self, Option<crate::config::ConfigRecovery>)> {
-        let data_dir = petalfall_base::fs::data_dir()?;
+        Self::load_recovering_with(&petalfall_base::fs::resolve_data_dir()?, DATA_FORMAT).await
+    }
+
+    /// [`Petalfall::load`] 的实现：数据目录的定位结果与这一版的数据格式号从参数进来，测试才指得到临时目录、
+    /// 换得了号。
+    ///
+    /// 门面构造时还不知道应用版本，记号要抬号时写出的不带 `written_by`；桌面应用在这之前已经带着版本过了
+    /// 同一道关卡，走到这里时记号已是这一版的号，什么都不写。
+    async fn load_with(resolution: &DataDirResolution, own: u32) -> Result<Self> {
+        check_data_root(resolution, own, None).await?;
+        let data_dir = resolution.path.clone();
+        let config_path = data_dir.join("config.json");
+        let config = crate::config::ConfigStore::at(&config_path).load().await?;
+        Self::open(config, data_dir, config_path)
+    }
+
+    /// [`Petalfall::load_recovering`] 的实现，参数同 [`Petalfall::load_with`]。
+    ///
+    /// 关卡必须在读配置之前：读不懂的配置在这里会被改名、按默认重置，而更新的版本写的配置在这一版可能正是
+    /// 读不懂的，号比这一版大时一个字节都不能碰。
+    async fn load_recovering_with(
+        resolution: &DataDirResolution,
+        own: u32,
+    ) -> Result<(Self, Option<crate::config::ConfigRecovery>)> {
+        check_data_root(resolution, own, None).await?;
+        let data_dir = resolution.path.clone();
         let config_path = data_dir.join("config.json");
         let (config, recovery) = crate::config::ConfigStore::at(&config_path)
             .load_or_preserve()
@@ -173,10 +198,13 @@ impl Petalfall {
     /// 构造时的客户端用的是 petalfall-base 自己的 crate 版本，发版只改应用版本时它不会跟着变；镜像站按 UA
     /// 统计与限流，一个永远不变的版本号让对方分不出新旧客户端。不自动跳转的那个也得重建：带凭据的下载
     /// 走它，漏掉的话同一个应用会发出两种 UA。桌面应用在构造门面后、任何请求之前调用。
+    ///
+    /// 版本同时记在门面上（随快照克隆），游戏目录的数据格式记号抬号时记成是哪个版本写的。
     pub fn with_app_version(mut self, version: &str) -> Result<Self> {
         let config = petalfall_base::http::HttpConfig::for_app_version(version);
         self.http = petalfall_base::http::build_client_with(&config)?;
         self.http_manual = petalfall_base::http::build_manual_redirect_client_with(&config)?;
+        self.app_version = Some(version.to_owned());
         Ok(self)
     }
 
@@ -700,7 +728,16 @@ impl SourceResolver for UnansweredProbe {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::ffi::OsString;
+
+    use petalfall_instance::PETALFALL_META_DIR;
+
     use super::*;
+    use crate::config::ConfigRecovery;
+    use crate::data_format::testing::{GuardFixture, with_fixture};
+    use crate::data_format::{DataRootRefusal, GameDirCheck, GuardMode, STAMP_FILE};
+    use crate::error::CoreError;
 
     fn test_petalfall() -> Petalfall {
         Petalfall::for_test(
@@ -948,5 +985,302 @@ mod tests {
         // 传 None 清空选择；删掉 setter 里的赋值这两条断言即挂。
         petalfall.set_selected_version(None);
         assert!(petalfall.config().selected_version.is_none());
+    }
+
+    // ---- 构造时的数据格式关卡 ----
+
+    /// 被更新的预览版抬到 3 的数据目录记号。
+    const STAMP_3: &str = r#"{"data_format":3,"written_by":"1.1.0-dev.57"}"#;
+    /// 读得进来的配置。并发上限不是默认值，门面读的是不是这一份一看便知。
+    const CONFIG: &[u8] = br#"{"download_concurrency":16}"#;
+    /// 不是合法 JSON 的配置：恢复式构造会把它改名留存。
+    const BROKEN_CONFIG: &[u8] = b"{ broken";
+
+    /// 门面的两个构造。
+    #[derive(Debug, Clone, Copy)]
+    enum Load {
+        Plain,
+        Recovering,
+    }
+
+    impl Load {
+        /// 在数据目录 `root` 上以本版号 `own` 构造；普通构造没有处置经过，交回 `None`。
+        async fn run(self, root: &Path, own: u32) -> Result<(Petalfall, Option<ConfigRecovery>)> {
+            let resolution = resolution(root);
+            match self {
+                Load::Plain => Ok((Petalfall::load_with(&resolution, own).await?, None)),
+                Load::Recovering => Petalfall::load_recovering_with(&resolution, own).await,
+            }
+        }
+
+        /// 同 [`Load::run`]，但应当被拒绝：交回错误，放行了就当场失败。
+        async fn refused(self, root: &Path, own: u32) -> CoreError {
+            match self.run(root, own).await {
+                Ok(_) => panic!("{self:?}：应拒绝，实际放行"),
+                Err(err) => err,
+            }
+        }
+    }
+
+    fn resolution(root: &Path) -> DataDirResolution {
+        DataDirResolution {
+            path: root.to_owned(),
+            portable: true,
+            fallback_reason: None,
+            write_failure: None,
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    /// 放着 `config` 与（可有可无的）记号的临时数据目录。
+    fn data_root(config: &[u8], stamp: Option<&str>) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("config.json"), config).unwrap();
+        if let Some(stamp) = stamp {
+            std::fs::write(tmp.path().join(STAMP_FILE), stamp).unwrap();
+        }
+        tmp
+    }
+
+    /// 目录下每个条目的名字与文件字节（文件夹记 `None`）。前后各拍一次，比对出有没有改动、改名、多出或少了文件。
+    fn entries(dir: &Path) -> BTreeMap<OsString, Option<Vec<u8>>> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let bytes = path.is_file().then(|| std::fs::read(&path).unwrap());
+                (entry.file_name(), bytes)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_newer_data_root_is_refused_and_nothing_in_it_changes() {
+        for load in [Load::Plain, Load::Recovering] {
+            let tmp = data_root(CONFIG, Some(STAMP_3));
+            let root = tmp.path();
+            let before = entries(root);
+
+            match load.refused(root, 2).await {
+                CoreError::DataRootRefused(DataRootRefusal::TooNew {
+                    path,
+                    found,
+                    supported,
+                    written_by,
+                }) => {
+                    assert_eq!(path, root.join(STAMP_FILE), "{load:?}");
+                    assert_eq!((found, supported), (3, 2), "{load:?}");
+                    assert_eq!(written_by.as_deref(), Some("1.1.0-dev.57"), "{load:?}");
+                }
+                other => panic!("{load:?}：应判为数据比这一版新，实际是 {other:?}"),
+            }
+            assert_eq!(
+                std::fs::read(root.join("config.json")).unwrap(),
+                CONFIG,
+                "{load:?}"
+            );
+            // 没有 .broken 留存，也没有任何新文件。
+            assert_eq!(entries(root), before, "{load:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_data_root_stamp_is_refused_and_nothing_is_written() {
+        for load in [Load::Plain, Load::Recovering] {
+            for stamp in ["not json", r#"{"data_format":"2"}"#] {
+                let tmp = data_root(CONFIG, Some(stamp));
+                let root = tmp.path();
+                let before = entries(root);
+
+                match load.refused(root, 2).await {
+                    CoreError::DataRootRefused(DataRootRefusal::Unreadable { path, .. }) => {
+                        assert_eq!(path, root.join(STAMP_FILE), "{load:?} {stamp}");
+                    }
+                    other => panic!("{load:?} {stamp}：应判为读不懂，实际是 {other:?}"),
+                }
+                assert_eq!(entries(root), before, "{load:?} {stamp}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn format_one_builds_from_the_config_without_writing_anything() {
+        for load in [Load::Plain, Load::Recovering] {
+            let tmp = data_root(CONFIG, None);
+            let root = tmp.path();
+            let before = entries(root);
+
+            let (petalfall, recovery) = load.run(root, 1).await.unwrap();
+
+            assert_eq!(petalfall.data_dir(), root, "{load:?}");
+            assert_eq!(petalfall.game_dir(), root.join(".minecraft"), "{load:?}");
+            assert_eq!(petalfall.config().download_concurrency, 16, "{load:?}");
+            assert_eq!(recovery, None, "{load:?}");
+            assert_eq!(entries(root), before, "{load:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn format_two_raises_a_missing_stamp_without_written_by() {
+        for load in [Load::Plain, Load::Recovering] {
+            let tmp = data_root(CONFIG, None);
+            let root = tmp.path();
+
+            let (petalfall, recovery) = load.run(root, 2).await.unwrap();
+
+            assert_eq!(petalfall.config().download_concurrency, 16, "{load:?}");
+            assert_eq!(recovery, None, "{load:?}");
+            // 门面构造时不知道应用版本，记号里没有 written_by。
+            assert_eq!(
+                std::fs::read_to_string(root.join(STAMP_FILE)).unwrap(),
+                r#"{"data_format":2}"#,
+                "{load:?}"
+            );
+            assert_eq!(
+                std::fs::read(root.join("config.json")).unwrap(),
+                CONFIG,
+                "{load:?}"
+            );
+            // 原子写的临时文件也不留下。
+            assert_eq!(
+                entries(root).into_keys().collect::<BTreeSet<_>>(),
+                BTreeSet::from([OsString::from("config.json"), OsString::from(STAMP_FILE)]),
+                "{load:?}"
+            );
+        }
+    }
+
+    /// 坏配置与太新的记号同在时，先被关卡拒绝，坏配置原样留着：关卡排在读配置之后的话，恢复式构造会先把它
+    /// 改名。末尾把记号换成这一版的号再走一遍，证明这份配置确实会被改名，前面原样留着不是因为它没坏。
+    #[tokio::test]
+    async fn a_newer_data_root_is_refused_before_a_broken_config_is_renamed() {
+        for load in [Load::Plain, Load::Recovering] {
+            let tmp = data_root(BROKEN_CONFIG, Some(STAMP_3));
+            let root = tmp.path();
+            let before = entries(root);
+
+            match load.refused(root, 2).await {
+                CoreError::DataRootRefused(DataRootRefusal::TooNew {
+                    found: 3,
+                    supported: 2,
+                    ..
+                }) => {}
+                other => panic!("{load:?}：应先被数据目录的关卡拒绝，实际是 {other:?}"),
+            }
+            assert_eq!(entries(root), before, "{load:?}");
+        }
+
+        let tmp = data_root(BROKEN_CONFIG, Some(r#"{"data_format":2}"#));
+        let root = tmp.path();
+        match Load::Plain.refused(root, 2).await {
+            CoreError::ConfigParse { path, .. } => assert_eq!(path, root.join("config.json")),
+            other => panic!("关卡放行后应报配置读不出来，实际是 {other:?}"),
+        }
+        let (_, recovery) = Load::Recovering.run(root, 2).await.unwrap();
+        match recovery {
+            Some(ConfigRecovery::Reset { preserved, .. }) => {
+                assert_eq!(std::fs::read(&preserved).unwrap(), BROKEN_CONFIG);
+            }
+            other => panic!("关卡放行后坏配置应被改名留存，实际是 {other:?}"),
+        }
+        assert!(!root.join("config.json").exists());
+    }
+
+    /// 上面的用例走的是可注入的两个实现。生产入口是否经过它们、传的是否是这一版的号，钉住源码；关卡是否在读
+    /// 配置之前也钉住：配置读得进来时，把关卡挪到读配置之后，「太新」与「读不懂」的用例照样过。
+    #[test]
+    fn constructors_check_the_data_root_before_reading_the_config() {
+        for (entry, inner) in [
+            ("    pub async fn load() ", "Self::load_with("),
+            (
+                "    pub async fn load_recovering() ",
+                "Self::load_recovering_with(",
+            ),
+        ] {
+            let body = method_source(entry);
+            for call in [
+                inner,
+                "petalfall_base::fs::resolve_data_dir()?",
+                "DATA_FORMAT",
+            ] {
+                assert!(body.contains(call), "{call}\n{body}");
+            }
+        }
+        for signature in [
+            "    async fn load_with(",
+            "    async fn load_recovering_with(",
+        ] {
+            let body = method_source(signature);
+            let gate = body
+                .find("check_data_root(resolution, own, None).await?")
+                .unwrap_or_else(|| panic!("没有过数据目录的关卡\n{body}"));
+            let config = body
+                .find("ConfigStore::at(")
+                .unwrap_or_else(|| panic!("不再读配置\n{body}"));
+            assert!(gate < config, "关卡应在读配置之前\n{body}");
+        }
+    }
+
+    /// 本文件里签名行以 `signature` 开头的方法（`impl` 块里缩进四格），从签名行到同一缩进的收尾 `}`。
+    fn method_source(signature: &str) -> String {
+        let source = include_str!("facade.rs");
+        let starts = |line: &&str| line.starts_with(signature);
+        assert_eq!(source.lines().filter(starts).count(), 1, "{signature}");
+        let mut body = Vec::new();
+        for line in source.lines().skip_while(|line| !starts(line)) {
+            body.push(line);
+            if line.trim_end() == "    }" {
+                break;
+            }
+        }
+        body.join("\n")
+    }
+
+    #[test]
+    fn with_app_version_is_recorded_on_the_facade_and_its_snapshots() {
+        assert_eq!(test_petalfall().app_version, None);
+        let petalfall = test_petalfall().with_app_version("1.2.3").unwrap();
+        let snapshot = petalfall.clone();
+        assert_eq!(petalfall.app_version.as_deref(), Some("1.2.3"));
+        assert_eq!(snapshot.app_version.as_deref(), Some("1.2.3"));
+    }
+
+    /// 抬号写游戏目录的记号时，`written_by` 取 `with_app_version` 记下的版本；没调用过时不写这一项。
+    #[tokio::test]
+    async fn a_game_dir_stamp_names_the_version_given_to_with_app_version() {
+        for (app_version, expected) in [
+            (Some("1.2.3"), r#"{"data_format":2,"written_by":"1.2.3"}"#),
+            (None, r#"{"data_format":2}"#),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let game_dir = tmp.path().join(".minecraft");
+            std::fs::create_dir(&game_dir).unwrap();
+            let mut petalfall = Petalfall::for_test(
+                PetalfallConfig::default(),
+                tmp.path().to_owned(),
+                game_dir.clone(),
+            );
+            if let Some(version) = app_version {
+                petalfall = petalfall.with_app_version(version).unwrap();
+            }
+            // 命令都在快照上跑，记号也由快照写。
+            let snapshot = petalfall.clone();
+
+            let check = with_fixture(
+                GuardFixture { own: 2, look: None },
+                snapshot.guard_game_dir(GuardMode::Use),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(check, GameDirCheck::Ready, "{app_version:?}");
+            assert_eq!(
+                std::fs::read_to_string(game_dir.join(PETALFALL_META_DIR).join(STAMP_FILE))
+                    .unwrap(),
+                expected,
+                "{app_version:?}"
+            );
+        }
     }
 }
