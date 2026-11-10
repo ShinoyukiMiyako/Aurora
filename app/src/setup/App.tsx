@@ -24,7 +24,7 @@ import {
   relaunchesAfterUpdate,
   stepDirection,
   stepKey,
-  upgradesUnattended,
+  unattendedMode,
   type SetupEvent,
   type SetupState,
   type StepDirection,
@@ -212,7 +212,7 @@ function useSetupFlow(bridge: SetupBridge, initial: SetupState): SetupFlow {
   // 更新模式先在准备升级页等落樱自己退出：等到了直接开始升级，用户看不到「请先关闭」那一页
   const updateSent = useRef(false);
   useEffect(() => {
-    if (state.view !== "preparing" || state.probe === null || !upgradesUnattended(state.probe) || updateSent.current) return;
+    if (state.view !== "preparing" || state.probe === null || unattendedMode(state.probe) === null || updateSent.current) return;
     updateSent.current = true;
     const deadline = performance.now() + UPDATE_EXIT_WAIT_MS;
     const stillRunning = async (): Promise<boolean> => {
@@ -325,7 +325,7 @@ function CurrentView({ flow, bridge, copy }: ViewProps) {
           copy={copy}
           failure={failure}
           recovery={recovery}
-          standardInstaller={offersStandardInstaller(failure.code)}
+          standardInstaller={offersStandardInstaller(failure.code, plan)}
           onRecover={() => (recovery === "retry" ? requestInstall(plan.mode) : dispatch({ type: "open_location" }))}
           onOpenLog={() => attempt(() => bridge.openLog())}
           onReport={() => attempt(() => bridge.openExternal(ISSUES_URL))}

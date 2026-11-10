@@ -5,7 +5,7 @@
 // 不当错误处理。这也是防重复点击的最后一道：第二次「安装」落在 installing 上什么都不会发生。
 
 import { APP_NAME_EN } from "../lib/app-info";
-import type { DirCheck, DirIssue, Existing, Failure, FailureCode, InstallMode, InstallPlan, Probe, Progress } from "./contract";
+import type { Channel, DataBlock, DirCheck, DirIssue, Existing, Failure, FailureCode, InstallMode, InstallPlan, Probe, Progress } from "./contract";
 
 export type View = "boot" | "preparing" | "welcome" | "location" | "installed" | "blocked" | "installing" | "done" | "failed" | "legal" | "fatal";
 
@@ -52,6 +52,9 @@ export const initialState: SetupState = {
   fatal: null,
 };
 
+/** 装回登记目录的模式：不带目录，位置是锁定的。 */
+type InPlaceMode = Extract<InstallMode, "upgrade" | "repair" | "switch">;
+
 export type SetupEvent =
   | { type: "probed"; probe: Probe }
   | { type: "open_location" }
@@ -60,7 +63,7 @@ export type SetupEvent =
   | { type: "use_default_dir" }
   | { type: "shortcut_changed"; value: boolean }
   | { type: "install_requested"; mode: "fresh"; running: boolean; check: DirCheck }
-  | { type: "install_requested"; mode: "upgrade" | "repair"; running: boolean }
+  | { type: "install_requested"; mode: InPlaceMode; running: boolean }
   /** 更新模式下等过落樱退出之后：running 是等满时长时它还在不在。 */
   | { type: "update_started"; running: boolean }
   | { type: "launcher_gone" }
@@ -109,36 +112,123 @@ export function stepDirection(from: View, to: View): StepDirection {
   return 1;
 }
 
-/** 现有安装决定能走哪种安装：newer 一种都不能走，降级保护只有这一道。 */
-export function allowedModes(existing: Existing | null): readonly InstallMode[] {
-  if (existing === null) return ["fresh"];
+/**
+ * 界面能发起哪几种安装，原样取后端判定表算好的：种类、通道、数据关、发起方式一起才定得下来，前端不自己推。
+ * 为空时什么都不能装；后端在安装前还会再核一遍，这里挡住的是不该出现的按钮动作。
+ */
+export function allowedModes(probe: Probe): readonly InstallMode[] {
+  return probe.allowedModes;
+}
+
+/** 更新模式下不经页面直接装的模式。 */
+export type UnattendedMode = Extract<InstallMode, "upgrade" | "switch">;
+
+/**
+ * 更新插件拉起时不问用户、直接装回登记目录用的模式，为 null 时退回交互的页面让用户看清楚再点。
+ * 后端只在能升级、或带着换通道开关遇到更慢通道上更早的包时给它；首装、修复都要人在场，给了就是契约坏了。
+ */
+export function unattendedMode(probe: Probe): UnattendedMode | null {
+  const mode = probe.unattended;
+  if (mode === null || mode === "upgrade" || mode === "switch") return mode;
+  throw new Error(`无人值守只会是 upgrade 或 switch，探测结果给的是 ${mode}`);
+}
+
+/**
+ * 只有无人值守装完才替用户重新打开，且插件要带了 /R：退回交互流程的那几种情况是用户自己点着装的，
+ * 和平常一样停在完成页。提权时不开，理由同完成页：提权启动和普通启动用的是两个数据根。
+ */
+export function relaunchesAfterUpdate(probe: Probe): boolean {
+  return unattendedMode(probe) !== null && probe.update?.relaunch === true && !probe.elevated;
+}
+
+/**
+ * 状态机照着探测结果自动走的几条契约，探测结果一到就核。对不上时照着走，可能在用户没点的时候装，
+ * 或者在数据关拦下时装，所以直接报错进致命错误页，不猜。
+ */
+function checkProbe(probe: Probe): void {
+  const mode = unattendedMode(probe);
+  if (mode !== null && probe.update === null) throw new Error(`交互启动的探测结果带了无人值守的模式 ${mode}`);
+  if (mode !== null && !probe.allowedModes.includes(mode)) throw new Error(`无人值守的模式 ${mode} 不在允许的模式 [${probe.allowedModes.join(", ")}] 里`);
+  if (probe.dataBlock === null) return;
+  // 首装探测时还没定目录，数据关由选目录那一步核
+  if (probe.existing === null) throw new Error("没有现有安装时探测结果不该带数据拦截");
+  if (probe.allowedModes.length > 0) throw new Error(`数据关拦下了，探测结果却允许 [${probe.allowedModes.join(", ")}]`);
+}
+
+/** 两边的通道：已装的与这个安装包的。 */
+export interface ChannelPair {
+  installed: Channel;
+  payload: Channel;
+}
+
+/**
+ * 已安装页是哪一种情形，页面照它挑标题、说明和按钮。
+ * closedForUpdate：更新模式下停在这一页，落樱是为这次更新关掉的，说明里要告诉用户可以从这里重新打开。
+ */
+export type InstalledCase =
+  /** 同通道或认不出通道的升级。 */
+  | { kind: "upgrade" }
+  /** 升到另一个通道上更新的版本，但不算换通道：不写交接记录，之后照设置里选的更新通道检查更新。 */
+  | { kind: "cross_upgrade"; channels: ChannelPair }
+  /** 「换到」安装包的通道，确认后按 mode 发起：upgrade 是换到更快的通道，switch 是装回更慢通道上更早的版本。 */
+  | { kind: "switch_to"; mode: "upgrade" | "switch"; channels: ChannelPair }
+  | { kind: "same" }
+  | { kind: "broken" }
+  /** 已装的更新，什么都不能装；说明按原因挑，跨通道的两种要用两边的通道。 */
+  | { kind: "newer"; reason: "same_channel" | "unknown_channel"; closedForUpdate: boolean }
+  | { kind: "newer"; reason: "faster_channel" | "slower_channel"; channels: ChannelPair; closedForUpdate: boolean }
+  /** 数据关拦下，什么都不能装；太新还是读不懂、谁写的，看 block。 */
+  | { kind: "data_blocked"; block: DataBlock; closedForUpdate: boolean };
+
+function channelsOf(probe: Probe, existing: Existing, situation: string): ChannelPair {
+  const installed = existing.channel;
+  const payload = probe.payloadChannel;
+  if (installed === null || payload === null) throw new Error(`${situation}要两边的通道都认得，探测结果是 ${installed} 与 ${payload}`);
+  return { installed, payload };
+}
+
+/**
+ * 种类、newer 的原因、要不要写交接记录都由后端定好，这里只把它们归成页面的几种情形，页面不拿两边的通道自己推。
+ * 数据关先于一切：拦下时不论种类，页面上只剩「打开落樱」。
+ */
+export function installedCase(probe: Probe): InstalledCase {
+  const { existing } = probe;
+  if (existing === null) throw new Error("没有现有安装，不该进已安装页");
+  const closedForUpdate = probe.update !== null;
+  if (probe.dataBlock !== null) return { kind: "data_blocked", block: probe.dataBlock, closedForUpdate };
   switch (existing.kind) {
-    case "upgrade":
-      return ["upgrade"];
-    case "same":
-    case "broken":
-      return ["repair"];
-    case "newer":
-      return [];
+    case "upgrade": {
+      // 交接记录只在用户亲手确认换到更快的通道时写，页面就用「换到」的说法
+      if (probe.handoff) return { kind: "switch_to", mode: "upgrade", channels: channelsOf(probe, existing, "换到更快的通道") };
+      const installed = existing.channel;
+      const payload = probe.payloadChannel;
+      if (installed !== null && payload !== null && installed !== payload) return { kind: "cross_upgrade", channels: { installed, payload } };
+      return { kind: "upgrade" };
+    }
     case "switch":
-      throw new Error("探测结果不该是 switch：现在的判定只按版本比");
+      return { kind: "switch_to", mode: "switch", channels: channelsOf(probe, existing, "换到更慢的通道") };
+    case "same":
+      return { kind: "same" };
+    case "broken":
+      return { kind: "broken" };
+    case "newer": {
+      const reason = probe.newerReason;
+      if (reason === null) throw new Error("种类是 newer，探测结果却没给原因");
+      if (reason === "faster_channel" || reason === "slower_channel") return { kind: "newer", reason, channels: channelsOf(probe, existing, `newer 的原因 ${reason} `), closedForUpdate };
+      return { kind: "newer", reason, closedForUpdate };
+    }
   }
 }
 
 /**
- * 启动器的更新插件拉起、现有安装又正好能升级时，不问用户，直接按升级装回登记目录。
- * 别的情况说明插件看到的和登记的安装对不上：同版本没有可升的，更新的不能往回装，残缺和没登记的要修复或首装，都交给交互流程让用户看清楚再点。
+ * 这次安装是不是换到安装包的通道，是就给出那个通道，安装中与完成页的标题据此说「换到」。
+ * switch 总是；upgrade 只有用户在「换到」页上确认的那种算。更新模式里跟着到另一个通道的升级不算：
+ * 那是启动器按偏好送来的，偏好由启动器自己管。
  */
-export function upgradesUnattended(probe: Probe): boolean {
-  return probe.update !== null && allowedModes(probe.existing).includes("upgrade");
-}
-
-/**
- * 只有无人值守的升级装完才替用户重新打开，且插件要带了 /R：退回交互流程的那几种情况是用户自己点着装的，
- * 和平常一样停在完成页。提权时不开，理由同完成页：提权启动和普通启动用的是两个数据根。
- */
-export function relaunchesAfterUpdate(probe: Probe): boolean {
-  return upgradesUnattended(probe) && probe.update?.relaunch === true && !probe.elevated;
+export function switchingTo(mode: InstallMode, probe: Probe): Channel | null {
+  if (mode !== "switch" && !(mode === "upgrade" && probe.handoff)) return null;
+  if (probe.payloadChannel === null) throw new Error(`按 ${mode} 换通道却认不出安装包的通道`);
+  return probe.payloadChannel;
 }
 
 function requireProbe(state: SetupState): Probe {
@@ -150,13 +240,13 @@ function startInstall(state: SetupState, running: boolean): SetupState {
   return running ? { ...state, view: "blocked" } : { ...state, view: "installing", run: state.run + 1, progress: null, failure: null };
 }
 
-// 这两种模式没有快捷方式的选项，NSIS 却总会建一个：传 false 让 Rust 删掉本来没有的，用户删过的不会被装回来
-const inPlacePlan = (mode: "upgrade" | "repair"): InstallPlan => ({ mode, dir: null, desktopShortcut: false });
+// 这几种模式没有快捷方式的选项，NSIS 却总会建一个：传 false 让 Rust 删掉本来没有的，用户删过的不会被装回来
+const inPlacePlan = (mode: InPlaceMode): InstallPlan => ({ mode, dir: null, desktopShortcut: false });
 
 function requestInstall(state: SetupState, event: Extract<SetupEvent, { type: "install_requested" }>): SetupState {
   if (state.view !== "welcome" && state.view !== "location" && state.view !== "installed" && state.view !== "failed") return state;
   const probe = requireProbe(state);
-  if (!allowedModes(probe.existing).includes(event.mode)) return state;
+  if (!allowedModes(probe).includes(event.mode)) return state;
   const origin = state.view === "failed" ? state.origin : state.view;
 
   if (event.mode === "fresh") {
@@ -171,11 +261,12 @@ export function reduce(state: SetupState, event: SetupEvent): SetupState {
   switch (event.type) {
     case "probed": {
       if (state.view !== "boot") return state;
+      checkProbe(event.probe);
       const { existing } = event.probe;
       const probed = { ...state, probe: event.probe, dir: existing?.dir ?? event.probe.defaultDir };
-      // 直接进准备升级页，不先闪一下已安装页；也不能留在 boot 等：窗口离开 boot 才显示，探测慢的机器上
+      // 直接进准备页，不先闪一下已安装页；也不能留在 boot 等：窗口离开 boot 才显示，探测慢的机器上
       // Rust 的显示兜底会先把一个空窗口顶出来
-      if (upgradesUnattended(event.probe)) return { ...probed, view: "preparing" };
+      if (unattendedMode(event.probe) !== null) return { ...probed, view: "preparing" };
       return { ...probed, view: existing === null ? "welcome" : "installed" };
     }
     case "open_location":
@@ -191,10 +282,13 @@ export function reduce(state: SetupState, event: SetupEvent): SetupState {
       return state.view === "location" ? { ...state, desktopShortcut: event.value } : state;
     case "install_requested":
       return requestInstall(state, event);
-    case "update_started":
-      // 记作从已安装页发起：失败、拦截页返回时落在那里，重试也照那页的升级走
-      if (state.view !== "preparing" || state.probe === null || !upgradesUnattended(state.probe)) return state;
-      return startInstall({ ...state, plan: inPlacePlan("upgrade"), origin: "installed", keptData: true }, event.running);
+    case "update_started": {
+      // 记作从已安装页发起：失败、拦截页返回时落在那里，重试也照同一个模式走
+      if (state.view !== "preparing" || state.probe === null) return state;
+      const mode = unattendedMode(state.probe);
+      if (mode === null) return state;
+      return startInstall({ ...state, plan: inPlacePlan(mode), origin: "installed", keptData: true }, event.running);
+    }
     case "launcher_gone":
       return state.view === "blocked" ? startInstall(state, false) : state;
     case "blocked_back":
@@ -243,9 +337,20 @@ export function failureRecovery(code: FailureCode, plan: InstallPlan): FailureRe
   return plan.mode === "fresh" && (code === "dir_unwritable" || code === "disk_full") ? "change_location" : "retry";
 }
 
-/** 这两类失败说明静默安装这条路走不通，原生向导是最后的退路。 */
-export function offersStandardInstaller(code: FailureCode): boolean {
-  return code === "payload_exit" || code === "verify_failed";
+/**
+ * 这两类失败说明静默安装这条路走不通，原生向导是最后的退路。换通道的那次不给：原生向导不经这里的判定，
+ * 它拦不拦往更早的版本装核实不了，后端也会拒绝只允许换通道的那次改用它。
+ */
+export function offersStandardInstaller(code: FailureCode, plan: InstallPlan): boolean {
+  return plan.mode !== "switch" && (code === "payload_exit" || code === "verify_failed");
+}
+
+/**
+ * 失败页要不要补一句怎么回到原来的通道：只在启动器带换通道开关拉起的那次。那时启动器已先把更新通道改成目标通道，
+ * 装不上用户就停在它上面；交互的换通道失败时偏好没动，不用说。
+ */
+export function remindsChannelRevert(plan: InstallPlan, probe: Probe): boolean {
+  return plan.mode === "switch" && unattendedMode(probe) === "switch";
 }
 
 export type DirNotice = { kind: "issue"; issue: DirIssue } | { kind: "resume" } | { kind: "nested" } | { kind: "not_empty" } | { kind: "ok" };

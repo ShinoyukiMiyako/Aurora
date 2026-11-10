@@ -3,7 +3,7 @@
 
 import { APP_NAME_EN } from "../lib/app-info";
 import type { SetupBridge, Unlisten } from "./bridge";
-import type { DirCheck, Existing, ExistingKind, Failure, FailureCode, InstallMode, InstallPlan, Probe, Progress, UpdateLaunch } from "./contract";
+import type { Channel, DirCheck, Existing, ExistingKind, Failure, FailureCode, InstallMode, InstallPlan, NewerReason, Probe, Progress, UpdateLaunch } from "./contract";
 import { initialState, replay, type SetupEvent, type SetupState } from "./model";
 
 const DEFAULT_DIR = `C:\\Users\\Player\\AppData\\Local\\${APP_NAME_EN}`;
@@ -23,6 +23,53 @@ export const FAKE_PROBE: Probe = {
   handoff: false,
   dataBlock: null,
 };
+
+/** 探测结果里由后端判定表算出的几项。 */
+type Judged = "newerReason" | "allowedModes" | "unattended" | "handoff";
+
+/** 通道快慢，数越大越快：预览版发得最勤，正式版最慢。 */
+const CHANNEL_SPEED: Readonly<Record<Channel, number>> = { stable: 0, beta: 1, dev: 2 };
+
+/** 安装包的通道相对已装的通道。 */
+type Relation = "same" | "payload_faster" | "payload_slower" | "unknown";
+
+function relationOf(installed: Channel | null, payload: Channel | null): Relation {
+  if (installed === null || payload === null) return "unknown";
+  const diff = CHANNEL_SPEED[payload] - CHANNEL_SPEED[installed];
+  return diff === 0 ? "same" : diff > 0 ? "payload_faster" : "payload_slower";
+}
+
+const NEWER_REASON: Readonly<Record<Relation, NewerReason>> = { same: "same_channel", payload_faster: "faster_channel", payload_slower: "slower_channel", unknown: "unknown_channel" };
+
+/**
+ * 照后端的判定表补上 newerReason、allowedModes、unattended、handoff，造出来的探测结果与真后端同一情形下给的一致，
+ * 测试和开发替身造探测结果都走这里，种类与允许的模式不会再对不上。种类由调用方定，这里不比版本；
+ * 换通道开关从种类看得出：更新模式下是 switch 就是带了开关，是安装包更慢的 newer 就是没带。后端给不出的组合直接报错。
+ */
+export function judgedProbe(facts: Omit<Probe, Judged>): Probe {
+  const { existing, update, dataBlock } = facts;
+  if (existing === null) {
+    if (dataBlock !== null) throw new Error("首装的数据关在选目录时核，探测结果不带数据拦截");
+    return { ...facts, newerReason: null, allowedModes: ["fresh"], unattended: null, handoff: false };
+  }
+  const relation = relationOf(existing.channel, facts.payloadChannel);
+  const interactive = update === null;
+  if (existing.kind === "switch" && relation !== "payload_slower") throw new Error(`switch 只出自安装包通道严格更慢的情形，这里两边是 ${existing.channel} 与 ${facts.payloadChannel}`);
+  if (existing.kind === "newer" && relation === "payload_slower" && interactive) throw new Error("交互启动遇到更慢通道上更早的包判 switch，不是 newer");
+  const newerReason = existing.kind === "newer" ? NEWER_REASON[relation] : null;
+  if (dataBlock !== null) return { ...facts, newerReason, allowedModes: [], unattended: null, handoff: false };
+  switch (existing.kind) {
+    case "upgrade":
+      return { ...facts, newerReason, allowedModes: ["upgrade"], unattended: interactive ? null : "upgrade", handoff: interactive && relation === "payload_faster" };
+    case "same":
+    case "broken":
+      return { ...facts, newerReason, allowedModes: ["repair"], unattended: null, handoff: false };
+    case "switch":
+      return { ...facts, newerReason, allowedModes: ["switch"], unattended: interactive ? null : "switch", handoff: interactive };
+    case "newer":
+      return { ...facts, newerReason, allowedModes: [], unattended: null, handoff: false };
+  }
+}
 
 /** 一次走完三个阶段的进度。 */
 export const FAKE_PROGRESS: readonly Progress[] = [
@@ -206,7 +253,7 @@ export function fakeFromQuery(search: string): FakeRuntime {
   const update: UpdateLaunch | null = query.has("update") ? { relaunch: !query.has("norelaunch") } : null;
 
   const kind = state === "installed" || update !== null ? pick(query.get("kind"), EXISTING_KINDS, "upgrade") : mode === "upgrade" ? "upgrade" : mode === "repair" ? "same" : null;
-  const probe: Probe = { ...FAKE_PROBE, existing: kind === null ? null : existingOf(kind), elevated: query.has("elevated"), interrupted: query.has("interrupted"), update };
+  const probe = judgedProbe({ ...FAKE_PROBE, existing: kind === null ? null : existingOf(kind), elevated: query.has("elevated"), interrupted: query.has("interrupted"), update });
 
   if (update !== null) {
     if (state !== "welcome" && state !== "blocked" && state !== "failed") throw new Error(`?update 从 boot 开始走，?state= 只能不写或是 blocked、failed，不能是 ${state}`);

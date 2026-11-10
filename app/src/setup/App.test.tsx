@@ -13,14 +13,14 @@ import { stubMatchMedia, stubResizeObserver } from "../test/dom";
 import App, { BLOCKED_POLL_MS, MIN_INSTALLING_MS, UPDATE_EXIT_CHECKS, UPDATE_EXIT_POLL_MS, UPDATE_EXIT_WAIT_MS } from "./App";
 import type { Existing, ExistingKind, Failure, InstallPlan, Probe } from "./contract";
 import { COPY } from "./copy";
-import { FAKE_PROBE, createFakeBridge, type FakeBridge, type FakeScenario } from "./fake-bridge";
+import { FAKE_PROBE, createFakeBridge, judgedProbe, type FakeBridge, type FakeScenario } from "./fake-bridge";
 import { replay, type SetupEvent, type SetupState } from "./model";
 
 const copy = COPY.zh;
 const WAIT = { timeout: 5000, interval: 10 };
 
 const existingOf = (kind: ExistingKind): Existing => ({ kind, version: "0.1.0", dir: "E:\\app", channel: "stable" });
-const probeOf = (kind: ExistingKind | null, extra: Partial<Probe> = {}): Probe => ({ ...FAKE_PROBE, existing: kind === null ? null : existingOf(kind), ...extra });
+const probeOf = (kind: ExistingKind | null, extra: Partial<Probe> = {}): Probe => judgedProbe({ ...FAKE_PROBE, existing: kind === null ? null : existingOf(kind), ...extra });
 const FAILURE: Failure = { code: "verify_failed", detail: "uninstall.exe 不存在" };
 
 const freshEvent = (fake: FakeBridge): SetupEvent => ({ type: "install_requested", mode: "fresh", running: false, check: fake.scenario.checkDir(FAKE_PROBE.defaultDir) });
