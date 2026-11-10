@@ -382,7 +382,7 @@ async fn recover_interrupted_swap(root: &Path, dir: &Path) -> Result<()> {
 }
 
 /// 建暂存目录，写进白名单文件与元数据。
-async fn fill_staging(
+pub(crate) async fn fill_staging(
     root: &Path,
     staging: &Path,
     source: &Path,

@@ -106,8 +106,8 @@ pub(crate) struct DirectoryBook {
 
 /// 全部游戏目录的记录。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct PlayLibrary {
-    directories: Vec<DirectoryBook>,
+pub(crate) struct PlayLibrary {
+    pub(crate) directories: Vec<DirectoryBook>,
 }
 
 /// 没记过的游戏目录读作一本空账。
@@ -528,7 +528,7 @@ async fn load(path: &Path, game_dir: &Path) -> Result<(PlayLibrary, bool)> {
     }
 }
 
-async fn save(path: &Path, library: PlayLibrary) -> Result<()> {
+pub(crate) async fn save(path: &Path, library: PlayLibrary) -> Result<()> {
     let bytes = serde_json::to_vec(&PlayFile {
         format: PLAYTIME_FORMAT,
         directories: library.directories,
