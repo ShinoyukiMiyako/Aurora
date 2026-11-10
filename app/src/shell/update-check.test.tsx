@@ -4,14 +4,16 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { UPDATE_FOUND_TOAST } from "../copy/updater";
+import { CHANNEL_CHECK_DEBOUNCE_MS } from "../domain/limits";
 import type { ConfigDto } from "../ipc/config";
-import type { UpdateDto, UpdaterInfoDto } from "../ipc/system";
+import type { UpdateChannel, UpdateDto, UpdaterInfoDto } from "../ipc/system";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { AUTO_CHECK_DELAY_MS, AUTO_CHECK_INTERVAL_MS } from "../state/updater/auto-check";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { useUpdater, type UpdaterApi } from "../state/updater/useUpdater";
+import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, callsOf, configDto, resetRecorder, settle } from "../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, resetRecorder, settle } from "../test/launcher";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider, useShell, type ShellApi } from "./shell";
 import { UpdatePanelMount } from "./UpdatePanel";
@@ -24,6 +26,7 @@ const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: "
 let view: Rendered | undefined;
 let shell: ShellApi;
 let launcher: LauncherApi;
+let updater: UpdaterApi;
 let config: ConfigDto;
 let info: UpdaterInfoDto;
 let online: boolean;
@@ -31,6 +34,7 @@ let online: boolean;
 function Probe() {
   shell = useShell();
   launcher = useLauncher();
+  updater = useUpdater();
   return null;
 }
 
@@ -92,9 +96,10 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  await drainFrames();
   vi.useRealTimers();
 });
 
@@ -193,6 +198,176 @@ describe("启动器更新：自动检查", () => {
     await mount();
     await advance(AUTO_CHECK_DELAY_MS + AUTO_CHECK_INTERVAL_MS);
     expect(callsOf(ipc, "check_update")).toEqual([]);
+  });
+});
+
+describe("启动器更新：跨通道的通知正文", () => {
+  it.each([
+    {
+      name: "新版本属于偏好的通道、不属于包的通道：正文写明装上以后就换过去",
+      packageChannel: "stable",
+      preference: "beta",
+      relation: "following",
+      update: { version: "0.3.0-beta.1", current_version: "0.1.0", notes: "测试版的更新", date: null, channel: "beta" },
+      body: "装上以后就换到测试版了，点「查看」了解更新内容",
+    },
+    {
+      name: "偏好更快、新版本属于更慢的线：装上以后仍按偏好收更新，正文照旧",
+      packageChannel: "dev",
+      preference: "beta",
+      relation: "waiting",
+      update: { version: "1.0.0", current_version: "1.0.0-dev.60", notes: "正式版发布", date: null, channel: "stable" },
+      body: "点「查看」了解更新内容",
+    },
+  ] as const)("$name", async ({ packageChannel, preference, relation, update, body }) => {
+    info = { ...info, current_version: update.current_version, package_channel: packageChannel, preference, relation };
+    ipc.overrides.set("check_update", () => {
+      info = { ...info, available: update };
+      return update;
+    });
+    await mount();
+    await advance(AUTO_CHECK_DELAY_MS);
+    expect(launcher.state.toasts.filter((t) => t.title === UPDATE_FOUND_TOAST.title(update.version)).map((t) => t.body)).toEqual([body]);
+  });
+});
+
+describe("启动器更新：改了更新通道之后的检查", () => {
+  const FOUND: Readonly<Record<UpdateChannel, UpdateDto>> = {
+    dev: { version: "0.3.0-dev.4", current_version: "0.1.0", notes: "预览版的更新", date: null, channel: "dev" },
+    beta: { version: "0.3.0-beta.1", current_version: "0.1.0", notes: "测试版的更新", date: null, channel: "beta" },
+    stable: UPDATE,
+  };
+
+  /** 固定种子的线性同余数列，取值落在 [0, 1)：每次跑出同样的间隔，换种子才换数据。 */
+  function seeded(seed: number): () => number {
+    let state = seed >>> 0;
+    return () => {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      return state / 2 ** 32;
+    };
+  }
+
+  beforeEach(() => {
+    // 包是正式版：选正式版回到同一条线，选别的是跟随更快的线；改了偏好，按旧偏好得出的结果作废
+    ipc.overrides.set("set_update_channel", (args) => {
+      const channel = args.channel;
+      if (channel !== "dev" && channel !== "beta" && channel !== "stable") throw new Error(`更新通道不成形：${String(channel)}`);
+      info = { ...info, preference: channel, relation: channel === "stable" ? "same" : "following", available: null, channel_heads: [] };
+      return info;
+    });
+    ipc.overrides.set("check_update", () => {
+      if (info.preference === null) throw new Error("用例的包认得出通道，偏好不该为空");
+      const found = FOUND[info.preference];
+      info = { ...info, available: found };
+      return found;
+    });
+  });
+
+  const choose = (channel: UpdateChannel) =>
+    act(async () => {
+      await updater.setChannel(channel);
+      await settle();
+    });
+  const checks = () => callsOf(ipc, "check_update").length;
+  const foundAnyToasts = () => launcher.state.toasts.filter((t) => Object.values(FOUND).some((u) => t.title === UPDATE_FOUND_TOAST.title(u.version)));
+
+  it("连着改几次：只在最后一次之后停够才查一次；查到的新版本不弹通知、也不记成已提示", async () => {
+    const random = seeded(20261110);
+    // 间隔含两头的边界：差一毫秒就停够了又改、紧接着再改，另有一个随机的
+    const gaps = [CHANNEL_CHECK_DEBOUNCE_MS - 1, 0, 1 + Math.floor(random() * (CHANNEL_CHECK_DEBOUNCE_MS - 2))];
+    const picks: UpdateChannel[] = ["beta", "dev", "stable", "beta"];
+    await mount();
+    for (let i = 0; i < gaps.length; i++) {
+      await choose(picks[i]);
+      await advance(gaps[i]);
+    }
+    await choose(picks[gaps.length]);
+    expect(callsOf(ipc, "set_update_channel")).toEqual(picks.map((channel) => ({ channel })));
+    expect(checks()).toBe(0);
+
+    await advance(CHANNEL_CHECK_DEBOUNCE_MS - 1);
+    expect(checks()).toBe(0);
+    await advance(1);
+    expect(checks()).toBe(1);
+    expect(updater.state.phase).toEqual({ kind: "available", update: FOUND.beta });
+    expect(foundAnyToasts()).toEqual([]);
+    expect(callsOf(ipc, "update_config")).toEqual([]);
+
+    await advance(CHANNEL_CHECK_DEBOUNCE_MS * 3);
+    expect(checks()).toBe(1);
+  });
+
+  it("停够时断网：不查，联网之后马上查", async () => {
+    await mount();
+    await choose("beta");
+    setOnline(false);
+    await advance(CHANNEL_CHECK_DEBOUNCE_MS * 4);
+    expect(checks()).toBe(0);
+    setOnline(true);
+    await advance(0);
+    expect(checks()).toBe(1);
+    expect(updater.state.phase).toEqual({ kind: "available", update: FOUND.beta });
+    expect(foundAnyToasts()).toEqual([]);
+  });
+
+  it("停够时还在检查：一直等到那次检查因改了通道作废、能检查了再查，不只在到点时试一次", async () => {
+    const stale = deferred<UpdateDto | null>();
+    const normal = ipc.overrides.get("check_update");
+    if (normal === undefined) throw new Error("beforeEach 应当已经改写 check_update");
+    let calls = 0;
+    ipc.overrides.set("check_update", (args) => {
+      calls += 1;
+      return calls === 1 ? stale.promise : normal(args);
+    });
+    await mount();
+    act(() => void updater.check());
+    await advance(0);
+    expect(updater.state.phase.kind).toBe("checking");
+
+    await choose("beta");
+    await advance(CHANNEL_CHECK_DEBOUNCE_MS * 4);
+    expect(checks()).toBe(1);
+    expect(updater.state.phase.kind).toBe("checking");
+
+    // 按旧偏好查到的正式版不落进状态，检查作废回到可检查，欠着的那次随即发出
+    stale.resolve(UPDATE);
+    await advance(0);
+    expect(checks()).toBe(2);
+    expect(updater.state.phase).toEqual({ kind: "available", update: FOUND.beta });
+  });
+
+  it("「自动检查更新」关着也查；之后照旧不排自动检查", async () => {
+    config = configDto({ check_updates: false });
+    await mount();
+    await choose("beta");
+    await advance(CHANNEL_CHECK_DEBOUNCE_MS);
+    expect(checks()).toBe(1);
+    await advance(AUTO_CHECK_DELAY_MS + AUTO_CHECK_INTERVAL_MS);
+    expect(checks()).toBe(1);
+    expect(foundAnyToasts()).toEqual([]);
+  });
+
+  it("停够之前自己查过：欠着的那次随之清掉，不再补查", async () => {
+    await mount();
+    await choose("beta");
+    await advance(CHANNEL_CHECK_DEBOUNCE_MS - 1);
+    await act(async () => {
+      await updater.check();
+      await settle();
+    });
+    expect(checks()).toBe(1);
+    await advance(CHANNEL_CHECK_DEBOUNCE_MS * 4);
+    expect(checks()).toBe(1);
+  });
+
+  it("卸载之后不再触发", async () => {
+    await mount();
+    await choose("beta");
+    await advance(CHANNEL_CHECK_DEBOUNCE_MS - 1);
+    view?.unmount();
+    view = undefined;
+    await advance(CHANNEL_CHECK_DEBOUNCE_MS * 4);
+    expect(checks()).toBe(0);
   });
 });
 
