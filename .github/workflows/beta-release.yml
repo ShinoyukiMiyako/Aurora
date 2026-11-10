@@ -42,7 +42,6 @@ jobs:
       PETALFALL_MSA_CLIENT_ID: ${{ vars.PETALFALL_MSA_CLIENT_ID }}
       PETALFALL_CURSEFORGE_API_KEY: ${{ secrets.PETALFALL_CURSEFORGE_API_KEY }}
       PETALFALL_OFFICIAL_BUILD: "1"
-      STABLE_MANIFEST_URL: https://petalfall.org/updates/stable/latest.json
     outputs:
       version: ${{ steps.version.outputs.version }}
       installer-name: ${{ steps.bundle.outputs.installer-name }}
@@ -121,9 +120,10 @@ jobs:
         run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/cargo-target" >> "$GITHUB_ENV"
 
       # 版本号只认 tauri.conf.json 里的基础号。beta 序号取已发布的 v<基础号>-beta.N 里最大的加 1：被拒批、失败的运行
-      # 和演练都不建 tag，不占号。next-beta 同时拦下不是纯 X.Y.Z 或主版本小于 1 的基础号：0.x.y-beta.N 比同基础号的
-      # dev 版本小，装过 dev 的用户会被判为降级。演练固定用 -beta.0：build-info.mjs 认不出的预发布标识会直接报错。
-      # 排在编译之前，版本号定不下来时不用白编。
+      # 和演练都不建 tag，不占号。next-beta 同时拦下不是纯 X.Y.Z、补丁段不为 0 或主版本小于 1 的基础号：基础号必须是
+      # X.Y.0、主版本至少为 1，dev 已在 1.0.0 及以上，0.x 的测试版低于所有现行预览版；补丁段留给正式版补丁。
+      # 演练不调 next-beta，基础号由下一步的版本先后检查查同一条；它固定用 -beta.0：build-info.mjs 认不出的预发布标识
+      # 会直接报错。排在编译之前，版本号定不下来时不用白编。
       - name: 确定版本号
         id: version
         run: |
@@ -146,30 +146,26 @@ jobs:
           awk -F '\t' '{ sub(/^refs\/tags\//, "", $2); sub(/\^\{\}$/, "", $2); print $2 }' "$RUNNER_TEMP/remote-tags.tsv" | sort -u > "$RUNNER_TEMP/tags.txt"
           number="$(node .github/scripts/dev-distribution.mjs next-beta "$base" "$RUNNER_TEMP/tags.txt")"
           version="$base-beta.$number"
-
-          # 这个基础号已经出过正式版，再发它的 beta 就比正式版旧。香港机上还没有正式版清单时 404，跳过。
-          status="$(curl --silent --show-error --retry 3 --max-time 60 --output "$RUNNER_TEMP/stable.json" --write-out '%{http_code}' "$STABLE_MANIFEST_URL")"
-          case "$status" in
-            200)
-              stable="$(node -e "
-                const version = JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).version;
-                if (typeof version !== 'string') throw new Error('正式版清单里没有字符串形式的 version');
-                process.stdout.write(version);
-              " "$RUNNER_TEMP/stable.json")"
-              order="$(node .github/scripts/dev-distribution.mjs compare "$base" "$stable")"
-              if [ "$order" != 1 ]; then
-                echo "::error::正式版清单上已经是 $stable，基础号 $base 不比它新：这个基础号的 beta 发出去比正式版旧，先在晋级分支上调高基础号"
-                exit 1
-              fi
-              ;;
-            404) echo "香港机上还没有正式版清单，跳过" ;;
-            *)
-              echo "::error::读正式版清单 $STABLE_MANIFEST_URL 返回 HTTP $status"
-              exit 1
-              ;;
-          esac
           echo "本次发布 $version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # 同一基础号下 beta < dev < 正式版，测试版低于预览版、核心号高于已发布的正式版不会自然成立，要在这里挡。
+      # 各通道已发布的版本只采信用该通道公钥验得过签名的清单，tag 名只用来定位：伪造的 tag、乱写的清单都抬不高也压不低结果。
+      # 数据格式号不能比上一个测试版小，测试版的号还必须是经晋级合并从 dev 带进来的。演练照常读取、照常验签，读取出错照样失败；
+      # 这几项检查不过只打 notice：演练的包本来就不发布，dev 还停在旧基础号时也要能演练。排在编译之前，挡下的版本不用白编。
+      - name: 读出各通道已发布的版本
+        id: heads
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          HEADS: ${{ runner.temp }}/release-heads.json
+        run: |
+          mode=release
+          if [ "$GITHUB_REF" != refs/heads/beta ]; then
+            mode=rehearsal
+          fi
+          node .github/scripts/release-heads.mjs read "$GITHUB_REPOSITORY" "$HEADS"
+          node .github/scripts/release-heads.mjs gate beta "$mode" "$VERSION" "$HEADS"
+          node .github/scripts/release-heads.mjs data-format beta "$mode" "$HEADS" "$GITHUB_REPOSITORY"
 
       # 更新面板显示的就是这段文字，签名前审批时在 job summary 里核对。取的是合并出这次推送的那个 PR：
       # 合并提交就是它的 merge_commit_sha，目标分支是 beta。找不到或不止一个都不猜，直接失败。
