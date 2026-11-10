@@ -325,6 +325,30 @@ pub(crate) fn move_blocker_json(blocker: &MoveBlocker) -> Value {
         }),
         MoveBlocker::Pending => json!({ "kind": "pending" }),
         MoveBlocker::SourceChanged => json!({ "kind": "source_changed" }),
+        MoveBlocker::DataTooNew {
+            path,
+            found,
+            supported,
+            written_by,
+        } => {
+            // 记号可能出自别人的机器：只交出形状核过的版本号与它的通道，不合格时两项都是 null。
+            let trusted = written_by
+                .as_deref()
+                .and_then(petalfall_core::data_format::trusted_written_by);
+            json!({
+                "kind": "data_too_new",
+                "path": path.display().to_string(),
+                "found": found,
+                "supported": supported,
+                "written_by": trusted.as_ref().map(|t| t.version.to_string()),
+                "written_by_channel": trusted.as_ref().map(|t| t.channel.as_str()),
+            })
+        }
+        MoveBlocker::DataFormatUnreadable { path, reason } => json!({
+            "kind": "data_format_unreadable",
+            "path": path.display().to_string(),
+            "reason": reason,
+        }),
     }
 }
 
@@ -1887,6 +1911,67 @@ mod tests {
         assert_eq!(
             mapped.detail,
             Some(json!({ "reason": "encode_failed", "causes": ["磁盘出错"] }))
+        );
+    }
+
+    /// 移动的两种数据格式拦截项带目标游戏目录；data_too_new 的 written_by 只给形状核过的版本号与它的通道，记号里
+    /// 没写或形状不对时两项都是 null。执行时被拦下，detail.blocker 与预检里的一项同形。
+    #[test]
+    fn data_format_move_blockers_carry_the_target_and_a_trusted_writer() {
+        let path = PathBuf::from(r"D:\新家\.minecraft");
+        for (raw, version, channel) in [
+            (Some("1.1.0-dev.57"), json!("1.1.0-dev.57"), json!("dev")),
+            (Some("1.0.0-beta.5"), json!("1.0.0-beta.5"), json!("beta")),
+            (Some("1.0.0"), json!("1.0.0"), json!("stable")),
+            (Some("1.0.0-rc.1"), Value::Null, Value::Null),
+            (Some("01.0.0"), Value::Null, Value::Null),
+            (
+                Some("1.0.0 https://example.invalid/"),
+                Value::Null,
+                Value::Null,
+            ),
+            (None, Value::Null, Value::Null),
+        ] {
+            let blocker = MoveBlocker::DataTooNew {
+                path: path.clone(),
+                found: 3,
+                supported: 2,
+                written_by: raw.map(str::to_owned),
+            };
+            assert_eq!(
+                move_blocker_json(&blocker),
+                json!({
+                    "kind": "data_too_new",
+                    "path": r"D:\新家\.minecraft",
+                    "found": 3,
+                    "supported": 2,
+                    "written_by": version,
+                    "written_by_channel": channel,
+                }),
+                "written_by {raw:?}"
+            );
+        }
+
+        let unreadable = MoveBlocker::DataFormatUnreadable {
+            path: path.clone(),
+            reason: "expected value at line 1 column 1".into(),
+        };
+        let unreadable_json = json!({
+            "kind": "data_format_unreadable",
+            "path": r"D:\新家\.minecraft",
+            "reason": "expected value at line 1 column 1",
+        });
+        assert_eq!(move_blocker_json(&unreadable), unreadable_json);
+
+        let blocked: CommandError = CoreError::InstanceMoveBlocked {
+            id: "生存".into(),
+            blocker: unreadable,
+        }
+        .into();
+        assert_eq!(blocked.code, code::INSTANCE_MOVE_BLOCKED);
+        assert_eq!(
+            blocked.detail,
+            Some(json!({ "id": "生存", "blocker": unreadable_json }))
         );
     }
 }

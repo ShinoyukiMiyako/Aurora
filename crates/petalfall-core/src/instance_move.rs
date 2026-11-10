@@ -30,6 +30,7 @@ use petalfall_instance::{
 use tokio::sync::{RwLock, RwLockReadGuard};
 
 use crate::InstanceError;
+use crate::data_format::{GameDirCheck, GuardMode};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, DownloadProgress, EventSink, InstallPhase, emit};
 use crate::facade::Petalfall;
@@ -70,6 +71,17 @@ pub enum MoveBlocker {
     Pending,
     /// 请求发起时实例所在的游戏目录不是现在的当前目录：同名实例在别的游戏目录里是另一个实例，不能按旧请求移它。
     SourceChanged,
+    /// 目标游戏目录的数据格式记号比这一版的号大：它被更新的落樱用过，这一版不往里写。`path` 是目标游戏目录，
+    /// `found` 是记号里的号，`supported` 是这一版的号，`written_by` 是记号里 `written_by` 的原文（没有或不是字符串
+    /// 时为 `None`）。记号可能出自别人的机器，要显示版本先经 [`crate::data_format::trusted_written_by`] 净化。
+    DataTooNew {
+        path: PathBuf,
+        found: u32,
+        supported: u32,
+        written_by: Option<String>,
+    },
+    /// 目标游戏目录的数据格式记号读不懂。`path` 是目标游戏目录，`reason` 只描述出了什么错，不照抄文件内容。
+    DataFormatUnreadable { path: PathBuf, reason: String },
 }
 
 impl fmt::Display for MoveBlocker {
@@ -93,6 +105,13 @@ impl fmt::Display for MoveBlocker {
             }
             MoveBlocker::Pending => f.write_str("上一次移动还没收尾"),
             MoveBlocker::SourceChanged => f.write_str("当前游戏目录已经换了，不是发起移动时的那个"),
+            // 记号里的版本与号不进给人看的文字：同 CoreError::GameDirDataTooNew。
+            MoveBlocker::DataTooNew { .. } => {
+                f.write_str("目标游戏目录已经被更新的落樱用过，这个版本不能往里移")
+            }
+            MoveBlocker::DataFormatUnreadable { reason, .. } => {
+                write!(f, "目标游戏目录里的数据格式记录读不懂：{reason}")
+            }
         }
     }
 }
@@ -296,8 +315,8 @@ struct Footprint {
 
 impl Petalfall {
     /// 预检，不写盘。源是当前游戏目录，目标可以还不存在。实例不在报 [`CoreError::VersionNotInstalled`]，目标路径
-    /// 不合法报 [`CoreError::InvalidGameDirectory`]，版本 JSON 坏了照实报错；拦着移动的问题全列进
-    /// [`MovePreview::blockers`]。
+    /// 不合法或暂时连不上报 [`CoreError::InvalidGameDirectory`]，版本 JSON 坏了照实报错；拦着移动的问题全列进
+    /// [`MovePreview::blockers`]，目标的数据格式记号比这一版新、读不懂也在其中。
     pub async fn preview_instance_move(
         &self,
         id: &str,
@@ -316,6 +335,9 @@ impl Petalfall {
     ///
     /// 提交之前失败或取消时原件不动、暂存与日志删掉再报错；提交之后的记录迁移与清理失败记进
     /// [`MoveOutcome::follow_ups`]，照常返回成功。
+    ///
+    /// 写日志之前以「使用」方式核对目标游戏目录的数据格式记号：被拒时报 [`CoreError::GameDirDataTooNew`] 或
+    /// [`CoreError::DataFormatUnreadable`]，原件不动、不留日志。
     pub async fn move_instance_files(
         &self,
         request: &MoveRequest,
@@ -371,6 +393,24 @@ impl Petalfall {
 
     async fn inspect_move(&self, id: &str, target: &Path, env: &MoveEnv) -> Result<Inspection> {
         let target = validate_game_dir(&target.to_string_lossy())?;
+        // 预检不写盘，只判断；目标还不在照常往下，执行时建好目录再以「使用」方式核对一次。暂时连不上整次报错。
+        let data_format = match self.guard_game_dir_at(&target, GuardMode::Inspect).await? {
+            GameDirCheck::TooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            } => Some(MoveBlocker::DataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            }),
+            GameDirCheck::Unreadable { path, reason } => {
+                Some(MoveBlocker::DataFormatUnreadable { path, reason })
+            }
+            GameDirCheck::Absent | GameDirCheck::Ready => None,
+        };
         let source = self.game_dir().to_path_buf();
         let instance_dir = self.existing_instance_dir(id).await?;
         // Windows 上大小写不同的 id 也打得开目录；照它改名会改掉实例名的大小写，记录与备份也就对不上了。
@@ -420,6 +460,8 @@ impl Petalfall {
 
         let same_dir = lexical_key(&source) == lexical_key(&target);
         let mut blockers = Vec::new();
+        // 目标目录整个不能写，排在最前：执行时报的是第一个拦截项。
+        blockers.extend(data_format);
         if same_dir {
             blockers.push(MoveBlocker::SameDirectory);
         }
@@ -661,6 +703,10 @@ impl Petalfall {
         tokio::fs::create_dir_all(&versions)
             .await
             .map_err(|source| io_error(&versions, source))?;
+        // 预检只判断：目标原本不在时记号这时才写得进去，预检之后目标也可能刚被更新的落樱用过。放在写日志之前，被拒时
+        // 原件没动、没有日志要收。
+        self.guard_game_dir_at(&preview.target_game_dir, GuardMode::Use)
+            .await?;
         let mut journal = MoveJournal::new(
             move_journal::new_token()?,
             &preview.id,
@@ -4578,5 +4624,208 @@ mod tests {
             Path::new("E:/Games/.minecraft/versions/Pack2"),
             Path::new("E:/Games/.minecraft/versions/Pack")
         ));
+    }
+
+    // ---- 目标游戏目录的数据格式记号 ----
+
+    use crate::data_format::testing::{GuardFixture, LookFn, with_fixture};
+    use crate::data_format::{DirLook, STAMP_FILE};
+    use petalfall_instance::PETALFALL_META_DIR;
+    use petalfall_release::data_format::{StampFile, StampRead, parse_stamp};
+
+    /// 测试里当作这一版的数据格式号：号为 1 时一个记号都不写，看不出写没写。
+    const OWN: u32 = 2;
+    /// 比 [`OWN`] 新的记号与写下它的版本。
+    const NEWER_STAMP: &str = r#"{"data_format":3,"written_by":"1.1.0-dev.57"}"#;
+    const NEWER_WRITER: &str = "1.1.0-dev.57";
+    const UNREADABLE_STAMP: &str = r#"{"data_format":"3"}"#;
+
+    fn own() -> GuardFixture {
+        GuardFixture {
+            own: OWN,
+            look: None,
+        }
+    }
+
+    fn stamp_file(game_dir: &Path) -> PathBuf {
+        game_dir.join(PETALFALL_META_DIR).join(STAMP_FILE)
+    }
+
+    fn unreadable_reason() -> String {
+        match parse_stamp(StampFile::Contents(UNREADABLE_STAMP.as_bytes())) {
+            StampRead::Unreadable { reason } => reason,
+            other => panic!("夹具应当读不懂，实际是 {other:?}"),
+        }
+    }
+
+    /// 目录下每个文件的修改时间，键是以 `/` 分隔的相对路径。
+    fn mtimes(dir: &Path) -> BTreeMap<String, SystemTime> {
+        fn visit(root: &Path, dir: &Path, out: &mut BTreeMap<String, SystemTime>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(root, &path, out);
+                } else {
+                    let key = path
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.insert(key, std::fs::metadata(&path).unwrap().modified().unwrap());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        visit(dir, dir, &mut out);
+        out
+    }
+
+    /// 目标的记号比这一版新、读不懂：预检照常给出结果，两种情况各列为一个拦截项，不写盘；执行时被同一个拦截项挡下，
+    /// 原件的字节与修改时间都不变，不留日志。
+    #[tokio::test]
+    async fn a_newer_or_unreadable_target_is_a_blocker_and_nothing_moves() {
+        for stamp in [NEWER_STAMP, UNREADABLE_STAMP] {
+            let dirs = Dirs::new();
+            build_instance(&dirs).await;
+            put(&stamp_file(&dirs.target), stamp.as_bytes());
+            let expected = if stamp == NEWER_STAMP {
+                MoveBlocker::DataTooNew {
+                    path: dirs.target.clone(),
+                    found: 3,
+                    supported: OWN,
+                    written_by: Some(NEWER_WRITER.to_owned()),
+                }
+            } else {
+                MoveBlocker::DataFormatUnreadable {
+                    path: dirs.target.clone(),
+                    reason: unreadable_reason(),
+                }
+            };
+            let instance = snapshot(&dirs.instance_in(&dirs.source));
+            let backups = snapshot(&dirs.backups_in(&dirs.source));
+            let instance_times = mtimes(&dirs.instance_in(&dirs.source));
+            let target = snapshot(&dirs.target);
+
+            let preview = with_fixture(
+                own(),
+                dirs.petalfall().preview_instance_move(ID, &dirs.target),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                preview.blockers,
+                std::slice::from_ref(&expected),
+                "记号 {stamp}"
+            );
+            assert_eq!(snapshot(&dirs.target), target, "预检不写盘");
+
+            let err = with_fixture(
+                own(),
+                dirs.petalfall().move_instance_files(&dirs.request(), None),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(&err, CoreError::InstanceMoveBlocked { id, blocker } if id == ID && *blocker == expected),
+                "记号 {stamp}：{err:?}"
+            );
+            assert!(!err.to_string().contains(NEWER_WRITER), "{err}");
+            assert_untouched(&dirs, &instance, &backups).await;
+            assert_eq!(mtimes(&dirs.instance_in(&dirs.source)), instance_times);
+            assert_eq!(snapshot(&dirs.target), target);
+        }
+    }
+
+    /// 预检放行之后、写日志之前，目标被更新的落樱用过或记号坏了：执行在建好 `versions/` 之后以「使用」方式核对时
+    /// 拒绝，原件的字节与修改时间都不变，不留日志。
+    #[tokio::test]
+    async fn a_target_refused_after_the_preview_stops_the_move_before_the_journal() {
+        for later in [NEWER_STAMP, UNREADABLE_STAMP] {
+            let dirs = Dirs::new();
+            build_instance(&dirs).await;
+            let instance = snapshot(&dirs.instance_in(&dirs.source));
+            let backups = snapshot(&dirs.backups_in(&dirs.source));
+            let instance_times = mtimes(&dirs.instance_in(&dirs.source));
+            let checks = Arc::new(AtomicUsize::new(0));
+            let look: LookFn = {
+                let (checks, target) = (checks.clone(), dirs.target.clone());
+                Arc::new(move |dir: &Path| {
+                    // 目标第一次（预检）还没有记号，第二次（执行）读到 `later`；别的目录一律没有记号。
+                    let read = if dir == target && checks.fetch_add(1, Ordering::SeqCst) > 0 {
+                        parse_stamp(StampFile::Contents(later.as_bytes()))
+                    } else {
+                        parse_stamp(StampFile::Missing)
+                    };
+                    Box::pin(async move { DirLook::Stamp(read) })
+                })
+            };
+            let fixture = GuardFixture {
+                own: OWN,
+                look: Some(look),
+            };
+
+            let err = with_fixture(
+                fixture,
+                dirs.petalfall().move_instance_files(&dirs.request(), None),
+            )
+            .await
+            .unwrap_err();
+
+            match err {
+                CoreError::GameDirDataTooNew {
+                    path,
+                    found,
+                    supported,
+                    written_by,
+                } if later == NEWER_STAMP => {
+                    assert_eq!(path, dirs.target);
+                    assert_eq!((found, supported), (3, OWN));
+                    assert_eq!(written_by.as_deref(), Some(NEWER_WRITER));
+                }
+                CoreError::DataFormatUnreadable { path, reason } if later == UNREADABLE_STAMP => {
+                    assert_eq!(path, dirs.target);
+                    assert_eq!(reason, unreadable_reason());
+                }
+                other => panic!("记号 {later} 应拒绝移动，实际是 {other:?}"),
+            }
+            assert_eq!(checks.load(Ordering::SeqCst), 2, "预检一次、执行一次");
+            assert_untouched(&dirs, &instance, &backups).await;
+            assert_eq!(mtimes(&dirs.instance_in(&dirs.source)), instance_times);
+            assert!(!dirs.target.join("libraries").exists(), "拒绝时还没补依赖");
+        }
+    }
+
+    /// 目标原本不在、在而没有记号：移动成功后目标有记号，号是这一版的号。记号已经等于这一版时原样不动。
+    #[tokio::test]
+    async fn a_moved_into_target_carries_the_stamp() {
+        let equal = r#"{"data_format":2,"written_by":"1.0.0"}"#;
+        for existing in [None, Some(None), Some(Some(equal))] {
+            let dirs = Dirs::new();
+            build_instance(&dirs).await;
+            match existing {
+                None => {}
+                Some(None) => std::fs::create_dir_all(&dirs.target).unwrap(),
+                Some(Some(stamp)) => put(&stamp_file(&dirs.target), stamp.as_bytes()),
+            }
+
+            let moved = with_fixture(
+                own(),
+                dirs.petalfall().move_instance_files(&dirs.request(), None),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(moved, outcome(&dirs, &moved.token), "目标 {existing:?}");
+            assert!(dirs.instance_in(&dirs.target).is_dir());
+            let expected = match existing {
+                Some(Some(stamp)) => stamp,
+                _ => r#"{"data_format":2}"#,
+            };
+            assert_eq!(
+                std::fs::read_to_string(stamp_file(&dirs.target)).unwrap(),
+                expected,
+                "目标 {existing:?}"
+            );
+        }
     }
 }
