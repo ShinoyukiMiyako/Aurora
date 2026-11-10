@@ -4,6 +4,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { CONFIRM_COPY, DELETE_INSTANCE_COPY, GAME_DIR_SWITCH_COPY, SLOW_LOADING_HINT, TOAST_COPY } from "../../copy/flows";
+import { INSTANCE_RESCAN_MIN_MS } from "../../domain/limits";
 import type { GameDirectoryDto } from "../../ipc/config";
 import { IpcError } from "../../ipc/errors";
 import type { InstanceDto, WorldDto } from "../../ipc/instances";
@@ -577,6 +578,22 @@ describe("实例库：游戏目录的数据格式不合", () => {
   it("被预览版用过：标题说打不开，正文点名那一版和该装的版本，出路依次是换目录、重试、打开游戏目录", async () => {
     listFailsWith(tooNew("1.1.0-dev.57", "dev"));
     await mount();
+    expect(errorTitles()).toEqual(["这个游戏目录现在打不开"]);
+    expect(bodyShows("游戏目录 D:\\Games\\.minecraft 已经被预览版 1.1.0-dev.57 用过，这个版本读不了里面的实例。装上预览版 1.1.0-dev.57 或更新的版本，或者换一个游戏目录。")).toBe(true);
+    expect(errorActions()).toEqual(["换一个游戏目录", "重试", "打开游戏目录"]);
+    expect(cardNames()).toEqual([]);
+  });
+
+  it("先读到了列表、窗口回到前台的重扫被拒：实例卡片换成打不开的说明，出路依次是换目录、重试、打开游戏目录", async () => {
+    await mount();
+    expect(cardNames()).toHaveLength(4);
+    listFailsWith(tooNew("1.1.0-dev.57", "dev"));
+    vi.setSystemTime(Date.now() + INSTANCE_RESCAN_MIN_MS);
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await flush();
+    await afterMotion();
     expect(errorTitles()).toEqual(["这个游戏目录现在打不开"]);
     expect(bodyShows("游戏目录 D:\\Games\\.minecraft 已经被预览版 1.1.0-dev.57 用过，这个版本读不了里面的实例。装上预览版 1.1.0-dev.57 或更新的版本，或者换一个游戏目录。")).toBe(true);
     expect(errorActions()).toEqual(["换一个游戏目录", "重试", "打开游戏目录"]);
