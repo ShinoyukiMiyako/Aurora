@@ -20,6 +20,8 @@
 - [ ] 改了前端：在 `app/` 下跑过 `pnpm check`
 - [ ] 改了后端：在仓库根目录跑过 `cargo test --workspace` 和 `cargo clippy --workspace --all-targets`
 - [ ] 新增或改动了 LICENSE-ASSETS.md 第 2 节所列类型的素材文件（徽记母版与应用图标只接受机械改动，素材不接受 AI 生成的像素内容，见 CONTRIBUTING.md「素材」）
+- [ ] 没有改 app/src-tauri/tauri.conf.json 的 version（基础号只由维护者在冻结时改）
+- [ ] 改了落盘的文件格式：按 docs/architecture.md「数据格式号」判断过要不要加号
 
 ## CLA
 

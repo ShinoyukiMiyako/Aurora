@@ -8,7 +8,7 @@
 
 ## 先读什么
 
-- [CONTRIBUTING.md](CONTRIBUTING.md)：分支、提交、质量门、素材与 CLA。
+- [CONTRIBUTING.md](CONTRIBUTING.md)：分支、版本号与数据格式号、提交、质量门、素材与 CLA。
 - [README.md](README.md)：开发环境、常用命令、配置项与目录结构。
 - [docs/architecture.md](docs/architecture.md)：分层与依赖方向、错误处理、IPC 约定、磁盘布局、测试与守卫。
 
@@ -17,6 +17,7 @@
 ## 工作方式
 
 - 从最新的 `dev` 切出分支，PR 的目标是 `dev`。
+- 不要改 `app/src-tauri/tauri.conf.json` 的 `version`：基础号只由维护者在冻结时改，见 CONTRIBUTING.md「版本号与发版」。
 - 只改任务需要的部分。不要顺手重排导入、格式化无关代码或改名；看到别处的问题，告诉贡献者，不要夹带进同一个改动。
 - 第三方库的接口拿不准时，按锁定的版本查文档或依赖源码，不要凭记忆写：Rust 看 `Cargo.lock`，前端看 `app/pnpm-lock.yaml`；`.github/scripts/` 里用的 `github` 对象来自 `.github/workflows/cla.yml` 中按提交固定的 `actions/github-script`。
 - 缺信息就停下来问贡献者，不要用 TODO、空实现或占位值糊过去。
@@ -26,11 +27,12 @@
 
 Rust：
 
-- crate 之间的依赖只能自上而下，同层之间可以依赖但不能成环，分层表见 architecture 的「分层与依赖方向」。启动器外壳与 CLI 只直接依赖 `petalfall-core` 和 `petalfall-base` 两个内部 crate；安装引导程序不在分层表里，只依赖 `petalfall-setup-payload`。
+- crate 之间的依赖只能自上而下，同层之间可以依赖但不能成环，分层表见 architecture 的「分层与依赖方向」。启动器外壳与 CLI 只直接依赖 `petalfall-core` 和 `petalfall-base` 两个内部 crate，版本序、通道、数据格式号与安装包载荷头的读法都经 `petalfall-core` 转出；安装引导程序不在分层表里，只依赖 `petalfall-setup-payload` 与 `petalfall-release`。这两个 crate 只带不碰系统接口的依赖（`petalfall-release` 只依赖 semver、serde、serde_json）：打包工具在 Linux 上跑，判定表的测试要在 CI 上跑。
 - 每个 crate 有一个总的错误枚举，多数叫 `Error`，`petalfall-auth`、`petalfall-launch`、`petalfall-core` 分别叫 `AuthError`、`LaunchError`、`CoreError`。下层错误用 `#[from]` 包进去往上传，保留原因链。业务函数不吞错误，不用默认值掩盖缺失，错误只在命令边界统一转换一次，见 architecture 的「错误处理」和「错误形状」。
 - 新增命令照 architecture 的「命令」：命令名用 snake_case，一律 async，前端传参的键用 camelCase，返回的 DTO 字段用 snake_case，先校验全部参数再登记任务。
 - 命令里取门面照 architecture 的「门面快照与取消」：要联网、扫盘或跑子进程时先 `snapshot`，不要拿着读锁做慢操作。会改动实例目录的命令要经 `InstanceLocks` 占住实例，见 architecture 的「实例互斥」。
 - 远端给的相对路径、版本 id 等要拼进落点或请求地址时，先用 `petalfall-version` 的 `check_relative_path` / `check_path_segment` 校验，见 architecture 的「安装、补全与启动的约定」。
+- 改了写进数据目录或游戏目录的文件格式，先看 architecture 的「数据格式号」。
 - 仓库没有 rustfmt 配置，CI 也不查格式。改完先跑 `cargo fmt --all -- --check`：差异只在你改过的文件里，就跑 `cargo fmt --all`；别的文件也有差异时，不要整仓格式化，只排你改过的部分。
 
 前端：
@@ -56,10 +58,10 @@ PR 上只会自动跑 CLA 签署检查，不跑代码检查，下面这些要在
 
 - 前端，在 `app/` 下：先 `pnpm install --frozen-lockfile`，再 `pnpm check`，后者依次执行 `pnpm typecheck`、`pnpm test` 和 `pnpm lint:tokens`。
 - Rust，在仓库根目录：`cargo test --workspace` 和 `cargo clippy --workspace --all-targets`。
-- 改了 `.github/scripts/` 下的脚本、`.github/workflows/cla.yml` 或 `.github/workflows/beta-release.yml`：在仓库根目录跑 `node --test .github/scripts/*.test.mjs`，其中的测试会读 `cla.yml`，核对权限、运行机和 checkout，也会读 `beta-release.yml`，核对它与客户端的契约（见下文）。改了生成更新清单的 `.github/scripts/dev-distribution.mjs`，还要跑 `cargo test -p petalfall-tauri --lib commands::update`，它同时跑 `commands::updater` 与 `commands::update_sources` 的用例。
+- 改了 `.github/scripts/` 下的脚本（含 `.github/scripts/release-heads.mjs`、`.github/scripts/locked-cli.mjs` 与 `.github/scripts/workflow-lines.mjs`）、`.github/workflows/cla.yml`、`.github/workflows/beta-release.yml` 或 `.github/workflows/dev-build.yml`：在仓库根目录跑 `node --test .github/scripts/*.test.mjs`，其中的测试会读 `cla.yml`，核对权限、运行机和 checkout，也会读 `beta-release.yml`，核对它与客户端的契约（见下文），`.github/scripts/dev-build-contract.test.mjs` 还会读 `dev-build.yml`。改了 `petalfall-release` 的版本序或通道规则，同时跑 node 测试（它们与 Rust 读同一份向量 `crates/petalfall-release/testdata/version-order.json`）。改了生成更新清单的 `.github/scripts/dev-distribution.mjs`，还要跑 `cargo test -p petalfall-tauri --lib commands::update`，它同时跑 `commands::updater`、`commands::update_sources`、`commands::update_channels`、`commands::update_head`、`commands::update_slot` 与 `commands::update_package` 的用例。
 - 上一条的 `node --test` 里，`.github/scripts/distribution-scripts.test.mjs` 会用 bash 执行分发链路的三个 shell 脚本，所以这条命令必须在 POSIX shell 里跑：要有 bash、openssl、sha256sum 与 GNU 的 stat（脚本用 `stat -c`，macOS 自带的 BSD stat 不认），还有 base64、awk 这类常用工具。Windows 上在 Git Bash 里跑，先用 `command -v bash` 确认 PATH 里的 bash 是 Git 自带的（例如 `/usr/bin/bash`），不是 WSL 的启动器 `bash.exe`。在 PowerShell 或 cmd 里直接跑时，bash 常常解析到 WSL 启动器，PATH 里也没有 openssl 和 sha256sum，大部分用例会以与改动无关的原因失败；这种失败不算你的改动出了问题，也不算验证通过，照实告诉贡献者。
 
-两侧的测试会读对方的源码：`app/src/ipc/bridge.test.ts` 读 Rust 的 `generate_handler!` 和能力文件，启动器外壳的 Rust 测试读 `app/index.html` 和 `app/src/lib/app-info.ts`，`app/src-tauri/src/commands/updater.rs` 的测试读 `.github/workflows/dev-build.yml`，按作业切开，核对 `publish` 的版本检查与 `publish-hk` 的公网回读用的都是客户端先问的香港清单地址，还读 `.github/scripts/` 下的非测试脚本，核对生成清单时写了客户端读的 `x-sources` 和 `x-size` 两个键；`app/src-tauri/src/commands/update_sources.rs` 的测试读 `.github/scripts/dev-distribution.mjs` 的源表，与客户端的源名、主机白名单和地区划分逐一比对；反过来，`.github/scripts/beta-release-contract.test.mjs` 读 `.github/workflows/beta-release.yml`，按作业和步骤切开，核对发布公钥在打包前无条件注入、签名带版本、各作业只拿自己那份凭据、挂环境的作业只在 beta 上跑，以及香港清单地址，还读 `updater.rs`，核对那边把 `BETA_ENDPOINT` 钉成同一个地址。拿不准改动会不会被另一侧读到，就两侧都跑。
+两侧的测试会读对方的源码：`app/src/ipc/bridge.test.ts` 读 Rust 的 `generate_handler!` 和能力文件，启动器外壳的 Rust 测试读 `app/index.html` 和 `app/src/lib/app-info.ts`，`app/src-tauri/src/commands/updater.rs` 的测试读 `.github/workflows/dev-build.yml`，按作业切开，核对 `publish` 的版本检查与 `publish-hk` 的公网回读用的都是客户端先问的香港清单地址，还读 `.github/scripts/` 下的非测试脚本，核对生成清单时写了客户端读的 `x-sources` 和 `x-size` 两个键；`app/src-tauri/src/commands/update_sources.rs` 的测试读 `.github/scripts/dev-distribution.mjs` 的源表，与客户端的源名、主机白名单和地区划分逐一比对；反过来，`.github/scripts/beta-release-contract.test.mjs` 读 `.github/workflows/beta-release.yml`，按作业和步骤切开，核对发布公钥在打包前无条件注入、签名带版本、各作业只拿自己那份凭据、挂环境的作业只在 beta 上跑，以及香港清单地址，还读 `updater.rs`，核对那边把 `BETA_ENDPOINT` 钉成同一个地址。`.github/scripts/release-heads.test.mjs` 读 `app/src-tauri/src/commands/update_channels.rs` 里编进两把公钥的两行 `include_str!`（核对它们就是注入行读的那两个 .pub 文件）、`updater.rs` 的清单地址、`crates/petalfall-release/src/data_format.rs` 的 `DATA_FORMAT` 那一行、`crates/petalfall-release/testdata/version-order.json`（共用版本向量），以及 `app/src-tauri/tauri.conf.json` 的 `plugins.updater`（核对其中不含 `installerArgs`）。拿不准改动会不会被另一侧读到，就两侧都跑。
 
 跑过的命令和结果写进 PR 模板的「怎么验证的」一节。没有跑或者没跑通的，照实告诉贡献者，不要说成已经通过。
 
