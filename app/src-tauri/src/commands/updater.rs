@@ -28,16 +28,17 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use petalfall_base::http::NetworkFailure;
-use petalfall_core::release::order::Channel;
+use petalfall_core::release::order::{compare_versions, Channel};
 use petalfall_core::{CancellationToken, CoreEvent, DownloadProgress, EventSink, PackageCandidate};
 use semver::Version;
 use serde::{Serialize, Serializer};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager, State, Url};
-use tauri_plugin_updater::{Update, Updater, UpdaterExt};
+use tauri_plugin_updater::{RemoteRelease, Update, Updater, UpdaterBuilder, UpdaterExt};
 use tokio::sync::Notify;
 
 use crate::commands::error::{code, source_chain, CommandError};
+use crate::commands::update_channels::channel_pubkey;
 use crate::commands::update_slot::{
     Candidate, CheckConclusion, ReleaseVersion, SlotError, UpdateSlot,
 };
@@ -122,6 +123,10 @@ pub enum UnsupportedReason {
     DowngradesAllowed,
     /// 版本号的预发布标识认不出是哪个通道（[`Channel::of`]），不知道该去哪里取清单。
     UnknownChannel,
+    /// 注入的 `plugins.updater.pubkey` 不是钥表里本包通道的那一把（[`channel_pubkey`]）。检查器一律按钥表认
+    /// 落樱的更新，不看注入的那一把：fork 换了自己的钥却没换仓库里的 `.pub` 文件时，它会去认落樱的包、
+    /// 把自己换掉，所以两者对不上就整体不支持。
+    PubkeyMismatch,
 }
 
 impl UnsupportedReason {
@@ -145,6 +150,9 @@ impl UnsupportedReason {
             }
             UnsupportedReason::UnknownChannel => {
                 "这个版本号不属于任何更新通道，不知道该去哪里检查更新，自更新已停用"
+            }
+            UnsupportedReason::PubkeyMismatch => {
+                "配置的更新签名公钥不是这个版本所属通道的那一把，自更新已停用"
             }
         }
     }
@@ -180,23 +188,29 @@ pub fn detect_support(
     if debug_build {
         return UpdaterSupport::Unsupported(UnsupportedReason::DebugBuild);
     }
-    if Channel::of(pre_release).is_none() {
+    let Some(channel) = Channel::of(pre_release) else {
         return UpdaterSupport::Unsupported(UnsupportedReason::UnknownChannel);
-    }
-    let has_pubkey = updater_config
+    };
+    // CI 注入前 trim 过，钥表给的也是去掉首尾空白的；这里同样去掉，只比内容。
+    let pubkey = updater_config
         .and_then(|config| config.get("pubkey"))
         .and_then(Value::as_str)
-        .is_some_and(|key| !key.trim().is_empty());
-    if !has_pubkey {
+        .map(str::trim)
+        .filter(|key| !key.is_empty());
+    let Some(pubkey) = pubkey else {
         return UpdaterSupport::Unsupported(UnsupportedReason::MissingPubkey);
+    };
+    if pubkey != channel_pubkey(channel) {
+        return UpdaterSupport::Unsupported(UnsupportedReason::PubkeyMismatch);
     }
     // 两种键名同时出现、或值不是布尔，插件反序列化配置就会失败、整个应用起不来，也按没打开处理，不注册插件。
     let required = values_of(updater_config, REQUIRE_SIGNED_VERSION_KEYS);
     if !matches!(required.as_slice(), [flag] if flag.as_bool() == Some(true)) {
         return UpdaterSupport::Unsupported(UnsupportedReason::SignedVersionNotRequired);
     }
-    // 应用没设版本比较器，插件见到它打开就改用「与当前不同」比较。两种键名同时出现或值不是布尔时，
-    // 同样是插件拒收整份配置，不注册。
+    // 插件的全局状态没设版本比较器，检查器自己也没设时，插件见到它打开就改用「与当前不同」比较。检查器都设了
+    // 「严格新于」的比较器（[`check_checker`]），这一项仍必须关着，漏设比较器的检查器才不会退回去。两种键名
+    // 同时出现或值不是布尔时，同样是插件拒收整份配置，不注册。
     let downgrades = values_of(updater_config, ALLOW_DOWNGRADES_KEYS);
     if matches!(downgrades.as_slice(), [] | [Value::Bool(false)]) {
         UpdaterSupport::Supported
@@ -313,8 +327,8 @@ pub struct RefusedUpdateDto {
 pub struct UpdaterInfoDto {
     pub current_version: String,
     pub supported: bool,
-    /// debug_build / missing_pubkey / signed_version_not_required / downgrades_allowed / unknown_channel；
-    /// 支持时为 `null`。
+    /// debug_build / missing_pubkey / signed_version_not_required / downgrades_allowed / unknown_channel /
+    /// pubkey_mismatch；支持时为 `null`。
     pub unsupported_reason: Option<UnsupportedReason>,
     /// 本包的通道；版本号认不出通道时为 `null`。
     pub package_channel: Option<Channel>,
@@ -478,38 +492,63 @@ pub async fn check_update(
 /// 非 2xx 时只记一行不带地址与状态码的日志、不记成错误，最后报的是最后记下的那个错误。这样香港机的清单一坏，GitHub 上
 /// 字节相同的那份就问不到，香港机回的状态码也进不了 detail。
 async fn fetch_conclusion(app: &AppHandle) -> Result<CheckConclusion<Update>, CommandError> {
-    let endpoints = version_endpoints(app.package_info().version.pre.as_str())?;
+    let (channel, endpoints) = version_endpoints(app.package_info().version.pre.as_str())?;
     let checkers = endpoints
         .iter()
-        .map(|endpoint| manifest_checker(app, endpoint))
+        .map(|endpoint| check_checker(app, channel, endpoint))
         .collect::<tauri_plugin_updater::Result<Vec<_>>>()
         .map_err(|err| check_failed(&endpoints, err))?;
     let version = app.package_info().version.to_string();
     check_in_order(&endpoints, &version, |index| checkers[index].check()).await
 }
 
-/// 预发布标识为 `pre_release` 的版本该问的清单端点。认不出通道时报 `updater_unsupported`：[`detect_support`]
-/// 已把这种版本判为不支持、各命令先过 `require_supported`，走到这里说明两处判定对不上了，宁可报错也不拿哪个通道的
-/// 清单顶上。
-fn version_endpoints(pre_release: &str) -> Result<Vec<String>, CommandError> {
+/// 预发布标识为 `pre_release` 的版本所属的通道与该问的清单端点。认不出通道时报 `updater_unsupported`：
+/// [`detect_support`] 已把这种版本判为不支持、各命令先过 `require_supported`，走到这里说明两处判定对不上了，
+/// 宁可报错也不拿哪个通道的清单顶上。
+fn version_endpoints(pre_release: &str) -> Result<(Channel, Vec<String>), CommandError> {
     Channel::of(pre_release)
-        .map(channel_endpoints)
+        .map(|channel| (channel, channel_endpoints(channel)))
         .ok_or_else(|| UnsupportedReason::UnknownChannel.error())
 }
 
-/// 只问 `endpoint` 这一个端点的检查器。签名公钥、requireSignedVersion 与版本比较由 `updater_builder` 从插件
-/// 状态带上，与把几个端点一次性交给插件时相同。
-fn manifest_checker(app: &AppHandle, endpoint: &str) -> tauri_plugin_updater::Result<Updater> {
+/// 只问通道 `channel` 的 `endpoint` 这一个端点的检查器构建器，这个 crate 构造检查器只从这里起步。
+///
+/// 显式用钥表里这个通道的公钥（[`channel_pubkey`]）：插件把它存进检查器的上下文，随 `Update` 带到下载后验签，
+/// 不调的话沿用插件配置里注入的那一把，那一把只属于本包的通道。换源下载只改地址，不换钥。
+fn channel_builder(
+    app: &AppHandle,
+    channel: Channel,
+    endpoint: &str,
+) -> tauri_plugin_updater::Result<UpdaterBuilder> {
     let http = petalfall_base::http::HttpConfig::default();
     let (connect, read) = (http.connect_timeout, http.read_timeout);
-    app.updater_builder()
+    Ok(app
+        .updater_builder()
+        .pubkey(channel_pubkey(channel))
         // 插件把这个回调放进上下文、随检查结果带进 Update，下载更新包也用它建客户端。插件自己的客户端一个超时
         // 都不设，终点不再送数据时下载会一直挂着；这里只补连接与读取超时，不设总时限：慢网下二十多兆的包要
         // 下好几分钟，总时限会把正常下载掐断。检查的总时限另由 CHECK_TIMEOUT 设。
         .configure_client(move |client| plugin_client(client, connect, read))
         .endpoints(endpoint_urls(&[endpoint.to_owned()]))?
-        .timeout(CHECK_TIMEOUT)
+        .timeout(CHECK_TIMEOUT))
+}
+
+/// 自动检查与下载前重查用的检查器：只为严格新于当前版本的清单造出更新（[`strictly_newer`]）。
+/// requireSignedVersion 由插件配置带上。
+fn check_checker(
+    app: &AppHandle,
+    channel: Channel,
+    endpoint: &str,
+) -> tauri_plugin_updater::Result<Updater> {
+    channel_builder(app, channel, endpoint)?
+        .version_comparator(|current, release| strictly_newer(&current, &release))
         .build()
+}
+
+/// 清单给的版本是否严格新于正在运行的版本 `current`，按 semver 优先级比，与挑候选时判「比当前新」用的是同一个
+/// 比较（[`compare_versions`]）：只差构建元数据的两个版本算同一版，不造更新。
+fn strictly_newer(current: &Version, release: &RemoteRelease) -> bool {
+    compare_versions(&release.version, current).is_gt()
 }
 
 /// 插件 `configure_client` 回调收发的 reqwest 构建器。这一层不直接依赖 reqwest，从插件公开的回调类型里取出
@@ -1513,13 +1552,23 @@ mod tests {
         assert_eq!(*steps.borrow(), ["install"], "拉起了就不该重新显示窗口");
     }
 
-    const PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWdu";
+    /// 支持判定用例里正式版的包要注入的公钥：钥表里正式版那一把。用例里的版本号不带预发布标识时都是正式版。
+    fn stable_key() -> &'static str {
+        channel_pubkey(Channel::Stable)
+    }
 
     #[test]
     fn support_requires_release_build_and_non_empty_pubkey() {
-        let with_key = json!({ "pubkey": PUBKEY, "requireSignedVersion": true });
+        let with_key = json!({ "pubkey": stable_key(), "requireSignedVersion": true });
         assert_eq!(
             detect_support(Some(&with_key), false, ""),
+            UpdaterSupport::Supported
+        );
+        // CI 注入前 trim 过，手写的配置多带了首尾空白也认。
+        let padded =
+            json!({ "pubkey": format!("  {}\n", stable_key()), "requireSignedVersion": true });
+        assert_eq!(
+            detect_support(Some(&padded), false, ""),
             UpdaterSupport::Supported
         );
         assert_eq!(
@@ -1549,7 +1598,7 @@ mod tests {
     #[test]
     fn support_requires_signed_versions() {
         for key in REQUIRE_SIGNED_VERSION_KEYS {
-            let config = json!({ "pubkey": PUBKEY, key: true });
+            let config = json!({ "pubkey": stable_key(), key: true });
             assert_eq!(
                 detect_support(Some(&config), false, ""),
                 UpdaterSupport::Supported,
@@ -1557,14 +1606,14 @@ mod tests {
             );
         }
         for config in [
-            json!({ "pubkey": PUBKEY }),
-            json!({ "pubkey": PUBKEY, "requireSignedVersion": false }),
-            json!({ "pubkey": PUBKEY, "require-signed-version": false }),
-            json!({ "pubkey": PUBKEY, "requireSignedVersion": "true" }),
-            json!({ "pubkey": PUBKEY, "requireSignedVersion": 1 }),
-            json!({ "pubkey": PUBKEY, "requireSignedVersion": null }),
-            json!({ "pubkey": PUBKEY, "require_signed_version": true }),
-            json!({ "pubkey": PUBKEY, "requireSignedVersion": true, "require-signed-version": true }),
+            json!({ "pubkey": stable_key() }),
+            json!({ "pubkey": stable_key(), "requireSignedVersion": false }),
+            json!({ "pubkey": stable_key(), "require-signed-version": false }),
+            json!({ "pubkey": stable_key(), "requireSignedVersion": "true" }),
+            json!({ "pubkey": stable_key(), "requireSignedVersion": 1 }),
+            json!({ "pubkey": stable_key(), "requireSignedVersion": null }),
+            json!({ "pubkey": stable_key(), "require_signed_version": true }),
+            json!({ "pubkey": stable_key(), "requireSignedVersion": true, "require-signed-version": true }),
         ] {
             assert_eq!(
                 detect_support(Some(&config), false, ""),
@@ -1593,14 +1642,14 @@ mod tests {
 
         for key in REQUIRE_SIGNED_VERSION_KEYS {
             let config: Config =
-                serde_json::from_value(json!({ "pubkey": PUBKEY, key: true })).unwrap();
+                serde_json::from_value(json!({ "pubkey": stable_key(), key: true })).unwrap();
             assert!(config.require_signed_version, "{key}");
         }
-        let absent: Config = serde_json::from_value(json!({ "pubkey": PUBKEY })).unwrap();
+        let absent: Config = serde_json::from_value(json!({ "pubkey": stable_key() })).unwrap();
         assert!(!absent.require_signed_version);
         for rejected in [
-            json!({ "pubkey": PUBKEY, "requireSignedVersion": true, "require-signed-version": true }),
-            json!({ "pubkey": PUBKEY, "requireSignedVersion": "true" }),
+            json!({ "pubkey": stable_key(), "requireSignedVersion": true, "require-signed-version": true }),
+            json!({ "pubkey": stable_key(), "requireSignedVersion": "true" }),
         ] {
             assert!(
                 serde_json::from_value::<Config>(rejected.clone()).is_err(),
@@ -1614,13 +1663,14 @@ mod tests {
     #[test]
     fn support_refuses_configs_that_allow_downgrades() {
         for key in ALLOW_DOWNGRADES_KEYS {
-            let closed = json!({ "pubkey": PUBKEY, "requireSignedVersion": true, key: false });
+            let closed =
+                json!({ "pubkey": stable_key(), "requireSignedVersion": true, key: false });
             assert_eq!(
                 detect_support(Some(&closed), false, ""),
                 UpdaterSupport::Supported,
                 "{closed}"
             );
-            let open = json!({ "pubkey": PUBKEY, "requireSignedVersion": true, key: true });
+            let open = json!({ "pubkey": stable_key(), "requireSignedVersion": true, key: true });
             assert_eq!(
                 detect_support(Some(&open), false, ""),
                 UpdaterSupport::Unsupported(UnsupportedReason::DowngradesAllowed),
@@ -1628,11 +1678,11 @@ mod tests {
             );
         }
         for config in [
-            json!({ "pubkey": PUBKEY, "requireSignedVersion": true, "allowDowngrades": "false" }),
-            json!({ "pubkey": PUBKEY, "requireSignedVersion": true, "allowDowngrades": 0 }),
-            json!({ "pubkey": PUBKEY, "requireSignedVersion": true, "allowDowngrades": null }),
+            json!({ "pubkey": stable_key(), "requireSignedVersion": true, "allowDowngrades": "false" }),
+            json!({ "pubkey": stable_key(), "requireSignedVersion": true, "allowDowngrades": 0 }),
+            json!({ "pubkey": stable_key(), "requireSignedVersion": true, "allowDowngrades": null }),
             json!({
-                "pubkey": PUBKEY,
+                "pubkey": stable_key(),
                 "requireSignedVersion": true,
                 "allowDowngrades": false,
                 "allow-downgrades": false,
@@ -1662,15 +1712,15 @@ mod tests {
 
         for key in ALLOW_DOWNGRADES_KEYS {
             let config: Config =
-                serde_json::from_value(json!({ "pubkey": PUBKEY, key: true })).unwrap();
+                serde_json::from_value(json!({ "pubkey": stable_key(), key: true })).unwrap();
             assert!(config.allow_downgrades, "{key}");
         }
-        let absent: Config = serde_json::from_value(json!({ "pubkey": PUBKEY })).unwrap();
+        let absent: Config = serde_json::from_value(json!({ "pubkey": stable_key() })).unwrap();
         assert!(!absent.allow_downgrades);
         for rejected in [
-            json!({ "pubkey": PUBKEY, "allowDowngrades": false, "allow-downgrades": false }),
-            json!({ "pubkey": PUBKEY, "allowDowngrades": "false" }),
-            json!({ "pubkey": PUBKEY, "allowDowngrades": null }),
+            json!({ "pubkey": stable_key(), "allowDowngrades": false, "allow-downgrades": false }),
+            json!({ "pubkey": stable_key(), "allowDowngrades": "false" }),
+            json!({ "pubkey": stable_key(), "allowDowngrades": null }),
         ] {
             assert!(
                 serde_json::from_value::<Config>(rejected.clone()).is_err(),
@@ -1683,14 +1733,21 @@ mod tests {
     /// 清单。三个通道的版本照常支持；开发构建仍先按开发构建报。
     #[test]
     fn support_refuses_versions_outside_known_channels() {
-        let config = json!({ "pubkey": PUBKEY, "requireSignedVersion": true });
-        for known in ["", "dev.37", "beta.1", "BETA.2"] {
+        for (known, channel) in [
+            ("", Channel::Stable),
+            ("dev.37", Channel::Dev),
+            ("beta.1", Channel::Beta),
+            ("BETA.2", Channel::Beta),
+        ] {
+            let config = json!({ "pubkey": channel_pubkey(channel), "requireSignedVersion": true });
             assert_eq!(
                 detect_support(Some(&config), false, known),
                 UpdaterSupport::Supported,
                 "{known}"
             );
         }
+        // 认不出通道就无从谈哪一把是本包通道的钥，先于公钥判。
+        let config = json!({ "pubkey": stable_key(), "requireSignedVersion": true });
         for unknown in ["rc.1", "alpha.1", "betax.1", "nightly", "dev-1"] {
             assert_eq!(
                 detect_support(Some(&config), false, unknown),
@@ -1712,6 +1769,74 @@ mod tests {
         let info = serde_json::to_value(state.info("1.0.0-rc.1".into())).unwrap();
         assert_eq!(info["supported"], false);
         assert_eq!(info["unsupported_reason"], "unknown_channel");
+    }
+
+    /// 注入的公钥必须正是钥表里本包通道的那一把：dev 包注入了发布钥、beta 包注入了 dev 钥、fork 注入了自己的钥，
+    /// 都整体不支持。检查器按钥表认落樱的更新，注入的钥对不上时 fork 会去认落樱的包，CI 注入错了钥则装不上自己
+    /// 通道的更新。本机构建没注入公钥仍按缺公钥报，打开 allowDowngrades 仍不支持。
+    #[test]
+    fn support_requires_the_key_of_the_package_channel() {
+        let dev_key = channel_pubkey(Channel::Dev);
+        let release_key = channel_pubkey(Channel::Beta);
+        assert_ne!(dev_key, release_key);
+        let fork_key = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWdu";
+        let with = |key: &str| json!({ "pubkey": key, "requireSignedVersion": true });
+        for (pre_release, key) in [
+            ("dev.37", release_key),
+            ("beta.1", dev_key),
+            ("", dev_key),
+            ("dev.37", fork_key),
+            ("beta.1", fork_key),
+            ("", fork_key),
+        ] {
+            assert_eq!(
+                detect_support(Some(&with(key)), false, pre_release),
+                UpdaterSupport::Unsupported(UnsupportedReason::PubkeyMismatch),
+                "{pre_release} {key}"
+            );
+        }
+        for (pre_release, key) in [
+            ("dev.37", dev_key),
+            ("beta.1", release_key),
+            ("", release_key),
+        ] {
+            assert_eq!(
+                detect_support(Some(&with(key)), false, pre_release),
+                UpdaterSupport::Supported,
+                "{pre_release}"
+            );
+        }
+
+        for pre_release in ["dev.37", "beta.1", ""] {
+            assert_eq!(
+                detect_support(
+                    Some(&json!({ "requireSignedVersion": true })),
+                    false,
+                    pre_release
+                ),
+                UpdaterSupport::Unsupported(UnsupportedReason::MissingPubkey),
+                "{pre_release}"
+            );
+        }
+        let downgrades = json!({
+            "pubkey": dev_key,
+            "requireSignedVersion": true,
+            "allowDowngrades": true,
+        });
+        assert_eq!(
+            detect_support(Some(&downgrades), false, "dev.37"),
+            UpdaterSupport::Unsupported(UnsupportedReason::DowngradesAllowed)
+        );
+
+        let state = UpdaterState::new(UpdaterSupport::Unsupported(
+            UnsupportedReason::PubkeyMismatch,
+        ));
+        let err = state.require_supported().unwrap_err();
+        assert_eq!(err.code, code::UPDATER_UNSUPPORTED);
+        assert_eq!(err.detail.unwrap()["reason"], "pubkey_mismatch");
+        let info = serde_json::to_value(state.info("1.0.0-dev.12".into())).unwrap();
+        assert_eq!(info["supported"], false);
+        assert_eq!(info["unsupported_reason"], "pubkey_mismatch");
     }
 
     #[test]
@@ -1811,15 +1936,15 @@ mod tests {
     fn version_endpoints_refuse_unknown_channels() {
         assert_eq!(
             version_endpoints("").unwrap(),
-            vec![PRIMARY_ENDPOINT.to_owned()]
+            (Channel::Stable, vec![PRIMARY_ENDPOINT.to_owned()])
         );
         assert_eq!(
             version_endpoints("beta.1").unwrap(),
-            vec![BETA_ENDPOINT.to_owned()]
+            (Channel::Beta, vec![BETA_ENDPOINT.to_owned()])
         );
         assert_eq!(
             version_endpoints("dev.37").unwrap(),
-            vec![DEV_ENDPOINT.to_owned(), dev_endpoint()]
+            (Channel::Dev, vec![DEV_ENDPOINT.to_owned(), dev_endpoint()])
         );
         for unknown in ["rc.1", "alpha.1", "betax.1"] {
             let err = version_endpoints(unknown).unwrap_err();
@@ -3237,14 +3362,162 @@ mod tests {
         ] {
             assert!(download_update.contains(step), "{step}\n{download_update}");
         }
-        let checker = top_level_fn(source, "fn manifest_checker(");
+        let checker = top_level_fn(source, "fn channel_builder(");
         assert!(
             checker
                 .contains(".configure_client(move |client| plugin_client(client, connect, read))"),
             "{checker}"
         );
         let fetch = top_level_fn(source, "async fn fetch_conclusion(");
-        assert!(fetch.contains("manifest_checker(app, endpoint)"), "{fetch}");
+        assert!(
+            fetch.contains("check_checker(app, channel, endpoint)"),
+            "{fetch}"
+        );
+    }
+
+    /// 外壳的非测试代码（app/src-tauri/src 下各文件去掉测试模块与整行注释）里的代码行，带上文件路径。
+    fn shell_code_lines() -> Vec<(String, String)> {
+        fn visit(dir: &std::path::Path, lines: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(&path, lines);
+                    continue;
+                }
+                if path.extension().is_none_or(|extension| extension != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let all: Vec<&str> = text.lines().map(str::trim).collect();
+                // 测试模块都在文件末尾：`#[cfg(test)]` 紧跟一行 `mod` 声明，从那里截断。
+                let end = all
+                    .windows(2)
+                    .position(|pair| {
+                        pair[0] == "#[cfg(test)]"
+                            && (pair[1].starts_with("mod ")
+                                || pair[1].starts_with("pub(crate) mod ")
+                                || pair[1].starts_with("pub mod "))
+                    })
+                    .unwrap_or(all.len());
+                let file = path.display().to_string();
+                lines.extend(
+                    all[..end]
+                        .iter()
+                        .filter(|line| !line.starts_with("//"))
+                        .map(|line| (file.clone(), (*line).to_owned())),
+                );
+            }
+        }
+        let mut lines = Vec::new();
+        visit(
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src")),
+            &mut lines,
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|(_, line)| line.starts_with("pub fn detect_support(")),
+            "没读到 updater.rs 的源码"
+        );
+        lines
+    }
+
+    /// 外壳非测试代码里 `needle` 出现的次数，按文件列出。
+    fn occurrences(lines: &[(String, String)], needle: &str) -> Vec<(String, usize)> {
+        let mut found: Vec<(String, usize)> = Vec::new();
+        for (file, line) in lines {
+            let count = line.matches(needle).count();
+            if count == 0 {
+                continue;
+            }
+            match found.iter_mut().find(|(seen, _)| seen == file) {
+                Some((_, total)) => *total += count,
+                None => found.push((file.clone(), count)),
+            }
+        }
+        found
+    }
+
+    /// 检查器只从 [`channel_builder`] 起步、同一处显式带上所问通道的公钥：别处另建检查器就会沿用插件配置里注入的
+    /// 那一把（本包通道的钥），跟随别的通道时验不过，或者反过来拿错的钥认了别的通道的包。比较器只设在
+    /// [`check_checker`]，插件默认的 `.updater()` 一处都不用。换通道用的安装参数与「装完不重开」这一期都还没有，
+    /// 一处都不该出现：插件会把它们带进下载出来的每一个包。各函数的行为单测里造不出来（要 AppHandle），钉住源码。
+    #[test]
+    fn checkers_start_from_one_builder_that_names_the_channel_key() {
+        let lines = shell_code_lines();
+        let (source, _) = include_str!("updater.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap();
+        let in_updater = |count: usize| vec![(updater_rs_path(&lines), count)];
+
+        assert_eq!(occurrences(&lines, "updater_builder()"), in_updater(1));
+        let builder = top_level_fn(source, "fn channel_builder(");
+        assert!(builder.contains("updater_builder()"), "{builder}");
+        assert!(
+            builder.contains(".pubkey(channel_pubkey(channel))"),
+            "{builder}"
+        );
+
+        assert_eq!(occurrences(&lines, ".updater()"), Vec::new());
+
+        let comparators = occurrences(&lines, "version_comparator(");
+        let checker = top_level_fn(source, "fn check_checker(");
+        assert_eq!(
+            comparators,
+            in_updater(checker.matches("version_comparator(").count())
+        );
+        assert_eq!(
+            checker.matches("version_comparator(").count(),
+            1,
+            "{checker}"
+        );
+
+        for absent in ["installer_arg", "restart_after_install("] {
+            assert_eq!(occurrences(&lines, absent), Vec::new(), "{absent}");
+        }
+    }
+
+    /// 读到的源码里 updater.rs 那一个文件的路径。
+    fn updater_rs_path(lines: &[(String, String)]) -> String {
+        lines
+            .iter()
+            .find(|(_, line)| line.starts_with("pub fn detect_support("))
+            .map(|(file, _)| file.clone())
+            .unwrap()
+    }
+
+    /// 自动检查的比较器只认严格新于当前版本的清单，按 semver 优先级比：相等、更旧、只差构建元数据的都不造更新。
+    #[test]
+    fn the_check_comparator_takes_only_strictly_newer_versions() {
+        let release = |version: &str| RemoteRelease {
+            version: Version::parse(version).unwrap(),
+            notes: None,
+            pub_date: None,
+            data: tauri_plugin_updater::RemoteReleaseInner::Dynamic(
+                tauri_plugin_updater::ReleaseManifestPlatform {
+                    url: Url::parse("https://petalfall.org/updates/dev/installer.exe").unwrap(),
+                    signature: "sig".to_owned(),
+                },
+            ),
+        };
+        let current = Version::parse("1.0.0-dev.12").unwrap();
+        for (offered, newer) in [
+            ("1.0.0-dev.13", true),
+            ("1.0.0-dev.120", true),
+            ("1.0.0", true),
+            ("1.1.0-beta.1", true),
+            ("1.0.0-dev.12", false),
+            ("1.0.0-dev.12+ci.7", false),
+            ("1.0.0-dev.11", false),
+            ("1.0.0-beta.99", false),
+            ("0.9.0", false),
+        ] {
+            assert_eq!(
+                strictly_newer(&current, &release(offered)),
+                newer,
+                "{offered}"
+            );
+        }
     }
 
     /// 取端点与支持判定都按应用自己的版本号认通道，接线要 AppHandle 与 tauri 上下文，单测造不出来，钉住源码：
@@ -3259,7 +3532,7 @@ mod tests {
         let fetch = top_level_fn(source, "async fn fetch_conclusion(");
         assert!(
             fetch.contains(
-                "let endpoints = version_endpoints(app.package_info().version.pre.as_str())?;"
+                "let (channel, endpoints) = version_endpoints(app.package_info().version.pre.as_str())?;"
             ),
             "{fetch}"
         );
