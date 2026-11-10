@@ -1,7 +1,10 @@
 // 锚定在触发元素旁的非模态面板：下载快览、账户切换、筛选面板，以及下拉列表与菜单的外框。
 //
 // - portal 到浮层根；按锚点矩形定位，首选方位放不下就翻到对侧，再夹在窗口内 8px。
-//   锚点所在的滚动容器滚动、面板或窗口尺寸变化时重新定位。
+//   锚点所在的滚动容器滚动、面板或窗口尺寸变化时重新定位；打开后沿用已采用的方位，当前一侧放不下了才翻，
+//   面板随内容变矮（下拉里键入筛选词）时不会因为首选一侧又放得下而整块翻回去。
+// - 入场从锚点长出：缩放原点落在锚点正对面板的那一点上（右对齐的按钮在面板右上角、右键菜单在指针处），
+//   位移起点朝向实际采用的方位，翻到对侧时也是从锚点那边滑出。
 // - 关闭途径：Esc（入 Esc 栈，只关栈顶）、指针按在面板与锚点之外（按下即判定，这次按下照常作用在目标上）、
 //   Tab 移出面板。按在锚点上不算外部，由锚点自己切换开合；按在面板之后才打开的浮层里（面板里弹出的下拉）也不算。
 // - 非模态，不圈定焦点。关闭时焦点仍在面板内（或已丢到 body）才还给打开前的元素；
@@ -43,7 +46,35 @@ export interface PopoverProps {
 /** 入场时起点向锚点一侧偏移的距离（px）。 */
 const ENTER_SHIFT = 4;
 
-const ORIGIN: Record<Side, string> = { bottom: "top center", top: "bottom center", right: "left center", left: "right center" };
+/** 把 placement 的方位换成 side，对齐方式不变。 */
+function withSide(placement: Placement, side: Side): Placement {
+  const align = placement.split("-")[1];
+  return align === "start" || align === "end" ? `${side}-${align}` : side;
+}
+
+/** 缩放原点（相对面板左上角）：面板朝向锚点的那条边上，正对锚点中心的一点；锚点超出面板范围时夹到边上。 */
+export function originTowardAnchor(anchor: Rect, panel: { left: number; top: number; width: number; height: number }, side: Side): string {
+  const x = Math.min(Math.max(anchor.left + anchor.width / 2 - panel.left, 0), panel.width);
+  const y = Math.min(Math.max(anchor.top + anchor.height / 2 - panel.top, 0), panel.height);
+  switch (side) {
+    case "bottom":
+      return `${x}px 0px`;
+    case "top":
+      return `${x}px ${panel.height}px`;
+    case "right":
+      return `0px ${y}px`;
+    case "left":
+      return `${panel.width}px ${y}px`;
+  }
+}
+
+/** 入场起点相对最终位置的偏移：从锚点那一侧滑出。 */
+export function enterShift(side: Side, distance: number): { x: number; y: number } {
+  return {
+    x: side === "right" ? -distance : side === "left" ? distance : 0,
+    y: side === "bottom" ? -distance : side === "top" ? distance : 0,
+  };
+}
 
 function anchorRect(anchor: PopoverAnchor, root: HTMLElement): Rect {
   if (anchor instanceof Element) return rectInRoot(anchor, root);
@@ -176,12 +207,17 @@ interface Position {
   top: number;
   side: Side;
   anchorWidth: number;
+  origin: string;
+  /** 第一次定位时采用的方位：入场方向只按它定，之后翻侧也不重播入场。 */
+  enter: Side;
 }
 
 function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidth, autoFocus, role, id, aria, className, close, children }: PanelProps) {
   const present = useIsPresent();
   const panelRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<Position | null>(null);
+  // 已采用的方位：之后的重新定位以它为首选
+  const adopted = useRef<Side | null>(null);
 
   useLayoutEffect(() => {
     if (present) currentPanel.current = panelRef.current;
@@ -193,8 +229,16 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
     const a = anchorRect(anchor, root);
     const bounds = root.getBoundingClientRect();
     const width = matchWidth ? Math.max(el.offsetWidth, a.width) : el.offsetWidth;
-    const next = { ...placeFloating(a, { width, height: el.offsetHeight }, placement, offset, { width: bounds.width, height: bounds.height }), anchorWidth: a.width };
-    setPos((prev) => (prev && prev.left === next.left && prev.top === next.top && prev.side === next.side && prev.anchorWidth === next.anchorWidth ? prev : next));
+    const height = el.offsetHeight;
+    const request = adopted.current === null ? placement : withSide(placement, adopted.current);
+    const placed = placeFloating(a, { width, height }, request, offset, { width: bounds.width, height: bounds.height });
+    adopted.current = placed.side;
+    const origin = originTowardAnchor(a, { left: placed.left, top: placed.top, width, height }, placed.side);
+    setPos((prev) =>
+      prev && prev.left === placed.left && prev.top === placed.top && prev.side === placed.side && prev.anchorWidth === a.width && prev.origin === origin
+        ? prev
+        : { ...placed, anchorWidth: a.width, origin, enter: prev === null ? placed.side : prev.enter },
+    );
   }, [anchor, root, placement, offset, matchWidth]);
 
   useLayoutEffect(() => {
@@ -256,8 +300,9 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
   };
 
   const side = pos ? pos.side : (placement.split("-")[0] as Side);
-  const x = side === "right" ? -ENTER_SHIFT : side === "left" ? ENTER_SHIFT : 0;
-  const y = side === "bottom" ? -ENTER_SHIFT : side === "top" ? ENTER_SHIFT : 0;
+  // 入场等定位之后才开始：挂载那一帧还不知道会不会翻到对侧，起点按首选方位给的话翻侧时方向是反的。
+  // 位移写成从起点到 0 的关键帧，起点按第一次定位的方位算；值不变时重渲染不会重播
+  const shift = pos === null ? null : enterShift(pos.enter, ENTER_SHIFT);
 
   return (
     <motion.div
@@ -275,10 +320,10 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
         left: pos ? pos.left : 0,
         top: pos ? pos.top : 0,
         visibility: pos ? "visible" : "hidden",
-        transformOrigin: ORIGIN[side],
+        transformOrigin: pos ? pos.origin : undefined,
       }}
-      initial={{ opacity: 0, scale: 0.97, x, y }}
-      animate={{ opacity: 1, scale: 1, x: 0, y: 0, transition: { ...springs.settle, opacity: fade.in } }}
+      initial={{ opacity: 0, scale: 0.97 }}
+      animate={shift === null ? undefined : { opacity: 1, scale: 1, x: [shift.x, 0], y: [shift.y, 0], transition: { ...springs.settle, opacity: fade.in } }}
       exit={{ opacity: 0, scale: 0.98, transition: fade.out }}
       onKeyDown={onKeyDown}
       onBlur={onBlur}

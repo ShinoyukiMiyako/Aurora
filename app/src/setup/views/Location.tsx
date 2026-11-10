@@ -1,7 +1,10 @@
+import { useIsPresent } from "framer-motion";
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon } from "../../art/Icon";
+import { useReflow } from "../../lib/reflow";
 import { isImeComposing } from "../../lib/util";
 import { useEscapeListener } from "../../shell/overlay";
+import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { Checkbox } from "../../ui/Checkbox";
 import { Field } from "../../ui/Field";
@@ -19,8 +22,9 @@ export const DIR_CHECK_DEBOUNCE_MS = 300;
 /**
  * 当前该显示的校验结果。新结果回来之前继续显示上一次的，提示行不随每个按键闪一下；
  * 这点滞后放不过坏目录，发起安装时 App 会再查一遍。
+ * active 为假（换步后这一页正在淡出）时排队的校验作废：用户已经离开，不该再替这一页写探针。
  */
-function useDirCheck(dir: string, initialCheck: DirCheck | null, checkDir: (path: string) => Promise<DirCheck>, attempt: (action: () => Promise<unknown>) => void): DirCheck | null {
+function useDirCheck(dir: string, initialCheck: DirCheck | null, active: boolean, checkDir: (path: string) => Promise<DirCheck>, attempt: (action: () => Promise<unknown>) => void): DirCheck | null {
   const [settled, setSettled] = useState(initialCheck);
 
   // App 每次渲染都传新闭包，放进依赖的话勾一下复选框都会重新写探针
@@ -30,6 +34,7 @@ function useDirCheck(dir: string, initialCheck: DirCheck | null, checkDir: (path
   });
 
   useEffect(() => {
+    if (!active) return;
     if (initialCheck !== null) {
       setSettled(initialCheck);
       return;
@@ -46,7 +51,7 @@ function useDirCheck(dir: string, initialCheck: DirCheck | null, checkDir: (path
       superseded = true;
       window.clearTimeout(timer);
     };
-  }, [dir, initialCheck]);
+  }, [active, dir, initialCheck]);
 
   return settled;
 }
@@ -96,9 +101,11 @@ export interface LocationProps {
 
 export function Location({ copy, dir, requiredBytes, desktopShortcut, initialCheck, busy, attempt, checkDir, pickFolder, onDirChange, onUseDefault, onShortcutChange, onBack, onInstall }: LocationProps) {
   const text = copy.location;
-  const check = useDirCheck(dir, initialCheck, checkDir, attempt);
+  const present = useIsPresent();
+  const check = useDirCheck(dir, initialCheck, present, checkDir, attempt);
   const issue = check === null || check.issue === null ? undefined : text.issue[check.issue];
   const hint = check === null ? null : dirHint(text, check, requiredBytes);
+  const reflow = useReflow<HTMLDivElement>();
 
   // 发起安装时目录已经取走，这时再改或返回，安装仍按旧目录走，界面却对不上；下面的 busy 禁用同理
   useEscapeListener(!busy, onBack);
@@ -139,7 +146,11 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
         </>
       }
     >
-      <div className={styles.content}>
+      {/*
+        和欢迎页的安装位置是同一块：换步时从那边的位置滑过来，见 Frame 的 carryAcross。
+        校验结果在一行提示与两行错误之间换（英文的长错误会折行）时字段变高，下面的复选框与实际位置滑过去，不跳
+      */}
+      <div ref={reflow} className={styles.content} data-setup-carry="location">
         <Field
           label={text.inputLabel}
           error={issue}
@@ -158,7 +169,7 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
           </div>
         </Field>
         <Checkbox checked={desktopShortcut} onChange={onShortcutChange} label={text.shortcut} disabled={busy} />
-        {check !== null && check.issue === null && check.appended && <p className={styles.finalPath}>{text.finalPath(check.normalized)}</p>}
+        <Appear>{check !== null && check.issue === null && check.appended && <p className={styles.finalPath}>{text.finalPath(check.normalized)}</p>}</Appear>
       </div>
     </Frame>
   );

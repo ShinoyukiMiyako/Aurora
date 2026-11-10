@@ -1,8 +1,11 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { keydown, render, type Rendered } from "../test/dom";
-import { addDays, addMonths, CalendarHeatmap, calendarDayLabel, daysInMonth, heatLevel, shiftMonthKeepDay, weekdayIndex } from "./CalendarHeatmap";
+import { keydown, render, waitForFrames, type Rendered } from "../test/dom";
+import { addDays, addMonths, CALENDAR_WEEKS, CalendarHeatmap, calendarDayLabel, daysInMonth, heatLevel, shiftMonthKeepDay, weekdayIndex } from "./CalendarHeatmap";
 
 let view: Rendered | undefined;
 afterEach(() => {
@@ -109,17 +112,63 @@ const day = (date: string) => {
 };
 
 describe("CalendarHeatmap", () => {
-  it("网格结构：周一开始，2026 年 10 月前空 3 格、共 5 周", () => {
+  it("网格结构：周一开始，2026 年 10 月前空 3 格、占 5 周，第 6 周整行空格补齐", () => {
     view = render(<Harness />);
     const grid = document.querySelector('[role="grid"]') as HTMLElement;
     expect(grid.getAttribute("aria-label")).toBe("2026 年 10 月游玩日历");
     const rowsEl = grid.querySelectorAll('[role="row"]');
-    expect(rowsEl).toHaveLength(6);
+    expect(rowsEl).toHaveLength(1 + CALENDAR_WEEKS);
     expect([...rowsEl[0].children].map((c) => c.textContent)).toEqual(["一", "二", "三", "四", "五", "六", "日"]);
     const firstWeek = [...rowsEl[1].children];
     expect(firstWeek.slice(0, 3).every((c) => c.querySelector("button") === null)).toBe(true);
     expect(firstWeek[3].querySelector("button")?.dataset.date).toBe("2026-10-01");
+    expect([...rowsEl[6].children].map((c) => c.getAttribute("role"))).toEqual(Array(7).fill("gridcell"));
+    expect(rowsEl[6].querySelector("button")).toBeNull();
     expect(grid.querySelectorAll("button[data-date]")).toHaveLength(31);
+  });
+
+  it("只占 4 周的二月也画满 6 周：翻月时日历高度不变", () => {
+    const base = { minutes: new Map<string, number>(), today: "2021-02-10", selected: null, onSelect: () => undefined, onMonthChange: () => undefined };
+    view = render(<CalendarHeatmap {...base} month="2021-02" minMonth="2021-01" maxMonth="2021-03" />);
+    const grid = document.querySelector('[role="grid"]') as HTMLElement;
+    expect(grid.querySelectorAll('[role="row"]')).toHaveLength(1 + CALENDAR_WEEKS);
+    expect(grid.querySelectorAll("button[data-date]")).toHaveLength(28);
+    expect(grid.querySelectorAll('[role="gridcell"]')).toHaveLength(CALENDAR_WEEKS * 7);
+  });
+
+  it("挂载时日格不另外淡入；翻月后整块日格从透明淡入", () => {
+    const onMonthChange = vi.fn();
+    view = render(<Harness onMonthChange={onMonthChange} />);
+    const weeks = () => document.querySelector<HTMLElement>('[role="rowgroup"]') as HTMLElement;
+    expect(weeks().style.opacity).toBe("");
+    act(() => day("2026-10-30").focus());
+    keydown(day("2026-10-30"), "PageDown");
+    expect(onMonthChange).toHaveBeenCalledWith("2026-11");
+    expect(weeks().style.opacity).toBe("0");
+    expect(document.activeElement).toBe(day("2026-11-30"));
+  });
+
+  it("游玩数据从无到有（加载完成）时日格整块淡入一次，之后数据刷新不再淡入", async () => {
+    const base = { today: "2026-10-30", selected: null, onSelect: () => undefined, onMonthChange: () => undefined, month: "2026-10", minMonth: "2026-09", maxMonth: "2026-11" };
+    view = render(<CalendarHeatmap {...base} minutes={new Map()} />);
+    const weeks = () => document.querySelector<HTMLElement>('[role="rowgroup"]') as HTMLElement;
+    expect(weeks().style.opacity).toBe("");
+    view.rerender(<CalendarHeatmap {...base} minutes={DATA} />);
+    expect(weeks().style.opacity).toBe("0");
+    expect(day("2026-10-02").dataset.level).toBe("1");
+    await waitForFrames(() => expect(weeks().style.opacity).toBe("1"));
+    view.rerender(<CalendarHeatmap {...base} minutes={new Map(DATA)} />);
+    expect(weeks().style.opacity).toBe("1");
+  });
+
+  it("数据到达时键盘停在日格上：日格原地换内容，焦点不掉到 body", () => {
+    const base = { today: "2026-10-30", selected: null, onSelect: () => undefined, onMonthChange: () => undefined, month: "2026-10", minMonth: "2026-09", maxMonth: "2026-11" };
+    view = render(<CalendarHeatmap {...base} minutes={new Map()} />);
+    const waiting = day("2026-10-15");
+    act(() => waiting.focus());
+    view.rerender(<CalendarHeatmap {...base} minutes={DATA} />);
+    expect(document.activeElement).toBe(waiting);
+    expect(day("2026-10-15")).toBe(waiting);
   });
 
   it("每格按分钟分档，没有记录的格为 none 且禁用", () => {
@@ -194,5 +243,27 @@ describe("CalendarHeatmap", () => {
     expect(() => render(<CalendarHeatmap {...base} month="2026-12" minMonth="2026-01" maxMonth="2026-10" />)).toThrow(/不在/);
     expect(() => render(<CalendarHeatmap {...base} month="2026-10" minMonth="2026-11" maxMonth="2026-10" />)).toThrow(/颠倒/);
     expect(() => render(<CalendarHeatmap {...base} minutes={new Map([["2026-10-01", -5]])} month="2026-10" minMonth="2026-01" maxMonth="2026-10" />)).toThrow(/非负/);
+  });
+});
+
+describe("CalendarHeatmap 样式", () => {
+  const strip = (text: string) => text.replace(/\r\n/g, "\n").replace(/\/\*[\s\S]*?\*\//g, "");
+  const css = strip(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "CalendarHeatmap.module.css"), "utf8"));
+  const rule = (selector: string) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // 换行前是逗号的是组合选择器的后半截，不当成独立的规则
+    const match = new RegExp(`(?<!,)(?:^|\\n)${escaped} \\{([^}]*)\\}`).exec(css);
+    if (match === null) throw new Error(`没有 ${selector} 规则`);
+    return match[1];
+  };
+
+  it("可点的日格按下在悬停放大上收一档；减少动画时不缩放、降不透明度", () => {
+    expect(rule('.day:hover:not([data-level="none"])')).toMatch(/scale: 1\.1;/);
+    expect(rule('.day:active:not([data-level="none"])')).toMatch(/scale: 1\.03;/);
+    expect(rule(':global([data-sk-reduced]) .day:active:not([data-level="none"])')).toMatch(/scale: none;\s*opacity: 0\.85;/);
+  });
+
+  it("日格不做颜色过渡：主题切换一帧换完", () => {
+    expect(/transition: ([^;]+);/.exec(rule(".day"))?.[1]).toBe("scale var(--sk-spring-tap-dur) var(--sk-spring-tap)");
   });
 });

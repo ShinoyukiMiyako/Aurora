@@ -1,4 +1,6 @@
+/* 退场的行脱离布局后以列表为定位基准，留在原处淡出 */
 .list {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -11,8 +13,8 @@
   gap: var(--sk-space-2);
 }
 
-/* 贴边列表：行间分隔线，末行无 */
-.list[data-variant="flush"] > .item + .item {
+/* 贴边列表：行间分隔线，第一条在场的行无。退场中的行（inert）不算：它一开始淡出，分隔线就交给下一行 */
+.list[data-variant="flush"] > .item:not([inert]) ~ .item:not([inert]) {
   border-top: 1px solid var(--sk-line);
 }
 
@@ -41,7 +43,6 @@
   color: var(--sk-text);
   text-align: start;
   outline: none;
-  transition: background-color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .row[data-variant="flush"] {
@@ -111,6 +112,7 @@
 }
 
 /* ---- 状态 ---- */
+/* 悬停底色瞬时跟手：指针扫过一列行时不留拖尾。只有选中底色淡入（过渡写在选中态上，取消选中瞬时） */
 .row[data-interactive] {
   cursor: pointer;
 }
@@ -126,10 +128,34 @@
 .row[data-selected],
 .row[data-selected]:hover {
   background: var(--sk-accent-soft);
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+/* 按下：比悬停深一档，瞬时。标题按钮覆盖整行的写法以按住标题按钮为准，按尾部控件不算按行 */
+.row[data-interactive]:not([data-overlay], [data-disabled]):active,
+.row[data-overlay]:has(.titleButton:active) {
+  background: var(--sk-bg-3);
+  transition: none;
+}
+
+.row[data-variant="flush"][data-interactive]:not([data-overlay], [data-disabled]):active,
+.row[data-variant="flush"][data-overlay]:has(.titleButton:active) {
+  background: var(--sk-bg-2);
+}
+
+.row[data-selected][data-interactive]:not([data-overlay], [data-disabled]):active,
+.row[data-selected][data-overlay]:has(.titleButton:active) {
+  background: var(--sk-accent-soft-2);
 }
 
 .row[data-selected] .title {
   color: var(--sk-accent-strong);
+}
+
+/* 停用与恢复时淡化走透明度过渡，不是整行一帧变灰 */
+.row > .leading,
+.row > .body {
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
 }
 
 .row[data-inactive] > .leading,

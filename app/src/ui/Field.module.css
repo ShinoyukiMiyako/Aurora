@@ -33,8 +33,22 @@
   margin-top: 0;
 }
 
+/* 预留模式：空着也占一行与上距，错误替换提示、提示时有时无时字段不变高 */
+.message[data-reserve] {
+  min-height: var(--sk-lh-caption);
+  margin-top: var(--sk-space-6);
+}
+
 .message[data-error] {
   color: var(--sk-danger);
+}
+
+/* 错误的图标与文字是一个整体，一起淡入 */
+.error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sk-space-4);
+  min-width: 0;
 }
 
 /* 14 的图标对齐 18 行高的第一行 */

@@ -6,9 +6,10 @@ import { stubCanvas } from "../art/illustrations/test-canvas";
 import { AVATAR_LINE, LAUNCH_COPY, PAGE_LABEL, STOPPED_LABEL } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
 import type { LaunchView } from "../launch/launchView";
+import { springs, TOOLTIP_TIMING } from "../lib/motion";
 import { startSession } from "../state/session";
 import type { Task } from "../domain/types";
-import { LauncherProvider } from "../state/launcher";
+import { LauncherProvider, useLauncherActions } from "../state/launcher";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../test/launcher";
@@ -20,6 +21,18 @@ import { dragShift, dropIndex, moveItem, PIN_STEP, pinLaunchItem, pinLine, pinTa
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
+
+/** 侧栏经 animate 驱动的固定项位移：起点与所用弹簧。jsdom 里动画不走帧，只看它是怎么被发起的。 */
+const motionCalls = vi.hoisted(() => [] as { from: unknown; transition: unknown }[]);
+vi.mock("framer-motion", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("framer-motion")>();
+  const animate = (...args: unknown[]) => {
+    const [subject, , transition] = args;
+    if (actual.isMotionValue(subject)) motionCalls.push({ from: subject.get(), transition });
+    return (actual.animate as (...forwarded: unknown[]) => unknown)(...args);
+  };
+  return { ...actual, animate };
+});
 
 const T0 = 1_700_000_000_000;
 const inst = { id: "生存", name: "生存", lastPlayedAt: null, playError: null } as InstanceSummary;
@@ -167,11 +180,13 @@ describe("固定实例菜单的第一项", () => {
 let view: Rendered | undefined;
 let nav: NavApi;
 let shell: ShellApi;
+let launcher: ReturnType<typeof useLauncherActions>;
 const chrome: ChromeApi = { scrollContentToTop: vi.fn(), focusContent: vi.fn() };
 
 function Probe() {
   nav = useNav();
   shell = useShell();
+  launcher = useLauncherActions();
   return null;
 }
 
@@ -335,6 +350,36 @@ describe("侧栏", () => {
     }
   });
 
+  it("拖动中方块保持上浮；松手提交新顺序后，被拖项从松手处用 pop 飞进空位，其余项 settle", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
+    try {
+      stubRowLayout();
+      // 松手点要落在胶囊里才算提交：jsdom 不做布局，给一个足够大的矩形
+      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 1000, width: 1000, height: 1000, x: 0, y: 0, toJSON: () => ({}) });
+      await mount();
+      const pin = item("pin:生存");
+      const pointer = (type: string, clientY: number) =>
+        act(() => {
+          pin.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, pointerId: 7, clientX: 10, clientY }));
+        });
+      // 越过一格再多 5px：落点是第二格，松手时被拖项比空位低 5px
+      const overshoot = 5;
+      pointer("pointerdown", 100);
+      pointer("pointermove", 100 + PIN_STEP + overshoot);
+      expect(pin.closest("li")?.hasAttribute("data-dragging")).toBe(true);
+      expect(pin.querySelector("[data-sk-art='iso']")?.className).toMatch(/lift/);
+
+      motionCalls.length = 0;
+      pointer("pointerup", 100 + PIN_STEP + overshoot);
+      await flush();
+      expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["创造", "生存", "空岛"] }]);
+      expect(motionCalls.filter((call) => call.transition === springs.pop)).toEqual([{ from: overshoot, transition: springs.pop }]);
+      expect(motionCalls.filter((call) => call.transition === springs.settle)).toHaveLength(2);
+    } finally {
+      delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture;
+    }
+  });
+
   it("选中滑块停在选中那一行上；落到固定实例上只留指示条；账户页没有选中项时收起", async () => {
     stubRowLayout();
     await mount();
@@ -414,6 +459,25 @@ describe("侧栏", () => {
     expect(row.dataset.motionPopId).toMatch(/\S/);
   });
 
+  it("随固定区一起出现的项不播入场；之后新固定的项从小处弹入", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存"), instanceDto("创造"), instanceDto("空岛"), instanceDto("末地")], pins: ["生存", "创造", "空岛"] });
+    await mount();
+    const rowOf = (key: string) => {
+      const row = item(key).closest("li");
+      if (row === null) throw new Error(`${key} 不在列表项里`);
+      return row;
+    };
+    // jsdom 里动画不走帧：入场的项停在起点（透明），不播的项直接是终点
+    expect(rowOf("pin:生存").style.opacity).toBe("1");
+    await act(async () => {
+      await launcher.togglePin("末地");
+    });
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存", "创造", "空岛", "末地"] }]);
+    expect(rowOf("pin:末地").style.opacity).toBe("0");
+    expect(rowOf("pin:生存").style.opacity).toBe("1");
+  });
+
   it("分隔线常驻：一个固定实例都没有时也在", async () => {
     bootOverrides(ipc, { instances: [instanceDto("生存")], pins: [] });
     await mount();
@@ -467,10 +531,38 @@ describe("侧栏", () => {
     expect(item("pin:生存").closest("ul")?.parentElement?.hasAttribute("data-late")).toBe(false);
   });
 
+  it("固定实例名称提示的第二行套在等宽数字的槽里", async () => {
+    await mount();
+    act(() => {
+      item("pin:生存").dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    });
+    act(() => {
+      vi.advanceTimersByTime(TOOLTIP_TIMING.sidebarDelay);
+    });
+    const tip = document.querySelector("[role='tooltip']");
+    if (tip === null) throw new Error("悬停后没有出现名称提示");
+    const line = tip.querySelector("[class*='pinLine']");
+    expect(line?.textContent).toBe(AVATAR_LINE.ready(null, Date.now()));
+  });
+
   it("主导航条目的名称写页面名，快捷键写在 aria-keyshortcuts 上", async () => {
     await mount();
     expect(item("discover").getAttribute("aria-label")).toBe(PAGE_LABEL.discover);
     expect(item("discover").getAttribute("aria-keyshortcuts")).toBe("Control+3");
+  });
+
+  it("菜单开着时打开另一固定项的菜单：旧菜单留下播完退场，新菜单另起", async () => {
+    await mount();
+    const menuOf = (name: string) => [...document.querySelectorAll("[role='menu']")].find((el) => el.getAttribute("aria-label") === SIDEBAR_COPY.menuLabel(name));
+    act(() => item("pin:生存").focus());
+    keydown(item("pin:生存"), "ContextMenu");
+    await flush();
+    expect(menuOf("生存")).toBeDefined();
+    keydown(item("pin:创造"), "ContextMenu");
+    await flush();
+    expect(menuOf("创造")).toBeDefined();
+    // jsdom 里退场动画不走帧：旧菜单还在，说明它在播退场而不是被直接卸掉
+    expect(menuOf("生存")).toBeDefined();
   });
 
   it("菜单键打开固定实例的菜单，「下移」把它和下一项对调并写入", async () => {

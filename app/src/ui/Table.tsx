@@ -8,10 +8,11 @@
 // 列按尺寸档显示或隐藏，档位由 <html data-sk-tier> 决定，组件不需要在脚本里知道当前档。
 // 选择、排序的状态都由页面持有：组件只渲染并回报，批量操作条也由页面替换工具条。
 // 行的增删：被删的行脱离布局原地淡出，其余行靠布局动画让位；页面只管换 rows，不用为退场做任何事。
+// 筛到零行时空状态与行在同一个 AnimatePresence 里互换，同样淡入淡出。
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { AnimatePresence, motion, useAnimate, useIsPresent, useReducedMotionConfig, type HTMLMotionProps, type Variants } from "framer-motion";
-import { useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
 import { fade, springs } from "../lib/motion";
 import { cssVars, cx } from "../lib/util";
@@ -139,6 +140,34 @@ export function rowChurn(previous: readonly string[], next: readonly string[]): 
   return changed > 0 ? changed : next.filter((k, i) => previous[i] !== k).length;
 }
 
+/** 前后都在、但下标变了的行数：这些行要量一次布局、走一段让位。 */
+export function rowShift(previous: readonly string[], next: readonly string[]): number {
+  const before = new Map(previous.map((k, i) => [k, i]));
+  let moved = 0;
+  next.forEach((k, i) => {
+    const was = before.get(k);
+    if (was !== undefined && was !== i) moved++;
+  });
+  return moved;
+}
+
+export interface TableShape {
+  keys: readonly string[];
+  virtual: boolean;
+}
+
+/**
+ * 这次变化是否整表换上：行不逐个淡入淡出，表体淡入一次。
+ * - 虚拟化的行按下标绝对定位，没有退场也没有让位：行集合或顺序一变就整表换，不让被删行之后的行一帧跳上来。
+ * - 跨过虚拟化阈值时两种渲染互换，同样整表换。
+ * - 不虚拟化时，增删换位的行或被挤动的行超过上限才整表换：每一行被挤动都要量一次布局，再多就掉帧。
+ */
+export function swapsWholeTable(previous: TableShape, next: TableShape): boolean {
+  const churn = rowChurn(previous.keys, next.keys);
+  if (previous.virtual || next.virtual) return churn > 0;
+  return churn > ROW_MOTION_LIMIT || rowShift(previous.keys, next.keys) > ROW_MOTION_LIMIT;
+}
+
 /** full 淡入淡出带缩放；fade 减少动画时只留透明度；none 一次变化太多，行直接换上。 */
 type RowMotion = "full" | "fade" | "none";
 
@@ -151,15 +180,17 @@ const ROW_VARIANTS: Variants = {
 interface PresenceRowProps extends HTMLMotionProps<"div"> {
   index: number;
   rowMotion: RowMotion;
-  /** 行顺序的签名：只有它变了才量布局，窗口缩放、分档切换引起的重渲染不触发布局动画。 */
-  order: string;
+  /** 表格挂载之后才出现的行播入场；挂载时就在的行跟着所在页面的入场走。 */
+  entering: boolean;
 }
 
 /**
  * 不虚拟化的一行。退场时留在原处淡出，这段时间它已经不是表格的一行：不再带序号（键盘移动按序号找行），
  * 也不接受指针与焦点，读屏不再读到。
+ * 只有下标变了的行才量布局（layoutDependency 取自己的下标）：删掉一行时它前面的行不动，也不必测量；
+ * 窗口缩放、分档切换引起的重渲染不触发布局动画。
  */
-function PresenceRow({ index, rowMotion, order, tabIndex, ...rest }: PresenceRowProps) {
+function PresenceRow({ index, rowMotion, entering, tabIndex, ...rest }: PresenceRowProps) {
   const present = useIsPresent();
   return (
     <motion.div
@@ -169,15 +200,46 @@ function PresenceRow({ index, rowMotion, order, tabIndex, ...rest }: PresenceRow
       inert={!present}
       custom={rowMotion}
       variants={ROW_VARIANTS}
-      initial="hidden"
+      initial={entering ? "hidden" : false}
       animate="show"
       exit="leave"
       layout={rowMotion === "full" ? "position" : false}
-      layoutDependency={order}
+      layoutDependency={index}
       transition={{ layout: springs.settle }}
     />
   );
 }
+
+interface PresenceEmptyProps extends Omit<HTMLMotionProps<"div">, "children"> {
+  rowMotion: RowMotion;
+  entering: boolean;
+  children: ReactNode;
+}
+
+/** 空表时表体里的空状态。与行同在一个 AnimatePresence 里：筛到零行时剩下的行照常淡出，空状态淡入；反过来也一样。 */
+function PresenceEmpty({ rowMotion, entering, children, ...rest }: PresenceEmptyProps) {
+  const present = useIsPresent();
+  return (
+    <motion.div
+      {...rest}
+      role="row"
+      className={styles.emptyRow}
+      inert={!present}
+      custom={rowMotion}
+      variants={ROW_VARIANTS}
+      initial={entering ? "hidden" : false}
+      animate="show"
+      exit="leave"
+    >
+      <div role="gridcell" className={styles.empty}>
+        {children}
+      </div>
+    </motion.div>
+  );
+}
+
+/** 空状态在 AnimatePresence 里的键：行键来自调用方，控制字符开头的键不会与之相撞。 */
+const EMPTY_ROW_KEY = "\u0000empty";
 
 /** 非当前行的行内控件退出 Tab 序列；回到当前行时恢复原值。原值记在 data-table-tabindex 上。 */
 function syncRowTabStops(body: HTMLElement) {
@@ -226,10 +288,15 @@ export function Table<T>({
   const activeIndex = rows.length === 0 ? -1 : Math.min(active, rows.length - 1);
 
   const reduced = useReducedMotionConfig() === true;
-  const shownKeys = useRef(keys);
-  const crowded = rowChurn(shownKeys.current, keys) > ROW_MOTION_LIMIT;
+  const shown = useRef<TableShape>({ keys, virtual });
+  const crowded = swapsWholeTable(shown.current, { keys, virtual });
   const rowMotion: RowMotion = crowded ? "none" : reduced ? "fade" : "full";
-  const order = keys.join("|");
+  // 挂载时就在的行与空状态不播入场。不能用 AnimatePresence 的 initial={false} 来做：它会让这些行里面
+  // 之后才挂载的元素（开关、徽标这类自带入场的部件）也永远跳过入场。这里只在行自己身上关掉
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -245,7 +312,7 @@ export function Table<T>({
   const tabStop = renderedIndexes === null || renderedIndexes.length === 0 || renderedIndexes.includes(activeIndex) ? activeIndex : renderedIndexes[0];
 
   useLayoutEffect(() => {
-    shownKeys.current = keys;
+    shown.current = { keys, virtual };
     const body = bodyRef.current;
     if (body === null) return;
     if (crowded) void animateBody(body, { opacity: [0, 1] }, fade.in);
@@ -367,7 +434,7 @@ export function Table<T>({
       }),
     };
     if (style !== undefined) return <div key={key} {...shared} data-row-index={index} data-virtual="" aria-rowindex={index + 2} style={style} />;
-    return <PresenceRow key={key} {...shared} index={index} rowMotion={rowMotion} order={order} />;
+    return <PresenceRow key={key} {...shared} index={index} rowMotion={rowMotion} entering={mounted.current} />;
   };
 
   const vars = cssVars({
@@ -407,7 +474,8 @@ export function Table<T>({
                 {column.sortable && onSortChange !== undefined ? (
                   <button type="button" className={styles.sortButton} data-sorted={sorted === null ? undefined : sorted} onClick={() => onSortChange(nextSort(sort, column.key))}>
                     <span className={styles.text}>{content}</span>
-                    {sorted !== null && <Icon name={sorted === "asc" ? "chevron-up" : "chevron-down"} size={14} className={styles.sortIcon} />}
+                    {/* 箭头常驻：换排序列时淡入淡出，翻转方向时转半圈；未排序的列也留着它的位置，换列时表头文字不挪动 */}
+                    <Icon name="chevron-up" size={14} className={styles.sortIcon} />
                   </button>
                 ) : (
                   content
@@ -418,17 +486,17 @@ export function Table<T>({
         </div>
       </div>
       <div ref={bodyRef} className={styles.body} role="rowgroup" style={virtual ? { height: `${virtualizer.getTotalSize()}px` } : undefined} data-virtual={virtual ? "" : undefined}>
-        {rows.length === 0 ? (
-          <div role="row" className={styles.emptyRow}>
-            <div role="gridcell" className={styles.empty}>
-              {empty}
-            </div>
-          </div>
-        ) : virtual ? (
+        {virtual ? (
           virtualizer.getVirtualItems().map((item) => renderRow(item.index, { transform: `translateY(${item.start}px)` }))
         ) : (
-          <AnimatePresence initial={false} mode="popLayout" custom={rowMotion}>
-            {rows.map((_, index) => renderRow(index))}
+          <AnimatePresence mode="popLayout" custom={rowMotion}>
+            {rows.length === 0 ? (
+              <PresenceEmpty key={EMPTY_ROW_KEY} rowMotion={rowMotion} entering={mounted.current}>
+                {empty}
+              </PresenceEmpty>
+            ) : (
+              rows.map((_, index) => renderRow(index))
+            )}
           </AnimatePresence>
         )}
       </div>

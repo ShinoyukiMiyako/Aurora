@@ -69,6 +69,7 @@
 
 .label {
   min-width: 0;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
 }
 
 /* ---- 主：全站唯一的渐变填充 + 强调投影 + 顶边高光 ---- */
@@ -187,15 +188,78 @@
   cursor: progress;
 }
 
-/* 无前置图标的加载态：指示居中叠在按钮上，文字隐去但保留占位，按钮宽度不变 */
+/*
+ * 无前置图标的加载态：指示居中叠在按钮上，文字淡去但保留占位，按钮宽度不变。
+ * 用透明度而不是 visibility：能过渡，文字也留在可访问性树里，加载中的按钮不丢名称。
+ */
 .button[data-loading]:not([data-has-icon]) .label {
-  visibility: hidden;
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
 }
 
+/* ---- 图标位：新旧两层叠在同一格里，换内容时按钮尺寸不变 ---- */
+.glyphSlot {
+  display: inline-grid;
+  flex: none;
+}
+
+/* 弹性盒去掉行内图标的基线留白，图标位正好是图标的尺寸 */
+.glyph {
+  display: flex;
+  grid-area: 1 / 1;
+}
+
+.glyph[data-enter="pop"] {
+  animation:
+    glyphPop var(--sk-spring-pop-dur) var(--sk-spring-pop),
+    glyphIn var(--sk-dur-in) var(--sk-ease-out);
+}
+
+.glyph[data-enter="tap"] {
+  animation:
+    glyphTap var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    glyphIn var(--sk-dur-in) var(--sk-ease-out);
+}
+
+/* 退场层静止时就是透明的：所在子树被隐藏、动画结束事件迟迟不来时，它也不会盖在新内容上 */
+.glyph[data-leaving] {
+  opacity: 0;
+  animation: glyphOut var(--sk-dur-out) var(--sk-ease-in);
+}
+
+/* 减少动画：不缩放，只淡入 */
+:global([data-sk-reduced]) .glyph[data-enter] {
+  animation: glyphIn var(--sk-dur-in) var(--sk-ease-out);
+}
+
+@keyframes glyphPop {
+  from {
+    scale: 0.6;
+  }
+}
+
+@keyframes glyphTap {
+  from {
+    scale: 0.8;
+  }
+}
+
+@keyframes glyphIn {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes glyphOut {
+  from {
+    opacity: 1;
+  }
+}
+
+/* 写在图标位之后：同为单类选择器，靠先后顺序盖掉 inline-grid */
 .centerSpinner {
   position: absolute;
   inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  place-items: center;
 }

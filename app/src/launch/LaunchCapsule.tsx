@@ -10,11 +10,11 @@
 import { AnimatePresence, motion, useReducedMotionConfig, useTransform, type Variants } from "framer-motion";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
-import { ASSEMBLY_TIMING, AssemblingBlock, type AssemblyExit } from "../art/iso/AssemblingBlock";
+import { AssemblingBlock, type AssemblyExit } from "../art/iso/AssemblingBlock";
 import { Spinner } from "../art/Spinner";
-import { LAUNCH_COPY, PHASE_LABEL, SESSION_COPY, taskPhaseText } from "../copy/flows";
+import { CRASH_CATEGORIES, crashClueLine, LAUNCH_COPY, LAUNCH_STAGES, PHASE_LABEL, SESSION_COPY, taskPhaseText, type FailureCopy } from "../copy/flows";
 import { percent } from "../domain/format";
-import { fade, springs } from "../lib/motion";
+import { assembly, capsuleSwap, fade, lineSwap, springs } from "../lib/motion";
 import { cx } from "../lib/util";
 import { useNow } from "../state/launcher";
 import { DOWNLOAD_STAGE } from "../state/session";
@@ -27,6 +27,7 @@ import { useInstanceCover } from "./cover";
 import styles from "./LaunchCapsule.module.css";
 import { brokenAction, sessionDetail, sessionPhaseLabel, stageLabel, type LaunchView } from "./launchView";
 import { useLaunch, type LaunchEntry } from "./useLaunch";
+import { useMounted } from "./useMounted";
 
 export type LaunchCapsuleSize = "md" | "lg";
 
@@ -42,12 +43,6 @@ export interface LaunchCapsuleProps {
 }
 
 export const CAPSULE_HEIGHT: Readonly<Record<LaunchCapsuleSize, number>> = { md: 48, lg: 56 };
-
-/** 视图变化后旧面留住的时长（毫秒）：拆解、崩落演完再换面；坐定之后再过这么久切到运行面。 */
-export const FACE_HOLD_MS = { disassemble: 240, collapse: 260, afterSeat: 200 } as const;
-
-/** 新面比旧面晚这么久入场（秒），旧面先让出位置。 */
-const FACE_ENTER_DELAY = 0.04;
 
 type Tone = "loading" | "running" | "danger" | "muted" | "info" | "none";
 const TONES: readonly Exclude<Tone, "none">[] = ["loading", "running", "danger", "muted", "info"];
@@ -76,6 +71,72 @@ export function faceKey(view: LaunchView): string {
   return view.kind === "stopped" ? `stopped:${view.reason}` : view.kind;
 }
 
+/**
+ * 文字槽的候选文案：槽宽取其中最宽的一条，槽里的文字在这些之间怎么换都不改胶囊宽度，也就不挤动同一行的按钮。
+ * 下载的文件数按四位、速度按最宽的几种写法占位；更长的（上万个文件）在槽里省略，不撑宽。
+ */
+export const TEXT_SLOTS = {
+  loadingTitle: [...LAUNCH_STAGES, SESSION_COPY.stopping],
+  loadingSub: [
+    PHASE_LABEL.preparing,
+    PHASE_LABEL.downloading,
+    PHASE_LABEL.launching,
+    SESSION_COPY.countingFiles,
+    ...[1000 * 1024, 99.9 * 1024 * 1024, 999 * 1024 * 1024].map((speed) => SESSION_COPY.downloadProgress(9999, 9999, speed)),
+  ],
+  percent: [percent(1, true)],
+  /** 计时按两位小时占位：跨过一小时不变宽。 */
+  runningTitle: [LAUNCH_COPY.runningTitle(((99 * 60 + 59) * 60 + 59) * 1000), SESSION_COPY.stopping],
+  /** 崩溃线索读出来之前副行就在：标题不先居中再上移，线索到了只换字。 */
+  crashSub: [...CRASH_CATEGORIES.map(crashClueLine), SESSION_COPY.noClue],
+  installingTitle: [LAUNCH_COPY.installingTitle(percent(1)), LAUNCH_COPY.queuedTitle],
+} as const satisfies Record<string, readonly string[]>;
+
+type WidthSource = Pick<LaunchEntry, "instance" | "failure">;
+
+/** 启动失败的面要用的文案；入口说失败了却没有文案是状态不一致，直接抛。 */
+function failureOf(entry: Pick<LaunchEntry, "failure">): FailureCopy {
+  if (entry.failure === null) throw new Error("启动失败的入口缺少失败文案");
+  return entry.failure;
+}
+
+/**
+ * 胶囊宽度只取决于：档位、是否撑满、哪个面、面里没有按候选定宽的那几段文字（就绪按钮的字、实例名、失败文案、
+ * 已结束的说明、安装步骤）。交给布局动画做 layoutDependency：进度、文件数、速度、计时这类只改数字的重渲染
+ * 不再逐次量布局；宽度真的会变（换面、换安装步骤）时才量一次、走 morph。
+ */
+export function capsuleLayoutKey(face: LaunchView, entry: WidthSource, size: LaunchCapsuleSize, block: boolean, relaunch: boolean): string {
+  return JSON.stringify([size, block, faceKey(face), ...faceFreeText(face, entry, relaunch)]);
+}
+
+function faceFreeText(face: LaunchView, entry: WidthSource, relaunch: boolean): (string | null)[] {
+  switch (face.kind) {
+    case "ready":
+      return [relaunch ? LAUNCH_COPY.relaunch : LAUNCH_COPY.launch];
+    case "broken":
+      return [brokenAction(face).label];
+    case "loading":
+    case "crashed":
+      return [];
+    case "running":
+      return [entry.instance.name];
+    case "stopped":
+      return [sessionPhaseLabel(face.session), sessionDetail(face.session, Date.now())];
+    case "failed": {
+      const failure = failureOf(entry);
+      return [failure.title, failure.fix.label];
+    }
+    case "installing":
+      return [installingSub(face)];
+  }
+}
+
+function installingSub(face: Extract<LaunchView, { kind: "installing" }>): string | null {
+  const task = face.task;
+  if (task === null || task.status === "queued") return face.queuePosition === null ? null : LAUNCH_COPY.queuedDetail(face.queuePosition);
+  return task.phase === null ? task.title : taskPhaseText(task.phase, "short");
+}
+
 /** 按会话阶段落面：准备 1、下载 2、启动 3。 */
 export function placedForStage(stageIndex: number): 0 | 1 | 2 | 3 {
   if (stageIndex < DOWNLOAD_STAGE) return 1;
@@ -102,22 +163,22 @@ interface FaceHold {
 /** 视图从 prev 换到 next 时旧面要不要留住、留多久；不留为 null。 */
 export function holdFor(prev: LaunchView, next: LaunchView): FaceHold | null {
   if (prev.kind === "loading") {
-    if (next.kind === "stopped" && next.reason === "cancelled") return { face: prev, exit: "disassemble", seat: false, ms: FACE_HOLD_MS.disassemble };
-    if (next.kind === "failed" || next.kind === "crashed") return { face: prev, exit: "collapse", seat: false, ms: FACE_HOLD_MS.collapse };
-    if (next.kind === "running") return { face: prev, exit: null, seat: true, ms: seatAt(placedForStage(prev.session.stageIndex)) + FACE_HOLD_MS.afterSeat };
+    if (next.kind === "stopped" && next.reason === "cancelled") return { face: prev, exit: "disassemble", seat: false, ms: capsuleSwap.holdMs.disassemble };
+    if (next.kind === "failed" || next.kind === "crashed") return { face: prev, exit: "collapse", seat: false, ms: capsuleSwap.holdMs.collapse };
+    if (next.kind === "running") return { face: prev, exit: null, seat: true, ms: seatAt(placedForStage(prev.session.stageIndex)) + capsuleSwap.holdMs.afterSeat };
   }
   if (prev.kind === "installing" && next.kind === "ready") {
     const task = prev.task;
     const placed = task === null || task.status === "queued" ? 1 : placedForProgress(task.progress);
-    return { face: prev, exit: null, seat: true, ms: seatAt(placed) + FACE_HOLD_MS.afterSeat };
+    return { face: prev, exit: null, seat: true, ms: seatAt(placed) + capsuleSwap.holdMs.afterSeat };
   }
   return null;
 }
 
-/** 坐定时刻：未落的面依次落下（间隔 90 ms），最后一面开始落位 120 ms 后坐定；三面早已落齐则为 0。 */
+/** 坐定时刻：未落的面依次落下（相邻两面隔一个落位间隔），最后一面开始落位后再过坐定延迟；三面早已落齐则为 0。 */
 function seatAt(placed: number): number {
   const remaining = 3 - placed;
-  return remaining > 0 ? (remaining - 1) * ASSEMBLY_TIMING.stepGapMs + ASSEMBLY_TIMING.seatDelayMs : 0;
+  return remaining > 0 ? (remaining - 1) * assembly.stepGapMs + assembly.seatDelayMs : 0;
 }
 
 function useFaceHold(view: LaunchView, reduced: boolean): { face: LaunchView; exit: AssemblyExit | null; seat: boolean } {
@@ -143,9 +204,13 @@ function useFaceHold(view: LaunchView, reduced: boolean): { face: LaunchView; ex
   return { face: view, exit: null, seat: false };
 }
 
-const faceSwap: Variants = {
+/** 面切换。show 按 custom 传入的减少动画生效值取延迟：根部 MotionConfig 只把位移类改成瞬时，透明度上的延迟它不管。 */
+export const faceSwap: Variants = {
   enter: { opacity: 0, y: 6 },
-  show: { opacity: 1, y: 0, transition: { ...springs.settle, delay: FACE_ENTER_DELAY, opacity: { ...fade.in, delay: FACE_ENTER_DELAY } } },
+  show: (reduced: boolean) => {
+    const delay = reduced ? 0 : capsuleSwap.faceEnterDelay;
+    return { opacity: 1, y: 0, transition: { ...springs.settle, delay, opacity: { ...fade.in, delay } } };
+  },
   leave: { opacity: 0, y: -6, transition: fade.out },
 };
 
@@ -154,6 +219,8 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
   const reduced = useReducedMotionConfig() === true;
   const { face, exit, seat } = useFaceHold(entry.view, reduced);
   const capsuleRef = useRef<HTMLDivElement>(null);
+  // 胶囊挂载时就在的面不播入场（跟着所在页面走）；之后换上来的面才播
+  const mounted = useMounted();
   const key = faceKey(face);
   // 键盘按了面上的按钮（「启动」「结束游戏」）随即换面：焦点还停在退场的旧面上，旧面移除时浏览器把它落回 body
   // 且不派发任何事件，键盘用户只能从文档开头重新找起。换面时焦点在胶囊里，就交给新面第一个可用的按钮；
@@ -168,14 +235,17 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
   const expanded = face.kind !== "ready" && face.kind !== "broken";
   const height = CAPSULE_HEIGHT[size];
   const fill = fillOf(face, seat);
+  const layoutKey = capsuleLayoutKey(face, entry, size, block, relaunch);
   const announce = entry.view.kind === "loading" || entry.view.kind === "running" || entry.view.kind === "stopped" || entry.view.kind === "failed" || entry.view.kind === "crashed"
     ? sessionPhaseLabel(entry.view.session)
     : "";
 
   return (
+    // 不撑满时胶囊自己的位置与宽度都由布局动画管：所在的动作行挂了兄弟让位（lib/reflow）时，它不再被让位重复位移一次
     <motion.div
       ref={capsuleRef}
       layout
+      layoutDependency={layoutKey}
       transition={{ layout: springs.morph }}
       role="group"
       aria-label={LAUNCH_COPY.group(entry.instance.name)}
@@ -184,20 +254,36 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
       data-size={size}
       data-block={block || undefined}
       data-expanded={expanded || undefined}
+      data-reflow-skip={block ? undefined : ""}
       style={{ borderRadius: height / 2 }}
     >
       {TONES.map((t) => (
         <span key={t} className={styles.layer} data-layer={t} data-active={t === tone || undefined} aria-hidden="true" />
       ))}
-      {face.kind === "running" && <BreathGlow />}
-      {fill !== null && <Fill value={fill.value} track={fill.track} tone={fill.tone} />}
+      {/* 光晕与进度填充随面出现、消失：与色调叠层同时交叉淡入淡出，不在换面那一帧硬切 */}
+      <AnimatePresence>
+        {face.kind === "running" && <BreathGlow key="glow" appear={mounted.current} reduced={reduced} />}
+        {fill !== null && <Fill key="fill" value={fill.value} track={fill.track} tone={fill.tone} appear={mounted.current} />}
+      </AnimatePresence>
       {/* 只播报 phase 的变化，计时与百分比不播报 */}
       <span className={styles.srOnly} aria-live="polite">
         {announce}
       </span>
-      <AnimatePresence mode="popLayout" initial={false}>
-        <motion.div key={key} data-face={key} layout className={styles.face} variants={faceSwap} initial="enter" animate="show" exit="leave">
-          <Face face={face} entry={entry} exit={exit} seat={seat} relaunch={relaunch} />
+      <AnimatePresence mode="popLayout">
+        <motion.div
+          key={key}
+          data-face={key}
+          layout
+          layoutDependency={layoutKey}
+          transition={{ layout: springs.morph }}
+          className={styles.face}
+          variants={faceSwap}
+          custom={reduced}
+          initial={mounted.current ? "enter" : false}
+          animate="show"
+          exit="leave"
+        >
+          <Face face={face} entry={entry} exit={exit} seat={seat} relaunch={relaunch} entering={mounted.current} />
         </motion.div>
       </AnimatePresence>
     </motion.div>
@@ -212,23 +298,47 @@ export function fillOf(face: LaunchView, seat: boolean): { value: number; track:
   return null;
 }
 
-function Fill({ value, track, tone }: { value: number; track: string; tone: "loading" | "info" }) {
+/** appear：胶囊挂载之后才出现（排队的安装开始跑、点了启动），淡入；随胶囊一起挂载的直接显示。 */
+function Fill({ value, track, tone, appear }: { value: number; track: string; tone: "loading" | "info"; appear: boolean }) {
   const { smooth } = useSmoothProgress(value, track);
   const x = useTransform(smooth, fillOffset);
   return (
-    <span className={styles.clip} aria-hidden="true">
+    <motion.span
+      className={styles.clip}
+      data-fill={tone}
+      aria-hidden="true"
+      initial={appear ? { opacity: 0 } : false}
+      animate={{ opacity: 1, transition: fade.in }}
+      exit={{ opacity: 0, transition: fade.out }}
+    >
       <motion.span className={styles.fill} data-tone={tone} style={{ x }} />
-    </span>
+    </motion.span>
   );
 }
 
-function BreathGlow() {
+/**
+ * 运行面的光晕。外层管出现与消失（与运行面同一拍淡入，离开运行面时淡出）；里层只在呼吸窗口内呼吸，
+ * 呼吸是 CSS 动画、会盖过内联的透明度，所以两件事分在两层上。
+ */
+function BreathGlow({ appear, reduced }: { appear: boolean; reduced: boolean }) {
   const ref = useRef<HTMLSpanElement>(null);
   useBreathPhase(ref, true);
-  return <span ref={ref} className={styles.glow} aria-hidden="true" />;
+  return (
+    <motion.span
+      className={styles.glowLayer}
+      data-glow=""
+      aria-hidden="true"
+      initial={appear ? { opacity: 0 } : false}
+      animate={{ opacity: 1, transition: { ...fade.in, delay: reduced ? 0 : capsuleSwap.faceEnterDelay } }}
+      exit={{ opacity: 0, transition: fade.out }}
+    >
+      <span ref={ref} className={styles.glow} />
+    </motion.span>
+  );
 }
 
-function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: LaunchEntry; exit: AssemblyExit | null; seat: boolean; relaunch: boolean }) {
+/** entering：这个面是换上来的（胶囊早已挂载），方块要从一面未落起演组装；否则是随胶囊一起挂载的，按现状直接显示。 */
+function Face({ face, entry, exit, seat, relaunch, entering }: { face: LaunchView; entry: LaunchEntry; exit: AssemblyExit | null; seat: boolean; relaunch: boolean; entering: boolean }) {
   const cover = useInstanceCover(entry.instance);
   const id = entry.instance.id;
   switch (face.kind) {
@@ -264,11 +374,14 @@ function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: 
       return (
         <>
           <span className={styles.blockSlot}>
-            <AssemblingBlock instanceId={id} cover={cover} placed={seat ? 3 : placedForStage(s.stageIndex)} seated={seat} exit={exit} width={28} />
+            <AssemblingBlock instanceId={id} cover={cover} placed={seat ? 3 : placedForStage(s.stageIndex)} seated={seat} exit={exit} width={28} enter={entering} />
           </span>
           <Text
             title={stopping ? SESSION_COPY.stopping : stageLabel(s.stageIndex)}
+            titleKey={stopping ? "stopping" : `stage:${s.stageIndex}`}
+            titleSlot={TEXT_SLOTS.loadingTitle}
             sub={face.phase === "downloading" ? sessionDetail(s, Date.now()) : PHASE_LABEL[face.phase]}
+            subSlot={TEXT_SLOTS.loadingSub}
           />
           <Percent value={seat ? 1 : s.progress} track={s.taskId} />
           <IconAction label={LAUNCH_COPY.cancel} icon="x" onClick={entry.cancel} disabled={stopping || exit !== null || seat} />
@@ -289,8 +402,7 @@ function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: 
         </>
       );
     case "failed": {
-      const failure = entry.failure;
-      if (failure === null) throw new Error("启动失败的入口缺少失败文案");
+      const failure = failureOf(entry);
       return (
         <>
           <span className={styles.dot} data-tone="danger" />
@@ -308,7 +420,7 @@ function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: 
       return (
         <>
           <span className={styles.dot} data-tone="danger" />
-          <Text title={LAUNCH_COPY.crashedTitle} sub={sessionDetail(face.session, Date.now())} />
+          <Text title={LAUNCH_COPY.crashedTitle} sub={sessionDetail(face.session, Date.now())} subSlot={TEXT_SLOTS.crashSub} />
           <span className={styles.actions}>
             <button type="button" className={styles.pill} onClick={entry.openCrash}>
               {LAUNCH_COPY.viewCrash}
@@ -323,12 +435,12 @@ function Face({ face, entry, exit, seat, relaunch }: { face: LaunchView; entry: 
       return (
         <>
           <span className={styles.blockSlot}>
-            <AssemblingBlock instanceId={id} cover={cover} placed={seat ? 3 : queued ? 1 : placedForProgress(task.progress)} seated={seat} width={28} />
+            <AssemblingBlock instanceId={id} cover={cover} placed={seat ? 3 : queued ? 1 : placedForProgress(task.progress)} seated={seat} width={28} enter={entering} />
           </span>
           {queued ? (
-            <Text title={LAUNCH_COPY.queuedTitle} sub={face.queuePosition === null ? null : LAUNCH_COPY.queuedDetail(face.queuePosition)} />
+            <Text title={LAUNCH_COPY.queuedTitle} titleSlot={TEXT_SLOTS.installingTitle} sub={installingSub(face)} />
           ) : (
-            <InstallingText progress={seat ? 1 : task.progress} track={progressTrack(task)} sub={task.phase === null ? task.title : taskPhaseText(task.phase, "short")} />
+            <InstallingText progress={seat ? 1 : task.progress} track={progressTrack(task)} sub={installingSub(face)} />
           )}
         </>
       );
@@ -344,11 +456,17 @@ function RunningFace({ face, entry }: { face: Extract<LaunchView, { kind: "runni
   return (
     <>
       <span className={styles.dot} data-tone="ok" />
-      <Text title={stopping ? SESSION_COPY.stopping : LAUNCH_COPY.runningTitle(now - runningSince)} sub={entry.instance.name} />
+      <Text
+        title={stopping ? SESSION_COPY.stopping : LAUNCH_COPY.runningTitle(now - runningSince)}
+        titleKey={stopping ? "stopping" : "clock"}
+        titleSlot={TEXT_SLOTS.runningTitle}
+        sub={entry.instance.name}
+      />
       <span className={styles.actions}>
         {/* 正在结束期间不用原生禁用：确认框关闭后焦点刚还到这里，原生禁用会把它丢回 body */}
         <button type="button" className={styles.pill} data-tone="ok" {...softDisabledProps(stopping, entry.stop)} aria-busy={stopping || undefined}>
-          {stopping ? <Spinner size={16} tone="current" decorative /> : <Icon name="stop" size={14} />}
+          {/* 图标与加载指示大小不同，放进同一个定宽格：换成「正在结束」时按钮不变宽 */}
+          <span className={styles.pillIcon}>{stopping ? <Spinner size={16} tone="current" decorative /> : <Icon name="stop" size={14} />}</span>
           {LAUNCH_COPY.stopGame}
         </button>
       </span>
@@ -356,26 +474,81 @@ function RunningFace({ face, entry }: { face: Extract<LaunchView, { kind: "runni
   );
 }
 
-function Text({ title, sub }: { title: ReactNode; sub: ReactNode | null }) {
+interface TextProps {
+  title: ReactNode;
+  /** 标题换了一件事（阶段名、正在结束）时换这个键：旧行上移淡出、新行落到位。不给则原地直接换字。 */
+  titleKey?: string;
+  /** 标题槽按这些文案里最宽的一条定宽，标题怎么换都不改宽度，放不下时省略；不给则按标题本身取宽。 */
+  titleSlot?: readonly string[];
+  /** null 为没有副行；给了 subSlot 时副行常驻，null 只是这一行暂时空着（崩溃线索还没读出来）。 */
+  sub: ReactNode | null;
+  subSlot?: readonly string[];
+}
+
+function Text({ title, titleKey, titleSlot, sub, subSlot }: TextProps) {
   return (
     <span className={styles.text}>
-      <span className={styles.title}>{title}</span>
-      {sub !== null && <span className={styles.sub}>{sub}</span>}
+      <Line className={styles.title} slot={titleSlot} swapKey={titleKey}>
+        {title}
+      </Line>
+      {(sub !== null || subSlot !== undefined) && (
+        <Line className={styles.sub} slot={subSlot}>
+          {sub}
+        </Line>
+      )}
     </span>
   );
 }
 
-/** 百分比文字取平滑值的整数，加载阶段封顶 99%。 */
+/**
+ * 一行文字：可见的文字与占宽的候选文案叠在同一格。有候选时格宽只取候选，可见文字不参与撑宽；
+ * 行常驻而文字晚到（null 变成有字）时，文字淡入；给了 swapKey 时键一换，新旧两行在同一格里交接。
+ */
+function Line({ className, slot, swapKey, children }: { className: string; slot: readonly string[] | undefined; swapKey?: string; children: ReactNode | null }) {
+  const mounted = useMounted();
+  return (
+    <span className={cx(className, styles.line)} data-slot={slot === undefined ? undefined : ""}>
+      {children !== null &&
+        (swapKey === undefined ? (
+          <motion.span className={styles.value} initial={mounted.current ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }}>
+            {children}
+          </motion.span>
+        ) : (
+          <AnimatePresence>
+            <motion.span key={swapKey} className={styles.value} variants={lineSwap} initial={mounted.current ? "enter" : false} animate="show" exit="leave">
+              {children}
+            </motion.span>
+          </AnimatePresence>
+        ))}
+      {slot !== undefined && [...new Set(slot)].map((text) => (
+        <span key={text} className={styles.reserve} aria-hidden="true">
+          {text}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** 百分比文字取平滑值的整数，加载阶段封顶 99%；按最宽的「99%」占位，数字进位不改宽度。 */
 function Percent({ value, track }: { value: number; track: string }) {
   const { smooth } = useSmoothProgress(value, track);
   const text = useTransform(smooth, (p) => percent(p, true));
-  return <motion.span className={styles.pct}>{text}</motion.span>;
+  return (
+    <span className={cx(styles.pct, styles.line)} data-slot="">
+      <motion.span className={styles.value}>{text}</motion.span>
+      {TEXT_SLOTS.percent.map((reserve) => (
+        <span key={reserve} className={styles.reserve} aria-hidden="true">
+          {reserve}
+        </span>
+      ))}
+    </span>
+  );
 }
 
-function InstallingText({ progress, track, sub }: { progress: number; track: string; sub: string }) {
+function InstallingText({ progress, track, sub }: { progress: number; track: string; sub: string | null }) {
   const { smooth } = useSmoothProgress(progress, track);
   const title = useTransform(smooth, (p) => LAUNCH_COPY.installingTitle(percent(p)));
-  return <Text title={<motion.span>{title}</motion.span>} sub={sub} />;
+  return <Text title={<motion.span>{title}</motion.span>} titleSlot={TEXT_SLOTS.installingTitle} sub={sub} />;
 }
 
 /** disabled 时保持可聚焦（aria-disabled）：按下「取消启动」后、换面之前，焦点要留在胶囊里等新面接住。 */

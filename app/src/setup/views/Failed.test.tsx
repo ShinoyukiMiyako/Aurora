@@ -14,6 +14,7 @@ import type { Existing, Failure, FailureCode } from "../contract";
 import { COPY, type SetupCopy } from "../copy";
 import { createFakeBridge, FAKE_PROBE, type FakeBridge } from "../fake-bridge";
 import { FrameChromeProvider, type FrameChrome } from "../Frame";
+import { InShell } from "./test-chrome";
 import { replay, type FailureRecovery } from "../model";
 import { Failed, type FailedProps } from "./Failed";
 
@@ -33,7 +34,9 @@ function failed(overrides: Partial<FailedProps> = {}) {
     <MotionConfig reducedMotion="always">
       <OverlayProvider>
         <FrameChromeProvider value={chromeOf(copy)}>
-          <Failed copy={copy} failure={FAILURE} recovery="retry" standardInstaller={false} onRecover={noop} onOpenLog={noop} onReport={noop} onStandardInstaller={noop} onBack={noop} {...overrides} />
+          <InShell>
+            <Failed copy={copy} failure={FAILURE} recovery="retry" standardInstaller={false} onRecover={noop} onOpenLog={noop} onReport={noop} onStandardInstaller={noop} onBack={noop} {...overrides} />
+          </InShell>
           <OverlayRoot />
         </FrameChromeProvider>
       </OverlayProvider>

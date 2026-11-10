@@ -15,9 +15,20 @@ export function BrandMark() {
   return <Logo size={28} />;
 }
 
-function subscribeVisibility(notify: () => void): () => void {
+function subscribeActivity(notify: () => void): () => void {
   document.addEventListener("visibilitychange", notify);
-  return () => document.removeEventListener("visibilitychange", notify);
+  window.addEventListener("focus", notify);
+  window.addEventListener("blur", notify);
+  return () => {
+    document.removeEventListener("visibilitychange", notify);
+    window.removeEventListener("focus", notify);
+    window.removeEventListener("blur", notify);
+  };
+}
+
+/** 窗口最小化（页面不可见）或失焦时花瓣停下，和启动器外壳一个口径：用户在看别的窗口时这里不该每帧跑着。 */
+export function usePetalsPaused(): boolean {
+  return useSyncExternalStore(subscribeActivity, () => document.hidden || !document.hasFocus());
 }
 
 function logDowngrade(event: PetalDowngrade): void {
@@ -28,12 +39,12 @@ export interface StageArtProps {
   reduced: boolean;
 }
 
-/** 左栏的花枝和花瓣。窗口最小化时页面不可见，花瓣跟着停。 */
+/** 左栏的花枝和花瓣。 */
 export function StageArt({ reduced }: StageArtProps) {
-  const hidden = useSyncExternalStore(subscribeVisibility, () => document.hidden);
+  const paused = usePetalsPaused();
   return (
     <div className={styles.stage} aria-hidden="true">
-      <PetalCanvas show paused={hidden} reduced={reduced} tier="regular" mode="day" accent="sakura" onDowngrade={logDowngrade} />
+      <PetalCanvas show paused={paused} reduced={reduced} tier="regular" mode="day" accent="sakura" onDowngrade={logDowngrade} />
       <BlossomBranch className={styles.branch} width={BRANCH_WIDTH} height={BRANCH_HEIGHT} />
     </div>
   );

@@ -635,6 +635,23 @@ describe("窗口", () => {
     expect(fake.callsOf("close")).toEqual([[true]]);
   });
 
+  it("换步时左栏常驻：花瓣画布、协议入口还是原来的元素，不随内容卸掉重建", async () => {
+    start();
+    await seeHeading(copy.welcome.title);
+    const canvas = document.querySelector("aside canvas");
+    const legal = button(copy.frame.legalLink);
+    expect(canvas).not.toBeNull();
+
+    button(copy.welcome.change).click();
+    await seeHeading(copy.location.title);
+    button(copy.frame.legalLink).click();
+    await seeHeading(copy.legal.title);
+
+    expect(document.querySelectorAll("aside")).toHaveLength(1);
+    expect(document.querySelector("aside canvas")).toBe(canvas);
+    expect(button(copy.frame.legalLink)).toBe(legal);
+  });
+
   it("系统要求减少动画时写到 html 上", async () => {
     stubMatchMedia(true);
     start();

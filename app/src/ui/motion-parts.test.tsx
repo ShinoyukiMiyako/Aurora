@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
-import { motion } from "framer-motion";
+import { motion, MotionConfig } from "framer-motion";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, waitForFrames, type Rendered } from "../test/dom";
 import { Appear } from "./Appear";
@@ -66,6 +68,15 @@ describe("Loadable", () => {
     });
   });
 
+  it("contentClassName 落在包住内容的那一层上", () => {
+    view = render(
+      <Loadable view="content" skeleton={<span />} contentClassName="fill">
+        {content}
+      </Loadable>,
+    );
+    expect(one("[data-content]").parentElement?.classList.contains("fill")).toBe(true);
+  });
+
   it("重新加载再回来：内容照样淡入", () => {
     view = render(tree("content"));
     view.rerender(tree("pending"));
@@ -103,12 +114,32 @@ describe("Appear", () => {
     expect(wrap?.style.transform).toBe("scale(0.98)");
   });
 
-  it("条件变假：播完退场再移除", async () => {
+  it("条件变假：播完退场再移除；退场期间那一层是 inert，在场时不是", async () => {
     view = render(tree(true));
+    expect(one("[data-note]").parentElement?.hasAttribute("inert")).toBe(false);
     view.rerender(tree(false));
-    // 退场中还在
-    expect(has("[data-note]")).toBe(true);
+    // 退场中还在，但已经点不到、聚焦不到，按 :not([inert]) 也筛得掉
+    expect(one("[data-note]").parentElement?.hasAttribute("inert")).toBe(true);
+    expect(has(".item:not([inert])")).toBe(false);
     await waitForFrames(() => expect(has("[data-note]")).toBe(false));
+  });
+
+  it("退场途中条件又变真：同一层接着用，摘掉 inert", () => {
+    view = render(tree(true));
+    const wrap = one("[data-note]").parentElement;
+    view.rerender(tree(false));
+    view.rerender(tree(true));
+    expect(one("[data-note]").parentElement).toBe(wrap);
+    expect(wrap?.hasAttribute("inert")).toBe(false);
+  });
+
+  it("减少动画：进出只动透明度，不带缩放", () => {
+    const reduced = (show: boolean) => <MotionConfig reducedMotion="always">{tree(show)}</MotionConfig>;
+    view = render(reduced(false));
+    view.rerender(reduced(true));
+    const wrap = one("[data-note]").parentElement;
+    expect(wrap?.style.opacity).toBe("0");
+    expect(wrap?.style.transform).toBe("");
   });
 
   it("不封住子项内部的入场：挂载时就在的子项里，之后才挂上的元素照常从起点入场", () => {
@@ -134,6 +165,15 @@ describe("LabelSlot", () => {
   it("重复的候选只留一条", () => {
     view = render(<LabelSlot current="检查" options={["检查", "检查", "检查中"]} />);
     expect(view.container.querySelectorAll("span > span")).toHaveLength(2);
+  });
+
+  it("对齐方式标在槽上：默认居中，正文里的说明可以靠左", () => {
+    view = render(<LabelSlot current="检查" options={["检查", "检查中"]} />);
+    expect(one("span").dataset.align).toBe("center");
+    view.rerender(<LabelSlot current="检查" options={["检查", "检查中"]} align="start" />);
+    expect(one("span").dataset.align).toBe("start");
+    const css = readFileSync(resolve(__dirname, "LabelSlot.module.css"), "utf8");
+    expect(/\.slot\[data-align="start"\]\s*\{\s*justify-items: start;/.test(css)).toBe(true);
   });
 
   it("当前文案不在候选里：直接抛错，不悄悄撑宽", () => {

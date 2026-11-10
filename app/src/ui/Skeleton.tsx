@@ -9,7 +9,7 @@ export type SkeletonRadius = "xs" | "sm" | "md" | "lg" | "xl" | "pill";
 
 export type SkeletonProps =
   | {
-      /** 文字行：每行占一个正文行高，条高 12；多行时末行 60% 宽。 */
+      /** 文字行：每行占所在位置的一个行高（继承下来的 line-height），条高 12；多行时末行 60% 宽。 */
       shape: "text";
       lines?: number;
       /** 整段的宽度；默认撑满。 */

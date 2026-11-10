@@ -63,6 +63,8 @@ async function decode(resolve: RemoteImageResolver, url: string, maxEdge: number
 /**
  * 加载一张远程图。url 为 null 或 enabled 为 false 时不加载（idle）。maxEdge 为解码后保留的最长边（设备像素）。
  * 失败（解析、网络、解码任一步）记一条 warn 并返回 failed，调用方显示回落图形，不显示裂图。
+ * 同一张图已经就绪后 maxEdge 变了（窗口缩放跨档、换到 dpr 不同的屏幕）：照旧给出旧位图，按新上限解好再换上，
+ * 不回到 loading，卡面不闪回占位；这次重解失败也留着旧位图。
  * 有地址却不在 RemoteImageProvider 里是装配错误，直接抛。
  */
 export function useRemoteImage(url: string | null, enabled: boolean, maxEdge: number): RemoteImageState {
@@ -71,29 +73,40 @@ export function useRemoteImage(url: string | null, enabled: boolean, maxEdge: nu
   const [state, setState] = useState<{ url: string; value: RemoteImageState } | null>(null);
 
   useEffect(() => {
-    if (url === null || !enabled || resolve === null) return;
+    if (url === null) {
+      // 不再要图：放掉手上的位图
+      setState(null);
+      return;
+    }
+    if (!enabled || resolve === null) return;
     let alive = true;
-    let bitmap: ImageBitmap | null = null;
-    setState({ url, value: { status: "loading" } });
+    const keeps = (prev: typeof state) => prev !== null && prev.url === url && prev.value.status === "ready";
+    setState((prev) => (keeps(prev) ? prev : { url, value: { status: "loading" } }));
     decode(resolve, url, maxEdge).then(
       (result) => {
         if (!alive) {
           result.bitmap.close();
           return;
         }
-        bitmap = result.bitmap;
         setState({ url, value: { status: "ready", ...result } });
       },
       (error: unknown) => {
         console.warn(`[thumb] 远程图片加载失败，改用回落图形：${url}`, error);
-        if (alive) setState({ url, value: { status: "failed" } });
+        if (alive) setState((prev) => (keeps(prev) ? prev : { url, value: { status: "failed" } }));
       },
     );
     return () => {
       alive = false;
-      bitmap?.close();
     };
   }, [url, enabled, resolve, maxEdge]);
+
+  // 位图的寿命跟着状态走：被新位图顶替、换了地址或卸载时才关。不能跟着取图的副作用关：
+  // 那样一换解码上限旧位图就关了，新位图解好之前调用方还在拿它重画
+  const bitmap = state !== null && state.value.status === "ready" ? state.value.bitmap : null;
+  useEffect(() => {
+    if (bitmap === null) return;
+    return () => bitmap.close();
+  }, [bitmap]);
 
   if (url === null || state === null || state.url !== url) return { status: "idle" };
   return state.value;

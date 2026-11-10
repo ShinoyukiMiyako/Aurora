@@ -3,9 +3,10 @@
 // value 为 null 表示眼下没有可显示的进度（例如没有活动任务）：只画轨道，带圆心文字的档位写「--」。
 // 这时不再是进度条：没有当前值的 progressbar 会被读屏当成不定进度念「忙」，所以改为图形，名称后接一句可读的说明。
 
-import { motion, useTransform } from "framer-motion";
-import { useId } from "react";
+import { AnimatePresence, motion, useIsPresent, useTransform, type MotionValue } from "framer-motion";
+import { useId, useRef } from "react";
 import { percent } from "../domain/format";
+import { fade } from "../lib/motion";
 import { cx } from "../lib/util";
 import type { ProgressTone } from "./ProgressBar";
 import { useSmoothProgress } from "./ProgressBar";
@@ -76,20 +77,10 @@ export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99
       )}
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true" focusable="false">
         <circle className={styles.track} cx={center} cy={center} r={radius} fill="none" strokeWidth={stroke} />
-        {/* 进度为 0 时不画填充：圆头描边在零长度时仍会画出一个点 */}
-        {!empty && target > 0 && (
-          <motion.circle
-            className={styles.fill}
-            cx={center}
-            cy={center}
-            r={radius}
-            fill="none"
-            strokeWidth={stroke}
-            strokeLinecap="round"
-            strokeDasharray={circumference}
-            style={{ strokeDashoffset: dashOffset }}
-          />
-        )}
+        {/* 进度为 0 时不画填充：圆头描边在零长度时仍会画出一个点。填充里没有之后才挂载的动画元素，initial={false} 只管它自己 */}
+        <AnimatePresence initial={false}>
+          {!empty && target > 0 && <RingFill key="fill" center={center} radius={radius} stroke={stroke} circumference={circumference} dashOffset={dashOffset} />}
+        </AnimatePresence>
       </svg>
       {ringHasLabel(size) && (
         <motion.span className={styles.label} aria-hidden="true">
@@ -97,5 +88,33 @@ export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99
         </motion.span>
       )}
     </span>
+  );
+}
+
+/**
+ * 填充弧：出现时淡入，转为没有进度时淡出。退场期间停在最后显示的位置：没有 track 时平滑值会随占位的 0 往回走，
+ * 不停住的话弧会一边淡出一边倒退。
+ */
+function RingFill({ center, radius, stroke, circumference, dashOffset }: { center: number; radius: number; stroke: number; circumference: number; dashOffset: MotionValue<number> }) {
+  const present = useIsPresent();
+  const frozen = useRef<number | null>(null);
+  // 退场途中进度又回来时（同一个键重新出现）继续跟随
+  if (present) frozen.current = null;
+  else if (frozen.current === null) frozen.current = dashOffset.get();
+  return (
+    <motion.circle
+      className={styles.fill}
+      cx={center}
+      cy={center}
+      r={radius}
+      fill="none"
+      strokeWidth={stroke}
+      strokeLinecap="round"
+      strokeDasharray={circumference}
+      style={{ strokeDashoffset: frozen.current === null ? dashOffset : frozen.current }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1, transition: fade.in }}
+      exit={{ opacity: 0, transition: fade.out }}
+    />
   );
 }

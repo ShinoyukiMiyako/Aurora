@@ -11,18 +11,39 @@
   gap: var(--sk-space-10);
   width: var(--toasts-width);
   max-width: calc(100% - var(--sk-space-32));
+  /*
+   * 落点换角时整栈在新角淡入，不做跨屏位移：两个角各用一个动画名，换角就是换名，换名浏览器就重播。
+   * 名字单列一条，换角的规则只改名字
+   */
+  animation: var(--sk-dur-in) var(--sk-ease-out);
+  animation-name: toastsAtCorner;
 }
 
 /*
  * 弹窗和向导开着时四个角都有按钮：右下是底栏主按钮，右上是头部关闭，左下是新建实例步骤条的末项。
- * 贴左放在标题栏下方，再让过资源详情左上的「返回」，它在 900 高的窗口里下沿到 113。方向随落点翻到左侧
+ * 贴左放在标题栏下方，再让过资源详情左上的「返回」，它在 900 高的窗口里下沿到 113。方向随落点翻到左侧。
+ * 只认没在退场的弹窗：弹窗一关就回右下角，不等它淡完；新建实例、登录成功都是关窗的同一拍发通知，这条通知直接落在右下角
  */
-:global(:root:has([data-sk-modal-layer], [data-sk-onboarding])) .region {
+:global(:root:has([data-sk-modal-layer]:not([data-exiting]), [data-sk-onboarding])) .region {
   --toast-enter-side: -1;
   top: calc(56px + var(--sk-space-64));
   right: auto;
   bottom: auto;
   left: var(--sk-space-16);
+  animation-name: toastsAtAside;
+}
+
+/* 两个关键帧内容相同，只是名字不同 */
+@keyframes toastsAtCorner {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes toastsAtAside {
+  from {
+    opacity: 0;
+  }
 }
 
 :global(:root[data-sk-tier="compact"]) .region {

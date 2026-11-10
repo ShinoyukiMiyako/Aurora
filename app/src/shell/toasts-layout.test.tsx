@@ -37,12 +37,22 @@ const BOTTOM_RIGHT = { top: "auto", bottom: "var(--sk-space-16)", left: "auto", 
 /** 标题栏 56 高、再留 64：资源详情的「返回」在 900 高的窗口里下沿到 113。 */
 const TOP_LEFT = { top: "calc(56px + var(--sk-space-64))", bottom: "auto", left: "var(--sk-space-16)", right: "auto" };
 
+const region = () => {
+  const el = document.querySelector<HTMLElement>(`section[aria-label="${TOASTS_COPY.region}"]`);
+  if (el === null) throw new Error("通知容器没有挂上");
+  return el;
+};
+
 const placement = () => {
-  const region = document.querySelector<HTMLElement>(`section[aria-label="${TOASTS_COPY.region}"]`);
-  if (region === null) throw new Error("通知容器没有挂上");
-  const { top, bottom, left, right } = getComputedStyle(region);
+  const { top, bottom, left, right } = getComputedStyle(region());
   return { top, bottom, left, right };
 };
+
+/** 容器此刻用的淡入动画名：两个角各一个，换角即换名，浏览器换名就重播。 */
+const cornerFade = () => getComputedStyle(region()).animationName;
+
+/** 正在退场、还挂在文档里的弹窗层。 */
+const exitingModal = () => document.querySelector("[data-sk-modal-layer][data-exiting]");
 
 /** 刚挂上的通知此刻的横向位移：入场动画还没走，就是入场起点。 */
 const enterShift = (title: string) => {
@@ -141,6 +151,52 @@ describe("通知栈的落点", () => {
     act(() => shell.closeCreateInstance());
     await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull(), { timeout: 3000, interval: 20 });
     expect(placement()).toEqual(BOTTOM_RIGHT);
+  });
+
+  it("弹窗一开始退场就回到右下角，不等它淡完", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    act(() => launcher.actions.toast("error", "常驻的失败"));
+    act(() => shell.openCreateInstance());
+    await flush();
+    expect(placement()).toEqual(TOP_LEFT);
+
+    act(() => shell.closeCreateInstance());
+    expect(exitingModal()).not.toBeNull();
+    expect(placement()).toEqual(BOTTOM_RIGHT);
+  });
+
+  it("关弹窗的同一拍发出的通知（新建实例、登录成功）：直接在右下角从右侧进，不先落左上角", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    act(() => shell.openCreateInstance());
+    await flush();
+
+    act(() => {
+      launcher.actions.toast("info", "已开始创建");
+      shell.closeCreateInstance();
+    });
+    expect(exitingModal()).not.toBeNull();
+    expect(placement()).toEqual(BOTTOM_RIGHT);
+    expect(enterShift("已开始创建")).toBe(40);
+  });
+
+  it("落点换角时整栈在新角淡入：两个角的淡入动画名不同，换角就重播", async () => {
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    act(() => launcher.actions.toast("error", "常驻的失败"));
+    const home = cornerFade();
+    expect(home).not.toBe("");
+    expect(home).not.toBe("none");
+
+    act(() => shell.openCreateInstance());
+    await flush();
+    const aside = cornerFade();
+    expect(aside).not.toBe("none");
+    expect(aside).not.toBe(home);
+
+    act(() => shell.closeCreateInstance());
+    expect(cornerFade()).toBe(home);
   });
 
   it("首次启动向导开着时同样在左上角：「开始使用」在向导底栏右侧；向导收尾后回到右下角", async () => {

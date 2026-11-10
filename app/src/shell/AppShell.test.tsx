@@ -15,6 +15,8 @@ import type { IpcRecorder } from "../test/fake-bridge";
 import { GAME_LOG_EVENT } from "../ipc/launch";
 import { CORE_EVENT } from "../ipc/tasks";
 import { bootOverrides, callsOf, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { Card } from "../ui/Card";
+import { Page } from "../ui/Page";
 import { RichText } from "../ui/RichText";
 import { parseMarkdown } from "../ui/richtext-parse";
 import { AppShell, PAGE_PRELOAD_DELAY_MS, type AppShellProps, type ShellFlows } from "./AppShell";
@@ -202,6 +204,38 @@ describe("外壳布局", () => {
     error.mockRestore();
   });
 
+  it("错误视图淡入；「复制错误信息」换成「已复制」时两条文案叠在同一格，按钮宽不变", async () => {
+    broken.add("tasks");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await mount();
+    act(() => nav.go({ page: "tasks" }));
+    await flush();
+    const alert = document.querySelector<HTMLElement>("[role='alert']");
+    if (alert === null) throw new Error("没有错误视图");
+    expect(alert.style.opacity).toBe("0");
+    const copyButton = [...alert.querySelectorAll("button")].find((b) => b.textContent?.includes(PAGE_ERROR_COPY.copy));
+    if (copyButton === undefined) throw new Error("错误页没有复制按钮");
+    const labels: string[] = [PAGE_ERROR_COPY.copy, PAGE_ERROR_COPY.copied];
+    const options = () =>
+      [...copyButton.querySelectorAll<HTMLElement>("span")]
+        .filter((el) => el.childElementCount === 0 && el.textContent !== null && labels.includes(el.textContent))
+        .map((el) => [el.textContent, el.hasAttribute("data-current")]);
+    expect(options()).toEqual([
+      [PAGE_ERROR_COPY.copy, true],
+      [PAGE_ERROR_COPY.copied, false],
+    ]);
+    act(() => copyButton.click());
+    await flush();
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(options()).toEqual([
+      [PAGE_ERROR_COPY.copy, false],
+      [PAGE_ERROR_COPY.copied, true],
+    ]);
+    error.mockRestore();
+  });
+
   it("换页之后错误边界随页面重建：别的页面不受上一页错误影响", async () => {
     broken.add("discover");
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -263,22 +297,6 @@ describe("外壳布局", () => {
       expect(pageShown()).toBe(page);
       expect(Number(probe().style.opacity)).toBeLessThan(0.01);
     }
-  });
-
-  it("向导收尾后主界面淡入：侧栏与主列从透明开始", async () => {
-    bootOverrides(ipc, { instances: [], firstRun: true });
-    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
-    ipc.overrides.set("complete_first_run", () => null);
-    await mount({ onboarding: OnboardingStub });
-    expect(document.querySelector("[data-flow='onboarding']")).not.toBeNull();
-    await act(async () => {
-      await launcher.actions.completeFirstRun("D:\\Games\\.minecraft", []);
-    });
-    await flush();
-    expect(document.querySelector("[data-flow='onboarding']")).toBeNull();
-    const slot = document.querySelector<HTMLElement>('[data-tauri-drag-region=""]');
-    expect(slot).not.toBeNull();
-    expect(slot?.style.opacity).toBe("0");
   });
 
   describe("左上角品牌", () => {
@@ -427,6 +445,72 @@ describe("外部链接", () => {
     await flush();
     expect(callsOf(ipc, OPEN_URL)).toEqual([{ url: DOC_URL }]);
     expect(launcher.state.toasts.filter((t) => t.title === SHELL_ACTION_ERROR.openLink).map((t) => [t.tone, t.body])).toEqual([["error", "没有可用的浏览器"]]);
+    error.mockRestore();
+  });
+});
+
+describe("页面入场随到达方式", () => {
+  function EntrancePage({ route }: { route: Route }) {
+    if (broken.has(route.page)) throw new Error(`${route.page} 页渲染出错`);
+    return (
+      <Page>
+        <Card>{route.page}</Card>
+      </Page>
+    );
+  }
+
+  beforeEach(async () => {
+    const real = Object.fromEntries(PAGE_IDS.map((page) => [page, async () => ({ default: EntrancePage })]));
+    registry = createPageRegistry(real as unknown as PageTable);
+    await registry.load("home");
+    await registry.load("library");
+  });
+
+  const root = () => {
+    const el = document.querySelector<HTMLElement>("[data-width]");
+    if (el === null) throw new Error("没有页面根");
+    return el;
+  };
+  const staggered = () => document.querySelectorAll("[data-entrance]").length;
+
+  it("启动那一屏是成品；go 进来的页面错开入场；后退、前进回到的页面只有根淡入", async () => {
+    await mount();
+    expect(root().style.opacity).toBe("1");
+    expect(staggered()).toBe(0);
+
+    act(() => nav.go({ page: "library" }));
+    await flush();
+    expect(root().textContent).toBe("library");
+    expect(root().style.opacity).toBe("0");
+    expect(staggered()).toBe(1);
+
+    act(() => nav.back());
+    await flush();
+    expect(root().textContent).toBe("home");
+    expect(root().style.opacity).toBe("0");
+    expect(staggered()).toBe(0);
+
+    act(() => nav.forward());
+    await flush();
+    expect(root().textContent).toBe("library");
+    expect(staggered()).toBe(0);
+  });
+
+  it("启动那一屏只有一次：还没导航过，错误页点「重新加载」挂回来的页面照常入场，不一帧硬切", async () => {
+    broken.add("home");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    expect(nav.arrival).toBe("boot");
+    expect(document.querySelector("[data-width]")).toBeNull();
+    const reload = [...document.querySelectorAll("button")].find((b) => b.textContent === PAGE_ERROR_COPY.reload);
+    if (reload === undefined) throw new Error("错误页没有重新加载");
+    broken.delete("home");
+    act(() => reload.click());
+    await flush();
+    expect(nav.arrival).toBe("boot");
+    expect(root().textContent).toBe("home");
+    expect(root().style.opacity).toBe("0");
+    expect(staggered()).toBe(1);
     error.mockRestore();
   });
 });

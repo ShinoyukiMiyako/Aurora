@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { AnimatePresence } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -86,6 +89,12 @@ describe("Toast", () => {
     expect(toast.textContent).toBe("已安装 Sodium正文");
   });
 
+  it("根元素交给 ref：容器的 popLayout 靠它量尺寸、把退场的那条抽出布局", () => {
+    const ref = { current: null as HTMLDivElement | null };
+    const { container } = mount(<Toast {...base} ref={ref} />);
+    expect(ref.current).toBe(container.querySelector("[data-tone]"));
+  });
+
   it("点动作先关闭这条通知再执行动作；关闭按钮只关闭", () => {
     const calls: string[] = [];
     mount(<Toast {...base} tone="error" title="下载失败：安装 Sodium" action={{ label: "重试", onClick: () => calls.push("retry") }} onClose={() => calls.push("close")} />);
@@ -138,6 +147,14 @@ describe("Toast", () => {
     );
     expect(line()).not.toBe(first);
     expect(line().style.getPropertyValue("--toast-from")).toBe("0.4");
+  });
+
+  it("减少动画时倒计时细线照常显示：它是剩余寿命的信息，样式表里没有按减少动画隐藏它的规则", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "Toast.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const reducedRules = [...css.matchAll(/([^{}]*data-sk-reduced[^{}]*)\{([^}]*)\}/g)].map((m) => ({ selector: m[1].trim(), body: m[2] }));
+    expect(reducedRules.filter((r) => r.selector.includes(".countdown"))).toEqual([]);
+    // 细线靠关键帧缩短：减少动画下关键帧照常播，没有把它停掉
+    expect(css).toMatch(/\.countdown \{[^}]*animation: toastCountdown var\(--toast-remaining\) linear forwards;/);
   });
 
   it("不自动消失的通知没有倒计时细线；取值越界抛错", () => {

@@ -9,6 +9,7 @@ import { render, type Rendered } from "../../test/dom";
 import type { ExistingKind } from "../contract";
 import { COPY, type Lang } from "../copy";
 import { FrameChromeProvider, type FrameChrome } from "../Frame";
+import { InShell } from "./test-chrome";
 import shared from "../setup.module.css";
 import { Installed, type InstalledProps } from "./Installed";
 
@@ -38,7 +39,9 @@ function show(kind: ExistingKind, extra: Partial<InstalledProps> = {}, lang: Lan
   const chrome: FrameChrome = { copy: copy.frame, version: "0.2.0", canClose: true, canOpenLegal: true, reduced: true, onMinimize: vi.fn(), onClose: vi.fn(), onOpenLegal: vi.fn() };
   view = render(
     <FrameChromeProvider value={chrome}>
-      <Installed copy={copy} existing={{ kind, version: "0.1.0", dir: LONG_DIR }} payloadVersion="0.2.0" elevated={false} busy={false} opening={false} {...handlers} {...extra} />
+      <InShell>
+        <Installed copy={copy} existing={{ kind, version: "0.1.0", dir: LONG_DIR }} payloadVersion="0.2.0" elevated={false} busy={false} opening={false} {...handlers} {...extra} />
+      </InShell>
     </FrameChromeProvider>,
   );
   return handlers;

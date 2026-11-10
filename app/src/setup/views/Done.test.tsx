@@ -11,6 +11,7 @@ import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../..
 import type { InstallMode } from "../contract";
 import { COPY, type SetupCopy } from "../copy";
 import { FrameChromeProvider, type FrameChrome } from "../Frame";
+import { InShell } from "./test-chrome";
 import { Done, type DoneProps } from "./Done";
 
 const VERSION = "0.2.0";
@@ -28,7 +29,9 @@ function done(overrides: Partial<DoneProps> = {}) {
     <MotionConfig reducedMotion="always">
       <OverlayProvider>
         <FrameChromeProvider value={chromeOf(copy)}>
-          <Done copy={copy} mode="fresh" version={VERSION} keptData={false} elevated={false} opening={false} onOpen={() => undefined} onClose={() => undefined} {...overrides} />
+          <InShell>
+            <Done copy={copy} mode="fresh" version={VERSION} keptData={false} elevated={false} opening={false} onOpen={() => undefined} onClose={() => undefined} {...overrides} />
+          </InShell>
           <OverlayRoot />
         </FrameChromeProvider>
       </OverlayProvider>
@@ -67,6 +70,14 @@ describe("文案", () => {
   ] as const)("%s 的标题是「%s」", (mode: InstallMode, title) => {
     view = render(done({ mode }));
     expect(heading()).toBe(title);
+  });
+
+  it("标题前有成功徽记：挂上时从透明处出来，读屏不念，标题文字照旧", () => {
+    view = render(done({ mode: "upgrade" }));
+    const mark = document.querySelector<HTMLElement>("h1 [aria-hidden='true']");
+    expect(mark?.querySelector("svg")).not.toBeNull();
+    expect(mark?.style.opacity).toBe("0");
+    expect(heading()).toBe("已升级到 0.2.0");
   });
 
   it("英文系统走英文表", () => {

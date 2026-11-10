@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { fade, insertItem, pageItem, rootTransition, SPRING_PARAMS, springAt, springs, tabPanel, TOOLTIP_TIMING, twoParam, type SpringName } from "./motion";
+import { ambientFade, fade, insertItem, pageItem, rootTransition, shake, SPRING_PARAMS, springAt, springs, tabPanel, TOOLTIP_TIMING, tweenAt, twoParam, type PanelFrom, type SpringName } from "./motion";
 
 const TOKENS = readFileSync(new URL("../styles/tokens.css", import.meta.url), "utf8");
 
@@ -101,6 +101,31 @@ describe("CSS 弹簧近似与动效令牌", () => {
     expect(token("--sk-dur-in")).toBe(`${fade.in.duration * 1000}ms`);
     expect(token("--sk-dur-out")).toBe(`${fade.out.duration * 1000}ms`);
   });
+
+  it("环境层显隐：入 480 ms 走淡入曲线，出 200 ms 走淡出曲线", () => {
+    expect(ambientFade).toEqual({
+      in: { duration: 0.48, ease: [0.16, 1, 0.3, 1] },
+      out: { duration: 0.2, ease: [0.4, 0, 1, 1] },
+    });
+    expect(ambientFade.in.ease).toBe(fade.in.ease);
+    expect(ambientFade.out.ease).toBe(fade.out.ease);
+  });
+
+  it("tweenAt：按补间自己的时长与缓动曲线给进度，两端钳在 0 与 1", () => {
+    expect(tweenAt(ambientFade.in, -0.1)).toBe(0);
+    expect(tweenAt(ambientFade.in, 0)).toBe(0);
+    expect(tweenAt(ambientFade.in, 0.48)).toBe(1);
+    expect(tweenAt(ambientFade.in, 3)).toBe(1);
+    // 三次贝塞尔的参数式：x(s) 是时间占比，y(s) 是进度
+    const bezier = (a: number, b: number, s: number) => 3 * a * s * (1 - s) ** 2 + 3 * b * s * s * (1 - s) + s ** 3;
+    for (const tween of [ambientFade.in, ambientFade.out, fade.in]) {
+      const [x1, y1, x2, y2] = tween.ease;
+      for (const s of [0.1, 0.35, 0.6, 0.9]) expect(tweenAt(tween, bezier(x1, x2, s) * tween.duration)).toBeCloseTo(bezier(y1, y2, s), 2);
+    }
+    // 淡入前快后慢，过一半时间已走完九成；淡出前慢后快，过一半时间还不到四成
+    expect(tweenAt(ambientFade.in, 0.24)).toBeGreaterThan(0.9);
+    expect(tweenAt(ambientFade.out, 0.1)).toBeLessThan(0.4);
+  });
 });
 
 describe("springAt：带初值的解析解", () => {
@@ -149,16 +174,46 @@ describe("变体与时机", () => {
     expect(rootTransition).toEqual({ ...springs.base, opacity: fade.in });
   });
 
-  it("页面区块第 i 项延迟 20 + min(i, 5) × 40 ms", () => {
-    const show = pageItem.show as (i: number) => { transition: { delay: number } };
+  it("页面区块从下方 6px 上移，第 i 项延迟 20 + min(i, 4) × 25 ms，120 ms 封顶", () => {
+    expect(pageItem.hidden).toEqual({ opacity: 0, y: 6 });
+    const show = pageItem.show as (i: number) => { y: number; transition: { delay: number; opacity: { delay: number } } };
+    expect(show(0).y).toBe(0);
     expect(show(0).transition.delay).toBeCloseTo(0.02, 10);
-    expect(show(1).transition.delay).toBeCloseTo(0.06, 10);
-    expect(show(5).transition.delay).toBeCloseTo(0.22, 10);
-    expect(show(9).transition.delay).toBeCloseTo(0.22, 10);
+    expect(show(1).transition.delay).toBeCloseTo(0.045, 10);
+    expect(show(3).transition.delay).toBeCloseTo(0.095, 10);
+    expect(show(4).transition.delay).toBeCloseTo(0.12, 10);
+    expect(show(9).transition.delay).toBeCloseTo(0.12, 10);
+  });
+
+  it("页面区块的透明度与位移同一个延迟：按值指定的 opacity 过渡不继承根上的 delay，必须自己带", () => {
+    const show = pageItem.show as (i: number) => { transition: Record<string, unknown> & { delay: number; opacity: Record<string, unknown> } };
+    for (const i of [0, 1, 2, 3, 4, 7]) {
+      const { transition } = show(i);
+      expect(transition.opacity).toEqual({ ...fade.in, delay: transition.delay });
+      expect(transition.opacity.delay).toBeGreaterThan(0);
+    }
+    const second = show(2).transition;
+    expect(second.opacity.delay).toBeCloseTo(0.07, 10);
+    expect(second).toEqual({ ...springs.soft, delay: second.delay, opacity: { ...fade.in, delay: second.delay } });
   });
 
   it("面板变体与页面区块同名，子元素才接得住编排", () => {
     expect(Object.keys(tabPanel).sort()).toEqual(Object.keys(pageItem).sort());
+  });
+
+  it("面板来向：不传时从下方 6px，横排标签按方向从左右 8px，竖排分区按方向从上下 6px", () => {
+    const hidden = tabPanel.hidden as (from: PanelFrom | undefined) => Record<string, number>;
+    expect(hidden(undefined)).toEqual({ opacity: 0, y: 6 });
+    expect(hidden({ axis: "x", dir: 1 })).toEqual({ opacity: 0, x: 8 });
+    expect(hidden({ axis: "x", dir: -1 })).toEqual({ opacity: 0, x: -8 });
+    expect(hidden({ axis: "y", dir: 1 })).toEqual({ opacity: 0, y: 6 });
+    expect(hidden({ axis: "y", dir: -1 })).toEqual({ opacity: 0, y: -6 });
+    // 落定时两个方向都回到 0：上一块面板从哪一侧进来，不影响这一块
+    expect(tabPanel.show).toEqual({ opacity: 1, x: 0, y: 0, transition: { ...springs.settle, opacity: fade.in } });
+  });
+
+  it("否定抖动每段走淡入的令牌曲线", () => {
+    expect(shake.transition).toEqual({ duration: 0.36, ease: fade.in.ease });
   });
 
   it("流内块增删：从 0.98 落到位走 settle，透明度走补间，退场只淡出不回弹", () => {

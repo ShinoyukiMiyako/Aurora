@@ -66,12 +66,32 @@ export function effectiveReducedMotion(appearance: Appearance, systemReduced: bo
   return appearance.reduceMotion || systemReduced;
 }
 
+/** 换明暗或强调色的那一刻挂在 <html> 上：全部过渡暂时关掉（规则在 styles/base.css）。 */
+export const INSTANT_THEME_ATTR = "data-sk-instant";
+
 /** 把外观写到 <html>：data-sk-mode 与 data-sk-accent 永远显式写出，不依赖「不写等于默认」。 */
 export function applyAppearance(appearance: Appearance, systemReduced: boolean, root: HTMLElement = document.documentElement): void {
-  root.setAttribute("data-sk-mode", assertMode(appearance.mode));
-  root.setAttribute("data-sk-accent", assertAccent(appearance.accent));
+  const mode = assertMode(appearance.mode);
+  const accent = assertAccent(appearance.accent);
+  // 页面底色一帧切完，按钮、开关轨道、选择卡描边却按自己的颜色过渡拖后约 150 ms 追上。换明暗或强调色时
+  // 先关掉全部过渡再改属性，读一次布局让样式在过渡关着时结算到新颜色，再撤掉：之后没有「旧色到新色」可供过渡，
+  // 悬停这类过渡照常。启动时第一次写入没有旧颜色，不用关
+  const switching = changes(root, "data-sk-mode", mode) || changes(root, "data-sk-accent", accent);
+  if (switching) root.setAttribute(INSTANT_THEME_ATTR, "");
+  root.setAttribute("data-sk-mode", mode);
+  root.setAttribute("data-sk-accent", accent);
   if (effectiveReducedMotion(appearance, systemReduced)) root.setAttribute("data-sk-reduced", "");
   else root.removeAttribute("data-sk-reduced");
+  if (switching) {
+    void root.offsetWidth;
+    root.removeAttribute(INSTANT_THEME_ATTR);
+  }
+}
+
+/** 属性已经写过、且这次要换成别的值。 */
+function changes(root: HTMLElement, name: string, next: string): boolean {
+  const current = root.getAttribute(name);
+  return current !== null && current !== next;
 }
 
 /** 首帧前读取外观；读取失败直接抛出，由启动流程显示错误页。 */

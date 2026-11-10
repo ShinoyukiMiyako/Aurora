@@ -7,7 +7,7 @@
 // 游戏日志每 100 ms 一批。状态岛按会话除日志以外的字段订阅，收起时日志怎么来都不重渲染；
 // 展开后的最近几行由 LatestLogs 自己订阅，只有它跟着换。
 
-import { AnimatePresence, motion, useIsPresent, useTransform, type Variants } from "framer-motion";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig, useTransform, type Variants } from "framer-motion";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "../art/Icon";
 import { InstanceBlock } from "../art/iso/InstanceBlock";
@@ -20,9 +20,11 @@ import { useBlockCatalog } from "../mc/catalog";
 import { useLaunchHost } from "../launch/host";
 import { sessionDetail, sessionPhaseLabel } from "../launch/launchView";
 import { fade, shake, springs } from "../lib/motion";
+import { useReflow } from "../lib/reflow";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { findInstance } from "../state/selectors";
 import { DOWNLOAD_STAGE, isLoadingPhase, type SessionState } from "../state/session";
+import { Appear } from "../ui/Appear";
 import { Button } from "../ui/Button";
 import { Popover } from "../ui/Popover";
 import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
@@ -128,6 +130,12 @@ const shakeVariants: Variants = {
   shake: { x: [...shake.x], transition: shake.transition },
 };
 
+/** 第二段换行的位移（px）：新行从下方升入，旧行向上淡出。 */
+const SECOND_SHIFT = 4;
+
+/** 减少动画时的退场：位移与缩放在那时瞬时到位，留在退场里会先瞬缩、瞬移一下再淡出，所以只留透明度。 */
+const FADE_OUT = { opacity: 0, transition: fade.out };
+
 function Island({ session }: { session: SessionState }) {
   const actions = useLauncherActions();
   const instance = useLauncherSelector((s) => findInstance(s, session.instanceId));
@@ -136,6 +144,7 @@ function Island({ session }: { session: SessionState }) {
   const host = useLaunchHost();
   const now = useRunningNow(session.phase === "running");
   const present = useIsPresent();
+  const reduced = useReducedMotionConfig() === true;
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
   // 「正在结束」是纯界面态：确认结束或点了取消、IPC 还没返回的这段时间；超时由动作本身以错误结束
@@ -146,6 +155,14 @@ function Island({ session }: { session: SessionState }) {
   const second = islandSecond(session, tier, now, stopping);
   const loading = isLoadingPhase(session.phase);
   const layoutKey = islandLayoutKey(session, tier, name, second);
+  // 详情在加载期间开着：加载结束（进入运行、失败、取消）后阶段清单留到浮层关闭，停在最终状态。
+  // 清单连间距两百多像素，加载一结束就抽走会让日志与动作行上跳、浮层底边骤缩；关掉再打开时不在加载期就不画
+  const [stagesHeld, setStagesHeld] = useState(false);
+  if (open && loading && !stagesHeld) setStagesHeld(true);
+  if (!open && stagesHeld) setStagesHeld(false);
+  const detailReflow = useReflow<HTMLDivElement>();
+  const dotRef = useRef<HTMLSpanElement>(null);
+  useBreathPhase(dotRef, tone === "running");
 
   const endSession = async () => {
     setStopping(true);
@@ -172,64 +189,98 @@ function Island({ session }: { session: SessionState }) {
 
   return (
     <>
-      <motion.button
-        ref={setAnchor}
-        type="button"
-        layout
-        layoutDependency={layoutKey}
-        className={styles.island}
-        data-tone={tone}
-        data-open={open || undefined}
-        aria-label={ISLAND_COPY.label(name, islandSecondText(second))}
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        style={{ borderRadius: ISLAND_RADIUS }}
-        initial={{ opacity: 0, scale: 0.92 }}
-        animate={{ opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } }}
-        exit={{ opacity: 0, scale: 0.96, transition: fade.out }}
-        transition={{ layout: springs.morph }}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <motion.span
-          className={styles.row}
-          layout="position"
+      {/* 崩溃时整座岛（描边与底色连同内容）抖一次。抖动放在外面这层：岛自己的 transform 归布局动画与入场、退场 */}
+      <motion.span className={styles.shaker} variants={shakeVariants} initial={false} animate={session.phase === "crashed" ? "shake" : "rest"}>
+        <motion.button
+          ref={setAnchor}
+          type="button"
+          layout
           layoutDependency={layoutKey}
-          variants={shakeVariants}
-          initial={false}
-          animate={session.phase === "crashed" ? "shake" : "rest"}
+          className={styles.island}
+          data-tone={tone}
+          data-open={open || undefined}
+          aria-label={ISLAND_COPY.label(name, islandSecondText(second))}
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          style={{ borderRadius: ISLAND_RADIUS }}
+          initial={{ opacity: 0, scale: 0.92 }}
+          animate={{ opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } }}
+          exit={reduced ? FADE_OUT : { opacity: 0, scale: 0.96, transition: fade.out }}
+          transition={{ layout: springs.morph }}
+          onClick={() => setOpen((v) => !v)}
         >
-          <span className={styles.blockFrame} aria-hidden="true">
-            {instance !== undefined && <InstanceBlock instanceId={instance.id} cover={instanceCover(instance, catalog)} width={20} />}
-          </span>
-          <span className={styles.name}>{name}</span>
-          <span className={styles.second}>
-            {second.label !== null && <span>{second.label}</span>}
-            {second.value !== null && <span className={styles.value}>{second.value}</span>}
-          </span>
-          {tone === "running" && <RunningDot />}
-          {session.phase === "crashed" && <motion.span className={styles.dangerDot} initial={{ scale: 0 }} animate={{ scale: 1, transition: springs.pop }} aria-hidden="true" />}
-        </motion.span>
-        <AnimatePresence>{loading && <IslandBar key="bar" session={session} />}</AnimatePresence>
-      </motion.button>
+          <motion.span
+            className={styles.row}
+            layout="position"
+            layoutDependency={layoutKey}
+            // 与外框同一枚弹簧：不写就落到根部的 base，外框入场缩放未完时变宽，内容会和外框分开动
+            transition={{ layout: springs.morph }}
+          >
+            <span className={styles.blockFrame} aria-hidden="true">
+              {instance !== undefined && <InstanceBlock instanceId={instance.id} cover={instanceCover(instance, catalog)} width={20} />}
+            </span>
+            <span className={styles.name}>{name}</span>
+            <span className={styles.second}>
+              {/* 阶段文字一变整行换掉（旧行上移淡出、新行从下方升入），百分比与计时在行内原地走。
+                  首帧那一行跟着整座岛入场，不单独播；行里只有文字、没有之后才挂载的动画元素，initial={false} 封不住别的入场 */}
+              <AnimatePresence mode="popLayout" initial={false}>
+                <motion.span
+                  key={second.label === null ? "value-only" : `label:${second.label}`}
+                  className={styles.face}
+                  initial={{ opacity: 0, y: SECOND_SHIFT }}
+                  animate={{ opacity: 1, y: 0, transition: { ...springs.settle, opacity: fade.in } }}
+                  exit={reduced ? FADE_OUT : { opacity: 0, y: -SECOND_SHIFT, transition: fade.out }}
+                >
+                  {second.label !== null && <span>{second.label}</span>}
+                  {second.value !== null && <span className={styles.value}>{second.value}</span>}
+                </motion.span>
+              </AnimatePresence>
+            </span>
+            {/* 状态点退场时立即脱离布局：外框的宽度动画按没有它的宽度量，淡完那一帧不再跳一次 */}
+            <AnimatePresence mode="popLayout">
+              {tone === "running" && (
+                <motion.span
+                  key="running"
+                  className={styles.runningDot}
+                  initial={{ scale: 0 }}
+                  animate={{ scale: 1, transition: springs.pop }}
+                  exit={reduced ? FADE_OUT : { opacity: 0, scale: 0.6, transition: fade.out }}
+                  aria-hidden="true"
+                >
+                  {/* 呼吸在里面这层：退场的透明度写在外层的内联样式上，CSS 动画要是也挂在外层会盖过它，只能在退场时撤掉呼吸，
+                      点就从呼吸中途跳回满亮再淡出。分两层后两者相乘，退场途中呼吸照常走 */}
+                  <span ref={dotRef} className={styles.breathing} />
+                </motion.span>
+              )}
+              {session.phase === "crashed" && (
+                <motion.span
+                  key="danger"
+                  className={styles.dangerDot}
+                  initial={{ scale: 0 }}
+                  animate={{ scale: 1, transition: springs.pop }}
+                  exit={reduced ? FADE_OUT : { opacity: 0, scale: 0.6, transition: fade.out }}
+                  aria-hidden="true"
+                />
+              )}
+            </AnimatePresence>
+          </motion.span>
+          <AnimatePresence>{loading && <IslandBar key="bar" session={session} />}</AnimatePresence>
+        </motion.button>
+      </motion.span>
       <span className={styles.srOnly} aria-live="polite">
         {ISLAND_COPY.announce(name, sessionPhaseLabel(session))}
       </span>
       <Popover open={open && present} anchor={anchor} onClose={close} placement="bottom" autoFocus aria-label={ISLAND_COPY.detailsLabel(name)}>
-        <div className={styles.detail}>
+        <div ref={detailReflow} className={styles.detail}>
           <DetailHead session={session} instance={instance} name={name} now={now} />
-          {loading && <StageList session={session} />}
+          {/* 换了一次启动（taskId 变）时清单重新挂载，勾号按新的这次启动算 */}
+          <Appear>{(loading || stagesHeld) && <StageList key={session.taskId} session={session} />}</Appear>
           <LatestLogs instanceId={session.instanceId} />
           <DetailActions session={session} controls={controls} onClose={close} />
         </div>
       </Popover>
     </>
   );
-}
-
-function RunningDot() {
-  const ref = useRef<HTMLSpanElement>(null);
-  useBreathPhase(ref, true);
-  return <motion.span ref={ref} className={styles.runningDot} initial={{ scale: 0 }} animate={{ scale: 1, transition: springs.pop }} aria-hidden="true" />;
 }
 
 function IslandBar({ session }: { session: SessionState }) {
@@ -255,19 +306,25 @@ function DetailHead({ session, instance, name, now }: { session: SessionState; i
         <p className={styles.headName}>{name}</p>
         <p className={styles.headPhase}>{detail === null ? phase : `${phase} · ${detail}`}</p>
       </div>
-      {isLoadingPhase(session.phase) && <ProgressRing value={session.progress} size={36} capAt99 track={session.taskId} label={ISLAND_COPY.progressLabel} />}
+      {/* 进度环比头部文字两行矮，撤掉不改头部高度；加载结束时淡出而不是瞬没 */}
+      <Appear itemClassName={styles.headRing}>
+        {isLoadingPhase(session.phase) && <ProgressRing key="ring" value={session.progress} size={36} capAt99 track={session.taskId} label={ISLAND_COPY.progressLabel} />}
+      </Appear>
     </div>
   );
 }
 
-export type StageState = "done" | "now" | "todo";
+/** halted：加载已经结束（失败或取消）时停下的那一步，外观同未开始，不再画成进行中。 */
+export type StageState = "done" | "now" | "todo" | "halted";
 
-/** 阶段清单不含最后一项「游戏运行中」：清单只在加载阶段出现。 */
+/** 阶段清单不含最后一项「游戏运行中」：清单只列加载的各步，加载结束后留在开着的详情里也只是停在最终状态。 */
 const LOADING_STAGES = LAUNCH_STAGES.slice(0, -1);
 
-export function stageState(stageIndex: number, index: number): StageState {
+/** loading 为 false 时清单是加载结束后留在详情里的：头部已写着「启动失败」「已取消」，出事那一步不能还像在进行。 */
+export function stageState(stageIndex: number, index: number, loading: boolean): StageState {
   if (index < stageIndex) return "done";
-  return index === stageIndex ? "now" : "todo";
+  if (index > stageIndex) return "todo";
+  return loading ? "now" : "halted";
 }
 
 /** 下载阶段那一行的右侧：进行中写「done/total · 速度」，没有缺失文件被跳过时写「无需下载」。 */
@@ -293,16 +350,23 @@ export function stageNote(session: SessionState, index: number): string | null {
 }
 
 function StageList({ session }: { session: SessionState }) {
+  // 打开详情时已经完成的阶段直接画勾；之后才完成的那一步才弹出并淡入，否则每次打开都像所有阶段刚刚完成
+  const [doneBeforeOpen] = useState(session.stageIndex);
+  const loading = isLoadingPhase(session.phase);
   return (
     <ol className={styles.stages} aria-label={ISLAND_COPY.stagesLabel}>
       {LOADING_STAGES.map((label, i) => {
-        const st = stageState(session.stageIndex, i);
+        const st = stageState(session.stageIndex, i, loading);
         const note = stageNote(session, i);
         return (
           <li key={label} className={styles.stage} data-state={st}>
             <span className={styles.stageDot} aria-hidden="true">
               {st === "done" && (
-                <motion.span className={styles.stageCheck} initial={{ scale: 0.6 }} animate={{ scale: 1, transition: springs.pop }}>
+                <motion.span
+                  className={styles.stageCheck}
+                  initial={i < doneBeforeOpen ? false : { scale: 0.6, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1, transition: { ...springs.pop, opacity: fade.in } }}
+                >
                   <Icon name="check" size={12} />
                 </motion.span>
               )}
@@ -316,15 +380,19 @@ function StageList({ session }: { session: SessionState }) {
   );
 }
 
-const LOG_LINES = 4;
+/** 详情里日志区的行数；样式里日志区的固定高度按它算。 */
+export const LOG_LINES = 4;
 
 /**
  * 详情里最近的几行日志：整座状态岛只有它订阅日志，详情收起时它不挂载。
- * 会话已清空（退场动画期间）或换成了别的实例时不画。
+ * 日志区常驻、高度固定为 LOG_LINES 行：首批日志常晚于详情打开才到、前几行逐批补齐，块要是随行数长高，下面的动作行会被一次次往下推。
+ * 会话已清空（退场动画期间）或换成了别的实例时选择器拿不到日志：照旧画最后见过的几行，淡出途中内容不突然变空。
  */
 function LatestLogs({ instanceId }: { instanceId: string }) {
-  const logs = useLauncherSelector((s) => (s.session !== null && s.session.instanceId === instanceId ? s.session.logs : null));
-  if (logs === null || logs.length === 0) return null;
+  const live = useLauncherSelector((s) => (s.session !== null && s.session.instanceId === instanceId ? s.session.logs : null));
+  const seen = useRef<SessionState["logs"]>([]);
+  if (live !== null) seen.current = live;
+  const logs = seen.current;
   const lines = logs.slice(-LOG_LINES);
   const offset = logs.length - lines.length;
   return (
@@ -353,6 +421,14 @@ function islandFailure(session: SessionState) {
   return failureCopy(session.failure.code, session.failure.params, { accountName: session.accountName, accountKind: session.accountKind, javaPinned: false });
 }
 
+/** 结束这一局的按钮：加载中是「取消启动」，运行中是「结束游戏」。 */
+type EndAction = "cancel" | "stop";
+
+function liveEndAction(phase: SessionState["phase"]): EndAction | null {
+  if (isLoadingPhase(phase)) return "cancel";
+  return phase === "running" ? "stop" : null;
+}
+
 function DetailActions({ session, controls, onClose }: { session: SessionState; controls: IslandControls; onClose: () => void }) {
   const phase = session.phase;
   // 「完整日志」「查看诊断」与修复动作先关浮层再执行
@@ -364,38 +440,49 @@ function DetailActions({ session, controls, onClose }: { session: SessionState; 
   const failure = phase === "failed" ? islandFailure(session) : null;
   // spawn_failed 的修复动作本身就是「完整日志」，不再重复一个同名按钮
   const showLogs = failure === null || failure.fix.kind !== "open_logs";
+  // 取消启动、结束游戏（或游戏自己退出）后会话进入已结束，停留片刻整座岛就退场。这段时间里结束按钮留在原位、改为不可用：
+  // 只删不补时让位无从接起（退场项被抽出布局的那一帧没有增删节点、也没有尺寸变化），右对齐的「完整日志」会右跳一个按钮宽，
+  // 正落在刚点过的位置；留着则位移为 0，聚焦着的按钮也不把焦点丢回页面。留的是此前显示的那一个（加载中游戏就退出了也是「取消启动」）
+  const live = liveEndAction(phase);
+  const [shownEnd, setShownEnd] = useState(live);
+  if (live !== null && live !== shownEnd) setShownEnd(live);
+  const end = live !== null ? live : phase === "stopped" ? shownEnd : null;
+  // 其余的增删（加载转运行、失败或崩溃）都有新按钮插入：退场的淡出并立即脱离布局，右对齐的其余按钮滑到新位置
+  const reflow = useReflow<HTMLDivElement>();
   return (
-    <div className={styles.actions}>
-      {showLogs && (
-        <Button variant="ghost" size="sm" onClick={leave(controls.openLogs)}>
-          {ISLAND_COPY.fullLog}
-        </Button>
-      )}
-      {isLoadingPhase(phase) && (
-        <Button variant="secondary" size="sm" icon="x" loading={controls.stopping} onClick={controls.cancel}>
-          {LAUNCH_COPY.cancel}
-        </Button>
-      )}
-      {phase === "running" && (
-        <Button variant="secondary" size="sm" icon="stop" loading={controls.stopping} onClick={controls.stop}>
-          {LAUNCH_COPY.stopGame}
-        </Button>
-      )}
-      {(phase === "failed" || phase === "crashed") && (
-        <Button variant="ghost" size="sm" onClick={controls.dismiss}>
-          {LAUNCH_COPY.dismiss}
-        </Button>
-      )}
-      {failure !== null && (
-        <Button variant="primary" size="sm" onClick={leave(() => controls.fix(failure.fix.kind))}>
-          {failure.fix.label}
-        </Button>
-      )}
-      {phase === "crashed" && (
-        <Button variant="primary" size="sm" onClick={leave(controls.openCrash)}>
-          {LAUNCH_COPY.viewCrash}
-        </Button>
-      )}
+    <div ref={reflow} className={styles.actions}>
+      <Appear itemClassName={styles.action}>
+        {showLogs && (
+          <Button key="logs" variant="ghost" size="sm" onClick={leave(controls.openLogs)}>
+            {ISLAND_COPY.fullLog}
+          </Button>
+        )}
+        {end === "cancel" && (
+          <Button key="cancel" variant="secondary" size="sm" icon="x" loading={live === "cancel" && controls.stopping} disabled={live !== "cancel"} focusableWhenDisabled onClick={controls.cancel}>
+            {LAUNCH_COPY.cancel}
+          </Button>
+        )}
+        {end === "stop" && (
+          <Button key="stop" variant="secondary" size="sm" icon="stop" loading={live === "stop" && controls.stopping} disabled={live !== "stop"} focusableWhenDisabled onClick={controls.stop}>
+            {LAUNCH_COPY.stopGame}
+          </Button>
+        )}
+        {(phase === "failed" || phase === "crashed") && (
+          <Button key="dismiss" variant="ghost" size="sm" onClick={controls.dismiss}>
+            {LAUNCH_COPY.dismiss}
+          </Button>
+        )}
+        {failure !== null && (
+          <Button key="fix" variant="primary" size="sm" onClick={leave(() => controls.fix(failure.fix.kind))}>
+            {failure.fix.label}
+          </Button>
+        )}
+        {phase === "crashed" && (
+          <Button key="crash" variant="primary" size="sm" onClick={leave(controls.openCrash)}>
+            {LAUNCH_COPY.viewCrash}
+          </Button>
+        )}
+      </Appear>
     </div>
   );
 }

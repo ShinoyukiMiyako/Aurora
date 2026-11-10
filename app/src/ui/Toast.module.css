@@ -97,7 +97,7 @@
   grid-column: 3;
 }
 
-/* 倒计时细线：从剩余比例线性缩到 0；暂停计时期间停住 */
+/* 倒计时细线：从剩余比例线性缩到 0；暂停计时期间停住。减少动画时照常显示：它是剩余寿命的信息，不是装饰性的位移 */
 .countdown {
   position: absolute;
   right: 0;
@@ -112,10 +112,6 @@
 
 .countdown[data-paused] {
   animation-play-state: paused;
-}
-
-:global([data-sk-reduced]) .countdown {
-  display: none;
 }
 
 @keyframes toastCountdown {

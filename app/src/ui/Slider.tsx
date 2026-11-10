@@ -2,7 +2,9 @@
 // 少于 5 个离散值用分段控件。
 //
 // - 语义与读屏交给原生 range（aria-valuetext 是格式化后的值），外观由自绘的轨道与圆钮承担，原生控件透明叠在上面。
-// - 指针拖动 1:1 跟手，不加过渡；可选吸附点（刻度、推荐值）只对指针生效：指针距吸附点不超过
+// - 圆钮与填充的位置只动 translate。键盘步进、点轨道定位、外部改值时沿 settle 滑到新值；
+//   指针按下后一旦拖出了新值就撤掉过渡，此后 1:1 跟手（按下那一下跳到指针处仍是滑过去的）。
+// - 可选吸附点（刻度、推荐值）只对指针生效：指针距吸附点不超过
 //   max(8px, 轨道宽 × 2%) 时吸到该值，之后离开超过 12px（且超出吸附半径）才脱开。键盘操作不吸附。
 // - 提交时机：拖动中只调 onChange 更新读数与预览，松手才 onCommit；键盘操作后 400 ms 没有新的按键才 onCommit。
 //   未提交的键盘改动在开始拖动或组件卸载时立即提交，不会丢。
@@ -77,6 +79,8 @@ interface Drag {
   start: number;
   last: number;
   snapped: number | null;
+  /** 按下之后已经拖出过新值：此后圆钮跟手，不再过渡。 */
+  following: boolean;
 }
 
 export function Slider({
@@ -105,6 +109,7 @@ export function Slider({
   const marksRef = useRef<HTMLDivElement>(null);
   const drag = useRef<Drag | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [following, setFollowing] = useState(false);
   const [marksWidth, setMarksWidth] = useState(0);
   const commitTimer = useRef<number | undefined>(undefined);
   const pending = useRef<number | null>(null);
@@ -170,10 +175,11 @@ export function Slider({
     return toStep(min + clamp((clientX - rect.left - SLIDER_THUMB / 2) / usable, 0, 1) * (max - min));
   };
 
-  const emit = (next: number, d: Drag) => {
-    if (next === d.last) return;
+  const emit = (next: number, d: Drag): boolean => {
+    if (next === d.last) return false;
     d.last = next;
     onChange(next);
+    return true;
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -183,7 +189,7 @@ export function Slider({
     flush();
     inputRef.current?.focus();
     event.currentTarget.setPointerCapture(event.pointerId);
-    const d: Drag = { pointerId: event.pointerId, start: value, last: value, snapped: null };
+    const d: Drag = { pointerId: event.pointerId, start: value, last: value, snapped: null, following: false };
     drag.current = d;
     setDragging(true);
     emit(valueAt(event.clientX, d), d);
@@ -191,7 +197,12 @@ export function Slider({
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     const d = drag.current;
-    if (d && d.pointerId === event.pointerId) emit(valueAt(event.clientX, d), d);
+    if (!d || d.pointerId !== event.pointerId) return;
+    // 只认改变了取值的移动：单击时指针的一两像素抖动不该把按下那一下的滑动截断
+    if (emit(valueAt(event.clientX, d), d) && !d.following) {
+      d.following = true;
+      setFollowing(true);
+    }
   };
 
   const endDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -199,6 +210,7 @@ export function Slider({
     if (!d || d.pointerId !== event.pointerId) return;
     drag.current = null;
     setDragging(false);
+    setFollowing(false);
     if (d.last !== d.start) onCommit(d.last);
   };
 
@@ -218,7 +230,7 @@ export function Slider({
   const shown = marks === undefined ? [] : visibleMarks(marks, min, max, marksWidth);
 
   return (
-    <div className={cx(styles.slider, className)} data-tone={tone} data-dragging={dragging || undefined} data-disabled={disabled || undefined} data-has-value={showValue || undefined}>
+    <div className={cx(styles.slider, className)} data-tone={tone} data-dragging={dragging || undefined} data-following={following || undefined} data-disabled={disabled || undefined} data-has-value={showValue || undefined}>
       <div className={styles.top}>
         <div
           ref={controlRef}

@@ -11,6 +11,13 @@
   gap: var(--sk-space-12);
 }
 
+/* 正文末尾随阶段替换的状态块：换阶段时整块换掉、新块淡入，块内几段（失败说明与后端原文）保持与正文同样的间距 */
+.status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-12);
+}
+
 .notes {
   display: flex;
   flex-direction: column;
@@ -44,8 +51,15 @@
   min-width: 0;
 }
 
+/*
+ * 已下 / 总大小的文字槽按最长的写法定宽、右对齐：「1023 MB / 1023 MB」17 个字符，数字等宽，
+ * 字母 M 比数字宽、空格与斜杠比数字窄，合起来不到 17ch。
+ * 首条进度把「0 B」换成两段大小、换源后又回到「0 B」、KB 进到 MB 时，同一行的进度条长度都不变
+ */
 .progressText {
   flex: none;
+  min-width: 17ch;
+  text-align: right;
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
   color: var(--sk-text-2);
@@ -67,14 +81,4 @@
   white-space: pre-line;
   overflow-wrap: anywhere;
   user-select: text;
-}
-
-.installing {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--sk-space-10);
-  padding: var(--sk-space-32) 0;
-  font-size: var(--sk-fs-small);
-  color: var(--sk-text-2);
 }

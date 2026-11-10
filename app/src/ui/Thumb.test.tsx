@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, type CanvasStub } from "../art/illustrations/test-canvas";
 import { render, stubMatchMedia, type Rendered } from "../test/dom";
 import { RemoteImageProvider } from "./remote-image";
 import { isPixelArtThumb, Thumb, THUMB_RADIUS, thumbIconSize, type ThumbSize } from "./Thumb";
+import styles from "./Thumb.module.css";
 
 let view: Rendered | undefined;
 let canvas: CanvasStub;
@@ -95,6 +98,8 @@ describe("Thumb", () => {
     expect(thumb().querySelector("svg")?.getAttribute("width")).toBe("24");
     expect(thumb().getAttribute("aria-hidden")).toBe("true");
     expect(fetchMock).not.toHaveBeenCalled();
+    // 一开始就没有图：图标不单独淡入
+    expect(thumb().querySelector("svg")?.classList.contains(styles.late)).toBe(false);
   });
 
   it("44 档：底座 44 见方、圆角 13、类型图标 20", () => {
@@ -152,6 +157,8 @@ describe("Thumb", () => {
     expect(thumb().dataset.view).toBe("fallback");
     expect(thumb().dataset.inactive).toBe("true");
     expect(thumb().querySelector("svg")?.getAttribute("width")).toBe("20");
+    // 加载失败才落到回落图形：图标淡入
+    expect(thumb().querySelector("svg")?.classList.contains(styles.late)).toBe(true);
     expect(String(warn.mock.calls[0][0])).toContain("https://x.test/a.png");
 
     view.unmount();
@@ -161,5 +168,18 @@ describe("Thumb", () => {
     await settle();
     expect(thumb().dataset.view).toBe("fallback");
     expect(String(warn.mock.calls.at(-1)?.[1])).toContain("HTTP 404");
+  });
+
+  it("样式：失败时底色从骨架淡到色相底座、图标淡入；减少动画时图片淡入缩到 200ms", () => {
+    const css = readFileSync(resolve(__dirname, "Thumb.module.css"), "utf8");
+    const body = (selector: string) => {
+      const at = css.indexOf(`${selector} {`);
+      if (at < 0) throw new Error(`Thumb.module.css 里没有 ${selector}`);
+      return css.slice(at, css.indexOf("}", at));
+    };
+    expect(body(".thumb")).toContain("transition: background-color var(--sk-dur-in) var(--sk-ease-out);");
+    expect(body(".late")).toContain("animation: reveal var(--sk-dur-in) var(--sk-ease-out);");
+    expect(body(".image")).toContain("animation: reveal var(--sk-dur-reveal) var(--sk-ease-out);");
+    expect(body(":global([data-sk-reduced]) .image")).toContain("animation: reveal var(--sk-dur-in) var(--sk-ease-out);");
   });
 });

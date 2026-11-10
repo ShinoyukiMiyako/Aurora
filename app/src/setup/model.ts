@@ -86,6 +86,29 @@ export function canCloseWindow(view: View): boolean {
   return view !== "installing";
 }
 
+/** 换步的方向：1 往前走，-1 退回去，0 原地换（只淡入淡出、不位移）。 */
+export type StepDirection = -1 | 0 | 1;
+
+/** 换步按哪一页算：准备升级页和安装中是同一页，等落樱退出后进度接着走，不换页。 */
+export function stepKey(view: View): string {
+  return view === "preparing" ? "installing" : view;
+}
+
+/** 失败页、拦截页「返回」落回的那几页。 */
+const RETURN_TARGETS: readonly View[] = ["welcome", "location", "installed"];
+
+/** 从 from 换到 to 时新页从哪一侧进来。 */
+export function stepDirection(from: View, to: View): StepDirection {
+  // 出错不算往前走，也不算退回，原地换上错误原文
+  if (stepKey(from) === stepKey(to) || from === "boot" || to === "fatal") return 0;
+  // 欢迎页点「更改」：路径原地变成可编辑，两页之间只淡不移
+  if ((from === "welcome" && to === "location") || (from === "location" && to === "welcome")) return 0;
+  if (to === "legal") return 1;
+  if (from === "legal") return -1;
+  if ((from === "blocked" || from === "failed") && RETURN_TARGETS.includes(to)) return -1;
+  return 1;
+}
+
 /** 现有安装决定能走哪种安装：newer 一种都不能走，降级保护只有这一道。 */
 export function allowedModes(existing: Existing | null): readonly InstallMode[] {
   if (existing === null) return ["fresh"];

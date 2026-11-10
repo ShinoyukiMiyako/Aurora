@@ -20,10 +20,11 @@ import { isImeComposing } from "../lib/util";
 import { useAppearance } from "../state/appearance";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import type { LauncherState } from "../state/store";
-import { SETTINGS_SECTIONS, type PageId, type Route } from "../state/route";
+import { SETTINGS_SECTIONS, sameRoute, type PageId, type Route } from "../state/route";
 import { activeAccount, findInstance, microsoftLoginUnavailable } from "../state/selectors";
 import { FocusReturnPoint, type FocusReturnHandle } from "../ui/focus-return";
 import { KeyHint } from "../ui/KeyHint";
+import { useOpenGeneration } from "../ui/Popover";
 import { useSwitchAccount } from "./AccountCapsule";
 import { useChrome } from "./chrome";
 import styles from "./CommandPalette.module.css";
@@ -68,12 +69,14 @@ export function CommandPalette() {
   const { palette, closePalette } = useShell();
   const root = useOverlayRoot();
   const focusReturn = useRef<FocusReturnHandle | null>(null);
+  // 退场途中再按 Ctrl+K：同一个 key 会把正在退场的面板拉回来，连同上次的关键词与高亮；每次打开换 key，新面板从头挂载
+  const generation = useOpenGeneration(palette.open);
   useEscapeLayer(palette.open, closePalette, { kind: "palette" });
   return (
     <>
       <FocusReturnPoint active={palette.open} handle={focusReturn} />
       {root !== null &&
-        createPortal(<AnimatePresence>{palette.open && <PaletteLayer key="palette" initialQuery={palette.query} focusReturn={focusReturn} />}</AnimatePresence>, root)}
+        createPortal(<AnimatePresence>{palette.open && <PaletteLayer key={generation} initialQuery={palette.query} focusReturn={focusReturn} />}</AnimatePresence>, root)}
     </>
   );
 }
@@ -112,7 +115,7 @@ function PaletteLayer({ initialQuery, focusReturn }: { initialQuery: string; foc
         aria-modal="true"
         aria-label={PALETTE_COPY.label}
         initial={{ opacity: 0, y: -8, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1, transition: { ...springs.settle, opacity: fade.in } }}
+        animate={{ opacity: 1, y: 0, scale: 1, transition: { ...springs.soft, opacity: fade.in } }}
         exit={{ opacity: 0, scale: 0.98, transition: fade.out }}
       >
         {currentId === null ? body(null) : <WithLaunch key={currentId} id={currentId}>{body}</WithLaunch>}
@@ -162,14 +165,16 @@ function usePaletteEntries(query: string, current: LaunchEntry | null): PaletteE
   const me = useLauncherSelector(activeAccount);
   const microsoftUnavailable = useLauncherSelector(microsoftLoginUnavailable);
   const actions = useLauncherActions();
-  const { go } = useNav();
+  const { go, route: here } = useNav();
+  const chrome = useChrome();
   const { openCreateInstance } = useShell();
   const { appearance, setAppearance } = useAppearance();
   const run = useRunner();
   const switchAccount = useSwitchAccount();
 
   const entries: PaletteEntry[] = [];
-  const goTo = (route: Route) => () => go(route);
+  // 已经在那一页：不压历史，把内容区滚回顶部，与侧栏点当前项一致；否则面板收起后什么都不发生
+  const goTo = (route: Route) => () => (sameRoute(here, route) ? chrome.scrollContentToTop() : go(route));
 
   for (const inst of instances) {
     if (inst.placeholder) continue;
@@ -327,10 +332,23 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
   const listId = `${base}-list`;
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const sections = rankPalette(query, usePaletteEntries(query, current));
+  const present = useIsPresent();
+  const live = rankPalette(query, usePaletteEntries(query, current));
+  // 退场的那一段不再跟着状态重算：刚执行的动作（切换账户、启动）此刻已改了状态，淡出中的条目不该换字、换位
+  const shownRef = useRef(live);
+  if (present) shownRef.current = live;
+  const sections = shownRef.current;
   const flat = sections.flatMap((s) => s.items);
-  const [highlight, setHighlight] = useState(0);
-  const active = flat.length === 0 ? -1 : Math.min(highlight, flat.length - 1);
+  // 高亮记的是条目：面板开着时后台插进新条目（数据晚到、占位实例转正），高亮留在原来那一条上，不按下标落到别的条目。
+  // 那一条不在了才按它最后所在的下标落位；id 为 null 表示「第一项」（刚打开、刚改了查询）
+  const [highlight, setHighlight] = useState<{ id: string | null; index: number }>({ id: null, index: 0 });
+  const kept = highlight.id === null ? -1 : flat.findIndex((entry) => entry.id === highlight.id);
+  if (kept >= 0 && kept !== highlight.index) setHighlight({ id: highlight.id, index: kept });
+  const active = flat.length === 0 ? -1 : kept >= 0 ? kept : Math.min(highlight.index, flat.length - 1);
+  const highlightAt = (index: number) => {
+    const entry = flat[index];
+    setHighlight(entry === undefined ? { id: null, index: 0 } : { id: entry.id, index });
+  };
   const optionId = (i: number) => `${base}-opt-${i}`;
 
   useLayoutEffect(() => {
@@ -353,7 +371,7 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
       case "ArrowDown":
       case "ArrowUp":
         event.preventDefault();
-        setHighlight(moveHighlight(active, event.key === "ArrowDown" ? 1 : -1, flat.length));
+        highlightAt(moveHighlight(active, event.key === "ArrowDown" ? 1 : -1, flat.length));
         return;
       case "Enter": {
         event.preventDefault();
@@ -387,7 +405,7 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
           autoComplete="off"
           onChange={(event) => {
             onQuery(event.target.value);
-            setHighlight(0);
+            setHighlight({ id: null, index: 0 });
           }}
           onKeyDown={onKeyDown}
         />
@@ -412,7 +430,7 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
                   aria-selected={i === active}
                   data-active={i === active || undefined}
                   onMouseMove={() => {
-                    if (i !== active) setHighlight(i);
+                    if (i !== active) highlightAt(i);
                   }}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => onExecute(entry)}

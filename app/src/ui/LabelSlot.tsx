@@ -9,12 +9,14 @@ export interface LabelSlotProps {
   current: string;
   /** 全部可能出现的文案。 */
   options: readonly string[];
+  /** 比最宽那条短的文案在槽里怎么摆。按钮标签居中（默认）；正文里靠左的说明传 start。 */
+  align?: "center" | "start";
 }
 
-export function LabelSlot({ current, options }: LabelSlotProps) {
+export function LabelSlot({ current, options, align = "center" }: LabelSlotProps) {
   if (!options.includes(current)) throw new Error(`LabelSlot 当前文案「${current}」不在候选里：${options.join("、")}`);
   return (
-    <span className={styles.slot}>
+    <span className={styles.slot} data-align={align}>
       {[...new Set(options)].map((option) => (
         // 不显示的那几条是 visibility: hidden：不进可访问性树，读屏只读到当前这条
         <span key={option} className={styles.option} data-current={option === current || undefined}>

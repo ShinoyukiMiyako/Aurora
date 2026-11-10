@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { MotionConfig } from "framer-motion";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
@@ -74,9 +76,31 @@ function intersect() {
   });
 }
 
-function runFrames() {
+let clock = 0;
+
+/** 推进一帧（16 ms）。 */
+function stepFrame() {
   act(() => {
-    for (const frame of frames.splice(0)) frame(0);
+    clock += 16;
+    for (const frame of frames.splice(0)) frame(clock);
+  });
+}
+
+/** 一帧一帧推进到帧循环停下（平铺层停稳）。 */
+function runFrames() {
+  for (let i = 0; frames.length > 0; i++) {
+    if (i > 200) throw new Error("平铺视差 200 帧还没停稳");
+    stepFrame();
+  }
+}
+
+/**
+ * 媒体层的淡入播完。jsdom 不播 CSS 动画，由测试替它派发结束事件。React 在加载时按环境选事件名：
+ * jsdom 没有 AnimationEvent，它改听带 webkit 前缀的名字；两个都派发，测试不依赖这个选择。
+ */
+function revealEnds(el: Element) {
+  act(() => {
+    for (const type of ["animationend", "webkitAnimationEnd"]) el.dispatchEvent(new Event(type, { bubbles: true }));
   });
 }
 
@@ -138,9 +162,22 @@ describe("Cover", () => {
     expect(resolve).toHaveBeenCalledTimes(1);
     expect(cover().dataset.source).toBe("remote");
     expect(cover().dataset.shade).toBe("bottom");
-    expect(cover().querySelector("[data-sk-art='iso']")).toBeNull();
     // 1600 × 900 的图按 cover 裁进 320 × 180：等比例刚好盖满
     expect(canvas.draws.at(-1)?.args).toEqual([0, 0, 1600, 900, 0, 0, 320, 180]);
+    // 远程图层连同压暗整层淡入，art 层（渐变底 + 底纹）垫在下面，身份方块同时淡出
+    const media = cover().querySelector<HTMLElement>("[data-reveal]") as HTMLElement;
+    expect(media.querySelector("canvas")).not.toBeNull();
+    expect(media.previousElementSibling?.querySelectorAll("svg[data-glyph]")).toHaveLength(4);
+    expect(cover().querySelector("[data-sk-art='iso']")?.closest("[data-leaving]")).not.toBeNull();
+
+    // 卡内别的动画冒上来的结束事件不算
+    revealEnds(media.querySelector("canvas") as HTMLCanvasElement);
+    expect(cover().querySelectorAll("svg[data-glyph]")).toHaveLength(4);
+
+    revealEnds(media);
+    expect(media.hasAttribute("data-reveal")).toBe(false);
+    expect(cover().querySelectorAll("svg[data-glyph]")).toHaveLength(0);
+    expect(cover().querySelector("[data-sk-art='iso']")).toBeNull();
   });
 
   it("远程图解码上限按 256 设备像素分档：同一档内改宽只重画画布、不再解码，跨档才重新解码", async () => {
@@ -172,6 +209,59 @@ describe("Cover", () => {
     expect(resolve).toHaveBeenCalledTimes(2);
     expect(createImageBitmap).toHaveBeenCalledTimes(4);
     expect(createImageBitmap).toHaveBeenLastCalledWith(expect.anything(), { resizeWidth: 1024, resizeHeight: 576, resizeQuality: "high" });
+  });
+
+  it("跨档重新解码期间照旧画旧位图、不闪回 art；新位图换上之后才关旧的，不再要图时放掉", async () => {
+    const decoded: { width: number; height: number; close: ReturnType<typeof vi.fn> }[] = [];
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(async (_source: unknown, options?: ImageBitmapOptions) => {
+        const bitmap = { width: options?.resizeWidth ?? 1600, height: options?.resizeHeight ?? 900, close: vi.fn() };
+        decoded.push(bitmap);
+        return bitmap;
+      }),
+    );
+    let release: () => void = () => {
+      throw new Error("第二次解析还没开始");
+    };
+    const resolve = vi
+      .fn<(url: string) => Promise<string>>()
+      .mockImplementationOnce(async (url) => url)
+      .mockImplementationOnce((url) => new Promise<string>((done) => (release = () => done(url))));
+    const tree = (remoteUrl: string | null) => (
+      <RemoteImageProvider resolve={resolve}>
+        <Cover hue={20} seed="p" height={180} remoteUrl={remoteUrl} />
+      </RemoteImageProvider>
+    );
+    view = render(tree("https://cdn.modrinth.com/gallery/a.png"));
+    intersect();
+    resize.resize(cover(), 320);
+    await settle();
+    const [, first] = decoded;
+    expect(first.width).toBe(768);
+    expect(canvas.draws.at(-1)?.source).toBe(first);
+
+    // 400 × 2 = 800 进了 1024 档：重新解码还没回来，卡面仍是远程图，旧位图按新宽度重画、没有被关
+    resize.resize(cover(), 400);
+    await settle();
+    expect(resolve).toHaveBeenCalledTimes(2);
+    expect(cover().dataset.source).toBe("remote");
+    expect(first.close).not.toHaveBeenCalled();
+    expect(canvas.draws.at(-1)?.source).toBe(first);
+    expect(canvas.draws.at(-1)?.args.slice(4)).toEqual([0, 0, 400, 180]);
+
+    release();
+    await settle();
+    const second = decoded.at(-1);
+    expect(second?.width).toBe(1024);
+    expect(canvas.draws.at(-1)?.source).toBe(second);
+    expect(first.close).toHaveBeenCalledTimes(1);
+    expect(second?.close).not.toHaveBeenCalled();
+
+    view.rerender(tree(null));
+    await settle();
+    expect(cover().dataset.source).toBe("art");
+    expect(second?.close).toHaveBeenCalledTimes(1);
   });
 
   it("remote 读不到、又没有平铺：回落 art，不加压暗", async () => {
@@ -276,6 +366,98 @@ describe("Cover", () => {
   });
 });
 
+describe("Cover 换形态", () => {
+  const reveal = () => cover().querySelector<HTMLElement>("[data-reveal]");
+
+  it("平铺材质首帧就在：画第一帧前就量出宽度画好平铺，不播淡入", () => {
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(320);
+    vi.mocked(useBlockSource).mockReturnValue(source("block|1.21.1|cherry_planks"));
+    view = render(<Cover hue={345} seed="inst-1" height={132} texture={CHERRY} shade="left" />);
+    // 没等 ResizeObserver 回报
+    expect([tileCanvas()?.style.width, tileCanvas()?.style.height]).toEqual(["344px", "156px"]);
+    expect(cover().dataset.source).toBe("texture");
+    expect(reveal()).toBeNull();
+    expect(cover().querySelectorAll("svg[data-glyph]")).toHaveLength(0);
+  });
+
+  it("平铺材质晚到：art 垫在下面，平铺层连同压暗整层淡入，播完才卸下 art", () => {
+    view = render(<Cover hue={345} seed="inst-1" height={132} texture={CHERRY} shade="left" identity={{ instanceId: "inst-1", cover: CHERRY }} />);
+    resize.resize(cover(), 320);
+    expect(cover().dataset.source).toBe("art");
+
+    vi.mocked(useBlockSource).mockReturnValue(source("block|1.21.1|cherry_planks"));
+    view.rerender(<Cover hue={345} seed="inst-1" height={132} texture={CHERRY} shade="left" identity={{ instanceId: "inst-1", cover: CHERRY }} />);
+    expect(cover().dataset.source).toBe("texture");
+    const media = reveal() as HTMLElement;
+    expect(media.contains(tileCanvas())).toBe(true);
+    expect(cover().querySelectorAll("svg[data-glyph]")).toHaveLength(4);
+    // 平铺形态照样画身份方块：不淡出
+    expect(cover().querySelector("[data-leaving]")).toBeNull();
+    expect(cover().querySelector("[data-sk-art='iso']")).not.toBeNull();
+
+    revealEnds(media);
+    expect(reveal()).toBeNull();
+    expect(cover().querySelectorAll("svg[data-glyph]")).toHaveLength(0);
+    expect(cover().querySelector("[data-sk-art='iso']")).not.toBeNull();
+  });
+
+  it("远程图盖到平铺上：平铺垫在下面直到淡入播完", async () => {
+    vi.mocked(useBlockSource).mockReturnValue(source("block|1.21.1|grass_block"));
+    view = render(
+      <RemoteImageProvider resolve={async (url) => url}>
+        <Cover hue={118} seed="i" height={132} remoteUrl="http://petalfall-tex.localhost/cover/abc" texture={CHERRY} />
+      </RemoteImageProvider>,
+    );
+    intersect();
+    resize.resize(cover(), 320);
+    await settle();
+    expect(cover().dataset.source).toBe("remote");
+    const media = reveal() as HTMLElement;
+    expect(media.querySelector("canvas:not([style])")).not.toBeNull();
+    expect(media.previousElementSibling?.contains(tileCanvas())).toBe(true);
+
+    revealEnds(media);
+    expect(tileCanvas()).toBeNull();
+  });
+
+  it("往下换（远程图地址清空）：直接换回 art，不垫旧层、不播淡入", async () => {
+    const tree = (remoteUrl: string | null) => (
+      <RemoteImageProvider resolve={async (url) => url}>
+        <Cover hue={20} seed="p" height={180} remoteUrl={remoteUrl} />
+      </RemoteImageProvider>
+    );
+    view = render(tree("https://cdn.modrinth.com/gallery/a.png"));
+    intersect();
+    resize.resize(cover(), 320);
+    await settle();
+    revealEnds(reveal() as HTMLElement);
+
+    view.rerender(tree(null));
+    expect(cover().dataset.source).toBe("art");
+    expect(reveal()).toBeNull();
+    expect(cover().querySelectorAll(":scope > div")).toHaveLength(1);
+  });
+
+  it("样式：淡入挂在整个媒体层上，减少动画时缩到 200ms；渐变底在 art 层；文字色跟着淡过去", () => {
+    const css = readFileSync(resolve(__dirname, "Cover.module.css"), "utf8");
+    const body = (selector: string) => {
+      const at = css.indexOf(`${selector} {`);
+      if (at < 0) throw new Error(`Cover.module.css 里没有 ${selector}`);
+      return css.slice(at, css.indexOf("}", at));
+    };
+    expect(body(".media[data-reveal]")).toContain("animation: reveal var(--sk-dur-reveal) var(--sk-ease-out);");
+    expect(body(".identity[data-leaving]")).toContain("animation: conceal var(--sk-dur-reveal) var(--sk-ease-out) forwards;");
+    expect(body(":global([data-sk-reduced]) .media[data-reveal]")).toContain("animation: reveal var(--sk-dur-in) var(--sk-ease-out);");
+    expect(body(":global([data-sk-reduced]) .identity[data-leaving]")).toContain("animation: conceal var(--sk-dur-in) var(--sk-ease-out) forwards;");
+    // 画布与平铺自己不再各播一遍
+    expect(body(".image")).not.toContain("animation");
+    expect(body(".tile")).not.toContain("animation");
+    expect(body(".art")).toContain("linear-gradient(");
+    expect(css).not.toContain('.cover[data-source="art"]');
+    expect(body(".cover")).toContain("transition: color var(--sk-dur-in) var(--sk-ease-out);");
+  });
+});
+
 describe("Cover 平铺视差", () => {
   function mountInHost(children: ReactNode = <Cover hue={345} seed="inst-1" height={132} texture={CHERRY} />) {
     view = render(
@@ -321,6 +503,34 @@ describe("Cover 平铺视差", () => {
     pointer(host, "pointermove", 560, -10);
     runFrames();
     expect(shift()).toEqual(["-8px", "8px"]);
+  });
+
+  it("平铺层沿弹簧追目标：一帧只走一截，中途换目标带着速度转向，停稳后帧循环停下", () => {
+    const host = mountInHost();
+    pointer(host, "pointermove", 100, 20);
+    stepFrame();
+    const [x1, y1] = shift().map(parseFloat);
+    // 往 (8, 8) 去，第一帧还在半路
+    expect(x1).toBeGreaterThan(0);
+    expect(x1).toBeLessThan(8);
+    expect(y1).toBe(x1);
+    stepFrame();
+    const x2 = parseFloat(shift()[0]);
+    expect(x2).toBeGreaterThan(x1);
+
+    // 目标掉头到 (-8, -8)：带着往正方向的速度，下一帧还会先往正方向冲一点，而不是立刻掉头
+    pointer(host, "pointermove", 500, 220);
+    stepFrame();
+    expect(parseFloat(shift()[0])).toBeGreaterThan(x2);
+
+    runFrames();
+    expect(shift()).toEqual(["-8px", "-8px"]);
+    expect(frames).toHaveLength(0);
+
+    // 平铺的位移不再挂 CSS 过渡：过渡每帧从零速重起，跟手发黏
+    const css = readFileSync(resolve(__dirname, "Cover.module.css"), "utf8");
+    const tileRule = css.slice(css.indexOf(":global(:root:not([data-sk-reduced])) .tile {"));
+    expect(tileRule.slice(0, tileRule.indexOf("}"))).not.toMatch(/transition:[^;]*translate/);
   });
 
   it("指针离开宿主或移出窗口：归位", () => {

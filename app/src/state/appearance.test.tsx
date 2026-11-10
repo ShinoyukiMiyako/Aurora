@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Appearance } from "../domain/types";
@@ -10,6 +12,7 @@ import {
   appearancePatchToDto,
   applyAppearance,
   DEFAULT_APPEARANCE,
+  INSTANT_THEME_ATTR,
   loadAppearance,
   useAppearance,
   type AppearanceApi,
@@ -107,6 +110,39 @@ describe("applyAppearance", () => {
   ])("应用设置 %s、系统偏好 %s -> 减少动画 %s", (setting, system, reduced) => {
     applyAppearance({ ...DEFAULT_APPEARANCE, reduceMotion: setting }, system);
     expect(html.hasAttribute("data-sk-reduced")).toBe(reduced);
+  });
+
+  describe("换明暗与强调色时颜色一帧切完", () => {
+    /** 这一次写入里 <html> 属性的变化次序；关过渡的标记记成「+标记」「-标记」。 */
+    const writes = (apply: () => void): string[] => {
+      const observer = new MutationObserver(() => undefined);
+      observer.observe(html, { attributes: true, attributeOldValue: true });
+      apply();
+      const records = observer.takeRecords();
+      observer.disconnect();
+      return records.map((r) => (r.attributeName === INSTANT_THEME_ATTR ? `${r.oldValue === null ? "+" : "-"}${INSTANT_THEME_ATTR}` : String(r.attributeName)));
+    };
+
+    it.each([
+      ["明暗", { ...DEFAULT_APPEARANCE, mode: "night" }],
+      ["强调色", { ...DEFAULT_APPEARANCE, accent: "moss" }],
+    ] as const)("换%s：先挂上关过渡的标记，改完属性再撤掉", (_name, next) => {
+      applyAppearance(DEFAULT_APPEARANCE, false);
+      expect(writes(() => applyAppearance(next, false))).toEqual([`+${INSTANT_THEME_ATTR}`, "data-sk-mode", "data-sk-accent", `-${INSTANT_THEME_ATTR}`]);
+      expect(html.hasAttribute(INSTANT_THEME_ATTR)).toBe(false);
+    });
+
+    it("启动时第一次写入、只改减少动画：不关过渡", () => {
+      expect(writes(() => applyAppearance(DEFAULT_APPEARANCE, false))).toEqual(["data-sk-mode", "data-sk-accent"]);
+      expect(writes(() => applyAppearance({ ...DEFAULT_APPEARANCE, reduceMotion: true }, false))).toEqual(["data-sk-mode", "data-sk-accent", "data-sk-reduced"]);
+    });
+
+    it("全局样式里有这个标记关掉全部过渡的规则", () => {
+      const css = readFileSync(resolve(__dirname, "../styles/base.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+      const rule = new RegExp(`:root\\[${INSTANT_THEME_ATTR}\\] \\*,[^{]*\\{([^}]*)\\}`).exec(css);
+      if (rule === null) throw new Error(`base.css 里没有 ${INSTANT_THEME_ATTR} 的规则`);
+      expect(rule[1].trim()).toBe("transition: none !important;");
+    });
   });
 });
 

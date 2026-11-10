@@ -1,7 +1,7 @@
 // 动效参数的唯一出处：弹簧预设、补间、页面与面板的入场变体、提示气泡的时机。
 // 页面与组件只引用这里的导出，不写字面的刚度、阻尼、时长与贝塞尔曲线。
 
-import type { Transition, Variants } from "framer-motion";
+import { cubicBezier, type Transition, type Variants } from "framer-motion";
 
 export type SpringName = "tap" | "settle" | "pop" | "soft" | "morph" | "base";
 
@@ -70,17 +70,41 @@ export const fade = {
   none: { duration: 0 },
 } as const satisfies Record<string, Transition>;
 
+/**
+ * 环境层（主页花瓣、樱花林全景）的显隐：铺满整片背景的一层从无到有要比控件慢慢浮现，离开也比 out 稍长，
+ * 大面积的明暗在 120 ms 里跳完像闪了一下。曲线沿用 in / out。只改透明度，减少动画时照常播放。
+ */
+export const ambientFade = {
+  in: { duration: 0.48, ease: fade.in.ease },
+  out: { duration: 0.2, ease: fade.out.ease },
+} as const satisfies Record<string, Transition>;
+
+/**
+ * 补间在第 t 秒走到的进度（0 到 1，已过缓动曲线）。给不经 framer-motion、自己逐帧画的动画用
+ * （花瓣画布里单片花瓣的淡入淡出），与弹簧的 springAt 相对。
+ */
+export function tweenAt(tween: { duration: number; ease: readonly [number, number, number, number] }, t: number): number {
+  if (t <= 0) return 0;
+  if (t >= tween.duration) return 1;
+  const [x1, y1, x2, y2] = tween.ease;
+  return cubicBezier(x1, y1, x2, y2)(t / tween.duration);
+}
+
 /** 应用根 MotionConfig 的兜底过渡：位移类走 base 弹簧，透明度走淡入补间。 */
 export const rootTransition: Transition = { ...springs.base, opacity: fade.in };
 
-/** 页面一级区块的入场：第 i 项延迟 20 + min(i, 5) × 40 ms。按索引算延迟，不用已废弃的 staggerChildren。 */
+/**
+ * 页面一级区块的入场：上移 6px 淡入，第 i 项延迟 20 + min(i, 4) × 25 ms。按索引算延迟，不用已废弃的 staggerChildren。
+ * 换页一天要做几十次：错开压到 120 ms 封顶，整页约 350 ms 落定，和侧栏选中滑块同一拍。
+ * opacity 的过渡要自己带同一个 delay：motion-dom 把按值指定的过渡单独取出、配上编排延迟后再启动，
+ * 根上的 delay 传不进去。漏写时各块同时淡入，后排已经不透明却还停在下方等位移起步。
+ */
 export const pageItem: Variants = {
-  hidden: { opacity: 0, y: 8 },
-  show: (i: number) => ({
-    opacity: 1,
-    y: 0,
-    transition: { ...springs.soft, opacity: fade.in, delay: 0.02 + Math.min(i, 5) * 0.04 },
-  }),
+  hidden: { opacity: 0, y: 6 },
+  show: (i: number) => {
+    const delay = 0.02 + Math.min(i, 4) * 0.025;
+    return { opacity: 1, y: 0, transition: { ...springs.soft, delay, opacity: { ...fade.in, delay } } };
+  },
 };
 
 /**
@@ -89,10 +113,22 @@ export const pageItem: Variants = {
  * 面板不是变体节点时它们挂到更上层的祖先上，而那一层只在页面挂载时编排过一次，切换一次标签后
  * 子元素就永久停在 hidden（内容还在 DOM 里，只是透明）。标签名与 pageItem 同名，子元素才接得住编排。
  * 旧面板同一帧移除、不等退场，所以没有 exit。
+ *
+ * 来向（custom 传 PanelFrom）：新面板从它在导航里所在的那一侧进来，和指示块的移动对得上。横排标签选了右边的，
+ * 内容从右侧 8px 处滑入；竖排分区选了上面的，内容从上方 6px 处落下。不传时从下方 6px 处上移。
  */
+export interface PanelFrom {
+  axis: "x" | "y";
+  /** 新序号在旧序号之后为 1，之前为 -1。 */
+  dir: 1 | -1;
+}
+
 export const tabPanel: Variants = {
-  hidden: { opacity: 0, y: 6 },
-  show: { opacity: 1, y: 0, transition: { ...springs.settle, opacity: fade.in } },
+  hidden: (from: PanelFrom | undefined) => {
+    if (from === undefined) return { opacity: 0, y: 6 };
+    return from.axis === "x" ? { opacity: 0, x: 8 * from.dir } : { opacity: 0, y: 6 * from.dir };
+  },
+  show: { opacity: 1, x: 0, y: 0, transition: { ...springs.settle, opacity: fade.in } },
 };
 
 /**
@@ -105,10 +141,54 @@ export const insertItem = {
   exit: { opacity: 0, scale: 0.98, transition: fade.out },
 } as const;
 
-/** 否定抖动：只用于会话崩溃时的状态岛与被拒绝的表单字段，每次只播一次，减少动画时不播。 */
+/** 否定抖动：只用于会话崩溃时的状态岛与被拒绝的表单字段，每次只播一次，减少动画时不播。每段都走淡入同一条令牌曲线。 */
 export const shake = {
   x: [0, -4, 4, -3, 3, -1, 0],
-  transition: { duration: 0.36, ease: "easeOut" },
+  transition: { duration: 0.36, ease: fade.in.ease },
+} as const;
+
+/**
+ * 启动胶囊左侧方块的组装时间线（秒或毫秒，见名）。面从各自的起点偏移（相对方块边长）落回原位：
+ * 左面从左下、右面从右下、顶面从上方。加载面与安装中面换上来后 firstDropMs 落下第一面（面在 40 ms 处入场、
+ * 蓝图随之出现，左面再落）；一次落多个面时相邻两面间隔 stepGapMs；最后一个面开始落位 seatDelayMs 后坐定。
+ * 拆解与崩落按顶、右、左逆序，相邻两面错开 gap 秒。
+ */
+export const assembly = {
+  dropOffset: { left: [-0.22, 0.12], right: [0.22, 0.12], top: [0, -0.26] },
+  dropFade: { duration: 0.16, ease: fade.in.ease },
+  reducedDropFade: { duration: 0.12, ease: fade.in.ease },
+  firstDropMs: 160,
+  stepGapMs: 90,
+  seatDelayMs: 120,
+  /** 坐定：目标值与当前值相同，靠初速度产生一次回弹（约 55 ms 到 +8% 峰值）。 */
+  seatVelocity: 3.5,
+  blueprintOut: { duration: 0.16, ease: fade.out.ease },
+  /** 拆解（取消启动）：已落的面飞回起点并淡出。 */
+  disassemble: { duration: 0.14, ease: fade.out.ease },
+  disassembleGap: 0.05,
+  /** 崩落（加载中崩溃、启动失败）：已落的面下坠 collapseFall 个边长并淡出。 */
+  collapse: { duration: 0.22, ease: fade.out.ease },
+  collapseGap: 0.04,
+  collapseFall: 0.4,
+} as const;
+
+/**
+ * 一行文字换内容（启动胶囊的阶段名）：旧行上移淡出，新行从下方落到位。两行叠在同一格里交接，不占额外高度。
+ * 只给「换了一件事」的文字用；百分比、文件数、计时这类同一件事的数字更新直接换字，不走它。
+ */
+export const lineSwap: Variants = {
+  enter: { opacity: 0, y: 4 },
+  show: { opacity: 1, y: 0, transition: { ...springs.settle, opacity: fade.in } },
+  leave: { opacity: 0, y: -4, transition: fade.out },
+};
+
+/**
+ * 启动胶囊的换面：新面比旧面晚 faceEnterDelay 秒入场，旧面先让出位置；视图变化后旧面留住 holdMs 毫秒，
+ * 让方块的拆解、崩落演完，或坐定之后再过 afterSeat 才换到运行面。减少动画时两者都归零。
+ */
+export const capsuleSwap = {
+  faceEnterDelay: 0.04,
+  holdMs: { disassemble: 240, collapse: 260, afterSeat: 200 },
 } as const;
 
 /**

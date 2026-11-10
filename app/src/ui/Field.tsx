@@ -3,9 +3,12 @@
 // 关联经上下文下发：放进来的输入框、下拉选择、开关等自动拿到 id（标签 for 指向它）、aria-describedby（提示与错误）
 // 与 aria-invalid；单选组这类不可被 label 关联的控件用 labelId 做 aria-labelledby。
 // 提示与错误共用一个常驻的 polite 播报区：先有播报区、后变内容，读屏才会念出新出现的错误。
+// 之后才出现的错误淡入并略微落下；挂载时就有的错误跟着所在页面或弹窗入场。
 
-import { createContext, useContext, useId, type ReactNode } from "react";
+import { motion } from "framer-motion";
+import { createContext, useContext, useEffect, useId, useRef, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
+import { fade, springs } from "../lib/motion";
 import { cx } from "../lib/util";
 import styles from "./Field.module.css";
 
@@ -41,14 +44,23 @@ export interface FieldProps {
   hint?: ReactNode;
   /** 校验失败的原因；有值时替换提示，并让控件进入错误态。 */
   error?: string;
+  /**
+   * 提示行常驻占一行：没有提示、但会校验出错的字段，或提示随输入时有时无的字段用。
+   * 错误或提示出现、消失时字段不变高，下面的内容不被挤开（错误长到折成两行时仍会多一行）。
+   */
+  reserve?: boolean;
   className?: string;
   children: ReactNode;
 }
 
-export function Field({ label, optional = false, hint, error, className, children }: FieldProps) {
+export function Field({ label, optional = false, hint, error, reserve = false, className, children }: FieldProps) {
   const base = useId();
   const invalid = error !== undefined && error !== "";
   const control: FieldControl = { controlId: `${base}-control`, labelId: `${base}-label`, describedBy: `${base}-message`, invalid };
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
   return (
     <FieldContext.Provider value={control}>
       <div className={cx(styles.field, className)}>
@@ -57,12 +69,17 @@ export function Field({ label, optional = false, hint, error, className, childre
           {optional && <span className={styles.optional}>{FIELD_OPTIONAL_SUFFIX}</span>}
         </label>
         {children}
-        <div id={control.describedBy} className={styles.message} data-error={invalid || undefined} aria-live="polite">
+        <div id={control.describedBy} className={styles.message} data-error={invalid || undefined} data-reserve={reserve || undefined} aria-live="polite">
           {invalid ? (
-            <>
+            <motion.span
+              key="error"
+              className={styles.error}
+              initial={mounted.current ? { opacity: 0, y: -4 } : false}
+              animate={{ opacity: 1, y: 0, transition: { ...springs.settle, opacity: fade.in } }}
+            >
               <Icon name="alert" size={14} className={styles.errorIcon} />
               <span>{error}</span>
-            </>
+            </motion.span>
           ) : (
             hint
           )}

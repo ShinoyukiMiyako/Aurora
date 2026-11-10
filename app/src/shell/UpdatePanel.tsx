@@ -1,16 +1,20 @@
 // 启动器更新面板：说清更新到哪一版、更新了什么，由用户决定何时下载、何时安装。正文与底栏随更新阶段变化。
 // 外壳级浮层：外壳布局挂 UpdatePanelMount，任何页面与通知动作经 openUpdatePanel 打开它。
+//
+// 换阶段时只换正文末尾的状态块（新块淡入、旧块同帧移除）与底栏按钮，更新说明一直留着；开始安装也不把正文换成转圈，
+// 按下的那个按钮转圈、状态块说明正在安装，弹窗尺寸不塌。
 
-import { useEffect, useMemo, type ReactNode } from "react";
+import { motion } from "framer-motion";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { PetalMark } from "../art/PetalMark";
-import { Spinner } from "../art/Spinner";
 import { downloadFailureCopy, sourceSwitchedCopy, UPDATE_COPY } from "../copy/updater";
 import { formatBytes, formatDate } from "../domain/format";
+import { insertItem } from "../lib/motion";
 import { cx } from "../lib/util";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useOnline } from "../state/online";
 import { busyInstanceId } from "../state/selectors";
-import { downloadFraction, hasPanel, phaseUpdate, type UpdaterPhase } from "../state/updater/machine";
+import { downloadFraction, hasPanel, phaseUpdate, type UpdateInfo, type UpdaterPhase } from "../state/updater/machine";
 import { useUpdater } from "../state/updater/useUpdater";
 import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
@@ -59,6 +63,24 @@ function DownloadProgress({ phase }: { phase: Extract<UpdaterPhase, { kind: "dow
   );
 }
 
+/**
+ * 正文末尾随阶段替换的状态块。换阶段时新块淡入、旧块同帧移除，不叠放交叉淡入：前后两块是进度行、说明条、
+ * 失败原文这类形状各异的内容，叠在一起淡出淡入会有一段两层文字压在一起。
+ * 随弹窗挂载、开着期间一直在，弹窗打开时就在的块跟着弹窗一起出现，之后换上的才单独淡入。
+ */
+function PhaseStatus({ phaseKey, children }: { phaseKey: string; children: ReactNode }) {
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
+  if (children === null) return null;
+  return (
+    <motion.div key={phaseKey} className={s.status} initial={mounted.current ? insertItem.initial : false} animate={insertItem.animate}>
+      {children}
+    </motion.div>
+  );
+}
+
 export interface UpdatePanelProps {
   open: boolean;
   onClose(): void;
@@ -72,7 +94,14 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
   const online = useOnline();
   const updater = useUpdater();
   const { phase } = updater.state;
-  const update = phaseUpdate(phase);
+  const current = phaseUpdate(phase);
+  // 版本不在了（装完、被新一轮检查替换）时面板还开着：留着最后一版继续挂着弹窗、只把 open 置假，退场才播得出来
+  const [last, setLast] = useState<UpdateInfo | null>(current);
+  if (current !== null && current !== last) setLast(current);
+  // 安装中沿用发起安装的那一面的底栏，按下的按钮转圈，另一个禁用，底栏不变空、不塌
+  const [installFrom, setInstallFrom] = useState<"ready" | "install_on_exit">("ready");
+  if ((phase.kind === "ready" || phase.kind === "install_on_exit") && phase.kind !== installFrom) setInstallFrom(phase.kind);
+  const update = current !== null ? current : last;
   if (update === null) return null;
 
   const installReason = gameRunning ? UPDATE_COPY.gameRunningReason : undefined;
@@ -183,34 +212,49 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
       );
       break;
     case "installing":
+      status = (
+        <Callout tone="info" announce>
+          {UPDATE_COPY.installing}
+        </Callout>
+      );
+      footer =
+        installFrom === "ready" ? (
+          <>
+            <Button disabled>{UPDATE_COPY.installOnExit}</Button>
+            <Button variant="primary" loading>
+              {UPDATE_COPY.restartInstall}
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button loading>{UPDATE_COPY.switchToNow}</Button>
+            <Button variant="ghost" disabled>
+              {UPDATE_COPY.close}
+            </Button>
+          </>
+        );
       break;
   }
 
-  const installing = phase.kind === "installing";
+  // 已就绪时游戏开始或结束，提示在两种说法间换，也算换了一块
+  const statusKey = phase.kind === "ready" ? `ready:${gameRunning}` : phase.kind;
   return (
     <Modal
-      open={open}
+      open={open && current !== null}
       onClose={onClose}
       size="md"
       icon={<PetalMark size={32} />}
       title={UPDATE_COPY.panelTitle(update.version)}
       subtitle={UPDATE_COPY.panelSubtitle(update.current_version, update.date === null ? null : formatDate(update.date))}
-      dismissible={!installing}
+      dismissible={phase.kind !== "installing"}
       footer={footer}
       footerStart={footerStart}
     >
-      {installing ? (
-        <div className={s.installing} role="status">
-          <Spinner size={24} />
-          <span>{UPDATE_COPY.installing}</span>
-        </div>
-      ) : (
-        <div className={s.panelBody}>
-          <Notes notes={update.notes} />
-          <p className={s.muted}>{UPDATE_COPY.installNote}</p>
-          {status}
-        </div>
-      )}
+      <div className={s.panelBody}>
+        <Notes notes={update.notes} />
+        <p className={s.muted}>{UPDATE_COPY.installNote}</p>
+        <PhaseStatus phaseKey={statusKey}>{status}</PhaseStatus>
+      </div>
     </Modal>
   );
 }

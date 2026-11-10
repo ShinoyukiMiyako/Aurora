@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { render, type Rendered } from "../test/dom";
 import { CopyButton, KV } from "./KV";
+import styles from "./KV.module.css";
 
 let view: Rendered | undefined;
 beforeEach(() => {
@@ -86,6 +89,50 @@ describe("CopyButton", () => {
     const container = mount(<CopyButton text="x" label="复制" onCopy={() => new Promise(() => undefined)} feedbackMs={2000} />);
     act(() => (container.querySelector("button") as HTMLButtonElement).click());
     expect(container.querySelector("button")?.getAttribute("aria-label")).toBe("复制");
+  });
+
+  it("图标位按阶段标记：初次挂载不标，复制成功标 copied，停留结束标 restored，再复制回到 copied", async () => {
+    const container = mount(<CopyButton text="x" label="复制" onCopy={() => Promise.resolve()} feedbackMs={1500} />);
+    const phase = () => container.querySelector("button")?.getAttribute("data-copy-phase");
+    expect(container.querySelector("button")?.classList.contains(styles.copy)).toBe(true);
+    expect(phase()).toBeNull();
+    act(() => (container.querySelector("button") as HTMLButtonElement).click());
+    await flush();
+    expect(phase()).toBe("copied");
+    act(() => vi.advanceTimersByTime(1500));
+    expect(phase()).toBe("restored");
+    act(() => (container.querySelector("button") as HTMLButtonElement).click());
+    await flush();
+    expect(phase()).toBe("copied");
+  });
+
+  it("复制失败（onCopy 以 false 结束）：图标位不进 copied", async () => {
+    const container = mount(<CopyButton text="x" label="复制" onCopy={() => Promise.resolve(false)} feedbackMs={1500} />);
+    act(() => (container.querySelector("button") as HTMLButtonElement).click());
+    await flush();
+    expect(container.querySelector("button")?.hasAttribute("data-copy-phase")).toBe(false);
+  });
+
+  it("样式：对勾弹出加淡入、复制图标淡回，三段关键帧各自命名；减少动画时对勾只淡入", () => {
+    const css = readFileSync(resolve(__dirname, "KV.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rule = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const found = new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`).exec(css);
+      if (found === null) throw new Error(`KV.module.css 没有 ${selector}`);
+      return found[1];
+    };
+    const copied = rule('.copy[data-copy-phase="copied"] svg');
+    expect(copied).toMatch(/copied-pop var\(--sk-spring-pop-dur\) var\(--sk-spring-pop\)/);
+    expect(copied).toMatch(/copied-fade var\(--sk-dur-in\) var\(--sk-ease-out\)/);
+    const restored = rule('.copy[data-copy-phase="restored"] svg');
+    expect(restored).toMatch(/restored-fade var\(--sk-dur-in\) var\(--sk-ease-out\)/);
+    expect(restored).not.toMatch(/copied-/);
+    const reduced = rule(':global([data-sk-reduced]) .copy[data-copy-phase="copied"] svg');
+    expect(reduced).toMatch(/copied-fade/);
+    expect(reduced).not.toMatch(/copied-pop/);
+    expect(css).toMatch(/@keyframes copied-pop\s*\{\s*from\s*\{\s*scale:\s*0\.6;/);
+    expect(css).toMatch(/@keyframes copied-fade\s*\{\s*from\s*\{\s*opacity:\s*0;/);
+    expect(css).toMatch(/@keyframes restored-fade\s*\{\s*from\s*\{\s*opacity:\s*0;/);
   });
 });
 

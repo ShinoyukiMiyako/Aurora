@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
@@ -163,6 +165,27 @@ describe("指针：跟手、钳制与松手提交", () => {
     expect(s.commits).toEqual([]);
   });
 
+  it("按下的跳位仍走过渡；拖出新值后撤掉过渡 1:1 跟手，松手恢复；不改值的抖动不撤", () => {
+    const s = spies();
+    const { control } = mount({ initial: 0 }, s);
+    layout(control);
+    const root = control.closest("[data-tone]") as HTMLElement;
+    pointer(control, "pointerdown", xOf(70));
+    expect(s.changes).toEqual([70]);
+    expect(root.hasAttribute("data-dragging")).toBe(true);
+    expect(root.hasAttribute("data-following")).toBe(false);
+    // 半个像素的抖动换算后还是 70：不算开始拖动
+    pointer(control, "pointermove", xOf(70) + 0.5);
+    expect(root.hasAttribute("data-following")).toBe(false);
+    pointer(control, "pointermove", xOf(72));
+    expect(s.changes).toEqual([70, 72]);
+    expect(root.hasAttribute("data-following")).toBe(true);
+    pointer(control, "pointerup", xOf(72));
+    expect(root.hasAttribute("data-following")).toBe(false);
+    expect(root.hasAttribute("data-dragging")).toBe(false);
+    expect(s.commits).toEqual([72]);
+  });
+
   it("禁用时指针与键盘都无效", () => {
     const s = spies();
     const { control, input } = mount({ initial: 20, disabled: true }, s);
@@ -240,6 +263,40 @@ describe("刻度避让", () => {
     expect(labels()).toEqual(["0", "10", "20", "40", "100"]);
     observers.resize(row, 200);
     expect(labels()).toEqual(["10", "40", "100"]);
+  });
+});
+
+describe("圆钮与填充的样式", () => {
+  // 按 CRLF 检出时多行选择器里夹着 \r，先统一成 \n
+  const css = readFileSync(resolve(__dirname, "Slider.module.css"), "utf8")
+    .replace(/\r\n/g, "\n")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  function ruleOf(selector: string): string {
+    const escaped = selector.replace(/[.[\]()]/g, (ch) => `\\${ch}`);
+    const rule = new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`).exec(css);
+    if (rule === null) throw new Error(`没有 ${selector} 规则`);
+    return rule[1];
+  }
+
+  it("位置只走 translate，不动 left / width", () => {
+    const thumb = ruleOf(".thumb");
+    const fill = ruleOf(".fill");
+    expect(thumb).toContain("translate: calc(var(--slider-p) * 100%) 0;");
+    expect(fill).toContain("translate: calc(var(--slider-thumb) / 2 + var(--slider-p) * (100% - var(--slider-thumb)) - 100%) 0;");
+    for (const rule of [thumb, fill]) {
+      expect(rule).not.toMatch(/(^|\s)(left|width):[^;]*--slider-p/);
+    }
+    // 行程宽 = 命中区宽 − 一个圆钮，圆钮自身按圆钮直径画
+    expect(thumb).toContain("right: var(--slider-thumb);");
+    expect(thumb).toContain("left: 0;");
+    expect(ruleOf(".knob")).toContain("width: var(--slider-thumb);");
+  });
+
+  it("非跟手时沿 settle 过渡，跟手与减少动画时不过渡；圆钮悬停与拿起的缩放走 tap", () => {
+    expect(ruleOf(".thumb,\n.fill")).toContain("transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);");
+    expect(ruleOf(".slider[data-following] .thumb,\n.slider[data-following] .fill")).toContain("transition: none;");
+    expect(ruleOf(":global([data-sk-reduced]) .thumb,\n:global([data-sk-reduced]) .fill")).toContain("transition: none;");
+    expect(ruleOf(".knob")).toContain("transition: transform var(--sk-spring-tap-dur) var(--sk-spring-tap);");
   });
 });
 

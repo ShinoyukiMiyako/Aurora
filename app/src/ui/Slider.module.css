@@ -35,14 +35,15 @@
   background: var(--sk-line-2);
 }
 
-/* 已填充段到圆钮中心为止；跟手时与圆钮同步、不做过渡 */
+/*
+ * 已填充段到圆钮中心为止：填充铺满轨道，右缘靠 translate 移到圆钮中心，轨道裁掉左侧溢出（translate 的百分比相对填充自身，
+ * 即整条轨道宽）。不用 width（逐帧重排）也不用 scaleX（渐变会被压扁）。
+ */
 .fill {
   position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: calc(var(--slider-thumb) / 2 + var(--slider-p) * (100% - var(--slider-thumb)));
+  inset: 0;
   background: var(--sk-accent-grad);
+  translate: calc(var(--slider-thumb) / 2 + var(--slider-p) * (100% - var(--slider-thumb)) - 100%) 0;
 }
 
 .slider[data-tone="warn"] .fill {
@@ -79,24 +80,46 @@
   pointer-events: none;
 }
 
+/*
+ * 圆钮的行程：宽度等于可用轨道（命中区减一个圆钮），圆钮贴在它的左端，整段靠 translate 移动 p × 自身宽度。
+ * 位置同样只动 translate，不动 left。
+ */
 .thumb {
   position: absolute;
   top: 50%;
-  left: calc(var(--slider-p) * (100% - var(--slider-thumb)));
-  width: var(--slider-thumb);
+  right: var(--slider-thumb);
+  left: 0;
   height: var(--slider-thumb);
   margin-top: calc(var(--slider-thumb) / -2);
+  translate: calc(var(--slider-p) * 100%) 0;
   pointer-events: none;
+}
+
+/* 键盘步进、点轨道定位、外部改值（切自动分配）时圆钮与填充一起沿 settle 滑到新值 */
+.thumb,
+.fill {
+  transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+/* 拖动开始移动后 1:1 跟手：撤掉过渡（按下那一下的跳位仍然是滑过去的） */
+.slider[data-following] .thumb,
+.slider[data-following] .fill {
+  transition: none;
+}
+
+:global([data-sk-reduced]) .thumb,
+:global([data-sk-reduced]) .fill {
+  transition: none;
 }
 
 .knob {
   display: block;
-  width: 100%;
+  width: var(--slider-thumb);
   height: 100%;
   border-radius: 50%;
   background: #FFFFFF;
   box-shadow: 0 0 0 1.5px var(--sk-line-strong), 0 2px 6px rgba(80, 30, 60, 0.22);
-  transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
+  transition: transform var(--sk-spring-tap-dur) var(--sk-spring-tap);
 }
 
 .control:hover .knob {

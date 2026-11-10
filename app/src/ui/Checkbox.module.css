@@ -29,6 +29,7 @@
   background: var(--sk-surface);
   color: var(--sk-accent-ink);
   transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
     background-color var(--sk-dur-hover) var(--sk-ease),
     border-color var(--sk-dur-hover) var(--sk-ease);
 }
@@ -55,6 +56,18 @@
 
 .root:focus-visible .box {
   box-shadow: var(--sk-focus);
+}
+
+/* 整行都是命中区，按下的回应落在方框上：按在标签上也看得到，连续批量勾选时每一下都有手感 */
+.root:active:not(:disabled, [aria-disabled="true"]) .box {
+  transform: scale(0.88);
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .root:active:not(:disabled, [aria-disabled="true"]) .box {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 .glyph {

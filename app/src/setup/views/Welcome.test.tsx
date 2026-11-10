@@ -90,6 +90,14 @@ describe("内容", () => {
     mount({ interrupted: true });
     expect(main()).toContain(copy.welcome.interrupted);
   });
+
+  it("续装说明排在位置行下面：位置行两页都贴着内容区顶，点「更改」过去原地变成输入框", () => {
+    mount({ interrupted: true });
+    const content = document.querySelector("main [data-setup-carry='location']");
+    const items = [...(content?.children ?? [])];
+    expect(items[0]?.querySelector("dd")?.textContent).toBe(DIR);
+    expect(items.findIndex((item) => item.textContent === copy.welcome.interrupted)).toBe(1);
+  });
 });
 
 describe("按钮", () => {

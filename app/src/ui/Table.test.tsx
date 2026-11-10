@@ -1,9 +1,25 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { motion } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
-import { columnTemplate, nextSort, rowChurn, selectionState, Table, validateColumns, VIRTUALIZE_ABOVE, type TableColumn, type TableSort } from "./Table";
+import {
+  columnTemplate,
+  nextSort,
+  rowChurn,
+  rowShift,
+  selectionState,
+  swapsWholeTable,
+  Table,
+  validateColumns,
+  VIRTUALIZE_ABOVE,
+  type TableColumn,
+  type TableSort,
+} from "./Table";
 
 interface Mod {
   id: string;
@@ -163,6 +179,81 @@ describe("行的增删", () => {
     act(() => setShownRows(all.slice(1)));
     expect(rows().every((r) => r.hasAttribute("data-virtual") && !r.textContent?.includes("Mod 0版本"))).toBe(true);
   });
+
+  it("前后都在、下标变了的行数：删掉头一行时其后每行都算，删掉末行时一行不算", () => {
+    const keys = someMods(50).map((m) => m.id);
+    expect(rowShift(keys, keys)).toBe(0);
+    expect(rowShift(keys, keys.slice(1))).toBe(49);
+    expect(rowShift(keys, keys.slice(0, -1))).toBe(0);
+    expect(rowShift(keys, ["new", ...keys])).toBe(50);
+    expect(rowShift(["a", "b", "c"], ["c", "b", "a"])).toBe(2);
+  });
+
+  it("整表换上的判定：虚拟化或跨过阈值时行集合一变就整表换；不虚拟化时增删或被挤动的行超过 40 才整表换", () => {
+    const keys = someMods(60).map((m) => m.id);
+    const plain = (k: readonly string[]) => ({ keys: k, virtual: false });
+    const big = someMods(VIRTUALIZE_ABOVE + 5).map((m) => m.id);
+    const virtualShape = (k: readonly string[]) => ({ keys: k, virtual: true });
+
+    expect(swapsWholeTable(virtualShape(big), virtualShape(big))).toBe(false);
+    expect(swapsWholeTable(virtualShape(big), virtualShape(big.slice(1)))).toBe(true);
+    expect(swapsWholeTable(virtualShape(big), plain(big.slice(0, VIRTUALIZE_ABOVE)))).toBe(true);
+    expect(swapsWholeTable(plain(keys), plain(keys.slice(0, -1)))).toBe(false);
+    expect(swapsWholeTable(plain(keys), plain(keys.slice(0, 15)))).toBe(true);
+    // 只删一行，但它后面 41 行都被挤动
+    expect(swapsWholeTable(plain(keys), plain(keys.filter((k) => k !== "mod-18")))).toBe(true);
+    expect(swapsWholeTable(plain(keys), plain(keys.filter((k) => k !== "mod-19")))).toBe(false);
+  });
+
+  it("挂载时就在的行不播入场，之后新增的行从透明淡入", () => {
+    mount(<Changing initial={[MODS[0]]} />);
+    expect(rows()[0].style.opacity).toBe("1");
+    act(() => setShownRows([MODS[0], MODS[1]]));
+    expect(rows()[1].style.opacity).toBe("0");
+  });
+
+  it("挂载时就在的行里，之后才出现的部件照常播自己的入场", () => {
+    let showBadge: (show: boolean) => void = () => undefined;
+    function WithBadge() {
+      const [badge, setBadge] = useState(false);
+      showBadge = setBadge;
+      const cols: TableColumn<Mod>[] = [
+        { key: "name", header: "Mod", cell: (mod) => (badge ? <motion.span data-badge="" initial={{ opacity: 0 }} animate={{ opacity: 1 }} /> : mod.name) },
+      ];
+      return <Table label="x" columns={cols} rows={[MODS[0]]} rowKey={(m) => m.id} empty="空" />;
+    }
+    mount(<WithBadge />);
+    act(() => showBadge(true));
+    expect(document.querySelector<HTMLElement>("[data-badge]")?.style.opacity).toBe("0");
+  });
+
+  it("筛到零行：剩下的行留在原处淡出，空状态同时淡入，放完后只剩空状态", async () => {
+    mount(<Changing initial={MODS} />);
+    act(() => setShownRows([]));
+    const leaving = rows().filter((r) => r.hasAttribute("inert"));
+    expect(leaving.map((r) => MODS.find((m) => r.textContent?.includes(m.name))?.id)).toEqual(["sodium", "lithium", "iris"]);
+    const emptyRow = rows().find((r) => r.textContent === "没有 Mod");
+    if (emptyRow === undefined) throw new Error("空状态应该同时出现");
+    expect(emptyRow.hasAttribute("inert")).toBe(false);
+    expect(emptyRow.style.opacity).toBe("0");
+
+    await waitFrames();
+    expect(rows().map((r) => r.textContent)).toEqual(["没有 Mod"]);
+  });
+
+  it("从零行恢复：空状态淡出，行淡入", async () => {
+    mount(<Changing initial={[]} />);
+    expect(rows().map((r) => [r.textContent, r.style.opacity])).toEqual([["没有 Mod", "1"]]);
+    act(() => setShownRows([MODS[0]]));
+    const emptyRow = rows().find((r) => r.textContent === "没有 Mod");
+    expect(emptyRow?.hasAttribute("inert")).toBe(true);
+    const back = rows().find((r) => r.textContent?.includes("Sodium"));
+    expect(back?.style.opacity).toBe("0");
+    expect(back?.dataset.rowIndex).toBe("0");
+
+    await waitFrames();
+    expect(rows().map((r) => r.textContent?.includes("Sodium"))).toEqual([true]);
+  });
 });
 
 describe("列定义", () => {
@@ -315,6 +406,48 @@ describe("Table 选择与排序", () => {
     act(() => header().querySelector("button")?.click());
     expect(header().getAttribute("aria-sort")).toBe("descending");
     expect(header().querySelector("svg")).not.toBeNull();
+  });
+
+  it("排序箭头常驻同一个元素：翻转方向只换标记（由样式转半圈），不重挂", () => {
+    mount(<Harness />);
+    const button = () => document.querySelectorAll<HTMLElement>('[role="columnheader"]')[1].querySelector("button") as HTMLButtonElement;
+    const arrow = button().querySelector("svg");
+    expect(button().dataset.sorted).toBe("asc");
+    act(() => button().click());
+    expect(button().dataset.sorted).toBe("desc");
+    expect(button().querySelector("svg")).toBe(arrow);
+  });
+
+  it("未排序的可排序列也留着箭头的位置", () => {
+    mount(<Table label="x" columns={columns()} rows={MODS} rowKey={(m) => m.id} sort={null} onSortChange={() => undefined} empty="空" />);
+    const button = document.querySelectorAll<HTMLElement>('[role="columnheader"]')[1].querySelector("button") as HTMLButtonElement;
+    expect(button.hasAttribute("data-sorted")).toBe(false);
+    expect(button.querySelectorAll("svg")).toHaveLength(1);
+  });
+});
+
+describe("Table 样式", () => {
+  // 工作树按 CRLF 检出时规则之间是 \r\n：先统一成 \n 再按行匹配
+  const strip = (text: string) => text.replace(/\r\n/g, "\n").replace(/\/\*[\s\S]*?\*\//g, "");
+  const css = strip(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "Table.module.css"), "utf8"));
+  const rule = (selector: string) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // 换行前是逗号的是组合选择器的后半截：「.headCell,\n.cell」不能当成「.cell」
+    const match = new RegExp(`(?<!,)(?:^|\\n)${escaped} \\{([^}]*)\\}`).exec(css);
+    if (match === null) throw new Error(`没有 ${selector} 规则`);
+    return match[1];
+  };
+
+  it("滚动条槽常驻，行右不再另留内边距（右侧由槽占住）", () => {
+    expect(rule(".table")).toMatch(/scrollbar-gutter: stable;/);
+    expect(rule(".headRow,\n.row")).toMatch(/padding: 0 0 0 var\(--sk-space-6\);/);
+  });
+
+  it("悬停底色不带过渡；只有选中底色淡入；启停淡化走透明度过渡", () => {
+    expect(rule(".row")).not.toMatch(/transition/);
+    expect(rule(".row:hover")).not.toMatch(/transition/);
+    expect(rule(".row[data-selected],\n.row[data-selected]:hover")).toMatch(/transition: background-color var\(--sk-dur-hover\)/);
+    expect(rule(".cell")).toMatch(/transition: opacity var\(--sk-dur-hover\)/);
   });
 });
 

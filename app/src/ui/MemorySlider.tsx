@@ -4,7 +4,9 @@
 // 超过物理内存一半进入警示区：已填充段、读数与占用说明改警示色，下方出现警示说明。
 
 import { formatMemory } from "../domain/format";
+import { useReflow } from "../lib/reflow";
 import { cx } from "../lib/util";
+import { Appear } from "./Appear";
 import { Callout } from "./Callout";
 import styles from "./MemorySlider.module.css";
 import { Slider, type SliderMark } from "./Slider";
@@ -29,9 +31,12 @@ export function memoryMarks(maxMb: number): SliderMark[] {
   return marks;
 }
 
-/** 占用说明行的主句：「占系统内存 37%（共 32 GB）」。 */
-export function memoryShare(valueMb: number, totalMb: number): string {
-  return `占系统内存 ${Math.round((valueMb / totalMb) * 100)}%（共 ${formatMemory(totalMb)}）`;
+/**
+ * 占用说明行的主句「占系统内存 37%（共 32 GB）」，拆成三段：百分比数字单独放进定宽槽，
+ * 拖动时位数在 1 到 3 位之间变化也不推动后面的补充说明。
+ */
+export function memoryShare(valueMb: number, totalMb: number): { lead: string; percent: string; tail: string } {
+  return { lead: "占系统内存 ", percent: String(Math.round((valueMb / totalMb) * 100)), tail: `%（共 ${formatMemory(totalMb)}）` };
 }
 
 export interface MemorySliderProps {
@@ -58,9 +63,12 @@ export function MemorySlider({ value, onChange, onCommit, totalMb, recommended, 
   const marks = memoryMarks(maxMb);
   const snapTo = recommended === undefined ? marks.map((m) => m.value) : [...marks.map((m) => m.value), recommended.mb];
   const warn = value > totalMb / 2;
+  const share = memoryShare(value, totalMb);
+  // 补充说明随取值换文案时占用说明可能多折一行：下面的警示条滑过去，不跳
+  const reflow = useReflow<HTMLDivElement>();
 
   return (
-    <div className={cx(styles.root, className)} data-warn={warn || undefined}>
+    <div ref={reflow} className={cx(styles.root, className)} data-warn={warn || undefined}>
       <Slider
         value={value}
         onChange={onChange}
@@ -77,14 +85,21 @@ export function MemorySlider({ value, onChange, onCommit, totalMb, recommended, 
         disabled={disabled}
       />
       <p className={styles.usage} data-tone={warn ? "warn" : undefined}>
-        <span>{memoryShare(value, totalMb)}</span>
+        <span>
+          {share.lead}
+          <span className={styles.percent}>{share.percent}</span>
+          {share.tail}
+        </span>
         {notes.length > 0 && <span data-tone={notesTone === "warn" ? "warn" : undefined}>{` · ${notes.join(" · ")}`}</span>}
       </p>
-      {warn && (
-        <Callout tone="warn" announce className={styles.callout}>
-          {MEMORY_WARN_COPY}
-        </Callout>
-      )}
+      {/* 拖动越过一半时出现：淡入落位、淡出并立即让出位置，卡片里下面的内容由所在容器的让位接住 */}
+      <Appear>
+        {warn && (
+          <Callout tone="warn" announce className={styles.callout}>
+            {MEMORY_WARN_COPY}
+          </Callout>
+        )}
+      </Appear>
     </div>
   );
 }

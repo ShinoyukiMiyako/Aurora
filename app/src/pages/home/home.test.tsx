@@ -707,7 +707,8 @@ describe("主页：固定的服务器", () => {
       if (el === null || !el.textContent?.includes("从游戏的多人服务器列表里挑选")) throw new Error("服务器挑选弹窗没有打开");
       return el;
     };
-    const pickRows = () => [...picker().querySelectorAll<HTMLButtonElement>('button[aria-label^="固定 "]')];
+    // 刚固定的那一行还在淡出，已经标了 inert，不算列表的行
+    const pickRows = () => [...picker().querySelectorAll<HTMLButtonElement>('li:not([inert]) > button[aria-label^="固定 "]')];
     expect(pickRows().map((b) => b.getAttribute("aria-label"))).toEqual(many.map((k) => `固定 ${k.name}`));
 
     click(pickRows()[11]);
@@ -737,7 +738,7 @@ describe("主页：固定的服务器", () => {
     click(menuItem("全部 11 台服务器"));
     await flush();
     const picker = dialog() as HTMLElement;
-    const rows = () => [...picker.querySelectorAll<HTMLButtonElement>('button[aria-label^="固定 "]')];
+    const rows = () => [...picker.querySelectorAll<HTMLButtonElement>('li:not([inert]) > button[aria-label^="固定 "]')];
     const focused = () => document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.textContent;
     const pickFocused = async () => {
       const el = document.activeElement;
@@ -781,7 +782,7 @@ describe("主页：固定的服务器", () => {
     await openMenu(buttonByLabel("固定服务器"));
     click(menuItem("全部 12 台服务器"));
     await flush();
-    const pickRow = (name: string) => (dialog() as HTMLElement).querySelector<HTMLButtonElement>(`button[aria-label="固定 ${name}"]`);
+    const pickRow = (name: string) => (dialog() as HTMLElement).querySelector<HTMLButtonElement>(`li:not([inert]) > button[aria-label="固定 ${name}"]`);
 
     const row = pickRow("服3") as HTMLButtonElement;
     click(row);

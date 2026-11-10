@@ -6,7 +6,7 @@
 // 内容区按路由键挂载页面：同一实例换分页、设置换分区不重新挂载；每个页面各有一层错误边界。
 
 import { AnimatePresence, motion } from "framer-motion";
-import { memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType } from "react";
+import { memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode, type RefObject } from "react";
 import { PanoramaBackdrop } from "../art/panorama/PanoramaBackdrop";
 import { PetalCanvas } from "../art/petals/PetalCanvas";
 import type { PetalDowngrade } from "../art/petals/engine";
@@ -20,6 +20,7 @@ import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { routeKey, type Route } from "../state/route";
 import { onboardingActive } from "../state/selectors";
 import { ExternalLinkProvider } from "../ui/external-link";
+import { PageArrivalProvider, type PageArrival } from "../ui/Page";
 import { RemoteImageProvider } from "../ui/remote-image";
 import styles from "./AppShell.module.css";
 import { ChromeProvider, type ChromeApi } from "./chrome";
@@ -29,7 +30,7 @@ import { fade } from "../lib/motion";
 import { FOCUS_FALLBACK_ATTR, OverlayRoot } from "./overlay";
 import { PageErrorBoundary } from "./PageError";
 import type { AnyPage, PageRegistry } from "./pages";
-import { useNav, useShell } from "./shell";
+import { useNav, useShell, type NavArrival } from "./shell";
 import { Sidebar } from "./Sidebar";
 import { TitleBar, useReportedWindowFrame, WindowControls } from "./TitleBar";
 import { Toasts } from "./Toasts";
@@ -157,11 +158,33 @@ const MAIN_ENTER = { initial: { opacity: 0 }, animate: { opacity: 1, transition:
 const MAIN_STILL = { initial: false, animate: { opacity: 1, transition: fade.in } } as const;
 
 /**
+ * 新挂载的页面怎么入场：后退、前进回到看过的位置，重播首访的区块错开像重新加载，只留根淡入；
+ * 应用启动的那一屏与两列一样，窗口显示时就是成品（窗口要等首帧之后才显示，入场会被截掉开头）。
+ */
+const PAGE_ARRIVAL: Readonly<Record<NavArrival, PageArrival>> = {
+  boot: "still",
+  go: "enter",
+  replace: "enter",
+  back: "return",
+  forward: "return",
+};
+
+/**
+ * 页面槽：放在错误边界里面，页面每次挂上（含错误页点「重新加载」）都在这里重新取一次到达方式。
+ * 导航状态停在 boot 直到第一次导航，但启动那一屏只有一次：主界面挂上之后、还没导航就重挂的页面
+ * （重新加载、实例被删退回实例库）按新进入处理，不然错误视图淡入了，重载回来的页面反而一帧硬切出来。
+ */
+function PageArrivalSlot({ arrival, bootShown, children }: { arrival: NavArrival; bootShown: RefObject<boolean>; children: ReactNode }) {
+  const value = arrival === "boot" && bootShown.current ? "enter" : PAGE_ARRIVAL[arrival];
+  return <PageArrivalProvider value={value}>{children}</PageArrivalProvider>;
+}
+
+/**
  * 只随路由、分档与外观重渲染：父级（外壳根、AnimatePresence）重渲染时 props 不变就跳过。
  * enter 只在挂载那一刻起作用：两列要不要淡入。
  */
 const MainFrame = memo(function MainFrame({ pages, bindScroll, enter }: { pages: PageRegistry; bindScroll: (el: HTMLDivElement | null) => void; enter: boolean }) {
-  const { route } = useNav();
+  const { route, arrival } = useNav();
   const { tier, petalsPaused } = useShell();
   const { appearance, reduced } = useAppearance();
   const run = useRunner();
@@ -176,6 +199,11 @@ const MainFrame = memo(function MainFrame({ pages, bindScroll, enter }: { pages:
   const key = routeKey(route);
   // 挂载之后 enter 再变不改已经定下的入场：记住挂载那一刻的取值
   const [columns] = useState(() => (enter ? MAIN_ENTER : MAIN_STILL));
+  // 第一次提交带着启动那一屏（或它的错误视图）画出来之后，启动那一屏就用掉了
+  const bootShown = useRef(false);
+  useEffect(() => {
+    bootShown.current = true;
+  }, []);
   return (
     <>
       {/* 槽位的空白是窗口拖动区（只认直接点在槽位上），侧栏胶囊本身不是 */}
@@ -197,7 +225,9 @@ const MainFrame = memo(function MainFrame({ pages, bindScroll, enter }: { pages:
           />
           <motion.div ref={bindScroll} className={styles.scroll} layoutScroll tabIndex={-1} {...{ [FOCUS_FALLBACK_ATTR]: "" }}>
             <PageErrorBoundary key={key} page={route.page}>
-              <PageView route={route} pages={pages} />
+              <PageArrivalSlot arrival={arrival} bootShown={bootShown}>
+                <PageView route={route} pages={pages} />
+              </PageArrivalSlot>
             </PageErrorBoundary>
           </motion.div>
         </div>
@@ -234,10 +264,11 @@ function OnboardingFrame({ Flow }: { Flow: ComponentType<FlowProps<"onboarding">
   const frame = useReportedWindowFrame();
   return (
     <div className={styles.onboarding} data-sk-onboarding="">
-      <header className={styles.strip} data-tauri-drag-region="deep" data-blurred={!frame.focused || undefined}>
+      {/* 向导收尾时顶条随向导主体一起淡出，主界面再整体淡入：不然它全不透明地停到最后一帧才消失，徽记与窗口三键先断后回 */}
+      <motion.header className={styles.strip} data-tauri-drag-region="deep" data-blurred={!frame.focused || undefined} exit={{ opacity: 0, transition: fade.out }}>
         <Logo size={20} className={styles.stripLogo} />
         <WindowControls maximized={frame.maximized} />
-      </header>
+      </motion.header>
       <div className={styles.onboardingBody}>
         <Suspense fallback={null}>
           <Flow />

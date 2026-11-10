@@ -1,4 +1,8 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { MotionConfig } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { NO_ART, setArtStatus } from "../../mc/art";
@@ -6,7 +10,8 @@ import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { clearArtCache } from "../../mc/useArt";
 import { render, stubMatchMedia, type Rendered } from "../../test/dom";
 import { stubCanvas, type CanvasStub } from "../illustrations/test-canvas";
-import { ASSEMBLY_TIMING, AssemblingBlock } from "./AssemblingBlock";
+import { assembly } from "../../lib/motion";
+import { AssemblingBlock } from "./AssemblingBlock";
 import { InstanceAvatarBase } from "./InstanceAvatarBase";
 import { InstanceBlock } from "./InstanceBlock";
 
@@ -39,6 +44,8 @@ afterEach(() => {
 
 const settle = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
 const block = () => view?.container.querySelector<HTMLElement>("[data-sk-art='iso']") as HTMLElement;
+/** 样式原文：jsdom 不算样式，动效约定读 CSS 文本断言。不写 new URL("./x.css", import.meta.url)：构建会把它当资源地址改写成 http。 */
+const cssOf = (name: string) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), name), "utf8");
 
 describe("InstanceBlock", () => {
   it("没有材质源：画实例徽记，不发请求；方框为 W × ceil(H)", async () => {
@@ -124,6 +131,17 @@ describe("InstanceBlock", () => {
     expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([image]);
   });
 
+  it("卡面、头图上的大方块标成 large，悬停上浮随卡片走 settle；头像里的小方块仍走 tap", () => {
+    view = render(<InstanceBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} width={64} lift />);
+    expect(block().dataset.large).toBe("true");
+    view.unmount();
+    view = render(<InstanceBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} width={32} lift />);
+    expect(block().dataset.large).toBeUndefined();
+    const css = cssOf("InstanceBlock.module.css");
+    expect(css).toMatch(/\.lift \{\s*transition: transform var\(--sk-spring-tap-dur\) var\(--sk-spring-tap\);/);
+    expect(css).toMatch(/\.lift\[data-large\] \{\s*transition: transform var\(--sk-spring-settle-dur\) var\(--sk-spring-settle\);/);
+  });
+
   it("不允许的宽度直接抛错", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     expect(() => render(<InstanceBlock instanceId="i3" cover={{ block: "cherry_planks", hue: 345, image: null }} width={48 as never} />)).toThrow("不允许");
@@ -160,6 +178,20 @@ describe("InstanceAvatarBase", () => {
     expect(avatar.dataset.selected).toBe("true");
     expect(avatar.querySelector("[data-testid='ring']")).not.toBeNull();
   });
+
+  it("选中外环是叠层，切换时只过渡透明度，不在一帧里出现或消失", () => {
+    const css = cssOf("InstanceAvatarBase.module.css").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rule = (selector: string) => {
+      const match = new RegExp(`(?:^|\\n)${selector.replace(/[.[\]]/g, "\\$&")} \\{([^}]*)\\}`).exec(css);
+      if (match === null) throw new Error(`没有 ${selector} 规则`);
+      return match[1];
+    };
+    expect(rule(".avatar::after")).toContain("opacity: 0;");
+    expect(rule(".avatar::after")).toContain("transition: opacity var(--sk-dur-hover) var(--sk-ease);");
+    expect(rule(".avatar::after")).toContain("0 0 0 4px var(--sk-accent)");
+    expect(rule(".avatar[data-selected]::after")).toContain("opacity: 1;");
+    expect(css).not.toMatch(/\.avatar\[data-selected\] \{/);
+  });
 });
 
 describe("AssemblingBlock", () => {
@@ -182,11 +214,60 @@ describe("AssemblingBlock", () => {
     expect(root().dataset.placed).toBe("1");
     advance(0);
     expect(root().dataset.placed).toBe("2");
-    advance(ASSEMBLY_TIMING.stepGapMs - 1);
+    advance(assembly.stepGapMs - 1);
     expect(root().dataset.placed).toBe("2");
     advance(1);
     expect(root().dataset.placed).toBe("3");
     view.rerender(<AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} placed={0} />);
     expect(root().dataset.placed).toBe("0");
+  });
+
+  it("随新换上的面入场：从一面未落起，蓝图先淡入，挂载 firstDropMs 后才落下左面；之后的面照常隔一个落位间隔", () => {
+    vi.useFakeTimers();
+    const advance = (ms: number) =>
+      act(() => {
+        vi.advanceTimersByTime(ms);
+      });
+    const cover = { block: "cherry_planks", hue: 345, image: null };
+    view = render(<AssemblingBlock instanceId="i" cover={cover} placed={1} enter />);
+    const root = () => view?.container.firstElementChild as HTMLElement;
+    expect(root().dataset.placed).toBe("0");
+    expect(root().querySelector("svg")?.style.opacity).toBe("0");
+    advance(assembly.firstDropMs - 1);
+    expect(root().dataset.placed).toBe("0");
+    advance(1);
+    expect(root().dataset.placed).toBe("1");
+    view.rerender(<AssemblingBlock instanceId="i" cover={cover} placed={2} enter />);
+    advance(assembly.stepGapMs - 1);
+    expect(root().dataset.placed).toBe("1");
+    advance(1);
+    expect(root().dataset.placed).toBe("2");
+  });
+
+  it("减少动画时入场不等待：第一面立即落下", () => {
+    vi.useFakeTimers();
+    view = render(
+      <MotionConfig reducedMotion="always">
+        <AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} placed={1} enter />
+      </MotionConfig>,
+    );
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    expect((view.container.firstElementChild as HTMLElement).dataset.placed).toBe("1");
+  });
+
+  it("崩落：已落的面下坠 40% 个方块边长（28 宽下坠 11.2 px，不按 32 高的画布算）并淡出", async () => {
+    vi.useFakeTimers();
+    const cover = { block: "cherry_planks", hue: 345, image: null };
+    view = render(<AssemblingBlock instanceId="i" cover={cover} placed={2} width={28} />);
+    view.rerender(<AssemblingBlock instanceId="i" cover={cover} placed={2} width={28} exit="collapse" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const left = view.container.querySelector<HTMLElement>("[data-face='left']");
+    if (left === null) throw new Error("没有左面");
+    expect(left.style.transform).toBe(`translateY(${assembly.collapseFall * 28}px)`);
+    expect(left.style.opacity).toBe("0");
   });
 });

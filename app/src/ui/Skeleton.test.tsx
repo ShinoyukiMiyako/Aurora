@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { render, type Rendered } from "../test/dom";
 import { proportionalRadius, Skeleton } from "./Skeleton";
@@ -52,5 +54,13 @@ describe("Skeleton", () => {
 
   it("方块边长必须为正", () => {
     expect(() => render(<Skeleton shape="square" size={0} />)).toThrow(/正数/);
+  });
+
+  it("文字行的高度跟随所在位置的行高（1lh），不写死正文行高：放进 18 或 20 的行里换成文字时不跳", () => {
+    const css = readFileSync(resolve(__dirname, "Skeleton.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const line = css.slice(css.indexOf(".line {"), css.indexOf("}", css.indexOf(".line {")));
+    expect(line).toContain("height: var(--skeleton-line);");
+    expect(line).toContain("margin: calc((1lh - var(--skeleton-line)) / 2) 0;");
+    expect(line).not.toContain("--sk-lh-body");
   });
 });

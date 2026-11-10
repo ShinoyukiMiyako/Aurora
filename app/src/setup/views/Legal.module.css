@@ -34,6 +34,11 @@
   color: var(--sk-text-2);
 }
 
+/* 里面是定宽文案槽（LabelSlot），它默认按按钮文案居中；说明要靠左读，短的那条不该缩进去 */
+.headingNote > span {
+  justify-items: start;
+}
+
 /* 说明放不下时折到标签下面，不去挤标签：标签组自己会横向滚动，挤窄了就有标签被遮住 */
 .documentBar {
   display: flex;
@@ -89,11 +94,29 @@
   white-space: pre-wrap;
 }
 
+/* 清单的底块：读到之前就占着清单的位置，读到之后清单在同一块底上淡入（清单自己的底色与它相同） */
+.packagesBox {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+}
+
+/* 内边距对齐清单第一行的文字；读得快时一直透明，超过加载延迟才淡入 */
 .pending {
   margin: 0;
+  padding: var(--sk-space-6) var(--sk-space-12);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
   color: var(--sk-text-2);
+  opacity: 0;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+.pending[data-shown] {
+  opacity: 1;
 }
 
 .failed {

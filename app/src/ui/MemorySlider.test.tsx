@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
+import { keydown, render, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { MEMORY_WARN_COPY, MemorySlider, memoryMarks, memoryMaxMb, memoryShare, type MemorySliderProps } from "./MemorySlider";
 
 let view: Rendered | undefined;
@@ -38,9 +40,24 @@ describe("范围、刻度与说明", () => {
     expect(memoryMarks(131072).map((m) => m.value)).toEqual([2048, 4096, 8192, 16384, 32768, 65536, 131072]);
   });
 
-  it("占用说明按四舍五入的百分比与总量书写", () => {
-    expect(memoryShare(6144, 16384)).toBe("占系统内存 38%（共 16 GB）");
-    expect(memoryShare(8192, 32768)).toBe("占系统内存 25%（共 32 GB）");
+  it("占用说明按四舍五入的百分比与总量书写，百分比数字单独拆出来放进定宽槽", () => {
+    expect(memoryShare(6144, 16384)).toEqual({ lead: "占系统内存 ", percent: "38", tail: "%（共 16 GB）" });
+    expect(memoryShare(8192, 32768)).toEqual({ lead: "占系统内存 ", percent: "25", tail: "%（共 32 GB）" });
+    expect(memoryShare(1024, 131072).percent).toBe("1");
+    expect(memoryShare(16384, 16384).percent).toBe("100");
+  });
+
+  it("百分比槽定宽 3 位、右对齐，整行用等宽数字", () => {
+    const css = readFileSync(resolve(__dirname, "MemorySlider.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rule = (selector: string) => {
+      const match = new RegExp(`(?:^|\\n)\\${selector}\\s*\\{([^}]*)\\}`).exec(css);
+      if (match === null) throw new Error(`没有 ${selector} 规则`);
+      return match[1];
+    };
+    expect(rule(".percent")).toContain("min-width: 3ch;");
+    expect(rule(".percent")).toContain("text-align: end;");
+    expect(rule(".percent")).toContain("display: inline-block;");
+    expect(rule(".usage")).toContain("font-variant-numeric: tabular-nums;");
   });
 });
 
@@ -52,7 +69,7 @@ describe("MemorySlider", () => {
   const range = () => document.querySelector<HTMLInputElement>('input[type="range"]') as HTMLInputElement;
   const usage = () => document.querySelector("p") as HTMLParagraphElement;
 
-  it("步长 512、读数用 GB；跨过物理内存一半进入警示区，回落后退出", () => {
+  it("步长 512、读数用 GB；跨过物理内存一半进入警示区，回落后退出", async () => {
     mount(<Host initial={7680} totalMb={16384} notes={["建议值 6 GB，当前足够"]} />);
     expect(range().min).toBe("1024");
     expect(range().max).toBe("16384");
@@ -68,13 +85,25 @@ describe("MemorySlider", () => {
 
     keydown(range(), "ArrowRight");
     expect(range().getAttribute("aria-valuetext")).toBe("8.5 GB");
-    expect(document.querySelector('[role="alert"]')?.textContent).toBe(MEMORY_WARN_COPY);
+    const alert = document.querySelector('[role="alert"]') as HTMLElement;
+    expect(alert.textContent).toBe(MEMORY_WARN_COPY);
+    // 警示条从透明淡入落位，不是一帧出现
+    const item = alert.parentElement as HTMLElement;
+    expect(item.style.opacity).toBe("0");
+    await waitForFrames(() => expect(item.style.opacity).toBe("1"));
     expect(usage().dataset.tone).toBe("warn");
     expect(document.querySelector('[data-tone="warn"][data-has-value]')).not.toBeNull();
 
     keydown(range(), "ArrowLeft");
-    expect(document.querySelector('[role="alert"]')).toBeNull();
     expect(usage().hasAttribute("data-tone")).toBe(false);
+    await waitForFrames(() => expect(document.querySelector('[role="alert"]')).toBeNull());
+  });
+
+  it("挂载时就在警示区：警示条随所在页面入场，不单独淡入", () => {
+    mount(<Host initial={12288} totalMb={16384} />);
+    const alert = document.querySelector('[role="alert"]') as HTMLElement;
+    expect(alert.textContent).toBe(MEMORY_WARN_COPY);
+    expect((alert.parentElement as HTMLElement).style.opacity).toBe("1");
   });
 
   it("低于推荐值的补充说明单独着警示色；推荐值画成标记并带悬停说明", () => {

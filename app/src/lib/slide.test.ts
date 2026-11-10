@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { springAt } from "./motion";
-import { Slide, springTrack } from "./slide";
+import { playTrack, Slide, springTrack } from "./slide";
 
 const SAMPLE_S = 1 / 120;
 const r2 = (value: number) => Math.round(value * 100) / 100;
@@ -64,6 +64,18 @@ describe("springTrack：轨迹", () => {
   it("换一枚弹簧：帧取自那枚弹簧的解", () => {
     const { frames } = springTrack("pop", 0, 0, -100, 0);
     expect(frames[6].translate).toBe(`0px ${r2(springAt("pop", -100, 0, 6 * SAMPLE_S).x)}px`);
+  });
+});
+
+describe("playTrack", () => {
+  it("整条轨迹原样交给 Web Animations：时长取轨迹的，帧之间线性相连", () => {
+    const { el, calls } = animatable();
+    const track = springTrack("morph", 24, 0, -8, 0);
+    const animation = playTrack(el, track);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].frames).toBe(track.frames);
+    expect(calls[0].options).toEqual({ duration: track.duration, easing: "linear" });
+    expect(animation).toBe(calls[0].animation);
   });
 });
 

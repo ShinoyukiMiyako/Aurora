@@ -1,6 +1,7 @@
 // 日志控制台：实例的启动日志（进行中的会话实时输出，否则显示最近一次留底）。放在无内边距的卡片里，高度由页面给。
 //
-// 贴底：距底不足 28px 视为贴底，新行进来自动滚到底；用户上翻后停止跟随，出现「跳到最新」，点它或按 End 恢复。
+// 贴底：距底不足 28px 视为贴底，新行进来自动滚到底；用户上翻后停止跟随，出现「跳到最新」，点它或按 End 平滑滚回底部。
+// 上翻阅读时内容只在两头变（尾部追加、头部截掉、顶上出现省略说明）：头部变化按高度找补滚动位置，正在读的行不被推走。
 // 换行：默认不换行，行高固定、横向滚动；开启自动换行后按内容折行并逐行测量，此时只渲染最近 2000 行。
 // 虚拟化常驻开启：游戏日志动辄几千行，不能全部挂进文档。
 // 读屏：日志区 aria-live="off"（刷屏会淹没读屏），另设一个视觉隐藏的礼貌播报区，每 5 秒至多报一次新增错误数。
@@ -11,11 +12,14 @@
 // 不闪烁的实时光标：游戏可能运行数小时，常驻动画违背克制原则。
 
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { AnimatePresence, motion, useReducedMotionConfig } from "framer-motion";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
 import { clock } from "../domain/format";
 import { APP_NAME } from "../lib/app-info";
-import { cx } from "../lib/util";
+import { fade, springs } from "../lib/motion";
+import { cssVars, cx } from "../lib/util";
+import { Appear } from "./Appear";
 import { Button } from "./Button";
 import { CardHeader } from "./CardHeader";
 import { IconButton } from "./IconButton";
@@ -84,6 +88,61 @@ export function formatLogLines(lines: readonly LogConsoleLine[]): string {
 
 export function distanceFromBottom(el: HTMLElement): number {
   return el.scrollHeight - el.scrollTop - el.clientHeight;
+}
+
+/**
+ * 环形缓冲从头部截掉了几行：上一次显示的行里，这一次的首行排在第几。
+ * 没截、整体换掉（新会话）或一次截掉的比上次显示的还多时为 0：这几种情况都没有可以对齐的旧行。
+ */
+export function droppedHead(before: readonly LogConsoleLine[], after: readonly LogConsoleLine[]): number {
+  if (before.length === 0 || after.length === 0 || before[0] === after[0]) return 0;
+  const at = before.indexOf(after[0]);
+  return at > 0 ? at : 0;
+}
+
+// 全角字符的大致范围（东亚宽字符、全角标点与符号、表情）：等宽字体里没有这些字形，回落字体里约占两个字符位
+const WIDE_RANGES: readonly (readonly [number, number])[] = [
+  [0x1100, 0x115f],
+  [0x2e80, 0xa4cf],
+  [0xac00, 0xd7a3],
+  [0xf900, 0xfaff],
+  [0xfe30, 0xfe4f],
+  [0xff00, 0xff60],
+  [0xffe0, 0xffe6],
+  [0x1f300, 0x1faff],
+  [0x20000, 0x3fffd],
+];
+const TAB_STOP = 8;
+
+/** 正文在等宽字体里占几个字符位：全角字符按两位，制表符走到下一个 8 位制表位（white-space: pre 的默认 tab-size）。 */
+export function textColumns(text: string): number {
+  let columns = 0;
+  for (const ch of text) {
+    if (ch === "\t") {
+      columns += TAB_STOP - (columns % TAB_STOP);
+      continue;
+    }
+    const code = ch.codePointAt(0);
+    if (code === undefined) throw new Error("取不到字符的码位");
+    columns += WIDE_RANGES.some(([from, to]) => code >= from && code <= to) ? 2 : 1;
+  }
+  return columns;
+}
+
+const LINE_COLUMNS = new WeakMap<LogConsoleLine, number>();
+
+/** 一批行里最长正文的字符位数。按行对象缓存：实时会话每批只有新来的几行需要数。 */
+export function longestTextColumns(lines: readonly LogConsoleLine[]): number {
+  let longest = 0;
+  for (const line of lines) {
+    let columns = LINE_COLUMNS.get(line);
+    if (columns === undefined) {
+      columns = textColumns(line.text);
+      LINE_COLUMNS.set(line, columns);
+    }
+    if (columns > longest) longest = columns;
+  }
+  return longest;
 }
 
 /** 行对象的稳定键：环形缓冲从头部丢行时下标会整体平移，测量缓存不能按下标记。 */
@@ -184,13 +243,21 @@ export function LogConsole({
   const [wrap, setWrap] = useState(false);
   const [stuck, setStuck] = useState(true);
   const stuckRef = useRef(true);
+  // 「跳到最新」的平滑滚动途中：途经的位置不算用户上翻，到底（滚动结束）后再按实际位置判断
+  const jumping = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const omittedRef = useRef<HTMLDivElement>(null);
+  const reduced = useReducedMotionConfig() === true;
   const announcement = useErrorAnnouncer(lines);
 
   const filtered = useMemo(() => filterLogLines(lines, level, source), [lines, level, source]);
   const hiddenByWrap = wrap ? Math.max(0, filtered.length - WRAP_RENDER_LIMIT) : 0;
-  const shown = hiddenByWrap > 0 ? filtered.slice(hiddenByWrap) : filtered;
+  // 截出来的是新数组：不记忆化的话每次渲染都是新的，依赖它的找补每次都要重跑、读一遍滚动区的布局
+  const shown = useMemo(() => (hiddenByWrap > 0 ? filtered.slice(hiddenByWrap) : filtered), [filtered, hiddenByWrap]);
   const omitted = dropped + hiddenByWrap;
+  const omittedShown = omitted > 0;
+  // 不换行时横向可滚的宽度按全部显示行里最长的正文给，不随渲染窗口里恰好有哪几行而伸缩
+  const textCols = useMemo(() => (wrap ? 0 : longestTextColumns(shown)), [shown, wrap]);
 
   const virtualizer = useVirtualizer({
     count: shown.length,
@@ -208,29 +275,82 @@ export function LogConsole({
   }, [virtualizer, wrap]);
 
   const totalSize = virtualizer.getTotalSize();
+  /** 上一次提交时的显示状态：判断这一次是不是只在两头增删了行。 */
+  const committed = useRef({ shown, level, source, wrap, omittedShown });
   useLayoutEffect(() => {
+    const before = committed.current;
+    committed.current = { shown, level, source, wrap, omittedShown };
     const el = scrollRef.current;
-    if (el !== null && stuckRef.current) el.scrollTop = el.scrollHeight;
-  }, [shown.length, totalSize, wrap, level, source]);
+    if (el === null) return;
+    if (stuckRef.current) {
+      // 平滑滚到底的途中由虚拟列表的命令盯着底部：新行进来、行量出新高度，它自己把目标改到新的底部，这里不插手
+      if (!jumping.current) el.scrollTop = el.scrollHeight;
+      return;
+    }
+    // 筛选、换行切换是用户自己换了内容，不找补
+    if (before.level !== level || before.source !== source || before.wrap !== wrap) return;
+    // 行按下标定位：头部截掉 k 行，后面每一行都上移这 k 行的高度；顶上新出现的省略说明把日志区整体往下压。
+    // 两者都会把正在读的行推走，按同样的量找补滚动位置
+    let shift = 0;
+    const head = droppedHead(before.shown, shown);
+    for (let i = 0; i < head; i++) {
+      const measured = virtualizer.itemSizeCache.get(lineKey(before.shown[i]));
+      // 没量过的行（不换行时全都如此）就是按估计行高排的
+      shift -= measured === undefined ? LOG_ROW_HEIGHT : measured;
+    }
+    const bar = omittedRef.current;
+    if (omittedShown && !before.omittedShown && bar !== null) shift += bar.offsetHeight;
+    if (shift !== 0) el.scrollTop += shift;
+  }, [shown, totalSize, wrap, level, source, omittedShown, virtualizer]);
 
   const stickToBottom = () => {
     const el = scrollRef.current;
     if (el === null) return;
     stuckRef.current = true;
     setStuck(true);
-    el.scrollTop = el.scrollHeight;
+    // 本来就在底部时不会有滚动、也就等不到滚动结束：直接到位
+    if (reduced || distanceFromBottom(el) < 1) {
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    jumping.current = true;
+    // 经虚拟列表自己的命令滚，不直接调元素的 scrollTo：它知道这是一次平滑滚动，途中有行第一次量出高度时不再
+    // 立刻写一次瞬时滚动去找补（新的程序滚动会中止正在进行的平滑滚动，停在半路），目标也随新行改到新的底部
+    virtualizer.scrollToEnd({ behavior: "smooth" });
   };
 
   const onScroll = () => {
     const el = scrollRef.current;
-    if (el === null) return;
+    if (el === null || jumping.current) return;
     const atBottom = distanceFromBottom(el) < STICK_THRESHOLD;
     stuckRef.current = atBottom;
     setStuck(atBottom);
   };
 
+  const onScrollEnd = () => {
+    const el = scrollRef.current;
+    if (el === null || !jumping.current) return;
+    // 停下时还没到底：平滑滚动被别的程序滚动中止在半路。接着滚，半路的位置不算用户上翻
+    if (distanceFromBottom(el) >= STICK_THRESHOLD) {
+      virtualizer.scrollToEnd({ behavior: "smooth" });
+      return;
+    }
+    jumping.current = false;
+    onScroll();
+  };
+
+  // 用户自己动手（滚轮、拖滚动条、按键）就不再是程序滚动：之后的位置照常判断是否贴底。
+  // 虚拟列表的命令也要撤掉（到底之后它还会核对几帧才收工），否则新行进来时它会把目标改到新的底部，把用户拽回去
+  const takeOver = () => {
+    jumping.current = false;
+    virtualizer.cancelScroll();
+  };
+
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "End" || event.ctrlKey || event.altKey || event.metaKey) return;
+    if (event.key !== "End" || event.ctrlKey || event.altKey || event.metaKey) {
+      takeOver();
+      return;
+    }
     event.preventDefault();
     stickToBottom();
   };
@@ -248,7 +368,18 @@ export function LogConsole({
           icon={
             <span className={styles.headIcon} data-live={live || undefined}>
               <Icon name="terminal" size={18} />
-              {live && <span className={styles.liveDot} />}
+              {/* 会话开始时运行点弹出，结束时淡出；挂载时就在跑则跟着页面入场，不另外弹。圆点没有子元素，initial={false} 封不住别的入场 */}
+              <AnimatePresence initial={false}>
+                {live && (
+                  <motion.span
+                    key="live"
+                    className={styles.liveDot}
+                    initial={{ opacity: 0, scale: 0 }}
+                    animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
+                    exit={{ opacity: 0, transition: fade.out }}
+                  />
+                )}
+              </AnimatePresence>
             </span>
           }
           actions={
@@ -270,20 +401,35 @@ export function LogConsole({
         />
         {filters !== undefined && <div className={styles.filters}>{filters}</div>}
       </div>
-      {omitted > 0 && (
-        <div className={styles.omitted}>
-          <span>较早的 {omitted} 行已省略，完整日志在 latest.log</span>
-          {onOpenLogFile !== undefined && (
-            <Button variant="ghost" size="sm" icon="file-text" onClick={onOpenLogFile}>
-              打开日志文件
-            </Button>
-          )}
-        </div>
-      )}
+      {/* 说明条出现时淡入；它压下来的高度由上面的滚动找补接住 */}
+      <Appear itemClassName={styles.omittedSlot}>
+        {omittedShown && (
+          <div ref={omittedRef} className={styles.omitted}>
+            <span>较早的 {omitted} 行已省略，完整日志在 latest.log</span>
+            {onOpenLogFile !== undefined && (
+              <Button variant="ghost" size="sm" icon="file-text" onClick={onOpenLogFile}>
+                打开日志文件
+              </Button>
+            )}
+          </div>
+        )}
+      </Appear>
       <div className={styles.area}>
-        <div ref={scrollRef} className={styles.scroller} role="log" aria-live="off" aria-label="日志输出" tabIndex={0} onScroll={onScroll} onKeyDown={onKeyDown}>
+        <div
+          ref={scrollRef}
+          className={styles.scroller}
+          role="log"
+          aria-live="off"
+          aria-label="日志输出"
+          tabIndex={0}
+          onScroll={onScroll}
+          onScrollEnd={onScrollEnd}
+          onWheel={takeOver}
+          onPointerDown={takeOver}
+          onKeyDown={onKeyDown}
+        >
           {filteredOut && filteredEmpty !== undefined && <div className={styles.filteredEmpty}>{filteredEmpty}</div>}
-          <div className={styles.canvas} style={{ height: `${totalSize}px` }}>
+          <div className={styles.canvas} style={{ height: `${totalSize}px`, ...cssVars({ "--log-text-cols": textCols }) }}>
             {virtualizer.getVirtualItems().map((item) => {
               const line = shown[item.index];
               return (
@@ -308,12 +454,23 @@ export function LogConsole({
             })}
           </div>
         </div>
-        {!stuck && (
-          <button type="button" className={styles.jump} onClick={stickToBottom}>
-            <Icon name="chevron-down" size={16} />
-            跳到最新
-          </button>
-        )}
+        {/* 浮动胶囊：从下方 8px 处滑上来并淡入，收起时淡出 */}
+        <AnimatePresence>
+          {!stuck && (
+            <motion.button
+              key="jump"
+              type="button"
+              className={styles.jump}
+              onClick={stickToBottom}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0, transition: { ...springs.settle, opacity: fade.in } }}
+              exit={{ opacity: 0, transition: fade.out }}
+            >
+              <Icon name="chevron-down" size={16} />
+              跳到最新
+            </motion.button>
+          )}
+        </AnimatePresence>
       </div>
       <span className={styles.srOnly} role="status" aria-live="polite">
         <span key={announcement.seq}>{announcement.text}</span>

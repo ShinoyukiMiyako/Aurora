@@ -76,6 +76,11 @@
   scale: 0.94;
 }
 
+/* 减少动画：条目按下改为变淡、不缩，浅底也不跟着缩 */
+:global([data-sk-reduced]) .capsule:has(.item[data-selected]:active) .selBlock {
+  scale: none;
+}
+
 .selBar {
   position: absolute;
   top: 50%;
@@ -205,6 +210,11 @@
   touch-action: none;
 }
 
+/* 名称提示第二行的计时与百分比逐秒在变：等宽数字让气泡只在位数变了时才变宽，不随每一秒抖动 */
+.pinLine {
+  font-variant-numeric: tabular-nums;
+}
+
 /* 没溢出时不裁切：取消固定的那一项退场时已经脱离布局，列表先一步变矮，裁切会把它拦腰截断 */
 .pinScroll:not([data-overflow]) {
   overflow: visible;
@@ -222,6 +232,26 @@
 .row[data-dragging] .pin {
   cursor: grabbing;
   transform: scale(1.04);
+}
+
+/*
+ * 抬起阴影：叠层与头像同大同圆角（头像 40 居中在 44 的按钮里），只对透明度做过渡，不动 box-shadow 本身。
+ * 外阴影只画在盒子之外，叠在头像上面也不遮它。拿起时淡入，松手按退场时长淡出。
+ */
+.pin::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-radius: 12px;
+  box-shadow: var(--sk-shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
+}
+
+.row[data-dragging] .pin::after {
+  opacity: 1;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
 }
 
 /* ---- 新建实例 ---- */
@@ -243,10 +273,11 @@
   transform: scale(0.94);
 }
 
-/* 减少动画：按下不缩，改为瞬时变淡 */
+/* 减少动画：按下不缩、拿起不放大，改为瞬时变淡 */
 :global([data-sk-reduced]) .item:active,
 :global([data-sk-reduced]) .create:active,
-:global([data-sk-reduced]) .row > .pin:active {
+:global([data-sk-reduced]) .row > .pin:active,
+:global([data-sk-reduced]) .row[data-dragging] .pin {
   transform: none;
   opacity: 0.85;
   transition: none;

@@ -1,0 +1,57 @@
+// 下载入口与快览的样式约定：jsdom 不做布局也不跑 CSS 过渡，这里直接读样式表核对声明。
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+
+const css = readFileSync(new URL("./DownloadPeek.module.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+
+/** 选择器恰好是 selector 的那条规则的声明，属性名到值。 */
+function rule(selector: string): Map<string, string> {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`).exec(css);
+  if (m === null) throw new Error(`没有 ${selector} 规则`);
+  const decls = new Map<string, string>();
+  for (const decl of m[1].split(";")) {
+    const at = decl.indexOf(":");
+    if (at < 0) continue;
+    decls.set(decl.slice(0, at).trim(), decl.slice(at + 1).trim().replace(/\s+/g, " "));
+  }
+  return decls;
+}
+
+describe("快览列表的滚动条槽位", () => {
+  it("滚动区常驻槽位，列表右侧不再加内边距，右边留白由槽承担", () => {
+    const scroller = rule(".scroller");
+    expect(scroller.get("overflow-y")).toBe("auto");
+    expect(scroller.get("scrollbar-gutter")).toBe("stable");
+    expect(scroller.get("max-height")).toBe("320px");
+    expect(rule(".list").get("padding")).toBe("0 0 var(--sk-space-8) var(--sk-space-8)");
+    expect(rule(".list").has("overflow-y")).toBe(false);
+  });
+});
+
+describe("下载入口的按压", () => {
+  it("按下缩到 0.94，走 tap 弹簧；减少动画时改为瞬时降到 0.85 不透明度", () => {
+    expect(rule(".entry:active").get("scale")).toBe("0.94");
+    expect(rule(".entry").get("transition")).toContain("scale var(--sk-spring-tap-dur) var(--sk-spring-tap)");
+    const reduced = rule(":global([data-sk-reduced]) .entry:active");
+    expect(reduced.get("scale")).toBe("none");
+    expect(reduced.get("opacity")).toBe("0.85");
+    expect(reduced.get("transition")).toBe("none");
+  });
+
+  it("按压不写 transform、过渡里也没有 transform：跟着账户胶囊滑动的布局动画把位移写在行内 transform 上", () => {
+    for (const selector of [".entry:active", ":global([data-sk-reduced]) .entry:active"]) expect(rule(selector).has("transform")).toBe(false);
+    expect(rule(".entry").get("transition")).not.toMatch(/(^|,\s*)transform\s/);
+  });
+});
+
+describe("失败点在两角之间换位", () => {
+  it("用 translate 挪、沿 settle 过渡，不改 top / bottom", () => {
+    const alone = rule(".failDot[data-alone]");
+    expect(alone.get("translate")).toBe("0 -19px");
+    expect(alone.has("top")).toBe(false);
+    expect(alone.has("bottom")).toBe(false);
+    expect(rule(".failDot").get("transition")).toBe("translate var(--sk-spring-settle-dur) var(--sk-spring-settle)");
+    expect(rule(":global([data-sk-reduced]) .failDot").get("transition")).toBe("none");
+  });
+});

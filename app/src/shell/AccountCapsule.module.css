@@ -1,13 +1,20 @@
-.capsule,
-.add {
+/*
+ * 骨架、当前账户、「添加账户」是同一个胶囊，宽度变化由布局动画伸缩。
+ * 按压用独立的 scale 属性：布局动画把 transform 写在行内样式上，:active 里写 transform 会被它盖掉。
+ * 等待期（账户读得快时的前 300ms）占着位但看不见，到了该出现的时刻淡入。
+ * 裁掉溢出：长名换短名时，退场的旧内容层按换之前的宽度脱离布局淡出，不裁的话会伸出胶囊右缘、压向窗口三键。
+ * 头像角上的提醒点在胶囊内框里，焦点环是胶囊自己的阴影，都不受影响。
+ */
+.capsule {
+  position: relative;
   display: inline-flex;
   flex: none;
   align-items: center;
-  gap: var(--sk-space-8);
   box-sizing: border-box;
   max-width: 140px;
   height: 34px;
   padding: 0 var(--sk-space-12) 0 var(--sk-space-4);
+  overflow: hidden;
   border: 1px solid var(--sk-line);
   border-radius: var(--sk-r-pill);
   background: var(--sk-surface);
@@ -15,6 +22,8 @@
   color: var(--sk-text);
   cursor: pointer;
   transition:
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    opacity var(--sk-dur-in) var(--sk-ease-out),
     border-color var(--sk-dur-hover) var(--sk-ease),
     background-color var(--sk-dur-hover) var(--sk-ease);
 }
@@ -23,13 +32,7 @@
   max-width: 220px;
 }
 
-.capsule[data-compact] {
-  width: 34px;
-  padding: 0;
-  justify-content: center;
-}
-
-.add {
+.capsule[data-kind="add"] {
   padding: 0 var(--sk-space-12) 0 var(--sk-space-10);
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
@@ -37,28 +40,58 @@
   color: var(--sk-text-2);
 }
 
-.add[data-compact] {
+.capsule[data-compact] {
   width: 34px;
   padding: 0;
   justify-content: center;
 }
 
-.capsule:hover,
-.capsule[data-open],
-.add:hover {
+.capsule[data-pending] {
+  opacity: 0;
+}
+
+.capsule:disabled {
+  cursor: default;
+}
+
+.capsule:hover:not(:disabled),
+.capsule[data-open] {
   border-color: var(--sk-line-2);
 }
 
 /* 停在账户页时胶囊描边用强调色：标题栏里没有别的「当前页」指示 */
-.capsule[data-here],
-.add[data-here] {
+.capsule[data-here] {
   border-color: var(--sk-accent-line);
 }
 
-.capsule:focus-visible,
-.add:focus-visible {
+.capsule:focus-visible {
   outline: none;
   box-shadow: var(--sk-focus);
+}
+
+.capsule:active:not(:disabled) {
+  scale: 0.97;
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .capsule:active:not(:disabled) {
+  scale: none;
+  opacity: 0.85;
+  transition: none;
+}
+
+/* 胶囊里的一层内容；换状态、换账户时新旧两层叠放交叉淡入，旧的一层以胶囊为定位基准脱离布局 */
+.face {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  min-width: 0;
+}
+
+.skeletonText {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-4);
 }
 
 .avatar {
@@ -110,7 +143,7 @@
   color: var(--sk-warn);
 }
 
-/* ---- 切换菜单 ---- */
+/* ---- 切换菜单：高亮随键盘与指针移动瞬时切换，底色不做过渡，连按方向键时不留几行半透明的拖尾 ---- */
 .menu {
   display: flex;
   flex-direction: column;
@@ -135,7 +168,6 @@
   text-align: left;
   cursor: pointer;
   outline: none;
-  transition: background-color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .item:hover,

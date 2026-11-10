@@ -5,10 +5,11 @@ import { act, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Icon } from "../art/Icon";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { render, type Rendered } from "../test/dom";
-import { announceRole, Banner, FEEDBACK_ICON } from "./Banner";
+import { render, waitForFrames, type Rendered } from "../test/dom";
+import { announceRole, Banner, BannerSlot, FEEDBACK_ICON } from "./Banner";
 import { Button } from "./Button";
 import { Callout } from "./Callout";
+import { Page } from "./Page";
 
 let view: Rendered | undefined;
 afterEach(() => {
@@ -78,6 +79,74 @@ describe("Banner", () => {
 
   it.each(["ok", "warn", "danger"] as const)("%s 横幅不允许关闭：条件型横幅在条件成立期间一直显示", (tone) => {
     expect(() => mount(<Banner tone={tone} title="x" onClose={() => undefined} />)).toThrow(/只有 info/);
+  });
+});
+
+describe("BannerSlot", () => {
+  const banner = () => view?.container.querySelector<HTMLElement>("[data-tone]") ?? null;
+  const page = (show: boolean, title = "游戏正在运行") => (
+    <Page>
+      <BannerSlot itemClassName="slot">{show && <Banner tone="info" title={title} />}</BannerSlot>
+      <div data-next="" />
+    </Page>
+  );
+  const rerender = (ui: ReactNode) =>
+    view?.rerender(
+      <OverlayProvider>
+        {ui}
+        <OverlayRoot />
+      </OverlayProvider>,
+    );
+
+  it("挂载时就在：横幅跟着页面入场认领一级序号，槽位不另外动它", () => {
+    mount(page(true));
+    expect(banner()?.dataset.entrance).toBe("0");
+    const wrap = banner()?.parentElement;
+    expect(wrap?.className).toBe("slot");
+    expect(wrap?.style.opacity).toBe("1");
+  });
+
+  it("之后才出现：由槽位从透明、略小处入场，横幅不再认领页面序号", () => {
+    mount(page(false));
+    expect(banner()).toBeNull();
+    rerender(page(true));
+    expect(banner()?.hasAttribute("data-entrance")).toBe(false);
+    const wrap = banner()?.parentElement;
+    expect(wrap?.style.opacity).toBe("0");
+    expect(wrap?.style.transform).toBe("scale(0.98)");
+  });
+
+  it("出现之后换文案：原位更新，不重挂（挂载时就在、之后才到两种都是）", () => {
+    mount(page(true));
+    const early = banner();
+    rerender(page(true, "游戏已退出"));
+    expect(banner()).toBe(early);
+    expect(banner()?.dataset.entrance).toBe("0");
+    expect(banner()?.textContent).toBe("游戏已退出");
+
+    view?.unmount();
+    mount(page(false));
+    rerender(page(true));
+    const late = banner();
+    rerender(page(true, "游戏已退出"));
+    expect(banner()).toBe(late);
+    expect(banner()?.hasAttribute("data-entrance")).toBe(false);
+  });
+
+  it("条件变假：淡出后移除", async () => {
+    mount(page(true));
+    rerender(page(false));
+    expect(banner()).not.toBeNull();
+    await waitForFrames(() => expect(banner()).toBeNull());
+  });
+
+  it("离开后再回来：按之后才出现处理", async () => {
+    mount(page(true));
+    rerender(page(false));
+    await waitForFrames(() => expect(banner()).toBeNull());
+    rerender(page(true));
+    expect(banner()?.hasAttribute("data-entrance")).toBe(false);
+    expect(banner()?.parentElement?.style.opacity).toBe("0");
   });
 });
 

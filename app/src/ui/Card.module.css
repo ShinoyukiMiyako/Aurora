@@ -10,19 +10,42 @@
   box-shadow: var(--sk-shadow-sm);
 }
 
-.card[data-pad="sm"] {
+.card[data-pad="sm"],
+.card[data-pad="sm"] > .clip {
   padding: var(--sk-space-12);
 }
 
-.card[data-pad="md"] {
+.card[data-pad="md"],
+.card[data-pad="md"] > .clip {
   padding: var(--sk-space-16) var(--sk-space-18);
 }
 
-.card[data-pad="lg"] {
+.card[data-pad="lg"],
+.card[data-pad="lg"] > .clip {
   padding: var(--sk-space-22) var(--sk-space-24);
 }
 
+/*
+ * 裁切卡片：卡片自己不裁，裁切与内边距都交给内层 .clip。悬停阴影、选中外圈画在卡片边框之外的叠层上，
+ * 卡片一裁它们就整个看不见了。
+ * 内层用负外边距加透明边框盖住卡片的边框盒，裁切边落在自己的内边距盒上，正好是卡片边框的内沿，
+ * 圆角也随之取内沿的半径，与卡片自己裁切时一模一样；它是定位元素，绝对定位的子项照旧以卡片的内边距盒为基准。
+ */
 .card[data-clip] {
+  padding: 0;
+}
+
+.clip {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 0;
+  margin: -1px;
+  border: 1px solid transparent;
+  border-radius: inherit;
   overflow: hidden;
 }
 
@@ -104,23 +127,57 @@
   opacity: 1;
 }
 
+/*
+ * 按下：从悬停的上浮落回原位并缩到 0.99，阴影叠层减半，像被按进页面；按下这一程走 Tap，
+ * 松开回到悬停态时用回上面的过渡，上浮走 Settle。
+ */
 .card[data-interactive]:active,
 .card:has(.titleButton:active) {
-  scale: 0.995;
+  translate: none;
+  scale: 0.99;
+  transition:
+    translate var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.card[data-interactive]:active::after,
+.card:has(.titleButton:active)::after {
+  opacity: 0.5;
 }
 
 .card[data-interactive]:focus-visible {
   box-shadow: var(--sk-focus), var(--sk-shadow);
 }
 
+/*
+ * 选中外圈画在 ::before 叠层上，透明度与描边色同时过渡：不对 box-shadow 本身做过渡，外圈也不能比描边先到。
+ * 页面要更宽的外圈时设 --card-ring-width（聚光卡）。
+ */
+.card::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  box-shadow: 0 0 0 var(--card-ring-width, 3px) var(--sk-accent-soft);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
 .card[data-selected],
 .card[data-selected]:hover {
   border-color: var(--sk-accent-line);
-  box-shadow: 0 0 0 3px var(--sk-accent-soft), var(--sk-shadow-sm);
 }
 
-.card[data-selected][data-interactive]:focus-visible {
-  box-shadow: var(--sk-focus), var(--sk-shadow);
+.card[data-selected]::before {
+  opacity: 1;
+}
+
+/* 键盘焦点环顶替选中外圈 */
+.card[data-selected][data-interactive]:focus-visible::before {
+  opacity: 0;
 }
 
 /* 减少动画：只保留阴影叠层与底色变化；按下不缩放，瞬时降到 0.85 不透明度 */

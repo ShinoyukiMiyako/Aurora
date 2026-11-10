@@ -64,8 +64,8 @@ function page(): HTMLElement {
   return view.container;
 }
 
-/** 任务行（并行通道是 ol，任务列表是 ul）。 */
-const rows = () => [...page().querySelectorAll<HTMLLIElement>("ul > li")];
+/** 任务行（并行通道是 ol，任务列表是 ul）。换组或被清除的行还在原处淡出，已经标了 inert，不算任务行。 */
+const rows = () => [...page().querySelectorAll<HTMLLIElement>("ul > li:not([inert])")];
 
 function row(title: string): HTMLLIElement {
   const found = rows().filter((r) => r.textContent?.includes(title));

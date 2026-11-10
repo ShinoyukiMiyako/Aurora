@@ -5,7 +5,7 @@ import type { InstanceSummary } from "../domain/adapt";
 import type { Task } from "../domain/types";
 import type { LauncherState } from "../state/store";
 import { PEEK_COPY } from "../copy/shell";
-import { cancelTaskConfirm, overallProgress, peekRows } from "./DownloadPeek";
+import { cancelTaskConfirm, overallProgress, overallTrack, peekRows } from "./DownloadPeek";
 
 function task(id: string, patch: Partial<Task> = {}): Task {
   return {
@@ -51,6 +51,18 @@ describe("下载入口的总进度", () => {
 
   it("已结束的任务不算", () => {
     expect(overallProgress([task("a", { status: "done", totalBytes: 100, progress: 1 }), task("b", { totalBytes: 100, progress: 0.2 })])).toBeCloseTo(0.2);
+  });
+
+  it("环的标识：只随活动任务的集合与各自的批次变，进度与队列顺序变化不换标识", () => {
+    const a = task("a", { totalBytes: 300, batchFiles: 3, progress: 0.2 });
+    const b = task("b", { status: "queued" });
+    const base = overallTrack([a, b]);
+    expect(overallTrack([{ ...a, progress: 0.9 }, b])).toBe(base);
+    expect(overallTrack([b, a])).toBe(base);
+    expect(overallTrack([a, b, task("c", { status: "done" })])).toBe(base);
+    expect(overallTrack([a])).not.toBe(base);
+    expect(overallTrack([a, b, task("d")])).not.toBe(base);
+    expect(overallTrack([{ ...a, totalBytes: 900, batchFiles: 40 }, b])).not.toBe(base);
   });
 });
 

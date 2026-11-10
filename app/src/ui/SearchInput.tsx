@@ -6,7 +6,9 @@
 // 按 Esc 会直接关掉整个弹窗。所以在浮层里且有内容、有焦点时临时登记一层，让清空排在弹窗关闭之前；
 // 在页面里时栈本来为空，不登记，免得「有浮层打开」的判定被一个搜索框改写、全局快捷键失效。
 
+import { AnimatePresence, motion } from "framer-motion";
 import { useState, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { fade } from "../lib/motion";
 import { isImeComposing } from "../lib/util";
 import { useEscapeLayer } from "../shell/overlay";
 import { KeyHint } from "./KeyHint";
@@ -62,7 +64,18 @@ export function SearchInput({ value, onChange, shortcut, placeholder = SEARCH_PL
       icon="search"
       clearable
       aria-keyshortcuts={shortcut === undefined ? undefined : ariaKeyShortcuts(shortcut)}
-      trailing={shortcut !== undefined && value === "" && !focused ? <KeyHint keys={shortcut} className={styles.shortcut} /> : undefined}
+      trailing={
+        // 聚焦、失焦时键帽只淡入淡出，与描边变色同节奏；退场即脱离布局，不挤同时弹入的清空键
+        shortcut === undefined ? undefined : (
+          <AnimatePresence initial={false} mode="popLayout">
+            {value === "" && !focused && (
+              <motion.span key="shortcut" className={styles.shortcut} initial={{ opacity: 0 }} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
+                <KeyHint keys={shortcut} />
+              </motion.span>
+            )}
+          </AnimatePresence>
+        )
+      }
       onFocus={handleFocus}
       onBlur={handleBlur}
       onKeyDown={handleKeyDown}

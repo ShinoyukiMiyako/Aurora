@@ -52,6 +52,11 @@
   color: var(--sk-text-2);
 }
 
+/* 副标题还没到：空着也占一行，文案到了头部高度不变 */
+.subtitle[data-reserve] {
+  height: var(--sk-lh-caption);
+}
+
 .actions {
   display: flex;
   flex: none;

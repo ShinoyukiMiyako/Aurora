@@ -3,6 +3,10 @@
   justify-items: center;
 }
 
+.slot[data-align="start"] {
+  justify-items: start;
+}
+
 .option {
   grid-area: 1 / 1;
   visibility: hidden;

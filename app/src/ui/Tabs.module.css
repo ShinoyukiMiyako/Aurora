@@ -68,6 +68,12 @@
   gap: 7px;
 }
 
+/* 徽标的出入场包裹层：flex 让徽标自身成为弹性项，不落在行框里多出基线下方的空隙 */
+.badge {
+  display: inline-flex;
+  flex: none;
+}
+
 /* ---- underline：页面级，底边一条分隔线，指示条压在分隔线上 ---- */
 .list[data-variant="underline"] {
   box-shadow: inset 0 -1px 0 var(--sk-line);
@@ -88,13 +94,13 @@
   box-shadow: var(--sk-focus);
 }
 
+/* 指示块的圆角由组件经 style 传入：布局动画只校正 style 里的圆角 */
 .list[data-variant="underline"] .indicator {
   position: absolute;
   right: 0;
   bottom: 0;
   left: 0;
   height: 2.5px;
-  border-radius: var(--sk-r-pill);
   background: var(--sk-accent);
 }
 
@@ -127,6 +133,5 @@
 .list[data-variant="pill"] .indicator {
   position: absolute;
   inset: 0;
-  border-radius: var(--sk-r-pill);
   background: var(--sk-accent-soft);
 }

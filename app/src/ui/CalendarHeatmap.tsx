@@ -2,11 +2,18 @@
 // 月份翻页按钮放在所在卡片的 CardHeader 操作区；当日详情由页面用 Inset 放在旁边。
 // 周一为首列。没有记录的日子（数据范围外、未来日期）不可选，但键盘仍能停在上面，方向键移动的节奏才可预期。
 // 颜色之外，时长同时写进每格的可访问名称。
+// 网格固定画 6 周，不足的周用空格补齐：翻月时日历高度不变，图例与所在卡片不跟着跳。
+// 翻月与游玩数据到达时，日格整块淡入一次（只动透明度）；日格本身不做颜色过渡，主题切换仍是一帧换完。
 
+import { useAnimate } from "framer-motion";
 import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { formatPlaytime } from "../domain/format";
+import { fade } from "../lib/motion";
 import { cx } from "../lib/util";
 import styles from "./CalendarHeatmap.module.css";
+
+/** 一个月最多跨 6 周（首日在周日且有 31 天时恰好 6 周）。 */
+export const CALENDAR_WEEKS = 6;
 
 export type HeatLevel = 0 | 1 | 2 | 3 | 4;
 
@@ -134,6 +141,7 @@ export function CalendarHeatmap({ month, minutes, today, selected, onSelect, onM
   const [focusDate, setFocusDate] = useState<string | null>(null);
   const pendingFocus = useRef<string | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+  const [weeksRef, animateWeeks] = useAnimate<HTMLDivElement>();
 
   useLayoutEffect(() => {
     const wanted = pendingFocus.current;
@@ -149,7 +157,6 @@ export function CalendarHeatmap({ month, minutes, today, selected, onSelect, onM
   const first = dateKey({ y, m, d: 1 });
   const last = dateKey({ y, m, d: total });
   const lead = weekdayIndex(first);
-  const weeks = Math.ceil((lead + total) / 7);
   const inMonth = (k: string | null): k is string => k !== null && monthOf(k) === month;
   const preferred = [focusDate, selected, today].find(inMonth);
   const tabStop = preferred === undefined ? first : preferred;
@@ -205,10 +212,23 @@ export function CalendarHeatmap({ month, minutes, today, selected, onSelect, onM
     moveTo(next);
   };
 
-  const cells = Array.from({ length: weeks * 7 }, (_, i) => {
+  const cells = Array.from({ length: CALENDAR_WEEKS * 7 }, (_, i) => {
     const day = i - lead + 1;
     return day >= 1 && day <= total ? dateKey({ y, m, d: day }) : null;
   });
+  // 换了月份，或游玩数据从无到有（加载完成）：整块日格换一批，淡入一次
+  const batch = `${month}:${minutes.size > 0 ? "data" : "empty"}`;
+  // 挂载时的那一批跟着所在页面的入场走，不另外淡入
+  const shownBatch = useRef(batch);
+  useLayoutEffect(() => {
+    if (shownBatch.current === batch) return;
+    shownBatch.current = batch;
+    // 同一个网格原地换内容，不靠换 key 重挂：重挂会把停在日格上的键盘焦点丢到 body。透明度先在提交时压到 0，
+    // 首帧就看不到新内容一闪
+    const weeks = weeksRef.current;
+    weeks.style.opacity = "0";
+    void animateWeeks(weeks, { opacity: [0, 1] }, fade.in);
+  }, [batch, weeksRef, animateWeeks]);
 
   return (
     <div className={cx(styles.calendar, className)}>
@@ -220,28 +240,30 @@ export function CalendarHeatmap({ month, minutes, today, selected, onSelect, onM
             </div>
           ))}
         </div>
-        {Array.from({ length: weeks }, (_, w) => (
-          <div key={w} className={styles.row} role="row">
-            {cells.slice(w * 7, w * 7 + 7).map((date, c) =>
-              date === null ? (
-                <div key={c} className={styles.blank} role="gridcell" />
-              ) : (
-                <DayCell
-                  key={date}
-                  date={date}
-                  minutes={minutes.get(date)}
-                  isToday={date === today}
-                  isSelected={date === selected}
-                  tabbable={date === tabStop}
-                  onPick={() => {
-                    setFocusDate(date);
-                    onSelect(date);
-                  }}
-                />
-              ),
-            )}
-          </div>
-        ))}
+        <div ref={weeksRef} className={styles.weeks} role="rowgroup">
+          {Array.from({ length: CALENDAR_WEEKS }, (_, w) => (
+            <div key={w} className={styles.row} role="row">
+              {cells.slice(w * 7, w * 7 + 7).map((date, c) =>
+                date === null ? (
+                  <div key={c} className={styles.blank} role="gridcell" />
+                ) : (
+                  <DayCell
+                    key={date}
+                    date={date}
+                    minutes={minutes.get(date)}
+                    isToday={date === today}
+                    isSelected={date === selected}
+                    tabbable={date === tabStop}
+                    onPick={() => {
+                      setFocusDate(date);
+                      onSelect(date);
+                    }}
+                  />
+                ),
+              )}
+            </div>
+          ))}
+        </div>
       </div>
       <div className={styles.legend}>
         <span>少</span>

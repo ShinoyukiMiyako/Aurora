@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
+import { AnimatePresence } from "framer-motion";
+import { createRef } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { LOADER_KINDS, type LoaderKind } from "../domain/types";
-import { render, type Rendered } from "../test/dom";
+import { render, waitForFrames, type Rendered } from "../test/dom";
 import { Badge, BADGE_MAX, badgeText } from "./Badge";
 import { LOADER_LABEL, LoaderDot, LoaderTag, type LoaderTagKind } from "./LoaderTag";
 import { Tag, TAG_ICON_SIZE } from "./Tag";
@@ -74,6 +76,55 @@ describe("Badge", () => {
     expect(badge.textContent).toBe("99+");
     expect(badge.dataset.ring).toBe("true");
     expect(badge.getAttribute("aria-hidden")).toBe("true");
+  });
+});
+
+describe("Badge 出现与消失", () => {
+  const dot = () => view?.container.querySelector<HTMLElement>("[data-kind]") ?? null;
+  const host = (show: boolean, count?: number) => (
+    <AnimatePresence initial={false}>{show && <Badge key="badge" tone="accent" count={count} />}</AnimatePresence>
+  );
+
+  it("单独挂上就从无到有弹出：起点缩到 0、全透明", () => {
+    const badge = mount(<Badge tone="accent" count={3} />).firstElementChild as HTMLElement;
+    expect(badge.style.opacity).toBe("0");
+    expect(badge.style.transform).toBe("scale(0)");
+  });
+
+  it("宿主挂载时就在（外层 initial={false}）：不弹，直接是终态", () => {
+    mount(host(true, 3));
+    expect(dot()?.style.opacity).toBe("1");
+    expect(dot()?.style.transform).toBe("none");
+  });
+
+  it("宿主已在、角标后到：照样从 0 弹出", () => {
+    mount(host(false));
+    expect(dot()).toBeNull();
+    view?.rerender(host(true, 2));
+    expect(dot()?.style.opacity).toBe("0");
+    expect(dot()?.style.transform).toBe("scale(0)");
+  });
+
+  it("计数变化不重播：同一个元素，停在终态", () => {
+    mount(host(true, 3));
+    const before = dot();
+    view?.rerender(host(true, 4));
+    expect(dot()).toBe(before);
+    expect(dot()?.textContent).toBe("4");
+    expect(dot()?.style.opacity).toBe("1");
+  });
+
+  it("条件变假：播完退场再移除", async () => {
+    mount(host(true, 3));
+    view?.rerender(host(false));
+    expect(dot()).not.toBeNull();
+    await waitForFrames(() => expect(dot()).toBeNull());
+  });
+
+  it("ref 落到根元素：popLayout 退场要靠它量尺寸", () => {
+    const ref = createRef<HTMLSpanElement>();
+    const badge = mount(<Badge ref={ref} />).firstElementChild;
+    expect(ref.current).toBe(badge);
   });
 });
 

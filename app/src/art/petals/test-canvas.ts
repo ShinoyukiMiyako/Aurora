@@ -7,7 +7,7 @@ import { stubCanvas as stubBitmapCanvas } from "../illustrations/test-canvas";
 export type CanvasOp =
   | { kind: "clear"; width: number; height: number }
   | { kind: "alpha"; value: number }
-  | { kind: "draw"; transform: number[]; width: number; height: number; x: number; y: number };
+  | { kind: "draw"; transform: number[]; width: number; height: number; x: number; y: number; alpha: number };
 
 /** 记录绘制调用的 2D 上下文。 */
 export class FakeContext {
@@ -36,7 +36,7 @@ export class FakeContext {
   }
 
   drawImage(image: HTMLCanvasElement, x: number, y: number): void {
-    this.ops.push({ kind: "draw", transform: [...this.transform], width: image.width, height: image.height, x, y });
+    this.ops.push({ kind: "draw", transform: [...this.transform], width: image.width, height: image.height, x, y, alpha: this.alpha });
   }
 
   createImageData(width: number, height: number): { width: number; height: number; data: Uint8ClampedArray } {

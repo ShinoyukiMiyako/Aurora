@@ -3132,7 +3132,8 @@ describe("实例详情：存档备份", () => {
     if (found === undefined) throw new Error("备份列表弹窗没有打开");
     return found;
   };
-  const rows = () => [...backupsDialog().querySelectorAll("li")];
+  // 删掉的备份那一行还在淡出，已经标了 inert，不算列表的行
+  const rows = () => [...backupsDialog().querySelectorAll("li:not([inert])")];
 
   async function hoverReason(el: HTMLElement): Promise<string> {
     act(() => {

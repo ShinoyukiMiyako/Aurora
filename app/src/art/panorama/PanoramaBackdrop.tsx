@@ -1,15 +1,15 @@
-import { motion } from "framer-motion";
-import { useEffect, useRef } from "react";
-import { fade } from "../../lib/motion";
+import { AnimatePresence, motion } from "framer-motion";
+import { useEffect, useRef, useState } from "react";
+import { ambientFade } from "../../lib/motion";
 import { cx } from "../../lib/util";
 import { panoramaUrl, useArtStatus } from "../../mc/art";
-import { useArt } from "../../mc/useArt";
+import { peekArt, useArt } from "../../mc/useArt";
 import { coverRect, prepareDisplayCanvas, useDevicePixelRatio } from "../illustrations/canvas";
 import styles from "./PanoramaBackdrop.module.css";
 
 /** 焦点落在落日处：水平居中，竖直 46%。 */
-const FOCUS_X = 0.5;
-const FOCUS_Y = 0.46;
+export const FOCUS_X = 0.5;
+export const FOCUS_Y = 0.46;
 /** 窗口尺寸变化时重绘的节流间隔：拖动窗口边框期间不逐帧重采样 1024 的大图。 */
 export const PANORAMA_RESIZE_THROTTLE_MS = 300;
 
@@ -28,6 +28,7 @@ export interface PanoramaBackdropProps {
  * 窗口背景层里的樱花林全景（默认关闭）：只用正面一张，等比铺满、焦点在落日，平滑缩放（它是渲染画面，
  * 不是像素材质），上面叠一层底色渐变罩，保证卡片外的文字可读。静态，不旋转、不视差。
  * 开关打开但本机没有全景对象时什么都不画（背景回到无图状态），不弹提示；开着时对象消失记一条 warn。
+ * 显隐都是整层淡入淡出：关掉开关或对象消失时淡出后卸载，不是一帧硬切。
  */
 export function PanoramaBackdrop({ enabled, className }: PanoramaBackdropProps) {
   const { panorama } = useArtStatus();
@@ -37,9 +38,14 @@ export function PanoramaBackdrop({ enabled, className }: PanoramaBackdropProps) 
     lastAvailable.current = panorama;
   }, [enabled, panorama]);
 
-  const art = useArt(enabled && panorama ? panoramaUrl() : null);
-  if (!enabled || !panorama || art.kind !== "ready") return null;
-  return <PanoramaImage bitmap={art.bitmap} className={className} />;
+  const url = enabled && panorama ? panoramaUrl() : null;
+  const art = useArt(url);
+  // 装删游戏版本会换材质源、清空取图缓存，同一张全景要重新取图解码。这段时间留着上一张，新图到了直接换上，
+  // 整窗背景不先消失再淡回来；重新取图失败（缓存里已落定为取不到）才放下旧图淡出。
+  const [held, setHeld] = useState<ImageBitmap | null>(null);
+  const bitmap = url === null ? null : art.kind === "ready" ? art.bitmap : peekArt(url) === undefined ? held : null;
+  if (bitmap !== held) setHeld(bitmap);
+  return <AnimatePresence>{bitmap !== null && <PanoramaImage key="panorama" bitmap={bitmap} className={className} />}</AnimatePresence>;
 }
 
 function PanoramaImage({ bitmap, className }: { bitmap: ImageBitmap; className?: string }) {
@@ -93,8 +99,8 @@ function PanoramaImage({ bitmap, className }: { bitmap: ImageBitmap; className?:
       data-sk-art="panorama"
       aria-hidden="true"
       initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={fade.in}
+      animate={{ opacity: 1, transition: ambientFade.in }}
+      exit={{ opacity: 0, transition: ambientFade.out }}
     >
       <canvas ref={canvasRef} className={styles.image} />
       <div className={styles.scrim} />

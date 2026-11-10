@@ -27,12 +27,16 @@ export interface CopyButtonProps {
   disabled?: boolean;
 }
 
+/** 原位反馈的阶段：idle 还没复制过；copied 显示对勾；restored 对勾停留结束、换回复制图标。 */
+type CopyPhase = "idle" | "copied" | "restored";
+
 /**
  * 复制按钮：复制成功后图标换成对勾、名称换成「已复制」，停留 feedbackMs 后复原。
- * 复制类操作一律原位反馈，不弹成功通知。
+ * 复制类操作一律原位反馈，不弹成功通知。对勾弹出、复制图标淡回（见样式），idle 与 restored 分开：
+ * 初次挂载的复制图标不该淡入。
  */
 export function CopyButton({ text, label, copiedLabel = "已复制", onCopy, feedbackMs, disabled = false }: CopyButtonProps) {
-  const [copied, setCopied] = useState(false);
+  const [phase, setPhase] = useState<CopyPhase>("idle");
   const timer = useRef<number | undefined>(undefined);
   const mounted = useRef(true);
 
@@ -48,12 +52,23 @@ export function CopyButton({ text, label, copiedLabel = "已复制", onCopy, fee
     void onCopy(typeof text === "function" ? text() : text).then((written) => {
       if (written === false || !mounted.current) return;
       window.clearTimeout(timer.current);
-      setCopied(true);
-      timer.current = window.setTimeout(() => setCopied(false), feedbackMs);
+      setPhase("copied");
+      timer.current = window.setTimeout(() => setPhase("restored"), feedbackMs);
     });
   };
 
-  return <IconButton icon={copied ? "check" : "copy"} label={copied ? copiedLabel : label} size="sm" disabled={disabled} onClick={copy} />;
+  const copied = phase === "copied";
+  return (
+    <IconButton
+      icon={copied ? "check" : "copy"}
+      label={copied ? copiedLabel : label}
+      size="sm"
+      disabled={disabled}
+      onClick={copy}
+      className={styles.copy}
+      data-copy-phase={phase === "idle" ? undefined : phase}
+    />
+  );
 }
 
 export interface KVRow {

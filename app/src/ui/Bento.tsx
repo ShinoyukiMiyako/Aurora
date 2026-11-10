@@ -1,12 +1,13 @@
 // 仪表盘型页面（主页、实例概览）的 12 列错落网格。列表型页面（实例库、发现结果）的网格不用它。
 // 子元素只放 Card，跨列由 Card 的 span 按尺寸档给出。
-// Bento 自己不参与页面入场，把序号转交给每张卡片：一级区块是卡片，不是网格。
+// Bento 自己不参与页面入场，把序号转交给每张卡片：一级区块是卡片，不是网格。它在页面里按卡片数占号，
+// 排在它后面的区块从最后一张卡片的下一个号接着编。
 
-import type { ReactNode } from "react";
+import { Children, type ReactNode } from "react";
 import { useReflow } from "../lib/reflow";
 import { cssVars, cx } from "../lib/util";
 import styles from "./Bento.module.css";
-import { numberEntrance, useEntranceIndex } from "./Page";
+import { numberEntrance, spreadsEntrance, useEntranceIndex } from "./Page";
 
 export interface BentoProps {
   /** 固定行高（px），配合 Card 的 rowSpan 做错落；不给则行高随内容。 */
@@ -27,3 +28,6 @@ export function Bento({ rowHeight, className, children }: BentoProps) {
     </div>
   );
 }
+
+// 与 numberEntrance 同样按 Children.toArray 计数：条件渲染掉的卡片不占号
+spreadsEntrance(Bento, (props: BentoProps) => Children.toArray(props.children).length);

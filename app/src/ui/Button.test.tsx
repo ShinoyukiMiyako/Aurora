@@ -1,10 +1,15 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act, createRef, type MouseEvent, type ReactNode } from "react";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import type { IconName } from "../art/Icon";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { focusByKeyboard, render, type Rendered } from "../test/dom";
 import { emulateFocusFixup } from "../test/focus-fixup";
 import { Button, CONTROL_ICON_SIZE, softDisabledProps } from "./Button";
+import styles from "./Button.module.css";
 import { IconButton } from "./IconButton";
 
 let view: Rendered | undefined;
@@ -53,6 +58,35 @@ const activateAllWays = (el: HTMLElement) => {
   press(el, "Enter");
   press(el, " ");
 };
+
+/**
+ * 某层动画播完。jsdom 没有 AnimationEvent，React 改按带前缀的事件名监听 onAnimationEnd
+ * （react-dom 的 getVendorPrefixedEventName），这里派发它实际监听的那个名字。
+ */
+const animationEnd = (el: Element) =>
+  act(() => {
+    el.dispatchEvent(new Event("webkitAnimationEnd", { bubbles: true }));
+  });
+
+/** 图标位里的各层：[身份, 入场方式；退场层为 leaving，挂载时就在的为 still]。 */
+const glyphsOf = (root: Element) =>
+  [...root.querySelectorAll<HTMLElement>("[data-glyph]")].map((g) => [g.dataset.glyph, g.hasAttribute("data-leaving") ? "leaving" : (g.dataset.enter ?? "still")]);
+
+const leavingOf = (root: Element) => {
+  const leaving = root.querySelector("[data-leaving]");
+  if (leaving === null) throw new Error("没有退场层");
+  return leaving;
+};
+
+// jsdom 环境里的 URL 是 jsdom 自己的实现，node:fs 不认，按文件路径读
+const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "./Button.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+
+/** 选择器恰好为 selector 的那条规则（或关键帧）的声明体，到第一个右花括号为止。 */
+function ruleOf(selector: string): string {
+  const at = css.indexOf(`\n${selector} {`);
+  if (at < 0) throw new Error(`样式里缺少 ${selector}`);
+  return css.slice(at + selector.length + 3, css.indexOf("}", at));
+}
 
 describe("Button", () => {
   it("默认次按钮、md、type=button，点击触发 onClick", () => {
@@ -110,6 +144,80 @@ describe("Button", () => {
     expect(button.textContent).toBe("删除");
     expect(button.querySelector("[data-tone]")?.getAttribute("data-tone")).toBe("current");
     expect(button.dataset.hasIcon).toBeUndefined();
+  });
+
+  it("有前置图标：进入加载时图标原地淡出、加载指示在同一格收拢入场，淡出完才移除；结束加载时反过来", () => {
+    const ui = (loading: boolean) =>
+      withOverlay(
+        <Button variant="primary" icon="download" loading={loading}>
+          下载
+        </Button>,
+      );
+    view = render(ui(false));
+    const button = view.container.querySelector("button") as HTMLButtonElement;
+    expect(glyphsOf(button)).toEqual([["download", "still"]]);
+
+    view.rerender(ui(true));
+    expect(glyphsOf(button)).toEqual([
+      ["download", "leaving"],
+      ["spinner", "tap"],
+    ]);
+    // 两层叠在同一个图标位里，按钮里没有多出一格
+    expect(new Set([...button.querySelectorAll("[data-glyph]")].map((g) => g.parentElement)).size).toBe(1);
+    // 里面的元素冒上来的动画结束不算这一层淡完
+    animationEnd(leavingOf(button).querySelector("svg") as SVGElement);
+    expect(glyphsOf(button)).toHaveLength(2);
+    animationEnd(leavingOf(button));
+    expect(glyphsOf(button)).toEqual([["spinner", "tap"]]);
+
+    const spinner = button.querySelector('[data-glyph="spinner"]');
+    view.rerender(ui(false));
+    expect(glyphsOf(button)).toEqual([
+      ["spinner", "leaving"],
+      ["download", "pop"],
+    ]);
+    // 被换下的加载指示还是原来的节点：旋转不从头开始
+    expect(leavingOf(button)).toBe(spinner);
+    expect(button.textContent).toBe("下载");
+  });
+
+  it("没有前置图标：加载指示叠在正中淡入，结束加载时淡出完才移除；不加载时不留空层", () => {
+    const ui = (loading: boolean) =>
+      withOverlay(
+        <Button variant="danger" loading={loading}>
+          删除
+        </Button>,
+      );
+    view = render(ui(false));
+    const button = view.container.querySelector("button") as HTMLButtonElement;
+    expect(button.querySelector("[data-glyph]")).toBeNull();
+    expect(button.children).toHaveLength(1);
+
+    view.rerender(ui(true));
+    expect(glyphsOf(button)).toEqual([["spinner", "tap"]]);
+    expect(button.querySelector("[data-glyph]")?.parentElement?.classList.contains(styles.centerSpinner)).toBe(true);
+    expect(button.querySelector("[data-tone]")?.getAttribute("data-tone")).toBe("current");
+
+    view.rerender(ui(false));
+    expect(glyphsOf(button)).toEqual([["spinner", "leaving"]]);
+    // 还没淡完又进入加载：淡出的那层接着淡出，新的指示照常入场
+    view.rerender(ui(true));
+    expect(glyphsOf(button)).toEqual([
+      ["spinner", "leaving"],
+      ["spinner", "tap"],
+    ]);
+    view.rerender(ui(false));
+    animationEnd(leavingOf(button));
+    expect(button.querySelector("[data-glyph]")).toBeNull();
+  });
+
+  it("挂载时就在加载：指示直接在位，不播入场", () => {
+    const button = mount(
+      <Button icon="stop" loading>
+        结束游戏
+      </Button>,
+    );
+    expect(glyphsOf(button)).toEqual([["spinner", "still"]]);
   });
 
   it("加载中的提交按钮不提交表单", () => {
@@ -299,6 +407,40 @@ describe("Button", () => {
   });
 });
 
+describe("图标位与加载态的样式", () => {
+  it("入场按 pop 从 0.6、按 tap 从 0.8 缩放到位并淡入；减少动画时只淡入", () => {
+    expect(ruleOf('.glyph[data-enter="pop"]')).toMatch(/glyphPop var\(--sk-spring-pop-dur\) var\(--sk-spring-pop\),\s*glyphIn var\(--sk-dur-in\) var\(--sk-ease-out\);/);
+    expect(ruleOf('.glyph[data-enter="tap"]')).toMatch(/glyphTap var\(--sk-spring-tap-dur\) var\(--sk-spring-tap\),\s*glyphIn var\(--sk-dur-in\) var\(--sk-ease-out\);/);
+    expect(ruleOf("@keyframes glyphPop")).toMatch(/scale: 0\.6;/);
+    expect(ruleOf("@keyframes glyphTap")).toMatch(/scale: 0\.8;/);
+    expect(ruleOf("@keyframes glyphIn")).toMatch(/opacity: 0;/);
+    expect(ruleOf(":global([data-sk-reduced]) .glyph[data-enter]")).toMatch(/animation: glyphIn var\(--sk-dur-in\) var\(--sk-ease-out\);/);
+  });
+
+  it("退场层静止时就是透明的，淡出结束事件不来也不会盖住新内容", () => {
+    const leaving = ruleOf(".glyph[data-leaving]");
+    expect(leaving).toMatch(/opacity: 0;/);
+    expect(leaving).toMatch(/animation: glyphOut var\(--sk-dur-out\) var\(--sk-ease-in\);/);
+    expect(ruleOf("@keyframes glyphOut")).toMatch(/opacity: 1;/);
+  });
+
+  it("两层叠在同一格里：图标位按最大的一层占位，不会并排撑宽按钮", () => {
+    expect(ruleOf(".glyphSlot")).toMatch(/display: inline-grid;/);
+    expect(ruleOf(".glyph")).toMatch(/grid-area: 1 \/ 1;/);
+    // 正中的加载指示同时带两个类，它的 display 必须写在后面盖掉 inline-grid
+    expect(ruleOf(".centerSpinner")).toMatch(/display: grid;/);
+    expect(css.indexOf("\n.centerSpinner {")).toBeGreaterThan(css.indexOf("\n.glyphSlot {"));
+  });
+
+  it("无前置图标的加载态：文字淡去而不是 visibility 隐藏，保留占位，名称仍在可访问性树里", () => {
+    const hidden = ruleOf(".button[data-loading]:not([data-has-icon]) .label");
+    expect(hidden).toMatch(/opacity: 0;/);
+    expect(hidden).toMatch(/transition: opacity var\(--sk-dur-out\) var\(--sk-ease-in\);/);
+    expect(css).not.toMatch(/visibility: hidden/);
+    expect(ruleOf(".label")).toMatch(/transition: opacity var\(--sk-dur-in\) var\(--sk-ease-out\);/);
+  });
+});
+
 describe("softDisabledProps", () => {
   it("不可用时挡掉点击并 preventDefault，可用时原样转交", () => {
     const onClick = vi.fn();
@@ -325,6 +467,28 @@ describe("IconButton", () => {
     expect(button.querySelector("svg")?.getAttribute("width")).toBe("18");
     focusByKeyboard(button);
     expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("复制");
+  });
+
+  it("换图标：旧图标原地淡出、新图标在同一格弹出，淡出完才移除；挂载时不播入场，按钮仍只有一个可见图标位", () => {
+    const ui = (icon: IconName) => withOverlay(<IconButton icon={icon} label="复制" badge={<span>3</span>} />);
+    view = render(ui("copy"));
+    const button = view.container.querySelector("button") as HTMLButtonElement;
+    expect(glyphsOf(button)).toEqual([["copy", "still"]]);
+
+    view.rerender(ui("check"));
+    expect(glyphsOf(button)).toEqual([
+      ["copy", "leaving"],
+      ["check", "pop"],
+    ]);
+    expect(new Set([...button.querySelectorAll("[data-glyph]")].map((g) => g.parentElement)).size).toBe(1);
+    animationEnd(leavingOf(button));
+    expect(glyphsOf(button)).toEqual([["check", "pop"]]);
+    expect(button.querySelectorAll("svg")).toHaveLength(1);
+    expect(button.textContent).toBe("3");
+
+    // 同一图标只是重渲染：不换层、不重播入场
+    view.rerender(ui("check"));
+    expect(glyphsOf(button)).toEqual([["check", "pop"]]);
   });
 
   it("切换型输出 aria-pressed，非切换型不输出", () => {

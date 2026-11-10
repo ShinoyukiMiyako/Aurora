@@ -1,6 +1,8 @@
 .avatar {
   --avatar-edge: transparent;
   position: relative;
+  /* 自成层叠上下文：选中外环的叠层（z-index -1）画在底座之上、方块与状态层之下，不沉到宿主的底色后面 */
+  isolation: isolate;
   display: inline-grid;
   place-items: center;
   flex: none;
@@ -25,9 +27,21 @@
   background: var(--sk-bg-3);
 }
 
-.avatar[data-selected] {
+/* 选中外环是独立叠层，选中切换时只过渡透明度：与侧栏底块的淡变同一拍，不在一帧里出现或消失（不过渡 box-shadow） */
+.avatar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
   box-shadow:
-    inset 0 0 0 1px var(--avatar-edge),
     0 0 0 2px var(--sk-surface),
     0 0 0 4px var(--sk-accent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
+.avatar[data-selected]::after {
+  opacity: 1;
 }

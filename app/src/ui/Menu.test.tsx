@@ -7,7 +7,7 @@ import { Button } from "./Button";
 import { Menu, type MenuEntry } from "./Menu";
 import { MenuButton } from "./MenuButton";
 import { MoreMenu } from "./MoreMenu";
-import { Popover } from "./Popover";
+import { enterShift, originTowardAnchor, Popover } from "./Popover";
 
 let view: Rendered | undefined;
 
@@ -47,6 +47,38 @@ const openMenu = (detail: number) => {
   act(() => trigger().focus());
   click(trigger(), detail);
 };
+
+/** 把带 data-side 的浮层面板量出的尺寸固定下来：面板挂载那一刻就要量到，来不及在元素上逐个定义。返回还原函数。 */
+function stubPanelSize(size: { width: number; height: number }): () => void {
+  const proto = HTMLElement.prototype;
+  const width = Object.getOwnPropertyDescriptor(proto, "offsetWidth");
+  const height = Object.getOwnPropertyDescriptor(proto, "offsetHeight");
+  if (width === undefined || height === undefined) throw new Error("jsdom 没有 offsetWidth / offsetHeight");
+  const sized = (value: number) => ({
+    configurable: true,
+    get(this: HTMLElement) {
+      return this.hasAttribute("data-side") ? value : 0;
+    },
+  });
+  Object.defineProperty(proto, "offsetWidth", sized(size.width));
+  Object.defineProperty(proto, "offsetHeight", sized(size.height));
+  return () => {
+    Object.defineProperty(proto, "offsetWidth", width);
+    Object.defineProperty(proto, "offsetHeight", height);
+  };
+}
+
+/** 入场动画第一次写到元素上的纵向位移（px）。framer-motion 的帧循环跑在真实时间上，只能轮询。 */
+function firstTranslateY(el: HTMLElement): Promise<number> {
+  return vi.waitFor(
+    () => {
+      const match = /translateY\((-?[\d.]+)px\)/.exec(el.style.transform);
+      if (match === null) throw new Error(`入场还没写到元素上：${el.style.transform}`);
+      return Number(match[1]);
+    },
+    { timeout: 2000, interval: 1 },
+  );
+}
 
 function entries(spy: (name: string) => void): MenuEntry[] {
   return [
@@ -167,6 +199,25 @@ describe("键盘", () => {
     press("Home");
     expect(highlighted()).toBe("重命名");
     expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("游戏正在运行，先结束游戏");
+  });
+
+  // 气泡在浮层根里自成一层，不跟着面板淡出：面板卸载时它连退场一起被直接拿掉，整块突然消失
+  it("菜单关闭时，键盘高亮着的禁用原因气泡跟着开始收起，不等面板卸载", () => {
+    mount(
+      <MoreMenu
+        items={[
+          { label: "打开实例文件夹", onSelect: () => undefined },
+          { label: "重命名", disabled: true, disabledReason: "游戏正在运行，先结束游戏", onSelect: () => undefined },
+        ]}
+      />,
+    );
+    openMenu(0);
+    press("ArrowDown");
+    const item = document.getElementById(menu()?.getAttribute("aria-activedescendant") ?? "") as HTMLElement;
+    expect(item.getAttribute("aria-describedby")).toBe(document.querySelector('[role="tooltip"]')?.id);
+    press("Escape");
+    expect(item.closest("[data-exiting]")).not.toBeNull();
+    expect(item.hasAttribute("aria-describedby")).toBe(false);
   });
 
   it("Enter 先关闭菜单再执行动作，焦点回到触发器", () => {
@@ -306,6 +357,113 @@ describe("定位", () => {
     // 右对齐锚点：936 − 300 = 636；上方：680 − 8 − 200 = 472
     expect(panel.style.left).toBe("636px");
     expect(panel.style.top).toBe("472px");
+    // 缩放原点在面板底边、正对锚点中心：918 − 636 = 282
+    expect(panel.style.transformOrigin).toBe("282px 200px");
+  });
+
+  // 可筛选的下拉向上展开后键入筛选词：面板变矮，下方又放得下了，也不能整块瞬移到触发器下方
+  it("打开后沿用已采用的方位：面板变矮、首选一侧又放得下时不翻回去，底边仍贴着锚点", () => {
+    function Anchored() {
+      const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+      return (
+        <>
+          <button ref={setAnchor}>版本</button>
+          <Popover open={anchor !== null} anchor={anchor} onClose={() => undefined} placement="bottom-start" aria-label="版本">
+            <p>内容</p>
+          </Popover>
+        </>
+      );
+    }
+    const { container } = mount(<Anchored />);
+    const root = container.querySelector("[data-sk-overlay-root]") as HTMLElement;
+    const anchor = container.querySelector("button") as HTMLButtonElement;
+    const panel = document.querySelector<HTMLElement>('[role="dialog"]') as HTMLElement;
+    setRect(root, { left: 0, top: 0, width: 960, height: 720 });
+    setRect(anchor, { left: 100, top: 600, width: 200, height: 30 });
+    Object.defineProperty(panel, "offsetWidth", { configurable: true, value: 200 });
+    Object.defineProperty(panel, "offsetHeight", { configurable: true, value: 300 });
+    const reposition = () =>
+      act(() => {
+        window.dispatchEvent(new Event("scroll"));
+      });
+    reposition();
+    expect(panel.dataset.side).toBe("top");
+    expect(panel.style.top).toBe(`${600 - 8 - 300}px`);
+
+    // 变成 50 高：下方 600 + 30 + 8 + 50 = 688 ≤ 712 放得下，但面板留在上方
+    Object.defineProperty(panel, "offsetHeight", { configurable: true, value: 50 });
+    reposition();
+    expect(panel.dataset.side).toBe("top");
+    expect(panel.style.top).toBe(`${600 - 8 - 50}px`);
+
+    // 当前一侧放不下了才翻：锚点挪到顶上
+    setRect(anchor, { left: 100, top: 20, width: 200, height: 30 });
+    reposition();
+    expect(panel.dataset.side).toBe("bottom");
+    expect(panel.style.top).toBe(`${20 + 30 + 8}px`);
+  });
+
+  it("右键菜单以指针为锚点：缩放原点就在指针处", () => {
+    const { container } = mount(<Menu open anchor={{ clientX: 300, clientY: 200 }} onClose={() => undefined} items={entries(() => undefined)} openedBy="pointer" aria-label="实例" />);
+    const root = container.querySelector("[data-sk-overlay-root]") as HTMLElement;
+    const panel = menu()?.parentElement as HTMLElement;
+    setRect(root, { left: 0, top: 0, width: 960, height: 720 });
+    Object.defineProperty(panel, "offsetWidth", { configurable: true, value: 200 });
+    Object.defineProperty(panel, "offsetHeight", { configurable: true, value: 240 });
+    act(() => {
+      window.dispatchEvent(new Event("scroll"));
+    });
+    // 菜单左上角落在指针下方 8px：原点在面板顶边、横向正是指针所在
+    expect(panel.style.left).toBe("300px");
+    expect(panel.style.top).toBe("208px");
+    expect(panel.style.transformOrigin).toBe("0px 0px");
+  });
+
+  it("originTowardAnchor：原点在朝向锚点的那条边上、正对锚点中心，锚点超出面板时夹到端点", () => {
+    const panel = { left: 100, top: 300, width: 200, height: 120 };
+    expect(originTowardAnchor({ left: 250, top: 260, width: 36, height: 30 }, panel, "bottom")).toBe("168px 0px");
+    expect(originTowardAnchor({ left: 250, top: 430, width: 36, height: 30 }, panel, "top")).toBe("168px 120px");
+    expect(originTowardAnchor({ left: 20, top: 340, width: 40, height: 40 }, panel, "right")).toBe("0px 60px");
+    expect(originTowardAnchor({ left: 320, top: 280, width: 40, height: 10 }, panel, "left")).toBe("200px 0px");
+    expect(originTowardAnchor({ left: 900, top: 260, width: 36, height: 30 }, panel, "bottom")).toBe("200px 0px");
+  });
+
+  it("enterShift：起点朝锚点一侧偏移", () => {
+    expect(enterShift("bottom", 4)).toEqual({ x: 0, y: -4 });
+    expect(enterShift("top", 4)).toEqual({ x: 0, y: 4 });
+    expect(enterShift("right", 3)).toEqual({ x: -3, y: 0 });
+    expect(enterShift("left", 3)).toEqual({ x: 3, y: 0 });
+  });
+
+  // 挂载那一帧还不知道会翻侧：入场起点按首选的下方给，翻到上方后面板是从远离锚点的一侧往锚点滑
+  it("首选方位放不下而翻到上方：入场从锚点那一侧（下方）滑上来", async () => {
+    const restore = stubPanelSize({ width: 300, height: 200 });
+    try {
+      function Anchored() {
+        const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+        const [open, setOpen] = useState(false);
+        return (
+          <>
+            <button ref={setAnchor} onClick={() => setOpen(true)}>
+              下载
+            </button>
+            <Popover open={open && anchor !== null} anchor={anchor} onClose={() => undefined} placement="bottom-end" aria-label="下载快览">
+              <p>内容</p>
+            </Popover>
+          </>
+        );
+      }
+      const { container } = mount(<Anchored />);
+      setRect(container.querySelector("[data-sk-overlay-root]") as HTMLElement, { left: 0, top: 0, width: 960, height: 720 });
+      const anchor = container.querySelector("button") as HTMLButtonElement;
+      setRect(anchor, { left: 900, top: 680, width: 36, height: 30 });
+      click(anchor, 1);
+      const panel = document.querySelector<HTMLElement>('[role="dialog"]') as HTMLElement;
+      expect(panel.dataset.side).toBe("top");
+      expect(await firstTranslateY(panel)).toBeGreaterThan(0);
+    } finally {
+      restore();
+    }
   });
 });
 

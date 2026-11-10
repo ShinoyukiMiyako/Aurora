@@ -61,12 +61,32 @@
   color: var(--sk-text-2);
 }
 
+/*
+ * 当前文案与全部候选叠在同一格：格宽取最长的那条，换选中项时触发器不变宽，
+ * 右对齐的一排里旁边的控件不被挤动。给了固定宽或撑满时照旧，放不下的当前文案以省略号截断。
+ */
 .value {
+  display: grid;
   flex: 1;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.valueText,
+.widthLabel {
+  grid-area: 1 / 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.widthLabel {
+  visibility: hidden;
+}
+
+.widthLabel::before {
+  content: attr(data-label);
 }
 
 .value[data-placeholder] {
@@ -94,19 +114,27 @@
   padding: var(--sk-space-6);
 }
 
+/* 右缘与选项高亮底的右缘对齐：列表的槽位比它吃进的面板内边距宽，过滤框跟着内缩这个差值 */
 .filter {
   flex: none;
+  margin-right: calc(var(--sk-scrollbar-size) - var(--sk-space-6));
   margin-bottom: var(--sk-space-6);
 }
 
-/* 高度上限 308，约 8 个单行选项；超出内部滚动，过滤框与面板内边距不随之滚走 */
+/*
+ * 高度上限 308，约 8 个单行选项；超出内部滚动，过滤框与面板内边距不随之滚走。
+ * 滚动条槽位常驻：筛选让列表在超出与不超出之间来回时，高亮底的右缘与勾选图标不横跳。
+ * 槽位吃进面板右侧的内边距，选项右侧留白取槽宽（10），比左侧（6）宽一点。
+ */
 .list {
   display: flex;
   flex-direction: column;
   gap: 1px;
   max-height: 308px;
+  margin-right: calc(var(--sk-space-6) * -1);
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   outline: none;
 }
 

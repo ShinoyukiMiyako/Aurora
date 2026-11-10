@@ -3,7 +3,9 @@
 // 三枚色块都画出真实颜色，不画占位：取外观预览令牌（与当前主题无关的静态色值），不在子树上重设外观属性。
 // 色块固定画日樱值（挑选时以日樱的取值为准），选中项色块内的对勾取日樱的强调底文字色，与色块配套。
 
+import { AnimatePresence, motion } from "framer-motion";
 import { Icon } from "../art/Icon";
+import { fade, springs } from "../lib/motion";
 import styles from "./AccentSwatches.module.css";
 import type { PreviewAccent } from "./ModeCards";
 import { useRovingGroup } from "./roving";
@@ -42,7 +44,20 @@ export function AccentSwatches({ value, options, onChange, ariaLabel }: AccentSw
             }}
           >
             <span className={styles.swatch} data-tint={option.value} aria-hidden="true">
-              {checked && <Icon name="check" size={14} />}
+              {/* 与复选框的勾号同一手法：换选中项时旧对勾淡出、新对勾弹出；挂载时已选中的那枚不播入场 */}
+              <AnimatePresence initial={false}>
+                {checked && (
+                  <motion.span
+                    key="check"
+                    className={styles.check}
+                    initial={{ opacity: 0, scale: 0.6 }}
+                    animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
+                    exit={{ opacity: 0, transition: fade.out }}
+                  >
+                    <Icon name="check" size={14} />
+                  </motion.span>
+                )}
+              </AnimatePresence>
             </span>
             <span className={styles.name}>{option.label}</span>
           </button>

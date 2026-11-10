@@ -1,6 +1,10 @@
+import { motion } from "framer-motion";
 import { useEffect, useId, useState } from "react";
 import { REPO_URL, type ThirdPartyManifest } from "../../lib/app-info";
+import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
+import { fade } from "../../lib/motion";
 import { Button } from "../../ui/Button";
+import { LabelSlot } from "../../ui/LabelSlot";
 import { TabPanel, Tabs } from "../../ui/Tabs";
 import type { SetupCopy } from "../copy";
 import { Frame } from "../Frame";
@@ -45,6 +49,8 @@ function useLoaded<T>(load: () => Promise<T>): Loaded<T> {
 
 /** 原文块：Markdown 也原样显示，法律文本要逐字可查。 */
 function DocumentText({ label, failed, loaded }: { label: string; failed: string; loaded: Loaded<string> }) {
+  // 挂上时还在读：底块先在，读到时原文在里面淡入。切标签重挂时原文早已读到，跟着面板一起淡入，不再单独淡一遍
+  const [waited] = useState(loaded.status === "loading");
   if (loaded.status === "failed") {
     return (
       <div className={styles.failed} role="alert">
@@ -55,20 +61,21 @@ function DocumentText({ label, failed, loaded }: { label: string; failed: string
   }
   return (
     <pre className={styles.licenseText} role="region" aria-label={label} aria-busy={loaded.status === "loading"} tabIndex={0}>
-      {loaded.status === "ready" ? loaded.value : null}
+      {loaded.status === "ready" ? (
+        <motion.span initial={waited ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }}>
+          {loaded.value}
+        </motion.span>
+      ) : null}
     </pre>
   );
 }
 
-function ThirdPartyList({ copy, loaded }: { copy: SetupCopy["legal"]; loaded: Loaded<ThirdPartyManifest> }) {
-  if (loaded.status === "loading") {
-    return (
-      <p className={styles.pending} role="status">
-        {copy.thirdPartyLoading}
-      </p>
-    );
-  }
-  if (loaded.status === "failed") {
+/**
+ * 清单的底块先于清单占住位置：读得快（加载门的延迟之内）时什么字都不出，清单读到后在同一块底上淡入；
+ * 超过延迟才在底块里说「正在读取」。几百行的清单只整块淡入，不逐行。
+ */
+function ThirdPartyList({ copy, loaded, view }: { copy: SetupCopy["legal"]; loaded: Loaded<ThirdPartyManifest>; view: LoadingView }) {
+  if (view === "content" && loaded.status === "failed") {
     return (
       <div className={styles.failed} role="alert">
         <p className={styles.failedTitle}>{copy.thirdPartyFailed}</p>
@@ -77,17 +84,26 @@ function ThirdPartyList({ copy, loaded }: { copy: SetupCopy["legal"]; loaded: Lo
     );
   }
   return (
-    <ul className={styles.packages} aria-label={copy.thirdPartyHeading} tabIndex={0}>
-      {loaded.value.packages.map((p) => (
-        <li key={`${p.ecosystem}:${p.name}@${p.version}`} className={styles.package}>
-          <span className={styles.packageName} title={p.name}>
-            {p.name}
-          </span>
-          <span className={styles.packageVersion}>{p.version}</span>
-          <span className={styles.packageLicense}>{p.license}</span>
-        </li>
-      ))}
-    </ul>
+    <div className={styles.packagesBox}>
+      {view === "content" && loaded.status === "ready" ? (
+        <motion.ul className={styles.packages} aria-label={copy.thirdPartyHeading} tabIndex={0} initial={{ opacity: 0 }} animate={{ opacity: 1, transition: fade.in }}>
+          {loaded.value.packages.map((p) => (
+            <li key={`${p.ecosystem}:${p.name}@${p.version}`} className={styles.package}>
+              <span className={styles.packageName} title={p.name}>
+                {p.name}
+              </span>
+              <span className={styles.packageVersion}>{p.version}</span>
+              <span className={styles.packageLicense}>{p.license}</span>
+            </li>
+          ))}
+        </motion.ul>
+      ) : (
+        // 播报区先挂上、后填字，读屏才念得出来
+        <p className={styles.pending} role="status" data-shown={view === "skeleton" || undefined}>
+          {view === "skeleton" ? copy.thirdPartyLoading : null}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -105,6 +121,7 @@ export function Legal({ copy, loadLicenseText, loadAdditionalTerms, loadAssetLic
   const terms = useLoaded(loadAdditionalTerms);
   const assets = useLoaded(loadAssetLicense);
   const thirdParty = useLoaded(loadThirdParty);
+  const thirdPartyGate = useLoadingGate(thirdParty.status === "loading");
   const documents: Readonly<Record<LegalDocument, { label: string; failed: string; note: string; loaded: Loaded<string> }>> = {
     license: { label: legal.licenseHeading, failed: legal.licenseFailed, note: legal.englishOnly, loaded: license },
     terms: { label: legal.termsHeading, failed: legal.termsFailed, note: legal.chinesePrevails, loaded: terms },
@@ -126,7 +143,10 @@ export function Legal({ copy, loadLicenseText, loadAdditionalTerms, loadAssetLic
               onChange={setShown}
               items={(["license", "terms", "assets"] as const).map((doc) => ({ value: doc, label: documents[doc].label }))}
             />
-            <span className={styles.headingNote}>{current.note}</span>
+            {/* 两种说明叠在同一格、按长的那条占宽：换标签时这一行不会一会儿折行一会儿不折，原文块的上沿不跳 */}
+            <span className={styles.headingNote}>
+              <LabelSlot current={current.note} options={[legal.englishOnly, legal.chinesePrevails]} />
+            </span>
           </div>
           <TabPanel tabsId={tabsId} value={shown} motion="card" className={styles.documentPanel}>
             <DocumentText label={current.label} failed={current.failed} loaded={current.loaded} />
@@ -143,9 +163,13 @@ export function Legal({ copy, loadLicenseText, loadAdditionalTerms, loadAssetLic
         <section className={styles.section}>
           <h2 className={styles.heading}>
             {legal.thirdPartyHeading}
-            {thirdParty.status === "ready" && <span className={styles.count}>{thirdParty.value.packages.length}</span>}
+            {thirdPartyGate.view === "content" && thirdParty.status === "ready" && (
+              <motion.span className={styles.count} initial={{ opacity: 0 }} animate={{ opacity: 1, transition: fade.in }}>
+                {thirdParty.value.packages.length}
+              </motion.span>
+            )}
           </h2>
-          <ThirdPartyList copy={legal} loaded={thirdParty} />
+          <ThirdPartyList copy={legal} loaded={thirdParty} view={thirdPartyGate.view} />
         </section>
         <div className={styles.notices}>
           <p className={styles.notice}>{legal.copyright}</p>

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { GLYPHS, TONE_WEIGHTS } from "./glyphs";
+import { CELL, GLYPHS, TONE_WEIGHTS } from "./glyphs";
 import {
   DT_MAX,
+  EDGE_ON,
   K_RETURN,
   K_YIELD,
   LAYER_COUNTS,
@@ -14,6 +15,7 @@ import {
   countPetals,
   createLayers,
   createRandom,
+  freezeLayers,
   layerCounts,
   nextDrawAt,
   pickTone,
@@ -284,6 +286,23 @@ describe("静态散落", () => {
     ]);
     // 第一片一次就满足；后两片各投 30 次（每次两个随机数），每片再抽字模、色调、角度、缩放与正负号
     expect(calls).toBe(2 + 30 * 2 * 2 + 5 * 3);
+  });
+
+  it("定格：看得见的花瓣按此刻的绘制位置、自转角与翻面定格；候场、出界与侧对视线的不定格", () => {
+    const bounds = { width: 400, height: 300 };
+    const reach = (Math.hypot(GLYPHS[0].cols, GLYPHS[0].rows) * CELL) / 2;
+    const at = (x: number, y: number, patch: Partial<Petal> = {}): Petal => ({ ...still(x, y), ...patch });
+    const pushed = at(100, 120, { ox: 5, oy: -3, rot: 33, flip: Math.PI, tone: 2 });
+    const leftEdge = at(-reach + 1, 150, { flip: 1 });
+    const waiting = at(200, -reach - 1);
+    const below = at(200, bounds.height + reach + 1);
+    const right = at(bounds.width + reach + 1, 100);
+    const edgeOn = at(200, 100, { flip: Math.acos(EDGE_ON / 2) });
+    expect(freezeLayers([[waiting, leftEdge], [below, right], [edgeOn, pushed]], bounds)).toEqual([
+      [{ glyph: 0, tone: 0, nx: (-reach + 1) / 400, ny: 0.5, rot: 0, sx: Math.cos(1) }],
+      [],
+      [{ glyph: 0, tone: 2, nx: 105 / 400, ny: 117 / 300, rot: 33, sx: -1 }],
+    ]);
   });
 
   it("档位变化保留已有的散落、只补新增的；尺寸非正时报错", () => {

@@ -24,6 +24,7 @@ import { DROP_COPY, FILE_PICK_COPY, FILE_SAVE_COPY, SHELL_ACTION_ERROR } from ".
 import { UPDATE_COPY } from "../copy/updater";
 import { isTypingTarget } from "../lib/util";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
+import { NAV_ANCHOR_ATTR } from "../ui/Page";
 import { FILE_KINDS, useFileDrop, type FileDropHint, type FileDropTarget, type FileKind, type JarDropTarget } from "./file-drop";
 import { assertPageCombo, matchesCombo, useGlobalShortcuts, type KeyCombo, type Shortcut } from "./keys";
 import {
@@ -50,14 +51,22 @@ import { useWindowPort } from "./window";
 
 export type { ConfirmOptions } from "../launch/host";
 
+/** 最近一次导航是怎么来的：boot 应用启动后还没导航过，go 压入新项，back / forward 在历史里移动，replace 替换当前项。 */
+export type NavArrival = "boot" | "go" | "back" | "forward" | "replace";
+
 export interface NavApi {
   /** 当前路由；指向已不存在的实例时已按实例库给出，页面拿不到不存在的 id。 */
   route: Route;
+  /** 当前路由是怎么来的；外壳据此决定新挂载的页面怎么入场。 */
+  arrival: NavArrival;
   canBack: boolean;
   canForward: boolean;
   /** 侧栏、卡片、链接、命令面板跳转：压入新历史项，回到顶部。与当前路由相同时什么都不做。 */
   go(route: Route): void;
-  /** 实例详情切 Tab、设置切分区、发现页改关键词：替换当前项，保留滚动位置。 */
+  /**
+   * 实例详情切 Tab、设置切分区、发现页改关键词：替换当前项，保留滚动位置；
+   * 页面标了导航锚点（NAV_ANCHOR_ATTR）且锚点已滚出视口上方时，先瞬时滚回锚点。
+   */
   replace(route: Route): void;
   back(): void;
   forward(): void;
@@ -164,6 +173,40 @@ export function ShellProvider({ children }: { children: ReactNode }) {
 
 type NavIntent = "go" | "back" | "forward";
 
+/**
+ * 同一页换标签或分区（replace）时的落点：页面标出的锚点（标签条、分区导航所在的那一行）已经滚出视口上方时，
+ * 瞬时滚回锚点，新面板从头看起；锚点还在视口里就不动。不做平滑滚动，变化交给面板自己的入场。
+ * 锚点的 scroll-margin-top 是它上方要留出的距离：分区导航吸顶时写成吸顶的 top，滚回去导航停在原处不动。
+ */
+function revealNavAnchor(scroller: HTMLElement): void {
+  const anchor = scroller.querySelector<HTMLElement>(`[${NAV_ANCHOR_ATTR}]`);
+  if (anchor === null) return;
+  assertAnchorInFlow(anchor, scroller);
+  const top = anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - scrollMarginTop(anchor);
+  if (top < scroller.scrollTop) scroller.scrollTop = top;
+}
+
+/**
+ * 吸顶元素吸住时量到的就是吸住的位置，锚点看起来永远在视口里，滚回永远不触发。
+ * 标错了当场报错，不让它静默失效：锚点要标在吸顶导航外层、不吸顶的那一行上。
+ */
+function assertAnchorInFlow(anchor: HTMLElement, scroller: HTMLElement): void {
+  for (let el: HTMLElement | null = anchor; el !== null && el !== scroller; el = el.parentElement) {
+    if (getComputedStyle(el).position === "sticky") {
+      throw new Error(`导航锚点不能是吸顶元素，也不能在吸顶元素里面：${el.tagName.toLowerCase()}.${el.className}`);
+    }
+  }
+}
+
+function scrollMarginTop(el: HTMLElement): number {
+  const raw = getComputedStyle(el).scrollMarginTop;
+  // 浏览器总给出像素值；jsdom 对没声明的属性给空串，而这个属性的初始值就是 0
+  if (raw === "") return 0;
+  const px = Number.parseFloat(raw);
+  if (Number.isNaN(px)) throw new Error(`导航锚点的 scroll-margin-top 不是像素值：${raw}`);
+  return px;
+}
+
 interface ConfirmRequest {
   id: number;
   options: ConfirmOptions;
@@ -191,16 +234,18 @@ function ShellCore({ children }: { children: ReactNode }) {
   // ---------------------------------------------------------------- 历史
 
   const [history, setHistoryState] = useState<NavHistory>(initialHistory);
+  const [arrival, setArrival] = useState<NavArrival>("boot");
   const historyRef = useRef(history);
   const intentRef = useRef<NavIntent | null>(null);
   const scrollRef = useRef<HTMLElement | null>(null);
 
-  /** 事件处理器里连续导航时读的是 ref 里的最新值，不等重渲染。 */
+  /** 事件处理器里连续导航时读的是 ref 里的最新值，不等重渲染。intent 为 null 的提交（替换、剪除失效项）不动滚动位置。 */
   const commit = useCallback((next: NavHistory, intent: NavIntent | null) => {
     if (next === historyRef.current) return;
     historyRef.current = next;
     if (intent !== null) intentRef.current = intent;
     setHistoryState(next);
+    setArrival(intent === null ? "replace" : intent);
   }, []);
 
   const scrollTop = () => (scrollRef.current === null ? 0 : scrollRef.current.scrollTop);
@@ -213,7 +258,17 @@ function ShellCore({ children }: { children: ReactNode }) {
     },
     [commit],
   );
-  const replace = useCallback((route: Route) => commit(navReplace(historyRef.current, route), null), [commit]);
+  const replace = useCallback(
+    (route: Route) => {
+      const next = navReplace(historyRef.current, route);
+      if (next === historyRef.current) return;
+      // 在提交之前滚：framer-motion 的布局动画在提交时取快照，吸顶导航里的指示块前后两次测量都落在新的滚动位置上，
+      // 不会按滚动差飞一段；同一个事件里滚动与新面板一起画出，旧面板不会在新位置上露一帧
+      if (scrollRef.current !== null) revealNavAnchor(scrollRef.current);
+      commit(next, null);
+    },
+    [commit],
+  );
   const back = useCallback(() => {
     const base = historyRef.current;
     if (!canBack(base)) return;
@@ -488,20 +543,37 @@ function ShellCore({ children }: { children: ReactNode }) {
   }, []);
 
   const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
-  const [focused, setFocused] = useState(() => document.hasFocus());
   useEffect(() => {
     const onVisibility = () => setVisible(document.visibilityState !== "hidden");
-    const onFocus = () => setFocused(true);
-    const onBlur = () => setFocused(false);
     document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("focus", onFocus);
-    window.addEventListener("blur", onBlur);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener("blur", onBlur);
-    };
+    return () => document.removeEventListener("visibilitychange", onVisibility);
   }, []);
+
+  // 焦点认窗口自己的焦点事件，不认网页的 focus / blur：焦点落到系统对话框这类地方时两者会不一致。
+  // 初值先取网页的，再以窗口读回的为准；订阅之后已经收到过焦点事件时，晚回来的初值不再盖掉它
+  const [focused, setFocused] = useState(() => document.hasFocus());
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    let heard = false;
+    const report = (error: unknown) => void run(() => Promise.reject(error), SHELL_ACTION_ERROR.windowState);
+    port
+      .onFocusChanged((now) => {
+        heard = true;
+        if (!disposed) setFocused(now);
+      })
+      .then((release) => {
+        if (disposed) release();
+        else unlisten = release;
+      }, report);
+    port.isFocused().then((now) => {
+      if (!disposed && !heard) setFocused(now);
+    }, report);
+    return () => {
+      disposed = true;
+      if (unlisten !== null) unlisten();
+    };
+  }, [port, run]);
 
   // visibilityState 要靠宿主在最小化时把 WebView2 设为不可见，再问窗口一路兜底：最小化与还原都会让窗口尺寸变化，
   // 变一次读一次。两路各自独立，任一说不可见就算不可见，先后到达都只翻转一次。
@@ -605,8 +677,8 @@ function ShellCore({ children }: { children: ReactNode }) {
   const launchHost = useMemo<LaunchHost>(() => ({ run, go, confirm }), [confirm, go, run]);
 
   const nav = useMemo<NavApi>(
-    () => ({ route, canBack: canBack(viewHistory), canForward: canForward(viewHistory), go, replace, back, forward }),
-    [back, forward, go, replace, route, viewHistory],
+    () => ({ route, arrival, canBack: canBack(viewHistory), canForward: canForward(viewHistory), go, replace, back, forward }),
+    [arrival, back, forward, go, replace, route, viewHistory],
   );
 
   const shell = useMemo<ShellApi>(

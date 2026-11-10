@@ -45,3 +45,40 @@
 .value[data-copyable] {
   margin: calc((var(--sk-lh-small) - 30px) / 2) 0;
 }
+
+/*
+ * 复制成功：对勾从略小处弹出并淡入；停留结束后复制图标淡回。图标位只有一个，旧图标同一帧让出，
+ * 新图标从透明起，读起来就是一换一。三段关键帧各自命名：两种状态里同名的动画会被当成同一条接着跑，不会重播。
+ */
+.copy[data-copy-phase="copied"] svg {
+  animation:
+    copied-pop var(--sk-spring-pop-dur) var(--sk-spring-pop),
+    copied-fade var(--sk-dur-in) var(--sk-ease-out);
+}
+
+.copy[data-copy-phase="restored"] svg {
+  animation: restored-fade var(--sk-dur-in) var(--sk-ease-out);
+}
+
+/* 减少动画：不缩放，只留淡入 */
+:global([data-sk-reduced]) .copy[data-copy-phase="copied"] svg {
+  animation: copied-fade var(--sk-dur-in) var(--sk-ease-out);
+}
+
+@keyframes copied-pop {
+  from {
+    scale: 0.6;
+  }
+}
+
+@keyframes copied-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes restored-fade {
+  from {
+    opacity: 0;
+  }
+}

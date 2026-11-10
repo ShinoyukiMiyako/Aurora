@@ -3,11 +3,14 @@
 
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LOADING_DELAY_MS } from "../../domain/limits";
 import { APP_LICENSE, ASSET_LICENSE, REPO_URL, type ThirdPartyManifest } from "../../lib/app-info";
 import { render, stubResizeObserver, type Rendered } from "../../test/dom";
 import { COPY, type Lang } from "../copy";
 import { FrameChromeProvider, type FrameChrome } from "../Frame";
+import { InShell } from "./test-chrome";
 import { Legal, type LegalProps } from "./Legal";
+import styles from "./Legal.module.css";
 
 // 花瓣层要 canvas 和令牌，和这里要验的东西无关
 vi.mock("../art", () => ({ BrandMark: () => null, StageArt: () => null }));
@@ -49,7 +52,9 @@ function element(props: LegalProps, lang: Lang) {
   const chrome: FrameChrome = { copy: copy.frame, version: "0.2.0", canClose: true, canOpenLegal: false, reduced: true, onMinimize: vi.fn(), onClose: vi.fn(), onOpenLegal: vi.fn() };
   return (
     <FrameChromeProvider value={chrome}>
-      <Legal {...props} copy={copy} />
+      <InShell>
+        <Legal {...props} copy={copy} />
+      </InShell>
     </FrameChromeProvider>
   );
 }
@@ -79,6 +84,9 @@ const licenseRegion = () => document.querySelector("pre");
 const packageList = () => document.querySelector("main ul");
 const rows = () => [...document.querySelectorAll("main li")].map((row) => [...row.children].map((cell) => cell.textContent));
 const tabs = () => [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+/** 原文标签右边那条说明：两种说明都叠在槽里，看得见的只有当前这条。 */
+const noteShown = () => document.querySelector(`.${styles.headingNote} [data-current]`)?.textContent;
+const listStatus = () => document.querySelector('main [role="status"]');
 
 function button(name: string): HTMLButtonElement {
   const found = [...document.querySelectorAll("button")].find((b) => b.textContent === name);
@@ -122,7 +130,17 @@ describe.each(["zh", "en"] as const)("必须出现的声明（%s）", (lang) => 
 
   it("协议全文只有英文版要说明", async () => {
     await show({}, lang);
-    expect(main()).toContain(legal.englishOnly);
+    expect(noteShown()).toBe(legal.englishOnly);
+  });
+
+  it("两种说明叠在同一个定宽槽里：换标签时说明这一行宽度不变，原文块上沿不跳", async () => {
+    await show({}, lang);
+    const slot = document.querySelector(`.${styles.headingNote}`);
+    const before = slot?.firstElementChild;
+    expect([...(before?.children ?? [])].map((option) => option.textContent).sort()).toEqual([legal.chinesePrevails, legal.englishOnly].sort());
+    await showTab(legal.termsHeading);
+    expect(slot?.firstElementChild).toBe(before);
+    expect(noteShown()).toBe(legal.chinesePrevails);
   });
 
   it("有 Minecraft 商标声明", async () => {
@@ -178,6 +196,28 @@ describe("协议全文", () => {
     expect(licenseRegion()?.getAttribute("tabindex")).toBe("0");
   });
 
+  it("挂上时还在读的原文，读到时在底块里从透明淡入；切回已读到的标签不再单独淡一遍", async () => {
+    const text = deferred<string>();
+    // 帧循环跑在真实时间上：在原文插进 DOM 的那一刻（微任务里，还没到下一帧）读它的透明度
+    const firstOpacity: string[] = [];
+    const watcher = new MutationObserver(() => {
+      const shown = licenseRegion()?.firstElementChild;
+      if (shown instanceof HTMLElement && shown.textContent === LICENSE && firstOpacity.length === 0) firstOpacity.push(shown.style.opacity);
+    });
+    watcher.observe(document.body, { childList: true, subtree: true });
+    try {
+      await show({ loadLicenseText: () => text.promise });
+      await act(async () => text.resolve(LICENSE));
+    } finally {
+      watcher.disconnect();
+    }
+    expect(firstOpacity).toEqual(["0"]);
+
+    await showTab(COPY.zh.legal.termsHeading);
+    await showTab(COPY.zh.legal.licenseHeading);
+    expect((licenseRegion()?.firstElementChild as HTMLElement | null)?.style.opacity).not.toBe("0");
+  });
+
   it("读到之前标记为忙，读到之后撤掉", async () => {
     const text = deferred<string>();
     await show({ loadLicenseText: () => text.promise });
@@ -225,8 +265,7 @@ describe.each([
     expect(region?.getAttribute("tabindex")).toBe("0");
     expect(region?.textContent).toBe(text);
     expect(document.querySelectorAll("pre")).toHaveLength(1);
-    expect(main()).toContain(legal.chinesePrevails);
-    expect(main()).not.toContain(legal.englishOnly);
+    expect(noteShown()).toBe(legal.chinesePrevails);
   });
 
   it("打开协议页时就读一次，切过去不再读，切回协议全文也不重读", async () => {
@@ -293,14 +332,59 @@ describe("第三方许可清单", () => {
     expect(packageList()?.getAttribute("tabindex")).toBe("0");
   });
 
-  it("读到之前显示读取中，不画清单，也不写包数", async () => {
+  const countText = () => [...document.querySelectorAll("h2")].find((h) => h.textContent?.startsWith(legal.thirdPartyHeading))?.textContent;
+
+  it("读得快时不闪「读取中」：底块先占着位置，清单读到后在同一块底上从透明淡入，包数也这时才写", async () => {
     const manifest = deferred<ThirdPartyManifest>();
     await show({ loadThirdParty: () => manifest.promise });
-    expect(document.querySelector('[role="status"]')?.textContent).toBe(legal.thirdPartyLoading);
+    expect(listStatus()?.textContent).toBe("");
     expect(packageList()).toBeNull();
-    await act(async () => manifest.resolve(MANIFEST));
-    expect(document.querySelector('[role="status"]')).toBeNull();
+    expect(countText()).toBe(legal.thirdPartyHeading);
+    const box = listStatus()?.parentElement;
+
+    // 帧循环跑在真实时间上：在清单插进 DOM 的那一刻（微任务里，还没到下一帧）读它的透明度
+    const firstOpacity: string[] = [];
+    const watcher = new MutationObserver(() => {
+      const list = packageList();
+      if (list instanceof HTMLElement && firstOpacity.length === 0) firstOpacity.push(list.style.opacity);
+    });
+    watcher.observe(document.body, { childList: true, subtree: true });
+    try {
+      await act(async () => manifest.resolve(MANIFEST));
+    } finally {
+      watcher.disconnect();
+    }
+    expect(firstOpacity).toEqual(["0"]);
+    expect(listStatus()).toBeNull();
     expect(rows()).toHaveLength(3);
+    expect(packageList()?.parentElement).toBe(box);
+    expect(countText()).toBe(`${legal.thirdPartyHeading}3`);
+  });
+
+  it("超过加载延迟还没读到才说「读取中」，读到后至少再停一个延迟才换成清单", async () => {
+    vi.useFakeTimers();
+    try {
+      const manifest = deferred<ThirdPartyManifest>();
+      await show({ loadThirdParty: () => manifest.promise });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS - 1);
+      });
+      expect(listStatus()?.textContent).toBe("");
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(listStatus()?.textContent).toBe(legal.thirdPartyLoading);
+
+      await act(async () => manifest.resolve(MANIFEST));
+      expect(packageList()).toBeNull();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
+      });
+      expect(listStatus()).toBeNull();
+      expect(rows()).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("读失败时说明并带上原文，协议全文还在", async () => {

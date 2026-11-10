@@ -101,6 +101,13 @@
   line-height: var(--sk-lh-small);
 }
 
+/* 副标题读取中：骨架条占着正好一行字的高度，读到后原位换字，头部不变高 */
+.subtitle[data-pending] {
+  display: flex;
+  align-items: center;
+  height: var(--sk-lh-small);
+}
+
 .close {
   flex: none;
 }
@@ -112,8 +119,17 @@
   overscroll-behavior: contain;
 }
 
+/*
+ * 滚动条槽位常驻：切标签、换步、骨架换成内容让主体在超出与不超出可视高度之间来回时，主体里的东西不随滚动条出没横移。
+ * 带内边距的主体总有（右内边距少给一个滚动条的宽度，留白与左边一致）；满版主体由调用方选择，
+ * 默认不留，否则贴边的头图右侧会多出一条一直看得见的空槽。
+ */
+.body[data-gutter] {
+  scrollbar-gutter: stable;
+}
+
 .body[data-padded] {
-  padding: var(--sk-space-14) var(--sk-space-24) var(--sk-space-20);
+  padding: var(--sk-space-14) calc(var(--sk-space-24) - var(--sk-scrollbar-size)) var(--sk-space-20) var(--sk-space-24);
 }
 
 /* 底栏按钮右对齐、间距 10；左侧辅助动作推到最左 */

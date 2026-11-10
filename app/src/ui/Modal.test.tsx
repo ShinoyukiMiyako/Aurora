@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 import { AnimatePresence } from "framer-motion";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FOCUS_FALLBACK_ATTR, OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
+import { keydown, render, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { Button } from "./Button";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Modal } from "./Modal";
@@ -368,6 +371,206 @@ describe("ConfirmDialog", () => {
     expect(() => mount(<ConfirmDialog open title="删除账户 Alex？" confirmLabel="确定" tone="danger" onConfirm={() => undefined} onClose={() => undefined} />)).toThrow(
       "确认键要写出动作",
     );
+  });
+});
+
+describe("弹窗随内容改变尺寸", () => {
+  // 设备码到达、换步、列表读到：弹窗在层里垂直居中，没有形变的话标题与底栏各瞬跳高度差的一半
+  it("正文变高：面板从原来的高度形变过去，不是一帧跳到新高度", async () => {
+    const handles: { grow?: () => void } = {};
+    function Growing() {
+      const [count, setCount] = useState(1);
+      handles.grow = () => setCount(4);
+      return (
+        <Modal open onClose={() => undefined} title="正在登录">
+          {Array.from({ length: count }, (_, i) => (
+            <p key={i}>第 {i + 1} 步</p>
+          ))}
+        </Modal>
+      );
+    }
+    mount(<Growing />);
+    const dialog = dialogs()[0];
+    // jsdom 不做布局：面板高度按正文段落数给（60 + 50 × 段数），在 720 高的层里垂直居中
+    const heightOf = () => 60 + 50 * dialog.querySelectorAll("p").length;
+    dialog.getBoundingClientRect = () => {
+      const height = heightOf();
+      const top = (720 - height) / 2;
+      return { left: 200, top, width: 560, height, x: 200, y: top, right: 760, bottom: top + height, toJSON: () => ({}) } as DOMRect;
+    };
+    // 等入场播完，免得入场自己的缩放混进来
+    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await act(async () => handles.grow?.());
+    const scale = /scale\(([\d.]+), ([\d.]+)\)/.exec(dialog.style.transform);
+    if (scale === null) throw new Error(`面板没有形变：${dialog.style.transform}`);
+    // 起点就是原来的高度：110 / 260
+    expect(Number(scale[1])).toBeCloseTo(1, 2);
+    expect(Number(scale[2])).toBeGreaterThan(0.4);
+    expect(Number(scale[2])).toBeLessThan(0.6);
+    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+  });
+
+  it("传了 layoutKey：只在它变的那次重渲染量布局、播形变", async () => {
+    const handles: { set?: (count: number, step: string) => void } = {};
+    function Stepped() {
+      const [state, setState] = useState({ count: 1, step: "a" });
+      handles.set = (count, step) => setState({ count, step });
+      return (
+        <Modal open onClose={() => undefined} title="导入整合包" layoutKey={state.step}>
+          {Array.from({ length: state.count }, (_, i) => (
+            <p key={i}>第 {i + 1} 行</p>
+          ))}
+        </Modal>
+      );
+    }
+    mount(<Stepped />);
+    const dialog = dialogs()[0];
+    dialog.getBoundingClientRect = () => {
+      const height = 60 + 50 * dialog.querySelectorAll("p").length;
+      const top = (720 - height) / 2;
+      return { left: 200, top, width: 560, height, x: 200, y: top, right: 760, bottom: top + height, toJSON: () => ({}) } as DOMRect;
+    };
+    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+    await act(async () => handles.set?.(2, "a"));
+    expect(dialog.style.transform).toBe("none");
+    await act(async () => handles.set?.(4, "b"));
+    expect(dialog.style.transform).toMatch(/scale\(1, 0\.\d+\)/);
+    await waitForFrames(() => expect(dialog.style.transform).toBe("none"));
+  });
+
+  it("副标题读取中（null）：占一行同高的骨架，不关联到弹窗；读到后原位换字并关联", () => {
+    const handles: { load?: () => void } = {};
+    function Backups() {
+      const [count, setCount] = useState<number | null>(null);
+      handles.load = () => setCount(3);
+      return (
+        <Modal open onClose={() => undefined} title="存档备份" subtitle={count === null ? null : `${count} 份备份`}>
+          正文
+        </Modal>
+      );
+    }
+    mount(<Backups />);
+    const dialog = dialogs()[0];
+    const pending = dialog.querySelector<HTMLElement>("[data-pending]");
+    expect(pending?.tagName).toBe("P");
+    expect(pending?.getAttribute("aria-hidden")).toBe("true");
+    expect(pending?.textContent).toBe("");
+    expect(dialog.hasAttribute("aria-describedby")).toBe(false);
+
+    act(() => handles.load?.());
+    expect(dialog.querySelector("[data-pending]")).toBeNull();
+    const described = document.getElementById(dialog.getAttribute("aria-describedby") ?? "");
+    expect(described?.textContent).toBe("3 份备份");
+  });
+
+  // 形变是 transform 缩放：圆角若还是 var() 字符串，framer-motion 没法按缩放反向校正，四角被拉成椭圆
+  it("圆角从算好的样式读成像素交给面板", async () => {
+    const original = globalThis.getComputedStyle;
+    vi.spyOn(globalThis, "getComputedStyle").mockImplementation((el, pseudo) => {
+      const style = original(el, pseudo);
+      if (el.getAttribute("role") !== "dialog") return style;
+      return new Proxy(style, {
+        get: (target, key) => {
+          if (key === "borderTopLeftRadius") return "22px";
+          const value: unknown = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    });
+    mount(
+      <Modal open onClose={() => undefined} title="详情">
+        正文
+      </Modal>,
+    );
+    const dialog = dialogs()[0];
+    await waitForFrames(() => expect(dialog.style.borderRadius).toBe("22px"));
+  });
+
+  it("见过骨架后到达的副标题淡入；一打开就有的副标题随弹窗入场，自己不再淡入", () => {
+    const handles: { load?: () => void } = {};
+    function Backups() {
+      const [count, setCount] = useState<number | null>(null);
+      handles.load = () => setCount(3);
+      return (
+        <Modal open onClose={() => undefined} title="存档备份" subtitle={count === null ? null : `${count} 份备份`}>
+          正文
+        </Modal>
+      );
+    }
+    mount(
+      <>
+        <Backups />
+        <Modal open onClose={() => undefined} title="关于" subtitle="版本 1.0.0">
+          正文
+        </Modal>
+      </>,
+    );
+    const subtitleOf = (title: string) => {
+      const dialog = dialogs().find((d) => d.textContent?.includes(title));
+      return document.getElementById(dialog?.getAttribute("aria-describedby") ?? "");
+    };
+    expect(subtitleOf("关于")?.style.opacity).toBe("1");
+    act(() => handles.load?.());
+    const arrived = subtitleOf("存档备份");
+    expect(arrived?.textContent).toBe("3 份备份");
+    expect(Number(arrived?.style.opacity)).toBeLessThan(1);
+  });
+
+  it("副标题不传：不占位", () => {
+    mount(
+      <Modal open onClose={() => undefined} title="详情">
+        正文
+      </Modal>,
+    );
+    expect(dialogs()[0].querySelector("p")).toBeNull();
+  });
+});
+
+describe("弹窗样式", () => {
+  // 检出时可能是 CRLF：统一成 LF、去掉注释再按规则匹配
+  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "Modal.module.css"), "utf8")
+    .replace(/\r\n/g, "\n")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const ruleOf = (selector: string) => {
+    const rule = new RegExp(`(?:^|\\n\\s*\\n)${selector.replace(/[.[\]]/g, (c) => `\\${c}`)} \\{([^}]*)\\}`).exec(css);
+    if (rule === null) throw new Error(`没有 ${selector} 规则`);
+    return rule[1];
+  };
+
+  it("滚动条槽位只给打了槽位标记的主体；带内边距时右内边距扣掉槽位宽，留白与左边一致", () => {
+    expect(ruleOf(".body")).not.toContain("scrollbar-gutter");
+    expect(ruleOf(".body[data-gutter]")).toContain("scrollbar-gutter: stable;");
+    expect(ruleOf(".body[data-padded]")).toContain(
+      "padding: var(--sk-space-14) calc(var(--sk-space-24) - var(--sk-scrollbar-size)) var(--sk-space-20) var(--sk-space-24);",
+    );
+  });
+
+  // 资讯弹窗的头图贴着满版主体的右边：常驻槽位会在它右侧留出一条一直看得见的空槽
+  it("带内边距的主体总有槽位标记；满版主体默认没有，传 stableGutter 才有", () => {
+    mount(
+      <>
+        <Modal open onClose={() => undefined} title="重命名">
+          <p data-testid="padded" />
+        </Modal>
+        <Modal open onClose={() => undefined} ariaLabel="资讯" padded={false}>
+          <p data-testid="bleed" />
+        </Modal>
+        <Modal open onClose={() => undefined} ariaLabel="资源详情" padded={false} stableGutter>
+          <p data-testid="detail" />
+        </Modal>
+      </>,
+    );
+    const bodyOf = (id: string) => document.querySelector(`[data-testid="${id}"]`)?.parentElement;
+    expect(bodyOf("padded")?.hasAttribute("data-gutter")).toBe(true);
+    expect(bodyOf("bleed")?.hasAttribute("data-gutter")).toBe(false);
+    expect(bodyOf("bleed")?.hasAttribute("data-padded")).toBe(false);
+    expect(bodyOf("detail")?.hasAttribute("data-gutter")).toBe(true);
+    expect(bodyOf("detail")?.hasAttribute("data-padded")).toBe(false);
+  });
+
+  it("读取中的副标题正好占一行字的高度", () => {
+    expect(ruleOf(".subtitle")).toContain("line-height: var(--sk-lh-small);");
+    expect(ruleOf(".subtitle[data-pending]")).toContain("height: var(--sk-lh-small);");
   });
 });
 

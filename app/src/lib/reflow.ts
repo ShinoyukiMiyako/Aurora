@@ -3,6 +3,8 @@
 // 为什么不用 framer-motion 的 layout：它只在带 layout 的组件自己重渲染时取「之前」的快照。异步数据在某张卡片内部到达时，
 // 被挤开的是它的兄弟，兄弟并没有重渲染，拿不到快照，也就不会动。这里改成观察 DOM 本身：ResizeObserver 报尺寸变化，
 // MutationObserver 报增删与换序，与 React 的渲染边界无关，也不要求每个子项都是 motion 元素。
+// 退场的子项（AnimatePresence 的 popLayout）是先被抽出布局、淡完才从 DOM 里拿掉的：抽出的那一帧节点没有增删，
+// 容器定宽时尺寸也不变，两种观察都不会报。所以另外盯着 framer 给退场项打的标记，兄弟在它让出位置的同一帧起步。
 //
 // 做法（FLIP）：布局照常一步到位；每个子项记着上一次相对容器的位置，位置变了就补一段从旧位置衰减到 0 的位移。
 // - 位移走独立的 translate 属性：页面入场用的是 transform，两者叠加，互不覆盖。
@@ -14,13 +16,16 @@
 // 滚动锚定：内容在视口上方变高时浏览器会同步调整滚动位置，可见内容本来就没动，这时也不补。
 
 import { useCallback, type RefCallback } from "react";
-import { springAt } from "./motion";
+import { springAt, type SpringName } from "./motion";
 import { elapsedSeconds, springTrack } from "./slide";
 
 /** 一次变化涉及的子项超过这么多就不做：逐项测量与起动画的开销不值，也看不清谁在动。 */
 export const REFLOW_MAX_ITEMS = 40;
 /** 子项带这个属性时不参与让位（自己管位移的元素，例如拖动排序中的项）。 */
 export const REFLOW_SKIP_ATTR = "data-reflow-skip";
+
+/** framer-motion 的 popLayout 把退场项抽出布局时打在它身上的标记。 */
+const POPPED_ATTR = "data-motion-pop-id";
 
 /** 位置差不到这么多像素不算移动：亚像素取整的抖动不该起动画。 */
 const MOVE_EPSILON_PX = 1;
@@ -32,6 +37,7 @@ interface Spot {
 
 interface Flight {
   animation: Animation;
+  spring: SpringName;
   x0: number;
   vx: number;
   y0: number;
@@ -64,10 +70,11 @@ function scrollerOf(el: HTMLElement): HTMLElement | null {
 
 /**
  * 开始观察 container 的直接子项，返回停止函数。
+ * spring：让位走哪条弹簧。默认 settle；容器里有自己按 morph 变宽的子项（启动胶囊）时传 morph，兄弟与它的边缘同步。
  * 运行环境没有 ResizeObserver 或 Web Animations 时什么也不做：组件测试用的 jsdom 既不做布局也没有这两个接口，
  * 让位在那里无从谈起；真机的 WebView2 两者都有。
  */
-export function observeReflow(container: HTMLElement): () => void {
+export function observeReflow(container: HTMLElement, spring: SpringName = "settle"): () => void {
   const doc = container.ownerDocument;
   const view = doc.defaultView;
   if (view === null || typeof ResizeObserver === "undefined" || typeof container.animate !== "function") return () => {};
@@ -86,8 +93,8 @@ export function observeReflow(container: HTMLElement): () => void {
     const flying = flights.get(el);
     if (flying !== undefined) {
       const t = elapsedSeconds(flying.animation);
-      const x = springAt("settle", flying.x0, flying.vx, t);
-      const y = springAt("settle", flying.y0, flying.vy, t);
+      const x = springAt(flying.spring, flying.x0, flying.vx, t);
+      const y = springAt(flying.spring, flying.y0, flying.vy, t);
       return { el, x0: x.x + tx, vx: x.v, y0: y.x + ty, vy: y.v, additive: flying.additive, replaces: flying.animation };
     }
     // 元素自己就靠 translate 定位或悬停位移时，位移叠加在它上面而不是顶替它（叠加模式不上合成线程，但不会把它甩离原位）
@@ -98,9 +105,9 @@ export function observeReflow(container: HTMLElement): () => void {
 
   const launch = ({ el, x0, vx, y0, vy, additive, replaces }: Launch) => {
     replaces?.cancel();
-    const { frames, duration } = springTrack("settle", x0, vx, y0, vy);
+    const { frames, duration } = springTrack(spring, x0, vx, y0, vy);
     const animation = el.animate(frames, { duration, easing: "linear", composite: additive ? "add" : "replace" });
-    const flight: Flight = { animation, x0, vx, y0, vy, additive };
+    const flight: Flight = { animation, spring, x0, vx, y0, vy, additive };
     flights.set(el, flight);
     const clear = () => {
       if (flights.get(el) === flight) flights.delete(el);
@@ -160,9 +167,14 @@ export function observeReflow(container: HTMLElement): () => void {
   };
 
   const sizes = new ResizeObserver(pass);
+  // 每个子项各自登记，不对整棵子树开观察：子项内部再怎么频繁改 DOM（日志、进度文字）都不会惊动这里
+  const watch = (node: HTMLElement) => {
+    sizes.observe(node, { box: "border-box" });
+    kids.observe(node, { attributes: true, attributeFilter: [POPPED_ATTR] });
+  };
   const kids = new MutationObserver((records) => {
     for (const record of records) {
-      for (const node of record.addedNodes) if (node instanceof HTMLElement) sizes.observe(node, { box: "border-box" });
+      for (const node of record.addedNodes) if (node instanceof HTMLElement) watch(node);
       for (const node of record.removedNodes) if (node instanceof HTMLElement) sizes.unobserve(node);
     }
     pass();
@@ -173,8 +185,8 @@ export function observeReflow(container: HTMLElement): () => void {
   };
 
   sizes.observe(container, { box: "border-box" });
-  for (const child of container.children) if (child instanceof HTMLElement) sizes.observe(child, { box: "border-box" });
   kids.observe(container, { childList: true });
+  for (const child of container.children) if (child instanceof HTMLElement) watch(child);
   scroller?.addEventListener("scroll", onScroll, { passive: true });
 
   return () => {
@@ -184,10 +196,13 @@ export function observeReflow(container: HTMLElement): () => void {
   };
 }
 
-/** 挂到容器元素上的 ref：容器的直接子项互相让位。 */
-export function useReflow<T extends HTMLElement>(): RefCallback<T> {
-  return useCallback((el: T | null) => {
-    if (el === null) return;
-    return observeReflow(el);
-  }, []);
+/** 挂到容器元素上的 ref：容器的直接子项互相让位。spring 见 observeReflow。 */
+export function useReflow<T extends HTMLElement>(spring: SpringName = "settle"): RefCallback<T> {
+  return useCallback(
+    (el: T | null) => {
+      if (el === null) return;
+      return observeReflow(el, spring);
+    },
+    [spring],
+  );
 }

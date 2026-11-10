@@ -92,7 +92,8 @@ export function Thumb({ url, kind, hue, size, alt, inactive = false, className }
       aria-hidden={alt === undefined ? true : undefined}
     >
       {view === "image" && <canvas ref={canvasRef} className={styles.image} data-pixel={pixel || undefined} />}
-      {view === "fallback" && <Icon name={THUMB_KIND_ICON[kind]} size={thumbIconSize(size)} />}
+      {/* 加载失败才落到回落图形时，图标淡入；本来就没有图的一开始就是回落图形，跟着所在页面的入场走 */}
+      {view === "fallback" && <Icon name={THUMB_KIND_ICON[kind]} size={thumbIconSize(size)} className={image.status === "failed" ? styles.late : undefined} />}
     </span>
   );
 }

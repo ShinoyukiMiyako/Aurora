@@ -304,6 +304,72 @@ describe("observeReflow：途中再被挤", () => {
     expect(first.animation.cancel).not.toHaveBeenCalled();
     expect(start(callsOn(b)[1])).toBe("0px -40px");
   });
+
+  it("指定 morph：轨迹与途中转向都按 morph 弹簧算", () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 800 });
+    const a = child(container, 0);
+    const b = child(container, 100);
+    stop = observeReflow(container, "morph");
+    sizes.resize(container, 800);
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    const first = callsOn(b)[0];
+    const step = (name: "morph" | "settle") => Math.round(springAt(name, -120, 0, SAMPLE_S).x * 100) / 100;
+    expect(step("morph")).not.toBe(step("settle"));
+    expect(first.frames[1].translate).toBe(`0px ${step("morph")}px`);
+    first.animation.currentTime = 50;
+    place(b, { top: 260 });
+    sizes.resize(a, 800);
+    const now = springAt("morph", -120, 0, 0.05);
+    expect(start(callsOn(b)[1])).toBe(`0px ${Math.round((now.x - 40) * 100) / 100}px`);
+  });
+});
+
+describe("observeReflow：退场项先被抽出布局（popLayout）", () => {
+  it("抽出的那一帧节点没有增删、尺寸也没变：兄弟照样在这一帧让位；节点稍后真正拿掉时不再动第二次", async () => {
+    const { a, b, c } = column();
+    // framer 给退场项打上标记并把它改成绝对定位：它留在原处，后面的兄弟顶上来
+    a.setAttribute("data-motion-pop-id", ":r1:");
+    place(b, { top: 0 });
+    place(c, { top: 100 });
+    await flushMutations();
+    expect(callsOn(a)).toHaveLength(0);
+    expect(start(callsOn(b)[0])).toBe("0px 100px");
+    expect(start(callsOn(c)[0])).toBe("0px 100px");
+    a.remove();
+    await flushMutations();
+    expect(callsOn(b)).toHaveLength(1);
+    expect(callsOn(c)).toHaveLength(1);
+  });
+
+  it("之后才加进来的子项退场时同样接得住", async () => {
+    const { container, b, c } = column();
+    const late = document.createElement("div");
+    place(late, { top: 300, parent: container });
+    container.append(late);
+    await flushMutations();
+    expect(calls).toHaveLength(0);
+    b.setAttribute("data-motion-pop-id", ":r2:");
+    place(c, { top: 100 });
+    place(late, { top: 200 });
+    await flushMutations();
+    expect(start(callsOn(c)[0])).toBe("0px 100px");
+    expect(start(callsOn(late)[0])).toBe("0px 100px");
+  });
+
+  it("标记打在子项里面更深的元素上：被抽出布局的不是这一层的子项，不量也不动", async () => {
+    const { a, b } = column();
+    const inner = document.createElement("span");
+    a.append(inner);
+    await flushMutations();
+    inner.setAttribute("data-motion-pop-id", ":r3:");
+    place(b, { top: 60 });
+    await flushMutations();
+    expect(calls).toHaveLength(0);
+  });
 });
 
 describe("observeReflow：滚动", () => {

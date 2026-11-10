@@ -23,9 +23,11 @@ export interface LoadableProps {
   children: () => ReactNode;
   /** 只用于布局。 */
   className?: string;
+  /** 包住内容的那一层的类名，只用于布局：内容要撑满按高度分配的区域、自己滚动时，让这一层也参与分高。 */
+  contentClassName?: string;
 }
 
-export function Loadable({ view, skeleton, children, className }: LoadableProps) {
+export function Loadable({ view, skeleton, children, className, contentClassName }: LoadableProps) {
   // 一挂上就是内容（数据早就在）：不单独淡入，跟着所在页面的入场走。见过加载态之后，内容每次出现都淡入
   const [waited, setWaited] = useState(view !== "content");
   if (view !== "content" && !waited) setWaited(true);
@@ -39,7 +41,7 @@ export function Loadable({ view, skeleton, children, className }: LoadableProps)
         )}
       </AnimatePresence>
       {view === "content" && (
-        <motion.div className={styles.content} initial={waited ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }}>
+        <motion.div className={cx(styles.content, contentClassName)} initial={waited ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }}>
           {children()}
         </motion.div>
       )}

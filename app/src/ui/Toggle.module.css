@@ -21,13 +21,26 @@
   height: 24px;
   border-radius: var(--sk-r-pill);
   background: var(--sk-line-2);
-  box-shadow: inset 0 0 0 1.5px var(--sk-line-strong);
   transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+/* 内描边画在常驻叠层上，开关时只淡入淡出，与底色的过渡同步；叠层在圆钮之前，画在圆钮之下 */
+.track::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1.5px var(--sk-line-strong);
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
 }
 
 .root[aria-checked="true"] .track {
   background: var(--sk-accent);
-  box-shadow: none;
+}
+
+.root[aria-checked="true"] .track::before {
+  opacity: 0;
 }
 
 .root:hover:not(:disabled, [aria-disabled="true"]) .track {
@@ -39,10 +52,6 @@
 }
 
 .root:focus-visible .track {
-  box-shadow: inset 0 0 0 1.5px var(--sk-line-strong), var(--sk-focus);
-}
-
-.root[aria-checked="true"]:focus-visible .track {
   box-shadow: var(--sk-focus);
 }
 
@@ -60,24 +69,29 @@
   transform: translateX(16px);
 }
 
+/*
+ * 按下时朝行程方向拉伸到 22：关态向右、开态向左。原点固定在中心，拉伸后再朝行程方向平移伸长量的一半
+ * （(22 − 18) / 2 = 2），背向行程的那一端不动。原点不随开关态切换：松手与切换发生在同一次点击里，
+ * 切原点会让还拉伸着的圆钮先朝行程反方向跳 4px 再滑走。
+ */
 .knob {
+  --knob-pull: 2px;
   display: block;
   width: 100%;
   height: 100%;
   border-radius: var(--sk-r-pill);
   background: #FFFFFF;
   box-shadow: 0 1px 3px rgba(60, 20, 40, 0.25);
-  transform-origin: left center;
+  transform-origin: center;
   transition: transform var(--sk-spring-tap-dur) var(--sk-spring-tap);
 }
 
-/* 按下时朝行程方向拉伸到 22：关态向右、开态向左 */
 .root[aria-checked="true"] .knob {
-  transform-origin: right center;
+  --knob-pull: -2px;
 }
 
 .root:active:not(:disabled, [aria-disabled="true"]) .knob {
-  transform: scaleX(calc(22 / 18));
+  transform: translateX(var(--knob-pull)) scaleX(calc(22 / 18));
 }
 
 :global([data-sk-reduced]) .thumb,

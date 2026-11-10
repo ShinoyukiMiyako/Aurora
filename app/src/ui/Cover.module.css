@@ -13,6 +13,8 @@
   overflow: hidden;
   isolation: isolate;
   color: var(--sk-text);
+  /* 换成媒体形态时文字色跟着新的一层淡过去，不在图还没显出来时就先变白 */
+  transition: color var(--sk-dur-in) var(--sk-ease-out);
 }
 
 :global(:root[data-sk-mode="night"]) .cover {
@@ -22,7 +24,8 @@
   --to-l: 25%;
 }
 
-.cover[data-source="art"] {
+/* 渐变底画在 art 层自己身上：远程图或平铺淡入期间它垫在下面，不随卡面根的形态一起换掉 */
+.art {
   background: linear-gradient(
     135deg,
     /* sk-guard-allow T1: 卡面底色公式，色相来自数据，分量来自上面的私有变量 */
@@ -43,7 +46,24 @@
   display: block;
   width: 100%;
   height: 100%;
+}
+
+/* 盖在旧层上的媒体层连同压暗整层淡入；身份方块同时淡出，淡完由组件卸下 */
+.media[data-reveal] {
   animation: reveal var(--sk-dur-reveal) var(--sk-ease-out);
+}
+
+.identity[data-leaving] {
+  animation: conceal var(--sk-dur-reveal) var(--sk-ease-out) forwards;
+}
+
+/* 减少动画：只保留不超过 200ms 的透明度淡入淡出 */
+:global([data-sk-reduced]) .media[data-reveal] {
+  animation: reveal var(--sk-dur-in) var(--sk-ease-out);
+}
+
+:global([data-sk-reduced]) .identity[data-leaving] {
+  animation: conceal var(--sk-dur-in) var(--sk-ease-out) forwards;
 }
 
 /*
@@ -58,11 +78,16 @@
   left: calc(-1 * var(--tile-overhang));
   display: block;
   filter: blur(var(--tile-blur));
-  animation: reveal var(--sk-dur-reveal) var(--sk-ease-out);
 }
 
 @keyframes reveal {
   from {
+    opacity: 0;
+  }
+}
+
+@keyframes conceal {
+  to {
     opacity: 0;
   }
 }
@@ -116,22 +141,20 @@
 }
 
 /*
- * ---- 悬停（在可点宿主内）：底纹上浮、远程图微放大，Settle；平铺对焦清晰并跟随指针反向位移（位移量由组件
- * 按帧写进 --tile-x / --tile-y）。减少动画时没有悬停变化，平铺保持静止形态 ----
+ * ---- 悬停（在可点宿主内）：底纹上浮（渐变底不动）、远程图微放大，Settle；平铺对焦清晰并跟随指针反向位移
+ * （位移由组件按弹簧逐帧写进 --tile-x / --tile-y，这里不再挂位移过渡）。减少动画时没有悬停变化，平铺保持静止形态 ----
  */
-:global(:root:not([data-sk-reduced])) .art,
+:global(:root:not([data-sk-reduced])) .pattern,
 :global(:root:not([data-sk-reduced])) .image {
   transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
 }
 
 :global(:root:not([data-sk-reduced])) .tile {
   translate: var(--tile-x) var(--tile-y);
-  transition:
-    filter var(--sk-dur-in) var(--sk-ease-out),
-    translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
+  transition: filter var(--sk-dur-in) var(--sk-ease-out);
 }
 
-:global(:root:not([data-sk-reduced]) :is(a, button, [role="button"], [data-sk-hover-host]):hover) .art {
+:global(:root:not([data-sk-reduced]) :is(a, button, [role="button"], [data-sk-hover-host]):hover) .pattern {
   transform: translateY(-4px);
 }
 
@@ -139,6 +162,8 @@
   transform: scale(1.03);
 }
 
+/* 悬停期间位移逐帧在变：先提成合成层，免得每帧重绘这张画布 */
 :global(:root:not([data-sk-reduced]) :is(a, button, [role="button"], [data-sk-hover-host]):hover) .tile {
   filter: none;
+  will-change: translate;
 }

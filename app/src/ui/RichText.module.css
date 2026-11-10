@@ -23,17 +23,44 @@
   font-weight: var(--sk-w-title);
 }
 
-/* 配图位：加载完成前不占高度，进入视口附近才开始取图 */
+/*
+ * 配图位，进入视口附近才开始取图。原文写了宽高的，取图前就按比例占好位置、垫一层骨架底色，
+ * 解码后图淡入盖上、骨架淡出，下面的正文一像素都不动；没写宽高的只能解码后才撑开，由正文容器的让位接住。
+ * 宽度由组件写在行内，窄于它的正文列里按 max-width 缩小，高度跟着 aspect-ratio 走。
+ */
 .image {
+  position: relative;
   display: block;
   max-width: 100%;
+  overflow: hidden;
+  border-radius: var(--sk-r-sm);
 }
 
+.image[data-reserved]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--sk-bg-2);
+  transition: opacity var(--sk-dur-reveal) var(--sk-ease-out);
+}
+
+.image[data-reserved][data-ready]::before {
+  opacity: 0;
+}
+
+/* 只动透明度：减少动画时照样淡入，与缩略图、封面的远程图一致 */
 .canvas {
+  position: relative;
   display: block;
-  max-width: 100%;
-  height: auto;
-  border-radius: var(--sk-r-sm);
+  width: 100%;
+  height: 100%;
+  animation: reveal var(--sk-dur-reveal) var(--sk-ease-out);
+}
+
+@keyframes reveal {
+  from {
+    opacity: 0;
+  }
 }
 
 .link {

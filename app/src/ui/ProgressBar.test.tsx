@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
 import { MotionConfig, type MotionValue } from "framer-motion";
 import { afterEach, describe, expect, it } from "vitest";
 import { render, type Rendered } from "../test/dom";
@@ -279,5 +280,37 @@ describe("ProgressRing", () => {
 
   it("没有名称时抛错", () => {
     expect(() => render(<ProgressRing value={0.5} />)).toThrow(/label 或 labelledBy/);
+  });
+
+  it("转为没有进度时填充弧不在那一帧移除，留在原位淡出", () => {
+    view = render(<ProgressRing value={0.6} size={84} label="下载总进度" />);
+    const fillOf = () => view?.container.querySelectorAll("circle")[1] as SVGCircleElement | undefined;
+    const before = fillOf()?.getAttribute("stroke-dashoffset");
+    expect(Number(before)).toBeCloseTo(2 * Math.PI * ((84 - 7) / 2) * 0.4, 5);
+    view.rerender(<ProgressRing value={null} size={84} tone="muted" label="下载总进度" />);
+    expect(emptyRing().textContent).toBe("--");
+    const fill = fillOf();
+    if (fill === undefined) throw new Error("填充弧在转为没有进度的那一刻就被移除了");
+    expect(fill.getAttribute("stroke-dashoffset")).toBe(before);
+  });
+});
+
+describe("进度填充的样式", () => {
+  const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "");
+  const ruleOf = (file: string, selector: string) => {
+    const css = strip(readFileSync(new URL(file, import.meta.url), "utf8"));
+    const rule = new RegExp(`(?:^|\\n)${selector.replace(".", "\\.")} \\{([^}]*)\\}`).exec(css);
+    if (rule === null) throw new Error(`${file} 里没有 ${selector} 规则`);
+    return rule[1];
+  };
+
+  it("确定进度条的填充不常驻 will-change：任务页几十行会各占一个合成层；循环的光带照常保留", () => {
+    expect(ruleOf("./ProgressBar.module.css", ".fill")).not.toContain("will-change");
+    expect(ruleOf("./ProgressBar.module.css", ".indeterminate")).toContain("will-change: transform");
+  });
+
+  it("进度环换色调时描边色与圆心字色一次性过渡", () => {
+    expect(ruleOf("./ProgressRing.module.css", ".fill")).toContain("transition: stroke var(--sk-dur-hover) var(--sk-ease)");
+    expect(ruleOf("./ProgressRing.module.css", ".label")).toContain("transition: color var(--sk-dur-hover) var(--sk-ease)");
   });
 });

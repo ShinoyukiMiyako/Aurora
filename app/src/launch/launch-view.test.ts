@@ -5,7 +5,8 @@ import { applyPhase, sessionCancelled, sessionCrashClue, sessionExited, sessionF
 import type { LauncherState } from "../state/store";
 import { newTask } from "../state/tasks";
 import { avatarIndicator, ringGeometry } from "./InstanceAvatar";
-import { faceKey, fillOf, holdFor, placedForProgress, placedForStage, FACE_HOLD_MS } from "./LaunchCapsule";
+import { capsuleSwap } from "../lib/motion";
+import { capsuleLayoutKey, faceKey, fillOf, holdFor, placedForProgress, placedForStage, TEXT_SLOTS } from "./LaunchCapsule";
 import { brokenAction, launchFailure, launchView, sessionDetail, stageLabel, type LaunchView } from "./launchView";
 
 const T0 = 1_720_000_000_000;
@@ -275,9 +276,9 @@ describe("头像指示与胶囊换面", () => {
     const a = inst("A");
     const prev = launchView(state({ session: loading("A", 4) }), a);
     const cancelled = launchView(state({ session: sessionCancelled(loading("A", 4), "launch-1", T0) }), a);
-    expect(holdFor(prev, cancelled)).toMatchObject({ exit: "disassemble", seat: false, ms: FACE_HOLD_MS.disassemble });
+    expect(holdFor(prev, cancelled)).toMatchObject({ exit: "disassemble", seat: false, ms: capsuleSwap.holdMs.disassemble });
     const failed = launchView(state({ session: sessionFailed(loading("A"), "launch-1", { code: "version_broken", params: {} }, T0) }), a);
-    expect(holdFor(prev, failed)).toMatchObject({ exit: "collapse", ms: FACE_HOLD_MS.collapse });
+    expect(holdFor(prev, failed)).toMatchObject({ exit: "collapse", ms: capsuleSwap.holdMs.collapse });
     // 下载阶段已落 2 面：剩 1 面立即落下，120 ms 后坐定，再过 200 ms 换到运行面
     expect(holdFor(prev, launchView(state({ session: running("A") }), a))).toMatchObject({ exit: null, seat: true, ms: 120 + 200 });
     const launchingPrev = launchView(state({ session: loading("A", 7) }), a);
@@ -285,5 +286,51 @@ describe("头像指示与胶囊换面", () => {
     expect(holdFor({ kind: "ready", busyElsewhere: false }, prev)).toBeNull();
     expect(faceKey(cancelled)).toBe("stopped:cancelled");
     expect(faceKey(prev)).toBe("loading");
+  });
+});
+
+describe("胶囊宽度：文字槽与布局测量的依据", () => {
+  const entryOf = (name: string) => ({ instance: inst(name), failure: null });
+  const key = (face: LaunchView, name = "A") => capsuleLayoutKey(face, entryOf(name), "lg", false, false);
+  const downloading = (done: number, total: number, speedBps: number) =>
+    applyPhase(loading("A", 4), { taskId: "launch-1", phase: "downloading", stageIndex: 4, download: { done, total, bytes: done, totalBytes: total, speedBps } }, T0);
+
+  it("加载面里阶段、进度、文件数与速度怎么变都不重新量布局；换面才量", () => {
+    const a = inst("A");
+    const sessions = [loading("A"), loading("A", 2), downloading(9, 480, 900 * 1024), downloading(120, 480, 10.4 * 1024 * 1024), loading("A", 6)];
+    expect(new Set(sessions.map((s) => s.progress)).size).toBeGreaterThan(1);
+    const keys = sessions.map((s) => key(launchView(state({ session: s }), a)));
+    expect(new Set(keys).size).toBe(1);
+    expect(key(launchView(state({ session: running("A") }), a))).not.toBe(keys[0]);
+  });
+
+  it("运行面的计时不进依据（标题按两位小时占位），实例名进：改了名才量", () => {
+    const early = launchView(state({ session: sessionLaunched(loading("A"), "launch-1", T0 + 1000) }), inst("A"));
+    const late = launchView(state({ session: sessionLaunched(loading("A"), "launch-1", T0 - 3 * 3_600_000) }), inst("A"));
+    expect(key(early)).toBe(key(late));
+    expect(key(early, "A")).not.toBe(key(early, "生存二"));
+  });
+
+  it("崩溃线索读出来前后同一个依据：副行按全部线索占位，线索到了只换字", () => {
+    const crashed = sessionExited(running("A"), { versionId: "A", crashed: true, killed: false }, T0 + 5000);
+    const clue = sessionCrashClue(crashed, "A", { status: "known", category: "out_of_memory" });
+    expect(key(launchView(state({ session: crashed }), inst("A")))).toBe(key(launchView(state({ session: clue }), inst("A"))));
+    expect(TEXT_SLOTS.crashSub).toContain(sessionDetail(clue, T0));
+    expect(TEXT_SLOTS.crashSub).toContain(sessionDetail(sessionCrashClue(crashed, "A", { status: "unavailable" }), T0));
+  });
+
+  it("安装中：百分比不进依据，换步骤进", () => {
+    const phase = (index: number) => ({ plan: ["metadata", "libraries", "assets"] as const, index, batch: null });
+    const task: Task = { ...installTask("A", "t1", "running", 0.2), phase: phase(0) };
+    const at = (t: Task) => key({ kind: "installing", task: t, queuePosition: null });
+    expect(at({ ...task, progress: 0.7 })).toBe(at(task));
+    expect(at({ ...task, phase: phase(1) })).not.toBe(at(task));
+  });
+
+  it("加载面的槽覆盖它会显示的每一种文字：全部阶段名、正在结束、阶段说明与最宽的下载进度", () => {
+    expect(TEXT_SLOTS.loadingTitle).toEqual(expect.arrayContaining(["验证账户", "下载缺失文件", "启动游戏进程", "正在结束…"]));
+    expect(TEXT_SLOTS.loadingSub).toEqual(expect.arrayContaining(["准备中", "下载中", "启动中", "正在统计缺失文件…", "文件 9999/9999 · 1000 KB/s", "文件 9999/9999 · 99.9 MB/s"]));
+    expect(TEXT_SLOTS.percent).toEqual(["99%"]);
+    expect(TEXT_SLOTS.runningTitle).toEqual(["游戏中 · 99:59:59", "正在结束…"]);
   });
 });

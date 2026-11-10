@@ -299,6 +299,29 @@ export interface StillPetal {
 }
 
 /**
+ * 把正在飘的花瓣原地定格成静态散落（自动降到最低级时用），画面不跳：位置取此刻的绘制位置（含推开偏移），
+ * 自转角不变，翻面取此刻的 cos(flip)。此刻看不见的花瓣（在顶边以上候场、整片落在画布外、侧对视线）不定格，
+ * 空出来的数量交给 scatterStill 补投。
+ */
+export function freezeLayers(layers: readonly (readonly Petal[])[], bounds: Bounds): StillPetal[][] {
+  return layers.map((petals) => {
+    const frozen: StillPetal[] = [];
+    for (const p of petals) {
+      const x = p.bx + p.ox;
+      const y = p.y + p.oy;
+      const sx = Math.cos(p.flip);
+      // 精灵以中心为锚点任意旋转，半条对角线以内都可能落在画布上
+      const glyph = GLYPHS[p.glyph];
+      const reach = (Math.hypot(glyph.cols, glyph.rows) * CELL) / 2;
+      const outside = x < -reach || x > bounds.width + reach || y < -reach || y > bounds.height + reach;
+      if (outside || Math.abs(sx) < EDGE_ON) continue;
+      frozen.push({ glyph: p.glyph, tone: p.tone, nx: x / bounds.width, ny: y / bounds.height, rot: p.rot, sx });
+    }
+    return frozen;
+  });
+}
+
+/**
  * 静态散落：existing 为 null 时全部新投；否则保留其中每层前 counts[i] 片（档位变化时按层增删），
  * 新增的按最小间距随机投点（每片最多投 STILL_ATTEMPTS 次，仍不满足就接受最后一次），间距对全部层一起计算。
  */

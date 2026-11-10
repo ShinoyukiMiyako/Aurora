@@ -3,7 +3,9 @@
 //
 // 花瓣是全站唯一常驻的动画，所以停得比别处更彻底：暂停条件成立时取消 rAF，画布保留最后一帧；
 // 减少动画或降到最低级时根本不启动 rAF，也不监听指针，只在尺寸或外观变化时重画一帧静态散落。
+// 自动降级不是用户操作引起的，换档时画面不能跳：一级裁下的花瓣就地淡出，二级把正在飘的花瓣原地定格。
 
+import { ambientFade, tweenAt } from "../../lib/motion";
 import { PetalGovernor, type GovernorDowngrade } from "./governor";
 import {
   EDGE_ON,
@@ -13,6 +15,7 @@ import {
   clampDt,
   countPetals,
   createLayers,
+  freezeLayers,
   layerCounts,
   nextDrawAt,
   resizeLayers,
@@ -49,7 +52,7 @@ export interface PetalDowngrade {
 }
 
 export interface PetalStats {
-  /** rAF 循环是否在跑。 */
+  /** 花瓣飘落的 rAF 循环是否在跑（定格后补投花瓣的那一小段淡入不算）。 */
   running: boolean;
   level: PetalLevel;
   /** 当前参与绘制的花瓣数。 */
@@ -120,7 +123,15 @@ export class PetalEngine {
   private sprites: SpriteSheet | null = null;
   private spriteKey = "";
   private layers: Petal[][] | null = null;
+  /** 一级降级裁下的花瓣（按层）：照常飘着淡出，淡完才丢。since 是开始淡出时的模拟时钟。 */
+  private leaving: { layers: Petal[][]; since: number } | null = null;
   private still: StillPetal[][] | null = null;
+  /**
+   * 二级降级定格时补投的静态花瓣：静态散落本不跑帧回调，只在它们淡入的这一小段逐帧重画，淡完就停。
+   * since 在淡入的第一帧取帧时间；alpha 是此刻的淡入进度。
+   */
+  private arriving: { petals: ReadonlySet<StillPetal>; since: number | null; alpha: number } | null = null;
+  private arrivalRaf: number | null = null;
   private simT = 0;
   private last: number | null = null;
   /** 下一拍的时刻；负无穷表示还没起拍，下一帧必画。 */
@@ -191,6 +202,8 @@ export class PetalEngine {
     this.destroyed = true;
     if (this.raf !== null) this.scheduler.cancel(this.raf);
     this.raf = null;
+    if (this.arrivalRaf !== null) this.scheduler.cancel(this.arrivalRaf);
+    this.arrivalRaf = null;
     this.listen(false);
     if (this.pendingTimer !== null) clearTimeout(this.pendingTimer);
     this.pendingTimer = null;
@@ -215,13 +228,26 @@ export class PetalEngine {
       return;
     }
     const prev = this.bounds;
-    this.bounds = { width, height };
+    const bounds = { width, height };
+    this.bounds = bounds;
     this.hasArea = true;
     this.dprEff = effectiveDpr(dpr, width, height);
-    this.canvas.width = Math.round(width * this.dprEff);
-    this.canvas.height = Math.round(height * this.dprEff);
-    if (this.layers !== null && prev !== null && prev.width !== width) scaleWidth(this.layers, prev.width, width);
+    const backingWidth = Math.round(width * this.dprEff);
+    const backingHeight = Math.round(height * this.dprEff);
+    // 给后备缓冲赋值（哪怕是原值）就会清空画布，尺寸没变就不碰它
+    const cleared = backingWidth !== this.canvas.width || backingHeight !== this.canvas.height;
+    if (cleared) {
+      this.canvas.width = backingWidth;
+      this.canvas.height = backingHeight;
+    }
+    if (prev !== null && prev.width !== width) {
+      if (this.layers !== null) scaleWidth(this.layers, prev.width, width);
+      if (this.leaving !== null) scaleWidth(this.leaving.layers, prev.width, width);
+    }
     this.sync();
+    // ResizeObserver 回调排在本帧的 rAF 之后：刚清空的画布要等下一拍才画，这一帧就以空白上屏，拖动窗口边框期间
+    // 花瓣层整片消失。播放中也按当前时刻立即重画（不跑 rAF 时 sync 已经画过）；首次量到尺寸时画布本来就是空的
+    if (cleared && prev !== null && this.raf !== null) this.drawStillFrame(bounds);
   }
 
   private applyCounts(): void {
@@ -255,6 +281,7 @@ export class PetalEngine {
       this.raf = null;
     }
     this.listen(!still);
+    this.settleArrivals(bounds !== null && still && !this.inputs.paused);
     if (!run && bounds !== null) this.drawStillFrame(bounds);
   }
 
@@ -269,7 +296,9 @@ export class PetalEngine {
     this.last = now;
     this.drawDue = nextDrawAt(this.drawDue, now);
     this.simT += dt;
+    if (this.leaving !== null && this.simT - this.leaving.since >= ambientFade.out.duration) this.leaving = null;
     step(layers, dt, this.simT, this.pointer, bounds, this.random);
+    if (this.leaving !== null) step(this.leaving.layers, dt, this.simT, this.pointer, bounds, this.random);
     this.drawLayers(layers);
     this.recordCost(this.clock() - started);
     const downgrade = this.governor.sample(now);
@@ -277,10 +306,52 @@ export class PetalEngine {
   };
 
   private applyDowngrade(downgrade: GovernorDowngrade, layers: Petal[][], bounds: Bounds): void {
-    if (downgrade.level === 1) resizeLayers(layers, layerCounts(this.inputs.tier, 1), bounds, this.random);
+    if (downgrade.level === 1) {
+      const counts = layerCounts(this.inputs.tier, 1);
+      this.leaving = { layers: layers.map((petals, li) => petals.slice(counts[li])), since: this.simT };
+      resizeLayers(layers, counts, bounds, this.random);
+    } else {
+      // 定格在这一帧刚画出的位置上，不重新抽取；数量照静态散落补齐，补投的那几片淡入
+      const frozen = freezeLayers(layers, bounds);
+      const still = scatterStill(LAYER_COUNTS[this.inputs.tier], bounds, this.random, frozen);
+      const kept = new Set(frozen.flat());
+      const added = still.flat().filter((p) => !kept.has(p));
+      this.still = still;
+      this.leaving = null;
+      this.arriving = added.length === 0 ? null : { petals: new Set(added), since: null, alpha: 0 };
+    }
     this.sync();
     this.onDowngrade({ tier: this.inputs.tier, level: downgrade.level, windowMediansMs: downgrade.windowMediansMs });
   }
+
+  /** 补投的花瓣还没淡入完：能播就逐帧重画到淡完；暂停或没有尺寸时直接到位，暂停期间不留任何帧回调。 */
+  private settleArrivals(play: boolean): void {
+    if (this.arriving === null) return;
+    if (play) {
+      if (this.arrivalRaf === null) this.arrivalRaf = this.scheduler.request(this.onArrivalFrame);
+      return;
+    }
+    if (this.arrivalRaf !== null) this.scheduler.cancel(this.arrivalRaf);
+    this.arrivalRaf = null;
+    this.arriving = null;
+  }
+
+  private readonly onArrivalFrame = (now: number): void => {
+    const arriving = this.arriving;
+    const still = this.still;
+    const bounds = this.bounds;
+    if (arriving === null || still === null || bounds === null) throw new Error("花瓣淡入帧在没有待淡入的静态花瓣时运行");
+    arriving.since ??= now;
+    const t = (now - arriving.since) / 1000;
+    if (t >= ambientFade.in.duration) {
+      this.arriving = null;
+      this.arrivalRaf = null;
+    } else {
+      arriving.alpha = tweenAt(ambientFade.in, t);
+      this.arrivalRaf = this.scheduler.request(this.onArrivalFrame);
+    }
+    this.drawStillPetals(still, bounds);
+  };
 
   private recordCost(ms: number): void {
     if (this.costCount < FRAME_COST_SAMPLES) {
@@ -323,6 +394,7 @@ export class PetalEngine {
     if (this.layers === null) throw new Error("花瓣尚未生成");
     // dt = 0：只按当前模拟时钟重算位置（宽度缩放后基准线变了），不推进、不改推开偏移
     step(this.layers, 0, this.simT, this.pointer, bounds, this.random);
+    if (this.leaving !== null) step(this.leaving.layers, 0, this.simT, this.pointer, bounds, this.random);
     this.drawLayers(this.layers);
   }
 
@@ -348,24 +420,44 @@ export class PetalEngine {
 
   private drawLayers(layers: readonly Petal[][]): void {
     const sprites = this.prepare();
-    const k = this.dprEff;
+    const leaving = this.leaving;
+    // 裁下的花瓣跟同层的一起画，远近次序不乱，只是透明度跟着淡出走
+    const fading = leaving === null ? 0 : 1 - tweenAt(ambientFade.out, this.simT - leaving.since);
     layers.forEach((petals, li) => {
-      this.ctx.globalAlpha = this.layerAlpha(li);
-      for (const p of petals) {
-        const f = Math.cos(p.flip);
-        if (Math.abs(f) < EDGE_ON) continue;
-        this.blit(sprites.sprite(p.glyph, p.tone), p.rot, f, (p.bx + p.ox) * k, (p.y + p.oy) * k);
-      }
+      const alpha = this.layerAlpha(li);
+      this.ctx.globalAlpha = alpha;
+      this.blitPetals(sprites, petals);
+      if (leaving === null || leaving.layers[li].length === 0) return;
+      this.ctx.globalAlpha = alpha * fading;
+      this.blitPetals(sprites, leaving.layers[li]);
     });
+  }
+
+  private blitPetals(sprites: SpriteSheet, petals: readonly Petal[]): void {
+    const k = this.dprEff;
+    for (const p of petals) {
+      const f = Math.cos(p.flip);
+      if (Math.abs(f) < EDGE_ON) continue;
+      this.blit(sprites.sprite(p.glyph, p.tone), p.rot, f, (p.bx + p.ox) * k, (p.y + p.oy) * k);
+    }
   }
 
   private drawStillPetals(still: readonly StillPetal[][], bounds: Bounds): void {
     const sprites = this.prepare();
-    const k = this.dprEff;
+    const arriving = this.arriving;
     still.forEach((petals, li) => {
-      this.ctx.globalAlpha = this.layerAlpha(li);
-      for (const p of petals) this.blit(sprites.sprite(p.glyph, p.tone), p.rot, p.sx, p.nx * bounds.width * k, p.ny * bounds.height * k);
+      const alpha = this.layerAlpha(li);
+      this.ctx.globalAlpha = alpha;
+      for (const p of petals) if (arriving === null || !arriving.petals.has(p)) this.blitStill(sprites, p, bounds);
+      if (arriving === null) return;
+      this.ctx.globalAlpha = alpha * arriving.alpha;
+      for (const p of petals) if (arriving.petals.has(p)) this.blitStill(sprites, p, bounds);
     });
+  }
+
+  private blitStill(sprites: SpriteSheet, p: StillPetal, bounds: Bounds): void {
+    const k = this.dprEff;
+    this.blit(sprites.sprite(p.glyph, p.tone), p.rot, p.sx, p.nx * bounds.width * k, p.ny * bounds.height * k);
   }
 
   /** translate(x, y) · rotate(rot) · scale(sx, 1)，平移已换算到设备像素；精灵本身就是设备像素尺寸，以中心为锚点。 */

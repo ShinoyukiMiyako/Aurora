@@ -882,7 +882,8 @@ describe("设置页：Java · 手动添加与不完整的运行时", () => {
     await click(removeButton(plain));
     expect(callsOf(ipc, "remove_java_path")).toEqual([{ path: plain }]);
     expect(toasts()).toContainEqual({ tone: "success", title: "已移除手动添加的 Java", body: undefined });
-    expect(all(`${MANUAL_LIST} > li`)).toHaveLength(1);
+    // 移除的那一行还在淡出，已经标了 inert，不算列表的行
+    expect(all(`${MANUAL_LIST} > li:not([inert])`)).toHaveLength(1);
     expect(radio("Java 25").getAttribute("aria-checked")).toBe("true");
 
     await click(removeButton(pinned));

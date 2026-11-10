@@ -13,6 +13,11 @@
   transition: transform var(--sk-spring-tap-dur) var(--sk-spring-tap);
 }
 
+/* 卡面、头图上的大方块随卡片一起上浮：与卡片、底纹同用 settle，同一次悬停几层同时到位；tap 只给小控件 */
+:global(:root:not([data-sk-reduced])) .lift[data-large] {
+  transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
 :global(:root:not([data-sk-reduced]) :is(a, button, [role="button"], [data-sk-hover-host]):hover) .lift {
   transform: translateY(-2px);
 }

@@ -124,7 +124,8 @@ const HISTORY: TaskRecordDto[] = [
 
 function rowText(title: string): string {
   if (view === undefined) throw new Error("页面还没有挂载");
-  const found = [...view.container.querySelectorAll<HTMLLIElement>("ul > li")].filter((li) => li.textContent?.includes(title));
+  // 换组的行在原来的组里还在淡出，已经标了 inert，不算任务行
+  const found = [...view.container.querySelectorAll<HTMLLIElement>("ul > li:not([inert])")].filter((li) => li.textContent?.includes(title));
   if (found.length !== 1) throw new Error(`标题含「${title}」的任务行有 ${found.length} 个`);
   return found[0].textContent ?? "";
 }

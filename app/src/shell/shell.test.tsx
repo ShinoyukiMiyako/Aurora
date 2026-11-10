@@ -7,8 +7,9 @@ import { SHELL_ACTION_ERROR } from "../copy/shell";
 import { GAME_EXIT_EVENT } from "../ipc/launch";
 import type { ModpackExportOptions } from "../ipc/modpack";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
-import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
+import { keydown, render, setRect, stubResizeObserver, type Rendered } from "../test/dom";
 import { CONFIRM_CANCEL_LABEL } from "../ui/ConfirmDialog";
+import { NAV_ANCHOR_ATTR } from "../ui/Page";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { OverlayRoot } from "./overlay";
@@ -137,6 +138,85 @@ describe("外壳：导航", () => {
     expect(nav.canForward).toBe(true);
     act(() => nav.forward());
     expect(nav.route).toEqual({ page: "instance", id: "生存", tab: "mods" });
+  });
+
+  it("到达方式：启动后是 boot，之后记下最近一次导航是 go、back、forward 还是 replace；没变的导航不改", async () => {
+    await mount();
+    expect(nav.arrival).toBe("boot");
+    act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+    expect(nav.arrival).toBe("go");
+    act(() => nav.replace({ page: "instance", id: "生存", tab: "mods" }));
+    expect(nav.arrival).toBe("replace");
+    act(() => nav.back());
+    expect(nav.arrival).toBe("back");
+    act(() => nav.forward());
+    expect(nav.arrival).toBe("forward");
+    act(() => nav.go({ page: "instance", id: "生存", tab: "mods" }));
+    expect(nav.arrival).toBe("forward");
+  });
+
+  it("同一页换标签：锚点滚出视口上方时先瞬时滚回锚点（留出它的 scroll-margin-top），锚点在视口里或没有锚点时不动", async () => {
+    await mount();
+    const scroller = document.createElement("div");
+    const anchor = document.createElement("div");
+    anchor.setAttribute(NAV_ANCHOR_ATTR, "");
+    anchor.style.scrollMarginTop = "8px";
+    scroller.append(anchor);
+    document.body.append(scroller);
+    act(() => shell.bindPageScroll(scroller));
+    act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+    setRect(scroller, { left: 0, top: 56, width: 900, height: 600 });
+    // 锚点在内容里的位置是 320
+    const scrollTo = (top: number) => {
+      scroller.scrollTop = top;
+      setRect(anchor, { left: 0, top: 56 + 320 - top, width: 900, height: 40 });
+    };
+
+    scrollTo(900);
+    act(() => nav.replace({ page: "instance", id: "生存", tab: "mods" }));
+    expect(scroller.scrollTop).toBe(312);
+
+    scrollTo(200);
+    act(() => nav.replace({ page: "instance", id: "生存", tab: "logs" }));
+    expect(scroller.scrollTop).toBe(200);
+
+    // 同一个路由不算换：不动
+    scrollTo(900);
+    act(() => nav.replace({ page: "instance", id: "生存", tab: "logs" }));
+    expect(scroller.scrollTop).toBe(900);
+
+    anchor.removeAttribute(NAV_ANCHOR_ATTR);
+    act(() => nav.replace({ page: "instance", id: "生存", tab: "crash" }));
+    expect(scroller.scrollTop).toBe(900);
+    scroller.remove();
+  });
+
+  it("锚点标在吸顶元素上或吸顶元素里面：换标签时直接报错，不静默失效", async () => {
+    await mount();
+    const scroller = document.createElement("div");
+    const sticky = document.createElement("nav");
+    sticky.className = "navCard";
+    const anchor = document.createElement("div");
+    anchor.setAttribute(NAV_ANCHOR_ATTR, "");
+    sticky.append(anchor);
+    scroller.append(sticky);
+    document.body.append(scroller);
+    act(() => shell.bindPageScroll(scroller));
+    act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+
+    sticky.style.position = "sticky";
+    expect(() => act(() => nav.replace({ page: "instance", id: "生存", tab: "mods" }))).toThrow("导航锚点不能是吸顶元素，也不能在吸顶元素里面：nav.navCard");
+    expect(nav.route).toEqual({ page: "instance", id: "生存", tab: "overview" });
+
+    sticky.style.position = "";
+    anchor.style.position = "sticky";
+    expect(() => act(() => nav.replace({ page: "instance", id: "生存", tab: "mods" }))).toThrow("导航锚点不能是吸顶元素");
+
+    // 锚点与滚动容器之间都不吸顶：照常换
+    anchor.style.position = "";
+    act(() => nav.replace({ page: "instance", id: "生存", tab: "mods" }));
+    expect(nav.route).toEqual({ page: "instance", id: "生存", tab: "mods" });
+    scroller.remove();
   });
 
   it("实例被删除：当前页落到之前的存活项，历史里指向它的项一并剪除", async () => {
@@ -409,6 +489,64 @@ describe("外壳：通知动作", () => {
     });
     await flush();
     expect(launcher.state.toasts).toEqual([]);
+  });
+});
+
+describe("外壳：窗口焦点", () => {
+  it("花瓣暂停认窗口的焦点事件，不认网页的 focus / blur；晚回来的初值不盖掉已经收到的事件", async () => {
+    const focusHandlers: ((focused: boolean) => void)[] = [];
+    const answers: ((focused: boolean) => void)[] = [];
+    const port: WindowPort = {
+      ...browserWindowPort(),
+      isFocused: () => new Promise<boolean>((resolve) => answers.push(resolve)),
+      onFocusChanged: async (handler) => {
+        focusHandlers.push(handler);
+        return () => {};
+      },
+    };
+    view = render(
+      <WindowPortProvider port={port}>
+        <LauncherProvider>
+          <ShellProvider>
+            <Probe />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </WindowPortProvider>,
+    );
+    await flush();
+    const windowFocus = (focused: boolean) => act(() => focusHandlers.forEach((handler) => handler(focused)));
+
+    windowFocus(true);
+    expect(shell.petalsPaused).toBe(false);
+    windowFocus(false);
+    expect(shell.petalsPaused).toBe(true);
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(shell.petalsPaused).toBe(true);
+    await act(async () => answers.forEach((answer) => answer(true)));
+    expect(shell.petalsPaused).toBe(true);
+    windowFocus(true);
+    expect(shell.petalsPaused).toBe(false);
+  });
+
+  it("订阅前读回的初值：窗口说失焦就按失焦", async () => {
+    view = render(
+      <WindowPortProvider port={{ ...browserWindowPort(), isFocused: async () => false, onFocusChanged: async () => () => {} }}>
+        <LauncherProvider>
+          <ShellProvider>
+            <Probe />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </WindowPortProvider>,
+    );
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await flush();
+    expect(shell.petalsPaused).toBe(true);
   });
 });
 

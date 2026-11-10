@@ -12,7 +12,7 @@ import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import type { SetupBridge } from "./bridge";
 import { isFailure, type InstallMode } from "./contract";
 import type { SetupCopy } from "./copy";
-import { FrameChromeProvider, type FrameChrome } from "./Frame";
+import { FrameChromeProvider, FrameShell, type FrameChrome } from "./Frame";
 import {
   canCloseWindow,
   canOpenLegal,
@@ -22,9 +22,13 @@ import {
   offersStandardInstaller,
   reduce,
   relaunchesAfterUpdate,
+  stepDirection,
+  stepKey,
   upgradesUnattended,
   type SetupEvent,
   type SetupState,
+  type StepDirection,
+  type View,
 } from "./model";
 import styles from "./setup.module.css";
 import { Blocked } from "./views/Blocked";
@@ -351,6 +355,15 @@ function CurrentView({ flow, bridge, copy }: ViewProps) {
   }
 }
 
+/** 换步方向在换步那一刻定下：之后同一页里的重渲染不改它，退场的那一页也按它离开。 */
+function useStepDirection(view: View): StepDirection {
+  const [step, setStep] = useState<{ view: View; direction: StepDirection }>({ view, direction: 0 });
+  if (stepKey(view) === stepKey(step.view)) return step.direction;
+  const next = { view, direction: stepDirection(step.view, view) };
+  setStep(next);
+  return next.direction;
+}
+
 export interface AppProps {
   bridge: SetupBridge;
   copy: SetupCopy;
@@ -362,6 +375,7 @@ function SetupRoot({ bridge, copy, initial = initialState }: AppProps) {
   const flow = useSetupFlow(bridge, initial);
   const { state, dispatch, attempt } = flow;
   const reduced = useReducedMotionPreference();
+  const direction = useStepDirection(state.view);
 
   useLayoutEffect(() => {
     document.documentElement.toggleAttribute("data-sk-reduced", reduced);
@@ -386,7 +400,12 @@ function SetupRoot({ bridge, copy, initial = initialState }: AppProps) {
       <OverlayProvider>
         <FrameChromeProvider value={chrome}>
           <div className={styles.root}>
-            <CurrentView flow={flow} bridge={bridge} copy={copy} />
+            {/* boot 期间窗口还没显示，什么都不画 */}
+            {state.view !== "boot" && (
+              <FrameShell step={stepKey(state.view)} direction={direction}>
+                <CurrentView flow={flow} bridge={bridge} copy={copy} />
+              </FrameShell>
+            )}
             <OverlayRoot />
           </div>
         </FrameChromeProvider>

@@ -289,8 +289,8 @@ function ServerPicker({ open, known, onPin, onClose }: ServerPickerProps) {
     refocusAt.current = null;
     const root = bodyRef.current;
     if (root === null) throw new Error("服务器挑选弹窗的列表尚未挂载");
-    // 整行可点的列表行渲染为 li 里的按钮
-    const rows = [...root.querySelectorAll<HTMLElement>("li > button")];
+    // 整行可点的列表行渲染为 li 里的按钮。刚固定的那一行还在原处淡出（inert，聚焦不了），不算接手的候选
+    const rows = [...root.querySelectorAll<HTMLElement>("li:not([inert]) > button")];
     const target = rows.length > 0 ? rows[Math.min(index, rows.length - 1)] : root.closest('[role="dialog"]')?.querySelector<HTMLElement>(`[${PICKER_CLOSE_ATTR}]`);
     if (target === null || target === undefined) throw new Error("服务器挑选弹窗里找不到接手焦点的控件");
     target.focus();

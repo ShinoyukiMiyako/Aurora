@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { INSTANCE_AVATAR_SPECS } from "../art/iso/InstanceAvatarBase";
 import { SIDEBAR_PIN_LIMIT } from "../domain/limits";
 import { RING_OUTSET } from "../launch/InstanceAvatar";
 import { PIN_STEP } from "./Sidebar";
@@ -15,6 +16,14 @@ function ruleOf(selector: string, source = css): string {
   const rule = new RegExp(`(?:^|\\n)${selector.replace(".", "\\.")} \\{([^}]*)\\}`).exec(source);
   if (rule === null) throw new Error(`没有 ${selector} 规则`);
   return rule[1];
+}
+
+/** 选择器列表里含 selector 的那条规则的声明（原样比较选择器文本，不当正则）。 */
+function ruleFor(selector: string): string {
+  for (const m of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    if (m[1].split(",").some((s) => s.trim() === selector)) return m[2];
+  }
+  throw new Error(`没有 ${selector} 规则`);
 }
 
 function declaration(rule: string, property: string): string {
@@ -144,5 +153,52 @@ describe("选中滑块与拖动步长", () => {
     const rule = /\.pinScroll:not\(\[data-overflow\]\) \{([^}]*)\}/.exec(css)?.[1];
     if (rule === undefined) throw new Error("没有固定列表未溢出时的规则");
     expect(declaration(rule, "overflow")).toBe("visible");
+  });
+});
+
+describe("固定实例名称提示", () => {
+  it("第二行的计时与百分比用等宽数字，逐秒更新时气泡不抖", () => {
+    expect(declaration(ruleFor(".pinLine"), "font-variant-numeric")).toBe("tabular-nums");
+  });
+});
+
+describe("拖动拿起的抬起阴影", () => {
+  const layer = ruleFor(".pin::after");
+  const pinSize = px(declaration(ruleOf(".pin"), "height"));
+
+  it("叠层与头像同大同圆角：正好衬在头像外面", () => {
+    expect(declaration(layer, "position")).toBe("absolute");
+    expect(px(declaration(layer, "inset"))).toBe((pinSize - PIN_AVATAR_SIZE) / 2);
+    expect(px(declaration(layer, "border-radius"))).toBe(INSTANCE_AVATAR_SPECS[PIN_AVATAR_SIZE].radius);
+    expect(declaration(layer, "pointer-events")).toBe("none");
+  });
+
+  it("平时透明，拿起时显出；只对透明度做过渡，松手按退场时长淡出", () => {
+    expect(declaration(layer, "box-shadow")).toBe("var(--sk-shadow)");
+    expect(declaration(layer, "opacity")).toBe("0");
+    expect(declaration(layer, "transition")).toBe("opacity var(--sk-dur-out) var(--sk-ease-in)");
+    const lifted = ruleFor(".row[data-dragging] .pin::after");
+    expect(declaration(lifted, "opacity")).toBe("1");
+    expect(declaration(lifted, "transition")).toBe("opacity var(--sk-dur-in) var(--sk-ease-out)");
+  });
+});
+
+describe("减少动画", () => {
+  it("按住选中的条目：平时浅底跟着缩到 0.94，减少动画时不缩", () => {
+    expect(declaration(ruleFor(".capsule:has(.item[data-selected]:active) .selBlock"), "scale")).toBe("0.94");
+    expect(declaration(ruleFor(":global([data-sk-reduced]) .capsule:has(.item[data-selected]:active) .selBlock"), "scale")).toBe("none");
+  });
+
+  it("拖动拿起：平时放大到 1.04，减少动画时不放大、改为变淡", () => {
+    expect(declaration(ruleFor(".row[data-dragging] .pin"), "transform")).toBe("scale(1.04)");
+    const reduced = ruleFor(":global([data-sk-reduced]) .row[data-dragging] .pin");
+    expect(declaration(reduced, "transform")).toBe("none");
+    expect(declaration(reduced, "opacity")).toBe("0.85");
+  });
+
+  it("按下主导航、新建与固定实例：减少动画时都不缩", () => {
+    for (const selector of [":global([data-sk-reduced]) .item:active", ":global([data-sk-reduced]) .create:active", ":global([data-sk-reduced]) .row > .pin:active"]) {
+      expect(declaration(ruleFor(selector), "transform")).toBe("none");
+    }
   });
 });

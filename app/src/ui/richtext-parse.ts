@@ -2,13 +2,20 @@
 // 统一转成一棵只含少数几种节点的树，界面按树渲染，不注入任何原始 HTML。只认标题、段落、列表、粗体、斜体、
 // 行内代码、代码块、链接与图片；其余标签剥掉、文字保留；脚本与样式整段丢弃。链接与图片只放行 http(s)，其余协议按纯文本处理。
 
+/** 原文写明的配图尺寸（CSS px）。 */
+export interface ImageSize {
+  width: number;
+  height: number;
+}
+
 export type Inline =
   | { t: "text"; v: string }
   | { t: "strong"; c: Inline[] }
   | { t: "em"; c: Inline[] }
   | { t: "code"; v: string }
   | { t: "link"; href: string; c: Inline[] }
-  | { t: "image"; src: string; alt: string }
+  /** size：HTML 的 img 同时写了宽与高时才有，界面据此在取图之前就占好位置。 */
+  | { t: "image"; src: string; alt: string; size?: ImageSize }
   | { t: "br" };
 
 export type Block =
@@ -289,8 +296,11 @@ function walkInline(node: Node, out: Inline[]): void {
     case "IMG": {
       const raw = el.getAttribute("src");
       const src = raw === null ? null : safeUrl(raw);
-      const alt = el.getAttribute("alt");
-      if (src !== null) out.push({ t: "image", src, alt: alt === null ? "" : alt });
+      if (src === null) return;
+      const altAttr = el.getAttribute("alt");
+      const alt = altAttr === null ? "" : altAttr;
+      const size = imageSizeOf(el);
+      out.push(size === null ? { t: "image", src, alt } : { t: "image", src, alt, size });
       return;
     }
     case "STRONG":
@@ -315,6 +325,25 @@ function walkInline(node: Node, out: Inline[]): void {
     default:
       el.childNodes.forEach((child) => walkInline(child, out));
   }
+}
+
+// 尺寸属性按浏览器的读法只认像素数（「600」「600px」）；百分比、空值、0 都当没写
+const PIXEL_DIMENSION = /^\s*(\d+(?:\.\d+)?)(?:px)?\s*$/i;
+
+function pixelAttr(el: Element, name: string): number | null {
+  const raw = el.getAttribute(name);
+  if (raw === null) return null;
+  const m = PIXEL_DIMENSION.exec(raw);
+  if (m === null) return null;
+  const value = Number(m[1]);
+  return value > 0 ? value : null;
+}
+
+/** 宽高都写了才算数：只写一边时另一边要等原图解码后按比例推出，事先无从知道。 */
+export function imageSizeOf(el: Element): ImageSize | null {
+  const width = pixelAttr(el, "width");
+  const height = pixelAttr(el, "height");
+  return width === null || height === null ? null : { width, height };
 }
 
 function inlineChildren(el: Element): Inline[] {

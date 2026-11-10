@@ -34,6 +34,11 @@ export function springTrack(name: SpringName, dx: number, vx: number, dy: number
   return { frames, duration: (frames.length - 1) * SAMPLE_MS };
 }
 
+/** 把采样好的一条轨迹交给 Web Animations 播：整段在合成线程上走，帧之间线性相连。 */
+export function playTrack(el: HTMLElement, track: { frames: Keyframe[]; duration: number }): Animation {
+  return el.animate(track.frames, { duration: track.duration, easing: "linear" });
+}
+
 /** 动画已经播了多少秒；还没开始计时的按 0。 */
 export function elapsedSeconds(animation: Animation): number {
   const time = animation.currentTime;
@@ -88,8 +93,7 @@ export class Slide {
     this.flight = null;
     this.place(x, y);
     if (Math.abs(dx) < REST_PX && Math.abs(dy) < REST_PX && Math.abs(now.vx) < REST_PX_PER_S && Math.abs(now.vy) < REST_PX_PER_S) return;
-    const { frames, duration } = springTrack(this.spring, dx, now.vx, dy, now.vy, x, y);
-    const animation = this.el.animate(frames, { duration, easing: "linear" });
+    const animation = playTrack(this.el, springTrack(this.spring, dx, now.vx, dy, now.vy, x, y));
     const flight: Flight = { animation, dx, vx: now.vx, dy, vy: now.vy };
     this.flight = flight;
     animation.onfinish = () => {

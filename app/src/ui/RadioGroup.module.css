@@ -36,7 +36,9 @@
   border: 1.5px solid var(--sk-line-strong);
   border-radius: 50%;
   background: var(--sk-surface);
-  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+  transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    border-color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .dot::after {
@@ -70,6 +72,18 @@
 
 .option:focus-visible .dot {
   box-shadow: var(--sk-focus);
+}
+
+/* 整行都是命中区，按下的回应落在圆点上：点已选项也有回应 */
+.option:active:not(:disabled) .dot {
+  transform: scale(0.88);
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .option:active:not(:disabled) .dot {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 .label {

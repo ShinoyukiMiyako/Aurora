@@ -4,7 +4,7 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { Icon, type IconName } from "../art/Icon";
 import { cx } from "../lib/util";
-import { CONTROL_ICON_SIZE, softDisabledProps, type ControlSize } from "./Button";
+import { CONTROL_ICON_SIZE, GlyphSlot, softDisabledProps, type ControlSize } from "./Button";
 import styles from "./IconButton.module.css";
 import { Tooltip, type TooltipSide } from "./Tooltip";
 
@@ -79,7 +79,10 @@ export function IconButton({
       aria-disabled={softDisabled ? true : rest["aria-disabled"]}
       onClick={guard.onClick}
     >
-      <Icon name={icon} size={CONTROL_ICON_SIZE[size]} />
+      {/* 换图标（复制换成已复制、固定换成取消固定）时新图标弹出、旧图标淡出，不在同一帧硬切 */}
+      <GlyphSlot glyph={icon}>
+        <Icon name={icon} size={CONTROL_ICON_SIZE[size]} />
+      </GlyphSlot>
       {badge !== undefined && <span className={styles.badge}>{badge}</span>}
     </button>
   );

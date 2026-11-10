@@ -73,13 +73,28 @@
   cursor: not-allowed;
 }
 
+/* 按下立即回应：未选项铺一层按压底（选中块滑来时盖住它） */
+.item:active:not(:disabled, [aria-checked="true"]) {
+  background: var(--sk-fill-press);
+}
+
+/* 圆角由组件经 style 传入：布局动画只校正 style 里的圆角 */
 .thumb {
   position: absolute;
   inset: 0;
   z-index: 0;
-  border-radius: var(--sk-r-xs);
   background: var(--sk-surface);
   box-shadow: var(--sk-shadow-sm), 0 0 0 1px var(--sk-line);
+  transition: scale var(--sk-spring-tap-dur) var(--sk-spring-tap);
+}
+
+/* 按住已选项时选中块轻缩：用独立的 scale 属性，不碰布局动画写在 transform 上的投影 */
+.item:active:not(:disabled) .thumb {
+  scale: 0.96;
+}
+
+:global([data-sk-reduced]) .item:active .thumb {
+  scale: none;
 }
 
 /* 夜樱的 surface 与凹槽 bg-2 几乎同色，选中块改用更亮一级的底与更明显的外环 */
@@ -103,10 +118,14 @@
   text-overflow: ellipsis;
 }
 
+/* 计数槽按位数定宽、右对齐：等宽数字下 1ch 恰是一位，位数在定宽以内变化时项不变宽，后面的项与相邻控件不被推开 */
 .count {
+  min-width: calc(var(--segment-count-digits) * 1ch);
   color: var(--sk-text-2);
   font-size: var(--sk-fs-micro);
   font-variant-numeric: tabular-nums;
+  text-align: end;
+  transition: color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .item[aria-checked="true"] .count {

@@ -1,6 +1,10 @@
-/* 描边容器即控件外观；内部的 input 无边框、透明底，聚焦样式由容器的 :focus-within 承担 */
+/*
+ * 描边容器即控件外观；内部的 input 无边框、透明底，聚焦样式由容器的 :focus-within 承担。
+ * 定位基准：退场中的清空键与快捷键键帽脱离布局后原地淡出。
+ */
 .box {
   --input-height: 36px;
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sk-space-8);
@@ -64,9 +68,11 @@
   cursor: not-allowed;
 }
 
+/* 聚焦时前缀图标与描边同节奏变色 */
 .prefix {
   flex: none;
   color: var(--sk-text-2);
+  transition: color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .box:focus-within .prefix {
