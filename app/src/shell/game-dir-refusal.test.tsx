@@ -10,13 +10,14 @@ import { IpcError } from "../ipc/errors";
 import LibraryPage from "../pages/library";
 import { LIBRARY_COPY } from "../pages/library/copy";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
+import { errorRecord } from "../state/errors";
 import type { FlowProps } from "../state/flows";
-import { LauncherProvider, useLauncherSelector } from "../state/launcher";
+import { LauncherProvider, useLauncher, useLauncherSelector, type LauncherApi } from "../state/launcher";
 import { PAGE_IDS, type PageProps, type Route } from "../state/route";
 import { getInstance } from "../state/selectors";
 import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { bootOverrides, deferred, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { AppShell } from "./AppShell";
 import { ErrorBoundary } from "./ErrorBoundary";
 import type { PageTable } from "./nav";
@@ -51,11 +52,13 @@ function LoginStub({ login }: FlowProps<"login">) {
 
 let view: Rendered | undefined;
 let nav: NavApi;
+let launcher: LauncherApi;
 let registry: PageRegistry;
 let crashed: unknown;
 
 function Probe() {
   nav = useNav();
+  launcher = useLauncher();
   return null;
 }
 
@@ -157,12 +160,61 @@ describe("停在实例页时游戏目录因数据格式打不开", () => {
     expect(crashed).toBeUndefined();
   });
 
-  it("别的读取失败（网络盘暂时连不上）：列表只是没读到，仍停在实例页", async () => {
-    await refusedWhileOnInstancePage(() => new IpcError("invalid_game_directory", `游戏目录 ${GAME_DIR} 不能用：找不到网络路径`, { path: GAME_DIR, problem: "unavailable" }));
+  // 别的读取失败留着旧列表，停着的实例本来就还在列表里，剪不剪都看不出来；要分辨，得有一项历史指向已经离开列表的实例。
+  // 不用当前页：当前页的实例不在列表里时实例页自己按 id 取实例就会抛错，所以放在前进的那一项上
+  it("别的读取失败（网络盘暂时连不上）让实例切片出错：列表不算读到，指向已不在列表里的实例的历史项也不剪，再读到列表才剪", async () => {
+    // 新建一直装着：占位项「新世界」在列表里，点得进它的实例页
+    const install = deferred<unknown>();
+    ipc.overrides.set("install_version", () => install.promise);
+    await mount();
+    await act(async () => {
+      await launcher.actions.createInstance({ name: "新世界", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "grass" });
+    });
+    await flush();
+    act(() => nav.go({ page: "library" }));
+    act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+    act(() => nav.go({ page: "instance", id: "新世界", tab: "overview" }));
+    await flush();
+    expect(document.querySelector("[data-page='instance']")?.textContent).toBe("新世界");
+    act(() => nav.back());
+    await flush();
+    expect(nav.route).toEqual({ page: "instance", id: "生存", tab: "overview" });
+    expect(nav.canForward).toBe(true);
+
+    // 重读实例列表，这次读不到（不是数据格式的拒绝）：切片出错，旧列表留着
+    ipc.overrides.set("list_instances", () => {
+      throw new IpcError("invalid_game_directory", `游戏目录 ${GAME_DIR} 不能用：找不到网络路径`, { path: GAME_DIR, problem: "unavailable" });
+    });
+    await act(async () => {
+      await launcher.actions.reload("instances");
+    });
+    await flush();
+    const failed = launcher.state.status.instances;
+    expect(failed.kind === "error" ? errorRecord(failed.error).code : failed.kind).toBe("invalid_game_directory");
+
+    // 新建失败，占位项撤下；落地重扫同样读不到，列表里不再有「新世界」，切片仍是这个错误
+    await act(async () => {
+      install.reject(new IpcError("network_failed", "连接 piston-meta.mojang.com 失败"));
+    });
+    await flush();
+    expect(launcher.state.instances.map((i) => i.id)).toEqual(["生存", "创造"]);
+    expect(launcher.state.status.instances).toBe(failed);
     expect(nav.route).toEqual({ page: "instance", id: "生存", tab: "overview" });
     expect(document.querySelector("[data-page='instance']")?.textContent).toBe("生存");
+    expect(nav.canForward).toBe(true);
     expect(liveTitles()).not.toContain(LIBRARY_COPY.blockedTitle);
     expect(document.body.textContent).not.toContain(PAGE_ERROR_COPY.title);
+    expect(crashed).toBeUndefined();
+
+    // 再读到列表，这时才知道「新世界」确实不在了：前进那一项剪掉，停着的实例页照旧
+    ipc.overrides.set("list_instances", () => [instanceDto("生存"), instanceDto("创造")]);
+    await act(async () => {
+      await launcher.actions.reload("instances");
+    });
+    await flush();
+    expect(launcher.state.status.instances).toEqual({ kind: "ready" });
+    expect(nav.route).toEqual({ page: "instance", id: "生存", tab: "overview" });
+    expect(nav.canForward).toBe(false);
     expect(crashed).toBeUndefined();
   });
 });
