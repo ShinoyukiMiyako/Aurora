@@ -450,7 +450,7 @@ impl Petalfall {
     /// 下载缓存不论成败都删掉。
     ///
     /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，不下载、
-    /// 不建实例目录。
+    /// 不建实例目录。游戏目录原本不在时，建好 `versions/` 就补写记号，之后才建实例目录、落任何数据。
     pub async fn import_modpack(
         &self,
         prepared: PreparedModpack,
@@ -584,7 +584,19 @@ impl Petalfall {
         events: Option<&EventSink>,
     ) -> Result<ModpackInstallOutcome> {
         let checked = self.guard_game_dir(GuardMode::Use).await?;
-        let version_dir = self.game_dir().join(VERSIONS_DIR).join(&name);
+        let versions = self.game_dir().join(VERSIONS_DIR);
+        tokio::fs::create_dir_all(&versions)
+            .await
+            .map_err(|source| petalfall_base::Error::Io {
+                path: versions.clone(),
+                source,
+            })?;
+        // 游戏目录是上一步才建出来的：开头核对时它还不在，记号没处写，现在补上。放在建实例目录之前，进程中途被杀
+        // 或后面哪一步失败时，留下的依赖版本记录与版本目录也落在一个有记号的目录里。
+        if checked == GameDirCheck::Absent {
+            self.guard_game_dir(GuardMode::Use).await?;
+        }
+        let version_dir = versions.join(&name);
         create_instance_dir(&version_dir, &name).await?;
         // 名字下还留着的记录属于在启动器之外被删掉的同名旧实例，与新建实例同一处理：放在目录建成之后，
         // 撞名时那份记录是现有实例的；清不掉不拦导入，改动已记下待补，在这个实例的第一局记下之前一定先补上。
@@ -603,14 +615,6 @@ impl Petalfall {
                 events,
             )
             .await;
-        // 游戏目录是这次导入建出来的：开头核对时它还不在，记号没处写，导入成了再补上。补不上按导入失败处理，
-        // 同样删掉实例目录。
-        let populated = match populated {
-            Ok(modpack) if checked == GameDirCheck::Absent => {
-                self.guard_game_dir(GuardMode::Use).await.map(|_| modpack)
-            }
-            other => other,
-        };
         match populated {
             Ok(modpack) => Ok(ModpackInstallOutcome {
                 version_id: name,
@@ -1438,16 +1442,8 @@ fn strip_minecraft_prefix<'a>(version: &'a str, minecraft: &str) -> &'a str {
         .unwrap_or(version)
 }
 
-/// 原子地建实例目录：同名目录已存在（含并发导入抢先建好）即报重名。
+/// 原子地建实例目录（`versions/` 由调用方先建好）：同名目录已存在（含并发导入抢先建好）即报重名。
 async fn create_instance_dir(version_dir: &Path, name: &str) -> Result<()> {
-    if let Some(parent) = version_dir.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|source| petalfall_base::Error::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
-    }
     match tokio::fs::create_dir(version_dir).await {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -4402,7 +4398,7 @@ mod tests {
         assert_eq!(pack_cache_entries(tmp.path()), Vec::<String>::new());
     }
 
-    /// 游戏目录原本不存在：导入把它建出来，成功后补上记号，记号是这一版的号。
+    /// 游戏目录原本不存在：导入把它建出来并补上记号，成功后记号是这一版的号。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_game_dir_created_by_an_import_gets_the_stamp() {
         let server = MockServer::start().await;
@@ -4445,7 +4441,93 @@ mod tests {
         );
     }
 
+    use crate::data_format::DirLook;
+    use crate::data_format::testing::LookFn;
     use crate::instances::tests::{NEWER_STAMP, NEWER_WRITER, disk_state, write_stamp};
+    use petalfall_release::data_format::{StampFile, parse_stamp};
+    use std::sync::{Arc, Mutex};
+
+    /// 游戏目录原本不存在、导入在装游戏这一步失败：记号在建好 `versions/` 之后、建实例目录之前就写下了。核对时顺带
+    /// 看一眼实例目录：第一次看到游戏目录在的那次核对（补记号的那次）实例目录还不在；失败后实例目录照旧删掉，记号留着。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_game_dir_created_by_an_import_gets_the_stamp_before_any_instance_data() {
+        // 只挂版本清单、不挂原版 JSON：装游戏失败。
+        let server = MockServer::start().await;
+        let base = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/manifest.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+                r#"{{"latest":{{"release":"test","snapshot":"test"}},
+                    "versions":[{{"id":"test","type":"release","url":"{base}/test.json",
+                    "time":"t","releaseTime":"t"}}]}}"#
+            )))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/options.txt", b"fov:90")],
+        );
+        let petalfall = petalfall(tmp.path(), &server);
+        let game_dir = petalfall.game_dir().to_owned();
+        assert!(!game_dir.exists());
+        let instance = game_dir.join("versions").join("中途失败");
+        let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let look: LookFn = {
+            let (seen, instance) = (seen.clone(), instance.clone());
+            Arc::new(move |dir: &Path| {
+                let look = if dir.exists() {
+                    seen.lock().unwrap().push(instance.exists());
+                    DirLook::Stamp(match std::fs::read(stamp_file(dir)) {
+                        Ok(bytes) => parse_stamp(StampFile::Contents(&bytes)),
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                            parse_stamp(StampFile::Missing)
+                        }
+                        Err(err) => panic!("读记号失败：{err}"),
+                    })
+                } else {
+                    DirLook::Absent
+                };
+                Box::pin(async move { look })
+            })
+        };
+
+        let err = with_fixture(
+            GuardFixture {
+                own: 2,
+                look: Some(look),
+            },
+            petalfall.install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("中途失败"),
+                &ImportSelection::default(),
+                "task-f",
+                None,
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            !matches!(
+                err,
+                CoreError::GameDirDataTooNew { .. } | CoreError::DataFormatUnreadable { .. }
+            ),
+            "应在装游戏时失败：{err:?}"
+        );
+        assert_eq!(
+            seen.lock().unwrap().first(),
+            Some(&false),
+            "补记号时实例目录还不在"
+        );
+        assert_eq!(
+            std::fs::read_to_string(stamp_file(&game_dir)).unwrap(),
+            r#"{"data_format":2}"#
+        );
+        assert!(!instance.exists(), "失败后实例目录照旧删掉");
+    }
 
     /// 导入没成留下的半成品「半成品」，带这次导入的未完成标记。两个收拾入口真走下去都会改盘：删目录、改写标记。
     async fn half_import(petalfall: &Petalfall) {
