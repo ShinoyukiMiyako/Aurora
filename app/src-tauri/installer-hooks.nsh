@@ -91,9 +91,11 @@ FunctionEnd
 ; 模板的删除数据复选框只清 WebView2 档案和注册表，账户凭据和配置都留在原地。
 ; 便携模式下数据根就是安装目录，这里面可能有用户自己的东西，所以只按名删启动器写的文件和目录，
 ; 绝不递归删根目录。游戏目录 .minecraft 不在名单里，用户的存档和模组留着。
-; 没有 config.json 说明这里不是落樱的数据根，同名的 logs、cache 不是我们的，一个都不碰。
+; config.json 和 data-format.json 都没有，说明这里不是落樱的数据根，同名的 logs、cache 不是我们的，一个都不碰。
+; 没走完首次向导就关掉时根下只有 data-format.json；只认 config.json 的话它会留下，以后装进这里的旧版本见了它就拒绝打开。
 !macro PETALFALL_DELETE_DATA ROOT
   ${If} ${FileExists} "${ROOT}\config.json"
+  ${OrIf} ${FileExists} "${ROOT}\data-format.json"
     Delete "${ROOT}\config.json"
     Delete "${ROOT}\config.json.broken-*"
     Delete "${ROOT}\credentials.bin"
@@ -111,6 +113,7 @@ FunctionEnd
     RMDir /r "${ROOT}\runtime"
     RMDir /r "${ROOT}\authlib-injector"
     RMDir /r "${ROOT}\templates"
+    Delete "${ROOT}\data-format.json"
     RMDir "${ROOT}"
   ${EndIf}
 !macroend

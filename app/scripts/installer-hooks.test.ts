@@ -88,6 +88,7 @@ function expectWrappedByFirstIf(code: string[]): void {
 const brandSource = "crates/petalfall-base/src/brand.rs";
 const authSource = "crates/petalfall-core/src/auth.rs";
 const configSource = "crates/petalfall-core/src/config.rs";
+const stampFile = rustConst("crates/petalfall-release/src/data_format.rs", "STAMP_FILE");
 
 describe("卸载钩子的删除名单", () => {
   const body = macroBody("PETALFALL_DELETE_DATA");
@@ -109,6 +110,7 @@ describe("卸载钩子的删除名单", () => {
         rustConst("crates/petalfall-core/src/playtime.rs", "PLAYTIME_FILE"),
         rustConst("crates/petalfall-core/src/java.rs", "PROBE_CACHE_FILE"),
         rustConst("app/src-tauri/src/window_state.rs", "WINDOW_STATE_FILE"),
+        stampFile,
         ".*.tmp",
         `.${slug}-write-probe`,
       ].sort(),
@@ -147,11 +149,22 @@ describe("卸载钩子的删除名单", () => {
     expect(body.indexOf('RMDir "${ROOT}"')).toBeGreaterThan(body.lastIndexOf("RMDir /r"));
   });
 
-  it("根目录没有配置文件时什么都不删", () => {
+  // 没走完首次向导的根下只有格式记号，只认 config.json 的话记号就删不掉
+  it("配置文件和格式记号都没有时什么都不删", () => {
     const lines = body.trim().split("\n").map((line) => line.trim());
-    expect(lines[0]).toBe('${If} ${FileExists} "${ROOT}\\config.json"');
+    expect(lines.slice(0, 2)).toEqual([
+      '${If} ${FileExists} "${ROOT}\\config.json"',
+      `\${OrIf} \${FileExists} "\${ROOT}\\${stampFile}"`,
+    ]);
     expect(lines.at(-1)).toBe("${EndIf}");
     expect(lines.filter((line) => line.startsWith("${If}"))).toHaveLength(1);
+  });
+
+  it("格式记号在判断块里删，且在删根目录之前", () => {
+    const lines = body.trim().split("\n").map((line) => line.trim());
+    const stamp = lines.indexOf(`Delete "\${ROOT}\\${stampFile}"`);
+    expect(stamp).toBeGreaterThan(1);
+    expect(stamp).toBeLessThan(lines.indexOf('RMDir "${ROOT}"'));
   });
 });
 
