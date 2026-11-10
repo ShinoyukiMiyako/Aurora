@@ -21,6 +21,12 @@ const WAIT = { timeout: 5000, interval: 10 };
 
 const existingOf = (kind: ExistingKind): Existing => ({ kind, version: "0.1.0", dir: "E:\\app", channel: "stable" });
 const probeOf = (kind: ExistingKind | null, extra: Partial<Probe> = {}): Probe => judgedProbe({ ...FAKE_PROBE, existing: kind === null ? null : existingOf(kind), ...extra });
+/** 已装预览版，安装包是更慢通道上更早的测试版：交互时是「换到」页，带开关的更新模式无人值守换过去。 */
+const switchProbe = (extra: Partial<Probe> = {}): Probe =>
+  judgedProbe({ ...FAKE_PROBE, payloadVersion: "1.0.0-beta.5", payloadChannel: "beta", existing: { kind: "switch", version: "1.1.0-dev.61", dir: "E:\\app", channel: "dev" }, ...extra });
+/** 已装测试版，安装包是更快通道上更新的预览版：交互时是「换到」页，确认后按升级装。 */
+const fasterProbe = (extra: Partial<Probe> = {}): Probe =>
+  judgedProbe({ ...FAKE_PROBE, payloadVersion: "1.0.0-dev.60", payloadChannel: "dev", existing: { kind: "upgrade", version: "1.0.0-beta.3", dir: "E:\\app", channel: "beta" }, ...extra });
 const FAILURE: Failure = { code: "verify_failed", detail: "uninstall.exe 不存在" };
 
 const freshEvent = (fake: FakeBridge): SetupEvent => ({ type: "install_requested", mode: "fresh", running: false, check: fake.scenario.checkDir(FAKE_PROBE.defaultDir) });
@@ -236,6 +242,26 @@ describe("发起安装", () => {
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(fake.callsOf("checkDir")).toHaveLength(1);
     expect(fake.callsOf("install")).toHaveLength(1);
+  });
+
+  it("「换到」更慢通道的确认按换通道计划装回登记目录，安装中与完成页都说换到", async () => {
+    const fake = start({ probe: switchProbe(), progress: [] });
+    await seeHeading(copy.installed.kind.switch.title("测试版"));
+    button(copy.installed.switchTo("测试版")).click();
+    await seeHeading("正在换到测试版 1.0.0-beta.5");
+    await seeHeading("已换到测试版 1.0.0-beta.5");
+    expect(fake.callsOf("install")).toEqual([[{ mode: "switch", dir: null, desktopShortcut: false }]]);
+    expect(fake.callsOf("checkDir")).toEqual([]);
+    // 交互确认的那次停在完成页，由用户自己点打开
+    expect(fake.callsOf("openLauncher")).toEqual([]);
+  });
+
+  it("「换到」更快通道的确认按升级计划发起，标题照样说换到", async () => {
+    const fake = start({ probe: fasterProbe(), outcome: "hang", progress: [] });
+    await seeHeading(copy.installed.kind.switch.title("预览版"));
+    button(copy.installed.switchTo("预览版")).click();
+    await seeHeading("正在换到预览版 1.0.0-dev.60");
+    await vi.waitFor(() => expect(fake.callsOf("install")).toEqual([[{ mode: "upgrade", dir: null, desktopShortcut: false }]]), WAIT);
   });
 
   it("已安装更新版本时没有任何安装按钮", async () => {

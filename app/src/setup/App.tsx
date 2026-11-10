@@ -172,7 +172,6 @@ function useSetupFlow(bridge: SetupBridge, initial: SetupState): SetupFlow {
       requestingInstall.current = true;
       setBusy(true);
       const run = async () => {
-        if (mode === "switch") throw new Error("没有发起换通道安装的入口，不该收到 switch");
         if (mode === "fresh") {
           const check = await bridge.checkDir(latest.current.dir);
           dispatch({ type: "install_requested", mode, check, running: await bridge.launcherRunning() });
@@ -291,16 +290,14 @@ function CurrentView({ flow, bridge, copy }: ViewProps) {
     }
     case "installed": {
       const probe = requireValue(state.probe, "探测结果", view);
-      const existing = requireValue(probe.existing, "现有安装", view);
       return (
         <Installed
           copy={copy}
-          existing={existing}
-          payloadVersion={probe.payloadVersion}
-          elevated={probe.elevated}
+          probe={probe}
           busy={busy}
           opening={state.opening}
           onUpdate={() => requestInstall("upgrade")}
+          onSwitch={() => requestInstall("switch")}
           onReinstall={() => requestInstall("repair")}
           onOpen={openLauncher}
         />

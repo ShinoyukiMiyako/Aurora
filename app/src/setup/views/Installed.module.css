@@ -12,6 +12,13 @@
   color: var(--sk-text);
 }
 
+/* 读不懂记录那一页的说明：路径和原因要能复制去反馈。路径没有空格，长了按字符折行，不撑出说明区 */
+.selectable {
+  user-select: text;
+  overflow-wrap: anywhere;
+  cursor: text;
+}
+
 /* 贴着底栏：内容再少，声明的位置也不漂 */
 .legalNote {
   margin: auto 0 0;
