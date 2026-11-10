@@ -237,7 +237,11 @@ impl Petalfall {
 
     /// 整份写入实例设置；任一字段不合法报 [`InstanceError::InvalidSettings`]，不改动文件。保存后删掉
     /// 卡面图片目录里不再被引用的图片（玩家清除图片、换回方块时旧文件随之删掉）。
+    ///
+    /// 先以「使用」方式核对游戏目录的数据格式记号，被拒时原样报错、什么都不写：任务重试与列实例被拒后
+    /// 留下的旧列表都不经过列实例，不能指望调用方核对过。
     pub async fn set_instance_settings(&self, id: &str, settings: &VersionSettings) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         settings
             .validate()
             .map_err(|violation| InstanceError::InvalidSettings {
@@ -304,12 +308,14 @@ impl Petalfall {
     /// 把实例目录交给 `disposer`（生产是系统回收站）。返回目录原先是否存在：不存在时什么都不做，
     /// 重复删除是幂等的。有别的实例依赖它时报 [`InstanceError::HasDependents`]。
     ///
-    /// 只处理文件；配置里的引用由调用方随后经 [`Petalfall::forget_instance`] 清掉。
+    /// 只处理文件；配置里的引用由调用方随后经 [`Petalfall::forget_instance`] 清掉。先核对游戏目录的数据格式
+    /// 记号，规则同 [`Petalfall::set_instance_settings`]。
     pub async fn delete_instance_files(
         &self,
         id: &str,
         disposer: impl Disposer + 'static,
     ) -> Result<bool> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dir = self.instance_dir(id)?;
         match tokio::fs::metadata(&dir).await {
             Ok(meta) if meta.is_dir() => {}
@@ -370,7 +376,9 @@ impl Petalfall {
     ///
     /// 新名字按命名规则校验（不分大小写重名，自己除外）；有实例依赖它时拒绝。中途失败时把已经改掉的
     /// 逐项改回去再报错。只处理文件；配置里的引用由调用方随后经 [`Petalfall::rename_instance_refs`] 同步。
+    /// 先核对游戏目录的数据格式记号，规则同 [`Petalfall::set_instance_settings`]。
     pub async fn rename_instance_files(&self, old: &str, new: &str) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let old_dir = self.existing_instance_dir(old).await?;
         let names = self.instance_names().await?;
         check_instance_name(new, names.iter().map(String::as_str), Some(old)).map_err(
@@ -1175,7 +1183,7 @@ pub(crate) mod tests {
     use tokio::time::Instant;
 
     use crate::data_format::testing::{GuardFixture, LookFn, with_fixture};
-    use crate::data_format::{DirLook, STAMP_FILE};
+    use crate::data_format::{DATA_FORMAT, DirLook, STAMP_FILE};
     use crate::error::GameDirProblem;
     use crate::folders::DIR_PROBE_TIMEOUT;
 
@@ -3102,6 +3110,139 @@ pub(crate) mod tests {
                 found, supported, ..
             } => assert_eq!((found, supported), (3, 2)),
             other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+    }
+
+    /// 号比这一版大一的记号，`written_by` 同 [`NEWER_STAMP`]。不换本版号，走生产的那条路。
+    fn next_format_stamp() -> String {
+        format!(
+            r#"{{"data_format":{},"written_by":"{NEWER_WRITER}"}}"#,
+            DATA_FORMAT + 1
+        )
+    }
+
+    /// 号等于这一版的记号：关卡放行，什么都不写。
+    pub(crate) fn current_format_stamp() -> String {
+        format!(r#"{{"data_format":{DATA_FORMAT}}}"#)
+    }
+
+    /// 号写成了字符串，哪一版都读不懂。
+    const UNREADABLE_STAMP: &str = r#"{"data_format":"3"}"#;
+
+    /// `err` 应是 `game` 被 [`next_format_stamp`] 拦下时的报错：带出记号里的号、这一版的号与写它的版本。
+    fn assert_too_new(err: CoreError, game: &Path) {
+        match err {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            } => {
+                assert_eq!(path, game);
+                assert_eq!((found, supported), (DATA_FORMAT + 1, DATA_FORMAT));
+                assert_eq!(written_by.as_deref(), Some(NEWER_WRITER));
+            }
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+    }
+
+    /// `err` 应是 `game` 被 [`UNREADABLE_STAMP`] 拦下时的报错。
+    fn assert_unreadable(err: CoreError, game: &Path) {
+        match err {
+            CoreError::DataFormatUnreadable { path, reason } => {
+                assert_eq!(path, game);
+                assert_eq!(reason, unreadable_reason(UNREADABLE_STAMP));
+            }
+            other => panic!("应报记号读不懂，实际是 {other:?}"),
+        }
+    }
+
+    /// 断言某个游戏目录被关卡拦下时报的错，见 [`assert_too_new`]、[`assert_unreadable`]。
+    pub(crate) type AssertRefused = fn(CoreError, &Path);
+
+    /// 关卡该拦下的两种记号，与各自该报的错。
+    pub(crate) fn refusing_stamps() -> [(String, AssertRefused); 2] {
+        [
+            (next_format_stamp(), assert_too_new),
+            (UNREADABLE_STAMP.to_owned(), assert_unreadable),
+        ]
+    }
+
+    /// 会往游戏目录写的实例入口，都对 [`game_dir_with_instances`] 里的「生存」下手。
+    #[derive(Debug, Clone, Copy)]
+    enum InstanceWrite {
+        Settings,
+        Delete,
+        Rename,
+    }
+
+    impl InstanceWrite {
+        const ALL: [Self; 3] = [Self::Settings, Self::Delete, Self::Rename];
+
+        fn wanted_settings() -> VersionSettings {
+            VersionSettings {
+                memory_mb: Some(6144),
+                ..VersionSettings::default()
+            }
+        }
+
+        async fn run(self, petalfall: &Petalfall) -> Result<()> {
+            match self {
+                Self::Settings => {
+                    petalfall
+                        .set_instance_settings("生存", &Self::wanted_settings())
+                        .await
+                }
+                Self::Delete => petalfall
+                    .delete_instance_files("生存", RecordingDisposer::default())
+                    .await
+                    .map(|_existed| ()),
+                Self::Rename => petalfall.rename_instance_files("生存", "创造").await,
+            }
+        }
+
+        /// 放行时这次写入在盘上留下的结果。
+        async fn assert_landed(self, game: &Path) {
+            let versions = game.join("versions");
+            match self {
+                Self::Settings => assert_eq!(
+                    VersionSettingsStore::for_version_dir(&versions.join("生存"))
+                        .load()
+                        .await
+                        .unwrap(),
+                    Self::wanted_settings()
+                ),
+                Self::Delete => assert!(!versions.join("生存").exists()),
+                Self::Rename => {
+                    assert!(!versions.join("生存").exists());
+                    assert!(versions.join("创造").join("创造.json").is_file());
+                }
+            }
+        }
+    }
+
+    /// 任务重试与列实例被拒后留下的旧列表都不经过列实例：每个写入口自己在动盘之前拦下。
+    #[tokio::test]
+    async fn instance_writes_refuse_a_newer_or_unreadable_game_dir_and_touch_no_file() {
+        for write in InstanceWrite::ALL {
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path());
+            let game = petalfall.game_dir().to_path_buf();
+            game_dir_with_instances(&game).await;
+            for (stamp, assert_refused) in refusing_stamps() {
+                write_stamp(&game, &stamp);
+                let before = disk_state(tmp.path());
+                let Err(err) = write.run(&petalfall).await else {
+                    panic!("{write:?} 应被记号 {stamp} 拦下");
+                };
+                assert_refused(err, &game);
+                assert_eq!(disk_state(tmp.path()), before, "{write:?} 被拦下后动了盘");
+            }
+
+            // 对照：号等于这一版时放行，这次写入真的落盘，上面盘面没变不是因为它本来就不写。
+            write_stamp(&game, &current_format_stamp());
+            write.run(&petalfall).await.unwrap();
+            write.assert_landed(&game).await;
         }
     }
 
