@@ -125,6 +125,10 @@ pub mod code {
     pub const REMOTE_PACK_UNREADABLE: &str = "remote_pack_unreadable";
     /// 游戏目录不能用，detail.path 与 detail.problem（empty / not_absolute / contains_bang / unavailable）。
     pub const INVALID_GAME_DIRECTORY: &str = "invalid_game_directory";
+    /// 游戏目录被更新版本的启动器用过，记下的数据格式比这个版本认得的新，读不了里面的实例。
+    pub const GAME_DIR_DATA_TOO_NEW: &str = "game_dir_data_too_new";
+    /// 游戏目录里记数据格式的文件读不懂，为了不弄坏里面的实例，没有打开它。
+    pub const DATA_FORMAT_UNREADABLE: &str = "data_format_unreadable";
     /// 读不到本机物理内存信息。
     pub const MEMORY_UNAVAILABLE: &str = "memory_unavailable";
     /// 当前环境没有自更新能力，detail.reason 为 debug_build / missing_pubkey / signed_version_not_required / downgrades_allowed / unknown_channel。
@@ -141,6 +145,15 @@ pub mod code {
     pub const UPDATE_NOT_READY: &str = "update_not_ready";
     /// 启动安装程序失败。
     pub const UPDATE_INSTALL_FAILED: &str = "update_install_failed";
+    /// 已有更新包正在下载或安装，这时不能改更新通道，也不能再开一次下载。
+    pub const UPDATE_BUSY: &str = "update_busy";
+    /// 检查期间更新通道改了，这次检查的结果作废、没有落下。
+    pub const UPDATE_SUPERSEDED: &str = "update_superseded";
+    /// 偏好通道的每个更新源都给出了清单，但版本全都旧于本机记下的这个通道见过的最高版本。
+    pub const UPDATE_SOURCE_STALE: &str = "update_source_stale";
+    /// 下载并验过签的更新包认得的数据格式比正在运行的这一版旧（不带格式号的旧包按 0 算），装上读不了现有数据，
+    /// 已丢弃。
+    pub const UPDATE_DATA_TOO_NEW: &str = "update_data_too_new";
     /// 已有游戏在加载或运行，同一时间只跑一个游戏。detail：`{ version_id, phase: loading | running }`。
     pub const BUSY: &str = "busy";
     /// 实例正在安装、补全、改名、删除、启动、运行、改动、备份或恢复存档，或正被别的实例当作基底，暂时不能做
