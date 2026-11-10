@@ -559,6 +559,9 @@ fn channel_named(name: &str) -> Result<Channel, CommandError> {
 /// 收不回来。先写配置，再看生效值（[`effective_preference`]）变没变：变了才清掉槽位里按旧偏好得来的进度、代号加一
 /// （[`UpdateSlot::reset_for_new_preference`]），没变时只写盘，候选、下好的包与各通道的结果照旧。写不进配置时报错，
 /// 槽位不动。
+///
+/// 从开始到清完槽位一直占着忙碌标记：只看一眼空不空闲的话，写配置要等的那段时间里「立即安装」能占到标记，赶在清
+/// 槽位之前装上旧偏好下下好的包。这期间开始的下载、安装与退出时安装都按有下载或安装在进行处理。
 async fn apply_update_channel<U: ReleaseVersion>(
     facade: &Facade,
     slot: &Mutex<UpdateSlot<U>>,
@@ -566,7 +569,7 @@ async fn apply_update_channel<U: ReleaseVersion>(
     channel: Channel,
 ) -> Result<(), CommandError> {
     let package = package_channel_of(current)?;
-    lock_slot(slot).ensure_idle()?;
+    let _busy = lock_slot(slot).try_begin_busy()?;
     let mut before = None;
     facade
         .update_if_changed(|petalfall| {
@@ -6455,8 +6458,8 @@ mod tests {
     }
 
     /// 命令层的接线单测里造不出来（要 AppHandle），钉住源码：设置通道先认通道名、再看支不支持自更新，然后才写偏好，
-    /// 交回写完之后从配置读出的状态；写偏好之前先看有没有下载或安装在进行，写完才清槽位。`updater_info` 同样从配置
-    /// 读偏好。命令在 lib.rs 里注册。各步的行为由下面的用例验证。
+    /// 交回写完之后从配置读出的状态；写偏好之前先占住忙碌标记（有下载或安装在进行就占不到），写完才清槽位，标记拿到
+    /// 函数结束。`updater_info` 同样从配置读偏好。命令在 lib.rs 里注册。各步的行为由下面的用例验证。
     #[test]
     fn setting_the_channel_checks_the_name_and_support_before_writing() {
         let (source, _) = include_str!("updater.rs")
@@ -6490,11 +6493,12 @@ mod tests {
         in_order(
             &apply,
             &[
-                "lock_slot(slot).ensure_idle()?;",
+                "let _busy = lock_slot(slot).try_begin_busy()?;",
                 ".update_if_changed(",
                 "lock_slot(slot).reset_for_new_preference();",
             ],
         );
+        assert!(!apply.contains("drop(_busy)"), "{apply}");
         let info = top_level_fn(source, "pub async fn updater_info(");
         assert!(
             info.contains("info_now(&facade, &updater, &app.package_info().version).await"),
@@ -6587,6 +6591,46 @@ mod tests {
         flow.set_channel(Channel::Stable).await.unwrap();
         assert_eq!(flow.saved().unwrap()["update_channel"], json!("stable"));
         assert_ne!(flow.ticket(), ticket);
+    }
+
+    /// 改通道从开始到清完槽位都占着忙碌标记：配置还在等写锁时，「立即安装」或下载占不到标记、报 `update_busy`，
+    /// 装不上旧偏好下下好的包；改完、清完槽位才放开，那时槽位里已经没有那个包。写不进配置报错时标记同样放开。
+    #[tokio::test]
+    async fn changing_the_channel_holds_the_busy_flag_until_the_slot_is_cleared() {
+        let flow = Flow::new("1.0.0-beta.4", None, None);
+        flow.fill_session();
+        let held = flow.facade.hold_write_lock().await;
+        let mut change = std::pin::pin!(flow.set_channel(Channel::Stable));
+        std::future::poll_fn(|cx| {
+            assert!(
+                change.as_mut().poll(cx).is_pending(),
+                "写锁被拿着，改通道该停在写配置那一步"
+            );
+            Poll::Ready(())
+        })
+        .await;
+        let install = lock_slot(&flow.slot).try_begin_busy();
+        assert_eq!(
+            CommandError::from(install.unwrap_err()).code,
+            code::UPDATE_BUSY
+        );
+        assert_eq!(
+            lock_slot(&flow.slot).downloaded_version().as_deref(),
+            Some("1.0.0-beta.5")
+        );
+
+        drop(held);
+        change.await.unwrap();
+        assert_eq!(flow.saved().unwrap()["update_channel"], json!("stable"));
+        assert_eq!(lock_slot(&flow.slot).downloaded_version(), None);
+        let after = lock_slot(&flow.slot).try_begin_busy();
+        assert!(after.is_ok(), "改完之后标记要放开");
+
+        let flow = Flow::new("1.0.0-beta.4", None, None);
+        flow.block_config_writes();
+        flow.set_channel(Channel::Stable).await.unwrap_err();
+        let after = lock_slot(&flow.slot).try_begin_busy();
+        assert!(after.is_ok(), "写不进配置报错之后标记也要放开");
     }
 
     /// 偏好写不进配置：照写配置失败报错，门面里的偏好不变，槽位与号都不动，免得界面按新通道显示、重启后却回到旧的。
