@@ -10,7 +10,7 @@ const BETA_TAG = /^beta\d*$/;
 /**
  * 发布通道由版本号推出：预发布标识的第一段是 dev 为预览版、beta 为测试版，后面只跟数字或什么都不跟，不分大小写；
  * 没有预发布标识为正式版，主版本为 0 的也一样。
- * 预发布标识只认这两种，与启动器认更新通道的规则（Rust 侧的 UpdateChannel::of）一致：rc、alpha 这类标识没有清单，
+ * 预发布标识只认这两种，与启动器认更新通道的规则（Rust 侧 petalfall-release 的 Channel::of）一致：rc、alpha 这类标识没有清单，
  * 启动器会判为不支持自更新，关于页再打上测试版或预览版就前后矛盾，所以直接报错，让构建停下，不猜。
  */
 export function releaseChannel(version) {
