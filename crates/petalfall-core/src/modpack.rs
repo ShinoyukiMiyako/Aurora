@@ -6,7 +6,8 @@
 //! 1. 读清单、去掉用户选择跳过的可选文件、校验实例名并查重；CurseForge 包先把全部文件 id 换成下载
 //!    地址——有作者禁止第三方分发、用户也还没手动下载认领的文件就在这一步整体报错，不先装几百 MB 游戏再
 //!    告诉用户装不完。这一步不动游戏目录（[`Petalfall::prepare_modpack`]），调用方可以在这之后占住实例名再往下走。
-//! 2. 原子地建目录（同名即报错），写下带任务 id 的未完成标记（[`Petalfall::import_modpack`] 从这里开始）。
+//! 2. 核对游戏目录的数据格式记号，原子地建目录（同名即报错），写下带任务 id 的未完成标记
+//!    （[`Petalfall::import_modpack`] 从这里开始）。
 //! 3. 装整合包要求的原版与加载器（与「安装版本」同一条路径，落在它们自然的版本目录里）。这次新落下的目录
 //!    记进依赖版本记录，不进实例库；目录原本就在的是玩家的，不记。
 //! 4. 在实例目录写一份以实例名为 id 的版本 JSON：有加载器时是加载器 JSON 的副本，原版时只
@@ -36,6 +37,7 @@ use petalfall_modplatform::{CurseForgeClient, CurseForgeFile, CurseForgeMod, Pla
 use serde::{Deserialize, Serialize};
 
 use crate::blocked::{BlockedFile, CLAIMS_DIR, ClaimedCopy, PACK_CACHE_DIR, place_claimed};
+use crate::data_format::{GameDirCheck, GuardMode};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Petalfall;
@@ -442,6 +444,9 @@ impl Petalfall {
     /// 解出覆盖文件、写整合包信息。任何一步失败都删掉这个实例目录；任务被强行放弃（future 被丢弃）
     /// 或这里删不掉时，由调用方经 [`Petalfall::discard_modpack_import`] 按实例名再清一次。平台整合包的
     /// 下载缓存不论成败都删掉。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，不下载、
+    /// 不建实例目录。
     pub async fn import_modpack(
         &self,
         prepared: PreparedModpack,
@@ -568,6 +573,7 @@ impl Petalfall {
         task_id: &str,
         events: Option<&EventSink>,
     ) -> Result<ModpackInstallOutcome> {
+        let checked = self.guard_game_dir(GuardMode::Use).await?;
         let version_dir = self.game_dir().join(VERSIONS_DIR).join(&name);
         create_instance_dir(&version_dir, &name).await?;
         // 名字下还留着的记录属于在启动器之外被删掉的同名旧实例，与新建实例同一处理：放在目录建成之后，
@@ -587,6 +593,14 @@ impl Petalfall {
                 events,
             )
             .await;
+        // 游戏目录是这次导入建出来的：开头核对时它还不在，记号没处写，导入成了再补上。补不上按导入失败处理，
+        // 同样删掉实例目录。
+        let populated = match populated {
+            Ok(modpack) if checked == GameDirCheck::Absent => {
+                self.guard_game_dir(GuardMode::Use).await.map(|_| modpack)
+            }
+            other => other,
+        };
         match populated {
             Ok(modpack) => Ok(ModpackInstallOutcome {
                 version_id: name,
@@ -4275,5 +4289,149 @@ mod tests {
         assert_eq!(strip_minecraft_prefix("1.20.1-47.2.0", "1.20.1"), "47.2.0");
         assert_eq!(strip_minecraft_prefix("47.2.0", "1.20.1"), "47.2.0");
         assert_eq!(strip_minecraft_prefix("1.20.10-1", "1.20.1"), "1.20.10-1");
+    }
+
+    // ---- 游戏目录的数据格式记号 ----
+
+    use crate::data_format::STAMP_FILE;
+    use crate::data_format::testing::{GuardFixture, with_fixture};
+    use std::collections::BTreeMap;
+
+    /// 测试里当作这一版的数据格式号：号为 1 时一个记号都不写，看不出写没写。
+    fn own() -> GuardFixture {
+        GuardFixture { own: 2, look: None }
+    }
+
+    fn stamp_file(game_dir: &Path) -> PathBuf {
+        game_dir.join(PETALFALL_META_DIR).join(STAMP_FILE)
+    }
+
+    /// `root` 下的全部内容：目录记成 `None`，文件记成字节。
+    fn tree(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                let rel = path.strip_prefix(root).unwrap().to_owned();
+                if path.is_dir() {
+                    out.insert(rel, None);
+                    walk(root, &path, out);
+                } else {
+                    out.insert(rel, Some(std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(root, root, &mut out);
+        out
+    }
+
+    /// 当前游戏目录被更新的落樱用过：导入在建实例目录之前就报错，不下载游戏文件，游戏目录一个文件都不多；平台
+    /// 整合包的下载缓存照样删掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn importing_into_a_newer_game_dir_downloads_and_writes_nothing() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("built.mrpack");
+        write_pack(
+            &built,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/options.txt", b"fov:90")],
+        );
+        let bytes = std::fs::read(&built).unwrap();
+        mount_platform_pack(&server, "pv-newer", &sha1_hex(&bytes), bytes).await;
+        let petalfall = petalfall(tmp.path(), &server);
+        let game_dir = petalfall.game_dir().to_owned();
+        std::fs::create_dir_all(game_dir.join(PETALFALL_META_DIR)).unwrap();
+        std::fs::write(
+            stamp_file(&game_dir),
+            r#"{"data_format":3,"written_by":"1.1.0-dev.57"}"#,
+        )
+        .unwrap();
+        let prepared = petalfall
+            .prepare_modpack(
+                &platform_source("pv-newer"),
+                Some("被挡下"),
+                &ImportSelection::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let before = tree(&game_dir);
+
+        let err = with_fixture(own(), petalfall.import_modpack(prepared, "task-n", None))
+            .await
+            .unwrap_err();
+
+        match err {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            } => {
+                assert_eq!(path, game_dir);
+                assert_eq!((found, supported), (3, 2));
+                assert_eq!(written_by.as_deref(), Some("1.1.0-dev.57"));
+            }
+            other => panic!("应拒绝导入，实际是 {other:?}"),
+        }
+        assert_eq!(tree(&game_dir), before);
+        let fetched: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .collect();
+        assert_eq!(
+            fetched,
+            ["/version/pv-newer", "/files/pv-newer.mrpack"],
+            "只下了整合包本身"
+        );
+        assert_eq!(pack_cache_entries(tmp.path()), Vec::<String>::new());
+    }
+
+    /// 游戏目录原本不存在：导入把它建出来，成功后补上记号，记号是这一版的号。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_game_dir_created_by_an_import_gets_the_stamp() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let pack = tmp.path().join("测试包.mrpack");
+        write_pack(
+            &pack,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/options.txt", b"fov:90")],
+        );
+        let petalfall = petalfall(tmp.path(), &server);
+        let game_dir = petalfall.game_dir().to_owned();
+        assert!(!game_dir.exists());
+
+        let outcome = with_fixture(
+            own(),
+            petalfall.install_modpack(
+                &ModpackSource::File { path: pack },
+                Some("新目录"),
+                &ImportSelection::default(),
+                "task-s",
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.version_dir,
+            game_dir.join("versions").join("新目录")
+        );
+        assert_eq!(
+            std::fs::read(outcome.version_dir.join("options.txt")).unwrap(),
+            b"fov:90"
+        );
+        assert_eq!(
+            std::fs::read_to_string(stamp_file(&game_dir)).unwrap(),
+            r#"{"data_format":2}"#
+        );
     }
 }
