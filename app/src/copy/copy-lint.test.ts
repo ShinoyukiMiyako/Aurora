@@ -481,6 +481,8 @@ describe("任务失败原因与后端码表对齐", () => {
       install_unsafe_path: "版本文件里有指向游戏目录之外的路径，已拒绝写入",
       instance_move_verify_failed: "复制出的文件和原件对不上，这次移动已放弃，原件没动",
       loader_library_missing: "加载器自带的文件缺失或已损坏，只能由加载器安装器生成，需要重新安装加载器",
+      game_dir_data_too_new: `当前游戏目录被更新的${APP_NAME}用过，这个版本读不了里面的实例`,
+      data_format_unreadable: "当前游戏目录里的格式记录读不懂，为了不弄坏里面的实例，这次没有动它",
     });
   });
 
