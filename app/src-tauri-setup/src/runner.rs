@@ -7,17 +7,20 @@
 pub mod fake;
 
 use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::io::{self, ErrorKind};
+use std::fs::{self, File};
+use std::io::{self, ErrorKind, Write};
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use petalfall_release::handoff::{ChannelHandoff, HANDOFF_FILE};
+use petalfall_release::order::Channel;
 use petalfall_setup_payload::Header;
+use semver::Version;
 use windows_sys::Win32::System::Com::CoTaskMemFree;
 use windows_sys::Win32::UI::Shell::{FOLDERID_Desktop, KF_FLAG_DONT_VERIFY, SHGetKnownFolderPath};
 use windows_sys::core::{GUID, PWSTR};
@@ -36,6 +39,7 @@ use crate::target::{SpaceNeed, SystemEnv, TargetEnv, Volume, write_fault};
 use crate::verify::{self, Expected, UNINSTALLER_NAME, verify};
 
 pub const SHORTCUT_NAME: &str = "Petalfall.lnk";
+const HANDOFF_TEMP_FILE: &str = "channel-handoff.json.tmp";
 
 const POLL: Duration = Duration::from_millis(100);
 /// NSIS 3.10 打开自身撞上杀软扫描时不重试，直接以 2 退出，这种退出来得很快。
@@ -340,6 +344,13 @@ impl Target {
     }
 }
 
+/// 用户在「换到」页上确认之后要留给启动器的交接记录：换到的通道与这次装的版本。写入时刻在落盘时取。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handoff {
+    pub channel: Channel,
+    pub version: Version,
+}
+
 /// 非静默运行的载荷：NSIS 自己的界面接管，引导程序只负责清掉临时文件。
 pub struct StandardRun {
     running: Box<dyn Running>,
@@ -375,6 +386,8 @@ pub struct Session {
     processes: Box<dyn Processes>,
     poll: Duration,
     quick_exit: Duration,
+    /// 交接记录的写入时刻从这里取，测试换成固定值。
+    clock: fn() -> SystemTime,
 }
 
 impl Session {
@@ -393,6 +406,7 @@ impl Session {
             processes,
             poll: POLL,
             quick_exit: QUICK_EXIT,
+            clock: SystemTime::now,
         }
     }
 
@@ -442,6 +456,28 @@ impl Session {
 
     fn journal_store(&self) -> JournalStore {
         JournalStore::new(&self.roots.state)
+    }
+
+    /// 先写临时文件、刷盘、再改名，同半装记录：启动器只该读到完整的一份。交回写进去的内容，给日志用。
+    fn write_handoff(&self, handoff: &Handoff) -> io::Result<String> {
+        let written_at = (self.clock)()
+            .duration_since(UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_secs();
+        let contents = ChannelHandoff {
+            channel: handoff.channel,
+            version: handoff.version.clone(),
+            written_at,
+        }
+        .to_json();
+        fs::create_dir_all(&self.roots.state)?;
+        let temp = self.roots.state.join(HANDOFF_TEMP_FILE);
+        let mut file = File::create(&temp)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(temp, self.roots.state.join(HANDOFF_FILE))?;
+        Ok(contents)
     }
 
     /// 清掉上次崩溃留下的临时目录。
@@ -520,12 +556,21 @@ impl Session {
     fn run_payload(
         &self,
         target: &Target,
+        handoff: Option<&Handoff>,
         instdir: &Path,
         extracted: &Extracted,
         meter: &mut ProgressMeter,
         reporter: &dyn Reporter,
     ) -> Result<i32, Failure> {
         let header = self.header();
+        // 交接记录先于半装记录：它写不成时什么都还没动，没有半装记录，安装目录也没碰；先落半装记录再失败的话，
+        // 下次启动会把一次没开始的安装认成半装。记录写成而后面失败时不撤回：启动器只采用版本与自己相同的记录
+        if let Some(handoff) = handoff {
+            let contents = self
+                .write_handoff(handoff)
+                .map_err(|err| io_failure("写交接记录", &err))?;
+            reporter.note(&format!("交接记录已写入：{contents}"));
+        }
         let store = self.journal_store();
         let mut journal =
             Journal::begin(instdir, target.mode == InstallMode::Fresh, &header.version);
@@ -588,14 +633,30 @@ impl Session {
 
     /// 跑完一次安装。阻塞到结束，要放在工作线程上调：子进程要等好几秒，窗口线程不能陪着。
     pub fn install(&self, target: &Target, reporter: &dyn Reporter) -> Result<(), Failure> {
-        let outcome = self.perform(target, reporter);
+        self.install_with_handoff(target, None, reporter)
+    }
+
+    /// 同 [`Session::install`]；`handoff` 有值时，先把交接记录写进状态目录，写不成就不装。只有用户在「换到」页上
+    /// 确认的那次安装带它：首装、修复与更新模式都不写，否则会改掉用户在落樱设置里选的更新通道。
+    pub fn install_with_handoff(
+        &self,
+        target: &Target,
+        handoff: Option<&Handoff>,
+        reporter: &dyn Reporter,
+    ) -> Result<(), Failure> {
+        let outcome = self.perform(target, handoff, reporter);
         if let Err(failure) = &outcome {
             reporter.note(&format!("安装失败：{failure}"));
         }
         outcome
     }
 
-    fn perform(&self, target: &Target, reporter: &dyn Reporter) -> Result<(), Failure> {
+    fn perform(
+        &self,
+        target: &Target,
+        handoff: Option<&Handoff>,
+        reporter: &dyn Reporter,
+    ) -> Result<(), Failure> {
         let header = self.header();
         let instdir = self.launcher.resolve_instdir(&target.instdir);
         let mut meter = ProgressMeter::new(header.exe_len);
@@ -610,7 +671,7 @@ impl Session {
         let shortcut = self.roots.desktop.join(SHORTCUT_NAME);
         let keep_shortcut = target.desktop_shortcut || shortcut.try_exists().unwrap_or(true);
 
-        let outcome = self.run_payload(target, &instdir, &extracted, &mut meter, reporter);
+        let outcome = self.run_payload(target, handoff, &instdir, &extracted, &mut meter, reporter);
         if let Err(err) = extracted.cleanup() {
             reporter.note(&format!("清理临时目录失败：{err}"));
         }
@@ -691,6 +752,8 @@ mod tests {
 
     const VERSION: &str = "0.2.0-dev.7";
     const DUMP_ENV: &str = "PETALFALL_TEST_DUMP_ARGS";
+    /// 测试会话的时钟固定在这一秒。
+    const WRITTEN_AT: u64 = 1_794_000_000;
 
     #[test]
     fn arguments_put_an_unquoted_directory_last() {
@@ -789,6 +852,17 @@ mod tests {
         );
         assert_eq!(roots.temp, std::env::temp_dir());
         assert!(roots.desktop.is_absolute());
+    }
+
+    /// 交接记录由引导程序写、启动器读，两边各拼各的路径：目录名对不上，启动器就永远找不到记录。
+    #[test]
+    fn the_handoff_lands_where_the_launcher_looks_for_it() {
+        assert_eq!(log::SETUP_DIR, petalfall_release::handoff::SETUP_DIR);
+        assert_eq!(
+            Roots::system().unwrap().state.join(HANDOFF_FILE),
+            Path::new(&std::env::var_os("LOCALAPPDATA").unwrap())
+                .join(r"Petalfall-Setup\channel-handoff.json")
+        );
     }
 
     /// main.rs 按 tempfile 的默认临时目录建 WebView2 数据目录，清扫看的是这里的 temp：两处不是同一个目录的话，
@@ -1073,12 +1147,14 @@ mod tests {
         cwd: PathBuf,
         payload: Vec<u8>,
         journal: Option<Journal>,
+        handoff: Option<Vec<u8>>,
     }
 
     struct Scripted {
         steps: Mutex<VecDeque<Step>>,
         calls: Arc<Mutex<Vec<Call>>>,
         journal_path: PathBuf,
+        handoff_path: PathBuf,
         free_bytes: u64,
     }
 
@@ -1104,6 +1180,7 @@ mod tests {
                 journal: fs::read(&self.journal_path)
                     .ok()
                     .map(|bytes| serde_json::from_slice(&bytes).unwrap()),
+                handoff: fs::read(&self.handoff_path).ok(),
             });
             match self
                 .steps
@@ -1173,6 +1250,7 @@ mod tests {
                 steps: Mutex::new(steps.into()),
                 calls: Arc::clone(&self.calls),
                 journal_path: JournalStore::new(&self.roots.state).path(),
+                handoff_path: self.handoff_path(),
                 free_bytes: self.free_bytes,
             };
             let entry: Arc<dyn Registry> = self.entry.clone();
@@ -1184,7 +1262,12 @@ mod tests {
                 Box::new(NoProcesses),
             );
             session.poll = Duration::ZERO;
+            session.clock = || UNIX_EPOCH + Duration::from_secs(WRITTEN_AT);
             session
+        }
+
+        fn handoff_path(&self) -> PathBuf {
+            self.roots.state.join(HANDOFF_FILE)
         }
 
         /// NSIS 跑完的现场：文件写好，卸载项写好。
@@ -1673,6 +1756,184 @@ mod tests {
                 .any(|line| line.starts_with("安装失败：ExtractFailed: ")),
             "{notes:?}"
         );
+    }
+
+    fn handoff() -> Handoff {
+        Handoff {
+            channel: Channel::Dev,
+            version: Version::parse(VERSION).unwrap(),
+        }
+    }
+
+    fn handoff_written_at(written_at: u64) -> ChannelHandoff {
+        ChannelHandoff {
+            channel: Channel::Dev,
+            version: Version::parse(VERSION).unwrap(),
+            written_at,
+        }
+    }
+
+    fn read_handoff(bytes: &[u8]) -> ChannelHandoff {
+        ChannelHandoff::from_json(bytes).unwrap()
+    }
+
+    #[test]
+    fn a_confirmed_switch_has_its_handoff_on_disk_before_the_payload_starts() {
+        // 「换到」页确认的两种安装：已装的更旧、安装包通道更快的升级，与已装的更新、安装包通道更慢的换通道
+        for mode in [InstallMode::Upgrade, InstallMode::Switch] {
+            let bench = Bench::new();
+            let session = bench.session(vec![bench.good_install()]);
+            let reporter = Recording::default();
+
+            session
+                .install_with_handoff(&bench.target(mode, true), Some(&handoff()), &reporter)
+                .unwrap();
+
+            let call = &bench.calls()[0];
+            let at_launch = call
+                .handoff
+                .as_deref()
+                .expect("启动载荷时交接记录必须已落盘");
+            assert_eq!(
+                read_handoff(at_launch),
+                handoff_written_at(WRITTEN_AT),
+                "{mode:?}"
+            );
+            assert!(call.journal.is_some(), "{mode:?}");
+            // 记录留给启动器读，装完不删
+            assert_eq!(
+                read_handoff(&fs::read(bench.handoff_path()).unwrap()),
+                handoff_written_at(WRITTEN_AT),
+                "{mode:?}"
+            );
+            let notes = reporter.notes.lock().unwrap();
+            assert!(
+                notes.iter().any(|line| line
+                    == r#"交接记录已写入：{"channel":"dev","version":"0.2.0-dev.7","written_at":1794000000}"#),
+                "{notes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_handoff_is_written_before_the_journal() {
+        let bench = Bench::new();
+        // 半装记录的位置被一个目录占着，改名到那里会失败
+        fs::create_dir_all(bench.store().path()).unwrap();
+        let session = bench.session(vec![bench.good_install()]);
+
+        let failure = session
+            .install_with_handoff(
+                &bench.target(InstallMode::Switch, true),
+                Some(&handoff()),
+                &Recording::default(),
+            )
+            .unwrap_err();
+
+        assert!(
+            failure.detail.starts_with("写半装记录："),
+            "{}",
+            failure.detail
+        );
+        assert!(bench.calls().is_empty());
+        assert_eq!(
+            read_handoff(&fs::read(bench.handoff_path()).unwrap()),
+            handoff_written_at(WRITTEN_AT)
+        );
+    }
+
+    #[test]
+    fn a_handoff_that_cannot_be_written_stops_before_the_journal_and_the_payload() {
+        // 状态目录的位置被一个文件占着，或者交接记录的位置被一个目录占着
+        for state_is_a_file in [true, false] {
+            let bench = Bench::new();
+            if state_is_a_file {
+                fs::write(&bench.roots.state, b"in the way").unwrap();
+            } else {
+                fs::create_dir_all(bench.handoff_path()).unwrap();
+            }
+            let session = bench.session(vec![bench.good_install()]);
+
+            let failure = session
+                .install_with_handoff(
+                    &bench.target(InstallMode::Switch, true),
+                    Some(&handoff()),
+                    &Recording::default(),
+                )
+                .unwrap_err();
+
+            assert_eq!(
+                failure.code,
+                FailureCode::ExtractFailed,
+                "{state_is_a_file}"
+            );
+            assert!(
+                failure.detail.starts_with("写交接记录："),
+                "{}",
+                failure.detail
+            );
+            assert!(bench.calls().is_empty(), "{state_is_a_file}");
+            assert!(!bench.store().path().exists(), "{state_is_a_file}");
+            assert!(bench.temp_is_empty(), "{state_is_a_file}");
+        }
+    }
+
+    #[test]
+    fn a_retry_rewrites_the_handoff_in_place() {
+        let bench = Bench::new();
+        bench
+            .session(vec![exits(3)])
+            .install_with_handoff(
+                &bench.target(InstallMode::Switch, true),
+                Some(&handoff()),
+                &Recording::default(),
+            )
+            .unwrap_err();
+        let mut retry = bench.session(vec![bench.good_install()]);
+        retry.clock = || UNIX_EPOCH + Duration::from_secs(WRITTEN_AT + 60);
+
+        retry
+            .install_with_handoff(
+                &bench.target(InstallMode::Switch, true),
+                Some(&handoff()),
+                &Recording::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            read_handoff(&fs::read(bench.handoff_path()).unwrap()),
+            handoff_written_at(WRITTEN_AT + 60)
+        );
+        let names: Vec<_> = fs::read_dir(&bench.roots.state)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [HANDOFF_FILE]);
+    }
+
+    #[test]
+    fn without_a_handoff_no_record_is_written() {
+        // 首装与修复从不写；升级与换通道不带记录时，是更新模式下无人值守装的两种，以及不改通道的普通升级
+        for mode in [
+            InstallMode::Fresh,
+            InstallMode::Upgrade,
+            InstallMode::Repair,
+            InstallMode::Switch,
+        ] {
+            let bench = Bench::new();
+            let session = bench.session(vec![bench.good_install()]);
+
+            session
+                .install(&bench.target(mode, true), &Recording::default())
+                .unwrap();
+
+            assert_eq!(bench.calls()[0].handoff, None, "{mode:?}");
+            assert!(!bench.handoff_path().exists(), "{mode:?}");
+            assert!(
+                !bench.roots.state.join(HANDOFF_TEMP_FILE).exists(),
+                "{mode:?}"
+            );
+        }
     }
 
     /// 载荷按模板的行为总是建桌面快捷方式。
