@@ -187,6 +187,27 @@ pub enum CoreError {
         path: PathBuf,
         problem: GameDirProblem,
     },
+    /// 数据目录在读配置之前的数据格式关卡没有放行：记号比这一版新、记号读不懂，或者该抬号时没能记下。
+    /// 只出自门面的构造（[`crate::Petalfall::load`] 一类）与外壳启动时的同一道关卡，不是命令的结果。
+    #[error(transparent)]
+    DataRootRefused(#[from] crate::data_format::DataRootRefusal),
+    /// 用到游戏目录之前核对数据格式记号（「使用」方式），记号的号比这一版的数据格式号大：这个目录被更新的
+    /// 落樱用过，这一版读不了里面的实例。`path` 是游戏目录，`found` 是记号里的号，`supported` 是这一版的号，
+    /// `written_by` 是记号里 `written_by` 的原文，没有或不是字符串时为 `None`。
+    ///
+    /// 记号文件可能出自别人的机器：给人看的文字里不带 `written_by` 与两个号，要显示版本先经
+    /// [`crate::data_format::trusted_written_by`] 净化。
+    #[error("游戏目录 {path} 已经被更新的落樱用过，这个版本读不了里面的实例")]
+    GameDirDataTooNew {
+        path: PathBuf,
+        found: u32,
+        supported: u32,
+        written_by: Option<String>,
+    },
+    /// 用到游戏目录之前核对数据格式记号（「使用」方式），记号读不懂。`path` 是游戏目录，`reason` 只描述出了
+    /// 什么错，不照抄文件里的内容。
+    #[error("游戏目录 {path} 里的数据格式记录读不懂：{reason}")]
+    DataFormatUnreadable { path: PathBuf, reason: String },
     /// 实例移动被预检拦下：执行前重新预检，遇到的第一个问题。
     #[error("实例 {id} 不能移动：{blocker}")]
     InstanceMoveBlocked {
