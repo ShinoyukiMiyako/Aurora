@@ -123,6 +123,12 @@ pub fn run() {
             let server_monitor = ServerMonitor::new(petalfall.data_dir());
             let data_dir = petalfall.data_dir().to_path_buf();
             app.manage(Facade::new(petalfall));
+            // 用户在安装引导程序里换了通道，偏好要在任何一次更新检查之前跟上。
+            tauri::async_runtime::block_on(channel_handoff::consume_on_startup(
+                &app.state::<Facade>(),
+                &app.package_info().version,
+                updater_support == UpdaterSupport::Supported,
+            ));
             app.manage(
                 commands::system::StartupNotices::from_recovery(recovery)
                     .with_data_dir(&petalfall_base::fs::resolve_data_dir()?),
