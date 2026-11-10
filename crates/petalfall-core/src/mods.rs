@@ -337,7 +337,11 @@ impl Petalfall {
     ///
     /// 磁盘是权威：列表来自重扫 mods 目录，卷宗只补身份。目录尚不存在（从未装过 Mod）返回空列表；
     /// 真实 IO 故障（如权限不足）与卷宗损坏照常冒泡。
+    ///
+    /// 重扫会把 jar 元数据缓存写进工作目录下的启动器元数据目录，所以与改实例的入口一样先核对游戏目录的
+    /// 数据格式记号。
     pub async fn list_mods(&self, version_id: &str) -> Result<Vec<InstanceMod>> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dirs = self.resolved_dirs(version_id).await?;
         let installed = scan_installed(&dirs).await?;
         if installed.is_empty() {
@@ -3816,22 +3820,24 @@ mod tests {
 
     // ---- 游戏目录的数据格式记号 ----
 
-    /// 会写实例的公开入口。
+    /// 会写实例的公开入口。列 Mod 也在内：重扫会写元数据缓存。
     #[derive(Debug, Clone, Copy)]
     enum WriteEntry {
         InstallMod,
         UpdateMod,
         AddLocalMods,
+        ListMods,
         SetModEnabled,
         SetModsEnabled,
         SetModUpdateHold,
         RemoveMod,
     }
 
-    const WRITE_ENTRIES: [WriteEntry; 7] = [
+    const WRITE_ENTRIES: [WriteEntry; 8] = [
         WriteEntry::InstallMod,
         WriteEntry::UpdateMod,
         WriteEntry::AddLocalMods,
+        WriteEntry::ListMods,
         WriteEntry::SetModEnabled,
         WriteEntry::SetModsEnabled,
         WriteEntry::SetModUpdateHold,
@@ -3871,6 +3877,13 @@ mod tests {
             update_hold: None,
         });
         petalfall.ledger_store("1.21").save(&ledger).await.unwrap();
+        // 还没人扫过 mods 目录：列 Mod 一旦放行就会多写出这份缓存。
+        let cache = petalfall
+            .resolved_dirs("1.21")
+            .await
+            .unwrap()
+            .metadata_cache;
+        assert!(!cache.exists(), "{}", cache.display());
         let local_jar = outside.join("lithium.jar");
         build_mod_jar(&local_jar, "lithium");
         (petalfall, local_jar)
@@ -3891,6 +3904,7 @@ mod tests {
                 .add_local_mods("1.21", &[local_jar.to_path_buf()])
                 .await
                 .unwrap_err(),
+            WriteEntry::ListMods => petalfall.list_mods("1.21").await.unwrap_err(),
             WriteEntry::SetModEnabled => petalfall
                 .set_mod_enabled("1.21", "sodium-v1.jar", false)
                 .await
