@@ -502,9 +502,9 @@ fn crash_report_path(version_dir: &Path) -> PathBuf {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct CrashReportFile<R = CrashReport> {
-    pub(crate) format: u32,
-    pub(crate) report: R,
+struct CrashReportFile<R = CrashReport> {
+    format: u32,
+    report: R,
 }
 
 /// 列表只要崩溃时刻：只反序列化这一项，不把线索与上下文行整份建出来。

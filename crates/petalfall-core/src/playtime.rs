@@ -200,9 +200,9 @@ struct TakenRecords {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(crate) struct PlayFile {
-    pub(crate) format: u32,
-    pub(crate) directories: Vec<DirectoryBook>,
+struct PlayFile {
+    format: u32,
+    directories: Vec<DirectoryBook>,
 }
 
 #[derive(Deserialize)]
