@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ACTION_ERROR } from "../copy/flows";
+import { INSTANCE_RESCAN_MIN_MS } from "../domain/limits";
 import { IpcError } from "../ipc/errors";
 import type { InstanceDto } from "../ipc/instances";
 import type { IpcRecorder } from "../test/fake-bridge";
@@ -296,6 +298,138 @@ describe("任务进行中重扫读到的占用不留到任务结束之后", () =
     running.reject(new IpcError("modpack_export_check_failed", "回读校验没通过"));
     await settle();
     expect(callsOf(ipc, "list_instances")).toHaveLength(scans);
+  });
+});
+
+describe("列实例因游戏目录的数据格式被拒：手里的旧列表不再留着给人操作", () => {
+  const GAME_DIR = "D:\\Games\\.minecraft";
+  // 真后端每次调用都交回新的错误对象，这里同样每次新造一个
+  const tooNew = (found: number, writtenBy: string) =>
+    new IpcError("game_dir_data_too_new", `游戏目录 ${GAME_DIR} 的数据格式 ${found} 比这一版认得的 2 新`, { path: GAME_DIR, found, supported: 2, written_by: writtenBy, written_by_channel: "dev" });
+  const unreadable = () => new IpcError("data_format_unreadable", `游戏目录 ${GAME_DIR} 的数据格式记号读不懂`, { path: GAME_DIR, reason: "expected value at line 1 column 1" });
+  const tooNewBody = (writtenBy: string) => `游戏目录 ${GAME_DIR} 已经被预览版 ${writtenBy} 用过，这个版本读不了里面的实例。装上预览版 ${writtenBy} 或更新的版本，或者换一个游戏目录。`;
+  const UNREADABLE_BODY = `游戏目录 ${GAME_DIR} 里的格式记录读不懂（expected value at line 1 column 1），为了不弄坏里面的实例，这次没有打开它。`;
+
+  function scansFailWith(error: () => Error): void {
+    ipc.overrides.set("list_instances", () => {
+      throw error();
+    });
+  }
+
+  /** 隔够节流时间后窗口回到前台，触发一次后台重扫。 */
+  async function focusLater(): Promise<void> {
+    vi.setSystemTime(Date.now() + INSTANCE_RESCAN_MIN_MS);
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+  }
+
+  const slice = () => store.getState().status.instances;
+  const shownError = (): IpcError => {
+    const s = slice();
+    if (s.kind !== "error" || !(s.error instanceof IpcError)) throw new Error(`实例切片不是后端错误：${JSON.stringify(s)}`);
+    return s.error;
+  };
+  const errorToasts = () =>
+    store
+      .getState()
+      .toasts.filter((t) => t.tone === "error")
+      .map((t) => ({ title: t.title, body: t.body, repeats: t.repeats }));
+
+  beforeEach(async () => {
+    await store.actions.selectInstance("生存");
+    expect(store.getState().selectedInstanceId).toBe("生存");
+  });
+
+  it.each([
+    ["被更新的版本用过", () => tooNew(3, "1.1.0-dev.57"), "game_dir_data_too_new", tooNewBody("1.1.0-dev.57")],
+    ["记号读不懂", unreadable, "data_format_unreadable", UNREADABLE_BODY],
+  ])("%s：获焦重扫被拒后切片出错并带着这个错误，旧列表清空，当前实例失效，只发一条通知", async (_, error, code, body) => {
+    scansFailWith(error);
+    await focusLater();
+    expect(shownError().code).toBe(code);
+    expect(ids()).toEqual([]);
+    expect(store.getState().selectedInstanceId).toBeNull();
+    expect(errorToasts()).toEqual([{ title: ACTION_ERROR.refreshInstances, body, repeats: 0 }]);
+  });
+
+  it("别的错误（网络盘一时连不上）：旧列表与当前实例都留着，切片仍就绪，只发一条通知", async () => {
+    scansFailWith(() => new IpcError("invalid_game_directory", `游戏目录 ${GAME_DIR} 不能用：找不到网络路径`, { path: GAME_DIR, problem: "unavailable" }));
+    await focusLater();
+    expect(slice()).toEqual({ kind: "ready" });
+    expect(ids()).toEqual(["生存", "创造"]);
+    expect(store.getState().selectedInstanceId).toBe("生存");
+    expect(errorToasts()).toEqual([{ title: ACTION_ERROR.refreshInstances, body: `游戏目录 ${GAME_DIR} 不能用：找不到网络路径`, repeats: 0 }]);
+  });
+
+  it("同一个拒绝连续撞上：照样重扫，但切片不换、不再发通知；换成另一个拒绝才再说一次", async () => {
+    scansFailWith(() => tooNew(3, "1.1.0-dev.57"));
+    await focusLater();
+    const first = slice();
+    const scans = callsOf(ipc, "list_instances").length;
+
+    await focusLater();
+    expect(callsOf(ipc, "list_instances")).toHaveLength(scans + 1);
+    expect(slice()).toBe(first);
+    expect(errorToasts()).toEqual([{ title: ACTION_ERROR.refreshInstances, body: tooNewBody("1.1.0-dev.57"), repeats: 0 }]);
+
+    // 又被更新的一版用过：记号与写入的版本都变了，是另一个拒绝
+    scansFailWith(() => tooNew(4, "1.1.0-dev.60"));
+    await focusLater();
+    expect(shownError().detail).toMatchObject({ found: 4, written_by: "1.1.0-dev.60" });
+    expect(errorToasts().map((t) => t.body)).toEqual([tooNewBody("1.1.0-dev.57"), tooNewBody("1.1.0-dev.60")]);
+  });
+
+  it("被拒之后记号修好了：下一次获焦重扫读到列表，切片回到就绪，当前实例回来", async () => {
+    scansFailWith(unreadable);
+    await focusLater();
+    expect(shownError().code).toBe("data_format_unreadable");
+
+    ipc.overrides.set("list_instances", () => onDisk);
+    await focusLater();
+    expect(slice()).toEqual({ kind: "ready" });
+    expect(ids()).toEqual(["生存", "创造"]);
+    expect(store.getState().selectedInstanceId).toBe("生存");
+  });
+
+  it("被拒之后换了游戏目录：切换后的重扫读到新目录的列表，切片回到就绪", async () => {
+    scansFailWith(() => tooNew(3, "1.1.0-dev.57"));
+    await focusLater();
+    expect(shownError().code).toBe("game_dir_data_too_new");
+
+    ipc.overrides.set("set_game_directory", () => null);
+    onDisk = [instanceDto("别处的实例")];
+    ipc.overrides.set("list_instances", () => onDisk);
+    await store.actions.setGameDirectory("E:\\Other\\.minecraft");
+    expect(slice()).toEqual({ kind: "ready" });
+    expect(ids()).toEqual(["别处的实例"]);
+  });
+
+  it("拒绝之前发出、之后才回来的成功重扫不把旧列表放回来", async () => {
+    const stale = holdNextScan();
+    void store.actions.refreshInstances();
+    await settle();
+    scansFailWith(() => tooNew(3, "1.1.0-dev.57"));
+    await expect(store.actions.refreshInstances()).rejects.toMatchObject({ code: "game_dir_data_too_new" });
+    expect(ids()).toEqual([]);
+
+    stale.resolve([instanceDto("生存"), instanceDto("创造")]);
+    await settle();
+    expect(shownError().code).toBe("game_dir_data_too_new");
+    expect(ids()).toEqual([]);
+  });
+
+  it("成功之前发出、之后才被拒的旧重扫不把切片改成出错", async () => {
+    const refused = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => refused.promise);
+    const older = store.actions.refreshInstances();
+    await settle();
+    ipc.overrides.set("list_instances", () => onDisk);
+    await store.actions.refreshInstances();
+
+    refused.reject(tooNew(3, "1.1.0-dev.57"));
+    await expect(older).rejects.toMatchObject({ code: "game_dir_data_too_new" });
+    expect(slice()).toEqual({ kind: "ready" });
+    expect(ids()).toEqual(["生存", "创造"]);
   });
 });
 

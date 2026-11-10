@@ -92,7 +92,7 @@ import * as modsIpc from "../ipc/mods";
 import { completeFirstRun, isFirstRun, listPinnedServers, setPinnedServerInstance, setPinnedServers, type PinnedServerDto } from "../ipc/system";
 import * as tasksIpc from "../ipc/tasks";
 import type { CoreEvent } from "../ipc/tasks";
-import { describeError, errorRecord, itemFailureReason } from "./errors";
+import { describeError, errorRecord, gameDirDataRejectionOf, itemFailureReason } from "./errors";
 import { MANUAL_LOGIN, type DeviceLogin, type LoginIntent, type LoginKind, type LoginState } from "./login";
 import { network as appNetwork, type NetworkMonitor } from "./online";
 import { MODPACK_SUMMARY_RESOURCE } from "./queries/discover";
@@ -613,6 +613,19 @@ function initialRaw(): RawState {
     lastRename: null,
     lastMove: null,
   };
+}
+
+/** 两个错误是不是游戏目录的同一个数据格式拒绝：错误码相同，detail 也相同。 */
+function sameRejection(a: Error, b: Error): boolean {
+  const x = gameDirDataRejectionOf(a);
+  const y = gameDirDataRejectionOf(b);
+  // 同一种拒绝的 detail 由同一个解析函数按固定键序造出，序列化后可以直接比
+  return x !== null && y !== null && x.kind === y.kind && JSON.stringify(x.detail) === JSON.stringify(y.detail);
+}
+
+/** 读到列表时，出错的实例切片回到就绪（目录因数据格式打不开之后换了目录、或记号修好了）；加载中由 loadSlice 收尾，不动。 */
+function readyAgain(raw: RawState): Partial<RawState> {
+  return raw.status.instances.kind === "error" ? { status: { ...raw.status, instances: { kind: "ready" } } } : {};
 }
 
 /**
@@ -1242,6 +1255,8 @@ export class LauncherStore {
   /** 实例重扫的发出序号与已采纳的最晚序号（见 fetchInstances）。 */
   private scanIssued = 0;
   private scanApplied = 0;
+  /** 重扫又撞上的、实例库已经原位说着的同一个数据格式拒绝（见 adoptScanRefusal）：report 不再为它们发通知。 */
+  private readonly repeatedRefusals = new WeakSet<IpcError>();
   /** 账户读取的发出序号与已采纳的最晚序号（见 fetchAccounts）。 */
   private accountsIssued = 0;
   private accountsApplied = 0;
@@ -1513,18 +1528,40 @@ export class LauncherStore {
   /**
    * 重扫实例列表。几处会同时发起重扫（窗口获得焦点、游戏退出、任务落地、删除与改名），先发出的那次可能后回来：
    * 它读的是更早的盘面，照单采纳会让刚删掉的实例回到列表、刚改名的实例变回旧名。所以只采纳比已采纳的那次更晚发出的结果；
-   * 晚到的旧结果丢掉，但 extra（撤占位项）照样套在已采纳的那份更新的列表上。
+   * 晚到的旧结果丢掉，但 extra（撤占位项）照样套在已采纳的那份更新的列表上。被拒的结果同样参与排序（见 adoptScanRefusal）。
    */
   private async fetchInstances(extra?: (raw: RawState) => Partial<RawState>): Promise<void> {
     const seq = ++this.scanIssued;
-    const dtos: InstanceDto[] = await instancesIpc.listInstances();
+    const dtos: InstanceDto[] = await instancesIpc.listInstances().catch((error: unknown) => {
+      this.adoptScanRefusal(seq, error);
+      throw error;
+    });
     const fresh = seq > this.scanApplied;
     if (fresh) {
       this.scanApplied = seq;
       this.lastScanAt = Date.now();
     }
     const scanned = fresh ? { scanned: dtos.map((dto) => instanceFromDto(dto, { pins: [], busyTaskInstanceIds: new Set() })) } : {};
-    this.set((raw) => ({ ...scanned, ...(extra === undefined ? {} : extra(raw)) }));
+    this.set((raw) => ({ ...scanned, ...(fresh ? readyAgain(raw) : {}), ...(extra === undefined ? {} : extra(raw)) }));
+  }
+
+  /**
+   * 列实例因游戏目录的数据格式被拒（目录被更新的版本用过，或记号读不懂）：换目录或修好记号之前怎么重扫都一样，手里的旧列表
+   * 也不能留着给人操作，否则实例页上的改动照样发到后端、写进更新版本用过的目录。所以切片置为出错、列表清空：实例库换成
+   * 「打不开」，当前实例随之失效。与读到的列表一样按发出序号排先后，晚到的旧结果不盖过更新的那次。
+   * 已经停在同一个拒绝上时状态原样不动（获焦、游戏退出、任务落地都会重扫，界面不能跟着一遍遍重画），这次的错误记进
+   * repeatedRefusals，不再发通知。别的失败（网络盘一时连不上等）重试就可能好，留着旧列表，失败照常交给调用方。
+   */
+  private adoptScanRefusal(seq: number, error: unknown): void {
+    if (!isIpcError(error) || gameDirDataRejectionOf(error) === null) return;
+    const shown = this.raw.status.instances;
+    const repeated = shown.kind === "error" && sameRejection(shown.error, error);
+    if (repeated) this.repeatedRefusals.add(error);
+    if (seq <= this.scanApplied) return;
+    this.scanApplied = seq;
+    this.lastScanAt = Date.now();
+    if (repeated) return;
+    this.set((raw) => ({ scanned: [], status: { ...raw.status, instances: { kind: "error", error } } }));
   }
 
   /** 读侧栏固定。与 fetchSettings 同理，只采纳比已采纳的那次更晚发出的结果。 */
@@ -1585,7 +1622,9 @@ export class LauncherStore {
     // 玩家手动往 mods 文件夹里放了 jar：概览的数字和 Mod 页读的是同一份，都要重扫；自动内存按启用的 Mod 估算，也跟着重读
     invalidateResources("mods");
     invalidateResources("memory-advice");
-    if (this.raw.status.instances.kind !== "ready") return;
+    const slice = this.raw.status.instances;
+    // 目录因数据格式打不开时照样重扫：目录恢复能读（例如读不懂的记号修好了）就回到列表，还是同一个拒绝时不再发通知
+    if (slice.kind === "loading" || (slice.kind === "error" && gameDirDataRejectionOf(slice.error) === null)) return;
     if (Date.now() - this.lastScanAt < INSTANCE_RESCAN_MIN_MS) return;
     // 本机 Java 也可能被挪走：探测要起进程，跟着实例重扫一起节流
     invalidateResources("java");
@@ -1594,8 +1633,12 @@ export class LauncherStore {
 
   // ---------------------------------------------------------------- 错误与通知
 
-  /** 后台工作的失败：没有调用方可抛，写控制台并发 error 通知。 */
+  /** 后台工作的失败：没有调用方可抛，写控制台并发 error 通知。实例库已经原位说着的同一个拒绝只写控制台。 */
   private report(title: string, error: unknown): void {
+    if (isIpcError(error) && this.repeatedRefusals.has(error)) {
+      console.warn(title, error);
+      return;
+    }
     console.error(title, error);
     this.pushToast("error", title, describeError(error));
     this.net.reportFailure(error);
