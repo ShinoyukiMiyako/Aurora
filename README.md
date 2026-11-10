@@ -26,20 +26,23 @@
 | | 预览版 | 测试版 |
 | --- | --- | --- |
 | 出自 | dev 分支，每合入一次就自动发一版，改动最先到，也最可能有问题 | beta 分支：从 dev 上已经作为预览版发过、验过的提交晋级而来，发得比预览版少 |
-| 版本号 | `0.1.0-dev.N` | `X.Y.Z-beta.N`，从 `1.0.0-beta.1` 开始（首个测试版还没有发出） |
-| 自更新 | 只收预览版的更新 | 只收测试版的更新 |
+| 版本号 | `X.Y.0-dev.N` | `X.Y.0-beta.N`，从 `1.0.0-beta.1` 开始 |
+| 自更新 | 默认按预览版检查更新，可在「设置 · 关于」里改 | 默认按测试版检查更新，可在「设置 · 关于」里改 |
 | 安装包 | 官网 <https://petalfall.org>，或 GitHub 上滚动更新的预发布 `dev-build`（只留最新一版） | GitHub Releases 上每版一个预发布 `v<版本>`，永久保留，附有 `SHA256SUMS` |
 
 安装时下载引导程序 `Petalfall-Installer-<版本>-x64.exe` 运行即可。
 
 **一台机器只装一个通道。** 几个通道是同一个应用：同一个安装位置、同一个卸载项、同一份数据（账户、设置、托管的 Java 等）。装另一个通道的包，就是把现在装的换掉，不会并排多出一个。
 
-**互换。** 引导程序按版本号判断，不看通道：安装包比已装的新，判为升级，直接覆盖安装，数据保留；比已装的旧，就拦下来，提示不能往回装。现在测试版的版本号比预览版大（`1.0.0-beta.N` 大于 `0.1.0-dev.N`），所以：
+**更新通道。** 落樱按「设置 · 关于」里选的「更新通道」检查更新，没选过时按装的那个通道。选了哪条线，就收那条线和比它更稳的线上更新的版本：比如测试版用户在正式版发布时会收到同号的正式版，装上之后仍按测试版检查更新。比所选更快的线上的版本不会自己找上门来。
 
-- 预览版换测试版：直接运行测试版的引导程序，按升级覆盖安装，账户、设置与实例都保留。
-- 测试版换回预览版：先关掉停在「不能往回装」那一页的安装窗口（窗口开着时再运行安装包，只会把这个窗口叫回来），在 Windows 设置的「应用」里卸载 Petalfall（卸载项用的是英文名），卸载时不要勾选「删除应用程序数据」，再运行预览版的引导程序，沿用默认的安装位置（就是原来装的位置）。勾了的话，卸载程序会删掉账户、设置、游玩统计、托管的 Java、新实例的默认设置等启动器数据；几个通道共用这份数据，装回预览版后也找不回来。游戏目录里的实例与存档不在删除范围内。
+**换通道。** 在落樱「设置 · 关于」的「更新通道」里选：
 
-自更新只在本通道里走：预览版永远收不到测试版的更新，测试版也收不到预览版的。换通道只能照上面手动装。
+- 换到更快的通道（测试版换预览版）：下次检查就收到那条线的新版本，和普通更新一样装上。
+- 换到更稳的通道（预览版换测试版）：现在的版本先留着，等那条线追上来再换过去，在那之前收不到更新。卡片上写着要等到哪个正式版。
+- 想马上换到更稳的通道：运行那个通道的安装包（测试版要用 1.0.0-beta.2 之后第一个支持这样换的测试版或更新的），已安装页会给出「换到测试版」，账户和游戏文件都留着。这样的测试版发出之前，只能在「更新通道」里选测试版、等它追上来。这台电脑上的数据被更新的版本用过、这个安装包读不了时，安装程序会拦下并说明该装哪一版。
+
+比它更早的测试版安装包（包括 1.0.0-beta.1、1.0.0-beta.2）不认这套检查，不要拿它们覆盖安装。
 
 ## 技术栈
 
@@ -105,7 +108,7 @@ pnpm tauri build
 | `PETALFALL_MSA_CLIENT_ID` | 微软登录 client_id。构建时设置会内嵌进二进制，运行期设置会覆盖内嵌的值，`config.json` 里的 `msa_client_id`（设置的「常规 · 高级」）又优先于两者。三处都没有时微软登录显示为不可用，登录报 `MsaClientIdMissing`。仓库里不放这个值，见下文「微软登录与 fork」 |
 | `PETALFALL_OFFICIAL_BUILD` | 构建时环境变量，标明这是落樱官方发布的构建，取值不论，设了就算。设了它，`PETALFALL_MSA_CLIENT_ID` 或 `PETALFALL_CURSEFORGE_API_KEY` 没设或只有空白时编译直接失败，不会打出微软登录或 CurseForge 不可用的包；dev 分支的 CI 三个都设。fork 与本机构建不用设 |
 | `PETALFALL_CURSEFORGE_API_KEY` | CurseForge API key，优先读运行期环境变量，其次读构建时嵌入的值，API 请求与 CDN 下载都用它。两处都没有时 CurseForge 源会被明确禁用；Modrinth 的搜索与安装不受影响，但 `.mrpack` 里有文件只有 forgecdn 地址时，导入会在准备阶段报 `curseforge_key_missing`（每个文件都另有别的地址时照常导入，forgecdn 那个地址失败后换备用地址）。CDN 拒绝这个 key 时下载任务直接失败（`curseforge_key_rejected`），不换源重试。dev 构建由 CI 从仓库 secret `PETALFALL_CURSEFORGE_API_KEY` 注入；fork 与自行构建请用自己在 CurseForge for Studios 控制台申请的 key |
-| `tauri.conf.json` 的 `plugins.updater` | 自更新需要在发布构建里配置签名公钥，并打开 `requireSignedVersion`，仓库里的配置两项都不带。CI 打包时按通道写入公钥，同时注入 `requireSignedVersion: true`，再以 `tauri signer sign --app-version` 签名更新包：版本号写进签名，签的版本和清单对不上的包客户端不收。dev 分支的 CI 用开发版公钥（`.github/dev-updater.pub`），私钥是仓库密钥 `DEV_UPDATER_PRIVATE_KEY`；beta 分支的 CI（`.github/workflows/beta-release.yml`）用发布公钥（`.github/release-updater.pub`），私钥只放在 GitHub 环境 `release-signing` 里，每版签名前要维护者审批。签的是首装引导程序（`Petalfall-Installer-<版本>-x64.exe`），不是 NSIS 包：插件拉起它时带着 `/UPDATE`，现有安装可以升级时它据此直接升级，其余情况退回交互向导，见 `docs/architecture.md` 里「装配与状态」的启动器更新一条。去哪检查更新由版本号决定：带 `-dev.N` 的包先检查 `https://petalfall.org/updates/dev/latest.json`，再检查滚动预发布 `dev-build` 上的同一份 `latest.json`；带 `-beta.N` 的只检查 `https://petalfall.org/updates/beta/latest.json`；不带预发布标识的检查 `https://petalfall.org/updates/stable/latest.json`；带别的预发布标识（如 `-rc.1`）的不检查，自更新显示为不可用。更新包按「文件下载源」设置在清单列出的国内外几个下载源之间排先后，一个源失败换下一个，清单格式、选源、换源与 CI 的发布链路见 `docs/architecture.md` 的「自更新的清单与下载源」。没有公钥、没打开 `requireSignedVersion`、打开了 `allowDowngrades` 时，或在 debug 构建里，自更新同样显示为不可用 |
+| `tauri.conf.json` 的 `plugins.updater` | 自更新需要在发布构建里配置签名公钥，并打开 `requireSignedVersion`，仓库里的配置两项都不带。CI 打包时按通道写入公钥，同时注入 `requireSignedVersion: true`，再以 `tauri signer sign --app-version` 签名更新包：版本号写进签名，签的版本和清单对不上的包客户端不收。dev 分支的 CI 用开发版公钥（`.github/dev-updater.pub`），私钥放在 GitHub 环境 `updates-dev` 里；beta 分支的 CI（`.github/workflows/beta-release.yml`）用发布公钥（`.github/release-updater.pub`），私钥只放在 GitHub 环境 `release-signing` 里，每版签名前要维护者审批。两个公钥文件还原样编进每个构建：启动器按通道挑公钥验清单与更新包，预览版用开发版公钥，测试版与正式版用发布公钥，注入的公钥必须等于本包所属通道的那一把。签的是首装引导程序（`Petalfall-Installer-<版本>-x64.exe`），不是 NSIS 包：插件拉起它时带着 `/UPDATE`，现有安装可以升级时它据此直接升级，其余情况退回交互向导，见 `docs/architecture.md` 里「装配与状态」的启动器更新一条。去哪检查更新由「设置 · 关于」里的更新通道决定，没选过时按版本号推出的通道（带 `-dev.N` 的是预览版，带 `-beta.N` 的是测试版，不带预发布标识的是正式版），检查所选的通道和比它更稳的通道：预览版先检查 `https://petalfall.org/updates/dev/latest.json`，再检查滚动预发布 `dev-build` 上的同一份 `latest.json`；测试版检查 `https://petalfall.org/updates/beta/latest.json`；正式版检查 `https://petalfall.org/updates/stable/latest.json`。清单上的版本当场按那个通道的公钥核对签名，不用先下载安装包。版本号带别的预发布标识（如 `-rc.1`）的不检查，自更新显示为不可用。更新包按「文件下载源」设置在清单列出的国内外几个下载源之间排先后，一个源失败换下一个，清单格式、选源、换源与 CI 的发布链路见 `docs/architecture.md` 的「自更新的清单与下载源」。没有公钥、注入的公钥与本包所属通道的那一把不一致（例如 fork 注入了自己的公钥却没换这两个 `.pub` 文件）、没打开 `requireSignedVersion`、打开了 `allowDowngrades` 时，或在 debug 构建里，自更新同样显示为不可用 |
 
 数据目录存放配置、加密凭据、任务日志、托管 Java、新实例的默认设置（`templates/default/`）与日志。可执行文件所在目录可写时使用该目录（便携模式），否则使用 `%LOCALAPPDATA%\Petalfall`。目录里已有读得进来的 `config.json` 时数据就在这里，即使这次写不进去也不换地方，启动后提示原因。debug 构建一律不走便携模式。存档备份不在数据目录里，放在游戏目录的 `.petalfall/backups/` 下。
 
@@ -130,6 +133,7 @@ pnpm tauri build
 ├── Cargo.toml            Rust workspace（crates/* 与 app/src-tauri）
 ├── crates/               后端各层 crate，按依赖方向分层
 │   ├── petalfall-base        HTTP 客户端工厂、镜像改写、原子写入与校验、重试、品牌常量
+│   ├── petalfall-release     版本先后、发布通道、数据格式号、安装判定表与换通道记录，启动器与安装引导程序共用
 │   ├── petalfall-version     版本清单与版本 JSON 的模型、规则求值与继承合并
 │   ├── petalfall-auth        微软、离线、外置登录与凭据存储
 │   ├── petalfall-java        Java 探测、选择与托管运行时下载
