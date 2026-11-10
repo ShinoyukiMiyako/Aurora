@@ -16,7 +16,7 @@ import { cx } from "../lib/util";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useOnline } from "../state/online";
 import { busyInstanceId } from "../state/selectors";
-import { downloadFraction, hasPanel, phaseUpdate, type DownloadRefusal, type UpdateInfo, type UpdaterChannels, type UpdaterPhase } from "../state/updater/machine";
+import { downloadFraction, hasPanel, phaseUpdate, supportedChannels, type DownloadRefusal, type UpdateInfo, type UpdaterChannels, type UpdaterPhase } from "../state/updater/machine";
 import { useUpdater } from "../state/updater/useUpdater";
 import { Button } from "../ui/Button";
 import { Callout } from "../ui/Callout";
@@ -88,10 +88,7 @@ function PhaseStatus({ phaseKey, children }: { phaseKey: string; children: React
  */
 function channelNoteOf(update: UpdateInfo, channels: UpdaterChannels | null): string | null {
   if (channels === null) throw new Error(`有可查看的 ${update.version} 时更新信息应当已经到达`);
-  const { package_channel: packageChannel, preference } = channels;
-  if (packageChannel === null || preference === null) {
-    throw new Error(`支持自更新时 updater_info 应给出包的通道与偏好，实为 ${JSON.stringify([packageChannel, preference])}`);
-  }
+  const { packageChannel, preference } = supportedChannels(channels);
   return updateChannelNote({ channel: update.channel, preference, packageChannel });
 }
 

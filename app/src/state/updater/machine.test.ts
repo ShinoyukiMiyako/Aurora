@@ -7,6 +7,7 @@ import {
   hasPanel,
   INITIAL_UPDATER_STATE,
   showsUpdateDot,
+  supportedChannels,
   updaterReducer,
   type UpdateInfo,
   type UpdaterChannels,
@@ -440,5 +441,40 @@ describe("下载被拒", () => {
     expect(run(refused, { type: "download_start", taskId: "t2" })).toBe(refused);
     expect(canCheck(refused.phase)).toBe(true);
     expect(run(refused, { type: "check_start" }).phase).toEqual({ kind: "checking" });
+  });
+});
+
+describe("支持自更新时的通道三项", () => {
+  // 各通道的结果与被拒的版本不进返回值：给非空的，确认只取三项
+  const HEADS: ChannelHeadDto[] = [{ channel: "beta", state: "published", version: "1.1.0-beta.2", date: null }];
+  const REFUSED: RefusedUpdateDto[] = [{ version: "1.1.0-beta.1", channel: "beta", reason: "data_too_new", intent: "update" }];
+
+  it("三项都有时原样交回，通道的每种组合与每种关系都一样", () => {
+    for (const packageChannel of CHANNELS) {
+      for (const preference of CHANNELS) {
+        for (const relation of RELATIONS) {
+          expect(supportedChannels({ package_channel: packageChannel, preference, relation, channel_heads: HEADS, refused: REFUSED })).toEqual({ packageChannel, preference, relation });
+        }
+      }
+    }
+  });
+
+  it("缺任一项都是后端违约：报错写出三项的实际值，不猜成哪条线", () => {
+    const channelOrNull: readonly (UpdateChannel | null)[] = [null, ...CHANNELS];
+    const relationOrNull: readonly (ChannelRelation | null)[] = [null, ...RELATIONS];
+    let broken = 0;
+    for (const packageChannel of channelOrNull) {
+      for (const preference of channelOrNull) {
+        for (const relation of relationOrNull) {
+          if (packageChannel !== null && preference !== null && relation !== null) continue;
+          broken += 1;
+          expect(() => supportedChannels({ package_channel: packageChannel, preference, relation, channel_heads: [], refused: [] })).toThrow(
+            `支持自更新时 updater_info 应给出包的通道、偏好与关系，实为 ${JSON.stringify([packageChannel, preference, relation])}`,
+          );
+        }
+      }
+    }
+    // 4 × 4 × 4 种取值里去掉三项全有的 27 种，只缺关系（包的通道与偏好都在）的 9 种也在其中
+    expect(broken).toBe(37);
   });
 });

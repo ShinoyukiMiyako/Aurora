@@ -2,7 +2,7 @@
 
 import { formatBytes, formatDate, formatRelative, percent } from "../../../domain/format";
 import { downloadFailureCopy, refusalReasonCopy, sourceSwitchedCopy, UPDATE_COPY } from "../../../copy/updater";
-import { downloadFraction, type UpdaterChannels, type UpdaterPhase, type UpdaterState } from "../../../state/updater/machine";
+import { downloadFraction, supportedChannels, type SupportedChannels, type UpdaterChannels, type UpdaterPhase, type UpdaterState } from "../../../state/updater/machine";
 
 /** 后端的通道名（dev、beta、stable）。 */
 export type ChannelId = NonNullable<UpdaterChannels["package_channel"]>;
@@ -59,11 +59,8 @@ function button(label: string, variant: CardButton["variant"], action: CardActio
   return { label, variant, action, loading: false, disabled: false, disabledReason: undefined, ...extra };
 }
 
-/** 支持自更新时后端必给的通道信息：包的通道、生效的偏好与两者的关系都不为空。 */
-interface KnownChannels {
-  packageChannel: ChannelId;
-  preference: ChannelId;
-  relation: NonNullable<UpdaterChannels["relation"]>;
+/** 支持自更新时更新卡要的通道信息：核对过的包的通道、偏好与关系，加上各通道最近一次的结果与被拒的版本。 */
+interface KnownChannels extends SupportedChannels {
   heads: UpdaterChannels["channel_heads"];
   refused: UpdaterChannels["refused"];
 }
@@ -72,11 +69,7 @@ interface KnownChannels {
 function knownChannels(state: UpdaterState): KnownChannels {
   const { channels } = state;
   if (channels === null) throw new Error("更新信息到达之前不该渲染更新卡");
-  const { package_channel: packageChannel, preference, relation } = channels;
-  if (packageChannel === null || preference === null || relation === null) {
-    throw new Error(`支持自更新时 updater_info 应给出包的通道、偏好与关系，实为 ${JSON.stringify([packageChannel, preference, relation])}`);
-  }
-  return { packageChannel, preference, relation, heads: channels.channel_heads, refused: channels.refused };
+  return { ...supportedChannels(channels), heads: channels.channel_heads, refused: channels.refused };
 }
 
 /** 版本的核心号：去掉第一个「-」及之后的部分，1.1.0-dev.61 的核心号是 1.1.0。 */

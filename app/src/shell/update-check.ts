@@ -12,17 +12,14 @@ import { CHANNEL_CHECK_DEBOUNCE_MS } from "../domain/limits";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useOnline } from "../state/online";
 import { AUTO_CHECK_DELAY_MS, AUTO_CHECK_INTERVAL_MS, autoCheckEnabled, updateToAnnounce } from "../state/updater/auto-check";
-import { canCheck, type UpdateInfo, type UpdaterChannels } from "../state/updater/machine";
+import { canCheck, supportedChannels, type UpdateInfo, type UpdaterChannels } from "../state/updater/machine";
 import { useUpdaterSelector, type UpdaterApi } from "../state/updater/useUpdater";
 import { useRunner } from "./useRunner";
 
 /** 通知正文：新版本属于偏好的通道、不属于包的通道时，写明装上以后就换过去了。包的通道与偏好只在不支持自更新时为空，空了是后端违约。 */
 function foundToastBody(update: UpdateInfo, channels: UpdaterChannels | null): string {
   if (channels === null) throw new Error(`查到 ${update.version} 时更新信息应当已经到达`);
-  const { package_channel: packageChannel, preference } = channels;
-  if (packageChannel === null || preference === null) {
-    throw new Error(`支持自更新时 updater_info 应给出包的通道与偏好，实为 ${JSON.stringify([packageChannel, preference])}`);
-  }
+  const { packageChannel, preference } = supportedChannels(channels);
   return updateFoundToastBody({ channel: update.channel, preference, packageChannel });
 }
 

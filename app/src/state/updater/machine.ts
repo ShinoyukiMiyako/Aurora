@@ -5,7 +5,7 @@
 // 「正在下载」这些只存在于本次会话里的事，所以两路合并：瞬时阶段（检查中、下载中、安装中）不被后端信息覆盖，
 // 「已是最新」「检查失败」这类会话内结论在后端没有更新可报时保留。
 
-import type { UpdateChannel } from "../../ipc/system";
+import type { ChannelRelation, UpdateChannel } from "../../ipc/system";
 import type { NetworkFailure } from "../errors";
 import type { UpdaterInfoDto } from "../queries/catalog";
 
@@ -97,6 +97,25 @@ export const INITIAL_UPDATER_STATE: UpdaterState = { currentVersion: null, chann
 /** 阶段里带着的版本；没有版本的阶段为 null。 */
 export function phaseUpdate(phase: UpdaterPhase): UpdateInfo | null {
   return "update" in phase ? phase.update : null;
+}
+
+/** 支持自更新时通道信息里必有的三项：包的通道、生效的偏好与两者的关系。 */
+export interface SupportedChannels {
+  packageChannel: UpdateChannel;
+  preference: UpdateChannel;
+  relation: ChannelRelation;
+}
+
+/**
+ * 支持自更新的前提下取通道信息里的三项。后端只在版本号认不出通道（这时也不支持自更新）时让它们一起为空，
+ * 支持时缺了任一项都是后端违约：直接抛出，不猜成哪条线。更新信息还没到达（channels 为 null）时怎么办各调用方前提不同，由它们先判。
+ */
+export function supportedChannels(channels: UpdaterChannels): SupportedChannels {
+  const { package_channel: packageChannel, preference, relation } = channels;
+  if (packageChannel === null || preference === null || relation === null) {
+    throw new Error(`支持自更新时 updater_info 应给出包的通道、偏好与关系，实为 ${JSON.stringify([packageChannel, preference, relation])}`);
+  }
+  return { packageChannel, preference, relation };
 }
 
 /**
