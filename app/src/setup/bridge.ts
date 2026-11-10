@@ -13,7 +13,10 @@ export interface SetupBridge {
   probe(): Promise<Probe>;
   checkDir(path: string): Promise<DirCheck>;
   launcherRunning(): Promise<boolean>;
-  /** 成功后才 resolve；失败时以 contract 的 Failure 拒绝。 */
+  /**
+   * 成功后才 resolve；装失败时以 contract 的 Failure 拒绝。后端安装前复核计划不过（模式不在允许的模式里、数据关此刻拦下）时
+   * 以字符串拒绝：那时什么都没动，不是安装失败。
+   */
   install(plan: InstallPlan): Promise<void>;
   /** 启动器窗口可见或等满 5 秒后 resolve，调用方随后关窗。 */
   openLauncher(dir: string): Promise<void>;
