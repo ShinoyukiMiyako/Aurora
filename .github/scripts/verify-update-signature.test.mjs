@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomBytes, randomInt, sign } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { verifyUpdateSignature } from "./verify-update-signature.mjs";
+import { verifyTrustedComment, verifyUpdateSignature } from "./verify-update-signature.mjs";
 
 const SCRIPT = fileURLToPath(new URL("./verify-update-signature.mjs", import.meta.url));
 const RUN = randomInt(2, 100_000);
@@ -150,6 +150,90 @@ describe("verifyUpdateSignature", () => {
     const { pub, file, sig } = fixture({ trusted: comment(`file:${FILE_NAME}`, `version:${VERSION}`) });
     for (const version of [undefined, ""]) {
       assert.throws(() => verifyUpdateSignature(pub, file, sig, version), /^Error: 用法：/);
+    }
+  });
+});
+
+describe("verifyTrustedComment", () => {
+  const pub = pubkeyText(key.keyId, key.raw);
+  // 被签的字节只在内存里，不落盘
+  const sigOf = (trusted, options) => signatureText(randomBytes(randomInt(1, 4096)), trusted, options);
+  const texts = ({ pub: pubPath, sig: sigPath }) => [readFileSync(pubPath, "utf8"), readFileSync(sigPath, "utf8")];
+  const keyNumber = key.keyId.toString("hex");
+
+  it("签名有效时交回与 verifyUpdateSignature 相同的密钥号，以及签进去的 version、file", () => {
+    const paths = fixture({ trusted: comment(`file:${FILE_NAME}`, `version:${VERSION}`) });
+    const result = verifyTrustedComment(...texts(paths));
+    assert.deepEqual(result, { keyNumber, version: VERSION, file: FILE_NAME });
+    assert.equal(result.keyNumber, check(paths).keyNumber);
+  });
+
+  it("不拿签进去的值比对任何期望：签的是上一个版本就交回上一个版本，字段先后不影响", () => {
+    const previousFile = `Petalfall-Installer-${PREVIOUS_VERSION}-x64.exe`;
+    const sig = sigOf(comment(`version:${PREVIOUS_VERSION}`, `file:${previousFile}`));
+    assert.deepEqual(verifyTrustedComment(pub, sig), { keyNumber, version: PREVIOUS_VERSION, file: previousFile });
+  });
+
+  it("不读安装包：安装包删掉之后 verifyUpdateSignature 读不到，它照样验过", () => {
+    const paths = fixture({ trusted: comment(`file:${FILE_NAME}`, `version:${VERSION}`) });
+    rmSync(paths.file);
+    assert.throws(() => check(paths), { code: "ENOENT" });
+    assert.deepEqual(verifyTrustedComment(...texts(paths)), { keyNumber, version: VERSION, file: FILE_NAME });
+  });
+
+  it("签完之后可信注释改了一个字时全局签名失败：开头、版本号第一位、结尾各改一次", () => {
+    const trusted = comment(`file:${FILE_NAME}`, `version:${VERSION}`);
+    const versionAt = trusted.indexOf("version:") + "version:".length;
+    for (const index of [0, versionAt, trusted.length - 1]) {
+      const changed = `${trusted.slice(0, index)}${trusted[index] === "0" ? "1" : "0"}${trusted.slice(index + 1)}`;
+      const sig = sigOf(trusted, { trustedLine: `trusted comment: ${changed}` });
+      assert.throws(() => verifyTrustedComment(pub, sig), { message: "可信注释的签名验证失败" }, `改第 ${index} 个字：${changed}`);
+    }
+  });
+
+  it("换一把钥签的时拒绝：钥号不符报配错，钥号冒用则全局签名失败", () => {
+    const trusted = comment(`file:${FILE_NAME}`, `version:${VERSION}`);
+    const other = { ...keypair(), keyId: otherKeyId() };
+    assert.throws(() => verifyTrustedComment(pub, sigOf(trusted, { signer: other })), {
+      message: `签名用的密钥号 ${other.keyId.toString("hex")} 和公钥的 ${keyNumber} 不是一对：私钥配错了`,
+    });
+    const impostor = { ...keypair(), keyId: key.keyId };
+    assert.throws(() => verifyTrustedComment(pub, sigOf(trusted, { signer: impostor })), { message: "可信注释的签名验证失败" });
+  });
+
+  it("可信注释里没有 version 时拒绝", () => {
+    const trusted = comment(`file:${FILE_NAME}`);
+    assert.throws(() => verifyTrustedComment(pub, sigOf(trusted)), {
+      message: `可信注释里应有恰好一个 version 字段，实际 0 个：${trusted}`,
+    });
+  });
+
+  it("version 字段出现两次时拒绝，不管哪个在前", () => {
+    for (const versions of [
+      [VERSION, PREVIOUS_VERSION],
+      [PREVIOUS_VERSION, VERSION],
+    ]) {
+      const trusted = comment(`file:${FILE_NAME}`, ...versions.map((v) => `version:${v}`));
+      assert.throws(() => verifyTrustedComment(pub, sigOf(trusted)), {
+        message: `可信注释里应有恰好一个 version 字段，实际 2 个：${trusted}`,
+      });
+    }
+  });
+
+  it("可信注释里没有 file 时拒绝", () => {
+    const trusted = comment(`version:${VERSION}`);
+    assert.throws(() => verifyTrustedComment(pub, sigOf(trusted)), {
+      message: `可信注释里应有恰好一个 file 字段，实际 0 个：${trusted}`,
+    });
+  });
+
+  it("参数不是字符串时拒绝：要的是文件内容的文本，不收 Buffer，也不能漏传", () => {
+    const sig = sigOf(comment(`file:${FILE_NAME}`, `version:${VERSION}`));
+    for (const [pubArg, sigArg, kinds] of [
+      [undefined, sig, "undefined 与 string"],
+      [pub, Buffer.from(sig), "string 与 object"],
+    ]) {
+      assert.throws(() => verifyTrustedComment(pubArg, sigArg), { message: `公钥文本与签名文本都应为字符串，实际是 ${kinds}` });
     }
   });
 });
