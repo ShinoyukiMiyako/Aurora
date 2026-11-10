@@ -91,6 +91,7 @@ impl Fake {
     pub fn new(outcome: Outcome, work_time: Duration) -> Self {
         let payload = vec![0x5A; PAYLOAD_LEN];
         let exe = vec![0xA5; EXE_LEN];
+        // 载入时要核对头里的数据格式号与能力位，只有 `Header::new` 填的本版本的值过得去
         let header =
             Header::new(&payload, &exe, env!("CARGO_PKG_VERSION")).expect("版本号来自 Cargo.toml");
         Self {
@@ -288,6 +289,9 @@ pub fn session(fake: Fake, sandbox: &Path) -> io::Result<Session> {
 
 #[cfg(test)]
 mod tests {
+    use petalfall_release::data_format::DATA_FORMAT;
+    use petalfall_setup_payload::SHIPPED_CAPS;
+
     use super::*;
     use crate::contract::{FailureCode, InstallMode, Phase};
     use crate::journal::Recovery;
@@ -341,6 +345,14 @@ mod tests {
         );
         assert_eq!(fake.header().exe_len, EXE_LEN as u64);
         assert_eq!(fake.header().version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn the_fake_header_carries_this_builds_data_format_and_caps() {
+        let fake = Fake::new(Outcome::Ok, Duration::ZERO);
+
+        assert_eq!(fake.header().data_format, Some(DATA_FORMAT));
+        assert_eq!(fake.header().caps, Some(SHIPPED_CAPS));
     }
 
     #[test]
