@@ -18,6 +18,9 @@
 //! 所有改动 mods 目录的操作都在该目录的写锁下进行，并在动第一个文件前探测占用（游戏运行时 jar 被
 //! JVM 打开着，Windows 上既不能改名也不能删）。
 //!
+//! 会写实例的每个公开入口都先以「使用」方式核对游戏目录的数据格式记号，再解析实例、碰任何文件或发请求：
+//! 任务中心的重试、列实例被拒之后前端留着的旧列表，都会不经列实例直接调进来，不能指望调用方核对过。
+//!
 //! 玩家拖进来的本地 jar 走 [`Petalfall::add_local_mods`]：同样先进暂存再移进 `mods/`、同样在写锁下、同样记
 //! 历史，但没有平台版本可记，所以不写卷宗，也不顶替已有文件。
 
@@ -35,6 +38,7 @@ use petalfall_modplatform::{
 use serde::Serialize;
 
 use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed, single_blocked};
+use crate::data_format::GuardMode;
 use crate::deps::{InstallPlan, PlannedItem};
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
@@ -218,6 +222,7 @@ impl Petalfall {
         mod_version_id: &str,
         events: Option<&EventSink>,
     ) -> Result<ModInstallOutcome> {
+        self.guard_game_dir(GuardMode::Use).await?;
         emit(
             events,
             CoreEvent::stage(format!(
@@ -250,6 +255,7 @@ impl Petalfall {
         mod_version_id: &str,
         events: Option<&EventSink>,
     ) -> Result<ModInstallOutcome> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dirs = self.resolved_dirs(version_id).await?;
         let path = mod_file_path(&dirs.mods_dir, file_name)?;
         let ledger = self.ledger_store(version_id).load().await?;
@@ -294,6 +300,7 @@ impl Petalfall {
         version_id: &str,
         sources: &[PathBuf],
     ) -> Result<Vec<LocalModOutcome>> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dirs = self.resolved_dirs(version_id).await?;
         let _guard = lock_mods_dir(&dirs.mods_dir).await;
         let mut taken = installed_mod_ids(&dirs).await?;
@@ -353,6 +360,7 @@ impl Petalfall {
         file_name: &str,
         enabled: bool,
     ) -> Result<PathBuf> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dirs = self.resolved_dirs(version_id).await?;
         let _guard = lock_mods_dir(&dirs.mods_dir).await;
         toggle_locked(&dirs.mods_dir, file_name, enabled).await
@@ -369,6 +377,7 @@ impl Petalfall {
         file_names: &[String],
         enabled: bool,
     ) -> Result<Vec<ModToggleOutcome>> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dirs = self.resolved_dirs(version_id).await?;
         let _guard = lock_mods_dir(&dirs.mods_dir).await;
         let mut outcomes = Vec::with_capacity(file_names.len());
@@ -391,6 +400,7 @@ impl Petalfall {
         file_name: &str,
         hold: Option<UpdateHold>,
     ) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dirs = self.resolved_dirs(version_id).await?;
         let path = mod_file_path(&dirs.mods_dir, file_name)?;
         let key = ledger_key(file_name);
@@ -423,6 +433,7 @@ impl Petalfall {
     /// 只删这一个文件：它当初带进来的前置可能也被别的 Mod 依赖着，启动器无从确知，不连带删除。
     /// 文件不在、名字不是 mods 目录里的模组文件、或文件正被占用时整体拒绝，什么都不改。
     pub async fn remove_mod(&self, version_id: &str, file_name: &str) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dirs = self.resolved_dirs(version_id).await?;
         let mods_dir = &dirs.mods_dir;
         let path = mod_file_path(mods_dir, file_name)?;
@@ -1399,7 +1410,10 @@ async fn discard_staging(staging_dir: &Path, events: Option<&EventSink>) {
 mod tests {
     use super::*;
     use crate::config::PetalfallConfig;
+    use crate::data_format::testing::with_fixture;
+    use crate::instances::tests::{NEWER_STAMP, NEWER_WRITER, disk_state, own_format, write_stamp};
     use petalfall_instance::{IsolationOverride, IsolationPolicy, VersionSettings};
+    use petalfall_release::data_format::{StampFile, StampRead, parse_stamp};
     use sha1::{Digest, Sha1};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -3798,5 +3812,175 @@ mod tests {
         assert_eq!(cdn_hits, 1);
         let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
         assert!(!mods_dir.join("jei.jar").exists());
+    }
+
+    // ---- 游戏目录的数据格式记号 ----
+
+    /// 会写实例的公开入口。
+    #[derive(Debug, Clone, Copy)]
+    enum WriteEntry {
+        InstallMod,
+        UpdateMod,
+        AddLocalMods,
+        SetModEnabled,
+        SetModsEnabled,
+        SetModUpdateHold,
+        RemoveMod,
+    }
+
+    const WRITE_ENTRIES: [WriteEntry; 7] = [
+        WriteEntry::InstallMod,
+        WriteEntry::UpdateMod,
+        WriteEntry::AddLocalMods,
+        WriteEntry::SetModEnabled,
+        WriteEntry::SetModsEnabled,
+        WriteEntry::SetModUpdateHold,
+        WriteEntry::RemoveMod,
+    ];
+
+    /// 关卡缺席时每个入口都真的有东西可写：卷宗里有来源的 sodium-v1、没有来源的 manual，平台上挂着
+    /// sodium 的 v2，实例外面还有一个可以拖进来的 jar。交回门面与那个 jar 的路径。
+    async fn instance_behind_the_guard(
+        mc: &Path,
+        outside: &Path,
+        server: &MockServer,
+    ) -> (Petalfall, PathBuf) {
+        mount_sodium(server, "v2", "sodium-v2.jar", b"sodium v2").await;
+        mount_projects(server, &[("sodium", "Sodium")]).await;
+        put_version(mc, "1.21").await;
+        let petalfall = isolated_petalfall(mc, server.uri());
+        let mods_dir = petalfall.resolve_mods_dir("1.21").await.unwrap();
+        tokio::fs::create_dir_all(&mods_dir).await.unwrap();
+        for name in ["sodium-v1.jar", "manual.jar"] {
+            tokio::fs::write(mods_dir.join(name), name.as_bytes())
+                .await
+                .unwrap();
+        }
+        let mut ledger = Ledger::default();
+        ledger.upsert(LedgerEntry {
+            file_name: "sodium-v1.jar".to_owned(),
+            platform: Platform::Modrinth,
+            project_id: "sodium".to_owned(),
+            version_id: "v1".to_owned(),
+            version_number: Some("v1.0".to_owned()),
+            title: Some("Sodium".to_owned()),
+            icon_url: None,
+            sha1: None,
+            installed_at: 1_700_000_000,
+            installed_as_dependency_of: None,
+            update_hold: None,
+        });
+        petalfall.ledger_store("1.21").save(&ledger).await.unwrap();
+        let local_jar = outside.join("lithium.jar");
+        build_mod_jar(&local_jar, "lithium");
+        (petalfall, local_jar)
+    }
+
+    /// 调一次入口，交回它报的错；入口放行了就说明关卡没挡住。
+    async fn refusal_of(petalfall: &Petalfall, entry: WriteEntry, local_jar: &Path) -> CoreError {
+        match entry {
+            WriteEntry::InstallMod => petalfall
+                .install_mod("1.21", Platform::Modrinth, "sodium", "v2", None)
+                .await
+                .unwrap_err(),
+            WriteEntry::UpdateMod => petalfall
+                .update_mod("1.21", "sodium-v1.jar", "v2", None)
+                .await
+                .unwrap_err(),
+            WriteEntry::AddLocalMods => petalfall
+                .add_local_mods("1.21", &[local_jar.to_path_buf()])
+                .await
+                .unwrap_err(),
+            WriteEntry::SetModEnabled => petalfall
+                .set_mod_enabled("1.21", "sodium-v1.jar", false)
+                .await
+                .unwrap_err(),
+            WriteEntry::SetModsEnabled => petalfall
+                .set_mods_enabled(
+                    "1.21",
+                    &["sodium-v1.jar".to_owned(), "manual.jar".to_owned()],
+                    false,
+                )
+                .await
+                .unwrap_err(),
+            WriteEntry::SetModUpdateHold => petalfall
+                .set_mod_update_hold("1.21", "sodium-v1.jar", Some(UpdateHold::Ignored))
+                .await
+                .unwrap_err(),
+            WriteEntry::RemoveMod => petalfall
+                .remove_mod("1.21", "manual.jar")
+                .await
+                .unwrap_err(),
+        }
+    }
+
+    /// 记号比这一版新：每个入口都报游戏目录太新并带出记号里的号与游戏目录，游戏目录（含实例目录与它的
+    /// 启动器元数据目录）里没有一个文件被改、被碰或多出来，平台一个请求都没收到。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_entries_refuse_a_newer_game_dir_before_touching_anything() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let (petalfall, local_jar) =
+            instance_behind_the_guard(tmp.path(), outside.path(), &server).await;
+        let game = petalfall.game_dir().to_path_buf();
+        write_stamp(&game, NEWER_STAMP);
+        let before = disk_state(&game);
+
+        for entry in WRITE_ENTRIES {
+            match with_fixture(own_format(2), refusal_of(&petalfall, entry, &local_jar)).await {
+                CoreError::GameDirDataTooNew {
+                    path,
+                    found,
+                    supported,
+                    written_by,
+                } => {
+                    assert_eq!(path, game, "{entry:?}");
+                    assert_eq!((found, supported), (3, 2), "{entry:?}");
+                    assert_eq!(written_by.as_deref(), Some(NEWER_WRITER), "{entry:?}");
+                }
+                other => panic!("{entry:?} 应报游戏目录太新，实际是 {other:?}"),
+            }
+            assert_eq!(disk_state(&game), before, "{entry:?}");
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                0,
+                "{entry:?}"
+            );
+        }
+    }
+
+    /// 记号读不懂与号是多少无关：不换本版号，生产的这条路上每个入口同样在动手之前挡下。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn write_entries_refuse_an_unreadable_stamp_before_touching_anything() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let (petalfall, local_jar) =
+            instance_behind_the_guard(tmp.path(), outside.path(), &server).await;
+        let game = petalfall.game_dir().to_path_buf();
+        let contents = r#"{"data_format":"3"}"#;
+        write_stamp(&game, contents);
+        let expected = match parse_stamp(StampFile::Contents(contents.as_bytes())) {
+            StampRead::Unreadable { reason } => reason,
+            other => panic!("夹具应当读不懂，实际是 {other:?}"),
+        };
+        let before = disk_state(&game);
+
+        for entry in WRITE_ENTRIES {
+            match refusal_of(&petalfall, entry, &local_jar).await {
+                CoreError::DataFormatUnreadable { path, reason } => {
+                    assert_eq!(path, game, "{entry:?}");
+                    assert_eq!(reason, expected, "{entry:?}");
+                }
+                other => panic!("{entry:?} 应报记号读不懂，实际是 {other:?}"),
+            }
+            assert_eq!(disk_state(&game), before, "{entry:?}");
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                0,
+                "{entry:?}"
+            );
+        }
     }
 }
