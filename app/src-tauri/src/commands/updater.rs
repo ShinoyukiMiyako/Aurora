@@ -304,23 +304,20 @@ pub struct ChannelHeadDto {
     pub date: Option<i64>,
 }
 
-/// 下载的用意：普通更新，或换到另一个通道。
+/// 下载的用意。这一版只有普通更新。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateIntent {
     Update,
-    Switch,
 }
 
 /// 一个版本在本次会话里为什么被拒。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RefusalReason {
-    /// 包认得的数据格式比正在运行的这一版旧，装上读不了现有数据。普通更新与换通道都会有。
+    /// 包认得的数据格式比正在运行的这一版旧，装上读不了现有数据。
     DataTooNew,
-    /// 包认不得换通道安装，只随换通道出现。
-    TargetUnsupported,
-    /// 跟随别的通道时没能把偏好写进配置，只随普通更新出现。
+    /// 跟随别的通道时没能把偏好写进配置。
     PreferenceUnsaved,
 }
 
@@ -409,8 +406,8 @@ impl UpdaterState {
     }
 }
 
-/// 安装前的关卡，「立即安装」与「退出时安装」共用：槽位里要有下好的包，它是普通更新，版本又严格新于正在运行的
-/// `current`，否则报 `update_not_ready`、不交给安装程序。
+/// 安装前的关卡，「立即安装」与「退出时安装」共用：槽位里要有下好的包，版本又严格新于正在运行的 `current`，
+/// 否则报 `update_not_ready`、不交给安装程序。
 ///
 /// 偏好、见过的版本与跟随规则已在下载前的重查里按同一个代号核过；改偏好会清掉槽位里的包、代号加一，下载开始之后
 /// 才改的又落不进槽位，所以包还在就说明那些条件没变。关卡因此只读槽位，退出路径（同步、拿不到门面的锁）也能做。
@@ -420,18 +417,6 @@ fn installable<'s, U: ReleaseVersion>(
 ) -> Result<&'s Downloaded<U>, CommandError> {
     let ready = slot.ready()?;
     let version = ready.update.release_version();
-    if ready.intent != UpdateIntent::Update {
-        tracing::error!(
-            version,
-            channel = ready.channel.as_str(),
-            intent = ?ready.intent,
-            "下好的包不是普通更新，不从这里交给安装程序"
-        );
-        return Err(CommandError::new(
-            code::UPDATE_NOT_READY,
-            "下好的包不是普通更新，不能从这里安装",
-        ));
-    }
     let parsed = Version::parse(version).expect("槽位里包的版本由清单里解析出的 semver 转成");
     if !compare_versions(&parsed, current).is_gt() {
         tracing::error!(
@@ -1380,7 +1365,7 @@ fn source_stale(
 
 /// 把一次取清单的结果落成结论，检查和下载前的重查共用。交回各通道的结果与给槽位的结论，由调用方落进槽位。
 ///
-/// - 各通道的结果按 [`conclude`] 合成，挑候选时排除本次会话被拒的版本（意图为普通更新的那些）。
+/// - 各通道的结果按 [`conclude`] 合成，挑候选时排除本次会话被拒的版本。
 /// - 验过、又高于本机记录的清单头并进见过的版本（[`newly_seen`]）；挑中别的通道的候选、偏好又是缺省时，同一次把
 ///   偏好写成本包的通道（[`must_save_preference`]），两者合成一次落盘（[`save_check_record`]）。偏好写不进去时，
 ///   跨通道的候选逐个记入被拒的版本（`preference_unsaved`）再挑，直到挑出本包通道的候选或没有候选；见过的版本
@@ -1410,7 +1395,6 @@ async fn conclude_fetched<U: ReleaseVersion>(
         let refused: Vec<(Channel, Version)> = slot
             .refused()
             .iter()
-            .filter(|entry| entry.intent == UpdateIntent::Update)
             .map(|entry| {
                 let version = Version::parse(&entry.version)
                     .expect("被拒的版本记的是候选的版本原文，由 semver 版本转成");

@@ -895,7 +895,7 @@ pub(crate) mod tests {
     }
 
     /// 固定种子随机地交替各种操作，含拿改偏好之前的旧号来落的。每一步之后核对：下好的包一定就是记着的候选；
-    /// 「退出时安装」打开时一定有下好的包；被拒的版本都记 `update` 且不重复；拿旧号的操作什么都不改；
+    /// 「退出时安装」打开时一定有下好的包；被拒的版本不重复；拿旧号的操作什么都不改；
     /// 代号从 0 起，只在改偏好时加一。
     #[test]
     fn random_operations_keep_the_slot_consistent() {
@@ -1015,18 +1015,11 @@ pub(crate) mod tests {
                     Some((ready.update.0, ready.channel)),
                     "第 {step} 步"
                 );
-                assert_eq!(ready.intent, UpdateIntent::Update, "第 {step} 步");
             }
             if slot.install_on_exit {
                 assert!(slot.ready().is_ok(), "第 {step} 步");
             }
             let refused = slot.refused();
-            assert!(
-                refused
-                    .iter()
-                    .all(|entry| entry.intent == UpdateIntent::Update),
-                "第 {step} 步"
-            );
             assert!(
                 refused
                     .iter()
