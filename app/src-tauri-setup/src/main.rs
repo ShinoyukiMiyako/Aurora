@@ -116,7 +116,10 @@ fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>
     log.info(format_args!("启动，WebView2：{webview:?}"));
     // 赶在互斥那关之前记下：被转发掉的那个进程带的是什么参数，日志里也要查得到
     let parsed = cli::parse(std::env::args_os().skip(1));
-    log.info(format_args!("启动方式：{:?}", parsed.launch));
+    log.info(format_args!(
+        "启动方式：{:?}，换通道开关：{}",
+        parsed.launch, parsed.channel_switch
+    ));
     if !parsed.ignored.is_empty() {
         log.warn(format_args!(
             "这些参数不起作用，已忽略：{:?}",
@@ -155,6 +158,8 @@ fn run(webview: Webview, log: &Arc<SetupLog>) -> Result<ExitCode, Box<dyn Error>
         Arc::clone(&instance),
         Arc::clone(log),
         parsed.launch,
+        parsed.channel_switch,
+        log::local_app_data()?,
     ));
 
     if let Webview::Unavailable { reason } = &webview {

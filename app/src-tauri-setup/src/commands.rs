@@ -6,24 +6,28 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use petalfall_release::install_policy::channel_of;
+use petalfall_release::data_format::{DATA_FORMAT, StampVerdict};
+use petalfall_release::install_policy::{
+    self, ChannelRelation, Initiation, KindJudgment, channel_of,
+};
 use tauri::ipc::InvokeError;
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 
 use crate::boot::{self, Instance};
 use crate::cli::{Launch, UpdateRequest};
 use crate::contract::{
-    Channel, DirCheck, ExistingKind, Failure, InstallMode, InstallPlan, PROGRESS_EVENT, Probe,
-    Progress, UpdateLaunch,
+    Channel, DirCheck, Existing, ExistingKind, Failure, InstallMode, InstallPlan, NewerReason,
+    PROGRESS_EVENT, Probe, Progress, UpdateLaunch,
 };
-use crate::existing::{self, Registry};
+use crate::datamark::{self, DataGate};
+use crate::existing::{self, Installation, Registry};
 use crate::journal::{self, Recovery};
 use crate::launcher::Opened;
-use crate::log::{self, SetupLog};
+use crate::log::SetupLog;
 use crate::runner::{Reporter, Session, StandardRun, Target};
 use crate::target::{self, APP_FOLDER, SpaceNeed, SystemEnv, TargetEnv};
 
@@ -42,6 +46,10 @@ pub struct SetupContext {
     instance: Arc<Instance>,
     log: Arc<SetupLog>,
     launch: Launch,
+    /// 判定表看的发起方式，由 `launch` 与换通道开关折成。
+    initiation: Initiation,
+    /// `%LOCALAPPDATA%`：默认安装目录在它下面，登记目录写不进时启动器也落到它下面的数据根。
+    local_app_data: PathBuf,
     located: Mutex<Located>,
     /// 用户选了原生向导，或窗口起不来时的退路。窗口关掉后进程还要等它退出：临时文件要靠守卫句柄钉到那时。
     wizard: Mutex<Option<StandardRun>>,
@@ -55,12 +63,17 @@ impl SetupContext {
         instance: Arc<Instance>,
         log: Arc<SetupLog>,
         launch: Launch,
+        channel_switch: bool,
+        local_app_data: PathBuf,
     ) -> Self {
+        let initiation = initiation_of(&launch, channel_switch);
         Self {
             session,
             instance,
             log,
             launch,
+            initiation,
+            local_app_data,
             located: Mutex::default(),
             wizard: Mutex::default(),
             installing: AtomicBool::new(false),
@@ -111,24 +124,78 @@ impl SetupContext {
         }
     }
 
+    /// 数据格式关拦下用户时，日志里要查得到读了哪几个根、哪个记号定的结论，以及为什么连回落的数据根也读了。
+    fn note_gate(&self, when: &str, gate: &DataGate) {
+        self.log.info(format_args!(
+            "{when}的数据格式关：读了 {:?}，定下结论的记号 {}，结论 {:?}",
+            gate.roots,
+            gate.stamp.display(),
+            gate.verdict
+        ));
+        if let Some(reason) = &gate.fallback_reason {
+            self.log.warn(format_args!(
+                "{when}时登记目录的探针没过，回落的数据根也读了：{reason}"
+            ));
+        }
+    }
+
+    /// 带了换通道开关、这次却不是无人值守的换通道安装：照判定表处理，开关只在日志里记一笔。
+    fn note_switch(&self, probe: &Probe) {
+        if self.initiation != Initiation::UpdateWithSwitch
+            || probe.unattended == Some(InstallMode::Switch)
+        {
+            return;
+        }
+        if probe.newer_reason == Some(NewerReason::SameChannel) {
+            self.log.warn("带了换通道开关，同通道不放行");
+            return;
+        }
+        self.log.warn(format_args!(
+            "带了换通道开关，这次不是换到更慢通道的安装，开关不起作用：种类 {:?}，数据格式关 {:?}",
+            probe.existing.as_ref().map(|existing| existing.kind),
+            probe.data_block.as_ref().map(|block| block.problem)
+        ));
+    }
+
     pub fn probe(&self) -> io::Result<Probe> {
         self.sweep_temp();
         let recovery = self.session.recover()?;
         self.note_recovery(&recovery);
 
-        let default_dir = log::local_app_data()?
+        let default_dir = self
+            .local_app_data
             .join(APP_FOLDER)
             .to_string_lossy()
             .into_owned();
-        let probe = assemble_probe(
+        let started = Started {
+            update: self.launch.update().map(UpdateRequest::launch_info),
+            initiation: self.initiation,
+            elevated: boot::is_elevated()?,
+        };
+        let Assembled {
+            probe,
+            relation,
+            gate,
+        } = assemble_probe(
             self.session.registry(),
+            &self.local_app_data,
             &self.session.header().version,
             self.need().target,
             default_dir.clone(),
             recovery,
-            boot::is_elevated()?,
-            self.launch.update().map(UpdateRequest::launch_info),
+            started,
         )?;
+        self.log.info(format_args!(
+            "判定：发起方式 {:?}，两边的通道 {relation:?}",
+            self.initiation
+        ));
+        match &gate {
+            Some(gate) => self.note_gate("探测", gate),
+            None => self
+                .log
+                .info("没有登记安装，探测时不读数据格式记号，首装的目标目录在安装前复核"),
+        }
+        self.note_switch(&probe);
         self.log.info(format_args!("探测结果：{probe:?}"));
 
         *self.located.lock().unwrap_or_else(PoisonError::into_inner) = Located {
@@ -222,22 +289,90 @@ impl SetupContext {
     }
 }
 
-/// 把这台电脑的现状折成探测结果。顺序不能换：半装记录要盖在现有安装的判定之上。
+/// 命令行折成判定表的发起方式。换通道开关只在更新模式下解析得出来，交互启动时它总是假。
+fn initiation_of(launch: &Launch, channel_switch: bool) -> Initiation {
+    match (launch, channel_switch) {
+        (Launch::Interactive, _) => Initiation::Interactive,
+        (Launch::Update(_), false) => Initiation::Update,
+        (Launch::Update(_), true) => Initiation::UpdateWithSwitch,
+    }
+}
+
+/// 这次是怎么被拉起的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Started {
+    /// 交给界面的那一半，交互启动时为 `None`。
+    update: Option<UpdateLaunch>,
+    /// 判定用的那一半，换通道开关只体现在这里。
+    initiation: Initiation,
+    elevated: bool,
+}
+
+/// 探测折出来的东西：交给界面的探测结果，以及只进日志的判定细节。
+#[derive(Debug)]
+struct Assembled {
+    probe: Probe,
+    relation: ChannelRelation,
+    /// 有登记安装时数据格式关读过的根与结论；没有时为 `None`，首装的最终目录要到安装前复核时才读。
+    gate: Option<DataGate>,
+}
+
+/// 现有安装的事实与种类，探测和直接交给 NSIS 之前的判定共用：先读事实，再按版本、通道与发起方式定种类。
+fn judge_installed(
+    registry: &dyn Registry,
+    payload_version: &str,
+    initiation: Initiation,
+) -> io::Result<(Option<Installation>, KindJudgment)> {
+    let found = existing::read_installation(registry)?;
+    let judged = install_policy::judge_kind(
+        found.as_ref().map(Installation::as_installed),
+        payload_version,
+        initiation,
+    );
+    Ok((found, judged))
+}
+
+/// 带上判出的种类交给界面。判定表只在有安装时给种类，两边对不上说明接错了线。
+fn existing_of(
+    found: Option<Installation>,
+    kind: Option<install_policy::ExistingKind>,
+) -> Option<Existing> {
+    match (found, kind) {
+        (Some(found), Some(kind)) => Some(found.into_existing(kind.into())),
+        (None, None) => None,
+        (found, kind) => unreachable!("判定表只在有安装时给种类：{found:?}，{kind:?}"),
+    }
+}
+
+/// 半装恢复改的是交给界面的种类，后面的模式判定要拿回判定表自己的类型。
+fn policy_kind(kind: ExistingKind) -> install_policy::ExistingKind {
+    match kind {
+        ExistingKind::Upgrade => install_policy::ExistingKind::Upgrade,
+        ExistingKind::Same => install_policy::ExistingKind::Same,
+        ExistingKind::Newer => install_policy::ExistingKind::Newer,
+        ExistingKind::Broken => install_policy::ExistingKind::Broken,
+        ExistingKind::Switch => install_policy::ExistingKind::Switch,
+    }
+}
+
+/// 把这台电脑的现状折成探测结果。顺序不能换：种类先按版本、通道与发起方式定下，半装记录再盖在它之上；
+/// 数据格式关看恢复之后仍登记着的安装；允许的模式、无人值守的模式与要不要写交接记录都按恢复之后的种类算，
+/// 被改成 broken 的那次只能「重新安装」，不再是「换到」页，也就不写交接记录。
 fn assemble_probe(
     registry: &dyn Registry,
+    local_app_data: &Path,
     payload_version: &str,
     required_bytes: u64,
     default_dir: String,
     recovery: Recovery,
-    elevated: bool,
-    update: Option<UpdateLaunch>,
-) -> io::Result<Probe> {
-    let existing = existing::detect(registry, payload_version)?;
+    started: Started,
+) -> io::Result<Assembled> {
+    let (found, judged) = judge_installed(registry, payload_version, started.initiation)?;
+    let existing = existing_of(found, judged.kind);
     let leftover = match existing {
         Some(_) => None,
         None => existing::leftover_dir(registry)?,
     };
-    // 种类只按版本比：分不出 newer 的原因、判不出 switch，也不读数据格式记号、不写交接记录
     let probe = Probe {
         payload_version: payload_version.to_owned(),
         payload_channel: channel_of(payload_version).map(Channel::from),
@@ -245,10 +380,10 @@ fn assemble_probe(
         required_bytes,
         existing,
         interrupted: false,
-        elevated,
-        update,
-        newer_reason: None,
-        // 半装恢复可能改掉种类，允许的模式等它定了再算
+        elevated: started.elevated,
+        update: started.update,
+        newer_reason: judged.newer_reason.map(NewerReason::from),
+        // 半装恢复可能改掉种类，模式相关的几项等它和数据格式关都定了再填
         allowed_modes: Vec::new(),
         unattended: None,
         handoff: false,
@@ -258,25 +393,35 @@ fn assemble_probe(
         Recovery::Interrupted { journal, .. } => journal::mark_interrupted(probe, &journal),
         Recovery::Clean | Recovery::Completed | Recovery::Discarded { .. } => probe,
     };
-    Ok(with_allowed_modes(probe))
-}
-
-/// 按半装恢复之后的种类定允许的模式：newer 什么都不能装。更新插件拉起时只有升级不经页面直接装，
-/// 同版本、残缺和没有安装都说明插件看到的和登记的对不上，退回交互的页面让用户看清再定。
-fn with_allowed_modes(probe: Probe) -> Probe {
-    let mode = match probe.existing.as_ref().map(|existing| existing.kind) {
-        None => Some(InstallMode::Fresh),
-        Some(ExistingKind::Upgrade) => Some(InstallMode::Upgrade),
-        Some(ExistingKind::Same | ExistingKind::Broken) => Some(InstallMode::Repair),
-        Some(ExistingKind::Newer) => None,
-        Some(ExistingKind::Switch) => unreachable!("种类只按版本比，判不出 switch"),
+    let gate = probe.existing.as_ref().map(|existing| {
+        datamark::inspect_installed(Path::new(&existing.dir), local_app_data, DATA_FORMAT)
+    });
+    // 首装的最终目录要到选目录时才定，这里放行；选目录与安装前复核在那个目录上把关
+    let verdict = match &gate {
+        Some(gate) => gate.verdict.clone(),
+        None => StampVerdict::Pass,
     };
-    let unattended = mode.filter(|mode| *mode == InstallMode::Upgrade && probe.update.is_some());
-    Probe {
-        allowed_modes: mode.into_iter().collect(),
-        unattended,
-        ..probe
-    }
+    let kind = probe
+        .existing
+        .as_ref()
+        .map(|existing| policy_kind(existing.kind));
+    let modes = install_policy::judge_modes(kind, judged.relation, &verdict, started.initiation);
+    let data_block = gate.as_ref().and_then(|gate| gate.block.clone());
+    Ok(Assembled {
+        probe: Probe {
+            allowed_modes: modes
+                .allowed_modes
+                .into_iter()
+                .map(InstallMode::from)
+                .collect(),
+            unattended: modes.unattended.map(InstallMode::from),
+            handoff: modes.handoff,
+            data_block,
+            ..probe
+        },
+        relation: judged.relation,
+        gate,
+    })
 }
 
 /// 窗口起不来时交给 NSIS 的参数。更新模式的开关和插件默认 passive 带的一样，顺序沿用 2.10.1（见 cli.rs 的
@@ -399,8 +544,10 @@ mod tests {
     #[cfg(debug_assertions)]
     use std::sync::Mutex;
 
+    use petalfall_release::data_format::{STAMP_FILE, stamp_contents};
+
     use super::*;
-    use crate::contract::{Existing, ExistingKind};
+    use crate::contract::{DataBlock, DataProblem};
     use crate::existing::{
         APP_EXE, CONFIG_FILE, DISPLAY_VERSION, INSTALL_LOCATION, LAST_DIR_KEY, LEGACY_LAST_DIR_KEY,
         UNINSTALL_KEY,
@@ -408,8 +555,22 @@ mod tests {
     use crate::journal::Journal;
 
     const PAYLOAD: &str = "0.2.0";
+    /// 假的 `%LOCALAPPDATA%`。用例里登记目录都是写得进的临时目录，探针一过就不会读到这里。
+    const LOCAL_APP_DATA: &str = r"C:\Users\a\AppData\Local";
     const DEFAULT_DIR: &str = r"C:\Users\a\AppData\Local\Petalfall";
     const REQUIRED: u64 = 52_428_800;
+
+    const INITIATIONS: [Initiation; 3] = [
+        Initiation::Interactive,
+        Initiation::Update,
+        Initiation::UpdateWithSwitch,
+    ];
+
+    /// 缺 `data_format` 的记号读不懂，原因是固定的一句话。
+    const NO_NUMBER: &str = r#"{"written_by":"1.0.0"}"#;
+    const NO_NUMBER_REASON: &str = "缺 data_format";
+    /// 把记号抬到比安装包高的那个版本。
+    const RAISED_BY: &str = "1.1.0-dev.57";
 
     #[derive(Default)]
     struct Table(HashMap<(String, Option<String>), String>);
@@ -435,22 +596,57 @@ mod tests {
         }
     }
 
-    fn assemble(registry: &Table, recovery: Recovery) -> Probe {
+    /// 按发起方式拉起，更新模式都带 `/R`。
+    fn started(initiation: Initiation) -> Started {
+        let update = match initiation {
+            Initiation::Interactive => None,
+            Initiation::Update | Initiation::UpdateWithSwitch => {
+                Some(UpdateLaunch { relaunch: true })
+            }
+        };
+        Started {
+            update,
+            initiation,
+            elevated: false,
+        }
+    }
+
+    fn assemble_with(
+        registry: &Table,
+        payload: &str,
+        recovery: Recovery,
+        started: Started,
+    ) -> Assembled {
         assemble_probe(
             registry,
-            PAYLOAD,
+            Path::new(LOCAL_APP_DATA),
+            payload,
             REQUIRED,
             DEFAULT_DIR.to_owned(),
             recovery,
-            false,
-            None,
+            started,
         )
         .unwrap()
     }
 
+    fn assemble(registry: &Table, recovery: Recovery) -> Probe {
+        assemble_with(
+            registry,
+            PAYLOAD,
+            recovery,
+            started(Initiation::Interactive),
+        )
+        .probe
+    }
+
     fn interrupted(dir: &Path, was_fresh: bool) -> Recovery {
+        interrupted_by(dir, was_fresh, PAYLOAD)
+    }
+
+    /// `version` 是留下半装记录的那个安装包的版本。
+    fn interrupted_by(dir: &Path, was_fresh: bool, version: &str) -> Recovery {
         Recovery::Interrupted {
-            journal: Journal::begin(dir, was_fresh, PAYLOAD),
+            journal: Journal::begin(dir, was_fresh, version),
             mismatches: vec![],
         }
     }
@@ -460,6 +656,66 @@ mod tests {
         std::fs::write(dir.path().join(APP_EXE), b"MZ").unwrap();
         let text = dir.path().to_str().unwrap().to_owned();
         (dir, text)
+    }
+
+    /// 卸载项还在、程序文件却不在的安装目录。
+    fn hollow_dir() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().to_str().unwrap().to_owned();
+        (dir, text)
+    }
+
+    fn stamp_path(dir: &str) -> String {
+        Path::new(dir).join(STAMP_FILE).to_str().unwrap().to_owned()
+    }
+
+    /// 数据被 [`RAISED_BY`] 抬到比安装包高一号时探测结果里的拦截详情。
+    fn too_new_at(dir: &str) -> DataBlock {
+        DataBlock {
+            problem: DataProblem::TooNew,
+            path: stamp_path(dir),
+            recorded: Some(DATA_FORMAT + 1),
+            supported: DATA_FORMAT,
+            reason: None,
+            written_by: Some(RAISED_BY.to_owned()),
+            written_by_channel: Some(Channel::Dev),
+        }
+    }
+
+    fn unreadable_at(dir: &str) -> DataBlock {
+        DataBlock {
+            problem: DataProblem::Unreadable,
+            path: stamp_path(dir),
+            recorded: None,
+            supported: DATA_FORMAT,
+            reason: Some(NO_NUMBER_REASON.to_owned()),
+            written_by: None,
+            written_by_channel: None,
+        }
+    }
+
+    /// 数据根里的记号：太新的，或读不懂的。
+    #[derive(Debug, Clone, Copy)]
+    enum Stamp {
+        TooNew,
+        Unreadable,
+    }
+
+    impl Stamp {
+        fn put(self, dir: &str) {
+            let contents = match self {
+                Stamp::TooNew => stamp_contents(DATA_FORMAT + 1, Some(RAISED_BY)),
+                Stamp::Unreadable => NO_NUMBER.to_owned(),
+            };
+            std::fs::write(Path::new(dir).join(STAMP_FILE), contents).unwrap();
+        }
+
+        fn block_at(self, dir: &str) -> DataBlock {
+            match self {
+                Stamp::TooNew => too_new_at(dir),
+                Stamp::Unreadable => unreadable_at(dir),
+            }
+        }
     }
 
     #[test]
@@ -488,18 +744,33 @@ mod tests {
 
     #[test]
     fn elevation_reaches_the_probe() {
-        let probe = assemble_probe(
-            &Table::default(),
-            PAYLOAD,
-            REQUIRED,
-            DEFAULT_DIR.to_owned(),
-            Recovery::Clean,
-            true,
-            None,
-        )
-        .unwrap();
+        let elevated = Started {
+            elevated: true,
+            ..started(Initiation::Interactive)
+        };
+
+        let probe = assemble_with(&Table::default(), PAYLOAD, Recovery::Clean, elevated).probe;
 
         assert!(probe.elevated);
+    }
+
+    #[test]
+    fn the_initiation_follows_the_launch_and_the_switch() {
+        let update = Launch::Update(UpdateRequest {
+            relaunch: true,
+            launcher_args: Vec::new(),
+        });
+
+        assert_eq!(
+            initiation_of(&Launch::Interactive, false),
+            Initiation::Interactive
+        );
+        assert_eq!(
+            initiation_of(&Launch::Interactive, true),
+            Initiation::Interactive
+        );
+        assert_eq!(initiation_of(&update, false), Initiation::Update);
+        assert_eq!(initiation_of(&update, true), Initiation::UpdateWithSwitch);
     }
 
     /// 前端靠这个字段决定跳过向导；断在半截的升级也可能是插件拉起的，盖上半装记录后字段不能丢。
@@ -520,17 +791,18 @@ mod tests {
                     interrupted(Path::new(&dir), false),
                 ),
             ];
+            let initiation = match update {
+                None => Initiation::Interactive,
+                Some(_) => Initiation::Update,
+            };
             for (registry, recovery) in cases {
-                let probe = assemble_probe(
-                    &registry,
-                    PAYLOAD,
-                    REQUIRED,
-                    DEFAULT_DIR.to_owned(),
-                    recovery,
-                    false,
+                let launched = Started {
                     update,
-                )
-                .unwrap();
+                    initiation,
+                    elevated: false,
+                };
+
+                let probe = assemble_with(&registry, PAYLOAD, recovery, launched).probe;
 
                 assert_eq!(probe.update, update, "{probe:?}");
             }
@@ -670,19 +942,19 @@ mod tests {
     #[test]
     fn allowed_modes_follow_the_kind_left_after_recovery() {
         let (_guard, dir) = app_dir();
-        let update = Some(UpdateLaunch { relaunch: true });
+        let update = Initiation::Update;
         let cases = [
             (
                 Table::default(),
                 Recovery::Clean,
-                None,
+                Initiation::Interactive,
                 vec![InstallMode::Fresh],
                 None,
             ),
             (
                 Table::installed(&dir, "0.1.0"),
                 Recovery::Clean,
-                None,
+                Initiation::Interactive,
                 vec![InstallMode::Upgrade],
                 None,
             ),
@@ -701,13 +973,6 @@ mod tests {
                 None,
             ),
             (
-                Table::installed(&dir, "0.3.0-dev.1"),
-                Recovery::Clean,
-                update,
-                vec![],
-                None,
-            ),
-            (
                 Table::installed(&dir, "0.1.0"),
                 interrupted(Path::new(&dir), false),
                 update,
@@ -722,17 +987,8 @@ mod tests {
                 None,
             ),
         ];
-        for (registry, recovery, update, allowed, unattended) in cases {
-            let probe = assemble_probe(
-                &registry,
-                PAYLOAD,
-                REQUIRED,
-                DEFAULT_DIR.to_owned(),
-                recovery,
-                false,
-                update,
-            )
-            .unwrap();
+        for (registry, recovery, initiation, allowed, unattended) in cases {
+            let probe = assemble_with(&registry, PAYLOAD, recovery, started(initiation)).probe;
 
             assert_eq!(probe.allowed_modes, allowed, "{probe:?}");
             assert_eq!(probe.unattended, unattended, "{probe:?}");
@@ -746,21 +1002,325 @@ mod tests {
     fn the_probe_names_the_channels_of_both_versions() {
         let (_guard, dir) = app_dir();
 
-        let probe = assemble_probe(
+        let probe = assemble_with(
             &Table::installed(&dir, "1.1.0-dev.61"),
             "1.0.0-beta.5",
-            REQUIRED,
-            DEFAULT_DIR.to_owned(),
             Recovery::Clean,
-            false,
-            None,
+            started(Initiation::Interactive),
         )
-        .unwrap();
+        .probe;
 
         assert_eq!(probe.payload_channel, Some(Channel::Beta));
         let existing = probe.existing.unwrap();
-        assert_eq!(existing.kind, ExistingKind::Newer);
+        assert_eq!(existing.kind, ExistingKind::Switch);
         assert_eq!(existing.channel, Some(Channel::Dev));
+    }
+
+    /// 判定表一行在一种发起方式下，探测结果里应有的种类、newer 的原因、允许的模式、无人值守的模式与交接记录。
+    #[derive(Debug, Clone, Copy)]
+    struct Row {
+        kind: Option<ExistingKind>,
+        reason: Option<NewerReason>,
+        allowed: Option<InstallMode>,
+        unattended: Option<InstallMode>,
+        handoff: bool,
+    }
+
+    fn may(
+        kind: Option<ExistingKind>,
+        mode: InstallMode,
+        unattended: Option<InstallMode>,
+        handoff: bool,
+    ) -> Row {
+        Row {
+            kind,
+            reason: None,
+            allowed: Some(mode),
+            unattended,
+            handoff,
+        }
+    }
+
+    fn newer(reason: NewerReason) -> Row {
+        Row {
+            kind: Some(ExistingKind::Newer),
+            reason: Some(reason),
+            allowed: None,
+            unattended: None,
+            handoff: false,
+        }
+    }
+
+    /// 已装的事实：版本与程序文件在不在；`None` 是没有安装。
+    type Installed = Option<(&'static str, bool)>;
+
+    /// 判定表每行各取一例，三列依次是交互、更新、更新并带换通道开关。全表穷举在共用包里，这里只钉住
+    /// 探测把事实、半装恢复与数据格式关接到判定表上的方式。
+    fn table_rows() -> [(&'static str, Installed, &'static str, [Row; 3]); 10] {
+        use ExistingKind as K;
+        use InstallMode as M;
+        use NewerReason as R;
+
+        let upgrade = |handoff| may(Some(K::Upgrade), M::Upgrade, None, handoff);
+        let unattended_upgrade = may(Some(K::Upgrade), M::Upgrade, Some(M::Upgrade), false);
+        let repair = |kind| may(Some(kind), M::Repair, None, false);
+        [
+            (
+                "1",
+                Some(("1.0.0-dev.5", true)),
+                "1.0.0-dev.6",
+                [upgrade(false), unattended_upgrade, unattended_upgrade],
+            ),
+            (
+                "2a",
+                Some(("1.0.0-beta.3", true)),
+                "1.0.0-dev.60",
+                [upgrade(true), unattended_upgrade, unattended_upgrade],
+            ),
+            (
+                "2b",
+                Some(("1.0.0-beta.4", true)),
+                "1.0.0",
+                [upgrade(false), unattended_upgrade, unattended_upgrade],
+            ),
+            (
+                "3",
+                Some(("1.0.0-dev.6", true)),
+                "1.0.0-dev.6",
+                [repair(K::Same); 3],
+            ),
+            (
+                "4",
+                Some(("1.0.0-dev.60", true)),
+                "1.0.0-dev.55",
+                [newer(R::SameChannel); 3],
+            ),
+            (
+                "5",
+                Some(("1.1.0-dev.61", true)),
+                "1.0.0-beta.5",
+                [
+                    may(Some(K::Switch), M::Switch, None, true),
+                    newer(R::SlowerChannel),
+                    may(Some(K::Switch), M::Switch, Some(M::Switch), false),
+                ],
+            ),
+            (
+                "6",
+                Some(("1.0.0", true)),
+                "1.0.0-beta.4",
+                [newer(R::FasterChannel); 3],
+            ),
+            (
+                "7",
+                Some(("2.0.0-rc.1", true)),
+                "1.0.0",
+                [newer(R::UnknownChannel); 3],
+            ),
+            (
+                "8",
+                Some(("1.0.0-dev.9", false)),
+                "1.0.0-dev.6",
+                [repair(K::Broken); 3],
+            ),
+            (
+                "9",
+                None,
+                "1.0.0-dev.6",
+                [may(None, M::Fresh, None, false); 3],
+            ),
+        ]
+    }
+
+    /// 按已装的事实摆好注册表与安装目录。返回的临时目录要活到用例结束。
+    fn machine_with(installed: Installed) -> (tempfile::TempDir, String, Table) {
+        let (guard, dir) = match installed {
+            Some((_, false)) | None => hollow_dir(),
+            Some((_, true)) => app_dir(),
+        };
+        let registry = match installed {
+            Some((version, _)) => Table::installed(&dir, version),
+            None => Table::default(),
+        };
+        (guard, dir, registry)
+    }
+
+    #[test]
+    fn every_row_of_the_table_reaches_the_probe_under_each_initiation() {
+        for (row, installed, payload, expected) in table_rows() {
+            for (initiation, expected) in INITIATIONS.into_iter().zip(expected) {
+                let (_guard, _dir, registry) = machine_with(installed);
+                let context = format!("第 {row} 行，{initiation:?}");
+
+                let probe =
+                    assemble_with(&registry, payload, Recovery::Clean, started(initiation)).probe;
+
+                assert_eq!(
+                    probe.existing.as_ref().map(|existing| existing.kind),
+                    expected.kind,
+                    "{context}"
+                );
+                assert_eq!(probe.newer_reason, expected.reason, "{context}");
+                assert_eq!(
+                    probe.allowed_modes,
+                    Vec::from_iter(expected.allowed),
+                    "{context}"
+                );
+                assert_eq!(probe.unattended, expected.unattended, "{context}");
+                assert_eq!(probe.handoff, expected.handoff, "{context}");
+                assert_eq!(probe.data_block, None, "{context}");
+            }
+        }
+    }
+
+    /// 数据关先于一切：升级、换通道、修复都一样，什么模式都不给，也不写交接记录；种类照判，界面才知道给不给「打开落樱」。
+    #[test]
+    fn data_newer_than_the_package_or_unreadable_leaves_nothing_to_install() {
+        let rows = [
+            ("1", ("1.0.0-dev.5", true), "1.0.0-dev.6"),
+            ("2a", ("1.0.0-beta.3", true), "1.0.0-dev.60"),
+            ("3", ("1.0.0-dev.6", true), "1.0.0-dev.6"),
+            ("5", ("1.1.0-dev.61", true), "1.0.0-beta.5"),
+            ("8", ("1.0.0-dev.9", false), "1.0.0-dev.6"),
+        ];
+        for (row, installed, payload) in rows {
+            for stamp in [Stamp::TooNew, Stamp::Unreadable] {
+                for initiation in INITIATIONS {
+                    let (_guard, dir, registry) = machine_with(Some(installed));
+                    let clean =
+                        assemble_with(&registry, payload, Recovery::Clean, started(initiation))
+                            .probe;
+                    stamp.put(&dir);
+                    let context = format!("第 {row} 行，{stamp:?}，{initiation:?}");
+
+                    let probe =
+                        assemble_with(&registry, payload, Recovery::Clean, started(initiation))
+                            .probe;
+
+                    assert_eq!(probe.data_block, Some(stamp.block_at(&dir)), "{context}");
+                    assert_eq!(probe.allowed_modes, Vec::new(), "{context}");
+                    assert_eq!(probe.unattended, None, "{context}");
+                    assert!(!probe.handoff, "{context}");
+                    assert_eq!(probe.existing, clean.existing, "{context}");
+                    assert_eq!(probe.newer_reason, clean.newer_reason, "{context}");
+                }
+            }
+        }
+    }
+
+    /// 记号与安装包认得的号相同时照常放行。
+    #[test]
+    fn a_stamp_at_the_packages_own_format_lets_the_upgrade_through() {
+        let (_guard, dir, registry) = machine_with(Some(("1.0.0-dev.5", true)));
+        std::fs::write(
+            Path::new(&dir).join(STAMP_FILE),
+            stamp_contents(DATA_FORMAT, Some("1.0.0-dev.5")),
+        )
+        .unwrap();
+
+        let assembled = assemble_with(
+            &registry,
+            "1.0.0-dev.6",
+            Recovery::Clean,
+            started(Initiation::Update),
+        );
+
+        assert_eq!(assembled.probe.allowed_modes, vec![InstallMode::Upgrade]);
+        assert_eq!(assembled.probe.unattended, Some(InstallMode::Upgrade));
+        assert_eq!(assembled.probe.data_block, None);
+        let gate = assembled.gate.expect("有登记安装就要过数据格式关");
+        assert_eq!(gate.roots, vec![PathBuf::from(&dir)]);
+        assert_eq!(gate.stamp, Path::new(&dir).join(STAMP_FILE));
+        assert_eq!(gate.verdict, StampVerdict::Pass);
+    }
+
+    /// 交接记录看半装恢复之后的种类：改成 broken 或首装的那次显示「重新安装」，不再是「换到」页。
+    #[test]
+    fn the_handoff_follows_the_kind_left_after_recovery() {
+        let faster = (("1.0.0-beta.3", true), "1.0.0-dev.60");
+        let slower_and_earlier = (("1.1.0-dev.61", true), "1.0.0-beta.5");
+        let cases = [
+            (
+                faster,
+                None,
+                Some(ExistingKind::Upgrade),
+                vec![InstallMode::Upgrade],
+                true,
+            ),
+            (
+                faster,
+                Some(false),
+                Some(ExistingKind::Broken),
+                vec![InstallMode::Repair],
+                false,
+            ),
+            (faster, Some(true), None, vec![InstallMode::Fresh], false),
+            (
+                slower_and_earlier,
+                None,
+                Some(ExistingKind::Switch),
+                vec![InstallMode::Switch],
+                true,
+            ),
+            // 已装的比载荷新时半装记录按过期处理，换通道保持原判
+            (
+                slower_and_earlier,
+                Some(false),
+                Some(ExistingKind::Switch),
+                vec![InstallMode::Switch],
+                true,
+            ),
+        ];
+        for ((installed, payload), half, kind, allowed, handoff) in cases {
+            let (_guard, dir, registry) = machine_with(Some(installed));
+            let recovery = match half {
+                None => Recovery::Clean,
+                Some(was_fresh) => interrupted_by(Path::new(&dir), was_fresh, payload),
+            };
+            let context = format!("{installed:?} 装 {payload}，半装 {half:?}");
+
+            let probe = assemble_with(
+                &registry,
+                payload,
+                recovery,
+                started(Initiation::Interactive),
+            )
+            .probe;
+
+            assert_eq!(
+                probe.existing.as_ref().map(|existing| existing.kind),
+                kind,
+                "{context}"
+            );
+            assert_eq!(probe.allowed_modes, allowed, "{context}");
+            assert_eq!(probe.handoff, handoff, "{context}");
+            assert_eq!(
+                probe.interrupted,
+                half.is_some() && kind != Some(ExistingKind::Switch),
+                "{context}"
+            );
+        }
+    }
+
+    /// 首装的数据格式关要等最终目录定了才做：卸载留下的目录里记号再高，探测也只给首装，拦截由选目录和安装前复核给。
+    #[test]
+    fn a_fresh_install_reads_no_stamp_before_the_target_is_chosen() {
+        let leftover = tempfile::tempdir().unwrap();
+        std::fs::write(leftover.path().join(CONFIG_FILE), b"{}").unwrap();
+        let dir = leftover.path().to_str().unwrap();
+        Stamp::TooNew.put(dir);
+
+        let assembled = assemble_with(
+            &Table::default().with(LAST_DIR_KEY, None, dir),
+            PAYLOAD,
+            Recovery::Clean,
+            started(Initiation::Interactive),
+        );
+
+        assert_eq!(assembled.probe.default_dir, dir);
+        assert_eq!(assembled.probe.allowed_modes, vec![InstallMode::Fresh]);
+        assert_eq!(assembled.probe.data_block, None);
+        assert_eq!(assembled.gate, None);
     }
 
     #[test]
@@ -848,6 +1408,7 @@ mod tests {
         let main = include_str!("main.rs");
         assert!(main.contains("cli::parse(std::env::args_os().skip(1))"));
         assert!(main.contains("parsed.launch,"));
+        assert!(main.contains("parsed.channel_switch,"));
         assert!(main.contains("context.start_fallback()?"));
         assert!(!main.contains("start_wizard"));
     }
@@ -918,6 +1479,15 @@ mod tests {
         }
 
         fn launched(test: &str, launch: Launch) -> Rig {
+            switched(test, launch, false)
+        }
+
+        /// 沙箱里的 `%LOCALAPPDATA%`，不碰这台电脑上真的那个。
+        fn local_app_data(sandbox: &Path) -> PathBuf {
+            sandbox.join("LocalAppData")
+        }
+
+        fn switched(test: &str, launch: Launch, channel_switch: bool) -> Rig {
             let sandbox = tempfile::tempdir().unwrap();
             let fake = Fake::new(Outcome::Ok, Duration::from_millis(5));
             let received = fake.received();
@@ -926,7 +1496,14 @@ mod tests {
                 panic!("{test} 上不该已有实例");
             };
             let log = SetupLog::open(&sandbox.path().join("log")).unwrap();
-            let context = SetupContext::new(session, Arc::new(instance), Arc::new(log), launch);
+            let context = SetupContext::new(
+                session,
+                Arc::new(instance),
+                Arc::new(log),
+                launch,
+                channel_switch,
+                local_app_data(sandbox.path()),
+            );
             Rig {
                 sandbox,
                 context,
@@ -1036,6 +1613,8 @@ mod tests {
                 Arc::new(instance),
                 Arc::new(log),
                 Launch::Interactive,
+                false,
+                local_app_data(sandbox.path()),
             );
 
             let spy = NavigationSpy::new(&context);
@@ -1184,6 +1763,8 @@ mod tests {
                 Arc::new(instance),
                 Arc::new(log),
                 Launch::Interactive,
+                false,
+                local_app_data(sandbox.path()),
             );
 
             let failure = context
@@ -1306,8 +1887,7 @@ mod tests {
 
             assert_eq!(
                 probe.default_dir,
-                log::local_app_data()
-                    .unwrap()
+                local_app_data(rig.sandbox.path())
                     .join("Petalfall")
                     .to_str()
                     .unwrap()
@@ -1320,6 +1900,61 @@ mod tests {
                     rig.context.session.header().exe_len
                 )
                 .target
+            );
+        }
+
+        /// 拦下用户时要查得到读了哪个根、哪个记号定的结论。
+        #[test]
+        fn the_probe_logs_what_the_data_gate_read() {
+            let rig = rig("probe-gate-log");
+            rig.context
+                .install(&fresh(r"D:\Petalfall"), &Recording::default())
+                .unwrap();
+            let instdir = rig.sandbox.path().join("instdir");
+
+            rig.context.probe().unwrap();
+
+            let logged = rig.logged();
+            assert!(logged.contains("判定：发起方式 Interactive"), "{logged}");
+            assert!(
+                logged.contains(&format!(
+                    "探测的数据格式关：读了 [{:?}]，定下结论的记号 {}，结论 Pass",
+                    instdir,
+                    instdir.join(STAMP_FILE).display()
+                )),
+                "{logged}"
+            );
+        }
+
+        #[test]
+        fn a_fresh_probe_says_it_left_the_stamp_for_later() {
+            let rig = rig("probe-gate-fresh");
+
+            rig.context.probe().unwrap();
+
+            assert!(
+                rig.logged()
+                    .contains("没有登记安装，探测时不读数据格式记号")
+            );
+        }
+
+        /// 开关只对换到更慢通道的那一行起作用，别的时候照判定表处理，日志里留一笔。
+        #[test]
+        fn a_switch_flag_with_nothing_to_switch_is_noted() {
+            let rig = switched("probe-switch-noted", update(true, Vec::new()), true);
+            rig.context
+                .install(&fresh(r"D:\Petalfall"), &Recording::default())
+                .unwrap();
+
+            let probe = rig.context.probe().unwrap();
+
+            assert_eq!(probe.existing.unwrap().kind, ExistingKind::Same);
+            assert_eq!(probe.unattended, None);
+            assert!(
+                rig.logged()
+                    .contains("带了换通道开关，这次不是换到更慢通道的安装，开关不起作用"),
+                "{}",
+                rig.logged()
             );
         }
     }
