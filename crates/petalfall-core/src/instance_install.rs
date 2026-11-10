@@ -391,7 +391,10 @@ impl Petalfall {
     }
 
     /// 丢掉一个新建到一半的实例目录（新建被取消时）。目录已经不在不算错。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，什么都不删。
     pub async fn abandon_instance(&self, id: &str) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dir = self.instance_dir(id)?;
         match tokio::fs::remove_dir_all(&dir).await {
             Ok(()) => {
@@ -404,12 +407,15 @@ impl Petalfall {
     }
 
     /// 把长任务的结局写进未完成标记。`marker` 是开始时写下的那份。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，标记不动。
     pub async fn settle_instance_marker(
         &self,
         id: &str,
         marker: IncompleteMarker,
         settlement: MarkerSettlement,
     ) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let store = MarkerStore::for_version_dir(&self.instance_dir(id)?);
         let settled = match settlement {
             MarkerSettlement::Succeeded => return Ok(store.clear().await?),
@@ -431,7 +437,11 @@ impl Petalfall {
     /// 定补全方案并写下新的未完成标记，返回方案与标记。
     ///
     /// 标记文件损坏时当作没有标记：版本 JSON 可用就照它补全，不可用时照安装记录重装，连记录也没有才报不可补全。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，标记不动。
+    /// 任务中心重试补全不经列实例，不能指望调用方已经核对过。
     pub async fn begin_repair(&self, id: &str) -> Result<(RepairPlan, IncompleteMarker)> {
+        self.guard_game_dir(GuardMode::Use).await?;
         self.plan_repair(id, false).await
     }
 
@@ -440,8 +450,9 @@ impl Petalfall {
     /// 内容接着重装。
     ///
     /// 标记里记着安装内容的照它重装，整合包没导入完的报不可补全，版本 JSON 丢失或写坏时照安装记录重装，都与
-    /// [`Petalfall::begin_repair`] 一样；定不出能原样装回的内容时报不可补全，标记不动。
+    /// [`Petalfall::begin_repair`] 一样；定不出能原样装回的内容时报不可补全，标记不动。核对数据格式记号也同它。
     pub async fn begin_loader_reinstall(&self, id: &str) -> Result<(RepairPlan, IncompleteMarker)> {
+        self.guard_game_dir(GuardMode::Use).await?;
         self.plan_repair(id, true).await
     }
 
@@ -561,12 +572,16 @@ impl Petalfall {
     }
 
     /// 按方案补全实例。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，不下载、
+    /// 不写任何文件。重装方案经 [`Petalfall::install_instance`]，那里照样再核对一次。
     pub async fn repair_instance(
         &self,
         id: &str,
         plan: &RepairPlan,
         events: Option<&EventSink>,
     ) -> Result<RepairOutcome> {
+        self.guard_game_dir(GuardMode::Use).await?;
         match plan {
             RepairPlan::Reinstall(request) => {
                 let outcome = self.install_instance(id, request, events).await?;
@@ -2148,5 +2163,144 @@ mod tests {
             std::fs::read_to_string(stamp_file(&game_dir)).unwrap(),
             equal
         );
+    }
+
+    use crate::instances::tests::disk_state;
+
+    /// 补全、定方案、记结局、丢弃这几个入口在表里的名字；补全按两种方案各调一次。
+    const WRITERS: [&str; 6] = [
+        "abandon_instance",
+        "settle_instance_marker",
+        "begin_repair",
+        "begin_loader_reinstall",
+        "repair_instance 补齐",
+        "repair_instance 重装",
+    ];
+
+    /// 等着补全的实例「待补全」：版本 JSON 只有一个从模拟端点下载的库，未完成标记记着当初的安装内容。各入口真走
+    /// 下去都会改盘或发请求：删目录、清标记、写新标记、下载库与版本清单。返回写下的标记。
+    async fn repairable_instance(petalfall: &Petalfall, base: &str) -> IncompleteMarker {
+        let dir = write_version(
+            petalfall.game_dir(),
+            "待补全",
+            &format!(
+                r#"{{"id":"待补全","type":"release","mainClass":"m",
+                    "libraries":[{{"name":"net.example:loader:0.16.10","url":"{base}/"}}]}}"#
+            ),
+        );
+        let marker = IncompleteMarker::pending(
+            IncompleteKind::Install {
+                spec: request("1.21.1", None, None).spec(),
+            },
+            1_700_000_000_000,
+        );
+        MarkerStore::for_version_dir(&dir)
+            .save(&marker)
+            .await
+            .unwrap();
+        marker
+    }
+
+    async fn call_writer(
+        petalfall: &Petalfall,
+        entry: &str,
+        marker: &IncompleteMarker,
+    ) -> Result<()> {
+        let id = "待补全";
+        match entry {
+            "abandon_instance" => petalfall.abandon_instance(id).await,
+            "settle_instance_marker" => {
+                petalfall
+                    .settle_instance_marker(id, marker.clone(), MarkerSettlement::Succeeded)
+                    .await
+            }
+            "begin_repair" => petalfall.begin_repair(id).await.map(drop),
+            "begin_loader_reinstall" => petalfall.begin_loader_reinstall(id).await.map(drop),
+            "repair_instance 补齐" => petalfall
+                .repair_instance(id, &RepairPlan::Complete, None)
+                .await
+                .map(drop),
+            "repair_instance 重装" => petalfall
+                .repair_instance(
+                    id,
+                    &RepairPlan::Reinstall(request("1.21.1", None, None)),
+                    None,
+                )
+                .await
+                .map(drop),
+            other => panic!("表里没有这个入口：{other}"),
+        }
+    }
+
+    fn repair_petalfall(root: &Path, server: &MockServer) -> Petalfall {
+        petalfall_at(root)
+            .with_manifest_url(format!("{}/manifest.json", server.uri()))
+            .with_fabric_base(server.uri())
+    }
+
+    /// 任务中心重试补全、旧列表上点补全时，游戏目录已被更新的落樱用过：每个入口都报游戏目录太新，一个请求都不发，
+    /// 数据目录与游戏目录里的文件内容、修改时间都不变，没有多出文件。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repair_entries_refuse_a_newer_game_dir_and_touch_nothing() {
+        for entry in WRITERS {
+            let server = MockServer::start().await;
+            mock_meta(&server).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = repair_petalfall(tmp.path(), &server);
+            let marker = repairable_instance(&petalfall, &server.uri()).await;
+            put(&stamp_file(petalfall.game_dir()), NEWER_STAMP);
+            let before = disk_state(tmp.path());
+
+            let err = with_fixture(own(), call_writer(&petalfall, entry, &marker))
+                .await
+                .unwrap_err();
+
+            match err {
+                CoreError::GameDirDataTooNew {
+                    path,
+                    found,
+                    supported,
+                    written_by,
+                } => {
+                    assert_eq!(path, petalfall.game_dir(), "{entry}");
+                    assert_eq!((found, supported), (3, OWN), "{entry}");
+                    assert_eq!(written_by.as_deref(), Some("1.1.0-dev.57"), "{entry}");
+                }
+                other => panic!("{entry} 应报游戏目录太新，实际是 {other:?}"),
+            }
+            assert_eq!(disk_state(tmp.path()), before, "{entry}");
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                0,
+                "{entry}"
+            );
+        }
+    }
+
+    /// 不换本版号：记号读不懂与号是多少无关，生产的这条路同样在碰任何文件、发任何请求之前拦下。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repair_entries_refuse_an_unreadable_stamp_and_touch_nothing() {
+        for entry in ["begin_repair", "repair_instance 补齐"] {
+            let server = MockServer::start().await;
+            mock_meta(&server).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = repair_petalfall(tmp.path(), &server);
+            let marker = repairable_instance(&petalfall, &server.uri()).await;
+            put(&stamp_file(petalfall.game_dir()), r#"{"data_format":"3"}"#);
+            let before = disk_state(tmp.path());
+
+            let err = call_writer(&petalfall, entry, &marker).await.unwrap_err();
+
+            assert!(
+                matches!(&err, CoreError::DataFormatUnreadable { path, .. } if path == petalfall.game_dir()),
+                "{entry}：{err:?}"
+            );
+            assert_eq!(disk_state(tmp.path()), before, "{entry}");
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                0,
+                "{entry}"
+            );
+        }
     }
 }

@@ -383,6 +383,9 @@ impl Petalfall {
 
     /// 把整合包导入为新实例：[`Petalfall::prepare_modpack`] 之后紧接 [`Petalfall::import_modpack`]。
     /// 需要在建目录前占住实例名的调用方分开调用这两步。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，平台整合包
+    /// 也不下载。
     pub async fn install_modpack(
         &self,
         source: &ModpackSource,
@@ -391,6 +394,7 @@ impl Petalfall {
         task_id: &str,
         events: Option<&EventSink>,
     ) -> Result<ModpackInstallOutcome> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let prepared = self
             .prepare_modpack(source, name, selection, events)
             .await?;
@@ -485,7 +489,10 @@ impl Petalfall {
     /// 调用方从定下实例名起就占住这个名字，并在占住之后经 [`Petalfall::ensure_modpack_name_free`] 确认过
     /// 名字仍然空闲：这期间名下出现的目录只可能是这次导入建的，所以不看未完成标记——标记可能还没
     /// 来得及写下，也可能读不出来，按标记找会漏掉这两种半成品。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，什么都不删。
     pub async fn discard_modpack_import(&self, name: &str) -> Result<bool> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dir = self.instance_dir(name)?;
         match tokio::fs::metadata(&dir).await {
             Ok(meta) if meta.is_dir() => {}
@@ -499,12 +506,15 @@ impl Petalfall {
 
     /// 半成品删不掉时（文件被占用）把它的未完成标记落成这次导入的结局：否则标记一直停在进行中，
     /// 列表里看不出导入其实已经结束。保留原标记的开始时刻；原标记读不出来时取此刻，新标记覆盖它。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，标记不动。
     pub async fn settle_modpack_import(
         &self,
         name: &str,
         task_id: &str,
         settlement: MarkerSettlement,
     ) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dir = self.instance_dir(name)?;
         let started_at = match MarkerStore::for_version_dir(&dir).load().await {
             Ok(Some(marker)) => marker.started_at,
@@ -4433,5 +4443,120 @@ mod tests {
             std::fs::read_to_string(stamp_file(&game_dir)).unwrap(),
             r#"{"data_format":2}"#
         );
+    }
+
+    use crate::instances::tests::{NEWER_STAMP, NEWER_WRITER, disk_state, write_stamp};
+
+    /// 导入没成留下的半成品「半成品」，带这次导入的未完成标记。两个收拾入口真走下去都会改盘：删目录、改写标记。
+    async fn half_import(petalfall: &Petalfall) {
+        let dir = petalfall.game_dir().join(VERSIONS_DIR).join("半成品");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_marker(&dir, "task-h").await.unwrap();
+    }
+
+    async fn call_cleanup(petalfall: &Petalfall, entry: &str) -> Result<()> {
+        match entry {
+            "discard_modpack_import" => petalfall.discard_modpack_import("半成品").await.map(drop),
+            "settle_modpack_import" => {
+                petalfall
+                    .settle_modpack_import("半成品", "task-h", MarkerSettlement::Cancelled)
+                    .await
+            }
+            other => panic!("表里没有这个入口：{other}"),
+        }
+    }
+
+    /// 导入失败后收拾半成品时，游戏目录已被更新的落樱用过：两个入口都报游戏目录太新，数据目录与游戏目录里的文件
+    /// 内容、修改时间都不变，没有多出文件。
+    #[tokio::test]
+    async fn cleanup_after_a_failed_import_refuses_a_newer_game_dir_and_touches_nothing() {
+        for entry in ["discard_modpack_import", "settle_modpack_import"] {
+            let server = MockServer::start().await;
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall(tmp.path(), &server);
+            half_import(&petalfall).await;
+            write_stamp(petalfall.game_dir(), NEWER_STAMP);
+            let before = disk_state(tmp.path());
+
+            let err = with_fixture(own(), call_cleanup(&petalfall, entry))
+                .await
+                .unwrap_err();
+
+            match err {
+                CoreError::GameDirDataTooNew {
+                    path,
+                    found,
+                    supported,
+                    written_by,
+                } => {
+                    assert_eq!(path, petalfall.game_dir(), "{entry}");
+                    assert_eq!((found, supported), (3, 2), "{entry}");
+                    assert_eq!(written_by.as_deref(), Some(NEWER_WRITER), "{entry}");
+                }
+                other => panic!("{entry} 应报游戏目录太新，实际是 {other:?}"),
+            }
+            assert_eq!(disk_state(tmp.path()), before, "{entry}");
+        }
+    }
+
+    /// 不换本版号：记号读不懂与号是多少无关，生产的这条路同样在删任何东西之前拦下。
+    #[tokio::test]
+    async fn discarding_a_half_import_refuses_an_unreadable_stamp() {
+        let server = MockServer::start().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall(tmp.path(), &server);
+        half_import(&petalfall).await;
+        write_stamp(petalfall.game_dir(), r#"{"data_format":"3"}"#);
+        let before = disk_state(tmp.path());
+
+        let err = petalfall
+            .discard_modpack_import("半成品")
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&err, CoreError::DataFormatUnreadable { path, .. } if path == petalfall.game_dir()),
+            "{err:?}"
+        );
+        assert_eq!(disk_state(tmp.path()), before);
+    }
+
+    /// 一步到位的导入：游戏目录被更新的落樱用过时，连平台整合包都不下载，一个请求都不发，什么都不写。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installing_a_platform_pack_into_a_newer_game_dir_sends_no_request() {
+        let server = MockServer::start().await;
+        mount_vanilla(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let built = tmp.path().join("built.mrpack");
+        write_pack(
+            &built,
+            &index(serde_json::json!({"minecraft": "test"})),
+            &[("overrides/options.txt", b"fov:90")],
+        );
+        let bytes = std::fs::read(&built).unwrap();
+        mount_platform_pack(&server, "pv-guard", &sha1_hex(&bytes), bytes).await;
+        let petalfall = petalfall(tmp.path(), &server);
+        write_stamp(petalfall.game_dir(), NEWER_STAMP);
+        let before = disk_state(tmp.path());
+
+        let err = with_fixture(
+            own(),
+            petalfall.install_modpack(
+                &platform_source("pv-guard"),
+                Some("被挡下"),
+                &ImportSelection::default(),
+                "task-g",
+                None,
+            ),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(&err, CoreError::GameDirDataTooNew { path, found: 3, supported: 2, .. } if path == petalfall.game_dir()),
+            "{err:?}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+        assert_eq!(disk_state(tmp.path()), before);
     }
 }
