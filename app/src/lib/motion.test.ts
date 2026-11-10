@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ambientFade, fade, insertItem, pageItem, rootTransition, shake, SPRING_PARAMS, springAt, springs, tabPanel, TOOLTIP_TIMING, tweenAt, twoParam, type PanelFrom, type SpringName } from "./motion";
+import { ambientFade, fade, insertItem, insertItemFade, pageItem, popMark, rootTransition, shake, SPRING_PARAMS, springAt, springs, stepPane, stepPaneFade, tabPanel, TOOLTIP_TIMING, tweenAt, twoParam, type PanelFrom, type SpringName } from "./motion";
 
 const TOKENS = readFileSync(new URL("../styles/tokens.css", import.meta.url), "utf8");
 
@@ -220,6 +220,34 @@ describe("变体与时机", () => {
     expect(insertItem.initial).toEqual({ opacity: 0, scale: 0.98 });
     expect(insertItem.animate).toEqual({ opacity: 1, scale: 1, transition: { ...springs.settle, opacity: fade.in } });
     expect(insertItem.exit).toEqual({ opacity: 0, scale: 0.98, transition: fade.out });
+  });
+
+  it("小标记两档：点从 0 弹出、退场缩到 0.6；图形从 0.8 弹出、退场只淡出；入场都走 pop 加淡入补间", () => {
+    const show = { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } };
+    expect(popMark.dot).toEqual({ initial: { opacity: 0, scale: 0 }, animate: show, exit: { opacity: 0, scale: 0.6, transition: fade.out } });
+    expect(popMark.glyph).toEqual({ initial: { opacity: 0, scale: 0.8 }, animate: show, exit: { opacity: 0, transition: fade.out } });
+  });
+
+  it("小标记的减少动画档只动透明度，进出都不带缩放", () => {
+    expect(popMark.reduced).toEqual({ initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in }, exit: { opacity: 0, transition: fade.out } });
+    for (const phase of Object.values(popMark.reduced)) expect(phase).not.toHaveProperty("scale");
+  });
+
+  it("向导换步：前进时新步骤从右侧 16px 进、旧步骤朝左 16px 退，后退反过来，方向为 0 只淡入淡出", () => {
+    const enter = stepPane.enter as (dir: number) => Record<string, unknown>;
+    const exit = stepPane.exit as (dir: number) => Record<string, unknown>;
+    expect(enter(1)).toEqual({ opacity: 0, x: 16 });
+    expect(exit(1)).toEqual({ opacity: 0, x: -16, transition: fade.out });
+    expect(enter(-1)).toEqual({ opacity: 0, x: -16 });
+    expect(exit(-1)).toEqual({ opacity: 0, x: 16, transition: fade.out });
+    expect(Math.abs(enter(0).x as number)).toBe(0);
+    expect(Math.abs(exit(0).x as number)).toBe(0);
+    expect(stepPane.center).toEqual({ opacity: 1, x: 0, transition: { ...springs.soft, opacity: fade.in } });
+  });
+
+  it("减少动画档的增删与换步只动透明度：没有缩放与位移可让根部配置一步到位", () => {
+    expect(insertItemFade).toEqual({ initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in }, exit: { opacity: 0, transition: fade.out } });
+    expect(stepPaneFade).toEqual({ enter: { opacity: 0 }, center: { opacity: 1, transition: fade.in }, exit: { opacity: 0, transition: fade.out } });
   });
 
   it("提示气泡时机", () => {

@@ -6,10 +6,11 @@
 // 没改不重复提交。收尾只把向导卸载（finishFirstRun）。第二到四步的开关与外观在各步里即时写入。
 // 后端拒绝了游戏目录时停在（或回到）第一步，把原因写在输入框下。
 
-import { AnimatePresence, motion, useIsPresent, type Variants } from "framer-motion";
-import { useRef, useState, type ReactNode } from "react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig, type Variants } from "framer-motion";
+import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { Icon } from "../../art/Icon";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
+import { useLoadingGate } from "../../lib/loading-gate";
 import { fade, springs } from "../../lib/motion";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -17,9 +18,10 @@ import { describeError } from "../../state/errors";
 import type { FlowProps } from "../../state/flows";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useDiscoveredGameDirectories } from "../../state/queries/catalog";
-import { Button } from "../../ui/Button";
+import { Appear } from "../../ui/Appear";
+import { Button, GlyphSlot } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
-import { Skeleton } from "../../ui/Skeleton";
+import { Loadable } from "../../ui/Loadable";
 import { DIR_COPY, FOOTER_COPY, STEP_COPY, stepCounter, WIZARD_LABEL } from "./copy";
 import {
   advance,
@@ -42,7 +44,7 @@ import {
 import s from "./onboarding.module.css";
 import { StepAccount } from "./StepAccount";
 import { StepAppearance } from "./StepAppearance";
-import { StepGameDir } from "./StepGameDir";
+import { GameDirSkeleton, StepGameDir } from "./StepGameDir";
 import { StepJava } from "./StepJava";
 
 /** 后端拒绝游戏目录时的错误码。 */
@@ -52,12 +54,29 @@ const INVALID_GAME_DIRECTORY = "invalid_game_directory";
 const SIDE_WIDTH = { compact: 248, regular: 248, wide: 272 } as const;
 const BRANCH_HEIGHT = 200;
 
-/** 新步骤从前进方向一侧滑入，旧步骤朝反方向退出；减少动画时位移被关掉，只剩淡入淡出。 */
+/** 新步骤从前进方向一侧滑入，旧步骤朝反方向退出。 */
 const stepMotion: Variants = {
   enter: (dir: number) => ({ opacity: 0, x: 16 * dir }),
   center: { opacity: 1, x: 0, transition: { ...springs.soft, opacity: fade.in } },
   exit: (dir: number) => ({ opacity: 0, x: -16 * dir, transition: fade.out }),
 };
+
+/**
+ * 减少动画时的换步：只淡入淡出。不能沿用 stepMotion 等根部 MotionConfig 去关位移：它只是把 x 改成一步到位，
+ * 旧步会在几乎不透明时先横跳 16px 再淡出。
+ */
+const stepFade: Variants = {
+  enter: { opacity: 0 },
+  center: { opacity: 1, transition: fade.in },
+  exit: { opacity: 0, transition: fade.out },
+};
+
+/**
+ * 收尾时整体淡出并轻微放大。退场一律走 fade.out，缩放也跟着它在 120ms 内走完：外壳要等这段退场播完才挂主界面，
+ * 缩放若走弹簧，透明度早已到 0 还要再等弹簧静止，窗口只剩底色与标题条。减少动画时只淡出：缩放在那里是一步到位的。
+ */
+const FINISH_EXIT = { opacity: 0, scale: 1.02, transition: fade.out } as const;
+const FINISH_EXIT_REDUCED = { opacity: 0, transition: fade.out } as const;
 
 type FinishVia = "start_now" | "skip" | "finish";
 
@@ -67,15 +86,26 @@ function errorCode(error: unknown): string | null {
   return typeof code === "string" ? code : null;
 }
 
+interface StepPaneProps {
+  /** popLayout 往直接子项上挂 ref 来量尺寸、把退场的那一步抽出布局：React 19 下它是普通 prop，要自己接住挂到根元素上。 */
+  ref?: Ref<HTMLDivElement>;
+  direction: 1 | -1;
+  /** 是否播入场：向导挂上时就在的那一步不播。 */
+  enter: boolean;
+  children: ReactNode;
+}
+
 /** 换步时新旧两步短暂并存：正在退场的那一步不可交互、不朗读，焦点与读屏只落在新的一步上。 */
-function StepPane({ direction, children }: { direction: 1 | -1; children: ReactNode }) {
+function StepPane({ ref, direction, enter, children }: StepPaneProps) {
   const present = useIsPresent();
+  const reduced = useReducedMotionConfig() === true;
   return (
     <motion.div
+      ref={ref}
       className={s.pane}
       custom={direction}
-      variants={stepMotion}
-      initial="enter"
+      variants={reduced ? stepFade : stepMotion}
+      initial={enter ? "enter" : false}
       animate="center"
       exit="exit"
       data-step-pane=""
@@ -102,7 +132,10 @@ function StepRail({ wizard, onJump }: { wizard: WizardState; onJump: (index: num
               disabled={!canJumpTo(wizard, i)}
               onClick={() => onJump(i)}
             >
-              <span className={s.railDot}>{status === "done" ? <Icon name="check" size={14} /> : i + 1}</span>
+              <span className={s.railDot}>
+                {/* 序号换成勾号时勾号弹出、序号原地淡出，圆的尺寸不变 */}
+                <GlyphSlot glyph={status === "done" ? "check" : "index"}>{status === "done" ? <Icon name="check" size={14} /> : i + 1}</GlyphSlot>
+              </span>
               <span className={s.railName}>{STEP_COPY[id].name}</span>
               {status === "skipped" && <span className={s.railSkipped}>{FOOTER_COPY.skippedTag}</span>}
             </button>
@@ -119,6 +152,8 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
   const actions = useLauncherActions();
   const { tier } = useShell();
   const run = useRunner();
+  const reduced = useReducedMotionConfig() === true;
+  const settingsGate = useLoadingGate(settings === null);
   const discovered = useDiscoveredGameDirectories();
   const [wizard, setWizard] = useState<WizardState>(INITIAL_WIZARD);
   const [pathOverride, setPathOverride] = useState<string | null>(null);
@@ -128,6 +163,12 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
   const [committing, setCommitting] = useState(false);
   // 上次提交给后端的第一步内容；与此刻一样就不再提交
   const [committed, setCommitted] = useState<string | null>(null);
+  // 向导挂上时就在的那一步不播入场：窗口这时才显示出来，内容应当已经在位。
+  // 不能写成 AnimatePresence 的 initial={false}：那会让这一步里之后才挂载的元素也永远跳过入场
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
 
   // 默认目录来自后端配置：配置读到之前没有目录可言，各个按钮也都不可用
   const path = settings === null ? null : pathOverride === null ? settings.defaultGameDir : pathOverride;
@@ -226,34 +267,35 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
         <span className={s.errorText}>{settingsStatus.error.message}</span>
       </Callout>
     );
-  } else if (settings === null || path === null) {
-    body = (
-      <div className={s.stepBody} aria-busy="true">
-        <Skeleton shape="block" width="100%" height={52} radius="md" />
-        <Skeleton shape="block" width="100%" height={76} radius="md" />
-      </div>
-    );
   } else if (id === "gameDir") {
+    // 配置先于向导挂上时多半已经读到，这里一挂上就是内容；冷启动时配置晚到才经加载门占位、交叉淡入
     body = (
-      <StepGameDir
-        path={path}
-        defaultPath={settings.defaultGameDir}
-        error={dirError}
-        deselected={deselected}
-        onPathChange={(value) => {
-          setPathOverride(value);
-          setDirError(null);
+      <Loadable view={settingsGate.view} skeleton={<GameDirSkeleton />}>
+        {() => {
+          if (settings === null || path === null) throw new Error("加载门放行内容时配置一定已经读到");
+          return (
+            <StepGameDir
+              path={path}
+              defaultPath={settings.defaultGameDir}
+              error={dirError}
+              deselected={deselected}
+              onPathChange={(value) => {
+                setPathOverride(value);
+                setDirError(null);
+              }}
+              onToggleExtra={(extra, picked) =>
+                setDeselected((prev) => {
+                  const nextSet = new Set(prev);
+                  if (picked) nextSet.delete(extra);
+                  else nextSet.add(extra);
+                  return nextSet;
+                })
+              }
+              onSubmit={() => void next()}
+            />
+          );
         }}
-        onToggleExtra={(extra, picked) =>
-          setDeselected((prev) => {
-            const nextSet = new Set(prev);
-            if (picked) nextSet.delete(extra);
-            else nextSet.add(extra);
-            return nextSet;
-          })
-        }
-        onSubmit={() => void next()}
-      />
+      </Loadable>
     );
   } else if (id === "java") {
     body = <StepJava />;
@@ -268,7 +310,7 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
   const last = wizard.index === LAST_STEP;
 
   return (
-    <motion.div className={s.root} exit={{ opacity: 0, scale: 1.02, transition: { ...springs.soft, opacity: fade.out } }}>
+    <motion.div className={s.root} exit={reduced ? FINISH_EXIT_REDUCED : FINISH_EXIT}>
       <span className={s.ambience} aria-hidden="true" />
       <div className={s.panel} role="group" aria-label={WIZARD_LABEL}>
         <aside className={s.side}>
@@ -277,8 +319,8 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
         </aside>
         <section className={s.main}>
           <div className={s.stage}>
-            <AnimatePresence mode="popLayout" initial={false} custom={wizard.direction}>
-              <StepPane key={id} direction={wizard.direction}>
+            <AnimatePresence mode="popLayout" custom={wizard.direction}>
+              <StepPane key={id} direction={wizard.direction} enter={mounted.current}>
                 <header className={s.head}>
                   <span className={s.counter}>{stepCounter(wizard.index + 1, STEPS.length)}</span>
                   <h1 className={s.title}>{copy.title}</h1>
@@ -288,36 +330,51 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
               </StepPane>
             </AnimatePresence>
           </div>
+          {/* 随步骤出没的按钮淡入淡出、退场时立即让位；主按钮按最宽的文案定宽，换到第四步、点下转圈时宽度都不变 */}
           <footer className={s.footer}>
             <div className={s.footerStart}>
-              {wizard.index > 0 && (
-                <Button variant="ghost" icon="arrow-left" disabled={busy} onClick={() => setWizard(back)}>
-                  {FOOTER_COPY.back}
-                </Button>
-              )}
-              {canStartNow(wizard.index) && (
-                <Button variant="ghost" loading={finishing === "start_now"} disabled={busy && finishing !== "start_now"} onClick={() => void finish("start_now")}>
-                  {FOOTER_COPY.startNow}
-                </Button>
-              )}
+              <Appear itemClassName={s.footerItem}>
+                {wizard.index > 0 && (
+                  <Button key="back" variant="ghost" icon="arrow-left" disabled={busy} onClick={() => setWizard(back)}>
+                    {FOOTER_COPY.back}
+                  </Button>
+                )}
+                {canStartNow(wizard.index) && (
+                  <Button key="start-now" variant="ghost" loading={finishing === "start_now"} disabled={busy && finishing !== "start_now"} onClick={() => void finish("start_now")}>
+                    {FOOTER_COPY.startNow}
+                  </Button>
+                )}
+              </Appear>
             </div>
             <div className={s.footerEnd}>
-              {canSkip(wizard.index) && (
-                <Button
-                  variant="ghost"
-                  loading={finishing === "skip"}
-                  disabled={busy && finishing !== "skip"}
-                  onClick={() => (last ? void finish("skip") : setWizard((w) => advance(w, "skip")))}
-                >
-                  {FOOTER_COPY.skip}
-                </Button>
-              )}
+              <Appear itemClassName={s.footerItem}>
+                {canSkip(wizard.index) && (
+                  <Button
+                    key="skip"
+                    variant="ghost"
+                    loading={finishing === "skip"}
+                    disabled={busy && finishing !== "skip"}
+                    onClick={() => (last ? void finish("skip") : setWizard((w) => advance(w, "skip")))}
+                  >
+                    {FOOTER_COPY.skip}
+                  </Button>
+                )}
+              </Appear>
               {last ? (
-                <Button variant="primary" iconRight="arrow-right" loading={finishing === "finish"} disabled={!ready || (busy && finishing !== "finish")} onClick={() => void finish("finish")}>
-                  {finishing === "finish" ? FOOTER_COPY.preparing : FOOTER_COPY.finish}
+                <Button
+                  className={s.primaryAction}
+                  variant="primary"
+                  iconRight="arrow-right"
+                  loading={finishing === "finish"}
+                  disabled={!ready || (busy && finishing !== "finish")}
+                  // 加载中文字淡去但保留占位，换成更长的字看不见却会撑宽按钮：可见文案不换，进行中的说法只给读屏
+                  aria-label={finishing === "finish" ? FOOTER_COPY.preparing : undefined}
+                  onClick={() => void finish("finish")}
+                >
+                  {FOOTER_COPY.finish}
                 </Button>
               ) : (
-                <Button variant="primary" loading={committing} disabled={!ready || (busy && !committing)} onClick={() => void next()}>
+                <Button className={s.primaryAction} variant="primary" loading={committing} disabled={!ready || (busy && !committing)} onClick={() => void next()}>
                   {FOOTER_COPY.next}
                 </Button>
               )}

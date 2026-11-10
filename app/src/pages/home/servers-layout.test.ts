@@ -21,6 +21,55 @@ function hiddenTiers(source: string, className: string): string[] {
   return TIERS.filter((tier) => hidden.has(tier));
 }
 
+/** 选择器恰好是 `.类名` 的那条规则的声明（不含伪类、属性选择器的变体）。 */
+function ruleOf(source: string, className: string): string {
+  for (const rule of source.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    if (rule[1].split(",").some((selector) => selector.trim() === `.${className}`)) return rule[2];
+  }
+  throw new Error(`样式表里没有 .${className} 的规则`);
+}
+
+describe("服务器行的高度不随测速结果变化", () => {
+  it("文字列恒占三行：正文一行加 MOTD、在线人数两行说明", () => {
+    expect(ruleOf(css, "serverText")).toMatch(/min-height:\s*calc\(var\(--sk-lh-body\) \+ 2 \* var\(--sk-lh-caption\)\);/);
+  });
+
+  it("两行说明与它们的骨架取说明字阶的行高，骨架文字条按它取高", () => {
+    expect(ruleOf(css, "serverDetail")).toMatch(/line-height:\s*var\(--sk-lh-caption\);/);
+  });
+});
+
+describe("信号格换色", () => {
+  it("测速结果回来、延迟换档时颜色过渡，与行底色同一档时长", () => {
+    expect(ruleOf(css, "signalBar")).toMatch(/transition:\s*background-color var\(--sk-dur-hover\) var\(--sk-ease\);/);
+    expect(ruleOf(css, "serverRow")).toMatch(/transition:\s*background-color var\(--sk-dur-hover\) var\(--sk-ease\);/);
+  });
+});
+
+describe("资讯与服务器的行骨架照真实的行排", () => {
+  const decl = (className: string, property: string) => {
+    const m = new RegExp(`(?:^|;|\\s)${property}:\\s*([^;]+);`).exec(ruleOf(css, className));
+    if (m === null) throw new Error(`.${className} 没有 ${property}`);
+    return m[1].trim();
+  };
+
+  it("行距与列表同为 2，上距与列表的上外边距相同：骨架换成内容时每一行都在原处", () => {
+    expect(decl("rowSkeletons", "gap")).toBe(decl("serverList", "gap"));
+    expect(decl("rowSkeletons", "margin-top")).toBe(decl("newsList", "margin-top"));
+    expect(decl("serverList", "margin").split(/\s+/)[0]).toBe(decl("rowSkeletons", "margin-top"));
+  });
+
+  it("骨架行的内边距与服务器行相同；配 40 的缩略图，资讯骨架行合 56，与列表行同高", () => {
+    expect(decl("rowSkeleton", "padding")).toBe(decl("serverRow", "padding"));
+    expect(decl("rowSkeleton", "padding")).toBe("var(--sk-space-8) var(--sk-space-10)");
+  });
+
+  it("骨架文字条的行高：标题行取正文，说明行取说明", () => {
+    expect(decl("skeletonBody", "line-height")).toBe("var(--sk-lh-body)");
+    expect(decl("skeletonCaption", "line-height")).toBe("var(--sk-lh-caption)");
+  });
+});
+
 describe("固定的服务器卡在最窄的档位里让位", () => {
   it("核对的前提：服务器卡在 compact 占 5 列、在 wide 占 3 列", () => {
     expect(page).toMatch(/<ServersCard span=\{\{ compact: 5, wide: 3 \}\} \/>/);

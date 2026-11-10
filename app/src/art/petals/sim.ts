@@ -298,27 +298,47 @@ export interface StillPetal {
   sx: number;
 }
 
+/** 定格时翻面被夹到下限的一片：定格这一刻的水平缩放与它每秒的变化量，引擎从这里沿弹簧转到夹过的 sx。 */
+export interface FlipTurn {
+  sx0: number;
+  v0: number;
+}
+
+export interface FrozenField {
+  /** 按层的静态花瓣，翻面已夹到静态散落的下限。 */
+  layers: StillPetal[][];
+  /** 被夹过的那几片。 */
+  turning: Map<StillPetal, FlipTurn>;
+}
+
 /**
  * 把正在飘的花瓣原地定格成静态散落（自动降到最低级时用），画面不跳：位置取此刻的绘制位置（含推开偏移），
- * 自转角不变，翻面取此刻的 cos(flip)。此刻看不见的花瓣（在顶边以上候场、整片落在画布外、侧对视线）不定格，
- * 空出来的数量交给 scatterStill 补投。
+ * 自转角不变。翻面取此刻的 cos(flip)，但静态画面不能留着近乎侧立的细条：比 STILL_SCALE_MIN 窄的夹到下限
+ * （正负号不变，不镜像），同时记进 turning，由引擎从此刻的姿态和翻面速度转过去，不在定格那一帧跳宽。
+ * 此刻看不见的花瓣（在顶边以上候场、整片落在画布外、侧对视线）不定格，空出来的数量交给 scatterStill 补投。
  */
-export function freezeLayers(layers: readonly (readonly Petal[])[], bounds: Bounds): StillPetal[][] {
-  return layers.map((petals) => {
+export function freezeLayers(layers: readonly (readonly Petal[])[], bounds: Bounds): FrozenField {
+  const turning = new Map<StillPetal, FlipTurn>();
+  const frozenLayers = layers.map((petals) => {
     const frozen: StillPetal[] = [];
     for (const p of petals) {
       const x = p.bx + p.ox;
       const y = p.y + p.oy;
-      const sx = Math.cos(p.flip);
+      const sx0 = Math.cos(p.flip);
       // 精灵以中心为锚点任意旋转，半条对角线以内都可能落在画布上
       const glyph = GLYPHS[p.glyph];
       const reach = (Math.hypot(glyph.cols, glyph.rows) * CELL) / 2;
       const outside = x < -reach || x > bounds.width + reach || y < -reach || y > bounds.height + reach;
-      if (outside || Math.abs(sx) < EDGE_ON) continue;
-      frozen.push({ glyph: p.glyph, tone: p.tone, nx: x / bounds.width, ny: y / bounds.height, rot: p.rot, sx });
+      if (outside || Math.abs(sx0) < EDGE_ON) continue;
+      const narrow = Math.abs(sx0) < STILL_SCALE_MIN;
+      const still: StillPetal = { glyph: p.glyph, tone: p.tone, nx: x / bounds.width, ny: y / bounds.height, rot: p.rot, sx: narrow ? Math.sign(sx0) * STILL_SCALE_MIN : sx0 };
+      // d cos(flip) / dt：转向从此刻的翻面速度起步，接得上前一帧
+      if (narrow) turning.set(still, { sx0, v0: -Math.sin(p.flip) * p.flipW });
+      frozen.push(still);
     }
     return frozen;
   });
+  return { layers: frozenLayers, turning };
 }
 
 /**

@@ -5,7 +5,7 @@
 // 检查进行中可以关掉清单：后台检查不打断，结果丢弃。
 
 import { AnimatePresence, motion, useIsPresent } from "framer-motion";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { fade } from "../../lib/motion";
 import { cx } from "../../lib/util";
 import { useRunner } from "../../shell/useRunner";
@@ -58,29 +58,44 @@ export function claimStatuses(files: readonly BlockedFileDto[], report: ClaimRep
   );
 }
 
-/** 正在淡出的旧标签与旧说明不再读给读屏，并标上 data-exiting。 */
-function FadeBox({ block, children }: { block: boolean; children: ReactNode }) {
+interface FadeBoxProps {
+  /**
+   * popLayout 递进来的 ref：它要量这一层、把退场的旧内容抽出布局，新内容才能同一帧占到原位、两者叠着交叉。
+   * 接不住时旧的一直占位，新的排在它后面，淡完那一帧再跳上来。
+   */
+  ref?: Ref<HTMLDivElement & HTMLSpanElement>;
+  block: boolean;
+  children: ReactNode;
+}
+
+/** 正在淡出的旧标签与旧说明：不可交互、不再读给读屏（inert），并标上 data-exiting。 */
+function FadeBox({ ref, block, children }: FadeBoxProps) {
   const present = useIsPresent();
-  const Box = block ? motion.div : motion.span;
-  return (
-    <Box
-      className={block ? undefined : styles.fadeInline}
-      data-exiting={present ? undefined : ""}
-      aria-hidden={present ? undefined : true}
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1, transition: fade.in }}
-      exit={{ opacity: 0, transition: fade.out }}
-    >
+  const motionProps = {
+    "data-exiting": present ? undefined : "",
+    inert: !present,
+    initial: { opacity: 0 },
+    animate: { opacity: 1, transition: fade.in },
+    exit: { opacity: 0, transition: fade.out },
+  };
+  return block ? (
+    <motion.div ref={ref} {...motionProps}>
       {children}
-    </Box>
+    </motion.div>
+  ) : (
+    <motion.span ref={ref} className={styles.fadeInline} {...motionProps}>
+      {children}
+    </motion.span>
   );
 }
 
 /**
  * 状态标签与说明块的出现与切换：只做透明度过渡、不位移。减少动效时也照样淡入淡出：只去掉位移类动效，
  * 不超过 200 ms 的透明度过渡保留，否则标签与说明块会无过渡地跳变。
+ * 旧的抽出布局、叠在原处淡出，所以外面要有定位容器（列表行本身就是；说明块所在的栈另设 position: relative）。
+ * 导入确认步的清单行也用它：同一种状态变化在两处的过渡一致。
  */
-function Fade({ id, block = false, children }: { id: string | null; block?: boolean; children: ReactNode }) {
+export function Fade({ id, block = false, children }: { id: string | null; block?: boolean; children: ReactNode }) {
   return (
     <AnimatePresence mode="popLayout" initial={false}>
       {id !== null && (
@@ -89,6 +104,20 @@ function Fade({ id, block = false, children }: { id: string | null; block?: bool
         </FadeBox>
       )}
     </AnimatePresence>
+  );
+}
+
+/**
+ * 主按钮会换的三条文案叠在同一格，按最宽的那条留宽：检查开始、结束与全部找到时按钮不变宽变窄，同一排的「关闭」不被挤动。
+ * 没在显示的两条只画在伪元素里（data-reserve-a / -b），按钮的文字与可访问名称只有当前这一条。
+ */
+function ReservedLabel({ current, options }: { current: string; options: readonly [string, string, string] }) {
+  const others = options.filter((option) => option !== current);
+  if (others.length !== 2) throw new Error(`主按钮文案「${current}」不在候选里，或候选有重复：${options.join("、")}`);
+  return (
+    <span className={styles.primaryLabel} data-reserve-a={others[0]} data-reserve-b={others[1]}>
+      <span>{current}</span>
+    </span>
   );
 }
 
@@ -116,10 +145,13 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
     if (!open) live.current = null;
   }, [open]);
 
-  // 找到的文件那一行不再有「打开网页」，它聚焦着时焦点随按钮掉回 body：交给主按钮，接着检查或继续
+  // 找到的文件那一行，「打开网页」随旧标签一起淡出、不可交互（inert），淡完才移除：它聚焦着时焦点会落空，
+  // 交给主按钮，接着检查或继续
   const primaryRef = useRef<HTMLButtonElement>(null);
   useLayoutEffect(() => {
-    if (statuses === null || document.activeElement !== document.body) return;
+    if (statuses === null) return;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && active.closest("[inert]") === null) return;
     if (primaryRef.current === null) throw new Error("清单的主按钮尚未挂载");
     primaryRef.current.focus();
   }, [statuses]);
@@ -160,15 +192,21 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
     onClose();
   };
 
-  const primary = allFound ? (
-    <Button ref={primaryRef} variant="primary" icon={origin === "import" ? "arrow-right" : "refresh"} onClick={onAllFound}>
-      {origin === "import" ? BLOCKED_COPY.continueImport : BLOCKED_COPY.reinstall}
-    </Button>
-  ) : (
-    <Button ref={primaryRef} variant="primary" icon="folder-open" loading={checking} onClick={check}>
-      {checking ? BLOCKED_COPY.checking : BLOCKED_COPY.check}
+  const finalLabel = origin === "import" ? BLOCKED_COPY.continueImport : BLOCKED_COPY.reinstall;
+  // 同一颗按钮换文案、换图标（图标位自己交叉淡化），不重挂：聚焦着它时检查完焦点还在
+  const primary = (
+    <Button
+      ref={primaryRef}
+      variant="primary"
+      icon={allFound ? (origin === "import" ? "arrow-right" : "refresh") : "folder-open"}
+      loading={!allFound && checking}
+      onClick={allFound ? onAllFound : check}
+    >
+      <ReservedLabel current={allFound ? finalLabel : checking ? BLOCKED_COPY.checking : BLOCKED_COPY.check} options={[BLOCKED_COPY.check, BLOCKED_COPY.checking, finalLabel]} />
     </Button>
   );
+  // 说明块只有一个槽：文件夹读不了的错误顶替检查结果，而不是插在列表与结果之间把结果推下去
+  const notice = folderError !== null ? `folder:${folderError}` : statuses === null ? null : allFound ? "all" : `partial:${found}`;
 
   return (
     <Modal
@@ -200,37 +238,41 @@ export function BlockedFilesModal({ open, files, origin, onClose, onAllFound }: 
                   title={<span className={styles.blockedName}>{file.file_name}</span>}
                   meta={dir === null ? undefined : <span className={styles.blockedDest}>{BLOCKED_COPY.destination(dir)}</span>}
                   trailing={
-                    <>
-                      <Fade id={status === undefined ? null : status}>
-                        {status === "found" ? <Tag tone="ok">{BLOCKED_COPY.found}</Tag> : <Tag tone="warn">{BLOCKED_COPY.missing}</Tag>}
-                      </Fade>
-                      {status !== "found" && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          icon="external"
-                          disabled={checking}
-                          focusableWhenDisabled
-                          aria-label={BLOCKED_COPY.openWebLabel(file.file_name)}
-                          onClick={() => void run(() => actions.openExternal(file.web_url), BLOCKED_COPY.openFailed)}
-                        >
-                          {BLOCKED_COPY.openWeb}
-                        </Button>
+                    // 找到之后「还没找到」与「打开网页」作为一组原地淡出，「已找到」在行尾淡入：按钮不在一帧里消失、把标签甩到行尾
+                    <Fade id={status === "found" ? "found" : "open"}>
+                      {status === "found" ? (
+                        <Tag tone="ok">{BLOCKED_COPY.found}</Tag>
+                      ) : (
+                        <>
+                          <Fade id={status === "missing" ? "missing" : null}>
+                            <Tag tone="warn">{BLOCKED_COPY.missing}</Tag>
+                          </Fade>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            icon="external"
+                            disabled={checking}
+                            focusableWhenDisabled
+                            aria-label={BLOCKED_COPY.openWebLabel(file.file_name)}
+                            onClick={() => void run(() => actions.openExternal(file.web_url), BLOCKED_COPY.openFailed)}
+                          >
+                            {BLOCKED_COPY.openWeb}
+                          </Button>
+                        </>
                       )}
-                    </>
+                    </Fade>
                   }
                 />
               );
             })}
           </List>
         </div>
-        <Fade id={folderError === null ? null : `folder:${folderError}`} block>
-          <Callout tone="danger" announce>
-            <span className={styles.selectable}>{folderError}</span>
-          </Callout>
-        </Fade>
-        <Fade id={statuses === null ? null : allFound ? "all" : `partial:${found}`} block>
-          {allFound ? (
+        <Fade id={notice} block>
+          {folderError !== null ? (
+            <Callout tone="danger" announce>
+              <span className={styles.selectable}>{folderError}</span>
+            </Callout>
+          ) : allFound ? (
             <Callout tone="ok" announce>
               {BLOCKED_COPY.allFound(files.length)}
             </Callout>

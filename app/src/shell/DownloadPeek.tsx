@@ -3,10 +3,11 @@
 // 浮层只列进行中的任务（运行在前、排队在后，各自保持队列顺序），已结束的去下载任务页看。
 //
 // 动效：图标与进度环叠在同一格交叉淡入，角标与危险点出现时弹入、消失时淡出缩小，入口尺寸始终不变；
-// 账户胶囊伸缩时入口跟着胶囊左缘滑（SLIDES_WITH_CAPSULE）；浮层里任务行增删时淡入淡出，其余行从旧位置滑到新位置。
+// 账户胶囊伸缩时入口跟着胶囊左缘滑（SLIDES_WITH_CAPSULE）；浮层里任务行增删时淡入淡出，其余行从旧位置滑到新位置，
+// 浮层外框随之形变到新高度，失败条与底栏跟着外框下沿走。
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import { Icon } from "../art/Icon";
 import { ACTION_ERROR, CONFIRM_COPY, taskPhaseText } from "../copy/flows";
 import { formatSpeed, percent } from "../domain/format";
@@ -31,12 +32,8 @@ import styles from "./DownloadPeek.module.css";
 import { useNav, useShell } from "./shell";
 import { useRunner } from "./useRunner";
 
-/** 角标与提醒点：出现时从零弹入，消失时淡出并缩到 0.6。 */
-const MARK = {
-  initial: { opacity: 0, scale: 0 },
-  animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } },
-  exit: { opacity: 0, scale: 0.6, transition: fade.out },
-} as const;
+/** 底栏随浮层外框的形变移动：与外框同一条弹簧，下沿与底栏一起到位。 */
+const FOLLOW_PANEL = { layout: springs.morph } as const;
 
 /** 挂载时就在的元素跟着外壳或浮层一起出现，不单独播入场；之后才挂上的才播。读这个 ref 决定 initial。 */
 function useMountedRef(): { readonly current: boolean } {
@@ -76,6 +73,16 @@ export function peekRows(tasks: readonly Task[]): Task[] {
 }
 
 /**
+ * 浮层的布局键：变了浮层才量一次布局、外框形变到新高度。由列表的行（按显示顺序）、有没有失败条、有没有「清除已结束」、
+ * 以及 settled 组成。进度、速度、失败数从 1 到 2 这类不改变高度的变化不换键，下载进度的高频重渲染不量布局。
+ * 行退场与列表、空态换手都是先在流里淡出、播完才离开布局：数据变的那一刻布局还没变，真正变高变矮在退场播完的那次提交，
+ * settled 是那一刻记的一笔（是否空态就在行 id 序列与这一笔里：序列为空、换手播完才是空态）。
+ */
+export function peekLayoutKey(rows: readonly Task[], settled: number, failedCount: number, finishedCount: number): string {
+  return JSON.stringify([rows.map((t) => t.id), settled, failedCount > 0, finishedCount > 0]);
+}
+
+/**
  * 取消一个任务前要不要确认：排队中的直接取消；运行中的新建与导入取消后实例会被删除，
  * 修复取消后实例停在文件不完整的状态，这两类要确认；其余直接取消。
  */
@@ -102,8 +109,14 @@ export function DownloadPeek() {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
   const mounted = useMountedRef();
+  // 浮层里的退场播完、节点离开布局的那一刻记一笔：浮层的布局键要在那次提交变，外框才在真正变矮时形变
+  const [settled, markSettled] = useReducer((n: number) => n + 1, 0);
 
   const active = tasks.filter(isActiveTask);
+  const rows = peekRows(tasks);
+  const failedCount = tasks.filter((t) => t.status === "failed").length;
+  const finishedCount = tasks.filter(isFinishedTask).length;
+  const layoutKey = peekLayoutKey(rows, settled, failedCount, finishedCount);
 
   // 快览开着的时候，失败即被看到（包括开着期间新出现的）
   useEffect(() => {
@@ -159,89 +172,99 @@ export function DownloadPeek() {
             </motion.span>
           )}
         </AnimatePresence>
-        <AnimatePresence>
-          {active.length > 0 && (
-            <motion.span key="count" className={styles.count} initial={mounted.current ? MARK.initial : false} animate={MARK.animate} exit={MARK.exit}>
-              <Badge count={active.length} tone="accent" ring />
-            </motion.span>
-          )}
-        </AnimatePresence>
-        <AnimatePresence>
+        {/*
+         * 计数角标与失败点的出现、消失由 Badge 自己播（弹入、缩小淡出），这里只给它退场的机会；
+         * initial={false} 让入口挂载时就在的不弹。两者都是叶子，封不住别人的入场
+         */}
+        <AnimatePresence initial={false}>{active.length > 0 && <Badge key="count" count={active.length} tone="accent" ring className={styles.count} />}</AnimatePresence>
+        <AnimatePresence initial={false}>
           {unseen > 0 && (
-            <motion.span
-              key="failed"
-              className={styles.failDot}
-              data-alone={active.length === 0 || undefined}
-              aria-hidden="true"
-              initial={mounted.current ? MARK.initial : false}
-              animate={MARK.animate}
-              exit={MARK.exit}
-            />
+            <span key="failed" className={styles.failDot} data-alone={active.length === 0 || undefined}>
+              <Badge tone="danger" ring />
+            </span>
           )}
         </AnimatePresence>
       </motion.button>
-      <Popover open={open} anchor={anchor} onClose={close} placement="bottom-end" aria-label={PEEK_COPY.title}>
-        <PeekPanel tasks={tasks} activeCount={active.length} onCancel={cancel} onLeave={leaveTo} onClearFinished={() => actions.clearFinishedTasks()} />
+      <Popover
+        open={open}
+        anchor={anchor}
+        onClose={close}
+        placement="bottom-end"
+        aria-label={PEEK_COPY.title}
+        className={styles.popover}
+        layoutKey={layoutKey}
+        header={<PeekHead activeCount={active.length} />}
+        footer={<PeekFoot failedCount={failedCount} finishedCount={finishedCount} layoutKey={layoutKey} onLeave={leaveTo} onClearFinished={() => actions.clearFinishedTasks()} />}
+      >
+        <PeekList rows={rows} onCancel={cancel} onSettled={markSettled} />
       </Popover>
     </>
   );
 }
 
-interface PeekPanelProps {
-  tasks: readonly Task[];
-  activeCount: number;
-  onCancel: (task: Task) => void;
+function PeekHead({ activeCount }: { activeCount: number }) {
+  return (
+    <div className={styles.head}>
+      <span className={styles.headTitle}>{PEEK_COPY.title}</span>
+      <span className={styles.headMeta}>{activeCount > 0 ? PEEK_COPY.activeSummary(activeCount) : PEEK_COPY.idle}</span>
+    </div>
+  );
+}
+
+/**
+ * 浮层的主体：任务行或空态。随浮层打开挂载，打开时就在的行不单独播入场，开着期间新来的行淡入。
+ * 行与列表的退场播完时调 onSettled：那一刻节点才离开布局，浮层要在那次提交量布局。
+ */
+function PeekList({ rows, onCancel, onSettled }: { rows: readonly Task[]; onCancel: (task: Task) => void; onSettled: () => void }) {
+  const mounted = useMountedRef();
+  const list = useReflow<HTMLUListElement>();
+  return (
+    // 列表与空态先退后进：最后一行跟着列表一起淡出，空态再淡入；退场的列表不脱离布局，外框在换手的那一刻才形变
+    <AnimatePresence mode="wait" onExitComplete={onSettled}>
+      {rows.length > 0 ? (
+        <motion.div key="list" initial={mounted.current ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
+          <ul ref={list} className={styles.list}>
+            {/*
+             * 行退场时留在流里淡出，播完才移除，下面的行再滑上来，外框与主体同时形变到新高度。不用 popLayout：
+             * 弹出流外的末行会挂在主体已经收上去的下沿之外
+             */}
+            <AnimatePresence onExitComplete={onSettled}>
+              {rows.map((task) => (
+                <PeekRow key={task.id} task={task} enter={mounted.current} onCancel={() => onCancel(task)} />
+              ))}
+            </AnimatePresence>
+          </ul>
+        </motion.div>
+      ) : (
+        <motion.p
+          key="empty"
+          className={styles.empty}
+          initial={mounted.current ? { opacity: 0 } : false}
+          animate={{ opacity: 1, transition: fade.in }}
+          exit={{ opacity: 0, transition: fade.out }}
+        >
+          {PEEK_COPY.empty}
+        </motion.p>
+      )}
+    </AnimatePresence>
+  );
+}
+
+interface PeekFootProps {
+  failedCount: number;
+  finishedCount: number;
+  layoutKey: string;
   onLeave: (filter?: "failed") => void;
   onClearFinished: () => void;
 }
 
-/** 浮层内容：随浮层打开挂载，打开时就在的行不单独播入场，开着期间新来的行淡入。 */
-function PeekPanel({ tasks, activeCount, onCancel, onLeave, onClearFinished }: PeekPanelProps) {
-  const mounted = useMountedRef();
-  const list = useReflow<HTMLUListElement>();
-  const failedCount = tasks.filter((t) => t.status === "failed").length;
-  const finishedCount = tasks.filter(isFinishedTask).length;
-  const rows = peekRows(tasks);
+/**
+ * 浮层的底部：失败条与底栏。整块跟着外框下沿走（浮层的底部槽位）；失败条出现、消失时底栏在槽位里上下移，
+ * 与外框下沿同一条弹簧、同一个布局键，一起到位。
+ */
+function PeekFoot({ failedCount, finishedCount, layoutKey, onLeave, onClearFinished }: PeekFootProps) {
   return (
-    <div className={styles.panel}>
-      <div className={styles.head}>
-        <span className={styles.headTitle}>{PEEK_COPY.title}</span>
-        <span className={styles.headMeta}>{activeCount > 0 ? PEEK_COPY.activeSummary(activeCount) : PEEK_COPY.idle}</span>
-      </div>
-      {/* 列表与空态先退后进：最后一行跟着列表一起淡出，空态再淡入，退场的列表不脱离布局、不撑出浮层的滚动条 */}
-      <AnimatePresence mode="wait">
-        {rows.length > 0 ? (
-          <motion.div
-            key="list"
-            className={styles.scroller}
-            initial={mounted.current ? { opacity: 0 } : false}
-            animate={{ opacity: 1, transition: fade.in }}
-            exit={{ opacity: 0, transition: fade.out }}
-          >
-            <ul ref={list} className={styles.list}>
-              {/*
-               * 行退场时留在流里淡出，播完才移除，下面的行再滑上来。不用 popLayout：浮层的外框不随内容伸缩，
-               * 弹出流外的末行会被立即缩短的滚动区裁掉，看上去仍是硬删
-               */}
-              <AnimatePresence>
-                {rows.map((task) => (
-                  <PeekRow key={task.id} task={task} enter={mounted.current} onCancel={() => onCancel(task)} />
-                ))}
-              </AnimatePresence>
-            </ul>
-          </motion.div>
-        ) : (
-          <motion.p
-            key="empty"
-            className={styles.empty}
-            initial={mounted.current ? { opacity: 0 } : false}
-            animate={{ opacity: 1, transition: fade.in }}
-            exit={{ opacity: 0, transition: fade.out }}
-          >
-            {PEEK_COPY.empty}
-          </motion.p>
-        )}
-      </AnimatePresence>
+    <>
       <Appear>
         {failedCount > 0 && (
           <div key="failed" className={styles.failed}>
@@ -253,7 +276,7 @@ function PeekPanel({ tasks, activeCount, onCancel, onLeave, onClearFinished }: P
           </div>
         )}
       </Appear>
-      <div className={styles.foot}>
+      <motion.div className={styles.foot} layout="position" layoutDependency={layoutKey} transition={FOLLOW_PANEL}>
         <Appear>
           {finishedCount > 0 && (
             <Button key="clear" variant="ghost" size="sm" onClick={onClearFinished}>
@@ -264,8 +287,8 @@ function PeekPanel({ tasks, activeCount, onCancel, onLeave, onClearFinished }: P
         <Button variant="secondary" size="sm" iconRight="arrow-right" onClick={() => onLeave()}>
           {PEEK_COPY.allTasks}
         </Button>
-      </div>
-    </div>
+      </motion.div>
+    </>
   );
 }
 

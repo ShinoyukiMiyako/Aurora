@@ -10,7 +10,7 @@ import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
 import type { FlowProps } from "../state/flows";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { PAGE_IDS, type PageId, type Route } from "../state/route";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { GAME_LOG_EVENT } from "../ipc/launch";
 import { CORE_EVENT } from "../ipc/tasks";
@@ -247,6 +247,22 @@ describe("外壳布局", () => {
     await flush();
     expect(pageShown()).toBe("settings");
     error.mockRestore();
+  });
+
+  it("Ctrl+数字的目标就是当前页：内容区平滑滚回顶部，不压历史", async () => {
+    await mount();
+    act(() => nav.go({ page: "library" }));
+    await flush();
+    const scroller = document.querySelector<HTMLElement>("[data-sk-focus-fallback]");
+    if (scroller === null) throw new Error("没有内容区滚动容器");
+    const scrollTo = vi.spyOn(scroller, "scrollTo");
+    scroller.scrollTop = 480;
+    keydown(window, "2", { ctrlKey: true, code: "Digit2" });
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "smooth" });
+    expect(scroller.scrollTop).toBe(0);
+    expect(nav.route).toEqual({ page: "library" });
+    act(() => nav.back());
+    expect(nav.route).toEqual({ page: "home" });
   });
 
   it("首次启动：整窗换成向导，没有侧栏", async () => {

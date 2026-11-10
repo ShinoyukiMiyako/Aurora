@@ -1,8 +1,38 @@
 /* 下载任务页：总览（吞吐卡 + 并行通道）、状态筛选、分组任务列表。尺寸分档读 <html data-sk-tier>。 */
 
+/*
+ * 页头是全部取消退场时的定位基准：退场项被抽出布局后按它在页头里量到的位置原地淡出。
+ * 不能拿动作区作基准：动作区按内容定宽、靠右，退场项一抽走它的左缘就右移，退场项会落到清除按钮上叠着淡出。
+ */
+.header {
+  position: relative;
+}
+
+/* 页头动作：全部取消出现、消失时淡入淡出，右侧的清除按钮不动 */
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+/* 清除按钮里的计数：数字等宽，同位数的计数换字时宽度不变 */
+.countLabel {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 有任务时的内容区：总览、筛选、列表竖排，间距与页面一级区块相同 */
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-page-gap);
+  min-width: 0;
+}
+
+/* 行高至少是骨架的高度（--tasks-overview-h 由页面按常量给出）：骨架换成内容时下面的筛选与列表不动 */
 .overview {
   display: grid;
   grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  grid-auto-rows: minmax(var(--tasks-overview-h), auto);
   gap: var(--sk-gap);
 }
 
@@ -95,6 +125,7 @@
   left: 0;
   width: 100%;
   height: 86px;
+  overflow: hidden;
   pointer-events: none;
 }
 
@@ -106,6 +137,32 @@
 .chartStopBottom {
   stop-color: var(--sk-accent);
   stop-opacity: 0;
+}
+
+/*
+ * 画布比卡宽出一格，右缘外画着最新的一点。每个采样间隔整块向左滑一格（线性，与采样同一节拍），新采样到时换键从头起步：
+ * 最新的一点从右缘外滑进来，整条连续地走，不是每秒整条跳一格。滑的是画布这个盒子，合成线程上播，画布内容一秒只画一次。
+ * 减少动画时不滑，直接停在滑完的位置。
+ */
+.chartPlot {
+  display: block;
+  width: var(--tasks-chart-width);
+  height: 100%;
+  animation: chart-scroll var(--tasks-sample-period) linear forwards;
+}
+
+@keyframes chart-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(var(--tasks-chart-shift));
+  }
+}
+
+:global([data-sk-reduced]) .chartPlot {
+  animation: none;
+  transform: translateX(var(--tasks-chart-shift));
 }
 
 /* 视图按 preserveAspectRatio="none" 横向拉伸，描边不随之变形 */
@@ -157,11 +214,25 @@
   font-weight: var(--sk-w-title);
   font-variant-numeric: tabular-nums;
   color: var(--sk-text-3);
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .lane[data-busy] .laneNo {
   background: var(--sk-accent-soft);
   color: var(--sk-accent-strong);
+}
+
+/* 通道换人时新旧两份内容叠在同一格里交接：旧的淡出、新的落进来，通道不变高 */
+.laneSlot {
+  display: grid;
+  min-width: 0;
+}
+
+.laneFace {
+  grid-area: 1 / 1;
+  min-width: 0;
 }
 
 .laneBody {
@@ -216,6 +287,14 @@
   color: var(--sk-text-2);
 }
 
+/* 排队说明固定一行：窄窗口里放不下就省略（全文在 title 里），不折行把总览行撑高 */
+.queueText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .queueDots {
   display: inline-flex;
   flex: none;
@@ -236,6 +315,12 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--sk-space-12);
+}
+
+/* 分组容器与每一组都是定位元素：组、组标题、空状态退场时以所在容器为基准原地淡出，所在容器正被让位平移时也不错位 */
+.groups,
+.group {
+  position: relative;
 }
 
 .groupLabel {
@@ -394,6 +479,36 @@
 .errorDetail {
   display: block;
   user-select: text;
+}
+
+/* 骨架里的任务行：与真实的大号贴边行同高（行高 72 加列表项上下内边距），行间同样一条分隔线 */
+.skeletonRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-12);
+  box-sizing: content-box;
+  min-height: 72px;
+  padding: var(--sk-space-12) var(--sk-space-18);
+}
+
+.skeletonRow + .skeletonRow {
+  border-top: 1px solid var(--sk-line);
+}
+
+.skeletonBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 骨架条按所在行的行高留白：标题行 22、元信息行 18，与真实文字行同高 */
+.skeletonTitle {
+  line-height: var(--sk-lh-body);
+}
+
+.skeletonMeta {
+  line-height: var(--sk-lh-caption);
 }
 
 .slowHint {

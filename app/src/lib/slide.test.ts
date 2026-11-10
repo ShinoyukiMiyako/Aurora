@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { springAt } from "./motion";
-import { playTrack, Slide, springTrack } from "./slide";
+import { springAt, type SpringName } from "./motion";
+import { playTrack, playTween, scaleTrack, Slide, springTrack } from "./slide";
 
 const SAMPLE_S = 1 / 120;
 const r2 = (value: number) => Math.round(value * 100) / 100;
+const r4 = (value: number) => Math.round(value * 10000) / 10000;
+const scalesOf = (frames: Keyframe[]) => frames.map((frame) => Number(frame.scale));
 
 interface Call {
   frames: Keyframe[];
@@ -67,6 +69,68 @@ describe("springTrack：轨迹", () => {
   });
 });
 
+describe("scaleTrack：缩放轨迹", () => {
+  it("从 from 出发、末帧恰好落在 1，帧在时间轴上等距，只写独立的 scale 属性", () => {
+    const { frames, duration } = scaleTrack("pop", 0.6);
+    expect(frames[0]).toEqual({ scale: "0.6" });
+    expect(frames[frames.length - 1]).toEqual({ scale: "1" });
+    // 只有 scale：与元素自己的 transform 叠加，不把它盖掉
+    for (const frame of frames) expect(Object.keys(frame)).toEqual(["scale"]);
+    expect(duration).toBeCloseTo(((frames.length - 1) * 1000) / 120, 6);
+  });
+
+  it("每一帧都是弹簧解析解在该时刻的缩放，保留四位小数", () => {
+    const { frames } = scaleTrack("pop", 0.6);
+    for (const i of [1, 5, 12, 24]) expect(Number(frames[i].scale)).toBe(r4(1 + springAt("pop", -0.4, 0, i * SAMPLE_S).x));
+  });
+
+  it("tap：临界阻尼，单调收拢到 1，不过冲", () => {
+    const scales = scalesOf(scaleTrack("tap", 0.8).frames);
+    expect(scales[0]).toBe(0.8);
+    expect(Math.max(...scales)).toBe(1);
+    for (let i = 1; i < scales.length; i++) expect(scales[i], `第 ${i} 帧`).toBeGreaterThanOrEqual(scales[i - 1]);
+  });
+
+  it("pop：过冲一点再落定，过冲看得出但有上限（20 px 的图标上不到 0.2 px）", () => {
+    const scales = scalesOf(scaleTrack("pop", 0.6).frames);
+    const peak = Math.max(...scales);
+    expect(peak).toBeGreaterThan(1.004);
+    expect(peak).toBeLessThan(1.008);
+    // 过冲出现在中途，不是末尾那一跳
+    expect(scales.indexOf(peak)).toBeLessThan(scales.length - 2);
+  });
+
+  it("停稳就收尾：tap 约 0.27 秒、pop 约 0.4 秒，都不长于对应的 CSS 弹簧时长（300 / 410 ms），末尾那一跳小于 0.002", () => {
+    const tap = scaleTrack("tap", 0.8);
+    const pop = scaleTrack("pop", 0.6);
+    expect(tap.duration).toBeGreaterThan(230);
+    expect(tap.duration).toBeLessThanOrEqual(300);
+    expect(pop.duration).toBeGreaterThan(350);
+    expect(pop.duration).toBeLessThanOrEqual(410);
+    for (const { frames } of [tap, pop]) expect(Math.abs(Number(frames[frames.length - 2].scale) - 1)).toBeLessThan(0.002);
+  });
+
+  it("起点已经是 1：只有一段，首末都是 1", () => {
+    const { frames, duration } = scaleTrack("pop", 1);
+    expect(frames).toEqual([{ scale: "1" }, { scale: "1" }]);
+    expect(duration).toBeCloseTo(1000 / 120, 6);
+  });
+
+  it("随机起点与弹簧：首帧是起点、末帧是 1，中途的帧取自那枚弹簧的解", () => {
+    const names: SpringName[] = ["tap", "settle", "pop", "soft", "morph", "base"];
+    for (let n = 0; n < 20; n++) {
+      const name = names[Math.floor(Math.random() * names.length)];
+      const from = r4(0.3 + Math.random() * 0.65);
+      const { frames } = scaleTrack(name, from);
+      const label = `${name} 从 ${from}`;
+      expect(Number(frames[0].scale), label).toBe(from);
+      expect(frames[frames.length - 1].scale, label).toBe("1");
+      const i = 1 + Math.floor(Math.random() * (frames.length - 2));
+      expect(Number(frames[i].scale), `${label} 第 ${i} 帧`).toBe(r4(1 + springAt(name, from - 1, 0, i * SAMPLE_S).x));
+    }
+  });
+});
+
 describe("playTrack", () => {
   it("整条轨迹原样交给 Web Animations：时长取轨迹的，帧之间线性相连", () => {
     const { el, calls } = animatable();
@@ -76,6 +140,30 @@ describe("playTrack", () => {
     expect(calls[0].frames).toBe(track.frames);
     expect(calls[0].options).toEqual({ duration: track.duration, easing: "linear" });
     expect(animation).toBe(calls[0].animation);
+  });
+});
+
+describe("playTween", () => {
+  it("补间交给 Web Animations：帧原样，时长从秒换成毫秒，曲线写成 cubic-bezier 串", () => {
+    const { el, calls } = animatable();
+    const frames = [{ opacity: 0.35 }, { opacity: 1 }];
+    const animation = playTween(el, frames, { duration: 0.2, ease: [0.16, 1, 0.3, 1] });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].frames).toBe(frames);
+    expect(calls[0].options).toEqual({ duration: 200, easing: "cubic-bezier(0.16, 1, 0.3, 1)" });
+    expect(animation).toBe(calls[0].animation);
+  });
+
+  it("另一组时长与曲线：照搬，不套默认值", () => {
+    const { el, calls } = animatable();
+    playTween(el, [{ opacity: 1 }, { opacity: 0 }], { duration: 0.12, ease: [0.4, 0, 1, 1] });
+    expect(calls[0].options).toEqual({ duration: 120, easing: "cubic-bezier(0.4, 0, 1, 1)" });
+  });
+
+  it("时长为 0：直接到位", () => {
+    const { el, calls } = animatable();
+    playTween(el, [{ opacity: 0 }, { opacity: 1 }], { duration: 0, ease: [0, 0, 1, 1] });
+    expect(calls[0].options).toEqual({ duration: 0, easing: "cubic-bezier(0, 0, 1, 1)" });
   });
 });
 

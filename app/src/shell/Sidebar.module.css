@@ -56,6 +56,15 @@
   opacity: 1;
 }
 
+/*
+ * 显出之前的那一次样式计算不起过渡：收起时换种类，浅底直接是新样子；侧栏挂上那一刻的显出也直接到位
+ * （冷启动侧栏不做入场）。属性只在那一刻挂着，组件读完布局就摘掉。
+ */
+.selection[data-instant],
+.selection[data-instant] .selBlock {
+  transition: none;
+}
+
 .selBlock {
   width: 44px;
   height: 44px;
@@ -220,7 +229,11 @@
   overflow: visible;
 }
 
-.row:not([data-dragging]) > .pin:active {
+/*
+ * 行与按钮之间还隔着名称提示的包裹层：display: contents 只去掉它的盒子，选择器仍按 DOM 树匹配，
+ * 所以从行找按钮一律用后代选择器，写成子选择器就永远匹配不上。
+ */
+.row:not([data-dragging]) .pin:active {
   transform: scale(0.94);
 }
 
@@ -234,11 +247,21 @@
   transform: scale(1.04);
 }
 
+/* 放下：从 1.04 缩回走 pop，与位置飞回原位或空位同一条弹簧；平常按下松开仍走 tap */
+.row[data-landing] .pin {
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease),
+    transform var(--sk-spring-pop-dur) var(--sk-spring-pop);
+}
+
 /*
  * 抬起阴影：叠层与头像同大同圆角（头像 40 居中在 44 的按钮里），只对透明度做过渡，不动 box-shadow 本身。
- * 外阴影只画在盒子之外，叠在头像上面也不遮它。拿起时淡入，松手按退场时长淡出。
+ * 用 ::before：在按钮里排在头像之前，和头像根、状态环一样是 z-index auto 的定位元素，按树序画在它们底下，
+ * 不压暗画在头像外 4px 的选中环与进度环。拿起时淡入，放下按退场时长淡出。
  */
-.pin::after {
+.pin::before {
   content: "";
   position: absolute;
   inset: 2px;
@@ -249,7 +272,7 @@
   transition: opacity var(--sk-dur-out) var(--sk-ease-in);
 }
 
-.row[data-dragging] .pin::after {
+.row[data-dragging] .pin::before {
   opacity: 1;
   transition: opacity var(--sk-dur-in) var(--sk-ease-out);
 }
@@ -273,10 +296,13 @@
   transform: scale(0.94);
 }
 
-/* 减少动画：按下不缩、拿起不放大，改为瞬时变淡 */
+/*
+ * 减少动画：按下不缩、拿起不放大，改为瞬时变淡。固定项按下那条与上面「没拿起时按下缩小」特异性相同，
+ * 靠排在它后面压过；比拿起、放下两条都高一级。
+ */
 :global([data-sk-reduced]) .item:active,
 :global([data-sk-reduced]) .create:active,
-:global([data-sk-reduced]) .row > .pin:active,
+:global([data-sk-reduced]) .row .pin:active,
 :global([data-sk-reduced]) .row[data-dragging] .pin {
   transform: none;
   opacity: 0.85;

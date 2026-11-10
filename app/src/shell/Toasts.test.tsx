@@ -10,6 +10,7 @@ import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, callsOf, instanceDto, resetRecorder } from "../test/launcher";
 import { TOASTS_COPY } from "../copy/shell";
 import { TOAST_CLOSE_LABEL } from "../ui/Toast";
+import toastStyles from "../ui/Toast.module.css";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider } from "./shell";
 import { Toasts } from "./Toasts";
@@ -265,6 +266,20 @@ describe("通知的删除", () => {
     expect(rule).toMatch(/\bbottom: /);
     expect(rule).not.toMatch(/\btop: /);
     await vi.waitFor(() => expect(first.isConnected).toBe(false), { timeout: 3000, interval: 20 });
+  });
+});
+
+describe("重复的通知", () => {
+  it("同一条又来一次：不新增，并进去的那一条图标底座原位弹一下", async () => {
+    act(() => launcher.actions.toast("success", "已复制"));
+    const icon = document.querySelector<HTMLElement>(`[data-tone] .${toastStyles.iconBase}`);
+    if (icon === null) throw new Error("没有图标底座");
+    await flush();
+    expect(icon.style.transform).toBe("");
+
+    act(() => launcher.actions.toast("success", "已复制"));
+    expect(launcher.state.toasts.map((t) => [t.title, t.repeats])).toEqual([["已复制", 1]]);
+    await vi.waitFor(() => expect(Number(/scale\(([\d.]+)\)/.exec(icon.style.transform)?.[1])).toBeGreaterThan(1.05), { timeout: 2000, interval: 4 });
   });
 });
 

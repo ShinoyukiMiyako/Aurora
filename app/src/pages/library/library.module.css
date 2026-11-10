@@ -32,7 +32,9 @@
   --lib-search-width: 240px;
 }
 
+/* 定位：目录选择撤掉时被抽出布局、按量到的偏移绝对定位，偏移以这里为基准 */
 .tools {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sk-space-10);
@@ -52,6 +54,11 @@
 }
 
 /* ---------------------------------------------------------------- 网格 */
+
+/* 网格与无结果说明的外层。退场的那一个被抽出布局、按量到的偏移绝对定位：偏移以这里为基准，叠放的位置才对得上 */
+.matches {
+  position: relative;
+}
 
 .grid {
   --lib-columns: 3;
@@ -115,11 +122,25 @@
   overflow: hidden;
 }
 
-.currentTag {
+/* 「当前」标签外面那层弹入弹出的包裹：它才是这一行的弹性项 */
+.currentSlot {
+  display: inline-flex;
   flex: none;
 }
 
-/* 未固定时只在卡片悬停或键盘聚焦到卡内时出现；已固定常显 */
+/*
+ * 未固定时只在卡片悬停或键盘聚焦到卡内时出现；已固定常显。显隐跟卡片的上浮与阴影一起淡入淡出：
+ * 图标按钮自己的过渡里没有透明度，这里照抄它的几项再补上（简写会整条覆盖）。
+ */
+.coverTop .pin {
+  transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease),
+    opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
 .pin:not([aria-pressed="true"]) {
   opacity: 0;
 }
@@ -129,6 +150,7 @@
   opacity: 1;
 }
 
+/* 字色随卡面形态换时与卡面图片同一拍淡入，不先于图片跳色 */
 .coverVersion {
   align-self: flex-end;
   color: var(--sk-text);
@@ -136,6 +158,7 @@
   font-weight: var(--sk-w-title);
   line-height: var(--sk-lh-heading);
   font-variant-numeric: tabular-nums;
+  transition: color var(--sk-dur-in) var(--sk-ease-out);
 }
 
 /* 标签行与卡面是同格的兄弟，接不到卡面的媒体文字色：卡面显示材质平铺或玩家图片时在这里换 */
@@ -189,12 +212,19 @@
   white-space: nowrap;
 }
 
+/*
+ * 统计行固定一行高：卡窄、相对时间或数目变长放不下时，排不下的项折到第二行被裁掉，而不是把卡片撑高一行
+ * （卡高一变，同一行与下面各行都要跟着挪，相对时间每 30 秒刷新一次就可能来回跳）。
+ */
 .stats {
+  --lib-stat-recent-min: 4.4em;
   display: flex;
   flex-wrap: wrap;
   gap: var(--sk-space-4) var(--sk-space-12);
+  height: var(--sk-lh-caption);
   margin: var(--sk-space-8) 0 0;
   padding: 0;
+  overflow: hidden;
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
@@ -207,6 +237,11 @@
   align-items: center;
   gap: var(--sk-space-4);
   white-space: nowrap;
+}
+
+/* 相对时间按常见最宽的写法（两位数加三个字：「10 分钟前」「11 个月前」）占宽：跨位数、换单位时后面的项不横移 */
+.stats > li:first-child > span {
+  min-width: var(--lib-stat-recent-min);
 }
 
 .broken {
@@ -224,6 +259,16 @@
   min-height: var(--lib-foot-min-height);
   padding: var(--sk-space-8) var(--sk-space-10) var(--sk-space-10) var(--sk-space-12);
   border-top: 1px solid var(--sk-line);
+}
+
+/*
+ * 换面的常驻槽位。不设定位：标题按钮的覆盖层要盖住底栏空白处（点空白处打开详情）；
+ * 退场的面按量到的偏移绝对定位，基准是卡片的裁切层，与它在底栏里的位置一致。
+ */
+.statusSlot {
+  flex: 1;
+  display: flex;
+  min-width: 0;
 }
 
 .status {
@@ -278,7 +323,9 @@
   white-space: nowrap;
 }
 
+/* 占满按钮左边：文案变短（正在结束…）或计时多出一段时，结束按钮停在原处 */
 .running {
+  flex: 1;
   display: inline-flex;
   align-items: center;
   gap: var(--sk-space-6);
@@ -323,6 +370,8 @@
   cursor: pointer;
   outline: none;
   transition:
+    translate var(--sk-spring-settle-dur) var(--sk-spring-settle),
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap),
     border-color var(--sk-dur-hover) var(--sk-ease),
     background-color var(--sk-dur-hover) var(--sk-ease),
     color var(--sk-dur-hover) var(--sk-ease);
@@ -332,6 +381,31 @@
   border-color: var(--sk-accent-line);
   background: var(--sk-accent-soft);
   color: var(--sk-text);
+}
+
+/*
+ * 与可点卡片同一手感：悬停整块上浮 2px（Settle），按下落回原位并缩到 0.99（Tap）。
+ * 用独立的 translate / scale 属性：格子的入场与让位分别写在外层的 transform 与 translate 上，互不覆盖。
+ */
+:global(:root:not([data-sk-reduced])) .createTile:hover {
+  translate: 0 -2px;
+}
+
+:global(:root:not([data-sk-reduced])) .createTile:active {
+  translate: none;
+  scale: 0.99;
+  transition:
+    translate var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+/* 减少动画：不上浮、不缩放，按下瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .createTile:active {
+  opacity: 0.85;
+  transition: none;
 }
 
 .createTile:focus-visible {

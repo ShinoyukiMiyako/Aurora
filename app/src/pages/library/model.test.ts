@@ -1,17 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { GAME_DIR_SWITCH_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
+import { REFLOW_MAX_ITEMS } from "../../lib/reflow";
 import type { GameDirectoryDto } from "../../state/queries/catalog";
 import { switchSuggestion } from "../shared/switch-suggestion";
 import { LIBRARY_COPY } from "./copy";
 import {
   brokenInstances,
+  crowdedChange,
   DEFAULT_VIEW,
   directoryOptions,
   isFiltered,
   loaderCounts,
   matchesView,
-  orderSignature,
   sortInstances,
   totalPlaytime,
   visibleInstances,
@@ -147,10 +148,27 @@ describe("统计与签名", () => {
     expect(ids(brokenInstances(list))).toEqual(["install", "repair"]);
   });
 
-  it("顺序签名随顺序变化、不随实例的其他字段变化", () => {
-    const a = [inst("x"), inst("y")];
-    expect(orderSignature(a)).toBe(orderSignature([inst("x", { playtimeMin: 9 }), inst("y")]));
-    expect(orderSignature(a)).not.toBe(orderSignature([inst("y"), inst("x")]));
+});
+
+describe("crowdedChange", () => {
+  const range = (n: number, from = 0) => Array.from({ length: n }, (_, i) => `i${from + i}`);
+
+  it("格子没有增删换序时不算，哪怕格子很多", () => {
+    expect(crowdedChange({ ids: range(60), create: true }, { ids: range(60), create: true })).toBe(false);
+  });
+
+  it("换序、增删、新建卡出没都算变化；只有前后多的一边超过让位上限才是一次涉及太多", () => {
+    const n = REFLOW_MAX_ITEMS;
+    // 上限以内换序：逐项让位
+    expect(crowdedChange({ ids: range(n), create: false }, { ids: [...range(n)].reverse(), create: false })).toBe(false);
+    // 新建卡也算一格：上限个实例再加新建卡就超了
+    expect(crowdedChange({ ids: range(n), create: false }, { ids: range(n), create: true })).toBe(true);
+    // 从很多筛到很少：按变化前那一边算
+    expect(crowdedChange({ ids: range(n + 5), create: true }, { ids: range(3), create: false })).toBe(true);
+    // 从很少到很多：按变化后那一边算
+    expect(crowdedChange({ ids: range(3), create: false }, { ids: range(n + 1), create: false })).toBe(true);
+    // 恰好在上限上：让位照常
+    expect(crowdedChange({ ids: range(n - 1), create: true }, { ids: range(n - 2), create: true })).toBe(false);
   });
 });
 

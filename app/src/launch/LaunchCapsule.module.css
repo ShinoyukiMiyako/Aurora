@@ -81,7 +81,7 @@
   pointer-events: none;
 }
 
-/* 窗口外为静止帧 0.5；呼吸的首尾帧也取 0.5，窗口开始与结束（整周期）时都不跳变 */
+/* 窗口外为静止帧 0.5 */
 .glow {
   position: absolute;
   inset: 0;
@@ -90,8 +90,13 @@
   opacity: 0.5;
 }
 
+/*
+ * 整个呼吸窗口（3 个周期）写成一段只播一次的关键帧：从静止帧 0.5 起，在 0.2 与 0.9 之间呼吸，最后回到 0.5 停住。
+ * 首尾都是静止帧，窗口开始与结束时不跳变，也不收窄呼吸幅度；三次最亮仍落在各周期的中点，与角标的呼吸同相。
+ * 窗口内新挂载的光晕按窗口起点取负延迟，跳到这一段里同一时刻。
+ */
 :global(:root[data-sk-breath]:not([data-sk-reduced])) .glow {
-  animation: glow var(--sk-loop-breath) var(--sk-ease-breath) infinite;
+  animation: glow calc(var(--sk-loop-breath) * 3) var(--sk-ease-breath);
   /* 未设置时整条声明在计算期失效，回到初始值 0 */
   animation-delay: var(--breath-delay);
 }
@@ -101,8 +106,14 @@
   100% {
     opacity: 0.5;
   }
-  50% {
+  16.667%,
+  50%,
+  83.333% {
     opacity: 0.9;
+  }
+  33.333%,
+  66.667% {
+    opacity: 0.2;
   }
 }
 
@@ -192,6 +203,14 @@
 
 .go:active {
   transform: scale(0.97);
+}
+
+/*
+ * 减少动画：按压反馈只有透明度，按下与松开都要即时，与同一面上的其它按钮一致。松开时落到的是上面 .go 的过渡，
+ * 所以这里整枚按钮都不留透明度过渡；带原因禁用的进出随之一步到位，同 .iconAction 的禁用。
+ */
+:global([data-sk-reduced]) .go {
+  transition: none;
 }
 
 /* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */

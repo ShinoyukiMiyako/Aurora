@@ -87,6 +87,16 @@ export function pageViewEqual(a: LaunchView, b: LaunchView): boolean {
   }
 }
 
+// ---------------------------------------------------------------- 标签切换的来向
+
+/** 换标签时新面板从导航里的哪一侧进来：新标签排在旧标签之后为 1，之前为 -1。 */
+export function tabStep<T>(order: readonly T[], from: T, to: T): 1 | -1 {
+  const a = order.indexOf(from);
+  const b = order.indexOf(to);
+  if (a < 0 || b < 0) throw new Error(`标签 ${String(from)} 或 ${String(to)} 不在标签顺序里`);
+  return b > a ? 1 : -1;
+}
+
 // ---------------------------------------------------------------- 概览横幅
 
 export type OverviewBannerKind = "failed" | "crashed" | "broken" | "installing";
@@ -578,6 +588,15 @@ export function peekLayout(listed: number, total: number, perRow: number): { sho
   return { shown, more: Math.max(total, listed) - shown };
 }
 
+/**
+ * 速览在 Mod 列表读到之前画几格占位：按实例列表里的 Mod 数，至多两行（放不下时真实内容也正好铺满两行，末格是「+N」）。
+ * 一个 Mod 都没有时真实内容是一条提示，按一格占一行；数目读不出来时按一整行。
+ */
+export function peekPlaceholder(modCount: number | null, perRow: number): number {
+  if (modCount === null) return perRow;
+  return Math.min(Math.max(modCount, 1), perRow * PEEK_ROWS);
+}
+
 // ---------------------------------------------------------------- 存档
 
 /** 最近玩过的在前，没有记录的排最后；同一时刻按名称。 */
@@ -595,6 +614,19 @@ export function worldName(world: WorldDto): string {
 }
 
 export const WORLDS_PREVIEW = 5;
+
+/** 存档数读不出来时存档卡按几行占位。 */
+export const WORLDS_PLACEHOLDER_ROWS = 3;
+
+/**
+ * 存档卡在存档列表读到之前的占位形状：按实例列表里的存档数画同样多的行，至多 WORLDS_PREVIEW 行，超出时再加展开钮那一栏；
+ * 没有存档时画空状态的轮廓。读到之后卡片高度不变，第二行的卡片不被推下去。
+ */
+export function worldsPlaceholder(count: number | null): { kind: "empty" } | { kind: "rows"; rows: number; foot: boolean } {
+  if (count === null) return { kind: "rows", rows: WORLDS_PLACEHOLDER_ROWS, foot: false };
+  if (count === 0) return { kind: "empty" };
+  return { kind: "rows", rows: Math.min(count, WORLDS_PREVIEW), foot: count > WORLDS_PREVIEW };
+}
 
 // ---------------------------------------------------------------- 变更历史
 

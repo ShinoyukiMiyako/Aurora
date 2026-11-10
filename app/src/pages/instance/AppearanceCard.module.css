@@ -38,11 +38,25 @@
   white-space: nowrap;
 }
 
+/*
+ * 背景图片一行包在出入场的包裹层里，方块行前面可能隔着这层包裹：设置行自带的「相邻两行之间画线」认不到它们，
+ * 这两行自己画分隔线（与设置行的分隔线同色同宽，相邻时两条规则落在同一条边上）
+ */
+.ruled {
+  border-top: 1px solid var(--sk-line);
+}
+
 .current {
   display: inline-flex;
   align-items: center;
   gap: var(--sk-space-8);
   min-width: 0;
+}
+
+/* 换方块时弹入的那一层：缩放要作用在块级盒上，不随名称变长被压窄 */
+.blockSlot {
+  display: block;
+  flex: none;
 }
 
 .blockName {

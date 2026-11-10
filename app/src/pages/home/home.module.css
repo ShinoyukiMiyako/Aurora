@@ -130,11 +130,23 @@
   white-space: nowrap;
 }
 
-.greetSkeleton {
+/* 问候与账户行这一块加载区：占满问候卡的宽，骨架里按百分比给的宽才有参照 */
+.greetAccount {
+  align-self: stretch;
+  min-width: 0;
+}
+
+.greetAccountBody {
   display: flex;
   flex-direction: column;
-  gap: var(--sk-space-8);
-  width: 100%;
+  align-items: flex-start;
+  gap: var(--sk-space-4);
+  min-width: 0;
+}
+
+/* 骨架里的标题撑满整行：名字骨架的宽按整行算，真实标题仍随名字收缩 */
+.greetTitleSkeleton {
+  align-self: stretch;
 }
 
 .greetIssue {
@@ -188,11 +200,21 @@
   white-space: nowrap;
 }
 
-/* 立绘整块是「管理账户」按钮；花瓣地面的投影中心线与立绘底边对齐（地面高 24、中心线 16） */
-.figureButton {
+/* 数字骨架：照真实的数值行与说明行画；数字本身按内容定宽，骨架没有内容，给个定宽 */
+.greetStatSkeleton {
+  width: 28%;
+}
+
+/* 立绘的落点：包裹层（出现时淡入）贴在问候卡右下角 */
+.figureSlot {
   position: absolute;
   right: var(--sk-space-16);
   bottom: var(--sk-space-14);
+}
+
+/* 立绘整块是「管理账户」按钮；花瓣地面的投影中心线与立绘底边对齐（地面高 24、中心线 16） */
+.figureButton {
+  position: relative;
   display: grid;
   justify-items: center;
   align-items: end;
@@ -204,11 +226,12 @@
   outline: none;
 }
 
-:global(:root:not([data-sk-reduced])) .figureButton {
+/* 悬停时只有人物离地上浮，脚下的花瓣地面留在原处 */
+:global(:root:not([data-sk-reduced])) .figure {
   transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
 }
 
-:global(:root:not([data-sk-reduced])) .figureButton:hover {
+:global(:root:not([data-sk-reduced])) .figureButton:hover .figure {
   translate: 0 calc(var(--sk-space-4) * -1);
 }
 
@@ -229,8 +252,33 @@
 
 /* ---------------------------------------------------------------- 继续游玩 */
 
+/* 出错与没有实例：空状态在卡里居中，内边距与普通卡片相同 */
 .heroCentered {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
   justify-content: center;
+  padding: var(--sk-space-16) var(--sk-space-18);
+}
+
+/*
+ * 加载占位与各面内容一律撑满卡片：卡片常被同排拉高（wide 档的洞察卡），标题区与胶囊靠 margin-top: auto 压在底边，
+ * 骨架也得一样高，落点才对得上。Loadable 的骨架层（带 aria-hidden）是它根上的直接子项，这里一并撑开。
+ */
+.heroLoadable,
+.heroLoadable > [aria-hidden="true"],
+.heroLoaded,
+.heroLayer {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 骨架顶行里的慢提示：占「上次游玩」那一格，放不下时截断，不换行撑高 */
+.heroSlow {
+  display: flex;
+  min-width: 0;
 }
 
 .emptyActions {
@@ -287,6 +335,13 @@
 
 .heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) :is(.heroName, .heroWhen, .heroLine) {
   text-shadow: var(--sk-media-text-shadow);
+}
+
+/* 卡面换成平铺或图片的那一帧底图才开始淡入：字色跟着慢慢换，不先一步跳成白字。投影不过渡 */
+.heroName,
+.heroWhen,
+.heroLine {
+  transition: color var(--sk-dur-in) var(--sk-ease-out);
 }
 
 .heroFace:has(> .heroCover:is([data-source="texture"], [data-source="remote"])) .heroName {
@@ -370,11 +425,24 @@
   color: var(--sk-text-2);
 }
 
+/* 信息行末尾的存档一段（分隔点、图标、存档名）：整段一起淡入，名字放不下时截断 */
+.heroWorld {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-6);
+  min-width: 0;
+}
+
 .heroActions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--sk-space-10);
+}
+
+/* 「实例详情」的盒子：胶囊伸缩时由动作行的让位整块移动它（按钮自己外面的包裹是 display: contents，移不动） */
+.heroDetails {
+  display: flex;
 }
 
 .heroBlock {
@@ -395,11 +463,28 @@
   min-width: 0;
 }
 
+/* 加载的前 300 ms 标题与骨架一样占位不可见；到了该出现的时刻和骨架（或直接到达的卡片）一起淡入 */
+.recentHead {
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+.recent[data-pending] .recentHead {
+  opacity: 0;
+}
+
+/* 定位元素：离开的卡片脱离布局后以网格为基准，留在原来那一列淡出 */
 .recentGrid {
   --recent-count: 4;
+  position: relative;
   display: grid;
   grid-template-columns: repeat(var(--recent-count), minmax(0, 1fr));
   gap: var(--sk-gap);
+}
+
+/* 增删动画包在每张卡外面的那一层：它才是网格的一项，卡片在里面撑满整格（同一排的卡等高） */
+.recentItem {
+  display: grid;
+  min-width: 0;
 }
 
 :global(:root[data-sk-tier="regular"]) .recentGrid {
@@ -446,12 +531,18 @@
   white-space: nowrap;
 }
 
+/* 换面时新旧两面叠在同一格，都贴右下角：两面大小不一时，旧面淡完、格子收缩，留下的那一面也不挪动 */
 .recentAction {
   position: absolute;
   right: var(--sk-space-12);
   bottom: var(--sk-space-12);
   display: grid;
-  place-items: center;
+  place-items: end;
+}
+
+.recentFace {
+  display: flex;
+  grid-area: 1 / 1;
 }
 
 .recentDone {
@@ -505,12 +596,23 @@
   overflow-y: auto;
 }
 
-.daySkeleton {
-  display: block;
-  margin-top: var(--sk-space-4);
+/* 当日详情的正文：时长一行，下面是说明或实例列表。骨架照同样的两行画 */
+.dayBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
 }
 
 /* ---------------------------------------------------------------- 游玩洞察 */
+
+/* 出错与正文互换的包裹层：撑满卡片的余高，卡片被同排拉高时正文里的近 7 天柱照常压在底边 */
+.insightsFace {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
 
 .insightsBody {
   display: flex;
@@ -521,10 +623,20 @@
   margin-top: var(--sk-space-14);
 }
 
+/* 数据块骨架照 StatTile 的三行画：标签与环比是 caption 行高，数值行与 StatTile 数值行同高（字号的 1.15 倍） */
 .statSkeleton {
   display: flex;
   flex-direction: column;
-  gap: var(--sk-space-4);
+  gap: var(--sk-space-2);
+  min-width: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+.statSkeletonValue {
+  display: flex;
+  align-items: center;
+  height: calc(var(--sk-fs-title) * 1.15);
 }
 
 .bars {
@@ -551,24 +663,51 @@
 
 button.bar {
   cursor: pointer;
-  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap);
 }
 
-button.bar:hover {
+/* 加载期间柱子不可点，没有悬停与按压 */
+button.bar:disabled {
+  cursor: default;
+}
+
+button.bar:not(:disabled):hover {
   background: var(--sk-bg-2);
+}
+
+/* 按下缩到 0.97，像被按进卡片；减少动画时不缩，瞬时降到 0.85 不透明度 */
+button.bar:not(:disabled):active {
+  scale: 0.97;
+}
+
+:global([data-sk-reduced]) button.bar:not(:disabled):active {
+  scale: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 button.bar:focus-visible {
   box-shadow: var(--sk-focus);
 }
 
+/* 数值没到时空着也占一行；到了淡入 */
 .barValue {
+  min-height: var(--sk-lh-micro);
   font-size: var(--sk-fs-micro);
   line-height: var(--sk-lh-micro);
   font-weight: var(--sk-w-medium);
   color: var(--sk-text-2);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  transition:
+    color var(--sk-dur-hover) var(--sk-ease),
+    opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+.barValue[data-empty] {
+  opacity: 0;
 }
 
 .bar[data-picked] .barValue {
@@ -583,9 +722,10 @@ button.bar:focus-visible {
   overflow: hidden;
   border-radius: var(--sk-r-pill);
   background: var(--sk-bg-2);
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
 }
 
-button.bar:hover .barTrack {
+button.bar:not(:disabled):hover .barTrack {
   background: var(--sk-bg-3);
 }
 
@@ -593,13 +733,13 @@ button.bar:hover .barTrack {
   box-shadow: var(--home-picked-ring);
 }
 
+/* 填充是整根柱高的胶囊，从底下推上来、由柱槽裁出：不用 scaleY，那会把顶端的圆头与今日柱的渐变一起压扁 */
 .barFill {
   position: absolute;
   inset: 0;
   border-radius: inherit;
   background: var(--sk-accent-2);
-  transform: scaleY(var(--fill));
-  transform-origin: bottom;
+  transform: translateY(calc((1 - var(--fill)) * 100%));
 }
 
 :global(:root:not([data-sk-reduced])) .barFill {
@@ -623,22 +763,44 @@ button.bar:hover .barTrack {
 
 /* ---------------------------------------------------------------- 资讯与服务器的行骨架 */
 
+/*
+ * 照真实的行排：上距 10、行距 2 同资讯列表与服务器列表，行内上下 8、左右 10 加 40 的缩略图，
+ * 资讯行（正文一行加说明一行）合 56 同列表行，服务器行（正文一行加说明两行）合 74 同服务器行。
+ * 骨架换成内容时每一行都在原处，卡片不跳。
+ */
 .rowSkeletons {
   display: flex;
   flex-direction: column;
-  gap: var(--sk-space-14);
-  margin-top: var(--sk-space-12);
-  padding: var(--sk-space-8) var(--sk-space-10);
+  gap: var(--sk-space-2);
+  margin-top: var(--sk-space-10);
 }
 
 .rowSkeleton {
   display: flex;
   align-items: center;
   gap: var(--sk-space-12);
+  padding: var(--sk-space-8) var(--sk-space-10);
 }
 
-.rowSkeleton > :last-child {
+.rowSkeletonText {
+  display: flex;
   flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 骨架文字条按所在位置的行高取高：标题行取正文行高，说明行取说明行高 */
+.skeletonBody {
+  line-height: var(--sk-lh-body);
+}
+
+.skeletonCaption {
+  line-height: var(--sk-lh-caption);
+}
+
+/* 加载超过一阵子时骨架下面的一句「比平时慢一些」 */
+.rowSlowHint {
+  margin-top: var(--sk-space-8);
 }
 
 /* ---------------------------------------------------------------- 资讯 */
@@ -716,6 +878,16 @@ button.bar:hover .barTrack {
 
 /* ---------------------------------------------------------------- 固定的服务器 */
 
+/*
+ * 列表（或空状态）与测速失败提示的竖排。每一项是 Appear 的包裹层：纵向 flex 让列表的上外边距留在包裹层里，
+ * 退场的那一项脱离布局时位置不错开；行数变化时提示由这里的让位滑过去。
+ */
+.serverStack {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .serverList {
   display: flex;
   flex-direction: column;
@@ -739,10 +911,24 @@ button.bar:hover .barTrack {
   background: var(--sk-bg-2);
 }
 
+/*
+ * 名称一行正文加 MOTD、在线人数两行说明。测速结果还没到、或这台没报 MOTD 时也占满三行：
+ * 行高恒定，结果晚到时不把下面的行一行行挤下去。内容靠上排，结果到了名称不挪位置。
+ */
 .serverText {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: calc(var(--sk-lh-body) + 2 * var(--sk-lh-caption));
+}
+
+/* MOTD 与在线人数，以及它们的骨架：说明字阶的行高，骨架的文字条按它取高 */
+.serverDetail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
 }
 
 .serverName {
@@ -766,6 +952,17 @@ button.bar:hover .barTrack {
   color: var(--sk-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 等过测速结果的行：版本号与下面两行说明一起淡入 */
+.serverVersion[data-late] {
+  animation: serverReveal var(--sk-dur-in) var(--sk-ease-out);
+}
+
+@keyframes serverReveal {
+  from {
+    opacity: 0;
+  }
 }
 
 .serverMotd,
@@ -808,10 +1005,12 @@ button.bar:hover .barTrack {
   height: var(--home-signal-height);
 }
 
+/* 测速结果回来、重测后延迟换档时格子换色：与行底色同一档过渡，不是四格同帧闪变 */
 .signalBar {
   width: var(--home-signal-bar-width);
   border-radius: var(--sk-r-pill);
   background: var(--sk-line-2);
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .signalBar[data-level="1"] {

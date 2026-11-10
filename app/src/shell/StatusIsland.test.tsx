@@ -17,7 +17,7 @@ import { bootOverrides, callsOf, cancelledError, deferred, emit, instanceDto, re
 import { ISLAND_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider } from "./shell";
-import { downloadStageNote, islandLayoutKey, islandSecond, islandSecondText, islandTone, LOG_LINES, stageNote, stageState, StatusIsland } from "./StatusIsland";
+import { downloadStageNote, islandLayoutKey, islandSecond, islandSecondText, islandSlot, islandTone, LOG_LINES, stageNote, stageState, StatusIsland, type IslandSecond } from "./StatusIsland";
 import styles from "./StatusIsland.module.css";
 import type { Tier } from "./tier";
 
@@ -129,7 +129,7 @@ describe("胶囊的布局依赖", () => {
   const runningSession = session({ phase: "running", runningSince: T0, stageIndex: 8, progress: 1 });
 
   function keyAt(s: SessionState, tier: Tier, elapsedMs: number, stopping = false): string {
-    return islandLayoutKey(s, tier, "生存", islandSecond(s, tier, T0 + elapsedMs, stopping));
+    return islandLayoutKey(s, tier, "生存", islandSlot(s, tier, T0 + elapsedMs, stopping));
   }
 
   it.each(ALL_TIERS)("%s 档运行中：计时位数不变的任意两秒 layoutKey 相同", (tier) => {
@@ -147,28 +147,100 @@ describe("胶囊的布局依赖", () => {
     expect(keyAt(runningSession, tier, 36_000_000)).not.toBe(hours);
   });
 
-  it("阶段变化时 layoutKey 变：三个加载阶段、运行、已结束、失败、崩溃两两不同", () => {
-    const phases: Partial<SessionState>[] = [
+  it.each(ALL_TIERS)("%s 档：三个加载阶段共用一个槽、layoutKey 相同；加载、运行、已结束、失败、崩溃两两不同", (tier) => {
+    const loading: Partial<SessionState>[] = [
       { phase: "preparing", progress: 0.1 },
-      { phase: "downloading", progress: 0.1 },
-      { phase: "launching", progress: 0.1 },
+      { phase: "downloading", stageIndex: 4, progress: 0.4 },
+      { phase: "launching", stageIndex: 6, progress: 0.9 },
+    ];
+    expect(new Set(loading.map((patch) => keyAt(session(patch), tier, 0))).size).toBe(1);
+    const kinds: Partial<SessionState>[] = [
+      loading[0],
       { phase: "running", runningSince: T0 },
       { phase: "stopped", stopReason: "exited", runningSince: T0 },
       { phase: "failed" },
       { phase: "crashed", runningSince: T0 },
     ];
-    expect(new Set(phases.map((patch) => keyAt(session(patch), "regular", 0))).size).toBe(phases.length);
+    expect(new Set(kinds.map((patch) => keyAt(session(patch), tier, 0))).size).toBe(kinds.length);
   });
 
-  it("点了结束、换档位时 layoutKey 变：胶囊宽度确实要变", () => {
-    expect(keyAt(runningSession, "regular", 5000, true)).not.toBe(keyAt(runningSession, "regular", 5000));
+  it("regular 与 wide 档点了结束不换 layoutKey（「正在结束…」已在槽里）；compact 档才换；换档位时换", () => {
+    const loadingSession = session({ phase: "downloading", stageIndex: 4, progress: 0.4 });
+    for (const tier of ["regular", "wide"] as const) {
+      expect(keyAt(runningSession, tier, 5000, true)).toBe(keyAt(runningSession, tier, 5000));
+      expect(keyAt(loadingSession, tier, 0, true)).toBe(keyAt(loadingSession, tier, 0));
+    }
+    expect(keyAt(runningSession, "compact", 5000, true)).not.toBe(keyAt(runningSession, "compact", 5000));
+    expect(keyAt(loadingSession, "compact", 0, true)).not.toBe(keyAt(loadingSession, "compact", 0));
     expect(keyAt(runningSession, "wide", 5000)).not.toBe(keyAt(runningSession, "regular", 5000));
   });
 
-  it("加载中：百分比走动不换 layoutKey，从一位数进到两位数才换", () => {
-    const at = (progress: number) => keyAt(session({ phase: "downloading", stageIndex: 4, progress }), "regular", 0);
-    expect(at(0.31)).toBe(at(0.87));
-    expect(at(0.09)).not.toBe(at(0.1));
+  it.each(ALL_TIERS)("%s 档加载中：百分比怎么走都不换 layoutKey（按 99% 占位）", (tier) => {
+    const at = (progress: number) => keyAt(session({ phase: "downloading", stageIndex: 4, progress }), tier, 0);
+    const edges = [0, 0.004, 0.09, 0.1, 0.5, 0.99, 0.995, 1];
+    const random = Array.from({ length: 30 }, () => Math.random());
+    expect(new Set([...edges, ...random].map(at)).size).toBe(1);
+  });
+});
+
+describe("第二段的槽", () => {
+  const ALL_TIERS: Tier[] = ["compact", "regular", "wide"];
+  const patches: Partial<SessionState>[] = [
+    { phase: "preparing", stageIndex: 1, progress: 0 },
+    { phase: "preparing", stageIndex: 3, progress: 0.07 },
+    { phase: "downloading", stageIndex: 4, progress: 0.42 },
+    { phase: "launching", stageIndex: 7, progress: 0.995 },
+    { phase: "running", runningSince: T0 },
+    { phase: "stopped", stopReason: "cancelled" },
+    { phase: "stopped", stopReason: "exited", runningSince: T0 },
+    { phase: "failed" },
+    { phase: "crashed", runningSince: T0 },
+  ];
+  // 运行计时取几处位数边界与随机秒数
+  const elapsed = [0, 9_000, 65_000, 3_599_000, 3_600_000, 36_000_000, Math.floor(Math.random() * 40_000) * 1000];
+
+  /** 显示的这一行能放进槽里：同一句文字的候选在，数字不比候选的占位长（数字等宽，位数不多就不宽）。 */
+  function fits(shown: IslandSecond, slot: readonly IslandSecond[]): boolean {
+    return slot.some((c) => c.label === shown.label && (c.value === null ? shown.value === null : shown.value !== null && shown.value.length <= c.value.length));
+  }
+
+  it("每种阶段、档位、计时与「正在结束」的组合：显示的那一行都放得进槽里", () => {
+    for (const patch of patches)
+      for (const tier of ALL_TIERS)
+        for (const ms of elapsed)
+          for (const stopping of [false, true]) {
+            const s = session(patch);
+            const shown = islandSecond(s, tier, T0 + ms, stopping);
+            const slot = islandSlot(s, tier, T0 + ms, stopping);
+            if (!fits(shown, slot)) throw new Error(`放不进槽：${JSON.stringify({ patch, tier, ms, stopping, shown, slot })}`);
+          }
+  });
+
+  it("regular 与 wide 档：加载期间槽里是三个加载阶段与「正在结束…」，运行期间是计时与「正在结束…」", () => {
+    const loading = session({ phase: "downloading", stageIndex: 4, progress: 0.42 });
+    const running = session({ phase: "running", runningSince: T0 });
+    for (const tier of ["regular", "wide"] as const) {
+      expect(islandSlot(loading, tier, T0, false).map(islandSecondText)).toEqual([
+        `${PHASE_LABEL.preparing} 99%`,
+        `${PHASE_LABEL.downloading} 99%`,
+        `${PHASE_LABEL.launching} 99%`,
+        SESSION_COPY.stopping,
+      ]);
+      expect(islandSlot(running, tier, T0 + 65_000, false).map(islandSecondText)).toEqual([`${SESSION_COPY.runningLabel} 00:00`, SESSION_COPY.stopping]);
+      expect(islandSlot(running, tier, T0 + 3_600_000, true).map(islandSecondText)).toEqual([`${SESSION_COPY.runningLabel} 0:00:00`, SESSION_COPY.stopping]);
+    }
+  });
+
+  it("compact 档只占当前这一行，不为「正在结束…」多占宽；已结束、失败、崩溃各档都只占当前这一行", () => {
+    expect(islandSlot(session({ phase: "launching", stageIndex: 6, progress: 0.9 }), "compact", T0, false)).toEqual([{ label: null, value: "99%" }]);
+    expect(islandSlot(session({ phase: "running", runningSince: T0 }), "compact", T0 + 65_000, false)).toEqual([{ label: null, value: "00:00" }]);
+    expect(islandSlot(session({ phase: "running", runningSince: T0 }), "compact", T0, true)).toEqual([{ label: SESSION_COPY.stopping, value: null }]);
+    for (const tier of ALL_TIERS) {
+      for (const patch of patches.slice(5)) {
+        const s = session(patch);
+        expect(islandSlot(s, tier, T0, false)).toEqual([islandSecond(s, tier, T0, false)]);
+      }
+    }
   });
 });
 
@@ -441,6 +513,50 @@ describe("状态岛", () => {
     const detail = liveDetail().querySelector(`.${styles.detail}`);
     if (detail === null) throw new Error("详情里没有正文");
     expect(reflowed.has(detail)).toBe(true);
+  });
+
+  it("运行转崩溃：「结束游戏」那一层退场时不可交互，新插入的「关闭」「查看诊断」各自从小、透明淡入，「完整日志」原地不动", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
+    view = render(
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          <StatusIsland />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>,
+    );
+    await flush();
+    await act(async () => {
+      await launcher.actions.launch("生存");
+      await settle();
+    });
+    expect(launcher.state.session?.phase).toBe("running");
+    const island = document.querySelector<HTMLButtonElement>("[aria-haspopup='dialog']");
+    if (island === null) throw new Error("状态岛没有出现");
+    act(() => island.click());
+    await flush();
+    const actions = liveDetail().querySelector<HTMLElement>(`.${styles.actions}`);
+    if (actions === null) throw new Error("详情里没有动作行");
+    const [logs, stop] = [...actions.children] as HTMLElement[];
+    expect([logs, stop].map((el) => el.textContent)).toEqual([ISLAND_COPY.fullLog, LAUNCH_COPY.stopGame]);
+
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 1, crashed: true, killed: false, duration_ms: 60_000 }));
+    await flush();
+    expect(launcher.state.session?.phase).toBe("crashed");
+    const items = [...actions.children] as HTMLElement[];
+    expect(items.map((el) => el.textContent)).toEqual([ISLAND_COPY.fullLog, LAUNCH_COPY.stopGame, LAUNCH_COPY.dismiss, LAUNCH_COPY.viewCrash]);
+    // 挂载时就在的「完整日志」还是原来那一层，不重播入场
+    expect(items[0]).toBe(logs);
+    expect(logs.hasAttribute("inert")).toBe(false);
+    // 退场的「结束游戏」点不到、聚焦不到：叠在顶上来的兄弟上面淡出时，点击落到它下面的按钮
+    expect(items[1]).toBe(stop);
+    expect(stop.hasAttribute("inert")).toBe(true);
+    // 新插入的两个按钮各包一层，起点是 insertItem 的 initial
+    expect(items.slice(2).map((el) => [el.className, el.hasAttribute("inert"), el.style.opacity, el.style.transform])).toEqual([
+      [styles.action, false, "0", "scale(0.98)"],
+      [styles.action, false, "0", "scale(0.98)"],
+    ]);
   });
 
   describe("结束这一局后动作行不删按钮：结束按钮留在原位改为不可用，「完整日志」不挪", () => {
@@ -780,8 +896,15 @@ describe("状态岛胶囊的动效", () => {
     const session = launcher.state.session;
     if (session === null) throw new Error("启动后应有会话");
     const faces = () => [...islandButton().querySelectorAll<HTMLElement>(`.${styles.face}`)];
+    const reserves = () => [...islandButton().querySelectorAll<HTMLElement>(`.${styles.reserve}`)];
     const [preparing] = faces();
     expect(preparing.textContent).toBe(`${PHASE_LABEL.preparing}0%`);
+    // 占宽的候选与显示的行在同一格：三个加载阶段按 99% 占位，再加「正在结束…」
+    const slot = reserves();
+    expect(slot.map((el) => el.textContent)).toEqual([`${PHASE_LABEL.preparing}99%`, `${PHASE_LABEL.downloading}99%`, `${PHASE_LABEL.launching}99%`, SESSION_COPY.stopping]);
+    expect(slot.every((el) => el.parentElement === preparing.parentElement && el.getAttribute("aria-hidden") === "true")).toBe(true);
+    const rects = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+    const measures = () => rects.mock.contexts.filter((el) => el === islandButton()).length;
 
     act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished: 0, total: 10, bytes: 0, total_bytes: null, speed: 0 } }));
     await flush();
@@ -789,11 +912,31 @@ describe("状态岛胶囊的动效", () => {
     expect(after.map((el) => el.textContent)).toEqual([`${PHASE_LABEL.preparing}0%`, `${PHASE_LABEL.downloading}30%`]);
     expect(after[0]).toBe(preparing);
     const downloading = after[1];
+    // 新行从下方入场，起点是 lineSwap 的 enter
+    expect([downloading.style.opacity, downloading.style.transform]).toEqual(["0", "translateY(4px)"]);
+    // 换的只是格里的那一行：候选还是那几个节点，胶囊宽度不变，布局动画不量胶囊
+    expect(reserves()).toEqual(slot);
+    expect(measures()).toBe(0);
 
     act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished: 2, total: 10, bytes: 0, total_bytes: null, speed: 0 } }));
     await flush();
     expect(faces().at(-1)).toBe(downloading);
     expect(downloading.textContent).toBe(`${PHASE_LABEL.downloading}39%`);
+
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "launching", stage_index: 6 }));
+    await flush();
+    expect(faces().at(-1)?.textContent).toMatch(new RegExp(`^${PHASE_LABEL.launching}\\d+%$`));
+    expect(reserves()).toEqual(slot);
+    expect(measures()).toBe(0);
+    rects.mockRestore();
+  });
+
+  it("第二段的槽：单格网格，显示的行宽度记 0 再撑满格子，候选不可见只占宽", () => {
+    const css = readFileSync(resolve(__dirname, "StatusIsland.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(css).toMatch(/\n\.second\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(0, 1fr\);/);
+    expect(css).toMatch(/\n\.face,\s*\.reserve\s*\{[^}]*grid-area:\s*1 \/ 1;/);
+    expect(css).toMatch(/\n\.face\s*\{\s*width:\s*0;\s*min-width:\s*100%;\s*\}/);
+    expect(css).toMatch(/\n\.reserve\s*\{\s*visibility:\s*hidden;\s*\}/);
   });
 
   it("运行转崩溃：绿点留着退场，红点同时弹出", async () => {
@@ -807,13 +950,25 @@ describe("状态岛胶囊的动效", () => {
     expect(islandButton().querySelectorAll(`.${styles.dangerDot}`)).toHaveLength(1);
   });
 
-  it("崩溃抖动由包住整座胶囊的那层承担，描边与底色跟着内容一起晃", async () => {
+  // 抖动层确实在崩溃时晃、胶囊与行自己不平移，要逐帧采样，在 StatusIsland.shake.test.tsx；这里只管它包住了谁
+  it("抖动层只包胶囊本身：读屏播报与打开着的详情都在它外面，崩溃时不跟着晃", async () => {
     mount();
     await running();
-    const shaker = islandButton().parentElement;
-    expect(shaker?.className).toBe(styles.shaker);
-    // 抖动层只包胶囊本身：读屏播报与详情浮层不在里面
-    expect(shaker?.children).toHaveLength(1);
+    const island = islandButton();
+    const shaker = island.parentElement;
+    if (shaker === null || shaker.className !== styles.shaker) throw new Error("胶囊外面应包着抖动层");
+    act(() => island.click());
+    await flush();
+    exitGame(true);
+    await flush();
+    expect(launcher.state.session?.phase).toBe("crashed");
+    const live = document.querySelector<HTMLElement>("[aria-live='polite']");
+    expect(live?.textContent).toBe(ISLAND_COPY.announce("生存", PHASE_LABEL.crashed));
+    const detail = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].filter((el) => !el.hasAttribute("data-exiting"));
+    expect(detail).toHaveLength(1);
+    expect([...shaker.children]).toEqual([island]);
+    expect(shaker.contains(live)).toBe(false);
+    expect(shaker.contains(detail[0])).toBe(false);
   });
 
   it("抖动层可以收窄：中列放不下时照旧由胶囊收窄、名字走省略号", () => {

@@ -2,6 +2,7 @@
 // 全部是纯函数，真正落笔在 render.ts。世界坐标以皮肤像素为单位，脚底中心是原点：
 // x 指向玩家左手（玩家面朝屏幕时的画面右侧）、y 向上、z 指向玩家正前方。
 
+import { springAt } from "../../lib/motion";
 import { armWidth } from "../illustrations/silhouette";
 import { FACE_SHADE, type Matrix } from "../iso/geometry";
 import { FIGURE_FRAME, FIGURE_FRAME_PAD, type SkinModel } from "./layout";
@@ -279,12 +280,24 @@ export function figureQuads(format: SkinFormat, model: SkinModel, hat: boolean, 
   });
 }
 
-// ---------------------------------------------------------------- 回位缓动
+// ---------------------------------------------------------------- 松手回位
 
-/** 指数回位的时间常数：大角度甩动约 0.7 秒回正。 */
-const SETTLE_TAU_MS = 110;
-/** 剩下不足 0.25 度时吸附到默认姿态，让循环能停下来。 */
+/** 剩下不足 0.25 度、角速度也不足 2 度每秒时吸附到默认姿态，让循环能停下来。只看角度会在回弹的半路停住。 */
 const SETTLE_SNAP = radians(0.25);
+const SETTLE_SNAP_SPEED = radians(2);
+
+/** 松手时的角速度只看松手前这么久里的拖动：更早的移动已经不代表手上的速度，停住再松手就是零。 */
+const RELEASE_WINDOW_MS = 80;
+/** 窗口里的拖动不足这么久时不算甩动：一两个挨得很近的事件，时刻差太小，算出的速度不可信。 */
+const RELEASE_MIN_SPAN_MS = 16;
+/** 甩动角速度的上限（弧度每秒）：带着它回位最多先多转约 23 度，不会甩成整圈。 */
+const MAX_RELEASE_SPEED = radians(1080);
+
+/** 拖动过程中的一次姿态：事件时刻（毫秒）与当时的 yaw。 */
+export interface YawSample {
+  t: number;
+  yaw: number;
+}
 
 /** 角度折算到 (-π, π]。 */
 export function wrapAngle(angle: number): number {
@@ -293,8 +306,24 @@ export function wrapAngle(angle: number): number {
   return wrapped > Math.PI ? wrapped - turn : wrapped;
 }
 
-/** 走 dtMs 之后的 yaw：沿最短方向靠向 rest，足够近时精确返回 rest。 */
-export function settleYaw(yaw: number, rest: number, dtMs: number): number {
-  const remaining = wrapAngle(rest - yaw) * Math.exp(-dtMs / SETTLE_TAU_MS);
-  return Math.abs(remaining) < SETTLE_SNAP ? rest : rest - remaining;
+/**
+ * 松手那一刻的角速度（弧度每秒）：窗口内最早的一次拖动到松手时的平均速度。samples 按时刻升序；
+ * 松手前停住不动的那段也算在里面，所以停一会儿再松手速度自然变小，停够一个窗口就是零。
+ */
+export function releaseVelocity(samples: readonly YawSample[], releaseAt: number, releaseYaw: number): number {
+  const first = samples.find((sample) => releaseAt - sample.t <= RELEASE_WINDOW_MS);
+  if (first === undefined) return 0;
+  const span = releaseAt - first.t;
+  if (span < RELEASE_MIN_SPAN_MS) return 0;
+  const speed = ((releaseYaw - first.yaw) / span) * 1000;
+  return Math.max(-MAX_RELEASE_SPEED, Math.min(MAX_RELEASE_SPEED, speed));
+}
+
+/**
+ * 松手 t 秒后的 yaw：从 from 带着松手时的角速度沿 pop 弹簧回到 rest，走最短方向。甩动中松手先顺着手的方向
+ * 带一段再折回，不会从最大速度起步猛然掉头。足够近又足够慢时精确返回 rest。
+ */
+export function releaseYaw(from: number, rest: number, velocity: number, t: number): number {
+  const { x, v } = springAt("pop", wrapAngle(from - rest), velocity, t);
+  return Math.abs(x) < SETTLE_SNAP && Math.abs(v) < SETTLE_SNAP_SPEED ? rest : rest + x;
 }

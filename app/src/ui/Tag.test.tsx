@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { AnimatePresence } from "framer-motion";
+import { AnimatePresence, motion, MotionConfig } from "framer-motion";
 import { createRef } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { LOADER_KINDS, type LoaderKind } from "../domain/types";
@@ -85,10 +85,31 @@ describe("Badge 出现与消失", () => {
     <AnimatePresence initial={false}>{show && <Badge key="badge" tone="accent" count={count} />}</AnimatePresence>
   );
 
-  it("单独挂上就从无到有弹出：起点缩到 0、全透明", () => {
+  it("没有包 AnimatePresence：挂上就是终态，不弹", () => {
     const badge = mount(<Badge tone="accent" count={3} />).firstElementChild as HTMLElement;
-    expect(badge.style.opacity).toBe("0");
-    expect(badge.style.transform).toBe("scale(0)");
+    expect(badge.style.opacity).toBe("1");
+    expect(badge.style.transform).toBe("none");
+  });
+
+  it("外面只有更远处的 AnimatePresence（主界面、弹窗那一层）：之后才出现也不弹", () => {
+    const frame = (show: boolean) => (
+      <AnimatePresence>
+        <motion.div key="frame">{show && <Badge tone="accent" count={2} />}</motion.div>
+      </AnimatePresence>
+    );
+    mount(frame(false));
+    expect(dot()).toBeNull();
+    view?.rerender(frame(true));
+    expect(dot()?.style.opacity).toBe("1");
+    expect(dot()?.style.transform).toBe("none");
+  });
+
+  it("放在直接出场的 motion 外壳里（标签页徽标、下载入口计数）：出现与消失归外壳，角标自己不再弹一次", () => {
+    const shell = (show: boolean) => <AnimatePresence>{show && <motion.span key="shell">{<Badge tone="accent" count={2} />}</motion.span>}</AnimatePresence>;
+    mount(shell(false));
+    view?.rerender(shell(true));
+    expect(dot()?.style.opacity).toBe("1");
+    expect(dot()?.style.transform).toBe("none");
   });
 
   it("宿主挂载时就在（外层 initial={false}）：不弹，直接是终态", () => {
@@ -103,6 +124,41 @@ describe("Badge 出现与消失", () => {
     view?.rerender(host(true, 2));
     expect(dot()?.style.opacity).toBe("0");
     expect(dot()?.style.transform).toBe("scale(0)");
+  });
+
+  it("直接包着的 AnimatePresence 在 motion 元素里面（宿主是图标按钮、导航项）：照样从 0 弹出", () => {
+    const nested = (show: boolean) => (
+      <motion.div>
+        <AnimatePresence initial={false}>{show && <Badge key="badge" tone="accent" count={2} />}</AnimatePresence>
+      </motion.div>
+    );
+    mount(nested(false));
+    view?.rerender(nested(true));
+    expect(dot()?.style.opacity).toBe("0");
+    expect(dot()?.style.transform).toBe("scale(0)");
+  });
+
+  it("减少动画：后到时只从透明淡入，不缩放", () => {
+    const reduced = (show: boolean) => <MotionConfig reducedMotion="always">{host(show, 2)}</MotionConfig>;
+    mount(reduced(false));
+    view?.rerender(reduced(true));
+    expect(dot()?.style.opacity).toBe("0");
+    expect(dot()?.style.transform).toBe("");
+  });
+
+  it("减少动画：消失时原地淡出，不先缩一下", async () => {
+    const reduced = (show: boolean) => <MotionConfig reducedMotion="always">{host(show, 2)}</MotionConfig>;
+    mount(reduced(true));
+    view?.rerender(reduced(false));
+    const leaving = dot();
+    if (leaving === null) throw new Error("退场中的角标应还在 DOM 里");
+    const transforms = new Set<string>();
+    await waitForFrames(() => {
+      transforms.add(leaving.style.transform);
+      expect(dot()).toBeNull();
+    });
+    // 整段退场都没写过缩放：减少动画下缩放一步到位，写了就会先跳到 scale(0.6)
+    expect([...transforms]).toEqual([""]);
   });
 
   it("计数变化不重播：同一个元素，停在终态", () => {

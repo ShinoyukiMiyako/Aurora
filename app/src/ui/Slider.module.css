@@ -81,17 +81,21 @@
 }
 
 /*
- * 圆钮的行程：宽度等于可用轨道（命中区减一个圆钮），圆钮贴在它的左端，整段靠 translate 移动 p × 自身宽度。
- * 位置同样只动 translate，不动 left。
+ * 圆钮的行程盒与命中区同宽，圆钮贴在它的右端；整段靠 translate 左移，p = 1 时恰好归位，p < 1 时多出的部分伸到命中区左侧。
+ * 不让盒子往右伸：变换后的盒子计入祖先的可滚动溢出，放进 overflow: auto 的容器（弹窗正文、向导）时，
+ * 往右伸的那段会在拖到右半段时撑出横向滚动条；伸到起始边之外的部分不可滚动，不撑大 scrollWidth。
+ * translate 的百分比相对盒子自身（即命中区宽），和填充一样留在计算值里：窗口缩放时不触发过渡。位置不动 left。
  */
 .thumb {
   position: absolute;
   top: 50%;
-  right: var(--slider-thumb);
+  right: 0;
   left: 0;
+  display: flex;
+  justify-content: flex-end;
   height: var(--slider-thumb);
   margin-top: calc(var(--slider-thumb) / -2);
-  translate: calc(var(--slider-p) * 100%) 0;
+  translate: calc(var(--slider-p) * (100% - var(--slider-thumb)) + var(--slider-thumb) - 100%) 0;
   pointer-events: none;
 }
 

@@ -31,6 +31,14 @@ describe("换步的页", () => {
   });
 });
 
+describe("说明区占位", () => {
+  it("两段说明叠在同一格里，格子按较高的那段撑开，占位的那段看不见", () => {
+    expect(decls(".leadSlot").get("display")).toBe("grid");
+    expect(decls(".leadSlot > .lead").get("grid-area")).toBe("1 / 1");
+    expect(decls(".lead[data-floor]").get("visibility")).toBe("hidden");
+  });
+});
+
 describe("窗口按钮", () => {
   it("底块只过渡底色和字色，焦点环（box-shadow）立刻出现、立刻消失", () => {
     const transition = decls(".winFace").get("transition");

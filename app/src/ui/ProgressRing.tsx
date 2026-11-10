@@ -4,7 +4,7 @@
 // 这时不再是进度条：没有当前值的 progressbar 会被读屏当成不定进度念「忙」，所以改为图形，名称后接一句可读的说明。
 
 import { AnimatePresence, motion, useIsPresent, useTransform, type MotionValue } from "framer-motion";
-import { useId, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import { percent } from "../domain/format";
 import { fade } from "../lib/motion";
 import { cx } from "../lib/util";
@@ -55,6 +55,12 @@ export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99
   const dashOffset = useTransform(smooth, (p) => circumference * (1 - p));
   const text = useTransform(smooth, (p) => percent(p, capAt99));
   const center = size / 2;
+  // 挂载时就有进度的填充直接显示，之后才出现的淡入。不写在 AnimatePresence 的 initial={false} 上：
+  // 那会让填充里之后才挂载的动画元素也永远跳过入场
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
 
   return (
     <span
@@ -77,9 +83,9 @@ export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99
       )}
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true" focusable="false">
         <circle className={styles.track} cx={center} cy={center} r={radius} fill="none" strokeWidth={stroke} />
-        {/* 进度为 0 时不画填充：圆头描边在零长度时仍会画出一个点。填充里没有之后才挂载的动画元素，initial={false} 只管它自己 */}
-        <AnimatePresence initial={false}>
-          {!empty && target > 0 && <RingFill key="fill" center={center} radius={radius} stroke={stroke} circumference={circumference} dashOffset={dashOffset} />}
+        {/* 进度为 0 时不画填充：圆头描边在零长度时仍会画出一个点 */}
+        <AnimatePresence>
+          {!empty && target > 0 && <RingFill key="fill" center={center} radius={radius} stroke={stroke} circumference={circumference} dashOffset={dashOffset} appear={mounted.current} />}
         </AnimatePresence>
       </svg>
       {ringHasLabel(size) && (
@@ -92,10 +98,10 @@ export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99
 }
 
 /**
- * 填充弧：出现时淡入，转为没有进度时淡出。退场期间停在最后显示的位置：没有 track 时平滑值会随占位的 0 往回走，
- * 不停住的话弧会一边淡出一边倒退。
+ * 填充弧：出现时淡入（appear：进度环挂载之后才出现），转为没有进度时淡出。退场期间停在最后显示的位置：
+ * 没有 track 时平滑值会随占位的 0 往回走，不停住的话弧会一边淡出一边倒退。
  */
-function RingFill({ center, radius, stroke, circumference, dashOffset }: { center: number; radius: number; stroke: number; circumference: number; dashOffset: MotionValue<number> }) {
+function RingFill({ center, radius, stroke, circumference, dashOffset, appear }: { center: number; radius: number; stroke: number; circumference: number; dashOffset: MotionValue<number>; appear: boolean }) {
   const present = useIsPresent();
   const frozen = useRef<number | null>(null);
   // 退场途中进度又回来时（同一个键重新出现）继续跟随
@@ -112,7 +118,7 @@ function RingFill({ center, radius, stroke, circumference, dashOffset }: { cente
       strokeLinecap="round"
       strokeDasharray={circumference}
       style={{ strokeDashoffset: frozen.current === null ? dashOffset : frozen.current }}
-      initial={{ opacity: 0 }}
+      initial={appear ? { opacity: 0 } : false}
       animate={{ opacity: 1, transition: fade.in }}
       exit={{ opacity: 0, transition: fade.out }}
     />

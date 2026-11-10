@@ -5,12 +5,13 @@
 // - 底部倒计时细线按剩余寿命线性缩短，暂停计时期间停住；不自动消失（countdown 为 null）的没有细线；
 //   减少动画时照常显示（它是剩余时间的信息）。剩余比例或剩余时长变化时细线从新的位置重新开始。
 // - 入场从落点靠窗口边的一侧滑入并轻微回弹，退场淡出；哪一侧由容器给，单独摆放时从右侧进。其余通知让位走布局动画。
+// - 重复的同一条并进来时（repeats 变了）图标底座原位弹一下，减少动画时不弹。
 // - error 为 alert（打断播报），其余为 status；通知不抢焦点、不入 Esc 栈。
 
-import { motion, type Variants } from "framer-motion";
-import type { Ref } from "react";
+import { motion, useAnimate, type Variants } from "framer-motion";
+import { useEffect, useRef, type Ref } from "react";
 import { Icon, type IconName } from "../art/Icon";
-import { fade, springs } from "../lib/motion";
+import { fade, nudge, springs } from "../lib/motion";
 import { cssVars, cx } from "../lib/util";
 import { useOverlayState } from "../shell/overlay";
 import { Button } from "./Button";
@@ -62,15 +63,30 @@ export interface ToastProps {
    * 单独摆放时不传，每次重渲染都量。
    */
   layoutDependency?: string;
+  /**
+   * 重复的同一条并进这一条的次数。挂载之后每变一次，图标底座原位弹一下：告诉用户这件事又发生了一次，
+   * 不然并进来的那次看起来像没发出来。不传时不弹。
+   */
+  repeats?: number;
   /** 根元素。容器用 popLayout 增删时经它量尺寸、把退场的那条抽出布局。 */
   ref?: Ref<HTMLDivElement>;
   className?: string;
 }
 
-export function Toast({ tone, title, body, action, onClose, countdown, side = 1, layoutDependency, ref, className }: ToastProps) {
+export function Toast({ tone, title, body, action, onClose, countdown, side = 1, layoutDependency, repeats, ref, className }: ToastProps) {
   const { scrimOpen } = useOverlayState();
   if (countdown !== null && (countdown.fraction < 0 || countdown.fraction > 1 || countdown.remainingMs < 0))
     throw new Error(`倒计时取值越界：fraction ${countdown.fraction}，remainingMs ${countdown.remainingMs}`);
+
+  // useAnimate 跟着根部 MotionConfig 的减少动画：缩放改成一步到位，目标又就是当前的 1，于是什么都不动
+  const [iconBase, animateIcon] = useAnimate<HTMLSpanElement>();
+  // 挂载时的次数不算：通知本身在入场，不另弹
+  const seenRepeats = useRef(repeats);
+  useEffect(() => {
+    if (repeats === seenRepeats.current) return;
+    seenRepeats.current = repeats;
+    void animateIcon(iconBase.current, { scale: 1 }, nudge.transition);
+  }, [repeats, animateIcon, iconBase]);
 
   return (
     <motion.div
@@ -87,7 +103,7 @@ export function Toast({ tone, title, body, action, onClose, countdown, side = 1,
       exit="away"
       transition={{ layout: springs.settle }}
     >
-      <span className={styles.iconBase}>
+      <span ref={iconBase} className={styles.iconBase}>
         <Icon name={TONE_ICON[tone]} size={18} />
       </span>
       <p className={styles.title}>{title}</p>

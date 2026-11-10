@@ -4,21 +4,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TOOLTIP_TIMING } from "../lib/motion";
 import { OverlayProvider, OverlayRoot, useEscapeLayer } from "../shell/overlay";
 import { focusByKeyboard, keydown, render, setRect, stubResizeObserver, type Rendered } from "../test/dom";
-import { Tooltip } from "./Tooltip";
+import { resetTooltipState, Tooltip } from "./Tooltip";
 
 let view: Rendered | undefined;
-let now = 1_000_000;
 
 beforeEach(() => {
-  // Date 一并假：预热窗口按 Date.now() 计算
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"], now });
+  // performance 一并假：预热窗口按 performance.now() 计算。Date 也假，系统时钟回拨的用例要拨它
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"], now: 1_000_000 });
+  // 预热时刻是全站共享的模块状态：前一个用例（尤其是走真实计时器的）留下的时刻不能带进来
+  resetTooltipState();
 });
 
 afterEach(() => {
   view?.unmount();
   view = undefined;
   vi.useRealTimers();
-  now += 10_000_000;
 });
 
 function mount(ui: ReactNode) {
@@ -151,6 +151,31 @@ describe("悬停时机", () => {
     advance(TOOLTIP_TIMING.delay);
     expect(button("A").hasAttribute("aria-describedby")).toBe(true);
   });
+
+  // 墙上时间的差值在时钟回拨后是负的，曾被一直算成预热：回拨一小时后所有提示都不等 delay
+  it("系统时钟往回调不影响预热：超过窗口后照常等待 delay", () => {
+    mount(
+      <>
+        <Tooltip content="甲">
+          <button>A</button>
+        </Tooltip>
+        <Tooltip content="乙">
+          <button>B</button>
+        </Tooltip>
+      </>,
+    );
+    pointerEnter(button("A"));
+    advance(TOOLTIP_TIMING.delay);
+    pointerLeave(button("A"));
+    advance(TOOLTIP_TIMING.linger + TOOLTIP_TIMING.warmWindow);
+    vi.setSystemTime(Date.now() - 3_600_000);
+    pointerEnter(button("B"));
+    expect(bubbleOf("B")).toBeNull();
+    advance(TOOLTIP_TIMING.delay - 1);
+    expect(bubbleOf("B")).toBeNull();
+    advance(1);
+    expect(bubbleOf("B")?.textContent).toBe("乙");
+  });
 });
 
 describe("连续扫过", () => {
@@ -258,13 +283,6 @@ describe("由 open 强制显示的气泡", () => {
       );
     }
     mount(<Host />);
-    // 先让乙显示一次再收起、等过预热窗口：预热时刻落在假时钟上（前面用真实计时器的用例把它留在了真实时间上）
-    pointerEnter(button("B"));
-    advance(TOOLTIP_TIMING.delay);
-    pointerLeave(button("B"));
-    advance(TOOLTIP_TIMING.linger + TOOLTIP_TIMING.warmWindow);
-    expect(bubbleOf("B")).toBeNull();
-
     act(() => setForced(true));
     expect(bubbleOf("A")?.textContent).toBe("游戏运行中不能删除");
     pointerEnter(button("B"));

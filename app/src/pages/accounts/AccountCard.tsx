@@ -1,7 +1,9 @@
 // 账户卡：舞台（类型短标、更多菜单、立绘）+ 名称与类型 + 底部状态。当前账户卡带选中描边。
 
+import { Fragment } from "react";
 import type { Account } from "../../domain/adapt";
 import { accountKindLabel } from "../../copy/flows";
+import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
 import type { MenuEntry } from "../../ui/Menu";
@@ -53,36 +55,42 @@ export function AccountCard({ account, current, online, act }: AccountCardProps)
       <div className={styles.cardBody}>
         <h3 className={styles.cardName}>{account.name}</h3>
         <span className={styles.cardKind}>{accountKindLabel(account.kind, account.authServer)}</span>
+        {/* 底部三种形态等高、不折行；换形态（切换账户、凭据失效）时旧的原地淡出，新的在同一处淡入 */}
         <div className={styles.cardFoot}>
-          {foot.kind === "current" && (
-            <>
-              <Tag tone="accent" size="sm" icon="check">
-                {ACCOUNTS_COPY.inUse}
-              </Tag>
-              {foot.expired && (
-                <Tag tone="warn" size="sm" icon="alert">
-                  {ACCOUNTS_COPY.expiredTag}
+          <Appear itemClassName={styles.footRow}>
+            {foot.kind === "current" && (
+              <Fragment key={foot.expired ? "current-expired" : "current"}>
+                <Tag tone="accent" size="sm" icon="check">
+                  {ACCOUNTS_COPY.inUse}
                 </Tag>
-              )}
-            </>
-          )}
-          {foot.kind === "expired" && (
-            <>
-              <Tag tone="warn" size="sm" icon="alert">
-                {ACCOUNTS_COPY.expiredTag}
-              </Tag>
-              <Button size="sm" disabledReason={offlineReason} onClick={() => act.relogin(account.uuid)}>
-                {ACCOUNTS_COPY.relogin}
+                {foot.expired && <ExpiredTag />}
+              </Fragment>
+            )}
+            {foot.kind === "expired" && (
+              <Fragment key="expired">
+                <ExpiredTag />
+                <Button size="sm" disabledReason={offlineReason} onClick={() => act.relogin(account.uuid)} className={styles.footButton}>
+                  {ACCOUNTS_COPY.relogin}
+                </Button>
+              </Fragment>
+            )}
+            {foot.kind === "switch" && (
+              <Button key="switch" size="sm" onClick={() => act.switchTo(account.uuid)} className={styles.footButton}>
+                {ACCOUNTS_COPY.switchTo}
               </Button>
-            </>
-          )}
-          {foot.kind === "switch" && (
-            <Button size="sm" onClick={() => act.switchTo(account.uuid)}>
-              {ACCOUNTS_COPY.switchTo}
-            </Button>
-          )}
+            )}
+          </Appear>
         </div>
       </div>
     </Card>
+  );
+}
+
+/** 「需要重新登录」：最窄的卡里和旁边的标签或按钮放不下一行时，它自己省略收缩，底部不折成两行。 */
+function ExpiredTag() {
+  return (
+    <Tag tone="warn" size="sm" icon="alert" className={styles.footTag}>
+      <span className={styles.footTagText}>{ACCOUNTS_COPY.expiredTag}</span>
+    </Tag>
   );
 }

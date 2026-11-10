@@ -1,6 +1,6 @@
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotionConfig } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
-import { ambientFade } from "../../lib/motion";
+import { ambientFade, fade } from "../../lib/motion";
 import { cx } from "../../lib/util";
 import { panoramaUrl, useArtStatus } from "../../mc/art";
 import { peekArt, useArt } from "../../mc/useArt";
@@ -52,6 +52,7 @@ function PanoramaImage({ bitmap, className }: { bitmap: ImageBitmap; className?:
   const rootRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dpr = useDevicePixelRatio();
+  const reduced = useReducedMotionConfig() === true;
 
   useEffect(() => {
     const root = rootRef.current;
@@ -99,7 +100,8 @@ function PanoramaImage({ bitmap, className }: { bitmap: ImageBitmap; className?:
       data-sk-art="panorama"
       aria-hidden="true"
       initial={{ opacity: 0 }}
-      animate={{ opacity: 1, transition: ambientFade.in }}
+      // 减少动画只拦位移与缩放，透明度照常播：整窗的慢淡入在这里收回控件那一档
+      animate={{ opacity: 1, transition: reduced ? fade.in : ambientFade.in }}
       exit={{ opacity: 0, transition: ambientFade.out }}
     >
       <canvas ref={canvasRef} className={styles.image} />

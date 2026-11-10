@@ -11,6 +11,7 @@ import {
   PUSH_DISTANCE,
   RECYCLE_MARGIN,
   STILL_MIN_GAP,
+  STILL_SCALE_MIN,
   clampDt,
   countPetals,
   createLayers,
@@ -293,16 +294,50 @@ describe("静态散落", () => {
     const reach = (Math.hypot(GLYPHS[0].cols, GLYPHS[0].rows) * CELL) / 2;
     const at = (x: number, y: number, patch: Partial<Petal> = {}): Petal => ({ ...still(x, y), ...patch });
     const pushed = at(100, 120, { ox: 5, oy: -3, rot: 33, flip: Math.PI, tone: 2 });
-    const leftEdge = at(-reach + 1, 150, { flip: 1 });
+    const leftEdge = at(-reach + 1, 150, { flip: 0.5 });
     const waiting = at(200, -reach - 1);
     const below = at(200, bounds.height + reach + 1);
     const right = at(bounds.width + reach + 1, 100);
     const edgeOn = at(200, 100, { flip: Math.acos(EDGE_ON / 2) });
-    expect(freezeLayers([[waiting, leftEdge], [below, right], [edgeOn, pushed]], bounds)).toEqual([
-      [{ glyph: 0, tone: 0, nx: (-reach + 1) / 400, ny: 0.5, rot: 0, sx: Math.cos(1) }],
+    const field = freezeLayers([[waiting, leftEdge], [below, right], [edgeOn, pushed]], bounds);
+    expect(field.layers).toEqual([
+      [{ glyph: 0, tone: 0, nx: (-reach + 1) / 400, ny: 0.5, rot: 0, sx: Math.cos(0.5) }],
       [],
       [{ glyph: 0, tone: 2, nx: 105 / 400, ny: 117 / 300, rot: 33, sx: -1 }],
     ]);
+    expect(field.turning.size).toBe(0);
+  });
+
+  it("定格：比静态散落下限窄的花瓣夹到下限、不改正负号，记下此刻的姿态与翻面速度作转向起点", () => {
+    const bounds = { width: 400, height: 300 };
+    const at = (x: number, y: number, patch: Partial<Petal>): Petal => ({ ...still(x, y), ...patch });
+    // cos(1) ≈ 0.540，正在变窄；cos(2) ≈ −0.416，镜像的一面正在变宽；cos(0.98) ≈ 0.557 刚好不用夹
+    const narrow = at(50, 60, { flip: 1, flipW: 2 });
+    const mirrored = at(150, 160, { flip: 2, flipW: 1.5, rot: 70 });
+    const wide = at(250, 260, { flip: 0.98, flipW: 2.4 });
+    const field = freezeLayers([[narrow], [mirrored, wide], []], bounds);
+    expect(field.layers.map((petals) => petals.map((p) => p.sx))).toEqual([[STILL_SCALE_MIN], [-STILL_SCALE_MIN, Math.cos(0.98)], []]);
+    expect(field.layers[1][0]).toMatchObject({ nx: 150 / 400, ny: 160 / 300, rot: 70 });
+    expect(field.turning.size).toBe(2);
+    expect(field.turning.get(field.layers[0][0])).toEqual({ sx0: Math.cos(1), v0: -Math.sin(1) * 2 });
+    expect(field.turning.get(field.layers[1][0])).toEqual({ sx0: Math.cos(2), v0: -Math.sin(2) * 1.5 });
+    expect(field.turning.has(field.layers[1][1])).toBe(false);
+  });
+
+  it("定格后的整片画面和静态散落同一个下限：任意翻面相位都不会留下近乎侧立的细条", () => {
+    const layers = createLayers(LAYER_COUNTS.wide, BOUNDS, createRandom(SEED));
+    for (const p of layers.flat()) p.y = BOUNDS.height / 2;
+    const field = freezeLayers(layers, BOUNDS);
+    const frozen = field.layers.flat();
+    for (const p of frozen) expect(Math.abs(p.sx)).toBeGreaterThanOrEqual(STILL_SCALE_MIN);
+    // 翻面相位均匀分布时约三分之一落在下限以内：这几片都记了转向，起点就是被夹之前的姿态
+    expect(field.turning.size).toBeGreaterThan(0);
+    for (const [p, turn] of field.turning) {
+      expect(frozen).toContain(p);
+      expect(Math.abs(turn.sx0)).toBeLessThan(STILL_SCALE_MIN);
+      expect(Math.abs(turn.sx0)).toBeGreaterThanOrEqual(EDGE_ON);
+      expect(Math.sign(p.sx)).toBe(Math.sign(turn.sx0));
+    }
   });
 
   it("档位变化保留已有的散落、只补新增的；尺寸非正时报错", () => {

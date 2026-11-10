@@ -3,7 +3,7 @@ import { useEffect, useLayoutEffect, useRef } from "react";
 import { isImeComposing } from "../../lib/util";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
-import type { SetupCopy } from "../copy";
+import { welcomeLead, type SetupCopy } from "../copy";
 import { Frame } from "../Frame";
 import { PathRow } from "../PathRow";
 import styles from "./Welcome.module.css";
@@ -50,7 +50,8 @@ export function Welcome({ copy, dir, interrupted, busy, onChangeDir, onInstall }
   return (
     <Frame
       title={text.title}
-      lead={text.languageNote === null ? text.lead : `${text.lead} ${text.languageNote}`}
+      lead={welcomeLead(copy)}
+      leadFloor={copy.location.lead}
       footer={
         <Button variant="primary" loading={busy} onClick={onInstall}>
           {text.install}
@@ -59,7 +60,8 @@ export function Welcome({ copy, dir, interrupted, busy, onChangeDir, onInstall }
     >
       {/*
         路径行排第一：选目录页的路径输入框也贴着内容区顶，点「更改」过去原地变成可编辑，续装提示因此放在它下面。
-        两页标题区高度不同时（英文说明行数不一样）这一块在换步时从旧位置滑过去，见 Frame 的 carryAcross
+        两页的说明长短不同（英文的欢迎页多一句语言说明），各自按对方的说明占高（leadFloor），这一块在两页里同一高度；
+        仍有差时由 Frame 的 carryAcross 从旧位置滑过去
       */}
       <div className={styles.content} data-setup-carry="location">
         <PathRow

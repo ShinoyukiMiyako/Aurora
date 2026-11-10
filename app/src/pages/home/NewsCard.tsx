@@ -9,18 +9,19 @@ import { hueOf } from "../../art/illustrations/seed";
 import { SLOW_LOADING_HINT } from "../../copy/flows";
 import { formatDate, formatRelative } from "../../domain/format";
 import { useLoadingGate } from "../../lib/loading-gate";
-import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { describeError, describeErrorRecord } from "../../state/errors";
 import { useLauncherSelector, useNow } from "../../state/launcher";
 import { useOnline } from "../../state/online";
 import { useNews, type NewsItemDto, type NewsTag } from "../../state/queries/home";
+import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { Card, type ResponsiveValue } from "../../ui/Card";
 import { CardHeader } from "../../ui/CardHeader";
 import { Cover } from "../../ui/Cover";
 import { EmptyState } from "../../ui/EmptyState";
 import { List, ListRow } from "../../ui/ListRow";
+import { Loadable } from "../../ui/Loadable";
 import { Modal } from "../../ui/Modal";
 import { Skeleton } from "../../ui/Skeleton";
 import { Tag, type TagTone } from "../../ui/Tag";
@@ -59,19 +60,6 @@ export function NewsCard({ span }: { span: ResponsiveValue }) {
   }, [online, retryOnReconnect, retryNews]);
 
   const body = () => {
-    if (news.status === "loading" || gate.view === "skeleton") {
-      return (
-        <div className={cx(s.rowSkeletons, gate.view === "pending" && s.pending)} aria-busy="true">
-          {Array.from({ length: count }, (_, i) => (
-            <span key={i} className={s.rowSkeleton}>
-              <Skeleton shape="square" size={SKELETON_SIZE.rowThumb} />
-              <Skeleton shape="text" lines={2} />
-            </span>
-          ))}
-          {gate.slow && <span className={s.slowHint}>{SLOW_LOADING_HINT}</span>}
-        </div>
-      );
-    }
     if (feed === undefined) {
       if (news.status !== "error") throw new Error("资讯已就绪却没有数据");
       return (
@@ -119,17 +107,43 @@ export function NewsCard({ span }: { span: ResponsiveValue }) {
   return (
     <Card span={span}>
       <CardHeader level={2} title={HOME_COPY.newsTitle} subtitle={subtitle} icon="news" />
-      {body()}
-      {feed !== undefined && feed.launcher_error !== null && (
-        <p className={s.newsNote} role="note">
-          <span>
-            {HOME_COPY.launcherNewsError}：{describeErrorRecord(feed.launcher_error)}
+      <Loadable
+        view={gate.view}
+        skeleton={
+          <div className={s.rowSkeletons}>
+            {Array.from({ length: count }, (_, i) => (
+              <span key={i} className={s.rowSkeleton}>
+                <Skeleton shape="square" size={SKELETON_SIZE.rowThumb} />
+                <span className={s.rowSkeletonText}>
+                  <Skeleton shape="text" width="85%" className={s.skeletonBody} />
+                  <Skeleton shape="text" width="55%" className={s.skeletonCaption} />
+                </span>
+              </span>
+            ))}
+          </div>
+        }
+      >
+        {body}
+      </Loadable>
+      <Appear itemClassName={s.rowSlowHint}>
+        {gate.slow && (
+          <span key="slow" className={s.slowHint}>
+            {SLOW_LOADING_HINT}
           </span>
-          <Button variant="ghost" size="sm" icon="refresh" onClick={news.retry}>
-            {HOME_COPY.retry}
-          </Button>
-        </p>
-      )}
+        )}
+      </Appear>
+      <Appear>
+        {feed !== undefined && feed.launcher_error !== null && (
+          <p key="launcher-error" className={s.newsNote} role="note">
+            <span>
+              {HOME_COPY.launcherNewsError}：{describeErrorRecord(feed.launcher_error)}
+            </span>
+            <Button variant="ghost" size="sm" icon="refresh" onClick={news.retry}>
+              {HOME_COPY.retry}
+            </Button>
+          </p>
+        )}
+      </Appear>
       {current !== null && <NewsModal item={current} open={open} onClose={() => setOpen(false)} />}
     </Card>
   );

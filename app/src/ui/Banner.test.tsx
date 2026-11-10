@@ -140,6 +140,30 @@ describe("BannerSlot", () => {
     await waitForFrames(() => expect(banner()).toBeNull());
   });
 
+  it("空槽不占页面入场序号：下面的区块接着用这个号，不为它晚一拍；有横幅时只占一个号", () => {
+    const tree = (banners: readonly string[]) => (
+      <Page>
+        <BannerSlot>
+          {banners.map((title) => (
+            <Banner key={title} tone="info" title={title} />
+          ))}
+        </BannerSlot>
+        <Banner tone="warn" title="下一块" />
+      </Page>
+    );
+    const next = () => view?.container.querySelector<HTMLElement>('[data-tone="warn"]');
+    mount(tree([]));
+    expect(next()?.dataset.entrance).toBe("0");
+    view?.unmount();
+    mount(tree(["游戏正在运行"]));
+    expect(banner()?.dataset.entrance).toBe("0");
+    expect(next()?.dataset.entrance).toBe("1");
+    view?.unmount();
+    mount(tree(["游戏正在运行", "正在安装"]));
+    expect([...(view?.container.querySelectorAll<HTMLElement>('[data-tone="info"]') ?? [])].map((b) => b.dataset.entrance)).toEqual(["0", "0"]);
+    expect(next()?.dataset.entrance).toBe("1");
+  });
+
   it("离开后再回来：按之后才出现处理", async () => {
     mount(page(true));
     rerender(page(false));

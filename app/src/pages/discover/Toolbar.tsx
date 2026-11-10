@@ -1,6 +1,6 @@
 // 搜索头图与吸顶工具条：搜索框、热门分类、类型标签、适配实例、筛选浮层、排序。
 
-import { motion, useReducedMotionConfig, type Variants } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotionConfig, type Variants } from "framer-motion";
 import { useMemo, useState, type Ref } from "react";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
 import { useDevicePixelRatio } from "../../art/illustrations/canvas";
@@ -9,10 +9,12 @@ import { LOADER_NAME } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import type { Platform } from "../../domain/types";
 import { springs } from "../../lib/motion";
+import { useReflow } from "../../lib/reflow";
 import { useShell } from "../../shell/shell";
 import { useManifest, type LoaderChoice } from "../../state/queries/catalog";
 import type { SortField } from "../../state/queries/discover";
 import type { DiscoverKind } from "../../state/route";
+import { Appear } from "../../ui/Appear";
 import { Badge } from "../../ui/Badge";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
@@ -44,11 +46,12 @@ const BRANCH_SIZE = { compact: { width: 150, height: 110 }, regular: { width: 21
 /**
  * 悬停头图时花枝轻轻上浮，离开时落回；不循环。不旋转：像素画转一个小角度就满边锯齿。
  * 上浮约 2 CSS px，按设备像素取整：125%、175% 缩放下整 2 px 是 2.5、3.5 个设备像素，停在半像素上整幅像素画会被重采样发虚。
+ * 上浮与落回走 settle，与卡片悬停同一条：soft 偏慢偏软，落回时拖泥带水。
  */
 export function branchSway(dpr: number): Variants {
   return {
-    rest: { y: 0, transition: springs.soft },
-    hover: { y: -Math.round(2 * dpr) / dpr, transition: springs.soft },
+    rest: { y: 0, transition: springs.settle },
+    hover: { y: -Math.round(2 * dpr) / dpr, transition: springs.settle },
   };
 }
 
@@ -71,6 +74,8 @@ export function SearchHero({ filters, onFilters, onQuery, onSubmit, onImport, in
   const size = BRANCH_SIZE[tier];
   const dpr = useDevicePixelRatio();
   const sway = useMemo(() => branchSway(dpr), [dpr]);
+  // 换资源类型时热门分类整排换一套：两边都有的分类从旧位置滑到新位置，新来的淡入，走掉的原地淡出
+  const chips = useReflow<HTMLDivElement>();
   return (
     <Card as="section" padding="lg" className={styles.heroCard}>
       <motion.div className={styles.hero} initial="rest" animate="rest" whileHover={reduced ? undefined : "hover"}>
@@ -96,17 +101,28 @@ export function SearchHero({ filters, onFilters, onQuery, onSubmit, onImport, in
             shortcut={["Ctrl", "F"]}
             className={styles.heroSearch}
           />
-          <div className={styles.chips} role="group" aria-label={SEARCH_COPY.hotCategories}>
+          <div ref={chips} className={styles.chips} role="group" aria-label={SEARCH_COPY.hotCategories}>
             <span className={styles.chipsLabel}>{SEARCH_COPY.hotCategories}</span>
-            {HOT_CATEGORIES[filters.kind].map((c) => {
-              const on = filters.category === c.key;
-              // 选中态除了按钮变体还带对勾，状态不只靠颜色区分
-              return (
-                <Button key={c.key} size="sm" variant={on ? "secondary" : "ghost"} icon={on ? "check" : undefined} aria-pressed={on} onClick={() => onFilters(toggleCategory(filters, c.key))}>
-                  {c.label}
-                </Button>
-              );
-            })}
+            <Appear itemClassName={styles.chipItem}>
+              {HOT_CATEGORIES[filters.kind].map((c) => {
+                const on = filters.category === c.key;
+                // 选中态除了按钮变体还带对勾，状态不只靠颜色区分。对勾位每枚都常驻、没选中时透明：
+                // 选中与取消时胶囊不变宽，同排后面的胶囊不被挤动
+                return (
+                  <Button
+                    key={c.key}
+                    size="sm"
+                    variant={on ? "secondary" : "ghost"}
+                    icon="check"
+                    aria-pressed={on}
+                    className={styles.chip}
+                    onClick={() => onFilters(toggleCategory(filters, c.key))}
+                  >
+                    {c.label}
+                  </Button>
+                );
+              })}
+            </Appear>
           </div>
         </div>
         <motion.div className={styles.heroArt} variants={sway} style={{ width: size.width, height: size.height }}>
@@ -168,10 +184,9 @@ export function Toolbar({ tabsId, filters, onKind, onFit, onFilters, fitCandidat
           aria-label={count > 0 ? SEARCH_COPY.filterWithCount(count) : SEARCH_COPY.filter}
           onClick={(e) => setAnchor(anchor === null ? e.currentTarget : null)}
         >
-          <span className={styles.filterLabel}>
-            {SEARCH_COPY.filter}
-            {count > 0 && <Badge count={count} tone="accent" />}
-          </span>
+          {SEARCH_COPY.filter}
+          {/* 进页时就有的条件数不弹；之后设上第一个条件时弹出，清空时缩小淡出 */}
+          <AnimatePresence initial={false}>{count > 0 && <Badge key="count" count={count} tone="accent" ring className={styles.filterBadge} />}</AnimatePresence>
         </Button>
         <Select<SortField>
           size="sm"

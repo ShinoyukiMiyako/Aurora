@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 // Mod 管理的批量操作、忽略更新、安装时间与更新预览：整页挂上实例详情的 Mod 标签，经替身 IPC 断言发出的命令与参数。
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
@@ -16,10 +18,11 @@ import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type Windo
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { render, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
+import { ROW_HEIGHT } from "../../ui/Table";
 import InstancePage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -547,6 +550,374 @@ describe("安装时间与新增标注", () => {
   });
 });
 
+describe("工具条不随数据到达变宽", () => {
+  const radioNames = () => [...document.querySelectorAll('[role="radio"]')].map(nameOf);
+  /** 定宽文案槽里叠着的全部候选，以及当前显示的那一条。 */
+  const slotOf = (host: Element) => {
+    const options = [...host.querySelectorAll<HTMLElement>("[data-align] > span")];
+    if (options.length === 0) throw new Error("没有定宽文案槽");
+    const current = options.filter((el) => el.hasAttribute("data-current")).map(textOf);
+    return { options: options.map(textOf), current };
+  };
+
+  it("列表读到之前计数槽空着、不写 0；可更新数等更新检查回来才填；「不检查更新」一直在，计数槽按三位数定宽", async () => {
+    const listing = deferred<InstalledMod[]>();
+    const checking = deferred<UpdateCandidate[]>();
+    ipc.overrides.set("list_mods", () => listing.promise);
+    ipc.overrides.set("check_updates", () => checking.promise);
+    await open();
+    expect(radioNames()).toEqual(["全部", "已启用", "已停用", "可更新", "不检查更新"]);
+    expect(document.querySelector<HTMLElement>('[role="radiogroup"]')?.style.getPropertyValue("--segment-count-digits")).toBe("3");
+
+    await act(async () => {
+      listing.resolve(mods);
+      await settle(20);
+    });
+    expect(radioNames()).toEqual(["全部，4 个", "已启用，4 个", "已停用，0 个", "可更新", "不检查更新，1 个"]);
+
+    await act(async () => {
+      checking.resolve([candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1")]);
+      await settle(20);
+    });
+    expect(radioNames()).toEqual(["全部，4 个", "已启用，4 个", "已停用，0 个", "可更新，1 个", "不检查更新，1 个"]);
+  });
+
+  it("「检查更新」与「全部更新 · N」是同一个按钮：查到更新只换文案，按两位数留宽，名称取当前这条", async () => {
+    const checking = deferred<UpdateCandidate[]>();
+    ipc.overrides.set("check_updates", () => checking.promise);
+    await open();
+    const check = button("检查更新");
+    expect(slotOf(check)).toEqual({ options: ["检查更新", "全部更新 · 99"], current: ["检查更新"] });
+
+    await act(async () => {
+      checking.resolve([candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1"), candidate("handmade.jar", "Handmade", "hand", "1.0", "2.0")]);
+      await settle(20);
+    });
+    const updateAll = button("全部更新 · 2");
+    expect(updateAll).toBe(check);
+    expect(slotOf(updateAll)).toEqual({ options: ["检查更新", "全部更新 · 2", "全部更新 · 99"], current: ["全部更新 · 2"] });
+  });
+
+  it("批量条的「已选 N 个」按三位数留宽", async () => {
+    await open();
+    click(find("checkbox", "选择 Sodium"));
+    const bar = document.querySelector("[data-batch]");
+    if (bar === null) throw new Error("没有批量条");
+    expect(slotOf(bar)).toEqual({ options: ["已选 1 个", "已选 999 个"], current: ["已选 1 个"] });
+  });
+
+  it("吸顶容器常驻：工具条与批量条互换时容器不重挂，从透明淡入的只有里面那一行", async () => {
+    await open();
+    const search = document.querySelector<HTMLInputElement>('input[placeholder="搜索名称、作者或文件名"]');
+    const holder = search?.closest('[class*="toolbarRow"]')?.parentElement;
+    if (holder === null || holder === undefined) throw new Error("工具条不在吸顶容器里");
+    click(find("checkbox", "选择 Sodium"));
+    const bar = document.querySelector<HTMLElement>("[data-batch]");
+    expect(bar?.parentElement).toBe(holder);
+    expect(holder.isConnected).toBe(true);
+    expect(bar?.style.opacity).toBe("0");
+    expect(holder.style.opacity).toBe("");
+    // 吸住时它的位置随滚动变：不参与所在栈的让位
+    expect(holder.hasAttribute("data-reflow-skip")).toBe(true);
+  });
+});
+
+describe("摘要行与锁定横幅的出入场", () => {
+  const RUNNING = "游戏正在运行，Mod 文件被占用。结束游戏后再启用、停用、更新或移除。";
+  const stack = (): HTMLElement => {
+    const holder = document.querySelector('input[placeholder="搜索名称、作者或文件名"]')?.closest('[class*="toolbarRow"]')?.parentElement?.parentElement;
+    if (holder === null || holder === undefined) throw new Error("没有 Mod 页的竖排栈");
+    return holder as HTMLElement;
+  };
+  /** 横幅外面那层出入场的包裹：栈的直接子项。 */
+  const bannerItem = (): HTMLElement | null => {
+    const banner = [...document.querySelectorAll<HTMLElement>("[data-tone]")].find((el) => el.textContent === RUNNING);
+    return banner === undefined ? null : banner.parentElement;
+  };
+  const setActivity = async (activity: InstanceDto["activity"]) => {
+    instances = [instanceDto(ID, { loaders: [{ kind: "fabric", version: "0.16.10" }], mod_count: 4, activity })];
+    await act(async () => {
+      await launcher.actions.refreshInstances();
+    });
+  };
+
+  it("游戏开始时横幅从透明淡入，作为栈的一项让下面的表格卡让位；游戏结束时淡出，退场期间不可交互", async () => {
+    await open();
+    expect(bannerItem()).toBeNull();
+    await setActivity("running");
+    const item = bannerItem();
+    if (item === null) throw new Error("游戏运行时没有锁定横幅");
+    expect(item.parentElement).toBe(stack());
+    expect(item.style.opacity).not.toBe("");
+    expect(Number(item.style.opacity)).toBeLessThan(1);
+    expect(item.hasAttribute("inert")).toBe(false);
+
+    await setActivity(null);
+    expect(bannerItem()?.hasAttribute("inert")).toBe(true);
+  });
+
+  it("更新进度块随任务出现时淡入；块高按说明行行高算，与总数那一行同高", async () => {
+    updates = [candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1")];
+    await open();
+    click(button("更新 Sodium"));
+    await flush();
+    const bar = document.querySelector<HTMLElement>('[role="progressbar"]');
+    const item = bar?.closest<HTMLElement>('[class*="modTaskItem"]');
+    if (item === null || item === undefined) throw new Error("更新进度块没有出入场的包裹层");
+    expect(item.style.opacity).not.toBe("");
+    expect(Number(item.style.opacity)).toBeLessThan(1);
+    const css = readFileSync(resolve(__dirname, "instance.module.css"), "utf8");
+    const block = /\.modTask \{([^}]*)\}/.exec(css);
+    if (block === null) throw new Error("没有 .modTask 规则");
+    expect(block[1]).toContain("line-height: var(--sk-lh-caption);");
+  });
+});
+
+describe("表格卡的读取占位", () => {
+  const skeleton = () => document.querySelector<HTMLElement>('[class*="tableSkeleton"]');
+  const pastLoadingDelay = () =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
+    });
+
+  it("头 300 ms 卡框与骨架照常占位、只是看不见；之后骨架淡出叠在卡里", async () => {
+    const listing = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => listing.promise);
+    await open();
+    const shell = skeleton();
+    if (shell === null) throw new Error("读取中没有表格骨架");
+    expect(shell.closest("[data-pending]")).not.toBeNull();
+    expect(shell.closest('[class*="modCard"]')).not.toBeNull();
+    await pastLoadingDelay();
+    expect(skeleton()).toBe(shell);
+    expect(shell.closest("[data-pending]")).toBeNull();
+  });
+
+  it("骨架照真表画：同一套列模板、表头高与行高，表头文字一样，每行一格对一列；换成真表时落在同一张卡里", async () => {
+    const listing = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => listing.promise);
+    await open();
+    await pastLoadingDelay();
+    const shell = skeleton();
+    if (shell === null) throw new Error("读取中没有表格骨架");
+    const card = shell.closest('[class*="modCard"]');
+    const geometry = {
+      cols: shell.style.getPropertyValue("--skeleton-cols"),
+      head: shell.style.getPropertyValue("--skeleton-head"),
+      row: shell.style.getPropertyValue("--skeleton-row"),
+    };
+    const [head, ...rows] = [...shell.children].filter((el) => el.tagName === "DIV");
+    const headLabels = [...head.children].map(textOf);
+    expect(rows).toHaveLength(6);
+    expect(rows.every((row) => row.children.length === head.children.length)).toBe(true);
+
+    listing.resolve(mods);
+    // 骨架一旦出现至少停留 300 ms
+    await pastLoadingDelay();
+    // 测试窗口 1440 宽，是 wide 档
+    expect(geometry).toEqual({
+      cols: grid().style.getPropertyValue("--table-cols-wide"),
+      head: grid().style.getPropertyValue("--table-head"),
+      row: grid().style.getPropertyValue("--table-row"),
+    });
+    const realHeaders = [...grid().querySelectorAll<HTMLElement>('[role="columnheader"]')].filter((h) => h.dataset.hideWide === undefined);
+    expect(headLabels).toEqual(realHeaders.map(textOf));
+    expect(grid().closest('[class*="modCard"]')).toBe(card);
+  });
+});
+
+describe("更新检查晚到时行里不跳", () => {
+  const rowEl = (name: string): HTMLElement => {
+    const row = [...grid().querySelectorAll<HTMLElement>('[role="row"][data-row-index]')].find((r) => r.querySelector('[class*="modName"]')?.textContent === name);
+    if (row === undefined) throw new Error(`没有 ${name} 这一行`);
+    return row;
+  };
+  const tagsIn = (host: Element | null): HTMLElement[] => {
+    if (host === null) throw new Error("没有这一格");
+    return [...host.querySelectorAll<HTMLElement>("span[data-tone]")];
+  };
+  /** 出入场包裹层此刻的透明度：之后才出现的从透明起步，挂载时就在的直接是 1。 */
+  const fadeOf = (el: Element): string => {
+    const wrap = el.closest<HTMLElement>('[class*="appearInline"]');
+    if (wrap === null) throw new Error("不在出入场的包裹层里");
+    return wrap.style.opacity;
+  };
+  const arriving = (opacity: string) => opacity !== "" && Number(opacity) < 1;
+
+  const stripComments = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "");
+  const instanceCss = () => stripComments(readFileSync(resolve(__dirname, "instance.module.css"), "utf8"));
+  const tokensCss = stripComments(readFileSync(resolve(__dirname, "../../styles/tokens.css"), "utf8"));
+  /** 某条规则的声明块，选择器按字面匹配。 */
+  const ruleBody = (css: string, selector: string): string => {
+    const rule = new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\{([^}]*)\\}`).exec(css);
+    if (rule === null) throw new Error(`没有 ${selector} 规则`);
+    return rule[1];
+  };
+  const declOf = (rule: string, property: string): string => {
+    const decl = new RegExp(`(?:^|\\s)${property}: ([^;]+);`).exec(rule);
+    if (decl === null) throw new Error(`规则里没有 ${property}`);
+    return decl[1];
+  };
+  /**
+   * 把样式表里的长度表达式按令牌表算成像素：jsdom 不做布局，只能照原文算。
+   * 只认 px、无单位数、var()、calc()、max() 与四则运算，认不出的写法直接抛，不静默算错。
+   */
+  const cssPx = (expr: string, vars: Readonly<Record<string, string>>): number => {
+    let src = expr;
+    for (let depth = 0; src.includes("var("); depth++) {
+      if (depth > 8) throw new Error(`变量嵌套过深：${expr}`);
+      src = src.replace(/var\((--[\w-]+)\)/g, (_, name: string) => {
+        if (name in vars) return `(${vars[name]})`;
+        const token = new RegExp(`(?:^|\\s)${name}: ([^;]+);`).exec(tokensCss);
+        if (token === null) throw new Error(`令牌表里没有 ${name}`);
+        return `(${token[1]})`;
+      });
+    }
+    const parts = src.replace(/calc\(/g, "(").match(/\d+(?:\.\d+)?(?:px)?|max|[-+*/(),]|\S/g);
+    if (parts === null) throw new Error(`空表达式：${expr}`);
+    let at = 0;
+    const take = (want?: string): string => {
+      const part = parts[at++];
+      if (part === undefined || (want !== undefined && part !== want)) throw new Error(`${expr}：第 ${at} 段期望 ${want === undefined ? "一个值" : want}，读到 ${part}`);
+      return part;
+    };
+    const sum = (): number => {
+      let value = product();
+      while (parts[at] === "+" || parts[at] === "-") value = take() === "+" ? value + product() : value - product();
+      return value;
+    };
+    const product = (): number => {
+      let value = operand();
+      while (parts[at] === "*" || parts[at] === "/") value = take() === "*" ? value * operand() : value / operand();
+      return value;
+    };
+    const operand = (): number => {
+      const part = take();
+      if (part === "(") {
+        const value = sum();
+        take(")");
+        return value;
+      }
+      if (part === "max") {
+        take("(");
+        const args = [sum()];
+        while (parts[at] === ",") {
+          take();
+          args.push(sum());
+        }
+        take(")");
+        return Math.max(...args);
+      }
+      if (part === "-") return -operand();
+      const number = /^(\d+(?:\.\d+)?)(?:px)?$/.exec(part);
+      if (number === null) throw new Error(`${expr}：认不出 ${part}`);
+      return Number(number[1]);
+    };
+    const value = sum();
+    if (at !== parts.length) throw new Error(`${expr}：多出 ${parts.slice(at).join(" ")}`);
+    return value;
+  };
+
+  const checkLater = () => {
+    const checking = deferred<UpdateCandidate[]>();
+    ipc.overrides.set("check_updates", () => checking.promise);
+    return async () =>
+      act(async () => {
+        checking.resolve([candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1")]);
+        await settle(20);
+      });
+  };
+
+  it("宽档：「可更新到」与行内更新按钮淡入，挂载时就有的状态标签不另外淡入；版本格钉在单元格顶部，两行标签也放得下", async () => {
+    const arrive = checkLater();
+    await open();
+    const versionCell = (name: string) => rowEl(name).querySelector('[class*="versionCell"]');
+    expect(tagsIn(versionCell("Sodium"))).toEqual([]);
+    const [iris] = tagsIn(versionCell("Iris"));
+    expect(fadeOf(iris)).toBe("1");
+
+    await arrive();
+    const [update] = tagsIn(versionCell("Sodium"));
+    expect(textOf(update)).toBe("可更新到 1.1");
+    expect(arriving(fadeOf(update))).toBe(true);
+    expect(arriving(fadeOf(button("更新 Sodium")))).toBe(true);
+
+    const css = instanceCss();
+    const cell = ruleBody(css, ".versionCell");
+    const tag = ruleBody(css, ".versionCell .updateTag");
+    // 标签折成几行都只往下长：不随单元格居中，也不靠最小高度（居中时标签一折行就把版本号顶上去）
+    expect(declOf(cell, "align-self")).toBe("flex-start");
+    expect(cell).not.toContain("min-height");
+    // 最坏的常见情况：版本号一行、间距、折成两行的「可更新到」。按样式表原文与令牌表算，不超出单元格（行高扣掉 1px 下边线），上下留白相等
+    const vars = { "--table-row": `${ROW_HEIGHT.regular}px`, "--update-tag-lh": declOf(cell, "--update-tag-lh"), "--update-tag-pad": declOf(cell, "--update-tag-pad") };
+    const px = (expr: string) => cssPx(expr, vars);
+    const twoLineTag = 2 * px(declOf(tag, "line-height")) * px("var(--sk-fs-caption)") + 2 * px(declOf(tag, "padding-block"));
+    const stack = px("var(--sk-lh-body)") + px(declOf(cell, "gap")) + twoLineTag;
+    const top = px(declOf(cell, "padding-top"));
+    expect(top + stack).toBeLessThanOrEqual(ROW_HEIGHT.regular - 1);
+    expect(top).toBeCloseTo((ROW_HEIGHT.regular - 1 - stack) / 2, 5);
+  });
+
+  it("紧凑档：更新状态插在来源后面，从透明淡入，其余标注照旧", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    const arrive = checkLater();
+    await open();
+    const modTags = (name: string) => tagsIn(rowEl(name).querySelector('[class*="modSub"]'));
+    expect(modTags("Sodium").map(textOf)).toEqual(["Modrinth", "新增"]);
+    await arrive();
+    const tags = modTags("Sodium");
+    expect(tags.map(textOf)).toEqual(["Modrinth", "可更新到 1.1", "新增"]);
+    expect(arriving(fadeOf(tags[1]))).toBe(true);
+  });
+
+  it("紧凑档：状态标签挤掉的第三个标注淡出而不是同一帧消失；Mod 格与文字列都撑满单元格，第二行定宽", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    mods = mods.map((m) => (m.file_name === "fabric-api.jar" && m.source !== null ? { ...m, source: { ...m.source, installed_at: Math.floor((NOW - DAY) / 1000) } } : m));
+    const checking = deferred<UpdateCandidate[]>();
+    ipc.overrides.set("check_updates", () => checking.promise);
+    await open();
+    const sub = () => rowEl("Fabric API").querySelector('[class*="modSub"]');
+    const present = () => tagsIn(sub()).filter((t) => t.closest("[inert]") === null);
+    expect(present().map(textOf)).toEqual(["Modrinth", "新增", "前置 · 由 Sodium 带入"]);
+    const dependency = present()[2];
+
+    await act(async () => {
+      checking.resolve([candidate("fabric-api.jar", "Fabric API", "P7dR8mSH", "1.0", "0.93.0")]);
+      await settle(20);
+    });
+    expect(present().map(textOf)).toEqual(["Modrinth", "可更新到 0.93.0", "新增"]);
+    // 被截掉的「前置」还在原处淡出：包裹层带 inert，点不到也不再被读
+    expect(dependency.isConnected).toBe(true);
+    expect(dependency.closest("[inert]")).not.toBeNull();
+
+    // 定宽要两层都撑满：单元格是横排 flex，.modCell 按内容取宽时 .modText 的撑满没有富余可分
+    const css = instanceCss();
+    expect(declOf(ruleBody(css, ".modCell"), "flex")).toBe("1 1 auto");
+    expect(declOf(ruleBody(css, ".modText"), "flex")).toBe("1 1 auto");
+  });
+
+  it("紧凑档：本地文件的第二行也挂让位，按哈希认出来以后同样插进更新状态", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    // jsdom 没有 Web Animations，让位在那里不启动；补上之后才能看到它观察了哪些元素。第二行是 span，装在 span 上就够
+    stubSpanAnimations();
+    const observers = stubResizeObserver();
+    const checking = deferred<UpdateCandidate[]>();
+    ipc.overrides.set("check_updates", () => checking.promise);
+    await open();
+    const sub = rowEl("Handmade").querySelector('[class*="modSub"]');
+    expect(observers.observed()).toContain(sub);
+
+    // 更新检查同一次先按哈希给本地文件补身份、再为它查更新；列表要等下次重扫才换来源，这期间仍是「本地文件」
+    await act(async () => {
+      checking.resolve([candidate("handmade.jar", "Handmade", "Hm4dE001", "1.0", "1.1")]);
+      await settle(20);
+    });
+    const tags = tagsIn(sub).filter((t) => t.closest("[inert]") === null);
+    expect(tags.slice(0, 2).map(textOf)).toEqual(["本地文件", "可更新到 1.1"]);
+    expect(arriving(fadeOf(tags[1]))).toBe(true);
+  });
+});
+
 describe("批量操作", () => {
   it("勾选 2 行：工具条换成「已选 2 个」的批量条；点「停用」只把这 2 个文件名交给 set_mods_enabled，结束后选择清空", async () => {
     await open();
@@ -764,7 +1135,7 @@ describe("批量操作与启停窗口", () => {
 });
 
 describe("忽略更新", () => {
-  it("被忽略的行带「不检查更新」，筛选里多一项；更多菜单恢复检查，本地文件的忽略项禁用", async () => {
+  it("被忽略的行带「不检查更新」，筛选里按它数；更多菜单恢复检查，本地文件的忽略项禁用", async () => {
     await open();
     expect(textOf(grid())).toContain("不检查更新");
     click(find("radio", "不检查更新，1 个"));
@@ -779,11 +1150,15 @@ describe("忽略更新", () => {
     await flush();
     expect(callsOf(ipc, "set_mod_update_hold")).toEqual([{ versionId: ID, fileName: "iris.jar", hold: null }]);
     expect(toasts()).toContainEqual(["info", "已恢复检查 Iris 的更新", undefined]);
-    // 不检查更新数到 0：筛选项消失，回到「全部」
-    expect([...document.querySelectorAll('[role="radio"]')].map(nameOf)).toEqual(["全部，4 个", "已启用，4 个", "已停用，0 个", "可更新，0 个"]);
-    expect(find("radio", "全部，4 个").getAttribute("aria-checked")).toBe("true");
+    // 不检查更新数到 0：筛选项留在原位（工具条不变宽），和别的筛选数到 0 一样留在空结果上
+    expect([...document.querySelectorAll('[role="radio"]')].map(nameOf)).toEqual(["全部，4 个", "已启用，4 个", "已停用，0 个", "可更新，0 个", "不检查更新，0 个"]);
+    expect(find("radio", "不检查更新，0 个").getAttribute("aria-checked")).toBe("true");
+    expect(gridNames()).toEqual([]);
+    click(find("radio", "全部，4 个"));
     expect(gridNames()).toEqual(["Fabric API", "Handmade", "Iris", "Sodium"]);
-    expect(textOf(grid())).not.toContain("不检查更新");
+    const iris = [...grid().querySelectorAll<HTMLElement>('[role="row"][data-row-index]')].find((r) => r.querySelector('[class*="modName"]')?.textContent === "Iris");
+    if (iris === undefined) throw new Error("没有 Iris 这一行");
+    expect([...iris.querySelectorAll("span[data-tone]")].filter((el) => el.closest("[inert]") === null).map(textOf)).not.toContain("不检查更新");
   });
 
   it("忽略一个有来源的 Mod：带上 ignored 调后端并说明怎么恢复；本地文件的忽略项禁用，点了不发命令", async () => {
@@ -1126,6 +1501,93 @@ describe("更新预览", () => {
     expect(textOf(dialog())).not.toContain("更新日志没能取到");
     // 日志失败不影响勾选与确认
     expect(textOf(dialog())).toContain("已勾选 3/3");
+  });
+
+  /** 定宽文案槽里叠着的全部候选与当前这条。 */
+  const slotOf = (host: Element) => {
+    const options = [...host.querySelectorAll<HTMLElement>("[data-align] > span")];
+    return { options: options.map(textOf), current: options.filter((el) => el.hasAttribute("data-current")).map(textOf) };
+  };
+  /** 预览里某一项的出入场包裹层。 */
+  const previewItemOf = (name: string): HTMLElement => {
+    const pick = find("checkbox", `选择 ${name}`, dialog());
+    const item = pick.closest<HTMLElement>('[class*="previewItem"]')?.parentElement;
+    if (item === null || item === undefined) throw new Error(`预览里没有 ${name}`);
+    return item;
+  };
+
+  it("确认键按全部条目数的位数留宽：勾选数变了只换文案，按钮不换", async () => {
+    await open();
+    click(button("全部更新 · 3"));
+    await flush();
+    const confirm = button("更新 3 个", dialog());
+    expect(slotOf(confirm)).toEqual({ options: ["更新 3 个"], current: ["更新 3 个"] });
+    click(find("checkbox", "选择 Handmade", dialog()));
+    expect(button("更新 2 个", dialog())).toBe(confirm);
+    expect(slotOf(confirm)).toEqual({ options: ["更新 2 个", "更新 3 个"], current: ["更新 2 个"] });
+  });
+
+  it("更新日志：请求快回来时不出骨架；超过 300 ms 骨架淡入，至少停留 300 ms 再换成正文", async () => {
+    const pending = deferred<ModChangelog>();
+    ipc.overrides.set("mod_update_changelog", () => pending.promise);
+    await open();
+    click(button("全部更新 · 3"));
+    await flush();
+    click(button("Sodium 的更新日志", dialog()));
+    const block = () => {
+      const el = dialog().querySelector<HTMLElement>('[class*="changelog"]');
+      if (el === null) throw new Error("展开后没有日志块");
+      return el;
+    };
+    const skeletonHidden = () => block().querySelector("[aria-hidden][data-pending]") !== null;
+    expect(skeletonHidden()).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
+    });
+    expect(skeletonHidden()).toBe(false);
+    expect(block().querySelector("li")).toBeNull();
+
+    pending.resolve({ version_id: "AANobbMI-1.1", format: "markdown", body: "- 修好了夜视闪烁" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
+    });
+    expect(block().querySelector("li")?.textContent).toBe("修好了夜视闪烁");
+  });
+
+  it("收起日志：日志块淡出并让出位置，退场期间不可交互；在别处开始更新的那一项从预览里淡出", async () => {
+    ipc.overrides.set("mod_update_changelog", () => ({ version_id: "AANobbMI-1.1", format: "markdown", body: "- 修好了夜视闪烁" }));
+    await open();
+    click(button("全部更新 · 3"));
+    await flush();
+    click(button("Sodium 的更新日志", dialog()));
+    await flush();
+    const log = dialog().querySelector<HTMLElement>('[class*="changelog"]')?.parentElement;
+    if (log === null || log === undefined) throw new Error("展开后没有日志块");
+    expect(log.hasAttribute("inert")).toBe(false);
+    click(button("Sodium 的更新日志", dialog()));
+    expect(log.hasAttribute("inert")).toBe(true);
+
+    const fabric = previewItemOf("Fabric API");
+    expect(fabric.hasAttribute("inert")).toBe(false);
+    await act(async () => {
+      void launcher.actions.updateMod(ID, "fabric-api.jar");
+      await settle(20);
+    });
+    expect(fabric.hasAttribute("inert")).toBe(true);
+    expect(textOf(dialog())).toContain("已勾选 2/2");
+
+    const css = readFileSync(resolve(__dirname, "instance.module.css"), "utf8");
+    const item = /\.previewItem \{([^}]*)\}/.exec(css);
+    if (item === null) throw new Error("没有 .previewItem 规则");
+    expect(item[1]).toContain("background: var(--sk-surface);");
+    // 分隔线跟着各自的条目走、不占布局，不按末项特判：末项退场时新末项的线不会在退场节点移除那一帧突然消失
+    expect(item[1]).not.toContain("border");
+    const line = /\.previewItem::before \{([^}]*)\}/.exec(css);
+    if (line === null) throw new Error("没有 .previewItem::before 规则");
+    expect(line[1]).toContain("position: absolute;");
+    expect(line[1]).toContain("top: -1px;");
+    expect(line[1]).toContain("background: var(--sk-line);");
+    expect(css).not.toMatch(/\.previewList[^{]*:last-child/);
   });
 
   it("概览页的「全部更新」打开同一个预览，确认后才入队", async () => {

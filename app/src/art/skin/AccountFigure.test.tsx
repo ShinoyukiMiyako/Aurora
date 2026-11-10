@@ -7,7 +7,21 @@ import { clearArtCache } from "../../mc/useArt";
 import { render, stubMatchMedia, type Rendered } from "../../test/dom";
 import { stubCanvas, type CanvasStub } from "../illustrations/test-canvas";
 import { AccountFigure } from "./AccountFigure";
+import { REST_POSE } from "./figure3d";
 import { skinFigureCanvas, type LoadedSkin } from "./render";
+
+/** 转动中现画的每一帧的 yaw（默认姿态贴缓存位图，不经过这里）。 */
+const painted = vi.hoisted((): number[] => []);
+vi.mock("./render", async (orig) => {
+  const mod = await orig<typeof import("./render")>();
+  return {
+    ...mod,
+    paintSkinFigure: (...args: Parameters<typeof mod.paintSkinFigure>) => {
+      painted.push(args[2].yaw);
+      mod.paintSkinFigure(...args);
+    },
+  };
+});
 
 const REMOTE = { kind: "remote", sha1: "ee".repeat(20), model: "wide", hat: true } as const;
 
@@ -71,9 +85,12 @@ function requireCanvas() {
   return element;
 }
 
-function pointer(type: string, clientX: number, init: PointerEventInit = {}) {
+/** 派发一个指针事件；给了 at 时把事件时刻定在这一毫秒（估算松手速度用的是事件时刻）。 */
+function pointer(type: string, clientX: number, init: PointerEventInit = {}, at?: number) {
+  const event = new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, clientX, ...init });
+  if (at !== undefined) Object.defineProperty(event, "timeStamp", { value: at });
   act(() => {
-    requireCanvas().dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, button: 0, clientX, ...init }));
+    requireCanvas().dispatchEvent(event);
   });
 }
 
@@ -168,6 +185,26 @@ describe("AccountFigure：可拖动的立绘", () => {
     expect(steps).toBeGreaterThan(5);
     expect(cachedDrawn()).toHaveLength(2);
     expect(onDisplay()[onDisplay().length - 1].source).toBe(skinFigureCanvas(loaded(), 6, 1));
+  });
+
+  it("松手接着手上的角速度：甩动中松手先顺着甩的方向多转一段，停住再松手第一帧就往回走", async () => {
+    await mount();
+    /** 30 ms 一步向右拖 60 px（转 60 度），releaseAt 时松手，返回松手后第一帧画的 yaw。 */
+    const flick = (releaseAt: number) => {
+      pointer("pointerdown", 100, {}, 1000);
+      pointer("pointermove", 130, {}, 1032);
+      pointer("pointermove", 160, {}, 1064);
+      runFrame();
+      painted.length = 0;
+      pointer("pointerup", 160, {}, releaseAt);
+      runFrame();
+      const [first] = painted;
+      while (frames.size > 0) runFrame();
+      return first;
+    };
+    const released = REST_POSE.yaw + Math.PI / 3;
+    expect(flick(1070)).toBeGreaterThan(released);
+    expect(flick(1300)).toBeLessThan(released);
   });
 
   it("减少动画：松手直接回位，不排帧", async () => {

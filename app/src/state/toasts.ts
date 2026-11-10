@@ -38,6 +38,8 @@ export interface Toast {
   deadline: number | null;
   /** 暂停期间记录的剩余寿命；未暂停为 null。 */
   pausedRemainingMs: number | null;
+  /** 去重时并进这一条的次数。每并进一次加 1，界面据此给一次反馈：不然重复的通知像是没发出来。 */
+  repeats: number;
   action?: ToastAction;
 }
 
@@ -85,7 +87,7 @@ export function pushToast(state: ToastsState, input: ToastInput, now: number): {
     (t) => t.tone === input.tone && t.title === input.title && t.body === input.body && now - t.createdAt <= TOAST_DEDUPE_MS && targetOf(t.action) === target,
   );
   if (duplicate) {
-    const items = state.items.map((t) => (t === duplicate ? withFullLife(t, paused, now) : t));
+    const items = state.items.map((t) => (t === duplicate ? { ...withFullLife(t, paused, now), repeats: t.repeats + 1 } : t));
     return { state: { ...state, items }, id: duplicate.id };
   }
   const seq = state.seq + 1;
@@ -98,6 +100,7 @@ export function pushToast(state: ToastsState, input: ToastInput, now: number): {
     ttlMs: toastTtl(input.tone, input.action !== undefined),
     deadline: null,
     pausedRemainingMs: null,
+    repeats: 0,
   };
   if (input.body !== undefined) base.body = input.body;
   if (input.action !== undefined) base.action = input.action;

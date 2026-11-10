@@ -46,7 +46,10 @@ export interface TooltipProps {
   children: ReactElement<{ "aria-describedby"?: string }>;
 }
 
-/** 全站共享的预热时刻：最近一次有气泡消失的时间。 */
+/**
+ * 全站共享的预热时刻：最近一次有气泡消失的时间。取 performance.now() 的单调时钟，不用 Date.now()：
+ * 系统时钟往回调时墙上时间的差值是负的，会一直被算成预热，直到时钟追上为止所有提示都不等 delay。
+ */
 let lastHiddenAt = Number.NEGATIVE_INFINITY;
 
 /** 正在显示的气泡：owner 区分是哪一个提示，hide(true) 让它直接撤掉、不播退场。强制显示的气泡不登记。 */
@@ -57,6 +60,19 @@ let showing: { owner: object; hide: (replaced: boolean) => void } | null = null;
  * 旧的要跟着立即撤掉，不然两个气泡并存到旧的淡完。它已不在 showing 里，只能单独记下。
  */
 let exiting: { owner: object; purge: () => void } | null = null;
+
+/** 测试之间复位全站共享的气泡状态；应用里不调用。 */
+export function resetTooltipState(): void {
+  lastHiddenAt = Number.NEGATIVE_INFINITY;
+  showing = null;
+  exiting = null;
+}
+
+/** 距最近一次有气泡消失还在预热窗口里。差值为负说明计时起点换过，不算预热。 */
+function warmSinceHidden(): boolean {
+  const since = performance.now() - lastHiddenAt;
+  return since >= 0 && since < TOOLTIP_TIMING.warmWindow;
+}
 
 /** 会裁掉超出部分的 overflow 取值。 */
 const CLIPPING_OVERFLOW = new Set(["auto", "scroll", "hidden", "clip", "overlay"]);
@@ -116,7 +132,7 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
       window.clearTimeout(showTimer.current);
       window.clearTimeout(hideTimer.current);
       if (openRef.current) {
-        lastHiddenAt = Date.now();
+        lastHiddenAt = performance.now();
         // 被顶替的直接撤掉，不用记；照常收起的要淡出 fade.quick，期间可能被下一个气泡顶掉
         if (!byOther) exiting = { owner, purge };
       }
@@ -153,7 +169,7 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
     if (openRef.current) return;
     const target = hostRef.current === null ? null : triggerOf(hostRef.current);
     if (target === null) throw new Error("Tooltip 必须包住一个元素");
-    const warm = Date.now() - lastHiddenAt < TOOLTIP_TIMING.warmWindow || (showing !== null && showing.owner !== owner);
+    const warm = warmSinceHidden() || (showing !== null && showing.owner !== owner);
     window.clearTimeout(showTimer.current);
     if (immediate || warm) open(target, warm);
     else showTimer.current = window.setTimeout(() => open(target, false), delay);

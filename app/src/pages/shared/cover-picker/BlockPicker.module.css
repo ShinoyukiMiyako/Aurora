@@ -18,6 +18,14 @@
   justify-content: center;
 }
 
+/* 搜索结果与无结果互换的那一层：接过面板的横向排法，网格照旧居中、无结果照旧撑满 */
+.swap {
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  min-width: 0;
+}
+
 /*
  * 网格视口像原版物品栏的面板：凹陷的底，格子浮在上面。行与格的位置、尺寸由脚本按同一组常量给出
  * （虚拟化要按它们算可见行），这里只取用 --picker-* 变量。
@@ -72,12 +80,25 @@
   cursor: pointer;
   transition:
     border-color var(--sk-dur-hover) var(--sk-ease),
-    background-color var(--sk-dur-hover) var(--sk-ease);
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap);
 }
 
 .cell:hover {
   border-color: var(--sk-accent-line);
   background: var(--sk-card-hover);
+}
+
+/* 按下：格子连同方块缩一点，像把方块按进物品栏的槽里；松手（或选中关窗前）弹回 */
+.cell:active {
+  scale: 0.94;
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .cell:active {
+  scale: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 /* 选中格：主色描边，内侧再压一道主色线，读作 2px 的框 */

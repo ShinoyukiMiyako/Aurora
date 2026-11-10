@@ -10,7 +10,7 @@ import { APP_NAME_EN } from "../../lib/app-info";
 import { focusByKeyboard, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import App from "../App";
 import type { DirCheck, DirIssue } from "../contract";
-import { COPY, formatBytes } from "../copy";
+import { COPY, formatBytes, welcomeLead } from "../copy";
 import { FAKE_PROBE, createFakeBridge } from "../fake-bridge";
 import { replay } from "../model";
 import { DIR_CHECK_DEBOUNCE_MS, Location, type LocationProps } from "./Location";
@@ -656,6 +656,24 @@ describe("接真的 App", () => {
     expect(presentHeading()).toBe(text.title);
     expect(fake.callsOf("launcherRunning")).toEqual([]);
     expect(fake.callsOf("install")).toEqual([]);
+  });
+
+  it.each(["zh", "en"] as const)("两页的说明区叠的是同两段说明：标题区一样高，位置块点「更改」过来不用挪（%s）", (lang) => {
+    const langCopy = COPY[lang];
+    view = render(<App bridge={createFakeBridge()} copy={langCopy} initial={replay([{ type: "probed", probe: FAKE_PROBE }])} />);
+    // 当前这一页标题下的每一段说明：文字，以及是不是只占位不显示的那段
+    const leadArea = () => [...document.querySelectorAll("[data-step-pane]:not([inert]) header p")].map((p) => [p.textContent, p.hasAttribute("data-floor")]);
+    expect(leadArea()).toEqual([
+      [welcomeLead(langCopy), false],
+      [langCopy.location.lead, true],
+    ]);
+
+    act(() => button(langCopy.welcome.change).click());
+    expect(presentHeading()).toBe(langCopy.location.title);
+    expect(leadArea()).toEqual([
+      [langCopy.location.lead, false],
+      [welcomeLead(langCopy), true],
+    ]);
   });
 
   it("点「更改」后欢迎页淡出的那一会儿不可交互，空白处的回车也不替用户发起安装", async () => {

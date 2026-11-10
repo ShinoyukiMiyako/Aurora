@@ -63,6 +63,11 @@ export interface ModalProps {
    * 重渲染频繁的弹窗（输入框逐字输入、进度回调、倒计时）应当传；传了以后，它没变时内容变高也不会形变。
    */
   layoutKey?: string | number;
+  /**
+   * 弹窗开着时换成了另一件事（外壳的确认被新的确认顶掉）就换一个值：按打开时的规则重新做一次初始聚焦
+   * （带 data-autofocus 的元素优先）。弹窗原地换内容，遮罩与面板不重挂。不传时初始聚焦只在打开时做一次。
+   */
+  requestKey?: string | number;
   /** 标题左侧：线性图标名（画在强调色图标底座里），或任意节点（实例标识等）。 */
   icon?: IconName | ReactNode;
   /** sm 420 / md 560（默认）/ lg 760 / xl 940；实际宽不超过窗口内容区宽减 48。 */
@@ -129,6 +134,7 @@ function ModalFrame({
   stableGutter = false,
   hideClose = false,
   layoutKey,
+  requestKey,
   className,
   children,
 }: ModalProps) {
@@ -164,13 +170,14 @@ function ModalFrame({
     setStacked(below.length > 0);
   }, []);
 
+  // 换了请求要重做：新的危险确认原地换上来时，焦点还停在旧请求的确认键上，回车就执行了不可逆的操作
   useLayoutEffect(() => {
     const box = boxRef.current;
     if (!box) return;
     const marked = box.querySelector<HTMLElement>(`[${AUTOFOCUS_ATTR}]`);
     if (marked) marked.focus();
     else if (!box.contains(document.activeElement)) box.focus();
-  }, []);
+  }, [requestKey]);
 
   const scrimClosable = closeOnScrim && dismissible;
   const onScrimPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {

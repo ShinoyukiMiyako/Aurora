@@ -66,6 +66,16 @@ function enterViewport() {
 
 const withResolver = (resolve: (url: string) => Promise<string>, ui: ReactNode) => <RemoteImageProvider resolve={resolve}>{ui}</RemoteImageProvider>;
 
+/**
+ * 某条 CSS 动画播完。jsdom 不播 CSS 动画，也没有 AnimationEvent：React 按环境选带不带 webkit 前缀的事件名，
+ * 两个都派发；伪元素照浏览器的样子挂在事件上（不是伪元素上的动画为空串）。
+ */
+function animationEnds(el: Element, pseudoElement: string) {
+  act(() => {
+    for (const type of ["animationend", "webkitAnimationEnd"]) el.dispatchEvent(Object.assign(new Event(type, { bubbles: true }), { pseudoElement }));
+  });
+}
+
 describe("判定规则", () => {
   it("像素风：不超过 64 的正方形源图，按 2 倍及以上整数倍放大", () => {
     expect(isPixelArtThumb(16, 16, 32)).toBe(true);
@@ -168,6 +178,58 @@ describe("Thumb", () => {
     await settle();
     expect(thumb().dataset.view).toBe("fallback");
     expect(String(warn.mock.calls.at(-1)?.[1])).toContain("HTTP 404");
+  });
+
+  it("光带：进入加载态才有；图到了不同帧消失，标成淡出留到 ::before 上的淡出播完才摘掉", async () => {
+    view = render(withResolver(async (u) => u, <Thumb url="https://cdn.modrinth.com/data/x/icon.png" kind="mod" hue={1} size={48} />));
+    // 视口外的静止占位没有光带
+    expect(thumb().hasAttribute("data-shimmer")).toBe(false);
+    enterViewport();
+    expect(thumb().dataset.shimmer).toBe("run");
+    await settle();
+    expect(thumb().dataset.view).toBe("image");
+    expect(thumb().dataset.shimmer).toBe("fading");
+
+    // 图片自己的淡入冒上来、::after 内描边上的事件都不算
+    animationEnds(thumb().querySelector("canvas") as HTMLCanvasElement, "");
+    animationEnds(thumb(), "::after");
+    expect(thumb().dataset.shimmer).toBe("fading");
+
+    animationEnds(thumb(), "::before");
+    expect(thumb().hasAttribute("data-shimmer")).toBe(false);
+  });
+
+  it("光带：加载失败落到回落图形时同样淡出；本来就没有图的从头到尾没有光带", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    view = render(withResolver(async () => Promise.reject(new Error("登记失败")), <Thumb url="https://x.test/a.png" kind="shader" hue={40} size={40} />));
+    enterViewport();
+    expect(thumb().dataset.shimmer).toBe("run");
+    await settle();
+    expect(thumb().dataset.view).toBe("fallback");
+    expect(thumb().dataset.shimmer).toBe("fading");
+    view.unmount();
+
+    view = render(<Thumb url={null} kind="resourcepack" hue={210} size={64} />);
+    enterViewport();
+    expect(thumb().dataset.view).toBe("fallback");
+    expect(thumb().hasAttribute("data-shimmer")).toBe(false);
+  });
+
+  it("样式：光带挂在 ::before 的标记上，淡出时横扫的那条只暂停不换名、再叠一条退场补间的淡出；减少动画时没有光带", () => {
+    const css = readFileSync(resolve(__dirname, "Thumb.module.css"), "utf8");
+    const body = (selector: string) => {
+      const at = css.indexOf(`${selector} {`);
+      if (at < 0) throw new Error(`Thumb.module.css 里没有 ${selector}`);
+      return css.slice(at, css.indexOf("}", at));
+    };
+    const run = "shimmer var(--sk-loop-shimmer) linear infinite";
+    expect(body(".thumb[data-shimmer]::before")).toContain(`animation: ${run};`);
+    // 同名同位：浏览器按名字认出还是那一条，保留播放进度，光带停在淡出开始那一刻的位置而不是跳回起点
+    expect(body('.thumb[data-shimmer="fading"]::before').replace(/\s+/g, " ")).toContain(`animation: ${run} paused, shimmer-out var(--sk-dur-out) var(--sk-ease-in) forwards;`);
+    expect(body("@keyframes shimmer-out")).toMatch(/to\s*\{\s*opacity: 0;/);
+    expect(body(":global([data-sk-reduced]) .thumb[data-shimmer]::before")).toContain("animation: none;");
+    // 光带不再跟着 data-view="loading" 出没：那样一换形态就同帧消失
+    expect(css).not.toContain('[data-view="loading"]::');
   });
 
   it("样式：失败时底色从骨架淡到色相底座、图标淡入；减少动画时图片淡入缩到 200ms", () => {

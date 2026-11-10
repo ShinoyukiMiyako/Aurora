@@ -13,6 +13,19 @@ const JAVA: SelectOption<string>[] = [
 
 const VERSIONS: SelectOption<string>[] = Array.from({ length: 22 }, (_, i) => ({ value: `1.${21 - i}`, label: `1.${21 - i}`, icon: "box" }));
 
+const SORT: SelectOption<string>[] = [
+  { value: "relevance", label: "相关度" },
+  { value: "downloads", label: "下载量" },
+  { value: "updated", label: "最近更新" },
+  { value: "newest", label: "最新发布" },
+];
+
+/** 宽度随内容走的触发器：换选中项时宽度不变，右边的按钮不被挤动。 */
+function Reserved() {
+  const [value, setValue] = useState("relevance");
+  return <Select value={value} onChange={setValue} options={SORT} size="sm" reserveWidth ariaLabel="排序" />;
+}
+
 function Live({ options, label, initial }: { options: SelectOption<string>[]; label: string; initial: string | null }) {
   const [value, setValue] = useState(initial);
   return (
@@ -35,6 +48,9 @@ export const gallery: GalleryEntry = {
       </GalleryRow>
       <GalleryRow label="超过 12 项有过滤框">
         <Live options={VERSIONS} label="游戏版本" initial={null} />
+      </GalleryRow>
+      <GalleryRow label="reserveWidth · 按最长选项定宽">
+        <Reserved />
       </GalleryRow>
       <GalleryRow label="sm · 错误 · 禁用">
         <Select value="21" onChange={() => undefined} options={JAVA} size="sm" ariaLabel="sm" />

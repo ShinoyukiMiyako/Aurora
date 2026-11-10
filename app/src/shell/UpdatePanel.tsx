@@ -81,6 +81,19 @@ function PhaseStatus({ phaseKey, children }: { phaseKey: string; children: React
   );
 }
 
+/**
+ * 弹窗形变的依赖（Modal 的 layoutKey）：只放会改变弹窗高度的东西。下载进度约每 100 ms 回调一次、整个面板跟着重渲染，
+ * 不传的话每次回调都要量一遍面板与头部、主体、底栏；已下大小在定宽的槽里，进度条长度固定，都不改高度。
+ * 阶段决定状态块与底栏；已就绪时游戏在不在跑换两种说明；下载失败时有后端原文就多一段；下载中换过源多一行提示；
+ * 新一轮检查换了一版时更新说明整段换掉。这几样一变，面板沿 morph 弹簧形变过去，上下沿不再各跳高度差的一半。
+ */
+export function updatePanelLayoutKey(phase: UpdaterPhase, gameRunning: boolean): string {
+  const update = phaseUpdate(phase);
+  const failureRaw = phase.kind === "download_failed" && downloadFailureCopy(phase).raw !== null;
+  const switched = phase.kind === "downloading" && sourceSwitchedCopy(phase.source) !== null;
+  return JSON.stringify([phase.kind, update === null ? null : update.version, gameRunning, failureRaw, switched]);
+}
+
 export interface UpdatePanelProps {
   open: boolean;
   onClose(): void;
@@ -242,6 +255,7 @@ export function UpdatePanel({ open, onClose }: UpdatePanelProps) {
     <Modal
       open={open && current !== null}
       onClose={onClose}
+      layoutKey={updatePanelLayoutKey(phase, gameRunning)}
       size="md"
       icon={<PetalMark size={32} />}
       title={UPDATE_COPY.panelTitle(update.version)}

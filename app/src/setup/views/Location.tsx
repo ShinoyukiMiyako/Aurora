@@ -10,7 +10,7 @@ import { Checkbox } from "../../ui/Checkbox";
 import { Field } from "../../ui/Field";
 import { TextInput } from "../../ui/TextInput";
 import type { DirCheck } from "../contract";
-import { formatBytes, type SetupCopy } from "../copy";
+import { formatBytes, welcomeLead, type SetupCopy } from "../copy";
 import { Frame } from "../Frame";
 import { dirNotice, withAppFolder } from "../model";
 import shared from "../setup.module.css";
@@ -130,6 +130,7 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
     <Frame
       title={text.title}
       lead={text.lead}
+      leadFloor={welcomeLead(copy)}
       footerStart={
         <Button variant="ghost" disabled={busy} focusableWhenDisabled onClick={onUseDefault}>
           {text.useDefault}
@@ -147,7 +148,8 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
       }
     >
       {/*
-        和欢迎页的安装位置是同一块：换步时从那边的位置滑过来，见 Frame 的 carryAcross。
+        和欢迎页的安装位置是同一块：说明区按欢迎页的说明占高（leadFloor），两页的这一块在同一高度，点「更改」过来原地变成可编辑；
+        仍有差时由 Frame 的 carryAcross 从那边的位置滑过来。
         校验结果在一行提示与两行错误之间换（英文的长错误会折行）时字段变高，下面的复选框与实际位置滑过去，不跳
       */}
       <div ref={reflow} className={styles.content} data-setup-carry="location">

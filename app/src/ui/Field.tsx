@@ -3,12 +3,13 @@
 // 关联经上下文下发：放进来的输入框、下拉选择、开关等自动拿到 id（标签 for 指向它）、aria-describedby（提示与错误）
 // 与 aria-invalid；单选组这类不可被 label 关联的控件用 labelId 做 aria-labelledby。
 // 提示与错误共用一个常驻的 polite 播报区：先有播报区、后变内容，读屏才会念出新出现的错误。
-// 之后才出现的错误淡入并略微落下；挂载时就有的错误跟着所在页面或弹窗入场。
+// 之后才出现的错误按流内块的增删（insertItem）淡入并从略小处落到位，与 Appear 里的提示条、警告同一种出现方式；
+// 挂载时就有的错误跟着所在页面或弹窗入场。
 
 import { motion } from "framer-motion";
 import { createContext, useContext, useEffect, useId, useRef, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
-import { fade, springs } from "../lib/motion";
+import { insertItem } from "../lib/motion";
 import { cx } from "../lib/util";
 import styles from "./Field.module.css";
 
@@ -74,8 +75,8 @@ export function Field({ label, optional = false, hint, error, reserve = false, c
             <motion.span
               key="error"
               className={styles.error}
-              initial={mounted.current ? { opacity: 0, y: -4 } : false}
-              animate={{ opacity: 1, y: 0, transition: { ...springs.settle, opacity: fade.in } }}
+              initial={mounted.current ? insertItem.initial : false}
+              animate={insertItem.animate}
             >
               <Icon name="alert" size={14} className={styles.errorIcon} />
               <span>{error}</span>

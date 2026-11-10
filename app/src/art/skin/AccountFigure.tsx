@@ -23,32 +23,32 @@ export interface AccountFigureProps {
 
 /**
  * 角色立绘：皮肤盒子的 3D 正交投影，含外层。只用于主页问候卡、账户页聚光卡与账户卡、离线账户弹窗。
- * 取不到皮肤时是剪影立绘，手臂宽按皮肤体型，没有皮肤信息时按宽体型。
+ * 取不到皮肤时是剪影立绘，手臂宽按皮肤体型，没有皮肤信息时按宽体型。换了皮肤时旧立绘留到新皮肤取到，两张交叉淡化。
  *
  * 根元素仍按 16 × 32 占位：底边是脚底基线，各处的脚下投影和页面布局都以它为准。
  * 投影比这个方框宽也比它高，画在四周外扩的外框里，外框不参与布局。
  */
 export function AccountFigure({ uuid, skin, scale, label, interactive = false, className }: AccountFigureProps) {
   const dpr = useDevicePixelRatio();
-  const loaded = useSkin(skin);
+  const shown = useSkin(skin);
   const frameWidth = FIGURE_FRAME.width * scale;
   const frameHeight = FIGURE_FRAME.height * scale;
   const pad = FIGURE_FRAME_PAD * scale;
   const canvas = (bitmap: CanvasImageSource) => <BitmapCanvas bitmap={bitmap} cssWidth={frameWidth} cssHeight={frameHeight} dpr={dpr} />;
   const model = skin === null ? "wide" : skin.model;
-  const real = loaded === null ? null : interactive ? <SpinningFigure skin={loaded} scale={scale} dpr={dpr} /> : canvas(skinFigureCanvas(loaded, scale, dpr));
+  const real = shown === null ? null : interactive ? <SpinningFigure skin={shown.skin} scale={scale} dpr={dpr} /> : canvas(skinFigureCanvas(shown.skin, scale, dpr));
   return (
     <span
       className={cx(styles.figure, className)}
       style={{ width: FIGURE_SIZE.width * scale, height: FIGURE_SIZE.height * scale }}
       data-sk-art="skin"
-      data-art={loaded ? "skin" : "silhouette"}
+      data-art={shown ? "skin" : "silhouette"}
       role={label === undefined ? undefined : "img"}
       aria-label={label}
       aria-hidden={label === undefined ? true : undefined}
     >
       <span className={styles.frame} style={{ left: -pad, top: -pad, width: frameWidth, height: frameHeight }}>
-        <ArtCrossfade fallback={canvas(silhouetteFigureCanvas(accountHue(uuid), model, scale, dpr))} real={real} />
+        <ArtCrossfade fallback={canvas(silhouetteFigureCanvas(accountHue(uuid), model, scale, dpr))} real={real} realKey={shown === null ? undefined : shown.key} />
       </span>
     </span>
   );

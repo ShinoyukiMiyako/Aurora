@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { MotionGlobalConfig } from "framer-motion";
+import { MotionConfig, MotionGlobalConfig } from "framer-motion";
 import { act } from "react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { NO_ART, setArtStatus } from "../../mc/art";
@@ -47,6 +47,22 @@ afterEach(() => {
 
 const settle = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
 const backdrop = () => view?.container.querySelector<HTMLElement>("[data-sk-art='panorama']") ?? null;
+
+/**
+ * first 第一次变成完全不透明的那一帧，second 的不透明度。framer 在同一帧里写完所有元素的样式之后，
+ * 才轮到 MutationObserver 的回调，所以读到的是同一帧的值。
+ */
+async function opacityWhenOpaque(first: HTMLElement, second: HTMLElement): Promise<number> {
+  const seen: { opacity: number | null } = { opacity: null };
+  const observer = new MutationObserver(() => {
+    if (seen.opacity === null && first.style.opacity === "1") seen.opacity = Number(second.style.opacity);
+  });
+  observer.observe(first, { attributes: true, attributeFilter: ["style"] });
+  await waitForFrames(() => expect(seen.opacity).not.toBeNull());
+  observer.disconnect();
+  if (seen.opacity === null) throw new Error("先到的那层一直没有变成不透明");
+  return seen.opacity;
+}
 
 describe("PanoramaBackdrop", () => {
   it("开关关闭时什么都不画、不取图", async () => {
@@ -121,6 +137,35 @@ describe("PanoramaBackdrop", () => {
     act(() => setArtStatus({ source: null, panorama: false }));
     await waitForFrames(() => expect(backdrop()).toBeNull());
     expect(warn.mock.calls.some((c) => String(c[0]).includes("樱花林全景已不可用"))).toBe(true);
+  });
+
+  it("减少动画时入场收回 fade.in：比照常的那层先到不透明，不播 480 ms 的整窗淡入", async () => {
+    setArtStatus({ source: null, panorama: true });
+    // 先把图取好：之后两层在同一次提交里就拿到位图，同一帧起播，每一帧拿同一个时间戳算各自的不透明度
+    view = render(<PanoramaBackdrop enabled />);
+    await settle();
+    view.unmount();
+    view = render(
+      <>
+        <div data-lane="normal">
+          <PanoramaBackdrop enabled />
+        </div>
+        <MotionConfig reducedMotion="always">
+          <div data-lane="reduced">
+            <PanoramaBackdrop enabled />
+          </div>
+        </MotionConfig>
+      </>,
+    );
+    const lane = (name: string) => {
+      const el = view?.container.querySelector<HTMLElement>(`[data-lane='${name}'] > [data-sk-art='panorama']`);
+      if (el === null || el === undefined) throw new Error(`${name} 那层全景没有渲染`);
+      return el;
+    };
+    const other = await opacityWhenOpaque(lane("reduced"), lane("normal"));
+    // 200 ms 的淡入落到 1 的那一帧，480 ms 的环境层淡入还没走完
+    expect(other).toBeGreaterThan(0);
+    expect(other).toBeLessThan(1);
   });
 
   it("关掉开关：整层先淡出再卸载，不是一帧硬切", async () => {

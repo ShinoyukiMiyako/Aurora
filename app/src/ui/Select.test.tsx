@@ -308,8 +308,8 @@ describe("尺寸稳定", () => {
   };
 
   // 排序下拉在「相关度」与「最新发布」之间切换：触发器宽差一个字，右对齐的一排里旁边的控件被挤动
-  it("触发器按最长的选项预留宽度：全部候选叠在同一格里、不可见，也不进触发器的文字", () => {
-    mount(<Host options={JAVA} initial="j8" onChange={() => undefined} />);
+  it("reserveWidth：触发器按最长的选项预留宽度，全部候选叠在同一格里、不可见，也不进触发器的文字", () => {
+    mount(<Select reserveWidth value="j8" options={JAVA} ariaLabel="Java 运行时" onChange={() => undefined} />);
     const reserved = [...trigger().querySelectorAll<HTMLElement>("[data-label]")];
     expect(reserved.map((el) => el.dataset.label)).toEqual(["选择", "自动选择", "Java 8", "Java 17", "Java 21", "内置运行时"]);
     expect(reserved.every((el) => el.getAttribute("aria-hidden") === "true" && el.textContent === "")).toBe(true);
@@ -319,15 +319,22 @@ describe("尺寸稳定", () => {
     expect(ruleOf(".widthLabel::before")).toContain("content: attr(data-label);");
   });
 
-  // 设置页、安装面板的下拉撑满容器，宽度与选项无关；游戏版本下拉有几百个选项
-  it("撑满的触发器不放宽度候选；选项很多时只叠放估算最宽的几条", () => {
-    mount(<Select block value="j8" options={JAVA} ariaLabel="Java 运行时" onChange={() => undefined} />);
+  // 设置页、实例库的下拉已由调用方定宽，安装面板的撑满容器：宽度与选项无关，预留只会白白多出隐藏节点
+  it("默认不放宽度候选；撑满的触发器传了 reserveWidth 也不放", () => {
+    mount(<Select value="j8" options={JAVA} ariaLabel="Java 运行时" onChange={() => undefined} />);
     expect(trigger().querySelectorAll("[data-label]")).toHaveLength(0);
+    expect(trigger().textContent).toBe("Java 8");
     view?.unmount();
 
+    mount(<Select block reserveWidth value="j8" options={JAVA} ariaLabel="Java 运行时" onChange={() => undefined} />);
+    expect(trigger().querySelectorAll("[data-label]")).toHaveLength(0);
+  });
+
+  // 游戏版本下拉有几百个选项
+  it("reserveWidth 且选项很多时只叠放估算最宽的几条", () => {
     const versions: SelectOption<string>[] = Array.from({ length: 300 }, (_, i) => ({ value: `v${i}`, label: `1.${i}` }));
     versions[200] = { value: "snapshot", label: "24w14a 快照" };
-    mount(<Select value="v0" options={versions} ariaLabel="游戏版本" onChange={() => undefined} />);
+    mount(<Select reserveWidth value="v0" options={versions} ariaLabel="游戏版本" onChange={() => undefined} />);
     const reserved = [...trigger().querySelectorAll<HTMLElement>("[data-label]")].map((el) => el.dataset.label);
     expect(reserved).toHaveLength(8);
     // 半角 6 个、空格 1 个、全角 2 个按 4 算：权重 11，比其余的「1.xxx」（5）都宽

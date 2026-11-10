@@ -48,6 +48,14 @@ const FADE_EDGE = 16;
  */
 export const INDICATOR_RADIUS = { underline: 1.25, pill: { md: 18, sm: 15 } } as const;
 
+/**
+ * 徽标会不会画出东西。React 对 undefined、null、布尔值与空串什么都不画：这些情况不包徽标层，
+ * 否则空的包裹层也会吃掉标签内容的间距，让标签无故变宽。
+ */
+function rendersSomething(node: ReactNode): boolean {
+  return node !== undefined && node !== null && typeof node !== "boolean" && node !== "";
+}
+
 export function Tabs<T extends string>({ id, value, onChange, items, variant = "underline", size = "md", ariaLabel, className }: TabsProps<T>) {
   if (items.length > TABS_MAX_ITEMS) throw new Error(`Tabs 最多 ${TABS_MAX_ITEMS} 项，收到 ${items.length} 项`);
   if (ariaLabel.trim() === "") throw new Error("Tabs 的 ariaLabel 不能为空");
@@ -150,7 +158,7 @@ export function Tabs<T extends string>({ id, value, onChange, items, variant = "
     >
       {items.map((item, i) => {
         const on = i === selected;
-        const hasBadge = item.badge !== undefined && item.badge !== null && item.badge !== false;
+        const hasBadge = rendersSomething(item.badge);
         return (
           <button
             key={item.value}

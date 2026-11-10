@@ -119,11 +119,14 @@
   position: relative;
 }
 
+/*
+ * 方块、文字列、图钉、更多钮与启动胶囊排成同一行，这一行挂着让位（宽高都由卡面定死，让位才认得出谁动了）。
+ * 行内间距按动作之间的 8 给，方块与文字列各自再补 12，凑成两侧的 20。
+ */
 .heroInner {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
-  gap: var(--sk-space-20);
+  gap: var(--sk-space-8);
   box-sizing: border-box;
   height: 100%;
   padding: var(--sk-space-20) var(--sk-space-24);
@@ -131,15 +134,25 @@
 
 .heroBlock {
   display: flex;
+  flex: none;
   align-items: center;
   justify-content: center;
+  margin-right: var(--sk-space-12);
 }
 
 .heroText {
   display: flex;
+  flex: 1 1 0;
   flex-direction: column;
   gap: var(--sk-space-6);
   min-width: 0;
+  margin-right: var(--sk-space-12);
+}
+
+/* 图钉与更多钮的提示气泡外层是 display: contents，没有盒子，让位认不到：外面再包这一层真实的盒子 */
+.heroAction {
+  display: flex;
+  flex: none;
 }
 
 .heroEyebrow {
@@ -177,10 +190,18 @@
   color: var(--sk-on-media-2);
 }
 
-/* 改名钮平时隐藏，悬停头图或聚焦时出现；用透明度而不是 display，保留键盘可达 */
+/*
+ * 改名钮平时隐藏，悬停头图或聚焦时出现；用透明度而不是 display，保留键盘可达。
+ * 这条 transition 与图标按钮自己的同权重、又后加载，会整条盖掉它：按压弹簧与底色、描边、字色的过渡要一并写回来
+ */
 .heroEdit {
   opacity: 0;
-  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+  transition:
+    opacity var(--sk-dur-hover) var(--sk-ease),
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .heroHost:hover .heroEdit,
@@ -188,20 +209,28 @@
   opacity: 1;
 }
 
+/* 相对定位：状态标签退场时被抽出布局，以这里为基准原地淡出 */
 .heroChips {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   gap: var(--sk-space-6);
   min-width: 0;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
 }
 
-.heroActions {
-  display: flex;
-  align-items: center;
-  gap: var(--sk-space-8);
+/* 状态标签的出入场包裹层：flex 让标签自身成为弹性项，不落在行框里多出基线下方的空隙 */
+.heroChip {
+  display: inline-flex;
+}
+
+/* 改名输入校验出错时，错误叠在标签行的位置上，标签让出来 */
+.heroText:has(> .renameRow[data-invalid]) > .heroChips {
+  opacity: 0;
 }
 
 .renameRow {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -215,17 +244,29 @@
   flex: 1 1 260px;
 }
 
+/* 落在输入行下面一个文字列间距处、与标签行同高（标签 22）：不进流，出现、消失时什么都不挪 */
 .renameError {
-  display: inline-flex;
+  position: absolute;
+  top: calc(100% + var(--sk-space-6));
+  right: 0;
+  left: 0;
+  display: flex;
   align-items: center;
   gap: var(--sk-space-4);
+  height: 22px;
   color: var(--sk-danger);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
+  pointer-events: none;
 }
 
 .tabBar {
   min-width: 0;
+}
+
+/* Mod 标签上「N 更新」的弹出包裹层：flex 让标签自身成为弹性项，不落在行框里多出基线下方的空隙 */
+.tabBadge {
+  display: inline-flex;
 }
 
 /* ---------------------------------------------------------------- 概览 */
@@ -254,6 +295,31 @@
 
 .statsNotice {
   margin-top: var(--sk-space-14);
+}
+
+/* 存档一个都没有时的占位：EmptyState compact 的几何（内边距、64 插画、标题一行、正文一行），读到后高度不变 */
+.emptySkeleton {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sk-space-8);
+  padding: var(--sk-space-20) var(--sk-space-16);
+}
+
+.emptySkeletonTitle {
+  margin-top: var(--sk-space-6);
+  line-height: var(--sk-lh-section);
+}
+
+.emptySkeletonBody {
+  line-height: var(--sk-lh-small);
+}
+
+/* 资源包卡的正文：列表与底部说明是这一层的直接子项，列表变高时说明从原位置滑下去 */
+.packsBody {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .rows {
@@ -326,6 +392,34 @@
   gap: var(--sk-space-6);
 }
 
+/* 备份列表读取中的骨架：照贴边列表的中号行画，行高 56、左右内边距 18、行间 1px 分隔线 */
+.backupSkeleton {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.backupSkeletonRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-12);
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 56px;
+  padding: 0 var(--sk-space-18);
+}
+
+.backupSkeletonRow + .backupSkeletonRow {
+  border-top: 1px solid var(--sk-line);
+}
+
+.backupSkeletonTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+}
+
 .modeText[data-mode="hardcore"] {
   color: var(--sk-danger);
 }
@@ -361,6 +455,36 @@
   outline-offset: 2px;
 }
 
+/* 方格是按钮：悬停铺浅底，按下与方形图标按钮同样缩到 0.94，不等 280 ms 后的提示气泡才知道点得动 */
+.peekTile,
+.peekMore {
+  transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.peekTile:hover,
+.peekMore:hover {
+  background: var(--sk-bg-2);
+}
+
+.peekMore:hover {
+  color: var(--sk-text);
+}
+
+.peekTile:active,
+.peekMore:active {
+  transform: scale(0.94);
+}
+
+:global([data-sk-reduced]) .peekTile:active,
+:global([data-sk-reduced]) .peekMore:active {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
+}
+
 /* 有更新的角标：组件的提醒点，描边取卡片底色 */
 .peekDot {
   position: absolute;
@@ -385,16 +509,20 @@
 
 /* ---------------------------------------------------------------- Mod 管理 */
 
+/* 吸顶容器常驻并持有底色；工具条与批量条是里面互换的一行，淡入的只有这一行 */
 .toolbar {
   position: sticky;
   top: var(--sk-space-8);
   z-index: var(--sk-z-page);
+  padding: var(--sk-space-8) 0;
+  background: var(--sk-bg);
+}
+
+.toolbarRow {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--sk-space-10);
-  padding: var(--sk-space-8) 0;
-  background: var(--sk-bg);
 }
 
 .toolSearch {
@@ -415,7 +543,9 @@
   justify-content: flex-end;
 }
 
+/* 定位基准：更新进度淡出时脱离布局，叠在原处淡完 */
 .modSummary {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -446,6 +576,13 @@
   line-height: var(--sk-lh-small);
 }
 
+/* 出入场的包裹层：定宽的进度块不被压窄 */
+.modTaskItem {
+  display: flex;
+  flex: none;
+}
+
+/* 进度条 4 + 间距 4 + 标题一行 18 = 26，与总数那一行同高：进度块来去时摘要行不变高 */
 .modTask {
   display: flex;
   flex-direction: column;
@@ -453,6 +590,7 @@
   width: 220px;
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
 }
 
 /* 超过 100 行时表格自己虚拟化，必须有确定的可视高度；矮窗口下至少留 360 */
@@ -460,22 +598,95 @@
   max-height: max(360px, 100vh - 260px);
 }
 
-.tableSkeleton {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sk-space-8);
-  padding: var(--sk-space-16) var(--sk-space-18);
+/* 表格卡常驻；空状态与错误不贴边，在卡里补上大号卡片的内边距 */
+.modCardBody {
+  padding: var(--sk-space-22) var(--sk-space-24);
 }
 
+/*
+ * 表格骨架照真表的几何画：表头高加 1px 下边线、同一套列模板与行高、行左内边距 6、单元格左右 12、右侧常驻滚动条槽。
+ * 换成真表时缩略图、文字行与开关都落在原处。
+ */
+.tableSkeleton {
+  overflow: hidden;
+  scrollbar-gutter: stable;
+}
+
+.skeletonHead,
+.skeletonRow {
+  display: grid;
+  grid-template-columns: var(--skeleton-cols);
+  align-items: center;
+  padding-left: var(--sk-space-6);
+}
+
+/* 表头的高不含下边线：真表的下边线画在表头外层，另占 1px */
+.skeletonHead {
+  box-sizing: content-box;
+  height: var(--skeleton-head);
+  border-bottom: 1px solid var(--sk-line);
+  background: var(--sk-surface);
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+  font-weight: var(--sk-w-medium);
+}
+
+.skeletonRow {
+  box-sizing: border-box;
+  height: var(--skeleton-row);
+  border-bottom: 1px solid var(--sk-line);
+}
+
+.skeletonRow:last-of-type {
+  border-bottom: 0;
+}
+
+.skeletonCell {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-12);
+  box-sizing: border-box;
+  min-width: 0;
+  height: 100%;
+  padding: 0 var(--sk-space-12);
+  overflow: hidden;
+}
+
+.skeletonCell[data-align="end"] {
+  justify-content: flex-end;
+}
+
+/* Mod 列的两行：名称一行 22，第二行按说明行 18，与真表的名称加标注同高 */
+.skeletonText {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+  min-width: 0;
+}
+
+.skeletonSub {
+  line-height: var(--sk-lh-caption);
+}
+
+.tableSkeleton > .slowHint {
+  padding: var(--sk-space-12) var(--sk-space-18);
+}
+
+/* 撑满单元格：单元格是横排 flex，不撑开的话它按内容取宽，下面 .modText 的撑满就无处可撑 */
 .modCell {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   gap: var(--sk-space-12);
   min-width: 0;
 }
 
+/* 撑满 .modCell 里缩略图以外的宽度：第二行的宽度不跟着内容走。紧凑档状态标签插拔时第二行定宽，让位才把它当作兄弟换位、滑开后面的标注 */
 .modText {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: var(--sk-space-2);
   min-width: 0;
@@ -526,12 +737,31 @@
   user-select: text;
 }
 
+/*
+ * 版本号在上、更新状态标签在下：整格钉在单元格顶部，不随单元格垂直居中，标签随更新检查晚到时只往下长，版本号不动。
+ * 上边距按最坏的常见情况留：版本号一行、间距、折成两行的「可更新到」标签（真实版本号大多会折成两行）在行内居中，
+ * 行高扣掉 1px 下边线。代价是版本号不再和 Mod 列的名称首行对齐（高出约 9px）：按名称首行对齐时标签下面只剩一行的位置，
+ * 两行标签的底部会被单元格的 overflow: hidden 裁掉。三行以上的标签极少见，从底部裁掉，版本号照样不动。
+ * 标签的行高与上下内边距在这里定义，下方 .updateTag 读同一组变量：留出的高度与标签实际的高度不会各改各的。
+ */
 .versionCell {
+  --update-tag-lh: 1.3;
+  --update-tag-pad: var(--sk-space-2);
   display: flex;
   flex-direction: column;
+  align-self: flex-start;
   align-items: flex-start;
   gap: var(--sk-space-2);
   min-width: 0;
+  padding-top: calc((var(--table-row) - 1px - var(--sk-lh-body) - var(--sk-space-2) - 2 * var(--update-tag-lh) * var(--sk-fs-caption) - 2 * var(--update-tag-pad)) / 2);
+}
+
+/* 行内出入场（状态标签、行内更新按钮）的包裹层：自己是 flex，标签与按钮不落进行盒，高度与不包时相同；不被压窄，长标签照常在格内换行 */
+.appearInline {
+  display: flex;
+  flex: none;
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* 真实版本号又长又没有断点（1.14.2+kotlin.2.4.21），单元格是 overflow: hidden，不让它换行就被静默切掉尾巴 */
@@ -545,8 +775,8 @@
   height: auto;
   min-height: var(--tag-height);
   max-width: 100%;
-  padding-block: var(--sk-space-2);
-  line-height: 1.3;
+  padding-block: var(--update-tag-pad);
+  line-height: var(--update-tag-lh);
   white-space: normal;
   overflow-wrap: anywhere;
 }
@@ -602,17 +832,35 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 定位基准：被剔出的条目淡出时脱离布局，叠在原处淡完 */
 .previewList {
+  position: relative;
   display: flex;
   flex-direction: column;
 }
 
+/*
+ * 条目铺着与弹窗同色的底：展开时下方条目从原位滑下，像幕布一样揭开正在淡入的日志，而不是透明地压在它上面叠出两层字；
+ * 收起时淡出的日志块叠在原处，滑回来的条目把它盖住。条目也是日志块淡出时的定位基准。
+ */
 .previewItem {
-  border-bottom: 1px solid var(--sk-line);
+  position: relative;
+  background: var(--sk-surface);
 }
 
-.previewItem:last-child {
-  border-bottom: 0;
+/*
+ * 分隔线由每个条目画在自己顶上、叠在上一项的最后 1px 上（第一项叠在全选行的下边线上，同色重合），不占布局。
+ * 线跟着条目走：条目淡出时它的线一起淡出，让位滑上来的条目带着自己的线；不按首项、末项特判，
+ * 也就没有「末项正在退场时新末项还带着线、退场节点一移除线就瞬间消失」的 1px 闪变。
+ */
+.previewItem::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  right: 0;
+  left: 0;
+  height: 1px;
+  background: var(--sk-line);
 }
 
 .previewRow {
@@ -705,6 +953,11 @@
   background: var(--sk-bg-2);
 }
 
+/* 内存卡骨架里的「跟随全局」框：外框与行高照真实的来，底色去掉，同色的骨架条才看得见 */
+.followSkeleton {
+  background: none;
+}
+
 .followText {
   display: flex;
   flex: 1 1 auto;
@@ -759,6 +1012,28 @@
   width: 220px;
 }
 
+/* 默认设置一行的第二行：读取中、没存过、存过都占一行高 */
+.templateLine {
+  min-height: var(--sk-lh-small);
+}
+
+/*
+ * 补全、重装加载器按钮的文案槽：当前文案与伪元素里的另一条上下叠放，宽取较宽的一条；伪元素高为 0、不可见，
+ * 只撑宽。当前文案在槽里居中，与按钮原本的居中一致
+ */
+.swapLabel {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.swapLabel::after {
+  content: attr(data-reserve);
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+}
+
 .dangerZone {
   display: flex;
   align-items: center;
@@ -807,6 +1082,52 @@
   height: 100%;
 }
 
+/* 控制台卡里加载占位与内容那两层：撑满卡片给定的高度，控制台的日志区据此分高 */
+.consoleFill {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 控制台卡里不是日志的几种内容（读不出、没记下输出、从没启动过）：卡片恒为无内边距，内边距在这一层补上，与普通卡片相同 */
+.consolePad {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  padding: var(--sk-space-16) var(--sk-space-18);
+}
+
+/* 控制台的加载占位照控制台自己的头部画：同样的内边距、分隔线与筛选行，换成控制台时头部不变高 */
+.consoleSkeletonHead {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--sk-space-10);
+  padding: var(--sk-space-14) var(--sk-space-16) var(--sk-space-12);
+  border-bottom: 1px solid var(--sk-line);
+}
+
+.consoleSkeletonHeader {
+  margin-bottom: 0;
+}
+
+.consoleSkeletonFilters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+/* 日志区的骨架行：与日志行同高（22），左右内边距同日志行 */
+.consoleSkeletonLines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-8);
+  padding: var(--sk-space-8) var(--sk-space-16);
+  line-height: 22px;
+}
+
 .historyCard {
   min-width: 0;
   max-height: max(340px, 100vh - 330px);
@@ -814,6 +1135,13 @@
 
 :root[data-sk-tier="compact"] .historyCard {
   max-height: none;
+}
+
+/* 变更历史卡里加载占位与内容那两层：参与卡片的纵向分高，时间线超出卡片最大高度时在里面的滚动区滚动 */
+.historyBody {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .timelineScroll {
@@ -970,15 +1298,22 @@
 
 /* ---------------------------------------------------------------- 崩溃诊断 */
 
+/*
+ * 摘要卡里提示条与摘要的间距用 gap 而不是摘要的上外边距：提示条退场时先脱离布局（绝对定位）再淡出，
+ * 脱离的那一帧间距就随它一起让出，摘要一次滑到位；靠 :first-child 判断的外边距要等它淡完从文档拿掉才收回，会再跳一下
+ */
+.summaryBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-14);
+  min-width: 0;
+}
+
 .crashHead {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
   gap: var(--sk-space-18);
-}
-
-.crashHead:not(:first-child) {
-  margin-top: var(--sk-space-14);
 }
 
 .crashText {
@@ -1104,10 +1439,24 @@
   border-radius: var(--sk-r-sm);
   background: var(--sk-bg-2);
   color: var(--sk-text-2);
+  transition: color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .fixIcon[data-done] {
   color: var(--sk-ok);
+}
+
+/* 「查看处理办法」的箭头：同一个朝下的图标，展开时翻转朝上（按钮里唯一的直接子级 svg 就是后置图标） */
+.stepsToggle > svg {
+  transition: rotate var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.stepsToggle[aria-expanded="true"] > svg {
+  rotate: 180deg;
+}
+
+:global([data-sk-reduced]) .stepsToggle > svg {
+  transition: none;
 }
 
 .steps {
@@ -1125,6 +1474,12 @@
   display: flex;
   align-items: center;
   gap: var(--sk-space-6);
+}
+
+/* 「日志指向的 Mod」行标题里随开关出现的「已停用」：外面这层承担弹出的缩放，不被名称挤窄 */
+.tagMark {
+  display: inline-flex;
+  flex: none;
 }
 
 /* 摘要卡里的「参与扫描的文件」与「这次启动时的提醒」：三档都纵向堆叠在文字列里 */

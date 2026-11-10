@@ -1,12 +1,14 @@
-// 通知容器：右下角的通知栈，新的在最下面；弹窗或首次启动向导开着时挪到左上角，给它们的按钮让路，换角时整栈在新角淡入。
+// 通知容器：右下角的通知栈，新的在最下面；弹窗或首次启动向导开着时挪到左上角，给它们的按钮让路。
+// 换角时整栈在新角淡入，旧角留下的一份拷贝原地淡出。
 // 挂在浮层根里，弹窗打开时也看得见（动作此时置灰）。
 // 寿命与暂停由状态容器管，这里只负责摆放与交互：
 // 指针悬停或焦点在栈内时全部暂停计时，离开后恢复；动作经外壳统一执行（先关这条再导航或执行）。
 // 倒计时细线的起点按「截止时刻、暂停剩余」算一次，不随每次重渲染重算：细线自己按剩余时长缩短。
 
 import { AnimatePresence } from "framer-motion";
-import { useLayoutEffect, useRef, useState, type Ref } from "react";
+import { useLayoutEffect, useRef, useState, type Ref, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { fade, tweenAt } from "../lib/motion";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { toastCountdown, type Toast as ToastState } from "../state/toasts";
 import { Toast, type ToastSide } from "../ui/Toast";
@@ -15,6 +17,11 @@ import { useOverlayRoot } from "./overlay";
 import { useShell } from "./shell";
 import styles from "./Toasts.module.css";
 
+/** 样式表给出的落点方向。 */
+function sideOf(style: CSSStyleDeclaration): ToastSide {
+  return style.getPropertyValue("--toast-enter-side").trim() === "-1" ? -1 : 1;
+}
+
 /**
  * 落点写在样式表里，判据是有没有没在退场的弹窗、首次启动向导在不在文档里，脚本不再判断一遍，只读样式表给的方向。
  * 读的是上一次提交之后的文档，所以通知的增删要晚一拍上屏（见 Toasts 里的 shown）。
@@ -22,7 +29,106 @@ import styles from "./Toasts.module.css";
  */
 function slideSide(region: HTMLElement | null): ToastSide {
   if (region === null) return 1;
-  return getComputedStyle(region).getPropertyValue("--toast-enter-side").trim() === "-1" ? -1 : 1;
+  return sideOf(getComputedStyle(region));
+}
+
+/** framer-motion 的 popLayout 把退场项抽出布局时打在它身上的标记。 */
+const POPPED_ATTR = "data-motion-pop-id";
+
+/**
+ * 拷贝里的 CSS 动画（倒计时细线）会从头播：对到原件此刻的进度，细线不在淡出的那一份里跳回起点。
+ * 深拷贝不改结构，两边自身与后代按文档顺序一一对应。
+ */
+function syncAnimations(original: Element, copy: Element): void {
+  const originals = [original, ...original.querySelectorAll("*")];
+  const copies = [copy, ...copy.querySelectorAll("*")];
+  for (const animation of original.getAnimations({ subtree: true })) {
+    if (!(animation instanceof CSSAnimation) || !(animation.effect instanceof KeyframeEffect) || animation.effect.target === null) continue;
+    const twin = copies[originals.indexOf(animation.effect.target)];
+    const mirror = twin.getAnimations().find((a) => a instanceof CSSAnimation && a.animationName === animation.animationName);
+    if (mirror !== undefined) mirror.currentTime = animation.currentTime;
+  }
+}
+
+/**
+ * 换角时旧角那一栈原地淡出。落点由样式表当场切换：容器一步到了新角并在那里淡入（--sk-dur-in 配 --sk-ease-out，即 fade.in），
+ * 旧角那一份由这里补上。切换之后、浏览器画下一帧之前（MutationObserver 的回调在这次任务的末尾跑），
+ * 把容器里此刻看得见的通知拷一份钉在旧角，淡完拿掉。拷贝只是一张会淡出的照片：不可交互、不进读屏。
+ * 能引起换角的只有三种变化：浮层根的直接子项（弹窗层）增删、弹窗层开始退场（data-exiting）、外壳根的直接子项（首次启动向导）增删。
+ * 运行环境不播动画（组件测试的 jsdom，没有 getAnimations）时不拷：拷贝要等它的淡出播完才拿掉。
+ */
+function useCornerHandoff(regionRef: RefObject<HTMLElement | null>, root: HTMLElement | null): void {
+  useLayoutEffect(() => {
+    const region = regionRef.current;
+    if (region === null || root === null || typeof region.getAnimations !== "function") return;
+    const host = root.parentElement;
+    let side = slideSide(region);
+    // 上一次换角的时刻。弹窗异步接力（关一个、隔几拍再开下一个）会连换两次角：第二次时容器在新角的淡入还没走完，
+    // 旧角的拷贝从淡入此刻走到的透明度起淡出，不先闪回全不透明
+    let movedAt = Number.NEGATIVE_INFINITY;
+    const ghosts = new Set<HTMLElement>();
+
+    const handOff = (records: MutationRecord[]) => {
+      if (!records.some((r) => r.type === "attributes" || r.target === root || r.target === host)) return;
+      const style = getComputedStyle(region);
+      const next = sideOf(style);
+      if (next === side) return;
+      const from = side;
+      side = next;
+      const now = performance.now();
+      const shown = tweenAt(fade.in, (now - movedAt) / 1000);
+      movedAt = now;
+
+      // 这一拍才进来的通知旧角从没画过；正在退场的那条已被抽出布局、自己在淡出：都不拷
+      const fresh = new Set(records.flatMap((r) => (r.target === region ? [...r.addedNodes] : [])));
+      const pairs: [Element, Element][] = [];
+      for (const child of region.children) {
+        if (fresh.has(child) || child.hasAttribute(POPPED_ATTR)) continue;
+        const copy = child.cloneNode(true);
+        if (!(copy instanceof Element)) throw new Error("通知的拷贝不是元素");
+        pairs.push([child, copy]);
+      }
+      if (pairs.length === 0) return;
+
+      const ghost = document.createElement("div");
+      ghost.className = styles.ghost;
+      ghost.dataset.corner = from === 1 ? "home" : "aside";
+      ghost.setAttribute("aria-hidden", "true");
+      ghost.setAttribute("inert", "");
+      ghost.style.setProperty("--toasts-width", style.getPropertyValue("--toasts-width"));
+      ghost.style.setProperty("--toasts-ghost-from", String(shown));
+      ghost.append(...pairs.map(([, copy]) => copy));
+      // 拷贝里的 id 与原件重复，引用 id 的属性会对到它身上
+      for (const el of ghost.querySelectorAll("[id]")) el.removeAttribute("id");
+      region.after(ghost);
+      ghosts.add(ghost);
+      for (const [original, copy] of pairs) syncAnimations(original, copy);
+
+      const drop = () => {
+        ghost.remove();
+        ghosts.delete(ghost);
+      };
+      const fadeOut = ghost.getAnimations()[0];
+      if (fadeOut === undefined) {
+        drop();
+        throw new Error("通知栈旧角的拷贝没有淡出动画：样式表里的 .ghost 规则缺了");
+      }
+      fadeOut.finished.then(drop, (error: unknown) => {
+        drop();
+        // 拷贝被提前拿掉（外壳卸载）时淡出随之取消，这是正常收尾；别的错误照常抛出
+        if (!(error instanceof DOMException && error.name === "AbortError")) throw error;
+      });
+    };
+
+    const observer = new MutationObserver(handOff);
+    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-exiting"] });
+    if (host !== null) observer.observe(host, { childList: true });
+    return () => {
+      observer.disconnect();
+      for (const ghost of ghosts) ghost.remove();
+      ghosts.clear();
+    };
+  }, [regionRef, root]);
 }
 
 export function Toasts() {
@@ -40,6 +146,7 @@ export function Toasts() {
   const focusedWithin = useRef(false);
   const regionRef = useRef<HTMLElement>(null);
   const root = useOverlayRoot();
+  useCornerHandoff(regionRef, root);
 
   // 指针与焦点任一在栈内就保持暂停；两者都离开才恢复，免得指针移走时把键盘用户正在读的通知恢复计时
   const sync = () => {
@@ -147,6 +254,7 @@ function ToastItem({ ref, toast, side, layoutDependency, onClose, onUnmount }: T
       body={toast.body}
       side={side}
       layoutDependency={layoutDependency}
+      repeats={toast.repeats}
       action={action === undefined ? undefined : { label: action.label, onClick: () => runToastAction(toast) }}
       onClose={onClose}
       countdown={memo.current.value}

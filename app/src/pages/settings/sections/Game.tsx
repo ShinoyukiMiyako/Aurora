@@ -1,12 +1,16 @@
 // 游戏：全局内存（推荐值全部来自后端的内存建议）、版本隔离档位、游戏目录与其他文件夹、存档备份。
 
-import { useState, type ReactNode } from "react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
+import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import type { InstanceSummary, Settings, WorldBackup } from "../../../domain/adapt";
 import { formatMemory } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
 import { memoryBasis } from "../../../domain/memory";
 import { samePath } from "../../../domain/paths";
 import { autoBackupOutcome } from "../../../domain/rules";
+import { useLoadingGate } from "../../../lib/loading-gate";
+import { fade, insertItem } from "../../../lib/motion";
+import { useReflow } from "../../../lib/reflow";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR, gameDirSwitchReason, GAME_DIR_SWITCH_COPY } from "../../../copy/flows";
@@ -15,12 +19,14 @@ import { useLauncherActions, useLauncherSelector } from "../../../state/launcher
 import { useDiscoveredGameDirectories, useGameDirectories, useMemoryAdvice, type GameDirectoryDto } from "../../../state/queries/catalog";
 import { invalidate } from "../../../state/resource";
 import { gameDirectoryBusy } from "../../../state/selectors";
+import { Appear } from "../../../ui/Appear";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
 import { Card } from "../../../ui/Card";
 import { CardHeader } from "../../../ui/CardHeader";
 import { IconButton } from "../../../ui/IconButton";
 import { CopyButton } from "../../../ui/KV";
+import { Loadable } from "../../../ui/Loadable";
 import { MemorySlider } from "../../../ui/MemorySlider";
 import { Select } from "../../../ui/Select";
 import { SettingRow } from "../../../ui/SettingRow";
@@ -64,6 +70,21 @@ function CustomMemoryLine({ instances }: { instances: readonly InstanceSummary[]
   );
 }
 
+/** 内存滑杆的占位：与没有警示条时的滑杆等高（命中区一行、刻度行、占用说明一行），轨道与读数各在各的位置。 */
+function MemorySliderSkeleton() {
+  return (
+    <div className={s.memorySkeleton}>
+      <span className={s.memorySkeletonTrack}>
+        <Skeleton shape="block" width="100%" height={6} radius="pill" />
+        <Skeleton shape="block" width={40} height={12} radius="xs" />
+      </span>
+      <span className={s.memorySkeletonUsage}>
+        <Skeleton shape="text" width="45%" />
+      </span>
+    </div>
+  );
+}
+
 function MemoryCard() {
   const settings = useLoadedSettings();
   const instances = useLauncherSelector((s) => s.instances);
@@ -73,6 +94,11 @@ function MemoryCard() {
   // 按当前实例的 id 取，不让后端自己去读主页选中了谁：缓存 key 带上实例 id，换当前实例、改名、删除与 Mod 变化
   // 才会随实例作用域的失效一起重取，不会留着上一个实例的估算
   const advice = useMemoryAdvice(selectedInstanceId);
+  // 估算没到时卡片照真实结构排：卡头副标题、开关行常驻，只有说明与滑杆先放等高的占位。读得快时占位不露面，
+  // 读得慢时占位与内容叠放交叉；说明折行数与占位不同、提示条出没时，下面的部分滑过去
+  const gate = useLoadingGate(advice.status === "loading");
+  const stack = useReflow<HTMLDivElement>();
+  const body = useReflow<HTMLDivElement>();
   const memory = settings.memory;
   // 两项写的是同一组内存设置：一项还在写入时改另一项，要带上前一项正在写的值；按读到的旧配置拼整组，
   // 后到的这次就把前一项改回去了（刚关掉的自动分配又被打开，或刚调的最大内存退回原值）
@@ -82,13 +108,23 @@ function MemoryCard() {
   const max: SettingWrite<number> = useSettingWrite(memory.maxMb, MEMORY_COPY.max, (maxMb: number) => actions.updateSettings({ memory: { ...memory, auto: auto.value, maxMb } }));
   const [dragging, setDragging] = useState<number | null>(null);
 
-  if (advice.status === "error") {
-    return (
-      <Card>
-        <CardHeader title={MEMORY_COPY.title} icon="memory" />
-        <SettingRow title={MEMORY_COPY.auto}>
-          <Toggle checked={auto.value} onChange={auto.set} ariaLabel={MEMORY_COPY.auto} disabled />
-        </SettingRow>
+  // 加载门放行之前（含骨架的最短停留）一律按「还没到」画，卡头、说明与滑杆同一刻换成内容
+  const shown = gate.view === "content";
+  const failed = shown && advice.status === "error" ? advice.error : null;
+  const data = shown && advice.status === "ready" ? advice.data : null;
+  // 实例列表里还找不到当前实例时（重扫还没回来），加载器与版本只写组成项看得出来的部分
+  const basis = data === null ? null : memoryBasis(data, data.version_id === null ? null : (instances.find((i) => i.id === data.version_id) ?? null));
+  const manual = dragging === null ? max.value : dragging;
+
+  const description = () => {
+    if (data === null || basis === null) throw new Error("内存建议还没到，写不出自动分配的依据");
+    const current = data.version_id === null ? MEMORY_COPY.noInstance(formatMemory(data.recommended_mb)) : MEMORY_COPY.currentInstance(data.version_id, basis.summary);
+    return MEMORY_COPY.autoDesc(current);
+  };
+
+  const slider = () => {
+    if (failed !== null) {
+      return (
         <Callout
           tone="danger"
           announce
@@ -99,61 +135,64 @@ function MemoryCard() {
           }
         >
           <span className={s.calloutTitle}>{MEMORY_COPY.readFailed}</span>
-          <span className={s.errorText}>{advice.error.message}</span>
+          <span className={s.errorText}>{failed.message}</span>
         </Callout>
-      </Card>
-    );
-  }
-
-  if (advice.status === "loading") {
+      );
+    }
+    if (data === null || basis === null) throw new Error("内存建议还没到，不能画内存滑杆");
     return (
-      <Card>
-        <CardHeader title={MEMORY_COPY.title} icon="memory" />
-        <div className={s.listSkeleton} aria-busy="true">
-          <Skeleton shape="text" lines={2} />
-          <Skeleton shape="block" width="100%" height={56} radius="md" />
-        </div>
-      </Card>
+      <MemorySlider
+        ariaLabel={MEMORY_COPY.max}
+        totalMb={data.total_mb}
+        value={auto.value ? data.recommended_mb : manual}
+        disabled={auto.value}
+        recommended={{ mb: data.recommended_mb, tip: basis.sentence }}
+        notes={[MEMORY_COPY.available(formatMemory(data.available_mb))]}
+        onChange={setDragging}
+        onCommit={(mb) => {
+          setDragging(null);
+          if (mb !== max.value) max.set(mb);
+        }}
+      />
     );
-  }
+  };
 
-  const { total_mb: total, available_mb: available, recommended_mb: recommended, version_id: versionId } = advice.data;
-  // 实例列表里还找不到当前实例时（重扫还没回来），加载器与版本只写组成项看得出来的部分
-  const basis = memoryBasis(advice.data, versionId === null ? null : (instances.find((i) => i.id === versionId) ?? null));
-  const current = versionId === null ? MEMORY_COPY.noInstance(formatMemory(recommended)) : MEMORY_COPY.currentInstance(versionId, basis.summary);
-  const manual = dragging === null ? max.value : dragging;
-  const value = auto.value ? recommended : manual;
   return (
     <Card>
-      <CardHeader title={MEMORY_COPY.title} subtitle={MEMORY_COPY.subtitle(formatMemory(total))} icon="memory" />
-      <SettingRow title={MEMORY_COPY.auto} description={MEMORY_COPY.autoDesc(current)}>
-        <Toggle checked={auto.value} onChange={auto.set} ariaLabel={MEMORY_COPY.auto} />
-      </SettingRow>
-      <div className={s.cardBody}>
-        <MemorySlider
-          ariaLabel={MEMORY_COPY.max}
-          totalMb={total}
-          value={value}
-          disabled={auto.value}
-          recommended={{ mb: recommended, tip: basis.sentence }}
-          notes={[MEMORY_COPY.available(formatMemory(available))]}
-          onChange={setDragging}
-          onCommit={(mb) => {
-            setDragging(null);
-            if (mb !== max.value) max.set(mb);
-          }}
-        />
-        <CustomMemoryLine instances={instances} />
-        {auto.value && basis.cap !== null && (
-          <Callout tone="warn" icon="alert" announce>
-            {MEMORY_BASIS_COPY.capNotice(basis.cap)}
-          </Callout>
-        )}
-        {!auto.value && overAvailable(manual, available, total) && (
-          <Callout tone="warn" icon="alert" announce>
-            {MEMORY_COPY.overAvailable(formatMemory(manual), formatMemory(available))}
-          </Callout>
-        )}
+      <div ref={stack} className={s.slideStack}>
+        <CardHeader title={MEMORY_COPY.title} subtitle={data !== null ? MEMORY_COPY.subtitle(formatMemory(data.total_mb)) : failed !== null ? undefined : null} icon="memory" />
+        <SettingRow
+          title={MEMORY_COPY.auto}
+          description={
+            failed !== null ? undefined : (
+              <Loadable view={gate.view} skeleton={<Skeleton shape="text" lines={2} />}>
+                {description}
+              </Loadable>
+            )
+          }
+        >
+          {/* 开关写的是配置里的值，不等估算：读取期间照常可用；读不到估算时说不清自动分配会给多少，才禁用 */}
+          <Toggle checked={auto.value} onChange={auto.set} ariaLabel={MEMORY_COPY.auto} disabled={failed !== null} />
+        </SettingRow>
+        <div ref={body} className={s.cardBody}>
+          <Loadable view={gate.view} skeleton={<MemorySliderSkeleton />}>
+            {slider}
+          </Loadable>
+          <CustomMemoryLine instances={instances} />
+          {/* 两条提醒同一时刻至多一条；拖动越线、切换自动分配时淡入淡出，卡片里下面没有别的，卡片下沿由分区的让位接住 */}
+          <Appear>
+            {data !== null && basis !== null && auto.value && basis.cap !== null && (
+              <Callout key="cap" tone="warn" icon="alert" announce>
+                {MEMORY_BASIS_COPY.capNotice(basis.cap)}
+              </Callout>
+            )}
+            {data !== null && !auto.value && overAvailable(manual, data.available_mb, data.total_mb) && (
+              <Callout key="over" tone="warn" icon="alert" announce>
+                {MEMORY_COPY.overAvailable(formatMemory(manual), formatMemory(data.available_mb))}
+              </Callout>
+            )}
+          </Appear>
+        </div>
       </div>
     </Card>
   );
@@ -194,6 +233,56 @@ function IsolationCard() {
 
 // ---------------------------------------------------------------- 游戏目录
 
+/** 减少动画时行的进出只留透明度：缩放在减少动画下一步到位，退场会先缩一下再淡出。 */
+const ROW_FADE_ONLY = {
+  initial: { opacity: 0 },
+  animate: { opacity: 1, transition: fade.in },
+  exit: { opacity: 0, transition: fade.out },
+} as const;
+
+interface DirItemProps {
+  /** popLayout 把退场的行抽出布局时要量这一层，由 AnimatePresence 递进来。 */
+  ref?: Ref<HTMLLIElement>;
+  /** 列表挂上之后才出现的行自己播入场；挂载时就在的跟着所在的块走。 */
+  own: boolean;
+  children: ReactNode;
+}
+
+function DirItem({ ref, own, children }: DirItemProps) {
+  const present = useIsPresent();
+  const item = useReducedMotionConfig() === true ? ROW_FADE_ONLY : insertItem;
+  // 退场中的行留在原处淡出，按钮已经点不到、聚焦不到
+  return (
+    <motion.li ref={ref} className={s.dirRow} inert={!present} initial={own ? item.initial : false} animate={item.animate} exit={item.exit}>
+      {children}
+    </motion.li>
+  );
+}
+
+/**
+ * 目录列表：登记、移除一个目录后行在两个列表之间换位置。新来的行淡入落位，走掉的行原地淡出并立即让出位置，
+ * 其余行滑过去。这里的行比通用列表行紧凑，所以不用 ListRow，进出场参数与它相同。
+ */
+function DirList<T extends { path: string }>({ items, children }: { items: readonly T[]; children: (item: T) => ReactNode }) {
+  const reflow = useReflow<HTMLUListElement>();
+  // 不能用 AnimatePresence 的 initial={false} 关掉首屏入场：它会让行里之后才挂载的元素也跳过入场
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
+  return (
+    <ul ref={reflow} className={s.dirList}>
+      <AnimatePresence mode="popLayout">
+        {items.map((item) => (
+          <DirItem key={item.path} own={mounted.current}>
+            {children(item)}
+          </DirItem>
+        ))}
+      </AnimatePresence>
+    </ul>
+  );
+}
+
 function OtherDirectoryRow({ dir, busy }: { dir: GameDirectoryDto; busy: boolean }) {
   const run = useRunner();
   const commands = useSettingsCommands();
@@ -204,7 +293,7 @@ function OtherDirectoryRow({ dir, busy }: { dir: GameDirectoryDto; busy: boolean
       invalidate("game-dirs");
     }, GAME_DIR_COPY.removeFailed);
   return (
-    <li className={s.dirRow}>
+    <>
       <span className={s.dirText}>
         <span className={s.dirName}>
           {dir.name}
@@ -226,51 +315,56 @@ function OtherDirectoryRow({ dir, busy }: { dir: GameDirectoryDto; busy: boolean
       <Button size="sm" variant="ghost" onClick={remove}>
         {GAME_DIR_COPY.remove}
       </Button>
-    </li>
+    </>
   );
 }
 
-function DiscoveredBlock({ known, current }: { known: readonly GameDirectoryDto[]; current: string }) {
+/**
+ * 探测到、还没登记的文件夹。探测往往比已登记的目录晚回来，且多数机器上没有：不预留位置，
+ * 结果到了整块淡入，下面的数据目录行与卡片滑下去。known 为 null 时已登记的目录还没读到，分不出哪些是新的，先不出。
+ * 常驻挂载：块挂上时就有的结果跟着页面走，之后到的才播入场。
+ */
+function DiscoveredBlock({ known, current }: { known: readonly GameDirectoryDto[] | null; current: string }) {
   const discovered = useDiscoveredGameDirectories();
   const run = useRunner();
   const commands = useSettingsCommands();
-  if (discovered.status === "loading") return null;
-  if (discovered.status === "error") {
-    return (
-      <Callout tone="danger" announce fullText>
-        <span className={s.calloutTitle}>{GAME_DIR_COPY.discoverFailed}</span>
-        <span className={s.errorText}>{discovered.error.message}</span>
-      </Callout>
-    );
-  }
-  const fresh = unrecorded(discovered.data, known, current);
-  if (fresh.length === 0) return null;
+  const fresh = known !== null && discovered.status === "ready" ? unrecorded(discovered.data, known, current) : [];
   return (
-    <div className={s.discovered}>
-      <span className={s.subheading}>{GAME_DIR_COPY.discoveredTitle}</span>
-      <ul className={s.dirList}>
-        {fresh.map((d) => (
-          <li key={d.path} className={s.dirRow}>
-            <span className={s.dirText}>
-              <span className={s.dirName}>{d.name}</span>
-              <span className={s.dirPath}>{d.path}</span>
-            </span>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() =>
-                void run(async () => {
-                  await commands.addGameDirectory(d.name, d.path);
-                  invalidate("game-dirs");
-                }, GAME_DIR_COPY.addFailed)
-              }
-            >
-              {GAME_DIR_COPY.add}
-            </Button>
-          </li>
-        ))}
-      </ul>
-    </div>
+    <Appear>
+      {known !== null && discovered.status === "error" && (
+        <Callout key="discover-error" tone="danger" announce fullText>
+          <span className={s.calloutTitle}>{GAME_DIR_COPY.discoverFailed}</span>
+          <span className={s.errorText}>{discovered.error.message}</span>
+        </Callout>
+      )}
+      {fresh.length > 0 && (
+        <div key="discovered" className={s.discovered}>
+          <span className={s.subheading}>{GAME_DIR_COPY.discoveredTitle}</span>
+          <DirList items={fresh}>
+            {(d) => (
+              <>
+                <span className={s.dirText}>
+                  <span className={s.dirName}>{d.name}</span>
+                  <span className={s.dirPath}>{d.path}</span>
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() =>
+                    void run(async () => {
+                      await commands.addGameDirectory(d.name, d.path);
+                      invalidate("game-dirs");
+                    }, GAME_DIR_COPY.addFailed)
+                  }
+                >
+                  {GAME_DIR_COPY.add}
+                </Button>
+              </>
+            )}
+          </DirList>
+        </div>
+      )}
+    </Appear>
   );
 }
 
@@ -293,70 +387,76 @@ function GameDirectoryCard() {
     }, GAME_DIR_COPY.pickFailed);
 
   const others = dirs.status === "ready" ? dirs.data.filter((d) => !d.is_current && !samePath(d.path, settings.gameDir)) : [];
+  // 其他文件夹的个数由本机决定、多数为 0：不放推测高度的骨架（读完多半要塌掉），列表与探测结果各自到了再淡入，
+  // 子区与数据目录行经让位滑开。首次探测期间「重新探测」照样转圈，看得出还在找
+  const stack = useReflow<HTMLDivElement>();
+  const subsection = useReflow<HTMLDivElement>();
 
   return (
     <Card>
       <CardHeader title={GAME_DIR_COPY.title} subtitle={GAME_DIR_COPY.subtitle} icon="folder" />
-      <div className={s.pathRow}>
-        <span className={s.pathBox} title={settings.gameDir}>
-          {settings.gameDir}
-        </span>
-        <CopyButton text={settings.gameDir} label={GAME_DIR_COPY.copyPath} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
-        <IconButton
-          icon="folder"
-          variant="secondary"
-          label={GAME_DIR_COPY.openFolder}
-          onClick={() => void run(() => actions.openFolder("game_dir"), ACTION_ERROR.openFolder)}
-        />
-        <Button icon="edit" disabledReason={busy ? GAME_DIR_SWITCH_COPY.busyReason : undefined} onClick={change}>
-          {GAME_DIR_COPY.change}
-        </Button>
-      </div>
-
-      <div className={s.subsection}>
-        <div className={s.subsectionHead}>
-          <span className={s.subsectionText}>
-            <span className={s.subheading}>{GAME_DIR_COPY.othersTitle}</span>
-            <span className={s.mutedText}>{GAME_DIR_COPY.othersDesc}</span>
+      <div ref={stack} className={s.slideStack}>
+        <div className={s.pathRow}>
+          <span className={s.pathBox} title={settings.gameDir}>
+            {settings.gameDir}
           </span>
-          <Button size="sm" icon="refresh" loading={discovered.refreshing} onClick={() => discovered.reload()}>
-            {GAME_DIR_COPY.rediscover}
+          <CopyButton text={settings.gameDir} label={GAME_DIR_COPY.copyPath} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
+          <IconButton
+            icon="folder"
+            variant="secondary"
+            label={GAME_DIR_COPY.openFolder}
+            onClick={() => void run(() => actions.openFolder("game_dir"), ACTION_ERROR.openFolder)}
+          />
+          <Button icon="edit" disabledReason={busy ? GAME_DIR_SWITCH_COPY.busyReason : undefined} onClick={change}>
+            {GAME_DIR_COPY.change}
           </Button>
         </div>
-        {dirs.status === "error" && (
-          <Callout
-            tone="danger"
-            announce
-            action={
-              <Button size="sm" onClick={() => dirs.reload()}>
-                {LOAD_COPY.retry}
-              </Button>
-            }
-          >
-            <span className={s.calloutTitle}>{GAME_DIR_COPY.dirsFailed}</span>
-            <span className={s.errorText}>{dirs.error.message}</span>
-          </Callout>
-        )}
-        {dirs.status === "loading" && <Skeleton shape="block" width="100%" height={52} radius="md" />}
-        {others.length > 0 && (
-          <ul className={s.dirList}>
-            {others.map((d) => (
-              <OtherDirectoryRow key={d.path} dir={d} busy={busy} />
-            ))}
-          </ul>
-        )}
-        {dirs.status === "ready" && <DiscoveredBlock known={dirs.data} current={settings.gameDir} />}
-      </div>
 
-      <div className={s.dataDirRow}>
-        <span>{GAME_DIR_COPY.dataDir}</span>
-        <span className={s.dataDirPath}>{settings.dataDir}</span>
-        <IconButton
-          icon="folder"
-          size="sm"
-          label={GAME_DIR_COPY.openFolder}
-          onClick={() => void run(() => commands.openDataDirectory(), ACTION_ERROR.openFolder)}
-        />
+        <div ref={subsection} className={s.subsection}>
+          <div className={s.subsectionHead}>
+            <span className={s.subsectionText}>
+              <span className={s.subheading}>{GAME_DIR_COPY.othersTitle}</span>
+              <span className={s.mutedText}>{GAME_DIR_COPY.othersDesc}</span>
+            </span>
+            <Button size="sm" icon="refresh" loading={discovered.status === "loading" || discovered.refreshing} onClick={() => discovered.reload()}>
+              {GAME_DIR_COPY.rediscover}
+            </Button>
+          </div>
+          <Appear>
+            {dirs.status === "error" && (
+              <Callout
+                key="dirs-error"
+                tone="danger"
+                announce
+                action={
+                  <Button size="sm" onClick={() => dirs.reload()}>
+                    {LOAD_COPY.retry}
+                  </Button>
+                }
+              >
+                <span className={s.calloutTitle}>{GAME_DIR_COPY.dirsFailed}</span>
+                <span className={s.errorText}>{dirs.error.message}</span>
+              </Callout>
+            )}
+            {others.length > 0 && (
+              <DirList key="others" items={others}>
+                {(d) => <OtherDirectoryRow dir={d} busy={busy} />}
+              </DirList>
+            )}
+          </Appear>
+          <DiscoveredBlock known={dirs.status === "ready" ? dirs.data : null} current={settings.gameDir} />
+        </div>
+
+        <div className={s.dataDirRow}>
+          <span>{GAME_DIR_COPY.dataDir}</span>
+          <span className={s.dataDirPath}>{settings.dataDir}</span>
+          <IconButton
+            icon="folder"
+            size="sm"
+            label={GAME_DIR_COPY.openFolder}
+            onClick={() => void run(() => commands.openDataDirectory(), ACTION_ERROR.openFolder)}
+          />
+        </div>
       </div>
     </Card>
   );
@@ -394,57 +494,69 @@ function WorldBackupCard() {
   const total = useSettingWrite(committed.maxTotalGb, c.total, (value: number) => write({ maxTotalGb: value }));
   shown = { auto: auto.value, keepPerWorld: keep.value, maxTotalGb: total.value };
   const pruneReason = auto.value ? undefined : c.pruneOff;
+  // 「不会备份」那一行只在少数组合下出现，不预留：它淡入淡出，下面两行滑开
+  const rows = useReflow<HTMLDivElement>();
   return (
     <Card>
       <CardHeader title={c.title} subtitle={c.subtitle} icon="archive" />
-      <SettingRow
-        title={c.auto}
-        description={
-          <>
-            {c.autoDesc}
-            {autoBackupOutcome(settings.afterLaunch, auto.value) === "skipped" && <span className={s.descNote}>{AUTO_BACKUP_SKIPPED_NOTE}</span>}
-          </>
-        }
-      >
-        <Toggle checked={auto.value} onChange={auto.set} ariaLabel={c.auto} />
-      </SettingRow>
-      <SettingRow title={c.keep} description={c.keepDesc}>
-        <ReasonHost reason={pruneReason}>
-          <Select<string>
-            className={s.select}
-            size="sm"
-            ariaLabel={c.keep}
-            value={String(keep.value)}
-            disabled={!auto.value}
-            onChange={(value) => keep.set(Number(value))}
-            options={countOptions(KEEP_PER_WORLD_OPTIONS, keep.value, c.keepOption)}
-          />
-        </ReasonHost>
-      </SettingRow>
-      <SettingRow title={c.total} description={c.totalDesc}>
-        <ReasonHost reason={pruneReason}>
-          <Select<string>
-            className={s.select}
-            size="sm"
-            ariaLabel={c.total}
-            value={String(total.value)}
-            disabled={!auto.value}
-            onChange={(value) => total.set(Number(value))}
-            options={countOptions(MAX_TOTAL_GB_OPTIONS, total.value, c.totalOption)}
-          />
-        </ReasonHost>
-      </SettingRow>
+      <div ref={rows} className={s.slideStack}>
+        <SettingRow
+          title={c.auto}
+          description={
+            <>
+              {c.autoDesc}
+              <Appear>
+                {autoBackupOutcome(settings.afterLaunch, auto.value) === "skipped" && (
+                  <span key="skipped" className={s.descNote}>
+                    {AUTO_BACKUP_SKIPPED_NOTE}
+                  </span>
+                )}
+              </Appear>
+            </>
+          }
+        >
+          <Toggle checked={auto.value} onChange={auto.set} ariaLabel={c.auto} />
+        </SettingRow>
+        <SettingRow title={c.keep} description={c.keepDesc}>
+          <ReasonHost reason={pruneReason}>
+            <Select<string>
+              className={s.select}
+              size="sm"
+              ariaLabel={c.keep}
+              value={String(keep.value)}
+              disabled={!auto.value}
+              onChange={(value) => keep.set(Number(value))}
+              options={countOptions(KEEP_PER_WORLD_OPTIONS, keep.value, c.keepOption)}
+            />
+          </ReasonHost>
+        </SettingRow>
+        <SettingRow title={c.total} description={c.totalDesc}>
+          <ReasonHost reason={pruneReason}>
+            <Select<string>
+              className={s.select}
+              size="sm"
+              ariaLabel={c.total}
+              value={String(total.value)}
+              disabled={!auto.value}
+              onChange={(value) => total.set(Number(value))}
+              options={countOptions(MAX_TOTAL_GB_OPTIONS, total.value, c.totalOption)}
+            />
+          </ReasonHost>
+        </SettingRow>
+      </div>
     </Card>
   );
 }
 
 export function GameSection() {
+  // 卡片之间互相让位：内存估算、目录列表晚到或提示出没时卡片变高，下面的卡片滑过去而不是一帧跳下去
+  const reflow = useReflow<HTMLDivElement>();
   return (
-    <>
+    <div ref={reflow} className={s.sectionStack}>
       <MemoryCard />
       <IsolationCard />
       <GameDirectoryCard />
       <WorldBackupCard />
-    </>
+    </div>
   );
 }

@@ -38,12 +38,12 @@ export function useScrollContainer(ref: RefObject<HTMLElement | null>): HTMLElem
 
 /**
  * 哨兵元素进入（滚动容器底边外扩 margin 的）范围时为 true。用于滚到底部附近时预取下一页。
+ * 哨兵按元素传（回调 ref 存进 state）：列表尾随结果整块换上来时是新的节点，观察要跟着换过去，不能盯着已经摘下的旧节点。
  */
-export function useNearBottom(sentinel: RefObject<Element | null>, container: HTMLElement | null, marginPx: number, enabled: boolean): boolean {
+export function useNearBottom(sentinel: Element | null, container: HTMLElement | null, marginPx: number, enabled: boolean): boolean {
   const [near, setNear] = useState(false);
   useEffect(() => {
-    const el = sentinel.current;
-    if (!enabled || container === null || el === null) {
+    if (!enabled || container === null || sentinel === null) {
       setNear(false);
       return;
     }
@@ -52,10 +52,20 @@ export function useNearBottom(sentinel: RefObject<Element | null>, container: HT
       root,
       rootMargin: `0px 0px ${marginPx}px 0px`,
     });
-    observer.observe(el);
+    observer.observe(sentinel);
     return () => observer.disconnect();
   }, [sentinel, container, marginPx, enabled]);
   return near;
+}
+
+/**
+ * 换了一组搜索条件：结果区顶边（贴在那里的哨兵）已滚出容器顶边时，瞬时滚回它，新结果从头看起。
+ * 吸顶工具条吸住时与滚回后都贴在容器顶上，看起来停在原处。不平滑滚动：下面的内容整块换了，滑过去只是多看一段要被换掉的旧内容。
+ */
+export function revealTop(sentinel: Element, container: HTMLElement): void {
+  const rootTop = container === document.scrollingElement ? 0 : container.getBoundingClientRect().top;
+  const above = sentinel.getBoundingClientRect().top - rootTop;
+  if (above < 0) container.scrollTop += above;
 }
 
 /** 吸顶判定：放在吸顶元素正上方的哨兵滚出容器顶边时为 true。 */

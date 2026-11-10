@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { springs } from "../../lib/motion";
 import { branchSway } from "./Toolbar";
 
 describe("branchSway", () => {
+  it("上浮与落回都走 settle，与卡片悬停同一条弹簧", () => {
+    const { rest, hover } = branchSway(1) as Record<"rest" | "hover", { transition: unknown }>;
+    expect(rest.transition).toBe(springs.settle);
+    expect(hover.transition).toBe(springs.settle);
+  });
+
   // 缩放比、上浮的设备像素：2 × dpr 四舍五入
   it.each([
     [1, 2],

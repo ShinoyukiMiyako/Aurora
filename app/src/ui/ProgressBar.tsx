@@ -6,7 +6,7 @@
 // 一屏几十行排队任务各带一条循环光带，同屏循环动画数会失控。
 
 import { motion, useReducedMotionConfig, useSpring, useTransform, type MotionValue, type SpringOptions } from "framer-motion";
-import { useLayoutEffect, useRef, type HTMLAttributes } from "react";
+import { useEffect, useRef, type HTMLAttributes } from "react";
 import { springs } from "../lib/motion";
 import { clamp, cx } from "../lib/util";
 import styles from "./ProgressBar.module.css";
@@ -59,7 +59,10 @@ export function useSmoothProgress(value: number, track?: string): { smooth: Moti
   const next = nextProgressTarget(state.current, track, value);
   const smooth = useSpring(next.target, springs.settle as SpringOptions);
 
-  useLayoutEffect(() => {
+  // 提交之后再推目标，不放在布局 effect 里：调用方都在同一组件里接着用 useTransform 由它派生位移与文字，
+  // useTransform 每次渲染都在布局阶段先退订、再按 hook 顺序重订（framer-motion 的 useCombineMotionValues）。
+  // 在这里 jump 正好落在退订与重订之间，没人收到：减少动画下显示总慢一次上报，换了标识后停在上一个任务的进度上
+  useEffect(() => {
     if (state.current === null) throw new Error("进度平滑状态在挂载前丢失");
     const step = nextProgressTarget(state.current, track, value);
     state.current = { track: step.track, target: step.target };

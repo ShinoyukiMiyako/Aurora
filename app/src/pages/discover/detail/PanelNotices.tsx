@@ -1,5 +1,12 @@
 // 安装面板上的提醒：这一步至多一条说明块，第一条用说明块，其余写成行。排序（重的在前）由面板决定。
+//
+// 提醒多是晚到的（矩阵、Iris、整合包清单读取失败）：面板挂上之后才出现的那条淡入并从略小处落到位，
+// 下面的目标列表、清单由面板的让位滑下去。撤下时同帧移除，空出的位置同样由让位接住：撤下的提醒不留在文档里淡出，
+// 重试、读到清单之后它就不该再被读到、点到。挂载时就在的跟着弹窗入场，不单独淡入。
 
+import { motion, useReducedMotionConfig } from "framer-motion";
+import { useEffect, useRef, useState } from "react";
+import { fade, insertItem } from "../../../lib/motion";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
 import { WarnNote } from "../../../ui/WarnNote";
@@ -35,19 +42,33 @@ function noticeButton(notice: PanelNotice) {
   );
 }
 
-export function PanelNotices({ notices }: { notices: readonly PanelNotice[] }) {
-  const [lead, ...others] = notices;
-  if (lead === undefined) return null;
+/** 减少动画时只淡入：缩放在减少动画下是一步到位的。 */
+const FADE_IN = { initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in } } as const;
+
+function NoticeItem({ notice, lead, own }: { notice: PanelNotice; lead: boolean; own: boolean }) {
+  const reduced = useReducedMotionConfig() === true;
+  // 只在挂载那一刻定下要不要入场：排到第一条、换成说明块时不重播
+  const [enter] = useState(own);
+  const motionProps = reduced ? FADE_IN : insertItem;
   return (
-    <>
-      <Callout tone={lead.tone} action={noticeButton(lead)}>
-        <NoticeText notice={lead} />
-      </Callout>
-      {others.map((notice) => (
-        <WarnNote key={notice.key} action={noticeButton(notice)}>
+    <motion.div initial={enter ? motionProps.initial : false} animate={motionProps.animate}>
+      {lead ? (
+        <Callout tone={notice.tone} action={noticeButton(notice)}>
+          <NoticeText notice={notice} />
+        </Callout>
+      ) : (
+        <WarnNote action={noticeButton(notice)}>
           <NoticeText notice={notice} />
         </WarnNote>
-      ))}
-    </>
+      )}
+    </motion.div>
   );
+}
+
+export function PanelNotices({ notices }: { notices: readonly PanelNotice[] }) {
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
+  return notices.map((notice, i) => <NoticeItem key={notice.key} notice={notice} lead={i === 0} own={mounted.current} />);
 }

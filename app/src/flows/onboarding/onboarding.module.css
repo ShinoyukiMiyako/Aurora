@@ -79,7 +79,9 @@
   text-align: left;
   outline: none;
   cursor: pointer;
-  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .railItem:disabled {
@@ -95,6 +97,8 @@
 }
 
 .railDot {
+  position: relative;
+  isolation: isolate;
   display: grid;
   flex: none;
   place-items: center;
@@ -106,6 +110,21 @@
   font-size: var(--sk-fs-caption);
   font-weight: var(--sk-w-medium);
   font-variant-numeric: tabular-nums;
+  transition:
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+/* 当前步的渐变底放在叠层上淡入淡出：渐变本身不能过渡，直接换底色会一帧跳变。盖住描边，与原来去掉描边的样子一致 */
+.railDot::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--sk-accent-grad);
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
 }
 
 .railItem[data-status="current"] {
@@ -114,8 +133,12 @@
 
 .railItem[data-status="current"] .railDot {
   border-color: transparent;
-  background: var(--sk-accent-grad);
   color: var(--sk-accent-ink);
+}
+
+.railItem[data-status="current"] .railDot::before {
+  opacity: 1;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
 }
 
 .railItem[data-status="done"] {
@@ -132,10 +155,18 @@
   font-weight: var(--sk-w-medium);
 }
 
+/* 跳过那一步时才挂上：淡入，不一帧冒出来（在行尾，不挤别的内容） */
 .railSkipped {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
   color: var(--sk-text-2);
+  animation: railTagIn var(--sk-dur-in) var(--sk-ease-out);
+}
+
+@keyframes railTagIn {
+  from {
+    opacity: 0;
+  }
 }
 
 /* ---------------------------------------------------------------- 右栏：标题、步骤内容、底栏 */
@@ -201,10 +232,16 @@
   color: var(--sk-text-2);
 }
 
+/*
+ * 步骤内容在停留期间会从不溢出变成溢出（提示晚到、文件夹列表变长、登录后多出账户区）：滚动条槽常驻，
+ * 出现滚动条时内容不收窄。槽伸进右栏的右内边距里，内容右缘仍与标题、底栏对齐。
+ */
 .scroll {
   flex: 1;
   min-height: 0;
+  margin-right: calc(-1 * var(--sk-scrollbar-size));
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .footer {
@@ -216,16 +253,33 @@
   border-top: 1px solid var(--sk-line);
 }
 
+/* 定位基准：退场中的按钮脱离布局后按这里定位，原地淡出 */
 .footerStart,
 .footerEnd {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sk-space-8);
 }
 
+/* 按钮外的出没包裹层：弹性盒让按钮不落在行框里，包裹层与按钮同高 */
+.footerItem {
+  display: flex;
+}
+
+/*
+ * 主按钮按最宽的「开始使用 →」定宽（ui/Button md 档：四个汉字、左右内边距、图标间距、18 的图标、两侧 1px 描边）：
+ * 第三步换到第四步、点下后转圈时宽度都不变，左边的「跳过」不被推走。两个类名：压过 Button 自己的 min-width。
+ */
+.footerEnd .primaryAction {
+  min-width: calc(4em + 2 * var(--sk-space-14) + var(--sk-space-8) - 1px + 18px + 2px);
+}
+
 /* ---------------------------------------------------------------- 步骤内容 */
 
+/* 定位基准：退场中的块脱离布局后按这里定位，跟着内容滚动、被内容区裁切，不受换步横移的影响 */
 .stepBody {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-14);
@@ -276,6 +330,12 @@
   font-family: var(--sk-mono);
 }
 
+/* 「用回默认位置」的出没包裹层：与按钮同宽同高，入场的缩放以按钮为中心，不从整行的中点缩 */
+.useDefault {
+  display: flex;
+  align-self: flex-start;
+}
+
 .others {
   display: flex;
   flex-direction: column;
@@ -297,7 +357,9 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 定位基准：删掉的那一行脱离布局后按列表定位，原地淡出 */
 .extraList {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-6);
@@ -333,6 +395,20 @@
   color: var(--sk-text-2);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 文件夹卡的骨架：方框加名称、路径两行，行高沿用上面两条，卡高与真实的一致 */
+.extraSkeleton {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+.extraSkeletonText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
 }
 
 .noneBlock {
@@ -395,6 +471,20 @@
   gap: var(--sk-space-8);
 }
 
+/*
+ * 标题行按「继续添加」（sm 按钮 30 高）定高：按钮点掉后行高不从 30 落到 20，下面的胶囊不上移。
+ * 同时是定位基准：按钮脱离布局后按这里原地淡出。
+ */
+.added > .othersHead {
+  position: relative;
+  min-height: 30px;
+}
+
+/* 「继续添加」的出没包裹层：弹性盒让按钮不落在行框里，包裹层与按钮同高 */
+.addMore {
+  display: flex;
+}
+
 .accountChips {
   display: flex;
   flex-wrap: wrap;
@@ -450,11 +540,25 @@
   text-align: left;
   outline: none;
   cursor: pointer;
-  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+  transition:
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap);
 }
 
 .loginOption:hover:not(:disabled) {
   border-color: var(--sk-accent-line);
+}
+
+/* 按压与其他可点卡片一致：按下缩到 0.99，松开回弹，都走 tap 弹簧 */
+.loginOption:active:not(:disabled) {
+  scale: 0.99;
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .loginOption:active:not(:disabled) {
+  scale: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 .loginOption:focus-visible {

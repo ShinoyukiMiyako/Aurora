@@ -9,7 +9,7 @@ import { keydown, render, stubResizeObserver, waitForFrames, type Rendered, type
 import { Card } from "./Card";
 import { Page, PageArrivalProvider } from "./Page";
 import { SEGMENT_THUMB_RADIUS, SegmentedControl, type SegmentOption } from "./SegmentedControl";
-import { INDICATOR_RADIUS, TabPanel, Tabs, type TabItem } from "./Tabs";
+import { INDICATOR_RADIUS, TabPanel, Tabs, tabDomId, type TabItem } from "./Tabs";
 
 let view: Rendered | undefined;
 let observers: ResizeObserverStub;
@@ -187,6 +187,18 @@ describe("Tabs", () => {
     view.rerender(<Badged badge={<b>实时</b>} />);
     expect(wrapperOf("实时").style.opacity).toBe("0");
     await waitForFrames(() => expect(wrapperOf("实时").style.opacity).toBe("1"));
+  });
+
+  it("徽标传空串或布尔值时不包徽标层（空层也会吃掉内容间距、撑宽标签）；数字 0 照常显示", () => {
+    const items: TabItem<Section>[] = SECTIONS.map((s) =>
+      s.value === "mods" ? { ...s, badge: "" } : s.value === "logs" ? { ...s, badge: true } : s.value === "crash" ? { ...s, badge: 0 } : s.value === "overview" ? { ...s, badge: false } : s,
+    );
+    view = render(<Tabs id="e" value="overview" items={items} ariaLabel="实例详情" onChange={() => undefined} />);
+    const layersOf = (value: Section) => [...(document.getElementById(tabDomId("e", value)) as HTMLElement).querySelectorAll('span[class*="badge"]')].map((el) => el.textContent);
+    expect(layersOf("overview")).toEqual([]);
+    expect(layersOf("mods")).toEqual([]);
+    expect(layersOf("logs")).toEqual([]);
+    expect(layersOf("crash")).toEqual(["0"]);
   });
 });
 

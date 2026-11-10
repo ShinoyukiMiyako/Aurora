@@ -13,14 +13,22 @@ export const SKELETON_SIZE = {
   greetName: 30,
   /** sm 标签高。 */
   tagSm: 18,
+  /** 大卡左上角「继续游玩」标签的宽：sm 标签左右各 6、12 号图标、间距 4、四个 12 号字。 */
+  continueTag: 76,
+  /** sm 按钮高。 */
+  buttonSm: 30,
+  /** 大卡右上角「换一个」的宽：sm 按钮带左右图标、三个 13 号字。 */
+  switchButton: 104,
   /** 继续游玩大卡的实例名：hero 字阶行高。 */
   heroName: 34,
+  /** 同上，wide 档改用 display 字阶的行高。 */
+  heroNameWide: 38,
   /** lg 启动胶囊高。 */
   capsule: CAPSULE_HEIGHT.lg,
   /** 最近游玩卡的头像。 */
   recentAvatar: 40,
   /** 资讯与服务器行的缩略图。 */
   rowThumb: 40,
-  /** 数据块的数值：title 字阶。 */
-  statValue: 28,
+  /** 数据块数值的骨架条：title 字号；所在行与 StatTile 数值行同高（字号的 1.15 倍），条比行矮，上下各留一点。 */
+  statValue: 24,
 } as const;

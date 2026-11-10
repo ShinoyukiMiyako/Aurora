@@ -3,28 +3,32 @@
 // 头图与标签条只用实例列表里的摘要先画出来，五个标签各自加载，任何一个都不等其他标签的数据。
 // 新建、导入还没装好时标签内容换成安装说明（见 InstallStage），装好、扫到实例后自动换回。
 
-import { useEffect, useId, useState } from "react";
+import { motion } from "framer-motion";
+import { useEffect, useId, useRef, useState } from "react";
+import { fade } from "../../lib/motion";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector } from "../../state/launcher";
 import { useLastCrash, useModUpdates } from "../../state/queries/instance";
 import type { InstanceTab, PageProps } from "../../state/route";
 import { getInstance } from "../../state/selectors";
 import { Badge } from "../../ui/Badge";
-import { Page } from "../../ui/Page";
+import { EntranceBlock, NAV_ANCHOR_ATTR, Page } from "../../ui/Page";
 import { TabPanel, Tabs, type TabItem } from "../../ui/Tabs";
 import { Tag } from "../../ui/Tag";
 import { INSTANCE_TAB_LABEL } from "../../copy/flows";
 import { launchView } from "../../launch/launchView";
+import { useMounted } from "../../lib/useMounted";
 import { CrashTab } from "./CrashTab";
 import { PAGE_COPY } from "./copy";
 import { Hero } from "./Hero";
 import { InstallStageTab } from "./InstallStage";
 import styles from "./instance.module.css";
 import { LogsTab } from "./LogsTab";
-import { creationRef, creationRefEqual, installStage, isCrashActive, pageViewEqual } from "./model";
+import { creationRef, creationRefEqual, installStage, isCrashActive, pageViewEqual, tabStep } from "./model";
 import { ModsTab } from "./ModsTab";
 import { useInstanceOps } from "./ops";
 import { OverviewTab } from "./OverviewTab";
+import { CHIP_MOTION } from "./parts";
 import { SettingsTab } from "./SettingsTab";
 
 const TAB_ICON = {
@@ -59,18 +63,37 @@ export default function InstancePage({ route }: PageProps<"instance">) {
   const crashAt = inst.lastCrashAt === null ? reportAt : reportAt === null ? inst.lastCrashAt : Math.max(inst.lastCrashAt, reportAt);
   const crashActive = isCrashActive(crashAt, inst.lastPlayedAt, view.kind);
   const live = view.kind === "loading" || view.kind === "running";
+  const mounted = useMounted();
+
+  // 换标签时新面板从标签条上所在的那一侧进来：按新旧标签的先后定方向，渲染期间换算，面板挂载时就读到
+  const [shownTab, setShownTab] = useState(route.tab);
+  const [panelDir, setPanelDir] = useState<1 | -1>(1);
+  if (route.tab !== shownTab) {
+    setShownTab(route.tab);
+    setPanelDir(tabStep(TAB_ORDER, shownTab, route.tab));
+  }
+
+  // 新建、导入装好、标签内容第一次换成正常内容的那一刻：新内容淡入，不在同一帧硬切。之后换标签只走面板自己的切换
+  const stageWas = useRef(stage.kind);
+  const landed = stageWas.current !== "none" && stage.kind === "none";
+  useEffect(() => {
+    stageWas.current = stage.kind;
+  });
 
   const onTab = (tab: InstanceTab) => replace({ page: "instance", id: inst.id, tab });
 
   const badgeOf = (tab: InstanceTab) => {
     if (tab === "mods" && modded) {
+      // 计数换成「N 更新」时那一格换了一件事：新标签弹出来；标签变宽挤开的后面几个标签由标签条的让位滑过去
       if (updates.status === "ready" && updates.data.length > 0)
         return (
-          <Tag tone="accent" size="sm">
-            {PAGE_COPY.updatesBadge(updates.data.length)}
-          </Tag>
+          <motion.span key="updates" className={styles.tabBadge} initial={mounted.current ? CHIP_MOTION.initial : false} animate={CHIP_MOTION.animate}>
+            <Tag tone="accent" size="sm">
+              {PAGE_COPY.updatesBadge(updates.data.length)}
+            </Tag>
+          </motion.span>
         );
-      return inst.modCount === null ? undefined : <Badge count={inst.modCount} />;
+      return inst.modCount === null ? undefined : <Badge key="count" count={inst.modCount} />;
     }
     if (tab === "logs" && live)
       return (
@@ -97,21 +120,24 @@ export default function InstancePage({ route }: PageProps<"instance">) {
   return (
     <Page className={styles.page}>
       <Hero inst={inst} ops={ops} view={view} crashActive={crashActive} renaming={renaming} onRenamingChange={setRenaming} />
-      <div className={styles.tabBar}>
+      {/* 标签条这一行是一级区块，和头图、面板一起按序号入场；也是换标签时外壳滚回的锚点 */}
+      <EntranceBlock className={styles.tabBar} {...{ [NAV_ANCHOR_ATTR]: "" }}>
         <Tabs id={tabsId} value={route.tab} onChange={onTab} items={items} ariaLabel={PAGE_COPY.tabsLabel} />
-      </div>
-      <TabPanel tabsId={tabsId} value={route.tab} className={styles.panel}>
+      </EntranceBlock>
+      <TabPanel tabsId={tabsId} value={route.tab} from={{ axis: "x", dir: panelDir }} className={styles.panel}>
         {/* 原版实例的 Mod 标签也换：装了一半的目录还没写版本 JSON，扫出来一律像原版，按加载器分流会把 Fabric 实例说成原版 */}
         {stage.kind !== "none" ? (
           <InstallStageTab tab={route.tab} instanceId={inst.id} stage={stage} />
         ) : (
-          <>
-            {route.tab === "overview" && <OverviewTab inst={inst} queryId={queryId} ops={ops} view={view} crash={crash} crashActive={crashActive} updates={updates} onTab={onTab} />}
+          <motion.div initial={landed ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }}>
+            {route.tab === "overview" && (
+              <OverviewTab inst={inst} queryId={queryId} ops={ops} view={view} crash={crash} crashAt={crashAt} crashActive={crashActive} updates={updates} onTab={onTab} />
+            )}
             {route.tab === "mods" && <ModsTab inst={inst} queryId={queryId} ops={ops} updates={updates} />}
             {route.tab === "settings" && <SettingsTab inst={inst} queryId={queryId} ops={ops} />}
             {route.tab === "logs" && <LogsTab inst={inst} queryId={queryId} ops={ops} />}
             {route.tab === "crash" && <CrashTab inst={inst} queryId={queryId} ops={ops} view={view} crash={crash} crashActive={crashActive} onTab={onTab} onRename={() => setRenaming(true)} />}
-          </>
+          </motion.div>
         )}
       </TabPanel>
     </Page>

@@ -14,6 +14,19 @@
   min-width: 0;
 }
 
+/*
+ * 换参数重取期间沿用上一份的块（切换来源时的统计与正文、换版本时的目标列表与预览）：等得久了淡下去表示「这是旧的、马上换」，
+ * 新的一到淡回来。只动透明度，减少动画时照样淡
+ */
+.dimmable {
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+.dimmable[data-stale] {
+  opacity: 0.6;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
+}
+
 .footNote {
   flex: 1;
   min-width: 0;
@@ -24,6 +37,27 @@
   color: var(--sk-text-3);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/*
+ * 安装主按钮的文案槽：当前文案与最长的「安装到 n 个实例」叠在同一格，宽度取后者，勾选数变化时按钮不变宽。
+ * 占宽的那份是伪元素，不进文字内容；数字等宽，位数不变时宽度不变
+ */
+.installLabel {
+  display: inline-grid;
+  justify-items: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.installLabel > span,
+.installLabel::after {
+  grid-area: 1 / 1;
+  white-space: nowrap;
+}
+
+.installLabel::after {
+  content: attr(data-widest);
+  visibility: hidden;
 }
 
 /* ---- 头图 ---- */
@@ -42,6 +76,14 @@
   position: relative;
   flex: none;
   height: 56px;
+}
+
+/*
+ * 关闭与返回常驻在骨架、正文、出错三态之外，以这一层为定位基准：三态的头图都从这一层的顶边画起，按钮落在头图的左上、右上角。
+ * 它们排在三态之前（Tab 顺序先到），靠 z-index 叠在头图之上
+ */
+.layer {
+  position: relative;
 }
 
 .heroBack {
@@ -198,6 +240,38 @@
   color: var(--sk-text-3);
 }
 
+/* 来源切换的加载指示常驻这一格：指示出没时分段控件不横移；进出的两份叠在格里 */
+.switchSlot {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.switchSpinner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+}
+
+/* 骨架的标签行：与下划线标签条同高同线 */
+.tabsSkeleton {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-20);
+  height: 40px;
+  padding: 0 var(--sk-space-2);
+  border-bottom: 1px solid var(--sk-line);
+}
+
+/* 骨架的正文：文字骨架每行按正文行高占位 */
+.bodySkeleton {
+  font-size: var(--sk-fs-body);
+  line-height: var(--sk-lh-body);
+}
+
 /* ---- 介绍 ---- */
 .intro {
   display: flex;
@@ -286,6 +360,30 @@
   display: inline-flex;
   align-items: center;
   gap: var(--sk-space-4);
+}
+
+/* 列表骨架：勾选行与复选框同高，列表行与内嵌列表的行同高同间距 */
+.checkSkeleton {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  height: 24px;
+}
+
+.rowSkeletons {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-2);
+}
+
+.rowSkeleton {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--sk-space-6);
+  height: 56px;
+  padding: 0 var(--sk-space-10);
 }
 
 /* ---- 右栏面板 ---- */
@@ -389,6 +487,13 @@
   gap: var(--sk-space-4);
 }
 
+/* 一组计划的各行：包在加载占位的内容层里，行距与组内一致 */
+.planRows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-4);
+}
+
 .previewFor {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
@@ -441,4 +546,11 @@
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-8);
+}
+
+/* 装好之后的说明与启动胶囊是一块，与面板里的块同间距 */
+.result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-12);
 }

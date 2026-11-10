@@ -25,6 +25,7 @@ import { UPDATE_COPY } from "../copy/updater";
 import { isTypingTarget } from "../lib/util";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { NAV_ANCHOR_ATTR } from "../ui/Page";
+import type { ChromeApi } from "./chrome";
 import { FILE_KINDS, useFileDrop, type FileDropHint, type FileDropTarget, type FileKind, type JarDropTarget } from "./file-drop";
 import { assertPageCombo, matchesCombo, useGlobalShortcuts, type KeyCombo, type Shortcut } from "./keys";
 import {
@@ -144,6 +145,8 @@ export interface ShellApi {
   bindRoot(el: HTMLElement | null): void;
   /** 内容区唯一的纵向滚动容器（历史项的滚动位置记录与恢复）。 */
   bindPageScroll(el: HTMLElement | null): void;
+  /** 外壳布局给自己视觉件的能力（滚回顶部）：全局快捷键的目标就是当前页时也要用它。只由外壳布局调用。 */
+  bindChrome(chrome: ChromeApi | null): void;
 }
 
 const NavContext = createContext<NavApi | null>(null);
@@ -209,6 +212,8 @@ function scrollMarginTop(el: HTMLElement): number {
 
 interface ConfirmRequest {
   id: number;
+  /** 确认框的 key：框开着时被顶替的请求沿用前一个的，框关上之后再来的请求才换新的。 */
+  frame: number;
   options: ConfirmOptions;
   resolve: (ok: boolean) => void;
 }
@@ -356,7 +361,8 @@ function ShellCore({ children }: { children: ReactNode }) {
       // 新的确认顶掉尚未回答的旧请求：旧请求按取消结算
       if (pendingRef.current !== null) pendingRef.current.resolve(false);
       confirmSeq.current += 1;
-      const request: ConfirmRequest = { id: confirmSeq.current, options, resolve };
+      const frame = pendingRef.current === null ? confirmSeq.current : pendingRef.current.frame;
+      const request: ConfirmRequest = { id: confirmSeq.current, frame, options, resolve };
       pendingRef.current = request;
       setConfirmRequest(request);
       setConfirmOpen(true);
@@ -448,6 +454,23 @@ function ShellCore({ children }: { children: ReactNode }) {
 
   const shortcutState = { firstRun, paletteOpen: palette.open, pins };
 
+  // 外壳布局在 ShellProvider 里面，它的滚回顶部只能由它交进来
+  const chromeRef = useRef<ChromeApi | null>(null);
+  const bindChrome = useCallback((chrome: ChromeApi | null) => {
+    chromeRef.current = chrome;
+  }, []);
+
+  /** 快捷键要去的就是当前页时滚回顶部，与侧栏、命令面板一致；go 遇到同一路由什么都不做，按下去像没反应。 */
+  const openFromShortcut = (target: Route) => {
+    if (!sameRoute(route, target)) {
+      go(target);
+      return;
+    }
+    const chrome = chromeRef.current;
+    if (chrome === null) throw new Error("外壳布局还没挂载，快捷键没法把内容区滚回顶部");
+    chrome.scrollContentToTop();
+  };
+
   /** 不是全局快捷键的按键：交给最后登记的、组合相同的页面快捷键；返回是否接手。 */
   const onPageKey = (event: KeyboardEvent): boolean => {
     if (shortcutState.firstRun === true || overlay.isOpen() || shortcutState.paletteOpen) return false;
@@ -493,18 +516,18 @@ function ShellCore({ children }: { children: ReactNode }) {
     if (overlayOpen) return;
     switch (shortcut.kind) {
       case "page":
-        go({ page: shortcut.page });
+        openFromShortcut({ page: shortcut.page });
         return;
       case "pin": {
         const inst = shortcutState.pins[shortcut.index];
-        if (inst !== undefined) go({ page: "instance", id: inst.id, tab: "overview" });
+        if (inst !== undefined) openFromShortcut({ page: "instance", id: inst.id, tab: "overview" });
         return;
       }
       case "create":
         openCreateInstance();
         return;
       case "settings":
-        go({ page: "settings" });
+        openFromShortcut({ page: "settings" });
         return;
     }
   }, onPageKey);
@@ -707,8 +730,10 @@ function ShellCore({ children }: { children: ReactNode }) {
       petalsPaused,
       bindRoot: setRootEl,
       bindPageScroll,
+      bindChrome,
     }),
     [
+      bindChrome,
       bindPageScroll,
       closeCreateInstance,
       closePalette,
@@ -740,11 +765,14 @@ function ShellCore({ children }: { children: ReactNode }) {
       <ShellContext.Provider value={shell}>
         <LaunchHostProvider host={launchHost}>
           {children}
+          {/* 框开着时被顶替不换 key：换 key 会把开着的框连遮罩一起卸掉重挂，遮罩断一帧。原地换内容，
+              按 requestKey 重做初始聚焦；框关上之后再来的请求才换 key */}
           {confirmRequest !== null && (
             <ConfirmDialog
-              key={confirmRequest.id}
+              key={confirmRequest.frame}
               open={confirmOpen}
               {...confirmRequest.options}
+              requestKey={confirmRequest.id}
               onConfirm={() => settleConfirm(true)}
               onClose={() => settleConfirm(false)}
             />

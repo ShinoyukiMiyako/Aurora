@@ -2,11 +2,16 @@
 import { motion, MotionConfig } from "framer-motion";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { act, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, waitForFrames, type Rendered } from "../test/dom";
 import { Appear } from "./Appear";
+import { Bento } from "./Bento";
+import { Card } from "./Card";
 import { LabelSlot } from "./LabelSlot";
 import { Loadable } from "./Loadable";
+import loadableStyles from "./Loadable.module.css";
+import { Page } from "./Page";
 import type { LoadingView } from "../lib/loading-gate";
 
 let view: Rendered | undefined;
@@ -22,6 +27,8 @@ const one = (selector: string): HTMLElement => {
   return el;
 };
 const has = (selector: string) => view?.container.querySelector(selector) !== null;
+/** 等页面画完第一帧：入场窗口在这之后关上，再挂上的一级区块按晚到处理。 */
+const nextFrame = () => act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
 
 describe("Loadable", () => {
   const content = vi.fn(() => <p data-content="">内容</p>);
@@ -33,21 +40,23 @@ describe("Loadable", () => {
 
   afterEach(() => content.mockClear());
 
-  it("等待期：骨架占位但标成不可见，容器在忙，内容不求值", () => {
+  it("等待期：骨架占位但不可见，容器在忙，内容不求值", () => {
     view = render(tree("pending"));
     expect(one("[data-skeleton]").parentElement?.hasAttribute("data-pending")).toBe(true);
+    expect(one("[data-skeleton]").parentElement?.style.opacity).toBe("0");
     expect(one("[aria-busy]").getAttribute("aria-busy")).toBe("true");
     expect(has("[data-content]")).toBe(false);
     expect(content).not.toHaveBeenCalled();
   });
 
-  it("到了出现的时刻：同一个骨架摘掉不可见标记，不重挂", () => {
+  it("到了出现的时刻：同一个骨架摘掉不可见标记，不重挂，从透明淡入到不透明", async () => {
     view = render(tree("pending"));
     const skeleton = one("[data-skeleton]");
     view.rerender(tree("skeleton"));
     expect(one("[data-skeleton]")).toBe(skeleton);
     expect(skeleton.parentElement?.hasAttribute("data-pending")).toBe(false);
     expect(content).not.toHaveBeenCalled();
+    await waitForFrames(() => expect(skeleton.parentElement?.style.opacity).toBe("1"));
   });
 
   it("一挂上就是内容：不单独淡入，容器不在忙", () => {
@@ -68,6 +77,38 @@ describe("Loadable", () => {
     });
   });
 
+  it("等待期里内容就到了：骨架没显出来过，同一次提交里直接拿掉，不留在内容上退场", () => {
+    view = render(tree("pending"));
+    view.rerender(tree("content"));
+    expect(has("[data-skeleton]")).toBe(false);
+    expect(one("[data-content]").parentElement?.style.opacity).toBe("0");
+  });
+
+  it("骨架显出来过：内容到达时它留在原处退场，不同一次提交里拿掉", () => {
+    view = render(tree("pending"));
+    view.rerender(tree("skeleton"));
+    view.rerender(tree("content"));
+    expect(has("[data-skeleton]")).toBe(true);
+  });
+
+  it("上一段骨架显出来过、这一段一直停在等待期：内容到达时照样直接拿掉", () => {
+    view = render(tree("skeleton"));
+    view.rerender(tree("content"));
+    view.rerender(tree("pending"));
+    expect(one("[data-skeleton]").parentElement?.hasAttribute("data-pending")).toBe(true);
+    view.rerender(tree("content"));
+    expect(has("[data-skeleton]")).toBe(false);
+  });
+
+  it("骨架层整个不接收指针事件，不只是等待期：退场时它叠在内容上，淡出那一段不能截住点击", () => {
+    const css = readFileSync(resolve(__dirname, "Loadable.module.css"), "utf8");
+    const layer = /(?:^|\n)\.skeleton\s*\{([^}]*)\}/.exec(css);
+    if (layer === null) throw new Error("Loadable.module.css 里没有 .skeleton 规则");
+    expect(layer[1]).toMatch(/\bpointer-events:\s*none;/);
+    view = render(tree("skeleton"));
+    expect(one("[data-skeleton]").parentElement?.classList.contains(loadableStyles.skeleton)).toBe(true);
+  });
+
   it("contentClassName 落在包住内容的那一层上", () => {
     view = render(
       <Loadable view="content" skeleton={<span />} contentClassName="fill">
@@ -77,12 +118,98 @@ describe("Loadable", () => {
     expect(one("[data-content]").parentElement?.classList.contains("fill")).toBe(true);
   });
 
-  it("重新加载再回来：内容照样淡入", () => {
+  it("第一次挂载就是骨架：直接不透明，跟着所在页面的入场走", () => {
+    view = render(tree("skeleton"));
+    expect(one("[data-skeleton]").parentElement?.style.opacity).toBe("1");
+  });
+
+  it("从内容退回等待期：内容留在原处淡出、标成 inert，骨架不可见地占位", () => {
     view = render(tree("content"));
+    const shown = one("[data-content]");
     view.rerender(tree("pending"));
-    expect(has("[data-content]")).toBe(false);
+    expect(one("[data-content]")).toBe(shown);
+    expect(shown.parentElement?.hasAttribute("inert")).toBe(true);
+    const layer = one("[data-skeleton]").parentElement;
+    expect(layer?.hasAttribute("data-pending")).toBe(true);
+    expect(layer?.style.opacity).toBe("0");
+    expect(one("[aria-busy]").getAttribute("aria-busy")).toBe("true");
+  });
+
+  it("从内容直接退回骨架：内容淡出、标成 inert，骨架从透明淡入，不一下子不透明地盖上", () => {
+    view = render(tree("content"));
+    view.rerender(tree("skeleton"));
+    expect(one("[data-content]").parentElement?.hasAttribute("inert")).toBe(true);
+    const layer = one("[data-skeleton]").parentElement;
+    expect(layer?.hasAttribute("data-pending")).toBe(false);
+    expect(layer?.style.opacity).toBe("0");
+  });
+
+  it("淡完之前内容又回来：同一层接着用，摘掉 inert，不从透明重来", () => {
+    view = render(tree("content"));
+    const layer = one("[data-content]").parentElement;
+    view.rerender(tree("pending"));
     view.rerender(tree("content"));
-    expect(one("[data-content]").parentElement?.style.opacity).toBe("0");
+    expect(one("[data-content]").parentElement).toBe(layer);
+    expect(layer?.hasAttribute("inert")).toBe(false);
+    expect(layer?.style.opacity).toBe("1");
+    expect(has("[data-skeleton]")).toBe(false);
+  });
+
+  it("减少动画：骨架与内容的交接只动透明度，没有位移或缩放", () => {
+    const reduced = (state: LoadingView) => <MotionConfig reducedMotion="always">{tree(state)}</MotionConfig>;
+    view = render(reduced("content"));
+    view.rerender(reduced("skeleton"));
+    expect(one("[data-content]").parentElement?.style.transform).toBe("");
+    expect(one("[data-skeleton]").parentElement?.style.transform).toBe("");
+    view.rerender(reduced("content"));
+    expect(one("[data-content]").parentElement?.style.transform).toBe("");
+  });
+});
+
+describe("Loadable 在页面一级位置上", () => {
+  const page = (state: LoadingView) => (
+    <MotionConfig reducedMotion="never">
+      <Page>
+        <Loadable view={state} skeleton={<Card className="bone">骨架</Card>}>
+          {() => <Card className="block">内容</Card>}
+        </Loadable>
+      </Page>
+    </MotionConfig>
+  );
+
+  it("挂载时就是内容：里面的区块照常领页面分来的序号入场", () => {
+    view = render(page("content"));
+    expect(one(".block").dataset.entrance).toBe("0");
+    expect(one(".block").style.transform).toBe("translateY(6px)");
+  });
+
+  it("页面入场完之后才等到内容：里面的区块是普通元素，不再自己淡入，只由内容层整层淡入", async () => {
+    view = render(page("pending"));
+    await nextFrame();
+    view.rerender(page("content"));
+    const block = one(".block");
+    expect(block.dataset.entrance).toBeUndefined();
+    expect(block.style.opacity).toBe("");
+    expect(block.parentElement?.style.opacity).toBe("0");
+  });
+
+  it("页面首帧之内就等到了内容：同样只由内容层淡入，区块不按序号错开上移", () => {
+    view = render(page("pending"));
+    view.rerender(page("content"));
+    const block = one(".block");
+    expect(block.dataset.entrance).toBeUndefined();
+    expect(block.style.transform).toBe("");
+    expect(block.parentElement?.style.opacity).toBe("0");
+  });
+
+  it("内容出现过之后退回骨架：骨架里的区块不再自己淡入，只由骨架层整层淡入", async () => {
+    view = render(page("content"));
+    await nextFrame();
+    view.rerender(page("skeleton"));
+    const bone = one(".bone");
+    expect(bone.dataset.entrance).toBeUndefined();
+    expect(bone.style.opacity).toBe("");
+    expect(bone.parentElement?.style.opacity).toBe("0");
   });
 });
 
@@ -151,6 +278,64 @@ describe("Appear", () => {
     view = render(inner(false));
     view.rerender(inner(true));
     expect(one("[data-late]").style.opacity).toBe("0");
+  });
+});
+
+describe("Appear 在页面编号里占几个号", () => {
+  const entranceOf = (text: string): string | undefined => {
+    if (view === undefined) throw new Error("还没有渲染");
+    const el = [...view.container.querySelectorAll<HTMLElement>(".block")].find((b) => b.textContent === text);
+    if (el === undefined) throw new Error(`没有区块 ${text}`);
+    return el.dataset.entrance;
+  };
+
+  it("Page 的直接子项：false、null、undefined、空数组都算空，不占号；有子项时占一个号", () => {
+    const tree = (note: ReactNode) => (
+      <MotionConfig reducedMotion="never">
+        <Page>
+          <Card className="block">上面</Card>
+          <Appear>{note}</Appear>
+          <Card className="block">下面</Card>
+        </Page>
+      </MotionConfig>
+    );
+    for (const empty of [false, null, undefined, []]) {
+      view = render(tree(empty));
+      expect(entranceOf("下面")).toBe("1");
+      view.unmount();
+      view = undefined;
+    }
+    view = render(
+      tree([
+        <Card key="a" className="block">
+          甲
+        </Card>,
+        <Card key="b" className="block">
+          乙
+        </Card>,
+      ]),
+    );
+    expect([entranceOf("上面"), entranceOf("甲"), entranceOf("乙"), entranceOf("下面")]).toEqual(["0", "1", "1", "2"]);
+  });
+
+  it("Bento 的直接子项：空的不占号，后面的卡片不晚一拍", () => {
+    const tree = (show: boolean) => (
+      <MotionConfig reducedMotion="never">
+        <Page>
+          <Bento>
+            <Appear>{show && <Card className="block">提示</Card>}</Appear>
+            <Card span={6} className="block">
+              卡片
+            </Card>
+          </Bento>
+        </Page>
+      </MotionConfig>
+    );
+    view = render(tree(false));
+    expect(entranceOf("卡片")).toBe("0");
+    view.unmount();
+    view = render(tree(true));
+    expect([entranceOf("提示"), entranceOf("卡片")]).toEqual(["0", "1"]);
   });
 });
 

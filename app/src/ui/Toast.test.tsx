@@ -2,13 +2,14 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { AnimatePresence } from "framer-motion";
+import { AnimatePresence, MotionConfig } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { render, stubResizeObserver, type Rendered } from "../test/dom";
 import { Modal } from "./Modal";
 import { TOAST_ACTION_BLOCKED_REASON, Toast, type ToastProps, type ToastSide } from "./Toast";
+import styles from "./Toast.module.css";
 
 let view: Rendered | undefined;
 
@@ -73,6 +74,60 @@ describe("Toast 的滑动方向", () => {
 
     click(buttonByText("收起"));
     await vi.waitFor(() => expect(shiftOf(toast)).toBeLessThan(-4), { timeout: 2000, interval: 4 });
+  });
+});
+
+describe("Toast 的重复反馈", () => {
+  const iconBaseOf = (container: HTMLElement) => {
+    const el = container.querySelector<HTMLElement>(`.${styles.iconBase}`);
+    if (el === null) throw new Error("没有图标底座");
+    return el;
+  };
+  const scaleOf = (el: HTMLElement) => {
+    const match = /scale\((-?[\d.]+)\)/.exec(el.style.transform);
+    return match === null ? 1 : Number(match[1]);
+  };
+  /** 真实计时器下逐帧采样 ms 毫秒，返回见过的最大缩放。 */
+  const peakScale = async (el: HTMLElement, ms: number) => {
+    let peak = scaleOf(el);
+    const end = performance.now() + ms;
+    while (performance.now() < end) {
+      await new Promise((resolve) => setTimeout(resolve, 4));
+      peak = Math.max(peak, scaleOf(el));
+    }
+    return peak;
+  };
+  const withRepeats = (repeats: number, reduced = false) => (
+    <MotionConfig reducedMotion={reduced ? "always" : "never"}>
+      <OverlayProvider>
+        <Toast {...base} repeats={repeats} />
+        <OverlayRoot />
+      </OverlayProvider>
+    </MotionConfig>
+  );
+
+  it("重复的同一条并进来（repeats 变了）：图标底座原位放大约 12% 再落回 1", async () => {
+    view = render(withRepeats(0));
+    const icon = iconBaseOf(view.container);
+    view.rerender(withRepeats(1));
+    await vi.waitFor(() => expect(scaleOf(icon)).toBeGreaterThan(1.08), { timeout: 2000, interval: 4 });
+    expect(await peakScale(icon, 120)).toBeLessThan(1.14);
+    await vi.waitFor(() => expect(scaleOf(icon)).toBe(1), { timeout: 2000, interval: 10 });
+  });
+
+  it("挂载时已有的次数不弹，次数没变的重渲染也不弹", async () => {
+    view = render(withRepeats(2));
+    const icon = iconBaseOf(view.container);
+    expect(await peakScale(icon, 80)).toBe(1);
+    view.rerender(withRepeats(2));
+    expect(await peakScale(icon, 80)).toBe(1);
+  });
+
+  it("减少动画时不弹", async () => {
+    view = render(withRepeats(0, true));
+    const icon = iconBaseOf(view.container);
+    view.rerender(withRepeats(1, true));
+    expect(await peakScale(icon, 120)).toBe(1);
   });
 });
 

@@ -72,7 +72,8 @@ export const fade = {
 
 /**
  * 环境层（主页花瓣、樱花林全景）的显隐：铺满整片背景的一层从无到有要比控件慢慢浮现，离开也比 out 稍长，
- * 大面积的明暗在 120 ms 里跳完像闪了一下。曲线沿用 in / out。只改透明度，减少动画时照常播放。
+ * 大面积的明暗在 120 ms 里跳完像闪了一下。曲线沿用 in / out。只改透明度；减少动画时入场改用 fade.in
+ * （铺满整窗的慢淡入不留给减少动画的用户），退场本来就不超过 200 ms，照常播放。
  */
 export const ambientFade = {
   in: { duration: 0.48, ease: fade.in.ease },
@@ -108,6 +109,18 @@ export const pageItem: Variants = {
 };
 
 /**
+ * 设备码逐字入场：每格（连同短横）从下方 6px 上浮淡入，第 i 格晚 i × 50 ms 起步，位移走 pop。
+ * 透明度同样要自己带上延迟（理由同 pageItem）。减少动画时调用方把序号都传 0：整组一次淡入，不逐格等。
+ */
+export const codeCell: Variants = {
+  hidden: { opacity: 0, y: 6 },
+  show: (i: number) => {
+    const delay = i * 0.05;
+    return { opacity: 1, y: 0, transition: { ...springs.pop, delay, opacity: { ...fade.in, delay } } };
+  },
+};
+
+/**
  * 标签页与分区内容切换的面板变体。必须以变体标签（hidden / show）驱动，不能写成
  * initial={{…}} animate={{…}} 的对象字面量：面板内部带 variants 的子元素会等最近的变体祖先来编排，
  * 面板不是变体节点时它们挂到更上层的祖先上，而那一层只在页面挂载时编排过一次，切换一次标签后
@@ -131,6 +144,27 @@ export const tabPanel: Variants = {
   show: { opacity: 1, x: 0, y: 0, transition: { ...springs.settle, opacity: fade.in } },
 };
 
+/** 向导换步的横移距离（px）：首次启动向导与安装引导程序原先各写一份，取值相同。 */
+const STEP_SHIFT_PX = 16;
+
+/**
+ * 向导换步（首次启动向导、安装引导程序）：新步骤从前进方向一侧滑入，旧步骤朝反方向退出。
+ * custom 传方向：前进 1、后退 -1、0 只淡入淡出。以变体标签 enter / center / exit 驱动。
+ * 减少动画时换用 stepPaneFade：根部 MotionConfig 只把位移改成一步到位，照用这一份的话旧步骤会先横跳再淡出。
+ */
+export const stepPane: Variants = {
+  enter: (dir: number) => ({ opacity: 0, x: STEP_SHIFT_PX * dir }),
+  center: { opacity: 1, x: 0, transition: { ...springs.soft, opacity: fade.in } },
+  exit: (dir: number) => ({ opacity: 0, x: -STEP_SHIFT_PX * dir, transition: fade.out }),
+};
+
+/** 减少动画时的向导换步：同样的变体标签，只动透明度。 */
+export const stepPaneFade: Variants = {
+  enter: { opacity: 0 },
+  center: { opacity: 1, transition: fade.in },
+  exit: { opacity: 0, transition: fade.out },
+};
+
 /**
  * 流内块的增删（列表行、提示条、校验错误、联动出现的选项）：新增淡入并从略小处落到位，删除淡出。
  * 只管这一块自己；它腾出或占掉的位置由 popLayout 加兄弟让位（lib/reflow）处理，不动 height / margin。
@@ -141,10 +175,44 @@ export const insertItem = {
   exit: { opacity: 0, scale: 0.98, transition: fade.out },
 } as const;
 
+/**
+ * 减少动画时的增删：只留透明度。根部 MotionConfig 只把缩放改成一步到位，照用 insertItem 的话删掉的块会先缩一下再淡出。
+ * 按生效值在两者之间取用 lib/useInsertItem。
+ */
+export const insertItemFade = {
+  initial: { opacity: 0 },
+  animate: { opacity: 1, transition: fade.in },
+  exit: { opacity: 0, transition: fade.out },
+} as const;
+
+/** 小标记的弹入：pop 弹簧放大，透明度走淡入补间。 */
+const POP_MARK_SHOW = { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } } as const;
+
+/**
+ * 小标记的出现消失，按尺寸分两档，挂在 motion 元素上直接展开（{...popMark.dot}）：
+ * - dot：角标、提醒点、运行点这类几个像素的点。从 0 弹出，从略小处起看不出是「弹出来」的；退场淡出并缩到 0.6。
+ * - glyph：清空键、标签上的计数、换上来的图标，本身有一定尺寸。从 0.8 弹出；退场只原地淡出，
+ *   它们多在 popLayout 里，退场那一刻已经让出位置，再缩一下反而像往别处飞。
+ * - reduced：减少动画时两档都换成它，只淡入淡出。根部 MotionConfig 会把缩放改成一步到位，照用 dot 退场会先跳到 0.6 再淡出。
+ */
+export const popMark = {
+  dot: { initial: { opacity: 0, scale: 0 }, animate: POP_MARK_SHOW, exit: { opacity: 0, scale: 0.6, transition: fade.out } },
+  glyph: { initial: { opacity: 0, scale: 0.8 }, animate: POP_MARK_SHOW, exit: { opacity: 0, transition: fade.out } },
+  reduced: { initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in }, exit: { opacity: 0, transition: fade.out } },
+} as const;
+
 /** 否定抖动：只用于会话崩溃时的状态岛与被拒绝的表单字段，每次只播一次，减少动画时不播。每段都走淡入同一条令牌曲线。 */
 export const shake = {
   x: [0, -4, 4, -3, 3, -1, 0],
   transition: { duration: 0.36, ease: fade.in.ease },
+} as const;
+
+/**
+ * 原位弹一下：同一件事又发生了一次（重复的通知并进已有的那一条），让那一块放大约 12% 再落回。
+ * 目标就是当前的 scale 1，靠初速度在 pop 弹簧上产生一次回弹，约 55 ms 到峰值，几乎不回摆。减少动画时不播。
+ */
+export const nudge = {
+  transition: { ...springs.pop, velocity: 5.5 },
 } as const;
 
 /**
@@ -183,12 +251,24 @@ export const lineSwap: Variants = {
 };
 
 /**
- * 启动胶囊的换面：新面比旧面晚 faceEnterDelay 秒入场，旧面先让出位置；视图变化后旧面留住 holdMs 毫秒，
- * 让方块的拆解、崩落演完，或坐定之后再过 afterSeat 才换到运行面。减少动画时两者都归零。
+ * 同一格里换一枚小控件（最近游玩卡角上的启动入口在就绪、修复、安装中、启动中、运行中之间换面）：新的一枚弹入，
+ * 旧的一枚原地淡出。与按钮图标位换图同一口径：换成别的东西从 0.6 弹出走 pop；换成进度（动作已经开始，
+ * 不该再抢眼）从 0.8 收拢走 tap。减少动画时只淡入淡出：缩放在那里是一步到位的。
+ */
+export const faceSwap = {
+  pop: { initial: { opacity: 0, scale: 0.6 }, animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } } },
+  tap: { initial: { opacity: 0, scale: 0.8 }, animate: { opacity: 1, scale: 1, transition: { ...springs.tap, opacity: fade.in } } },
+  reduced: { initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in } },
+  exit: { opacity: 0, transition: fade.out },
+} as const;
+
+/**
+ * 启动胶囊的换面：新面比旧面晚 faceEnterDelay 秒入场，旧面先让出位置。视图变化后旧面先留住，让方块的拆解、崩落演完
+ * （时长按已落的面数由 assembly 的时长与间隔算出），或方块坐定之后再过 holdMs.afterSeat 毫秒才换到运行面。减少动画时都归零。
  */
 export const capsuleSwap = {
   faceEnterDelay: 0.04,
-  holdMs: { disassemble: 240, collapse: 260, afterSeat: 200 },
+  holdMs: { afterSeat: 200 },
 } as const;
 
 /**

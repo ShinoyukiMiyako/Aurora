@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubResizeObserver, type ResizeObserverStub } from "../test/dom";
 import { springAt } from "./motion";
-import { observeReflow, REFLOW_MAX_ITEMS, REFLOW_SKIP_ATTR } from "./reflow";
+import { closestScroller, observeReflow, REFLOW_HARD_MAX_ITEMS, REFLOW_MAX_ITEMS, REFLOW_PAUSED_ATTR, REFLOW_SKIP_ATTR } from "./reflow";
 
 // jsdom 不做布局：每个元素的位置、定位祖先与样式由这张表给出
 interface Box {
@@ -12,6 +12,10 @@ interface Box {
   clientWidth: number;
   overflowY: string;
   translate: string;
+  display: string;
+  height: number;
+  /** getBoundingClientRect 的上沿（视口坐标）。 */
+  viewTop: number;
 }
 
 interface Call {
@@ -25,11 +29,13 @@ const boxes = new Map<Element, Box>();
 let calls: Call[] = [];
 let sizes: ResizeObserverStub;
 let stop: (() => void) | undefined;
+/** 读了多少次定位祖先与偏移（布局读取）。 */
+let layoutReads = 0;
 const SAMPLE_S = 1 / 120;
 
 function place(el: HTMLElement, box: Partial<Box>): void {
   const was = boxes.get(el);
-  boxes.set(el, { left: 0, top: 0, parent: null, clientWidth: 0, overflowY: "visible", translate: "none", ...was, ...box });
+  boxes.set(el, { left: 0, top: 0, parent: null, clientWidth: 0, overflowY: "visible", translate: "none", display: "block", height: 0, viewTop: 0, ...was, ...box });
 }
 
 const box = (el: Element): Box => {
@@ -53,22 +59,34 @@ const flushMutations = () => Promise.resolve();
 
 beforeEach(() => {
   calls = [];
+  layoutReads = 0;
   sizes = stubResizeObserver();
   vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockImplementation(function (this: HTMLElement) {
+    layoutReads++;
     return box(this).parent;
   });
   vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+    layoutReads++;
     return box(this).top;
   });
   vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) {
+    layoutReads++;
     return box(this).left;
+  });
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) {
+    return box(this).height;
   });
   vi.spyOn(Element.prototype, "clientWidth", "get").mockImplementation(function (this: Element) {
     return box(this).clientWidth;
   });
+  vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+    const { viewTop, height, clientWidth } = box(this);
+    return { top: viewTop, bottom: viewTop + height, left: 0, right: clientWidth, width: clientWidth, height, x: 0, y: viewTop, toJSON: () => ({}) } as DOMRect;
+  });
   vi.spyOn(window, "getComputedStyle").mockImplementation((el) => {
     const found = boxes.get(el);
-    return { overflowY: found === undefined ? "visible" : found.overflowY, translate: found === undefined ? "none" : found.translate } as CSSStyleDeclaration;
+    if (found === undefined) return { overflowY: "visible", translate: "none", display: "block" } as CSSStyleDeclaration;
+    return { overflowY: found.overflowY, translate: found.translate, display: found.display } as CSSStyleDeclaration;
   });
   Object.defineProperty(HTMLElement.prototype, "animate", {
     configurable: true,
@@ -255,14 +273,33 @@ describe("observeReflow：不做动画的情况", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it(`子项超过 ${REFLOW_MAX_ITEMS} 个：不动`, async () => {
-    const { container, a, b } = column();
-    for (let i = 3; i <= REFLOW_MAX_ITEMS; i++) child(container, i * 100);
+  it(`子项超过 ${REFLOW_HARD_MAX_ITEMS} 个：整趟不读位置、不动；回到上限以内的第一趟只记位置，不拿超限之前的旧位置补滑`, async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 800 });
+    // 正好在上限上：照常量
+    const items = Array.from({ length: REFLOW_HARD_MAX_ITEMS }, (_, i) => {
+      const el = child(container, i * 10);
+      place(el, { height: 10 });
+      return el;
+    });
+    stop = observeReflow(container);
+    sizes.resize(container, 800);
+    const extra = child(container, REFLOW_HARD_MAX_ITEMS * 10);
     await flushMutations();
-    expect(container.children).toHaveLength(REFLOW_MAX_ITEMS + 1);
-    place(b, { top: 220 });
-    sizes.resize(a, 800);
+    layoutReads = 0;
+    for (let i = 1; i < items.length; i++) place(items[i], { top: i * 10 + 20 });
+    sizes.resize(items[0], 800);
+    expect(layoutReads).toBe(0);
     expect(calls).toHaveLength(0);
+    extra.remove();
+    await flushMutations();
+    expect(calls).toHaveLength(0);
+    for (let i = 1; i < items.length; i++) place(items[i], { top: i * 10 + 40 });
+    sizes.resize(items[0], 800);
+    expect(calls).toHaveLength(REFLOW_MAX_ITEMS);
+    expect(calls.every((c) => start(c) === "0px -20px")).toBe(true);
   });
 
   it("没有 ResizeObserver 的环境：不观察也不抛错", () => {
@@ -271,6 +308,169 @@ describe("observeReflow：不做动画的情况", () => {
     document.body.append(container);
     place(container, { parent: document.body, clientWidth: 800 });
     expect(() => observeReflow(container)()).not.toThrow();
+  });
+});
+
+describe("observeReflow：暂停", () => {
+  it("容器带暂停属性：只记位置不起动画；去掉之后的变化从暂停期间记下的位置算起", async () => {
+    const { container, a, b, c } = column();
+    container.setAttribute(REFLOW_PAUSED_ATTR, "");
+    await flushMutations();
+    place(b, { top: 220 });
+    place(c, { top: 320 });
+    sizes.resize(a, 800);
+    expect(calls).toHaveLength(0);
+    container.removeAttribute(REFLOW_PAUSED_ATTR);
+    await flushMutations();
+    expect(calls).toHaveLength(0);
+    place(c, { top: 360 });
+    sizes.resize(b, 800);
+    expect(callsOn(a)).toHaveLength(0);
+    expect(callsOn(b)).toHaveLength(0);
+    expect(start(callsOn(c)[0])).toBe("0px -40px");
+  });
+
+  it("暂停时被挪动的项还在飞：取消，直接落到新位置；没被挪动的接着飞；恢复后再被挤从静止出发", async () => {
+    const { container, a, b, c } = column();
+    place(b, { top: 220 });
+    place(c, { top: 320 });
+    sizes.resize(a, 800);
+    const [flyB] = callsOn(b);
+    const [flyC] = callsOn(c);
+    flyB.animation.currentTime = 50;
+    flyC.animation.currentTime = 50;
+    container.setAttribute(REFLOW_PAUSED_ATTR, "");
+    await flushMutations();
+    place(c, { top: 400 });
+    sizes.resize(b, 800);
+    expect(flyC.animation.cancel).toHaveBeenCalledTimes(1);
+    expect(flyB.animation.cancel).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(2);
+    container.removeAttribute(REFLOW_PAUSED_ATTR);
+    await flushMutations();
+    place(c, { top: 440 });
+    sizes.resize(b, 800);
+    // 已取消的那段不再算进此刻的位置：从静止的 -40px 出发
+    expect(start(callsOn(c)[1])).toBe("0px -40px");
+    expect(flyC.animation.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("同一次提交里打开暂停并换掉一批子项：这一趟不起动画", async () => {
+    const { container, a, b, c } = column();
+    container.setAttribute(REFLOW_PAUSED_ATTR, "");
+    a.remove();
+    place(b, { top: 0 });
+    place(c, { top: 100 });
+    await flushMutations();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("开关的增删本身不起动画：去掉属性时已经排好、尺寸观察还没报上来的变化直接收下", async () => {
+    const { container, a, b } = column();
+    container.setAttribute(REFLOW_PAUSED_ATTR, "");
+    await flushMutations();
+    // 暂停期间布局变了，尺寸观察要到这一帧稍后才报；调用方在那之前就去掉了属性
+    place(b, { top: 220 });
+    container.removeAttribute(REFLOW_PAUSED_ATTR);
+    await flushMutations();
+    expect(calls).toHaveLength(0);
+    sizes.resize(a, 800);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe(`observeReflow：子项超过 ${REFLOW_MAX_ITEMS} 个`, () => {
+  /** count 项等高的子项竖排，从 0 起每 pitch 一项，定位祖先是容器。 */
+  function rows(container: HTMLElement, count: number, pitch: number): HTMLElement[] {
+    return Array.from({ length: count }, (_, i) => {
+      const el = child(container, i * pitch);
+      place(el, { height: pitch });
+      return el;
+    });
+  }
+
+  /** 第 0 项变高 grow：其余各项下移 grow，尺寸观察报在第 0 项上。 */
+  function growFirst(items: HTMLElement[], pitch: number, grow: number): void {
+    items.forEach((el, i) => {
+      if (i > 0) place(el, { top: i * pitch + grow });
+    });
+    sizes.resize(items[0], 800);
+  }
+
+  /** 起了动画的子项序号。 */
+  const moving = (items: HTMLElement[]) => items.flatMap((el, i) => (callsOn(el).length > 0 ? [i] : []));
+  const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, k) => from + k);
+
+  /** 滚动祖先在视口里占 [0, height]、已滚到 scrollTop；容器在它里面，视口上沿随之在 -scrollTop。 */
+  function inScroller(height: number, scrollTop: number): HTMLElement {
+    const scroller = document.createElement("div");
+    document.body.append(scroller);
+    place(scroller, { overflowY: "auto", viewTop: 0, height });
+    scroller.scrollTop = scrollTop;
+    const container = document.createElement("div");
+    scroller.append(container);
+    place(container, { parent: scroller, clientWidth: 800, viewTop: -scrollTop });
+    return container;
+  }
+
+  it("只给起点或终点落在可见范围附近（上下各留 200px）的起动画，远处的直接到位；可见范围取滚动容器与窗口的交集", () => {
+    // 滚动容器高 2000，比窗口（jsdom 的 768）还高：可见范围按窗口截
+    const container = inScroller(2000, 1000);
+    const items = rows(container, 60, 50);
+    stop = observeReflow(container);
+    sizes.resize(container, 800);
+    growFirst(items, 50, 60);
+    // 换到容器坐标：可见带 [1000, 1768]，加余量 [800, 1968]；第 i 项起点 [50i, 50i + 50]，终点再往下 60。
+    // 14 只有终点够得着，39 只有起点够得着
+    expect(moving(items)).toEqual(range(14, 39));
+    for (const i of range(14, 39)) expect(start(callsOn(items[i])[0])).toBe("0px -60px");
+  });
+
+  it("容器自己就是滚动容器：按它自己的滚动量换算", () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 800, overflowY: "auto", viewTop: 0, height: 600 });
+    container.scrollTop = 1000;
+    const items = rows(container, 60, 50);
+    stop = observeReflow(container);
+    sizes.resize(container, 800);
+    growFirst(items, 50, 40);
+    // 容器坐标里可见带 [1000, 1600]，加余量 [800, 1800]
+    expect(moving(items)).toEqual(range(15, 36));
+  });
+
+  it("没有滚动容器时按窗口算", () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 800, viewTop: 0 });
+    const items = rows(container, 60, 50);
+    stop = observeReflow(container);
+    sizes.resize(container, 800);
+    growFirst(items, 50, 40);
+    // 窗口 [0, 768]，加余量 [-200, 968]
+    expect(moving(items)).toEqual(range(1, 19));
+  });
+
+  it(`附近的仍超过 ${REFLOW_MAX_ITEMS} 个：只动离可见范围中心最近的那些`, () => {
+    const container = inScroller(600, 1000);
+    const items = rows(container, 150, 20);
+    stop = observeReflow(container);
+    sizes.resize(container, 800);
+    growFirst(items, 20, 40);
+    // 附近的是 37 到 90 共 54 项。中心在容器坐标 1300：62、63 的终点与 64、65 的起点压着它，往两边每隔 20px 各添一项
+    expect(moving(items)).toEqual(range(44, 83));
+    expect(calls).toHaveLength(REFLOW_MAX_ITEMS);
+  });
+
+  it(`不超过 ${REFLOW_MAX_ITEMS} 个时不挑：远在可见范围之外的也照常起动画`, () => {
+    const container = inScroller(600, 5000);
+    const items = rows(container, REFLOW_MAX_ITEMS, 50);
+    stop = observeReflow(container);
+    sizes.resize(container, 800);
+    growFirst(items, 50, 40);
+    expect(moving(items)).toEqual(range(1, REFLOW_MAX_ITEMS - 1));
   });
 });
 
@@ -372,6 +572,167 @@ describe("observeReflow：退场项先被抽出布局（popLayout）", () => {
   });
 });
 
+/** display: contents 的包裹层（像按钮外面的提示宿主）：没有盒子，offsetParent 为空。 */
+function contents(parent: HTMLElement): HTMLElement {
+  const el = document.createElement("span");
+  parent.append(el);
+  place(el, { display: "contents" });
+  return el;
+}
+
+/** 包裹层里的按钮：DOM 上挂在包裹层下，定位祖先是让位的容器。 */
+function inside(host: HTMLElement, container: HTMLElement, top: number, left = 0): HTMLElement {
+  const el = document.createElement("button");
+  host.append(el);
+  place(el, { top, left, parent: container });
+  return el;
+}
+
+describe("observeReflow：display: contents 的子项", () => {
+  /** a 在 0；一层包裹里装着按钮 b（100）、c（200）；d 在 300。 */
+  function wrapped() {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 800 });
+    const a = child(container, 0);
+    const host = contents(container);
+    const b = inside(host, container, 100);
+    const c = inside(host, container, 200);
+    const d = child(container, 300);
+    stop = observeReflow(container);
+    sizes.resize(container, 800);
+    return { container, host, a, b, c, d };
+  }
+
+  it("上面的兄弟变高：包裹层里的按钮从旧位置滑过去；包裹层自己不起动画，也不观察它的尺寸", () => {
+    const { host, a, b, c, d } = wrapped();
+    place(b, { top: 220 });
+    place(c, { top: 320 });
+    place(d, { top: 420 });
+    sizes.resize(a, 800);
+    expect(callsOn(host)).toHaveLength(0);
+    expect(start(callsOn(b)[0])).toBe("0px -120px");
+    expect(start(callsOn(c)[0])).toBe("0px -120px");
+    expect(start(callsOn(d)[0])).toBe("0px -120px");
+    expect(sizes.observed()).toEqual(expect.arrayContaining([b, c]));
+    expect(sizes.observed()).not.toContain(host);
+  });
+
+  it("包裹层里的按钮变宽：同一层里后面的按钮横着让位", () => {
+    const { b, c } = wrapped();
+    place(c, { left: 40 });
+    sizes.resize(b, 800);
+    expect(callsOn(b)).toHaveLength(0);
+    expect(start(callsOn(c)[0])).toBe("-40px 0px");
+  });
+
+  it("包裹层里增删元素：兄弟让位，新来的纳入观察，移走的不再观察", async () => {
+    const { container, host, b, c, d } = wrapped();
+    const e = document.createElement("button");
+    place(e, { top: 200, parent: container });
+    place(c, { top: 260 });
+    place(d, { top: 360 });
+    host.insertBefore(e, c);
+    await flushMutations();
+    expect(callsOn(e)).toHaveLength(0);
+    expect(start(callsOn(c)[0])).toBe("0px -60px");
+    expect(start(callsOn(d)[0])).toBe("0px -60px");
+    expect(sizes.observed()).toContain(e);
+    b.remove();
+    place(e, { top: 100 });
+    await flushMutations();
+    expect(start(callsOn(e)[0])).toBe("0px 100px");
+    expect(sizes.observed()).not.toContain(b);
+  });
+
+  it("包裹层里的按钮被 popLayout 抽出布局：后面的兄弟同一帧让位", async () => {
+    const { b, c, d } = wrapped();
+    b.setAttribute("data-motion-pop-id", ":r4:");
+    place(c, { top: 100 });
+    place(d, { top: 200 });
+    await flushMutations();
+    expect(callsOn(b)).toHaveLength(0);
+    expect(start(callsOn(c)[0])).toBe("0px 100px");
+    expect(start(callsOn(d)[0])).toBe("0px 100px");
+  });
+
+  it("整层包裹移走：里面的按钮不再观察，后面的兄弟滑上来", async () => {
+    const { host, b, c, d } = wrapped();
+    host.remove();
+    place(d, { top: 100 });
+    await flushMutations();
+    expect(start(callsOn(d)[0])).toBe("0px 200px");
+    expect(sizes.observed()).not.toContain(b);
+    expect(sizes.observed()).not.toContain(c);
+  });
+
+  it("包裹层套包裹层：逐层往里，直到有盒子的那一层", () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 800 });
+    const a = child(container, 0);
+    const outer = contents(container);
+    const inner = contents(outer);
+    const b = inside(inner, container, 100);
+    stop = observeReflow(container);
+    sizes.resize(container, 800);
+    place(b, { top: 160 });
+    sizes.resize(a, 800);
+    expect(callsOn(outer)).toHaveLength(0);
+    expect(callsOn(inner)).toHaveLength(0);
+    expect(start(callsOn(b)[0])).toBe("0px -60px");
+  });
+
+  it("包裹层带跳过标记：整层都不参与", () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 800 });
+    const a = child(container, 0);
+    const host = contents(container);
+    host.setAttribute(REFLOW_SKIP_ATTR, "");
+    const b = inside(host, container, 100);
+    const c = child(container, 200);
+    stop = observeReflow(container);
+    sizes.resize(container, 800);
+    place(b, { top: 160 });
+    place(c, { top: 260 });
+    sizes.resize(a, 800);
+    expect(callsOn(b)).toHaveLength(0);
+    expect(start(callsOn(c)[0])).toBe("0px -60px");
+  });
+
+  it("之后才加进来的包裹层：同一趟就认出来，里面的按钮纳入观察，之后被挤照样让位", async () => {
+    const { container, b, c } = column();
+    const host = document.createElement("span");
+    place(host, { display: "contents" });
+    const d = document.createElement("button");
+    host.append(d);
+    place(d, { top: 300, parent: container });
+    container.append(host);
+    await flushMutations();
+    expect(calls).toHaveLength(0);
+    expect(sizes.observed()).toContain(d);
+    place(c, { top: 240 });
+    place(d, { top: 340 });
+    sizes.resize(b, 800);
+    expect(start(callsOn(d)[0])).toBe("0px -40px");
+  });
+
+  it("有盒子的子项里面增删节点不惊动这里：只盯包裹层这一层，不盯整棵子树", async () => {
+    const { a, b } = column();
+    const deep = document.createElement("div");
+    place(deep, { parent: a });
+    place(b, { top: 160 });
+    a.append(deep);
+    await flushMutations();
+    expect(calls).toHaveLength(0);
+    expect(sizes.observed()).not.toContain(deep);
+  });
+});
+
 describe("observeReflow：滚动", () => {
   function scrolled() {
     const scroller = document.createElement("div");
@@ -411,6 +772,57 @@ describe("observeReflow：滚动", () => {
     scroller.scrollTop = 0;
     sizes.resize(a, 800);
     expect(start(callsOn(b)[0])).toBe("0px -120px");
+  });
+});
+
+describe("observeReflow：容器自己就是滚动容器", () => {
+  /** 容器自身纵向可滚动、已滚到 500，外面没有别的滚动祖先。 */
+  function selfScrolled() {
+    const container = document.createElement("div");
+    document.body.append(container);
+    place(document.body, {});
+    place(container, { parent: document.body, clientWidth: 800, overflowY: "auto" });
+    container.scrollTop = 500;
+    const a = child(container, 0);
+    const b = child(container, 100);
+    stop = observeReflow(container);
+    sizes.resize(container, 800);
+    return { container, a, b };
+  }
+
+  it("滚动锚定挪的是容器自己的滚动位置：可见内容没动，不补", () => {
+    const { container, a, b } = selfScrolled();
+    place(b, { top: 220 });
+    container.scrollTop = 620;
+    sizes.resize(a, 800);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("用户滚动容器自己之后再被挤：滚动量不算进位移，哪怕恰好等于位移", () => {
+    const { container, a, b } = selfScrolled();
+    container.scrollTop = 620;
+    container.dispatchEvent(new Event("scroll"));
+    place(b, { top: 220 });
+    sizes.resize(a, 800);
+    expect(start(callsOn(b)[0])).toBe("0px -120px");
+  });
+});
+
+describe("closestScroller", () => {
+  it("自己纵向可滚动时就是自己，否则取最近的纵向滚动祖先，都没有时为 null", () => {
+    const outer = document.createElement("div");
+    const middle = document.createElement("div");
+    const inner = document.createElement("div");
+    document.body.append(outer);
+    outer.append(middle);
+    middle.append(inner);
+    place(outer, { overflowY: "scroll" });
+    place(middle, {});
+    place(inner, { overflowY: "auto" });
+    expect(closestScroller(inner)).toBe(inner);
+    expect(closestScroller(middle)).toBe(outer);
+    place(outer, { overflowY: "hidden" });
+    expect(closestScroller(middle)).toBeNull();
   });
 });
 

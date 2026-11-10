@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { AnimatePresence } from "framer-motion";
+import { AnimatePresence, visualElementStore } from "framer-motion";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -366,6 +366,74 @@ describe("ConfirmDialog", () => {
     expect(calls).toEqual(["confirm", "close", "close"]);
   });
 
+  /** 外壳的命令式确认：同一个确认框，新请求顶掉旧请求时换 requestKey。 */
+  interface Request {
+    id: number;
+    title: string;
+    confirmLabel: string;
+    tone?: "primary" | "danger";
+  }
+  const SWITCH: Request = { id: 1, title: "切换下载源？", confirmLabel: "切换并重下" };
+  const REMOVE: Request = { id: 2, title: "删除「生存」？", confirmLabel: "删除实例", tone: "danger" };
+  const ENDGAME: Request = { id: 3, title: "结束游戏？", confirmLabel: "结束游戏", tone: "danger" };
+  const confirmHandles: { set?: (request: Request) => void; close?: () => void } = {};
+  function Commanded() {
+    const [request, setRequest] = useState(SWITCH);
+    const [open, setOpen] = useState(true);
+    confirmHandles.set = (next) => {
+      setRequest(next);
+      setOpen(true);
+    };
+    confirmHandles.close = () => setOpen(false);
+    return (
+      <ConfirmDialog
+        open={open}
+        requestKey={request.id}
+        title={request.title}
+        body={`第 ${request.id} 个请求`}
+        confirmLabel={request.confirmLabel}
+        tone={request.tone}
+        onConfirm={() => undefined}
+        onClose={() => setOpen(false)}
+      />
+    );
+  }
+  const titleOf = () => document.querySelector<HTMLElement>('[data-sk-modal-layer]:not([data-exiting]) h2 > span');
+
+  // 换 key 重挂的话遮罩断一帧；原地换内容的话初始聚焦只跑过一次，焦点还停在旧请求的确认键上，回车就删了
+  it("开着时被危险确认顶替（换 requestKey）：框不重挂，焦点回到「取消」，新的标题与正文淡入", () => {
+    mount(<Commanded />);
+    const layer = document.querySelector("[data-sk-modal-layer]");
+    expect(document.activeElement).toBe(byText("切换并重下"));
+    expect(titleOf()?.style.opacity).toBe("1");
+
+    act(() => confirmHandles.set?.(REMOVE));
+    expect(document.querySelectorAll("[data-sk-modal-layer]")).toHaveLength(1);
+    expect(document.querySelector("[data-sk-modal-layer]")).toBe(layer);
+    expect(document.activeElement).toBe(byText("取消"));
+    expect(byText("删除实例").dataset.variant).toBe("danger");
+    // 淡入刚开始：内联透明度是 0 或刚起步的小数（不是空串，空串说明根本没有淡入）
+    const FADING = /^0(\.\d+)?$/;
+    expect(titleOf()?.textContent).toBe("删除「生存」？");
+    expect(titleOf()?.style.opacity).toMatch(FADING);
+    const body = document.querySelector<HTMLElement>("[role='dialog'] [data-padded] > div");
+    expect(body?.textContent).toBe("第 2 个请求");
+    expect(body?.style.opacity).toMatch(FADING);
+  });
+
+  it("关上之后再来的请求：换一层新的框，标题随弹窗入场、不单独淡入", async () => {
+    mount(<Commanded />);
+    act(() => confirmHandles.set?.(REMOVE));
+    act(() => confirmHandles.close?.());
+    act(() => confirmHandles.set?.(ENDGAME));
+    expect(titleOf()?.textContent).toBe("结束游戏？");
+    expect(titleOf()?.style.opacity).toBe("1");
+    // 旧框还在退场、排在前面：只认没在退场的那一层
+    const cancel = [...document.querySelectorAll<HTMLElement>("[data-sk-modal-layer]:not([data-exiting]) button")].find((b) => b.textContent === "取消");
+    expect(document.activeElement).toBe(cancel);
+    await vi.waitFor(() => expect(dialogs()).toHaveLength(1), { timeout: 3000, interval: 20 });
+  });
+
   it("确认键不能写「确定」这类不说明动作的泛称", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     expect(() => mount(<ConfirmDialog open title="删除账户 Alex？" confirmLabel="确定" tone="danger" onConfirm={() => undefined} onClose={() => undefined} />)).toThrow(
@@ -514,6 +582,28 @@ describe("弹窗随内容改变尺寸", () => {
     const arrived = subtitleOf("存档备份");
     expect(arrived?.textContent).toBe("3 份备份");
     expect(Number(arrived?.style.opacity)).toBeLessThan(1);
+  });
+
+  // 主体里的布局动画（列表增删、指示块）按滚动后的位置量：主体不是 layoutScroll 节点时，
+  // 内容变矮、滚动位置被夹回的那一下，主体里的元素从错开一个滚动量的起点滑过来。jsdom 不做布局，只能看投影节点的配置
+  it("主体是按滚动量校正的投影节点；面板与头部不是", () => {
+    mount(
+      <Modal open onClose={() => undefined} title="更新预览" footer={<Button>更新</Button>}>
+        <p data-testid="content" />
+      </Modal>,
+    );
+    const dialog = dialogs()[0];
+    const body = document.querySelector('[data-testid="content"]')?.parentElement;
+    const head = dialog.firstElementChild;
+    expect(head?.querySelector("h2")?.textContent).toBe("更新预览");
+    const optionsOf = (el: Element | null | undefined) => {
+      const projection = visualElementStore.get(el)?.projection;
+      if (projection === undefined) throw new Error("不是布局投影节点");
+      return projection.options;
+    };
+    expect(optionsOf(body).layoutScroll).toBe(true);
+    expect(optionsOf(dialog).layoutScroll).not.toBe(true);
+    expect(optionsOf(head).layoutScroll).not.toBe(true);
   });
 
   it("副标题不传：不占位", () => {

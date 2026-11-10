@@ -19,13 +19,11 @@ function rule(selector: string): Map<string, string> {
 }
 
 describe("快览列表的滚动条槽位", () => {
-  it("滚动区常驻槽位，列表右侧不再加内边距，右边留白由槽承担", () => {
-    const scroller = rule(".scroller");
-    expect(scroller.get("overflow-y")).toBe("auto");
-    expect(scroller.get("scrollbar-gutter")).toBe("stable");
-    expect(scroller.get("max-height")).toBe("320px");
+  it("滚动交给浮层的主体（常驻槽位）并封顶 320；列表右侧不再加内边距，右边留白由槽承担", () => {
+    expect(rule(".popover").get("--popover-body-max-height")).toBe("320px");
     expect(rule(".list").get("padding")).toBe("0 0 var(--sk-space-8) var(--sk-space-8)");
-    expect(rule(".list").has("overflow-y")).toBe(false);
+    // 自己不再另开滚动区：两层滚动容器会叠出两道槽，主体形变途中不滚动的约定也管不到里面那一层
+    expect(css).not.toMatch(/overflow(-y)?\s*:\s*(auto|scroll)/);
   });
 });
 

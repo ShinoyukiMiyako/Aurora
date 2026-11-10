@@ -13,7 +13,7 @@
 // - 冷启动：实例与固定列表晚于窗口显示才读到，固定区与新建按钮等这两片数据到了再一起淡入，不先画空的再被顶开。
 
 import { AnimatePresence, animate, motion, useMotionValue, useReducedMotionConfig, type MotionValue } from "framer-motion";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type Ref } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type Ref } from "react";
 import { Icon, type IconName } from "../art/Icon";
 import { ACTION_ERROR, AVATAR_LINE, LAUNCH_COPY, PAGE_LABEL, STOPPED_LABEL } from "../copy/flows";
 import type { InstanceSummary } from "../domain/adapt";
@@ -33,6 +33,7 @@ import { useUpdater } from "../state/updater/useUpdater";
 import { Menu, type MenuEntry, type MenuItem, type MenuOpenedBy } from "../ui/Menu";
 import { Tooltip } from "../ui/Tooltip";
 import { useChrome } from "./chrome";
+import { useOverlayRoot } from "./overlay";
 import { SHELL_ACTION_ERROR, SIDEBAR_COPY } from "../copy/shell";
 import { PIN_SHORTCUT_COUNT, SHORTCUT_PAGES, type ShortcutPage } from "./keys";
 import { useNav, useShell } from "./shell";
@@ -127,6 +128,15 @@ export function dragShift(index: number, from: number, over: number): number {
 const isPinKey = (key: SidebarKey): key is `pin:${string}` => key.startsWith("pin:");
 
 /**
+ * 元素自己的透明度过渡是不是还在播。滑块收起后调用，在播就是淡出还没播完。
+ * 运行环境没有 Web Animations（组件测试的 jsdom）时没有过渡可播。
+ */
+function fadingOut(el: HTMLElement): boolean {
+  if (typeof el.getAnimations !== "function") return false;
+  return el.getAnimations().some((animation) => animation instanceof CSSTransition && animation.transitionProperty === "opacity");
+}
+
+/**
  * el 相对 ancestor 的纵向布局位置：沿定位祖先逐级累加 offsetTop，途中的滚动容器扣掉已滚过的距离。
  * 只看布局，不含任何位移（拖动、补间里的 transform 另算），所以不受位移写没写进 DOM 的时机影响。
  */
@@ -210,8 +220,22 @@ export function Sidebar() {
   const orderKey = pinIds.join("\n");
   const lastOrderKey = useRef(orderKey);
   const before = useRef<Map<string, number> | null>(null);
-  /** 刚拖动松手、提交了新顺序的那一项：新顺序落地后它用 pop 飞进空位，其余项照常 settle。 */
-  const dropped = useRef<string | null>(null);
+  /**
+   * 刚拖动松手、提交了新顺序的那一项：新顺序落地后它用 pop 飞进空位，其余项照常 settle。
+   * 每次松手一个新对象：提交落定时按身份认出还是不是自己这一次。
+   */
+  const dropped = useRef<{ id: string } | null>(null);
+  /** 拿起的那一项：拖动中，以及松手之后到新顺序落地（或提交落定）之前。 */
+  const [dragging, setDragging] = useState<string | null>(null);
+  /** 刚放下的那一项：拿起时的放大按 pop 缩回，与位置飞回同一条弹簧。缩回播完或下一次按下固定项时清掉。 */
+  const [landing, setLanding] = useState<string | null>(null);
+  // 放下：此前这一项一直保持拿起的样子。新顺序落地时 React 可能把它的节点挪了位置，挪动会掐掉已经起步的
+  // CSS 过渡（缩回与阴影淡出就一帧跳完），所以等落地、节点挪完再放下。期间又拿起了别的项时不动那一项
+  const putDown = useCallback((id: string) => {
+    setDragging((current) => (current === id ? null : current));
+    setLanding(id);
+  }, []);
+  const onLanded = useCallback((id: string) => setLanding((current) => (current === id ? null : current)), []);
   // 顺序或成员一变，在这次提交改动 DOM 之前记下每一项此刻的视觉位置（布局位置 + 当前位移）
   if (orderKey !== lastOrderKey.current) {
     lastOrderKey.current = orderKey;
@@ -230,15 +254,17 @@ export function Sidebar() {
     const snapshot = before.current;
     before.current = null;
     if (snapshot === null) return;
-    const landing = dropped.current;
+    const drop = dropped.current;
     dropped.current = null;
     for (const [id, h] of handles.current) {
       const was = snapshot.get(id);
       if (was === undefined) continue;
       h.y.jump(was - h.el.offsetTop);
-      settle(h.y, 0, id === landing ? springs.pop : springs.settle);
+      settle(h.y, 0, drop !== null && id === drop.id ? springs.pop : springs.settle);
     }
-  }, [orderKey, settle]);
+    // 上面读布局时节点已经挪好、样式按拿起的样子算过一次：这时放下，过渡从挪好的节点上起步
+    if (drop !== null) putDown(drop.id);
+  }, [orderKey, putDown, settle]);
 
   const register = useCallback((id: string, handle: PinHandle | null) => {
     if (handle === null) handles.current.delete(id);
@@ -254,6 +280,11 @@ export function Sidebar() {
   selectionRef.current = selection;
   // 选中的固定项被拖动、或在重排补间途中时，滑块跟着它的位移走
   const followY = useMotionValue(0);
+  // 侧栏挂上的那一次提交还没过去：这期间摆出来的滑块直接是成品（冷启动时侧栏直接出现，不做入场）
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
 
   const placeSelection = useCallback(
     (key: SidebarKey | null, how: "slide" | "jump") => {
@@ -271,11 +302,20 @@ export function Sidebar() {
       }
       if (shown.current === key && how === "slide") return;
       if (slide.current === null) slide.current = new Slide(el, "settle");
-      const top = topWithin(row, capsule);
-      // 从没显示到显示：直接出现在那一行上淡入，不从上一次停的地方飞过来
-      if (how === "jump" || shown.current === null || reduced) slide.current.jump(0, top);
-      else slide.current.to(0, top);
+      // 从收起到显出：关着过渡先把种类换好，显出来时浅底已经是该有的样子，不先显出再淡掉。
+      // 侧栏挂上的那一次提交里连显出也关着过渡。下面读布局时浏览器按此刻的属性算一次样式，
+      // 这一次关着过渡就不起过渡；之后再打开过渡、值没再变，也不会补播。
+      // 上一次的淡出还没播完（进账户页后马上点回侧栏）时不关：关了会掐掉淡出、一帧跳到全透明再淡入，
+      // 照常过渡才是从此刻的透明度反向淡回。查询会先把挂起的样式算一遍，所以排在下面改属性之前
+      const appearing = shown.current === null;
+      if (appearing && !fadingOut(el)) el.setAttribute("data-instant", "");
       el.dataset.kind = isPinKey(key) ? "pin" : "nav";
+      if (!mounted.current) el.setAttribute("data-on", "");
+      const top = topWithin(row, capsule);
+      el.removeAttribute("data-instant");
+      // 从没显示到显示：直接出现在那一行上淡入，不从上一次停的地方飞过来
+      if (how === "jump" || appearing || reduced) slide.current.jump(0, top);
+      else slide.current.to(0, top);
       el.setAttribute("data-on", "");
       shown.current = key;
     },
@@ -330,7 +370,6 @@ export function Sidebar() {
 
   // ---- 拖动排序
   const drag = useRef<DragState | null>(null);
-  const [dragging, setDragging] = useState<string | null>(null);
   const suppressClick = useRef(false);
   const pinsRef = useRef(pins);
   pinsRef.current = pins;
@@ -341,19 +380,26 @@ export function Sidebar() {
     return h;
   };
 
+  /** 拖动没有换成顺序（放弃，或提交了却没换）：所有项按 pop 弹回原位。 */
+  const springBack = useCallback(() => {
+    for (const h of handles.current.values()) settle(h.y, 0, springs.pop);
+  }, [settle]);
+
   const cancelDrag = useCallback(() => {
     const d = drag.current;
     drag.current = null;
-    setDragging(null);
     if (d === null || !d.active) return;
-    for (const h of handles.current.values()) settle(h.y, 0, springs.pop);
-  }, [settle]);
+    putDown(d.id);
+    springBack();
+  }, [putDown, springBack]);
 
   // 拖动中 Esc 放弃
   useEffect(() => {
     if (dragging === null) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      // 已经松手、只是等新顺序落地：没有可放弃的拖动，Esc 照常交给别处。这期间按下了另一项、还没拖起来，
+      // 也还只是一次点击，与平时没在拖时一样放行，不吞 Esc、不屏蔽随后的点击
+      if (event.key !== "Escape" || drag.current === null || !drag.current.active) return;
       event.preventDefault();
       event.stopPropagation();
       // 指针还按着：松手后浏览器照样补发一次 click，放弃了的拖动不能变成一次点击
@@ -368,6 +414,8 @@ export function Sidebar() {
     if (event.button !== 0 || drag.current !== null) return;
     // 新的一次按下：上一次手势没等到补发的 click（松在了别处），留下的屏蔽不能吞掉这一次
     suppressClick.current = false;
+    // 按下的缩小走平常的 tap，不沿用刚放下那一项的 pop
+    setLanding(null);
     drag.current = { id, pointerId: event.pointerId, startY: event.clientY, from: index, over: index, active: false };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
@@ -409,26 +457,38 @@ export function Sidebar() {
       cancelDrag();
       return;
     }
+    // 拿起的样子留着，等新顺序落地（FLIP 认领这次松手）再放下，见 putDown
     drag.current = null;
-    setDragging(null);
-    dropped.current = d.id;
-    commitOrder(moveItem(pinsRef.current.map((p) => p.id), d.from, d.over));
+    const mark = { id: d.id };
+    dropped.current = mark;
+    void run(() => actions.setSidebarPins(moveItem(pinsRef.current.map((p) => p.id), d.from, d.over)), ACTION_ERROR.pin).then(() => {
+      // 新顺序落地时 FLIP 已经认领了这次松手。落定了还没认领，就是显示的顺序根本没变（安装中自动固定的项
+      // 总排在末尾、写不进固定顺序，越过它们的拖动等于没换）：FLIP 不会再来，在这里放下，被拖项与让位的项
+      // 弹回原位；记号也在这里清掉，免得之后一次不相干的增删让这一项误用 pop
+      if (dropped.current !== mark) return;
+      dropped.current = null;
+      putDown(mark.id);
+      // 这期间又拖起了一项：位移归那次拖动管，它松手或放弃时自会归位
+      if (drag.current !== null && drag.current.active) return;
+      springBack();
+    });
   };
 
   // ---- 右键菜单
   // 每个固定项各有一个菜单槽：菜单开着时右键另一项，旧菜单在自己的槽里播完退场，新菜单另起，
-  // 不会因为换了一项就被连根卸掉、一帧消失
+  // 不会因为换了一项就被连根卸掉、一帧消失。关上的槽播完退场就卸掉，不常驻
   const [menus, setMenus] = useState<readonly MenuState[]>([]);
   const openMenu = (id: string, target: HTMLElement, openedBy: MenuOpenedBy) => {
     const capsule = capsuleRef.current;
     if (capsule === null) throw new Error("侧栏胶囊还没挂载");
     // 菜单贴着胶囊外缘、与该项顶边对齐
     const next: MenuState = { id, anchor: { clientX: capsule.getBoundingClientRect().right, clientY: target.getBoundingClientRect().top }, openedBy, open: true };
-    const pinned = pinsRef.current.map((p) => p.id);
-    // 关着的槽只留还固定着的项：取消固定的那一项早已退场完，留着只是多一份订阅
-    setMenus((list) => [...list.filter((m) => m.id !== id && (m.open || pinned.includes(m.id))).map((m) => (m.open ? { ...m, open: false } : m)), next]);
+    // 关着的槽可能还在播退场（指针右键另一项时，旧菜单已被外部按下先关上了）：留着，等它自己报告播完
+    setMenus((list) => [...list.filter((m) => m.id !== id).map((m) => (m.open ? { ...m, open: false } : m)), next]);
   };
   const closeMenu = useCallback(() => setMenus((list) => (list.some((m) => m.open) ? list.map((m) => (m.open ? { ...m, open: false } : m)) : list)), []);
+  /** 关上的菜单播完了退场：卸掉它的槽。期间又打开了同一项的不动。 */
+  const dropMenu = useCallback((id: string) => setMenus((list) => (list.some((m) => m.id === id && !m.open) ? list.filter((m) => m.id !== id || m.open) : list)), []);
   const menuOpen = menus.some((m) => m.open);
 
   // ---- 导航
@@ -502,6 +562,8 @@ export function Sidebar() {
                   selected={selection === pinKey(inst.id)}
                   tabStop={tabStop === pinKey(inst.id)}
                   dragging={dragging === inst.id}
+                  landing={landing === inst.id}
+                  onLanded={onLanded}
                   tooltipsOff={tooltipsOff}
                   register={register}
                   onPointerDown={onPinPointerDown}
@@ -532,7 +594,7 @@ export function Sidebar() {
         />
       </div>
       {menus.map((m) => (
-        <PinMenuSlot key={m.id} menu={m} pinIds={pinIds} onClose={closeMenu} onReorder={commitOrder} />
+        <PinMenuSlot key={m.id} menu={m} pinIds={pinIds} onClose={closeMenu} onReorder={commitOrder} onGone={dropMenu} />
       ))}
     </nav>
   );
@@ -690,6 +752,10 @@ interface PinItemProps extends ItemBaseProps {
   /** 挂载时播入场（新固定的项）；只在挂载那一刻读。 */
   enter: boolean;
   dragging: boolean;
+  /** 刚放下：拿起时的放大按 pop 缩回。 */
+  landing: boolean;
+  /** 放下后的缩回播完了。 */
+  onLanded(id: string): void;
   register(id: string, handle: PinHandle | null): void;
   onPointerDown(event: ReactPointerEvent<HTMLButtonElement>, id: string, index: number): void;
   onPointerMove(event: ReactPointerEvent<HTMLButtonElement>): void;
@@ -699,7 +765,7 @@ interface PinItemProps extends ItemBaseProps {
   onMenu(target: HTMLElement, openedBy: MenuOpenedBy): void;
 }
 
-function PinItem({ ref: presenceRef, instance, index, enter, selected = false, tabStop, tooltipsOff, dragging, register, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onActivate, onMenu }: PinItemProps) {
+function PinItem({ ref: presenceRef, instance, index, enter, selected = false, tabStop, tooltipsOff, dragging, landing, onLanded, register, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onActivate, onMenu }: PinItemProps) {
   const y = useMotionValue(0);
   // 每个固定项只随自己的启动视图变：别的实例的下载进度、这一局的游戏日志不让它重渲染
   const view = useLauncherSelector((s) => launchView(s, instance), launchViewEqual);
@@ -724,6 +790,7 @@ function PinItem({ ref: presenceRef, instance, index, enter, selected = false, t
       className={styles.row}
       data-sidebar-row=""
       data-dragging={dragging || undefined}
+      data-landing={landing || undefined}
       style={{ y }}
       initial={enter ? { opacity: 0, scale: 0.6 } : false}
       animate={{ opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } }}
@@ -749,6 +816,10 @@ function PinItem({ ref: presenceRef, instance, index, enter, selected = false, t
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerCancel}
+          onTransitionEnd={(event) => {
+            // 只认按钮自己的缩放：头像里的底色过渡会冒泡上来，抬起阴影叠层的透明度过渡也报在按钮上
+            if (landing && event.target === event.currentTarget && event.propertyName === "transform") onLanded(id);
+          }}
         >
           {/* 拖动中方块照样浮着：拿起是往上提，摘掉上浮会让它先瞬间落下 2px */}
           <InstanceAvatar instance={instance} size={40} base="neutral" selected={selected} />
@@ -801,14 +872,64 @@ export function pinLaunchItem(entry: Pick<LaunchEntry, "view" | "blocked" | "rep
   }
 }
 
-/** 一个固定项的菜单槽。实例已被删掉时不画：菜单里的启动入口按 id 取实例，取不到会抛错。 */
-function PinMenuSlot({ menu, pinIds, onClose, onReorder }: { menu: MenuState; pinIds: readonly string[]; onClose: () => void; onReorder: (ids: string[]) => void }) {
+/**
+ * 一个固定项的菜单槽。实例已被删掉时不画：菜单里的启动入口按 id 取实例，取不到会抛错。
+ * 关上之后面板还要播一会儿退场，退场播完、面板从浮层根里拿掉时报告 onGone，由侧栏卸掉这个槽：
+ * 关着的菜单不常驻，不再白白挂着启动入口的订阅（spawn_failed 时还会去读实例设置）。
+ */
+function PinMenuSlot({
+  menu,
+  pinIds,
+  onClose,
+  onReorder,
+  onGone,
+}: {
+  menu: MenuState;
+  pinIds: readonly string[];
+  onClose: () => void;
+  onReorder: (ids: string[]) => void;
+  onGone: (id: string) => void;
+}) {
   const instance = useLauncherSelector((s) => findInstance(s, menu.id));
+  const root = useOverlayRoot();
+  const menuId = useId();
+  const { open, id } = menu;
+  useEffect(() => {
+    if (open) return;
+    // 菜单不对外报告退场播完，面板拿掉就是播完了。按 id 找而不是记住元素：同一项关上又打开再关上时，
+    // 上一次的面板可能还在退场，两份都拿掉才算完
+    const gone = () => document.getElementById(menuId) === null;
+    if (root === null || gone()) {
+      onGone(id);
+      return;
+    }
+    const observer = new MutationObserver(() => {
+      if (!gone()) return;
+      observer.disconnect();
+      onGone(id);
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [id, menuId, onGone, open, root]);
   if (instance === undefined) return null;
-  return <PinMenu menu={menu} instance={instance} pinIds={pinIds} onClose={onClose} onReorder={onReorder} />;
+  return <PinMenu menu={menu} menuId={menuId} instance={instance} pinIds={pinIds} onClose={onClose} onReorder={onReorder} />;
 }
 
-function PinMenu({ menu, instance, pinIds, onClose, onReorder }: { menu: MenuState; instance: InstanceSummary; pinIds: readonly string[]; onClose: () => void; onReorder: (ids: string[]) => void }) {
+function PinMenu({
+  menu,
+  menuId,
+  instance,
+  pinIds,
+  onClose,
+  onReorder,
+}: {
+  menu: MenuState;
+  menuId: string;
+  instance: InstanceSummary;
+  pinIds: readonly string[];
+  onClose: () => void;
+  onReorder: (ids: string[]) => void;
+}) {
   const entry = useLaunch(instance.id);
   const actions = useLauncherActions();
   const { go } = useNav();
@@ -823,5 +944,5 @@ function PinMenu({ menu, instance, pinIds, onClose, onReorder }: { menu: MenuSta
     { label: SIDEBAR_COPY.moveDown, icon: "arrow-down", disabled: index < 0 || index >= pinIds.length - 1, onSelect: () => onReorder(moveItem(pinIds, index, index + 1)) },
     { label: SIDEBAR_COPY.unpin, icon: "pin-off", onSelect: () => void run(() => actions.togglePin(instance.id), ACTION_ERROR.pin) },
   ];
-  return <Menu open={menu.open} anchor={menu.anchor} onClose={onClose} items={items} openedBy={menu.openedBy} placement="right-start" aria-label={SIDEBAR_COPY.menuLabel(instance.name)} />;
+  return <Menu id={menuId} open={menu.open} anchor={menu.anchor} onClose={onClose} items={items} openedBy={menu.openedBy} placement="right-start" aria-label={SIDEBAR_COPY.menuLabel(instance.name)} />;
 }

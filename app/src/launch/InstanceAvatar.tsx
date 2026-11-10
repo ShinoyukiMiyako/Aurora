@@ -16,7 +16,7 @@ import { useBreathPhase } from "./breath";
 import { useInstanceCover } from "./cover";
 import styles from "./InstanceAvatar.module.css";
 import { launchView, type LaunchView } from "./launchView";
-import { useMounted } from "./useMounted";
+import { useMounted } from "../lib/useMounted";
 
 export type { InstanceAvatarSize } from "../art/iso/InstanceAvatarBase";
 

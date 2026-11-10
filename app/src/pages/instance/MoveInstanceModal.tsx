@@ -1,8 +1,9 @@
 // 移到其他游戏目录：选目标（记下的别的游戏目录，或经系统对话框选一个文件夹）-> 预检 -> 确认后入队移动任务。
 // 头图菜单与实例库卡片菜单经 AnimatePresence 只在打开时挂载它；每选一次目标都重新预检，不用上次的结果。
 // 实例此刻能不能移（实例与基底上的活动）由调用方经 lockReason 给出，打开期间被锁时主按钮据此禁用、选择保留。
+//
+// 弹窗面板随内容形变只在渲染 Modal 的这一层重渲染时才接得住：目录列表与预检的加载门、上一份预检结果都放在这一层。
 
-import { motion } from "framer-motion";
 import { useState } from "react";
 import { Icon } from "../../art/Icon";
 import { Spinner } from "../../art/Spinner";
@@ -10,19 +11,23 @@ import { ACTION_ERROR, moveBlockerReason } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatBytes } from "../../domain/format";
 import { dirName, samePath } from "../../domain/paths";
-import { tabPanel } from "../../lib/motion";
+import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
+import { useReflow } from "../../lib/reflow";
 import { useRunner } from "../../shell/useRunner";
 import { errorRecord } from "../../state/errors";
 import { useLauncherActions } from "../../state/launcher";
 import { useGameDirectories, type GameDirectoryDto } from "../../state/queries/catalog";
 import { useInstanceMovePreview, type MovePreviewDto } from "../../state/queries/instance";
+import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Inset } from "../../ui/Inset";
 import { KV, type KVRow } from "../../ui/KV";
 import { List, ListRow } from "../../ui/ListRow";
+import { Loadable } from "../../ui/Loadable";
 import { Modal } from "../../ui/Modal";
 import { SectionTitle } from "../../ui/SectionTitle";
+import { Skeleton } from "../../ui/Skeleton";
 import { WarnNote } from "../../ui/WarnNote";
 import { usePickFolder } from "../discover/platform";
 import { MOVE_COPY } from "./copy";
@@ -57,15 +62,40 @@ export function moveSubmitReason(target: string | null, preview: { status: "load
   return lockReason;
 }
 
+/**
+ * 预检区此刻画什么。held 是上一份已经摆出来的结果：换目标后新结果回来之前继续摆着它（加载门亮出加载态后压暗），
+ * 不先塌成加载态再撑开。新结果、失败都要等加载门放行（骨架至少停留的那段时间）才换上。
+ */
+export function moveCheckView(
+  gate: LoadingView,
+  preview: { status: "loading" | "ready" | "error"; data?: MovePreviewDto },
+  held: MovePreviewDto | null,
+): { view: LoadingView; shown: MovePreviewDto | null; failed: boolean; stale: boolean } {
+  const settled = gate === "content";
+  const shown = settled ? (preview.status === "ready" && preview.data !== undefined ? preview.data : null) : held;
+  const failed = settled && preview.status === "error";
+  return { view: shown !== null || failed ? "content" : gate, shown, failed, stale: gate === "skeleton" && shown !== null };
+}
+
 export function MoveInstanceModal({ inst, lockReason, onRename, onClose }: MoveInstanceModalProps) {
   const run = useRunner();
   const actions = useLauncherActions();
   const pickFolder = usePickFolder();
   const dirs = useGameDirectories();
+  const dirsGate = useLoadingGate(dirs.status === "loading");
   const [target, setTarget] = useState<string | null>(null);
   // 经对话框选的、不在列表里的文件夹：列在别的目录之后，选别的目录时也留着，方便选回来
   const [picked, setPicked] = useState<string | null>(null);
   const preview = useInstanceMovePreview(inst.id, target);
+  // 还没选目标时不算在加载：否则选中的那一刻加载门早已过了等待期，骨架会立刻亮出来
+  const checkGate = useLoadingGate(target !== null && preview.status === "loading");
+  const [held, setHeld] = useState<MovePreviewDto | null>(null);
+  const check = moveCheckView(checkGate.view, preview, held);
+  if (checkGate.view === "content" && held !== check.shown) setHeld(check.shown);
+
+  // 让位：目录列表多出一行时「选择其他文件夹」滑下去；目标区变高时预检区滑下去
+  const bodyReflow = useReflow<HTMLDivElement>();
+  const targetsReflow = useReflow<HTMLDivElement>();
 
   const listed = dirs.status === "ready" ? dirs.data : [];
   const others = otherDirectories(listed);
@@ -81,8 +111,9 @@ export function MoveInstanceModal({ inst, lockReason, onRename, onClose }: MoveI
     setTarget(known === null ? outcome.value : known);
   };
 
-  const ready = preview.status === "ready" && target !== null ? preview.data : null;
-  const submitReason = moveSubmitReason(target, preview, lockReason);
+  // 能确认的只有已经摆出来的那份结果：加载门还亮着加载态时（含骨架至少停留的那段）不算回来
+  const ready = checkGate.view === "content" && target !== null ? check.shown : null;
+  const submitReason = moveSubmitReason(target, checkGate.view === "content" ? preview : { status: "loading" }, lockReason);
 
   const submit = async () => {
     if (ready === null) throw new Error("没有预检结果时不能移动");
@@ -106,84 +137,130 @@ export function MoveInstanceModal({ inst, lockReason, onRename, onClose }: MoveI
 
   return (
     <Modal open onClose={onClose} closeOnScrim={false} title={MOVE_COPY.title} icon="folder-open" subtitle={MOVE_COPY.subtitle(inst.name)} size="md" footer={footer}>
-      <div className={styles.body}>
+      <div ref={bodyReflow} className={styles.body}>
         <section className={styles.block}>
           <SectionTitle level={3}>{MOVE_COPY.targetsLabel}</SectionTitle>
-          {dirs.status === "error" ? (
-            <Callout
-              tone="danger"
-              announce
-              action={
-                <Button variant="ghost" size="sm" onClick={dirs.reload}>
-                  {MOVE_COPY.retry}
-                </Button>
-              }
-            >
-              {errorRecord(dirs.error).message}
-            </Callout>
-          ) : dirs.status === "loading" ? (
-            <div className={styles.checking} aria-busy="true">
-              <Spinner size={20} />
-            </div>
-          ) : (
-            <>
-              {others.length === 0 && pickedRow === null && <p className={styles.hint}>{MOVE_COPY.noOthers}</p>}
-              {(others.length > 0 || pickedRow !== null) && (
-                <List select={{ selected: target, onSelect: setTarget }} aria-label={MOVE_COPY.targetsLabel}>
-                  {others.map((dir) => (
-                    <ListRow
-                      key={dir.path}
-                      value={dir.path}
-                      leading={<Icon name="folder" size={20} />}
-                      title={dir.name}
-                      meta={<span className={styles.path}>{dir.available ? dir.path : `${dir.path} · ${MOVE_COPY.unavailable}`}</span>}
-                      disabled={!dir.available}
-                    />
-                  ))}
-                  {pickedRow !== null && (
-                    <ListRow
-                      key={pickedRow}
-                      value={pickedRow}
-                      leading={<Icon name="folder-open" size={20} />}
-                      title={dirName(pickedRow)}
-                      meta={<span className={styles.path}>{`${pickedRow} · ${pickedIsCurrent ? MOVE_COPY.pickedCurrent : MOVE_COPY.pickedNew}`}</span>}
-                    />
-                  )}
-                </List>
-              )}
-              <Button variant="secondary" size="sm" icon="folder-open" className={styles.pick} onClick={() => void pick()}>
-                {MOVE_COPY.pickFolder}
-              </Button>
-            </>
-          )}
+          <Loadable view={dirsGate.view} skeleton={<TargetsSkeleton />}>
+            {() =>
+              dirs.status === "error" ? (
+                <Callout
+                  tone="danger"
+                  announce
+                  action={
+                    <Button variant="ghost" size="sm" onClick={dirs.reload}>
+                      {MOVE_COPY.retry}
+                    </Button>
+                  }
+                >
+                  {errorRecord(dirs.error).message}
+                </Callout>
+              ) : (
+                <div ref={targetsReflow} className={styles.block}>
+                  <Appear>
+                    {others.length === 0 && pickedRow === null ? (
+                      <p key="none" className={styles.hint}>
+                        {MOVE_COPY.noOthers}
+                      </p>
+                    ) : (
+                      <List key="dirs" select={{ selected: target, onSelect: setTarget }} aria-label={MOVE_COPY.targetsLabel}>
+                        {others.map((dir) => (
+                          <ListRow
+                            key={dir.path}
+                            value={dir.path}
+                            leading={<Icon name="folder" size={20} />}
+                            title={dir.name}
+                            meta={<span className={styles.path}>{dir.available ? dir.path : `${dir.path} · ${MOVE_COPY.unavailable}`}</span>}
+                            disabled={!dir.available}
+                          />
+                        ))}
+                        {pickedRow !== null && (
+                          <ListRow
+                            key={pickedRow}
+                            value={pickedRow}
+                            leading={<Icon name="folder-open" size={20} />}
+                            title={dirName(pickedRow)}
+                            meta={<span className={styles.path}>{`${pickedRow} · ${pickedIsCurrent ? MOVE_COPY.pickedCurrent : MOVE_COPY.pickedNew}`}</span>}
+                          />
+                        )}
+                      </List>
+                    )}
+                  </Appear>
+                  <Button variant="secondary" size="sm" icon="folder-open" className={styles.pick} onClick={() => void pick()}>
+                    {MOVE_COPY.pickFolder}
+                  </Button>
+                </div>
+              )
+            }
+          </Loadable>
         </section>
 
-        {target !== null && (
-          <motion.section key={target} className={styles.block} variants={tabPanel} initial="hidden" animate="show" aria-live="polite">
-            {preview.status === "error" ? (
-              <Callout
-                tone="danger"
-                announce
-                action={
-                  <Button variant="ghost" size="sm" onClick={preview.reload}>
-                    {MOVE_COPY.retry}
-                  </Button>
-                }
-              >
-                {`${MOVE_COPY.previewError}：${errorRecord(preview.error).message}`}
-              </Callout>
-            ) : ready === null ? (
-              <div className={styles.checking} aria-busy="true">
-                <Spinner size={20} />
-                <span>{MOVE_COPY.checking}</span>
-              </div>
-            ) : (
-              <MovePreview preview={ready} pinned={inst.pinned} onRename={onRename} />
-            )}
-          </motion.section>
-        )}
+        <Appear>
+          {target !== null && (
+            <section key="check" className={styles.block} aria-live="polite">
+              <Loadable view={check.view} skeleton={<PreviewSkeleton />}>
+                {() => {
+                  if (check.failed && preview.status === "error") {
+                    return (
+                      <Callout
+                        tone="danger"
+                        announce
+                        action={
+                          <Button variant="ghost" size="sm" onClick={preview.reload}>
+                            {MOVE_COPY.retry}
+                          </Button>
+                        }
+                      >
+                        {`${MOVE_COPY.previewError}：${errorRecord(preview.error).message}`}
+                      </Callout>
+                    );
+                  }
+                  if (check.shown === null) throw new Error("预检区画内容时既没有结果也没有失败");
+                  return <MovePreview preview={check.shown} stale={check.stale} pinned={inst.pinned} onRename={onRename} />;
+                }}
+              </Loadable>
+            </section>
+          )}
+        </Appear>
       </div>
     </Modal>
+  );
+}
+
+/** 目录列表读取中：一行目录与「选择其他文件夹」按钮的占位，行高、按钮高与真实内容一致。 */
+function TargetsSkeleton() {
+  return (
+    <div className={styles.block}>
+      <List>
+        <ListRow
+          key="dir"
+          leading={<Skeleton shape="block" width={20} height={20} radius="xs" />}
+          title={<Skeleton shape="text" width="32%" />}
+          meta={<Skeleton shape="text" width="64%" />}
+        />
+      </List>
+      <Skeleton shape="block" width={PICK_SKELETON_WIDTH} height={30} radius="sm" className={styles.pick} />
+    </div>
+  );
+}
+
+/** 「选择其他文件夹…」小号按钮的大致宽度。 */
+const PICK_SKELETON_WIDTH = 140;
+
+/** 每份预检都有的几行；版本两行（要带过去的、目标里已有的）看目标而定，骨架不画。 */
+const PREVIEW_SKELETON_LABELS = [MOVE_COPY.instance, MOVE_COPY.backups, MOVE_COPY.shared, MOVE_COPY.write, MOVE_COPY.free] as const;
+
+/** 预检进行中：摘要的键照常写出、值画成骨架，说明块的位置写「正在检查」，与回来的结果同一个排布。 */
+function PreviewSkeleton() {
+  return (
+    <div className={styles.preview}>
+      <Inset>
+        <KV rows={PREVIEW_SKELETON_LABELS.map((label) => ({ label, value: <Skeleton shape="text" width={96} /> }))} />
+      </Inset>
+      <div className={styles.checking}>
+        <Spinner size={20} decorative />
+        <span>{MOVE_COPY.checking}</span>
+      </div>
+    </div>
   );
 }
 
@@ -199,17 +276,21 @@ function summaryRows(preview: MovePreviewDto): KVRow[] {
   return rows;
 }
 
-function MovePreview({ preview, pinned, onRename }: { preview: MovePreviewDto; pinned: boolean; onRename(): void }) {
+/** stale：这是上一个目标的结果，新目标的预检还没回来，压暗摆着。 */
+function MovePreview({ preview, stale, pinned, onRename }: { preview: MovePreviewDto; stale: boolean; pinned: boolean; onRename(): void }) {
+  // 换目标后说明块、拦截项与提醒行会增减：排在后面的从原位置滑过去
+  const reflow = useReflow<HTMLDivElement>();
   const blocked = preview.blockers.length > 0;
   const nameTaken = preview.blockers.some((b) => b.kind === "name_taken");
   return (
-    <>
+    <div ref={reflow} className={styles.preview} data-stale={stale || undefined} aria-busy={stale || undefined}>
       <Inset>
         <KV rows={summaryRows(preview)} />
       </Inset>
-      {blocked ? (
-        <>
+      <Appear>
+        {blocked ? (
           <Callout
+            key="blocked"
             tone="danger"
             announce
             action={
@@ -222,20 +303,24 @@ function MovePreview({ preview, pinned, onRename }: { preview: MovePreviewDto; p
           >
             {MOVE_COPY.blockedTitle}
           </Callout>
-          <ul className={styles.blockers} aria-label={MOVE_COPY.blockedTitle}>
+        ) : (
+          <Callout key="volume" tone="info">
+            {preview.same_volume ? MOVE_COPY.sameVolume : MOVE_COPY.crossVolume}
+          </Callout>
+        )}
+        {blocked && (
+          <ul key="blockers" className={styles.blockers} aria-label={MOVE_COPY.blockedTitle}>
             {preview.blockers.map((blocker) => (
               <li key={blocker.kind}>
                 <WarnNote>{moveBlockerReason(blocker)}</WarnNote>
               </li>
             ))}
           </ul>
-        </>
-      ) : (
-        <Callout tone="info">{preview.same_volume ? MOVE_COPY.sameVolume : MOVE_COPY.crossVolume}</Callout>
-      )}
-      {!preview.isolated && <WarnNote>{MOVE_COPY.notIsolated}</WarnNote>}
-      {preview.missing_in_source > 0 && <WarnNote>{MOVE_COPY.missingInSource(preview.missing_in_source)}</WarnNote>}
-      {pinned && !blocked && <WarnNote>{MOVE_COPY.pinned}</WarnNote>}
-    </>
+        )}
+        {!preview.isolated && <WarnNote key="isolated">{MOVE_COPY.notIsolated}</WarnNote>}
+        {preview.missing_in_source > 0 && <WarnNote key="missing">{MOVE_COPY.missingInSource(preview.missing_in_source)}</WarnNote>}
+        {pinned && !blocked && <WarnNote key="pinned">{MOVE_COPY.pinned}</WarnNote>}
+      </Appear>
+    </div>
   );
 }

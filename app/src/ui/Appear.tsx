@@ -10,11 +10,12 @@
 // 退场中的那一层带 inert：它已经让出位置、叠在顶上来的兄弟上面淡出，点不到、聚焦不到，读屏也不再读它。
 // 按选择器找子项的代码与测试用 :not([inert]) 排除它（列表行的退场也是这个约定）。
 // 放在页面一级区块的位置上时：挂载时就在的子项跟着页面入场；之后出现的子项由这里淡入，里面的区块不再叠一层页面淡入。
+// 空的时候不占入场序号，有子项时占一个。
 
 import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
 import { Children, isValidElement, useEffect, useRef, type ReactNode, type Ref } from "react";
 import { fade, insertItem } from "../lib/motion";
-import { EntranceGate } from "./Page";
+import { EntranceGate, spreadsEntrance } from "./Page";
 
 export interface AppearProps {
   children: ReactNode;
@@ -69,3 +70,7 @@ export function Appear({ children, itemClassName, initial = false }: AppearProps
     </AnimatePresence>
   );
 }
+
+// 作为 Page 或 Bento 的直接子项时：空的不占入场序号，下面的区块不该为一个什么都没有的块晚一拍。
+// 有子项时只占一个号，几个子项一起入场。与 numberEntrance 同样按 Children.toArray 计数：false、null、undefined、空数组都算空
+spreadsEntrance(Appear, (props: AppearProps) => (Children.toArray(props.children).length > 0 ? 1 : 0));

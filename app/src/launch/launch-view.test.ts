@@ -4,6 +4,7 @@ import type { Task } from "../domain/types";
 import { applyPhase, sessionCancelled, sessionCrashClue, sessionExited, sessionFailed, sessionLaunched, startSession, type SessionState } from "../state/session";
 import type { LauncherState } from "../state/store";
 import { newTask } from "../state/tasks";
+import type { AssemblyClock } from "../art/iso/AssemblingBlock";
 import { avatarIndicator, ringGeometry } from "./InstanceAvatar";
 import { capsuleSwap } from "../lib/motion";
 import { capsuleLayoutKey, faceKey, fillOf, holdFor, placedForProgress, placedForStage, TEXT_SLOTS } from "./LaunchCapsule";
@@ -272,20 +273,58 @@ describe("头像指示与胶囊换面", () => {
     expect([0, 0.33, 1 / 3, 0.66, 2 / 3, 1].map(placedForProgress)).toEqual([1, 1, 2, 2, 3, 3]);
   });
 
-  it("加载换到取消、失败、运行时先留住旧面演完方块动画；其余直接换", () => {
+  describe("换面前留住旧面", () => {
     const a = inst("A");
     const prev = launchView(state({ session: loading("A", 4) }), a);
     const cancelled = launchView(state({ session: sessionCancelled(loading("A", 4), "launch-1", T0) }), a);
-    expect(holdFor(prev, cancelled)).toMatchObject({ exit: "disassemble", seat: false, ms: capsuleSwap.holdMs.disassemble });
     const failed = launchView(state({ session: sessionFailed(loading("A"), "launch-1", { code: "version_broken", params: {} }, T0) }), a);
-    expect(holdFor(prev, failed)).toMatchObject({ exit: "collapse", ms: capsuleSwap.holdMs.collapse });
-    // 下载阶段已落 2 面：剩 1 面立即落下，120 ms 后坐定，再过 200 ms 换到运行面
-    expect(holdFor(prev, launchView(state({ session: running("A") }), a))).toMatchObject({ exit: null, seat: true, ms: 120 + 200 });
-    const launchingPrev = launchView(state({ session: loading("A", 7) }), a);
-    expect(holdFor(launchingPrev, launchView(state({ session: running("A") }), a))?.ms).toBe(200);
-    expect(holdFor({ kind: "ready", busyElsewhere: false }, prev)).toBeNull();
-    expect(faceKey(cancelled)).toBe("stopped:cancelled");
-    expect(faceKey(prev)).toBe("loading");
+    const runningView = launchView(state({ session: running("A") }), a);
+    const now = 50_000;
+    /** 面早就落定了（挂载时就在，或落下已久）。 */
+    const settledAt = (shown: number): AssemblyClock => ({ shown, lastDropAt: Number.NEGATIVE_INFINITY, firstDropAt: Number.NEGATIVE_INFINITY });
+
+    it("拆解与崩落按实际已落的面数演完：逆序逐面错开一个间隔，最后一面演满一段；一面未落时不留", () => {
+      expect(holdFor(prev, cancelled, settledAt(3), now)).toEqual({ face: prev, exit: "disassemble", seat: false, ms: 2 * 50 + 140 });
+      expect(holdFor(prev, cancelled, settledAt(2), now)?.ms).toBe(50 + 140);
+      // 启动阶段已落 3 面：崩落要 2 × 40 + 220，不在最后一面落到一半时换面
+      expect(holdFor(prev, failed, settledAt(3), now)).toEqual({ face: prev, exit: "collapse", seat: false, ms: 2 * 40 + 220 });
+      expect(holdFor(prev, failed, settledAt(2), now)?.ms).toBe(40 + 220);
+      expect(holdFor(prev, failed, settledAt(1), now)?.ms).toBe(220);
+      expect(holdFor(prev, failed, settledAt(0), now)).toBeNull();
+      expect(holdFor(prev, launchView(state({ session: sessionExited(running("A"), { versionId: "A", crashed: true, killed: false }, T0 + 5000) }), a), settledAt(3), now)?.exit).toBe("collapse");
+    });
+
+    it("坐定：未落的面隔着落位间隔依次落齐，最后一面落下 120 ms 后坐定，再停 200 ms 才换到运行面", () => {
+      expect(holdFor(prev, runningView, settledAt(2), now)).toEqual({ face: prev, exit: null, seat: true, ms: 120 + capsuleSwap.holdMs.afterSeat });
+      expect(holdFor(prev, runningView, settledAt(1), now)?.ms).toBe(90 + 120 + 200);
+      expect(holdFor(prev, runningView, settledAt(3), now)?.ms).toBe(200);
+      // 最后一面 50 ms 前才落下：坐定还差 70 ms
+      expect(holdFor(prev, runningView, { shown: 3, lastDropAt: now - 50, firstDropAt: Number.NEGATIVE_INFINITY }, now)?.ms).toBe(70 + 200);
+    });
+
+    it("坐定时刻按方块实际进度算：加载面刚换上还在等首落延迟、阶段一次跳了几级面还没落齐，都不提前换面", () => {
+      // 加载面 50 ms 前才换上：首落还要 110 ms，之后两面各隔 90 ms
+      expect(holdFor(prev, runningView, { shown: 0, lastDropAt: Number.NEGATIVE_INFINITY, firstDropAt: now + 110 }, now)?.ms).toBe(110 + 90 + 90 + 120 + 200);
+      // 落位数刚从 1 跳到 3：第二面 30 ms 前才落下，第三面要等满间隔
+      expect(holdFor(prev, runningView, { shown: 2, lastDropAt: now - 30, firstDropAt: Number.NEGATIVE_INFINITY }, now)?.ms).toBe(60 + 120 + 200);
+      // 安装中换到就绪同理
+      const installing = launchView(state({ tasks: [installTask("A", "t1", "running", 0.9)] }), inst("A", { status: "installing" }));
+      expect(installing.kind).toBe("installing");
+      expect(holdFor(installing, { kind: "ready", busyElsewhere: false }, { shown: 1, lastDropAt: now - 10, firstDropAt: now - 10 }, now)).toEqual({
+        face: installing,
+        exit: null,
+        seat: true,
+        ms: 80 + 90 + 120 + 200,
+      });
+    });
+
+    it("其余换面不留；要留时方块却没报过进度是状态不一致，直接抛", () => {
+      expect(holdFor({ kind: "ready", busyElsewhere: false }, prev, null, now)).toBeNull();
+      expect(holdFor(runningView, failed, null, now)).toBeNull();
+      expect(() => holdFor(prev, runningView, null, now)).toThrow(/组装进度/);
+      expect(faceKey(cancelled)).toBe("stopped:cancelled");
+      expect(faceKey(prev)).toBe("loading");
+    });
   });
 });
 

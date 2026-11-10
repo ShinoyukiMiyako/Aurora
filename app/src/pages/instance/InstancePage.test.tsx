@@ -34,6 +34,25 @@ import { creationRef, creationRefEqual, installStage } from "./model";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+// 让位挂到了哪些容器上、走哪条弹簧：jsdom 不做布局，让位本身在这里测不了，只核对它挂对了地方；挂载照常交给真实现
+const reflowed = vi.hoisted(() => new Map<Element, string>());
+vi.mock("../../lib/reflow", async (orig) => {
+  const mod = await orig<typeof import("../../lib/reflow")>();
+  const { useCallback } = await import("react");
+  return {
+    ...mod,
+    useReflow: <T extends HTMLElement>(spring: Parameters<typeof mod.useReflow>[0] = "settle") => {
+      const real = mod.useReflow<T>(spring);
+      return useCallback(
+        (el: T | null) => {
+          if (el !== null) reflowed.set(el, spring);
+          return real(el);
+        },
+        [real, spring],
+      );
+    },
+  };
+});
 // 系统保存文件对话框的替身：各用例按需改写返回值
 vi.mock("../../shell/platform", async (orig) => {
   const actual = await orig<typeof import("../../shell/platform")>();
@@ -866,7 +885,8 @@ describe("实例详情：新建与导入还没装好", () => {
   const TABS: readonly InstanceTab[] = ["overview", "mods", "settings", "logs", "crash"];
   /** 页面按需发的查询：盘上没有装好的实例目录时一条都不该发。 */
   const QUERIES = new Set(["list_mods", "check_updates", "list_instance_content", "get_instance_settings", "memory_advice", "last_launch_log", "list_history", "rollback_checks", "last_crash"]);
-  const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
+  // 看得见的骨架：加载门等待期里占位的骨架（data-pending）是透明的，读到后它叠在内容上淡出，不算出了骨架
+  const skeletons = () => [...document.querySelectorAll('[class*="_skeleton_"]')].filter((el) => el.closest("[data-pending]") === null).length;
   const queriesFor = (id: string) => ipc.calls.filter((c) => QUERIES.has(c.cmd) && Object.values(c.args).includes(id)).map((c) => c.cmd);
   const installResult = (): InstallResultDto => ({ id: NAME, mc_version: "1.21.1", loader: { kind: "fabric", version: "0.16.10" }, libraries: 40, assets: 3000, natives: 2, template: null });
   const fabric: InstanceDto["loaders"] = [{ kind: "fabric", version: "0.16.10" }];
@@ -1187,6 +1207,73 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(attempts).toBe(2);
     expect(launcher.state.tasks.filter((t) => t.instanceId === NAME).map((t) => [t.status, t.attempt])).toEqual([["running", 2]]);
     expect(text()).not.toContain("安装没有完成");
+  });
+
+  it("概览上「全部找到」后任务重新排队：说明卡不卸载，被拦文件的清单还挂着放完退场，不在同一帧连遮罩一起消失", async () => {
+    resetModpackMock();
+    const FILE = {
+      project_id: 9,
+      file_id: 90,
+      file_name: "locked.jar",
+      web_url: "https://www.curseforge.com/minecraft/mc-mods/locked/files/90",
+      destination: "mods/locked.jar",
+      sha1: "a".repeat(40),
+      fingerprint: 0,
+      size: 3,
+    };
+    let attempts = 0;
+    ipc.overrides.set("install_version", () => {
+      attempts += 1;
+      return attempts === 1 ? Promise.reject(new IpcError("distribution_blocked", "原文", { files: [FILE] })) : new Promise(() => undefined);
+    });
+    function KeptPlaceholder() {
+      const creation = useLauncherSelector((s) => creationRef(s.tasks, NAME), creationRefEqual);
+      if (creation === null) return null;
+      const stage = installStage({ id: NAME, placeholder: true, activity: "installing" }, creation);
+      return stage.kind === "none" ? null : <InstallStageTab tab="overview" instanceId={NAME} stage={stage} />;
+    }
+    view = render(
+      <Providers>
+        <Probe />
+        <KeptPlaceholder />
+      </Providers>,
+    );
+    await flush();
+    await create(NAME);
+    const card = [...document.querySelectorAll("h2")].find((h) => h.textContent === "安装没有完成")?.closest("[data-pad]");
+    if (card === undefined || card === null) throw new Error("失败时应有说明卡");
+
+    click(button("查看这些文件"));
+    await flush();
+    seedMockDownloads(["locked.jar"]);
+    click(button("我已下载，重新检查"));
+    await flush();
+    click(button("重新安装"));
+    await flush();
+    expect(attempts).toBe(2);
+    expect(document.body.contains(card)).toBe(true);
+    expect(text()).toContain("装好后这里会显示存档、Mod 与实例信息。");
+    expect(document.querySelector("[data-sk-modal-layer][data-exiting]")).not.toBeNull();
+  });
+
+  it("概览：任务结束、落地重扫回来之前，说明卡原位换成正在刷新，安装横幅退场，不整块换掉", async () => {
+    await openCreating("overview");
+    const card = [...document.querySelectorAll("h2")].find((h) => h.textContent === AVAILABLE_LATER)?.closest("[data-pad]");
+    if (card === undefined || card === null) throw new Error("安装中应有说明卡");
+    const release = holdScans();
+    instances = [...instances, instanceDto(NAME, { loaders: fabric })];
+    await act(async () => {
+      install.resolve(installResult());
+      await settle(20);
+    });
+    expect(text()).toContain("安装任务已经结束，正在刷新实例列表…");
+    expect(document.body.contains(card)).toBe(true);
+    const bars = [...document.querySelectorAll(`[role="progressbar"][aria-label="${TITLE}"]`)];
+    expect(bars.every((bar) => bar.closest("[inert]") !== null)).toBe(true);
+    await act(async () => {
+      release();
+      await settle(20);
+    });
   });
 });
 
@@ -1603,17 +1690,22 @@ describe("实例详情：概览", () => {
     const pending = deferred<InstanceContentDto>();
     ipc.overrides.set("list_instance_content", () => pending.promise);
     await open("overview");
-    // 其余查询都已读完，骨架只会来自等着内容列表的存档卡、资源包卡与四格数据的存档格
-    const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
-    expect(skeletons()).toBe(0);
+    // 其余查询都已读完，骨架只会来自等着内容列表的存档卡、资源包卡与四格数据的存档格。
+    // 前 300 ms 骨架照常占位、只是不可见（data-pending），数据一到也不会先 0 高再撑开
+    const shown = () => [...document.querySelectorAll('[class*="_skeleton_"]')].filter((el) => el.closest("[data-pending]") === null).length;
+    const placeholders = () => document.querySelectorAll("[aria-busy='true'] > [data-pending]").length;
+    expect(shown()).toBe(0);
+    expect(placeholders()).toBe(3);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(299);
     });
-    expect(skeletons()).toBe(0);
+    expect(shown()).toBe(0);
+    expect(placeholders()).toBe(3);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
-    expect(skeletons()).toBeGreaterThan(0);
+    expect(shown()).toBeGreaterThan(0);
+    expect(placeholders()).toBe(0);
     expect(text()).not.toContain("比平时慢一些，仍在加载…");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
@@ -1657,6 +1749,98 @@ describe("实例详情：概览", () => {
     resetRecorderKeepOverrides();
     await open("overview");
     expect(text()).not.toContain("上次启动崩溃了");
+  });
+
+  it("崩溃报告晚到：横幅按列表里的崩溃时刻先画出来、正文写正在读取，报告到了原位换成诊断，不再晚一步插进顶上", async () => {
+    const pending = deferred<CrashReportDto | null>();
+    ipc.overrides.set("last_crash", () => pending.promise);
+    instances = instances.map((i) => (i.id === ID ? { ...i, last_crash_at: NOW - 2 * DAY, last_played_at: NOW - 3 * DAY } : i));
+    await open("overview");
+    const title = [...document.querySelectorAll("div")].find((el) => el.childElementCount === 0 && el.textContent === "上次启动崩溃了 · 2 天前");
+    if (title === undefined) throw new Error("报告没到时就该有崩溃横幅");
+    expect(text()).toContain("正在读取崩溃报告…");
+
+    await act(async () => {
+      pending.resolve(report([{ category: "out_of_memory" }], NOW - 2 * DAY));
+      await settle(20);
+    });
+    expect(document.body.contains(title)).toBe(true);
+    expect(text()).toContain("日志指向内存不足，诊断里有可以一键尝试的办法。");
+    expect(text()).not.toContain("正在读取崩溃报告…");
+  });
+
+  it("崩溃报告读出来是空的：不留一条正在读取的横幅", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, last_crash_at: NOW - 2 * DAY, last_played_at: NOW - 3 * DAY } : i));
+    await open("overview");
+    const live = [...document.querySelectorAll("div")].filter((el) => el.textContent === "正在读取崩溃报告…" && el.closest("[inert]") === null);
+    expect(live).toEqual([]);
+  });
+
+  it("存档读到之前按实例列表里的存档数占位：多于 5 个时占 5 行加展开钮那一栏，没有存档时占空状态的轮廓", async () => {
+    const card = () => {
+      const heading = [...document.querySelectorAll("h3")].find((h) => h.textContent === "存档");
+      const found = heading?.closest("[data-pad]");
+      if (found === undefined || found === null) throw new Error("找不到存档卡");
+      return found;
+    };
+    const pending = deferred<InstanceContentDto>();
+    ipc.overrides.set("list_instance_content", () => pending.promise);
+    instances = instances.map((i) => (i.id === ID ? { ...i, world_count: 7 } : i));
+    await open("overview");
+    const placeholder = card().querySelector("[aria-busy='true'] > [data-pending]");
+    if (placeholder === null) throw new Error("存档卡读到之前没有占位");
+    expect(placeholder.querySelectorAll('[class*="_row_"]')).toHaveLength(5);
+    expect(placeholder.querySelectorAll('[class*="_cardFoot_"]')).toHaveLength(1);
+    // 副标题那一行先占着
+    expect(card().querySelector("[data-reserve]")).not.toBeNull();
+    view?.unmount();
+
+    instances = instances.map((i) => (i.id === ID ? { ...i, world_count: 0 } : i));
+    resetRecorderKeepOverrides();
+    await open("overview");
+    const empty = card().querySelector("[aria-busy='true'] > [data-pending]");
+    expect(empty?.querySelectorAll('[class*="_emptySkeleton_"]')).toHaveLength(1);
+    expect(empty?.querySelectorAll('[class*="_row_"]')).toHaveLength(0);
+  });
+
+  it("头图的启动胶囊、更多钮在同一行，这一行按胶囊的 morph 弹簧让位；更多钮外面是真实的盒子，不是没有盒子的提示气泡外层", async () => {
+    await open("overview");
+    const capsule = document.querySelector(`[role="group"][aria-label="启动「${ID}」"]`);
+    const row = capsule?.parentElement;
+    if (row === undefined || row === null) throw new Error("找不到启动胶囊所在的行");
+    expect(reflowed.get(row)).toBe("morph");
+    const more = button("更多操作", row);
+    const slot = [...row.children].find((child) => child.contains(more));
+    if (slot === undefined) throw new Error("更多钮不在胶囊那一行里");
+    expect(slot.hasAttribute("data-tooltip-host")).toBe(false);
+    expect(slot).not.toBe(more);
+    // 名称、标签所在的文字列也是这一行的直接子项：胶囊变宽时它变窄，文字列变高时它在行里重新居中
+    expect([...row.children].some((child) => child.querySelector("h1") !== null)).toBe(true);
+  });
+
+  it("标签条那一行是换标签时外壳滚回的锚点", async () => {
+    await open("overview");
+    const anchors = document.querySelectorAll("[data-nav-anchor]");
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].querySelector('[role="tablist"]')).not.toBeNull();
+  });
+
+  it("改名输入出错：错误挂在输入行上（不进流，叠在标签行的位置），输入行带出错标记；改回合法后标记撤掉", async () => {
+    await open("overview");
+    const scope = document.querySelector("h1")?.closest("section");
+    if (!scope) throw new Error("没有头图");
+    keydown(scope, "F2");
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="实例名称"]');
+    if (input === null) throw new Error("F2 没有进入改名");
+    const renameRow = input.closest('[class*="_renameRow_"]');
+    if (renameRow === null) throw new Error("找不到改名输入行");
+    expect(renameRow.hasAttribute("data-invalid")).toBe(false);
+    typeInto(input, "创造");
+    expect(renameRow.hasAttribute("data-invalid")).toBe(true);
+    const alert = [...renameRow.querySelectorAll('[role="alert"]')].find((el) => el.textContent === "已经有同名的实例了，换一个吧");
+    expect(alert).toBeDefined();
+    typeInto(input, "樱花生存二周目");
+    expect(renameRow.hasAttribute("data-invalid")).toBe(false);
   });
 });
 
@@ -2048,23 +2232,28 @@ describe("实例详情：设置", () => {
     expect(area?.value).toBe("-XX:+UseZGC -XX:+ZGenerational");
   });
 
-  it("整页一个加载门：本机内存读得慢时 300 ms 后几张卡一起出骨架，读到后一起换成内容", async () => {
+  it("整页一个加载门：等待期五张卡照常画骨架占位、只是看不见；本机内存读得慢时 300 ms 后一起显出骨架，读到后一起换成内容", async () => {
     const advice = deferred<MemoryAdviceDto>();
     ipc.overrides.set("memory_advice", () => advice.promise);
     await open("settings");
-    const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
-    expect(skeletons()).toBe(0);
+    // 加载中的卡体：外层 aria-busy，骨架层是它的直接子项；等待期骨架层带 data-pending（占着尺寸、不可见）
+    const layers = () => [...document.querySelectorAll<HTMLElement>('[aria-busy="true"] > [aria-hidden="true"]')];
+    const hidden = () => layers().filter((layer) => layer.hasAttribute("data-pending")).length;
+    expect(layers()).toHaveLength(5);
+    expect(hidden()).toBe(5);
+    expect(layers().every((layer) => layer.querySelector('[class*="_skeleton_"]') !== null)).toBe(true);
     expect(document.querySelector('textarea[aria-label="JVM 参数"]')).toBeNull();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
-    expect(skeletons()).toBeGreaterThan(0);
+    expect(layers()).toHaveLength(5);
+    expect(hidden()).toBe(0);
     await act(async () => {
       advice.resolve(memoryAdviceDto({ version_id: ID }));
       await settle(20);
       await vi.advanceTimersByTimeAsync(300);
     });
-    expect(skeletons()).toBe(0);
+    expect(layers()).toHaveLength(0);
     expect(document.querySelector('textarea[aria-label="JVM 参数"]')).not.toBeNull();
     expect(text()).toContain("全局固定值");
   });

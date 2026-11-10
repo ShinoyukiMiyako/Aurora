@@ -2,16 +2,18 @@
 // @module-tag heavy-page
 // 下载入口与快览的动效：总进度环换任务集合时直接跳、不倒退，角标与进度环弹入，快览里的行增删淡入淡出。
 // jsdom 没有帧循环，framer-motion 的入场停在起点、退场永远不播完：这里断言的正是「从哪开始」与「还在不在」。
-import { act } from "react";
+import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PEEK_COPY } from "../copy/shell";
+import type { Task } from "../domain/types";
 import { IpcError } from "../ipc/errors";
 import { CORE_EVENT } from "../ipc/tasks";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { render, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { bootOverrides, deferred, emit, resetRecorder, settle, type Deferred } from "../test/launcher";
-import { DownloadPeek } from "./DownloadPeek";
+import popover from "../ui/Popover.module.css";
+import { DownloadPeek, peekLayoutKey } from "./DownloadPeek";
 import styles from "./DownloadPeek.module.css";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider } from "./shell";
@@ -22,10 +24,23 @@ vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).f
 let view: Rendered | undefined;
 let launcher: LauncherApi;
 let runs: Map<number, Deferred<unknown>>;
+/** 再挂一个下载入口：它挂载时任务已经在了。 */
+let setLate: (on: boolean) => void;
 
 function Host() {
   launcher = useLauncher();
-  return <DownloadPeek />;
+  const [late, setLateState] = useState(false);
+  setLate = setLateState;
+  return (
+    <>
+      <DownloadPeek />
+      {late && (
+        <div data-testid="late">
+          <DownloadPeek />
+        </div>
+      )}
+    </>
+  );
 }
 
 const flush = () =>
@@ -92,10 +107,26 @@ describe("下载入口", () => {
     if (ring === undefined) throw new Error("没有进度环那一格");
     expect(ring.style.opacity).toBe("0");
     expect(ring.style.transform).toContain("scale(0.8)");
+    // 计数角标就是 Badge 本身：只有它自己这一层在弹，不再外包一层同样弹入的壳
     const count = only(entry(), `.${styles.count}`);
+    expect(count.dataset.kind).toBe("count");
     expect(count.textContent).toBe("1");
     expect(count.style.opacity).toBe("0");
     expect(count.style.transform).toContain("scale(0)");
+  });
+
+  it("入口挂载时就有的计数角标与失败点不弹，跟着入口一起出现", async () => {
+    await startJava(21);
+    await startJava(17);
+    runs.get(21)?.reject(new IpcError("java_failed", "运行时清单下载失败"));
+    await flush();
+    act(() => setLate(true));
+    const late = view?.container.querySelector<HTMLElement>("[data-testid='late']");
+    if (late === null || late === undefined) throw new Error("后挂的下载入口没有挂上");
+    const count = only(late, `.${styles.count}`);
+    expect(count.style.opacity).toBe("1");
+    const mark = only(late, `.${styles.failDot}`).firstElementChild as HTMLElement;
+    expect(mark.style.opacity).toBe("1");
   });
 
   it("任务失败：危险点弹入；有计数角标时挂在右下角，角标退场后改用 translate 挪到右上角", async () => {
@@ -104,7 +135,12 @@ describe("下载入口", () => {
     runs.get(21)?.reject(new IpcError("java_failed", "运行时清单下载失败"));
     await flush();
     const dot = only(entry(), `.${styles.failDot}`);
-    expect(dot.style.opacity).toBe("0");
+    // 弹入由里面的提醒点自己播，外面这层只管定位：缩放不叠两层
+    const mark = dot.firstElementChild as HTMLElement;
+    expect(mark.dataset.kind).toBe("dot");
+    expect(mark.style.opacity).toBe("0");
+    expect(mark.style.transform).toContain("scale(0)");
+    expect(dot.style.transform).toBe("");
     expect(dot.hasAttribute("data-alone")).toBe(false);
     runs.get(17)?.reject(new IpcError("java_failed", "又失败了"));
     await flush();
@@ -156,12 +192,40 @@ describe("快览的任务行", () => {
     expect(leaving.parentElement).toBe(row(java17.title).parentElement);
   });
 
-  it("滚动区与列表分两层：列表随行增删变高变矮，让位量得到；滚动区常驻滚动条槽位", async () => {
+  it("列表放在浮层的主体里滚动，标题行与底栏在主体之外：失败条与底栏在底部槽位里跟着外框下沿走", async () => {
     await startJava(21);
+    await startJava(17);
+    runs.get(21)?.reject(new IpcError("java_failed", "运行时清单下载失败"));
+    await flush();
     act(() => entry().click());
     await flush();
-    const list = only(document, `.${styles.list}`);
+    const panel = only(document, "[role='dialog']");
+    expect(panel.className).toContain(styles.popover);
+    expect(panel.hasAttribute("data-structured")).toBe(true);
+    const list = only(panel, `.${styles.list}`);
     expect(list.tagName).toBe("UL");
-    expect(list.parentElement?.classList.contains(styles.scroller)).toBe(true);
+    // 列表与滚动区分两层：列表随行增删变高变矮，让位量得到；滚动区是浮层的主体，封顶后高度不变
+    expect(list.closest(`.${popover.body}`)).not.toBeNull();
+    expect(only(panel, `.${styles.head}`).closest(`.${popover.header}`)).not.toBeNull();
+    const footer = only(panel, `.${popover.footer}`);
+    expect(only(footer, `.${styles.failed}`).textContent).toContain(PEEK_COPY.failed(1));
+    expect(footer.querySelector(`.${styles.foot}`)).not.toBeNull();
+    expect(footer.closest(`.${popover.body}`)).toBeNull();
+  });
+});
+
+describe("快览的布局键", () => {
+  const task = (id: string) => ({ id }) as Task;
+
+  it("行的集合与顺序、失败条与「清除已结束」的有无、退场播完的那一笔才换键；进度与失败数从 1 到 2 不换", () => {
+    const base = peekLayoutKey([task("a"), task("b")], 0, 1, 1);
+    expect(peekLayoutKey([task("a"), task("b")], 0, 2, 3)).toBe(base);
+    expect(peekLayoutKey([task("b"), task("a")], 0, 1, 1)).not.toBe(base);
+    expect(peekLayoutKey([task("a")], 0, 1, 1)).not.toBe(base);
+    expect(peekLayoutKey([task("a"), task("b")], 1, 1, 1)).not.toBe(base);
+    expect(peekLayoutKey([task("a"), task("b")], 0, 0, 1)).not.toBe(base);
+    expect(peekLayoutKey([task("a"), task("b")], 0, 1, 0)).not.toBe(base);
+    // 行 id 里带分隔符也不会和另一组行撞成同一个键
+    expect(peekLayoutKey([task("a,b")], 0, 0, 0)).not.toBe(peekLayoutKey([task("a"), task("b")], 0, 0, 0));
   });
 });

@@ -4,6 +4,7 @@ import { gameDirSwitchReason } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
 import { needsReimport } from "../../domain/rules";
+import { REFLOW_MAX_ITEMS } from "../../lib/reflow";
 import type { GameDirectoryDto } from "../../state/queries/catalog";
 import type { SelectOption } from "../../ui/Select";
 import { LIBRARY_COPY } from "./copy";
@@ -120,7 +121,18 @@ export function directoryOptions(dirs: readonly GameDirectoryDto[], busy: boolea
   });
 }
 
-/** 网格的顺序签名：只有顺序或成员变化时才触发布局动画，窗口缩放、分档切换不触发。 */
-export function orderSignature(list: readonly InstanceSummary[]): string {
-  return list.map((inst) => inst.id).join("\n");
+/** 网格里排着什么：实例按显示顺序，外加末尾有没有新建卡。 */
+export interface GridShape {
+  ids: readonly string[];
+  create: boolean;
+}
+
+/**
+ * 两次提交之间格子有增删或换序，且一次涉及的格子超过让位上限（前后取多的一边，新建卡也算一格）。
+ * 这时让位自己停手，网格改为整片淡入一次，不逐个播入退场。
+ */
+export function crowdedChange(before: GridShape, after: GridShape): boolean {
+  const changed = before.create !== after.create || before.ids.length !== after.ids.length || before.ids.some((id, i) => id !== after.ids[i]);
+  const cells = (shape: GridShape) => shape.ids.length + (shape.create ? 1 : 0);
+  return changed && Math.max(cells(before), cells(after)) > REFLOW_MAX_ITEMS;
 }

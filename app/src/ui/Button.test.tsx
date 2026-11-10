@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 import { act, createRef, type MouseEvent, type ReactNode } from "react";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { IconName } from "../art/Icon";
+import { fade, tweenAt } from "../lib/motion";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { focusByKeyboard, render, type Rendered } from "../test/dom";
+import { focusByKeyboard, render, stubSpanAnimations, type FakeAnimation, type Rendered } from "../test/dom";
 import { emulateFocusFixup } from "../test/focus-fixup";
 import { Button, CONTROL_ICON_SIZE, softDisabledProps } from "./Button";
 import styles from "./Button.module.css";
@@ -60,15 +61,15 @@ const activateAllWays = (el: HTMLElement) => {
 };
 
 /**
- * 某层动画播完。jsdom 没有 AnimationEvent，React 改按带前缀的事件名监听 onAnimationEnd
- * （react-dom 的 getVendorPrefixedEventName），这里派发它实际监听的那个名字。
+ * 派发 CSS 动画结束事件。jsdom 没有 AnimationEvent，React 改按带前缀的事件名监听 onAnimationEnd
+ * （react-dom 的 getVendorPrefixedEventName），两个名字都派发。
  */
 const animationEnd = (el: Element) =>
   act(() => {
-    el.dispatchEvent(new Event("webkitAnimationEnd", { bubbles: true }));
+    for (const type of ["animationend", "webkitAnimationEnd"]) el.dispatchEvent(new Event(type, { bubbles: true }));
   });
 
-/** 图标位里的各层：[身份, 入场方式；退场层为 leaving，挂载时就在的为 still]。 */
+/** 图标位里的各层：[身份, 入场方式；退场层为 leaving，不在入场中的为 still]。 */
 const glyphsOf = (root: Element) =>
   [...root.querySelectorAll<HTMLElement>("[data-glyph]")].map((g) => [g.dataset.glyph, g.hasAttribute("data-leaving") ? "leaving" : (g.dataset.enter ?? "still")]);
 
@@ -78,8 +79,32 @@ const leavingOf = (root: Element) => {
   return leaving;
 };
 
+const layerOf = (root: Element, glyph: string) => {
+  const layer = root.querySelector<HTMLElement>(`[data-glyph="${glyph}"]`);
+  if (layer === null) throw new Error(`没有「${glyph}」这一层`);
+  return layer;
+};
+
+const scalesOf = (animation: FakeAnimation) => animation.frames.map((f) => Number(f.scale));
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const TOKENS = readFileSync(join(HERE, "../styles/tokens.css"), "utf8");
+
+function token(name: string): string {
+  const found = TOKENS.match(new RegExp(`(?:^|\\s)${name}:\\s*([^;]+);`));
+  if (found === null) throw new Error(`tokens.css 缺少 ${name}`);
+  return found[1].trim();
+}
+
+/** 透明度补间与原来的 CSS 写法同一对时长与曲线：淡入 --sk-dur-in / --sk-ease-out，淡出 --sk-dur-out / --sk-ease-in。 */
+function expectFade(animation: FakeAnimation, way: "in" | "out") {
+  const [dur, ease] = way === "in" ? ["--sk-dur-in", "--sk-ease-out"] : ["--sk-dur-out", "--sk-ease-in"];
+  expect(`${animation.options.duration}ms`).toBe(token(dur));
+  expect(animation.options.easing).toBe(token(ease));
+}
+
 // jsdom 环境里的 URL 是 jsdom 自己的实现，node:fs 不认，按文件路径读
-const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "./Button.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+const css = readFileSync(join(HERE, "./Button.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
 /** 选择器恰好为 selector 的那条规则（或关键帧）的声明体，到第一个右花括号为止。 */
 function ruleOf(selector: string): string {
@@ -146,7 +171,8 @@ describe("Button", () => {
     expect(button.dataset.hasIcon).toBeUndefined();
   });
 
-  it("有前置图标：进入加载时图标原地淡出、加载指示在同一格收拢入场，淡出完才移除；结束加载时反过来", () => {
+  it("有前置图标：进入加载时图标原地淡出、加载指示在同一格收拢入场；淡出播完才移除，入场播完摘掉标记；结束加载时反过来", () => {
+    const waapi = stubSpanAnimations();
     const ui = (loading: boolean) =>
       withOverlay(
         <Button variant="primary" icon="download" loading={loading}>
@@ -156,6 +182,8 @@ describe("Button", () => {
     view = render(ui(false));
     const button = view.container.querySelector("button") as HTMLButtonElement;
     expect(glyphsOf(button)).toEqual([["download", "still"]]);
+    // 挂载时就在的图标不播入场
+    expect(waapi.played).toHaveLength(0);
 
     view.rerender(ui(true));
     expect(glyphsOf(button)).toEqual([
@@ -164,13 +192,32 @@ describe("Button", () => {
     ]);
     // 两层叠在同一个图标位里，按钮里没有多出一格
     expect(new Set([...button.querySelectorAll("[data-glyph]")].map((g) => g.parentElement)).size).toBe(1);
-    // 里面的元素冒上来的动画结束不算这一层淡完
-    animationEnd(leavingOf(button).querySelector("svg") as SVGElement);
-    expect(glyphsOf(button)).toHaveLength(2);
-    animationEnd(leavingOf(button));
-    expect(glyphsOf(button)).toEqual([["spinner", "tap"]]);
+    const download = layerOf(button, "download");
+    const spinner = layerOf(button, "spinner");
+    const out = waapi.running(download, "opacity");
+    expect(out.frames).toEqual([{ opacity: 1 }, { opacity: 0 }]);
+    expectFade(out, "out");
+    // 加载指示从 0.8 沿 tap 弹簧收拢到 1，临界阻尼不过冲；透明度从 0 淡入
+    const tap = waapi.running(spinner, "scale");
+    expect(scalesOf(tap)[0]).toBe(0.8);
+    expect(scalesOf(tap).at(-1)).toBe(1);
+    expect(Math.max(...scalesOf(tap))).toBe(1);
+    expect(tap.options.easing).toBe("linear");
+    const fadeIn = waapi.running(spinner, "opacity");
+    expect(fadeIn.frames).toEqual([{ opacity: 0 }, { opacity: 1 }]);
+    expectFade(fadeIn, "in");
 
-    const spinner = button.querySelector('[data-glyph="spinner"]');
+    // 退场层的去留只看脚本动画：CSS 动画结束事件（子树显隐时会乱来）不再驱动它
+    animationEnd(download);
+    expect(glyphsOf(button)).toHaveLength(2);
+    waapi.finish(out);
+    expect(glyphsOf(button)).toEqual([["spinner", "tap"]]);
+    // 入场的两段都播完才摘掉 data-enter：标记不留在元素上，子树重新显示时没有可重播的东西
+    waapi.finish(fadeIn);
+    expect(glyphsOf(button)).toEqual([["spinner", "tap"]]);
+    waapi.finish(tap);
+    expect(glyphsOf(button)).toEqual([["spinner", "still"]]);
+
     view.rerender(ui(false));
     expect(glyphsOf(button)).toEqual([
       ["spinner", "leaving"],
@@ -178,10 +225,60 @@ describe("Button", () => {
     ]);
     // 被换下的加载指示还是原来的节点：旋转不从头开始
     expect(leavingOf(button)).toBe(spinner);
+    expect(waapi.running(spinner, "opacity").frames).toEqual([{ opacity: 1 }, { opacity: 0 }]);
+    // 换回图标走 pop：从 0.6 弹出，过冲一点再落定
+    const pop = scalesOf(waapi.running(layerOf(button, "download"), "scale"));
+    expect(pop[0]).toBe(0.6);
+    expect(pop.at(-1)).toBe(1);
+    expect(Math.max(...pop)).toBeGreaterThan(1.004);
     expect(button.textContent).toBe("下载");
   });
 
-  it("没有前置图标：加载指示叠在正中淡入，结束加载时淡出完才移除；不加载时不留空层", () => {
+  it("入场途中被换下：从此刻的透明度接着淡出，不先跳回全不透明；缩放照常走完；更早的退场层接着淡出，不被丢掉", () => {
+    const waapi = stubSpanAnimations();
+    const ui = (icon: IconName) => withOverlay(<IconButton icon={icon} label="复制" />);
+    view = render(ui("copy"));
+    const button = view.container.querySelector("button") as HTMLButtonElement;
+    view.rerender(ui("check"));
+    const copy = layerOf(button, "copy");
+    const check = layerOf(button, "check");
+    const copyOut = waapi.running(copy, "opacity");
+    const checkIn = waapi.running(check, "opacity");
+    const checkPop = waapi.running(check, "scale");
+    // 淡入走了 50 ms，复制图标的淡出走了 40 ms
+    checkIn.currentTime = 50;
+    copyOut.currentTime = 40;
+
+    view.rerender(ui("x"));
+    expect(glyphsOf(button)).toEqual([
+      ["copy", "leaving"],
+      ["check", "leaving"],
+      ["x", "pop"],
+    ]);
+    expect(checkIn.cancelled).toBe(true);
+    const checkOut = waapi.running(check, "opacity");
+    const reached = tweenAt(fade.in, 0.05);
+    expect(reached).toBeGreaterThan(0.3);
+    expect(reached).toBeLessThan(0.95);
+    expect(checkOut.frames[0].opacity).toBeCloseTo(reached, 9);
+    expect(checkOut.frames[1]).toEqual({ opacity: 0 });
+    expectFade(checkOut, "out");
+    expect(checkPop.cancelled).toBe(false);
+    // 换下中的旧层不受打扰：动画还是原来那条，节点还在
+    expect(copyOut.cancelled).toBe(false);
+    expect(waapi.running(copy, "opacity")).toBe(copyOut);
+
+    waapi.finish(copyOut);
+    expect(glyphsOf(button)).toEqual([
+      ["check", "leaving"],
+      ["x", "pop"],
+    ]);
+    waapi.finish(checkOut);
+    expect(glyphsOf(button)).toEqual([["x", "pop"]]);
+  });
+
+  it("没有前置图标：加载指示叠在正中淡入，结束加载时淡出播完才移除；不加载时不留空层", () => {
+    const waapi = stubSpanAnimations();
     const ui = (loading: boolean) =>
       withOverlay(
         <Button variant="danger" loading={loading}>
@@ -195,20 +292,107 @@ describe("Button", () => {
 
     view.rerender(ui(true));
     expect(glyphsOf(button)).toEqual([["spinner", "tap"]]);
-    expect(button.querySelector("[data-glyph]")?.parentElement?.classList.contains(styles.centerSpinner)).toBe(true);
+    expect(layerOf(button, "spinner").parentElement?.classList.contains(styles.centerSpinner)).toBe(true);
     expect(button.querySelector("[data-tone]")?.getAttribute("data-tone")).toBe("current");
 
     view.rerender(ui(false));
     expect(glyphsOf(button)).toEqual([["spinner", "leaving"]]);
-    // 还没淡完又进入加载：淡出的那层接着淡出，新的指示照常入场
-    view.rerender(ui(true));
-    expect(glyphsOf(button)).toEqual([
-      ["spinner", "leaving"],
-      ["spinner", "tap"],
-    ]);
-    view.rerender(ui(false));
-    animationEnd(leavingOf(button));
+    waapi.finish(waapi.running(layerOf(button, "spinner"), "opacity"));
     expect(button.querySelector("[data-glyph]")).toBeNull();
+    expect(button.children).toHaveLength(1);
+  });
+
+  it("还没淡完又换回来：接回原来那层，节点不换不挪、从此刻的透明度淡回，不重播入场，也不叠第二枚加载指示", () => {
+    const waapi = stubSpanAnimations();
+    const ui = (loading: boolean) =>
+      withOverlay(
+        <Button variant="danger" loading={loading}>
+          删除
+        </Button>,
+      );
+    view = render(ui(false));
+    const button = view.container.querySelector("button") as HTMLButtonElement;
+    view.rerender(ui(true));
+    const spinner = layerOf(button, "spinner");
+    waapi.finishAll();
+    expect(glyphsOf(button)).toEqual([["spinner", "still"]]);
+
+    view.rerender(ui(false));
+    const out = waapi.running(spinner, "opacity");
+    out.currentTime = 30;
+    const before = waapi.played.length;
+    view.rerender(ui(true));
+    // 只有一层，还是原来的节点：旋转相位连续，不会两枚相位不同的指示叠在一起
+    expect(glyphsOf(button)).toEqual([["spinner", "still"]]);
+    expect(layerOf(button, "spinner")).toBe(spinner);
+    expect(out.cancelled).toBe(true);
+    // 只起了一段淡回，没有缩放
+    expect(waapi.played.slice(before).map((a) => Object.keys(a.frames[0]))).toEqual([["opacity"]]);
+    const back = waapi.running(spinner, "opacity");
+    expect(back.frames[0].opacity).toBeCloseTo(1 - tweenAt(fade.out, 0.03), 9);
+    expect(back.frames[1]).toEqual({ opacity: 1 });
+    expectFade(back, "in");
+    // 被取消的淡出不会再把它移除
+    act(() => out.onfinish?.());
+    expect(glyphsOf(button)).toEqual([["spinner", "still"]]);
+  });
+
+  it("有前置图标时来回切换：接回的图标层 key 较小，节点留在原处，靠样式把当前层画在上面", () => {
+    stubSpanAnimations();
+    const ui = (loading: boolean) =>
+      withOverlay(
+        <Button icon="download" loading={loading}>
+          下载
+        </Button>,
+      );
+    view = render(ui(false));
+    const button = view.container.querySelector("button") as HTMLButtonElement;
+    view.rerender(ui(true));
+    const slot = layerOf(button, "download").parentElement as HTMLElement;
+    const download = layerOf(button, "download");
+    const moves = new MutationObserver(() => undefined);
+    moves.observe(slot, { childList: true });
+    view.rerender(ui(false));
+    expect(glyphsOf(button)).toEqual([
+      ["download", "still"],
+      ["spinner", "leaving"],
+    ]);
+    expect(layerOf(button, "download")).toBe(download);
+    // React 挪节点是先摘下再插回，会让里面的加载指示从头转：这里一个节点都没有被摘下或插入
+    expect(moves.takeRecords()).toEqual([]);
+    moves.disconnect();
+  });
+
+  it("减少动画：换上来的内容只淡入、不缩放，淡入播完就摘掉入场标记", () => {
+    const waapi = stubSpanAnimations();
+    document.documentElement.setAttribute("data-sk-reduced", "");
+    onTestFinished(() => document.documentElement.removeAttribute("data-sk-reduced"));
+    const ui = (icon: IconName) => withOverlay(<IconButton icon={icon} label="复制" />);
+    view = render(ui("copy"));
+    const button = view.container.querySelector("button") as HTMLButtonElement;
+    view.rerender(ui("check"));
+    const check = layerOf(button, "check");
+    expect(waapi.played.filter((a) => a.el === check).map((a) => Object.keys(a.frames[0]))).toEqual([["opacity"]]);
+    waapi.finish(waapi.running(check, "opacity"));
+    expect(glyphsOf(button)).toEqual([
+      ["copy", "leaving"],
+      ["check", "still"],
+    ]);
+  });
+
+  it("运行环境没有 Web Animations：直接到位，换下的层立即移除，不留入场标记", () => {
+    const ui = (loading: boolean) =>
+      withOverlay(
+        <Button icon="download" loading={loading}>
+          下载
+        </Button>,
+      );
+    view = render(ui(false));
+    const button = view.container.querySelector("button") as HTMLButtonElement;
+    view.rerender(ui(true));
+    expect(glyphsOf(button)).toEqual([["spinner", "still"]]);
+    view.rerender(ui(false));
+    expect(glyphsOf(button)).toEqual([["download", "still"]]);
   });
 
   it("挂载时就在加载：指示直接在位，不播入场", () => {
@@ -408,20 +592,16 @@ describe("Button", () => {
 });
 
 describe("图标位与加载态的样式", () => {
-  it("入场按 pop 从 0.6、按 tap 从 0.8 缩放到位并淡入；减少动画时只淡入", () => {
-    expect(ruleOf('.glyph[data-enter="pop"]')).toMatch(/glyphPop var\(--sk-spring-pop-dur\) var\(--sk-spring-pop\),\s*glyphIn var\(--sk-dur-in\) var\(--sk-ease-out\);/);
-    expect(ruleOf('.glyph[data-enter="tap"]')).toMatch(/glyphTap var\(--sk-spring-tap-dur\) var\(--sk-spring-tap\),\s*glyphIn var\(--sk-dur-in\) var\(--sk-ease-out\);/);
-    expect(ruleOf("@keyframes glyphPop")).toMatch(/scale: 0\.6;/);
-    expect(ruleOf("@keyframes glyphTap")).toMatch(/scale: 0\.8;/);
-    expect(ruleOf("@keyframes glyphIn")).toMatch(/opacity: 0;/);
-    expect(ruleOf(":global([data-sk-reduced]) .glyph[data-enter]")).toMatch(/animation: glyphIn var\(--sk-dur-in\) var\(--sk-ease-out\);/);
+  it("图标位不挂 CSS 关键帧：挂在属性上的关键帧会随子树从 display: none 变回可见而重播", () => {
+    const glyphRules = [...css.matchAll(/\n([^\n{}]*\.glyph\b[^\n{]*)\{([^}]*)\}/g)];
+    expect(glyphRules.map((m) => m[1].trim())).toEqual([".glyph", ".glyph:not([data-leaving])", ".glyph[data-leaving]"]);
+    for (const [, , body] of glyphRules) expect(body).not.toMatch(/animation|transition/);
+    expect(css).not.toMatch(/@keyframes glyph/);
   });
 
-  it("退场层静止时就是透明的，淡出结束事件不来也不会盖住新内容", () => {
-    const leaving = ruleOf(".glyph[data-leaving]");
-    expect(leaving).toMatch(/opacity: 0;/);
-    expect(leaving).toMatch(/animation: glyphOut var\(--sk-dur-out\) var\(--sk-ease-in\);/);
-    expect(ruleOf("@keyframes glyphOut")).toMatch(/opacity: 1;/);
+  it("退场层静止时就是透明的，淡出播完、还没移除的那一帧也不会盖住新内容；当前层画在退场层之上", () => {
+    expect(ruleOf(".glyph[data-leaving]")).toMatch(/opacity: 0;/);
+    expect(ruleOf(".glyph:not([data-leaving])")).toMatch(/order: 1;/);
   });
 
   it("两层叠在同一格里：图标位按最大的一层占位，不会并排撑宽按钮", () => {
@@ -469,11 +649,13 @@ describe("IconButton", () => {
     expect(document.querySelector('[role="tooltip"]')?.textContent).toBe("复制");
   });
 
-  it("换图标：旧图标原地淡出、新图标在同一格弹出，淡出完才移除；挂载时不播入场，按钮仍只有一个可见图标位", () => {
+  it("换图标：旧图标原地淡出、新图标在同一格弹出，淡出播完才移除；挂载时不播入场，按钮仍只有一个可见图标位", () => {
+    const waapi = stubSpanAnimations();
     const ui = (icon: IconName) => withOverlay(<IconButton icon={icon} label="复制" badge={<span>3</span>} />);
     view = render(ui("copy"));
     const button = view.container.querySelector("button") as HTMLButtonElement;
     expect(glyphsOf(button)).toEqual([["copy", "still"]]);
+    expect(waapi.played).toHaveLength(0);
 
     view.rerender(ui("check"));
     expect(glyphsOf(button)).toEqual([
@@ -481,14 +663,16 @@ describe("IconButton", () => {
       ["check", "pop"],
     ]);
     expect(new Set([...button.querySelectorAll("[data-glyph]")].map((g) => g.parentElement)).size).toBe(1);
-    animationEnd(leavingOf(button));
+    waapi.finish(waapi.running(leavingOf(button), "opacity"));
     expect(glyphsOf(button)).toEqual([["check", "pop"]]);
     expect(button.querySelectorAll("svg")).toHaveLength(1);
     expect(button.textContent).toBe("3");
 
     // 同一图标只是重渲染：不换层、不重播入场
+    const count = waapi.played.length;
     view.rerender(ui("check"));
     expect(glyphsOf(button)).toEqual([["check", "pop"]]);
+    expect(waapi.played).toHaveLength(count);
   });
 
   it("切换型输出 aria-pressed，非切换型不输出", () => {

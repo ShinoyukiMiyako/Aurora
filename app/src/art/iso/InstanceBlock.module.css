@@ -8,16 +8,22 @@
 /*
  * 在可点宿主内悬停时方块上浮 2 px（Tap）。宿主是链接、按钮、role=button，或用 data-sk-hover-host
  * 标记的卡片（卡内有其他控件、整卡不能是按钮时）。减少动画时没有悬停变化。
+ * 过渡挂在 .block 上而不是 .lift：宿主悬停期间摘掉上浮（lift 变为 false）时，方块也沿弹簧落回，不在一帧里掉回原位。
  */
-:global(:root:not([data-sk-reduced])) .lift {
+:global(:root:not([data-sk-reduced])) .block {
   transition: transform var(--sk-spring-tap-dur) var(--sk-spring-tap);
 }
 
 /* 卡面、头图上的大方块随卡片一起上浮：与卡片、底纹同用 settle，同一次悬停几层同时到位；tap 只给小控件 */
-:global(:root:not([data-sk-reduced])) .lift[data-large] {
+:global(:root:not([data-sk-reduced])) .block[data-large] {
   transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
 }
 
 :global(:root:not([data-sk-reduced]) :is(a, button, [role="button"], [data-sk-hover-host]):hover) .lift {
   transform: translateY(-2px);
+}
+
+/* 按下宿主时方块落回原位，像把它按回去，松开后再浮起。只认真正被按下的控件：整卡悬停宿主里按别的控件不算 */
+:global(:root:not([data-sk-reduced]) :is(a, button, [role="button"]):active) .lift {
+  transform: none;
 }

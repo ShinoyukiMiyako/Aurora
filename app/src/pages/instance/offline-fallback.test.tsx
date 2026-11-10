@@ -92,8 +92,13 @@ function textOf(node: Node): string {
 }
 
 /** 概览里的启动失败横幅：以标题定位，按钮只在它里面找，避开头图与状态岛上的同名按钮。 */
+/** 在场的启动失败横幅标题。横幅消失时淡出退场，那段时间它还在文档里、带 inert，不算。 */
+function liveFailedTitles(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>("*")].filter((el) => el.children.length === 0 && textOf(el).startsWith("上次启动失败：") && el.closest("[inert]") === null);
+}
+
 function failedBanner(): HTMLElement {
-  const title = [...document.querySelectorAll<HTMLElement>("*")].find((el) => el.children.length === 0 && textOf(el).startsWith("上次启动失败："));
+  const title = liveFailedTitles()[0];
   if (title === undefined) throw new Error("概览里没有启动失败横幅");
   let node: HTMLElement | null = title;
   while (node !== null && node.querySelector("button") === null) node = node.parentElement;
@@ -193,7 +198,7 @@ describe("概览的启动失败横幅：以离线方式进单人", () => {
     expect(launcher.state.toasts.filter((t) => t.tone === "info").map((t) => [t.title, t.body])).toEqual([
       [`「${ID}」以离线方式启动`, "这一局只能玩单人游戏，多人服务器与 Realms 用不了"],
     ]);
-    expect(document.body.textContent).not.toContain("上次启动失败：");
+    expect(liveFailedTitles()).toEqual([]);
   });
 
   it("「重试」照常不带降级标记，横幅上的两个按钮各走各的", async () => {

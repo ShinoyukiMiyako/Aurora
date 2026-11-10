@@ -7,6 +7,7 @@ import { ACTION_ERROR, CONFIRM_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { clock, formatBytes, formatDate, formatRelative } from "../../domain/format";
 import { autoBackupOutcome, type AutoBackupOutcome } from "../../domain/rules";
+import { useReflow } from "../../lib/reflow";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
@@ -14,10 +15,12 @@ import type { WorldDto } from "../../state/queries/instance";
 import { useResource, type ResourceResult } from "../../state/resource";
 import { activeTasks, busyWorlds, savesExported } from "../../state/selectors";
 import { worldBackupsKey, type LauncherState, type WorldBackupDto, type WorldBackupListDto } from "../../state/store";
+import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { EmptyState } from "../../ui/EmptyState";
 import { List, ListRow } from "../../ui/ListRow";
+import { Loadable } from "../../ui/Loadable";
 import type { MenuEntry } from "../../ui/Menu";
 import { Modal } from "../../ui/Modal";
 import { Skeleton } from "../../ui/Skeleton";
@@ -175,13 +178,19 @@ export function WorldBackupsModal({ inst, world, open, onClose, worldOps }: Worl
   const actions = useLauncherActions();
   const run = useRunner();
   const list = useWorldBackups(inst.id, world.dir);
+  // 加载门放在渲染 Modal 的这一层：骨架换成列表时这一层重渲染，面板才接得住尺寸变化、沿弹簧形变
+  const view = useModuleView(list);
   const busy = worldOps.busyWorlds.includes(world.dir);
   const ready = list.status === "ready" ? list.data : null;
 
+  // 副标题与列表同时换上；读取中传 null 先占住这一行，读到时头部不变高
+  const shown = view.view === "ready" ? ready : null;
   const subtitle =
-    ready === null
+    view.view === "error"
       ? undefined
-      : `${ready.backups.length > 0 ? COPY.modalSubtitle(ready.backups.length, ready.total_bytes) : COPY.modalSubtitleEmpty}${ready.scope === "shared" ? COPY.sharedSuffix : ""}`;
+      : shown === null
+        ? null
+        : `${shown.backups.length > 0 ? COPY.modalSubtitle(shown.backups.length, shown.total_bytes) : COPY.modalSubtitleEmpty}${shown.scope === "shared" ? COPY.sharedSuffix : ""}`;
 
   const footer = (
     <>
@@ -207,8 +216,29 @@ export function WorldBackupsModal({ inst, world, open, onClose, worldOps }: Worl
 
   return (
     <Modal open={open} onClose={onClose} size="md" title={COPY.modalTitle(world.name)} subtitle={subtitle} footer={footer}>
-      <BackupsBody inst={inst} world={world} list={list} busy={busy} worldOps={worldOps} onClose={onClose} />
+      <BackupsBody inst={inst} world={world} list={list} view={view} busy={busy} worldOps={worldOps} onClose={onClose} />
     </Modal>
+  );
+}
+
+/** 读取中的占位：典型的 3 行，行高、分隔线与贴边列表的行一致（不用 li：列表行按 li 数）。 */
+const SKELETON_ROWS = 3;
+
+function BackupsSkeleton() {
+  return (
+    <div className={styles.backupSkeleton}>
+      {Array.from({ length: SKELETON_ROWS }, (_, i) => (
+        <div key={i} className={styles.backupSkeletonRow}>
+          <span className={styles.backupSkeletonTitle}>
+            <Skeleton shape="text" width="56%" />
+          </span>
+          <span className={styles.rowActions}>
+            <Skeleton shape="block" width={50} height={30} radius="sm" />
+            <Skeleton shape="block" width={50} height={30} radius="sm" />
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -216,6 +246,7 @@ function BackupsBody({
   inst,
   world,
   list,
+  view,
   busy,
   worldOps,
   onClose,
@@ -223,35 +254,35 @@ function BackupsBody({
   inst: InstanceSummary;
   world: WorldRef;
   list: ResourceResult<WorldBackupListDto>;
+  view: ReturnType<typeof useModuleView>;
   busy: boolean;
   worldOps: WorldOps;
   onClose(): void;
 }) {
-  const view = useModuleView(list);
   const policy = useLauncherSelector((s) => (s.settings === null ? null : s.settings.worldBackup));
   const autoBackup = useLauncherSelector(selectAutoBackup);
   const { go } = useNav();
+  // 列表读到、增删一行、空状态与列表互换时，下面的注记从原位置滑过去
+  const reflow = useReflow<HTMLDivElement>();
   return (
-    <div className={styles.stack}>
-      {view.view === "skeleton" && (
-        <div className={styles.rows} aria-busy="true">
-          {Array.from({ length: 3 }, (_, i) => (
-            <div key={i} className={styles.row}>
-              <div className={styles.rowMain}>
-                <Skeleton shape="text" lines={2} />
-              </div>
-            </div>
-          ))}
-          <SlowHint slow={view.slow} />
-        </div>
-      )}
-      {view.view === "error" && list.status === "error" && <ModuleError title={COPY.loadError} error={list.error} onRetry={list.reload} />}
-      {view.view === "ready" && list.status === "ready" && list.data.backups.length === 0 && (
-        <EmptyState compact scene="clock" title={COPY.emptyTitle} body={autoBackup === "runs" ? COPY.emptyBody : COPY.emptyBodyManual} />
-      )}
-      {view.view === "ready" && list.status === "ready" && list.data.backups.length > 0 && (
-        <BackupRows inst={inst} world={world} backups={list.data.backups} busy={busy} restoreReason={worldOps.restoreReason} />
-      )}
+    <div ref={reflow} className={styles.stack}>
+      <Loadable view={view.view === "pending" || view.view === "skeleton" ? view.view : "content"} skeleton={<BackupsSkeleton />}>
+        {() => {
+          if (list.status === "error") return <ModuleError title={COPY.loadError} error={list.error} onRetry={list.reload} />;
+          if (list.status !== "ready") throw new Error("备份列表的加载门已放行，列表却还在读取");
+          const backups = list.data.backups;
+          return (
+            <Appear>
+              {backups.length === 0 ? (
+                <EmptyState key="empty" compact scene="clock" title={COPY.emptyTitle} body={autoBackup === "runs" ? COPY.emptyBody : COPY.emptyBodyManual} />
+              ) : (
+                <BackupRows key="rows" inst={inst} world={world} backups={backups} busy={busy} restoreReason={worldOps.restoreReason} />
+              )}
+            </Appear>
+          );
+        }}
+      </Loadable>
+      <Appear>{view.slow && <SlowHint key="slow" slow />}</Appear>
       {policy !== null &&
         (autoBackup === "runs" ? (
           <Callout tone="info">{COPY.autoOnNote(policy.keepPerWorld)}</Callout>
@@ -297,6 +328,10 @@ function BackupRows({
   const { confirm } = useShell();
   // 删除不确认、也不走任务：请求回来之前再按一次，第二个请求撞上已经移走的文件，报 world_backup_not_found
   const [removing, setRemoving] = useState<ReadonlySet<string>>(new Set());
+  // 删除成功后只发起列表重读、不等它回来：这一行接着转圈，直到重读回来的列表里没有它、整行退场，
+  // 不在删除请求回来时就复原，否则按钮先恢复可点，过一会儿整行才消失
+  const gone = [...removing].filter((file) => !backups.some((b) => b.file === file));
+  if (gone.length > 0) setRemoving((s) => new Set([...s].filter((file) => !gone.includes(file))));
   const rowRestoreReason = busy ? COPY.worldBusy : restoreReason;
   const rowDeleteReason = busy ? COPY.worldBusy : undefined;
 
@@ -308,13 +343,14 @@ function BackupRows({
 
   const remove = (backup: WorldBackupDto) => {
     setRemoving((s) => new Set(s).add(backup.file));
-    void run(() => actions.deleteWorldBackup(inst.id, world.dir, backup.file), ACTION_ERROR.deleteWorldBackup).then(() =>
+    void run(() => actions.deleteWorldBackup(inst.id, world.dir, backup.file), ACTION_ERROR.deleteWorldBackup).then((outcome) => {
+      if (outcome.ok) return;
       setRemoving((s) => {
         const next = new Set(s);
         next.delete(backup.file);
         return next;
-      }),
-    );
+      });
+    });
   };
 
   // 后端给出的就是新的在前；界面的顺序不依赖传输顺序，这里按备份时刻再排一次

@@ -36,6 +36,8 @@ let view: Rendered | undefined;
 let nav: NavApi;
 let launcher: LauncherApi;
 let onClose: ReturnType<typeof vi.fn<() => void>>;
+/** 元素上的程序化滚动：jsdom 没有 Element.scrollTo，这里记下参数并直接落到目标位置。 */
+let scrolls: ScrollToOptions[];
 
 function Probe() {
   nav = useNav();
@@ -87,8 +89,15 @@ function setInput(input: HTMLInputElement, value: string) {
   });
 }
 
+/** 按钮上看得见的那条文案：定宽文案槽里叠着全部候选，只认当前那条。 */
+function visibleText(el: Element): string | null {
+  const current = el.querySelector("[data-current]");
+  return current === null ? el.textContent : current.textContent;
+}
+
+/** 在场的按钮：退场中（inert）的「上一步」与撑宽度的隐形主按钮都不算。 */
 function button(text: string, root: ParentNode = document): HTMLButtonElement {
-  const el = [...root.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === text);
+  const el = [...root.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.closest("[inert]") === null && visibleText(b) === text);
   if (el === undefined) throw new Error(`找不到按钮「${text}」`);
   return el;
 }
@@ -144,6 +153,14 @@ beforeEach(() => {
     },
   );
   onClose = vi.fn<() => void>();
+  scrolls = [];
+  Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+    configurable: true,
+    value(this: HTMLElement, options: ScrollToOptions) {
+      scrolls.push(options);
+      if (options.top !== undefined) this.scrollTop = options.top;
+    },
+  });
   bootOverrides(ipc);
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   ipc.overrides.set("set_sidebar_pins", (args) => args.pins);
@@ -161,6 +178,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  Reflect.deleteProperty(HTMLElement.prototype, "scrollTo");
 });
 
 describe("新建实例：名称", () => {
@@ -302,7 +320,7 @@ describe("新建实例：完整走一遍", () => {
     expect(text).not.toContain("已安装");
   });
 
-  it("版本清单没给全下载体积时确认步不写预计下载", async () => {
+  it("版本清单没给全下载体积时预计下载写估不出，不写数字也不删掉这一行", async () => {
     await mount();
     await fillName("怀旧");
     click(button(CREATE_COPY.version.old));
@@ -314,7 +332,11 @@ describe("新建实例：完整走一遍", () => {
     expect(subtitle()).toBe("第 5 步，共 5 步 · 确认");
     expect(dialog().textContent).toContain("1.5.2 · 正式版");
     expect(dialog().textContent).toContain("Java 8 · 已安装（Oracle Corporation）");
-    expect(dialog().textContent).not.toContain(CREATE_COPY.confirm.download);
+    const keys = [...dialog().querySelectorAll("dt")].map((d) => d.textContent);
+    expect(keys).toEqual(["名称", "游戏版本", "加载器", "封面", "Java", CREATE_COPY.confirm.download, "存放位置"]);
+    const download = [...dialog().querySelectorAll("dt")].find((d) => d.textContent === CREATE_COPY.confirm.download);
+    expect(download?.nextElementSibling?.textContent).toBe(CREATE_COPY.confirm.downloadUnknown);
+    expect(dialog().textContent).not.toContain("约 ");
   });
 
   it("创建失败：弹窗留在确认步，顶部给出原因，主按钮恢复可点", async () => {
@@ -333,6 +355,40 @@ describe("新建实例：完整走一遍", () => {
     expect(callsOf(ipc, "update_config")).toEqual([]);
   });
 
+  it("创建失败后再点：旧横幅留到这一次有结果，不先撤掉再插回；新的失败原地换字", async () => {
+    await mount();
+    await fillName("周末生存");
+    await next();
+    await next();
+    await next();
+    const attempt = deferred<string>();
+    const create = vi.spyOn(launcher.actions, "createInstance").mockRejectedValueOnce(new Error("磁盘空间不足")).mockReturnValueOnce(attempt.promise);
+    click(button(CREATE_COPY.create));
+    await flush();
+    const banners = () => [...dialog().querySelectorAll('[class*="_banner_"]')].filter((el) => el.closest("[inert]") === null);
+    expect(banners().map((el) => el.textContent)).toEqual([`${CREATE_COPY.confirm.failed}磁盘空间不足`]);
+    const first = banners()[0];
+
+    click(button(CREATE_COPY.create));
+    await flush();
+    expect(create).toHaveBeenCalledTimes(2);
+    // 第二次还在进行：按钮换成进行中的文案，旧横幅还是同一个节点
+    const busy = dialog().querySelector('button[aria-busy="true"]');
+    if (busy === null) throw new Error("创建中的主按钮没有进入加载态");
+    expect(visibleText(busy)).toBe(CREATE_COPY.creating);
+    expect(banners()).toHaveLength(1);
+    expect(banners()[0]).toBe(first);
+
+    await act(async () => {
+      attempt.reject(new Error("目标文件夹被占用"));
+      await settle();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(banners()).toHaveLength(1);
+    expect(banners()[0]).toBe(first);
+    expect(first.textContent).toBe(`${CREATE_COPY.confirm.failed}目标文件夹被占用`);
+  });
+
   it("创建失败时确认步滚回顶部：开局选项让这一步常要滚动，原因写在最上面，不能停在视野之外", async () => {
     await mount();
     await fillName("周末生存");
@@ -346,6 +402,8 @@ describe("新建实例：完整走一遍", () => {
     click(button(CREATE_COPY.create));
     await flush();
     expect(dialog().textContent).toContain("磁盘空间不足");
+    // 平滑地滚回去，看得出内容往哪边走
+    expect(scrolls).toEqual([{ top: 0, behavior: "smooth" }]);
     expect(pane.scrollTop).toBe(0);
   });
 });
@@ -730,6 +788,175 @@ describe("新建实例：确认步的开局选项", () => {
     // 这个版本一项都装不了：两项仍禁用，原因换成缺版本
     expect(isBlocked(checkbox("一并装上 Fabric API"))).toBe(true);
     expect(isBlocked(checkbox("装上性能优化组合"))).toBe(true);
+  });
+});
+
+describe("新建实例：占位与换态", () => {
+  const live = (selector: string) => [...dialog().querySelectorAll<HTMLElement>(selector)].filter((el) => el.closest("[inert]") === null);
+
+  it("底栏：「上一步」第 2 步起才在；主按钮从头到尾是同一个按钮，隐形的创建按钮垫着定宽", async () => {
+    await mount();
+    expect(() => button(CREATE_COPY.back)).toThrow();
+    const primary = button(CREATE_COPY.next);
+    const slot = primary.closest('[class*="_primarySlot_"]');
+    if (slot === null) throw new Error("主按钮不在定宽格里");
+    const ghost = slot.querySelector("[inert] button");
+    if (ghost === null) throw new Error("定宽格里没有隐形的创建按钮");
+    expect(visibleText(ghost)).toBe(CREATE_COPY.create);
+    expect(slot.querySelector("[inert]")?.getAttribute("aria-hidden")).toBe("true");
+
+    await fillName("周末生存");
+    expect(button(CREATE_COPY.back).closest('[class*="_footActions_"]')).not.toBeNull();
+    await next();
+    await next();
+    await next();
+    // 进确认步换成创建，仍是同一个按钮：聚焦着的按钮不丢焦点
+    expect(button(CREATE_COPY.create)).toBe(primary);
+
+    click(stepButton("名称"));
+    await flush();
+    expect(subtitle()).toBe("第 1 步，共 5 步 · 名称");
+    expect(() => button(CREATE_COPY.back)).toThrow();
+    expect(button(CREATE_COPY.next)).toBe(primary);
+  });
+
+  it("底栏提示：两句叠在同一格，只有当前那句可见", async () => {
+    await mount();
+    const lines = () => [...dialog().querySelectorAll('[class*="_footHintLine_"]')].map((el) => [el.textContent, el.hasAttribute("data-current"), el.getAttribute("aria-hidden")]);
+    expect(lines()).toEqual([
+      [`${CREATE_COPY.hintEnter}Enter${CREATE_COPY.hintEnterAfter}`, true, null],
+      [CREATE_COPY.hintEsc, false, "true"],
+    ]);
+    await fillName("周末生存");
+    expect(lines()).toEqual([
+      [`${CREATE_COPY.hintEnter}Enter${CREATE_COPY.hintEnterAfter}`, false, "true"],
+      [CREATE_COPY.hintEsc, true, null],
+    ]);
+  });
+
+  it("名称为空按 Enter：不前进，输入框抖一次后归位", async () => {
+    await mount();
+    const shaker = nameInput().closest<HTMLElement>("[data-shaker]");
+    if (shaker === null) throw new Error("名称输入框外面没有抖动层");
+    keydown(nameInput(), "Enter");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(80);
+    });
+    expect(subtitle()).toBe("第 1 步，共 5 步 · 名称");
+    expect(shaker.style.transform).toMatch(/translateX\(-?[1-9]/);
+    await flush();
+    expect(shaker.style.transform).toBe("none");
+  });
+
+  it("版本清单没到：前 300 ms 骨架只占位不可见，计数槽透明占位；之后骨架出现", async () => {
+    ipc.overrides.set("list_manifest", () => new Promise(() => undefined));
+    await mount();
+    setInput(nameInput(), "慢");
+    click(button(CREATE_COPY.next));
+    await act(async () => {
+      await settle();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(subtitle()).toBe("第 2 步，共 5 步 · 游戏版本");
+    const skeleton = () => {
+      const el = dialog().querySelector('[aria-busy="true"] > [aria-hidden="true"]');
+      if (el === null) throw new Error("版本步没有骨架层");
+      return el;
+    };
+    expect(skeleton().hasAttribute("data-pending")).toBe(true);
+    expect(skeleton().querySelectorAll('[class*="_skeletonRow_"]')).toHaveLength(6);
+    const count = dialog().querySelector('[class*="_filterCount_"]');
+    expect(count?.hasAttribute("data-pending")).toBe(true);
+    expect(count?.getAttribute("aria-hidden")).toBe("true");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(skeleton().hasAttribute("data-pending")).toBe(false);
+  });
+
+  it("离线缓存的版本列表：计数只写条数，离线说明在列表下面另起一行", async () => {
+    const since = Date.now() - 3 * 86_400_000;
+    ipc.overrides.set("list_manifest", async () => ({ ...(await mockInvoke<ManifestDto>("list_manifest")), stale_since: since }));
+    await mount();
+    await fillName("离线");
+    const count = dialog().querySelector('[class*="_filterCount_"]');
+    expect(count?.textContent).toBe("共 4 个版本");
+    expect(count?.hasAttribute("data-pending")).toBe(false);
+    expect(live('[class*="_listNote_"]').map((el) => el.textContent)).toEqual([CREATE_COPY.version.stale(since, Date.now())]);
+  });
+
+  it("换筛选：整个版本列表从透明淡入一次", async () => {
+    await mount();
+    await fillName("筛选");
+    const list = () => {
+      const el = dialog().querySelector<HTMLElement>(`[role="radiogroup"][aria-label="${CREATE_COPY.version.listLabel}"]`);
+      if (el === null) throw new Error("版本步没有列表");
+      return el;
+    };
+    expect(list().style.opacity).toBe("");
+    click(button(CREATE_COPY.version.snapshots));
+    expect(list().style.opacity).toBe("0");
+    await flush();
+    expect(list().style.opacity).toBe("1");
+    expect(radios().map((r) => r.textContent?.match(/^[\w.]+/)?.[0])).toContain("24w14a");
+  });
+
+  it("开局脚注常驻占位：两项都不勾时只是隐藏，勾上一项又显示", async () => {
+    await mount();
+    await fillName("脚注");
+    await next();
+    click(radio("Fabric"));
+    await flush();
+    await next();
+    await next();
+    await next();
+    const note = () => {
+      const el = [...dialog().querySelectorAll("p")].find((p) => p.textContent === CREATE_COPY.confirm.starter.footnote);
+      if (el === undefined) throw new Error("确认步没有开局脚注");
+      return el;
+    };
+    expect(note().getAttribute("aria-hidden")).toBeNull();
+    const api = [...dialog().querySelectorAll<HTMLButtonElement>('[role="checkbox"]')].find((b) => b.textContent === "一并装上 Fabric API");
+    if (api === undefined) throw new Error("确认步没有 Fabric API 一项");
+    click(api);
+    expect(note().getAttribute("aria-hidden")).toBe("true");
+    expect(note().hasAttribute("data-hidden")).toBe(true);
+    click(api);
+    expect(note().hasAttribute("data-hidden")).toBe(false);
+  });
+
+  it("左栏：当前步的底色是同一块滑块；走过的步骤圆点换成勾号；预览卡不是悬停宿主", async () => {
+    await mount();
+    const marks = () => dialog().querySelectorAll('ol > [class*="_stepMark_"]');
+    expect(marks()).toHaveLength(1);
+    const mark = marks()[0];
+    expect(mark.getAttribute("aria-hidden")).toBe("true");
+    expect(stepButton("名称").querySelector("[data-glyph]:not([data-leaving])")?.getAttribute("data-glyph")).toBe("n1");
+    await fillName("左栏");
+    expect(marks()).toHaveLength(1);
+    expect(marks()[0]).toBe(mark);
+    expect(stepButton("名称").querySelector("[data-glyph]:not([data-leaving])")?.getAttribute("data-glyph")).toBe("check");
+    expect(dialog().querySelector("aside [data-sk-hover-host]")).toBeNull();
+  });
+
+  it("预览卡的版本行常驻：清单没到时空着占一行，到了填上版本", async () => {
+    const manifest = deferred<ManifestDto>();
+    ipc.overrides.set("list_manifest", () => manifest.promise);
+    await mount();
+    const meta = () => {
+      const el = dialog().querySelector('aside [class*="_previewMeta_"]');
+      if (el === null) throw new Error("预览卡没有版本行");
+      return el;
+    };
+    expect(meta().hasAttribute("data-pending")).toBe(true);
+    expect(meta().textContent).toBe("");
+    await act(async () => {
+      manifest.resolve(await mockInvoke<ManifestDto>("list_manifest"));
+      await settle();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(meta().hasAttribute("data-pending")).toBe(false);
+    expect(meta().textContent).toBe("1.21.1 · 原版");
   });
 });
 

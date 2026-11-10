@@ -9,11 +9,11 @@
 // 内容区例外：滚动条和要选中的错误原文都不是可点击元素，放在拖动区里一按就成了拖窗。
 // 窗口级的东西（版本号、关窗能力、协议入口）由 App 经 FrameChrome 下发，视图只管自己的标题、内容和底栏。
 
-import { AnimatePresence, motion, useIsPresent, type Variants } from "framer-motion";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig, type Variants } from "framer-motion";
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
 import { Icon } from "../art/Icon";
 import { fade, springs } from "../lib/motion";
-import { springTrack } from "../lib/slide";
+import { playTrack, springTrack } from "../lib/slide";
 import { softDisabledProps } from "../ui/Button";
 import { Tooltip } from "../ui/Tooltip";
 import { BrandMark, StageArt } from "./art";
@@ -68,11 +68,21 @@ function WindowControls({ chrome }: { chrome: FrameChrome }) {
 /** 换步时的横移距离（px），和首启向导一致。 */
 const STEP_SHIFT_PX = 16;
 
-/** 新页从前进方向一侧进来，旧页朝反方向退出；方向为 0 时只淡入淡出。减少动画时位移由根部 MotionConfig 关掉。 */
+/** 新页从前进方向一侧进来，旧页朝反方向退出；方向为 0 时只淡入淡出。 */
 const stepMotion: Variants = {
   enter: (direction: StepDirection) => ({ opacity: 0, x: STEP_SHIFT_PX * direction }),
   center: { opacity: 1, x: 0, transition: { ...springs.soft, opacity: fade.in } },
   exit: (direction: StepDirection) => ({ opacity: 0, x: -STEP_SHIFT_PX * direction, transition: fade.out }),
+};
+
+/**
+ * 减少动画时的换步：只淡入淡出。不能沿用 stepMotion 等根部 MotionConfig 去关位移：它把位移改成一步到位，
+ * 旧页会先横跳 16px、还是不透明的，再花一个 fade.out 淡掉。
+ */
+const stepFade: Variants = {
+  enter: { opacity: 0 },
+  center: { opacity: 1, transition: fade.in },
+  exit: { opacity: 0, transition: fade.out },
 };
 
 /** 视图把它标在两页里「同一块」内容上（值相同），换步时那两块跟着走，见 carryAcross。 */
@@ -83,7 +93,8 @@ const CARRY_EPSILON_PX = 1;
 
 /**
  * 两页都有的同一块内容在换步时跟着走：新页这一块从旧页那一块的位置沿弹簧滑到自己的位置，旧页那一块同时朝新位置走，
- * 两块交叉淡入淡出，看着是一块在挪。欢迎页与选目录页的标题区高度不同时（英文的说明行数不一样），路径行因此不会在换步时跳一下。
+ * 两块交叉淡入淡出，看着是一块在挪。这是兜底：能预留就先预留（欢迎页与选目录页靠 leadFloor 让标题区等高，这一块本就在同一高度），
+ * 竖向挪得多了，挪动中的块会压过新页的说明。
  * 位移交给 Web Animations、写在 translate 上：整段在合成线程上播，与页面自己在 transform 上的横移叠加、互不覆盖。
  * 旧页这时已被 popLayout 抽出布局、叠在原处，量到的就是它换步前的位置。
  */
@@ -107,13 +118,8 @@ function carryAcross(pane: HTMLElement): void {
   const dx = from.left - to.left;
   const dy = from.top - to.top;
   if (Math.abs(dx) < CARRY_EPSILON_PX && Math.abs(dy) < CARRY_EPSILON_PX) return;
-  play(target, springTrack("morph", dx, 0, dy, 0));
-  play(source, springTrack("morph", dx, 0, dy, 0, -dx, -dy));
-}
-
-/** 事先采样好的弹簧轨迹交给合成线程播，帧间线性插值；时长随轨迹而定。 */
-function play(el: HTMLElement, { frames, duration }: ReturnType<typeof springTrack>): void {
-  el.animate(frames, { duration, easing: "linear" });
+  playTrack(target, springTrack("morph", dx, 0, dy, 0));
+  playTrack(source, springTrack("morph", dx, 0, dy, 0, -dx, -dy));
 }
 
 interface StepPaneProps {
@@ -128,6 +134,7 @@ interface StepPaneProps {
 /** 换步时新旧两页短暂并存：退场中的那一页不可交互、不朗读，焦点与读屏只落在新的一页上。 */
 function StepPane({ ref, direction, enter, children }: StepPaneProps) {
   const present = useIsPresent();
+  const reduced = useReducedMotionConfig() === true;
   const own = useRef<HTMLDivElement | null>(null);
   const bind = useCallback(
     (el: HTMLDivElement | null) => {
@@ -149,7 +156,7 @@ function StepPane({ ref, direction, enter, children }: StepPaneProps) {
       ref={bind}
       className={styles.pane}
       custom={direction}
-      variants={stepMotion}
+      variants={reduced ? stepFade : stepMotion}
       initial={enter ? "enter" : false}
       animate="center"
       exit="exit"
@@ -210,6 +217,11 @@ export interface FrameProps {
   title: ReactNode;
   /** 标题下的说明。 */
   lead?: ReactNode;
+  /**
+   * 说明区至少按这段文字的高度占位，它本身不显示。两页之间原地换（只淡不移）、下面又有同一块内容时，
+   * 各自把对方的说明传进来：两页的标题区一样高，那块内容在两页里就在同一高度上，换步时不用挪。
+   */
+  leadFloor?: ReactNode;
   /** 主列内容，超高时在这一块内滚动。 */
   children?: ReactNode;
   /** 底栏右侧的按钮，主按钮放最后。 */
@@ -219,12 +231,22 @@ export interface FrameProps {
 }
 
 /** 主列里的一页：标题、说明、内容和底栏。放在 FrameShell 里，左栏与窗口按钮在那边。 */
-export function Frame({ title, lead, children, footer, footerStart }: FrameProps) {
+export function Frame({ title, lead, leadFloor, children, footer, footerStart }: FrameProps) {
   return (
     <>
       <header className={styles.head}>
         <h1 className={styles.title}>{title}</h1>
-        {lead !== undefined && <p className={styles.lead}>{lead}</p>}
+        {lead !== undefined &&
+          (leadFloor === undefined ? (
+            <p className={styles.lead}>{lead}</p>
+          ) : (
+            <div className={styles.leadSlot}>
+              <p className={styles.lead}>{lead}</p>
+              <p className={styles.lead} data-floor="" aria-hidden="true">
+                {leadFloor}
+              </p>
+            </div>
+          ))}
       </header>
       <div className={styles.body} data-tauri-drag-region="false">
         {children}

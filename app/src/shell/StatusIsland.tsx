@@ -19,7 +19,7 @@ import { instanceCover } from "../launch/cover";
 import { useBlockCatalog } from "../mc/catalog";
 import { useLaunchHost } from "../launch/host";
 import { sessionDetail, sessionPhaseLabel } from "../launch/launchView";
-import { fade, shake, springs } from "../lib/motion";
+import { fade, lineSwap, shake, springs } from "../lib/motion";
 import { useReflow } from "../lib/reflow";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { findInstance } from "../state/selectors";
@@ -83,13 +83,46 @@ export function islandSecondText(second: IslandSecond): string {
   return [second.label, second.value].filter((part): part is string => part !== null).join(" ");
 }
 
+/** 加载百分比的占位：封顶 99%，数字等宽，任何一个百分比都不比它宽。 */
+const PERCENT_PEAK = percent(1, true);
+
+const LOADING_LABELS = [PHASE_LABEL.preparing, PHASE_LABEL.downloading, PHASE_LABEL.launching] as const;
+
+/** 运行计时的占位：同样位数的 0。数字等宽，位数不变就同宽，跨过一小时才变。 */
+function clockPeak(session: SessionState, now: number): string {
+  if (session.runningSince === null) throw new Error("running 会话缺少运行起点");
+  return formatElapsed(now - session.runningSince).replace(/\d/g, "0");
+}
+
 /**
- * 胶囊的宽度只取决于这几样：档位、名字、阶段文字、数字槽里的字数（等宽数字，字数相同就同宽）、尾部有没有圆点。
- * 交给布局动画做 layoutDependency：下载进度、百分比、运行计时这类只改数字的重渲染不再逐次量一遍布局，
+ * 第二段的槽：这些候选叠在同一格里占宽，格宽取最宽的一条，显示的那一行不参与撑宽。
+ * regular 与 wide 档在加载与运行期间把「正在结束…」和三个加载阶段一并列进来：点了结束、阶段推进时胶囊不变宽，
+ * 换的只是格里的那一行。compact 档只占当前这一行：它为省宽而设，不为片刻的「正在结束…」常年多占一截，
+ * 那一下交给胶囊的宽度形变。
+ */
+export function islandSlot(session: SessionState, tier: Tier, now: number, stopping: boolean): readonly IslandSecond[] {
+  const phase = session.phase;
+  const compact = tier === "compact";
+  const ending: IslandSecond = { label: SESSION_COPY.stopping, value: null };
+  if (isLoadingPhase(phase)) {
+    if (compact) return [stopping ? ending : { label: null, value: PERCENT_PEAK }];
+    return [...LOADING_LABELS.map((label) => ({ label, value: PERCENT_PEAK })), ending];
+  }
+  if (phase === "running") {
+    const clock: IslandSecond = { label: compact ? null : SESSION_COPY.runningLabel, value: clockPeak(session, now) };
+    if (compact) return [stopping ? ending : clock];
+    return [clock, ending];
+  }
+  return [islandSecond(session, tier, now, stopping)];
+}
+
+/**
+ * 胶囊的宽度只取决于这几样：档位、名字、第二段的槽（候选文案与数字占位的位数）、尾部有没有圆点。
+ * 交给布局动画做 layoutDependency：下载进度、百分比、运行计时、同一槽里换阶段文字这类重渲染不再逐次量一遍布局，
  * 否则运行中每秒都要量一次、再跑一段弹簧。
  */
-export function islandLayoutKey(session: SessionState, tier: Tier, name: string, second: IslandSecond): string {
-  return JSON.stringify([tier, name, second.label, second.value === null ? null : second.value.length, islandTone(session), session.phase === "crashed"]);
+export function islandLayoutKey(session: SessionState, tier: Tier, name: string, slot: readonly IslandSecond[]): string {
+  return JSON.stringify([tier, name, slot, islandTone(session), session.phase === "crashed"]);
 }
 
 /**
@@ -130,9 +163,6 @@ const shakeVariants: Variants = {
   shake: { x: [...shake.x], transition: shake.transition },
 };
 
-/** 第二段换行的位移（px）：新行从下方升入，旧行向上淡出。 */
-const SECOND_SHIFT = 4;
-
 /** 减少动画时的退场：位移与缩放在那时瞬时到位，留在退场里会先瞬缩、瞬移一下再淡出，所以只留透明度。 */
 const FADE_OUT = { opacity: 0, transition: fade.out };
 
@@ -153,8 +183,9 @@ function Island({ session }: { session: SessionState }) {
   const name = instance === undefined ? session.instanceId : instance.name;
   const tone = islandTone(session);
   const second = islandSecond(session, tier, now, stopping);
+  const slot = islandSlot(session, tier, now, stopping);
   const loading = isLoadingPhase(session.phase);
-  const layoutKey = islandLayoutKey(session, tier, name, second);
+  const layoutKey = islandLayoutKey(session, tier, name, slot);
   // 详情在加载期间开着：加载结束（进入运行、失败、取消）后阶段清单留到浮层关闭，停在最终状态。
   // 清单连间距两百多像素，加载一结束就抽走会让日志与动作行上跳、浮层底边骤缩；关掉再打开时不在加载期就不画
   const [stagesHeld, setStagesHeld] = useState(false);
@@ -221,20 +252,26 @@ function Island({ session }: { session: SessionState }) {
             </span>
             <span className={styles.name}>{name}</span>
             <span className={styles.second}>
-              {/* 阶段文字一变整行换掉（旧行上移淡出、新行从下方升入），百分比与计时在行内原地走。
+              {/* 阶段文字一变整行换掉（旧行上移淡出、新行从下方升入，与启动胶囊的阶段名同一套），百分比与计时在行内原地走。
+                  新旧两行与占宽的候选叠在同一格里交接，格宽只取候选，换行时胶囊不变宽。
                   首帧那一行跟着整座岛入场，不单独播；行里只有文字、没有之后才挂载的动画元素，initial={false} 封不住别的入场 */}
-              <AnimatePresence mode="popLayout" initial={false}>
+              <AnimatePresence initial={false}>
                 <motion.span
                   key={second.label === null ? "value-only" : `label:${second.label}`}
                   className={styles.face}
-                  initial={{ opacity: 0, y: SECOND_SHIFT }}
-                  animate={{ opacity: 1, y: 0, transition: { ...springs.settle, opacity: fade.in } }}
-                  exit={reduced ? FADE_OUT : { opacity: 0, y: -SECOND_SHIFT, transition: fade.out }}
+                  variants={lineSwap}
+                  initial="enter"
+                  animate="show"
+                  exit={reduced ? FADE_OUT : "leave"}
                 >
-                  {second.label !== null && <span>{second.label}</span>}
-                  {second.value !== null && <span className={styles.value}>{second.value}</span>}
+                  <SecondText second={second} />
                 </motion.span>
               </AnimatePresence>
+              {slot.map((candidate) => (
+                <span key={islandSecondText(candidate)} className={styles.reserve} aria-hidden="true">
+                  <SecondText second={candidate} />
+                </span>
+              ))}
             </span>
             {/* 状态点退场时立即脱离布局：外框的宽度动画按没有它的宽度量，淡完那一帧不再跳一次 */}
             <AnimatePresence mode="popLayout">
@@ -279,6 +316,16 @@ function Island({ session }: { session: SessionState }) {
           <DetailActions session={session} controls={controls} onClose={close} />
         </div>
       </Popover>
+    </>
+  );
+}
+
+/** 第二段一行的内容：显示的那一行与占宽的候选同一结构，候选量出来的宽度才和显示时一致。 */
+function SecondText({ second }: { second: IslandSecond }) {
+  return (
+    <>
+      {second.label !== null && <span>{second.label}</span>}
+      {second.value !== null && <span className={styles.value}>{second.value}</span>}
     </>
   );
 }

@@ -5,8 +5,8 @@
 // 在线人数与上次在线照旧取上一次的结果；恢复联网立即重测一次。
 // 每行的「加入」以记住的实例直接启动并进服；没记住（或记住的已不可用）时弹实例选择，可以顺手记住这次的选择。
 
-import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { Icon } from "../../art/Icon";
 import { serverHue } from "../../art/illustrations/seed";
 import { ACTION_ERROR, LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
@@ -14,8 +14,8 @@ import type { InstanceSummary } from "../../domain/adapt";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { formatRelative } from "../../domain/format";
 import { useLoadingGate } from "../../lib/loading-gate";
-import { fade, springs } from "../../lib/motion";
-import { cx } from "../../lib/util";
+import { fade, insertItem, springs } from "../../lib/motion";
+import { useReflow } from "../../lib/reflow";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
@@ -24,6 +24,7 @@ import { useOnline } from "../../state/online";
 import { useKnownServers, usePinnedServers, useServerStatus, type KnownServerDto, type PinnedServerDto } from "../../state/queries/home";
 import type { ResourceResult } from "../../state/resource";
 import { busyInstanceId, savesBusyIds } from "../../state/selectors";
+import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Card, type ResponsiveValue } from "../../ui/Card";
@@ -32,6 +33,7 @@ import { Checkbox } from "../../ui/Checkbox";
 import { EmptyState } from "../../ui/EmptyState";
 import { IconButton } from "../../ui/IconButton";
 import { List, ListRow } from "../../ui/ListRow";
+import { Loadable } from "../../ui/Loadable";
 import type { MenuEntry } from "../../ui/Menu";
 import { MenuButton } from "../../ui/MenuButton";
 import { Modal } from "../../ui/Modal";
@@ -54,6 +56,7 @@ import {
   pinMenuPlan,
   rememberedGone,
   serverRows,
+  shownProbeError,
   type BusySession,
   type JoinBlock,
   type JoinPlan,
@@ -133,6 +136,12 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
   if (probeOrigin.data !== status.data) setProbeOrigin({ data: status.data, offline: !online });
   const probe: ProbeState = !online ? "paused" : probeOrigin.data === status.data && probeOrigin.offline ? "retesting" : "live";
 
+  const probing = status.status === "loading" || status.refreshing;
+  const [pingErrorShown, setPingErrorShown] = useState<Error | null>(() => shownProbeError(status, null));
+  const pingError = shownProbeError(status, pingErrorShown);
+  if (pingError !== pingErrorShown) setPingErrorShown(pingError);
+  const stackReflow = useReflow<HTMLDivElement>();
+
   const wasOnline = useRef(online);
   useEffect(() => {
     const reconnected = online && !wasOnline.current;
@@ -170,22 +179,11 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
 
   const count = pinned.status === "ready" ? pinned.data.length : 0;
   const countLine = count > 0 ? HOME_COPY.serversSubtitle(count) : HOME_COPY.serversSubtitleEmpty;
-  const subtitle = pinned.status !== "ready" ? undefined : count > 0 && !online ? HOME_COPY.serversOffline(countLine) : countLine;
+  // 读取中先占住副标题这一行（null），台数到了原位淡入，卡头不因此变高、把下面的内容推下去
+  const subtitle = pinned.status === "loading" ? null : pinned.status === "error" ? undefined : count > 0 && !online ? HOME_COPY.serversOffline(countLine) : countLine;
 
   const body = () => {
-    if (pinned.status === "loading" || gate.view === "skeleton") {
-      return (
-        <div className={cx(s.rowSkeletons, gate.view === "pending" && s.pending)} aria-busy="true">
-          {Array.from({ length: SKELETON_ROWS }, (_, i) => (
-            <span key={i} className={s.rowSkeleton}>
-              <Skeleton shape="square" size={SKELETON_SIZE.rowThumb} />
-              <Skeleton shape="text" lines={3} />
-            </span>
-          ))}
-          {gate.slow && <span className={s.slowHint}>{SLOW_LOADING_HINT}</span>}
-        </div>
-      );
-    }
+    if (pinned.status === "loading") throw new Error("固定列表还在读，加载门却放行了内容");
     if (pinned.status === "error") {
       return (
         <EmptyState
@@ -201,25 +199,18 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
         />
       );
     }
-    if (pinned.data.length === 0) return <EmptyState scene="compass" compact title={HOME_COPY.serversEmptyTitle} body={HOME_COPY.serversEmptyBody} />;
-    const rows = serverRows(pinned.data, status.data, probe);
+    const rows = serverRows(pinned.data, status.data, probe, probing);
     const candidates = joinCandidates(instances);
+    // 固定第一台、取消最后一台时空状态与列表在同一处交叉淡入淡出，最后一行随列表一起淡出；
+    // 行数变化时下面的测速失败提示滑到新位置
     return (
-      <>
-        <ul className={s.serverList}>
-          <AnimatePresence initial={false} mode="popLayout">
-            {rows.map((row) => (
-              <motion.li
-                key={row.address}
-                {...{ [SERVER_ROW_ATTR]: row.address }}
-                layout
-                layoutDependency={rows.map((r) => r.address).join("|")}
-                className={s.serverRow}
-                initial={{ opacity: 0, scale: 0.98 }}
-                animate={{ opacity: 1, scale: 1, transition: { ...springs.settle, opacity: fade.in } }}
-                exit={{ opacity: 0, scale: 0.98, transition: fade.out }}
-                transition={springs.settle}
-              >
+      <div ref={stackReflow} className={s.serverStack}>
+        <Appear>
+          {rows.length === 0 ? (
+            <EmptyState key="empty" scene="compass" compact title={HOME_COPY.serversEmptyTitle} body={HOME_COPY.serversEmptyBody} />
+          ) : (
+            <ServerList key="list" rows={rows}>
+              {(row) => (
                 <ServerRowView
                   row={row}
                   join={joinPlan(row.instance, instances, busy, savesBusy)}
@@ -230,24 +221,28 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
                   savesBusy={savesBusy}
                   onUnpin={() => unpin({ name: row.name, address: row.address, instance: row.instance })}
                 />
-              </motion.li>
-            ))}
-          </AnimatePresence>
-        </ul>
-        {status.status === "error" && (
-          <Callout
-            tone="danger"
-            fullText
-            action={
-              <Button variant="ghost" size="sm" icon="refresh" onClick={status.reload}>
-                {HOME_COPY.retry}
-              </Button>
-            }
-          >
-            {HOME_COPY.pingError(describeError(status.error))}
-          </Callout>
-        )}
-      </>
+              )}
+            </ServerList>
+          )}
+        </Appear>
+        <Appear>
+          {rows.length > 0 && pingError !== null && (
+            <Callout
+              key="ping-error"
+              tone="danger"
+              fullText
+              action={
+                // 重测途中提示留着，按钮转圈说明正在重测
+                <Button variant="ghost" size="sm" icon="refresh" loading={probing} onClick={status.reload}>
+                  {HOME_COPY.retry}
+                </Button>
+              }
+            >
+              {HOME_COPY.pingError(describeError(pingError))}
+            </Callout>
+          )}
+        </Appear>
+      </div>
     );
   };
 
@@ -260,9 +255,97 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
         icon="server"
         actions={<MenuButton items={addItems()} placement="bottom-end" trigger={(props) => <IconButton {...props} {...{ [PIN_BUTTON_ATTR]: "" }} icon="plus" variant="secondary" size="sm" label={HOME_COPY.pinServer} />} />}
       />
-      {body()}
+      <Loadable
+        view={gate.view}
+        skeleton={
+          <div className={s.rowSkeletons}>
+            {Array.from({ length: SKELETON_ROWS }, (_, i) => (
+              <span key={i} className={s.rowSkeleton}>
+                <Skeleton shape="square" size={SKELETON_SIZE.rowThumb} />
+                <span className={s.rowSkeletonText}>
+                  <Skeleton shape="text" width="60%" className={s.skeletonBody} />
+                  <Skeleton shape="text" lines={2} className={s.skeletonCaption} />
+                </span>
+              </span>
+            ))}
+          </div>
+        }
+      >
+        {body}
+      </Loadable>
+      <Appear itemClassName={s.rowSlowHint}>
+        {gate.slow && (
+          <span key="slow" className={s.slowHint}>
+            {SLOW_LOADING_HINT}
+          </span>
+        )}
+      </Appear>
       {picker !== null && <ServerPicker key={picker.session} open={picker.open} known={known} onPin={pin} onClose={closePicker} />}
     </Card>
+  );
+}
+
+/** 减少动画时行的进出只留透明度：缩放在那里是一步到位的，退场会先缩一下再淡出。 */
+const ROW_FADE_ONLY = {
+  initial: { opacity: 0 },
+  animate: { opacity: 1, transition: fade.in },
+  exit: { opacity: 0, transition: fade.out },
+} as const;
+
+/**
+ * 固定服务器的行：新固定的一台淡入，取消固定的原地淡出并让出位置，其余行沿 settle 滑到新位置。
+ * 挂载时就在的行不播入场，跟着卡片出现。不能用 AnimatePresence 的 initial={false} 来做：它会让行里之后才挂载的
+ * 元素（测速结果到达时的淡入）也永远跳过入场。
+ */
+function ServerList({ rows, children }: { rows: readonly ServerRow[]; children: (row: ServerRow) => ReactNode }) {
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
+  const order = rows.map((r) => r.address).join("|");
+  return (
+    <ul className={s.serverList}>
+      <AnimatePresence mode="popLayout">
+        {rows.map((row) => (
+          <ServerItem key={row.address} address={row.address} order={order} entering={mounted.current}>
+            {children(row)}
+          </ServerItem>
+        ))}
+      </AnimatePresence>
+    </ul>
+  );
+}
+
+interface ServerItemProps {
+  /** popLayout 把退场的行抽出布局时要量这个 li，由 AnimatePresence 递进来。 */
+  ref?: Ref<HTMLLIElement>;
+  address: string;
+  /** 行的顺序签名：只有它变了才量布局，行内的数据更新不牵动布局动画。 */
+  order: string;
+  entering: boolean;
+  children: ReactNode;
+}
+
+/** 一行。退场中的那一行带 inert：它叠在滑上来的下一行上淡出，已经不是列表的一行，点不到也聚焦不到。 */
+function ServerItem({ ref, address, order, entering, children }: ServerItemProps) {
+  const present = useIsPresent();
+  const reduced = useReducedMotionConfig() === true;
+  const item = reduced ? ROW_FADE_ONLY : insertItem;
+  return (
+    <motion.li
+      ref={ref}
+      {...{ [SERVER_ROW_ATTR]: address }}
+      layout
+      layoutDependency={order}
+      className={s.serverRow}
+      inert={!present}
+      initial={entering ? item.initial : false}
+      animate={item.animate}
+      exit={item.exit}
+      transition={springs.settle}
+    >
+      {children}
+    </motion.li>
   );
 }
 
@@ -289,8 +372,9 @@ function ServerPicker({ open, known, onPin, onClose }: ServerPickerProps) {
     refocusAt.current = null;
     const root = bodyRef.current;
     if (root === null) throw new Error("服务器挑选弹窗的列表尚未挂载");
-    // 整行可点的列表行渲染为 li 里的按钮。刚固定的那一行还在原处淡出（inert，聚焦不了），不算接手的候选
-    const rows = [...root.querySelectorAll<HTMLElement>("li:not([inert]) > button")];
+    // 整行可点的列表行渲染为 li 里的按钮。刚固定的那一行还在原处淡出（inert，聚焦不了），不算接手的候选；
+    // 挑空时整个列表连同最后一行淡出，那一层带 inert，里面的行同样不算
+    const rows = [...root.querySelectorAll<HTMLElement>("li > button")].filter((el) => el.closest("[inert]") === null);
     const target = rows.length > 0 ? rows[Math.min(index, rows.length - 1)] : root.closest('[role="dialog"]')?.querySelector<HTMLElement>(`[${PICKER_CLOSE_ATTR}]`);
     if (target === null || target === undefined) throw new Error("服务器挑选弹窗里找不到接手焦点的控件");
     target.focus();
@@ -311,13 +395,13 @@ function ServerPicker({ open, known, onPin, onClose }: ServerPickerProps) {
   const body = () => {
     // 固定之后多人列表会重读；重读期间手里的旧列表照常可用，只有一份都没有时才说明原因
     if (known.data === undefined) {
-      if (known.status === "error") return <EmptyState scene="error" compact title={HOME_COPY.knownError} body={describeError(known.error)} />;
-      return <EmptyState icon="server" compact title={HOME_COPY.knownLoading} />;
+      if (known.status === "error") return <EmptyState key="error" scene="error" compact title={HOME_COPY.knownError} body={describeError(known.error)} />;
+      return <EmptyState key="loading" icon="server" compact title={HOME_COPY.knownLoading} />;
     }
     const candidates = pinCandidates(known.data).filter((server) => !picked.has(server.address));
-    if (candidates.length === 0) return <EmptyState icon="check-circle" compact title={HOME_COPY.allPinned} />;
+    if (candidates.length === 0) return <EmptyState key="done" icon="check-circle" compact title={HOME_COPY.allPinned} />;
     return (
-      <List>
+      <List key="list">
         {candidates.map((server, index) => (
           <ListRow
             key={server.address}
@@ -345,7 +429,10 @@ function ServerPicker({ open, known, onPin, onClose }: ServerPickerProps) {
         </Button>
       }
     >
-      <div ref={bodyRef}>{body()}</div>
+      {/* 挑空时列表连同最后一行淡出、「都已固定」在同一处淡入，弹窗随内容收缩；多人列表读完换上列表同理 */}
+      <div ref={bodyRef}>
+        <Appear>{body()}</Appear>
+      </div>
     </Modal>
   );
 }
@@ -380,6 +467,12 @@ function ServerRowView({ row, join, instanceGone, candidates, selectedInstanceId
   const actions = useLauncherActions();
   const run = useRunner();
   const now = useNow(30_000);
+  // 测速结果没到时 MOTD 与在线人数两行先占着（前 300 ms 隐身，之后是骨架），到了原位淡入，行不变高。
+  // 版本号跟着这两行一起出现：等过结果的行，它到了也淡入；挂载时就有结果的照常直接显示
+  const detailGate = useLoadingGate(row.awaiting);
+  const detailsShown = detailGate.view === "content";
+  const [waited, setWaited] = useState(!detailsShown);
+  if (!detailsShown && !waited) setWaited(true);
   const [copied, setCopied] = useState(false);
   // 实例选择锚在「加入」上：从「更多」菜单打开时也锚在这里。打开过才挂上，之后保持挂载好播完关闭的退场；
   // 每次打开换一个 session，选择与「记住」都从默认值开始
@@ -448,22 +541,41 @@ function ServerRowView({ row, join, instanceGone, candidates, selectedInstanceId
   return (
     <>
       <Thumb url={row.favicon} kind="server" hue={serverHue(row.address)} size={40} />
-      <span className={s.serverText}>
+      <div className={s.serverText}>
         <span className={s.serverName}>
           <span className={s.ellipsis}>{row.name}</span>
-          {row.versionName !== null && <span className={s.serverVersion}>{row.versionName}</span>}
+          {detailsShown && row.versionName !== null && (
+            <span className={s.serverVersion} data-late={waited || undefined}>
+              {row.versionName}
+            </span>
+          )}
         </span>
-        {row.motd !== null && <span className={s.serverMotd}>{row.motd}</span>}
-        {row.population.kind === "online" && (
-          <span className={s.serverOnline}>
-            <span className={s.onlineDot} aria-hidden="true" />
-            {HOME_COPY.online(row.population.online, row.population.max)}
-          </span>
-        )}
-        {row.population.kind === "last-seen" && (
-          <span className={s.serverOnline}>{HOME_COPY.lastOnline(formatRelative(row.population.at, now), row.population.online)}</span>
-        )}
-      </span>
+        <Loadable
+          view={detailGate.view}
+          contentClassName={s.serverDetail}
+          skeleton={
+            <span className={s.serverDetail}>
+              <Skeleton shape="text" width="70%" />
+              <Skeleton shape="text" width="45%" />
+            </span>
+          }
+        >
+          {() => (
+            <>
+              {row.motd !== null && <span className={s.serverMotd}>{row.motd}</span>}
+              {row.population.kind === "online" && (
+                <span className={s.serverOnline}>
+                  <span className={s.onlineDot} aria-hidden="true" />
+                  {HOME_COPY.online(row.population.online, row.population.max)}
+                </span>
+              )}
+              {row.population.kind === "last-seen" && (
+                <span className={s.serverOnline}>{HOME_COPY.lastOnline(formatRelative(row.population.at, now), row.population.online)}</span>
+              )}
+            </>
+          )}
+        </Loadable>
+      </div>
       <span className={s.serverSide}>
         <span className={s.signal} data-state={signal.kind} data-quality={signal.kind === "online" ? signal.quality : undefined} aria-hidden="true">
           {Array.from({ length: SIGNAL_BARS }, (_, i) => (

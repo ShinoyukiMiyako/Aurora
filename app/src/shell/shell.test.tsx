@@ -277,6 +277,34 @@ describe("外壳：确认框与启动替换", () => {
     await expect(second).resolves.toBe(true);
   });
 
+  // 按请求换 key 时开着的框连遮罩一起卸掉重挂，遮罩断一帧；原地换内容又得重做初始聚焦，不然焦点停在旧的确认键上
+  it("确认框开着时被顶替：框不重挂，换成危险确认时焦点回到「取消」", async () => {
+    await mount();
+    act(() => {
+      void shell.confirm({ title: "切换下载源？", confirmLabel: "切换并重下" });
+    });
+    const layer = document.querySelector("[data-sk-modal-layer]");
+    expect(document.activeElement).toBe(button("切换并重下"));
+    act(() => {
+      void shell.confirm({ title: "删除「生存」？", confirmLabel: "删除实例", tone: "danger" });
+    });
+    expect(document.querySelectorAll("[data-sk-modal-layer]")).toHaveLength(1);
+    expect(document.querySelector("[data-sk-modal-layer]")).toBe(layer);
+    expect(dialogTitle()).toBe("删除「生存」？");
+    expect(document.activeElement).toBe(button(CONFIRM_CANCEL_LABEL));
+
+    // 框关上之后再来的请求才换一个新的框：旧框直接拿掉，不和新框并存
+    act(() => button(CONFIRM_CANCEL_LABEL).click());
+    act(() => {
+      void shell.confirm({ title: "结束游戏？", confirmLabel: "结束游戏", tone: "danger" });
+    });
+    const layers = document.querySelectorAll("[data-sk-modal-layer]");
+    expect(layers).toHaveLength(1);
+    expect(layers[0]).not.toBe(layer);
+    expect(dialogTitle()).toBe("结束游戏？");
+    expect(document.activeElement).toBe(button(CONFIRM_CANCEL_LABEL));
+  });
+
   it("另一实例在运行时再点启动：弹替换确认，确认后结束旧的并启动新的", async () => {
     ipc.overrides.set("launch_game", () => ({ pid: 1 }));
     ipc.overrides.set("stop_game", () => {
@@ -418,6 +446,33 @@ describe("外壳：全局快捷键", () => {
     offA();
     keydown(window, "f", { ctrlKey: true, code: "KeyF" });
     expect(a).not.toHaveBeenCalled();
+  });
+
+  it("目标就是当前页：Ctrl+数字、Alt+数字、Ctrl+, 都滚回顶部，不压历史；别的页照常跳过去", async () => {
+    await mount();
+    const chrome = { scrollContentToTop: vi.fn(), focusContent: vi.fn() };
+    act(() => shell.bindChrome(chrome));
+
+    keydown(window, "1", { ctrlKey: true, code: "Digit1" });
+    expect(chrome.scrollContentToTop).toHaveBeenCalledTimes(1);
+    expect(nav.route).toEqual({ page: "home" });
+    expect(nav.canBack).toBe(false);
+
+    keydown(window, "1", { altKey: true, code: "Digit1" });
+    expect(nav.route).toEqual({ page: "instance", id: "创造", tab: "overview" });
+    keydown(window, "1", { altKey: true, code: "Digit1" });
+    expect(chrome.scrollContentToTop).toHaveBeenCalledTimes(2);
+    // 同一实例的别的标签不算当前页：快捷键回到概览
+    act(() => nav.replace({ page: "instance", id: "创造", tab: "mods" }));
+    keydown(window, "1", { altKey: true, code: "Digit1" });
+    expect(nav.route).toEqual({ page: "instance", id: "创造", tab: "overview" });
+    expect(chrome.scrollContentToTop).toHaveBeenCalledTimes(2);
+
+    keydown(window, ",", { ctrlKey: true, code: "Comma" });
+    expect(nav.route).toEqual({ page: "settings" });
+    keydown(window, ",", { ctrlKey: true, code: "Comma" });
+    expect(chrome.scrollContentToTop).toHaveBeenCalledTimes(3);
+    expect(chrome.focusContent).not.toHaveBeenCalled();
   });
 
   it("首次启动向导期间导航快捷键全部无效", async () => {

@@ -16,6 +16,7 @@ import { bootOverrides, callsOf, cancelledError, deferred, emit, instanceDto, re
 import { CONFIRM_CANCEL_LABEL } from "../ui/ConfirmDialog";
 import { OverlayRoot } from "../shell/overlay";
 import { ShellProvider } from "../shell/shell";
+import { assemblyExitMs } from "../art/iso/AssemblingBlock";
 import { assembly, capsuleSwap } from "../lib/motion";
 import { faceSwap, LaunchCapsule, TEXT_SLOTS } from "./LaunchCapsule";
 
@@ -168,9 +169,9 @@ describe("启动胶囊换面时的焦点", () => {
       await settle();
     });
     expect(launcher.state.session?.phase).toBe("stopped");
-    // 拆散的动画留住旧面一小会儿，之后换成已结束面；已结束面停留的计时还没到
+    // 拆散的动画留住旧面一小会儿（最长是三面都落了的时候），之后换成已结束面；已结束面停留的计时还没到
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(capsuleSwap.holdMs.disassemble + 20);
+      await vi.advanceTimersByTimeAsync(assemblyExitMs("disassemble", 3) + 20);
     });
     const stopped = document.querySelector<HTMLElement>('[data-face="stopped:cancelled"]');
     if (stopped === null) throw new Error("没有换成已结束面");
@@ -396,6 +397,33 @@ describe("换面与文字", () => {
     expect(placedIn(second)).toBe("1");
   });
 
+  it("加载面刚换上就进入运行：等首落延迟与落位间隔把三面落齐、坐定之后，再停一拍才换到运行面", async () => {
+    const started = deferred<{ pid: number }>();
+    ipc.overrides.set("launch_game", () => started.promise);
+    act(() => buttonByText(LAUNCH_COPY.launch).click());
+    await flush();
+    expect(placedIn(document)).toBe("0");
+    await act(async () => {
+      started.resolve({ pid: 4242 });
+      await settle();
+    });
+    expect(launcher.state.session?.phase).toBe("running");
+    // 方块每落一面要提交一次才排下一面：按 10 ms 一步推进，每一步的重渲染都在 act 收尾时提交
+    const advanceInSteps = async (ms: number) => {
+      for (let passed = 0; passed < ms; passed += 10) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(Math.min(10, ms - passed));
+        });
+      }
+    };
+    // 首落之后三面隔着落位间隔落齐，最后一面落下后再过坐定延迟才坐定：这期间一直是加载面
+    await advanceInSteps(assembly.firstDropMs + 2 * assembly.stepGapMs + assembly.seatDelayMs);
+    expect(placedIn(document)).toBe("3");
+    expect(document.querySelector('[data-face="running"]')).toBeNull();
+    await advanceInSteps(capsuleSwap.holdMs.afterSeat);
+    expect(document.querySelector('[data-face="running"]')).not.toBeNull();
+  });
+
   /** 一行文字槽里看得见的那段与占宽的候选。 */
   const slotOf = (line: Element) => {
     const children = [...line.children];
@@ -419,7 +447,7 @@ describe("换面与文字", () => {
   });
 
   // 只断言交接的那一刻：同一文件里前面的用例换下假时钟时 framer-motion 的帧循环还排着帧，之后的动画在这里不再推进，
-  // 退场演完被移除这一步只在单独跑时看得到
+  // 退场演完被移除这一步在 LaunchCapsule.frames.test.tsx 里走真实时间断言
   it("阶段名换行：旧行不原地换字，与新行在同一格里交接", async () => {
     act(() => {
       void launcher.actions.launch("生存");

@@ -86,7 +86,15 @@ const rows = () => [...document.querySelectorAll("main li")].map((row) => [...ro
 const tabs = () => [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
 /** 原文标签右边那条说明：两种说明都叠在槽里，看得见的只有当前这条。 */
 const noteShown = () => document.querySelector(`.${styles.headingNote} [data-current]`)?.textContent;
-const listStatus = () => document.querySelector('main [role="status"]');
+/** 清单的底块：读到之前就在，清单读到后落在它上面。 */
+const packagesBox = () => document.querySelector(`main .${styles.packagesBox}`);
+/** 底块里「正在读取」那一行；看不看得见由加载门决定，延迟之内它所在的那一层带着 data-pending、是透明的。 */
+const loadingNote = () => [...document.querySelectorAll<HTMLElement>("main p")].find((p) => p.textContent === COPY.zh.legal.thirdPartyLoading) ?? null;
+const loadingNoteVisible = () => {
+  const note = loadingNote();
+  return note !== null && note.closest("[data-pending]") === null;
+};
+const listBusy = () => packagesBox()?.querySelector("[aria-busy='true']") !== null;
 
 function button(name: string): HTMLButtonElement {
   const found = [...document.querySelectorAll("button")].find((b) => b.textContent === name);
@@ -141,6 +149,11 @@ describe.each(["zh", "en"] as const)("必须出现的声明（%s）", (lang) => 
     await showTab(legal.termsHeading);
     expect(slot?.firstElementChild).toBe(before);
     expect(noteShown()).toBe(legal.chinesePrevails);
+  });
+
+  it("说明在槽里靠左：短的那条不按按钮文案居中缩进去", async () => {
+    await show({}, lang);
+    expect(document.querySelector(`.${styles.headingNote}`)?.firstElementChild?.getAttribute("data-align")).toBe("start");
   });
 
   it("有 Minecraft 商标声明", async () => {
@@ -337,16 +350,19 @@ describe("第三方许可清单", () => {
   it("读得快时不闪「读取中」：底块先占着位置，清单读到后在同一块底上从透明淡入，包数也这时才写", async () => {
     const manifest = deferred<ThirdPartyManifest>();
     await show({ loadThirdParty: () => manifest.promise });
-    expect(listStatus()?.textContent).toBe("");
+    const box = packagesBox();
+    expect(box).not.toBeNull();
+    expect(loadingNote()).not.toBeNull();
+    expect(loadingNoteVisible()).toBe(false);
+    expect(listBusy()).toBe(true);
     expect(packageList()).toBeNull();
     expect(countText()).toBe(legal.thirdPartyHeading);
-    const box = listStatus()?.parentElement;
 
-    // 帧循环跑在真实时间上：在清单插进 DOM 的那一刻（微任务里，还没到下一帧）读它的透明度
+    // 帧循环跑在真实时间上：在清单插进 DOM 的那一刻（微任务里，还没到下一帧）读包住它的那一层的透明度
     const firstOpacity: string[] = [];
     const watcher = new MutationObserver(() => {
-      const list = packageList();
-      if (list instanceof HTMLElement && firstOpacity.length === 0) firstOpacity.push(list.style.opacity);
+      const layer = packageList()?.parentElement;
+      if (layer instanceof HTMLElement && firstOpacity.length === 0) firstOpacity.push(layer.style.opacity);
     });
     watcher.observe(document.body, { childList: true, subtree: true });
     try {
@@ -355,9 +371,10 @@ describe("第三方许可清单", () => {
       watcher.disconnect();
     }
     expect(firstOpacity).toEqual(["0"]);
-    expect(listStatus()).toBeNull();
+    expect(loadingNoteVisible()).toBe(false);
+    expect(listBusy()).toBe(false);
     expect(rows()).toHaveLength(3);
-    expect(packageList()?.parentElement).toBe(box);
+    expect(packageList()?.closest(`.${styles.packagesBox}`)).toBe(box);
     expect(countText()).toBe(`${legal.thirdPartyHeading}3`);
   });
 
@@ -369,18 +386,19 @@ describe("第三方许可清单", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS - 1);
       });
-      expect(listStatus()?.textContent).toBe("");
+      expect(loadingNoteVisible()).toBe(false);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1);
       });
-      expect(listStatus()?.textContent).toBe(legal.thirdPartyLoading);
+      expect(loadingNoteVisible()).toBe(true);
 
       await act(async () => manifest.resolve(MANIFEST));
       expect(packageList()).toBeNull();
+      expect(listBusy()).toBe(true);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
       });
-      expect(listStatus()).toBeNull();
+      expect(listBusy()).toBe(false);
       expect(rows()).toHaveLength(3);
     } finally {
       vi.useRealTimers();

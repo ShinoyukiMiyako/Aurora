@@ -3,12 +3,15 @@
 import { useRef, useState } from "react";
 import { Spinner } from "../../art/Spinner";
 import { runtimeComplete } from "../../domain/rules";
+import { useLoadingGate } from "../../lib/loading-gate";
+import { useReflow } from "../../lib/reflow";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useJavaRuntimes, type JavaInstallationDto } from "../../state/queries/catalog";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { EmptyState } from "../../ui/EmptyState";
+import { Loadable } from "../../ui/Loadable";
 import { SettingRow } from "../../ui/SettingRow";
 import { Tag } from "../../ui/Tag";
 import { Toggle } from "../../ui/Toggle";
@@ -75,39 +78,50 @@ function AutoDownloadRow() {
   );
 }
 
+/** 扫描中的占位：所在容器带 aria-busy，占位本身不朗读。 */
+function Scanning() {
+  return (
+    <div className={s.scanning}>
+      <Spinner size={20} />
+      <span>{JAVA_STEP_COPY.scanning}</span>
+    </div>
+  );
+}
+
+/**
+ * 进入本步才扫描，首次运行要逐个起 java 进程，常要几百毫秒到几秒：300ms 内回来不画扫描行（只占位），
+ * 超过才淡入，换成结果时交叉淡入。结果的高度由运行时的个数决定，占不住，下面的「自动下载 Java」由容器的让位滑过去。
+ * 不把开关挪到结果上方：空状态的说明是「打开下面的自动下载」。
+ */
 export function StepJava() {
   const java = useJavaRuntimes();
-  let body;
-  if (java.status === "loading") {
-    body = (
-      <div className={s.scanning} role="status">
-        <Spinner size={20} />
-        <span>{JAVA_STEP_COPY.scanning}</span>
-      </div>
-    );
-  } else if (java.status === "error") {
-    body = (
-      <Callout
-        tone="danger"
-        announce
-        action={
-          <Button size="sm" variant="ghost" onClick={() => java.reload()}>
-            {JAVA_STEP_COPY.retry}
-          </Button>
-        }
-      >
-        <span className={s.calloutTitle}>{JAVA_STEP_COPY.failed}</span>
-        <span className={s.errorText}>{java.error.message}</span>
-      </Callout>
-    );
-  } else if (java.data.length === 0) {
-    body = <EmptyState compact icon="java" title={JAVA_STEP_COPY.emptyTitle} body={JAVA_STEP_COPY.emptyBody} />;
-  } else {
-    body = <RuntimeRows runtimes={java.data} />;
-  }
+  const gate = useLoadingGate(java.status === "loading");
+  const reflow = useReflow<HTMLDivElement>();
   return (
-    <div className={s.stepBody}>
-      {body}
+    <div ref={reflow} className={s.stepBody}>
+      <Loadable view={gate.view} skeleton={<Scanning />}>
+        {() => {
+          if (java.status === "loading") throw new Error("加载门放行内容时 Java 扫描一定已经结束");
+          if (java.status === "error") {
+            return (
+              <Callout
+                tone="danger"
+                announce
+                action={
+                  <Button size="sm" variant="ghost" onClick={() => java.reload()}>
+                    {JAVA_STEP_COPY.retry}
+                  </Button>
+                }
+              >
+                <span className={s.calloutTitle}>{JAVA_STEP_COPY.failed}</span>
+                <span className={s.errorText}>{java.error.message}</span>
+              </Callout>
+            );
+          }
+          if (java.data.length === 0) return <EmptyState compact icon="java" title={JAVA_STEP_COPY.emptyTitle} body={JAVA_STEP_COPY.emptyBody} />;
+          return <RuntimeRows runtimes={java.data} />;
+        }}
+      </Loadable>
       <AutoDownloadRow />
     </div>
   );

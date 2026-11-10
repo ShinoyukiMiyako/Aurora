@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { fade } from "../../lib/motion";
 import styles from "./ArtCrossfade.module.css";
 
@@ -21,11 +21,13 @@ export interface ArtCrossfadeProps {
  */
 export function ArtCrossfade({ fallback, real, realKey }: ArtCrossfadeProps) {
   // 挂载之后真图每次出现都淡入，挂载时就在的不淡入。不能用 AnimatePresence 的 initial={false} 来做：
-  // 它会让真图里面之后才挂载的 motion 元素也永远跳过入场
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  // 它会让真图里面之后才挂载的 motion 元素也永远跳过入场。
+  // 记下挂载那一刻在场的是哪一层；它一离场（真图没了、换了来源）就忘掉，之后同一来源再出现也是新的一次，照样淡入。
+  // 用状态而不是在渲染期读 ref：渲染只依赖 props 与状态
+  const layerKey = realKey === undefined ? "real" : `real:${realKey}`;
+  const [mountedLayer, setMountedLayer] = useState(real !== null ? layerKey : null);
+  const stillMounted = mountedLayer !== null && real !== null && layerKey === mountedLayer;
+  if (mountedLayer !== null && !stillMounted) setMountedLayer(null);
   return (
     <>
       <motion.span className={styles.layer} initial={false} animate={{ opacity: real !== null ? 0 : 1 }} transition={real !== null ? fade.out : fade.in}>
@@ -34,9 +36,9 @@ export function ArtCrossfade({ fallback, real, realKey }: ArtCrossfadeProps) {
       <AnimatePresence>
         {real !== null && (
           <motion.span
-            key={realKey === undefined ? "real" : `real:${realKey}`}
+            key={layerKey}
             className={styles.layer}
-            initial={mounted.current ? { opacity: 0 } : false}
+            initial={stillMounted ? false : { opacity: 0 }}
             animate={{ opacity: 1, transition: fade.in }}
             exit={{ opacity: 0, transition: fade.out }}
           >

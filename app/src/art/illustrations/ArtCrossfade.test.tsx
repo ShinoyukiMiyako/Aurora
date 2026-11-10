@@ -60,4 +60,14 @@ describe("ArtCrossfade", () => {
     view.rerender(tree("alex"));
     expect(realLayers()).toEqual([{ src: "alex", layer }]);
   });
+
+  it("挂载时的那张图换走之后又换回来：换回来的是新的一次，照样淡入", async () => {
+    view = render(tree("steve", "skin/aa"));
+    expect(layerOf("[data-real]")?.style.opacity).toBe("1");
+    view.rerender(tree("alex", "skin/bb"));
+    await waitForFrames(() => expect(realLayers().map((r) => r.src)).toEqual(["alex"]));
+
+    view.rerender(tree("steve", "skin/aa"));
+    expect(realLayers().find((r) => r.src === "steve")?.layer.style.opacity).toBe("0");
+  });
 });

@@ -3,14 +3,16 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useReflow } from "../lib/reflow";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { keydown, render, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
+import { keydown, render, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
 import { MEMORY_WARN_COPY, MemorySlider, memoryMarks, memoryMaxMb, memoryShare, type MemorySliderProps } from "./MemorySlider";
 
 let view: Rendered | undefined;
+let observers: ResizeObserverStub;
 
 beforeEach(() => {
-  stubResizeObserver();
+  observers = stubResizeObserver();
 });
 
 afterEach(() => {
@@ -97,6 +99,38 @@ describe("MemorySlider", () => {
     keydown(range(), "ArrowLeft");
     expect(usage().hasAttribute("data-tone")).toBe(false);
     await waitForFrames(() => expect(document.querySelector('[role="alert"]')).toBeNull());
+  });
+
+  it("警示条出没改变的是组件根元素自己的高度：根元素是外层让位直接观察的那个盒子", () => {
+    // jsdom 没有 Web Animations，让位在那里不启动；补上之后才能看到它观察了哪些元素
+    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: () => undefined });
+    try {
+      function CardBody() {
+        const ref = useReflow<HTMLDivElement>();
+        return (
+          <div ref={ref} data-testid="card-body">
+            <Host initial={12288} totalMb={16384} />
+            <span>下一行</span>
+          </div>
+        );
+      }
+      mount(<CardBody />);
+      const body = document.querySelector('[data-testid="card-body"]') as HTMLElement;
+      // 组件只出一个根元素，就是卡片栈里的那一项；警示条的出入场层是它的流内直接子项，出现时撑高的是它
+      expect(body.children).toHaveLength(2);
+      const root = body.children[0] as HTMLElement;
+      const alert = document.querySelector('[role="alert"]') as HTMLElement;
+      expect(alert.parentElement?.parentElement).toBe(root);
+      // 根元素被观察两次：外层让位把它当子项，组件内部的让位把它当容器
+      expect(observers.observed().filter((el) => el === root)).toHaveLength(2);
+      // 根元素是有盒子的定位基准：popLayout 退场时警示条以它为基准脱离布局，它同帧缩回，外层的尺寸观察看得到
+      const css = readFileSync(resolve(__dirname, "MemorySlider.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+      const rootRule = /(?:^|\n)\.root\s*\{([^}]*)\}/.exec(css)?.[1];
+      expect(rootRule).toContain("position: relative;");
+      expect(rootRule).toContain("display: flex;");
+    } finally {
+      delete (HTMLElement.prototype as { animate?: unknown }).animate;
+    }
   });
 
   it("挂载时就在警示区：警示条随所在页面入场，不单独淡入", () => {

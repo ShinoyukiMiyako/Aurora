@@ -6,8 +6,8 @@
 // Enter 选中并关闭、Esc 关闭并把焦点还给触发器、Tab 关闭并前进；任意时刻键入字符按首字跳转
 // （500 ms 内连续键入合并为前缀；关闭时直接选中匹配项，与原生下拉一致）。
 // 选项超过 12 个时列表顶部出现过滤框，打开即聚焦，按标签包含匹配。
-// 尺寸不随内容跳：触发器宽度按最长的选项预留，换选中项时同一行的其他控件不被挤动（撑满的触发器宽度由容器定，不预留；
-// 选项很多时只取估算最长的几条）；
+// 尺寸不随内容跳：宽度随内容走的触发器传 reserveWidth，按最长的选项预留宽度，换选中项时同一行的其他控件不被挤动
+// （选项很多时只取估算最长的几条）；撑满或调用方已定宽的触发器不用传；
 // 打开期间面板不变矮（键入筛选词只换内容），过滤框有没有在打开那一刻定下，选项晚到也不会把它插进来。
 
 import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
@@ -38,6 +38,12 @@ export interface SelectProps<T extends string> {
   placeholder?: string;
   size?: "sm" | "md";
   block?: boolean;
+  /**
+   * 触发器宽度按最长的选项（含占位）预留：换选中项时触发器不变宽，同一行右对齐的其他控件不被挤动。
+   * 只给宽度随内容走的触发器打开（工具条里的排序、适配实例）。撑满（block）或调用方已给固定宽的不要开：
+   * 宽度本来就不变，预留只会在触发器里白白多出最多 8 个隐藏节点。block 时不生效。
+   */
+  reserveWidth?: boolean;
   disabled?: boolean;
   invalid?: boolean;
   /** 不在 Field 里时必填。 */
@@ -102,6 +108,7 @@ export function Select<T extends string>({
   placeholder = SELECT_PLACEHOLDER,
   size = "md",
   block = false,
+  reserveWidth = false,
   disabled = false,
   invalid = false,
   ariaLabel,
@@ -210,7 +217,7 @@ export function Select<T extends string>({
 
   const current = selected >= 0 ? options[selected] : null;
   const activeId = open && highlight >= 0 && visible.includes(highlight) ? optionId(highlight) : undefined;
-  const widthLabels = block ? [] : widthCandidates([placeholder, ...options.map((o) => o.label)]);
+  const widthLabels = reserveWidth && !block ? widthCandidates([placeholder, ...options.map((o) => o.label)]) : [];
 
   return (
     <>

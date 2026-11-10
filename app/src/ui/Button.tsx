@@ -1,9 +1,11 @@
 // 按钮只有四种变体：主（每个视图至多 1 个）、次（默认）、幽灵、危险（每个视图至多 1 个）。
 // 只有图标没有文字时用 IconButton；在多个互斥选项间切换用分段控件。
 
-import { useState, type ButtonHTMLAttributes, type MouseEvent, type MouseEventHandler, type ReactNode, type Ref } from "react";
+import { useLayoutEffect, useRef, useState, type ButtonHTMLAttributes, type MouseEvent, type MouseEventHandler, type ReactNode, type Ref } from "react";
 import { Icon, type IconName, type IconSize } from "../art/Icon";
 import { Spinner, type SpinnerTone } from "../art/Spinner";
+import { fade, tweenAt, type SpringName } from "../lib/motion";
+import { elapsedSeconds, playTrack, playTween, scaleTrack } from "../lib/slide";
 import { cx } from "../lib/util";
 import styles from "./Button.module.css";
 import { Tooltip } from "./Tooltip";
@@ -23,6 +25,11 @@ const SPINNER_GLYPH = "spinner";
 /** 换上来的内容怎么入场：pop 从 0.6 弹出（换了个图标），tap 从 0.8 收拢（换成加载指示，动作已经开始，不该再抢眼）。 */
 export type GlyphEnter = "pop" | "tap";
 
+const GLYPH_ENTER: Readonly<Record<GlyphEnter, { spring: SpringName; from: number }>> = {
+  pop: { spring: "pop", from: 0.6 },
+  tap: { spring: "tap", from: 0.8 },
+};
+
 export interface GlyphSlotProps {
   /** 当前内容的身份（图标名、加载指示）；null 为空着。只有它变了才算换内容，同一身份下内容的其他属性照常更新。 */
   glyph: string | null;
@@ -33,54 +40,142 @@ export interface GlyphSlotProps {
   children?: ReactNode;
 }
 
-interface GlyphShown {
+interface GlyphLayer {
   glyph: string;
-  /** 它换上来那一刻的内容：之后被换下时，退场层画的就是这份。 */
+  /** 它换上来（或被接回）那一刻的内容：之后被换下时，退场层画的就是这份。 */
   node: ReactNode;
   key: number;
+  /** 正在播的入场；播完、被换下或被接回的层为 null。 */
+  enter: GlyphEnter | null;
+}
+
+interface GlyphState {
+  current: GlyphLayer | null;
+  /** 正在淡出的层。各层身份互不相同，也不与当前层相同：同一身份回来时接回原来那层，而不是再叠一层。 */
+  leaving: readonly GlyphLayer[];
+  swaps: number;
+}
+
+type Tween = typeof fade.in | typeof fade.out;
+
+/** 一层正在播的透明度补间：被打断时按它算出此刻的透明度，从那里接着走。 */
+interface GlyphFade {
+  animation: Animation;
+  from: number;
+  to: number;
+  tween: Tween;
+}
+
+const opacityOf = (f: GlyphFade) => f.from + (f.to - f.from) * tweenAt(f.tween, elapsedSeconds(f.animation));
+
+function swapGlyph(state: GlyphState, glyph: string | null, node: ReactNode, enter: GlyphEnter): GlyphState {
+  const swaps = state.swaps + 1;
+  // 还在淡出的同一身份回来了（快速来回切换）：接回原来那层。DOM 节点不换，加载指示的旋转相位连续，也不会两枚叠着转
+  const back = glyph === null ? undefined : state.leaving.find((layer) => layer.glyph === glyph);
+  const leaving = state.leaving.filter((layer) => layer !== back);
+  if (state.current !== null) leaving.push({ ...state.current, enter: null });
+  const current = glyph === null ? null : back !== undefined ? { ...back, node } : { glyph, node, key: swaps, enter };
+  return { current, leaving, swaps };
+}
+
+function layerElement(slot: HTMLElement, glyph: string): HTMLElement {
+  for (const el of slot.children) if (el instanceof HTMLElement && el.dataset.glyph === glyph) return el;
+  throw new Error(`图标位里找不到「${glyph}」这一层`);
 }
 
 /**
  * 图标位：换图标、图标与加载指示互换时，新内容在同一格里入场，旧内容原地淡出，按钮尺寸不变。
- * 用 CSS 动画而不是 motion 组件：列表每行都有图标按钮，没换过内容时它只是一层 span，不为此多付挂载代价。
- * 被换下的那层保留原来的 DOM 节点（key 不变），加载指示的旋转不会从头开始；它淡出结束后才移除。
  * 挂载时就在的内容不播入场，跟着所在页面的入场走。
+ *
+ * 动画只在换内容的那一刻由 Web Animations 起，不挂 CSS 关键帧，也不用 motion 组件（列表每行都有图标按钮，
+ * 没换过内容时它只是一层 span）。不用 CSS 关键帧是因为：
+ * - 关键帧挂在属性上，所在子树从 display: none 变回可见（按档位隐藏的表格列）时会整段重播，换过的图标再弹一次；
+ *   退场层的淡出也要等重新显示才开始，旧图标先闪出来。脚本起的动画不随显隐重启，隐藏期间照常播完、照常移除。
+ * - 换关键帧只能从头播。这里记着每层透明度补间的起止，被打断时算出此刻的值，从那里接着淡出或淡回。
+ * 退场层保留原来的 DOM 节点（key 不变），加载指示的旋转不从头开始；淡出结束后才移除。层按 key 排序渲染，节点从不移动。
  */
 export function GlyphSlot({ glyph, enter = "pop", className, children }: GlyphSlotProps) {
-  const [state, setState] = useState<{ current: GlyphShown | null; leaving: GlyphShown | null; swaps: number }>(() => ({
-    current: glyph === null ? null : { glyph, node: children, key: 0 },
-    leaving: null,
+  const [state, setState] = useState<GlyphState>(() => ({
+    current: glyph === null ? null : { glyph, node: children, key: 0, enter: null },
+    leaving: [],
     swaps: 0,
   }));
-  const shown = state.current === null ? null : state.current.glyph;
-  if (glyph !== shown) {
-    const swaps = state.swaps + 1;
-    // 从空着换上来时，还在淡出的那层接着淡出
-    setState({ current: glyph === null ? null : { glyph, node: children, key: swaps }, leaving: state.current === null ? state.leaving : state.current, swaps });
-  }
+  if (glyph !== (state.current === null ? null : state.current.glyph)) setState(swapGlyph(state, glyph, children, enter));
+
+  const root = useRef<HTMLSpanElement>(null);
+  const [fades] = useState(() => new Map<number, GlyphFade>());
+  // 上一次提交时的当前层：换内容之后据此分辨谁被换下、谁新换上、谁被接回
+  const shown = useRef(state.current === null ? null : state.current.key);
+
+  useLayoutEffect(() => {
+    const was = shown.current;
+    const current = state.current;
+    const now = current === null ? null : current.key;
+    if (was === now) return;
+    shown.current = now;
+    const slot = root.current;
+    if (slot === null) throw new Error("图标位换了内容，却没有渲染出来");
+
+    const drop = (key: number) => setState((s) => (s.leaving.some((layer) => layer.key === key) ? { ...s, leaving: s.leaving.filter((layer) => layer.key !== key) } : s));
+    if (typeof slot.animate !== "function") {
+      // 运行环境没有 Web Animations（组件测试的 jsdom）：直接到位，换下的层立即移除
+      setState((s) => ({ ...s, current: s.current === null ? null : { ...s.current, enter: null }, leaving: [] }));
+      return;
+    }
+
+    // resting：这一层没有在播透明度补间时的透明度
+    const fadeTo = (layer: GlyphLayer, to: number, tween: Tween, resting: number, done: () => void) => {
+      const running = fades.get(layer.key);
+      const from = running === undefined ? resting : opacityOf(running);
+      running?.animation.cancel();
+      const animation = playTween(layerElement(slot, layer.glyph), [{ opacity: from }, { opacity: to }], tween);
+      const record: GlyphFade = { animation, from, to, tween };
+      fades.set(layer.key, record);
+      animation.onfinish = () => {
+        if (fades.get(layer.key) === record) fades.delete(layer.key);
+        done();
+      };
+    };
+
+    for (const layer of state.leaving) {
+      if (layer.key === was) fadeTo(layer, 0, fade.out, 1, () => drop(layer.key));
+      // 没提交过就被换下（并发渲染里一次提交前换了两回）：从没画出来，直接移除
+      else if (!fades.has(layer.key)) drop(layer.key);
+    }
+    if (current === null) return;
+    if (current.enter === null) {
+      // 接回的层：从此刻的透明度淡回；它的淡出若已播完、还没来得及移除，就从 0 淡回
+      fadeTo(current, 1, fade.in, 0, () => undefined);
+      return;
+    }
+    const { spring, from } = GLYPH_ENTER[current.enter];
+    const reduced = slot.ownerDocument.documentElement.hasAttribute("data-sk-reduced");
+    // 入场播完就摘掉 data-enter：标记只表示「正在入场」，不留在元素上
+    let pending = reduced ? 1 : 2;
+    const settled = () => {
+      pending -= 1;
+      if (pending === 0) setState((s) => (s.current !== null && s.current.key === current.key && s.current.enter !== null ? { ...s, current: { ...s.current, enter: null } } : s));
+    };
+    // 减少动画：不缩放，只淡入
+    if (!reduced) playTrack(layerElement(slot, current.glyph), scaleTrack(spring, from)).onfinish = settled;
+    fadeTo(current, 1, fade.in, 0, settled);
+  }, [state, fades]);
+
   const { current, leaving } = state;
-  if (current === null && leaving === null) return null;
+  if (current === null && leaving.length === 0) return null;
+  const layers = (current === null ? [...leaving] : [...leaving, current]).sort((a, b) => a.key - b.key);
   return (
-    <span className={cx(styles.glyphSlot, className)}>
-      {leaving !== null && (
-        <span
-          key={leaving.key}
-          className={styles.glyph}
-          data-glyph={leaving.glyph}
-          data-leaving=""
-          onAnimationEnd={(event) => {
-            // 里面的加载指示自己也在跑动画，只认这一层的淡出
-            if (event.target !== event.currentTarget) return;
-            setState((s) => (s.leaving !== null && s.leaving.key === leaving.key ? { ...s, leaving: null } : s));
-          }}
-        >
-          {leaving.node}
-        </span>
-      )}
-      {current !== null && (
-        <span key={current.key} className={styles.glyph} data-glyph={current.glyph} data-enter={current.key > 0 ? enter : undefined}>
-          {children}
-        </span>
+    <span ref={root} className={cx(styles.glyphSlot, className)}>
+      {layers.map((layer) =>
+        layer === current ? (
+          <span key={layer.key} className={styles.glyph} data-glyph={layer.glyph} data-enter={layer.enter === null ? undefined : layer.enter}>
+            {children}
+          </span>
+        ) : (
+          <span key={layer.key} className={styles.glyph} data-glyph={layer.glyph} data-leaving="">
+            {layer.node}
+          </span>
+        ),
       )}
     </span>
   );

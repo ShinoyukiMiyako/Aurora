@@ -420,6 +420,52 @@ describe("Cover 换形态", () => {
     expect(tileCanvas()).toBeNull();
   });
 
+  it("平铺还在淡入时远程图又到了：平铺原地接着淡入、art 照旧垫着，远程图淡入播完才一起卸下", async () => {
+    let finish: (url: string) => void = () => {
+      throw new Error("解析函数还没被调用");
+    };
+    const resolver = () => new Promise<string>((done) => (finish = done));
+    const tree = () => (
+      <RemoteImageProvider resolve={resolver}>
+        <Cover hue={118} seed="i" height={132} remoteUrl="http://petalfall-tex.localhost/cover/abc" texture={CHERRY} identity={{ instanceId: "i", cover: CHERRY }} />
+      </RemoteImageProvider>
+    );
+    view = render(tree());
+    intersect();
+    resize.resize(cover(), 320);
+    await settle();
+    expect(cover().dataset.source).toBe("art");
+
+    vi.mocked(useBlockSource).mockReturnValue(source("block|1.21.1|grass_block"));
+    view.rerender(tree());
+    const tile = reveal() as HTMLElement;
+    expect(tile.contains(tileCanvas())).toBe(true);
+
+    finish("http://petalfall-tex.localhost/cover/abc");
+    await settle();
+    expect(cover().dataset.source).toBe("remote");
+    const layers = [...cover().querySelectorAll<HTMLElement>(":scope > div")];
+    // 从下到上：art、平铺、远程图；平铺还是原来那个节点，淡入没有被摘掉，也没有重建重播
+    expect(layers).toHaveLength(3);
+    expect(layers[0].querySelectorAll("svg[data-glyph]")).toHaveLength(4);
+    expect(layers[1]).toBe(tile);
+    expect(layers[1].hasAttribute("data-reveal")).toBe(true);
+    expect(layers[2].querySelector("canvas:not([style])")).not.toBeNull();
+    expect(layers[2].hasAttribute("data-reveal")).toBe(true);
+    expect(cover().querySelector("[data-sk-art='iso']")?.closest("[data-leaving]")).not.toBeNull();
+
+    // 平铺先开始、先播完：它的结束不算换完
+    revealEnds(tile);
+    expect(cover().querySelectorAll(":scope > div")).toHaveLength(3);
+
+    revealEnds(layers[2]);
+    const left = cover().querySelectorAll(":scope > div");
+    expect(left).toHaveLength(1);
+    expect(left[0]).toBe(layers[2]);
+    expect(layers[2].hasAttribute("data-reveal")).toBe(false);
+    expect(cover().querySelector("[data-sk-art='iso']")).toBeNull();
+  });
+
   it("往下换（远程图地址清空）：直接换回 art，不垫旧层、不播淡入", async () => {
     const tree = (remoteUrl: string | null) => (
       <RemoteImageProvider resolve={async (url) => url}>

@@ -12,6 +12,7 @@ import { ACCOUNT_COPY, PEEK_COPY, TITLEBAR_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider, useNav, type NavApi } from "./shell";
 import { TitleBar } from "./TitleBar";
+import styles from "./TitleBar.module.css";
 import { WindowPortProvider, browserWindowPort, type WindowPort } from "./window";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -205,6 +206,36 @@ describe("账户胶囊", () => {
       expect(seen[0]).toBe(steve);
       expect(seen.at(-1)).toBe(alex);
     }
+  });
+
+  it("窄窗口里右列超过 1fr 时胶囊伸缩会推动中列：状态岛也与胶囊同组取快照，换之前量到旧位置、换之后量到新位置", async () => {
+    ipc.overrides.set("launch_game", () => deferred<never>().promise);
+    await mount();
+    act(() => void launcher.actions.launch("生存"));
+    await flush();
+    const island = document.querySelector<HTMLElement>(`.${styles.center} button`);
+    if (island === null) throw new Error("标题栏中列没有状态岛");
+    const steve = ACCOUNT_COPY.current("Steve", accountKindLabel("offline", null));
+    const alex = ACCOUNT_COPY.current("Alex", accountKindLabel("microsoft", null));
+    const capsule = byLabel(steve);
+    // 状态岛自己的布局依赖（档位、名字、阶段文字、数字位数）在换账户时都没变，被量到只能是因为与胶囊同在一个布局组里。
+    // 右列按内容定宽时中列的位置随右列宽度变：胶囊写 Alex 时更宽，状态岛整体左移
+    const seen: string[] = [];
+    island.getBoundingClientRect = () => {
+      const label = capsule.getAttribute("aria-label");
+      if (label === null) throw new Error("账户胶囊没有名称");
+      seen.push(label);
+      const left = label === steve ? 420 : 380;
+      return { left, top: 11, width: 160, height: 34, x: left, y: 11, right: left + 160, bottom: 45, toJSON: () => null } as DOMRect;
+    };
+    act(() => capsule.click());
+    await flush();
+    ipc.overrides.set("current_account", () => ALEX);
+    act(() => [...document.querySelectorAll<HTMLElement>("[role='menuitemradio']")][1].click());
+    await flush();
+    expect(capsule.getAttribute("aria-label")).toBe(alex);
+    expect(seen[0]).toBe(steve);
+    expect(seen.at(-1)).toBe(alex);
   });
 
   it("没有账户时是「添加账户」，直接去账户页", async () => {

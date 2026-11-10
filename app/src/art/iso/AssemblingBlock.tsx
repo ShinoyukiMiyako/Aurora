@@ -1,5 +1,5 @@
-import { motion, useAnimate, useReducedMotionConfig, type TargetAndTransition, type Transition } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
+import { motion, useAnimate, useIsPresent, useReducedMotionConfig, type TargetAndTransition, type Transition } from "framer-motion";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { assembly, fade, springs } from "../../lib/motion";
 import { cx } from "../../lib/util";
 import { BitmapCanvas } from "../illustrations/BitmapCanvas";
@@ -14,6 +14,38 @@ import { useBlockSource } from "./useBlockSource";
 const FACE_ORDER: readonly IsoFace[] = ["left", "right", "top"];
 
 export type AssemblyExit = "disassemble" | "collapse";
+
+/**
+ * 组装此刻走到了哪（时刻都是 performance.now）。启动胶囊换面前要把旧面留到方块的拆解、崩落或坐定演完，
+ * 留多久按它估算：落位数由启动阶段给出，但面是隔着落位间隔、入场后还要等首落延迟才一面面落下的，实际已落的面会晚于它。
+ */
+export interface AssemblyClock {
+  /** 已落位的面数。 */
+  shown: number;
+  /** 最后一面开始落位的时刻；还没有面是落下来的（挂载时就在的面直接显示）为 -Infinity。 */
+  lastDropAt: number;
+  /** 入场时第一面最早的落位时刻；不是随新换上的面入场的为 -Infinity。 */
+  firstDropAt: number;
+}
+
+/** 下一面最早在何时落位：不早于 now，与上一面隔一个落位间隔，且不早于入场的首落时刻。 */
+function nextDropAt(lastDropAt: number, firstDropAt: number, now: number): number {
+  return Math.max(now, lastDropAt + assembly.stepGapMs, firstDropAt);
+}
+
+/** 从 now 起把未落的面依次落齐、再等坐定延迟开始坐定，还要多少毫秒；早已能坐定则为 0。 */
+export function assemblySeatInMs(clock: AssemblyClock, now: number): number {
+  let last = clock.lastDropAt;
+  for (let face = clock.shown; face < FACE_ORDER.length; face++) last = nextDropAt(last, clock.firstDropAt, now);
+  return Math.max(0, last + assembly.seatDelayMs - now);
+}
+
+/** 已落的 faces 个面拆解或崩落演完要多少毫秒：逆序逐面错开一个间隔，最后一面再演一整段。一面未落时为 0。 */
+export function assemblyExitMs(exit: AssemblyExit, faces: number): number {
+  if (faces === 0) return 0;
+  const [tween, gap] = exit === "disassemble" ? [assembly.disassemble, assembly.disassembleGap] : [assembly.collapse, assembly.collapseGap];
+  return Math.round(((faces - 1) * gap + tween.duration) * 1000);
+}
 
 export interface AssemblingBlockProps {
   instanceId: string;
@@ -31,6 +63,8 @@ export interface AssemblingBlockProps {
    * 不传时按重新挂载处理（胶囊在页面之间换了位置）：已落的面与蓝图直接显示，不重播落位。
    */
   enter?: boolean;
+  /** 每次落下一面后写入组装进度（见 AssemblyClock）。所在的面正在退场时不再写：那时换上来的新面才是要估算的。 */
+  clock?: RefObject<AssemblyClock | null>;
   className?: string;
 }
 
@@ -38,11 +72,12 @@ export interface AssemblingBlockProps {
  * 启动胶囊左侧组装中的方块：虚线蓝图 + 三个独立的面层，几何与静态方块完全相同（竖棱 √1.5 倍）。
  * 面上是本机材质，读不到时是实例徽记。减少动画时只淡入淡出，没有位移、坐定与等待间隔。纯装饰，aria-hidden。
  */
-export function AssemblingBlock({ instanceId, cover, placed, seated = false, exit = null, width = 28, enter = false, className }: AssemblingBlockProps) {
+export function AssemblingBlock({ instanceId, cover, placed, seated = false, exit = null, width = 28, enter = false, clock, className }: AssemblingBlockProps) {
   const layout = isoLayout(width);
   const dpr = useDevicePixelRatio();
   const source = useBlockSource(cover);
   const reduced = useReducedMotionConfig() === true;
+  const present = useIsPresent();
   const [scope, animate] = useAnimate<HTMLSpanElement>();
 
   const [shown, setShown] = useState<number>(enter ? 0 : placed);
@@ -50,6 +85,11 @@ export function AssemblingBlock({ instanceId, cover, placed, seated = false, exi
   // 入场时第一面最早的落位时刻：面先淡入、蓝图先出现，左面再落下
   const [firstDropAt] = useState(() => (enter ? performance.now() + assembly.firstDropMs : Number.NEGATIVE_INFINITY));
   const [seatStarted, setSeatStarted] = useState(seated && placed === 3);
+
+  useLayoutEffect(() => {
+    if (clock === undefined || !present) return;
+    clock.current = { shown, lastDropAt: lastDropAt.current, firstDropAt };
+  }, [clock, present, shown, firstDropAt]);
 
   useEffect(() => {
     if (exit !== null) return;
@@ -59,7 +99,7 @@ export function AssemblingBlock({ instanceId, cover, placed, seated = false, exi
     }
     if (placed === shown) return;
     const now = performance.now();
-    const wait = reduced ? 0 : Math.max(0, lastDropAt.current + assembly.stepGapMs - now, firstDropAt - now);
+    const wait = reduced ? 0 : nextDropAt(lastDropAt.current, firstDropAt, now) - now;
     const timer = setTimeout(() => {
       lastDropAt.current = performance.now();
       setShown((s) => s + 1);

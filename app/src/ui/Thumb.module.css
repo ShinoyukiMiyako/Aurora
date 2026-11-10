@@ -65,7 +65,12 @@
   background: var(--sk-bg-2);
 }
 
-.thumb[data-view="loading"]::after {
+/*
+ * 光带画在 ::before 上：::after 是已加载时的内描边，两者在换上图片的那一刻要同时在。
+ * 离开加载态时组件把 data-shimmer 标成 fading：横扫的那条动画名字不变、只暂停，光带停在原处（换名会跳回起点），
+ * 再叠一条淡出，盖在正淡入的图片或图标上，不同帧消失；淡完组件摘掉标记，循环动画随之移除，不在已加载的缩略图上常驻。
+ */
+.thumb[data-shimmer]::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -74,7 +79,13 @@
   animation: shimmer var(--sk-loop-shimmer) linear infinite;
 }
 
-:global([data-sk-reduced]) .thumb[data-view="loading"]::after {
+.thumb[data-shimmer="fading"]::before {
+  animation:
+    shimmer var(--sk-loop-shimmer) linear infinite paused,
+    shimmer-out var(--sk-dur-out) var(--sk-ease-in) forwards;
+}
+
+:global([data-sk-reduced]) .thumb[data-shimmer]::before {
   animation: none;
   opacity: 0;
 }
@@ -82,6 +93,12 @@
 @keyframes shimmer {
   to {
     transform: translateX(100%);
+  }
+}
+
+@keyframes shimmer-out {
+  to {
+    opacity: 0;
   }
 }
 

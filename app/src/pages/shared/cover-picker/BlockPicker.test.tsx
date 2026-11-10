@@ -1,4 +1,7 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../../art/illustrations/test-canvas";
@@ -8,7 +11,7 @@ import type { ArtDownloadProgressDto, ArtStatusDto, CatalogBlockDto } from "../.
 import { catalogFromDto, setBlockCatalog } from "../../../mc/catalog";
 import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
-import { BlockPicker, gridMove, renderedRows, type BlockPickerProps } from "./BlockPicker";
+import { BlockPicker, gridMove, pickerLayoutKey, renderedRows, type BlockPickerProps } from "./BlockPicker";
 
 const art = vi.hoisted(() => ({ reported: [] as string[] }));
 
@@ -353,11 +356,80 @@ describe("没有材质源", () => {
     expect(activeBlock()).toBe("cherry_planks");
   });
 
-  it("打开期间目录载入：分类页与搜索框出现，下载部件消失", () => {
+  it("打开期间目录载入：分类页与搜索框出现，下载部件原地淡出、不再可交互；弹窗的版式键跟着变，面板据此形变", () => {
     mount({ block: "cherry_planks", image: false });
+    // 挂载时就在的下载部件跟着弹窗出现，不另外播入场
+    expect(dialog().querySelector("[inert]")).toBeNull();
     act(() => setBlockCatalog(catalog()));
     expect(tabs()).toEqual(["推荐", "建筑", "彩色", "自然", "功能", "搜索", "我的图片"]);
     expect(search()).not.toBeNull();
-    expect(dialog().textContent).not.toContain("本机还没有原版材质");
+    // 退场中的部件留着最后一帧淡出：它在不可交互的退场层里，框里其余部分已经没有它
+    const leaving = [...dialog().querySelectorAll<HTMLElement>("[inert]")];
+    expect(leaving).toHaveLength(1);
+    expect(leaving[0].textContent).toContain("本机还没有原版材质");
+    const live = dialog().cloneNode(true) as HTMLElement;
+    for (const node of live.querySelectorAll("[inert]")) node.remove();
+    expect(live.textContent).not.toContain("本机还没有原版材质");
+    // 之后才出现的搜索框淡入并从略小处落到位
+    const searchItem = search()?.closest<HTMLElement>('[style*="opacity"]');
+    expect(searchItem?.style.opacity).toBe("0");
+    expect(pickerLayoutKey(null)).not.toBe(pickerLayoutKey(catalog()));
+  });
+});
+
+describe("搜索结果有无互换", () => {
+  beforeEach(() => setBlockCatalog(catalog()));
+
+  const results = () => dialog().querySelector<HTMLElement>("[data-results]");
+
+  it("打开时的网格跟着弹窗出现；搜到没有匹配时无结果那面淡入，再搜到时网格那面淡入", () => {
+    mount({ block: "cherry_planks", image: false });
+    act(() => tab("搜索").click());
+    expect(results()?.dataset.results).toBe("grid");
+    expect(results()?.style.opacity).not.toBe("0");
+    const input = search();
+    if (input === null) throw new Error("没有搜索框");
+    typeInto(input, "钻");
+    expect(results()?.dataset.results).toBe("empty");
+    expect(results()?.style.opacity).toBe("0");
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      if (!setter) throw new Error("jsdom 没有 input.value 的 setter");
+      setter.call(input, "");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(results()?.dataset.results).toBe("grid");
+    expect(results()?.style.opacity).toBe("0");
+  });
+
+  it("同为有结果时逐字刷新网格不淡入：只有有无互换才淡", () => {
+    mount({ block: "cherry_planks", image: false });
+    const input = search();
+    if (input === null) throw new Error("没有搜索框");
+    typeInto(input, "羊");
+    typeInto(input, "毛");
+    expect(blocksShown()).toEqual(["white_wool", "red_wool"]);
+    expect(results()?.style.opacity).not.toBe("0");
+  });
+});
+
+describe("方块格的按压反馈（读样式表）", () => {
+  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "BlockPicker.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const rule = (selector: string) => {
+    const found = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].find((m) => m[1].trim() === selector);
+    if (found === undefined) throw new Error(`样式表里没有 ${selector}`);
+    return found[2];
+  };
+
+  it("按下时格子缩到 0.94，缩放走独立的 scale 属性与按压弹簧", () => {
+    expect(rule(".cell:active")).toMatch(/scale:\s*0\.94/);
+    expect(rule(".cell")).toMatch(/scale var\(--sk-spring-tap-dur\) var\(--sk-spring-tap\)/);
+  });
+
+  it("减少动画时不缩放，改为瞬时降不透明度", () => {
+    const reduced = rule(":global([data-sk-reduced]) .cell:active");
+    expect(reduced).toMatch(/scale:\s*none/);
+    expect(reduced).toMatch(/opacity:\s*0\.85/);
+    expect(reduced).toMatch(/transition:\s*none/);
   });
 });

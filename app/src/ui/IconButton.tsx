@@ -36,6 +36,11 @@ export interface IconButtonProps extends NativeButton {
   disabledReason?: string;
   tooltip?: boolean;
   tooltipSide?: TooltipSide;
+  /**
+   * 强制显示提示（转给 Tooltip 的 open）：为真时立即显示，转为假时收起这一次显示。操作结果要让指针用户也看得见时用，
+   * 例如复制后的「已复制」：按下时悬停出来的提示已经收起，名称换了也看不到。tooltip={false} 且没有禁用原因时无效。
+   */
+  tooltipOpen?: boolean;
   /** 右上角角标（计数等），偏移 −4 / −4。 */
   badge?: ReactNode;
   type?: "button" | "submit";
@@ -52,6 +57,7 @@ export function IconButton({
   disabledReason,
   tooltip = true,
   tooltipSide = "top",
+  tooltipOpen,
   badge,
   type = "button",
   className,
@@ -89,7 +95,7 @@ export function IconButton({
   // 包裹层常驻：tooltip={false} 的按钮原因随状态来去时同样不重挂，聚焦着的按钮不丢焦点
   const reason = softDisabled ? disabledReason : undefined;
   return (
-    <Tooltip content={tooltip ? label : reason} sub={tooltip ? reason : undefined} side={tooltipSide} wrap={reason !== undefined} disabled={!tooltip && reason === undefined}>
+    <Tooltip content={tooltip ? label : reason} sub={tooltip ? reason : undefined} side={tooltipSide} wrap={reason !== undefined} disabled={!tooltip && reason === undefined} open={tooltipOpen}>
       {button}
     </Tooltip>
   );

@@ -109,10 +109,13 @@
   font-weight: var(--sk-w-medium);
 }
 
-/* 第二段的槽：换行时退场的旧行脱离布局、以这里为定位基准叠在新行上淡出，槽宽只取新行 */
+/*
+ * 第二段的槽：显示的行（.face，换行时新旧两行）与占宽的候选（.reserve）叠在同一格。
+ * 格宽只取候选里最宽的一条：显示的行宽度记 0、再撑满格子，换阶段文字、退场的旧行还没淡完时胶囊都不变宽
+ */
 .second {
-  position: relative;
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   flex: none;
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
@@ -121,11 +124,22 @@
   transition: color var(--sk-dur-hover) var(--sk-ease);
 }
 
-.face {
-  display: inline-flex;
+.face,
+.reserve {
+  display: flex;
+  grid-area: 1 / 1;
   align-items: baseline;
   gap: var(--sk-space-4);
   white-space: nowrap;
+}
+
+.face {
+  width: 0;
+  min-width: 100%;
+}
+
+.reserve {
+  visibility: hidden;
 }
 
 /*

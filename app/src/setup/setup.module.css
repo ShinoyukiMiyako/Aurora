@@ -136,6 +136,19 @@
   color: var(--sk-text-2);
 }
 
+/* 传了 leadFloor：两段说明叠在同一格里，格子按较高的那段撑开；占位的那段看不见，也不进读屏 */
+.leadSlot {
+  display: grid;
+}
+
+.leadSlot > .lead {
+  grid-area: 1 / 1;
+}
+
+.lead[data-floor] {
+  visibility: hidden;
+}
+
 /* 外扩的内边距抵消掉自身的裁切：贴边控件的焦点环有 4px，overflow 会把它切掉 */
 .body {
   flex: 1;

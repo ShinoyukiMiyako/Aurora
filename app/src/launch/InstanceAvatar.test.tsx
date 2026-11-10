@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 // 头像状态层的换场：角标、环、排队轨道之间不在一帧里硬切。
+import { MotionConfig } from "framer-motion";
 import { afterEach, describe, expect, it } from "vitest";
-import { render, type Rendered } from "../test/dom";
-import { AvatarIndicatorLayer, type AvatarIndicator } from "./InstanceAvatar";
+import { render, waitForFrames, type Rendered } from "../test/dom";
+import { AvatarIndicatorLayer, ringGeometry, type AvatarIndicator } from "./InstanceAvatar";
 
 let view: Rendered | undefined;
 afterEach(() => {
@@ -46,5 +47,35 @@ describe("头像状态层", () => {
     view.rerender(layer({ type: "badge", tone: "ok" }));
     expect(rings()).toHaveLength(1);
     expect(badges().map((b) => b.dataset.badge)).toContain("ok");
+  });
+
+  // 减少动画下平滑值直接跳到目标，补满与否在下一帧就看得出；同屏另一枚走失败的环作对照，说明那一帧已经渲染过
+  it("启动进入运行：退场的进度环先补满再走，不带着缺口消失；启动失败时停在原处淡出", async () => {
+    const pair = (ok: AvatarIndicator, failed: AvatarIndicator) => (
+      <MotionConfig reducedMotion="always">
+        <span data-avatar="ok">
+          <AvatarIndicatorLayer indicator={ok} size={40} />
+        </span>
+        <span data-avatar="failed">
+          <AvatarIndicatorLayer indicator={failed} size={40} />
+        </span>
+      </MotionConfig>
+    );
+    const fillOf = (name: string) => {
+      const fill = view?.container.querySelectorAll(`[data-avatar="${name}"] path`)[1];
+      if (fill === undefined) throw new Error(`头像 ${name} 的进度环没有填充`);
+      return fill;
+    };
+    const offsetOf = (el: Element) => Number(el.getAttribute("stroke-dashoffset"));
+    const { length } = ringGeometry(40);
+    view = render(pair({ type: "ring", tone: "accent", progress: 0.4, track: "launch-1" }, { type: "ring", tone: "accent", progress: 0.4, track: "launch-2" }));
+    const ok = fillOf("ok");
+    const failed = fillOf("failed");
+    expect(offsetOf(ok)).toBeCloseTo(length * 0.6, 3);
+
+    view.rerender(pair({ type: "badge", tone: "ok" }, { type: "badge", tone: "danger" }));
+    expect(fillOf("ok")).toBe(ok);
+    await waitForFrames(() => expect(offsetOf(ok)).toBeCloseTo(0, 3));
+    expect(offsetOf(failed)).toBeCloseTo(length * 0.6, 3);
   });
 });

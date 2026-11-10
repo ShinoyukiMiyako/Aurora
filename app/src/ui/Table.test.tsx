@@ -6,7 +6,7 @@ import { motion } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
+import { keydown, render, setRect, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import {
   columnTemplate,
   nextSort,
@@ -38,6 +38,7 @@ let view: Rendered | undefined;
 afterEach(() => {
   view?.unmount();
   view = undefined;
+  vi.restoreAllMocks();
 });
 
 function mount(ui: ReactNode) {
@@ -189,20 +190,80 @@ describe("行的增删", () => {
     expect(rowShift(["a", "b", "c"], ["c", "b", "a"])).toBe(2);
   });
 
-  it("整表换上的判定：虚拟化或跨过阈值时行集合一变就整表换；不虚拟化时增删或被挤动的行超过 40 才整表换", () => {
+  it("整表换上的判定：虚拟化或跨过阈值时行集合一变就整表换；不虚拟化时只有换了一批（增删换位超过 40、又不是末尾追加）才整表换", () => {
     const keys = someMods(60).map((m) => m.id);
     const plain = (k: readonly string[]) => ({ keys: k, virtual: false });
     const big = someMods(VIRTUALIZE_ABOVE + 5).map((m) => m.id);
     const virtualShape = (k: readonly string[]) => ({ keys: k, virtual: true });
+    const extra = Array.from({ length: 41 }, (_, i) => `extra-${i}`);
 
     expect(swapsWholeTable(virtualShape(big), virtualShape(big))).toBe(false);
     expect(swapsWholeTable(virtualShape(big), virtualShape(big.slice(1)))).toBe(true);
     expect(swapsWholeTable(virtualShape(big), plain(big.slice(0, VIRTUALIZE_ABOVE)))).toBe(true);
     expect(swapsWholeTable(plain(keys), plain(keys.slice(0, -1)))).toBe(false);
+    // 换筛选：一次走掉 45 行
     expect(swapsWholeTable(plain(keys), plain(keys.slice(0, 15)))).toBe(true);
-    // 只删一行，但它后面 41 行都被挤动
-    expect(swapsWholeTable(plain(keys), plain(keys.filter((k) => k !== "mod-18")))).toBe(true);
-    expect(swapsWholeTable(plain(keys), plain(keys.filter((k) => k !== "mod-19")))).toBe(false);
+    // 只删靠前的一行：其后 59 行都被挤动，但被挤动的行不计
+    expect(swapsWholeTable(plain(keys), plain(keys.slice(1)))).toBe(false);
+    expect(swapsWholeTable(plain(keys), plain(keys.filter((k) => k !== "mod-18")))).toBe(false);
+    // 排序：60 行全换了位置
+    expect(swapsWholeTable(plain(keys), plain([...keys].reverse()))).toBe(true);
+    // 末尾追加 41 行：已有的行一动不动，不算换了一批；同样多的行插在最前面就算
+    expect(swapsWholeTable(plain(keys.slice(0, 50)), plain([...keys.slice(0, 50), ...extra]))).toBe(false);
+    expect(swapsWholeTable(plain(keys.slice(0, 50)), plain([...extra, ...keys.slice(0, 50)]))).toBe(true);
+  });
+
+  /** 表格限高 640、自己滚动；表体上沿在视口里的位置由滚动位置决定（表头 36 高）。 */
+  function placeTable(scrollTop: number) {
+    const grid = document.querySelector<HTMLElement>('[role="grid"]') as HTMLElement;
+    const body = document.querySelector<HTMLElement>('[role="rowgroup"] + [role="rowgroup"]') as HTMLElement;
+    setRect(grid, { left: 0, top: 0, width: 800, height: 640 });
+    setRect(body, { left: 0, top: 36 - scrollTop, width: 800, height: 0 });
+    return body;
+  }
+
+  /** 行的名称列写着「Mod n」，取出 n。 */
+  const modIndex = (row: Element) => {
+    const name = row.querySelectorAll('[role="gridcell"]')[1].textContent;
+    const match = /^Mod (\d+)$/.exec(name === null ? "" : name);
+    if (match === null) throw new Error(`认不出这一行：${row.textContent}`);
+    return Number(match[1]);
+  };
+
+  // 哪些被挤动的行量了布局，见 Table.window.test.tsx（要在没跑过布局动画的新文件里断言）
+  it("41 到 100 行的表删掉靠前的一行：不整表淡入，删掉的行原地淡出，其余行的序号立刻接上", () => {
+    const all = someMods(60);
+    mount(<Changing initial={all} />);
+    const body = placeTable(640);
+    act(() => setShownRows(all.slice(1)));
+
+    expect(body.style.opacity).not.toBe("0");
+    const leaving = rows().filter((r) => r.hasAttribute("inert"));
+    expect(leaving.map(modIndex)).toEqual([0]);
+    expect(rows().filter((r) => r.hasAttribute("data-row-index")).map((r) => [modIndex(r), r.dataset.rowIndex])[0]).toEqual([1, "0"]);
+  });
+
+  it("新来的行只有落在可见范围附近的播入场，远处的直接出现", () => {
+    const all = someMods(50);
+    mount(<Changing initial={all} />);
+    // 没有滚动：可见的是第 0 到 9 行，加余量到第 13 行
+    placeTable(0);
+    const near = { id: "near", name: "Mod 900", version: "1", enabled: true };
+    const far = { id: "far", name: "Mod 901", version: "1", enabled: true };
+    act(() => setShownRows([...all.slice(0, 2), near, ...all.slice(2, 45), far, ...all.slice(45)]));
+    const opacityOf = (id: number) => rows().find((r) => modIndex(r) === id)?.style.opacity;
+    expect(opacityOf(900)).toBe("0");
+    expect(opacityOf(901)).toBe("1");
+  });
+
+  it("换了一批（排序）：行直接换上，表体在提交时先压到透明再淡入一次", async () => {
+    const all = someMods(60);
+    mount(<Changing initial={all} />);
+    const body = document.querySelector<HTMLElement>('[role="rowgroup"] + [role="rowgroup"]') as HTMLElement;
+    act(() => setShownRows([...all].reverse()));
+    expect(body.style.opacity).toBe("0");
+    expect(rows().filter((r) => r.hasAttribute("inert"))).toHaveLength(0);
+    await waitForFrames(() => expect(body.style.opacity).toBe("1"));
   });
 
   it("挂载时就在的行不播入场，之后新增的行从透明淡入", () => {
@@ -345,6 +406,35 @@ describe("Table 键盘", () => {
     keydown(rows()[0], "ArrowDown");
     expect(controls(0).map((b) => b.getAttribute("tabindex"))).toEqual(["-1", "-1"]);
     expect(controls(1).map((b) => b.getAttribute("tabindex"))).toEqual([null, null]);
+  });
+
+  it("空状态里的按钮不受漫游 tabindex 管：筛到零行时「清除筛选」仍在 Tab 序列里", () => {
+    function Filtering() {
+      const [shown, setShown] = useState<readonly Mod[]>(MODS);
+      setShownRows = setShown;
+      return (
+        <Table
+          label="已装 Mod"
+          columns={columns()}
+          rows={shown}
+          rowKey={(m) => m.id}
+          onSortChange={() => undefined}
+          empty={
+            <button type="button" data-clear="">
+              清除筛选
+            </button>
+          }
+        />
+      );
+    }
+    mount(<Filtering />);
+    act(() => setShownRows([]));
+    const clear = () => document.querySelector<HTMLButtonElement>("[data-clear]") as HTMLButtonElement;
+    expect(clear().hasAttribute("tabindex")).toBe(false);
+    expect(clear().hasAttribute("data-table-tabindex")).toBe(false);
+    // 剩下的行退场、表格再提交一次之后也一样
+    act(() => setShownRows([]));
+    expect(clear().hasAttribute("tabindex")).toBe(false);
   });
 
   it("Enter 执行行的主动作，Space 切换行选择", () => {

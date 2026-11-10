@@ -3,6 +3,7 @@
 // 线索全部只来自退出码时摘要写「退出码指向」。手动触发的崩溃不是故障，只留摘要卡，不画线索和一键尝试。
 // 本页不放第二个启动胶囊：重新启动用头图的胶囊。
 
+import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { EmptyArt } from "../../art/illustrations/EmptyArt";
@@ -26,6 +27,9 @@ import { clock, formatDate, formatMemory, formatRelative } from "../../domain/fo
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { javaMajorFromDetail } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
+import { useLoadingGate } from "../../lib/loading-gate";
+import { fade, springs } from "../../lib/motion";
+import { useReflow } from "../../lib/reflow";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
@@ -33,12 +37,14 @@ import { useGpuAdapters, useJavaRuntimes } from "../../state/queries/catalog";
 import { useInstanceMods, useInstanceSettings, type CrashClueDto, type CrashReportDto, type InstalledMod } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
 import type { InstanceTab } from "../../state/route";
-import { Button } from "../../ui/Button";
+import { Appear } from "../../ui/Appear";
+import { Button, GlyphSlot } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Card } from "../../ui/Card";
 import { CardHeader } from "../../ui/CardHeader";
 import { EmptyState } from "../../ui/EmptyState";
 import { CopyButton } from "../../ui/KV";
+import { Loadable } from "../../ui/Loadable";
 import { Skeleton } from "../../ui/Skeleton";
 import { Tag } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
@@ -122,8 +128,10 @@ function ReportView({
   onTab,
   onRename,
 }: Omit<CrashTabProps, "crash"> & { report: CrashReportDto }) {
+  // 摘要卡顶部的提示条来去时，下面的线索与一键尝试整块滑过去
+  const reflow = useReflow<HTMLDivElement>();
   return (
-    <div className={styles.stack}>
+    <div ref={reflow} className={styles.stack}>
       <SummaryCard inst={inst} ops={ops} view={view} report={report} crashActive={crashActive} onTab={onTab} onRename={onRename} />
       {!isManualCrash(report) && <ReportDetails inst={inst} queryId={queryId} ops={ops} report={report} onTab={onTab} onRename={onRename} />}
     </div>
@@ -136,15 +144,19 @@ function ReportDetails({ inst, queryId, ops, report, onTab, onRename }: Omit<Cra
   const required = useRequiredMajor(inst);
   const modList = mods.status === "ready" ? mods.data : [];
   const switches = useModSwitches(inst.id, mods.status === "ready" ? mods.data : null);
+  // 两列各自让位：线索卡的解释等到游戏版本要求的 Java 才改写；一键尝试的骨架换成行、处理办法展开收起，
+  // 「日志指向的 Mod」都从原位置滑过去
+  const clues = useReflow<HTMLDivElement>();
+  const side = useReflow<HTMLDivElement>();
 
   return (
     <div className={styles.crashGrid}>
-      <div className={styles.stack}>
+      <div ref={clues} className={styles.stack}>
         {report.diagnoses.map((clue, i) => (
           <ClueCard key={`${clue.category}-${clue.line}-${i}`} index={i} clue={clue} report={report} required={required.status === "ready" ? required.value : null} />
         ))}
       </div>
-      <div className={styles.stack}>
+      <div ref={side} className={styles.stack}>
         {/* 推一次就定住的一键尝试只属于这一份报告：停在本页时又崩了一次，按新报告从头推，上一份的完成态与撤销不再适用 */}
         <FixesCard
           key={report.at}
@@ -170,59 +182,77 @@ function ReportDetails({ inst, queryId, ops, report, onTab, onRename }: Omit<Cra
 function SummaryCard({ inst, ops, view, report, crashActive, onTab, onRename }: { inst: InstanceSummary; ops: InstanceOps; view: LaunchView; report: CrashReportDto; crashActive: boolean; onTab(tab: InstanceTab): void; onRename(): void }) {
   const now = useNow(30_000);
   const { tier, copyText } = useShell();
+  const reflow = useReflow<HTMLDivElement>();
+  const [ranAfter, setRanAfter] = useState<number | null>(null);
   if (report.at === null) throw new Error(`实例 ${inst.id} 的崩溃报告缺少崩溃时刻`);
   const labels = report.diagnoses.map((d) => crashCategoryLabel(d.category));
   const unique = labels.filter((l, i) => labels.indexOf(l) === i);
   const relative = formatRelative(report.at, now);
   const rerunning = view.kind === "loading" || view.kind === "running";
   const manual = isManualCrash(report);
+  // 停在本页时游戏又跑起来过：这份报告之后已经正常启动过一次。正常退出后要等实例列表重读才知道上次游玩，
+  // 那段空档里 crashActive 还是旧值，提示会先撤走、再以过期态出现，来回跳两次。又崩了一次不算：新报告随后就到
+  if (view.kind === "running" && ranAfter !== report.at) setRanAfter(report.at);
+  else if (view.kind === "crashed" && ranAfter !== null) setRanAfter(null);
+  const stale = !crashActive || ranAfter === report.at;
 
   return (
     <Card padding="lg">
-      {rerunning ? (
-        <Callout tone="info">{CRASH_PAGE_COPY.runningAgain}</Callout>
-      ) : (
-        !crashActive && <Callout tone="info">{CRASH_PAGE_COPY.stale(relative)}</Callout>
-      )}
-      <div className={styles.crashHead}>
-        <EmptyArt scene={manual ? "charm" : "error"} size={tier === "compact" ? 72 : 88} />
-        <div className={styles.crashText}>
-          <span className={styles.crashEyebrow}>
-            <span className={styles.dangerDot} aria-hidden="true" />
-            {report.exit_code_note === null ? (
-              CRASH_COPY.exitLine(relative, report.exit_code, null)
-            ) : (
-              <Tooltip content={EXIT_CODE_COPY[report.exit_code_note.kind].explain} wrap>
-                <span tabIndex={0}>{CRASH_COPY.exitLine(relative, report.exit_code, report.exit_code_note)}</span>
-              </Tooltip>
-            )}
-          </span>
-          {manual ? (
-            <h2 className={styles.crashTitle}>
-              {CRASH_CATEGORY.manual_debug_crash.title}
-              <span className={styles.soft}>{` ${CRASH_COPY.manualNote}`}</span>
-            </h2>
+      <div ref={reflow} className={styles.summaryBody}>
+        {/* 两种说明各自一个键：换说明时旧的原位淡出、新的淡入；出现或撤走时下面的摘要滑过去 */}
+        <Appear>
+          {rerunning ? (
+            <Callout key="running" tone="info">
+              {CRASH_PAGE_COPY.runningAgain}
+            </Callout>
           ) : (
-            <h2 className={styles.crashTitle}>
-              {unique.length > 0 ? CRASH_PAGE_COPY.clueCount(report.diagnoses.length) : CRASH_COPY.noClueTitle}
-              <span className={styles.soft}>{unique.length > 0 ? CRASH_PAGE_COPY.clueTail(unique) : `，${CRASH_COPY.noClueExplain}`}</span>
-            </h2>
+            stale && (
+              <Callout key="stale" tone="info">
+                {CRASH_PAGE_COPY.stale(relative)}
+              </Callout>
+            )
           )}
-          {report.log_path !== null && (
-            <span className={styles.crashPath}>
-              <Icon name="file" size={14} />
-              <code className={styles.path}>{report.log_path}</code>
-              <CopyButton text={report.log_path} label={CRASH_PAGE_COPY.copyPath} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
-              <FolderButton ops={ops} target="session_logs" label={SETTINGS_COPY.open} size="sm" />
+        </Appear>
+        <div className={styles.crashHead}>
+          <EmptyArt scene={manual ? "charm" : "error"} size={tier === "compact" ? 72 : 88} />
+          <div className={styles.crashText}>
+            <span className={styles.crashEyebrow}>
+              <span className={styles.dangerDot} aria-hidden="true" />
+              {report.exit_code_note === null ? (
+                CRASH_COPY.exitLine(relative, report.exit_code, null)
+              ) : (
+                <Tooltip content={EXIT_CODE_COPY[report.exit_code_note.kind].explain} wrap>
+                  <span tabIndex={0}>{CRASH_COPY.exitLine(relative, report.exit_code, report.exit_code_note)}</span>
+                </Tooltip>
+              )}
             </span>
-          )}
-          <span className={styles.soft}>{`${formatDate(report.at)} ${clock(report.at)}`}</span>
-          {report.scanned_files.length > 0 && <ScannedFiles files={report.scanned_files} />}
-          {report.warnings.length > 0 && <LaunchWarnings warnings={report.warnings} ops={ops} onTab={onTab} onRename={onRename} />}
+            {manual ? (
+              <h2 className={styles.crashTitle}>
+                {CRASH_CATEGORY.manual_debug_crash.title}
+                <span className={styles.soft}>{` ${CRASH_COPY.manualNote}`}</span>
+              </h2>
+            ) : (
+              <h2 className={styles.crashTitle}>
+                {unique.length > 0 ? CRASH_PAGE_COPY.clueCount(report.diagnoses.length) : CRASH_COPY.noClueTitle}
+                <span className={styles.soft}>{unique.length > 0 ? CRASH_PAGE_COPY.clueTail(unique) : `，${CRASH_COPY.noClueExplain}`}</span>
+              </h2>
+            )}
+            {report.log_path !== null && (
+              <span className={styles.crashPath}>
+                <Icon name="file" size={14} />
+                <code className={styles.path}>{report.log_path}</code>
+                <CopyButton text={report.log_path} label={CRASH_PAGE_COPY.copyPath} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
+                <FolderButton ops={ops} target="session_logs" label={SETTINGS_COPY.open} size="sm" />
+              </span>
+            )}
+            <span className={styles.soft}>{`${formatDate(report.at)} ${clock(report.at)}`}</span>
+            {report.scanned_files.length > 0 && <ScannedFiles files={report.scanned_files} />}
+            {report.warnings.length > 0 && <LaunchWarnings warnings={report.warnings} ops={ops} onTab={onTab} onRename={onRename} />}
+          </div>
+          <Button variant="ghost" size="sm" icon="terminal" onClick={() => onTab("logs")}>
+            {CRASH_PAGE_COPY.fullLog}
+          </Button>
         </div>
-        <Button variant="ghost" size="sm" icon="terminal" onClick={() => onTab("logs")}>
-          {CRASH_PAGE_COPY.fullLog}
-        </Button>
       </div>
     </Card>
   );
@@ -461,31 +491,33 @@ function FixesCard({
   const [done, setDone] = useState<ReadonlyMap<string, Done>>(new Map());
   const [frozen, setFrozen] = useState<CrashFix[] | null>(null);
 
-  const ready =
+  const rows = useReflow<HTMLUListElement>();
+
+  // 推一次就定住：点了「停用」之后 Mod 列表会变，再推会让刚完成的那一行消失；改用独立显卡之后独显偏好变了，同理。
+  // 在渲染里推、不经 effect：输入到齐的这一次渲染就画出行，不先提交一帧骨架
+  const derived =
+    frozen === null &&
     settings.status === "ready" &&
     memory.status === "ready" &&
     runtimes.status === "ready" &&
     required.status === "ready" &&
     modsReady &&
     (!graphics || gpu.status === "ready") &&
-    preferDedicatedGpu !== null;
-  // 推一次就定住：点了「停用」之后 Mod 列表会变，再推会让刚完成的那一行消失；改用独立显卡之后独显偏好变了，同理
-  useEffect(() => {
-    if (!ready || frozen !== null || settings.status !== "ready" || memory.status !== "ready" || runtimes.status !== "ready" || required.status !== "ready" || preferDedicatedGpu === null) return;
-    setFrozen(
-      crashFixes(report, {
-        memoryMb: memory.value.effectiveMb,
-        followsGlobal: memory.value.followsGlobal,
-        physicalMb: memory.value.advice.total_mb,
-        jvmArgs: settings.data.jvmArgs,
-        mods,
-        runtimes: runtimes.data,
-        requiredJava: required.value,
-        gpu: gpu.status === "ready" ? gpu.data : null,
-        preferDedicatedGpu,
-      }),
-    );
-  }, [frozen, gpu, memory, mods, preferDedicatedGpu, ready, report, required, runtimes, settings]);
+    preferDedicatedGpu !== null
+      ? crashFixes(report, {
+          memoryMb: memory.value.effectiveMb,
+          followsGlobal: memory.value.followsGlobal,
+          physicalMb: memory.value.advice.total_mb,
+          jvmArgs: settings.data.jvmArgs,
+          mods,
+          runtimes: runtimes.data,
+          requiredJava: required.value,
+          gpu: gpu.status === "ready" ? gpu.data : null,
+          preferDedicatedGpu,
+        })
+      : null;
+  if (derived !== null) setFrozen(derived);
+  const fixes = derived === null ? frozen : derived;
 
   // 推一键尝试要的每一样都可能读不出来；漏掉任何一样，ready 永远等不到，卡片就一直停在骨架上。
   // 实例设置读不出来时内存也跟着报同一个错，所以设置排在内存前面，标题才对得上真正没读出来的那一样
@@ -497,44 +529,94 @@ function FixesCard({
     [CRASH_PAGE_COPY.readError.mods, modsError],
     [CRASH_PAGE_COPY.readError.gpu, graphics ? gpu : null],
   ]);
+  // 与模块级加载同一口径：300 ms 内推出来就不出骨架（照样按行占位，只是看不见），骨架出现后至少停留 300 ms 再与行交叉淡化
+  const gate = useLoadingGate(failure === null && (fixes === null || settings.status !== "ready"));
 
   return (
     <Card padding="lg">
       <CardHeader icon="zap" title={CRASH_PAGE_COPY.fixesTitle} subtitle={CRASH_PAGE_COPY.fixesSubtitle} />
       {failure !== null ? (
         <ModuleError title={failure.title} error={failure.error} onRetry={failure.reload} />
-      ) : frozen === null || settings.status !== "ready" ? (
-        <Skeleton shape="text" lines={3} />
       ) : (
-        <ul className={styles.rows}>
-          {frozen.map((fix) => {
-            const key = crashFixKey(fix);
-            const state = done.get(key);
+        <Loadable view={gate.view} skeleton={<RowSkeletons count={fixSkeletonRows(report)} lead={FIX_LEAD_SKELETON} trail={FIX_TRAIL_SKELETON} />}>
+          {() => {
+            if (fixes === null || settings.status !== "ready") throw new Error("加载门放行时一键尝试不可能还没推出来");
             return (
-            <FixRow
-              key={key}
-              fix={fix}
-              inst={inst}
-              ops={ops}
-              settings={settings.data}
-              switches={switches}
-              done={state === undefined ? null : state}
-              onDone={(d) => setDone((m) => new Map(m).set(key, d))}
-              onUndone={() =>
-                setDone((m) => {
-                  const next = new Map(m);
-                  next.delete(key);
-                  return next;
-                })
-              }
-              onTab={onTab}
-              onRename={onRename}
-            />
+              <ul ref={rows} className={styles.rows}>
+                {fixes.map((fix) => {
+                  const key = crashFixKey(fix);
+                  const state = done.get(key);
+                  return (
+                    <FixRow
+                      key={key}
+                      fix={fix}
+                      inst={inst}
+                      ops={ops}
+                      settings={settings.data}
+                      switches={switches}
+                      done={state === undefined ? null : state}
+                      onDone={(d) => setDone((m) => new Map(m).set(key, d))}
+                      onUndone={() =>
+                        setDone((m) => {
+                          const next = new Map(m);
+                          next.delete(key);
+                          return next;
+                        })
+                      }
+                      onTab={onTab}
+                      onRename={onRename}
+                    />
+                  );
+                })}
+              </ul>
             );
-          })}
-        </ul>
+          }}
+        </Loadable>
       )}
     </Card>
+  );
+}
+
+/** 骨架最多画这么多行：多出的条数由让位接住。 */
+const ROW_SKELETON_LIMIT = 6;
+
+/**
+ * 一键尝试的骨架画几行：按线索类别推，同类只出一行，显卡驱动与本地崩溃共用一行处理办法，手动崩溃与本机连接没有可做的，
+ * 末尾恒有「对照完整日志」。个别类别要看已装 Mod 才知道出不出行，这里按出算，差的一两行由让位接住。
+ */
+function fixSkeletonRows(report: CrashReportDto): number {
+  const kinds = new Set<string>();
+  for (const clue of report.diagnoses) {
+    if (clue.category === "manual_debug_crash" || clue.category === "loopback_unavailable") continue;
+    kinds.add(clue.category === "graphics_driver" || clue.category === "intel_graphics_driver" || clue.category === "native_crash" ? "driver_steps" : clue.category);
+  }
+  return Math.min(kinds.size + 1, ROW_SKELETON_LIMIT);
+}
+
+const FIX_LEAD_SKELETON = <Skeleton shape="block" width={30} height={30} radius="sm" />;
+const FIX_TRAIL_SKELETON = <Skeleton shape="block" width={72} height={30} radius="sm" />;
+const SUSPECT_LEAD_SKELETON = <Skeleton shape="square" size={40} />;
+const SUSPECT_TRAIL_SKELETON = <Skeleton shape="block" width={40} height={24} radius="pill" />;
+
+/** 行骨架：与真实行同一套行类（行高 52、标题与说明各一行），前导与尾部照真实控件的尺寸给。 */
+function RowSkeletons({ count, lead, trail, mono = false }: { count: number; lead: ReactNode; trail: ReactNode; mono?: boolean }) {
+  return (
+    <div className={styles.rows}>
+      {Array.from({ length: count }, (_, i) => (
+        <div key={i} className={styles.row}>
+          {lead}
+          <div className={styles.rowMain}>
+            <span className={styles.rowTitle}>
+              <Skeleton shape="text" width="45%" />
+            </span>
+            <span className={mono ? styles.modFile : styles.rowSub}>
+              <Skeleton shape="text" width="70%" />
+            </span>
+          </div>
+          {trail}
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -740,8 +822,9 @@ function FixRow({
       );
       break;
     case "driver_steps": {
+      // 箭头始终是同一个朝下的图标，展开时翻转朝上（样式按 aria-expanded 转它），不换图标
       const toggle = (
-        <Button variant="ghost" size="sm" iconRight={expanded ? "chevron-up" : "chevron-down"} aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
+        <Button variant="ghost" size="sm" iconRight="chevron-down" className={styles.stepsToggle} aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
           {CRASH_PAGE_COPY.driverSteps}
         </Button>
       );
@@ -776,7 +859,10 @@ function FixRow({
     <li className={styles.fixRow}>
       <div className={styles.row}>
         <span className={styles.fixIcon} data-done={isDone || undefined} aria-hidden="true">
-          <Icon name={isDone ? "check" : FIX_ICON[fix.kind]} size={16} />
+          {/* 完成时对勾从 0.6 弹出、原图标原位淡出，底色上的字色同时过渡成成功色：看得出是刚刚做完的 */}
+          <GlyphSlot glyph={isDone ? "check" : FIX_ICON[fix.kind]}>
+            <Icon name={isDone ? "check" : FIX_ICON[fix.kind]} size={16} />
+          </GlyphSlot>
         </span>
         <div className={styles.rowMain}>
           <span className={styles.rowTitle}>{fixTitle(fix)}</span>
@@ -795,24 +881,37 @@ function FixRow({
           {trailing}
         </div>
       </div>
-      {fix.kind === "driver_steps" && expanded && (
-        <ol className={styles.steps}>
-          <li>{CRASH_PAGE_COPY.driverStep1}</li>
-          {/* 有「改用独立显卡」时手动去 Windows 里设高性能就是同一件事，不再列 */}
-          {fix.gpu === null && <li>{CRASH_PAGE_COPY.driverStep2}</li>}
-          {fix.gpu === null && fix.javaPath !== null && (
-            <li className={styles.stepCopy}>
-              <code className={styles.path}>{fix.javaPath}</code>
-              <CopyButton text={fix.javaPath} label={CRASH_PAGE_COPY.copyJava} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
-            </li>
-          )}
-        </ol>
-      )}
+      {/* 展开时步骤淡入落位、收起时脱离布局原地淡出；后面的行与下面的卡由所在列表与列的让位滑过去，不动高度 */}
+      <Appear>
+        {fix.kind === "driver_steps" && expanded && (
+          <ol className={styles.steps}>
+            <li>{CRASH_PAGE_COPY.driverStep1}</li>
+            {/* 有「改用独立显卡」时手动去 Windows 里设高性能就是同一件事，不再列 */}
+            {fix.gpu === null && <li>{CRASH_PAGE_COPY.driverStep2}</li>}
+            {fix.gpu === null && fix.javaPath !== null && (
+              <li className={styles.stepCopy}>
+                <code className={styles.path}>{fix.javaPath}</code>
+                <CopyButton text={fix.javaPath} label={CRASH_PAGE_COPY.copyJava} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />
+              </li>
+            )}
+          </ol>
+        )}
+      </Appear>
     </li>
   );
 }
 
 // ---------------------------------------------------------------- 日志指向的 Mod
+
+/**
+ * 行内状态标签的出现与消失：从 0.6 弹出（pop），与开关拇指的滑动同一拍落定；退场只淡出，
+ * 减少动画时缩放是一步到位的，退场带缩放会先跳一下再淡。
+ */
+const TAG_MARK = {
+  initial: { opacity: 0, scale: 0.6 },
+  animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } },
+  exit: { opacity: 0, transition: fade.out },
+} as const;
 
 function SuspectsCard({ ops, report, mods, switches }: { ops: InstanceOps; report: CrashReportDto; mods: ResourceResult<InstalledMod[]>; switches: ModSwitches }) {
   const actions = useLauncherActions();
@@ -828,49 +927,72 @@ function SuspectsCard({ ops, report, mods, switches }: { ops: InstanceOps; repor
     });
   };
 
+  // 与一键尝试同一口径的加载门；骨架按报告点名的条数画，扫盘回来时行数不变
+  const gate = useLoadingGate(mods.status === "loading");
+  const named = report.suspects.length;
+  const skeleton =
+    named === 0 ? (
+      <p className={styles.soft}>
+        <Skeleton shape="text" width="60%" />
+      </p>
+    ) : (
+      <RowSkeletons count={Math.min(named, ROW_SKELETON_LIMIT)} lead={SUSPECT_LEAD_SKELETON} trail={SUSPECT_TRAIL_SKELETON} mono />
+    );
+
   return (
     <Card padding="lg">
       <CardHeader icon="bug" title={CRASH_PAGE_COPY.suspectsTitle} subtitle={CRASH_PAGE_COPY.suspectsSubtitle} />
-      {mods.status === "loading" && <Skeleton shape="text" lines={2} />}
-      {mods.status === "error" && <ModuleError title={CRASH_PAGE_COPY.readError.mods} error={mods.error} onRetry={mods.reload} />}
-      {mods.status === "ready" && report.suspects.length === 0 && <p className={styles.soft}>{CRASH_PAGE_COPY.suspectsNone}</p>}
-      {mods.status === "ready" && report.suspects.length > 0 && (
-        <ul className={styles.rows}>
-          {report.suspects.map((s) => {
-            const mod = matchSuspect(s, mods.data);
-            const name = mod === null ? s.mod_id : modName(mod);
-            const state = mod === null ? null : switches.of(mod);
-            return (
-              <li key={`${s.mod_id}:${s.file_name === null ? "" : s.file_name}`} className={styles.row}>
-                {mod === null || state === null ? (
-                  <KindTile kind="unknown" />
-                ) : (
-                  <Thumb url={mod.icon_url} kind="mod" hue={hueOf(mod.metadata === null ? mod.file_name : mod.metadata.mod_id)} size={40} inactive={!state.enabled} />
-                )}
-                <div className={styles.rowMain}>
-                  <span className={styles.rowTitle}>
-                    <span className={styles.ellipsis}>{name}</span>
-                    {state !== null && !state.enabled && <Tag size="sm">{CRASH_PAGE_COPY.disabledTag}</Tag>}
-                  </span>
-                  <code className={styles.modFile}>{s.file_name === null ? CRASH_PAGE_COPY.noFileName : s.file_name}</code>
-                </div>
-                {mod === null || state === null ? (
-                  <Tag size="sm" tone="outline">
-                    {CRASH_PAGE_COPY.notInList}
-                  </Tag>
-                ) : (
-                  <Toggle
-                    checked={state.enabled}
-                    onChange={() => toggle(mod)}
-                    ariaLabel={CRASH_PAGE_COPY.toggleLabel(name, state.enabled)}
-                    disabledReason={lock !== undefined ? lock : state.pending ? MODS_COPY.togglePending : undefined}
-                  />
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
+      <Loadable view={gate.view} skeleton={skeleton}>
+        {() => {
+          if (mods.status === "loading") throw new Error("加载门放行时 Mod 列表不可能还在读取");
+          if (mods.status === "error") return <ModuleError title={CRASH_PAGE_COPY.readError.mods} error={mods.error} onRetry={mods.reload} />;
+          if (named === 0) return <p className={styles.soft}>{CRASH_PAGE_COPY.suspectsNone}</p>;
+          return (
+            <ul className={styles.rows}>
+              {report.suspects.map((s) => {
+                const mod = matchSuspect(s, mods.data);
+                const name = mod === null ? s.mod_id : modName(mod);
+                const state = mod === null ? null : switches.of(mod);
+                return (
+                  <li key={`${s.mod_id}:${s.file_name === null ? "" : s.file_name}`} className={styles.row}>
+                    {mod === null || state === null ? (
+                      <KindTile kind="unknown" />
+                    ) : (
+                      <Thumb url={mod.icon_url} kind="mod" hue={hueOf(mod.metadata === null ? mod.file_name : mod.metadata.mod_id)} size={40} inactive={!state.enabled} />
+                    )}
+                    <div className={styles.rowMain}>
+                      <span className={styles.rowTitle}>
+                        <span className={styles.ellipsis}>{name}</span>
+                        {/* 「已停用」随开关弹出、淡出；退场时立即让出位置，名称不等它淡完才伸回去。挂载时就在的不弹 */}
+                        <AnimatePresence initial={false} mode="popLayout">
+                          {state !== null && !state.enabled && (
+                            <motion.span key="off" className={styles.tagMark} initial={TAG_MARK.initial} animate={TAG_MARK.animate} exit={TAG_MARK.exit}>
+                              <Tag size="sm">{CRASH_PAGE_COPY.disabledTag}</Tag>
+                            </motion.span>
+                          )}
+                        </AnimatePresence>
+                      </span>
+                      <code className={styles.modFile}>{s.file_name === null ? CRASH_PAGE_COPY.noFileName : s.file_name}</code>
+                    </div>
+                    {mod === null || state === null ? (
+                      <Tag size="sm" tone="outline">
+                        {CRASH_PAGE_COPY.notInList}
+                      </Tag>
+                    ) : (
+                      <Toggle
+                        checked={state.enabled}
+                        onChange={() => toggle(mod)}
+                        ariaLabel={CRASH_PAGE_COPY.toggleLabel(name, state.enabled)}
+                        disabledReason={lock !== undefined ? lock : state.pending ? MODS_COPY.togglePending : undefined}
+                      />
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          );
+        }}
+      </Loadable>
     </Card>
   );
 }

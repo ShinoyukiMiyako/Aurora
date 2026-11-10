@@ -149,6 +149,10 @@
   transition: transform var(--sk-spring-settle-dur) var(--sk-spring-settle);
 }
 
+/*
+ * 有意的例外：动效只动 transform 与 opacity，这里却对 filter 做过渡。悬停对焦同一时刻只发生在指针下的那一张卡面上，
+ * 平铺层悬停时已提成合成层，Chromium 在合成线程上播 blur 的过渡，不回到主线程重绘；换成透明度叠两层又多一张整面画布。
+ */
 :global(:root:not([data-sk-reduced])) .tile {
   translate: var(--tile-x) var(--tile-y);
   transition: filter var(--sk-dur-in) var(--sk-ease-out);

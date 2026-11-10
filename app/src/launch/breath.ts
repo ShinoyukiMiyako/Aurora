@@ -1,7 +1,9 @@
 // 运行呼吸的窗口：游戏可能运行数小时，呼吸只在「刚进入运行」与「窗口重新获得焦点」后的 3 个周期内播放，
 // 其余时间是静止帧。外壳决定何时开始、何时结束（失焦或不可见立即结束），计时与 <html> 上的标记在这里：
-// 窗口期间 <html> 带 BREATH_ATTR（值为窗口起点），呼吸元素的样式写 :root[data-sk-breath] 下的无限循环动画。
-// 窗口长度是整周期，结束时都停在首帧，不跳变。窗口内新挂载的元素按起点算负延迟，与已有元素同相；
+// 窗口期间 <html> 带 BREATH_ATTR（值为窗口起点），呼吸元素的样式写 :root[data-sk-breath] 下的动画：
+// 首尾帧就是静止帧的，写成按周期无限循环；首尾帧与静止帧不同的（运行光晕），把整个窗口写成一段只播一次的关键帧，
+// 自己从静止帧起、回到静止帧止。窗口长度是整周期，两种写法结束时都停在静止帧，不跳变。
+// 窗口内新挂载的元素按起点算负延迟（到起点的整段时长，不取模：只播一次的那种要跳到整段里的同一时刻），与已有元素同相；
 // 每个新窗口开始时所有元素的延迟清零，一起从首帧起播。
 
 import { useLayoutEffect, type RefObject } from "react";
@@ -27,9 +29,9 @@ export function breathWindowStart(root: HTMLElement = document.documentElement):
   return start;
 }
 
-/** 窗口内新挂载的呼吸元素的相位延迟：−((now − 起点) mod 周期)。 */
+/** 窗口内新挂载的呼吸元素的相位延迟：−(now − 起点)。无限循环的动画跳过整周期后与取模同相。 */
 export function breathDelayMs(windowStart: number, now: number): number {
-  return -((now - windowStart) % BREATH_PERIOD_MS);
+  return -(now - windowStart);
 }
 
 /** 开始一个 3 周期的呼吸窗口；已在窗口内时从头再来。 */

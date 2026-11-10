@@ -44,15 +44,18 @@ import {
   parseDimension,
   peekLayout,
   peekPerRow,
+  peekPlaceholder,
   presetFlags,
   RESOLUTION_LIMITS,
   removalRelations,
   sortRows,
   sortWorlds,
   playtimeNote,
+  tabStep,
   toggleFlags,
   weeklyHours,
   workLock,
+  worldsPlaceholder,
   type CrashFix,
   type CrashFixContext,
 } from "./model";
@@ -303,6 +306,20 @@ describe("概览横幅取最高严重度", () => {
     expect(overviewBanner("broken", false)).toBe("broken");
     expect(overviewBanner("installing", false)).toBe("installing");
     expect(overviewBanner("ready", false)).toBeNull();
+  });
+});
+
+describe("换标签时面板的来向", () => {
+  const ORDER = ["overview", "mods", "settings", "logs", "crash"] as const;
+  it("新标签在旧标签右边从右侧进来，左边从左侧进来，隔几个都一样", () => {
+    expect(tabStep(ORDER, "overview", "mods")).toBe(1);
+    expect(tabStep(ORDER, "mods", "crash")).toBe(1);
+    expect(tabStep(ORDER, "logs", "settings")).toBe(-1);
+    expect(tabStep(ORDER, "crash", "overview")).toBe(-1);
+  });
+
+  it("不在顺序里的标签直接报错，不猜一个方向", () => {
+    expect(() => tabStep<string>(ORDER, "overview", "history")).toThrow("不在标签顺序里");
   });
 });
 
@@ -716,6 +733,29 @@ describe("Mod 速览", () => {
     expect(peekLayout(15, 15, 7)).toEqual({ shown: 13, more: 2 });
     expect(peekLayout(24, 168, 7)).toEqual({ shown: 13, more: 155 });
     expect(peekLayout(5, 168, 7)).toEqual({ shown: 5, more: 163 });
+  });
+
+  it("读到列表之前的占位格数按实例列表里的 Mod 数，至多两行；没有 Mod 占一格，读不出占一整行", () => {
+    expect(peekPlaceholder(3, 7)).toBe(3);
+    expect(peekPlaceholder(14, 7)).toBe(14);
+    expect(peekPlaceholder(168, 7)).toBe(14);
+    expect(peekPlaceholder(168, 4)).toBe(8);
+    expect(peekPlaceholder(0, 7)).toBe(1);
+    expect(peekPlaceholder(null, 7)).toBe(7);
+  });
+});
+
+describe("存档卡加载期的占位", () => {
+  it("按实例列表里的存档数画行，至多 5 行，超出时加展开钮那一栏", () => {
+    expect(worldsPlaceholder(2)).toEqual({ kind: "rows", rows: 2, foot: false });
+    expect(worldsPlaceholder(5)).toEqual({ kind: "rows", rows: 5, foot: false });
+    expect(worldsPlaceholder(6)).toEqual({ kind: "rows", rows: 5, foot: true });
+    expect(worldsPlaceholder(40)).toEqual({ kind: "rows", rows: 5, foot: true });
+  });
+
+  it("没有存档画空状态的轮廓；存档数读不出时按 3 行", () => {
+    expect(worldsPlaceholder(0)).toEqual({ kind: "empty" });
+    expect(worldsPlaceholder(null)).toEqual({ kind: "rows", rows: 3, foot: false });
   });
 });
 

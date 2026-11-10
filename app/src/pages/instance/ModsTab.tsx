@@ -5,12 +5,15 @@
 // 把 .jar 拖进这一页就是添加本地 Mod：锁定规则与上面的文件操作同一条，只在这一页收。
 
 import { motion } from "framer-motion";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { hueOf } from "../../art/illustrations/seed";
 import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatDate } from "../../domain/format";
+import type { LoadingView } from "../../lib/loading-gate";
 import { fade } from "../../lib/motion";
+import { useReflow } from "../../lib/reflow";
+import { cssVars } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorRecord } from "../../state/errors";
@@ -18,20 +21,23 @@ import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } fr
 import { useInstanceMods, type InstalledMod, type UpdateCandidate, type UpdateHold } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
 import { modFilesBeingUpdated, progressTrack } from "../../state/tasks";
-import { Banner } from "../../ui/Banner";
+import { Appear } from "../../ui/Appear";
+import { Banner, BannerSlot } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
-import { Card } from "../../ui/Card";
+import { Card, type TierName } from "../../ui/Card";
 import { Checkbox } from "../../ui/Checkbox";
 import { EmptyState } from "../../ui/EmptyState";
 import { IconButton } from "../../ui/IconButton";
 import { Inset } from "../../ui/Inset";
+import { LabelSlot } from "../../ui/LabelSlot";
+import { Loadable } from "../../ui/Loadable";
 import type { MenuEntry } from "../../ui/Menu";
 import { MoreMenu } from "../../ui/MoreMenu";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { SearchInput } from "../../ui/SearchInput";
 import { SegmentedControl } from "../../ui/SegmentedControl";
 import { Skeleton } from "../../ui/Skeleton";
-import { Table, type TableColumn, type TableSort } from "../../ui/Table";
+import { columnTemplate, HEADER_HEIGHT, ROW_HEIGHT, Table, type TableColumn, type TableSort } from "../../ui/Table";
 import { Tag } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
 import { Toggle } from "../../ui/Toggle";
@@ -68,6 +74,12 @@ export interface ModsTabProps {
 
 const SKELETON_ROWS = 6;
 const NETWORK_FAILED = "network_failed";
+/** 筛选计数槽的定宽位数：整合包常有一两百个 Mod，按三位数留宽，数字到达或跨位数时分段不变宽。 */
+const FILTER_COUNT_DIGITS = 3;
+/** 「全部更新 · N」按两位数留宽：可更新到三位数极少见，留得更宽会让「检查更新」两侧空出一大截。 */
+const UPDATE_COUNT_WIDEST = 99;
+/** 批量条「已选 N 个」按三位数留宽，与筛选计数同一口径。 */
+const BATCH_COUNT_WIDEST = 999;
 /** 「新增」标签按小时刷新就够：边界在第 7 天，差一小时没人在意。 */
 const NEW_TAG_TICK_MS = 60 * 60 * 1000;
 
@@ -150,6 +162,9 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const [preview, setPreview] = useState<PreviewScope | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  // 摘要、锁定横幅与表格卡互相让位：横幅随游戏启动退出插拔、摘要行因更新进度换行变高时，下面的块滑过去而不是跳过去。
+  // 面板里的栈不在页面一级位置上，页面自带的让位管不到这里
+  const stackRef = useReflow<HTMLDivElement>();
   // 工具条与批量操作条互换时新条淡入；页面刚挂上时的那一条不淡入
   const barMounted = useRef(false);
   // 批量条卸下时焦点还在条里（点了「取消选择」或批量动作跑完）：被移除的按钮会把焦点扔回页面开头，
@@ -212,10 +227,10 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     return override === undefined ? r : { ...r, enabled: override };
   });
   const counts = modCounts(rows);
-  // 正选着「不检查更新」而它数到 0（最后一个恢复了检查）时回到「全部」，不留一个看不见的筛选
-  const activeFilter: ModFilter = filter === "ignored" && counts.ignored === 0 ? "all" : filter;
-  if (modsData !== null && activeFilter !== filter) setFilter(activeFilter);
-  const shown = sortRows(filterMods(rows, query, activeFilter), sort);
+  // 列表还没读到时各项计数未知，可更新数还要等更新检查：先占住计数槽，数字到了原位填上，分段不变宽
+  const listedCount = (n: number): number | null => (modsData === null ? null : n);
+  const outdatedCount = modsData === null || updates.status === "loading" ? null : counts.outdated;
+  const shown = sortRows(filterMods(rows, query, filter), sort);
   // 选择只作用于当前列出的行：筛选、搜索变了或列表重扫后不再列出的行从选择里剔除。重读失败时列表整个读不出来，不算这些行没了
   const selectedRows = shown.filter((r) => selected.has(r.fileName));
   if (modsData !== null && selectedRows.length !== selected.size) setSelected(new Set(selectedRows.map((r) => r.fileName)));
@@ -400,6 +415,8 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   };
 
   const checkLoading = checking || updates.status === "loading" || updates.refreshing;
+  // 表格卡的加载门：错误与列表都算到了，卡里按查询结果画
+  const tableView: LoadingView = load.view === "pending" || load.view === "skeleton" ? load.view : "content";
   const compact = tier === "compact";
   const columns = modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, toggle, update, remove, setHold });
   // 选中的行有启停还没回来时盘上是哪个名字未知，批量动作和开关一样带原因等它
@@ -416,70 +433,86 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
     searchRef.current?.focus();
   }, [batchShown]);
 
+  const updateLabel = counts.outdated > 0 ? MODS_COPY.updateAll(counts.outdated) : MODS_COPY.checkUpdates;
+  const batchLabel = MODS_COPY.batchSelected(selectedRows.length);
+
   return (
-    <div className={styles.stack}>
-      {batch !== null ? (
-        <motion.div key="batch" ref={batchBarRef} className={styles.toolbar} data-batch="" initial={barFade} animate={{ opacity: 1, transition: fade.in }}>
-          <span className={styles.batchCount}>{MODS_COPY.batchSelected(selectedRows.length)}</span>
-          <div className={styles.batchActions}>
-            <Button disabled={batchBlocked("enable")} focusableWhenDisabled disabledReason={batch.enable} loading={batchBusy === "enable"} onClick={() => batchToggle(true)}>
-              {MODS_COPY.batchEnable}
-            </Button>
-            <Button disabled={batchBlocked("disable")} focusableWhenDisabled disabledReason={batch.disable} loading={batchBusy === "disable"} onClick={() => batchToggle(false)}>
-              {MODS_COPY.batchDisable}
-            </Button>
-            <Button
-              icon="download"
-              disabled={batchBlocked("update")}
-              focusableWhenDisabled
-              // 确认之后勾选项随即都算在更新：别让转圈的按钮中途换成带原因禁用
-              disabledReason={batchBusy === "update" ? undefined : batch.update}
-              loading={batchBusy === "update"}
-              onClick={() => openPreview(new Set(selectedRows.map((r) => r.fileName)))}
-            >
-              {MODS_COPY.batchUpdate}
-            </Button>
-            <Button variant="danger" icon="trash" disabled={batchBlocked("remove")} focusableWhenDisabled disabledReason={batch.remove} loading={batchBusy === "remove"} onClick={batchRemove}>
-              {MODS_COPY.batchRemove}
-            </Button>
-          </div>
-          <Button variant="ghost" className={styles.batchClear} onClick={() => setSelected(new Set())}>
-            {MODS_COPY.clearSelection}
-          </Button>
-        </motion.div>
-      ) : (
-        <motion.div key="tools" className={styles.toolbar} initial={barFade} animate={{ opacity: 1, transition: fade.in }}>
-          <SearchInput ref={searchRef} value={query} onChange={setQuery} placeholder={MODS_COPY.search} shortcut={["Ctrl", "F"]} size="md" className={styles.toolSearch} />
-          <SegmentedControl
-            size="sm"
-            value={activeFilter}
-            onChange={setFilter}
-            ariaLabel={MODS_COPY.filterLabel}
-            options={[
-              { value: "all", label: MODS_COPY.all, count: counts.all },
-              { value: "enabled", label: MODS_COPY.enabled, count: counts.enabled },
-              { value: "disabled", label: MODS_COPY.disabled, count: counts.disabled },
-              { value: "outdated", label: MODS_COPY.outdated, count: counts.outdated },
-              ...(counts.ignored > 0 ? [{ value: "ignored" as const, label: MODS_COPY.ignoredFilter, count: counts.ignored }] : []),
-            ]}
-          />
-          <div className={styles.toolRight}>
-            <FolderButton ops={ops} target="mods" label={MODS_COPY.openFolder} variant="secondary" />
-            {counts.outdated > 0 ? (
-              <Button icon="download" disabledReason={lock} loading={pending.size > 0 || updatingNames.length > 0} onClick={() => openPreview(null)}>
-                {MODS_COPY.updateAll(counts.outdated)}
+    <div ref={stackRef} className={styles.stack}>
+      {/* 吸顶容器常驻并持有底色，两条互换时只有里面的内容淡入：底色不跟着变透明，滚过的表格不会从条下透出来。
+          吸住时它相对栈的位置随滚动变，不参与让位，否则下一次让位会把它从滚动前的位置滑回来 */}
+      <div className={styles.toolbar} data-reflow-skip="">
+        {batch !== null ? (
+          <motion.div key="batch" ref={batchBarRef} className={styles.toolbarRow} data-batch="" initial={barFade} animate={{ opacity: 1, transition: fade.in }}>
+            {/* 选中数跨位数时后面的按钮组不挪：按三位数留宽 */}
+            <span className={styles.batchCount}>
+              <LabelSlot current={batchLabel} options={[batchLabel, MODS_COPY.batchSelected(BATCH_COUNT_WIDEST)]} align="start" />
+            </span>
+            <div className={styles.batchActions}>
+              <Button disabled={batchBlocked("enable")} focusableWhenDisabled disabledReason={batch.enable} loading={batchBusy === "enable"} onClick={() => batchToggle(true)}>
+                {MODS_COPY.batchEnable}
               </Button>
-            ) : (
-              <Button icon="download" loading={checkLoading} disabled={queryId === null} disabledReason={checkReason} onClick={checkUpdates}>
-                {MODS_COPY.checkUpdates}
+              <Button disabled={batchBlocked("disable")} focusableWhenDisabled disabledReason={batch.disable} loading={batchBusy === "disable"} onClick={() => batchToggle(false)}>
+                {MODS_COPY.batchDisable}
               </Button>
-            )}
-            <Button icon="plus" onClick={() => go({ page: "discover", kind: "mod", forInstance: id })}>
-              {MODS_COPY.addMod}
+              <Button
+                icon="download"
+                disabled={batchBlocked("update")}
+                focusableWhenDisabled
+                // 确认之后勾选项随即都算在更新：别让转圈的按钮中途换成带原因禁用
+                disabledReason={batchBusy === "update" ? undefined : batch.update}
+                loading={batchBusy === "update"}
+                onClick={() => openPreview(new Set(selectedRows.map((r) => r.fileName)))}
+              >
+                {MODS_COPY.batchUpdate}
+              </Button>
+              <Button variant="danger" icon="trash" disabled={batchBlocked("remove")} focusableWhenDisabled disabledReason={batch.remove} loading={batchBusy === "remove"} onClick={batchRemove}>
+                {MODS_COPY.batchRemove}
+              </Button>
+            </div>
+            <Button variant="ghost" className={styles.batchClear} onClick={() => setSelected(new Set())}>
+              {MODS_COPY.clearSelection}
             </Button>
-          </div>
-        </motion.div>
-      )}
+          </motion.div>
+        ) : (
+          <motion.div key="tools" className={styles.toolbarRow} initial={barFade} animate={{ opacity: 1, transition: fade.in }}>
+            <SearchInput ref={searchRef} value={query} onChange={setQuery} placeholder={MODS_COPY.search} shortcut={["Ctrl", "F"]} size="md" className={styles.toolSearch} />
+            {/* 「不检查更新」常驻：它随忽略、恢复或列表晚到来去的话，整段插进拔出会把搜索框挤窄、分段左移 */}
+            <SegmentedControl
+              size="sm"
+              value={filter}
+              onChange={setFilter}
+              ariaLabel={MODS_COPY.filterLabel}
+              countDigits={FILTER_COUNT_DIGITS}
+              options={[
+                { value: "all", label: MODS_COPY.all, count: listedCount(counts.all) },
+                { value: "enabled", label: MODS_COPY.enabled, count: listedCount(counts.enabled) },
+                { value: "disabled", label: MODS_COPY.disabled, count: listedCount(counts.disabled) },
+                { value: "outdated", label: MODS_COPY.outdated, count: outdatedCount },
+                { value: "ignored", label: MODS_COPY.ignoredFilter, count: listedCount(counts.ignored) },
+              ]}
+            />
+            <div className={styles.toolRight}>
+              <FolderButton ops={ops} target="mods" label={MODS_COPY.openFolder} variant="secondary" />
+              {/* 「检查更新」与「全部更新 · N」是同一个按钮换文案：按两位数留宽，查到更新时左边的文件夹按钮不被挤动；名称直接给当前这条 */}
+              <Button
+                icon="download"
+                aria-label={updateLabel}
+                loading={counts.outdated > 0 ? pending.size > 0 || updatingNames.length > 0 : checkLoading}
+                disabled={counts.outdated === 0 && queryId === null}
+                disabledReason={counts.outdated > 0 ? lock : checkReason}
+                onClick={counts.outdated > 0 ? () => openPreview(null) : checkUpdates}
+              >
+                <span className={styles.num}>
+                  <LabelSlot current={updateLabel} options={[MODS_COPY.checkUpdates, updateLabel, MODS_COPY.updateAll(UPDATE_COUNT_WIDEST)]} />
+                </span>
+              </Button>
+              <Button icon="plus" onClick={() => go({ page: "discover", kind: "mod", forInstance: id })}>
+                {MODS_COPY.addMod}
+              </Button>
+            </div>
+          </motion.div>
+        )}
+      </div>
 
       <Inset className={styles.modSummary}>
         <span className={styles.modTotal}>
@@ -494,83 +527,78 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
         <UpdateProgress instanceId={id} />
       </Inset>
 
-      {ops.locks.mods !== null && (
-        <Banner tone="info" title={ops.locks.mods === "running" ? MODS_COPY.bannerRunning : ops.locks.mods === "moving" ? MODS_COPY.bannerMoving : MODS_COPY.bannerInstalling} />
-      )}
+      {/* 三种锁是同一条横幅换文案（同一个 key 原位更新）；出现时淡入，消失时淡出并让出位置，下面的表格卡由栈的让位滑过去 */}
+      <BannerSlot>
+        {ops.locks.mods !== null && (
+          <Banner
+            key="lock"
+            tone="info"
+            title={ops.locks.mods === "running" ? MODS_COPY.bannerRunning : ops.locks.mods === "moving" ? MODS_COPY.bannerMoving : MODS_COPY.bannerInstalling}
+          />
+        )}
+      </BannerSlot>
 
-      {load.view === "skeleton" && (
-        <Card padding="none">
-          <div className={styles.tableSkeleton}>
-            {Array.from({ length: SKELETON_ROWS }, (_, i) => (
-              <div key={i} className={styles.row}>
-                <Skeleton shape="square" size={40} />
-                <div className={styles.rowMain}>
-                  <Skeleton shape="text" lines={2} />
-                </div>
+      {/* 卡框常驻：读取中（含骨架还没出现的头 300 ms）占着照真表画的骨架，到了换成表格、空状态或错误，骨架叠在上面淡出 */}
+      <Card padding="none" className={styles.modCard}>
+        <Loadable view={tableView} skeleton={<ModTableSkeleton columns={columns} tier={tier} slow={load.slow} />}>
+          {() =>
+            mods.status === "error" ? (
+              <div className={styles.modCardBody}>
+                <ModuleError
+                  title={MODS_COPY.errorTitle}
+                  error={mods.error}
+                  onRetry={mods.reload}
+                  extra={
+                    <Button variant="ghost" size="sm" disabledReason={ops.folderReason("mods")} onClick={() => ops.openFolder("mods")}>
+                      {MODS_COPY.openFolder}
+                    </Button>
+                  }
+                />
               </div>
-            ))}
-            <SlowHint slow={load.slow} />
-          </div>
-        </Card>
-      )}
-      {load.view === "error" && mods.status === "error" && (
-        <Card padding="lg">
-          <ModuleError
-            title={MODS_COPY.errorTitle}
-            error={mods.error}
-            onRetry={mods.reload}
-            extra={
-              <Button variant="ghost" size="sm" disabledReason={ops.folderReason("mods")} onClick={() => ops.openFolder("mods")}>
-                {MODS_COPY.openFolder}
-              </Button>
-            }
-          />
-        </Card>
-      )}
-      {load.view === "ready" && rows.length === 0 && (
-        <Card padding="lg">
-          <EmptyState
-            scene="enchanted-book"
-            titleAs="h2"
-            title={MODS_COPY.emptyTitle}
-            body={MODS_COPY.emptyBody}
-            action={
-              <Button icon="compass" onClick={() => go({ page: "discover", kind: "mod", forInstance: id })}>
-                {MODS_COPY.emptyAction}
-              </Button>
-            }
-          />
-        </Card>
-      )}
-      {load.view === "ready" && rows.length > 0 && (
-        <Card padding="none" className={styles.modCard}>
-          <Table
-            label={MODS_COPY.tableLabel}
-            columns={columns}
-            rows={shown}
-            rowKey={(r) => r.fileName}
-            density={compact ? "compact" : "regular"}
-            selection={{ selected, onChange: setSelected }}
-            sort={sort}
-            onSortChange={(next) => setSort((prev) => adjustModSort(prev, next))}
-            isInactive={(r) => !r.enabled}
-            className={styles.modTable}
-            empty={
-              <EmptyState
-                compact
-                icon="search"
-                title={MODS_COPY.noMatchTitle}
-                body={query.trim() !== "" ? MODS_COPY.noMatchQuery(query.trim(), partial) : MODS_COPY.noMatchFilter}
-                action={
-                  <Button variant="ghost" size="sm" onClick={clearFilters}>
-                    {MODS_COPY.clearFilters}
-                  </Button>
+            ) : rows.length === 0 ? (
+              <div className={styles.modCardBody}>
+                <EmptyState
+                  scene="enchanted-book"
+                  titleAs="h2"
+                  title={MODS_COPY.emptyTitle}
+                  body={MODS_COPY.emptyBody}
+                  action={
+                    <Button icon="compass" onClick={() => go({ page: "discover", kind: "mod", forInstance: id })}>
+                      {MODS_COPY.emptyAction}
+                    </Button>
+                  }
+                />
+              </div>
+            ) : (
+              <Table
+                label={MODS_COPY.tableLabel}
+                columns={columns}
+                rows={shown}
+                rowKey={(r) => r.fileName}
+                density={compact ? "compact" : "regular"}
+                selection={{ selected, onChange: setSelected }}
+                sort={sort}
+                onSortChange={(next) => setSort((prev) => adjustModSort(prev, next))}
+                isInactive={(r) => !r.enabled}
+                className={styles.modTable}
+                empty={
+                  <EmptyState
+                    compact
+                    icon="search"
+                    title={MODS_COPY.noMatchTitle}
+                    body={query.trim() !== "" ? MODS_COPY.noMatchQuery(query.trim(), partial) : MODS_COPY.noMatchFilter}
+                    action={
+                      <Button variant="ghost" size="sm" onClick={clearFilters}>
+                        {MODS_COPY.clearFilters}
+                      </Button>
+                    }
+                  />
                 }
               />
-            }
-          />
-        </Card>
-      )}
+            )
+          }
+        </Loadable>
+      </Card>
 
       {preview !== null && (
         <UpdatePreviewModal key={preview.key} open={previewOpen} queryId={queryId} rows={previewRows} lock={ops.modsReason} onClose={() => setPreviewOpen(false)} onConfirm={confirmPreview} />
@@ -579,16 +607,90 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   );
 }
 
-/** 摘要行的更新进度，取排在最前的那个更新任务。进度约 100 ms 一次，只让这一小块跟着重渲染。 */
+/**
+ * 摘要行的更新进度，取排在最前的那个更新任务。进度约 100 ms 一次，只让这一小块跟着重渲染。
+ * 任务入队时淡入、全部结束时淡出；换成下一个任务只是原位换标题与进度。
+ */
 function UpdateProgress({ instanceId }: { instanceId: string }) {
   const task = useLauncherSelector((s) => s.tasks.find((t) => isPendingModUpdate(t, instanceId)));
-  if (task === undefined) return null;
   return (
-    <span className={styles.modTask}>
-      <ProgressBar value={task.status === "running" ? task.progress : 0} size="sm" track={progressTrack(task)} label={task.title} />
-      <span className={styles.ellipsis}>{task.title}</span>
-    </span>
+    <Appear itemClassName={styles.modTaskItem}>
+      {task !== undefined && (
+        <span key="task" className={styles.modTask}>
+          <ProgressBar value={task.status === "running" ? task.progress : 0} size="sm" track={progressTrack(task)} label={task.title} />
+          <span className={styles.ellipsis}>{task.title}</span>
+        </span>
+      )}
+    </Appear>
   );
+}
+
+/**
+ * 表格的读取占位，照真表的几何画：同样的表头与表头文字、同一套列模板、同样的行高与单元格内边距，左侧行内边距与右侧滚动条槽也一样，
+ * 换成真表时缩略图、文字行与开关都落在原处。行数取列表骨架的上限，真表多出或少掉的高度落在页面末尾。
+ */
+function ModTableSkeleton({ columns, tier, slow }: { columns: readonly TableColumn<ModRow>[]; tier: TierName; slow: boolean }) {
+  const visible = columns.filter((c) => c.tiers === undefined || c.tiers.includes(tier));
+  const vars = cssVars({
+    "--skeleton-cols": columnTemplate(columns, tier),
+    "--skeleton-head": `${HEADER_HEIGHT}px`,
+    "--skeleton-row": `${ROW_HEIGHT[tier === "compact" ? "compact" : "regular"]}px`,
+  });
+  const alignOf = (c: TableColumn<ModRow>) => (c.align === undefined ? "start" : c.align);
+  return (
+    <div className={styles.tableSkeleton} style={vars}>
+      <div className={styles.skeletonHead}>
+        {visible.map((c) => (
+          <div key={c.key} className={styles.skeletonCell} data-align={alignOf(c)}>
+            {/* 全选框的表头要拿到选择状态才画得出，占一个复选框大小的块 */}
+            {typeof c.header === "function" ? <Skeleton shape="block" width={18} height={18} radius="xs" /> : c.header}
+          </div>
+        ))}
+      </div>
+      {Array.from({ length: SKELETON_ROWS }, (_, i) => (
+        <div key={i} className={styles.skeletonRow}>
+          {visible.map((c) => (
+            <div key={c.key} className={styles.skeletonCell} data-align={alignOf(c)}>
+              {skeletonCell(c.key)}
+            </div>
+          ))}
+        </div>
+      ))}
+      <SlowHint slow={slow} />
+    </div>
+  );
+}
+
+/** 一格骨架照那一列的真实内容画：复选框、缩略图加两行文字、标签、开关、操作按钮。 */
+function skeletonCell(key: string): ReactNode {
+  switch (key) {
+    case "select":
+      return <Skeleton shape="block" width={18} height={18} radius="xs" />;
+    case "mod":
+      return (
+        <>
+          <Skeleton shape="square" size={40} />
+          <span className={styles.skeletonText}>
+            <Skeleton shape="text" width="45%" />
+            <span className={styles.skeletonSub}>
+              <Skeleton shape="text" width="70%" />
+            </span>
+          </span>
+        </>
+      );
+    case "version":
+    case "installed":
+    case "author":
+      return <Skeleton shape="text" width="70%" />;
+    case "source":
+      return <Skeleton shape="block" width={64} height={18} radius="xs" />;
+    case "enabled":
+      return <Skeleton shape="block" width={40} height={24} radius="pill" />;
+    case "actions":
+      return <Skeleton shape="block" width={66} height={30} radius="sm" />;
+    default:
+      throw new Error(`Mod 表骨架没有 ${key} 列的画法`);
+  }
 }
 
 interface ColumnDeps {
@@ -642,29 +744,63 @@ function statusTag(row: ModRow): ReactElement | null {
 /** 紧凑档一行放不下更多标注：版本列与来源列都隐藏了，它们的标注挪进来后整行最多留这么几个。 */
 const COMPACT_TAG_LIMIT = 3;
 
-/** Mod 列第二行的标注。紧凑档按来源、更新状态、新增、前置排，截到上限；其余档来源与更新状态各有自己的列，这里只放新增与前置。 */
+/**
+ * Mod 列第二行的标注。紧凑档按来源、更新状态、新增、前置排，截到上限；其余档来源与更新状态各有自己的列，这里只放新增与前置。
+ * 紧凑档的更新状态随更新检查晚到：来源后面常驻一个出入场的槽，标签出现时淡入、消失时淡出，同一行的其余标注由所在行的让位滑开；
+ * 状态标签挤掉的那个标注也走出入场，淡出而不是同一帧消失。
+ */
 function modSubTags(row: ModRow, compact: boolean, now: number): ReactElement[] {
-  const tags: ReactElement[] = [];
-  if (compact) {
-    tags.push(<SourceTag key="source" row={row} />);
-    const status = statusTag(row);
-    if (status !== null) tags.push(status);
-  }
+  const marks: ReactElement[] = [];
   if (isNewMod(row, now)) {
-    tags.push(
+    marks.push(
       <Tag key="new" size="sm" tone="info">
         {MODS_COPY.newTag}
       </Tag>,
     );
   }
   if (row.dependencyOf !== null) {
-    tags.push(
+    marks.push(
       <Tag key="dependency" size="sm" tone="info" icon="link">
         {MODS_COPY.dependencyOf(row.dependencyOf)}
       </Tag>,
     );
   }
-  return compact ? tags.slice(0, COMPACT_TAG_LIMIT) : tags;
+  if (!compact) return marks;
+  const status = statusTag(row);
+  return [
+    <SourceTag key="source" row={row} />,
+    <Appear key="status" itemClassName={styles.appearInline}>
+      {status}
+    </Appear>,
+    <Appear key="marks" itemClassName={styles.appearInline}>
+      {marks.slice(0, COMPACT_TAG_LIMIT - (status === null ? 1 : 2))}
+    </Appear>,
+  ];
+}
+
+/**
+ * Mod 列：缩略图、名称与第二行的标注。紧凑档的第二行挂让位：更新状态晚到插在来源后面时，同一行的其余标注滑过去而不是跳过去。
+ * 本地文件也要挂：更新检查会先按哈希反查给它补上身份，同一次就为它查更新，这一行在下次重扫之前一直显示「本地文件」却带着更新状态。
+ * 也不能等有了更新状态再挂：让位挂上的那一趟只记位置，和插入同一次提交时不动。
+ */
+function ModCell({ row, compact, now }: { row: ModRow; compact: boolean; now: number }) {
+  const subReflow = useReflow<HTMLSpanElement>();
+  return (
+    <div className={styles.modCell}>
+      <Thumb url={row.iconUrl} kind="mod" hue={hueOf(row.seed)} size={40} inactive={!row.enabled} />
+      <div className={styles.modText}>
+        <span className={styles.modTitle}>
+          <span className={styles.modName}>{row.name}</span>
+          {compact && row.version !== null && <span className={styles.modVersion}>{row.version}</span>}
+        </span>
+        <span ref={compact ? subReflow : undefined} className={styles.modSub}>
+          {row.summary !== null && <span className={styles.ellipsis}>{row.summary}</span>}
+          {modSubTags(row, compact, now)}
+          {!compact && row.summary === null && <span className={styles.modFile}>{row.fileName}</span>}
+        </span>
+      </div>
+    </div>
+  );
 }
 
 /** 行的更多菜单：有来源且没设置时可以忽略更新，忽略或锁定过的恢复检查；本地文件没有来源，忽略项禁用并写原因。 */
@@ -692,22 +828,7 @@ function modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, togg
       header: MODS_COPY.colMod,
       minWidth: 260,
       sortable: true,
-      cell: (r) => (
-        <div className={styles.modCell}>
-          <Thumb url={r.iconUrl} kind="mod" hue={hueOf(r.seed)} size={40} inactive={!r.enabled} />
-          <div className={styles.modText}>
-            <span className={styles.modTitle}>
-              <span className={styles.modName}>{r.name}</span>
-              {compact && r.version !== null && <span className={styles.modVersion}>{r.version}</span>}
-            </span>
-            <span className={styles.modSub}>
-              {r.summary !== null && <span className={styles.ellipsis}>{r.summary}</span>}
-              {modSubTags(r, compact, now)}
-              {!compact && r.summary === null && <span className={styles.modFile}>{r.fileName}</span>}
-            </span>
-          </div>
-        </div>
-      ),
+      cell: (r) => <ModCell row={r} compact={compact} now={now} />,
     },
     {
       key: "version",
@@ -717,7 +838,8 @@ function modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, togg
       cell: (r) => (
         <div className={styles.versionCell}>
           <span className={styles.modVersion}>{r.version === null ? MODS_COPY.versionUnknown : r.version}</span>
-          {statusTag(r)}
+          {/* 状态标签随更新检查晚到：整格钉在单元格顶部、按两行标签留好位置，标签出现时版本号不动；标签自己淡入淡出 */}
+          <Appear itemClassName={styles.appearInline}>{statusTag(r)}</Appear>
         </div>
       ),
     },
@@ -758,14 +880,27 @@ function modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, togg
       keepOpaque: true,
       cell: (r) => (
         <div className={styles.rowActions}>
-          {r.update !== null &&
-            (compact ? (
-              <IconButton icon="download" label={MODS_COPY.updateLabel(r.name)} size="sm" variant="secondary" disabled={isUpdating(r)} focusableWhenDisabled disabledReason={lock} onClick={() => update(r)} />
-            ) : (
-              <Button size="sm" disabledReason={lock} loading={isUpdating(r)} onClick={() => update(r)} aria-label={MODS_COPY.updateLabel(r.name)}>
-                {MODS_COPY.update}
-              </Button>
-            ))}
+          {/* 更新按钮随更新检查晚到时淡入、更新完成后淡出；操作列右对齐，后面的两个按钮不动 */}
+          <Appear itemClassName={styles.appearInline}>
+            {r.update !== null &&
+              (compact ? (
+                <IconButton
+                  key="update"
+                  icon="download"
+                  label={MODS_COPY.updateLabel(r.name)}
+                  size="sm"
+                  variant="secondary"
+                  disabled={isUpdating(r)}
+                  focusableWhenDisabled
+                  disabledReason={lock}
+                  onClick={() => update(r)}
+                />
+              ) : (
+                <Button key="update" size="sm" disabledReason={lock} loading={isUpdating(r)} onClick={() => update(r)} aria-label={MODS_COPY.updateLabel(r.name)}>
+                  {MODS_COPY.update}
+                </Button>
+              ))}
+          </Appear>
           <MoreMenu items={holdMenu(r, holdLock, setHold)} size="sm" label={MODS_COPY.more(r.name)} />
           {/* 启停还没回来时盘上是哪个名字未知：这时开确认框，确认时拿的是改名前的旧名字 */}
           <IconButton icon="trash" label={MODS_COPY.remove(r.name)} size="sm" variant="danger" disabledReason={toggleReason(r)} onClick={() => remove(r)} />

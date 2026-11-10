@@ -2,14 +2,17 @@
 //
 // 各行按片订阅自己那一项设置：游戏运行时每批日志、下载时每次进度都会换一次状态，整份订阅会让整个分区跟着重渲染。
 
+import { motion } from "framer-motion";
 import { useState } from "react";
 import { INTERFACE_COPY, LANGUAGE_OPTIONS } from "../../../copy/settings";
 import type { Settings } from "../../../domain/adapt";
 import { autoBackupOutcome } from "../../../domain/rules";
+import { springs } from "../../../lib/motion";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import type { LauncherState } from "../../../state/store";
+import { Appear } from "../../../ui/Appear";
 import { Button } from "../../../ui/Button";
 import { Card } from "../../../ui/Card";
 import { CardHeader } from "../../../ui/CardHeader";
@@ -20,6 +23,7 @@ import { Tag } from "../../../ui/Tag";
 import { TextInput } from "../../../ui/TextInput";
 import { Toggle } from "../../../ui/Toggle";
 import { AFTER_LAUNCH_OPTIONS, AUTO_BACKUP_SKIPPED_NOTE, GENERAL_COPY, saveFailed } from "../copy";
+import { RowFlow } from "../Flow";
 import { useSettingWrite } from "../write";
 import s from "../settings.module.css";
 
@@ -58,7 +62,8 @@ function AfterLaunchRow() {
           <span className={s.desc} data-tone={write.value === "close" ? "warn" : undefined}>
             {current.desc}
           </span>
-          {autoBackupOutcome(write.value, autoBackup) === "skipped" && <span className={s.descNote}>{AUTO_BACKUP_SKIPPED_NOTE}</span>}
+          {/* 提醒行淡入淡出；它撑高、让出的那一行由所在的 RowFlow 与分区卡片栈让位 */}
+          <Appear>{autoBackupOutcome(write.value, autoBackup) === "skipped" && <span key="skipped" className={s.descNote}>{AUTO_BACKUP_SKIPPED_NOTE}</span>}</Appear>
         </>
       }
     >
@@ -145,46 +150,54 @@ function ClientIdRow() {
   return (
     <div className={s.stackRow}>
       <SettingRow title={GENERAL_COPY.clientId} description={GENERAL_COPY.clientIdDesc}>
-        <Tag tone={hasClientId ? "ok" : "neutral"}>{hasClientId ? GENERAL_COPY.clientIdSet : GENERAL_COPY.clientIdUnset}</Tag>
-        {!editing && hasClientId && (
-          <Button size="sm" variant="ghost" loading={clearing} onClick={() => void clear()}>
-            {GENERAL_COPY.clientIdClear}
-          </Button>
-        )}
-        {!editing && (
-          // 清除还没回来时不让改：两次写入并发，结果就看谁后到
+        {/* 「清除」出没时控件区按内容变宽变窄，状态标签跟着挪：滑过去而不是一帧跳 */}
+        <motion.span className={s.idTag} layout="position" layoutDependency={hasClientId} transition={springs.settle}>
+          <Tag tone={hasClientId ? "ok" : "neutral"}>{hasClientId ? GENERAL_COPY.clientIdSet : GENERAL_COPY.clientIdUnset}</Tag>
+        </motion.span>
+        {/* 编辑时这两个按钮淡出但留着位置：状态标签不横移，说明列也不因此变宽重新折行 */}
+        <span className={s.idActions} data-hidden={editing || undefined} inert={editing}>
+          <Appear>
+            {hasClientId && (
+              <Button key="clear" size="sm" variant="ghost" loading={clearing} onClick={() => void clear()}>
+                {GENERAL_COPY.clientIdClear}
+              </Button>
+            )}
+          </Appear>
+          {/* 清除还没回来时不让改：两次写入并发，结果就看谁后到 */}
           <Button size="sm" disabled={clearing} onClick={() => setEditing(true)}>
             {GENERAL_COPY.clientIdEdit}
           </Button>
-        )}
+        </span>
       </SettingRow>
-      {editing && (
-        <div className={s.inlineEditor}>
-          <TextInput
-            className={s.monoInput}
-            value={draft}
-            onChange={setDraft}
-            onEnter={() => void save()}
-            aria-label={GENERAL_COPY.clientId}
-            placeholder={hasClientId ? GENERAL_COPY.clientIdPlaceholderSet : GENERAL_COPY.clientIdPlaceholderUnset}
-            autoFocus
-            spellCheck={false}
-            autoComplete="off"
-          />
-          <Button
-            variant="ghost"
-            onClick={() => {
-              setEditing(false);
-              setDraft("");
-            }}
-          >
-            {GENERAL_COPY.cancel}
-          </Button>
-          <Button disabled={value === ""} loading={saving} onClick={() => void save()}>
-            {GENERAL_COPY.save}
-          </Button>
-        </div>
-      )}
+      <Appear>
+        {editing && (
+          <div key="editor" className={s.inlineEditor}>
+            <TextInput
+              className={s.monoInput}
+              value={draft}
+              onChange={setDraft}
+              onEnter={() => void save()}
+              aria-label={GENERAL_COPY.clientId}
+              placeholder={hasClientId ? GENERAL_COPY.clientIdPlaceholderSet : GENERAL_COPY.clientIdPlaceholderUnset}
+              autoFocus
+              spellCheck={false}
+              autoComplete="off"
+            />
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setEditing(false);
+                setDraft("");
+              }}
+            >
+              {GENERAL_COPY.cancel}
+            </Button>
+            <Button disabled={value === ""} loading={saving} onClick={() => void save()}>
+              {GENERAL_COPY.save}
+            </Button>
+          </div>
+        )}
+      </Appear>
     </div>
   );
 }
@@ -194,8 +207,11 @@ export function GeneralSection() {
     <>
       <Card>
         <CardHeader title={GENERAL_COPY.launchTitle} subtitle={GENERAL_COPY.launchSubtitle} icon="play" />
-        <AfterLaunchRow />
-        <SkipAccessibilityOnboardingRow />
+        {/* 「游戏启动后」的说明随选项换行、提醒行出没时，下面一行滑过去 */}
+        <RowFlow>
+          <AfterLaunchRow />
+          <SkipAccessibilityOnboardingRow />
+        </RowFlow>
       </Card>
       <Card>
         <CardHeader title={INTERFACE_COPY.title} icon="sliders" />

@@ -1,10 +1,13 @@
 // 当前账户聚光卡：左侧舞台站着角色立绘，右侧是名称、类型、UUID、验证信息与动作。
 // 凭据失效时动作换成「重新登录」主按钮，页头的「添加微软账户」随之降为次按钮，保证每屏一个主按钮。
 
+import { motion } from "framer-motion";
+import { useEffect, useRef } from "react";
 import { Icon } from "../../art/Icon";
 import { formatDate, formatRelative } from "../../domain/format";
 import type { Account } from "../../domain/adapt";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
+import { tabPanel } from "../../lib/motion";
 import { useNow } from "../../state/launcher";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
@@ -28,6 +31,10 @@ export interface SpotlightProps {
 
 export function Spotlight({ account, online, act }: SpotlightProps) {
   const now = useNow(RELATIVE_REFRESH_MS);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
   const line = kindLine(account);
   const uuid = displayUuid(account.uuid);
   const credential = isCredential(account);
@@ -43,7 +50,8 @@ export function Spotlight({ account, online, act }: SpotlightProps) {
     <Card as="section" padding="none" clip selected className={styles.spot}>
       <div className={styles.spotGrid}>
         <Stage account={account} variant="spot" />
-        <div className={styles.spotInfo}>
+        {/* 换了当前账户：信息列整列换人，从下方 6px 淡入落位（旧的一列同一帧让出）。挂载时就在的跟着页面入场 */}
+        <motion.div key={account.uuid} className={styles.spotInfo} variants={tabPanel} initial={mounted.current ? "hidden" : false} animate="show">
           <div className={styles.tagRow}>
             <Tag tone="accent" icon="check" size="sm">
               {ACCOUNTS_COPY.currentTag}
@@ -89,7 +97,7 @@ export function Spotlight({ account, online, act }: SpotlightProps) {
               ]}
             />
           </div>
-        </div>
+        </motion.div>
       </div>
     </Card>
   );

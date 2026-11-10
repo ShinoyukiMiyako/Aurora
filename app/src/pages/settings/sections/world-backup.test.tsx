@@ -135,7 +135,11 @@ describe("设置 · 游戏：存档备份", () => {
     await mountGame();
     expect(card().textContent).toContain(NOTE);
     await click(autoSwitch());
-    expect(card().textContent).not.toContain(NOTE);
+    // 那一行淡出期间还在文档里，已标 inert（假定时器下动画走不完）：在场的文字里没有它
+    expect([...card().querySelectorAll("[inert]")].map((el) => el.textContent)).toEqual([NOTE]);
+    const present = card().cloneNode(true) as HTMLElement;
+    for (const leaving of present.querySelectorAll("[inert]")) leaving.remove();
+    expect(present.textContent).not.toContain(NOTE);
   });
 
   it("「游戏启动后」没选关闭：不提这件事", async () => {

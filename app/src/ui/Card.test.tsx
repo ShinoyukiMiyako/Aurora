@@ -236,6 +236,42 @@ describe("Card 样式", () => {
     expect(rule(".card[data-selected]::before").opacity).toBe("1");
     expect(rule(".card[data-selected][data-interactive]:focus-visible::before").opacity).toBe("0");
   });
+
+  it("不可点的选中卡：描边色在卡片基础规则上过渡，与外圈同一时长同一曲线；可点卡片也带着它", () => {
+    const ring = /opacity (var\(--sk-dur-hover\) var\(--sk-ease\))/.exec(rule(".card::before").transition)?.[1];
+    expect(ring).toBe("var(--sk-dur-hover) var(--sk-ease)");
+    expect(rule(".card").transition).toBe(`border-color ${ring}`);
+    // 可点卡片的过渡另写了一整条，里面同样有描边色
+    expect(rule(".card[data-interactive]").transition).toContain(`border-color ${ring}`);
+    expect(rule(".card:has(.titleButton)").transition).toContain(`border-color ${ring}`);
+  });
+
+  it("外圈宽度由页面经 --card-ring-width 改：组件只读不写，页面的声明不论特异性与先后都生效", () => {
+    expect(rule(".card::before")["box-shadow"]).toBe("0 0 0 var(--card-ring-width, 3px) var(--sk-accent-soft)");
+    // 组件自己一旦声明这个变量，页面要靠更高的特异性或更晚的顺序才盖得过，聚光卡就会退回 3px
+    expect(css).not.toMatch(/--card-ring-width\s*:/);
+    // 选中态不另写一圈固定宽度的外圈
+    for (const [selector, decls] of rules) {
+      if (selector.includes("data-selected")) expect(decls["box-shadow"], selector).toBeUndefined();
+    }
+  });
+
+  it("带标题按钮的卡片：键盘焦点环画在卡片自己身上，不画在会被裁切内层裁掉的覆盖层上；选中外圈让位", () => {
+    expect(rule(".card:has(.titleButton:focus-visible)")["box-shadow"]).toBe("var(--sk-focus), var(--sk-shadow)");
+    expect(rule(".card[data-interactive]:focus-visible")["box-shadow"]).toBe("var(--sk-focus), var(--sk-shadow)");
+    expect(rules.get(".titleButton:focus-visible::after")).toBeUndefined();
+    expect(rule(".card[data-selected]:has(.titleButton:focus-visible)::before").opacity).toBe("0");
+
+    // 裁切卡片里标题按钮在内层裁切容器里：覆盖层画在边框外的东西都会被它裁掉
+    const card = mount(
+      <Card clip padding="none" selected>
+        <CardTitleButton onClick={() => undefined}>生存 1.21</CardTitleButton>
+      </Card>,
+    );
+    const button = card.querySelector("button") as HTMLButtonElement;
+    expect(button.parentElement).not.toBe(card);
+    expect(button.parentElement?.parentElement).toBe(card);
+  });
 });
 
 describe("CardHeader", () => {

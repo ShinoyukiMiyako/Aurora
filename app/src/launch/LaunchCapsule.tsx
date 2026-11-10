@@ -4,17 +4,17 @@
 // - 容器宽度随面变化（layout + morph 弹簧）；底色与描边是几张叠层，切换时交叉淡入，不过渡 background-color。
 // - 面切换：旧面淡出上移，新面稍后淡入下落（popLayout，旧面不占位）。
 // - 方块组装跨面连续：加载 -> 取消时拆解、加载 -> 失败 / 崩溃时崩落、加载 -> 运行时坐定，都要在旧面上演完再换面，
-//   所以视图变化后先把旧面「留住」一小段（useFaceHold）；减少动画时不留，直接换。
+//   所以视图变化后先把旧面「留住」一小段（useFaceHold），时长按方块报来的组装进度算；减少动画时不留，直接换。
 // - 进度填充在容器级的裁切层里，按 translateX((p − 1) × 100%) 移动，不随面的入场位移一起动。
 
 import { AnimatePresence, motion, useReducedMotionConfig, useTransform, type Variants } from "framer-motion";
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Icon } from "../art/Icon";
-import { AssemblingBlock, type AssemblyExit } from "../art/iso/AssemblingBlock";
+import { AssemblingBlock, assemblyExitMs, assemblySeatInMs, type AssemblyClock, type AssemblyExit } from "../art/iso/AssemblingBlock";
 import { Spinner } from "../art/Spinner";
 import { CRASH_CATEGORIES, crashClueLine, LAUNCH_COPY, LAUNCH_STAGES, PHASE_LABEL, SESSION_COPY, taskPhaseText, type FailureCopy } from "../copy/flows";
 import { percent } from "../domain/format";
-import { assembly, capsuleSwap, fade, lineSwap, springs } from "../lib/motion";
+import { capsuleSwap, fade, lineSwap, springs } from "../lib/motion";
 import { cx } from "../lib/util";
 import { useNow } from "../state/launcher";
 import { DOWNLOAD_STAGE } from "../state/session";
@@ -27,7 +27,7 @@ import { useInstanceCover } from "./cover";
 import styles from "./LaunchCapsule.module.css";
 import { brokenAction, sessionDetail, sessionPhaseLabel, stageLabel, type LaunchView } from "./launchView";
 import { useLaunch, type LaunchEntry } from "./useLaunch";
-import { useMounted } from "./useMounted";
+import { useMounted } from "../lib/useMounted";
 
 export type LaunchCapsuleSize = "md" | "lg";
 
@@ -160,28 +160,37 @@ interface FaceHold {
   ms: number;
 }
 
-/** 视图从 prev 换到 next 时旧面要不要留住、留多久；不留为 null。 */
-export function holdFor(prev: LaunchView, next: LaunchView): FaceHold | null {
+/**
+ * 视图从 prev 换到 next 时旧面要不要留住、留多久；不留为 null。clock 是旧面上方块此刻的组装进度（now 与它同一时基）：
+ * 拆解、崩落按实际已落的面数算演完的时长；坐定按未落的面还要多久落齐（含刚换上时的首落延迟）再加坐定后的停顿。
+ * 实际已落的面数会晚于阶段给出的落位数，按落位数估会在方块坐定前就换走旧面。
+ */
+export function holdFor(prev: LaunchView, next: LaunchView, clock: AssemblyClock | null, now: number): FaceHold | null {
   if (prev.kind === "loading") {
-    if (next.kind === "stopped" && next.reason === "cancelled") return { face: prev, exit: "disassemble", seat: false, ms: capsuleSwap.holdMs.disassemble };
-    if (next.kind === "failed" || next.kind === "crashed") return { face: prev, exit: "collapse", seat: false, ms: capsuleSwap.holdMs.collapse };
-    if (next.kind === "running") return { face: prev, exit: null, seat: true, ms: seatAt(placedForStage(prev.session.stageIndex)) + capsuleSwap.holdMs.afterSeat };
+    if (next.kind === "stopped" && next.reason === "cancelled") return exitHold(prev, "disassemble", clockOf(clock));
+    if (next.kind === "failed" || next.kind === "crashed") return exitHold(prev, "collapse", clockOf(clock));
+    if (next.kind === "running") return seatHold(prev, clockOf(clock), now);
   }
-  if (prev.kind === "installing" && next.kind === "ready") {
-    const task = prev.task;
-    const placed = task === null || task.status === "queued" ? 1 : placedForProgress(task.progress);
-    return { face: prev, exit: null, seat: true, ms: seatAt(placed) + capsuleSwap.holdMs.afterSeat };
-  }
+  if (prev.kind === "installing" && next.kind === "ready") return seatHold(prev, clockOf(clock), now);
   return null;
 }
 
-/** 坐定时刻：未落的面依次落下（相邻两面隔一个落位间隔），最后一面开始落位后再过坐定延迟；三面早已落齐则为 0。 */
-function seatAt(placed: number): number {
-  const remaining = 3 - placed;
-  return remaining > 0 ? (remaining - 1) * assembly.stepGapMs + assembly.seatDelayMs : 0;
+function clockOf(clock: AssemblyClock | null): AssemblyClock {
+  if (clock === null) throw new Error("加载面与安装中面的方块还没有报过组装进度");
+  return clock;
 }
 
-function useFaceHold(view: LaunchView, reduced: boolean): { face: LaunchView; exit: AssemblyExit | null; seat: boolean } {
+/** 一面都还没落时没有可演的退场，直接换面。 */
+function exitHold(face: LaunchView, exit: AssemblyExit, clock: AssemblyClock): FaceHold | null {
+  const ms = assemblyExitMs(exit, clock.shown);
+  return ms === 0 ? null : { face, exit, seat: false, ms };
+}
+
+function seatHold(face: LaunchView, clock: AssemblyClock, now: number): FaceHold {
+  return { face, exit: null, seat: true, ms: assemblySeatInMs(clock, now) + capsuleSwap.holdMs.afterSeat };
+}
+
+function useFaceHold(view: LaunchView, reduced: boolean, clock: RefObject<AssemblyClock | null>): { face: LaunchView; exit: AssemblyExit | null; seat: boolean } {
   const key = faceKey(view);
   // 上一次提交时的视图：留住的旧面要用它最后的样子（下载到一半取消，方块与进度停在取消那一刻）
   const committed = useRef(view);
@@ -193,7 +202,7 @@ function useFaceHold(view: LaunchView, reduced: boolean): { face: LaunchView; ex
   if (key !== prevKey) {
     // 渲染期间就决定留不留：比 effect 早一帧，旧面不会先换成新面再闪回来
     setPrevKey(key);
-    setHold(reduced ? null : holdFor(committed.current, view));
+    setHold(reduced ? null : holdFor(committed.current, view, clock.current, performance.now()));
   }
   useEffect(() => {
     if (hold === null) return;
@@ -217,7 +226,9 @@ export const faceSwap: Variants = {
 export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch = false, className }: LaunchCapsuleProps) {
   const entry = useLaunch(instanceId);
   const reduced = useReducedMotionConfig() === true;
-  const { face, exit, seat } = useFaceHold(entry.view, reduced);
+  // 加载面、安装中面上方块的组装进度，由方块写入；换面时据此决定旧面留多久
+  const clock = useRef<AssemblyClock | null>(null);
+  const { face, exit, seat } = useFaceHold(entry.view, reduced, clock);
   const capsuleRef = useRef<HTMLDivElement>(null);
   // 胶囊挂载时就在的面不播入场（跟着所在页面走）；之后换上来的面才播
   const mounted = useMounted();
@@ -283,7 +294,7 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
           animate="show"
           exit="leave"
         >
-          <Face face={face} entry={entry} exit={exit} seat={seat} relaunch={relaunch} entering={mounted.current} />
+          <Face face={face} entry={entry} exit={exit} seat={seat} relaunch={relaunch} entering={mounted.current} clock={clock} />
         </motion.div>
       </AnimatePresence>
     </motion.div>
@@ -337,8 +348,11 @@ function BreathGlow({ appear, reduced }: { appear: boolean; reduced: boolean }) 
   );
 }
 
-/** entering：这个面是换上来的（胶囊早已挂载），方块要从一面未落起演组装；否则是随胶囊一起挂载的，按现状直接显示。 */
-function Face({ face, entry, exit, seat, relaunch, entering }: { face: LaunchView; entry: LaunchEntry; exit: AssemblyExit | null; seat: boolean; relaunch: boolean; entering: boolean }) {
+/**
+ * entering：这个面是换上来的（胶囊早已挂载），方块要从一面未落起演组装；否则是随胶囊一起挂载的，按现状直接显示。
+ * clock：加载面与安装中面的方块把组装进度写在这里。
+ */
+function Face({ face, entry, exit, seat, relaunch, entering, clock }: { face: LaunchView; entry: LaunchEntry; exit: AssemblyExit | null; seat: boolean; relaunch: boolean; entering: boolean; clock: RefObject<AssemblyClock | null> }) {
   const cover = useInstanceCover(entry.instance);
   const id = entry.instance.id;
   switch (face.kind) {
@@ -374,7 +388,7 @@ function Face({ face, entry, exit, seat, relaunch, entering }: { face: LaunchVie
       return (
         <>
           <span className={styles.blockSlot}>
-            <AssemblingBlock instanceId={id} cover={cover} placed={seat ? 3 : placedForStage(s.stageIndex)} seated={seat} exit={exit} width={28} enter={entering} />
+            <AssemblingBlock instanceId={id} cover={cover} placed={seat ? 3 : placedForStage(s.stageIndex)} seated={seat} exit={exit} width={28} enter={entering} clock={clock} />
           </span>
           <Text
             title={stopping ? SESSION_COPY.stopping : stageLabel(s.stageIndex)}
@@ -435,7 +449,7 @@ function Face({ face, entry, exit, seat, relaunch, entering }: { face: LaunchVie
       return (
         <>
           <span className={styles.blockSlot}>
-            <AssemblingBlock instanceId={id} cover={cover} placed={seat ? 3 : queued ? 1 : placedForProgress(task.progress)} seated={seat} width={28} enter={entering} />
+            <AssemblingBlock instanceId={id} cover={cover} placed={seat ? 3 : queued ? 1 : placedForProgress(task.progress)} seated={seat} width={28} enter={entering} clock={clock} />
           </span>
           {queued ? (
             <Text title={LAUNCH_COPY.queuedTitle} titleSlot={TEXT_SLOTS.installingTitle} sub={installingSub(face)} />

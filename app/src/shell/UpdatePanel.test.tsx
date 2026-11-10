@@ -4,16 +4,19 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
-import { UPDATE_COPY } from "../copy/updater";
+import { sourceSwitchedCopy, UPDATE_COPY } from "../copy/updater";
+import { formatBytes } from "../domain/format";
 import type { UpdateDto, UpdaterInfoDto } from "../ipc/system";
+import { CORE_EVENT } from "../ipc/tasks";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
 import { LauncherProvider } from "../state/launcher";
+import type { DownloadSource, UpdaterPhase } from "../state/updater/machine";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
-import { bootOverrides, deferred, resetRecorder, settle, type Deferred } from "../test/launcher";
+import { bootOverrides, callsOf, deferred, emit, resetRecorder, settle, type Deferred } from "../test/launcher";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider, useShell, type ShellApi } from "./shell";
-import { UpdatePanelMount } from "./UpdatePanel";
+import { UpdatePanelMount, updatePanelLayoutKey } from "./UpdatePanel";
 import styles from "./UpdatePanel.module.css";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -145,5 +148,77 @@ describe("开始安装", () => {
     expect(document.querySelector('[data-sk-modal-layer]:not([data-exiting])')).toBeNull();
     const leaving = document.querySelector<HTMLElement>("[data-sk-modal-layer][data-exiting]");
     expect(leaving?.textContent).toContain(UPDATE_COPY.panelTitle(UPDATE.version));
+  });
+});
+
+describe("弹窗形变的依赖", () => {
+  const update = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null };
+  const downloading = (bytes: number, source: DownloadSource | null): UpdaterPhase => ({ kind: "downloading", update, taskId: "t", bytes, totalBytes: 1200, source });
+  const failed = (signature: boolean): UpdaterPhase => ({ kind: "download_failed", update, reason: "连接被重置", signature, network: null, sourcesTried: 1 });
+  const key = updatePanelLayoutKey;
+
+  it("下载进度与仍在第一个源时不变；换过源之后再换也不变（同样多一行提示）", () => {
+    expect(key(downloading(0, null), false)).toBe(key(downloading(900, { index: 0, count: 3, name: "cn" }), false));
+    expect(key(downloading(0, { index: 1, count: 3, name: "hk" }), false)).toBe(key(downloading(700, { index: 2, count: 3, name: "global" }), false));
+  });
+
+  it("换了源、换了阶段、游戏开始或结束、失败带不带后端原文、换了一版都变", () => {
+    expect(key(downloading(0, { index: 1, count: 3, name: "hk" }), false)).not.toBe(key(downloading(0, null), false));
+    expect(key({ kind: "ready", update }, true)).not.toBe(key({ kind: "ready", update }, false));
+    expect(key({ kind: "ready", update }, false)).not.toBe(key({ kind: "install_on_exit", update }, false));
+    // 签名不符时只有说明、没有原文，比别的失败少一段
+    expect(key(failed(true), false)).not.toBe(key(failed(false), false));
+    expect(key({ kind: "available", update }, false)).not.toBe(key({ kind: "available", update: { ...update, version: "0.3.0" } }, false));
+  });
+});
+
+describe("换阶段时弹窗形变", () => {
+  const TOTAL = 1200;
+
+  /** 面板被量布局的次数：Modal 只在 layoutKey 变了的那次重渲染量面板、播形变，不变时一次都不量。 */
+  function countMeasures(el: HTMLElement): { count: number } {
+    const counter = { count: 0 };
+    const real = el.getBoundingClientRect.bind(el);
+    el.getBoundingClientRect = () => {
+      counter.count += 1;
+      return real();
+    };
+    return counter;
+  }
+
+  it("下载进度回调不量面板；开始下载、换了下载源、下载失败这几次改变高度时才量", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    info = { ...info, downloaded_version: null };
+    const pending = deferred<UpdateDto>();
+    ipc.overrides.set("download_update", () => pending.promise);
+    await openReady();
+    const measures = countMeasures(dialog());
+
+    act(() => button(UPDATE_COPY.download).click());
+    await flush();
+    expect(measures.count).toBeGreaterThan(0);
+    const taskId = callsOf(ipc, "download_update")[0].taskId;
+    if (typeof taskId !== "string") throw new Error("下载命令没有带 taskId");
+
+    measures.count = 0;
+    for (const bytes of [0, 400, 800]) {
+      act(() => emit(CORE_EVENT, { kind: "download", task_id: taskId, total: 1, finished: 0, bytes, total_bytes: TOTAL, speed: 0 }));
+      await flush();
+    }
+    expect(dialog().textContent).toContain(UPDATE_COPY.progress(formatBytes(800), formatBytes(TOTAL)));
+    expect(measures.count).toBe(0);
+
+    act(() => emit(CORE_EVENT, { kind: "source", task_id: taskId, index: 1, count: 3, name: "hk" }));
+    await flush();
+    const switched = sourceSwitchedCopy({ index: 1, count: 3 });
+    if (switched === null) throw new Error("换到第二个源应当有提示");
+    expect(dialog().textContent).toContain(switched);
+    expect(measures.count).toBeGreaterThan(0);
+
+    measures.count = 0;
+    pending.reject(new Error("连接被重置"));
+    await flush();
+    expect(statusBlocks().map((el) => el.textContent)).toEqual([expect.stringContaining("连接被重置")]);
+    expect(measures.count).toBeGreaterThan(0);
   });
 });

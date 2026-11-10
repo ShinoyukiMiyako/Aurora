@@ -220,6 +220,54 @@ describe("命令面板的开合与后台变化", () => {
     expect(optionLabels(leaving.panel)).toEqual(before);
   });
 
+  it("退场途中当前实例变了：淡出中的面板不整块重挂，条目照旧，也不把焦点抢回它的输入框", async () => {
+    await mount();
+    expect(launcher.state.selectedInstanceId).toBeNull();
+    const before = document.getElementById("before");
+    if (before === null) throw new Error("缺少起始焦点");
+    act(() => before.focus());
+    act(() => shell.openPalette("生存"));
+    await flush();
+    const field = liveInput();
+    const shown = optionLabels(livePanel());
+    act(() => shell.closePalette());
+    expect(document.activeElement).toBe(before);
+
+    // 当前实例从没有变成「生存」：没冻结的话面板换成另一棵子树重挂，「生存」这一条的提示也会变成「当前实例」
+    await act(async () => {
+      await launcher.actions.selectInstance("生存");
+    });
+    await flush();
+    expect(launcher.state.selectedInstanceId).toBe("生存");
+    const [leaving] = panels();
+    expect(leaving.exiting).toBe(true);
+    expect(leaving.panel.querySelector("[role='combobox']")).toBe(field);
+    expect(optionLabels(leaving.panel)).toEqual(shown);
+    expect(document.activeElement).toBe(before);
+  });
+
+  it("高亮项滚进可见区只在高亮或查询变了时量：后台数据更新引起的重渲染不碰列表", async () => {
+    await mount();
+    act(() => shell.openPalette());
+    await flush();
+    const list = livePanel().querySelector<HTMLElement>("[role='listbox']");
+    if (list === null) throw new Error("面板里没有结果列表");
+    const lookups = vi.spyOn(list, "querySelector");
+
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { last_played_at: 100 }), instanceDto("创造", { last_played_at: 900 }), instanceDto("空岛"), instanceDto("后来的")]);
+    await act(async () => {
+      await launcher.actions.reload("instances");
+    });
+    await flush();
+    expect(options().some((o) => o.textContent?.startsWith("后来的"))).toBe(true);
+    expect(lookups).not.toHaveBeenCalled();
+
+    keydown(input(), "ArrowDown");
+    expect(lookups).toHaveBeenCalledTimes(1);
+    type("空");
+    expect(lookups).toHaveBeenCalledTimes(2);
+  });
+
   it("面板开着时后台插进新实例：高亮留在原来那一条上，不按下标落到别的条目", async () => {
     await mount();
     act(() => shell.openPalette());

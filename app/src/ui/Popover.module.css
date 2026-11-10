@@ -22,6 +22,45 @@
   outline: none;
 }
 
+/*
+ * 带形变或头尾的面板：外框只裁切不滚动，纵向排开头部、主体、底部。形变是 transform 缩放，滚动容器缩放途中
+ * 反向缩放的内容比它的布局框大，会撑出滚动条，所以外框用 clip：不是滚动容器，聚焦或滚入视野也不会把它卷动。
+ */
+.panel[data-structured] {
+  display: flex;
+  flex-direction: column;
+  overflow: clip;
+}
+
+.header,
+.footer {
+  flex: none;
+}
+
+/*
+ * 主体是唯一的滚动区。常驻滚动条槽位：内容在超出与不超出可视高度之间来回时不横移。
+ * 最大高度由调用方经 --popover-body-max-height 给，不给则只受外框（窗口内容区）的高度限制
+ */
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: var(--popover-body-max-height, none);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+/* 形变途中不滚动：反向缩放的内容比主体的布局框大，自动滚动会冒出一下滚动条。hidden 保留滚动位置与槽位，宽度不变 */
+.body[data-morphing] {
+  overflow-y: hidden;
+}
+
+/* 主体里随形变移动的那一层：自成格式化上下文，子项的外边距留在它里面，量到的框就是内容的框 */
+.content {
+  display: flow-root;
+}
+
 /* 下拉选择：宽度至少与触发器一致；触发器比默认最大宽还宽时以触发器为准 */
 .panel[data-match-width] {
   min-width: max(var(--popover-min-width), var(--popover-anchor-width));

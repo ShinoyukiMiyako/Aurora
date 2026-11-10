@@ -5,6 +5,7 @@ import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
 import { fade } from "../../lib/motion";
 import { Button } from "../../ui/Button";
 import { LabelSlot } from "../../ui/LabelSlot";
+import { Loadable } from "../../ui/Loadable";
 import { TabPanel, Tabs } from "../../ui/Tabs";
 import type { SetupCopy } from "../copy";
 import { Frame } from "../Frame";
@@ -71,8 +72,8 @@ function DocumentText({ label, failed, loaded }: { label: string; failed: string
 }
 
 /**
- * 清单的底块先于清单占住位置：读得快（加载门的延迟之内）时什么字都不出，清单读到后在同一块底上淡入；
- * 超过延迟才在底块里说「正在读取」。几百行的清单只整块淡入，不逐行。
+ * 清单的底块先于清单占住位置，加载态交给 Loadable：读得快（加载门的延迟之内）时什么字都不出，清单读到后在同一块底上淡入；
+ * 超过延迟才在底块里淡入「正在读取」，清单到了与它交叉淡化。几百行的清单只整块淡入，不逐行。
  */
 function ThirdPartyList({ copy, loaded, view }: { copy: SetupCopy["legal"]; loaded: Loaded<ThirdPartyManifest>; view: LoadingView }) {
   if (view === "content" && loaded.status === "failed") {
@@ -85,24 +86,25 @@ function ThirdPartyList({ copy, loaded, view }: { copy: SetupCopy["legal"]; load
   }
   return (
     <div className={styles.packagesBox}>
-      {view === "content" && loaded.status === "ready" ? (
-        <motion.ul className={styles.packages} aria-label={copy.thirdPartyHeading} tabIndex={0} initial={{ opacity: 0 }} animate={{ opacity: 1, transition: fade.in }}>
-          {loaded.value.packages.map((p) => (
-            <li key={`${p.ecosystem}:${p.name}@${p.version}`} className={styles.package}>
-              <span className={styles.packageName} title={p.name}>
-                {p.name}
-              </span>
-              <span className={styles.packageVersion}>{p.version}</span>
-              <span className={styles.packageLicense}>{p.license}</span>
-            </li>
-          ))}
-        </motion.ul>
-      ) : (
-        // 播报区先挂上、后填字，读屏才念得出来
-        <p className={styles.pending} role="status" data-shown={view === "skeleton" || undefined}>
-          {view === "skeleton" ? copy.thirdPartyLoading : null}
-        </p>
-      )}
+      <Loadable view={view} className={styles.packagesFill} contentClassName={styles.packagesFill} skeleton={<p className={styles.pending}>{copy.thirdPartyLoading}</p>}>
+        {() => {
+          // 加载门只在读取落定后才给 content，读失败已在上面接走
+          if (loaded.status !== "ready") throw new Error(`第三方清单的加载门已到内容态，读取状态却是 ${loaded.status}`);
+          return (
+            <ul className={styles.packages} aria-label={copy.thirdPartyHeading} tabIndex={0}>
+              {loaded.value.packages.map((p) => (
+                <li key={`${p.ecosystem}:${p.name}@${p.version}`} className={styles.package}>
+                  <span className={styles.packageName} title={p.name}>
+                    {p.name}
+                  </span>
+                  <span className={styles.packageVersion}>{p.version}</span>
+                  <span className={styles.packageLicense}>{p.license}</span>
+                </li>
+              ))}
+            </ul>
+          );
+        }}
+      </Loadable>
     </div>
   );
 }
@@ -143,9 +145,9 @@ export function Legal({ copy, loadLicenseText, loadAdditionalTerms, loadAssetLic
               onChange={setShown}
               items={(["license", "terms", "assets"] as const).map((doc) => ({ value: doc, label: documents[doc].label }))}
             />
-            {/* 两种说明叠在同一格、按长的那条占宽：换标签时这一行不会一会儿折行一会儿不折，原文块的上沿不跳 */}
+            {/* 两种说明叠在同一格、按长的那条占宽：换标签时这一行不会一会儿折行一会儿不折，原文块的上沿不跳。说明是正文，短的那条靠左读，不缩进去 */}
             <span className={styles.headingNote}>
-              <LabelSlot current={current.note} options={[legal.englishOnly, legal.chinesePrevails]} />
+              <LabelSlot current={current.note} options={[legal.englishOnly, legal.chinesePrevails]} align="start" />
             </span>
           </div>
           <TabPanel tabsId={tabsId} value={shown} motion="card" className={styles.documentPanel}>

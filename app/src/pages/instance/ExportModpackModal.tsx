@@ -1,13 +1,16 @@
 // 导出整合包：读取此刻的盘面 -> 确认名称、版本号与一起打包的内容 -> 系统保存对话框选位置 -> 入队导出任务。
 // 头图经 AnimatePresence 只在打开时挂载它；它自己只订阅导出预览，实例的名字、状态与锁定原因由头图经 props 给出，
 // 任务进度一概不订阅。每次打开都重新读取，不用上次的结果。
+//
+// 弹窗面板随内容形变（读取态换成表单、展开清单、跳过说明出没）只在渲染 Modal 的这一层重渲染时才接得住，
+// 所以会改变布局的状态（读取的加载门、清单展开）都放在这一层，不放进表单自己的 state。
 
-import { motion } from "framer-motion";
 import { useState } from "react";
 import { Spinner } from "../../art/Spinner";
 import { ACTION_ERROR, LOADER_NAME } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
-import { tabPanel } from "../../lib/motion";
+import { useLoadingGate } from "../../lib/loading-gate";
+import { useReflow } from "../../lib/reflow";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorRecord } from "../../state/errors";
@@ -20,12 +23,14 @@ import {
   type ModpackExportOptions,
   type ModpackExportPreviewDto,
 } from "../../state/queries/instance";
+import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Checkbox } from "../../ui/Checkbox";
 import { Field } from "../../ui/Field";
 import { Inset } from "../../ui/Inset";
 import { KV } from "../../ui/KV";
+import { Loadable } from "../../ui/Loadable";
 import { Modal } from "../../ui/Modal";
 import { SectionTitle } from "../../ui/SectionTitle";
 import { Textarea } from "../../ui/Textarea";
@@ -115,26 +120,29 @@ export function ExportModpackModal({ inst, lockReason, savesReason, onClose }: E
   const run = useRunner();
   const actions = useLauncherActions();
   const preview = useModpackExportPreview(inst.id);
+  // 读取很快回来时不出转圈；转圈一旦出现至少停留一会儿，表单等它收起再换上
+  const gate = useLoadingGate(preview.status === "loading");
   const [draft, setDraft] = useState<Draft | null>(null);
   const [picking, setPicking] = useState(false);
+  const [listOpen, setListOpen] = useState(false);
   // 第一次读到盘面时按它的默认值起草；读取失败后重试成功也从这里起草
   if (draft === null && preview.status === "ready") setDraft(initialDraft(preview.data));
 
   const loader = inst.loader === "vanilla" ? null : inst.loaderVersion === null ? LOADER_NAME[inst.loader] : `${LOADER_NAME[inst.loader]} ${inst.loaderVersion}`;
-  const cancel = (
-    <Button variant="ghost" onClick={onClose}>
-      {EXPORT_COPY.cancel}
-    </Button>
-  );
 
-  const confirming = preview.status === "ready" && draft !== null;
+  const settled = gate.view === "content";
+  const confirming = settled && preview.status === "ready" && draft !== null;
+  // 主按钮常驻：读取中、读取失败时带原因禁用，读到后原位变成可用；不在读到时才插进底栏，把「取消」挤开
   const submitReason = !confirming
-    ? undefined
+    ? settled && preview.status === "error"
+      ? errorRecord(preview.error).message
+      : EXPORT_COPY.reading
     : draft.name.trim() === ""
       ? EXPORT_COPY.needName
       : draft.version.trim() === ""
         ? EXPORT_COPY.needVersion
         : lockReason;
+  const skipped = confirming ? skippedCount(preview.data, effectiveExtras(draft.extras, savesReason), carriesDisabled(preview.data, draft)) : 0;
 
   const submit = async () => {
     if (!confirming) throw new Error("没读到导出预览时不能导出");
@@ -156,42 +164,59 @@ export function ExportModpackModal({ inst, lockReason, savesReason, onClose }: E
     await run(() => actions.exportModpack(inst.id, options), ACTION_ERROR.exportModpack);
   };
 
-  const footer = confirming ? (
+  const footer = (
     <>
-      {cancel}
+      <Button variant="ghost" onClick={onClose}>
+        {EXPORT_COPY.cancel}
+      </Button>
       <Button variant="primary" icon="modpack" loading={picking} disabledReason={submitReason} onClick={() => void submit()}>
         {EXPORT_COPY.submit}
       </Button>
     </>
-  ) : (
-    cancel
   );
 
-  const phase = preview.status === "error" ? "failed" : confirming ? "confirm" : "reading";
+  // 名称、版本号、简介逐字输入时这一层每次都重渲染：面板只在会改变布局的状态变了时才量尺寸、形变
+  const layoutKey = `${gate.view}:${preview.status}:${listOpen ? "list" : ""}:${skipped > 0 ? "skipped" : ""}`;
   return (
-    <Modal open onClose={onClose} title={EXPORT_COPY.title} icon="modpack" subtitle={EXPORT_COPY.subtitle(inst.name, inst.mcVersion, loader)} size="md" footer={footer}>
-      <motion.div key={phase} variants={tabPanel} initial="hidden" animate="show">
-        {phase === "failed" && preview.status === "error" ? (
-          <Callout
-            tone="danger"
-            announce
-            action={
-              <Button variant="ghost" size="sm" onClick={preview.reload}>
-                {EXPORT_COPY.retry}
-              </Button>
-            }
-          >
-            {errorRecord(preview.error).message}
-          </Callout>
-        ) : confirming ? (
-          <ExportForm preview={preview.data} draft={draft} savesReason={savesReason} onDraft={setDraft} />
-        ) : (
-          <div className={styles.reading} aria-busy="true">
-            <Spinner size={24} />
+    <Modal
+      open
+      onClose={onClose}
+      title={EXPORT_COPY.title}
+      icon="modpack"
+      subtitle={EXPORT_COPY.subtitle(inst.name, inst.mcVersion, loader)}
+      size="md"
+      footer={footer}
+      layoutKey={layoutKey}
+    >
+      <Loadable
+        view={gate.view}
+        skeleton={
+          <div className={styles.reading}>
+            <Spinner size={24} decorative />
             <span>{EXPORT_COPY.reading}</span>
           </div>
-        )}
-      </motion.div>
+        }
+      >
+        {() => {
+          if (preview.status === "error") {
+            return (
+              <Callout
+                tone="danger"
+                announce
+                action={
+                  <Button variant="ghost" size="sm" onClick={preview.reload}>
+                    {EXPORT_COPY.retry}
+                  </Button>
+                }
+              >
+                {errorRecord(preview.error).message}
+              </Callout>
+            );
+          }
+          if (preview.status !== "ready" || draft === null) throw new Error("导出预览已经读到，却没有按它起草");
+          return <ExportForm preview={preview.data} draft={draft} savesReason={savesReason} skipped={skipped} listOpen={listOpen} onListOpen={setListOpen} onDraft={setDraft} />;
+        }}
+      </Loadable>
     </Modal>
   );
 }
@@ -200,16 +225,21 @@ interface ExportFormProps {
   preview: ModpackExportPreviewDto;
   draft: Draft;
   savesReason: string | undefined;
+  /** 这次会跳过的文件数（见 skippedCount）。 */
+  skipped: number;
+  /** 不在 Modrinth 上的 Mod 清单是否展开。 */
+  listOpen: boolean;
+  onListOpen(open: boolean): void;
   onDraft(next: Draft): void;
 }
 
-function ExportForm({ preview, draft, savesReason, onDraft }: ExportFormProps) {
+function ExportForm({ preview, draft, savesReason, skipped, listOpen, onListOpen, onDraft }: ExportFormProps) {
   const { tier } = useShell();
   const compact = tier === "compact";
-  const [listOpen, setListOpen] = useState(false);
+  // 清单展开、跳过说明出没时，排在后面的块从原位置滑过去
+  const reflow = useReflow<HTMLDivElement>();
   const extras = effectiveExtras(draft.extras, savesReason);
   const totals = bundledTotals(preview, { extras, includeDisabled: draft.includeDisabled });
-  const skipped = skippedCount(preview, extras, carriesDisabled(preview, draft));
 
   const toggleExtra = (extra: ExportExtra, on: boolean) => {
     const next = new Set(draft.extras);
@@ -219,7 +249,7 @@ function ExportForm({ preview, draft, savesReason, onDraft }: ExportFormProps) {
   };
 
   return (
-    <div className={styles.form}>
+    <div ref={reflow} className={styles.form}>
       <div className={styles.basics} data-compact={compact ? "" : undefined}>
         <Field label={EXPORT_COPY.nameLabel}>
           <TextInput value={draft.name} onChange={(name) => onDraft({ ...draft, name })} size="md" maxLength={NAME_MAX} data-autofocus="" />
@@ -289,25 +319,27 @@ function ExportForm({ preview, draft, savesReason, onDraft }: ExportFormProps) {
           <Callout
             tone="warn"
             action={
-              <Button variant="ghost" size="sm" aria-expanded={listOpen} onClick={() => setListOpen((v) => !v)}>
+              <Button variant="ghost" size="sm" aria-expanded={listOpen} onClick={() => onListOpen(!listOpen)}>
                 {listOpen ? EXPORT_COPY.hideList : EXPORT_COPY.showList}
               </Button>
             }
           >
             {EXPORT_COPY.unlisted(preview.bundled.length)}
           </Callout>
-          {listOpen && (
-            <ul className={styles.unlistedList} aria-label={EXPORT_COPY.unlistedListLabel}>
-              {preview.bundled.map((mod) => (
-                <li key={mod.path} title={mod.file_name}>
-                  {mod.file_name}
-                </li>
-              ))}
-            </ul>
-          )}
+          <Appear>
+            {listOpen && (
+              <ul key="unlisted" className={styles.unlistedList} aria-label={EXPORT_COPY.unlistedListLabel}>
+                {preview.bundled.map((mod) => (
+                  <li key={mod.path} title={mod.file_name}>
+                    {mod.file_name}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Appear>
         </div>
       )}
-      {skipped > 0 && <Callout tone="info">{EXPORT_COPY.skipped(skipped)}</Callout>}
+      <Appear>{skipped > 0 && <Callout key="skipped" tone="info">{EXPORT_COPY.skipped(skipped)}</Callout>}</Appear>
     </div>
   );
 }

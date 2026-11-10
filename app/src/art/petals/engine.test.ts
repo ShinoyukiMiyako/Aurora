@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ambientFade, tweenAt } from "../../lib/motion";
+import { ambientFade, springAt, tweenAt } from "../../lib/motion";
 import { setRect } from "../../test/dom";
 import { PetalEngine, STILL_RESIZE_DEBOUNCE_MS, currentPetalStats, effectiveDpr, type PetalDowngrade, type PetalInputs } from "./engine";
-import { createRandom } from "./sim";
+import { EDGE_ON, LAYERS, STILL_SCALE_MIN, createRandom } from "./sim";
 import { manualFrames, stubCanvas, stubPetalTokens, type FakeContext, type ManualFrames } from "./test-canvas";
 
 const SEED = 20231;
@@ -65,6 +65,16 @@ function lastFrame(r: Rig) {
   const all = r.ctx().frames();
   return all[all.length - 1];
 }
+
+type Draw = ReturnType<typeof lastFrame>["draws"][number];
+
+/** 按层的满不透明度画的（定格留下的），区别于正在淡入的补投花瓣。 */
+const solid = (d: Draw) => d.alpha === 0.4 || d.alpha === 0.65 || d.alpha === 0.9;
+const pose = (d: Draw) => d.transform.map((v) => v.toFixed(6)).join(",");
+/** 只看位置与自转角：变换的后四项是 −sin、cos 与平移，不含翻面缩放。 */
+const place = (d: Draw) => d.transform.slice(2).map((v) => v.toFixed(6)).join(",");
+/** 绘制变换 [cos·sx, sin·sx, −sin, cos, x, y] 的行列式就是带符号的翻面缩放 sx。 */
+const sxOf = (d: Draw) => d.transform[0] * d.transform[3] - d.transform[1] * d.transform[2];
 
 beforeEach(() => {
   canvases = stubCanvas();
@@ -496,8 +506,6 @@ describe("自动降级", () => {
     // 10000 这一拍先照常飘落着画了一帧，降级后立即补画定格的静态散落
     const moving = all[all.length - 2].draws;
     const frozen = all[all.length - 1];
-    const solid = (d: { alpha: number }) => d.alpha === 0.4 || d.alpha === 0.65 || d.alpha === 0.9;
-    const pose = (d: { transform: number[] }) => d.transform.map((v) => v.toFixed(6)).join(",");
     const kept = frozen.draws.filter(solid);
     const added = frozen.draws.filter((d) => !solid(d));
     expect(kept.length).toBeGreaterThan(6);
@@ -515,14 +523,72 @@ describe("自动降级", () => {
     const arriving = mid.draws.filter((d) => !solid(d));
     expect(arriving.map(pose)).toEqual(added.map(pose));
     for (const d of arriving) expect([0.4 * k, 0.65 * k, 0.9 * k].some((a) => Math.abs(a - d.alpha) < 1e-9)).toBe(true);
-    expect(mid.draws.filter(solid).map(pose)).toEqual(kept.map(pose));
+    // 位置与自转角原地不动；翻面够宽的连姿态都不变（窄的那几片在转向，见下一条）
+    expect(mid.draws.filter(solid).map(place)).toEqual(kept.map(place));
+    const wide = kept.filter((d) => Math.abs(sxOf(d)) >= STILL_SCALE_MIN).map(pose);
+    expect(wide.length).toBeGreaterThan(0);
+    expect(mid.draws.filter(solid).map(pose)).toEqual(expect.arrayContaining(wide));
 
     r.frames.run(10_016 + 480);
     expect(r.frames.pending()).toBe(0);
     const done = lastFrame(r);
     expect(done.alphas).toEqual([0.4, 0.65, 0.9]);
     expect(done.draws).toHaveLength(26);
-    expect(done.draws.map(pose).sort()).toEqual([...kept, ...added].map(pose).sort());
+    expect(done.draws.map(place).sort()).toEqual([...kept, ...added].map(place).sort());
+  });
+
+  it("二级降级时比静态散落下限窄的花瓣：定格那一帧不跳，随后沿 settle 弹簧转到下限，正负号不变", () => {
+    const r = rig({ tier: "wide" });
+    r.engine.measure();
+    runFrames(r.frames, 1000, 10_000, 40);
+    const frozen = lastFrame(r).draws.filter(solid);
+    const narrow = frozen.filter((d) => Math.abs(sxOf(d)) < STILL_SCALE_MIN);
+    // 翻面相位均匀分布，26 片里总有几片正侧着身
+    expect(narrow.length).toBeGreaterThan(0);
+    const at = (draws: Draw[], d: Draw) => {
+      const found = draws.find((e) => place(e) === place(d));
+      if (found === undefined) throw new Error("这一帧里找不到定格的那片花瓣");
+      return found;
+    };
+
+    const target = (d: Draw) => Math.sign(sxOf(d)) * STILL_SCALE_MIN;
+    // 离下限还远的几片：一拍之内翻面速度再大也转不到（不是一步跳过去的）
+    const far = narrow.filter((d) => Math.abs(sxOf(d) - target(d)) >= 0.05);
+    expect(far.length).toBeGreaterThan(0);
+
+    // 收尾的第一帧取起点，仍是定格姿态；再过一拍已经在转、还没到；半程时已基本落定（不是憋到最后才跳）
+    r.frames.run(10_016);
+    for (const d of narrow) expect(sxOf(at(lastFrame(r).draws, d))).toBeCloseTo(sxOf(d), 12);
+    r.frames.run(10_032);
+    for (const d of far) expect(Math.abs(sxOf(at(lastFrame(r).draws, d)) - target(d))).toBeGreaterThan(1e-3);
+    r.frames.run(10_016 + 240);
+    for (const d of narrow) expect(Math.abs(sxOf(at(lastFrame(r).draws, d)) - target(d))).toBeLessThan(0.01);
+
+    r.frames.run(10_016 + 480);
+    expect(r.frames.pending()).toBe(0);
+    const done = lastFrame(r).draws;
+    for (const d of done) expect(Math.abs(sxOf(d))).toBeGreaterThanOrEqual(STILL_SCALE_MIN - 1e-9);
+    for (const d of narrow) expect(sxOf(at(done, d))).toBeCloseTo(Math.sign(sxOf(d)) * STILL_SCALE_MIN, 12);
+  });
+
+  it("收尾在淡入的时长里播完：最窄、翻得最快的花瓣转到下限时 settle 弹簧也已落定，最后一帧不跳", () => {
+    const fastest = Math.max(...LAYERS.map((l) => l.flipW[1]));
+    for (const v0 of [fastest, -fastest]) expect(Math.abs(springAt("settle", EDGE_ON - STILL_SCALE_MIN, v0, ambientFade.in.duration).x)).toBeLessThan(1e-3);
+  });
+
+  it("收尾途中打开减少动画：补投的淡入与窄花瓣的转向直接到位，不留帧回调", () => {
+    const r = rig({ tier: "wide" });
+    r.engine.measure();
+    runFrames(r.frames, 1000, 10_000, 40);
+    r.frames.run(10_016);
+    r.frames.run(10_032);
+    expect(r.frames.pending()).toBe(1);
+    r.engine.update({ ...BASE, tier: "wide", reduced: true });
+    expect(r.frames.pending()).toBe(0);
+    const done = lastFrame(r);
+    expect(done.alphas).toEqual([0.4, 0.65, 0.9]);
+    expect(done.draws).toHaveLength(26);
+    for (const d of done.draws) expect(Math.abs(sxOf(d))).toBeGreaterThanOrEqual(STILL_SCALE_MIN - 1e-9);
   });
 
   it("补投的花瓣淡入中暂停或销毁：直接到位，不留帧回调", () => {

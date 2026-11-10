@@ -5,9 +5,9 @@ import { fileURLToPath } from "node:url";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { keydown, render, waitForFrames, type Rendered } from "../test/dom";
+import { keydown, render, setRect, waitForFrames, type Rendered } from "../test/dom";
 import { IconButton } from "./IconButton";
-import { List, ListRow, ROW_MOTION_LIMIT } from "./ListRow";
+import { appendsOnly, EVERY_ROW, List, ListRow, ROW_MOTION_LIMIT, ROW_WINDOW_MARGIN, rowsInWindow, rowWindow } from "./ListRow";
 
 let view: Rendered | undefined;
 afterEach(() => {
@@ -269,19 +269,36 @@ describe("行的增删", () => {
     ]);
   });
 
-  it(`一次新增超过 ${ROW_MOTION_LIMIT} 行：行不逐个入场，整个列表淡入一次；不超过时照常逐行入场`, async () => {
-    const batch = (prefix: string, count: number): Item[] => Array.from({ length: count }, (_, i) => ({ id: `${prefix}${i}`, name: `${prefix}${i}` }));
+  const batch = (prefix: string, count: number): Item[] => Array.from({ length: count }, (_, i) => ({ id: `${prefix}${i}`, name: `${prefix}${i}` }));
+  const liveItems = () => items().filter((li) => !li.hasAttribute("inert"));
+
+  it(`换了一批、一次来了超过 ${ROW_MOTION_LIMIT} 行：行不逐个入场，整个列表淡入一次；之后不超过时照常逐行入场`, async () => {
     const many = batch("多", ROW_MOTION_LIMIT + 1);
     const more = batch("再", ROW_MOTION_LIMIT);
+    mount(<Changing initial={ITEMS} />);
+    const list = document.querySelector("ul") as HTMLElement;
+    act(() => setItems(many));
+    expect(list.style.opacity).toBe("0");
+    expect(liveItems().map((li) => li.style.opacity)).toEqual(Array(many.length).fill("1"));
+    await waitForFrames(() => expect(list.style.opacity).toBe("1"));
+    act(() => setItems([...many, ...more]));
+    expect(list.style.opacity).toBe("1");
+    expect(liveItems().map((li) => li.style.opacity)).toEqual([...Array(many.length).fill("1"), ...Array(more.length).fill("0")]);
+  });
+
+  it(`在末尾一次追加超过 ${ROW_MOTION_LIMIT} 行：已有的行不跟着淡入，新行里只有可见范围附近的播入场`, () => {
+    const many = batch("多", ROW_MOTION_LIMIT + 1);
     mount(<Changing initial={ITEMS.slice(0, 1)} />);
     const list = document.querySelector("ul") as HTMLElement;
+    // 一行 56 高、列表顶在视口最上沿：768 高的视口里露出第 0 到 13 行，再多留 4 行，第 0 到 17 行算在范围内
+    expect(window.innerHeight).toBe(768);
+    setRect(list, { left: 0, top: 0, width: 320, height: 56 });
     act(() => setItems([ITEMS[0], ...many]));
-    expect(list.style.opacity).toBe("0");
-    expect(items().map((li) => li.style.opacity)).toEqual(Array(1 + many.length).fill("1"));
-    await waitForFrames(() => expect(list.style.opacity).toBe("1"));
-    act(() => setItems([ITEMS[0], ...many, ...more]));
-    expect(list.style.opacity).toBe("1");
-    expect(items().map((li) => li.style.opacity)).toEqual([...Array(1 + many.length).fill("1"), ...Array(more.length).fill("0")]);
+    expect(list.style.opacity).not.toBe("0");
+    const opacities = items().map((li) => li.style.opacity);
+    expect(opacities[0]).toBe("1");
+    expect(opacities.slice(1, 18)).toEqual(Array(17).fill("0"));
+    expect(opacities.slice(18)).toEqual(Array(many.length - 17).fill("1"));
   });
 
   it("移除一行：它留在原处淡出，这段时间不可交互，放完后才离开文档", async () => {
@@ -352,6 +369,41 @@ describe("行的增删", () => {
   it("直接放文字是装配错误", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     expect(() => mount(<List>{"孤零零的字"}</List>)).toThrow(/不能直接放文字/);
+  });
+});
+
+describe("可见范围（List 与 Table 共用）", () => {
+  it("等距的行里落在可见带之内的行号，上下各多留几行；半行露出来也算", () => {
+    // 第 0 行上沿在 -640、行距 64、可见带 0 到 640：露出来的是第 10 到 19 行
+    expect(rowWindow(-640, 0, 640, 64)).toEqual({ first: 10 - ROW_WINDOW_MARGIN, last: 19 + ROW_WINDOW_MARGIN });
+    // 往回 40：第 9 行露出下半截
+    expect(rowWindow(-600, 0, 640, 64)).toEqual({ first: 9 - ROW_WINDOW_MARGIN, last: 19 + ROW_WINDOW_MARGIN });
+    // 整块在可见带下方远处：范围里没有行号不小于 0 的行
+    expect(rowWindow(2000, 0, 640, 64).last).toBeLessThan(0);
+    expect(() => rowWindow(0, 0, 640, 0)).toThrow(/行距/);
+  });
+
+  it("只在末尾追加：上一次的行都在、原样排在最前面；首次填充、插在中间、删行都不算", () => {
+    expect(appendsOnly(["a", "b"], ["a", "b", "c"])).toBe(true);
+    expect(appendsOnly(["a", "b"], ["x", "a", "b"])).toBe(false);
+    expect(appendsOnly(["a", "b"], ["a", "x", "b"])).toBe(false);
+    expect(appendsOnly(["a", "b"], ["a", "b"])).toBe(false);
+    expect(appendsOnly(["a", "b"], ["a"])).toBe(false);
+    expect(appendsOnly([], ["a"])).toBe(false);
+  });
+
+  it("要逐行动画的行：新行看新位置，被挤动的行看旧位置或新位置，落在范围内才算", () => {
+    const keys = Array.from({ length: 30 }, (_, i) => `k${i}`);
+    const range = { first: 5, last: 12 };
+    // 删掉第 0 行：k5 到 k13 的旧位置或新位置在 5 到 12 之内
+    const removed = rowsInWindow(keys, keys.slice(1), range);
+    expect([...removed.moving]).toEqual(keys.slice(5, 14));
+    expect(removed.entering.size).toBe(0);
+    // 新行一个插在第 6 位、一个插在第 26 位：只有前一个在范围内
+    const inserted = rowsInWindow(keys, [...keys.slice(0, 6), "near", ...keys.slice(6, 25), "far", ...keys.slice(25)], range);
+    expect([...inserted.entering]).toEqual(["near"]);
+    // 没有布局可量时按每一行都在范围内
+    expect(rowsInWindow(keys, keys.slice(1), EVERY_ROW).moving.size).toBe(29);
   });
 });
 

@@ -3,12 +3,14 @@
 /* ---------------------------------------------------------------- 聚光卡 */
 
 /*
- * 外框在通用卡片「选中」描边的基础上把圆角放大一档、外圈加宽到 4、叠强调光晕。
+ * 外框在通用卡片「选中」描边的基础上把圆角放大一档、外圈加宽到 4、叠强调光晕。外圈由卡片的选中叠层画，
+ * 这里只给宽度，阴影里不再另画一圈（两层半透明叠在一起会深一倍）。
  * 选择器带上卡片自己的属性，特异性高于卡片样式表里的选中规则（含悬停），不依赖样式表的加载顺序。
  */
 .spot[data-selected][data-pad][data-clip] {
+  --card-ring-width: var(--sk-space-4);
   border-radius: var(--sk-r-xl);
-  box-shadow: 0 0 0 calc(var(--sk-space-4)) var(--sk-accent-soft), var(--sk-accent-glow), var(--sk-shadow-sm);
+  box-shadow: var(--sk-accent-glow), var(--sk-shadow-sm);
 }
 
 .spotGrid {
@@ -98,7 +100,14 @@
   user-select: text;
 }
 
+/*
+ * 信息区比舞台高，聚光卡的高度跟着它走。「上次验证」只有验证过的凭据账户才有，键值表按最多的三行留位：
+ * 在离线与凭据账户之间切换、凭据账户首次验证成功时，聚光卡不变高，下方的账户网格也不被推动。
+ * 行高与行距照 KV 自己的（每行一行小号字、行距 8）。
+ */
 .spotKv {
+  align-content: start;
+  min-height: calc(3 * var(--sk-lh-small) + 2 * var(--sk-space-8));
   margin-top: var(--sk-space-2);
 }
 
@@ -207,7 +216,12 @@
   min-width: 0;
 }
 
+/*
+ * 定位元素：被删的卡淡出时按它在网格里的偏移脱离布局、叠在原处，偏移量与绝对定位要以同一个祖先为基准，
+ * 不能落到页面入场期间带着位移的外层上。
+ */
 .grid {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: var(--sk-gap);
@@ -217,12 +231,39 @@
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
 }
 
+/* 增删动画包在每张卡外面的那一层：它才是网格的格子，卡片照旧撑满格子，同一行等高 */
+.cell {
+  display: grid;
+  min-width: 0;
+}
+
+/*
+ * 切换账户时选中描边与外圈（卡片的选中叠层）一起淡入淡出；这里的 transition 盖掉了卡片自己的，描边色要补上。
+ * 悬停上浮 2px，阴影放在 ::after 叠层上淡入，给上浮一个深度，不对 box-shadow 本身做过渡。
+ */
 .accountCard {
-  transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
+  transition:
+    translate var(--sk-spring-settle-dur) var(--sk-spring-settle),
+    border-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.accountCard::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  box-shadow: var(--sk-shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
 }
 
 .accountCard:hover {
   translate: 0 -2px;
+}
+
+.accountCard:hover::after {
+  opacity: 1;
 }
 
 .cardBody {
@@ -253,12 +294,40 @@
   color: var(--sk-text-2);
 }
 
+/*
+ * 底部三种形态（使用中的标签、失效标签加重新登录、切换按钮）一律按小号按钮高 30 留位，同一行的卡等高，
+ * 换形态时卡片不变高。定位元素：换下来的那一行脱离布局后以这里为基准叠在原处淡出。
+ */
 .cardFoot {
+  position: relative;
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+  min-height: 30px;
+  margin-top: var(--sk-space-8);
+}
+
+/* 一行放下标签与按钮，不折行：最窄的卡里放不下时由「需要重新登录」标签省略收缩 */
+.footRow {
+  display: flex;
+  flex: 1 1 auto;
   align-items: center;
   gap: var(--sk-space-8);
-  margin-top: var(--sk-space-8);
+  min-width: 0;
+}
+
+.footButton {
+  flex: none;
+}
+
+.footRow > .footTag {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.footTagText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---------------------------------------------------------------- 添加卡 */
@@ -331,10 +400,24 @@
   user-select: text;
 }
 
-.loading {
+/* 页头与横幅之下的正文：聚光卡（或空状态、错误卡）与「全部账户」分区。骨架是同一副栈，区块间距同页面 */
+.body {
   display: flex;
   flex-direction: column;
   gap: var(--sk-page-gap);
+  min-width: 0;
+}
+
+/* 骨架里的 UUID 胶囊：与真胶囊一样靠左、不超出信息区 */
+.uuidBone {
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+/* 骨架里「全部账户」那一行：字号与行高照分区标题，文字骨架随之一行高 */
+.sectionBone {
+  font-size: var(--sk-fs-section);
+  line-height: var(--sk-lh-section);
 }
 
 .slowHint {
@@ -344,11 +427,14 @@
   color: var(--sk-text-2);
 }
 
-/* ---------------------------------------------------------------- 减少动画：没有悬停位移 */
+/* ---------------------------------------------------------------- 减少动画：没有悬停位移，描边色与阴影叠层照常淡入淡出 */
 
-:global([data-sk-reduced]) .figure,
-:global([data-sk-reduced]) .accountCard {
+:global([data-sk-reduced]) .figure {
   transition: none;
+}
+
+:global([data-sk-reduced]) .accountCard {
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
 }
 
 :global([data-sk-reduced]) .spot:hover .figure,

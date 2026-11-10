@@ -70,7 +70,7 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
   // 按片订阅：外壳根只随「是否首次启动」变，下载进度与游戏日志不让整棵树跟着重渲染
   const firstRunKnown = useLauncherSelector((s) => s.status.firstRun.kind !== "loading");
   const firstRun = useLauncherSelector(onboardingActive);
-  const { bindRoot, bindPageScroll, fileDropHint } = useShell();
+  const { bindRoot, bindPageScroll, bindChrome, fileDropHint } = useShell();
   const { appearance, reduced } = useAppearance();
   const run = useRunner();
   const actions = useLauncherActions();
@@ -118,6 +118,11 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
       focusContent: () => content().focus({ preventScroll: true }),
     };
   }, [reduced]);
+  // 全局快捷键的目标就是当前页时，外壳核心也要滚回顶部；同一份实现，减少动画的取舍不分两处写
+  useEffect(() => {
+    bindChrome(chrome);
+    return () => bindChrome(null);
+  }, [bindChrome, chrome]);
 
   return (
     <ChromeProvider value={chrome}>
@@ -280,7 +285,7 @@ function OnboardingFrame({ Flow }: { Flow: ComponentType<FlowProps<"onboarding">
 
 function LoginMount({ Flow }: { Flow: ComponentType<FlowProps<"login">> }) {
   const login = useLauncherSelector((s) => s.login);
-  return <AnimatePresence>{login !== null && <Flow key={login.kind} login={login} />}</AnimatePresence>;
+  return <AnimatePresence>{login !== null && <Flow key="login" login={login} />}</AnimatePresence>;
 }
 
 function CreateInstanceMount({ Flow }: { Flow: ComponentType<FlowProps<"create-instance">> | null }) {

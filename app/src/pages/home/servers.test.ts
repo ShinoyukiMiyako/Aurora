@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 import type { KnownServerDto, ServerStatusDto } from "../../state/queries/home";
 import { MENU_MAX_ACTIONS } from "../../ui/Menu";
-import { canJoinWith, defaultJoinChoice, joinBlock, joinCandidates, joinPlan, pinCandidates, pinMenuPlan, rememberedGone, serverRows, signalBars, signalQuality } from "./servers";
+import {
+  canJoinWith,
+  defaultJoinChoice,
+  joinBlock,
+  joinCandidates,
+  joinPlan,
+  pinCandidates,
+  pinMenuPlan,
+  rememberedGone,
+  serverRows,
+  shownProbeError,
+  signalBars,
+  signalQuality,
+} from "./servers";
 import { summary } from "./test-data";
 
 function status(address: string, overrides: Partial<ServerStatusDto> = {}): ServerStatusDto {
@@ -47,6 +60,7 @@ describe("服务器行", () => {
         status("play.example", { latency_ms: 186 }),
       ],
       "live",
+      true,
     );
     expect(rows.map((r) => r.name)).toEqual(["晨星", "小镇", "新加的"]);
     // 记住的实例原样带到行上，「加入」据此决定直接启动还是弹实例选择
@@ -57,10 +71,15 @@ describe("服务器行", () => {
     expect(rows[1].population).toEqual({ kind: "last-seen", at: 500, online: 9 });
     expect(rows[2].signal).toEqual({ kind: "pending" });
     expect(rows[2].population).toEqual({ kind: "none" });
+    // 只有还没有任何结果的那一台在等版本、MOTD 与在线人数
+    expect(rows.map((r) => r.awaiting)).toEqual([false, false, true]);
   });
 
-  it("状态还没回来时全部测速中", () => {
-    expect(serverRows(pinned, undefined, "live").map((r) => r.signal.kind)).toEqual(["pending", "pending", "pending"]);
+  it("状态还没回来时全部测速中；首测在路上时每台都在等结果，测速失败了就不再等", () => {
+    const rows = serverRows(pinned, undefined, "live", true);
+    expect(rows.map((r) => r.signal.kind)).toEqual(["pending", "pending", "pending"]);
+    expect(rows.map((r) => r.awaiting)).toEqual([true, true, true]);
+    expect(serverRows(pinned, undefined, "live", false).map((r) => r.awaiting)).toEqual([false, false, false]);
   });
 
   // 单台测速分不出本机断网与服务器宕机：本机离线时一律不下结论，不把每台都标成连不上
@@ -69,13 +88,16 @@ describe("服务器行", () => {
       status("town.example:25570", { reachable: false, latency_ms: null, online: null, max: null, last_seen_at: 500, last_online: 9 }),
       status("play.example", { latency_ms: 38 }),
     ];
-    const rows = serverRows(pinned, statuses, "paused");
+    const rows = serverRows(pinned, statuses, "paused", false);
     expect(rows.map((r) => r.signal)).toEqual([{ kind: "paused" }, { kind: "paused" }, { kind: "paused" }]);
     expect(rows.map((r) => r.population)).toEqual([{ kind: "online", online: 25_000, max: 200_000 }, { kind: "last-seen", at: 500, online: 9 }, { kind: "none" }]);
     expect(rows[0].versionName).toBe("Paper 1.21.4");
-    expect(serverRows(pinned, undefined, "paused").map((r) => r.signal.kind)).toEqual(["paused", "paused", "paused"]);
+    expect(serverRows(pinned, undefined, "paused", false).map((r) => r.signal.kind)).toEqual(["paused", "paused", "paused"]);
+    // 暂停的是周期重测：没在测时等不来结果；断网时进主页照样会测，那一次回来的结果照样显示人数，在路上时照样留位置
+    expect(rows.map((r) => r.awaiting)).toEqual([false, false, false]);
+    expect(serverRows(pinned, undefined, "paused", true).map((r) => r.awaiting)).toEqual([true, true, true]);
     // 恢复联网后同一份结果照常判定
-    expect(serverRows(pinned, statuses, "live").map((r) => r.signal.kind)).toEqual(["online", "unreachable", "pending"]);
+    expect(serverRows(pinned, statuses, "live", false).map((r) => r.signal.kind)).toEqual(["online", "unreachable", "pending"]);
   });
 
   it("恢复联网、手里的结果是断网期间测的：重测回来之前每台都是测速中，在线人数与上次在线照旧取手里的结果", () => {
@@ -83,10 +105,12 @@ describe("服务器行", () => {
       status("town.example:25570", { reachable: false, latency_ms: null, online: null, max: null, last_seen_at: 500, last_online: 9 }),
       status("play.example", { reachable: false, latency_ms: null, online: null, max: null, last_seen_at: 400, last_online: 120 }),
     ];
-    const rows = serverRows(pinned, statuses, "retesting");
+    const rows = serverRows(pinned, statuses, "retesting", true);
     expect(rows.map((r) => r.signal)).toEqual([{ kind: "pending" }, { kind: "pending" }, { kind: "pending" }]);
     expect(rows.map((r) => r.population)).toEqual([{ kind: "last-seen", at: 400, online: 120 }, { kind: "last-seen", at: 500, online: 9 }, { kind: "none" }]);
     expect(rows[0].versionName).toBe("Paper 1.21.4");
+    // 手里有断网期间的结果就照常显示它们，不再留空等；只有从没测过的那台在等
+    expect(rows.map((r) => r.awaiting)).toEqual([false, false, true]);
   });
 
   it("连不上且从没连通过、或连通但没报人数时不写在线人数", () => {
@@ -94,14 +118,36 @@ describe("服务器行", () => {
       pinned.slice(0, 2),
       [status("play.example", { online: null, max: null }), status("town.example:25570", { reachable: false, latency_ms: null, last_seen_at: null, last_online: null })],
       "live",
+      false,
     );
     expect(rows.map((r) => r.population.kind)).toEqual(["none", "none"]);
   });
 
   it("标为连通却没有延迟是契约破坏，直接抛错；离线与重测时也照样检查", () => {
-    expect(() => serverRows(pinned.slice(0, 1), [status("play.example", { latency_ms: null })], "live")).toThrow("没有延迟");
-    expect(() => serverRows(pinned.slice(0, 1), [status("play.example", { latency_ms: null })], "paused")).toThrow("没有延迟");
-    expect(() => serverRows(pinned.slice(0, 1), [status("play.example", { latency_ms: null })], "retesting")).toThrow("没有延迟");
+    expect(() => serverRows(pinned.slice(0, 1), [status("play.example", { latency_ms: null })], "live", false)).toThrow("没有延迟");
+    expect(() => serverRows(pinned.slice(0, 1), [status("play.example", { latency_ms: null })], "paused", false)).toThrow("没有延迟");
+    expect(() => serverRows(pinned.slice(0, 1), [status("play.example", { latency_ms: null })], "retesting", false)).toThrow("没有延迟");
+  });
+});
+
+describe("整批测速失败的提示", () => {
+  const before = new Error("上一轮：连接被拒绝");
+  const now = new Error("这一轮：地址不合法");
+
+  it("这一轮失败就挂这一轮的原因，换掉上一轮的；成功回来就收起", () => {
+    expect(shownProbeError({ status: "error", error: now, refreshing: false }, null)).toBe(now);
+    expect(shownProbeError({ status: "error", error: now, refreshing: false }, before)).toBe(now);
+    expect(shownProbeError({ status: "ready", error: null, refreshing: false }, before)).toBeNull();
+  });
+
+  it("重测途中沿用上一轮的结论：失败过的不收起，没失败过的也不凭空挂上", () => {
+    // 失败过、手里没有成功的结果：重测时回到加载
+    expect(shownProbeError({ status: "loading", error: null, refreshing: false }, before)).toBe(before);
+    // 失败过、手里还有更早成功的结果：重测时是带旧数据的后台重取
+    expect(shownProbeError({ status: "ready", error: null, refreshing: true }, before)).toBe(before);
+    // 一直正常：每 60 秒的后台重取不挂提示；首测还在路上也不挂
+    expect(shownProbeError({ status: "ready", error: null, refreshing: true }, null)).toBeNull();
+    expect(shownProbeError({ status: "loading", error: null, refreshing: false }, null)).toBeNull();
   });
 });
 

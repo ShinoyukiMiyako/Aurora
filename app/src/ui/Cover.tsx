@@ -94,15 +94,17 @@ export function Cover({ hue, seed, height, remoteUrl = null, texture = null, ide
   const shown: CoverLayer = remote ? "remote" : textured ? "texture" : "art";
 
   // 换形态在渲染期同步记下：新的一层挂上的这一帧，旧的一层就得已经垫在下面。
-  // 只有媒体晚到（形态往上换）才垫；往下换（远程图地址清空、平铺材质没了）直接换，没有可留的旧层
-  const [layers, setLayers] = useState<{ shown: CoverLayer; under: CoverLayer | null }>({ shown, under: null });
+  // 只有媒体晚到（形态往上换）才垫；往下换（远程图地址清空、平铺材质没了）直接换，没有可留的旧层。
+  // 上一层还在淡入时又往上换（材质与远程图前后脚到）：它连同它下面的一起垫着，并且接着淡入，
+  // 不能降成静止的下层，否则淡入动画随 data-reveal 摘掉，半透明的平铺一帧跳成不透明
+  const [layers, setLayers] = useState<{ shown: CoverLayer; under: readonly CoverLayer[] }>({ shown, under: [] });
   let current = layers;
   if (layers.shown !== shown) {
-    current = { shown, under: LAYER_RANK[shown] > LAYER_RANK[layers.shown] ? layers.shown : null };
+    current = { shown, under: LAYER_RANK[shown] > LAYER_RANK[layers.shown] ? [...layers.under, layers.shown] : [] };
     setLayers(current);
   }
   const under = current.under;
-  const settled = () => setLayers((l) => (l.under === null ? l : { ...l, under: null }));
+  const settled = () => setLayers((l) => (l.under.length === 0 ? l : { ...l, under: [] }));
 
   useLayoutEffect(() => {
     if (image.status !== "ready" || width === 0) return;
@@ -121,7 +123,8 @@ export function Cover({ hue, seed, height, remoteUrl = null, texture = null, ide
     return trackParallax(el);
   }, [textured, reduced]);
 
-  const layer = (kind: CoverLayer, top: boolean) => {
+  /** 第 depth 层（0 是最底下）：盖在别的层上的都在淡入；只有最上面那层播完才算换完，一次卸下下面所有层。 */
+  const layer = (kind: CoverLayer, depth: number) => {
     if (kind === "art") {
       return (
         <div key="art" className={styles.art} aria-hidden="true">
@@ -129,13 +132,14 @@ export function Cover({ hue, seed, height, remoteUrl = null, texture = null, ide
         </div>
       );
     }
-    // 只有盖在旧层上的那一层淡入；淡入只认自己的动画，卡内其他动画冒上来的 animationend 不算
-    const reveal = top && under !== null;
-    const onAnimationEnd = reveal
-      ? (event: AnimationEvent<HTMLDivElement>) => {
-          if (event.target === event.currentTarget) settled();
-        }
-      : undefined;
+    // 淡入只认最上面那层自己的动画：中间那层先开始、先播完，卡内其他动画冒上来的 animationend 也不算
+    const reveal = depth > 0;
+    const onAnimationEnd =
+      reveal && depth === under.length
+        ? (event: AnimationEvent<HTMLDivElement>) => {
+            if (event.target === event.currentTarget) settled();
+          }
+        : undefined;
     if (kind === "remote") {
       return (
         <div key="remote" className={styles.media} data-reveal={reveal || undefined} onAnimationEnd={onAnimationEnd} aria-hidden="true">
@@ -160,9 +164,9 @@ export function Cover({ hue, seed, height, remoteUrl = null, texture = null, ide
       data-source={shown}
       data-shade={media && shade !== null ? shade : undefined}
     >
-      {under !== null && layer(under, false)}
-      {layer(shown, true)}
-      {identity !== null && (!remote || under !== null) && (
+      {/* 各层放在同一个带 key 的数组里：往上换时已有的层原地留着，正在播的淡入不因节点重建而重播 */}
+      {[...under, shown].map(layer)}
+      {identity !== null && (!remote || under.length > 0) && (
         <span className={styles.identity} data-leaving={remote || undefined}>
           <InstanceBlock instanceId={identity.instanceId} cover={identity.cover} width={coverIdentityWidth(height)} lift />
         </span>

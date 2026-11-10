@@ -138,6 +138,11 @@ describe("选中滑块与拖动步长", () => {
     expect(declaration(ruleOf(".selBlock"), "border-radius")).toBe(declaration(itemRule, "border-radius"));
   });
 
+  it("挂着 data-instant 的那一次样式计算，滑块的显隐与浅底都不过渡", () => {
+    expect(declaration(ruleFor(".selection[data-instant]"), "transition")).toBe("none");
+    expect(declaration(ruleFor(".selection[data-instant] .selBlock"), "transition")).toBe("none");
+  });
+
   it("滑块不占流也不拦指针：只是一层衬底", () => {
     const selection = ruleOf(".selection");
     expect(declaration(selection, "position")).toBe("absolute");
@@ -163,7 +168,7 @@ describe("固定实例名称提示", () => {
 });
 
 describe("拖动拿起的抬起阴影", () => {
-  const layer = ruleFor(".pin::after");
+  const layer = ruleFor(".pin::before");
   const pinSize = px(declaration(ruleOf(".pin"), "height"));
 
   it("叠层与头像同大同圆角：正好衬在头像外面", () => {
@@ -173,13 +178,39 @@ describe("拖动拿起的抬起阴影", () => {
     expect(declaration(layer, "pointer-events")).toBe("none");
   });
 
-  it("平时透明，拿起时显出；只对透明度做过渡，松手按退场时长淡出", () => {
+  it("叠层是排在头像之前的 ::before、不抬层级：按树序画在头像与状态环底下，不压暗头像外的选中环", () => {
+    expect(/(?:^|\s)z-index:/.test(layer)).toBe(false);
+    expect(/\.pin::after/.test(css)).toBe(false);
+  });
+
+  it("平时透明，拿起时显出；只对透明度做过渡，放下按退场时长淡出", () => {
     expect(declaration(layer, "box-shadow")).toBe("var(--sk-shadow)");
     expect(declaration(layer, "opacity")).toBe("0");
     expect(declaration(layer, "transition")).toBe("opacity var(--sk-dur-out) var(--sk-ease-in)");
-    const lifted = ruleFor(".row[data-dragging] .pin::after");
+    const lifted = ruleFor(".row[data-dragging] .pin::before");
     expect(declaration(lifted, "opacity")).toBe("1");
     expect(declaration(lifted, "transition")).toBe("opacity var(--sk-dur-in) var(--sk-ease-out)");
+  });
+});
+
+describe("拖动放下的缩回", () => {
+  /** 过渡列表逐条拆开；多条时值从下一行写起，declaration 的「冒号加一个空格」认不出。 */
+  const transitions = (rule: string) => {
+    const match = /(?:^|\s)transition:\s+([^;]+);/.exec(rule);
+    if (match === null) throw new Error("规则里没有 transition");
+    return match[1].split(/,\s*/).map((part) => part.trim());
+  };
+  const base = /\n\.item,\r?\n\.pin,\r?\n\.create \{([^}]*)\}/.exec(css)?.[1];
+  if (base === undefined) throw new Error("没有 .item、.pin、.create 共用的规则");
+  const landing = ruleFor(".row[data-landing] .pin");
+
+  it("刚放下的那一项从 1.04 缩回走 pop，与位置飞回同一条弹簧；平常按下松开仍走 tap", () => {
+    expect(transitions(landing).find((t) => t.startsWith("transform "))).toBe("transform var(--sk-spring-pop-dur) var(--sk-spring-pop)");
+    expect(transitions(base).find((t) => t.startsWith("transform "))).toBe("transform var(--sk-spring-tap-dur) var(--sk-spring-tap)");
+  });
+
+  it("放下时只换缩放那一条，悬停的底色与文字色过渡照旧", () => {
+    expect(transitions(landing).filter((t) => !t.startsWith("transform "))).toEqual(transitions(base).filter((t) => !t.startsWith("transform ")));
   });
 });
 
@@ -197,7 +228,7 @@ describe("减少动画", () => {
   });
 
   it("按下主导航、新建与固定实例：减少动画时都不缩", () => {
-    for (const selector of [":global([data-sk-reduced]) .item:active", ":global([data-sk-reduced]) .create:active", ":global([data-sk-reduced]) .row > .pin:active"]) {
+    for (const selector of [":global([data-sk-reduced]) .item:active", ":global([data-sk-reduced]) .create:active", ":global([data-sk-reduced]) .row .pin:active"]) {
       expect(declaration(ruleFor(selector), "transform")).toBe("none");
     }
   });

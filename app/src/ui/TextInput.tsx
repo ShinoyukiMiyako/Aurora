@@ -3,7 +3,7 @@
 // 名称由所在 Field 的标签或 aria-label 提供；回车回调在输入法组字期间不触发（组字时的回车属于输入法）。
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useRef, type InputHTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type Ref } from "react";
+import { useEffect, useRef, type InputHTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type Ref } from "react";
 import { Icon, type IconName } from "../art/Icon";
 import { fade, springs } from "../lib/motion";
 import { cx, isImeComposing } from "../lib/util";
@@ -71,6 +71,12 @@ export function TextInput({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const isInvalid = invalid || (field !== null && field.invalid);
   const showClear = clearable && value !== "" && !disabled && !readOnly;
+  // 挂载时就有内容的清空键跟着所在页面入场，不单独弹入。只在清空键自己身上关掉入场，不用 AnimatePresence 的
+  // initial={false}：那会让清空键里之后才挂载的元素也永远跳过入场
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+  }, []);
 
   const focusInput = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (disabled || event.target === inputRef.current || (event.target as Element).closest("button")) return;
@@ -112,7 +118,7 @@ export function TextInput({
         onKeyDown={handleKeyDown}
       />
       {/* 打出第一个字时弹入、清空时淡出；退场即脱离布局，同时出现的快捷键键帽不会先被挤到右边再跳回来 */}
-      <AnimatePresence initial={false} mode="popLayout">
+      <AnimatePresence mode="popLayout">
         {showClear && (
           <motion.button
             key="clear"
@@ -121,7 +127,7 @@ export function TextInput({
             tabIndex={-1}
             className={styles.clear}
             aria-label={CLEAR_LABEL}
-            initial={{ opacity: 0, scale: 0.8 }}
+            initial={mounted.current ? { opacity: 0, scale: 0.8 } : false}
             animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
             exit={{ opacity: 0, transition: fade.out }}
             onClick={() => {

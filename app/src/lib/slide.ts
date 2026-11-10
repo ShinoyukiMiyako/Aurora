@@ -34,9 +34,37 @@ export function springTrack(name: SpringName, dx: number, vx: number, dy: number
   return { frames, duration: (frames.length - 1) * SAMPLE_MS };
 }
 
+/** 缩放离 1 的偏差与速度（每秒）都落到这以下就算停稳：20 px 的图标上不到 0.02 px。 */
+const REST_SCALE = 0.001;
+const REST_SCALE_PER_S = 0.05;
+
+/**
+ * 缩放从 from 静止出发、沿弹簧回到 1 的整条轨迹，写在独立的 scale 属性上（与 transform 叠加，互不覆盖）。
+ * 取样间隔与时长上限同 springTrack。给不经 framer-motion 的单个元素弹出用（按钮图标位换上来的图标）。
+ */
+export function scaleTrack(name: SpringName, from: number): { frames: Keyframe[]; duration: number } {
+  const frames: Keyframe[] = [];
+  for (let i = 0; ; i++) {
+    const ms = i * SAMPLE_MS;
+    const at = springAt(name, from - 1, 0, ms / 1000);
+    if ((i > 0 && Math.abs(at.x) < REST_SCALE && Math.abs(at.v) < REST_SCALE_PER_S) || ms >= MAX_TRACK_MS) break;
+    frames.push({ scale: String(Math.round((1 + at.x) * 10000) / 10000) });
+  }
+  frames.push({ scale: "1" });
+  return { frames, duration: (frames.length - 1) * SAMPLE_MS };
+}
+
 /** 把采样好的一条轨迹交给 Web Animations 播：整段在合成线程上走，帧之间线性相连。 */
 export function playTrack(el: HTMLElement, track: { frames: Keyframe[]; duration: number }): Animation {
   return el.animate(track.frames, { duration: track.duration, easing: "linear" });
+}
+
+/**
+ * 把 lib/motion 的补间（fade.in、fade.out 这类）交给 Web Animations 播：时长与三次贝塞尔照搬，
+ * 与 framer-motion 播同一个补间时一样。用于透明度这类不需要弹簧的值。
+ */
+export function playTween(el: HTMLElement, frames: Keyframe[], tween: { duration: number; ease: readonly [number, number, number, number] }): Animation {
+  return el.animate(frames, { duration: tween.duration * 1000, easing: `cubic-bezier(${tween.ease.join(", ")})` });
 }
 
 /** 动画已经播了多少秒；还没开始计时的按 0。 */

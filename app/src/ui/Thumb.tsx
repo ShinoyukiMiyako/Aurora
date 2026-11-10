@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, useState, type AnimationEvent } from "react";
 import { coverRect, prepareDisplayCanvas, useDevicePixelRatio } from "../art/illustrations/canvas";
 import { Icon, type IconName } from "../art/Icon";
 import { cssVars, cx } from "../lib/util";
@@ -65,6 +65,19 @@ export function Thumb({ url, kind, hue, size, alt, inactive = false, className }
   const image = useRemoteImage(url, near, Math.ceil(size * dpr * 2));
   const view = url === null || image.status === "failed" ? "fallback" : image.status === "ready" ? "image" : near ? "loading" : "pending";
   const pixel = image.status === "ready" && isPixelArtThumb(image.naturalWidth, image.naturalHeight, size);
+  // 光带离开加载态（图到了或失败）后停在原处淡出，不同帧消失：见过加载态就一直标着，淡完才摘掉，
+  // 循环动画随标记一起移除。没进过加载态的（本来就没有图、视口外）从头到尾没有光带。
+  // 淡出用动画而不用过渡：加载态只停了不到一帧时光带还没算过样式，过渡起不来，也就等不到结束事件
+  const [shimmered, setShimmered] = useState(false);
+  if (view === "loading" && !shimmered) setShimmered(true);
+  const shimmer = view === "loading" ? "run" : shimmered ? "fading" : undefined;
+  const onAnimationEnd =
+    shimmer === "fading"
+      ? (event: AnimationEvent<HTMLSpanElement>) => {
+          // 光带的循环动画不会结束，::before 上结束的只有淡出；图片与图标的淡入在子元素上，不算
+          if (event.target === event.currentTarget && event.pseudoElement === "::before") setShimmered(false);
+        }
+      : undefined;
 
   useLayoutEffect(() => {
     if (image.status !== "ready") return;
@@ -86,6 +99,8 @@ export function Thumb({ url, kind, hue, size, alt, inactive = false, className }
       className={cx(styles.thumb, className)}
       style={{ width: size, height: size, borderRadius: THUMB_RADIUS[size], ...cssVars({ "--hue": hue }) }}
       data-view={view}
+      data-shimmer={shimmer}
+      onAnimationEnd={onAnimationEnd}
       data-inactive={inactive || undefined}
       role={alt === undefined ? undefined : "img"}
       aria-label={alt}

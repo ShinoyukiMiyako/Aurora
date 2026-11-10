@@ -5,7 +5,7 @@
 // 减少动画或降到最低级时根本不启动 rAF，也不监听指针，只在尺寸或外观变化时重画一帧静态散落。
 // 自动降级不是用户操作引起的，换档时画面不能跳：一级裁下的花瓣就地淡出，二级把正在飘的花瓣原地定格。
 
-import { ambientFade, tweenAt } from "../../lib/motion";
+import { ambientFade, springAt, tweenAt } from "../../lib/motion";
 import { PetalGovernor, type GovernorDowngrade } from "./governor";
 import {
   EDGE_ON,
@@ -23,6 +23,7 @@ import {
   scatterStill,
   step,
   type Bounds,
+  type FlipTurn,
   type Petal,
   type PetalLevel,
   type PetalTier,
@@ -52,7 +53,7 @@ export interface PetalDowngrade {
 }
 
 export interface PetalStats {
-  /** 花瓣飘落的 rAF 循环是否在跑（定格后补投花瓣的那一小段淡入不算）。 */
+  /** 花瓣飘落的 rAF 循环是否在跑（定格后补投花瓣淡入、窄花瓣转向的那一小段收尾不算）。 */
   running: boolean;
   level: PetalLevel;
   /** 当前参与绘制的花瓣数。 */
@@ -127,10 +128,12 @@ export class PetalEngine {
   private leaving: { layers: Petal[][]; since: number } | null = null;
   private still: StillPetal[][] | null = null;
   /**
-   * 二级降级定格时补投的静态花瓣：静态散落本不跑帧回调，只在它们淡入的这一小段逐帧重画，淡完就停。
-   * since 在淡入的第一帧取帧时间；alpha 是此刻的淡入进度。
+   * 二级降级定格后的收尾：petals 是补投的静态花瓣，按环境层的淡入曲线浮现；turning 是定格时比静态散落下限还窄、
+   * 被夹到下限的几片，沿 settle 弹簧从定格姿态转过去。静态散落本不跑帧回调，只在这一小段逐帧重画，淡完就停：
+   * settle 弹簧在淡入的 480 ms 里早已落定，到时直接按夹过的 sx 画不会跳。
+   * since 在收尾的第一帧取帧时间；t 是此刻距 since 的秒数。
    */
-  private arriving: { petals: ReadonlySet<StillPetal>; since: number | null; alpha: number } | null = null;
+  private arriving: { petals: ReadonlySet<StillPetal>; turning: ReadonlyMap<StillPetal, FlipTurn>; since: number | null; t: number } | null = null;
   private arrivalRaf: number | null = null;
   private simT = 0;
   private last: number | null = null;
@@ -281,7 +284,8 @@ export class PetalEngine {
       this.raf = null;
     }
     this.listen(!still);
-    this.settleArrivals(bounds !== null && still && !this.inputs.paused);
+    // 收尾途中打开减少动画：转向属于缩放，和淡入一起直接到位
+    this.settleArrivals(bounds !== null && still && !this.inputs.paused && !this.inputs.reduced);
     if (!run && bounds !== null) this.drawStillFrame(bounds);
   }
 
@@ -311,20 +315,20 @@ export class PetalEngine {
       this.leaving = { layers: layers.map((petals, li) => petals.slice(counts[li])), since: this.simT };
       resizeLayers(layers, counts, bounds, this.random);
     } else {
-      // 定格在这一帧刚画出的位置上，不重新抽取；数量照静态散落补齐，补投的那几片淡入
+      // 定格在这一帧刚画出的位置上，不重新抽取；数量照静态散落补齐，补投的那几片淡入，过窄的几片转到下限
       const frozen = freezeLayers(layers, bounds);
-      const still = scatterStill(LAYER_COUNTS[this.inputs.tier], bounds, this.random, frozen);
-      const kept = new Set(frozen.flat());
+      const still = scatterStill(LAYER_COUNTS[this.inputs.tier], bounds, this.random, frozen.layers);
+      const kept = new Set(frozen.layers.flat());
       const added = still.flat().filter((p) => !kept.has(p));
       this.still = still;
       this.leaving = null;
-      this.arriving = added.length === 0 ? null : { petals: new Set(added), since: null, alpha: 0 };
+      this.arriving = added.length === 0 && frozen.turning.size === 0 ? null : { petals: new Set(added), turning: frozen.turning, since: null, t: 0 };
     }
     this.sync();
     this.onDowngrade({ tier: this.inputs.tier, level: downgrade.level, windowMediansMs: downgrade.windowMediansMs });
   }
 
-  /** 补投的花瓣还没淡入完：能播就逐帧重画到淡完；暂停或没有尺寸时直接到位，暂停期间不留任何帧回调。 */
+  /** 定格后的收尾还没播完：能播就逐帧重画到播完；暂停、没有尺寸或减少动画时直接到位，不留任何帧回调。 */
   private settleArrivals(play: boolean): void {
     if (this.arriving === null) return;
     if (play) {
@@ -340,14 +344,14 @@ export class PetalEngine {
     const arriving = this.arriving;
     const still = this.still;
     const bounds = this.bounds;
-    if (arriving === null || still === null || bounds === null) throw new Error("花瓣淡入帧在没有待淡入的静态花瓣时运行");
+    if (arriving === null || still === null || bounds === null) throw new Error("花瓣收尾帧在没有待收尾的静态花瓣时运行");
     arriving.since ??= now;
     const t = (now - arriving.since) / 1000;
     if (t >= ambientFade.in.duration) {
       this.arriving = null;
       this.arrivalRaf = null;
     } else {
-      arriving.alpha = tweenAt(ambientFade.in, t);
+      arriving.t = t;
       this.arrivalRaf = this.scheduler.request(this.onArrivalFrame);
     }
     this.drawStillPetals(still, bounds);
@@ -450,14 +454,23 @@ export class PetalEngine {
       this.ctx.globalAlpha = alpha;
       for (const p of petals) if (arriving === null || !arriving.petals.has(p)) this.blitStill(sprites, p, bounds);
       if (arriving === null) return;
-      this.ctx.globalAlpha = alpha * arriving.alpha;
+      this.ctx.globalAlpha = alpha * tweenAt(ambientFade.in, arriving.t);
       for (const p of petals) if (arriving.petals.has(p)) this.blitStill(sprites, p, bounds);
     });
   }
 
   private blitStill(sprites: SpriteSheet, p: StillPetal, bounds: Bounds): void {
     const k = this.dprEff;
-    this.blit(sprites.sprite(p.glyph, p.tone), p.rot, p.sx, p.nx * bounds.width * k, p.ny * bounds.height * k);
+    this.blit(sprites.sprite(p.glyph, p.tone), p.rot, this.stillScale(p), p.nx * bounds.width * k, p.ny * bounds.height * k);
+  }
+
+  /** 静态花瓣此刻的水平缩放：收尾中转向的那几片按 settle 弹簧从定格姿态走向夹过的 sx，其余就是 sx。 */
+  private stillScale(p: StillPetal): number {
+    const arriving = this.arriving;
+    if (arriving === null) return p.sx;
+    const turn = arriving.turning.get(p);
+    if (turn === undefined) return p.sx;
+    return p.sx + springAt("settle", turn.sx0 - p.sx, turn.v0, arriving.t).x;
   }
 
   /** translate(x, y) · rotate(rot) · scale(sx, 1)，平移已换算到设备像素；精灵本身就是设备像素尺寸，以中心为锚点。 */

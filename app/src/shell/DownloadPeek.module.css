@@ -74,23 +74,22 @@
   stroke: var(--sk-accent);
 }
 
-/* 角标外面包着弹入弹出的一层；flex 容器不带行高支柱，这层与角标一样大，缩放以角标中心为原点 */
+/* 计数角标本身挂在右上角；它的弹入弹出写在行内 transform 上，这里只用 top / right 定位 */
 .count {
   position: absolute;
   top: -6px;
   right: -6px;
-  display: flex;
 }
 
+/*
+ * 失败点外面包着定位的一层，弹入弹出由里面的提醒点（Badge）自己播；这层只管摆在哪个角。
+ * flex 容器不带行高支柱，这层与提醒点一样大
+ */
 .failDot {
   position: absolute;
   bottom: 2px;
   right: 2px;
-  width: 8px;
-  height: 8px;
-  border-radius: var(--sk-r-pill);
-  background: var(--sk-danger);
-  box-shadow: 0 0 0 2px var(--sk-bg);
+  display: flex;
   transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
 }
 
@@ -106,13 +105,15 @@
   transition: none;
 }
 
-/* ---- 浮层 ---- */
-.panel {
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-  width: 360px;
-  max-width: calc(100vw - var(--sk-space-32));
+/*
+ * ---- 浮层 ----
+ * 写在浮层面板上：头部、主体、底部各在面板的一层里，宽度要定在面板上。主体是面板的滚动区，封顶 320 只露出约四行；
+ * 它常驻滚动条槽位，任务数在 4 个上下变化、列表跨过最大高度时，行右侧的取消键与百分比不随滚动条出没横跳，
+ * 右侧留白由 10px 的槽承担，列表本身不再加右内边距
+ */
+.popover {
+  --popover-body-max-height: 320px;
+  width: min(360px, calc(100vw - var(--sk-space-32)));
 }
 
 .head {
@@ -135,17 +136,7 @@
   color: var(--sk-text-3);
 }
 
-/*
- * 滚动区常驻滚动条槽位：任务数在 4 个上下变化、列表跨过最大高度时，行右侧的取消键与百分比不随滚动条出没横跳。
- * 右侧留白由 10px 的槽承担，列表本身不再加右内边距。滚动区与列表分两层：列表的高度随行增删变化，
- * 让位才量得到；滚动区封顶后高度不变，挂在它上面量不到
- */
-.scroller {
-  max-height: 320px;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
-}
-
+/* 让位挂在列表上而不是滚动区上：列表的高度随行增删变化才量得到，滚动区封顶后高度不变 */
 .list {
   display: flex;
   flex-direction: column;

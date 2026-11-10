@@ -105,6 +105,59 @@ describe("AccountAvatar", () => {
   });
 });
 
+describe("换皮肤（刷新账户后换了一张）", () => {
+  const OLD = { kind: "remote", sha1: "a1".repeat(20), model: "wide", hat: true } as const;
+  const NEW = { kind: "remote", sha1: "b2".repeat(20), model: "wide", hat: true } as const;
+  /** ArtCrossfade 的叠层：第一层是常驻的剪影，其余是真图层（含正在淡出的）。 */
+  const realLayers = () => [...root().querySelectorAll<HTMLElement>('[class*="layer"]')].slice(1);
+  let arrive: () => void;
+
+  beforeEach(() => {
+    const gate = new Promise<void>((resolve) => {
+      arrive = resolve;
+    });
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes(NEW.sha1)) await gate;
+      return { ok: true, status: 200, blob: async () => new Blob([url]) };
+    });
+  });
+
+  it("新皮肤取到之前仍显示旧皮肤，到了两张叠放交叉淡化，中间不落回剪影", async () => {
+    view = render(<AccountAvatar uuid="u7" skin={OLD} size={40} />);
+    await settle();
+    const [oldLayer] = realLayers();
+    view.rerender(<AccountAvatar uuid="u7" skin={NEW} size={40} />);
+    await settle();
+    expect(root().dataset.art).toBe("skin");
+    expect(realLayers()).toEqual([oldLayer]);
+    expect(bitmaps.map((b) => b.url)).toEqual([`http://petalfall-tex.localhost/skin/${OLD.sha1}.png`]);
+    arrive();
+    await settle();
+    expect(root().dataset.art).toBe("skin");
+    const fresh = realLayers().filter((layer) => layer !== oldLayer);
+    expect(fresh).toHaveLength(1);
+    // 新图层是从透明淡入的那一层（真实计时器下已经走了一点）
+    expect(Number(fresh[0].style.opacity)).toBeLessThan(1);
+    expect(canvas.sourceRects(bitmaps[1]).length).toBeGreaterThan(0);
+  });
+
+  it("新皮肤取不到：等它落定后回落剪影", async () => {
+    view = render(<AccountAvatar uuid="u8" skin={OLD} size={40} />);
+    await settle();
+    fetchMock.mockImplementation(async () => ({ ok: false, status: 404, blob: async () => new Blob() }));
+    view.rerender(<AccountAvatar uuid="u8" skin={NEW} size={40} />);
+    await settle();
+    expect(root().dataset.art).toBe("silhouette");
+  });
+
+  it("账户没有皮肤了：不留旧图，直接回落剪影", async () => {
+    view = render(<AccountAvatar uuid="u9" skin={OLD} size={40} />);
+    await settle();
+    view.rerender(<AccountAvatar uuid="u9" skin={null} size={40} />);
+    expect(root().dataset.art).toBe("silhouette");
+  });
+});
+
 describe("AccountFigure", () => {
   it("旧格式皮肤：布局方框 scale 5 为 80 × 160，投影画在四周各大 10 px 的外框里，外层只有帽子", async () => {
     skinSize = { width: 64, height: 32 };

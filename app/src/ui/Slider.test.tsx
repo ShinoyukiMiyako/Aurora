@@ -281,15 +281,33 @@ describe("圆钮与填充的样式", () => {
   it("位置只走 translate，不动 left / width", () => {
     const thumb = ruleOf(".thumb");
     const fill = ruleOf(".fill");
-    expect(thumb).toContain("translate: calc(var(--slider-p) * 100%) 0;");
+    expect(thumb).toContain("translate: calc(var(--slider-p) * (100% - var(--slider-thumb)) + var(--slider-thumb) - 100%) 0;");
     expect(fill).toContain("translate: calc(var(--slider-thumb) / 2 + var(--slider-p) * (100% - var(--slider-thumb)) - 100%) 0;");
     for (const rule of [thumb, fill]) {
       expect(rule).not.toMatch(/(^|\s)(left|width):[^;]*--slider-p/);
     }
-    // 行程宽 = 命中区宽 − 一个圆钮，圆钮自身按圆钮直径画
-    expect(thumb).toContain("right: var(--slider-thumb);");
+    // 行程盒与命中区同宽、圆钮贴右端，圆钮自身按圆钮直径画
+    expect(thumb).toContain("right: 0;");
     expect(thumb).toContain("left: 0;");
+    expect(thumb).toContain("justify-content: flex-end;");
     expect(ruleOf(".knob")).toContain("width: var(--slider-thumb);");
+  });
+
+  it("行程盒任何取值下都不越过命中区右缘：只往起始边一侧伸，不撑出横向滚动", () => {
+    // 按样式里的公式求行程盒在命中区坐标里的左右缘：盒宽 = 命中区宽 w，偏移 = p(w − T) + T − w
+    const thumb = ruleOf(".thumb");
+    const formula = /translate: calc\(var\(--slider-p\) \* \(100% - var\(--slider-thumb\)\) \+ var\(--slider-thumb\) - 100%\) 0;/;
+    expect(thumb).toMatch(formula);
+    for (const w of [SLIDER_THUMB * 3, 220, 500, 1020]) {
+      for (const p of [0, 0.25, 0.5, 1]) {
+        const shift = p * (w - SLIDER_THUMB) + SLIDER_THUMB - w;
+        const box = { left: shift, right: shift + w };
+        const knob = { left: box.right - SLIDER_THUMB, right: box.right };
+        expect(box.right).toBeLessThanOrEqual(w);
+        // 圆钮中心落在可用轨道上 p 处，与填充的右缘、刻度中心一致
+        expect((knob.left + knob.right) / 2).toBeCloseTo(SLIDER_THUMB / 2 + p * (w - SLIDER_THUMB), 10);
+      }
+    }
   });
 
   it("非跟手时沿 settle 过渡，跟手与减少动画时不过渡；圆钮悬停与拿起的缩放走 tap", () => {

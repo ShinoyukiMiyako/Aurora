@@ -2,7 +2,7 @@
 // 下标按原版客户端的数组顺序（先 9 套细臂、后 9 套宽臂，各自按名字字母序）换成皮肤路径。
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SKIN_PATHS } from "../../mc/whitelist";
-import { defaultSkin, javaUuidHash } from "./default-skin";
+import { DEFAULT_SKINS, defaultSkin, javaUuidHash, STARTER_SKINS } from "./default-skin";
 import { hyphenateUuid, offlineUuid } from "./offline-uuid";
 
 describe("Java 的 UUID.hashCode", () => {
@@ -105,6 +105,16 @@ describe("默认皮肤的选取", () => {
     const simple = offlineUuid(name);
     expect(hyphenateUuid(simple)).toBe(uuid);
     expect(defaultSkin(simple).path).toBe(path);
+  });
+
+  it("预取用的全集：18 套各不相同，顺序同原版数组，任何 UUID 选出的都在里面，开局并排的两位也在里面", () => {
+    const paths = DEFAULT_SKINS.map((s) => s.path);
+    expect(new Set(paths).size).toBe(18);
+    expect(DEFAULT_SKINS.slice(0, 9).every((s) => s.model === "slim" && s.path.startsWith("entity/player/slim/"))).toBe(true);
+    expect(DEFAULT_SKINS.slice(9).every((s) => s.model === "wide" && s.path.startsWith("entity/player/wide/"))).toBe(true);
+    for (let k = 0; k < 18; k++) expect(DEFAULT_SKINS[k]).toEqual(defaultSkin(`00000000000000000000000000000${k.toString(16).padStart(3, "0")}`));
+    for (const name of ["Steve", "Alex", "樱花", "Hanami"]) expect(DEFAULT_SKINS).toContainEqual(defaultSkin(offlineUuid(name)));
+    for (const starter of STARTER_SKINS) expect(DEFAULT_SKINS).toContainEqual(starter.skin);
   });
 
   it("选出的路径都在材质协议允许读取的默认皮肤名单里", () => {

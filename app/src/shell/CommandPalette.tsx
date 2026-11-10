@@ -89,10 +89,19 @@ function currentInstanceId(state: LauncherState): string | null {
 }
 
 function PaletteLayer({ initialQuery, focusReturn }: { initialQuery: string; focusReturn: { current: FocusReturnHandle | null } }) {
-  const currentId = useLauncherSelector(currentInstanceId);
   const { closePalette } = useShell();
   const chrome = useChrome();
   const present = useIsPresent();
+  // 退场的那一段沿用最后在场时的当前实例：刚执行的动作（结束游戏、取消启动）可能让它在 null 与某个实例之间换了，
+  // 换了就会把淡出中的面板整块重挂，冻结的条目与列表滚动位置都丢掉。那个实例在退场途中没了（被删、改名）时只能跟着换
+  const liveId = useLauncherSelector(currentInstanceId);
+  const lastId = useRef(liveId);
+  useLayoutEffect(() => {
+    if (present) lastId.current = liveId;
+  });
+  const keptId = lastId.current;
+  const keptAlive = useLauncherSelector((s) => keptId === null || findInstance(s, keptId) !== undefined);
+  const currentId = !present && keptAlive ? keptId : liveId;
   const panelRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState(initialQuery);
   useFocusTrap(panelRef, present);
@@ -334,10 +343,13 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const present = useIsPresent();
   const live = rankPalette(query, usePaletteEntries(query, current));
-  // 退场的那一段不再跟着状态重算：刚执行的动作（切换账户、启动）此刻已改了状态，淡出中的条目不该换字、换位
-  const shownRef = useRef(live);
-  if (present) shownRef.current = live;
-  const sections = shownRef.current;
+  // 退场的那一段不再跟着状态重算：刚执行的动作（切换账户、启动）此刻已改了状态，淡出中的条目不该换字、换位。
+  // 快照在提交之后才记：并发渲染里被丢弃的那次渲染不会成为冻结的样子
+  const committed = useRef(live);
+  useLayoutEffect(() => {
+    if (present) committed.current = live;
+  });
+  const sections = present ? live : committed.current;
   const flat = sections.flatMap((s) => s.items);
   // 高亮记的是条目：面板开着时后台插进新条目（数据晚到、占位实例转正），高亮留在原来那一条上，不按下标落到别的条目。
   // 那一条不在了才按它最后所在的下标落位；id 为 null 表示「第一项」（刚打开、刚改了查询）
@@ -351,11 +363,13 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
   };
   const optionId = (i: number) => `${base}-opt-${i}`;
 
+  // 只在挂载时聚焦一次。退场中挂上的面板不拿焦点：执行导航时焦点已交给内容区，退场途中万一重挂也不能把它抢回来
   useLayoutEffect(() => {
-    inputRef.current?.focus();
+    if (present) inputRef.current?.focus();
   }, []);
 
-  // 高亮项滚进可见区：只在越出上下边缘时最小幅度滚动
+  // 高亮项滚进可见区：只在越出上下边缘时最小幅度滚动。只在高亮项或查询变了时量：
+  // 后台数据更新这类重渲染不量布局，也不把用户正在滚轮翻看的列表拽回高亮项
   useLayoutEffect(() => {
     const list = listRef.current;
     if (list === null || active < 0) return;
@@ -363,7 +377,7 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
     if (option === null) return;
     if (option.offsetTop < list.scrollTop) list.scrollTop = option.offsetTop;
     else if (option.offsetTop + option.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = option.offsetTop + option.offsetHeight - list.clientHeight;
-  });
+  }, [active, query]);
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (isImeComposing(event)) return;

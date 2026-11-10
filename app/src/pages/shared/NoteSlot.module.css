@@ -1,0 +1,33 @@
+/* 当前说明与两条备用说明叠在同一格：格高取最高的那条；备用的只占位、不可见 */
+.slot {
+  display: grid;
+  min-width: 0;
+}
+
+.slot::before,
+.slot::after,
+.current {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
+.slot::before {
+  content: attr(data-reserve-a);
+  visibility: hidden;
+}
+
+.slot::after {
+  content: attr(data-reserve-b);
+  visibility: hidden;
+}
+
+/* 换上来的说明只淡入、不位移：同一格里换字，位置没有变化可言 */
+.current[data-enter] {
+  animation: noteIn var(--sk-dur-in) var(--sk-ease-out);
+}
+
+@keyframes noteIn {
+  from {
+    opacity: 0;
+  }
+}

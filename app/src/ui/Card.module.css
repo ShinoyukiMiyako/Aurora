@@ -8,6 +8,8 @@
   border-radius: var(--sk-r-lg);
   background: var(--sk-card);
   box-shadow: var(--sk-shadow-sm);
+  /* 不可点的卡片也会被选中（当前账户）：描边色与 ::before 选中外圈同一时长同一曲线，两者一起到 */
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .card[data-pad="sm"],
@@ -147,7 +149,12 @@
   opacity: 0.5;
 }
 
-.card[data-interactive]:focus-visible {
+/*
+ * 键盘焦点环画在卡片自己身上。带标题按钮的卡片是按钮拿焦点，但环不能画在按钮铺满整卡的覆盖层上：
+ * 裁切卡片的内层会把画在边框外的环整个裁掉，覆盖层落在别的定位祖先里时也框不住整卡。
+ */
+.card[data-interactive]:focus-visible,
+.card:has(.titleButton:focus-visible) {
   box-shadow: var(--sk-focus), var(--sk-shadow);
 }
 
@@ -176,7 +183,8 @@
 }
 
 /* 键盘焦点环顶替选中外圈 */
-.card[data-selected][data-interactive]:focus-visible::before {
+.card[data-selected][data-interactive]:focus-visible::before,
+.card[data-selected]:has(.titleButton:focus-visible)::before {
   opacity: 0;
 }
 
@@ -216,10 +224,6 @@
   position: absolute;
   inset: -1px;
   border-radius: var(--sk-r-lg);
-}
-
-.titleButton:focus-visible::after {
-  box-shadow: var(--sk-focus), var(--sk-shadow);
 }
 
 /* 卡内其他控件浮在覆盖层之上；零特异性，控件自己的定位规则照常生效 */

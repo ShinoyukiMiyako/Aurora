@@ -3,6 +3,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IpcError } from "../../ipc/errors";
+import { COMPLETION_HOLD_S } from "../../lib/progress-display";
 import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
 import { CORE_EVENT, type TaskJournalDto, type TaskRecordDto } from "../../ipc/tasks";
 import { OverlayRoot } from "../../shell/overlay";
@@ -14,6 +15,7 @@ import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, cancelledError, deferred, emit, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { PickFolderProvider } from "../discover/platform";
 import TasksPage from "./index";
+import styles from "./tasks.module.css";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -64,8 +66,24 @@ function page(): HTMLElement {
   return view.container;
 }
 
-/** 任务行（并行通道是 ol，任务列表是 ul）。换组或被清除的行还在原处淡出，已经标了 inert，不算任务行。 */
-const rows = () => [...page().querySelectorAll<HTMLLIElement>("ul > li:not([inert])")];
+/**
+ * 在场的节点。正在退场的（换组的行、被清掉的整组、收起的横幅、通道里换下的那份内容）还在原处淡出，
+ * 自己或某个祖先带着 inert，不算在场。
+ */
+const live = (el: Element) => el.closest("[inert]") === null;
+
+/** 元素在场部分的文字：去掉正在退场的节点。 */
+function liveText(el: Element): string {
+  const copy = el.cloneNode(true);
+  if (!(copy instanceof Element)) throw new Error("复制出的不是元素");
+  for (const gone of copy.querySelectorAll("[inert]")) gone.remove();
+  const text = copy.textContent;
+  if (text === null) throw new Error("元素没有文字内容");
+  return text;
+}
+
+/** 任务行（并行通道是 ol，任务列表是 ul）。 */
+const rows = () => [...page().querySelectorAll<HTMLLIElement>("ul > li")].filter(live);
 
 function row(title: string): HTMLLIElement {
   const found = rows().filter((r) => r.textContent?.includes(title));
@@ -73,13 +91,26 @@ function row(title: string): HTMLLIElement {
   return found[0];
 }
 
+/** 按钮上显示的文案：文案放在定宽槽（LabelSlot）里的，候选都在 DOM 里，只取当前那条。 */
+function labelOf(button: HTMLButtonElement): string | null {
+  const current = button.querySelector("[data-current]");
+  return current === null ? button.textContent : current.textContent;
+}
+
 function buttonIn(root: ParentNode, text: string): HTMLButtonElement {
-  const found = [...root.querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent === text);
+  const found = [...root.querySelectorAll<HTMLButtonElement>("button")].filter(live).filter((b) => labelOf(b) === text);
   if (found.length !== 1) throw new Error(`文字为「${text}」的按钮有 ${found.length} 个`);
   return found[0];
 }
 
-const hasButton = (root: ParentNode, text: string) => [...root.querySelectorAll("button")].some((b) => b.textContent === text);
+const hasButton = (root: ParentNode, text: string) => [...root.querySelectorAll<HTMLButtonElement>("button")].filter(live).some((b) => labelOf(b) === text);
+
+/** 进度条（行内或通道里）报给读屏的百分数：百分数文字随平滑逐帧走，测试读它的目标值。 */
+function progressOf(root: Element): string | null {
+  const bar = root.querySelector('[role="progressbar"]');
+  if (bar === null) throw new Error("这里没有进度条");
+  return bar.getAttribute("aria-valuenow");
+}
 
 /** 最新打开的确认框（上一个可能还在退场动画里）。 */
 function dialog(): HTMLElement {
@@ -100,7 +131,7 @@ const radio = (label: string) => {
   return el;
 };
 
-const headings = () => [...page().querySelectorAll("section > h2")].map((h) => h.textContent);
+const headings = () => [...page().querySelectorAll("section h2")].filter(live).map((h) => h.textContent);
 
 /** 吞吐卡的总进度环：有进度时是 progressbar，没有可算的进度时是带说明的图形，名称都以 ringLabel 开头。 */
 function totalRing(): HTMLElement {
@@ -259,6 +290,18 @@ describe("下载任务页：历史", () => {
     expect(callsOf(ipc, "save_task_journal").at(-1)).toEqual({ seq: 1, tasks: [] });
   });
 
+  it("清除按钮与筛选的计数按三位数定宽：首个任务结束、计数跨位数时按钮与分段都不变宽", async () => {
+    bootOverrides(ipc, { journal: HISTORY });
+    await mount();
+    // 文案在定宽槽里：不带计数、当前计数、按历史上限（三位数）计的那条叠在同一格，宽度取最宽的
+    const slot = buttonIn(header(), "清除已结束（3）").querySelector("[data-current]")?.parentElement;
+    if (slot === null || slot === undefined) throw new Error("清除按钮的文案不在定宽槽里");
+    expect([...slot.children].map((el) => el.textContent)).toEqual(["清除已结束", "清除已结束（3）", "清除已结束（100）"]);
+    const filter = page().querySelector<HTMLElement>('[role="radiogroup"]');
+    if (filter === null) throw new Error("页面没有状态筛选");
+    expect(filter.style.getPropertyValue("--segment-count-digits")).toBe("3");
+  });
+
   it("重试：同一任务换下一次尝试的 taskId 重新开始，行内写第几次尝试", async () => {
     bootOverrides(ipc, {
       journal: [record("failed-java", "failed", { error: { code: "hash_mismatch", message: "sha1" }, spec: { command: "install_java", args: { requiredMajor: 17 } } })],
@@ -348,10 +391,10 @@ describe("下载任务页：断网", () => {
       journal: [record("failed-java", "failed", { error: { code: "network_failed", message: "dns" }, spec: { command: "install_java", args: { requiredMajor: 17 } } })],
     });
     await mount();
-    const banner = () => [...page().querySelectorAll<HTMLElement>("[data-tone]")].find((el) => el.textContent?.startsWith("没有网络连接"));
+    const banner = () => [...page().querySelectorAll<HTMLElement>("[data-tone]")].filter(live).find((el) => el.textContent?.startsWith("没有网络连接"));
     expect(banner()?.textContent).toBe("没有网络连接进行中的下载会继续重试，重试用完仍连不上时记为失败；联网后可以再重试。");
-    // 横幅紧跟页头，在任务列表之前
-    expect(header().nextElementSibling).toBe(banner());
+    // 横幅在页头下的常驻槽位里，在任务列表之前：断网、联网时它进出，下面的内容让位
+    expect(header().nextElementSibling?.firstElementChild).toBe(banner());
     const retry = buttonIn(row("failed-java"), "重试");
     expect(retry.getAttribute("aria-disabled")).toBe("true");
     act(() => retry.click());
@@ -506,9 +549,13 @@ describe("下载任务页：进行中", () => {
     expect(page().textContent).toContain("3 个下载中，1 个排队 · 最多 3 个并行");
     expect(page().textContent).toContain("还有 1 个在排队，空出通道后按加入顺序开始");
     const lanes = [...page().querySelectorAll("ol > li")];
-    expect(lanes.map((l) => l.textContent)).toEqual(["1下载 Java 80%", "2下载 Java 170%", "3下载 Java 210%"]);
+    expect(lanes.map(liveText)).toEqual(["1下载 Java 80%", "2下载 Java 170%", "3下载 Java 210%"]);
     expect(row("Java 25").textContent).toContain("排队中 · 第 1 位");
     expect(row("Java 25").textContent).toContain("大小待定");
+    // 排队中也占着百分数槽（空着、读屏不读）：轮到运行时尾部不变宽
+    const slot = row("Java 25").querySelector(`.${styles.pct}`);
+    expect([slot?.textContent, slot?.getAttribute("aria-hidden")]).toEqual(["", "true"]);
+    expect(row("Java 8").querySelector(`.${styles.pct}`)?.textContent).toBe("0%");
     expect(headings()).toEqual(["进行中 · 4"]);
     expect(radio("进行中").getAttribute("aria-label")).toBe("进行中，4 个");
     // 有活动任务、但还没有一个报了总量：说明换成「大小还不知道」，不说成没有下载
@@ -518,10 +565,11 @@ describe("下载任务页：进行中", () => {
     act(() => emit(CORE_EVENT, { kind: "download", task_id: `${ids[0]}#1`, total: 10, finished: 2, bytes: 120 * MB, total_bytes: 612 * MB, speed: 12 * MB }));
     // 剩余时间按最近 5 秒的平均速度：等窗口里全是这个速度
     await advance(5000);
-    expect(lanes[0].textContent).toBe("1下载 Java 820%");
+    expect(liveText(lanes[0])).toContain("1下载 Java 8");
+    expect(progressOf(lanes[0])).toBe("20");
     expect(row("Java 8").textContent).toContain("120 MB / 612 MB");
     expect(row("Java 8").textContent).toContain("12.0 MB/s · 约 45 秒");
-    expect(row("Java 8").textContent).toContain("20%");
+    expect(progressOf(row("Java 8"))).toBe("20");
     expect(page().textContent).toContain("当前总速度");
     expect(page().textContent).toContain("剩余 492 MB · 约 45 秒");
     // 只有这一个任务报了总量：总进度就是它的 120 / 612
@@ -572,6 +620,35 @@ describe("下载任务页：进行中", () => {
     expect(finished.textContent).toContain("120 MB · 用时 12 秒");
   });
 
+  it("任务完成：先在原处把进度推满、留一拍，再换到已结束；通道粘住任务，空出的那条让给排队的，其余通道不换人", async () => {
+    const ids = await fourJavaTasks();
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${ids[0]}#1`, total: 10, finished: 6, bytes: 60 * MB, total_bytes: 100 * MB, speed: 5 * MB }));
+    javaRuns.get(`${ids[0]}#1`)?.resolve({ component: "java-runtime-delta", version: { major: 8, minor: 0, security: 1, build: 1, raw: "1.8.0_1" }, java_executable: "C:/java8.exe" });
+    await flush();
+    expect(launcher.state.tasks.find((t) => t.id === ids[0])?.status).toBe("done");
+    expect(launcher.state.tasks.find((t) => t.id === ids[3])?.status).toBe("running");
+
+    const lanes = () => [...page().querySelectorAll("ol > li")];
+    /** 各通道里在场的任务名；换下的那份还在原处淡出，不算。 */
+    const laneTitles = () => lanes().map((l) => [...l.querySelectorAll("[title]")].filter(live).map((el) => el.getAttribute("title")));
+    const [t8, t17, t21, t25] = ids.map((id) => launcher.state.tasks.find((t) => t.id === id)?.title);
+    // 收尾：行还在进行中原来的位置，进度推到满格；1 号道也还是它，刚开始的第四个任务等这条道让出来
+    expect(headings()).toEqual(["进行中 · 4"]);
+    expect(progressOf(row("Java 8"))).toBe("100");
+    expect(row("Java 8").querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Java，已完成");
+    expect(laneTitles()).toEqual([[t8], [t17], [t21]]);
+    expect(progressOf(lanes()[0])).toBe("100");
+    // 收尾期任务已经完成：取消键留在原位但不可用，还在跑的照常可用
+    const cancelKey = (title: string) => row(title).querySelector('button[aria-label="取消任务"]');
+    expect(cancelKey("Java 8")?.getAttribute("aria-disabled")).toBe("true");
+    expect(cancelKey("Java 17")?.getAttribute("aria-disabled")).toBeNull();
+
+    await advance(COMPLETION_HOLD_S * 1000);
+    // 收尾结束：行换到已结束，1 号道让给第四个任务；2、3 号道的任务不因前面的结束而换道
+    expect(headings()).toEqual(["进行中 · 3", "已结束 · 1"]);
+    expect(laneTitles()).toEqual([[t25], [t17], [t21]]);
+  });
+
   it("补全完成行：进度按有效字节走满，说明只写实际下载的量；一个字节没传写文件已就绪", async () => {
     const ids = await fourJavaTasks();
     const repaired = `${ids[0]}#1`;
@@ -579,7 +656,7 @@ describe("下载任务页：进行中", () => {
     // 大部分文件本就完整：有效字节 701 MB、走网络的只有 5.5 MB
     act(() => emit(CORE_EVENT, { kind: "download", task_id: repaired, total: 900, finished: 450, bytes: 350 * MB, total_bytes: 701 * MB, transferred: 2 * MB, speed: MB }));
     expect(row("Java 8").textContent).toContain("350 MB / 701 MB");
-    expect(row("Java 8").textContent).toContain("50%");
+    expect(progressOf(row("Java 8"))).toBe("50");
     act(() => emit(CORE_EVENT, { kind: "download", task_id: repaired, total: 900, finished: 900, bytes: 701 * MB, total_bytes: 701 * MB, transferred: 5.5 * MB, speed: MB }));
     act(() => emit(CORE_EVENT, { kind: "download", task_id: present, total: 900, finished: 900, bytes: 701 * MB, total_bytes: 701 * MB, transferred: 0, speed: 0 }));
     await advance(2_000);
@@ -604,6 +681,8 @@ describe("下载任务页：进行中", () => {
     expect(headings()).toEqual(["进行中 · 3", "已结束 · 1"]);
     expect(launcher.state.toasts.map((t) => t.title)).toContain("已取消：下载 Java 25");
 
+    // 全部取消退场时按页头定位、留在原处淡出（规则见 header-layout.test）：页头带着那个类
+    expect(header().classList.contains(styles.header)).toBe(true);
     act(() => buttonIn(header(), "全部取消").click());
     await flush();
     expect(dialog().querySelector("h2")?.textContent).toBe("取消全部 3 个任务？");
@@ -676,43 +755,75 @@ describe("下载任务页：任务记录读取", () => {
     act(() => buttonIn(page(), "重试").click());
     await flush();
     expect(callsOf(ipc, "load_task_journal")).toHaveLength(2);
-    expect(page().textContent).not.toContain("下载任务记录读不出来");
-    expect(page().textContent).toContain("下载队列是空的");
+    // 错误卡收起时在原处淡出（已不在场），空状态换上来
+    expect(liveText(page())).not.toContain("下载任务记录读不出来");
+    expect(liveText(page())).toContain("下载队列是空的");
   });
 
-  it("300 ms 内读完不出骨架；超过才出，出了至少停留 300 ms", async () => {
+  /** 加载区的骨架层：已换成内容（none）、占着位但看不见（等待期，pending）、显示中（shown）。 */
+  function skeletonState(): "none" | "pending" | "shown" {
+    const layer = page().querySelector('[aria-busy="true"] > [aria-hidden="true"]');
+    if (layer === null) return "none";
+    return layer.hasAttribute("data-pending") ? "pending" : "shown";
+  }
+
+  it("300 ms 内读完不出骨架但照样占位；超过才出，出了至少停留 300 ms", async () => {
     const journal = deferred<TaskJournalDto>();
     ipc.overrides.set("load_task_journal", () => journal.promise);
     await mount();
-    const busy = () => page().querySelector('[aria-busy="true"]') !== null;
+    // 等待期骨架已经按内容的形状占着位，只是看不见：数据一到不会从 0 高撑开
+    expect(skeletonState()).toBe("pending");
     await advance(299);
-    expect(busy()).toBe(false);
+    expect(skeletonState()).toBe("pending");
     await advance(1);
-    expect(busy()).toBe(true);
+    expect(skeletonState()).toBe("shown");
     await advance(100);
     journal.resolve({ seq: 0, tasks: [] });
     await flush();
     // 数据已到，但骨架才出现 100 ms
-    expect(busy()).toBe(true);
+    expect(skeletonState()).toBe("shown");
     expect(page().textContent).not.toContain("下载队列是空的");
     await advance(200);
-    expect(busy()).toBe(false);
+    expect(skeletonState()).toBe("none");
     expect(page().textContent).toContain("下载队列是空的");
   });
 
-  it("读了 10 s 还没读完：骨架下方补一行「比平时慢」，读完随骨架一起收起", async () => {
+  it("骨架出现之后才读到任务：同样停够最短时长才换成总览与列表，不是一到就把骨架撤掉", async () => {
     const journal = deferred<TaskJournalDto>();
     ipc.overrides.set("load_task_journal", () => journal.promise);
     await mount();
     await advance(300);
-    expect(page().querySelector('[aria-busy="true"]')).not.toBeNull();
+    expect(skeletonState()).toBe("shown");
+    await advance(50);
+    journal.resolve({ seq: 1, tasks: HISTORY });
+    await flush();
+    expect(launcher.state.tasks).toHaveLength(3);
+    expect(skeletonState()).toBe("shown");
+    expect(rows()).toHaveLength(0);
+    await advance(250);
+    expect(skeletonState()).toBe("none");
+    expect(headings()).toEqual(["已结束 · 3"]);
+    expect(rows()).toHaveLength(3);
+  });
+
+  it("读了 10 s 还没读完：骨架下方补一行「比平时慢」，读屏读得到；读完随骨架一起收起", async () => {
+    const journal = deferred<TaskJournalDto>();
+    ipc.overrides.set("load_task_journal", () => journal.promise);
+    await mount();
+    const hints = () => [...page().querySelectorAll("p")].filter(live).filter((p) => p.textContent === "比平时慢一些，仍在加载…");
+    await advance(300);
+    expect(skeletonState()).toBe("shown");
     await advance(9_699);
-    expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
+    expect(hints()).toHaveLength(0);
     await advance(1);
-    expect(page().textContent).toContain("比平时慢一些，仍在加载…");
+    expect(hints()).toHaveLength(1);
+    // 骨架层对读屏隐藏，提示不在它里面
+    expect(hints()[0].closest('[aria-hidden="true"]')).toBeNull();
     journal.resolve({ seq: 0, tasks: [] });
     await flush();
-    expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
+    // 骨架与提示一起退场：提示只剩正在原处淡出的那一份
+    expect(skeletonState()).toBe("none");
+    expect(hints()).toHaveLength(0);
     expect(page().textContent).toContain("下载队列是空的");
   });
 });

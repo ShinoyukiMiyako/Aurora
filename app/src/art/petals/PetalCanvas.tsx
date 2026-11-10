@@ -4,7 +4,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useLayoutEffect, useRef } from "react";
-import { ambientFade } from "../../lib/motion";
+import { ambientFade, fade } from "../../lib/motion";
 import { PetalEngine, type PetalDowngrade, type PetalInputs } from "./engine";
 import { createRandom } from "./sim";
 import styles from "./PetalCanvas.module.css";
@@ -65,7 +65,8 @@ function PetalSurface({ paused, reduced, tier, mode, accent, onDowngrade, seed }
     engine.update({ paused, reduced, tier, mode, accent });
   }, [paused, reduced, tier, mode, accent]);
 
-  // 进入主页时花瓣场慢慢浮现；离开主页或关闭开关时淡出，淡出期间继续播放，结束后卸载画布
+  // 进入主页时花瓣场慢慢浮现；离开主页或关闭开关时淡出，淡出期间继续播放，结束后卸载画布。
+  // 减少动画时花瓣是静态散落，浮现也收回控件那一档的淡入：铺满整片的慢淡入不留给减少动画的用户
   return (
     <motion.canvas
       ref={canvasRef}
@@ -73,7 +74,7 @@ function PetalSurface({ paused, reduced, tier, mode, accent, onDowngrade, seed }
       data-sk-petals=""
       aria-hidden="true"
       initial={{ opacity: 0 }}
-      animate={{ opacity: 1, transition: ambientFade.in }}
+      animate={{ opacity: 1, transition: reduced ? fade.in : ambientFade.in }}
       exit={{ opacity: 0, transition: ambientFade.out }}
     />
   );

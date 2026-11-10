@@ -46,6 +46,42 @@
   }
 }
 
+/*
+ * 换角时旧角留下的那一份拷贝：钉在旧角原地淡出，几何与 .region 在那个角时相同，宽度由脚本照抄容器此刻的 --toasts-width。
+ * 不带 .region 类，落点规则管不到它。从容器此刻的透明度（--toasts-ghost-from）起淡出：接力换角时容器的淡入还没走完
+ */
+.ghost {
+  position: absolute;
+  z-index: var(--sk-z-toast);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: var(--sk-space-10);
+  width: var(--toasts-width);
+  max-width: calc(100% - var(--sk-space-32));
+  animation: toastsLeaveCorner var(--sk-dur-out) var(--sk-ease-in) forwards;
+}
+
+.ghost[data-corner="home"] {
+  right: var(--sk-space-16);
+  bottom: var(--sk-space-16);
+}
+
+.ghost[data-corner="aside"] {
+  top: calc(56px + var(--sk-space-64));
+  left: var(--sk-space-16);
+}
+
+@keyframes toastsLeaveCorner {
+  from {
+    opacity: var(--toasts-ghost-from);
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
 :global(:root[data-sk-tier="compact"]) .region {
   --toasts-width: 320px;
 }

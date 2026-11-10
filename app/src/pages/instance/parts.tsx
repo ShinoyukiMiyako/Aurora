@@ -2,7 +2,8 @@
 
 import type { ReactNode } from "react";
 import { SLOW_LOADING_HINT } from "../../copy/flows";
-import { useLoadingGate } from "../../lib/loading-gate";
+import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
+import { fade, springs } from "../../lib/motion";
 import { describeError } from "../../state/errors";
 import type { ResourceResult } from "../../state/resource";
 import { Button } from "../../ui/Button";
@@ -13,15 +14,32 @@ import { OVERVIEW_COPY } from "./copy";
 import styles from "./instance.module.css";
 import type { FolderTarget, InstanceOps } from "./ops";
 
+export type ModuleView = "pending" | "skeleton" | "error" | "ready";
+
 /**
- * 模块此刻该画什么：300 ms 内读到就不出骨架（pending 期间只留卡片框架），骨架一旦出现至少停留 300 ms，
+ * 模块此刻该画什么：300 ms 内读到就不出骨架（pending 期间骨架照常占位、只是不可见），骨架一旦出现至少停留 300 ms，
  * 数据早到也等满再换成内容；之后按查询结果画错误或内容。slow 为这一轮加载已超过 10 s。
  */
-export function useModuleView(resource: ResourceResult<unknown>): { view: "pending" | "skeleton" | "error" | "ready"; slow: boolean } {
+export function useModuleView(resource: ResourceResult<unknown>): { view: ModuleView; slow: boolean } {
   const gate = useLoadingGate(resource.status === "loading");
   if (gate.view !== "content") return { view: gate.view, slow: gate.slow };
   return { view: resource.status === "error" ? "error" : "ready", slow: false };
 }
+
+/** 交给 ui/Loadable 的那一态：错误与内容都是「内容」，在原位交叉淡入。 */
+export function loadableView(view: ModuleView): LoadingView {
+  return view === "pending" || view === "skeleton" ? view : "content";
+}
+
+/**
+ * 随状态出现、消失的小标签（头图的状态标签、标签条上的「N 更新」）：出现时从略小处弹出，消失时原地淡出。
+ * 只有挂载之后才出现的才播入场，调用方按挂载与否给 initial。
+ */
+export const CHIP_MOTION = {
+  initial: { opacity: 0, scale: 0.8 },
+  animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } },
+  exit: { opacity: 0, transition: fade.out },
+} as const;
 
 /** 骨架下方的「比平时慢一些」：同一轮加载超过 10 s 才出现。 */
 export function SlowHint({ slow }: { slow: boolean }) {

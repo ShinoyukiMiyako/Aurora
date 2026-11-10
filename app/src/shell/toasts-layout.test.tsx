@@ -6,9 +6,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { TOASTS_COPY } from "../copy/shell";
+import { fade, tweenAt } from "../lib/motion";
 import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
 import type { FlowProps } from "../state/flows";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
@@ -31,7 +32,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // :global() 与局部类名都是构建期语法，换成浏览器认识的选择器和实际挂到元素上的类名
 const SHEET = readFileSync(join(HERE, "Toasts.module.css"), "utf8")
   .replace(/:global\((.+)\) \.region/g, "$1 .region")
-  .replaceAll(".region", `.${styles.region}`);
+  .replaceAll(".region", `.${styles.region}`)
+  .replaceAll(".ghost", `.${styles.ghost}`);
 
 const BOTTOM_RIGHT = { top: "auto", bottom: "var(--sk-space-16)", left: "auto", right: "var(--sk-space-16)" };
 /** 标题栏 56 高、再留 64：资源详情的「返回」在 900 高的窗口里下沿到 113。 */
@@ -43,10 +45,11 @@ const region = () => {
   return el;
 };
 
-const placement = () => {
-  const { top, bottom, left, right } = getComputedStyle(region());
+const placementOf = (el: Element) => {
+  const { top, bottom, left, right } = getComputedStyle(el);
   return { top, bottom, left, right };
 };
+const placement = () => placementOf(region());
 
 /** 容器此刻用的淡入动画名：两个角各一个，换角即换名，浏览器换名就重播。 */
 const cornerFade = () => getComputedStyle(region()).animationName;
@@ -210,8 +213,8 @@ describe("通知栈的落点", () => {
     await act(async () => {
       await launcher.actions.completeFirstRun("D:\\Games\\.minecraft", []);
     });
-    await flush();
-    expect(document.querySelector("[data-flow='onboarding']")).toBeNull();
+    // 向导要演完退场才拿掉：机器忙时十拍定时器不够，按条件等
+    await vi.waitFor(() => expect(document.querySelector("[data-flow='onboarding']")).toBeNull(), { timeout: 3000, interval: 20 });
     expect(placement()).toEqual(BOTTOM_RIGHT);
   });
 
@@ -271,5 +274,195 @@ describe("通知栈的落点", () => {
     await mount();
     act(() => void launcher.actions.toast("success", "已添加离线账户"));
     expect(enterShift("已添加离线账户")).toBe(-40);
+  });
+});
+
+describe("换角时旧角那一栈原地淡出", () => {
+  const ghosts = () => [...document.querySelectorAll<HTMLElement>(`.${styles.ghost}`)];
+  const ghostFrom = (ghost: HTMLElement) => Number(ghost.style.getPropertyValue("--toasts-ghost-from"));
+  /** MutationObserver 的回调是微任务：让它跑完。 */
+  const observed = () => act(async () => await Promise.resolve());
+  /** 假后端启动时会发几条通知（读不出账户皮肤）：关掉，等它们退场完，栈从空的开始。 */
+  const clearToasts = async () => {
+    act(() => {
+      for (const toast of launcher.state.toasts) launcher.actions.dismissToast(toast.id);
+    });
+    await vi.waitFor(() => expect(region().children).toHaveLength(0), { timeout: 3000, interval: 20 });
+  };
+
+  /**
+   * jsdom 不播动画，没有 getAnimations：换成可以手动收尾的版本。拷贝有一段淡出动画，由测试决定它何时播完；
+   * 其余元素没有动画。返回每份拷贝的收尾函数，按创建顺序。
+   */
+  function stubFades() {
+    const finishers: (() => void)[] = [];
+    const fades = new Map<Element, Animation>();
+    Object.defineProperty(Element.prototype, "getAnimations", {
+      configurable: true,
+      value(this: Element) {
+        if (!this.classList.contains(styles.ghost)) return [];
+        let fadeOut = fades.get(this);
+        if (fadeOut === undefined) {
+          const finished = new Promise<void>((resolve) => finishers.push(resolve));
+          fadeOut = { finished } as unknown as Animation;
+          fades.set(this, fadeOut);
+        }
+        return [fadeOut];
+      },
+    });
+    onTestFinished(() => {
+      Reflect.deleteProperty(Element.prototype, "getAnimations");
+    });
+    return finishers;
+  }
+
+  it("弹窗打开：右下角那一栈的拷贝钉在右下淡出，不可交互、不进读屏，淡完拿掉；在场的那一栈已在左上", async () => {
+    const finishers = stubFades();
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    await clearToasts();
+    act(() => launcher.actions.toast("error", "常驻的失败"));
+    await flush();
+    expect(ghosts()).toEqual([]);
+
+    act(() => shell.openCreateInstance());
+    await observed();
+    const [ghost] = ghosts();
+    expect(ghost.dataset.corner).toBe("home");
+    expect(placementOf(ghost)).toEqual(BOTTOM_RIGHT);
+    expect(placement()).toEqual(TOP_LEFT);
+    expect(ghost.getAttribute("aria-hidden")).toBe("true");
+    expect(ghost.hasAttribute("inert")).toBe(true);
+    expect(ghost.textContent).toContain("常驻的失败");
+    expect(ghost.querySelector("[id]")).toBeNull();
+    expect(ghostFrom(ghost)).toBe(1);
+    expect(region().textContent).toContain("常驻的失败");
+
+    act(() => finishers[0]());
+    await flush();
+    expect(ghost.isConnected).toBe(false);
+    expect(ghosts()).toEqual([]);
+  });
+
+  it("关弹窗的同一拍发出的通知：左上角的拷贝里只有旧角画过的那几条", async () => {
+    const finishers = stubFades();
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    await clearToasts();
+    act(() => shell.openCreateInstance());
+    await flush();
+    act(() => launcher.actions.toast("error", "早先的"));
+    await flush();
+    expect(ghosts()).toEqual([]);
+
+    act(() => {
+      launcher.actions.toast("info", "已开始创建");
+      shell.closeCreateInstance();
+    });
+    await observed();
+    const [ghost] = ghosts();
+    expect(ghost.dataset.corner).toBe("aside");
+    expect(placementOf(ghost)).toEqual(TOP_LEFT);
+    expect(ghost.textContent).toContain("早先的");
+    expect(ghost.textContent).not.toContain("已开始创建");
+    expect(region().textContent).toContain("已开始创建");
+    expect(finishers).toHaveLength(1);
+  });
+
+  it("拷贝里的倒计时细线对到原件此刻的进度，不在淡出的那一份里跳回起点", async () => {
+    // jsdom 没有 CSS 动画：细线（带 --toast-remaining 的那个元素）各给一段假的 CSS 动画，原件的已经播了 1234 ms
+    class FakeEffect {
+      constructor(readonly target: Element) {}
+    }
+    class FakeCssAnimation {
+      readonly animationName = "toastCountdown";
+      constructor(
+        readonly effect: FakeEffect,
+        public currentTime: number | null,
+      ) {}
+    }
+    vi.stubGlobal("KeyframeEffect", FakeEffect);
+    vi.stubGlobal("CSSAnimation", FakeCssAnimation);
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
+    const lines = new Map<Element, FakeCssAnimation>();
+    const lineOf = (el: Element) => {
+      let animation = lines.get(el);
+      if (animation === undefined) {
+        animation = new FakeCssAnimation(new FakeEffect(el), el.closest(`.${styles.ghost}`) === null ? 1234 : null);
+        lines.set(el, animation);
+      }
+      return animation;
+    };
+    const isLine = (el: Element) => el.matches("[style*='--toast-remaining']");
+    const finished = new Promise<void>(() => undefined);
+    Object.defineProperty(Element.prototype, "getAnimations", {
+      configurable: true,
+      value(this: Element, options?: { subtree?: boolean }) {
+        if (this.classList.contains(styles.ghost)) return [{ finished }];
+        const scope = options?.subtree === true ? [this, ...this.querySelectorAll("*")] : [this];
+        return scope.filter(isLine).map(lineOf);
+      },
+    });
+    onTestFinished(() => {
+      Reflect.deleteProperty(Element.prototype, "getAnimations");
+    });
+
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    await clearToasts();
+    act(() => launcher.actions.toast("info", "会消失的"));
+    await flush();
+    act(() => shell.openCreateInstance());
+    await observed();
+    const [ghost] = ghosts();
+    const copied = ghost.querySelector("[style*='--toast-remaining']");
+    if (copied === null) throw new Error("拷贝里没有倒计时细线");
+    expect(lineOf(copied).currentTime).toBe(1234);
+  });
+
+  it("栈里没有通知时换角不留拷贝", async () => {
+    stubFades();
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    await clearToasts();
+    act(() => shell.openCreateInstance());
+    await observed();
+    expect(placement()).toEqual(TOP_LEFT);
+    expect(ghosts()).toEqual([]);
+  });
+
+  it("接力换角（关一个弹窗、隔几拍又开一个）：第二份拷贝从容器在新角淡入走到的透明度起淡出，不先闪回全不透明", async () => {
+    const finishers = stubFades();
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    await clearToasts();
+    act(() => launcher.actions.toast("error", "常驻的失败"));
+    act(() => shell.openCreateInstance());
+    await flush();
+    // 打开这一次留在右下的拷贝淡完；栈在左上的淡入也走完
+    act(() => finishers.forEach((finish) => finish()));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(ghosts()).toEqual([]);
+    const real = performance.now.bind(performance);
+    let clock: number | null = null;
+    vi.spyOn(performance, "now").mockImplementation(() => (clock === null ? real() : clock));
+
+    // 关掉：栈从左上回右下，左上留一份拷贝；右下的容器从这一刻起淡入
+    clock = real();
+    act(() => shell.closeCreateInstance());
+    await observed();
+    expect(ghosts().map((g) => [g.dataset.corner, ghostFrom(g)])).toEqual([["aside", 1]]);
+
+    // 50 ms 后又开一个：右下的淡入才走到一部分，右下的拷贝从那里起淡出
+    clock += 50;
+    act(() => shell.openCreateInstance());
+    await observed();
+    clock = null;
+    const second = ghosts().find((g) => g.dataset.corner === "home");
+    if (second === undefined) throw new Error("第二次换角没有在右下留拷贝");
+    expect(ghostFrom(second)).toBeCloseTo(tweenAt(fade.in, 0.05), 6);
+    expect(ghostFrom(second)).toBeLessThan(0.9);
   });
 });

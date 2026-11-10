@@ -1,16 +1,12 @@
-/* 退场中的骨架脱离布局后以这里为定位基准，叠在内容上淡出 */
+/* 退场中的骨架或内容脱离布局后以这里为定位基准，叠在对方上面淡出 */
 .loadable {
   position: relative;
   min-width: 0;
 }
 
+/* 骨架只是占位图形，整层不接收指针事件：退场时它脱离布局叠在内容上（比内容高时还盖住下面的兄弟），
+   淡出的那一段不能截住点在那块区域的点击。透明度由 framer-motion 统一驱动，这里不写 */
 .skeleton {
-  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
-}
-
-/* 等待期：占着位但看不见。用透明度而不是 visibility，到了该出现的时刻骨架是淡入的 */
-.skeleton[data-pending] {
-  opacity: 0;
   pointer-events: none;
 }
 

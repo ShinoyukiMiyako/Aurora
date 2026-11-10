@@ -143,6 +143,12 @@ export interface SetupCopy {
   };
 }
 
+/** 欢迎页标题下的说明：英文界面在后面补上语言说明。选目录页也要它，按它给说明区占高。 */
+export function welcomeLead(copy: SetupCopy): string {
+  const { lead, languageNote } = copy.welcome;
+  return languageNote === null ? lead : `${lead} ${languageNote}`;
+}
+
 // 只说代码按 AGPL 开源：美术素材另按素材许可授权，说成整个程序都按 AGPL 就成了对素材的默示许可
 const LEGAL_NOTE_ZH = `${APP_NAME}的代码按 ${APP_LICENSE} 及其附加条款开源，美术素材按 ${ASSET_LICENSE} 授权，不提供任何担保，你可以按协议转发。`;
 const LEGAL_NOTE_EN = `${APP_NAME_EN}'s code is open source under ${APP_LICENSE} with additional terms, and its art assets are licensed under ${ASSET_LICENSE}. It comes with no warranty. You may redistribute it under those licenses.`;

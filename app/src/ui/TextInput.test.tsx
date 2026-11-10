@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { insertItem } from "../lib/motion";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { keydown, render, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { Field } from "./Field";
@@ -117,6 +118,8 @@ describe("Field 关联", () => {
     first.rerender(<Named error="已有同名整合包" />);
     expect(errorOf()?.textContent).toBe("已有同名整合包");
     expect(errorOf()?.style.opacity).toBe("0");
+    // 起点取流内块增删的预设：从略小处落到位，与 Appear 里的提示条一致，不另写一套位移
+    expect(errorOf()?.style.transform).toBe(`scale(${insertItem.initial.scale})`);
     await waitForFrames(() => expect(errorOf()?.style.opacity).toBe("1"));
   });
 

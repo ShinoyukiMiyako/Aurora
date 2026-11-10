@@ -135,6 +135,8 @@ export const CREATE_COPY = {
     download: "预计下载",
     downloadValue: (bytes: number) => `约 ${formatBytes(bytes)}`,
     downloadNoLoader: " · 不含加载器",
+    /** 体积读不到，或有文件没标大小、估不准：宁可写估不出也不写一个偏小的数。 */
+    downloadUnknown: "无法估计",
     path: "存放位置",
     snapshotWarning: "快照版本可能有严重问题，别在里面放重要存档。",
     openAfter: "创建后打开实例详情",

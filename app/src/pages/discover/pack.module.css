@@ -1,6 +1,19 @@
-/* 弹窗页脚的挂载点：自身不成盒，挂进来的说明与按钮直接排在页脚的弹性布局里 */
+/* 弹窗页脚的挂载点：撑满页脚，挂进来的说明与按钮照页脚的排法排开。页脚随确认步出现时，
+   里面的说明与按钮跟着确认步的内容淡入一次，不在一帧里冒出来 */
 .footerHost {
-  display: contents;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sk-space-10);
+  min-width: 0;
+  animation: footer-in var(--sk-dur-in) var(--sk-ease-out) backwards;
+}
+
+@keyframes footer-in {
+  from {
+    opacity: 0;
+  }
 }
 
 .footNote {
@@ -30,6 +43,11 @@
   flex-direction: column;
   align-items: center;
   gap: var(--sk-space-6);
+}
+
+/* 换封面时弹回原大的那一层：自己不成行盒，方块下面不多出行高的空隙 */
+.stageBlock {
+  display: flex;
 }
 
 .packFields {
@@ -145,19 +163,19 @@
 }
 
 /* ---- 本地整合包导入 ---- */
+/* 定位容器：错误与受限说明淡出时抽出布局，以这里为基准叠在原处 */
 .choose,
 .confirm {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-14);
 }
 
+/* 拖进拖出时描边、底色与字色过渡一次：拖着文件在窗口边缘进出时不频闪 */
 .dropZone {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--sk-space-6);
+  display: grid;
+  place-items: center;
   min-height: 180px;
   padding: var(--sk-space-24) var(--sk-space-20);
   border: 1.5px dashed var(--sk-line-2);
@@ -165,6 +183,19 @@
   background: var(--sk-bg-2);
   color: var(--sk-text-3);
   text-align: center;
+  transition:
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+/* 选文件面与读取面叠在同一格：读取开始时投放区不变高 */
+.dropFace {
+  grid-area: 1 / 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sk-space-6);
 }
 
 /* 文件正拖在窗口上方：投放区接住它的提示。
@@ -274,8 +305,15 @@
   color: var(--sk-text-2);
 }
 
+/* 重读刚开始：占着这一行的位置，读得快就不露面 */
+.rereading[data-pending] {
+  visibility: hidden;
+}
+
 /* ---- 需要手动下载的文件清单 ---- */
+/* 定位容器：说明块换内容时，旧的一块抽出布局后以这里为基准叠在原处淡出 */
 .blocked {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-12);
@@ -313,7 +351,33 @@
   line-height: var(--sk-lh-caption);
 }
 
-/* 淡入淡出的标签外层：不成块、不占额外间距 */
+/* 淡入淡出的标签外层：不成块；里面是「还没找到」与「打开网页」一组时，间距与行尾区一致 */
 .fadeInline {
   display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-4);
+}
+
+/* 清单主按钮的文案在「我已下载，重新检查」「正在检查…」「继续导入 / 重新安装」之间换：三条叠在同一格，
+   按最宽的留宽，同一排的「关闭」不被挤动。没在显示的两条只画在伪元素里，按钮的文字与可访问名称只有当前这条 */
+.primaryLabel {
+  display: inline-grid;
+  justify-items: center;
+}
+
+.primaryLabel > span,
+.primaryLabel::before,
+.primaryLabel::after {
+  grid-area: 1 / 1;
+  white-space: nowrap;
+}
+
+.primaryLabel::before {
+  content: attr(data-reserve-a);
+  visibility: hidden;
+}
+
+.primaryLabel::after {
+  content: attr(data-reserve-b);
+  visibility: hidden;
 }
