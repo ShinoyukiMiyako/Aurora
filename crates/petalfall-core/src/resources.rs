@@ -14,6 +14,7 @@ use petalfall_download::DownloadTask;
 use petalfall_modplatform::{CurseForgeClient, ModrinthClient, Platform, ResourceType};
 
 use crate::blocked::{BlockedFile, ClaimedCopy, place_claimed, single_blocked};
+use crate::data_format::GuardMode;
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, EventSink, emit};
 use crate::facade::Petalfall;
@@ -51,6 +52,9 @@ impl Petalfall {
     ///
     /// 先在本地定位目标目录（实例不存在、存档不存在都在触网前报错），再取平台文件、校验文件名、
     /// 经批量下载池落盘（带 sha1 与大小契约，不符即重下换源）。
+    ///
+    /// 这之前先以「使用」方式核对游戏目录的数据格式记号：任务中心的重试与列实例被拒之后的旧列表都会不经
+    /// 列实例直接调进来，记号比这一版新或读不懂时什么都不下载、不写。
     pub async fn install_resource(
         &self,
         target: ResourceTarget<'_>,
@@ -59,6 +63,7 @@ impl Petalfall {
         file_version_id: &str,
         events: Option<&EventSink>,
     ) -> Result<ResourceInstallOutcome> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let (dir, landing) = self.resource_dir(target).await?;
         emit(
             events,
@@ -314,7 +319,10 @@ pub fn is_safe_file_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::config::PetalfallConfig;
+    use crate::data_format::testing::with_fixture;
+    use crate::instances::tests::{NEWER_STAMP, NEWER_WRITER, disk_state, own_format, write_stamp};
     use petalfall_instance::IsolationPolicy;
+    use petalfall_release::data_format::{StampFile, StampRead, parse_stamp};
     use sha1::{Digest, Sha1};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -830,6 +838,96 @@ mod tests {
         }
         for bad in ["", ".", "..", "a/b", "a\\b", "C:x", "x.", "x ", "a\u{0}b"] {
             assert!(!is_safe_file_name(bad), "{bad:?}");
+        }
+    }
+
+    /// 记号比这一版新或读不懂时，资源在定位目录、取平台文件之前就被挡下：带出记号的结论与游戏目录，游戏
+    /// 目录里一个文件都没被改、被碰或多出来，平台一个请求都没收到。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn install_resource_refuses_a_rejected_game_dir_before_asking_the_platform() {
+        let server = MockServer::start().await;
+        mount_modrinth_version(&server, "rp1", "Faithful.zip", b"resource-pack").await;
+        mount_modrinth_version(&server, "dp1", "terralith.zip", b"datapack").await;
+        let tmp = tempfile::tempdir().unwrap();
+        let mc = tmp.path();
+        put_version(mc, "1.21.1").await;
+        tokio::fs::create_dir_all(mc.join("versions/1.21.1/saves/新的世界"))
+            .await
+            .unwrap();
+        let petalfall = petalfall(mc, IsolationPolicy::All, &server.uri());
+        let game = petalfall.game_dir().to_path_buf();
+        // 关卡缺席时两项都装得上：资源包进 resourcepacks/，数据包进那个存档的 datapacks/。
+        let installs = [
+            (
+                ResourceTarget {
+                    version_id: "1.21.1",
+                    resource_type: ResourceType::ResourcePack,
+                    world: None,
+                },
+                "rp1",
+            ),
+            (
+                ResourceTarget {
+                    version_id: "1.21.1",
+                    resource_type: ResourceType::DataPack,
+                    world: Some("新的世界"),
+                },
+                "dp1",
+            ),
+        ];
+
+        write_stamp(&game, NEWER_STAMP);
+        let before = disk_state(&game);
+        for (target, file_version_id) in installs {
+            let install =
+                petalfall.install_resource(target, Platform::Modrinth, "p", file_version_id, None);
+            match with_fixture(own_format(2), install).await.unwrap_err() {
+                CoreError::GameDirDataTooNew {
+                    path,
+                    found,
+                    supported,
+                    written_by,
+                } => {
+                    assert_eq!(path, game, "{target:?}");
+                    assert_eq!((found, supported), (3, 2), "{target:?}");
+                    assert_eq!(written_by.as_deref(), Some(NEWER_WRITER), "{target:?}");
+                }
+                other => panic!("{target:?} 应报游戏目录太新，实际是 {other:?}"),
+            }
+            assert_eq!(disk_state(&game), before, "{target:?}");
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                0,
+                "{target:?}"
+            );
+        }
+
+        // 读不懂与号是多少无关：不换本版号，走生产的这条路。
+        let unreadable = r#"{"data_format":"3"}"#;
+        write_stamp(&game, unreadable);
+        let expected = match parse_stamp(StampFile::Contents(unreadable.as_bytes())) {
+            StampRead::Unreadable { reason } => reason,
+            other => panic!("夹具应当读不懂，实际是 {other:?}"),
+        };
+        let before = disk_state(&game);
+        for (target, file_version_id) in installs {
+            match petalfall
+                .install_resource(target, Platform::Modrinth, "p", file_version_id, None)
+                .await
+                .unwrap_err()
+            {
+                CoreError::DataFormatUnreadable { path, reason } => {
+                    assert_eq!(path, game, "{target:?}");
+                    assert_eq!(reason, expected, "{target:?}");
+                }
+                other => panic!("{target:?} 应报记号读不懂，实际是 {other:?}"),
+            }
+            assert_eq!(disk_state(&game), before, "{target:?}");
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                0,
+                "{target:?}"
+            );
         }
     }
 }
