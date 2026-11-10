@@ -204,7 +204,7 @@ export interface ListNewsOptions {
 
 /**
  * 官方资讯 6 小时内用缓存；联网失败退回缓存并标 offline，连缓存都没有才报错（network_failed / feed_invalid，detail.url）。
- * 启动器资讯（launcher）进程内缓存 1 小时，正式版不含预发布；它的失败不让命令报错，只放进 launcher_error。
+ * 启动器资讯（launcher）进程内缓存 1 小时，偏好的更新通道与安装包的通道都是正式版时不含预发布；它的失败不让命令报错，只放进 launcher_error。
  * 启动器资讯取不到之后按 1、5、15、60 分钟退避：退避期内不请求，照样给上次的失败（或上次取到的发布并标 offline）。
  */
 export const listNews = (options: ListNewsOptions = { retry: false }): Promise<NewsFeedDto> =>

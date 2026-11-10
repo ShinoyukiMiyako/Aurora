@@ -84,7 +84,7 @@ export const SETTINGS_SECTION_LABEL = {
   about: "关于",
 } as const;
 
-/** 发布通道（由版本号推出，见 lib/app-info 的 buildInfo）：关于页的通道标与版本信息。 */
+/** 发布通道（官方构建由版本号推出；自行构建的包标为 local、写「本机构建」，不在这张表里，见 lib/app-info 的 buildInfo）：关于页的通道标与版本信息。 */
 export const RELEASE_CHANNEL_LABEL: Readonly<Record<ReleaseChannel, string>> = {
   stable: "正式版",
   beta: "测试版",
