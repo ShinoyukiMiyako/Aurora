@@ -12,6 +12,7 @@
 //!   （`connect` / `timeout`）：前端据此判断要不要做一次连通性探测，而不必认识每一个可能联网的错误码。
 
 use std::error::Error as StdError;
+use std::path::Path;
 
 use petalfall_core::{
     AuthError, BaseError, CoreError, CoverImageError, CredentialRealm, DownloadError, InstallError,
@@ -126,12 +127,16 @@ pub mod code {
     /// 游戏目录不能用，detail.path 与 detail.problem（empty / not_absolute / contains_bang / unavailable）。
     pub const INVALID_GAME_DIRECTORY: &str = "invalid_game_directory";
     /// 游戏目录被更新版本的启动器用过，记下的数据格式比这个版本认得的新，读不了里面的实例。
+    /// detail：`{ path, found, supported, written_by, written_by_channel }`，path 是游戏目录；found、supported 是
+    /// 记号里的与这一版的数据格式号；written_by 是形状核过的版本号，记号里没写或形状不对时为 null；
+    /// written_by_channel 是它所属的通道（dev / beta / stable），written_by 为 null 时也为 null。
     pub const GAME_DIR_DATA_TOO_NEW: &str = "game_dir_data_too_new";
-    /// 游戏目录里记数据格式的文件读不懂，为了不弄坏里面的实例，没有打开它。
+    /// 游戏目录里记数据格式的文件读不懂，为了不弄坏里面的实例，没有打开它。detail：`{ path, reason }`，path 是
+    /// 游戏目录，reason 是读不懂的原因。
     pub const DATA_FORMAT_UNREADABLE: &str = "data_format_unreadable";
     /// 读不到本机物理内存信息。
     pub const MEMORY_UNAVAILABLE: &str = "memory_unavailable";
-    /// 当前环境没有自更新能力，detail.reason 为 debug_build / missing_pubkey / signed_version_not_required / downgrades_allowed / unknown_channel。
+    /// 当前环境没有自更新能力，detail.reason 为 debug_build / missing_pubkey / signed_version_not_required / downgrades_allowed / unknown_channel / pubkey_mismatch。
     pub const UPDATER_UNSUPPORTED: &str = "updater_unsupported";
     /// 检查更新失败（连不上更新源、更新源回了 404 以外的非 2xx、清单不合法）。
     pub const UPDATE_CHECK_FAILED: &str = "update_check_failed";
@@ -330,26 +335,53 @@ pub(crate) fn move_blocker_json(blocker: &MoveBlocker) -> Value {
             found,
             supported,
             written_by,
-        } => {
-            // 记号可能出自别人的机器：只交出形状核过的版本号与它的通道，不合格时两项都是 null。
-            let trusted = written_by
-                .as_deref()
-                .and_then(petalfall_core::data_format::trusted_written_by);
-            json!({
-                "kind": "data_too_new",
-                "path": path.display().to_string(),
-                "found": found,
-                "supported": supported,
-                "written_by": trusted.as_ref().map(|t| t.version.to_string()),
-                "written_by_channel": trusted.as_ref().map(|t| t.channel.as_str()),
-            })
-        }
-        MoveBlocker::DataFormatUnreadable { path, reason } => json!({
-            "kind": "data_format_unreadable",
-            "path": path.display().to_string(),
-            "reason": reason,
-        }),
+        } => with_kind(
+            "data_too_new",
+            data_too_new_fields(path, *found, *supported, written_by.as_deref()),
+        ),
+        MoveBlocker::DataFormatUnreadable { path, reason } => with_kind(
+            "data_format_unreadable",
+            data_format_unreadable_fields(path, reason),
+        ),
     }
+}
+
+/// 两种数据格式拦截项与同名错误的 detail 只差一个 `kind`，字段由同一个函数给出。
+fn with_kind(kind: &str, mut fields: Map<String, Value>) -> Value {
+    fields.insert("kind".to_owned(), json!(kind));
+    Value::Object(fields)
+}
+
+/// 游戏目录被更新的落樱用过：game_dir_data_too_new 的 detail 与移动拦截项 data_too_new 共用这几个字段，前端用同一个
+/// 解析函数读两处。记号可能出自别人的机器：只交出形状核过的版本号与它的通道，记号里没写或形状不对时两项都是 null。
+fn data_too_new_fields(
+    path: &Path,
+    found: u32,
+    supported: u32,
+    written_by: Option<&str>,
+) -> Map<String, Value> {
+    let trusted = written_by.and_then(petalfall_core::data_format::trusted_written_by);
+    let mut fields = Map::new();
+    fields.insert("path".to_owned(), json!(path.display().to_string()));
+    fields.insert("found".to_owned(), json!(found));
+    fields.insert("supported".to_owned(), json!(supported));
+    fields.insert(
+        "written_by".to_owned(),
+        json!(trusted.as_ref().map(|t| t.version.to_string())),
+    );
+    fields.insert(
+        "written_by_channel".to_owned(),
+        json!(trusted.as_ref().map(|t| t.channel.as_str())),
+    );
+    fields
+}
+
+/// 游戏目录的数据格式记号读不懂：data_format_unreadable 的 detail 与移动拦截项 data_format_unreadable 共用。
+fn data_format_unreadable_fields(path: &Path, reason: &str) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert("path".to_owned(), json!(path.display().to_string()));
+    fields.insert("reason".to_owned(), json!(reason));
+    fields
 }
 
 /// `source()` 链上每一层的描述（不含顶层，顶层已在 `message` 里）。
@@ -798,6 +830,22 @@ fn core_detail(err: &CoreError) -> Map<String, Value> {
         CoreError::InvalidGameDirectory { path, problem } => {
             detail.insert("path".to_owned(), json!(path.display().to_string()));
             detail.insert("problem".to_owned(), json!(problem.code()));
+        }
+        CoreError::GameDirDataTooNew {
+            path,
+            found,
+            supported,
+            written_by,
+        } => {
+            detail.extend(data_too_new_fields(
+                path,
+                *found,
+                *supported,
+                written_by.as_deref(),
+            ));
+        }
+        CoreError::DataFormatUnreadable { path, reason } => {
+            detail.extend(data_format_unreadable_fields(path, reason));
         }
         CoreError::InstanceMoveBlocked { id, blocker } => {
             detail.insert("id".to_owned(), json!(id));
@@ -1973,5 +2021,100 @@ mod tests {
             blocked.detail,
             Some(json!({ "id": "生存", "blocker": unreadable_json }))
         );
+    }
+
+    /// 游戏目录的两种数据格式错误，从盘上的记号经关卡一路到命令错误：detail 的 path 是游戏目录而不是记号文件；
+    /// game_dir_data_too_new 的 written_by 只给形状核过的版本号与它的通道，记号里没写或形状不对时两项都是 null，
+    /// 原文也不进 message。两种 detail 的字段与同名的移动拦截项去掉 kind 之后一致。
+    #[tokio::test]
+    async fn game_dir_data_format_errors_carry_the_game_dir_and_a_trusted_writer() {
+        use petalfall_core::data_format::{GuardMode, DATA_FORMAT};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_core::Petalfall::open(
+            petalfall_core::PetalfallConfig::default(),
+            tmp.path().to_path_buf(),
+            tmp.path().join("config.json"),
+        )
+        .unwrap();
+        let write_stamp = |dir: &Path, contents: &[u8]| {
+            let stamp = dir.join(".petalfall").join("data-format.json");
+            std::fs::create_dir_all(stamp.parent().unwrap()).unwrap();
+            std::fs::write(stamp, contents).unwrap();
+        };
+        let without_kind = |blocker: &MoveBlocker| {
+            let mut fields = move_blocker_json(blocker);
+            fields.as_object_mut().unwrap().remove("kind");
+            fields
+        };
+
+        for (index, (raw, version, channel)) in [
+            (Some("1.1.0-dev.57"), json!("1.1.0-dev.57"), json!("dev")),
+            (Some("1.0.0-beta.5"), json!("1.0.0-beta.5"), json!("beta")),
+            (Some("1.2.0"), json!("1.2.0"), json!("stable")),
+            (Some("1.1.0-rc.1"), Value::Null, Value::Null),
+            (Some("1.01.0"), Value::Null, Value::Null),
+            (
+                Some("1.1.0-dev.57 https://example.invalid/"),
+                Value::Null,
+                Value::Null,
+            ),
+            (None, Value::Null, Value::Null),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = tmp.path().join(format!("盘{index}")).join(".minecraft");
+            let mut stamp = json!({ "data_format": u32::MAX });
+            if let Some(raw) = raw {
+                stamp["written_by"] = json!(raw);
+            }
+            write_stamp(&dir, stamp.to_string().as_bytes());
+
+            let err: CommandError = petalfall
+                .guard_game_dir_at(&dir, GuardMode::Use)
+                .await
+                .unwrap_err()
+                .into();
+
+            assert_eq!(err.code, code::GAME_DIR_DATA_TOO_NEW, "{raw:?}");
+            let detail = json!({
+                "path": dir.display().to_string(),
+                "found": u32::MAX,
+                "supported": DATA_FORMAT,
+                "written_by": version,
+                "written_by_channel": channel,
+            });
+            assert_eq!(err.detail.as_ref(), Some(&detail), "{raw:?}");
+            if let Some(raw) = raw {
+                assert!(!err.message.contains(raw), "{raw:?}：{}", err.message);
+            }
+            let blocker = MoveBlocker::DataTooNew {
+                path: dir.clone(),
+                found: u32::MAX,
+                supported: DATA_FORMAT,
+                written_by: raw.map(str::to_owned),
+            };
+            assert_eq!(without_kind(&blocker), detail, "{raw:?}");
+        }
+
+        let dir = tmp.path().join("坏记号").join(".minecraft");
+        write_stamp(&dir, b"[2]");
+        let err: CommandError = petalfall
+            .guard_game_dir_at(&dir, GuardMode::Use)
+            .await
+            .unwrap_err()
+            .into();
+        assert_eq!(err.code, code::DATA_FORMAT_UNREADABLE);
+        let detail = json!({
+            "path": dir.display().to_string(),
+            "reason": "不是 JSON 对象，而是数组",
+        });
+        assert_eq!(err.detail.as_ref(), Some(&detail));
+        let blocker = MoveBlocker::DataFormatUnreadable {
+            path: dir.clone(),
+            reason: "不是 JSON 对象，而是数组".into(),
+        };
+        assert_eq!(without_kind(&blocker), detail);
     }
 }
