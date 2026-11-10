@@ -38,7 +38,9 @@ use tauri_plugin_updater::{Update, Updater, UpdaterExt};
 use tokio::sync::Notify;
 
 use crate::commands::error::{code, source_chain, CommandError};
-use crate::commands::update_slot::{CheckConclusion, ReleaseVersion, UpdateSlot};
+use crate::commands::update_slot::{
+    Candidate, CheckConclusion, ReleaseVersion, SlotError, UpdateSlot,
+};
 use crate::commands::update_sources::{
     judge, package_plan, sources_failed, AttemptError, PackagePlan, PackageSource, Verdict,
 };
@@ -420,7 +422,10 @@ impl UpdaterState {
             package_channel,
             preference: package_channel,
             relation: package_channel.map(|_| ChannelRelation::Same),
-            available: slot.available.as_ref().map(update_dto),
+            available: slot
+                .available
+                .as_ref()
+                .map(|candidate| update_dto(&candidate.update)),
             channel_heads: Vec::new(),
             refused: Vec::new(),
             downloaded_channel: downloaded_version.as_ref().and(package_channel),
@@ -440,6 +445,41 @@ impl UpdaterState {
         ready.update.install(&ready.bytes).map_err(|err| {
             updater_error(code::UPDATE_INSTALL_FAILED, "启动更新安装失败", None, err)
         })
+    }
+}
+
+/// 槽位只说为什么拒绝，错误码与说法在这里定。
+impl From<SlotError> for CommandError {
+    fn from(err: SlotError) -> Self {
+        match err {
+            SlotError::Busy => {
+                CommandError::new(code::UPDATE_BUSY, "已有更新包正在下载或安装，请等它结束")
+            }
+            SlotError::Superseded => CommandError::new(
+                code::UPDATE_SUPERSEDED,
+                "这期间更新通道改过，这次的结果已作废",
+            ),
+            SlotError::NoCandidate => {
+                CommandError::new(code::UPDATE_NOT_AVAILABLE, "重新检查后已经没有可用更新")
+            }
+            SlotError::Outdated {
+                downloading,
+                latest,
+            } => {
+                let message = match latest {
+                    Some(latest) => format!(
+                        "下载期间检查到了更新的版本 {latest}，这次下载的 {downloading} 已作废，请重新下载"
+                    ),
+                    None => format!(
+                        "下载期间再次检查时已没有可用更新，这次下载的 {downloading} 已作废"
+                    ),
+                };
+                CommandError::new(code::UPDATE_NOT_AVAILABLE, message)
+            }
+            SlotError::NotReady => {
+                CommandError::new(code::UPDATE_NOT_READY, "更新包还没有下载完成")
+            }
+        }
     }
 }
 
@@ -463,8 +503,13 @@ pub async fn check_update(
     updater: State<'_, UpdaterState>,
 ) -> Result<Option<UpdateDto>, CommandError> {
     updater.require_supported()?;
+    let ticket = updater.slot().generation();
     let conclusion = fetch_conclusion(&app).await?;
-    let dto = updater.slot().settle_check(conclusion).map(update_dto);
+    // 检查还只问本包通道的清单、不整理各通道的结果，`channel_heads` 照旧为空。
+    let dto = updater
+        .slot()
+        .settle_check(ticket, Vec::new(), conclusion)?
+        .map(|candidate| update_dto(&candidate.update));
     Ok(dto)
 }
 
@@ -564,7 +609,16 @@ where
                     }
                     None => tracing::info!(endpoint, "已是最新版本"),
                 }
-                return Ok(CheckConclusion::Manifest(found));
+                return Ok(match found {
+                    // 现在只问本包通道的清单，候选必然来自本包的通道；认不出通道的版本建不出检查器
+                    // （[`version_endpoints`]），走不到这里。
+                    Some(update) => CheckConclusion::Found(Candidate {
+                        update,
+                        channel: package_channel(app_version)
+                            .expect("候选只来自认得出通道的版本建的检查器"),
+                    }),
+                    None => CheckConclusion::UpToDate,
+                });
             }
             Err(err) => err,
         };
@@ -794,21 +848,31 @@ pub async fn download_update(
     let outcome = async {
         let task = tasks.register(&task_id)?;
         let token = task.token();
+        let ticket = updater.slot().generation();
         // 开发版的滚动预发布每次构建都删掉上一版安装包，检查时记下的地址过一阵就 404，重试也一样
         let conclusion = unless_cancelled(token, fetch_conclusion(&app)).await?;
-        let update = updater.slot().update_to_download(conclusion)?;
-        let plan = unless_cancelled(token, download_plan(&facade, &update)).await?;
+        // 重查同检查，`channel_heads` 照旧为空。
+        let candidate = updater
+            .slot()
+            .update_to_download(ticket, Vec::new(), conclusion)?;
+        let update = &candidate.update;
+        let plan = unless_cancelled(token, download_plan(&facade, update)).await?;
         let (bytes, source) = task
             .run(download_with_progress(
-                &update,
+                update,
                 &plan.sources,
                 plan.size,
                 events.sink(),
                 token,
-                || updater.slot().ensure_current(&update),
+                || {
+                    updater
+                        .slot()
+                        .ensure_current(&candidate)
+                        .map_err(CommandError::from)
+                },
             ))
             .await?;
-        let dto = update_dto(&update);
+        let dto = update_dto(update);
         tracing::info!(
             version = %update.version,
             source = %source.name,
@@ -816,7 +880,7 @@ pub async fn download_update(
             "更新包下载并校验完成"
         );
         // 槽位里存的是清单原样的那份：安装只用字节，换源改过的下载地址留着没有用处。
-        updater.slot().store_download(update, bytes)?;
+        updater.slot().store_download(ticket, candidate, bytes)?;
         Ok(dto)
     }
     .await;
@@ -925,7 +989,10 @@ pub async fn set_install_on_exit(
     updater: State<'_, UpdaterState>,
 ) -> Result<(), CommandError> {
     updater.require_supported()?;
-    updater.slot().set_install_on_exit(enabled)
+    updater
+        .slot()
+        .set_install_on_exit(enabled)
+        .map_err(CommandError::from)
 }
 
 /// 在 `RunEvent::Exit` 里调用：选了「退出时安装」就在进程退出前拉起安装程序。
@@ -2852,9 +2919,27 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_changed_manifest_stops_before_the_next_source() {
         let slot = Mutex::new(UpdateSlot::<Fake>::default());
-        slot.lock().unwrap().record_check(Some(Fake("0.2.0")));
-        let downloading = Fake("0.2.0");
-        let still_current = || slot.lock().unwrap().ensure_current(&downloading);
+        let found = |version| {
+            let mut slot = slot.lock().unwrap();
+            let ticket = slot.generation();
+            let candidate = Candidate {
+                update: Fake(version),
+                channel: Channel::Stable,
+            };
+            slot.settle_check(ticket, Vec::new(), CheckConclusion::Found(candidate))
+                .unwrap();
+        };
+        found("0.2.0");
+        let downloading = Candidate {
+            update: Fake("0.2.0"),
+            channel: Channel::Stable,
+        };
+        let still_current = || {
+            slot.lock()
+                .unwrap()
+                .ensure_current(&downloading)
+                .map_err(CommandError::from)
+        };
         let fixture = || {
             fake_sources(vec![
                 ("cn", Script::failing(status("404 Not Found"))),
@@ -2867,7 +2952,7 @@ mod tests {
         let (outcome, _) = download_until(&package, &sources, None, &cancel, still_current).await;
         assert_eq!(outcome.unwrap(), (package_from("hk"), "hk".to_owned()));
 
-        slot.lock().unwrap().record_check(Some(Fake("0.2.1")));
+        found("0.2.1");
         let (package, sources) = fixture();
         let (outcome, _) = download_until(&package, &sources, None, &cancel, still_current).await;
         let err = outcome.unwrap_err();
@@ -3252,7 +3337,7 @@ mod tests {
         let download_update = top_level_fn(source, "pub async fn download_update(");
         for step in [
             "unless_cancelled(token, fetch_conclusion(&app)).await?",
-            "unless_cancelled(token, download_plan(&facade, &update)).await?",
+            "unless_cancelled(token, download_plan(&facade, update)).await?",
         ] {
             assert!(download_update.contains(step), "{step}\n{download_update}");
         }
@@ -3618,13 +3703,16 @@ mod tests {
         .await;
         assert!(matches!(
             found.unwrap(),
-            CheckConclusion::Manifest(Some(Fake("0.2.0")))
+            CheckConclusion::Found(Candidate {
+                update: Fake("0.2.0"),
+                channel: Channel::Stable,
+            })
         ));
         assert_eq!(asked, [0]);
 
         // 已是最新（含端点回 204）同样是给出了清单：不去问 GitHub 有没有更新的。
         let (latest, asked) = check_with(&endpoints, vec![Ok(None), Ok(Some(Fake("0.3.0")))]).await;
-        assert!(matches!(latest.unwrap(), CheckConclusion::Manifest(None)));
+        assert!(matches!(latest.unwrap(), CheckConclusion::UpToDate));
         assert_eq!(asked, [0]);
 
         assert!(first.received_requests().await.unwrap().is_empty());
@@ -3662,7 +3750,10 @@ mod tests {
             assert!(
                 matches!(
                     conclusion,
-                    Ok(CheckConclusion::Manifest(Some(Fake("0.2.0"))))
+                    Ok(CheckConclusion::Found(Candidate {
+                        update: Fake("0.2.0"),
+                        channel: Channel::Stable,
+                    }))
                 ),
                 "{case}"
             );
