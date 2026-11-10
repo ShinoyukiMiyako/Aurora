@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { IpcError } from "../ipc/errors";
 import { APP_NAME } from "../lib/app-info";
-import { describeError, errorDetail, errorDetailOf, itemFailureReason, networkFailureOf, sourceFailuresOf } from "./errors";
+import { describeError, errorDetail, errorDetailOf, gameDirDataRejectionOf, itemFailureReason, networkFailureOf, sourceFailuresOf } from "./errors";
 
 describe("批量动作里一项失败的原因", () => {
   it("正文只有「文件 IO 失败: 路径」时写原因链，多层按后端的写法用全角冒号接起来", () => {
@@ -146,5 +146,50 @@ describe("游戏目录的数据格式比这一版新或读不懂时的通知正�
     }
     expect(() => describeError(new IpcError("data_format_unreadable", "原文", { path: DIR }))).toThrow("data_format_unreadable 的 detail.reason 应是字符串");
     expect(() => describeError(new IpcError("data_format_unreadable", "原文", { reason: "x" }))).toThrow("data_format_unreadable 的 detail.path 应是字符串");
+  });
+});
+
+describe("游戏目录的数据格式拒绝", () => {
+  const DIR = "\\\\nas\\共享\\.minecraft";
+
+  it("被更新的版本用过：交回 too_new 与逐项取出的 detail，后端多带的字段不跟过来", () => {
+    const detail = { path: DIR, found: 3, supported: 2, written_by: "1.2.0-beta.3", written_by_channel: "beta", causes: ["format 3 > 2"] };
+    expect(gameDirDataRejectionOf(new IpcError("game_dir_data_too_new", "原文", detail))).toEqual({
+      kind: "too_new",
+      detail: { path: DIR, found: 3, supported: 2, written_by: "1.2.0-beta.3", written_by_channel: "beta" },
+    });
+  });
+
+  it("格式号取边界值、用过它的版本不可信（两项同为空）：照样交回", () => {
+    const detail = { path: "", found: Number.MAX_SAFE_INTEGER, supported: 0, written_by: null, written_by_channel: null };
+    expect(gameDirDataRejectionOf(new IpcError("game_dir_data_too_new", "原文", detail))).toEqual({ kind: "too_new", detail });
+  });
+
+  it("记号读不懂：交回 unreadable 与路径、原因原文", () => {
+    const detail = { path: DIR, reason: "expected `,` or `}` at line 1 column 14", causes: ["x"] };
+    expect(gameDirDataRejectionOf(new IpcError("data_format_unreadable", "原文", detail))).toEqual({
+      kind: "unreadable",
+      detail: { path: DIR, reason: "expected `,` or `}` at line 1 column 14" },
+    });
+  });
+
+  it("别的错误码、前端自身的错误、只是长得像后端错误的对象：都不是", () => {
+    expect(gameDirDataRejectionOf(new IpcError("invalid_game_directory", "游戏目录不可用", { path: DIR }))).toBeNull();
+    expect(gameDirDataRejectionOf(new IpcError("io", "文件 IO 失败: config.json"))).toBeNull();
+    expect(gameDirDataRejectionOf(new IpcError("instance_busy", "实例 1.20.1 正在运行，请稍后再试", { id: "1.20.1", activity: "running" }))).toBeNull();
+    expect(gameDirDataRejectionOf(new Error("game_dir_data_too_new"))).toBeNull();
+    expect(gameDirDataRejectionOf({ code: "data_format_unreadable", detail: { path: DIR, reason: "x" } })).toBeNull();
+    expect(gameDirDataRejectionOf("data_format_unreadable")).toBeNull();
+  });
+
+  it("detail 形状不对：契约破了，抛错并指出是哪个错误码的哪一项", () => {
+    const tooNew = { path: DIR, found: 3, supported: 2, written_by: "1.1.0-dev.57", written_by_channel: "dev" };
+    expect(() => gameDirDataRejectionOf(new IpcError("game_dir_data_too_new", "原文"))).toThrow("game_dir_data_too_new 的 detail 应是对象");
+    expect(() => gameDirDataRejectionOf(new IpcError("game_dir_data_too_new", "原文", { ...tooNew, found: 1.5 }))).toThrow("game_dir_data_too_new 的 detail.found 应是非负整数");
+    expect(() => gameDirDataRejectionOf(new IpcError("game_dir_data_too_new", "原文", { ...tooNew, written_by_channel: "nightly" }))).toThrow(
+      "game_dir_data_too_new 的 detail.written_by_channel 不认识",
+    );
+    expect(() => gameDirDataRejectionOf(new IpcError("data_format_unreadable", "原文", "读不懂"))).toThrow("data_format_unreadable 的 detail 应是对象");
+    expect(() => gameDirDataRejectionOf(new IpcError("data_format_unreadable", "原文", { path: DIR, reason: null }))).toThrow("data_format_unreadable 的 detail.reason 应是字符串");
   });
 });

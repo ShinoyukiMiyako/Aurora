@@ -16,7 +16,7 @@ import { fade, springs } from "../../lib/motion";
 import { observeReflow, REFLOW_PAUSED_ATTR } from "../../lib/reflow";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
-import { describeError, errorRecord } from "../../state/errors";
+import { describeError, gameDirDataRejectionOf } from "../../state/errors";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
 import { useGameDirectories, type GameDirectoryDto } from "../../state/queries/catalog";
 import { busyInstanceId, gameDirectoryBusy } from "../../state/selectors";
@@ -61,12 +61,6 @@ const SKELETON_CARDS = { compact: 6, regular: 8, wide: 10 } as const;
 const SEARCH_SHORTCUT = ["Ctrl", "F"] as const;
 
 const NO_DIRECTORIES: readonly GameDirectoryDto[] = [];
-
-/**
- * 列实例时后端因游戏目录的数据格式拒绝读写的两种错误：目录被更新的版本用过，或记数据格式的文件读不懂。
- * 换目录之前重试也读不出来，所以错误场景换成「打不开」的说法并给出换目录的出路。
- */
-const GAME_DIR_BLOCKED_CODES: ReadonlySet<string> = new Set(["game_dir_data_too_new", "data_format_unreadable"]);
 
 /** 格子的退场按 AnimatePresence 的 custom 取：一次涉及太多格子（crowded）时直接撤下，由整片淡入代替逐个淡出。 */
 const cellMotion: Variants = {
@@ -116,7 +110,9 @@ export default function LibraryPage() {
   );
 
   const ready = slice.kind === "ready";
-  const blocked = slice.kind === "error" && GAME_DIR_BLOCKED_CODES.has(errorRecord(slice.error).code);
+  // 列实例时后端因游戏目录的数据格式拒绝读写（目录被更新的版本用过，或记数据格式的文件读不懂）：换目录之前重试也读不出来，
+  // 所以错误场景换成「打不开」的说法并给出换目录的出路
+  const blocked = slice.kind === "error" && gameDirDataRejectionOf(slice.error) !== null;
   // 目录列表读不出时这里只是少一个切换入口，错误由设置页的游戏目录卡片原位呈现
   const knownDirs = dirs.data === undefined ? NO_DIRECTORIES : dirs.data;
   const suggestion = switchSuggestion(knownDirs);

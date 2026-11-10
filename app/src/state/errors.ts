@@ -5,7 +5,7 @@ import { dataFormatUnreadableText, gameDirDataTooNewText } from "../copy/data-fo
 import { INSTANCE_IN_USE_COPY } from "../copy/flows";
 import { instanceBusyFromError, isInstanceBusy } from "../domain/instance-busy";
 import { IpcError, isIpcError, UNKNOWN_ERROR_CODE } from "../ipc/errors";
-import { DATA_FORMAT_UNREADABLE_ERROR_CODE, GAME_DIR_DATA_TOO_NEW_ERROR_CODE, parseDataFormatUnreadable, parseGameDirDataTooNew } from "../ipc/instances";
+import { DATA_FORMAT_UNREADABLE_ERROR_CODE, GAME_DIR_DATA_TOO_NEW_ERROR_CODE, parseDataFormatUnreadable, parseGameDirDataTooNew, type DataFormatUnreadableDto, type GameDirDataTooNewDto } from "../ipc/instances";
 import type { UpdateSourceFailureDto, UpdateSourceFailureKind } from "../ipc/system";
 
 function numericDetail(detail: unknown, key: string): number | null {
@@ -21,19 +21,38 @@ function inUseReason(error: IpcError): string | null {
   return usedBy === null ? null : INSTANCE_IN_USE_COPY.reason(usedBy);
 }
 
+/** 后端因游戏目录的数据格式拒绝读写：目录被更新的版本用过（too_new），或记数据格式的文件读不懂（unreadable）。 */
+export type GameDirDataRejection = { kind: "too_new"; detail: GameDirDataTooNewDto } | { kind: "unreadable"; detail: DataFormatUnreadableDto };
+
 /**
- * 游戏目录的数据格式比这一版新、或记号读不懂时，界面不显示格式号，正文按 detail 写出是哪个目录、被哪一版用过，
- * 不用后端原文。其余错误为 null。detail 不成形是前后端契约破坏，抛出，不退回后端原文。
+ * 游戏目录的数据格式拒绝与它解析好的 detail；别的错误为 null。页面与流程不能引用 ipc，经这里认这两个错误码，
+ * detail 的校验只在 ipc 里写一份。detail 不成形是前后端契约破坏，抛出。
  */
-function dataFormatReason(error: IpcError): string | null {
+export function gameDirDataRejectionOf(error: unknown): GameDirDataRejection | null {
+  if (!isIpcError(error)) return null;
   const where = `${error.code} 的 detail`;
   switch (error.code) {
     case GAME_DIR_DATA_TOO_NEW_ERROR_CODE:
-      return gameDirDataTooNewText(parseGameDirDataTooNew(error.detail, where));
+      return { kind: "too_new", detail: parseGameDirDataTooNew(error.detail, where) };
     case DATA_FORMAT_UNREADABLE_ERROR_CODE:
-      return dataFormatUnreadableText(parseDataFormatUnreadable(error.detail, where));
+      return { kind: "unreadable", detail: parseDataFormatUnreadable(error.detail, where) };
     default:
       return null;
+  }
+}
+
+/**
+ * 游戏目录的数据格式比这一版新、或记号读不懂时，界面不显示格式号，正文按 detail 写出是哪个目录、被哪一版用过，
+ * 不用后端原文。其余错误为 null。
+ */
+function dataFormatReason(error: IpcError): string | null {
+  const rejection = gameDirDataRejectionOf(error);
+  if (rejection === null) return null;
+  switch (rejection.kind) {
+    case "too_new":
+      return gameDirDataTooNewText(rejection.detail);
+    case "unreadable":
+      return dataFormatUnreadableText(rejection.detail);
   }
 }
 
