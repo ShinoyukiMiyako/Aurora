@@ -278,11 +278,11 @@ impl Petalfall {
     /// 游戏目录，走这个入口。
     ///
     /// 看目录在不在与读记号放在一个阻塞任务里，共用 [`DIR_PROBE_TIMEOUT`]；「使用」方式下抬号时的再读与写记号
-    /// 也算在这同一个时限里。时限内没有结论（网络盘挂起、写挂起、任务异常结束）两种方式都报
-    /// [`GameDirProblem::Unavailable`]，不读写这个目录：没核对过就往下走，号更低的这一版可能写坏里面的数据，
-    /// 宁可让用户重试。其余情况：
-    /// - 目录本身不存在：交回 [`GameDirCheck::Absent`]，不建目录、不写；
-    /// - 看目录时出错（不存在以外）：报读写错误；
+    /// 也算在这同一个时限里。时限内没有结论（网络盘挂起、写挂起、任务异常结束），或者看目录时这个位置此刻够不着
+    /// （Windows 上盘符无效、找不到网络路径或网络名），两种方式都报 [`GameDirProblem::Unavailable`]，不读写这个
+    /// 目录：没核对过就往下走，号更低的这一版可能写坏里面的数据，宁可让用户重试。其余情况：
+    /// - 目录本身不存在（文件或路径不存在）：交回 [`GameDirCheck::Absent`]，不建目录、不写；
+    /// - 看目录时出错（上面两种以外）：报读写错误；
     /// - 号不高于这一版：交回 [`GameDirCheck::Ready`]；「使用」方式下号更低时先把记号原子写成这一版，写不进去
     ///   报读写错误。写之前再读一次（见 [`raise_if_still_lower`]），那时号已经不低于这一版就不写，照再读到的
     ///   记号下结论；
@@ -344,7 +344,9 @@ pub(crate) enum DirLook {
     Absent,
     /// 目录在，这是记号的读取结论（文件不存在算 1）。
     Stamp(StampRead),
-    /// 看目录时出错（不存在以外）。
+    /// 看目录时这个位置此刻够不着（见 [`is_missing`]），不知道目录在不在。
+    Unreachable(io::Error),
+    /// 看目录时出错（不存在、够不着以外）。
     Failed(io::Error),
     /// 做这件事的阻塞任务异常结束，没有结论。
     Lost,
@@ -373,6 +375,18 @@ async fn guard_dir(
                 path: dir.to_owned(),
                 source,
             }));
+        }
+        Ok(DirLook::Unreachable(source)) => {
+            tracing::info!(
+                dir = %dir.display(),
+                ?mode,
+                error = %source,
+                "看游戏目录时这个位置够不着，不当作目录不存在，按暂时连不上处理"
+            );
+            return Err(CoreError::InvalidGameDirectory {
+                path: dir.to_owned(),
+                problem: GameDirProblem::Unavailable,
+            });
         }
         Ok(DirLook::Lost) | Err(_) => {
             tracing::info!(
@@ -507,10 +521,21 @@ fn look_at_game_dir(dir: &Path) -> DirLook {
                 "这个位置是文件，不是文件夹",
             ));
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return DirLook::Absent,
-        Err(err) => return DirLook::Failed(err),
+        Err(err) => return dir_error_look(err),
     }
     DirLook::Stamp(stamp_read(std::fs::read(stamp_path(dir))))
+}
+
+/// 取游戏目录的元数据出错时的结论：确实不存在（见 [`is_missing`]）是目录不存在；同样被归成 `NotFound` 的其余
+/// 几种是这一刻够不着；别的是读写错误。
+fn dir_error_look(err: io::Error) -> DirLook {
+    if is_missing(&err) {
+        DirLook::Absent
+    } else if err.kind() == io::ErrorKind::NotFound {
+        DirLook::Unreachable(err)
+    } else {
+        DirLook::Failed(err)
+    }
 }
 
 fn stamp_path(game_dir: &Path) -> PathBuf {
@@ -530,25 +555,30 @@ fn stamp_read(file: io::Result<Vec<u8>>) -> StampRead {
     }
 }
 
-/// 读记号文件出错时，这算记号缺失还是读出错。
+/// 读盘报的错是不是「确实不存在」。
 ///
-/// Windows 上标准库把盘符无效（15）、找不到网络路径（53）、找不到网络名（67）也归成 `NotFound`。读记号时报
-/// 这几种，说明这一刻够不着那个位置（多半是网络盘一时断开），而不是记号不存在：当成缺失接着抬号，就会把已有
-/// 的更高的号覆盖成低号。所以只认文件不存在、路径不存在（2、3）为缺失，其余一律按读出错，原因带系统错误原文。
+/// Windows 上标准库把盘符无效（15）、找不到网络路径（53）、找不到网络名（67）也归成 `NotFound`。报这几种说明
+/// 这一刻够不着那个位置（多半是网络盘一时断开），而不是东西不存在：读记号时当成缺失接着抬号，会把已有的更高的号
+/// 覆盖成低号；看游戏目录时当成目录不存在，关卡就不核对、直接放行，建好目录之后的那次核对也一样。所以只认文件
+/// 不存在、路径不存在（2、3）。
 #[cfg(windows)]
-fn stamp_file_error(err: &io::Error) -> StampFile<'static> {
+fn is_missing(err: &io::Error) -> bool {
     // ERROR_FILE_NOT_FOUND、ERROR_PATH_NOT_FOUND。
     const MISSING: [i32; 2] = [2, 3];
-    match err.raw_os_error() {
-        Some(code) if MISSING.contains(&code) => StampFile::Missing,
-        _ => StampFile::ReadFailed(err.to_string()),
-    }
+    err.raw_os_error()
+        .is_some_and(|code| MISSING.contains(&code))
 }
 
-/// 别的平台上 `NotFound` 只表示文件或路径不存在，照旧算缺失。
+/// 别的平台上 `NotFound` 只表示文件或路径不存在。
 #[cfg(not(windows))]
+fn is_missing(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::NotFound
+}
+
+/// 读记号文件出错时，这算记号缺失还是读出错：确实不存在（见 [`is_missing`]）才算缺失，其余一律按读出错，原因带
+/// 系统错误原文。
 fn stamp_file_error(err: &io::Error) -> StampFile<'static> {
-    if err.kind() == io::ErrorKind::NotFound {
+    if is_missing(err) {
         StampFile::Missing
     } else {
         StampFile::ReadFailed(err.to_string())
@@ -1570,6 +1600,67 @@ mod tests {
             stamp_file_error(&bare),
             StampFile::ReadFailed(bare.to_string())
         );
+    }
+
+    /// 看游戏目录用同一条规矩：只有文件不存在、路径不存在算目录不存在；盘符无效、找不到网络路径、找不到网络名是
+    /// 这一刻够不着，原错误带着交出去；拒绝访问是普通的读写错误。说不清是哪一种的 `NotFound` 也算够不着，不放行。
+    #[cfg(windows)]
+    #[test]
+    fn only_a_missing_file_or_path_counts_as_a_missing_game_dir() {
+        for code in [2, 3] {
+            let look = dir_error_look(io::Error::from_raw_os_error(code));
+            assert!(matches!(look, DirLook::Absent), "os error {code}：{look:?}");
+        }
+        for code in [15, 53, 67] {
+            match dir_error_look(io::Error::from_raw_os_error(code)) {
+                DirLook::Unreachable(err) => assert_eq!(err.raw_os_error(), Some(code)),
+                other => panic!("os error {code} 应判为够不着，实际是 {other:?}"),
+            }
+        }
+        match dir_error_look(io::Error::from_raw_os_error(5)) {
+            DirLook::Failed(err) => assert_eq!(err.raw_os_error(), Some(5)),
+            other => panic!("拒绝访问应判为读写错误，实际是 {other:?}"),
+        }
+        match dir_error_look(io::Error::from(io::ErrorKind::NotFound)) {
+            DirLook::Unreachable(err) => {
+                assert_eq!(
+                    (err.kind(), err.raw_os_error()),
+                    (io::ErrorKind::NotFound, None)
+                );
+            }
+            other => panic!("不带系统错误码的 NotFound 应判为够不着，实际是 {other:?}"),
+        }
+    }
+
+    /// 看目录时够不着：两种方式都报暂时连不上，不当作目录不存在放行，也不再读、不写记号。
+    #[tokio::test]
+    async fn an_unreachable_game_dir_is_unavailable_not_absent() {
+        let dir = PathBuf::from(r"\\nas\share\.minecraft");
+        for mode in [GuardMode::Use, GuardMode::Inspect] {
+            let err = guard_dir(
+                &dir,
+                mode,
+                2,
+                Some(WRITER),
+                async { DirLook::Unreachable(io::Error::from_raw_os_error(53)) },
+                async |_: &Path| -> StampRead { panic!("够不着时不该再读记号") },
+                async |_: &Path, _: &[u8]| -> petalfall_base::Result<()> {
+                    panic!("够不着时不该写记号")
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    CoreError::InvalidGameDirectory {
+                        path,
+                        problem: GameDirProblem::Unavailable,
+                    } if *path == dir
+                ),
+                "{mode:?}：{err:?}"
+            );
+        }
     }
 
     /// 真实磁盘上走到的两种「不存在」：游戏目录本身不存在（连上一级都不在也一样）是目录不存在；目录在而
