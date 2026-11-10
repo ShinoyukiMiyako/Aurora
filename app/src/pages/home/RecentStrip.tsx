@@ -21,6 +21,7 @@ import { useReflow } from "../../lib/reflow";
 import { useMounted } from "../../lib/useMounted";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector, useNow } from "../../state/launcher";
+import { findInstance } from "../../state/selectors";
 import { progressTrack } from "../../state/tasks";
 import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
@@ -146,9 +147,18 @@ function RecentCard({ inst }: { inst: InstanceSummary }) {
         </CardTitleButton>
         <span className={s.recentMeta}>{HOME_COPY.recentMeta(formatRelative(inst.lastPlayedAt, now), LOADER_NAME[inst.loader])}</span>
       </div>
-      <RecentLaunch instanceId={inst.id} />
+      <RecentLaunchSlot instanceId={inst.id} />
     </Card>
   );
+}
+
+/**
+ * 整段或这张卡退场期间卡片还挂着、照样订阅状态。实例在这期间不在了（被删，或游戏目录因数据格式打不开、列表被清空）时
+ * 不画启动入口：入口按 id 取实例，取不到就抛错，整个主页会落进页面错误边界。
+ */
+function RecentLaunchSlot({ instanceId }: { instanceId: string }) {
+  const live = useLauncherSelector((s) => findInstance(s, instanceId) !== undefined);
+  return live ? <RecentLaunch instanceId={instanceId} /> : null;
 }
 
 /**
