@@ -32,6 +32,7 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use petalfall_base::http::NetworkFailure;
+use petalfall_core::data_format::DATA_FORMAT;
 use petalfall_core::release::order::{compare_versions, Channel};
 use petalfall_core::update_prefs::{
     LazyPreference, SeenUpdateEntries, SeenUpdateVersion, UpdateCheckRecord,
@@ -51,8 +52,9 @@ use crate::commands::update_channels::{
     ChannelReport, Conclusion, EndpointOutcome,
 };
 use crate::commands::update_head::{read_seen_entry, verify_head, VerifiedHead};
+use crate::commands::update_package::vet_download;
 use crate::commands::update_slot::{
-    Candidate, CheckConclusion, Generation, ReleaseVersion, SlotError, UpdateSlot,
+    Candidate, CheckConclusion, Downloaded, Generation, ReleaseVersion, SlotError, UpdateSlot,
 };
 use crate::commands::update_sources::{
     judge, package_plan, sources_failed, AttemptError, PackagePlan, PackageSource, Verdict,
@@ -424,17 +426,60 @@ impl UpdaterState {
         }
     }
 
-    /// 拉起已下载更新包的安装程序。Windows 上成功即退出进程，不会返回；拉不起来（`ShellExecuteW` 失败）时
-    /// 插件返回错误，但它在拉起之前已经跑过默认的 `on_before_exit`（tauri 的 `cleanup_before_exit`），
-    /// 把所有窗口都藏了起来，见 [`install_after_persisting`]。
-    fn install_downloaded(&self) -> Result<(), CommandError> {
+    /// 拉起已下载更新包的安装程序，`current` 是正在运行的版本，先过安装前的关卡（[`installable`]）。Windows 上
+    /// 成功即退出进程，不会返回；拉不起来（`ShellExecuteW` 失败）时插件返回错误，但它在拉起之前已经跑过默认的
+    /// `on_before_exit`（tauri 的 `cleanup_before_exit`），把所有窗口都藏了起来，见 [`install_after_persisting`]。
+    fn install_downloaded(&self, current: &Version) -> Result<(), CommandError> {
         let slot = self.slot();
-        let ready = slot.ready()?;
-        tracing::info!(version = %ready.update.version, "开始安装更新");
+        let ready = installable(&slot, current)?;
+        tracing::info!(
+            version = %ready.update.version,
+            channel = ready.channel.as_str(),
+            "开始安装更新"
+        );
         ready.update.install(&ready.bytes).map_err(|err| {
             updater_error(code::UPDATE_INSTALL_FAILED, "启动更新安装失败", None, err)
         })
     }
+}
+
+/// 安装前的关卡，「立即安装」与「退出时安装」共用：槽位里要有下好的包，它是普通更新，版本又严格新于正在运行的
+/// `current`，否则报 `update_not_ready`、不交给安装程序。
+///
+/// 偏好、见过的版本与跟随规则已在下载前的重查里按同一个代号核过；改偏好会清掉槽位里的包、代号加一，下载开始之后
+/// 才改的又落不进槽位，所以包还在就说明那些条件没变。关卡因此只读槽位，退出路径（同步、拿不到门面的锁）也能做。
+fn installable<'s, U: ReleaseVersion>(
+    slot: &'s UpdateSlot<U>,
+    current: &Version,
+) -> Result<&'s Downloaded<U>, CommandError> {
+    let ready = slot.ready()?;
+    let version = ready.update.release_version();
+    if ready.intent != UpdateIntent::Update {
+        tracing::error!(
+            version,
+            channel = ready.channel.as_str(),
+            intent = ?ready.intent,
+            "下好的包不是普通更新，不从这里交给安装程序"
+        );
+        return Err(CommandError::new(
+            code::UPDATE_NOT_READY,
+            "下好的包不是普通更新，不能从这里安装",
+        ));
+    }
+    let parsed = Version::parse(version).expect("槽位里包的版本由清单里解析出的 semver 转成");
+    if !compare_versions(&parsed, current).is_gt() {
+        tracing::error!(
+            version,
+            channel = ready.channel.as_str(),
+            %current,
+            "下好的包不比正在运行的版本新，不交给安装程序"
+        );
+        return Err(CommandError::new(
+            code::UPDATE_NOT_READY,
+            format!("下好的更新包 {version} 不比正在运行的 {current} 新，不能安装"),
+        ));
+    }
+    Ok(ready)
 }
 
 /// 拿槽位的锁。临界区里只有字段赋值与同步的安装调用，真中毒说明程序已处于未知状态，直接崩。
@@ -1454,6 +1499,8 @@ async fn save_check_record(facade: &Facade, record: &UpdateCheckRecord) -> bool 
 /// 再次检查换了版本或已无更新时报 `update_not_available`，包同样丢弃。正文开始后长时间没有进展（见 [`StallWatch`]）
 /// 记为超时，下载的字节超过清单声明的大小记为 `too_large`，都换下一个源。
 /// 重查、解析候选源与排序（自动档要探测）也都看取消：令牌一置位就丢下手头这一步，报 `cancelled`。
+/// 已有下载或安装在进行时一开始就报 `update_busy`。验过签的包先看载荷头再收进槽位（[`vet_download`]）：包不对报
+/// `update_signature_invalid`；认不得这台电脑上的数据时报 `update_data_too_new`，本次会话不再把这一版当作候选。
 #[tauri::command]
 pub async fn download_update(
     task_id: String,
@@ -1465,6 +1512,8 @@ pub async fn download_update(
     updater.require_supported()?;
     let events = CoreEventForwarder::to_app(&app, Some(task_id.clone()));
     let outcome = async {
+        // 同一时间只有一次下载或安装；改通道也要等它结束。守卫随这个块结束（成功、失败、取消）放掉。
+        let _busy = updater.slot().try_begin_busy()?;
         let task = tasks.register(&task_id)?;
         let token = task.token();
         let ticket = updater.slot().generation();
@@ -1494,6 +1543,8 @@ pub async fn download_update(
                 },
             ))
             .await?;
+        // 交给安装程序之前看载荷头：包不对、或认不得这台电脑上的数据时在这里挡下，不进槽位。
+        let bytes = vet_download(&mut updater.slot(), ticket, &candidate, bytes, DATA_FORMAT)?;
         let dto = update_dto(update, candidate.channel);
         tracing::info!(
             version = %update.version,
@@ -1560,7 +1611,8 @@ async fn ordered_sources(facade: &Facade, sources: Vec<PackageSource>) -> Vec<Pa
 }
 
 /// 立即安装已下载的更新。Windows 上拉起安装程序后进程退出，前端收不到返回；拉不起来时先把主窗口重新显示
-/// 出来再报错。其它平台替换完文件后由这里重启。
+/// 出来再报错。其它平台替换完文件后由这里重启。已有下载或安装在进行时报 `update_busy`；下好的包过不了安装前的
+/// 关卡（[`installable`]）时报 `update_not_ready`。
 #[tauri::command]
 pub async fn install_update(
     app: AppHandle,
@@ -1568,9 +1620,11 @@ pub async fn install_update(
     facade: State<'_, Facade>,
 ) -> Result<(), CommandError> {
     updater.require_supported()?;
+    // 安装进行中不许改通道、不许再开下载：落盘那一步要等，期间清掉槽位的话就装不成了。
+    let _busy = updater.slot().try_begin_busy()?;
     install_after_persisting(
         &facade,
-        || updater.install_downloaded(),
+        || updater.install_downloaded(&app.package_info().version),
         reshow_after_failed_install(&app),
     )
     .await?;
@@ -1617,12 +1671,20 @@ pub async fn set_install_on_exit(
         .map_err(CommandError::from)
 }
 
-/// 在 `RunEvent::Exit` 里调用：选了「退出时安装」就在进程退出前拉起安装程序。
+/// 在 `RunEvent::Exit` 里调用：选了「退出时安装」就在进程退出前拉起安装程序，同样先过安装前的关卡（[`installable`]）。
 pub fn install_on_exit(app: &AppHandle) {
     let updater = app.state::<UpdaterState>();
     if !updater.slot().install_on_exit {
         return;
     }
+    // 「立即安装」正在落盘时退出的话，它会自己拉起安装程序，这里再拉一个就重复了；正在下载的同一版也收不进槽位了。
+    let _busy = match updater.slot().try_begin_busy() {
+        Ok(guard) => guard,
+        Err(err) => {
+            tracing::warn!(?err, "有下载或安装正在进行，退出时不再安装更新");
+            return;
+        }
+    };
     // 正在等这个进程退出的后来者会赶在安装程序之前接手，安装程序替换文件时它就挡在那里：让它们退出，
     // 安装完由安装程序重新打开落樱。
     #[cfg(windows)]
@@ -1631,7 +1693,7 @@ pub fn install_on_exit(app: &AppHandle) {
     }
     // 退出路径上没有前端可以报错，只能记日志；下次启动检查更新时会再次提示。插件藏起的窗口也不重新显示：
     // 进程本来就在退出。
-    if let Err(err) = updater.install_downloaded() {
+    if let Err(err) = updater.install_downloaded(&app.package_info().version) {
         tracing::error!(code = err.code, message = %err.message, "退出时安装更新失败");
     }
 }
@@ -4018,6 +4080,129 @@ mod tests {
             ask.contains("check_checker(app, channel, endpoint, Arc::clone(&record))"),
             "{ask}"
         );
+    }
+
+    /// 命令层的接线单测里造不出来（要 AppHandle 与插件的 Update），钉住源码：下载一开始就占忙碌标记，先于登记任务
+    /// 与重查；下载交回的包先过载荷头关卡再收进槽位；「立即安装」先占忙碌标记再落盘、安装；退出时安装占不到标记就
+    /// 不装，并且在打发走等着的后来者之前判；两条安装路都带着正在运行的版本过安装前的关卡。
+    #[test]
+    fn downloads_and_installs_take_the_busy_flag_and_pass_the_gates() {
+        let (source, _) = include_str!("updater.rs")
+            .split_once("#[cfg(test)]")
+            .unwrap();
+        let at = |body: &str, needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("找不到 {needle}\n{body}"))
+        };
+
+        let download = top_level_fn(source, "pub async fn download_update(");
+        let busy = at(&download, "let _busy = updater.slot().try_begin_busy()?;");
+        assert!(
+            busy < at(&download, "tasks.register(&task_id)?"),
+            "{download}"
+        );
+        assert!(
+            busy < at(&download, "fetch_conclusion(&app, &check)"),
+            "{download}"
+        );
+        let vet = at(
+            &download,
+            "let bytes = vet_download(&mut updater.slot(), ticket, &candidate, bytes, DATA_FORMAT)?;",
+        );
+        assert!(at(&download, "download_with_progress(") < vet, "{download}");
+        assert!(
+            vet < at(&download, "store_download(ticket, candidate, bytes)?"),
+            "{download}"
+        );
+
+        let install = top_level_fn(source, "pub async fn install_update(");
+        let busy = at(&install, "let _busy = updater.slot().try_begin_busy()?;");
+        assert!(
+            busy < at(&install, "install_after_persisting("),
+            "{install}"
+        );
+        assert!(
+            install.contains("updater.install_downloaded(&app.package_info().version)"),
+            "{install}"
+        );
+
+        let on_exit = top_level_fn(source, "pub fn install_on_exit(");
+        let busy = at(
+            &on_exit,
+            "let _busy = match updater.slot().try_begin_busy() {",
+        );
+        assert!(busy < at(&on_exit, "answer.release_waiting()"), "{on_exit}");
+        assert!(
+            busy < at(
+                &on_exit,
+                "updater.install_downloaded(&app.package_info().version)"
+            ),
+            "{on_exit}"
+        );
+
+        let state = top_level_fn(source, "impl UpdaterState {");
+        assert!(
+            state.contains("let ready = installable(&slot, current)?;"),
+            "{state}"
+        );
+        assert!(!state.contains("slot.ready()"), "{state}");
+    }
+
+    /// 安装前的关卡：槽位里没有包时报还没下好；下好的包严格新于正在运行的版本才交出去，等于（含只差构建元数据的）
+    /// 或不新于正在运行的版本都报 `update_not_ready`。关卡只读槽位，挡下之后包照样留着。
+    #[test]
+    fn the_install_gate_takes_only_packages_newer_than_the_running_version() {
+        let mut slot = UpdateSlot::<Fake>::default();
+        let Err(err) = installable(&slot, &version("1.0.0-dev.7")) else {
+            panic!("槽位里没有包时不能安装");
+        };
+        assert_eq!(err.code, code::UPDATE_NOT_READY);
+
+        let ticket = slot.generation();
+        let candidate = || Candidate {
+            update: Fake("1.0.0-dev.8"),
+            channel: Channel::Dev,
+        };
+        slot.settle_check(ticket, Vec::new(), CheckConclusion::Found(candidate()))
+            .unwrap();
+        slot.store_download(ticket, candidate(), vec![7, 8])
+            .unwrap();
+
+        for current in ["1.0.0-dev.7", "0.9.0", "0.9.9-beta.3"] {
+            let ready = installable(&slot, &version(current))
+                .map(|ready| (ready.update.0, ready.channel, ready.bytes.clone()));
+            assert_eq!(
+                ready,
+                Ok(("1.0.0-dev.8", Channel::Dev, vec![7, 8])),
+                "{current}"
+            );
+        }
+        for current in [
+            "1.0.0-dev.8",
+            "1.0.0-dev.8+local",
+            "1.0.0-dev.9",
+            "1.0.1-beta.1",
+            "1.0.0",
+        ] {
+            let Err(err) = installable(&slot, &version(current)) else {
+                panic!("正在运行 {current} 时不该装 1.0.0-dev.8");
+            };
+            assert_eq!(err.code, code::UPDATE_NOT_READY, "{current}");
+            assert!(err.message.contains("1.0.0-dev.8"), "{}", err.message);
+            assert!(err.message.contains(current), "{}", err.message);
+        }
+        assert_eq!(slot.downloaded_version().as_deref(), Some("1.0.0-dev.8"));
+    }
+
+    /// 下载或安装进行中（忙碌标记被占着）再开一次下载或安装报 `update_busy`；占着的那一次结束（守卫放掉）之后又能开始。
+    #[test]
+    fn a_second_download_or_install_while_one_runs_is_busy() {
+        let slot = UpdateSlot::<Fake>::default();
+        let running = slot.try_begin_busy().unwrap();
+        let err = CommandError::from(slot.try_begin_busy().unwrap_err());
+        assert_eq!(err.code, code::UPDATE_BUSY);
+        drop(running);
+        let _next = slot.try_begin_busy().unwrap();
     }
 
     /// 外壳的非测试代码（app/src-tauri/src 下各文件去掉测试模块与整行注释）里的代码行，带上文件路径。
