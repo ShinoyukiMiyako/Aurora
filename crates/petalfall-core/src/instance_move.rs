@@ -317,11 +317,16 @@ impl Petalfall {
     /// 预检，不写盘。源是当前游戏目录，目标可以还不存在。实例不在报 [`CoreError::VersionNotInstalled`]，目标路径
     /// 不合法或暂时连不上报 [`CoreError::InvalidGameDirectory`]，版本 JSON 坏了照实报错；拦着移动的问题全列进
     /// [`MovePreview::blockers`]，目标的数据格式记号比这一版新、读不懂也在其中。
+    ///
+    /// 源目录先以「使用」方式核对数据格式记号（与列实例一样，号低时把记号抬上来，这是唯一可能的写）：被更新的落樱
+    /// 用过、记号读不懂时整次报 [`CoreError::GameDirDataTooNew`] 或 [`CoreError::DataFormatUnreadable`]。这是源目录
+    /// 本身不能动，不是这次移动的拦截项。
     pub async fn preview_instance_move(
         &self,
         id: &str,
         target_game_dir: &Path,
     ) -> Result<MovePreview> {
+        self.guard_game_dir(GuardMode::Use).await?;
         Ok(self
             .inspect_move(id, target_game_dir, &MoveEnv::default())
             .await?
@@ -337,7 +342,8 @@ impl Petalfall {
     /// [`MoveOutcome::follow_ups`]，照常返回成功。
     ///
     /// 写日志之前以「使用」方式核对目标游戏目录的数据格式记号：被拒时报 [`CoreError::GameDirDataTooNew`] 或
-    /// [`CoreError::DataFormatUnreadable`]，原件不动、不留日志。
+    /// [`CoreError::DataFormatUnreadable`]，原件不动、不留日志。源目录（当前游戏目录）在最前面同样核对一次，被拒时
+    /// 同样整次报错：任务中心重试移动不经列实例，不能指望调用方已经核对过。
     pub async fn move_instance_files(
         &self,
         request: &MoveRequest,
@@ -677,6 +683,7 @@ impl Petalfall {
         events: Option<EventSink>,
         env: &MoveEnv,
     ) -> Result<MoveOutcome> {
+        self.guard_game_dir(GuardMode::Use).await?;
         // 切换过游戏目录后，同名实例在当前目录里是另一个实例：按发起时的请求移它就移错了。
         if !same_path(&request.source_game_dir, self.game_dir()) {
             return Err(CoreError::InstanceMoveBlocked {
@@ -4826,6 +4833,55 @@ mod tests {
                 expected,
                 "目标 {existing:?}"
             );
+        }
+    }
+
+    use crate::instances::tests::disk_state;
+
+    /// 源目录（当前游戏目录）被更新的落樱用过、记号读不懂：预检与执行（任务中心重试走的也是执行）都整次报错，不当作
+    /// 拦截项；数据目录、源与目标里的文件内容与修改时间都不变，没有多出文件，不留日志。
+    #[tokio::test]
+    async fn a_newer_or_unreadable_source_refuses_the_whole_move() {
+        for stamp in [NEWER_STAMP, UNREADABLE_STAMP] {
+            let dirs = Dirs::new();
+            build_instance(&dirs).await;
+            put(&stamp_file(&dirs.source), stamp.as_bytes());
+            let before = disk_state(dirs.tmp.path());
+            let check = |err: CoreError, call: &str| match err {
+                CoreError::GameDirDataTooNew {
+                    path,
+                    found,
+                    supported,
+                    written_by,
+                } if stamp == NEWER_STAMP => {
+                    assert_eq!(path, dirs.source, "{call}");
+                    assert_eq!((found, supported), (3, OWN), "{call}");
+                    assert_eq!(written_by.as_deref(), Some(NEWER_WRITER), "{call}");
+                }
+                CoreError::DataFormatUnreadable { path, reason } if stamp == UNREADABLE_STAMP => {
+                    assert_eq!(path, dirs.source, "{call}");
+                    assert_eq!(reason, unreadable_reason(), "{call}");
+                }
+                other => panic!("记号 {stamp} 应拒绝{call}，实际是 {other:?}"),
+            };
+
+            let err = with_fixture(
+                own(),
+                dirs.petalfall().preview_instance_move(ID, &dirs.target),
+            )
+            .await
+            .unwrap_err();
+            check(err, "预检");
+            let err = with_fixture(
+                own(),
+                dirs.petalfall().move_instance_files(&dirs.request(), None),
+            )
+            .await
+            .unwrap_err();
+            check(err, "移动");
+
+            assert_eq!(disk_state(dirs.tmp.path()), before, "记号 {stamp}");
+            assert!(journals(&dirs).is_empty(), "{:?}", journals(&dirs));
         }
     }
 }
