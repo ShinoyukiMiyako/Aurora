@@ -1,7 +1,9 @@
-//! 前端命令：把契约里的命令接到各模块。判定都在模块里，这里只管线程和这次启动要记住的东西。
+//! 前端命令：把契约里的命令接到各模块。判定都在模块里，这里只管线程、这次启动要记住的东西，以及装之前的复核。
 //!
 //! 不带 `async` 的命令跑在窗口线程上。碰盘、等进程的活都走 [`on_worker`]，否则窗口会跟着卡住。
-//! 除 `install` 外，拒绝一律是字符串：前端把它们当意外，进致命错误页显示原文。
+//! 拒绝一律是字符串：前端把它们当意外，进致命错误页显示原文。`install` 另有一种 [`Failure`]，是安装本身的结果，
+//! 前端进失败页。`install` 开工之前后端还要复核一遍：模式不在探测允许的集合里、或数据此刻过不了数据格式关时，
+//! 同样以字符串拒绝。装回较早的版本与数据比安装包新这两件事不能只靠前端的状态机拦。
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
@@ -14,6 +16,7 @@ use petalfall_release::data_format::{DATA_FORMAT, StampVerdict};
 use petalfall_release::install_policy::{
     self, ChannelRelation, Initiation, KindJudgment, channel_of,
 };
+use semver::Version;
 use tauri::ipc::InvokeError;
 use tauri::{AppHandle, Emitter, State, WebviewWindow};
 
@@ -28,16 +31,22 @@ use crate::existing::{self, Installation, Registry};
 use crate::journal::{self, Recovery};
 use crate::launcher::Opened;
 use crate::log::SetupLog;
-use crate::runner::{Reporter, Session, StandardRun, Target};
+use crate::runner::{Handoff, Reporter, Session, StandardRun, Target};
 use crate::target::{self, APP_FOLDER, SpaceNeed, SystemEnv, TargetEnv};
 
-/// 探测时认定、之后的命令还要用的目录。
+/// 探测时认定、之后的命令还要用的东西。
 #[derive(Debug, Default)]
 struct Located {
-    /// 升级和修复的目录，前端的计划里不带。
+    /// 升级、修复和换通道的目录，前端的计划里不带。
     registered: Option<String>,
     /// 已知属于落樱的目录，校验时不能当成别人的：默认目录（启动器回落的数据目录），以及探测换上的半装记录或卸载残留。
     own: Vec<String>,
+    /// 探测判下的允许模式。还没探测过时为空，什么都不许装。
+    allowed: Vec<InstallMode>,
+    /// 用户在页面上确认安装时要写的交接记录，只有交互的第 2a、5 行有。
+    handoff: Option<Handoff>,
+    /// 探测时数据格式关读过的根；没有登记安装时为空。
+    data_roots: Vec<PathBuf>,
 }
 
 /// 窗口存活期间共用的东西，也是 `main.rs` 里 `manage` 进去的状态。
@@ -176,6 +185,7 @@ impl SetupContext {
             probe,
             relation,
             gate,
+            handoff,
         } = assemble_probe(
             self.session.registry(),
             &self.local_app_data,
@@ -201,6 +211,9 @@ impl SetupContext {
         *self.located.lock().unwrap_or_else(PoisonError::into_inner) = Located {
             registered: probe.existing.as_ref().map(|existing| existing.dir.clone()),
             own: own_dirs(default_dir, &probe),
+            allowed: probe.allowed_modes.clone(),
+            handoff,
+            data_roots: gate.map_or_else(Vec::new, |gate| gate.roots),
         };
         Ok(probe)
     }
@@ -225,17 +238,81 @@ impl SetupContext {
         !self.installing.load(Ordering::Acquire)
     }
 
+    /// 安装前由后端再核一次，tauri 命令 `install` 过了它才开工。前端发来的模式要在探测允许的集合里；数据此刻也要
+    /// 过得了数据格式关：探测之后用户可能先打开过已装的落樱，记号被它抬高；首装的最终目录也是这时才定。
+    /// 没过时返回原因，什么都还没开始：不写交接记录、不写半装记录、不启动载荷。
+    pub fn review_plan(&self, plan: &InstallPlan) -> Result<(), String> {
+        let (allowed, registered, probed_roots) = {
+            let located = self.located.lock().unwrap_or_else(PoisonError::into_inner);
+            (
+                located.allowed.clone(),
+                located.registered.clone(),
+                located.data_roots.clone(),
+            )
+        };
+        let refuse = |reason: String| -> Result<(), String> {
+            self.log
+                .warn(format_args!("安装前复核没过，不装：{reason}"));
+            Err(reason)
+        };
+        if !allowed.contains(&plan.mode) {
+            return refuse(format!(
+                "探测允许的安装方式是 {allowed:?}，收到的是 {:?}",
+                plan.mode
+            ));
+        }
+        let gate = match plan.mode {
+            InstallMode::Fresh => match plan.dir.as_deref() {
+                Some(dir) => datamark::inspect_target(Path::new(dir), DATA_FORMAT),
+                None => return refuse("首装的计划里没有目录".to_owned()),
+            },
+            InstallMode::Upgrade | InstallMode::Repair | InstallMode::Switch => {
+                match registered.as_deref() {
+                    Some(dir) => datamark::inspect_installed(
+                        Path::new(dir),
+                        &self.local_app_data,
+                        DATA_FORMAT,
+                    ),
+                    None => return refuse(format!("{:?} 安装没有登记目录", plan.mode)),
+                }
+            }
+        };
+        self.log.info(format_args!(
+            "安装前复核 {:?}：探测时数据格式关读过 {probed_roots:?}",
+            plan.mode
+        ));
+        self.note_gate("安装前复核", &gate);
+        match gate.block {
+            Some(block) => refuse(format!("数据格式关没过：{block:?}")),
+            None => Ok(()),
+        }
+    }
+
+    /// tauri 命令 `install` 在工作线程上做的全部：先 [`Self::review_plan`]，过了才 [`Self::install`]。
+    /// 外层的 `Err` 是复核没过，什么都没开始；里层是安装本身的结果。
+    pub fn reviewed_install(
+        &self,
+        plan: &InstallPlan,
+        reporter: &dyn Reporter,
+    ) -> Result<Result<(), Failure>, String> {
+        self.review_plan(plan)?;
+        Ok(self.install(plan, reporter))
+    }
+
+    /// 按计划装，不复核：窗口里的安装走 [`Self::reviewed_install`]。探测记下交接记录时（用户在「换到」页上确认），
+    /// 它先于半装记录落盘；失败页「重试」按同一计划再来，会覆盖重写。
     pub fn install(&self, plan: &InstallPlan, reporter: &dyn Reporter) -> Result<(), Failure> {
-        let registered = self
-            .located
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .registered
-            .clone();
+        let (registered, handoff) = {
+            let located = self.located.lock().unwrap_or_else(PoisonError::into_inner);
+            (located.registered.clone(), located.handoff.clone())
+        };
         let target = Target::from_plan(plan, registered.as_deref())?;
-        self.log.info(format_args!("开始安装：{target:?}"));
+        self.log
+            .info(format_args!("开始安装：{target:?}，交接记录：{handoff:?}"));
         self.installing.store(true, Ordering::Release);
-        let outcome = self.session.install(&target, reporter);
+        let outcome = self
+            .session
+            .install_with_handoff(&target, handoff.as_ref(), reporter);
         self.installing.store(false, Ordering::Release);
         outcome
     }
@@ -315,6 +392,16 @@ struct Assembled {
     relation: ChannelRelation,
     /// 有登记安装时数据格式关读过的根与结论；没有时为 `None`，首装的最终目录要到安装前复核时才读。
     gate: Option<DataGate>,
+    /// 用户在页面上确认安装时要写的交接记录。
+    handoff: Option<Handoff>,
+}
+
+/// 交接记录记下安装包的通道与版本。判定表只在两边的通道都认得时才要写它，安装包的通道认得，版本就一定解析得了。
+fn handoff_of(payload_version: &str) -> Handoff {
+    Handoff {
+        channel: channel_of(payload_version).expect("判定表只在安装包的通道认得时要写交接记录"),
+        version: Version::parse(payload_version).expect("认得通道的版本一定解析得了"),
+    }
 }
 
 /// 现有安装的事实与种类，探测和直接交给 NSIS 之前的判定共用：先读事实，再按版本、通道与发起方式定种类。
@@ -421,6 +508,7 @@ fn assemble_probe(
         },
         relation: judged.relation,
         gate,
+        handoff: modes.handoff.then(|| handoff_of(payload_version)),
     })
 }
 
@@ -494,7 +582,7 @@ pub async fn launcher_running(context: State<'_, Arc<SetupContext>>) -> Result<b
     on_worker(move || context.launcher_running()).await
 }
 
-/// 拒绝分两种：[`Failure`] 是安装结果，前端进失败页；工作线程崩了是字符串，前端进致命错误页。
+/// 拒绝分两种：[`Failure`] 是安装结果，前端进失败页；复核没过与工作线程崩了是字符串，前端进致命错误页。
 #[tauri::command]
 pub async fn install(
     app: AppHandle,
@@ -506,8 +594,9 @@ pub async fn install(
         log: Arc::clone(&context.log),
     };
     let context = Arc::clone(&context);
-    tauri::async_runtime::spawn_blocking(move || context.install(&plan, &reporter))
+    tauri::async_runtime::spawn_blocking(move || context.reviewed_install(&plan, &reporter))
         .await
+        .map_err(InvokeError::from)?
         .map_err(InvokeError::from)?
         .map_err(InvokeError::from)
 }
@@ -545,6 +634,7 @@ mod tests {
     use std::sync::Mutex;
 
     use petalfall_release::data_format::{STAMP_FILE, stamp_contents};
+    use petalfall_release::order;
 
     use super::*;
     use crate::contract::{DataBlock, DataProblem};
@@ -1152,9 +1242,11 @@ mod tests {
                 let (_guard, _dir, registry) = machine_with(installed);
                 let context = format!("第 {row} 行，{initiation:?}");
 
-                let probe =
-                    assemble_with(&registry, payload, Recovery::Clean, started(initiation)).probe;
+                let assembled =
+                    assemble_with(&registry, payload, Recovery::Clean, started(initiation));
 
+                let probe = assembled.probe;
+                assert_eq!(assembled.handoff.is_some(), expected.handoff, "{context}");
                 assert_eq!(
                     probe.existing.as_ref().map(|existing| existing.kind),
                     expected.kind,
@@ -1321,6 +1413,55 @@ mod tests {
         assert_eq!(assembled.probe.allowed_modes, vec![InstallMode::Fresh]);
         assert_eq!(assembled.probe.data_block, None);
         assert_eq!(assembled.gate, None);
+    }
+
+    /// 交接记录写的是安装包的通道与版本，启动器拿版本与自己比对，对上了才把偏好改成那个通道。
+    #[test]
+    fn the_handoff_names_the_packages_channel_and_version() {
+        let cases = [
+            (
+                ("1.0.0-beta.3", true),
+                "1.0.0-dev.60",
+                Some(order::Channel::Dev),
+            ),
+            (
+                ("1.1.0-dev.61", true),
+                "1.0.0-beta.5",
+                Some(order::Channel::Beta),
+            ),
+            (("1.0.0-beta.4", true), "1.0.0", None),
+            (("1.0.0-dev.5", true), "1.0.0-dev.6", None),
+        ];
+        for (installed, payload, channel) in cases {
+            let (_guard, _dir, registry) = machine_with(Some(installed));
+
+            let assembled = assemble_with(
+                &registry,
+                payload,
+                Recovery::Clean,
+                started(Initiation::Interactive),
+            );
+
+            let expected = channel.map(|channel| Handoff {
+                channel,
+                version: Version::parse(payload).unwrap(),
+            });
+            assert_eq!(assembled.handoff, expected, "{payload}");
+        }
+    }
+
+    /// 命令只是把活交给工作线程：复核写在命令里而不是 `SetupContext::install` 里，漏接了编译也不报。
+    #[test]
+    fn the_install_command_reviews_before_installing() {
+        let source = include_str!("commands.rs");
+        let (_, command) = source
+            .split_once("pub async fn install(")
+            .expect("要有 install 命令");
+        let (body, _) = command
+            .split_once("#[tauri::command]")
+            .expect("install 后面还有命令");
+        assert!(body.contains("context.reviewed_install(&plan, &reporter)"));
+        assert!(!body.contains("context.install("));
     }
 
     #[test]
@@ -1956,6 +2097,492 @@ mod tests {
                 "{}",
                 rig.logged()
             );
+        }
+    }
+
+    /// 版本由用例定的安装包，打开在一台假电脑上：注册表在内存里，NSIS 是只记参数的替身，所有目录都在临时目录下。
+    mod on_a_fake_machine {
+        use std::fs;
+        use std::sync::Mutex;
+
+        use petalfall_release::handoff::{ChannelHandoff, HANDOFF_FILE};
+
+        use super::*;
+        use crate::boot::{Claim, test_claim};
+        use crate::journal::{JOURNAL_FILE, Processes};
+        use crate::overlay::test_support::{packed_image, random_bytes};
+        use crate::overlay::{Overlay, Source};
+        use crate::runner::test_support::Recording;
+        use crate::runner::{Launcher, Roots, Running};
+        use crate::verify::UNINSTALLER_NAME;
+
+        /// 写得进的注册表：替身 NSIS 装完要改卸载项。
+        #[derive(Default)]
+        struct Hive(Mutex<HashMap<(String, Option<String>), String>>);
+
+        impl Hive {
+            fn set(&self, key: &str, value: Option<&str>, text: &str) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .insert((key.to_owned(), value.map(str::to_owned)), text.to_owned());
+            }
+        }
+
+        impl Registry for Hive {
+            fn read_string(&self, key: &str, value: Option<&str>) -> io::Result<Option<String>> {
+                let key = (key.to_owned(), value.map(str::to_owned));
+                Ok(self.0.lock().unwrap().get(&key).cloned())
+            }
+        }
+
+        struct Exited(i32);
+
+        impl Running for Exited {
+            fn pid(&self) -> u32 {
+                0
+            }
+
+            fn try_wait(&mut self) -> io::Result<Option<i32>> {
+                Ok(Some(self.0))
+            }
+        }
+
+        /// 替身 NSIS 与替身启动器收到过的东西。
+        #[derive(Debug, Default)]
+        struct Calls {
+            /// 每次拉起 NSIS 的整串参数。
+            launches: Vec<OsString>,
+            /// 每次打开启动器的目录与参数。
+            openings: Vec<(PathBuf, Vec<OsString>)>,
+        }
+
+        /// 静默安装时像 NSIS 一样写好程序文件与卸载项，事后核验才过得去；向导与原生回退只记参数。
+        struct Nsis {
+            exe: Vec<u8>,
+            version: String,
+            hive: Arc<Hive>,
+            calls: Arc<Mutex<Calls>>,
+        }
+
+        impl Launcher for Nsis {
+            fn launch(
+                &self,
+                _exe: &Path,
+                _cwd: &Path,
+                arguments: &OsStr,
+            ) -> io::Result<Box<dyn Running>> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .launches
+                    .push(arguments.to_owned());
+                let silent = arguments
+                    .to_str()
+                    .and_then(|text| text.strip_prefix("/S /D="));
+                if let Some(dir) = silent {
+                    let dir = Path::new(dir);
+                    fs::create_dir_all(dir)?;
+                    fs::write(dir.join(APP_EXE), &self.exe)?;
+                    fs::write(dir.join(UNINSTALLER_NAME), b"MZ")?;
+                    self.hive
+                        .set(UNINSTALL_KEY, Some(DISPLAY_VERSION), &self.version);
+                    self.hive.set(
+                        UNINSTALL_KEY,
+                        Some(INSTALL_LOCATION),
+                        &format!("\"{}\"", dir.display()),
+                    );
+                }
+                Ok(Box::new(Exited(0)))
+            }
+
+            fn app_running(&self) -> io::Result<bool> {
+                Ok(false)
+            }
+
+            fn open_app(
+                &self,
+                dir: &Path,
+                args: &[OsString],
+                _instance: &Instance,
+            ) -> io::Result<Opened> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .openings
+                    .push((dir.to_owned(), args.to_vec()));
+                Ok(Opened::Exited(None))
+            }
+        }
+
+        struct NoPayloadRunning;
+
+        impl Processes for NoPayloadRunning {
+            fn payload_alive(&self, _: u32) -> io::Result<bool> {
+                Ok(false)
+            }
+        }
+
+        struct Machine {
+            root: tempfile::TempDir,
+            hive: Arc<Hive>,
+            calls: Arc<Mutex<Calls>>,
+            context: SetupContext,
+        }
+
+        fn update_launch(launcher_args: Vec<OsString>) -> Launch {
+            Launch::Update(UpdateRequest {
+                relaunch: true,
+                launcher_args,
+            })
+        }
+
+        /// 三种发起方式对应的命令行。
+        fn launch_for(initiation: Initiation) -> (Launch, bool) {
+            match initiation {
+                Initiation::Interactive => (Launch::Interactive, false),
+                Initiation::Update => (update_launch(Vec::new()), false),
+                Initiation::UpdateWithSwitch => (update_launch(Vec::new()), true),
+            }
+        }
+
+        /// 在一台空电脑上打开版本为 `payload` 的安装包。`test` 区分各用例的实例互斥名。
+        fn machine(test: &str, payload: &str, launch: Launch, channel_switch: bool) -> Machine {
+            let root = tempfile::tempdir().unwrap();
+            let exe = random_bytes(4096);
+            let image = packed_image(root.path(), &random_bytes(1024), &exe, payload, &[]);
+            let hive = Arc::new(Hive::default());
+            let calls = Arc::new(Mutex::new(Calls::default()));
+            let roots = Roots {
+                temp: root.path().join("temp"),
+                state: root.path().join("state"),
+                desktop: root.path().join("desktop"),
+            };
+            fs::create_dir_all(&roots.temp).unwrap();
+            fs::create_dir_all(&roots.desktop).unwrap();
+            let nsis = Nsis {
+                exe,
+                version: payload.to_owned(),
+                hive: Arc::clone(&hive),
+                calls: Arc::clone(&calls),
+            };
+            let registry: Arc<dyn Registry> = hive.clone();
+            let session = Session::new(
+                Source::Packed(Overlay::open(&image).unwrap()),
+                roots,
+                Box::new(nsis),
+                registry,
+                Box::new(NoPayloadRunning),
+            );
+            let Claim::First(instance) = test_claim(&format!("commands-machine-{test}")) else {
+                panic!("{test} 上不该已有实例");
+            };
+            let log = SetupLog::open(&root.path().join("log")).unwrap();
+            let context = SetupContext::new(
+                session,
+                Arc::new(instance),
+                Arc::new(log),
+                launch,
+                channel_switch,
+                root.path().join("LocalAppData"),
+            );
+            Machine {
+                root,
+                hive,
+                calls,
+                context,
+            }
+        }
+
+        impl Machine {
+            /// 装好一份版本为 `version` 的落樱，返回登记目录。
+            fn installed(&self, version: &str) -> String {
+                let dir = self.root.path().join("Games").join("Petalfall");
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(dir.join(APP_EXE), b"MZ").unwrap();
+                let dir = dir.to_str().unwrap().to_owned();
+                self.hive
+                    .set(UNINSTALL_KEY, Some(INSTALL_LOCATION), &format!("\"{dir}\""));
+                self.hive.set(UNINSTALL_KEY, Some(DISPLAY_VERSION), version);
+                dir
+            }
+
+            fn state(&self) -> PathBuf {
+                self.context.session.roots().state.clone()
+            }
+
+            fn handoff(&self) -> Option<ChannelHandoff> {
+                let path = self.state().join(HANDOFF_FILE);
+                let bytes = match fs::read(path) {
+                    Ok(bytes) => bytes,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
+                    Err(err) => panic!("读交接记录失败：{err}"),
+                };
+                Some(ChannelHandoff::from_json(&bytes).unwrap())
+            }
+
+            fn launches(&self) -> Vec<OsString> {
+                self.calls.lock().unwrap().launches.clone()
+            }
+
+            /// 什么都没开始：没解开载荷、没拉起 NSIS、没写半装记录、没写交接记录。
+            fn assert_untouched(&self, context: &str) {
+                assert_eq!(self.launches(), Vec::<OsString>::new(), "{context}");
+                assert!(!self.state().join(JOURNAL_FILE).exists(), "{context}");
+                assert_eq!(self.handoff(), None, "{context}");
+                let unpacked = fs::read_dir(self.root.path().join("temp")).unwrap().count();
+                assert_eq!(unpacked, 0, "{context}");
+            }
+        }
+
+        fn locked(mode: InstallMode) -> InstallPlan {
+            InstallPlan {
+                mode,
+                dir: None,
+                desktop_shortcut: false,
+            }
+        }
+
+        fn fresh_at(dir: &str) -> InstallPlan {
+            InstallPlan {
+                mode: InstallMode::Fresh,
+                dir: Some(dir.to_owned()),
+                desktop_shortcut: false,
+            }
+        }
+
+        fn silent_to(dir: &str) -> OsString {
+            OsString::from(format!("/S /D={dir}"))
+        }
+
+        /// 安装前复核：探测允许的模式之外的计划一律拒绝，复核前什么都没动。
+        #[test]
+        fn a_mode_the_probe_did_not_allow_is_refused_before_anything_starts() {
+            let machine = machine("review-mode", "1.0.0-dev.6", Launch::Interactive, false);
+            machine.installed("1.0.0-dev.5");
+            let elsewhere = machine.root.path().join("Elsewhere");
+            let probe = machine.context.probe().unwrap();
+            assert_eq!(probe.allowed_modes, vec![InstallMode::Upgrade]);
+
+            for plan in [
+                locked(InstallMode::Repair),
+                locked(InstallMode::Switch),
+                fresh_at(elsewhere.to_str().unwrap()),
+            ] {
+                let refused = machine
+                    .context
+                    .reviewed_install(&plan, &Recording::default())
+                    .unwrap_err();
+
+                assert_eq!(
+                    refused,
+                    format!("探测允许的安装方式是 [Upgrade]，收到的是 {:?}", plan.mode)
+                );
+                machine.assert_untouched(&format!("{plan:?}"));
+            }
+            assert!(!elsewhere.exists());
+        }
+
+        #[test]
+        fn nothing_is_allowed_before_the_probe() {
+            let machine = machine("review-unprobed", "1.0.0-dev.6", Launch::Interactive, false);
+            machine.installed("1.0.0-dev.5");
+
+            let refused = machine
+                .context
+                .reviewed_install(&locked(InstallMode::Upgrade), &Recording::default())
+                .unwrap_err();
+
+            assert_eq!(refused, "探测允许的安装方式是 []，收到的是 Upgrade");
+            machine.assert_untouched("没探测过");
+        }
+
+        /// 探测时数据还读得了，之后用户打开了已装的落樱，记号被它抬高或写坏：复核在开工前拦下。
+        #[test]
+        fn a_stamp_raised_after_the_probe_stops_the_install() {
+            let cases = [
+                ("1.0.0-dev.5", "1.0.0-dev.6", InstallMode::Upgrade),
+                ("1.1.0-dev.61", "1.0.0-beta.5", InstallMode::Switch),
+                ("1.0.0-dev.6", "1.0.0-dev.6", InstallMode::Repair),
+            ];
+            for (installed, payload, mode) in cases {
+                for stamp in [Stamp::TooNew, Stamp::Unreadable] {
+                    let test = format!("review-raised-{mode:?}-{stamp:?}");
+                    let machine = machine(&test, payload, Launch::Interactive, false);
+                    let dir = machine.installed(installed);
+                    assert_eq!(machine.context.probe().unwrap().allowed_modes, vec![mode]);
+                    stamp.put(&dir);
+
+                    let refused = machine
+                        .context
+                        .reviewed_install(&locked(mode), &Recording::default())
+                        .unwrap_err();
+
+                    assert_eq!(
+                        refused,
+                        format!("数据格式关没过：{:?}", stamp.block_at(&dir)),
+                        "{test}"
+                    );
+                    machine.assert_untouched(&test);
+                }
+            }
+        }
+
+        /// 首装的最终目录在选目录时才定，复核读的就是计划里的那个目录。
+        #[test]
+        fn a_fresh_install_is_reviewed_at_the_dir_it_goes_to() {
+            for stamp in [Stamp::TooNew, Stamp::Unreadable] {
+                let test = format!("review-fresh-{stamp:?}");
+                let machine = machine(&test, "1.0.0-dev.6", Launch::Interactive, false);
+                let target = machine.root.path().join("Games").join("Petalfall");
+                fs::create_dir_all(&target).unwrap();
+                let target = target.to_str().unwrap().to_owned();
+                stamp.put(&target);
+                machine.context.probe().unwrap();
+
+                let refused = machine
+                    .context
+                    .reviewed_install(&fresh_at(&target), &Recording::default())
+                    .unwrap_err();
+
+                assert_eq!(
+                    refused,
+                    format!("数据格式关没过：{:?}", stamp.block_at(&target)),
+                    "{test}"
+                );
+                machine.assert_untouched(&test);
+            }
+        }
+
+        #[test]
+        fn a_fresh_install_to_a_clean_dir_goes_ahead() {
+            let machine = machine(
+                "review-fresh-clean",
+                "1.0.0-dev.6",
+                Launch::Interactive,
+                false,
+            );
+            let target = machine.root.path().join("Games").join("Petalfall");
+            let target = target.to_str().unwrap().to_owned();
+            machine.context.probe().unwrap();
+
+            machine
+                .context
+                .reviewed_install(&fresh_at(&target), &Recording::default())
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(machine.launches(), vec![silent_to(&target)]);
+            assert_eq!(machine.handoff(), None);
+        }
+
+        /// 交接记录只在交互安装、用户在「换到」页上确认时写（第 2a、5 行），内容是安装包的通道与版本；
+        /// 普通升级、修复、首装与更新模式都照常装，但不写。
+        #[test]
+        fn the_handoff_is_written_only_when_the_user_switches_on_the_page() {
+            use Initiation as I;
+            use InstallMode as M;
+            use order::Channel as C;
+
+            let cases = [
+                (
+                    "2a",
+                    Some("1.0.0-beta.3"),
+                    "1.0.0-dev.60",
+                    I::Interactive,
+                    M::Upgrade,
+                    Some(C::Dev),
+                ),
+                (
+                    "5",
+                    Some("1.1.0-dev.61"),
+                    "1.0.0-beta.5",
+                    I::Interactive,
+                    M::Switch,
+                    Some(C::Beta),
+                ),
+                (
+                    "1",
+                    Some("1.0.0-dev.5"),
+                    "1.0.0-dev.6",
+                    I::Interactive,
+                    M::Upgrade,
+                    None,
+                ),
+                (
+                    "2b",
+                    Some("1.0.0-beta.4"),
+                    "1.0.0",
+                    I::Interactive,
+                    M::Upgrade,
+                    None,
+                ),
+                (
+                    "3",
+                    Some("1.0.0-dev.6"),
+                    "1.0.0-dev.6",
+                    I::Interactive,
+                    M::Repair,
+                    None,
+                ),
+                (
+                    "2a-update",
+                    Some("1.0.0-beta.3"),
+                    "1.0.0-dev.60",
+                    I::Update,
+                    M::Upgrade,
+                    None,
+                ),
+                (
+                    "5-switch",
+                    Some("1.1.0-dev.61"),
+                    "1.0.0-beta.5",
+                    I::UpdateWithSwitch,
+                    M::Switch,
+                    None,
+                ),
+                ("9", None, "1.0.0-dev.6", I::Interactive, M::Fresh, None),
+            ];
+            for (row, installed, payload, initiation, mode, channel) in cases {
+                let (launch, switch) = launch_for(initiation);
+                let machine = machine(&format!("handoff-{row}"), payload, launch, switch);
+                let dir = match installed {
+                    Some(version) => machine.installed(version),
+                    None => machine
+                        .root
+                        .path()
+                        .join("Fresh")
+                        .to_str()
+                        .unwrap()
+                        .to_owned(),
+                };
+                let probe = machine.context.probe().unwrap();
+                assert_eq!(probe.allowed_modes, vec![mode], "第 {row} 行");
+                let plan = match mode {
+                    M::Fresh => fresh_at(&dir),
+                    M::Upgrade | M::Repair | M::Switch => locked(mode),
+                };
+
+                machine
+                    .context
+                    .reviewed_install(&plan, &Recording::default())
+                    .unwrap()
+                    .unwrap();
+
+                assert_eq!(machine.launches(), vec![silent_to(&dir)], "第 {row} 行");
+                let written = machine
+                    .handoff()
+                    .map(|handoff| (handoff.channel, handoff.version.to_string()));
+                assert_eq!(
+                    written,
+                    channel.map(|channel| (channel, payload.to_owned())),
+                    "第 {row} 行"
+                );
+                assert!(
+                    !machine.state().join(JOURNAL_FILE).exists(),
+                    "第 {row} 行装完要删半装记录"
+                );
+            }
         }
     }
 }
