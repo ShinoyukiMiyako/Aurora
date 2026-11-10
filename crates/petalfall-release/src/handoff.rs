@@ -12,6 +12,8 @@ use std::error::Error;
 use std::fmt;
 
 use semver::Version;
+use serde::de::value::MapAccessDeserializer;
+use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::order::Channel;
@@ -45,6 +47,23 @@ struct Stored {
     written_at: u64,
 }
 
+/// 只从 JSON 对象读 [`Stored`]。derive 出来的结构体反序列化也收按字段顺序排的数组，
+/// `["beta","1.0.0-beta.5",0]` 会被当成合法记录；引导程序从不这样写，这种文件是形状不对。
+struct StoredObject;
+
+impl<'de> Visitor<'de> for StoredObject {
+    type Value = Stored;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("JSON 对象")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Stored, A::Error> {
+        // 键的读法仍交给 derive 出来的那份：缺键、同一个键写两次、值的类型不对照旧报出。
+        Stored::deserialize(MapAccessDeserializer::new(map))
+    }
+}
+
 impl ChannelHandoff {
     /// 写进文件的内容，例如 `{"channel":"beta","version":"1.0.0-beta.5","written_at":1794000000}`。
     pub fn to_json(&self) -> String {
@@ -63,7 +82,10 @@ impl ChannelHandoff {
     /// 记录里多出来的键不管：以后的引导程序可能多写几项，读到这种记录的启动器照样按版本判断要不要，
     /// 不必当成读不懂。同一个键写了两次算读不懂。
     pub fn from_json(contents: &[u8]) -> Result<Self, HandoffError> {
-        let stored: Stored = serde_json::from_slice(contents).map_err(HandoffError::Malformed)?;
+        let mut deserializer = serde_json::Deserializer::from_slice(contents);
+        let stored = serde::Deserializer::deserialize_map(&mut deserializer, StoredObject)
+            .and_then(|stored| deserializer.end().map(|()| stored))
+            .map_err(HandoffError::Malformed)?;
         let Some(channel) = Channel::from_name(&stored.channel) else {
             return Err(HandoffError::UnknownChannel(stored.channel));
         };
@@ -240,10 +262,60 @@ mod tests {
         }
     }
 
+    /// 标量与数组都报类型不对，并点明要的是对象。
     #[test]
     fn json_that_is_not_an_object_is_malformed() {
-        for text in ["null", "[]", "1794000000", "\"dev\"", "true"] {
-            malformed(text.as_bytes());
+        for (text, kind) in [
+            ("null", "null"),
+            ("1794000000", "integer `1794000000`"),
+            ("-1", "integer `-1`"),
+            ("1.5", "floating point `1.5`"),
+            ("\"dev\"", "string \"dev\""),
+            ("true", "boolean `true`"),
+            ("[]", "sequence"),
+            (" \r\n[\"dev\"]", "sequence"),
+        ] {
+            let err = malformed(text.as_bytes());
+            assert!(
+                err.to_string()
+                    .starts_with(&format!("invalid type: {kind}, expected JSON 对象")),
+                "{text}：{err}"
+            );
+        }
+    }
+
+    /// 三个值按字段顺序排成数组，类型也都对得上，仍是形状不对：引导程序只写对象。
+    #[test]
+    fn an_array_in_field_order_is_malformed() {
+        for text in [
+            r#"["beta","1.0.0-beta.5",0]"#,
+            r#"["dev","1.0.0-dev.60",1794000000]"#,
+            r#"["stable","1.0.0",18446744073709551615]"#,
+            r#"["beta","1.0.0-beta.5",0,"extra"]"#,
+            r#"[{"channel":"beta","version":"1.0.0-beta.5","written_at":0}]"#,
+        ] {
+            let err = malformed(text.as_bytes());
+            assert!(
+                err.to_string()
+                    .starts_with("invalid type: sequence, expected JSON 对象"),
+                "{text}：{err}"
+            );
+        }
+    }
+
+    /// 对象之后还有别的内容，整份不算一份记录。
+    #[test]
+    fn content_after_the_object_is_malformed() {
+        for text in [
+            r#"{"channel":"beta","version":"1.0.0-beta.5","written_at":0} x"#,
+            r#"{"channel":"beta","version":"1.0.0-beta.5","written_at":0}{}"#,
+            r#"{"channel":"beta","version":"1.0.0-beta.5","written_at":0}[]"#,
+        ] {
+            let err = malformed(text.as_bytes());
+            assert!(
+                err.to_string().starts_with("trailing characters"),
+                "{text}：{err}"
+            );
         }
     }
 
