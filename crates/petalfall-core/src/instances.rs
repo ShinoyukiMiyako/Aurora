@@ -30,6 +30,7 @@ use tokio::task::JoinSet;
 
 use crate::InstanceError;
 use crate::crashdiag::last_crash_at;
+use crate::data_format::{GameDirCheck, GuardMode};
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
 use crate::folders::same_path;
@@ -175,7 +176,14 @@ impl Petalfall {
     ///
     /// Mod 数只数 `mods/` 下的文件，不解析 jar；存档数只数 `saves/` 下的文件夹，不读 level.dat；
     /// 版本 JSON 解析走进程内缓存，文件没变就不重读。玩家没建过的依赖版本目录不列出。
+    ///
+    /// 扫描之前以「使用」方式核对游戏目录的数据格式记号（[`Petalfall::guard_game_dir`]）：号比这一版新、
+    /// 记号读不懂、时限内看不出结论都直接报错，一个实例文件也不读。游戏目录不存在时交回空列表。
     pub async fn list_instances(&self) -> Result<Vec<InstanceSummary>> {
+        // 关卡已在时限内判定目录不存在：不再去看第二遍，也不扫描关卡之后才冒出来、没核对过记号的目录。
+        if self.guard_game_dir(GuardMode::Use).await? == GameDirCheck::Absent {
+            return Ok(Vec::new());
+        }
         let mut scan = discover_versions(self.game_dir()).await?;
         // 先算再隐藏：这两项要沿继承链走，隐藏的版本可能正是链上的一环。
         let javas = java_majors(&scan);
@@ -1159,6 +1167,17 @@ pub(crate) mod tests {
     };
     use serde_json::json;
     use std::sync::Mutex;
+
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use petalfall_release::data_format::{StampFile, StampRead, parse_stamp};
+    use tokio::time::Instant;
+
+    use crate::data_format::testing::{GuardFixture, LookFn, with_fixture};
+    use crate::data_format::{DirLook, STAMP_FILE};
+    use crate::error::GameDirProblem;
+    use crate::folders::DIR_PROBE_TIMEOUT;
 
     pub(crate) fn petalfall_at(root: &Path) -> Petalfall {
         Petalfall::for_test(
@@ -2813,6 +2832,277 @@ pub(crate) mod tests {
                 ..
             })
         ));
+    }
+
+    // ---- 游戏目录的数据格式记号 ----
+
+    /// 被更新的预览版抬到 3 的记号。测试经 [`with_fixture`] 把这一版的号当作 2，它就比这一版新。
+    pub(crate) const NEWER_STAMP: &str = r#"{"data_format":3,"written_by":"1.1.0-dev.57"}"#;
+    /// [`NEWER_STAMP`] 里 `written_by` 的原文。
+    pub(crate) const NEWER_WRITER: &str = "1.1.0-dev.57";
+
+    pub(crate) fn own_format(own: u32) -> GuardFixture {
+        GuardFixture { own, look: None }
+    }
+
+    pub(crate) fn stamp_file(game_dir: &Path) -> PathBuf {
+        game_dir.join(PETALFALL_META_DIR).join(STAMP_FILE)
+    }
+
+    pub(crate) fn write_stamp(game_dir: &Path, contents: &str) {
+        let path = stamp_file(game_dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// 目录下每个条目的相对路径、修改时间与文件字节（文件夹不记字节）。前后各拍一次，比对出有没有文件
+    /// 被改过、多出或少了。
+    pub(crate) fn disk_state(root: &Path) -> BTreeMap<PathBuf, (SystemTime, Option<Vec<u8>>)> {
+        walk(root)
+            .into_iter()
+            .map(|path| {
+                let meta = std::fs::metadata(&path).unwrap();
+                let bytes = meta.is_file().then(|| std::fs::read(&path).unwrap());
+                let relative = path.strip_prefix(root).unwrap().to_owned();
+                (relative, (meta.modified().unwrap(), bytes))
+            })
+            .collect()
+    }
+
+    fn unreadable_reason(contents: &str) -> String {
+        match parse_stamp(StampFile::Contents(contents.as_bytes())) {
+            StampRead::Unreadable { reason } => reason,
+            other => panic!("夹具应当读不懂，实际是 {other:?}"),
+        }
+    }
+
+    /// 有两个实例的游戏目录：原版，以及装了 Mod、有存档与设置、继承原版的模组实例。
+    async fn game_dir_with_instances(game_dir: &Path) {
+        write_version(game_dir, "1.21.1", &vanilla_json("1.21.1"));
+        let modded = write_version(game_dir, "生存", &fabric_json("生存", "1.21.1"));
+        std::fs::create_dir_all(modded.join("mods")).unwrap();
+        std::fs::write(modded.join("mods").join("sodium.jar"), b"jar").unwrap();
+        std::fs::create_dir_all(modded.join("saves").join("世界")).unwrap();
+        VersionSettingsStore::for_version_dir(&modded)
+            .save(&VersionSettings {
+                description: Some("周末一起玩".into()),
+                ..VersionSettings::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    /// `versions` 是个文件的游戏目录：扫描读它必然出错，交回的错误能看出有没有走到扫描。
+    fn game_dir_that_fails_the_scan(game_dir: &Path) {
+        std::fs::create_dir_all(game_dir).unwrap();
+        std::fs::write(game_dir.join("versions"), b"not a folder").unwrap();
+    }
+
+    fn ids(list: &[InstanceSummary]) -> Vec<&str> {
+        list.iter().map(|summary| summary.id.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn list_instances_refuses_a_newer_game_dir_and_touches_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        game_dir_with_instances(&game).await;
+        write_stamp(&game, NEWER_STAMP);
+        let before = disk_state(tmp.path());
+
+        match with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap_err()
+        {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            } => {
+                assert_eq!(path, game);
+                assert_eq!((found, supported), (3, 2));
+                assert_eq!(written_by.as_deref(), Some(NEWER_WRITER));
+            }
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+        assert_eq!(disk_state(tmp.path()), before);
+    }
+
+    /// 不换本版号：读不懂与号是多少无关，生产的这条路同样在扫描之前拦下。
+    #[tokio::test]
+    async fn list_instances_refuses_an_unreadable_stamp_and_touches_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        game_dir_with_instances(&game).await;
+        let contents = r#"{"data_format":"3"}"#;
+        write_stamp(&game, contents);
+        let before = disk_state(tmp.path());
+
+        match petalfall.list_instances().await.unwrap_err() {
+            CoreError::DataFormatUnreadable { path, reason } => {
+                assert_eq!(path, game);
+                assert_eq!(reason, unreadable_reason(contents));
+            }
+            other => panic!("应报记号读不懂，实际是 {other:?}"),
+        }
+        assert_eq!(disk_state(tmp.path()), before);
+    }
+
+    #[tokio::test]
+    async fn a_refused_game_dir_is_not_scanned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        game_dir_that_fails_the_scan(&game);
+
+        // 对照：记号等于这一版时放行，扫描照常进行，在 versions 上出错。
+        write_stamp(&game, r#"{"data_format":2}"#);
+        match with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap_err()
+        {
+            CoreError::Instance(InstanceError::Io { path, .. }) => {
+                assert_eq!(path, game.join("versions"));
+            }
+            other => panic!("放行后应扫描并在 versions 上出错，实际是 {other:?}"),
+        }
+
+        write_stamp(&game, NEWER_STAMP);
+        let err = with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::GameDirDataTooNew { found: 3, .. }),
+            "{err:?}"
+        );
+
+        write_stamp(&game, "not json");
+        let err = with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::DataFormatUnreadable { reason, .. } if *reason == unreadable_reason("not json")),
+            "{err:?}"
+        );
+    }
+
+    /// 看目录、读记号超过探测时限：报暂时连不上，不扫描、不抬号；用户重试时及时读到「太新」就照常拦下。
+    #[tokio::test(start_paused = true)]
+    async fn a_stamp_read_past_the_probe_limit_is_unavailable_and_nothing_is_scanned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        game_dir_that_fails_the_scan(&game);
+        let before = disk_state(tmp.path());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let look: LookFn = {
+            let calls = calls.clone();
+            Arc::new(move |_: &Path| {
+                let call = calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if call == 0 {
+                        // 挂起的网络盘：迟迟读不完，读完了也只是号更低、该抬号的记号。
+                        tokio::time::sleep(DIR_PROBE_TIMEOUT * 3).await;
+                        DirLook::Stamp(parse_stamp(StampFile::Missing))
+                    } else {
+                        DirLook::Stamp(parse_stamp(StampFile::Contents(NEWER_STAMP.as_bytes())))
+                    }
+                })
+            })
+        };
+        let fixture = GuardFixture {
+            own: 2,
+            look: Some(look),
+        };
+
+        let started = Instant::now();
+        let err = with_fixture(fixture.clone(), petalfall.list_instances())
+            .await
+            .unwrap_err();
+        let elapsed = started.elapsed();
+        match err {
+            CoreError::InvalidGameDirectory { path, problem } => {
+                assert_eq!(path, game);
+                assert_eq!(problem, GameDirProblem::Unavailable);
+            }
+            other => panic!("应报暂时连不上，实际是 {other:?}"),
+        }
+        assert!(elapsed >= DIR_PROBE_TIMEOUT, "提前放弃了：{elapsed:?}");
+        assert!(elapsed < DIR_PROBE_TIMEOUT * 5 / 4, "等太久：{elapsed:?}");
+        assert_eq!(disk_state(tmp.path()), before, "超时后不该抬号");
+
+        match with_fixture(fixture, petalfall.list_instances())
+            .await
+            .unwrap_err()
+        {
+            CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            } => {
+                assert_eq!(path, game);
+                assert_eq!((found, supported), (3, 2));
+                assert_eq!(written_by.as_deref(), Some(NEWER_WRITER));
+            }
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(disk_state(tmp.path()), before);
+    }
+
+    #[tokio::test]
+    async fn a_missing_game_dir_lists_nothing_and_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+
+        // 本版号取 2：关卡要是在这里写记号，一定会留下文件。
+        let list = with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap();
+        assert_eq!(list, Vec::<InstanceSummary>::new());
+        assert!(!petalfall.game_dir().exists());
+        assert_eq!(disk_state(tmp.path()), BTreeMap::new());
+    }
+
+    /// 关卡不记「核对过」：两次列实例之间另一台电脑把号抬高了，第二次就拒绝。
+    #[tokio::test]
+    async fn a_stamp_raised_between_two_listings_is_refused_by_the_second() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        game_dir_with_instances(&game).await;
+
+        // 记号缺失算 1：「使用」方式把它抬到这一版的 2，照常列出。
+        let list = with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap();
+        assert_eq!(ids(&list), vec!["1.21.1", "生存"]);
+        assert_eq!(
+            std::fs::read_to_string(stamp_file(&game)).unwrap(),
+            r#"{"data_format":2}"#
+        );
+        // 记号等于这一版：不写，照常列出。
+        let before = disk_state(tmp.path());
+        let list = with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap();
+        assert_eq!(ids(&list), vec!["1.21.1", "生存"]);
+        assert_eq!(disk_state(tmp.path()), before);
+
+        write_stamp(&game, NEWER_STAMP);
+        match with_fixture(own_format(2), petalfall.list_instances())
+            .await
+            .unwrap_err()
+        {
+            CoreError::GameDirDataTooNew {
+                found, supported, ..
+            } => assert_eq!((found, supported), (3, 2)),
+            other => panic!("应报游戏目录太新，实际是 {other:?}"),
+        }
     }
 
     fn walk(dir: &Path) -> Vec<PathBuf> {
