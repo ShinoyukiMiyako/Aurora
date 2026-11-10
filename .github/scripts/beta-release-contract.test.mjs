@@ -79,6 +79,47 @@ const BUNDLE_SCRIPT = [
   'echo "installer-name=$(basename "$installer")" >> "$GITHUB_OUTPUT"',
 ];
 
+// 下面三步是挡违规构建的闸，脚本同样逐行钉死（不含 shell 注释），理由与打包那一步相同：前面插一句 exit 0、
+// 命令后面接 || true、包进一个从不调用的函数，检查就不再执行，构建却照样成功。
+// 读出各通道已发布的版本：三条命令一条不少，模式只由分支定，beta 上是 release，别处的演练是 rehearsal。
+const HEADS_SCRIPT = [
+  'mode=release',
+  'if [ "$GITHUB_REF" != refs/heads/beta ]; then',
+  'mode=rehearsal',
+  'fi',
+  'node .github/scripts/release-heads.mjs read "$GITHUB_REPOSITORY" "$HEADS"',
+  'node .github/scripts/release-heads.mjs gate beta "$mode" "$VERSION" "$HEADS"',
+  'node .github/scripts/release-heads.mjs data-format beta "$mode" "$HEADS" "$GITHUB_REPOSITORY"',
+];
+
+// 核对载荷头：读回的四项交给 release-heads.mjs payload 按源码核对，通过之后才写出给构建信息用的三项。
+const PAYLOAD_SCRIPT = [
+  'fields="$(cargo run --release --locked -p petalfall-setup-payload --bin inspect-setup -- "$BOOTSTRAP")"',
+  "IFS=$'\\t' read -r magic header_version data_format caps <<< \"$fields\"",
+  'node .github/scripts/release-heads.mjs payload "$VERSION" "$magic" "$header_version" "$data_format" "$caps"',
+  'echo "magic=$magic" >> "$GITHUB_OUTPUT"',
+  'echo "data-format=$data_format" >> "$GITHUB_OUTPUT"',
+  'echo "caps=$caps" >> "$GITHUB_OUTPUT"',
+];
+
+// 核对内嵌的更新公钥：两个 .pub 文件都找，去掉首尾空白的写法与注入那一行相同；空串对 grep -F 处处命中、多行只要一行
+// 命中就算，所以先要求是一行 base64。
+const PUBKEYS_SCRIPT = [
+  'for pub in .github/dev-updater.pub .github/release-updater.pub; do',
+  `key="$(node -p "require('fs').readFileSync(process.argv[1], 'utf8').trim()" "$pub")"`,
+  'if ! [[ "$key" =~ ^[A-Za-z0-9+/]+=*$ ]]; then',
+  'echo "::error::$pub 去掉首尾空白后不是一行 base64"',
+  'exit 1',
+  'fi',
+  `if ! grep -qF -e "$key" -- ${PETALFALL_EXE}; then`,
+  'echo "::error::Petalfall.exe 里没有内嵌 $pub 里的更新公钥"',
+  'exit 1',
+  'fi',
+  'done',
+];
+
+const LOCKED_CLI_CALL = 'node .github/scripts/locked-cli.mjs app/pnpm-lock.yaml "$CLI_VERSION" > "$RUNNER_TEMP/tauri-cli.tsv"';
+
 /** 允许的 flow 集合，整行比对。flow 集合能跨行、能嵌套，逐行看不出折成了什么，只放行现有的这几处。 */
 const FLOW_ALLOWED = ['branches: [beta]', 'permissions: {}', 'needs: [build, sign]', 'needs: [build, stage]'];
 
@@ -190,20 +231,131 @@ describe('beta 发布工作流的契约', () => {
     );
   });
 
+  // 同一基础号下 beta < dev < 正式版，测试版低于预览版、核心号高于已发布的正式版都不会自然成立，靠这一步挡。
+  // 它要拿确定版本号定出的版本去比，又要在编译之前做完：排到注入公钥之后，挡下的版本已经白编了一遍。
+  // 这一步多一个 if、continue-on-error，或脚本里少一条命令，不低于预览版、基础号已出过正式版、数据格式号倒退
+  // 或单独摘进来的测试版照样签名发布。
+  it('确定版本号之后、注入公钥之前读出各通道已发布的版本，跑 read、gate beta、data-format beta', () => {
+    const buildSteps = steps(LINES, 'build');
+    const version = buildSteps.findIndex((step) => stepKeys(step).includes('id: version'));
+    const heads = buildSteps.findIndex((step) => stepKeys(step).includes('id: heads'));
+    const inject = buildSteps.findIndex((step) => codeOf(step).includes(PUBKEY_LINE));
+    assert.notEqual(version, -1, 'build 作业里找不到确定版本号那一步（id: version）');
+    assert.notEqual(heads, -1, 'build 作业里找不到读出各通道已发布的版本那一步（id: heads）');
+    assert.notEqual(inject, -1, '更新插件的配置不再写在 build 作业里');
+    assert.ok(version < heads, '读出各通道已发布的版本排到了确定版本号之前，拿不到要检查的本包版本');
+    assert.ok(heads < inject, '读出各通道已发布的版本排到了注入公钥之后：版本先后要在编译之前查完');
+    const step = buildSteps[heads];
+    assert.deepEqual(
+      stepKeys(step),
+      ['name: 读出各通道已发布的版本', 'id: heads', 'env:', 'run: |'],
+      '读出各通道已发布的版本那一步多了键（if、continue-on-error、shell 之类），检查可能不执行，或不过也不挡构建',
+    );
+    assert.deepEqual(
+      blockOf(step, 8, 'env'),
+      ['VERSION: ${{ steps.version.outputs.version }}', 'HEADS: ${{ runner.temp }}/release-heads.json'],
+      '读出各通道已发布的版本查的不再是确定版本号定出的本包版本，或 heads 文件换了地方、写构建信息读不到',
+    );
+    assert.deepEqual(
+      codeOf(step.filter((line) => line.kind === 'content')),
+      HEADS_SCRIPT,
+      '读出各通道已发布的版本的脚本变了：read、gate beta、data-format beta 少了一条，模式不再只由分支定，或插了让检查不执行的命令',
+    );
+  });
+
+  // 正式版那一条改由 gate beta 按验过签的结果查。未验签的清单谁改得了香港机上的文件、谁能在半路改写响应，
+  // 谁就能让它显示任意版本，按它比，测试版能不能发就由伪造的人说了算；地址变量留着，迟早又被拿去读。
+  it('不再读未验签的正式版清单，也不再声明它的地址', () => {
+    assert.ok(!WORKFLOW.includes('STABLE_MANIFEST_URL'), '工作流里又出现了 STABLE_MANIFEST_URL，正式版清单只能经 release-heads.mjs 验签后采信');
+    assert.deepEqual(
+      CODE.filter((line) => line.includes('/updates/stable/')),
+      [],
+      '工作流又直接读正式版清单：版本先后只能按 release-heads.mjs 验过签的结果比',
+    );
+  });
+
+  // 构建首装引导程序之后才有要核对的引导程序与 exe；两步排在写构建信息之前，审批摘要里的载荷头就是核对过的值。
+  // 载荷头写错、漏编一把公钥，编译与打包都不报错，坏在用户那头，所以两步都不许带 if、continue-on-error，
+  // 作业级的 continue-on-error 同样会让核对失败的作业不再判这次运行失败，一并不许。
+  it('构建首装引导程序之后依次核对载荷头与内嵌的更新公钥，两步都无条件执行', () => {
+    const buildSteps = steps(LINES, 'build');
+    const at = (key) => buildSteps.findIndex((step) => stepKeys(step).includes(key));
+    const order = [
+      ['构建首装引导程序（id: bootstrap）', at('id: bootstrap')],
+      ['核对载荷头（id: payload）', at('id: payload')],
+      ['核对内嵌的更新公钥', at('name: 核对内嵌的更新公钥')],
+      ['写构建信息（id: info）', at('id: info')],
+    ];
+    for (const [what, index] of order) assert.notEqual(index, -1, `build 作业里找不到 ${what} 那一步`);
+    const indexes = order.map(([, index]) => index);
+    assert.deepEqual(
+      [...indexes].sort((a, b) => a - b),
+      indexes,
+      `顺序应为 ${order.map(([what]) => what).join('、')}，实际排在第 ${indexes.join('、')} 步`,
+    );
+    const [payload, pubkeys] = [buildSteps[indexes[1]], buildSteps[indexes[2]]];
+    for (const step of [payload, pubkeys]) {
+      const keys = stepKeys(step);
+      assert.deepEqual(
+        keys.filter((key) => /^(?:if|continue-on-error)\s*:/i.test(key)),
+        [],
+        `${keys[0]} 带了 if 或 continue-on-error：核对可能不执行，或失败了也不挡构建`,
+      );
+    }
+    assert.ok(
+      !jobKeys(LINES, 'build').some((key) => /^continue-on-error\s*:/i.test(key)),
+      'build 作业级带了 continue-on-error：核对失败的作业不再判这次运行失败',
+    );
+
+    assert.deepEqual(stepKeys(payload), ['name: 核对载荷头', 'id: payload', 'env:', 'run: |'], '核对载荷头那一步多了键，核对可能不执行');
+    assert.deepEqual(
+      blockOf(payload, 8, 'env'),
+      ['VERSION: ${{ steps.version.outputs.version }}', 'BOOTSTRAP: ${{ steps.bootstrap.outputs.bootstrap }}'],
+      '核对载荷头比的不再是本包版本，或读的不再是构建出的那份引导程序',
+    );
+    assert.deepEqual(
+      codeOf(payload.filter((line) => line.kind === 'content')),
+      PAYLOAD_SCRIPT,
+      '核对载荷头的脚本变了：读回的四项可能不再全部交给 release-heads.mjs payload 核对',
+    );
+    assert.deepEqual(stepKeys(pubkeys), ['name: 核对内嵌的更新公钥', 'run: |'], '核对内嵌的更新公钥那一步多了键，核对可能不执行');
+    assert.deepEqual(
+      codeOf(pubkeys.filter((line) => line.kind === 'content')),
+      PUBKEYS_SCRIPT,
+      '核对内嵌的更新公钥的脚本变了：两个 .pub 文件可能不再都在 Petalfall.exe 里找',
+    );
+  });
+
+  // CI 上不跑启动器的 Rust 测试，版本序、数据格式号与安装判定这些共用规则，只能靠这一行随每次构建在托管机上跑到。
+  it('跑 Rust 测试的那一行带上 petalfall-release', () => {
+    assert.deepEqual(
+      job(LINES, 'build').filter((line) => /\bcargo\s+test\b/.test(line)),
+      ['cargo test --release --locked -p petalfall-setup-payload -p petalfall-release'],
+      'build 作业里跑 Rust 测试的那一行变了：共用包 petalfall-release 的规则测试要和载荷格式的测试一起跑',
+    );
+  });
+
   // 换钥时 CI 里打包、签名、验签都对得上，坏在已装旧版的用户那头：他们只认编进旧包的公钥，换钥之后发的更新全被拒收。
   // 所以把密钥号钉死，换钥必须连这里一起改；顺带挡住把开发版公钥误当发布公钥提交。密钥号写成验签脚本输出的样子
   // （小写十六进制，和 minisign 注释里那串字节序相反）。公钥文件是 minisign 公钥框整个再做一次 base64，
   // 框的第二行解出 42 字节：算法 Ed、8 字节密钥号、32 字节 Ed25519 公钥。
+  const keyNumber = (name) => {
+    const box = Buffer.from(readFileSync(new URL(`../${name}`, import.meta.url), 'utf8').trim(), 'base64').toString('utf8').split('\n');
+    const key = Buffer.from(box[1].trim(), 'base64');
+    assert.equal(key.length, 42, `${name} 解出的公钥不是 42 字节`);
+    assert.equal(key.subarray(0, 2).toString(), 'Ed', `${name} 的算法不是 Ed`);
+    return key.subarray(2, 10).toString('hex');
+  };
+
   it('发布公钥是记录在案的那把，不是开发版的', () => {
-    const keyNumber = (name) => {
-      const box = Buffer.from(readFileSync(new URL(`../${name}`, import.meta.url), 'utf8').trim(), 'base64').toString('utf8').split('\n');
-      const key = Buffer.from(box[1].trim(), 'base64');
-      assert.equal(key.length, 42, `${name} 解出的公钥不是 42 字节`);
-      assert.equal(key.subarray(0, 2).toString(), 'Ed', `${name} 的算法不是 Ed`);
-      return key.subarray(2, 10).toString('hex');
-    };
     assert.equal(keyNumber('release-updater.pub'), 'aeeab33bdc36d624');
     assert.notEqual(keyNumber('release-updater.pub'), keyNumber('dev-updater.pub'));
+  });
+
+  // 启动器把开发版公钥也编进每个包，偏好为预览版时拿它验 dev 的清单与包，已装预览版的用户同样只认编进旧包的那把。
+  // 钉住它，换钥必须连这里一起改；在一次性分支上换成测试钥做的夹具，到了正式流水线编译之前就在这里挂掉，混不进发出去的包。
+  it('开发版公钥也是记录在案的那把', () => {
+    assert.equal(keyNumber('dev-updater.pub'), 'a85c28a4343f0962', '开发版公钥换了，或提交进来的是测试钥');
   });
 
   // 客户端开了 requireSignedVersion，签名时不把版本号写进可信注释，插件拒收每一个 beta 包。
@@ -230,6 +382,41 @@ describe('beta 发布工作流的契约', () => {
     assert.deepEqual(secretsIn(exposedOf(jobLines(LINES, 'sign'))), { names: ['RELEASE_UPDATER_PRIVATE_KEY'], other: [] });
     assert.deepEqual(tokenRefs(exposedOf(jobLines(LINES, 'sign'))), [], 'sign 作业不该拿仓库令牌');
     assert.deepEqual(jobBlock(LINES, 'sign', 'permissions'), ['contents: read']);
+  });
+
+  // 持钥的作业里不跑包管理器：npm exec、pnpm install 按 registry 当下给的元数据取包，还会跑安装脚本，拿到的不一定是
+  // 锁文件里那一份。签名 CLI 只按锁文件记的 integrity 取，读锁文件只经 locked-cli.mjs 这一份带测试的解析，
+  // 两条流水线不各写一套。sparse 名单逐项钉住：持钥的机器上只放用得到的这几个文件。
+  it('sign 经 locked-cli.mjs 按锁文件取签名 CLI，不再内联解析锁文件', () => {
+    const signLines = jobLines(LINES, 'sign');
+    const sparseAt = signLines.findIndex((line) => line.kind === 'structure' && line.key === 'sparse-checkout');
+    assert.notEqual(sparseAt, -1, 'sign 作业的 checkout 不再用 sparse-checkout，持钥的机器上会多出整个仓库');
+    assert.equal(signLines[sparseAt].valueKind, 'block', 'sign 作业的 sparse-checkout 不再是逐行列文件的块');
+    const sparse = [];
+    for (const line of signLines.slice(sparseAt + 1)) {
+      if (line.kind !== 'content') break;
+      if (line.raw.trim() !== '') sparse.push(line.raw.trim());
+    }
+    assert.deepEqual(
+      sparse,
+      ['/.github/release-updater.pub', '/.github/scripts/locked-cli.mjs', '/.github/scripts/verify-update-signature.mjs', '/app/pnpm-lock.yaml'],
+      'sign 作业取出的文件变了：持钥的机器上只放公钥、locked-cli.mjs、验签脚本和锁文件',
+    );
+    const sign = job(LINES, 'sign');
+    assert.ok(sign.includes('sparse-checkout-cone-mode: false'), 'sign 的 sparse-checkout 不再是非 cone 模式，按文件列的名单会放宽成整个目录');
+
+    const cli = steps(LINES, 'sign').find((step) => stepKeys(step).includes('id: cli'));
+    assert.notEqual(cli, undefined, 'sign 作业里找不到按锁文件取签名 CLI 那一步（id: cli）');
+    const script = codeOf(cli.filter((line) => line.kind === 'content'));
+    assert.equal(script[0], LOCKED_CLI_CALL, '取签名 CLI 的第一件事不再是用 locked-cli.mjs 从锁文件读出 integrity');
+    assert.ok(script.includes('done < "$RUNNER_TEMP/tauri-cli.tsv"'), '下载、核对 integrity 的循环不再读 locked-cli.mjs 写出的名单');
+    assert.deepEqual(
+      sign.filter((line) => line.includes('pnpm-lock.yaml')),
+      ['/app/pnpm-lock.yaml', LOCKED_CLI_CALL],
+      'sign 作业里又有别处读锁文件：锁文件只许经 locked-cli.mjs 解析',
+    );
+    assert.deepEqual(sign.filter((line) => /\bnode\s+-(?:\s|$)/.test(line)), [], 'sign 作业里又有从标准输入读进来的内联 node 脚本');
+    assert.deepEqual(sign.filter((line) => /\b(?:npm|npx|pnpm|yarn)\s/.test(line)), [], 'sign 作业里跑了包管理器');
   });
 
   it('桶凭据只进 stage，香港推送钥只进 publish-hk', () => {
