@@ -86,6 +86,12 @@ pub fn run() {
         );
     }
 
+    // 数据被更新的版本用过就不打开：排在读配置之前，读配置可能把坏配置改名，那已经是一次写入；排在等上一个实例
+    // 退出之后，同一数据目录上就不会有两个进程同时抬号。
+    if data_gate::check_on_startup(&context.package_info().version) == data_gate::Gate::Exit {
+        return;
+    }
+
     let updater_support = commands::updater::detect_support(
         context.config().plugins.0.get("updater"),
         cfg!(debug_assertions),
