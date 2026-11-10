@@ -4,6 +4,8 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { ConfigDto, GameDirectoryDto } from "../../ipc/config";
+import { IpcError } from "../../ipc/errors";
+import { APP_NAME } from "../../lib/app-info";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
@@ -549,6 +551,69 @@ describe("首次启动向导：推进与收尾", () => {
     await click(button("开始使用"));
     expect(callsOf(ipc, "complete_first_run")).toHaveLength(1);
     expect(launcher.state.firstRun).toBe(false);
+  });
+});
+
+describe("首次启动向导：选到数据格式不合的游戏目录", () => {
+  const PICKED = "D:\\Games\\.minecraft";
+  const OTHER = "E:\\Games\\Petal";
+  const tooNew = (written_by: string | null, written_by_channel: "dev" | "beta" | "stable" | null) =>
+    new IpcError("game_dir_data_too_new", `游戏目录 ${PICKED} 的数据格式 3 比这一版认得的 2 新`, { path: PICKED, found: 3, supported: 2, written_by, written_by_channel });
+  const unreadable = (reason: string) => new IpcError("data_format_unreadable", `游戏目录 ${PICKED} 的数据格式记号读不懂`, { path: PICKED, reason });
+  const commitFailsWith = (error: Error) =>
+    ipc.overrides.set("complete_first_run", () => {
+      throw error;
+    });
+
+  /** 路径框下那一行的错误；没有错误时（显示常驻提示）为 null。 */
+  const dirError = () => {
+    const message = document.querySelector("[data-step-pane]:not([aria-hidden]) [data-error]");
+    return message === null ? null : message.textContent;
+  };
+
+  it.each([
+    ["被预览版用过", () => tooNew("1.1.0-dev.57", "dev"), "这个文件夹已经被预览版 1.1.0-dev.57 用过，这个版本读不了里面的实例。换一个文件夹，或者装上预览版 1.1.0-dev.57 或更新的版本再来。"],
+    ["被正式版用过", () => tooNew("1.3.0", "stable"), "这个文件夹已经被正式版 1.3.0 用过，这个版本读不了里面的实例。换一个文件夹，或者装上正式版 1.3.0 或更新的版本再来。"],
+    ["不知道是哪一版用过", () => tooNew(null, null), `这个文件夹已经被更新的${APP_NAME}用过，这个版本读不了里面的实例。换一个文件夹，或者装上更新的版本再来。`],
+    ["格式记录读不懂", () => unreadable("expected value at line 1 column 1"), "这个文件夹里的格式记录读不懂（expected value at line 1 column 1），换一个文件夹。"],
+  ])("%s：停在第一步，路径框下是不带路径的说法，配置不变", async (_, error, expected) => {
+    commitFailsWith(error());
+    await mount();
+    const config = await mockInvoke<ConfigDto>("get_config");
+    await typePath(PICKED);
+    await click(button("下一步"));
+    expect(callsOf(ipc, "complete_first_run").map((a) => a.gameDir)).toEqual([PICKED]);
+    expect(title()).toBe("游戏文件放在哪");
+    expect(dirError()).toBe(expected);
+    expect(dirInput().value).toBe(PICKED);
+    expect(dirInput().getAttribute("aria-invalid")).toBe("true");
+    expect(launcher.state.firstRun).toBe(true);
+    expect(await mockInvoke<ConfigDto>("get_config")).toEqual(config);
+    expect(await mockInvoke<boolean>("is_first_run")).toBe(true);
+  });
+
+  it("换一个文件夹：错误随改动收起，再按下一步提交新目录、向导前进", async () => {
+    commitFailsWith(tooNew("1.1.0-dev.57", "dev"));
+    await mount();
+    await typePath(PICKED);
+    await click(button("下一步"));
+    expect(dirError()).toBe("这个文件夹已经被预览版 1.1.0-dev.57 用过，这个版本读不了里面的实例。换一个文件夹，或者装上预览版 1.1.0-dev.57 或更新的版本再来。");
+    await typePath(OTHER);
+    expect(dirError()).toBeNull();
+    ipc.overrides.delete("complete_first_run");
+    await click(button("下一步"));
+    expect(callsOf(ipc, "complete_first_run").map((a) => a.gameDir)).toEqual([PICKED, OTHER]);
+    expect(title()).toBe("看看这台电脑上的 Java");
+    expect((await mockInvoke<ConfigDto>("get_config")).game_dir).toBe(OTHER);
+  });
+
+  it("别的失败不落进路径框：停在第一步，只由通知说明", async () => {
+    commitFailsWith(new IpcError("io", "文件 IO 失败: config.json"));
+    await mount();
+    await click(button("下一步"));
+    expect(title()).toBe("游戏文件放在哪");
+    expect(dirError()).toBeNull();
+    expect(launcher.state.toasts.map((t) => t.title)).toContain("首次设置没有保存");
   });
 });
 

@@ -1,6 +1,8 @@
 // 首次启动向导的文案。产品名一律经 APP_NAME 拼入。
 
 import type { IconName } from "../../art/Icon";
+import { dataWriterName, newerVersionToInstall, type DataWriter } from "../../copy/data-format";
+import { joinMixed } from "../../copy/flows";
 import { APP_NAME } from "../../lib/app-info";
 import type { StepId } from "./model";
 
@@ -55,6 +57,10 @@ export const DIR_COPY = {
   none: "没有找到其他启动器的文件夹。之后可以在设置里手动添加。",
   empty: "游戏目录不能为空",
   bang: "路径里不能有「!」，Java 会读不出里面的游戏文件",
+  // 默认目录被挡最常见：卸载时删了数据，游戏目录里的格式记录却还在。路径就在输入框里，句子不重复它，先说可以直接换一个
+  dataTooNew: (writer: DataWriter) =>
+    joinMixed("这个文件夹已经被", dataWriterName(writer), "用过，这个版本读不了里面的实例。换一个文件夹，或者装上", newerVersionToInstall(writer), "再来。"),
+  dataFormatUnreadable: (reason: string) => `这个文件夹里的格式记录读不懂（${reason}），换一个文件夹。`,
   pickFailed: "没能打开文件夹选择框",
   settingsFailed: "读不到默认的游戏目录",
   discoverFailed: "没能探测其他启动器的文件夹",

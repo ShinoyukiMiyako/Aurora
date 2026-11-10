@@ -10,6 +10,7 @@ import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "f
 import { useRef, useState, type ReactNode, type Ref } from "react";
 import { Icon } from "../../art/Icon";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
+import type { DataWriter } from "../../copy/data-format";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { fade, stepPane, stepPaneFade } from "../../lib/motion";
 import { useMounted } from "../../lib/useMounted";
@@ -50,6 +51,16 @@ import { StepJava } from "./StepJava";
 
 /** 后端拒绝游戏目录时的错误码。 */
 const INVALID_GAME_DIRECTORY = "invalid_game_directory";
+/** 游戏目录被更新的版本用过、或记数据格式的文件读不懂：同样是这个目录不能用，原因也落在输入框下。 */
+const GAME_DIR_DATA_TOO_NEW = "game_dir_data_too_new";
+const DATA_FORMAT_UNREADABLE = "data_format_unreadable";
+
+// 写成以通道为键的表：后端加了通道、类型跟着加时，这里漏写会在编译期报出来
+const WRITER_CHANNELS: Readonly<Record<NonNullable<DataWriter["written_by_channel"]>, true>> = { dev: true, beta: true, stable: true };
+
+function isWriterChannel(value: unknown): value is keyof typeof WRITER_CHANNELS {
+  return typeof value === "string" && Object.hasOwn(WRITER_CHANNELS, value);
+}
 
 /** 左栏宽度随窗口档位；花枝插画按它画。 */
 const SIDE_WIDTH = { compact: 248, regular: 248, wide: 272 } as const;
@@ -68,6 +79,45 @@ function errorCode(error: unknown): string | null {
   if (typeof error !== "object" || error === null || !("code" in error)) return null;
   const code = (error as { code: unknown }).code;
   return typeof code === "string" ? code : null;
+}
+
+/** 后端错误附带的 detail。流程层不引用 ipc，按结构读；不是对象说明前后端的错误契约被破坏，抛出。 */
+function detailOf(error: unknown, code: string): Record<string, unknown> {
+  const detail = typeof error === "object" && error !== null && "detail" in error ? (error as { detail: unknown }).detail : undefined;
+  if (typeof detail !== "object" || detail === null || Array.isArray(detail)) throw new Error(`${code} 的 detail 应是对象，实为 ${JSON.stringify(detail)}`);
+  return detail as Record<string, unknown>;
+}
+
+/** 用过这个目录的那一版。字段形状不对同样是契约破坏，抛出，不退回「更新的落樱」把缺口藏起来。 */
+function dataWriterOf(detail: Record<string, unknown>): DataWriter {
+  const { written_by: version, written_by_channel: channel } = detail;
+  if (version !== null && typeof version !== "string") throw new Error(`${GAME_DIR_DATA_TOO_NEW} 的 detail.written_by 应是字符串或 null，实为 ${JSON.stringify(version)}`);
+  if (channel !== null && !isWriterChannel(channel)) throw new Error(`${GAME_DIR_DATA_TOO_NEW} 的 detail.written_by_channel 不认识：${JSON.stringify(channel)}`);
+  return { written_by: version, written_by_channel: channel };
+}
+
+function unreadableReasonOf(detail: Record<string, unknown>): string {
+  const { reason } = detail;
+  if (typeof reason !== "string") throw new Error(`${DATA_FORMAT_UNREADABLE} 的 detail.reason 应是字符串，实为 ${JSON.stringify(reason)}`);
+  return reason;
+}
+
+/**
+ * 后端拒绝了这个游戏目录时写在输入框下的原因；别的失败为 null，只由通知说明。
+ * 数据格式的两种不用通知里那句带路径的正文：路径就在上面的输入框里。
+ */
+function dirRejection(error: unknown): string | null {
+  const code = errorCode(error);
+  switch (code) {
+    case INVALID_GAME_DIRECTORY:
+      return describeError(error);
+    case GAME_DIR_DATA_TOO_NEW:
+      return DIR_COPY.dataTooNew(dataWriterOf(detailOf(error, code)));
+    case DATA_FORMAT_UNREADABLE:
+      return DIR_COPY.dataFormatUnreadable(unreadableReasonOf(detailOf(error, code)));
+    default:
+      return null;
+  }
 }
 
 interface StepPaneProps {
@@ -192,7 +242,8 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
       setCommitted(key);
       return true;
     }
-    if (errorCode(result.error) === INVALID_GAME_DIRECTORY) setDirError(describeError(result.error));
+    const rejection = dirRejection(result.error);
+    if (rejection !== null) setDirError(rejection);
     setWizard(backToStart);
     return false;
   };
