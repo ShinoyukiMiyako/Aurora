@@ -42,6 +42,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::config::MemorySettings;
+use crate::data_format::GuardMode;
 use crate::error::{CoreError, OfflineFallbackRefusal};
 use crate::event::{CoreEvent, DownloadProgress};
 use crate::facade::Petalfall;
@@ -693,6 +694,9 @@ impl Petalfall {
         events: &LaunchEventSink,
         java_override: Option<JavaChoice>,
     ) -> Result<GameRun, LaunchFailed> {
+        // 建会话日志、补文件、起进程都会写进游戏目录：记号比这一版新的目录这一版不能往里写，读不懂或时限内
+        // 看不出结论时也不能当作没事往下走。
+        self.guard_game_dir(GuardMode::Use).await?;
         let clock = SessionClock::start()?;
         let chain = read_version_chain(self.game_dir(), &request.version_id).await?;
         let version_dir = chain.target.dir.clone();
@@ -2203,6 +2207,9 @@ mod tests {
     use petalfall_download::CancellationToken;
     use petalfall_launch::logfile::SessionOutcome;
     use std::sync::Arc;
+
+    use crate::data_format::testing::with_fixture;
+    use crate::instances::tests::{NEWER_STAMP, NEWER_WRITER, disk_state, own_format, write_stamp};
 
     const VERSION: &str = "1.20.1";
 
@@ -5124,6 +5131,117 @@ mod tests {
         let failure = expect_failure(result);
         assert_eq!(failure.code, FailureCode::VersionBroken);
         assert!(failure.params.contains_key("reason"));
+    }
+
+    /// 经两个公开入口发起一次启动并收齐事件。不指定 Java：用例先把全局默认 Java 固定好。
+    async fn launch_entry(
+        petalfall: &Petalfall,
+        request: LaunchRequest,
+        offline_fallback: bool,
+    ) -> (Result<GameRun, LaunchFailed>, Vec<LaunchEvent>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let result = if offline_fallback {
+            petalfall.launch_offline_fallback(request, &tx).await
+        } else {
+            petalfall.launch(request, &tx).await
+        };
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        (result, events)
+    }
+
+    fn expect_newer_game_dir(result: Result<GameRun, LaunchFailed>, game_dir: &Path) {
+        match result {
+            Err(LaunchFailed::Core(CoreError::GameDirDataTooNew {
+                path,
+                found,
+                supported,
+                written_by,
+            })) => {
+                assert_eq!(path, game_dir);
+                assert_eq!((found, supported), (3, 2));
+                assert_eq!(written_by.as_deref(), Some(NEWER_WRITER));
+            }
+            Err(other) => panic!("应报游戏目录太新，实际：{other:?}"),
+            Ok(_) => panic!("游戏目录比这一版新时不该拉起游戏"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launch_refuses_a_newer_game_dir_before_writing_or_spawning_anything() {
+        let mut fx = fixture();
+        let game = fx.root.join(".minecraft");
+        install_version(&game, 17, true);
+        fx.petalfall.set_default_java(Some(echo_java(&fx.root)));
+        write_stamp(&game, NEWER_STAMP);
+        let before = disk_state(&game);
+
+        let (result, events) =
+            with_fixture(own_format(2), launch_entry(&fx.petalfall, request(), false)).await;
+        expect_newer_game_dir(result, &game);
+        // 没进任何阶段、没建会话日志，假 java 也没被当作游戏拉起来。
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(disk_state(&game), before);
+        assert!(!fx.root.join(ECHO_JAVA_ARGS).exists());
+
+        // 对照：记号等于这一版时，同一个实例照常拉起。
+        write_stamp(&game, r#"{"data_format":2}"#);
+        let (result, events) =
+            with_fixture(own_format(2), launch_entry(&fx.petalfall, request(), false)).await;
+        let run = expect_run(result);
+        assert_eq!(stage_indices(&events), vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(run.finish().await.exit.exit_code, Some(0));
+        assert!(fx.root.join(ECHO_JAVA_ARGS).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offline_fallback_refuses_a_newer_game_dir_and_keeps_the_failure_record() {
+        let server = wiremock::MockServer::start().await;
+        let mut fx = fixture();
+        let game = fx.root.join(".minecraft");
+        install_legacy_args_version(&game);
+        fx.petalfall.set_default_java(Some(echo_java(&fx.root)));
+        let (petalfall, stored) = with_stale_account(&fx, &server);
+        // 上一次启动碰上了服务故障：这个账户本可以离线进单人。
+        petalfall
+            .account_failures
+            .lock()
+            .unwrap()
+            .insert(MS_UUID.to_owned(), FailureCode::AccountServiceDown);
+        write_stamp(&game, NEWER_STAMP);
+        let before = disk_state(&game);
+
+        let (result, events) = with_fixture(
+            own_format(2),
+            launch_entry(&petalfall, stored_request(stored.clone()), true),
+        )
+        .await;
+        expect_newer_game_dir(result, &game);
+        assert!(events.is_empty(), "{events:?}");
+        assert_eq!(disk_state(&game), before);
+        assert!(!fx.root.join(ECHO_JAVA_ARGS).exists());
+        // 这次没走到降级：失败记录还在，也没联网。
+        assert_eq!(
+            failures_of(&petalfall).get(MS_UUID),
+            Some(&FailureCode::AccountServiceDown)
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        // 对照：记号等于这一版时，同样的请求以离线方式拉起游戏，失败记录随之消耗。
+        write_stamp(&game, r#"{"data_format":2}"#);
+        let (result, _) = with_fixture(
+            own_format(2),
+            launch_entry(&petalfall, stored_request(stored), true),
+        )
+        .await;
+        let run = expect_run(result);
+        assert!(run.offline());
+        assert_eq!(run.finish().await.exit.exit_code, Some(0));
+        assert!(fx.root.join(ECHO_JAVA_ARGS).exists());
+        assert!(failures_of(&petalfall).is_empty());
     }
 
     /// 加载器安装器自带的库（版本 JSON 里地址留空）被删掉后启动：报只能重装加载器，不把空地址交给下载池
