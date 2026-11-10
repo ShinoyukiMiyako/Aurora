@@ -19,6 +19,7 @@ use petalfall_instance::{
 use sha1::{Digest, Sha1};
 
 use crate::InstanceError;
+use crate::data_format::GuardMode;
 use crate::error::Result;
 use crate::facade::Petalfall;
 use crate::modfs::try_exists;
@@ -383,13 +384,15 @@ impl Petalfall {
     ///
     /// 背景位同时把 `background` 设为图片；方块位只写 `cover_image`，`cover` 留作图片读不到时的兜底。
     /// 被换下的旧图随之删掉。图片的问题报 [`CoverImageError`]（经 [`crate::CoreError::CoverImage`]），
-    /// 实例不存在报 [`crate::CoreError::VersionNotInstalled`]；失败时设置不变。
+    /// 实例不存在报 [`crate::CoreError::VersionNotInstalled`]；失败时设置不变。先核对游戏目录的数据格式记号，
+    /// 规则同 [`Petalfall::set_instance_settings`]。
     pub async fn import_cover_image(
         &self,
         id: &str,
         slot: CoverImageSlot,
         source: &Path,
     ) -> Result<VersionSettings> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dir = self.existing_instance_dir(id).await?;
         let owned = source.to_path_buf();
         let encoded =
@@ -426,7 +429,10 @@ impl Petalfall {
 mod tests {
     use super::*;
     use crate::CoreError;
-    use crate::instances::tests::{petalfall_at, vanilla_json, write_version};
+    use crate::instances::tests::{
+        current_format_stamp, disk_state, petalfall_at, refusing_stamps, vanilla_json, write_stamp,
+        write_version,
+    };
     use image::RgbImage;
     use image::codecs::webp::WebPEncoder;
 
@@ -1120,6 +1126,40 @@ mod tests {
             petalfall.instance_settings("1.21.1").await.unwrap(),
             cleared
         );
+    }
+
+    /// 任务重试与列实例被拒后留下的旧列表都不经过列实例：导入自己在读图、写图片与设置之前核对游戏目录的记号。
+    #[tokio::test]
+    async fn import_refuses_a_newer_or_unreadable_game_dir_and_touches_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let game = petalfall.game_dir().to_path_buf();
+        let dir = write_version(&game, "1.21.1", &vanilla_json("1.21.1"));
+        let photo = source(tmp.path(), "photo.png", &rgb_png(30, 20));
+
+        for (stamp, assert_refused) in refusing_stamps() {
+            write_stamp(&game, &stamp);
+            let before = disk_state(tmp.path());
+            let err = petalfall
+                .import_cover_image("1.21.1", CoverImageSlot::Background, &photo)
+                .await
+                .unwrap_err();
+            assert_refused(err, &game);
+            assert_eq!(disk_state(tmp.path()), before, "记号 {stamp} 拦下后动了盘");
+        }
+
+        // 对照：号等于这一版时放行，图片与设置照常落盘。
+        write_stamp(&game, &current_format_stamp());
+        let settings = petalfall
+            .import_cover_image("1.21.1", CoverImageSlot::Background, &photo)
+            .await
+            .unwrap();
+        let encoded = encode_cover_image(&photo, CoverImageSlot::Background).unwrap();
+        assert_eq!(
+            settings.background_image.as_deref(),
+            Some(encoded.file_name.as_str())
+        );
+        assert_eq!(cover_files(&dir), vec![encoded.file_name]);
     }
 
     #[tokio::test]

@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use petalfall_instance::{PETALFALL_META_DIR, VERSIONS_DIR};
 use serde::{Deserialize, Serialize};
 
+use crate::data_format::GuardMode;
 use crate::error::{CoreError, Result};
 use crate::facade::Petalfall;
 use crate::modfs::{
@@ -412,7 +413,10 @@ impl Petalfall {
     /// 全部前置检查（事件存在、是更新事件、没回滚过、没被之后的更新盖过、备份还在、目标名没被占、
     /// 文件没被游戏占用）通过后才动第一次盘。半个回滚比不回滚更糟——玩家会拿到一个既不是旧版也不是新版的 mods 目录，
     /// 且没人知道它缺了什么。
+    ///
+    /// 这些检查之前先核对游戏目录的数据格式记号，规则同 [`Petalfall::set_instance_settings`]。
     pub async fn rollback(&self, version_id: &str, event_id: &str) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let dirs = self.resolved_dirs(version_id).await?;
         let mods_dir = &dirs.mods_dir;
         let _guard = lock_mods_dir(mods_dir).await;
@@ -569,6 +573,7 @@ impl Petalfall {
 mod tests {
     use super::*;
     use crate::config::PetalfallConfig;
+    use crate::instances::tests::{current_format_stamp, disk_state, refusing_stamps, write_stamp};
     use crate::ledger::{Ledger, LedgerEntry};
     use petalfall_instance::IsolationPolicy;
     use petalfall_modplatform::Platform;
@@ -1698,6 +1703,61 @@ mod tests {
             petalfall.ledger_store(VERSION_ID).load().await.unwrap(),
             Ledger::default()
         );
+    }
+
+    /// 任务重试与列实例被拒后留下的旧列表都不经过列实例：回滚自己在读历史、动 mods 之前核对游戏目录的记号。
+    #[tokio::test]
+    async fn rollback_refuses_a_newer_or_unreadable_game_dir_and_touches_no_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (petalfall, mods_dir) = installed_instance(tmp.path()).await;
+        let game = petalfall.game_dir().to_path_buf();
+        tokio::fs::write(mods_dir.join("sodium-0.6.0.jar"), NEW_BYTES)
+            .await
+            .unwrap();
+        tokio::fs::write(mods_dir.join("sodium-0.5.3.jar.old"), OLD_BYTES)
+            .await
+            .unwrap();
+        let mut ledger = Ledger::default();
+        ledger.upsert(ledger_entry(
+            "sodium-0.6.0.jar",
+            "NEW-VER",
+            &sha1_hex(NEW_BYTES),
+        ));
+        petalfall
+            .ledger_store(VERSION_ID)
+            .save(&ledger)
+            .await
+            .unwrap();
+        petalfall
+            .history_store(VERSION_ID)
+            .append(update_event(
+                "200-001",
+                200,
+                "sodium-0.6.0.jar",
+                "sodium-0.5.3.jar",
+                "OLD-VER",
+                "NEW-VER",
+            ))
+            .await
+            .unwrap();
+
+        for (stamp, assert_refused) in refusing_stamps() {
+            write_stamp(&game, &stamp);
+            let before = disk_state(tmp.path());
+            let err = petalfall.rollback(VERSION_ID, "200-001").await.unwrap_err();
+            assert_refused(err, &game);
+            assert_eq!(disk_state(tmp.path()), before, "记号 {stamp} 拦下后动了盘");
+        }
+
+        // 对照：号等于这一版时放行，回滚照常落盘。
+        write_stamp(&game, &current_format_stamp());
+        petalfall.rollback(VERSION_ID, "200-001").await.unwrap();
+        assert_eq!(dir_names(&mods_dir).await, vec!["sodium-0.5.3.jar"]);
+        let history = petalfall.history(VERSION_ID).await.unwrap();
+        assert!(matches!(
+            history.events.as_slice(),
+            [_, HistoryEvent::Rollback { reverted_event, .. }] if reverted_event == "200-001"
+        ));
     }
 
     /// 历史文件缺失时 history 返回空，而不是报错——新实例还没被改过是正常态。
