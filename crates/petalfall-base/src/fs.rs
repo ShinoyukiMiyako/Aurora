@@ -250,7 +250,7 @@ const CONFIG_FILE: &str = "config.json";
 
 /// 探针失败后每次重试前等多久。杀软扫新文件、另一个启动器进程撞上同名探针这类一时的占用几百毫秒就放开；
 /// 定位在窗口出来之前，这些等待都是双击后没反应的时间，所以次数和总时长写死。
-const PROBE_RETRY_DELAYS: [Duration; 3] = [
+pub const PROBE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(100),
     Duration::from_millis(200),
     Duration::from_millis(300),
