@@ -499,12 +499,14 @@ jobs:
       VERSION: ${{ needs.build.outputs.version }}
       BOOTSTRAP: ${{ github.workspace }}/dist/${{ needs.build.outputs.bootstrap-name }}
     steps:
-      # 持钥的机器上只放用得到的三个文件：验签脚本、公钥和锁定签名 CLI 的锁文件。非 cone 模式才能按文件取。
+      # 持钥的机器上只放用得到的四个文件：验签脚本、公钥、锁定签名 CLI 的锁文件和从中读出 integrity 的脚本。
+      # 非 cone 模式才能按文件取。
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           sparse-checkout: |
             /.github/release-updater.pub
+            /.github/scripts/locked-cli.mjs
             /.github/scripts/verify-update-signature.mjs
             /app/pnpm-lock.yaml
           sparse-checkout-cone-mode: false
@@ -534,34 +536,7 @@ jobs:
         env:
           CLI_VERSION: ${{ needs.build.outputs.cli-version }}
         run: |
-          node - app/pnpm-lock.yaml "$CLI_VERSION" > "$RUNNER_TEMP/tauri-cli.tsv" <<'EOF'
-          const fs = require("fs");
-          const [lockPath, expected] = process.argv.slice(2);
-          const lines = fs.readFileSync(lockPath, "utf8").split(/\r?\n/);
-          const lineAt = (index) => {
-            if (index >= lines.length) throw new Error(`锁文件只有 ${lines.length} 行，读不到第 ${index + 1} 行`);
-            return lines[index];
-          };
-          const indexesOf = (text) => lines.flatMap((line, index) => (line === text ? [index] : []));
-
-          // importers 下 devDependencies 里的这一项缩进 6 格，snapshots 里引用它的行形如 'name': version，不会混进来
-          const importer = indexesOf("      '@tauri-apps/cli':");
-          if (importer.length !== 1) throw new Error(`锁文件里 @tauri-apps/cli 的依赖声明应有恰好一处，实际 ${importer.length} 处`);
-          if (!lineAt(importer[0] + 1).startsWith("        specifier: ")) throw new Error("锁文件里 @tauri-apps/cli 的依赖声明后面不是 specifier");
-          const locked = /^        version: (\S+)$/.exec(lineAt(importer[0] + 2));
-          if (locked === null) throw new Error(`锁文件里 @tauri-apps/cli 的 version 行认不出：${lineAt(importer[0] + 2)}`);
-          if (locked[1] !== expected) throw new Error(`锁文件锁定 @tauri-apps/cli ${locked[1]}，build 作业装的是 ${expected}`);
-
-          // packages 与 snapshots 各有一行同名的键，带 resolution 的那一行才是包本身；integrity 只认 sha512，
-          // 带 tarball 地址的（不是默认 registry）同样认不出，宁可失败
-          for (const name of ["cli", "cli-linux-x64-gnu"]) {
-            const found = indexesOf(`  '@tauri-apps/${name}@${expected}':`)
-              .map((index) => /^    resolution: \{integrity: (sha512-[A-Za-z0-9+/]+={0,2})\}$/.exec(lineAt(index + 1)))
-              .filter((match) => match !== null);
-            if (found.length !== 1) throw new Error(`锁文件里 @tauri-apps/${name}@${expected} 的 integrity 应有恰好一条，实际 ${found.length} 条`);
-            console.log(`${name}\t${found[0][1]}`);
-          }
-          EOF
+          node .github/scripts/locked-cli.mjs app/pnpm-lock.yaml "$CLI_VERSION" > "$RUNNER_TEMP/tauri-cli.tsv"
           cli_root="$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps"
           while IFS=$'\t' read -r name integrity; do
             tarball="$RUNNER_TEMP/$name-$CLI_VERSION.tgz"
