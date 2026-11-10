@@ -277,9 +277,10 @@ impl Petalfall {
     /// 动 `dir` 这个游戏目录之前核对它的记号。切换目录、移动实例的目标、首次向导选的目录都不是门面当前的
     /// 游戏目录，走这个入口。
     ///
-    /// 看目录在不在与读记号放在一个阻塞任务里，共用 [`DIR_PROBE_TIMEOUT`]。时限内没有结论（网络盘挂起、任务
-    /// 异常结束）两种方式都报 [`GameDirProblem::Unavailable`]，不读写这个目录：没核对过就往下走，号更低的这一版
-    /// 可能写坏里面的数据，宁可让用户重试。其余情况：
+    /// 看目录在不在与读记号放在一个阻塞任务里，共用 [`DIR_PROBE_TIMEOUT`]；「使用」方式下抬号时的再读与写记号
+    /// 也算在这同一个时限里。时限内没有结论（网络盘挂起、写挂起、任务异常结束）两种方式都报
+    /// [`GameDirProblem::Unavailable`]，不读写这个目录：没核对过就往下走，号更低的这一版可能写坏里面的数据，
+    /// 宁可让用户重试。其余情况：
     /// - 目录本身不存在：交回 [`GameDirCheck::Absent`]，不建目录、不写；
     /// - 看目录时出错（不存在以外）：报读写错误；
     /// - 号不高于这一版：交回 [`GameDirCheck::Ready`]；「使用」方式下号更低时先把记号原子写成这一版，写不进去
@@ -350,7 +351,7 @@ pub(crate) enum DirLook {
 }
 
 /// 游戏目录关卡的实现：`look` 给出「看目录 + 读记号」的结果，时限从这里开始算。「使用」方式下要抬号时，
-/// `reread` 在写之前再读一次记号，`write` 写记号。
+/// `reread` 在写之前再读一次记号，`write` 写记号，两步与 `look` 共用一个截止时刻。
 async fn guard_dir(
     dir: &Path,
     mode: GuardMode,
@@ -360,7 +361,8 @@ async fn guard_dir(
     reread: impl AsyncFnOnce(&Path) -> StampRead,
     write: impl AsyncFnOnce(&Path, &[u8]) -> petalfall_base::Result<()>,
 ) -> Result<GameDirCheck> {
-    let mut read = match tokio::time::timeout(DIR_PROBE_TIMEOUT, look).await {
+    let deadline = tokio::time::Instant::now() + DIR_PROBE_TIMEOUT;
+    let mut read = match tokio::time::timeout_at(deadline, look).await {
         Ok(DirLook::Stamp(read)) => read,
         Ok(DirLook::Absent) => {
             tracing::debug!(dir = %dir.display(), ?mode, "游戏目录不存在，不写数据格式记号");
@@ -389,7 +391,27 @@ async fn guard_dir(
     if mode == GuardMode::Use && matches!(judge_stamp(&read, own), StampVerdict::Raise) {
         let found = stamp_facts(&read).0;
         let contents = stamp_contents(own, app_version);
-        match raise_if_still_lower(&stamp, own, contents.as_bytes(), reread, write).await? {
+        // 能读不能写的网络盘上写会挂起，不限时的话列实例会一直等着，不会在时限后报暂时连不上。与看目录共用一个
+        // 截止时刻、不另起一份时限：挂起的目录不该把等待拖到两倍。时限到了就丢下这一步：已经交给阻塞线程池的那
+        // 一小步（例如改名）仍可能稍后做完，记号晚些才抬上去，写的是这一版的号、写前再读过，可以接受；停在写
+        // 临时文件时会留下原子写的临时文件，它不是记号，不影响判读。
+        let raised = tokio::time::timeout_at(
+            deadline,
+            raise_if_still_lower(&stamp, own, contents.as_bytes(), reread, write),
+        )
+        .await;
+        let Ok(raised) = raised else {
+            tracing::info!(
+                dir = %dir.display(),
+                ?mode,
+                "写游戏目录的数据格式记号在时限内没有完成，按暂时连不上处理"
+            );
+            return Err(CoreError::InvalidGameDirectory {
+                path: dir.to_owned(),
+                problem: GameDirProblem::Unavailable,
+            });
+        };
+        match raised? {
             Raised::Written => {
                 tracing::info!(
                     path = %stamp.display(),
@@ -1348,6 +1370,50 @@ mod tests {
                 "{mode:?}：{err:?}"
             );
         }
+    }
+
+    /// 记号能读不能写：写一直挂起时也受探测时限约束，看目录用掉的时间算在同一个时限里，到点报暂时连不上。
+    #[tokio::test(start_paused = true)]
+    async fn a_stamp_write_that_hangs_is_unavailable_at_the_probe_limit() {
+        let dir = PathBuf::from("N:/.minecraft");
+        let mut wrote = false;
+        let started = Instant::now();
+        let guarded = guard_dir(
+            &dir,
+            GuardMode::Use,
+            2,
+            Some(WRITER),
+            async {
+                // 看目录用掉大半个时限，留给写的只剩一小段。
+                tokio::time::sleep(DIR_PROBE_TIMEOUT * 3 / 4).await;
+                DirLook::Stamp(parse_stamp(StampFile::Missing))
+            },
+            async |_: &Path| parse_stamp(StampFile::Missing),
+            async |_: &Path, _: &[u8]| {
+                wrote = true;
+                std::future::pending::<petalfall_base::Result<()>>().await
+            },
+        );
+        // 写不受时限约束的话关卡会一直等：外面套一层宽得多的时限，让测试照常失败而不是卡住。
+        let err = tokio::time::timeout(DIR_PROBE_TIMEOUT * 20, guarded)
+            .await
+            .expect("写挂起时关卡应在探测时限后放弃")
+            .unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(wrote, "应当已经开始写记号");
+        match err {
+            CoreError::InvalidGameDirectory { path, problem } => {
+                assert_eq!(path, dir);
+                assert_eq!(problem, GameDirProblem::Unavailable);
+            }
+            other => panic!("写挂起应报暂时连不上，实际是 {other:?}"),
+        }
+        assert!(elapsed >= DIR_PROBE_TIMEOUT, "提前放弃了：{elapsed:?}");
+        assert!(
+            elapsed < DIR_PROBE_TIMEOUT * 5 / 4,
+            "时限被累加了：{elapsed:?}"
+        );
     }
 
     /// 游戏目录第一次读到缺失，写之前的再读交回 `again`：记下再读与写，读写都不碰磁盘。
