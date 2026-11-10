@@ -4529,6 +4529,98 @@ mod tests {
         assert!(!instance.exists(), "失败后实例目录照旧删掉");
     }
 
+    /// 游戏目录原本不存在：导入开头的核对看到目录不存在，建好 `versions/` 之后的第二次核对被拒，一种是别处刚写下了
+    /// 更高的号，一种是这一刻够不着这个位置（网络盘断开）。导入报第二次核对的错误，不装游戏、不建实例目录、不写
+    /// 记号：游戏目录里只有空的 `versions/`，模拟端点一个请求都没收到。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_check_after_creating_the_game_dir_imports_nothing() {
+        for case in ["更高的号", "够不着"] {
+            let server = MockServer::start().await;
+            mount_vanilla(&server).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let pack = tmp.path().join("测试包.mrpack");
+            write_pack(
+                &pack,
+                &index(serde_json::json!({"minecraft": "test"})),
+                &[("overrides/options.txt", b"fov:90")],
+            );
+            let petalfall = petalfall(tmp.path(), &server);
+            let game_dir = petalfall.game_dir().to_owned();
+            let instance = game_dir.join("versions").join("被挡下");
+            let prepared = petalfall
+                .prepare_modpack(
+                    &ModpackSource::File { path: pack },
+                    Some("被挡下"),
+                    &ImportSelection::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(!game_dir.exists(), "{case}");
+            // 游戏目录建出来之后的每次核对都记下那时实例目录在不在。
+            let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+            let look: LookFn = {
+                let (seen, instance) = (seen.clone(), instance.clone());
+                Arc::new(move |dir: &Path| {
+                    let look = if !dir.exists() {
+                        DirLook::Absent
+                    } else {
+                        seen.lock().unwrap().push(instance.exists());
+                        match case {
+                            "更高的号" => DirLook::Stamp(parse_stamp(StampFile::Contents(
+                                NEWER_STAMP.as_bytes(),
+                            ))),
+                            _ => DirLook::Unreachable(std::io::Error::from_raw_os_error(53)),
+                        }
+                    };
+                    Box::pin(async move { look })
+                })
+            };
+
+            let err = with_fixture(
+                GuardFixture {
+                    own: 2,
+                    look: Some(look),
+                },
+                petalfall.import_modpack(prepared, "task-r", None),
+            )
+            .await
+            .unwrap_err();
+
+            match (case, err) {
+                (
+                    "更高的号",
+                    CoreError::GameDirDataTooNew {
+                        path,
+                        found,
+                        supported,
+                        written_by,
+                    },
+                ) => {
+                    assert_eq!(path, game_dir);
+                    assert_eq!((found, supported), (3, 2));
+                    assert_eq!(written_by.as_deref(), Some(NEWER_WRITER));
+                }
+                ("够不着", CoreError::InvalidGameDirectory { path, problem }) => {
+                    assert_eq!(path, game_dir);
+                    assert_eq!(problem, crate::error::GameDirProblem::Unavailable);
+                }
+                (case, other) => panic!("{case}：应拒绝导入，实际是 {other:?}"),
+            }
+            assert_eq!(
+                *seen.lock().unwrap(),
+                [false],
+                "{case}：建好目录之后只核对一次，那时实例目录还不在"
+            );
+            assert_eq!(
+                tree(&game_dir),
+                BTreeMap::from([(PathBuf::from("versions"), None)]),
+                "{case}"
+            );
+            assert_eq!(server.received_requests().await.unwrap().len(), 0, "{case}");
+        }
+    }
+
     /// 导入没成留下的半成品「半成品」，带这次导入的未完成标记。两个收拾入口真走下去都会改盘：删目录、改写标记。
     async fn half_import(petalfall: &Petalfall) {
         let dir = petalfall.game_dir().join(VERSIONS_DIR).join("半成品");

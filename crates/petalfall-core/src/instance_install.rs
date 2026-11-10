@@ -2165,6 +2165,88 @@ mod tests {
         );
     }
 
+    use crate::data_format::DirLook;
+    use crate::data_format::testing::LookFn;
+    use crate::error::GameDirProblem;
+    use petalfall_release::data_format::{StampFile, parse_stamp};
+    use std::sync::{Arc, Mutex};
+
+    /// 游戏目录原本不存在：开头的核对看到目录不存在，建好 `versions/` 之后的第二次核对被拒，一种是别处刚写下了更高的
+    /// 号，一种是这一刻够不着这个位置（网络盘断开）。新建报第二次核对的错误，实例目录没建、没有未完成标记、没写记号：
+    /// 盘上只多出空的 `versions/`。
+    #[tokio::test]
+    async fn a_refused_check_after_creating_the_game_dir_creates_no_instance() {
+        for case in ["更高的号", "够不着"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path());
+            let game_dir = petalfall.game_dir().to_owned();
+            let instance = game_dir.join("versions").join("新实例");
+            // 游戏目录建出来之后的每次核对都记下那时实例目录在不在。
+            let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+            let look: LookFn = {
+                let (seen, instance) = (seen.clone(), instance.clone());
+                Arc::new(move |dir: &Path| {
+                    let look = if !dir.exists() {
+                        DirLook::Absent
+                    } else {
+                        seen.lock().unwrap().push(instance.exists());
+                        match case {
+                            "更高的号" => DirLook::Stamp(parse_stamp(StampFile::Contents(
+                                NEWER_STAMP.as_bytes(),
+                            ))),
+                            _ => DirLook::Unreachable(std::io::Error::from_raw_os_error(53)),
+                        }
+                    };
+                    Box::pin(async move { look })
+                })
+            };
+
+            let err = with_fixture(
+                GuardFixture {
+                    own: OWN,
+                    look: Some(look),
+                },
+                petalfall.create_instance_dir("新实例", &request("1.21.1", None, None)),
+            )
+            .await
+            .unwrap_err();
+
+            match (case, err) {
+                (
+                    "更高的号",
+                    CoreError::GameDirDataTooNew {
+                        path,
+                        found,
+                        supported,
+                        written_by,
+                    },
+                ) => {
+                    assert_eq!(path, game_dir);
+                    assert_eq!((found, supported), (3, OWN));
+                    assert_eq!(written_by.as_deref(), Some("1.1.0-dev.57"));
+                }
+                ("够不着", CoreError::InvalidGameDirectory { path, problem }) => {
+                    assert_eq!(path, game_dir);
+                    assert_eq!(problem, GameDirProblem::Unavailable);
+                }
+                (case, other) => panic!("{case}：应拒绝新建，实际是 {other:?}"),
+            }
+            assert_eq!(
+                *seen.lock().unwrap(),
+                [false],
+                "{case}：建好目录之后只核对一次，那时实例目录还不在"
+            );
+            assert_eq!(
+                tree(tmp.path()),
+                BTreeMap::from([
+                    (PathBuf::from(".minecraft"), None),
+                    (PathBuf::from(".minecraft").join("versions"), None),
+                ]),
+                "{case}"
+            );
+        }
+    }
+
     use crate::instances::tests::disk_state;
 
     /// 补全、定方案、记结局、丢弃这几个入口在表里的名字；补全按两种方案各调一次。
