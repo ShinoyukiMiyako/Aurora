@@ -1,7 +1,7 @@
 //! 启动器自更新：检查、下载、安装，以及「退出时安装」。
 //!
 //! 走 Rust 侧命令而不是让前端直接调插件：安装包要按「文件下载源」策略在清单列出的几个源之间排先后、
-//! 一个源失败换下一个，插件的 JS 接口只会从清单的 `url` 下载；清单端点也按版本号决定，不写在 tauri.conf.json 里。
+//! 一个源失败换下一个，插件的 JS 接口只会从清单的 `url` 下载；清单端点也按通道偏好决定，不写在 tauri.conf.json 里。
 //!
 //! 清单的平台条目除了插件认的 `url` 与 `signature`，另带 `x-sources`（候选源）与 `x-size`（包大小）两个扩展键，
 //! 插件和旧客户端都不认、照常忽略，解析与换源的判定见 [`super::update_sources`]。换源只改下载地址，
@@ -15,20 +15,27 @@
 //! 诱导降级（CVE-2026-95625），所以没打开这一项同样整体不支持。`allowDowngrades` 会把插件的版本比较从
 //! 「比当前新」放宽成「与当前不同」，伪造的清单照实写上旧版本号、指向旧版本的合法包，签名版本也对得上，
 //! 同样防不住降级，打开了也整体不支持。版本号的预发布标识认不出通道（[`Channel::of`]）时不知道该去哪取清单，
-//! 也整体不支持。不支持时各命令报 `updater_unsupported`。
+//! 也整体不支持。注入的公钥不是钥表里本包通道的那一把时同样整体不支持。不支持时各命令报 `updater_unsupported`。
 //! 仓库里的配置两项都不带，dev、beta 分支的 CI 打包时才分别写入开发版公钥（`.github/dev-updater.pub`）、
 //! 发布公钥（`.github/release-updater.pub`）并打开 `requireSignedVersion`，签名时用 `--app-version` 把版本号写进
 //! 可信注释：本地和 fork 构建的包不会去认落樱的更新。
 //!
-//! 去哪取清单由版本号决定（[`Channel`]），与前端从版本号推发布通道同源，不另设配置。
+//! 去哪取清单由生效的通道偏好决定：偏好通道与比它慢的通道同时问（[`fetch_conclusion`]）。偏好缺省时就是由版本号
+//! 判出的本包通道（[`Channel`]），与前端从版本号推发布通道同源。每个检查器用钥表里它所问通道的公钥，清单头先核过
+//! 形状与签名才算数（[`verify_head`]），验过的最高版本记进配置的见过的版本，回放的旧清单压不低它。
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use petalfall_base::http::NetworkFailure;
 use petalfall_core::release::order::{compare_versions, Channel};
+use petalfall_core::update_prefs::{
+    LazyPreference, SeenUpdateEntries, SeenUpdateVersion, UpdateCheckRecord,
+};
 use petalfall_core::{CancellationToken, CoreEvent, DownloadProgress, EventSink, PackageCandidate};
 use semver::Version;
 use serde::{Serialize, Serializer};
@@ -38,9 +45,14 @@ use tauri_plugin_updater::{RemoteRelease, Update, Updater, UpdaterBuilder, Updat
 use tokio::sync::Notify;
 
 use crate::commands::error::{code, source_chain, CommandError};
-use crate::commands::update_channels::channel_pubkey;
+use crate::commands::update_channels::{
+    channel_outcome, channel_pubkey, conclude, effective_preference, endpoint_groups,
+    followed_channels, head_outcome, must_save_preference, ChannelEndpoints, ChannelOutcome,
+    ChannelReport, Conclusion, EndpointOutcome,
+};
+use crate::commands::update_head::{read_seen_entry, verify_head, VerifiedHead};
 use crate::commands::update_slot::{
-    Candidate, CheckConclusion, ReleaseVersion, SlotError, UpdateSlot,
+    Candidate, CheckConclusion, Generation, ReleaseVersion, SlotError, UpdateSlot,
 };
 use crate::commands::update_sources::{
     judge, package_plan, sources_failed, AttemptError, PackagePlan, PackageSource, Verdict,
@@ -85,7 +97,7 @@ pub fn dev_endpoint() -> String {
     )
 }
 
-/// 这个通道的清单端点，按这个顺序逐个问（[`check_in_order`]）：前一个没给出清单就问下一个。顺序固定、不探测：
+/// 这个通道的清单端点，按这个顺序逐个问（[`fetch_channel`]）：前一个没给出可用的清单头就问下一个。顺序固定、不探测：
 /// 清单只有几百字节，测速省不下时间，反倒多一轮请求。
 fn channel_endpoints(channel: Channel) -> Vec<String> {
     match channel {
@@ -100,6 +112,9 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 清单不存在时更新源回的状态码：这个源上还没有发布。
 const MANIFEST_MISSING_STATUS: u16 = 404;
+
+/// 端点回了 2xx 却不带正文的状态码。插件见到它直接当没有更新，不读正文：没给出清单头，算这个端点失败。
+const NO_CONTENT_STATUS: u16 = 204;
 
 /// 下载进度推送的最小间隔，与下载池的采样间隔一致，前端进度条观感相同。
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -232,19 +247,22 @@ pub struct UpdateDto {
     pub channel: Channel,
 }
 
-fn update_dto(update: &Update) -> UpdateDto {
+/// 候选 `update` 的 DTO，`channel` 是它真实所属的通道（取自哪个通道的清单）。
+fn update_dto(update: &Update, channel: Channel) -> UpdateDto {
     UpdateDto {
         version: update.version.clone(),
         current_version: update.current_version.clone(),
         notes: update.body.clone(),
-        date: update
-            .date
-            .map(|date| date.unix_timestamp() * 1000 + i64::from(date.millisecond())),
-        // 现在只问本包通道的清单，候选必然来自本包的通道；认不出通道的版本建不出检查器（[`version_endpoints`]），
-        // 走不到这里。
-        channel: package_channel(&update.current_version)
-            .expect("候选只来自认得出通道的版本建的检查器"),
+        date: update_millis(update),
+        channel,
     }
+}
+
+/// 清单里的发布时间，Unix 毫秒；清单没写时为 `None`。
+fn update_millis(update: &Update) -> Option<i64> {
+    update
+        .date
+        .map(|date| date.unix_timestamp() * 1000 + i64::from(date.millisecond()))
 }
 
 /// 版本号 `version` 所属的发布通道，规则同 [`Channel::of`]；认不出时为 `None`。
@@ -366,8 +384,7 @@ impl UpdaterState {
     }
 
     fn slot(&self) -> MutexGuard<'_, UpdateSlot<Update>> {
-        // 临界区里只有字段赋值与同步的安装调用，真中毒说明程序已处于未知状态，直接崩。
-        self.slot.lock().expect("更新状态的锁已中毒")
+        lock_slot(&self.slot)
     }
 
     fn require_supported(&self) -> Result<(), CommandError> {
@@ -397,7 +414,7 @@ impl UpdaterState {
             available: slot
                 .available
                 .as_ref()
-                .map(|candidate| update_dto(&candidate.update)),
+                .map(|candidate| update_dto(&candidate.update, candidate.channel)),
             channel_heads: Vec::new(),
             refused: Vec::new(),
             downloaded_channel: downloaded_version.as_ref().and(package_channel),
@@ -418,6 +435,11 @@ impl UpdaterState {
             updater_error(code::UPDATE_INSTALL_FAILED, "启动更新安装失败", None, err)
         })
     }
+}
+
+/// 拿槽位的锁。临界区里只有字段赋值与同步的安装调用，真中毒说明程序已处于未知状态，直接崩。
+fn lock_slot<U>(slot: &Mutex<UpdateSlot<U>>) -> MutexGuard<'_, UpdateSlot<U>> {
+    slot.lock().expect("更新状态的锁已中毒")
 }
 
 /// 槽位只说为什么拒绝，错误码与说法在这里定。
@@ -464,51 +486,219 @@ pub async fn updater_info(
     Ok(updater.info(app.package_info().version.to_string()))
 }
 
-/// 检查更新。端点见 [`channel_endpoints`]：开发版先问 [`DEV_ENDPOINT`] 再问 [`dev_endpoint`]，前一个没给出清单
-/// （连不上、超时、非 2xx、正文读不出或不成形）就问下一个；测试版只问 [`BETA_ENDPOINT`]，
-/// 正式版只问 [`PRIMARY_ENDPOINT`]。
-/// 已是最新返回 `null`；所有端点的清单都确认 404 不算失败，见 [`check_in_order`] 与 [`UpdateSlot::settle_check`]。
+/// 检查更新。按生效的通道偏好，同时问偏好通道与所有比它慢的通道（[`fetch_conclusion`]）；每个通道的端点见
+/// [`channel_endpoints`]：开发版先问 [`DEV_ENDPOINT`] 再问 [`dev_endpoint`]，测试版只问 [`BETA_ENDPOINT`]，
+/// 正式版只问 [`PRIMARY_ENDPOINT`]，前一个没给出可用的清单头就问下一个。各通道的结果记进槽位（`channel_heads`），
+/// 验过的清单头记进见过的版本（[`conclude_fetched`]）。
+///
+/// 已是最新返回 `null`；偏好通道的端点都确认 404（还没有发布）不算失败，本次会话已知的候选照旧
+/// （[`UpdateSlot::settle_check`]）。偏好通道取不到可信的清单报 `update_check_failed`，给出的清单头全都旧于本机
+/// 记录报 `update_source_stale`，都不拿更慢通道的结果顶上；检查期间改了通道偏好报 `update_superseded`。
 /// 不看 `check_updates` 设置：那一项只管启动时要不要自动查，由前端决定。
 #[tauri::command]
 pub async fn check_update(
     app: AppHandle,
+    facade: State<'_, Facade>,
     updater: State<'_, UpdaterState>,
 ) -> Result<Option<UpdateDto>, CommandError> {
     updater.require_supported()?;
+    // 先取号再读偏好：读完偏好之后才改的，号对不上，这次的结果落不进来。
     let ticket = updater.slot().generation();
-    let conclusion = fetch_conclusion(&app).await?;
-    // 检查还只问本包通道的清单、不整理各通道的结果，`channel_heads` 照旧为空。
+    let plan = read_check_plan(&facade, &app.package_info().version, channel_pubkey).await?;
+    let fetched = fetch_conclusion(&app, &plan).await?;
+    let (heads, conclusion) =
+        conclude_fetched(&facade, &updater.slot, &plan, ticket, fetched).await?;
     let dto = updater
         .slot()
-        .settle_check(ticket, Vec::new(), conclusion)?
-        .map(|candidate| update_dto(&candidate.update));
+        .settle_check(ticket, heads, conclusion)?
+        .map(|candidate| update_dto(&candidate.update, candidate.channel));
     Ok(dto)
 }
 
-/// 取一次清单并下结论。检查和下载前的重查共用。
-///
-/// 每个端点各建一个只问它的检查器，由 [`check_in_order`] 逐个问，不把端点一次性交给插件：插件遇到 2xx 而正文
-/// 读不出（不是 JSON、读到一半断开或撞上总时限）、或清单里没有本平台的条目时直接返回，不再问下一个端点；
-/// 非 2xx 时只记一行不带地址与状态码的日志、不记成错误，最后报的是最后记下的那个错误。这样香港机的清单一坏，GitHub 上
-/// 字节相同的那份就问不到，香港机回的状态码也进不了 detail。
-async fn fetch_conclusion(app: &AppHandle) -> Result<CheckConclusion<Update>, CommandError> {
-    let (channel, endpoints) = version_endpoints(app.package_info().version.pre.as_str())?;
-    let checkers = endpoints
-        .iter()
-        .map(|endpoint| check_checker(app, channel, endpoint))
-        .collect::<tauri_plugin_updater::Result<Vec<_>>>()
-        .map_err(|err| check_failed(&endpoints, err))?;
-    let version = app.package_info().version.to_string();
-    check_in_order(&endpoints, &version, |index| checkers[index].check()).await
+/// 一次取清单要用的本机状态，取清单之前从配置里读出。
+struct CheckPlan {
+    /// 正在运行的版本。
+    current: Version,
+    /// 本包的通道，由 `current` 判出。
+    package: Channel,
+    /// 配置里存着的偏好；缺省或认不出时为 `None`。
+    stored: Option<Channel>,
+    /// 生效的偏好。
+    preference: Channel,
+    /// 要问的各通道见过的最高版本，逐项重验过；作废的项不在这里。
+    seen: HashMap<Channel, VerifiedHead>,
 }
 
-/// 预发布标识为 `pre_release` 的版本所属的通道与该问的清单端点。认不出通道时报 `updater_unsupported`：
-/// [`detect_support`] 已把这种版本判为不支持、各命令先过 `require_supported`，走到这里说明两处判定对不上了，
-/// 宁可报错也不拿哪个通道的清单顶上。
-fn version_endpoints(pre_release: &str) -> Result<(Channel, Vec<String>), CommandError> {
-    Channel::of(pre_release)
-        .map(|channel| (channel, channel_endpoints(channel)))
-        .ok_or_else(|| UnsupportedReason::UnknownChannel.error())
+impl CheckPlan {
+    /// 由正在运行的版本 `current`、存着的偏好 `stored` 与见过的版本的原始各项 `entries` 定下这次要问什么。
+    /// `key_of` 给出重验见过的版本用的公钥，生产传钥表（[`channel_pubkey`]）。
+    ///
+    /// 见过的版本只重验要问的那几个通道（[`followed_channels`]）：某一项重验不过只废这一项、记 error，下次取到
+    /// 这个通道的清单时覆盖；整张表不是对象时整张作废，同样记 error。本包的通道认不出时报 `updater_unsupported`
+    /// （[`package_channel_of`]）。
+    fn new(
+        current: Version,
+        stored: Option<Channel>,
+        entries: &SeenUpdateEntries,
+        key_of: impl Fn(Channel) -> &'static str,
+    ) -> Result<Self, CommandError> {
+        let package = package_channel_of(&current)?;
+        let preference = effective_preference(stored, package);
+        if let Some(table) = entries.malformed_table() {
+            tracing::error!(
+                %table,
+                "配置里见过的更新版本不是对象，整张当作没有记录，下次记录时换掉"
+            );
+        }
+        let mut seen = HashMap::new();
+        for &channel in followed_channels(preference) {
+            let Some(raw) = entries.get(channel) else {
+                continue;
+            };
+            match read_seen_entry(channel, raw, key_of(channel)) {
+                Ok(head) => {
+                    seen.insert(channel, head);
+                }
+                Err(err) => tracing::error!(
+                    channel = channel.as_str(),
+                    error = %err,
+                    "配置里这个通道见过的更新版本作废，当作没有记录，下次取到清单时覆盖"
+                ),
+            }
+        }
+        Ok(Self {
+            current,
+            package,
+            stored,
+            preference,
+            seen,
+        })
+    }
+
+    /// 通道 `channel` 见过的最高版本；没有有效记录时为 `None`。
+    fn seen_version(&self, channel: Channel) -> Option<&Version> {
+        self.seen.get(&channel).map(|head| &head.version)
+    }
+}
+
+/// 读出这次检查要用的偏好与见过的版本。读锁里只克隆原始的项，重验签名放到锁外做。`key_of` 同 [`CheckPlan::new`]。
+async fn read_check_plan(
+    facade: &Facade,
+    current: &Version,
+    key_of: impl Fn(Channel) -> &'static str,
+) -> Result<CheckPlan, CommandError> {
+    let (stored, entries) = {
+        let petalfall = facade.read().await;
+        (
+            petalfall.update_channel_preference(),
+            petalfall.seen_update_entries(),
+        )
+    };
+    CheckPlan::new(current.clone(), stored, &entries, key_of)
+}
+
+/// 本包的通道。认不出时报 `updater_unsupported`：[`detect_support`] 已把这种版本判为不支持、各命令先过
+/// `require_supported`，走到这里说明两处判定对不上了，宁可报错也不拿哪个通道的端点顶上。
+fn package_channel_of(current: &Version) -> Result<Channel, CommandError> {
+    Channel::of_version(current).ok_or_else(|| UnsupportedReason::UnknownChannel.error())
+}
+
+/// 按偏好问一次清单：偏好通道与所有更慢的通道同时问，通道内按先后逐个问（[`fetch_channels`]）。要问的通道与
+/// 端点只经 [`endpoint_groups`] 按 [`followed_channels`] 取得，每组带着它所问通道的公钥。检查和下载前的重查共用。
+///
+/// 每个端点各建一个只问它的检查器（[`check_checker`]），不把端点一次性交给插件：插件遇到 2xx 而正文读不出
+/// （不是 JSON、读到一半断开或撞上总时限）、或清单里没有本平台的条目时直接返回，不再问下一个端点；非 2xx 时只记一行
+/// 不带地址与状态码的日志、不记成错误。一起交给插件的话，香港机的清单一坏，GitHub 上字节相同的那份就问不到，
+/// 香港机回的状态码也进不了 detail。
+async fn fetch_conclusion(
+    app: &AppHandle,
+    plan: &CheckPlan,
+) -> Result<Vec<ChannelFetch<Update>>, CommandError> {
+    let groups = endpoint_groups(plan.preference, channel_endpoints);
+    fetch_channels(&groups, plan, |channel, endpoint| {
+        ask_endpoint(app, channel, endpoint)
+    })
+    .await
+}
+
+/// 比较器记下的清单头，每个检查器一份。
+type ReleaseRecord = Arc<Mutex<Option<RemoteRelease>>>;
+
+/// 用 [`check_checker`] 问通道 `channel` 的端点 `endpoint`，连同比较器记下的清单头一起认成 [`EndpointAnswer`]。
+async fn ask_endpoint(app: &AppHandle, channel: Channel, endpoint: &str) -> EndpointAnswer<Update> {
+    let record = ReleaseRecord::default();
+    let checked = match check_checker(app, channel, endpoint, Arc::clone(&record)) {
+        Ok(checker) => checker.check().await,
+        Err(err) => Err(err),
+    };
+    let recorded = record.lock().expect("记清单头的锁已中毒").take();
+    endpoint_answer(checked, recorded)
+}
+
+/// 把插件对一个端点的检查结果 `checked` 与比较器记下的清单头 `recorded` 认成 [`EndpointAnswer`]。
+fn endpoint_answer(
+    checked: tauri_plugin_updater::Result<Option<Update>>,
+    recorded: Option<RemoteRelease>,
+) -> EndpointAnswer<Update> {
+    match (checked, recorded) {
+        (Ok(Some(update)), _) => EndpointAnswer::Head(ManifestHead {
+            version: Version::parse(&update.version)
+                .expect("插件交回的版本由清单里解析出的 semver 转成"),
+            signature: update.signature.clone(),
+            date: update_millis(&update),
+            update: Some(update),
+        }),
+        // 比较器判为不新于当前，插件不造更新，清单头只能从记下的那份里取。
+        (Ok(None), Some(release)) => match manifest_signature(&release) {
+            Ok(signature) => EndpointAnswer::Head(ManifestHead {
+                date: release
+                    .pub_date
+                    .map(|date| date.unix_timestamp() * 1000 + i64::from(date.millisecond())),
+                version: release.version,
+                signature,
+                update: None,
+            }),
+            Err(err) => EndpointAnswer::Failed(err),
+        },
+        // 端点回了 204：插件不读正文，也不调比较器。
+        (Ok(None), None) => EndpointAnswer::NoContent,
+        (Err(tauri_plugin_updater::Error::ReleaseNotFound), _) => EndpointAnswer::Unsuccessful,
+        // 比较器记下了也作废：例如清单里没有本平台的条目时，插件在比较之后才报错。
+        (Err(err), _) => EndpointAnswer::Failed(err),
+    }
+}
+
+/// 清单头 `release` 里本平台条目的签名串。插件只在造出更新时交回签名串，比较器判为不新于当前时只能照插件挑条目的
+/// 顺序自己找：先 `<系统>-<架构>-<安装类型>`，再 `<系统>-<架构>`。插件在比较之后也按这个顺序找过，找不到时它已经
+/// 报了错，走不到这里；这里找不到说明两边的顺序错开了，照插件的错误报成这个端点失败。
+fn manifest_signature(release: &RemoteRelease) -> tauri_plugin_updater::Result<String> {
+    let base = tauri_plugin_updater::target().ok_or(tauri_plugin_updater::Error::UnsupportedOs)?;
+    let mut targets = Vec::with_capacity(2);
+    if let Some(installer) = installer_name(tauri::utils::platform::bundle_type()) {
+        targets.push(format!("{base}-{installer}"));
+    }
+    targets.push(base);
+    let found = targets
+        .iter()
+        .find_map(|target| release.signature(target).ok().cloned());
+    match found {
+        Some(signature) => Ok(signature),
+        None => Err(tauri_plugin_updater::Error::TargetsNotFound(targets)),
+    }
+}
+
+/// 插件给安装类型起的名字，照插件自己的对照表：dmg 没有名字，只按 `<系统>-<架构>` 找。
+fn installer_name(bundle: Option<tauri::utils::config::BundleType>) -> Option<&'static str> {
+    use tauri::utils::config::BundleType;
+    match bundle? {
+        BundleType::Deb => Some("deb"),
+        BundleType::Rpm => Some("rpm"),
+        BundleType::AppImage => Some("appimage"),
+        BundleType::Msi => Some("msi"),
+        BundleType::Nsis => Some("nsis"),
+        BundleType::App => Some("app"),
+        BundleType::Dmg => None,
+    }
 }
 
 /// 只问通道 `channel` 的 `endpoint` 这一个端点的检查器构建器，这个 crate 构造检查器只从这里起步。
@@ -533,22 +723,30 @@ fn channel_builder(
         .timeout(CHECK_TIMEOUT))
 }
 
-/// 自动检查与下载前重查用的检查器：只为严格新于当前版本的清单造出更新（[`strictly_newer`]）。
-/// requireSignedVersion 由插件配置带上。
+/// 自动检查与下载前重查用的检查器：只为严格新于当前版本的清单造出更新，比较之前把清单头记进 `record`
+/// （[`strictly_newer`]）。requireSignedVersion 由插件配置带上。
 fn check_checker(
     app: &AppHandle,
     channel: Channel,
     endpoint: &str,
+    record: ReleaseRecord,
 ) -> tauri_plugin_updater::Result<Updater> {
     channel_builder(app, channel, endpoint)?
-        .version_comparator(|current, release| strictly_newer(&current, &release))
+        .version_comparator(strictly_newer(record))
         .build()
 }
 
-/// 清单给的版本是否严格新于正在运行的版本 `current`，按 semver 优先级比，与挑候选时判「比当前新」用的是同一个
-/// 比较（[`compare_versions`]）：只差构建元数据的两个版本算同一版，不造更新。
-fn strictly_newer(current: &Version, release: &RemoteRelease) -> bool {
-    compare_versions(&release.version, current).is_gt()
+/// 自动检查的比较器：清单给的版本严格新于正在运行的版本才造出更新，按 semver 优先级比，与挑候选时判「比当前新」
+/// 用的是同一个比较（[`compare_versions`]），只差构建元数据的两个版本算同一版。插件只为比较器判真的版本造出
+/// 更新，自动更新这条路因此碰不到比当前旧的版本。
+///
+/// 判之前把插件交来的清单头存进 `record`：不比当前新的清单头插件不交回来，见过的版本与各通道的结果却都要用它。
+fn strictly_newer(record: ReleaseRecord) -> impl Fn(Version, RemoteRelease) -> bool + Send + Sync {
+    move |current, release| {
+        let newer = compare_versions(&release.version, &current).is_gt();
+        *record.lock().expect("记清单头的锁已中毒") = Some(release);
+        newer
+    }
 }
 
 /// 插件 `configure_client` 回调收发的 reqwest 构建器。这一层不直接依赖 reqwest，从插件公开的回调类型里取出
@@ -584,55 +782,317 @@ fn plugin_client(client: ClientBuilder, connect: Duration, read: Duration) -> Cl
     with_transfer_timeouts(client, connect, read).https_only(true)
 }
 
-/// 按 `endpoints` 的先后逐个问清单，`check(i)` 问第 i 个端点。哪个端点给出了清单（有新版本或已是最新）就以它为准，
-/// 后面的不再问；其余任何失败都记下、接着问下一个：连不上、超时、非 2xx、正文读不出或不成形、没有本平台的条目。
-/// 一个端点都没给出清单时的结论见 [`conclude_without_manifest`]。
-async fn check_in_order<U, Fut>(
-    endpoints: &[String],
-    app_version: &str,
-    mut check: impl FnMut(usize) -> Fut,
-) -> Result<CheckConclusion<U>, CommandError>
-where
-    U: ReleaseVersion,
-    Fut: Future<Output = tauri_plugin_updater::Result<Option<U>>>,
-{
-    let mut misses = Vec::with_capacity(endpoints.len());
-    for (index, endpoint) in endpoints.iter().enumerate() {
-        let err = match check(index).await {
-            Ok(found) => {
-                match &found {
-                    Some(update) => {
-                        tracing::info!(endpoint, version = update.release_version(), "发现可用更新")
-                    }
-                    None => tracing::info!(endpoint, "已是最新版本"),
-                }
-                return Ok(match found {
-                    // 现在只问本包通道的清单，候选必然来自本包的通道；认不出通道的版本建不出检查器
-                    // （[`version_endpoints`]），走不到这里。
-                    Some(update) => CheckConclusion::Found(Candidate {
-                        update,
-                        channel: package_channel(app_version)
-                            .expect("候选只来自认得出通道的版本建的检查器"),
-                    }),
-                    None => CheckConclusion::UpToDate,
-                });
-            }
-            Err(err) => err,
-        };
-        tracing::warn!(endpoint, error = %err, "清单端点没有给出清单");
-        misses.push(match err {
-            tauri_plugin_updater::Error::ReleaseNotFound => NoManifest::Unsuccessful(endpoint),
-            other => NoManifest::Failed(EndpointFailure::plugin(endpoint, &other)),
-        });
-    }
-    conclude_without_manifest(endpoints, app_version, misses).await
+/// 一个端点问下来、核验清单头之前的样子。
+enum EndpointAnswer<U> {
+    /// 给出了清单头。
+    Head(ManifestHead<U>),
+    /// 回了 204，没给出清单。
+    NoContent,
+    /// 回了非 2xx。插件只报 `ReleaseNotFound`，不报状态码，要再问一次才知道是不是 404（[`fetch_channel`]）。
+    Unsuccessful,
+    /// 其余失败：连不上、超时、正文读不出或不成形、没有本平台的条目、检查器建不起来。
+    Failed(tauri_plugin_updater::Error),
 }
 
-/// 一个端点为什么没给出清单。
-enum NoManifest<'a> {
-    /// 回了非 2xx。插件只报 `ReleaseNotFound`，不报状态码。
-    Unsuccessful(&'a str),
+/// 端点给出的清单头。
+struct ManifestHead<U> {
+    version: Version,
+    /// 清单里本平台条目原样的签名串。
+    signature: String,
+    /// 清单里的发布时间，Unix 毫秒；清单不签名，只作显示。
+    date: Option<i64>,
+    /// 插件造出的更新：只有严格新于当前版本时才有（[`strictly_newer`]）。
+    update: Option<U>,
+}
+
+/// 同时问 `groups` 里的各通道（[`fetch_channel`]），按 `groups` 的先后交回各通道的结果。`ask(c, e)` 问通道 c 的
+/// 端点 e，生产里是 [`ask_endpoint`]。
+async fn fetch_channels<'g, U, Fut>(
+    groups: &'g [ChannelEndpoints],
+    plan: &CheckPlan,
+    ask: impl Fn(Channel, &'g str) -> Fut,
+) -> Result<Vec<ChannelFetch<U>>, CommandError>
+where
+    Fut: Future<Output = EndpointAnswer<U>>,
+{
+    let app_version = plan.current.to_string();
+    let channels = groups
+        .iter()
+        .map(|group| fetch_channel(group, plan.seen_version(group.channel), &app_version, &ask))
+        .collect();
+    all_of(channels).await.into_iter().collect()
+}
+
+/// 同时跑 `steps`，全部结束后按原来的先后交回结果。几个通道的清单同时问：慢的那条不拖着别的，整次检查的时长取最慢
+/// 的那条而不是相加。都在当前任务里轮询、不另开任务，取消时丢掉这个 future，各通道的请求随之一起丢下。
+async fn all_of<F: Future>(steps: Vec<F>) -> Vec<F::Output> {
+    let mut steps: Vec<_> = steps.into_iter().map(Box::pin).collect();
+    let mut outputs: Vec<Option<F::Output>> =
+        std::iter::repeat_with(|| None).take(steps.len()).collect();
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for (step, output) in steps.iter_mut().zip(outputs.iter_mut()) {
+            if output.is_some() {
+                continue;
+            }
+            match step.as_mut().poll(cx) {
+                Poll::Ready(value) => *output = Some(value),
+                Poll::Pending => pending = true,
+            }
+        }
+        if pending {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    })
+    .await;
+    outputs
+        .into_iter()
+        .map(|output| output.expect("全部结束之后每一步都有结果"))
+        .collect()
+}
+
+/// 按先后逐个问一个通道的端点，问到第一个签名与形状都验过（[`verify_head`]，用这一组的公钥）、又不旧于本机记录
+/// `seen` 的清单头为止（[`head_outcome`]）。清单头没通过核验（清单异常）、旧于本机记录、回了 204 或别的失败，都记下
+/// 原因、接着问下一个。一个可用的清单头都没问到时，回了非 2xx 的端点逐个再 GET 一次问出状态码：插件把 503、403
+/// 这类服务器故障也报成 `ReleaseNotFound`，不再问一次的话，服务器出故障时界面会显示还没有发布。各端点的结果合成
+/// 这个通道的结果见 [`channel_outcome`]：都答 404 才算还没有发布。
+async fn fetch_channel<'g, U, Fut>(
+    group: &'g ChannelEndpoints,
+    seen: Option<&Version>,
+    app_version: &str,
+    ask: &impl Fn(Channel, &'g str) -> Fut,
+) -> Result<ChannelFetch<U>, CommandError>
+where
+    Fut: Future<Output = EndpointAnswer<U>>,
+{
+    let channel = group.channel;
+    let mut asked = Vec::with_capacity(group.endpoints.len());
+    let mut found = None;
+    let mut stale_shown = None;
+    for endpoint in &group.endpoints {
+        let head = match ask(channel, endpoint).await {
+            EndpointAnswer::Head(head) => head,
+            EndpointAnswer::NoContent => {
+                tracing::warn!(
+                    endpoint,
+                    channel = channel.as_str(),
+                    "清单端点回了 204，没给出清单"
+                );
+                asked.push(Asked::Failed(EndpointFailure::status(
+                    endpoint,
+                    NO_CONTENT_STATUS,
+                )));
+                continue;
+            }
+            EndpointAnswer::Unsuccessful => {
+                tracing::warn!(endpoint, channel = channel.as_str(), "清单端点回了非 2xx");
+                asked.push(Asked::Unsuccessful);
+                continue;
+            }
+            EndpointAnswer::Failed(err) => {
+                tracing::warn!(endpoint, channel = channel.as_str(), error = %err, "清单端点没有给出清单");
+                asked.push(Asked::Failed(EndpointFailure::plugin(endpoint, &err)));
+                continue;
+            }
+        };
+        let verified = match verify_head(channel, &head.version, &head.signature, group.pubkey) {
+            Ok(verified) => verified,
+            Err(err) => {
+                tracing::error!(
+                    endpoint,
+                    channel = channel.as_str(),
+                    version = %head.version,
+                    error = %err,
+                    "清单头没通过核验，按清单异常处理，问下一个端点"
+                );
+                asked.push(Asked::Failed(EndpointFailure::rejected(
+                    endpoint,
+                    format!("清单头没通过核验：{err}"),
+                )));
+                continue;
+            }
+        };
+        match head_outcome(head.version.clone(), seen) {
+            EndpointOutcome::Verified(version) => {
+                tracing::info!(
+                    endpoint,
+                    channel = channel.as_str(),
+                    %version,
+                    newer = head.update.is_some(),
+                    "取到验过的清单头"
+                );
+                found = Some(FoundHead {
+                    head: verified,
+                    date: head.date,
+                    update: head.update,
+                });
+                asked.push(Asked::Verified(version));
+                break;
+            }
+            EndpointOutcome::Stale(version) => {
+                tracing::warn!(
+                    endpoint,
+                    channel = channel.as_str(),
+                    %version,
+                    seen = ?seen.map(Version::to_string),
+                    "清单给出的版本旧于本机记下的这个通道见过的最高版本，问下一个端点"
+                );
+                stale_shown.get_or_insert((version.clone(), head.date));
+                asked.push(Asked::Stale(version));
+            }
+            EndpointOutcome::Missing | EndpointOutcome::Failed => {
+                unreachable!("head_outcome 只判可用或旧于本机记录")
+            }
+        }
+    }
+
+    // 有端点给出了可用的清单头，这个通道已有结论，前面回了非 2xx 的端点不必再问状态码。
+    let probe = (found.is_none() && asked.iter().any(|one| matches!(one, Asked::Unsuccessful)))
+        .then(|| {
+            petalfall_base::http::build_client_with(
+                &petalfall_base::http::HttpConfig::for_app_version(app_version),
+            )
+        })
+        .transpose()?;
+    let mut outcomes = Vec::with_capacity(asked.len());
+    let mut failures = Vec::new();
+    for (endpoint, one) in group.endpoints.iter().zip(asked) {
+        let (outcome, failure) = match one {
+            Asked::Verified(version) => (EndpointOutcome::Verified(version), None),
+            Asked::Stale(version) => {
+                let seen = seen.expect("旧于本机记录的清单头必然有记录可比");
+                let failure = EndpointFailure::rejected(
+                    endpoint,
+                    format!("清单给出的 {version} 旧于这台电脑见过的 {seen}"),
+                );
+                (EndpointOutcome::Stale(version), Some(failure))
+            }
+            Asked::Failed(failure) => (EndpointOutcome::Failed, Some(failure)),
+            Asked::Unsuccessful => match &probe {
+                None => (EndpointOutcome::Failed, None),
+                Some(client) => {
+                    let probed = client
+                        .get(endpoint)
+                        .header("accept", "application/json")
+                        .timeout(CHECK_TIMEOUT)
+                        .send()
+                        .await;
+                    // 再问一次也连不上时，记成网络层失败。
+                    let failure = match probed {
+                        Ok(response) => {
+                            EndpointFailure::status(endpoint, response.status().as_u16())
+                        }
+                        Err(err) => EndpointFailure::plugin(
+                            endpoint,
+                            &tauri_plugin_updater::Error::Reqwest(err),
+                        ),
+                    };
+                    let outcome = if failure.status == Some(MANIFEST_MISSING_STATUS) {
+                        EndpointOutcome::Missing
+                    } else {
+                        EndpointOutcome::Failed
+                    };
+                    (outcome, Some(failure))
+                }
+            },
+        };
+        outcomes.push(outcome);
+        failures.extend(failure);
+    }
+    let outcome = channel_outcome(outcomes);
+    if outcome == ChannelOutcome::NotPublished {
+        // 界面上不算失败，日志要留痕。
+        tracing::warn!(
+            channel = channel.as_str(),
+            endpoints = ?group.endpoints,
+            "更新源上没有这个通道的清单（404），按还没有发布处理"
+        );
+    }
+    if found.is_some() {
+        failures.clear();
+    }
+    Ok(ChannelFetch {
+        channel,
+        endpoints: group.endpoints.clone(),
+        outcome,
+        found,
+        stale_shown,
+        failures,
+    })
+}
+
+/// 一个端点问到哪一步。
+enum Asked {
+    /// 给出了可用的清单头。
+    Verified(Version),
+    /// 给出了验过的清单头，但旧于本机记录。
+    Stale(Version),
+    /// 回了非 2xx，状态码还没问。
+    Unsuccessful,
     Failed(EndpointFailure),
+}
+
+/// 给出可用清单头的那个端点交回的东西。
+struct FoundHead<U> {
+    head: VerifiedHead,
+    date: Option<i64>,
+    /// 插件造出的更新，见 [`ManifestHead::update`]。
+    update: Option<U>,
+}
+
+/// 一个通道这次问下来的结果。
+struct ChannelFetch<U> {
+    channel: Channel,
+    /// 这个通道的端点，按问的先后。
+    endpoints: Vec<String>,
+    outcome: ChannelOutcome,
+    /// 给出可用清单头的端点交回的东西；没有端点给出时为 `None`。
+    found: Option<FoundHead<U>>,
+    /// 没取到可用清单头时界面显示的那一份：第一个旧于本机记录的清单头与它的发布时间。
+    stale_shown: Option<(Version, Option<i64>)>,
+    /// 各端点为什么没给出可用的清单头，按问的先后；偏好通道整次失败时进 detail。有端点给出可用清单头时为空。
+    failures: Vec<EndpointFailure>,
+}
+
+impl<U> ChannelFetch<U> {
+    /// 记进槽位、供界面显示的这个通道的结果。`version` 是验过的清单头，比当前版本新旧都有可能：取到可用的就是它，
+    /// 否则是第一个旧于本机记录的那一份；一个验过的都没有时为 `null`。
+    fn head_dto(&self) -> ChannelHeadDto {
+        let shown = match &self.found {
+            Some(found) => Some((&found.head.version, found.date)),
+            None => self
+                .stale_shown
+                .as_ref()
+                .map(|(version, date)| (version, *date)),
+        };
+        ChannelHeadDto {
+            channel: self.channel,
+            state: self.outcome.head_state(),
+            version: shown.map(|(version, _)| version.to_string()),
+            date: shown.and_then(|(_, date)| date),
+        }
+    }
+
+    /// 偏好通道没取到可用的清单头、整次检查失败时报的错：给出的清单头全都旧于本机记录 `seen` 时报
+    /// `update_source_stale`，其余报 `update_check_failed`。
+    fn into_failure(self, seen: Option<&Version>) -> CommandError {
+        match self.outcome {
+            ChannelOutcome::Stale { offered } => source_stale(
+                self.channel,
+                &self.endpoints,
+                &offered,
+                seen.expect("旧于本机记录必然有记录可比"),
+            ),
+            ChannelOutcome::Failed => {
+                endpoints_failed(self.channel, &self.endpoints, self.failures)
+            }
+            ChannelOutcome::Published { .. } | ChannelOutcome::NotPublished => {
+                unreachable!("通道有清单或还没有发布都不算整次失败")
+            }
+        }
+    }
 }
 
 /// 一个清单端点没给出清单的结果，按问的先后进 detail.attempts。
@@ -687,6 +1147,17 @@ impl EndpointFailure {
         }
     }
 
+    /// 端点给出了清单头却不能用：没通过核验，或旧于本机记录。`message` 写明是哪一种。
+    fn rejected(endpoint: &str, message: String) -> Self {
+        EndpointFailure {
+            endpoint: endpoint.to_owned(),
+            status: None,
+            network: None,
+            message,
+            causes: Vec::new(),
+        }
+    }
+
     /// 多个端点时 message 里的一行。状态码写法与前端给单个端点的 detail.status 补上的一样。
     fn line(&self) -> String {
         match self.status {
@@ -696,74 +1167,16 @@ impl EndpointFailure {
     }
 }
 
-/// 一个端点都没给出清单时的结论。回了非 2xx 的端点逐个再 GET 一次，问出状态码：全部端点都答 404 才算这个更新源上
-/// 还没有发布；有一个答不出 404，就说不清那个源上有没有新版本，只能算检查失败。插件把 503、403 这类服务器故障也
-/// 报成 `ReleaseNotFound`，不再问一次的话，服务器出故障时界面会显示已是最新。
-async fn conclude_without_manifest<U>(
+/// 偏好通道 `channel` 的端点都没给出可用的清单头、又不全是 404 时的检查失败，`detail.channel` 是这个通道。
+/// 只问了一个端点时：message 是那个端点的原文，状态码在 detail.status，原因链在 detail.causes；多个端点时 message
+/// 逐行写成「端点：原文」，状态码与原因链各自留在 detail.attempts 里，顶层不放 status：前端会把它补在整段 message
+/// 的末尾，分不清是哪个端点的。全都败在网络层时标 detail.network，规则同下载源的汇总：全是超时为 timeout，
+/// 混着连不上为 connect。
+fn endpoints_failed(
+    channel: Channel,
     endpoints: &[String],
-    app_version: &str,
-    misses: Vec<NoManifest<'_>>,
-) -> Result<CheckConclusion<U>, CommandError> {
-    assert!(!misses.is_empty(), "检查更新至少要问一个清单端点");
-    let failures = probe_unsuccessful(app_version, misses).await?;
-    if failures
-        .iter()
-        .all(|failure| failure.status == Some(MANIFEST_MISSING_STATUS))
-    {
-        // 界面上不算失败，日志要留痕。
-        tracing::warn!(?endpoints, "更新源上没有清单（404），按没有新版本处理");
-        return Ok(CheckConclusion::NotPublished);
-    }
-    Err(endpoints_failed(endpoints, failures))
-}
-
-/// 给回了非 2xx 的端点各 GET 一次问出状态码，与其余失败一起按问的先后排好。
-async fn probe_unsuccessful(
-    app_version: &str,
-    misses: Vec<NoManifest<'_>>,
-) -> Result<Vec<EndpointFailure>, CommandError> {
-    let needs_probe = misses
-        .iter()
-        .any(|miss| matches!(miss, NoManifest::Unsuccessful(_)));
-    let http = needs_probe
-        .then(|| {
-            petalfall_base::http::build_client_with(
-                &petalfall_base::http::HttpConfig::for_app_version(app_version),
-            )
-        })
-        .transpose()?;
-    let mut failures = Vec::with_capacity(misses.len());
-    for miss in misses {
-        let failure = match miss {
-            NoManifest::Failed(failure) => failure,
-            NoManifest::Unsuccessful(endpoint) => {
-                let probed = http
-                    .as_ref()
-                    .expect("有回了非 2xx 的端点时已建好客户端")
-                    .get(endpoint)
-                    .header("accept", "application/json")
-                    .timeout(CHECK_TIMEOUT)
-                    .send()
-                    .await;
-                match probed {
-                    Ok(response) => EndpointFailure::status(endpoint, response.status().as_u16()),
-                    Err(err) => EndpointFailure::plugin(
-                        endpoint,
-                        &tauri_plugin_updater::Error::Reqwest(err),
-                    ),
-                }
-            }
-        };
-        failures.push(failure);
-    }
-    Ok(failures)
-}
-
-/// 所有端点都没给出清单、又不全是 404 时的检查失败。只问了一个端点时与逐端点检查之前的形状一致：message 是那个
-/// 端点的原文，状态码在 detail.status，原因链在 detail.causes；多个端点时 message 逐行写成「端点：原文」，状态码与
-/// 原因链各自留在 detail.attempts 里，顶层不放 status：前端会把它补在整段 message 的末尾，分不清是哪个端点的。
-/// 全都败在网络层时标 detail.network，规则同下载源的汇总：全是超时为 timeout，混着连不上为 connect。
-fn endpoints_failed(endpoints: &[String], failures: Vec<EndpointFailure>) -> CommandError {
+    failures: Vec<EndpointFailure>,
+) -> CommandError {
     let message = match failures.as_slice() {
         [only] => only.message.clone(),
         many => many
@@ -773,6 +1186,7 @@ fn endpoints_failed(endpoints: &[String], failures: Vec<EndpointFailure>) -> Com
             .join("\n"),
     };
     let mut detail = Map::new();
+    detail.insert("channel".to_owned(), json!(channel));
     detail.insert("endpoints".to_owned(), json!(endpoints));
     if let Some(network) = network_layer(&failures) {
         detail.insert("network".to_owned(), json!(network.code()));
@@ -787,9 +1201,10 @@ fn endpoints_failed(endpoints: &[String], failures: Vec<EndpointFailure>) -> Com
     }
     tracing::warn!(
         code = code::UPDATE_CHECK_FAILED,
+        channel = channel.as_str(),
         %message,
         attempts = ?failures,
-        "没有一个清单端点给出清单，检查更新失败"
+        "偏好通道没有一个清单端点给出可用的清单，检查更新失败"
     );
     detail.insert("attempts".to_owned(), json!(failures));
     CommandError {
@@ -814,13 +1229,220 @@ fn network_layer(failures: &[EndpointFailure]) -> Option<NetworkFailure> {
     )
 }
 
-fn check_failed(endpoints: &[String], err: tauri_plugin_updater::Error) -> CommandError {
-    updater_error(
-        code::UPDATE_CHECK_FAILED,
-        "检查更新失败",
-        Some(endpoints),
-        err,
-    )
+/// 偏好通道 `channel` 的每个端点都给出了验过的清单头、却全都旧于本机记下的 `seen` 时的整次失败：多半是更新源在
+/// 回放旧清单，或者还没跟上。`detail` 是 `{channel, offered: [{endpoint, version}], seen}`，`offered` 按端点先后，
+/// 与 `endpoints` 一一对应。
+fn source_stale(
+    channel: Channel,
+    endpoints: &[String],
+    offered: &[Version],
+    seen: &Version,
+) -> CommandError {
+    let offered: Vec<Value> = endpoints
+        .iter()
+        .zip(offered)
+        .map(|(endpoint, version)| json!({ "endpoint": endpoint, "version": version.to_string() }))
+        .collect();
+    let message = format!(
+        "{} 通道的更新源给出的版本都旧于这台电脑见过的 {seen}，更新源还没跟上",
+        channel.as_str()
+    );
+    tracing::warn!(
+        code = code::UPDATE_SOURCE_STALE,
+        %message,
+        ?offered,
+        "偏好通道的清单都旧于本机记录，检查更新失败"
+    );
+    CommandError::new(code::UPDATE_SOURCE_STALE, message).with_detail(json!({
+        "channel": channel,
+        "offered": offered,
+        "seen": seen.to_string(),
+    }))
+}
+
+/// 把一次取清单的结果落成结论，检查和下载前的重查共用。交回各通道的结果与给槽位的结论，由调用方落进槽位。
+///
+/// - 各通道的结果按 [`conclude`] 合成，挑候选时排除本次会话被拒的版本（意图为普通更新的那些）。
+/// - 验过、又高于本机记录的清单头并进见过的版本（[`newly_seen`]）；挑中别的通道的候选、偏好又是缺省时，同一次把
+///   偏好写成本包的通道（[`must_save_preference`]），两者合成一次落盘（[`save_check_record`]）。偏好写不进去时，
+///   跨通道的候选逐个记入被拒的版本（`preference_unsaved`）再挑，直到挑出本包通道的候选或没有候选；见过的版本
+///   写不进去只记 error，这次照样用内存里验过的清单头判定。
+/// - `ticket` 是取清单之前取的号。号变了说明这期间改了偏好：不写偏好、不落槽位，报 `update_superseded`；见过的
+///   版本照样记，验过的清单头与偏好无关。
+/// - 偏好通道整次失败（清单取不到或异常、清单头全都旧于本机记录）时只把各通道的结果记进槽位，候选与下好的包
+///   不动，报错，不拿更慢通道的结果顶上。
+async fn conclude_fetched<U: ReleaseVersion>(
+    facade: &Facade,
+    slot: &Mutex<UpdateSlot<U>>,
+    plan: &CheckPlan,
+    ticket: Generation,
+    fetched: Vec<ChannelFetch<U>>,
+) -> Result<(Vec<ChannelHeadDto>, CheckConclusion<U>), CommandError> {
+    let heads: Vec<ChannelHeadDto> = fetched.iter().map(ChannelFetch::head_dto).collect();
+    let reports: Vec<ChannelReport> = fetched
+        .iter()
+        .map(|fetch| ChannelReport {
+            channel: fetch.channel,
+            seen: plan.seen_version(fetch.channel).cloned(),
+            outcome: fetch.outcome.clone(),
+        })
+        .collect();
+    let (mut refused, current_ticket) = {
+        let slot = lock_slot(slot);
+        let refused: Vec<(Channel, Version)> = slot
+            .refused()
+            .iter()
+            .filter(|entry| entry.intent == UpdateIntent::Update)
+            .map(|entry| {
+                let version = Version::parse(&entry.version)
+                    .expect("被拒的版本记的是候选的版本原文，由 semver 版本转成");
+                (entry.channel, version)
+            })
+            .collect();
+        (refused, slot.generation() == ticket)
+    };
+    let mut conclusion = conclude(
+        &plan.current,
+        plan.package,
+        plan.preference,
+        &reports,
+        &refused,
+    );
+
+    let lazy_preference = match &conclusion {
+        Conclusion::Available(candidate)
+            if current_ticket
+                && must_save_preference(candidate.channel, plan.package, plan.stored) =>
+        {
+            Some(plan.package)
+        }
+        _ => None,
+    };
+    let record = UpdateCheckRecord {
+        lazy_preference,
+        seen: fetched
+            .iter()
+            .filter_map(|fetch| newly_seen(fetch, plan))
+            .collect(),
+    };
+    if save_check_record(facade, &record).await {
+        while let Conclusion::Available(candidate) = &conclusion {
+            if candidate.channel == plan.package {
+                break;
+            }
+            let (channel, version) = (candidate.channel, candidate.version.clone());
+            tracing::warn!(
+                channel = channel.as_str(),
+                %version,
+                "跟随别的通道之前没能写下偏好，本次会话不再把这一版当作候选"
+            );
+            lock_slot(slot).refuse_update(
+                ticket,
+                version.to_string(),
+                channel,
+                RefusalReason::PreferenceUnsaved,
+            )?;
+            refused.push((channel, version));
+            conclusion = conclude(
+                &plan.current,
+                plan.package,
+                plan.preference,
+                &reports,
+                &refused,
+            );
+        }
+    }
+
+    let mut fetched = fetched.into_iter();
+    let failed = match conclusion {
+        Conclusion::CheckFailed | Conclusion::SourceStale => {
+            let preferred = fetched.next().expect("要问的通道至少有偏好通道自己");
+            preferred.into_failure(plan.seen_version(plan.preference))
+        }
+        Conclusion::Available(candidate) => {
+            let update = fetched
+                .find(|fetch| fetch.channel == candidate.channel)
+                .and_then(|fetch| fetch.found)
+                .and_then(|found| found.update)
+                .expect("候选严格新于当前版本，检查器的比较器同样判它为新，插件已为它造出更新");
+            return Ok((
+                heads,
+                CheckConclusion::Found(Candidate {
+                    update,
+                    channel: candidate.channel,
+                }),
+            ));
+        }
+        Conclusion::UpToDate => return Ok((heads, CheckConclusion::UpToDate)),
+        Conclusion::NotPublished => return Ok((heads, CheckConclusion::NotPublished)),
+    };
+    lock_slot(slot).settle_failed_check(ticket, heads)?;
+    Err(failed)
+}
+
+/// 通道这次取到的可用清单头高于本机记录（或没有有效记录）时，要并进见过的版本的那一项。记录只往上走：等于记录的
+/// 不必重写，旧于记录的清单头根本不算这个通道的结果。
+fn newly_seen<U>(
+    fetch: &ChannelFetch<U>,
+    plan: &CheckPlan,
+) -> Option<(Channel, SeenUpdateVersion)> {
+    let head = &fetch.found.as_ref()?.head;
+    let higher = plan
+        .seen_version(fetch.channel)
+        .is_none_or(|seen| compare_versions(&head.version, seen).is_gt());
+    higher.then(|| {
+        (
+            fetch.channel,
+            SeenUpdateVersion {
+                version: head.version.to_string(),
+                signature: head.signature.clone(),
+            },
+        )
+    })
+}
+
+/// 把一次检查要记的惰性偏好与见过的版本合成一次落盘（`Petalfall::merge_update_check`），返回惰性偏好是不是该写
+/// 却没写进去。落盘失败只记 error：见过的版本下次取到清单时再记。检查期间用户选过通道时偏好不写，按用户选的算。
+async fn save_check_record(facade: &Facade, record: &UpdateCheckRecord) -> bool {
+    if *record == UpdateCheckRecord::default() {
+        return false;
+    }
+    let mut merged = None;
+    let saved = facade
+        .update_if_changed(|petalfall| {
+            let merge = petalfall.merge_update_check(record);
+            merged = Some(merge);
+            merge.changed
+        })
+        .await;
+    let merged = merged.expect("update_if_changed 总会调用改动闭包");
+    if let LazyPreference::AlreadyChosen(chosen) = merged.preference {
+        tracing::info!(
+            chosen = chosen.as_str(),
+            "检查期间选过更新通道，不按这次检查写偏好"
+        );
+    }
+    match saved {
+        Ok(_) => {
+            if merged.preference == LazyPreference::Written {
+                tracing::info!(
+                    preference = ?record.lazy_preference,
+                    "跟随别的通道之前写下了偏好：之后仍按原来那条线收更新"
+                );
+            }
+            false
+        }
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                causes = ?source_chain(&err),
+                lazy_preference = ?record.lazy_preference,
+                seen = record.seen.len(),
+                "检查结果没能写进配置：见过的版本下次取到清单时再记，没写下的偏好按没写处理"
+            );
+            merged.preference == LazyPreference::Written
+        }
+    }
 }
 
 /// 先按最新清单重查一次，再按「文件下载源」策略把清单列出的源排好（[`ordered_sources`]），逐个下载并校验签名，
@@ -846,12 +1468,15 @@ pub async fn download_update(
         let task = tasks.register(&task_id)?;
         let token = task.token();
         let ticket = updater.slot().generation();
-        // 开发版的滚动预发布每次构建都删掉上一版安装包，检查时记下的地址过一阵就 404，重试也一样
-        let conclusion = unless_cancelled(token, fetch_conclusion(&app)).await?;
-        // 重查同检查，`channel_heads` 照旧为空。
+        // 开发版的滚动预发布每次构建都删掉上一版安装包，检查时记下的地址过一阵就 404，重试也一样。重查按整套规则
+        // 走一遍（偏好、见过的版本、跟随规则、被拒的版本），结论与各通道的结果照检查落进槽位。
+        let check = read_check_plan(&facade, &app.package_info().version, channel_pubkey).await?;
+        let fetched = unless_cancelled(token, fetch_conclusion(&app, &check)).await?;
+        let (heads, conclusion) =
+            conclude_fetched(&facade, &updater.slot, &check, ticket, fetched).await?;
         let candidate = updater
             .slot()
-            .update_to_download(ticket, Vec::new(), conclusion)?;
+            .update_to_download(ticket, heads, conclusion)?;
         let update = &candidate.update;
         let plan = unless_cancelled(token, download_plan(&facade, update)).await?;
         let (bytes, source) = task
@@ -869,7 +1494,7 @@ pub async fn download_update(
                 },
             ))
             .await?;
-        let dto = update_dto(update);
+        let dto = update_dto(update, candidate.channel);
         tracing::info!(
             version = %update.version,
             source = %source.name,
@@ -1930,24 +2555,39 @@ mod tests {
         );
     }
 
-    /// 检查与下载前的重查都按版本号取端点：三个通道各取各的，认不出通道时报 `updater_unsupported`，
-    /// 不拿哪个通道的清单顶上。
+    /// 检查与下载前的重查都由本包的版本号认通道，偏好缺省时按本包的通道取端点组：偏好通道在前，更慢的通道跟在后面，
+    /// 各通道的端点各取各的。认不出通道时报 `updater_unsupported`（reason `unknown_channel`），一个端点都不取，
+    /// 不拿哪个通道的端点顶上。
     #[test]
     fn version_endpoints_refuse_unknown_channels() {
+        let plan_for = |version: &str| {
+            CheckPlan::new(
+                Version::parse(version).unwrap(),
+                None,
+                &SeenUpdateEntries::default(),
+                channel_pubkey,
+            )
+        };
+        let endpoints_of = |version: &str| -> Vec<(Channel, Vec<String>)> {
+            let plan = plan_for(version).expect("认得出通道的版本建得出检查计划");
+            endpoint_groups(plan.preference, channel_endpoints)
+                .into_iter()
+                .map(|group| (group.channel, group.endpoints))
+                .collect()
+        };
+        let stable = (Channel::Stable, vec![PRIMARY_ENDPOINT.to_owned()]);
+        let beta = (Channel::Beta, vec![BETA_ENDPOINT.to_owned()]);
+        let dev = (Channel::Dev, vec![DEV_ENDPOINT.to_owned(), dev_endpoint()]);
+        assert_eq!(endpoints_of("1.0.0"), vec![stable.clone()]);
         assert_eq!(
-            version_endpoints("").unwrap(),
-            (Channel::Stable, vec![PRIMARY_ENDPOINT.to_owned()])
+            endpoints_of("1.0.0-beta.1"),
+            vec![beta.clone(), stable.clone()]
         );
-        assert_eq!(
-            version_endpoints("beta.1").unwrap(),
-            (Channel::Beta, vec![BETA_ENDPOINT.to_owned()])
-        );
-        assert_eq!(
-            version_endpoints("dev.37").unwrap(),
-            (Channel::Dev, vec![DEV_ENDPOINT.to_owned(), dev_endpoint()])
-        );
-        for unknown in ["rc.1", "alpha.1", "betax.1"] {
-            let err = version_endpoints(unknown).unwrap_err();
+        assert_eq!(endpoints_of("1.0.0-dev.37"), vec![dev, beta, stable]);
+        for unknown in ["1.0.0-rc.1", "1.0.0-alpha.1", "1.0.0-betax.1"] {
+            let err = plan_for(unknown)
+                .err()
+                .expect("认不出通道的版本不该有检查计划");
             assert_eq!(err.code, code::UPDATER_UNSUPPORTED, "{unknown}");
             assert_eq!(
                 err.detail.unwrap()["reason"],
@@ -3357,7 +3997,7 @@ mod tests {
             .unwrap();
         let download_update = top_level_fn(source, "pub async fn download_update(");
         for step in [
-            "unless_cancelled(token, fetch_conclusion(&app)).await?",
+            "unless_cancelled(token, fetch_conclusion(&app, &check)).await?",
             "unless_cancelled(token, download_plan(&facade, update)).await?",
         ] {
             assert!(download_update.contains(step), "{step}\n{download_update}");
@@ -3370,8 +4010,13 @@ mod tests {
         );
         let fetch = top_level_fn(source, "async fn fetch_conclusion(");
         assert!(
-            fetch.contains("check_checker(app, channel, endpoint)"),
+            fetch.contains("ask_endpoint(app, channel, endpoint)"),
             "{fetch}"
+        );
+        let ask = top_level_fn(source, "async fn ask_endpoint(");
+        assert!(
+            ask.contains("check_checker(app, channel, endpoint, Arc::clone(&record))"),
+            "{ask}"
         );
     }
 
@@ -3487,6 +4132,7 @@ mod tests {
     }
 
     /// 自动检查的比较器只认严格新于当前版本的清单，按 semver 优先级比：相等、更旧、只差构建元数据的都不造更新。
+    /// 不管认不认，交来的清单头都记下：不新于当前的清单头也要用来显示与记见过的版本。
     #[test]
     fn the_check_comparator_takes_only_strictly_newer_versions() {
         let release = |version: &str| RemoteRelease {
@@ -3512,30 +4158,162 @@ mod tests {
             ("1.0.0-beta.99", false),
             ("0.9.0", false),
         ] {
+            let record = ReleaseRecord::default();
+            let comparator = strictly_newer(Arc::clone(&record));
             assert_eq!(
-                strictly_newer(&current, &release(offered)),
+                comparator(current.clone(), release(offered)),
                 newer,
+                "{offered}"
+            );
+            let recorded = record.lock().unwrap().take().expect("比较器没记下清单头");
+            assert_eq!(
+                recorded.version,
+                Version::parse(offered).unwrap(),
                 "{offered}"
             );
         }
     }
 
-    /// 取端点与支持判定都按应用自己的版本号认通道，接线要 AppHandle 与 tauri 上下文，单测造不出来，钉住源码：
-    /// 取端点必须经 [`version_endpoints`]，认不出通道时报错，不拿默认通道顶上；lib.rs 给 [`detect_support`] 传的
-    /// 必须是应用版本的预发布标识，写死的话认不出通道的版本也会注册插件、显示更新入口，到检查时才报不支持。
-    /// 两个函数的行为由上面的用例验证。
+    /// 比较器判为不新于当前时，清单头的签名串照插件挑平台条目的顺序找：先带安装类型的，再不带的；都没有时报插件
+    /// 自己的「找不到本平台的条目」。单测进程不是安装包，没有安装类型，只找不带的那一条。
+    #[test]
+    fn a_not_newer_head_takes_the_signature_the_plugin_would_pick() {
+        let base = tauri_plugin_updater::target().expect("单测跑在插件支持的平台上");
+        assert_eq!(tauri::utils::platform::bundle_type(), None);
+        let release = |platforms: &[(&str, &str)]| RemoteRelease {
+            version: Version::parse("1.0.0-dev.7").unwrap(),
+            notes: None,
+            pub_date: None,
+            data: tauri_plugin_updater::RemoteReleaseInner::Static {
+                platforms: platforms
+                    .iter()
+                    .map(|(target, signature)| {
+                        (
+                            (*target).to_owned(),
+                            tauri_plugin_updater::ReleaseManifestPlatform {
+                                url: Url::parse("https://petalfall.org/installer.exe").unwrap(),
+                                signature: (*signature).to_owned(),
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        };
+        let nsis = format!("{base}-nsis");
+        assert_eq!(
+            manifest_signature(&release(&[(&nsis, "nsis 的签名"), (&base, "通用的签名")])).unwrap(),
+            "通用的签名"
+        );
+        let missing = manifest_signature(&release(&[(&nsis, "nsis 的签名")])).unwrap_err();
+        assert!(
+            matches!(&missing, tauri_plugin_updater::Error::TargetsNotFound(targets) if *targets == [base.clone()]),
+            "{missing}"
+        );
+
+        assert_eq!(
+            installer_name(Some(tauri::utils::config::BundleType::Nsis)),
+            Some("nsis")
+        );
+        assert_eq!(
+            installer_name(Some(tauri::utils::config::BundleType::Msi)),
+            Some("msi")
+        );
+        assert_eq!(
+            installer_name(Some(tauri::utils::config::BundleType::Dmg)),
+            None
+        );
+        assert_eq!(installer_name(None), None);
+
+        // 没交回更新、比较器也没记下清单头：端点回了 204。记下了却报错的照报错算。
+        assert!(matches!(
+            endpoint_answer(Ok(None), None),
+            EndpointAnswer::NoContent
+        ));
+        assert!(matches!(
+            endpoint_answer(
+                Err(tauri_plugin_updater::Error::ReleaseNotFound),
+                Some(release(&[(&base, "通用的签名")]))
+            ),
+            EndpointAnswer::Unsuccessful
+        ));
+        match endpoint_answer(Ok(None), Some(release(&[(&base, "通用的签名")]))) {
+            EndpointAnswer::Head(head) => {
+                assert_eq!(head.version, Version::parse("1.0.0-dev.7").unwrap());
+                assert_eq!(head.signature, "通用的签名");
+                assert!(head.update.is_none());
+            }
+            _ => panic!("记下了清单头却没认成清单头"),
+        }
+        assert!(matches!(
+            endpoint_answer(
+                Err(tauri_plugin_updater::Error::TargetsNotFound(vec![
+                    base.clone()
+                ])),
+                Some(release(&[(&nsis, "nsis 的签名")]))
+            ),
+            EndpointAnswer::Failed(_)
+        ));
+    }
+
+    /// 本包的通道只由应用自己的版本号判定，要问的通道只经 [`followed_channels`] 按生效的偏好取得。接线要
+    /// AppHandle 与 tauri 上下文，单测造不出来，钉住源码：检查与下载前的重查都拿应用版本建检查计划，本包的通道认不出
+    /// 时报错（[`package_channel_of`]），不拿默认通道顶上；端点只经 [`endpoint_groups`] 取，别处不直接按通道拿端点，
+    /// 免得绕过偏好去问比它快的通道。lib.rs 给 [`detect_support`] 传的必须是应用版本的预发布标识，写死的话认不出通道的
+    /// 版本也会注册插件、显示更新入口，到检查时才报不支持。各函数的行为由上面的用例验证。
     #[test]
     fn channel_is_read_from_the_app_version() {
         let (source, _) = include_str!("updater.rs")
             .split_once("#[cfg(test)]")
             .unwrap();
+        let package = top_level_fn(source, "fn package_channel_of(");
+        assert!(
+            package.contains("Channel::of_version(current)"),
+            "{package}"
+        );
+        for command in [
+            "pub async fn check_update(",
+            "pub async fn download_update(",
+        ] {
+            let body = top_level_fn(source, command);
+            assert!(
+                body.contains(
+                    "read_check_plan(&facade, &app.package_info().version, channel_pubkey).await?"
+                ),
+                "{body}"
+            );
+        }
+
         let fetch = top_level_fn(source, "async fn fetch_conclusion(");
         assert!(
-            fetch.contains(
-                "let (channel, endpoints) = version_endpoints(app.package_info().version.pre.as_str())?;"
-            ),
+            fetch.contains("endpoint_groups(plan.preference, channel_endpoints)"),
             "{fetch}"
         );
+        let lines = shell_code_lines();
+        let updater_rs = updater_rs_path(&lines);
+        let total = |needle: &str| -> usize {
+            occurrences(&lines, needle)
+                .iter()
+                .map(|(_, count)| count)
+                .sum()
+        };
+        let in_updater = |needle: &str| -> usize {
+            occurrences(&lines, needle)
+                .iter()
+                .filter(|(file, _)| *file == updater_rs)
+                .map(|(_, count)| count)
+                .sum()
+        };
+        // endpoint_groups 定义在 update_channels.rs，用处只有 fetch_conclusion 这一处。
+        assert_eq!(total("endpoint_groups("), 2);
+        assert_eq!(in_updater("endpoint_groups("), 1);
+        // channel_endpoints 除了定义，只交给 endpoint_groups。
+        assert_eq!(total("channel_endpoints"), 2);
+        assert_eq!(in_updater("channel_endpoints"), 2);
+        assert_eq!(fetch.matches("channel_endpoints").count(), 1, "{fetch}");
+        let channels_source = include_str!("update_channels.rs");
+        let groups = top_level_fn(channels_source, "pub(crate) fn endpoint_groups(");
+        assert!(groups.contains("followed_channels(preference)"), "{groups}");
+
         let (_, call) = include_str!("../lib.rs")
             .split_once("commands::updater::detect_support(")
             .expect("lib.rs 不再调 detect_support");
@@ -3617,37 +4395,151 @@ mod tests {
         (server, url)
     }
 
-    /// 一次逐端点检查的经过：结论，与按先后问过的端点下标。
-    type Checked = (Result<CheckConclusion<Fake>, CommandError>, Vec<usize>);
+    // 签名夹具：两把一次性 Ed25519 测试钥，离线按 tauri signer 的格式给下面几版签好名，外层再包一层 base64，与仓库里的
+    // `.pub` 文件、清单里的 `signature` 字段同形。私钥只在生成时留在内存里，没有落盘，这里只有公钥与签名串。
+    // TEST_DEV_KEY 充当预览版的钥，TEST_RELEASE_KEY 充当测试版与正式版共用的钥。检查流程的公钥由调用方传入
+    // （端点组里的 `pubkey`、建检查计划时的 `key_of`），用例把它们换成这两把；生产路径只传钥表。
 
-    /// 第 i 个端点上插件的检查给出 `results[i]`，跑一遍逐端点检查。回了非 2xx 的端点之后还要再问一次状态码，
-    /// 这样的端点要用本地服务的地址。
-    async fn check_with(
-        endpoints: &[String],
-        results: Vec<tauri_plugin_updater::Result<Option<Fake>>>,
-    ) -> Checked {
-        assert_eq!(endpoints.len(), results.len(), "每个端点配一个检查结果");
-        let mut results = results.into_iter();
-        let mut asked = Vec::new();
-        let conclusion = check_in_order(endpoints, "0.1.0", |index| {
-            asked.push(index);
-            std::future::ready(results.next().expect("问的端点比配好的结果多"))
+    /// 密钥号 ec6ec430e38c3082。
+    const TEST_DEV_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgyMzA4Q0UzMzBDNDZFRUMKUldUc2JzUXc0NHd3Z3BMKzZoRTdaaGdtUjlJNXlvSXBzM2hnVDVadUk1YUhwVlcyekE2cUQ5K04K";
+    /// 密钥号 7c9485859026bf2e。
+    const TEST_RELEASE_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDJFQkYyNjkwODU4NTk0N0MKUldSOGxJV0ZrQ2EvTHBLRC9CbXlDRHl3RFRlVGl6UHFqUVBwcVV5UWhkVkZFQjlJL0ZqQ3M1L0cK";
+
+    /// 测试钥签好的清单头：版本，与清单里本平台条目的签名串。预览版的由 TEST_DEV_KEY 签，其余由 TEST_RELEASE_KEY 签；
+    /// 可信注释里恰好一个 `version` 字段，等于这一版。
+    const SIGNED_HEADS: [(&str, &str); 6] = [
+        ("1.0.0-dev.7", "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc2JzUXc0NHd3Z2lQcXFZSDRxTDhWd093MEVmSE1kTHFaZzEvVUFSYXVjQXYzSVJsVDNTWVJ6TFp3cDhScVM5ZWE3M2tnQU04WlEyU0ZXOTBub28xTUxwZzJSQmc0SWdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzYyNzYxNjAwCWZpbGU6UGV0YWxmYWxsLUluc3RhbGxlci0xLjAuMC1kZXYuNy14NjQuZXhlCXZlcnNpb246MS4wLjAtZGV2LjcKTDBnMzk0eUlXQmJodWVJMEhIbHprRlJtUCs0a201QTQrMi9sVjZGamx3MWpzY2xLalZFeWJRenlNN1dRd2FRdm9IdmIxUnhMNGZqZlNvMm5HaGNPRFE9PQo="),
+        ("1.0.0-dev.8", "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc2JzUXc0NHd3Z2lQcXFZSDRxTDhWd093MEVmSE1kTHFaZzEvVUFSYXVjQXYzSVJsVDNTWVJ6TFp3cDhScVM5ZWE3M2tnQU04WlEyU0ZXOTBub28xTUxwZzJSQmc0SWdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzYyNzYxNjAwCWZpbGU6UGV0YWxmYWxsLUluc3RhbGxlci0xLjAuMC1kZXYuOC14NjQuZXhlCXZlcnNpb246MS4wLjAtZGV2LjgKdWttOTY4MHBCei9OMk54UFU2bVlkblBBTHRUY0tBMGFoYlIvREMvOVc2MXB5Y1I2a3lQcE1vSUlJVk9vUm1jaURxbC9ZbmRLNFd2WVBkRURudm82Q3c9PQo="),
+        ("1.0.0-dev.12", "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUc2JzUXc0NHd3Z2lQcXFZSDRxTDhWd093MEVmSE1kTHFaZzEvVUFSYXVjQXYzSVJsVDNTWVJ6TFp3cDhScVM5ZWE3M2tnQU04WlEyU0ZXOTBub28xTUxwZzJSQmc0SWdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzYyNzYxNjAwCWZpbGU6UGV0YWxmYWxsLUluc3RhbGxlci0xLjAuMC1kZXYuMTIteDY0LmV4ZQl2ZXJzaW9uOjEuMC4wLWRldi4xMgo1Wjg1OG1vQXlTT3M2L1UxOEhQMEhsekRESnovYUJQeFEzaUY2SXpyRHU5NmhESGJTMFZCNDV0TUhZQytaOTdUVm91dXJTcjdGRmtNeFR5Q0RqYUdDZz09Cg=="),
+        ("1.0.0-beta.4", "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSOGxJV0ZrQ2EvTGxPcnExN0VrRGg4d1ZBQ2UrWnh3cGowYzBOQWczYi9jUWRMNWtPUzhWbWErcENmYVVqVXRYMWFoLzlILzZOcFpaQnI0NklyOHFmRnF0VUtGUzF4T1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzYyNzYxNjAwCWZpbGU6UGV0YWxmYWxsLUluc3RhbGxlci0xLjAuMC1iZXRhLjQteDY0LmV4ZQl2ZXJzaW9uOjEuMC4wLWJldGEuNApLaDkwR1h4VDNQNzN0LzZhMjRhWGxHWDc0aGIweVlZcC8zVG8vMndTeDN5Z2pHYkVKQXZqeFVzYmlxN3FKQThWYVJzR1FEazBKenpUUEFEMURBRGxCQT09Cg=="),
+        ("1.0.0", "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSOGxJV0ZrQ2EvTGxPcnExN0VrRGg4d1ZBQ2UrWnh3cGowYzBOQWczYi9jUWRMNWtPUzhWbWErcENmYVVqVXRYMWFoLzlILzZOcFpaQnI0NklyOHFmRnF0VUtGUzF4T1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzYyNzYxNjAwCWZpbGU6UGV0YWxmYWxsLUluc3RhbGxlci0xLjAuMC14NjQuZXhlCXZlcnNpb246MS4wLjAKeE9QOExxM3B4S0RPZzU1QUxYU3pJbXlnZnZVU3g3L2JtNXVTMm1NM2dyRy82aFVVQXBQTjNINHBnRE0wTXByTytoUzhmaXZZeWVSdlhZbUkvdmJEQ3c9PQo="),
+        ("1.1.0-beta.1", "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSOGxJV0ZrQ2EvTGxPcnExN0VrRGg4d1ZBQ2UrWnh3cGowYzBOQWczYi9jUWRMNWtPUzhWbWErcENmYVVqVXRYMWFoLzlILzZOcFpaQnI0NklyOHFmRnF0VUtGUzF4T1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzYyNzYxNjAwCWZpbGU6UGV0YWxmYWxsLUluc3RhbGxlci0xLjEuMC1iZXRhLjEteDY0LmV4ZQl2ZXJzaW9uOjEuMS4wLWJldGEuMQpLS0crTlVvaHNDcUxwT2xsTjFMU2lMamwvRUFGRitvSHYyaEFScTFsRWRab05RT2NBQUdyeWRuL1U4UEJjeWMyOGRhZmlZMkpOVExEUS91OG9td0VCQT09Cg=="),
+    ];
+
+    /// 用例里各通道验清单头用的测试钥，形状同钥表：预览版一把，测试版与正式版共用一把。
+    fn test_key(channel: Channel) -> &'static str {
+        match channel {
+            Channel::Dev => TEST_DEV_KEY,
+            Channel::Beta | Channel::Stable => TEST_RELEASE_KEY,
+        }
+    }
+
+    fn version(text: &str) -> Version {
+        Version::parse(text).unwrap_or_else(|err| panic!("{text} 不是合法版本号：{err}"))
+    }
+
+    /// 测试钥给 `text` 那一版签的签名串。
+    fn signature_of(text: &str) -> &'static str {
+        SIGNED_HEADS
+            .iter()
+            .find(|(signed, _)| *signed == text)
+            .map(|(_, signature)| *signature)
+            .unwrap_or_else(|| panic!("夹具里没有 {text} 的签名"))
+    }
+
+    /// 清单里的发布时间：2026-11-10 08:00 UTC 的 Unix 毫秒。
+    const HEAD_DATE: i64 = 1_762_761_600_000;
+
+    /// 端点给出 `text` 那一版的清单头，签名串是测试钥签的那一份；比 `current` 新时插件也造出了更新，同检查器的比较器。
+    fn head(text: &'static str, current: &str) -> EndpointAnswer<Fake> {
+        let offered = version(text);
+        let newer = compare_versions(&offered, &version(current)).is_gt();
+        EndpointAnswer::Head(ManifestHead {
+            version: offered,
+            signature: signature_of(text).to_owned(),
+            date: Some(HEAD_DATE),
+            update: newer.then_some(Fake(text)),
         })
-        .await;
-        (conclusion, asked)
+    }
+
+    /// 端点声称 `claimed` 这一版，签名串却是 `signed` 那一版的：可信注释里的版本对不上，清单头核验不过。伪造的版本
+    /// 比当前新，插件照样会为它造出更新。
+    fn forged_head(claimed: &'static str, signed: &str) -> EndpointAnswer<Fake> {
+        EndpointAnswer::Head(ManifestHead {
+            version: version(claimed),
+            signature: signature_of(signed).to_owned(),
+            date: Some(HEAD_DATE),
+            update: Some(Fake(claimed)),
+        })
+    }
+
+    /// 夹具确实是测试钥签的、能过清单头核验；钥表里的真钥验不过它们，生产路径上认不了这些夹具。
+    #[test]
+    fn signed_heads_pass_the_head_check_only_with_the_test_keys() {
+        for (text, signature) in SIGNED_HEADS {
+            let offered = version(text);
+            let channel = Channel::of_version(&offered).unwrap();
+            verify_head(channel, &offered, signature, test_key(channel))
+                .unwrap_or_else(|err| panic!("{text}：{err}"));
+            assert!(
+                verify_head(channel, &offered, signature, channel_pubkey(channel)).is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    /// 单通道用例的当前版本，只用作再问状态码时的 User-Agent；清单头新不新已在 [`head`] 里按各自的当前版本定好。
+    const AGENT_VERSION: &str = "1.0.0-dev.6";
+
+    /// 一个通道逐端点问下来的经过：偏好就是这个通道时它的结果（整次失败时是报的错），与按先后问过的端点下标。
+    type Checked = (Result<ChannelOutcome, CommandError>, Vec<usize>);
+
+    /// 通道 `channel` 的第 i 个端点给出 `answers[i]`、本机记下的这个通道的最高版本是 `seen` 时，逐端点问一遍。回了
+    /// 非 2xx 的端点之后还要再问一次状态码，这样的端点要用本地服务的地址。
+    async fn check_channel(
+        channel: Channel,
+        endpoints: &[String],
+        seen: Option<&str>,
+        answers: Vec<EndpointAnswer<Fake>>,
+    ) -> Checked {
+        assert_eq!(endpoints.len(), answers.len(), "每个端点配一个答案");
+        let group = ChannelEndpoints {
+            channel,
+            pubkey: test_key(channel),
+            endpoints: endpoints.to_vec(),
+        };
+        let seen = seen.map(version);
+        let answers = std::cell::RefCell::new(answers.into_iter().map(Some).collect::<Vec<_>>());
+        let asked = std::cell::RefCell::new(Vec::new());
+        let ask = |_, endpoint: &str| {
+            let index = group
+                .endpoints
+                .iter()
+                .position(|known| known == endpoint)
+                .expect("问了不属于这个通道的端点");
+            asked.borrow_mut().push(index);
+            let answer = answers.borrow_mut()[index]
+                .take()
+                .expect("同一个端点问了两次");
+            std::future::ready(answer)
+        };
+        let fetch = fetch_channel(&group, seen.as_ref(), AGENT_VERSION, &ask)
+            .await
+            .expect("建再问状态码用的客户端失败");
+        let failed = matches!(
+            fetch.outcome,
+            ChannelOutcome::Failed | ChannelOutcome::Stale { .. }
+        );
+        let result = if failed {
+            Err(fetch.into_failure(seen.as_ref()))
+        } else {
+            Ok(fetch.outcome)
+        };
+        (result, asked.into_inner())
     }
 
     /// 每个端点都回了非 2xx：插件对每一个都只报 `ReleaseNotFound`。前一个没给出清单，后一个照样要问。
     async fn after_release_not_found(
+        channel: Channel,
         endpoints: &[String],
-    ) -> Result<CheckConclusion<Fake>, CommandError> {
-        let results = endpoints
+    ) -> Result<ChannelOutcome, CommandError> {
+        let answers = endpoints
             .iter()
-            .map(|_| Err(UpdaterError::ReleaseNotFound))
+            .map(|_| EndpointAnswer::Unsuccessful)
             .collect();
-        let (conclusion, asked) = check_with(endpoints, results).await;
+        let (outcome, asked) = check_channel(channel, endpoints, None, answers).await;
         assert_eq!(asked, (0..endpoints.len()).collect::<Vec<_>>());
-        conclusion
+        outcome
     }
 
     /// 2xx 而正文不是 JSON（站点回退页、中间设备注入的页面）时插件报的错：插件对 2xx 的正文调 `json()`。
@@ -3745,24 +4637,30 @@ mod tests {
     #[tokio::test]
     async fn manifest_404_counts_as_not_published() {
         let (_source, url) = source_answering(404).await;
-        let conclusion = after_release_not_found(&[url]).await.unwrap();
-        assert!(matches!(conclusion, CheckConclusion::NotPublished));
+        let outcome = after_release_not_found(Channel::Stable, &[url])
+            .await
+            .unwrap();
+        assert_eq!(outcome, ChannelOutcome::NotPublished);
     }
 
-    /// 服务器故障不能显示成已是最新：404 以外的状态一律是检查失败，状态码进 detail 让界面写出来。
-    /// 200 是两次请求之间服务恢复了，这次同样没拿到清单，重试就好。只有一个端点时形状与逐端点检查之前一致，
-    /// 另带 detail.attempts。
+    /// 服务器故障不能显示成还没有发布：404 以外的状态一律是检查失败，状态码进 detail 让界面写出来。
+    /// 200 是两次请求之间服务恢复了，这次同样没拿到清单，重试就好。只有一个端点时 message 是它的原文、状态码在
+    /// detail.status，另带 detail.attempts；detail.channel 是没取到清单的那个通道。
     #[tokio::test]
     async fn other_statuses_behind_release_not_found_stay_check_failures() {
         for status in [200, 400, 401, 403, 405, 429, 500, 502, 503] {
             let (_source, url) = source_answering(status).await;
             let endpoints = vec![url];
-            let err = after_release_not_found(&endpoints).await.err().unwrap();
+            let err = after_release_not_found(Channel::Stable, &endpoints)
+                .await
+                .err()
+                .unwrap();
             assert_eq!(err.code, code::UPDATE_CHECK_FAILED, "{status}");
             assert_eq!(err.message, "更新服务器返回了异常状态", "{status}");
             assert_eq!(
                 err.detail,
                 Some(json!({
+                    "channel": "stable",
                     "endpoints": endpoints,
                     "status": status,
                     "attempts": [{
@@ -3780,7 +4678,10 @@ mod tests {
     #[tokio::test]
     async fn probe_that_cannot_connect_stays_a_check_failure() {
         let endpoints = vec![closed_endpoint()];
-        let err = after_release_not_found(&endpoints).await.err().unwrap();
+        let err = after_release_not_found(Channel::Stable, &endpoints)
+            .await
+            .err()
+            .unwrap();
         assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
         let detail = err.detail.unwrap();
         assert_eq!(detail["network"], json!("connect"));
@@ -3789,17 +4690,18 @@ mod tests {
         assert!(detail["attempts"][0].get("status").is_none());
     }
 
-    /// dev 通道有香港机与 GitHub 两个端点：两个都确认 404 才算没有发布，任一端点故障就说不清它上面有没有新版本。
+    /// 预览版有香港机与 GitHub 两个端点：两个都确认 404 才算没有发布，任一端点故障就说不清它上面有没有新版本。
     /// 端点按 [`channel_endpoints`] 给的先后逐个问，两个顺序都试一遍；每个端点的状态码按问的先后进 detail.attempts，
     /// message 逐行写明。一个端点 404、另一个根本没答上话（超时）也不算没有发布。
     #[tokio::test]
     async fn every_endpoint_has_to_confirm_404() {
         let (missing, missing_url) = source_answering(404).await;
         let (other_missing, other_missing_url) = source_answering(404).await;
-        let conclusion = after_release_not_found(&[missing_url.clone(), other_missing_url])
-            .await
-            .unwrap();
-        assert!(matches!(conclusion, CheckConclusion::NotPublished));
+        let outcome =
+            after_release_not_found(Channel::Dev, &[missing_url.clone(), other_missing_url])
+                .await
+                .unwrap();
+        assert_eq!(outcome, ChannelOutcome::NotPublished);
         assert_eq!(missing.received_requests().await.unwrap().len(), 1);
         assert_eq!(other_missing.received_requests().await.unwrap().len(), 1);
 
@@ -3813,13 +4715,17 @@ mod tests {
             [missing_url.clone(), broken_url.clone()],
             [broken_url.clone(), missing_url.clone()],
         ] {
-            let err = after_release_not_found(&endpoints).await.err().unwrap();
+            let err = after_release_not_found(Channel::Dev, &endpoints)
+                .await
+                .err()
+                .unwrap();
             assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
             assert_eq!(
                 err.message,
                 format!("{}\n{}", line_of(&endpoints[0]), line_of(&endpoints[1]))
             );
             let detail = err.detail.unwrap();
+            assert_eq!(detail["channel"], json!("dev"));
             let attempts: Vec<(String, u64)> = detail["attempts"]
                 .as_array()
                 .unwrap()
@@ -3842,15 +4748,20 @@ mod tests {
         }
 
         let endpoints = [closed_endpoint(), missing_url.clone()];
-        let (conclusion, asked) = check_with(
+        let (outcome, asked) = check_channel(
+            Channel::Dev,
             &endpoints,
-            vec![Err(timed_out().await), Err(UpdaterError::ReleaseNotFound)],
+            None,
+            vec![
+                EndpointAnswer::Failed(timed_out().await),
+                EndpointAnswer::Unsuccessful,
+            ],
         )
         .await;
         assert_eq!(asked, [0, 1]);
-        let err = conclusion
-            .err()
-            .expect("一个端点超时、另一个 404，不能算没有发布");
+        let Err(err) = outcome else {
+            panic!("一个端点超时、另一个 404，不能算没有发布");
+        };
         assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
         let detail = err.detail.unwrap();
         assert_eq!(detail["attempts"][0]["network"], json!("timeout"));
@@ -3858,72 +4769,130 @@ mod tests {
         assert!(detail.get("network").is_none());
     }
 
-    /// 哪个端点先给出了清单就以它为准：后面的端点不再问，前面也没有谁要再问状态码。
+    /// 哪个端点先给出了验过的清单头就以它为准：后面的端点不再问，前面也没有谁要再问状态码。比当前新不新都算
+    /// 给出了清单（不新就是已是最新，不去问 GitHub 有没有更新的）；等于本机记录的照常可用，那就是上次见过的同一版。
     #[tokio::test]
     async fn the_first_endpoint_with_a_manifest_settles_the_check() {
         let (first, first_url) = source_answering(503).await;
         let (second, second_url) = source_answering(404).await;
         let endpoints = vec![first_url, second_url];
+        let published = |text: &str| ChannelOutcome::Published {
+            endpoint: 0,
+            version: version(text),
+        };
 
-        let (found, asked) = check_with(
+        let (newer, asked) = check_channel(
+            Channel::Dev,
             &endpoints,
-            vec![Ok(Some(Fake("0.2.0"))), Ok(Some(Fake("0.3.0")))],
+            None,
+            vec![
+                head("1.0.0-dev.12", "1.0.0-dev.6"),
+                head("1.0.0-dev.8", "1.0.0-dev.6"),
+            ],
         )
         .await;
-        assert!(matches!(
-            found.unwrap(),
-            CheckConclusion::Found(Candidate {
-                update: Fake("0.2.0"),
-                channel: Channel::Stable,
-            })
-        ));
+        assert_eq!(newer.unwrap(), published("1.0.0-dev.12"));
         assert_eq!(asked, [0]);
 
-        // 已是最新（含端点回 204）同样是给出了清单：不去问 GitHub 有没有更新的。
-        let (latest, asked) = check_with(&endpoints, vec![Ok(None), Ok(Some(Fake("0.3.0")))]).await;
-        assert!(matches!(latest.unwrap(), CheckConclusion::UpToDate));
+        let (latest, asked) = check_channel(
+            Channel::Dev,
+            &endpoints,
+            None,
+            vec![
+                head("1.0.0-dev.7", "1.0.0-dev.12"),
+                head("1.0.0-dev.12", "1.0.0-dev.12"),
+            ],
+        )
+        .await;
+        assert_eq!(latest.unwrap(), published("1.0.0-dev.7"));
+        assert_eq!(asked, [0]);
+
+        let (same_as_seen, asked) = check_channel(
+            Channel::Dev,
+            &endpoints,
+            Some("1.0.0-dev.8"),
+            vec![
+                head("1.0.0-dev.8", "1.0.0-dev.6"),
+                head("1.0.0-dev.12", "1.0.0-dev.6"),
+            ],
+        )
+        .await;
+        assert_eq!(same_as_seen.unwrap(), published("1.0.0-dev.8"));
         assert_eq!(asked, [0]);
 
         assert!(first.received_requests().await.unwrap().is_empty());
         assert!(second.received_requests().await.unwrap().is_empty());
     }
 
-    /// 香港机没给出清单，不管是哪种失败，都接着问 GitHub，拿它的清单下结论；前面那个端点不必再问状态码。
-    /// 插件把几个端点一次性问时，正文不是 JSON、正文读到一半撞上总时限、没有本平台的条目这几种直接返回，
-    /// 字节相同的 GitHub 清单就问不到。
+    /// 香港机没给出可用的清单头，不管是哪种情形，都接着问 GitHub，拿它的清单头下结论；前面那个端点不必再问状态码。
+    /// 插件把几个端点一次性问时，正文不是 JSON、正文读到一半撞上总时限、没有本平台的条目这几种直接返回，字节相同的
+    /// GitHub 清单就问不到。回了 204 不算给出了清单；清单头没通过核验（版本不属于这个通道、签名里的版本对不上）是
+    /// 清单异常；清单头旧于本机记录多半是回放的旧清单：都接着问下一个。
     #[tokio::test]
     async fn an_endpoint_without_a_manifest_hands_over_to_the_next() {
-        let failures = [
-            ("正文不是 JSON", undecodable().await),
-            ("正文读到一半撞上总时限", body_timed_out().await),
-            ("连不上", refused().await),
-            ("连得上、等不到响应", timed_out().await),
-            ("非 2xx", UpdaterError::ReleaseNotFound),
+        let current = "1.0.0-dev.6";
+        let failures: Vec<(&str, Option<&str>, EndpointAnswer<Fake>)> = vec![
+            (
+                "正文不是 JSON",
+                None,
+                EndpointAnswer::Failed(undecodable().await),
+            ),
+            (
+                "正文读到一半撞上总时限",
+                None,
+                EndpointAnswer::Failed(body_timed_out().await),
+            ),
+            ("连不上", None, EndpointAnswer::Failed(refused().await)),
+            (
+                "连得上、等不到响应",
+                None,
+                EndpointAnswer::Failed(timed_out().await),
+            ),
+            ("非 2xx", None, EndpointAnswer::Unsuccessful),
+            ("回了 204", None, EndpointAnswer::NoContent),
             (
                 "清单不成形",
-                UpdaterError::Serialization(serde_json::from_str::<Value>("{").unwrap_err()),
+                None,
+                EndpointAnswer::Failed(UpdaterError::Serialization(
+                    serde_json::from_str::<Value>("{").unwrap_err(),
+                )),
             ),
             (
                 "没有本平台的条目",
-                UpdaterError::TargetsNotFound(vec![
+                None,
+                EndpointAnswer::Failed(UpdaterError::TargetsNotFound(vec![
                     "windows-x86_64-nsis".into(),
                     "windows-x86_64".into(),
-                ]),
+                ])),
+            ),
+            (
+                "签名里的版本对不上",
+                None,
+                forged_head("1.0.0-dev.99", "1.0.0-dev.12"),
+            ),
+            ("版本不属于这个通道", None, head("1.0.0-beta.4", current)),
+            (
+                "旧于本机记录",
+                Some("1.0.0-dev.8"),
+                head("1.0.0-dev.7", current),
             ),
         ];
-        for (case, failure) in failures {
+        for (case, seen, failure) in failures {
             let (hk, hk_url) = source_answering(503).await;
             let endpoints = vec![hk_url, dev_endpoint()];
-            let (conclusion, asked) =
-                check_with(&endpoints, vec![Err(failure), Ok(Some(Fake("0.2.0")))]).await;
-            assert!(
-                matches!(
-                    conclusion,
-                    Ok(CheckConclusion::Found(Candidate {
-                        update: Fake("0.2.0"),
-                        channel: Channel::Stable,
-                    }))
-                ),
+            let (outcome, asked) = check_channel(
+                Channel::Dev,
+                &endpoints,
+                seen,
+                vec![failure, head("1.0.0-dev.12", current)],
+            )
+            .await;
+            assert_eq!(
+                outcome.unwrap(),
+                ChannelOutcome::Published {
+                    endpoint: 1,
+                    version: version("1.0.0-dev.12"),
+                },
                 "{case}"
             );
             assert_eq!(asked, [0, 1], "{case}");
@@ -3944,13 +4913,18 @@ mod tests {
         let (hk, hk_url) = source_answering(403).await;
         let endpoints = vec![hk_url.clone(), dev_endpoint()];
 
-        let (conclusion, asked) = check_with(
+        let (outcome, asked) = check_channel(
+            Channel::Dev,
             &endpoints,
-            vec![Err(UpdaterError::ReleaseNotFound), Err(refused)],
+            None,
+            vec![
+                EndpointAnswer::Unsuccessful,
+                EndpointAnswer::Failed(refused),
+            ],
         )
         .await;
         assert_eq!(asked, [0, 1]);
-        let err = conclusion.err().unwrap();
+        let err = outcome.err().unwrap();
         assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
         assert_eq!(
             err.message,
@@ -3970,6 +4944,7 @@ mod tests {
         assert_eq!(
             err.detail,
             Some(json!({
+                "channel": "dev",
                 "endpoints": endpoints,
                 "attempts": [
                     { "endpoint": hk_url, "status": 403, "message": "更新服务器返回了异常状态" },
@@ -3985,27 +4960,45 @@ mod tests {
     #[tokio::test]
     async fn endpoints_failing_only_on_the_network_mark_detail_network() {
         let unreachable = || vec![closed_endpoint(), closed_endpoint()];
-        for (results, network) in [
+        for (answers, network) in [
             (
-                vec![Err(refused().await), Err(timed_out().await)],
+                vec![
+                    EndpointAnswer::Failed(refused().await),
+                    EndpointAnswer::Failed(timed_out().await),
+                ],
                 Some("connect"),
             ),
             (
-                vec![Err(timed_out().await), Err(refused().await)],
+                vec![
+                    EndpointAnswer::Failed(timed_out().await),
+                    EndpointAnswer::Failed(refused().await),
+                ],
                 Some("connect"),
             ),
             (
-                vec![Err(timed_out().await), Err(body_timed_out().await)],
+                vec![
+                    EndpointAnswer::Failed(timed_out().await),
+                    EndpointAnswer::Failed(body_timed_out().await),
+                ],
                 Some("timeout"),
             ),
             (
-                vec![Err(UpdaterError::ReleaseNotFound), Err(timed_out().await)],
+                vec![
+                    EndpointAnswer::Unsuccessful,
+                    EndpointAnswer::Failed(timed_out().await),
+                ],
                 Some("connect"),
             ),
-            (vec![Err(undecodable().await), Err(refused().await)], None),
+            (
+                vec![
+                    EndpointAnswer::Failed(undecodable().await),
+                    EndpointAnswer::Failed(refused().await),
+                ],
+                None,
+            ),
         ] {
-            let (conclusion, _) = check_with(&unreachable(), results).await;
-            let err = conclusion.err().unwrap();
+            let (outcome, _) = check_channel(Channel::Dev, &unreachable(), None, answers).await;
+            let err = outcome.err().unwrap();
             assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
             let detail = err.detail.unwrap();
             assert_eq!(
@@ -4022,19 +5015,811 @@ mod tests {
         let missing = UpdaterError::TargetNotFound("windows-x86_64".into());
         let raw = missing.to_string();
         let endpoints = vec![url];
-        let (conclusion, asked) = check_with(&endpoints, vec![Err(missing)]).await;
+        let (outcome, asked) = check_channel(
+            Channel::Stable,
+            &endpoints,
+            None,
+            vec![EndpointAnswer::Failed(missing)],
+        )
+        .await;
         assert_eq!(asked, [0]);
-        let err = conclusion.err().unwrap();
+        let err = outcome.err().unwrap();
         assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
         assert_eq!(err.message, raw);
         assert_eq!(
             err.detail,
             Some(json!({
+                "channel": "stable",
                 "endpoints": endpoints,
                 "attempts": [{ "endpoint": endpoints[0], "message": raw }],
             }))
         );
         assert!(source.received_requests().await.unwrap().is_empty());
+    }
+
+    /// 清单头没通过核验就是清单异常：整个通道只有这一个端点时检查失败，attempts 里写明是哪一种不过，不标网络层。
+    #[tokio::test]
+    async fn a_head_failing_the_check_is_a_check_failure() {
+        let endpoints = vec![PRIMARY_ENDPOINT.to_owned()];
+        for (case, answer) in [
+            ("签名里的版本对不上", forged_head("1.1.0", "1.0.0")),
+            ("测试版的版本号", head("1.0.0-beta.4", "0.9.0")),
+            ("预览版的版本号", head("1.0.0-dev.12", "0.9.0")),
+        ] {
+            let (outcome, asked) =
+                check_channel(Channel::Stable, &endpoints, None, vec![answer]).await;
+            assert_eq!(asked, [0], "{case}");
+            let err = outcome.err().unwrap();
+            assert_eq!(err.code, code::UPDATE_CHECK_FAILED, "{case}");
+            assert!(
+                err.message.starts_with("清单头没通过核验："),
+                "{case}：{}",
+                err.message
+            );
+            let detail = err.detail.unwrap();
+            assert_eq!(detail["channel"], json!("stable"), "{case}");
+            assert!(detail.get("network").is_none(), "{case}");
+            assert!(detail.get("status").is_none(), "{case}");
+        }
+    }
+
+    /// 每个端点都给出了验过的清单头、又全都旧于本机记录：更新源还没跟上，报 `update_source_stale`，detail 按端点先后
+    /// 列出各自给的版本与本机记录。有端点没给出清单头（503）、其余旧于记录时说不清是不是整个更新源在回放，归检查失败。
+    #[tokio::test]
+    async fn stale_heads_on_every_endpoint_make_the_source_stale() {
+        let current = "1.0.0-dev.6";
+        let endpoints = vec![DEV_ENDPOINT.to_owned(), dev_endpoint()];
+        let (outcome, asked) = check_channel(
+            Channel::Dev,
+            &endpoints,
+            Some("1.0.0-dev.8"),
+            vec![head("1.0.0-dev.7", current), head("1.0.0-dev.7", current)],
+        )
+        .await;
+        assert_eq!(asked, [0, 1]);
+        let err = outcome.err().unwrap();
+        assert_eq!(err.code, code::UPDATE_SOURCE_STALE);
+        assert_eq!(
+            err.detail,
+            Some(json!({
+                "channel": "dev",
+                "offered": [
+                    { "endpoint": DEV_ENDPOINT, "version": "1.0.0-dev.7" },
+                    { "endpoint": dev_endpoint(), "version": "1.0.0-dev.7" },
+                ],
+                "seen": "1.0.0-dev.8",
+            }))
+        );
+        assert!(err.message.contains("1.0.0-dev.8"), "{}", err.message);
+
+        let (_broken, broken_url) = source_answering(503).await;
+        let endpoints = vec![DEV_ENDPOINT.to_owned(), broken_url.clone()];
+        let (outcome, _) = check_channel(
+            Channel::Dev,
+            &endpoints,
+            Some("1.0.0-dev.8"),
+            vec![head("1.0.0-dev.7", current), EndpointAnswer::Unsuccessful],
+        )
+        .await;
+        let err = outcome.err().unwrap();
+        assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
+        let detail = err.detail.unwrap();
+        assert_eq!(detail["channel"], json!("dev"));
+        assert_eq!(
+            detail["attempts"][0]["message"],
+            json!("清单给出的 1.0.0-dev.7 旧于这台电脑见过的 1.0.0-dev.8")
+        );
+        assert_eq!(detail["attempts"][1]["status"], json!(503));
+    }
+
+    // 检查流程的端到端用例：真的门面（配置落在临时目录）、单测的假更新的槽位、按地址给答案的端点。检查器与插件要
+    // AppHandle，换成按地址交出配好答案的 `ask`；回了非 2xx 的端点要再问状态码，配成本地服务的地址，其余地址只用来
+    // 对答案，不会真去连。流程与 `check_update` 相同：取号、读计划、问清单、落结论、落槽位。
+
+    const HK_DEV: &str = "https://hk.invalid/updates/dev/latest.json";
+    const GITHUB_DEV: &str = "https://github.invalid/dev-build/latest.json";
+    const HK_BETA: &str = "https://hk.invalid/updates/beta/latest.json";
+    const HK_STABLE: &str = "https://hk.invalid/updates/stable/latest.json";
+
+    /// 检查流程的夹具。
+    struct Flow {
+        _dir: tempfile::TempDir,
+        config_path: std::path::PathBuf,
+        facade: Facade,
+        slot: Mutex<UpdateSlot<Fake>>,
+        current: Version,
+        endpoints: HashMap<Channel, Vec<String>>,
+    }
+
+    /// 一次检查交回的候选（版本，通道）。
+    type Found = Option<(&'static str, Channel)>;
+
+    impl Flow {
+        /// 正在运行 `current`，配置里的 `update_channel` 与 `seen_update_versions` 是这两个原样的值。
+        fn new(current: &str, update_channel: Option<Value>, seen: Option<Value>) -> Self {
+            use petalfall_core::{Petalfall, PetalfallConfig};
+
+            let dir = tempfile::tempdir().unwrap();
+            let config_path = dir.path().join("config.json");
+            let config = PetalfallConfig {
+                update_channel,
+                seen_update_versions: seen,
+                ..PetalfallConfig::default()
+            };
+            let facade = Facade::new(
+                Petalfall::open(config, dir.path().to_path_buf(), config_path.clone()).unwrap(),
+            );
+            let endpoints = HashMap::from([
+                (Channel::Dev, vec![HK_DEV.to_owned(), GITHUB_DEV.to_owned()]),
+                (Channel::Beta, vec![HK_BETA.to_owned()]),
+                (Channel::Stable, vec![HK_STABLE.to_owned()]),
+            ]);
+            Flow {
+                _dir: dir,
+                config_path,
+                facade,
+                slot: Mutex::default(),
+                current: version(current),
+                endpoints,
+            }
+        }
+
+        /// 通道 `channel` 的端点换成 `endpoints`。
+        fn with_endpoints(mut self, channel: Channel, endpoints: &[&str]) -> Self {
+            self.endpoints.insert(
+                channel,
+                endpoints
+                    .iter()
+                    .map(|endpoint| (*endpoint).to_owned())
+                    .collect(),
+            );
+            self
+        }
+
+        /// 配置写不进去：配置文件的位置被同名文件夹占着，原子写入最后一步的改名必然失败。
+        fn block_config_writes(&self) {
+            std::fs::create_dir_all(&self.config_path).unwrap();
+        }
+
+        /// 落盘的配置；一次都没写过时为 `None`。
+        fn saved(&self) -> Option<Value> {
+            match std::fs::read_to_string(&self.config_path) {
+                Ok(text) => Some(serde_json::from_str(&text).unwrap()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err) => panic!("读不了落盘的配置：{err}"),
+            }
+        }
+
+        fn ticket(&self) -> Generation {
+            lock_slot(&self.slot).generation()
+        }
+
+        async fn plan(&self) -> CheckPlan {
+            read_check_plan(&self.facade, &self.current, test_key)
+                .await
+                .expect("用例里的版本都认得出通道")
+        }
+
+        /// 按 `plan` 问一遍清单，`answers` 按端点地址给答案；交回各通道的结果，与问过的端点（按先后）。
+        async fn fetch(
+            &self,
+            plan: &CheckPlan,
+            answers: Vec<(&str, EndpointAnswer<Fake>)>,
+        ) -> (Vec<ChannelFetch<Fake>>, Vec<String>) {
+            let mut groups =
+                endpoint_groups(plan.preference, |channel| self.endpoints[&channel].clone());
+            for group in &mut groups {
+                group.pubkey = test_key(group.channel);
+            }
+            let answers = std::cell::RefCell::new(
+                answers
+                    .into_iter()
+                    .map(|(endpoint, answer)| (endpoint.to_owned(), answer))
+                    .collect::<HashMap<_, _>>(),
+            );
+            let asked = std::cell::RefCell::new(Vec::new());
+            let fetched = fetch_channels(&groups, plan, |_, endpoint: &str| {
+                asked.borrow_mut().push(endpoint.to_owned());
+                let answer = answers
+                    .borrow_mut()
+                    .remove(endpoint)
+                    .unwrap_or_else(|| panic!("{endpoint} 没配答案，或问了两次"));
+                std::future::ready(answer)
+            })
+            .await
+            .expect("建再问状态码用的客户端失败");
+            (fetched, asked.into_inner())
+        }
+
+        /// 落成结论并照 `check_update` 落进槽位。
+        async fn settle(
+            &self,
+            plan: &CheckPlan,
+            ticket: Generation,
+            fetched: Vec<ChannelFetch<Fake>>,
+        ) -> Result<Found, CommandError> {
+            let (heads, conclusion) =
+                conclude_fetched(&self.facade, &self.slot, plan, ticket, fetched).await?;
+            let found = lock_slot(&self.slot)
+                .settle_check(ticket, heads, conclusion)?
+                .map(|candidate| (candidate.update.0, candidate.channel));
+            Ok(found)
+        }
+
+        /// 照 `check_update` 跑一次检查，交回结果与问过的端点。
+        async fn check(
+            &self,
+            answers: Vec<(&str, EndpointAnswer<Fake>)>,
+        ) -> (Result<Found, CommandError>, Vec<String>) {
+            let ticket = self.ticket();
+            let plan = self.plan().await;
+            let (fetched, asked) = self.fetch(&plan, answers).await;
+            (self.settle(&plan, ticket, fetched).await, asked)
+        }
+
+        fn heads(&self) -> Vec<ChannelHeadDto> {
+            lock_slot(&self.slot).channel_heads().to_vec()
+        }
+
+        fn refused(&self) -> Vec<RefusedUpdateDto> {
+            lock_slot(&self.slot).refused().to_vec()
+        }
+
+        /// 本次会话已知的候选（版本，通道）。
+        fn available(&self) -> Found {
+            lock_slot(&self.slot)
+                .available
+                .as_ref()
+                .map(|candidate| (candidate.update.0, candidate.channel))
+        }
+
+        /// 像选通道的命令那样把偏好写进配置并落盘，不碰槽位。
+        async fn write_preference(&self, channel: Channel) {
+            let changed = self
+                .facade
+                .update_if_changed(|petalfall| petalfall.set_update_channel_preference(channel))
+                .await
+                .unwrap();
+            assert!(changed, "偏好本来就是 {}", channel.as_str());
+        }
+
+        /// 先在槽位里记下一个候选，好看检查失败或还没有发布时它动没动。
+        fn remember(&self, version: &'static str, channel: Channel) {
+            let mut slot = lock_slot(&self.slot);
+            let ticket = slot.generation();
+            slot.settle_check(
+                ticket,
+                Vec::new(),
+                CheckConclusion::Found(Candidate {
+                    update: Fake(version),
+                    channel,
+                }),
+            )
+            .unwrap();
+        }
+    }
+
+    /// 见过的版本里的一项：`text` 那一版连同测试钥签的签名串，与写入一方的形状相同。
+    fn seen_entry(text: &str) -> Value {
+        json!({ "version": text, "signature": signature_of(text) })
+    }
+
+    /// 槽位里一个通道的结果；有版本时发布时间就是夹具里的 [`HEAD_DATE`]。
+    fn head_dto(
+        channel: Channel,
+        state: ChannelHeadState,
+        version: Option<&str>,
+    ) -> ChannelHeadDto {
+        ChannelHeadDto {
+            channel,
+            state,
+            version: version.map(str::to_owned),
+            date: version.map(|_| HEAD_DATE),
+        }
+    }
+
+    fn sorted(mut endpoints: Vec<String>) -> Vec<String> {
+        endpoints.sort();
+        endpoints
+    }
+
+    /// 偏好决定问哪几个通道：偏好通道与比它慢的都问，比它快的一个都不问。偏好缺省时按本包的通道；测试版的包选了
+    /// 正式版只问正式版；预览版的包选了测试版，预览版的两个端点都不问。
+    #[tokio::test]
+    async fn a_check_asks_the_preferred_channel_and_the_slower_ones_only() {
+        let (_stable, stable_url) = source_answering(404).await;
+        let stable = stable_url.as_str();
+
+        let flow = Flow::new("1.0.0-beta.4", None, None).with_endpoints(Channel::Stable, &[stable]);
+        let (found, asked) = flow
+            .check(vec![
+                (HK_BETA, head("1.0.0-beta.4", "1.0.0-beta.4")),
+                (stable, EndpointAnswer::Unsuccessful),
+            ])
+            .await;
+        assert_eq!(
+            found.unwrap(),
+            None,
+            "测试版有清单、没有更新的版本：已是最新"
+        );
+        assert_eq!(
+            sorted(asked),
+            sorted(vec![HK_BETA.to_owned(), stable_url.clone()])
+        );
+        assert_eq!(
+            flow.heads(),
+            [
+                head_dto(
+                    Channel::Beta,
+                    ChannelHeadState::Published,
+                    Some("1.0.0-beta.4")
+                ),
+                head_dto(Channel::Stable, ChannelHeadState::NotPublished, None),
+            ]
+        );
+
+        let flow = Flow::new("1.0.0-beta.4", Some(json!("stable")), None)
+            .with_endpoints(Channel::Stable, &[stable]);
+        let (found, asked) = flow
+            .check(vec![(stable, EndpointAnswer::Unsuccessful)])
+            .await;
+        assert_eq!(found.unwrap(), None);
+        assert_eq!(asked, [stable]);
+        assert_eq!(
+            flow.heads(),
+            [head_dto(
+                Channel::Stable,
+                ChannelHeadState::NotPublished,
+                None
+            )]
+        );
+
+        // 等它追上来：测试版的核心号更高，不受跟随规则约束，是候选。
+        let flow = Flow::new("1.0.0-dev.6", Some(json!("beta")), None)
+            .with_endpoints(Channel::Stable, &[stable]);
+        let (found, asked) = flow
+            .check(vec![
+                (HK_BETA, head("1.1.0-beta.1", "1.0.0-dev.6")),
+                (stable, EndpointAnswer::Unsuccessful),
+            ])
+            .await;
+        assert_eq!(found.unwrap(), Some(("1.1.0-beta.1", Channel::Beta)));
+        assert_eq!(
+            sorted(asked),
+            sorted(vec![HK_BETA.to_owned(), stable_url.clone()])
+        );
+    }
+
+    /// 香港机的预览版清单旧于本机记录（回放的旧清单）：接着问 GitHub，拿它验过的清单头挑候选，并把它记进见过的版本。
+    /// 本通道的候选不必写偏好。
+    #[tokio::test]
+    async fn a_stale_hk_dev_manifest_hands_over_to_github() {
+        let (_beta, beta_url) = source_answering(404).await;
+        let (_stable, stable_url) = source_answering(404).await;
+        let current = "1.0.0-dev.6";
+        let flow = Flow::new(
+            current,
+            None,
+            Some(json!({ "dev": seen_entry("1.0.0-dev.8") })),
+        )
+        .with_endpoints(Channel::Beta, &[beta_url.as_str()])
+        .with_endpoints(Channel::Stable, &[stable_url.as_str()]);
+        let (found, asked) = flow
+            .check(vec![
+                (HK_DEV, head("1.0.0-dev.7", current)),
+                (GITHUB_DEV, head("1.0.0-dev.12", current)),
+                (beta_url.as_str(), EndpointAnswer::Unsuccessful),
+                (stable_url.as_str(), EndpointAnswer::Unsuccessful),
+            ])
+            .await;
+        assert_eq!(found.unwrap(), Some(("1.0.0-dev.12", Channel::Dev)));
+        let dev_asked: Vec<&String> = asked
+            .iter()
+            .filter(|endpoint| [HK_DEV, GITHUB_DEV].contains(&endpoint.as_str()))
+            .collect();
+        assert_eq!(dev_asked, [HK_DEV, GITHUB_DEV]);
+        assert_eq!(
+            flow.heads(),
+            [
+                head_dto(
+                    Channel::Dev,
+                    ChannelHeadState::Published,
+                    Some("1.0.0-dev.12")
+                ),
+                head_dto(Channel::Beta, ChannelHeadState::NotPublished, None),
+                head_dto(Channel::Stable, ChannelHeadState::NotPublished, None),
+            ]
+        );
+        let saved = flow.saved().expect("见过的版本要落盘");
+        assert_eq!(
+            saved["seen_update_versions"],
+            json!({ "dev": seen_entry("1.0.0-dev.12") })
+        );
+        assert_eq!(saved["update_channel"], Value::Null);
+    }
+
+    /// 偏好通道两处都旧于本机记录：整次失败，报 `update_source_stale`，不看更慢的通道。测试版那一版本来是候选，
+    /// 也不拿它顶上；本次会话先前记着的候选不动，各通道的结果照记，测试版验过的清单头照样记进见过的版本。
+    /// 一处旧于记录、一处 503 时说不清是不是整个更新源在回放，报检查失败，同样不看更慢的通道。
+    #[tokio::test]
+    async fn a_preferred_channel_stale_everywhere_fails_without_the_slower_ones() {
+        let (_stable, stable_url) = source_answering(404).await;
+        let current = "1.0.0-dev.6";
+        let seen = || Some(json!({ "dev": seen_entry("1.0.0-dev.8") }));
+        let flow = Flow::new(current, None, seen())
+            .with_endpoints(Channel::Stable, &[stable_url.as_str()]);
+        flow.remember("1.0.0-dev.8", Channel::Dev);
+        let (outcome, _) = flow
+            .check(vec![
+                (HK_DEV, head("1.0.0-dev.7", current)),
+                (GITHUB_DEV, head("1.0.0-dev.7", current)),
+                (HK_BETA, head("1.1.0-beta.1", current)),
+                (stable_url.as_str(), EndpointAnswer::Unsuccessful),
+            ])
+            .await;
+        let Err(err) = outcome else {
+            panic!("偏好通道两处都旧于记录，整次检查失败");
+        };
+        assert_eq!(err.code, code::UPDATE_SOURCE_STALE);
+        assert_eq!(
+            err.detail,
+            Some(json!({
+                "channel": "dev",
+                "offered": [
+                    { "endpoint": HK_DEV, "version": "1.0.0-dev.7" },
+                    { "endpoint": GITHUB_DEV, "version": "1.0.0-dev.7" },
+                ],
+                "seen": "1.0.0-dev.8",
+            }))
+        );
+        assert_eq!(flow.available(), Some(("1.0.0-dev.8", Channel::Dev)));
+        assert_eq!(
+            flow.heads(),
+            [
+                head_dto(Channel::Dev, ChannelHeadState::Stale, Some("1.0.0-dev.7")),
+                head_dto(
+                    Channel::Beta,
+                    ChannelHeadState::Published,
+                    Some("1.1.0-beta.1")
+                ),
+                head_dto(Channel::Stable, ChannelHeadState::NotPublished, None),
+            ]
+        );
+        assert_eq!(
+            flow.saved().expect("测试版验过的清单头要落盘")["seen_update_versions"],
+            json!({
+                "dev": seen_entry("1.0.0-dev.8"),
+                "beta": seen_entry("1.1.0-beta.1"),
+            })
+        );
+
+        let (_broken, broken_url) = source_answering(503).await;
+        let flow = Flow::new(current, None, seen())
+            .with_endpoints(Channel::Dev, &[HK_DEV, broken_url.as_str()])
+            .with_endpoints(Channel::Stable, &[stable_url.as_str()]);
+        let (outcome, _) = flow
+            .check(vec![
+                (HK_DEV, head("1.0.0-dev.7", current)),
+                (broken_url.as_str(), EndpointAnswer::Unsuccessful),
+                (HK_BETA, head("1.1.0-beta.1", current)),
+                (stable_url.as_str(), EndpointAnswer::Unsuccessful),
+            ])
+            .await;
+        let Err(err) = outcome else {
+            panic!("一处旧于记录、一处 503，同样整次失败");
+        };
+        assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
+        assert_eq!(err.detail.unwrap()["channel"], json!("dev"));
+        assert_eq!(flow.available(), None);
+        assert_eq!(
+            flow.heads()[0],
+            head_dto(Channel::Dev, ChannelHeadState::Failed, Some("1.0.0-dev.7"))
+        );
+    }
+
+    /// 正式版的清单回 404 是还没有发布，不算失败：偏好正式版时结论是还没有发布，本次会话先前记着的候选照旧；偏好测试版
+    /// 时正式版只是没有候选，测试版有清单就是已是最新。
+    #[tokio::test]
+    async fn stable_404_means_not_published_rather_than_a_failure() {
+        let (_stable, stable_url) = source_answering(404).await;
+        let flow = Flow::new("1.0.0-beta.4", Some(json!("stable")), None)
+            .with_endpoints(Channel::Stable, &[stable_url.as_str()]);
+        flow.remember("1.0.0", Channel::Stable);
+        let (found, _) = flow
+            .check(vec![(stable_url.as_str(), EndpointAnswer::Unsuccessful)])
+            .await;
+        assert_eq!(found.unwrap(), Some(("1.0.0", Channel::Stable)));
+        assert_eq!(
+            flow.heads(),
+            [head_dto(
+                Channel::Stable,
+                ChannelHeadState::NotPublished,
+                None
+            )]
+        );
+
+        let flow = Flow::new("1.0.0-beta.4", None, None)
+            .with_endpoints(Channel::Stable, &[stable_url.as_str()]);
+        let (found, _) = flow
+            .check(vec![
+                (HK_BETA, head("1.0.0-beta.4", "1.0.0-beta.4")),
+                (stable_url.as_str(), EndpointAnswer::Unsuccessful),
+            ])
+            .await;
+        assert_eq!(found.unwrap(), None);
+    }
+
+    /// 清单头没通过核验的端点被跳过：香港机给了一个更高、签名却对不上的版本，候选取 GitHub 验过的那一版，见过的版本
+    /// 记的也是它，伪造的版本记不进来。更慢通道的清单头核验不过只算那个通道失败，检查照常，也不记它。
+    #[tokio::test]
+    async fn heads_failing_the_check_are_skipped_and_never_seen() {
+        let (_beta, beta_url) = source_answering(404).await;
+        let (_stable, stable_url) = source_answering(404).await;
+        let current = "1.0.0-dev.6";
+        let flow = Flow::new(current, None, None)
+            .with_endpoints(Channel::Beta, &[beta_url.as_str()])
+            .with_endpoints(Channel::Stable, &[stable_url.as_str()]);
+        let (found, asked) = flow
+            .check(vec![
+                (HK_DEV, forged_head("1.0.0-dev.99", "1.0.0-dev.12")),
+                (GITHUB_DEV, head("1.0.0-dev.12", current)),
+                (beta_url.as_str(), EndpointAnswer::Unsuccessful),
+                (stable_url.as_str(), EndpointAnswer::Unsuccessful),
+            ])
+            .await;
+        assert_eq!(found.unwrap(), Some(("1.0.0-dev.12", Channel::Dev)));
+        assert!(asked.contains(&GITHUB_DEV.to_owned()));
+        assert_eq!(
+            flow.heads()[0],
+            head_dto(
+                Channel::Dev,
+                ChannelHeadState::Published,
+                Some("1.0.0-dev.12")
+            )
+        );
+        assert_eq!(
+            flow.saved().unwrap()["seen_update_versions"],
+            json!({ "dev": seen_entry("1.0.0-dev.12") })
+        );
+
+        let flow =
+            Flow::new(current, None, None).with_endpoints(Channel::Stable, &[stable_url.as_str()]);
+        let (found, _) = flow
+            .check(vec![
+                (HK_DEV, head("1.0.0-dev.12", current)),
+                (HK_BETA, head("1.0.0-dev.8", current)),
+                (stable_url.as_str(), EndpointAnswer::Unsuccessful),
+            ])
+            .await;
+        assert_eq!(found.unwrap(), Some(("1.0.0-dev.12", Channel::Dev)));
+        assert_eq!(
+            flow.heads()[1],
+            head_dto(Channel::Beta, ChannelHeadState::Failed, None)
+        );
+        assert_eq!(
+            flow.saved().unwrap()["seen_update_versions"],
+            json!({ "dev": seen_entry("1.0.0-dev.12") })
+        );
+    }
+
+    /// 测试版用户跟随同号正式版：挑中别的通道的候选、偏好又是缺省，同一次检查先把偏好写成本包的通道，与见过的版本
+    /// 一起落盘。不写的话装上正式版之后包的通道变了，他会悄悄成为正式版用户。偏好已经显式选过时不必再写。
+    #[tokio::test]
+    async fn following_a_slower_channel_saves_the_package_channel_first() {
+        let current = "1.0.0-beta.4";
+        let answers = || {
+            vec![
+                (HK_BETA, head("1.0.0-beta.4", current)),
+                (HK_STABLE, head("1.0.0", current)),
+            ]
+        };
+        let flow = Flow::new(current, None, None);
+        let (found, _) = flow.check(answers()).await;
+        assert_eq!(found.unwrap(), Some(("1.0.0", Channel::Stable)));
+        let saved = flow.saved().expect("偏好与见过的版本要落盘");
+        assert_eq!(saved["update_channel"], json!("beta"));
+        assert_eq!(
+            saved["seen_update_versions"],
+            json!({ "beta": seen_entry("1.0.0-beta.4"), "stable": seen_entry("1.0.0") })
+        );
+        assert!(flow.refused().is_empty());
+
+        let flow = Flow::new(current, Some(json!("beta")), None);
+        let (found, _) = flow.check(answers()).await;
+        assert_eq!(found.unwrap(), Some(("1.0.0", Channel::Stable)));
+        assert_eq!(flow.saved().unwrap()["update_channel"], json!("beta"));
+    }
+
+    /// 检查期间用户选了通道：写偏好时在锁里再看一次，已经选过就不按这次检查写，留着用户选的。用户的命令已经清过
+    /// 槽位、号变了时，这次的结果不落槽位，报 `update_superseded`，验过的清单头照样记进见过的版本。
+    #[tokio::test]
+    async fn a_preference_chosen_during_the_check_is_not_overwritten() {
+        let current = "1.0.0-beta.4";
+        let answers = || {
+            vec![
+                (HK_BETA, head("1.0.0-beta.4", current)),
+                (HK_STABLE, head("1.0.0", current)),
+            ]
+        };
+        // 选通道的命令先写配置、后清槽位：夹在两步之间时号还没变，这次照旧落下，随后被清掉。
+        let flow = Flow::new(current, None, None);
+        let ticket = flow.ticket();
+        let plan = flow.plan().await;
+        let (fetched, _) = flow.fetch(&plan, answers()).await;
+        flow.write_preference(Channel::Stable).await;
+        let found = flow.settle(&plan, ticket, fetched).await.unwrap();
+        assert_eq!(found, Some(("1.0.0", Channel::Stable)));
+        assert_eq!(flow.saved().unwrap()["update_channel"], json!("stable"));
+
+        let flow = Flow::new(current, None, None);
+        let ticket = flow.ticket();
+        let plan = flow.plan().await;
+        let (fetched, _) = flow.fetch(&plan, answers()).await;
+        flow.write_preference(Channel::Stable).await;
+        lock_slot(&flow.slot).reset_for_new_preference();
+        let err = flow.settle(&plan, ticket, fetched).await.err().unwrap();
+        assert_eq!(err.code, code::UPDATE_SUPERSEDED);
+        let saved = flow.saved().unwrap();
+        assert_eq!(saved["update_channel"], json!("stable"));
+        assert_eq!(
+            saved["seen_update_versions"],
+            json!({ "beta": seen_entry("1.0.0-beta.4"), "stable": seen_entry("1.0.0") })
+        );
+        assert_eq!(flow.available(), None);
+        assert!(flow.heads().is_empty());
+    }
+
+    /// 偏好写不进配置：跨通道的候选记入被拒的版本（`preference_unsaved`，意图为普通更新），同一会话不再是候选；本通道
+    /// 的候选照常。见过的版本同样写不进去，只记 error，检查照样给出结论。
+    #[tokio::test]
+    async fn an_unsaved_preference_refuses_only_cross_channel_candidates() {
+        let current = "1.0.0-beta.4";
+        let flow = Flow::new(current, None, None);
+        flow.block_config_writes();
+        let answers = || {
+            vec![
+                (HK_BETA, head("1.0.0-beta.4", current)),
+                (HK_STABLE, head("1.0.0", current)),
+            ]
+        };
+        let unsaved = |version: &str, channel| RefusedUpdateDto {
+            version: version.to_owned(),
+            channel,
+            reason: RefusalReason::PreferenceUnsaved,
+            intent: UpdateIntent::Update,
+        };
+        let (found, _) = flow.check(answers()).await;
+        assert_eq!(
+            found.unwrap(),
+            None,
+            "跨通道的候选被拒，测试版自己没有更新的"
+        );
+        assert_eq!(flow.refused(), [unsaved("1.0.0", Channel::Stable)]);
+        let (found, _) = flow.check(answers()).await;
+        assert_eq!(found.unwrap(), None);
+        assert_eq!(flow.refused(), [unsaved("1.0.0", Channel::Stable)]);
+
+        // 测试版那一版核心号更高、本该胜出；写不进偏好就拒掉它，挑本通道的。
+        let (_stable, stable_url) = source_answering(404).await;
+        let current = "1.0.0-dev.6";
+        let flow =
+            Flow::new(current, None, None).with_endpoints(Channel::Stable, &[stable_url.as_str()]);
+        flow.block_config_writes();
+        let (found, _) = flow
+            .check(vec![
+                (HK_DEV, head("1.0.0-dev.12", current)),
+                (HK_BETA, head("1.1.0-beta.1", current)),
+                (stable_url.as_str(), EndpointAnswer::Unsuccessful),
+            ])
+            .await;
+        assert_eq!(found.unwrap(), Some(("1.0.0-dev.12", Channel::Dev)));
+        assert_eq!(flow.refused(), [unsaved("1.1.0-beta.1", Channel::Beta)]);
+    }
+
+    /// 读见过的版本时逐项重验：被改高的那一项（签名对不上版本）只废它自己，当这个通道没有记录，下次取到清单时覆盖；
+    /// 别的通道照用，不认识的通道键原样带着写回。整张表不是对象时整张作废，下次记录时换成新对象。
+    #[tokio::test]
+    async fn a_tampered_seen_entry_only_voids_itself() {
+        let (_stable, stable_url) = source_answering(404).await;
+        let current = "1.0.0-dev.6";
+        let seen = json!({
+            "dev": { "version": "1.0.0-dev.99", "signature": signature_of("1.0.0-dev.12") },
+            "beta": seen_entry("1.0.0-beta.4"),
+            "nightly": { "version": "2.0.0-nightly.1" },
+        });
+        let flow = Flow::new(current, None, Some(seen))
+            .with_endpoints(Channel::Stable, &[stable_url.as_str()]);
+        let (found, _) = flow
+            .check(vec![
+                (HK_DEV, head("1.0.0-dev.7", current)),
+                (HK_BETA, head("1.0.0-beta.4", current)),
+                (stable_url.as_str(), EndpointAnswer::Unsuccessful),
+            ])
+            .await;
+        assert_eq!(
+            found.unwrap(),
+            Some(("1.0.0-dev.7", Channel::Dev)),
+            "改高的记录作废，挡不住 dev.7"
+        );
+        assert_eq!(
+            flow.saved().unwrap()["seen_update_versions"],
+            json!({
+                "dev": seen_entry("1.0.0-dev.7"),
+                "beta": seen_entry("1.0.0-beta.4"),
+                "nightly": { "version": "2.0.0-nightly.1" },
+            })
+        );
+
+        let flow = Flow::new(current, None, Some(json!("broken")))
+            .with_endpoints(Channel::Stable, &[stable_url.as_str()]);
+        let (found, _) = flow
+            .check(vec![
+                (HK_DEV, head("1.0.0-dev.12", current)),
+                (HK_BETA, head("1.0.0-beta.4", current)),
+                (stable_url.as_str(), EndpointAnswer::Unsuccessful),
+            ])
+            .await;
+        assert_eq!(found.unwrap(), Some(("1.0.0-dev.12", Channel::Dev)));
+        assert_eq!(
+            flow.saved().unwrap()["seen_update_versions"],
+            json!({
+                "dev": seen_entry("1.0.0-dev.12"),
+                "beta": seen_entry("1.0.0-beta.4"),
+            })
+        );
+    }
+
+    /// 几个通道同时问：每个端点都要 5 秒才答，三个通道问完也只花 5 秒，不是相加的 15 秒。
+    #[tokio::test(start_paused = true)]
+    async fn channels_are_asked_at_the_same_time() {
+        let current = "1.0.0-dev.6";
+        let plan = CheckPlan::new(
+            version(current),
+            None,
+            &SeenUpdateEntries::default(),
+            test_key,
+        )
+        .expect("预览版认得出通道");
+        let mut groups = endpoint_groups(plan.preference, |channel| match channel {
+            Channel::Dev => vec![HK_DEV.to_owned()],
+            Channel::Beta => vec![HK_BETA.to_owned()],
+            Channel::Stable => vec![HK_STABLE.to_owned()],
+        });
+        for group in &mut groups {
+            group.pubkey = test_key(group.channel);
+        }
+        let started = tokio::time::Instant::now();
+        let fetched = fetch_channels(&groups, &plan, |channel, _| async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            match channel {
+                Channel::Dev => head("1.0.0-dev.12", current),
+                Channel::Beta => head("1.0.0-beta.4", current),
+                Channel::Stable => head("1.0.0", current),
+            }
+        })
+        .await
+        .expect("没有要再问状态码的端点");
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(5),
+            "三个通道该同时问"
+        );
+        let outcomes: Vec<(Channel, ChannelOutcome)> = fetched
+            .iter()
+            .map(|fetch| (fetch.channel, fetch.outcome.clone()))
+            .collect();
+        let published = |text: &str| ChannelOutcome::Published {
+            endpoint: 0,
+            version: version(text),
+        };
+        assert_eq!(
+            outcomes,
+            [
+                (Channel::Dev, published("1.0.0-dev.12")),
+                (Channel::Beta, published("1.0.0-beta.4")),
+                (Channel::Stable, published("1.0.0")),
+            ]
+        );
     }
 
     /// 更新域名 TLS 不通时的样子：TCP 连得上，握手时被对端掐断。要算 connect，前端才认得出这是连不上。
