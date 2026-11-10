@@ -37,6 +37,7 @@ Rust：
 
 - 目录之间的依赖方向见 architecture 的「目录与依赖方向」，由 `pnpm lint:tokens` 检查。启动器前端只在 `app/src/ipc/bridge.ts` 引入 `@tauri-apps/api/core` 和 `@tauri-apps/api/event`，`@tauri-apps/api/window` 只在 `shell/` 和 `main.tsx` 引入，`pages/` 与 `flows/` 不引入任何 `@tauri-apps/*`；引导程序界面只经 `app/src/setup/bridge.ts` 调用 Tauri。
 - 颜色、间距和动效参数用设计令牌，不写字面值。产品名引用 `app/src/lib/app-info.ts` 里的 `APP_NAME` 等常量，Rust 侧用 `petalfall-base` 的 `brand` 模块；crate 名、Rust 类型名、事件前缀 `petalfall://`、协议名 `petalfall-tex` 和环境变量名 `PETALFALL_*` 照写字面量，见 architecture 的「品牌常量」。
+- 动效与布局稳定照 architecture 的「动效与布局稳定」：数据晚到不能让界面跳。位置能预留就预留（同尺寸骨架、定宽文案槽），预留不了的用现成的共用件接住，不要在页面里重造：兄弟让位用 `app/src/lib/reflow.ts` 的 `useReflow`，加载态用 `app/src/ui/Loadable.tsx`，条件出现的块用 `app/src/ui/Appear.tsx`，会换的文案用 `app/src/ui/LabelSlot.tsx`。动画只动 `transform` 与 `opacity`；带位移或缩放的进出场要读 `useReducedMotionConfig()`，减少动画时换成 `app/src/lib/motion.ts` 里只动透明度的那一份。退场中的节点带 `inert` 仍在 DOM 里，查找时写 `:not([inert])`。
 - `pnpm lint:tokens` 报错时修掉原因，不要为了过检查加豁免。豁免只用在规则确实不适用的地方：在违规行或它的上一行写 `sk-guard-allow T<编号>: <理由>`，多条规则用逗号分隔，理由必填。
 - 新增后端命令要在 `app/src/ipc/mock` 里补上同名的模拟实现：`app/src/ipc/bridge.test.ts` 要求模拟后端与 `generate_handler!` 注册的命令一一对应。
 - 前端新调用 `@tauri-apps/api` 的接口或插件命令（例如 `@tauri-apps/plugin-dialog` 的函数，或经 `bridge.ts` 调用的 `plugin:<插件>|<命令>`）时，要在 `app/src-tauri/capabilities/default.json` 逐条加 allow 权限，不用 `core:default` 这类默认集，并同步 `app/src-tauri/src/window.rs` 能力测试里的期望清单；经 `bridge.ts` 新增插件命令时，`bridge.test.ts` 里的插件命令清单和模拟后端也要一起改。
@@ -47,7 +48,7 @@ Rust：
 - 改了核心逻辑就同步改测试。断言具体结果，例如错误码、文件内容、状态变化和事件；不要写怎样都会过的断言。
 - 涉及网络的 Rust 测试用 wiremock 在本地模拟端点，不访问真实服务。前端测试走 `app/src/ipc/mock` 的模拟后端。
 - 测试写文件一律落在临时目录，不写仓库，也不写真实的数据目录与游戏目录；读仓库里的源码、配置和夹具不受此限。
-- 渲染整页、流程弹窗或外壳的前端测试文件，首行写 `// @vitest-environment jsdom`，下一行写 `// @module-tag heavy-page`。等 framer-motion 的动画用 `app/src/test/dom.ts` 的 `waitForFrames(断言)`，它反复等真实帧直到断言通过；不要睡固定时长，也不要在假定时器下调用它。细则见 architecture 的「测试与守卫」。
+- 渲染整页、流程弹窗或外壳的前端测试文件，首行写 `// @vitest-environment jsdom`，下一行写 `// @module-tag heavy-page`。等 framer-motion 的动画用 `app/src/test/dom.ts` 的 `waitForFrames(断言)`，它反复等真实帧直到断言通过；不要睡固定时长，也不要在假定时器下调用它。假定时器下逐帧走用 `stepFrames`，用例收尾按「先卸载，再 `drainFrames()`，再换回真实计时器」的顺序；断言退场播完的用例单独成文件、全程真实计时器。细则见 architecture 的「测试与守卫」。
 
 ## 改完要跑的检查
 

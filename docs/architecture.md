@@ -699,6 +699,50 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 - 菜单：写明原因（`disabledReason`）的禁用项键盘也能高亮到，高亮时提示气泡写出原因并经 `aria-describedby` 关联，Enter / Space 不执行；没写原因的禁用项照旧跳过。
 - 错误只在最外层统一处理：动作的失败由 `shell/useRunner.ts` 转成通知，渲染错误由外壳和各页面的错误边界接住。
 
+### 动效与布局稳定
+
+界面的原则是数据到达不引起布局位移：位置能预留就预留，预留不了的由让位或形变接住，不出现一帧跳过去的变化。动画只动 `transform` 与 `opacity`，不过渡、不逐帧改 `width`、`height`、`margin`、`padding`、`box-shadow`、`filter`。
+
+**参数只有一份。** 弹簧、补间与成组的进出场参数都在 `lib/motion.ts`，时长与曲线的令牌在 `styles/tokens.css`；`pages/`、`flows/`、`ui/`、`shell/`、`launch/`、`setup/` 里不写字面的时长、弹簧与曲线（守卫 T8）。成组的预设直接展开到 `motion` 元素上：
+
+| 预设 | 用途 |
+| --- | --- |
+| `pageItem` | 页面一级区块的错开入场（由 `ui/Page` 分配序号，不直接用） |
+| `tabPanel` | 标签面板与分区面板的新内容，从导航的那一侧进来 |
+| `stepPane` / `stepPaneFade` | 向导换步 |
+| `insertItem` / `insertItemFade` | 流内块的增删 |
+| `popMark`（`dot` / `glyph` / `tag` / `reduced`） | 角标、提醒点、计数、标签这类小标记的出没 |
+| `faceSwap`、`lineSwap` / `lineSwapFade` | 同一格里换一枚小控件、同一行换一句文字 |
+| `shake`、`nudge` | 否定抖动、原位弹一下 |
+
+**减少动画。** 外观偏好里的「减少动画」经根部的 `MotionConfig` 生效，它只会把位移与缩放改成一步到位，带位移或缩放的退场会先跳一下再淡出。所以凡是带位移或缩放的进出场，组件自己读 `useReducedMotionConfig()`，减少动画时换成只动透明度的那一份（上表里带 `Fade`、`reduced` 的，或 `lib/useInsertItem` 按生效值给出的增删参数）。
+
+**共用件**（页面与流程直接用，不在各处再写一份）：
+
+| 共用件 | 解决什么 |
+| --- | --- |
+| `lib/reflow` 的 `useReflow(spring?)` / `observeReflow` | 兄弟让位：容器的直接子项里有一个变高变矮、增删或换序时，其余子项从旧位置沿弹簧滑到新位置。它观察 DOM 尺寸与子节点增删，不依赖哪个组件重渲染，数据在子组件内部晚到也接得住。`ui/Page` 与 `ui/Bento` 已经自带 |
+| `ui/Loadable` | 加载门（`lib/loading-gate`）三种状态的画法：等待期骨架不可见地占位，超过才淡入；内容到达时交叉淡化。可选的 `busyLabel` 在加载期间向读屏播报 |
+| `ui/Appear` | 条件出现的块：出现时淡入并落到位，消失时抽出布局原地淡出 |
+| `ui/LabelSlot` | 会换的文案按最宽的候选定宽，换字不改宽度 |
+| `lib/useMounted` | 区分「挂载时就在」（跟着所在页面入场，自己不播）与「之后才出现」（播入场） |
+| `lib/progress-display`、`ui/SmoothPercent` | 下载类进度的统一节拍：速度文字与累计量按固定间隔刷新，百分数与进度条走同一条平滑，任务完成后先推满、停一拍再退场 |
+| `lib/slide` | 不经 framer-motion 的弹簧位移与一次性进出场，由 Web Animations 在合成线程上播 |
+| `lib/scroll-hold` | 外壳在换标签、换分区之后托住页面高度，新内容较短时滚动不被夹回 |
+
+让位的几条边界：
+
+- 能预留就不要靠让位。让位只接「被挤开的兄弟」，变高的那一块自己是瞬间变高的，新出现的内容要自己淡入。
+- 子项不超过 40 个时被挤动的都滑；超过 40 个时只有起点或终点落在可见范围附近的才滑，每趟至多 40 个，其余直接到位；超过 400 个整趟不读位置。一批变化不该滑时（键入过滤、整批换数据），在同一次渲染里给容器打上 `data-reflow-paused`（`REFLOW_PAUSED_ATTR`），之后任何时刻去掉。
+- 容器的直接子项是 `display: contents` 的包裹层（每个带提示的按钮外面都有一层）时，让位越过它移动里面的元素。
+- 容器宽度或窗口尺寸变化、减少动画时不动。容器自己按内容定宽并整体右对齐、或靠外边距贴底与居中的，不要挂让位；一组元素跟着其中一个伸缩一起平移用 `LayoutGroup` 加 `layout="position"`（标题栏右侧一组是这样做的）。
+
+退场中的节点还在 DOM 里。`Appear` 的包裹层、列表行、`Loadable` 退回加载时的旧内容层在退场期间带 `inert`：按选择器找行、找块的代码与测试写 `:not([inert])`。`AnimatePresence mode="popLayout"` 的直接子项是函数组件时，要把 `ref` 接住并挂到根元素上，否则退场项不会被抽出布局。包住一片子树的 `AnimatePresence` 不要写 `initial={false}`：它会让子树里之后才挂载的元素也永远跳过入场，要跳过首屏的入场就在那个元素自己身上判断（`useMounted`）。
+
+**弹窗与浮层。** `ui/Modal` 与 `ui/Popover` 的外框可以随内容形变，由调用方传 `layoutKey` 打开：只有它变了才量布局、才形变，进度回调、倒计时、逐字输入这类高频重渲染不会触发测量。同一个弹窗开着时换成另一件事，换 `requestKey`，不要换组件的 `key`。
+
+**页面入场。** `ui/Page` 给一级区块分配入场序号并错开入场；`EntranceBoundary` 让一棵子树不参加编号；空的 `Appear` 与空的横幅槽不占序号。等过加载才挂上的内容由 `Loadable` 整层淡入，里面的区块不再各自入场。带导航锚点（`NAV_ANCHOR_ATTR`）的页面在 `replace` 时由外壳把锚点滚回视口并托住页面高度。
+
 ## 磁盘布局
 
 ### 数据目录
@@ -782,7 +826,10 @@ versions/<实例名>/
 - **前端**：`pnpm test`（vitest + jsdom）。测试覆盖 DTO 适配、状态容器、页面与外壳组件、模拟后端，并有一个整应用冒烟测试：紧凑、常规、宽三档窗口宽度各配日樱、夜樱两种外观，逐个页面与主要弹窗渲染一遍，任何组合抛错即失败。
   - 进程数取逻辑处理器的一半（`vitest.config.ts` 的 `maxWorkers`）：一核一进程会和负责模块转换的主进程抢同一批物理核，满载时用例慢到超时。
   - 挂载 `LauncherProvider` 渲染整页、流程弹窗或外壳的测试文件在 `// @vitest-environment jsdom` 的下一行写 `// @module-tag heavy-page`，单例超时放到 30 秒（`HEAVY_PAGE_TEST_TIMEOUT_MS`）；标签名写错时 vitest 直接报错。一次超时的用例不会停下，它余下的异步步骤会落进同一文件的下一个用例，把后面整串带挂。
-  - 等 framer-motion 的动画用 `test/dom.ts` 的 `waitForFrames(assertion)`：按条件等真实帧（3 秒上限），不睡固定时长，在假定时器下调用直接抛错（framer-motion 的帧循环只跑在真实时间上）。
+  - 等 framer-motion 的动画用 `test/dom.ts` 的 `waitForFrames(assertion)`：按条件等真实帧（3 秒上限），不睡固定时长，在假定时器下调用直接抛错。假定时器下要逐帧采样一段动画用 `stepFrames(count)`（假定时器必须连 `setInterval` 一起假掉）。换计时器之前旧计时器上可能还排着一帧，会把同文件后面的用例带歪：用例收尾固定为先卸载，再 `drainFrames()`，再换回真实计时器。
+  - 断言「退场播完、节点移除」的用例放进单独的测试文件、全程真实计时器；其余用例断言挂载那一刻的初始样式与 `inert`、`data-*` 标记。不要先等一轮宏任务再去断言一个 120 ms 就结束的过渡状态：`act` 里的事件是同步提交的，在提交那一刻断言。
+  - jsdom 没有 Web Animations。按钮的图标位在这种环境下换内容时直接到位；要断言换图标的交接过程，在用例里装 `stubSpanAnimations()`（只装在 `span` 上，不能装到 `Element.prototype`：framer-motion 按它决定走不走 Web Animations）。让位在 jsdom 里是空操作，测它要像 `lib/reflow.test.ts` 那样桩上布局与动画。
+  - 外观偏好的 `AppearanceProvider` 自己包着根部的 `MotionConfig`：整页或外壳级的用例要测减少动画，用初始外观打开它，在外面再包一层 `MotionConfig` 会被内层盖掉。
   - jsdom 缺的只有「聚焦着的元素被禁用时焦点落回 body」：元素被移除时 `activeElement` 本来就回到 body，不用补。测焦点留在禁用按钮上的用例用 `test/focus-fixup.ts` 的 `emulateFocusFixup()` 补上禁用这一种，并以原生禁用作对照确认替身生效。
 - **守卫**：`pnpm lint:tokens` 运行 `app/scripts/check-tokens.mjs`，规则 T0 到 T12 依次检查：豁免缺少理由、字面色值、页面写死样式、Tailwind 任意值与数字间距、颜色透明度修饰、视口断点、依赖方向、原版材质、动效参数、Emoji、产品名字面量、富文本注入、令牌覆盖。确有必要豁免时，在违规行或它的上一行写 `sk-guard-allow <规则>: <理由>`，理由必须填写。每条规则在 `app/scripts/guard-fixtures/` 下都有正反例，由 `check-tokens.test.ts` 验证。
 - **品牌一致性**：`petalfall-tauri` 的测试检查 `tauri.conf.json`、`index.html`、`app/src/lib/app-info.ts` 三处的产品名与 `petalfall-base::brand` 是否一致；`identifier` 发布后就成为兼容契约，测试里单独写死。
