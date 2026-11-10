@@ -16,6 +16,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use petalfall_release::data_format::TrustedWrittenBy;
+use petalfall_release::install_policy::DataBlock;
+use petalfall_release::order::Channel;
 use tauri::{Runtime, WebviewWindow};
 use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, FALSE, GetLastError, HANDLE_FLAG_INHERIT, SetHandleInformation, TRUE,
@@ -320,12 +323,52 @@ pub fn is_elevated() -> io::Result<bool> {
     Ok(elevation.TokenIsElevated != 0)
 }
 
+/// 已装的比安装包新时，这个安装包为什么装不上去。更快、更慢两种的说明要写出两边的通道。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Older {
+    /// 同一个通道上更早的包。
+    SameChannel,
+    /// 比已装的通道更快的通道上更早的包。
+    FasterChannel {
+        installed: Channel,
+        payload: Channel,
+    },
+    /// 更慢通道上更早的包，却由不带换通道开关的自动更新拉起。
+    SlowerChannel {
+        installed: Channel,
+        payload: Channel,
+    },
+    /// 任一侧的通道认不出。
+    UnknownChannel,
+}
+
 /// 开窗之前要告诉用户的话。这时没有樱花界面，只有系统消息框。
+///
+/// 后三种是窗口起不来、要直接交给 NSIS 时判定不让装的情形：NSIS 自己不拦装回较早的版本，也不读数据格式记号。
+/// `reopens` 为真时，用户关掉提示后会按原参数重开启动器（更新模式下启动器是为这次安装关掉的）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
     ForeignUser,
     IncompletePackage,
     StartFailed(String),
+    /// 装回较早的版本只走窗口里的那条安装流程，那里有复核、半装记录与事后核验，窗口却起不来。
+    NeedsWindow {
+        reopens: bool,
+    },
+    /// 已装的比这个安装包新，又不是能装回去的那一种。
+    Newer {
+        older: Older,
+        installed: String,
+        payload: String,
+        reopens: bool,
+    },
+    /// 数据被更新的版本用过，或者数据格式记号读不懂。`stamp` 是定下结论的那个记号文件。
+    DataBlocked {
+        block: DataBlock,
+        stamp: String,
+        payload: String,
+        reopens: bool,
+    },
 }
 
 impl Notice {
@@ -337,14 +380,182 @@ impl Notice {
             (Notice::IncompletePackage, false) => "This installer is incomplete, most likely a cut-off download. Download it again and reopen it.".to_owned(),
             (Notice::StartFailed(detail), true) => format!("安装程序没能继续。重新打开试试，反馈问题时带上下面这段原文。\n\n{detail}"),
             (Notice::StartFailed(detail), false) => format!("Setup can't continue. Try opening it again, and include the text below if you report the problem.\n\n{detail}"),
+            (Notice::NeedsWindow { reopens }, true) => reopening("这次安装要用到安装程序的窗口，但这台电脑上的 WebView2 用不了。先装好或修复 WebView2，再运行这个安装包。".to_owned(), *reopens, true),
+            (Notice::NeedsWindow { reopens }, false) => reopening("This install needs the setup window, but WebView2 isn't working on this PC. Install or repair WebView2, then run this installer again.".to_owned(), *reopens, false),
+            (
+                Notice::Newer {
+                    older,
+                    installed,
+                    payload,
+                    reopens,
+                },
+                chinese,
+            ) => reopening(newer_text(*older, installed, payload, chinese), *reopens, chinese),
+            (
+                Notice::DataBlocked {
+                    block,
+                    stamp,
+                    payload,
+                    reopens,
+                },
+                chinese,
+            ) => reopening(blocked_text(block, stamp, payload, chinese), *reopens, chinese),
         }
     }
 
     fn style(&self) -> MESSAGEBOX_STYLE {
         match self {
-            Notice::ForeignUser => MB_OK | MB_ICONWARNING,
+            Notice::ForeignUser
+            | Notice::NeedsWindow { .. }
+            | Notice::Newer { .. }
+            | Notice::DataBlocked { .. } => MB_OK | MB_ICONWARNING,
             Notice::IncompletePackage | Notice::StartFailed(_) => MB_OK | MB_ICONERROR,
         }
+    }
+}
+
+/// 引导程序文案里的通道名，与安装界面那一份相同。
+fn channel_name(channel: Channel, chinese: bool) -> &'static str {
+    match (channel, chinese) {
+        (Channel::Dev, true) => "预览版",
+        (Channel::Beta, true) => "测试版",
+        (Channel::Stable, true) => "正式版",
+        (Channel::Dev, false) => "Preview",
+        (Channel::Beta, false) => "Beta",
+        (Channel::Stable, false) => "Stable",
+    }
+}
+
+/// 更新模式下用户关掉提示后会重开启动器，提示里先说一声，免得以为桌面上什么都没了。
+fn reopening(text: String, reopens: bool, chinese: bool) -> String {
+    if !reopens {
+        return text;
+    }
+    let tail = if chinese {
+        "关掉这个提示后会重新打开落樱。"
+    } else {
+        "Petalfall will reopen after you close this message."
+    };
+    format!("{text}\n\n{tail}")
+}
+
+/// 同安装界面已安装页 newer 的四种说明。
+fn newer_text(older: Older, installed: &str, payload: &str, chinese: bool) -> String {
+    match (older, chinese) {
+        (Older::SameChannel, true) => {
+            format!("已安装 {installed}，这个安装包是 {payload}，版本更早，不能往回装。")
+        }
+        (Older::SameChannel, false) => format!(
+            "{installed} is installed and this installer is the earlier {payload}, so it can't go back."
+        ),
+        (
+            Older::SlowerChannel {
+                installed: ci,
+                payload: cp,
+            },
+            true,
+        ) => {
+            let (ci, cp) = (channel_name(ci, true), channel_name(cp, true));
+            format!(
+                "已安装{ci} {installed}，这个安装包是版本更早的{cp} {payload}。自动更新不会这样换过去，所以没有安装。要换到{cp}，直接运行{cp}的安装包。"
+            )
+        }
+        (
+            Older::SlowerChannel {
+                installed: ci,
+                payload: cp,
+            },
+            false,
+        ) => {
+            let (ci, cp) = (channel_name(ci, false), channel_name(cp, false));
+            format!(
+                "{ci} {installed} is installed and this installer is the earlier {cp} {payload}. Automatic updates don't switch channels this way, so nothing was installed. To move to {cp}, run a {cp} installer directly."
+            )
+        }
+        (
+            Older::FasterChannel {
+                installed: ci,
+                payload: cp,
+            },
+            true,
+        ) => {
+            let (ci, cp) = (channel_name(ci, true), channel_name(cp, true));
+            format!(
+                "已安装{ci} {installed}，这个安装包是{cp} {payload}，版本更早，不能这样换过去。要换到{cp}，在落樱的「设置 · 关于」里把更新通道选成{cp}，{cp}出了比 {installed} 新的版本就会装上。"
+            )
+        }
+        (
+            Older::FasterChannel {
+                installed: ci,
+                payload: cp,
+            },
+            false,
+        ) => {
+            let (ci, cp) = (channel_name(ci, false), channel_name(cp, false));
+            format!(
+                "{ci} {installed} is installed and this installer is the earlier {cp} {payload}, so it can't switch this way. To move to {cp}, choose {cp} as the update channel in Petalfall's Settings, About; it installs once {cp} has a version newer than {installed}."
+            )
+        }
+        (Older::UnknownChannel, true) => {
+            format!("已安装 {installed}，这个安装包是 {payload}，不能往回装。")
+        }
+        (Older::UnknownChannel, false) => {
+            format!(
+                "{installed} is installed and this installer is {payload}, so it can't go back."
+            )
+        }
+    }
+}
+
+/// 同安装界面已安装页数据拦截与读不懂的标题，空一行接说明。
+fn blocked_text(block: &DataBlock, stamp: &str, payload: &str, chinese: bool) -> String {
+    match (block, chinese) {
+        (
+            DataBlock::TooNew {
+                written_by: Some(TrustedWrittenBy { version, channel }),
+                ..
+            },
+            true,
+        ) => {
+            let channel = channel_name(*channel, true);
+            format!(
+                "这个安装包读不了现在的数据\n\n这台电脑上的数据已经被{channel} {version} 用过，这个安装包（{payload}）读不了，所以没有安装，落樱的程序和数据都没有改动。要接着用这些数据，装{channel} {version} 或更新的版本。"
+            )
+        }
+        (
+            DataBlock::TooNew {
+                written_by: Some(TrustedWrittenBy { version, channel }),
+                ..
+            },
+            false,
+        ) => {
+            let channel = channel_name(*channel, false);
+            format!(
+                "This installer can't read your current data\n\nThe data on this PC has been used by {channel} {version}, which this installer ({payload}) can't read, so nothing was installed and Petalfall's program files and data were left unchanged. To keep using this data, install {channel} {version} or later."
+            )
+        }
+        (
+            DataBlock::TooNew {
+                written_by: None, ..
+            },
+            true,
+        ) => format!(
+            "这个安装包读不了现在的数据\n\n这台电脑上的数据已经被更新的落樱用过，这个安装包（{payload}）读不了，所以没有安装，落樱的程序和数据都没有改动。要接着用这些数据，装更新的版本。"
+        ),
+        (
+            DataBlock::TooNew {
+                written_by: None, ..
+            },
+            false,
+        ) => format!(
+            "This installer can't read your current data\n\nThe data on this PC has been used by a newer Petalfall, which this installer ({payload}) can't read, so nothing was installed and Petalfall's program files and data were left unchanged. To keep using this data, install a newer version."
+        ),
+        (DataBlock::Unreadable { reason }, true) => format!(
+            "读不懂这台电脑上的数据格式记录\n\n{stamp}：{reason}。判断不了这里的数据能不能用这个安装包，所以没有安装，落樱的程序和数据都没有改动。反馈问题时带上这个路径和原因。"
+        ),
+        (DataBlock::Unreadable { reason }, false) => format!(
+            "Can't read the data format record on this PC\n\n{stamp}: {reason}. It's unclear whether this installer can use the data here, so nothing was installed and Petalfall's program files and data were left unchanged. Include this path and reason if you report the problem."
+        ),
     }
 }
 
@@ -800,28 +1011,221 @@ mod tests {
         assert!(notice.text(false).ends_with("拒绝访问。 (os error 5)"));
     }
 
+    const STAMP: &str = r"D:\游戏\Petalfall\data-format.json";
+
+    fn newer(older: Older, reopens: bool) -> Notice {
+        Notice::Newer {
+            older,
+            installed: "1.1.0-dev.61".into(),
+            payload: "1.0.0-beta.5".into(),
+            reopens,
+        }
+    }
+
+    fn blocked(block: DataBlock, reopens: bool) -> Notice {
+        Notice::DataBlocked {
+            block,
+            stamp: STAMP.into(),
+            payload: "1.0.0-dev.55".into(),
+            reopens,
+        }
+    }
+
+    fn too_new_by(written_by: &str) -> DataBlock {
+        DataBlock::TooNew {
+            recorded: 2,
+            written_by: petalfall_release::data_format::trusted_written_by(written_by),
+        }
+    }
+
+    /// 窗口起不来时判定不让装的几种，每种都带上「关掉后重开」的一句与不带的各一份。
+    fn refusals(reopens: bool) -> Vec<Notice> {
+        vec![
+            Notice::NeedsWindow { reopens },
+            newer(Older::SameChannel, reopens),
+            newer(
+                Older::FasterChannel {
+                    installed: Channel::Stable,
+                    payload: Channel::Beta,
+                },
+                reopens,
+            ),
+            newer(
+                Older::SlowerChannel {
+                    installed: Channel::Dev,
+                    payload: Channel::Beta,
+                },
+                reopens,
+            ),
+            newer(Older::UnknownChannel, reopens),
+            blocked(too_new_by("1.1.0-dev.57"), reopens),
+            blocked(
+                DataBlock::TooNew {
+                    recorded: 2,
+                    written_by: None,
+                },
+                reopens,
+            ),
+            blocked(
+                DataBlock::Unreadable {
+                    reason: "缺 data_format".into(),
+                },
+                reopens,
+            ),
+        ]
+    }
+
     #[test]
     fn notices_follow_the_product_wording_rules() {
-        let notices = [
+        let mut notices = vec![
             Notice::ForeignUser,
             Notice::IncompletePackage,
             Notice::StartFailed("x".into()),
         ];
+        notices.extend(refusals(false));
+        notices.extend(refusals(true));
         for notice in &notices {
             let text = notice.text(true);
             assert!(!text.contains('请'), "{text}");
             assert!(!text.contains("启动器"), "{text}");
+            assert!(!text.contains("卸载"), "{text}");
+            assert!(!text.contains("降级"), "{text}");
         }
     }
 
     #[test]
-    fn only_a_wrong_account_is_a_warning() {
-        assert_eq!(Notice::ForeignUser.style(), MB_OK | MB_ICONWARNING);
+    fn failures_are_errors_and_everything_else_is_a_warning() {
         assert_eq!(Notice::IncompletePackage.style(), MB_OK | MB_ICONERROR);
         assert_eq!(
             Notice::StartFailed("x".into()).style(),
             MB_OK | MB_ICONERROR
         );
+        let mut warnings = vec![Notice::ForeignUser];
+        warnings.extend(refusals(false));
+        warnings.extend(refusals(true));
+        for notice in &warnings {
+            assert_eq!(notice.style(), MB_OK | MB_ICONWARNING, "{notice:?}");
+        }
+    }
+
+    #[test]
+    fn a_switch_without_a_window_asks_for_webview2() {
+        assert_eq!(
+            Notice::NeedsWindow { reopens: false }.text(true),
+            "这次安装要用到安装程序的窗口，但这台电脑上的 WebView2 用不了。先装好或修复 WebView2，再运行这个安装包。"
+        );
+        assert_eq!(
+            Notice::NeedsWindow { reopens: false }.text(false),
+            "This install needs the setup window, but WebView2 isn't working on this PC. Install or repair WebView2, then run this installer again."
+        );
+    }
+
+    /// 四种原因与已安装页的说明一字不差；更快、更慢两种写出两边的通道。
+    #[test]
+    fn each_reason_an_earlier_package_cannot_go_on_reads_like_the_installed_page() {
+        let cases = [
+            (
+                Older::SameChannel,
+                "已安装 1.1.0-dev.61，这个安装包是 1.0.0-beta.5，版本更早，不能往回装。",
+                "1.1.0-dev.61 is installed and this installer is the earlier 1.0.0-beta.5, so it can't go back.",
+            ),
+            (
+                Older::SlowerChannel {
+                    installed: Channel::Dev,
+                    payload: Channel::Beta,
+                },
+                "已安装预览版 1.1.0-dev.61，这个安装包是版本更早的测试版 1.0.0-beta.5。自动更新不会这样换过去，所以没有安装。要换到测试版，直接运行测试版的安装包。",
+                "Preview 1.1.0-dev.61 is installed and this installer is the earlier Beta 1.0.0-beta.5. Automatic updates don't switch channels this way, so nothing was installed. To move to Beta, run a Beta installer directly.",
+            ),
+            (
+                Older::FasterChannel {
+                    installed: Channel::Stable,
+                    payload: Channel::Dev,
+                },
+                "已安装正式版 1.1.0-dev.61，这个安装包是预览版 1.0.0-beta.5，版本更早，不能这样换过去。要换到预览版，在落樱的「设置 · 关于」里把更新通道选成预览版，预览版出了比 1.1.0-dev.61 新的版本就会装上。",
+                "Stable 1.1.0-dev.61 is installed and this installer is the earlier Preview 1.0.0-beta.5, so it can't switch this way. To move to Preview, choose Preview as the update channel in Petalfall's Settings, About; it installs once Preview has a version newer than 1.1.0-dev.61.",
+            ),
+            (
+                Older::UnknownChannel,
+                "已安装 1.1.0-dev.61，这个安装包是 1.0.0-beta.5，不能往回装。",
+                "1.1.0-dev.61 is installed and this installer is 1.0.0-beta.5, so it can't go back.",
+            ),
+        ];
+        for (older, chinese, english) in cases {
+            assert_eq!(newer(older, false).text(true), chinese);
+            assert_eq!(newer(older, false).text(false), english);
+        }
+    }
+
+    #[test]
+    fn data_written_by_a_known_version_names_it() {
+        let notice = blocked(too_new_by("1.1.0-dev.57"), false);
+
+        assert_eq!(
+            notice.text(true),
+            "这个安装包读不了现在的数据\n\n这台电脑上的数据已经被预览版 1.1.0-dev.57 用过，这个安装包（1.0.0-dev.55）读不了，所以没有安装，落樱的程序和数据都没有改动。要接着用这些数据，装预览版 1.1.0-dev.57 或更新的版本。"
+        );
+        assert_eq!(
+            notice.text(false),
+            "This installer can't read your current data\n\nThe data on this PC has been used by Preview 1.1.0-dev.57, which this installer (1.0.0-dev.55) can't read, so nothing was installed and Petalfall's program files and data were left unchanged. To keep using this data, install Preview 1.1.0-dev.57 or later."
+        );
+    }
+
+    /// 记号里的 written_by 不像落樱发过的版本时，净化后为空，说成「更新的落樱」。
+    #[test]
+    fn data_written_by_someone_unknown_says_a_newer_petalfall() {
+        let notice = blocked(too_new_by("9.9.9-evil"), false);
+
+        assert_eq!(
+            notice.text(true),
+            "这个安装包读不了现在的数据\n\n这台电脑上的数据已经被更新的落樱用过，这个安装包（1.0.0-dev.55）读不了，所以没有安装，落樱的程序和数据都没有改动。要接着用这些数据，装更新的版本。"
+        );
+        assert_eq!(
+            notice.text(false),
+            "This installer can't read your current data\n\nThe data on this PC has been used by a newer Petalfall, which this installer (1.0.0-dev.55) can't read, so nothing was installed and Petalfall's program files and data were left unchanged. To keep using this data, install a newer version."
+        );
+    }
+
+    #[test]
+    fn an_unreadable_stamp_shows_its_path_and_reason() {
+        let notice = blocked(
+            DataBlock::Unreadable {
+                reason: "缺 data_format".into(),
+            },
+            false,
+        );
+
+        assert_eq!(
+            notice.text(true),
+            format!(
+                "读不懂这台电脑上的数据格式记录\n\n{STAMP}：缺 data_format。判断不了这里的数据能不能用这个安装包，所以没有安装，落樱的程序和数据都没有改动。反馈问题时带上这个路径和原因。"
+            )
+        );
+        assert_eq!(
+            notice.text(false),
+            format!(
+                "Can't read the data format record on this PC\n\n{STAMP}: 缺 data_format. It's unclear whether this installer can use the data here, so nothing was installed and Petalfall's program files and data were left unchanged. Include this path and reason if you report the problem."
+            )
+        );
+    }
+
+    /// 更新模式下关掉提示会重开启动器，每一种都在末尾说一声；交互启动时不说。
+    #[test]
+    fn a_refusal_in_update_mode_says_petalfall_will_reopen() {
+        for (quiet, loud) in refusals(false).iter().zip(refusals(true).iter()) {
+            assert_eq!(
+                loud.text(true),
+                format!("{}\n\n关掉这个提示后会重新打开落樱。", quiet.text(true))
+            );
+            assert_eq!(
+                loud.text(false),
+                format!(
+                    "{}\n\nPetalfall will reopen after you close this message.",
+                    quiet.text(false)
+                )
+            );
+            assert!(!quiet.text(true).contains("重新打开落樱"), "{quiet:?}");
+        }
     }
 
     #[test]
