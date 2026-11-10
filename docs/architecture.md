@@ -172,6 +172,7 @@ petalfall-launch / petalfall-install / petalfall-instance / petalfall-modplatfor
 | `drop.rs` | 主窗口原生拖放：在 WebView2 的子窗口上注册自己的 `IDropTarget`，读拖入的文件列表与 authlib-injector 服务器链接，经 `petalfall://window-drop` 推给前端 |
 | `renderer.rs` | 主窗口 WebView2 渲染进程退出或无响应时自动重载页面，60 秒内最多 2 次；用完即停下并记 error，之后安静满 60 秒才重新计数。停下后网页里的标题栏与关闭键都没了，关闭请求（Alt+F4、任务栏）由后端直接销毁窗口 |
 | `exit.rs` | 正常退出（`RunEvent::Exit`）时的收尾：游戏还在跑时先让会话日志落盘（限时 2 秒），再关上外置令牌轮换的闸、等进行中的轮换落盘（限时 3 秒），补写游玩记录里待补的改动（限时 3 秒）与主窗口状态（限时 1 秒），最后按需拉起更新安装程序。中间的令牌与游玩记录两步是 `persist_before_exit`，自更新拉起安装程序之前也走它 |
+| `data_gate.rs` | 启动时的数据目录关卡：读配置之前调 core 的 `check_data_root`，数据被更新的版本用过、记号读不懂或没能记下时，在建窗口之前弹系统对话框说明，`run()` 随即返回（见「磁盘布局」下的「数据格式号」） |
 | `channel_handoff.rs` | setup 里门面就位之后，消费一次安装引导程序留下的换通道交接记录，把更新通道偏好对上（见「自更新的清单与下载源」）。只在支持自更新的构建里做 |
 | `gpu.rs` | 经 DXGI 列出本机硬件显卡，看出 Windows 按高性能与省电偏好各挑哪一块（`gpu_adapters` 命令用）；Windows 10 1803 之前没有按偏好枚举，退回系统顺序且不标首选；非 Windows 为空 |
 | `single_instance.rs`（仅 Windows） | 同一数据目录只跑一个启动器：再次启动时把已有窗口叫到前台（`window.rs` 的 `front_on_second_launch`：先还原最小化，再取得焦点），新进程随后退出。占位与唤醒是同一个具名事件 `Local\Petalfall-<小写且反斜杠换成斜杠的数据目录>`：由系统保证只有一个进程创建成功，进程退出（包括崩溃）后系统回收，下一次启动不会被残留挡住；后来者对它 `SetEvent`，先来者的监听线程醒来叫窗口，事件自动复位，先来者还没开始监听时的那次唤醒留到开始监听时生效。叫到了前台，先来者再置应答事件（占位名后加 `|answer`，手动复位，在等的后来者都看得到），后来者看到才退出。还原与取得焦点是投递给事件循环的消息，窗口已销毁时照样报成功，所以叫完再读一次可见性，读到了才应答。先来者正在退出时（窗口已关，退出收尾还要落几秒盘）不应答，后来者每 100 毫秒看一次应答、试一次占位，等它退出、占位被系统回收后自己接手，启动器日志记下等了多久；先来者退出之前不接手，两个进程不能同时写一份数据。后来者只唤醒一次，不会应答的旧版本每收到一次唤醒都会抢一次焦点；唤醒前先清掉上一回的应答。等着的后来者里有一个接手后也置上应答，其余的由它的窗口兑现，不在它关掉之后各开一个。先来者退出时要拉起安装程序的（「退出时安装」），先置上应答打发走在等的后来者，安装完由安装程序重新打开落樱；后来者占到占位之后还要复查一次应答，免得先来者刚放过行就退出时被它抢先接手、挡住安装程序替换文件。先来者 15 秒（`TAKEOVER_WAIT`，用例核对它盖住退出收尾各段时限之和）内既不应答也不退出时，后来者同样退出，不留日志。按数据目录而不是按应用标识占位，两份便携版的数据互不相干，可以各开各的。占位在日志初始化之前执行（每次启动都开一份新日志、清掉最旧的，连点几下图标会把正在用的那份挤掉）；占位失败只记 error 日志、不拦启动，拦下来就是双击后什么都没有，而这只是少了一层防重复打开 |
@@ -501,6 +502,8 @@ beta 的发布链路（`.github/workflows/beta-release.yml`）把签名与发布
 | `java_runtime_incomplete` | 手动添加的 Java 缺运行时文件 | `{ path, missing }` |
 | `gpu_query_failed` | 枚举显卡失败 | `{ hresult, causes }` |
 | `feed_invalid` | 资讯内容认不出，或正文超过读取上限（`FeedTooLarge`） | `{ url }` |
+| `game_dir_data_too_new` | 游戏目录的数据格式记号比这一版的号大：这个目录被更新的落樱用过，没有打开它（见「数据格式号」） | `{ path, found, supported, written_by, written_by_channel }`：`path` 是游戏目录，`found`、`supported` 是记号里的与这一版的号；`written_by` 只给经 `trusted_written_by` 认可的版本号，记号里没写或形状不对时为 null，`written_by_channel` 是它所属的通道（`dev`、`beta`、`stable`），同时为 null。界面不显示号码 |
+| `data_format_unreadable` | 游戏目录的数据格式记号读不懂，为了不弄坏里面的实例，没有打开它 | `{ path, reason }`，`path` 是游戏目录，`reason` 是读不懂的原因（只描述出了什么错，不照抄文件内容） |
 | `update_busy` | 已有更新包正在下载或安装，这时改更新通道、再开一次下载都报它 | 无 |
 | `update_superseded` | 检查或下载开始之后更新通道的生效值改过，这次的结果作废、没有落下（见「自更新的清单与下载源」的代号） | 无 |
 | `update_source_stale` | 偏好通道的每个端点都给出了验过的清单头，版本却全都低于这台电脑记下的这个通道见过的最高版本 | `{ channel, offered: [{ endpoint, version }], seen }`，前端读 `channel` |
@@ -857,6 +860,7 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | --- | --- |
 | `config.json` | 全局配置 |
 | `config.json.broken-<本地时间>` | 解析失败的配置原样留存（见「启动提示」） |
+| `data-format.json` | 数据格式号的记号：打开过这份数据的落樱里最大的号（见下文「数据格式号」）。号为 1 的版本不写它，只有号更高的版本打开过这里才会出现；启动器读配置之前先核对它。卸载时勾了「删除应用程序数据」，它与 `config.json` 一起删 |
 | `credentials.bin` | 账户令牌，DPAPI 加密 |
 | `credentials.bin.broken-<本地时间>` | 解不开的凭据库原样留存（见「启动提示」）；回到原来的机器与 Windows 用户下改回 `credentials.bin` 即可恢复 |
 | `offline_accounts.json` | 离线账户 |
@@ -879,6 +883,8 @@ Tauri 自带的原生拖放只认文件，开着时它占住 WebView2 的放置�
 | `world_backup` | `{ auto: true, keep_per_world: 5, max_total_gb: 20 }` | 存档备份。段里不认识的键读入时保留、落盘时写回 |
 | `pinned_servers[].instance` | 无 | 「加入」时记住的实例 id。条目层不认识的键不保留 |
 | `parked_directories` | 空 | 非当前游戏目录留下的侧栏固定与当前选中，按游戏目录各存一份（`path`、`sidebar_pins`、`selected_version`）。它们是实例名，只在所在目录里有意义，`sidebar_pins` 与 `selected_version` 只属于当前目录。切换游戏目录时把当前目录的收起、把目标目录上次留下的放回，两样都为空的不留记录，切回来的目录不留第二份；不收起的话，在新目录里固定一个实例（新建实例也会自动固定）就把原目录的固定整份冲掉了 |
+| `update_channel` | 无，不写出 | 用户选的启动器更新通道，取值 `dev`、`beta`、`stable`；不存在表示按安装包自带的通道。按原样的 JSON 值收下、不登记 `ENUM_FIELDS`，值认不出只影响这一项。只经 `set_update_channel`、检查时的跟随与安装引导程序的交接记录写，不进 `ConfigDto`、不经 `update_config`，见「自更新的清单与下载源」 |
+| `seen_update_versions` | 无，不写出 | 各通道见过的最高版本，形如 `{通道: {version, signature}}`，读时逐项按公钥重验，坏了只废那一项，见「自更新的清单与下载源」 |
 
 ### 游戏目录
 
@@ -919,8 +925,94 @@ versions/<实例名>/
 
 游戏目录根下的元数据区里另有 `.petalfall/base-versions.json`，内容是 `{"versions": [...]}`：整合包导入新落下的原版与加载器版本目录的 id（依赖版本记录），实例库据此不把这些目录当实例列出，见 `hide_base_versions`。它跟着游戏目录走，换一个游戏目录就是另一批版本。
 
+同一个元数据区里还可能有 `.petalfall/data-format.json`，即 `<游戏目录>\.petalfall\data-format.json`：这个游戏目录的数据格式号记号，用到这个目录之前先核对它（见下文「数据格式号」）。实例不单独记，跟着所在的游戏目录算。卸载时游戏目录不在删除范围内，记号随目录留着。
+
 - **未完成标记**：新建实例、补全和整合包导入都使用同一种格式（`kind` 为 `install`、`repair` 或 `modpack`，另有 `outcome`、`started_at`、`error`）。列表据此显示「安装没有完成」之类的原因。补全据此决定怎么处理：`install` 按记下的内容重装，`repair` 补齐文件，`modpack` 报不可补全并提示重新导入。标记不存在时的方案、版本 JSON 不可用时的退路与重新安装加载器见「实例补全」。
 - **Mod 备份与回滚**：更新 Mod 时，旧文件改名为 `<文件名>.old` 保留在 mods 目录。同名备份已存在时取 `<文件名>.2.old`、`.3.old`，依次类推。实际的备份名记在历史事件的 `backup_file` 里。一个 Mod 连续更新形成一条链，只能从最近的一次往回滚。启用状态跟着 Mod 走：回滚时新文件是停用的，旧文件也恢复成 `<文件名>.disabled`。
+
+### 数据格式号
+
+落樱维护一个整数，叫数据格式号：常量 `DATA_FORMAT`，在 `crates/petalfall-release/src/data_format.rs` 里。只有「较早的版本读不了新数据」的改动才给它加一。每个安装包把自己的号写进载荷头（见「装配与状态」的启动器更新一条），数据目录与每个游戏目录各放一个记号文件，记着打开过这份数据的落樱里最大的号。程序或安装包的号比数据记着的号小，就不打开、不安装，说明原因，绝不重置数据。
+
+这道关与版本号、通道完全分开，自动更新、跟随、手动装包一视同仁。按版本号算是升级，不说明数据读得了：同一基础号下正式版 `1.0.0` 大于所有 `1.0.0-dev.N`，共用的游戏目录也可能被别处更新的落樱打开过。号只来自签过名的安装包与本机文件，清单里没有它。
+
+**登记表。** 每个号一行，与 `FORMAT_HISTORY` 一一对应，三列逐字照抄它的 `format`、`change`、`reason`（`crates/petalfall-release/tests/format_history_docs.rs` 逐行对拍）：
+
+| 号 | 改了什么 | 为什么要加号 |
+| --- | --- | --- |
+| 1 | 基线：第一个带数据格式号的版本写出的数据形态。 | 基线，没有更低的号可比。 |
+
+**记号文件。** 文件名是 `data-format.json`（`STAMP_FILE`），两处同名、同格式：
+
+- 数据目录：`<数据目录>\data-format.json`。
+- 游戏目录：`<游戏目录>\.petalfall\data-format.json`。数据目录只属于一个启动器，游戏目录却可能被共用（两份便携版共用一个游戏目录，游戏目录放在移动硬盘或网络盘上给几台电脑用，卸载时也不删它），所以两处各记一份。实例不单独记，跟着所在的游戏目录算。
+
+内容形如：
+
+```json
+{ "data_format": 2, "written_by": "1.1.0-dev.57" }
+```
+
+- `data_format`：打开过这份数据的落樱里最大的号，1 到 u32 上限之间的 JSON 整数。
+- `written_by`：把号抬到这个值的那个落樱的版本号，只用来提示用户该装哪一版。可以没有：门面没有应用版本时（调试命令行）写出的记号不带它。游戏目录可能在共用盘上，这段文字可能出自别人的机器，拿给人看之前经 `trusted_written_by`：形状恰好是 `X.Y.Z`、`X.Y.Z-dev.N`、`X.Y.Z-beta.N` 之一，数字段不带前导零、不带构建元数据，不超过 48 字节，才交回版本与它所属的通道；否则界面改说「更新的落樱」，原文只转义后进日志。
+- 读的一方忽略不认识的键，以后的版本可以加键。
+
+读法（`parse_stamp`）：文件不存在算 1，号为 1 的版本一个记号都不写，没有记号的数据就是 1 号的形态。读文件出错（不存在以外的错误）、不是 JSON、不是对象、缺 `data_format`、`data_format` 不是 1 到 u32 上限之间的整数，都算「记号读不懂」，一律拦下，不当作缺失，也不当作 1：无从知道数据是哪一版写的。写法：只在读到的号小于程序自己的号时写，把整个文件原子写成程序的号与版本（`stamp_contents`），所以号只升不降。号为 1 的版本在哪里都不写记号；号升到 2 以后，被打开过的数据目录与游戏目录才会出现记号。
+
+**四处把关**，比的都是同一件事（`judge_stamp`）：
+
+- 启动器启动时，读配置之前，核对数据目录：`data_gate.rs` 调 core 的 `check_data_root`，排在单实例的等待之后。读配置可能把坏配置改名，那已经是一次写入，所以这道关必须在它之前；排在等待之后，同一数据目录上就不会有两个进程同时抬号。号比本版大、或记号读不懂时，一个数据文件都不动，在建窗口之前弹系统对话框说明，点完退出：这时还没有窗口，setup 里报错只会变成一个看不见的 panic。不给「仍然打开」，也不自动重置；对话框里写出的版本与下载页地址只取经过 `trusted_written_by` 认可的版本与编译进来的常量。号比本版小时把记号抬上去，写不进去按 100、200、300 毫秒的间隔重试三次（`PROBE_RETRY_DELAYS`），仍不成同样拒绝：这次启动接下来会写出新形态的数据，记号没记上，号更低的版本以后会读错它。数据目录整个写不进去（启动提示 `data_dir_unwritable` 那种情形）时不抬号，照常启动：这次什么都写不下，数据仍是记号所记的形态。门面的 `Petalfall::load` 与 `load_recovering` 读配置之前也过这道关，不放行时报 `CoreError::DataRootRefused`，调试命令行同样绕不过去。
+- 启动器用到游戏目录时：门面的 `guard_game_dir`（当前游戏目录）与 `guard_game_dir_at`（别的目录）在一个阻塞任务里先看目录在不在、再读记号，两步共用 2 秒的时限（`DIR_PROBE_TIMEOUT`）。时限内没有结论时按暂时连不上报 `invalid_game_directory`（`problem` 为 `unavailable`），不扫描、不读写这个目录，用户重试即可；目录本身不存在时放行，不建目录、不写记号。「使用」方式（`GuardMode::Use`）下号更低就抬号，写不进去照实报读写错误；号更高报 `game_dir_data_too_new`，读不懂报 `data_format_unreadable`。「只判断」方式（`GuardMode::Inspect`）什么都不写，把结论交回调用方。列实例、启动、新建实例、导入整合包、切换当前游戏目录、首次启动向导选定目录都先以「使用」方式核对；新建实例与导入整合包遇到原本不存在的游戏目录，在目录建出来之后再核对一次。移动实例的预检以「只判断」方式看目标目录，太新、读不懂分别列为拦截项 `data_too_new`、`data_format_unreadable`；执行时在建好目标的 `versions/` 之后、写任何实例数据之前再以「使用」方式核对。每次都重新核对、不缓存：两台电脑共用一个目录时，另一台随时可能把号抬上去。Mod、实例设置、存档备份、改名、删除都只能从实例列表进入，列实例那一关已经核对过。
+- 安装引导程序安装之前，核对数据目录：`app/src-tauri-setup/src/datamark.rs` 照启动器选数据目录的规则（`petalfall-base` 的 `choose_data_root`）另写一份，两边要一起改。已有安装时，登记目录写得进（与选目录时同一个写入探针），或写不进但里面有读得进来的 `config.json`，只读登记目录；两样都不成时，启动器会落到 `%LOCALAPPDATA%\Petalfall`，而一次探针失败证明不了数据不在登记目录，所以两处都读，取较大的号，任一个读不懂就拦。首装只读最终的目标目录。引导程序从不写记号，号低于安装包认得的号与相等一样放行；它也不读游戏目录，游戏目录由启动器在用到时把关。拦下之后的处理见「装配与状态」的启动器更新一条。
+- 启动器下载验签之后，核对更新包：载荷头里的号比本版的 `DATA_FORMAT` 小就丢掉，报 `update_data_too_new`，见「自更新的清单与下载源」。
+
+**什么改动要加一。** 设现在的号是 N。改动之后新版本可能写出的任何数据，号为 N 的旧版本读到时，只要出现下面任一情况，就必须加一：
+
+1. 报错、拒绝，或者把文件当作损坏而改名留存、删除；
+2. 读成别的意思，并据此行事；
+3. 写坏或丢掉用户找不回来的信息。
+
+旧版本读到不认识的字段会忽略，但保存时多数文件会把它丢掉。例外只有 `config.json`：顶层，以及外观、内存、存档备份三段，都原样保留不认识的键（见「启动提示」）；实例设置等别的文件不保留。所以新字段是一项用户能再设一次的设置时，丢了等于回到默认值，不加一；新字段承载用户找不回来的内容（记录、历史、来源信息、凭据）时，放到会被原样保留的位置，做不到就加一。拿不准时按「要加」处理，并在 `FORMAT_HISTORY` 里写明理由。
+
+| 改动 | 加一 | 为什么 |
+| --- | --- | --- |
+| 新增可选的设置项：带 `#[serde(default)]`，取默认值时不写出 | 否 | 旧版本忽略它，保存时丢掉也只是回到默认 |
+| 新增承载找不回内容的可选字段，所在文件不保留未知字段 | 是 | 旧版本保存一次，内容就永久丢失 |
+| `config.json` 新增顶层键 | 否 | 原样写回 |
+| `config.json` 里已登记在 `ENUM_FIELDS` 的枚举新增取值 | 否 | 有字段级的容忍：认不出的取值按默认值启动，原值写回 |
+| 实例卡面的背景新增取值 | 否 | 认不出的取值被丢掉（`drop_unknown_background`），回到默认 |
+| Mod 卷宗的平台（`Platform`）新增取值 | 是 | 没有容忍，旧版本读 `ledger.json` 整份失败 |
+| 账户类型、账户状态、凭据种类新增取值 | 是 | 凭据库整份读失败，被改名留存 |
+| 未完成标记、Mod 历史、整合包信息里的枚举新增取值 | 是 | 整份读失败 |
+| 已知字段改类型或改含义 | 是 | `config.json` 整份被改名重置，其他文件读失败或读错 |
+| 自带格式版本的文件升版本 | 是 | 旧版本报错、覆盖或改名留存 |
+| 文件改名、搬位置、把信息挪到新文件 | 是 | 旧版本看不到，像数据丢了 |
+| 新增一个与旧文件无关的新文件 | 否 | 旧版本不读它 |
+| 派生缓存或 `window-state.json` 改格式 | 否 | 旧版本当作过期重建，或按首次启动处理 |
+| 只让新版本读得更宽松 | 否 | 写出的数据没有变 |
+
+**加号的步骤：**
+
+1. 对照上面的规则判断；能改成不加号的写法就改：能加可选字段就不改类型；新枚举取值能登记容忍就登记（登记进 `ENUM_FIELDS`，或照 `drop_unknown_background` 的做法）；同一个发版周期里有几处破坏性改动，合成一次加号。每加一次，较慢的通道晋级到同一个号之前，用户就换不回那个通道（安装引导程序的数据格式关会拦下），所以加号要克制。
+2. 给 `DATA_FORMAT` 加一，在 `FORMAT_HISTORY` 末尾追加一行，写明这个号改了什么、号更低的版本为什么读不了。
+3. 把每个有快照的位置（见下面的防忘守卫）的 `testdata/data-format/current/` 复制成 `testdata/data-format/<旧号>/` 冻结，再更新 `current/`。
+4. 确保新代码读得了所有冻结的快照，需要时写读时迁移，照 `playtime.json` 从格式版本 1 升到 2 的做法。
+5. 在上面的登记表末尾加一行，三列逐字照抄 `FORMAT_HISTORY` 新加的那一行；`cargo test -p petalfall-release` 会跑 `format_history_docs.rs`，两处对不上就挂。
+6. 加号的提交只能随 dev 整体晋级进入测试版，不能单独摘进 beta：测试版流水线的 `data-format beta` 会挡下（见「自更新的清单与下载源」的发布链路）。这次改动晋级到测试版或正式版时，更新说明里写一句「装上之后不能再换回更早的版本」。
+
+**防忘守卫：**
+
+- 快照绊线：每种落盘类型都有一份完整的样本（每个字段都填上非默认值，每个持久化枚举的每个取值都出现），按生产代码的写法序列化，与所在包根下 `testdata/data-format/current/` 里的样本逐字节比对。落盘形状一变测试就挂，失败信息里写着上面的判断规则与新内容：不需要加号就把新内容存进样本，需要就按上面的步骤做。很多落盘类型是私有的，所以快照都写在各自包内的测试模块里，共四处：
+  - `crates/petalfall-core/src/data_format_snapshot.rs`：`config.json`、`playtime.json`、`running-game.json`、模板元数据 `template.json`、移动日志、`.petalfall/base-versions.json`，以及实例元数据里的 `last-crash.json`、`modpack.json`、`ledger.json`、`history.json`；
+  - `crates/petalfall-auth/src/data_format_snapshot.rs`：凭据库（比对的是 DPAPI 加密之前的明文）与 `offline_accounts.json`；
+  - `crates/petalfall-instance/src/data_format_snapshot.rs`：实例设置、未完成标记、安装记录与存档备份清单 `index.json`；
+  - `app/src-tauri/src/tasks.rs` 测试模块里的 `data_format_snapshot`：`tasks.json`。
+- 枚举穷举：样本里用不带通配分支的 match 列出每个持久化枚举的全部取值，新增取值时先编译不过；补上分支、把新取值加进样本，再按上面的规则判断。
+- 自带格式版本的常量登记：`PLAYTIME_FORMAT`、`RECORD_FORMAT`（`running-game.json`）、`CRASH_REPORT_FORMAT`、`MODPACK_INFO_SCHEMA`、`BACKUP_INDEX_VERSION`、`TASK_JOURNAL_VERSION` 各自要等于快照模块里的登记值。改了常量就是升了文件自带的版本，旧版本会拒读，按上面的步骤加号之后再改登记值。
+- 号连续：`petalfall-release` 断言 `FORMAT_HISTORY` 的号恰好是 1 到 `DATA_FORMAT` 的连续整数，`format_history_docs.rs` 断言上面的登记表与它逐行相同；四处快照各自断言 `testdata/data-format/` 下的冻结目录恰好是 1 到 `DATA_FORMAT - 1`。号不能悄悄变小，也不能跳号。
+- 载荷头两端一致：`pack-setup` 的测试断言写出的号等于 `DATA_FORMAT`，流水线的「核对载荷头」从产物读回再比一次（见「自更新的清单与下载源」的发布链路）。
+
+新增一种落盘文件却忘了给它做样本时，快照绊线抓不到，只能靠上文的磁盘布局表与代码评审。
 
 ## 测试与守卫
 
@@ -938,6 +1030,10 @@ versions/<实例名>/
 - **版本规则与发布流水线的契约**：几处测试读别处的文件，改了被读的那一侧，就要跑读它的那一侧。
   - 共用版本向量 `crates/petalfall-release/testdata/version-order.json`：版本先后（`order`，含 `1.0.0-beta.999 < 1.0.0-dev.1 < 1.0.0` 与 2^53 附近的序号）与认通道（`channel`）的标准例子。四处各自的比较与认通道都按它对拍：`petalfall-release` 的 `order` 单元测试、`.github/scripts/release-heads.test.mjs`、`.github/scripts/dev-distribution.test.mjs`、`app/scripts/build-info.test.ts`。改了这份向量或任何一处的版本规则，四处都跑：`cargo test -p petalfall-release`，在 Git Bash 里于仓库根目录跑 `node --test .github/scripts/*.test.mjs`，在 `app/` 下跑 `pnpm exec vitest run scripts/build-info.test.ts`。
   - `.github/scripts` 下的 node 测试读 Rust 源码与工作流。`release-heads.test.mjs` 读 `app/src-tauri/src/commands/update_channels.rs` 钥表里的两行 `include_str!`（编进的正是两个 `.pub`，且与两条流水线注入、`release-heads.mjs` 验清单用的公钥文件一致），`app/src-tauri/src/commands/updater.rs` 的三个清单地址常量与 `DEV_RELEASE_TAG`，`crates/petalfall-release/src/data_format.rs` 里 `DATA_FORMAT` 那一行（流水线的正则必须恰好命中一行），以及 `app/src-tauri/tauri.conf.json` 与两条流水线的公钥注入行（不含 `installerArgs`）。`dev-build-contract.test.mjs` 与 `beta-release-contract.test.mjs` 分别读两条工作流，核对作业与步骤的先后、`release-heads` 作业只读不挂环境、构建后的两步核对无条件执行、Rust 测试带 `-p petalfall-release`、签名用的 CLI 经 `locked-cli.mjs` 按锁文件取；beta 那份还读 `updater.rs` 的 `BETA_ENDPOINT`。改了这几处 Rust 源码、`tauri.conf.json`、`app/pnpm-lock.yaml` 里的 Tauri CLI 或两条工作流，都要在 Git Bash 里跑 `node --test .github/scripts/*.test.mjs`。两条流水线都在编译之前跑这组测试；流水线上的 Rust 测试只跑 `-p petalfall-setup-payload -p petalfall-release`，跨启动器与流水线两侧的约定因此都写成 node 测试，才能每次发版都跑到。
+- **数据格式号的守卫**（规则与挂了怎么办见「磁盘布局」下的「数据格式号」）：
+  - 改了写进数据目录或游戏目录的类型、持久化枚举的取值，或文件自带的格式版本常量：跑 `cargo test -p petalfall-core data_format_snapshot`、`cargo test -p petalfall-auth data_format_snapshot`、`cargo test -p petalfall-instance data_format_snapshot` 与 `cargo test -p petalfall-tauri --lib data_format_snapshot`。快照比对挂了不要直接把新内容存进样本，先按规则判断要不要加号。
+  - 改了 `FORMAT_HISTORY` 或「数据格式号」里的登记表：跑 `cargo test -p petalfall-release`，其中 `tests/format_history_docs.rs` 读 `docs/architecture.md`，两处要逐行相同。这组测试随两条流水线的 Rust 测试跑。
+  - 改了 `STAMP_FILE`：`app/scripts/installer-hooks.test.ts` 读它，核对卸载时勾了「删除应用程序数据」会连记号一起删，在 `app/` 下跑 `pnpm exec vitest run scripts/installer-hooks.test.ts`。
 
 ## 品牌常量
 
