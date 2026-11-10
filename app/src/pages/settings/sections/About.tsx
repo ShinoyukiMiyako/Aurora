@@ -37,6 +37,11 @@ function builtDate(build: BuildInfo): string {
   return formatDate(ts);
 }
 
+/** 本机构建先按预览版标：它出自没走发布流程的源码，标成正式版会误导，也与它以前按版本号推出的显示一致。 */
+function channelLabel(channel: BuildInfo["channel"]): string {
+  return RELEASE_CHANNEL_LABEL[channel === "local" ? "preview" : channel];
+}
+
 function BrandCard({ build }: { build: BuildInfo }) {
   return (
     <section className={s.brand}>
@@ -48,7 +53,7 @@ function BrandCard({ build }: { build: BuildInfo }) {
         <span className={s.brandName}>
           {APP_NAME}
           <span className={s.brandNameEn}>{APP_NAME_EN}</span>
-          <Tag tone="accent">{RELEASE_CHANNEL_LABEL[build.channel]}</Tag>
+          <Tag tone="accent">{channelLabel(build.channel)}</Tag>
         </span>
         <span className={s.brandSub}>{ABOUT_COPY.versionLine(build.version, APP_LICENSE)}</span>
       </span>
@@ -58,7 +63,7 @@ function BrandCard({ build }: { build: BuildInfo }) {
 
 function VersionCard({ build }: { build: BuildInfo }) {
   const { copyText } = useShell();
-  const channel = RELEASE_CHANNEL_LABEL[build.channel];
+  const channel = channelLabel(build.channel);
   const built = builtDate(build);
   const text = ABOUT_COPY.infoText({ name: APP_NAME_EN, version: build.version, channel, built, license: APP_LICENSE, assetLicense: ASSET_LICENSE, source: REPO_URL });
   return (

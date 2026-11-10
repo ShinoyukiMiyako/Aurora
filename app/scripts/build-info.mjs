@@ -9,7 +9,7 @@ const BETA_TAG = /^beta\d*$/;
 
 /**
  * 发布通道由版本号推出：预发布标识的第一段是 dev 为预览版、beta 为测试版，后面只跟数字或什么都不跟，不分大小写；
- * 没有预发布标识时 0.x 尚未发布过正式版，算预览版，1.0 起为正式版。
+ * 没有预发布标识为正式版，主版本为 0 的也一样。
  * 预发布标识只认这两种，与启动器认更新通道的规则（Rust 侧的 UpdateChannel::of）一致：rc、alpha 这类标识没有清单，
  * 启动器会判为不支持自更新，关于页再打上测试版或预览版就前后矛盾，所以直接报错，让构建停下，不猜。
  */
@@ -23,7 +23,7 @@ export function releaseChannel(version) {
     if (BETA_TAG.test(tag)) return "beta";
     throw new Error(`版本号「${version}」的预发布标识「${tag}」不对应任何发布通道`);
   }
-  return match[1] === "0" ? "preview" : "stable";
+  return "stable";
 }
 
 /** 构建时间：设了 SOURCE_DATE_EPOCH（秒）时取它，同一份源码重复构建得到同样的产物；否则取当前时间。 */
@@ -34,9 +34,15 @@ export function buildTime(env, now) {
   return new Date(Number(epoch) * 1000).toISOString();
 }
 
+/**
+ * 通道只对官方构建由版本号推出。官方构建的判据与 Rust 侧相同：设了 PETALFALL_OFFICIAL_BUILD 就算，取值不论，空串也算。
+ * 本机与 fork 构建的版本号是 tauri.conf.json 里不带预发布段的基础号，照版本号推会标成还没发布过的正式版，所以标 local。
+ * 不论是不是官方构建，版本号都先过 releaseChannel：认不出的预发布标识照样让构建停下。
+ */
 export function readBuildInfo({ tauriConfPath, env, now }) {
   const conf = JSON.parse(readFileSync(tauriConfPath, "utf8"));
   const version = conf.version;
   if (typeof version !== "string") throw new Error(`${tauriConfPath} 没有写 version`);
-  return { version, channel: releaseChannel(version), builtAt: buildTime(env, now) };
+  const channel = releaseChannel(version);
+  return { version, channel: env.PETALFALL_OFFICIAL_BUILD === undefined ? "local" : channel, builtAt: buildTime(env, now) };
 }
