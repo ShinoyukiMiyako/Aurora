@@ -500,12 +500,36 @@ async fn read_stamp_on_disk(path: &Path) -> StampRead {
     stamp_read(tokio::fs::read(path).await)
 }
 
-/// 读记号文件的结果交给共用包判读：文件不存在算缺失，别的读错都是读不懂，不当作缺失。
+/// 读记号文件的结果交给共用包判读：文件确实不存在算缺失，别的读错都是读不懂，不当作缺失。
 fn stamp_read(file: io::Result<Vec<u8>>) -> StampRead {
     match file {
         Ok(bytes) => parse_stamp(StampFile::Contents(&bytes)),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => parse_stamp(StampFile::Missing),
-        Err(err) => parse_stamp(StampFile::ReadFailed(err.to_string())),
+        Err(err) => parse_stamp(stamp_file_error(&err)),
+    }
+}
+
+/// 读记号文件出错时，这算记号缺失还是读出错。
+///
+/// Windows 上标准库把盘符无效（15）、找不到网络路径（53）、找不到网络名（67）也归成 `NotFound`。读记号时报
+/// 这几种，说明这一刻够不着那个位置（多半是网络盘一时断开），而不是记号不存在：当成缺失接着抬号，就会把已有
+/// 的更高的号覆盖成低号。所以只认文件不存在、路径不存在（2、3）为缺失，其余一律按读出错，原因带系统错误原文。
+#[cfg(windows)]
+fn stamp_file_error(err: &io::Error) -> StampFile<'static> {
+    // ERROR_FILE_NOT_FOUND、ERROR_PATH_NOT_FOUND。
+    const MISSING: [i32; 2] = [2, 3];
+    match err.raw_os_error() {
+        Some(code) if MISSING.contains(&code) => StampFile::Missing,
+        _ => StampFile::ReadFailed(err.to_string()),
+    }
+}
+
+/// 别的平台上 `NotFound` 只表示文件或路径不存在，照旧算缺失。
+#[cfg(not(windows))]
+fn stamp_file_error(err: &io::Error) -> StampFile<'static> {
+    if err.kind() == io::ErrorKind::NotFound {
+        StampFile::Missing
+    } else {
+        StampFile::ReadFailed(err.to_string())
     }
 }
 
@@ -1439,6 +1463,88 @@ mod tests {
             );
         }
         assert!(!drive.exists());
+    }
+
+    /// 只有文件不存在、路径不存在算记号缺失。盘符无效、找不到网络路径、找不到网络名也被标准库归成 `NotFound`，
+    /// 但只说明这一刻够不着那个位置，按读出错；拒绝访问是普通的读错。
+    #[cfg(windows)]
+    #[test]
+    fn only_a_missing_file_or_path_counts_as_a_missing_stamp() {
+        for code in [2, 3] {
+            assert_eq!(
+                stamp_file_error(&io::Error::from_raw_os_error(code)),
+                StampFile::Missing,
+                "os error {code}"
+            );
+        }
+        for code in [15, 53, 67, 5] {
+            let err = io::Error::from_raw_os_error(code);
+            // 前三种正是被标准库混进 NotFound、要分开的那几种。
+            assert_eq!(
+                err.kind() == io::ErrorKind::NotFound,
+                code != 5,
+                "os error {code}"
+            );
+            match stamp_file_error(&err) {
+                StampFile::ReadFailed(reason) => {
+                    assert_eq!(reason, err.to_string());
+                    assert!(reason.ends_with(&format!("(os error {code})")), "{reason}");
+                }
+                other => panic!("os error {code} 应按读出错，实际是 {other:?}"),
+            }
+            assert_eq!(
+                stamp_read(Err(io::Error::from_raw_os_error(code))),
+                parse_stamp(StampFile::ReadFailed(err.to_string())),
+                "os error {code}"
+            );
+        }
+        // 不带系统错误码的 NotFound 说不清是哪一种，同样按读出错。
+        let bare = io::Error::from(io::ErrorKind::NotFound);
+        assert_eq!(
+            stamp_file_error(&bare),
+            StampFile::ReadFailed(bare.to_string())
+        );
+    }
+
+    /// 真实磁盘上走到的两种「不存在」：游戏目录本身不存在（连上一级都不在也一样）是目录不存在；目录在而
+    /// `.petalfall` 不在、`.petalfall` 在而记号不在，都是记号缺失、按 1 算。数据根一侧同样。
+    #[tokio::test]
+    async fn a_missing_game_dir_is_absent_and_a_missing_stamp_reads_as_format_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".minecraft");
+        for missing in [dir.clone(), tmp.path().join("移动硬盘").join(".minecraft")] {
+            let look = look_at_game_dir(&missing);
+            assert!(
+                matches!(look, DirLook::Absent),
+                "{}：{look:?}",
+                missing.display()
+            );
+        }
+
+        let one = parse_stamp(StampFile::Missing);
+        std::fs::create_dir(&dir).unwrap();
+        match look_at_game_dir(&dir) {
+            DirLook::Stamp(read) => assert_eq!(read, one, "没有 .petalfall"),
+            other => panic!("没有 .petalfall 时应读到缺失的记号，实际是 {other:?}"),
+        }
+        std::fs::create_dir(dir.join(PETALFALL_META_DIR)).unwrap();
+        match look_at_game_dir(&dir) {
+            DirLook::Stamp(read) => assert_eq!(read, one, "有 .petalfall、没有记号"),
+            other => panic!("没有记号时应读到缺失的记号，实际是 {other:?}"),
+        }
+
+        let root = tmp.path().join("Petalfall");
+        assert_eq!(
+            read_stamp_on_disk(&root.join(STAMP_FILE)).await,
+            one,
+            "数据根还不存在"
+        );
+        std::fs::create_dir(&root).unwrap();
+        assert_eq!(
+            read_stamp_on_disk(&root.join(STAMP_FILE)).await,
+            one,
+            "数据根在、没有记号"
+        );
     }
 
     #[tokio::test]
