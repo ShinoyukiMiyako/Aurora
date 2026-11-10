@@ -636,6 +636,8 @@ struct CheckPlan {
     preference: Channel,
     /// 要问的各通道见过的最高版本，逐项重验过；作废的项不在这里。
     seen: HashMap<Channel, VerifiedHead>,
+    /// 重验见过的版本用的公钥，落盘前在写锁里再比一次时（[`supersedes_stored`]）还要用。
+    key_of: fn(Channel) -> &'static str,
 }
 
 impl CheckPlan {
@@ -649,7 +651,7 @@ impl CheckPlan {
         current: Version,
         stored: Option<Channel>,
         entries: &SeenUpdateEntries,
-        key_of: impl Fn(Channel) -> &'static str,
+        key_of: fn(Channel) -> &'static str,
     ) -> Result<Self, CommandError> {
         let package = package_channel_of(&current)?;
         let preference = effective_preference(stored, package);
@@ -681,6 +683,7 @@ impl CheckPlan {
             stored,
             preference,
             seen,
+            key_of,
         })
     }
 
@@ -694,7 +697,7 @@ impl CheckPlan {
 async fn read_check_plan(
     facade: &Facade,
     current: &Version,
-    key_of: impl Fn(Channel) -> &'static str,
+    key_of: fn(Channel) -> &'static str,
 ) -> Result<CheckPlan, CommandError> {
     let (stored, entries) = {
         let petalfall = facade.read().await;
@@ -1433,7 +1436,7 @@ async fn conclude_fetched<U: ReleaseVersion>(
             .filter_map(|fetch| newly_seen(fetch, plan))
             .collect(),
     };
-    if save_check_record(facade, &record).await {
+    if save_check_record(facade, &record, plan.key_of).await {
         while let Conclusion::Available(candidate) = &conclusion {
             if candidate.channel == plan.package {
                 break;
@@ -1489,7 +1492,8 @@ async fn conclude_fetched<U: ReleaseVersion>(
 }
 
 /// 通道这次取到的可用清单头高于本机记录（或没有有效记录）时，要并进见过的版本的那一项。记录只往上走：等于记录的
-/// 不必重写，旧于记录的清单头根本不算这个通道的结果。
+/// 不必重写，旧于记录的清单头根本不算这个通道的结果。这里比的是检查开始时读到的记录，落盘前还要跟那一刻存着的
+/// 再比一次（[`supersedes_stored`]）。
 fn newly_seen<U>(
     fetch: &ChannelFetch<U>,
     plan: &CheckPlan,
@@ -1511,14 +1515,21 @@ fn newly_seen<U>(
 
 /// 把一次检查要记的惰性偏好与见过的版本合成一次落盘（`Petalfall::merge_update_check`），返回惰性偏好是不是该写
 /// 却没写进去。落盘失败只记 error：见过的版本下次取到清单时再记。检查期间用户选过通道时偏好不写，按用户选的算。
-async fn save_check_record(facade: &Facade, record: &UpdateCheckRecord) -> bool {
+/// 见过的版本每一项都在写锁里跟此刻存着的那一项再比一次（[`supersedes_stored`]），存着的用 `key_of` 给的公钥重验。
+async fn save_check_record(
+    facade: &Facade,
+    record: &UpdateCheckRecord,
+    key_of: fn(Channel) -> &'static str,
+) -> bool {
     if *record == UpdateCheckRecord::default() {
         return false;
     }
     let mut merged = None;
     let saved = facade
         .update_if_changed(|petalfall| {
-            let merge = petalfall.merge_update_check(record);
+            let merge = petalfall.merge_update_check(record, |channel, stored, seen| {
+                supersedes_stored(channel, stored, seen, key_of(channel))
+            });
             merged = Some(merge);
             merge.changed
         })
@@ -1551,6 +1562,47 @@ async fn save_check_record(facade: &Facade, record: &UpdateCheckRecord) -> bool 
             merged.preference == LazyPreference::Written
         }
     }
+}
+
+/// 在门面写锁里判断要记的 `seen` 该不该盖掉通道 `channel` 此刻存着的那一项 `stored`（配置里原样的值）。
+///
+/// 自动检查、手动检查与下载前的重查可以同时跑，各自拿开始时读的记录判断「比记录高」；只按那份记录写的话，后落盘的
+/// 那次会把先落盘的更高版本盖回去，回放的旧清单就又能骗过「旧于记录」那层判断。所以落盘前按此刻的记录再比一次：
+/// 存着的那一项照读的时候一样用 `public_key` 重验（[`read_seen_entry`]），没有、坏的、验不过的都当作没有记录，
+/// 可以覆盖；验得过的只在 `seen` 严格更高时覆盖，只差构建元数据的算同一版（[`compare_versions`]）。
+fn supersedes_stored(
+    channel: Channel,
+    stored: Option<&Value>,
+    seen: &SeenUpdateVersion,
+    public_key: &str,
+) -> bool {
+    let Some(stored) = stored else {
+        return true;
+    };
+    let stored = match read_seen_entry(channel, stored, public_key) {
+        Ok(head) => head.version,
+        Err(err) => {
+            tracing::error!(
+                channel = channel.as_str(),
+                error = %err,
+                offered = %seen.version,
+                "配置里这个通道见过的更新版本作废，由这次检查验过的版本覆盖"
+            );
+            return true;
+        }
+    };
+    let offered =
+        Version::parse(&seen.version).expect("要记的版本由验过的清单头的 semver 版本转成");
+    let higher = compare_versions(&offered, &stored).is_gt();
+    if !higher {
+        tracing::info!(
+            channel = channel.as_str(),
+            %stored,
+            %offered,
+            "同时进行的另一次检查已记下不低于这一版的版本，不覆盖"
+        );
+    }
+    higher
 }
 
 /// 先按最新清单重查一次，再按「文件下载源」策略把清单列出的源排好（[`ordered_sources`]），逐个下载并校验签名，
@@ -6184,6 +6236,71 @@ mod tests {
                 (Channel::Dev, verified(Channel::Dev, "1.0.0-dev.8")),
                 (Channel::Stable, verified(Channel::Stable, "1.0.0")),
             ])
+        );
+    }
+
+    /// 两次检查交错：较慢的那次开始时读到的记录是 dev.7、取到 dev.8；其间另一次取到 dev.12 先落了盘。较慢的那次落盘时
+    /// 在写锁里跟此刻存着的 dev.12 再比一次，不比它高就不写，见过的版本不会被压回 dev.8，之后回放 dev.8 仍算旧于记录。
+    /// 此刻存着的那一项要是坏的（被改高、签名对不上），照读的时候一样当作没有，验过的 dev.8 照写。
+    #[tokio::test]
+    async fn a_slower_check_cannot_lower_what_a_faster_one_saved() {
+        let (_beta, beta_url) = source_answering(404).await;
+        let (_stable, stable_url) = source_answering(404).await;
+        let current = "1.0.0-dev.6";
+        let new_flow = || {
+            Flow::new(
+                current,
+                None,
+                Some(json!({ "dev": seen_entry("1.0.0-dev.7") })),
+            )
+            .with_endpoints(Channel::Beta, &[beta_url.as_str()])
+            .with_endpoints(Channel::Stable, &[stable_url.as_str()])
+        };
+        let answers = |dev: &'static str| {
+            vec![
+                (HK_DEV, head(dev, current)),
+                (beta_url.as_str(), EndpointAnswer::Unsuccessful),
+                (stable_url.as_str(), EndpointAnswer::Unsuccessful),
+            ]
+        };
+
+        let flow = new_flow();
+        let slower = flow.ticket();
+        let slower_plan = flow.plan().await;
+        let (slower_fetched, _) = flow.fetch(&slower_plan, answers("1.0.0-dev.8")).await;
+        let (found, _) = flow.check(answers("1.0.0-dev.12")).await;
+        assert_eq!(found.unwrap(), Some(("1.0.0-dev.12", Channel::Dev)));
+        flow.settle(&slower_plan, slower, slower_fetched)
+            .await
+            .unwrap();
+        assert_eq!(
+            flow.saved().unwrap()["seen_update_versions"],
+            json!({ "dev": seen_entry("1.0.0-dev.12") }),
+            "后落盘的 dev.8 不能把先落盘的 dev.12 压回去"
+        );
+        assert_eq!(
+            flow.plan().await.seen_version(Channel::Dev),
+            Some(&version("1.0.0-dev.12"))
+        );
+
+        let flow = new_flow();
+        let ticket = flow.ticket();
+        let plan = flow.plan().await;
+        let (fetched, _) = flow.fetch(&plan, answers("1.0.0-dev.8")).await;
+        let raised = SeenUpdateVersion {
+            version: "1.0.0-dev.99".to_owned(),
+            signature: signature_of("1.0.0-dev.12").to_owned(),
+        };
+        flow.facade
+            .update_if_changed(|petalfall| {
+                petalfall.record_seen_update_version(Channel::Dev, &raised)
+            })
+            .await
+            .unwrap();
+        flow.settle(&plan, ticket, fetched).await.unwrap();
+        assert_eq!(
+            flow.saved().unwrap()["seen_update_versions"],
+            json!({ "dev": seen_entry("1.0.0-dev.8") })
         );
     }
 

@@ -62,7 +62,8 @@ impl SeenUpdateEntries {
 pub struct UpdateCheckRecord {
     /// 偏好仍是缺省时要写下的通道：检查挑中了别的通道的候选时，写当时包的通道。`None` 表示这次不写偏好。
     pub lazy_preference: Option<Channel>,
-    /// 各通道要记下的见过的最高版本。只放验过、且高于原有记录（或原有记录无效、缺失）的那几项。
+    /// 各通道要记下的见过的最高版本。只放验过、且高于检查开始时读到的记录（或那时记录无效、缺失）的那几项；
+    /// 落盘前还要在写锁里跟此刻存着的那一项再比一次（[`Petalfall::merge_update_check`]）。
     pub seen: Vec<(Channel, SeenUpdateVersion)>,
 }
 
@@ -183,9 +184,18 @@ impl Petalfall {
     /// 惰性偏好只在此刻偏好仍是缺省（键不存在、为 `null` 或认不出）时写；调用方在门面写锁里调用，「仍是缺省」
     /// 就是落盘前最后一刻的状态，检查期间用户选过通道就不写，结果里带出选的那个通道。
     ///
+    /// 见过的版本只往上走，而自动检查、手动检查与下载前的重查可以同时跑，各自拿开始时读的记录判断「比记录高」：
+    /// 后落盘的那次不能把先落盘的更高版本盖回去。所以每一项都在这里、在写锁里问一次
+    /// `supersedes(通道, 此刻存着的原样值, 要写的项)`，答是才整项覆盖。存着的值是配置里原样的 JSON，这个通道没有
+    /// 记录、或整张表不是对象时为 `None`；它是坏的还是验得过、高不高，由外壳判断：这里只管存取，不懂验签。
+    ///
     /// 结果说的是内存里的这份配置。落盘失败时 `update_if_changed` 丢掉这份改动，[`LazyPreference::Written`]
     /// 与见过的版本都不作数：偏好按没写下处理，见过的版本只记 error。
-    pub fn merge_update_check(&mut self, record: &UpdateCheckRecord) -> UpdateCheckMerge {
+    pub fn merge_update_check(
+        &mut self,
+        record: &UpdateCheckRecord,
+        mut supersedes: impl FnMut(Channel, Option<&Value>, &SeenUpdateVersion) -> bool,
+    ) -> UpdateCheckMerge {
         let mut changed = false;
         let preference = match record.lazy_preference {
             None => LazyPreference::NotRequested,
@@ -198,11 +208,22 @@ impl Petalfall {
             },
         };
         for (channel, seen) in &record.seen {
-            changed |= self.record_seen_update_version(*channel, seen);
+            if supersedes(*channel, self.stored_seen_entry(*channel), seen) {
+                changed |= self.record_seen_update_version(*channel, seen);
+            }
         }
         UpdateCheckMerge {
             preference,
             changed,
+        }
+    }
+
+    /// 通道 `channel` 此刻存着的原样项。没有这个键时为 `None`；整张表不是对象时同样为 `None`，与
+    /// [`Petalfall::seen_update_entries`] 一致，写入时整张换掉。
+    fn stored_seen_entry(&self, channel: Channel) -> Option<&Value> {
+        match &self.config().seen_update_versions {
+            Some(Value::Object(table)) => table.get(channel.as_str()),
+            _ => None,
         }
     }
 }
@@ -224,6 +245,16 @@ mod tests {
             version: version.to_owned(),
             signature: signature.to_owned(),
         }
+    }
+
+    /// 给 `merge_update_check` 的判断：一律覆盖。用例看的是惰性偏好、合成一次写或落盘，与高低无关。
+    fn always(_: Channel, _: Option<&Value>, _: &SeenUpdateVersion) -> bool {
+        true
+    }
+
+    /// 给 `merge_update_check` 的判断：这次没有要记的版本，问到就是并错了。
+    fn not_asked(channel: Channel, _: Option<&Value>, _: &SeenUpdateVersion) -> bool {
+        panic!("没有要记的版本，却问了 {} 通道", channel.as_str())
     }
 
     /// 照 config.json 的原文开门面，与桌面应用启动同一条读法；`None` 表示没有这个文件。
@@ -404,10 +435,13 @@ mod tests {
             let mut petalfall = open_with(dir.path(), Some(&original)).await;
             let before = petalfall.config().clone();
 
-            let merged = petalfall.merge_update_check(&UpdateCheckRecord {
-                lazy_preference: Some(lazy),
-                seen: Vec::new(),
-            });
+            let merged = petalfall.merge_update_check(
+                &UpdateCheckRecord {
+                    lazy_preference: Some(lazy),
+                    seen: Vec::new(),
+                },
+                not_asked,
+            );
 
             assert_eq!(merged.preference, expected, "{original}");
             let wrote = expected == LazyPreference::Written;
@@ -425,7 +459,7 @@ mod tests {
         // 不要求写偏好时，缺省的偏好原样不动。
         let dir = tempfile::tempdir().unwrap();
         let mut petalfall = open_with(dir.path(), None).await;
-        let merged = petalfall.merge_update_check(&UpdateCheckRecord::default());
+        let merged = petalfall.merge_update_check(&UpdateCheckRecord::default(), not_asked);
         assert_eq!(
             merged,
             UpdateCheckMerge {
@@ -457,7 +491,7 @@ mod tests {
         };
         let mut merged = None;
         update_if_changed(&mut resident, &mut saves, |p| {
-            let result = p.merge_update_check(&record);
+            let result = p.merge_update_check(&record, always);
             merged = Some(result);
             result.changed
         })
@@ -493,7 +527,7 @@ mod tests {
         let mut saves = 0;
         let mut merged = None;
         let wrote = update_if_changed(&mut petalfall, &mut saves, |p| {
-            let result = p.merge_update_check(&record);
+            let result = p.merge_update_check(&record, always);
             merged = Some(result);
             result.changed
         })
@@ -537,7 +571,7 @@ mod tests {
         };
         let mut merged = None;
         let wrote = update_if_changed(&mut petalfall, &mut saves, |p| {
-            let result = p.merge_update_check(&again);
+            let result = p.merge_update_check(&again, always);
             merged = Some(result);
             result.changed
         })
@@ -572,7 +606,7 @@ mod tests {
         let mut saves = 0;
         let mut merged = None;
         let err = update_if_changed(&mut petalfall, &mut saves, |p| {
-            let result = p.merge_update_check(&record);
+            let result = p.merge_update_check(&record, always);
             merged = Some(result);
             result.changed
         })
@@ -740,10 +774,106 @@ mod tests {
         }
     }
 
-    /// 随机的几轮检查结果依次并进配置：每轮结束后，偏好等于第一次要求写时的通道（之后都算显式选过），
-    /// 各通道的项等于最后一次记下的那项；没有新内容的轮次不算变化。
+    /// 每一项写不写在合并时问调用方：交给它的是这个通道此刻存着的原样值，没有这一项、或整张表不是对象时为 `None`，
+    /// 坏的值也原样交出。答否的那一项原样留着，答是的整项覆盖；全都答否时不算变化，不必落盘。
+    #[tokio::test]
+    async fn each_seen_entry_is_written_only_when_the_caller_says_it_supersedes_the_stored_one() {
+        let stored_dev = json!({"version": "1.1.0-dev.62", "signature": "ZGV2NjI="});
+        let dir = tempfile::tempdir().unwrap();
+        let mut petalfall = open_with(
+            dir.path(),
+            Some(&format!(
+                r#"{{"seen_update_versions": {{"dev": {stored_dev}, "beta": 7, "canary": 1}}}}"#
+            )),
+        )
+        .await;
+        let record = UpdateCheckRecord {
+            lazy_preference: None,
+            seen: vec![
+                (Channel::Dev, seen("1.1.0-dev.61", "ZGV2NjE=")),
+                (Channel::Beta, seen("1.0.0-beta.4", "YmV0YTQ=")),
+                (Channel::Stable, seen("1.0.0", "c3RhYmxl")),
+            ],
+        };
+
+        let mut asked = Vec::new();
+        let merged = petalfall.merge_update_check(&record, |channel, stored, entry| {
+            asked.push((channel, stored.cloned(), entry.version.clone()));
+            channel != Channel::Dev
+        });
+
+        assert_eq!(
+            asked,
+            [
+                (
+                    Channel::Dev,
+                    Some(stored_dev.clone()),
+                    "1.1.0-dev.61".to_owned()
+                ),
+                (Channel::Beta, Some(json!(7)), "1.0.0-beta.4".to_owned()),
+                (Channel::Stable, None, "1.0.0".to_owned()),
+            ]
+        );
+        assert_eq!(
+            merged,
+            UpdateCheckMerge {
+                preference: LazyPreference::NotRequested,
+                changed: true
+            }
+        );
+        assert_eq!(
+            petalfall.config().seen_update_versions,
+            Some(json!({
+                "dev": stored_dev,
+                "beta": {"version": "1.0.0-beta.4", "signature": "YmV0YTQ="},
+                "stable": {"version": "1.0.0", "signature": "c3RhYmxl"},
+                "canary": 1,
+            }))
+        );
+
+        let before = petalfall.config().clone();
+        let higher = UpdateCheckRecord {
+            lazy_preference: None,
+            seen: vec![(Channel::Dev, seen("1.1.0-dev.63", "ZGV2NjM="))],
+        };
+        let merged = petalfall.merge_update_check(&higher, |_, _, _| false);
+        assert!(!merged.changed);
+        assert_eq!(petalfall.config(), &before);
+
+        for table in [r#""1.0.0-beta.4""#, "[]", "3"] {
+            let mut broken = open_with(
+                tempfile::tempdir().unwrap().path(),
+                Some(&format!(r#"{{"seen_update_versions": {table}}}"#)),
+            )
+            .await;
+            let mut asked = Vec::new();
+            let merged = broken.merge_update_check(&record, |channel, stored, _| {
+                asked.push((channel, stored.cloned()));
+                false
+            });
+            assert_eq!(
+                asked,
+                [
+                    (Channel::Dev, None),
+                    (Channel::Beta, None),
+                    (Channel::Stable, None)
+                ],
+                "{table}"
+            );
+            assert!(!merged.changed, "{table}");
+        }
+    }
+
+    /// 随机的几轮检查结果依次并进配置：每轮结束后，偏好等于第一次要求写时的通道（之后都算显式选过）；
+    /// 各通道的项只往上走，等于至今要写过的序号最高的那项。判断照外壳的做法：没有记录就写，有记录时比它高才写，
+    /// 每次交来的都是这个通道此刻存着的那一项。没有新内容的轮次不算变化。
     #[test]
-    fn repeated_merges_keep_the_first_lazy_preference_and_the_last_seen_entries() {
+    fn repeated_merges_keep_the_first_lazy_preference_and_the_highest_seen_entries() {
+        fn sequence(version: &str) -> u64 {
+            version.rsplit_once('.').unwrap().1.parse().unwrap()
+        }
+        let index_of = |channel: Channel| CHANNELS.iter().position(|c| *c == channel).unwrap();
+
         let mut rng = fastrand::Rng::with_seed(0x5eed_2b17);
         let dir = tempfile::tempdir().unwrap();
         let mut petalfall = Petalfall::open(
@@ -781,19 +911,39 @@ mod tests {
                         LazyPreference::Written
                     }
                 };
+                let expected_asked: Vec<(Channel, Option<Value>)> = round
+                    .iter()
+                    .map(|(channel, _)| {
+                        let stored = expected_seen[index_of(*channel)].as_ref();
+                        (*channel, stored.map(SeenUpdateVersion::to_value))
+                    })
+                    .collect();
                 for (channel, entry) in &round {
-                    let index = CHANNELS.iter().position(|c| c == channel).unwrap();
-                    if expected_seen[index].as_ref() != Some(entry) {
+                    let kept = &mut expected_seen[index_of(*channel)];
+                    let higher = kept
+                        .as_ref()
+                        .is_none_or(|kept| sequence(&kept.version) < sequence(&entry.version));
+                    if higher {
+                        *kept = Some(entry.clone());
                         changes = true;
                     }
-                    expected_seen[index] = Some(entry.clone());
                 }
 
-                let merged = petalfall.merge_update_check(&UpdateCheckRecord {
-                    lazy_preference: lazy,
-                    seen: round,
-                });
+                let mut asked = Vec::new();
+                let merged = petalfall.merge_update_check(
+                    &UpdateCheckRecord {
+                        lazy_preference: lazy,
+                        seen: round,
+                    },
+                    |channel, stored, entry| {
+                        asked.push((channel, stored.cloned()));
+                        stored.is_none_or(|stored| {
+                            sequence(stored["version"].as_str().unwrap()) < sequence(&entry.version)
+                        })
+                    },
+                );
 
+                assert_eq!(asked, expected_asked);
                 assert_eq!(merged.preference, expected_written);
                 assert_eq!(merged.changed, changes);
                 assert_eq!(petalfall.update_channel_preference(), expected_preference);
