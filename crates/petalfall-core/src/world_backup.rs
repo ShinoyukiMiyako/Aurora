@@ -22,6 +22,7 @@ use tokio::sync::OwnedMutexGuard;
 
 use crate::InstanceError;
 use crate::config::WorldBackupSettings;
+use crate::data_format::GuardMode;
 use crate::error::{CoreError, Result};
 use crate::event::{CoreEvent, DownloadProgress, EventSink, emit};
 use crate::facade::Petalfall;
@@ -113,6 +114,10 @@ impl Petalfall {
     /// 备份一个存档。存档文件夹不在报 [`CoreError::WorldNotFound`]，正被游戏打开报
     /// `Instance(WorldInUse)`。写进清单之后，自动备份开着时按保留策略清理旧备份，清理不掉（包括别的存档的清单
     /// 读不懂）只发一条告警，下次再试：这份备份已经成了，不能因为清理报失败。
+    ///
+    /// 动手之前先以「使用」方式核对当前游戏目录的数据格式记号：目录被更新的落樱用过、记号读不懂时报错，什么都不写。
+    /// 任务重试、列实例被拒后还留着的旧列表都能不经列实例直接调到这里，所以不靠调用方先核对。退出游戏后的自动备份
+    /// 也经这里，被拒时每个存档各记一条失败。
     pub async fn backup_world(
         &self,
         id: &str,
@@ -120,6 +125,7 @@ impl Petalfall {
         kind: BackupKind,
         events: Option<&EventSink>,
     ) -> Result<BackupOutcome> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let paths = self.world_paths(id, world).await?;
         ensure_world_exists(id, world, &paths.world_dir).await?;
         let _world = acquire(&WORLD_LOCKS, &paths.backup_dir, self.cancel_token()).await?;
@@ -211,6 +217,8 @@ impl Petalfall {
     /// 用一份备份替换现在的存档：先解到同级临时目录并确认 level.dat 可读，再把现在的存档交给 `disposer`
     /// （生产是回收站），最后把临时目录改名就位。`file` 必须是清单里登记过的名字，不在清单里或盘上已经
     /// 没有时报 [`CoreError::WorldBackupNotFound`]。任何一步失败，现在的存档都原样不动。
+    ///
+    /// 动手之前先核对当前游戏目录的数据格式记号，同 [`Petalfall::backup_world`]。
     pub async fn restore_world_backup(
         &self,
         id: &str,
@@ -219,6 +227,7 @@ impl Petalfall {
         disposer: impl Disposer + 'static,
         events: Option<&EventSink>,
     ) -> Result<RestoreOutcome> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let paths = self.world_paths(id, world).await?;
         check_backup_file(file)?;
         let _world = acquire(&WORLD_LOCKS, &paths.backup_dir, self.cancel_token()).await?;
@@ -268,6 +277,8 @@ impl Petalfall {
     /// 删除不占实例，能和实例改名同时发生，而改名只持备份根锁。根锁要盖住从查清单到写回的全程：放在写回前才拿
     /// 的话，改名可以从中间插进来，写回时旧路径上的清单读出来是空的，又把搬走的目录在旧名下建了回去，新名下的
     /// 清单还留着已经删掉的那份。排在改名之后的删除查不到这份备份，按不在报错，不写任何东西。
+    ///
+    /// 动手之前先核对当前游戏目录的数据格式记号，同 [`Petalfall::backup_world`]。
     pub async fn delete_world_backup(
         &self,
         id: &str,
@@ -275,6 +286,7 @@ impl Petalfall {
         file: &str,
         disposer: impl Disposer + 'static,
     ) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let paths = self.world_paths(id, world).await?;
         check_backup_file(file)?;
         let _world = acquire(&WORLD_LOCKS, &paths.backup_dir, self.cancel_token()).await?;
@@ -354,7 +366,10 @@ impl Petalfall {
     }
 
     /// 实例改名后把 `instances/<old>` 下的备份并进 `instances/<new>`；旧目录不存在时什么都不做。
+    ///
+    /// 动手之前先核对当前游戏目录的数据格式记号，同 [`Petalfall::backup_world`]。
     pub async fn rename_world_backups(&self, old: &str, new: &str) -> Result<()> {
+        self.guard_game_dir(GuardMode::Use).await?;
         let from = self.instance_backups_dir(old)?;
         let to = self.instance_backups_dir(new)?;
         let root = self.backup_layout().root().to_path_buf();
@@ -2027,5 +2042,152 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(snapshot(&to), merged);
+    }
+
+    // ---- 游戏目录的数据格式记号 ----
+
+    use crate::data_format::testing::with_fixture;
+    use crate::instances::tests::{NEWER_STAMP, NEWER_WRITER, disk_state, own_format, write_stamp};
+
+    /// 会往游戏目录写的入口。
+    const WRITERS: [&str; 4] = [
+        "backup_world",
+        "restore_world_backup",
+        "delete_world_backup",
+        "rename_world_backups",
+    ];
+
+    /// 隔离实例「a」的存档 w 带一份手动备份，返回备份的文件名。各入口真走下去都会改盘：打新包、换掉存档、
+    /// 处置备份、把备份目录搬到「b」名下。
+    async fn instance_with_a_backup(petalfall: &Petalfall) -> String {
+        let saves = isolated(petalfall, "a");
+        world(&saves, "w", "w");
+        petalfall
+            .backup_world("a", "w", BackupKind::Manual, None)
+            .await
+            .unwrap()
+            .backup
+            .file
+    }
+
+    async fn call_writer(
+        petalfall: &Petalfall,
+        entry: &str,
+        file: &str,
+        disposer: &RecordingDisposer,
+    ) -> Result<()> {
+        match entry {
+            "backup_world" => petalfall
+                .backup_world("a", "w", BackupKind::Manual, None)
+                .await
+                .map(drop),
+            "restore_world_backup" => petalfall
+                .restore_world_backup("a", "w", file, disposer.clone(), None)
+                .await
+                .map(drop),
+            "delete_world_backup" => {
+                petalfall
+                    .delete_world_backup("a", "w", file, disposer.clone())
+                    .await
+            }
+            "rename_world_backups" => petalfall.rename_world_backups("a", "b").await,
+            other => panic!("表里没有这个入口：{other}"),
+        }
+    }
+
+    /// 当前游戏目录被更新的落樱用过：每个写入口都报游戏目录太新，数据目录与游戏目录里的文件内容、修改时间都不变，
+    /// 没有多出文件，也没有处置任何东西。
+    #[tokio::test]
+    async fn writers_refuse_a_newer_game_dir_and_touch_no_file() {
+        for entry in WRITERS {
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path());
+            let file = instance_with_a_backup(&petalfall).await;
+            let disposer = RecordingDisposer::new(tmp.path().join("trash"));
+            write_stamp(petalfall.game_dir(), NEWER_STAMP);
+            let before = disk_state(tmp.path());
+
+            let err = with_fixture(
+                own_format(2),
+                call_writer(&petalfall, entry, &file, &disposer),
+            )
+            .await
+            .unwrap_err();
+
+            match err {
+                CoreError::GameDirDataTooNew {
+                    path,
+                    found,
+                    supported,
+                    written_by,
+                } => {
+                    assert_eq!(path, petalfall.game_dir(), "{entry}");
+                    assert_eq!((found, supported), (3, 2), "{entry}");
+                    assert_eq!(written_by.as_deref(), Some(NEWER_WRITER), "{entry}");
+                }
+                other => panic!("{entry} 应报游戏目录太新，实际是 {other:?}"),
+            }
+            assert_eq!(disk_state(tmp.path()), before, "{entry}");
+            assert_eq!(disposer.seen(), Vec::<PathBuf>::new(), "{entry}");
+        }
+    }
+
+    /// 不换本版号：记号读不懂与号是多少无关，生产的这条路同样在碰任何文件之前拦下。
+    #[tokio::test]
+    async fn writers_refuse_an_unreadable_stamp_and_touch_no_file() {
+        for entry in ["backup_world", "delete_world_backup"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let petalfall = petalfall_at(tmp.path());
+            let file = instance_with_a_backup(&petalfall).await;
+            let disposer = RecordingDisposer::new(tmp.path().join("trash"));
+            write_stamp(petalfall.game_dir(), r#"{"data_format":"3"}"#);
+            let before = disk_state(tmp.path());
+
+            let err = call_writer(&petalfall, entry, &file, &disposer)
+                .await
+                .unwrap_err();
+
+            assert!(
+                matches!(&err, CoreError::DataFormatUnreadable { path, .. } if path == petalfall.game_dir()),
+                "{entry}：{err:?}"
+            );
+            assert_eq!(disk_state(tmp.path()), before, "{entry}");
+        }
+    }
+
+    /// 退出游戏后的自动备份经 backup_world 写盘：游戏目录被更新的落樱用过时，玩过的存档各记一条游戏目录太新的失败，
+    /// 什么都不写。
+    #[tokio::test]
+    async fn auto_backup_in_a_newer_game_dir_fails_each_world_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let petalfall = petalfall_at(tmp.path());
+        let saves = isolated(&petalfall, "a");
+        world(&saves, "w", "w");
+        write_stamp(petalfall.game_dir(), NEWER_STAMP);
+        let before = disk_state(tmp.path());
+
+        let outcome = with_fixture(
+            own_format(2),
+            petalfall.auto_backup_after_session("a", SystemTime::UNIX_EPOCH),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.backed_up, Vec::<String>::new());
+        assert_eq!(outcome.failed.len(), 1);
+        assert_eq!(outcome.failed[0].0, "w");
+        assert!(
+            matches!(
+                &outcome.failed[0].1,
+                CoreError::GameDirDataTooNew {
+                    found: 3,
+                    supported: 2,
+                    ..
+                }
+            ),
+            "{:?}",
+            outcome.failed[0].1
+        );
+        assert_eq!(disk_state(tmp.path()), before);
     }
 }
