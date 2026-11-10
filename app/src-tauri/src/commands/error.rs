@@ -385,6 +385,11 @@ fn core_code(err: &CoreError) -> &'static str {
         CoreError::InvalidServerAddress { .. } => code::INVALID_ARGUMENT,
         CoreError::ServerNotPinned { .. } => code::SERVER_NOT_PINNED,
         CoreError::InvalidGameDirectory { .. } => code::INVALID_GAME_DIRECTORY,
+        // 数据目录的关卡只在构造门面、启动外壳时把关，拒绝时在窗口出现之前就弹框退出了，没有命令能收到它；
+        // 真走到命令边界只能是程序缺陷。
+        CoreError::DataRootRefused(_) => code::INTERNAL,
+        CoreError::GameDirDataTooNew { .. } => code::GAME_DIR_DATA_TOO_NEW,
+        CoreError::DataFormatUnreadable { .. } => code::DATA_FORMAT_UNREADABLE,
         CoreError::InstanceMoveBlocked { .. } => code::INSTANCE_MOVE_BLOCKED,
         CoreError::InstanceMoveVerifyFailed { .. } => code::INSTANCE_MOVE_VERIFY_FAILED,
         CoreError::MemoryUnavailable => code::MEMORY_UNAVAILABLE,
