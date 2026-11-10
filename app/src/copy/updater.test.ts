@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { APP_NAME } from "../lib/app-info";
 import { downloadFailureCopy, refusalReasonCopy, sourceSwitchedCopy, UPDATE_COPY, UPDATE_FOUND_TOAST, updateChannelLabel, updateChannelNote, updateFoundToastBody } from "./updater";
 
@@ -138,4 +138,46 @@ describe("换源的说法", () => {
     expect(sourceSwitchedCopy({ index: 0, count: 4 })).toBeNull();
     expect(sourceSwitchedCopy(null)).toBeNull();
   });
+});
+
+describe("通道叫法所在的三份文案谁先加载都能用", () => {
+  // flows 与 data-format 互相引用，updater 在模块顶层就读 flows 的导出：只要引用绕回 updater，总有一种加载顺序读到未初始化的值
+  const LOAD = {
+    flows: () => import("./flows"),
+    updater: () => import("./updater"),
+    "data-format": () => import("./data-format"),
+  } as const;
+  type Entry = keyof typeof LOAD;
+  const ORDERS: readonly (readonly Entry[])[] = [
+    ["flows", "updater", "data-format"],
+    ["flows", "data-format", "updater"],
+    ["updater", "flows", "data-format"],
+    ["updater", "data-format", "flows"],
+    ["data-format", "flows", "updater"],
+    ["data-format", "updater", "flows"],
+  ];
+
+  async function loadInOrder(order: readonly Entry[]) {
+    vi.resetModules();
+    for (const entry of order) await LOAD[entry]();
+    // 三份都已求值，再取拿到的是同一轮加载的模块
+    return { flows: await LOAD.flows(), updater: await LOAD.updater(), dataFormat: await LOAD["data-format"]() };
+  }
+
+  for (const order of ORDERS) {
+    it(`按 ${order.join("、")} 的顺序加载`, async () => {
+      const { flows, updater, dataFormat } = await loadInOrder(order);
+      // 不是文件开头静态引入的那一份：这一轮确实按给定顺序重新求值过
+      expect(updater.UPDATE_COPY).not.toBe(UPDATE_COPY);
+      // 映射与叫法只有 flows 一份，updater 原样转出
+      expect(updater.updateChannelLabel).toBe(flows.updateChannelLabel);
+      expect(updater.RELEASE_CHANNEL_OF).toBe(flows.RELEASE_CHANNEL_OF);
+      expect((["dev", "beta", "stable"] as const).map(flows.updateChannelLabel)).toEqual(["预览版", "测试版", "正式版"]);
+      // updater 在模块顶层读过通道标签
+      expect(updater.UPDATE_COPY.notPublished).toBe("正式版还没有发布");
+      expect(updater.UPDATE_COPY.channelOptionDesc.stable).toBe("测试版里没再发现问题的版本，最稳，更新最慢");
+      expect(dataFormat.dataWriterName({ written_by: "1.1.0-dev.57", written_by_channel: "dev" })).toBe("预览版 1.1.0-dev.57");
+      expect(flows.taskFailureReason({ code: "game_dir_data_too_new", message: "x" })).toBe(`当前游戏目录被更新的${APP_NAME}用过，这个版本读不了里面的实例`);
+    });
+  }
 });

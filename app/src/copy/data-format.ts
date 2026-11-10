@@ -3,11 +3,8 @@
 
 import type { DataFormatUnreadableDto, GameDirDataTooNewDto } from "../ipc/instances";
 import type { UpdateChannel } from "../ipc/system";
-import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
-import { joinMixed, RELEASE_CHANNEL_LABEL } from "./flows";
-
-/** 后端的通道名到界面的发布通道：dev 在界面上叫预览版。 */
-const RELEASE_CHANNEL_OF: Readonly<Record<UpdateChannel, ReleaseChannel>> = { dev: "preview", beta: "beta", stable: "stable" };
+import { APP_NAME } from "../lib/app-info";
+import { joinMixed, updateChannelLabel } from "./flows";
 
 /** 用过这份数据的那一版：后端给的版本号与它所属的通道，两项同为空或同不为空。 */
 export type DataWriter = Pick<GameDirDataTooNewDto, "written_by" | "written_by_channel">;
@@ -22,7 +19,7 @@ function knownWriter({ written_by: version, written_by_channel: channel }: DataW
 /** 用过这份数据的那一版的叫法：「预览版 1.1.0-dev.57」；不知道是哪一版时是「更新的落樱」。 */
 export function dataWriterName(writer: DataWriter): string {
   const known = knownWriter(writer);
-  return known === null ? `更新的${APP_NAME}` : `${RELEASE_CHANNEL_LABEL[RELEASE_CHANNEL_OF[known.channel]]} ${known.version}`;
+  return known === null ? `更新的${APP_NAME}` : `${updateChannelLabel(known.channel)} ${known.version}`;
 }
 
 /** 该装的那一版：「预览版 1.1.0-dev.57 或更新的版本」；不知道是哪一版时是「更新的版本」。 */

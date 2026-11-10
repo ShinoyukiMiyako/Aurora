@@ -7,6 +7,7 @@ import type { BaseBusyLock, InstanceLock } from "../domain/instance-locks";
 import type { AccountKind, FailureCode, InstallPhase, LoaderKind, SessionPhase, StopReason, TaskError, TaskKind, TaskPhase, TaskStatus } from "../domain/types";
 import type { CrashSource, ExitCodeKind, ExitCodeNoteDto, LaunchWarningCode } from "../ipc/diagnostics";
 import type { MoveBlockerDto, MoveFollowUpDto, NameRule, TemplateSkipReason } from "../ipc/instances";
+import type { UpdateChannel } from "../ipc/system";
 import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
 import { DATA_FORMAT_TASK_FAILURE, moveTargetDataFormatUnreadableReason, moveTargetDataTooNewReason } from "./data-format";
 
@@ -90,6 +91,17 @@ export const RELEASE_CHANNEL_LABEL: Readonly<Record<ReleaseChannel, string>> = {
   beta: "测试版",
   preview: "预览版",
 };
+
+// 后端通道名的映射与叫法放在这里而不放进 copy/updater：data-format 也要用，若从 updater 引，flows 引 data-format、
+// data-format 引 updater、updater 又引 flows 绕成一圈，而 updater 在模块顶层就读 flows 的导出，先加载 flows 时它读到的还是未定义。
+
+/** 后端的通道名到界面的发布通道：dev 在界面上叫预览版。 */
+export const RELEASE_CHANNEL_OF: Readonly<Record<UpdateChannel, ReleaseChannel>> = { dev: "preview", beta: "beta", stable: "stable" };
+
+/** 后端通道名在界面上的叫法，与关于页的通道标同一套（RELEASE_CHANNEL_LABEL）。 */
+export function updateChannelLabel(channel: UpdateChannel): string {
+  return RELEASE_CHANNEL_LABEL[RELEASE_CHANNEL_OF[channel]];
+}
 
 /** 加载器的官方写法（英文专名保持官方大小写）。 */
 export const LOADER_NAME: Readonly<Record<LoaderKind, string>> = {

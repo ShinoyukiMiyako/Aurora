@@ -1,18 +1,12 @@
 // 启动器更新的文案：外壳的更新面板与发现新版本的通知、设置页关于分区的更新卡共用。产品名一律经 APP_NAME 拼入。
 
 import type { RefusalReason, UpdateChannel, UpdaterUnsupportedReason } from "../ipc/system";
-import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
-import { CONFIRM_COPY, RELEASE_CHANNEL_LABEL } from "./flows";
+import { APP_NAME } from "../lib/app-info";
+import { CONFIRM_COPY, RELEASE_CHANNEL_LABEL, updateChannelLabel } from "./flows";
+
+export { RELEASE_CHANNEL_OF, updateChannelLabel } from "./flows";
 
 const RESTART_INSTALL = "重启并安装";
-
-/** 后端的通道名到界面的发布通道：dev 在界面上叫预览版。 */
-export const RELEASE_CHANNEL_OF: Readonly<Record<UpdateChannel, ReleaseChannel>> = { dev: "preview", beta: "beta", stable: "stable" };
-
-/** 后端通道名在界面上的叫法，与关于页的通道标同一套（RELEASE_CHANNEL_LABEL）。 */
-export function updateChannelLabel(channel: UpdateChannel): string {
-  return RELEASE_CHANNEL_LABEL[RELEASE_CHANNEL_OF[channel]];
-}
 
 const STABLE_LABEL = RELEASE_CHANNEL_LABEL.stable;
 
