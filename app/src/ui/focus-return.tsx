@@ -73,8 +73,10 @@ export function FocusReturnPoint({ active, shouldReturn, handle }: FocusReturnPo
     if (skipped.current) return;
     const check = shouldReturnRef.current;
     if (check !== undefined && !check()) return;
-    // 还在文档里但已被原生禁用的目标接不住焦点，焦点会留在正在退场的浮层里，浮层移除后掉回 body
-    const usable = target instanceof HTMLElement && target.isConnected && target !== document.body && !target.matches(":disabled");
+    // 还在文档里但已被原生禁用的目标接不住焦点，焦点会留在正在退场的浮层里，浮层移除后掉回 body。
+    // 在 inert 子树里的也一样：打开浮层的按钮所在的块正在退场（Appear、列表行的退场层带 inert）
+    const usable =
+      target instanceof HTMLElement && target.isConnected && target !== document.body && !target.matches(":disabled") && target.closest("[inert]") === null;
     const destination = usable ? target : regionDestination(region.current);
     destination?.focus();
   };

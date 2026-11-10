@@ -1,8 +1,8 @@
 // 当前账户聚光卡：左侧舞台站着角色立绘，右侧是名称、类型、UUID、验证信息与动作。
 // 凭据失效时动作换成「重新登录」主按钮，页头的「添加微软账户」随之降为次按钮，保证每屏一个主按钮。
 
-import { motion } from "framer-motion";
-import { useEffect, useRef } from "react";
+import { motion, useAnimationControls } from "framer-motion";
+import { useLayoutEffect, useRef } from "react";
 import { Icon } from "../../art/Icon";
 import { formatDate, formatRelative } from "../../domain/format";
 import type { Account } from "../../domain/adapt";
@@ -31,10 +31,17 @@ export interface SpotlightProps {
 
 export function Spotlight({ account, online, act }: SpotlightProps) {
   const now = useNow(RELATIVE_REFRESH_MS);
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  // 换了当前账户：信息列原地换人，再从下方 6px 淡入落位；挂载时就在的跟着页面入场，不另播。
+  // 不按账户给这一列换 key 重挂：里面的刷新、重新登录、更多菜单的触发器会跟着重建，键盘焦点掉回 body
+  // （从聚光卡的更多菜单删除当前账户，确认框关上、焦点还给触发器之后，下一个账户顶上来的那一刻）
+  const swap = useAnimationControls();
+  const shownUuid = useRef(account.uuid);
+  useLayoutEffect(() => {
+    if (shownUuid.current === account.uuid) return;
+    shownUuid.current = account.uuid;
+    swap.set("hidden");
+    void swap.start("show");
+  }, [account.uuid, swap]);
   const line = kindLine(account);
   const uuid = displayUuid(account.uuid);
   const credential = isCredential(account);
@@ -50,8 +57,7 @@ export function Spotlight({ account, online, act }: SpotlightProps) {
     <Card as="section" padding="none" clip selected className={styles.spot}>
       <div className={styles.spotGrid}>
         <Stage account={account} variant="spot" />
-        {/* 换了当前账户：信息列整列换人，从下方 6px 淡入落位（旧的一列同一帧让出）。挂载时就在的跟着页面入场 */}
-        <motion.div key={account.uuid} className={styles.spotInfo} variants={tabPanel} initial={mounted.current ? "hidden" : false} animate="show">
+        <motion.div className={styles.spotInfo} variants={tabPanel} initial={false} animate={swap}>
           <div className={styles.tagRow}>
             <Tag tone="accent" icon="check" size="sm">
               {ACCOUNTS_COPY.currentTag}
@@ -67,7 +73,8 @@ export function Spotlight({ account, online, act }: SpotlightProps) {
           </p>
           <div className={styles.uuid}>
             <code className={styles.uuidText}>{uuid}</code>
-            <CopyButton text={uuid} label={ACCOUNTS_COPY.copyUuid} onCopy={act.copyText} feedbackMs={COPY_FEEDBACK_MS} />
+            {/* 按账户重挂：换人时不带着上一位的「已复制」 */}
+            <CopyButton key={account.uuid} text={uuid} label={ACCOUNTS_COPY.copyUuid} onCopy={act.copyText} feedbackMs={COPY_FEEDBACK_MS} />
           </div>
           <KV rows={rows} className={styles.spotKv} />
           <div className={styles.spotActions}>

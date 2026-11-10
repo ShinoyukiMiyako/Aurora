@@ -102,10 +102,11 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 问候是页面的 h1，名字一行在它里面加载。撑满整行：名字骨架按百分比给的宽才有参照（标题没有底色，撑满与随名字收缩看起来一样） */
 .greetTitle {
   display: flex;
   flex-direction: column;
-  gap: var(--sk-space-2);
+  align-self: stretch;
   max-width: 100%;
   min-width: 0;
   margin: var(--sk-space-6) 0 0;
@@ -119,8 +120,14 @@
   color: var(--sk-text-2);
 }
 
+/*
+ * 名字一行，真实名字与它的骨架共用。与问候、账户行的间距写成内边距：这一行包在加载区与出没动画的层里，
+ * 外边距会穿过这些层折叠出去，退场的层被抽成绝对定位时不再折叠，正在淡出的那一行就会错开几个像素。
+ * 没有账户时整行不渲染，问候下面不留空。
+ */
 .greetName {
-  margin-bottom: var(--sk-space-4);
+  display: block;
+  padding: var(--sk-space-2) 0 var(--sk-space-4);
   overflow: hidden;
   font-size: var(--sk-fs-title);
   line-height: var(--sk-lh-title);
@@ -130,23 +137,16 @@
   white-space: nowrap;
 }
 
-/* 问候与账户行这一块加载区：占满问候卡的宽，骨架里按百分比给的宽才有参照 */
+/* 账户行这一块加载区：占满问候卡的宽，骨架里按百分比给的宽才有参照 */
 .greetAccount {
   align-self: stretch;
   min-width: 0;
 }
 
-.greetAccountBody {
+/* 账户行（标签，或说明加按钮）与它的骨架各自所在的那一层：横排 flex，标签按自己的高排，不被所在行的行高撑高 */
+.greetLine {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--sk-space-4);
   min-width: 0;
-}
-
-/* 骨架里的标题撑满整行：名字骨架的宽按整行算，真实标题仍随名字收缩 */
-.greetTitleSkeleton {
-  align-self: stretch;
 }
 
 .greetIssue {
@@ -263,7 +263,8 @@
 
 /*
  * 加载占位与各面内容一律撑满卡片：卡片常被同排拉高（wide 档的洞察卡），标题区与胶囊靠 margin-top: auto 压在底边，
- * 骨架也得一样高，落点才对得上。Loadable 的骨架层（带 aria-hidden）是它根上的直接子项，这里一并撑开。
+ * 骨架也得一样高，落点才对得上。Loadable 没有给骨架层挂类名的接口：骨架层按它的约定整层带 aria-hidden、
+ * 是它根上的直接子项，这里照此选中一并撑开。这条层级关系由主页测试钉住，Loadable 改了包裹结构会先在那里挂掉。
  */
 .heroLoadable,
 .heroLoadable > [aria-hidden="true"],
@@ -438,11 +439,6 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--sk-space-10);
-}
-
-/* 「实例详情」的盒子：胶囊伸缩时由动作行的让位整块移动它（按钮自己外面的包裹是 display: contents，移不动） */
-.heroDetails {
-  display: flex;
 }
 
 .heroBlock {
@@ -767,12 +763,14 @@ button.bar:not(:disabled):hover .barTrack {
  * 照真实的行排：上距 10、行距 2 同资讯列表与服务器列表，行内上下 8、左右 10 加 40 的缩略图，
  * 资讯行（正文一行加说明一行）合 56 同列表行，服务器行（正文一行加说明两行）合 74 同服务器行。
  * 骨架换成内容时每一行都在原处，卡片不跳。
+ * 上距用内边距而不是外边距：外边距会穿过 Loadable 的骨架层（无内边距的块）折叠出去，退场时那一层被抽成
+ * 绝对定位（按量到的 offsetTop 摆放、自成格式化上下文），外边距不再折叠，骨架行在淡出途中下跳 10。
  */
 .rowSkeletons {
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-2);
-  margin-top: var(--sk-space-10);
+  padding-top: var(--sk-space-10);
 }
 
 .rowSkeleton {
@@ -798,15 +796,23 @@ button.bar:not(:disabled):hover .barTrack {
   line-height: var(--sk-lh-caption);
 }
 
-/* 加载超过一阵子时骨架下面的一句「比平时慢一些」 */
+/*
+ * 加载超过一阵子时骨架下面的一句「比平时慢一些」。这是 Appear 的包裹层，上距用内边距：退场时它被抽成绝对定位、
+ * top 取量到的边框盒位置，外边距还会再加在上面，整句在淡出途中下跳 8。
+ */
 .rowSlowHint {
-  margin-top: var(--sk-space-8);
+  padding-top: var(--sk-space-8);
 }
 
 /* ---------------------------------------------------------------- 资讯 */
 
+/*
+ * 包在资讯列表外面的那一层，上距与骨架相同。不写在 List 自己身上：List 的根规则清零了外边距与内边距，
+ * 与这里同一特异性，谁赢取决于两份样式表的注入顺序（冷启动主页时 List 的在后，上距被清掉，内容比骨架矮 10）。
+ * 同样用内边距，内容层退场被抽成绝对定位时不下跳。
+ */
 .newsList {
-  margin-top: var(--sk-space-10);
+  padding-top: var(--sk-space-10);
 }
 
 .newsNote {

@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { visualElementStore } from "framer-motion";
+import { MotionConfig, visualElementStore } from "framer-motion";
 import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
@@ -26,10 +26,11 @@ interface HostProps {
   layoutKey?: string;
   header?: boolean;
   footer?: boolean;
+  className?: string;
 }
 
 /** 锚点按钮加一个开着的浮层；rerender 换 props 时面板不重新挂载。 */
-function Host({ layoutKey, header = false, footer = false }: HostProps) {
+function Host({ layoutKey, header = false, footer = false, className }: HostProps) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
   return (
     <>
@@ -40,6 +41,7 @@ function Host({ layoutKey, header = false, footer = false }: HostProps) {
         onClose={() => undefined}
         placement="bottom-end"
         aria-label="下载快览"
+        className={className}
         layoutKey={layoutKey}
         header={header ? <p>标题行</p> : undefined}
         footer={footer ? <p>底栏</p> : undefined}
@@ -137,6 +139,20 @@ describe("形变与重新定位", () => {
     await waitForFrames(() => expect(panel().style.transformOrigin).toBe("93.75% 100% 0"));
   });
 
+  it("形变的面板交给布局动画校正的圆角，取的是样式表里（含调用方 className）的圆角；量到之前不写行内圆角", async () => {
+    const sheet = document.createElement("style");
+    sheet.textContent = ".peek-round { border-top-left-radius: 7px; }";
+    document.head.append(sheet);
+    try {
+      mount({ layoutKey: "a", className: "peek-round" });
+      // 行内值会盖过 className：挂上那一刻没有行内圆角，量的才是 className 里的
+      expect(panel().style.borderRadius).toBe("");
+      await waitForFrames(() => expect(panel().style.borderRadius).toBe("7px"));
+    } finally {
+      sheet.remove();
+    }
+  });
+
   it("主体在形变途中带标记（样式表据此让它途中不滚动），形变收尾时去掉；跟的是投影节点的开始与结束", () => {
     mount({ layoutKey: "a" });
     const body = panel().querySelector<HTMLElement>(`.${styles.body}`) as HTMLElement;
@@ -147,6 +163,57 @@ describe("形变与重新定位", () => {
     // 窗口缩放、下一次测量提前收尾时只有 animationComplete，没有 onLayoutAnimationComplete
     act(() => projection.notifyListeners("animationComplete"));
     expect(body.hasAttribute("data-morphing")).toBe(false);
+  });
+});
+
+// 根部 MotionConfig 在减少动画时只把位移与缩放改成一步到位：照用平常的进出，关上的那一帧面板先缩一截，再淡出
+describe("减少动画", () => {
+  const PLACED = /translate|scale/;
+
+  /** 开着的浮层挂在指定的减少动画档位下；返回挂上那一刻与退场途中（已开始变淡）面板的 transform。 */
+  async function panelTransforms(reducedMotion: "always" | "never"): Promise<{ mounted: string; leaving: string }> {
+    const handles: { close?: () => void } = {};
+    function Closable() {
+      const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+      const [open, setOpen] = useState(true);
+      handles.close = () => setOpen(false);
+      return (
+        <>
+          <button ref={setAnchor}>筛选</button>
+          <Popover open={open && anchor !== null} anchor={anchor} onClose={() => setOpen(false)} aria-label="筛选">
+            <p>主体</p>
+          </Popover>
+        </>
+      );
+    }
+    view = render(
+      <OverlayProvider>
+        <MotionConfig reducedMotion={reducedMotion}>
+          <Closable />
+        </MotionConfig>
+        <OverlayRoot />
+      </OverlayProvider>,
+    );
+    const p = panel();
+    const mounted = p.style.transform;
+    expect(p.style.opacity).toBe("0");
+    await waitForFrames(() => expect(p.style.opacity).toBe("1"));
+    act(() => handles.close?.());
+    expect(p.hasAttribute("data-exiting")).toBe(true);
+    await waitForFrames(() => expect(Number(p.style.opacity)).toBeLessThan(1));
+    return { mounted, leaving: p.style.transform };
+  }
+
+  it("平常：面板从略小处长出，退场边淡出边缩小", async () => {
+    const { mounted, leaving } = await panelTransforms("never");
+    expect(mounted).toBe("scale(0.97)");
+    expect(leaving).toMatch(/scale\(0\.9\d*\)/);
+  });
+
+  it("减少动画：进出只动透明度，挂上时与退场途中面板都没有位移或缩放", async () => {
+    const { mounted, leaving } = await panelTransforms("always");
+    expect(leaving).not.toMatch(PLACED);
+    expect(mounted).not.toMatch(PLACED);
   });
 });
 
@@ -180,5 +247,12 @@ describe("样式约定", () => {
     expect(body.get("max-height")).toBe("var(--popover-body-max-height, none)");
     expect(body.get("min-height")).toBe("0");
     expect(rule(".body[data-morphing]").get("overflow-y")).toBe("hidden");
+  });
+
+  it("头部、底部与内容层自己是定位祖先：退场项量位置与形变途中被摆放用的是同一个基准，不会被推出裁切区", () => {
+    // 头部与底部共用一条规则
+    expect(css).toMatch(/(^|\n)\.header,\s*\.footer\s*\{/);
+    expect(rule(".footer").get("position")).toBe("relative");
+    expect(rule(".content").get("position")).toBe("relative");
   });
 });

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
+import { MotionConfig } from "framer-motion";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, Profiler } from "react";
@@ -7,7 +8,9 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 import { CONFIRM_COPY, LAUNCH_COPY, PHASE_LABEL, SESSION_COPY, STOPPED_LABEL } from "../copy/flows";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { GAME_EXIT_EVENT, GAME_LOG_EVENT, LAUNCH_PHASE_EVENT } from "../ipc/launch";
+import { formatSpeed } from "../domain/format";
 import { BREATH_DELAY_VAR } from "../launch/breath";
+import { feedSpeed, publishSpeed, startSpeed } from "../lib/progress-display";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { startSession, type SessionState } from "../state/session";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
@@ -17,7 +20,8 @@ import { bootOverrides, callsOf, cancelledError, deferred, emit, instanceDto, re
 import { ISLAND_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider } from "./shell";
-import { downloadStageNote, islandLayoutKey, islandSecond, islandSecondText, islandSlot, islandTone, LOG_LINES, stageNote, stageState, StatusIsland, type IslandSecond } from "./StatusIsland";
+import popoverStyles from "../ui/Popover.module.css";
+import { detailLayoutKey, downloadStageNote, islandLayoutKey, islandSecond, islandSecondText, islandSlot, islandTone, loadingFinished, LOG_LINES, stageNote, stageState, StatusIsland, type IslandSecond } from "./StatusIsland";
 import styles from "./StatusIsland.module.css";
 import type { Tier } from "./tier";
 
@@ -43,6 +47,19 @@ vi.mock("../ui/Button", async (orig) => {
     Button: (props: Parameters<typeof mod.Button>[0]) => {
       renders.Button += 1;
       return mod.Button(props);
+    },
+  };
+});
+
+// 开着的浮层收到的布局键：形变本身在 jsdom 里测不了，只核对状态岛把哪个键交给了 Popover；渲染照常交给真实现
+const popoverKeys = vi.hoisted(() => [] as (string | number | undefined)[]);
+vi.mock("../ui/Popover", async (orig) => {
+  const mod = await orig<typeof import("../ui/Popover")>();
+  return {
+    ...mod,
+    Popover: (props: Parameters<typeof mod.Popover>[0]) => {
+      if (props.open) popoverKeys.push(props.layoutKey);
+      return mod.Popover(props);
     },
   };
 });
@@ -255,8 +272,15 @@ describe("阶段清单", () => {
   });
 
   it("下载阶段进行中写文件数与速度；数量未知时不写", () => {
-    expect(downloadStageNote(session({ stageIndex: 4, download: { done: 12, total: 40, bytes: 0, totalBytes: null, speedBps: 2048 } }))).toBe("12/40 · 2.0 KB/s");
-    expect(downloadStageNote(session({ stageIndex: 4, download: { done: 0, total: null, bytes: 0, totalBytes: null, speedBps: 0 } }))).toBeNull();
+    expect(downloadStageNote(session({ phase: "downloading", stageIndex: 4, download: { done: 12, total: 40, bytes: 0, totalBytes: null, speedBps: 2048 } }))).toBe("12/40 · 2.0 KB/s");
+    expect(downloadStageNote(session({ phase: "downloading", stageIndex: 4, download: { done: 0, total: null, bytes: 0, totalBytes: null, speedBps: 0 } }))).toBeNull();
+  });
+
+  it("加载停在下载这一步（取消、失败）：只留文件数，不再写速度", () => {
+    const download = { done: 7, total: 40, bytes: 0, totalBytes: null, speedBps: 4096 };
+    expect(downloadStageNote(session({ phase: "stopped", stopReason: "cancelled", stageIndex: 4, download }))).toBe("7/40");
+    expect(downloadStageNote(session({ phase: "failed", stageIndex: 4, download }))).toBe("7/40");
+    expect(downloadStageNote(session({ phase: "downloading", stageIndex: 4, download }))).toBe("7/40 · 4.0 KB/s");
   });
 
   it("越过下载阶段且没有下载记录：写「无需下载」；还没到下载阶段不写", () => {
@@ -273,6 +297,66 @@ describe("阶段清单", () => {
   });
 });
 
+describe("详情浮层的布局键", () => {
+  const ALL_STAGES = [true, false];
+
+  it("进度、速度、阶段推进、提醒数、日志都不换键：三个加载阶段是同一套动作", () => {
+    const loading: Partial<SessionState>[] = [
+      { phase: "preparing", stageIndex: 0, progress: 0 },
+      { phase: "preparing", stageIndex: 3, progress: 0.2, stageWarnings: [0, 0, 3, 0, 0, 0, 0, 0, 0] },
+      { phase: "downloading", stageIndex: 4, progress: 0.42, download: { done: 3, total: 40, bytes: 0, totalBytes: null, speedBps: 9000 } },
+      { phase: "launching", stageIndex: 7, progress: 0.91, logs: [{ at: T0, level: "info", source: "launcher", text: "x" }] },
+    ];
+    for (const stages of ALL_STAGES) expect(new Set(loading.map((patch) => detailLayoutKey(session(patch), stages))).size).toBe(1);
+  });
+
+  it("动作行换一套按钮时换键：加载、运行、已结束、崩溃、失败两两不同；失败时修复文案不同也不同", () => {
+    const kinds: Partial<SessionState>[] = [
+      { phase: "launching", stageIndex: 6 },
+      { phase: "running", runningSince: T0 },
+      { phase: "stopped", stopReason: "exited", runningSince: T0 },
+      { phase: "crashed", runningSince: T0 },
+      { phase: "failed", failure: { code: "account_relogin", params: {} } },
+      { phase: "failed", failure: { code: "account_refresh_network", params: {} } },
+    ];
+    expect(new Set(kinds.map((patch) => detailLayoutKey(session(patch), false))).size).toBe(kinds.length);
+  });
+
+  it("阶段清单出没、换成另一次启动的清单时换键", () => {
+    const s = session({ phase: "downloading", stageIndex: 4 });
+    expect(detailLayoutKey(s, true)).not.toBe(detailLayoutKey(s, false));
+    expect(detailLayoutKey({ ...s, taskId: "launch-2" }, true)).not.toBe(detailLayoutKey(s, true));
+    // 不画清单时与哪一次启动无关
+    expect(detailLayoutKey({ ...s, taskId: "launch-2" }, false)).toBe(detailLayoutKey(s, false));
+  });
+
+  it("失败会话缺失败码是状态坏了，直接抛错", () => {
+    expect(() => detailLayoutKey(session({ phase: "failed" }), false)).toThrow("失败码");
+  });
+});
+
+describe("加载走完的收尾", () => {
+  const since = T0 + 4321;
+
+  it("在这座岛上画过加载的那一局进入运行：完成项是这一局，完成时刻取运行起点", () => {
+    const s = session({ phase: "running", runningSince: since, stageIndex: 8, progress: 1 });
+    expect(loadingFinished(s, "launch-1")).toEqual([{ id: "launch-1", finishedAt: since }]);
+  });
+
+  it("找回的一局（这里没画过它的加载）、别的一局画过加载、还在加载、失败与结束：都没有要推满的", () => {
+    const running = session({ phase: "running", runningSince: since, stageIndex: 8, progress: 1 });
+    expect(loadingFinished(running, null)).toEqual([]);
+    expect(loadingFinished(running, "launch-0")).toEqual([]);
+    expect(loadingFinished(session({ phase: "launching", stageIndex: 7, progress: 0.91 }), "launch-1")).toEqual([]);
+    expect(loadingFinished(session({ phase: "failed" }), "launch-1")).toEqual([]);
+    expect(loadingFinished(session({ phase: "stopped", stopReason: "exited", runningSince: since }), "launch-1")).toEqual([]);
+  });
+
+  it("运行中缺运行起点是状态坏了，直接抛错", () => {
+    expect(() => loadingFinished(session({ phase: "running" }), "launch-1")).toThrow("运行起点");
+  });
+});
+
 describe("详情的日志区", () => {
   const css = readFileSync(resolve(__dirname, "StatusIsland.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
   const block = (selector: string) => {
@@ -286,6 +370,19 @@ describe("详情的日志区", () => {
     expect(logs).toMatch(/box-sizing:\s*border-box/);
     expect(logs).toContain(`height: calc(${LOG_LINES} * var(--sk-lh-mono-sm) + 2 * var(--sk-space-8))`);
     expect(logs).not.toMatch(/max-height/);
+  });
+
+  it("浮层宽度定在面板上；正文右内边距扣掉主体常驻的滚动条槽，下内边距是它与动作行的间距；动作行在底部那一层补齐左右与下沿的留白", () => {
+    expect(block(".detailPanel")).toMatch(/width:\s*min\(340px, calc\(100vw - var\(--sk-space-32\)\)\);/);
+    const detail = block(".detail");
+    expect(detail).toMatch(/padding:\s*var\(--sk-space-16\) calc\(var\(--sk-space-16\) - var\(--sk-scrollbar-size\)\) var\(--sk-space-12\) var\(--sk-space-16\);/);
+    expect(detail).not.toMatch(/(^|\s)width:/);
+    expect(block(".actions")).toMatch(/padding:\s*0 var\(--sk-space-16\) var\(--sk-space-16\);/);
+  });
+
+  it("正文与动作行是退场项的定位基准：形变途中外层带 transform，退场项按它们量位置、也按它们摆", () => {
+    expect(block(".detail")).toMatch(/position:\s*relative;/);
+    expect(block(".actions")).toMatch(/position:\s*relative;/);
   });
 });
 
@@ -445,6 +542,60 @@ describe("状态岛", () => {
     await flush();
     expect(launcher.state.session).toMatchObject({ phase: "stopped", stopReason: "cancelled" });
     expect(stageStates(liveDetail())).toEqual(["done", "done", "done", "done", "halted", "todo", "todo", "todo"]);
+    // 停下的下载那一行只留文件数：速度会让它像还在下载
+    expect(liveDetail().querySelectorAll("[data-state]")[4].textContent).toBe("下载缺失文件2/10");
+  });
+
+  it("详情头与下载那一行写同一个显示速度：平滑过、离上次换字满 500 ms 才换，不跟着每次上报跳", async () => {
+    view = render(
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          <StatusIsland />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>,
+    );
+    await flush();
+    act(() => void launcher.actions.launch("生存"));
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("启动后应有会话");
+    const download = (finished: number, speed: number) => ({ finished, total: 10, bytes: 0, total_bytes: null, speed });
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: download(2, 1024) }));
+    await flush();
+    const t0 = Date.now();
+    const island = document.querySelector<HTMLButtonElement>("[aria-haspopup='dialog']");
+    if (island === null) throw new Error("状态岛没有出现");
+    act(() => island.click());
+    await flush();
+    /** 详情头的副行与阶段清单下载那一行末尾写的速度。 */
+    const speeds = () => {
+      const head = liveDetail().querySelector(`.${styles.headPhase}`)?.textContent;
+      const row = liveDetail().querySelectorAll("[data-state]")[4]?.textContent;
+      if (head === undefined || head === null || row === undefined || row === null) throw new Error("详情里没有副行或下载那一行");
+      return [head.split(" · ").at(-1), row.split(" · ").at(-1)];
+    };
+    const advance = (ms: number) =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    // 从 0 开始传：真实速度一开始就是它，直接写
+    expect(speeds()).toEqual([formatSpeed(1024), formatSpeed(1024)]);
+
+    await advance(100);
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: download(3, 8192) }));
+    await flush();
+    // 离上次换字不到 500 ms：照旧
+    expect(speeds()).toEqual([formatSpeed(1024), formatSpeed(1024)]);
+    await advance(399);
+    expect(speeds()).toEqual([formatSpeed(1024), formatSpeed(1024)]);
+
+    // 满 500 ms 换上平均值：既不是旧速度，也不是刚报上来的瞬时速度
+    await advance(1);
+    const average = formatSpeed(publishSpeed(feedSpeed(startSpeed(1024, t0), 8192, t0 + 100), t0 + 500).shown);
+    expect([average === formatSpeed(1024), average === formatSpeed(8192)]).toEqual([false, false]);
+    expect(speeds()).toEqual([average, average]);
   });
 
   it("打开详情时已完成阶段的勾号直接画好，之后新完成的那一步才从小、透明弹出", async () => {
@@ -508,11 +659,52 @@ describe("状态岛", () => {
     const items = [...actions.children];
     expect(items.map((el) => el.className)).toEqual([styles.action, styles.action]);
     expect(items.map((el) => el.querySelector("button")?.textContent)).toEqual([ISLAND_COPY.fullLog, LAUNCH_COPY.cancel]);
-    // 有新按钮插入的换组（加载转运行、失败、崩溃）靠动作行的让位；阶段清单插入时日志与动作行靠详情正文的让位
+    // 有新按钮插入的换组（加载转运行、失败、崩溃）靠动作行的让位；阶段清单插入时日志区靠详情正文的让位，动作行跟着浮层下沿走
     expect(reflowed.has(actions)).toBe(true);
     const detail = liveDetail().querySelector(`.${styles.detail}`);
     if (detail === null) throw new Error("详情里没有正文");
     expect(reflowed.has(detail)).toBe(true);
+  });
+
+  it("详情浮层随内容形变：正文在主体（滚动区）里，动作行在底部那一层、不随主体滚动", async () => {
+    view = render(
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          <StatusIsland />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>,
+    );
+    await flush();
+    act(() => void launcher.actions.launch("生存"));
+    await flush();
+    const island = document.querySelector<HTMLButtonElement>("[aria-haspopup='dialog']");
+    if (island === null) throw new Error("状态岛没有出现");
+    act(() => island.click());
+    await flush();
+    const panel = liveDetail();
+    // 传了布局键：面板换成主体加底部的结构，宽度由面板上的类名给
+    expect(panel.hasAttribute("data-structured")).toBe(true);
+    expect(panel.classList.contains(styles.detailPanel)).toBe(true);
+    const detail = panel.querySelector(`.${styles.detail}`);
+    const actions = panel.querySelector(`.${styles.actions}`);
+    if (detail === null || actions === null) throw new Error("详情里没有正文或动作行");
+    expect(detail.closest(`.${popoverStyles.body}`)?.parentElement).toBe(panel);
+    expect(actions.parentElement?.className).toBe(popoverStyles.footer);
+    expect(actions.parentElement?.parentElement).toBe(panel);
+    expect(detail.contains(actions)).toBe(false);
+
+    // 交给浮层的布局键：加载中开着、清单在画；进入运行时动作行换一套，键跟着换
+    const loading = launcher.state.session;
+    if (loading === null) throw new Error("启动后应有会话");
+    expect(popoverKeys.at(-1)).toBe(detailLayoutKey(loading, true));
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: loading.taskId, phase: "running", stage_index: 8 }));
+    await flush();
+    const running = launcher.state.session;
+    if (running === null) throw new Error("进入运行后应有会话");
+    expect(popoverKeys.at(-1)).toBe(detailLayoutKey(running, true));
+    expect(detailLayoutKey(running, true)).not.toBe(detailLayoutKey(loading, true));
   });
 
   it("运行转崩溃：「结束游戏」那一层退场时不可交互，新插入的「关闭」「查看诊断」各自从小、透明淡入，「完整日志」原地不动", async () => {
@@ -921,7 +1113,9 @@ describe("状态岛胶囊的动效", () => {
     act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished: 2, total: 10, bytes: 0, total_bytes: null, speed: 0 } }));
     await flush();
     expect(faces().at(-1)).toBe(downloading);
-    expect(downloading.textContent).toBe(`${PHASE_LABEL.downloading}39%`);
+    // 百分数跟底边进度条同一种平滑，逐帧走过去（StatusIsland.progress.test.tsx 逐帧看）：这一刻还没出帧，字不当场跳到新值，读屏的名称已是新值
+    expect(downloading.textContent).toBe(`${PHASE_LABEL.downloading}30%`);
+    expect(islandButton().getAttribute("aria-label")).toBe(ISLAND_COPY.label("生存", `${PHASE_LABEL.downloading} 39%`));
 
     act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "launching", stage_index: 6 }));
     await flush();
@@ -947,28 +1141,59 @@ describe("状态岛胶囊的动效", () => {
     await flush();
     expect(launcher.state.session?.phase).toBe("crashed");
     expect(islandButton().querySelectorAll(`.${styles.runningDot}`)).toHaveLength(1);
-    expect(islandButton().querySelectorAll(`.${styles.dangerDot}`)).toHaveLength(1);
+    const danger = islandButton().querySelectorAll<HTMLElement>(`.${styles.dangerDot}`);
+    expect(danger).toHaveLength(1);
+    // 小标记的 dot 档：从 0 弹出，同时淡入
+    expect([danger[0].style.opacity, danger[0].style.transform]).toEqual(["0", "scale(0)"]);
   });
 
-  // 抖动层确实在崩溃时晃、胶囊与行自己不平移，要逐帧采样，在 StatusIsland.shake.test.tsx；这里只管它包住了谁
-  it("抖动层只包胶囊本身：读屏播报与打开着的详情都在它外面，崩溃时不跟着晃", async () => {
+  it("减少动画：状态点与阶段勾号出现时只淡入，不从小处弹出", async () => {
+    view = render(
+      <MotionConfig reducedMotion="always">
+        <LauncherProvider>
+          <ShellProvider>
+            <Probe />
+            <StatusIsland />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </MotionConfig>,
+    );
+    await flush();
+    act(() => void launcher.actions.launch("生存"));
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("启动后应有会话");
+    act(() => islandButton().click());
+    await flush();
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "preparing", stage_index: 1 }));
+    await flush();
+    const [check] = [...document.querySelectorAll<HTMLElement>(`[role="dialog"]:not([data-exiting]) .${styles.stageCheck}`)];
+    if (check === undefined) throw new Error("完成的阶段没有画勾");
+    expect([check.style.opacity, check.style.transform]).toEqual(["0", ""]);
+
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "running", stage_index: 8 }));
+    await flush();
+    const dot = islandButton().querySelector<HTMLElement>(`.${styles.runningDot}`);
+    if (dot === null) throw new Error("运行中应有状态点");
+    expect([dot.style.opacity, dot.style.transform]).toEqual(["0", ""]);
+  });
+
+  // 抖动层确实在崩溃时晃、胶囊与行自己不平移，要逐帧采样，在 StatusIsland.shake.test.tsx；这里只管它包住了谁。
+  // 详情浮层经 portal 挂在浮层根里，DOM 上无论如何都不在抖动层内，断言它在外面什么也测不到，所以不写
+  it("抖动层只包胶囊本身：读屏播报在它外面，崩溃时不跟着晃", async () => {
     mount();
     await running();
     const island = islandButton();
     const shaker = island.parentElement;
     if (shaker === null || shaker.className !== styles.shaker) throw new Error("胶囊外面应包着抖动层");
-    act(() => island.click());
-    await flush();
     exitGame(true);
     await flush();
     expect(launcher.state.session?.phase).toBe("crashed");
     const live = document.querySelector<HTMLElement>("[aria-live='polite']");
     expect(live?.textContent).toBe(ISLAND_COPY.announce("生存", PHASE_LABEL.crashed));
-    const detail = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].filter((el) => !el.hasAttribute("data-exiting"));
-    expect(detail).toHaveLength(1);
     expect([...shaker.children]).toEqual([island]);
     expect(shaker.contains(live)).toBe(false);
-    expect(shaker.contains(detail[0])).toBe(false);
   });
 
   it("抖动层可以收窄：中列放不下时照旧由胶囊收窄、名字走省略号", () => {

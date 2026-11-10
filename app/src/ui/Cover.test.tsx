@@ -9,6 +9,7 @@ import type { BlockSource } from "../art/iso/render";
 import { useBlockSource } from "../art/iso/useBlockSource";
 import { render, setRect, stubMatchMedia, stubResizeObserver, type ResizeObserverStub, type Rendered } from "../test/dom";
 import { Cover, coverIdentityWidth } from "./Cover";
+import styles from "./Cover.module.css";
 import { RemoteImageProvider } from "./remote-image";
 
 vi.mock("../art/iso/useBlockSource", () => ({ useBlockSource: vi.fn() }));
@@ -454,9 +455,12 @@ describe("Cover 换形态", () => {
     expect(layers[2].hasAttribute("data-reveal")).toBe(true);
     expect(cover().querySelector("[data-sk-art='iso']")?.closest("[data-leaving]")).not.toBeNull();
 
-    // 平铺先开始、先播完：它的结束不算换完
+    // 平铺先开始、先播完：它整个盖住了 art，art 先卸下；远程图还半透明，平铺照旧垫着、身份方块照旧在淡出
     revealEnds(tile);
-    expect(cover().querySelectorAll(":scope > div")).toHaveLength(3);
+    expect([...cover().querySelectorAll(":scope > div")]).toEqual([tile, layers[2]]);
+    expect(tile.hasAttribute("data-reveal")).toBe(false);
+    expect(layers[2].hasAttribute("data-reveal")).toBe(true);
+    expect(cover().querySelector("[data-sk-art='iso']")?.closest("[data-leaving]")).not.toBeNull();
 
     revealEnds(layers[2]);
     const left = cover().querySelectorAll(":scope > div");
@@ -466,10 +470,14 @@ describe("Cover 换形态", () => {
     expect(cover().querySelector("[data-sk-art='iso']")).toBeNull();
   });
 
-  it("往下换（远程图地址清空）：直接换回 art，不垫旧层、不播淡入", async () => {
+  const conceal = () => cover().querySelector<HTMLElement>("[data-conceal]");
+  const layerEls = () => [...cover().querySelectorAll<HTMLElement>(":scope > div")];
+  const identitySlot = () => cover().querySelector<HTMLElement>(`.${styles.identity}`);
+
+  it("往下换（远程图地址清空）：art 垫到最下面，远程图留在上面带着压暗淡出，淡完才卸下；身份方块同时淡入", async () => {
     const tree = (remoteUrl: string | null) => (
       <RemoteImageProvider resolve={async (url) => url}>
-        <Cover hue={20} seed="p" height={180} remoteUrl={remoteUrl} />
+        <Cover hue={20} seed="p" height={180} remoteUrl={remoteUrl} shade="bottom" identity={{ instanceId: "i", cover: CHERRY }} />
       </RemoteImageProvider>
     );
     view = render(tree("https://cdn.modrinth.com/gallery/a.png"));
@@ -477,11 +485,124 @@ describe("Cover 换形态", () => {
     resize.resize(cover(), 320);
     await settle();
     revealEnds(reveal() as HTMLElement);
+    const image = layerEls()[0];
+    expect(image.querySelector("canvas")).not.toBeNull();
+    expect(cover().querySelector("[data-sk-art='iso']")).toBeNull();
+    const imageCanvas = image.querySelector("canvas") as HTMLCanvasElement;
+    const drawn = canvas.draws.filter((d) => d.canvas === imageCanvas).length;
 
     view.rerender(tree(null));
     expect(cover().dataset.source).toBe("art");
     expect(reveal()).toBeNull();
-    expect(cover().querySelectorAll(":scope > div")).toHaveLength(1);
+    // 从下到上：新垫上的 art、原来那张远程图（同一个节点，带着已画好的像素淡出）
+    const [art, leaving] = layerEls();
+    expect(layerEls()).toHaveLength(2);
+    expect(art.querySelectorAll("svg[data-glyph]")).toHaveLength(4);
+    expect(art.hasAttribute("data-reveal")).toBe(false);
+    expect(leaving).toBe(image);
+    expect(conceal()).toBe(image);
+    // 旧画布不再重画：接画布的只有在场的那一层
+    expect(canvas.draws.filter((d) => d.canvas === imageCanvas)).toHaveLength(drawn);
+    // 淡出期间压暗跟着旧图走完
+    expect(cover().dataset.shade).toBe("bottom");
+    const identity = identitySlot() as HTMLElement;
+    expect(identity.querySelector("[data-sk-art='iso']")).not.toBeNull();
+    expect(identity.hasAttribute("data-arriving")).toBe(true);
+    expect(identity.hasAttribute("data-leaving")).toBe(false);
+
+    // 卡内别的动画冒上来的结束事件不算
+    revealEnds(imageCanvas);
+    expect(layerEls()).toHaveLength(2);
+
+    revealEnds(image);
+    expect(layerEls()).toEqual([art]);
+    expect(cover().dataset.shade).toBeUndefined();
+    expect(identity.isConnected).toBe(true);
+    expect(identity.hasAttribute("data-arriving")).toBe(false);
+  });
+
+  it("不再平铺（平铺 → art）：art 垫到最下面，平铺层叠在上面淡出，淡完卸下；身份方块一直在、不重播", () => {
+    vi.mocked(useBlockSource).mockReturnValue(source("block|1.21.1|cherry_planks"));
+    const tree = (texture: typeof CHERRY | null) => <Cover hue={345} seed="inst-1" height={132} texture={texture} shade="left" identity={{ instanceId: "inst-1", cover: CHERRY }} />;
+    view = render(tree(CHERRY));
+    resize.resize(cover(), 320);
+    const tile = layerEls()[0];
+    expect(tile.contains(tileCanvas())).toBe(true);
+    const identity = cover().querySelector("[data-sk-art='iso']") as Element;
+
+    vi.mocked(useBlockSource).mockReturnValue(null);
+    view.rerender(tree(null));
+    expect(cover().dataset.source).toBe("art");
+    const [art, leaving] = layerEls();
+    expect(art.querySelectorAll("svg[data-glyph]")).toHaveLength(4);
+    expect(leaving).toBe(tile);
+    expect(leaving.hasAttribute("data-conceal")).toBe(true);
+    // 平铺画布接着画旧材质，没有被撤空
+    expect(leaving.contains(tileCanvas())).toBe(true);
+    expect(cover().dataset.shade).toBe("left");
+    expect(cover().querySelector("[data-sk-art='iso']")).toBe(identity);
+    expect(identitySlot()?.hasAttribute("data-arriving")).toBe(false);
+    expect(identitySlot()?.hasAttribute("data-leaving")).toBe(false);
+
+    revealEnds(leaving);
+    expect(layerEls()).toEqual([art]);
+    expect(cover().dataset.shade).toBeUndefined();
+  });
+
+  it("换了色相：新的 art 层盖上去淡入，旧层留着自己的颜色垫在下面，淡完卸下", () => {
+    const tree = (hue: number) => <Cover hue={hue} seed="inst-1" height={132} />;
+    view = render(tree(345));
+    const old = layerEls()[0];
+    expect(old.style.getPropertyValue("--hue")).toBe("345");
+
+    view.rerender(tree(120));
+    const [under, fresh] = layerEls();
+    expect(under).toBe(old);
+    expect(under.style.getPropertyValue("--hue")).toBe("345");
+    expect(fresh.style.getPropertyValue("--hue")).toBe("120");
+    expect(fresh.hasAttribute("data-reveal")).toBe(true);
+    expect(cover().style.getPropertyValue("--hue")).toBe("120");
+
+    revealEnds(fresh);
+    expect(layerEls()).toEqual([fresh]);
+    expect(fresh.hasAttribute("data-reveal")).toBe(false);
+  });
+
+  it("平铺换了方块：新的平铺层盖在旧平铺上淡入，旧平铺照画旧材质", () => {
+    const oak = source("block|1.21.1|oak_planks");
+    vi.mocked(useBlockSource).mockReturnValue(source("block|1.21.1|cherry_planks"));
+    view = render(<Cover hue={345} seed="inst-1" height={132} texture={CHERRY} />);
+    resize.resize(cover(), 320);
+    const old = layerEls()[0];
+
+    vi.mocked(useBlockSource).mockReturnValue(oak);
+    view.rerender(<Cover hue={30} seed="inst-1" height={132} texture={{ block: "oak_planks", hue: 30, image: null }} />);
+    expect(cover().dataset.source).toBe("texture");
+    const [under, fresh] = layerEls();
+    expect(under).toBe(old);
+    expect(under.querySelector("canvas")).not.toBeNull();
+    expect(fresh.hasAttribute("data-reveal")).toBe(true);
+    expect(fresh.querySelector("canvas")).not.toBeNull();
+
+    revealEnds(fresh);
+    expect(layerEls()).toEqual([fresh]);
+  });
+
+  it("淡入还没播完就往下换：那一层直接拿掉，不从不透明重新起播淡出", () => {
+    view = render(<Cover hue={345} seed="inst-1" height={132} texture={CHERRY} />);
+    resize.resize(cover(), 320);
+    const art = layerEls()[0];
+    vi.mocked(useBlockSource).mockReturnValue(source("block|1.21.1|cherry_planks"));
+    view.rerender(<Cover hue={345} seed="inst-1" height={132} texture={CHERRY} />);
+    expect(reveal()).not.toBeNull();
+
+    vi.mocked(useBlockSource).mockReturnValue(null);
+    view.rerender(<Cover hue={345} seed="inst-1" height={132} texture={CHERRY} />);
+    expect(cover().dataset.source).toBe("art");
+    // 换回的是还垫在下面的那层 art：原地留着，不另起一层
+    expect(layerEls()).toEqual([art]);
+    expect(conceal()).toBeNull();
+    expect(reveal()).toBeNull();
   });
 
   it("样式：淡入挂在整个媒体层上，减少动画时缩到 200ms；渐变底在 art 层；文字色跟着淡过去", () => {
@@ -495,6 +616,13 @@ describe("Cover 换形态", () => {
     expect(body(".identity[data-leaving]")).toContain("animation: conceal var(--sk-dur-reveal) var(--sk-ease-out) forwards;");
     expect(body(":global([data-sk-reduced]) .media[data-reveal]")).toContain("animation: reveal var(--sk-dur-in) var(--sk-ease-out);");
     expect(body(":global([data-sk-reduced]) .identity[data-leaving]")).toContain("animation: conceal var(--sk-dur-in) var(--sk-ease-out) forwards;");
+    // 换色相时 art 层也会盖上来；往下换时旧层淡出、身份方块淡入，与淡入同一时长同一曲线
+    expect(css).toMatch(/\.art\[data-reveal\],\s*\.media\[data-reveal\] \{/);
+    expect(css).toMatch(/\.art\[data-conceal\],\s*\.media\[data-conceal\] \{/);
+    expect(body(".media[data-conceal]")).toContain("animation: conceal var(--sk-dur-reveal) var(--sk-ease-out) forwards;");
+    expect(body(".identity[data-arriving]")).toContain("animation: reveal var(--sk-dur-reveal) var(--sk-ease-out);");
+    expect(body(":global([data-sk-reduced]) .media[data-conceal]")).toContain("animation: conceal var(--sk-dur-in) var(--sk-ease-out) forwards;");
+    expect(body(":global([data-sk-reduced]) .identity[data-arriving]")).toContain("animation: reveal var(--sk-dur-in) var(--sk-ease-out);");
     // 画布与平铺自己不再各播一遍
     expect(body(".image")).not.toContain("animation");
     expect(body(".tile")).not.toContain("animation");

@@ -17,6 +17,7 @@ import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import { bundledTotals, defaultExportFileName, effectiveExtras, skippedCount } from "./ExportModpackModal";
+import exportStyles from "./export.module.css";
 import InstancePage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -198,6 +199,15 @@ function readingBlock(): HTMLElement {
   return label.parentElement;
 }
 
+/** 「正在读取」的读屏播报区：随弹窗预先挂着，不在骨架那层对读屏隐藏的子树里。 */
+function readingStatus(): HTMLElement {
+  const found = dialog().querySelector<HTMLElement>(`.${exportStyles.status}`);
+  if (found === null) throw new Error("弹窗里没有读取的播报区");
+  expect(found.getAttribute("role")).toBe("status");
+  expect(found.closest('[aria-hidden="true"]')).toBeNull();
+  return found;
+}
+
 /** 在场的文字：正在退场（inert）的块还在文档里淡出，不算。 */
 function liveText(root: HTMLElement): string {
   const copy = root.cloneNode(true) as HTMLElement;
@@ -315,15 +325,21 @@ describe("导出整合包弹窗", () => {
     expect(dialog().textContent).toContain("「樱花生存」· 1.21.1 · Fabric 0.16.10");
     // 等待期里读取块照常占位、标成不可见：读取很快回来时不闪一下转圈
     expect(readingBlock().closest("[data-pending]")).not.toBeNull();
+    // 读取块对读屏隐藏，「正在读取」另由骨架外的播报区念：等待期先空着，与转圈同一时机写字
+    const status = readingStatus();
+    expect(status.textContent).toBe("");
     // 主按钮一开始就在底栏里，读到时不插进来把「取消」挤开
     const submit = button("导出整合包", dialog());
     expect(submit.getAttribute("aria-disabled")).toBe("true");
     expect(await reasonOf(submit)).toBe("正在读取 Mod 与配置…");
     expect(readingBlock().closest("[data-pending]")).toBeNull();
+    expect(readingStatus()).toBe(status);
+    expect(status.textContent).toBe("正在读取 Mod 与配置…");
     await act(async () => {
       release();
       await settle();
     });
+    expect(status.textContent).toBe("");
     expect(button("导出整合包", dialog())).toBe(submit);
     expect(submit.getAttribute("aria-disabled")).toBeNull();
     expect(input("名称").value).toBe("樱花生存");

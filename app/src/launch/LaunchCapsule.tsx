@@ -14,10 +14,11 @@ import { AssemblingBlock, assemblyExitMs, assemblySeatInMs, type AssemblyClock, 
 import { Spinner } from "../art/Spinner";
 import { CRASH_CATEGORIES, crashClueLine, LAUNCH_COPY, LAUNCH_STAGES, PHASE_LABEL, SESSION_COPY, taskPhaseText, type FailureCopy } from "../copy/flows";
 import { percent } from "../domain/format";
-import { capsuleSwap, fade, lineSwap, springs } from "../lib/motion";
+import { capsuleSwap, fade, lineSwap, lineSwapFade, springs } from "../lib/motion";
+import { useDisplaySpeed } from "../lib/progress-display";
 import { cx } from "../lib/util";
 import { useNow } from "../state/launcher";
-import { DOWNLOAD_STAGE } from "../state/session";
+import { DOWNLOAD_STAGE, type SessionState } from "../state/session";
 import { progressTrack } from "../state/tasks";
 import { softDisabledProps } from "../ui/Button";
 import { fillOffset, useSmoothProgress } from "../ui/ProgressBar";
@@ -213,14 +214,17 @@ function useFaceHold(view: LaunchView, reduced: boolean, clock: RefObject<Assemb
   return { face: view, exit: null, seat: false };
 }
 
-/** 面切换。show 按 custom 传入的减少动画生效值取延迟：根部 MotionConfig 只把位移类改成瞬时，透明度上的延迟它不管。 */
+/**
+ * 面切换，各段按 custom 传入的减少动画生效值取。根部 MotionConfig 只把位移类改成瞬时：透明度上的延迟它不管，
+ * 带位移的退场在那里会先跳 6px 再淡出。所以减少动画时延迟归零，进出只交叉淡化。
+ */
 export const faceSwap: Variants = {
-  enter: { opacity: 0, y: 6 },
+  enter: (reduced: boolean) => (reduced ? { opacity: 0 } : { opacity: 0, y: 6 }),
   show: (reduced: boolean) => {
     const delay = reduced ? 0 : capsuleSwap.faceEnterDelay;
     return { opacity: 1, y: 0, transition: { ...springs.settle, delay, opacity: { ...fade.in, delay } } };
   },
-  leave: { opacity: 0, y: -6, transition: fade.out },
+  leave: (reduced: boolean) => (reduced ? { opacity: 0, transition: fade.out } : { opacity: 0, y: -6, transition: fade.out }),
 };
 
 export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch = false, className }: LaunchCapsuleProps) {
@@ -280,7 +284,8 @@ export function LaunchCapsule({ instanceId, size = "md", block = false, relaunch
       <span className={styles.srOnly} aria-live="polite">
         {announce}
       </span>
-      <AnimatePresence mode="popLayout">
+      {/* 退场的面按这里的 custom 取退场变体：它的 props 停在离场那一刻，减少动画的设置在那之后变了也按当前的走 */}
+      <AnimatePresence mode="popLayout" custom={reduced}>
         <motion.div
           key={key}
           data-face={key}
@@ -394,7 +399,7 @@ function Face({ face, entry, exit, seat, relaunch, entering, clock }: { face: La
             title={stopping ? SESSION_COPY.stopping : stageLabel(s.stageIndex)}
             titleKey={stopping ? "stopping" : `stage:${s.stageIndex}`}
             titleSlot={TEXT_SLOTS.loadingTitle}
-            sub={face.phase === "downloading" ? sessionDetail(s, Date.now()) : PHASE_LABEL[face.phase]}
+            sub={loadingSub(face)}
             subSlot={TEXT_SLOTS.loadingSub}
           />
           <Percent value={seat ? 1 : s.progress} track={s.taskId} />
@@ -462,6 +467,23 @@ function Face({ face, entry, exit, seat, relaunch, entering, clock }: { face: La
   }
 }
 
+/** 加载面的副行：准备、启动写阶段；下载写文件数与速度，还没报过下载进度时写正在统计。 */
+function loadingSub(face: Extract<LaunchView, { kind: "loading" }>): ReactNode {
+  if (face.phase !== "downloading") return PHASE_LABEL[face.phase];
+  const d = face.session.download;
+  return d === null ? sessionDetail(face.session, Date.now()) : <DownloadDetail session={face.session} speedBps={d.speedBps} />;
+}
+
+/**
+ * 下载阶段的副行。文件数照上报跟随；速度走 lib/progress-display 的显示节流（约 1 秒平均、每秒最多换两次字），
+ * 不随每 100 ms 一次的瞬时速度跳字。报过下载进度之后才挂上，第一次报上来的速度直接显示，不从 0 爬上来；
+ * 下载阶段一过就卸掉，下一段下载不接着上一段的平均。
+ */
+function DownloadDetail({ session, speedBps }: { session: SessionState; speedBps: number }) {
+  const shown = useDisplaySpeed(speedBps);
+  return sessionDetail(session, Date.now(), shown);
+}
+
 function RunningFace({ face, entry }: { face: Extract<LaunchView, { kind: "running" }>; entry: LaunchEntry }) {
   const now = useNow(1000);
   const runningSince = face.session.runningSince;
@@ -520,6 +542,8 @@ function Text({ title, titleKey, titleSlot, sub, subSlot }: TextProps) {
  */
 function Line({ className, slot, swapKey, children }: { className: string; slot: readonly string[] | undefined; swapKey?: string; children: ReactNode | null }) {
   const mounted = useMounted();
+  // 减少动画时新旧两行只交叉淡化：位移在那里一步到位，旧行会先上跳再淡出
+  const swap = useReducedMotionConfig() === true ? lineSwapFade : lineSwap;
   return (
     <span className={cx(className, styles.line)} data-slot={slot === undefined ? undefined : ""}>
       {children !== null &&
@@ -529,7 +553,7 @@ function Line({ className, slot, swapKey, children }: { className: string; slot:
           </motion.span>
         ) : (
           <AnimatePresence>
-            <motion.span key={swapKey} className={styles.value} variants={lineSwap} initial={mounted.current ? "enter" : false} animate="show" exit="leave">
+            <motion.span key={swapKey} className={styles.value} variants={swap} initial={mounted.current ? "enter" : false} animate="show" exit="leave">
               {children}
             </motion.span>
           </AnimatePresence>

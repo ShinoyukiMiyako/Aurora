@@ -9,9 +9,9 @@ import { formatDate } from "../../domain/format";
 import { IpcError } from "../../ipc/errors";
 import type { InstanceDto } from "../../ipc/instances";
 import type { InstalledMod, ModChangelog, ModSource, UpdateCandidate } from "../../ipc/mods";
-import { ACTION_ERROR } from "../../copy/flows";
+import { ACTION_ERROR, SLOW_LOADING_HINT } from "../../copy/flows";
 import { DROP_COPY } from "../../copy/shell";
-import { LOADING_DELAY_MS } from "../../domain/limits";
+import { LOADING_DELAY_MS, SLOW_HINT_MS } from "../../domain/limits";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { WindowPortProvider, browserWindowPort, type WindowDropEvent, type WindowPort } from "../../shell/window";
@@ -671,6 +671,26 @@ describe("摘要行与锁定横幅的出入场", () => {
     if (block === null) throw new Error("没有 .modTask 规则");
     expect(block[1]).toContain("line-height: var(--sk-lh-caption);");
   });
+
+  it("说明的那一格常驻：列表读到之前格子就占着，读到后文字在同一格里淡入，后面的进度块不被挤动", async () => {
+    const listing = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => listing.promise);
+    await open();
+    const slot = document.querySelector<HTMLElement>('[class*="modSummaryText"]');
+    if (slot === null) throw new Error("列表读到之前摘要行没有说明的那一格");
+    expect(textOf(slot)).toBe("");
+
+    await act(async () => {
+      listing.resolve(mods);
+      await settle(20);
+    });
+    expect(document.querySelector('[class*="modSummaryText"]')).toBe(slot);
+    expect(textOf(slot)).toBe("已启用 4 个，停用 0 个。");
+    const note = slot.firstElementChild;
+    if (!(note instanceof HTMLElement)) throw new Error("说明不在出入场的包裹层里");
+    expect(note.style.opacity).not.toBe("");
+    expect(Number(note.style.opacity)).toBeLessThan(1);
+  });
 });
 
 describe("表格卡的读取占位", () => {
@@ -723,6 +743,54 @@ describe("表格卡的读取占位", () => {
     const realHeaders = [...grid().querySelectorAll<HTMLElement>('[role="columnheader"]')].filter((h) => h.dataset.hideWide === undefined);
     expect(headLabels).toEqual(realHeaders.map(textOf));
     expect(grid().closest('[class*="modCard"]')).toBe(card);
+  });
+
+  it("读了 10 秒还没回来：慢提示画在卡里、骨架层之外，读屏读得到；读到后淡出", async () => {
+    const listing = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => listing.promise);
+    await open();
+    const hint = () => [...document.querySelectorAll<HTMLElement>("p")].find((p) => textOf(p) === SLOW_LOADING_HINT);
+    expect(hint()).toBeUndefined();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SLOW_HINT_MS);
+    });
+    const shown = hint();
+    if (shown === undefined) throw new Error("读了 10 秒还没有慢提示");
+    // 骨架层整层 aria-hidden：画在里面读屏读不到
+    expect(shown.closest('[aria-hidden="true"]')).toBeNull();
+    expect(skeleton()?.contains(shown)).toBe(false);
+    expect(shown.closest('[class*="modCard"]')).not.toBeNull();
+
+    await act(async () => {
+      listing.resolve(mods);
+      await settle(20);
+    });
+    // 退场中：叠在原处淡出，不可交互、不再被读
+    expect(shown.closest("[inert]")).not.toBeNull();
+  });
+
+  it("移除最后一个 Mod：表格与空状态交叉淡化，旧的一面叠在原处淡出；卡片裁切，淡出的旧面不越过下沿", async () => {
+    mods = mods.filter((m) => m.file_name === "sodium.jar");
+    await open();
+    const table = grid();
+    const card = table.closest<HTMLElement>('[class*="modCard"]');
+    if (card === null) throw new Error("表格不在表格卡里");
+    expect(card.hasAttribute("data-clip")).toBe(true);
+
+    click(button("移除 Sodium"));
+    await flush();
+    mods = [];
+    click(button("移除", dialog()));
+    await flush();
+    const title = [...card.querySelectorAll("h2")].find((h) => textOf(h) === "还没有安装 Mod");
+    const face = title?.closest('[class*="modCardBody"]')?.parentElement;
+    if (face === null || face === undefined) throw new Error("移除最后一个 Mod 后没有换成空状态");
+    expect(face.style.opacity).not.toBe("");
+    expect(Number(face.style.opacity)).toBeLessThan(1);
+    expect(face.hasAttribute("inert")).toBe(false);
+    // 旧的表格还在 DOM 里淡出：不是同一帧换掉
+    expect(table.isConnected).toBe(true);
+    expect(table.closest("[inert]")).not.toBeNull();
   });
 });
 
@@ -915,6 +983,119 @@ describe("更新检查晚到时行里不跳", () => {
     const tags = tagsIn(sub).filter((t) => t.closest("[inert]") === null);
     expect(tags.slice(0, 2).map(textOf)).toEqual(["本地文件", "可更新到 1.1"]);
     expect(arriving(fadeOf(tags[1]))).toBe(true);
+  });
+
+  /** 远长于检查结束后让位的停留时长（一个 settle 弹簧）。 */
+  const pastHold = () =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+  const subs = () => [...grid().querySelectorAll<HTMLElement>('[class*="modSub"]')];
+
+  it("紧凑档：第二行的让位只在更新检查进行中与结果刚到时挂，平时（含重新挂上的行）不建观察者", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    stubSpanAnimations();
+    const observers = stubResizeObserver();
+    const checking = deferred<UpdateCandidate[]>();
+    ipc.overrides.set("check_updates", () => checking.promise);
+    await open();
+    const watched = () => subs().filter((el) => observers.observed().includes(el));
+    expect(subs()).toHaveLength(4);
+    expect(watched()).toHaveLength(4);
+
+    await act(async () => {
+      checking.resolve([]);
+      await settle(20);
+    });
+    // 结果刚到：观察者要到下一帧才报这次变化，同一次提交里摘掉就接不住
+    expect(watched()).toHaveLength(4);
+    await pastHold();
+    expect(watched()).toEqual([]);
+
+    // 行重新挂上（虚拟化的长表格滚动时就是这样）也不挂：可更新项已在缓存里，不再检查
+    act(() => nav.go({ page: "instance", id: ID, tab: "overview" }));
+    await flush();
+    act(() => nav.go({ page: "instance", id: ID, tab: "mods" }));
+    await flush();
+    expect(subs()).toHaveLength(4);
+    expect(watched()).toEqual([]);
+  });
+
+  it("紧凑档：检查进行中插进状态标签，后面的「新增」从原位滑过去", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    stubSpanAnimations();
+    const observers = stubResizeObserver();
+    // jsdom 不做布局：第二行的直接子项按前面各项的文字长度横排（每字 12、间距 6），被 popLayout 抽出布局的不占位；别的元素照旧没有盒子
+    const inSub = (el: HTMLElement) => el.parentElement !== null && el.parentElement.matches('[class*="modSub"]');
+    const widthOf = (el: Element) => textOf(el).length * 12;
+    vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockImplementation(function (this: HTMLElement) {
+      return inSub(this) ? this.parentElement : null;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockImplementation(function (this: HTMLElement) {
+      if (!inSub(this)) return 0;
+      let left = 0;
+      for (let s = this.previousElementSibling; s !== null; s = s.previousElementSibling) if (!s.hasAttribute("data-motion-pop-id")) left += widthOf(s) + 6;
+      return left;
+    });
+    const checking = deferred<UpdateCandidate[]>();
+    ipc.overrides.set("check_updates", () => checking.promise);
+    await open();
+    const sub = rowEl("Sodium").querySelector<HTMLElement>('[class*="modSub"]');
+    if (sub === null) throw new Error("Sodium 没有第二行");
+    const fresh = tagsIn(sub).find((t) => textOf(t) === "新增")?.closest<HTMLElement>('[class*="appearInline"]');
+    if (fresh === undefined || fresh === null) throw new Error("「新增」不在出入场的包裹层里");
+    // 被挪动的是包裹层（div）：jsdom 没有 Web Animations，只给它这一个元素装上，记下让位起的关键帧
+    const slides: Keyframe[][] = [];
+    Object.defineProperty(fresh, "animate", {
+      configurable: true,
+      value: (frames: Keyframe[]) => {
+        slides.push(frames);
+        return { currentTime: 0, cancel() {}, onfinish: null, oncancel: null };
+      },
+    });
+    // 观察者挂上后的第一趟：只记位置
+    observers.resize(sub, 0);
+    expect(slides).toEqual([]);
+
+    await act(async () => {
+      checking.resolve([candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1")]);
+      await settle(20);
+    });
+    const status = tagsIn(sub).find((t) => textOf(t) === "可更新到 1.1")?.closest('[class*="appearInline"]');
+    if (status === undefined || status === null) throw new Error("没有插进状态标签");
+    expect(slides).toHaveLength(1);
+    // 起点是插入之前的位置：往左退回状态标签占掉的宽度加一个间距
+    expect(slides[0][0].translate).toBe(`${-(widthOf(status) + 6)}px 0px`);
+    expect(slides[0].at(-1)?.translate).toBe("0px 0px");
+  });
+
+  it("紧凑档：忽略更新一按下就挂上让位，不等后端回来", async () => {
+    vi.stubGlobal("innerWidth", 1024);
+    stubSpanAnimations();
+    const observers = stubResizeObserver();
+    updates = [candidate("sodium.jar", "Sodium", "AANobbMI", "1.0", "1.1")];
+    await open();
+    await pastHold();
+    const sub = rowEl("Sodium").querySelector('[class*="modSub"]');
+    if (sub === null) throw new Error("Sodium 没有第二行");
+    expect(observers.observed()).not.toContain(sub);
+
+    const holding = deferred<null>();
+    ipc.overrides.set("set_mod_update_hold", () => holding.promise);
+    click(button("Sodium 的更多操作"));
+    const ignore = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => textOf(el) === "忽略这个 Mod 的更新");
+    if (ignore === undefined) throw new Error("菜单里没有「忽略这个 Mod 的更新」");
+    click(ignore);
+    await flush();
+    // 后端写卷宗期间就挂上：回来后重读出的「不检查更新」顶替「可更新到」，宽度一变后面的标注滑开
+    expect(observers.observed()).toContain(sub);
+
+    await act(async () => {
+      holding.resolve(null);
+      await settle(20);
+    });
+    await pastHold();
+    expect(observers.observed()).not.toContain(sub);
   });
 });
 

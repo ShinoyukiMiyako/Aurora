@@ -17,6 +17,7 @@ import { OverlayRoot } from "../../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../../state/appearance";
 import { LauncherProvider } from "../../../state/launcher";
+import { invalidate } from "../../../state/resource";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../../test/dom";
 import type { IpcRecorder } from "../../../test/fake-bridge";
 import { deferred, memoryAdviceDto, resetRecorder, settle } from "../../../test/launcher";
@@ -53,9 +54,10 @@ const wait = (ms: number) =>
     await vi.advanceTimersByTimeAsync(ms);
   });
 
-async function mountGame() {
+/** reduced 为真时按外观里打开了「减少动画」渲染（外观层据此设根部的 MotionConfig）。 */
+async function mountGame(reduced = false) {
   view = render(
-    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+    <AppearanceProvider initial={{ ...DEFAULT_APPEARANCE, reduceMotion: reduced }}>
       <LauncherProvider>
         <ShellProvider>
           <SettingsCommandsProvider value={commands}>
@@ -117,6 +119,17 @@ afterEach(() => {
   view?.unmount();
   view = undefined;
   vi.useRealTimers();
+});
+
+describe("游戏 · 卡片之间的让位", () => {
+  it("四张卡片直接排在载入门的分区卡片栈里：一张变高时由那一层的让位把下面的卡片滑过去，分区不再自己包一层", async () => {
+    await mountGame();
+    const cards = ["内存", "版本隔离", "游戏目录", "存档备份"].map(card);
+    const stack = cards[0].parentElement;
+    if (stack === null) throw new Error("内存卡片没有父元素");
+    expect(stack.classList.contains(s.sectionFlow)).toBe(true);
+    expect([...stack.children]).toEqual(cards);
+  });
 });
 
 describe("游戏 · 内存卡的加载", () => {
@@ -252,6 +265,43 @@ describe("游戏 · 其他文件夹", () => {
     expect(hmcl.isConnected).toBe(true);
     expect(hmcl.hasAttribute("inert")).toBe(true);
     expect(rows()).toEqual(["PCL"]);
+  });
+
+  describe("之后登记进来的行自己播入场，列表挂上时就在的行不单独入场", () => {
+    /** 列表已经挂着时再登记一个目录，返回原有那一行与新来的那一行（挂载那一刻的样式）。 */
+    async function addLater(reduced: boolean) {
+      let dirs = [dir("默认目录", CURRENT, true), dir("HMCL", "D:\\HMCL\\.minecraft")];
+      ipc.overrides.set("list_game_directories", () => dirs);
+      ipc.overrides.set("discover_game_directories", () => []);
+      await mountGame(reduced);
+      const games = card("游戏目录");
+      const row = (name: string) => {
+        const found = live<HTMLLIElement>(games, "li").find((li) => li.querySelector(`.${s.dirName}`)?.textContent === name);
+        if (found === undefined) throw new Error(`没有「${name}」那一行`);
+        return found;
+      };
+      dirs = [...dirs, dir("PCL", "D:\\PCL\\.minecraft")];
+      await act(async () => {
+        invalidate("game-dirs");
+        await settle(20);
+      });
+      return { kept: row("HMCL"), added: row("PCL") };
+    }
+
+    it("平常：新行淡入并从 0.98 落到位", async () => {
+      const { kept, added } = await addLater(false);
+      // 不播入场的行直接以终态挂上
+      expect(kept.style.opacity).toBe("1");
+      expect(added.style.opacity).toBe("0");
+      expect(added.style.transform).toBe("scale(0.98)");
+    });
+
+    it("减少动画：新行只淡入，不缩放（缩放在减少动画下一步到位，退场会先缩一下再淡出）", async () => {
+      const { kept, added } = await addLater(true);
+      expect(kept.style.opacity).toBe("1");
+      expect(added.style.opacity).toBe("0");
+      expect(added.style.transform).toBe("");
+    });
   });
 });
 

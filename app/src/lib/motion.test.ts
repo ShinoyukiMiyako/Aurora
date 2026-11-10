@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ambientFade, fade, insertItem, insertItemFade, pageItem, popMark, rootTransition, shake, SPRING_PARAMS, springAt, springs, stepPane, stepPaneFade, tabPanel, TOOLTIP_TIMING, tweenAt, twoParam, type PanelFrom, type SpringName } from "./motion";
+import { ambientFade, fade, faceSwap, insertItem, insertItemFade, lineSwap, lineSwapFade, pageItem, popMark, rootTransition, shake, SPRING_PARAMS, springAt, springs, stepPane, stepPaneFade, tabPanel, TOOLTIP_TIMING, tweenAt, twoParam, type PanelFrom, type SpringName } from "./motion";
 
 const TOKENS = readFileSync(new URL("../styles/tokens.css", import.meta.url), "utf8");
 
@@ -233,6 +233,26 @@ describe("变体与时机", () => {
     for (const phase of Object.values(popMark.reduced)) expect(phase).not.toHaveProperty("scale");
   });
 
+  it("小标记的标签档：从 0.6 弹出走 pop 加淡入补间，退场同 glyph 只原地淡出", () => {
+    expect(popMark.tag).toEqual({
+      initial: { opacity: 0, scale: 0.6 },
+      animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } },
+      exit: { opacity: 0, transition: fade.out },
+    });
+    expect(popMark.tag.animate).toEqual(popMark.glyph.animate);
+    expect(popMark.tag.exit).toEqual(popMark.glyph.exit);
+  });
+
+  it("换一枚小控件：换成别的东西取标签档，减少动画取小标记的减少动画档，同一组参数只留一份", () => {
+    expect(faceSwap.pop).toEqual({ initial: { opacity: 0, scale: 0.6 }, animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } } });
+    expect(faceSwap.pop.initial).toBe(popMark.tag.initial);
+    expect(faceSwap.pop.animate).toBe(popMark.tag.animate);
+    expect(faceSwap.exit).toEqual({ opacity: 0, transition: fade.out });
+    expect(faceSwap.exit).toBe(popMark.tag.exit);
+    expect(faceSwap.reduced).toBe(popMark.reduced);
+    expect(faceSwap.tap).toEqual({ initial: { opacity: 0, scale: 0.8 }, animate: { opacity: 1, scale: 1, transition: { ...springs.tap, opacity: fade.in } } });
+  });
+
   it("向导换步：前进时新步骤从右侧 16px 进、旧步骤朝左 16px 退，后退反过来，方向为 0 只淡入淡出", () => {
     const enter = stepPane.enter as (dir: number) => Record<string, unknown>;
     const exit = stepPane.exit as (dir: number) => Record<string, unknown>;
@@ -248,6 +268,24 @@ describe("变体与时机", () => {
   it("减少动画档的增删与换步只动透明度：没有缩放与位移可让根部配置一步到位", () => {
     expect(insertItemFade).toEqual({ initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in }, exit: { opacity: 0, transition: fade.out } });
     expect(stepPaneFade).toEqual({ enter: { opacity: 0 }, center: { opacity: 1, transition: fade.in }, exit: { opacity: 0, transition: fade.out } });
+  });
+
+  it("换行：新行从下方 4px 落到位走 settle，旧行上移 4px 淡出", () => {
+    expect(lineSwap).toEqual({
+      enter: { opacity: 0, y: 4 },
+      show: { opacity: 1, y: 0, transition: { ...springs.settle, opacity: fade.in } },
+      leave: { opacity: 0, y: -4, transition: fade.out },
+    });
+  });
+
+  it("减少动画档的换行与 lineSwap 同一组变体标签，进出只动透明度", () => {
+    expect(lineSwapFade).toEqual({ enter: { opacity: 0 }, show: { opacity: 1, transition: fade.in }, leave: { opacity: 0, transition: fade.out } });
+    expect(Object.keys(lineSwapFade).sort()).toEqual(Object.keys(lineSwap).sort());
+    for (const phase of Object.values(lineSwapFade)) {
+      expect(phase).not.toHaveProperty("y");
+      expect(phase).not.toHaveProperty("x");
+      expect(phase).not.toHaveProperty("scale");
+    }
   });
 
   it("提示气泡时机", () => {

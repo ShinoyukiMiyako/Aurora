@@ -2,7 +2,7 @@
 //
 // 入场：根元素淡入；一级区块（Page 与 Bento 的直接子项）上移淡入，并按序号错开。
 // 区块组件（PageHeader、Card、Banner）经 EntranceBlock 认领自己的序号；Bento 不动自己，把序号转交给子项，
-// 并按子项数占号，排在它后面的区块接着往下编，错开始终自上而下。认领之后子树里的序号被清空，嵌套在区块里的组件不会再动第二次。
+// 并按子项各自的占号之和占号，排在它后面的区块接着往下编，错开始终自上而下。认领之后子树里的序号被清空，嵌套在区块里的组件不会再动第二次。
 // 页面怎么来的决定入场，由外壳经 PageArrivalProvider 告诉页面：
 // - enter（侧栏、链接、命令面板）：根淡入加区块错开。
 // - return（后退、前进）：回到看过的位置，只有根淡入，不重播区块的上移与错开。
@@ -94,6 +94,17 @@ function entranceSpan(child: ReactNode): number {
   return span === undefined ? 1 : (span as (props: unknown) => number)(child.props);
 }
 
+/**
+ * 一组子项在页面编号里一共占几个号：登记过的组件（Bento、Appear、BannerSlot）按自己的规则算，别的各占一个。
+ * 给把序号转交给子项的组件算自己的占号用：子项里有空的 Appear 时，它不该替这个空块多占一个号。
+ * 与 numberEntrance 同样按 Children.toArray 计数：false、null、undefined 不占号。
+ */
+export function entranceSpanOf(children: ReactNode): number {
+  let span = 0;
+  for (const child of Children.toArray(children)) span += entranceSpan(child);
+  return span;
+}
+
 /** 给一组子项从 start 起依次编号；start 为 null 时子项都不参与入场。 */
 export function numberEntrance(children: ReactNode, start: number | null): ReactNode {
   if (start === null) return <EntranceBoundary>{children}</EntranceBoundary>;
@@ -136,7 +147,7 @@ function entranceOf(index: number | null, stage: EntranceStage | null, reduced: 
  * 自己另有切换动画的区块（标签面板）挂载时问页面这一次怎么入场，只读一次：
  * - 入场属性：站在一级位置、赶上了首帧，页面在错开入场，照页面分的序号走；
  * - "still"：站在一级位置、赶上了首帧，但页面这一次不播区块入场（后退前进、启动那一屏、减少动画只留根淡入），区块直接是成品；
- * - null：不归页面管（嵌套在区块里，或首帧之后才挂上），区块播自己的。
+ * - null：不归页面管（嵌套在区块里，或首帧之后才挂上），区块播自己的。这两种要分开时再问 usePageFirstFrame()。
  */
 export function usePageEntrance(): EntranceProps | "still" | null {
   const index = useContext(EntranceContext);
@@ -148,6 +159,17 @@ export function usePageEntrance(): EntranceProps | "still" | null {
     return { variants: pageItem, custom: index, "data-entrance": index };
   });
   return entrance;
+}
+
+/**
+ * 挂载那一刻页面还在第一帧之内，只读一次；不在页面里时为 false。
+ * usePageEntrance() 为 null 时用它分辨：为真是嵌套在首帧里的区块之内，外层整块正随页面入场（或这一次直接是成品），
+ * 里面的东西跟着外层走，自己再播一层就是位移叠加、透明度相乘；为假是首帧之后才挂上的，入场归自己。
+ */
+export function usePageFirstFrame(): boolean {
+  const stage = useContext(StageContext);
+  const [first] = useState(() => stage !== null && !stage.settled);
+  return first;
 }
 
 /**

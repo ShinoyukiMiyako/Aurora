@@ -9,7 +9,7 @@
 
 import { motion, MotionContext, PresenceContext, useReducedMotionConfig } from "framer-motion";
 import { useContext, type Ref } from "react";
-import { fade, springs } from "../lib/motion";
+import { popMark } from "../lib/motion";
 import { cx } from "../lib/util";
 import styles from "./Badge.module.css";
 
@@ -32,20 +32,6 @@ export interface BadgeProps {
   ref?: Ref<HTMLSpanElement>;
 }
 
-/** 出现、消失的动画。缩放从 0 起：角标小，从略小处起看不出是「弹出来」的。 */
-const BADGE_MOTION = {
-  initial: { scale: 0, opacity: 0 },
-  animate: { scale: 1, opacity: 1, transition: { ...springs.pop, opacity: fade.in } },
-  exit: { scale: 0.6, opacity: 0, transition: fade.out },
-} as const;
-
-/** 减少动画时的进出：只留透明度。缩放在减少动画下一步到位，退场会先在一帧里缩掉四成再淡出。 */
-const BADGE_FADE = {
-  initial: { opacity: 0 },
-  animate: { opacity: 1, transition: fade.in },
-  exit: { opacity: 0, transition: fade.out },
-} as const;
-
 /**
  * 角标的出现与消失是不是由一个 AnimatePresence 直接管着。只看有没有 PresenceContext 不够：外壳的主界面、弹窗、
  * 浮层都在 AnimatePresence 里，页面上每个角标都拿得到一个。直接管着时，外面最近的 motion 元素在那个 AnimatePresence
@@ -67,7 +53,8 @@ export function badgeText(count: number): string {
 export function Badge({ count, tone = "neutral", ring = false, className, ref }: BadgeProps) {
   const text = count === undefined ? null : badgeText(count);
   const owned = usePresenceOwned();
-  const moves = useReducedMotionConfig() === true ? BADGE_FADE : BADGE_MOTION;
+  // 角标是几个像素的点或一枚小计数，走 dot 档：从 0 弹出，从略小处起看不出是「弹出来」的
+  const moves = useReducedMotionConfig() === true ? popMark.reduced : popMark.dot;
   return (
     <motion.span
       ref={ref}

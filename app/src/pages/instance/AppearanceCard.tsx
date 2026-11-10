@@ -66,34 +66,33 @@ export function AppearanceCard({ inst, editor, view, slow }: AppearanceCardProps
   return (
     <Card padding="lg" className={shared.settingsWide}>
       <CardHeader icon="palette" title={SETTINGS_COPY.appearanceTitle} subtitle={SETTINGS_COPY.appearanceSubtitle} />
-      <Loadable view={view} skeleton={<AppearanceSkeleton slow={slow} />}>
+      <Loadable view={view} skeleton={<AppearanceSkeleton />}>
         {() => {
           if (editor === null) throw new Error("外观卡：加载门放行时实例设置必定已读到");
           return <AppearanceBody inst={inst} editor={editor} />;
         }}
       </Loadable>
+      {/* 「比平时慢一些」放在骨架层外：骨架层整层对读屏隐藏，放在里面读屏就读不到。出没时卡片变高变矮由网格的让位接住 */}
+      <Appear itemClassName={shared.settingsSlow}>{slow && <SlowHint key="slow" slow />}</Appear>
     </Card>
   );
 }
 
 /** 外观卡的骨架：左侧卡面、右侧卡面背景与封面方块两行，尺寸照真实内容（不含只在有背景图时出现的那一行）。 */
-function AppearanceSkeleton({ slow }: { slow: boolean }) {
+function AppearanceSkeleton() {
   return (
-    <>
-      <div className={styles.layout}>
-        <Skeleton shape="block" width="100%" height={PREVIEW_HEIGHT + PREVIEW_BORDER * 2} radius="lg" />
-        <div>
-          <SettingRow title={<Skeleton shape="text" width={TITLE_SKELETON_WIDTH} />} description={<Skeleton shape="text" lines={2} />}>
-            <Skeleton shape="block" width={SEGMENT_SKELETON_WIDTH} height={SMALL_CONTROL_HEIGHT} radius="sm" />
-          </SettingRow>
-          <SettingRow title={<Skeleton shape="text" width={TITLE_SKELETON_WIDTH} />} description={<Skeleton shape="text" />}>
-            <Skeleton shape="block" width={BLOCK_WIDTH} height={isoLayout(BLOCK_WIDTH).canvasHeight} radius="sm" />
-            <Skeleton shape="block" width={BUTTON_SKELETON_WIDTH} height={SMALL_CONTROL_HEIGHT} radius="sm" />
-          </SettingRow>
-        </div>
+    <div className={styles.layout}>
+      <Skeleton shape="block" width="100%" height={PREVIEW_HEIGHT + PREVIEW_BORDER * 2} radius="lg" />
+      <div>
+        <SettingRow title={<Skeleton shape="text" width={TITLE_SKELETON_WIDTH} />} description={<Skeleton shape="text" lines={2} />}>
+          <Skeleton shape="block" width={SEGMENT_SKELETON_WIDTH} height={SMALL_CONTROL_HEIGHT} radius="sm" />
+        </SettingRow>
+        <SettingRow title={<Skeleton shape="text" width={TITLE_SKELETON_WIDTH} />} description={<Skeleton shape="text" />}>
+          <Skeleton shape="block" width={BLOCK_WIDTH} height={isoLayout(BLOCK_WIDTH).canvasHeight} radius="sm" />
+          <Skeleton shape="block" width={BUTTON_SKELETON_WIDTH} height={SMALL_CONTROL_HEIGHT} radius="sm" />
+        </SettingRow>
       </div>
-      <SlowHint slow={slow} />
-    </>
+    </div>
   );
 }
 

@@ -4,9 +4,10 @@
 // 这时不再是进度条：没有当前值的 progressbar 会被读屏当成不定进度念「忙」，所以改为图形，名称后接一句可读的说明。
 
 import { AnimatePresence, motion, useIsPresent, useTransform, type MotionValue } from "framer-motion";
-import { useEffect, useId, useRef } from "react";
+import { useId, useRef } from "react";
 import { percent } from "../domain/format";
 import { fade } from "../lib/motion";
+import { useMounted } from "../lib/useMounted";
 import { cx } from "../lib/util";
 import type { ProgressTone } from "./ProgressBar";
 import { useSmoothProgress } from "./ProgressBar";
@@ -57,10 +58,7 @@ export function ProgressRing({ value, size = 36, tone = "accent", track, capAt99
   const center = size / 2;
   // 挂载时就有进度的填充直接显示，之后才出现的淡入。不写在 AnimatePresence 的 initial={false} 上：
   // 那会让填充里之后才挂载的动画元素也永远跳过入场
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
 
   return (
     <span

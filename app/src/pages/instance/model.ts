@@ -8,6 +8,7 @@ import { samePath } from "../../domain/paths";
 import { bestLocalRuntime, isHeapReserveFailure, javaMajorFromDetail, memoryLowerTarget, memoryTarget } from "../../domain/rules";
 import type { Task, TaskError, TaskStatus } from "../../domain/types";
 import type { LaunchView, LaunchViewKind } from "../../launch/launchView";
+import type { FinishedItem } from "../../lib/progress-display";
 import type { GpuAdaptersDto, JavaInstallationDto } from "../../state/queries/catalog";
 import type { CrashClueDto, CrashReportDto, HistoryEvent, InstalledMod, RollbackCheck, UpdateCandidate, UpdateHold, WorldDto } from "../../state/queries/instance";
 import { isActiveTask } from "../../state/tasks";
@@ -21,11 +22,24 @@ import { MODS_COPY, OVERVIEW_COPY } from "./copy";
  * 「上次崩溃」只在这次崩溃之后没有再正常玩过、且此刻不在启动或运行时提示。崩溃报告不会被后续正常启动清空，
  * 所以要拿它和上次游玩比：崩溃那一局的退出时刻同时写进两边，之后正常结束的一局会把上次游玩推到更晚。
  * 游玩记录读不出时比不了，按还没再玩过算：多提示一次，好过把崩溃藏起来。
+ * ranAfter：停在页面上时看到这份崩溃之后游戏又跑起来过（见 crashRanAfter）。正常退出后要等实例列表重读才知道新的上次游玩，
+ * 那段空档里只比游玩时刻，提示会在运行结束时先亮回来、列表回来后再撤走；同一份崩溃时刻因此不再算数。
  */
-export function isCrashActive(crashAt: number | null, lastPlayedAt: number | null, view: LaunchViewKind): boolean {
+export function isCrashActive(crashAt: number | null, lastPlayedAt: number | null, view: LaunchViewKind, ranAfter: number | null = null): boolean {
   if (crashAt === null) return false;
   if (view === "loading" || view === "running") return false;
+  if (crashAt === ranAfter) return false;
   return lastPlayedAt === null || crashAt >= lastPlayedAt;
+}
+
+/**
+ * 页面停留期间记下的「这份崩溃之后游戏又跑起来过」：看到运行中时记下此刻的崩溃时刻，交给 isCrashActive 的 ranAfter。
+ * 又崩了一次就清掉：旧的那份重新算数，直到新报告到了换成新的崩溃时刻。列表与报告里的崩溃时刻读自同一份报告文件，同一次崩溃两边相等。
+ */
+export function crashRanAfter(prev: number | null, crashAt: number | null, view: LaunchViewKind): number | null {
+  if (view === "running") return crashAt;
+  if (view === "crashed") return null;
+  return prev;
 }
 
 // ---------------------------------------------------------------- 删除
@@ -149,6 +163,8 @@ export interface CreationRef {
   title: string;
   modpack: boolean;
   error: TaskError | null;
+  /** 结束的时刻；还在排队或在跑时为 null。 */
+  finishedAt: number | null;
 }
 
 /** 挂在这个实例名下的新建或导入任务：进行中的优先（重试还是同一个任务）；都已结束时取最近建的那个。 */
@@ -163,13 +179,29 @@ export function creationRef(tasks: readonly Task[], instanceId: string): Creatio
     if (pick === null || task.createdAt >= pick.createdAt) pick = task;
   }
   if (pick === null) return null;
-  return { id: pick.id, status: pick.status, title: pick.title, modpack: pick.spec.command === "install_modpack", error: pick.error };
+  return { id: pick.id, status: pick.status, title: pick.title, modpack: pick.spec.command === "install_modpack", error: pick.error, finishedAt: pick.finishedAt };
 }
 
 export function creationRefEqual(a: CreationRef | null, b: CreationRef | null): boolean {
   if (a === null || b === null) return a === b;
   const sameError = a.error === null || b.error === null ? a.error === b.error : a.error.code === b.error.code && a.error.message === b.error.message;
-  return a.id === b.id && a.status === b.status && a.title === b.title && a.modpack === b.modpack && sameError;
+  return a.id === b.id && a.status === b.status && a.title === b.title && a.modpack === b.modpack && sameError && a.finishedAt === b.finishedAt;
+}
+
+/** 交给 lib/progress-display 的 useFinishing：已完成的新建或导入任务，其余情形为空。 */
+export function creationFinished(creation: CreationRef | null): FinishedItem[] {
+  if (creation === null || creation.status !== "done") return [];
+  if (creation.finishedAt === null) throw new Error(`已完成的任务 ${creation.id} 没有完成时刻`);
+  return [{ id: creation.id, finishedAt: creation.finishedAt }];
+}
+
+/**
+ * 新建或导入任务刚完成、还在收尾（finishing 为 useFinishing 给出的集合）时，页面照旧按在跑画：概览的安装横幅留在原处
+ * 把进度推满、停一拍，再换成落地说明或正常内容，不在完成那一刻（落地重扫回来得快时连说明卡一起）整块换掉。
+ */
+export function heldInstallStage(stage: InstallStage, creation: CreationRef | null, finishing: ReadonlySet<string>): InstallStage {
+  if (creation === null || creation.status !== "done" || !finishing.has(creation.id)) return stage;
+  return { kind: "running", title: creation.title };
 }
 
 /**
@@ -965,6 +997,50 @@ export function crashFixes(report: CrashReportDto, ctx: CrashFixContext): CrashF
   }
   fixes.push({ kind: "compare_log" });
   return fixes;
+}
+
+/**
+ * 一键尝试推出来之前大约有几行，给加载骨架定行数：同一类别只出一行，显卡驱动、Intel 显卡驱动与本地崩溃共用一行处理办法，
+ * 手动崩溃与本机连接没有可做的，末尾恒有「对照完整日志」。个别类别要看已装 Mod、本机 Java 才知道出不出行，这里按出算，
+ * 差的一两行由骨架所在容器的让位接住。与 crashFixes 的分支一一对应：新增类别时 fixRowOf 的穷尽检查编译不过，改合并规则时两处一起改。
+ */
+export function crashFixRowEstimate(report: CrashReportDto): number {
+  const rows = new Set<string>();
+  for (const clue of report.diagnoses) {
+    const row = fixRowOf(clue.category);
+    if (row !== null) rows.add(row);
+  }
+  return rows.size + 1;
+}
+
+/** 这一类线索在一键尝试里占哪一行；不出行为 null。 */
+function fixRowOf(category: CrashClueDto["category"]): string | null {
+  switch (category) {
+    case "manual_debug_crash":
+    case "loopback_unavailable":
+      return null;
+    case "graphics_driver":
+    case "intel_graphics_driver":
+    case "native_crash":
+      return "driver_steps";
+    case "out_of_memory":
+    case "jvm_args_invalid":
+    case "java_version_mismatch":
+    case "missing_dependency":
+    case "missing_language_provider":
+    case "game_version_mismatch":
+    case "dependency_version_mismatch":
+    case "optifine_incompatible":
+    case "mixin_failure":
+    case "duplicate_mod":
+    case "native_library_missing":
+    case "corrupted_jar":
+      return category;
+    default: {
+      const unknown: never = category;
+      throw new Error(`未知的崩溃诊断类别：${String(unknown)}`);
+    }
+  }
 }
 
 /** 一键尝试条目的稳定键：完成态与撤销按它记。 */

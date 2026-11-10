@@ -149,12 +149,6 @@
   margin-right: var(--sk-space-12);
 }
 
-/* 图钉与更多钮的提示气泡外层是 display: contents，没有盒子，让位认不到：外面再包这一层真实的盒子 */
-.heroAction {
-  display: flex;
-  flex: none;
-}
-
 .heroEyebrow {
   color: var(--sk-text-2);
   font-size: var(--sk-fs-small);
@@ -244,7 +238,10 @@
   flex: 1 1 260px;
 }
 
-/* 落在输入行下面一个文字列间距处、与标签行同高（标签 22）：不进流，出现、消失时什么都不挪 */
+/*
+ * 落在输入行下面一个文字列间距处、与标签行同高（标签 22）：不进流，出现、消失时什么都不挪。
+ * 接收指针：截断的长错误要悬停看全文；它盖着的标签行此时已淡出，标签本身也不可交互
+ */
 .renameError {
   position: absolute;
   top: calc(100% + var(--sk-space-6));
@@ -257,7 +254,6 @@
   color: var(--sk-danger);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
-  pointer-events: none;
 }
 
 .tabBar {
@@ -295,6 +291,13 @@
 
 .statsNotice {
   margin-top: var(--sk-space-14);
+}
+
+/* 实例信息里等加载的两格（Java、内存）：值落在加载层里的块上，KV 那一层的省略号管不到块里的文字，长值在这一层自己出省略号 */
+.kvLoaded {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 存档一个都没有时的占位：EmptyState compact 的几何（内边距、64 插画、标题一行、正文一行），读到后高度不变 */
@@ -392,18 +395,18 @@
   gap: var(--sk-space-6);
 }
 
-/* 备份列表读取中的骨架：照贴边列表的中号行画，行高 56、左右内边距 18、行间 1px 分隔线 */
+/* 备份列表读取中的骨架：照贴边列表的中号行画，行高 56、左右内边距 18 */
 .backupSkeleton {
   display: flex;
   flex-direction: column;
   min-width: 0;
 }
 
+/* 不用 border-box：贴边列表的分隔线画在 li 上、行（56）之外，第二行起每行 57；骨架的分隔线也得加在 56 之外 */
 .backupSkeletonRow {
   display: flex;
   align-items: center;
   gap: var(--sk-space-12);
-  box-sizing: border-box;
   min-width: 0;
   min-height: 56px;
   padding: 0 var(--sk-space-18);
@@ -670,7 +673,8 @@
   line-height: var(--sk-lh-caption);
 }
 
-.tableSkeleton > .slowHint {
+/* 慢提示画在骨架层外、骨架下方的卡片里（骨架层对读屏隐藏），左缘与首列对齐 */
+.modCard .slowHint {
   padding: var(--sk-space-12) var(--sk-space-18);
 }
 
@@ -944,6 +948,11 @@
   grid-column: 1 / -1;
 }
 
+/* 设置卡里骨架下方的慢提示：与卡内各块同样隔 14。用内边距不用外边距：退场时抽出布局按边框盒定位，外边距会让它下移 */
+.settingsSlow {
+  padding-top: var(--sk-space-14);
+}
+
 .followBox {
   display: flex;
   align-items: center;
@@ -1015,6 +1024,17 @@
 /* 默认设置一行的第二行：读取中、没存过、存过都占一行高 */
 .templateLine {
   min-height: var(--sk-lh-small);
+}
+
+/* 默认设置一行的「清除」：常驻占位，有默认设置时淡入，没有时淡出（不可交互由 inert 管）；只动透明度 */
+.clearSlot {
+  display: inline-flex;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+.clearSlot[data-hidden] {
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
 }
 
 /*
@@ -1098,6 +1118,24 @@
   padding: var(--sk-space-16) var(--sk-space-18);
 }
 
+/* 加载期间只给读屏的卡片标题：占位整层对读屏隐藏，看得见的那个标题在占位里 */
+.consoleHeading {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 慢提示在占位外面、卡片底部，左右内边距与日志区的骨架行对齐 */
+.consoleSlow {
+  flex: none;
+  padding: var(--sk-space-8) var(--sk-space-16);
+}
+
 /* 控制台的加载占位照控制台自己的头部画：同样的内边距、分隔线与筛选行，换成控制台时头部不变高 */
 .consoleSkeletonHead {
   display: flex;
@@ -1144,13 +1182,19 @@
   min-height: 0;
 }
 
+/*
+ * 时间线越过卡片最大高度时才出滚动条：滚动条槽常驻，出没时条目不收窄、居中的「显示更早」不横移。
+ * 槽伸进卡片的右内边距里，条目右缘仍与卡头对齐
+ */
 .timelineScroll {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: var(--sk-space-8);
   min-height: 0;
+  margin-right: calc(-1 * var(--sk-scrollbar-size));
   overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 .timeline {

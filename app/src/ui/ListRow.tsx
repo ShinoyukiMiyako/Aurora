@@ -9,16 +9,23 @@
 // - onClick 且有尾部（尾部放了操作）：标题做成按钮，伪元素覆盖整行，尾部控件浮在覆盖层上；
 // - 放在带 select 的 List 里：列表是 listbox，行是 option，↑↓ / Home / End 移动，Enter / Space 选中。
 // 尾部操作常驻显示，不做「悬停才出现」：键盘与触控板用户看不到悬停态。
-// 行的增删：List 挂载之后新增的行淡入并从略小处落到位，只有落在可见范围附近的才播，远处的直接出现
-// （换了一批、新来的又太多时改为整个列表淡入一次）；被删的行脱离布局原地淡出，其余行滑到新位置。
+// 行的增删：List 挂载之后新增的行淡入并从略小处落到位，只有落在可见范围附近的才播，远处的直接出现；
+// 被删的行脱离布局原地淡出，其余行滑到新位置。换了一批、新来的又太多时整批换上：新行只淡入，已在场的行直接到位、不滑，
+// 被换掉的行直接拿掉；原先一行也没有时改为整个列表淡入一次。
 // 页面只管换 children（给稳定的 key），不用为进出场做任何事；行被页面自己的组件包着也一样。
 
-import { AnimatePresence, motion, useAnimate, useIsPresent } from "framer-motion";
-import { Children, createContext, isValidElement, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
-import { fade, insertItem } from "../lib/motion";
-import { observeReflow } from "../lib/reflow";
+import { AnimatePresence, motion, useIsPresent } from "framer-motion";
+import { Children, createContext, isValidElement, useCallback, useContext, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
+import { fade, insertItemFade } from "../lib/motion";
+import { observeReflow, REFLOW_PAUSED_ATTR } from "../lib/reflow";
+import { playTween } from "../lib/slide";
+import { useInsertItem } from "../lib/useInsertItem";
+import { useMounted } from "../lib/useMounted";
 import { cx } from "../lib/util";
+import { appendsOnly, EVERY_ROW, measuredRowWindow, ROW_MOTION_LIMIT, rowsInWindow, rowWindow, type RowWindow } from "./ListRow.window";
 import styles from "./ListRow.module.css";
+
+export { appendsOnly, EVERY_ROW, measuredRowWindow, ROW_MOTION_LIMIT, ROW_WINDOW_MARGIN, rowsInWindow, rowWindow, type RowEdges, type RowWindow } from "./ListRow.window";
 
 export type ListVariant = "inset" | "flush";
 export type ListRowSize = "sm" | "md" | "lg";
@@ -32,15 +39,29 @@ export interface ListSelect {
 interface ListContextValue {
   variant: ListVariant;
   select: (ListSelect & { tabStop: string | null; focus: (value: string) => void }) | null;
+  /**
+   * 这一次是整批换上。这时退场的行直接拿掉：新行就落在它们腾出的位置上淡入，两层文字叠着交叉淡化看不清。
+   * 走上下文而不是行自己的属性：退场的行留着的是它最后一次的属性，上下文变了它照样重渲染。
+   */
+  swapping: boolean;
 }
 
 const ListContext = createContext<ListContextValue | null>(null);
 
+/** 整批换上时退场的行：不播淡出，直接拿掉。 */
+const SWAP_EXIT = { opacity: 0, transition: fade.none } as const;
+
+/**
+ * 一行挂载时怎么入场。none：不播（挂载时就在、或落在可见范围之外）；item：按增删参数淡入并从略小处落到位；
+ * fade：换了一批时整批的新行，只淡入。
+ */
+type RowEnter = "none" | "item" | "fade";
+
 interface RowSlotValue {
   /** popLayout 塞进来的 ref，交给行自己的 li。 */
   ref: Ref<HTMLLIElement> | undefined;
-  /** 这一行挂载时播入场：列表挂载之后才来、又落在可见范围附近。挂载时就在的行跟着所在页面的入场走。 */
-  entering: boolean;
+  /** 这一行挂载时怎么入场：列表挂载之后才来、又落在可见范围附近的才播。挂载时就在的行跟着所在页面的入场走。 */
+  enter: RowEnter;
 }
 
 /**
@@ -49,70 +70,20 @@ interface RowSlotValue {
  */
 const RowSlotContext = createContext<RowSlotValue | null>(null);
 
-function RowSlot({ children, ref, entering }: { children: ReactNode; ref?: Ref<HTMLLIElement>; entering: boolean }) {
-  const value = useMemo(() => ({ ref, entering }), [ref, entering]);
+function RowSlot({ children, ref, enter }: { children: ReactNode; ref?: Ref<HTMLLIElement>; enter: RowEnter }) {
+  const value = useMemo(() => ({ ref, enter }), [ref, enter]);
   return <RowSlotContext.Provider value={value}>{children}</RowSlotContext.Provider>;
 }
 
 /** 在场的选项；退场中的行（inert）还在文档里淡出，键盘不该停上去。 */
 const LIVE_OPTION = ':scope > [role="option"]:not([inert])';
-
-/** 一次新增超过这么多行、又不是在末尾追加时不逐行入场：行直接换上，整个列表淡入一次（与 Table 同一口径）。 */
-export const ROW_MOTION_LIMIT = 40;
-
-/**
- * 可见范围上下各多留这么多行。一次变化里只有落在这之内的行逐行动画（新行的入场、表格行的让位）：
- * 再远的在视口之外，直接到位看不出差别，也省掉逐行测量与起动画。余量盖住估算误差和标题栏一类遮挡。
- */
-export const ROW_WINDOW_MARGIN = 4;
-
-/** 行号范围，含两端。 */
-export interface RowWindow {
-  first: number;
-  last: number;
-}
-
-/** 量不出可见范围（还没有布局：组件测试的 jsdom，或祖先 display: none）时按每一行都在范围内处理。 */
-export const EVERY_ROW: RowWindow = { first: -Infinity, last: Infinity };
+/** 在场的行，同上。 */
+const LIVE_ROW = ":scope > li:not([inert])";
 
 /**
- * 等距排开的行里，落在可见带 [clipTop, clipBottom] 之内的行号，上下各多留 ROW_WINDOW_MARGIN 行。
- * top 是第 0 行的上沿，pitch 是相邻两行上沿的间距，与可见带同一坐标系（视口坐标）。整块在可见带之外时范围为空或只剩余量。
- */
-export function rowWindow(top: number, clipTop: number, clipBottom: number, pitch: number): RowWindow {
-  if (!(pitch > 0)) throw new Error(`行距必须是正数，收到 ${pitch}`);
-  return {
-    first: Math.floor((clipTop - top) / pitch) - ROW_WINDOW_MARGIN,
-    last: Math.ceil((clipBottom - top) / pitch) - 1 + ROW_WINDOW_MARGIN,
-  };
-}
-
-/** 这次只是在末尾追加：上一次的行都还在，原样排在最前面。追加时已有的行一动不动，不算换了一批。 */
-export function appendsOnly<K>(previous: readonly K[], next: readonly K[]): boolean {
-  return previous.length > 0 && next.length > previous.length && previous.every((key, i) => next[i] === key);
-}
-
-/**
- * 一次变化里要逐行动画的行：新来的行里新位置在范围内的（播入场），前后都在、位置变了的行里旧位置或新位置在范围内的（走让位）。
- * 位置按行号算，行等高时与像素位置一一对应。
- */
-export function rowsInWindow<K>(previous: readonly K[], next: readonly K[], window: RowWindow): { entering: Set<K>; moving: Set<K> } {
-  const inside = (index: number) => index >= window.first && index <= window.last;
-  const was = new Map(previous.map((key, i) => [key, i]));
-  const entering = new Set<K>();
-  const moving = new Set<K>();
-  next.forEach((key, i) => {
-    const from = was.get(key);
-    if (from === undefined) {
-      if (inside(i)) entering.add(key);
-    } else if (from !== i && (inside(from) || inside(i))) moving.add(key);
-  });
-  return { entering, moving };
-}
-
-/**
- * 列表此刻露在视口里的行号范围，只在行集合变化的那一刻量一次。同一个列表里的行同高：上一次的总高按行数均分成行距
- * （行间的缝也算进去）。上一次没有行时无从估算，按全部在范围内处理。
+ * 列表此刻露在视口里的行号范围，只在行集合变化的那一刻量一次。按在场的行各自的上下沿二分查找，行高不一也不累积偏差；
+ * 视口越过末行的部分按平均行距（行间的缝也算进去）推算。在场的行与上一次的行数对不上（页面把一行包成了别的结构）时
+ * 整段按平均行距估。上一次没有行、或量不到布局时按全部在范围内处理。
  */
 function listWindow(list: HTMLUListElement | null, count: number): RowWindow {
   if (list === null) throw new Error("List 尚未挂载");
@@ -121,7 +92,10 @@ function listWindow(list: HTMLUListElement | null, count: number): RowWindow {
   if (count === 0) return EVERY_ROW;
   const rect = list.getBoundingClientRect();
   if (rect.height === 0) return EVERY_ROW;
-  return rowWindow(rect.top, 0, view.innerHeight, rect.height / count);
+  const pitch = rect.height / count;
+  const rows = list.querySelectorAll<HTMLElement>(LIVE_ROW);
+  if (rows.length !== count) return rowWindow(rect.top, 0, view.innerHeight, pitch);
+  return measuredRowWindow(count, (index) => rows[index].getBoundingClientRect(), 0, view.innerHeight, pitch);
 }
 
 export interface ListProps {
@@ -150,31 +124,34 @@ export function List({ variant = "inset", select, className, children, ...aria }
   const listRef = useRef<HTMLUListElement>(null);
   const [focusValue, setFocusValue] = useState<string | null>(null);
   // 不能用 AnimatePresence 的 initial={false} 关掉首屏入场：它会让行里之后才挂载的元素也永远跳过入场
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   const rows = Children.toArray(children).map((child) => {
     if (!isValidElement(child)) throw new Error("List 的子项只能是行（ListRow 或包着它的组件），不能直接放文字");
     return child;
   });
-  // 和上一次提交相比新来了几行。换了一批（首次填充、整体换掉、换了条件）又来得太多时，逐行入场不划算，整个列表淡入一次；
-  // 只是在末尾追加时已有的行原样留着、不跟着闪，新行里只有可见范围附近的播入场
+  // 和上一次提交相比新来了几行，新行里只有可见范围附近的播入场。只是在末尾追加时已有的行原样留着，照常逐行入场。
+  // 换了一批（首次填充、整体换掉、换了条件）又来得太多时整批换上：新行只淡入，不从略小处落位；已在场的行被挤到哪就直接在哪，
+  // 这一趟的让位暂停，几十行同时滑看不清谁在动，挤动的距离也可能长到几屏
   const keys = rows.map((row) => row.key);
   const shownKeys = useRef(keys);
   const previous = shownKeys.current;
   const before = new Set(previous);
   const added = keys.filter((key) => !before.has(key)).length;
   const crowded = added > ROW_MOTION_LIMIT && !appendsOnly(previous, keys);
-  const entering = !mounted.current || crowded || added === 0 ? null : rowsInWindow(previous, keys, listWindow(listRef.current, previous.length)).entering;
-  const [, animateList] = useAnimate<HTMLUListElement>();
+  // 原先一行也没有时整个列表淡入一次：没有已在场的行会跟着闪，也省得几十上百行各起一段透明度动画
+  const wholeFade = crowded && previous.length === 0;
+  const entering = !mounted.current || added === 0 || wholeFade ? null : rowsInWindow(previous, keys, listWindow(listRef.current, previous.length)).entering;
+  const newRow: RowEnter = crowded ? "fade" : "item";
   useLayoutEffect(() => {
     shownKeys.current = keys;
     const list = listRef.current;
     if (!crowded || list === null) return;
-    // 透明度先在提交时压到 0，首帧就看不到整批新行一闪
-    list.style.opacity = "0";
-    void animateList(list, { opacity: [0, 1] }, fade.in);
+    // 暂停只盖住这一批：同一个任务里打上又撤掉，观察者把这一趟收作暂停（开关的增删本身就按暂停处理）。
+    // 留到下一次渲染才撤的话，这期间行内自己引起的尺寸变化、撤掉的那一趟里同时发生的增删都会被一并吞掉，不再滑
+    list.setAttribute(REFLOW_PAUSED_ATTR, "");
+    list.removeAttribute(REFLOW_PAUSED_ATTR);
+    // 组件测试的 jsdom 没有 Web Animations
+    if (wholeFade && typeof list.animate === "function") playTween(list, [{ opacity: 0 }, { opacity: 1 }], fade.in);
   });
   // 行增删、变高变矮时其余行从原位置滑过去。回调必须稳定：每次渲染换一个会拆掉重建观察，丢掉旧位置
   const attach = useCallback((el: HTMLUListElement | null) => {
@@ -187,7 +164,7 @@ export function List({ variant = "inset", select, className, children, ...aria }
     };
   }, []);
 
-  let context: ListContextValue = { variant, select: null };
+  let context: ListContextValue = { variant, select: null, swapping: crowded };
   if (select !== undefined) {
     const values = optionValues(children);
     const preferred = [focusValue, select.selected].find((v): v is string => v !== null && values.includes(v));
@@ -200,7 +177,7 @@ export function List({ variant = "inset", select, className, children, ...aria }
       if (target === undefined) throw new Error(`List 里找不到 value 为 ${value} 的选项`);
       target.focus();
     };
-    context = { variant, select: { ...select, tabStop, focus } };
+    context = { variant, select: { ...select, tabStop, focus }, swapping: crowded };
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLUListElement>) => {
@@ -252,7 +229,7 @@ export function List({ variant = "inset", select, className, children, ...aria }
         <AnimatePresence mode="popLayout">
           {rows.map((row) => (
             // toArray 给每个元素补上键（调用方的 key 加前缀，静态子项按位置）：presence 靠它认出谁走了、谁新来
-            <RowSlot key={row.key} entering={entering !== null && entering.has(row.key)}>
+            <RowSlot key={row.key} enter={entering !== null && entering.has(row.key) ? newRow : "none"}>
               {row}
             </RowSlot>
           ))}
@@ -310,15 +287,16 @@ export function ListRow({
   const list = useContext(ListContext);
   const slot = useContext(RowSlotContext);
   const present = useIsPresent();
+  const motionSet = useInsertItem();
   if (list === null || slot === null) throw new Error("ListRow 必须放在 List 里");
   // 行自己的进出场。退场时留在原处淡出，这段时间它已经不是列表的一行：不接受指针与焦点，读屏不再读到
   const item = {
     ref: slot.ref,
     className: cx(styles.item, className),
     inert: !present,
-    initial: slot.entering ? insertItem.initial : false,
-    animate: insertItem.animate,
-    exit: insertItem.exit,
+    initial: slot.enter === "none" ? false : slot.enter === "fade" ? insertItemFade.initial : motionSet.initial,
+    animate: motionSet.animate,
+    exit: list.swapping ? SWAP_EXIT : motionSet.exit,
   } as const;
   // inert 在真机上已经挡住指针；这里再断开回调，连点两下时第二下落在正退场的行上也不会再触发一次
   const activate = present ? onClick : undefined;

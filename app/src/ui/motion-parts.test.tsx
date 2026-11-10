@@ -13,6 +13,7 @@ import { Loadable } from "./Loadable";
 import loadableStyles from "./Loadable.module.css";
 import { Page } from "./Page";
 import type { LoadingView } from "../lib/loading-gate";
+import { REFLOW_SKIP_ATTR } from "../lib/reflow";
 
 let view: Rendered | undefined;
 
@@ -91,15 +92,6 @@ describe("Loadable", () => {
     expect(has("[data-skeleton]")).toBe(true);
   });
 
-  it("上一段骨架显出来过、这一段一直停在等待期：内容到达时照样直接拿掉", () => {
-    view = render(tree("skeleton"));
-    view.rerender(tree("content"));
-    view.rerender(tree("pending"));
-    expect(one("[data-skeleton]").parentElement?.hasAttribute("data-pending")).toBe(true);
-    view.rerender(tree("content"));
-    expect(has("[data-skeleton]")).toBe(false);
-  });
-
   it("骨架层整个不接收指针事件，不只是等待期：退场时它叠在内容上，淡出那一段不能截住点击", () => {
     const css = readFileSync(resolve(__dirname, "Loadable.module.css"), "utf8");
     const layer = /(?:^|\n)\.skeleton\s*\{([^}]*)\}/.exec(css);
@@ -116,6 +108,55 @@ describe("Loadable", () => {
       </Loadable>,
     );
     expect(one("[data-content]").parentElement?.classList.contains("fill")).toBe(true);
+  });
+
+  const labelled = (state: LoadingView) => (
+    <Loadable view={state} skeleton={<span data-skeleton="">正在读取</span>} busyLabel="正在读取">
+      {content}
+    </Loadable>
+  );
+
+  it("不传加载说明：只有根元素一个节点，没有播报区", () => {
+    view = render(tree("skeleton"));
+    expect(view.container.children).toHaveLength(1);
+    expect(has('[role="status"]')).toBe(false);
+  });
+
+  it("加载说明：播报区先挂好、先空着，骨架显出来时写进说明，内容到达后清空，始终是同一个节点", () => {
+    view = render(labelled("pending"));
+    const status = one('[role="status"]');
+    expect(status.textContent).toBe("");
+    view.rerender(labelled("skeleton"));
+    expect(one('[role="status"]')).toBe(status);
+    expect(status.textContent).toBe("正在读取");
+    view.rerender(labelled("content"));
+    expect(one('[role="status"]')).toBe(status);
+    expect(status.textContent).toBe("");
+    view.rerender(labelled("pending"));
+    expect(status.textContent).toBe("");
+  });
+
+  it("加载说明的播报区在带 aria-busy 的根外面、不在骨架的 aria-hidden 里，视觉隐藏且不参与让位", () => {
+    view = render(labelled("skeleton"));
+    const status = one('[role="status"]');
+    expect(status.closest("[aria-busy]")).toBeNull();
+    expect(status.closest('[aria-hidden="true"]')).toBeNull();
+    expect(status.nextElementSibling?.getAttribute("aria-busy")).toBe("true");
+    expect(status.hasAttribute(REFLOW_SKIP_ATTR)).toBe(true);
+    expect(status.classList.contains(loadableStyles.status)).toBe(true);
+    const css = readFileSync(resolve(__dirname, "Loadable.module.css"), "utf8");
+    const rule = /(?:^|\n)\.status\s*\{([^}]*)\}/.exec(css);
+    if (rule === null) throw new Error("Loadable.module.css 里没有 .status 规则");
+    expect(rule[1]).toMatch(/\bposition:\s*absolute;/);
+    expect(rule[1]).toMatch(/\bclip-path:\s*inset\(50%\);/);
+  });
+
+  it("加载说明中途撤掉：根元素与里面的内容层不重挂", () => {
+    view = render(labelled("content"));
+    const layer = one("[data-content]").parentElement;
+    view.rerender(tree("content"));
+    expect(has('[role="status"]')).toBe(false);
+    expect(one("[data-content]").parentElement).toBe(layer);
   });
 
   it("第一次挂载就是骨架：直接不透明，跟着所在页面的入场走", () => {
@@ -155,14 +196,19 @@ describe("Loadable", () => {
     expect(has("[data-skeleton]")).toBe(false);
   });
 
-  it("减少动画：骨架与内容的交接只动透明度，没有位移或缩放", () => {
+  it("减少动画：交叉淡化照常（骨架从透明淡入到不透明，旧内容标成 inert），两层都不带位移或缩放", async () => {
     const reduced = (state: LoadingView) => <MotionConfig reducedMotion="always">{tree(state)}</MotionConfig>;
     view = render(reduced("content"));
+    const contentLayer = one("[data-content]").parentElement;
     view.rerender(reduced("skeleton"));
-    expect(one("[data-content]").parentElement?.style.transform).toBe("");
-    expect(one("[data-skeleton]").parentElement?.style.transform).toBe("");
-    view.rerender(reduced("content"));
-    expect(one("[data-content]").parentElement?.style.transform).toBe("");
+    const skeletonLayer = one("[data-skeleton]").parentElement;
+    if (contentLayer === null || skeletonLayer === null) throw new Error("骨架层或内容层没有挂上");
+    expect(contentLayer.hasAttribute("inert")).toBe(true);
+    expect(skeletonLayer.style.opacity).toBe("0");
+    expect(contentLayer.style.transform).toBe("");
+    expect(skeletonLayer.style.transform).toBe("");
+    await waitForFrames(() => expect(skeletonLayer.style.opacity).toBe("1"));
+    expect(skeletonLayer.style.transform).toBe("");
   });
 });
 

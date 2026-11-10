@@ -46,6 +46,29 @@ const px = (value: string): number => {
   return Number(match[1]);
 };
 
+/**
+ * 选择器的特异性（id, 类/属性/伪类, 类型/伪元素），只认这份样式表用得到的写法：
+ * :not() 取参数的特异性；:global() 只是 CSS 模块的标记，同样取参数。
+ */
+function specificity(selector: string): [number, number, number] {
+  const total: [number, number, number] = [0, 0, 0];
+  const rest = selector.replace(/:(?:not|global)\(([^)]*)\)/g, (_m, inner: string) => {
+    specificity(inner).forEach((n, i) => (total[i] += n));
+    return " ";
+  });
+  const count = (re: RegExp, source: string) => [...source.matchAll(re)].length;
+  const withoutElements = rest.replace(/::[\w-]+/g, " ");
+  total[0] += count(/#[\w-]+/g, rest);
+  total[1] += count(/\.[\w-]+/g, rest) + count(/\[[^\]]*\]/g, rest) + count(/:[\w-]+/g, withoutElements);
+  total[2] += count(/::[\w-]+/g, rest) + count(/(?:^|[\s>+~])[a-z][\w-]*/gi, rest);
+  return total;
+}
+
+function compareSpecificity(a: readonly number[], b: readonly number[]): number {
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return 0;
+}
+
 function tokenPx(name: string): number {
   const token = new RegExp(`${name}: (\\d+)px;`).exec(tokens);
   if (token === null) throw new Error(`令牌表里没有 ${name}`);
@@ -231,5 +254,25 @@ describe("减少动画", () => {
     for (const selector of [":global([data-sk-reduced]) .item:active", ":global([data-sk-reduced]) .create:active", ":global([data-sk-reduced]) .row .pin:active"]) {
       expect(declaration(ruleFor(selector), "transform")).toBe("none");
     }
+  });
+
+  it("特异性按类、属性、伪类计，:not() 与 :global() 取参数", () => {
+    expect(specificity(".row:not([data-dragging]):not([data-landing]) .pin:active")).toEqual([0, 5, 0]);
+    expect(specificity(":global([data-sk-reduced]) .row .pin:active")).toEqual([0, 4, 0]);
+    expect(specificity(".pin::before")).toEqual([0, 1, 1]);
+  });
+
+  it("固定项按下：减少动画那条排在按下缩小后面，特异性也不低于它，减少动画的用户按下不再缩到 0.94", () => {
+    const rules = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].map((m) => ({ at: m.index, selectors: m[1].split(",").map((s) => s.trim()), body: m[2] }));
+    const shrinks = rules.filter((r) => r.selectors.some((s) => s.endsWith(".pin:active") && !s.includes("[data-sk-reduced]")));
+    expect(shrinks).toHaveLength(1);
+    const [shrink] = shrinks;
+    expect(declaration(shrink.body, "transform")).toBe("scale(0.94)");
+    const reduced = rules.find((r) => r.selectors.includes(":global([data-sk-reduced]) .row .pin:active"));
+    if (reduced === undefined) throw new Error("没有减少动画的固定项按下规则");
+    expect(reduced.at).toBeGreaterThan(shrink.at);
+    const strongest = reduced.selectors.filter((s) => s.endsWith(".pin:active")).map(specificity).sort(compareSpecificity).at(-1);
+    if (strongest === undefined) throw new Error("减少动画规则里没有固定项按下的选择器");
+    for (const selector of shrink.selectors) expect(compareSpecificity(strongest, specificity(selector))).toBeGreaterThanOrEqual(0);
   });
 });

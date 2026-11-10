@@ -14,6 +14,7 @@ import { ACTION_ERROR, taskFailureReason } from "../../copy/flows";
 import { instanceNameError } from "../../domain/rules";
 import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
 import { fade, tabPanel } from "../../lib/motion";
+import { useMounted } from "../../lib/useMounted";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { errorRecord } from "../../state/errors";
@@ -125,8 +126,19 @@ export function readFace(loading: boolean, gate: LoadingView): ReadFace | null {
   return loading ? "pending" : null;
 }
 
+/**
+ * 选文件步显示的错误。settled 是读完时这一次的错误，held 是上一次读完时的错误。
+ * 等待期界面照旧，上一次的错误先留着：读得快又失败时错误条不先收起再冒出来，弹窗也不一缩一涨；
+ * 读取面露出时收起；读完按这一次的结果。
+ */
+export function shownChooseError(face: ReadFace | null, settled: string | null, held: string | null): string | null {
+  if (face === null) return settled;
+  return face === "pending" ? held : null;
+}
+
 /** 确认步里随重读与认领变化的那一处、以及包里有没有其他可选文件；选文件步时为 null。 */
 export interface ConfirmShape {
+  /** 那一处已换成「正在重新读取」（重读过了等待期才换，等待期照旧是受限说明）。 */
   reread: boolean;
   blocked: number;
   extras: number;
@@ -226,11 +238,16 @@ export function ImportModpackDialog({ request, onClose, online }: ImportModpackD
   // 认领完的原地重读同样过一道门：快读完时不闪「正在重新读取」
   const rereadGate = useLoadingGate(confirming && preview.refreshing);
   const rereadFace = confirming ? readFace(preview.refreshing, rereadGate.view) : null;
-  const chooseError = path !== null && settled && preview.status === "error" ? previewErrorText(preview.error) : null;
+  const settledError = path !== null && settled && preview.status === "error" ? previewErrorText(preview.error) : null;
+  // 读完时的错误记下来，下一次读取的等待期里照旧显示它
+  const [heldError, setHeldError] = useState<string | null>(null);
+  if (settled && heldError !== settledError) setHeldError(settledError);
+  const chooseError = shownChooseError(face, settledError, heldError);
   const layoutKey = importLayoutKey(
-    confirming ? { reread: rereadFace !== null, blocked: preview.data.blocked_files.length, extras: preview.data.optional_extras.length } : null,
+    confirming ? { reread: rereadFace === "shown", blocked: preview.data.blocked_files.length, extras: preview.data.optional_extras.length } : null,
     chooseError,
   );
+  const step = confirming ? "confirm" : "choose";
   return (
     <Modal
       open={request !== null}
@@ -239,9 +256,12 @@ export function ImportModpackDialog({ request, onClose, online }: ImportModpackD
       icon="upload"
       size="md"
       layoutKey={layoutKey}
+      // 换步时旧的一步整个卸掉，焦点若在里面（「选择文件」、路径框、底栏的「换一个文件」）会掉回 body：
+      // 每换一步按打开时的规则重做一次初始聚焦，落到新一步带 data-autofocus 的控件上
+      requestKey={step}
       footer={confirming ? <div ref={setFooterHost} className={styles.footerHost} /> : undefined}
     >
-      <ImportStep step={confirming ? "confirm" : "choose"}>
+      <ImportStep step={step}>
         {confirming ? (
           <ImportConfirm
             key={path}
@@ -275,10 +295,7 @@ export function ImportModpackDialog({ request, onClose, online }: ImportModpackD
  * Modal 的形变接住（layoutKey 随步骤变）。弹窗打开时就在的那一步跟着弹窗的入场走，不另播一次。
  */
 function ImportStep({ step, children }: { step: "choose" | "confirm"; children: ReactNode }) {
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   return (
     <motion.div key={step} variants={tabPanel} initial={mounted.current ? "hidden" : false} animate="show">
       {children}
@@ -330,11 +347,15 @@ function ChooseFile({ input, onInput, onRead, onFile, reading, error }: ChooseFi
     [pickFile, run],
   );
 
-  // 读取期间不再从这里另起一次读取（拖进新文件除外：那是明确换了一个文件）；控件保持可聚焦，焦点不掉回 body
+  // 读取期间不再从这里另起一次读取（拖进新文件除外：那是明确换了一个文件）。等待期界面照旧，按钮不先变暗，只挡住点击；
+  // 读取面露出后才显示为不可用。控件一直可聚焦，焦点不掉回 body
   const busy = reading !== null;
   const shown = reading !== null && reading.face === "shown";
   const submit = () => {
     if (!busy) onRead();
+  };
+  const choose = () => {
+    if (!busy) pick();
   };
 
   return (
@@ -346,7 +367,7 @@ function ChooseFile({ input, onInput, onRead, onFile, reading, error }: ChooseFi
           <span className={styles.dropTitle}>{IMPORT_COPY.dropTitle}</span>
           <span className={styles.dropHint}>{IMPORT_COPY.dropHint}</span>
           <span className={styles.dropAction}>
-            <Button size="sm" variant="secondary" icon="folder-open" disabled={busy} focusableWhenDisabled onClick={pick} {...{ [AUTOFOCUS_ATTR]: "" }}>
+            <Button size="sm" variant="secondary" icon="folder-open" disabled={shown} focusableWhenDisabled onClick={choose} {...{ [AUTOFOCUS_ATTR]: "" }}>
               {IMPORT_COPY.pick}
             </Button>
           </span>
@@ -379,7 +400,7 @@ function ChooseFile({ input, onInput, onRead, onFile, reading, error }: ChooseFi
             aria-label={IMPORT_COPY.pathLabel}
             invalid={error !== null}
           />
-          <Button size="sm" variant="ghost" disabled={input.trim() === "" || busy} focusableWhenDisabled={busy} onClick={submit}>
+          <Button size="sm" variant="ghost" disabled={input.trim() === "" || shown} focusableWhenDisabled={busy} onClick={submit}>
             {IMPORT_COPY.read}
           </Button>
         </div>
@@ -493,6 +514,18 @@ function ImportConfirm({ path, preview, refreshing, rereadFace, online, footerHo
       return next;
     });
 
+  // 重读的等待期里说明还留着，但它列的是旧清单：这时不再打开，免得新结果到了清单在开着时换掉
+  const openBlocked = () => {
+    if (!refreshing) setBlockedOpen(true);
+  };
+  // 确认步的焦点落点：换到这一步时初始聚焦的那个控件（名称框）
+  const root = useRef<HTMLDivElement>(null);
+  const focusAnchor = useCallback(() => {
+    const anchor = root.current?.querySelector<HTMLElement>(`[${AUTOFOCUS_ATTR}]`);
+    if (anchor === null || anchor === undefined) throw new Error("确认步没有焦点落点");
+    anchor.focus();
+  }, []);
+
   const submit = async () => {
     if (!online) {
       actions.toast("warning", SEARCH_COPY.offlineInstall, SEARCH_COPY.offlineInstallBody);
@@ -523,7 +556,7 @@ function ImportConfirm({ path, preview, refreshing, rereadFace, online, footerHo
   };
 
   return (
-    <div className={styles.confirm}>
+    <div ref={root} className={styles.confirm}>
       <PackForm
         seed={preview.name}
         name={name}
@@ -534,6 +567,7 @@ function ImportConfirm({ path, preview, refreshing, rereadFace, online, footerHo
         version={<span className={styles.readonlyVersion}>{IMPORT_COPY.versionReadonly(preview.version)}</span>}
         facts={facts}
         readOnly={false}
+        nameAutoFocus
       />
       <section className={styles.modSection} aria-label={IMPORT_COPY.modsLabel}>
         <SectionTitle level={3}>{IMPORT_COPY.modsTitle(preview.mod_files)}</SectionTitle>
@@ -555,18 +589,17 @@ function ImportConfirm({ path, preview, refreshing, rereadFace, online, footerHo
           </List>
         </section>
       )}
-      {/* 受限文件的说明与「正在重新读取」轮流占底部这一处：说明淡出、重读行淡入，弹窗随之形变（layoutKey）。
-          重读刚开始时那一行先不可见地占着位，读得快就不露面，读得慢再原位淡入，弹窗不先缩到底再长回来 */}
+      {/* 受限文件的说明与「正在重新读取」轮流占底部这一处，弹窗随之形变（layoutKey）。重读的等待期界面照旧，说明连同按钮
+          留着：读得快时只在结果出来（受限数归零）后收起一次；读得慢时等待期过了才换成重读行 */}
       <Appear>
         {rereadFace === "shown" ? (
-          <RereadLine key="reread" name={fileName(path)} pending={false} />
-        ) : rereadFace === null && blocked.length > 0 ? (
-          <Callout key="blocked" tone="warn" action={<ViewBlockedButton onClick={() => setBlockedOpen(true)} />}>
+          <RereadLine key="reread" name={fileName(path)} />
+        ) : blocked.length > 0 ? (
+          <Callout key="blocked" tone="warn" action={<ViewBlockedButton onClick={openBlocked} onLeave={focusAnchor} />}>
             {IMPORT_COPY.blockedNotice(blocked.length)}
           </Callout>
         ) : null}
       </Appear>
-      {rereadFace === "pending" && <RereadLine name={fileName(path)} pending />}
       <BlockedFilesModal
         open={blockedOpen}
         files={blocked}
@@ -592,10 +625,10 @@ function ImportConfirm({ path, preview, refreshing, rereadFace, online, footerHo
   );
 }
 
-/** 「正在重新读取」一行。pending 时只占位、不可见，也不读给读屏。 */
-function RereadLine({ name, pending }: { name: string; pending: boolean }) {
+/** 「正在重新读取」一行。 */
+function RereadLine({ name }: { name: string }) {
   return (
-    <div className={styles.rereading} data-pending={pending || undefined} aria-hidden={pending || undefined} aria-busy="true">
+    <div className={styles.rereading} aria-busy="true">
       <Spinner size={16} />
       <span>{IMPORT_COPY.rereading(name)}</span>
     </div>
@@ -603,14 +636,20 @@ function RereadLine({ name, pending }: { name: string; pending: boolean }) {
 }
 
 /**
- * 受限说明里的「查看这些文件」。说明块开始淡出时这颗按钮先拿掉：清单关上时焦点要还给它，它若还留在正在淡出、
- * 不可交互的块里，焦点就落空了；拿掉之后焦点按它所在的区域落到确认步的第一个控件。
+ * 受限说明里的「查看这些文件」。说明块退场时它留在块里一起淡出：先拿掉的话，说明文字会在淡出途中铺进它让出的位置。
+ * 退场层不可交互，它若正聚焦着（清单关上时焦点还给了它，说明随后才收起），焦点交给确认步的落点（onLeave），不掉回 body。
  */
-function ViewBlockedButton({ onClick }: { onClick: () => void }) {
+function ViewBlockedButton({ onClick, onLeave }: { onClick: () => void; onLeave: () => void }) {
   const present = useIsPresent();
-  if (!present) return null;
+  const ref = useRef<HTMLButtonElement>(null);
+  // 在布局阶段接走：浏览器要到之后才把留在 inert 子树里的焦点挪回 body，这时焦点还在按钮上。
+  // 只接按钮自己身上的焦点：整个弹窗关上时退场也会传到这里，那时焦点已由弹窗还给打开它的地方，不能再拉回来
+  useLayoutEffect(() => {
+    if (present || document.activeElement !== ref.current) return;
+    onLeave();
+  }, [present, onLeave]);
   return (
-    <Button size="sm" variant="ghost" onClick={onClick}>
+    <Button ref={ref} size="sm" variant="ghost" onClick={onClick}>
       {IMPORT_COPY.viewBlocked}
     </Button>
   );

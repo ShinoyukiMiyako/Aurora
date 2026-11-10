@@ -316,8 +316,8 @@
 
 /*
  * 每一步各自是滚动容器：换步后新内容从顶部开始，不继承上一步的滚动位置。
- * 块的增删由让位滑过去；关掉滚动锚定：锚定会在视野上方的块变高时悄悄挪滚动位置，让位在这里看不到这一挪，
- * 会把已经被锚定留在原处的内容再从上面滑下来一次
+ * 块的增删由让位滑过去。滚动锚定照常开着：视野上方的块变高时浏览器挪滚动位置把可见内容留在原处，
+ * 让位认得挂在滚动容器自己身上的这一挪，按抵消后的位移算，不会再从上面滑下来一次
  */
 .pane {
   display: flex;
@@ -330,7 +330,6 @@
   padding: var(--sk-space-16) var(--sk-space-24) var(--sk-space-20);
   overflow-x: hidden;
   overflow-y: auto;
-  overflow-anchor: none;
 }
 
 .stepHead {
@@ -476,6 +475,16 @@
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
+}
+
+/* 只给读屏的加载说明：绝对定位脱离步骤的弹性布局，不占间距 */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /*

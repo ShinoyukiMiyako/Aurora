@@ -127,12 +127,27 @@ export interface GridShape {
   create: boolean;
 }
 
+/** 新建卡的格子键（React key 与比对都用它）：实例 id 是版本目录名，任何系统的文件名里都不能有「/」，撞不上实例。 */
+export const CREATE_CELL_KEY = "/create";
+
+function cellKeys(shape: GridShape): readonly string[] {
+  return shape.create ? [...shape.ids, CREATE_CELL_KEY] : shape.ids;
+}
+
 /**
- * 两次提交之间格子有增删或换序，且一次涉及的格子超过让位上限（前后取多的一边，新建卡也算一格）。
- * 这时让位自己停手，网格改为整片淡入一次，不逐个播入退场。
+ * 这次变化是否整片换上：格子不逐个淡入淡出，网格整片淡入一次，这一次提交里让位暂停。
+ * - 新来的格子或走掉的格子有一边超过让位上限（新建卡也算一格）：逐个播的入场或退场太多。两边分开数：
+ *   前后各不超过上限、只是并集超过的（整段换了搜索词），进出各自逐个播，共同的卡片交给让位滑过去。
+ * - 格子一个没增删、换了位置的超过上限（换排序）。
+ * 被挤动的格子不计：删掉靠前的一张时其后几十张都被挤动，让位只给可见范围附近的起动画，量由视口封顶，不随实例数增长。
  */
 export function crowdedChange(before: GridShape, after: GridShape): boolean {
-  const changed = before.create !== after.create || before.ids.length !== after.ids.length || before.ids.some((id, i) => id !== after.ids[i]);
-  const cells = (shape: GridShape) => shape.ids.length + (shape.create ? 1 : 0);
-  return changed && Math.max(cells(before), cells(after)) > REFLOW_MAX_ITEMS;
+  const previous = cellKeys(before);
+  const next = cellKeys(after);
+  const had = new Set(previous);
+  const has = new Set(next);
+  const entering = next.filter((key) => !had.has(key)).length;
+  const leaving = previous.filter((key) => !has.has(key)).length;
+  if (entering > 0 || leaving > 0) return Math.max(entering, leaving) > REFLOW_MAX_ITEMS;
+  return next.filter((key, i) => previous[i] !== key).length > REFLOW_MAX_ITEMS;
 }

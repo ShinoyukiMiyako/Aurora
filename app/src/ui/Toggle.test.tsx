@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { keydown, render, type Rendered } from "../test/dom";
 import { Checkbox, type CheckState } from "./Checkbox";
+import checkboxStyles from "./Checkbox.module.css";
 import { Field } from "./Field";
 import { RadioGroup, type RadioOption } from "./RadioGroup";
 import { RadioTile } from "./RadioTile";
@@ -208,6 +209,21 @@ describe("Checkbox", () => {
     click(box);
     expect(box.getAttribute("aria-checked")).toBe("false");
     expect(onChange.mock.calls.map((c) => c[0])).toEqual([true, false]);
+  });
+
+  it("换勾号：新勾号在方框里从 0.6 弹出并淡入，旧短横留在原处淡出，不同帧瞬换；挂载时就在的不播入场", () => {
+    mount(<Host initial="mixed" onChange={() => undefined} />);
+    const box = document.querySelector('[role="checkbox"]') as HTMLButtonElement;
+    const glyphs = () => [...box.querySelectorAll<HTMLElement>(`.${checkboxStyles.glyph}`)];
+    const [minus] = glyphs();
+    expect(minus.style.opacity).toBe("1");
+    expect(minus.style.transform).not.toMatch(/scale/);
+
+    click(box);
+    const [leaving, entering] = glyphs();
+    expect(leaving).toBe(minus);
+    expect(entering.style.opacity).toBe("0");
+    expect(entering.style.transform).toBe("scale(0.6)");
   });
 
   it("Enter 不切换（拦下按钮合成的点击）", () => {

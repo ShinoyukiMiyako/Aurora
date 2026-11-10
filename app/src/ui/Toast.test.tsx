@@ -6,7 +6,7 @@ import { AnimatePresence, MotionConfig } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { render, stubResizeObserver, type Rendered } from "../test/dom";
+import { drainFrames, render, stepFrames, stubResizeObserver, type Rendered } from "../test/dom";
 import { Modal } from "./Modal";
 import { TOAST_ACTION_BLOCKED_REASON, Toast, type ToastProps, type ToastSide } from "./Toast";
 import styles from "./Toast.module.css";
@@ -17,9 +17,12 @@ beforeEach(() => {
   stubResizeObserver();
 });
 
-afterEach(() => {
+// 有的用例在假时钟上逐帧走：换计时器之前先卸载、把帧循环排空，同文件后面的用例才推得动动画
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  await drainFrames();
+  vi.useRealTimers();
 });
 
 function mount(ui: ReactNode) {
@@ -77,6 +80,49 @@ describe("Toast 的滑动方向", () => {
   });
 });
 
+describe("减少动画时 Toast 的进出", () => {
+  const reducedRemovable = () => (
+    <MotionConfig reducedMotion="always">
+      <OverlayProvider>
+        <Removable entering={1} leaving={1} />
+        <OverlayRoot />
+      </OverlayProvider>
+    </MotionConfig>
+  );
+  const toastIn = (container: HTMLElement) => {
+    const el = container.querySelector<HTMLElement>("[data-tone]");
+    if (el === null) throw new Error("通知没有挂上");
+    return el;
+  };
+
+  it("入场起点只有透明度：挂载那一刻不带横移与缩放", () => {
+    vi.useFakeTimers();
+    view = render(reducedRemovable());
+    const toast = toastIn(view.container);
+    expect(toast.style.opacity).toBe("0");
+    expect(toast.style.transform).not.toMatch(/translate|scale/);
+  });
+
+  it("退场只淡出：减少动画下位移与缩放一步到位，整段退场里一帧都不先横跳、不先缩", async () => {
+    vi.useFakeTimers();
+    view = render(reducedRemovable());
+    const toast = toastIn(view.container);
+    await stepFrames(30);
+    expect(toast.style.opacity).toBe("1");
+
+    click(buttonByText("收起"));
+    const frames: { transform: string; opacity: number }[] = [];
+    for (let i = 0; i < 40 && toast.isConnected; i++) {
+      await stepFrames(1);
+      frames.push({ transform: toast.style.transform, opacity: Number(toast.style.opacity) });
+    }
+    expect(toast.isConnected).toBe(false);
+    // 确实分几帧淡出（fade.out 约 120 ms），且每一帧都没有位移与缩放
+    expect(frames.filter((f) => f.opacity > 0 && f.opacity < 1).length).toBeGreaterThan(2);
+    expect(frames.filter((f) => /translate|scale/.test(f.transform))).toEqual([]);
+  });
+});
+
 describe("Toast 的重复反馈", () => {
   const iconBaseOf = (container: HTMLElement) => {
     const el = container.querySelector<HTMLElement>(`.${styles.iconBase}`);
@@ -87,15 +133,17 @@ describe("Toast 的重复反馈", () => {
     const match = /scale\((-?[\d.]+)\)/.exec(el.style.transform);
     return match === null ? 1 : Number(match[1]);
   };
-  /** 真实计时器下逐帧采样 ms 毫秒，返回见过的最大缩放。 */
-  const peakScale = async (el: HTMLElement, ms: number) => {
-    let peak = scaleOf(el);
-    const end = performance.now() + ms;
-    while (performance.now() < end) {
-      await new Promise((resolve) => setTimeout(resolve, 4));
-      peak = Math.max(peak, scaleOf(el));
+  /**
+   * 假时钟上逐帧走 count 帧，返回每一帧之后的缩放。峰值只有几十毫秒宽：真实计时器下机器一忙，帧来得晚就会整段错过，
+   * 假时钟上每一帧都按时到，采样可复现。
+   */
+  const scalesOver = async (el: HTMLElement, count: number) => {
+    const seen: number[] = [];
+    for (let i = 0; i < count; i++) {
+      await stepFrames(1);
+      seen.push(scaleOf(el));
     }
-    return peak;
+    return seen;
   };
   const withRepeats = (repeats: number, reduced = false) => (
     <MotionConfig reducedMotion={reduced ? "always" : "never"}>
@@ -107,27 +155,32 @@ describe("Toast 的重复反馈", () => {
   );
 
   it("重复的同一条并进来（repeats 变了）：图标底座原位放大约 12% 再落回 1", async () => {
+    vi.useFakeTimers();
     view = render(withRepeats(0));
     const icon = iconBaseOf(view.container);
     view.rerender(withRepeats(1));
-    await vi.waitFor(() => expect(scaleOf(icon)).toBeGreaterThan(1.08), { timeout: 2000, interval: 4 });
-    expect(await peakScale(icon, 120)).toBeLessThan(1.14);
-    await vi.waitFor(() => expect(scaleOf(icon)).toBe(1), { timeout: 2000, interval: 10 });
+    const seen = await scalesOver(icon, 30);
+    expect(Math.max(...seen)).toBeGreaterThan(1.08);
+    expect(Math.max(...seen)).toBeLessThan(1.14);
+    // 480 ms 之后落回 1，不再回摆
+    expect(seen.at(-1)).toBe(1);
   });
 
   it("挂载时已有的次数不弹，次数没变的重渲染也不弹", async () => {
+    vi.useFakeTimers();
     view = render(withRepeats(2));
     const icon = iconBaseOf(view.container);
-    expect(await peakScale(icon, 80)).toBe(1);
+    expect(Math.max(...(await scalesOver(icon, 8)))).toBe(1);
     view.rerender(withRepeats(2));
-    expect(await peakScale(icon, 80)).toBe(1);
+    expect(Math.max(...(await scalesOver(icon, 8)))).toBe(1);
   });
 
   it("减少动画时不弹", async () => {
+    vi.useFakeTimers();
     view = render(withRepeats(0, true));
     const icon = iconBaseOf(view.container);
     view.rerender(withRepeats(1, true));
-    expect(await peakScale(icon, 120)).toBe(1);
+    expect(Math.max(...(await scalesOver(icon, 8)))).toBe(1);
   });
 });
 

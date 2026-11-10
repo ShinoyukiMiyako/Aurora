@@ -131,6 +131,17 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("Java · 卡片之间的让位", () => {
+  it("三张卡片直接排在载入门的分区卡片栈里：运行时列表变高变矮时由那一层的让位把下面的卡片滑过去，分区不再自己包一层", async () => {
+    await mountJava();
+    const cards = [RUNTIMES, "下载运行时", "显卡"].map(card);
+    const stack = cards[0].parentElement;
+    if (stack === null) throw new Error("运行时卡片没有父元素");
+    expect(stack.classList.contains(s.sectionFlow)).toBe(true);
+    expect([...stack.children]).toEqual(cards);
+  });
+});
+
 describe("Java · 运行时列表的加载", () => {
   it("扫描结果被丢掉后再进来：骨架等 300 ms 才露面，「自动选择」一块加上次扫到的个数，按单选块的列数排；扫完换成列表", async () => {
     setMockJavaInstallations([25, 21, 17].map((major) => installation(`C:\\Java\\jdk-${major}\\bin\\java.exe`, major)));
@@ -255,14 +266,18 @@ describe("Java · 手动添加的记录", () => {
 });
 
 describe("Java · 显卡", () => {
-  it("读取中不放骨架行；读到两块显卡时说明块作为后到的一项淡入", async () => {
+  it("读取中不放骨架行，「读取中」只标在开关的说明上、不罩住开关；读到两块显卡时说明块作为后到的一项淡入", async () => {
     const adapters = deferred<GpuAdaptersDto>();
     ipc.overrides.set("gpu_adapters", () => adapters.promise);
     await mountJava();
     const gpu = card("显卡");
     expect(gpu.querySelector('[class*="skeleton"]')).toBeNull();
-    expect(gpu.querySelector('[aria-busy="true"]')).not.toBeNull();
-    expect(gpu.textContent).toContain("正在读取显卡信息");
+    const busy = [...gpu.querySelectorAll('[aria-busy="true"]')];
+    expect(busy.map((el) => el.textContent)).toEqual(["正在读取显卡信息…"]);
+    const toggle = gpu.querySelector<HTMLElement>('[role="switch"]');
+    if (toggle === null) throw new Error("显卡卡里没有开关");
+    expect(toggle.closest('[aria-busy="true"]')).toBeNull();
+    expect(toggle.getAttribute("aria-label")).toBe("让游戏用独立显卡");
 
     ipc.overrides.delete("gpu_adapters");
     await act(async () => {

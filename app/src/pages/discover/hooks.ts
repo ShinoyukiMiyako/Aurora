@@ -61,11 +61,16 @@ export function useNearBottom(sentinel: Element | null, container: HTMLElement |
 /**
  * 换了一组搜索条件：结果区顶边（贴在那里的哨兵）已滚出容器顶边时，瞬时滚回它，新结果从头看起。
  * 吸顶工具条吸住时与滚回后都贴在容器顶上，看起来停在原处。不平滑滚动：下面的内容整块换了，滑过去只是多看一段要被换掉的旧内容。
+ * 滚到哨兵整个刚好出了顶边、再多 1px，而不是哨兵上沿正贴顶边：贴边的哨兵会被吸顶判定（useStuck）当成相交（贴边也算相交），
+ * 工具条每换一次条件就掉一次吸顶外观（底色、阴影、上沿圆角），往下一滚又吸回去。多滚的这一两像素藏在吸住的工具条底下。
  */
 export function revealTop(sentinel: Element, container: HTMLElement): void {
   const rootTop = container === document.scrollingElement ? 0 : container.getBoundingClientRect().top;
-  const above = sentinel.getBoundingClientRect().top - rootTop;
-  if (above < 0) container.scrollTop += above;
+  const rect = sentinel.getBoundingClientRect();
+  if (rect.top >= rootTop) return;
+  // 已经停在这个位置（换类型时先滚过一次，提交后布局阶段再来一次）就不再写滚动位置
+  const delta = rect.bottom + 1 - rootTop;
+  if (delta !== 0) container.scrollTop += delta;
 }
 
 /** 吸顶判定：放在吸顶元素正上方的哨兵滚出容器顶边时为 true。 */

@@ -3,7 +3,7 @@
 // 线索全部只来自退出码时摘要写「退出码指向」。手动触发的崩溃不是故障，只留摘要卡，不画线索和一键尝试。
 // 本页不放第二个启动胶囊：重新启动用头图的胶囊。
 
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotionConfig } from "framer-motion";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { EmptyArt } from "../../art/illustrations/EmptyArt";
@@ -28,7 +28,7 @@ import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { javaMajorFromDetail } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useLoadingGate } from "../../lib/loading-gate";
-import { fade, springs } from "../../lib/motion";
+import { popMark } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -55,7 +55,7 @@ import { useMemoryInfo, useRequiredMajor } from "./hooks";
 import styles from "./instance.module.css";
 import { crashFixes, crashFixKey, disabledFileName, enabledFileName, hasGraphicsClue, matchSuspect, modName, type CrashFix } from "./model";
 import type { InstanceOps } from "./ops";
-import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
+import { FolderButton, loadableView, ModuleError, SlowHint, useModuleView } from "./parts";
 
 export interface CrashTabProps {
   inst: InstanceSummary;
@@ -78,40 +78,50 @@ export function CrashTab({ inst, queryId, ops, view, crash, crashActive, onTab, 
   }, [actions, crashed]);
   const load = useModuleView(crash);
 
-  if (load.view === "pending" || load.view === "skeleton") {
-    return (
-      <Card padding="lg">
-        {load.view === "skeleton" && <Skeleton shape="text" lines={4} />}
-        <SlowHint slow={load.slow} />
-      </Card>
-    );
-  }
-  if (crash.status === "loading") throw new Error("加载门放行时崩溃报告不可能还在读取");
-  if (crash.status === "error") {
-    return (
-      <Card padding="lg">
-        <ModuleError title={CRASH_PAGE_COPY.error} error={crash.error} onRetry={crash.reload} />
-      </Card>
-    );
-  }
-  if (crash.data === null) {
-    return (
-      <Card padding="lg">
-        <EmptyState
-          scene="charm"
-          titleAs="h2"
-          title={CRASH_PAGE_COPY.emptyTitle}
-          body={CRASH_PAGE_COPY.emptyBody}
-          action={
-            <Button icon="terminal" onClick={() => onTab("logs")}>
-              {CRASH_PAGE_COPY.viewLogs}
-            </Button>
+  // 等待期里骨架卡照常占位、看不见，而不是先画一张空卡；读到后报告、空状态或错误在原位淡入，骨架叠在上面淡出。
+  // 慢提示放在骨架层外面：骨架层对读屏隐藏
+  return (
+    <div className={styles.stack}>
+      <Loadable
+        view={loadableView(load.view)}
+        skeleton={
+          <Card padding="lg">
+            <Skeleton shape="text" lines={4} />
+          </Card>
+        }
+      >
+        {() => {
+          if (crash.status === "loading") throw new Error("加载门放行时崩溃报告不可能还在读取");
+          if (crash.status === "error") {
+            return (
+              <Card padding="lg">
+                <ModuleError title={CRASH_PAGE_COPY.error} error={crash.error} onRetry={crash.reload} />
+              </Card>
+            );
           }
-        />
-      </Card>
-    );
-  }
-  return <ReportView inst={inst} queryId={queryId} ops={ops} view={view} report={crash.data} crashActive={crashActive} onTab={onTab} onRename={onRename} />;
+          if (crash.data === null) {
+            return (
+              <Card padding="lg">
+                <EmptyState
+                  scene="charm"
+                  titleAs="h2"
+                  title={CRASH_PAGE_COPY.emptyTitle}
+                  body={CRASH_PAGE_COPY.emptyBody}
+                  action={
+                    <Button icon="terminal" onClick={() => onTab("logs")}>
+                      {CRASH_PAGE_COPY.viewLogs}
+                    </Button>
+                  }
+                />
+              </Card>
+            );
+          }
+          return <ReportView inst={inst} queryId={queryId} ops={ops} view={view} report={crash.data} crashActive={crashActive} onTab={onTab} onRename={onRename} />;
+        }}
+      </Loadable>
+      <SlowHint slow={load.slow} />
+    </div>
+  );
 }
 
 function isManualCrash(report: CrashReportDto): boolean {
@@ -903,19 +913,11 @@ function FixRow({
 
 // ---------------------------------------------------------------- 日志指向的 Mod
 
-/**
- * 行内状态标签的出现与消失：从 0.6 弹出（pop），与开关拇指的滑动同一拍落定；退场只淡出，
- * 减少动画时缩放是一步到位的，退场带缩放会先跳一下再淡。
- */
-const TAG_MARK = {
-  initial: { opacity: 0, scale: 0.6 },
-  animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } },
-  exit: { opacity: 0, transition: fade.out },
-} as const;
-
 function SuspectsCard({ ops, report, mods, switches }: { ops: InstanceOps; report: CrashReportDto; mods: ResourceResult<InstalledMod[]>; switches: ModSwitches }) {
   const actions = useLauncherActions();
   const lock = ops.modsReason;
+  // 行内状态标签从 0.6 弹出（pop），与开关拇指的滑动同一拍落定；减少动画时只淡入淡出
+  const tagMark = useReducedMotionConfig() === true ? popMark.reduced : popMark.tag;
 
   const toggle = (mod: InstalledMod) => {
     const name = modName(mod);
@@ -966,7 +968,7 @@ function SuspectsCard({ ops, report, mods, switches }: { ops: InstanceOps; repor
                         {/* 「已停用」随开关弹出、淡出；退场时立即让出位置，名称不等它淡完才伸回去。挂载时就在的不弹 */}
                         <AnimatePresence initial={false} mode="popLayout">
                           {state !== null && !state.enabled && (
-                            <motion.span key="off" className={styles.tagMark} initial={TAG_MARK.initial} animate={TAG_MARK.animate} exit={TAG_MARK.exit}>
+                            <motion.span key="off" className={styles.tagMark} initial={tagMark.initial} animate={tagMark.animate} exit={tagMark.exit}>
                               <Tag size="sm">{CRASH_PAGE_COPY.disabledTag}</Tag>
                             </motion.span>
                           )}

@@ -168,12 +168,14 @@ export function Toolbar({ tabsId, filters, onKind, onFit, onFilters, fitCandidat
         items={DISCOVER_KINDS.map((k) => ({ value: k, label: KIND_LABEL[k] }))}
       />
       <div className={styles.toolbarRight}>
+        {/* 两个下拉的宽度随选中项的文字走：按最长的选项预留，换选中项时同排靠右的筛选按钮不被挤动 */}
         <Select<string>
           size="sm"
           ariaLabel={SEARCH_COPY.fitLabel}
           value={filters.fitInstance === null ? FIT_ANY : filters.fitInstance}
           options={fitOptions}
           onChange={(v) => onFit(v === FIT_ANY ? null : v)}
+          reserveWidth
           className={styles.fitSelect}
         />
         <Button
@@ -194,6 +196,7 @@ export function Toolbar({ tabsId, filters, onKind, onFit, onFilters, fitCandidat
           value={filters.sort}
           options={SORT_FIELDS.map((s) => ({ value: s, label: SORT_LABEL[s] }))}
           onChange={(sort) => onFilters({ ...filters, sort })}
+          reserveWidth
         />
       </div>
       <Popover open={anchor !== null} anchor={anchor} onClose={() => setAnchor(null)} placement="bottom-end" aria-label={SEARCH_COPY.filterPanel} className={styles.filterPanel}>

@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 import { AnimatePresence, motion, MotionConfig } from "framer-motion";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createRef } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { LOADER_KINDS, type LoaderKind } from "../domain/types";
@@ -40,6 +42,24 @@ describe("Tag", () => {
 
   it("sm 用 12、md 用 14", () => {
     expect(TAG_ICON_SIZE).toEqual({ sm: 12, md: 14 });
+  });
+
+  it("样式：卡面换底时字色、垫底色、描边色与卡面文字同一拍过渡；描边用向内收的 outline，不用不能过渡的内阴影", () => {
+    const css = readFileSync(resolve(__dirname, "Tag.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rule = (selector: string) => {
+      const found = new RegExp(`(?:^|\\n)${selector.replace(/[.[\]"=]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(css);
+      if (found === null) throw new Error(`Tag.module.css 没有 ${selector} 规则`);
+      return found[1];
+    };
+    const transition = /\stransition:([^;]*);/.exec(rule(".tag"));
+    if (transition === null) throw new Error(".tag 没有 transition");
+    const parts = transition[1].split(",").map((p) => p.trim().split(/\s+/));
+    expect(parts.map(([property]) => property).sort()).toEqual(["background-color", "color", "outline-color"]);
+    for (const [, duration, ease] of parts) expect([duration, ease]).toEqual(["var(--sk-dur-in)", "var(--sk-ease-out)"]);
+    const outline = rule('.tag[data-tone="outline"]');
+    expect(outline).toMatch(/\soutline:\s*1px solid var\(--tag-line, var\(--sk-line-2\)\);/);
+    expect(outline).toMatch(/\soutline-offset:\s*-1px;/);
+    expect(css).not.toMatch(/box-shadow/);
   });
 });
 
@@ -220,5 +240,14 @@ describe("LoaderTag", () => {
     const dot = mount(<LoaderDot loader="quilt" size={6} />).firstElementChild as HTMLElement;
     expect(dot.dataset.size).toBe("6");
     expect(dot.dataset.loader).toBe("quilt");
+  });
+
+  it("样式：名称与版本各自写了字色，也各自带上与标签同一拍的字色过渡", () => {
+    const css = readFileSync(resolve(__dirname, "LoaderTag.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const selector of ["name", "version"]) {
+      const found = new RegExp(`(?:^|\\n)\\.${selector}\\s*\\{([^}]*)\\}`).exec(css);
+      if (found === null) throw new Error(`LoaderTag.module.css 没有 .${selector} 规则`);
+      expect(found[1]).toMatch(/\stransition:\s*color var\(--sk-dur-in\) var\(--sk-ease-out\);/);
+    }
   });
 });

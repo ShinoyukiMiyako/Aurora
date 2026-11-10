@@ -7,6 +7,7 @@ import { switchSuggestion } from "../shared/switch-suggestion";
 import { LIBRARY_COPY } from "./copy";
 import {
   brokenInstances,
+  CREATE_CELL_KEY,
   crowdedChange,
   DEFAULT_VIEW,
   directoryOptions,
@@ -157,18 +158,39 @@ describe("crowdedChange", () => {
     expect(crowdedChange({ ids: range(60), create: true }, { ids: range(60), create: true })).toBe(false);
   });
 
-  it("换序、增删、新建卡出没都算变化；只有前后多的一边超过让位上限才是一次涉及太多", () => {
+  it("换排序：换了位置的格子超过让位上限才整片换上", () => {
     const n = REFLOW_MAX_ITEMS;
-    // 上限以内换序：逐项让位
-    expect(crowdedChange({ ids: range(n), create: false }, { ids: [...range(n)].reverse(), create: false })).toBe(false);
-    // 新建卡也算一格：上限个实例再加新建卡就超了
-    expect(crowdedChange({ ids: range(n), create: false }, { ids: range(n), create: true })).toBe(true);
-    // 从很多筛到很少：按变化前那一边算
-    expect(crowdedChange({ ids: range(n + 5), create: true }, { ids: range(3), create: false })).toBe(true);
-    // 从很少到很多：按变化后那一边算
-    expect(crowdedChange({ ids: range(3), create: false }, { ids: range(n + 1), create: false })).toBe(true);
-    // 恰好在上限上：让位照常
-    expect(crowdedChange({ ids: range(n - 1), create: true }, { ids: range(n - 2), create: true })).toBe(false);
+    expect(crowdedChange({ ids: range(n), create: true }, { ids: [...range(n)].reverse(), create: true })).toBe(false);
+    expect(crowdedChange({ ids: range(n + 2), create: true }, { ids: [...range(n + 2)].reverse(), create: true })).toBe(true);
+    // 只有一张从后面挪到最前（刚玩过的实例按「最近」排上来）：换了位置的 30 格，没超过上限
+    expect(crowdedChange({ ids: range(30), create: true }, { ids: ["i29", ...range(29)], create: true })).toBe(false);
+  });
+
+  it("增删：新来的或走掉的有一边超过让位上限才整片换上，新建卡也算一格；实例再多，删一张也逐个播", () => {
+    const n = REFLOW_MAX_ITEMS;
+    // 很多个里删掉靠前的一张：其后几十张被挤动，交给让位
+    expect(crowdedChange({ ids: range(n + 20), create: true }, { ids: range(n + 19, 1), create: true })).toBe(false);
+    // 从很多筛到只剩一个别的：走掉的连新建卡超过上限
+    expect(crowdedChange({ ids: range(n), create: true }, { ids: range(1, n), create: false })).toBe(true);
+    // 走掉的连新建卡恰好在上限上：逐个播
+    expect(crowdedChange({ ids: range(n - 1), create: true }, { ids: range(1, n), create: false })).toBe(false);
+    // 从很少到很多：新来的超过上限
+    expect(crowdedChange({ ids: range(1), create: false }, { ids: range(n + 1), create: true })).toBe(true);
+    // 只有新建卡出没
+    expect(crowdedChange({ ids: range(n), create: false }, { ids: range(n), create: true })).toBe(false);
+  });
+
+  it("整段换搜索词：前后各不超过上限、只是并集超过的不整片换上，进出各自逐个播，共同的卡片交给让位", () => {
+    const n = REFLOW_MAX_ITEMS;
+    // 前后各 25 格、只有 5 格相同：并集 45
+    expect(crowdedChange({ ids: range(25), create: false }, { ids: range(25, 20), create: false })).toBe(false);
+    // 前后各恰好上限、一格也不相同：并集是上限的两倍
+    expect(crowdedChange({ ids: range(n), create: false }, { ids: range(n, n), create: false })).toBe(false);
+    expect(crowdedChange({ ids: range(n + 1), create: false }, { ids: range(n + 1, n + 1), create: false })).toBe(true);
+  });
+
+  it("新建卡的格子键带「/」：任何系统的目录名里都不能有它，撞不上实例 id", () => {
+    expect(CREATE_CELL_KEY).toContain("/");
   });
 });
 

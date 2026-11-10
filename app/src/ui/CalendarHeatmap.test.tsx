@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { MotionConfig } from "framer-motion";
 import { act, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { keydown, render, waitForFrames, type Rendered } from "../test/dom";
@@ -146,6 +147,38 @@ describe("CalendarHeatmap", () => {
     expect(onMonthChange).toHaveBeenCalledWith("2026-11");
     expect(weeks().style.opacity).toBe("0");
     expect(document.activeElement).toBe(day("2026-11-30"));
+  });
+
+  it("翻月时日格从所去月份的那一侧滑进来：往后翻从右侧，往前翻从左侧；数据到达只淡入不横移；减少动画时翻月也只淡入", async () => {
+    const base = { minutes: DATA, today: "2026-10-30", selected: null, onSelect: () => undefined, onMonthChange: () => undefined, minMonth: "2026-09", maxMonth: "2026-11" };
+    const weeks = () => document.querySelector<HTMLElement>('[role="rowgroup"]') as HTMLElement;
+    view = render(<CalendarHeatmap {...base} month="2026-10" />);
+    view.rerender(<CalendarHeatmap {...base} month="2026-11" />);
+    expect(weeks().style.transform).toBe("translateX(8px)");
+    view.rerender(<CalendarHeatmap {...base} month="2026-09" />);
+    expect(weeks().style.transform).toBe("translateX(-8px)");
+    // 滑到原位，不停在起点
+    await waitForFrames(() => expect(weeks().style.transform).toBe("none"));
+    view.unmount();
+
+    view = render(<CalendarHeatmap {...base} month="2026-10" minutes={new Map()} />);
+    view.rerender(<CalendarHeatmap {...base} month="2026-10" />);
+    expect(weeks().style.opacity).toBe("0");
+    expect(weeks().style.transform).toBe("");
+    view.unmount();
+
+    view = render(
+      <MotionConfig reducedMotion="always">
+        <CalendarHeatmap {...base} month="2026-10" />
+      </MotionConfig>,
+    );
+    view.rerender(
+      <MotionConfig reducedMotion="always">
+        <CalendarHeatmap {...base} month="2026-11" />
+      </MotionConfig>,
+    );
+    expect(weeks().style.opacity).toBe("0");
+    expect(weeks().style.transform).toBe("");
   });
 
   it("游玩数据从无到有（加载完成）时日格整块淡入一次，之后数据刷新不再淡入", async () => {

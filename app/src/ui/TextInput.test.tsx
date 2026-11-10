@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { MotionConfig } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { insertItem } from "../lib/motion";
+import { insertItem, popMark } from "../lib/motion";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { keydown, render, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { Field } from "./Field";
@@ -182,6 +183,20 @@ describe("TextInput", () => {
     setValue(input("新建"), "a");
     expect(clearOf("新建")?.style.opacity).toBe("0");
     await waitForFrames(() => expect(clearOf("新建")?.style.opacity).toBe("1"));
+  });
+
+  it.each([
+    ["never", `scale(${popMark.glyph.initial.scale})`],
+    ["always", ""],
+  ] as const)("清空键按小标记的 glyph 档从略小处弹入；减少动画（%s）时只淡入、不带缩放", (reducedMotion, transform) => {
+    mount(
+      <MotionConfig reducedMotion={reducedMotion}>
+        <Controlled aria-label="路径" clearable />
+      </MotionConfig>,
+    );
+    setValue(input("路径"), "D:/Games");
+    expect(clearButton()?.style.opacity).toBe("0");
+    expect(clearButton()?.style.transform).toBe(transform);
   });
 
   it("描边容器是退场项的定位基准；前缀图标随聚焦变色时走悬停过渡", () => {

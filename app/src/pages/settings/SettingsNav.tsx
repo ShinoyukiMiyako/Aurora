@@ -16,8 +16,8 @@ import { SETTINGS_SECTIONS, type SettingsSection } from "../../state/route";
 import { Badge } from "../../ui/Badge";
 import { Card } from "../../ui/Card";
 import { aboutHint, aboutUpdateHint, SECTION_META, SETTINGS_NAV_LABEL, UPDATE_DOT_LABEL } from "./copy";
-import { phaseUpdate, showsUpdateDot } from "../../state/updater/machine";
-import { useUpdater } from "../../state/updater/useUpdater";
+import { phaseUpdate, showsUpdateDot, type UpdaterState } from "../../state/updater/machine";
+import { useUpdaterSelector } from "../../state/updater/useUpdater";
 import s from "./settings.module.css";
 
 /** 导航项上标着它是哪个分区，胶囊据此找到要滑去的那一项。 */
@@ -26,15 +26,24 @@ const SECTION_ATTR = "data-section";
 /** 版本号读到之前占着说明行的不换行空格：行高照常撑开，读屏不念。 */
 const HINT_PLACEHOLDER = " ";
 
+/** 阶段里带着的版本号；没有版本的阶段为 null。 */
+function phaseVersion(state: UpdaterState): string | null {
+  const update = phaseUpdate(state.phase);
+  return update === null ? null : update.version;
+}
+
+const currentVersionOf = (state: UpdaterState): string | null => state.currentVersion;
+
 function useAboutHint(): { text: string; accent: boolean; dot: boolean } {
   const loaded = useLauncherSelector((s) => s.settings !== null);
   const skipped = useLauncherSelector((s) => (s.settings === null ? null : s.settings.skippedUpdateVersion));
-  const updater = useUpdater();
-  const dot = loaded && showsUpdateDot(updater.state, skipped);
-  const update = phaseUpdate(updater.state.phase);
-  if (dot && update !== null) return { text: aboutUpdateHint(update.version), accent: true, dot };
-  if (updater.state.currentVersion === null) return { text: "", accent: false, dot };
-  return { text: aboutHint(updater.state.currentVersion), accent: false, dot };
+  // 只取说明行与提示点要的几样：下载更新时每条进度事件都换一次状态，这些都不变，这一项就不跟着重渲染
+  const dot = useUpdaterSelector((state) => loaded && showsUpdateDot(state, skipped));
+  const version = useUpdaterSelector(phaseVersion);
+  const currentVersion = useUpdaterSelector(currentVersionOf);
+  if (dot && version !== null) return { text: aboutUpdateHint(version), accent: true, dot };
+  if (currentVersion === null) return { text: "", accent: false, dot };
+  return { text: aboutHint(currentVersion), accent: false, dot };
 }
 
 /**
@@ -92,7 +101,7 @@ function NavButton({ id, on, onSelect, ariaLabel, hint, trailing }: NavButtonPro
   );
 }
 
-/** 「关于」单独订阅更新状态：下载更新时每个进度事件都换一次状态，只让这一项跟着重渲染。 */
+/** 「关于」单独订阅更新状态，别的导航项不受它牵连；它自己也只在说明行或提示点变了时重渲染，不跟着下载进度。 */
 function AboutButton({ on, onSelect }: { on: boolean; onSelect: (section: SettingsSection) => void }) {
   const about = useAboutHint();
   const label = SETTINGS_SECTION_LABEL.about;

@@ -39,14 +39,20 @@ describe("骨架卡与结果卡逐行同高", () => {
 });
 
 describe("说明行与工具条不被晚到的文字挤动", () => {
-  it("计数是定宽槽，「清除筛选」固定在行尾", () => {
+  it("「清除筛选」固定在行尾（计数槽的宽度由 LabelSlot 的候选撑出，见页面测试）", () => {
     expect(value(".infoCount", "display")).toBe("inline-block");
-    expect(value(".infoCount", "min-width")).toBe("8em");
     expect(value(".infoClear", "margin-left")).toBe("auto");
   });
 
   it("筛选条件数角标绝对定位叠在按钮角上，不占按钮宽度", () => {
     expect(value(".filterBadge", "position")).toBe("absolute");
+  });
+
+  it("角标的描边随工具条吸住与否取工具条此刻的底色：伸出按钮的那半圈落在底色上，不多出一圈异色的环", () => {
+    expect(value(".toolbarWrap", "--badge-ring")).toBe("var(--sk-bg)");
+    expect(value(".toolbarWrap", "--badge-ring")).toBe(value(".toolbarWrap", "background"));
+    expect(value(".toolbarWrap[data-stuck]", "--badge-ring")).toBe("var(--sk-surface)");
+    expect(value(".toolbarWrap[data-stuck]", "--badge-ring")).toBe(value(".toolbarWrap[data-stuck]", "background"));
   });
 
   it("热门分类的对勾位常驻：没选中时只是透明，选中时显出", () => {

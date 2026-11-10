@@ -573,9 +573,10 @@ function GpuCard() {
   return (
     <Card>
       <CardHeader title={GPU_COPY.title} subtitle={GPU_COPY.subtitle} icon="monitor" />
-      <div ref={reflow} className={s.cardBody} aria-busy={gpu.status === "loading" || undefined}>
+      <div ref={reflow} className={s.cardBody}>
         <Appear>{notice}</Appear>
-        <SettingRow title={GPU_COPY.toggle} description={description}>
+        {/* 「读取中」只标在会换掉的说明上：标在整块上时，读屏可能在读取期间不报里面的开关，而开关这时照常可用 */}
+        <SettingRow title={GPU_COPY.toggle} description={<span aria-busy={gpu.status === "loading" || undefined}>{description}</span>}>
           <Toggle checked={prefer.value} onChange={prefer.set} ariaLabel={GPU_COPY.toggle} />
         </SettingRow>
         <p className={s.mutedText}>{GPU_COPY.revertNote}</p>
@@ -585,13 +586,13 @@ function GpuCard() {
 }
 
 export function JavaSection() {
-  // 卡片之间互相让位：运行时列表晚到、增删、提醒换了时卡片变高变矮，下载卡与显卡卡滑过去而不是一帧跳走
-  const reflow = useReflow<HTMLDivElement>();
+  // 卡片直接排进载入门里会让位的分区卡片栈（SectionFlow）：运行时列表晚到、增删、提醒换了时卡片变高变矮，
+  // 下载卡与显卡卡由它滑过去。这里不再包一层：包了以后外层只看得到一个子项，等于两层让位叠着、只有内层在干活
   return (
-    <div ref={reflow} className={s.sectionStack}>
+    <>
       <RuntimeCard />
       <DownloadCard />
       <GpuCard />
-    </div>
+    </>
   );
 }

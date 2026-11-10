@@ -37,6 +37,36 @@ describe("头像状态层", () => {
     expect(badges()[1].style.transform).toBe("scale(0)");
   });
 
+  it("减少动画时角标只淡入淡出：之后出现的不从 0 弹出，消失时不先跳小再淡", async () => {
+    const reduced = (indicator: AvatarIndicator) => <MotionConfig reducedMotion="always">{layer(indicator)}</MotionConfig>;
+    view = render(reduced({ type: "none" }));
+    view.rerender(reduced({ type: "badge", tone: "danger" }));
+    const [entering] = badges();
+    expect(entering.style.opacity).toBe("0");
+    expect(entering.style.transform).not.toContain("scale");
+    view.unmount();
+
+    view = render(reduced({ type: "badge", tone: "warn" }));
+    const [leaving] = badges();
+    view.rerender(reduced({ type: "none" }));
+    await waitForFrames(() => expect(Number(leaving.style.opacity)).toBeLessThan(1));
+    expect(leaving.style.transform).not.toContain("scale");
+  });
+
+  it("减少动画时排队轨道换成进度环：两者的出没都只动透明度，退场的轨道不带缩放与位移", async () => {
+    const reduced = (indicator: AvatarIndicator) => <MotionConfig reducedMotion="always">{layer(indicator)}</MotionConfig>;
+    view = render(reduced({ type: "queued" }));
+    const leaving = view.container.querySelector<SVGElement>("svg[data-queued]");
+    if (leaving === null) throw new Error("没有排队轨道");
+    view.rerender(reduced({ type: "ring", tone: "info", progress: 0.3, track: "install-1" }));
+    const entering = view.container.querySelector<SVGElement>('svg[data-tone="info"]');
+    if (entering === null) throw new Error("没有进度环");
+    expect(entering.style.opacity).toBe("0");
+    expect(entering.style.transform).toBe("");
+    await waitForFrames(() => expect(Number(leaving.style.opacity)).toBeLessThan(1));
+    expect(leaving.style.transform).toBe("");
+  });
+
   it("游戏退出角标消失、启动进入运行环消失时，都先演退场，不在那一帧移除", () => {
     view = render(layer({ type: "badge", tone: "warn" }));
     view.rerender(layer({ type: "none" }));

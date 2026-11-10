@@ -27,6 +27,27 @@ describe("快览列表的滚动条槽位", () => {
   });
 });
 
+describe("快览行状态文字的留宽", () => {
+  it("状态文字与不可见的最宽字样叠在同一格，宽度取最宽的那条；文字靠右、不折行，数字等宽", () => {
+    const state = rule(".rowState");
+    expect(state.get("display")).toBe("inline-grid");
+    expect(state.get("flex")).toBe("none");
+    expect(state.get("justify-items")).toBe("end");
+    expect(state.get("white-space")).toBe("nowrap");
+    expect(state.get("font-variant-numeric")).toBe("tabular-nums");
+    expect(rule(".rowStateText").get("grid-area")).toBe("1 / 1");
+    const sample = rule(".rowStateSample");
+    expect(sample.get("grid-area")).toBe("1 / 1");
+    expect(sample.get("visibility")).toBe("hidden");
+  });
+});
+
+describe("快览底栏里的退场", () => {
+  it("底栏自己是定位祖先：它随外框形变带 transform，退场的「清除已结束」量位置与被摆放都按它", () => {
+    expect(rule(".foot").get("position")).toBe("relative");
+  });
+});
+
 describe("下载入口的按压", () => {
   it("按下缩到 0.94，走 tap 弹簧；减少动画时改为瞬时降到 0.85 不透明度", () => {
     expect(rule(".entry:active").get("scale")).toBe("0.94");

@@ -43,10 +43,12 @@ describe("步骤里出没的块", () => {
 });
 
 describe("账户步", () => {
-  it("「已添加」的标题行按 sm 按钮定高：「继续添加」点掉后胶囊不上移", () => {
-    const head = declarations(".added > .othersHead");
-    expect(head).toMatch(/min-height:\s*30px/);
-    expect(head).toMatch(/position:\s*relative/);
+  it("「继续添加」的槽常驻：点掉后只把槽淡到透明，标题行仍由按钮撑高，不在这里写死按钮的高度", () => {
+    expect(declarations(".addMore")).toMatch(/transition:\s*opacity var\(--sk-dur-in\) var\(--sk-ease-out\)/);
+    const spent = declarations(".addMore[data-spent]");
+    expect(spent).toMatch(/opacity:\s*0/);
+    expect(spent).toMatch(/transition:\s*opacity var\(--sk-dur-out\) var\(--sk-ease-in\)/);
+    expect(css).not.toMatch(/min-height:\s*30px/);
   });
 
   it("登录选项卡按下缩到 0.99、走 tap 弹簧；减少动画时不缩放，只降不透明度", () => {
@@ -59,11 +61,18 @@ describe("账户步", () => {
 });
 
 describe("底栏", () => {
-  it("主按钮按「开始使用 →」定宽：四个汉字、两侧内边距、图标间距、18 的图标与两侧描边", () => {
-    expect(declarations(".footerEnd .primaryAction")).toMatch(/min-width:\s*calc\(4em \+ 2 \* var\(--sk-space-14\) \+ var\(--sk-space-8\) - 1px \+ 18px \+ 2px\)/);
+  it("主按钮与隐形的「开始使用 →」叠在同一格：格宽取最宽的那种，不在这里复写按钮的内边距与图标尺寸", () => {
+    expect(declarations(".primarySlot")).toMatch(/display:\s*inline-grid/);
+    expect(css).toMatch(/\n\.primaryAction,\s*\n\.primaryGhost\s*\{[^}]*grid-area:\s*1 \/ 1/);
+    // 单独的那条规则（前一行是上一条规则的结尾），不是和真按钮合写的那条
+    expect(/\}\s*\n\.primaryGhost\s*\{([^}]*)\}/.exec(css)?.[1]).toMatch(/visibility:\s*hidden/);
+    expect(css).not.toMatch(/\.primaryAction[^{]*\{[^}]*min-width/);
   });
 
-  it("出没的按钮退场时按两侧按钮组定位，原地淡出", () => {
-    expect(css).toMatch(/\.footerStart,\s*\n\.footerEnd\s*\{[^}]*position:\s*relative/);
+  it("出没的按钮退场时按整条底栏定位，原地淡出：右侧按钮组靠右、从左侧收窄，按它定位会落到主按钮上", () => {
+    expect(declarations(".footer")).toMatch(/position:\s*relative/);
+    const groups = /\.footerStart,\s*\n\.footerEnd\s*\{([^}]*)\}/.exec(css);
+    if (groups === null) throw new Error("样式表里没有两侧按钮组的规则");
+    expect(groups[1]).not.toMatch(/position/);
   });
 });

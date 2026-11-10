@@ -7,7 +7,7 @@
 
 import type { ReactNode } from "react";
 import type { Settings } from "../../domain/adapt";
-import { useLoadingGate } from "../../lib/loading-gate";
+import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import type { SettingsSection } from "../../state/route";
@@ -79,11 +79,20 @@ function SectionSkeleton({ section }: { section: GatedSection }) {
   );
 }
 
-export function SettingsGate({ section, children }: { section: SettingsSection; children: ReactNode }) {
+/**
+ * 配置的加载门，挂在按分区换掉的面板外面（设置页本身）：骨架显形之后切分区，新面板接着用同一个门，骨架照样显着；
+ * 门要是跟着面板重挂，就会从头再等一个出现延迟，骨架先隐身再淡入，内容列空白一下。
+ */
+export function useSettingsLoad(): LoadingView {
   const status = useLauncherSelector((s) => s.status.settings);
   const loaded = useLauncherSelector((s) => s.settings !== null);
   // 读失败不算加载中：错误卡换下骨架；点重试才开始新一轮，骨架照样等满延迟才显形
-  const gate = useLoadingGate(!loaded && status.kind === "loading");
+  return useLoadingGate(!loaded && status.kind === "loading").view;
+}
+
+/** view 取自 useSettingsLoad。 */
+export function SettingsGate({ section, view, children }: { section: SettingsSection; view: LoadingView; children: ReactNode }) {
+  const status = useLauncherSelector((s) => s.status.settings);
   const actions = useLauncherActions();
   const run = useRunner();
   // 外观分区只读写外观偏好，不依赖配置
@@ -107,7 +116,7 @@ export function SettingsGate({ section, children }: { section: SettingsSection; 
     );
   }
   return (
-    <Loadable view={gate.view} skeleton={<SectionSkeleton section={section} />}>
+    <Loadable view={view} skeleton={<SectionSkeleton section={section} />}>
       {() => <SectionFlow>{children}</SectionFlow>}
     </Loadable>
   );

@@ -21,6 +21,17 @@ function declarations(selector: string): Record<string, string> {
   throw new Error(`样式表里没有选择器恰为 ${selector} 的规则`);
 }
 
+describe("工具条", () => {
+  it("工具组按带目录选择的宽度占位、组内靠右排：目录选择晚到或撤掉都不改变工具条折不折行", () => {
+    const tools = declarations(".tools");
+    const slots = [".search", ".directory", ".sort"].map((selector) => declarations(selector).width);
+    expect(slots).toEqual(["var(--lib-search-width)", "var(--lib-directory-width)", "var(--lib-sort-width)"]);
+    expect(tools["min-width"]).toBe(`calc(${slots.join(" + ")} + 2 * ${tools.gap})`);
+    expect(tools["justify-content"]).toBe("flex-end");
+    expect(tools["margin-left"]).toBe("auto");
+  });
+});
+
 describe("实例卡片的统计行", () => {
   it("固定一行高、裁掉排不下的项：文案变长或卡变窄时卡片不长高", () => {
     const stats = declarations(".stats");
@@ -34,6 +45,26 @@ describe("实例卡片的统计行", () => {
     expect(declarations(".stats > li:first-child > span")["min-width"]).toBe("var(--lib-stat-recent-min)");
     expect(declarations(".stats")["--lib-stat-recent-min"]).toMatch(/^\d+(\.\d+)?em$/);
   });
+
+  it("四项按最宽写法排不下时只在视觉上收起第四项：显示哪几项只随卡宽变，不随时长、Mod 数的位数变；读屏照旧读到", () => {
+    expect(declarations(".stats")["container-type"]).toBe("inline-size");
+    const query = /@container\s*\(width < (\d+)px\)\s*\{\s*\.stats > li:nth-child\(n \+ 4\)\s*\{([^}]*)\}\s*\}/.exec(css);
+    if (query === null) throw new Error("样式表里没有按卡宽收起第四项的容器查询");
+    // 与只给读屏的说明（.srOnly）同一套视觉隐藏：不占行内位置、裁成看不见，但不移出无障碍树
+    const hidden = Object.fromEntries(
+      query[2]
+        .split(";")
+        .map((d) => d.trim())
+        .filter((d) => d !== "")
+        .map((d) => d.split(":").map((part) => part.trim())),
+    );
+    expect(hidden).toEqual(declarations(".srOnly"));
+    // 阈值不低于四项最宽写法：每项 16px 图标加 4px 间距、三处 12px 列距，文字按 12px 字号的 em 数
+    // （相对时间预留的 4.4em、「读不到」3em、四位 Mod 数与三位存档数每位 0.6em）
+    const recent = Number.parseFloat(declarations(".stats")["--lib-stat-recent-min"]);
+    const worst = 4 * (16 + 4) + 3 * 12 + (recent + 3 + 4 * 0.6 + 3 * 0.6) * 12;
+    expect(Number(query[1])).toBeGreaterThanOrEqual(worst);
+  });
 });
 
 describe("卡面与新建卡的悬停", () => {
@@ -42,8 +73,10 @@ describe("卡面与新建卡的悬停", () => {
     for (const property of ["opacity", "transform", "background-color", "border-color", "color"]) expect(transition).toContain(`${property} var(`);
   });
 
-  it("卡面版本号的字色随卡面形态换时淡入", () => {
-    expect(declarations(".coverVersion").transition).toBe("color var(--sk-dur-in) var(--sk-ease-out)");
+  it("卡面版本号的字色随卡面形态换时按悬停那一档淡过去；带模糊的文字阴影不过渡，随形态瞬切", () => {
+    expect(declarations(".coverVersion").transition).toBe("color var(--sk-dur-hover) var(--sk-ease)");
+    // 阴影仍随媒体形态挂上，只是不补间（那条规则的选择器里带逗号，declarations 按逗号拆分组匹配不到它）
+    expect(css).toMatch(/\.coverVersion\s*\{[^}]*text-shadow: var\(--sk-media-text-shadow\);/);
   });
 
   it("新建卡悬停上浮、按下缩到 0.99；减少动画时不位移，按下改为降透明度", () => {
@@ -53,6 +86,12 @@ describe("卡面与新建卡的悬停", () => {
     expect(active.translate).toBe("none");
     expect(declarations(":global([data-sk-reduced]) .createTile:active")).toEqual({ opacity: "0.85", transition: "none" });
     expect(declarations(".createTile").transition).toContain("translate var(--sk-spring-settle-dur) var(--sk-spring-settle)");
+  });
+
+  it("新建卡悬停时图标随卡体一起上浮 2px，不再自己另抬一次", () => {
+    expect(css).not.toMatch(/\.createIcon\s*\{[^}]*translate/);
+    expect(css).not.toMatch(/\.createTile:hover \.createIcon/);
+    expect(declarations(".createIcon").transition).toBeUndefined();
   });
 });
 

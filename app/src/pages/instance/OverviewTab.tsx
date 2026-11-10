@@ -1,20 +1,22 @@
 // 概览：状态横幅（至多一条）→ 四格数据 → 存档与实例信息 → Mod 速览与资源包光影。
 // 每个模块各自加载、各自出错，不互相等待。
 
-import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
+import { AnimatePresence, motion, useIsPresent } from "framer-motion";
 import { useLayoutEffect, useRef, useState, type ReactNode, type Ref, type RefObject } from "react";
 import { Icon } from "../../art/Icon";
 import { KindTile, WorldModeTile, type WorldMode } from "../../art/illustrations/FeatureTile";
 import { hueOf } from "../../art/illustrations/seed";
 import { ACTION_ERROR, CRASH_COPY, crashCategoryLabel, INSTANCE_IN_USE_COPY, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, REINSTALL_LOADER_LABEL, taskPhaseText } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
-import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, percent } from "../../domain/format";
+import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed } from "../../domain/format";
 import { canReinstallLoader, lostLoaderLibrary, needsReimport } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
 import { useMounted } from "../../lib/useMounted";
+import { useInsertItem } from "../../lib/useInsertItem";
 import { useLoadingGate } from "../../lib/loading-gate";
-import { fade, insertItem } from "../../lib/motion";
+import { useCompletionHold, useDisplaySpeed, useFinishing } from "../../lib/progress-display";
+import { fade } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
 import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
@@ -49,6 +51,7 @@ import { LoaderTag } from "../../ui/LoaderTag";
 import { MoreMenu } from "../../ui/MoreMenu";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { Skeleton } from "../../ui/Skeleton";
+import { SmoothPercent } from "../../ui/SmoothPercent";
 import { StatGrid, StatTile } from "../../ui/StatTile";
 import { Tag } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
@@ -104,6 +107,11 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashAt, crashAct
   // 上次崩溃由列表时刻先判定：报告还在读就先画横幅（正文写正在读取），不等报告到了再插进来把下面整块推下去。
   // 报告读不到或读出来是空的时不画，与读到之前的口径一致
   const crashShown = banner === "crashed" && (crash.status === "loading" || (crash.status === "ready" && crash.data !== null));
+  // 补全装完的那一刻实例就不再按安装中画：横幅先把进度推满、停一拍再走。这一拍里状态层还拿着补全之前扫的那份列表，
+  // 原先损坏的实例会被说成损坏，等重扫回来才对，所以损坏横幅让给收尾；启动失败与上次崩溃照常优先
+  const install = useInstallingBanner(inst.id, banner === "installing" && view.kind === "installing");
+  const holdInstall = install.holding && (banner === null || banner === "broken");
+  const installing = (banner === "installing" && view.kind === "installing") || holdInstall;
 
   return (
     <div ref={stack} className={styles.stack}>
@@ -112,9 +120,10 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashAt, crashAct
         {banner === "failed" && <FailedBanner key="failed" inst={inst} />}
         {crashShown && <CrashBanner key="crashed" at={crashAt} report={crash.status === "ready" ? crash.data : null} onTab={onTab} />}
         {banner === "broken" &&
+          !holdInstall &&
           view.kind === "broken" &&
           (needsReimport(inst) ? <ReimportBanner key="reimport" inst={inst} reason={view.reason} ops={ops} /> : <BrokenBanner key="broken" inst={inst} reason={view.reason} ops={ops} />)}
-        {banner === "installing" && view.kind === "installing" && <InstallingBanner key="installing" instanceId={inst.id} />}
+        {installing && <InstallingBanner key="installing" instanceId={inst.id} held={install.held} />}
       </BannerSlot>
       <StatsCard inst={inst} content={content} mods={mods} outdated={outdated} />
       <div ref={grid} className={styles.overviewGrid}>
@@ -238,23 +247,70 @@ function ReimportBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: 
   );
 }
 
-export function InstallingBanner({ instanceId }: { instanceId: string }) {
+/**
+ * 安装横幅的收尾。横幅画着的任务完成时，进度条与百分数先推满、停一拍（lib/progress-display 的 useFinishing）再交给调用方退场，
+ * 不在完成的那一刻连同进度一起撤走。完成之后调用方仍挂着横幅时（概览要等实例列表重读才知道装好了），接着画这个已完成的任务，
+ * 不翻回「排队中」。
+ * shown：调用方按自己的条件此刻要不要横幅。返回 holding（不论 shown，横幅画着的任务正在收尾）与 held（横幅没有进行中的任务时
+ * 接着画的那个已完成任务）。只订阅任务的 id 与完成时刻，不随进度重渲染。
+ */
+export function useInstallingBanner(instanceId: string, shown: boolean): { holding: boolean; held: string | null } {
+  const activeId = useLauncherSelector((s) => {
+    const task = instanceTask(s, instanceId);
+    return task === null ? null : task.id;
+  });
+  const [lastId, setLastId] = useState<string | null>(null);
+  if (shown && activeId !== null && activeId !== lastId) setLastId(activeId);
+  const finishedAt = useLauncherSelector((s) => {
+    if (lastId === null) return null;
+    const task = s.tasks.find((t) => t.id === lastId);
+    if (task === undefined || task.status !== "done") return null;
+    if (task.finishedAt === null) throw new Error(`已完成的任务 ${task.id} 没有完成时刻`);
+    return task.finishedAt;
+  });
+  const finishing = useFinishing(lastId === null || finishedAt === null ? [] : [{ id: lastId, finishedAt }], useCompletionHold());
+  const holding = lastId !== null && finishing.has(lastId);
+  // 横幅撤下、收尾也过了就忘掉：之后后端单独报「安装中」（没有前端任务）时横幅照常写排队中，不拿很久以前的任务充数
+  if (!shown && !holding && lastId !== null) setLastId(null);
+  return { holding, held: finishedAt === null ? null : lastId };
+}
+
+/** held：本实例没有进行中的任务时接着画的那个已完成任务（见 useInstallingBanner），按进行中、满格画。 */
+export function InstallingBanner({ instanceId, held }: { instanceId: string; held: string | null }) {
   const { go } = useNav();
   // 进度每个任务约 100 ms 一次：横幅自己订阅本实例的任务，页面拿到的启动视图里的任务进度可能是旧的
-  const task = useLauncherSelector((s) => instanceTask(s, instanceId));
-  const running = task !== null && task.status === "running";
+  const task = useLauncherSelector((s) => {
+    const active = instanceTask(s, instanceId);
+    if (active !== null || held === null) return active;
+    const done = s.tasks.find((t) => t.id === held);
+    return done === undefined ? null : done;
+  });
+  const finished = task !== null && task.status === "done";
+  const running = task !== null && (task.status === "running" || finished);
+  // 完成时后端把速度归零：收尾那一拍接着显示完成前的速度，进度推满的同时文字不跳成 0
+  const lastSpeed = useRef(0);
+  if (task !== null && task.status === "running") lastSpeed.current = task.speedBps;
+  // 速度按固定间隔换字、带平滑，不随每 100 ms 的上报跳；百分数与进度条同一份平滑（同一个 track）
+  const speed = formatSpeed(useDisplaySpeed(running ? (finished ? lastSpeed.current : task.speedBps) : 0));
   const title = task === null ? OVERVIEW_COPY.queuedTitle : task.title;
+  const track = task === null ? undefined : progressTrack(task);
+  const progress = finished ? 1 : running ? task.progress : 0;
   return (
     <Banner tone="info" icon="download" title={title} actions={<Button variant="ghost" onClick={() => go({ page: "tasks" })}>{OVERVIEW_COPY.viewTasks}</Button>}>
       <div className={styles.bannerProgress}>
         {/* 排队可能很久：静态空轨道，不放常驻的不定进度动画 */}
-        <ProgressBar value={running ? task.progress : 0} tone="info" size="sm" track={task === null ? undefined : progressTrack(task)} label={title} />
+        <ProgressBar value={progress} tone="info" size="sm" track={track} label={title} />
         <span className={styles.num}>
-          {running
-            ? task.phase === null
-              ? OVERVIEW_COPY.installProgress(percent(task.progress), formatSpeed(task.speedBps), task.totalBytes === null ? null : formatBytes(task.totalBytes))
-              : OVERVIEW_COPY.installStepProgress(percent(task.progress), taskPhaseText(task.phase, "long"), formatSpeed(task.speedBps))
-            : OVERVIEW_COPY.queuedBody}
+          {running && track !== undefined ? (
+            <>
+              <SmoothPercent value={progress} track={track} />
+              {task.phase === null
+                ? OVERVIEW_COPY.installProgressTail(speed, task.totalBytes === null ? null : formatBytes(task.totalBytes))
+                : OVERVIEW_COPY.installStepProgressTail(taskPhaseText(task.phase, "long"), speed)}
+            </>
+          ) : (
+            OVERVIEW_COPY.queuedBody
+          )}
         </span>
       </div>
     </Banner>
@@ -397,8 +453,15 @@ function WorldsCard({ inst, view, content, ops }: { inst: InstanceSummary; view:
   const worlds = content.status === "ready" ? sortWorlds(content.data.worlds) : [];
   const total = worlds.reduce((sum, w) => sum + w.size_bytes, 0);
   const shown = expanded ? worlds : worlds.slice(0, WORLDS_PREVIEW);
-  // 副标题必定会有：读到之前先占住一行（null），卡头不因文案晚到变高
-  const subtitle = load.view !== "ready" ? null : worlds.length > 0 ? OVERVIEW_COPY.worldsSubtitle(worlds.length, total) : OVERVIEW_COPY.worldsEmptySubtitle;
+  // 读到之后副标题必定会有：读到之前先占住一行（null），卡头不因文案晚到变高。读不出来时没有可写的，不留空行
+  const subtitle =
+    load.view === "error"
+      ? undefined
+      : load.view !== "ready"
+        ? null
+        : worlds.length > 0
+          ? OVERVIEW_COPY.worldsSubtitle(worlds.length, total)
+          : OVERVIEW_COPY.worldsEmptySubtitle;
 
   return (
     <Card>
@@ -477,13 +540,6 @@ function WorldsCard({ inst, view, content, ops }: { inst: InstanceSummary; view:
   );
 }
 
-/** 一行存档的出入场：退场时已经不是列表的一行，不接受指针与焦点。减少动画时只留透明度（缩放在那里是一步到位的）。 */
-const ROW_FADE = {
-  initial: { opacity: 0 },
-  animate: { opacity: 1, transition: fade.in },
-  exit: { opacity: 0, transition: fade.out },
-} as const;
-
 /**
  * 存档行的列表：游戏退出后重读、最近玩过的排到第一，或新建了存档、展开收起时，行不在原地瞬移。
  * 新来的行淡入并从略小处落到位，走掉的行抽出布局原地淡出，其余行从旧位置滑到新位置（列表挂着让位）。
@@ -505,10 +561,13 @@ function WorldRows({ worlds, children }: { worlds: readonly WorldDto[]; children
   );
 }
 
-/** popLayout 量尺寸、把退场的行抽出布局要用 ref，由 AnimatePresence 递进来，落到 li 上。 */
+/**
+ * popLayout 量尺寸、把退场的行抽出布局要用 ref，由 AnimatePresence 递进来，落到 li 上。
+ * 退场时已经不是列表的一行，不接受指针与焦点。减少动画时只留透明度（缩放在那里是一步到位的）。
+ */
 function WorldRow({ ref, entering, children }: { ref?: Ref<HTMLLIElement>; entering: boolean; children: ReactNode }) {
   const present = useIsPresent();
-  const item = useReducedMotionConfig() === true ? ROW_FADE : insertItem;
+  const item = useInsertItem();
   return (
     <motion.li ref={ref} className={styles.row} inert={!present} initial={entering ? item.initial : false} animate={item.animate} exit={item.exit}>
       {children}
@@ -627,7 +686,7 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
           {
             label: OVERVIEW_COPY.kvJava,
             value: (
-              <Loadable view={javaGate.view} skeleton={<Skeleton shape="text" width={130} />}>
+              <Loadable view={javaGate.view} skeleton={<Skeleton shape="text" width={130} />} contentClassName={styles.kvLoaded}>
                 {javaValue}
               </Loadable>
             ),
@@ -635,7 +694,7 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
           {
             label: OVERVIEW_COPY.kvMemory,
             value: (
-              <Loadable view={memoryGate.view} skeleton={<Skeleton shape="text" width={100} />}>
+              <Loadable view={memoryGate.view} skeleton={<Skeleton shape="text" width={100} />} contentClassName={styles.kvLoaded}>
                 {memoryValue}
               </Loadable>
             ),

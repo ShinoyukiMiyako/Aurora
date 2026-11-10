@@ -5,7 +5,7 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { Icon } from "../art/Icon";
-import { fade, springs } from "../lib/motion";
+import { faceSwap } from "../lib/motion";
 import styles from "./AccentSwatches.module.css";
 import type { PreviewAccent } from "./ModeCards";
 import { useRovingGroup } from "./roving";
@@ -47,13 +47,7 @@ export function AccentSwatches({ value, options, onChange, ariaLabel }: AccentSw
               {/* 与复选框的勾号同一手法：换选中项时旧对勾淡出、新对勾弹出；挂载时已选中的那枚不播入场 */}
               <AnimatePresence initial={false}>
                 {checked && (
-                  <motion.span
-                    key="check"
-                    className={styles.check}
-                    initial={{ opacity: 0, scale: 0.6 }}
-                    animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
-                    exit={{ opacity: 0, transition: fade.out }}
-                  >
+                  <motion.span key="check" className={styles.check} initial={faceSwap.pop.initial} animate={faceSwap.pop.animate} exit={faceSwap.exit}>
                     <Icon name="check" size={14} />
                   </motion.span>
                 )}

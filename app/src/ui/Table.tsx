@@ -13,12 +13,13 @@
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { AnimatePresence, motion, useAnimate, useIsPresent, useReducedMotionConfig, type HTMLMotionProps, type Variants } from "framer-motion";
-import { useEffect, useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
 import { fade, springs } from "../lib/motion";
+import { useMounted } from "../lib/useMounted";
 import { cssVars, cx } from "../lib/util";
 import type { TierName } from "./Card";
-import { appendsOnly, EVERY_ROW, rowsInWindow, rowWindow, type RowWindow } from "./ListRow";
+import { appendsOnly, EVERY_ROW, ROW_MOTION_LIMIT, rowsInWindow, rowWindow, type RowWindow } from "./ListRow.window";
 import styles from "./Table.module.css";
 
 export type TableDensity = "regular" | "compact";
@@ -89,8 +90,6 @@ export const ROW_HEIGHT: Readonly<Record<TableDensity, number>> = { regular: 64,
 export const HEADER_HEIGHT = 36;
 /** 超过这个行数开启虚拟化。 */
 export const VIRTUALIZE_ABOVE = 100;
-/** 一次增删或换位超过这么多行、又不是在末尾追加时不逐行动画：行直接换上，整张表淡入一次（与 List 同一口径）。 */
-const ROW_MOTION_LIMIT = 40;
 
 const TIERS: readonly TierName[] = ["compact", "regular", "wide"];
 const ROW_FOCUSABLE = 'button, a[href], input, select, textarea, [tabindex], [data-table-tabindex]';
@@ -100,10 +99,16 @@ const ROW_CONTROLS = 'button, a[href], input, select, textarea, label, [role="sw
 
 const visibleIn = <T,>(column: TableColumn<T>, tier: TierName) => column.tiers === undefined || column.tiers.includes(tier);
 
+/**
+ * 某一档显示的列，按定义的顺序。照表格画同尺寸骨架的页面用它取列，不要自己再按 tiers 判断一遍：规则一改，骨架就会和表格错位。
+ */
+export function visibleColumns<T>(columns: readonly TableColumn<T>[], tier: TierName): TableColumn<T>[] {
+  return columns.filter((c) => visibleIn(c, tier));
+}
+
 /** 某一档的列模板：固定列写像素宽，弹性列按最小宽分剩余空间。 */
 export function columnTemplate<T>(columns: readonly TableColumn<T>[], tier: TierName): string {
-  return columns
-    .filter((c) => visibleIn(c, tier))
+  return visibleColumns(columns, tier)
     .map((c) => (c.width !== undefined ? `${c.width}px` : `minmax(${c.minWidth === undefined ? 0 : c.minWidth}px, 1fr)`))
     .join(" ");
 }
@@ -347,10 +352,7 @@ export function Table<T>({
   const rowMotion: RowMotion = crowded ? "none" : reduced ? "fade" : "full";
   // 挂载时就在的行与空状态不播入场。不能用 AnimatePresence 的 initial={false} 来做：它会让这些行里面
   // 之后才挂载的元素（开关、徽标这类自带入场的部件）也永远跳过入场。这里只在行自己身上关掉
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   // 行集合或顺序变了：读一次此刻的可见范围，只让附近的行逐行动画（新行入场、被挤动的行让位）。整表换上、虚拟化时一行也不量。
   // 减少动画时让位本来就一步到位，不必量布局，只留新行的淡入
   const nearby = changed && mounted.current && !crowded && !virtual ? rowsInWindow(before.keys, keys, tableWindow(scrollRef.current, bodyRef.current, rowHeight)) : null;
@@ -480,6 +482,9 @@ export function Table<T>({
       "data-selected": selected || undefined,
       "data-inactive": isInactive !== undefined && isInactive(row) ? "" : undefined,
       "data-activatable": onActivate === undefined ? undefined : "",
+      // 末行不画分隔线。:last-child 会把抽出布局、仍排在文档末尾的退场行认成末行，新的末行要等它淡完才去掉分隔线；
+      // 退场的行留着最后一次的标记，淡出时样子不变
+      "data-last": index === rows.length - 1 ? "" : undefined,
       "aria-selected": selection === undefined ? undefined : selected,
       tabIndex: index === tabStop ? 0 : -1,
       onFocus: (event: FocusEvent<HTMLDivElement>) => {

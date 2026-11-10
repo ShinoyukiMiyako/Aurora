@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // 固定实例的菜单关上、退场播完之后，菜单槽要卸掉，不常驻启动入口的订阅。整个文件走真实时间：
-// 退场要等 framer-motion 的帧循环把动画播完，假定时器推不动它（见 shell/onboarding-exit.test.tsx）。
+// 退场要等 framer-motion 的帧循环把动画播完。假定时器下帧跟着假时钟走，要逐帧推进才播得完（stepFrames，见 test/dom.ts），
+// 这里按真实时间用 waitForFrames 等。
 import { act } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";

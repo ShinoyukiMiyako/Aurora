@@ -104,8 +104,23 @@ describe("样式表里的动效约定", () => {
     }
   });
 
-  it("大卡动作行里「实例详情」的盒子是真实的盒子：display: contents 没有盒子，让位移不动它", () => {
-    expect(declaration(block(home, ".heroDetails"), "display")).not.toBe("contents");
+  it("大卡的骨架层与内容层都撑满卡片：纵向 flex 且占满余高，标题区与胶囊才能和内容一样压在底边", () => {
+    for (const selector of ['.heroLoadable > [aria-hidden="true"]', ".heroLoaded"]) {
+      const body = block(home, selector);
+      expect(declaration(body, "display")).toBe("flex");
+      expect(declaration(body, "flex")).toBe("1");
+      expect(declaration(body, "flex-direction")).toBe("column");
+    }
+  });
+
+  it("问候卡名字一行与上下的间距是内边距：外边距会穿过加载区与出没动画的层折叠，退场层抽成绝对定位时错开", () => {
+    const name = block(home, ".greetName");
+    expect(name).not.toMatch(/margin/);
+    expect(declaration(name, "display")).toBe("block");
+    expect(declaration(name, "padding")).toBe("var(--sk-space-2) 0 var(--sk-space-4)");
+    expect(declaration(name, "line-height")).toBe("var(--sk-lh-title)");
+    // 原先这 2 px 是标题的行距：挪进名字一行之后标题自己不再有间距，没有账户时问候下面不多出空白
+    expect(block(home, ".greetTitle")).not.toMatch(/gap/);
   });
 
   it("立绘悬停只抬人物，花瓣地面与按钮本身不动", () => {

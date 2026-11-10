@@ -289,9 +289,15 @@ describe("下载原版材质部件的状态切换", () => {
     await startDownload();
     await act(async () => art.pending[0].resolve(READY));
     await flush();
-    act(() => setBlockCatalog(catalog()));
+    // 与材质绑定的顺序一致：放进目录的同时报告载入成功，下载状态在同一次渲染里回到空闲
+    act(() => {
+      setBlockCatalog(catalog());
+      settleArtDownload(true);
+    });
+    expect(getArtDownloadState()).toEqual({ phase: "idle" });
     const leaving = view.container.querySelector<HTMLElement>("[inert]");
     expect(leaving?.textContent).toContain("正在载入材质…");
+    expect(leaving?.querySelector("button")).toBeNull();
   });
 
   it("状态区按最高的状态（小号按钮、一行字加细进度条，都是 30）常驻占位", () => {

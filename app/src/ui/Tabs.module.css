@@ -74,6 +74,14 @@
   flex: none;
 }
 
+/*
+ * 调用方把整个 AnimatePresence 当作徽标传进来时外壳常驻，角标不在时外壳是空的：
+ * 空外壳退出排布，不吃内容间距，标签宽度与没有徽标时相同
+ */
+.badge:empty {
+  display: none;
+}
+
 /* ---- underline：页面级，底边一条分隔线，指示条压在分隔线上 ---- */
 .list[data-variant="underline"] {
   box-shadow: inset 0 -1px 0 var(--sk-line);

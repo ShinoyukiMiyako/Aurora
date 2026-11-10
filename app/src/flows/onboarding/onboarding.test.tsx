@@ -239,6 +239,31 @@ describe("首次启动向导：第一步的内容不跳", () => {
     await flush();
     expect(dirInput().value).toBe(DEFAULT_DIR);
   });
+
+  it("配置过了等待期才到、文件夹探测更晚：文件夹骨架从外层骨架接过来一直显着，不先消失、再过 300ms 重新淡入", async () => {
+    let answer: () => void = () => undefined;
+    ipc.overrides.set("get_config", () => new Promise((resolve) => (answer = () => void mockInvoke("get_config").then(resolve))));
+    ipc.overrides.set("discover_game_directories", () => new Promise(() => undefined));
+    await mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    act(() => answer());
+    await flush();
+    // 外层骨架显出来后至少停 300ms，到点才换成真实的第一步
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    await flush();
+    expect(dirInput().value).toBe(DEFAULT_DIR);
+    // 只剩文件夹区还在加载：它的骨架一挂上就是显出来的，不是等待期里看不见的占位
+    const busy = all("[aria-busy='true']");
+    expect(busy).toHaveLength(1);
+    const others = busy[0].querySelector<HTMLElement>(":scope > [aria-hidden='true']");
+    if (others === null) throw new Error("文件夹区没有骨架");
+    expect(others.hasAttribute("data-pending")).toBe(false);
+    expect(others.style.opacity).toBe("1");
+  });
 });
 
 describe("首次启动向导：推进与收尾", () => {
@@ -268,12 +293,20 @@ describe("首次启动向导：推进与收尾", () => {
     await mount();
     await click(button("下一步"));
     const scanning = () => all("[aria-busy='true'] > [aria-hidden='true']").find((el) => el.textContent?.includes("正在查找本机的 Java…"));
+    // 扫描行在 aria-hidden 的骨架层里：读屏听到的是这一步里先挂好的状态区（不在任何 aria-hidden 之内）
+    const announced = () => {
+      const regions = all("[data-step-pane]:not([inert]) [role='status']").filter((el) => el.closest("[aria-hidden='true']") === null);
+      expect(regions).toHaveLength(1);
+      return regions[0].textContent;
+    };
     expect(scanning()?.hasAttribute("data-pending")).toBe(true);
+    expect(announced()).toBe("");
     expect(button("自动下载 Java").getAttribute("aria-checked")).toBe("true");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
     expect(scanning()?.hasAttribute("data-pending")).toBe(false);
+    expect(announced()).toBe("正在查找本机的 Java…");
     act(() => found([]));
     await flush();
     await act(async () => {
@@ -282,6 +315,7 @@ describe("首次启动向导：推进与收尾", () => {
     await flush();
     expect(text()).toContain("没有在本机找到 Java");
     expect(document.querySelector("[aria-busy='true']")).toBeNull();
+    expect(announced()).toBe("");
   });
 
   it("第二步扫描 Java 并能关掉自动下载；跳过后步骤条标「已跳过」，只能点回到过的步", async () => {
@@ -321,8 +355,12 @@ describe("首次启动向导：推进与收尾", () => {
     expect(all("button[data-kind]").every((b) => b.closest("[inert]") !== null)).toBe(true);
     expect(button("离线账户").closest("div[style]")?.getAttribute("style")).toContain("opacity: 0");
 
-    await click(button("继续添加"));
+    const addMore = button("继续添加");
+    await click(addMore);
     expect(all("button").filter((b) => b.textContent?.trim() === "继续添加").every((b) => b.closest("[inert]") !== null)).toBe(true);
+    // 点掉的按钮不离开布局：还是同一颗、留在标题行的常驻槽里淡出，行高由它撑着
+    expect(addMore.isConnected).toBe(true);
+    expect(addMore.closest("[data-spent]")?.hasAttribute("inert")).toBe(true);
     expect(all("button[data-kind]").some((b) => b.closest("[inert]") === null)).toBe(true);
   });
 
@@ -590,6 +628,22 @@ describe("首次启动向导：换步动效", () => {
     const leaving = all<HTMLButtonElement>("footer button").filter((b) => ["上一步", "直接开始", "跳过"].includes(b.textContent?.trim() ?? ""));
     expect(leaving).toHaveLength(3);
     expect(leaving.every((b) => b.closest("[inert]") !== null)).toBe(true);
+  });
+
+  it("主按钮与隐形的「开始使用 →」叠在同一格：前三步的「下一步」也按它撑宽，隐形的那颗点不到、读屏读不到", async () => {
+    await mount();
+    const slot = button("下一步").closest<HTMLElement>('[class*="_primarySlot_"]');
+    if (slot === null) throw new Error("主按钮不在定宽的格里");
+    const ghost = slot.querySelector<HTMLElement>('[class*="_primaryGhost_"]');
+    if (ghost === null) throw new Error("格里没有撑宽的隐形按钮");
+    expect(ghost.getAttribute("aria-hidden")).toBe("true");
+    expect(ghost.hasAttribute("inert")).toBe(true);
+    const widest = ghost.querySelector("button");
+    expect(widest?.textContent?.trim()).toBe("开始使用");
+    expect(widest?.getAttribute("data-variant")).toBe("primary");
+    expect(widest?.querySelector("svg")).not.toBeNull();
+    for (let i = 0; i < 3; i++) await click(button("下一步"));
+    expect(button("开始使用").closest('[class*="_primarySlot_"]')).toBe(slot);
   });
 
   it("点下「开始使用」后按钮文案不换（换成更长的字会撑宽按钮、推走「跳过」），进行中的说法只给读屏", async () => {

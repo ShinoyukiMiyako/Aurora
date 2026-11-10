@@ -2,12 +2,14 @@
 // 外框是小号弹窗、无关闭按钮；Esc 与点遮罩都等同取消。
 // 危险色调初始聚焦「取消」，回车不会直接执行不可逆操作；普通色调初始聚焦确认按钮。
 // 点确认时先调 onConfirm 再调 onClose：命令式确认以第一次决议为准，顺序反了会被当成取消。
-// 开着时被另一个请求顶替（换 requestKey）：框不重挂、遮罩不断，原地换内容并重做初始聚焦，新的标题与正文淡入。
+// 开着时被另一个请求顶替（换 requestKey）：框不重挂、遮罩不断，原地换内容并重做初始聚焦，新的标题、正文与确认键文案淡入，
+// 「取消」随确认键的宽度变化滑到新位置，读屏经状态区补读新的问题。
 
 import { motion } from "framer-motion";
 import { useState, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
 import { fade } from "../lib/motion";
+import { REFLOW_SKIP_ATTR, useReflow } from "../lib/reflow";
 import { Button } from "./Button";
 import styles from "./ConfirmDialog.module.css";
 import { AUTOFOCUS_ATTR, Modal } from "./Modal";
@@ -51,7 +53,13 @@ export function ConfirmDialog({ open, title, body, confirmLabel, cancelLabel = C
     setWasOpen(open);
     if (open) setOpenedWith(requestKey);
   }
-  const swapIn = requestKey !== openedWith ? { opacity: 0 } : false;
+  const swapped = requestKey !== openedWith;
+  const swapIn = swapped ? { opacity: 0 } : false;
+  // 顶替时焦点只在同一个框里挪动（普通确认换普通确认时停在同一个确认键上），读屏不会重读对话框的名称：
+  // 新的问题与后果经状态区补读一次。打开时就在的请求由读屏随对话框一起读，这里留空
+  const announcement = swapped ? (typeof body === "string" ? `${title} ${body}` : title) : "";
+  // 确认键换了文案就变宽变窄，底栏右对齐，左边的「取消」随之横移：挂让位让它滑过去
+  const actions = useReflow<HTMLDivElement>();
   const focusCancel = danger ? { [AUTOFOCUS_ATTR]: "" } : {};
   const focusConfirm = danger ? {} : { [AUTOFOCUS_ATTR]: "" };
   return (
@@ -74,10 +82,12 @@ export function ConfirmDialog({ open, title, body, confirmLabel, cancelLabel = C
       }
       hideClose
       footer={
-        <>
+        // 撑满底栏的一行：行宽不随按钮变，让位才接得住（按内容定宽的容器宽度一变，那一趟就当作静止）
+        <div ref={actions} className={styles.actions}>
           <Button variant="ghost" onClick={onClose} {...focusCancel}>
             {cancelLabel}
           </Button>
+          {/* 确认键自己不参与让位：它的右缘不动，跟着滑的话会从旧的左缘起步，右缘先越出底栏再滑回来 */}
           <Button
             variant={danger ? "danger" : "primary"}
             onClick={() => {
@@ -85,10 +95,13 @@ export function ConfirmDialog({ open, title, body, confirmLabel, cancelLabel = C
               onClose();
             }}
             {...focusConfirm}
+            {...{ [REFLOW_SKIP_ATTR]: "" }}
           >
-            {confirmLabel}
+            <motion.span key={requestKey} initial={swapIn} animate={SWAP_IN}>
+              {confirmLabel}
+            </motion.span>
           </Button>
-        </>
+        </div>
       }
     >
       {body !== undefined && (
@@ -96,6 +109,9 @@ export function ConfirmDialog({ open, title, body, confirmLabel, cancelLabel = C
           {body}
         </motion.div>
       )}
+      <span className={styles.announce} aria-live="polite">
+        {announcement}
+      </span>
     </Modal>
   );
 }

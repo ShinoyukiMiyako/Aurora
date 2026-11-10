@@ -3,9 +3,10 @@
 // 头图与标签条只用实例列表里的摘要先画出来，五个标签各自加载，任何一个都不等其他标签的数据。
 // 新建、导入还没装好时标签内容换成安装说明（见 InstallStage），装好、扫到实例后自动换回。
 
-import { motion } from "framer-motion";
+import { motion, useReducedMotionConfig } from "framer-motion";
 import { useEffect, useId, useRef, useState } from "react";
-import { fade } from "../../lib/motion";
+import { fade, popMark } from "../../lib/motion";
+import { useCompletionHold, useFinishing } from "../../lib/progress-display";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector } from "../../state/launcher";
 import { useLastCrash, useModUpdates } from "../../state/queries/instance";
@@ -17,18 +18,16 @@ import { TabPanel, Tabs, type TabItem } from "../../ui/Tabs";
 import { Tag } from "../../ui/Tag";
 import { INSTANCE_TAB_LABEL } from "../../copy/flows";
 import { launchView } from "../../launch/launchView";
-import { useMounted } from "../../lib/useMounted";
 import { CrashTab } from "./CrashTab";
 import { PAGE_COPY } from "./copy";
 import { Hero } from "./Hero";
 import { InstallStageTab } from "./InstallStage";
 import styles from "./instance.module.css";
 import { LogsTab } from "./LogsTab";
-import { creationRef, creationRefEqual, installStage, isCrashActive, pageViewEqual, tabStep } from "./model";
+import { crashRanAfter, creationFinished, creationRef, creationRefEqual, heldInstallStage, installStage, isCrashActive, pageViewEqual, tabStep } from "./model";
 import { ModsTab } from "./ModsTab";
 import { useInstanceOps } from "./ops";
 import { OverviewTab } from "./OverviewTab";
-import { CHIP_MOTION } from "./parts";
 import { SettingsTab } from "./SettingsTab";
 
 const TAB_ICON = {
@@ -52,18 +51,28 @@ export default function InstancePage({ route }: PageProps<"instance">) {
   const ops = useInstanceOps(inst);
   const [renaming, setRenaming] = useState(false);
   const creation = useLauncherSelector((s) => creationRef(s.tasks, route.id), creationRefEqual);
-  const stage = installStage(inst, creation);
+  const actual = installStage(inst, creation);
   // 新建或导入还没装好：占位项盘上没有目录，扫到了的也只是装了一半的现场，按需查询一律不发
-  const queryId = stage.kind === "none" ? inst.id : null;
+  const queryId = actual.kind === "none" ? inst.id : null;
+  // 刚装完的那一拍照旧按在跑画：概览的安装横幅把进度推满、停一拍，再换成落地说明或正常内容
+  const settling = useFinishing(creationFinished(creation), useCompletionHold());
+  const stage = heldInstallStage(actual, creation, settling);
   const modded = inst.loader !== "vanilla";
   const crash = useLastCrash(queryId);
   const updates = useModUpdates(modded ? queryId : null);
   // 头图与标签条只靠实例列表就能画：崩溃时刻先取列表里的，不等崩溃报告；报告到了且更新（列表还没重扫）时以报告为准
   const reportAt = crash.status === "ready" && crash.data !== null ? crash.data.at : null;
   const crashAt = inst.lastCrashAt === null ? reportAt : reportAt === null ? inst.lastCrashAt : Math.max(inst.lastCrashAt, reportAt);
-  const crashActive = isCrashActive(crashAt, inst.lastPlayedAt, view.kind);
+  // 停在本页时游戏又跑起来过：正常退出到实例列表重读出上次游玩之前，同一份崩溃不再把横幅与头图标记亮回来
+  const [ranAfter, setRanAfter] = useState<number | null>(null);
+  const ran = crashRanAfter(ranAfter, crashAt, view.kind);
+  if (ran !== ranAfter) setRanAfter(ran);
+  const crashActive = isCrashActive(crashAt, inst.lastPlayedAt, view.kind, ran);
   const live = view.kind === "loading" || view.kind === "running";
-  const mounted = useMounted();
+  // Mod 标签在上一次提交时挂没挂着徽标。没挂着时「N 更新」连同标签条的徽标外壳一起出现，外壳自己已从略小处弹出，
+  // 里层再弹一次就是两层缩放相乘；挂着计数时外壳不动，换上来的「N 更新」才由里层弹出。页面挂载时为假，首屏不弹
+  const modsBadged = useRef(false);
+  const chip = useReducedMotionConfig() === true ? popMark.reduced : popMark.glyph;
 
   // 换标签时新面板从标签条上所在的那一侧进来：按新旧标签的先后定方向，渲染期间换算，面板挂载时就读到
   const [shownTab, setShownTab] = useState(route.tab);
@@ -87,7 +96,7 @@ export default function InstancePage({ route }: PageProps<"instance">) {
       // 计数换成「N 更新」时那一格换了一件事：新标签弹出来；标签变宽挤开的后面几个标签由标签条的让位滑过去
       if (updates.status === "ready" && updates.data.length > 0)
         return (
-          <motion.span key="updates" className={styles.tabBadge} initial={mounted.current ? CHIP_MOTION.initial : false} animate={CHIP_MOTION.animate}>
+          <motion.span key="updates" className={styles.tabBadge} initial={modsBadged.current ? chip.initial : false} animate={chip.animate}>
             <Tag tone="accent" size="sm">
               {PAGE_COPY.updatesBadge(updates.data.length)}
             </Tag>
@@ -109,6 +118,9 @@ export default function InstancePage({ route }: PageProps<"instance">) {
   };
 
   const items: TabItem<InstanceTab>[] = TAB_ORDER.map((tab) => ({ value: tab, label: INSTANCE_TAB_LABEL[tab], icon: TAB_ICON[tab], badge: badgeOf(tab) }));
+  useEffect(() => {
+    modsBadged.current = items.some((item) => item.value === "mods" && item.badge !== undefined);
+  });
 
   // F2 就地改名：改名被锁住（游戏运行、安装或改动中）时不登记，按了也不进改名；焦点在输入框里时外壳不分发
   const renameLocked = ops.locks.rename !== null;

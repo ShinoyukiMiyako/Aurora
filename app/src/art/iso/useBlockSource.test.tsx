@@ -200,6 +200,73 @@ describe("useBlockSource：本机材质", () => {
   });
 });
 
+describe("useBlockSource：换来源时新图还在取", () => {
+  /** 下一次取图挂起，返回放行函数。 */
+  const holdNextFetch = () => {
+    let release: (() => void) | undefined;
+    fetchMock.mockImplementationOnce((url: string) => new Promise((resolve) => (release = () => resolve({ ok: !missing.has(url), status: missing.has(url) ? 404 : 200, blob: async () => new Blob([url]) }))));
+    return () => {
+      if (release === undefined) throw new Error("挂起的那次取图还没发出");
+      release();
+    };
+  };
+
+  it("换封面方块：新材质到之前先给上一份已就绪的（不落回 null 画徽记），到了再换", async () => {
+    withSource();
+    view = render(<Probe cover={cover("blue_ice")} />);
+    await settle();
+    expect(last?.key).toBe("block|1.21.1|blue_ice");
+
+    const release = holdNextFetch();
+    view.rerender(<Probe cover={cover("cherry_planks")} />);
+    await settle();
+    expect(fetched()).toContain(art("block/cherry_planks"));
+    expect(summary(last)).toMatchObject({ key: "block|1.21.1|blue_ice", side: art("block/blue_ice") });
+
+    release();
+    await settle();
+    expect(summary(last)).toMatchObject({ key: "block|1.21.1|cherry_planks", side: art("block/cherry_planks") });
+  });
+
+  it("新材质取不到：回落 null（画徽记），不一直留着旧的", async () => {
+    withSource();
+    view = render(<Probe cover={cover("blue_ice")} />);
+    await settle();
+    missing.add(art("block/cherry_planks"));
+    const release = holdNextFetch();
+    view.rerender(<Probe cover={cover("cherry_planks")} />);
+    await settle();
+    expect(last?.key).toBe("block|1.21.1|blue_ice");
+    release();
+    await settle();
+    expect(last).toBeNull();
+  });
+
+  it("换图片：新图到之前先给旧图", async () => {
+    view = render(<Probe cover={cover("cherry_planks", IMAGE)} />);
+    await settle();
+    const release = holdNextFetch();
+    view.rerender(<Probe cover={cover("cherry_planks", OTHER_IMAGE)} />);
+    await settle();
+    expect(last?.key).toBe(`image|${IMAGE}`);
+    release();
+    await settle();
+    expect(last?.key).toBe(`image|${OTHER_IMAGE}`);
+  });
+
+  it("新来源已有定论时直接换，不等：已缓存的立即给新的，cover 换成 null 立即为 null", async () => {
+    withSource();
+    view = render(<Probe cover={cover("blue_ice")} />);
+    await settle();
+    view.rerender(<Probe cover={cover("cherry_planks")} />);
+    await settle();
+    view.rerender(<Probe cover={cover("blue_ice")} />);
+    expect(last?.key).toBe("block|1.21.1|blue_ice");
+    view.rerender(<Probe cover={null} />);
+    expect(last).toBeNull();
+  });
+});
+
 describe("useBlockSource：玩家图片", () => {
   it("有图片时三面同一张、不染色，键是图片地址；不取方块材质", async () => {
     withSource();

@@ -7,12 +7,14 @@ import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ICON_PATHS } from "../../art/icon-paths";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { SLOW_LOADING_HINT } from "../../copy/flows";
 import { getConfig, updateConfig } from "../../ipc/config";
 import { lastCrash, type CrashClueDto, type CrashReportDto } from "../../ipc/diagnostics";
 import { IpcError } from "../../ipc/errors";
+import type { InstanceDto } from "../../ipc/instances";
 import { GAME_EXIT_EVENT, launchGame } from "../../ipc/launch";
 import type { InstalledMod } from "../../ipc/mods";
-import { resetMocks } from "../../ipc/mock";
+import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { setMockGpuAdapters } from "../../ipc/mock/handlers/java";
 import { endMockGame, mockCrashReport, setMockLaunchWarnings } from "../../ipc/mock/handlers/launch";
 import { OverlayRoot } from "../../shell/overlay";
@@ -190,6 +192,68 @@ describe("崩溃诊断：停在本页重新运行", () => {
     exit(true);
     await flush();
     expect(notes()).toEqual([]);
+  });
+
+  it("又崩了一次、实例列表先于新报告回来：列表里的上次崩溃与上次游玩同为这次退出的时刻，同样不说「之后已经正常启动过」", async () => {
+    await crashWith(1);
+    await open("crash");
+    await relaunch();
+    // 后端在推送退出事件之前写好游玩记录与崩溃报告，两者都记这次退出的时刻；新报告的读取悬着，列表先回来
+    ipc.overrides.set("list_instances", async () => {
+      const list = await mockInvoke<InstanceDto[]>("list_instances");
+      return list.map((i) => (i.id === ID ? { ...i, last_played_at: NOW, last_crash_at: NOW } : i));
+    });
+    const fresh = deferred<CrashReportDto | null>();
+    ipc.overrides.set("last_crash", () => fresh.promise);
+    exit(true);
+    await flush();
+    expect(launcher.state.instances.find((i) => i.id === ID)?.lastPlayedAt).toBe(NOW);
+    expect(notes()).toEqual([]);
+  });
+});
+
+describe("崩溃诊断：报告读得慢", () => {
+  async function pass(ms: number) {
+    act(() => {
+      vi.advanceTimersByTime(ms);
+    });
+    await flush();
+  }
+
+  function panel(): HTMLElement {
+    const el = document.querySelector<HTMLElement>('[role="tabpanel"]');
+    if (el === null) throw new Error("找不到标签面板");
+    return el;
+  }
+
+  /** 面板里不在隐藏层、也不在退场层里的卡片。 */
+  const liveCards = () => [...panel().querySelectorAll<HTMLElement>("[data-pad]")].filter((c) => c.closest('[aria-hidden="true"]') === null && c.closest("[inert]") === null);
+  const hints = () => [...panel().querySelectorAll("p")].filter((p) => p.textContent === SLOW_LOADING_HINT);
+
+  it("等待期里骨架卡不可见地占位，不先画一张空卡；读了 10 s 慢提示在骨架层外面；读到后原位换成摘要", async () => {
+    await crashWith(1);
+    const report = deferred<CrashReportDto | null>();
+    ipc.overrides.set("last_crash", () => report.promise);
+    await open("crash");
+    const layer = panel().querySelector<HTMLElement>('[aria-busy="true"] > [aria-hidden="true"]');
+    if (layer === null) throw new Error("报告没读到时应有骨架层");
+    expect(layer.hasAttribute("data-pending")).toBe(true);
+    expect(layer.querySelector("[data-pad]")).not.toBeNull();
+    expect(liveCards()).toEqual([]);
+
+    await pass(300);
+    expect(layer.hasAttribute("data-pending")).toBe(false);
+    expect(hints()).toEqual([]);
+    await pass(10_000);
+    expect(hints()).toHaveLength(1);
+    expect(hints()[0].closest('[aria-hidden="true"]')).toBeNull();
+
+    report.resolve(mockCrashReport(ID));
+    await flush();
+    await pass(300);
+    expect(hints()).toEqual([]);
+    const titles = [...panel().querySelectorAll("h2")].filter((h) => h.closest('[aria-hidden="true"]') === null && h.closest("[inert]") === null).map(textOf);
+    expect(titles).toEqual([expect.stringContaining("找到 1 条线索")]);
   });
 });
 

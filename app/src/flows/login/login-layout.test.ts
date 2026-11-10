@@ -28,6 +28,13 @@ describe("登录弹窗的动效只动位移、缩放与透明度", () => {
   it("换内容的那一格是退场项的定位基准", () => {
     expect(declaration(ruleFor(".swap"), "position")).toBe("relative");
   });
+
+  it("有东西在退场时纵向裁到这一格：比新内容高的旧内容不伸进弹窗主体的可滚动范围；横向与平时不裁，焦点环不被切", () => {
+    const leaving = ruleFor(".swap:has([inert])");
+    expect(declaration(leaving, "overflow-y")).toBe("clip");
+    for (const property of ["overflow", "overflow-x"]) expect(() => declaration(leaving, property)).toThrow();
+    for (const property of ["overflow", "overflow-y"]) expect(() => declaration(ruleFor(".swap"), property)).toThrow();
+  });
 });
 
 describe("离线账户", () => {

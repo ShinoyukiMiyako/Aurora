@@ -6,12 +6,13 @@
 // 没改不重复提交。收尾只把向导卸载（finishFirstRun）。第二到四步的开关与外观在各步里即时写入。
 // 后端拒绝了游戏目录时停在（或回到）第一步，把原因写在输入框下。
 
-import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig, type Variants } from "framer-motion";
-import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
+import { useRef, useState, type ReactNode, type Ref } from "react";
 import { Icon } from "../../art/Icon";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
 import { useLoadingGate } from "../../lib/loading-gate";
-import { fade, springs } from "../../lib/motion";
+import { fade, stepPane, stepPaneFade } from "../../lib/motion";
+import { useMounted } from "../../lib/useMounted";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
@@ -54,23 +55,6 @@ const INVALID_GAME_DIRECTORY = "invalid_game_directory";
 const SIDE_WIDTH = { compact: 248, regular: 248, wide: 272 } as const;
 const BRANCH_HEIGHT = 200;
 
-/** 新步骤从前进方向一侧滑入，旧步骤朝反方向退出。 */
-const stepMotion: Variants = {
-  enter: (dir: number) => ({ opacity: 0, x: 16 * dir }),
-  center: { opacity: 1, x: 0, transition: { ...springs.soft, opacity: fade.in } },
-  exit: (dir: number) => ({ opacity: 0, x: -16 * dir, transition: fade.out }),
-};
-
-/**
- * 减少动画时的换步：只淡入淡出。不能沿用 stepMotion 等根部 MotionConfig 去关位移：它只是把 x 改成一步到位，
- * 旧步会在几乎不透明时先横跳 16px 再淡出。
- */
-const stepFade: Variants = {
-  enter: { opacity: 0 },
-  center: { opacity: 1, transition: fade.in },
-  exit: { opacity: 0, transition: fade.out },
-};
-
 /**
  * 收尾时整体淡出并轻微放大。退场一律走 fade.out，缩放也跟着它在 120ms 内走完：外壳要等这段退场播完才挂主界面，
  * 缩放若走弹簧，透明度早已到 0 还要再等弹簧静止，窗口只剩底色与标题条。减少动画时只淡出：缩放在那里是一步到位的。
@@ -104,7 +88,7 @@ function StepPane({ ref, direction, enter, children }: StepPaneProps) {
       ref={ref}
       className={s.pane}
       custom={direction}
-      variants={reduced ? stepFade : stepMotion}
+      variants={reduced ? stepPaneFade : stepPane}
       initial={enter ? "enter" : false}
       animate="center"
       exit="exit"
@@ -155,6 +139,8 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
   const reduced = useReducedMotionConfig() === true;
   const settingsGate = useLoadingGate(settings === null);
   const discovered = useDiscoveredGameDirectories();
+  // 文件夹探测的加载门放在这里：第一步重新挂上（配置晚到、换步回来）时接着这一轮，不从等待期重来
+  const discoveredGate = useLoadingGate(discovered.status === "loading");
   const [wizard, setWizard] = useState<WizardState>(INITIAL_WIZARD);
   const [pathOverride, setPathOverride] = useState<string | null>(null);
   const [deselected, setDeselected] = useState<ReadonlySet<string>>(new Set());
@@ -165,10 +151,7 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
   const [committed, setCommitted] = useState<string | null>(null);
   // 向导挂上时就在的那一步不播入场：窗口这时才显示出来，内容应当已经在位。
   // 不能写成 AnimatePresence 的 initial={false}：那会让这一步里之后才挂载的元素也永远跳过入场
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
 
   // 默认目录来自后端配置：配置读到之前没有目录可言，各个按钮也都不可用
   const path = settings === null ? null : pathOverride === null ? settings.defaultGameDir : pathOverride;
@@ -279,6 +262,7 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
               defaultPath={settings.defaultGameDir}
               error={dirError}
               deselected={deselected}
+              othersView={discoveredGate.view}
               onPathChange={(value) => {
                 setPathOverride(value);
                 setDirError(null);
@@ -360,24 +344,33 @@ export default function OnboardingFlow(_props: FlowProps<"onboarding">) {
                   </Button>
                 )}
               </Appear>
-              {last ? (
-                <Button
-                  className={s.primaryAction}
-                  variant="primary"
-                  iconRight="arrow-right"
-                  loading={finishing === "finish"}
-                  disabled={!ready || (busy && finishing !== "finish")}
-                  // 加载中文字淡去但保留占位，换成更长的字看不见却会撑宽按钮：可见文案不换，进行中的说法只给读屏
-                  aria-label={finishing === "finish" ? FOOTER_COPY.preparing : undefined}
-                  onClick={() => void finish("finish")}
-                >
-                  {FOOTER_COPY.finish}
-                </Button>
-              ) : (
-                <Button className={s.primaryAction} variant="primary" loading={committing} disabled={!ready || (busy && !committing)} onClick={() => void next()}>
-                  {FOOTER_COPY.next}
-                </Button>
-              )}
+              {/* 隐形的「开始使用 →」垫在同一格里撑出宽度，真按钮撑满这一格：宽度跟着按钮组件自己的尺寸走，不在这里复写 */}
+              <div className={s.primarySlot}>
+                {last ? (
+                  <Button
+                    className={s.primaryAction}
+                    variant="primary"
+                    iconRight="arrow-right"
+                    block
+                    loading={finishing === "finish"}
+                    disabled={!ready || (busy && finishing !== "finish")}
+                    // 加载中文字淡去但保留占位，换成更长的字看不见却会撑宽按钮：可见文案不换，进行中的说法只给读屏
+                    aria-label={finishing === "finish" ? FOOTER_COPY.preparing : undefined}
+                    onClick={() => void finish("finish")}
+                  >
+                    {FOOTER_COPY.finish}
+                  </Button>
+                ) : (
+                  <Button className={s.primaryAction} variant="primary" block loading={committing} disabled={!ready || (busy && !committing)} onClick={() => void next()}>
+                    {FOOTER_COPY.next}
+                  </Button>
+                )}
+                <span className={s.primaryGhost} aria-hidden="true" inert>
+                  <Button variant="primary" iconRight="arrow-right">
+                    {FOOTER_COPY.finish}
+                  </Button>
+                </span>
+              </div>
             </div>
           </footer>
         </section>

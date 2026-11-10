@@ -23,7 +23,7 @@
 }
 
 .dimmable[data-stale] {
-  opacity: 0.6;
+  opacity: var(--sk-disabled);
   transition: opacity var(--sk-dur-out) var(--sk-ease-in);
 }
 
@@ -345,7 +345,8 @@
   gap: var(--sk-space-10);
 }
 
-.versions > [data-tooltip-host]:last-child > button {
+/* 按类名认「加载更多」，不靠它排在最后：列表被截断时它后面还跟着截断说明，两种情况都居中、不被拉成整行宽 */
+.loadMore {
   align-self: center;
 }
 

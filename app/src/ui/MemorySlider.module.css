@@ -31,3 +31,17 @@
 .callout {
   margin-top: var(--sk-space-10);
 }
+
+/*
+ * 加载占位里命中区加刻度的那一行：照 Slider 的尺寸画，命中区高 22、刻度行 16（记作下边距），
+ * 轨道之后是 64 宽、隔 12 的读数列，读数条靠右
+ */
+.skeletonTrack {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px;
+  align-items: center;
+  justify-items: end;
+  gap: var(--sk-space-12);
+  height: 22px;
+  margin-bottom: var(--sk-space-16);
+}

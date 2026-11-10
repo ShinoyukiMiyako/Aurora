@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { GAME_LOG_EVENT } from "../../ipc/launch";
 import { resetMocks } from "../../ipc/mock";
+import type { UpdateDto, UpdaterInfoDto } from "../../ipc/system";
 import { CORE_EVENT } from "../../ipc/tasks";
 import { APP_NAME } from "../../lib/app-info";
 import { OverlayRoot } from "../../shell/overlay";
@@ -15,9 +16,10 @@ import { ShellProvider } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import type { SettingsSection } from "../../state/route";
+import { useUpdater, type UpdaterApi } from "../../state/updater/useUpdater";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import SettingsPage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -33,6 +35,17 @@ function Probe() {
   launcher = useLauncher();
   return null;
 }
+
+let updater: UpdaterApi;
+
+/** 在页面子树之外发起更新下载：它整份订阅，自己每条进度都重渲染，不算进页面的提交。 */
+function UpdaterProbe() {
+  updater = useUpdater();
+  return null;
+}
+
+const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null };
+const UPDATER_INFO: UpdaterInfoDto = { current_version: "0.1.0", supported: true, unsupported_reason: null, available: null, downloaded_version: null, install_on_exit: false };
 
 const flush = () =>
   act(async () => {
@@ -111,6 +124,43 @@ describe("设置页按片订阅", () => {
     }
     expect(launcher.state.tasks[0].progress).toBe(1);
     expect(launcher.state.session?.logs).toHaveLength(20);
+    expect(commits).toBe(0);
+  });
+
+  it("下载启动器更新时，导航里的「关于」只在说明行或提示点变了才重渲染：20 次进度事件页面子树一次都不提交", async () => {
+    const download = deferred<UpdateDto>();
+    ipc.overrides.set("updater_info", (): UpdaterInfoDto => ({ ...UPDATER_INFO, available: UPDATE }));
+    ipc.overrides.set("download_update", () => download.promise);
+    view = render(
+      <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+        <LauncherProvider>
+          <ShellProvider>
+            <UpdaterProbe />
+            <Profiler id="settings" onRender={() => void (commits += 1)}>
+              <SettingsPage route={{ page: "settings", section: "general" }} />
+            </Profiler>
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </AppearanceProvider>,
+    );
+    await flush();
+    act(() => {
+      void updater.download();
+    });
+    await flush();
+    const [{ taskId }] = callsOf(ipc, "download_update");
+    if (typeof taskId !== "string") throw new Error("下载命令没带 taskId");
+    const about = [...document.querySelectorAll<HTMLButtonElement>('nav[aria-label="设置分区"] button')].find((b) => b.textContent?.startsWith("关于"));
+    expect([about?.getAttribute("aria-label"), about?.textContent]).toEqual(["关于，有可用更新", "关于有新版本 0.2.0"]);
+
+    commits = 0;
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        emit(CORE_EVENT, { kind: "download", task_id: taskId, total: 1, finished: 0, bytes: i * 600_000, total_bytes: 12_000_000, speed: 1_000_000 });
+      });
+    }
+    expect(updater.snapshot().phase).toMatchObject({ kind: "downloading", bytes: 12_000_000 });
     expect(commits).toBe(0);
   });
 

@@ -43,6 +43,12 @@ describe("版本列表", () => {
     expect(declarations("listArea")).toMatch(/overflow:\s*hidden/);
   });
 
+  it("给读屏的加载说明绝对定位、裁成一像素：不进步骤的弹性布局，不多出一道间距", () => {
+    const sr = declarations("srOnly");
+    expect(sr).toMatch(/position:\s*absolute/);
+    expect(sr).toMatch(/clip-path:\s*inset\(50%\)/);
+  });
+
   it("筛选行不折行，计数在余下的宽度里靠右、放不下出省略号", () => {
     expect(declarations("filterRow")).not.toMatch(/flex-wrap:\s*wrap/);
     const count = declarations("filterCount");
@@ -53,8 +59,10 @@ describe("版本列表", () => {
 });
 
 describe("步骤容器", () => {
-  it("关掉滚动锚定：块的增删交给让位，锚定挪的滚动位置让位看不到", () => {
-    expect(declarations("pane")).toMatch(/overflow-anchor:\s*none/);
+  it("自己就是纵向滚动容器，滚动锚定不关：让位从容器自身算起，认得锚定挪的滚动位置", () => {
+    const pane = declarations("pane");
+    expect(pane).toMatch(/overflow-y:\s*auto/);
+    expect(pane).not.toMatch(/overflow-anchor/);
   });
 });
 

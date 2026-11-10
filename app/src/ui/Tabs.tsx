@@ -2,13 +2,14 @@
 // 筛选同一列表用分段控件；分步流程不用它。最多 7 项，放不下时横向滚动、两端渐隐，选中项自动滚入可视区。
 // 漫游 tabindex：←→ 移动并激活，Home / End 到首尾。标签与面板按同一个 id 关联（aria-controls / aria-labelledby）。
 
-import { AnimatePresence, motion, type Variants } from "framer-motion";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { AnimatePresence, motion, useReducedMotionConfig, type Variants } from "framer-motion";
+import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Icon, type IconName } from "../art/Icon";
-import { fade, springs, tabPanel, type PanelFrom } from "../lib/motion";
+import { fade, popMark, springs, tabPanel, type PanelFrom } from "../lib/motion";
 import { useReflow } from "../lib/reflow";
+import { useMounted } from "../lib/useMounted";
 import { cx, isImeComposing } from "../lib/util";
-import { EntranceBoundary, usePageEntrance } from "./Page";
+import { EntranceBoundary, usePageEntrance, usePageFirstFrame } from "./Page";
 import { nextEnabled } from "./roving";
 import styles from "./Tabs.module.css";
 
@@ -75,11 +76,9 @@ export function Tabs<T extends string>({ id, value, onChange, items, variant = "
     },
     [reflow],
   );
-  // 挂载时就在的徽标跟着页面入场，不单独弹入
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  // 挂载时就在的徽标跟着页面入场，不单独弹入。减少动画时缩放是一步到位的，只留淡入淡出
+  const mounted = useMounted();
+  const mark = useReducedMotionConfig() === true ? popMark.reduced : popMark.glyph;
   const placed = useRef(false);
   const disabled = items.map((item) => item.disabled === true);
   const selected = items.findIndex((item) => item.value === value);
@@ -193,9 +192,9 @@ export function Tabs<T extends string>({ id, value, onChange, items, variant = "
                   <motion.span
                     key="badge"
                     className={styles.badge}
-                    initial={mounted.current ? { opacity: 0, scale: 0.8 } : false}
-                    animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
-                    exit={{ opacity: 0, transition: fade.out }}
+                    initial={mounted.current ? mark.initial : false}
+                    animate={mark.animate}
+                    exit={mark.exit}
                   >
                     {item.badge}
                   </motion.span>
@@ -209,7 +208,7 @@ export function Tabs<T extends string>({ id, value, onChange, items, variant = "
   );
 }
 
-/** 卡片内的胶囊标签切换：新内容只淡入，不位移。 */
+/** 卡片内的胶囊标签切换：新内容只淡入，不位移。第一次挂载默认不播（见 TabPanelProps.initial）。 */
 const cardPanel: Variants = {
   hidden: { opacity: 0 },
   show: { opacity: 1, transition: fade.in },
@@ -220,10 +219,17 @@ export interface TabPanelProps {
   tabsId: string;
   /** 当前选中的标签值；面板按它重新挂载，旧面板同一帧移除。 */
   value: string;
-  /** page：页面级与页面次级切换（淡入 + 上移 6px）；card：卡片内的胶囊标签（只淡入）。 */
+  /** page：页面级与页面次级切换（淡入 + 上移 6px）；card：卡片内的胶囊标签（换标签时只淡入，第一次挂载默认不淡）。 */
   motion?: "page" | "card";
   /** 换标签时新面板从导航里的哪一侧进来：横排标签传 x 轴，竖排分区传 y 轴，dir 按新旧序号比较。不传时从下方上移。 */
   from?: PanelFrom;
+  /**
+   * 第一次挂载时播不播面板自己的入场。page 默认播；card 默认不播：卡片里的面板随所在的卡片、弹窗或向导步骤一起出现，
+   * 自己再淡一遍就是两层叠着动。page 面板的外层已经把整块内容淡入（弹窗正文的 Loadable）时传 false：
+   * 两层叠着动，标签内容会比旁边的内容多一段位移。只管第一次挂载，之后换标签照常走切换动画；
+   * 进页那一次归页面管的面板（页面一级位置、赶上首帧）照页面的安排走，嵌套在首帧里的区块之内的跟着那个区块走，都不看它。
+   */
+  initial?: boolean;
   className?: string;
   children: ReactNode;
 }
@@ -235,16 +241,20 @@ export interface TabPanelProps {
  *
  * 面板是一块内容，只动一次：里面的卡片、横幅不再认领页面入场序号（否则面板淡入的同时它们按序号再等一拍、
  * 再上移一次，内容分两段出现）。面板放在页面一级位置时，进页那一次由面板自己按序号随页面入场；
- * 之后换标签只走面板的切换动画。
+ * 嵌套在首帧里的一级区块之内时，进页那一次跟着那个区块走，自己不动；之后换标签只走面板的切换动画。
  */
-export function TabPanel({ tabsId, value, motion: kind = "page", from, className, children }: TabPanelProps) {
+export function TabPanel({ tabsId, value, motion: kind = "page", from, initial: firstEntrance = kind === "page", className, children }: TabPanelProps) {
   const entrance = usePageEntrance();
+  const firstFrame = usePageFirstFrame();
   const [firstValue] = useState(value);
   const [switched, setSwitched] = useState(false);
   if (!switched && value !== firstValue) setSwitched(true);
   const own = { variants: kind === "page" ? tabPanel : cardPanel, custom: from };
   // 进页那一次归页面管：页面错开入场就照序号走，页面这次不播区块入场（后退前进、启动那一屏）面板也直接是成品
   const withPage = !switched && entrance !== null;
+  // 不归页面管却赶上了首帧：嵌在首帧里的区块之内，外层整块已在随页面入场（或直接是成品），面板跟着它走
+  const withBlock = !switched && entrance === null && firstFrame;
+  const still = withPage ? entrance === "still" : !switched && (withBlock || !firstEntrance);
   return (
     <motion.div
       key={value}
@@ -253,7 +263,7 @@ export function TabPanel({ tabsId, value, motion: kind = "page", from, className
       aria-labelledby={tabDomId(tabsId, value)}
       className={className}
       {...(withPage && entrance !== "still" ? entrance : own)}
-      initial={withPage && entrance === "still" ? false : "hidden"}
+      initial={still ? false : "hidden"}
       animate="show"
     >
       <EntranceBoundary>{children}</EntranceBoundary>

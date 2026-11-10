@@ -10,7 +10,7 @@ import { clearArtCache } from "../../mc/useArt";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import AccountsPage from "./index";
@@ -175,9 +175,11 @@ beforeEach(() => {
   ipc.overrides.set("skin_info", () => null);
 });
 
-afterEach(() => {
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  // 帧循环跟着假时钟走：换回真实计时器之前排空，同文件后面逐帧采样的用例才推得动
+  await drainFrames();
   setArtStatus(NO_ART);
   clearArtCache();
   vi.unstubAllGlobals();
@@ -234,18 +236,46 @@ describe("账户页：当前账户与列表", () => {
     expect([hanamiNow.textContent, hanamiNow.style.opacity]).toEqual(["切换到此账户", "0"]);
   });
 
-  it("切换账户：聚光卡还是同一张，信息列整列换人，从下方 6px 淡入；进页时的信息列不另播", async () => {
+  it("切换账户：聚光卡与信息列都还是原来的节点，信息列原地换人、从下方 6px 淡入；进页时的信息列不另播", async () => {
     await mount();
     const spot = page().querySelector("section") as HTMLElement;
     const info = () => spot.querySelector("h2")?.parentElement as HTMLElement;
     const before = info();
-    expect(before.style.opacity).toBe("1");
+    await stepFrames(2);
+    expect([before.style.opacity, before.style.transform]).toEqual(["", ""]);
     await click(buttonIn(cardOf("Steve"), "切换到此账户"));
     expect(page().querySelector("section")).toBe(spot);
-    const after = info();
-    expect(after).not.toBe(before);
-    expect(after.querySelector("h2")?.textContent).toBe("Steve");
-    expect([after.style.opacity, after.style.transform]).toEqual(["0", "translateY(6px)"]);
+    expect(info()).toBe(before);
+    expect(before.querySelector("h2")?.textContent).toBe("Steve");
+    // 第一帧画出来时已经走了这一帧的时长：从透明、下方 6px 起步，还在半路
+    await stepFrames(1);
+    const opacity = Number(before.style.opacity);
+    const shift = Number(/^translateY\(([\d.]+)px\)$/.exec(before.style.transform)?.[1]);
+    expect([opacity > 0 && opacity < 0.6, shift > 4 && shift <= 6]).toEqual([true, true]);
+    await stepFrames(40);
+    expect([before.style.opacity, before.style.transform]).toEqual(["1", "none"]);
+  });
+
+  it("从聚光卡的更多菜单删除当前账户：下一个账户顶上来时信息列不重挂，焦点留在同一个更多菜单触发器上", async () => {
+    await mount();
+    const spot = page().querySelector("section") as HTMLElement;
+    const trigger = spot.querySelector<HTMLButtonElement>('button[aria-label="Hanami 的更多操作"]') as HTMLButtonElement;
+    await openMenu("Hanami 的更多操作", spot);
+    await chooseMenuItem("删除账户");
+    await click(buttonIn(dialog() as HTMLElement, "删除账户"));
+    expect(spotlightName()).toBe("Steve");
+    expect([trigger.isConnected, trigger.getAttribute("aria-label")]).toEqual([true, "Steve 的更多操作"]);
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("切换账户：聚光卡的复制按钮不带着上一位的「已复制」", async () => {
+    await mount();
+    const spot = page().querySelector("section") as HTMLElement;
+    await click(spot.querySelector('button[aria-label="复制 UUID"]') as HTMLButtonElement);
+    expect(spot.querySelector('button[aria-label="已复制"]')).not.toBeNull();
+    await click(buttonIn(cardOf("Steve"), "切换到此账户"));
+    expect(spotlightName()).toBe("Steve");
+    expect([spot.querySelector('button[aria-label="已复制"]'), spot.querySelector('button[aria-label="复制 UUID"]') !== null]).toEqual([null, true]);
   });
 
   it("当前账户卡的菜单没有「设为当前账户」，其余账户卡的这一项与切换按钮等效", async () => {
@@ -284,6 +314,23 @@ describe("账户页：皮肤", () => {
     const figures = [...page().querySelectorAll<HTMLElement>('[data-sk-art="skin"]')];
     expect(figures.map((f) => f.dataset.art)).toEqual(["skin", "skin", "skin"]);
     expect(figures.map((f) => f.querySelector('canvas[data-tauri-drag-region="false"]') !== null)).toEqual([true, false, false]);
+  });
+
+  it("切换到皮肤信息还没读到的账户：聚光卡舞台留着上一位的立绘，读到「没有皮肤」才换成剪影", async () => {
+    const steveSkin = deferred<null>();
+    ipc.overrides.set("skin_info", (args) => (args.accountUuid === steve.uuid ? steveSkin.promise : { kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["skin"]) })));
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 64, height: 64 })));
+    await mount();
+    await flush();
+    const spotFigure = () => (page().querySelector("section") as HTMLElement).querySelector<HTMLElement>('[data-sk-art="skin"]');
+    expect(spotFigure()?.dataset.art).toBe("skin");
+    await click(buttonIn(cardOf("Steve"), "切换到此账户"));
+    expect(spotlightName()).toBe("Steve");
+    expect(spotFigure()?.dataset.art).toBe("skin");
+    steveSkin.resolve(null);
+    await flush();
+    expect(spotFigure()?.dataset.art).toBe("silhouette");
   });
 
   it("皮肤查询失败：舞台照常画剪影立绘，不弹通知，原因写进控制台", async () => {
@@ -839,6 +886,23 @@ describe("账户页：断网、加载与读取失败", () => {
     expect(callsOf(ipc, "list_accounts").length).toBe(2);
     expect(spotlightName()).toBe("Hanami");
     expect(liveText()).not.toContain("账户列表读不出来");
+  });
+
+  it("读取失败后点重试成功：「全部账户」分区与聚光卡一样从透明与 0.98 落位，不同帧硬切出现，也不另领页面入场序号", async () => {
+    let fail = true;
+    ipc.overrides.set("list_accounts", () => {
+      if (fail) throw new IpcError("io", "accounts.json 读取失败：拒绝访问");
+      return accounts;
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    fail = false;
+    await click(buttonIn(page(), "重试"));
+    const [spot, section] = live(page().querySelectorAll("section"));
+    expect([spot.querySelector("h2")?.textContent, section.textContent?.startsWith("全部账户")]).toEqual(["Hanami", true]);
+    const enter = (el: HTMLElement) => [el.parentElement?.style.opacity, el.parentElement?.style.transform, el.hasAttribute("data-entrance")];
+    expect(enter(spot)).toEqual(["0", "scale(0.98)", false]);
+    expect(enter(section)).toEqual(["0", "scale(0.98)", false]);
   });
 
   it("点重试：错误卡留在原处、重试按钮转圈，等多久都不换成骨架；又失败时同一张卡原位换上新原文", async () => {

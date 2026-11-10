@@ -4,12 +4,13 @@
 // 「已添加」区出现、选项卡与按钮行互换都经 Appear 交叉淡入，竖排的兄弟由 useReflow 滑开，不整块硬跳。
 
 import { motion } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Icon } from "../../art/Icon";
 import { AccountAvatar } from "../../art/skin/AccountAvatar";
 import { accountKindLabel, MSA_CLIENT_ID_MISSING } from "../../copy/flows";
 import type { Account } from "../../domain/adapt";
 import { useReflow } from "../../lib/reflow";
+import { useMounted } from "../../lib/useMounted";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { useSkinInfo } from "../../state/queries/home";
@@ -54,21 +55,17 @@ function AccountChip({ account, enter }: { account: Account; enter: boolean }) {
 function AddedSection({ accounts, expanded, onExpand }: { accounts: readonly Account[]; expanded: boolean; onExpand: () => void }) {
   // 新胶囊插在中间或折到下一行时，其余胶囊从旧位置滑过去
   const reflow = useReflow<HTMLUListElement>();
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   return (
     <section className={s.added}>
       <div className={s.othersHead}>
         <span className={s.subheading}>{ACCOUNT_STEP_COPY.added}</span>
-        <Appear itemClassName={s.addMore}>
-          {!expanded && (
-            <Button key="add-more" size="sm" variant="ghost" icon="plus" onClick={onExpand}>
-              {ACCOUNT_STEP_COPY.addMore}
-            </Button>
-          )}
-        </Appear>
+        {/* 点掉之后不离开布局，原地淡出、不可再点：标题行一直按这颗按钮的高度占位，下面的胶囊不上移 */}
+        <span className={s.addMore} data-spent={expanded || undefined} inert={expanded}>
+          <Button size="sm" variant="ghost" icon="plus" onClick={onExpand}>
+            {ACCOUNT_STEP_COPY.addMore}
+          </Button>
+        </span>
       </div>
       <ul ref={reflow} className={s.accountChips}>
         {accounts.map((a) => (

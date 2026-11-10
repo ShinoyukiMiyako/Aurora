@@ -28,6 +28,19 @@ vi.mock("../../../shell/useRunner", async (orig) => {
     useRunner: () => (work: () => unknown, title: string) => actual.runGuarded(work, title, { error: (t, body) => art.reported.push(`${t}：${body}`) }),
   };
 });
+// 弹窗每次渲染收到的版式键：jsdom 不做布局，形变本身在这里测不了，只核对选择框把版式键交给了弹窗；弹窗照常用真实现
+const modal = vi.hoisted(() => ({ layoutKeys: [] as unknown[] }));
+vi.mock("../../../ui/Modal", async (orig) => {
+  const actual = await orig<typeof import("../../../ui/Modal")>();
+  const { createElement } = await import("react");
+  return {
+    ...actual,
+    Modal: (props: Parameters<typeof actual.Modal>[0]) => {
+      modal.layoutKeys.push(props.layoutKey);
+      return createElement(actual.Modal, props);
+    },
+  };
+});
 
 function dto(id: string, en: string | null = null, zh: string | null = null, front: string | null = null): CatalogBlockDto {
   return { id, top: `block/${id}`, side: `block/${id}`, front, top_tint: null, side_tint: null, hue: 30, name_en: en, name_zh: zh };
@@ -55,6 +68,7 @@ let props: BlockPickerProps;
 
 beforeEach(() => {
   art.reported.length = 0;
+  modal.layoutKeys.length = 0;
   stubMatchMedia(false);
   stubCanvas();
   stubResizeObserver();
@@ -360,7 +374,10 @@ describe("没有材质源", () => {
     mount({ block: "cherry_planks", image: false });
     // 挂载时就在的下载部件跟着弹窗出现，不另外播入场
     expect(dialog().querySelector("[inert]")).toBeNull();
+    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(null));
     act(() => setBlockCatalog(catalog()));
+    // 目录载入的那次渲染里弹窗就拿到新的版式键：面板在这一次量布局、形变过去
+    expect(modal.layoutKeys.at(-1)).toBe(pickerLayoutKey(catalog()));
     expect(tabs()).toEqual(["推荐", "建筑", "彩色", "自然", "功能", "搜索", "我的图片"]);
     expect(search()).not.toBeNull();
     // 退场中的部件留着最后一帧淡出：它在不可交互的退场层里，框里其余部分已经没有它
@@ -410,6 +427,14 @@ describe("搜索结果有无互换", () => {
     typeInto(input, "毛");
     expect(blocksShown()).toEqual(["white_wool", "red_wool"]);
     expect(results()?.style.opacity).not.toBe("0");
+  });
+});
+
+describe("下载部件退场的定位基准（读样式表）", () => {
+  it("选择框正文自己是定位祖先：退场的部件按它量、按它摆，弹窗形变期间主体带 transform 也不会把它挪走", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "BlockPicker.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const body = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].find((m) => m[1].trim() === ".body");
+    expect(body?.[2]).toMatch(/position:\s*relative/);
   });
 });
 

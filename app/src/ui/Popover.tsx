@@ -13,28 +13,27 @@
 //   不再一帧跳过去：外框走 framer-motion 的布局动画（transform 缩放），头部、主体、底部只随位置移动、抵消外框的缩放，
 //   内容本身不被拉伸。它只在 layoutKey 变的那次重渲染取快照，内容结构的变化要体现在 layoutKey 上。
 // - 传了 layoutKey 或头尾（header / footer）的面板换一种结构：外框只裁切不滚动，中间的主体滚动，头尾固定在主体上下。
-//   主体也随内容形变，它的下沿与外框下沿同步，里面让位滑动的行不会被一条提前收上去的边裁掉。缩放途中反向缩放的内容
+//   主体也随内容形变，它的下沿与外框下沿同步。里面的让位要与形变同一条弹簧（useReflow("morph")），让位滑动的行才与
+//   下沿同起同停，不被一条提前收上去的边裁掉，也不在中间删行时与下沿之间空出一道缝。缩放途中反向缩放的内容
 //   比滚动容器的布局框大，会短暂撑出滚动条，所以主体在形变途中不滚动；主体常驻滚动条槽位，内容在超出与不超出可视高度
 //   之间来回时不横移。主体的最大高度由调用方经 --popover-body-max-height 给（写在 className 上），不给则只受窗口高度限制。
 
-import { AnimatePresence, LayoutGroup, motion, MotionContext, useIsPresent, useMotionValue, type Transition } from "framer-motion";
+import { AnimatePresence, LayoutGroup, motion, useIsPresent, useMotionValue, useReducedMotionConfig, type Transition } from "framer-motion";
 import {
   useCallback,
-  useContext,
-  useEffect,
   useLayoutEffect,
   useRef,
   useState,
   type FocusEvent as ReactFocusEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
-  type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
-import { fade, springs } from "../lib/motion";
+import { fade, insertItemFade, springs } from "../lib/motion";
 import { cssVars, cx } from "../lib/util";
 import { placeFloating, rectInRoot, tabbableElements, useEscapeLayer, useOverlayRoot, type Placement, type Rect, type Side } from "../shell/overlay";
 import { FocusReturnPoint, type FocusReturnHandle } from "./focus-return";
+import { MorphingMark } from "./morphing-mark";
 import styles from "./Popover.module.css";
 
 /** 锚点：触发元素，或右键菜单的指针位置（视口坐标）。 */
@@ -75,9 +74,6 @@ const ENTER_SHIFT = 4;
 
 /** 外框与它里面各层共用的布局过渡：各层的位移与外框的形变同一条弹簧，才严丝合缝。 */
 const MORPH: Transition = { layout: springs.morph };
-
-/** 主体在形变途中带的标记，样式表据此让它途中不滚动。 */
-const MORPHING_ATTR = "data-morphing";
 
 /** 把 placement 的方位换成 side，对齐方式不变。 */
 function withSide(placement: Placement, side: Side): Placement {
@@ -295,14 +291,17 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
   const adopted = useRef<Side | null>(null);
   const morph = layoutKey !== undefined;
   const structured = morph || header !== undefined || footer !== undefined;
-  const radius = useMotionValue("var(--sk-r-lg)");
+  // 量到之前不给值，也就不写行内圆角：行内值会盖过样式表与调用方 className 里的圆角，下面量到的就成了它自己
+  const radius = useMotionValue<string | undefined>(undefined);
+  // 减少动画时进出只动透明度：根部 MotionConfig 只把位移与缩放改成一步到位，照用平常的进出，关上的那一帧面板先缩一截再淡出
+  const reduced = useReducedMotionConfig() === true;
 
   useLayoutEffect(() => {
     if (present) currentPanel.current = panelRef.current;
   }, [present, currentPanel]);
 
   // 形变是 transform 缩放：圆角要以像素交给 framer-motion，它才按缩放反向校正（不然四角被拉成椭圆）。
-  // 圆角令牌只在样式表里，打开时从算好的样式读一次。阴影留在样式表里随缩放走：逐帧校正阴影要逐帧重绘
+  // 圆角只写在样式表里（调用方也可以经 className 改），打开时从算好的样式读一次。阴影留在样式表里随缩放走：逐帧校正阴影要逐帧重绘
   useLayoutEffect(() => {
     if (!morph) return;
     const el = panelRef.current;
@@ -437,9 +436,15 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
         visibility: pos ? "visible" : "hidden",
         ...shape,
       }}
-      initial={{ opacity: 0, scale: 0.97 }}
-      animate={shift === null ? undefined : { opacity: 1, scale: 1, x: [shift.x, 0], y: [shift.y, 0], transition: { ...springs.settle, opacity: fade.in } }}
-      exit={{ opacity: 0, scale: 0.98, transition: fade.out }}
+      initial={reduced ? insertItemFade.initial : { opacity: 0, scale: 0.97 }}
+      animate={
+        shift === null
+          ? undefined
+          : reduced
+            ? insertItemFade.animate
+            : { opacity: 1, scale: 1, x: [shift.x, 0], y: [shift.y, 0], transition: { ...springs.settle, opacity: fade.in } }
+      }
+      exit={reduced ? insertItemFade.exit : { opacity: 0, scale: 0.98, transition: fade.out }}
       onKeyDown={onKeyDown}
       onBlur={onBlur}
     >
@@ -450,7 +455,12 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
               {header}
             </motion.div>
           )}
-          {/* layoutScroll：主体里的布局节点按滚动后的位置量，滚动位置被夹回时起点不错位 */}
+          {/*
+           * layoutScroll：快照与测量两头都扣掉主体的滚动量，内容层只比未滚动时的布局，滚动位置的变化不算它的位移。
+           * 视野上方的行被移除时，浏览器的滚动锚定挪滚动位置让可见的行不动，里面的让位（lib/reflow）也认得这是锚定、不补滑；
+           * 不开的话内容层会把这段滚动当成位移再补一遍，可见的行先跳开再滑回来。
+           * 代价：内容变矮、滚动位置被夹回（滚到底时删行，内容低于封顶高度）时，夹回的那段不补，内容按它一帧跳过去
+           */}
           <motion.div
             ref={bodyRef}
             className={styles.body}
@@ -459,6 +469,7 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
             layoutDependency={layoutKey}
             transition={morph ? MORPH : undefined}
           >
+            {/* 放在主体里：跟的是主体自己的形变 */}
             {morph && <MorphingMark target={bodyRef} />}
             <motion.div className={styles.content} {...follow}>
               {children}
@@ -478,27 +489,4 @@ function PopoverPanel({ currentPanel, root, anchor, placement, offset, matchWidt
   // 自成一个布局组：标题栏这类外层 LayoutGroup 会经 portal 传进来，组员互相通知取快照，而面板的投影树与它们不是同一棵，
   // 被通知的面板取了快照却等不到自己这棵树的提交，留着过期的快照。组内（外框、头尾、调用方跟着走的块）一起取快照
   return morph ? <LayoutGroup inherit={false}>{panel}</LayoutGroup> : panel;
-}
-
-/**
- * 给主体在形变途中打上标记。缩放途中反向缩放的内容比滚动容器的布局框大，会短暂撑出滚动条；样式表凭标记让主体途中不滚动。
- * 读的是主体自己的布局投影节点的开始与结束：形变被窗口缩放或下一次测量提前收尾时不会调 onLayoutAnimationComplete，
- * 标记会一直留着、主体再也滚不动；投影节点的 animationStart 与 animationComplete 在这些情况下也成对。
- */
-function MorphingMark({ target }: { target: RefObject<HTMLDivElement | null> }) {
-  const { visualElement } = useContext(MotionContext);
-  // 不用布局副作用：它先于父元素挂 ref 运行，那时主体的 ref 还是空的。形变只会在之后的提交里开始，
-  // 而 React 在下一次提交之前一定先跑完这次的普通副作用
-  useEffect(() => {
-    const el = target.current;
-    const node = visualElement?.projection;
-    if (el === null || node === undefined) throw new Error("浮层主体没有挂上，或没有布局投影节点");
-    const offStart = node.addEventListener("animationStart", () => el.setAttribute(MORPHING_ATTR, ""));
-    const offComplete = node.addEventListener("animationComplete", () => el.removeAttribute(MORPHING_ATTR));
-    return () => {
-      offStart();
-      offComplete();
-    };
-  }, [visualElement, target]);
-  return null;
 }

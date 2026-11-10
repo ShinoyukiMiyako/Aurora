@@ -6,7 +6,7 @@ import { memo } from "react";
 import { Icon } from "../../art/Icon";
 import { hueOf } from "../../art/illustrations/seed";
 import { formatCount, formatRelative } from "../../domain/format";
-import { fade, springs } from "../../lib/motion";
+import { popMark } from "../../lib/motion";
 import { cx } from "../../lib/util";
 import type { SearchEntry } from "../../state/queries/discover";
 import { Card, type TierName } from "../../ui/Card";
@@ -25,22 +25,6 @@ export const BAND_HEIGHT = 78;
 /** 图标边长：压在色带下沿，一半落进正文。 */
 const ICON_SIZE = 64;
 
-/**
- * 「已装入」标签的出现与消失：它在结果到了之后才由全部实例的已装来源算出来，晚到一拍，要让人看见是刚到的，
- * 从小处弹出；消失时缩小淡出。减少动画时只淡入淡出，缩放在那里是一步到位的，退场会先缩一下再淡。
- */
-const TAG_MOTION = {
-  initial: { opacity: 0, scale: 0.6 },
-  animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } },
-  exit: { opacity: 0, scale: 0.6, transition: fade.out },
-} as const;
-
-const TAG_FADE = {
-  initial: { opacity: 0 },
-  animate: { opacity: 1, transition: fade.in },
-  exit: { opacity: 0, transition: fade.out },
-} as const;
-
 const DOT_LOADERS: ReadonlySet<string> = new Set<LoaderTagKind>(["fabric", "quilt", "forge", "neoforge"]);
 
 /** 有识别色的加载器（LiteLoader 没有识别色，不画圆点）。 */
@@ -58,10 +42,14 @@ export interface ResultCardProps {
   fresh?: boolean;
 }
 
-/** 色带右上角与本机实例的关系：整合包写来自它的实例数，其余写已装着它的实例数。退场中带 data-leaving，按选择器找标签时排除它。 */
+/**
+ * 色带右上角与本机实例的关系：整合包写来自它的实例数，其余写已装着它的实例数。退场中带 data-leaving，按选择器找标签时排除它。
+ * 它在结果到了之后才由全部实例的已装来源算出来，晚到一拍，要让人看见是刚到的：按有尺寸的小标记弹出，原地淡出。
+ * 减少动画时只淡入淡出，缩放在那里是一步到位的。
+ */
 function InstalledTag({ pack, installed }: { pack: boolean; installed: number }) {
   const present = useIsPresent();
-  const tag = useReducedMotionConfig() === true ? TAG_FADE : TAG_MOTION;
+  const tag = useReducedMotionConfig() === true ? popMark.reduced : popMark.glyph;
   return (
     <motion.span className={styles.installedTag} data-installed="" data-leaving={present ? undefined : ""} initial={tag.initial} animate={tag.animate} exit={tag.exit}>
       {pack ? (

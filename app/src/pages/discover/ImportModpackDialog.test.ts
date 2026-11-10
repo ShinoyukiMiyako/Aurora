@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { IpcError } from "../../ipc/errors";
 import type { ModpackPreviewDto, PackModDto } from "../../ipc/modpack";
 import { claimStatuses, destinationDir } from "./BlockedFilesModal";
-import { droppedFile, excludedPaths, importLayoutKey, previewErrorText, readFace, typedPath } from "./ImportModpackDialog";
+import { droppedFile, excludedPaths, importLayoutKey, previewErrorText, readFace, shownChooseError, typedPath } from "./ImportModpackDialog";
 
 describe("droppedFile", () => {
   it("一次拖进几个文件时读第一个整合包，扩展名不分大小写", () => {
@@ -99,6 +99,23 @@ describe("readFace", () => {
   it("读完了门还留着读取面（露出后至少停留同样久）时照旧露着；门收起才没有读取面", () => {
     expect(readFace(false, "skeleton")).toBe("shown");
     expect(readFace(false, "content")).toBeNull();
+  });
+});
+
+describe("shownChooseError", () => {
+  const OLD = "文件不完整或已损坏，重新下载一份再试";
+  const NEW = "只认 .mrpack 和 CurseForge 导出的 .zip";
+
+  it("等待期界面照旧：上一次读完时的错误先留着，这一次的结果还不算", () => {
+    expect(shownChooseError("pending", null, OLD)).toBe(OLD);
+    expect(shownChooseError("pending", NEW, OLD)).toBe(OLD);
+    expect(shownChooseError("pending", null, null)).toBeNull();
+  });
+
+  it("读取面露出时收起错误；读完按这一次的结果", () => {
+    expect(shownChooseError("shown", null, OLD)).toBeNull();
+    expect(shownChooseError(null, NEW, OLD)).toBe(NEW);
+    expect(shownChooseError(null, null, OLD)).toBeNull();
   });
 });
 

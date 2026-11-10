@@ -8,6 +8,7 @@ import { sourceSwitchedCopy, UPDATE_COPY } from "../copy/updater";
 import { formatBytes } from "../domain/format";
 import type { UpdateDto, UpdaterInfoDto } from "../ipc/system";
 import { CORE_EVENT } from "../ipc/tasks";
+import { SPEED_REFRESH_MS } from "../lib/progress-display";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
 import { LauncherProvider } from "../state/launcher";
 import type { DownloadSource, UpdaterPhase } from "../state/updater/machine";
@@ -151,6 +152,57 @@ describe("开始安装", () => {
   });
 });
 
+describe("下载进度的文字", () => {
+  const TOTAL = 10 * 1024 * 1024;
+
+  /** 点「下载」并拿到下载任务的 id：下载命令一直挂着，进度只由测试发的事件推动。 */
+  async function startDownload(): Promise<string> {
+    info = { ...info, downloaded_version: null };
+    ipc.overrides.set("download_update", () => deferred<UpdateDto>().promise);
+    await openReady();
+    act(() => button(UPDATE_COPY.download).click());
+    await flush();
+    const taskId = callsOf(ipc, "download_update")[0].taskId;
+    if (typeof taskId !== "string") throw new Error("下载命令没有带 taskId");
+    return taskId;
+  }
+
+  const progress = (taskId: string, bytes: number) =>
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: taskId, total: 1, finished: 0, bytes, total_bytes: TOTAL, speed: 0 }));
+  const sizeText = () => dialog().querySelector(`.${styles.progressText}`)?.textContent;
+  const barValue = () => dialog().querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow");
+
+  it("进度条随每条进度事件走，已下大小的字每 500 ms 才换一次", async () => {
+    const taskId = await startDownload();
+    progress(taskId, 0);
+    await flush();
+    expect(sizeText()).toBe(UPDATE_COPY.progress(formatBytes(0), formatBytes(TOTAL)));
+    const step = SPEED_REFRESH_MS / 5;
+    for (let i = 1; i <= 4; i++) {
+      await act(() => vi.advanceTimersByTimeAsync(step));
+      progress(taskId, (TOTAL * i) / 10);
+      await flush();
+      expect(barValue()).toBe(String(i * 10));
+      expect(sizeText()).toBe(UPDATE_COPY.progress(formatBytes(0), formatBytes(TOTAL)));
+    }
+    // 间隔满的那一刻换上最近报上来的那一条
+    await act(() => vi.advanceTimersByTimeAsync(step));
+    expect(sizeText()).toBe(UPDATE_COPY.progress(formatBytes((TOTAL * 4) / 10), formatBytes(TOTAL)));
+  });
+
+  it("换源后进度从 0 重来：字立即回到 0，不停在作废的旧值上", async () => {
+    const taskId = await startDownload();
+    progress(taskId, TOTAL / 2);
+    await act(() => vi.advanceTimersByTimeAsync(SPEED_REFRESH_MS));
+    expect(sizeText()).toBe(UPDATE_COPY.progress(formatBytes(TOTAL / 2), formatBytes(TOTAL)));
+    await act(() => vi.advanceTimersByTimeAsync(100));
+    act(() => emit(CORE_EVENT, { kind: "source", task_id: taskId, index: 1, count: 3, name: "hk" }));
+    await flush();
+    // 换源时总量也回到未知，只写已下大小
+    expect(sizeText()).toBe(formatBytes(0));
+  });
+});
+
 describe("弹窗形变的依赖", () => {
   const update = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null };
   const downloading = (bytes: number, source: DownloadSource | null): UpdaterPhase => ({ kind: "downloading", update, taskId: "t", bytes, totalBytes: 1200, source });
@@ -205,6 +257,8 @@ describe("换阶段时弹窗形变", () => {
       act(() => emit(CORE_EVENT, { kind: "download", task_id: taskId, total: 1, finished: 0, bytes, total_bytes: TOTAL, speed: 0 }));
       await flush();
     }
+    // 已下大小的字按节拍补上最后一条：这次重渲染同样不量面板
+    await act(() => vi.advanceTimersByTimeAsync(SPEED_REFRESH_MS));
     expect(dialog().textContent).toContain(UPDATE_COPY.progress(formatBytes(800), formatBytes(TOTAL)));
     expect(measures.count).toBe(0);
 

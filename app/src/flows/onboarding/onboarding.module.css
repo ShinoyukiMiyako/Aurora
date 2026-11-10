@@ -244,7 +244,12 @@
   scrollbar-gutter: stable;
 }
 
+/*
+ * 定位基准：退场中的按钮脱离布局后按这里定位，原地淡出。不能放在两侧按钮组上：右侧那组被推到右端、
+ * 宽度随内容变，「跳过」离开时组从左侧收窄，退场层还按旧的左偏移摆，会落到主按钮上被盖住。底栏的左缘与上缘都不动
+ */
 .footer {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -253,10 +258,8 @@
   border-top: 1px solid var(--sk-line);
 }
 
-/* 定位基准：退场中的按钮脱离布局后按这里定位，原地淡出 */
 .footerStart,
 .footerEnd {
-  position: relative;
   display: flex;
   align-items: center;
   gap: var(--sk-space-8);
@@ -268,11 +271,22 @@
 }
 
 /*
- * 主按钮按最宽的「开始使用 →」定宽（ui/Button md 档：四个汉字、左右内边距、图标间距、18 的图标、两侧 1px 描边）：
- * 第三步换到第四步、点下后转圈时宽度都不变，左边的「跳过」不被推走。两个类名：压过 Button 自己的 min-width。
+ * 主按钮与隐形的「开始使用 →」叠在同一格：格宽取最宽的那种，真按钮撑满。第三步换到第四步、点下后转圈时宽度都不变，
+ * 左边的「跳过」不被推走；按钮组件改了尺寸，两者一起变。
  */
-.footerEnd .primaryAction {
-  min-width: calc(4em + 2 * var(--sk-space-14) + var(--sk-space-8) - 1px + 18px + 2px);
+.primarySlot {
+  display: inline-grid;
+  flex: none;
+}
+
+.primaryAction,
+.primaryGhost {
+  grid-area: 1 / 1;
+}
+
+.primaryGhost {
+  display: flex;
+  visibility: hidden;
 }
 
 /* ---------------------------------------------------------------- 步骤内容 */
@@ -432,6 +446,18 @@
   color: var(--sk-text-2);
 }
 
+/* 只给读屏的状态区：不占位、看不见，仍在可访问性树里 */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 .runtimeList {
   display: flex;
   flex-direction: column;
@@ -472,17 +498,17 @@
 }
 
 /*
- * 标题行按「继续添加」（sm 按钮 30 高）定高：按钮点掉后行高不从 30 落到 20，下面的胶囊不上移。
- * 同时是定位基准：按钮脱离布局后按这里原地淡出。
+ * 「继续添加」的常驻槽：弹性盒让按钮不落在行框里，槽与按钮同高。点掉后按钮留在原处淡出，
+ * 标题行的高度仍由它撑着，不从按钮高落到文字高。
  */
-.added > .othersHead {
-  position: relative;
-  min-height: 30px;
-}
-
-/* 「继续添加」的出没包裹层：弹性盒让按钮不落在行框里，包裹层与按钮同高 */
 .addMore {
   display: flex;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+.addMore[data-spent] {
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
 }
 
 .accountChips {

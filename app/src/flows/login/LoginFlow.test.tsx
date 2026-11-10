@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
-import { act } from "react";
+import { AnimatePresence, MotionConfig } from "framer-motion";
+import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { AUTHLIB_COPY, LITTLESKIN_API, MICROSOFT_LOGIN_COPY, NO_ACCOUNT_COPY, OFFLINE_NAME_COPY, TOAST_COPY } from "../../copy/flows";
 import { validateOfflineName } from "../../domain/rules";
-import { LOADING_DELAY_MS } from "../../domain/limits";
+import { COPY_FEEDBACK_MS, LOADING_DELAY_MS } from "../../domain/limits";
 import { DEVICE_CODE_EVENT } from "../../ipc/accounts";
 import { IpcError } from "../../ipc/errors";
 import { mockInvoke } from "../../ipc/mock";
@@ -13,7 +14,8 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { MANUAL_LOGIN } from "../../state/login";
-import { render, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
+import type { ModalProps } from "../../ui/Modal";
+import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, configDto, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { AUTHLIB_DIALOG_COPY, DEVICE_DIALOG_COPY, OFFLINE_DIALOG_COPY } from "../../copy/login";
@@ -25,6 +27,20 @@ import { FIGURE_DEBOUNCE_MS, nameDisplay } from "./OfflineDialog";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+
+/** 每次渲染弹窗时传进去的布局签名：弹窗只在它变了的那次量布局、播形变。 */
+const modalLayoutKeys = vi.hoisted((): unknown[] => []);
+vi.mock("../../ui/Modal", async (orig) => {
+  const real = await orig<typeof import("../../ui/Modal")>();
+  const { createElement } = await import("react");
+  return {
+    ...real,
+    Modal: (props: ModalProps) => {
+      modalLayoutKeys.push(props.layoutKey);
+      return createElement(real.Modal, props);
+    },
+  };
+});
 
 describe("离线用户名下方的提示", () => {
   const check = (name: string) => validateOfflineName(name, ["Alex"]);
@@ -51,10 +67,12 @@ let nav: NavApi;
 let writeText: ReturnType<typeof vi.fn>;
 let opened: string[];
 
-function Host() {
+function Host({ presence }: { presence: boolean }) {
   launcher = useLauncher();
   nav = useNav();
   const login = launcher.state.login;
+  // 照外壳的 LoginMount 挂：AnimatePresence 里固定 key，换登录方式时流程不重挂
+  if (presence) return <AnimatePresence>{login !== null && <LoginFlow key="login" login={login} />}</AnimatePresence>;
   return login === null ? null : <LoginFlow login={login} />;
 }
 
@@ -63,14 +81,29 @@ const flush = () =>
     await settle();
   });
 
-async function mount() {
+/** 弹窗开着时切换减少动画（像应用根部的 MotionConfig 那样）。 */
+let setReduced: (on: boolean) => void;
+
+function Motion({ initial, children }: { initial: boolean; children: ReactNode }) {
+  const [reduced, set] = useState(initial);
+  setReduced = set;
+  return <MotionConfig reducedMotion={reduced ? "always" : "never"}>{children}</MotionConfig>;
+}
+
+/**
+ * presence：照外壳那样挂在 AnimatePresence 里。关弹窗后要断言弹窗已不在的用例不开：jsdom 里退场播不完。
+ * reduced：一开始就打开减少动画。
+ */
+async function mount({ presence = false, reduced = false }: { presence?: boolean; reduced?: boolean } = {}) {
   view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <Host />
-        <OverlayRoot />
-      </ShellProvider>
-    </LauncherProvider>,
+    <Motion initial={reduced}>
+      <LauncherProvider>
+        <ShellProvider>
+          <Host presence={presence} />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </Motion>,
   );
   await flush();
 }
@@ -116,6 +149,7 @@ const stepPane = () => {
 beforeEach(() => {
   vi.useFakeTimers();
   resetRecorder(ipc);
+  modalLayoutKeys.length = 0;
   stubResizeObserver();
   stubMatchMedia(false);
   stubCanvas();
@@ -129,9 +163,11 @@ beforeEach(() => {
     return null;
   });
 });
-afterEach(() => {
+// 换回真实计时器之前把帧循环排空：还有一帧排在这个用例的假时钟上时，后面的用例一帧都推不动（抖动这类逐帧采样的断言会落空）
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  await drainFrames();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -140,7 +176,7 @@ describe("还没有账户", () => {
   it("没有账户时启动弹出；选离线账户在同一个弹窗里换成离线内容，保留启动意图", async () => {
     bootOverrides(ipc, { accounts: [], instances: [instanceDto("生存")] });
     ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
-    await mount();
+    await mount({ presence: true });
     await act(async () => {
       await launcher.actions.launch("生存");
     });
@@ -408,6 +444,51 @@ describe("微软设备码弹窗", () => {
     expect(launcher.state.toasts.map((t) => [t.tone, t.title, t.body])).toContainEqual(["error", TOAST_COPY.copyFailed, "剪贴板被占用"]);
   });
 
+  it("复制链接：复制成功后强制显示「已复制」提示，没有悬停与聚焦也看得到，停留结束收起", async () => {
+    pendingLogin();
+    await mount();
+    act(() => void launcher.actions.startMicrosoftLogin());
+    act(() => emit(DEVICE_CODE_EVENT, code));
+    await flush();
+    const copyLink = dialog()?.querySelector<HTMLButtonElement>(`button[aria-label="${MICROSOFT_LOGIN_COPY.copyLink}"]`);
+    if (copyLink === null || copyLink === undefined) throw new Error("链接行里没有复制键");
+    const bubble = () => {
+      const id = copyLink.getAttribute("aria-describedby");
+      return id === null ? null : document.getElementById(id);
+    };
+    expect(bubble()).toBeNull();
+    // 复制键只给指针点的那一次强制显示气泡（click 带点击次数）；键盘触发时焦点提示本来就开着
+    act(() => void copyLink.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 })));
+    await flush();
+    expect(writeText).toHaveBeenCalledWith("https://www.microsoft.com/link");
+    expect(copyLink.getAttribute("aria-label")).toBe(DEVICE_DIALOG_COPY.copied);
+    expect(bubble()?.getAttribute("role")).toBe("tooltip");
+    expect(bubble()?.textContent).toBe(DEVICE_DIALOG_COPY.copied);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COPY_FEEDBACK_MS);
+    });
+    expect(copyLink.hasAttribute("aria-describedby")).toBe(false);
+    expect(copyLink.getAttribute("aria-label")).toBe(MICROSOFT_LOGIN_COPY.copyLink);
+  });
+
+  it("倒计时每秒重渲染只换字：弹窗的布局签名只随设备码状态与加载门变，不每秒量一次布局", async () => {
+    pendingLogin();
+    await mount();
+    act(() => void launcher.actions.startMicrosoftLogin());
+    await flush();
+    expect(modalLayoutKeys.at(-1)).toBe("microsoft:requesting:pending");
+    act(() => emit(DEVICE_CODE_EVENT, code));
+    await flush();
+    expect(modalLayoutKeys.at(-1)).toBe("microsoft:waiting:content");
+    const before = modalLayoutKeys.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(dialog()?.textContent).not.toContain(MICROSOFT_LOGIN_COPY.expiresIn(900_000));
+    expect(modalLayoutKeys.length).toBeGreaterThan(before);
+    expect(new Set(modalLayoutKeys.slice(before))).toEqual(new Set(["microsoft:waiting:content"]));
+  });
+
   it("过了有效期界面自己判过期，只能关闭或重新获取", async () => {
     pendingLogin();
     await mount();
@@ -535,8 +616,8 @@ describe("外置登录弹窗", () => {
     await bridge.invoke("is_first_run");
   });
 
-  async function openAuthlib() {
-    await mount();
+  async function openAuthlib(options: { reduced?: boolean } = {}) {
+    await mount(options);
     await act(async () => {
       await launcher.actions.openLogin("authlib");
     });
@@ -654,6 +735,96 @@ describe("外置登录弹窗", () => {
     expect(dialog()?.querySelector('[class*="_warnNote_"]')?.textContent).toBe(AUTHLIB_COPY.httpWarning);
   });
 
+  /** 弹窗里唯一一个在场的播报型说明块（role=alert）。 */
+  const alertBlock = () => {
+    const found = [...(dialog()?.querySelectorAll<HTMLElement>("[role='alert']") ?? [])].filter(live);
+    if (found.length !== 1) throw new Error(`弹窗里在场的播报型说明块有 ${found.length} 个`);
+    return found[0];
+  };
+  const serviceDown = (step: string) => () => {
+    throw new IpcError("ServiceUnavailable", `登录服务暂时不可用（${step}：HTTP 503）`, { step, status: 503 });
+  };
+
+  it("同一个地址又探测失败、原因相同：说明块不重挂，文字换一份节点，读屏再念一遍", async () => {
+    await openAuthlib();
+    typeInto(inputs()[0], "not-ygg.example.com");
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    const block = alertBlock();
+    const said = block.querySelector("strong");
+    expect(said?.textContent).toBe(AUTHLIB_COPY.notYggdrasil.title);
+
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    expect(callsOf(ipc, "probe_auth_server")).toHaveLength(2);
+    expect(alertBlock()).toBe(block);
+    expect(dialog()?.querySelector("[inert]")).toBeNull();
+    expect(said?.isConnected).toBe(false);
+    expect(block.querySelector("strong")?.textContent).toBe(AUTHLIB_COPY.notYggdrasil.title);
+  });
+
+  it("探测失败换成另一种原因：说明块原位换字，弹窗按新的说明块重新量布局", async () => {
+    await openAuthlib();
+    typeInto(inputs()[0], "not-ygg.example.com");
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    const block = alertBlock();
+    const first = modalLayoutKeys.at(-1);
+    ipc.overrides.set("probe_auth_server", serviceDown("读取验证服务器信息"));
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    expect(alertBlock()).toBe(block);
+    expect(block.textContent).toContain("这个服务器暂时不可用");
+    expect(block.textContent).not.toContain(AUTHLIB_COPY.notYggdrasil.title);
+    expect(modalLayoutKeys.at(-1)).not.toBe(first);
+  });
+
+  it("点预设胶囊换了地址：上一个地址的失败说明随之淡出；点的就是当前地址时说明留着", async () => {
+    await openAuthlib();
+    typeInto(inputs()[0], "not-ygg.example.com");
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    expect(liveText()).toContain(AUTHLIB_COPY.notYggdrasil.title);
+    act(() => button(AUTHLIB_COPY.preset).click());
+    expect(inputs()[0].value).toBe(LITTLESKIN_API);
+    expect(liveText()).not.toContain(AUTHLIB_COPY.notYggdrasil.title);
+    expect(dialog()?.querySelector("[inert]")?.textContent).toContain(AUTHLIB_COPY.notYggdrasil.title);
+
+    ipc.overrides.set("probe_auth_server", serviceDown("读取验证服务器信息"));
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    expect(liveText()).toContain("这个服务器暂时不可用");
+    act(() => button(AUTHLIB_COPY.preset).click());
+    expect(liveText()).toContain("这个服务器暂时不可用");
+  });
+
+  it("登录这一步同一种失败再来一次：说明块与重试键不重挂、焦点留在重试键上，文字换一份节点让读屏再念一遍", async () => {
+    await openAuthlib();
+    typeInto(inputs()[0], "skin.example.com");
+    act(() => button(AUTHLIB_COPY.next).click());
+    await flush();
+    const [username, password] = inputs();
+    typeInto(username, "multi@example.com");
+    typeInto(password, "secret");
+    ipc.overrides.set("authlib_login", serviceDown("账号密码认证"));
+    act(() => button(AUTHLIB_COPY.login).click());
+    await flush();
+    const block = alertBlock();
+    const said = block.querySelector("strong");
+    expect(said?.textContent).toBe(AUTHLIB_COPY.loginServiceDown.title);
+    const retry = button(AUTHLIB_COPY.retry);
+    act(() => retry.focus());
+
+    act(() => retry.click());
+    await flush();
+    expect(callsOf(ipc, "authlib_login")).toHaveLength(2);
+    expect(alertBlock()).toBe(block);
+    expect(button(AUTHLIB_COPY.retry)).toBe(retry);
+    expect(document.activeElement).toBe(retry);
+    expect(said?.isConnected).toBe(false);
+    expect(block.querySelector("strong")?.textContent).toBe(AUTHLIB_COPY.loginServiceDown.title);
+  });
+
   it("从皮肤站拖进服务器链接：弹窗打开即填好地址并执行一次「下一步」，停在登录这一步", async () => {
     await mount();
     await act(async () => {
@@ -714,6 +885,51 @@ describe("外置登录弹窗", () => {
     expect(selected.pendingId).toMatch(/^authlib-/);
     expect(launcher.state.login).toBeNull();
     expect(launcher.state.toasts[0]?.title).toBe(TOAST_COPY.authlibAdded("multi_alt", "skin.example.com").title);
+  });
+
+  describe("密码被拒时密码框抖一次", () => {
+    /** 停在登录这一步、填好账号与错的密码，返回密码框外面的抖动层。 */
+    async function wrongPassword(options: { reduced?: boolean } = {}) {
+      await openAuthlib(options);
+      typeInto(inputs()[0], "skin.example.com");
+      act(() => button(AUTHLIB_COPY.next).click());
+      await flush();
+      const [username, password] = inputs();
+      typeInto(username, "multi@example.com");
+      typeInto(password, "wrong");
+      const shaker = password.closest<HTMLElement>("[data-shaker]");
+      if (shaker === null) throw new Error("密码框外面没有抖动层");
+      // 抖动层只包输入框，框下的错误不跟着晃
+      expect(shaker.closest("[class*='_field_']")?.querySelector("[aria-live='polite']")?.closest("[data-shaker]")).toBeNull();
+      return shaker;
+    }
+
+    it("被拒一次抖一次，抖完归位；之后的重渲染不再抖", async () => {
+      const shaker = await wrongPassword();
+      expect(shaker.style.transform).toBe("");
+      act(() => button(AUTHLIB_COPY.login).click());
+      await flush();
+      expect(dialog()?.textContent).toContain(AUTHLIB_COPY.badCredentials);
+      await stepFrames(5);
+      expect(shaker.style.transform).toMatch(/translateX\(-?[1-9]/);
+      await stepFrames(30);
+      expect(shaker.style.transform).toBe("none");
+      // 再输入（重渲染、清掉错误）、减少动画开了又关，都不重播上一次的拒绝
+      typeInto(inputs()[1], "again");
+      act(() => setReduced(true));
+      act(() => setReduced(false));
+      await stepFrames(5);
+      expect(shaker.style.transform).toBe("none");
+    });
+
+    it("减少动画：不抖，只靠框下的错误", async () => {
+      const shaker = await wrongPassword({ reduced: true });
+      act(() => button(AUTHLIB_COPY.login).click());
+      await flush();
+      expect(dialog()?.textContent).toContain(AUTHLIB_COPY.badCredentials);
+      await stepFrames(5);
+      expect(shaker.style.transform).toBe("");
+    });
   });
 
   it("服务器拒绝登录：危险提示框完整显示服务器给的原因，不截成两行", async () => {
@@ -803,6 +1019,9 @@ describe("外置登录：重新登录与用过的服务器", () => {
     expect(password.value).toBe("");
     expect(document.activeElement).toBe(password);
     expect(callsOf(ipc, "probe_auth_server")).toEqual([]);
+    // 一打开就在登录这一步：还没被拒过，密码框不抖
+    await stepFrames(5);
+    expect(password.closest<HTMLElement>("[data-shaker]")?.style.transform).toBe("");
 
     typeInto(password, "secret");
     act(() => button(AUTHLIB_COPY.login).click());

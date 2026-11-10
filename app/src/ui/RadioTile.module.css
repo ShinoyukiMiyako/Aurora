@@ -9,6 +9,17 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* 块随运行时数据增删的组：被移除的块退场时脱离布局、按这个网格绝对定位；网格的左上角不随增删移动，退场块原地淡出 */
+.grid[data-open-ended] {
+  position: relative;
+}
+
+/* 这种组里每块外面的进出层才是网格的子项：块撑满这一格，同一行的块照旧等高 */
+.item {
+  display: grid;
+  min-width: 0;
+}
+
 .tile {
   position: relative;
   display: flex;

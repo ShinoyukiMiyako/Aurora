@@ -8,7 +8,6 @@ import { useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
 import { Icon } from "../../art/Icon";
 import { LAUNCH_COPY, lockReason, MODPACK_REIMPORT_COPY, SESSION_COPY, TASK_STATUS_LABEL } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
-import { percent } from "../../domain/format";
 import { locksOf } from "../../domain/instance-locks";
 import { needsReimport } from "../../domain/rules";
 import { sessionPhaseLabel, stageLabel, type LaunchView } from "../../launch/launchView";
@@ -22,6 +21,7 @@ import { progressTrack } from "../../state/tasks";
 import { Button } from "../../ui/Button";
 import { IconButton } from "../../ui/IconButton";
 import { ProgressBar } from "../../ui/ProgressBar";
+import { SmoothPercent } from "../../ui/SmoothPercent";
 import { useDeleteInstance } from "../instance/delete";
 import styles from "./library.module.css";
 
@@ -177,7 +177,9 @@ function LoadingStatus({ view, entry }: { view: Extract<LaunchView, { kind: "loa
       <div className={styles.statusProgress}>
         <span className={styles.statusLine}>
           <span className={styles.ellipsis}>{stopping ? SESSION_COPY.stopping : stageLabel(s.stageIndex)}</span>
-          <b className={styles.statusPct}>{percent(s.progress, true)}</b>
+          {/* 与下面的进度条同一条平滑（同一个 track），字跟着条走，不随每次上报跳字。
+              加载阶段的进度到不了 99%（最后一段从 91% 起，进入运行才算满），不用封顶 */}
+          <SmoothPercent className={styles.statusPct} value={s.progress} track={s.taskId} />
         </span>
         <ProgressBar value={s.progress} size="sm" track={s.taskId} label={stageLabel(s.stageIndex)} />
       </div>
@@ -205,6 +207,17 @@ function RunningStatus({ view, entry }: { view: Extract<LaunchView, { kind: "run
   );
 }
 
+/** 文案模板里百分数的占位：模板按它切成前后两段，中间摆与进度条同步平滑的百分数节点（ui/SmoothPercent）。 */
+const PERCENT_SLOT = "\u0000";
+
+function aroundPercent(text: string): readonly [string, string] {
+  const parts = text.split(PERCENT_SLOT);
+  if (parts.length !== 2) throw new Error(`安装中的标题里百分数应当恰好出现一次，实为 ${parts.length - 1} 次`);
+  return [parts[0], parts[1]];
+}
+
+const [INSTALLING_BEFORE, INSTALLING_AFTER] = aroundPercent(LAUNCH_COPY.installingTitle(PERCENT_SLOT));
+
 function InstallingStatus({ view }: { view: Extract<LaunchView, { kind: "installing" }> }) {
   const task = view.task;
   // 排队（或后端在装、本次运行没有对应任务）时不画进度段：排队可能很久，不定进度条不允许常驻
@@ -212,7 +225,18 @@ function InstallingStatus({ view }: { view: Extract<LaunchView, { kind: "install
   return (
     <div className={styles.statusProgress}>
       <span className={styles.statusLine}>
-        <span className={styles.ellipsis}>{queued ? LAUNCH_COPY.queuedTitle : LAUNCH_COPY.installingTitle(percent(task.progress))}</span>
+        <span className={styles.ellipsis}>
+          {queued ? (
+            LAUNCH_COPY.queuedTitle
+          ) : (
+            // 百分数与下面的进度条同一条平滑；平滑只在真有进度时挂上，排队的卡不多带一条弹簧
+            <>
+              {INSTALLING_BEFORE}
+              <SmoothPercent value={task.progress} track={progressTrack(task)} />
+              {INSTALLING_AFTER}
+            </>
+          )}
+        </span>
         {queued && <b className={styles.statusPct}>{TASK_STATUS_LABEL.queued}</b>}
       </span>
       <ProgressBar

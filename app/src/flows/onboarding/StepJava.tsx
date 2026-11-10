@@ -78,7 +78,7 @@ function AutoDownloadRow() {
   );
 }
 
-/** 扫描中的占位：所在容器带 aria-busy，占位本身不朗读。 */
+/** 扫描中的占位：骨架层整层 aria-hidden，读屏读不到这里；要播报的说法由 StepJava 放在加载占位之外的状态区里。 */
 function Scanning() {
   return (
     <div className={s.scanning}>
@@ -99,6 +99,10 @@ export function StepJava() {
   const reflow = useReflow<HTMLDivElement>();
   return (
     <div ref={reflow} className={s.stepBody}>
+      {/* 状态区先挂好、只换文字，读屏才会播报；和扫描行同一时刻出现，300ms 内回来就什么也不说。不参与让位 */}
+      <span className={s.srOnly} role="status" data-reflow-skip="">
+        {gate.view === "skeleton" ? JAVA_STEP_COPY.scanning : ""}
+      </span>
       <Loadable view={gate.view} skeleton={<Scanning />}>
         {() => {
           if (java.status === "loading") throw new Error("加载门放行内容时 Java 扫描一定已经结束");

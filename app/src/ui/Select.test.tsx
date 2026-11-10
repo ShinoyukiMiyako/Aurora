@@ -14,7 +14,8 @@ let view: Rendered | undefined;
 
 beforeEach(() => {
   stubResizeObserver();
-  vi.useFakeTimers({ toFake: ["Date"], now: 1_000_000 });
+  // 键入跳转按 performance.now() 计时，用 advanceTimersByTime 推进键入间隔。Date 也假：系统时钟回拨的用例要拨它
+  vi.useFakeTimers({ toFake: ["Date", "performance"], now: 1_000_000 });
 });
 
 afterEach(() => {
@@ -160,13 +161,13 @@ describe("按键跳转", () => {
     press("ArrowDown");
     typeKey("e");
     expect(highlighted()).toBe("English");
-    vi.setSystemTime(Date.now() + 100);
+    vi.advanceTimersByTime(100);
     typeKey("e");
     expect(highlighted()).toBe("Esperanto");
-    vi.setSystemTime(Date.now() + 100);
+    vi.advanceTimersByTime(100);
     typeKey("e");
     expect(highlighted()).toBe("Español");
-    vi.setSystemTime(Date.now() + 100);
+    vi.advanceTimersByTime(100);
     typeKey("e");
     expect(highlighted()).toBe("English");
   });
@@ -176,10 +177,23 @@ describe("按键跳转", () => {
     focusTrigger();
     press("ArrowDown");
     typeKey("e");
-    vi.setSystemTime(Date.now() + TYPEAHEAD_WINDOW_MS);
+    vi.advanceTimersByTime(TYPEAHEAD_WINDOW_MS);
     typeKey("s");
     expect(highlighted()).toBe("Esperanto");
-    vi.setSystemTime(Date.now() + TYPEAHEAD_WINDOW_MS + 1);
+    vi.advanceTimersByTime(TYPEAHEAD_WINDOW_MS + 1);
+    typeKey("日");
+    expect(highlighted()).toBe("日本語");
+  });
+
+  // 按墙上时间计时的话，时钟回拨后差值是负的，一直算在窗口之内：之后的键入全并进旧前缀，跳不到别的项
+  it("系统时钟往回调不影响前缀窗口：隔了窗口的键入照常重新开始", () => {
+    mount(<Host options={LANGS} initial="zh" onChange={() => undefined} />);
+    focusTrigger();
+    press("ArrowDown");
+    typeKey("e");
+    expect(highlighted()).toBe("English");
+    vi.advanceTimersByTime(TYPEAHEAD_WINDOW_MS + 1);
+    vi.setSystemTime(Date.now() - 3_600_000);
     typeKey("日");
     expect(highlighted()).toBe("日本語");
   });

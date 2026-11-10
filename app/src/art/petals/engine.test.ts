@@ -516,8 +516,9 @@ describe("自动降级", () => {
     for (const d of kept) expect(movingPoses.has(pose(d))).toBe(true);
     expect(r.frames.pending()).toBe(1);
 
+    // 收尾从定格那一拍（10000）起算
     r.frames.run(10_016);
-    r.frames.run(10_016 + 240);
+    r.frames.run(10_240);
     const mid = lastFrame(r);
     const k = tweenAt(ambientFade.in, 0.24);
     const arriving = mid.draws.filter((d) => !solid(d));
@@ -529,7 +530,9 @@ describe("自动降级", () => {
     expect(wide.length).toBeGreaterThan(0);
     expect(mid.draws.filter(solid).map(pose)).toEqual(expect.arrayContaining(wide));
 
-    r.frames.run(10_016 + 480);
+    r.frames.run(10_464);
+    expect(r.frames.pending()).toBe(1);
+    r.frames.run(10_480);
     expect(r.frames.pending()).toBe(0);
     const done = lastFrame(r);
     expect(done.alphas).toEqual([0.4, 0.65, 0.9]);
@@ -556,15 +559,24 @@ describe("自动降级", () => {
     const far = narrow.filter((d) => Math.abs(sxOf(d) - target(d)) >= 0.05);
     expect(far.length).toBeGreaterThan(0);
 
-    // 收尾的第一帧取起点，仍是定格姿态；再过一拍已经在转、还没到；半程时已基本落定（不是憋到最后才跳）
+    // 定格那一拍（10000）已按定格姿态画过，收尾从那一拍起算：下一帧补投的已在淡入、窄的已离开定格姿态在转，
+    // 不先停一帧再起步；还没转到下限；半程时已基本落定（不是憋到最后才跳）
     r.frames.run(10_016);
-    for (const d of narrow) expect(sxOf(at(lastFrame(r).draws, d))).toBeCloseTo(sxOf(d), 12);
-    r.frames.run(10_032);
-    for (const d of far) expect(Math.abs(sxOf(at(lastFrame(r).draws, d)) - target(d))).toBeGreaterThan(1e-3);
-    r.frames.run(10_016 + 240);
+    const first = lastFrame(r).draws;
+    const k = tweenAt(ambientFade.in, 0.016);
+    expect(k).toBeGreaterThan(0);
+    const fading = first.filter((d) => !solid(d));
+    expect(fading.length).toBeGreaterThan(0);
+    for (const d of fading) expect([0.4 * k, 0.65 * k, 0.9 * k].some((a) => Math.abs(a - d.alpha) < 1e-9)).toBe(true);
+    for (const d of far) {
+      const sx = sxOf(at(first, d));
+      expect(Math.abs(sx - sxOf(d))).toBeGreaterThan(1e-4);
+      expect(Math.abs(sx - target(d))).toBeGreaterThan(1e-3);
+    }
+    r.frames.run(10_240);
     for (const d of narrow) expect(Math.abs(sxOf(at(lastFrame(r).draws, d)) - target(d))).toBeLessThan(0.01);
 
-    r.frames.run(10_016 + 480);
+    r.frames.run(10_480);
     expect(r.frames.pending()).toBe(0);
     const done = lastFrame(r).draws;
     for (const d of done) expect(Math.abs(sxOf(d))).toBeGreaterThanOrEqual(STILL_SCALE_MIN - 1e-9);
@@ -591,18 +603,39 @@ describe("自动降级", () => {
     for (const d of done.draws) expect(Math.abs(sxOf(d))).toBeGreaterThanOrEqual(STILL_SCALE_MIN - 1e-9);
   });
 
-  it("补投的花瓣淡入中暂停或销毁：直接到位，不留帧回调", () => {
+  it("收尾途中暂停：停在此刻的姿态、不留帧回调；恢复后从停下的那一刻接着播完，暂停的时长不算", () => {
     const r = rig({ tier: "wide" });
     r.engine.measure();
     runFrames(r.frames, 1000, 10_000, 40);
     r.frames.run(10_016);
+    r.frames.run(10_112);
     expect(r.frames.pending()).toBe(1);
+    const before = lastFrame(r);
+    const k = tweenAt(ambientFade.in, 0.112);
+    expect(before.alphas.some((a) => [0.4 * k, 0.65 * k, 0.9 * k].some((b) => Math.abs(a - b) < 1e-9))).toBe(true);
+
+    // 失焦时窗口仍看得见：暂停补画的这一帧与暂停前最后一帧完全相同，不跳到淡完、转完的终态
     r.engine.update({ ...BASE, tier: "wide", paused: true });
+    expect(r.frames.pending()).toBe(0);
+    expect(lastFrame(r)).toEqual(before);
+
+    r.engine.update({ ...BASE, tier: "wide" });
+    expect(r.frames.pending()).toBe(1);
+    // 恢复后的第一帧只记下帧时间，姿态仍是停下时的；此后按帧间隔往前走
+    r.frames.run(60_000);
+    expect(lastFrame(r)).toEqual(before);
+    r.frames.run(60_016);
+    const k2 = tweenAt(ambientFade.in, 0.128);
+    expect(lastFrame(r).alphas.some((a) => [0.4 * k2, 0.65 * k2, 0.9 * k2].some((b) => Math.abs(a - b) < 1e-9))).toBe(true);
+    expect(r.frames.pending()).toBe(1);
+    // 还差 352 ms：差一帧时还在播，到点淡完停掉帧回调
+    r.frames.run(60_016 + 336);
+    expect(r.frames.pending()).toBe(1);
+    r.frames.run(60_016 + 352);
     expect(r.frames.pending()).toBe(0);
     expect(lastFrame(r).alphas).toEqual([0.4, 0.65, 0.9]);
     expect(lastFrame(r).draws).toHaveLength(26);
-    r.engine.update({ ...BASE, tier: "wide" });
-    expect(r.frames.pending()).toBe(0);
+    for (const d of lastFrame(r).draws) expect(Math.abs(sxOf(d))).toBeGreaterThanOrEqual(STILL_SCALE_MIN - 1e-9);
 
     const s = rig({ tier: "wide" });
     s.engine.measure();

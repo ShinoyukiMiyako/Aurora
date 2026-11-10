@@ -2,7 +2,7 @@
 // 判定由后端落位矩阵给出，本机才知道的条件（实例状态、存档、Iris / OptiFine）在 verdict.ts 里叠加。
 // 底栏渲染进弹窗页脚（footerHost），面板与底栏共用同一份勾选状态。
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ACTION_ERROR, LOADER_NAME } from "../../../copy/flows";
 import type { InstanceSummary } from "../../../domain/adapt";
@@ -123,6 +123,18 @@ function IrisProbe({ onReport }: { onReport: (report: IrisReport) => void }) {
   return null;
 }
 
+/** 按上一次显示的顺序排；上一次没有的行（新来的实例）按 sorted 里的先后接在后面。 */
+function holdOrder(sorted: readonly TargetRow[], previous: readonly string[]): TargetRow[] {
+  const rank = new Map(previous.map((id, i) => [id, i]));
+  const rankOf = (row: TargetRow): number => {
+    const at = rank.get(row.instance.id);
+    if (at === undefined) throw new Error(`实例 ${row.instance.id} 不在上一次显示的顺序里`);
+    return at;
+  };
+  const known = sorted.filter((row) => rank.has(row.instance.id)).sort((a, b) => rankOf(a) - rankOf(b));
+  return [...known, ...sorted.filter((row) => !rank.has(row.instance.id))];
+}
+
 function instanceMeta(inst: InstanceSummary): string {
   const mc = inst.mcVersion === null ? "" : inst.mcVersion;
   return [mc, LOADER_NAME[inst.loader]].filter((s) => s !== "").join(" · ");
@@ -136,11 +148,13 @@ export interface InstallPanelProps {
   onPin: (versionId: string | null) => void;
   fitInstance: string | null;
   online: boolean;
+  /** 合并卡切换来源、新平台的详情还没到或没取到：detail 是上一个平台的，不能安装。 */
+  showingPrevious: boolean;
   footerHost: HTMLElement | null;
   onClose: () => void;
 }
 
-export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, online, footerHost, onClose }: InstallPanelProps) {
+export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, online, showingPrevious, footerHost, onClose }: InstallPanelProps) {
   const instances = useLauncherSelector((s) => s.instances);
   const instancesRead = useLauncherSelector((s) => s.status.instances.kind === "ready");
   const selectedInstanceId = useLauncherSelector((s) => s.selectedInstanceId);
@@ -206,7 +220,7 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
     return found === undefined ? { status: "loading" } : found;
   };
 
-  const rows: TargetRow[] = sortTargets(
+  const sorted = sortTargets(
     instances.map((instance) => ({
       instance,
       verdict: targetVerdict({
@@ -218,15 +232,19 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
       }),
     })),
   );
+  const worldsRead = type !== "data_pack" || instances.every((i) => i.status !== "ready" || worldsOf(i.id).status !== "loading");
+  // 数据包的存档是两个两个陆续读回来的，每回来一个，那一行的判定就变一次：照判定排序的话行一轮轮换位，
+  // 可见的那段跟着一轮轮滑，正要勾的那一行也会从指针下面挪走。全部读完之前按上一次显示的顺序排，判定与标签原地换，
+  // 读完后按判定整批排一次
+  const shownOrder = useRef<readonly string[]>([]);
+  const rows: TargetRow[] = worldsRead ? sorted : holdOrder(sorted, shownOrder.current);
+  useEffect(() => {
+    shownOrder.current = rows.map((r) => r.instance.id);
+  });
 
   // 默认勾选只做一次，且要等判定落定：实例列表读到、矩阵到了并覆盖全部就绪实例、数据包的存档读完、光影的 Iris 情况查完。
   // 看过的资源矩阵留在缓存里，新建实例后再打开时先拿到的是旧矩阵，这时落定新实例就永远勾不上了
-  const settled =
-    instancesRead &&
-    matchRows !== null &&
-    covered &&
-    (type !== "data_pack" || instances.every((i) => i.status !== "ready" || worldsOf(i.id).status !== "loading")) &&
-    (type !== "shader" || (iris !== null && iris.status !== "loading"));
+  const settled = instancesRead && matchRows !== null && covered && worldsRead && (type !== "shader" || (iris !== null && iris.status !== "loading"));
   useEffect(() => {
     if (picked === null && settled) setPicked(new Set(defaultPick(rows, fitInstance, selectedInstanceId)));
   }, [picked, settled, rows, fitInstance, selectedInstanceId]);
@@ -322,7 +340,7 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
       <Button variant="ghost" onClick={onClose}>
         {INSTALL_COPY.cancel}
       </Button>
-      <Button variant="primary" icon="download" disabled={selected.length === 0 || !detail.distribution_allowed || matchesStale} loading={submitting} onClick={() => void confirm()}>
+      <Button variant="primary" icon="download" disabled={selected.length === 0 || !detail.distribution_allowed || matchesStale || showingPrevious} loading={submitting} onClick={() => void confirm()}>
         <InstallLabel current={primaryLabel(selected)} instanceCount={instances.length} />
       </Button>
     </>
@@ -414,7 +432,7 @@ export function InstallPanel({ detail, versions, pinned, onPin, fitInstance, onl
                   type === "mod" ? (
                     <ModPlanGroup key={row.instance.id} row={row} detail={detail} showHead={selected.length > 1} coveredByIris={coveredByIris.has(row.instance.id)} onReport={reportPlan} verdictStale={matchesStale} />
                   ) : (
-                    <FilePlanGroup key={row.instance.id} row={row} detail={detail} showHead={selected.length > 1} coveredByIris={coveredByIris.has(row.instance.id)} onReport={reportPlan} />
+                    <FilePlanGroup key={row.instance.id} row={row} detail={detail} showHead={selected.length > 1} coveredByIris={coveredByIris.has(row.instance.id)} onReport={reportPlan} verdictStale={matchesStale} />
                   ),
                 )}
               </Appear>
@@ -474,6 +492,8 @@ interface PlanGroupProps {
   /** 光影的「一并安装 Iris」覆盖了这个实例的「可能可行」。 */
   coveredByIris: boolean;
   onReport: (id: string, summary: PlanSummary | null) => void;
+  /** 判定沿用上一份矩阵（换版本、换来源后新矩阵还没到）：行上的版本是上一份给的，换来源时属于另一个平台的工程。 */
+  verdictStale: boolean;
 }
 
 /** 可能可行的实例要提醒的话；不用提醒（判定确定，或光影已一并装 Iris）为 null。 */
@@ -519,7 +539,7 @@ function planItemNote(item: PlannedItem): string {
  * 一个实例的计划：很快算出来的直接出现；慢的先在一行里写「正在计算」，到达后这行淡出、计划各行淡入，
  * 组变高时后面的说明块与组从原位置滑下去。换了版本重算时接着显示上一份计划，不先缩回一行再撑开。
  */
-function ModPlanGroup({ row, detail, showHead, coveredByIris, onReport, verdictStale }: PlanGroupProps & { verdictStale: boolean }) {
+function ModPlanGroup({ row, detail, showHead, coveredByIris, onReport, verdictStale }: PlanGroupProps) {
   const version = row.verdict.version;
   if (version === null) throw new Error(`已勾选的实例 ${row.instance.id} 没有要装的版本`);
   // 判定沿用上一份矩阵时，行上的版本是上一份给的：换来源时它属于另一个平台的工程，和 detail 的平台、工程拼成的请求后端认不出，
@@ -597,15 +617,16 @@ function ModPlanGroup({ row, detail, showHead, coveredByIris, onReport, verdictS
 }
 
 /** 资源包、光影、数据包没有前置：要下载的就是所选版本这一个文件。 */
-function FilePlanGroup({ row, detail, showHead, coveredByIris, onReport }: PlanGroupProps) {
+function FilePlanGroup({ row, detail, showHead, coveredByIris, onReport, verdictStale }: PlanGroupProps) {
   const version = row.verdict.version;
   if (version === null) throw new Error(`已勾选的实例 ${row.instance.id} 没有要装的版本`);
   const id = row.instance.id;
   const size = version.file_size;
   const reflow = useReflow<HTMLDivElement>();
+  // 与 Mod 同一口径：判定沿用上一份时这个文件不是要装的那个，底栏写「正在计算」，不报另一个平台那个文件的大小
   useEffect(() => {
-    onReport(id, { files: 1, bytes: size });
-  }, [id, size, onReport]);
+    onReport(id, verdictStale ? null : { files: 1, bytes: size });
+  }, [id, size, verdictStale, onReport]);
   useEffect(() => () => onReport(id, null), [id, onReport]);
   return (
     <div ref={reflow} className={styles.previewGroup}>

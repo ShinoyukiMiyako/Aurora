@@ -5,10 +5,11 @@
 // 其余空白与标题文字都能拖动窗口、双击切换最大化。窗口失焦时标题与三键字形降一级颜色。
 
 import { LayoutGroup, motion } from "framer-motion";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback } from "react";
 import { Icon } from "../art/Icon";
 import { INSTANCE_TAB_LABEL, PAGE_LABEL } from "../copy/flows";
 import { fade } from "../lib/motion";
+import { useMounted } from "../lib/useMounted";
 import { useLauncherSelector } from "../state/launcher";
 import { findInstance } from "../state/selectors";
 import { IconButton } from "../ui/IconButton";
@@ -79,10 +80,7 @@ export function PageTitle() {
   const { route, go } = useNav();
   const inst = useLauncherSelector((s) => (route.page === "instance" ? findInstance(s, route.id) : undefined));
   // 挂载时就在的标题跟着外壳一起出现，不单独淡入
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   const enter = mounted.current ? { opacity: 0 } : false;
   const shown = { opacity: 1, transition: fade.in };
   if (route.page !== "instance") {

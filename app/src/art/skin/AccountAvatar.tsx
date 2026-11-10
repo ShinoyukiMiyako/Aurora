@@ -4,15 +4,15 @@ import { BitmapCanvas } from "../illustrations/BitmapCanvas";
 import { useDevicePixelRatio } from "../illustrations/canvas";
 import { accountHue } from "../illustrations/seed";
 import styles from "./AccountAvatar.module.css";
-import { AVATAR_SPECS, type AvatarSize, type SkinRef } from "./layout";
+import { AVATAR_SPECS, type AvatarSize, type SkinSource } from "./layout";
 import { silhouetteFaceCanvas, skinFaceCanvas } from "./render";
 import { useSkin } from "./useSkin";
 
 export interface AccountAvatarProps {
   /** 账户 UUID：决定剪影的色相。 */
   uuid: string;
-  /** 后端给出的皮肤信息；null 表示没有可用皮肤。 */
-  skin: SkinRef | null;
+  /** 后端给出的皮肤信息；null 表示没有可用皮肤，"loading" 表示还在读（保留正在显示的脸，读到再换）。 */
+  skin: SkinSource;
   size: AvatarSize;
   /** 当前账户外环。 */
   current?: boolean;
@@ -23,7 +23,7 @@ export interface AccountAvatarProps {
 
 /**
  * 账户头像：皮肤正脸 + 帽子层，脸部按整数倍放大，四周留 4 px 底座边。
- * 先显示剪影，皮肤就绪后交叉淡化替换；换了皮肤时旧脸留到新脸取到，两张脸交叉淡化。
+ * 先显示剪影，皮肤就绪后交叉淡化替换；换了皮肤、或换了账户而皮肤信息还在读时，旧脸留到新脸取到，两张脸交叉淡化。
  * 取不到皮肤时一直是剪影，不留空白、不用名称首字。
  */
 export function AccountAvatar({ uuid, skin, size, current = false, label, className }: AccountAvatarProps) {

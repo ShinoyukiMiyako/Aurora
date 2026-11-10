@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
+import { fade } from "../lib/motion";
+import { REFLOW_PAUSED_ATTR } from "../lib/reflow";
 import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { activeAccount } from "../state/selectors";
@@ -17,6 +19,26 @@ import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./s
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
+
+// 挂了让位的容器。jsdom 不做布局，让位本身在这里不动，只记下谁挂了它
+const reflowed = vi.hoisted(() => new Set<Element>());
+vi.mock("../lib/reflow", async (orig) => {
+  const mod = await orig<typeof import("../lib/reflow")>();
+  const { useCallback } = await import("react");
+  return {
+    ...mod,
+    useReflow: <T extends HTMLElement>(spring: Parameters<typeof mod.useReflow>[0] = "settle") => {
+      const real = mod.useReflow<T>(spring);
+      return useCallback(
+        (el: T | null) => {
+          if (el !== null) reflowed.add(el);
+          return real(el);
+        },
+        [real],
+      );
+    },
+  };
+});
 
 let view: Rendered | undefined;
 let nav: NavApi;
@@ -89,6 +111,7 @@ beforeEach(() => {
   ipc.overrides.set("set_current_account", () => null);
   vi.mocked(chrome.focusContent).mockClear();
   vi.mocked(chrome.scrollContentToTop).mockClear();
+  reflowed.clear();
 });
 afterEach(() => {
   view?.unmount();
@@ -170,7 +193,7 @@ describe("命令面板", () => {
 });
 
 describe("命令面板的开合与后台变化", () => {
-  /** 面板层：关闭后退场动画播完前仍挂着，带 data-exiting。假定时器下动画帧不走，退场一直停在半路。 */
+  /** 面板层：关闭后退场动画播完前仍挂着，带 data-exiting。假定时器下帧跟着假时钟走，这里的 flush 只推进 0 ms，一帧也不来，退场一直停在半路。 */
   const panels = () => [...document.querySelectorAll<HTMLElement>("[role='dialog']")].map((panel) => ({ panel, exiting: panel.closest("[data-exiting]") !== null }));
   const livePanel = () => {
     const live = panels().filter((p) => !p.exiting);
@@ -311,5 +334,114 @@ describe("命令面板的开合与后台变化", () => {
     await flush();
     expect(nav.route).toEqual({ page: "library" });
     expect(chrome.scrollContentToTop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("命令面板的结果列表：后台变化让位，键入过滤整批换上", () => {
+  const listbox = () => {
+    const el = document.querySelector<HTMLElement>("[role='listbox']");
+    if (el === null) throw new Error("命令面板没有结果列表");
+    return el;
+  };
+  const groups = () => [...listbox().querySelectorAll<HTMLElement>("[role='group']")];
+  const withInstances = (...names: [string, number | null][]) => names.map(([name, at]) => instanceDto(name, { last_played_at: at }));
+
+  /** 开始记录列表里让位暂停开关的增删。返回取结果的函数：每个元素依次的旧值，打开时是 null，去掉时是 ""。 */
+  function watchPauses() {
+    const records: MutationRecord[] = [];
+    const watcher = new MutationObserver((batch) => records.push(...batch));
+    watcher.observe(listbox(), { subtree: true, attributes: true, attributeFilter: [REFLOW_PAUSED_ATTR], attributeOldValue: true });
+    onTestFinished(() => watcher.disconnect());
+    return () => {
+      records.push(...watcher.takeRecords());
+      const toggles = new Map<Node, (string | null)[]>();
+      for (const record of records) {
+        const seen = toggles.get(record.target);
+        if (seen === undefined) toggles.set(record.target, [record.oldValue]);
+        else seen.push(record.oldValue);
+      }
+      return toggles;
+    };
+  }
+
+  /** 后到的行或组淡入走 Web Animations。jsdom 没有：给 div 装一个只记录调用的（不碰 Element.prototype，framer-motion 照旧走 JS）。 */
+  function recordFades() {
+    const played: { el: Element; frames: Keyframe[]; options: KeyframeAnimationOptions }[] = [];
+    Object.defineProperty(HTMLDivElement.prototype, "animate", {
+      configurable: true,
+      writable: true,
+      value(this: HTMLDivElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
+        played.push({ el: this, frames, options });
+        return {} as Animation;
+      },
+    });
+    onTestFinished(() => {
+      Reflect.deleteProperty(HTMLDivElement.prototype, "animate");
+    });
+    return () => played.filter((p) => listbox().contains(p.el));
+  }
+
+  const reload = async (instances: ReturnType<typeof withInstances>) => {
+    ipc.overrides.set("list_instances", () => instances);
+    await act(async () => {
+      await launcher.actions.reload("instances");
+    });
+    await flush();
+  };
+
+  it("结果列表与每一组都挂了让位", async () => {
+    await mount();
+    act(() => shell.openPalette());
+    await flush();
+    expect(reflowed.has(listbox())).toBe(true);
+    expect(groups().length).toBeGreaterThan(1);
+    for (const group of groups()) expect(reflowed.has(group)).toBe(true);
+  });
+
+  it("键入过滤：列表与在场的各组在这一次提交里开过让位暂停又去掉，结果整批换上，不逐行淡入", async () => {
+    const fades = recordFades();
+    await mount();
+    act(() => shell.openPalette());
+    await flush();
+    const pauses = watchPauses();
+
+    type("生");
+    const toggles = pauses();
+    expect(toggles.get(listbox())).toEqual([null, ""]);
+    expect(groups().length).toBeGreaterThan(0);
+    for (const group of groups()) expect(toggles.get(group)).toEqual([null, ""]);
+    expect(listbox().hasAttribute(REFLOW_PAUSED_ATTR)).toBe(false);
+    expect(fades()).toEqual([]);
+  });
+
+  it("面板开着时后台插进新实例：不暂停让位，插进来的那一行原地淡入，其余行不动", async () => {
+    const fades = recordFades();
+    await mount();
+    act(() => shell.openPalette());
+    await flush();
+    const pauses = watchPauses();
+
+    await reload(withInstances(["生存", 100], ["创造", 900], ["空岛", null], ["新装的", 1000]));
+    expect(options()[0].textContent?.startsWith("新装的")).toBe(true);
+    expect(pauses().size).toBe(0);
+    const played = fades();
+    expect(played.map((p) => [p.el.getAttribute("role"), p.el.textContent?.startsWith("新装的")])).toEqual([["option", true]]);
+    expect(played[0].frames).toEqual([{ opacity: 0 }, { opacity: 1 }]);
+    // 走的是淡入补间：时长与曲线照搬 fade.in
+    expect(played[0].options.duration).toBe(fade.in.duration * 1000);
+    expect(played[0].options.easing).toContain(fade.in.ease.join(", "));
+  });
+
+  it("整组后到（冷启动时实例列表晚到）：整组淡入，组里的行不再各自淡入", async () => {
+    ipc.overrides.set("list_instances", () => []);
+    const fades = recordFades();
+    await mount();
+    act(() => shell.openPalette());
+    await flush();
+    expect(groups().map((g) => g.getAttribute("aria-label"))).not.toContain(PALETTE_COPY.groups.instance);
+
+    await reload(withInstances(["生存", 100], ["创造", 900]));
+    const played = fades();
+    expect(played.map((p) => [p.el.getAttribute("role"), p.el.getAttribute("aria-label")])).toEqual([["group", PALETTE_COPY.groups.instance]]);
   });
 });

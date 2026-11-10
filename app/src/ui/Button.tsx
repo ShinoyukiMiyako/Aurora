@@ -217,6 +217,11 @@ export interface ButtonProps extends NativeButton {
   /** 后置图标。 */
   iconRight?: IconName;
   /**
+   * 后置图标翻转 180°：展开收起的箭头用同一个朝下的图标，展开时传 true 朝上，沿 settle 弹簧转过去，减少动画时直接到位。
+   * 不要在页面样式里按按钮内部结构去转它（例如「按钮的直接子级 svg」）。
+   */
+  iconRightFlipped?: boolean;
+  /**
    * 进行中：有前置图标时图标位交叉淡化成加载指示，否则指示叠在正中淡入、文字淡去但保留占位，宽度不变。
    * 加载期间要换文案的（「创建」换「正在创建…」），把文案放进 LabelSlot 列出两条，否则按钮会变宽变窄。
    * 不降低不透明度（与禁用区分）；保持可聚焦，点击与 Enter / 空格都无效（同 focusableWhenDisabled）。
@@ -245,6 +250,7 @@ export function Button({
   size = "md",
   icon,
   iconRight,
+  iconRightFlipped = false,
   loading = false,
   disabled = false,
   focusableWhenDisabled = false,
@@ -271,6 +277,7 @@ export function Button({
       data-size={size}
       data-block={block || undefined}
       data-has-icon={icon !== undefined || undefined}
+      data-icon-right-flipped={(iconRight !== undefined && iconRightFlipped) || undefined}
       data-loading={loading || undefined}
       data-disabled={softDisabled || undefined}
       disabled={disabled && !focusableWhenDisabled}
@@ -284,7 +291,7 @@ export function Button({
         </GlyphSlot>
       )}
       <span className={styles.label}>{children}</span>
-      {iconRight !== undefined && <Icon name={iconRight} size={iconSize} />}
+      {iconRight !== undefined && <Icon name={iconRight} size={iconSize} className={styles.iconRight} />}
       {icon === undefined && (
         <GlyphSlot glyph={loading ? SPINNER_GLYPH : null} enter="tap" className={styles.centerSpinner}>
           {loading && spinner}

@@ -827,3 +827,68 @@ describe("下载任务页：任务记录读取", () => {
     expect(page().textContent).toContain("下载队列是空的");
   });
 });
+
+describe("下载任务页：入场编号", () => {
+  /** 领了页面入场序号的区块与序号，按文档顺序；正在退场的不算。 */
+  const numbered = () =>
+    [...page().querySelectorAll<HTMLElement>("[data-entrance]")].filter(live).map((el): [string, string | undefined] => {
+      if (el.tagName === "HEADER") return ["header", el.dataset.entrance];
+      if (el.classList.contains(styles.overview)) return ["overview", el.dataset.entrance];
+      if (el.classList.contains(styles.listHead)) return ["filter", el.dataset.entrance];
+      if (el.querySelector(`.${styles.groups}`) !== null) return ["list", el.dataset.entrance];
+      if (el.textContent?.includes("下载队列是空的")) return ["empty", el.dataset.entrance];
+      throw new Error(`领了入场序号的是一块认不出的元素：${el.outerHTML.slice(0, 80)}`);
+    });
+
+  it("进页时任务记录已在：总览、筛选、列表卡接着页头的序号逐块错开；空着的横幅槽不占号", async () => {
+    bootOverrides(ipc, { journal: HISTORY });
+    await mount();
+    expect(numbered()).toEqual([
+      ["header", "0"],
+      ["overview", "1"],
+      ["filter", "2"],
+      ["list", "3"],
+    ]);
+  });
+
+  it("进页时队列是空的：空状态卡接着页头领下一个序号", async () => {
+    await mount();
+    expect(numbered()).toEqual([
+      ["header", "0"],
+      ["empty", "1"],
+    ]);
+  });
+
+  it("等过加载才读到任务：内容整层淡入，里面的总览、筛选、列表都不再各自领序号", async () => {
+    const journal = deferred<TaskJournalDto>();
+    ipc.overrides.set("load_task_journal", () => journal.promise);
+    await mount();
+    await advance(300);
+    journal.resolve({ seq: 1, tasks: HISTORY });
+    await flush();
+    await advance(300);
+    expect(headings()).toEqual(["已结束 · 3"]);
+    expect(numbered()).toEqual([["header", "0"]]);
+  });
+
+  it("进页之后空状态换成列表：换上来的总览、筛选、列表整块淡入，不领序号", async () => {
+    await mount();
+    expect(numbered()).toEqual([
+      ["header", "0"],
+      ["empty", "1"],
+    ]);
+    await act(() => launcher.actions.installJava(8));
+    await flush();
+    expect(headings()).toEqual(["进行中 · 1"]);
+    // 换下的空状态卡还在原处淡出（带 inert），不算
+    expect(numbered()).toEqual([["header", "0"]]);
+  });
+
+  it("进页之后列表换成空状态：换上来的空状态卡整块淡入，不领序号", async () => {
+    bootOverrides(ipc, { journal: HISTORY });
+    await mount();
+    act(() => buttonIn(page(), "清除已结束（3）").click());
+    expect(liveText(page())).toContain("下载队列是空的");
+    expect(numbered()).toEqual([["header", "0"]]);
+  });
+});

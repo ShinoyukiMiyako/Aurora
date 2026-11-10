@@ -7,8 +7,9 @@
 // 在页面里时栈本来为空，不登记，免得「有浮层打开」的判定被一个搜索框改写、全局快捷键失效。
 
 import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useRef, useState, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useState, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { fade } from "../lib/motion";
+import { useMounted } from "../lib/useMounted";
 import { isImeComposing } from "../lib/util";
 import { useEscapeLayer } from "../shell/overlay";
 import { KeyHint } from "./KeyHint";
@@ -33,10 +34,7 @@ export function SearchInput({ value, onChange, shortcut, placeholder = SEARCH_PL
   const [focused, setFocused] = useState(false);
   const [inOverlay, setInOverlay] = useState(false);
   // 挂载时就在的键帽跟着所在页面入场；只在键帽自己身上关掉入场，不用 AnimatePresence 的 initial={false}（会封住它里面之后挂载的元素）
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
 
   useEscapeLayer(focused && inOverlay && value !== "", () => onChange(""), { kind: "popover" });
 

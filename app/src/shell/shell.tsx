@@ -14,14 +14,15 @@ import { bindArtStatus } from "../mc/binding";
 import { registerCatalogReload, settleArtDownload } from "../state/art-download";
 import type { CreateInstancePreset } from "../state/flows";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../state/launcher";
-import { LIBRARY_ROUTE, routeInstanceId, sameRoute, type Route } from "../state/route";
+import { LIBRARY_ROUTE, routeInstanceId, routeKey, sameRoute, type Route } from "../state/route";
 import { activeDownloads, activeTasks, pinnedInstances } from "../state/selectors";
 import { launchPromptCopy } from "../state/store";
 import type { Toast } from "../state/toasts";
 import { phaseUpdate } from "../state/updater/machine";
-import { UpdaterProvider, useUpdater } from "../state/updater/useUpdater";
+import { UpdaterProvider, useUpdater, type UpdaterApi } from "../state/updater/useUpdater";
 import { DROP_COPY, FILE_PICK_COPY, FILE_SAVE_COPY, SHELL_ACTION_ERROR } from "../copy/shell";
 import { UPDATE_COPY } from "../copy/updater";
+import { holdScroll } from "../lib/scroll-hold";
 import { isTypingTarget } from "../lib/util";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { NAV_ANCHOR_ATTR } from "../ui/Page";
@@ -67,6 +68,7 @@ export interface NavApi {
   /**
    * 实例详情切 Tab、设置切分区、发现页改关键词：替换当前项，保留滚动位置；
    * 页面标了导航锚点（NAV_ANCHOR_ATTR）且锚点已滚出视口上方时，先瞬时滚回锚点。
+   * 标了锚点的页面还会被托住高度（新面板较短时滚动位置不被夹回），直到用户滚回页顶。
    */
   replace(route: Route): void;
   back(): void;
@@ -180,13 +182,25 @@ type NavIntent = "go" | "back" | "forward";
  * 同一页换标签或分区（replace）时的落点：页面标出的锚点（标签条、分区导航所在的那一行）已经滚出视口上方时，
  * 瞬时滚回锚点，新面板从头看起；锚点还在视口里就不动。不做平滑滚动，变化交给面板自己的入场。
  * 锚点的 scroll-margin-top 是它上方要留出的距离：分区导航吸顶时写成吸顶的 top，滚回去导航停在原处不动。
+ * 返回页面标出的锚点；页面没有锚点时为 null。
  */
-function revealNavAnchor(scroller: HTMLElement): void {
+function revealNavAnchor(scroller: HTMLElement): HTMLElement | null {
   const anchor = scroller.querySelector<HTMLElement>(`[${NAV_ANCHOR_ATTR}]`);
-  if (anchor === null) return;
+  if (anchor === null) return null;
   assertAnchorInFlow(anchor, scroller);
   const top = anchor.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - scrollMarginTop(anchor);
   if (top < scroller.scrollTop) scroller.scrollTop = top;
+  return anchor;
+}
+
+/** 锚点所在的页面：内容区滚动容器里包着锚点的那个直接子元素，也就是页面根。 */
+function pageOf(anchor: HTMLElement, scroller: HTMLElement): HTMLElement {
+  let el = anchor;
+  while (el.parentElement !== scroller) {
+    if (el.parentElement === null) throw new Error("导航锚点不在内容区滚动容器里");
+    el = el.parentElement;
+  }
+  return el;
 }
 
 /**
@@ -218,6 +232,16 @@ interface ConfirmRequest {
   resolve: (ok: boolean) => void;
 }
 
+/**
+ * 替外壳核心整份订阅更新状态的叶子，什么都不画：下载更新的每条进度事件只让它重渲染，不让外壳核心重渲染。
+ * 在布局阶段交接口，并排在外壳内容之前：内容里挂载时就调更新动作的一方（布局与常规副作用都算）读到的已经是它。
+ */
+function UpdaterBridge({ bind }: { bind: (api: UpdaterApi) => void }) {
+  const updater = useUpdater();
+  useLayoutEffect(() => bind(updater), [bind, updater]);
+  return null;
+}
+
 function ShellCore({ children }: { children: ReactNode }) {
   // 外壳根只订阅自己用到的几片：每 100 ms 的下载进度与每批游戏日志都不让它重渲染
   const lastRename = useLauncherSelector((s) => s.lastRename);
@@ -243,6 +267,8 @@ function ShellCore({ children }: { children: ReactNode }) {
   const historyRef = useRef(history);
   const intentRef = useRef<NavIntent | null>(null);
   const scrollRef = useRef<HTMLElement | null>(null);
+  /** 最近一次换标签、换分区留下的托底的滚动监听；摘掉它不动托底（见 lib/scroll-hold）。 */
+  const scrollHoldRef = useRef<(() => void) | null>(null);
 
   /** 事件处理器里连续导航时读的是 ref 里的最新值，不等重渲染。intent 为 null 的提交（替换、剪除失效项）不动滚动位置。 */
   const commit = useCallback((next: NavHistory, intent: NavIntent | null) => {
@@ -269,7 +295,14 @@ function ShellCore({ children }: { children: ReactNode }) {
       if (next === historyRef.current) return;
       // 在提交之前滚：framer-motion 的布局动画在提交时取快照，吸顶导航里的指示块前后两次测量都落在新的滚动位置上，
       // 不会按滚动差飞一段；同一个事件里滚动与新面板一起画出，旧面板不会在新位置上露一帧
-      if (scrollRef.current !== null) revealNavAnchor(scrollRef.current);
+      const scroller = scrollRef.current;
+      const anchor = scroller === null ? null : revealNavAnchor(scroller);
+      if (scroller !== null && anchor !== null) {
+        // 滚回锚点之后、新面板挂上之前，按此刻的滚动位置托住页面的高度：新面板较短时滚动不被夹回，
+        // 标签条、吸顶的分区导航不跟着下跳（见 lib/scroll-hold）
+        scrollHoldRef.current?.();
+        scrollHoldRef.current = holdScroll(pageOf(anchor, scroller), scroller);
+      }
       commit(next, null);
     },
     [commit],
@@ -314,6 +347,16 @@ function ShellCore({ children }: { children: ReactNode }) {
 
   const current = currentEntry(viewHistory);
   const route = effectiveRoute(current.route, (id) => !instancesReady || instanceIds.has(id));
+
+  // 托底跟着页面走：换了页面（页面按路由键重挂，托着的页面根已经卸掉）就摘掉它的滚动监听
+  const pageKey = routeKey(route);
+  useEffect(
+    () => () => {
+      scrollHoldRef.current?.();
+      scrollHoldRef.current = null;
+    },
+    [pageKey],
+  );
 
   // go 进新项回到顶部；后退、前进恢复该项离开时的位置（内容不够高时浏览器自动取能滚到的最大值）；replace 不动
   useLayoutEffect(() => {
@@ -402,20 +445,28 @@ function ShellCore({ children }: { children: ReactNode }) {
 
   // ---------------------------------------------------------------- 启动器更新
 
-  const updater = useUpdater();
-  const updaterRef = useRef(updater);
-  updaterRef.current = updater;
+  // 外壳核心（连同其中的自动检查）只在回调与事件里调更新动作、经 snapshot() 读此刻的阶段，自己不订阅更新状态：
+  // 整份订阅的是下面渲染的 UpdaterBridge 叶子，下载更新的每条进度事件只让它重渲染，它把接口交进这个 ref
+  const updaterRef = useRef<UpdaterApi | null>(null);
+  const bindUpdater = useCallback((api: UpdaterApi) => {
+    updaterRef.current = api;
+  }, []);
+  const updater = useCallback((): UpdaterApi => {
+    const api = updaterRef.current;
+    if (api === null) throw new Error("更新接口还没交进外壳核心：UpdaterBridge 没有挂上");
+    return api;
+  }, []);
   // installUpdate 是引用稳定的回调：活动任务数经 ref 读，不进它的依赖
   const pendingWorkRef = useRef({ tasks: pendingTasks, downloads: pendingDownloads });
   pendingWorkRef.current = { tasks: pendingTasks, downloads: pendingDownloads };
   const [updatePanelOpen, setUpdatePanelOpen] = useState(false);
   const openUpdatePanel = useCallback(() => {
-    const api = updaterRef.current;
+    const api = updater();
     const update = phaseUpdate(api.snapshot().phase);
     if (update === null) throw new Error("没有可查看的更新时不该打开更新面板");
     api.markSeen(update.version);
     setUpdatePanelOpen(true);
-  }, []);
+  }, [updater]);
   const closeUpdatePanel = useCallback(() => setUpdatePanelOpen(false), []);
   const installUpdate = useCallback(async () => {
     const { tasks, downloads } = pendingWorkRef.current;
@@ -425,10 +476,10 @@ function ShellCore({ children }: { children: ReactNode }) {
     }
     await run(async () => {
       await actions.flushTaskJournal();
-      await updaterRef.current.install();
+      await updater().install();
     }, UPDATE_COPY.installFailed);
-  }, [actions, confirm, run]);
-  useUpdaterAutoCheck(openUpdatePanel);
+  }, [actions, confirm, run, updater]);
+  useUpdaterAutoCheck(openUpdatePanel, updater);
 
   const findHandlers = useRef<(() => void)[]>([]);
   const registerFind = useCallback((handler: () => void) => {
@@ -460,12 +511,17 @@ function ShellCore({ children }: { children: ReactNode }) {
     chromeRef.current = chrome;
   }, []);
 
-  /** 快捷键要去的就是当前页时滚回顶部，与侧栏、命令面板一致；go 遇到同一路由什么都不做，按下去像没反应。 */
+  /**
+   * 快捷键要去的就是当前页时滚回顶部，与侧栏、命令面板一致；go 遇到同一路由什么都不做，按下去像没反应。
+   * 内容区还没挂上时没有可滚的内容，什么都不做：向导收尾时首次启动标记已经撤掉、快捷键已经生效，
+   * 主界面却要等向导的退场播完才挂上，这段时间里按到当前页（初始就是主页）是正常操作，不是装配错误。
+   */
   const openFromShortcut = (target: Route) => {
     if (!sameRoute(route, target)) {
       go(target);
       return;
     }
+    if (scrollRef.current === null) return;
     const chrome = chromeRef.current;
     if (chrome === null) throw new Error("外壳布局还没挂载，快捷键没法把内容区滚回顶部");
     chrome.scrollContentToTop();
@@ -764,6 +820,7 @@ function ShellCore({ children }: { children: ReactNode }) {
     <NavContext.Provider value={nav}>
       <ShellContext.Provider value={shell}>
         <LaunchHostProvider host={launchHost}>
+          <UpdaterBridge bind={bindUpdater} />
           {children}
           {/* 框开着时被顶替不换 key：换 key 会把开着的框连遮罩一起卸掉重挂，遮罩断一帧。原地换内容，
               按 requestKey 重做初始聚焦；框关上之后再来的请求才换 key */}

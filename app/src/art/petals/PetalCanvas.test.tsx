@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { MotionGlobalConfig } from "framer-motion";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, stubMatchMedia, stubResizeObserver, waitForFrames, type MediaQueryStub, type ResizeObserverStub } from "../../test/dom";
+import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, waitForFrames, type MediaQueryStub, type Rendered, type ResizeObserverStub } from "../../test/dom";
 import { currentPetalStats } from "./engine";
 import { PetalCanvas, type PetalCanvasProps } from "./PetalCanvas";
 import { manualFrames, stubCanvas, stubPetalTokens, type ManualFrames } from "./test-canvas";
@@ -115,7 +115,9 @@ describe("PetalCanvas", () => {
     expect(currentPetalStats()).toBeNull();
   });
 
-  describe("浮现按真实时间播", () => {
+  describe("浮现按假时钟逐帧播", () => {
+    let view: Rendered | undefined;
+
     beforeAll(() => {
       MotionGlobalConfig.skipAnimations = false;
     });
@@ -124,9 +126,22 @@ describe("PetalCanvas", () => {
       MotionGlobalConfig.skipAnimations = true;
     });
 
+    // 换计时器前把帧循环排空，否则排在旧计时器上的那一帧会让新计时器下推不动
+    beforeEach(async () => {
+      await drainFrames();
+      vi.useFakeTimers();
+    });
+
+    afterEach(async () => {
+      view?.unmount();
+      view = undefined;
+      await drainFrames();
+      vi.useRealTimers();
+    });
+
     it("减少动画时浮现收回 fade.in：比照常的那层先到不透明，不播 480 ms 的整片淡入", async () => {
-      // 两层同一次提交挂上、同一帧起播，每一帧拿同一个时间戳算各自的不透明度
-      const view = render(
+      // 两层同一次提交挂上、同一帧起播。帧跟着假时钟走，每帧恰好 16 ms：机器再忙，两层的进度差也不会被一次长帧间隔抹平
+      const rendered = render(
         <>
           <div data-lane="normal">
             <PetalCanvas {...BASE} onDowngrade={vi.fn()} />
@@ -136,32 +151,17 @@ describe("PetalCanvas", () => {
           </div>
         </>,
       );
-      const lane = (name: string) => {
-        const canvas = view.container.querySelector<HTMLElement>(`[data-lane='${name}'] > canvas`);
+      view = rendered;
+      const opacity = (name: string) => {
+        const canvas = rendered.container.querySelector<HTMLElement>(`[data-lane='${name}'] > canvas`);
         if (canvas === null) throw new Error(`${name} 那层没有画布`);
-        return canvas;
+        return Number(canvas.style.opacity);
       };
-      const other = await opacityWhenOpaque(lane("reduced"), lane("normal"));
-      // 200 ms 的淡入落到 1 的那一帧，480 ms 的环境层淡入还没走完
-      expect(other).toBeGreaterThan(0);
-      expect(other).toBeLessThan(1);
-      view.unmount();
+      // 256 ms：200 ms 的淡入已落到 1，480 ms 的环境层淡入还没走完
+      await stepFrames(16);
+      expect(opacity("reduced")).toBe(1);
+      expect(opacity("normal")).toBeGreaterThan(0);
+      expect(opacity("normal")).toBeLessThan(1);
     });
   });
 });
-
-/**
- * first 第一次变成完全不透明的那一帧，second 的不透明度。framer 在同一帧里写完所有元素的样式之后，
- * 才轮到 MutationObserver 的回调，所以读到的是同一帧的值。
- */
-async function opacityWhenOpaque(first: HTMLElement, second: HTMLElement): Promise<number> {
-  const seen: { opacity: number | null } = { opacity: null };
-  const observer = new MutationObserver(() => {
-    if (seen.opacity === null && first.style.opacity === "1") seen.opacity = Number(second.style.opacity);
-  });
-  observer.observe(first, { attributes: true, attributeFilter: ["style"] });
-  await waitForFrames(() => expect(seen.opacity).not.toBeNull());
-  observer.disconnect();
-  if (seen.opacity === null) throw new Error("先到的那层一直没有变成不透明");
-  return seen.opacity;
-}

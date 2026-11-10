@@ -37,7 +37,9 @@
   min-width: 0;
 }
 
+/* 定位容器：转成只读时「换封面」抽出布局，以这里为基准在原处淡出 */
 .stageColumn {
+  position: relative;
   display: flex;
   flex: none;
   flex-direction: column;
@@ -50,11 +52,20 @@
   display: flex;
 }
 
+/* 定位容器：名称框换成名称文字、版本行撤掉时，旧的一块抽出布局后以这里为基准在原处淡出 */
 .packFields {
+  position: relative;
   display: flex;
   flex: 1;
   flex-direction: column;
   gap: var(--sk-space-10);
+  min-width: 0;
+}
+
+/* 名称与版本外面那层进出的包裹：里面的名称文字照旧是弹性子项，长名称才截得出省略号 */
+.packField {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
 }
 
@@ -303,11 +314,6 @@
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
   color: var(--sk-text-2);
-}
-
-/* 重读刚开始：占着这一行的位置，读得快就不露面 */
-.rereading[data-pending] {
-  visibility: hidden;
 }
 
 /* ---- 需要手动下载的文件清单 ---- */

@@ -146,6 +146,14 @@ describe("会话第二行文案", () => {
     expect(sessionDetail(known, T0)).toBe("文件 120/480 · 4.2 MB/s");
   });
 
+  it("下载速度可由渲染方传入显示节流后的值：文件数照会话写，速度写传入的那个；总数未知时与速度无关", () => {
+    const counting = loading("A", 4);
+    expect(sessionDetail(counting, T0, 2 * 1024 * 1024)).toBe("正在统计缺失文件…");
+    const known = applyPhase(counting, { taskId: "launch-1", phase: "downloading", stageIndex: 4, download: { done: 120, total: 480, bytes: 1, totalBytes: 10, speedBps: 4.2 * 1024 * 1024 } }, T0);
+    expect(sessionDetail(known, T0, 1.5 * 1024 * 1024)).toBe("文件 120/480 · 1.5 MB/s");
+    expect(sessionDetail(known, T0, 0)).toBe("文件 120/480 · 0 B/s");
+  });
+
   it("阶段名按九阶段表取：下标 8 是游戏运行中，下标 9 越界", () => {
     expect(stageLabel(8)).toBe("游戏运行中");
     expect(() => stageLabel(9)).toThrow("阶段下标 9 超出九阶段表");

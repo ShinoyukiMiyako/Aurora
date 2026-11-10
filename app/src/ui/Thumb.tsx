@@ -1,6 +1,7 @@
-import { useLayoutEffect, useRef, useState, type AnimationEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type AnimationEvent } from "react";
 import { coverRect, prepareDisplayCanvas, useDevicePixelRatio } from "../art/illustrations/canvas";
 import { Icon, type IconName } from "../art/Icon";
+import { LOADING_DELAY_MS } from "../lib/loading-gate";
 import { cssVars, cx } from "../lib/util";
 import { useNearViewport, useRemoteImage } from "./remote-image";
 import styles from "./Thumb.module.css";
@@ -63,7 +64,40 @@ export function Thumb({ url, kind, hue, size, alt, inactive = false, className }
   const dpr = useDevicePixelRatio();
   const near = useNearViewport(ref);
   const image = useRemoteImage(url, near, Math.ceil(size * dpr * 2));
-  const view = url === null || image.status === "failed" ? "fallback" : image.status === "ready" ? "image" : near ? "loading" : "pending";
+
+  // 上一次渲染时的地址与形态，在渲染期比较：地址或形态一变，这一帧就要按新的画。
+  // 挂载那一刻还没进视口（useNearViewport 从 false 起），有地址的必是 pending
+  const [last, setLast] = useState<{ url: string | null; view: ThumbView }>({ url, view: url === null ? "fallback" : "pending" });
+
+  // 正显示着回落图形时来了地址（服务器图标随状态查询晚到，多是 data: 地址或已在缓存里）：色相底座与图标先留着，
+  // 图在 LOADING_DELAY_MS 内到了就直接在底座上淡入，不先切到灰色骨架再出图；过了这段还没到才转入加载态。
+  // 挂载时就有地址的照旧：进视口就扫光
+  const [held, setHeld] = useState<string | null>(null);
+  let holding = held;
+  if (last.url !== url) {
+    holding = url !== null && last.view === "fallback" ? url : null;
+    setHeld(holding);
+  }
+  useEffect(() => {
+    if (held === null) return;
+    const timer = setTimeout(() => setHeld(null), LOADING_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [held]);
+  const waiting = image.status === "idle" || image.status === "loading";
+  const view: ThumbView =
+    url === null || image.status === "failed" || (holding === url && waiting) ? "fallback" : image.status === "ready" ? "image" : near ? "loading" : "pending";
+
+  // 类型图标：挂载时就是回落图形的不单独淡入，跟着所在页面的入场走；之后才落到回落图形的（加载失败）淡入；
+  // 回落图形让给图或加载态时不同帧消失，还是同一个节点原地淡出，叠在正淡入的图上，淡完摘掉。
+  // 留住底座等图的那段里加载失败，图标一直在，不重播淡入
+  const [glyph, setGlyph] = useState<GlyphPhase | null>(view === "fallback" ? "still" : null);
+  let glyphPhase = glyph;
+  if (last.view !== view) {
+    glyphPhase = view === "fallback" ? "late" : glyph === null ? null : "leaving";
+    setGlyph(glyphPhase);
+  }
+  if (last.url !== url || last.view !== view) setLast({ url, view });
+
   const pixel = image.status === "ready" && isPixelArtThumb(image.naturalWidth, image.naturalHeight, size);
   // 光带离开加载态（图到了或失败）后停在原处淡出，不同帧消失：见过加载态就一直标着，淡完才摘掉，
   // 循环动画随标记一起移除。没进过加载态的（本来就没有图、视口外）从头到尾没有光带。
@@ -72,10 +106,14 @@ export function Thumb({ url, kind, hue, size, alt, inactive = false, className }
   if (view === "loading" && !shimmered) setShimmered(true);
   const shimmer = view === "loading" ? "run" : shimmered ? "fading" : undefined;
   const onAnimationEnd =
-    shimmer === "fading"
+    shimmer === "fading" || glyphPhase === "leaving"
       ? (event: AnimationEvent<HTMLSpanElement>) => {
-          // 光带的循环动画不会结束，::before 上结束的只有淡出；图片与图标的淡入在子元素上，不算
-          if (event.target === event.currentTarget && event.pseudoElement === "::before") setShimmered(false);
+          // 光带的循环动画不会结束，::before 上结束的只有淡出；子元素上冒上来的只认图标的淡出，图片与图标的淡入不算
+          if (event.target === event.currentTarget) {
+            if (event.pseudoElement === "::before") setShimmered(false);
+          } else if (event.target instanceof Element && event.target.classList.contains(styles.leaving)) {
+            setGlyph((g) => (g === "leaving" ? null : g));
+          }
         }
       : undefined;
 
@@ -107,8 +145,13 @@ export function Thumb({ url, kind, hue, size, alt, inactive = false, className }
       aria-hidden={alt === undefined ? true : undefined}
     >
       {view === "image" && <canvas ref={canvasRef} className={styles.image} data-pixel={pixel || undefined} />}
-      {/* 加载失败才落到回落图形时，图标淡入；本来就没有图的一开始就是回落图形，跟着所在页面的入场走 */}
-      {view === "fallback" && <Icon name={THUMB_KIND_ICON[kind]} size={thumbIconSize(size)} className={image.status === "failed" ? styles.late : undefined} />}
+      {glyphPhase !== null && <Icon name={THUMB_KIND_ICON[kind]} size={thumbIconSize(size)} className={glyphPhase === "late" ? styles.late : glyphPhase === "leaving" ? styles.leaving : undefined} />}
     </span>
   );
 }
+
+/** pending：还在视口外、没开始加载的静止占位。 */
+type ThumbView = "pending" | "loading" | "image" | "fallback";
+
+/** 类型图标的进出：still 挂载时就在，late 之后才落到回落图形、淡入，leaving 让位淡出。 */
+type GlyphPhase = "still" | "late" | "leaving";

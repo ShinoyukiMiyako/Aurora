@@ -358,10 +358,13 @@ function WeekBars({ activity, today, selected, onPickDay }: WeekBarsProps) {
             type="button"
             className={s.bar}
             disabled={activity === null}
+            // 加载期间这几根是占位：时长还没到，按「无记录」给标签会把每一天都读成没玩。禁用的按钮不可聚焦，
+            // 整根从读屏里藏起来不会藏住焦点；读屏只读到组的名称与 aria-busy，和骨架一样
+            aria-hidden={activity === null || undefined}
             data-today={isToday || undefined}
             data-picked={date === selected || undefined}
             aria-pressed={date === selected}
-            aria-label={calendarDayLabel(date, minutes !== null && recorded ? minutes : undefined, isToday)}
+            aria-label={minutes === null ? undefined : calendarDayLabel(date, recorded ? minutes : undefined, isToday)}
             onClick={() => onPickDay(date)}
           >
             <span className={s.barValue} data-empty={minutes === null || undefined}>

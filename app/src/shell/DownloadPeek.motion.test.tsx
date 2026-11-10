@@ -2,6 +2,7 @@
 // @module-tag heavy-page
 // 下载入口与快览的动效：总进度环换任务集合时直接跳、不倒退，角标与进度环弹入，快览里的行增删淡入淡出。
 // jsdom 没有帧循环，framer-motion 的入场停在起点、退场永远不播完：这里断言的正是「从哪开始」与「还在不在」。
+import { MotionConfig, visualElementStore } from "framer-motion";
 import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PEEK_COPY } from "../copy/shell";
@@ -20,6 +21,25 @@ import { ShellProvider } from "./shell";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
+/** 挂了让位的容器与它走的弹簧：包住真的 useReflow，行为不变，只记下来。 */
+const reflowed = vi.hoisted(() => new Map<HTMLElement, string>());
+vi.mock("../lib/reflow", async (orig) => {
+  const mod = await orig<typeof import("../lib/reflow")>();
+  const { useCallback } = await import("react");
+  return {
+    ...mod,
+    useReflow: <T extends HTMLElement>(spring: Parameters<typeof mod.useReflow>[0] = "settle") => {
+      const real = mod.useReflow<T>(spring);
+      return useCallback(
+        (el: T | null) => {
+          if (el !== null) reflowed.set(el, spring);
+          return real(el);
+        },
+        [real, spring],
+      );
+    },
+  };
+});
 
 let view: Rendered | undefined;
 let launcher: LauncherApi;
@@ -115,6 +135,26 @@ describe("下载入口", () => {
     expect(count.style.transform).toContain("scale(0)");
   });
 
+  it("减少动画：进度环那一格只淡入，不从 0.8 缩放弹入（缩放在减少动画下一步到位，会先跳一下）", async () => {
+    view?.unmount();
+    view = render(
+      <MotionConfig reducedMotion="always">
+        <LauncherProvider>
+          <ShellProvider>
+            <Host />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </MotionConfig>,
+    );
+    await flush();
+    await startJava(21);
+    const ring = [...entry().querySelectorAll<HTMLElement>(`.${styles.glyphSlot}`)].find((s) => s.querySelector(`.${styles.glyph}`) !== null);
+    if (ring === undefined) throw new Error("没有进度环那一格");
+    expect(ring.style.opacity).toBe("0");
+    expect(ring.style.transform).not.toContain("scale");
+  });
+
   it("入口挂载时就有的计数角标与失败点不弹，跟着入口一起出现", async () => {
     await startJava(21);
     await startJava(17);
@@ -192,6 +232,44 @@ describe("快览的任务行", () => {
     expect(leaving.parentElement).toBe(row(java17.title).parentElement);
   });
 
+  it("减少动画：新来的行只淡入，进出的目标里只有透明度（缩放在减少动画下一步到位，删掉的行会先缩一下再淡出）", async () => {
+    view?.unmount();
+    view = render(
+      <MotionConfig reducedMotion="always">
+        <LauncherProvider>
+          <ShellProvider>
+            <Host />
+            <OverlayRoot />
+          </ShellProvider>
+        </LauncherProvider>
+      </MotionConfig>,
+    );
+    await flush();
+    /** 行上某一组进出目标里动的值（不含过渡参数）。 */
+    const animated = (li: HTMLElement, which: "initial" | "animate" | "exit") => {
+      const target = visualElementStore.get(li)?.getProps()[which];
+      if (typeof target !== "object" || target === null || Array.isArray(target)) throw new Error(`行的 ${which} 应当是目标对象，实为 ${String(target)}`);
+      return Object.keys(target).filter((key) => key !== "transition");
+    };
+
+    const java21 = await startJava(21);
+    act(() => entry().click());
+    await flush();
+    const java17 = await startJava(17);
+    const arriving = row(java17.title);
+    expect(arriving.style.opacity).toBe("0");
+    expect(arriving.style.transform).not.toContain("scale");
+    expect(animated(arriving, "initial")).toEqual(["opacity"]);
+    expect(animated(arriving, "animate")).toEqual(["opacity"]);
+
+    const leaving = row(java21.title);
+    runs.get(21)?.reject(new IpcError("java_failed", "运行时清单下载失败"));
+    await flush();
+    // 已经在退场的那一行：留在流里，退场目标只有透明度
+    expect(row(java21.title)).toBe(leaving);
+    expect(animated(leaving, "exit")).toEqual(["opacity"]);
+  });
+
   it("列表放在浮层的主体里滚动，标题行与底栏在主体之外：失败条与底栏在底部槽位里跟着外框下沿走", async () => {
     await startJava(21);
     await startJava(17);
@@ -211,6 +289,14 @@ describe("快览的任务行", () => {
     expect(only(footer, `.${styles.failed}`).textContent).toContain(PEEK_COPY.failed(1));
     expect(footer.querySelector(`.${styles.foot}`)).not.toBeNull();
     expect(footer.closest(`.${popover.body}`)).toBeNull();
+  });
+
+  it("行的让位走 morph 弹簧：与外框、主体下沿、底栏的形变同一条，删中间一行时不空出缝、插入时末行不被裁", async () => {
+    await startJava(21);
+    act(() => entry().click());
+    await flush();
+    const list = only(document, `.${styles.list}`);
+    expect(reflowed.get(list)).toBe("morph");
   });
 });
 

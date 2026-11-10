@@ -5,7 +5,7 @@
 // 在线人数与上次在线照旧取上一次的结果；恢复联网立即重测一次。
 // 每行的「加入」以记住的实例直接启动并进服；没记住（或记住的已不可用）时弹实例选择，可以顺手记住这次的选择。
 
-import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
+import { AnimatePresence, motion, useIsPresent } from "framer-motion";
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { Icon } from "../../art/Icon";
 import { serverHue } from "../../art/illustrations/seed";
@@ -14,8 +14,10 @@ import type { InstanceSummary } from "../../domain/adapt";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import { formatRelative } from "../../domain/format";
 import { useLoadingGate } from "../../lib/loading-gate";
-import { fade, insertItem, springs } from "../../lib/motion";
+import { springs } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
+import { useInsertItem } from "../../lib/useInsertItem";
+import { useMounted } from "../../lib/useMounted";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
@@ -179,8 +181,9 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
 
   const count = pinned.status === "ready" ? pinned.data.length : 0;
   const countLine = count > 0 ? HOME_COPY.serversSubtitle(count) : HOME_COPY.serversSubtitleEmpty;
-  // 读取中先占住副标题这一行（null），台数到了原位淡入，卡头不因此变高、把下面的内容推下去
-  const subtitle = pinned.status === "loading" ? null : pinned.status === "error" ? undefined : count > 0 && !online ? HOME_COPY.serversOffline(countLine) : countLine;
+  // 读取中先占住副标题这一行（null），台数到了原位淡入，卡头不因此变高、把下面的内容推下去。
+  // 读取失败也照样占着：台数不知道，但重试读到后同一行填上，卡头在加载、失败、读到之间始终一样高
+  const subtitle = pinned.status !== "ready" ? null : count > 0 && !online ? HOME_COPY.serversOffline(countLine) : countLine;
 
   const body = () => {
     if (pinned.status === "loading") throw new Error("固定列表还在读，加载门却放行了内容");
@@ -285,23 +288,13 @@ export function ServersCard({ span }: { span: ResponsiveValue }) {
   );
 }
 
-/** 减少动画时行的进出只留透明度：缩放在那里是一步到位的，退场会先缩一下再淡出。 */
-const ROW_FADE_ONLY = {
-  initial: { opacity: 0 },
-  animate: { opacity: 1, transition: fade.in },
-  exit: { opacity: 0, transition: fade.out },
-} as const;
-
 /**
  * 固定服务器的行：新固定的一台淡入，取消固定的原地淡出并让出位置，其余行沿 settle 滑到新位置。
  * 挂载时就在的行不播入场，跟着卡片出现。不能用 AnimatePresence 的 initial={false} 来做：它会让行里之后才挂载的
  * 元素（测速结果到达时的淡入）也永远跳过入场。
  */
 function ServerList({ rows, children }: { rows: readonly ServerRow[]; children: (row: ServerRow) => ReactNode }) {
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   const order = rows.map((r) => r.address).join("|");
   return (
     <ul className={s.serverList}>
@@ -329,8 +322,8 @@ interface ServerItemProps {
 /** 一行。退场中的那一行带 inert：它叠在滑上来的下一行上淡出，已经不是列表的一行，点不到也聚焦不到。 */
 function ServerItem({ ref, address, order, entering, children }: ServerItemProps) {
   const present = useIsPresent();
-  const reduced = useReducedMotionConfig() === true;
-  const item = reduced ? ROW_FADE_ONLY : insertItem;
+  // li 外面不能再包 Appear 的那层 div：增删参数按减少动画的生效值取，减少动画时只留透明度
+  const item = useInsertItem();
   return (
     <motion.li
       ref={ref}

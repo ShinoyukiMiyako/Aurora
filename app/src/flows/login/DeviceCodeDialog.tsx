@@ -8,7 +8,7 @@
 // 弹窗本身由 LoginFlow 渲染（各种登录共用一个），这里只算外框与主体交上去。
 
 import { motion, useReducedMotionConfig } from "framer-motion";
-import { memo, useEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useRef, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { AccountAvatar } from "../../art/skin/AccountAvatar";
 import { Spinner } from "../../art/Spinner";
@@ -25,7 +25,7 @@ import { useLauncherActions, useLauncherSelector, useNow } from "../../state/lau
 import { deviceCodeExpired, deviceCodeRemaining, type DeviceLogin, type LoginState } from "../../state/login";
 import { Banner } from "../../ui/Banner";
 import { Button, GlyphSlot } from "../../ui/Button";
-import { IconButton } from "../../ui/IconButton";
+import { CopyButton } from "../../ui/KV";
 import { LabelSlot } from "../../ui/LabelSlot";
 import { Loadable } from "../../ui/Loadable";
 import { ProgressBar } from "../../ui/ProgressBar";
@@ -309,19 +309,10 @@ export function CodeCells({ code, expired }: { code: string; expired: boolean })
   );
 }
 
+/** 复制验证页链接：与别处的复制键同一个组件，复制成功后强制显示「已复制」，指针不在按钮上、用键盘触发时也看得到。 */
 function CopyLink({ text }: { text: string }) {
   const { copyText } = useShell();
-  const [copied, setCopied] = useState(false);
-  const timer = useRef<number | undefined>(undefined);
-  useEffect(() => () => window.clearTimeout(timer.current), []);
-  const copy = () =>
-    void copyText(text).then((ok) => {
-      if (!ok) return;
-      setCopied(true);
-      window.clearTimeout(timer.current);
-      timer.current = window.setTimeout(() => setCopied(false), COPY_FEEDBACK_MS);
-    });
-  return <IconButton icon={copied ? "check" : "copy"} size="sm" label={copied ? DEVICE_DIALOG_COPY.copied : MICROSOFT_LOGIN_COPY.copyLink} onClick={copy} />;
+  return <CopyButton text={text} label={MICROSOFT_LOGIN_COPY.copyLink} copiedLabel={DEVICE_DIALOG_COPY.copied} onCopy={copyText} feedbackMs={COPY_FEEDBACK_MS} />;
 }
 
 function Success({ account, updated }: { account: Account; updated: boolean }) {

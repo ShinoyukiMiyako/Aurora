@@ -4,11 +4,11 @@
 // - 角标（32 及以上）：运行中实心绿点（只在呼吸窗口内呼吸）；启动失败与崩溃为危险色「!」；损坏为警示色「!」。
 // - 24 只画身份图形。头像本身 aria-hidden：宿主控件的名称要写出实例名与状态文字。
 
-import { AnimatePresence, motion, useIsPresent, usePresenceData, useTransform } from "framer-motion";
+import { AnimatePresence, motion, useIsPresent, usePresenceData, useReducedMotionConfig, useTransform } from "framer-motion";
 import { useRef } from "react";
 import { INSTANCE_AVATAR_SPECS, InstanceAvatarBase, type InstanceAvatarSize } from "../art/iso/InstanceAvatarBase";
 import type { InstanceSummary } from "../domain/adapt";
-import { fade, springs } from "../lib/motion";
+import { fade, popMark } from "../lib/motion";
 import { useLauncherSelector } from "../state/launcher";
 import { progressTrack } from "../state/tasks";
 import { useSmoothProgress, visibleProgress } from "../ui/ProgressBar";
@@ -197,19 +197,14 @@ function QueuedRing({ size, appear }: { size: InstanceAvatarSize; appear: boolea
 
 /**
  * 角标。外层管弹出与消失（transform），里层是圆点本身、运行时在呼吸窗口内呼吸：呼吸是 CSS 动画，
- * 会盖过外层写在内联上的缩放，所以分在两层上。
+ * 会盖过外层写在内联上的缩放，所以分在两层上。减少动画时只淡入淡出：缩放在那里一步到位，退场会先跳小再淡出。
  */
 function Badge({ tone, appear }: { tone: "ok" | "danger" | "warn"; appear: boolean }) {
   const ref = useRef<HTMLSpanElement>(null);
   useBreathPhase(ref, tone === "ok");
+  const mark = useReducedMotionConfig() === true ? popMark.reduced : popMark.dot;
   return (
-    <motion.span
-      className={styles.badgeSlot}
-      data-badge={tone}
-      initial={appear ? { scale: 0, opacity: 0 } : false}
-      animate={{ scale: 1, opacity: 1, transition: { ...springs.pop, opacity: fade.in } }}
-      exit={{ scale: 0.6, opacity: 0, transition: fade.out }}
-    >
+    <motion.span className={styles.badgeSlot} data-badge={tone} initial={appear ? mark.initial : false} animate={mark.animate} exit={mark.exit}>
       <span ref={ref} className={styles.badge} data-tone={tone}>
         {tone !== "ok" && "!"}
       </span>

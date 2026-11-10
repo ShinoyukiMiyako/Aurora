@@ -4,12 +4,13 @@
 // 条件出现的块经 Appear 淡入淡出，竖排的兄弟由 useReflow 从旧位置滑过去；探测与检查晚到时先占位或沿用上一次的结论。
 
 import { AnimatePresence, motion, useIsPresent } from "framer-motion";
-import { useEffect, useRef, useState, type Ref } from "react";
+import { useEffect, useState, type Ref } from "react";
 import { Icon } from "../../art/Icon";
 import { SEARCH_DEBOUNCE_MS } from "../../domain/limits";
 import { samePath } from "../../domain/paths";
-import { useLoadingGate } from "../../lib/loading-gate";
+import type { LoadingView } from "../../lib/loading-gate";
 import { useReflow } from "../../lib/reflow";
+import { useMounted } from "../../lib/useMounted";
 import { useRunner } from "../../shell/useRunner";
 import { useDiscoveredGameDirectories, useGameDirectoryInspection } from "../../state/queries/catalog";
 import { Appear } from "../../ui/Appear";
@@ -135,10 +136,7 @@ interface OthersListProps {
 
 function OthersList({ candidates, deselected, onToggle }: OthersListProps) {
   const reflow = useReflow<HTMLUListElement>();
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   const picked = candidates.filter((d) => !deselected.has(d.path)).length;
   return (
     <section className={s.others}>
@@ -167,15 +165,21 @@ function NoneFound() {
   );
 }
 
+interface OtherLaunchersProps {
+  view: LoadingView;
+  gameDir: string;
+  deselected: ReadonlySet<string>;
+  onToggle(path: string, picked: boolean): void;
+}
+
 /**
  * 其他启动器的文件夹。探测在向导挂上时才发出：300ms 内回来不画骨架（只占位），超过才淡入骨架，换成结果时交叉淡入。
  * 列表与「没有找到」互换（选中了唯一的那个文件夹）时也交叉淡入。
  */
-function OtherLaunchers({ gameDir, deselected, onToggle }: { gameDir: string; deselected: ReadonlySet<string>; onToggle: (path: string, picked: boolean) => void }) {
+function OtherLaunchers({ view, gameDir, deselected, onToggle }: OtherLaunchersProps) {
   const discovered = useDiscoveredGameDirectories();
-  const gate = useLoadingGate(discovered.status === "loading");
   return (
-    <Loadable view={gate.view} skeleton={<OthersSkeleton />}>
+    <Loadable view={view} skeleton={<OthersSkeleton />}>
       {() => {
         if (discovered.status === "loading") throw new Error("加载门放行内容时文件夹探测一定已经结束");
         if (discovered.status === "error") {
@@ -206,12 +210,18 @@ export interface StepGameDirProps {
   defaultPath: string;
   error: string | null;
   deselected: ReadonlySet<string>;
+  /**
+   * 文件夹探测的加载门，由向导根持有、从探测发出（向导挂上）那一刻计时。不在这一步里自己开：配置晚到时这一步是在
+   * 交叉淡入里才挂上的，自己开的门会从头再走一遍等待期，外层骨架里已经显出来的文件夹骨架先消失、过 300ms 再出现；
+   * 换步回来重新挂上时也一样。
+   */
+  othersView: LoadingView;
   onPathChange(path: string): void;
   onToggleExtra(path: string, picked: boolean): void;
   onSubmit(): void;
 }
 
-export function StepGameDir({ path, defaultPath, error, deselected, onPathChange, onToggleExtra, onSubmit }: StepGameDirProps) {
+export function StepGameDir({ path, defaultPath, error, deselected, othersView, onPathChange, onToggleExtra, onSubmit }: StepGameDirProps) {
   const run = useRunner();
   const pick = usePickDirectory();
   // 「用回默认位置」与已有文件提示出没、后端拒绝的原因折成几行时，下面的块从旧位置滑过去
@@ -239,7 +249,7 @@ export function StepGameDir({ path, defaultPath, error, deselected, onPathChange
         )}
       </Appear>
       <ExistingFilesHint path={path} />
-      <OtherLaunchers gameDir={path} deselected={deselected} onToggle={onToggleExtra} />
+      <OtherLaunchers view={othersView} gameDir={path} deselected={deselected} onToggle={onToggleExtra} />
     </div>
   );
 }

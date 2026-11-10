@@ -74,6 +74,7 @@ function DocumentText({ label, failed, loaded }: { label: string; failed: string
 /**
  * 清单的底块先于清单占住位置，加载态交给 Loadable：读得快（加载门的延迟之内）时什么字都不出，清单读到后在同一块底上淡入；
  * 超过延迟才在底块里淡入「正在读取」，清单到了与它交叉淡化。几百行的清单只整块淡入，不逐行。
+ * Loadable 的骨架层整层对读屏隐藏，「正在读取」另在它外面的播报区里报一次，与骨架同一时刻出现。
  */
 function ThirdPartyList({ copy, loaded, view }: { copy: SetupCopy["legal"]; loaded: Loaded<ThirdPartyManifest>; view: LoadingView }) {
   if (view === "content" && loaded.status === "failed") {
@@ -86,6 +87,10 @@ function ThirdPartyList({ copy, loaded, view }: { copy: SetupCopy["legal"]; load
   }
   return (
     <div className={styles.packagesBox}>
+      {/* 播报区先挂上、后填字，读屏才念得出来；aria-busy 主流读屏不会主动播报 */}
+      <p className={styles.status} role="status">
+        {view === "skeleton" ? copy.thirdPartyLoading : null}
+      </p>
       <Loadable view={view} className={styles.packagesFill} contentClassName={styles.packagesFill} skeleton={<p className={styles.pending}>{copy.thirdPartyLoading}</p>}>
         {() => {
           // 加载门只在读取落定后才给 content，读失败已在上面接走

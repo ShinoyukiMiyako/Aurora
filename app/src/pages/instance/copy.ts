@@ -151,6 +151,8 @@ export const EXPORT_COPY = {
     return loader === null ? head : `${head} · ${loader}`;
   },
   reading: "正在读取 Mod 与配置…",
+  /** 读取中主按钮的禁用原因：悬停提示里是一句原因，不带进行中的省略号。 */
+  readingReason: "正在读取 Mod 与配置",
   retry: "重试",
   cancel: "取消",
   submit: "导出整合包",
@@ -199,9 +201,10 @@ export const OVERVIEW_COPY = {
   reinstallLoaderStarted: (name: string) => `开始重新安装「${name}」的加载器`,
   queuedTitle: "安装任务排队中",
   queuedBody: "等前面的任务完成后自动开始",
-  installProgress: (pct: string, speed: string, total: string | null) => (total === null ? `${pct} · ${speed}` : `${pct} · ${speed} · 共 ${total}`),
+  /** 安装进度行百分数之后的那一截：百分数单独画，与旁边的进度条同一份平滑。 */
+  installProgressTail: (speed: string, total: string | null) => (total === null ? ` · ${speed}` : ` · ${speed} · 共 ${total}`),
   /** 分步任务的百分比是整体进度；「共多少」只是当前这一步那批的量，放一起会被读成全部大小，所以不写。 */
-  installStepProgress: (pct: string, step: string, speed: string) => `${pct} · ${step} · ${speed}`,
+  installStepProgressTail: (step: string, speed: string) => ` · ${step} · ${speed}`,
   viewTasks: "查看下载任务",
   failedTitle: (title: string) => `上次启动失败：${title}`,
   crashTitle: (relative: string) => `上次启动崩溃了 · ${relative}`,

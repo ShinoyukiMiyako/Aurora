@@ -189,15 +189,17 @@ export const insertItemFade = {
 const POP_MARK_SHOW = { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } } as const;
 
 /**
- * 小标记的出现消失，按尺寸分两档，挂在 motion 元素上直接展开（{...popMark.dot}）：
+ * 小标记的出现消失，按尺寸与分量分三档，挂在 motion 元素上直接展开（{...popMark.dot}）：
  * - dot：角标、提醒点、运行点这类几个像素的点。从 0 弹出，从略小处起看不出是「弹出来」的；退场淡出并缩到 0.6。
  * - glyph：清空键、标签上的计数、换上来的图标，本身有一定尺寸。从 0.8 弹出；退场只原地淡出，
  *   它们多在 popLayout 里，退场那一刻已经让出位置，再缩一下反而像往别处飞。
- * - reduced：减少动画时两档都换成它，只淡入淡出。根部 MotionConfig 会把缩放改成一步到位，照用 dot 退场会先跳到 0.6 再淡出。
+ * - tag：行内状态标签（「当前」「未保存」「已停用」），标签出现本身就是消息。从 0.6 弹出，比 glyph 醒目；退场同 glyph。
+ * - reduced：减少动画时各档都换成它，只淡入淡出。根部 MotionConfig 会把缩放改成一步到位，照用 dot 退场会先跳到 0.6 再淡出。
  */
 export const popMark = {
   dot: { initial: { opacity: 0, scale: 0 }, animate: POP_MARK_SHOW, exit: { opacity: 0, scale: 0.6, transition: fade.out } },
   glyph: { initial: { opacity: 0, scale: 0.8 }, animate: POP_MARK_SHOW, exit: { opacity: 0, transition: fade.out } },
+  tag: { initial: { opacity: 0, scale: 0.6 }, animate: POP_MARK_SHOW, exit: { opacity: 0, transition: fade.out } },
   reduced: { initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in }, exit: { opacity: 0, transition: fade.out } },
 } as const;
 
@@ -243,6 +245,7 @@ export const assembly = {
 /**
  * 一行文字换内容（启动胶囊的阶段名）：旧行上移淡出，新行从下方落到位。两行叠在同一格里交接，不占额外高度。
  * 只给「换了一件事」的文字用；百分比、文件数、计时这类同一件事的数字更新直接换字，不走它。
+ * 减少动画时换用 lineSwapFade：根部 MotionConfig 只把位移改成一步到位，照用这一份的话旧行会先上跳 4px 再淡出。
  */
 export const lineSwap: Variants = {
   enter: { opacity: 0, y: 4 },
@@ -250,16 +253,23 @@ export const lineSwap: Variants = {
   leave: { opacity: 0, y: -4, transition: fade.out },
 };
 
+/** 减少动画时的换行：同样的变体标签，新旧两行只交叉淡化。 */
+export const lineSwapFade: Variants = {
+  enter: { opacity: 0 },
+  show: { opacity: 1, transition: fade.in },
+  leave: { opacity: 0, transition: fade.out },
+};
+
 /**
  * 同一格里换一枚小控件（最近游玩卡角上的启动入口在就绪、修复、安装中、启动中、运行中之间换面）：新的一枚弹入，
- * 旧的一枚原地淡出。与按钮图标位换图同一口径：换成别的东西从 0.6 弹出走 pop；换成进度（动作已经开始，
- * 不该再抢眼）从 0.8 收拢走 tap。减少动画时只淡入淡出：缩放在那里是一步到位的。
+ * 旧的一枚原地淡出。与按钮图标位换图同一口径：换成别的东西与行内标签的出现同一档（popMark.tag，从 0.6 弹出走 pop）；
+ * 换成进度（动作已经开始，不该再抢眼）从 0.8 收拢走 tap。减少动画时只淡入淡出（popMark.reduced）：缩放在那里是一步到位的。
  */
 export const faceSwap = {
-  pop: { initial: { opacity: 0, scale: 0.6 }, animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } } },
+  pop: { initial: popMark.tag.initial, animate: popMark.tag.animate },
   tap: { initial: { opacity: 0, scale: 0.8 }, animate: { opacity: 1, scale: 1, transition: { ...springs.tap, opacity: fade.in } } },
-  reduced: { initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in } },
-  exit: { opacity: 0, transition: fade.out },
+  reduced: popMark.reduced,
+  exit: popMark.tag.exit,
 } as const;
 
 /**

@@ -7,9 +7,10 @@
 // 挂载时就有的错误跟着所在页面或弹窗入场。
 
 import { motion } from "framer-motion";
-import { createContext, useContext, useEffect, useId, useRef, type ReactNode } from "react";
+import { createContext, useContext, useId, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
 import { insertItem } from "../lib/motion";
+import { useMounted } from "../lib/useMounted";
 import { cx } from "../lib/util";
 import styles from "./Field.module.css";
 
@@ -58,10 +59,7 @@ export function Field({ label, optional = false, hint, error, reserve = false, c
   const base = useId();
   const invalid = error !== undefined && error !== "";
   const control: FieldControl = { controlId: `${base}-control`, labelId: `${base}-label`, describedBy: `${base}-message`, invalid };
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   return (
     <FieldContext.Provider value={control}>
       <div className={cx(styles.field, className)}>

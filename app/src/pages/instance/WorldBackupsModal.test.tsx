@@ -1,6 +1,9 @@
 // @vitest-environment jsdom
 // 存档备份列表弹窗的读取占位与增删：读取中先占住副标题与列表的位置（等待期不可见），删除成功后那一行一直转圈，
 // 直到重读回来的列表里没有它、整行退场；列表与空状态互换时旧的原地淡出。
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
@@ -236,6 +239,33 @@ describe("存档备份列表弹窗：读取占位", () => {
     await openBackups();
     expect(textOf(backupsDialog())).toContain("读不到备份列表");
     expect(subtitleLine()).toBeNull();
+  });
+});
+
+describe("存档备份列表弹窗：骨架行高", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const read = (path: string) => readFileSync(join(here, path), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+
+  /** 选择器恰好是 selector 的那条规则的声明，空白压成一个空格；没有这条规则时报错。 */
+  function declarations(css: string, selector: string): string {
+    for (const rule of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      if (rule[1].replace(/\s+/g, " ").trim() === selector) return rule[2].replace(/\s+/g, " ").trim();
+    }
+    throw new Error(`样式表里没有 ${selector} 的规则`);
+  }
+
+  it("三行骨架与贴边列表的三行同高：列表的分隔线画在行（56）之外的 li 上，骨架的分隔线也加在 56 之外", () => {
+    const list = read("../../ui/ListRow.module.css");
+    expect(declarations(list, ".row")).toContain("--row-height: 56px;");
+    expect(declarations(list, '.list[data-variant="flush"] > .item:not([inert]) ~ .item:not([inert])')).toContain("border-top: 1px solid var(--sk-line);");
+
+    const own = read("./instance.module.css");
+    const row = declarations(own, ".backupSkeletonRow");
+    expect(row).toContain("min-height: 56px;");
+    // border-box 会把分隔线算进 56：第二、三行各矮 1px，内容换上时下面的注记位移 2px
+    expect(row).not.toContain("box-sizing");
+    expect(row).not.toMatch(/padding: [^0]/);
+    expect(declarations(own, ".backupSkeletonRow + .backupSkeletonRow")).toContain("border-top: 1px solid var(--sk-line);");
   });
 });
 

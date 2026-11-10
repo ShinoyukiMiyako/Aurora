@@ -2,12 +2,15 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { MotionConfig } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { fade } from "../lib/motion";
+import { REFLOW_PAUSED_ATTR } from "../lib/reflow";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { keydown, render, setRect, waitForFrames, type Rendered } from "../test/dom";
+import { keydown, render, setRect, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
 import { IconButton } from "./IconButton";
-import { appendsOnly, EVERY_ROW, List, ListRow, ROW_MOTION_LIMIT, ROW_WINDOW_MARGIN, rowsInWindow, rowWindow } from "./ListRow";
+import { appendsOnly, EVERY_ROW, List, ListRow, measuredRowWindow, ROW_MOTION_LIMIT, ROW_WINDOW_MARGIN, rowsInWindow, rowWindow } from "./ListRow";
 
 let view: Rendered | undefined;
 afterEach(() => {
@@ -272,18 +275,136 @@ describe("行的增删", () => {
   const batch = (prefix: string, count: number): Item[] => Array.from({ length: count }, (_, i) => ({ id: `${prefix}${i}`, name: `${prefix}${i}` }));
   const liveItems = () => items().filter((li) => !li.hasAttribute("inert"));
 
-  it(`换了一批、一次来了超过 ${ROW_MOTION_LIMIT} 行：行不逐个入场，整个列表淡入一次；之后不超过时照常逐行入场`, async () => {
+  it(`换了一批、一次来了超过 ${ROW_MOTION_LIMIT} 行：新行只淡入，已在场的行不跟着闪，这一趟让位暂停；之后不超过时照常逐行入场`, () => {
     const many = batch("多", ROW_MOTION_LIMIT + 1);
     const more = batch("再", ROW_MOTION_LIMIT);
     mount(<Changing initial={ITEMS} />);
     const list = document.querySelector("ul") as HTMLElement;
+    // 暂停开关的每一次增删：让位的观察者把同一批记录里出现过开关的那一趟按暂停处理
+    const toggles = new MutationObserver(() => undefined);
+    toggles.observe(list, { attributes: true, attributeFilter: [REFLOW_PAUSED_ATTR], attributeOldValue: true });
+    onTestFinished(() => toggles.disconnect());
+    act(() => setItems([ITEMS[0], ...many]));
+    // 整个列表不再压到透明：留下来的那一行一直是不透明的
+    expect(list.style.opacity).toBe("");
+    // 提交时打上又撤掉：暂停只盖住这一批，不留到之后
+    expect(toggles.takeRecords().map((record) => record.oldValue)).toEqual([null, ""]);
+    expect(list.hasAttribute(REFLOW_PAUSED_ATTR)).toBe(false);
+    const swapped = liveItems();
+    expect(swapped[0].textContent).toBe("甲进行中");
+    expect(swapped[0].style.opacity).toBe("1");
+    // 新行只从透明淡入，不从略小处落位
+    expect(swapped.slice(1).map((li) => [li.style.opacity, li.style.transform])).toEqual(Array(many.length).fill(["0", ""]));
+    act(() => setItems([ITEMS[0], ...many, ...more]));
+    expect(toggles.takeRecords()).toEqual([]);
+    const appended = liveItems().slice(many.length + 1);
+    expect(appended.map((li) => [li.style.opacity, li.style.transform])).toEqual(Array(more.length).fill(["0", "scale(0.98)"]));
+  });
+
+  it("换了一批时让位只暂停那一趟：紧接着删掉一行，其后的行照常从原位置滑上去", async () => {
+    // jsdom 不做布局、没有 ResizeObserver 与 Web Animations：每行 56 高，按在流里的先后排开，被 popLayout 抽出去的行留在原位；
+    // 让位起的动画记在 played 里
+    const ROW = 56;
+    const sizes = stubResizeObserver();
+    onTestFinished(() => {
+      vi.unstubAllGlobals();
+    });
+    const played: { el: Element; frames: Keyframe[] }[] = [];
+    for (const proto of [HTMLUListElement.prototype, HTMLLIElement.prototype]) {
+      Object.defineProperty(proto, "animate", {
+        configurable: true,
+        writable: true,
+        value(this: Element, frames: Keyframe[]) {
+          played.push({ el: this, frames });
+          return { currentTime: 0, cancel: () => undefined, onfinish: null, oncancel: null };
+        },
+      });
+      onTestFinished(() => {
+        Reflect.deleteProperty(proto, "animate");
+      });
+    }
+    const tops = new WeakMap<Element, number>();
+    const topOf = (el: HTMLElement): number => {
+      if (el.tagName !== "LI") return 0;
+      const list = el.parentElement;
+      if (list === null) throw new Error("行不在列表里");
+      if (el.dataset.motionPopId === undefined) {
+        const flow = [...list.children].filter((li) => li instanceof HTMLElement && li.dataset.motionPopId === undefined);
+        tops.set(el, flow.indexOf(el) * ROW);
+      }
+      const top = tops.get(el);
+      if (top === undefined) throw new Error("抽出布局的行没有量过位置");
+      return top;
+    };
+    vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockImplementation(function (this: HTMLElement) {
+      return this.tagName === "LI" ? this.parentElement : document.body;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
+      return topOf(this);
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetLeft", "get").mockReturnValue(0);
+    // popLayout 量得到行的尺寸才把退场的行钉成绝对定位
+    const real = window.getComputedStyle.bind(window);
+    vi.spyOn(window, "getComputedStyle").mockImplementation((el: Element, pseudo?: string | null) => {
+      const style = real(el, pseudo);
+      if (el.tagName !== "LI") return style;
+      return new Proxy(style, {
+        get(target, prop) {
+          if (prop === "height") return `${ROW}px`;
+          if (prop === "width") return "320px";
+          const value: unknown = Reflect.get(target, prop, target);
+          return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+        },
+      });
+    });
+    const many = batch("多", ROW_MOTION_LIMIT + 1);
+    mount(<Changing initial={ITEMS} />);
+    const list = document.querySelector("ul") as HTMLElement;
+    // 第一趟只记位置
+    sizes.resize(list, 320);
+    act(() => setItems([ITEMS[0], ...many]));
+    // 增删的记录在微任务里交给让位
+    await Promise.resolve();
+    expect(played).toEqual([]);
+    // 删掉留下来的那一行：其后每行上移一行
     act(() => setItems(many));
-    expect(list.style.opacity).toBe("0");
-    expect(liveItems().map((li) => li.style.opacity)).toEqual(Array(many.length).fill("1"));
-    await waitForFrames(() => expect(list.style.opacity).toBe("1"));
-    act(() => setItems([...many, ...more]));
-    expect(list.style.opacity).toBe("1");
-    expect(liveItems().map((li) => li.style.opacity)).toEqual([...Array(many.length).fill("1"), ...Array(more.length).fill("0")]);
+    await Promise.resolve();
+    const first = liveItems()[0];
+    expect(first.textContent).toBe("多0进行中");
+    expect(played.filter((p) => p.el === first).map((p) => p.frames[0].translate)).toEqual([`0px ${ROW}px`]);
+  });
+
+  it(`原先一行也没有、一次来了超过 ${ROW_MOTION_LIMIT} 行：整个列表淡入一次，行不各自起动画`, () => {
+    const played: { frames: Keyframe[]; options: KeyframeAnimationOptions }[] = [];
+    Object.defineProperty(HTMLUListElement.prototype, "animate", {
+      configurable: true,
+      writable: true,
+      value(frames: Keyframe[], options: KeyframeAnimationOptions) {
+        played.push({ frames, options });
+        return { currentTime: 0, cancel: () => undefined, onfinish: null };
+      },
+    });
+    onTestFinished(() => {
+      Reflect.deleteProperty(HTMLUListElement.prototype, "animate");
+    });
+    const many = batch("多", ROW_MOTION_LIMIT + 1);
+    mount(<Changing initial={[]} />);
+    act(() => setItems(many));
+    expect(items().map((li) => li.style.opacity)).toEqual(Array(many.length).fill("1"));
+    expect(played.map((p) => p.frames)).toEqual([[{ opacity: 0 }, { opacity: 1 }]]);
+    expect(played[0].options.duration).toBe(fade.in.duration * 1000);
+    expect(played[0].options.easing).toContain(fade.in.ease.join(", "));
+  });
+
+  it("换了一批时被换掉的行直接拿掉，不在原处与落到同一位置的新行叠着淡出", async () => {
+    mount(<Changing initial={ITEMS} />);
+    act(() => setItems([ITEMS[0], ...batch("多", ROW_MOTION_LIMIT + 1)]));
+    // 平常的淡出要 fade.out 那么久；这里下一帧就拿掉了
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    expect(items().filter((li) => li.hasAttribute("inert"))).toEqual([]);
+    expect(items()).toHaveLength(ROW_MOTION_LIMIT + 2);
   });
 
   it(`在末尾一次追加超过 ${ROW_MOTION_LIMIT} 行：已有的行不跟着淡入，新行里只有可见范围附近的播入场`, () => {
@@ -293,12 +414,45 @@ describe("行的增删", () => {
     // 一行 56 高、列表顶在视口最上沿：768 高的视口里露出第 0 到 13 行，再多留 4 行，第 0 到 17 行算在范围内
     expect(window.innerHeight).toBe(768);
     setRect(list, { left: 0, top: 0, width: 320, height: 56 });
+    setRect(items()[0], { left: 0, top: 0, width: 320, height: 56 });
+    // 追加不算换了一批：让位不暂停，暂停开关一次也不动
+    const toggles = new MutationObserver(() => undefined);
+    toggles.observe(list, { attributes: true, attributeFilter: [REFLOW_PAUSED_ATTR] });
+    onTestFinished(() => toggles.disconnect());
     act(() => setItems([ITEMS[0], ...many]));
-    expect(list.style.opacity).not.toBe("0");
+    expect(list.style.opacity).toBe("");
+    expect(toggles.takeRecords()).toEqual([]);
     const opacities = items().map((li) => li.style.opacity);
     expect(opacities[0]).toBe("1");
     expect(opacities.slice(1, 18)).toEqual(Array(17).fill("0"));
     expect(opacities.slice(18)).toEqual(Array(many.length - 17).fill("1"));
+  });
+
+  it("行高不一：按每一行实际的位置找可见范围，不按平均行距估，视口顶上插进来的新行照样播入场", () => {
+    const rows = batch("行", 40);
+    mount(<Changing initial={rows} />);
+    // 前 5 行各 200 高（带进度的大行），已滚出视口上方；其后 35 行各 56 高，从视口顶端排起，露出来的是第 5 到 18 行。
+    // 按平均行距（2960 / 40 = 74）估，露出来的会被算成第 13 行起，插在第 5 行（视口顶端）的新行落在余量之外
+    const list = document.querySelector("ul") as HTMLElement;
+    setRect(list, { left: 0, top: -1000, width: 320, height: 2960 });
+    items().forEach((li, i) => setRect(li, { left: 0, top: i < 5 ? -1000 + 200 * i : 56 * (i - 5), width: 320, height: i < 5 ? 200 : 56 }));
+    const near = { id: "near", name: "近" };
+    const far = { id: "far", name: "远" };
+    act(() => setItems([...rows.slice(0, 5), near, ...rows.slice(5), far]));
+    const opacityOf = (name: string) => items().find((li) => li.textContent === `${name}进行中`)?.style.opacity;
+    expect(opacityOf("近")).toBe("0");
+    expect(opacityOf("远")).toBe("1");
+  });
+
+  it("减少动画时新增的行只淡入，不从略小处落位", () => {
+    view = render(
+      <MotionConfig reducedMotion="always">
+        <Changing initial={ITEMS.slice(0, 2)} />
+      </MotionConfig>,
+    );
+    act(() => setItems(ITEMS));
+    const added = items()[2];
+    expect([added.style.opacity, added.style.transform]).toEqual(["0", ""]);
   });
 
   it("移除一行：它留在原处淡出，这段时间不可交互，放完后才离开文档", async () => {
@@ -381,6 +535,20 @@ describe("可见范围（List 与 Table 共用）", () => {
     // 整块在可见带下方远处：范围里没有行号不小于 0 的行
     expect(rowWindow(2000, 0, 640, 64).last).toBeLessThan(0);
     expect(() => rowWindow(0, 0, 640, 0)).toThrow(/行距/);
+  });
+
+  it("按每行实际上下沿找可见范围：等高时与按行距算的一致，越过首末行的部分按行距推算；高矮不一时不累积偏差", () => {
+    const even = (top: number, pitch: number) => (i: number) => ({ top: top + i * pitch, bottom: top + (i + 1) * pitch });
+    // 等高的行：首尾都在可见带里、整块在可见带下方、整块已滚出上方，三种都与 rowWindow 同口径
+    for (const top of [-640, -600, 0, 100, 2000, -5000]) {
+      expect(measuredRowWindow(30, even(top, 64), 0, 640, 64)).toEqual(rowWindow(top, 0, 640, 64));
+    }
+    // 前 5 行各 200 高、已滚出上方，之后各 56 高从可见带顶端排起：露出来的是第 5 到 16 行
+    const tall = (i: number) => (i < 5 ? { top: -1000 + 200 * i, bottom: -800 + 200 * i } : { top: 56 * (i - 5), bottom: 56 * (i - 4) });
+    expect(measuredRowWindow(20, tall, 0, 640, 92)).toEqual({ first: 5 - ROW_WINDOW_MARGIN, last: 16 + ROW_WINDOW_MARGIN });
+    // 末行之下还有可见的空：末尾追加的行按行距推下去
+    expect(measuredRowWindow(20, tall, 0, 1000, 92)).toEqual({ first: 5 - ROW_WINDOW_MARGIN, last: 19 + Math.ceil((1000 - 840) / 92) + ROW_WINDOW_MARGIN });
+    expect(() => measuredRowWindow(0, tall, 0, 640, 92)).toThrow(/行数/);
   });
 
   it("只在末尾追加：上一次的行都在、原样排在最前面；首次填充、插在中间、删行都不算", () => {

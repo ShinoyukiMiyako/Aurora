@@ -435,6 +435,43 @@ describe("主页：最近游玩", () => {
     expect(recentSection()).toBeNull();
   });
 
+  it("实例列表读取失败后重试：不在的段落不为重读先插进隐身占位，读到有卡再出现", async () => {
+    let failing = true;
+    let release: () => void = () => {
+      throw new Error("重读还没发出");
+    };
+    ipc.overrides.set("list_instances", () => {
+      if (failing) throw new IpcError("io_failed", "versions 目录读不出来");
+      return new Promise<InstanceDto[]>((resolve) => (release = () => resolve(instances)));
+    });
+    await mount();
+    expect(launcher.state.status.instances.kind).toBe("error");
+    expect(recentSection()).toBeNull();
+
+    failing = false;
+    const heroError = [...document.querySelectorAll<HTMLElement>("[data-pad]")].find((card) => card.textContent?.includes("实例列表读不出来"));
+    if (heroError === undefined) throw new Error("大卡没有原位报错");
+    click(buttonByText("重试", heroError));
+    await flush();
+    expect(launcher.state.status.instances.kind).toBe("loading");
+    expect(recentSection()).toBeNull();
+    // 过了隐身期也不补一块骨架：这一段读完之前是什么样就还是什么样
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(recentSection()).toBeNull();
+
+    await act(async () => {
+      release();
+      await settle();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    const titles = [...(recentSection() as HTMLElement).querySelectorAll<HTMLButtonElement>('button[aria-label^="打开「"]')].map((b) => b.textContent);
+    expect(titles).toEqual(["创造", "红石"]);
+  });
+
   it("设置晚于实例列表：大卡指向谁定下来之前最近游玩不出卡，不先排除错的实例再改", async () => {
     let releaseConfig: () => void = () => {
       throw new Error("设置的读取还没发出");
@@ -604,6 +641,16 @@ describe("主页：资讯", () => {
     expect(titles).toEqual(["Minecraft 1.21.1", "Minecraft 26.3", "Minecraft Live 回顾"]);
     expect(text()).toContain("正式版");
     expect(text()).toContain("活动");
+  });
+
+  // List 的根规则清零外边距与内边距，与页面类同一特异性：上距写在 List 上时谁赢看样式表注入顺序，冷启动主页时被清掉，
+  // 内容比骨架矮 10、整排跟着缩
+  it("列表上方的留白落在包住列表的那一层上，不写在 List 自己身上", async () => {
+    await mount();
+    const list = buttonByText("Minecraft 1.21.1").closest("ul");
+    if (list === null) throw new Error("资讯行不在列表里");
+    expect(list.className).not.toMatch(/newsList/);
+    expect(list.parentElement?.className).toMatch(/newsList/);
   });
 
   it("已有该版本的实例：主按钮打开它，先关弹窗再跳转", async () => {
@@ -1114,6 +1161,26 @@ describe("主页：固定的服务器", () => {
       release();
       await settle();
     });
+    expect(header.querySelector("[data-reserve]")).toBeNull();
+    expect(header.textContent).toContain("1 个 · 在线人数与延迟");
+  });
+
+  it("固定列表读取失败：卡头照样占住副标题一行，不比加载中矮；重试读到后台数填进同一行", async () => {
+    let failing = true;
+    ipc.overrides.set("list_pinned_servers", () => {
+      if (failing) throw new IpcError("io_failed", "servers.dat 读不出来");
+      return pinned;
+    });
+    await mount();
+    const header = [...document.querySelectorAll("h2")].find((h) => h.textContent === "固定的服务器")?.parentElement;
+    if (header === undefined || header === null) throw new Error("找不到服务器卡的卡头");
+    const card = header.closest<HTMLElement>("[data-pad]") as HTMLElement;
+    expect(card.textContent).toContain("固定的服务器读不出来");
+    expect(header.querySelector("[data-reserve]")).not.toBeNull();
+
+    failing = false;
+    click(buttonByText("重试", card));
+    await flush();
     expect(header.querySelector("[data-reserve]")).toBeNull();
     expect(header.textContent).toContain("1 个 · 在线人数与延迟");
   });

@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 //
-// 要逐帧看动画的用例单独一个文件：framer-motion 的帧循环挂在假定时器接管的 requestAnimationFrame 上，
-// 前一个用例收尾换回真实计时器时，挂在旧假时钟上的那一帧永远不来，同文件里之后的用例帧循环就停了。
+// 要逐帧看动画的用例单独一个文件：假定时器下 framer-motion 的帧跟着假时钟走（jsdom 的 requestAnimationFrame 每次排帧都用
+// 被假掉的 setInterval），推进多少就走多少帧。这里的用例收尾时不排空帧循环就换回真实计时器，还排在旧假时钟上的那一帧永远不来，
+// 同文件里之后的用例帧循环就停了。要和别的用例放在一起，收尾改成先卸载、再 drainFrames、再换计时器（见 test/dom.ts）。
 import { MotionConfig } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";

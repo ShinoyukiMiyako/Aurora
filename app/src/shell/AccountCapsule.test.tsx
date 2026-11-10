@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 // 账户胶囊的加载、换状态与按压：冷启动账户切片晚到时不误画「添加账户」，骨架、当前账户、「添加账户」是同一个胶囊。
+import { MotionConfig } from "framer-motion";
 import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
@@ -39,14 +40,16 @@ const flush = () =>
     await settle();
   });
 
-async function mount(initiallyShown = true) {
+async function mount(initiallyShown = true, reducedMotion: "always" | "never" = "never") {
   view = render(
-    <LauncherProvider>
-      <ShellProvider>
-        <Host initiallyShown={initiallyShown} />
-        <OverlayRoot />
-      </ShellProvider>
-    </LauncherProvider>,
+    <MotionConfig reducedMotion={reducedMotion}>
+      <LauncherProvider>
+        <ShellProvider>
+          <Host initiallyShown={initiallyShown} />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </MotionConfig>,
   );
   await flush();
 }
@@ -203,12 +206,31 @@ describe("已经读到账户之后", () => {
     expect(face("Alexander").style.opacity).toBe("0");
   });
 
+  /** 头像角上的提醒点。 */
+  const warnDot = () => {
+    const dot = capsule().querySelector("[data-sk-art='skin']")?.nextElementSibling;
+    if (!(dot instanceof HTMLElement)) throw new Error("头像旁没有提醒点");
+    return dot;
+  };
+
   it("当前账户需要重新登录：头像角上的提醒点从零弹入", async () => {
     bootOverrides(ipc, { accounts: [accountDto({ status: "expired" })] });
     await mount();
-    const dot = capsule().querySelector("[data-sk-art='skin']")?.nextElementSibling;
-    if (!(dot instanceof HTMLElement)) throw new Error("头像旁没有提醒点");
+    expect(warnDot().style.opacity).toBe("0");
+    expect(warnDot().style.transform).toContain("scale(0)");
+  });
+
+  it("减少动画时提醒点只淡入淡出：账户恢复后退场不先跳小一截", async () => {
+    bootOverrides(ipc, { accounts: [accountDto({ status: "expired" })] });
+    await mount(true, "always");
+    const dot = warnDot();
     expect(dot.style.opacity).toBe("0");
-    expect(dot.style.transform).toContain("scale(0)");
+    bootOverrides(ipc, { accounts: [accountDto()] });
+    act(() => void launcher.actions.reload("accounts"));
+    await flush();
+    expect(capsule().getAttribute("aria-label")).toBe(ACCOUNT_COPY.current("Steve", accountKindLabel("offline", null)));
+    // 退场在假时钟下播不完，节点还在；减少动画下缩放一步到位，退场带缩放的话这里已经是 scale(0.6)
+    expect(dot.isConnected).toBe(true);
+    expect(dot.style.transform).not.toContain("scale");
   });
 });

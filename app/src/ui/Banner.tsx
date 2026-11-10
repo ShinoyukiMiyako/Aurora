@@ -69,7 +69,11 @@ export function Banner({ tone, title, children, icon, actions, onClose, announce
 }
 
 export interface BannerSlotProps {
-  /** 条件渲染的横幅，或渲染横幅的组件；假值会被丢掉。 */
+  /**
+   * 条件渲染的横幅，假值会被丢掉。可以是渲染横幅的组件（<CrashBanner key="crashed" … />），但条件要写在槽里，
+   * 组件自己不能返回 null：槽位按写进来的子项数入场序号、给每个子项包一层，看不到组件渲染出了什么，
+   * 返回 null 的组件照样占一个号（下面的区块晚一拍），还留下一层空的包裹。
+   */
   children: ReactNode;
   /** 包在每条横幅外面那层元素的类名，只用于布局（所在网格的区域、对齐）。 */
   itemClassName?: string;

@@ -49,8 +49,10 @@ describe("换内容时旧的一块叠在原处淡出", () => {
     for (const stack of [".blocked", ".choose", ".confirm"]) expect(decls(stack).get("position")).toBe("relative");
   });
 
-  it("「正在重新读取」等待期只占位、不可见", () => {
-    expect(decls(".rereading[data-pending]").get("visibility")).toBe("hidden");
+  it("整合包表单转成只读时撤下的名称框、版本行与换封面，也以所在的栈为基准在原处淡出；名称文字的包裹层仍是弹性盒，长名称截得出省略号", () => {
+    for (const stack of [".packFields", ".stageColumn"]) expect(decls(stack).get("position")).toBe("relative");
+    const item = decls(".packField");
+    expect([item.get("display"), item.get("flex-direction"), item.get("min-width")]).toEqual(["flex", "column", "0"]);
   });
 });
 

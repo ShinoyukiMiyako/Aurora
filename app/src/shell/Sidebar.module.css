@@ -232,8 +232,10 @@
 /*
  * 行与按钮之间还隔着名称提示的包裹层：display: contents 只去掉它的盒子，选择器仍按 DOM 树匹配，
  * 所以从行找按钮一律用后代选择器，写成子选择器就永远匹配不上。
+ * 刚放下的行也不缩：拖动途中按 Esc 放弃时指针多半还按着，这里命中的话按钮会从 1.04 缩到 0.94、停成按下的样子，
+ * 而这次松手不会触发点击。放下的记号要等缩回播完、指针也松开才摘（见组件），新的按下会先把它清掉。
  */
-.row:not([data-dragging]) .pin:active {
+.row:not([data-dragging]):not([data-landing]) .pin:active {
   transform: scale(0.94);
 }
 
@@ -297,12 +299,14 @@
 }
 
 /*
- * 减少动画：按下不缩、拿起不放大，改为瞬时变淡。固定项按下那条与上面「没拿起时按下缩小」特异性相同，
- * 靠排在它后面压过；比拿起、放下两条都高一级。
+ * 减少动画：按下不缩、拿起不放大，改为瞬时变淡。上面「没拿起、没在放下时按下缩小」带两个 :not()，
+ * 固定项按下这里并上同样带两个 :not() 的一条，特异性比它高一级，并且排在它后面；不带 :not() 的那条
+ * 接住拿起中、放下中的按下（只变淡）。比拿起、放下两条都高一级。顺序与特异性由 sidebar-layout 测试钉住。
  */
 :global([data-sk-reduced]) .item:active,
 :global([data-sk-reduced]) .create:active,
 :global([data-sk-reduced]) .row .pin:active,
+:global([data-sk-reduced]) .row:not([data-dragging]):not([data-landing]) .pin:active,
 :global([data-sk-reduced]) .row[data-dragging] .pin {
   transform: none;
   opacity: 0.85;

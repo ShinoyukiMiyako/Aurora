@@ -1,7 +1,7 @@
 // 游戏：全局内存（推荐值全部来自后端的内存建议）、版本隔离档位、游戏目录与其他文件夹、存档备份。
 
-import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
-import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
+import { AnimatePresence, motion, useIsPresent } from "framer-motion";
+import { useState, type ReactNode, type Ref } from "react";
 import type { InstanceSummary, Settings, WorldBackup } from "../../../domain/adapt";
 import { formatMemory } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
@@ -9,8 +9,9 @@ import { memoryBasis } from "../../../domain/memory";
 import { samePath } from "../../../domain/paths";
 import { autoBackupOutcome } from "../../../domain/rules";
 import { useLoadingGate } from "../../../lib/loading-gate";
-import { fade, insertItem } from "../../../lib/motion";
 import { useReflow } from "../../../lib/reflow";
+import { useInsertItem } from "../../../lib/useInsertItem";
+import { useMounted } from "../../../lib/useMounted";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR, gameDirSwitchReason, GAME_DIR_SWITCH_COPY } from "../../../copy/flows";
@@ -233,13 +234,6 @@ function IsolationCard() {
 
 // ---------------------------------------------------------------- 游戏目录
 
-/** 减少动画时行的进出只留透明度：缩放在减少动画下一步到位，退场会先缩一下再淡出。 */
-const ROW_FADE_ONLY = {
-  initial: { opacity: 0 },
-  animate: { opacity: 1, transition: fade.in },
-  exit: { opacity: 0, transition: fade.out },
-} as const;
-
 interface DirItemProps {
   /** popLayout 把退场的行抽出布局时要量这一层，由 AnimatePresence 递进来。 */
   ref?: Ref<HTMLLIElement>;
@@ -250,7 +244,7 @@ interface DirItemProps {
 
 function DirItem({ ref, own, children }: DirItemProps) {
   const present = useIsPresent();
-  const item = useReducedMotionConfig() === true ? ROW_FADE_ONLY : insertItem;
+  const item = useInsertItem();
   // 退场中的行留在原处淡出，按钮已经点不到、聚焦不到
   return (
     <motion.li ref={ref} className={s.dirRow} inert={!present} initial={own ? item.initial : false} animate={item.animate} exit={item.exit}>
@@ -266,10 +260,7 @@ function DirItem({ ref, own, children }: DirItemProps) {
 function DirList<T extends { path: string }>({ items, children }: { items: readonly T[]; children: (item: T) => ReactNode }) {
   const reflow = useReflow<HTMLUListElement>();
   // 不能用 AnimatePresence 的 initial={false} 关掉首屏入场：它会让行里之后才挂载的元素也跳过入场
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   return (
     <ul ref={reflow} className={s.dirList}>
       <AnimatePresence mode="popLayout">
@@ -549,14 +540,14 @@ function WorldBackupCard() {
 }
 
 export function GameSection() {
-  // 卡片之间互相让位：内存估算、目录列表晚到或提示出没时卡片变高，下面的卡片滑过去而不是一帧跳下去
-  const reflow = useReflow<HTMLDivElement>();
+  // 卡片直接排进载入门里会让位的分区卡片栈（SectionFlow）：内存估算、目录列表晚到或提示出没时卡片变高，
+  // 下面的卡片由它滑过去。这里不再包一层：包了以后外层只看得到一个子项，等于两层让位叠着、只有内层在干活
   return (
-    <div ref={reflow} className={s.sectionStack}>
+    <>
       <MemoryCard />
       <IsolationCard />
       <GameDirectoryCard />
       <WorldBackupCard />
-    </div>
+    </>
   );
 }

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { artUrl, useArtStatus } from "../../mc/art";
 import { useBlockCatalog, type BlockCatalog } from "../../mc/catalog";
 import { peekArt, useArt } from "../../mc/useArt";
@@ -54,8 +55,21 @@ function imageFits(url: string, bitmap: ImageBitmap): boolean {
  * 1. 有玩家图片时取图片（16 × 16），三面同一张、不染色；图片不依赖本机材质源。
  * 2. 没有图片、图片读不到或尺寸不合规时，按方块 id 取本机材质：顶面、侧面（有正面的连正面）都取到才算。
  * 图片还在取时不取方块材质，免得先闪一下方块再换成图片。cover 为 null（调用方这次不画方块）时恒为 null，不发请求。
+ * 换了来源（换封面方块、换图片、材质源变了）而新图还在取的这段时间先给上一份已就绪的，到了再换：
+ * 不中途落回徽记，旧材质与新材质之间是一次交叉淡化（来源标识 key 变了），而不是材质、徽记、材质闪两下。新图取不到才回落徽记。
  */
 export function useBlockSource(cover: InstanceCover | null): BlockSource | null {
+  const { source, waiting } = useLoadedSource(cover);
+  const [held, setHeld] = useState<BlockSource | null>(source);
+  // 按来源标识比：每次渲染给的都是新对象，按引用比会每次都存、反复重渲染
+  if (source !== null && (held === null || held.key !== source.key)) setHeld(source);
+  if (source === null && !waiting && held !== null) setHeld(null);
+  if (source !== null) return source;
+  return waiting ? held : null;
+}
+
+/** 此刻已就绪的材质，以及还有没有图在取（取图缓存里既没有成功也没有失败）。 */
+function useLoadedSource(cover: InstanceCover | null): { source: BlockSource | null; waiting: boolean } {
   const status = useArtStatus();
   const catalog = useBlockCatalog();
   const imageUrl = cover?.image ?? null;
@@ -65,21 +79,28 @@ export function useBlockSource(cover: InstanceCover | null): BlockSource | null 
   // 取图失败的结果会缓存下来：useArt 给 missing 而缓存里已有定论，就是读不到；缓存里没有则还在取
   const wantBlock = imageUrl === null || peekArt(imageUrl)?.kind === "missing" || (image.kind === "ready" && imageBitmap === null);
   const faces = cover !== null && wantBlock && versionId !== null ? blockFaces(cover.block, versionId, catalog) : null;
-  const top = useArt(faces ? artUrl(faces.top) : null);
-  const side = useArt(faces ? artUrl(faces.side) : null);
-  const front = useArt(faces?.front ? artUrl(faces.front) : null);
+  const topUrl = faces ? artUrl(faces.top) : null;
+  const sideUrl = faces ? artUrl(faces.side) : null;
+  const frontUrl = faces?.front ? artUrl(faces.front) : null;
+  const top = useArt(topUrl);
+  const side = useArt(sideUrl);
+  const front = useArt(frontUrl);
+  const waiting = [imageUrl, topUrl, sideUrl, frontUrl].some((url) => url !== null && peekArt(url) === undefined);
 
   if (imageUrl !== null && imageBitmap !== null) {
-    return { key: `image|${imageUrl}`, top: imageBitmap, side: imageBitmap, front: null, topTint: null, sideTint: null };
+    return { source: { key: `image|${imageUrl}`, top: imageBitmap, side: imageBitmap, front: null, topTint: null, sideTint: null }, waiting };
   }
-  if (cover === null || faces === null || top.kind !== "ready" || side.kind !== "ready") return null;
-  if (faces.front !== null && front.kind !== "ready") return null;
+  if (cover === null || faces === null || top.kind !== "ready" || side.kind !== "ready") return { source: null, waiting };
+  if (faces.front !== null && front.kind !== "ready") return { source: null, waiting };
   return {
-    key: `block|${versionId}|${cover.block}`,
-    top: top.bitmap,
-    side: side.bitmap,
-    front: front.kind === "ready" ? front.bitmap : null,
-    topTint: faces.topTint,
-    sideTint: faces.sideTint,
+    source: {
+      key: `block|${versionId}|${cover.block}`,
+      top: top.bitmap,
+      side: side.bitmap,
+      front: front.kind === "ready" ? front.bitmap : null,
+      topTint: faces.topTint,
+      sideTint: faces.sideTint,
+    },
+    waiting,
   };
 }

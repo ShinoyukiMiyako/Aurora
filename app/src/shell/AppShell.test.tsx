@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
-import { motion } from "framer-motion";
-import { act } from "react";
+import { motion, useIsPresent } from "framer-motion";
+import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { INSTANCE_TAB_LABEL, PAGE_LABEL } from "../copy/flows";
@@ -163,6 +163,19 @@ describe("外壳布局", () => {
       await vi.advanceTimersByTimeAsync(PAGE_PRELOAD_DELAY_MS);
     });
     expect([...loads].sort()).toEqual([...PAGE_IDS].sort());
+  });
+
+  it("主界面出来后预取一次游戏目录列表，实例库第一帧就有目录选择；首次启动向导期间不取", async () => {
+    await mount();
+    expect(callsOf(ipc, "list_game_directories")).toHaveLength(1);
+    view?.unmount();
+    view = undefined;
+    resetRecorder(ipc);
+    bootOverrides(ipc, { instances: [], firstRun: true });
+    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    await mount({ onboarding: OnboardingStub });
+    expect(document.querySelector("[data-flow='onboarding']")).not.toBeNull();
+    expect(callsOf(ipc, "list_game_directories")).toEqual([]);
   });
 
   it("没加载过的页面挂起后照常出现，标题栏写页面名", async () => {
@@ -512,6 +525,45 @@ describe("页面入场随到达方式", () => {
     expect(staggered()).toBe(0);
   });
 
+  it("页面槽在挂上时取定到达方式：主界面之后重渲染过（窗口失焦暂停花瓣），槽里再重挂的页面根拿到的仍是挂上时那一次", async () => {
+    const handle: { remount: (() => void) | null } = { remount: null };
+    function RemountingPage({ route }: { route: Route }) {
+      const [generation, setGeneration] = useState(0);
+      handle.remount = () => setGeneration((n) => n + 1);
+      return (
+        <Page key={generation}>
+          <Card>{`${route.page}:${generation}`}</Card>
+        </Page>
+      );
+    }
+    registry = createPageRegistry({
+      ...(Object.fromEntries(PAGE_IDS.map((page) => [page, async () => ({ default: EntrancePage })])) as unknown as PageTable),
+      home: async () => ({ default: RemountingPage }),
+    });
+    await registry.load("home");
+    const focusHandlers: ((focused: boolean) => void)[] = [];
+    port = {
+      ...port,
+      isFocused: async () => true,
+      onFocusChanged: async (handler) => {
+        focusHandlers.push(handler);
+        return () => undefined;
+      },
+    };
+    await mount();
+    expect(root().style.opacity).toBe("1");
+    // 启动那一屏用掉之后主界面重渲染：槽也跟着重渲染，取值要是按渲染时读，这里就从 still 变成了 enter
+    act(() => focusHandlers.forEach((handler) => handler(false)));
+    await flush();
+    const again = handle.remount;
+    if (again === null) throw new Error("页面没有挂上");
+    act(() => again());
+    await flush();
+    expect(root().textContent).toBe("home:1");
+    expect(root().style.opacity).toBe("1");
+    expect(staggered()).toBe(0);
+  });
+
   it("启动那一屏只有一次：还没导航过，错误页点「重新加载」挂回来的页面照常入场，不一帧硬切", async () => {
     broken.add("home");
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -559,6 +611,57 @@ describe("按片订阅", () => {
     expect(launcher.state.tasks[0].progress).toBe(1);
     expect(launcher.state.session?.logs).toHaveLength(20);
     expect(pageRenders.home).toBe(before);
+  });
+
+  // 外壳根整份读 useShell：命令面板开合、窗口失焦聚焦都让它重渲染。主界面里的 motion 元素都读外壳根那一层的在场上下文，
+  // 上下文每次换新对象的话，它们全跟着重渲染，带布局动画的还要再量一次布局
+  it("外壳根因无关状态重渲染（窗口失焦聚焦、命令面板开合）：主界面里只读在场上下文的组件一次都不重渲染", async () => {
+    let presenceRenders = 0;
+    /** 页面本身不重渲染时，它再渲染只可能是外壳根那一层的在场上下文换了值。 */
+    function PresenceProbe() {
+      useIsPresent();
+      presenceRenders += 1;
+      return null;
+    }
+    function ProbePage() {
+      return (
+        <div data-page="home">
+          <PresenceProbe />
+        </div>
+      );
+    }
+    registry = createPageRegistry({ ...pageTable(loads, broken), home: async () => ({ default: ProbePage }) });
+    await registry.load("home");
+    const focusHandlers: ((focused: boolean) => void)[] = [];
+    port = {
+      ...port,
+      isFocused: async () => true,
+      onFocusChanged: async (handler) => {
+        focusHandlers.push(handler);
+        return () => undefined;
+      },
+    };
+    await mount();
+    expect(pageShown()).toBe("home");
+    expect(shell.petalsPaused).toBe(false);
+    const before = presenceRenders;
+    expect(before).toBeGreaterThan(0);
+
+    const toggles = 3 + Math.floor(Math.random() * 5);
+    for (let i = 0; i < toggles; i++) {
+      // 花瓣暂停跟着焦点翻转：外壳上下文换了值，读它的外壳根这一次必然重渲染
+      act(() => focusHandlers.forEach((handler) => handler(false)));
+      expect(shell.petalsPaused).toBe(true);
+      act(() => focusHandlers.forEach((handler) => handler(true)));
+      expect(shell.petalsPaused).toBe(false);
+    }
+    act(() => shell.openPalette());
+    await flush();
+    expect(shell.palette.open).toBe(true);
+    act(() => shell.closePalette());
+    await flush();
+    expect(shell.palette.open).toBe(false);
+    expect(presenceRenders).toBe(before);
   });
 });
 

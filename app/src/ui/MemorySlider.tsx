@@ -9,6 +9,7 @@ import { cx } from "../lib/util";
 import { Appear } from "./Appear";
 import { Callout } from "./Callout";
 import styles from "./MemorySlider.module.css";
+import { Skeleton } from "./Skeleton";
 import { Slider, type SliderMark } from "./Slider";
 
 export const MEMORY_MIN_MB = 1024;
@@ -100,6 +101,25 @@ export function MemorySlider({ value, onChange, onCommit, totalMb, recommended, 
           </Callout>
         )}
       </Appear>
+    </div>
+  );
+}
+
+/**
+ * 内存滑杆的加载占位，放进 Loadable 的 skeleton：与没有警示条时的滑杆等高（命中区一行、刻度行、占用说明一行），
+ * 轨道与读数各在各的位置。和滑杆写在一处，滑杆的尺寸一改占位跟着改，设置页与实例设置页不各留一份。
+ * 外层容器与占用说明行直接用滑杆自己的类，只有命中区加刻度这一行按 Slider 的尺寸另画。
+ */
+export function MemorySliderSkeleton() {
+  return (
+    <div className={styles.root}>
+      <span className={styles.skeletonTrack}>
+        <Skeleton shape="block" width="100%" height={6} radius="pill" />
+        <Skeleton shape="block" width={40} height={12} radius="xs" />
+      </span>
+      <p className={styles.usage}>
+        <Skeleton shape="text" width="45%" />
+      </p>
     </div>
   );
 }

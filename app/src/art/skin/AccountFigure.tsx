@@ -4,14 +4,15 @@ import { BitmapCanvas } from "../illustrations/BitmapCanvas";
 import { useDevicePixelRatio } from "../illustrations/canvas";
 import { accountHue } from "../illustrations/seed";
 import styles from "./AccountFigure.module.css";
-import { FIGURE_FRAME, FIGURE_FRAME_PAD, FIGURE_SIZE, type FigureScale, type SkinRef } from "./layout";
+import { FIGURE_FRAME, FIGURE_FRAME_PAD, FIGURE_SIZE, type FigureScale, type SkinSource } from "./layout";
 import { silhouetteFigureCanvas, skinFigureCanvas } from "./render";
 import { SpinningFigure } from "./SpinningFigure";
 import { useSkin } from "./useSkin";
 
 export interface AccountFigureProps {
   uuid: string;
-  skin: SkinRef | null;
+  /** 同 AccountAvatar：null 没有可用皮肤，"loading" 还在读（保留正在显示的立绘，读到再换）。 */
+  skin: SkinSource;
   /** 每个皮肤像素的 CSS px：4 / 5 / 6，布局方框对应 64 × 128、80 × 160、96 × 192。 */
   scale: FigureScale;
   /** 单独出现时的可访问名称；不传则 aria-hidden。 */
@@ -23,7 +24,8 @@ export interface AccountFigureProps {
 
 /**
  * 角色立绘：皮肤盒子的 3D 正交投影，含外层。只用于主页问候卡、账户页聚光卡与账户卡、离线账户弹窗。
- * 取不到皮肤时是剪影立绘，手臂宽按皮肤体型，没有皮肤信息时按宽体型。换了皮肤时旧立绘留到新皮肤取到，两张交叉淡化。
+ * 取不到皮肤时是剪影立绘，手臂宽按皮肤体型，没有皮肤信息（含还在读）时按宽体型。换了皮肤、或换了账户而皮肤信息还在读时，
+ * 旧立绘留到新皮肤取到，两张交叉淡化。
  *
  * 根元素仍按 16 × 32 占位：底边是脚底基线，各处的脚下投影和页面布局都以它为准。
  * 投影比这个方框宽也比它高，画在四周外扩的外框里，外框不参与布局。
@@ -35,7 +37,7 @@ export function AccountFigure({ uuid, skin, scale, label, interactive = false, c
   const frameHeight = FIGURE_FRAME.height * scale;
   const pad = FIGURE_FRAME_PAD * scale;
   const canvas = (bitmap: CanvasImageSource) => <BitmapCanvas bitmap={bitmap} cssWidth={frameWidth} cssHeight={frameHeight} dpr={dpr} />;
-  const model = skin === null ? "wide" : skin.model;
+  const model = skin === null || skin === "loading" ? "wide" : skin.model;
   const real = shown === null ? null : interactive ? <SpinningFigure skin={shown.skin} scale={scale} dpr={dpr} /> : canvas(skinFigureCanvas(shown.skin, scale, dpr));
   return (
     <span

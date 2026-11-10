@@ -107,8 +107,9 @@ export function Location({ copy, dir, requiredBytes, desktopShortcut, initialChe
   const hint = check === null ? null : dirHint(text, check, requiredBytes);
   const reflow = useReflow<HTMLDivElement>();
 
-  // 发起安装时目录已经取走，这时再改或返回，安装仍按旧目录走，界面却对不上；下面的 busy 禁用同理
-  useEscapeListener(!busy, onBack);
+  // 发起安装时目录已经取走，这时再改或返回，安装仍按旧目录走，界面却对不上；下面的 busy 禁用同理。
+  // 换步后这一页还要淡出一会儿，监听挂在窗口上、不受 inert 管：这期间的 Esc 归新的一页
+  useEscapeListener(!busy && present, onBack);
 
   // 不用 TextInput 的 onEnter：它不看重复事件。在上一页的按钮上按住 Enter 进来时焦点已经落在这里，安装一旦发起就取消不了
   const onPathKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {

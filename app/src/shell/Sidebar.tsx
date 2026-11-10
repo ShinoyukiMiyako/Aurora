@@ -21,9 +21,10 @@ import { percent } from "../domain/format";
 import { InstanceAvatar } from "../launch/InstanceAvatar";
 import { brokenAction, launchView, launchViewEqual, type LaunchView } from "../launch/launchView";
 import { useLaunch, type LaunchEntry } from "../launch/useLaunch";
-import { TOOLTIP_TIMING, fade, springs } from "../lib/motion";
+import { TOOLTIP_TIMING, fade, insertItemFade, popMark, springs } from "../lib/motion";
 import { REFLOW_SKIP_ATTR, observeReflow } from "../lib/reflow";
 import { Slide } from "../lib/slide";
+import { useMounted } from "../lib/useMounted";
 import { clamp, isImeComposing } from "../lib/util";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } from "../state/launcher";
 import { sameRoute, type Route } from "../state/route";
@@ -281,10 +282,7 @@ export function Sidebar() {
   // 选中的固定项被拖动、或在重排补间途中时，滑块跟着它的位移走
   const followY = useMotionValue(0);
   // 侧栏挂上的那一次提交还没过去：这期间摆出来的滑块直接是成品（冷启动时侧栏直接出现，不做入场）
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
 
   const placeSelection = useCallback(
     (key: SidebarKey | null, how: "slide" | "jump") => {
@@ -305,10 +303,12 @@ export function Sidebar() {
       // 从收起到显出：关着过渡先把种类换好，显出来时浅底已经是该有的样子，不先显出再淡掉。
       // 侧栏挂上的那一次提交里连显出也关着过渡。下面读布局时浏览器按此刻的属性算一次样式，
       // 这一次关着过渡就不起过渡；之后再打开过渡、值没再变，也不会补播。
-      // 上一次的淡出还没播完（进账户页后马上点回侧栏）时不关：关了会掐掉淡出、一帧跳到全透明再淡入，
-      // 照常过渡才是从此刻的透明度反向淡回。查询会先把挂起的样式算一遍，所以排在下面改属性之前
-      const appearing = shown.current === null;
-      if (appearing && !fadingOut(el)) el.setAttribute("data-instant", "");
+      // 上一次的淡出还没播完（进账户页后马上点回侧栏）时按「仍显示着」处理：不关过渡（关了会掐掉淡出、
+      // 一帧跳到全透明再淡入），透明度从此刻的值反向淡回，位置也从停着的那一行沿弹簧滑过去，
+      // 而不是半透明地瞬移到新的一行。查询会先把挂起的样式算一遍，所以排在下面改属性之前
+      const resuming = shown.current === null && fadingOut(el);
+      const appearing = shown.current === null && !resuming;
+      if (appearing) el.setAttribute("data-instant", "");
       el.dataset.kind = isPinKey(key) ? "pin" : "nav";
       if (!mounted.current) el.setAttribute("data-on", "");
       const top = topWithin(row, capsule);
@@ -322,14 +322,16 @@ export function Sidebar() {
     [reduced],
   );
 
-  // 选中项变了：滑过去
+  // 选中项变了：滑过去。选中项没变、只是固定项增删换序或固定区刚挂上：行的位置变了，滑块直接跟到新位置
+  // （固定项自己的补间由 followY 带着走）。两件事落在同一次提交里时按选中项变了处理：在实例页固定或取消固定当前实例，
+  // 选中项在「实例库」与这个固定项之间换，固定顺序也同时变了。这时读到的已是新布局，滑动的终点就是新位置；
+  // 分成两个 effect 各管一件的话，排在后面的直接到位会掐掉刚起步的滑动，滑块瞬移到新行
+  const placedFor = useRef(selection);
   useLayoutEffect(() => {
-    placeSelection(selection, "slide");
-  }, [placeSelection, selection]);
-  // 固定项增删换序、固定区刚挂上：行的位置变了，滑块直接跟到新位置（固定项自己的补间由 followY 带着走）
-  useLayoutEffect(() => {
-    placeSelection(selectionRef.current, "jump");
-  }, [placeSelection, orderKey, pinsReady]);
+    const how = placedFor.current === selection ? "jump" : "slide";
+    placedFor.current = selection;
+    placeSelection(selection, how);
+  }, [placeSelection, selection, orderKey, pinsReady]);
   // 胶囊高度变了（窗口缩放）：设置那一行跟着底边走
   useLayoutEffect(() => {
     const capsule = capsuleRef.current;
@@ -633,6 +635,7 @@ function NavItem({
   badge?: boolean;
   ariaLabel?: string;
 }) {
+  const reduced = useReducedMotionConfig() === true;
   return (
     <div className={styles.row} data-sidebar-row="">
       <Tooltip content={label} sub={sub} side="right" delay={TOOLTIP_TIMING.sidebarDelay} disabled={tooltipsOff}>
@@ -652,15 +655,7 @@ function NavItem({
         >
           <Icon name={icon} size={20} />
           <AnimatePresence initial={false}>
-            {badge === true && (
-              <motion.span
-                className={styles.dot}
-                aria-hidden="true"
-                initial={{ opacity: 0, scale: 0 }}
-                animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
-                exit={{ opacity: 0, scale: 0.6, transition: fade.out }}
-              />
-            )}
+            {badge === true && <motion.span className={styles.dot} aria-hidden="true" {...(reduced ? popMark.reduced : popMark.dot)} />}
           </AnimatePresence>
         </button>
       </Tooltip>
@@ -765,8 +760,20 @@ interface PinItemProps extends ItemBaseProps {
   onMenu(target: HTMLElement, openedBy: MenuOpenedBy): void;
 }
 
+/**
+ * 固定项的进出：新固定的从 0.6 沿 base 弹簧弹入，取消固定的淡出并缩到 0.8。
+ * 减少动画时换成 insertItemFade 只动透明度：根部 MotionConfig 会把缩放改成一步到位，照用这一份的话
+ * 取消固定的那一项会先跳到 0.8 再淡出。
+ */
+const PIN_PRESENCE = {
+  initial: { opacity: 0, scale: 0.6 },
+  animate: { opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } },
+  exit: { opacity: 0, scale: 0.8, transition: fade.out },
+} as const;
+
 function PinItem({ ref: presenceRef, instance, index, enter, selected = false, tabStop, tooltipsOff, dragging, landing, onLanded, register, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onActivate, onMenu }: PinItemProps) {
   const y = useMotionValue(0);
+  const presence = useReducedMotionConfig() === true ? insertItemFade : PIN_PRESENCE;
   // 每个固定项只随自己的启动视图变：别的实例的下载进度、这一局的游戏日志不让它重渲染
   const view = useLauncherSelector((s) => launchView(s, instance), launchViewEqual);
   const id = instance.id;
@@ -784,6 +791,17 @@ function PinItem({ ref: presenceRef, instance, index, enter, selected = false, t
       onMenu(event.currentTarget, "keyboard");
     }
   };
+  // 缩回播完时指针还按着这个按钮（拖动途中按 Esc 放弃，指针还没松）：放下的记号留到指针松开再摘。
+  // 早摘了，样式表里的按下缩小这时补上来，按钮停成一次不会生效的按压（这次松手的点击已被屏蔽）。
+  // 指针被按钮捕获着，松开总是报到这里。「还按着」看主键按下的那个指针是否仍被按钮捕获，不看 :active：
+  // 键盘按住空格也是 :active，可它松开不经过指针事件，记号会一直摘不掉；那一次按压松开照常触发点击，按下缩小本来就该显出来
+  const pressedBy = useRef<number | null>(null);
+  const landedWhilePressed = useRef(false);
+  const release = () => {
+    if (!landedWhilePressed.current) return;
+    landedWhilePressed.current = false;
+    onLanded(id);
+  };
   return (
     <motion.li
       ref={ref}
@@ -792,9 +810,9 @@ function PinItem({ ref: presenceRef, instance, index, enter, selected = false, t
       data-dragging={dragging || undefined}
       data-landing={landing || undefined}
       style={{ y }}
-      initial={enter ? { opacity: 0, scale: 0.6 } : false}
-      animate={{ opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } }}
-      exit={{ opacity: 0, scale: 0.8, transition: fade.out }}
+      initial={enter ? presence.initial : false}
+      animate={presence.animate}
+      exit={presence.exit}
     >
       <Tooltip content={instance.name} sub={<PinLine view={view} instance={instance} />} side="right" delay={TOOLTIP_TIMING.sidebarDelay} disabled={tooltipsOff}>
         <button
@@ -812,13 +830,26 @@ function PinItem({ ref: presenceRef, instance, index, enter, selected = false, t
             onMenu(event.currentTarget, "pointer");
           }}
           onKeyDown={onKeyDown}
-          onPointerDown={(event) => onPointerDown(event, id, index)}
+          onPointerDown={(event) => {
+            if (event.button === 0) pressedBy.current = event.pointerId;
+            onPointerDown(event, id, index);
+          }}
           onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={onPointerCancel}
+          onPointerUp={(event) => {
+            release();
+            onPointerUp(event);
+          }}
+          onPointerCancel={() => {
+            release();
+            onPointerCancel();
+          }}
+          onLostPointerCapture={release}
           onTransitionEnd={(event) => {
             // 只认按钮自己的缩放：头像里的底色过渡会冒泡上来，抬起阴影叠层的透明度过渡也报在按钮上
-            if (landing && event.target === event.currentTarget && event.propertyName === "transform") onLanded(id);
+            if (!landing || event.target !== event.currentTarget || event.propertyName !== "transform") return;
+            const pointer = pressedBy.current;
+            if (pointer !== null && event.currentTarget.hasPointerCapture(pointer)) landedWhilePressed.current = true;
+            else onLanded(id);
           }}
         >
           {/* 拖动中方块照样浮着：拿起是往上提，摘掉上浮会让它先瞬间落下 2px */}
@@ -894,6 +925,11 @@ function PinMenuSlot({
   const root = useOverlayRoot();
   const menuId = useId();
   const { open, id } = menu;
+  const missing = instance === undefined;
+  // 开着菜单的实例被删掉：面板随之不画了，侧栏这边也要记成关上。否则一直当作有菜单开着，名称提示全关着
+  useEffect(() => {
+    if (missing && open) onClose();
+  }, [missing, onClose, open]);
   useEffect(() => {
     if (open) return;
     // 菜单不对外报告退场播完，面板拿掉就是播完了。按 id 找而不是记住元素：同一项关上又打开再关上时，

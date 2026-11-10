@@ -20,7 +20,7 @@ import { BlockedFilesModal } from "../discover/BlockedFilesModal";
 import { TASKS_COPY } from "../tasks/copy";
 import styles from "./instance.module.css";
 import type { InstallStage } from "./model";
-import { InstallingBanner } from "./OverviewTab";
+import { InstallingBanner, useInstallingBanner } from "./OverviewTab";
 
 export interface InstallStageTabProps {
   tab: InstanceTab;
@@ -40,10 +40,12 @@ export function InstallStageTab({ tab, instanceId, stage }: InstallStageTabProps
  */
 function OverviewStage({ instanceId, stage }: { instanceId: string; stage: InstallStageTabProps["stage"] }) {
   const reflow = useReflow<HTMLDivElement>();
+  // 任务刚完成的那一拍页面仍按在跑传进来（见 heldInstallStage），横幅接着画这个已完成的任务、进度推满
   const banner = stage.kind === "queued" || stage.kind === "running";
+  const install = useInstallingBanner(instanceId, banner);
   return (
     <div ref={reflow} className={styles.stack}>
-      <BannerSlot>{banner && <InstallingBanner key="installing" instanceId={instanceId} />}</BannerSlot>
+      <BannerSlot>{banner && <InstallingBanner key="installing" instanceId={instanceId} held={install.held} />}</BannerSlot>
       <StagePanel stage={stage} banner={banner} />
     </div>
   );

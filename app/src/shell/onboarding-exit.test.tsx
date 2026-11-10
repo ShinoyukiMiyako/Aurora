@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-// 向导收尾时的退场与主界面淡入。整个文件走真实时间：退场要等 framer-motion 的帧循环把动画播完，
-// 假定时器下它请求的帧不会到，而帧循环一旦有一帧没到就停在原地，同一文件里之后的用例也再推不动它，
-// 所以不和 AppShell.test 里那些假定时器用例放在一起。
+// 向导收尾时的退场与主界面淡入。整个文件走真实时间：退场要等 framer-motion 的帧循环把动画播完，用 waitForFrames 按真实时间等。
+// 假定时器下帧跟着假时钟走，不推进就一帧都不来（逐帧推进用 stepFrames，见 test/dom.ts）。AppShell.test 的假定时器用例
+// 只推进 0 ms 的计时器，收尾时也不排空帧循环：放在一起的话，换回真实计时器时还排在旧假时钟上的那一帧永远不来，
+// 帧循环就此停住，这里的退场推不动，所以单独一个文件。
 import { act } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";

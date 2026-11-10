@@ -4,9 +4,10 @@
 // 下面的目标列表、清单由面板的让位滑下去。撤下时同帧移除，空出的位置同样由让位接住：撤下的提醒不留在文档里淡出，
 // 重试、读到清单之后它就不该再被读到、点到。挂载时就在的跟着弹窗入场，不单独淡入。
 
-import { motion, useReducedMotionConfig } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
-import { fade, insertItem } from "../../../lib/motion";
+import { motion } from "framer-motion";
+import { useState } from "react";
+import { useInsertItem } from "../../../lib/useInsertItem";
+import { useMounted } from "../../../lib/useMounted";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
 import { WarnNote } from "../../../ui/WarnNote";
@@ -42,14 +43,11 @@ function noticeButton(notice: PanelNotice) {
   );
 }
 
-/** 减少动画时只淡入：缩放在减少动画下是一步到位的。 */
-const FADE_IN = { initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in } } as const;
-
 function NoticeItem({ notice, lead, own }: { notice: PanelNotice; lead: boolean; own: boolean }) {
-  const reduced = useReducedMotionConfig() === true;
+  // 减少动画时只淡入：缩放在减少动画下是一步到位的
+  const motionProps = useInsertItem();
   // 只在挂载那一刻定下要不要入场：排到第一条、换成说明块时不重播
   const [enter] = useState(own);
-  const motionProps = reduced ? FADE_IN : insertItem;
   return (
     <motion.div initial={enter ? motionProps.initial : false} animate={motionProps.animate}>
       {lead ? (
@@ -66,9 +64,6 @@ function NoticeItem({ notice, lead, own }: { notice: PanelNotice; lead: boolean;
 }
 
 export function PanelNotices({ notices }: { notices: readonly PanelNotice[] }) {
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   return notices.map((notice, i) => <NoticeItem key={notice.key} notice={notice} lead={i === 0} own={mounted.current} />);
 }

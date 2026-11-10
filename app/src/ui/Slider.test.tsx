@@ -293,19 +293,111 @@ describe("圆钮与填充的样式", () => {
     expect(ruleOf(".knob")).toContain("width: var(--slider-thumb);");
   });
 
-  it("行程盒任何取值下都不越过命中区右缘：只往起始边一侧伸，不撑出横向滚动", () => {
-    // 按样式里的公式求行程盒在命中区坐标里的左右缘：盒宽 = 命中区宽 w，偏移 = p(w − T) + T − w
-    const thumb = ruleOf(".thumb");
-    const formula = /translate: calc\(var\(--slider-p\) \* \(100% - var\(--slider-thumb\)\) \+ var\(--slider-thumb\) - 100%\) 0;/;
-    expect(thumb).toMatch(formula);
-    for (const w of [SLIDER_THUMB * 3, 220, 500, 1020]) {
+  /** 规则里 translate 的横向分量（calc 的参数）。 */
+  function translateX(selector: string): string {
+    const found = /translate: calc\((.*)\) 0;/.exec(ruleOf(selector));
+    if (found === null) throw new Error(`${selector} 的 translate 不是 calc(…) 0`);
+    return found[1];
+  }
+
+  /** 规则里某个属性的取值（不含分号），calc(…) 去掉外壳。 */
+  function declOf(selector: string, property: string): string {
+    const found = new RegExp(`(?:^|[;{\\s])${property}: ([^;]+);`).exec(ruleOf(selector));
+    if (found === null) throw new Error(`${selector} 没有写 ${property}`);
+    const value = found[1].trim();
+    const calc = /^calc\((.*)\)$/.exec(value);
+    return calc === null ? value : calc[1];
+  }
+
+  /**
+   * 按样式表里写的 calc 表达式求像素值：var() 换成给定的取值，百分比按 percentBase 折算，
+   * 只认数字、加减乘除与括号。断言因此跟着样式表里实际写的公式走，而不是在测试里把公式再抄一遍。
+   */
+  function evalCalc(expression: string, vars: Readonly<Record<string, number>>, percentBase: number): number {
+    const src = expression
+      .replace(/var\((--[a-z-]+)\)/g, (_, name: string) => {
+        const value = vars[name];
+        if (value === undefined) throw new Error(`没有给 ${name} 取值`);
+        return `(${value})`;
+      })
+      .replace(/(\d+(?:\.\d+)?)%/g, (_, n: string) => `(${(Number(n) / 100) * percentBase})`);
+    let at = 0;
+    const skip = () => {
+      while (src[at] === " ") at++;
+    };
+    const sum = (): number => {
+      let value = product();
+      for (;;) {
+        skip();
+        const op = src[at];
+        if (op !== "+" && op !== "-") return value;
+        at++;
+        const rhs = product();
+        value = op === "+" ? value + rhs : value - rhs;
+      }
+    };
+    const product = (): number => {
+      let value = factor();
+      for (;;) {
+        skip();
+        const op = src[at];
+        if (op !== "*" && op !== "/") return value;
+        at++;
+        const rhs = factor();
+        value = op === "*" ? value * rhs : value / rhs;
+      }
+    };
+    const factor = (): number => {
+      skip();
+      if (src[at] === "-") {
+        at++;
+        return -factor();
+      }
+      if (src[at] === "(") {
+        at++;
+        const value = sum();
+        skip();
+        if (src[at] !== ")") throw new Error(`calc 括号不配对：${src}`);
+        at++;
+        return value;
+      }
+      const number = /^\d+(?:\.\d+)?/.exec(src.slice(at));
+      if (number === null) throw new Error(`calc 里有认不出的内容：${src.slice(at)}`);
+      at += number[0].length;
+      return Number(number[0]);
+    };
+    const value = sum();
+    skip();
+    if (at !== src.length) throw new Error(`calc 没有读完：${src.slice(at)}`);
+    return value;
+  }
+
+  it("行程盒任何取值下都不越过命中区右缘：只往起始边一侧伸，不撑出横向滚动；圆钮中心与填充右缘重合", () => {
+    // 圆钮直径以样式里的变量为准，并与指针换算用的常量一致
+    const thumbVar = /--slider-thumb: (\d+)px;/.exec(ruleOf(".slider"));
+    expect(thumbVar?.[1]).toBe(String(SLIDER_THUMB));
+    const T = SLIDER_THUMB;
+    const thumbShift = translateX(".thumb");
+    const fillShift = translateX(".fill");
+    // 圆钮贴在行程盒的哪一端，由行程盒的主轴对齐决定（不写时贴起始端）
+    const knobAtEnd = /(?:^|[;{\s])justify-content: flex-end;/.test(ruleOf(".thumb"));
+    // 填充铺满轨道，轨道贴着命中区两侧：填充与命中区同宽
+    expect(declOf(".fill", "inset")).toBe("0");
+    expect([declOf(".rail", "left"), declOf(".rail", "right")]).toEqual(["0", "0"]);
+    for (const w of [T * 3, 220, 500, 1020]) {
       for (const p of [0, 0.25, 0.5, 1]) {
-        const shift = p * (w - SLIDER_THUMB) + SLIDER_THUMB - w;
-        const box = { left: shift, right: shift + w };
-        const knob = { left: box.right - SLIDER_THUMB, right: box.right };
-        expect(box.right).toBeLessThanOrEqual(w);
-        // 圆钮中心落在可用轨道上 p 处，与填充的右缘、刻度中心一致
-        expect((knob.left + knob.right) / 2).toBeCloseTo(SLIDER_THUMB / 2 + p * (w - SLIDER_THUMB), 10);
+        const vars = { "--slider-p": p, "--slider-thumb": T };
+        // 行程盒在命中区坐标里的左右缘：先按 left / right 摆，再按 translate 平移（百分比相对盒子自身宽）
+        const left = evalCalc(declOf(".thumb", "left"), vars, w);
+        const width = w - left - evalCalc(declOf(".thumb", "right"), vars, w);
+        const shift = evalCalc(thumbShift, vars, width);
+        const box = { left: left + shift, right: left + shift + width };
+        expect(box.right).toBeLessThanOrEqual(w + 1e-9);
+        // 圆钮中心落在可用轨道上 p 处，与指针换算（左缘 + T/2 + p × 可用宽）一致
+        const knobCenter = knobAtEnd ? box.right - T / 2 : box.left + T / 2;
+        expect(knobCenter).toBeCloseTo(T / 2 + p * (w - T), 9);
+        // 已填充段的右缘到圆钮中心为止
+        expect(evalCalc(fillShift, vars, w) + w).toBeCloseTo(knobCenter, 9);
       }
     }
   });

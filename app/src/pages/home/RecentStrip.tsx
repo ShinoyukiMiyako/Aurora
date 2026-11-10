@@ -1,12 +1,12 @@
 // 「最近游玩」：大卡之外最近玩过的几个实例。整卡点进详情（标题按钮铺满整卡），右下角的小钮就地启动，
 // 小钮与胶囊共用同一个启动视图，只是收成一个图标或一个进度环。一个都没有时整段不渲染。
 //
-// 这一段夹在两排卡片之间，有没有要等实例列表读出来才知道。加载期间整段照常占位（前 300 ms 隐身），
+// 这一段夹在两排卡片之间，有没有要等实例列表读出来才知道。首次加载期间整段照常占位（前 300 ms 隐身），
 // 列表到了有卡就原位换上，没有就整段淡出、让出位置，下面一排由页面的让位滑上来；之后有无翻转（换一个、
 // 新玩了一个）同样是淡入淡出加让位，不让下面整排一帧跳动。
 
 import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
-import { useEffect, useRef, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { LAUNCH_COPY, LOADER_NAME, PHASE_LABEL, STOPPED_LABEL, AVATAR_LINE } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
@@ -18,6 +18,7 @@ import { useLaunch, type LaunchEntry } from "../../launch/useLaunch";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { faceSwap } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
+import { useMounted } from "../../lib/useMounted";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector, useNow } from "../../state/launcher";
 import { progressTrack } from "../../state/tasks";
@@ -54,10 +55,16 @@ export function RecentStrip({ currentId }: { currentId: string | null }) {
   const pending = gate.view === "pending";
   // 实例列表读不出来时由大卡原位报错；这里与「一个都没玩过」一样整段不渲染
   const recent = waiting || status.kind === "error" ? [] : recentInstances(instances, currentId, count);
+  // 上一次读完时这一段在不在（null：还没读完过）。读取失败后在大卡上点重试，实例列表重新进入读取中：本来就不在的段落
+  // 不为这次重读先插进一块隐身的空白、把下面一排推下去（重读后仍没有卡还要再滑回来），读到有卡再淡入。
+  // 第一次读取还不知道有没有，照常占位
+  const [settled, setSettled] = useState<boolean | null>(null);
+  if (!waiting && settled !== (recent.length > 0)) setSettled(recent.length > 0);
+  const shown = waiting ? settled !== false : recent.length > 0;
 
   return (
     <Appear>
-      {(waiting || recent.length > 0) && (
+      {shown && (
         // 加载的前 300 ms 连标题一起隐身：列表很快回来、又一个都没玩过时，标题不会闪一下再消失
         <EntranceBlock key="recent" as="section" className={s.recent} aria-labelledby={TITLE_ID} data-pending={pending || undefined} inert={pending}>
           <SectionTitle
@@ -151,10 +158,7 @@ function RecentCard({ inst }: { inst: InstanceSummary }) {
 function RecentLaunch({ instanceId }: { instanceId: string }) {
   const entry = useLaunch(instanceId);
   // 挂载时就在的面跟着卡片出现，不单独弹入
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   const kind = entry.view.kind;
   const enter = !mounted.current ? null : kind === "loading" || kind === "installing" ? "tap" : "pop";
   return (

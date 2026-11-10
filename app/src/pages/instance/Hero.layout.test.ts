@@ -22,27 +22,31 @@ describe("头图动作行", () => {
     expect(declarations(".heroInner")).toContain("display: flex;");
   });
 
-  it("图钉与更多钮外面那一层是真实的盒子：提示气泡外层没有盒子，让位认不到", () => {
-    const own = declarations(".heroAction");
-    expect(own).toContain("display: flex;");
-    expect(own).not.toContain("contents");
-  });
-
   it("状态标签退场时以标签行为基准抽出布局", () => {
     expect(declarations(".heroChips")).toContain("position: relative;");
   });
 });
 
 describe("改名的校验错误", () => {
-  it("错误不进输入行的流：绝对定位叠在下面标签行的位置上", () => {
+  it("错误不进输入行的流：绝对定位叠在下面标签行的位置上；接收指针，截断的长错误悬停看得到全文", () => {
     const own = declarations(".renameError");
     expect(own).toContain("position: absolute;");
     expect(own).toContain("top: calc(100% + var(--sk-space-6));");
+    expect(own).not.toContain("pointer-events");
   });
 
   it("出错时标签行淡出让位给错误，只动透明度", () => {
     expect(declarations(".heroText:has(> .renameRow[data-invalid]) > .heroChips")).toContain("opacity: 0;");
     expect(declarations(".heroChips")).toContain("transition: opacity var(--sk-dur-hover) var(--sk-ease);");
+  });
+});
+
+describe("实例信息里等加载的值", () => {
+  it("加载层里的值自己出省略号：KV 外层的省略号管不到块里的文字", () => {
+    const own = declarations(".kvLoaded");
+    expect(own).toContain("overflow: hidden;");
+    expect(own).toContain("text-overflow: ellipsis;");
+    expect(own).toContain("white-space: nowrap;");
   });
 });
 

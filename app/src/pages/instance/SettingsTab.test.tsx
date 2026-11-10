@@ -8,10 +8,13 @@ import { fileURLToPath } from "node:url";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { INSTANCE_NAME_ERROR, SLOW_LOADING_HINT } from "../../copy/flows";
+import { SLOW_HINT_MS } from "../../domain/limits";
 import type { InstanceDto, InstanceSettingsDto, TemplateInfoDto } from "../../ipc/instances";
 import type { JavaInstallationDto } from "../../ipc/java";
 import { GAME_EXIT_EVENT } from "../../ipc/launch";
 import type { MemoryAdviceDto } from "../../ipc/system";
+import { REFLOW_PAUSED_ATTR } from "../../lib/reflow";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
@@ -19,13 +22,32 @@ import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/lau
 import { routeKey } from "../../state/route";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { bootOverrides, configDto, deferred, emit, instanceDto, memoryAdviceDto, resetRecorder, settle } from "../../test/launcher";
+import { bootOverrides, callsOf, configDto, deferred, emit, instanceDto, memoryAdviceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import { SETTINGS_COPY } from "./copy";
 import InstancePage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+// 让位挂到了哪些容器上：jsdom 不做布局，让位本身在这里测不了，只核对它挂对了地方；挂载照常交给真实现
+const reflowed = vi.hoisted(() => new Set<Element>());
+vi.mock("../../lib/reflow", async (orig) => {
+  const mod = await orig<typeof import("../../lib/reflow")>();
+  const { useCallback } = await import("react");
+  return {
+    ...mod,
+    useReflow: <T extends HTMLElement>(spring: Parameters<typeof mod.useReflow>[0] = "settle") => {
+      const real = mod.useReflow<T>(spring);
+      return useCallback(
+        (el: T | null) => {
+          if (el !== null) reflowed.add(el);
+          return real(el);
+        },
+        [real],
+      );
+    },
+  };
+});
 
 const ID = "樱花生存";
 const NO_TEMPLATE: TemplateInfoDto = { present: false, files: [], source_instance: null, saved_at: null, enabled: true };
@@ -146,6 +168,7 @@ beforeAll(async () => {
 beforeEach(() => {
   vi.useFakeTimers();
   resetRecorder(ipc);
+  reflowed.clear();
   stubMatchMedia(false);
   stubResizeObserver();
   stubCanvas();
@@ -312,6 +335,112 @@ describe("实例设置：JVM 参数卡", () => {
     typeInto(area(), "-XX:+UseG1GC");
     expect(layer.hasAttribute("inert")).toBe(true);
   });
+
+  it("按住参数框（拖尺寸手柄）期间网格的让位暂停，下面的卡片跟着指针走；在哪儿松手都恢复", async () => {
+    await openSettings();
+    const grid = document.querySelector<HTMLElement>('[class*="settingsGrid"]');
+    if (grid === null) throw new Error("没有设置网格");
+    expect(grid.hasAttribute(REFLOW_PAUSED_ATTR)).toBe(false);
+    act(() => {
+      area().dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    });
+    expect(grid.hasAttribute(REFLOW_PAUSED_ATTR)).toBe(true);
+    act(() => {
+      window.dispatchEvent(new Event("pointerup"));
+    });
+    expect(grid.hasAttribute(REFLOW_PAUSED_ATTR)).toBe(false);
+  });
+});
+
+describe("实例设置：让位挂在哪里", () => {
+  it("横幅与网格所在的竖排、卡片网格、JVM 卡的警示与操作行一段都挂了让位；参数框不在让位的段里", async () => {
+    await openSettings();
+    const grid = document.querySelector<HTMLElement>('[class*="settingsGrid"]');
+    if (grid === null) throw new Error("没有设置网格");
+    expect(reflowed.has(grid)).toBe(true);
+    const stack = grid.parentElement;
+    if (stack === null) throw new Error("网格没有外层");
+    expect(stack.className).toMatch(/stack/);
+    expect(reflowed.has(stack)).toBe(true);
+    const jvm = card(SETTINGS_COPY.jvmTitle);
+    const tail = button(SETTINGS_COPY.saveArgs, jvm).closest('[class*="actionsRow"]')?.parentElement;
+    if (tail === null || tail === undefined) throw new Error("没有操作行所在的那一段");
+    expect(reflowed.has(tail)).toBe(true);
+    const textarea = jvm.querySelector("textarea");
+    if (textarea === null) throw new Error("没有 JVM 参数框");
+    expect(tail.contains(textarea)).toBe(false);
+  });
+});
+
+describe("实例设置：比平时慢一些", () => {
+  it("加载超过 10 s：外观卡与 JVM 卡的慢提示在骨架层外面（读屏读得到）、淡入落位；读到之后撤下", async () => {
+    const advice = deferred<MemoryAdviceDto>();
+    ipc.overrides.set("memory_advice", () => advice.promise);
+    await openSettings();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SLOW_HINT_MS);
+    });
+    const hints = () => [...document.querySelectorAll<HTMLElement>("p")].filter((p) => p.textContent === SLOW_LOADING_HINT);
+    const shown = hints();
+    expect(shown.map((hint) => [card(SETTINGS_COPY.appearanceTitle).contains(hint), card(SETTINGS_COPY.jvmTitle).contains(hint)])).toEqual([
+      [true, false],
+      [false, true],
+    ]);
+    for (const hint of shown) {
+      expect(hint.closest('[aria-hidden="true"]')).toBeNull();
+      expect(appearLayer(hint).style.opacity).toBe("0");
+    }
+    await act(async () => {
+      advice.resolve(memoryAdviceDto({ version_id: ID }));
+      await settle(20);
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(shown.every((hint) => hint.closest("[inert]") !== null)).toBe(true);
+  });
+});
+
+describe("实例设置：实例管理卡", () => {
+  function typeName(value: string) {
+    const input = row(SETTINGS_COPY.nameTitle).querySelector("input");
+    if (input === null) throw new Error("没有名称输入框");
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    if (setter === undefined) throw new Error("取不到 value 的 setter");
+    act(() => {
+      setter.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
+  it("名称校验错误换进说明槽：原来的说明留作占位，这一行不变高；错误用危险色，改对后说明换回来", async () => {
+    await openSettings();
+    const slot = description(row(SETTINGS_COPY.nameTitle)).firstElementChild as HTMLElement;
+    expect(textOf(slot)).toBe(SETTINGS_COPY.nameNote);
+    expect(slot.hasAttribute("data-tone")).toBe(false);
+    typeName("");
+    expect(textOf(slot)).toBe(INSTANCE_NAME_ERROR.empty);
+    expect(slot.dataset.reserveA).toBe(SETTINGS_COPY.nameNote);
+    expect(slot.dataset.tone).toBe("danger");
+    typeName(ID);
+    expect(textOf(slot)).toBe(SETTINGS_COPY.nameNote);
+    expect(slot.hasAttribute("data-tone")).toBe(false);
+  });
+
+  it("游戏运行中危险区追加一句：换的是同一个说明槽，没运行时就按追加之后的那条占位", async () => {
+    instances = [instanceDto(ID, { loaders: [{ kind: "fabric", version: "0.16.10" }], isolated: true, world_count: 3 })];
+    await openSettings();
+    const zone = document.querySelector<HTMLElement>('[class*="dangerZone"]');
+    const slot = zone?.querySelector<HTMLElement>("[data-reserve-a]");
+    if (slot === null || slot === undefined) throw new Error("危险区没有说明槽");
+    const base = SETTINGS_COPY.deleteWorlds(3);
+    expect(textOf(slot)).toBe(base);
+    expect(slot.dataset.reserveA).toBe(`${base}${SETTINGS_COPY.deleteRunning}`);
+    await act(async () => {
+      await launcher.actions.launch(ID);
+      await settle(20);
+    });
+    expect(textOf(slot)).toBe(`${base}${SETTINGS_COPY.deleteRunning}`);
+    expect(slot.dataset.reserveA).toBe(base);
+  });
 });
 
 describe("实例设置：会换的说明与按钮文案", () => {
@@ -381,6 +510,38 @@ describe("实例设置：默认设置一行", () => {
     expect(line).not.toBeNull();
     expect(textOf(line as HTMLElement)).toBe("");
   });
+
+  it("「清除」常驻占位：清除成功后还是同一个按钮，淡出并进了不可交互的层；焦点从它身上交给「保存为默认」", async () => {
+    let template: TemplateInfoDto = { present: true, files: [{ name: "options.txt", size: 2048 }], source_instance: "创造", saved_at: Date.now() - 60_000, enabled: true };
+    ipc.overrides.set("template_info", () => template);
+    ipc.overrides.set("clear_template", () => {
+      template = NO_TEMPLATE;
+      return template;
+    });
+    await openSettings();
+    const clear = [...templateRow().querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === SETTINGS_COPY.templateClear);
+    if (clear === undefined) throw new Error("没有「清除」");
+    const slot = clear.closest<HTMLElement>('[class*="clearSlot"]');
+    if (slot === null) throw new Error("「清除」不在常驻槽里");
+    expect(slot.hasAttribute("inert")).toBe(false);
+    expect(slot.hasAttribute("data-hidden")).toBe(false);
+    act(() => clear.focus());
+    act(() => clear.click());
+    await flush();
+    expect(callsOf(ipc, "clear_template")).toHaveLength(1);
+    expect(templateRow().contains(clear)).toBe(true);
+    expect(slot.hasAttribute("inert")).toBe(true);
+    expect(slot.hasAttribute("data-hidden")).toBe(true);
+    expect(document.activeElement).toBe(button(SETTINGS_COPY.templateSave, templateRow()));
+  });
+
+  it("没存过默认设置：「清除」照样占着位置，只是透明、不可交互", async () => {
+    await openSettings();
+    const slot = templateRow().querySelector<HTMLElement>('[class*="clearSlot"]');
+    expect(slot?.hasAttribute("inert")).toBe(true);
+    expect(slot?.hasAttribute("data-hidden")).toBe(true);
+    expect(slot?.textContent).toBe(SETTINGS_COPY.templateClear);
+  });
 });
 
 describe("实例设置：占位规则（读样式表）", () => {
@@ -405,5 +566,18 @@ describe("实例设置：占位规则（读样式表）", () => {
 
   it("内存骨架的跟随框去掉底色，外框与行高照真实的来", () => {
     expect(rule(".followSkeleton")).toMatch(/background:\s*none/);
+  });
+
+  it("「清除」的常驻槽：隐藏时只把透明度降到 0，进出只过渡透明度", () => {
+    expect(rule(".clearSlot")).toMatch(/transition:\s*opacity var\(--sk-dur-in\) var\(--sk-ease-out\)/);
+    const hidden = rule(".clearSlot[data-hidden]");
+    expect(hidden).toMatch(/opacity:\s*0/);
+    expect(hidden).toMatch(/transition:\s*opacity var\(--sk-dur-out\) var\(--sk-ease-in\)/);
+  });
+
+  it("骨架下方的慢提示与卡内各块隔 14，用内边距（退场抽出布局时外边距会让它下移）", () => {
+    const slow = rule(".settingsSlow");
+    expect(slow).toMatch(/padding-top:\s*var\(--sk-space-14\)/);
+    expect(slow).not.toMatch(/margin/);
   });
 });

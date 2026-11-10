@@ -8,6 +8,7 @@ import { Menu, type MenuEntry } from "./Menu";
 import { MenuButton } from "./MenuButton";
 import { MoreMenu } from "./MoreMenu";
 import { enterShift, originTowardAnchor, Popover } from "./Popover";
+import { TYPEAHEAD_WINDOW_MS } from "./typeahead";
 
 let view: Rendered | undefined;
 
@@ -232,14 +233,24 @@ describe("键盘", () => {
     expect(document.activeElement).toBe(trigger());
   });
 
-  it("键入字符按首字跳转", () => {
-    mount(<MoreMenu items={entries(() => undefined)} />);
-    openMenu(1);
-    press("固");
-    expect(highlighted()).toBe("固定到侧栏");
-    press("删");
-    // 两次键入相隔不到 500 ms，前缀合并成「固删」，没有匹配，高亮不变
-    expect(highlighted()).toBe("固定到侧栏");
+  it("键入字符按首字跳转；窗口内的键入合并成前缀，隔了窗口重新开始", () => {
+    // 键入跳转按 performance.now() 计时：假它来推进键入间隔，不靠真实时间碰巧够快
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      mount(<MoreMenu items={entries(() => undefined)} />);
+      openMenu(1);
+      press("固");
+      expect(highlighted()).toBe("固定到侧栏");
+      vi.advanceTimersByTime(TYPEAHEAD_WINDOW_MS);
+      press("删");
+      // 两次键入相隔不超过窗口，前缀合并成「固删」，没有匹配，高亮不变
+      expect(highlighted()).toBe("固定到侧栏");
+      vi.advanceTimersByTime(TYPEAHEAD_WINDOW_MS + 1);
+      press("删");
+      expect(highlighted()).toBe("删除实例");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("Tab 关闭菜单，焦点前进到触发器之后的元素；Shift+Tab 回到触发器", () => {

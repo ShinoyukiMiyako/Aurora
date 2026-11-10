@@ -7,8 +7,9 @@
 // 绝对定位的基准会中途换成主体，淡出中的旧内容跳一下。
 
 import { AnimatePresence, motion, useIsPresent, type Variants } from "framer-motion";
-import { useEffect, useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
+import { useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
 import { fade, tabPanel, type PanelFrom } from "../../lib/motion";
+import { useMounted } from "../../lib/useMounted";
 import { cx } from "../../lib/util";
 import styles from "./login.module.css";
 
@@ -39,10 +40,7 @@ export interface SwapProps {
 export function Swap({ id, from, still = false, onEnter, className, paneClassName, children }: SwapProps) {
   const wrap = useRef<HTMLDivElement>(null);
   // 挂载时就在的内容不播入场；不能在 AnimatePresence 上写 initial={false}，那会让里面之后才挂载的元素也跳过入场
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   const settledId = useRef(id);
   const enterRef = useRef(onEnter);
   enterRef.current = onEnter;

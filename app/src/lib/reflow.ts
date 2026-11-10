@@ -16,20 +16,29 @@
 //
 // 不补位移的情况：容器宽度或窗口尺寸变了（窗口缩放、分档切换引起的重排不做动画）、减少动画、
 // 容器带暂停属性（REFLOW_PAUSED_ATTR）、子项超过 REFLOW_HARD_MAX_ITEMS。
-// 子项超过 REFLOW_MAX_ITEMS 时位置照记，只给可见范围附近的起动画，远处的直接到位：长列表删一行，可见的那段照样滑上去。
+// 子项超过 REFLOW_MAX_ITEMS 时位置照记，每一趟只给可见范围附近的至多 REFLOW_MAX_ITEMS 个起动画，其余被挪动的直接到位：
+// 长列表删一行，可见的那段照样滑上去。
 // 滚动锚定：内容在视口上方变高时浏览器会同步调整滚动位置，可见内容本来就没动，这时也不补。容器自己就是滚动容器时同样认得。
+//
+// 已知限制：容器靠 margin-top: auto 贴底或纵向居中时，容器长高会让它的上沿上移，原地没动的子项相对容器的偏移跟着变了，
+// 会被当成位移，先跳开再滑回来。这类容器不要挂让位。
 
 import { useCallback, type RefCallback } from "react";
 import { springAt, type SpringName } from "./motion";
 import { elapsedSeconds, springTrack } from "./slide";
 
 /**
- * 一趟里同时起动画的子项至多这么多：再多既看不清谁在动，逐项起动画（每项一个合成层）的开销也不值。
- * 子项超过这个数时只挑起点或终点落在可见范围附近的，仍超过时取离可见范围中心最近的这么多个。
+ * 每一趟至多给这么多子项起动画：一次变化挪动的再多，既看不清谁在动，逐项起动画（每项一个合成层）的开销也不值。
+ * 子项超过这个数时只挑起点或终点落在可见范围附近的，仍超过时取离可见范围中心最近的这么多个；被挪动而没挑上的直接到位，
+ * 还在飞的当场落定。
+ * 上限按趟算，不按同时在飞的总数算：前几趟起飞、这一趟没再被挪动的不占配额，接着飞完。这一趟被挤的才是此刻眼前在变的，
+ * 配额先给它们；从配额里扣掉旧轨迹，会让眼前被挤的项一帧跳过去，却让早先起飞的接着飞。旧轨迹各自在一段弹簧时长内落定，
+ * 再被挪动的会顶替自己的旧轨迹，不会叠成两段。
  */
 export const REFLOW_MAX_ITEMS = 40;
 /**
- * 子项超过这么多就整趟放弃，连位置也不读；回到这以内的第一趟只记位置。
+ * 让位项（display: contents 的包裹层展开之后数）超过这么多就整趟放弃，连位置也不读；回到这以内的第一趟只记位置。
+ * 头一次遇到的包裹层要读一次定位祖先与计算样式才认得出，这份读取不论超没超限都要付，之后不再复查。
  * 依据：每一趟按子项数线性地读布局（每项 offsetParent、offsetTop、offsetLeft 三次读取，布局已干净时都是不触发重排的
  * 快速读取，比 getBoundingClientRect 少一次变换换算、也不分配 DOMRect），再建表比对；400 项是一千出头次读取，
  * 估计在一毫秒以内（估算，未实测），且只在变化发生的那一帧做一次。会到几百项的只有导入大整合包时的模组清单
@@ -93,8 +102,23 @@ interface Launch {
 const flights = new WeakMap<HTMLElement, Flight>();
 
 /**
+ * 被挪动而这一趟不补位移的项若还在飞，直接落到新位置：剩下那段轨迹是相对旧排布起的，接着播会先随布局跳一下，
+ * 再多出一段与这次变化无关的漂移。
+ * 登记当场清掉：取消事件不是当场派发的，这期间再来一趟会按已取消的轨迹去算此刻的位置。
+ */
+function land(el: HTMLElement): void {
+  const flying = flights.get(el);
+  if (flying === undefined) return;
+  flights.delete(el);
+  flying.animation.cancel();
+}
+
+/**
  * el 自己或离它最近的纵向滚动祖先；都不滚动时为 null。
  * 从 el 自己查起：让位的容器本身就是滚动容器时，滚动锚定挪的是它自己的滚动位置，只看祖先就把锚定当成了位移。
+ * 只看计算后的 overflow-y：只写了 overflow-x: hidden / auto / scroll 的元素，overflow-y 按 CSS 规则会一并算成 auto，
+ * 这里也就把它当成纵向滚动容器（计算样式分不出这是不是本意）。让位容器外面隔着这样一层时，滚动锚定只认这一层的
+ * 滚动位置，可见范围按它的矩形截，不再看更外面真正在滚的那一个。
  */
 export function closestScroller(el: HTMLElement): HTMLElement | null {
   const view = el.ownerDocument.defaultView;
@@ -173,7 +197,7 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
 
   /**
    * 子项多时挑出值得动的：起点或终点落在可见范围附近（上下各留 VIEW_MARGIN_PX）的，离可见范围中心近的优先，
-   * 至多 REFLOW_MAX_ITEMS 个。起点终点都在远处的直接到位：整段都在视野之外，一帧跳过去看不出差别。
+   * 这一趟至多 REFLOW_MAX_ITEMS 个。起点终点都在远处的直接到位：整段都在视野之外，一帧跳过去看不出差别。
    * 可见范围取滚动容器与窗口的交集，没有滚动容器时就是窗口；只看纵向，滚动容器本来就只认纵向的。
    * inner：让位项的定位祖先是容器本身，位置从容器的内边距边量起（否则从边框边）。
    */
@@ -202,10 +226,36 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
 
   /** quiet：这一趟按暂停处理（暂停开关刚增删过）。 */
   const pass = (quiet: boolean) => {
+    // 先数，再认包裹层，展开之后再数一次，最后才量：超过硬上限时一个位置也不读。
+    // 旧位置跟着作废：超限期间的变化没有跟踪，回到上限以内时拿它补滑，会把用户早已看着跳完的位移再播一遍
     const items = collect(container, []);
-    // 先数再量：数只走 DOM，超过硬上限时一个位置也不读。旧位置跟着作废：超限期间的变化没有跟踪，
-    // 回到上限以内时拿它补滑，会把用户早已看着跳完的位移再播一遍
+    // 数只走 DOM，已认出的包裹层在这里已经展开；超限时连定位祖先也不读
     if (items.length > REFLOW_HARD_MAX_ITEMS) {
+      spots = new Map();
+      return;
+    }
+    // 认包裹层：只读定位祖先，没有盒子的再读一次计算样式，位置留到确认没超限之后再读。
+    // 按下标走：新认出的包裹层，它里面的元素追加在末尾，这一趟就认到（包裹层套包裹层逐层往里）。
+    // 展开后超限也把这一趟遇到的认完：认下的不再复查，之后各趟在上一步就停，不用一趟趟地认
+    const boxed: { el: HTMLElement; parent: Element }[] = [];
+    let count = items.length;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const parent = item.offsetParent;
+      if (parent !== null) {
+        boxed.push({ el: item, parent });
+        continue;
+      }
+      // 没有盒子。display: contents 的包裹层头一次遇到时认下来（只有这类没有盒子的才读计算样式，布局此刻已是干净的）；
+      // display: none、固定定位不在这条流里
+      if (view.getComputedStyle(item).display !== "contents") continue;
+      adopt(item);
+      const before = items.length;
+      collect(item, items);
+      // 包裹层自己不算让位项，换成它里面的
+      count += items.length - before - 1;
+    }
+    if (count > REFLOW_HARD_MAX_ITEMS) {
       spots = new Map();
       return;
     }
@@ -213,22 +263,10 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     const baseLeft = container.offsetLeft;
     const baseTop = container.offsetTop;
     let inner = false;
-    // 按下标走：循环里新认出的包裹层，它里面的元素追加在末尾，这一趟就量到
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      const parent = item.offsetParent;
-      if (parent === null) {
-        // 没有盒子。display: contents 的包裹层头一次遇到时认下来（只有这类没有盒子的才读计算样式，布局此刻已是干净的）；
-        // display: none、固定定位不在这条流里
-        if (view.getComputedStyle(item).display === "contents") {
-          adopt(item);
-          collect(item, items);
-        }
-        continue;
-      }
+    for (const { el, parent } of boxed) {
       const own = parent === container;
       if (own) inner = true;
-      next.set(item, { left: item.offsetLeft - (own ? 0 : baseLeft), top: item.offsetTop - (own ? 0 : baseTop) });
+      next.set(el, { left: el.offsetLeft - (own ? 0 : baseLeft), top: el.offsetTop - (own ? 0 : baseTop) });
     }
     const nextWidth = container.clientWidth;
     const nextViewport = { width: view.innerWidth, height: view.innerHeight };
@@ -259,22 +297,26 @@ export function observeReflow(container: HTMLElement, spring: SpringName = "sett
     if (moved.length === 0) return;
 
     if (quiet || container.hasAttribute(REFLOW_PAUSED_ATTR)) {
-      // 被挪动的项还在飞的，剩下那段是相对旧排布起的：新排布整批一步换上了，接着播只会多出一段与这次变化无关的漂移。
-      // 登记当场清掉：取消事件不是当场派发的，这期间再来一趟会按已取消的轨迹去算此刻的位置
-      for (const m of moved) {
-        const flying = flights.get(m.el);
-        if (flying === undefined) continue;
-        flights.delete(m.el);
-        flying.animation.cancel();
-      }
+      // 新排布整批一步换上了：还在飞的一并落定
+      for (const m of moved) land(m.el);
       return;
     }
 
     // 滚动位置在这一趟布局里变了，且恰好抵消了某个子项的位移：这是滚动锚定，按抵消后的量算
     const anchored =
       (drift.x !== 0 || drift.y !== 0) && moved.some((m) => Math.abs(m.dx + drift.x) < MOVE_EPSILON_PX && Math.abs(m.dy + drift.y) < MOVE_EPSILON_PX);
-    const shifts: Shift[] = moved.map((m) => ({ el: m.el, top: m.top, tx: m.dx + (anchored ? drift.x : 0), ty: m.dy + (anchored ? drift.y : 0) }));
+    // 抵消之后不到 1px 的在眼前并没有动：不占挑选的名额，还在飞的接着飞
+    const shifts: Shift[] = [];
+    for (const m of moved) {
+      const tx = m.dx + (anchored ? drift.x : 0);
+      const ty = m.dy + (anchored ? drift.y : 0);
+      if (Math.abs(tx) >= MOVE_EPSILON_PX || Math.abs(ty) >= MOVE_EPSILON_PX) shifts.push({ el: m.el, top: m.top, tx, ty });
+    }
     const chosen = next.size > REFLOW_MAX_ITEMS ? nearView(shifts, inner) : shifts;
+    if (chosen.length < shifts.length) {
+      const picked = new Set(chosen);
+      for (const s of shifts) if (!picked.has(s)) land(s.el);
+    }
     const launches: Launch[] = [];
     for (const s of chosen) {
       const planned = plan(s.el, s.tx, s.ty);

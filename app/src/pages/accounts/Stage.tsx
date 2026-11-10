@@ -46,7 +46,14 @@ export function Stage({ account, variant, children }: StageProps) {
       <svg className={styles.pedestal} width={pedestal.width} height={pedestal.height} viewBox={`0 0 ${pedestal.width} ${pedestal.height}`} aria-hidden="true" focusable="false">
         <ellipse cx={pedestal.width / 2} cy={pedestal.height / 2} rx={pedestal.width / 2} ry={pedestal.height / 2} />
       </svg>
-      <AccountFigure uuid={account.uuid} skin={skin.status === "ready" ? skin.data : null} scale={variant === "spot" ? 6 : 4} interactive={variant === "spot"} className={styles.figure} />
+      {/* 皮肤信息还在读时说「读取中」而不是「没有」：聚光卡换到皮肤信息没缓存的账户时，舞台上留着上一位的立绘直到读到，再交叉换上 */}
+      <AccountFigure
+        uuid={account.uuid}
+        skin={skin.status === "loading" ? "loading" : skin.status === "ready" ? skin.data : null}
+        scale={variant === "spot" ? 6 : 4}
+        interactive={variant === "spot"}
+        className={styles.figure}
+      />
       {children}
     </div>
   );

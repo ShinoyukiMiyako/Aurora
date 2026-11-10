@@ -49,6 +49,15 @@ describe("NoteSlot", () => {
     expect([slot().dataset.reserveA, slot().dataset.reserveB]).toEqual([A, B]);
   });
 
+  it("tone 为 danger 时槽上带危险色标记，不传就没有；样式表按标记取危险色", () => {
+    view = render(<NoteSlot current={B} options={[A, B]} tone="danger" />);
+    expect(slot().dataset.tone).toBe("danger");
+    view.rerender(<NoteSlot current={A} options={[A, B]} />);
+    expect(slot().hasAttribute("data-tone")).toBe(false);
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "NoteSlot.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(css).toMatch(/\.slot\[data-tone="danger"\]\s*\{[^}]*color:\s*var\(--sk-danger\)/);
+  });
+
   it("重复的候选只算一条", () => {
     view = render(<NoteSlot current={A} options={[A, B, B]} />);
     expect([slot().dataset.reserveA, slot().dataset.reserveB]).toEqual([B, undefined]);

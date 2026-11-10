@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { MotionConfig } from "framer-motion";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { codeCell, fade, springs } from "../../lib/motion";
 import { render } from "../../test/dom";
 import { CodeCells } from "./DeviceCodeDialog";
@@ -32,5 +33,33 @@ describe("设备码逐字入场", () => {
       expect(part.style.transform).toBe("translateY(6px)");
     }
     view.unmount();
+  });
+
+  describe("每格领到的序号", () => {
+    /** 每一格解析入场目标时拿到的序号（framer-motion 把 custom 交给变体函数）。 */
+    function orders(reduced: "always" | "never"): number[] {
+      const show = vi.spyOn(codeCell as { show: (i: number) => unknown }, "show");
+      const view = render(
+        <MotionConfig reducedMotion={reduced}>
+          <CodeCells code="PF7Q-X2LM" expired={false} />
+        </MotionConfig>,
+      );
+      const seen = show.mock.calls.map(([i]) => i);
+      view.unmount();
+      return seen;
+    }
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("平时按位置逐格错开，短横也按自己的位置", () => {
+      expect([...new Set(orders("never"))].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    });
+
+    it("减少动画：每格都按 0，整组一次淡入，不逐格等", () => {
+      const seen = orders("always");
+      expect(seen.length).toBeGreaterThanOrEqual(9);
+      expect(new Set(seen)).toEqual(new Set([0]));
+    });
   });
 });

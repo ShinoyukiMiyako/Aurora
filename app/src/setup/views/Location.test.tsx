@@ -7,11 +7,13 @@ import { act, useLayoutEffect, type ReactElement } from "react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, stubPetalTokens } from "../../art/petals/test-canvas";
 import { APP_NAME_EN } from "../../lib/app-info";
+import { OverlayProvider, OverlayRoot } from "../../shell/overlay";
 import { focusByKeyboard, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import App from "../App";
 import type { DirCheck, DirIssue } from "../contract";
 import { COPY, formatBytes, welcomeLead } from "../copy";
 import { FAKE_PROBE, createFakeBridge } from "../fake-bridge";
+import { Frame, FrameChromeProvider, FrameShell, type FrameChrome } from "../Frame";
 import { replay } from "../model";
 import { DIR_CHECK_DEBOUNCE_MS, Location, type LocationProps } from "./Location";
 import { presentHeading, TestChrome } from "./test-chrome";
@@ -59,6 +61,20 @@ function props(overrides: Partial<LocationProps> = {}): LocationProps {
 }
 
 const inChrome = (ui: ReactElement) => <TestChrome copy={copy}>{ui}</TestChrome>;
+
+const CHROME: FrameChrome = { copy: copy.frame, version: "0.2.0", canClose: true, canOpenLegal: true, reduced: true, onMinimize: () => undefined, onClose: () => undefined, onOpenLegal: () => undefined };
+
+/** 能换步的骨架（TestChrome 里只有一页）：step 变了就是换步，旧页留在 DOM 里退场。 */
+const atStep = (step: string, ui: ReactElement) => (
+  <OverlayProvider>
+    <FrameChromeProvider value={CHROME}>
+      <FrameShell step={step} direction={1}>
+        {ui}
+      </FrameShell>
+      <OverlayRoot />
+    </FrameChromeProvider>
+  </OverlayProvider>
+);
 
 function mount(overrides: Partial<LocationProps> = {}): LocationProps {
   const all = props(overrides);
@@ -463,6 +479,19 @@ describe("Esc", () => {
     const { onBack } = mount({ busy: true });
     pressKey(document.body, "Escape");
     expect(onBack).not.toHaveBeenCalled();
+  });
+
+  it("换步后这一页淡出的那一会儿不再响应：这时的 Esc 归新的一页", () => {
+    const all = props();
+    view = render(atStep("location", <Location {...all} />));
+    pressKey(document.body, "Escape");
+    expect(all.onBack).toHaveBeenCalledTimes(1);
+
+    view.rerender(atStep("next", <Frame title="下一页" />));
+    // 帧循环还没走：选目录页还在 DOM 里，正在退场
+    expect(document.querySelector("[data-step-pane][inert] h1")?.textContent).toBe(text.title);
+    pressKey(document.body, "Escape");
+    expect(all.onBack).toHaveBeenCalledTimes(1);
   });
 });
 

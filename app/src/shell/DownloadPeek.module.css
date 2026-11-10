@@ -192,9 +192,26 @@
   white-space: nowrap;
 }
 
+/*
+ * 状态文字与几条不可见的最宽字样叠在同一格，宽度取最宽的那条：速度换字、百分数进位时这一格不变宽，
+ * 左侧详情的省略位置不跟着抖。文字靠右，右缘仍与上面的取消键对齐
+ */
 .rowState {
+  display: inline-grid;
   flex: none;
+  justify-items: end;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rowStateText {
+  grid-area: 1 / 1;
+}
+
+/* 不显示的字样是 visibility: hidden：只撑宽度，不进可访问性树，也接不到指针 */
+.rowStateSample {
+  grid-area: 1 / 1;
+  visibility: hidden;
 }
 
 .empty {
@@ -223,7 +240,12 @@
   font-weight: var(--sk-w-medium);
 }
 
+/*
+ * 底栏随外框形变移动（layout="position"），途中带 transform，会成为里面绝对定位元素的包含块。「清除已结束」退场时被
+ * popLayout 抽成绝对定位，量位置按 offsetParent：底栏自己定位，量与摆才是同一个基准，不会被推出面板的裁切区
+ */
 .foot {
+  position: relative;
   display: flex;
   justify-content: flex-end;
   gap: var(--sk-space-8);

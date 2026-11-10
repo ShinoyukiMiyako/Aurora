@@ -17,6 +17,7 @@ import { createThumbResolver } from "../mc/art";
 import { useAppearance } from "../state/appearance";
 import type { FlowProps } from "../state/flows";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
+import { prefetchGameDirectories } from "../state/queries/catalog";
 import { routeKey, type Route } from "../state/route";
 import { onboardingActive } from "../state/selectors";
 import { ExternalLinkProvider } from "../ui/external-link";
@@ -27,6 +28,7 @@ import { ChromeProvider, type ChromeApi } from "./chrome";
 import { CommandPalette } from "./CommandPalette";
 import { SHELL_ACTION_ERROR, SHELL_DEFECT_COPY } from "../copy/shell";
 import { fade } from "../lib/motion";
+import { useMounted } from "../lib/useMounted";
 import { FOCUS_FALLBACK_ATTR, OverlayRoot } from "./overlay";
 import { PageErrorBoundary } from "./PageError";
 import type { AnyPage, PageRegistry } from "./pages";
@@ -89,14 +91,17 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
     return () => window.clearTimeout(timer);
   }, [pages, run]);
 
+  // 主界面一出来就把游戏目录列表取进缓存：实例库工具条的目录选择要在第一帧就在，不等进页面才去要、晚到再淡入插进来。
+  // 首次启动向导期间不取：目录还没选定，取到的是向导之前的旧记录
+  useEffect(() => {
+    if (firstRunKnown && !firstRun) prefetchGameDirectories();
+  }, [firstRunKnown, firstRun]);
+
   if (firstRun && flows.onboarding === null) throw new Error(SHELL_DEFECT_COPY.missingOnboarding);
   const onboarding = firstRun ? flows.onboarding : null;
 
   // 应用启动时就在的那一屏不播两列的淡入；之后才挂上的主界面（向导收尾）照常淡入
-  const booted = useRef(false);
-  useEffect(() => {
-    booted.current = true;
-  }, []);
+  const booted = useMounted();
 
   // 内容区滚动容器：交给外壳核心记录滚动位置，也给侧栏与命令面板用
   const scrollEl = useRef<HTMLDivElement | null>(null);
@@ -136,8 +141,11 @@ export function AppShell({ pages, flows, startupNotices }: AppShellProps) {
               向导收尾后先播完它自己的退场，再换成主界面：两者都占满整个网格，不能叠着同时出现。
               这里不能写 initial={false}：它会把「不播入场」记在首屏那一支的上下文里，整场会话不再更新，
               之后在它下面挂载的每个页面、每个分页面板的入场都被一并跳过。启动那一屏不淡入改由 MainFrame 自己管。
+              presenceAffectsLayout 关掉：开着时外壳根每重渲染一次（命令面板开合、窗口失焦、分档变化），在场上下文都换一个新对象，
+              主界面里每个读它的 motion 元素（侧栏、标题栏、页面）都跟着重渲染，带布局动画的还要重量一次布局。
+              这里同一时刻只有一支，没有兄弟要随它进出让位，换场靠的是 isPresent 本身的变化，不靠这个新对象。
             */}
-            <AnimatePresence mode="wait">
+            <AnimatePresence mode="wait" presenceAffectsLayout={false}>
               {onboarding !== null ? (
                 <OnboardingFrame key="onboarding" Flow={onboarding} />
               ) : (
@@ -175,12 +183,14 @@ const PAGE_ARRIVAL: Readonly<Record<NavArrival, PageArrival>> = {
 };
 
 /**
- * 页面槽：放在错误边界里面，页面每次挂上（含错误页点「重新加载」）都在这里重新取一次到达方式。
+ * 页面槽：放在错误边界里面，槽每次挂上时取一次到达方式，之后不再变。换路由键、错误页点「重新加载」都是连槽一起重挂，
+ * 新挂上的页面拿到的就是这一次导航的到达方式；槽挂着期间主界面再重渲染（分档、花瓣暂停）不改它，
+ * 已经挂着的页面不会因为取值变了多重渲染一次。
  * 导航状态停在 boot 直到第一次导航，但启动那一屏只有一次：主界面挂上之后、还没导航就重挂的页面
  * （重新加载、实例被删退回实例库）按新进入处理，不然错误视图淡入了，重载回来的页面反而一帧硬切出来。
  */
 function PageArrivalSlot({ arrival, bootShown, children }: { arrival: NavArrival; bootShown: RefObject<boolean>; children: ReactNode }) {
-  const value = arrival === "boot" && bootShown.current ? "enter" : PAGE_ARRIVAL[arrival];
+  const [value] = useState<PageArrival>(() => (arrival === "boot" && bootShown.current ? "enter" : PAGE_ARRIVAL[arrival]));
   return <PageArrivalProvider value={value}>{children}</PageArrivalProvider>;
 }
 
@@ -205,10 +215,7 @@ const MainFrame = memo(function MainFrame({ pages, bindScroll, enter }: { pages:
   // 挂载之后 enter 再变不改已经定下的入场：记住挂载那一刻的取值
   const [columns] = useState(() => (enter ? MAIN_ENTER : MAIN_STILL));
   // 第一次提交带着启动那一屏（或它的错误视图）画出来之后，启动那一屏就用掉了
-  const bootShown = useRef(false);
-  useEffect(() => {
-    bootShown.current = true;
-  }, []);
+  const bootShown = useMounted();
   return (
     <>
       {/* 槽位的空白是窗口拖动区（只认直接点在槽位上），侧栏胶囊本身不是 */}

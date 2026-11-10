@@ -5,7 +5,8 @@ import type { InstanceSummary } from "../domain/adapt";
 import type { Task } from "../domain/types";
 import type { LauncherState } from "../state/store";
 import { PEEK_COPY } from "../copy/shell";
-import { cancelTaskConfirm, overallProgress, overallTrack, peekRows } from "./DownloadPeek";
+import { formatSpeed, percent } from "../domain/format";
+import { cancelTaskConfirm, overallProgress, overallTrack, peekRows, ROW_STATE_WIDEST } from "./DownloadPeek";
 
 function task(id: string, patch: Partial<Task> = {}): Task {
   return {
@@ -72,9 +73,40 @@ describe("快览的列表与失败点", () => {
     expect(peekRows(tasks).map((t) => t.id)).toEqual(["r1", "r2", "q1", "q2"]);
   });
 
+  it("刚完成、还在收尾的任务仍按运行中排在原来的位置；收尾只留已完成的，失败的不留", () => {
+    const tasks = [task("r1"), task("d1", { status: "done" }), task("q1", { status: "queued" }), task("r2"), task("f1", { status: "failed" }), task("d2", { status: "done" })];
+    expect(peekRows(tasks, new Set(["d1", "f1"])).map((t) => t.id)).toEqual(["r1", "d1", "r2", "q1"]);
+  });
+
   it("入口名称并入计数与失败数", () => {
     expect(PEEK_COPY.button(0, 0)).toBe("下载任务");
     expect(PEEK_COPY.button(2, 1)).toBe("下载任务，2 个进行中，1 个任务失败");
+  });
+});
+
+/** 速度文字拆成数字与单位：「1.2 MB/s」为 ["1.2", "MB/s"]。 */
+function splitSpeed(text: string): [string, string] {
+  const m = /^(\d+(?:\.\d)?) ((?:[KMG])?B\/s)$/.exec(text);
+  if (m === null) throw new Error(`速度文字的格式不认识：${text}`);
+  return [m[1], m[2]];
+}
+
+describe("快览行状态文字的留宽字样", () => {
+  it("每个单位下写得出的速度都不长于该单位的四位整数，满格的百分数也不长于留宽用的那个", () => {
+    const KB = 1024;
+    // 进位边界：99.95 起写成三位整数，四舍五入够 1024 就进到下一个单位；字节数不到 1 KB 时原样写（上报的速度是整数）
+    const edges = [0, 1, 999, 1023, KB, 99.94 * KB, 99.96 * KB, 1023.4 * KB, 1023.6 * KB, 1023.4 * KB ** 2, 1023.4 * KB ** 3, KB ** 4 - 1];
+    const random = Array.from({ length: 300 }, () => Math.floor(2 ** (Math.random() * 40)));
+    for (const bps of [...edges, ...random]) {
+      const [digits, unit] = splitSpeed(formatSpeed(bps));
+      expect(digits.length, `${bps} 写成 ${formatSpeed(bps)}`).toBeLessThanOrEqual(4);
+      expect(ROW_STATE_WIDEST).toContain(PEEK_COPY.progress(percent(1), `1023 ${unit}`));
+    }
+    for (const p of [0, 0.004, 0.096, 0.5, 0.994, 1, Math.random()]) expect(percent(p).length).toBeLessThanOrEqual(percent(1).length);
+  });
+
+  it("排队中的状态词也在留宽字样里：从排队轮到运行时这一格不变宽", () => {
+    expect(ROW_STATE_WIDEST).toContain(PEEK_COPY.queued);
   });
 });
 

@@ -105,6 +105,7 @@ function expectFade(animation: FakeAnimation, way: "in" | "out") {
 
 // jsdom 环境里的 URL 是 jsdom 自己的实现，node:fs 不认，按文件路径读
 const css = readFileSync(join(HERE, "./Button.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+const iconCss = readFileSync(join(HERE, "./IconButton.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
 
 /** 选择器恰好为 selector 的那条规则（或关键帧）的声明体，到第一个右花括号为止。 */
 function ruleOf(selector: string): string {
@@ -136,6 +137,35 @@ describe("Button", () => {
     expect(icons).toHaveLength(2);
     for (const svg of icons) expect(svg.getAttribute("width")).toBe(String(CONTROL_ICON_SIZE[size]));
     expect(button.dataset.hasIcon).toBe("true");
+  });
+
+  it("iconRightFlipped：按钮带翻转标记，转的是后置图标那一个节点（不重挂），前置图标不受影响；没有后置图标时不带标记", () => {
+    const ui = (flipped: boolean) =>
+      withOverlay(
+        <Button variant="ghost" icon="download" iconRight="chevron-down" iconRightFlipped={flipped}>
+          查看处理办法
+        </Button>,
+      );
+    view = render(ui(false));
+    const button = view.container.querySelector("button") as HTMLButtonElement;
+    const trailing = button.querySelector(":scope > svg");
+    expect(trailing?.classList.contains(styles.iconRight)).toBe(true);
+    expect([...button.querySelectorAll(`.${styles.iconRight}`)]).toEqual([trailing]);
+    expect(button.hasAttribute("data-icon-right-flipped")).toBe(false);
+
+    view.rerender(ui(true));
+    expect(button.getAttribute("data-icon-right-flipped")).toBe("true");
+    expect(button.querySelector(":scope > svg")).toBe(trailing);
+    view.rerender(ui(false));
+    expect(button.hasAttribute("data-icon-right-flipped")).toBe(false);
+
+    view.unmount();
+    const plain = mount(
+      <Button icon="download" iconRightFlipped>
+        下载
+      </Button>,
+    );
+    expect(plain.hasAttribute("data-icon-right-flipped")).toBe(false);
   });
 
   it("加载中：图标位换成装饰性加载指示，保持可聚焦但点击无效", () => {
@@ -618,6 +648,37 @@ describe("图标位与加载态的样式", () => {
     expect(hidden).toMatch(/transition: opacity var\(--sk-dur-out\) var\(--sk-ease-in\);/);
     expect(css).not.toMatch(/visibility: hidden/);
     expect(ruleOf(".label")).toMatch(/transition: opacity var\(--sk-dur-in\) var\(--sk-ease-out\);/);
+  });
+});
+
+describe("后置图标的翻转", () => {
+  it("带翻转标记时后置图标转 180°，走独立的 rotate 与 settle 弹簧，不写 transform；减少动画时直接到位", () => {
+    expect(ruleOf(".button[data-icon-right-flipped] .iconRight")).toMatch(/rotate: 180deg;/);
+    const turn = ruleOf(".iconRight");
+    expect(turn).toMatch(/transition: rotate var\(--sk-spring-settle-dur\) var\(--sk-spring-settle\);/);
+    expect(turn).not.toMatch(/transform/);
+    expect(ruleOf(":global([data-sk-reduced]) .iconRight")).toMatch(/transition: none;/);
+  });
+});
+
+describe("变成禁用时的不透明度", () => {
+  it.each([
+    ["Button", css],
+    ["IconButton", iconCss],
+  ])("%s：禁用把不透明度降到 --sk-disabled，不透明度按悬停那组令牌过渡，不一帧硬切；原有的过渡项不变", (_name, source) => {
+    expect(source).toMatch(/\n\.button:disabled,\r?\n\.button\[data-disabled\] \{\r?\n {2}opacity: var\(--sk-disabled\);/);
+    // IconButton 的样式表以这条规则开头，前面没有换行
+    const rule = /(?:^|\n)\.button \{([^}]*)\}/.exec(source);
+    if (rule === null) throw new Error("样式里缺少 .button");
+    const transition = /transition:([^;]*);/.exec(rule[1]);
+    if (transition === null) throw new Error(".button 没有 transition");
+    expect(transition[1].split(",").map((item) => item.trim())).toEqual([
+      "transform var(--sk-spring-tap-dur) var(--sk-spring-tap)",
+      "background-color var(--sk-dur-hover) var(--sk-ease)",
+      "border-color var(--sk-dur-hover) var(--sk-ease)",
+      "color var(--sk-dur-hover) var(--sk-ease)",
+      "opacity var(--sk-dur-hover) var(--sk-ease)",
+    ]);
   });
 });
 

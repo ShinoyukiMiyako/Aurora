@@ -3,14 +3,23 @@
 // 周一为首列。没有记录的日子（数据范围外、未来日期）不可选，但键盘仍能停在上面，方向键移动的节奏才可预期。
 // 颜色之外，时长同时写进每格的可访问名称。
 // 网格固定画 6 周，不足的周用空格补齐：翻月时日历高度不变，图例与所在卡片不跟着跳。
-// 翻月与游玩数据到达时，日格整块淡入一次（只动透明度）；日格本身不做颜色过渡，主题切换仍是一帧换完。
+// 翻月与游玩数据到达时，日格整块淡入一次，翻月时还从所去月份的那一侧滑进来；日格本身不做颜色过渡，主题切换仍是一帧换完。
 
-import { useAnimate } from "framer-motion";
+import { useAnimate, useReducedMotionConfig } from "framer-motion";
 import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { formatPlaytime } from "../domain/format";
-import { fade } from "../lib/motion";
+import { fade, springs, tabPanel, type PanelFrom } from "../lib/motion";
 import { cx } from "../lib/util";
 import styles from "./CalendarHeatmap.module.css";
+
+/** 换月时日格的起点横移（px）：取横排标签换面板的来向起点，翻到后一个月为 1，前一个月为 -1。 */
+function monthEnterX(dir: PanelFrom["dir"]): number {
+  const hidden = tabPanel.hidden;
+  const from: PanelFrom = { axis: "x", dir };
+  const start = typeof hidden === "function" ? hidden(from, {}, {}) : hidden;
+  if (typeof start === "string" || typeof start.x !== "number") throw new Error("横排标签面板的来向起点缺少 x");
+  return start.x;
+}
 
 /** 一个月最多跨 6 周（首日在周日且有 31 天时恰好 6 周）。 */
 export const CALENDAR_WEEKS = 6;
@@ -216,19 +225,28 @@ export function CalendarHeatmap({ month, minutes, today, selected, onSelect, onM
     const day = i - lead + 1;
     return day >= 1 && day <= total ? dateKey({ y, m, d: day }) : null;
   });
-  // 换了月份，或游玩数据从无到有（加载完成）：整块日格换一批，淡入一次
+  // 换了月份，或游玩数据从无到有（加载完成）：整块日格换一批，淡入一次。
+  // 换月时还从所去月份的那一侧滑进来（往后翻从右侧，往前翻从左侧），与横排标签换面板同一组参数；减少动画时只淡入
   const batch = `${month}:${minutes.size > 0 ? "data" : "empty"}`;
+  const reduced = useReducedMotionConfig() === true;
   // 挂载时的那一批跟着所在页面的入场走，不另外淡入
-  const shownBatch = useRef(batch);
+  const shownBatch = useRef({ batch, month });
   useLayoutEffect(() => {
-    if (shownBatch.current === batch) return;
-    shownBatch.current = batch;
-    // 同一个网格原地换内容，不靠换 key 重挂：重挂会把停在日格上的键盘焦点丢到 body。透明度先在提交时压到 0，
-    // 首帧就看不到新内容一闪
+    const shown = shownBatch.current;
+    if (shown.batch === batch) return;
+    shownBatch.current = { batch, month };
+    // 同一个网格原地换内容，不靠换 key 重挂：重挂会把停在日格上的键盘焦点丢到 body。起点先在提交时写上，
+    // 首帧就看不到新内容在原位一闪
     const weeks = weeksRef.current;
+    const x = shown.month === month || reduced ? null : monthEnterX(month > shown.month ? 1 : -1);
     weeks.style.opacity = "0";
-    void animateWeeks(weeks, { opacity: [0, 1] }, fade.in);
-  }, [batch, weeksRef, animateWeeks]);
+    if (x === null) {
+      void animateWeeks(weeks, { opacity: [0, 1] }, fade.in);
+      return;
+    }
+    weeks.style.transform = `translateX(${x}px)`;
+    void animateWeeks(weeks, { opacity: [0, 1], x: [x, 0] }, { ...springs.settle, opacity: fade.in });
+  }, [batch, month, reduced, weeksRef, animateWeeks]);
 
   return (
     <div className={cx(styles.calendar, className)}>

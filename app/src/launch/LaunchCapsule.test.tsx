@@ -17,7 +17,8 @@ import { CONFIRM_CANCEL_LABEL } from "../ui/ConfirmDialog";
 import { OverlayRoot } from "../shell/overlay";
 import { ShellProvider } from "../shell/shell";
 import { assemblyExitMs } from "../art/iso/AssemblingBlock";
-import { assembly, capsuleSwap } from "../lib/motion";
+import { assembly, capsuleSwap, fade } from "../lib/motion";
+import { feedSpeed, publishSpeed, SPEED_REFRESH_MS, startSpeed } from "../lib/progress-display";
 import { faceSwap, LaunchCapsule, TEXT_SLOTS } from "./LaunchCapsule";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -469,6 +470,42 @@ describe("换面与文字", () => {
     expect(entering.style.transform).toBe("translateY(4px)");
   });
 
+  it("下载阶段的速度走显示节流：不随每次上报跳字，满一个刷新间隔才换成平均后的值；文件数照常跟随", async () => {
+    act(() => {
+      void launcher.actions.launch("生存");
+    });
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("没有会话");
+    const MB = 1024 * 1024;
+    const report = (finished: number, speed: number) =>
+      act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished, total: 10, bytes: 0, total_bytes: null, speed } }));
+    const sub = () => {
+      const line = document.querySelectorAll('[data-face="loading"] [data-slot]')[1];
+      if (line === undefined) throw new Error("加载面没有副行");
+      return slotOf(line).shown;
+    };
+    const t0 = Date.now();
+    // 第一次报上来的速度直接写，不从 0 爬上来
+    report(1, MB);
+    expect(sub()).toEqual([SESSION_COPY.downloadProgress(1, 10, MB)]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    report(2, 5 * MB);
+    // 文件数跟着走，速度还是上一次换上的
+    expect(sub()).toEqual([SESSION_COPY.downloadProgress(2, 10, MB)]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SPEED_REFRESH_MS - 100);
+    });
+    const averaged = publishSpeed(feedSpeed(startSpeed(MB, t0), 5 * MB, t0 + 100), t0 + SPEED_REFRESH_MS).shown;
+    expect(sub()).toEqual([SESSION_COPY.downloadProgress(2, 10, averaged)]);
+    // 平均后的值不是这一刻的瞬时速度
+    expect(SESSION_COPY.downloadProgress(2, 10, averaged)).not.toBe(SESSION_COPY.downloadProgress(2, 10, 5 * MB));
+  });
+
   it("崩溃线索读出来之前副行就在（空着），读出来后只在这一行里换上字", async () => {
     ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
     const report = deferred<null>();
@@ -526,5 +563,14 @@ describe("换面与文字", () => {
     };
     expect(delayOf(false)).toEqual({ all: capsuleSwap.faceEnterDelay, opacity: capsuleSwap.faceEnterDelay });
     expect(delayOf(true)).toEqual({ all: 0, opacity: 0 });
+  });
+
+  it("减少动画时换面只交叉淡化：新面不从下方来，旧面不先跳 6px 再淡出", () => {
+    const { enter, leave } = faceSwap;
+    if (typeof enter !== "function" || typeof leave !== "function") throw new Error("enter 与 leave 应按减少动画生效值取");
+    expect(enter(true, {}, {})).toEqual({ opacity: 0 });
+    expect(leave(true, {}, {})).toEqual({ opacity: 0, transition: fade.out });
+    expect(enter(false, {}, {})).toEqual({ opacity: 0, y: 6 });
+    expect(leave(false, {}, {})).toEqual({ opacity: 0, y: -6, transition: fade.out });
   });
 });

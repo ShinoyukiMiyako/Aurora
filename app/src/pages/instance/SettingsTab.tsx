@@ -12,8 +12,8 @@ import { formatMemory } from "../../domain/format";
 import { memoryBasis } from "../../domain/memory";
 import { canReinstallLoader, isolationByPolicy, needsReimport, runtimeComplete } from "../../domain/rules";
 import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
-import { fade, springs } from "../../lib/motion";
-import { useReflow } from "../../lib/reflow";
+import { fade, popMark } from "../../lib/motion";
+import { REFLOW_PAUSED_ATTR, useReflow } from "../../lib/reflow";
 import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -110,6 +110,19 @@ export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
   // 横幅出入、某张卡变高变矮（数据到达、切换模式、提示出没）时，下面的内容从旧位置滑过去
   const stack = useReflow<HTMLDivElement>();
   const grid = useReflow<HTMLDivElement>();
+  // 按住 JVM 参数框（拖它的尺寸手柄）期间网格的让位暂停：下面的卡片要跟着指针走，不能沿弹簧在后面追。
+  // 松手在哪儿都算，所以在窗口上收；按着的期间框内点选文字不改尺寸，暂停也无妨
+  const [pressing, setPressing] = useState(false);
+  useEffect(() => {
+    if (!pressing) return;
+    const release = () => setPressing(false);
+    window.addEventListener("pointerup", release);
+    window.addEventListener("pointercancel", release);
+    return () => {
+      window.removeEventListener("pointerup", release);
+      window.removeEventListener("pointercancel", release);
+    };
+  }, [pressing]);
 
   if (settings.status === "error") {
     return (
@@ -125,11 +138,11 @@ export function SettingsTab({ inst, queryId, ops }: SettingsTabProps) {
         {ops.busy && <Banner key="running" tone="info" title={SETTINGS_COPY.runningNote} />}
         {ops.settingsReason !== undefined && <Banner key="locked" tone="info" title={ops.settingsReason} />}
       </BannerSlot>
-      <div ref={grid} className={styles.settingsGrid}>
+      <div ref={grid} className={styles.settingsGrid} {...{ [REFLOW_PAUSED_ATTR]: pressing ? "" : undefined }}>
         <AppearanceCard inst={inst} editor={editor} view={gate.view} slow={gate.slow} />
         <MemoryCard inst={inst} editor={editor} memory={memory} view={gate.view} />
         <JavaCard inst={inst} editor={editor} java={java} view={gate.view} />
-        <JvmCard editor={editor} java={java} view={gate.view} slow={gate.slow} />
+        <JvmCard editor={editor} java={java} view={gate.view} slow={gate.slow} onPress={() => setPressing(true)} />
         <WindowCard inst={inst} editor={editor} view={gate.view} />
         <ManageCard inst={inst} ops={ops} />
       </div>
@@ -196,7 +209,7 @@ function JavaSkeleton() {
   );
 }
 
-function JvmSkeleton({ slow }: { slow: boolean }) {
+function JvmSkeleton() {
   return (
     <div className={styles.cardBody}>
       <Skeleton shape="block" width="100%" height={JVM_TEXTAREA_HEIGHT} radius="sm" />
@@ -212,7 +225,6 @@ function JvmSkeleton({ slow }: { slow: boolean }) {
         <Skeleton shape="block" width={56} height={SMALL_CONTROL_HEIGHT} radius="sm" />
         <Skeleton shape="block" width={96} height={SMALL_CONTROL_HEIGHT} radius="sm" />
       </div>
-      <SlowHint slow={slow} />
     </div>
   );
 }
@@ -478,10 +490,20 @@ function JavaState({ info, autoDownload, locked, onUseAuto }: { info: JavaInfo; 
 
 // ---------------------------------------------------------------- JVM 参数
 
-/** 「未保存」标签出现时从这个比例弹到原大。 */
-const UNSAVED_POP_FROM = 0.6;
-
-function JvmCard({ editor, java, view, slow }: { editor: SettingsEditor | null; java: ReturnType<typeof useJavaInfo>; view: LoadingView; slow: boolean }) {
+function JvmCard({
+  editor,
+  java,
+  view,
+  slow,
+  onPress,
+}: {
+  editor: SettingsEditor | null;
+  java: ReturnType<typeof useJavaInfo>;
+  view: LoadingView;
+  slow: boolean;
+  /** 指针在参数框上按下（可能是在拖尺寸手柄）。 */
+  onPress(): void;
+}) {
   const actions = useLauncherActions();
   const reduced = useReducedMotionConfig() === true;
   // 堆参数警示出入时，下面的操作行从旧位置滑过去。只挂在警示与操作行这一段上：
@@ -530,12 +552,7 @@ function JvmCard({ editor, java, view, slow }: { editor: SettingsEditor | null; 
           // 改出未保存的内容时标签弹出，保存或恢复后淡出；标签比卡头矮，出入不改卡头的高
           <AnimatePresence>
             {dirty && (
-              <motion.span
-                key="unsaved"
-                initial={reduced ? { opacity: 0 } : { opacity: 0, scale: UNSAVED_POP_FROM }}
-                animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
-                exit={{ opacity: 0, transition: fade.out }}
-              >
+              <motion.span key="unsaved" {...(reduced ? popMark.reduced : popMark.tag)}>
                 <Tag tone="warn" size="sm">
                   {SETTINGS_COPY.unsaved}
                 </Tag>
@@ -544,13 +561,23 @@ function JvmCard({ editor, java, view, slow }: { editor: SettingsEditor | null; 
           </AnimatePresence>
         }
       />
-      <Loadable view={view} skeleton={<JvmSkeleton slow={slow} />}>
+      <Loadable view={view} skeleton={<JvmSkeleton />}>
         {() => {
           const ready = readyEditor(editor, "JVM 参数卡");
           if (draft === null || saved === null) throw new Error("JVM 参数卡：实例设置读到的那一次渲染里草稿必定已就位");
           return (
             <div className={styles.cardBody}>
-              <Textarea mono rows={3} value={draft} onChange={setDraft} placeholder={SETTINGS_COPY.jvmPlaceholder} aria-label={SETTINGS_COPY.jvmInput} className={styles.jvm} onKeyDown={onKeyDown} />
+              <Textarea
+                mono
+                rows={3}
+                value={draft}
+                onChange={setDraft}
+                placeholder={SETTINGS_COPY.jvmPlaceholder}
+                aria-label={SETTINGS_COPY.jvmInput}
+                className={styles.jvm}
+                onKeyDown={onKeyDown}
+                onPointerDown={onPress}
+              />
               <div className={styles.chips}>
                 {JVM_PRESET_KEYS.map((key) => {
                   const flags = major === null ? null : presetFlags(key, major);
@@ -598,6 +625,8 @@ function JvmCard({ editor, java, view, slow }: { editor: SettingsEditor | null; 
           );
         }}
       </Loadable>
+      {/* 「比平时慢一些」放在骨架层外：骨架层整层对读屏隐藏，放在里面读屏就读不到。出没时卡片变高变矮由网格的让位接住 */}
+      <Appear itemClassName={styles.settingsSlow}>{slow && <SlowHint key="slow" slow />}</Appear>
     </Card>
   );
 }
@@ -765,7 +794,18 @@ function ManageCard({ inst, ops }: { inst: InstanceSummary; ops: InstanceOps }) 
     <Card padding="lg" className={styles.settingsWide}>
       <CardHeader icon="box" title={SETTINGS_COPY.manageTitle} />
       <div>
-        <SettingRow title={SETTINGS_COPY.nameTitle} description={error === null ? SETTINGS_COPY.nameNote : <span className={styles.dangerText}>{error}</span>}>
+        {/* 校验错误换进说明位：说明槽常驻原来的说明占位，格高取它与当前错误里高的那条（现有的错误都比它短），
+            出错、改对时这一行不变高，下面的行与危险区不跳 */}
+        <SettingRow
+          title={SETTINGS_COPY.nameTitle}
+          description={
+            <NoteSlot
+              current={error === null ? SETTINGS_COPY.nameNote : error}
+              options={error === null ? [SETTINGS_COPY.nameNote] : [SETTINGS_COPY.nameNote, error]}
+              tone={error === null ? undefined : "danger"}
+            />
+          }
+        >
           <TextInput
             value={name}
             onChange={setName}
@@ -877,15 +917,18 @@ function TemplateRow({ id, locked }: { id: string; locked: string | undefined })
   // 第二行与整页同一套出现时机：300 ms 内读到就不出骨架，骨架出现后至少停留 300 ms
   const gate = useLoadingGate(template.status === "loading");
 
-  // 默认设置没了，「清除」连同焦点一起从 DOM 里拿掉，焦点掉回 body，键盘用户得从文档开头重新找起。
-  // 交给同一行的「保存为默认」；焦点已经在别处时不抢
+  // 默认设置没了，「清除」淡出并变得不可交互：焦点还在它身上（浏览器随后会把它挪回 body）或已经掉回 body，
+  // 键盘用户都得从文档开头重新找起。交给同一行的「保存为默认」；焦点已经在别处时不抢
   const saveRef = useRef<HTMLButtonElement>(null);
+  const clearSlot = useRef<HTMLSpanElement>(null);
   const hadClear = useRef(present);
   useLayoutEffect(() => {
     const removed = hadClear.current && !present;
     hadClear.current = present;
-    if (!removed || document.activeElement !== document.body) return;
-    if (saveRef.current === null) throw new Error("「保存为默认」尚未挂载");
+    if (!removed) return;
+    if (clearSlot.current === null || saveRef.current === null) throw new Error("「清除」与「保存为默认」尚未挂载");
+    const active = document.activeElement;
+    if (active !== document.body && !clearSlot.current.contains(active)) return;
     saveRef.current.focus();
   }, [present]);
 
@@ -917,11 +960,13 @@ function TemplateRow({ id, locked }: { id: string; locked: string | undefined })
         </span>
       }
     >
-      {present && (
+      {/* 「清除」常驻占位：默认设置读到、存下、清除时控件区不变宽，说明列不重新折行，这一行与下面的行不跳。
+          没有默认设置时淡出，带 inert：点不到、聚焦不到，读屏也不读它 */}
+      <span ref={clearSlot} className={styles.clearSlot} data-hidden={!present || undefined} inert={!present}>
         <Button size="sm" variant="ghost" loading={busy === "clear"} disabled={busy !== null} focusableWhenDisabled onClick={clear}>
           {SETTINGS_COPY.templateClear}
         </Button>
-      )}
+      </span>
       <Button ref={saveRef} size="sm" loading={busy === "save"} disabled={busy !== null && locked === undefined} focusableWhenDisabled disabledReason={locked} onClick={save}>
         {SETTINGS_COPY.templateSave}
       </Button>
@@ -931,10 +976,12 @@ function TemplateRow({ id, locked }: { id: string; locked: string | undefined })
 
 function DeleteNote({ inst, busy }: { inst: InstanceSummary; busy: boolean }) {
   const worlds = deletableWorldCount(inst);
+  const base = worlds === null ? null : worlds > 0 ? SETTINGS_COPY.deleteWorlds(worlds) : SETTINGS_COPY.deleteNoWorlds;
+  // 游戏运行中在后面追加一句：说明槽按追加之后的那条占位，游戏启动、退出时危险区不因多出一行而变高
+  const running = base === null ? SETTINGS_COPY.deleteRunning : `${base}${SETTINGS_COPY.deleteRunning}`;
   return (
     <span className={styles.soft}>
-      {worlds === null ? null : worlds > 0 ? SETTINGS_COPY.deleteWorlds(worlds) : SETTINGS_COPY.deleteNoWorlds}
-      {busy && SETTINGS_COPY.deleteRunning}
+      <NoteSlot current={busy ? running : base} options={base === null ? [running] : [base, running]} />
     </span>
   );
 }

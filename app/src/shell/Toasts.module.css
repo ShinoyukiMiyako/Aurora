@@ -33,16 +33,19 @@
   animation-name: toastsAtAside;
 }
 
-/* 两个关键帧内容相同，只是名字不同 */
+/*
+ * 两个关键帧内容相同，只是名字不同。起点平时是 0；接力换回原角时那一角上一次的拷贝还没淡完，
+ * 脚本拿掉它，经 --toasts-enter-from 让容器从它此刻的透明度接着淡入
+ */
 @keyframes toastsAtCorner {
   from {
-    opacity: 0;
+    opacity: var(--toasts-enter-from, 0);
   }
 }
 
 @keyframes toastsAtAside {
   from {
-    opacity: 0;
+    opacity: var(--toasts-enter-from, 0);
   }
 }
 

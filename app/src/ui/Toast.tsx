@@ -5,13 +5,14 @@
 // - 底部倒计时细线按剩余寿命线性缩短，暂停计时期间停住；不自动消失（countdown 为 null）的没有细线；
 //   减少动画时照常显示（它是剩余时间的信息）。剩余比例或剩余时长变化时细线从新的位置重新开始。
 // - 入场从落点靠窗口边的一侧滑入并轻微回弹，退场淡出；哪一侧由容器给，单独摆放时从右侧进。其余通知让位走布局动画。
+//   减少动画时进出只淡入淡出。
 // - 重复的同一条并进来时（repeats 变了）图标底座原位弹一下，减少动画时不弹。
 // - error 为 alert（打断播报），其余为 status；通知不抢焦点、不入 Esc 栈。
 
-import { motion, useAnimate, type Variants } from "framer-motion";
+import { motion, useAnimate, useReducedMotionConfig, type Variants } from "framer-motion";
 import { useEffect, useRef, type Ref } from "react";
 import { Icon, type IconName } from "../art/Icon";
-import { fade, nudge, springs } from "../lib/motion";
+import { fade, insertItemFade, nudge, springs } from "../lib/motion";
 import { cssVars, cx } from "../lib/util";
 import { useOverlayState } from "../shell/overlay";
 import { Button } from "./Button";
@@ -39,6 +40,17 @@ export type ToastSide = 1 | -1;
 const SLIDE: Variants = {
   away: (side: ToastSide) => ({ opacity: 0, x: side * ENTER_SHIFT, scale: ENTER_SCALE, transition: fade.out }),
 };
+
+/**
+ * 平时的进出：从 away 滑入，退场回到 away。减少动画时换成 insertItemFade：根部 MotionConfig 把位移与缩放改成一步到位，
+ * 照用这一份的话退场那一刻会先横跳 40px、缩一下，再在原处淡出。
+ */
+const SLIDE_MOTION = {
+  variants: SLIDE,
+  initial: "away",
+  animate: { opacity: 1, x: 0, scale: 1, transition: { ...springs.base, opacity: fade.in } },
+  exit: "away",
+} as const;
 
 export interface ToastCountdown {
   /** 剩余寿命占满额的比例（0 到 1），细线从这个长度开始缩短。 */
@@ -75,6 +87,7 @@ export interface ToastProps {
 
 export function Toast({ tone, title, body, action, onClose, countdown, side = 1, layoutDependency, repeats, ref, className }: ToastProps) {
   const { scrimOpen } = useOverlayState();
+  const moves = useReducedMotionConfig() === true ? insertItemFade : SLIDE_MOTION;
   if (countdown !== null && (countdown.fraction < 0 || countdown.fraction > 1 || countdown.remainingMs < 0))
     throw new Error(`倒计时取值越界：fraction ${countdown.fraction}，remainingMs ${countdown.remainingMs}`);
 
@@ -97,10 +110,7 @@ export function Toast({ tone, title, body, action, onClose, countdown, side = 1,
       className={cx(styles.toast, className)}
       data-tone={tone}
       custom={side}
-      variants={SLIDE}
-      initial="away"
-      animate={{ opacity: 1, x: 0, scale: 1, transition: { ...springs.base, opacity: fade.in } }}
-      exit="away"
+      {...moves}
       transition={{ layout: springs.settle }}
     >
       <span ref={iconBase} className={styles.iconBase}>

@@ -5,11 +5,13 @@
 // 按下的那个按钮转圈、状态块说明正在安装，弹窗尺寸不塌。
 
 import { motion } from "framer-motion";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { PetalMark } from "../art/PetalMark";
 import { downloadFailureCopy, sourceSwitchedCopy, UPDATE_COPY } from "../copy/updater";
 import { formatBytes, formatDate } from "../domain/format";
 import { insertItem } from "../lib/motion";
+import { useDisplayCount } from "../lib/progress-display";
+import { useMounted } from "../lib/useMounted";
 import { cx } from "../lib/util";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useOnline } from "../state/online";
@@ -46,7 +48,9 @@ function Notes({ notes }: { notes: string | null }) {
 
 function DownloadProgress({ phase }: { phase: Extract<UpdaterPhase, { kind: "downloading" }> }) {
   const fraction = downloadFraction(phase.bytes, phase.totalBytes);
-  const label = phase.totalBytes === null ? formatBytes(phase.bytes) : UPDATE_COPY.progress(formatBytes(phase.bytes), formatBytes(phase.totalBytes));
+  // 进度条按每条进度事件平滑地走；已下大小的字照事件原样换，一秒跳十次读不清，按速度文字的节拍换
+  const bytes = useDisplayCount(phase.bytes, phase.totalBytes);
+  const label = phase.totalBytes === null ? formatBytes(bytes) : UPDATE_COPY.progress(formatBytes(bytes), formatBytes(phase.totalBytes));
   // 换源后进度从 0 重来，说一句才不像是进度倒退了。读屏也要听到这句：status 节点在下载阶段一直挂着、只换文字，
   // 读屏对已有 live 区域换文字念得可靠，对新插进来的节点常常不念
   const switched = sourceSwitchedCopy(phase.source);
@@ -69,10 +73,7 @@ function DownloadProgress({ phase }: { phase: Extract<UpdaterPhase, { kind: "dow
  * 随弹窗挂载、开着期间一直在，弹窗打开时就在的块跟着弹窗一起出现，之后换上的才单独淡入。
  */
 function PhaseStatus({ phaseKey, children }: { phaseKey: string; children: ReactNode }) {
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   if (children === null) return null;
   return (
     <motion.div key={phaseKey} className={s.status} initial={mounted.current ? insertItem.initial : false} animate={insertItem.animate}>

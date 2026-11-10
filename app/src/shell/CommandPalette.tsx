@@ -5,9 +5,11 @@
 // - 键盘：↑↓ 首尾循环移动高亮，Enter 执行，Tab 不做事（焦点留在输入框），输入法组字期间不响应；指针移动即高亮。
 // - 执行：先同步关闭面板再执行动作，动作弹出的确认框、弹窗才在栈顶；导航类动作不把焦点还给打开前的元素，
 //   而是交给内容区，读屏从新页面开头读起。
+// - 结果列表：键入过滤时整批换上；面板开着时后台数据插进、拿掉条目（数据晚到、占位实例转正、当前实例的启动项换了），
+//   插进来的淡入，被挤开的从旧位置滑到新位置。
 
-import { AnimatePresence, motion, useIsPresent } from "framer-motion";
-import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
+import { useCallback, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { Icon, type IconName } from "../art/Icon";
 import { ACTION_ERROR, LAUNCH_COPY, LOADER_NAME, MSA_CLIENT_ID_MISSING, PAGE_LABEL, SETTINGS_SECTION_LABEL, accountKindLabel } from "../copy/flows";
@@ -15,7 +17,9 @@ import type { InstanceSummary } from "../domain/adapt";
 import { InstanceAvatar } from "../launch/InstanceAvatar";
 import { brokenAction } from "../launch/launchView";
 import { useLaunch, type LaunchEntry } from "../launch/useLaunch";
-import { fade, springs } from "../lib/motion";
+import { fade, insertItemFade, springs } from "../lib/motion";
+import { REFLOW_PAUSED_ATTR, useReflow } from "../lib/reflow";
+import { playTween } from "../lib/slide";
 import { isImeComposing } from "../lib/util";
 import { useAppearance } from "../state/appearance";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
@@ -65,6 +69,16 @@ const SECTION_KEYWORDS: Readonly<Record<(typeof SETTINGS_SECTIONS)[number], read
 
 const JUMP_PAGES: readonly Exclude<PageId, "instance">[] = ["home", "library", "discover", "tasks", "accounts", "settings"];
 
+/**
+ * 面板的进出：从上方 8px、略小处落下淡入，退场原地略缩淡出。减少动画时换成 insertItemFade：根部 MotionConfig
+ * 把位移与缩放改成一步到位，照用这一份的话关闭那一刻面板会先缩一下再淡出。
+ */
+const PANEL_MOTION = {
+  initial: { opacity: 0, y: -8, scale: 0.98 },
+  animate: { opacity: 1, y: 0, scale: 1, transition: { ...springs.soft, opacity: fade.in } },
+  exit: { opacity: 0, scale: 0.98, transition: fade.out },
+} as const;
+
 export function CommandPalette() {
   const { palette, closePalette } = useShell();
   const root = useOverlayRoot();
@@ -92,6 +106,7 @@ function PaletteLayer({ initialQuery, focusReturn }: { initialQuery: string; foc
   const { closePalette } = useShell();
   const chrome = useChrome();
   const present = useIsPresent();
+  const panelMoves = useReducedMotionConfig() === true ? insertItemFade : PANEL_MOTION;
   // 退场的那一段沿用最后在场时的当前实例：刚执行的动作（结束游戏、取消启动）可能让它在 null 与某个实例之间换了，
   // 换了就会把淡出中的面板整块重挂，冻结的条目与列表滚动位置都丢掉。那个实例在退场途中没了（被删、改名）时只能跟着换
   const liveId = useLauncherSelector(currentInstanceId);
@@ -123,9 +138,7 @@ function PaletteLayer({ initialQuery, focusReturn }: { initialQuery: string; foc
         role="dialog"
         aria-modal="true"
         aria-label={PALETTE_COPY.label}
-        initial={{ opacity: 0, y: -8, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1, transition: { ...springs.soft, opacity: fade.in } }}
-        exit={{ opacity: 0, scale: 0.98, transition: fade.out }}
+        {...panelMoves}
       >
         {currentId === null ? body(null) : <WithLaunch key={currentId} id={currentId}>{body}</WithLaunch>}
       </motion.div>
@@ -341,6 +354,20 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
   const listId = `${base}-list`;
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  // 结果列表与每一组各自让位：组里插进、拿掉一行时同组下面的行滑开，组变高变矮时后面的组滑开
+  const listFlow = useReflow<HTMLDivElement>();
+  const groupFlow = useReflow<HTMLDivElement>();
+  const attachList = useCallback(
+    (el: HTMLDivElement | null) => {
+      listRef.current = el;
+      const stop = listFlow(el);
+      return () => {
+        listRef.current = null;
+        if (typeof stop === "function") stop();
+      };
+    },
+    [listFlow],
+  );
   const present = useIsPresent();
   const live = rankPalette(query, usePaletteEntries(query, current));
   // 退场的那一段不再跟着状态重算：刚执行的动作（切换账户、启动）此刻已改了状态，淡出中的条目不该换字、换位。
@@ -378,6 +405,37 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
     if (option.offsetTop < list.scrollTop) list.scrollTop = option.offsetTop;
     else if (option.offsetTop + option.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = option.offsetTop + option.offsetHeight - list.clientHeight;
   }, [active, query]);
+
+  // 上一次提交时的查询与条目：这一次的增删是键入过滤带来的，还是后台数据带来的，靠它分辨
+  const shownRows = useRef<{ query: string; groups: ReadonlySet<PaletteGroup>; ids: ReadonlySet<string> } | null>(null);
+  useLayoutEffect(() => {
+    const last = shownRows.current;
+    shownRows.current = { query, groups: new Set(sections.map((section) => section.group)), ids: new Set(flat.map((entry) => entry.id)) };
+    const list = listRef.current;
+    // 刚挂上：跟着面板一起入场
+    if (last === null || list === null) return;
+    if (last.query !== query) {
+      // 键入过滤：结果整批换上，一行行滑过去结果就跟不上手。让位在这次提交之后才读位置，
+      // 暂停开关在这里开了又关：开关的增删让列表与各组这一趟只记下新位置，之后后台数据带来的增删照常滑
+      const flows = [list, ...list.children];
+      for (const flow of flows) flow.setAttribute(REFLOW_PAUSED_ATTR, "");
+      for (const flow of flows) flow.removeAttribute(REFLOW_PAUSED_ATTR);
+      return;
+    }
+    // 后台数据插进来的条目淡入，整组后到的整组淡入；被挤开的由让位滑开
+    let index = 0;
+    sections.forEach((section, s) => {
+      const freshGroup = !last.groups.has(section.group);
+      const group = list.children[s];
+      if (freshGroup && group instanceof HTMLElement) arrive(group);
+      for (const entry of section.items) {
+        const i = index++;
+        if (freshGroup || last.ids.has(entry.id)) continue;
+        const row = list.ownerDocument.getElementById(optionId(i));
+        if (row !== null) arrive(row);
+      }
+    });
+  });
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
     if (isImeComposing(event)) return;
@@ -425,9 +483,9 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
         />
         <KeyHint keys={["Esc"]} />
       </div>
-      <div ref={listRef} id={listId} className={styles.list} role="listbox" aria-label={PALETTE_COPY.label}>
+      <div ref={attachList} id={listId} className={styles.list} role="listbox" aria-label={PALETTE_COPY.label}>
         {sections.map((section) => (
-          <div key={section.group} className={styles.group} role="group" aria-label={groupLabel(section.group)}>
+          <div key={section.group} ref={groupFlow} className={styles.group} role="group" aria-label={groupLabel(section.group)}>
             <div className={styles.groupLabel} aria-hidden="true">
               {groupLabel(section.group)}
             </div>
@@ -483,4 +541,10 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
 
 function groupLabel(group: PaletteGroup): string {
   return PALETTE_COPY.groups[group];
+}
+
+/** 面板开着时后到的一行或一组：原地淡入。运行环境没有 Web Animations（组件测试的 jsdom）时直接出现。 */
+function arrive(el: HTMLElement): void {
+  if (typeof el.animate !== "function") return;
+  playTween(el, [{ opacity: 0 }, { opacity: 1 }], fade.in);
 }

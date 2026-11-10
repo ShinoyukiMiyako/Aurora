@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 // 协议页要做到的事：协议、无担保、全文、附加条款、素材许可、源代码、第三方清单、素材与商标声明都在，读失败不把整页带下去，打开一次只读一次。
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOADING_DELAY_MS } from "../../domain/limits";
@@ -88,13 +90,26 @@ const tabs = () => [...document.querySelectorAll<HTMLButtonElement>('[role="tab"
 const noteShown = () => document.querySelector(`.${styles.headingNote} [data-current]`)?.textContent;
 /** 清单的底块：读到之前就在，清单读到后落在它上面。 */
 const packagesBox = () => document.querySelector(`main .${styles.packagesBox}`);
-/** 底块里「正在读取」那一行；看不看得见由加载门决定，延迟之内它所在的那一层带着 data-pending、是透明的。 */
-const loadingNote = () => [...document.querySelectorAll<HTMLElement>("main p")].find((p) => p.textContent === COPY.zh.legal.thirdPartyLoading) ?? null;
+/** 在底块里查；底块不在就直接报错，不让「查不到」被当成某种答案（比如「不忙」或「忙」）。 */
+function inBox(selector: string): Element | null {
+  const box = packagesBox();
+  if (box === null) throw new Error("没有第三方清单的底块");
+  return box.querySelector(selector);
+}
+/** 底块里看得见的「正在读取」那一行（不是给读屏的播报区）；看不看得见由加载门决定，延迟之内它所在的那一层带着 data-pending、是透明的。 */
+const loadingNote = () => [...document.querySelectorAll<HTMLElement>("main p:not([role='status'])")].find((p) => p.textContent === COPY.zh.legal.thirdPartyLoading) ?? null;
 const loadingNoteVisible = () => {
   const note = loadingNote();
   return note !== null && note.closest("[data-pending]") === null;
 };
-const listBusy = () => packagesBox()?.querySelector("[aria-busy='true']") !== null;
+const listBusy = () => inBox("[aria-busy='true']") !== null;
+/** 清单的读屏播报区：要在对读屏隐藏的骨架层外面，否则念不出来。 */
+function listStatus(): Element {
+  const found = inBox('[role="status"]');
+  if (found === null) throw new Error("清单底块里没有播报区");
+  if (found.closest('[aria-hidden="true"]') !== null) throw new Error("清单的播报区落在对读屏隐藏的层里");
+  return found;
+}
 
 function button(name: string): HTMLButtonElement {
   const found = [...document.querySelectorAll("button")].find((b) => b.textContent === name);
@@ -355,6 +370,8 @@ describe("第三方许可清单", () => {
     expect(loadingNote()).not.toBeNull();
     expect(loadingNoteVisible()).toBe(false);
     expect(listBusy()).toBe(true);
+    expect(listStatus().textContent).toBe("");
+    expect(listStatus().className).toBe(styles.status);
     expect(packageList()).toBeNull();
     expect(countText()).toBe(legal.thirdPartyHeading);
 
@@ -373,12 +390,13 @@ describe("第三方许可清单", () => {
     expect(firstOpacity).toEqual(["0"]);
     expect(loadingNoteVisible()).toBe(false);
     expect(listBusy()).toBe(false);
+    expect(listStatus().textContent).toBe("");
     expect(rows()).toHaveLength(3);
     expect(packageList()?.closest(`.${styles.packagesBox}`)).toBe(box);
     expect(countText()).toBe(`${legal.thirdPartyHeading}3`);
   });
 
-  it("超过加载延迟还没读到才说「读取中」，读到后至少再停一个延迟才换成清单", async () => {
+  it("超过加载延迟还没读到才说「读取中」（看得见的和读屏播报的同一刻），读到后至少再停一个延迟才换成清单", async () => {
     vi.useFakeTimers();
     try {
       const manifest = deferred<ThirdPartyManifest>();
@@ -387,22 +405,39 @@ describe("第三方许可清单", () => {
         await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS - 1);
       });
       expect(loadingNoteVisible()).toBe(false);
+      expect(listStatus().textContent).toBe("");
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1);
       });
       expect(loadingNoteVisible()).toBe(true);
+      expect(listStatus().textContent).toBe(legal.thirdPartyLoading);
 
       await act(async () => manifest.resolve(MANIFEST));
       expect(packageList()).toBeNull();
       expect(listBusy()).toBe(true);
+      expect(listStatus().textContent).toBe(legal.thirdPartyLoading);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
       });
       expect(listBusy()).toBe(false);
+      expect(listStatus().textContent).toBe("");
       expect(rows()).toHaveLength(3);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("播报区只给读屏：脱离底块的布局、裁成看不见，填字时清单与骨架都不挪", () => {
+    // jsdom 不做布局，直接读样式表
+    const css = readFileSync(resolve(__dirname, "Legal.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rule = /(?:^|\n)\.status\s*\{([^}]*)\}/.exec(css)?.[1];
+    if (rule === undefined) throw new Error("样式表里没有 .status");
+    const decls = new Map(rule.split(";").flatMap((decl) => (decl.includes(":") ? [[decl.slice(0, decl.indexOf(":")).trim(), decl.slice(decl.indexOf(":") + 1).trim()] as const] : [])));
+    expect(decls.get("position")).toBe("absolute");
+    expect(decls.get("width")).toBe("1px");
+    expect(decls.get("height")).toBe("1px");
+    expect(decls.get("overflow")).toBe("hidden");
+    expect(decls.get("clip-path")).toBe("inset(50%)");
   });
 
   it("读失败时说明并带上原文，协议全文还在", async () => {

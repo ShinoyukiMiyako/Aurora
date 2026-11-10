@@ -5,12 +5,13 @@
 // 从皮肤站把服务器链接拖进窗口时带着解出来的地址进来：填进第一步并立即执行一次「下一步」，与用户手动点一样。
 // 弹窗本身由 LoginFlow 渲染（各种登录共用一个），这里只算外框与主体交上去。
 
-import { memo, useEffect, useRef, useState, type ReactNode } from "react";
+import { useAnimate, useReducedMotionConfig } from "framer-motion";
+import { Fragment, memo, useEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { AccountAvatar } from "../../art/skin/AccountAvatar";
 import { ACTION_ERROR, AUTHLIB_COPY, LITTLESKIN_API } from "../../copy/flows";
 import type { AuthlibProfile, AuthServer } from "../../domain/adapt";
-import type { PanelFrom } from "../../lib/motion";
+import { shake, type PanelFrom } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
@@ -63,6 +64,16 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
   const [probeError, setProbeError] = useState<InlineProblem | null>(null);
   const [server, setServer] = useState<{ url: string; info: AuthServer } | null>(() => (prefill === null ? null : prefilledServer(prefill)));
   const normalized = normalizeServerUrl(serverInput);
+  // 原位说明过几次失败。说明块在重试期间留着，同一种失败再来一次时块不重挂、文字也不变：
+  // 每次失败换一份文字节点，读屏才会把这一次再念一遍；换了原因时说明块的行数会变，弹窗也按它重新量一次布局
+  const [failures, setFailures] = useState(0);
+
+  // 换了地址，上一个地址的失败说明就对不上了：手动改字与点预设胶囊一样收起它。点的就是当前地址时什么都不变
+  const editServer = (value: string) => {
+    if (value === serverInput) return;
+    setServerInput(value);
+    setProbeError(null);
+  };
 
   // 再探测一次时上一次的说明块留到这次有结果，不先收起再撑开（弹窗会缩一下又长回来）
   const probe = (input: string) =>
@@ -84,6 +95,7 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
         );
         if (!outcome.ok) {
           setProbeError(outcome.problem);
+          setFailures((n) => n + 1);
           return;
         }
         setProbeError(null);
@@ -114,6 +126,17 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
   const [loginError, setLoginError] = useState<LoginProblem | null>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
   const canLogin = username.trim() !== "" && password !== "";
+  // 账号密码被拒的次数：每加一，密码框抖一次，告诉用户这一下没有通过。减少动画时不抖，只靠框下的错误
+  const [refused, setRefused] = useState(0);
+  const [passwordShaker, animatePassword] = useAnimate<HTMLDivElement>();
+  const reduced = useReducedMotionConfig() === true;
+  const shookFor = useRef(refused);
+  useEffect(() => {
+    if (refused === shookFor.current) return;
+    shookFor.current = refused;
+    if (reduced) return;
+    void animatePassword(passwordShaker.current, { x: [...shake.x] }, shake.transition);
+  }, [refused, reduced, animatePassword, passwordShaker]);
 
   // ---- 第三步：角色
   const [pending, setPending] = useState<PendingProfiles | null>(null);
@@ -142,8 +165,10 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
         );
         if (!outcome.ok) {
           setLoginError(outcome.problem);
+          setFailures((n) => n + 1);
           if (outcome.problem.kind === "credentials") {
             setPassword("");
+            setRefused((n) => n + 1);
             passwordRef.current?.focus();
           }
           return;
@@ -253,10 +278,7 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
             <TextInput
               type="url"
               value={serverInput}
-              onChange={(value) => {
-                setServerInput(value);
-                setProbeError(null);
-              }}
+              onChange={editServer}
               placeholder={AUTHLIB_COPY.serverPlaceholder}
               icon="server"
               clearable
@@ -269,11 +291,11 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
             />
           </Field>
           <div className={styles.presets}>
-            <button type="button" className={styles.preset} onClick={() => setServerInput(LITTLESKIN_API)}>
+            <button type="button" className={styles.preset} onClick={() => editServer(LITTLESKIN_API)}>
               {AUTHLIB_COPY.preset}
             </button>
             {usedServers.map((used) => (
-              <button key={used.serverUrl} type="button" className={styles.preset} title={used.serverUrl} onClick={() => setServerInput(used.serverUrl)}>
+              <button key={used.serverUrl} type="button" className={styles.preset} title={used.serverUrl} onClick={() => editServer(used.serverUrl)}>
                 {used.serverName}
               </button>
             ))}
@@ -283,8 +305,10 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
             {http && <WarnNote key="http">{AUTHLIB_COPY.httpWarning}</WarnNote>}
             {probeError !== null && (
               <Callout key="probe" tone="danger" announce>
-                <strong className={styles.problemTitle}>{probeError.title}</strong>
-                <span>{probeError.body}</span>
+                <Fragment key={failures}>
+                  <strong className={styles.problemTitle}>{probeError.title}</strong>
+                  <span>{probeError.body}</span>
+                </Fragment>
               </Callout>
             )}
           </Appear>
@@ -318,30 +342,35 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
             />
           </Field>
           <Field label={AUTHLIB_COPY.password} hint={AUTHLIB_COPY.passwordNote} error={loginError !== null && loginError.kind === "credentials" ? AUTHLIB_COPY.badCredentials : undefined}>
-            <TextInput
-              ref={passwordRef}
-              type={reveal ? "text" : "password"}
-              value={password}
-              onChange={(value) => {
-                setPassword(value);
-                if (loginError !== null && loginError.kind === "credentials") setLoginError(null);
-              }}
-              autoComplete="current-password"
-              data-autofocus={focusPassword ? "" : undefined}
-              onEnter={submitLogin}
-              trailing={
-                <IconButton
-                  icon="eye"
-                  size="sm"
-                  label={AUTHLIB_DIALOG_COPY.showPassword}
-                  pressed={reveal}
-                  onClick={() => setReveal((v) => !v)}
-                />
-              }
-            />
+            {/* 抖动层只包输入框：框下的错误与说明不跟着晃 */}
+            <div ref={passwordShaker} data-shaker="">
+              <TextInput
+                ref={passwordRef}
+                type={reveal ? "text" : "password"}
+                value={password}
+                onChange={(value) => {
+                  setPassword(value);
+                  if (loginError !== null && loginError.kind === "credentials") setLoginError(null);
+                }}
+                autoComplete="current-password"
+                data-autofocus={focusPassword ? "" : undefined}
+                onEnter={submitLogin}
+                trailing={
+                  <IconButton
+                    icon="eye"
+                    size="sm"
+                    label={AUTHLIB_DIALOG_COPY.showPassword}
+                    pressed={reveal}
+                    onClick={() => setReveal((v) => !v)}
+                  />
+                }
+              />
+            </div>
           </Field>
           {/* 同一种失败只换文案时原位更新，换成另一种时旧的淡出、新的淡入 */}
-          <Appear>{loginError !== null && loginError.kind !== "credentials" && <LoginCallout key={loginError.kind} problem={loginError} retrying={loggingIn} onRetry={submitLogin} />}</Appear>
+          <Appear>
+            {loginError !== null && loginError.kind !== "credentials" && <LoginCallout key={loginError.kind} problem={loginError} attempt={failures} retrying={loggingIn} onRetry={submitLogin} />}
+          </Appear>
         </div>
       );
       break;
@@ -358,8 +387,8 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
     size: "md",
     closeOnScrim: false,
     onClose: close,
-    // 逐字输入每次都重渲染：只在换步、说明块与提醒行出没时量布局
-    layoutKey: [step, http ? "http" : "", probeError === null ? "" : "probe", loginError === null ? "" : loginError.kind].join(":"),
+    // 逐字输入每次都重渲染：只在换步、说明块与提醒行出没、又说明了一次失败（原因换了，块的行数跟着变）时量布局
+    layoutKey: [step, http ? "http" : "", probeError === null ? "" : "probe", loginError === null ? "" : loginError.kind, failures].join(":"),
     footer,
     body: (
       <div className={styles.authlib}>
@@ -373,8 +402,16 @@ export const AuthlibDialog = memo(function AuthlibDialog({ prefill, dropped, rep
   return null;
 });
 
+interface LoginCalloutProps {
+  problem: Exclude<LoginProblem, { kind: "credentials" }>;
+  /** 第几次说明失败：每次换一份文字节点，同一种失败再来一次时读屏照样念。块与重试键不重挂，焦点留在重试键上。 */
+  attempt: number;
+  retrying: boolean;
+  onRetry: () => void;
+}
+
 /** 登录这一步原位说明的失败；账号密码错写在密码框下，不经这里。 */
-function LoginCallout({ problem, retrying, onRetry }: { problem: Exclude<LoginProblem, { kind: "credentials" }>; retrying: boolean; onRetry: () => void }) {
+function LoginCallout({ problem, attempt, retrying, onRetry }: LoginCalloutProps) {
   // 重试在途时说明块留着，重试键转圈
   const retry = (
     <Button variant="secondary" size="sm" icon="refresh" loading={retrying} onClick={onRetry}>
@@ -385,27 +422,31 @@ function LoginCallout({ problem, retrying, onRetry }: { problem: Exclude<LoginPr
     case "network":
       return (
         <Callout tone="danger" announce action={retry}>
-          {AUTHLIB_COPY.network}
+          <Fragment key={attempt}>{AUTHLIB_COPY.network}</Fragment>
         </Callout>
       );
     case "service_down":
       return (
         <Callout tone="danger" announce action={retry}>
-          <strong className={styles.problemTitle}>{AUTHLIB_COPY.loginServiceDown.title}</strong>
-          <span>{AUTHLIB_COPY.loginServiceDown.body}</span>
+          <Fragment key={attempt}>
+            <strong className={styles.problemTitle}>{AUTHLIB_COPY.loginServiceDown.title}</strong>
+            <span>{AUTHLIB_COPY.loginServiceDown.body}</span>
+          </Fragment>
         </Callout>
       );
     case "no_profile":
       return (
         <Callout tone="warn" announce>
-          <strong className={styles.problemTitle}>{AUTHLIB_COPY.noProfile.title}</strong>
-          <span>{AUTHLIB_COPY.noProfile.body}</span>
+          <Fragment key={attempt}>
+            <strong className={styles.problemTitle}>{AUTHLIB_COPY.noProfile.title}</strong>
+            <span>{AUTHLIB_COPY.noProfile.body}</span>
+          </Fragment>
         </Callout>
       );
     case "rejected":
       return (
         <Callout tone="danger" announce fullText>
-          {problem.message}
+          <Fragment key={attempt}>{problem.message}</Fragment>
         </Callout>
       );
   }

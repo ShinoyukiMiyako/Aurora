@@ -91,12 +91,12 @@ function textOf(node: Node): string {
   return t;
 }
 
-/** 概览里的启动失败横幅：以标题定位，按钮只在它里面找，避开头图与状态岛上的同名按钮。 */
 /** 在场的启动失败横幅标题。横幅消失时淡出退场，那段时间它还在文档里、带 inert，不算。 */
 function liveFailedTitles(): HTMLElement[] {
   return [...document.querySelectorAll<HTMLElement>("*")].filter((el) => el.children.length === 0 && textOf(el).startsWith("上次启动失败：") && el.closest("[inert]") === null);
 }
 
+/** 概览里的启动失败横幅：以标题定位，按钮只在它里面找，避开头图与状态岛上的同名按钮。 */
 function failedBanner(): HTMLElement {
   const title = liveFailedTitles()[0];
   if (title === undefined) throw new Error("概览里没有启动失败横幅");

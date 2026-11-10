@@ -1,6 +1,6 @@
-// 进度类数字的显示节流：下载速度怎么平滑、多久换一次字，任务完成时进度条推满、留住一拍再交给所在的行。
+// 进度类数字的显示节流：下载速度怎么平滑、多久换一次字，已下大小多久换一次字，任务完成时进度条推满、留住一拍再交给所在的行。
 //
-// 后端每 100 ms 报一次进度与瞬时速度。照原样写出来，速度文字一秒跳十次、读不清；任务一完成，行与进度条又在同一次
+// 后端每 100 ms 报一次进度与瞬时速度。照原样写出来，速度与已下大小的文字一秒跳十次、读不清；任务一完成，行与进度条又在同一次
 // 更新里撤掉，进度条停在最后一次上报的位置（常差最后几成），用户从没见过满格。这里只管「显示成什么、何时换」，
 // 不改任务本身的数据。百分比文字不在这里：它取进度条用的同一份平滑（ui/ProgressBar 的 useSmoothProgress），字与条同步走。
 
@@ -12,7 +12,10 @@ import { SPRING_PARAMS } from "./motion";
 
 /** 显示速度的指数平均时间常数（秒）：1 秒前的速度权重降到 1/e，短促的尖峰与掉速被抹平，又不拖着旧值太久。 */
 export const SPEED_SMOOTHING_S = 1;
-/** 速度文字两次换字的最短间隔（毫秒）：每秒最多换 2 次。 */
+/**
+ * 进度文字两次换字的最短间隔（毫秒）：每秒最多换 2 次。名字沿用最早接入的速度文字；已下大小（useDisplayCount）用的也是它，
+ * 同一处的速度与大小按同一个节拍换字。
+ */
 export const SPEED_REFRESH_MS = 500;
 /** 平均值与最新速度相差不到这个比例就算追上：直接显示最新速度，不再定时刷新。 */
 const SPEED_SETTLED_RATIO = 0.005;
@@ -89,6 +92,71 @@ export function useDisplaySpeed(raw: number): number {
     const timer = setTimeout(() => setState((s) => publishSpeed(s, Date.now())), Math.max(0, nextAt - Date.now()));
     return () => clearTimeout(timer);
   }, [settled, nextAt]);
+  return current.shown;
+}
+
+// ---------------------------------------------------------------- 累计量（已下大小）
+
+export interface CountDisplay {
+  /** 最近一次报上来的值。 */
+  raw: number;
+  /** 正在显示的值，以及它换上的时刻。 */
+  shown: number;
+  shownAt: number;
+}
+
+function assertCount(raw: number): void {
+  if (!Number.isFinite(raw) || raw < 0) throw new Error(`累计量必须是非负有限数，收到 ${raw}`);
+}
+
+/** 第一次拿到累计量：直接显示。 */
+export function startCount(raw: number, now: number): CountDisplay {
+  assertCount(raw);
+  return { raw, shown: raw, shownAt: now };
+}
+
+/** 换上最新的值。 */
+export function publishCount(s: CountDisplay, now: number): CountDisplay {
+  return { raw: s.raw, shown: s.raw, shownAt: now };
+}
+
+/** 已经到了总量：总量未知时无从判断，按没到算。 */
+function reachedTotal(raw: number, total: number | null): boolean {
+  return total !== null && raw >= total;
+}
+
+/**
+ * 报上来一个新的累计量。离上次换字满 SPEED_REFRESH_MS 才换上，不满的由调用方定时补上（publishCount）。
+ * 不平滑：累计量本身就是单调走的，显示的永远是某一刻真实报上来的值。两种情况不等间隔、直接换上：
+ * - 变小了：换源后从 0 重来。停在比真实大的旧值上，等于把已经作废的进度多挂半拍；
+ * - 到了总量：传完的那一刻进度条正推到满格，字要同时到「y / y」，不能还差一截。
+ */
+export function feedCount(s: CountDisplay, raw: number, total: number | null, now: number): CountDisplay {
+  assertCount(raw);
+  if (raw < s.raw || reachedTotal(raw, total) || now - s.shownAt >= SPEED_REFRESH_MS) return { raw, shown: raw, shownAt: now };
+  return { raw, shown: s.shown, shownAt: s.shownAt };
+}
+
+/**
+ * 显示用的累计量（已下大小这类随进度事件每 100 ms 涨一次的数）：每秒最多换 2 次字，与速度文字同一个间隔；
+ * 进度停下时，最后报上来的值在间隔满时补上。total 为总量，未知时传 null。
+ * 新值在渲染里就并进来（不多一次提交），理由同 useDisplaySpeed。
+ */
+export function useDisplayCount(raw: number, total: number | null): number {
+  const [state, setState] = useState(() => startCount(raw, Date.now()));
+  let current = state;
+  // 值没变而总量后到、恰好等于它时同样要立即换上
+  if (raw !== state.raw || (state.shown !== raw && reachedTotal(raw, total))) {
+    current = feedCount(state, raw, total, Date.now());
+    setState(current);
+  }
+  const behind = current.shown !== current.raw;
+  const nextAt = current.shownAt + SPEED_REFRESH_MS;
+  useEffect(() => {
+    if (!behind) return;
+    const timer = setTimeout(() => setState((s) => publishCount(s, Date.now())), Math.max(0, nextAt - Date.now()));
+    return () => clearTimeout(timer);
+  }, [behind, nextAt]);
   return current.shown;
 }
 

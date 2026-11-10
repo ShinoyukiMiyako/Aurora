@@ -16,6 +16,7 @@ import {
   swapsWholeTable,
   Table,
   validateColumns,
+  visibleColumns,
   VIRTUALIZE_ABOVE,
   type TableColumn,
   type TableSort,
@@ -149,6 +150,21 @@ describe("行的增删", () => {
 
     await waitFrames();
     expect(rows().map((r) => r.textContent?.includes("Lithium"))).toEqual([false, false]);
+  });
+
+  it("删掉末行：新的末行当场不画分隔线，正在淡出的退场行不算末行、也不跟着变样", () => {
+    mount(<Changing initial={MODS} />);
+    expect(rows().map((r) => r.hasAttribute("data-last"))).toEqual([false, false, true]);
+    act(() => setShownRows(MODS.slice(0, 2)));
+    // 退场的 Iris 抽出布局后仍排在文档末尾
+    expect(rows().map((r) => [r.textContent?.includes("Iris"), r.hasAttribute("inert"), r.hasAttribute("data-last")])).toEqual([
+      [false, false, false],
+      [false, false, true],
+      [true, true, true],
+    ]);
+    // 末尾追加一行：末行标记交给新行
+    act(() => setShownRows([...MODS.slice(0, 2), { id: "new", name: "New", version: "1", enabled: true }]));
+    expect(rows().filter((r) => !r.hasAttribute("inert")).map((r) => r.hasAttribute("data-last"))).toEqual([false, false, true]);
   });
 
   it("新增的行留在表里，序号与内容都对", async () => {
@@ -323,6 +339,13 @@ describe("列定义", () => {
     expect(columnTemplate(cols, "compact")).toBe("40px minmax(260px, 1fr) 96px");
     expect(columnTemplate(cols, "regular")).toBe("40px minmax(260px, 1fr) 150px 96px");
     expect(columnTemplate(cols, "wide")).toBe("40px minmax(260px, 1fr) 150px 96px");
+  });
+
+  it("按档取可见的列：照表格画骨架的页面与表格用同一个判断，顺序不变", () => {
+    const cols: TableColumn<Mod>[] = [...columns(), { key: "author", header: "作者", width: 140, tiers: ["wide"], cell: () => "" }];
+    expect(visibleColumns(cols, "compact").map((c) => c.key)).toEqual(["select", "name", "actions"]);
+    expect(visibleColumns(cols, "regular").map((c) => c.key)).toEqual(["select", "name", "version", "actions"]);
+    expect(visibleColumns(cols, "wide").map((c) => c.key)).toEqual(["select", "name", "version", "actions", "author"]);
   });
 
   it("key 重复、宽度非正、tiers 为空、某档没有列都抛错", () => {
@@ -538,6 +561,12 @@ describe("Table 样式", () => {
     expect(rule(".row:hover")).not.toMatch(/transition/);
     expect(rule(".row[data-selected],\n.row[data-selected]:hover")).toMatch(/transition: background-color var\(--sk-dur-hover\)/);
     expect(rule(".cell")).toMatch(/transition: opacity var\(--sk-dur-hover\)/);
+  });
+
+  it("末行按数据标记去掉分隔线，不按文档里的最后一个子项认", () => {
+    expect(rule(".row")).toMatch(/border-bottom: 1px solid var\(--sk-line\);/);
+    expect(rule(".row[data-last]")).toMatch(/border-bottom: 0;/);
+    expect(css).not.toMatch(/:last-child/);
   });
 });
 

@@ -2,7 +2,7 @@
 // 页面按路由键挂载，换分区不重新挂载，直接跟着 route.section 走。
 
 import { motion } from "framer-motion";
-import { useCallback, useEffect, useRef, useState, type JSX } from "react";
+import { useState, type JSX } from "react";
 import { SETTINGS_SECTION_LABEL } from "../../copy/flows";
 import { tabPanel, type PanelFrom } from "../../lib/motion";
 import { useNav } from "../../shell/shell";
@@ -10,7 +10,6 @@ import { SETTINGS_SECTIONS, type PageProps, type SettingsSection } from "../../s
 import { EntranceBlock, NAV_ANCHOR_ATTR, Page } from "../../ui/Page";
 import { PageHeader } from "../../ui/PageHeader";
 import { settingsSubtitle, SETTINGS_TITLE } from "./copy";
-import { holdScroll, scrollParent } from "./scroll-hold";
 import { SettingsNav } from "./SettingsNav";
 import { AboutSection } from "./sections/About";
 import { AppearanceSection } from "./sections/Appearance";
@@ -18,7 +17,7 @@ import { DownloadSection } from "./sections/Download";
 import { GameSection } from "./sections/Game";
 import { GeneralSection } from "./sections/General";
 import { JavaSection } from "./sections/Java";
-import { SettingsGate } from "./SettingsGate";
+import { SettingsGate, useSettingsLoad } from "./SettingsGate";
 import s from "./settings.module.css";
 
 const SECTION_BODY: Readonly<Record<SettingsSection, () => JSX.Element>> = {
@@ -30,23 +29,6 @@ const SECTION_BODY: Readonly<Record<SettingsSection, () => JSX.Element>> = {
   about: AboutSection,
 };
 
-/** 换分区前托住分区布局的高度（见 scroll-hold）；页面卸载或下一次换分区时摘掉上一次的滚动监听。 */
-function useScrollHold(): (layout: HTMLElement) => void {
-  const detach = useRef<(() => void) | null>(null);
-  useEffect(
-    () => () => {
-      detach.current?.();
-    },
-    [],
-  );
-  return useCallback((layout: HTMLElement) => {
-    detach.current?.();
-    detach.current = null;
-    const scroller = scrollParent(layout);
-    if (scroller !== null) detach.current = holdScroll(layout, scroller);
-  }, []);
-}
-
 /** 这一次挂上的分区，和它从导航里的哪一侧进来；进页时的第一个分区没有来向。 */
 interface ShownSection {
   section: SettingsSection;
@@ -57,8 +39,8 @@ export default function SettingsPage({ route }: PageProps<"settings">) {
   const { replace } = useNav();
   const section: SettingsSection = route.section === undefined ? "general" : route.section;
   const Body = SECTION_BODY[section];
-  const panelRef = useRef<HTMLDivElement>(null);
-  const hold = useScrollHold();
+  // 配置的加载门放在按分区换掉的面板外面：换分区时面板重挂，门不跟着从头计时
+  const load = useSettingsLoad();
 
   // 竖排导航：选了上面的分区，新面板从上方落下；选了下面的，从下方升起，和胶囊的去向一致
   const [shown, setShown] = useState<ShownSection>({ section, from: undefined });
@@ -68,13 +50,8 @@ export default function SettingsPage({ route }: PageProps<"settings">) {
     setShown(current);
   }
 
-  const select = (next: SettingsSection) => {
-    replace({ page: "settings", section: next });
-    // replace 里外壳已经按导航锚点滚好；新面板挂上之前，按这个滚动位置托住分区布局的高度
-    const layout = panelRef.current?.parentElement;
-    if (layout === null || layout === undefined) throw new Error("分区面板不在分区布局里");
-    hold(layout);
-  };
+  // 外壳的 replace 按导航锚点滚好，并托住页面高度：新分区较短时滚动不被夹回，吸顶的导航不下跳
+  const select = (next: SettingsSection) => replace({ page: "settings", section: next });
 
   return (
     <Page aria-labelledby="settings-title">
@@ -86,7 +63,6 @@ export default function SettingsPage({ route }: PageProps<"settings">) {
           进页的第一个分区不自己播：它已经在跟着所在的区块入场，再播一次就是位移叠加、透明度相乘
         */}
         <motion.div
-          ref={panelRef}
           key={section}
           className={s.content}
           variants={tabPanel}
@@ -96,7 +72,7 @@ export default function SettingsPage({ route }: PageProps<"settings">) {
           role="region"
           aria-label={SETTINGS_SECTION_LABEL[section]}
         >
-          <SettingsGate section={section}>
+          <SettingsGate section={section} view={load}>
             <Body />
           </SettingsGate>
         </motion.div>

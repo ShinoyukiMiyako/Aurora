@@ -1,7 +1,8 @@
 // 实例库：全部实例的卡片网格。页头说总数、固定数与累计时长；工具条按加载器筛选、按名称搜索、三种排序，
 // 登记了不止一个游戏目录时还能切目录；有损坏实例时页头下出现修复横幅；网格末尾是新建卡（筛选或搜索时不出现）。
 // 当前目录没有实例、别的目录里有版本时，空状态直接给切过去的入口。
-// 卡片增删、换序、变高时其余卡片滑到新位置；一次涉及超过 40 项时整片淡入一次，减少动画时直接重排。
+// 卡片增删、换序、变高时其余卡片滑到新位置；一次进出或换位的卡片太多时整片淡入一次（判据见 model 的 crowdedChange），
+// 减少动画时直接重排。
 
 import { AnimatePresence, motion, useAnimate, useReducedMotionConfig, type Variants } from "framer-motion";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef } from "react";
@@ -10,9 +11,9 @@ import { ACTION_ERROR, GAME_DIR_SWITCH_COPY, gameDirSwitchReason, LOADER_NAME, l
 import type { InstanceSummary } from "../../domain/adapt";
 import { locksOf } from "../../domain/instance-locks";
 import { useMounted } from "../../lib/useMounted";
-import { useLoadingGate } from "../../lib/loading-gate";
+import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
 import { fade, springs } from "../../lib/motion";
-import { observeReflow } from "../../lib/reflow";
+import { observeReflow, REFLOW_PAUSED_ATTR } from "../../lib/reflow";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
@@ -38,6 +39,7 @@ import { CARD_COVER_HEIGHT, InstanceCard } from "./InstanceCard";
 import styles from "./library.module.css";
 import {
   brokenInstances,
+  CREATE_CELL_KEY,
   crowdedChange,
   directoryOptions,
   FILTER_LOADERS,
@@ -140,21 +142,16 @@ export default function LibraryPage() {
   const pickDirectory = knownDirs.length > 1;
   const toolSlide = { layout: "position", layoutDependency: pickDirectory, transition: { layout: springs.settle } } as const;
 
+  // 与网格同一个加载门：网格还在等的时候这里也不先给结论（目录列表没回来时不先说「还没有实例」）
   const subtitle =
-    gate.view === "skeleton" ? (
-      <Skeleton shape="text" width={260} />
-    ) : !ready ? null : all.length === 0 ? (
-      LIBRARY_COPY.subtitleEmpty
-    ) : (
-      LIBRARY_COPY.subtitle(all.length, pinCount, totalPlaytime(all))
-    );
+    gate.view !== "content" || !ready ? null : all.length === 0 ? LIBRARY_COPY.subtitleEmpty : LIBRARY_COPY.subtitle(all.length, pinCount, totalPlaytime(all));
 
   return (
     <Page aria-labelledby={titleId}>
       <PageHeader
         titleId={titleId}
         title={LIBRARY_COPY.title}
-        subtitle={subtitle}
+        subtitle={<SubtitleSwap view={gate.view} text={subtitle} />}
         actions={
           <>
             <Button variant="ghost" icon="compass" onClick={() => go({ page: "discover", kind: "modpack" })}>
@@ -170,9 +167,10 @@ export default function LibraryPage() {
       <EntranceBlock className={styles.toolbar}>
         <SegmentedControl value={view.loader} onChange={(loader) => setView({ loader })} options={filterOptions} size="sm" ariaLabel={LIBRARY_COPY.filterLabel} />
         {/*
-         * 目录列表每次运行第一次进来要等一个往返，登记了多个目录时目录选择这才插进来：搜索框被挤向左，放不下时整组折到第二行。
-         * 三样都是布局动画节点，依赖取「有没有目录选择」：插进来、撤掉时各自从原位置滑到新位置，下方内容由页面的让位跟着滑。
-         * 不用兄弟让位：这一组按内容定宽、整体右对齐，宽度一变它就当作整体重排不做动画。窗口缩放引起的折行不改依赖，照常直接重排
+         * 目录列表由外壳预取，多数时候第一帧就在；预取还没回来就进了页面、或缓存被失效后重读时，目录选择晚一个往返才插进来。
+         * 工具组按带目录选择的宽度占位（样式表的 .tools），插进来、撤掉都不改变工具条折不折行，下面的横幅与网格不动。
+         * 三样都是布局动画节点，依赖取「有没有目录选择」：插进来、撤掉时搜索框在组内从原位置滑到新位置。
+         * 窗口缩放引起的折行不改依赖，照常直接重排
          */}
         <div className={styles.tools}>
           <motion.div {...toolSlide}>
@@ -187,7 +185,8 @@ export default function LibraryPage() {
               className={styles.search}
             />
           </motion.div>
-          <AnimatePresence mode="popLayout">
+          {/* 撤掉时按右缘定位：组内靠右排，与排布同一个基准，退场项留在原处淡出，不叠到排序上 */}
+          <AnimatePresence mode="popLayout" anchorX="right">
             {pickDirectory && (
               <motion.div key="directory" {...toolSlide} initial={mounted.current ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
                 <DirectorySelect dirs={knownDirs} busy={directoryBusy} instanceCount={ready ? all.length : null} onPick={switchDirectory} />
@@ -221,6 +220,10 @@ export default function LibraryPage() {
 
       {/* 骨架与内容共用这一个一级区块：页面入场只播一次，换成内容时在块里交叉淡化，不再整块重挂、重播入场 */}
       <EntranceBlock>
+        {/* 骨架层整层对读屏隐藏：加载说明放在它外面，常驻的状态区在骨架显出来时播报一次 */}
+        <p className={styles.srOnly} role="status">
+          {gate.view === "skeleton" ? LIBRARY_COPY.loadingLabel : ""}
+        </p>
         <Loadable view={gate.view} skeleton={<SkeletonGrid count={SKELETON_CARDS[tier]} />}>
           {() => (
             // 读取失败、空库与有实例三种内容互换（重试成功、建好第一个实例、删掉最后一个）时交叉淡化，不硬切
@@ -330,7 +333,8 @@ function noMatchBody(query: string, loader: LoaderFilter): string {
  * 卡片网格。卡片增删、换序（筛选、搜索、排序），或某张卡变高变矮（转损坏、修好、统计换字）时，其余卡片由兄弟让位
  * 从原位置滑过去。不用 framer-motion 的 layout：它只在格子自己重渲染时取快照，卡片内部变高时兄弟拿不到快照；
  * 它还会把格子的尺寸变化也补间成缩放，换到行高不同的行时卡片被纵向拉扁。
- * 一次涉及的格子超过让位上限时让位自己停手，这里再把新来的格子直接放上、走掉的直接撤下，整片淡入一次。
+ * 一次进出或换位的格子太多（crowdedChange）时整片换上：新来的直接放上、走掉的直接撤下，网格整片淡入一次，
+ * 这一次提交里让位暂停，免得整片淡入的同时可见的格子还在滑。
  */
 function InstanceGrid({ shown, now, showCreate, onCreate }: { shown: readonly InstanceSummary[]; now: number; showCreate: boolean; onCreate: () => void }) {
   const reduced = useReducedMotionConfig() === true;
@@ -347,6 +351,11 @@ function InstanceGrid({ shown, now, showCreate, onCreate }: { shown: readonly In
     committed.current = shape;
     const grid = gridRef.current;
     if (!crowded || grid === null) return;
+    // 让位暂停只开这一次提交：让位在提交之后的微任务里收下这批变化（位置照记、不起动画、正在滑的直接落位），
+    // 紧接着的微任务里关掉，下一次变化照常滑；开关的增删本身不起动画。不交给 React 渲染这个属性：
+    // 那样要等下一次渲染才去掉，下一次变化恰好和它同一次提交时也会被当成暂停
+    grid.setAttribute(REFLOW_PAUSED_ATTR, "");
+    queueMicrotask(() => grid.removeAttribute(REFLOW_PAUSED_ATTR));
     // 提交时先压到 0：首帧就看不到整批格子一闪
     grid.style.opacity = "0";
     void animateGrid(grid, { opacity: [0, 1] }, fade.in);
@@ -371,7 +380,7 @@ function InstanceGrid({ shown, now, showCreate, onCreate }: { shown: readonly In
           </motion.div>
         ))}
         {showCreate && (
-          <motion.div key="create" className={styles.cell} variants={variants} initial={enter} animate="show" exit="leave">
+          <motion.div key={CREATE_CELL_KEY} className={styles.cell} variants={variants} initial={enter} animate="show" exit="leave">
             <button type="button" className={styles.createTile} onClick={onCreate}>
               <span className={styles.createIcon}>
                 <Icon name="plus" size={24} />
@@ -386,9 +395,34 @@ function InstanceGrid({ shown, now, showCreate, onCreate }: { shown: readonly In
   );
 }
 
+/**
+ * 页头副标题：骨架条与文字叠在同一格里交叉淡化，与下面网格的加载态同一个门、同一手感。副标题在 <p> 里，
+ * Loadable 的 div 放不进去，这里用 span 照它画：等待期这一行空着（行高由页头常驻），骨架显出来时骨架条淡入；
+ * 读到时文字淡入，显出来过的骨架条叠在下面淡出。挂载时就有的文字跟着页面入场，不另外淡入。
+ */
+function SubtitleSwap({ view, text }: { view: LoadingView; text: string | null }) {
+  const mounted = useMounted();
+  return (
+    <span className={styles.subtitleSwap}>
+      <AnimatePresence>
+        {view === "skeleton" && (
+          <motion.span key="skeleton" initial={{ opacity: 0 }} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
+            <Skeleton shape="text" width={260} />
+          </motion.span>
+        )}
+        {text !== null && (
+          <motion.span key="text" initial={mounted.current ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
+            {text}
+          </motion.span>
+        )}
+      </AnimatePresence>
+    </span>
+  );
+}
+
 function SkeletonGrid({ count }: { count: number }) {
   return (
-    <div className={styles.grid} aria-label={LIBRARY_COPY.loadingLabel}>
+    <div className={styles.grid}>
       {Array.from({ length: count }, (_, i) => (
         <SkeletonCard key={i} />
       ))}

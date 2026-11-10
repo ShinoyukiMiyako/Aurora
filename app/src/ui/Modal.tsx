@@ -15,21 +15,31 @@
 // - 内容变高变矮（数据到达、换步、展开）时面板沿 morph 弹簧形变到新尺寸：弹窗在层里垂直居中，不形变的话标题与底栏
 //   各瞬跳高度差的一半。面板走 framer-motion 的布局动画（transform 缩放），头部、主体、底栏只随位置移动、
 //   抵消面板的缩放，内容本身不被拉伸；它只在弹窗自己重渲染时取快照，内容的变化要经过 Modal 这一层的重渲染
-//   （由渲染 Modal 的组件持有那份状态）才接得住。
+//   （由渲染 Modal 的组件持有那份状态）才接得住。形变途中主体不滚动（见 MorphingMark）。
 // - 带内边距的主体常驻滚动条槽位：内容在超出与不超出可视高度之间来回时，主体里的东西不横移。满版主体默认不留：
 //   贴边的头图（资讯）右侧会多出一条一直看得见的空槽，从不溢出的满版主体（新建实例）右侧也会平白多出一条留白。
 //   满版主体里会出没滚动条、又没有贴右边的内容时，由调用方传 stableGutter 打开。
 
-import { AnimatePresence, motion, useIsPresent, useMotionValue, type Transition } from "framer-motion";
-import { useId, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
+import { AnimatePresence, motion, useIsPresent, useMotionValue, useReducedMotionConfig, type Transition } from "framer-motion";
+import {
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import { Icon, type IconName } from "../art/Icon";
-import { fade, springs } from "../lib/motion";
+import { useLoadingGate } from "../lib/loading-gate";
+import { fade, insertItemFade, springs } from "../lib/motion";
 import { cx } from "../lib/util";
 import { useEscapeLayer, useFocusTrap, useOverlayRoot } from "../shell/overlay";
 import { FocusReturnPoint } from "./focus-return";
 import { IconButton } from "./IconButton";
 import styles from "./Modal.module.css";
+import { MorphingMark } from "./morphing-mark";
 import { useOpenGeneration } from "./Popover";
 import { Skeleton } from "./Skeleton";
 
@@ -46,6 +56,13 @@ const MODAL_LAYER_ATTR = "data-sk-modal-layer";
 /** 面板与它的直接子项共用的布局过渡：子项的位移与面板的形变同一条弹簧，才严丝合缝。 */
 const MORPH: Transition = { layout: springs.morph };
 
+/**
+ * 面板形变途中要不要给主体打「形变中」标记。弹窗变矮的那一下，主体里被让位的兄弟、带布局动画的块从旧位置滑过来，
+ * 越出主体的新底边，所以一般都打。没留槽位的满版主体此刻正显示着滚动条时不打：藏起滚动条就让出槽宽，内容横移，
+ * 比途中冒出滚动条更糟。
+ */
+const marksBody = (body: HTMLElement) => body.hasAttribute("data-gutter") || body.offsetWidth === body.clientWidth;
+
 export interface ModalProps {
   open: boolean;
   onClose: () => void;
@@ -61,6 +78,8 @@ export interface ModalProps {
    * 弹窗的布局（内容结构）只随这个值变化时传它，例如步骤、阶段：只在它变的那次重渲染量面板布局、播形变。
    * 不传则每次重渲染都量一次（面板与头部、主体、底栏 4 个节点，提交前后各一次，后一次是强制同步布局）。
    * 重渲染频繁的弹窗（输入框逐字输入、进度回调、倒计时）应当传；传了以后，它没变时内容变高也不会形变。
+   * 例外是弹窗包在 LayoutGroup 里：组里任何一个布局节点换了外形，组员（面板、头部、主体、底栏）都跟着取快照、播形变，
+   * 与这个值无关。数据在子组件内部晚到、Modal 这一层不重渲染时，可以借这一点接住（给变尺寸的那一块 layout 与它自己的外形作依赖）。
    */
   layoutKey?: string | number;
   /**
@@ -144,9 +163,12 @@ function ModalFrame({
   const subtitleId = `${base}-subtitle`;
   const layerRef = useRef<HTMLDivElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const scrimDown = useRef(false);
   const [stacked, setStacked] = useState(false);
   const radius = useMotionValue("var(--sk-r-xl)");
+  // 减少动画时进出只动透明度：根部 MotionConfig 只把位移与缩放改成一步到位，照用平常的进出，关上的那一帧面板先下沉缩小一截再淡出
+  const reduced = useReducedMotionConfig() === true;
 
   useFocusTrap(boxRef, present);
 
@@ -230,10 +252,12 @@ function ModalFrame({
         layoutDependency={layoutKey}
         transition={MORPH}
         style={{ borderRadius: radius }}
-        initial={{ opacity: 0, y: 12, scale: 0.97 }}
-        animate={{ opacity: 1, y: 0, scale: 1, transition: { ...springs.soft, opacity: fade.in } }}
-        exit={{ opacity: 0, y: 6, scale: 0.98, transition: fade.out }}
+        initial={reduced ? insertItemFade.initial : { opacity: 0, y: 12, scale: 0.97 }}
+        animate={reduced ? insertItemFade.animate : { opacity: 1, y: 0, scale: 1, transition: { ...springs.soft, opacity: fade.in } }}
+        exit={reduced ? insertItemFade.exit : { opacity: 0, y: 6, scale: 0.98, transition: fade.out }}
       >
+        {/* 放在面板里：跟的是面板自己的形变 */}
+        <MorphingMark target={bodyRef} when={marksBody} />
         {(title !== undefined || showClose || iconNode !== null) && (
           <motion.div className={styles.head} layout="position" layoutDependency={layoutKey} transition={MORPH}>
             {iconNode}
@@ -250,6 +274,7 @@ function ModalFrame({
         )}
         {/* layoutScroll：主体里的布局动画（列表增删、指示块）按滚动后的位置量，滚动位置被夹回时起点不错位 */}
         <motion.div
+          ref={bodyRef}
           className={styles.body}
           data-padded={padded || undefined}
           data-gutter={padded || stableGutter || undefined}
@@ -276,14 +301,25 @@ function ModalSubtitle({ id, value }: { id: string; value: ReactNode }) {
   // 一打开就有的副标题跟着弹窗的入场走；见过骨架之后，到达的副标题淡入
   const [waited, setWaited] = useState(value === null);
   if (value === null && !waited) setWaited(true);
+  // 骨架与正文的加载占位（Loadable）同一套时机：等待期占着行高但不可见，超过才淡入。
+  // 读取很快时标题下不闪一下骨架条，而正文那边什么都没出现
+  const gate = useLoadingGate(value === null);
+  // 骨架与文字各给一个 key：换成文字时挂一个新元素从透明淡入，不接着骨架那一层的透明度
   if (value === null)
     return (
-      <p className={styles.subtitle} data-pending="" aria-hidden="true">
+      <motion.p
+        key="pending"
+        className={styles.subtitle}
+        data-pending=""
+        aria-hidden="true"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: gate.view === "pending" ? 0 : 1, transition: fade.in }}
+      >
         <Skeleton shape="block" width="40%" height={12} radius="xs" />
-      </p>
+      </motion.p>
     );
   return (
-    <motion.p id={id} className={styles.subtitle} initial={waited ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }}>
+    <motion.p key="value" id={id} className={styles.subtitle} initial={waited ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }}>
       {value}
     </motion.p>
   );

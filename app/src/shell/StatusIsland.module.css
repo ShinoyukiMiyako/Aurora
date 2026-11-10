@@ -227,15 +227,24 @@
   white-space: nowrap;
 }
 
-/* ---- 详情浮层 ---- */
+/*
+ * ---- 详情浮层 ----
+ * 浮层分主体与底部两层（随内容形变）：宽度定在面板上。主体是面板的滚动区，常驻 10px 滚动条槽位，
+ * 正文右内边距扣掉槽宽，右侧留白仍是 16；动作行在底部那一层，正文的下内边距就是它与日志区的间距。
+ * 正文与动作行都设 position: relative：退场项被抽出布局时按它们定位。形变途中外层带着 transform，
+ * 不设的话退场项按面板量位置、却摆进带 transform 的那一层里，落点会偏
+ */
+.detailPanel {
+  width: min(340px, calc(100vw - var(--sk-space-32)));
+}
+
 .detail {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-12);
   box-sizing: border-box;
-  width: 340px;
-  max-width: calc(100vw - var(--sk-space-32));
-  padding: var(--sk-space-16);
+  padding: var(--sk-space-16) calc(var(--sk-space-16) - var(--sk-scrollbar-size)) var(--sk-space-12) var(--sk-space-16);
 }
 
 .head {
@@ -382,10 +391,12 @@
 }
 
 .actions {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--sk-space-8);
+  padding: 0 var(--sk-space-16) var(--sk-space-16);
 }
 
 /* 每个按钮外那层（随阶段增删淡入淡出）：按钮是 inline-flex，包在块里会多出行框的下沿空隙，动作行就高了几像素 */

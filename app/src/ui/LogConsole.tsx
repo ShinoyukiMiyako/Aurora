@@ -17,7 +17,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEve
 import { Icon } from "../art/Icon";
 import { clock } from "../domain/format";
 import { APP_NAME } from "../lib/app-info";
-import { fade, springs } from "../lib/motion";
+import { fade, insertItemFade, popMark, springs } from "../lib/motion";
 import { cssVars, cx } from "../lib/util";
 import { Appear } from "./Appear";
 import { Button } from "./Button";
@@ -58,6 +58,19 @@ export const WRAP_RENDER_LIMIT = 2000;
 export const ERROR_ANNOUNCE_INTERVAL_MS = 5000;
 const LIST_PADDING_TOP = 8;
 const LIST_PADDING_BOTTOM = 14;
+
+/** 平滑滚到底的途中交给虚拟列表的找补判据：一律不找补（理由见组件里的 glideToEnd）。 */
+const HOLD_SCROLL_ADJUSTMENT = () => false;
+
+/**
+ * 「跳到最新」胶囊的进出：从下方 8px 处滑上来并淡入，收起时原地淡出。
+ * 减少动画时换用 insertItemFade：根部 MotionConfig 把位移改成一步到位，照用这一份的话挂载那一帧胶囊还停在下方 8px，下一帧才跳上来。
+ */
+const JUMP_MOTION = {
+  initial: { opacity: 0, y: 8 },
+  animate: { opacity: 1, y: 0, transition: { ...springs.settle, opacity: fade.in } },
+  exit: { opacity: 0, transition: fade.out },
+} as const;
 
 export function filterLogLines(lines: readonly LogConsoleLine[], level: LogLevelFilter, source: LogSourceFilter): LogConsoleLine[] {
   return lines.filter(
@@ -243,8 +256,9 @@ export function LogConsole({
   const [wrap, setWrap] = useState(false);
   const [stuck, setStuck] = useState(true);
   const stuckRef = useRef(true);
-  // 「跳到最新」的平滑滚动途中：途经的位置不算用户上翻，到底（滚动结束）后再按实际位置判断
-  const jumping = useRef(false);
+  // 「跳到最新」的平滑滚动途中：途经的位置不算用户上翻，到底（滚动结束）后再按实际位置判断。
+  // target 是最近一次发出的平滑滚动的终点，目标没变就不重发：每发一次，浏览器都从当前位置重新起一段平滑滚动
+  const jumping = useRef<{ target: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const omittedRef = useRef<HTMLDivElement>(null);
   const reduced = useReducedMotionConfig() === true;
@@ -274,6 +288,27 @@ export function LogConsole({
     virtualizer.measure();
   }, [virtualizer, wrap]);
 
+  /**
+   * 平滑滚到底：直接交给浏览器，目标是元素能滚到的最大位置。途中不让虚拟列表做测量找补：换行时途经的行第一次量出高度，
+   * 起点在滚动位置之上的，它默认立刻写一次瞬时滚动把正在读的行留在原处；按 CSSOM，新的程序滚动会中止正在进行的平滑滚动。
+   * 跳到最新本来就要离开正在读的位置，这时的找补没有意义，压住它平滑滚动才走得完；途中行高变了、新行进来，
+   * 由下面的贴底找补把目标改到新的底部。不走虚拟列表自己的平滑滚动命令：命令途中它只测量目标附近的行，
+   * 落点上方没量到的折行行会一直按估计行高排位、叠在下一行上；离目标不足一屏时它改目标用的是瞬时滚动，最后一段一步跳完。
+   */
+  const glideToEnd = (el: HTMLElement, again = false) => {
+    const target = el.scrollHeight - el.clientHeight;
+    if (!again && jumping.current !== null && jumping.current.target === target) return;
+    if (jumping.current === null) virtualizer.shouldAdjustScrollPositionOnItemSizeChange = HOLD_SCROLL_ADJUSTMENT;
+    jumping.current = { target };
+    el.scrollTo({ top: target, behavior: "smooth" });
+  };
+
+  /** 平滑滚动结束或被用户接管：测量找补回到虚拟列表的默认判据。 */
+  const endGlide = () => {
+    jumping.current = null;
+    virtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined;
+  };
+
   const totalSize = virtualizer.getTotalSize();
   /** 上一次提交时的显示状态：判断这一次是不是只在两头增删了行。 */
   const committed = useRef({ shown, level, source, wrap, omittedShown });
@@ -283,8 +318,9 @@ export function LogConsole({
     const el = scrollRef.current;
     if (el === null) return;
     if (stuckRef.current) {
-      // 平滑滚到底的途中由虚拟列表的命令盯着底部：新行进来、行量出新高度，它自己把目标改到新的底部，这里不插手
-      if (!jumping.current) el.scrollTop = el.scrollHeight;
+      // 平滑滚到底的途中新行进来、行量出新高度：目标改到新的底部，接着平滑地滚，不中途一下跳到位
+      if (jumping.current !== null) glideToEnd(el);
+      else el.scrollTop = el.scrollHeight;
       return;
     }
     // 筛选、换行切换是用户自己换了内容，不找补
@@ -313,15 +349,12 @@ export function LogConsole({
       el.scrollTop = el.scrollHeight;
       return;
     }
-    jumping.current = true;
-    // 经虚拟列表自己的命令滚，不直接调元素的 scrollTo：它知道这是一次平滑滚动，途中有行第一次量出高度时不再
-    // 立刻写一次瞬时滚动去找补（新的程序滚动会中止正在进行的平滑滚动，停在半路），目标也随新行改到新的底部
-    virtualizer.scrollToEnd({ behavior: "smooth" });
+    glideToEnd(el);
   };
 
   const onScroll = () => {
     const el = scrollRef.current;
-    if (el === null || jumping.current) return;
+    if (el === null || jumping.current !== null) return;
     const atBottom = distanceFromBottom(el) < STICK_THRESHOLD;
     stuckRef.current = atBottom;
     setStuck(atBottom);
@@ -329,21 +362,19 @@ export function LogConsole({
 
   const onScrollEnd = () => {
     const el = scrollRef.current;
-    if (el === null || !jumping.current) return;
+    if (el === null || jumping.current === null) return;
     // 停下时还没到底：平滑滚动被别的程序滚动中止在半路。接着滚，半路的位置不算用户上翻
     if (distanceFromBottom(el) >= STICK_THRESHOLD) {
-      virtualizer.scrollToEnd({ behavior: "smooth" });
+      glideToEnd(el, true);
       return;
     }
-    jumping.current = false;
+    endGlide();
     onScroll();
   };
 
-  // 用户自己动手（滚轮、拖滚动条、按键）就不再是程序滚动：之后的位置照常判断是否贴底。
-  // 虚拟列表的命令也要撤掉（到底之后它还会核对几帧才收工），否则新行进来时它会把目标改到新的底部，把用户拽回去
+  // 用户自己动手（滚轮、拖滚动条、按键）就不再是程序滚动：之后的位置照常判断是否贴底，新行进来也不再把用户拽回底部
   const takeOver = () => {
-    jumping.current = false;
-    virtualizer.cancelScroll();
+    if (jumping.current !== null) endGlide();
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -368,17 +399,9 @@ export function LogConsole({
           icon={
             <span className={styles.headIcon} data-live={live || undefined}>
               <Icon name="terminal" size={18} />
-              {/* 会话开始时运行点弹出，结束时淡出；挂载时就在跑则跟着页面入场，不另外弹。圆点没有子元素，initial={false} 封不住别的入场 */}
+              {/* 会话开始时运行点弹出，结束时缩小淡出；挂载时就在跑则跟着页面入场，不另外弹。圆点没有子元素，initial={false} 封不住别的入场 */}
               <AnimatePresence initial={false}>
-                {live && (
-                  <motion.span
-                    key="live"
-                    className={styles.liveDot}
-                    initial={{ opacity: 0, scale: 0 }}
-                    animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
-                    exit={{ opacity: 0, transition: fade.out }}
-                  />
-                )}
+                {live && <motion.span key="live" className={styles.liveDot} {...(reduced ? popMark.reduced : popMark.dot)} />}
               </AnimatePresence>
             </span>
           }
@@ -454,18 +477,9 @@ export function LogConsole({
             })}
           </div>
         </div>
-        {/* 浮动胶囊：从下方 8px 处滑上来并淡入，收起时淡出 */}
         <AnimatePresence>
           {!stuck && (
-            <motion.button
-              key="jump"
-              type="button"
-              className={styles.jump}
-              onClick={stickToBottom}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0, transition: { ...springs.settle, opacity: fade.in } }}
-              exit={{ opacity: 0, transition: fade.out }}
-            >
+            <motion.button key="jump" type="button" className={styles.jump} onClick={stickToBottom} {...(reduced ? insertItemFade : JUMP_MOTION)}>
               <Icon name="chevron-down" size={16} />
               跳到最新
             </motion.button>

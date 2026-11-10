@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { NO_ART, setArtStatus } from "../../mc/art";
 import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { clearArtCache } from "../../mc/useArt";
-import { render, stubMatchMedia, waitForFrames, type Rendered } from "../../test/dom";
+import { render, stubMatchMedia, type Rendered } from "../../test/dom";
 import { stubCanvas, type CanvasStub } from "../illustrations/test-canvas";
 import { assembly } from "../../lib/motion";
 import { AssemblingBlock, assemblyExitMs, assemblySeatInMs, type AssemblyClock } from "./AssemblingBlock";
@@ -149,22 +149,7 @@ describe("InstanceBlock", () => {
     expect(css).toMatch(/:global\(:root:not\(\[data-sk-reduced\]\) :is\(a, button, \[role="button"\]\):active\) \.lift \{\s*transform: none;/);
   });
 
-  it("换了来源（两张材质都已缓存、不经徽记直接换）：旧图淡出、新图淡入，两层叠放交叉", async () => {
-    setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
-    const at = (block: string) => <InstanceBlock instanceId="i6" cover={{ block, hue: 0, image: null }} width={32} />;
-    // 先各取一次，两种方块的材质都进缓存；等换图留下的退场层走完
-    view = render(at("cherry_planks"));
-    await settle();
-    view.rerender(at("mossy_cobblestone"));
-    await settle();
-    expect(block().dataset.art).toBe("texture");
-    await waitForFrames(() => expect(block().children).toHaveLength(2));
-
-    view.rerender(at("cherry_planks"));
-    expect(block().dataset.art).toBe("texture");
-    // 回落件一层 + 正在淡出的旧图 + 正在淡入的新图
-    expect(block().children).toHaveLength(3);
-  });
+  // 换了来源时旧图淡出、新图淡入的叠放交叉要等退场层播完，在 InstanceBlock.frames.test.tsx 里走真实时间断言
 
   it("不允许的宽度直接抛错", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -268,7 +253,7 @@ describe("AssemblingBlock", () => {
     expect(root().dataset.placed).toBe("2");
   });
 
-  it("把组装进度写进 clock：入场的首落时刻、已落面数与最后一面的时刻；所在的面退场后不再写", () => {
+  it("把组装进度写进 clock：入场的首落时刻、已落面数与最后一面的时刻；所在的面退场后不再落面、也不再写", () => {
     vi.useFakeTimers();
     const advance = (ms: number) =>
       act(() => {
@@ -294,11 +279,37 @@ describe("AssemblingBlock", () => {
     advance(assembly.stepGapMs);
     expect(clock.current).toEqual({ shown: 2, lastDropAt: firstDropAt + assembly.stepGapMs, firstDropAt });
 
-    // 面退场期间方块照常落完，但进度属于正在离开的面，不再写
+    // 面退场期间方块停在离场那一刻：排着的第三面不再落下（在淡出的面上落位只会半透明地闪一下），进度也不再写
     view.rerender(tree(false));
     advance(assembly.stepGapMs);
-    expect(view.container.querySelector<HTMLElement>("[data-placed]")?.dataset.placed).toBe("3");
+    expect(view.container.querySelector<HTMLElement>("[data-placed]")?.dataset.placed).toBe("2");
     expect(clock.current?.shown).toBe(2);
+  });
+
+  it("面刚换上、首落之前就退场（加载面上来不到 firstDropMs 就失败或取消）：左面不在淡出途中落下", () => {
+    vi.useFakeTimers();
+    const cover = { block: "cherry_planks", hue: 345, image: null };
+    const tree = (present: boolean) => (
+      <AnimatePresence>
+        {present && (
+          <motion.div key="face" exit={{ opacity: 0, transition: { duration: 5 } }}>
+            <AssemblingBlock instanceId="i" cover={cover} placed={1} enter />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    );
+    view = render(tree(true));
+    act(() => {
+      vi.advanceTimersByTime(assembly.firstDropMs / 2);
+    });
+    view.rerender(tree(false));
+    act(() => {
+      vi.advanceTimersByTime(assembly.firstDropMs);
+    });
+    const root = view.container.querySelector<HTMLElement>("[data-placed]");
+    if (root === null) throw new Error("退场中的方块不在了");
+    expect(root.dataset.placed).toBe("0");
+    expect(root.querySelector<HTMLElement>("[data-face='left']")?.style.opacity).toBe("0");
   });
 
   it("留住旧面的估算：拆解、崩落按已落面数逐面错开；坐定按未落的面还要多久落齐", () => {

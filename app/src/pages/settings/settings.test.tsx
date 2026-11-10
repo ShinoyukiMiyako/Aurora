@@ -305,6 +305,8 @@ describe("设置页：骨架与分区导航", () => {
 
     await click(navItem("关于"));
     expect(shape()).toEqual(["plain", { subtitle: false, rows: 1 }, { subtitle: false, rows: 0 }, { subtitle: false, rows: 6 }, "plain"]);
+    // 换分区不让加载门从头计时：新面板里的骨架接着显着，不先隐身再等一个出现延迟
+    expect([skeleton()?.hasAttribute("data-pending"), skeleton()?.style.opacity]).toEqual([false, "1"]);
     expect(text()).not.toContain("检查更新");
 
     await act(async () => {
@@ -1818,10 +1820,15 @@ describe("设置页：关于与启动器更新", () => {
     const loading = () => dialog.querySelector<HTMLElement>('[aria-busy="true"] > [aria-hidden="true"]');
     expect(loading()?.hasAttribute("data-pending")).toBe(true);
     expect(loading()?.textContent).toBe("正在读取协议全文…");
+    // 转圈所在的骨架层对读屏隐藏：读取中的说明另有一份在它外面，转圈显形时才写进去，读屏念得到
+    const status = dialog.querySelector<HTMLElement>('[role="status"]');
+    if (status === null) throw new Error("弹窗里没有给读屏的读取中说明");
+    expect([status.closest('[aria-hidden="true"]'), status.textContent]).toEqual([null, ""]);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
     expect(loading()?.hasAttribute("data-pending")).toBe(false);
+    expect(status.textContent).toBe("正在读取协议全文…");
 
     const license = `GNU AFFERO GENERAL PUBLIC LICENSE ${Math.random().toString(36).slice(2)}\n`;
     await act(async () => {
@@ -1834,6 +1841,7 @@ describe("设置页：关于与启动器更新", () => {
     });
     expect(dialog.querySelector('pre[role="region"]')?.textContent).toBe(license);
     expect(dialog.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(status.textContent).toBe("");
   });
 
   it("第三方许可：条数读到之前副标题先占住一行，读到后原位换成条数；弹窗打开就取满高", async () => {

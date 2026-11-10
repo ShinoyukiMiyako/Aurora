@@ -53,10 +53,17 @@ describe("资讯与服务器的行骨架照真实的行排", () => {
     return m[1].trim();
   };
 
-  it("行距与列表同为 2，上距与列表的上外边距相同：骨架换成内容时每一行都在原处", () => {
+  it("行距与列表同为 2，上距与列表上方的留白相同：骨架换成内容时每一行都在原处", () => {
     expect(decl("rowSkeletons", "gap")).toBe(decl("serverList", "gap"));
-    expect(decl("rowSkeletons", "margin-top")).toBe(decl("newsList", "margin-top"));
-    expect(decl("serverList", "margin").split(/\s+/)[0]).toBe(decl("rowSkeletons", "margin-top"));
+    expect(decl("rowSkeletons", "padding-top")).toBe(decl("newsList", "padding-top"));
+    expect(decl("serverList", "margin").split(/\s+/)[0]).toBe(decl("rowSkeletons", "padding-top"));
+  });
+
+  // 外边距会穿过无内边距的包裹层折叠出去；包裹层退场时被抽成绝对定位（top 取量到的位置），外边距不再折叠或再加一次，
+  // 淡出途中整块下跳
+  it("骨架列、资讯列表外层与慢提示的上距都用内边距，不用外边距", () => {
+    for (const name of ["rowSkeletons", "newsList", "rowSlowHint"]) expect(ruleOf(css, name)).not.toMatch(/(?:^|[;\s])margin(?:-top)?\s*:/);
+    expect(decl("rowSlowHint", "padding-top")).toBe("var(--sk-space-8)");
   });
 
   it("骨架行的内边距与服务器行相同；配 40 的缩略图，资讯骨架行合 56，与列表行同高", () => {

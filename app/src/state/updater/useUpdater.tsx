@@ -2,7 +2,7 @@
 // （检查过、下载中都不因切页丢失），外壳的自动检查与更新面板、设置页的更新卡与导航提示点读写的都是它。
 // 后端更新信息经按需查询同步进状态机；每个改动后端状态的动作完成后让查询失效，以后端为准再同步一次。
 
-import { createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { useUpdaterInfo, type UpdaterInfoDto } from "../queries/catalog";
 import { invalidate, type ResourceResult } from "../resource";
 import { UpdaterController } from "./controller";
@@ -36,9 +36,36 @@ export interface UpdaterApi {
   markSeen(version: string): void;
 }
 
-export function useUpdater(): UpdaterApi {
+function useController(hook: string): UpdaterController {
   const controller = useContext(UpdaterContext);
-  if (controller === null) throw new Error("useUpdater 必须在 UpdaterProvider 之内使用");
+  if (controller === null) throw new Error(`${hook} 必须在 UpdaterProvider 之内使用`);
+  return controller;
+}
+
+/**
+ * 只订阅更新状态里的一部分：选出的值（按 Object.is）不变就不重渲染。下载更新时每条进度事件都换一次状态，
+ * 只关心版本号、提示点的订阅方用它，不跟着进度重渲染。select 要选出原始值或状态里原有的对象：
+ * 每次新拼的对象永远不相等，等于整份订阅。
+ */
+export function useUpdaterSelector<T>(select: (state: UpdaterState) => T): T {
+  const controller = useController("useUpdaterSelector");
+  // useSyncExternalStore 要求状态没变时快照也不变，否则反复重渲染：按状态与 select 记下上次的结果，
+  // select 是每次渲染新建的函数时重选一次，选出的值没变就交回上次那个
+  const last = useRef<{ state: UpdaterState; select: (state: UpdaterState) => T; value: T } | null>(null);
+  const getSnapshot = (): T => {
+    const state = controller.getState();
+    const prev = last.current;
+    if (prev !== null && prev.state === state && prev.select === select) return prev.value;
+    const picked = select(state);
+    const value = prev !== null && Object.is(prev.value, picked) ? prev.value : picked;
+    last.current = { state, select, value };
+    return value;
+  };
+  return useSyncExternalStore(controller.subscribe, getSnapshot, getSnapshot);
+}
+
+export function useUpdater(): UpdaterApi {
+  const controller = useController("useUpdater");
   const info = useUpdaterInfo();
   const state = useSyncExternalStore(controller.subscribe, controller.getState, controller.getState);
 

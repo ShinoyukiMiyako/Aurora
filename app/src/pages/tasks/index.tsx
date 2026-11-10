@@ -35,7 +35,7 @@ import { EmptyState } from "../../ui/EmptyState";
 import { LabelSlot } from "../../ui/LabelSlot";
 import { List } from "../../ui/ListRow";
 import { Loadable } from "../../ui/Loadable";
-import { EntranceBlock, EntranceBoundary, numberEntrance, Page, useEntranceIndex, usePageEntrance } from "../../ui/Page";
+import { EntranceBlock, EntranceBoundary, numberEntrance, Page, useEntranceIndex } from "../../ui/Page";
 import { PageHeader } from "../../ui/PageHeader";
 import { SegmentedControl } from "../../ui/SegmentedControl";
 import { Skeleton } from "../../ui/Skeleton";
@@ -217,27 +217,26 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
     }
     // 任务记录读不出来时不能说「队列是空的」：只给上面的错误与重试
     if (slice.kind === "error") return null;
+    // 空状态卡直接领加载区的入场序号：赶上页面首帧时跟着页面错开入场，之后才换上来的由 Loadable / Appear 清空序号、整块淡入
     return (
-      <EmptyTasks key="empty">
-        <Card padding="lg">
-          <EmptyState
-            scene="empty-basket"
-            titleAs="h2"
-            title={TASKS_COPY.empty.title}
-            body={TASKS_COPY.empty.body}
-            action={
-              <div className={styles.emptyActions}>
-                <Button variant="secondary" icon="compass" onClick={() => nav.go({ page: "discover" })}>
-                  {TASKS_COPY.empty.discover}
-                </Button>
-                <Button variant="secondary" icon="plus" onClick={() => openCreateInstance()}>
-                  {TASKS_COPY.empty.create}
-                </Button>
-              </div>
-            }
-          />
-        </Card>
-      </EmptyTasks>
+      <Card key="empty" padding="lg">
+        <EmptyState
+          scene="empty-basket"
+          titleAs="h2"
+          title={TASKS_COPY.empty.title}
+          body={TASKS_COPY.empty.body}
+          action={
+            <div className={styles.emptyActions}>
+              <Button variant="secondary" icon="compass" onClick={() => nav.go({ page: "discover" })}>
+                {TASKS_COPY.empty.discover}
+              </Button>
+              <Button variant="secondary" icon="plus" onClick={() => openCreateInstance()}>
+                {TASKS_COPY.empty.create}
+              </Button>
+            </div>
+          }
+        />
+      </Card>
     );
   };
 
@@ -286,27 +285,18 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
 // ---------------------------------------------------------------- 内容区
 
 /**
- * 内容区里的区块从哪个入场序号编起：赶上页面首帧的，接着页面的序号逐块错开入场；
- * 之后才挂上的（读完任务记录换下骨架、空状态与列表互换）由外层整块淡入，里面的区块不再各自入场，免得透明度乘两遍。
+ * 有任务时的内容：总览、筛选、列表竖排，某一块变高变矮时其余的滑到新位置。children 是总览之后的各块，各带 key。
+ * 赶上页面首帧时，三块接着加载区分到的入场序号逐块错开入场。之后才挂上的（读完任务记录换下骨架、空状态与列表互换）
+ * 序号已被 Loadable / Appear 清空，这里拿到 null，三块不再各自入场，由外层整块淡入，免得透明度乘两遍。
  */
-function useContentEntrance(): number | null {
-  const index = useEntranceIndex();
-  return usePageEntrance() === null ? null : index;
-}
-
-/** 有任务时的内容：总览、筛选、列表竖排，某一块变高变矮时其余的滑到新位置。children 是总览之后的各块，各带 key。 */
 function TasksContent({ finishing, children }: { finishing: ReadonlySet<string>; children: ReactNode }) {
-  const start = useContentEntrance();
+  const start = useEntranceIndex();
   const reflow = useReflow<HTMLDivElement>();
   return (
     <div ref={reflow} className={styles.content}>
       {numberEntrance([<TasksOverview key="overview" finishing={finishing} />, children], start)}
     </div>
   );
-}
-
-function EmptyTasks({ children }: { children: ReactNode }) {
-  return <>{numberEntrance(children, useContentEntrance())}</>;
 }
 
 // ---------------------------------------------------------------- 总览

@@ -3,6 +3,7 @@
 // 启动胶囊里要等动画真正播完的用例。整个文件走真实时间：退场要等 framer-motion 的帧循环把动画播完，
 // 假定时器下帧循环一旦有一帧没到就停在原地，同一文件里之后的用例也再推不动它，
 // 所以不和 LaunchCapsule.test 里那些假定时器用例放在一起。
+import { MotionConfig } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
@@ -83,4 +84,35 @@ it("阶段名换行：旧行与新行在同一格里交接，旧行演完退场�
   // 旧行还没开始淡，新行从透明起入场
   expect(shownLines().map((line) => line.style.opacity)).toEqual(["1", "0"]);
   await waitForFrames(() => expect(shownTitles()).toEqual(["检查 Java"]));
+});
+
+it("减少动画时阶段名换行只交叉淡化：新行不从下方来，旧行不先上跳再淡出", async () => {
+  view?.unmount();
+  view = render(
+    <MotionConfig reducedMotion="always">
+      <LauncherProvider>
+        <ShellProvider>
+          <Host />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    </MotionConfig>,
+  );
+  await flush();
+  act(() => {
+    void launcher.actions.launch("生存");
+  });
+  await flush();
+  const session = launcher.state.session;
+  if (session === null) throw new Error("没有会话");
+  const [leaving] = shownLines();
+  expect(leaving.textContent).toBe("验证账户");
+
+  act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "preparing", stage_index: 1 }));
+  const entering = shownLines()[1];
+  expect(entering.textContent).toBe("检查 Java");
+  expect(entering.style.opacity).toBe("0");
+  expect(entering.style.transform).not.toContain("translate");
+  await waitForFrames(() => expect(Number(leaving.style.opacity)).toBeLessThan(1));
+  expect(leaving.style.transform).not.toContain("translate");
 });

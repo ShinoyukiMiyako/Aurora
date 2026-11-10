@@ -1,10 +1,15 @@
 // @vitest-environment jsdom
 // 日志与历史标签的加载与换数据：控制台在会话结束、留底读回的交接里不闪骨架、不重挂；加载占位与控制台同一框架；
 // 变更历史两份查询落定后一起换，新条目从入场起点出现。
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { SLOW_LOADING_HINT } from "../../copy/flows";
 import type { LaunchLogDto } from "../../ipc/diagnostics";
+import { IpcError } from "../../ipc/errors";
 import type { HistoryEvent, RollbackCheck } from "../../ipc/history";
 import type { InstanceSettingsDto } from "../../ipc/instances";
 import { GAME_EXIT_EVENT, GAME_LOG_EVENT } from "../../ipc/launch";
@@ -21,6 +26,33 @@ import InstancePage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+// 让位挂到了哪些容器上：jsdom 不做布局，让位本身在这里测不了，只核对它挂对了地方；挂载照常交给真实现
+const reflowed = vi.hoisted(() => new Set<Element>());
+vi.mock("../../lib/reflow", async (orig) => {
+  const mod = await orig<typeof import("../../lib/reflow")>();
+  const { useCallback } = await import("react");
+  return {
+    ...mod,
+    useReflow: <T extends HTMLElement>(spring: Parameters<typeof mod.useReflow>[0] = "settle") => {
+      const real = mod.useReflow<T>(spring);
+      return useCallback(
+        (el: T | null) => {
+          if (el !== null) reflowed.add(el);
+          return real(el);
+        },
+        [real],
+      );
+    },
+  };
+});
+
+const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "instance.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+
+/** 选择器恰好是 selector 的那条规则的声明块。 */
+function rule(selector: string): string {
+  for (const m of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) if (m[1].trim() === selector) return m[2];
+  throw new Error(`样式表里没有 ${selector}`);
+}
 
 const ID = "樱花生存";
 const DAY = 24 * 3600 * 1000;
@@ -153,6 +185,7 @@ beforeAll(async () => {
 beforeEach(() => {
   vi.useFakeTimers({ now: NOW });
   resetRecorder(ipc);
+  reflowed.clear();
   stubMatchMedia(false);
   stubResizeObserver();
   stubCanvas();
@@ -274,6 +307,47 @@ describe("日志控制台：加载占位", () => {
     expect(logArea()).not.toBeNull();
   });
 
+  it("加载期间读屏仍读得到卡片标题：占位整层隐藏，占位外面另有一个同名标题；控制台到了只剩它自己的卡头", async () => {
+    const log = deferred<LaunchLogDto>();
+    ipc.overrides.set("last_launch_log", () => log.promise);
+    await open();
+    const headings = () => [...consoleCard().querySelectorAll("h3")].filter((h) => h.closest('[aria-hidden="true"]') === null && h.closest("[inert]") === null).map(textOf);
+    expect(headings()).toEqual(["启动日志"]);
+    await pass(300);
+    expect(headings()).toEqual(["启动日志"]);
+
+    log.resolve(launchLog(["上一局的第一行"], NOW - DAY));
+    await flush();
+    await pass(300);
+    expect(logArea()).not.toBeNull();
+    expect(headings()).toEqual(["启动日志"]);
+  });
+
+  it("读了 10 s 还没读完：两张卡的「比平时慢」都在占位外面，读屏读得到；读到后撤走", async () => {
+    const log = deferred<LaunchLogDto>();
+    const events = deferred<HistoryEvent[]>();
+    ipc.overrides.set("last_launch_log", () => log.promise);
+    ipc.overrides.set("list_history", () => events.promise);
+    await open();
+    const hints = (root: HTMLElement) => [...root.querySelectorAll("p")].filter((p) => p.textContent === SLOW_LOADING_HINT);
+    expect(hints(consoleCard())).toEqual([]);
+    expect(hints(card("变更历史"))).toEqual([]);
+
+    await pass(10_000);
+    for (const root of [consoleCard(), card("变更历史")]) {
+      const found = hints(root);
+      expect(found).toHaveLength(1);
+      expect(found[0].closest('[aria-hidden="true"]')).toBeNull();
+    }
+
+    log.resolve(launchLog(["上一局的第一行"], NOW - DAY));
+    events.resolve(history);
+    await flush();
+    await pass(300);
+    expect(hints(consoleCard())).toEqual([]);
+    expect(hints(card("变更历史"))).toEqual([]);
+  });
+
   it("级别计数槽按四位定宽，来源组不带计数照默认", async () => {
     await open();
     const group = (label: string) => {
@@ -305,6 +379,28 @@ describe("变更历史：换数据", () => {
     expect(textOf(header)).toContain("2 条记录 · 1 条可回滚");
   });
 
+  it("骨架显出来之后才读不出：副标题那一行照旧占着，卡头不缩、错误块不上移；重试读到后文案填进同一行", async () => {
+    const events = deferred<HistoryEvent[]>();
+    ipc.overrides.set("list_history", () => events.promise);
+    await open();
+    await pass(300);
+    const header = card("变更历史");
+    expect(header.querySelector("[data-reserve]")).not.toBeNull();
+
+    events.reject(new IpcError("io", "history.json 读不出来"));
+    await flush();
+    await pass(300);
+    expect(textOf(header)).toContain("读不到变更历史");
+    expect(header.querySelector("[data-reserve]")).not.toBeNull();
+
+    ipc.overrides.set("list_history", () => history);
+    click(button("重试"));
+    await flush();
+    await pass(300);
+    expect(header.querySelector("[data-reserve]")).toBeNull();
+    expect(textOf(header)).toContain("2 条记录 · 1 条可回滚");
+  });
+
   it("回滚后历史先到、可回滚检查后到：两份都落定之前时间线不动，之后新事件从入场起点出现，挂载时就在的不入场", async () => {
     await open();
     expect(timeline().map(([, entering]) => entering)).toEqual([false, false]);
@@ -330,6 +426,29 @@ describe("变更历史：换数据", () => {
     expect(after[0][1]).toBe(true);
     expect(after.slice(1).map(([, entering]) => entering)).toEqual([false, false]);
     expect(textOf(card("变更历史"))).toContain("3 条记录 · 0 条可回滚");
+  });
+});
+
+describe("变更历史：「显示更早」与滚动区", () => {
+  it("超过一页时「显示更早」与时间线同在一个让位容器里：顶上插进新事件时它跟着条目滑，不一帧跳下去", async () => {
+    history = Array.from({ length: 31 }, (_, i) => ({ kind: "install" as const, id: `${100 + i}-000`, at: Math.floor(NOW / 1000) - 3600 - i, files: [`mod-${i}.jar`] }));
+    await open();
+    const more = button("显示更早的 1 条");
+    const list = card("变更历史").querySelector<HTMLElement>("ol");
+    if (list === null) throw new Error("时间线没有画出来");
+    const scroller = list.parentElement;
+    if (scroller === null) throw new Error("时间线没有滚动区");
+    expect(scroller.contains(more)).toBe(true);
+    expect(more.closest("ol")).toBeNull();
+    expect(reflowed.has(list)).toBe(true);
+    expect(reflowed.has(scroller)).toBe(true);
+  });
+
+  it("滚动条槽常驻并伸进卡片右内边距：时间线越过最大高度时条目不收窄，居中的「显示更早」不横移", () => {
+    const decl = rule(".timelineScroll");
+    expect(decl).toMatch(/overflow:\s*auto;/);
+    expect(decl).toMatch(/scrollbar-gutter:\s*stable;/);
+    expect(decl).toMatch(/margin-right:\s*calc\(-1 \* var\(--sk-scrollbar-size\)\);/);
   });
 });
 

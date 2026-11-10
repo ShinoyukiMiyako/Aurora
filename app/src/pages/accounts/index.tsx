@@ -21,7 +21,7 @@ import { EmptyState } from "../../ui/EmptyState";
 import { KV } from "../../ui/KV";
 import { Loadable } from "../../ui/Loadable";
 import { MenuButton } from "../../ui/MenuButton";
-import { EntranceBlock, numberEntrance, Page, useEntranceIndex, usePageEntrance } from "../../ui/Page";
+import { EntranceBlock, numberEntrance, Page, useEntranceIndex } from "../../ui/Page";
 import { PageHeader } from "../../ui/PageHeader";
 import { SectionTitle } from "../../ui/SectionTitle";
 import { Skeleton } from "../../ui/Skeleton";
@@ -164,20 +164,23 @@ export default function AccountsPage(_props: PageProps<"accounts">) {
                 </Card>
               )}
             </Appear>
-            {ready && (
-              <EntranceBlock as="section" className={styles.section}>
-                <SectionTitle hint={ACCOUNTS_COPY.count(accounts.length)}>{ACCOUNTS_COPY.allAccounts}</SectionTitle>
-                {/* 账户增删：新卡淡入落位，被删的卡原地淡出并让出位置，其余卡与添加卡从旧格子滑到新格子 */}
-                <div ref={gridRef} className={styles.grid}>
-                  <Appear itemClassName={styles.cell}>
-                    {accounts.map((account) => (
-                      <AccountCard key={account.uuid} account={account} current={account.uuid === currentAccountId} online={online} act={act} />
-                    ))}
-                    <AddCard key="add" online={online} microsoftUnavailable={microsoftUnavailable} onAdd={openLogin} />
-                  </Appear>
-                </div>
-              </EntranceBlock>
-            )}
+            {/* 正文挂上之后才读到（读取失败后点重试成功）：分区和聚光卡一样淡入落位，不同帧硬切出现 */}
+            <Appear>
+              {ready && (
+                <EntranceBlock key="all" as="section" className={styles.section}>
+                  <SectionTitle hint={ACCOUNTS_COPY.count(accounts.length)}>{ACCOUNTS_COPY.allAccounts}</SectionTitle>
+                  {/* 账户增删：新卡淡入落位，被删的卡原地淡出并让出位置，其余卡与添加卡从旧格子滑到新格子 */}
+                  <div ref={gridRef} className={styles.grid}>
+                    <Appear itemClassName={styles.cell}>
+                      {accounts.map((account) => (
+                        <AccountCard key={account.uuid} account={account} current={account.uuid === currentAccountId} online={online} act={act} />
+                      ))}
+                      <AddCard key="add" online={online} microsoftUnavailable={microsoftUnavailable} onAdd={openLogin} />
+                    </Appear>
+                  </div>
+                </EntranceBlock>
+              )}
+            </Appear>
           </Body>
         )}
       </Loadable>
@@ -188,17 +191,14 @@ export default function AccountsPage(_props: PageProps<"accounts">) {
 }
 
 /**
- * 读到之后的正文，与骨架同一副栈。挂载时页面还在入场，就把页面分给这里的序号接着往下编，聚光卡与分区照常错开入场；
- * 等过加载才挂上时 Loadable 已经整体淡入，里面的区块不再各自淡入一层。
+ * 读到之后的正文，与骨架同一副栈。挂载时就是内容（页面还在入场），从页面分给 Loadable 的那个号往下编，聚光卡与分区照常错开入场；
+ * 等过加载才挂上时 Loadable 已经清空了序号、整层淡入，这里编不出号，里面的区块不再各自淡入一层。
  */
 function Body({ children }: { children: ReactNode }) {
   const ref = useReflow<HTMLDivElement>();
-  const index = useEntranceIndex();
-  const entrance = usePageEntrance();
-  const [start] = useState(entrance === null ? null : index);
   return (
     <div ref={ref} className={styles.body}>
-      {numberEntrance(children, start)}
+      {numberEntrance(children, useEntranceIndex())}
     </div>
   );
 }

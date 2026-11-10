@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 // 移到其他游戏目录：头图菜单入口的锁定、弹窗的目录列表与选文件夹、预检的展示与拦截、确认入队，以及完成后离开详情页。
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { MotionGlobalConfig } from "framer-motion";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +23,7 @@ import { RemoteImageProvider } from "../../ui/remote-image";
 import { PickFolderProvider, type PickFolder } from "../discover/platform";
 import InstancePage from "./index";
 import { moveCheckView, moveSubmitReason } from "./MoveInstanceModal";
+import moveStyles from "./move.module.css";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -195,6 +199,15 @@ function previewSkeleton(): HTMLElement | null {
   return layer === undefined ? null : layer;
 }
 
+/** 「正在检查」的读屏播报区：随预检区预先挂着，不在骨架那层对读屏隐藏的子树里。 */
+function checkStatus(): HTMLElement {
+  const found = dialog().querySelector<HTMLElement>(`.${moveStyles.status}`);
+  if (found === null) throw new Error("预检区没有播报区");
+  expect(found.getAttribute("role")).toBe("status");
+  expect(found.closest('[aria-hidden="true"]')).toBeNull();
+  return found;
+}
+
 /** 让某个目标的预检回来。 */
 async function answer(target: string, dto: MovePreviewDto) {
   const pending = previews.get(target);
@@ -334,9 +347,15 @@ describe("移到其他游戏目录：弹窗", () => {
     expect([...skeleton.querySelectorAll("dt")].map(textOf)).toEqual(["实例", "存档备份", "补齐的共用文件", "要写入目标盘", "目标盘剩余"]);
     expect(textOf(skeleton)).toContain("正在检查目标位置…");
     expect(skeleton.hasAttribute("data-pending")).toBe(true);
+    // 骨架对读屏隐藏，「正在检查」另由骨架外的播报区念：等待期先空着，与骨架同一时机写字
+    const status = checkStatus();
+    expect(status.textContent).toBe("");
     expect(await reasonOf(button("移动实例", dialog()))).toBe("正在检查目标位置");
     expect(skeleton.hasAttribute("data-pending")).toBe(false);
+    expect(checkStatus()).toBe(status);
+    expect(status.textContent).toBe("正在检查目标位置…");
     await answer(HMCL, previewDto(HMCL));
+    expect(status.textContent).toBe("");
     expect(kv("实例")).toBe(`${formatBytes(420 * MB)} · 1830 个文件`);
     expect(kv("存档备份")).toBe(`3 份 · ${formatBytes(500 * MB)}`);
     expect(kv("补齐的共用文件")).toBe(`186 个 · ${formatBytes(94 * MB)}`);
@@ -444,19 +463,24 @@ describe("移到其他游戏目录：弹窗", () => {
     click(button("选择其他文件夹…", dialog()));
     await flush();
     expect(callsOf(ipc, "preview_instance_move").at(-1)).toEqual({ id: ID, target: NEW_HOME });
-    // 等待期：上一份结果原样摆着（同一个节点，没有换成骨架），不压暗；但已经不能拿它去确认
+    // 等待期：上一份结果原样摆着（同一个节点，没有换成骨架），不压暗；但已经不能拿它去确认，
+    // 读屏那边从换目标那一刻起就标成在忙：摆着的是上一个目标的结果
     expect(previewBlock()).toBe(block);
     expect(block.isConnected).toBe(true);
     expect(kv("目标盘剩余")).toBe(formatBytes(120 * GIB));
     expect(block.hasAttribute("data-stale")).toBe(false);
+    expect(block.getAttribute("aria-busy")).toBe("true");
+    expect(checkStatus().textContent).toBe("");
     expect(await reasonOf(button("移动实例", dialog()))).toBe("正在检查目标位置");
-    // 过了等待期还没回来：压暗并标成在忙
+    // 过了等待期还没回来：压暗并标成在忙，播报区念「正在检查」
     expect(block.hasAttribute("data-stale")).toBe(true);
     expect(block.getAttribute("aria-busy")).toBe("true");
+    expect(checkStatus().textContent).toBe("正在检查目标位置…");
 
     await answer(NEW_HOME, previewDto(NEW_HOME, { same_volume: false, available_bytes: 30 * GIB }));
     expect(previewBlock()).toBe(block);
     expect(block.hasAttribute("data-stale")).toBe(false);
+    expect(block.hasAttribute("aria-busy")).toBe(false);
     expect(kv("目标盘剩余")).toBe(formatBytes(30 * GIB));
     expect(textOf(block)).toContain("目标在另一个盘上");
     expect(button("移动实例", dialog()).getAttribute("aria-disabled")).toBeNull();
@@ -541,23 +565,23 @@ describe("移到其他游戏目录：预检区画什么", () => {
   const before = previewDto(HMCL);
   const after = previewDto("E:\\新家\\.minecraft", { available_bytes: 30 * GIB });
 
-  it("还没有摆过结果：照加载门画加载态", () => {
-    expect(moveCheckView("pending", { status: "loading" }, null)).toEqual({ view: "pending", shown: null, failed: false, stale: false });
-    expect(moveCheckView("skeleton", { status: "loading" }, null)).toEqual({ view: "skeleton", shown: null, failed: false, stale: false });
+  it("还没有摆过结果：照加载门画加载态（忙由加载层自己标）", () => {
+    expect(moveCheckView("pending", { status: "loading" }, null)).toEqual({ view: "pending", shown: null, failed: false, stale: false, busy: false });
+    expect(moveCheckView("skeleton", { status: "loading" }, null)).toEqual({ view: "skeleton", shown: null, failed: false, stale: false, busy: false });
   });
 
-  it("换了目标、新结果还没回来：等待期原样摆着上一份，加载态亮出后压暗", () => {
-    expect(moveCheckView("pending", { status: "loading" }, before)).toEqual({ view: "content", shown: before, failed: false, stale: false });
-    expect(moveCheckView("skeleton", { status: "loading" }, before)).toEqual({ view: "content", shown: before, failed: false, stale: true });
+  it("换了目标、新结果还没回来：等待期原样摆着上一份、只标在忙，加载态亮出后再压暗", () => {
+    expect(moveCheckView("pending", { status: "loading" }, before)).toEqual({ view: "content", shown: before, failed: false, stale: false, busy: true });
+    expect(moveCheckView("skeleton", { status: "loading" }, before)).toEqual({ view: "content", shown: before, failed: false, stale: true, busy: true });
   });
 
   it("新结果回来了但加载态还在最短停留里：仍摆着上一份；加载门放行后换上新的", () => {
-    expect(moveCheckView("skeleton", { status: "ready", data: after }, before)).toEqual({ view: "content", shown: before, failed: false, stale: true });
-    expect(moveCheckView("content", { status: "ready", data: after }, before)).toEqual({ view: "content", shown: after, failed: false, stale: false });
+    expect(moveCheckView("skeleton", { status: "ready", data: after }, before)).toEqual({ view: "content", shown: before, failed: false, stale: true, busy: true });
+    expect(moveCheckView("content", { status: "ready", data: after }, before)).toEqual({ view: "content", shown: after, failed: false, stale: false, busy: false });
   });
 
   it("预检失败：加载门放行后换成失败，不再摆着上一份", () => {
-    expect(moveCheckView("content", { status: "error" }, before)).toEqual({ view: "content", shown: null, failed: true, stale: false });
+    expect(moveCheckView("content", { status: "error" }, before)).toEqual({ view: "content", shown: null, failed: true, stale: false, busy: false });
   });
 });
 
@@ -570,5 +594,24 @@ describe("移到其他游戏目录：主按钮的判定", () => {
     expect(moveSubmitReason(HMCL, { status: "ready", data: previewDto(HMCL, { blockers: [{ kind: "pending" }] }) }, "游戏正在运行，结束后才能移动")).toBe("先解决上面列出的问题");
     expect(moveSubmitReason(HMCL, ready, "游戏正在运行，结束后才能移动")).toBe("游戏正在运行，结束后才能移动");
     expect(moveSubmitReason(HMCL, ready, undefined)).toBeUndefined();
+  });
+});
+
+describe("移到其他游戏目录：样式", () => {
+  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "move.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+
+  /** 选择器恰好是 selector 的那条规则的声明，空白压成一个空格；没有这条规则时报错。 */
+  function declarations(selector: string): string {
+    for (const rule of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      if (rule[1].trim() === selector) return rule[2].replace(/\s+/g, " ").trim();
+    }
+    throw new Error(`样式表里没有 ${selector} 的规则`);
+  }
+
+  it("换目标期间压暗上一份结果：透明度与全站重取压暗同一个令牌，压暗走退场时长，新结果换上时按入场时长淡回", () => {
+    expect(declarations(".preview[data-stale]")).toContain("opacity: var(--sk-disabled);");
+    expect(declarations(".preview[data-stale]")).toContain("transition: opacity var(--sk-dur-out) var(--sk-ease-in);");
+    expect(declarations(".preview")).toContain("transition: opacity var(--sk-dur-in) var(--sk-ease-out);");
+    expect(css).not.toContain("--sk-dur-hover");
   });
 });

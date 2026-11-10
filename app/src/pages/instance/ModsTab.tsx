@@ -10,9 +10,9 @@ import { hueOf } from "../../art/illustrations/seed";
 import { ACTION_ERROR, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { formatDate } from "../../domain/format";
-import type { LoadingView } from "../../lib/loading-gate";
-import { fade } from "../../lib/motion";
+import { fade, SPRING_PARAMS } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
+import { useMounted } from "../../lib/useMounted";
 import { cssVars } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -37,7 +37,7 @@ import { ProgressBar } from "../../ui/ProgressBar";
 import { SearchInput } from "../../ui/SearchInput";
 import { SegmentedControl } from "../../ui/SegmentedControl";
 import { Skeleton } from "../../ui/Skeleton";
-import { columnTemplate, HEADER_HEIGHT, ROW_HEIGHT, Table, type TableColumn, type TableSort } from "../../ui/Table";
+import { columnTemplate, HEADER_HEIGHT, ROW_HEIGHT, Table, visibleColumns, type TableColumn, type TableSort } from "../../ui/Table";
 import { Tag } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
 import { Toggle } from "../../ui/Toggle";
@@ -62,7 +62,7 @@ import {
   type ModRow,
 } from "./model";
 import type { InstanceOps } from "./ops";
-import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
+import { FolderButton, loadableView, ModuleError, SlowHint, useModuleView } from "./parts";
 import { UpdatePreviewModal } from "./UpdatePreviewModal";
 
 export interface ModsTabProps {
@@ -82,6 +82,11 @@ const UPDATE_COUNT_WIDEST = 99;
 const BATCH_COUNT_WIDEST = 999;
 /** 「新增」标签按小时刷新就够：边界在第 7 天，差一小时没人在意。 */
 const NEW_TAG_TICK_MS = 60 * 60 * 1000;
+/**
+ * 更新检查结束后，紧凑档第二行的让位再挂多久（毫秒）。结果到达的那次提交改了第二行，观察者要到下一帧才报上来，
+ * 同一次提交里摘掉会连同没报的变化一起丢掉。留一个 settle 弹簧的时长，余量足够；已经起步的滑动不随摘除中断。
+ */
+const ROW_REFLOW_HOLD_MS = SPRING_PARAMS.settle.duration * 1000;
 
 type BatchAction = "enable" | "disable" | "update" | "remove";
 
@@ -110,6 +115,22 @@ function useJarDrop(inst: InstanceSummary, modsReason: string | undefined) {
       }),
     [actions, id, registerJarDrop, run],
   );
+}
+
+/** active 为真时为真，转假之后再保持 holdMs 毫秒；保持期间又转真，下一次转假从头算。 */
+function useHeld(active: boolean, holdMs: number): boolean {
+  const [held, setHeld] = useState(false);
+  const [was, setWas] = useState(active);
+  if (was !== active) {
+    setWas(active);
+    setHeld(!active);
+  }
+  useEffect(() => {
+    if (!held) return;
+    const timer = setTimeout(() => setHeld(false), holdMs);
+    return () => clearTimeout(timer);
+  }, [held, holdMs]);
+  return active || held;
 }
 
 export function ModsTab({ inst, queryId, ops, updates }: ModsTabProps) {
@@ -161,12 +182,14 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const [batchBusy, setBatchBusy] = useState<BatchAction | null>(null);
   const [preview, setPreview] = useState<PreviewScope | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
+  // 忽略、恢复更新还没回来的个数：回来后列表与可更新项都要重读，行的第二行随之换状态标签
+  const [holdsInFlight, setHoldsInFlight] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
   // 摘要、锁定横幅与表格卡互相让位：横幅随游戏启动退出插拔、摘要行因更新进度换行变高时，下面的块滑过去而不是跳过去。
   // 面板里的栈不在页面一级位置上，页面自带的让位管不到这里
   const stackRef = useReflow<HTMLDivElement>();
   // 工具条与批量操作条互换时新条淡入；页面刚挂上时的那一条不淡入
-  const barMounted = useRef(false);
+  const barMounted = useMounted();
   // 批量条卸下时焦点还在条里（点了「取消选择」或批量动作跑完）：被移除的按钮会把焦点扔回页面开头，
   // 键盘用户得从头 Tab 回来。卸下的那一刻记一笔，换上的工具条把焦点接到同一位置的搜索框。
   const focusLeftWithBar = useRef(false);
@@ -180,9 +203,6 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   const holdLock = ops.updateHoldReason;
 
   useEffect(() => registerFind(() => searchRef.current?.focus()), [registerFind]);
-  useEffect(() => {
-    barMounted.current = true;
-  }, []);
 
   // 玩家可能刚在资源管理器里动过 mods 目录：页面按标签挂载，切过来就重读一次；回到前台的重读在状态层
   const { refresh } = mods;
@@ -339,7 +359,8 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   };
 
   const setHold = (r: ModRow, hold: UpdateHold | null) => {
-    void run(() => actions.setModUpdateHold(id, r.fileName, r.name, hold), ACTION_ERROR.updateHold);
+    setHoldsInFlight((n) => n + 1);
+    void run(() => actions.setModUpdateHold(id, r.fileName, r.name, hold), ACTION_ERROR.updateHold).then(() => setHoldsInFlight((n) => n - 1));
   };
 
   /** 批量动作跑完（成功与否）都清空选择：结果已由通知说明，留着选择容易对着已经变了的行再点一次。 */
@@ -415,10 +436,14 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
   };
 
   const checkLoading = checking || updates.status === "loading" || updates.refreshing;
+  // 紧凑档第二行的让位只在它会变的这一段挂：更新检查进行中与结果刚到时（插拔状态标签、挤掉标注），以及忽略、恢复更新
+  // 还没回来时（回来后重读出来的状态标签换文案、变宽变窄；它在写卷宗那一刻就成立，重读的结果再快也赶在挂好之后）。
+  // 平时不挂：每个让位各带一对观察者，挂上时还要找滚动祖先，超过 100 行的表格虚拟化后滚动中行反复挂卸，这笔开销会落在每一次滚动上
+  const rowReflow = useHeld(checkLoading || holdsInFlight > 0, ROW_REFLOW_HOLD_MS);
   // 表格卡的加载门：错误与列表都算到了，卡里按查询结果画
-  const tableView: LoadingView = load.view === "pending" || load.view === "skeleton" ? load.view : "content";
+  const tableView = loadableView(load.view);
   const compact = tier === "compact";
-  const columns = modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, toggle, update, remove, setHold });
+  const columns = modColumns({ compact, rowReflow, lock, holdLock, now, isUpdating, isToggling, toggle, update, remove, setHold });
   // 选中的行有启停还没回来时盘上是哪个名字未知，批量动作和开关一样带原因等它
   const batchLock = lock === undefined && selectedRows.some((r) => toggling.has(r.fileName)) ? MODS_COPY.togglePending : lock;
   const batch = selectedRows.length > 0 ? batchAvailability(selectedRows, batchLock, isUpdating) : null;
@@ -519,11 +544,16 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
           {shownTotal !== null ? <b className={styles.bigNum}>{shownTotal}</b> : <Skeleton shape="block" width={40} height={28} radius="sm" />}
           {MODS_COPY.totalUnit}
         </span>
-        {mods.status === "ready" && (
-          <span className={styles.modSummaryText}>
-            {partial && inst.modpack !== null ? MODS_COPY.partialNote(inst.modpack.name, total, rows.length) : MODS_COPY.completeNote(counts.enabled, counts.disabled)}
-          </span>
-        )}
+        {/* 说明的那一格常驻：列表读到之前就占着弹性的宽度，读到后文字在格里淡入，右边的更新进度块不被挤动 */}
+        <div className={styles.modSummaryText}>
+          <Appear>
+            {mods.status === "ready" && (
+              <span key="note">
+                {partial && inst.modpack !== null ? MODS_COPY.partialNote(inst.modpack.name, total, rows.length) : MODS_COPY.completeNote(counts.enabled, counts.disabled)}
+              </span>
+            )}
+          </Appear>
+        </div>
         <UpdateProgress instanceId={id} />
       </Inset>
 
@@ -538,66 +568,73 @@ function ModdedMods({ inst, queryId, ops, updates }: ModsTabProps) {
         )}
       </BannerSlot>
 
-      {/* 卡框常驻：读取中（含骨架还没出现的头 300 ms）占着照真表画的骨架，到了换成表格、空状态或错误，骨架叠在上面淡出 */}
-      <Card padding="none" className={styles.modCard}>
-        <Loadable view={tableView} skeleton={<ModTableSkeleton columns={columns} tier={tier} slow={load.slow} />}>
-          {() =>
-            mods.status === "error" ? (
-              <div className={styles.modCardBody}>
-                <ModuleError
-                  title={MODS_COPY.errorTitle}
-                  error={mods.error}
-                  onRetry={mods.reload}
-                  extra={
-                    <Button variant="ghost" size="sm" disabledReason={ops.folderReason("mods")} onClick={() => ops.openFolder("mods")}>
-                      {MODS_COPY.openFolder}
-                    </Button>
-                  }
-                />
-              </div>
-            ) : rows.length === 0 ? (
-              <div className={styles.modCardBody}>
-                <EmptyState
-                  scene="enchanted-book"
-                  titleAs="h2"
-                  title={MODS_COPY.emptyTitle}
-                  body={MODS_COPY.emptyBody}
-                  action={
-                    <Button icon="compass" onClick={() => go({ page: "discover", kind: "mod", forInstance: id })}>
-                      {MODS_COPY.emptyAction}
-                    </Button>
-                  }
-                />
-              </div>
-            ) : (
-              <Table
-                label={MODS_COPY.tableLabel}
-                columns={columns}
-                rows={shown}
-                rowKey={(r) => r.fileName}
-                density={compact ? "compact" : "regular"}
-                selection={{ selected, onChange: setSelected }}
-                sort={sort}
-                onSortChange={(next) => setSort((prev) => adjustModSort(prev, next))}
-                isInactive={(r) => !r.enabled}
-                className={styles.modTable}
-                empty={
-                  <EmptyState
-                    compact
-                    icon="search"
-                    title={MODS_COPY.noMatchTitle}
-                    body={query.trim() !== "" ? MODS_COPY.noMatchQuery(query.trim(), partial) : MODS_COPY.noMatchFilter}
-                    action={
-                      <Button variant="ghost" size="sm" onClick={clearFilters}>
-                        {MODS_COPY.clearFilters}
+      {/* 卡框常驻：读取中（含骨架还没出现的头 300 ms）占着照真表画的骨架，到了换成表格、空状态或错误，骨架叠在上面淡出。
+          表格、空状态、错误三者之后再互换（移除最后一个 Mod、重读失败、重试成功）也交叉淡化：新的一面淡入，旧的一面脱离布局叠在原处淡出。
+          卡片裁切溢出：换成更矮的一面时卡片立即变矮，叠在上面淡出的旧面（以及更高的骨架）不越过卡片的下沿 */}
+      <Card padding="none" clip className={styles.modCard}>
+        <Loadable view={tableView} skeleton={<ModTableSkeleton columns={columns} tier={tier} />}>
+          {() => (
+            <Appear>
+              {mods.status === "error" ? (
+                <div key="error" className={styles.modCardBody}>
+                  <ModuleError
+                    title={MODS_COPY.errorTitle}
+                    error={mods.error}
+                    onRetry={mods.reload}
+                    extra={
+                      <Button variant="ghost" size="sm" disabledReason={ops.folderReason("mods")} onClick={() => ops.openFolder("mods")}>
+                        {MODS_COPY.openFolder}
                       </Button>
                     }
                   />
-                }
-              />
-            )
-          }
+                </div>
+              ) : rows.length === 0 ? (
+                <div key="empty" className={styles.modCardBody}>
+                  <EmptyState
+                    scene="enchanted-book"
+                    titleAs="h2"
+                    title={MODS_COPY.emptyTitle}
+                    body={MODS_COPY.emptyBody}
+                    action={
+                      <Button icon="compass" onClick={() => go({ page: "discover", kind: "mod", forInstance: id })}>
+                        {MODS_COPY.emptyAction}
+                      </Button>
+                    }
+                  />
+                </div>
+              ) : (
+                <Table
+                  key="table"
+                  label={MODS_COPY.tableLabel}
+                  columns={columns}
+                  rows={shown}
+                  rowKey={(r) => r.fileName}
+                  density={compact ? "compact" : "regular"}
+                  selection={{ selected, onChange: setSelected }}
+                  sort={sort}
+                  onSortChange={(next) => setSort((prev) => adjustModSort(prev, next))}
+                  isInactive={(r) => !r.enabled}
+                  className={styles.modTable}
+                  empty={
+                    <EmptyState
+                      compact
+                      icon="search"
+                      title={MODS_COPY.noMatchTitle}
+                      body={query.trim() !== "" ? MODS_COPY.noMatchQuery(query.trim(), partial) : MODS_COPY.noMatchFilter}
+                      action={
+                        <Button variant="ghost" size="sm" onClick={clearFilters}>
+                          {MODS_COPY.clearFilters}
+                        </Button>
+                      }
+                    />
+                  }
+                />
+              )}
+            </Appear>
+          )}
         </Loadable>
+        {/* 慢提示在骨架层外面：骨架层对读屏隐藏，提示要读得到。位置与原先画在骨架末尾时相同，出现时卡片变高、后面没有别的区块要让 */}
+        <Appear>{load.slow && <SlowHint key="slow" slow />}</Appear>
       </Card>
 
       {preview !== null && (
@@ -629,8 +666,8 @@ function UpdateProgress({ instanceId }: { instanceId: string }) {
  * 表格的读取占位，照真表的几何画：同样的表头与表头文字、同一套列模板、同样的行高与单元格内边距，左侧行内边距与右侧滚动条槽也一样，
  * 换成真表时缩略图、文字行与开关都落在原处。行数取列表骨架的上限，真表多出或少掉的高度落在页面末尾。
  */
-function ModTableSkeleton({ columns, tier, slow }: { columns: readonly TableColumn<ModRow>[]; tier: TierName; slow: boolean }) {
-  const visible = columns.filter((c) => c.tiers === undefined || c.tiers.includes(tier));
+function ModTableSkeleton({ columns, tier }: { columns: readonly TableColumn<ModRow>[]; tier: TierName }) {
+  const visible = visibleColumns(columns, tier);
   const vars = cssVars({
     "--skeleton-cols": columnTemplate(columns, tier),
     "--skeleton-head": `${HEADER_HEIGHT}px`,
@@ -656,7 +693,6 @@ function ModTableSkeleton({ columns, tier, slow }: { columns: readonly TableColu
           ))}
         </div>
       ))}
-      <SlowHint slow={slow} />
     </div>
   );
 }
@@ -695,6 +731,8 @@ function skeletonCell(key: string): ReactNode {
 
 interface ColumnDeps {
   compact: boolean;
+  /** 紧凑档第二行此刻挂不挂让位。 */
+  rowReflow: boolean;
   lock: string | undefined;
   /** 更新检查设置的锁：安装、补全、改名、删除进行中才有。 */
   holdLock: string | undefined;
@@ -779,11 +817,11 @@ function modSubTags(row: ModRow, compact: boolean, now: number): ReactElement[] 
 }
 
 /**
- * Mod 列：缩略图、名称与第二行的标注。紧凑档的第二行挂让位：更新状态晚到插在来源后面时，同一行的其余标注滑过去而不是跳过去。
- * 本地文件也要挂：更新检查会先按哈希反查给它补上身份，同一次就为它查更新，这一行在下次重扫之前一直显示「本地文件」却带着更新状态。
- * 也不能等有了更新状态再挂：让位挂上的那一趟只记位置，和插入同一次提交时不动。
+ * Mod 列：缩略图、名称与第二行的标注。紧凑档的第二行在 reflow 为真时挂让位：更新状态晚到插在来源后面时，同一行的其余标注滑过去而不是跳过去。
+ * 什么时候为真由页面按「第二行此刻会不会变」决定，挂上的那一趟只记位置，所以要在变化之前就挂好，不能等这一行有了更新状态再挂。
+ * 本地文件一样挂：更新检查会先按哈希反查给它补上身份，同一次就为它查更新，这一行在下次重扫之前一直显示「本地文件」却带着更新状态。
  */
-function ModCell({ row, compact, now }: { row: ModRow; compact: boolean; now: number }) {
+function ModCell({ row, compact, reflow, now }: { row: ModRow; compact: boolean; reflow: boolean; now: number }) {
   const subReflow = useReflow<HTMLSpanElement>();
   return (
     <div className={styles.modCell}>
@@ -793,7 +831,7 @@ function ModCell({ row, compact, now }: { row: ModRow; compact: boolean; now: nu
           <span className={styles.modName}>{row.name}</span>
           {compact && row.version !== null && <span className={styles.modVersion}>{row.version}</span>}
         </span>
-        <span ref={compact ? subReflow : undefined} className={styles.modSub}>
+        <span ref={compact && reflow ? subReflow : undefined} className={styles.modSub}>
           {row.summary !== null && <span className={styles.ellipsis}>{row.summary}</span>}
           {modSubTags(row, compact, now)}
           {!compact && row.summary === null && <span className={styles.modFile}>{row.fileName}</span>}
@@ -811,7 +849,7 @@ function holdMenu(r: ModRow, holdLock: string | undefined, setHold: ColumnDeps["
   return [{ label: MODS_COPY.ignoreUpdates, ...lockProps, onSelect: () => setHold(r, { kind: "ignored" }) }];
 }
 
-function modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, toggle, update, remove, setHold }: ColumnDeps): TableColumn<ModRow>[] {
+function modColumns({ compact, rowReflow, lock, holdLock, now, isUpdating, isToggling, toggle, update, remove, setHold }: ColumnDeps): TableColumn<ModRow>[] {
   const toggleReason = (r: ModRow): string | undefined => (lock !== undefined ? lock : isToggling(r) ? MODS_COPY.togglePending : undefined);
   return [
     {
@@ -828,7 +866,7 @@ function modColumns({ compact, lock, holdLock, now, isUpdating, isToggling, togg
       header: MODS_COPY.colMod,
       minWidth: 260,
       sortable: true,
-      cell: (r) => <ModCell row={r} compact={compact} now={now} />,
+      cell: (r) => <ModCell row={r} compact={compact} reflow={rowReflow} now={now} />,
     },
     {
       key: "version",

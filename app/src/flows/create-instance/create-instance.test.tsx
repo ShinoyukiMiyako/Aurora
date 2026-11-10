@@ -14,6 +14,7 @@ import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import type { CreateInstancePreset } from "../../state/flows";
+import type { Appearance } from "../../domain/types";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { resources } from "../../state/resource";
@@ -31,6 +32,18 @@ vi.hoisted(() => {
 });
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+// 直接调 observeReflow 挂让位的容器记在这里；照常转给真的实现（jsdom 里它什么也不做）
+const reflowed = vi.hoisted(() => new Set<HTMLElement>());
+vi.mock("../../lib/reflow", async (orig) => {
+  const real = await orig<typeof import("../../lib/reflow")>();
+  return {
+    ...real,
+    observeReflow: (container: HTMLElement, spring?: Parameters<typeof real.observeReflow>[1]) => {
+      reflowed.add(container);
+      return real.observeReflow(container, spring);
+    },
+  };
+});
 
 let view: Rendered | undefined;
 let nav: NavApi;
@@ -45,9 +58,9 @@ function Probe() {
   return null;
 }
 
-async function mount(preset: CreateInstancePreset | null = null) {
+async function mount(preset: CreateInstancePreset | null = null, appearance: Appearance = DEFAULT_APPEARANCE) {
   view = render(
-    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+    <AppearanceProvider initial={appearance}>
       <LauncherProvider>
         <ShellProvider>
           <Probe />
@@ -102,18 +115,23 @@ function button(text: string, root: ParentNode = document): HTMLButtonElement {
   return el;
 }
 
+/** 在场的元素：换步后退场中的那一步带 inert，淡出期间还在 DOM 里，不算。 */
+function presentAll<T extends Element>(selector: string): T[] {
+  return [...dialog().querySelectorAll<T>(selector)].filter((el) => el.closest("[inert]") === null);
+}
+
 /** 单选项：文字以 text 开头的 role="radio"（版本行后面还跟着标签与副行）。 */
 function radio(text: string): HTMLButtonElement {
-  const el = [...dialog().querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((b) => b.getAttribute("aria-label") === text || b.textContent?.startsWith(text));
+  const el = presentAll<HTMLButtonElement>('[role="radio"]').find((b) => b.getAttribute("aria-label") === text || b.textContent?.startsWith(text));
   if (el === undefined) throw new Error(`找不到单选项「${text}」`);
   return el;
 }
 
-const radios = () => [...dialog().querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+const radios = () => presentAll<HTMLButtonElement>('[role="radio"]');
 const checkedRadio = () => radios().find((r) => r.getAttribute("aria-checked") === "true");
 const nameInput = () => {
-  const el = dialog().querySelector<HTMLInputElement>("input");
-  if (el === null) throw new Error("名称步没有输入框");
+  const el = presentAll<HTMLInputElement>("input").at(0);
+  if (el === undefined) throw new Error("名称步没有输入框");
   return el;
 };
 /** 步骤导航里的一项：按步骤名精确匹配（「加载器」与「加载器版本」是两步）。 */
@@ -123,8 +141,8 @@ const stepButton = (label: string) => {
   return el;
 };
 const heading = () => {
-  const el = dialog().querySelector("h3");
-  if (el === null) throw new Error("当前步骤没有标题");
+  const el = presentAll<HTMLHeadingElement>("h3").at(0);
+  if (el === undefined) throw new Error("当前步骤没有标题");
   return el;
 };
 
@@ -154,6 +172,7 @@ beforeEach(() => {
   );
   onClose = vi.fn<() => void>();
   scrolls = [];
+  reflowed.clear();
   Object.defineProperty(HTMLElement.prototype, "scrollTo", {
     configurable: true,
     value(this: HTMLElement, options: ScrollToOptions) {
@@ -179,7 +198,24 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   Reflect.deleteProperty(HTMLElement.prototype, "scrollTo");
+  Reflect.deleteProperty(HTMLButtonElement.prototype, "animate");
 });
+
+/**
+ * 按钮上的 Web Animations 调用：jsdom 没有 animate，装一个只记参数的替身。只装在按钮上（版本行）：
+ * 装到 Element.prototype 上会让 framer-motion 改走 WAAPI。afterEach 里拆掉。
+ */
+function stubButtonAnimations(): { el: Element; keyframes: Keyframe[] }[] {
+  const calls: { el: Element; keyframes: Keyframe[] }[] = [];
+  Object.defineProperty(HTMLButtonElement.prototype, "animate", {
+    configurable: true,
+    value(this: HTMLButtonElement, keyframes: Keyframe[]) {
+      calls.push({ el: this, keyframes });
+      return { cancel() {}, finish() {} };
+    },
+  });
+  return calls;
+}
 
 describe("新建实例：名称", () => {
   it("为空时不提示错误、只禁用下一步；重名与非法字符给出规则表里的那一句", async () => {
@@ -206,6 +242,46 @@ describe("新建实例：名称", () => {
     keydown(nameInput(), "Enter");
     await flush();
     expect(subtitle()).toBe("第 2 步，共 5 步 · 游戏版本");
+  });
+
+  it("逐字输入名称不量弹窗面板：面板只按步骤形变，换步的那一次才量", async () => {
+    await mount();
+    const panel = dialog();
+    let measures = 0;
+    const real = panel.getBoundingClientRect.bind(panel);
+    panel.getBoundingClientRect = () => {
+      measures += 1;
+      return real();
+    };
+    for (const typed of ["周", "周末", "周末生", "周末生存"]) setInput(nameInput(), typed);
+    await flush();
+    expect(nameInput().value).toBe("周末生存");
+    expect(measures).toBe(0);
+    await next();
+    expect(subtitle()).toBe("第 2 步，共 5 步 · 游戏版本");
+    expect(measures).toBeGreaterThan(0);
+  });
+
+  it("换步时正在淡出的上一步带 inert：旧步骤里的控件点不到、聚焦不到，新的一步照常可用", async () => {
+    await mount();
+    setInput(nameInput(), "周末生存");
+    const leaving = nameInput().closest<HTMLElement>('[class*="_pane_"]');
+    if (leaving === null) throw new Error("名称步不在步骤容器里");
+    const main = leaving.parentElement;
+    if (main === null) throw new Error("名称步没有挂在主列里");
+    click(button(CREATE_COPY.next));
+    // 提交的那一刻：名称步还在 DOM 里淡出，版本步已经挂上
+    const panes = [...main.children];
+    expect(panes).toHaveLength(2);
+    expect(panes).toContain(leaving);
+    expect(leaving.hasAttribute("inert")).toBe(true);
+    const entering = panes.find((pane) => pane !== leaving);
+    expect(entering?.hasAttribute("inert")).toBe(false);
+    expect(heading().textContent).toBe(CREATE_COPY.version.title);
+    expect(heading().closest('[class*="_pane_"]')).toBe(entering);
+    await flush();
+    expect(leaving.isConnected).toBe(false);
+    expect(main.children).toHaveLength(1);
   });
 });
 
@@ -355,19 +431,26 @@ describe("新建实例：完整走一遍", () => {
     expect(callsOf(ipc, "update_config")).toEqual([]);
   });
 
-  it("创建失败后再点：旧横幅留到这一次有结果，不先撤掉再插回；新的失败原地换字", async () => {
+  it("创建失败后再点：旧横幅留到这一次有结果，不先撤掉再插回；再失败换一个横幅节点重新播报，原因一字不差也换", async () => {
     await mount();
     await fillName("周末生存");
     await next();
     await next();
     await next();
-    const attempt = deferred<string>();
-    const create = vi.spyOn(launcher.actions, "createInstance").mockRejectedValueOnce(new Error("磁盘空间不足")).mockReturnValueOnce(attempt.promise);
+    const second = deferred<string>();
+    const third = deferred<string>();
+    const create = vi
+      .spyOn(launcher.actions, "createInstance")
+      .mockRejectedValueOnce(new Error("磁盘空间不足"))
+      .mockReturnValueOnce(second.promise)
+      .mockReturnValueOnce(third.promise);
     click(button(CREATE_COPY.create));
     await flush();
     const banners = () => [...dialog().querySelectorAll('[class*="_banner_"]')].filter((el) => el.closest("[inert]") === null);
     expect(banners().map((el) => el.textContent)).toEqual([`${CREATE_COPY.confirm.failed}磁盘空间不足`]);
     const first = banners()[0];
+    const slot = first.closest('[class*="_failed_"]');
+    if (slot === null) throw new Error("失败横幅不在横幅槽里");
 
     click(button(CREATE_COPY.create));
     await flush();
@@ -379,14 +462,32 @@ describe("新建实例：完整走一遍", () => {
     expect(banners()).toHaveLength(1);
     expect(banners()[0]).toBe(first);
 
-    await act(async () => {
-      attempt.reject(new Error("目标文件夹被占用"));
-      await settle();
-      await vi.advanceTimersByTimeAsync(600);
-    });
+    const fail = async (attempt: ReturnType<typeof deferred<string>>, reason: string) => {
+      await act(async () => {
+        attempt.reject(new Error(reason));
+        await settle();
+        await vi.advanceTimersByTimeAsync(600);
+      });
+    };
+    // 原因与上一次一字不差：原地换字等于没变，读屏不会再念；换成新插入的 alert 才会
+    await fail(second, "磁盘空间不足");
     expect(banners()).toHaveLength(1);
-    expect(banners()[0]).toBe(first);
-    expect(first.textContent).toBe(`${CREATE_COPY.confirm.failed}目标文件夹被占用`);
+    const again = banners()[0];
+    expect(again).not.toBe(first);
+    expect(first.isConnected).toBe(false);
+    expect(again.getAttribute("role")).toBe("alert");
+    expect(again.textContent).toBe(`${CREATE_COPY.confirm.failed}磁盘空间不足`);
+    // 槽位还是原来那一个：没有退场再入场，下面的内容不跳
+    expect(again.closest('[class*="_failed_"]')).toBe(slot);
+    expect(dialog().querySelectorAll('[class*="_failed_"]')).toHaveLength(1);
+
+    click(button(CREATE_COPY.create));
+    await flush();
+    await fail(third, "目标文件夹被占用");
+    expect(banners()).toHaveLength(1);
+    expect(banners()[0]).not.toBe(again);
+    expect(banners()[0].textContent).toBe(`${CREATE_COPY.confirm.failed}目标文件夹被占用`);
+    expect(banners()[0].closest('[class*="_failed_"]')).toBe(slot);
   });
 
   it("创建失败时确认步滚回顶部：开局选项让这一步常要滚动，原因写在最上面，不能停在视野之外", async () => {
@@ -848,8 +949,9 @@ describe("新建实例：占位与换态", () => {
     expect(shaker.style.transform).toBe("none");
   });
 
-  it("版本清单没到：前 300 ms 骨架只占位不可见，计数槽透明占位；之后骨架出现", async () => {
-    ipc.overrides.set("list_manifest", () => new Promise(() => undefined));
+  it("版本清单没到：前 300 ms 骨架只占位不可见，计数槽透明占位；之后骨架出现，读屏在骨架层外听到正在读取", async () => {
+    const manifest = deferred<ManifestDto>();
+    ipc.overrides.set("list_manifest", () => manifest.promise);
     await mount();
     setInput(nameInput(), "慢");
     click(button(CREATE_COPY.next));
@@ -863,8 +965,17 @@ describe("新建实例：占位与换态", () => {
       if (el === null) throw new Error("版本步没有骨架层");
       return el;
     };
+    const status = () => {
+      const el = dialog().querySelector('[role="status"]');
+      if (el === null) throw new Error("版本步没有读取状态的播报区");
+      return el;
+    };
     expect(skeleton().hasAttribute("data-pending")).toBe(true);
     expect(skeleton().querySelectorAll('[class*="_skeletonRow_"]')).toHaveLength(6);
+    // 骨架层对读屏隐藏，层里的名称读不到：不挂失效的 aria-label，说明放在层外
+    expect(skeleton().querySelector("[aria-label]")).toBeNull();
+    expect(status().closest('[aria-hidden="true"]')).toBeNull();
+    expect(status().textContent).toBe("");
     const count = dialog().querySelector('[class*="_filterCount_"]');
     expect(count?.hasAttribute("data-pending")).toBe(true);
     expect(count?.getAttribute("aria-hidden")).toBe("true");
@@ -872,6 +983,15 @@ describe("新建实例：占位与换态", () => {
       await vi.advanceTimersByTimeAsync(300);
     });
     expect(skeleton().hasAttribute("data-pending")).toBe(false);
+    expect(status().textContent).toBe(CREATE_COPY.version.loadingLabel);
+
+    await act(async () => {
+      manifest.resolve(await mockInvoke<ManifestDto>("list_manifest"));
+      await settle();
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(radios().length).toBeGreaterThan(0);
+    expect(status().textContent).toBe("");
   });
 
   it("离线缓存的版本列表：计数只写条数，离线说明在列表下面另起一行", async () => {
@@ -885,20 +1005,83 @@ describe("新建实例：占位与换态", () => {
     expect(live('[class*="_listNote_"]').map((el) => el.textContent)).toEqual([CREATE_COPY.version.stale(since, Date.now())]);
   });
 
-  it("换筛选：整个版本列表从透明淡入一次", async () => {
+  const versionList = () => {
+    const el = dialog().querySelector<HTMLElement>(`[role="radiogroup"][aria-label="${CREATE_COPY.version.listLabel}"]`);
+    if (el === null) throw new Error("版本步没有列表");
+    return el;
+  };
+  const versionSearch = () => {
+    const el = dialog().querySelector<HTMLInputElement>(`input[aria-label="${CREATE_COPY.version.search}"]`);
+    if (el === null) throw new Error("版本步没有搜索框");
+    return el;
+  };
+
+  it("换筛选、进出的行不多：列表不整个重新淡入，只有新来的行淡入并从略小处落到位，留下的行由让位接住", async () => {
+    const calls = stubButtonAnimations();
     await mount();
     await fillName("筛选");
-    const list = () => {
-      const el = dialog().querySelector<HTMLElement>(`[role="radiogroup"][aria-label="${CREATE_COPY.version.listLabel}"]`);
-      if (el === null) throw new Error("版本步没有列表");
-      return el;
-    };
-    expect(list().style.opacity).toBe("");
+    expect(reflowed.has(versionList())).toBe(true);
+    const kept = radios();
+    expect(kept).toHaveLength(4);
+
     click(button(CREATE_COPY.version.snapshots));
-    expect(list().style.opacity).toBe("0");
+    const entered = radio("24w14a");
+    expect(versionList().style.opacity).toBe("");
+    expect(versionList().hasAttribute("data-reflow-paused")).toBe(false);
+    expect(calls.map((c) => c.el)).toEqual([entered, entered]);
+    expect(calls[0].keyframes).toEqual([{ opacity: 0 }, { opacity: 1 }]);
+    expect(calls[1].keyframes[0]).toEqual({ scale: "0.98" });
+    expect(calls[1].keyframes.at(-1)).toEqual({ scale: "1" });
+    // 留下的行还是原来的节点，不跟着闪
+    expect(radios().filter((r) => r !== entered)).toEqual(kept);
+
+    // 搜索收窄：删掉的行直接离开，留下的行不重播入场，列表也不重新淡入
+    calls.length = 0;
+    setInput(versionSearch(), "1.2");
+    expect(radios().map((r) => r.textContent?.match(/^[\w.]+/)?.[0])).toEqual(["1.21.1", "1.20.1"]);
+    expect(versionList().style.opacity).toBe("");
+    expect(calls).toEqual([]);
     await flush();
-    expect(list().style.opacity).toBe("1");
-    expect(radios().map((r) => r.textContent?.match(/^[\w.]+/)?.[0])).toContain("24w14a");
+    expect(versionList().style.opacity).toBe("");
+  });
+
+  it("减少动画：新来的行只淡入，不缩放", async () => {
+    const calls = stubButtonAnimations();
+    await mount(null, { ...DEFAULT_APPEARANCE, reduceMotion: true });
+    await fillName("筛选");
+    click(button(CREATE_COPY.version.snapshots));
+    expect(calls.map((c) => c.keyframes)).toEqual([[{ opacity: 0 }, { opacity: 1 }]]);
+  });
+
+  it("一次进出超过 40 行算换了一批：整个列表从透明淡入一次，这一批不让位、也不逐行入场", async () => {
+    ipc.overrides.set("list_manifest", async () => {
+      const base = await mockInvoke<ManifestDto>("list_manifest");
+      const snapshots = Array.from({ length: 41 }, (_, i) => ({ ...base.versions[1], id: `25w${10 + i}a` }));
+      return { ...base, versions: [...base.versions, ...snapshots] };
+    });
+    const calls = stubButtonAnimations();
+    await mount();
+    await fillName("筛选");
+    expect(radios()).toHaveLength(4);
+
+    click(button(CREATE_COPY.version.snapshots));
+    expect(radios()).toHaveLength(46);
+    // 透明度在提交时就压到 0；暂停开关与这一批增删同一次提交打开，下一帧关上
+    expect(versionList().style.opacity).toBe("0");
+    expect(versionList().hasAttribute("data-reflow-paused")).toBe(true);
+    expect(calls).toEqual([]);
+    await flush();
+    expect(versionList().style.opacity).toBe("1");
+    expect(versionList().hasAttribute("data-reflow-paused")).toBe(false);
+
+    // 关回去：一次走掉 42 行，同样整批换上
+    click(button(CREATE_COPY.version.snapshots));
+    expect(radios()).toHaveLength(4);
+    expect(versionList().style.opacity).toBe("0");
+    expect(versionList().hasAttribute("data-reflow-paused")).toBe(true);
+    await flush();
+    expect(versionList().style.opacity).toBe("1");
+    expect(calls).toEqual([]);
   });
 
   it("开局脚注常驻占位：两项都不勾时只是隐藏，勾上一项又显示", async () => {

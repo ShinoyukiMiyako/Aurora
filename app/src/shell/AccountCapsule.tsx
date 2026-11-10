@@ -8,7 +8,7 @@
 // 切换菜单的行带头像与两行文字，通用菜单画不了，这里自己实现同一套键盘约定：
 // 打开即聚焦当前账户，↑↓ 循环移动，Home / End 到首尾，Enter / Space 执行，Esc 关闭并把焦点还给胶囊。
 
-import { AnimatePresence, motion, type HTMLMotionProps } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotionConfig, type HTMLMotionProps } from "framer-motion";
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon } from "../art/Icon";
 import type { SkinRef } from "../art/skin/layout";
@@ -16,7 +16,8 @@ import { AccountAvatar } from "../art/skin/AccountAvatar";
 import { ACTION_ERROR, NEXT_LAUNCH_SUFFIX, TOAST_COPY, accountKindLabel } from "../copy/flows";
 import type { Account } from "../domain/adapt";
 import { useLoadingGate } from "../lib/loading-gate";
-import { fade, springs } from "../lib/motion";
+import { fade, popMark, springs } from "../lib/motion";
+import { useMounted } from "../lib/useMounted";
 import { isImeComposing } from "../lib/util";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useSkinInfo } from "../state/queries/home";
@@ -101,10 +102,7 @@ export function AccountCapsule() {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
   // 挂载时就在的内容跟着外壳一起出现；之后才换上的（读完账户、切换账户、加上首个账户）淡入
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
 
   const account = gate.view === "content" ? current : null;
   const kind: CapsuleKind = gate.view !== "content" ? "loading" : account === null ? "add" : "account";
@@ -221,21 +219,14 @@ function CapsuleSkeleton({ tier }: { tier: Tier }) {
 
 function CapsuleAvatar({ account }: { account: Account }) {
   const skin = useAccountSkin(account.uuid);
+  // 减少动画时缩放一步到位，照用 dot 档的退场会先跳到 0.6 再淡出：只留淡入淡出
+  const mark = useReducedMotionConfig() === true ? popMark.reduced : popMark.dot;
   return (
     <span className={styles.avatar}>
       <AccountAvatar uuid={account.uuid} skin={skin} size={24} />
       {/* 需要重新登录的提醒点：出现时弹入，恢复后淡出缩小 */}
       <AnimatePresence>
-        {account.status === "expired" && (
-          <motion.span
-            key="expired"
-            className={styles.warnDot}
-            aria-hidden="true"
-            initial={{ opacity: 0, scale: 0 }}
-            animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
-            exit={{ opacity: 0, scale: 0.6, transition: fade.out }}
-          />
-        )}
+        {account.status === "expired" && <motion.span key="expired" className={styles.warnDot} aria-hidden="true" {...mark} />}
       </AnimatePresence>
     </span>
   );

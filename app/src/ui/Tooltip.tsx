@@ -6,6 +6,9 @@
 // 全站同一时刻只有一个气泡：新的出现时旧的直接撤掉、不播退场（旧的已在淡出也一样立即撤掉）；预热中出现的气泡也不播入场，
 // 指针扫过一排图标按钮时提示原地换字，不反复浮起、淡入淡出。只有一轮里的第一个气泡带入场。
 // 由 open 强制显示的气泡不参与顶替：它标的是键盘所在的位置，指针移到别的提示上时它留着，也不让别的提示借它预热。
+// 强制显示的气泡之间照样只留一个（键盘只在一处）：新的出现时旧的直接撤掉、新的不播入场，与两者在树里的先后无关。
+// 强制显示结束（open 转假）时：收起的气泡带着结束前的字淡出（调用方通常同时把「已复制」换回原文）；
+// 这一次原本是键盘聚焦打开的、焦点还在触发元素上时不收起，转回普通显示、换上新字。
 // 按在带原因禁用（aria-disabled）的控件上不收起而是立即显示：点击会被挡掉，这一刻正是最想知道原因的时候。
 // 显示期间气泡尺寸变了（文案换成「已复制」、多出一行原因）就按新尺寸重新贴到锚点旁。
 // 由 open 强制显示的气泡滚动时不收起，跟着锚点走（键盘在可滚动的网格里移动，滚动由程序触发）；
@@ -16,7 +19,7 @@
 // 增减的话 React 会重挂控件，聚焦着的控件把焦点丢回 body。Button、IconButton、Toggle、Checkbox 都这样用。
 
 import { AnimatePresence, motion, type Variants } from "framer-motion";
-import { cloneElement, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { cloneElement, useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { fade, springs, TOOLTIP_ENTER_OFFSET, TOOLTIP_TIMING } from "../lib/motion";
 import { placeFloating, rectInRoot, useEscapeListener, useOverlayRoot, type Side } from "../shell/overlay";
@@ -52,8 +55,15 @@ export interface TooltipProps {
  */
 let lastHiddenAt = Number.NEGATIVE_INFINITY;
 
-/** 正在显示的气泡：owner 区分是哪一个提示，hide(true) 让它直接撤掉、不播退场。强制显示的气泡不登记。 */
+/** 正在显示的气泡：owner 区分是哪一个提示，hide(true) 让它直接撤掉、不播退场。强制显示的气泡不登记在这里。 */
 let showing: { owner: object; hide: (replaced: boolean) => void } | null = null;
+
+/**
+ * 正在由 open 强制显示的气泡，与 showing 分开记：悬停的气泡顶替不了它，新的强制气泡顶替它。
+ * 键盘往回移（菜单里相邻的带原因禁用项按 ↑、方块网格按 ←）时新格子的布局副作用先于旧格子运行，
+ * 这时旧格子的 open 还没转假、也没登记退场，只能靠这份登记在打开新气泡的那一刻撤掉它。
+ */
+let forcedShowing: { owner: object; hide: (replaced: boolean) => void } | null = null;
 
 /**
  * 正在播退场（fade.quick）的气泡：驻留结束后的预热窗口里移到下一个提示时，新气泡原地出现，
@@ -65,6 +75,7 @@ let exiting: { owner: object; purge: () => void } | null = null;
 export function resetTooltipState(): void {
   lastHiddenAt = Number.NEGATIVE_INFINITY;
   showing = null;
+  forcedShowing = null;
   exiting = null;
 }
 
@@ -118,9 +129,15 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
   // 错误屏的按钮在 OverlayProvider 之外，从没启用过的提示不能碰浮层体系。启用过就留着：退场动画要在气泡层里演完
   const [armed, setArmed] = useState(!disabled);
   if (!disabled && !armed) setArmed(true);
-  // 调用方常把内容和 disabled 一起撤掉（按钮的禁用原因没了）：退场中的气泡留着最后的字，不闪成空气泡
+  // 处在强制显示中：open 转真的布局副作用里置位，转假时清掉
+  const forcedShown = useRef(false);
+  // 强制显示结束时那一次渲染先留着旧字；焦点还在、气泡留着的话，布局副作用里用它按新字再渲染一次（在绘制之前）
+  const [, refresh] = useReducer((n: number) => n + 1, 0);
+  // 调用方常把内容和 disabled 一起撤掉（按钮的禁用原因没了）：退场中的气泡留着最后的字，不闪成空气泡。
+  // 强制显示在这一次渲染里结束时同理：调用方通常同时把「已复制」换回原文，收起的气泡要带着「已复制」淡出，不在眼前先翻回去
+  const closingForced = forced !== true && forcedShown.current;
   const shown = useRef({ content, sub });
-  if (!disabled) shown.current = { content, sub };
+  if (!disabled && !closingForced) shown.current = { content, sub };
 
   const clearTimers = () => {
     window.clearTimeout(showTimer.current);
@@ -131,13 +148,15 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
     (byOther: boolean) => {
       window.clearTimeout(showTimer.current);
       window.clearTimeout(hideTimer.current);
-      if (openRef.current) {
-        lastHiddenAt = performance.now();
-        // 被顶替的直接撤掉，不用记；照常收起的要淡出 fade.quick，期间可能被下一个气泡顶掉
-        if (!byOther) exiting = { owner, purge };
-      }
+      // 没在显示就什么都不碰：被新的强制气泡顶替的旧气泡，随后自己的 open 转假还会来收起一次，
+      // 这时再登记退场、把 replaced 改回假，已经定下的「直接撤掉」就被改回 fade.quick 淡出，与新气泡并存
+      if (!openRef.current) return;
+      lastHiddenAt = performance.now();
+      // 被顶替的直接撤掉，不用记；照常收起的要淡出 fade.quick，期间可能被下一个气泡顶掉
+      if (!byOther) exiting = { owner, purge };
       openRef.current = false;
       if (showing !== null && showing.owner === owner) showing = null;
+      if (forcedShowing !== null && forcedShowing.owner === owner) forcedShowing = null;
       setReplaced(byOther);
       setAnchor(null);
     },
@@ -150,15 +169,19 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
   const open = (target: Element, warm: boolean) => {
     const other = showing !== null && showing.owner !== owner ? showing : null;
     other?.hide(true);
+    const forcing = forcedShown.current;
+    const previous = forcing && forcedShowing !== null && forcedShowing.owner !== owner ? forcedShowing : null;
+    previous?.hide(true);
     // 自己正在退场又被重新打开时，同一个气泡会被 AnimatePresence 接回来，不能当成别人的退场撤掉
     if (exiting !== null) {
       if (exiting.owner !== owner) exiting.purge();
       exiting = null;
     }
-    if (!forcedShown.current) showing = { owner, hide };
+    if (forcing) forcedShowing = { owner, hide };
+    else showing = { owner, hide };
     openRef.current = true;
     openedDisabled.current = target.matches(":disabled");
-    setInstant(warm || other !== null);
+    setInstant(warm || other !== null || previous !== null);
     setReplaced(false);
     setAnchor(target);
   };
@@ -192,6 +215,7 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
     () => () => {
       clearTimers();
       if (showing !== null && showing.owner === owner) showing = null;
+      if (forcedShowing !== null && forcedShowing.owner === owner) forcedShowing = null;
       if (exiting !== null && exiting.owner === owner) exiting = null;
     },
     [owner],
@@ -202,17 +226,29 @@ export function Tooltip({ content, sub, side = "top", delay = TOOLTIP_TIMING.del
   }, [disabled, hideNow]);
 
   // 只收起由 open 打开的那一次：open 一直为假时，悬停与聚焦打开的气泡不该被它关掉
-  const forcedShown = useRef(false);
   useLayoutEffect(() => {
     if (forced === true) {
       forcedShown.current = true;
       show(true);
-      // 悬停已经打开的这一次转成强制显示：同样不再让别的提示顶替
-      if (showing !== null && showing.owner === owner) showing = null;
+      // 悬停或聚焦已经打开的这一次转成强制显示：同样不再让别的提示顶替，也照样顶掉上一个强制气泡
+      if (openRef.current && (forcedShowing === null || forcedShowing.owner !== owner)) {
+        if (showing !== null && showing.owner === owner) showing = null;
+        forcedShowing?.hide(true);
+        forcedShowing = { owner, hide };
+      }
       return;
     }
     if (!forcedShown.current) return;
     forcedShown.current = false;
+    // 键盘聚焦着触发元素时提示本来就该显示（复制键按回车后焦点还在它身上）：转回普通显示、换上新字，不收起。
+    // 指针已经让别的提示显示出来了就照常收起，不并存两个
+    const target = hostRef.current === null ? null : triggerOf(hostRef.current);
+    if (openRef.current && target !== null && target.matches(":focus-visible") && (showing === null || showing.owner === owner)) {
+      if (forcedShowing !== null && forcedShowing.owner === owner) forcedShowing = null;
+      showing = { owner, hide };
+      refresh();
+      return;
+    }
     hideNow();
     // show 每次渲染都是新函数，不列进依赖：只跟随 open 的变化
   }, [forced, hideNow]);

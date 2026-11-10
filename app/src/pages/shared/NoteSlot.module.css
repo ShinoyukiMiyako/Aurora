@@ -21,6 +21,11 @@
   visibility: hidden;
 }
 
+/* 校验错误换进来时用危险色；备用候选本来就不可见，跟着变色无妨 */
+.slot[data-tone="danger"] {
+  color: var(--sk-danger);
+}
+
 /* 换上来的说明只淡入、不位移：同一格里换字，位置没有变化可言 */
 .current[data-enter] {
   animation: noteIn var(--sk-dur-in) var(--sk-ease-out);

@@ -30,6 +30,7 @@ import { Callout } from "../../../ui/Callout";
 import { Inset } from "../../../ui/Inset";
 import { ProgressBar } from "../../../ui/ProgressBar";
 import { Select } from "../../../ui/Select";
+import { SmoothPercent } from "../../../ui/SmoothPercent";
 import { BlockedFilesModal } from "../BlockedFilesModal";
 import { DETAIL_COPY, MODPACK_COPY, SEARCH_COPY } from "../copy";
 import { instancesFromPack, type ProjectOrigin } from "../model";
@@ -163,11 +164,33 @@ export interface ModpackPanelProps {
   pinned: string | null;
   onPin: (versionId: string | null) => void;
   online: boolean;
+  /** 合并卡切换来源、新平台的详情还没到或没取到：detail 是上一个平台的，不能安装。 */
+  showingPrevious: boolean;
   footerHost: HTMLElement | null;
   onClose: () => void;
 }
 
-export function ModpackPanel({ detail, origins, versions, pinned, onPin, online, footerHost, onClose }: ModpackPanelProps) {
+/** 「正在下载」文案里百分数的占位：百分数是与进度条同步平滑的文字节点（ui/SmoothPercent），按模板摆到它的位置上。 */
+const PERCENT_SLOT = "\u0000";
+
+/**
+ * 下载中的那一行字。百分数与下面的进度条走同一条平滑（同一个 track），不随每条进度事件跳字，也不在条还没走到时先报出数来。
+ * 任务已经结束、只等新实例落地的那一小段没有 track，这时进度恒为满格，直接写字。
+ */
+export function DownloadingLine({ progress, track }: { progress: number; track: string | undefined }) {
+  if (track === undefined) return <>{MODPACK_COPY.downloading(percent(progress))}</>;
+  const parts = MODPACK_COPY.downloading(PERCENT_SLOT).split(PERCENT_SLOT);
+  if (parts.length !== 2) throw new Error(`整合包的下载文案里百分数应当恰好出现一次，实为 ${parts.length - 1} 次`);
+  return (
+    <>
+      {parts[0]}
+      <SmoothPercent value={progress} track={track} />
+      {parts[1]}
+    </>
+  );
+}
+
+export function ModpackPanel({ detail, origins, versions, pinned, onPin, online, showingPrevious, footerHost, onClose }: ModpackPanelProps) {
   const instances = useLauncherSelector((s) => s.instances);
   const actions = useLauncherActions();
   const run = useRunner();
@@ -193,7 +216,8 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   const summary = useModpackSummary(detail.platform, detail.project_id, version === null ? null : version.version_id);
   const releases = manifest.status === "ready" ? manifest.data.versions.map((v) => v.id) : null;
   const facts = packFacts(version, summary.status === "ready" ? summary.data : null, releases);
-  const listedFacts: PackFacts = summary.status === "loading" && version !== null ? { ...facts, extra: [{ icon: "box", text: MODPACK_COPY.summaryLoading }] } : facts;
+  // 清单在读：Mod 数与下载量各占一行骨架，读到后在同一行换上文字，下面的内存与固定行不被推下去
+  const listedFacts: PackFacts = summary.status === "loading" && version !== null ? { ...facts, pending: true } : facts;
   // 提交的是去掉首尾空格的名字，校验也按它：否则前面多个空格就躲过重名检查，末尾多个空格又被当成 Windows 不允许的名字
   const nameError = instanceNameError(name.trim(), existing);
   const fromPack = instancesFromPack(origins, instances);
@@ -269,7 +293,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
     nav.go({ page: "instance", id: createdId, tab: "overview" });
   };
 
-  const installDisabled = version === null || facts.mcVersion === null || nameError !== null;
+  const installDisabled = version === null || facts.mcVersion === null || nameError !== null || showingPrevious;
   const failedBlocked = progress !== null && progress.kind === "failed" ? progress.blocked : null;
   // 开始安装后版本选择已经收起，这些提醒都管不到这次安装了；进度态自己的说明块是这一步唯一的一条
   const notices =
@@ -365,7 +389,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
         <Appear>
           {progress !== null && (progress.kind === "queued" || progress.kind === "downloading") && (
             <div key="progress" className={styles.progress}>
-              <span className={styles.panelHint}>{progress.kind === "queued" ? MODPACK_COPY.queued : MODPACK_COPY.downloading(percent(progress.progress))}</span>
+              <span className={styles.panelHint}>{progress.kind === "queued" ? MODPACK_COPY.queued : <DownloadingLine progress={progress.progress} track={task === null ? undefined : progressTrack(task)} />}</span>
               {/* 排队是静态的空轨道，开跑后从 0 走起；同一个任务只增不减 */}
               <ProgressBar
                 value={progress.kind === "queued" ? 0 : progress.progress}

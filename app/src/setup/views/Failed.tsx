@@ -1,3 +1,4 @@
+import { useIsPresent } from "framer-motion";
 import { useState, type FocusEvent } from "react";
 import { useEscapeListener } from "../../shell/overlay";
 import { Button } from "../../ui/Button";
@@ -33,7 +34,9 @@ export function Failed({ copy, failure, recovery, standardInstaller, onRecover, 
   // 重试和标准安装程序各起一个 NSIS，NSIS 之间没有互斥，同写一个目录只会留下半套文件，还会让窗口关不掉。
   // 所以选定一条路就关上别的路。两条路的结局都是离开这一页或关窗，出错进 fatal，这个状态不用复位
   const [leaving, setLeaving] = useState<"recover" | "standard" | null>(null);
-  useEscapeListener(leaving === null, onBack);
+  // 换步后这一页还要淡出一会儿，监听挂在窗口上、不受 inert 管：这期间的 Esc 归新的一页
+  const present = useIsPresent();
+  useEscapeListener(leaving === null && present, onBack);
 
   return (
     <Frame

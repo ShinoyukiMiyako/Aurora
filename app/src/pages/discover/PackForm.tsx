@@ -9,12 +9,15 @@ import { InstanceAvatarBase } from "../../art/iso/InstanceAvatarBase";
 import { coverLabel, LOADER_NAME } from "../../copy/flows";
 import { SIDEBAR_PIN_LIMIT } from "../../domain/limits";
 import type { LoaderKind } from "../../domain/types";
-import { fade, springs } from "../../lib/motion";
+import { fade, popMark, springs } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
+import { useMounted } from "../../lib/useMounted";
 import { useLauncherSelector } from "../../state/launcher";
+import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { Field } from "../../ui/Field";
 import { LoaderTag } from "../../ui/LoaderTag";
+import { AUTOFOCUS_ATTR } from "../../ui/Modal";
 import { Popover } from "../../ui/Popover";
 import { Skeleton } from "../../ui/Skeleton";
 import { Tag } from "../../ui/Tag";
@@ -91,17 +94,11 @@ function FactItem({ icon, text, late }: { icon: IconName; text: string | null; l
 
 const COVER_ITEMS = COVER_PRESETS.map((cover) => ({ value: cover.block }));
 
-/** 选中封面的勾标：换到哪一格就在那一格弹出（复选标记的出现），离开的那一格缩小淡出。减少动画时只淡入淡出。 */
+/** 选中封面的勾标：换到哪一格就在那一格弹出（复选标记的出现），离开的那一格缩小淡出。减少动画时换成 popMark.reduced，只淡入淡出。 */
 const CHECK_MOTION = {
   initial: { opacity: 0, scale: 0.6 },
   animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } },
   exit: { opacity: 0, scale: 0.6, transition: fade.out },
-} as const;
-
-const CHECK_FADE = {
-  initial: { opacity: 0 },
-  animate: { opacity: 1, transition: fade.in },
-  exit: { opacity: 0, transition: fade.out },
 } as const;
 
 /** 舞台上的方块：换了封面时从略小处弹回原大，看得出是这次操作换上的；挂载时不动。减少动画时只淡入。 */
@@ -125,7 +122,7 @@ function StageBlock({ seed, cover }: { seed: string; cover: InstanceCover }) {
 function CoverPicker({ seed, value, onChange }: { seed: string; value: InstanceCover; onChange: (cover: InstanceCover) => void }) {
   const [anchor, setAnchor] = useState<Element | null>(null);
   const reduced = useReducedMotionConfig() === true;
-  const check = reduced ? CHECK_FADE : CHECK_MOTION;
+  const check = reduced ? popMark.reduced : CHECK_MOTION;
   // 方向键在封面之间移动并立即换上（与单选组一致），点击换上并收起
   const roving = useRovingGroup(COVER_ITEMS, value.block, (block) => onChange(presetOf(block)), false);
   return (
@@ -185,34 +182,43 @@ export interface PackFormProps {
   facts: PackFacts;
   /** 装好之后只读：名称、封面、版本都定了。 */
   readOnly: boolean;
+  /**
+   * 名称框作为所在弹窗这一步的初始焦点（带 data-autofocus）：弹窗换到这一步时焦点落在它上面。
+   * 只给表单就是弹窗一整步的地方用（本地导入的确认步）；嵌在别的内容里的（资源详情的面板）不要传。
+   */
+  nameAutoFocus?: boolean;
 }
 
-export function PackForm({ seed, name, onName, nameError, cover, onCover, version, facts, readOnly }: PackFormProps) {
+export function PackForm({ seed, name, onName, nameError, cover, onCover, version, facts, readOnly, nameAutoFocus = false }: PackFormProps) {
   const pins = useLauncherSelector((s) => s.sidebarPins.length);
   const memoryAuto = useLauncherSelector((s) => s.settings !== null && s.settings.memory.auto);
   // 清单行数随读到的结果变（Mod 数或下载量读不出来、额外行增减）：后面的行从旧位置滑过去，多出来的行淡入
   const reflow = useReflow<HTMLUListElement>();
-  const listed = useRef(false);
-  useEffect(() => {
-    listed.current = true;
-  }, []);
+  // 开始安装后转成只读：名称框换成名称文字、版本行撤掉，下面的标签从旧位置滑上去
+  const fieldsReflow = useReflow<HTMLDivElement>();
+  const listed = useMounted();
   return (
     <>
       <div className={styles.packCard}>
         <div className={styles.stageColumn}>
           <StageBlock seed={seed} cover={cover} />
-          {!readOnly && <CoverPicker seed={seed} value={cover} onChange={onCover} />}
+          <Appear>{!readOnly && <CoverPicker key="cover" seed={seed} value={cover} onChange={onCover} />}</Appear>
         </div>
-        <div className={styles.packFields}>
-          {readOnly ? (
-            <span className={styles.packName}>{name}</span>
-          ) : (
-            // 每次按键都校验，清空或重名的错误随打随出：错误行常驻占位，出现、消失时版本与清单不被推上推下
-            <Field label={MODPACK_COPY.name} error={nameError === null ? undefined : nameError} reserve>
-              <TextInput size="sm" value={name} onChange={onName} invalid={nameError !== null} />
-            </Field>
-          )}
-          {version}
+        <div ref={fieldsReflow} className={styles.packFields}>
+          {/* 名称框与名称文字在同一处交接：旧的原地淡出、新的淡入 */}
+          <Appear itemClassName={styles.packField}>
+            {readOnly ? (
+              <span key="name" className={styles.packName}>
+                {name}
+              </span>
+            ) : (
+              // 每次按键都校验，清空或重名的错误随打随出：错误行常驻占位，出现、消失时版本与清单不被推上推下
+              <Field key="field" label={MODPACK_COPY.name} error={nameError === null ? undefined : nameError} reserve>
+                <TextInput size="sm" value={name} onChange={onName} invalid={nameError !== null} {...(nameAutoFocus ? { [AUTOFOCUS_ATTR]: "" } : {})} />
+              </Field>
+            )}
+          </Appear>
+          <Appear itemClassName={styles.packField}>{version}</Appear>
           <div className={styles.packTags}>
             {facts.mcVersion !== null && <Tag size="sm">{facts.mcVersion}</Tag>}
             <LoaderTag loader={facts.loader} size="sm" />

@@ -3,7 +3,7 @@
 // 下载、下完后等目录与失败都在状态层，全应用同一份；下载失败经统一错误处理报出，目录载入失败由材质绑定报出，按钮都换成重试。
 
 import { useIsPresent } from "framer-motion";
-import { useId, useRef, useState, type ReactNode } from "react";
+import { useId, useState } from "react";
 import { Spinner } from "../../../art/Spinner";
 import { useBlockCatalog } from "../../../art/iso/catalog";
 import { ART_DOWNLOAD_COPY } from "../../../copy/cover";
@@ -22,17 +22,22 @@ export interface ArtDownloadProps {
 
 export function ArtDownload({ compact = false }: ArtDownloadProps) {
   const catalog = useBlockCatalog();
-  const { state, download } = useArtDownload();
+  const { state: live, download } = useArtDownload();
   const run = useRunner();
   // 放在出入场容器（Appear）里时，目录一载入它就开始退场：退场期间留着最后一帧（多半是「正在载入材质…」）原地淡出，
-  // 而不是先变空、再淡出一个空框。不在出入场容器里时恒为在场，照旧什么都不渲染
+  // 而不是先变空、再淡出一个空框。不在出入场容器里时恒为在场，照旧什么都不渲染。
+  // 最后一帧按目录载入之前最后看到的下载状态重画：目录载入的同时下载状态已经回到空闲，照它画就成了「下载」按钮。
+  // 记在状态里、渲染期按需更新，不在渲染期读写 ref：被丢弃的那次渲染不会把没提交过的画面记成最后一帧
   const present = useIsPresent();
-  const lastFrame = useRef<ReactNode>(null);
-  // 挂载时的状态跟着所在弹窗或页面出现；之后每换一个阶段（开始下载、下完等载入、失败），换上来的状态淡入
+  const [held, setHeld] = useState(live);
+  if (catalog === null && held !== live) setHeld(live);
+  const state = catalog === null ? live : held;
+  // 挂载时的状态跟着所在弹窗或页面出现；之后每换一个阶段（开始下载、下完等载入、失败），换上来的状态淡入。
+  // 按画出来的状态算：退场期间下载状态回到空闲也不算换阶段，正在淡出的那一帧不会重播入场
   const [firstPhase] = useState(state.phase);
   const [phaseChanged, setPhaseChanged] = useState(false);
   if (!phaseChanged && state.phase !== firstPhase) setPhaseChanged(true);
-  if (catalog !== null) return present ? null : lastFrame.current;
+  if (catalog !== null && present) return null;
 
   const failed = state.phase === "failed";
   const enter = phaseChanged || undefined;
@@ -55,7 +60,7 @@ export function ArtDownload({ compact = false }: ArtDownloadProps) {
     </div>
   );
 
-  const frame = compact ? (
+  return compact ? (
     <div className={styles.compact}>
       {state.phase !== "running" && state.phase !== "finishing" && <p className={cx(styles.body, styles.compactBody)}>{ART_DOWNLOAD_COPY.compactBody}</p>}
       {status}
@@ -67,8 +72,6 @@ export function ArtDownload({ compact = false }: ArtDownloadProps) {
       <div className={styles.status}>{status}</div>
     </Inset>
   );
-  lastFrame.current = frame;
-  return frame;
 }
 
 function DownloadProgress({ progress, enter }: { progress: ArtDownloadProgress | null; enter: boolean }) {

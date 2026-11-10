@@ -40,6 +40,15 @@
 }
 
 /*
+ * 每片花瓣外面一层与底纹同大的定位层：换种子时的滑动位移写在它的 translate 上（组件交给 Web Animations 播），
+ * 花瓣自己照旧按 left / top 摆，卡面改尺寸时直接到位。同大，花瓣以它为定位基准时位置不变。
+ */
+.lane {
+  position: absolute;
+  inset: 0;
+}
+
+/*
  * 花瓣位置按丘陵的 slice 缩放换算：缩放 = max(宽 / 320, 高 / 120)，水平居中、底边对齐。
  * 只换算位置，花瓣本身保持 2 px 像素单元。
  */
@@ -48,4 +57,9 @@
   position: absolute;
   left: calc(50cqw + (var(--px) - 160) * var(--scale));
   top: calc(100cqh - (120 - var(--py)) * var(--scale));
+}
+
+/* 换种子时色调也跟着换：随滑动过渡过去，不在半路一帧变色。换明暗与强调色那一刻全站的过渡都被压掉，这里不会拖尾 */
+.petal path {
+  transition: fill var(--sk-dur-hover) var(--sk-ease);
 }

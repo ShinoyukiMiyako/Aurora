@@ -160,7 +160,8 @@
   outline: none;
 }
 
-.row:last-child {
+/* 末行按数据标记认（data-last），不用 :last-child：退场中的行抽出布局后仍是文档里的最后一个子项 */
+.row[data-last] {
   border-bottom: 0;
 }
 

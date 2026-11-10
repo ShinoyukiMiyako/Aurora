@@ -7,7 +7,7 @@
 // 卡片退场（删除、改名、取消安装、移到别的游戏目录）期间实例已不在状态里，这时底栏不再挂启动入口（它按 id 取实例，取不到会抛错），
 // 其余部分照最后一次的数据画完退场。「移到其他游戏目录」的弹窗只在打开期间挂载。
 
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotionConfig } from "framer-motion";
 import { useState } from "react";
 import { Icon, type IconName } from "../../art/Icon";
 import { ACTION_ERROR, lockReason, modpackLabel, TOAST_COPY } from "../../copy/flows";
@@ -17,7 +17,7 @@ import { locksOf } from "../../domain/instance-locks";
 import { useCoverBackdrop, useInstanceCover } from "../../launch/cover";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import { launchView } from "../../launch/launchView";
-import { fade, springs } from "../../lib/motion";
+import { popMark } from "../../lib/motion";
 import { useNav } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
@@ -44,16 +44,6 @@ import styles from "./library.module.css";
 /** 卡面高度：与骨架卡、页面样式里的同名变量一致。 */
 export const CARD_COVER_HEIGHT = 118;
 
-/**
- * 「当前」标签：设为当前实例时弹出（标签出现本身就是消息），旧的那张卡上淡出，与卡片描边、选中外圈的过渡同时发生。
- * 减少动画时缩放一步到位，只剩透明度。
- */
-const CURRENT_TAG = {
-  initial: { opacity: 0, scale: 0.6 },
-  animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } },
-  exit: { opacity: 0, transition: fade.out },
-} as const;
-
 export interface InstanceCardProps {
   inst: InstanceSummary;
   /** 相对时间的基准，由页面统一按 30 s 刷新，不让每张卡各起一个定时器。 */
@@ -66,6 +56,8 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   // 每张卡只订阅自己用到的几样判定结果（都是布尔值或字符串）：下载进度与游戏日志不让实例库的卡片跟着重渲染
   const live = useLauncherSelector((s) => findInstance(s, id) !== undefined);
   const current = useLauncherSelector((s) => s.selectedInstanceId === id);
+  // 「当前」标签：设为当前实例时弹出（标签出现本身就是消息），旧的那张卡上淡出，与卡片描边、选中外圈的过渡同时发生
+  const currentTag = useReducedMotionConfig() === true ? popMark.reduced : popMark.tag;
   const busy = useLauncherSelector((s) => busyInstanceId(s) === id);
   const canPin = useLauncherSelector(canPinMore);
   // 崩溃报告不会被之后的正常启动清空：菜单项按「崩溃过」出现，提示只在之后没再正常玩过时给出；
@@ -186,7 +178,7 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
             {/* 标签是叶子，里面没有之后才挂载的动画元素：initial={false} 只让挂载时就在的不弹 */}
             <AnimatePresence initial={false}>
               {current && (
-                <motion.span key="current" className={styles.currentSlot} {...CURRENT_TAG}>
+                <motion.span key="current" className={styles.currentSlot} {...currentTag}>
                   <Tag tone="accent" size="sm" className={styles.currentTag}>
                     {LIBRARY_COPY.current}
                   </Tag>

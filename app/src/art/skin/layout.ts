@@ -7,6 +7,12 @@ export type { SkinModel } from "../illustrations/silhouette";
 /** 后端皮肤信息：远程皮肤按 sha1 取，默认皮肤按白名单路径取。 */
 export type SkinRef = { kind: "remote"; sha1: string; model: SkinModel; hat: boolean } | { kind: "default"; path: string; model: SkinModel };
 
+/**
+ * 头像与立绘收的皮肤：SkinRef 有皮肤，null 没有可用皮肤（画剪影），"loading" 皮肤信息还在读、还不知道有没有。
+ * 读取中保留正在显示的那一张，读到再换：换了账户时不先落回剪影、再淡入新皮肤。
+ */
+export type SkinSource = SkinRef | null | "loading";
+
 export type AvatarSize = 24 | 32 | 40 | 48;
 
 /** 头像边长 -> 脸部边长与比例圆角；四周统一留 4 px 底座边，脸部是 8 的整数倍。 */

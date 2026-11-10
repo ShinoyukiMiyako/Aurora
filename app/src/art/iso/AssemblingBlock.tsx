@@ -92,7 +92,9 @@ export function AssemblingBlock({ instanceId, cover, placed, seated = false, exi
   }, [clock, present, shown, firstDropAt]);
 
   useEffect(() => {
-    if (exit !== null) return;
+    // 所在的面已在退场：它正淡出，再落一面就是半透明地闪一下（面刚换上、首落之前就失败或取消，没有可演的退场时尤其明显）。
+    // 停在离场那一刻的样子，排着的落位一并作废
+    if (exit !== null || !present) return;
     if (placed < shown) {
       setShown(placed);
       return;
@@ -105,7 +107,7 @@ export function AssemblingBlock({ instanceId, cover, placed, seated = false, exi
       setShown((s) => s + 1);
     }, wait);
     return () => clearTimeout(timer);
-  }, [placed, shown, exit, reduced, firstDropAt]);
+  }, [placed, shown, exit, present, reduced, firstDropAt]);
 
   useEffect(() => {
     if (!seated) {

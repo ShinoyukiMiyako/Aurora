@@ -216,13 +216,48 @@ describe("继续游玩大卡：加载、空态与实例之间始终是同一张�
     await flush();
   });
 
-  it("动作行的让位与启动胶囊同一条 morph 弹簧；「实例详情」垫在一层真实的盒子里，是让位能移动的直接子项", async () => {
+  it("设置晚于实例列表：大卡占着骨架等设置里的当前实例，不先画最近玩的那个再换一面", async () => {
+    instances = [...instances, instanceDto("创造", { mc_version: "1.20.1", playtime_min: 60, last_played_at: NOW - 120 * MINUTE })];
+    const config = deferred<unknown>();
+    ipc.overrides.set("get_config", () => config.promise);
+    await mount();
+    expect(launcher.state.status.instances.kind).toBe("ready");
+    expect(launcher.state.status.settings.kind).toBe("loading");
+    // 实例列表已到：照旧算的话这里画的是最近玩的「生存」
+    expect(continueCard().querySelector("h2")).toBeNull();
+    heroSkeleton();
+
+    config.resolve(configDto({ selected_version: "创造" }));
+    await flush();
+    expect([...continueCard().querySelectorAll("h2")].map((h) => h.textContent)).toEqual(["创造"]);
+  });
+
+  it("骨架层与内容层都是加载区根上的直接子项、骨架层带 aria-hidden：样式表按这个层级把两层都撑满大卡", async () => {
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    await advance(LOADING_DELAY_MS);
+    // 与 home.module.css 里撑满骨架层的选择器同一条路径：根（heroLoadable）> 骨架层 > 骨架的框体
+    expect(continueCard().querySelector(`.${s.heroLoadable} > [aria-hidden="true"] > .${s.heroFrame}`)).toBe(heroSkeleton());
+
+    list.resolve(instances);
+    await flush();
+    await advance(LOADING_DELAY_MS);
+    const content = continueCard().querySelector(`.${s.heroLoadable} > .${s.heroLoaded}:not([inert])`);
+    expect(content?.querySelector("h2")?.textContent).toBe("生存");
+  });
+
+  it("动作行的让位与启动胶囊同一条 morph 弹簧；「实例详情」与动作行之间只隔着提示气泡的 contents 包裹，让位越过它直接移动按钮", async () => {
     await mount();
     const details = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "实例详情");
-    const box = details?.closest<HTMLElement>(`.${s.heroDetails}`);
-    if (box === null || box === undefined || box.parentElement === null) throw new Error("找不到「实例详情」的盒子");
-    expect(box.parentElement.classList.contains(s.heroActions)).toBe(true);
-    expect(reflowSprings.get(box.parentElement)).toBe("morph");
+    const row = details?.closest<HTMLElement>(`.${s.heroActions}`);
+    if (details === undefined || row === null || row === undefined) throw new Error("找不到「实例详情」或动作行");
+    // 中间每一层都是提示气泡的宿主（display: contents，没有盒子）：让位越过它，按钮本身就是被胶囊挤动的那一项
+    const between: Element[] = [];
+    for (let el = details.parentElement; el !== null && el !== row; el = el.parentElement) between.push(el);
+    expect(between.length).toBeGreaterThan(0);
+    expect(between.every((el) => el.hasAttribute("data-tooltip-host"))).toBe(true);
+    expect(reflowSprings.get(row)).toBe("morph");
   });
 
   it("存档名晚于大卡到达：整段淡入，追加在信息行末尾", async () => {
@@ -240,24 +275,81 @@ describe("继续游玩大卡：加载、空态与实例之间始终是同一张�
 });
 
 describe("问候卡：账户与下载", () => {
-  it("账户晚到、骨架已出现：最短停留期间名字与立绘不提前露出，停满后与骨架同一刻换上", async () => {
+  it("账户还没读到：问候首帧就是页面的 h1，不在加载区与骨架里；名字一行在 h1 里不可见地占着位", async () => {
+    const accounts = deferred<unknown>();
+    ipc.overrides.set("list_accounts", () => accounts.promise);
+    await mount();
+    const h1 = document.querySelector("h1");
+    if (h1 === null) throw new Error("账户还在读，页面上就没有 h1");
+    expect(h1.textContent).toBe("下午好");
+    expect(h1.closest('[aria-hidden="true"]')).toBeNull();
+    expect(h1.closest('[aria-busy="true"]')).toBeNull();
+    const reserve = h1.querySelector<HTMLElement>(`[aria-busy="true"] > [aria-hidden="true"][data-pending] > .${s.greetName}`);
+    expect(reserve?.parentElement?.style.opacity).toBe("0");
+
+    accounts.resolve([accountDto()]);
+    await flush();
+    expect(document.querySelector("h1")).toBe(h1);
+    expect(h1.textContent).toBe("下午好，Steve");
+  });
+
+  it("账户晚到、骨架已出现：最短停留期间名字与立绘不提前露出，停满后与骨架同一刻换上，逗号随名字淡入", async () => {
     const accounts = deferred<unknown>();
     ipc.overrides.set("list_accounts", () => accounts.promise);
     await mount();
     await advance(LOADING_DELAY_MS);
-    // 骨架里的问候是真字，名字与标签是块；标题本身还不在
-    expect(document.querySelector("h1")).toBeNull();
-    expect(document.querySelector(`[aria-hidden="true"] .${s.greetTitle}`)?.textContent).toBe("下午好");
+    // 问候一直是真字；名字与账户标签是同高的块
+    const h1 = document.querySelector("h1");
+    expect(h1?.textContent).toBe("下午好");
+    const nameSkeleton = h1?.querySelector<HTMLElement>(`[aria-hidden="true"] > .${s.greetName}`);
+    expect(nameSkeleton?.querySelector<HTMLElement>('[style*="height"]')?.style.height).toBe("30px");
 
     accounts.resolve([accountDto()]);
     await flush();
     expect(launcher.state.status.accounts.kind).toBe("ready");
-    expect(document.querySelector("h1")).toBeNull();
+    expect(document.querySelector("h1")?.textContent).toBe("下午好");
     expect(document.querySelector('[aria-label="管理账户"]')).toBeNull();
 
     await advance(LOADING_DELAY_MS);
     expect(document.querySelector("h1")?.textContent).toBe("下午好，Steve");
     expect(document.querySelector('[aria-label="管理账户"]')).not.toBeNull();
+    const comma = [...document.querySelectorAll<HTMLElement>(`.${s.greetHello} > span`)].find((el) => el.textContent === "，");
+    expect(comma?.style.opacity).toBe("0");
+  });
+
+  it("账户读取出错后点重试：出错的那一行留在原处、重试按钮转圈，不退回骨架；读到后名字与账户标签原位淡入", async () => {
+    let reply: () => Promise<unknown> = () => Promise.reject(new IpcError("io", "accounts.json 读不出来"));
+    ipc.overrides.set("list_accounts", () => reply());
+    await mount();
+    /** 在场的出错行：重试成功后退场中的那一行（带 inert）不算。 */
+    const issues = () => [...document.querySelectorAll<HTMLElement>(`.${s.greetIssue}`)].filter((el) => el.closest("[inert]") === null);
+    const [issue] = issues();
+    if (issue === undefined) throw new Error("账户读取出错，问候卡却没有出错的那一行");
+    expect(issue.textContent).toContain("账户列表读不出来");
+    const card = issue.closest<HTMLElement>("[data-span]") as HTMLElement;
+
+    const retry = deferred<unknown>();
+    reply = () => retry.promise;
+    act(() => {
+      (issue.querySelector("button") as HTMLButtonElement).dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
+    });
+    await flush();
+    expect(launcher.state.status.accounts.kind).toBe("loading");
+    await advance(LOADING_DELAY_MS * 2);
+    // 一直是同一行、没有换成骨架；按钮转圈
+    expect(issues()).toEqual([issue]);
+    expect(issue.querySelector("button")?.getAttribute("aria-busy")).toBe("true");
+    expect(card.querySelector('div[aria-busy="true"]')).toBeNull();
+    expect(document.querySelector("h1")?.textContent).toBe("下午好");
+
+    retry.resolve([accountDto()]);
+    await flush();
+    expect(document.querySelector("h1")?.textContent).toBe("下午好，Steve");
+    expect(issue.closest("[inert]")).not.toBeNull();
+    const name = [...card.querySelectorAll<HTMLElement>(`.${s.greetName}`)].find((el) => el.textContent === "Steve");
+    expect(name?.parentElement?.style.opacity).toBe("0");
+    const tag = [...card.querySelectorAll<HTMLElement>(`.${s.greetLine}`)].find((el) => el.textContent === "离线账户" && !el.hasAttribute("inert"));
+    expect(tag?.style.opacity).toBe("0");
   });
 
   it("立绘随账户晚到时淡入；回到主页时账户已在，立绘跟着页面入场，不另播淡入", async () => {
@@ -274,6 +366,37 @@ describe("问候卡：账户与下载", () => {
     if (present === null || present === undefined) throw new Error("立绘不在定位层里");
     expect(present).not.toBe(late);
     expect(present.style.opacity).not.toBe("0");
+  });
+
+  it("游玩记录读取失败：问候卡底栏只剩下载那一行，数字那一块连同加载区一起离开、不占行距；重试时加载区回来", async () => {
+    let reply: (args: IpcArgs) => unknown = () => {
+      throw new IpcError("io", "playtime.json 读不出来");
+    };
+    ipc.overrides.set("play_stats", (args: IpcArgs) => reply(args));
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await mount();
+    await act(async () => {
+      await launcher.actions.repairInstance("生存");
+      await settle();
+    });
+    const foot = document.querySelector<HTMLElement>(`.${s.greetFoot}`);
+    if (foot === null) throw new Error("找不到问候卡底栏");
+    // 退场中的那一块（带 inert）已经抽出布局，不算
+    const live = () => [...foot.children].filter((el) => !el.hasAttribute("inert"));
+    expect(live()).toHaveLength(1);
+    expect(live()[0].textContent).toContain("1 个下载进行中");
+
+    const stats = deferred<ReturnType<typeof playStats>>();
+    reply = () => stats.promise;
+    const retry = [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === "重试");
+    if (retry === undefined) throw new Error("找不到游玩记录的重试按钮");
+    act(() => {
+      retry.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
+    });
+    await flush();
+    // jsdom 不跑完退场，回来的是还在淡出的那一层（同一个 key 接着用），入场初值在这里看不到，只断言它回到了布局里
+    expect(live()).toHaveLength(2);
+    expect(live()[1].querySelector('[aria-busy="true"]')).not.toBeNull();
   });
 
   it("下载开始：问候卡底栏的下载行淡入并从略小处落到位", async () => {
@@ -305,6 +428,9 @@ describe("游玩卡：加载前后是同一组元素，换内容只淡化", () =
     expect(before.map((b) => b.querySelector(`.${s.barLabel}`)?.textContent)).toEqual(["六", "日", "一", "二", "三", "四", "今"]);
     expect(before.every((b) => b.disabled)).toBe(true);
     expect(before.every((b) => b.querySelector(`.${s.barValue}`)?.hasAttribute("data-empty"))).toBe(true);
+    // 时长没到时不给每一天贴「无记录」：整根不朗读，读屏只读到组的名称与 aria-busy
+    expect(before.map((b) => [b.getAttribute("aria-hidden"), b.getAttribute("aria-label")])).toEqual(Array.from({ length: 7 }, () => ["true", null]));
+    expect(before[0].parentElement?.getAttribute("aria-busy")).toBe("true");
 
     stats.resolve(playStats(pendingArgs));
     await flush();
@@ -312,6 +438,9 @@ describe("游玩卡：加载前后是同一组元素，换内容只淡化", () =
     expect(after).toEqual(before);
     after.forEach((b, i) => expect(b).toBe(before[i]));
     expect(after.some((b) => b.disabled)).toBe(false);
+    expect(after.some((b) => b.hasAttribute("aria-hidden"))).toBe(false);
+    expect(after[6].getAttribute("aria-label")).toBe("10月30日 周五，游玩 1 小时 35 分钟，今天");
+    expect(after[5].getAttribute("aria-label")).toBe("10月29日 周四，没有游玩");
     const today = after[6];
     expect(today.querySelector(`.${s.barValue}`)?.textContent).toBe("1.6h");
     expect(today.querySelector(`.${s.barValue}`)?.hasAttribute("data-empty")).toBe(false);

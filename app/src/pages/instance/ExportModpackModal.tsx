@@ -217,6 +217,10 @@ export function ExportModpackModal({ inst, lockReason, savesReason, onClose }: E
           return <ExportForm preview={preview.data} draft={draft} savesReason={savesReason} skipped={skipped} listOpen={listOpen} onListOpen={setListOpen} onDraft={setDraft} />;
         }}
       </Loadable>
+      {/* 骨架里的「正在读取」对读屏隐藏：播报区随弹窗预先挂好、先空着，转圈亮出时才写字，读屏才念得出来；回得快时不播 */}
+      <div role="status" className={styles.status}>
+        {gate.view === "skeleton" ? EXPORT_COPY.reading : ""}
+      </div>
     </Modal>
   );
 }

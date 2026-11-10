@@ -35,6 +35,11 @@ function slideSide(region: HTMLElement | null): ToastSide {
 /** framer-motion 的 popLayout 把退场项抽出布局时打在它身上的标记。 */
 const POPPED_ATTR = "data-motion-pop-id";
 
+/** 落点方向对应的角：1 是平时的右下角，-1 是弹窗或向导开着时的左上角。 */
+function cornerOf(side: ToastSide): "home" | "aside" {
+  return side === 1 ? "home" : "aside";
+}
+
 /**
  * 拷贝里的 CSS 动画（倒计时细线）会从头播：对到原件此刻的进度，细线不在淡出的那一份里跳回起点。
  * 深拷贝不改结构，两边自身与后代按文档顺序一一对应。
@@ -51,8 +56,8 @@ function syncAnimations(original: Element, copy: Element): void {
 }
 
 /**
- * 换角时旧角那一栈原地淡出。落点由样式表当场切换：容器一步到了新角并在那里淡入（--sk-dur-in 配 --sk-ease-out，即 fade.in），
- * 旧角那一份由这里补上。切换之后、浏览器画下一帧之前（MutationObserver 的回调在这次任务的末尾跑），
+ * 换角时旧角那一栈原地淡出。落点由样式表当场切换：容器一步到了新角并在那里淡入（--sk-dur-in 配 --sk-ease-out，即 fade.in，
+ * 起点平时是 0，由这里经 --toasts-enter-from 给出），旧角那一份由这里补上。切换之后、浏览器画下一帧之前（MutationObserver 的回调在这次任务的末尾跑），
  * 把容器里此刻看得见的通知拷一份钉在旧角，淡完拿掉。拷贝只是一张会淡出的照片：不可交互、不进读屏。
  * 能引起换角的只有三种变化：浮层根的直接子项（弹窗层）增删、弹窗层开始退场（data-exiting）、外壳根的直接子项（首次启动向导）增删。
  * 运行环境不播动画（组件测试的 jsdom，没有 getAnimations）时不拷：拷贝要等它的淡出播完才拿掉。
@@ -63,10 +68,12 @@ function useCornerHandoff(regionRef: RefObject<HTMLElement | null>, root: HTMLEl
     if (region === null || root === null || typeof region.getAnimations !== "function") return;
     const host = root.parentElement;
     let side = slideSide(region);
-    // 上一次换角的时刻。弹窗异步接力（关一个、隔几拍再开下一个）会连换两次角：第二次时容器在新角的淡入还没走完，
-    // 旧角的拷贝从淡入此刻走到的透明度起淡出，不先闪回全不透明
+    // 上一次换角的时刻，与容器在那个角淡入的起点透明度。弹窗异步接力（关一个、隔几拍再开下一个）会连换两次角：
+    // 第二次时容器在新角的淡入还没走完，旧角的拷贝从淡入此刻走到的透明度起淡出，不先闪回全不透明
     let movedAt = Number.NEGATIVE_INFINITY;
-    const ghosts = new Set<HTMLElement>();
+    let enteredFrom = 0;
+    // 还在淡出的拷贝，连同它淡出的起点透明度与起步时刻
+    const ghosts = new Map<HTMLElement, { from: number; at: number }>();
 
     const handOff = (records: MutationRecord[]) => {
       if (!records.some((r) => r.type === "attributes" || r.target === root || r.target === host)) return;
@@ -76,23 +83,42 @@ function useCornerHandoff(regionRef: RefObject<HTMLElement | null>, root: HTMLEl
       const from = side;
       side = next;
       const now = performance.now();
-      const shown = tweenAt(fade.in, (now - movedAt) / 1000);
+      const shown = enteredFrom + (1 - enteredFrom) * tweenAt(fade.in, (now - movedAt) / 1000);
       movedAt = now;
 
-      // 这一拍才进来的通知旧角从没画过；正在退场的那条已被抽出布局、自己在淡出：都不拷
+      // 这一拍才进来的通知旧角从没画过；正在退场的那条已被抽出布局、自己在淡出：都不拷。先读完再写
       const fresh = new Set(records.flatMap((r) => (r.target === region ? [...r.addedNodes] : [])));
-      const pairs: [Element, Element][] = [];
+      const pairs: [Element, HTMLElement][] = [];
+      let staying = 0;
       for (const child of region.children) {
-        if (fresh.has(child) || child.hasAttribute(POPPED_ATTR)) continue;
+        if (child.hasAttribute(POPPED_ATTR)) continue;
+        staying += 1;
+        if (fresh.has(child)) continue;
         const copy = child.cloneNode(true);
-        if (!(copy instanceof Element)) throw new Error("通知的拷贝不是元素");
+        if (!(copy instanceof HTMLElement)) throw new Error("通知的拷贝不是 HTML 元素");
+        // 入场还没走完的那条，透明度由 Web Animations 驱动，内联样式还停在入场起点的 0：照它此刻实际的透明度拷
+        copy.style.opacity = getComputedStyle(child).opacity;
         pairs.push([child, copy]);
       }
+
+      // 接力换回原角（甲角到乙角，几拍后又回甲角）：甲角上一次留下的拷贝还没淡完。同样的内容叠两层各自半透明，
+      // 合起来先暗一下再亮回来：拿掉那份拷贝，容器从它此刻的透明度起淡入。栈里没有留下的通知时拷贝照常淡完，不一下子消失
+      let resume = 0;
+      if (staying > 0) {
+        for (const [ghost, fadeOut] of ghosts) {
+          if (ghost.dataset.corner !== cornerOf(next)) continue;
+          resume = Math.max(resume, fadeOut.from * (1 - tweenAt(fade.out, (now - fadeOut.at) / 1000)));
+          ghost.remove();
+          ghosts.delete(ghost);
+        }
+      }
+      enteredFrom = resume;
+      region.style.setProperty("--toasts-enter-from", String(resume));
       if (pairs.length === 0) return;
 
       const ghost = document.createElement("div");
       ghost.className = styles.ghost;
-      ghost.dataset.corner = from === 1 ? "home" : "aside";
+      ghost.dataset.corner = cornerOf(from);
       ghost.setAttribute("aria-hidden", "true");
       ghost.setAttribute("inert", "");
       ghost.style.setProperty("--toasts-width", style.getPropertyValue("--toasts-width"));
@@ -101,7 +127,7 @@ function useCornerHandoff(regionRef: RefObject<HTMLElement | null>, root: HTMLEl
       // 拷贝里的 id 与原件重复，引用 id 的属性会对到它身上
       for (const el of ghost.querySelectorAll("[id]")) el.removeAttribute("id");
       region.after(ghost);
-      ghosts.add(ghost);
+      ghosts.set(ghost, { from: shown, at: now });
       for (const [original, copy] of pairs) syncAnimations(original, copy);
 
       const drop = () => {
@@ -115,7 +141,7 @@ function useCornerHandoff(regionRef: RefObject<HTMLElement | null>, root: HTMLEl
       }
       fadeOut.finished.then(drop, (error: unknown) => {
         drop();
-        // 拷贝被提前拿掉（外壳卸载）时淡出随之取消，这是正常收尾；别的错误照常抛出
+        // 拷贝被提前拿掉（外壳卸载、接力换回这个角）时淡出随之取消，这是正常收尾；别的错误照常抛出
         if (!(error instanceof DOMException && error.name === "AbortError")) throw error;
       });
     };
@@ -125,7 +151,7 @@ function useCornerHandoff(regionRef: RefObject<HTMLElement | null>, root: HTMLEl
     if (host !== null) observer.observe(host, { childList: true });
     return () => {
       observer.disconnect();
-      for (const ghost of ghosts) ghost.remove();
+      for (const ghost of ghosts.keys()) ghost.remove();
       ghosts.clear();
     };
   }, [regionRef, root]);

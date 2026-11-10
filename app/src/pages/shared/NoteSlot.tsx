@@ -16,9 +16,11 @@ export interface NoteSlotProps {
   current: string | null;
   /** 全部可能出现的说明。 */
   options: readonly string[];
+  /** 当前说明是校验错误这类要用危险色的话时传 danger；不传沿用所在位置的字色。 */
+  tone?: "danger";
 }
 
-export function NoteSlot({ current, options }: NoteSlotProps) {
+export function NoteSlot({ current, options, tone }: NoteSlotProps) {
   const unique = [...new Set(options)];
   if (current !== null && !unique.includes(current)) throw new Error(`NoteSlot 当前说明「${current}」不在候选里：${unique.join(" / ")}`);
   const reserves = unique.filter((option) => option !== current);
@@ -28,7 +30,7 @@ export function NoteSlot({ current, options }: NoteSlotProps) {
   const [changed, setChanged] = useState(false);
   if (!changed && current !== first) setChanged(true);
   return (
-    <span className={styles.slot} data-reserve-a={reserves[0]} data-reserve-b={reserves[1]}>
+    <span className={styles.slot} data-tone={tone} data-reserve-a={reserves[0]} data-reserve-b={reserves[1]}>
       {current !== null && (
         <span key={current} className={styles.current} data-enter={changed || undefined}>
           {current}

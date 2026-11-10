@@ -5,7 +5,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { Icon } from "../art/Icon";
-import { fade, springs } from "../lib/motion";
+import { faceSwap } from "../lib/motion";
 import { cx } from "../lib/util";
 import styles from "./Checkbox.module.css";
 import { mergeDescribedBy, useFieldControl } from "./Field";
@@ -60,13 +60,7 @@ export function Checkbox({ checked, onChange, label, ariaLabel, invalid = false,
       <span className={styles.box}>
         <AnimatePresence initial={false}>
           {glyph !== null && (
-            <motion.span
-              key={glyph}
-              className={styles.glyph}
-              initial={{ opacity: 0, scale: 0.6 }}
-              animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
-              exit={{ opacity: 0, transition: fade.out }}
-            >
+            <motion.span key={glyph} className={styles.glyph} initial={faceSwap.pop.initial} animate={faceSwap.pop.animate} exit={faceSwap.exit}>
               <Icon name={glyph} size={14} />
             </motion.span>
           )}

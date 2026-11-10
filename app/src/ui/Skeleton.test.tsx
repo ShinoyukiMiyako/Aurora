@@ -42,6 +42,12 @@ describe("Skeleton", () => {
     expect(root().getAttribute("aria-hidden")).toBe("true");
   });
 
+  it("块：高度可以撑满所在位置（随内容伸缩的舞台），照写成百分比", () => {
+    view = render(<Skeleton shape="block" width="100%" height="100%" radius="lg" />);
+    expect(root().style.height).toBe("100%");
+    expect(root().style.width).toBe("100%");
+  });
+
   it("方块：圆角按边长 × 0.3 取整", () => {
     expect(proportionalRadius(40)).toBe(12);
     expect(proportionalRadius(30)).toBe(9);

@@ -19,6 +19,7 @@ import { Banner, BannerSlot } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { EmptyState } from "../../ui/EmptyState";
+import { LabelSlot } from "../../ui/LabelSlot";
 import { Loadable } from "../../ui/Loadable";
 import { EntranceBlock, numberEntrance, Page, useEntranceIndex } from "../../ui/Page";
 import { TabPanel } from "../../ui/Tabs";
@@ -339,11 +340,17 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
   const conditional = hasConditions(filters);
 
   const failed = pages.firstError !== null || timedOut;
-  // 失败与超时时说明行不写「搜索中」：下面的空状态已经说清了结局
-  const count = failed ? null : pages.loadingFirst || first === null ? SEARCH_COPY.searching : SEARCH_COPY.resultCount(first.total);
+  // 失败与超时时说明行不写「搜索中」：下面的空状态已经说清了结局。
+  // 首页等得久了，「搜索中…」原位换成慢提示：骨架下面的那一行在一整页骨架之后，几乎看不到
+  const count = failed ? null : gate.slow ? SLOW_LOADING_HINT : pages.loadingFirst || first === null ? SEARCH_COPY.searching : SEARCH_COPY.resultCount(first.total);
   const info = (
     <div className={styles.infoLine} aria-live="polite">
-      {count !== null && <span className={styles.infoCount}>{count}</span>}
+      {/* 槽宽按几条候选里最宽的那条（慢提示）留住：换成慢提示、换成总数时后面的条件片段都不左右跳 */}
+      {count !== null && (
+        <span className={styles.infoCount}>
+          <LabelSlot current={count} options={[count, SEARCH_COPY.searching, SLOW_LOADING_HINT]} align="start" />
+        </span>
+      )}
       {parts.map((p) => (
         <span key={p} className={styles.infoPart}>
           {p}
@@ -499,7 +506,6 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
           return <OutcomeSwap swapKey={`${pages.state.baseKey}|${shown.kind}`}>{shown.node}</OutcomeSwap>;
         }}
       </Loadable>
-      {gate.slow && <p className={styles.listNote}>{SLOW_LOADING_HINT}</p>}
     </div>
   );
 }

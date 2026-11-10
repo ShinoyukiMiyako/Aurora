@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useReflow } from "../lib/reflow";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { keydown, render, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
-import { MEMORY_WARN_COPY, MemorySlider, memoryMarks, memoryMaxMb, memoryShare, type MemorySliderProps } from "./MemorySlider";
+import { MEMORY_WARN_COPY, MemorySlider, MemorySliderSkeleton, memoryMarks, memoryMaxMb, memoryShare, type MemorySliderProps } from "./MemorySlider";
 
 let view: Rendered | undefined;
 let observers: ResizeObserverStub;
@@ -158,5 +158,58 @@ describe("MemorySlider", () => {
   it("物理内存放不下最小值以上的一档时抛错", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     expect(() => mount(<Host initial={1024} totalMb={1500} />)).toThrow("物理内存 1500 MB 不足以分配游戏内存");
+  });
+});
+
+describe("加载占位", () => {
+  const read = (file: string) =>
+    readFileSync(resolve(__dirname, file), "utf8")
+      .replace(/\r\n/g, "\n")
+      .replace(/\/\*[\s\S]*?\*\//g, "");
+  const tokensCss = read("../styles/tokens.css");
+
+  function decl(css: string, selector: string, property: string): string {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const block = new RegExp(`(^|\\n)${escaped}\\s*\\{([^}]*)\\}`).exec(css);
+    if (block === null) throw new Error(`样式表里没有 ${selector}`);
+    const found = new RegExp(`(^|[;\\s])${property}\\s*:\\s*([^;]+);`).exec(block[2]);
+    if (found === null) throw new Error(`${selector} 没有写 ${property}`);
+    return found[2].trim();
+  }
+
+  /** 把 var(--sk-…) 换成令牌在 :root 上的取值。 */
+  function resolveTokens(value: string): string {
+    return value.replace(/var\((--sk-[a-z0-9-]+)\)/g, (_, name: string) => {
+      const found = new RegExp(`${name}\\s*:\\s*([^;]+);`).exec(tokensCss);
+      if (found === null) throw new Error(`令牌表里没有 ${name}`);
+      return found[1].trim();
+    });
+  }
+
+  it("命中区加刻度那一行照 Slider 的尺寸画：命中区高、刻度行高、读数列宽与间距逐项对得上", () => {
+    const slider = read("Slider.module.css");
+    const memory = read("MemorySlider.module.css");
+    expect(decl(memory, ".skeletonTrack", "height")).toBe(decl(slider, ".control", "height"));
+    expect(resolveTokens(decl(memory, ".skeletonTrack", "margin-bottom"))).toBe(decl(slider, ".marks", "height"));
+    expect(decl(memory, ".skeletonTrack", "grid-template-columns")).toBe(`minmax(0, 1fr) ${decl(slider, ".slider", "--slider-value-width")}`);
+    expect(decl(memory, ".skeletonTrack", "gap")).toBe(decl(slider, ".slider", "--slider-value-gap"));
+  });
+
+  it("外层容器与占用说明行直接用滑杆自己的类；只画图形，没有可聚焦元素", () => {
+    mount(
+      <>
+        <div data-testid="skeleton">
+          <MemorySliderSkeleton />
+        </div>
+        <div data-testid="real">
+          <MemorySlider value={6144} onChange={() => undefined} onCommit={() => undefined} totalMb={16384} ariaLabel="最大内存" />
+        </div>
+      </>,
+    );
+    const skeleton = document.querySelector('[data-testid="skeleton"]') as HTMLElement;
+    const real = document.querySelector('[data-testid="real"]') as HTMLElement;
+    expect((skeleton.firstElementChild as HTMLElement).className).toBe((real.firstElementChild as HTMLElement).className);
+    expect((skeleton.querySelector("p") as HTMLElement).className).toBe((real.querySelector("p") as HTMLElement).className);
+    expect(skeleton.querySelector("button, input, a, select, textarea, [tabindex]")).toBeNull();
   });
 });

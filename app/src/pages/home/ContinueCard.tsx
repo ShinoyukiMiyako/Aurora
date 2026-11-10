@@ -16,6 +16,7 @@ import { LaunchCapsule } from "../../launch/LaunchCapsule";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { fade } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
+import { useMounted } from "../../lib/useMounted";
 import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -24,6 +25,7 @@ import { useLauncherActions, useLauncherSelector, useNow } from "../../state/lau
 import { useGameDirectories } from "../../state/queries/catalog";
 import { useInstanceContent } from "../../state/queries/instance";
 import { findInstance, gameDirectoryBusy } from "../../state/selectors";
+import type { SliceStatus } from "../../state/store";
 import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { Card, type ResponsiveValue } from "../../ui/Card";
@@ -45,43 +47,46 @@ import s from "./home.module.css";
 
 export interface ContinueCardProps {
   span: ResponsiveValue;
-  /** 大卡指向的实例；实例列表就绪且一个实例都没有时为 null。 */
+  /** 大卡指向的实例；实例列表与设置都读完、且一个实例都没有时为 null（读完之前的 null 不会被画出来）。 */
   target: InstanceSummary | null;
 }
 
+/** 一轮读取落定后画在卡里的结论：列表读取出错，或列表与设置都已读完。 */
+type Outcome = Exclude<SliceStatus, { kind: "loading" }>;
+
 /** 卡里这一面是什么：出错、没有实例，或某个实例的大卡（换实例由大卡自己交叉淡化）。 */
-function faceOf(status: { kind: "ready" } | { kind: "error"; error: Error }, target: InstanceSummary | null): "error" | "empty" | "hero" {
-  if (status.kind === "error") return "error";
+function faceOf(outcome: Outcome, target: InstanceSummary | null): "error" | "empty" | "hero" {
+  if (outcome.kind === "error") return "error";
   return target === null ? "empty" : "hero";
 }
 
 export function ContinueCard({ span, target }: ContinueCardProps) {
   const status = useLauncherSelector((s) => s.status.instances);
-  const gate = useLoadingGate(status.kind === "loading");
+  // 实例列表先到、设置还在读时继续占着骨架：大卡指向谁要等设置里的当前实例（主页按同一条件才算 target），
+  // 不先画最近玩的那个再换。列表读取出错时与设置无关，错误面照常出来
+  const settingsLoading = useLauncherSelector((s) => s.status.settings.kind === "loading");
+  const outcome: Outcome | null = status.kind === "error" ? status : status.kind === "ready" && !settingsLoading ? status : null;
+  // 上一次落定的结论。读取出错后点重试的这一轮不开加载门：错误面留在原处、重试按钮转圈，结果回来再原位换掉。
+  // 不这样做的话错误面一点就淡出、换成不可见的骨架，300 ms 内又失败时再淡入，整块闪一下
+  const [settled, setSettled] = useState<Outcome | null>(outcome);
+  if (outcome !== null && outcome !== settled) setSettled(outcome);
+  const retryingFrom = outcome === null && settled !== null && settled.kind === "error" ? settled : null;
+  const gate = useLoadingGate(outcome === null && retryingFrom === null);
   return (
     <Card span={span} padding="none" clip className={s.rowOne}>
       <Loadable view={gate.view} skeleton={<HeroSkeleton slow={gate.slow} />} className={s.heroLoadable} contentClassName={s.heroLoaded}>
         {() => {
-          if (status.kind === "loading") throw new Error("实例列表还在加载，却要画大卡内容");
-          const face = faceOf(status, target);
+          const drawn = outcome !== null ? outcome : retryingFrom;
+          if (drawn === null) throw new Error("实例列表或设置还在加载，却要画大卡内容");
           return (
-            <FaceSwap face={face} className={s.heroLayer}>
-              {status.kind === "error" ? <HeroError error={status.error} /> : target === null ? <NoInstances /> : <HeroFrame instanceId={target.id} />}
+            <FaceSwap face={faceOf(drawn, target)} className={s.heroLayer}>
+              {drawn.kind === "error" ? <HeroError error={drawn.error} retrying={retryingFrom !== null} /> : target === null ? <NoInstances /> : <HeroFrame instanceId={target.id} />}
             </FaceSwap>
           );
         }}
       </Loadable>
     </Card>
   );
-}
-
-/** 挂载之后为真；渲染期读它决定之后才出现的元素要不要播入场。 */
-function useMountedRef(): RefObject<boolean> {
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
-  return mounted;
 }
 
 interface FaceSwapProps {
@@ -98,7 +103,7 @@ interface FaceSwapProps {
  * 它会让这一面里之后才挂载的动画元素（晚到的存档名）也永远跳过入场。
  */
 function FaceSwap({ face, className, children }: FaceSwapProps) {
-  const mounted = useMountedRef();
+  const mounted = useMounted();
   return (
     <AnimatePresence mode="popLayout">
       <FaceLayer key={face} className={className} enter={mounted.current}>
@@ -132,7 +137,7 @@ function FaceLayer({ ref, enter, className, children }: FaceLayerProps) {
   );
 }
 
-function HeroError({ error }: { error: Error }) {
+function HeroError({ error, retrying }: { error: Error; retrying: boolean }) {
   const actions = useLauncherActions();
   const run = useRunner();
   // 紧凑空状态：落在第一排的最小高度之内，出错时不把整排撑高
@@ -144,7 +149,7 @@ function HeroError({ error }: { error: Error }) {
         title={BOOT_SLICE_ERROR.instances}
         body={describeError(error)}
         action={
-          <Button variant="secondary" icon="refresh" onClick={() => void run(() => actions.reload("instances"), BOOT_SLICE_ERROR.instances)}>
+          <Button variant="secondary" icon="refresh" loading={retrying} onClick={() => void run(() => actions.reload("instances"), BOOT_SLICE_ERROR.instances)}>
             {HOME_COPY.retry}
           </Button>
         }
@@ -153,7 +158,10 @@ function HeroError({ error }: { error: Error }) {
   );
 }
 
-/** 只有这里读目录列表：探测目录要摸盘，有实例时主页用不到它。 */
+/**
+ * 主页上只有这一面订阅目录列表：探测目录要摸盘，有实例时主页用不到它，也就不在回到主页时重读。
+ * 外壳在主界面出来后预取过一次（实例库的工具条要用），缓存还在时这一面首帧就有数据，下面只在后台重读。
+ */
 function NoInstances() {
   const { openCreateInstance } = useShell();
   const busy = useLauncherSelector(gameDirectoryBusy);
@@ -316,7 +324,7 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
   const now = useNow(30_000);
   const cover = useInstanceCover(inst);
   const backdrop = useCoverBackdrop(inst);
-  const mounted = useMountedRef();
+  const mounted = useMounted();
   // 胶囊换面时按 morph 伸缩：「详情」用同一条弹簧让位，和胶囊的右缘一起走，中间不裂缝也不叠
   const actionsRef = useReflow<HTMLDivElement>("morph");
 
@@ -395,12 +403,10 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
 
         <div ref={actionsRef} className={s.heroActions}>
           <LaunchCapsule instanceId={inst.id} size="lg" />
-          {/* Button 外面是提示气泡的 display: contents 包裹，没有盒子，让位认不到它：垫一层真实的盒子交给让位去移 */}
-          <span className={s.heroDetails}>
-            <Button size="lg" variant="secondary" iconRight="arrow-right" onClick={() => go({ page: "instance", id: inst.id, tab: "overview" })}>
-              {HOME_COPY.details}
-            </Button>
-          </span>
+          {/* 外面提示气泡的包裹是 display: contents，让位会越过它直接移动按钮，不必再垫一层盒子 */}
+          <Button size="lg" variant="secondary" iconRight="arrow-right" onClick={() => go({ page: "instance", id: inst.id, tab: "overview" })}>
+            {HOME_COPY.details}
+          </Button>
         </div>
       </div>
       <span className={s.heroBlock}>

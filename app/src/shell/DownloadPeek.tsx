@@ -5,16 +5,21 @@
 // 动效：图标与进度环叠在同一格交叉淡入，角标与危险点出现时弹入、消失时淡出缩小，入口尺寸始终不变；
 // 账户胶囊伸缩时入口跟着胶囊左缘滑（SLIDES_WITH_CAPSULE）；浮层里任务行增删时淡入淡出，其余行从旧位置滑到新位置，
 // 浮层外框随之形变到新高度，失败条与底栏跟着外框下沿走。
+// 行里的进度文字与下载任务页同一套显示节流（lib/progress-display）：速度平滑、每秒最多换两次字，百分数与进度条同步走；
+// 任务完成时行先留在原处把进度推满、停一拍，再退场。
 
-import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useReducer, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotionConfig } from "framer-motion";
+import { useEffect, useReducer, useState } from "react";
 import { Icon } from "../art/Icon";
 import { ACTION_ERROR, CONFIRM_COPY, taskPhaseText } from "../copy/flows";
 import { formatSpeed, percent } from "../domain/format";
 import type { Task } from "../domain/types";
 import type { ConfirmOptions } from "../launch/host";
-import { fade, insertItem, springs } from "../lib/motion";
+import { fade, popMark, springs } from "../lib/motion";
+import { useCompletionHold, useDisplaySpeed, useFinishing, type FinishedItem } from "../lib/progress-display";
 import { useReflow } from "../lib/reflow";
+import { useInsertItem } from "../lib/useInsertItem";
+import { useMounted } from "../lib/useMounted";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { findInstance } from "../state/selectors";
 import type { LauncherState } from "../state/store";
@@ -26,6 +31,7 @@ import { IconButton } from "../ui/IconButton";
 import { Popover } from "../ui/Popover";
 import { ProgressBar } from "../ui/ProgressBar";
 import { ProgressRing } from "../ui/ProgressRing";
+import { SmoothPercent } from "../ui/SmoothPercent";
 import { PEEK_COPY } from "../copy/shell";
 import { SLIDES_WITH_CAPSULE } from "./AccountCapsule";
 import styles from "./DownloadPeek.module.css";
@@ -34,15 +40,6 @@ import { useRunner } from "./useRunner";
 
 /** 底栏随浮层外框的形变移动：与外框同一条弹簧，下沿与底栏一起到位。 */
 const FOLLOW_PANEL = { layout: springs.morph } as const;
-
-/** 挂载时就在的元素跟着外壳或浮层一起出现，不单独播入场；之后才挂上的才播。读这个 ref 决定 initial。 */
-function useMountedRef(): { readonly current: boolean } {
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
-  return mounted;
-}
 
 /**
  * 入口上的总进度：按声明大小加权（Σ 大小 × 进度 / Σ 大小）。大小都未知时为 null，入口画静态虚线环；
@@ -67,9 +64,45 @@ export function overallTrack(tasks: readonly Task[]): string {
   return tasks.filter(isActiveTask).map(progressTrack).sort().join("\n");
 }
 
-/** 浮层的列表顺序：运行中在前、排队在后，两组内部保持队列（数组）顺序。 */
-export function peekRows(tasks: readonly Task[]): Task[] {
-  return [...tasks.filter((t) => t.status === "running"), ...tasks.filter((t) => t.status === "queued")];
+const NOT_FINISHING: ReadonlySet<string> = new Set();
+
+/**
+ * 浮层的列表顺序：运行中在前、排队在后，两组内部保持队列（数组）顺序。
+ * 刚完成、还在收尾的任务（finishing，lib/progress-display 的 useFinishing）仍算运行中，留在原来的位置把进度推满，收尾结束才退场。
+ */
+export function peekRows(tasks: readonly Task[], finishing: ReadonlySet<string> = NOT_FINISHING): Task[] {
+  const held = (t: Task) => t.status === "done" && finishing.has(t.id);
+  return [...tasks.filter((t) => t.status === "running" || held(t)), ...tasks.filter((t) => t.status === "queued")];
+}
+
+/** 已完成的任务与完成时刻：收尾从这一刻算起。失败与取消没有走满这回事，不算。 */
+function completions(tasks: readonly Task[]): FinishedItem[] {
+  return tasks
+    .filter((t) => t.status === "done")
+    .map((t) => {
+      if (t.finishedAt === null) throw new Error(`已完成的任务 ${t.id} 没有完成时刻`);
+      return { id: t.id, finishedAt: t.finishedAt };
+    });
+}
+
+/** 进度文案模板里百分数的占位：百分数是与进度条同步平滑的文字节点（ui/SmoothPercent），按模板摆到它的位置上。 */
+const PERCENT_SLOT = "\u0000";
+
+/**
+ * 行右侧状态文字能出现的最宽字样：百分数满格；速度在每个单位下取四位整数（formatSpeed 不到 100 时带一位小数，
+ * 也是四个字符，小数点不比数字宽）；再加排队中的状态词。它们不可见地叠在状态文字下面，这一格按其中最宽的定宽：
+ * 速度每半秒换一次字、从排队轮到运行时这一格不变宽，左侧详情的省略位置不跟着抖。用真实字样撑宽而不写像素，换字体字号照样对。
+ */
+export const ROW_STATE_WIDEST: readonly string[] = [
+  ...[0, 1, 2, 3].map((unit) => PEEK_COPY.progress(percent(1), formatSpeed(1023 * 1024 ** unit))),
+  PEEK_COPY.queued,
+];
+
+/** 模板在百分数前后的两段文字。 */
+function aroundPercent(text: string): readonly [string, string] {
+  const parts = text.split(PERCENT_SLOT);
+  if (parts.length !== 2) throw new Error(`快览的进度文案里百分数应当恰好出现一次，实为 ${parts.length - 1} 次`);
+  return [parts[0], parts[1]];
 }
 
 /**
@@ -108,12 +141,16 @@ export function DownloadPeek() {
   const run = useRunner();
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
-  const mounted = useMountedRef();
+  const mounted = useMounted();
+  // 进度环换上来是弹入的小图标；减少动画时缩放一步到位，只淡入淡出
+  const ringMark = useReducedMotionConfig() === true ? popMark.reduced : popMark.glyph;
   // 浮层里的退场播完、节点离开布局的那一刻记一笔：浮层的布局键要在那次提交变，外框才在真正变矮时形变
   const [settled, markSettled] = useReducer((n: number) => n + 1, 0);
 
   const active = tasks.filter(isActiveTask);
-  const rows = peekRows(tasks);
+  // 只有列表按收尾留行；入口的环与计数、标题行的计数、底栏都按真实状态，与下载任务页同一口径
+  const finishing = useFinishing(completions(tasks), useCompletionHold());
+  const rows = peekRows(tasks, finishing);
   const failedCount = tasks.filter((t) => t.status === "failed").length;
   const finishedCount = tasks.filter(isFinishedTask).length;
   const layoutKey = peekLayoutKey(rows, settled, failedCount, finishedCount);
@@ -164,9 +201,9 @@ export function DownloadPeek() {
             <motion.span
               key="active"
               className={styles.glyphSlot}
-              initial={mounted.current ? { opacity: 0, scale: 0.8 } : false}
-              animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
-              exit={{ opacity: 0, transition: fade.out }}
+              initial={mounted.current ? ringMark.initial : false}
+              animate={ringMark.animate}
+              exit={ringMark.exit}
             >
               <ActiveGlyph tasks={tasks} />
             </motion.span>
@@ -196,7 +233,7 @@ export function DownloadPeek() {
         header={<PeekHead activeCount={active.length} />}
         footer={<PeekFoot failedCount={failedCount} finishedCount={finishedCount} layoutKey={layoutKey} onLeave={leaveTo} onClearFinished={() => actions.clearFinishedTasks()} />}
       >
-        <PeekList rows={rows} onCancel={cancel} onSettled={markSettled} />
+        <PeekList rows={rows} finishing={finishing} onCancel={cancel} onSettled={markSettled} />
       </Popover>
     </>
   );
@@ -215,9 +252,11 @@ function PeekHead({ activeCount }: { activeCount: number }) {
  * 浮层的主体：任务行或空态。随浮层打开挂载，打开时就在的行不单独播入场，开着期间新来的行淡入。
  * 行与列表的退场播完时调 onSettled：那一刻节点才离开布局，浮层要在那次提交量布局。
  */
-function PeekList({ rows, onCancel, onSettled }: { rows: readonly Task[]; onCancel: (task: Task) => void; onSettled: () => void }) {
-  const mounted = useMountedRef();
-  const list = useReflow<HTMLUListElement>();
+function PeekList({ rows, finishing, onCancel, onSettled }: { rows: readonly Task[]; finishing: ReadonlySet<string>; onCancel: (task: Task) => void; onSettled: () => void }) {
+  const mounted = useMounted();
+  // 走 morph：外框、主体下沿与底栏随同一次变化沿 morph 形变，行若走更快的 settle，删中间一行时下面的行先到位、
+  // 与还在收的下沿之间空出一道缝，插入时末行先滑出、被主体裁掉半截
+  const list = useReflow<HTMLUListElement>("morph");
   return (
     // 列表与空态先退后进：最后一行跟着列表一起淡出，空态再淡入；退场的列表不脱离布局，外框在换手的那一刻才形变
     <AnimatePresence mode="wait" onExitComplete={onSettled}>
@@ -230,7 +269,7 @@ function PeekList({ rows, onCancel, onSettled }: { rows: readonly Task[]; onCanc
              */}
             <AnimatePresence onExitComplete={onSettled}>
               {rows.map((task) => (
-                <PeekRow key={task.id} task={task} enter={mounted.current} onCancel={() => onCancel(task)} />
+                <PeekRow key={task.id} task={task} finishing={finishing.has(task.id)} enter={mounted.current} onCancel={() => onCancel(task)} />
               ))}
             </AnimatePresence>
           </ul>
@@ -310,20 +349,53 @@ function ActiveGlyph({ tasks }: { tasks: readonly Task[] }) {
   );
 }
 
-function PeekRow({ task, enter, onCancel }: { task: Task; enter: boolean; onCancel: () => void }) {
+/**
+ * finishing：刚完成、还在收尾。仍按进行中的样子画（同一个行、同一个 track），进度条与百分数推到满格；
+ * 取消键留在原位、尾部不变宽，但已不可用（任务已经完成）。焦点可能正停在它上面，所以保持可聚焦。
+ */
+function PeekRow({ task, finishing, enter, onCancel }: { task: Task; finishing: boolean; enter: boolean; onCancel: () => void }) {
+  // ul 的直接子项只能是 li，不能再包一层 Appear；减少动画时进出只留透明度，删掉的行不先缩一下再淡出
+  const insert = useInsertItem();
   const queued = task.status === "queued";
+  // 写出来的速度是平滑过、每秒最多换两次字的那个，不是每 100 ms 一跳的瞬时值
+  const live = useDisplaySpeed(task.speedBps);
+  // 任务一完成，状态层就把速度清零：收尾这一拍留着完成前最后显示的速度，行在原处推满、淡出，不在最后一拍跳成 0。
+  // 下载任务页的收尾行换成完成摘要，是因为那一行收尾后还留在已结束里；快览的行收尾完就走，这时换一次字只会闪一下
+  const [lastLive, setLastLive] = useState(live);
+  if (!finishing && live !== lastLive) setLastLive(live);
+  const speed = finishing ? lastLive : live;
+  const progress = finishing ? 1 : task.progress;
+  const track = progressTrack(task);
+  const [beforePercent, afterPercent] = aroundPercent(PEEK_COPY.progress(PERCENT_SLOT, formatSpeed(speed)));
   return (
-    <motion.li className={styles.row} initial={enter ? insertItem.initial : false} animate={insertItem.animate} exit={insertItem.exit}>
+    <motion.li className={styles.row} initial={enter ? insert.initial : false} animate={insert.animate} exit={insert.exit}>
       <div className={styles.rowHead}>
         <span className={styles.rowTitle} title={task.title}>
           {task.title}
         </span>
-        <IconButton icon="x" size="sm" label={PEEK_COPY.cancel} tooltipSide="left" onClick={onCancel} />
+        <IconButton icon="x" size="sm" label={PEEK_COPY.cancel} tooltipSide="left" disabled={finishing} focusableWhenDisabled onClick={onCancel} />
       </div>
-      <ProgressBar value={queued ? 0 : task.progress} tone={queued ? "muted" : "accent"} size="sm" track={progressTrack(task)} label={PEEK_COPY.rowProgress(task.title)} />
+      <ProgressBar value={queued ? 0 : progress} tone={queued ? "muted" : "accent"} size="sm" track={track} label={PEEK_COPY.rowProgress(task.title)} />
       <div className={styles.rowMeta}>
         <span className={styles.rowDetail}>{queued || task.phase === null ? task.detail : taskPhaseText(task.phase, "short")}</span>
-        <span className={styles.rowState}>{queued ? PEEK_COPY.queued : PEEK_COPY.progress(percent(task.progress), formatSpeed(task.speedBps))}</span>
+        <span className={styles.rowState}>
+          <span className={styles.rowStateText}>
+            {queued ? (
+              PEEK_COPY.queued
+            ) : (
+              <>
+                {beforePercent}
+                <SmoothPercent value={progress} track={track} />
+                {afterPercent}
+              </>
+            )}
+          </span>
+          {ROW_STATE_WIDEST.map((sample) => (
+            <span key={sample} className={styles.rowStateSample} aria-hidden="true">
+              {sample}
+            </span>
+          ))}
+        </span>
       </div>
     </motion.li>
   );

@@ -9,11 +9,12 @@
 // 内容区例外：滚动条和要选中的错误原文都不是可点击元素，放在拖动区里一按就成了拖窗。
 // 窗口级的东西（版本号、关窗能力、协议入口）由 App 经 FrameChrome 下发，视图只管自己的标题、内容和底栏。
 
-import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig, type Variants } from "framer-motion";
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
+import { createContext, useCallback, useContext, useLayoutEffect, useRef, type ReactNode, type Ref } from "react";
 import { Icon } from "../art/Icon";
-import { fade, springs } from "../lib/motion";
+import { stepPane, stepPaneFade } from "../lib/motion";
 import { playTrack, springTrack } from "../lib/slide";
+import { useMounted } from "../lib/useMounted";
 import { softDisabledProps } from "../ui/Button";
 import { Tooltip } from "../ui/Tooltip";
 import { BrandMark, StageArt } from "./art";
@@ -64,26 +65,6 @@ function WindowControls({ chrome }: { chrome: FrameChrome }) {
     </div>
   );
 }
-
-/** 换步时的横移距离（px），和首启向导一致。 */
-const STEP_SHIFT_PX = 16;
-
-/** 新页从前进方向一侧进来，旧页朝反方向退出；方向为 0 时只淡入淡出。 */
-const stepMotion: Variants = {
-  enter: (direction: StepDirection) => ({ opacity: 0, x: STEP_SHIFT_PX * direction }),
-  center: { opacity: 1, x: 0, transition: { ...springs.soft, opacity: fade.in } },
-  exit: (direction: StepDirection) => ({ opacity: 0, x: -STEP_SHIFT_PX * direction, transition: fade.out }),
-};
-
-/**
- * 减少动画时的换步：只淡入淡出。不能沿用 stepMotion 等根部 MotionConfig 去关位移：它把位移改成一步到位，
- * 旧页会先横跳 16px、还是不透明的，再花一个 fade.out 淡掉。
- */
-const stepFade: Variants = {
-  enter: { opacity: 0 },
-  center: { opacity: 1, transition: fade.in },
-  exit: { opacity: 0, transition: fade.out },
-};
 
 /** 视图把它标在两页里「同一块」内容上（值相同），换步时那两块跟着走，见 carryAcross。 */
 const CARRY_ATTR = "data-setup-carry";
@@ -156,7 +137,8 @@ function StepPane({ ref, direction, enter, children }: StepPaneProps) {
       ref={bind}
       className={styles.pane}
       custom={direction}
-      variants={reduced ? stepFade : stepMotion}
+      // 减少动画时只淡入淡出：根部 MotionConfig 把位移改成一步到位，照用 stepPane 的话旧页会先横跳 16px、不透明，再淡掉
+      variants={reduced ? stepPaneFade : stepPane}
       initial={enter ? "enter" : false}
       animate="center"
       exit="exit"
@@ -183,10 +165,7 @@ export function FrameShell({ step, direction, children }: FrameShellProps) {
   const chrome = useFrameChrome();
   const { copy, version } = chrome;
   // 骨架挂上时就在的那一页不播入场：窗口这时才显示出来，内容应当已经在位
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   return (
     <div className={styles.frame}>
       <aside className={styles.side} data-tauri-drag-region="deep">

@@ -3,7 +3,7 @@
 // 失败视图：五种原因说的都是对的，错误码能拿走，退路一条不少，标准安装程序只给走得通的两种。
 
 import { MotionConfig } from "framer-motion";
-import { act } from "react";
+import { act, type ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, stubPetalTokens } from "../../art/petals/test-canvas";
 import { ISSUES_URL } from "../../lib/app-info";
@@ -13,7 +13,7 @@ import App from "../App";
 import type { Existing, Failure, FailureCode } from "../contract";
 import { COPY, type SetupCopy } from "../copy";
 import { createFakeBridge, FAKE_PROBE, type FakeBridge } from "../fake-bridge";
-import { FrameChromeProvider, type FrameChrome } from "../Frame";
+import { Frame, FrameChromeProvider, FrameShell, type FrameChrome } from "../Frame";
 import { InShell } from "./test-chrome";
 import { replay, type FailureRecovery } from "../model";
 import { Failed, type FailedProps } from "./Failed";
@@ -37,6 +37,22 @@ function failed(overrides: Partial<FailedProps> = {}) {
           <InShell>
             <Failed copy={copy} failure={FAILURE} recovery="retry" standardInstaller={false} onRecover={noop} onOpenLog={noop} onReport={noop} onStandardInstaller={noop} onBack={noop} {...overrides} />
           </InShell>
+          <OverlayRoot />
+        </FrameChromeProvider>
+      </OverlayProvider>
+    </MotionConfig>
+  );
+}
+
+/** 能换步的骨架（InShell 里只有一页）：step 变了就是换步，旧页留在 DOM 里退场。 */
+function atStep(step: string, ui: ReactElement) {
+  return (
+    <MotionConfig reducedMotion="always">
+      <OverlayProvider>
+        <FrameChromeProvider value={chromeOf(zh)}>
+          <FrameShell step={step} direction={1}>
+            {ui}
+          </FrameShell>
           <OverlayRoot />
         </FrameChromeProvider>
       </OverlayProvider>
@@ -172,6 +188,21 @@ describe("按钮", () => {
     );
     keydown(document.body, "Escape");
     expect(onBack).not.toHaveBeenCalled();
+  });
+
+  it("换步后这一页淡出的那一会儿 Esc 不再触发返回：这时的 Esc 归新的一页", () => {
+    const onBack = vi.fn();
+    const noop = () => undefined;
+    const page = <Failed copy={zh} failure={FAILURE} recovery="retry" standardInstaller={false} onRecover={noop} onOpenLog={noop} onReport={noop} onStandardInstaller={noop} onBack={onBack} />;
+    view = render(atStep("failed", page));
+    keydown(document.body, "Escape");
+    expect(onBack).toHaveBeenCalledTimes(1);
+
+    view.rerender(atStep("next", <Frame title="下一页" />));
+    // 帧循环还没走：失败页还在 DOM 里，正在退场
+    expect(document.querySelector("[data-step-pane][inert] h1")?.textContent).toBe(zh.failed.reason.payload_exit.title);
+    keydown(document.body, "Escape");
+    expect(onBack).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -11,7 +11,7 @@ import type { InstanceSummary } from "../../../domain/adapt";
 import { formatBytes, formatCount, formatDate, formatRelative } from "../../../domain/format";
 import { useLoadingGate } from "../../../lib/loading-gate";
 import { fade, springs } from "../../../lib/motion";
-import { useReflow } from "../../../lib/reflow";
+import { REFLOW_PAUSED_ATTR, useReflow } from "../../../lib/reflow";
 import { cx } from "../../../lib/util";
 import type { Platform } from "../../../domain/types";
 import { useRunner } from "../../../shell/useRunner";
@@ -426,6 +426,9 @@ function DetailBody({ entry, detail, onTitle, onClose, onOpenDependency, fitInst
   const kind = resourceKindOf(detail.resource_type);
   const isPack = kind === "modpack";
   const switching = sourceSwitch !== null && sourceSwitch.switching;
+  // 画的这份详情不属于选中的平台：新平台的还在路上，或者没取到。两种情况下版本列表与右栏都是上一个平台的，
+  // 点选会记在旧平台上、安装会装错平台，所以按「是不是这个平台的」判，不按「是不是正在加载」判
+  const showingPrevious = sourceSwitch !== null && detail.platform !== sourceSwitch.value;
   // 指示照全站的加载门延迟出现，切换很快时不闪；新详情一到就淡出，不等最短停留：要等的内容已经换上了
   const switchGate = useLoadingGate(switching);
   // 等得久时，要被换掉的统计、正文与右栏淡下去，看得出它们是旧的、马上要换；到达后换上新内容并淡回来。分段控件不淡
@@ -489,14 +492,17 @@ function DetailBody({ entry, detail, onTitle, onClose, onOpenDependency, fitInst
           <div className={styles.dimmable} data-stale={stale || undefined}>
             <TabPanel tabsId={tabsId} value={tab}>
               {tab === "intro" ? (
-                <IntroTab detail={detail} onOpenDependency={onOpenDependency} />
+                // 换来源时整段重挂：正文的块按下标作 key，留着旧元素会被让位当成「同一段变高了」，段落与下面的小节一起滑
+                <IntroTab key={detailKey} detail={detail} onOpenDependency={onOpenDependency} />
               ) : (
-                <VersionsTab detail={detail} versions={versions} pinned={pinned} onPin={onPin} />
+                <VersionsTab detail={detail} versions={versions} pinned={pinned} onPin={onPin} showingPrevious={showingPrevious} />
               )}
             </TabPanel>
           </div>
         </div>
-        <div className={cx(styles.sideColumn, styles.dimmable)} data-stale={stale || undefined}>
+        {/* 新平台的详情到达前或没取到时，右栏画的是上一个平台的那一份：装下去就装错了平台。这段时间右栏整块点不到（与沿用上一份的版本列表同一口径），
+            来源切换控件与重试在左栏，焦点留在它们上面；切回原平台从缓存立刻换回来。底栏经 portal 挂在弹窗页脚、不在右栏里，主按钮由面板按 showingPrevious 禁用 */}
+        <div className={cx(styles.sideColumn, styles.dimmable)} data-stale={stale || undefined} inert={showingPrevious || undefined}>
           {isPack ? (
             <ModpackPanel
               detail={detail}
@@ -505,11 +511,22 @@ function DetailBody({ entry, detail, onTitle, onClose, onOpenDependency, fitInst
               pinned={pinned}
               onPin={onPin}
               online={online}
+              showingPrevious={showingPrevious}
               footerHost={footerHost}
               onClose={onClose}
             />
           ) : (
-            <InstallPanel detail={detail} versions={versions} pinned={pinned} onPin={onPin} fitInstance={fitInstance} online={online} footerHost={footerHost} onClose={onClose} />
+            <InstallPanel
+              detail={detail}
+              versions={versions}
+              pinned={pinned}
+              onPin={onPin}
+              fitInstance={fitInstance}
+              online={online}
+              showingPrevious={showingPrevious}
+              footerHost={footerHost}
+              onClose={onClose}
+            />
           )}
         </div>
       </div>
@@ -687,6 +704,8 @@ interface VersionsTabProps {
   versions: ResourceResult<ModVersionList>;
   pinned: string | null;
   onPin: (versionId: string | null) => void;
+  /** 整份详情是上一个平台的（新平台的详情在路上或没取到）：列表也是那边的。 */
+  showingPrevious: boolean;
 }
 
 /** 版本标签的骨架：「只看能装的」勾选行加列表行，与真实列表同形，到达时首行落在原处。 */
@@ -706,17 +725,23 @@ function VersionsSkeleton() {
   );
 }
 
-function VersionsTab({ detail, versions, pinned, onPin }: VersionsTabProps) {
+function VersionsTab({ detail, versions, pinned, onPin, showingPrevious }: VersionsTabProps) {
   const instances = useLauncherSelector((s) => s.instances);
   const manifest = useManifest();
   const [onlyFits, setOnlyFits] = useState<boolean | null>(null);
   const [shown, setShown] = useState(VERSION_PAGE);
+  // 「加载更多」在列表末尾一次接上一整页，新行出现在按钮原来的位置。这一批的让位暂停：按钮与截断说明直接落到新的末尾，
+  // 不从指针下面滑过新来的几十行（途中还点得到）。提交之后就撤掉开关，之后的变化照常滑
+  const [paging, setPaging] = useState(false);
+  useEffect(() => {
+    if (paging) setPaging(false);
+  }, [paging]);
   // 换来源后新平台的列表到达前接着显示上一份：不塌成骨架再撑开，滚动位置也不被夹回。上一份是别的平台的版本，
   // 这段时间点不到；等得久了淡下去，新列表一到原地换上
   const kept = useKept(versions);
   const gate = useLoadingGate(versions.status === "loading" && !kept.stale);
   const staleGate = useLoadingGate(kept.stale);
-  // 筛选、加载更多改变列表高度时，「加载更多」与截断说明从原位置滑过去
+  // 筛选改变列表高度时，「加载更多」与截断说明从原位置滑过去
   const reflow = useReflow<HTMLDivElement>();
   const releases = manifest.status === "ready" ? manifest.data.versions.filter((v) => v.release_type === "release").map((v) => v.id) : null;
 
@@ -737,10 +762,15 @@ function VersionsTab({ detail, versions, pinned, onPin }: VersionsTabProps) {
             detail={detail}
             data={kept.data}
             stale={kept.stale}
+            showingPrevious={showingPrevious}
             dim={kept.stale && staleGate.view === "skeleton"}
             filter={{ value: onlyFits, onChange: setOnlyFits }}
             shown={shown}
-            onMore={() => setShown((n) => n + VERSION_PAGE)}
+            onMore={() => {
+              setShown((n) => n + VERSION_PAGE);
+              setPaging(true);
+            }}
+            paging={paging}
             releases={releases}
             instances={instances}
             pinned={pinned}
@@ -758,11 +788,18 @@ interface VersionsListProps {
   data: ModVersionList;
   /** 显示的是上一份（另一个平台的）列表，当前这份还在路上：点不到。 */
   stale: boolean;
+  /**
+   * 整份详情还是上一个平台的（新平台的详情在路上或没取到），列表随它也是那边的：点不到。
+   * 点选会按旧平台记下选定的版本、发出旧平台的兼容判定，新详情一到就被丢掉。
+   */
+  showingPrevious: boolean;
   /** 等得久了，旧列表淡下去。 */
   dim: boolean;
   filter: { value: boolean | null; onChange: (next: boolean) => void };
   shown: number;
   onMore: () => void;
+  /** 这一次提交是「加载更多」接上的一页：让位暂停。 */
+  paging: boolean;
   releases: readonly string[] | null;
   instances: readonly InstanceSummary[];
   pinned: string | null;
@@ -770,7 +807,7 @@ interface VersionsListProps {
   listRef: RefCallback<HTMLDivElement>;
 }
 
-function VersionsList({ detail, data, stale, dim, filter, shown, onMore, releases, instances, pinned, onPin, listRef }: VersionsListProps) {
+function VersionsList({ detail, data, stale, showingPrevious, dim, filter, shown, onMore, paging, releases, instances, pinned, onPin, listRef }: VersionsListProps) {
   const all = data.versions;
   const anyFits = all.some((v) => fitsAnyInstance(v, instances, detail.resource_type));
   // 默认勾选「只看能装进我的实例的版本」；一个能装的都没有时默认不勾，免得列表是空的
@@ -779,7 +816,15 @@ function VersionsList({ detail, data, stale, dim, filter, shown, onMore, release
   const showLoaders = detail.resource_type === "mod" || detail.resource_type === "modpack";
 
   return (
-    <div ref={listRef} className={cx(styles.versions, styles.dimmable)} data-stale={dim || undefined} inert={stale || undefined} aria-busy={stale || undefined}>
+    <div
+      ref={listRef}
+      className={cx(styles.versions, styles.dimmable)}
+      data-stale={dim || undefined}
+      inert={stale || showingPrevious || undefined}
+      // 详情在加载时外层整块已标 aria-busy；没取到时什么也不在加载，这里只认自己的列表在路上
+      aria-busy={stale || undefined}
+      {...(paging ? { [REFLOW_PAUSED_ATTR]: "" } : {})}
+    >
       <Checkbox checked={filtering} onChange={filter.onChange} label={DETAIL_COPY.onlyFits} />
       <Appear>
         {list.length === 0 ? (
@@ -830,7 +875,7 @@ function VersionsList({ detail, data, stale, dim, filter, shown, onMore, release
         )}
       </Appear>
       {list.length > shown && (
-        <Button variant="secondary" size="sm" onClick={onMore}>
+        <Button className={styles.loadMore} variant="secondary" size="sm" onClick={onMore}>
           {DETAIL_COPY.loadMore}
         </Button>
       )}

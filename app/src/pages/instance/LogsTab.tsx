@@ -2,7 +2,7 @@
 // 时间线上可回滚的给回滚按钮，不可回滚的如实写原因；回滚不确认，它本身会再记一条可追溯的回滚记录。
 
 import { motion } from "framer-motion";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { ACTION_ERROR, phaseLabel } from "../../copy/flows";
 import { logLineFromDto, type InstanceSummary } from "../../domain/adapt";
@@ -12,6 +12,7 @@ import type { LogLine } from "../../domain/types";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { insertItem } from "../../lib/motion";
 import { useReflow } from "../../lib/reflow";
+import { useMounted } from "../../lib/useMounted";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
@@ -168,9 +169,17 @@ function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
   // 卡片恒为无内边距：加载占位照控制台的框架画，换成控制台时只有日志区由骨架交叉淡化成日志，头部不变高、不换底色
   return (
     <Card padding="none" className={styles.console}>
-      <Loadable view={gate.view} skeleton={<ConsoleSkeleton slow={gate.slow} />} className={styles.consoleFill} contentClassName={styles.consoleFill}>
+      {/* 占位里的卡头整层对读屏隐藏：加载期间在占位外面另给读屏一个同名标题，内容到了由内容自己的卡头接替 */}
+      {gate.view !== "content" && <h3 className={styles.consoleHeading}>{LOGS_COPY.consoleTitle}</h3>}
+      <Loadable view={gate.view} skeleton={<ConsoleSkeleton />} className={styles.consoleFill} contentClassName={styles.consoleFill}>
         {content}
       </Loadable>
+      {/* 慢提示同理放在占位外面，贴在卡片底部 */}
+      {gate.slow && (
+        <div className={styles.consoleSlow}>
+          <SlowHint slow />
+        </div>
+      )}
     </Card>
   );
 }
@@ -179,7 +188,7 @@ function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
 const LEVEL_COUNT_DIGITS = 4;
 
 /** 控制台的加载占位：与控制台同一套框架（头部的图标、标题、副标题一行、两组筛选，下面是日志区的行）。 */
-function ConsoleSkeleton({ slow }: { slow: boolean }) {
+function ConsoleSkeleton() {
   return (
     <>
       <div className={styles.consoleSkeletonHead}>
@@ -191,7 +200,6 @@ function ConsoleSkeleton({ slow }: { slow: boolean }) {
       </div>
       <div className={styles.consoleSkeletonLines}>
         <Skeleton shape="text" lines={SKELETON_LINES} />
-        <SlowHint slow={slow} />
       </div>
     </>
   );
@@ -226,20 +234,14 @@ function HistoryCard({ queryId, ops }: { queryId: string | null; ops: InstanceOp
   const items = useMemo(() => (pair === null ? null : historyItems(pair.events, pair.checks, LOGS_COPY)), [pair?.events, pair?.checks]);
   const shownItems = gate.view === "content" ? items : null;
   const rollbackable = shownItems === null ? 0 : shownItems.filter((i) => i.canRollback).length;
-  // 加载中先占住副标题那一行，头部不因文案晚到而变高；读不出时没有这一行
-  const subtitle =
-    shownItems !== null
-      ? shownItems.length > 0
-        ? LOGS_COPY.historySubtitle(shownItems.length, rollbackable)
-        : LOGS_COPY.historyEmptySubtitle
-      : gate.view === "content"
-        ? undefined
-        : null;
+  // 副标题那一行一直占着：加载中先空着，文案到了淡入；读不出时也空着（重试读到后文案照样回来），
+  // 卡头不在报错的那一刻从两行缩成一行，下面的错误块不上移
+  const subtitle = shownItems === null ? null : shownItems.length > 0 ? LOGS_COPY.historySubtitle(shownItems.length, rollbackable) : LOGS_COPY.historyEmptySubtitle;
 
   return (
     <Card className={styles.historyCard}>
       <CardHeader icon="history" title={LOGS_COPY.historyTitle} subtitle={subtitle} />
-      <Loadable view={gate.view} skeleton={<HistorySkeleton slow={gate.slow} />} className={styles.historyBody} contentClassName={styles.historyBody}>
+      <Loadable view={gate.view} skeleton={<HistorySkeleton />} className={styles.historyBody} contentClassName={styles.historyBody}>
         {() => {
           if (shownItems === null) {
             if (error === null || error.status !== "error") throw new Error("加载门放行时变更历史不可能还在读取");
@@ -249,45 +251,43 @@ function HistoryCard({ queryId, ops }: { queryId: string | null; ops: InstanceOp
           return <Timeline items={shownItems} limit={limit} onMore={() => setLimit((n) => n + HISTORY_PAGE)} queryId={queryId} ops={ops} />;
         }}
       </Loadable>
+      {/* 占位整层对读屏隐藏，慢提示放在它外面，位置仍在骨架条目下方 */}
+      <SlowHint slow={gate.slow} />
     </Card>
   );
 }
 
 /** 变更历史的加载占位：与时间线同一套条目框架（节点圆点、连线、标题与元信息两行）。 */
-function HistorySkeleton({ slow }: { slow: boolean }) {
+function HistorySkeleton() {
   return (
-    <>
-      <div className={styles.timeline}>
-        {Array.from({ length: HISTORY_SKELETON_ITEMS }, (_, i) => (
-          <div key={i} className={styles.tlItem}>
-            <Skeleton shape="block" width={28} height={28} radius="pill" />
-            <div className={styles.tlBody}>
-              <span className={styles.tlTitle}>
-                <Skeleton shape="text" width={168} />
-              </span>
-              <span className={styles.tlMeta}>
-                <Skeleton shape="text" width={112} />
-              </span>
-            </div>
+    <div className={styles.timeline}>
+      {Array.from({ length: HISTORY_SKELETON_ITEMS }, (_, i) => (
+        <div key={i} className={styles.tlItem}>
+          <Skeleton shape="block" width={28} height={28} radius="pill" />
+          <div className={styles.tlBody}>
+            <span className={styles.tlTitle}>
+              <Skeleton shape="text" width={168} />
+            </span>
+            <span className={styles.tlMeta}>
+              <Skeleton shape="text" width={112} />
+            </span>
           </div>
-        ))}
-      </div>
-      <SlowHint slow={slow} />
-    </>
+        </div>
+      ))}
+    </div>
   );
 }
 
 function Timeline({ items, limit, onMore, queryId, ops }: { items: readonly HistoryItem[]; limit: number; onMore(): void; queryId: string | null; ops: InstanceOps }) {
   // 时间线挂上之后才出现的条目（回滚、装卸 Mod 记下的新事件，「显示更早」展开的一批）淡入并从略小处落到位；
   // 挂载时就在的跟着卡片内容一起淡入，不再单独入场
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   // 新事件插到最上面、被撤销的那条掉了按钮变矮时，其余条目从原位置滑过去；滚动区里的锚定由让位自己按滚动量扣除
   const reflow = useReflow<HTMLOListElement>();
+  // 「显示更早」在列表外面、是滚动区的直接子项：列表变高变矮时它跟着条目一起滑，不一帧跳过去
+  const scroll = useReflow<HTMLDivElement>();
   return (
-    <div className={styles.timelineScroll}>
+    <div ref={scroll} className={styles.timelineScroll}>
       <ol ref={reflow} className={styles.timeline}>
         {items.slice(0, limit).map((item) => (
           <TimelineItem key={item.event.id} item={item} entering={mounted.current} queryId={queryId} ops={ops} />

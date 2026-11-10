@@ -1,7 +1,8 @@
 // 键值对：两列网格，键在左（次级色），值在右（中等字重，右对齐，单行省略）。
 // 用户会复制的值（路径、UUID、地址）可以选中，并在右侧附一个复制按钮。
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { cx } from "../lib/util";
 import { IconButton } from "./IconButton";
 import styles from "./KV.module.css";
@@ -28,34 +29,68 @@ export interface CopyButtonProps {
 }
 
 /**
+ * 正在原位反馈的那一个复制按钮。剪贴板里只有最近复制的那一段：另一个按钮复制成功时，这里的「已复制」随即复原，
+ * 一组路径里连着复制两行时不会同时挂着两个对勾、两个气泡。
+ */
+let feedback: { owner: object; end: () => void } | null = null;
+
+/**
  * 复制按钮：复制成功后图标换成对勾、名称换成「已复制」，停留 feedbackMs 后复原。
  * 复制类操作一律原位反馈，不弹成功通知。对勾弹出、复制图标淡回由 IconButton 的图标位做（挂载时就在的图标不播入场），
  * 这里不再给图标另加动画：叠两层会让对勾从 0.36 倍、近乎透明处起跳，被换下的图标也来不及淡出就没了。
- * 反馈期间强制显示提示：指针按下时悬停出来的提示已经收起，只换名称的话鼠标用户看不到「已复制」。
+ * 指针点的那一次强制显示「已复制」提示：按下时悬停出来的提示已经收起，只换名称的话鼠标用户看不到。
+ * 键盘触发的不强制：聚焦时打开的提示一直开着，名称换了它就原地换字；强制显示在复原时会把它一起收起，焦点还在按钮上提示却没了。
  */
 export function CopyButton({ text, label, copiedLabel = "已复制", onCopy, feedbackMs, disabled = false }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
+  const [tipOpen, setTipOpen] = useState(false);
   const timer = useRef<number | undefined>(undefined);
   const mounted = useRef(true);
+  const [owner] = useState(() => ({}));
+
+  // 复原分两次提交：先收起气泡，再换回原名称。同一次渲染里一起变时，正在淡出的气泡会先翻成原名称、按新宽度重新居中再淡掉
+  const end = useCallback(() => {
+    window.clearTimeout(timer.current);
+    if (feedback !== null && feedback.owner === owner) feedback = null;
+    flushSync(() => setTipOpen(false));
+    setCopied(false);
+  }, [owner]);
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
       window.clearTimeout(timer.current);
+      if (feedback !== null && feedback.owner === owner) feedback = null;
     };
-  }, []);
+  }, [owner]);
 
-  const copy = () => {
+  const copy = (event: MouseEvent<HTMLButtonElement>) => {
+    // 指针点出来的 click 带点击次数；回车、空格触发的是 0
+    const byPointer = event.detail > 0;
     void onCopy(typeof text === "function" ? text() : text).then((written) => {
       if (written === false || !mounted.current) return;
+      if (feedback !== null && feedback.owner !== owner) feedback.end();
+      feedback = { owner, end };
       window.clearTimeout(timer.current);
       setCopied(true);
-      timer.current = window.setTimeout(() => setCopied(false), feedbackMs);
+      if (byPointer) setTipOpen(true);
+      timer.current = window.setTimeout(end, feedbackMs);
     });
   };
 
-  return <IconButton icon={copied ? "check" : "copy"} label={copied ? copiedLabel : label} size="sm" disabled={disabled} onClick={copy} tooltipOpen={copied} />;
+  return (
+    <IconButton
+      icon={copied ? "check" : "copy"}
+      label={copied ? copiedLabel : label}
+      size="sm"
+      disabled={disabled}
+      // 按下时提示照例收起；强制显示也跟着归位，停留期间再点一次，复制成功后气泡才能重新弹出来
+      onPointerDown={() => setTipOpen(false)}
+      onClick={copy}
+      tooltipOpen={tipOpen}
+    />
+  );
 }
 
 export interface KVRow {

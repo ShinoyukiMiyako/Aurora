@@ -465,4 +465,133 @@ describe("换角时旧角那一栈原地淡出", () => {
     expect(ghostFrom(second)).toBeCloseTo(tweenAt(fade.in, 0.05), 6);
     expect(ghostFrom(second)).toBeLessThan(0.9);
   });
+
+  /** 容器在新角淡入的起点透明度：脚本只在换角时写，平时样式表按 0 算。 */
+  const enterFrom = () => Number(region().style.getPropertyValue("--toasts-enter-from"));
+  /** 让 performance.now 停在 clock 上；clock 为 null 时照常走。返回调钟的函数。 */
+  function holdClock() {
+    const real = performance.now.bind(performance);
+    let clock: number | null = null;
+    vi.spyOn(performance, "now").mockImplementation(() => (clock === null ? real() : clock));
+    onTestFinished(() => {
+      vi.mocked(performance.now).mockRestore();
+    });
+    return {
+      start: () => {
+        clock = real();
+      },
+      advance: (ms: number) => {
+        if (clock === null) throw new Error("先 start 再推进");
+        clock += ms;
+      },
+      release: () => {
+        clock = null;
+      },
+    };
+  }
+
+  it("接力换回原角（开、关、再开，各隔几拍）：原角上没淡完的拷贝拿掉，容器从它此刻的透明度起淡入，不叠两层交叉淡化", async () => {
+    stubFades();
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    await clearToasts();
+    act(() => launcher.actions.toast("error", "常驻的失败"));
+    await flush();
+    const clock = holdClock();
+
+    clock.start();
+    act(() => shell.openCreateInstance());
+    await observed();
+    const [first] = ghosts();
+    expect([first.dataset.corner, ghostFrom(first)]).toEqual(["home", 1]);
+    expect(enterFrom()).toBe(0);
+
+    // 40 ms 后关掉：回到右下，右下那份拷贝才淡了一点，拿掉它，容器从它此刻的透明度起淡入
+    clock.advance(40);
+    act(() => shell.closeCreateInstance());
+    await observed();
+    expect(first.isConnected).toBe(false);
+    const homeFrom = 1 - tweenAt(fade.out, 0.04);
+    expect(enterFrom()).toBeCloseTo(homeFrom, 6);
+    expect(enterFrom()).toBeGreaterThan(0.5);
+    const [second] = ghosts();
+    expect(second.dataset.corner).toBe("aside");
+    expect(ghostFrom(second)).toBeCloseTo(tweenAt(fade.in, 0.04), 6);
+
+    // 再过 30 ms 又开一个：左上那份同样被接过去；右下的容器从 homeFrom 起淡入了 30 ms，新拷贝从那里起淡出
+    clock.advance(30);
+    act(() => shell.openCreateInstance());
+    await observed();
+    clock.release();
+    expect(second.isConnected).toBe(false);
+    expect(enterFrom()).toBeCloseTo(tweenAt(fade.in, 0.04) * (1 - tweenAt(fade.out, 0.03)), 6);
+    const [third] = ghosts();
+    expect(third.dataset.corner).toBe("home");
+    expect(ghostFrom(third)).toBeCloseTo(homeFrom + (1 - homeFrom) * tweenAt(fade.in, 0.03), 6);
+  });
+
+  it("换回原角时栈里已没有留下的通知：原角那份拷贝照常淡完，不一下子消失", async () => {
+    stubFades();
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    await clearToasts();
+    let id = "";
+    act(() => {
+      id = launcher.actions.toast("error", "常驻的失败");
+    });
+    await flush();
+    const clock = holdClock();
+
+    clock.start();
+    act(() => shell.openCreateInstance());
+    await observed();
+    const [first] = ghosts();
+    // 关掉这条：它被抽出布局、自己在淡出，栈里没有留下的了（jsdom 不做布局：给出 popLayout 量尺寸时要读的宽高）
+    const [toast] = [...region().children] as HTMLElement[];
+    toast.style.width = "340px";
+    toast.style.height = "60px";
+    act(() => launcher.actions.dismissToast(id));
+    expect(toast.hasAttribute("data-motion-pop-id")).toBe(true);
+    clock.advance(40);
+    act(() => shell.closeCreateInstance());
+    await observed();
+    clock.release();
+    expect(first.isConnected).toBe(true);
+    expect(enterFrom()).toBe(0);
+  });
+
+  it("刚进来、入场还没走完的通知：拷贝照它此刻实际的透明度，不照内联样式里入场起点的 0", async () => {
+    stubFades();
+    bootOverrides(ipc, { instances: [instanceDto("生存")] });
+    await mount();
+    await clearToasts();
+    act(() => launcher.actions.toast("error", "刚进来的"));
+    await flush();
+    // 浏览器里入场的透明度由 Web Animations 驱动，内联样式停在入场起点；jsdom 里 framer-motion 走 JS，这里还原成浏览器里的样子
+    const [toast] = [...region().children] as HTMLElement[];
+    toast.style.opacity = "0";
+    const real = window.getComputedStyle.bind(window);
+    vi.spyOn(window, "getComputedStyle").mockImplementation((el, pseudo) => {
+      const computed = real(el, pseudo);
+      if (el !== toast) return computed;
+      return new Proxy(computed, {
+        get: (target, key) => {
+          if (key === "opacity") return "0.4";
+          const value: unknown = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    });
+    onTestFinished(() => {
+      vi.mocked(window.getComputedStyle).mockRestore();
+    });
+
+    act(() => shell.openCreateInstance());
+    await observed();
+    const [ghost] = ghosts();
+    const copy = ghost.firstElementChild;
+    if (!(copy instanceof HTMLElement)) throw new Error("拷贝里没有通知");
+    expect(copy.textContent).toContain("刚进来的");
+    expect(copy.style.opacity).toBe("0.4");
+  });
 });

@@ -6,10 +6,10 @@ import { act, type ReactNode } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { render, waitForFrames, type Rendered } from "../test/dom";
 import { Appear } from "./Appear";
-import { Banner } from "./Banner";
+import { Banner, BannerSlot } from "./Banner";
 import { Bento } from "./Bento";
 import { Card } from "./Card";
-import { Page, PageArrivalProvider } from "./Page";
+import { Page, PageArrivalProvider, usePageFirstFrame } from "./Page";
 import { PageHeader } from "./PageHeader";
 import { SectionTitle } from "./SectionTitle";
 
@@ -114,6 +114,36 @@ describe("页面入场", () => {
       ["2", "最近"],
       ["3", "日历"],
       ["4", "资讯"],
+    ]);
+  });
+
+  it("Bento 按子项各自的占号之和占号：里面空着的 Appear 与 BannerSlot 不替它多占号，有子项的 Appear 占一个", () => {
+    const tip = true;
+    view = render(
+      <MotionConfig reducedMotion="never">
+        <Page>
+          <Bento>
+            <Card span={6}>问候</Card>
+            <Appear>{false}</Appear>
+            <BannerSlot>{null}</BannerSlot>
+            <Card span={6}>继续</Card>
+          </Bento>
+          <Card>最近</Card>
+          <Bento>
+            <Appear>{tip && <Card key="tip">提示</Card>}</Appear>
+            <Card span={6}>日历</Card>
+          </Bento>
+          <Card>资讯</Card>
+        </Page>
+      </MotionConfig>,
+    );
+    expect(entrances().map(([, index, text]) => [index, text])).toEqual([
+      ["0", "问候"],
+      ["1", "继续"],
+      ["2", "最近"],
+      ["3", "提示"],
+      ["4", "日历"],
+      ["5", "资讯"],
     ]);
   });
 
@@ -267,6 +297,36 @@ describe("页面入场", () => {
     if (late === undefined) throw new Error("晚到的横幅没有出现");
     expect(late.style.opacity).toBe("");
     expect(late.parentElement?.style.opacity).toBe("0");
+  });
+
+  it("usePageFirstFrame：首帧之内挂上的为真（嵌在区块里也是），首帧之后挂上的为假，只在挂载那一刻读；页面外为假", async () => {
+    function Probe({ name }: { name: string }) {
+      return <span data-probe={name}>{String(usePageFirstFrame())}</span>;
+    }
+    const probe = (name: string) => view?.container.querySelector(`[data-probe="${name}"]`)?.textContent;
+    const tree = (late: boolean) => (
+      <MotionConfig reducedMotion="never">
+        <Page>
+          <Card>
+            <Probe name="nested" />
+          </Card>
+          {late && (
+            <Card>
+              <Probe name="late" />
+            </Card>
+          )}
+        </Page>
+        <Probe name="outside" />
+      </MotionConfig>
+    );
+    view = render(tree(false));
+    expect(probe("nested")).toBe("true");
+    expect(probe("outside")).toBe("false");
+    await nextFrame();
+    view.rerender(tree(true));
+    expect(probe("late")).toBe("false");
+    // 首帧过去之后重渲染，挂载时读到的值不变
+    expect(probe("nested")).toBe("true");
   });
 
   it("减少动画：没有区块位移与错开", () => {

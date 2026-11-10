@@ -24,7 +24,10 @@
   --to-l: 25%;
 }
 
-/* 渐变底画在 art 层自己身上：远程图或平铺淡入期间它垫在下面，不随卡面根的形态一起换掉 */
+/*
+ * 渐变底画在 art 层自己身上：远程图或平铺淡入期间它垫在下面，不随卡面根的形态一起换掉。
+ * 色相取这一层自己的 --hue：换了色相时新旧两层各是各的颜色，交叉淡化
+ */
 .art {
   background: linear-gradient(
     135deg,
@@ -48,8 +51,21 @@
   height: 100%;
 }
 
-/* 盖在旧层上的媒体层连同压暗整层淡入；身份方块同时淡出，淡完由组件卸下 */
+/*
+ * 盖在旧层上的新层（媒体晚到，或换了色相、方块、图片）连同压暗整层淡入；媒体盖上来时身份方块同时淡出，淡完由组件卸下。
+ * 往下换反过来：旧层叠在垫到下面的新形态上淡出，同一时长同一曲线；远程图淡出时身份方块同时淡入
+ */
+.art[data-reveal],
 .media[data-reveal] {
+  animation: reveal var(--sk-dur-reveal) var(--sk-ease-out);
+}
+
+.art[data-conceal],
+.media[data-conceal] {
+  animation: conceal var(--sk-dur-reveal) var(--sk-ease-out) forwards;
+}
+
+.identity[data-arriving] {
   animation: reveal var(--sk-dur-reveal) var(--sk-ease-out);
 }
 
@@ -58,7 +74,17 @@
 }
 
 /* 减少动画：只保留不超过 200ms 的透明度淡入淡出 */
+:global([data-sk-reduced]) .art[data-reveal],
 :global([data-sk-reduced]) .media[data-reveal] {
+  animation: reveal var(--sk-dur-in) var(--sk-ease-out);
+}
+
+:global([data-sk-reduced]) .art[data-conceal],
+:global([data-sk-reduced]) .media[data-conceal] {
+  animation: conceal var(--sk-dur-in) var(--sk-ease-out) forwards;
+}
+
+:global([data-sk-reduced]) .identity[data-arriving] {
   animation: reveal var(--sk-dur-in) var(--sk-ease-out);
 }
 

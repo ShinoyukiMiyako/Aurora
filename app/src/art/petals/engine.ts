@@ -131,9 +131,11 @@ export class PetalEngine {
    * 二级降级定格后的收尾：petals 是补投的静态花瓣，按环境层的淡入曲线浮现；turning 是定格时比静态散落下限还窄、
    * 被夹到下限的几片，沿 settle 弹簧从定格姿态转过去。静态散落本不跑帧回调，只在这一小段逐帧重画，淡完就停：
    * settle 弹簧在淡入的 480 ms 里早已落定，到时直接按夹过的 sx 画不会跳。
-   * since 在收尾的第一帧取帧时间；t 是此刻距 since 的秒数。
+   * t 是收尾已经播了的秒数，从定格那一拍起算：那一拍已按 t = 0 画过定格姿态，下一帧就该按帧间隔往前走，
+   * 窄花瓣才是带着翻面速度接上的，而不是先停一帧。last 是上一次推进 t 的帧时间；暂停时清空，暂停期间不计时，
+   * 恢复后的第一帧只记下帧时间、按停下时的姿态再画一次。
    */
-  private arriving: { petals: ReadonlySet<StillPetal>; turning: ReadonlyMap<StillPetal, FlipTurn>; since: number | null; t: number } | null = null;
+  private arriving: { petals: ReadonlySet<StillPetal>; turning: ReadonlyMap<StillPetal, FlipTurn>; t: number; last: number | null } | null = null;
   private arrivalRaf: number | null = null;
   private simT = 0;
   private last: number | null = null;
@@ -284,8 +286,9 @@ export class PetalEngine {
       this.raf = null;
     }
     this.listen(!still);
-    // 收尾途中打开减少动画：转向属于缩放，和淡入一起直接到位
-    this.settleArrivals(bounds !== null && still && !this.inputs.paused && !this.inputs.reduced);
+    // 收尾途中暂停（失焦时窗口仍看得见）：停在此刻的姿态，恢复后接着播，不一帧跳到终态。
+    // 打开减少动画：转向属于缩放，和淡入一起直接到位。没有尺寸时什么也看不见，同样直接到位
+    this.settleArrivals(bounds === null || !still || this.inputs.reduced ? "finish" : this.inputs.paused ? "hold" : "play");
     if (!run && bounds !== null) this.drawStillFrame(bounds);
   }
 
@@ -306,10 +309,11 @@ export class PetalEngine {
     this.drawLayers(layers);
     this.recordCost(this.clock() - started);
     const downgrade = this.governor.sample(now);
-    if (downgrade !== null) this.applyDowngrade(downgrade, layers, bounds);
+    if (downgrade !== null) this.applyDowngrade(downgrade, layers, bounds, now);
   };
 
-  private applyDowngrade(downgrade: GovernorDowngrade, layers: Petal[][], bounds: Bounds): void {
+  /** now：触发降级的这一拍的帧时间，二级降级的收尾从这一拍起算。 */
+  private applyDowngrade(downgrade: GovernorDowngrade, layers: Petal[][], bounds: Bounds, now: number): void {
     if (downgrade.level === 1) {
       const counts = layerCounts(this.inputs.tier, 1);
       this.leaving = { layers: layers.map((petals, li) => petals.slice(counts[li])), since: this.simT };
@@ -322,22 +326,27 @@ export class PetalEngine {
       const added = still.flat().filter((p) => !kept.has(p));
       this.still = still;
       this.leaving = null;
-      this.arriving = added.length === 0 && frozen.turning.size === 0 ? null : { petals: new Set(added), turning: frozen.turning, since: null, t: 0 };
+      this.arriving = added.length === 0 && frozen.turning.size === 0 ? null : { petals: new Set(added), turning: frozen.turning, t: 0, last: now };
     }
     this.sync();
     this.onDowngrade({ tier: this.inputs.tier, level: downgrade.level, windowMediansMs: downgrade.windowMediansMs });
   }
 
-  /** 定格后的收尾还没播完：能播就逐帧重画到播完；暂停、没有尺寸或减少动画时直接到位，不留任何帧回调。 */
-  private settleArrivals(play: boolean): void {
-    if (this.arriving === null) return;
-    if (play) {
+  /**
+   * 定格后的收尾还没播完：play 逐帧重画到播完；hold 停在此刻的姿态，等恢复再接着播；finish 直接到位。
+   * hold 与 finish 都不留任何帧回调。
+   */
+  private settleArrivals(mode: "play" | "hold" | "finish"): void {
+    const arriving = this.arriving;
+    if (arriving === null) return;
+    if (mode === "play") {
       if (this.arrivalRaf === null) this.arrivalRaf = this.scheduler.request(this.onArrivalFrame);
       return;
     }
     if (this.arrivalRaf !== null) this.scheduler.cancel(this.arrivalRaf);
     this.arrivalRaf = null;
-    this.arriving = null;
+    if (mode === "hold") arriving.last = null;
+    else this.arriving = null;
   }
 
   private readonly onArrivalFrame = (now: number): void => {
@@ -345,13 +354,12 @@ export class PetalEngine {
     const still = this.still;
     const bounds = this.bounds;
     if (arriving === null || still === null || bounds === null) throw new Error("花瓣收尾帧在没有待收尾的静态花瓣时运行");
-    arriving.since ??= now;
-    const t = (now - arriving.since) / 1000;
-    if (t >= ambientFade.in.duration) {
+    if (arriving.last !== null) arriving.t += (now - arriving.last) / 1000;
+    arriving.last = now;
+    if (arriving.t >= ambientFade.in.duration) {
       this.arriving = null;
       this.arrivalRaf = null;
     } else {
-      arriving.t = t;
       this.arrivalRaf = this.scheduler.request(this.onArrivalFrame);
     }
     this.drawStillPetals(still, bounds);

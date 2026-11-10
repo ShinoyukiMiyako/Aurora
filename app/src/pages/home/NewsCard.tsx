@@ -79,28 +79,30 @@ export function NewsCard({ span }: { span: ResponsiveValue }) {
     const items = latestNews(feed.items, count);
     if (items.length === 0) return <EmptyState icon="news" compact title={HOME_COPY.newsEmpty} />;
     return (
-      <List className={s.newsList}>
-        {items.map((item) => (
-          <ListRow
-            key={item.id}
-            leading={<Thumb url={item.thumbnail_url} kind="news" hue={hueOf(item.id)} size={40} />}
-            title={item.title}
-            meta={item.summary}
-            trailing={
-              <span className={s.newsMeta}>
-                <Tag tone={NEWS_TAG_TONE[item.tag]} size="sm">
-                  {NEWS_TAG_LABEL[item.tag]}
-                </Tag>
-                <span className={s.newsWhen}>{formatRelative(item.date, now)}</span>
-              </span>
-            }
-            onClick={() => {
-              setCurrent(item);
-              setOpen(true);
-            }}
-          />
-        ))}
-      </List>
+      <div className={s.newsList}>
+        <List>
+          {items.map((item) => (
+            <ListRow
+              key={item.id}
+              leading={<Thumb url={item.thumbnail_url} kind="news" hue={hueOf(item.id)} size={40} />}
+              title={item.title}
+              meta={item.summary}
+              trailing={
+                <span className={s.newsMeta}>
+                  <Tag tone={NEWS_TAG_TONE[item.tag]} size="sm">
+                    {NEWS_TAG_LABEL[item.tag]}
+                  </Tag>
+                  <span className={s.newsWhen}>{formatRelative(item.date, now)}</span>
+                </span>
+              }
+              onClick={() => {
+                setCurrent(item);
+                setOpen(true);
+              }}
+            />
+          ))}
+        </List>
+      </div>
     );
   };
 

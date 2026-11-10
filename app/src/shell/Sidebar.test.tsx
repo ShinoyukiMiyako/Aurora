@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
+import { MotionConfig } from "framer-motion";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -264,11 +265,18 @@ function skeleton(selector: string): string {
   return domSelector(selector.replace(/:global\([^)]*\)/g, "").replace(/:not\([^)]*\)|\[[^\]]*\]|::?[\w-]+/g, "")).trim();
 }
 
-/** 样式表里带 marker 的那条固定项按钮规则（不含伪元素），换成 DOM 上的类名。 */
+/** 样式表里带 marker 的那条固定项按钮规则（不含伪元素；:not() 里的不算带），换成 DOM 上的类名。 */
 function pinRule(marker: string): string {
-  const found = PIN_SELECTORS.filter((s) => s.includes(marker) && !s.includes("::"));
+  const found = PIN_SELECTORS.filter((s) => s.replace(/:not\([^)]*\)/g, "").includes(marker) && !s.includes("::"));
   if (found.length !== 1) throw new Error(`样式表里带 ${marker} 的固定项按钮规则应正好一条，实际 ${found.length} 条`);
   return domSelector(found[0]);
+}
+
+/** 固定项的按下缩小（不含减少动画那条）去掉 :active、换成 DOM 上的类名：按住时它会不会落在这个按钮上。 */
+function pressShrinkRule(): string {
+  const found = PIN_SELECTORS.filter((s) => s.endsWith(".pin:active") && !s.includes("[data-sk-reduced]"));
+  if (found.length !== 1) throw new Error(`样式表里固定项的按下缩小应正好一条，实际 ${found.length} 条`);
+  return domSelector(found[0].slice(0, -":active".length));
 }
 
 beforeEach(() => {
@@ -325,6 +333,41 @@ describe("设置上的更新点", () => {
     ipc.overrides.set("updater_info", () => info(patch));
     await mount();
     expect(dotted()).toBe(expected);
+  });
+
+  // jsdom 里动画不走帧：之后才亮的点停在入场起点上，看得出它从哪里起步
+  const entrances: [string, "never" | "always", string][] = [
+    ["平常从 0 弹出", "never", "scale(0)"],
+    ["减少动画只淡入，不缩放", "always", ""],
+  ];
+  it.each(entrances)("设置读到之后才亮的点：%s", async (_name, reducedMotion, transform) => {
+    let arrive: () => void = () => {
+      throw new Error("设置还没被请求");
+    };
+    ipc.overrides.set("get_config", () => new Promise((resolve) => (arrive = () => resolve(configDto()))));
+    ipc.overrides.set("updater_info", () => info({ available: release("1.2.0") }));
+    view = render(
+      <MotionConfig reducedMotion={reducedMotion}>
+        <LauncherProvider>
+          <ShellProvider>
+            <ChromeProvider value={chrome}>
+              <Probe />
+              <Sidebar />
+              <OverlayRoot />
+            </ChromeProvider>
+          </ShellProvider>
+        </LauncherProvider>
+      </MotionConfig>,
+    );
+    await flush();
+    expect(dotted()).toBe(false);
+    arrive();
+    await flush();
+    expect(dotted()).toBe(true);
+    const dot = item("settings").querySelector<HTMLElement>(`.${styles.dot}`);
+    if (dot === null) throw new Error("设置上没有更新点");
+    expect(dot.style.opacity).toBe("0");
+    expect(dot.style.transform).toBe(transform);
   });
 });
 
@@ -393,6 +436,43 @@ describe("侧栏", () => {
     }
   });
 
+  it("拖动途中按 Esc 放弃时指针还按着：刚放下的那一项不吃按下缩小，缩回播完也等松开才摘掉放下的记号", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
+    try {
+      await mount();
+      const pin = item("pin:创造");
+      const row = pin.closest("li");
+      if (row === null) throw new Error("固定项不在列表项里");
+      // jsdom 没有指针捕获：按住期间由这里报指针 7 还被按钮捕获着
+      let pressed = false;
+      Object.defineProperty(pin, "hasPointerCapture", { configurable: true, value: (pointerId: number) => pressed && pointerId === 7 });
+      const pointer = (type: string, clientY: number) =>
+        act(() => {
+          pin.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, pointerId: 7, clientY }));
+        });
+      const press = pressShrinkRule();
+      expect(pin.matches(press)).toBe(true);
+
+      pressed = true;
+      pointer("pointerdown", 100);
+      pointer("pointermove", 100 + PIN_STEP);
+      keydown(window, "Escape");
+      expect(row.hasAttribute("data-landing")).toBe(true);
+      expect(pin.matches(press)).toBe(false);
+      // 缩回播完时还按着：记号留着，按下缩小不在这时补上来
+      transformEnd(pin);
+      expect(row.hasAttribute("data-landing")).toBe(true);
+      expect(pin.matches(press)).toBe(false);
+
+      pressed = false;
+      pointer("pointerup", 100 + PIN_STEP);
+      expect(row.hasAttribute("data-landing")).toBe(false);
+      expect(pin.matches(press)).toBe(true);
+    } finally {
+      delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture;
+    }
+  });
+
   it("拖动中方块保持上浮；松手提交新顺序后，被拖项从松手处用 pop 飞进空位，其余项 settle", async () => {
     Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
     try {
@@ -408,6 +488,8 @@ describe("侧栏", () => {
       const pin = item("pin:生存");
       const row = pin.closest("li");
       if (row === null) throw new Error("固定项不在列表项里");
+      // jsdom 没有指针捕获：缩回播完时指针早已松开，不再被按钮捕获
+      Object.defineProperty(pin, "hasPointerCapture", { configurable: true, value: () => false });
       const pointer = (type: string, clientY: number) =>
         act(() => {
           pin.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, pointerId: 7, clientX: 10, clientY }));
@@ -443,6 +525,40 @@ describe("侧栏", () => {
       transformEnd(pin);
       expect(row.hasAttribute("data-landing")).toBe(false);
       expect(pin.matches(pinRule("[data-landing]"))).toBe(false);
+    } finally {
+      delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture;
+    }
+  });
+
+  it("放下之后焦点还在这一项、键盘按住空格时缩回播完：照常摘掉放下的记号，按下缩小显出来，不等一次不会来的指针松开", async () => {
+    Object.defineProperty(HTMLElement.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
+    try {
+      stubRowLayout();
+      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, right: 1000, bottom: 1000, width: 1000, height: 1000, x: 0, y: 0, toJSON: () => ({}) });
+      await mount();
+      const pin = item("pin:生存");
+      const row = pin.closest("li");
+      if (row === null) throw new Error("固定项不在列表项里");
+      // 指针已经松开，不再被按钮捕获；键盘按住空格时按钮处在 :active（jsdom 只在派发 mousedown 的那一刻认 :active，由这里报）
+      let keyHeld = false;
+      Object.defineProperty(pin, "hasPointerCapture", { configurable: true, value: () => false });
+      const matches = pin.matches.bind(pin);
+      Object.defineProperty(pin, "matches", { configurable: true, value: (selector: string) => (selector === ":active" ? keyHeld : matches(selector)) });
+      const pointer = (type: string, clientY: number) =>
+        act(() => {
+          pin.dispatchEvent(new PointerEvent(type, { bubbles: true, cancelable: true, button: 0, pointerId: 7, clientX: 10, clientY }));
+        });
+      pointer("pointerdown", 100);
+      pointer("pointermove", 100 + PIN_STEP);
+      pointer("pointerup", 100 + PIN_STEP);
+      await flush();
+      expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["创造", "生存", "空岛"] }]);
+      expect(row.hasAttribute("data-landing")).toBe(true);
+
+      keyHeld = true;
+      transformEnd(pin);
+      expect(row.hasAttribute("data-landing")).toBe(false);
+      expect(pin.matches(pressShrinkRule())).toBe(true);
     } finally {
       delete (HTMLElement.prototype as { setPointerCapture?: unknown }).setPointerCapture;
     }
@@ -656,6 +772,79 @@ describe("侧栏", () => {
     expect(selection().hasAttribute("data-on")).toBe(true);
   });
 
+  it("淡出没播完就又显出、而且换了一行：按仍显示着处理，从停着的那一行沿弹簧滑过去；淡出播完后再显出则直接出现在新行上", async () => {
+    stubRowLayout();
+    class FakeTransition {
+      constructor(readonly transitionProperty: string) {}
+    }
+    vi.stubGlobal("CSSTransition", FakeTransition);
+    let running: object[] = [];
+    await mount();
+    const slider = selection();
+    Object.defineProperty(slider, "getAnimations", { configurable: true, value: () => running });
+    // jsdom 没有 Web Animations：记下滑块交给合成线程的每一条轨迹。滑过去才有轨迹，直接到位没有
+    const tracks: Keyframe[][] = [];
+    Object.defineProperty(slider, "animate", {
+      configurable: true,
+      value: (frames: Keyframe[]) => {
+        tracks.push(frames);
+        return { currentTime: 0, cancel: () => undefined, onfinish: null };
+      },
+    });
+
+    act(() => nav.go({ page: "accounts" }));
+    running = [new FakeTransition("opacity")];
+    act(() => item("pin:创造").click());
+    expect(tracks).toHaveLength(1);
+    expect(tracks[0][0].translate).toBe(`0px ${rowTop(0)}px`);
+    expect(tracks[0].at(-1)?.translate).toBe(`0px ${rowTop(5)}px`);
+    expect(slider.style.translate).toBe(`0px ${rowTop(5)}px`);
+    expect(slider.hasAttribute("data-on")).toBe(true);
+
+    act(() => nav.go({ page: "accounts" }));
+    running = [];
+    tracks.length = 0;
+    act(() => item("home").click());
+    expect(tracks).toEqual([]);
+    expect(slider.style.translate).toBe(`0px ${rowTop(0)}px`);
+  });
+
+  it("在实例页取消固定当前实例：选中项换到实例库与固定顺序变化落在同一次提交里，滑块照样从固定行沿弹簧滑过去，不被直接到位掐断", async () => {
+    stubRowLayout();
+    await mount();
+    act(() => item("pin:创造").click());
+    const slider = selection();
+    expect(slider.style.translate).toBe(`0px ${rowTop(5)}px`);
+    // jsdom 没有 Web Animations：记下滑块交给合成线程的每一条轨迹，以及之后有没有被取消
+    const tracks: { frames: Keyframe[]; cancelled: boolean }[] = [];
+    Object.defineProperty(slider, "animate", {
+      configurable: true,
+      value: (frames: Keyframe[]) => {
+        const track = { frames, cancelled: false };
+        tracks.push(track);
+        return {
+          currentTime: 0,
+          cancel: () => {
+            track.cancelled = true;
+          },
+          onfinish: null,
+        };
+      },
+    });
+
+    await act(async () => {
+      await launcher.togglePin("创造");
+    });
+    await flush();
+    expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存", "空岛"] }]);
+    expect(nav.route).toEqual({ page: "instance", id: "创造", tab: "overview" });
+    expect(tracks).toHaveLength(1);
+    expect(tracks[0].frames[0].translate).toBe(`0px ${rowTop(5)}px`);
+    expect(tracks[0].frames.at(-1)?.translate).toBe(`0px ${rowTop(1)}px`);
+    expect(tracks[0].cancelled).toBe(false);
+    expect(slider.style.translate).toBe(`0px ${rowTop(1)}px`);
+  });
+
   it("指针按下主导航条目：滑块先行出发；在别处松开没点成，就滑回当前选中项", async () => {
     stubRowLayout();
     await mount();
@@ -726,6 +915,37 @@ describe("侧栏", () => {
     expect(callsOf(ipc, "set_sidebar_pins")).toEqual([{ pins: ["生存", "创造", "空岛", "末地"] }]);
     expect(rowOf("pin:末地").style.opacity).toBe("0");
     expect(rowOf("pin:生存").style.opacity).toBe("1");
+  });
+
+  // jsdom 里动画不走帧：新固定的项停在入场起点上，看得出它从哪里起步。退场见 Sidebar.pin-exit.test.tsx
+  const pinEntrances: [string, "never" | "always", string][] = [
+    ["平常从 0.6 弹入", "never", "scale(0.6)"],
+    ["减少动画只淡入，不缩放", "always", "none"],
+  ];
+  it.each(pinEntrances)("之后新固定的项：%s", async (_name, reducedMotion, transform) => {
+    bootOverrides(ipc, { instances: [instanceDto("生存"), instanceDto("末地")], pins: ["生存"] });
+    view = render(
+      <MotionConfig reducedMotion={reducedMotion}>
+        <LauncherProvider>
+          <ShellProvider>
+            <ChromeProvider value={chrome}>
+              <Probe />
+              <Sidebar />
+              <OverlayRoot />
+            </ChromeProvider>
+          </ShellProvider>
+        </LauncherProvider>
+      </MotionConfig>,
+    );
+    await flush();
+    await act(async () => {
+      await launcher.togglePin("末地");
+    });
+    await flush();
+    const row = item("pin:末地").closest("li");
+    if (row === null) throw new Error("新固定的项不在列表项里");
+    expect(row.style.opacity).toBe("0");
+    expect(row.style.transform).toBe(transform);
   });
 
   it("分隔线常驻：一个固定实例都没有时也在", async () => {
@@ -841,6 +1061,31 @@ describe("侧栏", () => {
       expect(exiting("创造")).toBe(false);
       expect(exiting("生存")).toBe(true);
     });
+  });
+
+  it("开着菜单的实例被删掉：菜单记成关上，别的固定项的名称提示照常出现", async () => {
+    await mount();
+    act(() => item("pin:生存").focus());
+    keydown(item("pin:生存"), "ContextMenu");
+    await flush();
+    expect(document.querySelector("[role='menu']")).not.toBeNull();
+
+    ipc.overrides.set("list_instances", () => [instanceDto("创造"), instanceDto("空岛")]);
+    await act(async () => {
+      await launcher.refreshInstances();
+    });
+    await flush();
+    // 固定项正在退场（jsdom 里退场不走帧，节点留着）；菜单随实例一起不画了
+    expect(document.querySelector("[role='menu']")).toBeNull();
+
+    act(() => {
+      item("pin:创造").dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+    });
+    act(() => {
+      vi.advanceTimersByTime(TOOLTIP_TIMING.sidebarDelay);
+    });
+    const tips = [...document.querySelectorAll("[role='tooltip']")].map((tip) => tip.textContent);
+    expect(tips.some((text) => text !== null && text.startsWith("创造"))).toBe(true);
   });
 
   it("菜单键打开固定实例的菜单，「下移」把它和下一项对调并写入", async () => {

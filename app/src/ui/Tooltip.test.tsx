@@ -11,7 +11,8 @@ let view: Rendered | undefined;
 beforeEach(() => {
   // performance 一并假：预热窗口按 performance.now() 计算。Date 也假，系统时钟回拨的用例要拨它
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"], now: 1_000_000 });
-  // 预热时刻是全站共享的模块状态：前一个用例（尤其是走真实计时器的）留下的时刻不能带进来
+  // 预热时刻与在显示的气泡是全站共享的模块状态：前一个用例留下的不能带进来。
+  // 要等动画真的播完的用例（退场撤掉、入场方向）放在 Tooltip.frames.test.tsx，整个文件走真实计时器
   resetTooltipState();
 });
 
@@ -43,12 +44,6 @@ const bubbleOf = (label: string) => {
   const id = button(label).getAttribute("aria-describedby");
   return id === null ? null : document.getElementById(id);
 };
-/** 让 framer-motion 的帧循环（真实时间上的 requestAnimationFrame）走 n 帧，期间的重渲染在 act 收尾时提交。 */
-const frames = (n: number) =>
-  act(async () => {
-    for (let i = 0; i < n; i++) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  });
-
 /** React 的 onPointerEnter / onPointerLeave 由 pointerover / pointerout 推导，直接派发 pointerenter 收不到。 */
 function pointerEnter(el: Element, from: Element = document.body) {
   act(() => {
@@ -176,6 +171,35 @@ describe("悬停时机", () => {
     advance(1);
     expect(bubbleOf("B")?.textContent).toBe("乙");
   });
+
+  // performance.now() 在同一个页面里是单调的，差值为负只出现在计时起点换过之后（测试换了一次假时钟）。
+  // 负的差值小于窗口，不设下界的话会被一直算成预热，所有提示都不等 delay
+  it("计时起点换过、距上次消失的差值为负：不算预热，照常等待 delay", () => {
+    mount(
+      <>
+        <Tooltip content="甲">
+          <button>A</button>
+        </Tooltip>
+        <Tooltip content="乙">
+          <button>B</button>
+        </Tooltip>
+      </>,
+    );
+    pointerEnter(button("A"));
+    advance(TOOLTIP_TIMING.delay);
+    pointerLeave(button("A"));
+    advance(TOOLTIP_TIMING.linger + TOOLTIP_TIMING.warmWindow);
+    const hiddenBy = performance.now();
+    // 重装假时钟：performance.now() 从 0 重新计起，比记下的消失时刻还早
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"], now: 1_000_000 });
+    expect(performance.now()).toBeLessThan(hiddenBy - TOOLTIP_TIMING.warmWindow);
+    pointerEnter(button("B"));
+    expect(bubbleOf("B")).toBeNull();
+    advance(TOOLTIP_TIMING.delay - 1);
+    expect(bubbleOf("B")).toBeNull();
+    advance(1);
+    expect(bubbleOf("B")?.textContent).toBe("乙");
+  });
 });
 
 describe("连续扫过", () => {
@@ -216,52 +240,6 @@ describe("连续扫过", () => {
     advance(TOOLTIP_TIMING.linger + 100);
     pointerEnter(button("B"));
     expect(bubbleOf("B")?.hasAttribute("data-instant")).toBe(true);
-  });
-
-  // 两个相邻的气泡并存约 80ms、旧的还在淡出：扫视工具栏时一闪一闪
-  it("被顶替的旧气泡不播退场，下一帧就撤掉", async () => {
-    vi.useRealTimers();
-    mount(<Row />);
-    focusByKeyboard(button("A"));
-    // 等甲完全显示出来：还停在入场起点（全透明）时退场无从播起，看不出区别
-    const first = bubbleOf("A") as HTMLElement;
-    await vi.waitFor(() => expect(first.style.opacity).toBe("1"), { timeout: 2000, interval: 5 });
-    pointerEnter(button("B"));
-    // 照常退场要 80ms，两帧之内还在
-    await frames(2);
-    expect([...document.querySelectorAll('[role="tooltip"]')].map((el) => el.textContent)).toEqual(["乙"]);
-  });
-
-  // 驻留已结束、旧气泡正在淡出时，它已不算「显示中」，顶替逻辑够不着它
-  it("旧气泡已收起、还在淡出时移到下一个：旧气泡立即撤掉，不与新气泡并存到淡完", async () => {
-    vi.useRealTimers();
-    mount(<Row />);
-    focusByKeyboard(button("A"));
-    const first = bubbleOf("A") as HTMLElement;
-    await vi.waitFor(() => expect(first.style.opacity).toBe("1"), { timeout: 2000, interval: 5 });
-    act(() => button("A").blur());
-    expect(first.isConnected).toBe(true);
-    pointerEnter(button("B"));
-    expect(bubbleOf("B")?.hasAttribute("data-instant")).toBe(true);
-    // 照常淡出要 80ms，两帧之内还在
-    await frames(2);
-    expect(first.isConnected).toBe(false);
-    expect([...document.querySelectorAll('[role="tooltip"]')].map((el) => el.textContent)).toEqual(["乙"]);
-  });
-
-  it("自己正在淡出时又被移回来：同一个气泡接着显示，不被当成别人的退场撤掉", async () => {
-    vi.useRealTimers();
-    mount(<Row />);
-    focusByKeyboard(button("A"));
-    const first = bubbleOf("A") as HTMLElement;
-    await vi.waitFor(() => expect(first.style.opacity).toBe("1"), { timeout: 2000, interval: 5 });
-    act(() => button("A").blur());
-    pointerEnter(button("A"));
-    // 等过原本的淡出时长：还是原来那个元素、没被卸掉，并回到不透明
-    await frames(8);
-    expect(first.isConnected).toBe(true);
-    expect(bubbleOf("A")).toBe(first);
-    await vi.waitFor(() => expect(first.style.opacity).toBe("1"), { timeout: 2000, interval: 5 });
   });
 });
 
@@ -322,6 +300,122 @@ describe("由 open 强制显示的气泡", () => {
     advance(TOOLTIP_TIMING.delay);
     expect(bubbleOf("B")?.textContent).toBe("乙");
     expect(bubbleOf("A")?.textContent).toBe("石头");
+  });
+
+  /** 一排带原因的格子，键盘高亮到哪一格就强制显示哪一格的提示（菜单里的禁用项、方块网格）。 */
+  function Cells({ handle }: { handle: { at?: (i: number) => void } }) {
+    const [at, setAt] = useState(1);
+    handle.at = setAt;
+    return (
+      <>
+        <Tooltip content="甲" open={at === 0}>
+          <button>A</button>
+        </Tooltip>
+        <Tooltip content="乙" open={at === 1}>
+          <button>B</button>
+        </Tooltip>
+      </>
+    );
+  }
+
+  // 新格子的布局副作用先于旧格子运行：新气泡打开时旧的还没收起，以前两者都不在 showing 里，谁也撤不掉谁
+  it("强制显示往回移到树里靠前的一格：旧气泡被直接撤掉（不播退场），新气泡原地出现、不播入场", () => {
+    const handle: { at?: (i: number) => void } = {};
+    mount(<Cells handle={handle} />);
+    expect(bubbleOf("B")?.textContent).toBe("乙");
+    // 空闲超过预热窗口：不靠预热，也要原地换上
+    advance(TOOLTIP_TIMING.warmWindow * 2);
+    act(() => handle.at?.(0));
+    expect(bubbleOf("A")?.textContent).toBe("甲");
+    expect(bubbleOf("A")?.hasAttribute("data-instant")).toBe(true);
+    expect(button("B").hasAttribute("aria-describedby")).toBe(false);
+    act(() => handle.at?.(1));
+    expect(bubbleOf("B")?.hasAttribute("data-instant")).toBe(true);
+    expect(button("A").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  // 在「已复制」停留期间又点了另一行的复制键：两个「已复制」同时挂着、互相压住
+  it("两个各自的强制显示先后打开：后开的顶掉先开的", () => {
+    const sets: ((v: boolean) => void)[] = [];
+    function Copy({ label }: { label: string }) {
+      const [copied, set] = useState(false);
+      sets.push(set);
+      return (
+        <Tooltip content={copied ? "已复制" : "复制"} open={copied}>
+          <button>{label}</button>
+        </Tooltip>
+      );
+    }
+    mount(
+      <>
+        <Copy label="A" />
+        <Copy label="B" />
+      </>,
+    );
+    act(() => sets[1](true));
+    expect(bubbleOf("B")?.textContent).toBe("已复制");
+    act(() => sets[0](true));
+    expect(bubbleOf("A")?.textContent).toBe("已复制");
+    expect(bubbleOf("A")?.hasAttribute("data-instant")).toBe(true);
+    expect(button("B").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  /** 复制键：复制后强制显示「已复制」，停留结束时 open 转假、文案在同一次渲染里换回原文。 */
+  function CopyKey({ handle }: { handle: { copied?: (v: boolean) => void } }) {
+    const [copied, set] = useState(false);
+    handle.copied = set;
+    return (
+      <>
+        <Tooltip content={copied ? "已复制" : "复制"} open={copied}>
+          <button>A</button>
+        </Tooltip>
+        <Tooltip content="乙">
+          <button>B</button>
+        </Tooltip>
+      </>
+    );
+  }
+
+  it("强制显示结束、文案同时换回原文：收起的气泡带着结束前的字退场，不在眼前先翻回去", () => {
+    const handle: { copied?: (v: boolean) => void } = {};
+    mount(<CopyKey handle={handle} />);
+    act(() => handle.copied?.(true));
+    const tip = bubbleOf("A") as HTMLElement;
+    expect(tip.textContent).toBe("已复制");
+    act(() => handle.copied?.(false));
+    expect(button("A").hasAttribute("aria-describedby")).toBe(false);
+    expect(tip.isConnected).toBe(true);
+    expect(tip.textContent).toBe("已复制");
+  });
+
+  // 键盘聚焦复制键时提示本来就开着：按回车复制，停留结束后焦点还在它身上，提示不该跟着收起
+  it("键盘聚焦打开、后来转成强制显示的提示：强制结束时焦点还在就留着，换回原文，之后照常参与顶替", () => {
+    const handle: { copied?: (v: boolean) => void } = {};
+    mount(<CopyKey handle={handle} />);
+    focusByKeyboard(button("A"));
+    expect(bubbleOf("A")?.textContent).toBe("复制");
+    act(() => handle.copied?.(true));
+    expect(bubbleOf("A")?.textContent).toBe("已复制");
+    act(() => handle.copied?.(false));
+    expect(bubbleOf("A")?.textContent).toBe("复制");
+    // 转回普通显示：指针移到别的提示上就被顶掉
+    pointerEnter(button("B"));
+    expect(bubbleOf("B")?.textContent).toBe("乙");
+    expect(button("A").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("指针点下复制键（焦点不是键盘带来的）：强制结束时照常收起", () => {
+    const handle: { copied?: (v: boolean) => void } = {};
+    mount(<CopyKey handle={handle} />);
+    act(() => {
+      button("A").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      button("A").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      button("A").focus();
+    });
+    act(() => handle.copied?.(true));
+    expect(bubbleOf("A")?.textContent).toBe("已复制");
+    act(() => handle.copied?.(false));
+    expect(button("A").hasAttribute("aria-describedby")).toBe(false);
   });
 });
 
@@ -668,29 +762,5 @@ describe("键盘与关联", () => {
     expect(tip.dataset.side).toBe("bottom");
     expect(tip.style.top).toBe("42px");
     expect(tip.style.visibility).toBe("visible");
-  });
-
-  // 挂载那一帧还没定位，起点按首选的上方给的话，翻到下方后气泡是从远离锚点的一侧往锚点浮
-  it("翻到对侧时入场从锚点那一侧浮出", async () => {
-    vi.useRealTimers();
-    const container = mount(
-      <Tooltip content="提示" side="top">
-        <button>A</button>
-      </Tooltip>,
-    );
-    setRect(container.querySelector("[data-sk-overlay-root]") as HTMLElement, { left: 0, top: 0, width: 1000, height: 700 });
-    setRect(button("A"), { left: 100, top: 4, width: 80, height: 30 });
-    focusByKeyboard(button("A"));
-    const tip = bubble() as HTMLElement;
-    expect(tip.dataset.side).toBe("bottom");
-    const firstY = await vi.waitFor(
-      () => {
-        const match = /translateY\((-?[\d.]+)px\)/.exec(tip.style.transform);
-        if (match === null) throw new Error(`入场还没写到元素上：${tip.style.transform}`);
-        return Number(match[1]);
-      },
-      { timeout: 2000, interval: 1 },
-    );
-    expect(firstY).toBeLessThan(0);
   });
 });

@@ -107,8 +107,10 @@ export function launchFailure(view: Extract<LaunchView, { kind: "failed" }>, jav
 /**
  * 会话的第二行文案（胶囊副标题与状态岛详情共用）。崩溃报告还没读出来时为 null（不画副行）。
  * now 由调用方按秒刷新，「已运行 mm:ss」才会走。
+ * shownSpeed：下载阶段写出来的速度。这里是纯函数，平滑与换字节奏归渲染它的组件：传 lib/progress-display 的
+ * useDisplaySpeed 给出的值（约 1 秒平均、每秒最多换两次字）；不传时写会话里的原始速度，每 100 ms 跳一次。
  */
-export function sessionDetail(session: SessionState, now: number): string | null {
+export function sessionDetail(session: SessionState, now: number, shownSpeed?: number): string | null {
   switch (session.phase) {
     case "preparing":
     case "launching":
@@ -116,7 +118,7 @@ export function sessionDetail(session: SessionState, now: number): string | null
     case "downloading": {
       const d = session.download;
       if (d === null || d.total === null) return SESSION_COPY.countingFiles;
-      return SESSION_COPY.downloadProgress(d.done, d.total, d.speedBps);
+      return SESSION_COPY.downloadProgress(d.done, d.total, shownSpeed === undefined ? d.speedBps : shownSpeed);
     }
     case "running":
       if (session.runningSince === null) throw new Error("running 会话缺少运行起点");

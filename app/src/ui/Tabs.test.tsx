@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { motion, MotionConfig } from "framer-motion";
+import { AnimatePresence, motion, MotionConfig } from "framer-motion";
 import { act, useId, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { pageItem } from "../lib/motion";
+import { pageItem, popMark } from "../lib/motion";
 import { keydown, render, stubResizeObserver, waitForFrames, type Rendered, type ResizeObserverStub } from "../test/dom";
+import { Badge } from "./Badge";
 import { Card } from "./Card";
 import { Page, PageArrivalProvider } from "./Page";
 import { SEGMENT_THUMB_RADIUS, SegmentedControl, type SegmentOption } from "./SegmentedControl";
@@ -189,6 +190,25 @@ describe("Tabs", () => {
     await waitForFrames(() => expect(wrapperOf("实时").style.opacity).toBe("1"));
   });
 
+  it.each([
+    ["never", `scale(${popMark.glyph.initial.scale})`],
+    ["always", ""],
+  ] as const)("之后出现的徽标按小标记的 glyph 档从略小处弹入；减少动画（%s）时只淡入、不带缩放", (reducedMotion, transform) => {
+    function Badged({ badge }: { badge: ReactNode }) {
+      const items: TabItem<Section>[] = SECTIONS.map((s) => (s.value === "logs" ? { ...s, badge } : s));
+      return (
+        <MotionConfig reducedMotion={reducedMotion}>
+          <Tabs id="g" value="overview" items={items} ariaLabel="实例详情" onChange={() => undefined} />
+        </MotionConfig>
+      );
+    }
+    view = render(<Badged badge={undefined} />);
+    view.rerender(<Badged badge={<b>实时</b>} />);
+    const wrapper = document.querySelector("b")?.parentElement as HTMLElement;
+    expect(wrapper.style.opacity).toBe("0");
+    expect(wrapper.style.transform).toBe(transform);
+  });
+
   it("徽标传空串或布尔值时不包徽标层（空层也会吃掉内容间距、撑宽标签）；数字 0 照常显示", () => {
     const items: TabItem<Section>[] = SECTIONS.map((s) =>
       s.value === "mods" ? { ...s, badge: "" } : s.value === "logs" ? { ...s, badge: true } : s.value === "crash" ? { ...s, badge: 0 } : s.value === "overview" ? { ...s, badge: false } : s,
@@ -200,6 +220,22 @@ describe("Tabs", () => {
     expect(layersOf("logs")).toEqual([]);
     expect(layersOf("crash")).toEqual(["0"]);
   });
+
+  it("整个 AnimatePresence 当作徽标传入时外壳常驻：角标不在时外壳是空的，空外壳退出排布、不吃内容间距", () => {
+    expect(ruleOf(cssOf("Tabs.module.css"), ".badge:empty")).toContain("display: none;");
+    function Owned({ count }: { count: number }) {
+      const items: TabItem<Section>[] = SECTIONS.map((s) =>
+        s.value === "mods" ? { ...s, badge: <AnimatePresence initial={false}>{count > 0 && <Badge key="count" count={count} />}</AnimatePresence> } : s,
+      );
+      return <Tabs id="o" value="overview" items={items} ariaLabel="实例详情" onChange={() => undefined} />;
+    }
+    view = render(<Owned count={0} />);
+    const shell = () => (document.getElementById(tabDomId("o", "mods")) as HTMLElement).querySelector<HTMLElement>('span[class*="badge"]') as HTMLElement;
+    expect(shell().matches(":empty")).toBe(true);
+    view.rerender(<Owned count={3} />);
+    expect(shell().matches(":empty")).toBe(false);
+    expect(shell().textContent).toBe("3");
+  });
 });
 
 describe("TabPanel 入场", () => {
@@ -209,7 +245,7 @@ describe("TabPanel 入场", () => {
     { value: "mods", label: "Mod" },
   ];
 
-  function InstancePage() {
+  function InstancePage({ initial }: { initial?: boolean }) {
     const id = useId();
     const [value, setValue] = useState<Pane>("overview");
     return (
@@ -219,7 +255,7 @@ describe("TabPanel 入场", () => {
           <div>
             <Tabs id={id} value={value} items={PANES} ariaLabel="实例详情" onChange={setValue} />
           </div>
-          <TabPanel tabsId={id} value={value}>
+          <TabPanel tabsId={id} value={value} initial={initial}>
             <Card>{`${value} 甲`}</Card>
             <Card>{`${value} 乙`}</Card>
           </TabPanel>
@@ -279,6 +315,115 @@ describe("TabPanel 入场", () => {
     expect(panel().style.transform).toBe("translateX(8px)");
     keydown(document.activeElement as Element, "ArrowLeft");
     expect(panel().style.transform).toBe("translateX(-8px)");
+  });
+
+  it.each([
+    [undefined, "0", "translateY(6px)"],
+    [false, "1", "none"],
+  ] as const)("不归页面管的面板（弹窗里）：initial=%s 时第一次挂载的起点；之后换标签照常走切换动画", (initial, opacity, transform) => {
+    function InDialog() {
+      const id = useId();
+      const [value, setValue] = useState<Pane>("overview");
+      return (
+        <MotionConfig reducedMotion="never">
+          <Tabs id={id} value={value} items={PANES} ariaLabel="资源详情" onChange={setValue} />
+          <TabPanel tabsId={id} value={value} initial={initial}>
+            {value}
+          </TabPanel>
+        </MotionConfig>
+      );
+    }
+    view = render(<InDialog />);
+    expect(panel().style.opacity).toBe(opacity);
+    expect(panel().style.transform).toBe(transform);
+    act(() => selectedTab()?.focus());
+    keydown(document.activeElement as Element, "ArrowRight");
+    expect(panel().textContent).toBe("mods");
+    expect(panel().style.opacity).toBe("0");
+    expect(panel().style.transform).toBe("translateY(6px)");
+  });
+
+  it.each([
+    [undefined, "1"],
+    [true, "0"],
+  ] as const)("卡片内的胶囊面板（不归页面管）：initial=%s 时第一次挂载的透明度；之后换标签照常只淡入、不位移", (initial, opacity) => {
+    function InCard() {
+      const id = useId();
+      const [value, setValue] = useState<Pane>("overview");
+      return (
+        <MotionConfig reducedMotion="never">
+          <Tabs id={id} value={value} items={PANES} variant="pill" size="sm" ariaLabel="卡内切换" onChange={setValue} />
+          <TabPanel tabsId={id} value={value} motion="card" initial={initial}>
+            {value}
+          </TabPanel>
+        </MotionConfig>
+      );
+    }
+    view = render(<InCard />);
+    expect(panel().style.opacity).toBe(opacity);
+    act(() => selectedTab()?.focus());
+    keydown(document.activeElement as Element, "ArrowRight");
+    expect(panel().textContent).toBe("mods");
+    expect(panel().style.opacity).toBe("0");
+    expect(panel().style.transform).toBe("");
+  });
+
+  it("initial={false} 不改页面的安排：进页那一次面板仍按自己的序号随页面入场", () => {
+    view = render(<InstancePage initial={false} />);
+    expect(entrances()).toEqual([
+      ["DIV", "0"],
+      ["tabpanel", "2"],
+    ]);
+    expect(panel().style.opacity).toBe("0");
+  });
+
+  /** 嵌在一张卡片里的标签与面板：卡片本身站在页面一级位置上。 */
+  function CardTabs() {
+    const id = useId();
+    const [value, setValue] = useState<Pane>("overview");
+    return (
+      <>
+        <Tabs id={id} value={value} items={PANES} ariaLabel="卡内详情" onChange={setValue} />
+        <TabPanel tabsId={id} value={value}>
+          {value}
+        </TabPanel>
+      </>
+    );
+  }
+
+  const nestedPage = (withTabs: boolean) => (
+    <MotionConfig reducedMotion="never">
+      <Page>
+        <Card>头图</Card>
+        <Card>{withTabs && <CardTabs />}</Card>
+      </Page>
+    </MotionConfig>
+  );
+
+  /** 等页面画完第一帧：入场窗口在这之后关上。 */
+  const nextFrame = () => act(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+
+  it.each([
+    ["enter", [["DIV", "0"], ["DIV", "1"]]],
+    ["return", []],
+  ] as const)("%s 进页时嵌在首帧一级区块里的面板不自己播，跟着区块走；换标签后照常走切换动画", (arrival, blocks) => {
+    view = render(<PageArrivalProvider value={arrival}>{nestedPage(true)}</PageArrivalProvider>);
+    expect(entrances()).toEqual(blocks);
+    expect(panel().style.opacity).toBe("1");
+    expect(panel().style.transform).toBe("none");
+    act(() => selectedTab()?.focus());
+    keydown(document.activeElement as Element, "ArrowRight");
+    expect(panel().textContent).toBe("mods");
+    expect(panel().style.opacity).toBe("0");
+    expect(panel().style.transform).toBe("translateY(6px)");
+  });
+
+  it("首帧之后才挂进区块里的面板照常播自己的入场", async () => {
+    view = render(nestedPage(false));
+    await nextFrame();
+    view.rerender(nestedPage(true));
+    expect(panel().style.opacity).toBe("0");
+    expect(panel().style.transform).toBe("translateY(6px)");
   });
 });
 

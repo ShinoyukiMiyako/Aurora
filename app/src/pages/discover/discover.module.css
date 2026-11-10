@@ -128,8 +128,10 @@
 /*
  * 吸顶后底色向两侧多铺一点，卡片从下面滚过时不露边。吸住与松开时底色走过渡，阴影画在 ::after 叠层上只动透明度，
  * 在吸顶的临界位置来回滚时不一帧一闪。
+ * 筛选按钮角上的条件数角标有一半伸到工具条底色上：它的描边取工具条此刻的底色，否则未吸顶时多出一圈偏亮的环。
  */
 .toolbarWrap {
+  --badge-ring: var(--sk-bg);
   position: sticky;
   top: 0;
   z-index: var(--sk-z-main);
@@ -152,6 +154,7 @@
 }
 
 .toolbarWrap[data-stuck] {
+  --badge-ring: var(--sk-surface);
   border-radius: 0 0 var(--sk-r-lg) var(--sk-r-lg);
   background: var(--sk-surface);
 }
@@ -256,12 +259,11 @@
 }
 
 /*
- * 计数是定宽槽：「搜索中…」与「约 1.2 万 个结果」来回换时，后面的条件片段不左右跳。
- * 8em 按最宽的常见写法（万位带一位小数、四位数带千分位）留足，更长的少见情形才撑宽。
+ * 计数是定宽槽：「搜索中…」、慢提示与「约 1.2 万 个结果」来回换时，后面的条件片段不左右跳。
+ * 宽度由里面的 LabelSlot 按候选里最宽的那条（慢提示）撑出，比它还长的总数才撑宽。
  */
 .infoCount {
   display: inline-block;
-  min-width: 8em;
   font-weight: var(--sk-w-medium);
   color: var(--sk-text);
   font-variant-numeric: tabular-nums;

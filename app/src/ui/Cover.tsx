@@ -62,6 +62,8 @@ export interface CoverProps {
  *
  * 换形态：媒体晚到（art → texture、art / texture → remote）时旧的一层留在下面，新的一层连同压暗整层淡入盖上去，
  * 淡入播完才卸下旧层，身份方块随之淡出；不出现「先换成灰底加压暗、图再淡入」的中间态。
+ * 同一形态换了内容（色相、平铺的方块、图片地址）同样是新的一层盖上去。往下换（远程图撤掉、不再平铺）反过来：
+ * 新的形态垫到最下面，旧的一层留在上面淡出，淡完才卸下，身份方块随之淡入。
  * 首帧就有的形态（平铺材质已在缓存里）不播淡入，跟着所在页面的入场走。
  */
 export function Cover({ hue, seed, height, remoteUrl = null, texture = null, identity = null, shade = null, children, className }: CoverProps) {
@@ -90,21 +92,21 @@ export function Cover({ hue, seed, height, remoteUrl = null, texture = null, ide
   const image = useRemoteImage(remoteUrl, near && width > 0, maxEdge);
   const remote = image.status === "ready";
   const textured = !remote && tile !== null;
-  const media = remote || textured;
-  const shown: CoverLayer = remote ? "remote" : textured ? "texture" : "art";
+  const target: LayerFace =
+    remote && remoteUrl !== null ? { kind: "remote", url: remoteUrl } : tile !== null ? { kind: "texture", tile } : { kind: "art", hue, seed };
+  const shown = target.kind;
 
-  // 换形态在渲染期同步记下：新的一层挂上的这一帧，旧的一层就得已经垫在下面。
-  // 只有媒体晚到（形态往上换）才垫；往下换（远程图地址清空、平铺材质没了）直接换，没有可留的旧层。
-  // 上一层还在淡入时又往上换（材质与远程图前后脚到）：它连同它下面的一起垫着，并且接着淡入，
-  // 不能降成静止的下层，否则淡入动画随 data-reveal 摘掉，半透明的平铺一帧跳成不透明
-  const [layers, setLayers] = useState<{ shown: CoverLayer; under: readonly CoverLayer[] }>({ shown, under: [] });
-  let current = layers;
-  if (layers.shown !== shown) {
-    current = { shown, under: LAYER_RANK[shown] > LAYER_RANK[layers.shown] ? [...layers.under, layers.shown] : [] };
-    setLayers(current);
+  // 换形态在渲染期同步记下：新的一层挂上的这一帧，旧的一层就得已经垫在下面（往上换），或者已经叠在上面（往下换）
+  const [stack, setStack] = useState<readonly Layer[]>(() => [{ id: 0, face: target, phase: "still" }]);
+  let layers = stack;
+  if (!sameFace(topLayer(stack).face, target)) {
+    layers = restack(stack, target);
+    setStack(layers);
   }
-  const under = current.under;
-  const settled = () => setLayers((l) => (l.under.length === 0 ? l : { ...l, under: [] }));
+  const revealed = (id: number) => setStack((s) => settleReveal(s, id));
+  const concealed = (id: number) => setStack((s) => s.filter((l) => l.id !== id || l.phase !== "conceal"));
+  const media = layers.some((l) => l.face.kind !== "art");
+  const remoteLeaving = shown !== "remote" && layers.some((l) => l.face.kind === "remote");
 
   useLayoutEffect(() => {
     if (image.status !== "ready" || width === 0) return;
@@ -123,35 +125,37 @@ export function Cover({ hue, seed, height, remoteUrl = null, texture = null, ide
     return trackParallax(el);
   }, [textured, reduced]);
 
-  /** 第 depth 层（0 是最底下）：盖在别的层上的都在淡入；只有最上面那层播完才算换完，一次卸下下面所有层。 */
-  const layer = (kind: CoverLayer, depth: number) => {
-    if (kind === "art") {
-      return (
-        <div key="art" className={styles.art} aria-hidden="true">
-          <CoverPattern hue={hue} seed={seed} className={styles.pattern} />
-        </div>
-      );
-    }
-    // 淡入只认最上面那层自己的动画：中间那层先开始、先播完，卡内其他动画冒上来的 animationend 也不算
-    const reveal = depth > 0;
+  /** 一层。淡入、淡出都只认这一层自己的动画：卡内别的动画（底纹、身份方块）冒上来的 animationend 不算。 */
+  const layer = ({ id, face, phase }: Layer) => {
     const onAnimationEnd =
-      reveal && depth === under.length
-        ? (event: AnimationEvent<HTMLDivElement>) => {
-            if (event.target === event.currentTarget) settled();
-          }
-        : undefined;
-    if (kind === "remote") {
+      phase === "still"
+        ? undefined
+        : (event: AnimationEvent<HTMLDivElement>) => {
+            if (event.target !== event.currentTarget) return;
+            if (phase === "reveal") revealed(id);
+            else concealed(id);
+          };
+    const marks = { "data-reveal": phase === "reveal" || undefined, "data-conceal": phase === "conceal" || undefined, onAnimationEnd, "aria-hidden": true };
+    if (face.kind === "art") {
+      // 色相跟着这一层走：换了色相时旧的一层还是旧的颜色，新的一层盖上去
       return (
-        <div key="remote" className={styles.media} data-reveal={reveal || undefined} onAnimationEnd={onAnimationEnd} aria-hidden="true">
-          <canvas ref={canvasRef} className={styles.image} />
+        <div key={id} className={styles.art} style={cssVars({ "--hue": face.hue })} {...marks}>
+          <CoverPattern hue={face.hue} seed={face.seed} className={styles.pattern} />
         </div>
       );
     }
-    // 平铺垫在远程图下面时 tile 一定还在（它只取决于 texture）；这里判空只为类型收窄
-    if (tile === null) return null;
+    if (face.kind === "remote") {
+      // 只有在场的那一层接画布：淡出中的旧图留着已经画好的像素，不再重画
+      const live = phase !== "conceal" && sameFace(face, target);
+      return (
+        <div key={id} className={styles.media} {...marks}>
+          <canvas ref={live ? canvasRef : undefined} className={styles.image} />
+        </div>
+      );
+    }
     return (
-      <div key="texture" className={styles.media} data-reveal={reveal || undefined} onAnimationEnd={onAnimationEnd} aria-hidden="true">
-        {width > 0 && <TextureTile face={tile} width={width + 2 * TILE_OVERHANG_PX} height={height + 2 * TILE_OVERHANG_PX} className={styles.tile} />}
+      <div key={id} className={styles.media} {...marks}>
+        {width > 0 && <TextureTile face={face.tile} width={width + 2 * TILE_OVERHANG_PX} height={height + 2 * TILE_OVERHANG_PX} className={styles.tile} />}
       </div>
     );
   };
@@ -162,12 +166,13 @@ export function Cover({ hue, seed, height, remoteUrl = null, texture = null, ide
       className={cx(styles.cover, className)}
       style={{ height, ...cssVars({ "--hue": hue, "--tile-overhang": `${TILE_OVERHANG_PX}px` }) }}
       data-source={shown}
+      // 淡出中的媒体层也要带着压暗走完
       data-shade={media && shade !== null ? shade : undefined}
     >
-      {/* 各层放在同一个带 key 的数组里：往上换时已有的层原地留着，正在播的淡入不因节点重建而重播 */}
-      {[...under, shown].map(layer)}
-      {identity !== null && (!remote || under.length > 0) && (
-        <span className={styles.identity} data-leaving={remote || undefined}>
+      {/* 各层放在同一个带 key 的数组里，从下到上：已有的层原地留着，正在播的淡入淡出不因节点重建而重播 */}
+      {layers.map(layer)}
+      {identity !== null && layers.some((l) => l.face.kind !== "remote") && (
+        <span className={styles.identity} data-leaving={shown === "remote" || undefined} data-arriving={remoteLeaving || undefined}>
           <InstanceBlock instanceId={identity.instanceId} cover={identity.cover} width={coverIdentityWidth(height)} lift />
         </span>
       )}
@@ -179,6 +184,67 @@ export function Cover({ hue, seed, height, remoteUrl = null, texture = null, ide
 /** 卡面的三种形态，按「晚到」的先后排：art 一开始就有，平铺要等材质，远程图要等下载解码。 */
 type CoverLayer = "art" | "texture" | "remote";
 const LAYER_RANK: Readonly<Record<CoverLayer, number>> = { art: 0, texture: 1, remote: 2 };
+
+/** 一层画的是什么：形态加内容。同一形态换了内容（色相或种子、平铺的那一格、图片地址）也是另一层。 */
+type LayerFace = { kind: "art"; hue: number; seed: string } | { kind: "texture"; tile: ImageBitmap } | { kind: "remote"; url: string };
+
+/** still：静止；reveal：盖在下面的层上淡入；conceal：叠在新形态上淡出，淡完卸下。 */
+type LayerPhase = "still" | "reveal" | "conceal";
+
+interface Layer {
+  /** 节点的 key：同一内容先淡出、又被换回来时是两层，各走各的。 */
+  id: number;
+  face: LayerFace;
+  phase: LayerPhase;
+}
+
+function sameFace(a: LayerFace, b: LayerFace): boolean {
+  if (a.kind === "art" && b.kind === "art") return a.hue === b.hue && a.seed === b.seed;
+  if (a.kind === "texture" && b.kind === "texture") return a.tile === b.tile;
+  if (a.kind === "remote" && b.kind === "remote") return a.url === b.url;
+  return false;
+}
+
+/** 在场的最上面一层，也就是当前要显示的形态；淡出中的层不算。 */
+function topLayer(stack: readonly Layer[]): Layer {
+  for (let i = stack.length - 1; i >= 0; i--) if (stack[i].phase !== "conceal") return stack[i];
+  throw new Error("卡面的层里没有在场的一层");
+}
+
+/**
+ * 要显示的形态变了，排出新的层序（从下到上）。
+ * - 往上换或同一形态换内容：新的一层放到最上面淡入，下面的照旧垫着；下面那层还在淡入（材质与远程图前后脚到）也接着淡入，
+ *   不能降成静止，否则淡入动画随 data-reveal 摘掉，半透明的平铺一帧跳成不透明。
+ * - 往下换：要换回的那层还在场（上面的层还没淡入完就被撤掉）就留在原处，否则新的一层垫到最下面；在它上面的静止层改为淡出。
+ *   还在淡入的直接拿掉：CSS 动画换名会从不透明重新起播，先闪成满的再淡出，比直接拿掉一层半透明的更显眼。
+ */
+function restack(stack: readonly Layer[], target: LayerFace): Layer[] {
+  const id = Math.max(...stack.map((l) => l.id)) + 1;
+  if (LAYER_RANK[target.kind] >= LAYER_RANK[topLayer(stack).face.kind]) return [...stack, { id, face: target, phase: "reveal" }];
+  let at = -1;
+  for (let i = stack.length - 1; i >= 0; i--) {
+    if (stack[i].phase !== "conceal" && sameFace(stack[i].face, target)) {
+      at = i;
+      break;
+    }
+  }
+  const kept: Layer[] = at < 0 ? [{ id, face: target, phase: "still" }] : stack.slice(0, at + 1);
+  for (const l of at < 0 ? stack : stack.slice(at + 1)) {
+    if (l.phase === "still") kept.push({ ...l, phase: "conceal" });
+    else if (l.phase === "conceal") kept.push(l);
+  }
+  return kept;
+}
+
+/**
+ * 某层的淡入播完：它此后就是静止的，下面的层都被它整个盖住了，一次卸下；它上面的照旧（还在淡入的新层、还在淡出的旧层）。
+ * 所以静止层下面不会再有别的层。
+ */
+function settleReveal(stack: readonly Layer[], id: number): readonly Layer[] {
+  const at = stack.findIndex((l) => l.id === id);
+  if (at < 0 || stack[at].phase !== "reveal") return stack;
+  return [{ ...stack[at], phase: "still" }, ...stack.slice(at + 1)];
+}
 
 // ---------------------------------------------------------------- 视差
 

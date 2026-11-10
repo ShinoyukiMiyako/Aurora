@@ -65,16 +65,18 @@ export function moveSubmitReason(target: string | null, preview: { status: "load
 /**
  * 预检区此刻画什么。held 是上一份已经摆出来的结果：换目标后新结果回来之前继续摆着它（加载门亮出加载态后压暗），
  * 不先塌成加载态再撑开。新结果、失败都要等加载门放行（骨架至少停留的那段时间）才换上。
+ * stale 只管压暗（等待期不压，回得快时不闪）；busy 从换目标那一刻起就标：摆着的是上一个目标的结果，
+ * 读屏不能把它当成这一次的。
  */
 export function moveCheckView(
   gate: LoadingView,
   preview: { status: "loading" | "ready" | "error"; data?: MovePreviewDto },
   held: MovePreviewDto | null,
-): { view: LoadingView; shown: MovePreviewDto | null; failed: boolean; stale: boolean } {
+): { view: LoadingView; shown: MovePreviewDto | null; failed: boolean; stale: boolean; busy: boolean } {
   const settled = gate === "content";
   const shown = settled ? (preview.status === "ready" && preview.data !== undefined ? preview.data : null) : held;
   const failed = settled && preview.status === "error";
-  return { view: shown !== null || failed ? "content" : gate, shown, failed, stale: gate === "skeleton" && shown !== null };
+  return { view: shown !== null || failed ? "content" : gate, shown, failed, stale: gate === "skeleton" && shown !== null, busy: !settled && shown !== null };
 }
 
 export function MoveInstanceModal({ inst, lockReason, onRename, onClose }: MoveInstanceModalProps) {
@@ -215,9 +217,14 @@ export function MoveInstanceModal({ inst, lockReason, onRename, onClose }: MoveI
                     );
                   }
                   if (check.shown === null) throw new Error("预检区画内容时既没有结果也没有失败");
-                  return <MovePreview preview={check.shown} stale={check.stale} pinned={inst.pinned} onRename={onRename} />;
+                  return <MovePreview preview={check.shown} stale={check.stale} busy={check.busy} pinned={inst.pinned} onRename={onRename} />;
                 }}
               </Loadable>
+              {/* 骨架里的「正在检查」对读屏隐藏：播报区随这一块预先挂好、先空着，加载态亮出（含摆着上一份结果时）才写字，
+                  读屏才念得出来；回得快时不播，与看得见的骨架同一时机 */}
+              <div role="status" className={styles.status}>
+                {checkGate.view === "skeleton" ? MOVE_COPY.checking : ""}
+              </div>
             </section>
           )}
         </Appear>
@@ -276,14 +283,14 @@ function summaryRows(preview: MovePreviewDto): KVRow[] {
   return rows;
 }
 
-/** stale：这是上一个目标的结果，新目标的预检还没回来，压暗摆着。 */
-function MovePreview({ preview, stale, pinned, onRename }: { preview: MovePreviewDto; stale: boolean; pinned: boolean; onRename(): void }) {
+/** busy：这是上一个目标的结果，新目标的预检还没回来；stale：加载态已经亮出，压暗摆着。 */
+function MovePreview({ preview, stale, busy, pinned, onRename }: { preview: MovePreviewDto; stale: boolean; busy: boolean; pinned: boolean; onRename(): void }) {
   // 换目标后说明块、拦截项与提醒行会增减：排在后面的从原位置滑过去
   const reflow = useReflow<HTMLDivElement>();
   const blocked = preview.blockers.length > 0;
   const nameTaken = preview.blockers.some((b) => b.kind === "name_taken");
   return (
-    <div ref={reflow} className={styles.preview} data-stale={stale || undefined} aria-busy={stale || undefined}>
+    <div ref={reflow} className={styles.preview} data-stale={stale || undefined} aria-busy={busy || undefined}>
       <Inset>
         <KV rows={summaryRows(preview)} />
       </Inset>

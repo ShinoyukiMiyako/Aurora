@@ -12,9 +12,10 @@
 // 放在页面一级区块的位置上时：挂载时就在的子项跟着页面入场；之后出现的子项由这里淡入，里面的区块不再叠一层页面淡入。
 // 空的时候不占入场序号，有子项时占一个。
 
-import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
-import { Children, isValidElement, useEffect, useRef, type ReactNode, type Ref } from "react";
-import { fade, insertItem } from "../lib/motion";
+import { AnimatePresence, motion, useIsPresent } from "framer-motion";
+import { Children, isValidElement, type ReactNode, type Ref } from "react";
+import { useInsertItem } from "../lib/useInsertItem";
+import { useMounted } from "../lib/useMounted";
 import { EntranceGate, spreadsEntrance } from "./Page";
 
 export interface AppearProps {
@@ -24,13 +25,6 @@ export interface AppearProps {
   /** 挂载时已经在的子项也播入场。默认不播：它们跟着所在页面的入场走。 */
   initial?: boolean;
 }
-
-/** 减少动画时的进出：只留透明度。缩放在减少动画下是一步到位的，退场会先缩一下再淡出。 */
-const FADE_ONLY = {
-  initial: { opacity: 0 },
-  animate: { opacity: 1, transition: fade.in },
-  exit: { opacity: 0, transition: fade.out },
-} as const;
 
 interface AppearItemProps {
   /** popLayout 把退场项抽出布局时要量这一层，由 AnimatePresence 递进来。 */
@@ -43,8 +37,8 @@ interface AppearItemProps {
 
 function AppearItem({ ref, own, className, children }: AppearItemProps) {
   const present = useIsPresent();
-  const reduced = useReducedMotionConfig() === true;
-  const item = reduced ? FADE_ONLY : insertItem;
+  // 减少动画时只留透明度：缩放在那里是一步到位的，退场会先缩一下再淡出
+  const item = useInsertItem();
   return (
     <motion.div ref={ref} className={className} inert={!present} initial={own ? item.initial : false} animate={item.animate} exit={item.exit}>
       <EntranceGate own={own}>{children}</EntranceGate>
@@ -55,10 +49,7 @@ function AppearItem({ ref, own, className, children }: AppearItemProps) {
 export function Appear({ children, itemClassName, initial = false }: AppearProps) {
   // 挂载时就在的子项不播入场。不能用 AnimatePresence 的 initial={false} 来做：它会让这些子项里面
   // 之后才挂载的元素也永远跳过入场。这里只在包裹层自己身上关掉。
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-  }, []);
+  const mounted = useMounted();
   const own = mounted.current || initial;
   return (
     <AnimatePresence mode="popLayout">

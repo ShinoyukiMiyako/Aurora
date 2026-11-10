@@ -6,7 +6,11 @@ import { TOAST_COPY } from "../copy/flows";
 import { SHELL_ACTION_ERROR } from "../copy/shell";
 import { GAME_EXIT_EVENT } from "../ipc/launch";
 import type { ModpackExportOptions } from "../ipc/modpack";
+import type { UpdateDto } from "../ipc/system";
+import { CORE_EVENT } from "../ipc/tasks";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
+import { activeTasks } from "../state/selectors";
+import { useUpdater, type UpdaterApi } from "../state/updater/useUpdater";
 import { keydown, render, setRect, stubResizeObserver, type Rendered } from "../test/dom";
 import { CONFIRM_CANCEL_LABEL } from "../ui/ConfirmDialog";
 import { NAV_ANCHOR_ATTR } from "../ui/Page";
@@ -24,6 +28,18 @@ vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).f
 vi.mock("./platform", async (orig) => {
   const actual = await orig<typeof import("./platform")>();
   return { ...actual, pickSaveFile: vi.fn(actual.pickSaveFile) };
+});
+/** 外壳核心每渲染一次调一次自动检查：数它的调用就是数外壳核心（连同自动检查自己的订阅）的渲染次数。 */
+const coreRenders = vi.hoisted(() => ({ count: 0 }));
+vi.mock("./update-check", async (orig) => {
+  const actual = await orig<typeof import("./update-check")>();
+  return {
+    ...actual,
+    useUpdaterAutoCheck: (...args: Parameters<typeof actual.useUpdaterAutoCheck>) => {
+      coreRenders.count += 1;
+      actual.useUpdaterAutoCheck(...args);
+    },
+  };
 });
 
 let view: Rendered | undefined;
@@ -125,6 +141,74 @@ describe("外壳：重启并安装更新", () => {
   });
 });
 
+describe("外壳：启动器更新的下载进度", () => {
+  const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: null, date: null };
+
+  it("下载更新的进度事件不让外壳核心重渲染（连同其中的自动检查）；打开更新面板仍按此刻的阶段取版本", async () => {
+    ipc.overrides.set("updater_info", () => ({ current_version: "0.1.0", supported: true, unsupported_reason: null, available: UPDATE, downloaded_version: null, install_on_exit: false }));
+    ipc.overrides.set("download_update", () => new Promise(() => undefined));
+    // 经对象持有：闭包里给外层 let 赋值时 TypeScript 会把它收窄成 null
+    const probe: { api: UpdaterApi | null } = { api: null };
+    /** 整份订阅更新状态的一方放在外壳核心的子项位置：它自己的重渲染不算进外壳核心。 */
+    function UpdaterProbe() {
+      probe.api = useUpdater();
+      return null;
+    }
+    const api = (): UpdaterApi => {
+      if (probe.api === null) throw new Error("更新状态探针没有挂上");
+      return probe.api;
+    };
+    view = render(
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          <UpdaterProbe />
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>,
+    );
+    await flush();
+    expect(api().state.phase.kind).toBe("available");
+    act(() => void api().download());
+    await flush();
+    const [{ taskId }] = callsOf(ipc, "download_update");
+    if (typeof taskId !== "string") throw new Error("下载命令没带 taskId");
+    expect(api().state.phase.kind).toBe("downloading");
+
+    const before = coreRenders.count;
+    expect(before).toBeGreaterThan(0);
+    const events = 5 + Math.floor(Math.random() * 10);
+    for (let i = 1; i <= events; i++) {
+      act(() => emit(CORE_EVENT, { kind: "download", task_id: taskId, total: 1, finished: 0, bytes: i * 1000, total_bytes: events * 1000, speed: 0 }));
+    }
+    // 进度确实都进了状态，整份订阅的探针看到了最后一条
+    expect(api().state.phase).toMatchObject({ kind: "downloading", bytes: events * 1000, totalBytes: events * 1000 });
+    expect(coreRenders.count).toBe(before);
+
+    // 外壳核心不订阅更新状态，打开面板时经快照读到的仍是下载中的这一版，并记为看过
+    act(() => shell.openUpdatePanel());
+    expect(shell.updatePanelOpen).toBe(true);
+    expect(api().state.seenVersion).toBe("0.2.0");
+    // 计数确实接在外壳核心上：它自己的状态变化照常让它重渲染
+    expect(coreRenders.count).toBeGreaterThan(before);
+  });
+
+  it("外壳核心因无关状态重渲染时，打开更新面板与重启安装的回调连同整份外壳接口引用不变", async () => {
+    ipc.overrides.set("backup_world", () => new Promise(() => {}));
+    await mount();
+    const before = { shell, openUpdatePanel: shell.openUpdatePanel, installUpdate: shell.installUpdate, renders: coreRenders.count };
+    const backups = 1 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < backups; i++) act(() => void launcher.actions.backupWorld("生存", `w${i}`, `世界 ${i}`));
+    await flush();
+    // 活动任务数变了，外壳核心确实重渲染过
+    expect(activeTasks(launcher.state)).toHaveLength(backups);
+    expect(coreRenders.count).toBeGreaterThan(before.renders);
+    expect(shell.openUpdatePanel).toBe(before.openUpdatePanel);
+    expect(shell.installUpdate).toBe(before.installUpdate);
+    expect(shell).toBe(before.shell);
+  });
+});
+
 describe("外壳：导航", () => {
   it("go / back / forward 驱动路由与前后可用态", async () => {
     await mount();
@@ -217,6 +301,111 @@ describe("外壳：导航", () => {
     act(() => nav.replace({ page: "instance", id: "生存", tab: "mods" }));
     expect(nav.route).toEqual({ page: "instance", id: "生存", tab: "mods" });
     scroller.remove();
+  });
+
+  describe("换标签时托住页面高度", () => {
+    // 滚动区可视 600；页面根里依次是头图、标签条（锚点，在内容里的位置是 320）、面板。页面高按最低高度取，
+    // 滚动位置像浏览器一样夹在 [0, 页面高 - 600] 之内
+    const VIEW = 600;
+    const ANCHOR_AT = 320;
+
+    function stage(natural: number) {
+      const scroller = document.createElement("div");
+      const page = document.createElement("div");
+      const anchor = document.createElement("div");
+      anchor.setAttribute(NAV_ANCHOR_ATTR, "");
+      page.append(document.createElement("header"), anchor, document.createElement("section"));
+      scroller.append(page);
+      document.body.append(scroller);
+      let content = natural;
+      let scrolled = 0;
+      const floor = () => (page.style.minHeight === "" ? 0 : Number.parseFloat(page.style.minHeight));
+      const height = () => Math.max(content, floor());
+      const clamp = (top: number) => Math.max(0, Math.min(top, height() - VIEW));
+      Object.defineProperty(page, "offsetHeight", { configurable: true, get: height });
+      Object.defineProperty(scroller, "clientHeight", { configurable: true, value: VIEW });
+      Object.defineProperty(scroller, "scrollHeight", { configurable: true, get: height });
+      Object.defineProperty(scroller, "scrollTop", {
+        configurable: true,
+        get: () => scrolled,
+        set: (top: number) => {
+          scrolled = clamp(top);
+          setRect(anchor, { left: 0, top: 56 + ANCHOR_AT - scrolled, width: 900, height: 40 });
+        },
+      });
+      setRect(scroller, { left: 0, top: 56, width: 900, height: VIEW });
+      scroller.scrollTop = 0;
+      act(() => shell.bindPageScroll(scroller));
+      return {
+        scroller,
+        page,
+        anchor,
+        /** 新面板挂上：页面的内容高变成 next，越界的滚动位置夹回。 */
+        swap(next: number) {
+          content = next;
+          scroller.scrollTop = scrolled;
+        },
+        scrollTo(top: number) {
+          scroller.scrollTop = top;
+          scroller.dispatchEvent(new Event("scroll"));
+        },
+      };
+    }
+
+    it("滚回锚点之后按此刻的滚动位置托住锚点所在的页面根：新面板较短时滚动不被夹回，标签条不下跳", async () => {
+      await mount();
+      const view = stage(2000);
+      act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+      view.scrollTo(1000);
+      act(() => nav.replace({ page: "instance", id: "生存", tab: "mods" }));
+      // 滚回锚点：320；下面还能滚 2000 - 320 - 600 = 1080，页面至少留 2000 - 1080 = 920
+      expect(view.scroller.scrollTop).toBe(ANCHOR_AT);
+      expect(view.page.style.minHeight).toBe("920px");
+      expect(view.anchor.style.minHeight).toBe("");
+      view.swap(700);
+      expect(view.scroller.scrollTop).toBe(ANCHOR_AT);
+      view.scroller.remove();
+    });
+
+    it("连着换两次：按含托底的此刻高度重算，不叠加；滚回页顶后撤掉，页面回到按内容定高", async () => {
+      await mount();
+      const view = stage(2000);
+      act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+      view.scrollTo(1000);
+      act(() => nav.replace({ page: "instance", id: "生存", tab: "mods" }));
+      view.swap(700);
+      act(() => nav.replace({ page: "instance", id: "生存", tab: "logs" }));
+      expect(view.page.style.minHeight).toBe("920px");
+      view.swap(500);
+      expect(view.scroller.scrollTop).toBe(ANCHOR_AT);
+      view.scrollTo(0);
+      expect(view.page.style.minHeight).toBe("");
+      expect(view.scroller.scrollHeight).toBe(500);
+      view.scroller.remove();
+    });
+
+    it("页面没有锚点时不托", async () => {
+      await mount();
+      const view = stage(2000);
+      view.anchor.removeAttribute(NAV_ANCHOR_ATTR);
+      act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+      view.scrollTo(1000);
+      act(() => nav.replace({ page: "instance", id: "生存", tab: "mods" }));
+      expect(view.page.style.minHeight).toBe("");
+      view.scroller.remove();
+    });
+
+    it("换到别的页面就不再盯着滚动容器", async () => {
+      await mount();
+      const view = stage(2000);
+      act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+      view.scrollTo(1000);
+      act(() => nav.replace({ page: "instance", id: "生存", tab: "mods" }));
+      const removed = vi.spyOn(view.scroller, "removeEventListener");
+      act(() => nav.go({ page: "library" }));
+      expect(removed).toHaveBeenCalledWith("scroll", expect.any(Function));
+      view.scroller.remove();
+    });
   });
 
   it("实例被删除：当前页落到之前的存活项，历史里指向它的项一并剪除", async () => {
@@ -452,6 +641,7 @@ describe("外壳：全局快捷键", () => {
     await mount();
     const chrome = { scrollContentToTop: vi.fn(), focusContent: vi.fn() };
     act(() => shell.bindChrome(chrome));
+    act(() => shell.bindPageScroll(document.createElement("div")));
 
     keydown(window, "1", { ctrlKey: true, code: "Digit1" });
     expect(chrome.scrollContentToTop).toHaveBeenCalledTimes(1);
@@ -473,6 +663,43 @@ describe("外壳：全局快捷键", () => {
     keydown(window, ",", { ctrlKey: true, code: "Comma" });
     expect(chrome.scrollContentToTop).toHaveBeenCalledTimes(3);
     expect(chrome.focusContent).not.toHaveBeenCalled();
+  });
+
+  /** 窗口级按键监听里抛出的错误：不会抛给派发者，只在 window 上报一次 error 事件。收下并拦住它，返回这期间报出的错误。 */
+  function uncaught(run: () => void): unknown[] {
+    const errors: unknown[] = [];
+    const onError = (event: ErrorEvent) => {
+      errors.push(event.error);
+      event.preventDefault();
+    };
+    window.addEventListener("error", onError);
+    try {
+      run();
+    } finally {
+      window.removeEventListener("error", onError);
+    }
+    return errors;
+  }
+
+  it("内容区还没挂上（向导收尾、退场还在播）：按到当前页什么都不做，不报错；内容区挂上之后照常滚回顶部", async () => {
+    await mount();
+    const chrome = { scrollContentToTop: vi.fn(), focusContent: vi.fn() };
+    act(() => shell.bindChrome(chrome));
+    expect(uncaught(() => keydown(window, "1", { ctrlKey: true, code: "Digit1" }))).toEqual([]);
+    expect(chrome.scrollContentToTop).not.toHaveBeenCalled();
+    expect(nav.route).toEqual({ page: "home" });
+    expect(nav.canBack).toBe(false);
+
+    act(() => shell.bindPageScroll(document.createElement("div")));
+    keydown(window, "1", { ctrlKey: true, code: "Digit1" });
+    expect(chrome.scrollContentToTop).toHaveBeenCalledTimes(1);
+  });
+
+  it("内容区挂着、外壳布局却没交来滚回顶部的能力：属于装配错误，照常报错", async () => {
+    await mount();
+    act(() => shell.bindPageScroll(document.createElement("div")));
+    const errors = uncaught(() => keydown(window, "1", { ctrlKey: true, code: "Digit1" }));
+    expect(errors.map((e) => (e instanceof Error ? e.message : String(e)))).toEqual(["外壳布局还没挂载，快捷键没法把内容区滚回顶部"]);
   });
 
   it("首次启动向导期间导航快捷键全部无效", async () => {

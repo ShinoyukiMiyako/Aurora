@@ -28,11 +28,15 @@ export function matchTypeahead(labels: readonly string[], disabled: readonly boo
   return -1;
 }
 
-/** 返回 push(char)：把字符并入当前前缀并返回合并后的前缀；距上次键入超过窗口时重新开始。 */
+/**
+ * 返回 push(char)：把字符并入当前前缀并返回合并后的前缀；距上次键入超过窗口时重新开始。
+ * 按 performance.now() 的单调时钟计时，不用 Date.now()：系统时钟往回调时墙上时间的差值是负的，
+ * 会一直被当成窗口之内，之后的键入全部并进旧前缀、再也跳不到别的项，直到时钟追上为止。
+ */
 export function useTypeahead(): (char: string) => string {
   const state = useRef({ query: "", at: Number.NEGATIVE_INFINITY });
   return (char) => {
-    const now = Date.now();
+    const now = performance.now();
     const s = state.current;
     s.query = now - s.at <= TYPEAHEAD_WINDOW_MS ? s.query + char : char;
     s.at = now;
