@@ -264,7 +264,13 @@ fn update_dto(update: &Update, channel: Channel) -> UpdateDto {
 fn update_millis(update: &Update) -> Option<i64> {
     update
         .date
-        .map(|date| date.unix_timestamp() * 1000 + i64::from(date.millisecond()))
+        .map(|date| unix_millis(date.unix_timestamp(), date.millisecond()))
+}
+
+/// 清单发布时间的整秒数 `seconds` 与秒内毫秒数 `millisecond` 合成 Unix 毫秒。插件把发布时间解析成 `time` 库的
+/// 类型，本 crate 不直接依赖 `time`、写不出那个类型，所以由调用方拆成两段传进来。
+fn unix_millis(seconds: i64, millisecond: u16) -> i64 {
+    seconds * 1000 + i64::from(millisecond)
 }
 
 /// 生效的通道偏好与本包通道之间的关系。
@@ -756,7 +762,7 @@ fn endpoint_answer(
             Ok(signature) => EndpointAnswer::Head(ManifestHead {
                 date: release
                     .pub_date
-                    .map(|date| date.unix_timestamp() * 1000 + i64::from(date.millisecond())),
+                    .map(|date| unix_millis(date.unix_timestamp(), date.millisecond())),
                 version: release.version,
                 signature,
                 update: None,
@@ -4545,6 +4551,34 @@ mod tests {
             ),
             EndpointAnswer::Failed(_)
         ));
+    }
+
+    /// 清单里的发布时间按 Unix 毫秒交出：秒内的毫秒照算，带时区的换成 UTC；1970 年以前的整秒是负数、秒内毫秒仍是
+    /// 正的，合起来照样对；清单没写时为 `None`。
+    #[test]
+    fn manifest_publish_time_is_reported_in_unix_millis() {
+        for (pub_date, millis) in [
+            (Some("2026-11-10T08:00:00Z"), Some(1_794_297_600_000)),
+            (Some("2026-11-10T08:00:00.250Z"), Some(1_794_297_600_250)),
+            (
+                Some("2026-11-10T16:00:00.999+08:00"),
+                Some(1_794_297_600_999),
+            ),
+            (Some("1969-12-31T23:59:59.500Z"), Some(-500)),
+            (None, None),
+        ] {
+            let release: RemoteRelease = serde_json::from_value(json!({
+                "version": "1.0.0-dev.7",
+                "pub_date": pub_date,
+                "url": "https://petalfall.org/updates/dev/installer.exe",
+                "signature": "通用的签名",
+            }))
+            .unwrap_or_else(|err| panic!("{pub_date:?}：{err}"));
+            match endpoint_answer(Ok(None), Some(release)) {
+                EndpointAnswer::Head(head) => assert_eq!(head.date, millis, "{pub_date:?}"),
+                _ => panic!("{pub_date:?}：记下了清单头却没认成清单头"),
+            }
+        }
     }
 
     /// 本包的通道只由应用自己的版本号判定，要问的通道只经 [`followed_channels`] 按生效的偏好取得。接线要
