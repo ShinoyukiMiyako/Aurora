@@ -7533,6 +7533,17 @@ mod tests {
                     available: 9,
                 },
                 MoveBlocker::Pending,
+                MoveBlocker::SourceChanged,
+                MoveBlocker::DataTooNew {
+                    path: PathBuf::from(r"D:\新家\.minecraft"),
+                    found: 3,
+                    supported: 2,
+                    written_by: Some("1.1.0-dev.57".into()),
+                },
+                MoveBlocker::DataFormatUnreadable {
+                    path: PathBuf::from(r"D:\新家\.minecraft"),
+                    reason: "缺 data_format".into(),
+                },
             ],
         };
         let json = serde_json::to_value(move_preview_dto(preview, "新家".into(), false)).unwrap();
@@ -7566,6 +7577,20 @@ mod tests {
                     { "kind": "base_conflict", "bases": ["1.20.1"] },
                     { "kind": "insufficient_space", "needed": 339_091_456, "available": 9 },
                     { "kind": "pending" },
+                    { "kind": "source_changed" },
+                    {
+                        "kind": "data_too_new",
+                        "path": r"D:\新家\.minecraft",
+                        "found": 3,
+                        "supported": 2,
+                        "written_by": "1.1.0-dev.57",
+                        "written_by_channel": "dev",
+                    },
+                    {
+                        "kind": "data_format_unreadable",
+                        "path": r"D:\新家\.minecraft",
+                        "reason": "缺 data_format",
+                    },
                 ],
             })
         );
