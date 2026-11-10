@@ -1,5 +1,80 @@
 import { describe, expect, it } from "vitest";
-import { downloadFailureCopy, sourceSwitchedCopy, UPDATE_COPY } from "./updater";
+import { APP_NAME } from "../lib/app-info";
+import { downloadFailureCopy, refusalReasonCopy, sourceSwitchedCopy, UPDATE_COPY, UPDATE_FOUND_TOAST, updateChannelLabel, updateChannelNote, updateFoundToastBody } from "./updater";
+
+describe("通道的叫法", () => {
+  it("后端的 dev、beta、stable 在界面上叫预览版、测试版、正式版", () => {
+    expect((["dev", "beta", "stable"] as const).map(updateChannelLabel)).toEqual(["预览版", "测试版", "正式版"]);
+  });
+
+  it("三个选项的说明各不相同，提到的别的线也按界面叫法写", () => {
+    expect(UPDATE_COPY.channelOptionDesc).toEqual({
+      dev: "每有改动就出一版，新东西最先到，也最可能有问题",
+      beta: "从预览版里挑出用过一阵的版本，更稳，更新慢一些",
+      stable: "测试版里没再发现问题的版本，最稳，更新最慢",
+    });
+  });
+});
+
+describe("下载中、已下好时改更新通道的确认", () => {
+  it("已下好：正文说丢掉下好的那一版，取消键是「取消」", () => {
+    expect(UPDATE_COPY.channelConfirm("beta", "1.0.0-dev.62", false)).toEqual({
+      title: "把更新通道改成测试版？",
+      body: "已下好的 1.0.0-dev.62 会被丢掉，之后按测试版检查更新。",
+      confirmLabel: "改成测试版",
+      cancelLabel: "取消",
+    });
+  });
+
+  it("正在下载：正文说取消正在下的那一版，取消键是「继续下载」", () => {
+    expect(UPDATE_COPY.channelConfirm("stable", "1.0.0-beta.4", true)).toEqual({
+      title: "把更新通道改成正式版？",
+      body: "正在下载的 1.0.0-beta.4 会被取消，之后按正式版检查更新。",
+      confirmLabel: "改成正式版",
+      cancelLabel: "继续下载",
+    });
+  });
+});
+
+describe("普通更新被拒的原因", () => {
+  it("读不了数据只写被拒的那一版；没能保存偏好写出那一版所属的线", () => {
+    expect(refusalReasonCopy({ version: "1.0.0", channel: "stable", reason: "data_too_new" })).toBe("1.0.0 读不了这台电脑上的数据");
+    expect(refusalReasonCopy({ version: "1.0.0", channel: "stable", reason: "preference_unsaved" })).toBe("没能保存更新通道，正式版 1.0.0 这次先不装");
+    expect(refusalReasonCopy({ version: "1.1.0-beta.2", channel: "beta", reason: "preference_unsaved" })).toBe("没能保存更新通道，测试版 1.1.0-beta.2 这次先不装");
+  });
+
+  it("包认不得换通道只随换过去出现，普通更新的原因句里遇到就报错", () => {
+    expect(() => refusalReasonCopy({ version: "1.0.0-beta.5", channel: "beta", reason: "target_unsupported" })).toThrow("target_unsupported 只随换通道出现");
+  });
+});
+
+describe("跨通道更新：面板的说明行与发现新版本的通知", () => {
+  it("新版本属于包的通道：没有说明行，通知照旧", () => {
+    for (const preference of ["dev", "beta", "stable"] as const) {
+      expect(updateChannelNote({ channel: "beta", preference, packageChannel: "beta" })).toBeNull();
+      expect(updateFoundToastBody({ channel: "beta", preference, packageChannel: "beta" })).toBe("点「查看」了解更新内容");
+    }
+  });
+
+  it("新版本属于偏好通道、不属于包的通道：装上以后就换过去了", () => {
+    const channels = { channel: "beta", preference: "beta", packageChannel: "stable" } as const;
+    expect(updateChannelNote(channels)).toBe("这一版属于测试版，装上以后就换到测试版了。");
+    expect(updateFoundToastBody(channels)).toBe("装上以后就换到测试版了，点「查看」了解更新内容");
+    expect(UPDATE_FOUND_TOAST.title("1.1.0-beta.1")).toBe(`${APP_NAME} 1.1.0-beta.1 可以更新了`);
+  });
+
+  it("新版本属于更慢的线、不是偏好：装上以后照常按偏好收更新，通知照旧", () => {
+    // 预览版的包等测试版追上来，正式版先发了
+    const channels = { channel: "stable", preference: "beta", packageChannel: "dev" } as const;
+    expect(updateChannelNote(channels)).toBe("这一版属于正式版，装上以后照常接收测试版的更新。");
+    expect(updateFoundToastBody(channels)).toBe("点「查看」了解更新内容");
+  });
+
+  it("读不了数据的那一版：面板说明块不说成下载失败", () => {
+    expect(UPDATE_COPY.dataTooNew).toBe("这一版读不了这台电脑上的数据，已丢弃，不会安装。");
+    expect(UPDATE_COPY.dataTooNew).not.toContain("下载失败");
+  });
+});
 
 describe("重启并安装更新的确认", () => {
   it("全是下载：正文写下载任务，取消键是「继续下载」", () => {

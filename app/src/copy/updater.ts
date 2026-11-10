@@ -1,10 +1,20 @@
 // 启动器更新的文案：外壳的更新面板与发现新版本的通知、设置页关于分区的更新卡共用。产品名一律经 APP_NAME 拼入。
 
-import type { UpdaterUnsupportedReason } from "../ipc/system";
-import { APP_NAME } from "../lib/app-info";
-import { CONFIRM_COPY } from "./flows";
+import type { RefusalReason, UpdateChannel, UpdaterUnsupportedReason } from "../ipc/system";
+import { APP_NAME, type ReleaseChannel } from "../lib/app-info";
+import { CONFIRM_COPY, RELEASE_CHANNEL_LABEL } from "./flows";
 
 const RESTART_INSTALL = "重启并安装";
+
+/** 后端的通道名到界面的发布通道：dev 在界面上叫预览版。 */
+export const RELEASE_CHANNEL_OF: Readonly<Record<UpdateChannel, ReleaseChannel>> = { dev: "preview", beta: "beta", stable: "stable" };
+
+/** 后端通道名在界面上的叫法，与关于页的通道标同一套（RELEASE_CHANNEL_LABEL）。 */
+export function updateChannelLabel(channel: UpdateChannel): string {
+  return RELEASE_CHANNEL_LABEL[RELEASE_CHANNEL_OF[channel]];
+}
+
+const STABLE_LABEL = RELEASE_CHANNEL_LABEL.stable;
 
 export const UPDATE_COPY = {
   cardTitle: `${APP_NAME}更新`,
@@ -56,6 +66,45 @@ export const UPDATE_COPY = {
     pubkey_mismatch: "这个版本配的更新签名公钥与它所属的发布通道对不上，验不了更新包，所以不检查更新",
   } satisfies Readonly<Record<UpdaterUnsupportedReason, string>>,
   installingCard: "正在启动安装程序…",
+  // 更新通道：选项块的小标题也是组的读屏名与写入失败通知里的名字
+  channelTitle: "更新通道",
+  channelDesc: "从选的这条线接收更新。选了更稳的线时，现在的版本先留着，等那条线出了更新的版本再换过去。",
+  /** 选项说明是静态的，不随检查结果变：选项块的高度不在眼前变化，「还没有发布」由状态行说。 */
+  channelOptionDesc: {
+    dev: "每有改动就出一版，新东西最先到，也最可能有问题",
+    beta: `从${RELEASE_CHANNEL_LABEL.preview}里挑出用过一阵的版本，更稳，更新慢一些`,
+    stable: `${RELEASE_CHANNEL_LABEL.beta}里没再发现问题的版本，最稳，更新最慢`,
+  } satisfies Readonly<Record<UpdateChannel, string>>,
+  /** 标在包的通道那一项上。不叫「当前通道」：会和勾选的偏好混在一起。 */
+  packageChannelTag: "现在装的",
+  /**
+   * 下载中、已下好时改通道的确认：后端要丢掉旧通道的结果和下好的包，这是唯一会白白损失东西的情形。
+   * 丢掉的只是能重新下载的安装包，所以是普通色调；正在下载时取消键写「继续下载」，免得与取消下载混淆。
+   */
+  channelConfirm: (channel: UpdateChannel, version: string, downloading: boolean) => ({
+    title: `把更新通道改成${updateChannelLabel(channel)}？`,
+    body: downloading
+      ? `正在下载的 ${version} 会被取消，之后按${updateChannelLabel(channel)}检查更新。`
+      : `已下好的 ${version} 会被丢掉，之后按${updateChannelLabel(channel)}检查更新。`,
+    confirmLabel: `改成${updateChannelLabel(channel)}`,
+    cancelLabel: downloading ? CONFIRM_COPY.keepDownloading : CONFIRM_COPY.cancel,
+  }),
+  /** 偏好是正式版而正式版还没有发布时的状态行。 */
+  notPublished: `${STABLE_LABEL}还没有发布`,
+  notPublishedSub: "发布之前收不到任何更新",
+  /** 偏好通道比包的通道慢、还没有接得上的版本时的状态行。要等的正式版号就是当前版本的核心号。 */
+  waiting: (preference: UpdateChannel) => `在等${updateChannelLabel(preference)}追上来`,
+  /** 等待期间只问偏好通道和更慢的通道，包的通道上的修复到不了这台电脑：这是选更慢通道的代价，当场写明。 */
+  waitingSub: (core: string, packageChannel: UpdateChannel) => `要等到${STABLE_LABEL} ${core} 发布，在那之前收不到${updateChannelLabel(packageChannel)}的更新`,
+  /** 偏好通道给出的版本全都旧于这台电脑见过的：界面分不清是缓存、换源还是回放，用中性的说法。 */
+  sourceStale: (channel: UpdateChannel) => `${updateChannelLabel(channel)}的更新源还没跟上`,
+  sourceStaleSub: "它给出的版本比这台电脑以前拿到过的旧，过一阵再查",
+  /** 新版本不属于包的通道时，状态行次句开头写出它属于哪条线。 */
+  fromChannel: (channel: UpdateChannel) => `属于${updateChannelLabel(channel)}`,
+  /** 下好、验过签却不能装的版本：状态行主句。原因见 refusalReasonCopy。 */
+  nothingInstallable: "暂时没有能装的新版本",
+  /** 刚下好就被拒的那一版：原因后面接这一句。 */
+  discarded: (reason: string) => `${reason}，已丢弃`,
   // 更新面板
   panelTitle: (v: string) => `更新到 ${v}`,
   panelSubtitle: (current: string, date: string | null) => (date === null ? `当前 ${current}` : `当前 ${current} · 发布于 ${date}`),
@@ -87,6 +136,15 @@ export const UPDATE_COPY = {
   },
   sourcesFailed: (tried: number) => `${tried} 个下载源都没能下完`,
   signatureInvalid: "更新包签名校验不通过，已丢弃，不会安装",
+  /**
+   * 下载、验签都成了，只是这一版读不了这台电脑上的数据：面板的说明块。不沿用「下载失败：……」，下载是成功的；
+   * 也不给重试，再下必然同样被拒。
+   */
+  dataTooNew: "这一版读不了这台电脑上的数据，已丢弃，不会安装。",
+  /** 面板里的通道说明行，见 updateChannelNote：装上就换到了新版本所属的、也是偏好的那条线。 */
+  channelNoteSwitches: (channel: UpdateChannel) => `这一版属于${updateChannelLabel(channel)}，装上以后就换到${updateChannelLabel(channel)}了。`,
+  /** 面板里的通道说明行：偏好更快的人收到了更慢的线上更新的版本，装上以后仍按偏好收更新。 */
+  channelNoteKeeps: (channel: UpdateChannel, preference: UpdateChannel) => `这一版属于${updateChannelLabel(channel)}，装上以后照常接收${updateChannelLabel(preference)}的更新。`,
   /** 打包、备份这类本地任务不能说成下载：与关窗确认同一口径，有下载时取消键才写「继续下载」。 */
   restartConfirm: (tasks: number, downloads: number) => ({
     title: "重启并安装更新？",
@@ -133,10 +191,59 @@ export function sourceSwitchedCopy(source: { index: number; count: number } | nu
   return UPDATE_COPY.sourceSwitched(source.index, source.count);
 }
 
+/** 本次会话被拒的一个版本：版本号、所属通道与原因，字段同 updater_info 的 refused 条目。 */
+interface RefusedVersion {
+  version: string;
+  channel: UpdateChannel;
+  reason: RefusalReason;
+}
+
+/**
+ * 普通更新被拒的原因句，状态行的次句用它（刚下好就被拒时另接 UPDATE_COPY.discarded）。数据格式号不上界面，只写被拒的那一版。
+ * target_unsupported 只随换通道出现，进不了普通更新的这句话，遇到是调用方取错了条目。
+ */
+export function refusalReasonCopy({ version, channel, reason }: RefusedVersion): string {
+  switch (reason) {
+    case "data_too_new":
+      return `${version} 读不了这台电脑上的数据`;
+    case "preference_unsaved":
+      return `没能保存更新通道，${updateChannelLabel(channel)} ${version} 这次先不装`;
+    case "target_unsupported":
+      throw new Error(`target_unsupported 只随换通道出现，普通更新的拒绝里不该有：${version}`);
+  }
+}
+
+/** 一个可安装版本所属的通道，与偏好、包的通道放在一起，决定面板说明行与通知正文怎么写。 */
+export interface UpdateChannels {
+  /** 新版本所属的通道（UpdateDto 的 channel）。 */
+  channel: UpdateChannel;
+  /** 生效的偏好（updater_info 的 preference）。 */
+  preference: UpdateChannel;
+  /** 包的通道（updater_info 的 package_channel）。 */
+  packageChannel: UpdateChannel;
+}
+
+/**
+ * 更新面板里放在安装说明之前的通道说明行：新版本属于包的通道时没有这一行（与只有一条线时一样）；
+ * 属于偏好通道时说装上就换过去了；属于别的线（偏好更快的人收到更慢的线上更新的版本）时说装上以后照常按偏好收更新。
+ */
+export function updateChannelNote({ channel, preference, packageChannel }: UpdateChannels): string | null {
+  if (channel === packageChannel) return null;
+  if (channel === preference) return UPDATE_COPY.channelNoteSwitches(channel);
+  return UPDATE_COPY.channelNoteKeeps(channel, preference);
+}
+
 /** 自动检查发现新版本时的通知：每个版本只弹一次，动作打开更新面板。 */
 export const UPDATE_FOUND_TOAST = {
   title: (v: string) => `${APP_NAME} ${v} 可以更新了`,
   body: "点「查看」了解更新内容",
+  /** 新版本属于偏好通道、不属于包的通道：装上就换过去了，通知里先说清。 */
+  switchesBody: (channel: UpdateChannel) => `装上以后就换到${updateChannelLabel(channel)}了，点「查看」了解更新内容`,
   action: "查看",
   rememberFailed: "没能记下已提示过的版本",
 } as const;
+
+/** 发现新版本的通知正文：装上会换到偏好通道时用 switchesBody，其余照旧。 */
+export function updateFoundToastBody({ channel, preference, packageChannel }: UpdateChannels): string {
+  return channel === preference && channel !== packageChannel ? UPDATE_FOUND_TOAST.switchesBody(channel) : UPDATE_FOUND_TOAST.body;
+}

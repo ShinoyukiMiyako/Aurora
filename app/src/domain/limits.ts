@@ -28,6 +28,12 @@ export const TOAST_DEDUPE_MS = 3000;
 /** 暂停计时结束后，剩余寿命不足这个值的补到这个值。 */
 export const TOAST_MIN_REMAIN_MS = 2000;
 
+/**
+ * 改了更新通道之后停这么久没再改，才按新偏好检查一次。单选组里按方向键是移动并立即选中，从预览版按到正式版会路过测试版：
+ * 写偏好代价小、每次都写，检查要联网，只按停下来的那一个查。
+ */
+export const CHANNEL_CHECK_DEBOUNCE_MS = 800;
+
 /** 「已复制」原位反馈的停留时长。 */
 export const COPY_FEEDBACK_MS = 2000;
 
