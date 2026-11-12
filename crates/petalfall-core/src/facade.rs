@@ -45,6 +45,9 @@ pub struct Petalfall {
     /// 不自动跟随跳转的客户端，只给带下载凭据的任务用：自动跟随会把凭据头原样带到下一跳的主机，
     /// 由下载引擎逐跳决定带不带。
     http_manual: reqwest::Client,
+    /// 跳转只跟到 https 的客户端，只给自更新的请求用（给更新包下载源测速）：明文那一跳会泄露在下哪个版本，
+    /// 还能被中间人替源站作答。其余请求的下载源可能合法地跳到 http，不跟着收紧。
+    http_update: reqwest::Client,
     runtime: RuntimeContext,
     data_dir: PathBuf,
     game_dir: PathBuf,
@@ -152,6 +155,7 @@ impl Petalfall {
     pub fn open(config: PetalfallConfig, data_dir: PathBuf, config_path: PathBuf) -> Result<Self> {
         let http = petalfall_base::http::build_client()?;
         let http_manual = petalfall_base::http::build_manual_redirect_client()?;
+        let http_update = petalfall_base::http::build_https_redirect_client()?;
         let game_dir = config
             .game_directory
             .clone()
@@ -160,6 +164,7 @@ impl Petalfall {
             config,
             http,
             http_manual,
+            http_update,
             runtime: RuntimeContext::current(),
             data_dir,
             game_dir,
@@ -193,17 +198,18 @@ impl Petalfall {
         })
     }
 
-    /// 以带应用版本的 User-Agent（`Petalfall/<应用版本>`）重建两个共享 HTTP 客户端。
+    /// 以带应用版本的 User-Agent（`Petalfall/<应用版本>`）重建三个共享 HTTP 客户端。
     ///
     /// 构造时的客户端用的是 petalfall-base 自己的 crate 版本，发版只改应用版本时它不会跟着变；镜像站按 UA
-    /// 统计与限流，一个永远不变的版本号让对方分不出新旧客户端。不自动跳转的那个也得重建：带凭据的下载
-    /// 走它，漏掉的话同一个应用会发出两种 UA。桌面应用在构造门面后、任何请求之前调用。
+    /// 统计与限流，一个永远不变的版本号让对方分不出新旧客户端。不自动跳转的与跳转只跟 https 的也得重建：带凭据的
+    /// 下载与更新源测速分别走它们，漏掉的话同一个应用会发出两种 UA。桌面应用在构造门面后、任何请求之前调用。
     ///
     /// 版本同时记在门面上（随快照克隆），游戏目录的数据格式记号抬号时记成是哪个版本写的。
     pub fn with_app_version(mut self, version: &str) -> Result<Self> {
         let config = petalfall_base::http::HttpConfig::for_app_version(version);
         self.http = petalfall_base::http::build_client_with(&config)?;
         self.http_manual = petalfall_base::http::build_manual_redirect_client_with(&config)?;
+        self.http_update = petalfall_base::http::build_https_redirect_client_with(&config)?;
         self.app_version = Some(version.to_owned());
         Ok(self)
     }
@@ -410,6 +416,11 @@ impl Petalfall {
         self.http_manual.clone()
     }
 
+    /// 跳转只跟到 https 的客户端，只给自更新的请求用（克隆廉价：内部 `Arc`）。
+    pub(crate) fn http_update(&self) -> reqwest::Client {
+        self.http_update.clone()
+    }
+
     /// 运行环境快照。
     pub(crate) fn runtime(&self) -> &RuntimeContext {
         &self.runtime
@@ -575,10 +586,13 @@ impl Petalfall {
         let http = petalfall_base::http::build_client().expect("构建测试 HTTP 客户端");
         let http_manual =
             petalfall_base::http::build_manual_redirect_client().expect("构建测试 HTTP 客户端");
+        let http_update =
+            petalfall_base::http::build_https_redirect_client().expect("构建测试 HTTP 客户端");
         Self {
             config,
             http,
             http_manual,
+            http_update,
             runtime: RuntimeContext::new(petalfall_version::OsName::Windows, "x86_64", 64),
             data_dir,
             config_path: game_dir.join("config.json"),
@@ -936,8 +950,8 @@ mod tests {
         assert_eq!(last.transferred, 10);
     }
 
-    /// 门面发出的请求带应用版本的 User-Agent，不自动跳转的客户端也一样；快照（克隆）共用同样的客户端，
-    /// 同样带着。
+    /// 门面发出的请求带应用版本的 User-Agent，不自动跳转的与跳转只跟 https 的客户端也一样；快照（克隆）共用
+    /// 同样的客户端，同样带着。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn requests_carry_the_app_version_in_user_agent() {
         use wiremock::matchers::{header, method, path};
@@ -953,7 +967,7 @@ mod tests {
         let petalfall = test_petalfall().with_app_version("2.3.0-beta.1").unwrap();
         let snapshot = petalfall.clone();
         for facade in [&petalfall, &snapshot] {
-            for client in [facade.http(), facade.http_manual()] {
+            for client in [facade.http(), facade.http_manual(), facade.http_update()] {
                 let status = client
                     .get(format!("{}/ua", server.uri()))
                     .send()

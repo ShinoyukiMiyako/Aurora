@@ -1063,10 +1063,11 @@ where
         }
     }
 
-    // 有端点给出了可用的清单头，这个通道已有结论，前面回了非 2xx 的端点不必再问状态码。
+    // 有端点给出了可用的清单头，这个通道已有结论，前面回了非 2xx 的端点不必再问状态码。再问时跳转只跟到 https：
+    // 源站这时跳到 http 的话，中间人能在明文那一跳答 404，把检查失败说成还没有发布。
     let probe = (found.is_none() && asked.iter().any(|one| matches!(one, Asked::Unsuccessful)))
         .then(|| {
-            petalfall_base::http::build_client_with(
+            petalfall_base::http::build_https_redirect_client_with(
                 &petalfall_base::http::HttpConfig::for_app_version(app_version),
             )
         })
@@ -5075,6 +5076,45 @@ mod tests {
         assert_eq!(detail["endpoints"], json!(endpoints));
         assert_eq!(detail["attempts"][0]["network"], json!("connect"));
         assert!(detail["attempts"][0].get("status").is_none());
+    }
+
+    /// 再问状态码时不跟到 http 的跳转：源站这时把请求 302 到明文地址，中间人就能在明文那一跳答 404，把检查失败
+    /// 说成还没有发布。那一跳不发出，这个端点照样是检查失败，原因链写明拒在哪一跳。
+    /// 本地起不了 https 服务，源站也是 http；拒不拒只看下一跳的协议，与源站自己是不是 https 无关。
+    #[tokio::test]
+    async fn probe_does_not_follow_a_redirect_to_http() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let (plain, plain_url) = source_answering(404).await;
+        let origin = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(MANIFEST))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", plain_url.as_str()))
+            .mount(&origin)
+            .await;
+        let endpoints = vec![format!("{}{MANIFEST}", origin.uri())];
+
+        let outcome = after_release_not_found(Channel::Stable, &endpoints).await;
+        assert_eq!(
+            plain.received_requests().await.unwrap().len(),
+            0,
+            "跳到 http 的那一跳不该发出"
+        );
+        assert_eq!(origin.received_requests().await.unwrap().len(), 1);
+        let err = outcome.expect_err("没问出状态码不能算还没有发布");
+        assert_eq!(err.code, code::UPDATE_CHECK_FAILED);
+        let detail = err.detail.unwrap();
+        assert_eq!(detail["endpoints"], json!(endpoints));
+        assert!(detail.get("status").is_none(), "{detail}");
+        assert!(
+            detail.get("network").is_none(),
+            "拒掉跳转不是网络层失败：{detail}"
+        );
+        assert_eq!(
+            detail["causes"],
+            json!([format!("跳转的下一跳不是 https：{plain_url}")])
+        );
     }
 
     /// 预览版有香港机与 GitHub 两个端点：两个都确认 404 才算没有发布，任一端点故障就说不清它上面有没有新版本。

@@ -104,7 +104,7 @@ pub fn build_client_with(config: &HttpConfig) -> Result<reqwest::Client> {
         .map_err(Error::HttpClientBuild)
 }
 
-/// 两种客户端共用的配置：带凭据的下载换用不跳转的客户端时，超时、UA 与连接池必须与共享客户端一致，
+/// 几种客户端共用的配置：带凭据的下载换用不跳转的客户端时，超时、UA 与连接池必须与共享客户端一致，
 /// 以后给 [`HttpConfig`] 加的项也只改这一处。
 fn configured_builder(config: &HttpConfig) -> reqwest::ClientBuilder {
     let builder = reqwest::Client::builder()
@@ -136,6 +136,44 @@ pub fn build_manual_redirect_client_with(config: &HttpConfig) -> Result<reqwest:
         .build()
         .map_err(Error::HttpClientBuild)
 }
+
+/// 用默认配置构建跳转只跟到 https 的客户端，见 [`build_https_redirect_client_with`]。
+pub fn build_https_redirect_client() -> Result<reqwest::Client> {
+    build_https_redirect_client_with(&HttpConfig::default())
+}
+
+/// 按给定配置构建跳转只跟到 https 的客户端：下一跳不是 https 时那一跳不发出，请求以跳转错误结束；跟到 https 的
+/// 跳转照默认策略最多 10 跳。请求地址本身是不是 https 不归它管。
+///
+/// 自更新里不经更新插件的请求用它（给更新包下载源测速、清单端点回了非 2xx 后再问状态码）：源站一跳到 http，
+/// 链路上的人就看得到在下哪个版本，还能在明文那一跳替源站作答。共享客户端不跟着收紧：游戏文件与 Mod 平台的
+/// 下载源可能合法地跳到 http。
+///
+/// 除跳转策略外与 [`build_client_with`] 逐项相同。
+pub fn build_https_redirect_client_with(config: &HttpConfig) -> Result<reqwest::Client> {
+    configured_builder(config)
+        .redirect(https_redirect_policy())
+        .build()
+        .map_err(Error::HttpClientBuild)
+}
+
+/// 自定义策略不自带跳数上限，下一跳是 https 时交回默认策略判，上限与默认客户端一致。
+fn https_redirect_policy() -> reqwest::redirect::Policy {
+    let default = reqwest::redirect::Policy::default();
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.url().scheme() == "https" {
+            default.redirect(attempt)
+        } else {
+            let next = attempt.url().clone();
+            attempt.error(InsecureRedirect(next))
+        }
+    })
+}
+
+/// 跳转的下一跳不是 https，挂在 reqwest 跳转错误的 source 上，进日志与错误详情。
+#[derive(Debug, thiserror::Error)]
+#[error("跳转的下一跳不是 https：{0}")]
+struct InsecureRedirect(reqwest::Url);
 
 /// 联网请求在网络层失败的种类：连不上（DNS 解析失败、连接被拒、TLS 握手失败都在这里），或者等不到响应。
 /// 收到了响应但状态码不对、响应体解析失败不算：那说明网络是通的。
@@ -460,5 +498,114 @@ mod tests {
         assert_eq!(resp.text().await.unwrap(), "arrived");
         let requests = server.received_requests().await.unwrap();
         assert_eq!(paths_requested(&requests), vec!["/start", "/start", "/end"]);
+    }
+
+    /// 起点在 `origin`，302 到 `next`。
+    async fn mount_redirect_to(origin: &MockServer, next: &str) {
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", next))
+            .mount(origin)
+            .await;
+    }
+
+    /// 本地起不了 https 服务，起点也是 http；拒不拒只看下一跳的协议，与起点是不是 https 无关。同样的两跳，共享
+    /// 客户端会跟过去，拒掉它的正是跳转策略。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn https_redirect_client_refuses_a_hop_to_http_without_sending_it() {
+        let origin = MockServer::start().await;
+        let plain = MockServer::start().await;
+        let next = format!("{}/end", plain.uri());
+        mount_redirect_to(&origin, &next).await;
+        Mock::given(method("GET"))
+            .and(path("/end"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("arrived"))
+            .mount(&plain)
+            .await;
+        let ua = "Petalfall/6.6.6-https";
+        let config = HttpConfig {
+            user_agent: ua.to_owned(),
+            ..HttpConfig::default()
+        };
+
+        let err = build_https_redirect_client_with(&config)
+            .unwrap()
+            .get(format!("{}/start", origin.uri()))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_redirect(), "{err:?}");
+        let refused = std::error::Error::source(&err)
+            .and_then(|source| source.downcast_ref::<InsecureRedirect>())
+            .expect("原因应是下一跳不是 https");
+        assert_eq!(refused.0.as_str(), next);
+        assert_eq!(
+            refused.to_string(),
+            format!("跳转的下一跳不是 https：{next}")
+        );
+        assert_eq!(network_failure(&err), None, "拒掉跳转不是网络层失败");
+        assert!(
+            plain.received_requests().await.unwrap().is_empty(),
+            "明文那一跳不该发出"
+        );
+        let requests = origin.received_requests().await.unwrap();
+        assert_eq!(paths_requested(&requests), vec!["/start"]);
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("user-agent")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            ua,
+            "除跳转策略外沿用同一份配置"
+        );
+
+        let followed = build_client_with(&config)
+            .unwrap()
+            .get(format!("{}/start", origin.uri()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(followed.url().as_str(), next);
+        assert_eq!(followed.text().await.unwrap(), "arrived");
+    }
+
+    /// 下一跳是 https 就照常跟过去。本地起不了 https 服务，用一个只读不答的端口接住那一跳：读到的头一个字节是 TLS
+    /// 握手记录的类型（0x16），说明客户端跟着跳转去握手了，没在跳转这一层拒掉。随后连接被关掉，请求以连不上告终。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn https_redirect_client_follows_a_hop_to_https() {
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let next = format!("https://{}/end", listener.local_addr().unwrap());
+        let (first_byte, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut first = [0u8; 1];
+            stream.read_exact(&mut first).unwrap();
+            first_byte.send(first[0]).unwrap();
+        });
+        let origin = MockServer::start().await;
+        mount_redirect_to(&origin, &next).await;
+
+        let err = build_https_redirect_client()
+            .unwrap()
+            .get(format!("{}/start", origin.uri()))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(!err.is_redirect(), "跳转这一层不该拒掉 https：{err:?}");
+        assert_eq!(network_failure(&err), Some(NetworkFailure::Connect));
+        assert_eq!(
+            received
+                .recv_timeout(Duration::from_secs(5))
+                .expect("没有跟到 https 的那一跳"),
+            0x16
+        );
+        assert_eq!(
+            paths_requested(&origin.received_requests().await.unwrap()),
+            vec!["/start"]
+        );
     }
 }

@@ -121,7 +121,8 @@ impl Petalfall {
     /// 本次下载更新包要依次尝试的源，按「文件下载源」策略排好。
     ///
     /// 自动档并发探测全部候选，每个限时 [`UPDATE_PROBE_TIMEOUT`]；其余两档不探测。只有一个候选时测了也改变不了
-    /// 结果，不探测，省得白等一个时限。
+    /// 结果，不探测，省得白等一个时限。探测的路径里带着版本号与包名，跳转只跟到 https：源站跳到 http 的那一跳
+    /// 不发出，这个源按测不出处理。
     pub async fn package_sources(
         &self,
         candidates: Vec<PackageCandidate>,
@@ -129,7 +130,7 @@ impl Petalfall {
         let policy = self.config().download_source;
         let probes = match policy {
             DownloadSourcePolicy::Auto if candidates.len() > 1 => {
-                Some(probe_all(&self.http(), &candidates).await)
+                Some(probe_all(&self.http_update(), &candidates).await)
             }
             _ => None,
         };
@@ -690,6 +691,54 @@ mod tests {
             5,
             "只有一个候选时不探测"
         );
+    }
+
+    /// 自动档测速不跟到 http 的跳转：源站把探测 302 到明文地址时，那一跳不发出，这个源按测不出处理。跟过去的话，
+    /// 带着版本号与包名的路径以明文发出，中间人还能在那一跳答个 206，替一个本该测不出的源抢到前面。
+    /// 本地起不了 https 服务，源站也是 http；拒不拒只看下一跳的协议，与源站自己是不是 https 无关。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn auto_probe_does_not_follow_a_redirect_to_http() {
+        let plain = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(206))
+            .mount(&plain)
+            .await;
+        let origin = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/cn/pkg.exe"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/cn/pkg.exe", plain.uri())),
+            )
+            .mount(&origin)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/global/pkg.exe"))
+            .respond_with(ResponseTemplate::new(206))
+            .mount(&origin)
+            .await;
+
+        let ordered = petalfall_with(DownloadSourcePolicy::Auto)
+            .package_sources(vec![
+                at("cn", Domestic, format!("{}/cn/pkg.exe", origin.uri())),
+                at(
+                    "global",
+                    Overseas,
+                    format!("{}/global/pkg.exe", origin.uri()),
+                ),
+            ])
+            .await;
+        assert_eq!(
+            plain.received_requests().await.unwrap().len(),
+            0,
+            "跳到 http 的那一跳不该发出"
+        );
+        assert_eq!(
+            probed_paths(&origin).await,
+            ["/cn/pkg.exe", "/global/pkg.exe"]
+        );
+        // cn 测不出、global 测得出，海外在前；cn 跟过去测得出的话，两边比快慢，先后就说不准了
+        assert_eq!(names(&ordered), ["global", "cn"]);
     }
 
     /// 读到请求头结束为止。
