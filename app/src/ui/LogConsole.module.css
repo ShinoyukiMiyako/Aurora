@@ -1,5 +1,9 @@
 .console {
   --log-min-height: 340px;
+  /* 一行四列的前三列宽：时间 / 级别 / 来源；行模板与画布的最小宽共用 */
+  --log-col-time: 64px;
+  --log-col-level: 44px;
+  --log-col-source: 52px;
   position: relative;
   display: flex;
   flex: 1;
@@ -31,6 +35,9 @@
   border-radius: 9px;
   background: var(--sk-bg-2);
   color: var(--sk-text-2);
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .headIcon[data-live] {
@@ -56,6 +63,11 @@
   gap: var(--sk-space-8);
 }
 
+/* 省略说明条外面那层出现动画的包裹，才是这一列 flex 里的项 */
+.omittedSlot {
+  flex: none;
+}
+
 .omitted {
   display: flex;
   flex: none;
@@ -76,10 +88,16 @@
   min-height: 0;
 }
 
+/*
+ * 滚动条槽常驻：日志从不满一屏长到溢出（或筛选后只剩几行）时，自动换行的行宽不再跟着滚动条变 10px、重新折行。
+ * 关掉浏览器的滚动锚定：行靠 transform 定位，锚定看不准；头部截行与说明条出现的找补由组件按行高自己做。
+ */
 .scroller {
   flex: 1;
   min-width: 0;
   overflow: auto;
+  overflow-anchor: none;
+  scrollbar-gutter: stable;
   border-bottom-left-radius: inherit;
   border-bottom-right-radius: inherit;
   background: color-mix(in srgb, var(--sk-bg-2) 55%, transparent);
@@ -96,41 +114,52 @@
   box-shadow: inset 0 0 0 2px var(--sk-accent);
 }
 
+/*
+ * 不换行时，横向可滚的宽度按全部显示行里最长的正文算（--log-text-cols 由组件给出，单位是等宽字符位），
+ * 不随渲染窗口里恰好有哪几行而伸缩：横向滚到长行末尾再纵向滚动，横向位置不会被夹回去。
+ * 固定部分是三列定宽、三个列间距、左右内边距（右边已扣掉滚动条槽）与左边框。
+ */
 .canvas {
   position: relative;
-  min-width: 100%;
+  min-width: max(
+    100%,
+    calc(var(--log-col-time) + var(--log-col-level) + var(--log-col-source) + 3 * var(--sk-space-10) + 2 * var(--sk-space-16) - var(--sk-scrollbar-size) + 2.5px + var(--log-text-cols) * 1ch)
+  );
 }
 
-/* 筛选后一行不剩：日志区顶端一行弱色说明，与日志行同样的左右内边距 */
+/* 筛选后一行不剩：日志区顶端一行弱色说明，与日志行同样的左右内边距（右边扣掉常驻的滚动条槽） */
 .filteredEmpty {
-  padding: var(--sk-space-8) var(--sk-space-16) 0;
+  padding: var(--sk-space-8) calc(var(--sk-space-16) - var(--sk-scrollbar-size)) 0 var(--sk-space-16);
   color: var(--sk-text-2);
   font-family: var(--sk-font);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
 }
 
-/* 一行四列：时间 / 级别 / 来源 / 正文；左边框给级别第三种表达（文字、颜色之外） */
+/*
+ * 一行四列：时间 / 级别 / 来源 / 正文；左边框给级别第三种表达（文字、颜色之外）。
+ * 右内边距扣掉日志区常驻的滚动条槽：槽本身就是右侧留白，两边加起来与左边一样宽
+ */
 .line {
   --log-tone: transparent;
   position: absolute;
   top: 0;
   left: 0;
   display: grid;
-  grid-template-columns: 64px 44px 52px auto;
+  grid-template-columns: var(--log-col-time) var(--log-col-level) var(--log-col-source) auto;
   column-gap: var(--sk-space-10);
   box-sizing: border-box;
   width: max-content;
   min-width: 100%;
   height: 22px;
-  padding: var(--sk-space-2) var(--sk-space-16);
+  padding: var(--sk-space-2) calc(var(--sk-space-16) - var(--sk-scrollbar-size)) var(--sk-space-2) var(--sk-space-16);
   border-left: 2.5px solid var(--log-tone);
   color: var(--sk-text);
   white-space: pre;
 }
 
 .console[data-wrap] .line {
-  grid-template-columns: 64px 44px 52px minmax(0, 1fr);
+  grid-template-columns: var(--log-col-time) var(--log-col-level) var(--log-col-source) minmax(0, 1fr);
   width: 100%;
   height: auto;
   white-space: pre-wrap;
@@ -223,8 +252,25 @@
   transition: scale var(--sk-spring-tap-dur) var(--sk-spring-tap);
 }
 
+/* 悬停叠层：朝提高对比度的方向叠一层（反色胶囊在日樱下叠暗、夜樱下叠亮）。translate 让胶囊自成层叠上下文，叠层垫在文字之下 */
+.jump::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--sk-fill-hover);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
+.jump:hover::before {
+  opacity: 1;
+}
+
 .jump:active {
-  scale: 0.96;
+  scale: 0.97;
 }
 
 .jump:focus-visible {

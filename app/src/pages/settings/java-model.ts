@@ -115,6 +115,18 @@ export function javaNotes(defaultJava: string, runtimes: readonly JavaInstallati
   return notes;
 }
 
+/** 运行时列表骨架在本次会话还没扫过时画几块：一台机器上常见的是一个自带的加一个托管的。 */
+export const RUNTIME_SKELETON_DEFAULT = 2;
+/** 骨架列表的行数上限：再多的位置留空。 */
+export const RUNTIME_SKELETON_MAX = 6;
+
+/** 运行时列表的骨架画几块（不含「自动选择」）：上次扫到几个就画几个，至多 RUNTIME_SKELETON_MAX 块。 */
+export function runtimeSkeletonTiles(lastCount: number | null): number {
+  if (lastCount === null) return RUNTIME_SKELETON_DEFAULT;
+  if (!Number.isInteger(lastCount) || lastCount < 0) throw new Error(`运行时个数必须是非负整数，收到 ${lastCount}`);
+  return Math.min(lastCount, RUNTIME_SKELETON_MAX);
+}
+
 export function joinMajors(majors: readonly number[]): string {
   return majors.map((m) => `Java ${m}`).join("、");
 }

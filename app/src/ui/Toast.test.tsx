@@ -1,11 +1,15 @@
 // @vitest-environment jsdom
-import { AnimatePresence } from "framer-motion";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { AnimatePresence, MotionConfig } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { render, stubResizeObserver, type Rendered } from "../test/dom";
+import { drainFrames, render, stepFrames, stubResizeObserver, type Rendered } from "../test/dom";
 import { Modal } from "./Modal";
 import { TOAST_ACTION_BLOCKED_REASON, Toast, type ToastProps, type ToastSide } from "./Toast";
+import styles from "./Toast.module.css";
 
 let view: Rendered | undefined;
 
@@ -13,9 +17,12 @@ beforeEach(() => {
   stubResizeObserver();
 });
 
-afterEach(() => {
+// 有的用例在假时钟上逐帧走：换计时器之前先卸载、把帧循环排空，同文件后面的用例才推得动动画
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  await drainFrames();
+  vi.useRealTimers();
 });
 
 function mount(ui: ReactNode) {
@@ -73,6 +80,110 @@ describe("Toast 的滑动方向", () => {
   });
 });
 
+describe("减少动画时 Toast 的进出", () => {
+  const reducedRemovable = () => (
+    <MotionConfig reducedMotion="always">
+      <OverlayProvider>
+        <Removable entering={1} leaving={1} />
+        <OverlayRoot />
+      </OverlayProvider>
+    </MotionConfig>
+  );
+  const toastIn = (container: HTMLElement) => {
+    const el = container.querySelector<HTMLElement>("[data-tone]");
+    if (el === null) throw new Error("通知没有挂上");
+    return el;
+  };
+
+  it("入场起点只有透明度：挂载那一刻不带横移与缩放", () => {
+    vi.useFakeTimers();
+    view = render(reducedRemovable());
+    const toast = toastIn(view.container);
+    expect(toast.style.opacity).toBe("0");
+    expect(toast.style.transform).not.toMatch(/translate|scale/);
+  });
+
+  it("退场只淡出：减少动画下位移与缩放一步到位，整段退场里一帧都不先横跳、不先缩", async () => {
+    vi.useFakeTimers();
+    view = render(reducedRemovable());
+    const toast = toastIn(view.container);
+    await stepFrames(30);
+    expect(toast.style.opacity).toBe("1");
+
+    click(buttonByText("收起"));
+    const frames: { transform: string; opacity: number }[] = [];
+    for (let i = 0; i < 40 && toast.isConnected; i++) {
+      await stepFrames(1);
+      frames.push({ transform: toast.style.transform, opacity: Number(toast.style.opacity) });
+    }
+    expect(toast.isConnected).toBe(false);
+    // 确实分几帧淡出（fade.out 约 120 ms），且每一帧都没有位移与缩放
+    expect(frames.filter((f) => f.opacity > 0 && f.opacity < 1).length).toBeGreaterThan(2);
+    expect(frames.filter((f) => /translate|scale/.test(f.transform))).toEqual([]);
+  });
+});
+
+describe("Toast 的重复反馈", () => {
+  const iconBaseOf = (container: HTMLElement) => {
+    const el = container.querySelector<HTMLElement>(`.${styles.iconBase}`);
+    if (el === null) throw new Error("没有图标底座");
+    return el;
+  };
+  const scaleOf = (el: HTMLElement) => {
+    const match = /scale\((-?[\d.]+)\)/.exec(el.style.transform);
+    return match === null ? 1 : Number(match[1]);
+  };
+  /**
+   * 假时钟上逐帧走 count 帧，返回每一帧之后的缩放。峰值只有几十毫秒宽：真实计时器下机器一忙，帧来得晚就会整段错过，
+   * 假时钟上每一帧都按时到，采样可复现。
+   */
+  const scalesOver = async (el: HTMLElement, count: number) => {
+    const seen: number[] = [];
+    for (let i = 0; i < count; i++) {
+      await stepFrames(1);
+      seen.push(scaleOf(el));
+    }
+    return seen;
+  };
+  const withRepeats = (repeats: number, reduced = false) => (
+    <MotionConfig reducedMotion={reduced ? "always" : "never"}>
+      <OverlayProvider>
+        <Toast {...base} repeats={repeats} />
+        <OverlayRoot />
+      </OverlayProvider>
+    </MotionConfig>
+  );
+
+  it("重复的同一条并进来（repeats 变了）：图标底座原位放大约 12% 再落回 1", async () => {
+    vi.useFakeTimers();
+    view = render(withRepeats(0));
+    const icon = iconBaseOf(view.container);
+    view.rerender(withRepeats(1));
+    const seen = await scalesOver(icon, 30);
+    expect(Math.max(...seen)).toBeGreaterThan(1.08);
+    expect(Math.max(...seen)).toBeLessThan(1.14);
+    // 480 ms 之后落回 1，不再回摆
+    expect(seen.at(-1)).toBe(1);
+  });
+
+  it("挂载时已有的次数不弹，次数没变的重渲染也不弹", async () => {
+    vi.useFakeTimers();
+    view = render(withRepeats(2));
+    const icon = iconBaseOf(view.container);
+    expect(Math.max(...(await scalesOver(icon, 8)))).toBe(1);
+    view.rerender(withRepeats(2));
+    expect(Math.max(...(await scalesOver(icon, 8)))).toBe(1);
+  });
+
+  it("减少动画时不弹", async () => {
+    vi.useFakeTimers();
+    view = render(withRepeats(0, true));
+    const icon = iconBaseOf(view.container);
+    view.rerender(withRepeats(1, true));
+    expect(Math.max(...(await scalesOver(icon, 8)))).toBe(1);
+  });
+});
+
 describe("Toast", () => {
   it.each([
     ["info", "status"],
@@ -84,6 +195,12 @@ describe("Toast", () => {
     const toast = container.querySelector("[data-tone]") as HTMLElement;
     expect(toast.getAttribute("role")).toBe(role);
     expect(toast.textContent).toBe("已安装 Sodium正文");
+  });
+
+  it("根元素交给 ref：容器的 popLayout 靠它量尺寸、把退场的那条抽出布局", () => {
+    const ref = { current: null as HTMLDivElement | null };
+    const { container } = mount(<Toast {...base} ref={ref} />);
+    expect(ref.current).toBe(container.querySelector("[data-tone]"));
   });
 
   it("点动作先关闭这条通知再执行动作；关闭按钮只关闭", () => {
@@ -138,6 +255,14 @@ describe("Toast", () => {
     );
     expect(line()).not.toBe(first);
     expect(line().style.getPropertyValue("--toast-from")).toBe("0.4");
+  });
+
+  it("减少动画时倒计时细线照常显示：它是剩余寿命的信息，样式表里没有按减少动画隐藏它的规则", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "Toast.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const reducedRules = [...css.matchAll(/([^{}]*data-sk-reduced[^{}]*)\{([^}]*)\}/g)].map((m) => ({ selector: m[1].trim(), body: m[2] }));
+    expect(reducedRules.filter((r) => r.selector.includes(".countdown"))).toEqual([]);
+    // 细线靠关键帧缩短：减少动画下关键帧照常播，没有把它停掉
+    expect(css).toMatch(/\.countdown \{[^}]*animation: toastCountdown var\(--toast-remaining\) linear forwards;/);
   });
 
   it("不自动消失的通知没有倒计时细线；取值越界抛错", () => {

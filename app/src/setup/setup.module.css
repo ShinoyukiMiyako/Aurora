@@ -98,6 +98,19 @@
   padding: var(--sk-space-28) var(--sk-space-32) var(--sk-space-24);
 }
 
+/*
+ * 换步的那一页撑满主列。定位基准放在这一层：页里被抽出布局淡出的块（popLayout 的退场）按 offsetTop 量位置，
+ * 入场横移时这一层带着 transform，本来就是它们的包含块，两边得是同一个元素才对得上。
+ */
+.pane {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
 .head {
   display: flex;
   flex-direction: column;
@@ -121,6 +134,19 @@
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
   color: var(--sk-text-2);
+}
+
+/* 传了 leadFloor：两段说明叠在同一格里，格子按较高的那段撑开；占位的那段看不见，也不进读屏 */
+.leadSlot {
+  display: grid;
+}
+
+.leadSlot > .lead {
+  grid-area: 1 / 1;
+}
+
+.lead[data-floor] {
+  visibility: hidden;
 }
 
 /* 外扩的内边距抵消掉自身的裁切：贴边控件的焦点环有 4px，overflow 会把它切掉 */
@@ -149,10 +175,12 @@
 
 /* ---------------------------------------------------------------- 窗口按钮 */
 
+/* 换步的页是定位元素、入场时还带 transform，按文档顺序排在按钮后面会盖住它们，得抬一层 */
 .windowControls {
   position: absolute;
   top: 0;
   right: 0;
+  z-index: var(--sk-z-page);
   display: flex;
 }
 
@@ -175,10 +203,10 @@
   width: 34px;
   height: 30px;
   border-radius: var(--sk-r-sm);
+  /* 焦点环（box-shadow）不过渡：键盘聚焦时环要立刻出现、离开时立刻消失 */
   transition:
     background-color var(--sk-dur-hover) var(--sk-ease),
-    color var(--sk-dur-hover) var(--sk-ease),
-    box-shadow var(--sk-dur-hover) var(--sk-ease);
+    color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .winButton:hover .winFace {

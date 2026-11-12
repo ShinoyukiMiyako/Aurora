@@ -10,13 +10,17 @@ import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
+import { prefetchGameDirectories } from "../../state/queries/catalog";
+import { invalidate } from "../../state/resource";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import { emulateFocusFixup } from "../../test/focus-fixup";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { CORE_EVENT } from "../../ipc/tasks";
+import { REFLOW_PAUSED_ATTR } from "../../lib/reflow";
 import { bootOverrides, callsOf, deferred, emit, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { LIBRARY_COPY } from "./copy";
 import LibraryPage from "./index";
+import styles from "./library.module.css";
 import { resetLibraryView } from "./view-state";
 
 // jsdom 没有 requestAnimationFrame，动画库在模块加载时取不到就把帧循环设成空操作，退场永远放不完。
@@ -54,18 +58,20 @@ function sample(): InstanceDto[] {
 
 let instances: InstanceDto[];
 
+const page = () => (
+  <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+    <LauncherProvider>
+      <ShellProvider>
+        <Probe />
+        <LibraryPage />
+        <OverlayRoot />
+      </ShellProvider>
+    </LauncherProvider>
+  </AppearanceProvider>
+);
+
 async function mount() {
-  view = render(
-    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
-      <LauncherProvider>
-        <ShellProvider>
-          <Probe />
-          <LibraryPage />
-          <OverlayRoot />
-        </ShellProvider>
-      </LauncherProvider>
-    </AppearanceProvider>,
-  );
+  view = render(page());
   await flush();
 }
 
@@ -289,37 +295,231 @@ describe("实例库：筛选、搜索与空状态", () => {
     expect(nav.route).toEqual({ page: "discover", kind: "modpack" });
   });
 
-  it("列表 300 ms 内读到：不出现骨架；读得慢才出骨架，出现后至少停留 300 ms", async () => {
+  /** 骨架网格在 Loadable 的骨架层里，那一层整层 aria-hidden。 */
+  const skeletonGrid = () => document.querySelector(`[aria-hidden="true"] > .${styles.grid}`);
+  const skeletons = () => skeletonGrid()?.children.length ?? 0;
+  /** 骨架在等待期：照常占着位置，但不可见。 */
+  const skeletonHidden = () => skeletonGrid()?.closest("[data-pending]") !== null;
+  const repairBanner = () => [...document.querySelectorAll("button")].some((b) => b.textContent === LIBRARY_COPY.repairOne);
+  const loadingStatus = () => {
+    const el = document.querySelector<HTMLElement>(`.${styles.srOnly}[role="status"]`);
+    if (el === null) throw new Error("没有加载说明的状态区");
+    return el;
+  };
+
+  it("加载说明在骨架层之外：状态区常驻，骨架显出来时写上「正在读取实例列表」，读到后清空", async () => {
     const list = deferred<InstanceDto[]>();
     ipc.overrides.set("list_instances", () => list.promise);
     await mount();
-    const skeletons = () => {
-      const grid = document.querySelector(`[aria-label="${LIBRARY_COPY.loadingLabel}"]`);
-      return grid === null ? 0 : grid.children.length;
-    };
-    expect(document.querySelector(`[aria-label="${LIBRARY_COPY.loadingLabel}"]`)).not.toBeNull();
-    expect(skeletons()).toBe(0);
+    expect(loadingStatus().textContent).toBe("");
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(299);
+      await vi.advanceTimersByTimeAsync(300);
     });
-    expect(skeletons()).toBe(0);
+    expect(loadingStatus().textContent).toBe(LIBRARY_COPY.loadingLabel);
+    expect(loadingStatus().closest('[aria-hidden="true"]')).toBeNull();
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1);
+      list.resolve(instances);
+      await settle();
+      await vi.advanceTimersByTimeAsync(300);
     });
-    // jsdom 里没有宽度，按 compact 档铺满两行
-    expect(skeletons()).toBe(6);
+    expect(cardNames()).toHaveLength(4);
+    expect(loadingStatus().textContent).toBe("");
+  });
+
+  it("页头副标题：骨架条显出来过时，读到后文字在同一格里淡入，骨架条叠在下面淡出", async () => {
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    const subtitle = document.querySelector<HTMLElement>("header p");
+    if (subtitle === null) throw new Error("页头没有副标题行");
+    // 等待期这一行空着（页头常驻行高）
+    expect(subtitle.textContent).toBe("");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    const bar = subtitle.querySelector<HTMLElement>('[aria-hidden="true"]')?.parentElement;
+    if (bar === null || bar === undefined) throw new Error("骨架显出来时副标题行里没有骨架条");
+    // 骨架条从透明淡入，不是一帧出现
+    expect(bar.style.opacity).toBe("0");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(100);
       list.resolve(instances);
       await settle();
     });
-    expect(skeletons()).toBe(6);
-    expect(cardNames()).toEqual([]);
+    // 骨架停满之后换成文字的那一刻：文字从透明起，骨架条还不透明地留在同一格里，之后才淡出
     await act(async () => {
       await vi.advanceTimersByTimeAsync(200);
     });
-    expect(skeletons()).toBe(0);
+    const text = [...subtitle.querySelectorAll<HTMLElement>("span")].find((el) => el.childElementCount === 0 && el.textContent === "共 4 个实例 · 1 个固定在侧栏 · 累计 12 小时");
+    if (text === undefined) throw new Error("副标题没有换成文字");
+    expect(text.style.opacity).toBe("0");
+    expect(bar.isConnected).toBe(true);
+    expect(bar.style.opacity).toBe("1");
+    await afterMotion();
+    expect(bar.isConnected).toBe(false);
+    expect(text.style.opacity).toBe("1");
+  });
+
+  it("列表 300 ms 内读到：骨架只占位不显出，数据一到直接换成卡片", async () => {
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    // 等待期也照真实网格占着两行骨架（jsdom 里没有宽度，按 compact 档），只是看不见：数据到达时页面不从 0 高撑开
+    expect(skeletons()).toBe(6);
+    expect(skeletonHidden()).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+      list.resolve(instances);
+      await settle();
+    });
     expect(cardNames()).toHaveLength(4);
+    expect(repairBanner()).toBe(true);
+    await afterMotion();
+    expect(skeletonGrid()).toBeNull();
+  });
+
+  it("读得慢才显出骨架，出现后至少停留 300 ms；修复横幅与卡片同一帧出现，不先插进来把骨架推下去", async () => {
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(299);
+    });
+    expect(skeletonHidden()).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(skeletons()).toBe(6);
+    expect(skeletonHidden()).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+      list.resolve(instances);
+      await settle();
+    });
+    // 数据已经到了，骨架还要再停一会：这期间横幅也不出现
+    expect(skeletons()).toBe(6);
+    expect(cardNames()).toEqual([]);
+    expect(repairBanner()).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    expect(cardNames()).toHaveLength(4);
+    expect(repairBanner()).toBe(true);
+    await afterMotion();
+    expect(skeletonGrid()).toBeNull();
+  });
+
+  it("骨架卡按真实卡片的三行排：名称、介绍、统计各放在真实那一行的类里，换成卡片时卡高不变", async () => {
+    ipc.overrides.set("list_instances", () => deferred<InstanceDto[]>().promise);
+    await mount();
+    const body = skeletonGrid()?.querySelector(`.${styles.body}`);
+    if (body === null || body === undefined) throw new Error("骨架卡没有卡身");
+    expect([...body.children].slice(1).map((row) => row.className)).toEqual([styles.name, styles.meta, styles.stats]);
+    for (const row of [...body.children].slice(1)) expect(row.children).toHaveLength(1);
+  });
+
+  it("实例列表读到之前，筛选各项已经占着计数槽；读完只往槽里填数字", async () => {
+    const list = deferred<InstanceDto[]>();
+    ipc.overrides.set("list_instances", () => list.promise);
+    await mount();
+    const radios = () => [...document.querySelectorAll<HTMLButtonElement>(`[role="radiogroup"][aria-label="${LIBRARY_COPY.filterLabel}"] [role="radio"]`)];
+    expect(radios()).toHaveLength(6);
+    for (const radio of radios()) {
+      const slots = radio.querySelectorAll('span[aria-hidden="true"]');
+      expect(slots).toHaveLength(1);
+      expect(slots[0].textContent).toBe("");
+      expect(radio.getAttribute("aria-label")).toBeNull();
+    }
+    await act(async () => {
+      list.resolve(instances);
+      await settle();
+    });
+    expect(radios().map((radio) => radio.getAttribute("aria-label"))).toEqual(["全部，4 个", "原版，2 个", "Fabric，1 个", "Forge，1 个", "NeoForge，0 个", "Quilt，0 个"]);
+  });
+
+  it("筛到没有结果时网格不卸载：卡片照常退场，无结果说明淡入；清除筛选时说明退场、卡片回来", async () => {
+    await mount();
+    const grid = document.querySelector(`section[aria-label="${LIBRARY_COPY.gridLabel}"]`);
+    if (grid === null) throw new Error("找不到实例网格");
+    click(byLabel("Quilt，0 个"));
+    expect(grid.isConnected).toBe(true);
+    const title = byText<HTMLElement>("h2", LIBRARY_COPY.noMatchTitle);
+    await afterMotion();
+    expect(grid.isConnected).toBe(true);
+    expect(cardNames()).toEqual([]);
+    click(byText("button", LIBRARY_COPY.clearFilter));
+    expect(cardNames()).toHaveLength(4);
+    // 回来的卡片各自从透明入场
+    expect(byLabel("打开「樱花生存」").closest("article")?.parentElement?.style.opacity).toBe("0");
+    // 说明还在原处淡出，已经不可交互
+    expect(title.closest("[inert]")).not.toBeNull();
+    await afterMotion();
+    expect(title.isConnected).toBe(false);
+  });
+
+  /** 45 个实例：44 个原版按创建时间排，再加一个最早建的 Fabric。 */
+  const manyInstances = async () => {
+    instances = [...Array.from({ length: 44 }, (_, i) => instanceDto(`v${i}`, { created_at: NOW - i * HOUR })), instanceDto("织物", { loaders: [{ kind: "fabric", version: "0.16.10" }] })];
+    bootOverrides(ipc, { instances, pins: [] });
+    ipc.overrides.set("list_instances", () => instances);
+    await mount();
+    const grid = document.querySelector<HTMLElement>(`section[aria-label="${LIBRARY_COPY.gridLabel}"]`);
+    if (grid === null) throw new Error("找不到实例网格");
+    return grid;
+  };
+
+  it("一次走掉或新来的格子超过让位上限：走掉的直接撤下、新来的直接放上，整片网格淡入一次，这一次提交里让位暂停", async () => {
+    const grid = await manyInstances();
+    expect(grid.style.opacity).toBe("");
+    click(byLabel("Fabric，1 个"));
+    expect(grid.style.opacity).toBe("0");
+    // 暂停开关只开这一次提交：让位收下这批变化之后就关掉，下一次变化照常滑
+    expect(grid.hasAttribute(REFLOW_PAUSED_ATTR)).toBe(true);
+    await afterMotion();
+    expect(grid.hasAttribute(REFLOW_PAUSED_ATTR)).toBe(false);
+    expect(grid.style.opacity).toBe("1");
+    expect(cardNames()).toEqual(["织物"]);
+    click(byLabel("全部，45 个"));
+    expect(cardNames()).toHaveLength(45);
+    // 新放上的格子不逐个从透明入场：整片网格的淡入代替了它们
+    expect(byLabel("打开「v0」").closest("article")?.parentElement?.style.opacity).toBe("1");
+    expect(grid.style.opacity).toBe("0");
+    expect(grid.hasAttribute(REFLOW_PAUSED_ATTR)).toBe(true);
+  });
+
+  it("实例再多，一次只走掉几张：逐个退场，其余的交给让位滑过去，不整片淡入", async () => {
+    const grid = await manyInstances();
+    // 搜「v」：织物与新建卡走掉，其余 44 张原样排着
+    setInput(byLabel<HTMLInputElement>(LIBRARY_COPY.searchPlaceholder), "v");
+    expect(grid.style.opacity).toBe("");
+    expect(grid.hasAttribute(REFLOW_PAUSED_ATTR)).toBe(false);
+    await afterMotion();
+    expect(cardNames()).toHaveLength(44);
+  });
+
+  it("实例目录恰好叫 create：卡片与新建卡各占一格", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    instances = [...instances, instanceDto("create")];
+    await mount();
+    expect(cardNames()).toContain("create");
+    expect(createTile()).toBeDefined();
+    expect(error.mock.calls.map((args) => String(args[0])).filter((message) => message.includes("same key"))).toEqual([]);
+    error.mockRestore();
+  });
+
+  it("建好第一个实例：空状态淡出、网格在原处淡入，不硬切", async () => {
+    instances = [];
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await mount();
+    const empty = byText<HTMLElement>("h2", LIBRARY_COPY.emptyTitle);
+    await act(async () => {
+      await launcher.actions.createInstance({ name: "周末生存", mcVersion: "1.21.1", loader: "vanilla", loaderVersion: null, cover: "cherry_planks" });
+      await settle();
+    });
+    expect(cardNames()).toEqual(["周末生存"]);
+    expect(empty.closest("[inert]")).not.toBeNull();
+    await afterMotion();
+    expect(empty.isConnected).toBe(false);
   });
 
   it("列表超过 10 秒还没读到：骨架下方追加「比平时慢一些」", async () => {
@@ -506,7 +706,7 @@ describe("实例库：游戏目录", () => {
     ipc.overrides.set("list_game_directories", () => list.promise);
     await mount();
     expect(document.body.textContent).not.toContain(LIBRARY_COPY.emptyTitle);
-    expect(document.querySelector(`[aria-label="${LIBRARY_COPY.loadingLabel}"]`)).not.toBeNull();
+    expect(document.querySelector(`[aria-hidden="true"] > .${styles.grid}`)).not.toBeNull();
     await act(async () => {
       list.resolve([home, pcl]);
       await settle();
@@ -540,6 +740,100 @@ describe("实例库：游戏目录", () => {
     dirsAre([home, pcl]);
     await mount();
     expect(document.body.textContent).toContain(GAME_DIR_SWITCH_COPY.emptyTitle);
+  });
+
+  it("目录列表晚于页面到达：目录选择从透明淡入插进工具条，不是一帧出现", async () => {
+    const list = deferred<GameDirectoryDto[]>();
+    ipc.overrides.set("list_game_directories", () => list.promise);
+    await mount();
+    expect(picker()).toBeNull();
+    await act(async () => {
+      list.resolve([home, pcl]);
+      await settle();
+    });
+    const slot = picker()?.closest<HTMLElement>(`.${styles.tools} > *`);
+    if (slot === null || slot === undefined) throw new Error("目录选择不在工具条的槽位里");
+    expect(slot.style.opacity).toBe("0");
+    await afterMotion();
+    expect(slot.style.opacity).toBe("1");
+  });
+
+  it("目录选择撤掉时按右缘定位淡出：组内靠右排，退场项留在原处，不叠到排序上", async () => {
+    dirsAre([home, pcl]);
+    await mount();
+    const slot = picker()?.closest<HTMLElement>(`.${styles.tools} > *`);
+    if (slot === null || slot === undefined) throw new Error("工具条上没有目录选择");
+    // jsdom 没有布局：只给这一格报出尺寸，popLayout 才会把它抽出布局、写下定位规则
+    const real = window.getComputedStyle.bind(window);
+    const measured = vi.spyOn(window, "getComputedStyle").mockImplementation((el, pseudo) => {
+      const style = real(el, pseudo);
+      if (el !== slot) return style;
+      return new Proxy(style, {
+        get: (target, key) => {
+          if (key === "width") return "148px";
+          if (key === "height") return "30px";
+          const value: unknown = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    });
+    dirsAre([home]);
+    await act(async () => {
+      invalidate("game-dirs");
+      await settle();
+    });
+    const id = slot.dataset.motionPopId;
+    if (id === undefined) throw new Error("目录选择撤掉时没有被抽出布局");
+    const rules = [...document.head.querySelectorAll("style")].flatMap((s) => [...(s.sheet?.cssRules ?? [])].map((r) => r.cssText)).filter((text) => text.includes(id));
+    expect(rules).toHaveLength(1);
+    expect(rules[0]).toMatch(/\bright: /);
+    expect(rules[0]).not.toMatch(/\bleft: /);
+    measured.mockRestore();
+    await afterMotion();
+    expect(picker()).toBeNull();
+  });
+
+  it("外壳已预取目录列表：进实例库的第一帧就带目录选择，不等页面自己去要、晚到再插进来", async () => {
+    dirsAre([home, pcl]);
+    prefetchGameDirectories();
+    await flush();
+    const listed = callsOf(ipc, "list_game_directories").length;
+    // 渲染那一刻就断言：页面自己发的请求要等微任务才回来，这时还在路上
+    view = render(page());
+    const slot = picker()?.closest<HTMLElement>(`.${styles.tools} > *`);
+    if (slot === null || slot === undefined) throw new Error("第一帧的工具条上没有目录选择");
+    expect(slot.style.opacity).toBe("1");
+    expect(picker()?.textContent).toBe("默认目录");
+    // 回到页面照常后台重读一次，盘上的变化仍能看到
+    expect(callsOf(ipc, "list_game_directories")).toHaveLength(listed + 1);
+    await flush();
+  });
+
+  it("预取过之后目录列表被失效、当时没人订阅：条目被丢掉，进实例库时目录选择晚到，淡入插进同一个工具组", async () => {
+    dirsAre([home, pcl]);
+    prefetchGameDirectories();
+    await flush();
+    // 切换目录、移动实例之后的失效：实例库不在时没人订阅，预取来的条目直接丢掉，不会替页面重读
+    const listed = callsOf(ipc, "list_game_directories").length;
+    invalidate("game-dirs");
+    expect(callsOf(ipc, "list_game_directories")).toHaveLength(listed);
+    const list = deferred<GameDirectoryDto[]>();
+    ipc.overrides.set("list_game_directories", () => list.promise);
+    view = render(page());
+    expect(picker()).toBeNull();
+    const tools = document.querySelector(`.${styles.tools}`);
+    if (tools === null) throw new Error("工具条上没有工具组");
+    // 晚到的这一段不靠这里补救：工具组按带目录选择的宽度占位（见 library-layout.test.ts），插进来不改变工具条的行数
+    await act(async () => {
+      list.resolve([home, pcl]);
+      await settle();
+    });
+    const slot = picker()?.closest<HTMLElement>(`.${styles.tools} > *`);
+    if (slot === null || slot === undefined) throw new Error("目录选择没有插进工具组");
+    expect(slot.parentElement).toBe(tools);
+    expect(slot.style.opacity).toBe("0");
+    await afterMotion();
+    expect(slot.style.opacity).toBe("1");
   });
 
   it("只登记了一个目录：工具条上没有目录选择", async () => {
@@ -634,6 +928,26 @@ describe("实例库：动作", () => {
     const repairs = launcher.state.tasks.filter((t) => t.spec.command === "repair_instance");
     expect(repairs.map((t) => t.spec.args)).toEqual([{ id: "坏掉的" }]);
     expect(callsOf(ipc, "repair_instance").map((a) => a.id)).toEqual(["坏掉的"]);
+  });
+
+  it("开始修复：横幅淡出并让出位置，卡身的损坏原因淡出、统计行在原处淡入，底栏换成安装面", async () => {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await mount();
+    const card = byText<HTMLButtonElement>("article button", "坏掉的").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    const reason = byText<HTMLElement>("div", "缺少版本 JSON", card);
+    const repairButton = byText<HTMLButtonElement>("button", LIBRARY_COPY.repairOne);
+    click(repairButton);
+    await flush();
+    expect(repairButton.closest("[inert]")).not.toBeNull();
+    expect(reason.closest("[inert]")).not.toBeNull();
+    const stats = card.querySelector<HTMLElement>(`ul[aria-label="${LIBRARY_COPY.statsLabel}"]`);
+    expect(stats?.parentElement?.style.opacity).toBe("0");
+    expect(card.querySelector('[data-view="installing"]:not([inert])')).not.toBeNull();
+    await afterMotion();
+    expect(reason.isConnected).toBe(false);
+    expect(repairButton.isConnected).toBe(false);
+    expect(stats?.parentElement?.style.opacity).toBe("1");
   });
 
   it("补全连跑两批下载：卡片底栏的进度条第二批从当批进度重新走，不停在上一批的满格", async () => {
@@ -747,6 +1061,13 @@ describe("实例库：动作", () => {
     expect(toastTitles()).toContain("info:「原版」已设为当前实例");
     const card = byText<HTMLButtonElement>("article button", "原版").closest("article");
     expect(card?.textContent).toContain(LIBRARY_COPY.current);
+    // 标签从透明、缩小处弹出，不是一帧出现。文字为「当前」的第一个 span 是弹入弹出的包裹层，标签本身在它里面
+    const tag = card === null ? undefined : byText<HTMLElement>("span", LIBRARY_COPY.current, card);
+    expect(tag?.firstElementChild?.textContent).toBe(LIBRARY_COPY.current);
+    expect(tag?.style.opacity).toBe("0");
+    expect(tag?.style.transform).toContain("scale(0.6)");
+    await afterMotion();
+    expect(tag?.style.opacity).toBe("1");
     click(byLabel("「原版」的更多操作"));
     expect(menuItem(LIBRARY_COPY.menu.selected).getAttribute("aria-disabled")).toBe("true");
   });
@@ -873,6 +1194,42 @@ describe("实例库：动作", () => {
     click(stop);
     await flush();
     expect(callsOf(ipc, "cancel_task")).toHaveLength(1);
+  });
+
+  it("键盘按「启动」换成加载面：旧面留在原处淡出且不可交互，新面从透明入场，焦点交给「取消启动」", async () => {
+    ipc.overrides.set("launch_game", () => deferred<{ pid: number | null }>().promise);
+    await mount();
+    const card = byText<HTMLButtonElement>("article button", "原版").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    const launch = byText<HTMLButtonElement>("button", "启动", card);
+    act(() => launch.focus());
+    click(launch);
+    await flush();
+    const cancel = card.querySelector<HTMLButtonElement>('[aria-label="取消启动"]');
+    if (cancel === null) throw new Error("加载态没有「取消启动」");
+    expect(document.activeElement).toBe(cancel);
+    const leaving = launch.closest<HTMLElement>("[data-view]");
+    expect(leaving?.getAttribute("data-view")).toBe("ready");
+    expect(leaving?.hasAttribute("inert")).toBe(true);
+    const entering = cancel.closest<HTMLElement>("[data-view]");
+    expect(entering?.getAttribute("data-view")).toBe("loading");
+    expect(entering?.style.opacity).toBe("0");
+    await afterMotion();
+    expect(launch.isConnected).toBe(false);
+    expect(entering?.style.opacity).toBe("1");
+  });
+
+  it("焦点不在旧面上时换面不抢焦点", async () => {
+    ipc.overrides.set("launch_game", () => deferred<{ pid: number | null }>().promise);
+    await mount();
+    const card = byText<HTMLButtonElement>("article button", "原版").closest("article");
+    if (card === null) throw new Error("找不到卡片");
+    const search = byLabel<HTMLInputElement>(LIBRARY_COPY.searchPlaceholder);
+    act(() => search.focus());
+    click(byText<HTMLButtonElement>("button", "启动", card));
+    await flush();
+    expect(card.querySelector('[aria-label="取消启动"]')).not.toBeNull();
+    expect(document.activeElement).toBe(search);
   });
 
   it("启动：卡片底栏进入加载态，别的卡注明另一个游戏在运行；运行中的实例不能删除", async () => {

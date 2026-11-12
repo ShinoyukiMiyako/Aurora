@@ -5,12 +5,14 @@
 import { useState } from "react";
 import { ACTION_ERROR, taskFailureReason } from "../../copy/flows";
 import { INSTALL_STAGE_COPY } from "../../copy/install-stage";
+import { useReflow } from "../../lib/reflow";
 import { useNav } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions } from "../../state/launcher";
 import { useOnline } from "../../state/online";
 import type { InstanceTab } from "../../state/route";
 import type { BlockedFileDto } from "../../state/store";
+import { BannerSlot } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
 import { EmptyState } from "../../ui/EmptyState";
@@ -18,7 +20,7 @@ import { BlockedFilesModal } from "../discover/BlockedFilesModal";
 import { TASKS_COPY } from "../tasks/copy";
 import styles from "./instance.module.css";
 import type { InstallStage } from "./model";
-import { InstallingBanner } from "./OverviewTab";
+import { InstallingBanner, useInstallingBanner } from "./OverviewTab";
 
 export interface InstallStageTabProps {
   tab: InstanceTab;
@@ -27,21 +29,30 @@ export interface InstallStageTabProps {
 }
 
 export function InstallStageTab({ tab, instanceId, stage }: InstallStageTabProps) {
-  // 概览在任务排队或在跑时顶上是安装横幅：标题、进度与「查看下载任务」都在横幅里，下面的说明不再重复
-  if (tab === "overview" && (stage.kind === "queued" || stage.kind === "running")) {
-    return (
-      <div className={styles.stack}>
-        <InstallingBanner instanceId={instanceId} />
-        <Card padding="lg">
-          <EmptyState scene="sapling" titleAs="h2" title={INSTALL_STAGE_COPY.title} body={INSTALL_STAGE_COPY.overviewAfter} />
-        </Card>
-      </div>
-    );
-  }
-  return <StagePanel stage={stage} />;
+  if (tab !== "overview") return <StagePanel stage={stage} banner={false} />;
+  return <OverviewStage instanceId={instanceId} stage={stage} />;
 }
 
-function StagePanel({ stage }: { stage: InstallStageTabProps["stage"] }) {
+/**
+ * 概览在任务排队或在跑时顶上是安装横幅：标题、进度与「查看下载任务」都在横幅里，下面的说明不再重复。
+ * 各阶段共用同一副结构（横幅槽 + 说明卡）：任务结束时横幅淡出、说明卡原位换字并滑上去，不整块换掉；
+ * 被拦文件的清单「全部找到」后任务重新排队，说明卡也不卸载，清单的退场才放得完。
+ */
+function OverviewStage({ instanceId, stage }: { instanceId: string; stage: InstallStageTabProps["stage"] }) {
+  const reflow = useReflow<HTMLDivElement>();
+  // 任务刚完成的那一拍页面仍按在跑传进来（见 heldInstallStage），横幅接着画这个已完成的任务、进度推满
+  const banner = stage.kind === "queued" || stage.kind === "running";
+  const install = useInstallingBanner(instanceId, banner);
+  return (
+    <div ref={reflow} className={styles.stack}>
+      <BannerSlot>{banner && <InstallingBanner key="installing" instanceId={instanceId} held={install.held} />}</BannerSlot>
+      <StagePanel stage={stage} banner={banner} />
+    </div>
+  );
+}
+
+/** banner：概览顶上正挂着安装横幅，说明卡只说装好后有什么，不再给「查看下载任务」。 */
+function StagePanel({ stage, banner }: { stage: InstallStageTabProps["stage"]; banner: boolean }) {
   const { go } = useNav();
   const actions = useLauncherActions();
   const run = useRunner();
@@ -100,11 +111,17 @@ function StagePanel({ stage }: { stage: InstallStageTabProps["stage"] }) {
     );
   }
 
-  const body = stage.kind === "landing" ? INSTALL_STAGE_COPY.landing : stage.kind === "queued" ? INSTALL_STAGE_COPY.queued : INSTALL_STAGE_COPY.running(stage.title);
+  const body = banner
+    ? INSTALL_STAGE_COPY.overviewAfter
+    : stage.kind === "landing"
+      ? INSTALL_STAGE_COPY.landing
+      : stage.kind === "queued"
+        ? INSTALL_STAGE_COPY.queued
+        : INSTALL_STAGE_COPY.running(stage.title);
   return (
     <>
       <Card padding="lg">
-        <EmptyState scene="sapling" titleAs="h2" title={INSTALL_STAGE_COPY.title} body={body} action={viewTasks("secondary")} />
+        <EmptyState scene="sapling" titleAs="h2" title={INSTALL_STAGE_COPY.title} body={body} action={banner ? undefined : viewTasks("secondary")} />
       </Card>
       {blockedModal}
     </>

@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
@@ -163,6 +165,27 @@ describe("指针：跟手、钳制与松手提交", () => {
     expect(s.commits).toEqual([]);
   });
 
+  it("按下的跳位仍走过渡；拖出新值后撤掉过渡 1:1 跟手，松手恢复；不改值的抖动不撤", () => {
+    const s = spies();
+    const { control } = mount({ initial: 0 }, s);
+    layout(control);
+    const root = control.closest("[data-tone]") as HTMLElement;
+    pointer(control, "pointerdown", xOf(70));
+    expect(s.changes).toEqual([70]);
+    expect(root.hasAttribute("data-dragging")).toBe(true);
+    expect(root.hasAttribute("data-following")).toBe(false);
+    // 半个像素的抖动换算后还是 70：不算开始拖动
+    pointer(control, "pointermove", xOf(70) + 0.5);
+    expect(root.hasAttribute("data-following")).toBe(false);
+    pointer(control, "pointermove", xOf(72));
+    expect(s.changes).toEqual([70, 72]);
+    expect(root.hasAttribute("data-following")).toBe(true);
+    pointer(control, "pointerup", xOf(72));
+    expect(root.hasAttribute("data-following")).toBe(false);
+    expect(root.hasAttribute("data-dragging")).toBe(false);
+    expect(s.commits).toEqual([72]);
+  });
+
   it("禁用时指针与键盘都无效", () => {
     const s = spies();
     const { control, input } = mount({ initial: 20, disabled: true }, s);
@@ -240,6 +263,150 @@ describe("刻度避让", () => {
     expect(labels()).toEqual(["0", "10", "20", "40", "100"]);
     observers.resize(row, 200);
     expect(labels()).toEqual(["10", "40", "100"]);
+  });
+});
+
+describe("圆钮与填充的样式", () => {
+  // 按 CRLF 检出时多行选择器里夹着 \r，先统一成 \n
+  const css = readFileSync(resolve(__dirname, "Slider.module.css"), "utf8")
+    .replace(/\r\n/g, "\n")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  function ruleOf(selector: string): string {
+    const escaped = selector.replace(/[.[\]()]/g, (ch) => `\\${ch}`);
+    const rule = new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`).exec(css);
+    if (rule === null) throw new Error(`没有 ${selector} 规则`);
+    return rule[1];
+  }
+
+  it("位置只走 translate，不动 left / width", () => {
+    const thumb = ruleOf(".thumb");
+    const fill = ruleOf(".fill");
+    expect(thumb).toContain("translate: calc(var(--slider-p) * (100% - var(--slider-thumb)) + var(--slider-thumb) - 100%) 0;");
+    expect(fill).toContain("translate: calc(var(--slider-thumb) / 2 + var(--slider-p) * (100% - var(--slider-thumb)) - 100%) 0;");
+    for (const rule of [thumb, fill]) {
+      expect(rule).not.toMatch(/(^|\s)(left|width):[^;]*--slider-p/);
+    }
+    // 行程盒与命中区同宽、圆钮贴右端，圆钮自身按圆钮直径画
+    expect(thumb).toContain("right: 0;");
+    expect(thumb).toContain("left: 0;");
+    expect(thumb).toContain("justify-content: flex-end;");
+    expect(ruleOf(".knob")).toContain("width: var(--slider-thumb);");
+  });
+
+  /** 规则里 translate 的横向分量（calc 的参数）。 */
+  function translateX(selector: string): string {
+    const found = /translate: calc\((.*)\) 0;/.exec(ruleOf(selector));
+    if (found === null) throw new Error(`${selector} 的 translate 不是 calc(…) 0`);
+    return found[1];
+  }
+
+  /** 规则里某个属性的取值（不含分号），calc(…) 去掉外壳。 */
+  function declOf(selector: string, property: string): string {
+    const found = new RegExp(`(?:^|[;{\\s])${property}: ([^;]+);`).exec(ruleOf(selector));
+    if (found === null) throw new Error(`${selector} 没有写 ${property}`);
+    const value = found[1].trim();
+    const calc = /^calc\((.*)\)$/.exec(value);
+    return calc === null ? value : calc[1];
+  }
+
+  /**
+   * 按样式表里写的 calc 表达式求像素值：var() 换成给定的取值，百分比按 percentBase 折算，
+   * 只认数字、加减乘除与括号。断言因此跟着样式表里实际写的公式走，而不是在测试里把公式再抄一遍。
+   */
+  function evalCalc(expression: string, vars: Readonly<Record<string, number>>, percentBase: number): number {
+    const src = expression
+      .replace(/var\((--[a-z-]+)\)/g, (_, name: string) => {
+        const value = vars[name];
+        if (value === undefined) throw new Error(`没有给 ${name} 取值`);
+        return `(${value})`;
+      })
+      .replace(/(\d+(?:\.\d+)?)%/g, (_, n: string) => `(${(Number(n) / 100) * percentBase})`);
+    let at = 0;
+    const skip = () => {
+      while (src[at] === " ") at++;
+    };
+    const sum = (): number => {
+      let value = product();
+      for (;;) {
+        skip();
+        const op = src[at];
+        if (op !== "+" && op !== "-") return value;
+        at++;
+        const rhs = product();
+        value = op === "+" ? value + rhs : value - rhs;
+      }
+    };
+    const product = (): number => {
+      let value = factor();
+      for (;;) {
+        skip();
+        const op = src[at];
+        if (op !== "*" && op !== "/") return value;
+        at++;
+        const rhs = factor();
+        value = op === "*" ? value * rhs : value / rhs;
+      }
+    };
+    const factor = (): number => {
+      skip();
+      if (src[at] === "-") {
+        at++;
+        return -factor();
+      }
+      if (src[at] === "(") {
+        at++;
+        const value = sum();
+        skip();
+        if (src[at] !== ")") throw new Error(`calc 括号不配对：${src}`);
+        at++;
+        return value;
+      }
+      const number = /^\d+(?:\.\d+)?/.exec(src.slice(at));
+      if (number === null) throw new Error(`calc 里有认不出的内容：${src.slice(at)}`);
+      at += number[0].length;
+      return Number(number[0]);
+    };
+    const value = sum();
+    skip();
+    if (at !== src.length) throw new Error(`calc 没有读完：${src.slice(at)}`);
+    return value;
+  }
+
+  it("行程盒任何取值下都不越过命中区右缘：只往起始边一侧伸，不撑出横向滚动；圆钮中心与填充右缘重合", () => {
+    // 圆钮直径以样式里的变量为准，并与指针换算用的常量一致
+    const thumbVar = /--slider-thumb: (\d+)px;/.exec(ruleOf(".slider"));
+    expect(thumbVar?.[1]).toBe(String(SLIDER_THUMB));
+    const T = SLIDER_THUMB;
+    const thumbShift = translateX(".thumb");
+    const fillShift = translateX(".fill");
+    // 圆钮贴在行程盒的哪一端，由行程盒的主轴对齐决定（不写时贴起始端）
+    const knobAtEnd = /(?:^|[;{\s])justify-content: flex-end;/.test(ruleOf(".thumb"));
+    // 填充铺满轨道，轨道贴着命中区两侧：填充与命中区同宽
+    expect(declOf(".fill", "inset")).toBe("0");
+    expect([declOf(".rail", "left"), declOf(".rail", "right")]).toEqual(["0", "0"]);
+    for (const w of [T * 3, 220, 500, 1020]) {
+      for (const p of [0, 0.25, 0.5, 1]) {
+        const vars = { "--slider-p": p, "--slider-thumb": T };
+        // 行程盒在命中区坐标里的左右缘：先按 left / right 摆，再按 translate 平移（百分比相对盒子自身宽）
+        const left = evalCalc(declOf(".thumb", "left"), vars, w);
+        const width = w - left - evalCalc(declOf(".thumb", "right"), vars, w);
+        const shift = evalCalc(thumbShift, vars, width);
+        const box = { left: left + shift, right: left + shift + width };
+        expect(box.right).toBeLessThanOrEqual(w + 1e-9);
+        // 圆钮中心落在可用轨道上 p 处，与指针换算（左缘 + T/2 + p × 可用宽）一致
+        const knobCenter = knobAtEnd ? box.right - T / 2 : box.left + T / 2;
+        expect(knobCenter).toBeCloseTo(T / 2 + p * (w - T), 9);
+        // 已填充段的右缘到圆钮中心为止
+        expect(evalCalc(fillShift, vars, w) + w).toBeCloseTo(knobCenter, 9);
+      }
+    }
+  });
+
+  it("非跟手时沿 settle 过渡，跟手与减少动画时不过渡；圆钮悬停与拿起的缩放走 tap", () => {
+    expect(ruleOf(".thumb,\n.fill")).toContain("transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);");
+    expect(ruleOf(".slider[data-following] .thumb,\n.slider[data-following] .fill")).toContain("transition: none;");
+    expect(ruleOf(":global([data-sk-reduced]) .thumb,\n:global([data-sk-reduced]) .fill")).toContain("transition: none;");
+    expect(ruleOf(".knob")).toContain("transition: transform var(--sk-spring-tap-dur) var(--sk-spring-tap);");
   });
 });
 

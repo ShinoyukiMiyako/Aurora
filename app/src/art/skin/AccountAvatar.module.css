@@ -1,17 +1,31 @@
+/* 不裁切：当前账户外环画在方框之外。脸在四周 4 px 底座边之内，本来就不出界 */
 .avatar {
   position: relative;
   display: inline-grid;
   place-items: center;
   flex: none;
-  overflow: hidden;
   background: linear-gradient(160deg, var(--sk-bg-2), var(--sk-bg-3));
 }
 
-.avatar[data-current] {
-  overflow: visible;
+/*
+ * 当前账户外环是独立叠层，换当前账户（外置登录选角色、账户菜单）时只过渡透明度，旧的淡出、新的淡入，
+ * 不在一帧里出现或消失（不过渡 box-shadow）。叠层没有底色，只有外扩的阴影，盖不住脸
+ */
+.avatar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
   box-shadow:
     0 0 0 2px var(--sk-surface),
     0 0 0 4px var(--sk-accent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
+.avatar[data-current]::after {
+  opacity: 1;
 }
 
 .face {

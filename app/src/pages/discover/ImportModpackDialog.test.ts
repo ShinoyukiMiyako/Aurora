@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { IpcError } from "../../ipc/errors";
 import type { ModpackPreviewDto, PackModDto } from "../../ipc/modpack";
 import { claimStatuses, destinationDir } from "./BlockedFilesModal";
-import { droppedFile, excludedPaths, previewErrorText, typedPath } from "./ImportModpackDialog";
+import { droppedFile, excludedPaths, importLayoutKey, previewErrorText, readFace, shownChooseError, typedPath } from "./ImportModpackDialog";
 
 describe("droppedFile", () => {
   it("一次拖进几个文件时读第一个整合包，扩展名不分大小写", () => {
@@ -87,6 +87,56 @@ describe("excludedPaths", () => {
 
   it("重新读取后不再是可选文件、或不在清单里的落点不带上", () => {
     expect(excludedPaths(preview, new Set(["mods/a.jar", "mods/gone.jar", "mods/b.jar"]))).toEqual(["mods/b.jar"]);
+  });
+});
+
+describe("readFace", () => {
+  it("刚开始读：读取面只占位不露面；过了加载门的延迟才露出", () => {
+    expect(readFace(true, "pending")).toBe("pending");
+    expect(readFace(true, "skeleton")).toBe("shown");
+  });
+
+  it("读完了门还留着读取面（露出后至少停留同样久）时照旧露着；门收起才没有读取面", () => {
+    expect(readFace(false, "skeleton")).toBe("shown");
+    expect(readFace(false, "content")).toBeNull();
+  });
+});
+
+describe("shownChooseError", () => {
+  const OLD = "文件不完整或已损坏，重新下载一份再试";
+  const NEW = "只认 .mrpack 和 CurseForge 导出的 .zip";
+
+  it("等待期界面照旧：上一次读完时的错误先留着，这一次的结果还不算", () => {
+    expect(shownChooseError("pending", null, OLD)).toBe(OLD);
+    expect(shownChooseError("pending", NEW, OLD)).toBe(OLD);
+    expect(shownChooseError("pending", null, null)).toBeNull();
+  });
+
+  it("读取面露出时收起错误；读完按这一次的结果", () => {
+    expect(shownChooseError("shown", null, OLD)).toBeNull();
+    expect(shownChooseError(null, NEW, OLD)).toBe(NEW);
+    expect(shownChooseError(null, null, OLD)).toBeNull();
+  });
+});
+
+describe("importLayoutKey", () => {
+  const confirm = { reread: false, blocked: 2, extras: 1 };
+
+  it("只随步骤、底部那一处说明、有没有其他可选文件、选文件步的错误变化", () => {
+    const keys = [
+      importLayoutKey(null, null),
+      importLayoutKey(null, "文件不完整或已损坏，重新下载一份再试"),
+      importLayoutKey(confirm, null),
+      importLayoutKey({ ...confirm, reread: true }, null),
+      importLayoutKey({ ...confirm, blocked: 0 }, null),
+      importLayoutKey({ ...confirm, extras: 0 }, null),
+    ];
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  it("重读期间受限数怎么变都不量布局（那一处已经是重读行）；可选文件的个数变了而有无没变也不量", () => {
+    expect(importLayoutKey({ reread: true, blocked: 2, extras: 1 }, null)).toBe(importLayoutKey({ reread: true, blocked: 0, extras: 1 }, null));
+    expect(importLayoutKey({ ...confirm, extras: 3 }, null)).toBe(importLayoutKey(confirm, null));
   });
 });
 

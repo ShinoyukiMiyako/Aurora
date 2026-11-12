@@ -1,7 +1,8 @@
 // 新建实例各步骤的右栏内容。状态全在流程组件里，这里只负责呈现与回调。
 // 单选列表与单选卡用漫游焦点：组内一个 Tab 停靠点，方向键移动并立即选中，Enter 由流程组件统一当作「下一步」。
 
-import { useLayoutEffect, useRef, type ReactNode } from "react";
+import { useAnimate, useReducedMotionConfig } from "framer-motion";
+import { startTransition, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { COVER_PRESETS, type InstanceCover } from "../../art/iso/covers";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
@@ -9,12 +10,16 @@ import { LoaderTile } from "../../art/illustrations/FeatureTile";
 import { coverLabel, LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { Settings } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
-import { useLoadingGate } from "../../lib/loading-gate";
+import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
+import { fade, insertItem, shake } from "../../lib/motion";
+import { observeReflow, REFLOW_PAUSED_ATTR, REFLOW_SKIP_ATTR } from "../../lib/reflow";
+import { playTrack, playTween, scaleTrack } from "../../lib/slide";
 import { describeError } from "../../state/errors";
 import { useJavaRuntimes, type LoaderVersionDto, type VersionRequirementsDto } from "../../state/queries/catalog";
 import type { StarterModsDto, TemplateInfoDto } from "../../state/queries/starter";
 import type { ResourceResult } from "../../state/resource";
-import { Banner } from "../../ui/Banner";
+import { Appear } from "../../ui/Appear";
+import { Banner, BannerSlot } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Checkbox } from "../../ui/Checkbox";
@@ -23,6 +28,8 @@ import { EmptyState } from "../../ui/EmptyState";
 import { Field } from "../../ui/Field";
 import { Inset } from "../../ui/Inset";
 import { KV } from "../../ui/KV";
+import { ROW_MOTION_LIMIT } from "../../ui/ListRow";
+import { Loadable } from "../../ui/Loadable";
 import { LoaderDot } from "../../ui/LoaderTag";
 import { AUTOFOCUS_ATTR } from "../../ui/Modal";
 import { useRovingGroup } from "../../ui/roving";
@@ -51,9 +58,14 @@ import {
 /** 名称输入框的长度上限，与名称校验的上限一致（按 UTF-16 码元计）。 */
 export const NAME_MAX = 32;
 
-/** 列表加载中的骨架行数与行高。 */
+/** 列表加载中的骨架行数与行高（与真实的行同高，见样式表里的 .row）。 */
 const SKELETON_ROWS = 6;
 const ROW_HEIGHT = 56;
+/**
+ * 版本列表挂载时先画的行数：比列表区可见的行多一些。打开快照后版本有几百行，换步滑入的同时全部同步挂上会卡一下；
+ * 其余的行交给 React 分片在后台渲染，做完再一次提交。
+ */
+const FIRST_PAINT_ROWS = 12;
 
 const TYPE_TONE = { release: "ok", snapshot: "warn", old: "neutral" } as const;
 
@@ -72,14 +84,31 @@ function StepHead({ title, body, right }: { title: string; body: string; right?:
   );
 }
 
-function SkeletonRows({ label }: { label: string }) {
+function SkeletonRows() {
   return (
-    <div className={styles.list} aria-busy="true" aria-label={label}>
+    <div className={styles.list}>
       {Array.from({ length: SKELETON_ROWS }, (_, i) => (
-        <Skeleton key={i} shape="block" width="100%" height={ROW_HEIGHT} radius="md" />
+        <Skeleton key={i} shape="block" width="100%" height={ROW_HEIGHT} radius="md" className={styles.skeletonRow} />
       ))}
     </div>
   );
+}
+
+/**
+ * 读屏听到的「正在读取」：骨架层整层对辅助技术隐藏，说明只能放在 Loadable 外面。播报区常驻，骨架显出来时才写字，
+ * 等待期内就读完的请求不播报。它脱离布局（绝对定位、不参与让位），步骤里的块不因它多一道间距。
+ */
+function LoadingStatus({ view, label }: { view: LoadingView; label: string }) {
+  return (
+    <span className={styles.srOnly} role="status" {...{ [REFLOW_SKIP_ATTR]: "" }}>
+      {view === "skeleton" ? label : ""}
+    </span>
+  );
+}
+
+/** 列表区里不是列表的内容（加载失败、没有结果）：内边距与列表相同，和列表的行左右对齐。 */
+function ListPad({ children }: { children: ReactNode }) {
+  return <div className={styles.listPad}>{children}</div>;
 }
 
 function LoadError({ title, error, onRetry }: { title: string; error: Error | string; onRetry: () => void }) {
@@ -102,24 +131,38 @@ export interface NameStepProps {
   /** 校验错误；名称为空时不显示（只禁用下一步）。 */
   error: string | null;
   onChange: (name: string) => void;
+  /** 按 Enter 被拒的次数：每加一，输入框抖一次，告诉用户这一下没有前进。 */
+  rejected: number;
 }
 
-export function NameStep({ name, error, onChange }: NameStepProps) {
+export function NameStep({ name, error, onChange, rejected }: NameStepProps) {
   const shownError = name.trim() === "" || error === null ? undefined : error;
+  const [shaker, animate] = useAnimate<HTMLDivElement>();
+  const reduced = useReducedMotionConfig() === true;
+  // 只认挂载之后的变化：回到这一步时不重播上一次的拒绝
+  const seen = useRef(rejected);
+  useEffect(() => {
+    if (rejected === seen.current) return;
+    seen.current = rejected;
+    if (reduced) return;
+    void animate(shaker.current, { x: [...shake.x] }, shake.transition);
+  }, [rejected, reduced, animate, shaker]);
   return (
     <>
       <StepHead title={CREATE_COPY.name.title} body={CREATE_COPY.name.body} />
       <Field label={CREATE_COPY.name.label} hint={CREATE_COPY.name.hint} error={shownError}>
-        <TextInput
-          size="lg"
-          value={name}
-          onChange={onChange}
-          placeholder={CREATE_COPY.name.placeholder}
-          maxLength={NAME_MAX}
-          autoFocus
-          {...{ [AUTOFOCUS_ATTR]: "" }}
-          suffix={`${name.length}/${NAME_MAX}`}
-        />
+        <div ref={shaker} data-shaker="">
+          <TextInput
+            size="lg"
+            value={name}
+            onChange={onChange}
+            placeholder={CREATE_COPY.name.placeholder}
+            maxLength={NAME_MAX}
+            autoFocus
+            {...{ [AUTOFOCUS_ATTR]: "" }}
+            suffix={`${name.length}/${NAME_MAX}`}
+          />
+        </div>
       </Field>
       <div className={styles.ideas}>
         <span className={styles.ideasLabel}>{CREATE_COPY.name.ideasLabel}</span>
@@ -159,8 +202,8 @@ export interface VersionStepProps {
 
 export function VersionStep(props: VersionStepProps) {
   const { status, problem, onRetry, items, latestId, staleSince, value, onChange, filter, onFilter, selectedJava, now } = props;
-  const count = staleSince === null ? CREATE_COPY.version.count(items.length) : `${CREATE_COPY.version.count(items.length)} · ${CREATE_COPY.version.stale(staleSince, now)}`;
-  const { slow } = useLoadingGate(status === "loading");
+  const gate = useLoadingGate(status === "loading");
+  const counted = status === "ready" && problem === null;
   return (
     <>
       <StepHead title={CREATE_COPY.version.title} body={CREATE_COPY.version.body} />
@@ -173,22 +216,44 @@ export function VersionStep(props: VersionStepProps) {
           aria-label={CREATE_COPY.version.search}
           className={styles.versionSearch}
         />
-        <Checkbox checked={filter.snapshots} onChange={(snapshots) => onFilter({ snapshots })} label={CREATE_COPY.version.snapshots} />
-        <Checkbox checked={filter.old} onChange={(old) => onFilter({ old })} label={CREATE_COPY.version.old} />
-        {status === "ready" && problem === null && <span className={styles.filterCount}>{count}</span>}
+        <Checkbox checked={filter.snapshots} onChange={(snapshots) => onFilter({ snapshots })} label={CREATE_COPY.version.snapshots} className={styles.filterFixed} />
+        <Checkbox checked={filter.old} onChange={(old) => onFilter({ old })} label={CREATE_COPY.version.old} className={styles.filterFixed} />
+        {/* 计数槽常驻：清单没到时透明占位，到了原位淡入，筛选行不会因它出现而重排 */}
+        <span className={styles.filterCount} data-pending={!counted || undefined} aria-hidden={!counted || undefined}>
+          {CREATE_COPY.version.count(items.length)}
+        </span>
       </div>
-      {problem !== null ? (
-        <LoadError title={CREATE_COPY.version.loadError} error={problem} onRetry={onRetry} />
-      ) : status !== "ready" ? (
-        <>
-          <SkeletonRows label={CREATE_COPY.version.loadingLabel} />
-          {slow && <p className={styles.slowHint}>{SLOW_LOADING_HINT}</p>}
-        </>
-      ) : items.length === 0 ? (
-        <EmptyState scene="search" compact titleAs="h4" title={CREATE_COPY.version.noMatch(filter.query.trim())} />
-      ) : (
-        <VersionList items={items} latestId={latestId} value={value} onChange={onChange} selectedJava={selectedJava} now={now} />
-      )}
+      <LoadingStatus view={gate.view} label={CREATE_COPY.version.loadingLabel} />
+      <Loadable view={gate.view} skeleton={<SkeletonRows />} className={styles.listArea} contentClassName={styles.listFill}>
+        {() => (
+          <Appear itemClassName={styles.listFill}>
+            {problem !== null ? (
+              <ListPad key="error">
+                <LoadError title={CREATE_COPY.version.loadError} error={problem} onRetry={onRetry} />
+              </ListPad>
+            ) : items.length === 0 ? (
+              <ListPad key="empty">
+                <EmptyState scene="search" compact titleAs="h4" title={CREATE_COPY.version.noMatch(filter.query.trim())} />
+              </ListPad>
+            ) : (
+              <VersionList key="list" items={items} latestId={latestId} value={value} onChange={onChange} selectedJava={selectedJava} now={now} />
+            )}
+          </Appear>
+        )}
+      </Loadable>
+      {/* 列表区下方的一行说明：加载比平时慢、版本列表来自离线缓存。放在列表之下，出现时只缩短列表区，不推动上面的内容 */}
+      <Appear itemClassName={styles.listNoteItem}>
+        {gate.view !== "content" && gate.slow && (
+          <p key="slow" className={styles.listNote}>
+            {SLOW_LOADING_HINT}
+          </p>
+        )}
+        {counted && staleSince !== null && (
+          <p key="stale" className={styles.listNote}>
+            {CREATE_COPY.version.stale(staleSince, now)}
+          </p>
+        )}
+      </Appear>
     </>
   );
 }
@@ -201,15 +266,70 @@ function VersionList({
   selectedJava,
   now,
 }: Pick<VersionStepProps, "items" | "latestId" | "value" | "onChange" | "selectedJava" | "now">) {
+  // 先画前一屏多一点（见 FIRST_PAINT_ROWS），其余的行在过渡更新里渲染：React 分片做完、不占住换步的滑入
+  const [filled, setFilled] = useState(items.length <= FIRST_PAINT_ROWS);
+  useEffect(() => {
+    if (!filled) startTransition(() => setFilled(true));
+  }, [filled]);
+  const rows = filled ? items : items.slice(0, FIRST_PAINT_ROWS);
+
+  // 筛选或搜索换了行。进出的行不多时逐行处理：新来的行淡入并从略小处落到位，留下的行由让位从原位置滑到新位置，
+  // 删掉的行直接离开、空出来的位置由滑上来的行补上（行上不挂进出场：几百行各包一层的开销不值这一下淡出）。
+  // 一次进或出超过 ROW_MOTION_LIMIT 行（开关快照与远古版本、搜索一次换掉大半）算换了一批：整个列表淡入一次，这一批不让位。
+  // 出的行也要数：几百行一起走时，留下的行会从上千像素外滑进视野
+  const listRef = useRef<HTMLDivElement | null>(null);
+  // 回调必须稳定：每次渲染换一个会拆掉重建观察，丢掉记下的旧位置
+  const attachList = useCallback((el: HTMLDivElement | null) => {
+    listRef.current = el;
+    if (el === null) return;
+    const stop = observeReflow(el);
+    return () => {
+      listRef.current = null;
+      stop();
+    };
+  }, []);
+  const reduced = useReducedMotionConfig() === true;
+  const [, animateList] = useAnimate<HTMLDivElement>();
+  // 签名就是按序排好的 id，行变了的那一刻拆开来比
+  const signature = items.map((v) => v.id).join("\n");
+  const shownSignature = useRef(signature);
+  useLayoutEffect(() => {
+    if (shownSignature.current === signature) return;
+    const before = new Set(shownSignature.current.split("\n"));
+    shownSignature.current = signature;
+    const list = listRef.current;
+    if (list === null) throw new Error("版本列表尚未挂载");
+    const ids = signature.split("\n");
+    const after = new Set(ids);
+    const entering = new Set(ids.filter((id) => !before.has(id)));
+    const leaving = [...before].filter((id) => !after.has(id)).length;
+    if (entering.size > ROW_MOTION_LIMIT || leaving > ROW_MOTION_LIMIT) {
+      // 暂停开关与这一批增删在同一次提交里打开，让位把两者记在同一趟、整批落到新位置；下一帧关上，之后的筛选照常滑
+      list.setAttribute(REFLOW_PAUSED_ATTR, "");
+      requestAnimationFrame(() => list.removeAttribute(REFLOW_PAUSED_ATTR));
+      // 透明度先在提交时压到 0，首帧就看不到整批新行一闪
+      list.style.opacity = "0";
+      void animateList(list, { opacity: [0, 1] }, fade.in);
+      return;
+    }
+    // 行与 items 同序；过渡渲染还没画出来的行，之后挂上时直接出现
+    ids.forEach((id, i) => {
+      const row = list.children[i];
+      if (!entering.has(id) || !(row instanceof HTMLElement) || typeof row.animate !== "function") return;
+      playTween(row, [{ opacity: 0 }, { opacity: 1 }], fade.in);
+      if (!reduced) playTrack(row, scaleTrack("settle", insertItem.initial.scale));
+    });
+  }, [signature, animateList, reduced]);
+
   const roving = useRovingGroup(
-    items.map((v) => ({ value: v.id })),
+    rows.map((v) => ({ value: v.id })),
     value,
     onChange,
     false,
   );
   return (
-    <div role="radiogroup" aria-label={CREATE_COPY.version.listLabel} className={styles.list} onKeyDown={roving.onKeyDown}>
-      {items.map((v, i) => {
+    <div ref={attachList} role="radiogroup" aria-label={CREATE_COPY.version.listLabel} className={styles.list} onKeyDown={roving.onKeyDown}>
+      {rows.map((v, i) => {
         const on = v.id === value;
         const sub = on && selectedJava !== null ? `${CREATE_COPY.version.released(v.releasedAt, now)} · ${CREATE_COPY.version.java(selectedJava)}` : CREATE_COPY.version.released(v.releasedAt, now);
         return (
@@ -335,18 +455,30 @@ export interface LoaderVersionStepProps {
 }
 
 export function LoaderVersionStep({ loader, mcVersion, versions, recommended, value, onChange }: LoaderVersionStepProps) {
+  const gate = useLoadingGate(versions.status === "loading");
   return (
     <>
       <StepHead title={CREATE_COPY.loaderVersion.title(loader)} body={CREATE_COPY.loaderVersion.body} />
-      {versions.status === "error" && versions.data === undefined ? (
-        <LoadError title={CREATE_COPY.loaderVersion.loadError(loader)} error={versions.error} onRetry={versions.reload} />
-      ) : versions.data === undefined ? (
-        <SkeletonRows label={CREATE_COPY.loaderVersion.loadingLabel} />
-      ) : versions.data.length === 0 ? (
-        <EmptyState icon="info" compact titleAs="h4" title={CREATE_COPY.loaderVersion.empty(loader, mcVersion)} body={CREATE_COPY.loaderVersion.emptyBody} />
-      ) : (
-        <LoaderVersionList loader={loader} items={versions.data} recommended={recommended} value={value} onChange={onChange} />
-      )}
+      <LoadingStatus view={gate.view} label={CREATE_COPY.loaderVersion.loadingLabel} />
+      <Loadable view={gate.view} skeleton={<SkeletonRows />} className={styles.listArea} contentClassName={styles.listFill}>
+        {() => {
+          if (versions.data === undefined) {
+            if (versions.status !== "error") throw new Error("加载器版本还在读取，不该画内容");
+            return (
+              <ListPad>
+                <LoadError title={CREATE_COPY.loaderVersion.loadError(loader)} error={versions.error} onRetry={versions.reload} />
+              </ListPad>
+            );
+          }
+          return versions.data.length === 0 ? (
+            <ListPad>
+              <EmptyState icon="info" compact titleAs="h4" title={CREATE_COPY.loaderVersion.empty(loader, mcVersion)} body={CREATE_COPY.loaderVersion.emptyBody} />
+            </ListPad>
+          ) : (
+            <LoaderVersionList loader={loader} items={versions.data} recommended={recommended} value={value} onChange={onChange} />
+          );
+        }}
+      </Loadable>
     </>
   );
 }
@@ -506,17 +638,24 @@ export interface ConfirmStepProps {
   onOpenAfter: (open: boolean) => void;
   /** 键值表下方的「开局选项」。 */
   starter: StarterOptionsProps;
-  /** 上一次点「创建并开始安装」的错误；没有为 null。 */
-  error: unknown;
+  /** 上一次点「创建并开始安装」的失败；没失败过为 null。 */
+  failure: CreateFailure | null;
 }
 
-export function ConfirmStep({ name, version, loader, loaderVersion, cover, settings, requirements, willPin, openAfter, onOpenAfter, starter, error }: ConfirmStepProps) {
+/** 创建失败：原因与这是第几次失败（每失败一次加一，原因相同也加）。 */
+export interface CreateFailure {
+  error: unknown;
+  attempt: number;
+}
+
+export function ConfirmStep({ name, version, loader, loaderVersion, cover, settings, requirements, willPin, openAfter, onOpenAfter, starter, failure }: ConfirmStepProps) {
   const c = CREATE_COPY.confirm;
   const loaderValue = loader === "vanilla" ? c.vanilla : loaderVersion === null ? LOADER_NAME[loader] : `${LOADER_NAME[loader]} ${loaderVersion}`;
   const java = useConfirmJava(requirements, settings);
+  const pinned = java.status === "ready" ? pinnedJava(java.java) : null;
   return (
     <>
-      {error !== null && <CreateFailed error={error} />}
+      <BannerSlot itemClassName={styles.failed}>{failure !== null && <CreateFailed key="failed" failure={failure} />}</BannerSlot>
       <StepHead title={c.title} body={c.body} />
       <Inset className={styles.summary}>
         <KV
@@ -526,12 +665,19 @@ export function ConfirmStep({ name, version, loader, loaderVersion, cover, setti
             { label: c.loader, value: loaderValue },
             { label: c.cover, value: coverLabel(cover.block) },
             { label: c.java, value: settings === null ? <Skeleton shape="text" width={180} /> : <JavaValue state={java} autoDownload={settings.autoDownloadJava} /> },
-            // 体积只统计游戏本体（客户端、库、资源）；有库没标大小时后端给 null，宁可不写也不写一个偏小的数
-            ...(requirements.status === "loading"
-              ? [{ label: c.download, value: <Skeleton shape="text" width={120} /> }]
-              : requirements.status === "ready" && requirements.data.download_bytes !== null
-                ? [{ label: c.download, value: <DownloadValue bytes={requirements.data.download_bytes} withLoader={loader !== "vanilla"} /> }]
-                : []),
+            // 体积只统计游戏本体（客户端、库、资源）；有库没标大小时后端给 null，宁可写估不出也不写一个偏小的数。
+            // 这一行一直在：读到之前是骨架，读不到或估不出写原因，下面的内容不因它删掉而上移
+            {
+              label: c.download,
+              value:
+                requirements.status === "loading" ? (
+                  <Skeleton shape="text" width={120} />
+                ) : requirements.status === "ready" && requirements.data.download_bytes !== null ? (
+                  <DownloadValue bytes={requirements.data.download_bytes} withLoader={loader !== "vanilla"} />
+                ) : (
+                  c.downloadUnknown
+                ),
+            },
             {
               label: c.path,
               value: settings === null ? <Skeleton shape="text" width={220} /> : <span className={styles.path}>{instancePath(settings.gameDir, name)}</span>,
@@ -539,7 +685,8 @@ export function ConfirmStep({ name, version, loader, loaderVersion, cover, setti
           ]}
         />
       </Inset>
-      {java.status === "ready" && <PinnedJavaNote java={java.java} />}
+      {/* Java 的结论常在进了这一步之后才到：说明块淡入，下面的块由步骤容器的让位滑下去 */}
+      <Appear>{pinned !== null && <PinnedJavaNote key="pinned-java" java={pinned} />}</Appear>
       {version.type === "snapshot" && <WarnNote>{c.snapshotWarning}</WarnNote>}
       <StarterOptions {...starter} />
       <div className={styles.after}>
@@ -550,18 +697,24 @@ export function ConfirmStep({ name, version, loader, loaderVersion, cover, setti
   );
 }
 
-/** 创建失败的原因写在这一步最上面：开局选项让这一步常要滚动，出现时把滚动容器带回顶部，不让它停在视野之外。 */
-function CreateFailed({ error }: { error: unknown }) {
+/**
+ * 创建失败的原因写在这一步最上面：开局选项让这一步常要滚动，出现时把滚动容器带回顶部，不让它停在视野之外。
+ * 回顶是平滑滚动，看得出内容是往哪边去的；减少动画时瞬时到位。
+ * 再失败一次就换一个横幅节点（外面这层与槽位不动）：原因一字不差时原地换字等于什么都没变，读屏不会再播报，
+ * 新插入的 alert 才会。新旧两个节点同尺寸、在同一次提交里交接，下面的内容不跳。
+ */
+function CreateFailed({ failure }: { failure: CreateFailure }) {
   const host = useRef<HTMLDivElement>(null);
+  const reduced = useReducedMotionConfig() === true;
   useLayoutEffect(() => {
-    const pane = host.current === null ? null : host.current.parentElement;
+    const pane = host.current === null ? null : host.current.closest<HTMLElement>(`.${styles.pane}`);
     if (pane === null) throw new Error("创建失败的横幅没有挂在步骤里");
-    pane.scrollTop = 0;
-  }, [error]);
+    pane.scrollTo({ top: 0, behavior: reduced ? "auto" : "smooth" });
+  }, [failure, reduced]);
   return (
-    <div ref={host} className={styles.failed}>
-      <Banner tone="danger" title={CREATE_COPY.confirm.failed} announce>
-        {describeError(error)}
+    <div ref={host}>
+      <Banner key={failure.attempt} tone="danger" title={CREATE_COPY.confirm.failed} announce>
+        {describeError(failure.error)}
       </Banner>
     </div>
   );
@@ -643,6 +796,7 @@ export function StarterOptions({ loader, mcVersion, template, templateBlock, sta
         });
   const performanceReason = starterReason(performanceBlock, () => s.noneAvailable(mcVersion));
   const performanceNames = performance === null ? [] : performance.available.map((m) => m.name);
+  const footnoteHidden = !checked.api && !checked.performance;
 
   const retry =
     starter.status === "error" ? (
@@ -683,7 +837,15 @@ export function StarterOptions({ loader, mcVersion, template, templateBlock, sta
           )}
         </StarterOption>
       )}
-      {(checked.api || checked.performance) && <p className={styles.starterNote}>{s.footnote}</p>}
+      {/*
+       * 脚注只要勾了任一个 Mod 项就显示。它在可滚动的步骤里、随勾选来回出没：常驻占位，只切透明度，
+       * 下面「创建后打开」那一行不跟着跳，滚到底时取消勾选也不会被夹回的滚动位置带着整屏下移
+       */}
+      {modded && (
+        <p className={styles.starterNote} data-hidden={footnoteHidden || undefined} aria-hidden={footnoteHidden || undefined}>
+          {s.footnote}
+        </p>
+      )}
     </div>
   );
 }
@@ -726,10 +888,16 @@ function JavaValue({ state, autoDownload }: { state: ConfirmJavaState; autoDownl
   }
 }
 
+type PinnedJava = Extract<ConfirmJava, { kind: "pinnedMismatch" | "pinnedMissing" }>;
+
+/** 要在键值表下方补一段说明的 Java 结论；其余的为 null。 */
+function pinnedJava(java: ConfirmJava): PinnedJava | null {
+  return java.kind === "pinnedMismatch" || java.kind === "pinnedMissing" ? java : null;
+}
+
 /** 全局固定的默认 Java 用不了或与这个版本不符：一句后果，一句出路。新建流程里没有实例级的 Java 选项，出路指向创建后的实例设置。 */
-function PinnedJavaNote({ java }: { java: ConfirmJava }) {
+function PinnedJavaNote({ java }: { java: PinnedJava }) {
   const c = CREATE_COPY.confirm;
-  if (java.kind !== "pinnedMismatch" && java.kind !== "pinnedMissing") return null;
   const effect = java.kind === "pinnedMissing" ? c.pinnedGone : java.pinned < java.required ? c.pinnedLower(java.pinned) : c.pinnedHigher(java.pinned);
   return (
     <Callout tone="warn" icon="alert">

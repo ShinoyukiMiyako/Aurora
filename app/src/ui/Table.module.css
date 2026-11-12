@@ -1,12 +1,15 @@
 /*
  * 表格是自己的滚动容器：页面用 fill 锁住高度时由它内部滚动，表头吸顶；高度不受限时随内容变高。
- * 行左右 6 + 单元格左右 12：首列左缘与末列右缘正好 18，与卡片 md 内边距对齐，且不随隐藏列变化。
+ * 滚动条槽常驻：行数在限高上下浮动（筛选、增删）时滚动条出没，弹性列不再跟着伸缩、末端的开关与操作列不再横跳。
+ * 行左 6 + 单元格左 12：首列左缘 18，与卡片 md 内边距对齐，且不随隐藏列变化；
+ * 右侧由滚动条槽占住，行右不再留白，末列右缘为单元格右 12 加槽宽。
  */
 .table {
   position: relative;
   min-width: 0;
   max-height: 100%;
   overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 .head {
@@ -23,7 +26,7 @@
   grid-template-columns: var(--table-cols-compact);
   align-items: center;
   box-sizing: border-box;
-  padding: 0 var(--sk-space-6);
+  padding: 0 0 0 var(--sk-space-6);
 }
 
 :global([data-sk-tier="regular"]) .headRow,
@@ -123,9 +126,26 @@
   box-shadow: var(--sk-focus);
 }
 
+/* 排序箭头常驻：排序列淡入，换列时旧列淡出；降序时转半圈 */
 .sortIcon {
   flex: none;
   color: var(--sk-text-2);
+  opacity: 0;
+  transition:
+    opacity var(--sk-dur-hover) var(--sk-ease),
+    rotate var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.sortButton[data-sorted] .sortIcon {
+  opacity: 1;
+}
+
+.sortButton[data-sorted="desc"] .sortIcon {
+  rotate: 180deg;
+}
+
+:global([data-sk-reduced]) .sortIcon {
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
 }
 
 /* ---- 行 ---- */
@@ -138,10 +158,10 @@
   border-bottom: 1px solid var(--sk-line);
   color: var(--sk-text);
   outline: none;
-  transition: background-color var(--sk-dur-hover) var(--sk-ease);
 }
 
-.row:last-child {
+/* 末行按数据标记认（data-last），不用 :last-child：退场中的行抽出布局后仍是文档里的最后一个子项 */
+.row[data-last] {
   border-bottom: 0;
 }
 
@@ -156,6 +176,7 @@
   cursor: pointer;
 }
 
+/* 悬停底色瞬时跟手：指针扫过一列行时不留拖尾。只有选中底色淡入（过渡写在目标状态上，取消选中瞬时） */
 .row:hover {
   background: color-mix(in srgb, var(--sk-bg-2) 60%, transparent);
 }
@@ -163,6 +184,17 @@
 .row[data-selected],
 .row[data-selected]:hover {
   background: var(--sk-accent-soft);
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+/* 按下行（不是按行内控件）：深一档底色，瞬时 */
+.row[data-activatable]:active:not(:has(:is(button, a[href], input, select, textarea, label, [role="switch"], [role="checkbox"], [role="button"]):active)) {
+  background: var(--sk-bg-2);
+  transition: none;
+}
+
+.row[data-activatable][data-selected]:active:not(:has(:is(button, a[href], input, select, textarea, label, [role="switch"], [role="checkbox"], [role="button"]):active)) {
+  background: var(--sk-accent-soft-2);
 }
 
 /* 外环会被卡片裁掉，改成内描边 */
@@ -170,7 +202,12 @@
   box-shadow: inset 0 0 0 2px var(--sk-accent);
 }
 
-/* 内容失效：文字列淡化，缩略图去色；开关与操作列保持不透明。缩略图组件以 img 或 data-media 标记 */
+/* 内容失效：文字列淡化，缩略图去色；开关与操作列保持不透明。缩略图组件以 img 或 data-media 标记。
+   淡化走透明度过渡，与开关拇指的滑动同拍；去色是 filter，保持瞬时 */
+.cell {
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
 .row[data-inactive] .cell:not([data-keep]) {
   opacity: var(--sk-disabled);
 }

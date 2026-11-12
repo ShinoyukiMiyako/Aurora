@@ -14,15 +14,63 @@
 
 /* ---------------------------------------------------------------- 底栏 */
 
+/* 两句提示叠在同一格：宽度取长的那句，换步时只交叉淡化，右边按钮行的宽度不变 */
 .footHint {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sk-space-4);
+  display: inline-grid;
   min-width: 0;
   overflow: hidden;
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
   white-space: nowrap;
+}
+
+.footHintLine {
+  display: inline-flex;
+  grid-area: 1 / 1;
+  align-items: center;
+  gap: var(--sk-space-4);
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
+}
+
+.footHintLine[data-current] {
+  opacity: 1;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+/*
+ * 按钮行占满提示之外的宽度并靠右：宽度不随按钮增减而变，「上一步」出没时「取消」才有位置可让（让位只认定宽的容器）。
+ * 定位基准：退场中的「上一步」脱离布局后原地淡出。
+ */
+.footActions {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sk-space-10);
+  min-width: 0;
+}
+
+.footItem {
+  display: flex;
+  flex: none;
+}
+
+/* 主按钮与隐形的「创建并开始安装」叠在同一格：格宽取后者，真按钮撑满，换文案、换加载态都不改宽度 */
+.primarySlot {
+  display: inline-grid;
+  flex: none;
+}
+
+.primaryButton,
+.primaryGhost {
+  grid-area: 1 / 1;
+}
+
+.primaryGhost {
+  display: flex;
+  visibility: hidden;
 }
 
 /* ---------------------------------------------------------------- 左栏 */
@@ -69,8 +117,9 @@
   white-space: nowrap;
 }
 
-/* 块级而非弹性盒：版本号加加载器版本可能超宽，块级容器里的行内内容才能出省略号 */
+/* 块级而非弹性盒：版本号加加载器版本可能超宽，块级容器里的行内内容才能出省略号。版本没到时空着也占一行 */
 .previewMeta {
+  min-height: var(--sk-lh-caption);
   overflow: hidden;
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
@@ -96,7 +145,11 @@
   color: var(--sk-on-media-2);
 }
 
+/* 定位基准与层叠上下文：当前步的滑块垫在各行按钮之下 */
 .steps {
+  --cr-step-min-height: 42px;
+  position: relative;
+  isolation: isolate;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-2);
@@ -105,8 +158,20 @@
   list-style: none;
 }
 
+/* 当前步的底色：只有一块，换步时沿 translate 滑到新的一行，位置由脚本按当前行写入 */
+.stepMark {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: -1;
+  height: var(--cr-step-min-height);
+  border-radius: var(--sk-r);
+  background: var(--sk-accent-soft);
+  pointer-events: none;
+}
+
 .stepButton {
-  --cr-step-min-height: 42px;
   display: flex;
   align-items: center;
   gap: var(--sk-space-10);
@@ -136,21 +201,45 @@
   box-shadow: var(--sk-focus);
 }
 
+/* 圆点换态（当前、完成、到达过）时底色、描边、字色渐变，和滑过来的当前步底色同一拍，不在换步那一帧突变 */
 .stepDot {
   --cr-step-dot: 24px;
+  --cr-step-dot-border: 1.5px;
+  position: relative;
   display: grid;
   flex: none;
   place-items: center;
   box-sizing: border-box;
   width: var(--cr-step-dot);
   height: var(--cr-step-dot);
-  border: 1.5px solid var(--sk-line-2);
+  border: var(--cr-step-dot-border) solid var(--sk-line-2);
   border-radius: var(--sk-r-pill);
   background: var(--sk-surface);
   color: var(--sk-text-2);
   font-size: var(--sk-fs-micro);
   font-weight: var(--sk-w-title);
   font-variant-numeric: tabular-nums;
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+/* 当前步的渐变底与光晕：渐变与投影都不能过渡，画在叠层上，只淡入淡出这一层 */
+.stepDot::before {
+  content: "";
+  position: absolute;
+  inset: calc(var(--cr-step-dot-border) * -1);
+  border-radius: inherit;
+  background: var(--sk-accent-grad);
+  box-shadow: var(--sk-accent-glow);
+  opacity: 0;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
+/* 序号与勾号压在叠层之上 */
+.stepGlyph {
+  position: relative;
 }
 
 .stepText {
@@ -179,10 +268,6 @@
   white-space: nowrap;
 }
 
-.stepButton[data-state="current"] {
-  background: var(--sk-accent-soft);
-}
-
 .stepButton[data-state="current"] .stepLabel {
   color: var(--sk-accent-strong);
   font-weight: var(--sk-w-title);
@@ -190,9 +275,11 @@
 
 .stepButton[data-state="current"] .stepDot {
   border-color: transparent;
-  background: var(--sk-accent-grad);
   color: var(--sk-accent-ink);
-  box-shadow: var(--sk-accent-glow);
+}
+
+.stepButton[data-state="current"] .stepDot::before {
+  opacity: 1;
 }
 
 .stepButton[data-state="done"] .stepDot {
@@ -227,7 +314,11 @@
   overflow: hidden;
 }
 
-/* 每一步各自是滚动容器：换步后新内容从顶部开始，不继承上一步的滚动位置 */
+/*
+ * 每一步各自是滚动容器：换步后新内容从顶部开始，不继承上一步的滚动位置。
+ * 块的增删由让位滑过去。滚动锚定照常开着：视野上方的块变高时浏览器挪滚动位置把可见内容留在原处，
+ * 让位认得挂在滚动容器自己身上的这一挪，按抵消后的位移算，不会再从上面滑下来一次
+ */
 .pane {
   display: flex;
   flex: 1;
@@ -295,38 +386,111 @@
 
 /* ---------------------------------------------------------------- 版本与加载器版本：单选列表 */
 
+/* 筛选行不折行：计数的位数变化、字体回落时多出的一两个像素都不能把列表整体推下一行 */
 .filterRow {
   --cr-version-search: 160px;
   display: flex;
   flex: none;
-  flex-wrap: wrap;
   align-items: center;
-  gap: var(--sk-space-8) var(--sk-space-16);
+  gap: var(--sk-space-16);
+}
+
+.versionSearch,
+.filterFixed {
+  flex: none;
 }
 
 .versionSearch {
   width: var(--cr-version-search);
 }
 
+/* 计数占住筛选行余下的宽度、靠右；清单没到时透明占位，到了原位淡入；真放不下时出省略号而不是换行 */
 .filterCount {
-  margin-left: auto;
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
   font-variant-numeric: tabular-nums;
+  text-align: end;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
 }
 
-/* 列表自己滚动，标题与筛选条留在原位；四周留出聚焦环不被滚动裁切的余量 */
+.filterCount[data-pending] {
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
+}
+
+/*
+ * 列表区：占住筛选行下面余下的高度，列表在里面自己滚动，标题与筛选条留在原位。骨架与列表在这一格里交叉淡化，
+ * 比这一格高的骨架被裁掉。四周外扩出聚焦环的余量，右侧再外扩一个滚动条槽宽：列表的槽位常驻、落在步骤的右内边距里，
+ * 筛到只剩几行时滚动条消失，行的右缘与行尾的加载器标签也不横移
+ */
+.listArea {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  margin: calc(var(--sk-space-4) * -1) calc((var(--sk-space-4) + var(--sk-scrollbar-size)) * -1) calc(var(--sk-space-4) * -1) calc(var(--sk-space-4) * -1);
+  overflow: hidden;
+}
+
+.listFill {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .list {
   display: flex;
   flex: 1;
   flex-direction: column;
   gap: var(--sk-space-6);
   min-height: 0;
-  margin: calc(var(--sk-space-4) * -1);
   padding: var(--sk-space-4);
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
+/* 列表区里不是列表的内容（加载失败、没有结果）：与列表的行左右对齐 */
+.listPad {
+  padding: var(--sk-space-4) calc(var(--sk-space-4) + var(--sk-scrollbar-size)) var(--sk-space-4) var(--sk-space-4);
+}
+
+/* 骨架行与真实的行同高，不被定高的列表区压扁 */
+.skeletonRow {
+  flex: none;
+}
+
+/* 列表区下方的说明行（加载慢、离线缓存）：出现时只缩短列表区 */
+.listNoteItem {
+  flex: none;
+}
+
+.listNote {
+  margin: 0;
+  color: var(--sk-text-2);
+  font-size: var(--sk-fs-caption);
+  line-height: var(--sk-lh-caption);
+}
+
+/* 只给读屏的加载说明：绝对定位脱离步骤的弹性布局，不占间距 */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/*
+ * 行高 56：上下内边距比刻度少 1px，补的是描边，两行文字（20 + 2 + 18）正好放下，与骨架行同高。
+ * 打开快照后有几百行：视野外的行跳过布局与绘制
+ */
 .row {
   --cr-row-height: 56px;
   display: flex;
@@ -337,7 +501,9 @@
   width: 100%;
   min-width: 0;
   min-height: var(--cr-row-height);
-  padding: var(--sk-space-8) var(--sk-space-12);
+  padding: calc(var(--sk-space-8) - 1px) var(--sk-space-12);
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto var(--cr-row-height);
   border: 1px solid var(--sk-line-2);
   border-radius: var(--sk-r);
   background: var(--sk-surface);
@@ -537,7 +703,10 @@
   -webkit-line-clamp: 2;
 }
 
-/* 选中勾：加载器卡与封面样本共用，未选中时缩小隐藏，选中时弹出 */
+/*
+ * 选中勾：加载器卡与封面样本共用，未选中时缩小隐藏，选中时弹出。
+ * 过渡写在目标状态上：选中时淡入、缩放带回弹；取消时淡出更快、缩回不回弹
+ */
 .check {
   --cr-check: 20px;
   position: absolute;
@@ -554,13 +723,16 @@
   opacity: 0;
   scale: 0.5;
   transition:
-    opacity var(--sk-dur-hover) var(--sk-ease),
-    scale var(--sk-spring-pop-dur) var(--sk-spring-pop);
+    opacity var(--sk-dur-out) var(--sk-ease-in),
+    scale var(--sk-dur-out) var(--sk-ease-in);
 }
 
 [aria-checked="true"] > .check {
   opacity: 1;
   scale: 1;
+  transition:
+    opacity var(--sk-dur-in) var(--sk-ease-out),
+    scale var(--sk-spring-pop-dur) var(--sk-spring-pop);
 }
 
 /* ---------------------------------------------------------------- 外观：封面样本 */
@@ -700,10 +872,17 @@
   color: var(--sk-warn);
 }
 
+/* 脚注常驻占位，没勾任何 Mod 项时只是透明：随勾选出没时下面的行不跳 */
 .starterNote {
   margin: 0;
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+.starterNote[data-hidden] {
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
 }
 
 /* 预计下载：数字等宽，「不含加载器」用弱色跟在后面 */
@@ -722,15 +901,17 @@
 
 /* ---------------------------------------------------------------- 减少动画 */
 
-/* 只处理带缩放的几处：状态直接切换；只变颜色的过渡不算运动，照常保留 */
-:global([data-sk-reduced]) .check,
+/* 只处理带缩放的几处；只变颜色、透明度的过渡不算运动，照常保留 */
 :global([data-sk-reduced]) .radio::after {
   transition: none;
 }
 
-.slowHint {
-  margin: 0;
-  color: var(--sk-text-2);
-  font-size: var(--sk-fs-caption);
-  line-height: var(--sk-lh-caption);
+/* 选中勾不缩放，只淡入淡出 */
+:global([data-sk-reduced]) .check {
+  scale: 1;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
+}
+
+:global([data-sk-reduced]) [aria-checked="true"] > .check {
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
 }

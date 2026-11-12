@@ -13,6 +13,8 @@ import {
   reduce,
   relaunchesAfterUpdate,
   replay,
+  stepDirection,
+  stepKey,
   upgradesUnattended,
   withAppFolder,
   type SetupEvent,
@@ -423,6 +425,57 @@ describe("打开启动器", () => {
 describe("关窗", () => {
   it("只有安装中不能关", () => {
     expect(ALL_VIEWS.filter((view) => !canCloseWindow(view))).toEqual(["installing"]);
+  });
+});
+
+describe("换步", () => {
+  it("准备升级页和安装中是同一页，换过去不算换步", () => {
+    expect(stepKey("preparing")).toBe(stepKey("installing"));
+    expect(stepDirection("preparing", "installing")).toBe(0);
+    expect(ALL_VIEWS.filter((view) => view !== "preparing" && stepKey(view) !== view)).toEqual([]);
+  });
+
+  it("欢迎页与选目录页之间原地换，路径行不横移", () => {
+    expect(stepDirection("welcome", "location")).toBe(0);
+    expect(stepDirection("location", "welcome")).toBe(0);
+  });
+
+  it.each([
+    ["welcome", "installing"],
+    ["location", "installing"],
+    ["installed", "installing"],
+    ["welcome", "blocked"],
+    ["preparing", "blocked"],
+    ["blocked", "installing"],
+    ["installing", "done"],
+    ["installing", "failed"],
+    ["failed", "installing"],
+    ["failed", "blocked"],
+    ["done", "legal"],
+    ["welcome", "legal"],
+  ] as const)("%s 到 %s 往前走", (from, to) => {
+    expect(stepDirection(from, to)).toBe(1);
+  });
+
+  it.each([
+    ["blocked", "welcome"],
+    ["blocked", "installed"],
+    ["failed", "welcome"],
+    ["failed", "location"],
+    ["failed", "installed"],
+    ["legal", "welcome"],
+    ["legal", "done"],
+  ] as const)("%s 退回 %s", (from, to) => {
+    expect(stepDirection(from, to)).toBe(-1);
+  });
+
+  it.each(ALL_VIEWS.filter((view) => view !== "fatal"))("%s 崩进致命错误页时原地换", (view) => {
+    expect(stepDirection(view, "fatal")).toBe(0);
+  });
+
+  it("探测完的第一页不算换步", () => {
+    expect(stepDirection("boot", "welcome")).toBe(0);
+    expect(stepDirection("boot", "preparing")).toBe(0);
   });
 });
 

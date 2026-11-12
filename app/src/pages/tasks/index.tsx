@@ -4,11 +4,20 @@
 //
 // 订阅分两层：页面只订阅任务表的结构（增删、换状态），分组、筛选、页头与已结束的行只在结构变化时重排；
 // 下载进度每个任务约 100 ms 一次，只交给吞吐卡、通道卡与运行中的那一行，它们各自订阅自己要的那一片。
+//
+// 动起来的地方：任务完成时进度条先在原处推满、留一拍（lib/progress-display 的收尾），再换到已结束；换组的行从旧位置飞到新位置，
+// 两组之间、组内其余的行都滑到新位置。横幅、全部取消、空状态与列表互换都有进出场，骨架与内容叠着交叉淡化。
 
-import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useReducedMotionConfig } from "framer-motion";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ACTION_ERROR, BOOT_SLICE_ERROR, PAGE_LABEL, SLOW_LOADING_HINT } from "../../copy/flows";
+import { TASK_HISTORY_LIMIT } from "../../domain/limits";
 import type { Task } from "../../domain/types";
 import { useLoadingGate } from "../../lib/loading-gate";
+import { useCompletionHold, useDisplaySpeed, useFinishing } from "../../lib/progress-display";
+import { observeReflow, REFLOW_MAX_ITEMS, useReflow } from "../../lib/reflow";
+import { playTrack, springTrack } from "../../lib/slide";
+import { cssVars } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { describeError } from "../../state/errors";
@@ -17,19 +26,23 @@ import { useOnline } from "../../state/online";
 import type { PageProps, TaskFilter } from "../../state/route";
 import type { BlockedFileDto } from "../../state/store";
 import { isActiveTask, queuePosition } from "../../state/tasks";
-import { Banner } from "../../ui/Banner";
+import { Appear } from "../../ui/Appear";
+import { Banner, BannerSlot } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Card } from "../../ui/Card";
 import { EmptyState } from "../../ui/EmptyState";
+import { LabelSlot } from "../../ui/LabelSlot";
 import { List } from "../../ui/ListRow";
-import { EntranceBlock, Page } from "../../ui/Page";
+import { Loadable } from "../../ui/Loadable";
+import { EntranceBlock, EntranceBoundary, numberEntrance, Page, useEntranceIndex } from "../../ui/Page";
 import { PageHeader } from "../../ui/PageHeader";
 import { SegmentedControl } from "../../ui/SegmentedControl";
 import { Skeleton } from "../../ui/Skeleton";
 import { BlockedFilesModal } from "../discover/BlockedFilesModal";
-import { RELATIVE_TIME_REFRESH_MS } from "./constants";
+import { FILTER_SKELETON_WIDTH, LIST_SKELETON_ROWS, OVERVIEW_HEIGHT, RELATIVE_TIME_REFRESH_MS } from "./constants";
 import { TASKS_COPY } from "./copy";
+import { useChartFrame } from "./hooks";
 import { LanesCard } from "./LanesCard";
 import {
   bucketTasks,
@@ -39,19 +52,27 @@ import {
   filterCounts,
   filterOf,
   filterRoute,
+  finishedAtOf,
+  listBuckets,
   overviewOf,
+  overviewTrack,
   retryNeedsNetwork,
-  rowMeta,
   sameTaskLayout,
   subtitleOf,
   TASK_FILTERS,
   taskGroups,
-  type TaskBuckets,
+  type TaskGroup,
 } from "./model";
 import styles from "./tasks.module.css";
-import { TaskRow } from "./TaskRow";
+import { TASK_ROW_ATTR, TaskRow } from "./TaskRow";
 import { readThroughputHistory, ThroughputScope } from "./throughput";
 import { ThroughputCard } from "./ThroughputCard";
+
+/** 计数按几位数字定宽：已结束的任务最多留 TASK_HISTORY_LIMIT 条，计数到得了三位，跨位数时筛选与按钮都不变宽。 */
+const COUNT_DIGITS = String(TASK_HISTORY_LIMIT).length;
+
+/** 总览行至少与骨架一样高：骨架换成内容时下面的筛选与列表不动。 */
+const OVERVIEW_STYLE = cssVars({ "--tasks-overview-h": `${OVERVIEW_HEIGHT}px` });
 
 export default function TasksPage({ route }: PageProps<"tasks">) {
   // 运行中任务的对象在这里停在上一次结构变化时：它们的进度只由下面的进度部件读
@@ -72,6 +93,10 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   const buckets = bucketTasks(tasks);
   const counts = filterCounts(buckets);
   const active = [...buckets.running, ...buckets.queued];
+  const finishing = useFinishing(
+    buckets.done.map((t) => ({ id: t.id, finishedAt: finishedAtOf(t) })),
+    useCompletionHold(),
+  );
 
   // 确认框开着的时候任务可能已经自己结束了：确认后按最新的任务表判断还有没有可取消的（状态变化属于结构，这里总是新的）
   const latestTasks = useRef(tasks);
@@ -86,7 +111,6 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   }, [actions, unseenFailures]);
 
   const gate = useLoadingGate(slice.kind === "loading" && tasks.length === 0);
-  const showSkeleton = gate.view === "skeleton";
 
   const cancel = async (task: Task) => {
     const ask = cancelConfirm(task);
@@ -100,23 +124,34 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
     await run(() => actions.cancelAllTasks(), ACTION_ERROR.cancelTask);
   };
 
+  const finishedCount = buckets.finished.length;
   const header = (
     <PageHeader
       key="header"
+      className={styles.header}
       titleId={titleId}
       title={PAGE_LABEL.tasks}
       subtitle={subtitleOf(buckets)}
       actions={
-        <>
-          {active.length >= 2 && (
-            <Button variant="ghost" icon="x" onClick={() => void cancelAll()}>
-              {TASKS_COPY.cancelAll}
-            </Button>
-          )}
-          <Button variant="secondary" icon="trash" disabled={buckets.finished.length === 0} onClick={() => actions.clearFinishedTasks()}>
-            {TASKS_COPY.clearFinished(buckets.finished.length)}
+        <div className={styles.headerActions}>
+          {/* 动作区靠右：全部取消出现、消失时淡入淡出，右侧的清除按钮不动；退场时按页头定位留在原处（见样式里的 .header） */}
+          <Appear>
+            {active.length >= 2 && (
+              <Button key="cancel-all" variant="ghost" icon="x" onClick={() => void cancelAll()}>
+                {TASKS_COPY.cancelAll}
+              </Button>
+            )}
+          </Appear>
+          <Button variant="secondary" icon="trash" disabled={finishedCount === 0} onClick={() => actions.clearFinishedTasks()}>
+            {/* 带不带计数、计数几位，按钮都按最宽的那条占位：首个任务结束时不会把全部取消推开 */}
+            <span className={styles.countLabel}>
+              <LabelSlot
+                current={TASKS_COPY.clearFinished(finishedCount)}
+                options={[TASKS_COPY.clearFinished(0), TASKS_COPY.clearFinished(finishedCount), TASKS_COPY.clearFinished(TASK_HISTORY_LIMIT)]}
+              />
+            </span>
           </Button>
-        </>
+        </div>
       }
     />
   );
@@ -145,43 +180,44 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
       </Card>
     ) : null;
 
-  let body: ReactNode[];
-  if (tasks.length > 0) {
-    body = [
-      <TasksOverview key="overview" />,
-      <EntranceBlock key="filter" className={styles.listHead}>
-        <SegmentedControl
-          ariaLabel={TASKS_COPY.filter.ariaLabel}
-          value={filter}
-          onChange={(next) => nav.replace(filterRoute(next))}
-          options={TASK_FILTERS.map((f) => ({ value: f, label: TASKS_COPY.filter[f], count: counts[f] }))}
-        />
-      </EntranceBlock>,
-      <TaskList
-        key="list"
-        buckets={buckets}
-        filter={filter}
-        tasks={tasks}
-        now={now}
-        hasInstance={(id) => instanceIds.includes(id)}
-        retryBlocked={online ? undefined : TASKS_COPY.offline.retryReason}
-        onCancel={(task) => void cancel(task)}
-        onRetry={(task) => void run(() => actions.retryTask(task.id), ACTION_ERROR.install)}
-        onViewBlocked={(task) => {
-          if (task.error?.blocked_files === undefined) throw new Error(`任务 ${task.id} 没有需要手动下载的文件清单`);
-          setBlocked({ open: true, files: task.error.blocked_files, taskId: task.id });
-        }}
-        onViewInstance={(id) => nav.go({ page: "instance", id, tab: "overview" })}
-      />,
-    ];
-  } else if (slice.kind === "loading" || showSkeleton) {
-    // 骨架出现后即使数据已到也要停够最短时长，期间不切到空状态
-    body = showSkeleton ? [<TasksSkeleton key="skeleton" slow={gate.slow} />] : [];
-  } else if (slice.kind === "error") {
-    // 任务记录读不出来时不能说「队列是空的」：只给错误与重试
-    body = [];
-  } else {
-    body = [
+  const body = (): ReactNode => {
+    if (tasks.length > 0) {
+      const groups = taskGroups(listBuckets(tasks, finishing), filter);
+      return (
+        <TasksContent key="tasks" finishing={finishing}>
+          <EntranceBlock key="filter" className={styles.listHead}>
+            <SegmentedControl
+              ariaLabel={TASKS_COPY.filter.ariaLabel}
+              value={filter}
+              onChange={(next) => nav.replace(filterRoute(next))}
+              options={TASK_FILTERS.map((f) => ({ value: f, label: TASKS_COPY.filter[f], count: counts[f] }))}
+              countDigits={COUNT_DIGITS}
+            />
+          </EntranceBlock>
+          <TaskList
+            key="list"
+            groups={groups}
+            filter={filter}
+            finishing={finishing}
+            tasks={tasks}
+            now={now}
+            hasInstance={(id) => instanceIds.includes(id)}
+            retryBlocked={online ? undefined : TASKS_COPY.offline.retryReason}
+            onCancel={(task) => void cancel(task)}
+            onRetry={(task) => void run(() => actions.retryTask(task.id), ACTION_ERROR.install)}
+            onViewBlocked={(task) => {
+              if (task.error?.blocked_files === undefined) throw new Error(`任务 ${task.id} 没有需要手动下载的文件清单`);
+              setBlocked({ open: true, files: task.error.blocked_files, taskId: task.id });
+            }}
+            onViewInstance={(id) => nav.go({ page: "instance", id, tab: "overview" })}
+          />
+        </TasksContent>
+      );
+    }
+    // 任务记录读不出来时不能说「队列是空的」：只给上面的错误与重试
+    if (slice.kind === "error") return null;
+    // 空状态卡直接领加载区的入场序号：赶上页面首帧时跟着页面错开入场，之后才换上来的由 Loadable / Appear 清空序号、整块淡入
+    return (
       <Card key="empty" padding="lg">
         <EmptyState
           scene="empty-basket"
@@ -199,17 +235,30 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
             </div>
           }
         />
-      </Card>,
-    ];
-  }
+      </Card>
+    );
+  };
 
   return (
     <ThroughputScope>
       <Page aria-labelledby={titleId}>
         {header}
-        {offlineBanner}
-        {loadError}
-        {body}
+        <BannerSlot>
+          {offlineBanner}
+          {loadError}
+        </BannerSlot>
+        {/* 骨架出现后即使数据已到也要停够最短时长；之后骨架叠在上面淡出，内容（总览与列表，或空状态）淡入 */}
+        <Loadable view={gate.view} skeleton={<TasksSkeleton />}>
+          {() => <Appear>{body()}</Appear>}
+        </Loadable>
+        {/* 慢提示在骨架层外面：骨架层对读屏隐藏，提示要读得到。骨架的几何不含它，它出现时下面没有别的区块要让 */}
+        <Appear>
+          {gate.view !== "content" && gate.slow && (
+            <p key="slow" className={styles.slowHint}>
+              {SLOW_LOADING_HINT}
+            </p>
+          )}
+        </Appear>
       </Page>
       {blocked !== null && (
         <BlockedFilesModal
@@ -232,17 +281,38 @@ export default function TasksPage({ route }: PageProps<"tasks">) {
   );
 }
 
+// ---------------------------------------------------------------- 内容区
+
+/**
+ * 有任务时的内容：总览、筛选、列表竖排，某一块变高变矮时其余的滑到新位置。children 是总览之后的各块，各带 key。
+ * 赶上页面首帧时，三块接着加载区分到的入场序号逐块错开入场。之后才挂上的（读完任务记录换下骨架、空状态与列表互换）
+ * 序号已被 Loadable / Appear 清空，这里拿到 null，三块不再各自入场，由外层整块淡入，免得透明度乘两遍。
+ */
+function TasksContent({ finishing, children }: { finishing: ReadonlySet<string>; children: ReactNode }) {
+  const start = useEntranceIndex();
+  const reflow = useReflow<HTMLDivElement>();
+  return (
+    <div ref={reflow} className={styles.content}>
+      {numberEntrance([<TasksOverview key="overview" finishing={finishing} />, children], start)}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- 总览
 
-/** 吞吐卡与通道卡：读活动任务的实时进度与速度，每次进度更新都重渲染。 */
-function TasksOverview() {
-  const active = useLauncherSelector((s) => s.tasks.filter(isActiveTask), shallowArrayEqual);
+/** 吞吐卡与通道卡：读活动任务（连同还在收尾的）的实时进度与速度，每次进度更新都重渲染。 */
+function TasksOverview({ finishing }: { finishing: ReadonlySet<string> }) {
+  const shown = useLauncherSelector((s) => s.tasks.filter((t) => isActiveTask(t) || finishing.has(t.id)), shallowArrayEqual);
+  const active = shown.filter(isActiveTask);
   const history = readThroughputHistory();
+  const frame = useChartFrame(history);
   const buckets = bucketTasks(active);
+  const overview = overviewOf(buckets);
+  const speed = useDisplaySpeed(overview.speed);
   return (
-    <EntranceBlock className={styles.overview}>
-      <ThroughputCard overview={overviewOf(buckets)} history={history} />
-      <LanesCard running={buckets.running} queued={buckets.queued} />
+    <EntranceBlock className={styles.overview} style={OVERVIEW_STYLE}>
+      <ThroughputCard overview={overview} speed={speed} track={overviewTrack(active)} history={history} frame={frame} />
+      <LanesCard running={buckets.running} finishing={shown.filter((t) => !isActiveTask(t))} queued={buckets.queued} />
     </EntranceBlock>
   );
 }
@@ -260,8 +330,10 @@ interface RowHandlers {
 }
 
 interface TaskListProps extends RowHandlers {
-  buckets: TaskBuckets;
+  groups: readonly TaskGroup[];
   filter: TaskFilter;
+  /** 还在收尾的任务：行留在进行中，进度条推满。 */
+  finishing: ReadonlySet<string>;
   tasks: readonly Task[];
   now: number;
 }
@@ -272,15 +344,16 @@ interface TaskListProps extends RowHandlers {
  * 运行中的任务自己订阅这一个任务的实时进度，剩余时间按最近几秒的采样估；排队与已结束的进度不再变，沿用页面给的对象，
  * 也不读采样，不随进度与每秒换的采样重渲染。
  */
-function TaskListRow({ task: placed, queuePosition, now, handlers }: { task: Task; queuePosition: number | null; now: number; handlers: RowHandlers }) {
+function TaskListRow({ task: placed, finishing, queuePosition, now, handlers }: { task: Task; finishing: boolean; queuePosition: number | null; now: number; handlers: RowHandlers }) {
   const running = placed.status === "running";
   const task = useLauncherSelector((s) => (running ? s.tasks.find((t) => t.id === placed.id) : placed));
   if (task === undefined) throw new Error(`任务 ${placed.id} 已不在任务表里，列表却还在画它`);
-  const meta = rowMeta(task, { queuePosition, etaSpeed: running ? etaSpeed(readThroughputHistory(), task) : 0, now });
+  const speed = useDisplaySpeed(task.speedBps);
   return (
     <TaskRow
       task={task}
-      meta={meta}
+      finishing={finishing}
+      meta={{ queuePosition, etaSpeed: running ? etaSpeed(readThroughputHistory(), task) : 0, speed, now }}
       hasInstance={task.instanceId !== null && handlers.hasInstance(task.instanceId)}
       retryBlocked={retryNeedsNetwork(task) ? handlers.retryBlocked : undefined}
       onCancel={() => handlers.onCancel(task)}
@@ -294,62 +367,152 @@ function TaskListRow({ task: placed, queuePosition, now, handlers }: { task: Tas
   );
 }
 
-function TaskList({ buckets, filter, tasks, now, ...handlers }: TaskListProps) {
+/** 元素的中心点：新行入场时带着 0.98 的缩放，量中心不受缩放影响。 */
+function centerOf(el: Element): { x: number; y: number } {
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+/**
+ * 换组的行：旧组里那一行已经脱离布局、在原处淡出，新组里同一个任务的新行从它的位置沿 morph 弹簧飞到自己的位置，
+ * 两者叠着交接，看上去是同一行换了地方。
+ * 量的时机放在下一次尺寸观察的回调里：所在分组被挤开后的让位在那一轮观察里才起步，这个观察者建得晚、回调排在它们之后，
+ * 量到的新位置已经带着分组的让位，飞的距离不会把分组的位移再算一遍。都在绘制之前，新行不会先在终点露一帧。
+ */
+function flyAcross(root: HTMLElement, ids: readonly string[]): void {
+  if (typeof root.animate !== "function" || typeof ResizeObserver === "undefined") return;
+  const probe = new ResizeObserver(() => {
+    probe.disconnect();
+    for (const id of ids) {
+      let leaving: HTMLElement | null = null;
+      let arriving: HTMLElement | null = null;
+      for (const mark of root.querySelectorAll(`[${TASK_ROW_ATTR}="${CSS.escape(id)}"]`)) {
+        const row = mark.closest("li");
+        if (row === null) continue;
+        if (row.closest("[inert]") === null) arriving = row;
+        else leaving = row;
+      }
+      if (leaving === null || arriving === null) continue;
+      const from = centerOf(leaving);
+      const to = centerOf(arriving);
+      playTrack(arriving, springTrack("morph", from.x - to.x, 0, from.y - to.y, 0));
+    }
+  });
+  probe.observe(root);
+}
+
+function TaskList({ groups, filter, finishing, tasks, now, ...handlers }: TaskListProps) {
   const idBase = useId();
-  const groups = taskGroups(buckets, filter);
-  if (groups.length === 0) {
-    if (filter === "all") throw new Error("任务表不为空，「全部」筛选下却没有任何分组");
-    const copy = TASKS_COPY.filterEmpty[filter];
-    return (
-      <Card padding="none">
-        <EmptyState compact scene="empty-branch" title={copy.title} body={"body" in copy ? copy.body : undefined} />
-      </Card>
-    );
-  }
+  const reduced = useReducedMotionConfig() === true;
+  const root = useRef<HTMLDivElement | null>(null);
+  // 分组之间互相让位：某组增删行、组标题出现消失时，下面的组滑到新位置
+  const attach = useCallback((el: HTMLDivElement | null) => {
+    root.current = el;
+    if (el === null) return;
+    const stop = observeReflow(el);
+    return () => {
+      root.current = null;
+      stop();
+    };
+  }, []);
+
+  // 上一次提交时每个任务在哪一组：换了组的行要从旧位置飞过去
+  const placement = useRef<ReadonlyMap<string, TaskGroup["key"]> | null>(null);
+  useLayoutEffect(() => {
+    const next = new Map(groups.flatMap((g) => g.tasks.map((t) => [t.id, g.key] as const)));
+    const before = placement.current;
+    placement.current = next;
+    if (before === null || reduced || root.current === null) return;
+    const moved = [...next].filter(([id, key]) => before.has(id) && before.get(id) !== key).map(([id]) => id);
+    if (moved.length === 0 || moved.length > REFLOW_MAX_ITEMS) return;
+    flyAcross(root.current, moved);
+  });
+
+  if (groups.length === 0 && filter === "all") throw new Error("任务表不为空，「全部」筛选下却没有任何分组");
   return (
     <Card padding="none">
-      {groups.map((group) => {
-        const rows = group.tasks.map((task) => (
-          <TaskListRow
-            key={task.id}
-            task={task}
-            queuePosition={task.status === "queued" ? queuePosition(tasks, task.id) : null}
-            now={now}
-            handlers={handlers}
-          />
-        ));
-        if (group.label === null) {
-          return (
-            <List key={group.key} variant="flush" aria-label={TASKS_COPY.row.listLabel}>
-              {rows}
-            </List>
-          );
-        }
-        const headingId = `${idBase}-${group.key}`;
-        return (
-          <section key={group.key} aria-labelledby={headingId}>
-            <h2 id={headingId} className={styles.groupLabel}>
-              {group.label}
-            </h2>
-            <List variant="flush">{rows}</List>
-          </section>
-        );
-      })}
+      <div ref={attach} className={styles.groups}>
+        <Appear>
+          {groups.map((group) => (
+            <TaskGroupBlock key={group.key} group={group} headingId={`${idBase}-${group.key}`}>
+              {group.tasks.map((task) => (
+                <TaskListRow
+                  key={task.id}
+                  task={task}
+                  finishing={finishing.has(task.id)}
+                  queuePosition={task.status === "queued" ? queuePosition(tasks, task.id) : null}
+                  now={now}
+                  handlers={handlers}
+                />
+              ))}
+            </TaskGroupBlock>
+          ))}
+          {groups.length === 0 && filter !== "all" && <FilterEmpty key={`empty-${filter}`} filter={filter} />}
+        </Appear>
+      </div>
     </Card>
   );
 }
 
+/**
+ * 一组任务。组标题只在「全部」里有，换筛选时淡入淡出，下面的列表随之滑动；组内行的增删由 List 自己动。
+ * 换筛选时同一组沿用同一个容器（分组的键见 model），列表不重建，留下的行原地不动。
+ */
+function TaskGroupBlock({ group, headingId, children }: { group: TaskGroup; headingId: string; children: ReactNode }) {
+  const reflow = useReflow<HTMLElement>();
+  return (
+    <section ref={reflow} className={styles.group} aria-labelledby={group.label === null ? undefined : headingId}>
+      <Appear>
+        {group.label !== null && (
+          <h2 key="label" id={headingId} className={styles.groupLabel}>
+            {group.label}
+          </h2>
+        )}
+      </Appear>
+      <List variant="flush" aria-label={group.label === null ? TASKS_COPY.row.listLabel : undefined}>
+        {children}
+      </List>
+    </section>
+  );
+}
+
+function FilterEmpty({ filter }: { filter: Exclude<TaskFilter, "all"> }) {
+  const copy = TASKS_COPY.filterEmpty[filter];
+  return <EmptyState compact scene="empty-branch" title={copy.title} body={"body" in copy ? copy.body : undefined} />;
+}
+
 // ---------------------------------------------------------------- 骨架
 
-/** 形状与有任务时的首屏一致：总览的两张卡。读得久了在下方补一行「比平时慢」。 */
-function TasksSkeleton({ slow }: { slow: boolean }) {
+/**
+ * 形状照有任务时的内容画：总览两张卡（与总览行同高）、筛选条、带组标题的几行任务。
+ * 它自己不参与页面入场：等待期它透明占位，到点由加载容器淡入。
+ */
+function TasksSkeleton() {
   return (
-    <>
-      <EntranceBlock className={styles.overview} aria-busy="true">
-        <Skeleton shape="block" width="100%" height={188} radius="lg" />
-        <Skeleton shape="block" width="100%" height={188} radius="lg" />
-      </EntranceBlock>
-      {slow && <p className={styles.slowHint}>{SLOW_LOADING_HINT}</p>}
-    </>
+    <EntranceBoundary>
+      <div className={styles.content}>
+        <div className={styles.overview} style={OVERVIEW_STYLE}>
+          <Skeleton shape="block" width="100%" height={OVERVIEW_HEIGHT} radius="lg" />
+          <Skeleton shape="block" width="100%" height={OVERVIEW_HEIGHT} radius="lg" />
+        </div>
+        <div className={styles.listHead}>
+          <Skeleton shape="block" width={FILTER_SKELETON_WIDTH} height={36} radius="sm" />
+        </div>
+        <Card padding="none">
+          <div className={styles.groupLabel}>
+            <Skeleton shape="text" width="12%" />
+          </div>
+          {Array.from({ length: LIST_SKELETON_ROWS }, (_, i) => (
+            <div key={i} className={styles.skeletonRow}>
+              <Skeleton shape="square" size={44} />
+              <span className={styles.skeletonBody}>
+                <Skeleton shape="text" width="36%" className={styles.skeletonTitle} />
+                <Skeleton shape="text" width="58%" className={styles.skeletonMeta} />
+              </span>
+            </div>
+          ))}
+        </Card>
+      </div>
+    </EntranceBoundary>
   );
 }

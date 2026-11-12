@@ -19,8 +19,26 @@
   color: var(--sk-text-2);
 }
 
+/*
+ * 状态区按最高的那种状态占位（小号按钮 30，进度是一行文字 20 + 间距 6 + 细进度条 4，也是 30）：
+ * 下载、收尾、失败之间换时部件不变高，居中的弹窗上下沿不跟着抖
+ */
 .status {
+  min-height: 30px;
   margin-top: var(--sk-space-6);
+}
+
+/* 换了阶段，换上来的状态只淡入：同一块地方换内容，没有位移可言 */
+.actions[data-enter],
+.progress[data-enter],
+.finishing[data-enter] {
+  animation: statusIn var(--sk-dur-in) var(--sk-ease-out);
+}
+
+@keyframes statusIn {
+  from {
+    opacity: 0;
+  }
 }
 
 /* 紧凑档：说明在左、按钮在右；下载中进度占满整行 */

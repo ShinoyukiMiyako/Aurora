@@ -1,9 +1,26 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { motion } from "framer-motion";
 import { act, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { keydown, render, stubResizeObserver, type Rendered } from "../test/dom";
-import { columnTemplate, nextSort, rowChurn, selectionState, Table, validateColumns, VIRTUALIZE_ABOVE, type TableColumn, type TableSort } from "./Table";
+import { keydown, render, setRect, stubResizeObserver, waitForFrames, type Rendered } from "../test/dom";
+import {
+  columnTemplate,
+  nextSort,
+  rowChurn,
+  rowShift,
+  selectionState,
+  swapsWholeTable,
+  Table,
+  validateColumns,
+  visibleColumns,
+  VIRTUALIZE_ABOVE,
+  type TableColumn,
+  type TableSort,
+} from "./Table";
 
 interface Mod {
   id: string;
@@ -22,6 +39,7 @@ let view: Rendered | undefined;
 afterEach(() => {
   view?.unmount();
   view = undefined;
+  vi.restoreAllMocks();
 });
 
 function mount(ui: ReactNode) {
@@ -134,6 +152,21 @@ describe("行的增删", () => {
     expect(rows().map((r) => r.textContent?.includes("Lithium"))).toEqual([false, false]);
   });
 
+  it("删掉末行：新的末行当场不画分隔线，正在淡出的退场行不算末行、也不跟着变样", () => {
+    mount(<Changing initial={MODS} />);
+    expect(rows().map((r) => r.hasAttribute("data-last"))).toEqual([false, false, true]);
+    act(() => setShownRows(MODS.slice(0, 2)));
+    // 退场的 Iris 抽出布局后仍排在文档末尾
+    expect(rows().map((r) => [r.textContent?.includes("Iris"), r.hasAttribute("inert"), r.hasAttribute("data-last")])).toEqual([
+      [false, false, false],
+      [false, false, true],
+      [true, true, true],
+    ]);
+    // 末尾追加一行：末行标记交给新行
+    act(() => setShownRows([...MODS.slice(0, 2), { id: "new", name: "New", version: "1", enabled: true }]));
+    expect(rows().filter((r) => !r.hasAttribute("inert")).map((r) => r.hasAttribute("data-last"))).toEqual([false, false, true]);
+  });
+
   it("新增的行留在表里，序号与内容都对", async () => {
     mount(<Changing initial={[MODS[0]]} />);
     act(() => setShownRows([MODS[0], MODS[1]]));
@@ -163,6 +196,141 @@ describe("行的增删", () => {
     act(() => setShownRows(all.slice(1)));
     expect(rows().every((r) => r.hasAttribute("data-virtual") && !r.textContent?.includes("Mod 0版本"))).toBe(true);
   });
+
+  it("前后都在、下标变了的行数：删掉头一行时其后每行都算，删掉末行时一行不算", () => {
+    const keys = someMods(50).map((m) => m.id);
+    expect(rowShift(keys, keys)).toBe(0);
+    expect(rowShift(keys, keys.slice(1))).toBe(49);
+    expect(rowShift(keys, keys.slice(0, -1))).toBe(0);
+    expect(rowShift(keys, ["new", ...keys])).toBe(50);
+    expect(rowShift(["a", "b", "c"], ["c", "b", "a"])).toBe(2);
+  });
+
+  it("整表换上的判定：虚拟化或跨过阈值时行集合一变就整表换；不虚拟化时只有换了一批（增删换位超过 40、又不是末尾追加）才整表换", () => {
+    const keys = someMods(60).map((m) => m.id);
+    const plain = (k: readonly string[]) => ({ keys: k, virtual: false });
+    const big = someMods(VIRTUALIZE_ABOVE + 5).map((m) => m.id);
+    const virtualShape = (k: readonly string[]) => ({ keys: k, virtual: true });
+    const extra = Array.from({ length: 41 }, (_, i) => `extra-${i}`);
+
+    expect(swapsWholeTable(virtualShape(big), virtualShape(big))).toBe(false);
+    expect(swapsWholeTable(virtualShape(big), virtualShape(big.slice(1)))).toBe(true);
+    expect(swapsWholeTable(virtualShape(big), plain(big.slice(0, VIRTUALIZE_ABOVE)))).toBe(true);
+    expect(swapsWholeTable(plain(keys), plain(keys.slice(0, -1)))).toBe(false);
+    // 换筛选：一次走掉 45 行
+    expect(swapsWholeTable(plain(keys), plain(keys.slice(0, 15)))).toBe(true);
+    // 只删靠前的一行：其后 59 行都被挤动，但被挤动的行不计
+    expect(swapsWholeTable(plain(keys), plain(keys.slice(1)))).toBe(false);
+    expect(swapsWholeTable(plain(keys), plain(keys.filter((k) => k !== "mod-18")))).toBe(false);
+    // 排序：60 行全换了位置
+    expect(swapsWholeTable(plain(keys), plain([...keys].reverse()))).toBe(true);
+    // 末尾追加 41 行：已有的行一动不动，不算换了一批；同样多的行插在最前面就算
+    expect(swapsWholeTable(plain(keys.slice(0, 50)), plain([...keys.slice(0, 50), ...extra]))).toBe(false);
+    expect(swapsWholeTable(plain(keys.slice(0, 50)), plain([...extra, ...keys.slice(0, 50)]))).toBe(true);
+  });
+
+  /** 表格限高 640、自己滚动；表体上沿在视口里的位置由滚动位置决定（表头 36 高）。 */
+  function placeTable(scrollTop: number) {
+    const grid = document.querySelector<HTMLElement>('[role="grid"]') as HTMLElement;
+    const body = document.querySelector<HTMLElement>('[role="rowgroup"] + [role="rowgroup"]') as HTMLElement;
+    setRect(grid, { left: 0, top: 0, width: 800, height: 640 });
+    setRect(body, { left: 0, top: 36 - scrollTop, width: 800, height: 0 });
+    return body;
+  }
+
+  /** 行的名称列写着「Mod n」，取出 n。 */
+  const modIndex = (row: Element) => {
+    const name = row.querySelectorAll('[role="gridcell"]')[1].textContent;
+    const match = /^Mod (\d+)$/.exec(name === null ? "" : name);
+    if (match === null) throw new Error(`认不出这一行：${row.textContent}`);
+    return Number(match[1]);
+  };
+
+  // 哪些被挤动的行量了布局，见 Table.window.test.tsx（要在没跑过布局动画的新文件里断言）
+  it("41 到 100 行的表删掉靠前的一行：不整表淡入，删掉的行原地淡出，其余行的序号立刻接上", () => {
+    const all = someMods(60);
+    mount(<Changing initial={all} />);
+    const body = placeTable(640);
+    act(() => setShownRows(all.slice(1)));
+
+    expect(body.style.opacity).not.toBe("0");
+    const leaving = rows().filter((r) => r.hasAttribute("inert"));
+    expect(leaving.map(modIndex)).toEqual([0]);
+    expect(rows().filter((r) => r.hasAttribute("data-row-index")).map((r) => [modIndex(r), r.dataset.rowIndex])[0]).toEqual([1, "0"]);
+  });
+
+  it("新来的行只有落在可见范围附近的播入场，远处的直接出现", () => {
+    const all = someMods(50);
+    mount(<Changing initial={all} />);
+    // 没有滚动：可见的是第 0 到 9 行，加余量到第 13 行
+    placeTable(0);
+    const near = { id: "near", name: "Mod 900", version: "1", enabled: true };
+    const far = { id: "far", name: "Mod 901", version: "1", enabled: true };
+    act(() => setShownRows([...all.slice(0, 2), near, ...all.slice(2, 45), far, ...all.slice(45)]));
+    const opacityOf = (id: number) => rows().find((r) => modIndex(r) === id)?.style.opacity;
+    expect(opacityOf(900)).toBe("0");
+    expect(opacityOf(901)).toBe("1");
+  });
+
+  it("换了一批（排序）：行直接换上，表体在提交时先压到透明再淡入一次", async () => {
+    const all = someMods(60);
+    mount(<Changing initial={all} />);
+    const body = document.querySelector<HTMLElement>('[role="rowgroup"] + [role="rowgroup"]') as HTMLElement;
+    act(() => setShownRows([...all].reverse()));
+    expect(body.style.opacity).toBe("0");
+    expect(rows().filter((r) => r.hasAttribute("inert"))).toHaveLength(0);
+    await waitForFrames(() => expect(body.style.opacity).toBe("1"));
+  });
+
+  it("挂载时就在的行不播入场，之后新增的行从透明淡入", () => {
+    mount(<Changing initial={[MODS[0]]} />);
+    expect(rows()[0].style.opacity).toBe("1");
+    act(() => setShownRows([MODS[0], MODS[1]]));
+    expect(rows()[1].style.opacity).toBe("0");
+  });
+
+  it("挂载时就在的行里，之后才出现的部件照常播自己的入场", () => {
+    let showBadge: (show: boolean) => void = () => undefined;
+    function WithBadge() {
+      const [badge, setBadge] = useState(false);
+      showBadge = setBadge;
+      const cols: TableColumn<Mod>[] = [
+        { key: "name", header: "Mod", cell: (mod) => (badge ? <motion.span data-badge="" initial={{ opacity: 0 }} animate={{ opacity: 1 }} /> : mod.name) },
+      ];
+      return <Table label="x" columns={cols} rows={[MODS[0]]} rowKey={(m) => m.id} empty="空" />;
+    }
+    mount(<WithBadge />);
+    act(() => showBadge(true));
+    expect(document.querySelector<HTMLElement>("[data-badge]")?.style.opacity).toBe("0");
+  });
+
+  it("筛到零行：剩下的行留在原处淡出，空状态同时淡入，放完后只剩空状态", async () => {
+    mount(<Changing initial={MODS} />);
+    act(() => setShownRows([]));
+    const leaving = rows().filter((r) => r.hasAttribute("inert"));
+    expect(leaving.map((r) => MODS.find((m) => r.textContent?.includes(m.name))?.id)).toEqual(["sodium", "lithium", "iris"]);
+    const emptyRow = rows().find((r) => r.textContent === "没有 Mod");
+    if (emptyRow === undefined) throw new Error("空状态应该同时出现");
+    expect(emptyRow.hasAttribute("inert")).toBe(false);
+    expect(emptyRow.style.opacity).toBe("0");
+
+    await waitFrames();
+    expect(rows().map((r) => r.textContent)).toEqual(["没有 Mod"]);
+  });
+
+  it("从零行恢复：空状态淡出，行淡入", async () => {
+    mount(<Changing initial={[]} />);
+    expect(rows().map((r) => [r.textContent, r.style.opacity])).toEqual([["没有 Mod", "1"]]);
+    act(() => setShownRows([MODS[0]]));
+    const emptyRow = rows().find((r) => r.textContent === "没有 Mod");
+    expect(emptyRow?.hasAttribute("inert")).toBe(true);
+    const back = rows().find((r) => r.textContent?.includes("Sodium"));
+    expect(back?.style.opacity).toBe("0");
+    expect(back?.dataset.rowIndex).toBe("0");
+
+    await waitFrames();
+    expect(rows().map((r) => r.textContent?.includes("Sodium"))).toEqual([true]);
+  });
 });
 
 describe("列定义", () => {
@@ -171,6 +339,13 @@ describe("列定义", () => {
     expect(columnTemplate(cols, "compact")).toBe("40px minmax(260px, 1fr) 96px");
     expect(columnTemplate(cols, "regular")).toBe("40px minmax(260px, 1fr) 150px 96px");
     expect(columnTemplate(cols, "wide")).toBe("40px minmax(260px, 1fr) 150px 96px");
+  });
+
+  it("按档取可见的列：照表格画骨架的页面与表格用同一个判断，顺序不变", () => {
+    const cols: TableColumn<Mod>[] = [...columns(), { key: "author", header: "作者", width: 140, tiers: ["wide"], cell: () => "" }];
+    expect(visibleColumns(cols, "compact").map((c) => c.key)).toEqual(["select", "name", "actions"]);
+    expect(visibleColumns(cols, "regular").map((c) => c.key)).toEqual(["select", "name", "version", "actions"]);
+    expect(visibleColumns(cols, "wide").map((c) => c.key)).toEqual(["select", "name", "version", "actions", "author"]);
   });
 
   it("key 重复、宽度非正、tiers 为空、某档没有列都抛错", () => {
@@ -256,6 +431,35 @@ describe("Table 键盘", () => {
     expect(controls(1).map((b) => b.getAttribute("tabindex"))).toEqual([null, null]);
   });
 
+  it("空状态里的按钮不受漫游 tabindex 管：筛到零行时「清除筛选」仍在 Tab 序列里", () => {
+    function Filtering() {
+      const [shown, setShown] = useState<readonly Mod[]>(MODS);
+      setShownRows = setShown;
+      return (
+        <Table
+          label="已装 Mod"
+          columns={columns()}
+          rows={shown}
+          rowKey={(m) => m.id}
+          onSortChange={() => undefined}
+          empty={
+            <button type="button" data-clear="">
+              清除筛选
+            </button>
+          }
+        />
+      );
+    }
+    mount(<Filtering />);
+    act(() => setShownRows([]));
+    const clear = () => document.querySelector<HTMLButtonElement>("[data-clear]") as HTMLButtonElement;
+    expect(clear().hasAttribute("tabindex")).toBe(false);
+    expect(clear().hasAttribute("data-table-tabindex")).toBe(false);
+    // 剩下的行退场、表格再提交一次之后也一样
+    act(() => setShownRows([]));
+    expect(clear().hasAttribute("tabindex")).toBe(false);
+  });
+
   it("Enter 执行行的主动作，Space 切换行选择", () => {
     const onActivate = vi.fn();
     mount(<Harness onActivate={onActivate} />);
@@ -315,6 +519,54 @@ describe("Table 选择与排序", () => {
     act(() => header().querySelector("button")?.click());
     expect(header().getAttribute("aria-sort")).toBe("descending");
     expect(header().querySelector("svg")).not.toBeNull();
+  });
+
+  it("排序箭头常驻同一个元素：翻转方向只换标记（由样式转半圈），不重挂", () => {
+    mount(<Harness />);
+    const button = () => document.querySelectorAll<HTMLElement>('[role="columnheader"]')[1].querySelector("button") as HTMLButtonElement;
+    const arrow = button().querySelector("svg");
+    expect(button().dataset.sorted).toBe("asc");
+    act(() => button().click());
+    expect(button().dataset.sorted).toBe("desc");
+    expect(button().querySelector("svg")).toBe(arrow);
+  });
+
+  it("未排序的可排序列也留着箭头的位置", () => {
+    mount(<Table label="x" columns={columns()} rows={MODS} rowKey={(m) => m.id} sort={null} onSortChange={() => undefined} empty="空" />);
+    const button = document.querySelectorAll<HTMLElement>('[role="columnheader"]')[1].querySelector("button") as HTMLButtonElement;
+    expect(button.hasAttribute("data-sorted")).toBe(false);
+    expect(button.querySelectorAll("svg")).toHaveLength(1);
+  });
+});
+
+describe("Table 样式", () => {
+  // 工作树按 CRLF 检出时规则之间是 \r\n：先统一成 \n 再按行匹配
+  const strip = (text: string) => text.replace(/\r\n/g, "\n").replace(/\/\*[\s\S]*?\*\//g, "");
+  const css = strip(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "Table.module.css"), "utf8"));
+  const rule = (selector: string) => {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // 换行前是逗号的是组合选择器的后半截：「.headCell,\n.cell」不能当成「.cell」
+    const match = new RegExp(`(?<!,)(?:^|\\n)${escaped} \\{([^}]*)\\}`).exec(css);
+    if (match === null) throw new Error(`没有 ${selector} 规则`);
+    return match[1];
+  };
+
+  it("滚动条槽常驻，行右不再另留内边距（右侧由槽占住）", () => {
+    expect(rule(".table")).toMatch(/scrollbar-gutter: stable;/);
+    expect(rule(".headRow,\n.row")).toMatch(/padding: 0 0 0 var\(--sk-space-6\);/);
+  });
+
+  it("悬停底色不带过渡；只有选中底色淡入；启停淡化走透明度过渡", () => {
+    expect(rule(".row")).not.toMatch(/transition/);
+    expect(rule(".row:hover")).not.toMatch(/transition/);
+    expect(rule(".row[data-selected],\n.row[data-selected]:hover")).toMatch(/transition: background-color var\(--sk-dur-hover\)/);
+    expect(rule(".cell")).toMatch(/transition: opacity var\(--sk-dur-hover\)/);
+  });
+
+  it("末行按数据标记去掉分隔线，不按文档里的最后一个子项认", () => {
+    expect(rule(".row")).toMatch(/border-bottom: 1px solid var\(--sk-line\);/);
+    expect(rule(".row[data-last]")).toMatch(/border-bottom: 0;/);
+    expect(css).not.toMatch(/:last-child/);
   });
 });
 

@@ -10,7 +10,7 @@ import { clearArtCache } from "../../mc/useArt";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, configDto, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import AccountsPage from "./index";
@@ -91,20 +91,49 @@ async function mount() {
 }
 
 const page = () => view?.container as HTMLElement;
+/** 页面上还在的文字：退场中（inert）的块已经让出位置、正在淡出，不算。 */
+function liveText(): string | null {
+  const clone = page().cloneNode(true) as HTMLElement;
+  for (const leaving of clone.querySelectorAll("[inert]")) leaving.remove();
+  return clone.textContent;
+}
 const subtitle = () => page().querySelector("header p")?.textContent;
 const spotlightName = () => page().querySelector("section h2")?.textContent;
-const cardNames = () => [...page().querySelectorAll("h3")].map((h) => h.textContent).filter((t) => t !== "添加账户");
+/** 不在退场中的元素：退场的卡、横幅还在 DOM 里淡出，但已经带上 inert。 */
+const live = <T extends Element>(elements: Iterable<T>) => [...elements].filter((el) => el.closest("[inert]") === null);
+const cardNames = () =>
+  live(page().querySelectorAll("h3"))
+    .map((h) => h.textContent)
+    .filter((t) => t !== "添加账户");
 
 function buttonIn(root: ParentNode, text: string): HTMLButtonElement {
-  const el = [...root.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === text);
+  const el = live(root.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === text);
   if (el === undefined) throw new Error(`找不到按钮 ${text}`);
   return el;
 }
 
 function cardOf(name: string): HTMLElement {
-  const heading = [...page().querySelectorAll("h3")].find((h) => h.textContent === name);
+  const heading = live(page().querySelectorAll("h3")).find((h) => h.textContent === name);
   if (heading === undefined) throw new Error(`找不到账户卡 ${name}`);
   return heading.closest("[data-pad]") as HTMLElement;
+}
+
+/** 加载占位的状态：pending 占着位置但不可见，shown 骨架可见，null 已换成内容。 */
+function skeletonState(): "pending" | "shown" | null {
+  const loading = page().querySelector('div[aria-busy="true"]');
+  if (loading === null) return null;
+  const bones = loading.querySelector(':scope > [aria-hidden="true"]');
+  if (bones === null) throw new Error("加载中却没有骨架占位");
+  return bones.hasAttribute("data-pending") ? "pending" : "shown";
+}
+
+/** 账户网格的格子（增删动画包在每张卡外面的那一层），按顺序；退场中的也在里面。 */
+function gridCells(): HTMLElement[] {
+  const add = [...page().querySelectorAll("h3")].find((h) => h.textContent === "添加账户");
+  if (add === undefined) throw new Error("找不到添加卡");
+  const grid = add.parentElement?.parentElement?.parentElement;
+  if (grid === null || grid === undefined) throw new Error("添加卡不在网格里");
+  return [...grid.children] as HTMLElement[];
 }
 
 const click = async (el: Element) => {
@@ -146,9 +175,11 @@ beforeEach(() => {
   ipc.overrides.set("skin_info", () => null);
 });
 
-afterEach(() => {
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  // 帧循环跟着假时钟走：换回真实计时器之前排空，同文件后面逐帧采样的用例才推得动
+  await drainFrames();
   setArtStatus(NO_ART);
   clearArtCache();
   vi.unstubAllGlobals();
@@ -191,6 +222,62 @@ describe("账户页：当前账户与列表", () => {
     expect(launcher.state.toasts).toEqual([]);
   });
 
+  it("切换账户：两张卡的底部原位交叉淡化，换下来的那一行淡出，换上去的那一行从透明落位", async () => {
+    await mount();
+    const rows = (name: string) => [...cardOf(name).querySelectorAll<HTMLElement>('[class*="footRow"]')];
+    const [steveBefore] = rows("Steve");
+    const [hanamiBefore] = rows("Hanami");
+    await click(buttonIn(cardOf("Steve"), "切换到此账户"));
+    expect(steveBefore.hasAttribute("inert")).toBe(true);
+    expect(hanamiBefore.hasAttribute("inert")).toBe(true);
+    const steveNow = rows("Steve").find((row) => !row.hasAttribute("inert")) as HTMLElement;
+    const hanamiNow = rows("Hanami").find((row) => !row.hasAttribute("inert")) as HTMLElement;
+    expect([steveNow.textContent, steveNow.style.opacity]).toEqual(["使用中", "0"]);
+    expect([hanamiNow.textContent, hanamiNow.style.opacity]).toEqual(["切换到此账户", "0"]);
+  });
+
+  it("切换账户：聚光卡与信息列都还是原来的节点，信息列原地换人、从下方 6px 淡入；进页时的信息列不另播", async () => {
+    await mount();
+    const spot = page().querySelector("section") as HTMLElement;
+    const info = () => spot.querySelector("h2")?.parentElement as HTMLElement;
+    const before = info();
+    await stepFrames(2);
+    expect([before.style.opacity, before.style.transform]).toEqual(["", ""]);
+    await click(buttonIn(cardOf("Steve"), "切换到此账户"));
+    expect(page().querySelector("section")).toBe(spot);
+    expect(info()).toBe(before);
+    expect(before.querySelector("h2")?.textContent).toBe("Steve");
+    // 第一帧画出来时已经走了这一帧的时长：从透明、下方 6px 起步，还在半路
+    await stepFrames(1);
+    const opacity = Number(before.style.opacity);
+    const shift = Number(/^translateY\(([\d.]+)px\)$/.exec(before.style.transform)?.[1]);
+    expect([opacity > 0 && opacity < 0.6, shift > 4 && shift <= 6]).toEqual([true, true]);
+    await stepFrames(40);
+    expect([before.style.opacity, before.style.transform]).toEqual(["1", "none"]);
+  });
+
+  it("从聚光卡的更多菜单删除当前账户：下一个账户顶上来时信息列不重挂，焦点留在同一个更多菜单触发器上", async () => {
+    await mount();
+    const spot = page().querySelector("section") as HTMLElement;
+    const trigger = spot.querySelector<HTMLButtonElement>('button[aria-label="Hanami 的更多操作"]') as HTMLButtonElement;
+    await openMenu("Hanami 的更多操作", spot);
+    await chooseMenuItem("删除账户");
+    await click(buttonIn(dialog() as HTMLElement, "删除账户"));
+    expect(spotlightName()).toBe("Steve");
+    expect([trigger.isConnected, trigger.getAttribute("aria-label")]).toEqual([true, "Steve 的更多操作"]);
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("切换账户：聚光卡的复制按钮不带着上一位的「已复制」", async () => {
+    await mount();
+    const spot = page().querySelector("section") as HTMLElement;
+    await click(spot.querySelector('button[aria-label="复制 UUID"]') as HTMLButtonElement);
+    expect(spot.querySelector('button[aria-label="已复制"]')).not.toBeNull();
+    await click(buttonIn(cardOf("Steve"), "切换到此账户"));
+    expect(spotlightName()).toBe("Steve");
+    expect([spot.querySelector('button[aria-label="已复制"]'), spot.querySelector('button[aria-label="复制 UUID"]') !== null]).toEqual([null, true]);
+  });
+
   it("当前账户卡的菜单没有「设为当前账户」，其余账户卡的这一项与切换按钮等效", async () => {
     await mount();
     await openMenu("Hanami 的更多操作", cardOf("Hanami"));
@@ -227,6 +314,23 @@ describe("账户页：皮肤", () => {
     const figures = [...page().querySelectorAll<HTMLElement>('[data-sk-art="skin"]')];
     expect(figures.map((f) => f.dataset.art)).toEqual(["skin", "skin", "skin"]);
     expect(figures.map((f) => f.querySelector('canvas[data-tauri-drag-region="false"]') !== null)).toEqual([true, false, false]);
+  });
+
+  it("切换到皮肤信息还没读到的账户：聚光卡舞台留着上一位的立绘，读到「没有皮肤」才换成剪影", async () => {
+    const steveSkin = deferred<null>();
+    ipc.overrides.set("skin_info", (args) => (args.accountUuid === steve.uuid ? steveSkin.promise : { kind: "remote", sha1: "ab".repeat(20), model: "wide", hat: true }));
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["skin"]) })));
+    vi.stubGlobal("createImageBitmap", vi.fn(async () => ({ width: 64, height: 64 })));
+    await mount();
+    await flush();
+    const spotFigure = () => (page().querySelector("section") as HTMLElement).querySelector<HTMLElement>('[data-sk-art="skin"]');
+    expect(spotFigure()?.dataset.art).toBe("skin");
+    await click(buttonIn(cardOf("Steve"), "切换到此账户"));
+    expect(spotlightName()).toBe("Steve");
+    expect(spotFigure()?.dataset.art).toBe("skin");
+    steveSkin.resolve(null);
+    await flush();
+    expect(spotFigure()?.dataset.art).toBe("silhouette");
   });
 
   it("皮肤查询失败：舞台照常画剪影立绘，不弹通知，原因写进控制台", async () => {
@@ -285,16 +389,57 @@ describe("账户页：删除", () => {
     expect(dialog()?.textContent).toContain("以后再用要重新登录。正在运行的游戏不受影响。");
   });
 
-  it("删除最后一个账户后回到空状态", async () => {
+  it("删除最后一个账户后回到空状态：聚光卡淡出让位、空状态淡入，「全部账户」分区还是原来那块", async () => {
     useAccounts([steve], steve.uuid);
     await mount();
+    const allAccounts = () => live(page().querySelectorAll("section")).find((s) => s.textContent?.startsWith("全部账户"));
+    const section = allAccounts();
+    const spot = page().querySelector("section") as HTMLElement;
     await openMenu("Steve 的更多操作");
     await chooseMenuItem("删除账户");
     const box = dialog() as HTMLElement;
     expect(box.textContent).toContain("这是最后一个账户，删除后要重新添加才能启动游戏。");
     await click(buttonIn(box, "删除账户"));
     expect(subtitle()).toBe("还没有可用的账户");
-    expect(page().textContent).toContain("还没有账户");
+    expect(liveText()).toContain("还没有账户");
+    expect(spot.closest("[inert]")).not.toBeNull();
+    const empty = [...page().querySelectorAll("h2")].find((h) => h.textContent === "还没有账户")?.closest("[data-pad]")?.parentElement as HTMLElement;
+    expect([empty.style.opacity, empty.style.transform]).toEqual(["0", "scale(0.98)"]);
+    expect(allAccounts()).toBe(section);
+  });
+});
+
+describe("账户页：账户网格的增删", () => {
+  it("删除一张卡：它原地淡出并带上 inert，其余卡与添加卡还是原来的节点，由网格让位滑过去", async () => {
+    await mount();
+    const [hanamiCell, steveCell, addCell] = gridCells();
+    await openMenu("Steve 的更多操作");
+    await chooseMenuItem("删除账户");
+    await click(buttonIn(dialog() as HTMLElement, "删除账户"));
+    expect(cardNames()).toEqual(["Hanami"]);
+    expect(steveCell.hasAttribute("inert")).toBe(true);
+    expect(gridCells().filter((cell) => !cell.hasAttribute("inert"))).toEqual([hanamiCell, addCell]);
+  });
+
+  it("新增一个账户：新卡从透明与 0.98 落位，原有的卡与添加卡不重挂、不重播", async () => {
+    const alex = accountDto({ uuid: "3c4d5e6f7a8b4c9d8e7f6a5b4c3d2e1f", name: "Alex", account_type: "offline" });
+    ipc.overrides.set("create_offline_account", () => {
+      accounts = [...accounts, alex];
+      return alex;
+    });
+    await mount();
+    const before = gridCells();
+    await act(async () => {
+      await launcher.actions.addOfflineAccount("Alex");
+    });
+    await flush();
+    expect(cardNames()).toEqual(["Hanami", "Steve", "Alex"]);
+    const cells = gridCells();
+    expect([cells[0], cells[1], cells[3]]).toEqual(before);
+    expect(cells[2].textContent).toContain("Alex");
+    expect([cells[2].style.opacity, cells[2].style.transform]).toEqual(["0", "scale(0.98)"]);
+    // 挂载时就在的卡跟着页面入场走，格子自己一开始就是成品，不另播
+    expect(before.map((cell) => cell.style.opacity)).toEqual(["1", "1", "1"]);
   });
 });
 
@@ -508,7 +653,26 @@ describe("账户页：断网、加载与读取失败", () => {
     act(() => {
       window.dispatchEvent(new Event("online"));
     });
-    expect(page().textContent).not.toContain("没有网络连接");
+    expect(liveText()).not.toContain("没有网络连接");
+  });
+
+  it("停留期间断网：横幅从略小处淡入，恢复联网时淡出并让出位置，下面的内容由页面让位接住", async () => {
+    await mount();
+    const root = page().firstElementChild as HTMLElement;
+    act(() => {
+      net.onLine = false;
+      window.dispatchEvent(new Event("offline"));
+    });
+    const banner = [...root.children].find((child) => child.textContent?.includes("没有网络连接")) as HTMLElement;
+    // 横幅是页面的直接子项（页面的让位只认直接子项），挂上的那一刻从透明、0.98 起
+    expect(banner.style.opacity).toBe("0");
+    expect(banner.style.transform).toContain("scale(0.98)");
+    act(() => {
+      net.onLine = true;
+      window.dispatchEvent(new Event("online"));
+    });
+    expect(liveText()).not.toContain("没有网络连接");
+    expect(banner.hasAttribute("inert")).toBe(true);
   });
 
   it("构建里没有微软登录 client_id：标题栏按钮与添加卡的微软一行置灰，原因写明去设置里填，点了不发起；其余照常", async () => {
@@ -580,27 +744,44 @@ describe("账户页：断网、加载与读取失败", () => {
     expect(launcher.state.login).toBeNull();
   });
 
-  it("加载超过 300 ms 才出现骨架，出现后至少保持 300 ms", async () => {
+  it("加载超过 300 ms 才出现骨架，出现后至少保持 300 ms；等待期骨架占位但不可见，副标题先占一行", async () => {
     const list = deferred<AccountDto[]>();
     ipc.overrides.set("list_accounts", () => list.promise);
     await mount();
-    const busy = () => page().querySelector('[aria-busy="true"]') !== null;
-    expect([busy(), spotlightName()]).toEqual([false, undefined]);
+    const line = page().querySelector("header p");
+    expect([skeletonState(), spotlightName(), line?.textContent]).toEqual(["pending", undefined, ""]);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
-    expect(busy()).toBe(true);
+    expect(skeletonState()).toBe("shown");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(50);
     });
     list.resolve([hanami, steve]);
     await flush();
     // 数据在骨架出现 50 ms 后就到了，骨架仍要满 300 ms
-    expect([busy(), spotlightName()]).toEqual([true, undefined]);
+    expect([skeletonState(), spotlightName()]).toEqual(["shown", undefined]);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(250);
     });
-    expect([busy(), spotlightName()]).toEqual([false, "Hanami"]);
+    expect([skeletonState(), spotlightName()]).toEqual([null, "Hanami"]);
+    // 副标题是同一行填上文字，页头没有长出新的一行
+    expect(page().querySelector("header p")).toBe(line);
+    expect(line?.textContent).toBe("2 个账户 · 启动游戏时使用「Hanami」");
+  });
+
+  it("骨架照真实结构画：聚光卡的舞台、键值三行与动作，分区标题一行，两张账户卡加添加卡", async () => {
+    ipc.overrides.set("list_accounts", () => new Promise(() => undefined));
+    await mount();
+    const bones = page().querySelector('div[aria-busy="true"] > [aria-hidden="true"]') as HTMLElement;
+    expect(bones.querySelectorAll('[data-variant="spot"]')).toHaveLength(1);
+    expect(bones.querySelectorAll("dt")).toHaveLength(3);
+    expect(bones.querySelectorAll('[class*="sectionBone"]')).toHaveLength(1);
+    expect(bones.querySelectorAll('[data-variant="card"]')).toHaveLength(2);
+    expect(bones.querySelectorAll('[class*="cardFoot"]')).toHaveLength(2);
+    expect(bones.querySelectorAll('[class*="addCard"]')).toHaveLength(1);
+    // 骨架不带标题与按钮：淡出期间它还在 DOM 里，不能被当成真内容找到
+    expect(bones.querySelectorAll("h1, h2, h3, section, button")).toHaveLength(0);
   });
 
   it("读了 10 s 还没读完：骨架下方补一行「比平时慢」，读完随骨架一起收起", async () => {
@@ -610,7 +791,7 @@ describe("账户页：断网、加载与读取失败", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
-    expect(page().querySelector('[aria-busy="true"]')).not.toBeNull();
+    expect(skeletonState()).toBe("shown");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(9_699);
     });
@@ -618,26 +799,74 @@ describe("账户页：断网、加载与读取失败", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
-    expect(page().textContent).toContain("比平时慢一些，仍在加载…");
+    // 骨架在读屏里是隐藏的，说明不能放在骨架里
+    const hint = [...page().querySelectorAll("p")].find((p) => p.textContent === "比平时慢一些，仍在加载…");
+    expect(hint?.closest('[aria-hidden="true"]')).toBeNull();
     list.resolve([hanami]);
     await flush();
-    expect(page().textContent).not.toContain("比平时慢一些，仍在加载…");
+    expect(liveText()).not.toContain("比平时慢一些，仍在加载…");
     expect(spotlightName()).toBe("Hanami");
   });
 
-  it("300 ms 内读完不出现骨架", async () => {
+  it("300 ms 内读完不出现骨架：等待期只占位，读完内容淡入", async () => {
     const list = deferred<AccountDto[]>();
     ipc.overrides.set("list_accounts", () => list.promise);
     await mount();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(200);
     });
+    expect(skeletonState()).toBe("pending");
     list.resolve([hanami]);
     await flush();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(400);
-    });
-    expect(page().querySelector('[aria-busy="true"]')).toBeNull();
+    expect(skeletonState()).toBeNull();
+    expect(spotlightName()).toBe("Hanami");
+    // 等过加载才挂上的正文整体淡入一次，里面的区块不再按页面序号各自入场
+    const spot = page().querySelector("section") as HTMLElement;
+    expect(spot.hasAttribute("data-entrance")).toBe(false);
+    const content = page().querySelector('[class*="loadable"] > :not([aria-hidden])') as HTMLElement;
+    expect(content.style.opacity).toBe("0");
+  });
+
+  /** 账户早已读到之后才进页：先只挂状态容器读完数据，再挂上页面，页面挂载那一刻正文就在。 */
+  async function enterWithAccountsRead() {
+    const tree = (withPage: boolean) => (
+      <LauncherProvider>
+        <ShellProvider>
+          <Probe />
+          {withPage && <AccountsPage route={{ page: "accounts" }} />}
+          <OverlayRoot />
+        </ShellProvider>
+      </LauncherProvider>
+    );
+    view = render(tree(false));
+    await flush();
+    view.rerender(tree(true));
+  }
+
+  /** 页面里参与错开入场的元素：[标签, 入场序号]，按文档顺序。 */
+  const entrances = () => [...page().querySelectorAll("[data-entrance]")].map((el) => [el.tagName.toLowerCase(), el.getAttribute("data-entrance")]);
+
+  it("进页时账户早已读到：空的横幅槽不占序号，聚光卡与分区紧接着页头往下编号，错开入场", async () => {
+    await enterWithAccountsRead();
+    expect(entrances()).toEqual([
+      ["header", "0"],
+      ["section", "1"],
+      ["section", "2"],
+    ]);
+    expect(spotlightName()).toBe("Hanami");
+  });
+
+  it("进页时账户早已读到且断网：横幅占页头之后的 1 号，聚光卡与分区往后顺一位", async () => {
+    net.onLine = false;
+    await enterWithAccountsRead();
+    const banner = [...page().querySelectorAll<HTMLElement>("[data-entrance]")].find((el) => el.textContent?.includes("没有网络连接"));
+    expect(banner?.getAttribute("data-entrance")).toBe("1");
+    expect(entrances()).toEqual([
+      ["header", "0"],
+      ["div", "1"],
+      ["section", "2"],
+      ["section", "3"],
+    ]);
     expect(spotlightName()).toBe("Hanami");
   });
 
@@ -656,6 +885,50 @@ describe("账户页：断网、加载与读取失败", () => {
     await click(buttonIn(page(), "重试"));
     expect(callsOf(ipc, "list_accounts").length).toBe(2);
     expect(spotlightName()).toBe("Hanami");
-    expect(page().textContent).not.toContain("账户列表读不出来");
+    expect(liveText()).not.toContain("账户列表读不出来");
+  });
+
+  it("读取失败后点重试成功：「全部账户」分区与聚光卡一样从透明与 0.98 落位，不同帧硬切出现，也不另领页面入场序号", async () => {
+    let fail = true;
+    ipc.overrides.set("list_accounts", () => {
+      if (fail) throw new IpcError("io", "accounts.json 读取失败：拒绝访问");
+      return accounts;
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    fail = false;
+    await click(buttonIn(page(), "重试"));
+    const [spot, section] = live(page().querySelectorAll("section"));
+    expect([spot.querySelector("h2")?.textContent, section.textContent?.startsWith("全部账户")]).toEqual(["Hanami", true]);
+    const enter = (el: HTMLElement) => [el.parentElement?.style.opacity, el.parentElement?.style.transform, el.hasAttribute("data-entrance")];
+    expect(enter(spot)).toEqual(["0", "scale(0.98)", false]);
+    expect(enter(section)).toEqual(["0", "scale(0.98)", false]);
+  });
+
+  it("点重试：错误卡留在原处、重试按钮转圈，等多久都不换成骨架；又失败时同一张卡原位换上新原文", async () => {
+    let attempt = 0;
+    const second = deferred<AccountDto[]>();
+    ipc.overrides.set("list_accounts", () => {
+      attempt += 1;
+      if (attempt === 1) throw new IpcError("io", "accounts.json 读取失败：拒绝访问");
+      return second.promise;
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    const errorCard = () => live(page().querySelectorAll('[data-pad="lg"]')).find((card) => card.textContent?.includes("账户列表读不出来"));
+    const before = errorCard();
+    expect(before).toBeDefined();
+    await click(buttonIn(page(), "重试"));
+    expect(buttonIn(page(), "重试").getAttribute("aria-busy")).toBe("true");
+    expect(skeletonState()).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect([errorCard(), skeletonState(), subtitle()]).toEqual([before, null, ""]);
+    second.reject(new IpcError("io", "accounts.json 被另一个程序占用"));
+    await flush();
+    expect(errorCard()).toBe(before);
+    expect(before?.textContent).toContain("accounts.json 被另一个程序占用");
+    expect(buttonIn(page(), "重试").hasAttribute("aria-busy")).toBe(false);
   });
 });

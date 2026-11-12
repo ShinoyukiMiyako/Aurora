@@ -1,4 +1,8 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { AnimatePresence, MotionConfig, motion } from "framer-motion";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { NO_ART, setArtStatus } from "../../mc/art";
@@ -6,7 +10,8 @@ import { catalogFromDto, setBlockCatalog } from "../../mc/catalog";
 import { clearArtCache } from "../../mc/useArt";
 import { render, stubMatchMedia, type Rendered } from "../../test/dom";
 import { stubCanvas, type CanvasStub } from "../illustrations/test-canvas";
-import { ASSEMBLY_TIMING, AssemblingBlock } from "./AssemblingBlock";
+import { assembly } from "../../lib/motion";
+import { AssemblingBlock, assemblyExitMs, assemblySeatInMs, type AssemblyClock } from "./AssemblingBlock";
 import { InstanceAvatarBase } from "./InstanceAvatarBase";
 import { InstanceBlock } from "./InstanceBlock";
 
@@ -39,6 +44,8 @@ afterEach(() => {
 
 const settle = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
 const block = () => view?.container.querySelector<HTMLElement>("[data-sk-art='iso']") as HTMLElement;
+/** 样式原文：jsdom 不算样式，动效约定读 CSS 文本断言。不写 new URL("./x.css", import.meta.url)：构建会把它当资源地址改写成 http。 */
+const cssOf = (name: string) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), name), "utf8");
 
 describe("InstanceBlock", () => {
   it("没有材质源：画实例徽记，不发请求；方框为 W × ceil(H)", async () => {
@@ -124,6 +131,26 @@ describe("InstanceBlock", () => {
     expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([image]);
   });
 
+  it("卡面、头图上的大方块标成 large，悬停上浮随卡片走 settle；头像里的小方块仍走 tap", () => {
+    view = render(<InstanceBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} width={64} lift />);
+    expect(block().dataset.large).toBe("true");
+    view.unmount();
+    view = render(<InstanceBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} width={32} lift />);
+    expect(block().dataset.large).toBeUndefined();
+    const css = cssOf("InstanceBlock.module.css");
+    expect(css).toMatch(/\.block \{\s*transition: transform var\(--sk-spring-tap-dur\) var\(--sk-spring-tap\);/);
+    expect(css).toMatch(/\.block\[data-large\] \{\s*transition: transform var\(--sk-spring-settle-dur\) var\(--sk-spring-settle\);/);
+  });
+
+  it("上浮的过渡挂在方块本身：宿主摘掉上浮时也沿弹簧落回；按下宿主时方块落回原位", () => {
+    const css = cssOf("InstanceBlock.module.css").replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(css).not.toMatch(/\.lift(\[data-large\])? \{[^}]*transition/);
+    expect(css).toMatch(/:global\(:root:not\(\[data-sk-reduced\]\)\) \.block \{\s*transition: transform/);
+    expect(css).toMatch(/:global\(:root:not\(\[data-sk-reduced\]\) :is\(a, button, \[role="button"\]\):active\) \.lift \{\s*transform: none;/);
+  });
+
+  // 换了来源时旧图淡出、新图淡入的叠放交叉要等退场层播完，在 InstanceBlock.frames.test.tsx 里走真实时间断言
+
   it("不允许的宽度直接抛错", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     expect(() => render(<InstanceBlock instanceId="i3" cover={{ block: "cherry_planks", hue: 345, image: null }} width={48 as never} />)).toThrow("不允许");
@@ -160,6 +187,20 @@ describe("InstanceAvatarBase", () => {
     expect(avatar.dataset.selected).toBe("true");
     expect(avatar.querySelector("[data-testid='ring']")).not.toBeNull();
   });
+
+  it("选中外环是叠层，切换时只过渡透明度，不在一帧里出现或消失", () => {
+    const css = cssOf("InstanceAvatarBase.module.css").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rule = (selector: string) => {
+      const match = new RegExp(`(?:^|\\n)${selector.replace(/[.[\]]/g, "\\$&")} \\{([^}]*)\\}`).exec(css);
+      if (match === null) throw new Error(`没有 ${selector} 规则`);
+      return match[1];
+    };
+    expect(rule(".avatar::after")).toContain("opacity: 0;");
+    expect(rule(".avatar::after")).toContain("transition: opacity var(--sk-dur-hover) var(--sk-ease);");
+    expect(rule(".avatar::after")).toContain("0 0 0 4px var(--sk-accent)");
+    expect(rule(".avatar[data-selected]::after")).toContain("opacity: 1;");
+    expect(css).not.toMatch(/\.avatar\[data-selected\] \{/);
+  });
 });
 
 describe("AssemblingBlock", () => {
@@ -182,11 +223,129 @@ describe("AssemblingBlock", () => {
     expect(root().dataset.placed).toBe("1");
     advance(0);
     expect(root().dataset.placed).toBe("2");
-    advance(ASSEMBLY_TIMING.stepGapMs - 1);
+    advance(assembly.stepGapMs - 1);
     expect(root().dataset.placed).toBe("2");
     advance(1);
     expect(root().dataset.placed).toBe("3");
     view.rerender(<AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} placed={0} />);
     expect(root().dataset.placed).toBe("0");
+  });
+
+  it("随新换上的面入场：从一面未落起，蓝图先淡入，挂载 firstDropMs 后才落下左面；之后的面照常隔一个落位间隔", () => {
+    vi.useFakeTimers();
+    const advance = (ms: number) =>
+      act(() => {
+        vi.advanceTimersByTime(ms);
+      });
+    const cover = { block: "cherry_planks", hue: 345, image: null };
+    view = render(<AssemblingBlock instanceId="i" cover={cover} placed={1} enter />);
+    const root = () => view?.container.firstElementChild as HTMLElement;
+    expect(root().dataset.placed).toBe("0");
+    expect(root().querySelector("svg")?.style.opacity).toBe("0");
+    advance(assembly.firstDropMs - 1);
+    expect(root().dataset.placed).toBe("0");
+    advance(1);
+    expect(root().dataset.placed).toBe("1");
+    view.rerender(<AssemblingBlock instanceId="i" cover={cover} placed={2} enter />);
+    advance(assembly.stepGapMs - 1);
+    expect(root().dataset.placed).toBe("1");
+    advance(1);
+    expect(root().dataset.placed).toBe("2");
+  });
+
+  it("把组装进度写进 clock：入场的首落时刻、已落面数与最后一面的时刻；所在的面退场后不再落面、也不再写", () => {
+    vi.useFakeTimers();
+    const advance = (ms: number) =>
+      act(() => {
+        vi.advanceTimersByTime(ms);
+      });
+    const cover = { block: "cherry_planks", hue: 345, image: null };
+    const clock: { current: AssemblyClock | null } = { current: null };
+    const tree = (present: boolean) => (
+      <AnimatePresence>
+        {present && (
+          <motion.div key="face" exit={{ opacity: 0, transition: { duration: 5 } }}>
+            <AssemblingBlock instanceId="i" cover={cover} placed={3} enter clock={clock} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    );
+    const start = performance.now();
+    const firstDropAt = start + assembly.firstDropMs;
+    view = render(tree(true));
+    expect(clock.current).toEqual({ shown: 0, lastDropAt: Number.NEGATIVE_INFINITY, firstDropAt });
+    advance(assembly.firstDropMs);
+    expect(clock.current).toEqual({ shown: 1, lastDropAt: firstDropAt, firstDropAt });
+    advance(assembly.stepGapMs);
+    expect(clock.current).toEqual({ shown: 2, lastDropAt: firstDropAt + assembly.stepGapMs, firstDropAt });
+
+    // 面退场期间方块停在离场那一刻：排着的第三面不再落下（在淡出的面上落位只会半透明地闪一下），进度也不再写
+    view.rerender(tree(false));
+    advance(assembly.stepGapMs);
+    expect(view.container.querySelector<HTMLElement>("[data-placed]")?.dataset.placed).toBe("2");
+    expect(clock.current?.shown).toBe(2);
+  });
+
+  it("面刚换上、首落之前就退场（加载面上来不到 firstDropMs 就失败或取消）：左面不在淡出途中落下", () => {
+    vi.useFakeTimers();
+    const cover = { block: "cherry_planks", hue: 345, image: null };
+    const tree = (present: boolean) => (
+      <AnimatePresence>
+        {present && (
+          <motion.div key="face" exit={{ opacity: 0, transition: { duration: 5 } }}>
+            <AssemblingBlock instanceId="i" cover={cover} placed={1} enter />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    );
+    view = render(tree(true));
+    act(() => {
+      vi.advanceTimersByTime(assembly.firstDropMs / 2);
+    });
+    view.rerender(tree(false));
+    act(() => {
+      vi.advanceTimersByTime(assembly.firstDropMs);
+    });
+    const root = view.container.querySelector<HTMLElement>("[data-placed]");
+    if (root === null) throw new Error("退场中的方块不在了");
+    expect(root.dataset.placed).toBe("0");
+    expect(root.querySelector<HTMLElement>("[data-face='left']")?.style.opacity).toBe("0");
+  });
+
+  it("留住旧面的估算：拆解、崩落按已落面数逐面错开；坐定按未落的面还要多久落齐", () => {
+    expect([0, 1, 2, 3].map((faces) => assemblyExitMs("collapse", faces))).toEqual([0, 220, 260, 300]);
+    expect([0, 1, 2, 3].map((faces) => assemblyExitMs("disassemble", faces))).toEqual([0, 140, 190, 240]);
+    const never = Number.NEGATIVE_INFINITY;
+    expect(assemblySeatInMs({ shown: 3, lastDropAt: never, firstDropAt: never }, 1000)).toBe(0);
+    expect(assemblySeatInMs({ shown: 3, lastDropAt: 1000 - 20, firstDropAt: never }, 1000)).toBe(assembly.seatDelayMs - 20);
+    expect(assemblySeatInMs({ shown: 1, lastDropAt: never, firstDropAt: never }, 1000)).toBe(assembly.stepGapMs + assembly.seatDelayMs);
+    expect(assemblySeatInMs({ shown: 0, lastDropAt: never, firstDropAt: 1000 + 100 }, 1000)).toBe(100 + 2 * assembly.stepGapMs + assembly.seatDelayMs);
+  });
+
+  it("减少动画时入场不等待：第一面立即落下", () => {
+    vi.useFakeTimers();
+    view = render(
+      <MotionConfig reducedMotion="always">
+        <AssemblingBlock instanceId="i" cover={{ block: "cherry_planks", hue: 345, image: null }} placed={1} enter />
+      </MotionConfig>,
+    );
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    expect((view.container.firstElementChild as HTMLElement).dataset.placed).toBe("1");
+  });
+
+  it("崩落：已落的面下坠 40% 个方块边长（28 宽下坠 11.2 px，不按 32 高的画布算）并淡出", async () => {
+    vi.useFakeTimers();
+    const cover = { block: "cherry_planks", hue: 345, image: null };
+    view = render(<AssemblingBlock instanceId="i" cover={cover} placed={2} width={28} />);
+    view.rerender(<AssemblingBlock instanceId="i" cover={cover} placed={2} width={28} exit="collapse" />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    const left = view.container.querySelector<HTMLElement>("[data-face='left']");
+    if (left === null) throw new Error("没有左面");
+    expect(left.style.transform).toBe(`translateY(${assembly.collapseFall * 28}px)`);
+    expect(left.style.opacity).toBe("0");
   });
 });

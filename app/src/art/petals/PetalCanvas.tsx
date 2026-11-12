@@ -2,21 +2,12 @@
 // 汇总成 paused 传进来；减少动画、档位、明暗与强调色同样由上层传入。
 // 画布放在内容区里、页面滚动容器之下；内容区（画布的父元素）的指针移动用来推开花瓣。
 
-import { AnimatePresence, motion, type Transition } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { useLayoutEffect, useRef } from "react";
-import { fade } from "../../lib/motion";
+import { ambientFade, fade } from "../../lib/motion";
 import { PetalEngine, type PetalDowngrade, type PetalInputs } from "./engine";
 import { createRandom } from "./sim";
 import styles from "./PetalCanvas.module.css";
-
-/**
- * 进入主页时花瓣场比一般的淡入更慢地浮现；离开主页或关闭开关时较快淡出，淡出期间继续播放，结束后卸载画布。
- * 只改透明度，所以减少动画时照常播放。曲线沿用全站淡入与淡出的曲线。
- */
-export const PETAL_FADE = {
-  in: { duration: 0.48, ease: fade.in.ease },
-  out: { duration: 0.2, ease: fade.out.ease },
-} as const satisfies Record<string, Transition>;
 
 export interface PetalCanvasProps extends PetalInputs {
   /** 是否显示花瓣层：当前在主页且外观设置里开着「飘落花瓣」。变为 false 后淡出并卸载画布节点。 */
@@ -74,6 +65,8 @@ function PetalSurface({ paused, reduced, tier, mode, accent, onDowngrade, seed }
     engine.update({ paused, reduced, tier, mode, accent });
   }, [paused, reduced, tier, mode, accent]);
 
+  // 进入主页时花瓣场慢慢浮现；离开主页或关闭开关时淡出，淡出期间继续播放，结束后卸载画布。
+  // 减少动画时花瓣是静态散落，浮现也收回控件那一档的淡入：铺满整片的慢淡入不留给减少动画的用户
   return (
     <motion.canvas
       ref={canvasRef}
@@ -81,8 +74,8 @@ function PetalSurface({ paused, reduced, tier, mode, accent, onDowngrade, seed }
       data-sk-petals=""
       aria-hidden="true"
       initial={{ opacity: 0 }}
-      animate={{ opacity: 1, transition: PETAL_FADE.in }}
-      exit={{ opacity: 0, transition: PETAL_FADE.out }}
+      animate={{ opacity: 1, transition: reduced ? fade.in : ambientFade.in }}
+      exit={{ opacity: 0, transition: ambientFade.out }}
     />
   );
 }

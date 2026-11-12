@@ -289,7 +289,8 @@ describe("主页：问候与继续游玩", () => {
     expect(document.querySelector("h1")?.textContent).toBe("下午好");
     expect(text()).toContain("还没有登录账户");
     expect(text()).toContain("还没有可以继续的实例");
-    expect(text()).not.toContain("最近游玩");
+    // 最近游玩在加载期间占过位，列表到了一个都没有就整段退场；退场中的那一段还在文档里淡出（带 inert），不算
+    expect([...document.querySelectorAll('section[aria-labelledby="home-recent-title"]')].filter((el) => el.closest("[inert]") === null)).toEqual([]);
     click(buttonByText("新建实例"));
     expect(shell.createInstance).toEqual({ open: true, preset: null });
     click(buttonByText("添加账户"));
@@ -369,6 +370,124 @@ describe("主页：最近游玩", () => {
     expect(nav.route).toEqual({ page: "instance", id: "红石", tab: "overview" });
   });
 
+  /** 在场的最近游玩段：退场中的那一段（包在带 inert 的层里）不算。 */
+  const recentSection = () =>
+    [...document.querySelectorAll<HTMLElement>('section[aria-labelledby="home-recent-title"]')].find((el) => el.closest("[inert]:not(section)") === null) ?? null;
+  /** 推迟实例列表的读取，返回放行函数。 */
+  const holdInstances = () => {
+    let release: () => void = () => {
+      throw new Error("实例列表的读取还没发出");
+    };
+    ipc.overrides.set("list_instances", () => new Promise<InstanceDto[]>((resolve) => (release = () => resolve(instances))));
+    return () =>
+      act(async () => {
+        release();
+        await settle();
+      });
+  };
+
+  // 段落夹在两排卡片之间：加载期间不占位的话，列表一到整段插进来，下面一排被一帧顶下去
+  it("实例列表晚到：加载期间整段原位占着（前 300 ms 隐身、不可交互），读出来后在同一个段落里换成卡片", async () => {
+    const release = holdInstances();
+    await mount();
+    const held = recentSection();
+    if (held === null) throw new Error("实例列表还在读，最近游玩却没有占位");
+    expect(held.hasAttribute("data-pending")).toBe(true);
+    expect(held.hasAttribute("inert")).toBe(true);
+    expect(held.querySelector('[aria-busy="true"]')).not.toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(held.hasAttribute("data-pending")).toBe(false);
+    expect(held.hasAttribute("inert")).toBe(false);
+
+    await release();
+    // 骨架出现后至少停留 300 ms
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(recentSection()).toBe(held);
+    const titles = [...held.querySelectorAll<HTMLButtonElement>('button[aria-label^="打开「"]')].map((b) => b.textContent);
+    expect(titles).toEqual(["创造", "红石"]);
+  });
+
+  it("换一个：成了大卡的那张原地淡出（带 inert），原来的大卡加入，留下的卡是同一个节点、滑到新位置", async () => {
+    await mount();
+    const cardOf = (name: string) => buttonByLabel(`打开「${name}」`).closest<HTMLElement>("[class]:not(button)");
+    const kept = cardOf("红石");
+    await openMenu(buttonByText("换一个"));
+    click(menuItem("创造"));
+    await flush();
+    const section = recentSection() as HTMLElement;
+    const cards = [...section.querySelectorAll<HTMLButtonElement>('button[aria-label^="打开「"]')];
+    expect(cards.filter((b) => b.closest("[inert]") === null).map((b) => b.textContent)).toEqual(["生存", "红石"]);
+    expect(cards.filter((b) => b.closest("[inert]") !== null).map((b) => b.textContent)).toEqual(["创造"]);
+    expect(cardOf("红石")).toBe(kept);
+  });
+
+  it("实例列表晚到且除大卡外一个都没玩过：占位的段落退场让出位置，不留空白", async () => {
+    instances = instances.map((i) => (i.id === "生存" ? i : { ...i, last_played_at: null }));
+    const release = holdInstances();
+    await mount();
+    expect(recentSection()).not.toBeNull();
+    await release();
+    expect(recentSection()).toBeNull();
+  });
+
+  it("实例列表读取失败后重试：不在的段落不为重读先插进隐身占位，读到有卡再出现", async () => {
+    let failing = true;
+    let release: () => void = () => {
+      throw new Error("重读还没发出");
+    };
+    ipc.overrides.set("list_instances", () => {
+      if (failing) throw new IpcError("io_failed", "versions 目录读不出来");
+      return new Promise<InstanceDto[]>((resolve) => (release = () => resolve(instances)));
+    });
+    await mount();
+    expect(launcher.state.status.instances.kind).toBe("error");
+    expect(recentSection()).toBeNull();
+
+    failing = false;
+    const heroError = [...document.querySelectorAll<HTMLElement>("[data-pad]")].find((card) => card.textContent?.includes("实例列表读不出来"));
+    if (heroError === undefined) throw new Error("大卡没有原位报错");
+    click(buttonByText("重试", heroError));
+    await flush();
+    expect(launcher.state.status.instances.kind).toBe("loading");
+    expect(recentSection()).toBeNull();
+    // 过了隐身期也不补一块骨架：这一段读完之前是什么样就还是什么样
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(recentSection()).toBeNull();
+
+    await act(async () => {
+      release();
+      await settle();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    const titles = [...(recentSection() as HTMLElement).querySelectorAll<HTMLButtonElement>('button[aria-label^="打开「"]')].map((b) => b.textContent);
+    expect(titles).toEqual(["创造", "红石"]);
+  });
+
+  it("设置晚于实例列表：大卡指向谁定下来之前最近游玩不出卡，不先排除错的实例再改", async () => {
+    let releaseConfig: () => void = () => {
+      throw new Error("设置的读取还没发出");
+    };
+    ipc.overrides.set("get_config", () => new Promise((resolve) => (releaseConfig = () => resolve(configDto({ selected_version: "创造" })))));
+    await mount();
+    const held = recentSection();
+    expect(held?.querySelector('button[aria-label^="打开「"]')).toBeNull();
+    await act(async () => {
+      releaseConfig();
+      await settle();
+    });
+    const titles = [...(recentSection() as HTMLElement).querySelectorAll<HTMLButtonElement>('button[aria-label^="打开「"]')].map((b) => b.textContent);
+    expect(titles).toEqual(["生存", "红石"]);
+  });
+
   it("修复连跑两批下载：卡片上的进度环第二批从当批进度重新走，不停在上一批的满格", async () => {
     ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
     await mount();
@@ -388,6 +507,25 @@ describe("主页：最近游玩", () => {
     act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 2, bytes: 5_000, total_bytes: 100_000, speed: 1_000 }));
     await flush();
     expect(ring().getAttribute("aria-valuenow")).toBe("5");
+  });
+
+  it("最近卡换面：开始修复后进度环在同一角接手，换下来的启动钮带 inert 留在原处淡出，点不到", async () => {
+    ipc.overrides.set("repair_instance", () => new Promise(() => undefined));
+    await mount();
+    const card = buttonByLabel("打开「创造」").closest<HTMLElement>("[data-clip]");
+    if (card === null) throw new Error("找不到「创造」的最近卡");
+    const faces = () => [...card.querySelectorAll<HTMLElement>('[class*="recentFace"]')];
+    expect(faces()).toHaveLength(1);
+    await act(async () => {
+      await launcher.actions.repairInstance("创造");
+      await settle();
+    });
+    const live = faces().filter((f) => !f.hasAttribute("inert"));
+    const leaving = faces().filter((f) => f.hasAttribute("inert"));
+    expect(live).toHaveLength(1);
+    expect(live[0].querySelector('[role="progressbar"]')).not.toBeNull();
+    expect(leaving).toHaveLength(1);
+    expect(leaving[0].querySelector("button")).not.toBeNull();
   });
 });
 
@@ -494,12 +632,25 @@ describe("主页：游玩日历与洞察", () => {
 });
 
 describe("主页：资讯", () => {
+  /** 在场的启动器资讯提示：退场中的那一条（包在带 inert 的层里淡出）不算。 */
+  const liveNotes = () => [...document.querySelectorAll<HTMLElement>('[role="note"]')].filter((el) => el.closest("[inert]") === null);
+
   it("按发布时刻倒序列出，标签写类型", async () => {
     await mount();
     const titles = [...document.querySelectorAll<HTMLButtonElement>("button")].map((b) => b.textContent).filter((t) => t?.startsWith("Minecraft"));
     expect(titles).toEqual(["Minecraft 1.21.1", "Minecraft 26.3", "Minecraft Live 回顾"]);
     expect(text()).toContain("正式版");
     expect(text()).toContain("活动");
+  });
+
+  // List 的根规则清零外边距与内边距，与页面类同一特异性：上距写在 List 上时谁赢看样式表注入顺序，冷启动主页时被清掉，
+  // 内容比骨架矮 10、整排跟着缩
+  it("列表上方的留白落在包住列表的那一层上，不写在 List 自己身上", async () => {
+    await mount();
+    const list = buttonByText("Minecraft 1.21.1").closest("ul");
+    if (list === null) throw new Error("资讯行不在列表里");
+    expect(list.className).not.toMatch(/newsList/);
+    expect(list.parentElement?.className).toMatch(/newsList/);
   });
 
   it("已有该版本的实例：主按钮打开它，先关弹窗再跳转", async () => {
@@ -562,7 +713,9 @@ describe("主页：资讯", () => {
     await flush();
     expect(callsOf(ipc, "list_news")).toHaveLength(before + 1);
     expect(callsOf(ipc, "list_news")[before]).toEqual({ retry: true });
-    expect(document.querySelector('[role="note"]')).toBeNull();
+    // 提示退场：淡出期间它还在文档里，但已经 inert、不在场
+    expect(liveNotes()).toEqual([]);
+    expect(note.closest("[inert]")).not.toBeNull();
     expect(text()).toContain("Minecraft 1.21.1");
   });
 
@@ -585,7 +738,7 @@ describe("主页：资讯", () => {
     await flush();
     // 恢复联网的那次重取跳过后端退避，否则退避期内拿回来的仍是断网时那次失败
     expect(callsOf(ipc, "list_news")).toEqual([{ retry: false }, { retry: true }]);
-    expect(document.querySelector('[role="note"]')).toBeNull();
+    expect(liveNotes()).toEqual([]);
     expect(text()).not.toContain("离线中");
   });
 
@@ -707,7 +860,8 @@ describe("主页：固定的服务器", () => {
       if (el === null || !el.textContent?.includes("从游戏的多人服务器列表里挑选")) throw new Error("服务器挑选弹窗没有打开");
       return el;
     };
-    const pickRows = () => [...picker().querySelectorAll<HTMLButtonElement>('button[aria-label^="固定 "]')];
+    // 刚固定的那一行还在淡出，已经标了 inert，不算列表的行
+    const pickRows = () => [...picker().querySelectorAll<HTMLButtonElement>('li:not([inert]) > button[aria-label^="固定 "]')];
     expect(pickRows().map((b) => b.getAttribute("aria-label"))).toEqual(many.map((k) => `固定 ${k.name}`));
 
     click(pickRows()[11]);
@@ -737,7 +891,8 @@ describe("主页：固定的服务器", () => {
     click(menuItem("全部 11 台服务器"));
     await flush();
     const picker = dialog() as HTMLElement;
-    const rows = () => [...picker.querySelectorAll<HTMLButtonElement>('button[aria-label^="固定 "]')];
+    // 挑空时整个列表连同最后一行淡出，那一层带 inert：里面的行同样不算
+    const rows = () => [...picker.querySelectorAll<HTMLButtonElement>('li > button[aria-label^="固定 "]')].filter((b) => b.closest("[inert]") === null);
     const focused = () => document.activeElement?.getAttribute("aria-label") ?? document.activeElement?.textContent;
     const pickFocused = async () => {
       const el = document.activeElement;
@@ -760,6 +915,10 @@ describe("主页：固定的服务器", () => {
     for (let left = rows().length; left > 0; left--) await pickFocused();
     expect(rows()).toHaveLength(0);
     expect(picker.textContent).toContain("所有服务器都已固定");
+    // 挑空时列表连同最后一行原地淡出（不可交互），不是同一帧换成空状态
+    const leftover = picker.querySelector<HTMLElement>('li > button[aria-label^="固定 "]');
+    expect(leftover).not.toBeNull();
+    expect(leftover?.closest("[inert]")).not.toBeNull();
     expect(document.activeElement).toBe(buttonByText("关闭", picker));
     expect(pinned).toHaveLength(12);
   });
@@ -781,7 +940,7 @@ describe("主页：固定的服务器", () => {
     await openMenu(buttonByLabel("固定服务器"));
     click(menuItem("全部 12 台服务器"));
     await flush();
-    const pickRow = (name: string) => (dialog() as HTMLElement).querySelector<HTMLButtonElement>(`button[aria-label="固定 ${name}"]`);
+    const pickRow = (name: string) => (dialog() as HTMLElement).querySelector<HTMLButtonElement>(`li:not([inert]) > button[aria-label="固定 ${name}"]`);
 
     const row = pickRow("服3") as HTMLButtonElement;
     click(row);
@@ -968,6 +1127,103 @@ describe("主页：固定的服务器", () => {
     expect(text()).toContain("38 ms");
     expect(text()).not.toContain("测速中");
     expect(signals()).toEqual(["online"]);
+  });
+
+  // 结果晚到时行若从一行长成三行，下面的行与提示会被逐行挤下去
+  it("测速结果晚到：行先给 MOTD 与在线人数留好位置（加载中），结果到了在同一处换上", async () => {
+    ipc.overrides.set("ping_servers", () => new Promise<ServerStatusDto[]>((resolve) => setTimeout(() => resolve(pinned.map((p) => ping(p.address))), 2_000)));
+    await mount();
+    const row = document.querySelector<HTMLElement>('[data-server-row="play.example"]');
+    if (row === null) throw new Error("找不到晨星这一行");
+    expect(row.querySelector('[aria-busy="true"]')).not.toBeNull();
+    expect(row.textContent).not.toContain("127/500 在线");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(document.querySelector('[data-server-row="play.example"]')).toBe(row);
+    expect(row.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(row.textContent).toContain("第六周目开荒中");
+    expect(row.textContent).toContain("127/500 在线");
+  });
+
+  it("固定列表晚到：卡头先占住副标题一行，台数到了填进同一行；列表区先是隐身占位的骨架", async () => {
+    let release: () => void = () => {
+      throw new Error("固定列表的读取还没发出");
+    };
+    ipc.overrides.set("list_pinned_servers", () => new Promise<PinnedServerDto[]>((resolve) => (release = () => resolve(pinned))));
+    await mount();
+    const header = [...document.querySelectorAll("h2")].find((h) => h.textContent === "固定的服务器")?.parentElement;
+    if (header === undefined || header === null) throw new Error("找不到服务器卡的卡头");
+    expect(header.querySelector("[data-reserve]")).not.toBeNull();
+    const card = header.closest<HTMLElement>("[data-pad]") as HTMLElement;
+    expect(card.querySelector('[aria-busy="true"] [aria-hidden="true"][data-pending]')).not.toBeNull();
+    await act(async () => {
+      release();
+      await settle();
+    });
+    expect(header.querySelector("[data-reserve]")).toBeNull();
+    expect(header.textContent).toContain("1 个 · 在线人数与延迟");
+  });
+
+  it("固定列表读取失败：卡头照样占住副标题一行，不比加载中矮；重试读到后台数填进同一行", async () => {
+    let failing = true;
+    ipc.overrides.set("list_pinned_servers", () => {
+      if (failing) throw new IpcError("io_failed", "servers.dat 读不出来");
+      return pinned;
+    });
+    await mount();
+    const header = [...document.querySelectorAll("h2")].find((h) => h.textContent === "固定的服务器")?.parentElement;
+    if (header === undefined || header === null) throw new Error("找不到服务器卡的卡头");
+    const card = header.closest<HTMLElement>("[data-pad]") as HTMLElement;
+    expect(card.textContent).toContain("固定的服务器读不出来");
+    expect(header.querySelector("[data-reserve]")).not.toBeNull();
+
+    failing = false;
+    click(buttonByText("重试", card));
+    await flush();
+    expect(header.querySelector("[data-reserve]")).toBeNull();
+    expect(header.textContent).toContain("1 个 · 在线人数与延迟");
+  });
+
+  it("取消固定最后一台：列表连同最后一行原地淡出（带 inert），空状态在同一处淡入", async () => {
+    await mount();
+    await openMenu(buttonByLabel("晨星 的更多操作"));
+    click(menuItem("取消固定"));
+    await flush();
+    const row = document.querySelector<HTMLElement>('[data-server-row="play.example"]');
+    expect(row).not.toBeNull();
+    expect(row?.closest("[inert]")).not.toBeNull();
+    expect(text()).toContain("还没有固定服务器");
+  });
+
+  it("整批测速失败后重测：重测途中提示留着、「重试」标着忙；重测成功提示退场", async () => {
+    let failing = true;
+    let release: () => void = () => {
+      throw new Error("重测还没发出");
+    };
+    ipc.overrides.set("ping_servers", () => {
+      if (failing) throw new IpcError("invalid_argument", "地址不合法");
+      return new Promise<ServerStatusDto[]>((resolve) => (release = () => resolve(pinned.map((p) => ping(p.address)))));
+    });
+    await mount();
+    const liveCallouts = () => [...document.querySelectorAll<HTMLElement>('[data-tone="danger"]')].filter((el) => el.closest("[inert]") === null);
+    expect(liveCallouts()).toHaveLength(1);
+    // 失败了就不再等结果：行里不留一直转的骨架
+    expect(document.querySelector('[data-server-row="play.example"] [aria-busy="true"]')).toBeNull();
+
+    failing = false;
+    click(buttonByText("重试", liveCallouts()[0]));
+    await flush();
+    expect(liveCallouts()).toHaveLength(1);
+    expect(liveCallouts()[0].textContent).toContain("地址不合法");
+    expect(buttonByText("重试", liveCallouts()[0]).getAttribute("aria-busy")).toBe("true");
+
+    await act(async () => {
+      release();
+      await settle();
+    });
+    expect(liveCallouts()).toHaveLength(0);
+    expect(text()).toContain("127/500 在线");
   });
 
   it("没有固定服务器：紧凑空状态", async () => {

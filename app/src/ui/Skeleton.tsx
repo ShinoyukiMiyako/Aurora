@@ -9,7 +9,7 @@ export type SkeletonRadius = "xs" | "sm" | "md" | "lg" | "xl" | "pill";
 
 export type SkeletonProps =
   | {
-      /** 文字行：每行占一个正文行高，条高 12；多行时末行 60% 宽。 */
+      /** 文字行：每行占所在位置的一个行高（继承下来的 line-height），条高 12；多行时末行 60% 宽。 */
       shape: "text";
       lines?: number;
       /** 整段的宽度；默认撑满。 */
@@ -20,7 +20,11 @@ export type SkeletonProps =
       /** 块：卡面、按钮、胶囊等，尺寸与圆角照真实组件给。 */
       shape: "block";
       width: number | string;
-      height: number;
+      /**
+       * 数字为像素。要撑满随内容伸缩的区域（舞台随旁边的信息列变高）时传 "100%"：所在位置要有确定的高度，
+       * 例如被网格行或 flex 拉伸的格子，或自己定了高的容器。
+       */
+      height: number | string;
       radius: SkeletonRadius;
       className?: string;
     }
@@ -55,7 +59,7 @@ export function Skeleton(props: SkeletonProps) {
       <span
         className={cx(styles.skeleton, props.className)}
         data-radius={props.radius}
-        style={{ width: toCss(props.width), height: `${props.height}px` }}
+        style={{ width: toCss(props.width), height: toCss(props.height) }}
         aria-hidden="true"
       />
     );

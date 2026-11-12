@@ -4,8 +4,10 @@ import type { Task } from "../domain/types";
 import { applyPhase, sessionCancelled, sessionCrashClue, sessionExited, sessionFailed, sessionLaunched, startSession, type SessionState } from "../state/session";
 import type { LauncherState } from "../state/store";
 import { newTask } from "../state/tasks";
+import type { AssemblyClock } from "../art/iso/AssemblingBlock";
 import { avatarIndicator, ringGeometry } from "./InstanceAvatar";
-import { faceKey, fillOf, holdFor, placedForProgress, placedForStage, FACE_HOLD_MS } from "./LaunchCapsule";
+import { capsuleSwap } from "../lib/motion";
+import { capsuleLayoutKey, faceKey, fillOf, holdFor, placedForProgress, placedForStage, TEXT_SLOTS } from "./LaunchCapsule";
 import { brokenAction, launchFailure, launchView, sessionDetail, stageLabel, type LaunchView } from "./launchView";
 
 const T0 = 1_720_000_000_000;
@@ -144,6 +146,14 @@ describe("会话第二行文案", () => {
     expect(sessionDetail(known, T0)).toBe("文件 120/480 · 4.2 MB/s");
   });
 
+  it("下载速度可由渲染方传入显示节流后的值：文件数照会话写，速度写传入的那个；总数未知时与速度无关", () => {
+    const counting = loading("A", 4);
+    expect(sessionDetail(counting, T0, 2 * 1024 * 1024)).toBe("正在统计缺失文件…");
+    const known = applyPhase(counting, { taskId: "launch-1", phase: "downloading", stageIndex: 4, download: { done: 120, total: 480, bytes: 1, totalBytes: 10, speedBps: 4.2 * 1024 * 1024 } }, T0);
+    expect(sessionDetail(known, T0, 1.5 * 1024 * 1024)).toBe("文件 120/480 · 1.5 MB/s");
+    expect(sessionDetail(known, T0, 0)).toBe("文件 120/480 · 0 B/s");
+  });
+
   it("阶段名按九阶段表取：下标 8 是游戏运行中，下标 9 越界", () => {
     expect(stageLabel(8)).toBe("游戏运行中");
     expect(() => stageLabel(9)).toThrow("阶段下标 9 超出九阶段表");
@@ -271,19 +281,103 @@ describe("头像指示与胶囊换面", () => {
     expect([0, 0.33, 1 / 3, 0.66, 2 / 3, 1].map(placedForProgress)).toEqual([1, 1, 2, 2, 3, 3]);
   });
 
-  it("加载换到取消、失败、运行时先留住旧面演完方块动画；其余直接换", () => {
+  describe("换面前留住旧面", () => {
     const a = inst("A");
     const prev = launchView(state({ session: loading("A", 4) }), a);
     const cancelled = launchView(state({ session: sessionCancelled(loading("A", 4), "launch-1", T0) }), a);
-    expect(holdFor(prev, cancelled)).toMatchObject({ exit: "disassemble", seat: false, ms: FACE_HOLD_MS.disassemble });
     const failed = launchView(state({ session: sessionFailed(loading("A"), "launch-1", { code: "version_broken", params: {} }, T0) }), a);
-    expect(holdFor(prev, failed)).toMatchObject({ exit: "collapse", ms: FACE_HOLD_MS.collapse });
-    // 下载阶段已落 2 面：剩 1 面立即落下，120 ms 后坐定，再过 200 ms 换到运行面
-    expect(holdFor(prev, launchView(state({ session: running("A") }), a))).toMatchObject({ exit: null, seat: true, ms: 120 + 200 });
-    const launchingPrev = launchView(state({ session: loading("A", 7) }), a);
-    expect(holdFor(launchingPrev, launchView(state({ session: running("A") }), a))?.ms).toBe(200);
-    expect(holdFor({ kind: "ready", busyElsewhere: false }, prev)).toBeNull();
-    expect(faceKey(cancelled)).toBe("stopped:cancelled");
-    expect(faceKey(prev)).toBe("loading");
+    const runningView = launchView(state({ session: running("A") }), a);
+    const now = 50_000;
+    /** 面早就落定了（挂载时就在，或落下已久）。 */
+    const settledAt = (shown: number): AssemblyClock => ({ shown, lastDropAt: Number.NEGATIVE_INFINITY, firstDropAt: Number.NEGATIVE_INFINITY });
+
+    it("拆解与崩落按实际已落的面数演完：逆序逐面错开一个间隔，最后一面演满一段；一面未落时不留", () => {
+      expect(holdFor(prev, cancelled, settledAt(3), now)).toEqual({ face: prev, exit: "disassemble", seat: false, ms: 2 * 50 + 140 });
+      expect(holdFor(prev, cancelled, settledAt(2), now)?.ms).toBe(50 + 140);
+      // 启动阶段已落 3 面：崩落要 2 × 40 + 220，不在最后一面落到一半时换面
+      expect(holdFor(prev, failed, settledAt(3), now)).toEqual({ face: prev, exit: "collapse", seat: false, ms: 2 * 40 + 220 });
+      expect(holdFor(prev, failed, settledAt(2), now)?.ms).toBe(40 + 220);
+      expect(holdFor(prev, failed, settledAt(1), now)?.ms).toBe(220);
+      expect(holdFor(prev, failed, settledAt(0), now)).toBeNull();
+      expect(holdFor(prev, launchView(state({ session: sessionExited(running("A"), { versionId: "A", crashed: true, killed: false }, T0 + 5000) }), a), settledAt(3), now)?.exit).toBe("collapse");
+    });
+
+    it("坐定：未落的面隔着落位间隔依次落齐，最后一面落下 120 ms 后坐定，再停 200 ms 才换到运行面", () => {
+      expect(holdFor(prev, runningView, settledAt(2), now)).toEqual({ face: prev, exit: null, seat: true, ms: 120 + capsuleSwap.holdMs.afterSeat });
+      expect(holdFor(prev, runningView, settledAt(1), now)?.ms).toBe(90 + 120 + 200);
+      expect(holdFor(prev, runningView, settledAt(3), now)?.ms).toBe(200);
+      // 最后一面 50 ms 前才落下：坐定还差 70 ms
+      expect(holdFor(prev, runningView, { shown: 3, lastDropAt: now - 50, firstDropAt: Number.NEGATIVE_INFINITY }, now)?.ms).toBe(70 + 200);
+    });
+
+    it("坐定时刻按方块实际进度算：加载面刚换上还在等首落延迟、阶段一次跳了几级面还没落齐，都不提前换面", () => {
+      // 加载面 50 ms 前才换上：首落还要 110 ms，之后两面各隔 90 ms
+      expect(holdFor(prev, runningView, { shown: 0, lastDropAt: Number.NEGATIVE_INFINITY, firstDropAt: now + 110 }, now)?.ms).toBe(110 + 90 + 90 + 120 + 200);
+      // 落位数刚从 1 跳到 3：第二面 30 ms 前才落下，第三面要等满间隔
+      expect(holdFor(prev, runningView, { shown: 2, lastDropAt: now - 30, firstDropAt: Number.NEGATIVE_INFINITY }, now)?.ms).toBe(60 + 120 + 200);
+      // 安装中换到就绪同理
+      const installing = launchView(state({ tasks: [installTask("A", "t1", "running", 0.9)] }), inst("A", { status: "installing" }));
+      expect(installing.kind).toBe("installing");
+      expect(holdFor(installing, { kind: "ready", busyElsewhere: false }, { shown: 1, lastDropAt: now - 10, firstDropAt: now - 10 }, now)).toEqual({
+        face: installing,
+        exit: null,
+        seat: true,
+        ms: 80 + 90 + 120 + 200,
+      });
+    });
+
+    it("其余换面不留；要留时方块却没报过进度是状态不一致，直接抛", () => {
+      expect(holdFor({ kind: "ready", busyElsewhere: false }, prev, null, now)).toBeNull();
+      expect(holdFor(runningView, failed, null, now)).toBeNull();
+      expect(() => holdFor(prev, runningView, null, now)).toThrow(/组装进度/);
+      expect(faceKey(cancelled)).toBe("stopped:cancelled");
+      expect(faceKey(prev)).toBe("loading");
+    });
+  });
+});
+
+describe("胶囊宽度：文字槽与布局测量的依据", () => {
+  const entryOf = (name: string) => ({ instance: inst(name), failure: null });
+  const key = (face: LaunchView, name = "A") => capsuleLayoutKey(face, entryOf(name), "lg", false, false);
+  const downloading = (done: number, total: number, speedBps: number) =>
+    applyPhase(loading("A", 4), { taskId: "launch-1", phase: "downloading", stageIndex: 4, download: { done, total, bytes: done, totalBytes: total, speedBps } }, T0);
+
+  it("加载面里阶段、进度、文件数与速度怎么变都不重新量布局；换面才量", () => {
+    const a = inst("A");
+    const sessions = [loading("A"), loading("A", 2), downloading(9, 480, 900 * 1024), downloading(120, 480, 10.4 * 1024 * 1024), loading("A", 6)];
+    expect(new Set(sessions.map((s) => s.progress)).size).toBeGreaterThan(1);
+    const keys = sessions.map((s) => key(launchView(state({ session: s }), a)));
+    expect(new Set(keys).size).toBe(1);
+    expect(key(launchView(state({ session: running("A") }), a))).not.toBe(keys[0]);
+  });
+
+  it("运行面的计时不进依据（标题按两位小时占位），实例名进：改了名才量", () => {
+    const early = launchView(state({ session: sessionLaunched(loading("A"), "launch-1", T0 + 1000) }), inst("A"));
+    const late = launchView(state({ session: sessionLaunched(loading("A"), "launch-1", T0 - 3 * 3_600_000) }), inst("A"));
+    expect(key(early)).toBe(key(late));
+    expect(key(early, "A")).not.toBe(key(early, "生存二"));
+  });
+
+  it("崩溃线索读出来前后同一个依据：副行按全部线索占位，线索到了只换字", () => {
+    const crashed = sessionExited(running("A"), { versionId: "A", crashed: true, killed: false }, T0 + 5000);
+    const clue = sessionCrashClue(crashed, "A", { status: "known", category: "out_of_memory" });
+    expect(key(launchView(state({ session: crashed }), inst("A")))).toBe(key(launchView(state({ session: clue }), inst("A"))));
+    expect(TEXT_SLOTS.crashSub).toContain(sessionDetail(clue, T0));
+    expect(TEXT_SLOTS.crashSub).toContain(sessionDetail(sessionCrashClue(crashed, "A", { status: "unavailable" }), T0));
+  });
+
+  it("安装中：百分比不进依据，换步骤进", () => {
+    const phase = (index: number) => ({ plan: ["metadata", "libraries", "assets"] as const, index, batch: null });
+    const task: Task = { ...installTask("A", "t1", "running", 0.2), phase: phase(0) };
+    const at = (t: Task) => key({ kind: "installing", task: t, queuePosition: null });
+    expect(at({ ...task, progress: 0.7 })).toBe(at(task));
+    expect(at({ ...task, phase: phase(1) })).not.toBe(at(task));
+  });
+
+  it("加载面的槽覆盖它会显示的每一种文字：全部阶段名、正在结束、阶段说明与最宽的下载进度", () => {
+    expect(TEXT_SLOTS.loadingTitle).toEqual(expect.arrayContaining(["验证账户", "下载缺失文件", "启动游戏进程", "正在结束…"]));
+    expect(TEXT_SLOTS.loadingSub).toEqual(expect.arrayContaining(["准备中", "下载中", "启动中", "正在统计缺失文件…", "文件 9999/9999 · 1000 KB/s", "文件 9999/9999 · 99.9 MB/s"]));
+    expect(TEXT_SLOTS.percent).toEqual(["99%"]);
+    expect(TEXT_SLOTS.runningTitle).toEqual(["游戏中 · 99:59:59", "正在结束…"]);
   });
 });

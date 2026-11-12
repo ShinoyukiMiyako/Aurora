@@ -125,6 +125,7 @@
   color: var(--sk-text-3);
   cursor: text;
   transition:
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap),
     border-color var(--sk-dur-hover) var(--sk-ease),
     color var(--sk-dur-hover) var(--sk-ease);
 }
@@ -136,6 +137,27 @@
 .search:hover {
   border-color: var(--sk-line-2);
   color: var(--sk-text-2);
+}
+
+/*
+ * 按压与同一条标题栏上的后退前进键一个手感：伪输入框按按钮的 0.97，方形图标入口按图标按钮的 0.94。
+ * 用独立的 scale 属性：入口跟着账户胶囊滑动的布局动画把 transform 写在行内样式上，写 transform 会被盖掉；
+ * 过渡里也不能有 transform，否则布局动画逐帧写的位移会被拖成一段补间
+ */
+.search:active {
+  scale: 0.97;
+}
+
+.searchIcon:active {
+  scale: 0.94;
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .search:active,
+:global([data-sk-reduced]) .searchIcon:active {
+  scale: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 .search:focus-visible,
@@ -167,6 +189,7 @@
   color: var(--sk-text-2);
   cursor: pointer;
   transition:
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap),
     background-color var(--sk-dur-hover) var(--sk-ease),
     color var(--sk-dur-hover) var(--sk-ease);
 }
@@ -214,10 +237,10 @@
   width: 34px;
   height: 34px;
   border-radius: var(--sk-r-pill);
+  /* 焦点环（box-shadow）瞬时出现与消失，不进过渡 */
   transition:
     background-color var(--sk-dur-hover) var(--sk-ease),
-    color var(--sk-dur-hover) var(--sk-ease),
-    box-shadow var(--sk-dur-hover) var(--sk-ease);
+    color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .winButton:hover .winFace {

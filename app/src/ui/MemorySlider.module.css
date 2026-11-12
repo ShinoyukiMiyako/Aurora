@@ -1,4 +1,6 @@
+/* 退场中的警示条脱离布局后以这里为定位基准，原地淡出 */
 .root {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -10,6 +12,14 @@
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 百分比定宽 3 位、右对齐：拖动跨位数（9% 到 10%、99% 到 100%）时后面的说明不横移，也不在折行临界处来回折 */
+.percent {
+  display: inline-block;
+  min-width: 3ch;
+  text-align: end;
 }
 
 .usage[data-tone="warn"],
@@ -20,4 +30,18 @@
 /* 警示说明：卡片内的局部提示，与占用说明隔 10px */
 .callout {
   margin-top: var(--sk-space-10);
+}
+
+/*
+ * 加载占位里命中区加刻度的那一行：照 Slider 的尺寸画，命中区高 22、刻度行 16（记作下边距），
+ * 轨道之后是 64 宽、隔 12 的读数列，读数条靠右
+ */
+.skeletonTrack {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px;
+  align-items: center;
+  justify-items: end;
+  gap: var(--sk-space-12);
+  height: 22px;
+  margin-bottom: var(--sk-space-16);
 }

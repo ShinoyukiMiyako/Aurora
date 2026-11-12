@@ -26,14 +26,43 @@
   color: var(--sk-text-2);
 }
 
+/* 预检结果：摘要、说明块、拦截项与提醒行 */
+.preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-space-8);
+  min-width: 0;
+  /* 新结果换上时淡回：与全站「重取期间旧内容压暗」同一口径，恢复走入场时长 */
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+/* 换了目标、新的预检还没回来（加载态已经亮出）：上一个目标的结果压暗摆着，不先塌掉再撑开；压暗走退场时长 */
+.preview[data-stale] {
+  opacity: var(--sk-disabled);
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
+}
+
+/* 预检骨架里说明块的位置：高度按两行说明块（上下内边距 10、行高 20、描边 1），左右内边距与说明块相同 */
 .checking {
   display: flex;
   align-items: center;
   gap: var(--sk-space-10);
-  min-height: 64px;
-  font-size: var(--sk-fs-body);
-  line-height: var(--sk-lh-body);
+  box-sizing: border-box;
+  min-height: calc(var(--sk-lh-small) * 2 + var(--sk-space-10) * 2 + 2px);
+  padding: 0 var(--sk-space-14);
+  font-size: var(--sk-fs-small);
+  line-height: var(--sk-lh-small);
   color: var(--sk-text-2);
+}
+
+/* 「正在检查」的读屏播报：骨架层对读屏隐藏，播报另放在骨架外面，只给读屏，不占位 */
+.status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .path {

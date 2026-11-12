@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
+import { AnimatePresence, motion, MotionConfig } from "framer-motion";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { createRef } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { LOADER_KINDS, type LoaderKind } from "../domain/types";
-import { render, type Rendered } from "../test/dom";
+import { render, waitForFrames, type Rendered } from "../test/dom";
 import { Badge, BADGE_MAX, badgeText } from "./Badge";
 import { LOADER_LABEL, LoaderDot, LoaderTag, type LoaderTagKind } from "./LoaderTag";
 import { Tag, TAG_ICON_SIZE } from "./Tag";
@@ -38,6 +42,24 @@ describe("Tag", () => {
 
   it("sm 用 12、md 用 14", () => {
     expect(TAG_ICON_SIZE).toEqual({ sm: 12, md: 14 });
+  });
+
+  it("样式：卡面换底时字色、垫底色、描边色与卡面文字同一拍过渡；描边用向内收的 outline，不用不能过渡的内阴影", () => {
+    const css = readFileSync(resolve(__dirname, "Tag.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rule = (selector: string) => {
+      const found = new RegExp(`(?:^|\\n)${selector.replace(/[.[\]"=]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(css);
+      if (found === null) throw new Error(`Tag.module.css 没有 ${selector} 规则`);
+      return found[1];
+    };
+    const transition = /\stransition:([^;]*);/.exec(rule(".tag"));
+    if (transition === null) throw new Error(".tag 没有 transition");
+    const parts = transition[1].split(",").map((p) => p.trim().split(/\s+/));
+    expect(parts.map(([property]) => property).sort()).toEqual(["background-color", "color", "outline-color"]);
+    for (const [, duration, ease] of parts) expect([duration, ease]).toEqual(["var(--sk-dur-in)", "var(--sk-ease-out)"]);
+    const outline = rule('.tag[data-tone="outline"]');
+    expect(outline).toMatch(/\soutline:\s*1px solid var\(--tag-line, var\(--sk-line-2\)\);/);
+    expect(outline).toMatch(/\soutline-offset:\s*-1px;/);
+    expect(css).not.toMatch(/box-shadow/);
   });
 });
 
@@ -77,6 +99,111 @@ describe("Badge", () => {
   });
 });
 
+describe("Badge 出现与消失", () => {
+  const dot = () => view?.container.querySelector<HTMLElement>("[data-kind]") ?? null;
+  const host = (show: boolean, count?: number) => (
+    <AnimatePresence initial={false}>{show && <Badge key="badge" tone="accent" count={count} />}</AnimatePresence>
+  );
+
+  it("没有包 AnimatePresence：挂上就是终态，不弹", () => {
+    const badge = mount(<Badge tone="accent" count={3} />).firstElementChild as HTMLElement;
+    expect(badge.style.opacity).toBe("1");
+    expect(badge.style.transform).toBe("none");
+  });
+
+  it("外面只有更远处的 AnimatePresence（主界面、弹窗那一层）：之后才出现也不弹", () => {
+    const frame = (show: boolean) => (
+      <AnimatePresence>
+        <motion.div key="frame">{show && <Badge tone="accent" count={2} />}</motion.div>
+      </AnimatePresence>
+    );
+    mount(frame(false));
+    expect(dot()).toBeNull();
+    view?.rerender(frame(true));
+    expect(dot()?.style.opacity).toBe("1");
+    expect(dot()?.style.transform).toBe("none");
+  });
+
+  it("放在直接出场的 motion 外壳里（标签页徽标、下载入口计数）：出现与消失归外壳，角标自己不再弹一次", () => {
+    const shell = (show: boolean) => <AnimatePresence>{show && <motion.span key="shell">{<Badge tone="accent" count={2} />}</motion.span>}</AnimatePresence>;
+    mount(shell(false));
+    view?.rerender(shell(true));
+    expect(dot()?.style.opacity).toBe("1");
+    expect(dot()?.style.transform).toBe("none");
+  });
+
+  it("宿主挂载时就在（外层 initial={false}）：不弹，直接是终态", () => {
+    mount(host(true, 3));
+    expect(dot()?.style.opacity).toBe("1");
+    expect(dot()?.style.transform).toBe("none");
+  });
+
+  it("宿主已在、角标后到：照样从 0 弹出", () => {
+    mount(host(false));
+    expect(dot()).toBeNull();
+    view?.rerender(host(true, 2));
+    expect(dot()?.style.opacity).toBe("0");
+    expect(dot()?.style.transform).toBe("scale(0)");
+  });
+
+  it("直接包着的 AnimatePresence 在 motion 元素里面（宿主是图标按钮、导航项）：照样从 0 弹出", () => {
+    const nested = (show: boolean) => (
+      <motion.div>
+        <AnimatePresence initial={false}>{show && <Badge key="badge" tone="accent" count={2} />}</AnimatePresence>
+      </motion.div>
+    );
+    mount(nested(false));
+    view?.rerender(nested(true));
+    expect(dot()?.style.opacity).toBe("0");
+    expect(dot()?.style.transform).toBe("scale(0)");
+  });
+
+  it("减少动画：后到时只从透明淡入，不缩放", () => {
+    const reduced = (show: boolean) => <MotionConfig reducedMotion="always">{host(show, 2)}</MotionConfig>;
+    mount(reduced(false));
+    view?.rerender(reduced(true));
+    expect(dot()?.style.opacity).toBe("0");
+    expect(dot()?.style.transform).toBe("");
+  });
+
+  it("减少动画：消失时原地淡出，不先缩一下", async () => {
+    const reduced = (show: boolean) => <MotionConfig reducedMotion="always">{host(show, 2)}</MotionConfig>;
+    mount(reduced(true));
+    view?.rerender(reduced(false));
+    const leaving = dot();
+    if (leaving === null) throw new Error("退场中的角标应还在 DOM 里");
+    const transforms = new Set<string>();
+    await waitForFrames(() => {
+      transforms.add(leaving.style.transform);
+      expect(dot()).toBeNull();
+    });
+    // 整段退场都没写过缩放：减少动画下缩放一步到位，写了就会先跳到 scale(0.6)
+    expect([...transforms]).toEqual([""]);
+  });
+
+  it("计数变化不重播：同一个元素，停在终态", () => {
+    mount(host(true, 3));
+    const before = dot();
+    view?.rerender(host(true, 4));
+    expect(dot()).toBe(before);
+    expect(dot()?.textContent).toBe("4");
+    expect(dot()?.style.opacity).toBe("1");
+  });
+
+  it("条件变假：播完退场再移除", async () => {
+    mount(host(true, 3));
+    view?.rerender(host(false));
+    expect(dot()).not.toBeNull();
+    await waitForFrames(() => expect(dot()).toBeNull());
+  });
+
+  it("ref 落到根元素：popLayout 退场要靠它量尺寸", () => {
+    const ref = createRef<HTMLSpanElement>();
+    const badge = mount(<Badge ref={ref} />).firstElementChild;
+    expect(ref.current).toBe(badge);
+  });
+});
+
 describe("LoaderTag", () => {
   it("加载器集合与领域模型一一对应", () => {
     const kinds: readonly LoaderTagKind[] = LOADER_KINDS;
@@ -113,5 +240,14 @@ describe("LoaderTag", () => {
     const dot = mount(<LoaderDot loader="quilt" size={6} />).firstElementChild as HTMLElement;
     expect(dot.dataset.size).toBe("6");
     expect(dot.dataset.loader).toBe("quilt");
+  });
+
+  it("样式：名称与版本各自写了字色，也各自带上与标签同一拍的字色过渡", () => {
+    const css = readFileSync(resolve(__dirname, "LoaderTag.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const selector of ["name", "version"]) {
+      const found = new RegExp(`(?:^|\\n)\\.${selector}\\s*\\{([^}]*)\\}`).exec(css);
+      if (found === null) throw new Error(`LoaderTag.module.css 没有 .${selector} 规则`);
+      expect(found[1]).toMatch(/\stransition:\s*color var\(--sk-dur-in\) var\(--sk-ease-out\);/);
+    }
   });
 });

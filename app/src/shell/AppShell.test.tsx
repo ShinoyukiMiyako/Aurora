@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
-import { act } from "react";
+import { motion, useIsPresent } from "framer-motion";
+import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
 import { INSTANCE_TAB_LABEL, PAGE_LABEL } from "../copy/flows";
@@ -9,11 +10,13 @@ import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
 import type { FlowProps } from "../state/flows";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { PAGE_IDS, type PageId, type Route } from "../state/route";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
+import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { GAME_LOG_EVENT } from "../ipc/launch";
 import { CORE_EVENT } from "../ipc/tasks";
 import { bootOverrides, callsOf, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { Card } from "../ui/Card";
+import { Page } from "../ui/Page";
 import { RichText } from "../ui/RichText";
 import { parseMarkdown } from "../ui/richtext-parse";
 import { AppShell, PAGE_PRELOAD_DELAY_MS, type AppShellProps, type ShellFlows } from "./AppShell";
@@ -39,7 +42,14 @@ function pageTable(loads: PageId[], broken: Set<PageId>): PageTable {
       if (broken.has(page)) {
         throw new Error(`${page} 页渲染出错`);
       }
-      return <p data-page={page}>{`${page}:${JSON.stringify(route)}`}</p>;
+      return (
+        <p data-page={page}>
+          {`${page}:${JSON.stringify(route)}`}
+          {/* 入场探针：带 initial 的 motion 元素，内联透明度说明入场有没有被跳过。过渡拉得极长，用例跑完之前它都停在起点附近 */}
+          {/* sk-guard-allow T8: 探针要在整条用例期间停在入场起点，时长故意写成一小时，不是界面动效参数 */}
+          <motion.span data-entrance-probe="" initial={{ opacity: 0 }} animate={{ opacity: 1, transition: { duration: 3600, ease: "linear" } }} />
+        </p>
+      );
     }
     return [page, async () => {
       loads.push(page);
@@ -155,6 +165,19 @@ describe("外壳布局", () => {
     expect([...loads].sort()).toEqual([...PAGE_IDS].sort());
   });
 
+  it("主界面出来后预取一次游戏目录列表，实例库第一帧就有目录选择；首次启动向导期间不取", async () => {
+    await mount();
+    expect(callsOf(ipc, "list_game_directories")).toHaveLength(1);
+    view?.unmount();
+    view = undefined;
+    resetRecorder(ipc);
+    bootOverrides(ipc, { instances: [], firstRun: true });
+    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
+    await mount({ onboarding: OnboardingStub });
+    expect(document.querySelector("[data-flow='onboarding']")).not.toBeNull();
+    expect(callsOf(ipc, "list_game_directories")).toEqual([]);
+  });
+
   it("没加载过的页面挂起后照常出现，标题栏写页面名", async () => {
     await mount();
     act(() => nav.go({ page: "library" }));
@@ -194,6 +217,38 @@ describe("外壳布局", () => {
     error.mockRestore();
   });
 
+  it("错误视图淡入；「复制错误信息」换成「已复制」时两条文案叠在同一格，按钮宽不变", async () => {
+    broken.add("tasks");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    await mount();
+    act(() => nav.go({ page: "tasks" }));
+    await flush();
+    const alert = document.querySelector<HTMLElement>("[role='alert']");
+    if (alert === null) throw new Error("没有错误视图");
+    expect(alert.style.opacity).toBe("0");
+    const copyButton = [...alert.querySelectorAll("button")].find((b) => b.textContent?.includes(PAGE_ERROR_COPY.copy));
+    if (copyButton === undefined) throw new Error("错误页没有复制按钮");
+    const labels: string[] = [PAGE_ERROR_COPY.copy, PAGE_ERROR_COPY.copied];
+    const options = () =>
+      [...copyButton.querySelectorAll<HTMLElement>("span")]
+        .filter((el) => el.childElementCount === 0 && el.textContent !== null && labels.includes(el.textContent))
+        .map((el) => [el.textContent, el.hasAttribute("data-current")]);
+    expect(options()).toEqual([
+      [PAGE_ERROR_COPY.copy, true],
+      [PAGE_ERROR_COPY.copied, false],
+    ]);
+    act(() => copyButton.click());
+    await flush();
+    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(options()).toEqual([
+      [PAGE_ERROR_COPY.copy, false],
+      [PAGE_ERROR_COPY.copied, true],
+    ]);
+    error.mockRestore();
+  });
+
   it("换页之后错误边界随页面重建：别的页面不受上一页错误影响", async () => {
     broken.add("discover");
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -205,6 +260,22 @@ describe("外壳布局", () => {
     await flush();
     expect(pageShown()).toBe("settings");
     error.mockRestore();
+  });
+
+  it("Ctrl+数字的目标就是当前页：内容区平滑滚回顶部，不压历史", async () => {
+    await mount();
+    act(() => nav.go({ page: "library" }));
+    await flush();
+    const scroller = document.querySelector<HTMLElement>("[data-sk-focus-fallback]");
+    if (scroller === null) throw new Error("没有内容区滚动容器");
+    const scrollTo = vi.spyOn(scroller, "scrollTo");
+    scroller.scrollTop = 480;
+    keydown(window, "2", { ctrlKey: true, code: "Digit2" });
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: "smooth" });
+    expect(scroller.scrollTop).toBe(0);
+    expect(nav.route).toEqual({ page: "library" });
+    act(() => nav.back());
+    expect(nav.route).toEqual({ page: "home" });
   });
 
   it("首次启动：整窗换成向导，没有侧栏", async () => {
@@ -239,20 +310,22 @@ describe("外壳布局", () => {
     expect(slot?.style.opacity).toBe("1");
   });
 
-  it("向导收尾后主界面淡入：侧栏与主列从透明开始", async () => {
-    bootOverrides(ipc, { instances: [], firstRun: true });
-    ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
-    ipc.overrides.set("complete_first_run", () => null);
-    await mount({ onboarding: OnboardingStub });
-    expect(document.querySelector("[data-flow='onboarding']")).not.toBeNull();
-    await act(async () => {
-      await launcher.actions.completeFirstRun("D:\\Games\\.minecraft", []);
-    });
-    await flush();
-    expect(document.querySelector("[data-flow='onboarding']")).toBeNull();
-    const slot = document.querySelector<HTMLElement>('[data-tauri-drag-region=""]');
-    expect(slot).not.toBeNull();
-    expect(slot?.style.opacity).toBe("0");
+  it("页面自己的入场不被外壳跳过：启动那一屏之后换到的每一页都从入场起点开始", async () => {
+    await mount();
+    const probe = () => {
+      const el = document.querySelector<HTMLElement>("[data-entrance-probe]");
+      if (el === null) throw new Error("页面里没有入场探针");
+      return el;
+    };
+    // 启动那一屏：外壳两列不淡入，页面区块的入场照播。入场被跳过时探针一挂上就是 1
+    expect(document.querySelector<HTMLElement>('[data-tauri-drag-region=""]')?.style.opacity).toBe("1");
+    expect(Number(probe().style.opacity)).toBeLessThan(0.01);
+    for (const page of ["library", "tasks", "home"] as const) {
+      act(() => nav.go({ page }));
+      await flush();
+      expect(pageShown()).toBe(page);
+      expect(Number(probe().style.opacity)).toBeLessThan(0.01);
+    }
   });
 
   describe("左上角品牌", () => {
@@ -405,6 +478,111 @@ describe("外部链接", () => {
   });
 });
 
+describe("页面入场随到达方式", () => {
+  function EntrancePage({ route }: { route: Route }) {
+    if (broken.has(route.page)) throw new Error(`${route.page} 页渲染出错`);
+    return (
+      <Page>
+        <Card>{route.page}</Card>
+      </Page>
+    );
+  }
+
+  beforeEach(async () => {
+    const real = Object.fromEntries(PAGE_IDS.map((page) => [page, async () => ({ default: EntrancePage })]));
+    registry = createPageRegistry(real as unknown as PageTable);
+    await registry.load("home");
+    await registry.load("library");
+  });
+
+  const root = () => {
+    const el = document.querySelector<HTMLElement>("[data-width]");
+    if (el === null) throw new Error("没有页面根");
+    return el;
+  };
+  const staggered = () => document.querySelectorAll("[data-entrance]").length;
+
+  it("启动那一屏是成品；go 进来的页面错开入场；后退、前进回到的页面只有根淡入", async () => {
+    await mount();
+    expect(root().style.opacity).toBe("1");
+    expect(staggered()).toBe(0);
+
+    act(() => nav.go({ page: "library" }));
+    await flush();
+    expect(root().textContent).toBe("library");
+    expect(root().style.opacity).toBe("0");
+    expect(staggered()).toBe(1);
+
+    act(() => nav.back());
+    await flush();
+    expect(root().textContent).toBe("home");
+    expect(root().style.opacity).toBe("0");
+    expect(staggered()).toBe(0);
+
+    act(() => nav.forward());
+    await flush();
+    expect(root().textContent).toBe("library");
+    expect(staggered()).toBe(0);
+  });
+
+  it("页面槽在挂上时取定到达方式：主界面之后重渲染过（窗口失焦暂停花瓣），槽里再重挂的页面根拿到的仍是挂上时那一次", async () => {
+    const handle: { remount: (() => void) | null } = { remount: null };
+    function RemountingPage({ route }: { route: Route }) {
+      const [generation, setGeneration] = useState(0);
+      handle.remount = () => setGeneration((n) => n + 1);
+      return (
+        <Page key={generation}>
+          <Card>{`${route.page}:${generation}`}</Card>
+        </Page>
+      );
+    }
+    registry = createPageRegistry({
+      ...(Object.fromEntries(PAGE_IDS.map((page) => [page, async () => ({ default: EntrancePage })])) as unknown as PageTable),
+      home: async () => ({ default: RemountingPage }),
+    });
+    await registry.load("home");
+    const focusHandlers: ((focused: boolean) => void)[] = [];
+    port = {
+      ...port,
+      isFocused: async () => true,
+      onFocusChanged: async (handler) => {
+        focusHandlers.push(handler);
+        return () => undefined;
+      },
+    };
+    await mount();
+    expect(root().style.opacity).toBe("1");
+    // 启动那一屏用掉之后主界面重渲染：槽也跟着重渲染，取值要是按渲染时读，这里就从 still 变成了 enter
+    act(() => focusHandlers.forEach((handler) => handler(false)));
+    await flush();
+    const again = handle.remount;
+    if (again === null) throw new Error("页面没有挂上");
+    act(() => again());
+    await flush();
+    expect(root().textContent).toBe("home:1");
+    expect(root().style.opacity).toBe("1");
+    expect(staggered()).toBe(0);
+  });
+
+  it("启动那一屏只有一次：还没导航过，错误页点「重新加载」挂回来的页面照常入场，不一帧硬切", async () => {
+    broken.add("home");
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await mount();
+    expect(nav.arrival).toBe("boot");
+    expect(document.querySelector("[data-width]")).toBeNull();
+    const reload = [...document.querySelectorAll("button")].find((b) => b.textContent === PAGE_ERROR_COPY.reload);
+    if (reload === undefined) throw new Error("错误页没有重新加载");
+    broken.delete("home");
+    act(() => reload.click());
+    await flush();
+    expect(nav.arrival).toBe("boot");
+    expect(root().textContent).toBe("home");
+    expect(root().style.opacity).toBe("0");
+    expect(staggered()).toBe(1);
+    error.mockRestore();
+  });
+});
+
 describe("按片订阅", () => {
   // 下载进度每个任务约 100 ms 一次、游戏日志每 100 ms 一批：外壳根与主框架若整份订阅状态，当前页面就跟着每秒重渲染十次
   it("20 次下载进度加 20 批游戏日志：页面一次都不重渲染", async () => {
@@ -433,6 +611,57 @@ describe("按片订阅", () => {
     expect(launcher.state.tasks[0].progress).toBe(1);
     expect(launcher.state.session?.logs).toHaveLength(20);
     expect(pageRenders.home).toBe(before);
+  });
+
+  // 外壳根整份读 useShell：命令面板开合、窗口失焦聚焦都让它重渲染。主界面里的 motion 元素都读外壳根那一层的在场上下文，
+  // 上下文每次换新对象的话，它们全跟着重渲染，带布局动画的还要再量一次布局
+  it("外壳根因无关状态重渲染（窗口失焦聚焦、命令面板开合）：主界面里只读在场上下文的组件一次都不重渲染", async () => {
+    let presenceRenders = 0;
+    /** 页面本身不重渲染时，它再渲染只可能是外壳根那一层的在场上下文换了值。 */
+    function PresenceProbe() {
+      useIsPresent();
+      presenceRenders += 1;
+      return null;
+    }
+    function ProbePage() {
+      return (
+        <div data-page="home">
+          <PresenceProbe />
+        </div>
+      );
+    }
+    registry = createPageRegistry({ ...pageTable(loads, broken), home: async () => ({ default: ProbePage }) });
+    await registry.load("home");
+    const focusHandlers: ((focused: boolean) => void)[] = [];
+    port = {
+      ...port,
+      isFocused: async () => true,
+      onFocusChanged: async (handler) => {
+        focusHandlers.push(handler);
+        return () => undefined;
+      },
+    };
+    await mount();
+    expect(pageShown()).toBe("home");
+    expect(shell.petalsPaused).toBe(false);
+    const before = presenceRenders;
+    expect(before).toBeGreaterThan(0);
+
+    const toggles = 3 + Math.floor(Math.random() * 5);
+    for (let i = 0; i < toggles; i++) {
+      // 花瓣暂停跟着焦点翻转：外壳上下文换了值，读它的外壳根这一次必然重渲染
+      act(() => focusHandlers.forEach((handler) => handler(false)));
+      expect(shell.petalsPaused).toBe(true);
+      act(() => focusHandlers.forEach((handler) => handler(true)));
+      expect(shell.petalsPaused).toBe(false);
+    }
+    act(() => shell.openPalette());
+    await flush();
+    expect(shell.palette.open).toBe(true);
+    act(() => shell.closePalette());
+    await flush();
+    expect(shell.palette.open).toBe(false);
+    expect(presenceRenders).toBe(before);
   });
 });
 

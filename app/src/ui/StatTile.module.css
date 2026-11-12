@@ -66,6 +66,11 @@
   color: var(--sk-text-2);
 }
 
+/* 环比还在等：空行占住与有字时相同的一行高 */
+.delta[data-reserve] {
+  height: var(--sk-lh-caption);
+}
+
 .delta[data-tone="positive"] {
   color: var(--sk-ok);
 }

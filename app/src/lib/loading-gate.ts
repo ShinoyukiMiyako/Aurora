@@ -12,6 +12,9 @@
 import { useLayoutEffect, useState } from "react";
 import { LOADING_DELAY_MS, SLOW_HINT_MS } from "../domain/limits";
 
+/** 加载态出现前的等待时长。组件库不直接引 domain，要按同一时机自己判断的（缩略图留住回落图形等图）从这里取。 */
+export { LOADING_DELAY_MS };
+
 export type LoadingView =
   /** 加载中、还没到出现骨架的时刻：占位但不可见。 */
   | "pending"

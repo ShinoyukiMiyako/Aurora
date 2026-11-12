@@ -13,10 +13,12 @@ import { SegmentedControl } from "../../../ui/SegmentedControl";
 import { SettingRow } from "../../../ui/SettingRow";
 import { Tag } from "../../../ui/Tag";
 import { AccentSwatches } from "../../../ui/AccentSwatches";
+import { Appear } from "../../../ui/Appear";
 import { MODE_ICON, ModeCards } from "../../../ui/ModeCards";
 import { Toggle } from "../../../ui/Toggle";
 import { ArtDownload } from "../../shared/cover-picker/ArtDownload";
 import { APPEARANCE_COPY, COVER_STYLE_LABEL, saveFailed } from "../copy";
+import { RowFlow } from "../Flow";
 import s from "../settings.module.css";
 
 function useAppearanceWrite() {
@@ -55,45 +57,48 @@ export function AppearanceSection() {
       </Card>
       <Card>
         <CardHeader title={APPEARANCE_COPY.motionTitle} icon="sparkle" />
-        <SettingRow title={APPEARANCE_COPY.petals} description={reduced ? APPEARANCE_COPY.petalsReduced : APPEARANCE_COPY.petalsDesc}>
-          <Toggle checked={appearance.petals} onChange={(petals) => write(APPEARANCE_COPY.petals, { petals })} ariaLabel={APPEARANCE_COPY.petals} />
-        </SettingRow>
-        <SettingRow title={APPEARANCE_COPY.panorama} description={panoramaAvailable ? APPEARANCE_COPY.panoramaDesc : APPEARANCE_COPY.panoramaMissing}>
-          <Toggle
-            checked={appearance.panorama}
-            onChange={(panorama) => write(APPEARANCE_COPY.panorama, { panorama })}
-            ariaLabel={APPEARANCE_COPY.panorama}
-            disabled={!panoramaAvailable}
-          />
-        </SettingRow>
-        <SettingRow title={APPEARANCE_COPY.coverBackground} description={hasArt ? APPEARANCE_COPY.coverBackgroundDesc : APPEARANCE_COPY.coverBackgroundNoArt}>
-          <SegmentedControl
-            size="sm"
-            value={appearance.coverBackground}
-            onChange={(coverBackground) => write(APPEARANCE_COPY.coverBackground, { coverBackground })}
-            ariaLabel={APPEARANCE_COPY.coverBackground}
-            options={[
-              { value: "art", label: COVER_STYLE_LABEL.art },
-              { value: "texture", label: COVER_STYLE_LABEL.texture },
-            ]}
-          />
-        </SettingRow>
-        {!hasArt && <ArtDownload compact />}
-        <SettingRow
-          title={
-            <span className={s.titleWithTag}>
-              {APPEARANCE_COPY.reduceMotion}
-              {systemReduced && (
-                <Tag size="sm" tone="info">
-                  {APPEARANCE_COPY.systemReduced}
-                </Tag>
-              )}
-            </span>
-          }
-          description={APPEARANCE_COPY.reduceMotionDesc}
-        >
-          <Toggle checked={appearance.reduceMotion} onChange={(reduceMotion) => write(APPEARANCE_COPY.reduceMotion, { reduceMotion })} ariaLabel={APPEARANCE_COPY.reduceMotion} />
-        </SettingRow>
+        {/* 材质下完、目录载入后下载块退场，「减少动画」一行滑上去，而不是一帧跳上去 */}
+        <RowFlow>
+          <SettingRow title={APPEARANCE_COPY.petals} description={reduced ? APPEARANCE_COPY.petalsReduced : APPEARANCE_COPY.petalsDesc}>
+            <Toggle checked={appearance.petals} onChange={(petals) => write(APPEARANCE_COPY.petals, { petals })} ariaLabel={APPEARANCE_COPY.petals} />
+          </SettingRow>
+          <SettingRow title={APPEARANCE_COPY.panorama} description={panoramaAvailable ? APPEARANCE_COPY.panoramaDesc : APPEARANCE_COPY.panoramaMissing}>
+            <Toggle
+              checked={appearance.panorama}
+              onChange={(panorama) => write(APPEARANCE_COPY.panorama, { panorama })}
+              ariaLabel={APPEARANCE_COPY.panorama}
+              disabled={!panoramaAvailable}
+            />
+          </SettingRow>
+          <SettingRow title={APPEARANCE_COPY.coverBackground} description={hasArt ? APPEARANCE_COPY.coverBackgroundDesc : APPEARANCE_COPY.coverBackgroundNoArt}>
+            <SegmentedControl
+              size="sm"
+              value={appearance.coverBackground}
+              onChange={(coverBackground) => write(APPEARANCE_COPY.coverBackground, { coverBackground })}
+              ariaLabel={APPEARANCE_COPY.coverBackground}
+              options={[
+                { value: "art", label: COVER_STYLE_LABEL.art },
+                { value: "texture", label: COVER_STYLE_LABEL.texture },
+              ]}
+            />
+          </SettingRow>
+          <Appear>{!hasArt && <ArtDownload key="art" compact />}</Appear>
+          <SettingRow
+            title={
+              <span className={s.titleWithTag}>
+                {APPEARANCE_COPY.reduceMotion}
+                {systemReduced && (
+                  <Tag size="sm" tone="info">
+                    {APPEARANCE_COPY.systemReduced}
+                  </Tag>
+                )}
+              </span>
+            }
+            description={APPEARANCE_COPY.reduceMotionDesc}
+          >
+            <Toggle checked={appearance.reduceMotion} onChange={(reduceMotion) => write(APPEARANCE_COPY.reduceMotion, { reduceMotion })} ariaLabel={APPEARANCE_COPY.reduceMotion} />
+          </SettingRow>
+        </RowFlow>
       </Card>
     </>
   );

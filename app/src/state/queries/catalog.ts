@@ -20,7 +20,7 @@ import {
   type VersionRequirementsDto,
 } from "../../ipc/instances";
 import { memoryAdvice, updaterInfo, type MemoryAdviceDto, type UpdaterInfoDto } from "../../ipc/system";
-import { useResource, type ResourceResult } from "../resource";
+import { resources, useResource, type ResourceResult } from "../resource";
 
 export type { GameDirectoryDto, GameDirectoryInspectionDto, GameDirectoryProblem, NamedDirectoryDto } from "../../ipc/config";
 export type { GpuAdapterDto, GpuAdaptersDto, JavaInstallationDto, JavaSource, JavaVersionDto } from "../../ipc/java";
@@ -74,9 +74,28 @@ export function useMemoryAdvice(versionId: string | null): ResourceResult<Memory
   );
 }
 
+const GAME_DIRS_KEY = "game-dirs";
+
 /** game-dirs —— 已知游戏目录；切换、添加、移除后失效。 */
 export function useGameDirectories(): ResourceResult<GameDirectoryDto[]> {
-  return useResource("game-dirs", listGameDirectories);
+  return useResource(GAME_DIRS_KEY, listGameDirectories);
+}
+
+/**
+ * 预取 game-dirs，外壳在主界面出来后调一次。实例库的工具条按登记的目录数决定有没有目录选择：第一次进实例库才去要的话，
+ * 目录选择晚一个往返才淡入插进来、把搜索框挤开。缓存里已有、或已有请求在路上时不再请求。
+ * 只取这一次、不常驻订阅：之后的失效与重读照旧由在看的页面负责。没人订阅时失效（切换目录、移动实例之后）会直接丢掉条目，
+ * 下一次进实例库目录选择照样晚到；工具条为此按带目录选择的宽度占位，晚到不改变它的行数，这里不必常驻订阅去兜。
+ * 用一次性订阅而不是 read：失败照常记进条目并通知错误旁听者，没人订阅的出错条目随即丢掉、页面订阅时重新请求，
+ * 这里不必再接一个没人处理的 Promise。
+ */
+export function prefetchGameDirectories(): void {
+  const settled = () => resources.snapshot(GAME_DIRS_KEY).status !== "loading";
+  // 订阅只在没有数据、也没有请求在路上时才发请求，且不会在 subscribe 里同步通知：stop 在第一次通知之前已经赋值
+  const stop = resources.subscribe(GAME_DIRS_KEY, listGameDirectories, () => {
+    if (settled()) stop();
+  });
+  if (settled()) stop();
 }
 
 /** game-dirs:discovered —— 本机其他启动器的 .minecraft，只报告不写入。 */

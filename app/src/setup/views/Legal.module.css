@@ -89,11 +89,44 @@
   white-space: pre-wrap;
 }
 
+/* 清单的底块：读到之前就占着清单的位置，读到之后清单在同一块底上淡入（清单自己的底色与它相同） */
+.packagesBox {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  border-radius: var(--sk-r-sm);
+  background: var(--sk-bg-2);
+}
+
+/* Loadable 的外层与内容层都撑满底块：清单按剩下的高度在自己里面滚动 */
+.packagesFill {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* 内边距对齐清单第一行的文字；透明度由 Loadable 管：读得快时一直透明，超过加载延迟才淡入 */
 .pending {
   margin: 0;
+  padding: var(--sk-space-6) var(--sk-space-12);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
   color: var(--sk-text-2);
+}
+
+/* 读屏的播报区：看得见的「正在读取」在骨架里，骨架整层对读屏隐藏。脱离底块的布局，不占清单的高度 */
+.status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .failed {

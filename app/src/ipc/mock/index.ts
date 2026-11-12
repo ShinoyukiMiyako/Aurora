@@ -39,6 +39,35 @@ function storageKey(prefix: string, domain: string): string {
   return `${prefix}.mock.${domain}`;
 }
 
+/** 每条命令执行前先等的毫秒数；0 为立即执行。 */
+let latencyMs = 0;
+
+/** 延迟存在领域快照之外的键上：恢复种子数据不清它，它是测量用的开关，不是数据。 */
+function latencyKey(prefix: string): string {
+  return `${prefix}.mock-latency-ms`;
+}
+
+function assertLatency(ms: number, source: string): number {
+  if (!Number.isFinite(ms) || ms < 0) throw new Error(`${source}的模拟延迟必须是非负的毫秒数，收到 ${ms}`);
+  return ms;
+}
+
+/**
+ * 给每条命令加延迟。假后端默认立即返回，真实后端却要过进程边界、扫盘、联网：数据晚于首帧到达造成的界面跳动，
+ * 不加延迟在浏览器里一条都复现不出来。启用了持久化时一并存下，刷新后从第一条命令起就生效，冷启动也能测。
+ */
+export function setMockLatency(ms: number): void {
+  latencyMs = assertLatency(ms, "传入");
+  if (storageTarget === null) return;
+  const key = latencyKey(storageTarget.prefix);
+  if (ms === 0) storageTarget.storage.removeItem(key);
+  else storageTarget.storage.setItem(key, String(ms));
+}
+
+export function mockLatency(): number {
+  return latencyMs;
+}
+
 /** 把各领域的快照写进存储。存储报错（配额满、被禁用）原样抛出，不吞成「这次没存上」。 */
 function savePersisted(): void {
   if (persistence === null) return;
@@ -60,6 +89,7 @@ function roundTrip<T>(value: unknown): T {
 export async function mockInvoke<T>(cmd: string, args?: MockArgs): Promise<T> {
   const entry = table.get(cmd);
   if (!entry) throw new Error(`mock 未实现 ${cmd}`);
+  if (latencyMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, latencyMs));
   let result: unknown;
   try {
     result = await entry.handler(roundTrip<MockArgs>(args ?? {}));
@@ -97,6 +127,8 @@ export function enableMockPersistence(storage: Storage, prefix: string): void {
   if (storageTarget !== null) throw new Error("mock 持久化已经启用过");
   if (prefix === "") throw new Error("mock 持久化的键前缀为空");
   storageTarget = { storage, prefix };
+  const savedLatency = storage.getItem(latencyKey(prefix));
+  if (savedLatency !== null) latencyMs = assertLatency(Number(savedLatency), `localStorage 里 ${latencyKey(prefix)} `);
   const written = new Map<string, string>();
   for (const [domain, persist] of persisted) {
     const key = storageKey(prefix, domain);

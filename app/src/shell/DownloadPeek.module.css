@@ -14,6 +14,7 @@
   color: var(--sk-text-2);
   cursor: pointer;
   transition:
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap),
     background-color var(--sk-dur-hover) var(--sk-ease),
     color var(--sk-dur-hover) var(--sk-ease);
 }
@@ -27,6 +28,29 @@
 .entry:focus-visible {
   outline: none;
   box-shadow: var(--sk-focus);
+}
+
+/*
+ * 按压与旁边的后退前进键同一个手感：方形图标入口缩到 0.94。
+ * 用独立的 scale 属性：入口跟着账户胶囊滑动的布局动画把 transform 写在行内样式上，写 transform 会被盖掉；
+ * 过渡里也不能有 transform，否则布局动画逐帧写的位移会被拖成一段补间
+ */
+.entry:active {
+  scale: 0.94;
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .entry:active {
+  scale: none;
+  opacity: 0.85;
+  transition: none;
+}
+
+/* 空闲图标与进度环叠在入口的同一格里交叉淡入 */
+.glyphSlot {
+  display: inline-grid;
+  grid-area: 1 / 1;
+  place-items: center;
 }
 
 .glyph {
@@ -50,36 +74,46 @@
   stroke: var(--sk-accent);
 }
 
+/* 计数角标本身挂在右上角；它的弹入弹出写在行内 transform 上，这里只用 top / right 定位 */
 .count {
   position: absolute;
   top: -6px;
   right: -6px;
 }
 
+/*
+ * 失败点外面包着定位的一层，弹入弹出由里面的提醒点（Badge）自己播；这层只管摆在哪个角。
+ * flex 容器不带行高支柱，这层与提醒点一样大
+ */
 .failDot {
   position: absolute;
   bottom: 2px;
   right: 2px;
-  width: 8px;
-  height: 8px;
-  border-radius: var(--sk-r-pill);
-  background: var(--sk-danger);
-  box-shadow: 0 0 0 2px var(--sk-bg);
-}
-
-/* 没有计数角标时，失败点占右上角 */
-.failDot[data-alone] {
-  top: 3px;
-  bottom: auto;
-}
-
-/* ---- 浮层 ---- */
-.panel {
   display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-  width: 360px;
-  max-width: calc(100vw - var(--sk-space-32));
+  transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+/*
+ * 没有计数角标时，失败点挪到右上角（离上边 3px）：入口内框高 32，右下角的点顶边在 32 − 2 − 8 = 22，差 19。
+ * 用 translate 挪而不改 top，角标出现消失时点沿 settle 滑过去，不在两角之间瞬移
+ */
+.failDot[data-alone] {
+  translate: 0 -19px;
+}
+
+:global([data-sk-reduced]) .failDot {
+  transition: none;
+}
+
+/*
+ * ---- 浮层 ----
+ * 写在浮层面板上：头部、主体、底部各在面板的一层里，宽度要定在面板上。主体是面板的滚动区，封顶 320 只露出约四行；
+ * 它常驻滚动条槽位，任务数在 4 个上下变化、列表跨过最大高度时，行右侧的取消键与百分比不随滚动条出没横跳，
+ * 右侧留白由 10px 的槽承担，列表本身不再加右内边距
+ */
+.popover {
+  --popover-body-max-height: 320px;
+  width: min(360px, calc(100vw - var(--sk-space-32)));
 }
 
 .head {
@@ -102,14 +136,13 @@
   color: var(--sk-text-3);
 }
 
+/* 让位挂在列表上而不是滚动区上：列表的高度随行增删变化才量得到，滚动区封顶后高度不变 */
 .list {
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-6);
-  max-height: 320px;
   margin: 0;
-  padding: 0 var(--sk-space-8) var(--sk-space-8);
-  overflow-y: auto;
+  padding: 0 0 var(--sk-space-8) var(--sk-space-8);
   list-style: none;
 }
 
@@ -159,9 +192,26 @@
   white-space: nowrap;
 }
 
+/*
+ * 状态文字与几条不可见的最宽字样叠在同一格，宽度取最宽的那条：速度换字、百分数进位时这一格不变宽，
+ * 左侧详情的省略位置不跟着抖。文字靠右，右缘仍与上面的取消键对齐
+ */
 .rowState {
+  display: inline-grid;
   flex: none;
+  justify-items: end;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rowStateText {
+  grid-area: 1 / 1;
+}
+
+/* 不显示的字样是 visibility: hidden：只撑宽度，不进可访问性树，也接不到指针 */
+.rowStateSample {
+  grid-area: 1 / 1;
+  visibility: hidden;
 }
 
 .empty {
@@ -190,7 +240,12 @@
   font-weight: var(--sk-w-medium);
 }
 
+/*
+ * 底栏随外框形变移动（layout="position"），途中带 transform，会成为里面绝对定位元素的包含块。「清除已结束」退场时被
+ * popLayout 抽成绝对定位，量位置按 offsetParent：底栏自己定位，量与摆才是同一个基准，不会被推出面板的裁切区
+ */
 .foot {
+  position: relative;
   display: flex;
   justify-content: flex-end;
   gap: var(--sk-space-8);

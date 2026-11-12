@@ -4,6 +4,7 @@ import { gameDirSwitchReason } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import type { LoaderKind } from "../../domain/types";
 import { needsReimport } from "../../domain/rules";
+import { REFLOW_MAX_ITEMS } from "../../lib/reflow";
 import type { GameDirectoryDto } from "../../state/queries/catalog";
 import type { SelectOption } from "../../ui/Select";
 import { LIBRARY_COPY } from "./copy";
@@ -120,7 +121,33 @@ export function directoryOptions(dirs: readonly GameDirectoryDto[], busy: boolea
   });
 }
 
-/** 网格的顺序签名：只有顺序或成员变化时才触发布局动画，窗口缩放、分档切换不触发。 */
-export function orderSignature(list: readonly InstanceSummary[]): string {
-  return list.map((inst) => inst.id).join("\n");
+/** 网格里排着什么：实例按显示顺序，外加末尾有没有新建卡。 */
+export interface GridShape {
+  ids: readonly string[];
+  create: boolean;
+}
+
+/** 新建卡的格子键（React key 与比对都用它）：实例 id 是版本目录名，任何系统的文件名里都不能有「/」，撞不上实例。 */
+export const CREATE_CELL_KEY = "/create";
+
+function cellKeys(shape: GridShape): readonly string[] {
+  return shape.create ? [...shape.ids, CREATE_CELL_KEY] : shape.ids;
+}
+
+/**
+ * 这次变化是否整片换上：格子不逐个淡入淡出，网格整片淡入一次，这一次提交里让位暂停。
+ * - 新来的格子或走掉的格子有一边超过让位上限（新建卡也算一格）：逐个播的入场或退场太多。两边分开数：
+ *   前后各不超过上限、只是并集超过的（整段换了搜索词），进出各自逐个播，共同的卡片交给让位滑过去。
+ * - 格子一个没增删、换了位置的超过上限（换排序）。
+ * 被挤动的格子不计：删掉靠前的一张时其后几十张都被挤动，让位只给可见范围附近的起动画，量由视口封顶，不随实例数增长。
+ */
+export function crowdedChange(before: GridShape, after: GridShape): boolean {
+  const previous = cellKeys(before);
+  const next = cellKeys(after);
+  const had = new Set(previous);
+  const has = new Set(next);
+  const entering = next.filter((key) => !had.has(key)).length;
+  const leaving = previous.filter((key) => !has.has(key)).length;
+  if (entering > 0 || leaving > 0) return Math.max(entering, leaving) > REFLOW_MAX_ITEMS;
+  return next.filter((key, i) => previous[i] !== key).length > REFLOW_MAX_ITEMS;
 }

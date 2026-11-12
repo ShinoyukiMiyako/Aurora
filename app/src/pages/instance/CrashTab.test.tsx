@@ -1,13 +1,20 @@
 // @vitest-environment jsdom
 // 崩溃诊断标签跑在假后端上：先在 mock 里启动并让游戏以指定退出码崩掉，再打开诊断页看报告怎么画出来。
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ICON_PATHS } from "../../art/icon-paths";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
+import { SLOW_LOADING_HINT } from "../../copy/flows";
 import { getConfig, updateConfig } from "../../ipc/config";
 import { lastCrash, type CrashClueDto, type CrashReportDto } from "../../ipc/diagnostics";
 import { IpcError } from "../../ipc/errors";
-import { launchGame } from "../../ipc/launch";
-import { resetMocks } from "../../ipc/mock";
+import type { InstanceDto } from "../../ipc/instances";
+import { GAME_EXIT_EVENT, launchGame } from "../../ipc/launch";
+import type { InstalledMod } from "../../ipc/mods";
+import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { setMockGpuAdapters } from "../../ipc/mock/handlers/java";
 import { endMockGame, mockCrashReport, setMockLaunchWarnings } from "../../ipc/mock/handlers/launch";
 import { OverlayRoot } from "../../shell/overlay";
@@ -15,9 +22,9 @@ import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { render, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
-import { callsOf, resetRecorder, settle } from "../../test/launcher";
+import { callsOf, deferred, emit, memoryAdviceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import InstancePage from "./index";
 
@@ -65,7 +72,7 @@ const flush = () =>
     await settle(20);
   });
 
-async function open(tab: InstanceTab) {
+async function open(tab: InstanceTab, id = ID) {
   view = render(
     <Providers>
       <Probe />
@@ -73,7 +80,7 @@ async function open(tab: InstanceTab) {
     </Providers>,
   );
   await flush();
-  act(() => nav.go({ page: "instance", id: ID, tab }));
+  act(() => nav.go({ page: "instance", id, tab }));
   await flush();
 }
 
@@ -135,6 +142,329 @@ afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+describe("崩溃诊断：停在本页重新运行", () => {
+  const RUNNING = "游戏正在运行；如果再次崩溃，这里会换成新的诊断。";
+  const STALE = "这是1 分钟前的崩溃，之后已经正常启动过。";
+
+  /** 摘要卡顶部在场的说明（退场中的那层带 inert，不算）。 */
+  function notes(): string[] {
+    return [...document.querySelectorAll<HTMLElement>("[data-tone]")].filter((el) => el.closest("[inert]") === null && el.textContent !== null && /游戏正在运行|之后已经正常启动过/.test(el.textContent)).map(textOf);
+  }
+
+  async function relaunch() {
+    ipc.overrides.set("launch_game", () => ({ pid: 42 }));
+    await act(async () => {
+      await launcher.actions.launch(ID);
+      await settle(20);
+    });
+    expect(launcher.state.session?.phase).toBe("running");
+  }
+
+  function exit(crashed: boolean) {
+    act(() => emit(GAME_EXIT_EVENT, { version_id: ID, exit_code: crashed ? 1 : 0, crashed, killed: false, duration_ms: 60_000 }));
+  }
+
+  it("正常退出后、实例列表还没报上新的上次游玩：说明直接换成过期态，不先撤走", async () => {
+    await crashWith(1);
+    await open("crash");
+    expect(notes()).toEqual([]);
+    await relaunch();
+    expect(notes()).toEqual([RUNNING]);
+    // 这里的假后端不知道这一局，重扫回来的上次游玩还是崩溃那一刻：正是重扫落定之前的那段空档
+    exit(false);
+    await flush();
+    expect(notes()).toEqual([STALE]);
+    // 会话停留期满被清空之后照旧
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    await flush();
+    expect(launcher.state.session).toBeNull();
+    expect(notes()).toEqual([STALE]);
+  });
+
+  it("又崩了一次：不说「之后已经正常启动过」，等新报告", async () => {
+    await crashWith(1);
+    await open("crash");
+    await relaunch();
+    exit(true);
+    await flush();
+    expect(notes()).toEqual([]);
+  });
+
+  it("又崩了一次、实例列表先于新报告回来：列表里的上次崩溃与上次游玩同为这次退出的时刻，同样不说「之后已经正常启动过」", async () => {
+    await crashWith(1);
+    await open("crash");
+    await relaunch();
+    // 后端在推送退出事件之前写好游玩记录与崩溃报告，两者都记这次退出的时刻；新报告的读取悬着，列表先回来
+    ipc.overrides.set("list_instances", async () => {
+      const list = await mockInvoke<InstanceDto[]>("list_instances");
+      return list.map((i) => (i.id === ID ? { ...i, last_played_at: NOW, last_crash_at: NOW } : i));
+    });
+    const fresh = deferred<CrashReportDto | null>();
+    ipc.overrides.set("last_crash", () => fresh.promise);
+    exit(true);
+    await flush();
+    expect(launcher.state.instances.find((i) => i.id === ID)?.lastPlayedAt).toBe(NOW);
+    expect(notes()).toEqual([]);
+  });
+});
+
+describe("崩溃诊断：报告读得慢", () => {
+  async function pass(ms: number) {
+    act(() => {
+      vi.advanceTimersByTime(ms);
+    });
+    await flush();
+  }
+
+  function panel(): HTMLElement {
+    const el = document.querySelector<HTMLElement>('[role="tabpanel"]');
+    if (el === null) throw new Error("找不到标签面板");
+    return el;
+  }
+
+  /** 面板里不在隐藏层、也不在退场层里的卡片。 */
+  const liveCards = () => [...panel().querySelectorAll<HTMLElement>("[data-pad]")].filter((c) => c.closest('[aria-hidden="true"]') === null && c.closest("[inert]") === null);
+  const hints = () => [...panel().querySelectorAll("p")].filter((p) => p.textContent === SLOW_LOADING_HINT);
+
+  it("等待期里骨架卡不可见地占位，不先画一张空卡；读了 10 s 慢提示在骨架层外面；读到后原位换成摘要", async () => {
+    await crashWith(1);
+    const report = deferred<CrashReportDto | null>();
+    ipc.overrides.set("last_crash", () => report.promise);
+    await open("crash");
+    const layer = panel().querySelector<HTMLElement>('[aria-busy="true"] > [aria-hidden="true"]');
+    if (layer === null) throw new Error("报告没读到时应有骨架层");
+    expect(layer.hasAttribute("data-pending")).toBe(true);
+    expect(layer.querySelector("[data-pad]")).not.toBeNull();
+    expect(liveCards()).toEqual([]);
+
+    await pass(300);
+    expect(layer.hasAttribute("data-pending")).toBe(false);
+    expect(hints()).toEqual([]);
+    await pass(10_000);
+    expect(hints()).toHaveLength(1);
+    expect(hints()[0].closest('[aria-hidden="true"]')).toBeNull();
+
+    report.resolve(mockCrashReport(ID));
+    await flush();
+    await pass(300);
+    expect(hints()).toEqual([]);
+    const titles = [...panel().querySelectorAll("h2")].filter((h) => h.closest('[aria-hidden="true"]') === null && h.closest("[inert]") === null).map(textOf);
+    expect(titles).toEqual([expect.stringContaining("找到 1 条线索")]);
+  });
+});
+
+describe("崩溃诊断：一键尝试与「日志指向的 Mod」的加载占位", () => {
+  /** 标题为 title 的卡片里那层加载容器；已经换成内容时为 null。 */
+  function busy(title: string): HTMLElement | null {
+    const heading = [...document.querySelectorAll("h3")].find((h) => h.textContent === title);
+    const card = heading?.closest<HTMLElement>("[data-pad]");
+    if (card === undefined || card === null) throw new Error(`找不到「${title}」卡`);
+    return card.querySelector<HTMLElement>('[aria-busy="true"]');
+  }
+
+  /** 骨架层：是否还在等待期（看不见），以及按行画了几行。 */
+  function skeleton(title: string): { pending: boolean; rows: number } {
+    const layer = busy(title)?.querySelector<HTMLElement>(':scope > [aria-hidden="true"]');
+    if (layer === undefined || layer === null || layer.firstElementChild === null) throw new Error(`「${title}」卡上没有骨架`);
+    return { pending: layer.hasAttribute("data-pending"), rows: layer.firstElementChild.children.length };
+  }
+
+  /** 卡片里画出来的行（退场中的不算）。 */
+  function rows(title: string): HTMLElement[] {
+    const heading = [...document.querySelectorAll("h3")].find((h) => h.textContent === title);
+    const card = heading?.closest<HTMLElement>("[data-pad]");
+    if (card === undefined || card === null) throw new Error(`找不到「${title}」卡`);
+    return [...card.querySelectorAll<HTMLElement>("ul > li:not([inert])")];
+  }
+
+  async function pass(ms: number) {
+    act(() => {
+      vi.advanceTimersByTime(ms);
+    });
+    await flush();
+  }
+
+  function clue(category: CrashClueDto["category"]): CrashClueDto {
+    return { category, summary: "", advice: "", detail: null, matched: "", line: 1, context: [], source: "session_log" };
+  }
+
+  it("一键尝试：300 ms 内只按行占位不显示，之后骨架行数与推出来的行一致，同类与共用处理办法的线索只算一行", async () => {
+    await crashWith(-1073741819);
+    ipc.overrides.set("last_crash", (args) => {
+      const base = mockCrashReport(String(args.versionId));
+      if (base === null) throw new Error("mock 里应有崩溃报告");
+      // 内存一行；Intel 显卡驱动与进程异常退出共用一行处理办法；本机连接没有可做的；末尾对照完整日志
+      const report: CrashReportDto = { ...base, diagnoses: [clue("out_of_memory"), clue("intel_graphics_driver"), clue("native_crash"), clue("loopback_unavailable"), clue("out_of_memory")] };
+      return report;
+    });
+    const advice = deferred<ReturnType<typeof memoryAdviceDto>>();
+    ipc.overrides.set("memory_advice", () => advice.promise);
+    await open("crash");
+
+    expect(skeleton("一键尝试")).toEqual({ pending: true, rows: 3 });
+    await pass(300);
+    expect(skeleton("一键尝试")).toEqual({ pending: false, rows: 3 });
+
+    advice.resolve(memoryAdviceDto({ version_id: ID }));
+    await flush();
+    // 骨架出现后至少停留 300 ms
+    expect(rows("一键尝试")).toHaveLength(0);
+    await pass(300);
+    expect(busy("一键尝试")).toBeNull();
+    expect(rows("一键尝试")).toHaveLength(3);
+  });
+
+  it("日志指向的 Mod：扫盘没回来时按报告点名的条数画骨架，回来后行数不变", async () => {
+    await crashWith(1);
+    const PACK = "RLCraft";
+    ipc.overrides.set("last_crash", () => {
+      const base = mockCrashReport(ID);
+      if (base === null) throw new Error("mock 里应有崩溃报告");
+      const report: CrashReportDto = { ...base, diagnoses: [clue("mixin_failure")], suspects: [{ mod_id: "sodium", file_name: "sodium.jar" }, { mod_id: "ghost", file_name: null }] };
+      return report;
+    });
+    const mods = deferred<InstalledMod[]>();
+    ipc.overrides.set("list_mods", () => mods.promise);
+    await open("crash", PACK);
+    await pass(300);
+    expect(skeleton("日志指向的 Mod")).toEqual({ pending: false, rows: 2 });
+
+    mods.resolve([]);
+    await pass(300);
+    expect(busy("日志指向的 Mod")).toBeNull();
+    expect(rows("日志指向的 Mod")).toHaveLength(2);
+  });
+});
+
+describe("崩溃诊断：处理办法、完成态与「已停用」的进出", () => {
+  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "instance.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+
+  /** 选择器恰好是 selector 的那条规则的声明块。 */
+  function rule(selector: string): string {
+    for (const m of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) if (m[1].trim() === selector) return m[2];
+    throw new Error(`样式表里没有 ${selector}`);
+  }
+
+  /** 文字里含 text 的那一行一键尝试。 */
+  function fixRow(text: string): HTMLElement {
+    const found = [...document.querySelectorAll<HTMLElement>("li:not([inert])")].filter((li) => li.querySelector(":scope > div") !== null && textOf(li).includes(text));
+    if (found.length !== 1) throw new Error(`含「${text}」的一键尝试有 ${found.length} 行`);
+    return found[0];
+  }
+
+  it("处理办法：展开时步骤从淡出处入场，收起后退场层不可交互；箭头始终是同一个朝下的图标，靠样式翻转", async () => {
+    await crashWith(-1073741819);
+    await open("crash");
+    const toggle = button("查看处理办法");
+    const arrow = () => {
+      const path = toggle.querySelector(":scope > svg > path");
+      if (path === null) throw new Error("处理办法按钮没有后置图标");
+      return path.getAttribute("d");
+    };
+    expect(arrow()).toBe(ICON_PATHS["chevron-down"].s);
+
+    click(toggle);
+    await flush();
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(arrow()).toBe(ICON_PATHS["chevron-down"].s);
+    const steps = fixRow("没有自动修复").querySelector<HTMLElement>("ol");
+    if (steps === null) throw new Error("展开后没有步骤");
+    // 挂载那一刻是 insertItem 的起点：淡入、从略小处落到位
+    expect(steps.parentElement?.style.opacity).toBe("0");
+
+    click(toggle);
+    await flush();
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(steps.closest("[inert]")).not.toBeNull();
+
+    expect(rule('.stepsToggle[aria-expanded="true"] > svg')).toMatch(/rotate:\s*180deg/);
+    expect(rule(".stepsToggle > svg")).toMatch(/transition:\s*rotate var\(--sk-spring-settle-dur\) var\(--sk-spring-settle\)/);
+    expect(rule(":global([data-sk-reduced]) .stepsToggle > svg")).toMatch(/transition:\s*none/);
+  });
+
+  it("一键尝试完成：图标位换成对勾、从 0.6 弹出，原图标原位淡出；颜色过渡到成功色", async () => {
+    const waapi = stubSpanAnimations();
+    await crashWith(-1073741819);
+    ipc.overrides.set("last_crash", (args) => {
+      const base = mockCrashReport(String(args.versionId));
+      if (base === null) throw new Error("mock 里应有崩溃报告");
+      const report: CrashReportDto = {
+        ...base,
+        diagnoses: [{ category: "intel_graphics_driver", summary: "", advice: "", detail: "ig9icd64.dll", matched: "# C  [ig9icd64.dll+0x57a41c]", line: 11, context: [], source: "hs_err" }],
+      };
+      return report;
+    });
+    await open("crash");
+    const glyphs = () => [...fixRow("改用独立显卡").querySelectorAll<HTMLElement>("[data-glyph]")].map((g) => [g.dataset.glyph, g.dataset.enter, g.hasAttribute("data-leaving")]);
+    // 挂载时就在的图标不单独入场
+    expect(glyphs()).toEqual([["monitor", undefined, false]]);
+
+    click(button("改用独立显卡"));
+    await flush();
+    expect(glyphs()).toEqual([
+      ["monitor", undefined, true],
+      ["check", "pop", false],
+    ]);
+    const layer = (glyph: string) => fixRow("改用独立显卡").querySelector(`[data-glyph="${glyph}"]`) as HTMLElement;
+    expect(Number(waapi.running(layer("check"), "scale").frames[0].scale)).toBe(0.6);
+    const fadeOut = waapi.running(layer("monitor"), "opacity");
+    expect(fadeOut.frames).toEqual([{ opacity: 1 }, { opacity: 0 }]);
+    // 淡出播完才移除原图标
+    waapi.finish(fadeOut);
+    expect(glyphs()).toEqual([["check", "pop", false]]);
+    expect(rule(".fixIcon")).toMatch(/transition:\s*color var\(--sk-dur-hover\) var\(--sk-ease\)/);
+  });
+
+  it("日志指向的 Mod：停用时「已停用」从淡出处弹入；挂载时就停用着的不弹", async () => {
+    await crashWith(1);
+    ipc.overrides.set("last_crash", () => {
+      const base = mockCrashReport(ID);
+      if (base === null) throw new Error("mock 里应有崩溃报告");
+      const report: CrashReportDto = {
+        ...base,
+        diagnoses: [{ category: "mixin_failure", summary: "", advice: "", detail: null, matched: "", line: 1, context: [], source: "session_log" }],
+        suspects: [
+          { mod_id: "sodium", file_name: "sodium.jar" },
+          { mod_id: "lithium", file_name: "lithium.jar" },
+        ],
+      };
+      return report;
+    });
+    const mod = (fileName: string, name: string): InstalledMod => ({
+      path: `D:/mc/versions/RLCraft/mods/${fileName}`,
+      file_name: fileName,
+      enabled: !fileName.endsWith(".disabled"),
+      size: 1024,
+      modified_ms: 1,
+      metadata: { mod_id: name.toLowerCase(), name, version: "1.0.0", description: null, authors: [], depends: [], minecraft_version: null, icon: null, loader: "forge", format: "forge_toml" },
+      icon_url: null,
+      source: null,
+    });
+    ipc.overrides.set("list_mods", () => [mod("sodium.jar", "Sodium"), mod("lithium.jar.disabled", "Lithium")]);
+    ipc.overrides.set("set_mod_enabled", (args) => `${String(args.fileName)}.disabled`);
+    await open("crash", "RLCraft");
+
+    /** 在场的「已停用」：属于哪一行、挂载那一刻是不是从透明起（入场的起点）。 */
+    const tags = () =>
+      [...document.querySelectorAll<HTMLElement>("li:not([inert])")]
+        .flatMap((li) => [...li.querySelectorAll<HTMLElement>("span")].filter((s) => s.textContent === "已停用" && s.children.length === 0))
+        .map((tag) => [textOf(tag.closest("li") as HTMLElement).includes("Sodium") ? "Sodium" : "Lithium", tag.parentElement?.style.opacity === "0"]);
+    expect(tags()).toEqual([["Lithium", false]]);
+
+    const toggle = document.querySelector<HTMLElement>('[role="switch"][aria-label="停用 Sodium"]');
+    if (toggle === null) throw new Error("Sodium 那一行没有开关");
+    click(toggle);
+    await flush();
+    expect(callsOf(ipc, "set_mod_enabled")).toEqual([{ versionId: "RLCraft", fileName: "sodium.jar", enabled: false }]);
+    expect(tags()).toEqual([
+      ["Sodium", true],
+      ["Lithium", false],
+    ]);
+  });
 });
 
 describe("崩溃诊断：日志路径", () => {

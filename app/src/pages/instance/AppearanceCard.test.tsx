@@ -498,6 +498,81 @@ describe("实例设置：外观卡的封面方块", () => {
   });
 });
 
+describe("实例设置：外观卡的动效与占位", () => {
+  /** 卡面背景一行的说明槽。 */
+  const noteSlot = () => {
+    const desc = row("卡面背景").querySelector<HTMLElement>('span[id$="-desc"]');
+    const slot = desc?.firstElementChild;
+    if (!(slot instanceof HTMLElement)) throw new Error("卡面背景一行没有说明槽");
+    return slot;
+  };
+  /** 包住 el 的出入场层：入场起点写在它的内联样式上。 */
+  const appearLayer = (el: Element) => {
+    const layer = el.closest<HTMLElement>('[style*="opacity"]');
+    if (layer === null) throw new Error("它不在出入场层里");
+    return layer;
+  };
+
+  it("卡面背景的说明槽：跟随时只有跟随说明，平铺说明占位；切到渐变花瓣没有说明，两条都占位，这一行不变高", async () => {
+    await openSettings();
+    const follow = "跟随设置里「外观」选的默认背景，现在是「方块平铺」。";
+    const texture = "平铺封面方块的侧面材质，本机读不到材质时画渐变花瓣。";
+    expect(textOf(noteSlot())).toBe(follow);
+    expect([noteSlot().dataset.reserveA, noteSlot().dataset.reserveB]).toEqual([texture, undefined]);
+    await click(radio("渐变花瓣"));
+    expect(textOf(noteSlot())).toBe("");
+    expect([noteSlot().dataset.reserveA, noteSlot().dataset.reserveB]).toEqual([follow, texture]);
+  });
+
+  it("背景图片一行：导入成功后淡入落位；移除后原地淡出、不可交互；它与方块行都自己画分隔线", async () => {
+    vi.mocked(pickFile).mockResolvedValueOnce(PICKED);
+    await openSettings();
+    expect(row("封面方块").className).toMatch(/ruled/);
+    await click(radio("我的图片"));
+    const imageRow = row("背景图片");
+    expect(imageRow.className).toMatch(/ruled/);
+    const layer = appearLayer(imageRow);
+    expect(layer.style.opacity).toBe("0");
+    await click(button("移除图片", imageRow));
+    expect(layer.hasAttribute("inert")).toBe(true);
+  });
+
+  it("挂载时就有的背景图片一行跟着卡片出现，不单独播入场", async () => {
+    settings = { ...settings, background: "image", background_image: BG_FILE };
+    patchInstance({ background: "image", background_image: BG_KEY });
+    await openSettings();
+    // 包住这一行的出入场层就是它的父元素：挂载时就在的，不从透明起步
+    const layer = row("背景图片").parentElement;
+    expect(layer?.style.opacity).not.toBe("0");
+    expect(layer?.hasAttribute("inert")).toBe(false);
+  });
+
+  it("换了封面方块：新方块从 0.92 弹到原大；打开时的方块不弹", async () => {
+    await openSettings();
+    const slot = () => {
+      const el = row("封面方块").querySelector<HTMLElement>('[class*="blockSlot"]');
+      if (el === null) throw new Error("方块行没有方块");
+      return el;
+    };
+    expect(slot().style.opacity).not.toBe("0");
+    await click(button("选择方块", row("封面方块")));
+    await click(button("替身：选橡木原木", document));
+    expect(slot().style.opacity).toBe("0");
+    expect(slot().style.transform).toContain("scale(0.92)");
+  });
+
+  it("方块用着图片时的「移除图片」：移除后原地淡出，不同帧消失", async () => {
+    settings = { ...settings, cover_image: BLOCK_FILE };
+    patchInstance({ cover: "grass_block", cover_image: BLOCK_KEY });
+    await openSettings();
+    const remove = button("移除图片", row("封面方块"));
+    const layer = remove.closest<HTMLElement>("div:not([class])");
+    if (layer === null) throw new Error("「移除图片」不在出入场层里");
+    await click(remove);
+    expect(layer.hasAttribute("inert")).toBe(true);
+  });
+});
+
 describe("实例设置：外观卡锁住时", () => {
   it("补全进行中：分段与各按钮禁用并沿用锁的原因，点了不选图、不写设置", async () => {
     settings = { ...settings, background: "image", background_image: BG_FILE, cover_image: BLOCK_FILE };

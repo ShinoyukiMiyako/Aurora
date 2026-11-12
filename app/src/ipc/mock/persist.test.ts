@@ -207,3 +207,78 @@ describe("mock 持久化", () => {
     expect(() => core.enableMockPersistence(new MemoryStorage(), PREFIX)).toThrow("已经启用过");
   });
 });
+
+describe("mock 延迟", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("默认不等：命令在当前这一轮微任务里就返回", async () => {
+    vi.useFakeTimers();
+    const core = await reload();
+    expect(core.mockLatency()).toBe(0);
+    expect(await core.mockInvoke("is_first_run")).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("设了延迟：每条命令都等满这么久才返回，结果不变", async () => {
+    vi.useFakeTimers();
+    const core = await reload();
+    core.setMockLatency(300);
+    let settled = false;
+    const pending = core.mockInvoke("is_first_run").then((value) => {
+      settled = true;
+      return value;
+    });
+    await vi.advanceTimersByTimeAsync(299);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    expect(await pending).toBe(true);
+  });
+
+  it("没实现的命令不等延迟，立即报错", async () => {
+    vi.useFakeTimers();
+    const core = await reload();
+    core.setMockLatency(300);
+    await expect(core.mockInvoke("no_such_command")).rejects.toThrow("mock 未实现 no_such_command");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("随持久化存下，刷新后从第一条命令起生效；设回 0 时把键删掉", async () => {
+    const storage = new MemoryStorage();
+    const first = await reload();
+    first.enableMockPersistence(storage, PREFIX);
+    first.setMockLatency(250);
+    expect(storage.getItem("slug.mock-latency-ms")).toBe("250");
+
+    const second = await reload();
+    expect(second.mockLatency()).toBe(0);
+    second.enableMockPersistence(storage, PREFIX);
+    expect(second.mockLatency()).toBe(250);
+
+    second.setMockLatency(0);
+    expect(storage.keys()).not.toContain("slug.mock-latency-ms");
+  });
+
+  it("恢复种子数据不动延迟：它是测量用的开关，不是数据", async () => {
+    const storage = new MemoryStorage();
+    const core = await reload();
+    core.enableMockPersistence(storage, PREFIX);
+    core.setMockLatency(250);
+    core.resetMockData();
+    expect(core.mockLatency()).toBe(250);
+    expect(storage.getItem("slug.mock-latency-ms")).toBe("250");
+  });
+
+  it("负数、非数字一律拒绝；存储里的坏值在启用时报错", async () => {
+    const core = await reload();
+    expect(() => core.setMockLatency(-1)).toThrow("必须是非负的毫秒数，收到 -1");
+    expect(() => core.setMockLatency(Number.NaN)).toThrow("必须是非负的毫秒数，收到 NaN");
+    expect(core.mockLatency()).toBe(0);
+
+    const bad = new MemoryStorage();
+    bad.setItem("slug.mock-latency-ms", "soon");
+    await expect(reload().then((next) => next.enableMockPersistence(bad, PREFIX))).rejects.toThrow("必须是非负的毫秒数，收到 NaN");
+  });
+});

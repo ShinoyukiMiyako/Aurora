@@ -57,7 +57,10 @@
   border-radius: var(--sk-r-pill);
 }
 
-/* 文字行：条高 12，上下各留 5，合起来正好一个正文行高（22），换成真实文字时高度不变 */
+/*
+ * 文字行：条高 12，上下各留半个余量，合起来正好是所在位置的一个行高（1lh 取继承下来的行高）：
+ * 正文里 22，KV 的值 20，卡头副标题 18，换成真实文字时高度不变。
+ */
 .text {
   display: flex;
   flex-direction: column;
@@ -67,7 +70,7 @@
 .line {
   --skeleton-line: 12px;
   height: var(--skeleton-line);
-  margin: calc((var(--sk-lh-body) - var(--skeleton-line)) / 2) 0;
+  margin: calc((1lh - var(--skeleton-line)) / 2) 0;
   border-radius: var(--sk-r-xs);
 }
 

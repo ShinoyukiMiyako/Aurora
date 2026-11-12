@@ -1,5 +1,6 @@
-/* 键帽靠右，不随输入区伸缩 */
+/* 键帽靠右，不随输入区伸缩；flex 让键帽组自身成为弹性项，不落在行框里多出基线下方的空隙 */
 .shortcut {
+  display: flex;
   flex: none;
   pointer-events: none;
 }

@@ -38,13 +38,12 @@
   --bar-fill: var(--sk-text-3);
 }
 
-/* 填充铺满轨道，位移由组件按平滑后的进度写入 */
+/* 填充铺满轨道，位移由组件按平滑后的进度写入。不写常驻 will-change：任务页几十行进度条会各占一个合成层 */
 .fill {
   position: absolute;
   inset: 0;
   border-radius: inherit;
   background: var(--bar-fill);
-  will-change: transform;
 }
 
 /* 宽 40% 的光带从左外侧扫到右外侧（位移相对光带自身宽度） */

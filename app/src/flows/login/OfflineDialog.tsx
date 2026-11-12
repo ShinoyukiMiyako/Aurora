@@ -3,22 +3,26 @@
 // 艾利克斯。右侧是用户名、UUID 预览与说明。
 // 校验与后端同一套规则：错误不能提交，提醒照常可以提交。
 // 「输入用户名」只在提交、或输入过之后离开输入框才出现：刚打开弹窗就标红没有意义。
+// 弹窗本身由 LoginFlow 渲染（各种登录共用一个），这里只算外框与主体交上去。
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { BlossomBranch } from "../../art/illustrations/BlossomBranch";
 import { AccountFigure } from "../../art/skin/AccountFigure";
+import type { SkinRef } from "../../art/skin/layout";
+import { useSkin } from "../../art/skin/useSkin";
 import { ACTION_ERROR, OFFLINE_NAME_COPY } from "../../copy/flows";
 import { validateOfflineName, type OfflineNameCheck } from "../../domain/rules";
 import { useRunner } from "../../shell/useRunner";
 import { shallowArrayEqual, useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { Button } from "../../ui/Button";
 import { Field } from "../../ui/Field";
-import { Modal } from "../../ui/Modal";
 import { TextInput } from "../../ui/TextInput";
 import { LOGIN_ERROR, OFFLINE_DIALOG_COPY } from "../../copy/login";
 import styles from "./login.module.css";
-import { defaultSkin, STARTER_SKINS } from "./default-skin";
+import { DEFAULT_SKINS, defaultSkin, STARTER_SKINS } from "./default-skin";
 import { hyphenateUuid, offlineUuid } from "./offline-uuid";
+import { Swap } from "./Swap";
+import { useReportView, type ReportView } from "./view";
 
 /** 立绘跟随输入的停顿时长（毫秒）。 */
 export const FIGURE_DEBOUNCE_MS = 150;
@@ -44,7 +48,7 @@ function useDebounced<T>(value: T, ms: number): T {
   return settled;
 }
 
-export function OfflineDialog() {
+export const OfflineDialog = memo(function OfflineDialog({ report }: { report: ReportView }) {
   const takenNames = useLauncherSelector((s) => s.accounts.map((a) => a.name), shallowArrayEqual);
   const actions = useLauncherActions();
   const run = useRunner();
@@ -57,6 +61,7 @@ export function OfflineDialog() {
   const display = nameDisplay(name, check, touched);
   const figureName = useDebounced(name, FIGURE_DEBOUNCE_MS);
   const figureUuid = offlineUuid(figureName);
+  const figureSkin = defaultSkin(figureUuid);
 
   const close = () => void run(() => actions.closeLogin(), LOGIN_ERROR.close);
   const submit = async () => {
@@ -68,43 +73,49 @@ export function OfflineDialog() {
     setSubmitting(false);
   };
 
-  return (
-    <Modal
-      open
-      onClose={close}
-      size="md"
-      icon="user"
-      title={OFFLINE_DIALOG_COPY.title}
-      subtitle={OFFLINE_DIALOG_COPY.subtitle}
-      closeOnScrim={false}
-      footer={
-        <>
-          <Button variant="ghost" onClick={close}>
-            {OFFLINE_DIALOG_COPY.cancel}
-          </Button>
-          <Button variant="primary" icon="plus" loading={submitting} disabled={display.kind === "error"} onClick={() => void submit()}>
-            {OFFLINE_NAME_COPY.submit}
-          </Button>
-        </>
-      }
-    >
+  useReportView(report, {
+    kind: "offline",
+    title: OFFLINE_DIALOG_COPY.title,
+    subtitle: OFFLINE_DIALOG_COPY.subtitle,
+    icon: "user",
+    size: "md",
+    closeOnScrim: false,
+    onClose: close,
+    layoutKey: "",
+    footer: (
+      <>
+        <Button variant="ghost" onClick={close}>
+          {OFFLINE_DIALOG_COPY.cancel}
+        </Button>
+        <Button variant="primary" icon="plus" loading={submitting} disabled={display.kind === "error"} onClick={() => void submit()}>
+          {OFFLINE_NAME_COPY.submit}
+        </Button>
+      </>
+    ),
+    body: (
       <div className={styles.offline}>
         <div className={styles.stage} role="img" aria-label={figureName === "" ? OFFLINE_DIALOG_COPY.previewEmpty : OFFLINE_DIALOG_COPY.preview(figureName)}>
           <BlossomBranch width={150} height={96} dim className={styles.stageBranch} />
-          {figureName === "" ? (
-            // 两个并排要缩一档才放得进舞台
-            <span className={styles.stagePair}>
-              {STARTER_SKINS.map((starter) => (
-                <AccountFigure key={starter.name} uuid={offlineUuid(starter.name)} skin={starter.skin} scale={4} className={styles.stageFigure} />
-              ))}
-            </span>
-          ) : (
-            <AccountFigure uuid={figureUuid} skin={defaultSkin(figureUuid)} scale={5} className={styles.stageFigure} />
-          )}
+          {/* 换了一套皮肤才换立绘：新旧原地交叉淡化；名字不同但皮肤相同时立绘不动 */}
+          <Swap id={figureName === "" ? "starters" : figureSkin.path} still className={styles.stageSwap} paneClassName={styles.stageSlot}>
+            {figureName === "" ? (
+              // 两个并排要缩一档才放得进舞台
+              <span className={styles.stagePair}>
+                {STARTER_SKINS.map((starter) => (
+                  <AccountFigure key={starter.name} uuid={offlineUuid(starter.name)} skin={starter.skin} scale={4} className={styles.stageFigure} />
+                ))}
+              </span>
+            ) : (
+              <AccountFigure uuid={figureUuid} skin={figureSkin} scale={5} className={styles.stageFigure} />
+            )}
+          </Swap>
         </div>
         <div className={styles.offlineForm}>
+          {/* 提示区常驻两行：两行的默认说明与一行的「可以使用」「少于 3 个字符」互换时，下面的 UUID 与说明不上下抽动 */}
           <Field
             label={OFFLINE_DIALOG_COPY.nameLabel}
+            reserve
+            className={styles.nameField}
             error={display.kind === "error" ? display.message : undefined}
             hint={display.kind === "error" ? undefined : <span data-tone={display.kind}>{display.message}</span>}
           >
@@ -134,6 +145,22 @@ export function OfflineDialog() {
           <p className={styles.note}>{OFFLINE_DIALOG_COPY.note}</p>
         </div>
       </div>
-    </Modal>
+    ),
+  });
+  return (
+    <>
+      {DEFAULT_SKINS.map((skin) => (
+        <SkinPreload key={skin.path} skin={skin} />
+      ))}
+    </>
   );
+});
+
+/**
+ * 预取一套默认皮肤：只为把位图取进缓存，不画任何东西。默认皮肤只有 18 套、都在本机游戏文件里，
+ * 打开弹窗时全取一遍，输入停顿后换上的立绘第一帧就是真皮肤，不先闪一下剪影再交叉。
+ */
+function SkinPreload({ skin }: { skin: SkinRef }) {
+  useSkin(skin);
+  return null;
 }

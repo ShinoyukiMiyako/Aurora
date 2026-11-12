@@ -4,15 +4,18 @@
 // 整条是拖动区（data-tauri-drag-region="deep"）：子树里的按钮等可交互元素自然挡住拖动，
 // 其余空白与标题文字都能拖动窗口、双击切换最大化。窗口失焦时标题与三键字形降一级颜色。
 
+import { LayoutGroup, motion } from "framer-motion";
 import { useCallback } from "react";
 import { Icon } from "../art/Icon";
 import { INSTANCE_TAB_LABEL, PAGE_LABEL } from "../copy/flows";
+import { fade } from "../lib/motion";
+import { useMounted } from "../lib/useMounted";
 import { useLauncherSelector } from "../state/launcher";
 import { findInstance } from "../state/selectors";
 import { IconButton } from "../ui/IconButton";
 import { KeyHint } from "../ui/KeyHint";
 import { Tooltip } from "../ui/Tooltip";
-import { AccountCapsule } from "./AccountCapsule";
+import { AccountCapsule, SLIDES_WITH_CAPSULE } from "./AccountCapsule";
 import { SHELL_ACTION_ERROR, TITLEBAR_COPY } from "../copy/shell";
 import { DownloadPeek } from "./DownloadPeek";
 import { useNav, useShell } from "./shell";
@@ -32,21 +35,29 @@ export function TitleBar() {
   const frame = useReportedWindowFrame();
   return (
     <header className={styles.bar} data-tauri-drag-region="deep" data-blurred={!frame.focused || undefined}>
-      <div className={styles.start}>
-        <HistoryButtons />
-        <PageTitle />
-      </div>
-      <div className={styles.center}>
-        <StatusIsland />
-      </div>
-      <div className={styles.end}>
-        <div className={styles.tools}>
-          <SearchEntry />
-          <DownloadPeek />
-          <AccountCapsule />
+      {/*
+       * 账户胶囊随名字变宽变窄时，被它推动的东西跟着它的左缘一起滑，不被一帧推开：右对齐的搜索与下载入口，
+       * 以及右列按内容定宽时被挤动的状态岛（右列变窄，中列整体右移）。这几样都是布局动画节点，放进同一个 LayoutGroup：
+       * 组内任一节点开始布局动画时全组一起取快照。不靠各自重渲染取快照，因为被推动的兄弟根本没有重渲染。
+       * 不用兄弟让位（lib/reflow）：右列宽度随胶囊变，它把这当成整体重排不做动画；右对齐时子项相对容器的位置也不变
+       */}
+      <LayoutGroup>
+        <div className={styles.start}>
+          <HistoryButtons />
+          <PageTitle />
         </div>
-        <WindowControls maximized={frame.maximized} />
-      </div>
+        <div className={styles.center}>
+          <StatusIsland />
+        </div>
+        <div className={styles.end}>
+          <div className={styles.tools}>
+            <SearchEntry />
+            <DownloadPeek />
+            <AccountCapsule />
+          </div>
+          <WindowControls maximized={frame.maximized} />
+        </div>
+      </LayoutGroup>
     </header>
   );
 }
@@ -61,16 +72,29 @@ function HistoryButtons() {
   );
 }
 
-/** 页面标题；实例页是「实例库 / 实例名 / 分页名」面包屑，概览分页不写分页名。 */
+/**
+ * 页面标题；实例页是「实例库 / 实例名 / 分页名」面包屑，概览分页不写分页名。
+ * 换页、换实例、换分页时新出现的那段文字淡入、不位移，与下方页面根和分页面板的入场同步，不再是顶上先换、内容后到。
+ */
 export function PageTitle() {
   const { route, go } = useNav();
   const inst = useLauncherSelector((s) => (route.page === "instance" ? findInstance(s, route.id) : undefined));
-  if (route.page !== "instance") return <span className={styles.title}>{PAGE_LABEL[route.page]}</span>;
+  // 挂载时就在的标题跟着外壳一起出现，不单独淡入
+  const mounted = useMounted();
+  const enter = mounted.current ? { opacity: 0 } : false;
+  const shown = { opacity: 1, transition: fade.in };
+  if (route.page !== "instance") {
+    return (
+      <motion.span key={route.page} className={styles.title} initial={enter} animate={shown}>
+        {PAGE_LABEL[route.page]}
+      </motion.span>
+    );
+  }
   // 当前路由指向的实例由外壳保证存在（失效路由在渲染前就落到实例库），这里查不到就是外壳状态坏了
   if (inst === undefined) throw new Error(`标题栏找不到当前路由的实例 ${route.id}`);
   const tab = route.tab === "overview" ? null : INSTANCE_TAB_LABEL[route.tab];
   return (
-    <span className={styles.crumbs}>
+    <motion.span key={`instance:${route.id}`} className={styles.crumbs} initial={enter} animate={shown}>
       <button type="button" className={styles.crumbLink} onClick={() => go({ page: "library" })}>
         {PAGE_LABEL.library}
       </button>
@@ -82,13 +106,15 @@ export function PageTitle() {
       </span>
       {tab !== null && (
         <>
-          <span className={styles.crumbSep} aria-hidden="true">
+          <motion.span className={styles.crumbSep} aria-hidden="true" initial={enter} animate={shown}>
             {TITLEBAR_COPY.crumbSeparator}
-          </span>
-          <span className={styles.crumbTab}>{tab}</span>
+          </motion.span>
+          <motion.span key={route.tab} className={styles.crumbTab} initial={enter} animate={shown}>
+            {tab}
+          </motion.span>
         </>
       )}
-    </span>
+    </motion.span>
   );
 }
 
@@ -99,18 +125,25 @@ function SearchEntry() {
   if (tier === "compact") {
     return (
       <Tooltip content={TITLEBAR_COPY.searchTooltip} side="bottom">
-        <button type="button" className={styles.searchIcon} aria-label={TITLEBAR_COPY.searchLabel} aria-keyshortcuts="Control+K" onClick={open}>
+        <motion.button
+          type="button"
+          {...SLIDES_WITH_CAPSULE}
+          className={styles.searchIcon}
+          aria-label={TITLEBAR_COPY.searchLabel}
+          aria-keyshortcuts="Control+K"
+          onClick={open}
+        >
           <Icon name="search" size={18} />
-        </button>
+        </motion.button>
       </Tooltip>
     );
   }
   return (
-    <button type="button" className={styles.search} aria-label={TITLEBAR_COPY.searchLabel} aria-keyshortcuts="Control+K" onClick={open}>
+    <motion.button type="button" {...SLIDES_WITH_CAPSULE} className={styles.search} aria-label={TITLEBAR_COPY.searchLabel} aria-keyshortcuts="Control+K" onClick={open}>
       <Icon name="search" size={16} />
       <span className={styles.searchText}>{TITLEBAR_COPY.searchPlaceholder}</span>
       <KeyHint keys={["Ctrl", "K"]} />
-    </button>
+    </motion.button>
   );
 }
 

@@ -9,7 +9,19 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* 块随运行时数据增删的组：被移除的块退场时脱离布局、按这个网格绝对定位；网格的左上角不随增删移动，退场块原地淡出 */
+.grid[data-open-ended] {
+  position: relative;
+}
+
+/* 这种组里每块外面的进出层才是网格的子项：块撑满这一格，同一行的块照旧等高 */
+.item {
+  display: grid;
+  min-width: 0;
+}
+
 .tile {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: var(--sk-space-12);
@@ -25,6 +37,7 @@
   cursor: pointer;
   outline: none;
   transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
     background-color var(--sk-dur-hover) var(--sk-ease),
     border-color var(--sk-dur-hover) var(--sk-ease);
 }
@@ -36,20 +49,48 @@
 .tile[aria-checked="true"] {
   border-color: var(--sk-accent-line);
   background: color-mix(in srgb, var(--sk-accent) 6%, var(--sk-surface));
+}
+
+/* 选中外环画在常驻叠层上，只淡入淡出，与底色和描边色的过渡同步；外环本身不变，不过渡阴影 */
+.tile::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
   box-shadow: 0 0 0 3px var(--sk-accent-soft);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
+.tile[aria-checked="true"]::after {
+  opacity: 1;
 }
 
 .tile:focus-visible {
   box-shadow: var(--sk-focus);
 }
 
-.tile[aria-checked="true"]:focus-visible {
-  box-shadow: var(--sk-focus), 0 0 0 3px var(--sk-accent-soft);
+/* 焦点环比外环宽，原本整个盖住外环；叠层画在焦点环之上，聚焦时收起，保持焦点环的原样 */
+.tile:focus-visible::after {
+  opacity: 0;
 }
 
 .tile:disabled {
   opacity: var(--sk-disabled);
   cursor: not-allowed;
+}
+
+/* 可点的块按下微缩：点已选中的那一项也有回应 */
+.tile:active:not(:disabled) {
+  transform: scale(0.99);
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .tile:active:not(:disabled) {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 /* 与单选组同款圆点；顶边对齐标题行 */

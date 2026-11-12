@@ -79,7 +79,9 @@
   text-align: left;
   outline: none;
   cursor: pointer;
-  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+  transition:
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .railItem:disabled {
@@ -95,6 +97,8 @@
 }
 
 .railDot {
+  position: relative;
+  isolation: isolate;
   display: grid;
   flex: none;
   place-items: center;
@@ -106,6 +110,21 @@
   font-size: var(--sk-fs-caption);
   font-weight: var(--sk-w-medium);
   font-variant-numeric: tabular-nums;
+  transition:
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+/* 当前步的渐变底放在叠层上淡入淡出：渐变本身不能过渡，直接换底色会一帧跳变。盖住描边，与原来去掉描边的样子一致 */
+.railDot::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--sk-accent-grad);
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
 }
 
 .railItem[data-status="current"] {
@@ -114,8 +133,12 @@
 
 .railItem[data-status="current"] .railDot {
   border-color: transparent;
-  background: var(--sk-accent-grad);
   color: var(--sk-accent-ink);
+}
+
+.railItem[data-status="current"] .railDot::before {
+  opacity: 1;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
 }
 
 .railItem[data-status="done"] {
@@ -132,10 +155,18 @@
   font-weight: var(--sk-w-medium);
 }
 
+/* 跳过那一步时才挂上：淡入，不一帧冒出来（在行尾，不挤别的内容） */
 .railSkipped {
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
   color: var(--sk-text-2);
+  animation: railTagIn var(--sk-dur-in) var(--sk-ease-out);
+}
+
+@keyframes railTagIn {
+  from {
+    opacity: 0;
+  }
 }
 
 /* ---------------------------------------------------------------- 右栏：标题、步骤内容、底栏 */
@@ -201,13 +232,24 @@
   color: var(--sk-text-2);
 }
 
+/*
+ * 步骤内容在停留期间会从不溢出变成溢出（提示晚到、文件夹列表变长、登录后多出账户区）：滚动条槽常驻，
+ * 出现滚动条时内容不收窄。槽伸进右栏的右内边距里，内容右缘仍与标题、底栏对齐。
+ */
 .scroll {
   flex: 1;
   min-height: 0;
+  margin-right: calc(-1 * var(--sk-scrollbar-size));
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
+/*
+ * 定位基准：退场中的按钮脱离布局后按这里定位，原地淡出。不能放在两侧按钮组上：右侧那组被推到右端、
+ * 宽度随内容变，「跳过」离开时组从左侧收窄，退场层还按旧的左偏移摆，会落到主按钮上被盖住。底栏的左缘与上缘都不动
+ */
 .footer {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -223,9 +265,35 @@
   gap: var(--sk-space-8);
 }
 
+/* 按钮外的出没包裹层：弹性盒让按钮不落在行框里，包裹层与按钮同高 */
+.footerItem {
+  display: flex;
+}
+
+/*
+ * 主按钮与隐形的「开始使用 →」叠在同一格：格宽取最宽的那种，真按钮撑满。第三步换到第四步、点下后转圈时宽度都不变，
+ * 左边的「跳过」不被推走；按钮组件改了尺寸，两者一起变。
+ */
+.primarySlot {
+  display: inline-grid;
+  flex: none;
+}
+
+.primaryAction,
+.primaryGhost {
+  grid-area: 1 / 1;
+}
+
+.primaryGhost {
+  display: flex;
+  visibility: hidden;
+}
+
 /* ---------------------------------------------------------------- 步骤内容 */
 
+/* 定位基准：退场中的块脱离布局后按这里定位，跟着内容滚动、被内容区裁切，不受换步横移的影响 */
 .stepBody {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-14);
@@ -276,6 +344,12 @@
   font-family: var(--sk-mono);
 }
 
+/* 「用回默认位置」的出没包裹层：与按钮同宽同高，入场的缩放以按钮为中心，不从整行的中点缩 */
+.useDefault {
+  display: flex;
+  align-self: flex-start;
+}
+
 .others {
   display: flex;
   flex-direction: column;
@@ -297,7 +371,9 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 定位基准：删掉的那一行脱离布局后按列表定位，原地淡出 */
 .extraList {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-6);
@@ -335,6 +411,20 @@
   white-space: nowrap;
 }
 
+/* 文件夹卡的骨架：方框加名称、路径两行，行高沿用上面两条，卡高与真实的一致 */
+.extraSkeleton {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+}
+
+.extraSkeletonText {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .noneBlock {
   display: flex;
   align-items: center;
@@ -354,6 +444,18 @@
   padding: var(--sk-space-12) 0;
   font-size: var(--sk-fs-small);
   color: var(--sk-text-2);
+}
+
+/* 只给读屏的状态区：不占位、看不见，仍在可访问性树里 */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .runtimeList {
@@ -393,6 +495,20 @@
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-8);
+}
+
+/*
+ * 「继续添加」的常驻槽：弹性盒让按钮不落在行框里，槽与按钮同高。点掉后按钮留在原处淡出，
+ * 标题行的高度仍由它撑着，不从按钮高落到文字高。
+ */
+.addMore {
+  display: flex;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+.addMore[data-spent] {
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
 }
 
 .accountChips {
@@ -450,11 +566,25 @@
   text-align: left;
   outline: none;
   cursor: pointer;
-  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+  transition:
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap);
 }
 
 .loginOption:hover:not(:disabled) {
   border-color: var(--sk-accent-line);
+}
+
+/* 按压与其他可点卡片一致：按下缩到 0.99，松开回弹，都走 tap 弹簧 */
+.loginOption:active:not(:disabled) {
+  scale: 0.99;
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .loginOption:active:not(:disabled) {
+  scale: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 .loginOption:focus-visible {

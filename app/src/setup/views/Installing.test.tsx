@@ -13,8 +13,9 @@ import type { InstallMode, Progress } from "../contract";
 import { COPY, type SetupCopy } from "../copy";
 import { createFakeBridge, FAKE_PROBE } from "../fake-bridge";
 import { FrameChromeProvider, type FrameChrome } from "../Frame";
+import { InShell } from "./test-chrome";
 import { replay } from "../model";
-import { Installing } from "./Installing";
+import { Installing, NO_PHASE_YET } from "./Installing";
 
 const VERSION = "0.2.0";
 const zh = COPY.zh;
@@ -30,7 +31,7 @@ function harness(copy: SetupCopy, reduced: "always" | "never", ui: ReactNode) {
     <MotionConfig reducedMotion={reduced}>
       <OverlayProvider>
         <FrameChromeProvider value={chromeOf(copy)}>
-          {ui}
+          <InShell>{ui}</InShell>
           <OverlayRoot />
         </FrameChromeProvider>
       </OverlayProvider>
@@ -158,7 +159,24 @@ describe("进度条", () => {
 describe("阶段文字", () => {
   it("事件到之前状态区域已经挂着，只是没有字", () => {
     view = render(installing(null));
-    expect(status().textContent).toBe("");
+    expect(status().textContent?.trim()).toBe("");
+  });
+
+  it("阶段行从一开始就占着一行：第一个事件到达时只换字，右边的关闭说明按同一条基线对齐，不跳", () => {
+    view = render(installing(null));
+    const line = status().firstElementChild;
+    expect(line?.tagName).toBe("P");
+    expect(line?.textContent).toBe(NO_PHASE_YET);
+    view.rerender(installing({ phase: "unpack", percent: 1, slow: false }));
+    expect(status().firstElementChild).toBe(line);
+    expect(line?.textContent).toBe("解开安装包");
+  });
+
+  it("慢提示出现时从透明淡入，不是同一帧冒出来", () => {
+    view = render(installing({ phase: "write", percent: 50, slow: false }));
+    view.rerender(installing({ phase: "write", percent: 50, slow: true }));
+    const slow = [...status().querySelectorAll("p")].find((p) => p.textContent === zh.installing.slow);
+    expect(slow?.parentElement?.style.opacity).toBe("0");
   });
 
   it.each([

@@ -1,28 +1,34 @@
 // 发现页：跨 Modrinth / CurseForge 搜资源，点开详情装进实例；整合包装成新实例，本地整合包文件从头图右上角导入。
 // 页面持有界面上的筛选与分页累积；搜索结果、详情、版本、落位矩阵都是状态层的按需查询。
 
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { motion } from "framer-motion";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { LOADER_NAME, SLOW_LOADING_HINT } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { PLATFORM_TIMEOUT_MS, SEARCH_DEBOUNCE_MS, SLOW_HINT_MS } from "../../domain/limits";
-import { useLoadingGate } from "../../lib/loading-gate";
+import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
+import { fade, type PanelFrom } from "../../lib/motion";
+import { useReflow } from "../../lib/reflow";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector, useNow } from "../../state/launcher";
 import { useInstalledSources, type SearchEntry } from "../../state/queries/discover";
 import { invalidate } from "../../state/resource";
 import type { DiscoverKind, PageProps } from "../../state/route";
-import { Banner } from "../../ui/Banner";
+import { Appear } from "../../ui/Appear";
+import { Banner, BannerSlot } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { EmptyState } from "../../ui/EmptyState";
-import { EntranceBlock, Page } from "../../ui/Page";
+import { LabelSlot } from "../../ui/LabelSlot";
+import { Loadable } from "../../ui/Loadable";
+import { EntranceBlock, numberEntrance, Page, useEntranceIndex } from "../../ui/Page";
 import { TabPanel } from "../../ui/Tabs";
 import { Spinner } from "../../art/Spinner";
 import { PLATFORM_LABEL, SEARCH_COPY } from "./copy";
 import { ResourceDetail, type DetailTarget } from "./detail/ResourceDetail";
 import styles from "./discover.module.css";
 import { useOnline } from "../../state/online";
-import { useDebounced, useNearBottom, useScrollContainer, useStuck } from "./hooks";
+import { revealTop, useDebounced, useNearBottom, useScrollContainer, useStuck } from "./hooks";
 import { ImportModpackDialog, type ImportRequest } from "./ImportModpackDialog";
 import {
   allPlatformsFailed,
@@ -30,13 +36,13 @@ import {
   conditionParts,
   curseForgeSkipNote,
   DEFAULT_FILTERS,
+  DISCOVER_KINDS,
   fitCandidates,
   hasConditions,
   hitKey,
   installedBySource,
   installedCount,
   instancesFromPack,
-  PAGE_SIZE,
   partialFailure,
   PREFETCH_MARGIN_PX,
   projectOrigins,
@@ -48,7 +54,7 @@ import {
   withKind,
   type DiscoverFilters,
 } from "./model";
-import { ResultCard, SkeletonCard } from "./ResultCard";
+import { ResultCard, SkeletonGrid } from "./ResultCard";
 import { readSnapshot, writeSnapshot } from "./session";
 import { SearchHero, Toolbar } from "./Toolbar";
 import { useResultPages, type ResultPages } from "./useResultPages";
@@ -132,8 +138,37 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const container = useScrollContainer(sentinelRef);
   const stuck = useStuck(sentinelRef, container);
+  const revealResults = (scroller: HTMLElement | null) => {
+    const sentinel = sentinelRef.current;
+    if (sentinel === null || scroller === null) throw new Error("发现页的结果区或滚动容器尚未挂载");
+    revealTop(sentinel, scroller);
+  };
 
-  const setKind = (next: DiscoverKind) => setFilters(withKind(filters, next));
+  // 换了一组搜索条件（筛选、排序、关键词、外部带来的参数）：已经往下滚过结果区顶边时滚回去，新结果从头看起。
+  // 在布局之后、绘制之前滚：换上来的占位与滚回去的位置在同一帧画出。
+  // 进页那一次提交只记下条件、不滚：后退回来时外壳正要把滚动位置还原到上次看到的地方
+  const searched = useRef<string | null>(null);
+  const baseKey = pages.state.baseKey;
+  useLayoutEffect(() => {
+    if (searched.current === baseKey) return;
+    const mounting = searched.current === null;
+    searched.current = baseKey;
+    if (!mounting) revealResults(container);
+  });
+
+  // 换类型时新面板从所选标签那一侧滑进来，和标签指示块的方向一致
+  const [shownKind, setShownKind] = useState(filters.kind);
+  const [panelFrom, setPanelFrom] = useState<PanelFrom | undefined>(undefined);
+  if (filters.kind !== shownKind) {
+    setShownKind(filters.kind);
+    setPanelFrom({ axis: "x", dir: DISCOVER_KINDS.indexOf(filters.kind) > DISCOVER_KINDS.indexOf(shownKind) ? 1 : -1 });
+  }
+
+  const setKind = (next: DiscoverKind) => {
+    // 先滚再提交：标签指示块的布局动画在提交时取快照，前后两次都量在滚回之后的位置上，不按滚动差纵向飞一段
+    revealResults(container);
+    setFilters(withKind(filters, next));
+  };
   const setFit = (id: string | null) => {
     if (id === null) {
       setFilters(withFitInstance(filters, null));
@@ -169,11 +204,14 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
   return (
     <>
       <Page aria-labelledby={titleId}>
-        {!online && (
-          <Banner tone="warn" icon="cloud-off" title={SEARCH_COPY.offlineBanner} announce>
-            {SEARCH_COPY.offlineBannerBody}
-          </Banner>
-        )}
+        {/* 常驻槽位：断网时横幅淡入、恢复时淡出，头图与结果区由页面的让位滑开、滑回 */}
+        <BannerSlot>
+          {!online && (
+            <Banner tone="warn" icon="cloud-off" title={SEARCH_COPY.offlineBanner} announce>
+              {SEARCH_COPY.offlineBannerBody}
+            </Banner>
+          )}
+        </BannerSlot>
         <SearchHero
           titleId={titleId}
           filters={filters}
@@ -183,30 +221,54 @@ export default function DiscoverPage({ route }: PageProps<"discover">) {
           onImport={() => setImporting({ file: null })}
           inputRef={inputRef}
         />
-        <EntranceBlock as="section" className={styles.results} aria-label={SEARCH_COPY.label}>
-          <div ref={sentinelRef} className={styles.stickSentinel} aria-hidden="true" />
-          <div className={styles.toolbarWrap} data-stuck={stuck || undefined}>
-            <Toolbar tabsId={tabsId} filters={filters} onKind={setKind} onFit={setFit} onFilters={setFilters} fitCandidates={candidates} />
-          </div>
-          <TabPanel tabsId={tabsId} value={filters.kind} className={styles.panel}>
-            <Results
-              filters={filters}
-              committedQuery={committedQuery}
-              pages={pages}
-              online={online}
-              now={now}
-              instances={instances}
-              installed={installed}
-              container={container}
-              onOpen={open}
-              onClearFilters={() => setFilters(clearFilters(filters))}
-            />
-          </TabPanel>
-        </EntranceBlock>
+        <ResultsSection
+          sentinelRef={sentinelRef}
+          toolbar={
+            <EntranceBlock key="toolbar" className={styles.toolbarWrap} data-stuck={stuck || undefined}>
+              <Toolbar tabsId={tabsId} filters={filters} onKind={setKind} onFit={setFit} onFilters={setFilters} fitCandidates={candidates} />
+            </EntranceBlock>
+          }
+          panel={
+            <TabPanel key="panel" tabsId={tabsId} value={filters.kind} from={panelFrom} className={styles.panel}>
+              <Results
+                filters={filters}
+                committedQuery={committedQuery}
+                pages={pages}
+                online={online}
+                now={now}
+                instances={instances}
+                installed={installed}
+                container={container}
+                onOpen={open}
+                onClearFilters={() => setFilters(clearFilters(filters))}
+              />
+            </TabPanel>
+          }
+        />
       </Page>
       <ResourceDetail target={detail} onClose={() => setDetail(null)} fitInstance={filters.fitInstance} online={online} />
       <ImportModpackDialog request={importing} onClose={() => setImporting(null)} online={online} />
     </>
+  );
+}
+
+interface ResultsSectionProps {
+  sentinelRef: Ref<HTMLDivElement>;
+  toolbar: ReactNode;
+  panel: ReactNode;
+}
+
+/**
+ * 结果区：吸顶工具条与结果面板各算页面的一个一级区块，接在头图后面依次入场。
+ * 面板不嵌在另一个正在入场的区块里：进页时整块只上移淡入一次，之后换类型才播面板自己的切换。
+ */
+function ResultsSection({ sentinelRef, toolbar, panel }: ResultsSectionProps) {
+  const index = useEntranceIndex();
+  return (
+    <section className={styles.results} aria-label={SEARCH_COPY.label}>
+      <div ref={sentinelRef} className={styles.stickSentinel} aria-hidden="true" />
+      {numberEntrance([toolbar, panel], index)}
+    </section>
   );
 }
 
@@ -228,6 +290,9 @@ interface ResultsProps {
 }
 
 function Results({ filters, committedQuery, pages, online, now, instances, installed, container, onOpen, onClearFilters }: ResultsProps) {
+  const { tier } = useShell();
+  // 说明行折行、部分失败的提示条出没时，下面的结果区滑到新位置
+  const reflow = useReflow<HTMLDivElement>();
   const requestKey = JSON.stringify(pages.state.request);
   // 首页超时只记在超时那一刻的请求上：换了请求、点了重试即作废。超时的那一轮对加载门来说已经结束，
   // 作废后加载门看到加载重新开始，从头算新的一轮
@@ -241,10 +306,10 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
     if (online) setTimedOutKey(null);
   }
   const timedOut = pages.loadingFirst && timedOutKey === requestKey;
-  // 首页的骨架与「比平时慢」、下一页列表尾的「比平时慢」都走全站统一的加载门；以请求为一轮，
+  // 首页的骨架与「比平时慢」、下一页列表尾的加载行与「比平时慢」都走全站统一的加载门；以请求为一轮，
   // 加载中换了条件时慢提示（与接在它后面的超时）按新请求从头计时
   const gate = useLoadingGate(pages.loadingFirst && !timedOut, requestKey);
-  const slowNext = useLoadingGate(pages.loadingNext, requestKey).slow;
+  const nextGate = useLoadingGate(pages.loadingNext, requestKey);
 
   // 加载门没有超时：超时接在它的「慢」后面计，与慢提示同一轮、同一个起点，加载门换轮时一起重来
   const latestKey = useRef(requestKey);
@@ -261,8 +326,8 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
     pages.restart();
   };
 
-  const bottomRef = useRef<HTMLDivElement | null>(null);
-  const near = useNearBottom(bottomRef, container, PREFETCH_MARGIN_PX, pages.canLoadMore && online);
+  const [foot, setFoot] = useState<HTMLDivElement | null>(null);
+  const near = useNearBottom(foot, container, PREFETCH_MARGIN_PX, pages.canLoadMore && online);
   const { canLoadMore, loadMore } = pages;
   useEffect(() => {
     if (near && canLoadMore) loadMore();
@@ -272,84 +337,42 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
   const parts = conditionParts(filters, { loaderName: LOADER_NAME, platformName: PLATFORM_LABEL });
   const skip = first === null ? null : curseForgeSkipNote(first);
   const partial = first === null ? null : partialFailure(first);
-  const clear = hasConditions(filters) ? (
-    <Button size="sm" variant="ghost" onClick={onClearFilters}>
-      {SEARCH_COPY.clearFilters}
-    </Button>
-  ) : null;
+  const conditional = hasConditions(filters);
 
   const failed = pages.firstError !== null || timedOut;
-  // 失败与超时时说明行不写「搜索中」：下面的空状态已经说清了结局
-  const count = failed ? null : pages.loadingFirst || first === null ? SEARCH_COPY.searching : SEARCH_COPY.resultCount(first.total);
+  // 失败与超时时说明行不写「搜索中」：下面的空状态已经说清了结局。
+  // 首页等得久了，「搜索中…」原位换成慢提示：骨架下面的那一行在一整页骨架之后，几乎看不到
+  const count = failed ? null : gate.slow ? SLOW_LOADING_HINT : pages.loadingFirst || first === null ? SEARCH_COPY.searching : SEARCH_COPY.resultCount(first.total);
   const info = (
     <div className={styles.infoLine} aria-live="polite">
-      {count !== null && <span className={styles.infoCount}>{count}</span>}
+      {/* 槽宽按几条候选里最宽的那条（慢提示）留住：换成慢提示、换成总数时后面的条件片段都不左右跳 */}
+      {count !== null && (
+        <span className={styles.infoCount}>
+          <LabelSlot current={count} options={[count, SEARCH_COPY.searching, SLOW_LOADING_HINT]} align="start" />
+        </span>
+      )}
       {parts.map((p) => (
         <span key={p} className={styles.infoPart}>
           {p}
         </span>
       ))}
       {skip !== null && <span className={styles.infoPart}>{skip === "category_unmapped" ? SEARCH_COPY.onlyModrinthUnmapped : SEARCH_COPY.onlyModrinthKeyMissing}</span>}
-      {clear}
+      {conditional && (
+        <Button size="sm" variant="ghost" className={styles.infoClear} onClick={onClearFilters}>
+          {SEARCH_COPY.clearFilters}
+        </Button>
+      )}
     </div>
   );
 
-  if (failed) {
-    const message = pages.firstError === null ? SEARCH_COPY.timeoutBody : pages.firstError.message;
-    return (
-      <>
-        {info}
-        <EmptyState
-          scene={online ? "error" : "offline"}
-          title={online ? (timedOut ? SEARCH_COPY.timeout : SEARCH_COPY.allFailed) : SEARCH_COPY.offlineEmpty}
-          body={online ? <span className={styles.selectable}>{message}</span> : SEARCH_COPY.offlineEmptyBody}
-          action={
-            online ? (
-              <Button variant="secondary" icon="refresh" onClick={restartAfterFailure}>
-                {SEARCH_COPY.retry}
-              </Button>
-            ) : undefined
-          }
-        />
-      </>
-    );
-  }
+  // 失败与超时不等骨架停满：结局已经定了，直接换成空状态
+  const view: LoadingView = failed ? "content" : gate.view;
 
-  if (gate.view !== "content") {
-    return (
-      <>
-        {info}
-        <div className={styles.grid} aria-busy="true">
-          {gate.view === "skeleton" && Array.from({ length: PAGE_SIZE }, (_, i) => <SkeletonCard key={i} />)}
-        </div>
-        {gate.slow && <p className={styles.listNote}>{SLOW_LOADING_HINT}</p>}
-      </>
-    );
-  }
-
-  if (first === null) throw new Error("搜索既不在加载、也没有失败，却没有第一页结果");
-
-  if (allPlatformsFailed(first)) {
-    return (
-      <>
-        {info}
-        <EmptyState
-          scene={online ? "error" : "offline"}
-          title={online ? SEARCH_COPY.allFailed : SEARCH_COPY.offlineEmpty}
-          body={<span className={styles.selectable}>{first.errors.map((e) => `${PLATFORM_LABEL[e.platform]}：${e.message}`).join("\n")}</span>}
-          action={
-            <Button variant="secondary" icon="refresh" onClick={pages.restart}>
-              {SEARCH_COPY.retry}
-            </Button>
-          }
-        />
-      </>
-    );
-  }
-
+  // 部分失败的说明随结果一起出现：它在结果区外面，出现时自己淡入，结果区由让位滑下去，与骨架换结果的交叉淡入同一拍
   const partialNote =
-    partial === null ? null : (
+    view === "content" && !failed && partial !== null ? (
       <Callout
+        key="partial"
         tone="warn"
         action={
           <Button size="sm" variant="ghost" onClick={pages.restart}>
@@ -359,64 +382,172 @@ function Results({ filters, committedQuery, pages, online, now, instances, insta
       >
         {SEARCH_COPY.partialFailed(partial.failed, partial.other)}
       </Callout>
-    );
+    ) : null;
 
-  if (pages.hits.length === 0) {
-    const query = committedQuery.trim();
-    // 另一个平台照常回来、只是一条都没有：失败的平台上可能有，空状态上方照样说明并给重试
-    return (
-      <>
-        {info}
-        {partialNote}
-        <EmptyState
-          scene="empty-branch"
-          title={query === "" ? SEARCH_COPY.emptyNoQuery(filters.kind) : SEARCH_COPY.emptyWithQuery(query, filters.kind)}
-          body={SEARCH_COPY.emptyBody}
-          action={clear === null ? undefined : clear}
-        />
-      </>
-    );
-  }
-
-  return (
-    <>
-      {info}
-      {partialNote}
-      <div className={styles.grid}>
-        {pages.hits.map((entry) => (
-          <ResultCard
-            key={hitKey(entry)}
-            entry={entry}
-            installed={entry.resource_type === "modpack" ? instancesFromPack(projectOrigins(entry), instances).length : installedCount(entry, installed)}
-            now={now}
-            onOpen={onOpen}
-          />
-        ))}
-      </div>
-      <div ref={bottomRef} className={styles.listFoot}>
-        {pages.loadingNext && (
-          <span className={styles.listNote}>
-            <Spinner size={16} />
-            {slowNext ? SLOW_LOADING_HINT : SEARCH_COPY.searching}
-          </span>
-        )}
-        {pages.nextError !== null && (
-          <Callout
-            tone="danger"
+  const outcome = (): { kind: string; node: ReactNode } => {
+    if (failed) {
+      const message = pages.firstError === null ? SEARCH_COPY.timeoutBody : pages.firstError.message;
+      return {
+        kind: "failed",
+        node: (
+          <EmptyState
+            scene={online ? "error" : "offline"}
+            title={online ? (timedOut ? SEARCH_COPY.timeout : SEARCH_COPY.allFailed) : SEARCH_COPY.offlineEmpty}
+            body={online ? <span className={styles.selectable}>{message}</span> : SEARCH_COPY.offlineEmptyBody}
             action={
-              <Button size="sm" variant="ghost" onClick={pages.retry}>
+              online ? (
+                <Button variant="secondary" icon="refresh" onClick={restartAfterFailure}>
+                  {SEARCH_COPY.retry}
+                </Button>
+              ) : undefined
+            }
+          />
+        ),
+      };
+    }
+
+    if (first === null) throw new Error("搜索既不在加载、也没有失败，却没有第一页结果");
+
+    if (allPlatformsFailed(first)) {
+      return {
+        kind: "all-failed",
+        node: (
+          <EmptyState
+            scene={online ? "error" : "offline"}
+            title={online ? SEARCH_COPY.allFailed : SEARCH_COPY.offlineEmpty}
+            body={<span className={styles.selectable}>{first.errors.map((e) => `${PLATFORM_LABEL[e.platform]}：${e.message}`).join("\n")}</span>}
+            action={
+              <Button variant="secondary" icon="refresh" onClick={pages.restart}>
                 {SEARCH_COPY.retry}
               </Button>
             }
-          >
-            <span className={styles.selectable}>
-              {SEARCH_COPY.nextFailed}：{pages.nextError.message}
-            </span>
-          </Callout>
-        )}
-        {pages.capped && <span className={styles.listNote}>{SEARCH_COPY.tooMany}</span>}
-        {!pages.capped && pages.end && <span className={styles.listNote}>{SEARCH_COPY.end}</span>}
-      </div>
-    </>
+          />
+        ),
+      };
+    }
+
+    if (pages.hits.length === 0) {
+      const query = committedQuery.trim();
+      // 另一个平台照常回来、只是一条都没有：失败的平台上可能有，空状态上方照样说明并给重试
+      return {
+        kind: "empty",
+        node: (
+          <EmptyState
+            scene="empty-branch"
+            title={query === "" ? SEARCH_COPY.emptyNoQuery(filters.kind) : SEARCH_COPY.emptyWithQuery(query, filters.kind)}
+            body={SEARCH_COPY.emptyBody}
+            action={
+              conditional ? (
+                <Button size="sm" variant="ghost" onClick={onClearFilters}>
+                  {SEARCH_COPY.clearFilters}
+                </Button>
+              ) : undefined
+            }
+          />
+        ),
+      };
+    }
+
+    // 下一页的加载行与首页骨架同一口径：300 ms 内回来的不出现，免得列表尾一闪
+    const nextLoading = pages.loadingNext && nextGate.view === "skeleton";
+    return {
+      kind: "hits",
+      node: (
+        <>
+          <ResultGrid hits={pages.hits} instances={instances} installed={installed} now={now} onOpen={onOpen} />
+          <div ref={setFoot} className={styles.listFoot}>
+            <Appear itemClassName={styles.footItem}>
+              {nextLoading && (
+                <span key="loading" className={styles.listNote}>
+                  <Spinner size={16} />
+                  {nextGate.slow ? SLOW_LOADING_HINT : SEARCH_COPY.searching}
+                </span>
+              )}
+              {pages.nextError !== null && (
+                <Callout
+                  key="next-error"
+                  tone="danger"
+                  action={
+                    <Button size="sm" variant="ghost" onClick={pages.retry}>
+                      {SEARCH_COPY.retry}
+                    </Button>
+                  }
+                >
+                  <span className={styles.selectable}>
+                    {SEARCH_COPY.nextFailed}：{pages.nextError.message}
+                  </span>
+                </Callout>
+              )}
+              {pages.capped && (
+                <span key="capped" className={styles.listNote}>
+                  {SEARCH_COPY.tooMany}
+                </span>
+              )}
+              {!pages.capped && pages.end && (
+                <span key="end" className={styles.listNote}>
+                  {SEARCH_COPY.end}
+                </span>
+              )}
+            </Appear>
+          </div>
+        </>
+      ),
+    };
+  };
+
+  return (
+    <div ref={reflow} className={styles.panelBody}>
+      {info}
+      <Appear>{partialNote}</Appear>
+      {/* 加载中骨架照常占住一整页结果的高度（等待期看不见）：换条件时结果区不塌、滚动位置不被夹回；结果到了与骨架交叉淡入 */}
+      <Loadable view={view} skeleton={<SkeletonGrid tier={tier} />}>
+        {() => {
+          const shown = outcome();
+          return <OutcomeSwap swapKey={`${pages.state.baseKey}|${shown.kind}`}>{shown.node}</OutcomeSwap>;
+        }}
+      </Loadable>
+    </div>
+  );
+}
+
+/**
+ * 结果区换了一组内容而没经过加载态（换回缓存里的条件，或超时之后结果才到）：整块淡入一次，不逐张卡动。
+ * 挂上时就在的那一组不另外淡入：那一次由 Loadable 从加载态换上来时淡入，或跟着页面入场。
+ */
+function OutcomeSwap({ swapKey, children }: { swapKey: string; children: ReactNode }) {
+  const [firstKey] = useState(swapKey);
+  const [swapped, setSwapped] = useState(false);
+  if (!swapped && swapKey !== firstKey) setSwapped(true);
+  return (
+    <motion.div key={swapKey} className={styles.outcome} initial={swapped ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }}>
+      {children}
+    </motion.div>
+  );
+}
+
+interface ResultGridProps {
+  hits: readonly SearchEntry[];
+  instances: readonly InstanceSummary[];
+  installed: ReadonlyMap<string, ReadonlySet<string>>;
+  now: number;
+  onOpen: (entry: SearchEntry) => void;
+}
+
+/** 结果卡网格。挂上时就在的卡随结果区整块出现；之后翻页接上来的才各自淡入。一组新结果会整个重新挂上。 */
+function ResultGrid({ hits, instances, installed, now, onOpen }: ResultGridProps) {
+  const [initial] = useState(hits.length);
+  return (
+    <div className={styles.grid}>
+      {hits.map((entry, i) => (
+        <ResultCard
+          key={hitKey(entry)}
+          entry={entry}
+          installed={entry.resource_type === "modpack" ? instancesFromPack(projectOrigins(entry), instances).length : installedCount(entry, installed)}
+          now={now}
+          onOpen={onOpen}
+          fresh={i >= initial}
+        />
+      ))}
+    </div>
   );
 }

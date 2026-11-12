@@ -7,12 +7,13 @@ import { stubCanvas } from "../../art/illustrations/test-canvas";
 import type { CrashReportDto, LaunchLogDto } from "../../ipc/diagnostics";
 import { IpcError } from "../../ipc/errors";
 import type { HistoryEvent } from "../../ipc/history";
-import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSettingsDto, TemplateInfoDto, WorldBackupDto, WorldBackupListDto } from "../../ipc/instances";
+import type { InstallResultDto, InstanceContentDto, InstanceDto, InstanceSettingsDto, RepairResultDto, TemplateInfoDto, WorldBackupDto, WorldBackupListDto } from "../../ipc/instances";
 import type { JavaInstallationDto } from "../../ipc/java";
 import { GAME_EXIT_EVENT } from "../../ipc/launch";
 import type { InstalledMod, UpdateCandidate } from "../../ipc/mods";
 import type { MemoryAdviceDto } from "../../ipc/system";
 import { APP_NAME } from "../../lib/app-info";
+import { COMPLETION_HOLD_S } from "../../lib/progress-display";
 import { OverlayRoot } from "../../shell/overlay";
 import { pickSaveFile } from "../../shell/platform";
 import { MOCK_DOWNLOADS_DIR, reset as resetModpackMock, seedMockDownloads } from "../../ipc/mock/handlers/modpack";
@@ -34,6 +35,25 @@ import { creationRef, creationRefEqual, installStage } from "./model";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
+// 让位挂到了哪些容器上、走哪条弹簧：jsdom 不做布局，让位本身在这里测不了，只核对它挂对了地方；挂载照常交给真实现
+const reflowed = vi.hoisted(() => new Map<Element, string>());
+vi.mock("../../lib/reflow", async (orig) => {
+  const mod = await orig<typeof import("../../lib/reflow")>();
+  const { useCallback } = await import("react");
+  return {
+    ...mod,
+    useReflow: <T extends HTMLElement>(spring: Parameters<typeof mod.useReflow>[0] = "settle") => {
+      const real = mod.useReflow<T>(spring);
+      return useCallback(
+        (el: T | null) => {
+          if (el !== null) reflowed.set(el, spring);
+          return real(el);
+        },
+        [real, spring],
+      );
+    },
+  };
+});
 // 系统保存文件对话框的替身：各用例按需改写返回值
 vi.mock("../../shell/platform", async (orig) => {
   const actual = await orig<typeof import("../../shell/platform")>();
@@ -348,6 +368,53 @@ describe("实例详情：头图与标签", () => {
     expect(text()).toContain("自建 Mod 实例 · 已游玩 2 小时 10 分钟");
     expect(byRole("tab", /^Mod/).textContent).toBe("Mod1 更新");
     expect(text()).toContain("1 个有更新");
+  });
+
+  it("更新数晚到：Mod 标签原先没有徽标时只由标签条的徽标外壳弹出，里层不再叠一层缩放；原先挂着计数时换上来的「N 更新」由里层弹出", async () => {
+    const sodiumUpdate = (): UpdateCandidate => ({
+      file_name: "sodium.jar",
+      title: "Sodium",
+      current_version_id: "v1",
+      current_version_number: "0.6.0",
+      latest: {
+        version_id: "v9",
+        project_id: "AANobbMI",
+        platform: "modrinth",
+        name: "0.7.0",
+        version_number: "0.7.0",
+        release_channel: "release",
+        game_versions: [],
+        loaders: [],
+        file_name: "sodium-0.7.jar",
+        file_size: null,
+        sha1: null,
+        download_url: null,
+        date_published: "",
+        dependencies: [],
+      },
+    });
+    /** 「N 更新」那一层挂载时的起点：弹出的从透明起，不弹的一挂上就是终态。 */
+    const chipOpacity = async (modCount: number | null) => {
+      const pending = deferred<UpdateCandidate[]>();
+      ipc.overrides.set("check_updates", () => pending.promise);
+      instances = instances.map((i) => (i.id === ID ? { ...i, mod_count: modCount } : i));
+      resetRecorderKeepOverrides();
+      await open("overview");
+      expect(byRole("tab", /^Mod/).textContent).toBe(modCount === null ? "Mod" : `Mod${modCount}`);
+      await act(async () => {
+        pending.resolve([sodiumUpdate()]);
+        await settle(20);
+      });
+      expect(byRole("tab", /^Mod/).textContent).toBe("Mod1 更新");
+      const chip = byRole("tab", /^Mod/).querySelector<HTMLElement>('[class*="_tabBadge_"]');
+      if (chip === null) throw new Error("Mod 标签上没有「N 更新」");
+      const opacity = chip.style.opacity;
+      view?.unmount();
+      view = undefined;
+      return opacity;
+    };
+    expect(await chipOpacity(null)).not.toBe("0");
+    expect(await chipOpacity(2)).toBe("0");
   });
 
   it("整合包实例：眉题写来源平台，信息标签与实例信息写整合包名与版本", async () => {
@@ -862,11 +929,14 @@ describe("实例详情：新建与导入还没装好", () => {
   const TITLE = "安装 1.21.1 + Fabric 0.16.10";
   const AVAILABLE_LATER = "安装完成后可用";
   const RUNNING = `正在${TITLE}，进度可以在下载任务里查看。`;
+  /** 概览安装横幅没有任务可画时的标题。 */
+  const OVERVIEW_QUEUED = "安装任务排队中";
   const SLOW = "比平时慢一些，仍在加载…";
   const TABS: readonly InstanceTab[] = ["overview", "mods", "settings", "logs", "crash"];
   /** 页面按需发的查询：盘上没有装好的实例目录时一条都不该发。 */
   const QUERIES = new Set(["list_mods", "check_updates", "list_instance_content", "get_instance_settings", "memory_advice", "last_launch_log", "list_history", "rollback_checks", "last_crash"]);
-  const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
+  // 看得见的骨架：加载门等待期里占位的骨架（data-pending）是透明的，在等待期读到时同一次提交就离开文档，不算出了骨架
+  const skeletons = () => [...document.querySelectorAll('[class*="_skeleton_"]')].filter((el) => el.closest("[data-pending]") === null).length;
   const queriesFor = (id: string) => ipc.calls.filter((c) => QUERIES.has(c.cmd) && Object.values(c.args).includes(id)).map((c) => c.cmd);
   const installResult = (): InstallResultDto => ({ id: NAME, mc_version: "1.21.1", loader: { kind: "fabric", version: "0.16.10" }, libraries: 40, assets: 3000, natives: 2, template: null });
   const fabric: InstanceDto["loaders"] = [{ kind: "fabric", version: "0.16.10" }];
@@ -888,6 +958,12 @@ describe("实例详情：新建与导入还没装好", () => {
     ipc.overrides.set("install_version", () => install.promise);
     ipc.overrides.set("list_mods", (args) => (args.versionId === NAME ? [] : mods));
   });
+
+  /** 任务刚完成时页面留一拍收尾（概览的安装横幅把进度推满）：推过这一拍。 */
+  const passHold = () =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(COMPLETION_HOLD_S * 1000);
+    });
 
   async function create(name: string, loader: "fabric" | "vanilla" = "fabric") {
     await act(async () => {
@@ -951,6 +1027,32 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(text()).toContain("50% · 1.0 MB/s · 共 40.0 KB");
   });
 
+  it("头图的安装标签：排队时就是「等待安装」本身的宽度，不为百分比留白；开始之后按「100%」占住、居中", async () => {
+    const installTag = () => {
+      const chips = [...document.querySelectorAll<HTMLElement>('section [class*="_heroChip_"]')].filter((el) => el.closest("[inert]") === null);
+      const found = chips.find((el) => /等待安装|安装中/.test(textOf(el)));
+      if (found === undefined) throw new Error("头图上没有安装标签");
+      return found;
+    };
+    ipc.overrides.set("install_version", () => new Promise(() => undefined));
+    await open("overview");
+    for (const name of ["甲", "乙", "丙"]) await create(name);
+    await create(NAME);
+    act(() => nav.go({ page: "instance", id: NAME, tab: "overview" }));
+    await flush();
+    expect(launcher.state.tasks.find((t) => t.instanceId === NAME)?.status).toBe("queued");
+    expect(textOf(installTag())).toBe("等待安装");
+    expect(installTag().querySelector("[data-align]")).toBeNull();
+    view?.unmount();
+
+    resetRecorderKeepOverrides();
+    await openCreating("overview");
+    expect(launcher.state.tasks.find((t) => t.instanceId === NAME)?.status).toBe("running");
+    const slot = installTag().querySelector("[data-align]");
+    expect(slot?.getAttribute("data-align")).toBe("center");
+    expect([...(slot === null ? [] : slot.children)].map(textOf)).toEqual(["安装中 0%", "安装中 100%"]);
+  });
+
   it("排在前面的任务占满了通道：写排队中，不说正在安装", async () => {
     ipc.overrides.set("install_version", () => new Promise(() => undefined));
     await open("overview");
@@ -985,6 +1087,9 @@ describe("实例详情：新建与导入还没装好", () => {
       install.resolve(installResult());
       await settle(20);
     });
+    // 落地重扫已经回来，刚装完的那一拍仍按在跑画，过了才换成正常内容
+    expect(text()).toContain(RUNNING);
+    await passHold();
     expect(nav.route).toEqual({ page: "instance", id: NAME, tab: "mods" });
     expect(text()).not.toContain(AVAILABLE_LATER);
     expect(text()).toContain("还没有安装 Mod");
@@ -1053,6 +1158,9 @@ describe("实例详情：新建与导入还没装好", () => {
       await settle(20);
     });
     expect(launcher.state.tasks.find((t) => t.instanceId === NAME)?.status).toBe("done");
+    // 刚装完的那一拍照旧按在跑画（概览的横幅在这一拍里推满进度），过了才换成落地说明
+    expect(text()).toContain(RUNNING);
+    await passHold();
     expect(nav.route).toEqual({ page: "instance", id: NAME, tab: "mods" });
     expect(text()).toContain("安装任务已经结束，正在刷新实例列表…");
     // 读实例设置的那一次是状态层落地时写封面，不是页面的按需查询
@@ -1187,6 +1295,92 @@ describe("实例详情：新建与导入还没装好", () => {
     expect(attempts).toBe(2);
     expect(launcher.state.tasks.filter((t) => t.instanceId === NAME).map((t) => [t.status, t.attempt])).toEqual([["running", 2]]);
     expect(text()).not.toContain("安装没有完成");
+  });
+
+  it("概览上「全部找到」后任务重新排队：说明卡不卸载，被拦文件的清单还挂着放完退场，不在同一帧连遮罩一起消失", async () => {
+    resetModpackMock();
+    const FILE = {
+      project_id: 9,
+      file_id: 90,
+      file_name: "locked.jar",
+      web_url: "https://www.curseforge.com/minecraft/mc-mods/locked/files/90",
+      destination: "mods/locked.jar",
+      sha1: "a".repeat(40),
+      fingerprint: 0,
+      size: 3,
+    };
+    let attempts = 0;
+    ipc.overrides.set("install_version", () => {
+      attempts += 1;
+      return attempts === 1 ? Promise.reject(new IpcError("distribution_blocked", "原文", { files: [FILE] })) : new Promise(() => undefined);
+    });
+    function KeptPlaceholder() {
+      const creation = useLauncherSelector((s) => creationRef(s.tasks, NAME), creationRefEqual);
+      if (creation === null) return null;
+      const stage = installStage({ id: NAME, placeholder: true, activity: "installing" }, creation);
+      return stage.kind === "none" ? null : <InstallStageTab tab="overview" instanceId={NAME} stage={stage} />;
+    }
+    view = render(
+      <Providers>
+        <Probe />
+        <KeptPlaceholder />
+      </Providers>,
+    );
+    await flush();
+    await create(NAME);
+    const card = [...document.querySelectorAll("h2")].find((h) => h.textContent === "安装没有完成")?.closest("[data-pad]");
+    if (card === undefined || card === null) throw new Error("失败时应有说明卡");
+
+    click(button("查看这些文件"));
+    await flush();
+    seedMockDownloads(["locked.jar"]);
+    click(button("我已下载，重新检查"));
+    await flush();
+    click(button("重新安装"));
+    await flush();
+    expect(attempts).toBe(2);
+    expect(document.body.contains(card)).toBe(true);
+    expect(text()).toContain("装好后这里会显示存档、Mod 与实例信息。");
+    expect(document.querySelector("[data-sk-modal-layer][data-exiting]")).not.toBeNull();
+  });
+
+  it("概览：任务结束时安装横幅先把进度推满、停一拍；之后落地重扫回来之前，说明卡原位换成正在刷新，横幅退场，不整块换掉", async () => {
+    await openCreating("overview");
+    const card = [...document.querySelectorAll("h2")].find((h) => h.textContent === AVAILABLE_LATER)?.closest("[data-pad]");
+    if (card === undefined || card === null) throw new Error("安装中应有说明卡");
+    const task = launcher.state.tasks.find((t) => t.instanceId === NAME);
+    if (task === undefined || task.status !== "running") throw new Error("新建任务应在进行中");
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 20, bytes: 20_480, total_bytes: 40_960, speed: 1_048_576 }));
+    await flush();
+    const bars = () => [...document.querySelectorAll(`[role="progressbar"][aria-label="${TITLE}"]`)];
+    const liveBars = () => bars().filter((bar) => bar.closest("[inert]") === null);
+    expect(liveBars().map((bar) => bar.getAttribute("aria-valuenow"))).toEqual(["50"]);
+
+    const release = holdScans();
+    instances = [...instances, instanceDto(NAME, { loaders: fabric })];
+    await act(async () => {
+      install.resolve(installResult());
+      await settle(20);
+    });
+    // 收尾这一拍：同一条横幅还在场、进度满格，速度停在完成前的值（后端完成时已把速度归零），说明卡还是装好后有什么
+    expect(launcher.state.tasks.find((t) => t.id === task.id)?.status).toBe("done");
+    expect(liveBars().map((bar) => bar.getAttribute("aria-valuenow"))).toEqual(["100"]);
+    expect(text()).toContain(" · 1.0 MB/s · 共 40.0 KB");
+    expect(text()).not.toContain(OVERVIEW_QUEUED);
+    expect(text()).toContain("装好后这里会显示存档、Mod 与实例信息。");
+    expect(text()).not.toContain("安装任务已经结束，正在刷新实例列表…");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COMPLETION_HOLD_S * 1000);
+    });
+    expect(text()).toContain("安装任务已经结束，正在刷新实例列表…");
+    expect(document.body.contains(card)).toBe(true);
+    expect(bars()).toHaveLength(1);
+    expect(liveBars()).toHaveLength(0);
+    await act(async () => {
+      release();
+      await settle(20);
+    });
   });
 });
 
@@ -1603,17 +1797,22 @@ describe("实例详情：概览", () => {
     const pending = deferred<InstanceContentDto>();
     ipc.overrides.set("list_instance_content", () => pending.promise);
     await open("overview");
-    // 其余查询都已读完，骨架只会来自等着内容列表的存档卡、资源包卡与四格数据的存档格
-    const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
-    expect(skeletons()).toBe(0);
+    // 其余查询都已读完，骨架只会来自等着内容列表的存档卡、资源包卡与四格数据的存档格。
+    // 前 300 ms 骨架照常占位、只是不可见（data-pending），数据一到也不会先 0 高再撑开
+    const shown = () => [...document.querySelectorAll('[class*="_skeleton_"]')].filter((el) => el.closest("[data-pending]") === null).length;
+    const placeholders = () => document.querySelectorAll("[aria-busy='true'] > [data-pending]").length;
+    expect(shown()).toBe(0);
+    expect(placeholders()).toBe(3);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(299);
     });
-    expect(skeletons()).toBe(0);
+    expect(shown()).toBe(0);
+    expect(placeholders()).toBe(3);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });
-    expect(skeletons()).toBeGreaterThan(0);
+    expect(shown()).toBeGreaterThan(0);
+    expect(placeholders()).toBe(0);
     expect(text()).not.toContain("比平时慢一些，仍在加载…");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
@@ -1631,6 +1830,31 @@ describe("实例详情：概览", () => {
     await open("overview");
     expect(text()).toContain("自动 · Java 21 · 要求 21");
     expect(text()).toContain("4 GB · 跟随全局");
+  });
+
+  it("Java 与内存两格的值落在加载层里：值是那一层里的行内文字，由那一层出省略号", async () => {
+    await open("overview");
+    for (const label of ["Java", "最大内存"]) {
+      const key = [...document.querySelectorAll("dt")].find((dt) => dt.textContent === label);
+      const value = key?.nextElementSibling;
+      if (value === undefined || value === null) throw new Error(`实例信息里没有 ${label} 一格`);
+      const layer = [...value.querySelectorAll("div")].find((div) => /_kvLoaded_/.test(div.className));
+      if (layer === undefined) throw new Error(`${label} 一格的值不在自己出省略号的那一层里`);
+      expect(layer.closest("[aria-busy]")).toBeNull();
+      expect([...layer.children].map((child) => child.tagName)).toEqual(["SPAN"]);
+    }
+  });
+
+  it("存档读不出来：卡头不留副标题那一行空白，读到之前才占位", async () => {
+    ipc.overrides.set("list_instance_content", () => {
+      throw new IpcError("io", "saves 读不出来");
+    });
+    await open("overview");
+    const heading = [...document.querySelectorAll("h3")].find((h) => h.textContent === "存档");
+    const card = heading?.closest("[data-pad]");
+    if (card === undefined || card === null) throw new Error("找不到存档卡");
+    expect(card.textContent).toContain("saves 读不出来");
+    expect(card.querySelector("[data-reserve]")).toBeNull();
   });
 
   it("头图的「上次崩溃」按实例列表里的崩溃时刻先画出来，不等崩溃报告", async () => {
@@ -1657,6 +1881,212 @@ describe("实例详情：概览", () => {
     resetRecorderKeepOverrides();
     await open("overview");
     expect(text()).not.toContain("上次启动崩溃了");
+  });
+
+  it("补全装完：安装横幅先推满进度、停一拍再走；这一拍里状态层还拿着补全前扫的列表，原先损坏的实例不先冒出损坏横幅", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, status: "broken", broken_reason: "缺少版本 JSON" } : i));
+    const repair = deferred<RepairResultDto>();
+    ipc.overrides.set("repair_instance", () => repair.promise);
+    const live = (el: Element) => el.closest("[inert]") === null;
+    const bannerTitle = (title: string) => [...document.querySelectorAll("div")].filter((el) => el.childElementCount === 0 && el.textContent === title && live(el));
+    const liveBars = () => [...document.querySelectorAll('[role="progressbar"]')].filter(live);
+    await open("overview");
+    expect(bannerTitle("实例文件不完整，暂时无法启动")).toHaveLength(1);
+
+    await act(async () => {
+      await launcher.actions.repairInstance(ID);
+      await settle(20);
+    });
+    const task = launcher.state.tasks.find((t) => t.instanceId === ID);
+    if (task === undefined || task.status !== "running") throw new Error("补全任务应在进行中");
+    act(() => emit(CORE_EVENT, { kind: "download", task_id: `${task.id}#1`, total: 40, finished: 30, bytes: 30_720, total_bytes: 40_960, speed: 2_097_152 }));
+    await flush();
+    expect(bannerTitle(task.title)).toHaveLength(1);
+    expect(bannerTitle("实例文件不完整，暂时无法启动")).toHaveLength(0);
+
+    // 装完之后的列表重读挂起：状态层这时只有补全之前扫的那份（损坏）
+    let release: (() => void) | null = null;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    ipc.overrides.set("list_instances", async () => {
+      await held;
+      return instances;
+    });
+    instances = instances.map((i) => (i.id === ID ? { ...i, status: "ready", broken_reason: null } : i));
+    await act(async () => {
+      repair.resolve({ reinstalled: false, libraries: 40, assets: 0, natives: 0 });
+      await settle(20);
+    });
+    expect(launcher.state.tasks.find((t) => t.id === task.id)?.status).toBe("done");
+    expect(bannerTitle(task.title)).toHaveLength(1);
+    expect(bannerTitle("实例文件不完整，暂时无法启动")).toHaveLength(0);
+    expect(liveBars().map((bar) => bar.getAttribute("aria-valuenow"))).toContain("100");
+    expect(text()).toContain(" · 2.0 MB/s · 共 40.0 KB");
+
+    // 收尾过了：安装横幅退场；重读回来后没有损坏横幅
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COMPLETION_HOLD_S * 1000);
+    });
+    expect(bannerTitle(task.title)).toHaveLength(0);
+    await act(async () => {
+      if (release === null) throw new Error("挂起的重读没有放行函数");
+      release();
+      await settle(20);
+    });
+    expect(bannerTitle("实例文件不完整，暂时无法启动")).toHaveLength(0);
+  });
+
+  it("停在页面上又玩了一局、正常退出：实例列表重读出上次游玩之前，横幅与头图的「上次崩溃」不再亮回来", async () => {
+    crash = report([{ category: "out_of_memory" }], NOW - 2 * DAY);
+    ipc.overrides.set("launch_game", () => ({ pid: 42 }));
+    // 退场中的横幅与标签还挂在文档里，那一层带 inert，不算在场
+    const live = (el: Element) => el.closest("[inert]") === null;
+    const bannerTitles = () => [...document.querySelectorAll("div")].filter((el) => el.childElementCount === 0 && textOf(el).startsWith("上次启动崩溃了") && live(el));
+    const heroMarks = () => [...document.querySelectorAll('section [class*="_heroChip_"]')].filter((el) => textOf(el) === "上次崩溃" && live(el));
+    await open("overview");
+    expect(bannerTitles()).toHaveLength(1);
+    expect(heroMarks()).toHaveLength(1);
+
+    await act(async () => {
+      await launcher.actions.launch(ID);
+      await settle(20);
+    });
+    expect(launcher.state.session?.phase).toBe("running");
+    expect(bannerTitles()).toHaveLength(0);
+    expect(heroMarks()).toHaveLength(0);
+
+    // 退出后的实例列表重读挂起：上次游玩还是崩溃那一局的时刻
+    let release: (() => void) | null = null;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    ipc.overrides.set("list_instances", async () => {
+      await held;
+      return instances;
+    });
+    instances = instances.map((i) => (i.id === ID ? { ...i, last_played_at: Date.now() } : i));
+    act(() => emit(GAME_EXIT_EVENT, { version_id: ID, exit_code: 0, crashed: false, killed: false, duration_ms: 3 * 60_000 }));
+    await flush();
+    expect(launcher.state.session?.phase).toBe("stopped");
+    expect(launcher.state.instances.find((i) => i.id === ID)?.lastPlayedAt).toBe(NOW - 2 * DAY);
+    expect(bannerTitles()).toHaveLength(0);
+    expect(heroMarks()).toHaveLength(0);
+
+    await act(async () => {
+      if (release === null) throw new Error("挂起的重读没有放行函数");
+      release();
+      await settle(20);
+    });
+    expect(launcher.state.instances.find((i) => i.id === ID)?.lastPlayedAt).not.toBe(NOW - 2 * DAY);
+    expect(bannerTitles()).toHaveLength(0);
+    expect(heroMarks()).toHaveLength(0);
+  });
+
+  it("崩溃报告晚到：横幅按列表里的崩溃时刻先画出来、正文写正在读取，报告到了原位换成诊断，不再晚一步插进顶上", async () => {
+    const pending = deferred<CrashReportDto | null>();
+    ipc.overrides.set("last_crash", () => pending.promise);
+    instances = instances.map((i) => (i.id === ID ? { ...i, last_crash_at: NOW - 2 * DAY, last_played_at: NOW - 3 * DAY } : i));
+    await open("overview");
+    const title = [...document.querySelectorAll("div")].find((el) => el.childElementCount === 0 && el.textContent === "上次启动崩溃了 · 2 天前");
+    if (title === undefined) throw new Error("报告没到时就该有崩溃横幅");
+    expect(text()).toContain("正在读取崩溃报告…");
+
+    await act(async () => {
+      pending.resolve(report([{ category: "out_of_memory" }], NOW - 2 * DAY));
+      await settle(20);
+    });
+    expect(document.body.contains(title)).toBe(true);
+    expect(text()).toContain("日志指向内存不足，诊断里有可以一键尝试的办法。");
+    expect(text()).not.toContain("正在读取崩溃报告…");
+  });
+
+  it("崩溃报告读出来是空的：不留一条正在读取的横幅", async () => {
+    instances = instances.map((i) => (i.id === ID ? { ...i, last_crash_at: NOW - 2 * DAY, last_played_at: NOW - 3 * DAY } : i));
+    await open("overview");
+    const live = [...document.querySelectorAll("div")].filter((el) => el.textContent === "正在读取崩溃报告…" && el.closest("[inert]") === null);
+    expect(live).toEqual([]);
+  });
+
+  it("存档读到之前按实例列表里的存档数占位：多于 5 个时占 5 行加展开钮那一栏，没有存档时占空状态的轮廓", async () => {
+    const card = () => {
+      const heading = [...document.querySelectorAll("h3")].find((h) => h.textContent === "存档");
+      const found = heading?.closest("[data-pad]");
+      if (found === undefined || found === null) throw new Error("找不到存档卡");
+      return found;
+    };
+    const pending = deferred<InstanceContentDto>();
+    ipc.overrides.set("list_instance_content", () => pending.promise);
+    instances = instances.map((i) => (i.id === ID ? { ...i, world_count: 7 } : i));
+    await open("overview");
+    const placeholder = card().querySelector("[aria-busy='true'] > [data-pending]");
+    if (placeholder === null) throw new Error("存档卡读到之前没有占位");
+    expect(placeholder.querySelectorAll('[class*="_row_"]')).toHaveLength(5);
+    expect(placeholder.querySelectorAll('[class*="_cardFoot_"]')).toHaveLength(1);
+    // 副标题那一行先占着
+    expect(card().querySelector("[data-reserve]")).not.toBeNull();
+    // 等待期里读到：还没显出来的占位同一次提交就离开文档，不叠在内容上淡出（下面几处只数可见骨架的写法靠的就是这一点）
+    await act(async () => {
+      pending.resolve(contentDto());
+      await settle(20);
+    });
+    expect(document.body.contains(placeholder)).toBe(false);
+    expect(card().querySelector("[data-pending]")).toBeNull();
+    view?.unmount();
+
+    instances = instances.map((i) => (i.id === ID ? { ...i, world_count: 0 } : i));
+    const next = deferred<InstanceContentDto>();
+    ipc.overrides.set("list_instance_content", () => next.promise);
+    resources.clear();
+    resetRecorderKeepOverrides();
+    await open("overview");
+    const empty = card().querySelector("[aria-busy='true'] > [data-pending]");
+    expect(empty?.querySelectorAll('[class*="_emptySkeleton_"]')).toHaveLength(1);
+    expect(empty?.querySelectorAll('[class*="_row_"]')).toHaveLength(0);
+  });
+
+  it("头图的启动胶囊、更多钮在同一行，这一行按胶囊的 morph 弹簧让位；更多钮直接以提示气泡宿主排在行里，不另垫一层盒子", async () => {
+    await open("overview");
+    const capsule = document.querySelector(`[role="group"][aria-label="启动「${ID}」"]`);
+    const row = capsule?.parentElement;
+    if (row === undefined || row === null) throw new Error("找不到启动胶囊所在的行");
+    expect(reflowed.get(row)).toBe("morph");
+    // 宿主是 display: contents，让位越过它直接挪里面的按钮：行的直接子项就是宿主，按钮是宿主的直接子项。
+    // 图钉在最窄一档并进更多菜单，测试环境的窗口就是这一档；宽档里它与更多钮是同一种图标钮、同一种排法
+    const more = button("更多操作", row);
+    const slot = [...row.children].find((child) => child.contains(more));
+    if (slot === undefined) throw new Error("更多钮不在胶囊那一行里");
+    expect(slot.hasAttribute("data-tooltip-host")).toBe(true);
+    expect(more.parentElement).toBe(slot);
+    // 名称、标签所在的文字列也是这一行的直接子项：胶囊变宽时它变窄，文字列变高时它在行里重新居中
+    expect([...row.children].some((child) => child.querySelector("h1") !== null)).toBe(true);
+  });
+
+  it("标签条那一行是换标签时外壳滚回的锚点", async () => {
+    await open("overview");
+    const anchors = document.querySelectorAll("[data-nav-anchor]");
+    expect(anchors).toHaveLength(1);
+    expect(anchors[0].querySelector('[role="tablist"]')).not.toBeNull();
+  });
+
+  it("改名输入出错：错误挂在输入行上（不进流，叠在标签行的位置），输入行带出错标记；改回合法后标记撤掉", async () => {
+    await open("overview");
+    const scope = document.querySelector("h1")?.closest("section");
+    if (!scope) throw new Error("没有头图");
+    keydown(scope, "F2");
+    const input = document.querySelector<HTMLInputElement>('input[aria-label="实例名称"]');
+    if (input === null) throw new Error("F2 没有进入改名");
+    const renameRow = input.closest('[class*="_renameRow_"]');
+    if (renameRow === null) throw new Error("找不到改名输入行");
+    expect(renameRow.hasAttribute("data-invalid")).toBe(false);
+    typeInto(input, "创造");
+    expect(renameRow.hasAttribute("data-invalid")).toBe(true);
+    const alert = [...renameRow.querySelectorAll('[role="alert"]')].find((el) => el.textContent === "已经有同名的实例了，换一个吧");
+    if (alert === undefined) throw new Error("没有改名错误");
+    // 错误单行截断，窄的文字列里放不下时悬停看全文
+    expect(alert.querySelector('[class*="_ellipsis_"]')?.getAttribute("title")).toBe("已经有同名的实例了，换一个吧");
+    typeInto(input, "樱花生存二周目");
+    expect(renameRow.hasAttribute("data-invalid")).toBe(false);
   });
 });
 
@@ -2048,23 +2478,28 @@ describe("实例详情：设置", () => {
     expect(area?.value).toBe("-XX:+UseZGC -XX:+ZGenerational");
   });
 
-  it("整页一个加载门：本机内存读得慢时 300 ms 后几张卡一起出骨架，读到后一起换成内容", async () => {
+  it("整页一个加载门：等待期五张卡照常画骨架占位、只是看不见；本机内存读得慢时 300 ms 后一起显出骨架，读到后一起换成内容", async () => {
     const advice = deferred<MemoryAdviceDto>();
     ipc.overrides.set("memory_advice", () => advice.promise);
     await open("settings");
-    const skeletons = () => document.querySelectorAll('[class*="_skeleton_"]').length;
-    expect(skeletons()).toBe(0);
+    // 加载中的卡体：外层 aria-busy，骨架层是它的直接子项；等待期骨架层带 data-pending（占着尺寸、不可见）
+    const layers = () => [...document.querySelectorAll<HTMLElement>('[aria-busy="true"] > [aria-hidden="true"]')];
+    const hidden = () => layers().filter((layer) => layer.hasAttribute("data-pending")).length;
+    expect(layers()).toHaveLength(5);
+    expect(hidden()).toBe(5);
+    expect(layers().every((layer) => layer.querySelector('[class*="_skeleton_"]') !== null)).toBe(true);
     expect(document.querySelector('textarea[aria-label="JVM 参数"]')).toBeNull();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(300);
     });
-    expect(skeletons()).toBeGreaterThan(0);
+    expect(layers()).toHaveLength(5);
+    expect(hidden()).toBe(0);
     await act(async () => {
       advice.resolve(memoryAdviceDto({ version_id: ID }));
       await settle(20);
       await vi.advanceTimersByTimeAsync(300);
     });
-    expect(skeletons()).toBe(0);
+    expect(layers()).toHaveLength(0);
     expect(document.querySelector('textarea[aria-label="JVM 参数"]')).not.toBeNull();
     expect(text()).toContain("全局固定值");
   });
@@ -2149,12 +2584,14 @@ describe("实例详情：设置", () => {
       if (found === undefined || found === null) throw new Error("实例管理卡里没有「设为新实例的默认设置」一行");
       return found;
     };
+    /** 「清除」常驻占位：没有默认设置时它在不可交互（inert）的槽里。 */
+    const clearHidden = () => button("清除", row()).closest("[inert]") !== null;
 
     it("没有默认设置：说明位只有第一行，只有「保存为默认」；保存后命令收到实例 id，说明位改为当前默认取自本实例，可以清除", async () => {
       await open("settings");
       expect(row().textContent).toContain(NOTE);
       expect(row().textContent).not.toContain("当前默认");
-      expect(() => button("清除", row())).toThrow();
+      expect(clearHidden()).toBe(true);
 
       click(button("保存为默认", row()));
       await flush();
@@ -2162,6 +2599,7 @@ describe("实例详情：设置", () => {
       expect(toastTitles()).toContain(`已把「${ID}」的设置保存为默认`);
       expect(launcher.state.toasts.find((t) => t.title === `已把「${ID}」的设置保存为默认`)?.body).toBe("新建实例时可以在确认步沿用");
       expect(row().textContent).toContain(`当前默认取自「${ID}」，1 秒前保存`);
+      expect(clearHidden()).toBe(false);
 
       click(button("清除", row()));
       await flush();
@@ -2169,7 +2607,7 @@ describe("实例详情：设置", () => {
       expect(toastTitles()).toContain("已清除默认设置");
       expect(row().textContent).toContain(NOTE);
       expect(row().textContent).not.toContain("当前默认");
-      expect(() => button("清除", row())).toThrow();
+      expect(clearHidden()).toBe(true);
     });
 
     it.each([
@@ -2214,7 +2652,7 @@ describe("实例详情：设置", () => {
       });
       click(clear);
       await flush();
-      expect(() => button("清除", row())).toThrow();
+      expect(clearHidden()).toBe(true);
       expect(document.activeElement).toBe(button("保存为默认", row()));
     });
 
@@ -2225,7 +2663,7 @@ describe("实例详情：设置", () => {
       act(() => elsewhere.focus());
       click(button("清除", row()));
       await flush();
-      expect(() => button("清除", row())).toThrow();
+      expect(clearHidden()).toBe(true);
       expect(document.activeElement).toBe(elsewhere);
     });
 
@@ -3132,7 +3570,8 @@ describe("实例详情：存档备份", () => {
     if (found === undefined) throw new Error("备份列表弹窗没有打开");
     return found;
   };
-  const rows = () => [...backupsDialog().querySelectorAll("li")];
+  // 删掉的备份那一行还在淡出，已经标了 inert，不算列表的行
+  const rows = () => [...backupsDialog().querySelectorAll("li:not([inert])")];
 
   async function hoverReason(el: HTMLElement): Promise<string> {
     act(() => {

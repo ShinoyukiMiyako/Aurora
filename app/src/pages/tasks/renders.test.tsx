@@ -7,6 +7,7 @@ import { act, Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GAME_LOG_EVENT } from "../../ipc/launch";
 import { CORE_EVENT, type TaskRecordDto } from "../../ipc/tasks";
+import { SPEED_REFRESH_MS } from "../../lib/progress-display";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
@@ -122,11 +123,25 @@ const HISTORY: TaskRecordDto[] = [
   record("cancelled-java", "cancelled", { progress: 0.374, spec: { command: "install_java", args: { requiredMajor: 18 } } }),
 ];
 
-function rowText(title: string): string {
+/** 在场的节点：换组的行、清空的组还在原处淡出，自己或某个祖先标了 inert，不算。 */
+const live = (el: Element) => el.closest("[inert]") === null;
+
+function rowOf(title: string): HTMLLIElement {
   if (view === undefined) throw new Error("页面还没有挂载");
-  const found = [...view.container.querySelectorAll<HTMLLIElement>("ul > li")].filter((li) => li.textContent?.includes(title));
+  const found = [...view.container.querySelectorAll<HTMLLIElement>("ul > li")].filter(live).filter((li) => li.textContent?.includes(title));
   if (found.length !== 1) throw new Error(`标题含「${title}」的任务行有 ${found.length} 个`);
-  return found[0].textContent ?? "";
+  return found[0];
+}
+
+function rowText(title: string): string {
+  return rowOf(title).textContent ?? "";
+}
+
+/** 区域里第一条在场进度条报给读屏的百分数（百分数文字随平滑逐帧走，这里读目标值）。 */
+function progressOf(root: Element): string | null {
+  const bar = [...root.querySelectorAll('[role="progressbar"]')].find(live);
+  if (bar === undefined) throw new Error("这里没有进度条");
+  return bar.getAttribute("aria-valuenow");
 }
 
 beforeEach(() => {
@@ -201,8 +216,11 @@ describe("下载任务页按片订阅", () => {
     }
 
     expect(launcher.state.tasks.find((t) => t.id === hot.id)?.progress).toBe(1);
-    // 进度相关的部件如实跟上：行内与通道里都写到 100%
-    expect(rowText(hot.title)).toContain("100%");
+    // 进度相关的部件如实跟上：行内与通道里的进度都到 100%
+    expect(progressOf(rowOf(hot.title))).toBe("100");
+    const lane = [...(view?.container.querySelectorAll("ol > li") ?? [])].find((li) => li.textContent?.includes(hot.title));
+    if (lane === undefined) throw new Error("通道里没有这个任务");
+    expect(progressOf(lane)).toBe("100");
     expect(renders.rows.get(hot.id)).toBe((rowsBefore.get(hot.id) as number) + 20);
     for (const id of [...cold, ...queued].map((t) => t.id).concat(HISTORY.map((r) => r.id))) expect(renders.rows.get(id)).toBe(rowsBefore.get(id));
     expect({ LanesCard: renders.LanesCard, ThroughputCard: renders.ThroughputCard, PageHeader: renders.PageHeader, SegmentedControl: renders.SegmentedControl }).toEqual({
@@ -211,6 +229,22 @@ describe("下载任务页按片订阅", () => {
       PageHeader: before.PageHeader,
       SegmentedControl: before.SegmentedControl,
     });
+  });
+
+  it("已下大小到点补字：只重画那一小段文字，任务行与吞吐卡本身都不重渲染", async () => {
+    const { running } = await mountBusy();
+    const [hot] = running;
+    act(() => {
+      emit(CORE_EVENT, { kind: "download", task_id: `${hot.id}#1`, total: 100, finished: 30, bytes: 30 * MB, total_bytes: 100 * MB, speed: 2 * MB });
+    });
+    // 事件到达的那一刻已下大小还是上一拍的
+    expect(rowText(hot.title)).toContain("0 B / 100 MB");
+    const rowsBefore = new Map(renders.rows);
+    const cardBefore = renders.ThroughputCard;
+    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS));
+    expect(rowText(hot.title)).toContain("30.0 MB / 100 MB");
+    expect(renders.rows.get(hot.id)).toBe(rowsBefore.get(hot.id));
+    expect(renders.ThroughputCard).toBe(cardBefore);
   });
 
   it("游戏运行中推 20 批日志：页面子树一次都不提交", async () => {
@@ -239,12 +273,6 @@ describe("下载任务页按片订阅", () => {
     const { running, queued } = await mountBusy();
     const [first] = running;
     const [next] = queued;
-    const rowOf = (title: string): HTMLLIElement => {
-      if (view === undefined) throw new Error("页面还没有挂载");
-      const found = [...view.container.querySelectorAll<HTMLLIElement>("ul > li")].filter((li) => li.textContent?.includes(title));
-      if (found.length !== 1) throw new Error(`标题含「${title}」的任务行有 ${found.length} 个`);
-      return found[0];
-    };
     const row = rowOf(next.title);
     const cancel = row.querySelector<HTMLButtonElement>('button[aria-label="取消任务"]');
     if (cancel === null) throw new Error("排队中的任务行没有取消键");
@@ -274,7 +302,7 @@ describe("下载任务页按片订阅", () => {
     });
     const header = () => {
       if (view === undefined) throw new Error("页面还没有挂载");
-      return [...view.container.querySelectorAll("section > h2")].map((h) => h.textContent);
+      return [...view.container.querySelectorAll("section h2")].filter(live).map((h) => h.textContent);
     };
     expect(header()).toEqual(["进行中 · 4", "已结束 · 3"]);
     const headerRenders = renders.PageHeader;

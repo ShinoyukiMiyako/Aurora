@@ -64,7 +64,10 @@ export interface CardProps {
   ariaLabel?: string;
   /** 当前实例、已选安装目标。只是外观：状态不能只靠颜色，「当前」一类文字由卡内内容给出。 */
   selected?: boolean;
-  /** 裁掉溢出：满版封面贴边时开，封面放在第一个子元素。 */
+  /**
+   * 裁掉溢出：满版封面贴边时开，封面放在第一个子元素。子项包在一层裁切容器里（纵向 flex，撑满卡片），
+   * 卡片自己不裁，画在边框外的悬停阴影与选中外圈才看得见。
+   */
   clip?: boolean;
   as?: EntranceTag;
   className?: string;
@@ -134,7 +137,7 @@ export function Card({ span, rowSpan, padding = "md", onClick, ariaLabel, select
       onKeyDown={interactive ? onKeyDown : undefined}
       onKeyUp={interactive ? onKeyUp : undefined}
     >
-      <TitleButtonRegistry.Provider value={registerTitleButton}>{children}</TitleButtonRegistry.Provider>
+      <TitleButtonRegistry.Provider value={registerTitleButton}>{clip ? <div className={styles.clip}>{children}</div> : children}</TitleButtonRegistry.Provider>
     </EntranceBlock>
   );
 }

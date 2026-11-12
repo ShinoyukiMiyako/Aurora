@@ -2,6 +2,17 @@
  * 状态岛：标题栏中列的 34px 胶囊。宽度随内容变化、由布局动画过渡；圆角由组件经 style 传入，
  * 不在这里写，布局动画才不会把圆角拉成椭圆。
  */
+
+/*
+ * 崩溃抖动的承载层：标题栏中列 flex 里的那一项，胶囊作为它的 flex 子项，不多出行框。
+ * min-width: 0：它不裁切，自动最小宽度会取胶囊的内容宽，中列放不下时就不肯收窄；
+ * 照旧由胶囊（overflow: hidden）收窄、名字走省略号。
+ */
+.shaker {
+  display: flex;
+  min-width: 0;
+}
+
 .island {
   --island-max: 280px;
   --island-name-max: 110px;
@@ -20,6 +31,7 @@
   color: var(--sk-text);
   cursor: pointer;
   transition:
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap),
     background-color var(--sk-dur-hover) var(--sk-ease),
     border-color var(--sk-dur-hover) var(--sk-ease);
 }
@@ -39,6 +51,20 @@
   border-color: var(--sk-line-2);
 }
 
+/* 按下：与按钮同一档按压缩放。写独立的 scale 属性，和 framer 写的 transform（入场、布局动画）叠加 */
+.island:active {
+  scale: 0.97;
+}
+
+/* 减少动画：不缩放，按下时内容瞬时降到 0.85 不透明度（胶囊自身的透明度被入场动画写在内联样式上，样式表盖不过） */
+:global([data-sk-reduced]) .island:active {
+  scale: none;
+}
+
+:global([data-sk-reduced]) .island:active .row {
+  opacity: 0.85;
+}
+
 .island:focus-visible {
   outline: none;
   box-shadow: var(--sk-focus);
@@ -54,7 +80,9 @@
   border-color: color-mix(in srgb, var(--sk-danger) 30%, transparent);
 }
 
+/* 定位基准：退场的状态点脱离布局后按这里摆在原处（行在布局动画里带 transform，基准要和它是同一个元素） */
 .row {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: var(--sk-space-8);
@@ -81,15 +109,37 @@
   font-weight: var(--sk-w-medium);
 }
 
+/*
+ * 第二段的槽：显示的行（.face，换行时新旧两行）与占宽的候选（.reserve）叠在同一格。
+ * 格宽只取候选里最宽的一条：显示的行宽度记 0、再撑满格子，换阶段文字、退场的旧行还没淡完时胶囊都不变宽
+ */
 .second {
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   flex: none;
-  align-items: baseline;
-  gap: var(--sk-space-4);
-  white-space: nowrap;
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
   color: var(--sk-text-2);
+  /* 色调切换时字色与底色、描边同一时长过渡，不再底色在渐变、字色同帧硬切 */
+  transition: color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.face,
+.reserve {
+  display: flex;
+  grid-area: 1 / 1;
+  align-items: baseline;
+  gap: var(--sk-space-4);
+  white-space: nowrap;
+}
+
+.face {
+  width: 0;
+  min-width: 100%;
+}
+
+.reserve {
+  visibility: hidden;
 }
 
 /*
@@ -119,22 +169,31 @@
   border-radius: var(--sk-r-pill);
 }
 
-.runningDot {
+/* 底色画在里面的呼吸层上：外层归入场与退场（framer 写内联的 transform 与透明度），呼吸带得动的是这层 */
+.breathing {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
   background: var(--sk-ok);
 }
 
-:global(:root[data-sk-breath]:not([data-sk-reduced])) .runningDot {
+/* 不看色调：色调一变就撤掉呼吸，点会从呼吸中途跳回满亮再退场；呼吸层不碰外层的透明度，退场途中照常呼吸 */
+:global(:root[data-sk-breath]:not([data-sk-reduced])) .breathing {
   animation: breath var(--sk-loop-breath) var(--sk-ease-breath) infinite;
   animation-delay: var(--breath-delay);
 }
 
+/* 与侧栏实例角标同一套关键帧；缩放写独立的 scale 属性，和入场、退场动画写的 transform 叠加而不互相顶掉 */
 @keyframes breath {
   0%,
   100% {
+    scale: 1;
     opacity: 1;
   }
   50% {
-    opacity: 0.45;
+    scale: 0.82;
+    opacity: 0.55;
   }
 }
 
@@ -157,7 +216,6 @@
   position: absolute;
   inset: 0;
   background: var(--sk-accent-grad);
-  will-change: transform;
 }
 
 .srOnly {
@@ -169,15 +227,24 @@
   white-space: nowrap;
 }
 
-/* ---- 详情浮层 ---- */
+/*
+ * ---- 详情浮层 ----
+ * 浮层分主体与底部两层（随内容形变）：宽度定在面板上。主体是面板的滚动区，常驻 10px 滚动条槽位，
+ * 正文右内边距扣掉槽宽，右侧留白仍是 16；动作行在底部那一层，正文的下内边距就是它与日志区的间距。
+ * 正文与动作行都设 position: relative：退场项被抽出布局时按它们定位。形变途中外层带着 transform，
+ * 不设的话退场项按面板量位置、却摆进带 transform 的那一层里，落点会偏
+ */
+.detailPanel {
+  width: min(340px, calc(100vw - var(--sk-space-32)));
+}
+
 .detail {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-12);
   box-sizing: border-box;
-  width: 340px;
-  max-width: calc(100vw - var(--sk-space-32));
-  padding: var(--sk-space-16);
+  padding: var(--sk-space-16) calc(var(--sk-space-16) - var(--sk-scrollbar-size)) var(--sk-space-12) var(--sk-space-16);
 }
 
 .head {
@@ -197,6 +264,12 @@
 .headText {
   flex: 1;
   min-width: 0;
+}
+
+/* 进度环外的那层（随加载结束淡出）：环是行内网格，包在块里会多出行框的下沿空隙 */
+.headRing {
+  display: flex;
+  flex: none;
 }
 
 .headName,
@@ -241,6 +314,7 @@
   color: var(--sk-text-2);
 }
 
+/* 加载结束后停下的那一步（halted）不另写规则：与未开始同一外观，不再带进行中的强调 */
 .stage[data-state="now"] {
   color: var(--sk-text);
   font-weight: var(--sk-w-medium);
@@ -284,10 +358,12 @@
   color: var(--sk-text-2);
 }
 
+/* 常驻、固定 4 行高（与组件的 LOG_LINES 一致）：日志逐批补齐、首批晚到都不改变块高，动作行不被往下推 */
 .logs {
   display: flex;
   flex-direction: column;
-  max-height: 96px;
+  box-sizing: border-box;
+  height: calc(4 * var(--sk-lh-mono-sm) + 2 * var(--sk-space-8));
   padding: var(--sk-space-8) var(--sk-space-10);
   overflow: hidden;
   border-radius: var(--sk-r-sm);
@@ -315,8 +391,15 @@
 }
 
 .actions {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--sk-space-8);
+  padding: 0 var(--sk-space-16) var(--sk-space-16);
+}
+
+/* 每个按钮外那层（随阶段增删淡入淡出）：按钮是 inline-flex，包在块里会多出行框的下沿空隙，动作行就高了几像素 */
+.action {
+  display: flex;
 }

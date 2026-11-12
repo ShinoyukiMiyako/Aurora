@@ -14,6 +14,18 @@
   white-space: nowrap;
 }
 
+/* ---------------------------------------------------------------- 页头 */
+
+/* 副标题的骨架条与文字叠在同一格里交叉淡化。块级网格：行内的话骨架条没有文字基线，行框会多出一截下沉 */
+.subtitleSwap {
+  display: grid;
+}
+
+.subtitleSwap > * {
+  grid-area: 1 / 1;
+  min-width: 0;
+}
+
 /* ---------------------------------------------------------------- 工具条 */
 
 /* 一行放不下时搜索、目录与排序整体换到第二行并右对齐，分段筛选独占第一行 */
@@ -32,10 +44,20 @@
   --lib-search-width: 240px;
 }
 
+/*
+ * 定位：目录选择撤掉时被抽出布局、按量到的到右缘的偏移绝对定位，偏移以这里为基准。
+ * 最小宽按「搜索 + 目录 + 排序」占满，没有目录选择时组内靠右排：工具条折不折行只随窗口宽度变，
+ * 不随目录列表什么时候到、到了有几项变。目录列表没赶在进页面之前取到（预取还在路上，或缓存被失效后没人订阅、条目已丢掉）时，
+ * 目录选择晚到也只是插进这块预留的宽度里，工具条不会从一行挤成两行、把下面的横幅与网格整体推下去。
+ * 只登记一个目录的话，这块宽度左侧空着，窗口偏窄时工具组会比按内容排时更早换到第二行，这是行数不随数据变的代价
+ */
 .tools {
+  position: relative;
   display: flex;
+  justify-content: flex-end;
   align-items: center;
   gap: var(--sk-space-10);
+  min-width: calc(var(--lib-search-width) + var(--lib-directory-width) + var(--lib-sort-width) + 2 * var(--sk-space-10));
   margin-left: auto;
 }
 
@@ -52,6 +74,11 @@
 }
 
 /* ---------------------------------------------------------------- 网格 */
+
+/* 网格与无结果说明的外层。退场的那一个被抽出布局、按量到的偏移绝对定位：偏移以这里为基准，叠放的位置才对得上 */
+.matches {
+  position: relative;
+}
 
 .grid {
   --lib-columns: 3;
@@ -115,11 +142,25 @@
   overflow: hidden;
 }
 
-.currentTag {
+/* 「当前」标签外面那层弹入弹出的包裹：它才是这一行的弹性项 */
+.currentSlot {
+  display: inline-flex;
   flex: none;
 }
 
-/* 未固定时只在卡片悬停或键盘聚焦到卡内时出现；已固定常显 */
+/*
+ * 未固定时只在卡片悬停或键盘聚焦到卡内时出现；已固定常显。显隐跟卡片的上浮与阴影一起淡入淡出：
+ * 图标按钮自己的过渡里没有透明度，这里照抄它的几项再补上（简写会整条覆盖）。
+ */
+.coverTop .pin {
+  transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease),
+    opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
 .pin:not([aria-pressed="true"]) {
   opacity: 0;
 }
@@ -129,6 +170,10 @@
   opacity: 1;
 }
 
+/*
+ * 字色随卡面形态换时淡过去，不在卡面图片显出来之前一帧跳色。文字阴影不过渡、随形态瞬切（卡面组件自己也是这样）：
+ * 它带一层 14px 的模糊，补间时每帧都要重绘，一屏多张卡同时换卡面时开销太大
+ */
 .coverVersion {
   align-self: flex-end;
   color: var(--sk-text);
@@ -136,6 +181,7 @@
   font-weight: var(--sk-w-title);
   line-height: var(--sk-lh-heading);
   font-variant-numeric: tabular-nums;
+  transition: color var(--sk-dur-in) var(--sk-ease-out);
 }
 
 /* 标签行与卡面是同格的兄弟，接不到卡面的媒体文字色：卡面显示材质平铺或玩家图片时在这里换 */
@@ -189,12 +235,20 @@
   white-space: nowrap;
 }
 
+/*
+ * 统计行固定一行高：卡窄、相对时间或数目变长放不下时，排不下的项折到第二行被裁掉，而不是把卡片撑高一行
+ * （卡高一变，同一行与下面各行都要跟着挪，相对时间每 30 秒刷新一次就可能来回跳）。
+ */
 .stats {
+  --lib-stat-recent-min: 4.4em;
+  container-type: inline-size;
   display: flex;
   flex-wrap: wrap;
   gap: var(--sk-space-4) var(--sk-space-12);
+  height: var(--sk-lh-caption);
   margin: var(--sk-space-8) 0 0;
   padding: 0;
+  overflow: hidden;
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
@@ -207,6 +261,29 @@
   align-items: center;
   gap: var(--sk-space-4);
   white-space: nowrap;
+}
+
+/* 相对时间按常见最宽的写法（两位数加三个字：「10 分钟前」「11 个月前」）占宽：跨位数、换单位时后面的项不横移 */
+.stats > li:first-child > span {
+  min-width: var(--lib-stat-recent-min);
+}
+
+/*
+ * 四项按各自最宽的常见写法排不下时只留前三项：哪几项显示只随卡宽变，不随时长、Mod 数的位数变
+ * （靠折行裁掉的话，游玩时长涨一位就可能让某一项一下子出现或消失）。最宽写法：「11 个月前」占满预留的 4.4em，
+ * 「读不到」3em，四位 Mod 数、三位存档数（每位按 0.6em 算），加上每项 16px 图标与 4px 间距、三处 12px 列距，约 255px；
+ * 三项约 202px，常规档刚过分档线时最窄的卡也排得下。容器查询的条件里不能用自定义属性，阈值只能写字面值。
+ * 收起只是视觉上的（与 .srOnly 同法，绝对定位不占行内位置）：读屏照旧读到第四项，不用 display: none 把它移出无障碍树。
+ */
+@container (width < 256px) {
+  .stats > li:nth-child(n + 4) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 
 .broken {
@@ -224,6 +301,16 @@
   min-height: var(--lib-foot-min-height);
   padding: var(--sk-space-8) var(--sk-space-10) var(--sk-space-10) var(--sk-space-12);
   border-top: 1px solid var(--sk-line);
+}
+
+/*
+ * 换面的常驻槽位。不设定位：标题按钮的覆盖层要盖住底栏空白处（点空白处打开详情）；
+ * 退场的面按量到的偏移绝对定位，基准是卡片的裁切层，与它在底栏里的位置一致。
+ */
+.statusSlot {
+  flex: 1;
+  display: flex;
+  min-width: 0;
 }
 
 .status {
@@ -278,7 +365,9 @@
   white-space: nowrap;
 }
 
+/* 占满按钮左边：文案变短（正在结束…）或计时多出一段时，结束按钮停在原处 */
 .running {
+  flex: 1;
   display: inline-flex;
   align-items: center;
   gap: var(--sk-space-6);
@@ -323,6 +412,8 @@
   cursor: pointer;
   outline: none;
   transition:
+    translate var(--sk-spring-settle-dur) var(--sk-spring-settle),
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap),
     border-color var(--sk-dur-hover) var(--sk-ease),
     background-color var(--sk-dur-hover) var(--sk-ease),
     color var(--sk-dur-hover) var(--sk-ease);
@@ -332,6 +423,31 @@
   border-color: var(--sk-accent-line);
   background: var(--sk-accent-soft);
   color: var(--sk-text);
+}
+
+/*
+ * 与可点卡片同一手感：悬停整块上浮 2px（Settle），按下落回原位并缩到 0.99（Tap）。
+ * 用独立的 translate / scale 属性：格子的入场与让位分别写在外层的 transform 与 translate 上，互不覆盖。
+ */
+:global(:root:not([data-sk-reduced])) .createTile:hover {
+  translate: 0 -2px;
+}
+
+:global(:root:not([data-sk-reduced])) .createTile:active {
+  translate: none;
+  scale: 0.99;
+  transition:
+    translate var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
+}
+
+/* 减少动画：不上浮、不缩放，按下瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .createTile:active {
+  opacity: 0.85;
+  transition: none;
 }
 
 .createTile:focus-visible {
@@ -348,11 +464,6 @@
   background: var(--sk-surface);
   color: var(--sk-accent-strong);
   box-shadow: var(--sk-shadow-sm);
-  transition: translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
-}
-
-:global(:root:not([data-sk-reduced])) .createTile:hover .createIcon {
-  translate: 0 -2px;
 }
 
 .createTitle {
@@ -384,4 +495,14 @@
   color: var(--sk-text-2);
   font-size: var(--sk-fs-caption);
   line-height: var(--sk-lh-caption);
+}
+
+/* 只给读屏的加载说明：骨架层整层 aria-hidden，说明放在它外面 */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }

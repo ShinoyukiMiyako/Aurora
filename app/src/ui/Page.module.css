@@ -2,6 +2,8 @@
  * 页面根。外壳的页面滚动容器不给页面加边距，全部内边距与区块间距在这里：
  * 上边距很小，因为标题栏已经留出了呼吸；左边距小，因为侧栏胶囊外侧另有空隙。
  * 最大宽含内边距，超出时在内容区里水平居中；表单型页面更窄且左对齐。
+ * 右内边距扣掉一个滚动条的宽度：外壳的滚动容器常驻滚动条槽位，两者相加才是设计上的右留白，
+ * 有没有滚动条内容的右缘都在同一处。
  */
 .page {
   box-sizing: border-box;
@@ -12,7 +14,7 @@
   min-width: 0;
   max-width: var(--sk-page-max);
   margin-inline: auto;
-  padding: var(--sk-page-pad-top) var(--sk-page-pad-right) var(--sk-page-pad-bottom) var(--sk-page-pad-left);
+  padding: var(--sk-page-pad-top) calc(var(--sk-page-pad-right) - var(--sk-scrollbar-size)) var(--sk-page-pad-bottom) var(--sk-page-pad-left);
 }
 
 .page[data-width="narrow"] {

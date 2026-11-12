@@ -7,7 +7,7 @@
 // 卡片退场（删除、改名、取消安装、移到别的游戏目录）期间实例已不在状态里，这时底栏不再挂启动入口（它按 id 取实例，取不到会抛错），
 // 其余部分照最后一次的数据画完退场。「移到其他游戏目录」的弹窗只在打开期间挂载。
 
-import { AnimatePresence } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotionConfig } from "framer-motion";
 import { useState } from "react";
 import { Icon, type IconName } from "../../art/Icon";
 import { ACTION_ERROR, lockReason, modpackLabel, TOAST_COPY } from "../../copy/flows";
@@ -17,10 +17,12 @@ import { locksOf } from "../../domain/instance-locks";
 import { useCoverBackdrop, useInstanceCover } from "../../launch/cover";
 import { InstanceAvatar } from "../../launch/InstanceAvatar";
 import { launchView } from "../../launch/launchView";
+import { popMark } from "../../lib/motion";
 import { useNav } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector } from "../../state/launcher";
 import { busyInstanceId, canPinMore, findInstance } from "../../state/selectors";
+import { Appear } from "../../ui/Appear";
 import { Callout } from "../../ui/Callout";
 import { Card, CardTitleButton } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
@@ -54,6 +56,8 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
   // 每张卡只订阅自己用到的几样判定结果（都是布尔值或字符串）：下载进度与游戏日志不让实例库的卡片跟着重渲染
   const live = useLauncherSelector((s) => findInstance(s, id) !== undefined);
   const current = useLauncherSelector((s) => s.selectedInstanceId === id);
+  // 「当前」标签：设为当前实例时弹出（标签出现本身就是消息），旧的那张卡上淡出，与卡片描边、选中外圈的过渡同时发生
+  const currentTag = useReducedMotionConfig() === true ? popMark.reduced : popMark.tag;
   const busy = useLauncherSelector((s) => busyInstanceId(s) === id);
   const canPin = useLauncherSelector(canPinMore);
   // 崩溃报告不会被之后的正常启动清空：菜单项按「崩溃过」出现，提示只在之后没再正常玩过时给出；
@@ -171,11 +175,16 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
         <div className={styles.coverOverlay}>
           <div className={styles.coverTop}>
             <LoaderTag loader={inst.loader} version={inst.loaderVersion} size="sm" className={styles.chip} />
-            {current && (
-              <Tag tone="accent" size="sm" className={styles.currentTag}>
-                {LIBRARY_COPY.current}
-              </Tag>
-            )}
+            {/* 标签是叶子，里面没有之后才挂载的动画元素：initial={false} 只让挂载时就在的不弹 */}
+            <AnimatePresence initial={false}>
+              {current && (
+                <motion.span key="current" className={styles.currentSlot} {...currentTag}>
+                  <Tag tone="accent" size="sm" className={styles.currentTag}>
+                    {LIBRARY_COPY.current}
+                  </Tag>
+                </motion.span>
+              )}
+            </AnimatePresence>
             <span className={styles.grow} />
             <Tooltip content={TOAST_COPY.pinLimit} disabled={pinAllowed}>
               {pinButton}
@@ -191,18 +200,21 @@ export function InstanceCard({ inst, now }: InstanceCardProps) {
           {name}
         </CardTitleButton>
         <p className={styles.meta}>{description}</p>
-        {inst.status === "broken" ? (
-          <Callout tone="warn" className={styles.broken}>
-            {inst.brokenReason}
-          </Callout>
-        ) : (
-          <ul className={styles.stats} aria-label={LIBRARY_COPY.statsLabel}>
-            <Stat icon="history" label={LIBRARY_COPY.lastPlayed} value={inst.playError === null ? formatRelative(inst.lastPlayedAt, now) : LIBRARY_COPY.playUnknown} />
-            <Stat icon="clock" label={LIBRARY_COPY.playtime} value={inst.playtimeMin === null ? LIBRARY_COPY.playUnknown : formatPlaytimeShort(inst.playtimeMin)} />
-            {inst.modCount !== null && inst.modCount > 0 && <Stat icon="mod" label={LIBRARY_COPY.modCount} value={String(inst.modCount)} />}
-            {inst.worldCount !== null && <Stat icon="world" label={LIBRARY_COPY.worldCount} value={String(inst.worldCount)} />}
-          </ul>
-        )}
+        {/* 损坏原因与统计行互换（开始修复、修好、修复失败）时交叉淡化；卡片随之变高变矮，同网格的其余卡片由网格的让位滑开 */}
+        <Appear>
+          {inst.status === "broken" ? (
+            <Callout key="broken" tone="warn" className={styles.broken}>
+              {inst.brokenReason}
+            </Callout>
+          ) : (
+            <ul key="stats" className={styles.stats} aria-label={LIBRARY_COPY.statsLabel}>
+              <Stat icon="history" label={LIBRARY_COPY.lastPlayed} value={inst.playError === null ? formatRelative(inst.lastPlayedAt, now) : LIBRARY_COPY.playUnknown} />
+              <Stat icon="clock" label={LIBRARY_COPY.playtime} value={inst.playtimeMin === null ? LIBRARY_COPY.playUnknown : formatPlaytimeShort(inst.playtimeMin)} />
+              {inst.modCount !== null && inst.modCount > 0 && <Stat icon="mod" label={LIBRARY_COPY.modCount} value={String(inst.modCount)} />}
+              {inst.worldCount !== null && <Stat icon="world" label={LIBRARY_COPY.worldCount} value={String(inst.worldCount)} />}
+            </ul>
+          )}
+        </Appear>
       </div>
 
       <div className={styles.foot}>

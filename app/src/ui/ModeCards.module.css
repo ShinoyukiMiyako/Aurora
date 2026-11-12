@@ -5,6 +5,7 @@
 }
 
 .card {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-10);
@@ -18,7 +19,9 @@
   text-align: left;
   cursor: pointer;
   outline: none;
-  transition: border-color var(--sk-dur-hover) var(--sk-ease);
+  transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    border-color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .card:hover,
@@ -26,12 +29,36 @@
   border-color: var(--sk-accent-line);
 }
 
-.card[aria-checked="true"] {
+/* 选中外环画在常驻叠层上，只淡入淡出，与外框描边色的过渡同步 */
+.card::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
   outline: 3px solid var(--sk-accent-soft);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
+.card[aria-checked="true"]::after {
+  opacity: 1;
 }
 
 .card:focus-visible {
   box-shadow: var(--sk-focus);
+}
+
+/* 可点的卡按下微缩：点已选中的那张也有回应 */
+.card:active {
+  transform: scale(0.99);
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .card:active {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 /* ---- 迷你预览：颜色只取外观预览令牌，经组件私有变量分到各部件 ---- */
@@ -188,6 +215,7 @@
   border: 1.5px solid var(--sk-line-strong);
   border-radius: var(--sk-r-pill);
   background: var(--sk-surface);
+  transition: border-color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .radio::after {
@@ -209,4 +237,9 @@
 
 [aria-checked="true"] > .label > .radio::after {
   transform: scale(1);
+}
+
+/* 减少动画：内圆不缩放，选中即到位 */
+:global([data-sk-reduced]) .radio::after {
+  transition: none;
 }

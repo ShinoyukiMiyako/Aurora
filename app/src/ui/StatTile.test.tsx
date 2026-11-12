@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
 import { render, type Rendered } from "../test/dom";
-import { statLabel, StatGrid, StatTile } from "./StatTile";
+import { statLabel, StatGrid, StatTile, type StatDelta } from "./StatTile";
 
 let view: Rendered | undefined;
 afterEach(() => {
@@ -45,5 +47,54 @@ describe("StatTile", () => {
     ]);
     expect(deltas[0].querySelector("svg")?.getAttribute("width")).toBe("12");
     expect(container.querySelectorAll<HTMLElement>("[data-kind]")[2].dataset.kind).toBe("text");
+  });
+
+  describe("环比晚到（delta 为 null）", () => {
+    const tile = (delta: StatDelta | null | undefined) => <StatTile icon="box" label="Mod" value="12" unit="个" delta={delta} />;
+    const rerender = (ui: ReactNode) =>
+      view?.rerender(
+        <OverlayProvider>
+          {ui}
+          <OverlayRoot />
+        </OverlayProvider>,
+      );
+    const rows = () => [...(view?.container.querySelector('[role="group"]')?.children ?? [])] as HTMLElement[];
+    const outdated: StatDelta = { direction: "up", tone: "positive", text: "3 个可更新" };
+
+    it("等待时占住一行：空的、读屏忽略，读屏名称不带环比", () => {
+      mount(tile(null));
+      expect(rows()).toHaveLength(3);
+      const slot = rows()[2];
+      expect(slot.hasAttribute("data-reserve")).toBe(true);
+      expect(slot.getAttribute("aria-hidden")).toBe("true");
+      expect(slot.textContent).toBe("");
+      expect(view?.container.querySelector('[role="group"]')?.getAttribute("aria-label")).toBe("Mod 12 个");
+    });
+
+    it("到了：在同一行淡入，读屏名称补上环比", () => {
+      mount(tile(null));
+      rerender(tile(outdated));
+      expect(rows()).toHaveLength(3);
+      const arrived = rows()[2];
+      expect(arrived.hasAttribute("data-reserve")).toBe(false);
+      expect(arrived.textContent).toBe("3 个可更新");
+      expect(arrived.dataset.tone).toBe("positive");
+      expect(arrived.style.opacity).toBe("0");
+      expect(view?.container.querySelector('[role="group"]')?.getAttribute("aria-label")).toBe("Mod 12 个，3 个可更新");
+    });
+
+    it("挂载时就有环比：不单独淡入，跟着页面入场；不传就没有这一行", () => {
+      mount(tile(outdated));
+      expect(rows()[2].style.opacity).toBe("");
+      view?.unmount();
+      mount(tile(undefined));
+      expect(rows()).toHaveLength(2);
+    });
+
+    it("样式：占位行与有字时同一行高", () => {
+      const css = readFileSync(resolve(__dirname, "StatTile.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+      expect(css).toMatch(/(?:^|\n)\.delta\s*\{[^}]*\sline-height:\s*var\(--sk-lh-caption\);/);
+      expect(css).toMatch(/(?:^|\n)\.delta\[data-reserve\]\s*\{\s*height:\s*var\(--sk-lh-caption\);\s*\}/);
+    });
   });
 });

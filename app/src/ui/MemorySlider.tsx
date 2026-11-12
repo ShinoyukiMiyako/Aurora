@@ -4,9 +4,12 @@
 // 超过物理内存一半进入警示区：已填充段、读数与占用说明改警示色，下方出现警示说明。
 
 import { formatMemory } from "../domain/format";
+import { useReflow } from "../lib/reflow";
 import { cx } from "../lib/util";
+import { Appear } from "./Appear";
 import { Callout } from "./Callout";
 import styles from "./MemorySlider.module.css";
+import { Skeleton } from "./Skeleton";
 import { Slider, type SliderMark } from "./Slider";
 
 export const MEMORY_MIN_MB = 1024;
@@ -29,9 +32,12 @@ export function memoryMarks(maxMb: number): SliderMark[] {
   return marks;
 }
 
-/** 占用说明行的主句：「占系统内存 37%（共 32 GB）」。 */
-export function memoryShare(valueMb: number, totalMb: number): string {
-  return `占系统内存 ${Math.round((valueMb / totalMb) * 100)}%（共 ${formatMemory(totalMb)}）`;
+/**
+ * 占用说明行的主句「占系统内存 37%（共 32 GB）」，拆成三段：百分比数字单独放进定宽槽，
+ * 拖动时位数在 1 到 3 位之间变化也不推动后面的补充说明。
+ */
+export function memoryShare(valueMb: number, totalMb: number): { lead: string; percent: string; tail: string } {
+  return { lead: "占系统内存 ", percent: String(Math.round((valueMb / totalMb) * 100)), tail: `%（共 ${formatMemory(totalMb)}）` };
 }
 
 export interface MemorySliderProps {
@@ -58,9 +64,12 @@ export function MemorySlider({ value, onChange, onCommit, totalMb, recommended, 
   const marks = memoryMarks(maxMb);
   const snapTo = recommended === undefined ? marks.map((m) => m.value) : [...marks.map((m) => m.value), recommended.mb];
   const warn = value > totalMb / 2;
+  const share = memoryShare(value, totalMb);
+  // 补充说明随取值换文案时占用说明可能多折一行：下面的警示条滑过去，不跳
+  const reflow = useReflow<HTMLDivElement>();
 
   return (
-    <div className={cx(styles.root, className)} data-warn={warn || undefined}>
+    <div ref={reflow} className={cx(styles.root, className)} data-warn={warn || undefined}>
       <Slider
         value={value}
         onChange={onChange}
@@ -77,14 +86,40 @@ export function MemorySlider({ value, onChange, onCommit, totalMb, recommended, 
         disabled={disabled}
       />
       <p className={styles.usage} data-tone={warn ? "warn" : undefined}>
-        <span>{memoryShare(value, totalMb)}</span>
+        <span>
+          {share.lead}
+          <span className={styles.percent}>{share.percent}</span>
+          {share.tail}
+        </span>
         {notes.length > 0 && <span data-tone={notesTone === "warn" ? "warn" : undefined}>{` · ${notes.join(" · ")}`}</span>}
       </p>
-      {warn && (
-        <Callout tone="warn" announce className={styles.callout}>
-          {MEMORY_WARN_COPY}
-        </Callout>
-      )}
+      {/* 拖动越过一半时出现：淡入落位、淡出并立即让出位置，卡片里下面的内容由所在容器的让位接住 */}
+      <Appear>
+        {warn && (
+          <Callout tone="warn" announce className={styles.callout}>
+            {MEMORY_WARN_COPY}
+          </Callout>
+        )}
+      </Appear>
+    </div>
+  );
+}
+
+/**
+ * 内存滑杆的加载占位，放进 Loadable 的 skeleton：与没有警示条时的滑杆等高（命中区一行、刻度行、占用说明一行），
+ * 轨道与读数各在各的位置。和滑杆写在一处，滑杆的尺寸一改占位跟着改，设置页与实例设置页不各留一份。
+ * 外层容器与占用说明行直接用滑杆自己的类，只有命中区加刻度这一行按 Slider 的尺寸另画。
+ */
+export function MemorySliderSkeleton() {
+  return (
+    <div className={styles.root}>
+      <span className={styles.skeletonTrack}>
+        <Skeleton shape="block" width="100%" height={6} radius="pill" />
+        <Skeleton shape="block" width={40} height={12} radius="xs" />
+      </span>
+      <p className={styles.usage}>
+        <Skeleton shape="text" width="45%" />
+      </p>
     </div>
   );
 }

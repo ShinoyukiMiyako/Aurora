@@ -1,3 +1,4 @@
+/* 底色随形态过渡：加载失败时从骨架的凹陷底色淡到色相底座，不同帧硬换 */
 .thumb {
   position: relative;
   display: inline-grid;
@@ -5,6 +6,7 @@
   flex: none;
   overflow: hidden;
   box-sizing: border-box;
+  transition: background-color var(--sk-dur-in) var(--sk-ease-out);
 }
 
 /* ---- 已加载：底色垫在透明图标之下，内描边叠在图片之上，分开白底图标与白卡片 ---- */
@@ -32,6 +34,11 @@
   image-rendering: pixelated;
 }
 
+/* 减少动画：只保留不超过 200ms 的透明度淡入 */
+:global([data-sk-reduced]) .image {
+  animation: reveal var(--sk-dur-in) var(--sk-ease-out);
+}
+
 @keyframes reveal {
   from {
     opacity: 0;
@@ -48,13 +55,47 @@
   color: hsl(var(--hue) var(--sk-hue-glyph-s) var(--sk-hue-glyph-l));
 }
 
+.late {
+  animation: reveal var(--sk-dur-in) var(--sk-ease-out);
+}
+
+/*
+ * 回落图形让给图或加载态：类型图标原地淡出，与图片的淡入同一时长同一曲线，两者交叉；淡完由组件摘掉。
+ * 绝对定位居中：不和图片抢网格里的格子。底座换了形态，图标色要自己留着，不能跟着换成继承来的字色
+ */
+.leaving {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  /* sk-guard-allow T1: 离场的类型图标保持底座上的图标色 */
+  color: hsl(var(--hue) var(--sk-hue-glyph-s) var(--sk-hue-glyph-l));
+  animation: conceal var(--sk-dur-reveal) var(--sk-ease-out) forwards;
+}
+
+:global([data-sk-reduced]) .leaving {
+  animation: conceal var(--sk-dur-in) var(--sk-ease-out) forwards;
+}
+
+@keyframes conceal {
+  to {
+    opacity: 0;
+  }
+}
+
 /* ---- 加载中：同形骨架，光带横扫；减少动画时静止。还在视口外没开始加载时只有底色 ---- */
 .thumb[data-view="pending"],
 .thumb[data-view="loading"] {
   background: var(--sk-bg-2);
 }
 
-.thumb[data-view="loading"]::after {
+/*
+ * 光带画在 ::before 上：::after 是已加载时的内描边，两者在换上图片的那一刻要同时在。
+ * 离开加载态时组件把 data-shimmer 标成 fading：横扫的那条动画名字不变、只暂停，光带停在原处（换名会跳回起点），
+ * 再叠一条淡出，不同帧消失；淡完组件摘掉标记，循环动画随之移除，不在已加载的缩略图上常驻。
+ * 光带垫在正淡入的图片或图标下面、隔着它们透出来：透明度动画播放期间图片与图标各自成层，按树序排在 ::before 之后。
+ * 光带的淡出（--sk-dur-out）比图片与图标的淡入先播完，中途不会翻到它们上面。
+ */
+.thumb[data-shimmer]::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -63,14 +104,31 @@
   animation: shimmer var(--sk-loop-shimmer) linear infinite;
 }
 
-:global([data-sk-reduced]) .thumb[data-view="loading"]::after {
+.thumb[data-shimmer="fading"]::before {
+  animation:
+    shimmer var(--sk-loop-shimmer) linear infinite paused,
+    shimmer-out var(--sk-dur-out) var(--sk-ease-in) forwards;
+}
+
+:global([data-sk-reduced]) .thumb[data-shimmer]::before {
   animation: none;
   opacity: 0;
+}
+
+/* 减少动画时光带本来就看不见，淡出照样播一遍：组件等 ::before 上的动画结束才摘掉标记，animation: none 等不到，标记会一直挂着 */
+:global([data-sk-reduced]) .thumb[data-shimmer="fading"]::before {
+  animation: shimmer-out var(--sk-dur-out) var(--sk-ease-in) forwards;
 }
 
 @keyframes shimmer {
   to {
     transform: translateX(100%);
+  }
+}
+
+@keyframes shimmer-out {
+  to {
+    opacity: 0;
   }
 }
 

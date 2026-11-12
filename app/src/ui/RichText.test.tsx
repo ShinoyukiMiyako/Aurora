@@ -6,7 +6,7 @@ import { render, stubMatchMedia, type Rendered } from "../test/dom";
 import { ExternalLinkProvider, useExternalLinkOpener } from "./external-link";
 import { RemoteImageProvider } from "./remote-image";
 import { parseHtml, parseMarkdown, type Block } from "./richtext-parse";
-import { RICH_IMAGE_MAX_WIDTH, richImageSize, RichText } from "./RichText";
+import { RICH_IMAGE_MAX_WIDTH, richImageBox, richImageSize, RichText } from "./RichText";
 
 let view: Rendered | undefined;
 let observers: { callback: IntersectionObserverCallback; targets: Element[] }[];
@@ -79,6 +79,13 @@ describe("配图尺寸", () => {
     expect(richImageSize(640, 480)).toEqual({ width: 640, height: 480 });
     expect(richImageSize(641, 641)).toEqual({ width: 640, height: 640 });
     expect(richImageSize(4000, 1)).toEqual({ width: 640, height: 1 });
+  });
+
+  it("原文写了宽高就照写的显示，取图前已知；没写的等解码，在那之前没有尺寸", () => {
+    expect(richImageBox({ width: 1000, height: 500 }, null)).toEqual({ width: 640, height: 320 });
+    expect(richImageBox({ width: 300, height: 150 }, { width: 1280, height: 720 })).toEqual({ width: 300, height: 150 });
+    expect(richImageBox(undefined, null)).toBeNull();
+    expect(richImageBox(undefined, { width: 1280, height: 720 })).toEqual({ width: 640, height: 360 });
   });
 });
 
@@ -161,8 +168,39 @@ describe("RichText", () => {
     expect(pictures.map((el) => el.getAttribute("aria-label"))).toEqual(["截图"]);
     const canvas = pictures[0].querySelector("canvas");
     if (canvas === null) throw new Error("配图没有画进 Canvas");
-    expect(canvas.style.width).toBe("640px");
+    expect((pictures[0] as HTMLElement).style.width).toBe("640px");
+    expect((pictures[0] as HTMLElement).style.aspectRatio).toBe("640 / 360");
+    expect([canvas.width, canvas.height]).toEqual([640, 360]);
     expect(document.querySelectorAll("img")).toHaveLength(0);
+  });
+
+  it("写了宽高的配图取图之前就按比例占好位置，解码后尺寸不变，图画进同一格", async () => {
+    mount(parseHtml('<p>前</p><img src="https://cdn.io/banner.png" alt="横幅" width="1000" height="250"><p>后</p>'));
+    const slot = document.querySelector<HTMLElement>("[data-reserved]");
+    if (slot === null) throw new Error("写了宽高的配图应该先占位");
+    expect([slot.style.width, slot.style.aspectRatio]).toEqual(["640px", "640 / 160"]);
+    expect(slot.hasAttribute("data-ready")).toBe(false);
+    expect(slot.querySelector("canvas")).toBeNull();
+
+    await scrollAllIntoView();
+    // 原图 1280 × 720，与写的比例不同：照写的显示，位置不变
+    expect(document.querySelector("[data-reserved]")).toBe(slot);
+    expect([slot.style.width, slot.style.aspectRatio]).toEqual(["640px", "640 / 160"]);
+    expect(slot.hasAttribute("data-ready")).toBe(true);
+    expect(slot.getAttribute("role")).toBe("img");
+    expect(slot.getAttribute("aria-label")).toBe("横幅");
+    const canvas = slot.querySelector("canvas");
+    if (canvas === null) throw new Error("配图没有画进占好的格子");
+    expect([canvas.width, canvas.height]).toEqual([640, 160]);
+  });
+
+  it("没写宽高的配图解码前不占高度，也不垫骨架", () => {
+    mount(parseMarkdown("![截图](https://cdn.io/shot.png)"));
+    const slot = document.querySelector<HTMLElement>("p > span");
+    if (slot === null) throw new Error("配图位没有渲染");
+    expect(slot.hasAttribute("data-reserved")).toBe(false);
+    expect(slot.style.width).toBe("");
+    expect(slot.style.aspectRatio).toBe("");
   });
 
   it("空节点树：只有一个空容器", () => {

@@ -1,0 +1,17 @@
+/* 标题前的成功徽记：圆底与标题文字竖直居中 */
+.title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sk-space-10);
+}
+
+.mark {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--sk-r-pill);
+  background: var(--sk-ok-soft);
+  color: var(--sk-ok);
+}

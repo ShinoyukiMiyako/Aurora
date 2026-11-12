@@ -7,8 +7,8 @@ import { formatBytes, formatPlaytime, formatRelative, formatSpeed, percent } fro
 import { MAX_PARALLEL_TASKS } from "../../domain/limits";
 import type { Task, TaskKind } from "../../domain/types";
 import type { RouteOf, TaskFilter } from "../../state/route";
-import { attemptTaskId, DOWNLOADS_WHEN_RUNNING } from "../../state/tasks";
-import { CHART_MIN_CEILING_BPS, CHART_VIEW, ETA_WINDOW_SAMPLES, THROUGHPUT_SAMPLES } from "./constants";
+import { attemptTaskId, DOWNLOADS_WHEN_RUNNING, progressTrack } from "../../state/tasks";
+import { CHART_CEILING_DECAY, CHART_MIN_CEILING_BPS, CHART_STEP, CHART_VIEW, ETA_WINDOW_SAMPLES, THROUGHPUT_KEPT, THROUGHPUT_SAMPLES } from "./constants";
 import { TASKS_COPY } from "./copy";
 
 /** 任务类别的线性图标。修复补的是游戏文件，与新建实例同用「游戏本体」的图标。 */
@@ -62,7 +62,8 @@ export interface TaskBuckets {
   finished: Task[];
 }
 
-function finishedAtOf(task: Task): number {
+/** 已结束任务的结束时刻；没有是状态层的契约错误。 */
+export function finishedAtOf(task: Task): number {
   if (task.finishedAt === null) throw new Error(`已结束的任务 ${task.id} 没有结束时刻`);
   return task.finishedAt;
 }
@@ -94,8 +95,22 @@ export function subtitleOf(b: TaskBuckets): string {
   return TASKS_COPY.subtitleActive(downloading, b.queued.length);
 }
 
+/**
+ * 列表分组用的桶：刚完成、还在收尾的任务（finishing）仍算运行中，留在它原来的位置上把进度条推满，收尾结束才进已结束。
+ * 计数、副标题与筛选都按真实状态，不经这里。
+ */
+export function listBuckets(tasks: readonly Task[], finishing: ReadonlySet<string>): TaskBuckets {
+  const held = (t: Task) => t.status === "done" && finishing.has(t.id);
+  const rest = bucketTasks(tasks.filter((t) => !held(t)));
+  return { ...rest, running: tasks.filter((t) => t.status === "running" || held(t)) };
+}
+
 export interface TaskGroup {
-  key: string;
+  /**
+   * 分组容器的身份。已完成、失败与取消都是已结束的子集，用同一个键：换筛选时同一个列表沿用下来，
+   * 留下的行原地不动、离开的淡出、其余的滑到新位置，而不是整张列表拆掉重建。
+   */
+  key: "active" | "finished";
   /** 只有「全部」分组时才有组标题。 */
   label: string | null;
   tasks: Task[];
@@ -116,10 +131,10 @@ export function taskGroups(b: TaskBuckets, filter: TaskFilter): TaskGroup[] {
       groups = [{ key: "active", label: null, tasks: active }];
       break;
     case "done":
-      groups = [{ key: "done", label: null, tasks: b.done }];
+      groups = [{ key: "finished", label: null, tasks: b.done }];
       break;
     case "failed":
-      groups = [{ key: "failed", label: null, tasks: b.ended }];
+      groups = [{ key: "finished", label: null, tasks: b.ended }];
       break;
   }
   return groups.filter((g) => g.tasks.length > 0);
@@ -144,10 +159,32 @@ export function sameTaskLayout(a: readonly Task[], b: readonly Task[]): boolean 
   return a.length === b.length && a.every((task, i) => sameApartFromProgress(task, b[i]));
 }
 
-/** 三条并行通道各放哪个运行中的任务；空闲的通道为 null。 */
-export function laneSlots(running: readonly Task[]): (Task | null)[] {
+/** 还没有分配过通道时的上一次分配：全部空闲。 */
+export const NO_LANES: readonly (string | null)[] = Array.from({ length: MAX_PARALLEL_TASKS }, () => null);
+
+/**
+ * 三条并行通道各放哪个任务；空闲的通道为 null。previous 是上一次各通道里任务的 id。
+ * 通道粘住任务：上一次在哪条通道，只要还在跑、或刚完成还在收尾（finishing），就留在哪条，别的任务结束不会让它换道。
+ * 新开始的任务按开始顺序填进编号最小的空通道；收尾的任务还占着通道、一时没有空位的，先不画，等它让出来。
+ */
+export function laneSlots(previous: readonly (string | null)[], running: readonly Task[], finishing: readonly Task[]): (Task | null)[] {
   if (running.length > MAX_PARALLEL_TASKS) throw new Error(`同时运行的任务有 ${running.length} 个，超过了上限 ${MAX_PARALLEL_TASKS}`);
-  return Array.from({ length: MAX_PARALLEL_TASKS }, (_, i) => (i < running.length ? running[i] : null));
+  if (previous.length !== MAX_PARALLEL_TASKS) throw new Error(`上一次的通道分配有 ${previous.length} 条，应为 ${MAX_PARALLEL_TASKS} 条`);
+  const present = new Map([...running, ...finishing].map((t) => [t.id, t]));
+  // 上一次的任务已经离开（结束、收尾完、被取消）：这条通道空出来
+  const lanes = previous.map((id) => {
+    const stay = id === null ? undefined : present.get(id);
+    return stay === undefined ? null : stay;
+  });
+  const placed = new Set(lanes.flatMap((t) => (t === null ? [] : [t.id])));
+  for (const task of running) {
+    if (placed.has(task.id)) continue;
+    const free = lanes.indexOf(null);
+    if (free === -1) break;
+    lanes[free] = task;
+    placed.add(task.id);
+  }
+  return lanes;
 }
 
 // ---------------------------------------------------------------- 时间
@@ -194,9 +231,9 @@ export function takeSample(running: readonly Task[]): ThroughputSample {
   return { total, tasks };
 }
 
-/** 追加一个采样，只留最近 THROUGHPUT_SAMPLES 个。 */
+/** 追加一个采样，只留最近 THROUGHPUT_KEPT 个（窗口再多一个，见常量）。 */
 export function pushSample(history: readonly ThroughputSample[], sample: ThroughputSample): ThroughputSample[] {
-  return [...history, sample].slice(-THROUGHPUT_SAMPLES);
+  return [...history, sample].slice(-THROUGHPUT_KEPT);
 }
 
 function mean(values: readonly number[]): number {
@@ -240,6 +277,13 @@ export interface RowMetaContext {
   queuePosition: number | null;
   /** 估算剩余时间用的速度（etaSpeed）。 */
   etaSpeed: number;
+  /** 写出来的速度：平滑过、换字有节制的那个（lib/progress-display 的 useDisplaySpeed），不是每 100 ms 一跳的瞬时值。 */
+  speed: number;
+  /**
+   * 写出来的已下字节：按节拍换字的那个（lib/progress-display 的 useDisplayCount），不是每 100 ms 一跳的原值。
+   * 只有运行中的行用到，已下大小与剩余时间都按它算。
+   */
+  bytes: number;
   /** 相对时间的参照时刻。 */
   now: number;
 }
@@ -251,18 +295,19 @@ function sizeOrPending(bytes: number | null): string {
 /**
  * 分步任务这一步还没认下下载批次时，字节与速度还是上一批留下的，写出来像在下这一步，所以只写在第几步；
  * 认下之后写的量与剩余时间都是这一步这一批的。
+ * 量与剩余时间都按写出来的已下字节算：剩余时间挨着已下大小，两段字同一拍换，不各跳各的。
  */
-function runningMeta(task: Task, speedForEta: number): { left: string; right: string } {
+function runningMeta(task: Task, speedForEta: number, shownSpeed: number, shownBytes: number): { left: string; right: string } {
   if (task.phase !== null && task.phase.batch === null) return { left: taskPhaseText(task.phase, "short"), right: "" };
   const total = task.totalBytes;
   const amount =
-    total === null ? (task.bytes > 0 ? TASKS_COPY.row.transfer(formatBytes(task.bytes), TASKS_COPY.row.sizePending) : TASKS_COPY.row.sizePending) : TASKS_COPY.row.transfer(formatBytes(task.bytes), formatBytes(total));
+    total === null ? (shownBytes > 0 ? TASKS_COPY.row.transfer(formatBytes(shownBytes), TASKS_COPY.row.sizePending) : TASKS_COPY.row.sizePending) : TASKS_COPY.row.transfer(formatBytes(shownBytes), formatBytes(total));
   const left = task.phase === null ? amount : `${taskPhaseText(task.phase, "short")} · ${amount}`;
   if (task.speedBps <= 0) return { left, right: TASKS_COPY.row.waitingData };
   // 总量未知时估不出剩余时间，只报速度
-  if (total === null) return { left, right: formatSpeed(task.speedBps) };
+  if (total === null) return { left, right: formatSpeed(shownSpeed) };
   const speed = speedForEta > 0 ? speedForEta : task.speedBps;
-  return { left, right: TASKS_COPY.row.speedEta(formatSpeed(task.speedBps), etaText(Math.max(0, total - task.bytes) / speed)) };
+  return { left, right: TASKS_COPY.row.speedEta(formatSpeed(shownSpeed), etaText(Math.max(0, total - shownBytes) / speed)) };
 }
 
 /**
@@ -297,7 +342,7 @@ export function rowMeta(task: Task, ctx: RowMetaContext): RowMeta {
   let meta: RowMeta;
   switch (task.status) {
     case "running":
-      meta = { ...runningMeta(task, ctx.etaSpeed), danger: false };
+      meta = { ...runningMeta(task, ctx.etaSpeed, ctx.speed, ctx.bytes), danger: false };
       break;
     case "queued": {
       if (ctx.queuePosition === null) throw new Error(`排队中的任务 ${task.id} 没有队列位次`);
@@ -352,9 +397,20 @@ export function overviewOf(b: TaskBuckets): Overview {
   return { label, speed, downloaded, total, fraction: total > 0 ? downloaded / total : null, localOnly };
 }
 
-/** 总览副行：剩余字节与剩余时间；没有任何下载流量时写「等待数据」。 */
-export function overviewRemaining(o: Overview, speedForEta: number): string {
-  const remaining = Math.max(0, o.total - o.downloaded);
+/**
+ * 总进度环的平滑标识：活动任务连同各自所在的批次。有任务结束或入队、某个任务换了批次时标识就变，
+ * 环直接跳到按新集合加权的值，不从旧值倒退着动画过去；标识不变时只增不减。与标题栏下载入口的汇总环同一规则。
+ */
+export function overviewTrack(active: readonly Task[]): string {
+  return active.map(progressTrack).sort().join("\n");
+}
+
+/**
+ * 总览副行：剩余字节与剩余时间；没有任何下载流量时写「等待数据」。downloaded 是写出来的已下字节（按节拍换字的那个，
+ * 与「已下载」小统计同一个），不是 o.downloaded 的原值：剩余字节与旁边的已下载同一拍换。
+ */
+export function overviewRemaining(o: Overview, downloaded: number, speedForEta: number): string {
+  const remaining = Math.max(0, o.total - downloaded);
   const speed = speedForEta > 0 ? speedForEta : o.speed;
   return TASKS_COPY.flow.remaining(formatBytes(remaining), speed > 0 ? etaText(remaining / speed) : TASKS_COPY.row.waitingData);
 }
@@ -369,17 +425,29 @@ export interface ChartGeometry {
 }
 
 /**
- * 最近 THROUGHPUT_SAMPLES 秒的总速度曲线；采样不足时左侧补 0。纵轴上限 = max(最低上限, 样本最大值)。
+ * 曲线纵轴的上限：至少 CHART_MIN_CEILING_BPS，不低于要画的任何一个采样；峰值滑出窗口后不一下子落到新的最大值，
+ * 每个采样只回落到上一次的 CHART_CEILING_DECAY 倍。previous 是上一个采样时的上限，第一次为 null。
+ */
+export function chartCeiling(previous: number | null, totals: readonly number[]): number {
+  const drawn = totals.slice(-THROUGHPUT_KEPT);
+  return Math.max(CHART_MIN_CEILING_BPS, ...drawn, previous === null ? 0 : previous * CHART_CEILING_DECAY);
+}
+
+/**
+ * 最近的总速度曲线：画 THROUGHPUT_KEPT 个点，不足时左侧补 0，点距 CHART_STEP。最新的一个在视图右缘外一格，最旧的一个在左缘：
+ * 调用方让整条曲线在一个采样间隔里向左滑一格、新采样到时复位，最新的那个就从右缘外滑进来，曲线连续地走，不是每秒整条跳一格。
  * 补的 0 只是画图用的：采样从进页才开始，更早有没有流量不知道，窗口没采满就不能说这段时间没有流量。
  */
-export function chartGeometry(totals: readonly number[]): ChartGeometry {
-  const recent = totals.slice(-THROUGHPUT_SAMPLES);
-  const padded = [...Array<number>(THROUGHPUT_SAMPLES - recent.length).fill(0), ...recent];
-  const ceiling = Math.max(CHART_MIN_CEILING_BPS, ...padded);
-  const { width, height, peak } = CHART_VIEW;
-  const points = padded.map((v, i) => `${((i / (THROUGHPUT_SAMPLES - 1)) * width).toFixed(2)},${(height - (v / ceiling) * peak).toFixed(2)}`);
+export function chartGeometry(totals: readonly number[], ceiling: number): ChartGeometry {
+  const drawn = totals.slice(-THROUGHPUT_KEPT);
+  if (drawn.some((v) => v > ceiling)) throw new Error(`纵轴上限 ${ceiling} 低于要画的采样，曲线会画出视图`);
+  const padded = [...Array<number>(THROUGHPUT_KEPT - drawn.length).fill(0), ...drawn];
+  const { height, peak } = CHART_VIEW;
+  const points = padded.map((v, i) => `${(i * CHART_STEP).toFixed(2)},${(height - (v / ceiling) * peak).toFixed(2)}`);
   const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${p}`).join(" ");
-  return { line, area: `${line} L${width},${height} L0,${height} Z`, idle: recent.length === THROUGHPUT_SAMPLES && recent.every((v) => v === 0) };
+  const right = ((THROUGHPUT_KEPT - 1) * CHART_STEP).toFixed(2);
+  const visible = totals.slice(-THROUGHPUT_SAMPLES);
+  return { line, area: `${line} L${right},${height} L0,${height} Z`, idle: visible.length === THROUGHPUT_SAMPLES && visible.every((v) => v === 0) };
 }
 
 // ---------------------------------------------------------------- 取消前的确认

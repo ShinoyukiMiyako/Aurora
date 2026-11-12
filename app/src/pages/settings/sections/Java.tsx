@@ -1,15 +1,20 @@
 // Java：自动下载开关、默认 Java（自动选择或固定一个探测到的运行时）、手动添加与移除 Java、按条件出现的提醒、
 // 手动下载运行时，以及让游戏用独立显卡。
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useReducedMotionConfig } from "framer-motion";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../../art/Icon";
 import { JAVA_AUTO, type InstanceSummary } from "../../../domain/adapt";
 import { runtimeComplete } from "../../../domain/rules";
+import { useLoadingGate } from "../../../lib/loading-gate";
+import { observeReflow, useReflow } from "../../../lib/reflow";
+import { cssVars } from "../../../lib/util";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { ACTION_ERROR } from "../../../copy/flows";
 import { useLauncherActions, useLauncherSelector } from "../../../state/launcher";
 import { useGpuAdapters, useJavaRuntimes, type JavaInstallationDto } from "../../../state/queries/catalog";
+import { Appear } from "../../../ui/Appear";
 import { announceRole } from "../../../ui/Banner";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
@@ -17,6 +22,7 @@ import { Card } from "../../../ui/Card";
 import { CardHeader } from "../../../ui/CardHeader";
 import { EmptyState } from "../../../ui/EmptyState";
 import { List, ListRow } from "../../../ui/ListRow";
+import { Loadable } from "../../../ui/Loadable";
 import { RadioTile } from "../../../ui/RadioTile";
 import { Select } from "../../../ui/Select";
 import { SettingRow } from "../../../ui/SettingRow";
@@ -35,6 +41,7 @@ import {
   joinMajors,
   majorsInUse,
   manualJavas,
+  runtimeSkeletonTiles,
   scanDiff,
   selectableAsDefault,
   selectedRuntime,
@@ -133,33 +140,43 @@ function PinnedMissingNote({ path, onUseAuto, onPickAgain }: { path: string; onU
   );
 }
 
+/** 说明块下面逐行列出的提醒：行按种类进出，其余行滑过去。 */
+function NoteRows({ notes }: { notes: readonly JavaNote[] }) {
+  const reflow = useReflow<HTMLDivElement>();
+  return (
+    <div ref={reflow} className={s.noteRows}>
+      <Appear>
+        {notes.map((note) => (
+          <div key={note.kind} className={s.noteRow} role={announceRole("warn", true)}>
+            <Icon name="alert" size={16} className={s.noteIcon} />
+            <span>{noteText(note)}</span>
+          </div>
+        ))}
+      </Appear>
+    </div>
+  );
+}
+
 /**
  * 卡片里的提醒：一张卡片至多一条说明块，最要紧的那条写成说明块，其余逐行列在下面。行不限两行，也和说明块一样要播报。
- * notes 由 javaNotes 按后果排好。
+ * notes 由 javaNotes 按后果排好。说明块按种类认身份：固定、改回自动时换了一条，旧的原地淡出、新的淡入落位，
+ * 同一种只换文案（自动下载开关改了补救办法）时原位更新。
  */
 function JavaNotes({ notes, onUseAuto, onPickAgain }: { notes: readonly JavaNote[]; onUseAuto(): void; onPickAgain: (() => void) | null }) {
-  if (notes.length === 0) return null;
-  const [lead, ...rest] = notes;
+  const lead = notes.length > 0 ? notes[0] : null;
+  const rest = notes.slice(1);
   return (
-    <>
-      {lead.kind === "pinnedMissing" ? (
-        <PinnedMissingNote path={lead.path} onUseAuto={onUseAuto} onPickAgain={onPickAgain} />
-      ) : (
-        <Callout tone="warn" icon="alert" announce>
-          {noteText(lead)}
-        </Callout>
-      )}
-      {rest.length > 0 && (
-        <div className={s.noteRows}>
-          {rest.map((note) => (
-            <div key={note.kind} className={s.noteRow} role={announceRole("warn", true)}>
-              <Icon name="alert" size={16} className={s.noteIcon} />
-              <span>{noteText(note)}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </>
+    <Appear>
+      {lead !== null &&
+        (lead.kind === "pinnedMissing" ? (
+          <PinnedMissingNote key="lead-pinnedMissing" path={lead.path} onUseAuto={onUseAuto} onPickAgain={onPickAgain} />
+        ) : (
+          <Callout key={`lead-${lead.kind}`} tone="warn" icon="alert" announce>
+            {noteText(lead)}
+          </Callout>
+        ))}
+      {rest.length > 0 && <NoteRows key="rest" notes={rest} />}
+    </Appear>
   );
 }
 
@@ -189,34 +206,55 @@ function useRescan(java: ReturnType<typeof useJavaRuntimes>) {
   return { scanning, rescan };
 }
 
-function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] }) {
+/**
+ * autoDownload 是开关此刻显示的值（写入期间就是新值）：提醒与说明跟着点击一起换，不等配置写回再变一次。
+ */
+function RuntimeList({ runtimes, autoDownload }: { runtimes: readonly JavaInstallationDto[]; autoDownload: boolean }) {
   const settings = useLoadedSettings();
   const instances = useLauncherSelector((s) => s.instances);
   const actions = useLauncherActions();
   const { tier } = useShell();
+  const reduced = useReducedMotionConfig() === true;
   const write = useSettingWrite(settings.defaultJava, JAVA_COPY.defaultJava, (defaultJava: string) => actions.updateSettings({ defaultJava }));
   const majors = majorsInUse(instances);
   const sorted = sortRuntimes(runtimes);
   const selected = selectedRuntime(write.value, runtimes);
-  const notes = javaNotes(write.value, runtimes, instances, settings.autoDownloadJava);
-  const listRef = useRef<HTMLDivElement>(null);
+  const notes = javaNotes(write.value, runtimes, instances, autoDownload);
+  // 列表、手动记录、提醒三块之间互相让位：提醒换了、记录增删时下面的块滑过去
+  const reflow = useReflow<HTMLDivElement>();
+  const listRef = useRef<HTMLDivElement | null>(null);
+  // 单选块网格由 RadioTile 画，它不收 ref：从外层这一格取它的根挂让位。重新扫描、添加或移除后运行时增减，
+  // 说明随开关变高变矮时，其余单选块从原位置滑到新位置
+  const attachList = useCallback((el: HTMLDivElement | null) => {
+    listRef.current = el;
+    if (el === null) return;
+    const grid = el.firstElementChild;
+    if (!(grid instanceof HTMLElement)) throw new Error("默认 Java 列表里没有单选块网格");
+    const stop = observeReflow(grid);
+    return () => {
+      listRef.current = null;
+      stop();
+    };
+  }, []);
   // 不完整的运行时被禁用了，焦点落不上去；全是这种时没有可重新选的，只剩改回自动选择
   const pickable = sorted.some((runtime) => selectableAsDefault(runtime, write.value));
-  // 「重新选择」不替用户挑：把焦点放到第一个能选的运行时上（「自动选择」恒在最前），方向键或点击即可选定
+  // 「重新选择」不替用户挑：把焦点放到第一个能选的运行时上（「自动选择」恒在最前），方向键或点击即可选定。
+  // 它常在视口外：聚焦时不让浏览器一步跳过去，另外平滑地把它带进视口，看得出焦点去了哪里；减少动画时直接到位
   const pickAgain = () => {
     const host = listRef.current;
     if (host === null) throw new Error("默认 Java 列表还没挂载，不能重新选择");
     const first = host.querySelectorAll<HTMLElement>('[role="radio"]:not(:disabled)')[1];
     if (first === undefined) throw new Error("默认 Java 列表里没有可选的运行时");
-    first.focus();
+    first.focus({ preventScroll: true });
+    first.scrollIntoView({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
   };
   return (
-    <>
+    <div ref={reflow} className={s.cardBody}>
       {/* 一个都没扫到时只剩「自动选择」一项，构不成单选列表：列表位置换成空状态，提醒照常跟在后面 */}
       {sorted.length === 0 ? (
-        <EmptyState compact icon="java" title={JAVA_COPY.emptyTitle} body={settings.autoDownloadJava ? JAVA_COPY.emptyAuto : JAVA_COPY.emptyManual} />
+        <EmptyState compact icon="java" title={JAVA_COPY.emptyTitle} body={autoDownload ? JAVA_COPY.emptyAuto : JAVA_COPY.emptyManual} />
       ) : (
-        <div ref={listRef}>
+        <div ref={attachList}>
           <RadioTile<string>
             className={s.javaList}
             ariaLabel={JAVA_COPY.defaultJava}
@@ -236,7 +274,7 @@ function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
                     </Tag>
                   </span>
                 ),
-                description: JAVA_COPY.autoDesc(majors, settings.autoDownloadJava),
+                description: JAVA_COPY.autoDesc(majors, autoDownload),
               },
               ...sorted.map((runtime) => ({
                 value: runtime.path,
@@ -248,10 +286,10 @@ function RuntimeList({ runtimes }: { runtimes: readonly JavaInstallationDto[] })
           />
         </div>
       )}
-      {/* 空状态时也要有：手动记下的路径探测不出来时，只有这里还能看到并移除它 */}
-      <ManualBlock extraPaths={settings.extraJavaPaths} runtimes={runtimes} />
+      {/* 空状态时也要有：手动记下的路径探测不出来时，只有这里还能看到并移除它。第一条加进来、最后一条移走时整块淡入淡出 */}
+      <Appear>{settings.extraJavaPaths.length > 0 && <ManualBlock key="manual" extraPaths={settings.extraJavaPaths} runtimes={runtimes} />}</Appear>
       <JavaNotes notes={notes} onUseAuto={() => write.set(JAVA_AUTO)} onPickAgain={pickable ? pickAgain : null} />
-    </>
+    </div>
   );
 }
 
@@ -302,9 +340,8 @@ function ManualRow({ entry }: { entry: ManualJava }) {
   );
 }
 
-/** 手动添加的记录：探测里识别不出的也列在这里，用户才找得到、删得掉。 */
+/** 手动添加的记录：探测里识别不出的也列在这里，用户才找得到、删得掉。只在有记录时渲染它。 */
 function ManualBlock({ extraPaths, runtimes }: { extraPaths: readonly string[]; runtimes: readonly JavaInstallationDto[] }) {
-  if (extraPaths.length === 0) return null;
   return (
     <div className={s.manualBlock}>
       <span className={s.subsectionText}>
@@ -345,41 +382,65 @@ function useAddJava() {
   return { adding, add };
 }
 
+/**
+ * 本次会话上一次扫到几个运行时。扫描结果的缓存会在 Java 下载完成、回到前台、游戏退出后被丢掉，再进来时骨架按它画，
+ * 和马上要出现的列表差不多高。
+ */
+let lastRuntimeCount: number | null = null;
+
+/** 单选块的占位高度：「自动选择」一块是标题加一行说明，运行时一块是标题、路径与使用它的实例三行。 */
+const AUTO_TILE_SKELETON = 68;
+const RUNTIME_TILE_SKELETON = 90;
+
+/** 运行时列表的占位：照单选块网格排，「自动选择」独占一行，运行时块按列数排。 */
+function RuntimeSkeleton({ tiles, columns }: { tiles: number; columns: 1 | 2 }) {
+  return (
+    <div className={s.javaSkeleton} style={cssVars({ "--java-skeleton-columns": columns })}>
+      <Skeleton shape="block" width="100%" height={AUTO_TILE_SKELETON} radius="md" />
+      {Array.from({ length: tiles }, (_, i) => (
+        <Skeleton key={i} shape="block" width="100%" height={RUNTIME_TILE_SKELETON} radius="md" />
+      ))}
+    </div>
+  );
+}
+
 function RuntimeCard() {
   const settings = useLoadedSettings();
   const actions = useLauncherActions();
   const run = useRunner();
+  const { tier } = useShell();
   const java = useJavaRuntimes();
   const { scanning, rescan } = useRescan(java);
   const { adding, add } = useAddJava();
   const autoDownload = useSettingWrite(settings.autoDownloadJava, JAVA_COPY.autoDownload, (autoDownloadJava: boolean) => actions.updateSettings({ autoDownloadJava }));
+  // 探测常要一秒以上：骨架等 300 ms 才露面、至少停 300 ms，与列表叠放交叉。个数由本机决定、做不到等高，
+  // 差的那一截由分区的让位接住，下载卡与显卡卡滑过去
+  const gate = useLoadingGate(java.status === "loading");
+  const count = java.status === "ready" ? java.data.length : null;
+  useEffect(() => {
+    if (count !== null) lastRuntimeCount = count;
+  }, [count]);
 
-  let body: ReactNode;
-  if (java.status === "error") {
-    body = (
-      <Callout
-        tone="danger"
-        announce
-        action={
-          <Button size="sm" onClick={() => void run(() => java.reload(), JAVA_COPY.scanFailed)}>
-            {LOAD_COPY.retry}
-          </Button>
-        }
-      >
-        <span className={s.calloutTitle}>{JAVA_COPY.scanFailed}</span>
-        <span className={s.errorText}>{java.error.message}</span>
-      </Callout>
-    );
-  } else if (java.status === "loading") {
-    body = (
-      <div className={s.listSkeleton} aria-busy="true">
-        <Skeleton shape="block" width="100%" height={64} radius="md" />
-        <Skeleton shape="block" width="100%" height={84} radius="md" />
-      </div>
-    );
-  } else {
-    body = <RuntimeList runtimes={java.data} />;
-  }
+  const body = () => {
+    if (java.status === "error") {
+      return (
+        <Callout
+          tone="danger"
+          announce
+          action={
+            <Button size="sm" onClick={() => void run(() => java.reload(), JAVA_COPY.scanFailed)}>
+              {LOAD_COPY.retry}
+            </Button>
+          }
+        >
+          <span className={s.calloutTitle}>{JAVA_COPY.scanFailed}</span>
+          <span className={s.errorText}>{java.error.message}</span>
+        </Callout>
+      );
+    }
+    if (java.status === "loading") throw new Error("Java 还在扫描，不能画运行时列表");
+    return <RuntimeList runtimes={java.data} autoDownload={autoDownload.value} />;
+  };
 
   return (
     <Card>
@@ -401,7 +462,11 @@ function RuntimeCard() {
       <SettingRow title={JAVA_COPY.autoDownload} description={JAVA_COPY.autoDownloadDesc}>
         <Toggle checked={autoDownload.value} onChange={autoDownload.set} ariaLabel={JAVA_COPY.autoDownload} />
       </SettingRow>
-      <div className={s.cardBody}>{body}</div>
+      <div className={s.cardBody}>
+        <Loadable view={gate.view} skeleton={<RuntimeSkeleton tiles={runtimeSkeletonTiles(lastRuntimeCount)} columns={tier === "wide" ? 2 : 1} />}>
+          {body}
+        </Loadable>
+      </div>
     </Card>
   );
 }
@@ -465,19 +530,19 @@ function GpuCard() {
   const gpu = useGpuAdapters();
   const prefer = useSettingWrite(settings.preferDedicatedGpu, GPU_COPY.toggle, (preferDedicatedGpu: boolean) => actions.updateSettings({ preferDedicatedGpu }));
 
-  // 开关不随读取状态禁用：偏好在启动时才按选中的 Java 写入，读不到显卡信息也照样能写
+  // 卡内说明块与开关、撤销说明之间互相让位：读到两块显卡（或读取失败）时说明块淡入，下面两行滑下去
+  const reflow = useReflow<HTMLDivElement>();
+
+  // 开关不随读取状态禁用：偏好在启动时才按选中的 Java 写入，读不到显卡信息也照样能写。
+  // 读取中不放骨架行：最常见的结果是没有说明块（只有一块显卡），推测的骨架读完多半要塌掉；读取中由开关说明写明
   let notice: ReactNode = null;
   let description: string;
   if (gpu.status === "loading") {
-    notice = (
-      <div aria-busy="true">
-        <Skeleton shape="text" />
-      </div>
-    );
     description = GPU_COPY.descLoading;
   } else if (gpu.status === "error") {
     notice = (
       <Callout
+        key="error"
         tone="danger"
         announce
         action={
@@ -495,7 +560,7 @@ function GpuCard() {
     const summary = gpuSummary(gpu.data);
     if (summary.kind === "switchable") {
       notice = (
-        <Callout tone="info" icon="info">
+        <Callout key="switchable" tone="info" icon="info">
           {GPU_COPY.dualNote(summary.powerSaving.name, summary.highPerformance.name)}
         </Callout>
       );
@@ -508,9 +573,10 @@ function GpuCard() {
   return (
     <Card>
       <CardHeader title={GPU_COPY.title} subtitle={GPU_COPY.subtitle} icon="monitor" />
-      <div className={s.cardBody}>
-        {notice}
-        <SettingRow title={GPU_COPY.toggle} description={description}>
+      <div ref={reflow} className={s.cardBody}>
+        <Appear>{notice}</Appear>
+        {/* 「读取中」只标在会换掉的说明上：标在整块上时，读屏可能在读取期间不报里面的开关，而开关这时照常可用 */}
+        <SettingRow title={GPU_COPY.toggle} description={<span aria-busy={gpu.status === "loading" || undefined}>{description}</span>}>
           <Toggle checked={prefer.value} onChange={prefer.set} ariaLabel={GPU_COPY.toggle} />
         </SettingRow>
         <p className={s.mutedText}>{GPU_COPY.revertNote}</p>
@@ -520,6 +586,8 @@ function GpuCard() {
 }
 
 export function JavaSection() {
+  // 卡片直接排进载入门里会让位的分区卡片栈（SectionFlow）：运行时列表晚到、增删、提醒换了时卡片变高变矮，
+  // 下载卡与显卡卡由它滑过去。这里不再包一层：包了以后外层只看得到一个子项，等于两层让位叠着、只有内层在干活
   return (
     <>
       <RuntimeCard />

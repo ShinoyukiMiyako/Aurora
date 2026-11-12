@@ -2,9 +2,11 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { MotionConfig } from "framer-motion";
 import { act, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ACCENT_NAMES } from "../domain/types";
+import { faceSwap } from "../lib/motion";
 import { keydown, render, type Rendered } from "../test/dom";
 import { AccentSwatches, type AccentOption } from "./AccentSwatches";
 import type { PreviewAccent } from "./ModeCards";
@@ -50,6 +52,15 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const css = readFileSync(join(HERE, "./AccentSwatches.module.css"), "utf8");
 const tokens = readFileSync(join(HERE, "../styles/tokens.css"), "utf8");
 
+const plain = css.replace(/\/\*[\s\S]*?\*\//g, "");
+
+/** 选择器恰好为 selector 的那条规则的声明体（不含注释）。 */
+function ruleOf(selector: string): string {
+  const at = plain.indexOf(`\n${selector} {`);
+  if (at < 0) throw new Error(`样式里缺少 ${selector}`);
+  return plain.slice(at + selector.length + 3, plain.indexOf("}", at));
+}
+
 function varIn(selector: string, name: string): string {
   const at = css.indexOf(`${selector} {`);
   if (at < 0) throw new Error(`样式里缺少 ${selector}`);
@@ -88,6 +99,39 @@ describe("AccentSwatches", () => {
     expect(radios().map((r) => r.getAttribute("aria-checked"))).toEqual(["false", "false", "true"]);
   });
 
+  it("换选中项：新对勾从 0.6 弹出并淡入，旧对勾留在原处淡出，不在同一帧瞬现瞬隐；挂载时已选中的那枚不播入场", () => {
+    mount("sakura");
+    const checkOf = (i: number) => swatchOf(radios()[i]).firstElementChild as HTMLElement | null;
+    const mounted = checkOf(0);
+    expect(mounted?.querySelector("svg")).not.toBeNull();
+    expect(mounted?.style.opacity).toBe("1");
+
+    act(() => radios()[2].click());
+    const entering = checkOf(2);
+    expect(entering?.querySelector("svg")).not.toBeNull();
+    expect(entering?.style.opacity).toBe("0");
+    expect(entering?.style.transform).toBe("scale(0.6)");
+    // 旧对勾还在 DOM 里走退场，等淡出完才移除
+    expect(checkOf(0)).toBe(mounted);
+    expect(checkOf(1)).toBeNull();
+  });
+
+  it.each([
+    ["never", `scale(${faceSwap.pop.initial.scale})`],
+    ["always", ""],
+  ] as const)("换选中项的新对勾平常从略小处弹出；减少动画（%s）时只淡入，入场起点不带缩放", (reducedMotion, transform) => {
+    view = render(
+      <MotionConfig reducedMotion={reducedMotion}>
+        <Controlled initial="sakura" onChange={vi.fn()} />
+      </MotionConfig>,
+    );
+    act(() => radios()[1].click());
+    const entering = swatchOf(radios()[1]).firstElementChild as HTMLElement | null;
+    expect(entering?.querySelector("svg")).not.toBeNull();
+    expect(entering?.style.opacity).toBe("0");
+    expect(entering?.style.transform).toBe(transform);
+  });
+
   it("单选组以传入的名称命名，名称显示在色块下", () => {
     mount("sakura");
     expect(document.querySelector('[role="radiogroup"]')?.getAttribute("aria-label")).toBe("强调色");
@@ -97,6 +141,29 @@ describe("AccentSwatches", () => {
   it("选项重复是调用方的错误", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     expect(() => render(<AccentSwatches value="moss" options={[OPTIONS[2], OPTIONS[2]]} onChange={() => undefined} ariaLabel="强调色" />)).toThrow("重复的强调色");
+  });
+});
+
+describe("卡片的按压回应", () => {
+  it("按下时微缩到 0.99 并挂 tap 弹簧；减少动画时不缩放，瞬时降到 0.85 不透明度", () => {
+    expect(ruleOf(".card")).toMatch(/transform var\(--sk-spring-tap-dur\) var\(--sk-spring-tap\)/);
+    expect(ruleOf(".card:active")).toMatch(/transform: scale\(0\.99\);/);
+    const reduced = ruleOf(":global([data-sk-reduced]) .card:active");
+    expect(reduced).toMatch(/transform: none;/);
+    expect(reduced).toMatch(/opacity: 0\.85;/);
+    expect(reduced).toMatch(/transition: none;/);
+  });
+});
+
+describe("选中外环", () => {
+  it("外环画在卡片的常驻叠层上，选中时淡入；卡片本身不再一帧切换外环", () => {
+    expect(ruleOf('.card[aria-checked="true"]')).not.toMatch(/outline/);
+    expect(ruleOf(".card")).toMatch(/position: relative;/);
+    const ring = ruleOf(".card::after");
+    expect(ring).toMatch(/outline: 3px solid var\(--sk-accent-soft\);/);
+    expect(ring).toMatch(/opacity: 0;/);
+    expect(ring).toMatch(/transition: opacity var\(--sk-dur-hover\) var\(--sk-ease\);/);
+    expect(ruleOf('.card[aria-checked="true"]::after')).toMatch(/opacity: 1;/);
   });
 });
 

@@ -13,6 +13,7 @@ import { percent } from "../../../domain/format";
 import { instanceNameError } from "../../../domain/rules";
 import type { LoaderKind, Task } from "../../../domain/types";
 import { LaunchCapsule } from "../../../launch/LaunchCapsule";
+import { useReflow } from "../../../lib/reflow";
 import { useNav } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { errorRecord } from "../../../state/errors";
@@ -22,11 +23,14 @@ import { blockedFilesOf, useModpackSummary, type ModpackSummaryDto, type ModVers
 import type { ResourceResult } from "../../../state/resource";
 import { findInstance } from "../../../state/selectors";
 import type { BlockedFileDto } from "../../../state/store";
+import { progressTrack } from "../../../state/tasks";
+import { Appear } from "../../../ui/Appear";
 import { Button } from "../../../ui/Button";
 import { Callout } from "../../../ui/Callout";
 import { Inset } from "../../../ui/Inset";
 import { ProgressBar } from "../../../ui/ProgressBar";
 import { Select } from "../../../ui/Select";
+import { SmoothPercent } from "../../../ui/SmoothPercent";
 import { BlockedFilesModal } from "../BlockedFilesModal";
 import { DETAIL_COPY, MODPACK_COPY, SEARCH_COPY } from "../copy";
 import { instancesFromPack, type ProjectOrigin } from "../model";
@@ -160,11 +164,33 @@ export interface ModpackPanelProps {
   pinned: string | null;
   onPin: (versionId: string | null) => void;
   online: boolean;
+  /** 合并卡切换来源、新平台的详情还没到或没取到：detail 是上一个平台的，不能安装。 */
+  showingPrevious: boolean;
   footerHost: HTMLElement | null;
   onClose: () => void;
 }
 
-export function ModpackPanel({ detail, origins, versions, pinned, onPin, online, footerHost, onClose }: ModpackPanelProps) {
+/** 「正在下载」文案里百分数的占位：百分数是与进度条同步平滑的文字节点（ui/SmoothPercent），按模板摆到它的位置上。 */
+const PERCENT_SLOT = "\u0000";
+
+/**
+ * 下载中的那一行字。百分数与下面的进度条走同一条平滑（同一个 track），不随每条进度事件跳字，也不在条还没走到时先报出数来。
+ * 任务已经结束、只等新实例落地的那一小段没有 track，这时进度恒为满格，直接写字。
+ */
+export function DownloadingLine({ progress, track }: { progress: number; track: string | undefined }) {
+  if (track === undefined) return <>{MODPACK_COPY.downloading(percent(progress))}</>;
+  const parts = MODPACK_COPY.downloading(PERCENT_SLOT).split(PERCENT_SLOT);
+  if (parts.length !== 2) throw new Error(`整合包的下载文案里百分数应当恰好出现一次，实为 ${parts.length - 1} 次`);
+  return (
+    <>
+      {parts[0]}
+      <SmoothPercent value={progress} track={track} />
+      {parts[1]}
+    </>
+  );
+}
+
+export function ModpackPanel({ detail, origins, versions, pinned, onPin, online, showingPrevious, footerHost, onClose }: ModpackPanelProps) {
   const instances = useLauncherSelector((s) => s.instances);
   const actions = useLauncherActions();
   const run = useRunner();
@@ -177,6 +203,8 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   const [submitting, setSubmitting] = useState(false);
   // 打开过的清单留着它的文件与任务：重新安装后面板离开失败态，清单仍要播完退场。安装前打开的没有任务
   const [blocked, setBlocked] = useState<{ open: boolean; files: readonly BlockedFileDto[]; taskId: string | null } | null>(null);
+  // 清单摘要晚到、提醒出没、点安装后表单收起与进度块出现时，排在后面的从原位置滑过去
+  const panelReflow = useReflow<HTMLDivElement>();
 
   const list = versions.status === "ready" ? versions.data.versions : null;
   // 版本列表拉不到时还能装详情里给出的最新版本
@@ -188,7 +216,8 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
   const summary = useModpackSummary(detail.platform, detail.project_id, version === null ? null : version.version_id);
   const releases = manifest.status === "ready" ? manifest.data.versions.map((v) => v.id) : null;
   const facts = packFacts(version, summary.status === "ready" ? summary.data : null, releases);
-  const listedFacts: PackFacts = summary.status === "loading" && version !== null ? { ...facts, extra: [{ icon: "box", text: MODPACK_COPY.summaryLoading }] } : facts;
+  // 清单在读：Mod 数与下载量各占一行骨架，读到后在同一行换上文字，下面的内存与固定行不被推下去
+  const listedFacts: PackFacts = summary.status === "loading" && version !== null ? { ...facts, pending: true } : facts;
   // 提交的是去掉首尾空格的名字，校验也按它：否则前面多个空格就躲过重名检查，末尾多个空格又被当成 Windows 不允许的名字
   const nameError = instanceNameError(name.trim(), existing);
   const fromPack = instancesFromPack(origins, instances);
@@ -264,7 +293,7 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
     nav.go({ page: "instance", id: createdId, tab: "overview" });
   };
 
-  const installDisabled = version === null || facts.mcVersion === null || nameError !== null;
+  const installDisabled = version === null || facts.mcVersion === null || nameError !== null || showingPrevious;
   const failedBlocked = progress !== null && progress.kind === "failed" ? progress.blocked : null;
   // 开始安装后版本选择已经收起，这些提醒都管不到这次安装了；进度态自己的说明块是这一步唯一的一条
   const notices =
@@ -330,58 +359,79 @@ export function ModpackPanel({ detail, origins, versions, pinned, onPin, online,
     );
 
   return (
-    <Inset as="aside" className={styles.panel}>
-      <div className={styles.panelHead}>
-        <h3 className={styles.panelTitle}>{createdId === null ? MODPACK_COPY.title : MODPACK_COPY.createdTitle}</h3>
-        <span className={styles.panelHint}>{MODPACK_COPY.hint}</span>
-      </div>
-      <PackForm
-        seed={detail.project_id}
-        name={name}
-        onName={setName}
-        nameError={nameError}
-        cover={cover}
-        onCover={setCover}
-        version={versionRow}
-        facts={listedFacts}
-        readOnly={progress !== null && progress.kind !== "cancelled"}
-      />
-      <PanelNotices notices={notices} />
-      {progress === null && versions.status === "ready" && versions.data.truncated && <span className={styles.panelHint}>{DETAIL_COPY.versionsTruncated}</span>}
-
-      {progress !== null && (progress.kind === "queued" || progress.kind === "downloading") && (
-        <div className={styles.progress}>
-          <span className={styles.panelHint}>{progress.kind === "queued" ? MODPACK_COPY.queued : MODPACK_COPY.downloading(percent(progress.progress))}</span>
-          <ProgressBar value={progress.kind === "queued" ? null : progress.progress} tone="info" label={MODPACK_COPY.title} />
-          <span className={styles.panelHint}>{MODPACK_COPY.background}</span>
+    <Inset as="aside">
+      <div ref={panelReflow} className={styles.panel}>
+        <div className={styles.panelHead}>
+          <h3 className={styles.panelTitle}>{createdId === null ? MODPACK_COPY.title : MODPACK_COPY.createdTitle}</h3>
+          <span className={styles.panelHint}>{MODPACK_COPY.hint}</span>
         </div>
-      )}
-      {progress !== null && progress.kind === "ready" && createdId !== null && created !== undefined && (
-        <>
-          <Callout tone="ok">{MODPACK_COPY.ready(createdId)}</Callout>
-          <LaunchCapsule instanceId={createdId} block />
-        </>
-      )}
-      {progress !== null && progress.kind === "cancelled" && <Callout tone="info">{MODPACK_COPY.cancelled}</Callout>}
-      {progress !== null && progress.kind === "failed" && (
-        <Callout tone="danger" fullText>
-          {MODPACK_COPY.failed(progress.reason)}
-        </Callout>
-      )}
-      {blocked !== null && (
-        <BlockedFilesModal
-          open={blocked.open}
-          files={blocked.files}
-          origin={blocked.taskId === null ? "import" : "failed"}
-          onClose={() => setBlocked({ ...blocked, open: false })}
-          onAllFound={() => {
-            setBlocked({ ...blocked, open: false });
-            if (blocked.taskId !== null) retry(blocked.taskId);
-          }}
+        <PackForm
+          seed={detail.project_id}
+          name={name}
+          onName={setName}
+          nameError={nameError}
+          cover={cover}
+          onCover={setCover}
+          version={versionRow}
+          facts={listedFacts}
+          readOnly={progress !== null && progress.kind !== "cancelled"}
         />
-      )}
+        <PanelNotices notices={notices} />
+        <Appear>
+          {progress === null && versions.status === "ready" && versions.data.truncated && (
+            <span key="truncated" className={styles.panelHint}>
+              {DETAIL_COPY.versionsTruncated}
+            </span>
+          )}
+        </Appear>
 
-      {footerHost !== null && createPortal(footer, footerHost)}
+        {/* 进度、装好、取消、失败各是一块，换态时旧块原地淡出、新块淡入；排队与下载是同一块，只换文字与进度 */}
+        <Appear>
+          {progress !== null && (progress.kind === "queued" || progress.kind === "downloading") && (
+            <div key="progress" className={styles.progress}>
+              <span className={styles.panelHint}>{progress.kind === "queued" ? MODPACK_COPY.queued : <DownloadingLine progress={progress.progress} track={task === null ? undefined : progressTrack(task)} />}</span>
+              {/* 排队是静态的空轨道，开跑后从 0 走起；同一个任务只增不减 */}
+              <ProgressBar
+                value={progress.kind === "queued" ? 0 : progress.progress}
+                tone={progress.kind === "queued" ? "muted" : "info"}
+                track={task === null ? undefined : progressTrack(task)}
+                label={MODPACK_COPY.title}
+              />
+              <span className={styles.panelHint}>{MODPACK_COPY.background}</span>
+            </div>
+          )}
+          {progress !== null && progress.kind === "ready" && createdId !== null && created !== undefined && (
+            <div key="ready" className={styles.result}>
+              <Callout tone="ok">{MODPACK_COPY.ready(createdId)}</Callout>
+              <LaunchCapsule instanceId={createdId} block />
+            </div>
+          )}
+          {progress !== null && progress.kind === "cancelled" && (
+            <Callout key="cancelled" tone="info">
+              {MODPACK_COPY.cancelled}
+            </Callout>
+          )}
+          {progress !== null && progress.kind === "failed" && (
+            <Callout key="failed" tone="danger" fullText>
+              {MODPACK_COPY.failed(progress.reason)}
+            </Callout>
+          )}
+        </Appear>
+        {blocked !== null && (
+          <BlockedFilesModal
+            open={blocked.open}
+            files={blocked.files}
+            origin={blocked.taskId === null ? "import" : "failed"}
+            onClose={() => setBlocked({ ...blocked, open: false })}
+            onAllFound={() => {
+              setBlocked({ ...blocked, open: false });
+              if (blocked.taskId !== null) retry(blocked.taskId);
+            }}
+          />
+        )}
+
+        {footerHost !== null && createPortal(footer, footerHost)}
+      </div>
     </Inset>
   );
 }

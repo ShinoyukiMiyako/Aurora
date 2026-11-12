@@ -55,13 +55,18 @@
   min-height: 0;
 }
 
-/* 内容区滚动容器：页面的内边距与最大宽由页面根自己给；容器查询按内容区宽度而不是视口 */
+/*
+ * 内容区滚动容器：页面的内边距与最大宽由页面根自己给；容器查询按内容区宽度而不是视口。
+ * 滚动条槽位常驻：滚动条占 10px 宽，不预留的话内容高度一越过视口（切分页、换筛选、数据晚到）整页就横移一下。
+ * 页面根的右内边距相应少给一个滚动条的宽度，见 ui/Page.module.css。
+ */
 .scroll {
   position: absolute;
   inset: 0;
   z-index: var(--sk-z-page);
   overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   outline: none;
   container: sk-page / inline-size;
 }

@@ -69,6 +69,36 @@
   color: var(--sk-text-3);
 }
 
+/* 每枚胶囊外那层进出场的包裹：也是弹性盒，按钮不落在行盒基线上多出行高 */
+.chipItem {
+  display: flex;
+}
+
+/*
+ * 对勾位常驻（每枚都带图标位）：选中与否胶囊一样宽，同排的胶囊不被挤动。
+ * 没选中时对勾透明并缩小；选中时淡入并弹到原大，取消时淡出。
+ */
+.chip [data-glyph] {
+  opacity: 0;
+  scale: 0.6;
+  transition:
+    opacity var(--sk-dur-out) var(--sk-ease-in),
+    scale var(--sk-dur-out) var(--sk-ease-in);
+}
+
+.chip[aria-pressed="true"] [data-glyph] {
+  opacity: 1;
+  scale: 1;
+  transition:
+    opacity var(--sk-dur-in) var(--sk-ease-out),
+    scale var(--sk-spring-pop-dur) var(--sk-spring-pop);
+}
+
+/* 减少动画：不缩放，只淡入淡出 */
+:global([data-sk-reduced]) .chip [data-glyph] {
+  scale: none;
+}
+
 /* 花枝只是装饰：不接收指针 */
 .heroArt {
   flex: none;
@@ -95,8 +125,13 @@
   pointer-events: none;
 }
 
-/* 吸顶后底色向两侧多铺一点，卡片从下面滚过时不露边 */
+/*
+ * 吸顶后底色向两侧多铺一点，卡片从下面滚过时不露边。吸住与松开时底色走过渡，阴影画在 ::after 叠层上只动透明度，
+ * 在吸顶的临界位置来回滚时不一帧一闪。
+ * 筛选按钮角上的条件数角标有一半伸到工具条底色上：它的描边取工具条此刻的底色，否则未吸顶时多出一圈偏亮的环。
+ */
 .toolbarWrap {
+  --badge-ring: var(--sk-bg);
   position: sticky;
   top: 0;
   z-index: var(--sk-z-main);
@@ -104,12 +139,28 @@
   padding: var(--sk-space-8);
   border-radius: var(--sk-r-lg);
   background: var(--sk-bg);
+  transition: background-color var(--sk-dur-hover) var(--sk-ease);
+}
+
+.toolbarWrap::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: var(--sk-shadow-sm);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
 }
 
 .toolbarWrap[data-stuck] {
+  --badge-ring: var(--sk-surface);
   border-radius: 0 0 var(--sk-r-lg) var(--sk-r-lg);
   background: var(--sk-surface);
-  box-shadow: var(--sk-shadow-sm);
+}
+
+.toolbarWrap[data-stuck]::after {
+  opacity: 1;
 }
 
 .toolbar {
@@ -133,10 +184,11 @@
   max-width: 260px;
 }
 
-.filterLabel {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sk-space-6);
+/* 条件数角标叠在筛选按钮右上角，不占按钮宽度：计数出没时按钮不变宽，同组靠右对齐的适配下拉不被挤动 */
+.filterBadge {
+  position: absolute;
+  top: calc(var(--sk-space-6) * -1);
+  right: calc(var(--sk-space-6) * -1);
 }
 
 .filterPanel {
@@ -178,6 +230,22 @@
   min-width: 0;
 }
 
+/* 面板里的说明行、提示条、结果区互相让位：提示条出没、说明行折行时下面的结果滑到新位置 */
+.panelBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-gap);
+  min-width: 0;
+}
+
+/* 一组结果（网格与列表尾，或空状态）：换一组时整块淡入 */
+.outcome {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-gap);
+  min-width: 0;
+}
+
 /* ---- 结果说明行 ---- */
 .infoLine {
   display: flex;
@@ -190,10 +258,20 @@
   color: var(--sk-text-2);
 }
 
+/*
+ * 计数是定宽槽：「搜索中…」、慢提示与「约 1.2 万 个结果」来回换时，后面的条件片段不左右跳。
+ * 宽度由里面的 LabelSlot 按候选里最宽的那条（慢提示）撑出，比它还长的总数才撑宽。
+ */
 .infoCount {
+  display: inline-block;
   font-weight: var(--sk-w-medium);
   color: var(--sk-text);
   font-variant-numeric: tabular-nums;
+}
+
+/* 「清除筛选」固定在行尾：计数、条件、跳过平台的说明怎么变，它都停在原处 */
+.infoClear {
+  margin-left: auto;
 }
 
 .infoPart:not(:first-child)::before {
@@ -317,11 +395,54 @@
   margin-left: auto;
 }
 
-.skeletonBody {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sk-space-8);
-  padding: var(--sk-space-16) var(--sk-space-14);
+/*
+ * 翻页接上来的卡：淡入并从略小处落到位。首页的卡随结果区整块出现，不逐张动。
+ * 缩放用独立的 scale 属性，与卡片悬停的 translate、按下的 scale 过渡各写各的。
+ */
+.fresh {
+  animation:
+    cardIn var(--sk-dur-in) var(--sk-ease-out),
+    cardSettle var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+/* 减少动画：只淡入 */
+:global([data-sk-reduced]) .fresh {
+  animation: cardIn var(--sk-dur-in) var(--sk-ease-out);
+}
+
+@keyframes cardIn {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes cardSettle {
+  from {
+    scale: 0.98;
+  }
+}
+
+/* ---- 骨架：与结果卡逐行同高 ---- */
+
+/* 行按 1fr 等高：没画骨架卡的空格子所在的行也与骨架卡一样高，整页结果的高度照样占住 */
+.skeletonGrid {
+  grid-auto-rows: 1fr;
+}
+
+.skeletonSlot {
+  visibility: hidden;
+}
+
+/* 图标方块与色带骨架同色，描一圈卡片底色把两者分开 */
+.skeletonIcon {
+  box-shadow: 0 0 0 var(--sk-space-2) var(--sk-card);
+}
+
+/* 摘要两行：与 .cardSummary 的上边距、行高一致 */
+.skeletonSummary {
+  display: block;
+  margin: var(--sk-space-4) 0 0;
+  line-height: var(--sk-lh-small);
 }
 
 /* ---- 列表尾：加载下一页、到底、出错 ---- */
@@ -331,6 +452,12 @@
   align-items: stretch;
   gap: var(--sk-space-10);
   min-height: 1px;
+}
+
+/* 列表尾每条状态外那层进出场的包裹：撑满整行，居中的说明照旧居中 */
+.footItem {
+  display: flex;
+  flex-direction: column;
 }
 
 .listNote {

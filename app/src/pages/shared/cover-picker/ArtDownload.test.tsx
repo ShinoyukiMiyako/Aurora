@@ -1,12 +1,17 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ArtDownloadProgressDto, ArtStatusDto } from "../../../ipc/art";
 import { IpcError } from "../../../ipc/errors";
-import { catalogFromDto, setBlockCatalog } from "../../../mc/catalog";
+import { SPEED_REFRESH_MS } from "../../../lib/progress-display";
+import { catalogFromDto, setBlockCatalog, useBlockCatalog } from "../../../mc/catalog";
 import { OverlayProvider, OverlayRoot } from "../../../shell/overlay";
 import { getArtDownloadState, settleArtDownload } from "../../../state/art-download";
 import { render, stubMatchMedia, type Rendered } from "../../../test/dom";
+import { Appear } from "../../../ui/Appear";
 import { ArtDownload } from "./ArtDownload";
 
 interface Pending {
@@ -231,5 +236,120 @@ describe("下载原版材质部件", () => {
     expect(text()).not.toContain("本机还没有原版材质");
     expect(text()).toContain("从 Mojang 官方源或镜像下载原版材质，整包约 20 到 40 MB，下完只留不到 1 MB。");
     expect(button("下载原版材质")).toBeDefined();
+  });
+});
+
+describe("下载原版材质部件的已下大小", () => {
+  const MB = 1024 * 1024;
+  const bytes = () => view?.container.querySelector('[class*="_bytes_"]')?.textContent ?? null;
+
+  // 用例在假时钟下停在下载中：先换回真实计时器，再替它下完，交给文件级的收尾回到空闲。
+  // 断言中途失败时同样如此，后面的用例不会被一个还在下的状态连带挂掉
+  afterEach(async () => {
+    vi.useRealTimers();
+    await act(async () => art.pending.forEach((p) => p.resolve(READY)));
+    await flush();
+  });
+
+  it("进度约每 100 ms 一条：进度条每条都走，已下大小每 500 ms 才换一次字；到总量与换阶段立即换上", async () => {
+    mount();
+    await startDownload();
+    // 只假墙钟与 setTimeout：framer-motion 的帧挂在 setInterval 上照真实时间走，换回真实计时器时没有一帧卡在假时钟上
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    emit({ stage: "client", downloaded: 1 * MB, total: 20 * MB });
+    expect(bytes()).toBe("已下载 1.0 MB，共 20.0 MB");
+    for (let i = 2; i <= 4; i++) {
+      act(() => void vi.advanceTimersByTime(100));
+      emit({ stage: "client", downloaded: i * MB, total: 20 * MB });
+      expect(bar()?.getAttribute("aria-valuenow")).toBe(String(i * 5));
+      expect(bytes()).toBe("已下载 1.0 MB，共 20.0 MB");
+    }
+    // 进度停在 4 MB：不等下一条，离上次换字满一个间隔时补上
+    act(() => void vi.advanceTimersByTime(SPEED_REFRESH_MS - 300 - 1));
+    expect(bytes()).toBe("已下载 1.0 MB，共 20.0 MB");
+    act(() => void vi.advanceTimersByTime(1));
+    expect(bytes()).toBe("已下载 4.0 MB，共 20.0 MB");
+
+    // 传到总量：刚换过字也不等间隔，字与满格的进度条同时到
+    act(() => void vi.advanceTimersByTime(100));
+    emit({ stage: "client", downloaded: 20 * MB, total: 20 * MB });
+    expect(bar()?.getAttribute("aria-valuenow")).toBe("100");
+    expect(bytes()).toBe("已下载 20.0 MB，共 20.0 MB");
+
+    // 换阶段从 0 起算：起始那条没有字节，新阶段的第一个数直接显示
+    emit({ stage: "names", downloaded: 0, total: null });
+    expect(bytes()).toBeNull();
+    act(() => void vi.advanceTimersByTime(100));
+    emit({ stage: "names", downloaded: 300 * 1024, total: null });
+    expect(bytes()).toBe("已下载 300 KB");
+  });
+});
+
+describe("下载原版材质部件的状态切换", () => {
+  /** 状态区里当前的那一块（按钮行、进度或正在载入）。 */
+  const statusBlock = () => {
+    const status = view?.container.querySelector('[class*="_status_"]');
+    if (status === null || status === undefined) throw new Error("没有状态区");
+    const block = status.firstElementChild;
+    if (!(block instanceof HTMLElement)) throw new Error("状态区是空的");
+    return block;
+  };
+
+  it("挂载时的状态跟着弹窗出现；之后每换一个阶段，换上来的状态淡入，同一阶段里刷新进度不重播", async () => {
+    mount();
+    expect(statusBlock().hasAttribute("data-enter")).toBe(false);
+    await startDownload();
+    expect(statusBlock().textContent).toContain("正在准备下载");
+    expect(statusBlock().hasAttribute("data-enter")).toBe(true);
+    const progress = statusBlock();
+    emit({ stage: "client", downloaded: 1024, total: 4096 });
+    expect(statusBlock()).toBe(progress);
+    await act(async () => art.pending[0].resolve(READY));
+    await flush();
+    expect(statusBlock().textContent).toContain("正在载入材质…");
+    expect(statusBlock().hasAttribute("data-enter")).toBe(true);
+  });
+
+  it("失败转重试：与空闲同是按钮行，也重新挂上淡入", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mount();
+    const idle = statusBlock();
+    await startDownload();
+    await act(async () => art.pending[0].reject(new IpcError("download_failed", "连不上")));
+    await flush();
+    expect(statusBlock()).not.toBe(idle);
+    expect(statusBlock().textContent).toContain("上次没下完");
+    expect(statusBlock().hasAttribute("data-enter")).toBe(true);
+  });
+
+  it("放在出入场容器里：目录载入后不先变空，留着最后一帧原地淡出", async () => {
+    function InPicker() {
+      const loaded = useBlockCatalog();
+      return <Appear>{loaded === null && <ArtDownload key="art" />}</Appear>;
+    }
+    view = render(
+      <OverlayProvider>
+        <InPicker />
+        <OverlayRoot />
+      </OverlayProvider>,
+    );
+    await startDownload();
+    await act(async () => art.pending[0].resolve(READY));
+    await flush();
+    // 与材质绑定的顺序一致：放进目录的同时报告载入成功，下载状态在同一次渲染里回到空闲
+    act(() => {
+      setBlockCatalog(catalog());
+      settleArtDownload(true);
+    });
+    expect(getArtDownloadState()).toEqual({ phase: "idle" });
+    const leaving = view.container.querySelector<HTMLElement>("[inert]");
+    expect(leaving?.textContent).toContain("正在载入材质…");
+    expect(leaving?.querySelector("button")).toBeNull();
+  });
+
+  it("状态区按最高的状态（小号按钮、一行字加细进度条，都是 30）常驻占位", () => {
+    const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "ArtDownload.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const status = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)].find((m) => m[1].trim() === ".status");
+    expect(status?.[2]).toMatch(/min-height:\s*30px/);
   });
 });

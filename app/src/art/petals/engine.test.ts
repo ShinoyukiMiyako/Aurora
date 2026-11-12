@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ambientFade, springAt, tweenAt } from "../../lib/motion";
 import { setRect } from "../../test/dom";
 import { PetalEngine, STILL_RESIZE_DEBOUNCE_MS, currentPetalStats, effectiveDpr, type PetalDowngrade, type PetalInputs } from "./engine";
-import { createRandom } from "./sim";
+import { EDGE_ON, LAYERS, STILL_SCALE_MIN, createRandom } from "./sim";
 import { manualFrames, stubCanvas, stubPetalTokens, type FakeContext, type ManualFrames } from "./test-canvas";
 
 const SEED = 20231;
@@ -64,6 +65,16 @@ function lastFrame(r: Rig) {
   const all = r.ctx().frames();
   return all[all.length - 1];
 }
+
+type Draw = ReturnType<typeof lastFrame>["draws"][number];
+
+/** 按层的满不透明度画的（定格留下的），区别于正在淡入的补投花瓣。 */
+const solid = (d: Draw) => d.alpha === 0.4 || d.alpha === 0.65 || d.alpha === 0.9;
+const pose = (d: Draw) => d.transform.map((v) => v.toFixed(6)).join(",");
+/** 只看位置与自转角：变换的后四项是 −sin、cos 与平移，不含翻面缩放。 */
+const place = (d: Draw) => d.transform.slice(2).map((v) => v.toFixed(6)).join(",");
+/** 绘制变换 [cos·sx, sin·sx, −sin, cos, x, y] 的行列式就是带符号的翻面缩放 sx。 */
+const sxOf = (d: Draw) => d.transform[0] * d.transform[3] - d.transform[1] * d.transform[2];
 
 beforeEach(() => {
   canvases = stubCanvas();
@@ -191,6 +202,52 @@ describe("播放", () => {
     expect([big.canvas.width, big.canvas.height]).toEqual([2449, 1633]);
     expect(big.canvas.width * big.canvas.height).toBeLessThanOrEqual(4_000_000);
     expect(effectiveDpr(3, 800, 600)).toBe(2);
+  });
+
+  it("播放中尺寸变化：后备缓冲一清空就按当前时刻重画一帧，不等下一拍", () => {
+    const r = rig();
+    r.engine.measure();
+    r.frames.run(1000);
+    r.frames.run(1016);
+    const before = lastFrame(r);
+    setRect(r.canvas, { ...RECT, height: 700 });
+    r.engine.measure();
+    expect([r.canvas.width, r.canvas.height]).toEqual([800, 700]);
+    expect(r.ctx().frames()).toHaveLength(3);
+    expect(r.ctx().ops.filter((op) => op.kind === "clear").at(-1)).toEqual({ kind: "clear", width: 800, height: 700 });
+    // 同一时刻的画面：没有往下落、没有自转，只是画到了新的后备缓冲上
+    expect(lastFrame(r).draws.map((d) => d.transform)).toEqual(before.draws.map((d) => d.transform));
+    expect(r.frames.pending()).toBe(1);
+    expect(r.engine.stats().running).toBe(true);
+  });
+
+  it("播放中像素比变化：立即按新像素比重画，精灵换成新的像素单元", () => {
+    const r = rig();
+    r.engine.measure();
+    r.frames.run(1000);
+    const before = lastFrame(r);
+    vi.stubGlobal("devicePixelRatio", 1.5);
+    r.engine.measure();
+    expect([r.canvas.width, r.canvas.height]).toEqual([1200, 900]);
+    expect(r.ctx().frames()).toHaveLength(2);
+    const after = lastFrame(r).draws;
+    expect(after).toHaveLength(before.draws.length);
+    after.forEach((d, i) => {
+      // 像素单元 round(2 × 1.5) = 3 个设备像素；位置按像素比放大
+      expect(d.width % 3).toBe(0);
+      expect(d.transform[4]).toBeCloseTo(before.draws[i].transform[4] * 1.5, 8);
+      expect(d.transform[5]).toBeCloseTo(before.draws[i].transform[5] * 1.5, 8);
+    });
+  });
+
+  it("尺寸没变的观察回调不清空画布，也不额外重画", () => {
+    const r = rig();
+    r.engine.measure();
+    r.frames.run(1000);
+    r.engine.measure();
+    r.engine.measure();
+    expect(r.ctx().frames()).toHaveLength(1);
+    expect(r.frames.pending()).toBe(1);
   });
 
   it("画布尺寸为 0 时不生成花瓣也不跑 rAF，有了尺寸再开始", () => {
@@ -391,8 +448,8 @@ describe("自动降级", () => {
     let now = runFrames(r.frames, 1000, 6000, 40);
     expect(r.downgrades).toEqual([{ tier: "wide", level: 1, windowMediansMs: [40, 40] }]);
     expect(r.engine.stats()).toMatchObject({ running: true, level: 1, count: 12, drawIntervalMedianMs: 40 });
-    r.frames.run((now += 40));
-    // P5 碎瓣（6 px）只出现在远景层
+    // 裁下的花瓣淡完（200 ms）之后不再画；P5 碎瓣（6 px）只出现在远景层
+    now = runFrames(r.frames, now + 40, now + 280, 40);
     expect(lastFrame(r).draws.length).toBeLessThanOrEqual(12);
     expect(lastFrame(r).draws.some((d) => d.width === 6)).toBe(false);
     expect(r.ctx().frames()[0].draws.some((d) => d.width === 6)).toBe(true);
@@ -400,14 +457,192 @@ describe("自动降级", () => {
     runFrames(r.frames, now + 40, 10_000, 40);
     expect(r.downgrades.map((d) => d.level)).toEqual([1, 2]);
     expect(r.downgrades[1]).toEqual({ tier: "wide", level: 2, windowMediansMs: [40, 40] });
-    expect(r.frames.pending()).toBe(0);
     expect(r.engine.stats()).toMatchObject({ running: false, level: 2, count: 26 });
-    expect(lastFrame(r).draws).toHaveLength(26);
     expect(unlisten.mock.calls.map((c) => c[0])).toEqual(["pointermove", "pointerleave"]);
+    // 补投的花瓣淡入完，之后再没有任何帧回调
+    r.frames.run(10_016);
+    r.frames.run(10_016 + 480);
+    expect(r.frames.pending()).toBe(0);
+    expect(lastFrame(r).draws).toHaveLength(26);
     // 降到静态后关掉暂停、切换档位都不会重新开始播放
     r.engine.update({ ...BASE, tier: "regular" });
     expect(r.frames.pending()).toBe(0);
     expect(r.engine.stats().count).toBe(20);
+  });
+
+  it("一级降级裁下的花瓣不在半空消失：照常飘着，按环境层的退场曲线淡出，淡完才移除", () => {
+    const r = rig({ tier: "wide" });
+    r.engine.measure();
+    let now = runFrames(r.frames, 1000, 6000, 40);
+    expect(r.engine.stats()).toMatchObject({ level: 1, count: 12 });
+    r.frames.run((now += 40));
+    const first = lastFrame(r);
+    const k1 = 1 - tweenAt(ambientFade.out, 0.04);
+    // 每层先画留下的、再画同层裁下的：远景（留下的已空）、远景裁下、中景、中景裁下、近景
+    expect(first.alphas).toHaveLength(5);
+    [0.4, 0.4 * k1, 0.65, 0.65 * k1, 0.9].forEach((a, i) => expect(first.alphas[i]).toBeCloseTo(a, 3));
+    const leaving = first.draws.filter((d) => d.alpha !== 0.65 && d.alpha !== 0.9);
+    expect(leaving.length).toBeGreaterThan(0);
+    expect(first.draws.length - leaving.length).toBeLessThanOrEqual(12);
+    expect(leaving.some((d) => d.width === 6)).toBe(true);
+
+    r.frames.run((now += 40));
+    r.frames.run((now += 40));
+    expect(lastFrame(r).alphas[1]).toBeCloseTo(0.4 * (1 - tweenAt(ambientFade.out, 0.12)), 3);
+    expect(lastFrame(r).alphas[1]).toBeLessThan(first.alphas[1]);
+
+    runFrames(r.frames, now + 40, now + 160, 40);
+    expect(lastFrame(r).alphas).toEqual([0.4, 0.65, 0.9]);
+    expect(lastFrame(r).draws.length).toBeLessThanOrEqual(12);
+    expect(r.engine.stats().count).toBe(12);
+  });
+
+  it("二级降级原地定格：花瓣停在这一拍画出的位姿上，补投的 480 ms 淡入，淡完停掉帧回调", () => {
+    const r = rig({ tier: "wide" });
+    r.engine.measure();
+    runFrames(r.frames, 1000, 10_000, 40);
+    expect(r.engine.stats()).toMatchObject({ running: false, level: 2, count: 26 });
+    const all = r.ctx().frames();
+    // 10000 这一拍先照常飘落着画了一帧，降级后立即补画定格的静态散落
+    const moving = all[all.length - 2].draws;
+    const frozen = all[all.length - 1];
+    const kept = frozen.draws.filter(solid);
+    const added = frozen.draws.filter((d) => !solid(d));
+    expect(kept.length).toBeGreaterThan(6);
+    expect(added.length).toBe(26 - kept.length);
+    for (const d of added) expect(d.alpha).toBe(0);
+    // 定格的每一片都与这一拍画出的某一片位姿完全相同：不重新抽取，不跳
+    const movingPoses = new Set(moving.map(pose));
+    for (const d of kept) expect(movingPoses.has(pose(d))).toBe(true);
+    expect(r.frames.pending()).toBe(1);
+
+    // 收尾从定格那一拍（10000）起算
+    r.frames.run(10_016);
+    r.frames.run(10_240);
+    const mid = lastFrame(r);
+    const k = tweenAt(ambientFade.in, 0.24);
+    const arriving = mid.draws.filter((d) => !solid(d));
+    expect(arriving.map(pose)).toEqual(added.map(pose));
+    for (const d of arriving) expect([0.4 * k, 0.65 * k, 0.9 * k].some((a) => Math.abs(a - d.alpha) < 1e-9)).toBe(true);
+    // 位置与自转角原地不动；翻面够宽的连姿态都不变（窄的那几片在转向，见下一条）
+    expect(mid.draws.filter(solid).map(place)).toEqual(kept.map(place));
+    const wide = kept.filter((d) => Math.abs(sxOf(d)) >= STILL_SCALE_MIN).map(pose);
+    expect(wide.length).toBeGreaterThan(0);
+    expect(mid.draws.filter(solid).map(pose)).toEqual(expect.arrayContaining(wide));
+
+    r.frames.run(10_464);
+    expect(r.frames.pending()).toBe(1);
+    r.frames.run(10_480);
+    expect(r.frames.pending()).toBe(0);
+    const done = lastFrame(r);
+    expect(done.alphas).toEqual([0.4, 0.65, 0.9]);
+    expect(done.draws).toHaveLength(26);
+    expect(done.draws.map(place).sort()).toEqual([...kept, ...added].map(place).sort());
+  });
+
+  it("二级降级时比静态散落下限窄的花瓣：定格那一帧不跳，随后沿 settle 弹簧转到下限，正负号不变", () => {
+    const r = rig({ tier: "wide" });
+    r.engine.measure();
+    runFrames(r.frames, 1000, 10_000, 40);
+    const frozen = lastFrame(r).draws.filter(solid);
+    const narrow = frozen.filter((d) => Math.abs(sxOf(d)) < STILL_SCALE_MIN);
+    // 翻面相位均匀分布，26 片里总有几片正侧着身
+    expect(narrow.length).toBeGreaterThan(0);
+    const at = (draws: Draw[], d: Draw) => {
+      const found = draws.find((e) => place(e) === place(d));
+      if (found === undefined) throw new Error("这一帧里找不到定格的那片花瓣");
+      return found;
+    };
+
+    const target = (d: Draw) => Math.sign(sxOf(d)) * STILL_SCALE_MIN;
+    // 离下限还远的几片：一拍之内翻面速度再大也转不到（不是一步跳过去的）
+    const far = narrow.filter((d) => Math.abs(sxOf(d) - target(d)) >= 0.05);
+    expect(far.length).toBeGreaterThan(0);
+
+    // 定格那一拍（10000）已按定格姿态画过，收尾从那一拍起算：下一帧补投的已在淡入、窄的已离开定格姿态在转，
+    // 不先停一帧再起步；还没转到下限；半程时已基本落定（不是憋到最后才跳）
+    r.frames.run(10_016);
+    const first = lastFrame(r).draws;
+    const k = tweenAt(ambientFade.in, 0.016);
+    expect(k).toBeGreaterThan(0);
+    const fading = first.filter((d) => !solid(d));
+    expect(fading.length).toBeGreaterThan(0);
+    for (const d of fading) expect([0.4 * k, 0.65 * k, 0.9 * k].some((a) => Math.abs(a - d.alpha) < 1e-9)).toBe(true);
+    for (const d of far) {
+      const sx = sxOf(at(first, d));
+      expect(Math.abs(sx - sxOf(d))).toBeGreaterThan(1e-4);
+      expect(Math.abs(sx - target(d))).toBeGreaterThan(1e-3);
+    }
+    r.frames.run(10_240);
+    for (const d of narrow) expect(Math.abs(sxOf(at(lastFrame(r).draws, d)) - target(d))).toBeLessThan(0.01);
+
+    r.frames.run(10_480);
+    expect(r.frames.pending()).toBe(0);
+    const done = lastFrame(r).draws;
+    for (const d of done) expect(Math.abs(sxOf(d))).toBeGreaterThanOrEqual(STILL_SCALE_MIN - 1e-9);
+    for (const d of narrow) expect(sxOf(at(done, d))).toBeCloseTo(Math.sign(sxOf(d)) * STILL_SCALE_MIN, 12);
+  });
+
+  it("收尾在淡入的时长里播完：最窄、翻得最快的花瓣转到下限时 settle 弹簧也已落定，最后一帧不跳", () => {
+    const fastest = Math.max(...LAYERS.map((l) => l.flipW[1]));
+    for (const v0 of [fastest, -fastest]) expect(Math.abs(springAt("settle", EDGE_ON - STILL_SCALE_MIN, v0, ambientFade.in.duration).x)).toBeLessThan(1e-3);
+  });
+
+  it("收尾途中打开减少动画：补投的淡入与窄花瓣的转向直接到位，不留帧回调", () => {
+    const r = rig({ tier: "wide" });
+    r.engine.measure();
+    runFrames(r.frames, 1000, 10_000, 40);
+    r.frames.run(10_016);
+    r.frames.run(10_032);
+    expect(r.frames.pending()).toBe(1);
+    r.engine.update({ ...BASE, tier: "wide", reduced: true });
+    expect(r.frames.pending()).toBe(0);
+    const done = lastFrame(r);
+    expect(done.alphas).toEqual([0.4, 0.65, 0.9]);
+    expect(done.draws).toHaveLength(26);
+    for (const d of done.draws) expect(Math.abs(sxOf(d))).toBeGreaterThanOrEqual(STILL_SCALE_MIN - 1e-9);
+  });
+
+  it("收尾途中暂停：停在此刻的姿态、不留帧回调；恢复后从停下的那一刻接着播完，暂停的时长不算", () => {
+    const r = rig({ tier: "wide" });
+    r.engine.measure();
+    runFrames(r.frames, 1000, 10_000, 40);
+    r.frames.run(10_016);
+    r.frames.run(10_112);
+    expect(r.frames.pending()).toBe(1);
+    const before = lastFrame(r);
+    const k = tweenAt(ambientFade.in, 0.112);
+    expect(before.alphas.some((a) => [0.4 * k, 0.65 * k, 0.9 * k].some((b) => Math.abs(a - b) < 1e-9))).toBe(true);
+
+    // 失焦时窗口仍看得见：暂停补画的这一帧与暂停前最后一帧完全相同，不跳到淡完、转完的终态
+    r.engine.update({ ...BASE, tier: "wide", paused: true });
+    expect(r.frames.pending()).toBe(0);
+    expect(lastFrame(r)).toEqual(before);
+
+    r.engine.update({ ...BASE, tier: "wide" });
+    expect(r.frames.pending()).toBe(1);
+    // 恢复后的第一帧只记下帧时间，姿态仍是停下时的；此后按帧间隔往前走
+    r.frames.run(60_000);
+    expect(lastFrame(r)).toEqual(before);
+    r.frames.run(60_016);
+    const k2 = tweenAt(ambientFade.in, 0.128);
+    expect(lastFrame(r).alphas.some((a) => [0.4 * k2, 0.65 * k2, 0.9 * k2].some((b) => Math.abs(a - b) < 1e-9))).toBe(true);
+    expect(r.frames.pending()).toBe(1);
+    // 还差 352 ms：差一帧时还在播，到点淡完停掉帧回调
+    r.frames.run(60_016 + 336);
+    expect(r.frames.pending()).toBe(1);
+    r.frames.run(60_016 + 352);
+    expect(r.frames.pending()).toBe(0);
+    expect(lastFrame(r).alphas).toEqual([0.4, 0.65, 0.9]);
+    expect(lastFrame(r).draws).toHaveLength(26);
+    for (const d of lastFrame(r).draws) expect(Math.abs(sxOf(d))).toBeGreaterThanOrEqual(STILL_SCALE_MIN - 1e-9);
+
+    const s = rig({ tier: "wide" });
+    s.engine.measure();
+    runFrames(s.frames, 1000, 10_000, 40);
+    expect(s.frames.pending()).toBe(1);
+    s.engine.destroy();
+    expect(s.frames.pending()).toBe(0);
   });
 
   it("帧率正常时不降级", () => {

@@ -1,17 +1,19 @@
 import { describe, expect, it } from "vitest";
 import { GAME_DIR_SWITCH_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
+import { REFLOW_MAX_ITEMS } from "../../lib/reflow";
 import type { GameDirectoryDto } from "../../state/queries/catalog";
 import { switchSuggestion } from "../shared/switch-suggestion";
 import { LIBRARY_COPY } from "./copy";
 import {
   brokenInstances,
+  CREATE_CELL_KEY,
+  crowdedChange,
   DEFAULT_VIEW,
   directoryOptions,
   isFiltered,
   loaderCounts,
   matchesView,
-  orderSignature,
   sortInstances,
   totalPlaytime,
   visibleInstances,
@@ -147,10 +149,48 @@ describe("统计与签名", () => {
     expect(ids(brokenInstances(list))).toEqual(["install", "repair"]);
   });
 
-  it("顺序签名随顺序变化、不随实例的其他字段变化", () => {
-    const a = [inst("x"), inst("y")];
-    expect(orderSignature(a)).toBe(orderSignature([inst("x", { playtimeMin: 9 }), inst("y")]));
-    expect(orderSignature(a)).not.toBe(orderSignature([inst("y"), inst("x")]));
+});
+
+describe("crowdedChange", () => {
+  const range = (n: number, from = 0) => Array.from({ length: n }, (_, i) => `i${from + i}`);
+
+  it("格子没有增删换序时不算，哪怕格子很多", () => {
+    expect(crowdedChange({ ids: range(60), create: true }, { ids: range(60), create: true })).toBe(false);
+  });
+
+  it("换排序：换了位置的格子超过让位上限才整片换上", () => {
+    const n = REFLOW_MAX_ITEMS;
+    expect(crowdedChange({ ids: range(n), create: true }, { ids: [...range(n)].reverse(), create: true })).toBe(false);
+    expect(crowdedChange({ ids: range(n + 2), create: true }, { ids: [...range(n + 2)].reverse(), create: true })).toBe(true);
+    // 只有一张从后面挪到最前（刚玩过的实例按「最近」排上来）：换了位置的 30 格，没超过上限
+    expect(crowdedChange({ ids: range(30), create: true }, { ids: ["i29", ...range(29)], create: true })).toBe(false);
+  });
+
+  it("增删：新来的或走掉的有一边超过让位上限才整片换上，新建卡也算一格；实例再多，删一张也逐个播", () => {
+    const n = REFLOW_MAX_ITEMS;
+    // 很多个里删掉靠前的一张：其后几十张被挤动，交给让位
+    expect(crowdedChange({ ids: range(n + 20), create: true }, { ids: range(n + 19, 1), create: true })).toBe(false);
+    // 从很多筛到只剩一个别的：走掉的连新建卡超过上限
+    expect(crowdedChange({ ids: range(n), create: true }, { ids: range(1, n), create: false })).toBe(true);
+    // 走掉的连新建卡恰好在上限上：逐个播
+    expect(crowdedChange({ ids: range(n - 1), create: true }, { ids: range(1, n), create: false })).toBe(false);
+    // 从很少到很多：新来的超过上限
+    expect(crowdedChange({ ids: range(1), create: false }, { ids: range(n + 1), create: true })).toBe(true);
+    // 只有新建卡出没
+    expect(crowdedChange({ ids: range(n), create: false }, { ids: range(n), create: true })).toBe(false);
+  });
+
+  it("整段换搜索词：前后各不超过上限、只是并集超过的不整片换上，进出各自逐个播，共同的卡片交给让位", () => {
+    const n = REFLOW_MAX_ITEMS;
+    // 前后各 25 格、只有 5 格相同：并集 45
+    expect(crowdedChange({ ids: range(25), create: false }, { ids: range(25, 20), create: false })).toBe(false);
+    // 前后各恰好上限、一格也不相同：并集是上限的两倍
+    expect(crowdedChange({ ids: range(n), create: false }, { ids: range(n, n), create: false })).toBe(false);
+    expect(crowdedChange({ ids: range(n + 1), create: false }, { ids: range(n + 1, n + 1), create: false })).toBe(true);
+  });
+
+  it("新建卡的格子键带「/」：任何系统的目录名里都不能有它，撞不上实例 id", () => {
+    expect(CREATE_CELL_KEY).toContain("/");
   });
 });
 

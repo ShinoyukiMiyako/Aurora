@@ -11,14 +11,16 @@
 // 确认步的开局选项（沿用默认设置、加载器的 API、性能组合）的勾选记在这里而不是确认步里：跳回前面改了加载器或版本
 // 再回来，用户动过的勾选还在。默认设置与开局 Mod 从选定加载器起就开始查，到确认步时多半已经查好。
 
-import { AnimatePresence, motion, useReducedMotionConfig, type Variants } from "framer-motion";
-import { useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
+import { useMemo, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type Ref } from "react";
 import { DEFAULT_COVER, type InstanceCover } from "../../art/iso/covers";
 import { InstanceAvatarBase } from "../../art/iso/InstanceAvatarBase";
 import { ACTION_ERROR, coverLabel, LOADER_NAME } from "../../copy/flows";
 import { instanceNameError } from "../../domain/rules";
 import type { LoaderKind } from "../../domain/types";
-import { fade, springs } from "../../lib/motion";
+import { stepPane, stepPaneFade } from "../../lib/motion";
+import { useReflow } from "../../lib/reflow";
+import { useMounted } from "../../lib/useMounted";
 import { isImeComposing } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -27,8 +29,10 @@ import { shallowArrayEqual, useLauncherActions, useLauncherSelector, useNow } fr
 import { useLoaderVersions, useManifest, useVersionRequirements } from "../../state/queries/catalog";
 import { useStarterMods, useTemplateInfo } from "../../state/queries/starter";
 import { canPinMore } from "../../state/selectors";
+import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { KeyHint } from "../../ui/KeyHint";
+import { LabelSlot } from "../../ui/LabelSlot";
 import { Modal } from "../../ui/Modal";
 import { CREATE_COPY } from "./copy";
 import styles from "./create.module.css";
@@ -58,22 +62,41 @@ import {
   type VersionFilter,
 } from "./model";
 import { Preview, StepNav } from "./Rail";
-import { ConfirmStep, CoverStep, LoaderStep, LoaderVersionStep, NameStep, VersionStep } from "./Steps";
+import { ConfirmStep, CoverStep, LoaderStep, LoaderVersionStep, NameStep, VersionStep, type CreateFailure } from "./Steps";
 
-/** 换步时新步骤的横向位移（px），方向随前进后退。 */
-const STEP_SHIFT = 16;
+interface StepPaneProps {
+  /**
+   * popLayout 往直接子项上挂 ref 来量尺寸、把退场的那一步抽出布局（与调用方给的让位 ref 合成一个）：
+   * React 19 下它是普通 prop，要自己接住挂到根元素上。
+   */
+  ref?: Ref<HTMLDivElement>;
+  direction: number;
+  /** 是否播入场：弹窗打开时的第一步跟着弹窗的入场走。 */
+  enter: boolean;
+  onKeyDown(event: ReactKeyboardEvent<HTMLDivElement>): void;
+  children: ReactNode;
+}
 
-const paneSlide: Variants = {
-  enter: (dir: number) => ({ opacity: 0, x: STEP_SHIFT * dir }),
-  show: { opacity: 1, x: 0, transition: { ...springs.soft, opacity: fade.in } },
-  leave: (dir: number) => ({ opacity: 0, x: -STEP_SHIFT * dir, transition: fade.out }),
-};
-
-const paneFade: Variants = {
-  enter: { opacity: 0 },
-  show: { opacity: 1, transition: fade.in },
-  leave: { opacity: 0, transition: fade.out },
-};
+/** 换步时新旧两步短暂并存：正在退场的那一步点不到、聚焦不到，读屏也不再读它，操作只落在新的一步上。 */
+function StepPane({ ref, direction, enter, onKeyDown, children }: StepPaneProps) {
+  const present = useIsPresent();
+  const reduced = useReducedMotionConfig() === true;
+  return (
+    <motion.div
+      ref={ref}
+      className={styles.pane}
+      custom={direction}
+      variants={reduced ? stepPaneFade : stepPane}
+      initial={enter ? "enter" : false}
+      animate="center"
+      exit="exit"
+      inert={!present}
+      onKeyDown={onKeyDown}
+    >
+      {children}
+    </motion.div>
+  );
+}
 
 export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"create-instance">) {
   const existing = useLauncherSelector((s) => s.instances.map((i) => i.id), shallowArrayEqual);
@@ -84,7 +107,6 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
   const { confirm } = useShell();
   const run = useRunner();
   const now = useNow(60_000);
-  const reduced = useReducedMotionConfig() === true;
 
   // ---- 版本清单
   const manifest = useManifest();
@@ -121,7 +143,17 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
   const [dir, setDir] = useState(1);
   const [reachedRaw, setReached] = useState(0);
   const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<unknown>(null);
+  const [createFailure, setCreateFailure] = useState<CreateFailure | null>(null);
+  /** 名称步按 Enter 被拒的次数：每加一，名称输入框抖一次。 */
+  const [rejected, setRejected] = useState(0);
+
+  // 弹窗打开时的第一步跟着弹窗的入场走，之后换上来的每一步才滑入。不能写成 AnimatePresence 的 initial={false}：
+  // 那会让第一步里之后才挂载的动画元素（名称校验错误的淡入）也一并跳过入场
+  const opened = useMounted();
+  // 步骤里的块晚到、出没（确认步的 Java 说明、创建失败横幅、版本步的提示行）时，其余块滑到新位置
+  const paneReflow = useReflow<HTMLDivElement>();
+  // 底栏按钮行：「上一步」出没时「取消」滑过去
+  const footReflow = useReflow<HTMLDivElement>();
 
   const trimmed = name.trim();
   const filter: VersionFilter = {
@@ -180,7 +212,9 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
     setReached((r) => Math.max(Math.min(r, visible.length - 1), target));
   };
   const next = () => {
-    if (index < visible.length - 1 && valid[step]) goTo(index + 1);
+    if (index >= visible.length - 1) return;
+    if (valid[step]) goTo(index + 1);
+    else if (step === "name") setRejected((n) => n + 1);
   };
 
   // ---- 联动
@@ -222,7 +256,7 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
   const create = async () => {
     if (!canCreate || version === null) throw new Error("新建实例的必填项还没齐，创建按钮不应可点");
     setCreating(true);
-    setCreateError(null);
+    // 上一次的失败横幅留到这一次有结果：先清空再插回，整步内容会上跳再被推下
     const starterMods = starter.status === "ready" ? starterSelection(starter.data, checked.api, checked.performance) : [];
     const result = await run(
       () => actions.createInstance({ name: trimmed, mcVersion: version.id, loader, loaderVersion, cover: cover.block, useTemplate: checked.template, starterMods }),
@@ -230,7 +264,7 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
     );
     if (!result.ok) {
       setCreating(false);
-      setCreateError(result.error);
+      setCreateFailure((last) => ({ error: result.error, attempt: last === null ? 1 : last.attempt + 1 }));
       return;
     }
     const id = result.value;
@@ -262,7 +296,7 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
   const renderStep = () => {
     switch (step) {
       case "name":
-        return <NameStep name={name} error={nameError} onChange={setName} />;
+        return <NameStep name={name} error={nameError} onChange={setName} rejected={rejected} />;
       case "version":
         return (
           <VersionStep
@@ -327,13 +361,15 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
               onPick: (key, value) => setPicks((p) => ({ ...p, [key]: value })),
               now,
             }}
-            error={createError}
+            failure={createFailure}
           />
         );
     }
   };
 
   const isLast = index === visible.length - 1;
+  const onName = step === "name";
+  const createLabel = <LabelSlot current={creating ? CREATE_COPY.creating : CREATE_COPY.create} options={[CREATE_COPY.create, CREATE_COPY.creating]} />;
 
   return (
     <Modal
@@ -344,40 +380,58 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
       closeOnScrim={false}
       title={CREATE_COPY.title}
       subtitle={CREATE_COPY.subtitle(index + 1, visible.length, step)}
+      // 名称每敲一个字都重渲染整个弹窗；面板尺寸只随换步变化，只在换步时量布局
+      layoutKey={step}
       icon={<InstanceAvatarBase instanceId={previewId} cover={cover} size={56} />}
       footerStart={
+        // 两句提示叠在同一格里交叉淡化：宽度取长的那句，换步时右边的按钮行不因它变宽变窄
         <span className={styles.footHint}>
-          {step === "name" ? (
-            <>
-              {CREATE_COPY.hintEnter}
-              <KeyHint keys={["Enter"]} />
-              {CREATE_COPY.hintEnterAfter}
-            </>
-          ) : (
-            CREATE_COPY.hintEsc
-          )}
+          <span className={styles.footHintLine} data-current={onName || undefined} aria-hidden={!onName || undefined}>
+            {CREATE_COPY.hintEnter}
+            <KeyHint keys={["Enter"]} />
+            {CREATE_COPY.hintEnterAfter}
+          </span>
+          <span className={styles.footHintLine} data-current={!onName || undefined} aria-hidden={onName || undefined}>
+            {CREATE_COPY.hintEsc}
+          </span>
         </span>
       }
       footer={
-        <>
-          <Button variant="ghost" disabled={creating} onClick={() => void requestClose()}>
-            {CREATE_COPY.cancel}
-          </Button>
-          {index > 0 && (
-            <Button icon="arrow-left" disabled={creating} onClick={() => goTo(index - 1)}>
-              {CREATE_COPY.back}
+        // 按钮各包一层真实的盒子：按钮外的提示宿主是 display: contents，让位认不到它
+        <div ref={footReflow} className={styles.footActions}>
+          <div className={styles.footItem}>
+            <Button variant="ghost" disabled={creating} onClick={() => void requestClose()}>
+              {CREATE_COPY.cancel}
             </Button>
-          )}
-          {isLast ? (
-            <Button variant="primary" icon="download" loading={creating} disabled={!canCreate} onClick={() => void create()}>
-              {creating ? CREATE_COPY.creating : CREATE_COPY.create}
-            </Button>
-          ) : (
-            <Button variant="primary" iconRight="arrow-right" disabled={!valid[step]} onClick={next}>
-              {CREATE_COPY.next}
-            </Button>
-          )}
-        </>
+          </div>
+          <Appear itemClassName={styles.footItem}>
+            {index > 0 && (
+              <Button key="back" icon="arrow-left" disabled={creating} onClick={() => goTo(index - 1)}>
+                {CREATE_COPY.back}
+              </Button>
+            )}
+          </Appear>
+          {/*
+           * 主按钮在「下一步」与「创建并开始安装」之间换的是同一个按钮（聚焦着的按钮不丢焦点），宽度按最宽的那种定死：
+           * 隐形的创建按钮垫在同一格里撑出宽度，真按钮撑满这一格。换文案、换成加载态时同一行的按钮都不被挤动
+           */}
+          <div className={styles.primarySlot}>
+            {isLast ? (
+              <Button variant="primary" icon="download" block className={styles.primaryButton} loading={creating} disabled={!canCreate} onClick={() => void create()}>
+                {createLabel}
+              </Button>
+            ) : (
+              <Button variant="primary" iconRight="arrow-right" block className={styles.primaryButton} disabled={!valid[step]} onClick={next}>
+                {CREATE_COPY.next}
+              </Button>
+            )}
+            <span className={styles.primaryGhost} aria-hidden="true" inert>
+              <Button variant="primary" icon="download">
+                {createLabel}
+              </Button>
+            </span>
+          </div>
+        </div>
       }
     >
       <div className={styles.layout}>
@@ -386,19 +440,10 @@ export default function CreateInstanceFlow({ preset, onClose }: FlowProps<"creat
           <StepNav visible={visible} current={step} reached={reached} values={values} onJump={goTo} />
         </aside>
         <div className={styles.main}>
-          <AnimatePresence mode="popLayout" initial={false} custom={dir}>
-            <motion.div
-              key={step}
-              className={styles.pane}
-              custom={dir}
-              variants={reduced ? paneFade : paneSlide}
-              initial="enter"
-              animate="show"
-              exit="leave"
-              onKeyDown={onPaneKeyDown}
-            >
+          <AnimatePresence mode="popLayout" custom={dir}>
+            <StepPane key={step} ref={paneReflow} direction={dir} enter={opened.current} onKeyDown={onPaneKeyDown}>
               {renderStep()}
-            </motion.div>
+            </StepPane>
           </AnimatePresence>
         </div>
       </div>

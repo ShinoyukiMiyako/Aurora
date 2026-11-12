@@ -1,8 +1,12 @@
+import { Appear } from "../../ui/Appear";
 import { ProgressBar } from "../../ui/ProgressBar";
 import type { InstallMode, Progress } from "../contract";
 import type { SetupCopy } from "../copy";
 import { Frame } from "../Frame";
 import styles from "./Installing.module.css";
+
+/** 第一个进度事件到之前阶段行的内容：占住一行文字的高度与基线，读屏读到的仍是空白。 */
+export const NO_PHASE_YET = " ";
 
 export interface InstallingProps {
   copy: SetupCopy;
@@ -26,8 +30,12 @@ export function Installing({ copy, mode, version, run, progress }: InstallingPro
         <div className={styles.caption}>
           {/* 这一块从一开始就挂着：读屏只播报已有区域里的变化，等事件到了才挂上去，第一个阶段就念不出来 */}
           <div className={styles.status} role="status">
-            {progress !== null && <p className={styles.phase}>{text.phase[progress.phase]}</p>}
-            {progress?.slow === true && <p className={styles.slow}>{text.slow}</p>}
+            {/*
+              阶段这一行从一开始就在，没字时放一个不换行空格：这一行和右边的关闭说明按文字基线对齐，
+              空着的块没有基线、按底边对齐，第一个阶段到达时关闭说明会上跳几像素
+            */}
+            <p className={styles.phase}>{progress === null ? NO_PHASE_YET : text.phase[progress.phase]}</p>
+            <Appear>{progress?.slow === true && <p className={styles.slow}>{text.slow}</p>}</Appear>
           </div>
           {/* 关闭键的气泡在按下时就收起，Alt+F4 更是什么反馈都没有，原因得常驻在这里 */}
           <p className={styles.closeNote}>{copy.frame.closeBlocked}</p>

@@ -17,6 +17,7 @@ import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, callsOf, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
 import { bundledTotals, defaultExportFileName, effectiveExtras, skippedCount } from "./ExportModpackModal";
+import exportStyles from "./export.module.css";
 import InstancePage from "./index";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -174,6 +175,46 @@ async function openExport() {
   await flush();
 }
 
+/** 悬停后关联的提示气泡写着什么：禁用原因放在气泡里。 */
+async function reasonOf(el: HTMLElement): Promise<string | null | undefined> {
+  act(() => {
+    el.dispatchEvent(new PointerEvent("pointerover", { bubbles: true, relatedTarget: document.body }));
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(1000);
+  });
+  const tipId = el.getAttribute("aria-describedby");
+  if (tipId === null) throw new Error(`「${textOf(el)}」悬停后没有关联提示气泡`);
+  const reason = document.getElementById(tipId)?.textContent;
+  act(() => {
+    el.dispatchEvent(new PointerEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
+  });
+  return reason;
+}
+
+/** 读取中那一块（转圈与「正在读取」）。 */
+function readingBlock(): HTMLElement {
+  const label = [...dialog().querySelectorAll("span")].find((el) => el.textContent === "正在读取 Mod 与配置…");
+  if (label === undefined || label.parentElement === null) throw new Error("没有读取中的那一块");
+  return label.parentElement;
+}
+
+/** 「正在读取」的读屏播报区：随弹窗预先挂着，不在骨架那层对读屏隐藏的子树里。 */
+function readingStatus(): HTMLElement {
+  const found = dialog().querySelector<HTMLElement>(`.${exportStyles.status}`);
+  if (found === null) throw new Error("弹窗里没有读取的播报区");
+  expect(found.getAttribute("role")).toBe("status");
+  expect(found.closest('[aria-hidden="true"]')).toBeNull();
+  return found;
+}
+
+/** 在场的文字：正在退场（inert）的块还在文档里淡出，不算。 */
+function liveText(root: HTMLElement): string {
+  const copy = root.cloneNode(true) as HTMLElement;
+  for (const leaving of copy.querySelectorAll("[inert]")) leaving.remove();
+  return textOf(copy);
+}
+
 /** 弹窗退场动画播完后不在文档里。 */
 async function expectClosed() {
   await act(async () => {
@@ -276,18 +317,31 @@ describe("导出整合包弹窗：纯函数", () => {
 });
 
 describe("导出整合包弹窗", () => {
-  it("每次打开都重新读取：读取中只有取消，读到后按默认值起草，存在的额外项默认勾选、存档不勾", async () => {
+  it("每次打开都重新读取：读取中主按钮常驻、带原因禁用，转圈过了等待期才亮出；读到后同一个主按钮变成可用，按默认值起草，存在的额外项默认勾选、存档不勾", async () => {
     let release: () => void = () => undefined;
     ipc.overrides.set("preview_modpack_export", () => new Promise<ModpackExportPreviewDto>((resolve) => (release = () => resolve(preview()))));
     await openPage();
     await openExport();
-    expect(dialog().textContent).toContain("正在读取 Mod 与配置…");
     expect(dialog().textContent).toContain("「樱花生存」· 1.21.1 · Fabric 0.16.10");
-    expect(() => button("导出整合包", dialog())).toThrow();
+    // 等待期里读取块照常占位、标成不可见：读取很快回来时不闪一下转圈
+    expect(readingBlock().closest("[data-pending]")).not.toBeNull();
+    // 读取块对读屏隐藏，「正在读取」另由骨架外的播报区念：等待期先空着，与转圈同一时机写字
+    const status = readingStatus();
+    expect(status.textContent).toBe("");
+    // 主按钮一开始就在底栏里，读到时不插进来把「取消」挤开
+    const submit = button("导出整合包", dialog());
+    expect(submit.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(submit)).toBe("正在读取 Mod 与配置…");
+    expect(readingBlock().closest("[data-pending]")).toBeNull();
+    expect(readingStatus()).toBe(status);
+    expect(status.textContent).toBe("正在读取 Mod 与配置…");
     await act(async () => {
       release();
       await settle();
     });
+    expect(status.textContent).toBe("");
+    expect(button("导出整合包", dialog())).toBe(submit);
+    expect(submit.getAttribute("aria-disabled")).toBeNull();
     expect(input("名称").value).toBe("樱花生存");
     expect(input("版本号").value).toBe("1.0.0");
     expect(checkbox("配置文件（config）").getAttribute("aria-checked")).toBe("true");
@@ -371,7 +425,7 @@ describe("导出整合包弹窗", () => {
     expect(input("名称").value).toBe("周末包");
   });
 
-  it("预览报 modpack_export_unsupported：显示后端原文与重试，只有取消；重试成功后进入确认", async () => {
+  it("预览报 modpack_export_unsupported：显示后端原文与重试，主按钮以同一句原文禁用；重试成功后进入确认", async () => {
     let fail = true;
     ipc.overrides.set("preview_modpack_export", () => {
       if (fail) throw new IpcError("modpack_export_unsupported", "这个实例装了不止一种加载器，整合包只能写一种", { id: ID, reason: "multiple_loaders" });
@@ -380,12 +434,15 @@ describe("导出整合包弹窗", () => {
     await openPage();
     await openExport();
     expect(dialog().textContent).toContain("这个实例装了不止一种加载器，整合包只能写一种");
-    expect(() => button("导出整合包", dialog())).toThrow();
+    const submit = button("导出整合包", dialog());
+    expect(submit.getAttribute("aria-disabled")).toBe("true");
+    expect(await reasonOf(submit)).toBe("这个实例装了不止一种加载器，整合包只能写一种");
     fail = false;
     click(button("重试", dialog()));
     await flush();
     expect(callsOf(ipc, "preview_modpack_export")).toHaveLength(2);
     expect(input("名称").value).toBe("樱花生存");
+    expect(button("导出整合包", dialog()).getAttribute("aria-disabled")).toBeNull();
   });
 
   it("打开期间实例被改名占住：主按钮带同菜单的原因禁用，已填的内容保留", async () => {
@@ -419,9 +476,14 @@ describe("导出整合包弹窗", () => {
     expect(dialog().textContent).toContain("2 个文件的名字在 Windows 上不安全，不会打包");
     expect(dialog().querySelector('[aria-label="直接打包进去的 Mod"]')).toBeNull();
     click(button("查看", dialog()));
-    expect(dialog().querySelector('[aria-label="直接打包进去的 Mod"]')?.textContent).toBe("handmade-1.0.jar");
+    const list = dialog().querySelector<HTMLElement>('[aria-label="直接打包进去的 Mod"]');
+    expect(list?.textContent).toBe("handmade-1.0.jar");
+    // 展开时从透明、略小处入场，不是同一帧硬插进来
+    expect(list?.parentElement?.style.opacity).toBe("0");
     click(button("收起", dialog()));
-    expect(dialog().querySelector('[aria-label="直接打包进去的 Mod"]')).toBeNull();
+    // 收起时原地淡出：退场期间还在文档里，但已经不可交互、不算在场
+    expect(list?.parentElement?.hasAttribute("inert")).toBe(true);
+    expect(liveText(dialog())).not.toContain("handmade-1.0.jar");
   });
 
   it("跳过文件的说明跟着「带上停用的 Mod」变：名字不安全的停用 jar 没带上时不算", async () => {
@@ -516,6 +578,8 @@ describe("导出整合包弹窗", () => {
     click(checkbox("存档（saves）"));
     expect(dialog().textContent).toContain("1 个文件的名字在 Windows 上不安全，不会打包");
     click(checkbox("存档（saves）"));
-    expect(dialog().textContent).not.toContain("在 Windows 上不安全");
+    // 说明块原地淡出：退场期间还在文档里，但已经标成 inert，不算在场
+    expect(liveText(dialog())).not.toContain("在 Windows 上不安全");
+    expect(dialog().textContent).toContain("在 Windows 上不安全");
   });
 });

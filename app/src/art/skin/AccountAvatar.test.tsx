@@ -7,6 +7,7 @@ import { render, stubMatchMedia, type Rendered } from "../../test/dom";
 import { stubCanvas, type CanvasStub } from "../illustrations/test-canvas";
 import { AccountAvatar } from "./AccountAvatar";
 import { AccountFigure } from "./AccountFigure";
+import { preloadSkins } from "./useSkin";
 
 const REMOTE = "aa".repeat(20);
 
@@ -102,6 +103,152 @@ describe("AccountAvatar", () => {
     view = render(<AccountAvatar uuid="u4" skin={{ kind: "remote", sha1: "cc".repeat(20), model: "wide", hat: true }} size={48} />);
     await settle();
     expect(root().dataset.art).toBe("silhouette");
+  });
+});
+
+describe("换皮肤（刷新账户后换了一张）", () => {
+  const OLD = { kind: "remote", sha1: "a1".repeat(20), model: "wide", hat: true } as const;
+  const NEW = { kind: "remote", sha1: "b2".repeat(20), model: "wide", hat: true } as const;
+  /** ArtCrossfade 的叠层：第一层是常驻的剪影，其余是真图层（含正在淡出的）。 */
+  const realLayers = () => [...root().querySelectorAll<HTMLElement>('[class*="layer"]')].slice(1);
+  let arrive: () => void;
+
+  beforeEach(() => {
+    const gate = new Promise<void>((resolve) => {
+      arrive = resolve;
+    });
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes(NEW.sha1)) await gate;
+      return { ok: true, status: 200, blob: async () => new Blob([url]) };
+    });
+  });
+
+  it("新皮肤取到之前仍显示旧皮肤，到了两张叠放交叉淡化，中间不落回剪影", async () => {
+    view = render(<AccountAvatar uuid="u7" skin={OLD} size={40} />);
+    await settle();
+    const [oldLayer] = realLayers();
+    view.rerender(<AccountAvatar uuid="u7" skin={NEW} size={40} />);
+    await settle();
+    expect(root().dataset.art).toBe("skin");
+    expect(realLayers()).toEqual([oldLayer]);
+    expect(bitmaps.map((b) => b.url)).toEqual([`http://petalfall-tex.localhost/skin/${OLD.sha1}.png`]);
+    arrive();
+    await settle();
+    expect(root().dataset.art).toBe("skin");
+    const fresh = realLayers().filter((layer) => layer !== oldLayer);
+    expect(fresh).toHaveLength(1);
+    // 新图层是从透明淡入的那一层（真实计时器下已经走了一点）
+    expect(Number(fresh[0].style.opacity)).toBeLessThan(1);
+    expect(canvas.sourceRects(bitmaps[1]).length).toBeGreaterThan(0);
+  });
+
+  it("新皮肤取不到：等它落定后回落剪影", async () => {
+    view = render(<AccountAvatar uuid="u8" skin={OLD} size={40} />);
+    await settle();
+    fetchMock.mockImplementation(async () => ({ ok: false, status: 404, blob: async () => new Blob() }));
+    view.rerender(<AccountAvatar uuid="u8" skin={NEW} size={40} />);
+    await settle();
+    expect(root().dataset.art).toBe("silhouette");
+  });
+
+  it("账户没有皮肤了：不留旧图，直接回落剪影", async () => {
+    view = render(<AccountAvatar uuid="u9" skin={OLD} size={40} />);
+    await settle();
+    view.rerender(<AccountAvatar uuid="u9" skin={null} size={40} />);
+    expect(root().dataset.art).toBe("silhouette");
+  });
+});
+
+describe("换了账户、皮肤信息还在读（loading）", () => {
+  const PREV = { kind: "remote", sha1: "c3".repeat(20), model: "wide", hat: true } as const;
+  const NEXT = { kind: "remote", sha1: "d4".repeat(20), model: "slim", hat: true } as const;
+  const realLayers = () => [...root().querySelectorAll<HTMLElement>('[class*="layer"]')].slice(1);
+  let arrive: () => void;
+
+  beforeEach(() => {
+    const gate = new Promise<void>((resolve) => {
+      arrive = resolve;
+    });
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes(NEXT.sha1)) await gate;
+      return { ok: true, status: 200, blob: async () => new Blob([url]) };
+    });
+  });
+
+  it("头像：读取中留着上一位的脸、不发请求；读到新皮肤后两张叠放交叉淡化，中间不落回剪影", async () => {
+    view = render(<AccountAvatar uuid="prev" skin={PREV} size={40} />);
+    await settle();
+    const [prevLayer] = realLayers();
+    view.rerender(<AccountAvatar uuid="next" skin="loading" size={40} />);
+    await settle();
+    expect(root().dataset.art).toBe("skin");
+    expect(realLayers()).toEqual([prevLayer]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // 读到了皮肤信息，位图还在取：仍是上一位的脸
+    view.rerender(<AccountAvatar uuid="next" skin={NEXT} size={40} />);
+    await settle();
+    expect([root().dataset.art, realLayers()]).toEqual(["skin", [prevLayer]]);
+    arrive();
+    await settle();
+    const fresh = realLayers().filter((layer) => layer !== prevLayer);
+    expect(fresh).toHaveLength(1);
+    expect(Number(fresh[0].style.opacity)).toBeLessThan(1);
+    expect(bitmaps.map((b) => b.url)).toEqual([`http://petalfall-tex.localhost/skin/${PREV.sha1}.png`, `http://petalfall-tex.localhost/skin/${NEXT.sha1}.png`]);
+  });
+
+  it("头像：读到的是「没有皮肤」才回落剪影", async () => {
+    view = render(<AccountAvatar uuid="prev" skin={PREV} size={40} />);
+    await settle();
+    view.rerender(<AccountAvatar uuid="next" skin="loading" size={40} />);
+    await settle();
+    expect(root().dataset.art).toBe("skin");
+    view.rerender(<AccountAvatar uuid="next" skin={null} size={40} />);
+    expect(root().dataset.art).toBe("silhouette");
+  });
+
+  it("头像：挂载时就在读、没有上一张可留：先是剪影，不发请求", async () => {
+    view = render(<AccountAvatar uuid="next" skin="loading" size={32} />);
+    await settle();
+    expect(root().dataset.art).toBe("silhouette");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("立绘：读取中留着上一位的立绘，读到新皮肤后交叉换上", async () => {
+    view = render(<AccountFigure uuid="prev" skin={PREV} scale={6} />);
+    await settle();
+    const [prevLayer] = realLayers();
+    view.rerender(<AccountFigure uuid="next" skin="loading" scale={6} />);
+    await settle();
+    expect([root().dataset.art, realLayers()]).toEqual(["skin", [prevLayer]]);
+    view.rerender(<AccountFigure uuid="next" skin={NEXT} scale={6} />);
+    arrive();
+    await settle();
+    expect(root().dataset.art).toBe("skin");
+    expect(realLayers().filter((layer) => layer !== prevLayer)).toHaveLength(1);
+  });
+});
+
+describe("preloadSkins", () => {
+  const STEVE = { kind: "default", path: "entity/player/wide/steve", model: "wide" } as const;
+  const REMOTE_SKIN = { kind: "remote", sha1: "e5".repeat(20), model: "wide", hat: true } as const;
+
+  it("按与头像相同的地址先取进缓存，之后挂上的头像第一帧就是皮肤", async () => {
+    setArtStatus({ source: { versionId: "1.21.1" }, panorama: false });
+    preloadSkins([STEVE, REMOTE_SKIN]);
+    await settle();
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      "http://petalfall-tex.localhost/art/entity/player/wide/steve.png?v=1.21.1",
+      `http://petalfall-tex.localhost/skin/${REMOTE_SKIN.sha1}.png`,
+    ]);
+    view = render(<AccountAvatar uuid="u1" skin={STEVE} size={40} />);
+    expect(root().dataset.art).toBe("skin");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("本机没有材质源时默认皮肤不发请求，远程皮肤照取", async () => {
+    preloadSkins([STEVE, REMOTE_SKIN]);
+    await settle();
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([`http://petalfall-tex.localhost/skin/${REMOTE_SKIN.sha1}.png`]);
   });
 });
 

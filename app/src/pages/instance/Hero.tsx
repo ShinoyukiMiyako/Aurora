@@ -2,18 +2,21 @@
 // 名称就地改名：点改名或按 F2，回车保存、Esc 只取消改名；校验与新建、设置页共用一套规则。
 // 更多菜单的「导出整合包」「移到其他游戏目录」各打开一个弹窗，弹窗只在打开期间挂载。
 
-import { AnimatePresence } from "framer-motion";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
 import { Icon } from "../../art/Icon";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
 import { EXTRA_LOADER_NAME, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, TOAST_COPY } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
 import { percent } from "../../domain/format";
 import { needsReimport } from "../../domain/rules";
+import { fade, popMark } from "../../lib/motion";
+import { useReflow } from "../../lib/reflow";
 import { isImeComposing } from "../../lib/util";
 import { useCoverBackdrop, useInstanceCover } from "../../launch/cover";
 import { LaunchCapsule } from "../../launch/LaunchCapsule";
 import type { LaunchView } from "../../launch/launchView";
+import { useMounted } from "../../lib/useMounted";
 import { useNav, useShell } from "../../shell/shell";
 import { useLauncherSelector } from "../../state/launcher";
 import { reimportRoute } from "../../state/route";
@@ -21,6 +24,7 @@ import { canPinMore, instanceTask } from "../../state/selectors";
 import { Card } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
 import { IconButton } from "../../ui/IconButton";
+import { LabelSlot } from "../../ui/LabelSlot";
 import { LoaderTag } from "../../ui/LoaderTag";
 import type { MenuEntry } from "../../ui/Menu";
 import { MoreMenu } from "../../ui/MoreMenu";
@@ -62,6 +66,19 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   const compact = tier === "compact";
   const [exporting, setExporting] = useState(false);
   const [moving, setMoving] = useState(false);
+  // 方块、文字列、图钉、更多钮与启动胶囊同在一行，整行挂让位，走胶囊同一条 morph 弹簧：胶囊换面变宽变窄（自己按布局动画形变）时，
+  // 图钉与更多钮跟着它的左缘滑过去，不再一帧瞬移、也不被还没缩回的胶囊盖住；文字列变高变矮时滑到新的居中位置。
+  // 行本身是定宽的：只挂在动作那一小段上不行，那一段随胶囊变宽，让位会把它当成容器尺寸变化而不动。
+  // 两个图标钮外面的提示气泡宿主没有盒子（display: contents），让位会越过它直接挪里面的按钮，不用再垫一层
+  const row = useReflow<HTMLDivElement>("morph");
+  // 状态标签增减时同一行里后面的标签滑过去
+  const chips = useReflow<HTMLDivElement>();
+  // 挂载时就在的状态标签跟着页面入场，之后才出现的弹出来
+  const mounted = useMounted();
+  const editing = renaming && renameReason === undefined;
+  // 改过一次名之后名称再回来时淡入，不和输入行在同一帧硬切；页面挂载时的名称跟着页面入场
+  const [edited, setEdited] = useState(false);
+  if (editing && !edited) setEdited(true);
 
   const pinLabel = pinBlocked ? TOAST_COPY.pinLimit : inst.pinned ? HERO_COPY.unpin : HERO_COPY.pin;
   const pinReason = pinBlocked ? TOAST_COPY.pinLimit : undefined;
@@ -94,7 +111,7 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
       <div className={styles.heroHost} data-sk-hover-host="">
         {/* 方块、名称与标签在左侧，右侧的图钉、菜单与启动胶囊有自己的底 */}
         <Cover hue={cover.hue} seed={inst.id} height={HERO_HEIGHT[tier]} {...backdrop} shade="left" className={styles.heroCover}>
-          <div className={styles.heroInner}>
+          <div ref={row} className={styles.heroInner}>
             <span className={styles.heroBlock}>
               <InstanceBlock instanceId={inst.id} cover={cover} width={HERO_BLOCK[tier]} lift />
             </span>
@@ -107,17 +124,17 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
                   inst.playtimeMin > 0 && <span className={styles.soft}>{` · ${HERO_COPY.played(inst.playtimeMin)}`}</span>
                 )}
               </span>
-              {renaming && renameReason === undefined ? (
+              {editing ? (
                 <RenameField inst={inst} ops={ops} onDone={() => onRenamingChange(false)} />
               ) : (
-                <h1 className={styles.heroName}>
+                <motion.h1 className={styles.heroName} initial={edited ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }}>
                   <span className={styles.heroNameText}>{inst.name}</span>
                   {renameReason === undefined && (
                     <IconButton icon="edit" label={HERO_COPY.rename} size="sm" className={styles.heroEdit} onClick={() => onRenamingChange(true)} />
                   )}
-                </h1>
+                </motion.h1>
               )}
-              <div className={styles.heroChips}>
+              <div ref={chips} className={styles.heroChips}>
                 <Tag icon="box">{inst.mcVersion === null ? HERO_COPY.versionUnknown : inst.mcVersion}</Tag>
                 {inst.loader !== "vanilla" && <LoaderTag loader={inst.loader} version={inst.loaderVersion} />}
                 {inst.extraLoaders.map((extra) => (
@@ -126,44 +143,49 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
                   </Tag>
                 ))}
                 {inst.modpack !== null && <Tag icon="layers">{modpackLabel(inst.modpack)}</Tag>}
-                {view.kind === "broken" && (
-                  <Tag tone="warn" icon="alert">
-                    {HERO_COPY.broken}
-                  </Tag>
-                )}
-                {view.kind === "installing" && <InstallingTag instanceId={inst.id} />}
-                {inst.activity === "backing_up" && (
-                  <Tag tone="info" icon="clock">
-                    {HERO_COPY.backingUp}
-                  </Tag>
-                )}
-                {inst.activity === "moving" && (
-                  <Tag tone="info" icon="folder">
-                    {HERO_COPY.moving}
-                  </Tag>
-                )}
-                {crashActive && (
-                  <Tag tone="danger" icon="x-circle">
-                    {HERO_COPY.lastCrash}
-                  </Tag>
-                )}
+                {/* 随状态出现、消失的标签：消失时立即让出位置、原地淡出，后面的标签与（折行变化时）整个文字列滑到新位置 */}
+                <AnimatePresence mode="popLayout">
+                  {view.kind === "broken" && (
+                    <StatusChip key="broken" appear={mounted.current}>
+                      <Tag tone="warn" icon="alert">
+                        {HERO_COPY.broken}
+                      </Tag>
+                    </StatusChip>
+                  )}
+                  {view.kind === "installing" && (
+                    <StatusChip key="installing" appear={mounted.current}>
+                      <InstallingTag instanceId={inst.id} />
+                    </StatusChip>
+                  )}
+                  {inst.activity === "backing_up" && (
+                    <StatusChip key="backing-up" appear={mounted.current}>
+                      <Tag tone="info" icon="clock">
+                        {HERO_COPY.backingUp}
+                      </Tag>
+                    </StatusChip>
+                  )}
+                  {inst.activity === "moving" && (
+                    <StatusChip key="moving" appear={mounted.current}>
+                      <Tag tone="info" icon="folder">
+                        {HERO_COPY.moving}
+                      </Tag>
+                    </StatusChip>
+                  )}
+                  {crashActive && (
+                    <StatusChip key="crash" appear={mounted.current}>
+                      <Tag tone="danger" icon="x-circle">
+                        {HERO_COPY.lastCrash}
+                      </Tag>
+                    </StatusChip>
+                  )}
+                </AnimatePresence>
               </div>
             </div>
-            <div className={styles.heroActions}>
-              {!compact && (
-                <IconButton
-                  icon="pin"
-                  label={pinLabel}
-                  size="lg"
-                  variant="secondary"
-                  pressed={inst.pinned}
-                  aria-disabled={pinBlocked || undefined}
-                  onClick={ops.togglePin}
-                />
-              )}
-              <MoreMenu items={menu} size="lg" />
-              <LaunchCapsule instanceId={inst.id} size="lg" />
-            </div>
+            {!compact && (
+              <IconButton icon="pin" label={pinLabel} size="lg" variant="secondary" pressed={inst.pinned} aria-disabled={pinBlocked || undefined} onClick={ops.togglePin} />
+            )}
+            <MoreMenu items={menu} size="lg" />
+            <LaunchCapsule instanceId={inst.id} size="lg" />
           </div>
         </Cover>
       </div>
@@ -186,15 +208,39 @@ export function Hero({ inst, ops, view, crashActive, renaming, onRenamingChange 
   );
 }
 
+/**
+ * 一枚随状态出现、消失的标签的包裹层。popLayout 量尺寸、把退场项抽出布局要用 ref，由 AnimatePresence 递进来。
+ * 退场时带 inert：它已经不是此刻的状态，读屏不再读它（与 Appear、列表行的退场同一约定）。
+ */
+function StatusChip({ ref, appear, children }: { ref?: Ref<HTMLSpanElement>; appear: boolean; children: ReactNode }) {
+  const present = useIsPresent();
+  // 换上来的标签：从 0.8 弹出、原地淡出；减少动画时只淡入淡出（缩放在那里是一步到位的）
+  const mark = useReducedMotionConfig() === true ? popMark.reduced : popMark.glyph;
+  return (
+    <motion.span ref={ref} className={styles.heroChip} inert={!present} initial={appear ? mark.initial : false} animate={mark.animate} exit={mark.exit}>
+      {children}
+    </motion.span>
+  );
+}
+
 /** 头图上的安装标签：自己订阅本实例任务的百分比文字，进度怎么走都只换这一枚标签，头图其余部分不重渲染。 */
 function InstallingTag({ instanceId }: { instanceId: string }) {
-  const text = useLauncherSelector((s) => {
+  const pct = useLauncherSelector((s) => {
     const task = instanceTask(s, instanceId);
-    return task !== null && task.status === "running" ? HERO_COPY.installing(percent(task.progress)) : HERO_COPY.installingQueued;
+    return task !== null && task.status === "running" ? percent(task.progress) : null;
   });
+  // 排队时就按「等待安装」本身的宽度，不为还没开始的百分比在胶囊里留白；开始之后等宽数字、按最宽的「100%」占住并居中，
+  // 百分比逐次变化时标签不变宽，个位数时留白分在两侧。排队换成安装中是换了一件事，标签变宽由标签行的让位接住
+  if (pct === null)
+    return (
+      <Tag tone="info" icon="download">
+        {HERO_COPY.installingQueued}
+      </Tag>
+    );
+  const text = HERO_COPY.installing(pct);
   return (
-    <Tag tone="info" icon="download">
-      {text}
+    <Tag tone="info" icon="download" className={styles.num}>
+      <LabelSlot current={text} options={[text, HERO_COPY.installing(percent(1))]} />
     </Tag>
   );
 }
@@ -231,7 +277,9 @@ function RenameField({ inst, ops, onDone }: { inst: InstanceSummary; ops: Instan
   };
 
   return (
-    <div className={styles.renameRow}>
+    // 输入行换上来时淡入，不和名称在同一帧硬切。校验错误不进这一行的流：叠在下面标签行的位置上（标签同时淡出），
+    // 出现、消失时输入框不收窄、按钮不左跳，文字列也不变高
+    <motion.div className={styles.renameRow} data-invalid={error !== null || undefined} initial={{ opacity: 0 }} animate={{ opacity: 1, transition: fade.in }}>
       <TextInput
         ref={inputRef}
         value={draft}
@@ -257,12 +305,17 @@ function RenameField({ inst, ops, onDone }: { inst: InstanceSummary; ops: Instan
         onClick={commit}
       />
       <IconButton icon="x" label={HERO_COPY.cancelRename} size="sm" onClick={onDone} />
-      {error !== null && (
-        <span className={styles.renameError} role="alert">
-          <Icon name="alert" size={14} />
-          {error}
-        </span>
-      )}
-    </div>
+      <AnimatePresence>
+        {error !== null && (
+          <motion.span key={error} className={styles.renameError} role="alert" initial={{ opacity: 0 }} animate={{ opacity: 1, transition: fade.in }} exit={{ opacity: 0, transition: fade.out }}>
+            <Icon name="alert" size={14} />
+            {/* 单行截断：文字列窄时长的错误放不下，悬停看全文（读屏经 role=alert 读到全文） */}
+            <span className={styles.ellipsis} title={error}>
+              {error}
+            </span>
+          </motion.span>
+        )}
+      </AnimatePresence>
+    </motion.div>
   );
 }

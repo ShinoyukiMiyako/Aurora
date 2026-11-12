@@ -1,11 +1,24 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { MotionConfig, MotionGlobalConfig } from "framer-motion";
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { NO_ART, setArtStatus } from "../../mc/art";
 import { clearArtCache } from "../../mc/useArt";
-import { render, setRect, stubMatchMedia, stubResizeObserver, type ResizeObserverStub, type Rendered } from "../../test/dom";
+import { drainFrames, render, setRect, stepFrames, stubMatchMedia, stubResizeObserver, waitForFrames, type ResizeObserverStub, type Rendered } from "../../test/dom";
 import { stubCanvas, type CanvasStub } from "../illustrations/test-canvas";
-import { PanoramaBackdrop } from "./PanoramaBackdrop";
+import { FOCUS_X, FOCUS_Y, PanoramaBackdrop } from "./PanoramaBackdrop";
+
+// jsdom 环境里的 URL 是 jsdom 自己的实现，node:fs 不认，按文件路径读
+const CSS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "PanoramaBackdrop.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+
+function ruleOf(selector: string): string {
+  const rule = new RegExp(`(?:^|\\n)${selector.replace(".", "\\.")} \\{([^}]*)\\}`).exec(CSS);
+  if (rule === null) throw new Error(`没有 ${selector} 规则`);
+  return rule[1];
+}
 
 let view: Rendered | undefined;
 let canvas: CanvasStub;
@@ -91,14 +104,164 @@ describe("PanoramaBackdrop", () => {
     vi.useRealTimers();
   });
 
-  it("开着时全景变得不可用：背景回到无图，记一条 warn", async () => {
+  it("节流间隙里旧尺寸的画布按 cover 等比铺满，焦点与重绘相同，不被非等比拉伸", () => {
+    const image = ruleOf(".image");
+    expect(image).toMatch(/(?:^|\s)object-fit: cover;/);
+    const position = /(?:^|\s)object-position: ([\d.]+)% ([\d.]+)%;/.exec(image);
+    if (position === null) throw new Error(".image 没有按百分比写的 object-position");
+    expect(Number(position[1]) / 100).toBeCloseTo(FOCUS_X, 10);
+    expect(Number(position[2]) / 100).toBeCloseTo(FOCUS_Y, 10);
+  });
+
+  it("开着时全景变得不可用：背景淡出后回到无图，记一条 warn", async () => {
     setArtStatus({ source: null, panorama: true });
     view = render(<PanoramaBackdrop enabled />);
     await settle();
     expect(backdrop()).not.toBeNull();
     act(() => setArtStatus({ source: null, panorama: false }));
-    await settle();
-    expect(backdrop()).toBeNull();
+    await waitForFrames(() => expect(backdrop()).toBeNull());
     expect(warn.mock.calls.some((c) => String(c[0]).includes("樱花林全景已不可用"))).toBe(true);
+  });
+
+  describe("入场按假时钟逐帧播", () => {
+    // 先于文件级的收尾执行：卸载后在假时钟上把帧循环排空，再换回真实计时器，同文件后面的用例才推得动动画
+    afterEach(async () => {
+      view?.unmount();
+      view = undefined;
+      await drainFrames();
+      vi.useRealTimers();
+    });
+
+    it("减少动画时入场收回 fade.in：比照常的那层先到不透明，不播 480 ms 的整窗淡入", async () => {
+      setArtStatus({ source: null, panorama: true });
+      // 先按真实计时器把图取好：之后两层在同一次提交里就拿到位图，同一帧起播
+      view = render(<PanoramaBackdrop enabled />);
+      await settle();
+      view.unmount();
+      view = undefined;
+      // 换假时钟前把这一层入场排在真实计时器上的帧排空
+      await drainFrames();
+      vi.useFakeTimers();
+      const rendered = render(
+        <>
+          <div data-lane="normal">
+            <PanoramaBackdrop enabled />
+          </div>
+          <MotionConfig reducedMotion="always">
+            <div data-lane="reduced">
+              <PanoramaBackdrop enabled />
+            </div>
+          </MotionConfig>
+        </>,
+      );
+      view = rendered;
+      const opacity = (name: string) => {
+        const el = rendered.container.querySelector<HTMLElement>(`[data-lane='${name}'] > [data-sk-art='panorama']`);
+        if (el === null) throw new Error(`${name} 那层全景没有渲染`);
+        return Number(el.style.opacity);
+      };
+      // 帧跟着假时钟走，每帧恰好 16 ms：机器再忙，两层的进度差也不会被一次长帧间隔抹平。
+      // 256 ms：200 ms 的淡入已落到 1，480 ms 的环境层淡入还没走完
+      await stepFrames(16);
+      expect(opacity("reduced")).toBe(1);
+      expect(opacity("normal")).toBeGreaterThan(0);
+      expect(opacity("normal")).toBeLessThan(1);
+    });
+  });
+
+  it("关掉开关：整层先淡出再卸载，不是一帧硬切", async () => {
+    setArtStatus({ source: null, panorama: true });
+    view = render(<PanoramaBackdrop enabled />);
+    await settle();
+    const shown = backdrop();
+    if (!shown) throw new Error("全景背景没有渲染");
+    view.rerender(<PanoramaBackdrop enabled={false} />);
+    // 退场按真实时间播 200 ms：刚关掉时还在原处，正往透明淡
+    expect(backdrop()).toBe(shown);
+    await waitForFrames(() => expect(backdrop()).toBeNull());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe("材质源变化后重新取图", () => {
+    beforeAll(() => {
+      // 退场一帧就播完：要是旧图被放下，几帧之内节点就没了
+      MotionGlobalConfig.skipAnimations = true;
+    });
+
+    afterAll(() => {
+      MotionGlobalConfig.skipAnimations = false;
+    });
+
+    /** 让下一次取图挂起，返回放行函数。 */
+    function holdNextFetch(response: { ok: boolean; status: number }): () => Promise<void> {
+      let release: (() => void) | undefined;
+      fetchMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve({ ...response, blob: async () => new Blob(["y"]) });
+          }),
+      );
+      return async () => {
+        if (release === undefined) throw new Error("取图还没有发出");
+        release();
+        await settle();
+      };
+    }
+
+    /** 等若干帧，确认节点一直在、没被换掉。 */
+    async function staysFor(frames: number, el: HTMLElement): Promise<void> {
+      for (let i = 0; i < frames; i++) {
+        await act(() => new Promise<void>((resolve) => setTimeout(resolve, 16)));
+        expect(backdrop()).toBe(el);
+      }
+    }
+
+    it("取图期间留着上一张，新图到了在同一块画布上换上，不卸载重来", async () => {
+      const bitmaps: { width: number; height: number }[] = [];
+      vi.stubGlobal(
+        "createImageBitmap",
+        vi.fn(async () => {
+          const bitmap = { width: 1024, height: 1024 };
+          bitmaps.push(bitmap);
+          return bitmap;
+        }),
+      );
+      setArtStatus({ source: null, panorama: true });
+      view = render(<PanoramaBackdrop enabled />);
+      await settle();
+      const shown = backdrop();
+      if (!shown) throw new Error("全景背景没有渲染");
+      setRect(shown, { left: 0, top: 0, width: 1120, height: 720 });
+      resize.resize(shown, 1120);
+      expect(canvas.draws.at(-1)?.source).toBe(bitmaps[0]);
+
+      const release = holdNextFetch({ ok: true, status: 200 });
+      act(() => setArtStatus({ source: { versionId: "1.21.4" }, panorama: true }));
+      await settle();
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      await staysFor(6, shown);
+
+      await release();
+      expect(bitmaps).toHaveLength(2);
+      expect(backdrop()).toBe(shown);
+      resize.resize(shown, 1120);
+      expect(canvas.draws.at(-1)?.source).toBe(bitmaps[1]);
+    });
+
+    it("重新取图失败：放下旧图，淡出回到无图", async () => {
+      setArtStatus({ source: null, panorama: true });
+      view = render(<PanoramaBackdrop enabled />);
+      await settle();
+      const shown = backdrop();
+      if (!shown) throw new Error("全景背景没有渲染");
+
+      const release = holdNextFetch({ ok: false, status: 404 });
+      act(() => setArtStatus({ source: { versionId: "1.21.4" }, panorama: true }));
+      await settle();
+      await staysFor(3, shown);
+      await release();
+      await waitForFrames(() => expect(backdrop()).toBeNull());
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("/panorama/0.png"))).toBe(true);
+    });
   });
 });

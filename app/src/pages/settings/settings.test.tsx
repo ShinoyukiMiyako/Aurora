@@ -19,6 +19,7 @@ import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { stubCanvas } from "../../art/illustrations/test-canvas";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { NAV_ANCHOR_ATTR } from "../../ui/Page";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { callsOf, deferred, instanceDto, resetRecorder, settle } from "../../test/launcher";
 import { SettingsCommandsProvider, type SettingsCommands } from "./commands";
@@ -98,6 +99,11 @@ async function mount(section?: "general" | "download" | "java" | "game" | "appea
 
 function all<E extends Element = HTMLElement>(selector: string): E[] {
   return [...document.querySelectorAll<E>(selector)];
+}
+
+/** 不在退场中、也没被收起的元素：退场的块与收起的按钮带 inert，假定时器下动画走不完，节点会留在文档里。 */
+function live<E extends Element = HTMLElement>(selector: string): E[] {
+  return all<E>(selector).filter((el) => el.closest("[inert]") === null);
 }
 
 /** 按可见文字或无障碍名称找按钮（含 role=radio / switch / combobox 的按钮）。 */
@@ -209,6 +215,112 @@ describe("设置页：骨架与分区导航", () => {
     expect(items.map((b) => b.textContent)).toEqual(["常规启动后行为、语言", "下载下载源与速度", "Java运行时与自动选择", "游戏内存、隔离与目录", "外观明暗、强调色、花瓣、动画"]);
   });
 
+  it("分区布局标为导航锚点：导航与分区面板都在这一行里，一页只有这一个", async () => {
+    await mount();
+    const anchors = all(`[${NAV_ANCHOR_ATTR}]`);
+    expect(anchors).toHaveLength(1);
+    const nav = document.querySelector('nav[aria-label="设置分区"]');
+    const panel = document.querySelector('[role="region"]');
+    if (nav === null || panel === null) throw new Error("设置页没有画出导航或分区面板");
+    expect([anchors[0].contains(nav), anchors[0].contains(panel)]).toEqual([true, true]);
+  });
+
+  it("进页的第一个分区不自己播入场；换分区时新面板淡入，从导航里它所在的那一侧滑入", async () => {
+    await mount("java");
+    const panel = () => {
+      const found = document.querySelector<HTMLElement>('[role="region"]');
+      if (found === null) throw new Error("没有分区面板");
+      return found;
+    };
+    expect([panel().getAttribute("aria-label"), panel().style.opacity, panel().style.transform]).toEqual(["Java", "1", "none"]);
+    // 只看挂载那一刻的起点：假定时器下动画推进到哪一帧不可靠
+    act(() => navItem("外观").click());
+    expect([panel().getAttribute("aria-label"), panel().style.opacity, panel().style.transform]).toEqual(["外观", "0", "translateY(6px)"]);
+    await flush();
+    act(() => navItem("常规").click());
+    expect([panel().getAttribute("aria-label"), panel().style.opacity, panel().style.transform]).toEqual(["常规", "0", "translateY(-6px)"]);
+    await flush();
+  });
+
+  it("选中胶囊全导航只有一块，换分区时不重挂，摆到新选中项上、高度取那一项", async () => {
+    await mount();
+    const pills = () => all('nav[aria-label="设置分区"] > [class*="navPill"]');
+    expect(pills()).toHaveLength(1);
+    const [pill] = pills();
+    expect(pill.getAttribute("aria-hidden")).toBe("true");
+    // jsdom 不做布局：给目标项一个随机的位置与高度，胶囊必须照它摆
+    const top = 8 + Math.floor(Math.random() * 300);
+    const height = 40 + Math.floor(Math.random() * 20);
+    Object.defineProperty(navItem("游戏"), "offsetTop", { configurable: true, value: top });
+    Object.defineProperty(navItem("游戏"), "offsetHeight", { configurable: true, value: height });
+    await click(navItem("游戏"));
+    expect(pills()).toEqual([pill]);
+    expect(pill.style.translate).toBe(`0px ${top}px`);
+    expect(pill.style.height).toBe(`${height}px`);
+    expect(all('nav[aria-label="设置分区"] button [class*="navPill"]')).toEqual([]);
+  });
+
+  it("「关于」的版本号还没读到时说明行也占着（不换行空格、读屏不念），读到后原位换成版本号", async () => {
+    const info = deferred<unknown>();
+    ipc.overrides.set("updater_info", () => info.promise);
+    await mount();
+    const hints = () => [...navItem("关于").querySelectorAll<HTMLElement>('[class*="navHint"]')];
+    expect(hints().map((h) => ({ text: h.textContent, hidden: h.getAttribute("aria-hidden") }))).toEqual([{ text: " ", hidden: "true" }]);
+    await act(async () => {
+      info.resolve(await mockInvoke("updater_info", {}));
+      await settle(20);
+    });
+    expect(hints().map((h) => ({ text: h.textContent, hidden: h.getAttribute("aria-hidden") }))).toEqual([{ text: "版本 0.1.0", hidden: null }]);
+    // 等过占位的版本号淡入，而不是同帧硬换
+    expect(hints()[0].style.opacity).toBe("0");
+  });
+
+  it("配置还在读：骨架先只占位不显形，过了出现延迟才显形，照分区真实的卡片画；读到后换成分区内容", async () => {
+    const config = deferred<unknown>();
+    ipc.overrides.set("get_config", () => config.promise);
+    vi.stubGlobal("__PETALFALL_BUILD__", BUILD);
+    onTestFinished(() => void vi.unstubAllGlobals());
+    await mount("general");
+    const skeleton = () => document.querySelector<HTMLElement>('[role="region"] [aria-busy="true"] > [aria-hidden="true"]');
+    /** 骨架里逐块的样子：卡片写卡头有没有副标题、几行设置行，不是卡片的整块写 plain。 */
+    const shape = () => {
+      const layer = skeleton();
+      if (layer === null || layer.firstElementChild === null) throw new Error("内容列里没有骨架");
+      return [...layer.firstElementChild.children].map((block) =>
+        block.hasAttribute("data-pad")
+          ? { subtitle: block.querySelector('[class*="subtitle"]') !== null, rows: block.querySelectorAll(':scope > [class*="row"]').length }
+          : "plain",
+      );
+    };
+    expect(skeleton()?.hasAttribute("data-pending")).toBe(true);
+    expect(shape()).toEqual([
+      { subtitle: true, rows: 2 },
+      { subtitle: false, rows: 1 },
+      { subtitle: false, rows: 1 },
+    ]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(skeleton()?.hasAttribute("data-pending")).toBe(false);
+
+    await click(navItem("关于"));
+    expect(shape()).toEqual(["plain", { subtitle: false, rows: 1 }, { subtitle: false, rows: 0 }, { subtitle: false, rows: 6 }, "plain"]);
+    // 换分区不让加载门从头计时：新面板里的骨架接着显着，不先隐身再等一个出现延迟
+    expect([skeleton()?.hasAttribute("data-pending"), skeleton()?.style.opacity]).toEqual([false, "1"]);
+    expect(text()).not.toContain("检查更新");
+
+    await act(async () => {
+      config.resolve(await mockInvoke("get_config", {}));
+      await settle(20);
+    });
+    // 骨架一旦显形至少停留一个出现延迟，再换成内容
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(text()).toContain("检查更新");
+    expect(document.querySelector('[role="region"] [aria-busy="true"]')).toBeNull();
+  });
+
   it("配置读不出来：内容列是错误卡，导航照常可点；重试成功后显示分区", async () => {
     let fail = true;
     ipc.overrides.set("get_config", async (args) => {
@@ -307,6 +419,10 @@ describe("设置页：常规", () => {
     if (input === null) throw new Error("没有展开 client_id 输入框");
     expect(input.placeholder).toBe("输入以覆盖现有 client_id");
     expect(button("保存").disabled).toBe(true);
+    // 行尾的「清除」「修改」淡出、不可交互，但留着位置：状态标签不横移
+    const actions = button("修改").closest("[data-hidden]");
+    expect([actions?.hasAttribute("inert"), actions?.textContent]).toEqual([true, "清除修改"]);
+    expect(live('[role="region"] button').some((b) => b.textContent === "修改")).toBe(false);
     act(() => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
       setter?.call(input, "  00000000-aaaa-bbbb-cccc-000000000001 ");
@@ -315,7 +431,20 @@ describe("设置页：常规", () => {
     await click(button("保存"));
     expect(callsOf(ipc, "update_config")).toEqual([{ clientId: "00000000-aaaa-bbbb-cccc-000000000001" }]);
     expect(toasts()).toContainEqual({ tone: "success", title: "client_id 已保存", body: undefined });
-    expect(document.querySelector('input[aria-label="微软登录 client_id"]')).toBeNull();
+    expect(live('input[aria-label="微软登录 client_id"]')).toEqual([]);
+    expect(button("修改").closest("[data-hidden]")).toBeNull();
+  });
+
+  it("client_id：编辑行出现时淡入并从略小处落到位，收起时退场期间不可交互", async () => {
+    await mount("general");
+    act(() => button("修改").click());
+    const editor = document.querySelector<HTMLElement>('input[aria-label="微软登录 client_id"]')?.closest<HTMLElement>('[class*="inlineEditor"]')?.parentElement;
+    if (editor === null || editor === undefined) throw new Error("没有展开 client_id 输入框");
+    expect([editor.style.opacity, editor.style.transform]).toEqual(["0", "scale(0.98)"]);
+    await flush();
+    await click(button("取消"));
+    expect(editor.hasAttribute("inert")).toBe(true);
+    expect(live('input[aria-label="微软登录 client_id"]')).toEqual([]);
   });
 
   it("client_id：已配置时可以清除，先确认会让用它登录的账户重新登录；取消不写，确认后写入并提示", async () => {
@@ -335,7 +464,7 @@ describe("设置页：常规", () => {
     expect(toasts()).toContainEqual({ tone: "success", title: "已清除自定义的 client_id", body: undefined });
     // 清掉以后显示未配置，也不再给「清除」
     expect(text()).toContain("未配置");
-    expect(all<HTMLButtonElement>('[role="region"] button').some((b) => b.textContent?.trim() === "清除")).toBe(false);
+    expect(live<HTMLButtonElement>('[role="region"] button').some((b) => b.textContent?.trim() === "清除")).toBe(false);
   });
 
   it("client_id：保存还没回来时再按 Enter 不重复写入，只提示一次", async () => {
@@ -374,6 +503,13 @@ describe("设置页：下载", () => {
     expect(nav.route).toEqual({ page: "tasks" });
   });
 });
+
+/** 去掉退场中的块之后的文字。 */
+function liveText(root: Element = document.body): string {
+  const copy = root.cloneNode(true) as Element;
+  for (const leaving of copy.querySelectorAll("[inert]")) leaving.remove();
+  return copy.textContent ?? "";
+}
 
 describe("设置页：Java", () => {
   beforeEach(() => {
@@ -442,8 +578,14 @@ describe("设置页：Java", () => {
     const warnTitle = "默认 Java 已经找不到了，跟随全局的实例会启动失败";
 
     beforeEach(async () => {
+      // 「重新选择」把选项平滑地带进视口；jsdom 没有 scrollIntoView
+      Object.defineProperty(Element.prototype, "scrollIntoView", { value: vi.fn(), configurable: true, writable: true });
       // 先在假后端里固定 Java 8，再让扫描只报出 Java 21：等于那个 Java 8 被卸载了
       await mockInvoke("update_config", { defaultJava: JRE8 });
+    });
+
+    afterEach(() => {
+      Reflect.deleteProperty(Element.prototype, "scrollIntoView");
     });
 
     it("列表一项都不选中，给出带路径的专门提醒，「改回自动选择」写回 auto", async () => {
@@ -459,7 +601,7 @@ describe("设置页：Java", () => {
       await click(button("改回自动选择"));
       expect(callsOf(ipc, "update_config")).toEqual([{ defaultJava: "auto" }]);
       expect(radio("自动选择").getAttribute("aria-checked")).toBe("true");
-      expect(text()).not.toContain(warnTitle);
+      expect(liveText()).not.toContain(warnTitle);
     });
 
     it("扫描结果里的路径只差大小写：不报找不到，列表里照常选中它", async () => {
@@ -519,8 +661,8 @@ describe("设置页：Java", () => {
       missing_files: [],
     };
     /** 说明块带色调，提醒行没有；两者都要播报。 */
-    const callouts = () => all('[role="alert"][data-tone]');
-    const reminderRows = () => all('[role="alert"]:not([data-tone])').map((el) => el.textContent);
+    const callouts = () => live('[role="alert"][data-tone]');
+    const reminderRows = () => live('[role="alert"]:not([data-tone])').map((el) => el.textContent);
     const missingPinned = "还缺 Java 25、Java 21。默认 Java 固定后不会自动下载，可以在下面手动下载，再到实例设置里单独指定。";
     const bits32 = "32 位 Java 最多只能用约 1.5 GB 内存，装 Mod 的实例很容易内存不足。";
 
@@ -822,7 +964,7 @@ describe("设置页：Java · 手动添加与不完整的运行时", () => {
     expect(manualRow(gone).textContent).toContain("识别不出");
     await click(removeButton(gone));
     expect(callsOf(ipc, "remove_java_path")).toEqual([{ path: gone }]);
-    expect(document.querySelector(MANUAL_LIST)).toBeNull();
+    expect(live(MANUAL_LIST)).toEqual([]);
   });
 
   it("不完整的运行时：标「不完整」并写出缺的文件，单选项禁用；只有它时照样提示还缺这个主版本", async () => {
@@ -882,15 +1024,16 @@ describe("设置页：Java · 手动添加与不完整的运行时", () => {
     await click(removeButton(plain));
     expect(callsOf(ipc, "remove_java_path")).toEqual([{ path: plain }]);
     expect(toasts()).toContainEqual({ tone: "success", title: "已移除手动添加的 Java", body: undefined });
-    expect(all(`${MANUAL_LIST} > li`)).toHaveLength(1);
+    // 移除的那一行还在淡出，已经标了 inert，不算列表的行
+    expect(all(`${MANUAL_LIST} > li:not([inert])`)).toHaveLength(1);
     expect(radio("Java 25").getAttribute("aria-checked")).toBe("true");
 
     await click(removeButton(pinned));
     expect(callsOf(ipc, "remove_java_path")).toEqual([{ path: plain }, { path: pinned }]);
     expect(toasts()).toContainEqual({ tone: "success", title: "已移除手动添加的 Java", body: "默认 Java 改回了自动选择" });
     expect(radio("自动选择").getAttribute("aria-checked")).toBe("true");
-    expect(document.querySelector(MANUAL_LIST)).toBeNull();
-    expect(text()).not.toContain(pinned);
+    expect(live(MANUAL_LIST)).toEqual([]);
+    expect(liveText()).not.toContain(pinned);
   });
 
   it("手动添加的记录这次识别不出：标「识别不出」并说明，不进单选列表，照样可以移除", async () => {
@@ -904,7 +1047,7 @@ describe("设置页：Java · 手动添加与不完整的运行时", () => {
     expect(all('[role="radio"]').some((r) => r.textContent?.includes(gone))).toBe(false);
     await click(removeButton(gone));
     expect(callsOf(ipc, "remove_java_path")).toEqual([{ path: gone }]);
-    expect(document.querySelector(MANUAL_LIST)).toBeNull();
+    expect(live(MANUAL_LIST)).toEqual([]);
   });
 
   it("移除失败：报「没能移除 Java」、正文是原文，记录还在", async () => {
@@ -963,12 +1106,13 @@ describe("设置页：Java · 显卡", () => {
     expect(card.textContent).not.toContain("只找到一块显卡");
   });
 
-  it("读取中：说明位置是骨架行，开关说明写正在读取，开关照常可用", async () => {
+  it("读取中：不放推测的骨架行（多数机器读完没有说明块），开关说明写正在读取，开关照常可用", async () => {
     const pending = deferred<unknown>();
     ipc.overrides.set("gpu_adapters", () => pending.promise);
     await mount("java");
     const card = section("显卡");
     expect(card.querySelector('[aria-busy="true"]')).not.toBeNull();
+    expect(card.querySelector('[class*="skeleton"]')).toBeNull();
     expect(card.textContent).toContain("正在读取显卡信息");
     await click(button("让游戏用独立显卡"));
     expect(callsOf(ipc, "update_config")).toEqual([{ preferDedicatedGpu: true }]);
@@ -1115,7 +1259,7 @@ describe("设置页：游戏", () => {
       expect(card.querySelector('[data-tone="warn"]')?.textContent).toBe("需要 13 GB，本机最多给 8 GB（物理内存的一半），内存可能不够用。");
       expect(await markerTip()).toBe("Forge 1.20.1 · 1100 个 Mod，建议 8 GB。需要 13 GB，本机最多给 8 GB（物理内存的一半）");
       await click(button("自动分配"));
-      expect(section("内存").textContent).not.toContain("内存可能不够用");
+      expect(liveText(section("内存"))).not.toContain("内存可能不够用");
     });
   });
 
@@ -1285,7 +1429,9 @@ describe("设置页：外观", () => {
     expect(text()).toContain("本机还没有原版材质，方块平铺先画成渐变花瓣。");
     const download = all("[data-art-download]");
     expect(download.map((d) => d.getAttribute("data-art-download"))).toEqual(["compact"]);
-    expect(download[0].previousElementSibling?.textContent).toMatch(/^实例卡面默认背景/);
+    // 下载块包在一层出入场的外壳里，外壳紧跟在这一行后面
+    const host = download[0].parentElement;
+    expect(host?.previousElementSibling?.textContent).toMatch(/^实例卡面默认背景/);
 
     await click(radio("渐变花瓣"));
     expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { cover_background: "art" } }]);
@@ -1294,7 +1440,9 @@ describe("设置页：外观", () => {
     expect(callsOf(ipc, "set_appearance")).toEqual([{ patch: { cover_background: "art" } }, { patch: { cover_background: "texture" } }]);
 
     act(() => setBlockCatalog(catalogFromDto({ version_id: "1.21.1", blocks: [] })));
-    expect(all("[data-art-download]")).toEqual([]);
+    // 收起是退场：淡出期间不可交互，不再算作页面上的下载块
+    expect(host?.hasAttribute("inert")).toBe(true);
+    expect(live("[data-art-download]")).toEqual([]);
     expect(text()).toContain("方块平铺取封面方块的材质，读取自你本机的游戏文件。");
   });
 });
@@ -1330,14 +1478,18 @@ describe("设置页：关于与启动器更新", () => {
     await click(button("下载更新"));
     const [download] = callsOf(ipc, "download_update");
     expect(typeof download.taskId).toBe("string");
-    // 假后端每 120 ms 报一次进度，共 12 MB
+    // 假后端每 120 ms 报一次进度，共 12 MB。卡片主句的百分比条条都换，面板与卡片的已下大小按 500 ms 的节拍换字
     await act(async () => {
       await vi.advanceTimersByTimeAsync(250);
     });
-    expect(text()).toContain("4.8 MB / 12.0 MB");
+    expect(text()).toContain("正在下载 0.2.0 · 40%");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(text()).toContain("9.6 MB / 12.0 MB");
     expect(button("后台下载").textContent).toBe("后台下载");
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(600);
+      await vi.advanceTimersByTimeAsync(300);
     });
     await flush();
     expect(text()).toContain("新版本已经下好了。");
@@ -1398,6 +1550,26 @@ describe("设置页：关于与启动器更新", () => {
     expect(callsOf(ipc, "update_config")).toEqual([{ skippedUpdateVersion: "0.2.0" }]);
     expect(openDialogs()).toEqual([]);
     expect(text()).toContain("发布于 2026年10月29日 · 你跳过了这个版本");
+  });
+
+  it("更新信息还没到：状态行先放同结构的骨架、只占位不显形；到了原位换成当前版本", async () => {
+    const info = deferred<unknown>();
+    ipc.overrides.set("updater_info", () => info.promise);
+    await mount("about");
+    const card = section(`${APP_NAME}更新`);
+    const layer = card.querySelector<HTMLElement>('[aria-busy="true"] > [aria-hidden="true"]');
+    if (layer === null) throw new Error("更新卡里没有骨架");
+    expect(layer.hasAttribute("data-pending")).toBe(true);
+    // 主句、次句各一行，右边一个按钮
+    expect(layer.querySelectorAll('[class*="updateTitle"], [class*="mutedText"]')).toHaveLength(2);
+    expect([...card.querySelectorAll("button")].some((b) => b.textContent === "检查更新")).toBe(false);
+
+    await act(async () => {
+      info.resolve(await mockInvoke("updater_info", {}));
+      await settle(20);
+    });
+    expect(card.textContent).toContain("当前是 0.1.0");
+    expect(card.querySelector('[aria-busy="true"]')).toBeNull();
   });
 
   it("检查失败：卡内如实显示后端原因并给出重试，重试成功后显示新版本", async () => {
@@ -1513,7 +1685,8 @@ describe("设置页：关于与启动器更新", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(130);
     });
-    expect(text()).toContain("2.4 MB / 12.0 MB");
+    // 已下大小的字按 500 ms 的节拍换，第一个源报的这一条只在卡片主句的百分比上
+    expect(text()).toContain("正在下载 0.2.0 · 20%");
     expect(text()).not.toContain("已换用备用下载源");
     // 换源提示要让读屏念出来：status 节点在第一个源时就挂着、是空的，换源时只换文字
     const panel = openDialogs()[0];
@@ -1529,12 +1702,13 @@ describe("设置页：关于与启动器更新", () => {
     expect(panel?.textContent).not.toContain("2.4 MB");
     expect(text()).toContain("0 B · 已换用备用下载源（2/4）");
 
+    // 换源那一刻字回到 0 B，从那时起满 500 ms 换上最近报上来的一条
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(250);
+      await vi.advanceTimersByTimeAsync(500);
     });
-    expect(text()).toContain("4.8 MB / 12.0 MB · 已换用备用下载源（2/4）");
+    expect(text()).toContain("9.6 MB / 12.0 MB · 已换用备用下载源（2/4）");
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(400);
+      await vi.advanceTimersByTimeAsync(150);
     });
     await flush();
     expect(text()).toContain("新版本已经下好了。");
@@ -1607,6 +1781,7 @@ describe("设置页：关于与启动器更新", () => {
       expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([url]);
       const [dialog] = openDialogs();
       expect(dialog.querySelector("h2")?.textContent).toBe(title);
+      expect(dialog.className).toContain("licenseDialog");
       expect(dialog.querySelector("h2 + p")?.textContent).toBe("中文为准，附英文对照");
       const region = dialog.querySelector<HTMLElement>('pre[role="region"]');
       expect(region?.getAttribute("aria-label")).toBe(title);
@@ -1639,6 +1814,56 @@ describe("设置页：关于与启动器更新", () => {
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(openDialogs()[0]?.querySelector('pre[role="region"]')?.textContent).toBe(body);
     });
+  });
+
+  it("协议全文弹窗打开就取满高；读取中的转圈先只占位不显形，过了出现延迟才显形，读到后换成原文", async () => {
+    const response = deferred<unknown>();
+    vi.stubGlobal("fetch", vi.fn(async () => response.promise));
+    await mount("about");
+    await click(rowButton("协议全文", "查看"));
+    const [dialog] = openDialogs();
+    expect(dialog.className).toContain("licenseDialog");
+    const loading = () => dialog.querySelector<HTMLElement>('[aria-busy="true"] > [aria-hidden="true"]');
+    expect(loading()?.hasAttribute("data-pending")).toBe(true);
+    expect(loading()?.textContent).toBe("正在读取协议全文…");
+    // 转圈所在的骨架层对读屏隐藏：读取中的说明另有一份在它外面，转圈显形时才写进去，读屏念得到
+    const status = dialog.querySelector<HTMLElement>('[role="status"]');
+    if (status === null) throw new Error("弹窗里没有给读屏的读取中说明");
+    expect([status.closest('[aria-hidden="true"]'), status.textContent]).toEqual([null, ""]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(loading()?.hasAttribute("data-pending")).toBe(false);
+    expect(status.textContent).toBe("正在读取协议全文…");
+
+    const license = `GNU AFFERO GENERAL PUBLIC LICENSE ${Math.random().toString(36).slice(2)}\n`;
+    await act(async () => {
+      response.resolve({ ok: true, status: 200, text: async () => license });
+      await settle(20);
+    });
+    // 转圈一旦显形至少停留一个出现延迟，再换成原文
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(dialog.querySelector('pre[role="region"]')?.textContent).toBe(license);
+    expect(dialog.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(status.textContent).toBe("");
+  });
+
+  it("第三方许可：条数读到之前副标题先占住一行，读到后原位换成条数；弹窗打开就取满高", async () => {
+    const response = deferred<unknown>();
+    vi.stubGlobal("fetch", vi.fn(async () => response.promise));
+    await mount("about");
+    await click(rowButton("第三方许可", "查看"));
+    const [dialog] = openDialogs();
+    expect(dialog.className).toContain("licenseDialog");
+    const subtitle = () => dialog.querySelector<HTMLElement>("h2 + p");
+    expect([subtitle()?.hasAttribute("data-pending"), subtitle()?.textContent]).toEqual([true, ""]);
+    await act(async () => {
+      response.resolve({ ok: true, status: 200, json: async () => MANIFEST });
+      await settle(20);
+    });
+    expect([subtitle()?.hasAttribute("data-pending"), subtitle()?.textContent]).toEqual([false, "共 3 个，构建时从依赖树生成"]);
   });
 
   it("协议全文、附加条款与素材许可各读各的文件，先开过一份不影响另一份", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { INITIAL_UPDATER_STATE, type UpdateInfo, type UpdaterPhase, type UpdaterState } from "../../../state/updater/machine";
-import { updateCardView, type CardContext } from "./update-view";
+import { downloadSub, updateCardView, type CardContext, type CardView } from "./update-view";
 
 const UPDATE: UpdateInfo = { version: "0.3.0", current_version: "0.2.0", notes: null, date: new Date(2026, 9, 28, 12).getTime() };
 const NOW = new Date(2026, 9, 31, 12).getTime();
@@ -9,6 +9,12 @@ const CTX: CardContext = { checkUpdates: true, skippedVersion: null, now: NOW, o
 
 function state(phase: UpdaterPhase): UpdaterState {
   return { ...INITIAL_UPDATER_STATE, currentVersion: "0.2.0", phase };
+}
+
+/** 下载中的次句按上报的原值拼出来的样子（组件里换成节流后的已下大小）。 */
+function progressSub(view: CardView): string {
+  if (view.progress === null) throw new Error("下载中应当给出次句素材");
+  return downloadSub(view.progress);
 }
 
 describe("更新卡各阶段", () => {
@@ -36,9 +42,20 @@ describe("更新卡各阶段", () => {
 
   it("下载中：已知总量时写百分比与字节，未知时只写已下载字节", () => {
     const known = updateCardView(state({ kind: "downloading", update: UPDATE, taskId: "t", bytes: 4 * 1024 * 1024, totalBytes: 16 * 1024 * 1024, source: null }), CTX);
-    expect([known.title, known.sub, known.button.label]).toEqual(["正在下载 0.3.0 · 25%", "4.0 MB / 16.0 MB", "查看进度"]);
+    expect([known.title, progressSub(known), known.button.label]).toEqual(["正在下载 0.3.0 · 25%", "4.0 MB / 16.0 MB", "查看进度"]);
     const unknown = updateCardView(state({ kind: "downloading", update: UPDATE, taskId: "t", bytes: 2048, totalBytes: null, source: null }), CTX);
-    expect([unknown.title, unknown.sub]).toEqual(["正在下载 0.3.0", "2.0 KB"]);
+    expect([unknown.title, progressSub(unknown)]).toEqual(["正在下载 0.3.0", "2.0 KB"]);
+  });
+
+  it("下载中：次句不在纯函数里定稿，交出原始字节与总量；拼句子用调用方给的已下大小，主句的百分比仍按上报的原值", () => {
+    const view = updateCardView(state({ kind: "downloading", update: UPDATE, taskId: "t", bytes: 12 * 1024 * 1024, totalBytes: 16 * 1024 * 1024, source: null }), CTX);
+    expect([view.sub, view.progress]).toEqual([null, { bytes: 12 * 1024 * 1024, totalBytes: 16 * 1024 * 1024, switched: null }]);
+    expect(view.title).toBe("正在下载 0.3.0 · 75%");
+    if (view.progress === null) throw new Error("下载中应当给出次句素材");
+    expect(downloadSub({ ...view.progress, bytes: 3 * 1024 * 1024 })).toBe("3.0 MB / 16.0 MB");
+    // 其余阶段没有次句素材
+    expect(updateCardView(state({ kind: "available", update: UPDATE }), CTX).progress).toBeNull();
+    expect(updateCardView(state({ kind: "ready", update: UPDATE }), CTX).progress).toBeNull();
   });
 
   it("已下载：主按钮安装；游戏运行中带原因禁用", () => {
@@ -84,11 +101,11 @@ describe("更新卡各阶段", () => {
     const downloading = (source: { index: number; count: number; name: string } | null, totalBytes: number | null) =>
       updateCardView(state({ kind: "downloading", update: UPDATE, taskId: "t", bytes: 4 * 1024 * 1024, totalBytes, source }), CTX);
     const switched = downloading({ index: 1, count: 4, name: "hk" }, 16 * 1024 * 1024);
-    expect([switched.title, switched.sub]).toEqual(["正在下载 0.3.0 · 25%", "4.0 MB / 16.0 MB · 已换用备用下载源（2/4）"]);
-    expect(switched.sub).not.toContain("hk");
-    expect(downloading({ index: 3, count: 4, name: "github" }, null).sub).toBe("4.0 MB · 已换用备用下载源（4/4）");
-    expect(downloading({ index: 0, count: 4, name: "cn" }, 16 * 1024 * 1024).sub).toBe("4.0 MB / 16.0 MB");
-    expect(downloading(null, 16 * 1024 * 1024).sub).toBe("4.0 MB / 16.0 MB");
+    expect([switched.title, progressSub(switched)]).toEqual(["正在下载 0.3.0 · 25%", "4.0 MB / 16.0 MB · 已换用备用下载源（2/4）"]);
+    expect(progressSub(switched)).not.toContain("hk");
+    expect(progressSub(downloading({ index: 3, count: 4, name: "github" }, null))).toBe("4.0 MB · 已换用备用下载源（4/4）");
+    expect(progressSub(downloading({ index: 0, count: 4, name: "cn" }, 16 * 1024 * 1024))).toBe("4.0 MB / 16.0 MB");
+    expect(progressSub(downloading(null, 16 * 1024 * 1024))).toBe("4.0 MB / 16.0 MB");
   });
 
   it("试过多个下载源、全都败在网络层：次句说所有下载源，逐源原文另放一行", () => {

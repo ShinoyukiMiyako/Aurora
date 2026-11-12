@@ -6,8 +6,9 @@ import {
   figureParts,
   figureQuads,
   partOrder,
+  releaseVelocity,
+  releaseYaw,
   REST_POSE,
-  settleYaw,
   viewDirection,
   wrapAngle,
   type BoxFace,
@@ -447,28 +448,83 @@ describe("回位缓动", () => {
     expect(wrapAngle(0)).toBe(0);
   });
 
-  it("每步都更靠近默认姿态，最后精确落在 rest 上", () => {
-    let yaw = rest + deg(120);
-    let remaining = Math.abs(yaw - rest);
-    let steps = 0;
-    while (yaw !== rest) {
-      yaw = settleYaw(yaw, rest, 16);
-      const next = Math.abs(yaw - rest);
-      expect(next).toBeLessThan(remaining);
-      remaining = next;
-      expect(++steps).toBeLessThan(120);
+  /** 按 60 Hz 逐帧取 releaseYaw，直到精确落在 rest；返回每帧的 yaw。 */
+  function track(from: number, velocity: number): number[] {
+    const out: number[] = [];
+    for (let frame = 1; ; frame++) {
+      const yaw = releaseYaw(from, rest, velocity, (frame * 16) / 1000);
+      out.push(yaw);
+      if (yaw === rest) return out;
+      if (frame > 120) throw new Error("两秒内没有回到默认姿态");
     }
-    expect(yaw).toBe(rest);
+  }
+
+  it("静止松手：沿 pop 弹簧回位，第一帧就在动、几帧之内不会到位，最后精确落在 rest 上", () => {
+    const from = rest + deg(120);
+    const yaws = track(from, 0);
+    expect(releaseYaw(from, rest, 0, 0)).toBeCloseTo(from, 10);
+    expect(yaws[0]).toBeLessThan(from);
+    expect(yaws.length).toBeGreaterThan(10);
+    expect(yaws.length).toBeLessThan(60);
+    expect(yaws[yaws.length - 1]).toBe(rest);
+  });
+
+  it("甩动中松手：先顺着手的方向带一段再折回，不从最大速度起步猛然掉头", () => {
+    const from = rest + deg(60);
+    // 往远离默认姿态的方向甩，每秒 600 度
+    const yaws = track(from, deg(600));
+    expect(yaws[0]).toBeGreaterThan(from);
+    const peak = Math.max(...yaws);
+    expect(peak - from).toBeGreaterThan(deg(3));
+    expect(peak - from).toBeLessThan(deg(30));
+    // 静止松手同一位置时第一帧就往回走
+    expect(track(from, 0)[0]).toBeLessThan(from);
   });
 
   it("走最短方向：转过将近一圈的 yaw 只差 10 度，不会倒着绕回去", () => {
-    const next = settleYaw(rest + deg(350), rest, 16);
-    const offset = wrapAngle(next - rest);
+    const offset = wrapAngle(releaseYaw(rest + deg(350), rest, 0, 0.016) - rest);
     expect(offset).toBeGreaterThan(deg(-10));
     expect(offset).toBeLessThan(0);
   });
 
-  it("单步很长（窗口卡顿）时直接到位", () => {
-    expect(settleYaw(rest + deg(170), rest, 5000)).toBe(rest);
+  it("隔了很久（窗口卡顿）的一帧直接到位", () => {
+    expect(releaseYaw(rest + deg(170), rest, deg(900), 5)).toBe(rest);
+  });
+
+  it("回弹经过默认姿态时速度还大，不会在半路吸附停下", () => {
+    const yaws = track(rest + deg(170), deg(-1080));
+    const crossings = yaws.slice(0, -1).filter((yaw, i) => Math.sign(yaw - rest) !== Math.sign(yaws[i + 1] - rest) && yaws[i + 1] !== rest);
+    expect(crossings.length).toBeGreaterThan(0);
+    expect(yaws[yaws.length - 1]).toBe(rest);
+  });
+});
+
+describe("松手速度", () => {
+  const sample = (t: number, degrees: number) => ({ t, yaw: deg(degrees) });
+
+  it("取松手前 80 ms 内最早一次拖动到松手的平均角速度", () => {
+    const samples = [sample(0, 0), sample(50, 10), sample(100, 20), sample(150, 30)];
+    // 窗口从 80 起：最早的是 100 ms 时的 20 度，到 180 ms 松手时 36 度
+    expect(releaseVelocity(samples, 180, deg(36))).toBeCloseTo(deg(200), 10);
+  });
+
+  it("停住一个窗口再松手：速度为零", () => {
+    expect(releaseVelocity([sample(0, 0), sample(20, 40)], 200, deg(40))).toBe(0);
+  });
+
+  it("停了一会儿再松手：停住的那段把平均速度拉低", () => {
+    const moving = releaseVelocity([sample(0, 0), sample(40, 40)], 40, deg(40));
+    const paused = releaseVelocity([sample(0, 0), sample(40, 40)], 70, deg(40));
+    expect(paused).toBeGreaterThan(0);
+    expect(paused).toBeLessThan(moving);
+  });
+
+  it("窗口里只有挨得很近的事件时不算甩动", () => {
+    expect(releaseVelocity([sample(100, 0), sample(105, 30)], 108, deg(30))).toBe(0);
+  });
+
+  it("算出的速度封顶在每秒 1080 度，两个方向都封", () => {
+    expect(releaseVelocity([sample(0, 0), sample(20, 180)], 20, deg(180))).toBeCloseTo(deg(1080), 10);
+    expect(releaseVelocity([sample(0, 0), sample(20, -180)], 20, deg(-180))).toBeCloseTo(deg(-1080), 10);
   });
 });

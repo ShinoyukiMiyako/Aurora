@@ -20,7 +20,7 @@ import { ShellProvider, useNav, type NavApi } from "../../shell/shell";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
 import { routeKey, type InstanceTab } from "../../state/route";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { drainFrames, render, stepFrames, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { bootOverrides, configDto, deferred, emit, instanceDto, memoryAdviceDto, resetRecorder, settle } from "../../test/launcher";
 import { RemoteImageProvider } from "../../ui/remote-image";
@@ -307,9 +307,11 @@ beforeEach(() => {
   ipc.overrides.set("rollback_checks", () => history.map((e) => ({ event_id: e.id, can_rollback: e.kind === "update", reason: e.kind === "update" ? null : "安装事件不支持回滚" })));
 });
 
-afterEach(() => {
+// 横幅的百分数逐帧走：用例结束先卸载、把假时钟下的帧循环排空，同文件后面的用例才推得动动画
+afterEach(async () => {
   view?.unmount();
   view = undefined;
+  await drainFrames();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -393,7 +395,9 @@ describe("实例详情：本实例的进度在走", () => {
     expect(percent(progress)).toBe("50%");
     expect(document.body.textContent).toContain(HERO_COPY.installing("50%"));
     if (tab === "overview") {
-      const banner = OVERVIEW_COPY.installProgress("50%", formatSpeed(1_000_000), formatBytes(40_000));
+      // 横幅的百分数与进度条同一份平滑：逐帧走到这一批的进度，只改文字节点，不让任何部件重渲染
+      await stepFrames(40);
+      const banner = `50%${OVERVIEW_COPY.installProgressTail(formatSpeed(1_000_000), formatBytes(40_000))}`;
       expect(document.body.textContent).toContain(banner);
     }
     expect(renders).toEqual(before);
@@ -419,7 +423,10 @@ describe("实例详情：本实例的进度在走", () => {
       });
     }
     expect(document.body.textContent).toContain(HERO_COPY.installing("50%"));
-    if (tab === "overview") expect(document.body.textContent).toContain(OVERVIEW_COPY.installProgress("50%", formatSpeed(1_000_000), formatBytes(40_000)));
+    if (tab === "overview") {
+      await stepFrames(40);
+      expect(document.body.textContent).toContain(`50%${OVERVIEW_COPY.installProgressTail(formatSpeed(1_000_000), formatBytes(40_000))}`);
+    }
     expect(renders).toEqual(before);
   });
 
@@ -449,7 +456,8 @@ describe("实例详情：本实例的进度在走", () => {
     if (progress === undefined) throw new Error("新建任务不见了");
     expect(progress).toBeCloseTo(5.5 / 21, 10);
     expect(document.body.textContent).toContain(HERO_COPY.installing("26%"));
-    expect(document.body.textContent).toContain(OVERVIEW_COPY.installStepProgress("26%", "第 3 步，共 5 步：下载游戏本体与库文件", formatSpeed(1_000_000)));
+    await stepFrames(40);
+    expect(document.body.textContent).toContain(`26%${OVERVIEW_COPY.installStepProgressTail("第 3 步，共 5 步：下载游戏本体与库文件", formatSpeed(1_000_000))}`);
     expect(document.body.textContent).not.toContain(formatBytes(40_000));
     // 头图胶囊的副行放不下整句，写短的
     expect(document.body.textContent).toContain("下载游戏本体与库文件 · 第 3/5 步");

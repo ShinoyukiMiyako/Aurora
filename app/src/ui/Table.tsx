@@ -8,14 +8,18 @@
 // 列按尺寸档显示或隐藏，档位由 <html data-sk-tier> 决定，组件不需要在脚本里知道当前档。
 // 选择、排序的状态都由页面持有：组件只渲染并回报，批量操作条也由页面替换工具条。
 // 行的增删：被删的行脱离布局原地淡出，其余行靠布局动画让位；页面只管换 rows，不用为退场做任何事。
+// 被挤动的行里只有可见范围附近的那一小段走让位，新行也只有那一段播入场，远处的直接到位：几十行的表删一行不再整表闪一下。
+// 筛到零行时空状态与行在同一个 AnimatePresence 里互换，同样淡入淡出。
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { AnimatePresence, motion, useAnimate, useIsPresent, useReducedMotionConfig, type HTMLMotionProps, type Variants } from "framer-motion";
 import { useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
 import { Icon } from "../art/Icon";
 import { fade, springs } from "../lib/motion";
+import { useMounted } from "../lib/useMounted";
 import { cssVars, cx } from "../lib/util";
 import type { TierName } from "./Card";
+import { appendsOnly, EVERY_ROW, ROW_MOTION_LIMIT, rowsInWindow, rowWindow, type RowWindow } from "./ListRow.window";
 import styles from "./Table.module.css";
 
 export type TableDensity = "regular" | "compact";
@@ -86,8 +90,6 @@ export const ROW_HEIGHT: Readonly<Record<TableDensity, number>> = { regular: 64,
 export const HEADER_HEIGHT = 36;
 /** 超过这个行数开启虚拟化。 */
 export const VIRTUALIZE_ABOVE = 100;
-/** 一次增删或换位超过这么多行时不逐行动画：行直接换上，整张表淡入一次。再多，布局测量本身就会掉帧。 */
-const ROW_MOTION_LIMIT = 40;
 
 const TIERS: readonly TierName[] = ["compact", "regular", "wide"];
 const ROW_FOCUSABLE = 'button, a[href], input, select, textarea, [tabindex], [data-table-tabindex]';
@@ -97,10 +99,16 @@ const ROW_CONTROLS = 'button, a[href], input, select, textarea, label, [role="sw
 
 const visibleIn = <T,>(column: TableColumn<T>, tier: TierName) => column.tiers === undefined || column.tiers.includes(tier);
 
+/**
+ * 某一档显示的列，按定义的顺序。照表格画同尺寸骨架的页面用它取列，不要自己再按 tiers 判断一遍：规则一改，骨架就会和表格错位。
+ */
+export function visibleColumns<T>(columns: readonly TableColumn<T>[], tier: TierName): TableColumn<T>[] {
+  return columns.filter((c) => visibleIn(c, tier));
+}
+
 /** 某一档的列模板：固定列写像素宽，弹性列按最小宽分剩余空间。 */
 export function columnTemplate<T>(columns: readonly TableColumn<T>[], tier: TierName): string {
-  return columns
-    .filter((c) => visibleIn(c, tier))
+  return visibleColumns(columns, tier)
     .map((c) => (c.width !== undefined ? `${c.width}px` : `minmax(${c.minWidth === undefined ? 0 : c.minWidth}px, 1fr)`))
     .join(" ");
 }
@@ -139,6 +147,76 @@ export function rowChurn(previous: readonly string[], next: readonly string[]): 
   return changed > 0 ? changed : next.filter((k, i) => previous[i] !== k).length;
 }
 
+/** 前后都在、但下标变了的行数：被挤动的行。其中只有可见范围附近的量布局、走让位（见 rowsInWindow）。 */
+export function rowShift(previous: readonly string[], next: readonly string[]): number {
+  const before = new Map(previous.map((k, i) => [k, i]));
+  let moved = 0;
+  next.forEach((k, i) => {
+    const was = before.get(k);
+    if (was !== undefined && was !== i) moved++;
+  });
+  return moved;
+}
+
+export interface TableShape {
+  keys: readonly string[];
+  virtual: boolean;
+}
+
+/**
+ * 这次变化是否整表换上：行不逐个淡入淡出，表体淡入一次。只留给真正换了一批数据的时候（排序、换筛选、整体刷新）。
+ * - 虚拟化的行按下标绝对定位，没有退场也没有让位：行集合或顺序一变就整表换，不让被删行之后的行一帧跳上来。
+ * - 跨过虚拟化阈值时两种渲染互换，同样整表换。
+ * - 不虚拟化时，增删换位的行超过上限、又不是在末尾追加时才整表换。被挤动的行不计：删掉靠前的一行时其后几十行都被挤动，
+ *   但只有可见范围附近的那一小段量布局、走让位，测量与动画的量由视口高度封顶，不随表格行数增长。
+ */
+export function swapsWholeTable(previous: TableShape, next: TableShape): boolean {
+  const churn = rowChurn(previous.keys, next.keys);
+  if (previous.virtual || next.virtual) return churn > 0;
+  return churn > ROW_MOTION_LIMIT && !appendsOnly(previous.keys, next.keys);
+}
+
+/**
+ * 表体此刻露在视口里的行号范围，只在行集合或顺序变化的那一刻量一次。可见带取表格（自己的滚动区，限高时）与窗口的交集；
+ * 行高固定，表体上沿加行号乘行高就是每行的位置。
+ */
+function tableWindow(table: HTMLElement | null, body: HTMLElement | null, rowHeight: number): RowWindow {
+  if (table === null || body === null) throw new Error("Table 尚未挂载");
+  const view = table.ownerDocument.defaultView;
+  if (view === null) throw new Error("Table 不在文档窗口里");
+  const clip = table.getBoundingClientRect();
+  if (clip.height === 0) return EVERY_ROW;
+  return rowWindow(body.getBoundingClientRect().top, Math.max(clip.top, 0), Math.min(clip.bottom, view.innerHeight), rowHeight);
+}
+
+/** 两次的行是否同一批、同一个顺序。 */
+function sameRows(previous: readonly string[], next: readonly string[]): boolean {
+  return previous.length === next.length && previous.every((key, i) => next[i] === key);
+}
+
+/** 上一次提交时的行，以及每行的布局令牌。 */
+interface Shown extends TableShape {
+  /**
+   * 每行的 layoutDependency。framer-motion 只在它变了的那次提交前量这一行的旧位置：这一次要走让位的行换成新令牌，
+   * 其余沿用旧值，被挤动了也不量、直接到位。
+   */
+  tokens: ReadonlyMap<string, number>;
+  /** 行集合或顺序变了几次；新令牌就取它。 */
+  seq: number;
+}
+
+const NO_ROWS: ReadonlySet<string> = new Set();
+
+/** 这一次的布局令牌：要走让位的行换成 seq，其余沿用旧值。新来的行挂载时不量布局，令牌取什么都一样，也给 seq。 */
+function nextTokens(held: ReadonlyMap<string, number>, keys: readonly string[], moving: ReadonlySet<string>, seq: number): Map<string, number> {
+  const tokens = new Map<string, number>();
+  for (const key of keys) {
+    const was = held.get(key);
+    tokens.set(key, was === undefined || moving.has(key) ? seq : was);
+  }
+  return tokens;
+}
+
 /** full 淡入淡出带缩放；fade 减少动画时只留透明度；none 一次变化太多，行直接换上。 */
 type RowMotion = "full" | "fade" | "none";
 
@@ -151,15 +229,20 @@ const ROW_VARIANTS: Variants = {
 interface PresenceRowProps extends HTMLMotionProps<"div"> {
   index: number;
   rowMotion: RowMotion;
-  /** 行顺序的签名：只有它变了才量布局，窗口缩放、分档切换引起的重渲染不触发布局动画。 */
-  order: string;
+  /** 这一行挂载时播入场：表格挂载之后才来、又落在可见范围附近。挂载时就在的行跟着所在页面的入场走。 */
+  entering: boolean;
+  /** 布局令牌：只在这一次要走让位时换新值。 */
+  layoutToken: number;
 }
 
 /**
  * 不虚拟化的一行。退场时留在原处淡出，这段时间它已经不是表格的一行：不再带序号（键盘移动按序号找行），
  * 也不接受指针与焦点，读屏不再读到。
+ * 只有令牌变了的行才量布局（layoutDependency 取令牌）：删掉一行时它前面的行、离视口远的行都不量，直接到位；
+ * 窗口缩放、分档切换引起的重渲染不触发布局动画。layout 常开：framer-motion 只在挂载时登记布局动画，
+ * 挂载时关着的行之后再打开也不会动。
  */
-function PresenceRow({ index, rowMotion, order, tabIndex, ...rest }: PresenceRowProps) {
+function PresenceRow({ index, rowMotion, entering, layoutToken, tabIndex, ...rest }: PresenceRowProps) {
   const present = useIsPresent();
   return (
     <motion.div
@@ -169,19 +252,54 @@ function PresenceRow({ index, rowMotion, order, tabIndex, ...rest }: PresenceRow
       inert={!present}
       custom={rowMotion}
       variants={ROW_VARIANTS}
-      initial="hidden"
+      initial={entering ? "hidden" : false}
       animate="show"
       exit="leave"
-      layout={rowMotion === "full" ? "position" : false}
-      layoutDependency={order}
+      layout="position"
+      layoutDependency={layoutToken}
       transition={{ layout: springs.settle }}
     />
   );
 }
 
-/** 非当前行的行内控件退出 Tab 序列；回到当前行时恢复原值。原值记在 data-table-tabindex 上。 */
+interface PresenceEmptyProps extends Omit<HTMLMotionProps<"div">, "children"> {
+  rowMotion: RowMotion;
+  entering: boolean;
+  children: ReactNode;
+}
+
+/** 空表时表体里的空状态。与行同在一个 AnimatePresence 里：筛到零行时剩下的行照常淡出，空状态淡入；反过来也一样。 */
+function PresenceEmpty({ rowMotion, entering, children, ...rest }: PresenceEmptyProps) {
+  const present = useIsPresent();
+  return (
+    <motion.div
+      {...rest}
+      role="row"
+      className={styles.emptyRow}
+      inert={!present}
+      custom={rowMotion}
+      variants={ROW_VARIANTS}
+      initial={entering ? "hidden" : false}
+      animate="show"
+      exit="leave"
+    >
+      <div role="gridcell" className={styles.empty}>
+        {children}
+      </div>
+    </motion.div>
+  );
+}
+
+/** 空状态在 AnimatePresence 里的键：行键来自调用方，控制字符开头的键不会与之相撞。 */
+const EMPTY_ROW_KEY = "\u0000empty";
+
+/**
+ * 非当前行的行内控件退出 Tab 序列；回到当前行时恢复原值。原值记在 data-table-tabindex 上。
+ * 只管带行号的数据行：空状态那一行不参与漫游 tabindex，里面的「清除筛选」这类按钮要一直能 Tab 到；
+ * 退场中的行已经 inert，也不用管。
+ */
 function syncRowTabStops(body: HTMLElement) {
-  for (const row of body.querySelectorAll<HTMLElement>(':scope > [role="row"]')) {
+  for (const row of body.querySelectorAll<HTMLElement>(':scope > [role="row"][data-row-index]')) {
     const active = row.tabIndex === 0;
     for (const el of row.querySelectorAll<HTMLElement>(ROW_FOCUSABLE)) {
       const saved = el.getAttribute(DEMOTED_ATTR);
@@ -226,10 +344,20 @@ export function Table<T>({
   const activeIndex = rows.length === 0 ? -1 : Math.min(active, rows.length - 1);
 
   const reduced = useReducedMotionConfig() === true;
-  const shownKeys = useRef(keys);
-  const crowded = rowChurn(shownKeys.current, keys) > ROW_MOTION_LIMIT;
+  const shown = useRef<Shown | null>(null);
+  if (shown.current === null) shown.current = { keys, virtual, tokens: new Map(keys.map((key) => [key, 0])), seq: 0 };
+  const before = shown.current;
+  const changed = before.virtual !== virtual || !sameRows(before.keys, keys);
+  const crowded = swapsWholeTable(before, { keys, virtual });
   const rowMotion: RowMotion = crowded ? "none" : reduced ? "fade" : "full";
-  const order = keys.join("|");
+  // 挂载时就在的行与空状态不播入场。不能用 AnimatePresence 的 initial={false} 来做：它会让这些行里面
+  // 之后才挂载的元素（开关、徽标这类自带入场的部件）也永远跳过入场。这里只在行自己身上关掉
+  const mounted = useMounted();
+  // 行集合或顺序变了：读一次此刻的可见范围，只让附近的行逐行动画（新行入场、被挤动的行让位）。整表换上、虚拟化时一行也不量。
+  // 减少动画时让位本来就一步到位，不必量布局，只留新行的淡入
+  const nearby = changed && mounted.current && !crowded && !virtual ? rowsInWindow(before.keys, keys, tableWindow(scrollRef.current, bodyRef.current, rowHeight)) : null;
+  const seq = changed ? before.seq + 1 : before.seq;
+  const tokens = changed ? nextTokens(before.tokens, keys, nearby === null || reduced ? NO_ROWS : nearby.moving, seq) : before.tokens;
 
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -245,10 +373,14 @@ export function Table<T>({
   const tabStop = renderedIndexes === null || renderedIndexes.length === 0 || renderedIndexes.includes(activeIndex) ? activeIndex : renderedIndexes[0];
 
   useLayoutEffect(() => {
-    shownKeys.current = keys;
+    shown.current = { keys, virtual, tokens, seq };
     const body = bodyRef.current;
     if (body === null) return;
-    if (crowded) void animateBody(body, { opacity: [0, 1] }, fade.in);
+    if (crowded) {
+      // 透明度先在提交时压到 0：淡入要等下一帧才起步，首帧会先看到整批新行一闪
+      body.style.opacity = "0";
+      void animateBody(body, { opacity: [0, 1] }, fade.in);
+    }
     syncRowTabStops(body);
     const wanted = pendingFocus.current;
     if (wanted === null) return;
@@ -350,6 +482,9 @@ export function Table<T>({
       "data-selected": selected || undefined,
       "data-inactive": isInactive !== undefined && isInactive(row) ? "" : undefined,
       "data-activatable": onActivate === undefined ? undefined : "",
+      // 末行不画分隔线。:last-child 会把抽出布局、仍排在文档末尾的退场行认成末行，新的末行要等它淡完才去掉分隔线；
+      // 退场的行留着最后一次的标记，淡出时样子不变
+      "data-last": index === rows.length - 1 ? "" : undefined,
       "aria-selected": selection === undefined ? undefined : selected,
       tabIndex: index === tabStop ? 0 : -1,
       onFocus: (event: FocusEvent<HTMLDivElement>) => {
@@ -367,7 +502,9 @@ export function Table<T>({
       }),
     };
     if (style !== undefined) return <div key={key} {...shared} data-row-index={index} data-virtual="" aria-rowindex={index + 2} style={style} />;
-    return <PresenceRow key={key} {...shared} index={index} rowMotion={rowMotion} order={order} />;
+    const token = tokens.get(key);
+    if (token === undefined) throw new Error(`Table 的行 ${key} 没有布局令牌`);
+    return <PresenceRow key={key} {...shared} index={index} rowMotion={rowMotion} entering={nearby !== null && nearby.entering.has(key)} layoutToken={token} />;
   };
 
   const vars = cssVars({
@@ -407,7 +544,8 @@ export function Table<T>({
                 {column.sortable && onSortChange !== undefined ? (
                   <button type="button" className={styles.sortButton} data-sorted={sorted === null ? undefined : sorted} onClick={() => onSortChange(nextSort(sort, column.key))}>
                     <span className={styles.text}>{content}</span>
-                    {sorted !== null && <Icon name={sorted === "asc" ? "chevron-up" : "chevron-down"} size={14} className={styles.sortIcon} />}
+                    {/* 箭头常驻：换排序列时淡入淡出，翻转方向时转半圈；未排序的列也留着它的位置，换列时表头文字不挪动 */}
+                    <Icon name="chevron-up" size={14} className={styles.sortIcon} />
                   </button>
                 ) : (
                   content
@@ -418,17 +556,17 @@ export function Table<T>({
         </div>
       </div>
       <div ref={bodyRef} className={styles.body} role="rowgroup" style={virtual ? { height: `${virtualizer.getTotalSize()}px` } : undefined} data-virtual={virtual ? "" : undefined}>
-        {rows.length === 0 ? (
-          <div role="row" className={styles.emptyRow}>
-            <div role="gridcell" className={styles.empty}>
-              {empty}
-            </div>
-          </div>
-        ) : virtual ? (
+        {virtual ? (
           virtualizer.getVirtualItems().map((item) => renderRow(item.index, { transform: `translateY(${item.start}px)` }))
         ) : (
-          <AnimatePresence initial={false} mode="popLayout" custom={rowMotion}>
-            {rows.map((_, index) => renderRow(index))}
+          <AnimatePresence mode="popLayout" custom={rowMotion}>
+            {rows.length === 0 ? (
+              <PresenceEmpty key={EMPTY_ROW_KEY} rowMotion={rowMotion} entering={mounted.current}>
+                {empty}
+              </PresenceEmpty>
+            ) : (
+              rows.map((_, index) => renderRow(index))
+            )}
           </AnimatePresence>
         )}
       </div>

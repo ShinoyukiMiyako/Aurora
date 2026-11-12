@@ -7,14 +7,24 @@ import { act, useLayoutEffect, type ReactElement } from "react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, stubPetalTokens } from "../../art/petals/test-canvas";
 import { APP_NAME_EN } from "../../lib/app-info";
+import { OverlayProvider, OverlayRoot } from "../../shell/overlay";
 import { focusByKeyboard, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
 import App from "../App";
 import type { DirCheck, DirIssue } from "../contract";
-import { COPY, formatBytes } from "../copy";
+import { COPY, formatBytes, welcomeLead } from "../copy";
 import { FAKE_PROBE, createFakeBridge } from "../fake-bridge";
+import { Frame, FrameChromeProvider, FrameShell, type FrameChrome } from "../Frame";
 import { replay } from "../model";
 import { DIR_CHECK_DEBOUNCE_MS, Location, type LocationProps } from "./Location";
-import { TestChrome } from "./test-chrome";
+import { presentHeading, TestChrome } from "./test-chrome";
+
+// jsdom 不做布局也没有 Web Animations，让位本身测不了；这里只记下挂了让位的容器，核对它圈住的是哪几块
+const reflowed = vi.hoisted(() => new Set<HTMLElement>());
+vi.mock("../../lib/reflow", () => ({
+  useReflow: () => (el: HTMLElement | null) => {
+    if (el !== null) reflowed.add(el);
+  },
+}));
 
 const copy = COPY.zh;
 const text = copy.location;
@@ -51,6 +61,20 @@ function props(overrides: Partial<LocationProps> = {}): LocationProps {
 }
 
 const inChrome = (ui: ReactElement) => <TestChrome copy={copy}>{ui}</TestChrome>;
+
+const CHROME: FrameChrome = { copy: copy.frame, version: "0.2.0", canClose: true, canOpenLegal: true, reduced: true, onMinimize: () => undefined, onClose: () => undefined, onOpenLegal: () => undefined };
+
+/** 能换步的骨架（TestChrome 里只有一页）：step 变了就是换步，旧页留在 DOM 里退场。 */
+const atStep = (step: string, ui: ReactElement) => (
+  <OverlayProvider>
+    <FrameChromeProvider value={CHROME}>
+      <FrameShell step={step} direction={1}>
+        {ui}
+      </FrameShell>
+      <OverlayRoot />
+    </FrameChromeProvider>
+  </OverlayProvider>
+);
 
 function mount(overrides: Partial<LocationProps> = {}): LocationProps {
   const all = props(overrides);
@@ -320,6 +344,43 @@ describe("提示按优先级只显示一条", () => {
   });
 });
 
+describe("校验结果变化时不跳", () => {
+  const nested = `${DIR}\\${APP_NAME_EN}`;
+
+  it("字段、复选框、实际位置是同一个让位容器的三个直接子项：错误折成两行时下面两块滑过去", async () => {
+    reflowed.clear();
+    mount({ checkDir: vi.fn(async () => okCheck({ normalized: nested, notEmpty: true, appended: true })) });
+    await settle();
+    const stacks = [...reflowed].filter((el) => el.isConnected);
+    expect(stacks).toHaveLength(1);
+    const items = [...stacks[0].children];
+    const slotOf = (node: Node | null) => items.findIndex((item) => node !== null && item.contains(node));
+    const finalPath = [...document.querySelectorAll("main p")].find((p) => p.textContent === text.finalPath(nested)) ?? null;
+    expect([slotOf(pathInput()), slotOf(document.querySelector("main [role='checkbox']")), slotOf(finalPath)]).toEqual([0, 1, 2]);
+  });
+
+  it("实际位置从无到有时从透明淡入，不是同一帧冒出来", async () => {
+    const label = text.finalPath(nested);
+    // 帧循环跑在真实时间上：在插进 DOM 的那一刻（微任务里，还没到下一帧）读它的透明度
+    const firstOpacity: string[] = [];
+    const watcher = new MutationObserver(() => {
+      const shown = [...document.querySelectorAll("main p")].find((p) => p.textContent === label);
+      if (shown?.parentElement && firstOpacity.length === 0) firstOpacity.push(getComputedStyle(shown.parentElement).opacity);
+    });
+    watcher.observe(document.body, { childList: true, subtree: true });
+    try {
+      const all = mount({ checkDir: vi.fn(async () => okCheck()) });
+      await settle();
+      expect(firstOpacity).toEqual([]);
+      update({ ...all, dir: nested, checkDir: vi.fn(async () => okCheck({ normalized: nested, notEmpty: true, appended: true })) });
+      await settle();
+    } finally {
+      watcher.disconnect();
+    }
+    expect(firstOpacity).toEqual(["0"]);
+  });
+});
+
 describe("主按钮", () => {
   it.each(ISSUES)("问题 %s 挡住点击和回车，按钮仍可聚焦，原因就是提示文案", async (issue) => {
     const { onInstall } = mount({ checkDir: vi.fn(async () => issueCheck(issue)) });
@@ -419,6 +480,19 @@ describe("Esc", () => {
     pressKey(document.body, "Escape");
     expect(onBack).not.toHaveBeenCalled();
   });
+
+  it("换步后这一页淡出的那一会儿不再响应：这时的 Esc 归新的一页", () => {
+    const all = props();
+    view = render(atStep("location", <Location {...all} />));
+    pressKey(document.body, "Escape");
+    expect(all.onBack).toHaveBeenCalledTimes(1);
+
+    view.rerender(atStep("next", <Frame title="下一页" />));
+    // 帧循环还没走：选目录页还在 DOM 里，正在退场
+    expect(document.querySelector("[data-step-pane][inert] h1")?.textContent).toBe(text.title);
+    pressKey(document.body, "Escape");
+    expect(all.onBack).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("发起安装后这一页不能再改", () => {
@@ -451,6 +525,11 @@ describe("路径框", () => {
     mount();
     expect(pathInput().value).toBe(DIR);
     expect(document.activeElement).toBe(pathInput());
+  });
+
+  it("和欢迎页的位置行标成同一块，换步时从那边的位置滑过来", () => {
+    mount();
+    expect(document.querySelector("main [data-setup-carry='location'] input")).toBe(pathInput());
   });
 
   it("输入照原样交给 App，规整是 Rust 的事", () => {
@@ -590,7 +669,7 @@ describe("接真的 App", () => {
     view = render(<App bridge={fake} copy={copy} initial={atLocation()} />);
     pressKey(document.body, "Escape");
     await pass(DIR_CHECK_DEBOUNCE_MS * 2);
-    expect(document.querySelector("h1")?.textContent).toBe(copy.welcome.title);
+    expect(presentHeading()).toBe(copy.welcome.title);
     expect(fake.callsOf("checkDir")).toEqual([]);
   });
 
@@ -603,7 +682,41 @@ describe("接真的 App", () => {
     pressKey(pathInput(), "Enter", { repeat: true });
     await pass(DIR_CHECK_DEBOUNCE_MS);
 
-    expect(document.querySelector("h1")?.textContent).toBe(text.title);
+    expect(presentHeading()).toBe(text.title);
+    expect(fake.callsOf("launcherRunning")).toEqual([]);
+    expect(fake.callsOf("install")).toEqual([]);
+  });
+
+  it.each(["zh", "en"] as const)("两页的说明区叠的是同两段说明：标题区一样高，位置块点「更改」过来不用挪（%s）", (lang) => {
+    const langCopy = COPY[lang];
+    view = render(<App bridge={createFakeBridge()} copy={langCopy} initial={replay([{ type: "probed", probe: FAKE_PROBE }])} />);
+    // 当前这一页标题下的每一段说明：文字，以及是不是只占位不显示的那段
+    const leadArea = () => [...document.querySelectorAll("[data-step-pane]:not([inert]) header p")].map((p) => [p.textContent, p.hasAttribute("data-floor")]);
+    expect(leadArea()).toEqual([
+      [welcomeLead(langCopy), false],
+      [langCopy.location.lead, true],
+    ]);
+
+    act(() => button(langCopy.welcome.change).click());
+    expect(presentHeading()).toBe(langCopy.location.title);
+    expect(leadArea()).toEqual([
+      [langCopy.location.lead, false],
+      [welcomeLead(langCopy), true],
+    ]);
+  });
+
+  it("点「更改」后欢迎页淡出的那一会儿不可交互，空白处的回车也不替用户发起安装", async () => {
+    const fake = createFakeBridge({ outcome: "hang", progress: [] });
+    view = render(<App bridge={fake} copy={copy} initial={replay([{ type: "probed", probe: FAKE_PROBE }])} />);
+    act(() => button(copy.welcome.change).click());
+    // 帧循环跑在真实时间上，这里一帧都还没过：欢迎页还在，正在退场
+    const leaving = document.querySelector("[data-step-pane][inert]");
+    expect(leaving?.querySelector("h1")?.textContent).toBe(copy.welcome.title);
+    expect(leaving?.getAttribute("aria-hidden")).toBe("true");
+    expect(presentHeading()).toBe(text.title);
+
+    pressKey(document.body, "Enter");
+    await pass(DIR_CHECK_DEBOUNCE_MS);
     expect(fake.callsOf("launcherRunning")).toEqual([]);
     expect(fake.callsOf("install")).toEqual([]);
   });
@@ -616,7 +729,7 @@ describe("接真的 App", () => {
 
     await settle();
 
-    expect(document.querySelector("h1")?.textContent).toBe(copy.fatal.title);
+    expect(presentHeading()).toBe(copy.fatal.title);
     expect(document.querySelector("pre")?.textContent).toContain("IPC 断了");
     expect(logged).toHaveBeenCalledTimes(1);
   });
@@ -630,7 +743,7 @@ describe("接真的 App", () => {
     act(() => button(text.browse).click());
     await pass(0);
 
-    expect(document.querySelector("h1")?.textContent).toBe(copy.fatal.title);
+    expect(presentHeading()).toBe(copy.fatal.title);
     expect(document.querySelector("pre")?.textContent).toContain("dialog.open not allowed");
     expect(logged).toHaveBeenCalledTimes(1);
   });

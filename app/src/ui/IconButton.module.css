@@ -15,11 +15,13 @@
   color: var(--sk-text-2);
   cursor: pointer;
   outline: none;
+  /* 不透明度也过渡：按钮在眼前变成禁用（任务收尾时的取消键）时淡到半透明，不在 1 与 0.5 之间一帧硬切 */
   transition:
     transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
     background-color var(--sk-dur-hover) var(--sk-ease),
     border-color var(--sk-dur-hover) var(--sk-ease),
-    color var(--sk-dur-hover) var(--sk-ease);
+    color var(--sk-dur-hover) var(--sk-ease),
+    opacity var(--sk-dur-hover) var(--sk-ease);
 }
 
 .button[data-size="sm"] {

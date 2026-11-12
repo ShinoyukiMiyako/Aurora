@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 // 移到其他游戏目录：头图菜单入口的锁定、弹窗的目录列表与选文件夹、预检的展示与拦截、确认入队，以及完成后离开详情页。
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { MotionGlobalConfig } from "framer-motion";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,7 +22,8 @@ import { bootOverrides, callsOf, deferred, instanceDto, resetRecorder, settle, t
 import { RemoteImageProvider } from "../../ui/remote-image";
 import { PickFolderProvider, type PickFolder } from "../discover/platform";
 import InstancePage from "./index";
-import { moveSubmitReason } from "./MoveInstanceModal";
+import { moveCheckView, moveSubmitReason } from "./MoveInstanceModal";
+import moveStyles from "./move.module.css";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../../ipc/bridge", async (orig) => (await import("../../test/fake-bridge")).fakeBridge(await orig(), ipc));
@@ -167,11 +171,41 @@ function option(title: string): HTMLElement {
   return found;
 }
 
+/** 摘要里某一行的键；预检骨架（aria-hidden）里同名的键不算。 */
+function kvKey(label: string): HTMLElement {
+  const key = [...dialog().querySelectorAll<HTMLElement>("dt")].find((dt) => textOf(dt) === label && dt.closest('[aria-hidden="true"]') === null);
+  if (key === undefined) throw new Error(`没有「${label}」一行`);
+  return key;
+}
+
 /** 摘要里某一行的值。 */
 function kv(label: string): string {
-  const key = [...dialog().querySelectorAll("dt")].find((dt) => textOf(dt) === label);
-  if (key === undefined || key.nextElementSibling === null) throw new Error(`没有「${label}」一行`);
-  return textOf(key.nextElementSibling);
+  const value = kvKey(label).nextElementSibling;
+  if (value === null) throw new Error(`「${label}」一行没有值`);
+  return textOf(value);
+}
+
+/** 预检结果那一块（摘要、说明块与提醒行的容器）。 */
+function previewBlock(): HTMLElement {
+  const block = kvKey("实例").closest("dl")?.parentElement?.parentElement;
+  if (block === null || block === undefined) throw new Error("没有预检结果");
+  return block;
+}
+
+/** 预检骨架：键照常写出，值是骨架，包在不可见的等待层或亮出的骨架层里。 */
+function previewSkeleton(): HTMLElement | null {
+  const key = [...dialog().querySelectorAll<HTMLElement>("dt")].find((dt) => textOf(dt) === "实例" && dt.closest('[aria-hidden="true"]') !== null);
+  const layer = key?.closest<HTMLElement>('[aria-hidden="true"]');
+  return layer === undefined ? null : layer;
+}
+
+/** 「正在检查」的读屏播报区：随预检区预先挂着，不在骨架那层对读屏隐藏的子树里。 */
+function checkStatus(): HTMLElement {
+  const found = dialog().querySelector<HTMLElement>(`.${moveStyles.status}`);
+  if (found === null) throw new Error("预检区没有播报区");
+  expect(found.getAttribute("role")).toBe("status");
+  expect(found.closest('[aria-hidden="true"]')).toBeNull();
+  return found;
 }
 
 /** 让某个目标的预检回来。 */
@@ -307,9 +341,21 @@ describe("移到其他游戏目录：弹窗", () => {
     click(option("HMCL"));
     await flush();
     expect(callsOf(ipc, "preview_instance_move")).toEqual([{ id: ID, target: HMCL }]);
-    expect(textOf(dialog())).toContain("正在检查目标位置…");
+    // 加载态与结果同一个排布：摘要的键照常写出、值是骨架，说明块的位置写「正在检查」；等待期里占位但不可见
+    const skeleton = previewSkeleton();
+    if (skeleton === null) throw new Error("预检中没有骨架");
+    expect([...skeleton.querySelectorAll("dt")].map(textOf)).toEqual(["实例", "存档备份", "补齐的共用文件", "要写入目标盘", "目标盘剩余"]);
+    expect(textOf(skeleton)).toContain("正在检查目标位置…");
+    expect(skeleton.hasAttribute("data-pending")).toBe(true);
+    // 骨架对读屏隐藏，「正在检查」另由骨架外的播报区念：等待期先空着，与骨架同一时机写字
+    const status = checkStatus();
+    expect(status.textContent).toBe("");
     expect(await reasonOf(button("移动实例", dialog()))).toBe("正在检查目标位置");
+    expect(skeleton.hasAttribute("data-pending")).toBe(false);
+    expect(checkStatus()).toBe(status);
+    expect(status.textContent).toBe("正在检查目标位置…");
     await answer(HMCL, previewDto(HMCL));
+    expect(status.textContent).toBe("");
     expect(kv("实例")).toBe(`${formatBytes(420 * MB)} · 1830 个文件`);
     expect(kv("存档备份")).toBe(`3 份 · ${formatBytes(500 * MB)}`);
     expect(kv("补齐的共用文件")).toBe(`186 个 · ${formatBytes(94 * MB)}`);
@@ -403,6 +449,83 @@ describe("移到其他游戏目录：弹窗", () => {
     expect(callsOf(ipc, "preview_instance_move")).toHaveLength(2);
   });
 
+  it("换目标：上一份结果原地摆着，不先塌成加载态；加载态该亮出时才压暗，新结果回来在同一处换上", async () => {
+    const NEW_HOME = "E:\\新家\\.minecraft";
+    await openPage();
+    await openMove();
+    click(option("HMCL"));
+    await flush();
+    await answer(HMCL, previewDto(HMCL));
+    const block = previewBlock();
+    expect(block.hasAttribute("data-stale")).toBe(false);
+
+    pickFolder.mockResolvedValueOnce(NEW_HOME);
+    click(button("选择其他文件夹…", dialog()));
+    await flush();
+    expect(callsOf(ipc, "preview_instance_move").at(-1)).toEqual({ id: ID, target: NEW_HOME });
+    // 等待期：上一份结果原样摆着（同一个节点，没有换成骨架），不压暗；但已经不能拿它去确认，
+    // 读屏那边从换目标那一刻起就标成在忙：摆着的是上一个目标的结果
+    expect(previewBlock()).toBe(block);
+    expect(block.isConnected).toBe(true);
+    expect(kv("目标盘剩余")).toBe(formatBytes(120 * GIB));
+    expect(block.hasAttribute("data-stale")).toBe(false);
+    expect(block.getAttribute("aria-busy")).toBe("true");
+    expect(checkStatus().textContent).toBe("");
+    expect(await reasonOf(button("移动实例", dialog()))).toBe("正在检查目标位置");
+    // 过了等待期还没回来：压暗并标成在忙，播报区念「正在检查」
+    expect(block.hasAttribute("data-stale")).toBe(true);
+    expect(block.getAttribute("aria-busy")).toBe("true");
+    expect(checkStatus().textContent).toBe("正在检查目标位置…");
+
+    await answer(NEW_HOME, previewDto(NEW_HOME, { same_volume: false, available_bytes: 30 * GIB }));
+    expect(previewBlock()).toBe(block);
+    expect(block.hasAttribute("data-stale")).toBe(false);
+    expect(block.hasAttribute("aria-busy")).toBe(false);
+    expect(kv("目标盘剩余")).toBe(formatBytes(30 * GIB));
+    expect(textOf(block)).toContain("目标在另一个盘上");
+    expect(button("移动实例", dialog()).getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("目录列表读取中：先占住一行目录与按钮的位置但不可见，过了等待期才亮出骨架，读到后换成列表", async () => {
+    const listing = deferred<GameDirectoryDto[]>();
+    ipc.overrides.set("list_game_directories", () => listing.promise);
+    await openPage();
+    await openMove();
+    const targets = dialog().querySelector("section");
+    const layer = targets?.querySelector('[aria-busy="true"] > [aria-hidden="true"]');
+    if (layer === null || layer === undefined) throw new Error("目录列表读取中没有占位");
+    expect(layer.hasAttribute("data-pending")).toBe(true);
+    expect(layer.querySelectorAll("li")).toHaveLength(1);
+    expect(options()).toEqual([]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(layer.hasAttribute("data-pending")).toBe(false);
+    listing.resolve(dirs);
+    await flush();
+    // 骨架亮出后至少停留一会儿，读到了也等满再换
+    expect(options()).toEqual([]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(options().map((o) => o.dataset.value)).toEqual([HMCL, "F:\\拔掉了\\.minecraft"]);
+    expect(button("选择其他文件夹…", dialog()).getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("只记着当前目录时选了一个文件夹：说明退场（原地淡出、不可交互），换上列表，新的一行选中", async () => {
+    dirs = [dirs[0]];
+    await openPage();
+    await openMove();
+    const hint = [...dialog().querySelectorAll("p")].find((p) => textOf(p) === "还没有记下别的游戏目录，可以选一个文件夹作为目标。");
+    if (hint === undefined) throw new Error("没有说明");
+    expect(hint.parentElement?.hasAttribute("inert")).toBe(false);
+    pickFolder.mockResolvedValueOnce("E:\\新家\\.minecraft");
+    click(button("选择其他文件夹…", dialog()));
+    await flush();
+    expect(hint.parentElement?.hasAttribute("inert")).toBe(true);
+    expect(options().map((o) => [o.dataset.value, o.getAttribute("aria-selected")])).toEqual([["E:\\新家\\.minecraft", "true"]]);
+  });
+
   it("预检失败：写出后端原文并给重试，重试再发一次预检；失败期间主按钮禁用", async () => {
     ipc.overrides.set("preview_instance_move", () => {
       throw new IpcError("invalid_game_directory", "游戏目录 D:\\HMCL\\.minecraft 不能用：这个位置现在访问不到", { path: HMCL, problem: "unavailable" });
@@ -438,6 +561,30 @@ describe("移到其他游戏目录：弹窗", () => {
   });
 });
 
+describe("移到其他游戏目录：预检区画什么", () => {
+  const before = previewDto(HMCL);
+  const after = previewDto("E:\\新家\\.minecraft", { available_bytes: 30 * GIB });
+
+  it("还没有摆过结果：照加载门画加载态（忙由加载层自己标）", () => {
+    expect(moveCheckView("pending", { status: "loading" }, null)).toEqual({ view: "pending", shown: null, failed: false, stale: false, busy: false });
+    expect(moveCheckView("skeleton", { status: "loading" }, null)).toEqual({ view: "skeleton", shown: null, failed: false, stale: false, busy: false });
+  });
+
+  it("换了目标、新结果还没回来：等待期原样摆着上一份、只标在忙，加载态亮出后再压暗", () => {
+    expect(moveCheckView("pending", { status: "loading" }, before)).toEqual({ view: "content", shown: before, failed: false, stale: false, busy: true });
+    expect(moveCheckView("skeleton", { status: "loading" }, before)).toEqual({ view: "content", shown: before, failed: false, stale: true, busy: true });
+  });
+
+  it("新结果回来了但加载态还在最短停留里：仍摆着上一份；加载门放行后换上新的", () => {
+    expect(moveCheckView("skeleton", { status: "ready", data: after }, before)).toEqual({ view: "content", shown: before, failed: false, stale: true, busy: true });
+    expect(moveCheckView("content", { status: "ready", data: after }, before)).toEqual({ view: "content", shown: after, failed: false, stale: false, busy: false });
+  });
+
+  it("预检失败：加载门放行后换成失败，不再摆着上一份", () => {
+    expect(moveCheckView("content", { status: "error" }, before)).toEqual({ view: "content", shown: null, failed: true, stale: false, busy: false });
+  });
+});
+
 describe("移到其他游戏目录：主按钮的判定", () => {
   const ready = { status: "ready" as const, data: previewDto(HMCL) };
   it("没选目标、预检中、预检失败、有拦截项依次挡住；都没有时才看实例此刻的锁", () => {
@@ -447,5 +594,24 @@ describe("移到其他游戏目录：主按钮的判定", () => {
     expect(moveSubmitReason(HMCL, { status: "ready", data: previewDto(HMCL, { blockers: [{ kind: "pending" }] }) }, "游戏正在运行，结束后才能移动")).toBe("先解决上面列出的问题");
     expect(moveSubmitReason(HMCL, ready, "游戏正在运行，结束后才能移动")).toBe("游戏正在运行，结束后才能移动");
     expect(moveSubmitReason(HMCL, ready, undefined)).toBeUndefined();
+  });
+});
+
+describe("移到其他游戏目录：样式", () => {
+  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "move.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+
+  /** 选择器恰好是 selector 的那条规则的声明，空白压成一个空格；没有这条规则时报错。 */
+  function declarations(selector: string): string {
+    for (const rule of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+      if (rule[1].trim() === selector) return rule[2].replace(/\s+/g, " ").trim();
+    }
+    throw new Error(`样式表里没有 ${selector} 的规则`);
+  }
+
+  it("换目标期间压暗上一份结果：透明度与全站重取压暗同一个令牌，压暗走退场时长，新结果换上时按入场时长淡回", () => {
+    expect(declarations(".preview[data-stale]")).toContain("opacity: var(--sk-disabled);");
+    expect(declarations(".preview[data-stale]")).toContain("transition: opacity var(--sk-dur-out) var(--sk-ease-in);");
+    expect(declarations(".preview")).toContain("transition: opacity var(--sk-dur-in) var(--sk-ease-out);");
+    expect(css).not.toContain("--sk-dur-hover");
   });
 });

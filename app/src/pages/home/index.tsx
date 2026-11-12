@@ -28,6 +28,9 @@ import s from "./home.module.css";
 export default function HomePage(_props: PageProps<"home">) {
   // 主页根与各张卡只订阅自己用到的那几片：游戏运行时日志每 100 ms 一批，整份订阅会让整块 bento 跟着重渲染
   const instancesReady = useLauncherSelector((s) => s.status.instances.kind === "ready");
+  // 当前实例记在设置里。设置晚于实例列表到达时先算出来的是最近玩的那个，读到设置又改成配置里的当前实例，
+  // 大卡会先指错再换一面：两样都读完才定下大卡指向谁（设置读取出错也算读完，按没设过处理）
+  const settingsSettled = useLauncherSelector((s) => s.status.settings.kind !== "loading");
   const instances = useLauncherSelector((s) => s.instances);
   const selectedInstanceId = useLauncherSelector((s) => s.selectedInstanceId);
   const { tier } = useShell();
@@ -52,7 +55,7 @@ export default function HomePage(_props: PageProps<"home">) {
     setMonth(monthOf(date));
   };
 
-  const target = instancesReady ? continueTarget(instances, selectedInstanceId) : null;
+  const target = instancesReady && settingsSettled ? continueTarget(instances, selectedInstanceId) : null;
 
   const insights = (span: ResponsiveValue, className?: string) => (
     <InsightsCard span={span} play={play} today={today} selected={selected} onPickDay={pickDay} className={className} />

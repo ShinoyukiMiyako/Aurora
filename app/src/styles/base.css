@@ -30,6 +30,14 @@ textarea,
   background: var(--sk-selection);
 }
 
+/* 换明暗或强调色的那一刻（state/appearance 挂上、样式结算后撤掉）：颜色一帧切完，不让各控件的颜色过渡拖在底色后面 */
+:root[data-sk-instant],
+:root[data-sk-instant] *,
+:root[data-sk-instant] *::before,
+:root[data-sk-instant] *::after {
+  transition: none !important;
+}
+
 /* 组件自己画聚焦环时会 outline: none；没有单独定义的元素走这里的兜底，视觉上与 --sk-focus 等价 */
 :focus-visible {
   outline: 2px solid var(--sk-accent);

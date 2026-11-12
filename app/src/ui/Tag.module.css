@@ -16,6 +16,11 @@
   line-height: 1;
   white-space: nowrap;
   vertical-align: middle;
+  /* 卡面换成平铺或图片时字色、描边色与垫底色跟着换：与卡面上的文字同一拍慢慢换过去，不在一帧里翻转 */
+  transition:
+    color var(--sk-dur-in) var(--sk-ease-out),
+    background-color var(--sk-dur-in) var(--sk-ease-out),
+    outline-color var(--sk-dur-in) var(--sk-ease-out);
 }
 
 .tag[data-size="sm"] {
@@ -49,12 +54,14 @@
 }
 
 /*
- * 描边画在内侧：外框尺寸与有底色的色调一致。描边标签没有底，压在图片或材质平铺的卡面上时，
+ * 描边画在内侧：外框尺寸与有底色的色调一致。用向内收 1px 的 outline 而不是内阴影：描边色换的时候能与字色一起过渡，
+ * 阴影不做过渡。描边标签没有底，压在图片或材质平铺的卡面上时，
  * 卡面（或内容不在卡面里的页面）把 --tag-ink、--tag-line 换成媒体文字色，否则灰字在深色底上看不清；
  * 标签里分主次的组件（加载器标签的名称）另读强一档的 --tag-ink-strong，三个变量要一起换。
  */
 .tag[data-tone="outline"] {
   background: transparent;
   color: var(--tag-ink, var(--sk-text-2));
-  box-shadow: inset 0 0 0 1px var(--tag-line, var(--sk-line-2));
+  outline: 1px solid var(--tag-line, var(--sk-line-2));
+  outline-offset: -1px;
 }

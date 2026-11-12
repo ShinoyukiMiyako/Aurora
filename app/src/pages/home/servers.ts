@@ -3,6 +3,7 @@
 import type { InstanceSummary } from "../../domain/adapt";
 import { MENU_MAX_ACTIONS } from "../../ui/Menu";
 import type { KnownServerDto, PinnedServerDto, ServerStatusDto } from "../../state/queries/home";
+import type { ResourceStatus } from "../../state/resource";
 
 /** 信号格数的延迟分界（毫秒）：< 60 四格、< 120 三格、< 200 两格，其余一格。 */
 export const SIGNAL_THRESHOLDS_MS = [60, 120, 200] as const;
@@ -48,6 +49,11 @@ export interface ServerRow {
   favicon: string | null;
   signal: ServerSignal;
   population: ServerPopulation;
+  /**
+   * 这台还没有任何测速结果、而测速请求正在路上：版本、MOTD 与在线人数随后才到，行要先给它们留好位置。
+   * 请求失败、没有在测时等不来结果，不算。
+   */
+  awaiting: boolean;
 }
 
 function signalOf(status: ServerStatusDto): ServerSignal {
@@ -74,13 +80,24 @@ function populationOf(status: ServerStatusDto): ServerPopulation {
 export type ProbeState = "live" | "paused" | "retesting";
 
 /**
+ * 整批测速失败的提示此刻挂哪一次的失败。重测途中（每 60 秒的重测、点「重试」）测速结果会先回到加载或后台重取，
+ * 这一轮成没成要等它回来：途中沿用上一轮的结论，提示不随每次重测消失又出现、卡底不跟着反复伸缩。
+ */
+export function shownProbeError(status: { status: ResourceStatus; error: Error | null; refreshing: boolean }, previous: Error | null): Error | null {
+  if (status.status === "error") return status.error;
+  if (status.status === "ready" && !status.refreshing) return null;
+  return previous;
+}
+
+/**
  * 固定列表与状态按地址对位（状态查询原样回传查询用的地址）。固定列表刚变、状态还没跟上时，
  * 新加的那台没有状态，显示测速中。
  *
  * 结果不能下结论时不把每台都标成连不上：本机离线时每台的信号都是暂停，恢复联网后在重测的每台都是测速中；
  * 版本、MOTD、在线人数与上次在线照旧取手里的结果。
+ * probing：测速请求此刻在路上（首测、周期重测、固定列表变了之后的重测）。断网时照样会测，回来的结果照样显示人数。
  */
-export function serverRows(pinned: readonly PinnedServerDto[], statuses: readonly ServerStatusDto[] | undefined, probe: ProbeState): ServerRow[] {
+export function serverRows(pinned: readonly PinnedServerDto[], statuses: readonly ServerStatusDto[] | undefined, probe: ProbeState, probing: boolean): ServerRow[] {
   const byAddress = new Map((statuses === undefined ? [] : statuses).map((s) => [s.address, s]));
   const paused: ServerSignal = { kind: "paused" };
   const pending: ServerSignal = { kind: "pending" };
@@ -96,6 +113,7 @@ export function serverRows(pinned: readonly PinnedServerDto[], statuses: readonl
         favicon: null,
         signal: probe === "paused" ? paused : pending,
         population: { kind: "none" },
+        awaiting: probing,
       };
     }
     // 结果不算数时也先判一遍：标为连通却没有延迟是契约破坏，不因为暂停或重测而放过
@@ -109,6 +127,7 @@ export function serverRows(pinned: readonly PinnedServerDto[], statuses: readonl
       favicon: status.favicon,
       signal: probe === "live" ? signal : probe === "paused" ? paused : pending,
       population: populationOf(status),
+      awaiting: false,
     };
   });
 }

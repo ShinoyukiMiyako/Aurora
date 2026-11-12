@@ -1,34 +1,49 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 // 启动胶囊的焦点：键盘按了面上的按钮，换上的新面接住焦点，不随旧面一起丢到 body；
-// 按钮在进行中变成不可用时保持可聚焦，焦点留在按钮上。
-import { act } from "react";
+// 按钮在进行中变成不可用时保持可聚焦，焦点留在按钮上。以及换面时的组装与文字槽。
+import { act, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
-import { CONFIRM_COPY, INSTANCE_IN_USE_COPY, LAUNCH_COPY } from "../copy/flows";
+import { CONFIRM_COPY, INSTANCE_IN_USE_COPY, LAUNCH_COPY, SESSION_COPY } from "../copy/flows";
 import { STOPPED_LINGER_MS } from "../domain/limits";
+import { GAME_EXIT_EVENT, LAUNCH_PHASE_EVENT } from "../ipc/launch";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { emulateFocusFixup } from "../test/focus-fixup";
-import { bootOverrides, callsOf, cancelledError, deferred, instanceDto, resetRecorder, settle } from "../test/launcher";
+import { bootOverrides, callsOf, cancelledError, deferred, emit, instanceDto, resetRecorder, settle } from "../test/launcher";
 import { CONFIRM_CANCEL_LABEL } from "../ui/ConfirmDialog";
 import { OverlayRoot } from "../shell/overlay";
 import { ShellProvider } from "../shell/shell";
-import { FACE_HOLD_MS, LaunchCapsule } from "./LaunchCapsule";
+import { assemblyExitMs } from "../art/iso/AssemblingBlock";
+import { assembly, capsuleSwap, fade } from "../lib/motion";
+import { feedSpeed, publishSpeed, SPEED_REFRESH_MS, startSpeed } from "../lib/progress-display";
+import { faceSwap, LaunchCapsule, TEXT_SLOTS } from "./LaunchCapsule";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
 let view: Rendered | undefined;
 let launcher: LauncherApi;
+/** 另挂一枚同实例的胶囊：模拟胶囊随换页在别处重新挂载。 */
+let showSecond: (on: boolean) => void = () => {
+  throw new Error("Host 还没挂载");
+};
 
 function Host() {
   launcher = useLauncher();
+  const [second, setSecond] = useState(false);
+  showSecond = setSecond;
   return (
     <>
       <button type="button">别处</button>
       {launcher.state.instances.some((i) => i.id === "生存") && <LaunchCapsule instanceId="生存" />}
+      {second && (
+        <div data-testid="second">
+          <LaunchCapsule instanceId="生存" />
+        </div>
+      )}
     </>
   );
 }
@@ -155,9 +170,9 @@ describe("启动胶囊换面时的焦点", () => {
       await settle();
     });
     expect(launcher.state.session?.phase).toBe("stopped");
-    // 拆散的动画留住旧面一小会儿，之后换成已结束面；已结束面停留的计时还没到
+    // 拆散的动画留住旧面一小会儿（最长是三面都落了的时候），之后换成已结束面；已结束面停留的计时还没到
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(FACE_HOLD_MS.disassemble + 20);
+      await vi.advanceTimersByTimeAsync(assemblyExitMs("disassemble", 3) + 20);
     });
     const stopped = document.querySelector<HTMLElement>('[data-face="stopped:cancelled"]');
     if (stopped === null) throw new Error("没有换成已结束面");
@@ -358,5 +373,204 @@ describe("运行面「结束游戏」", () => {
     expect(document.activeElement).toBe(stop);
     expect(stop.getAttribute("aria-disabled")).toBeNull();
     expect(stop.getAttribute("aria-busy")).toBeNull();
+  });
+});
+
+describe("换面与文字", () => {
+  const placedIn = (root: ParentNode) => {
+    const block = root.querySelector<HTMLElement>('[data-face="loading"] [data-placed]');
+    if (block === null) throw new Error("加载面上没有组装中的方块");
+    return block.dataset.placed;
+  };
+
+  it("点「启动」换上加载面：方块从一面未落起，firstDropMs 后落下左面；之后才挂载的胶囊直接显示已落的面", async () => {
+    act(() => buttonByText(LAUNCH_COPY.launch).click());
+    await flush();
+    expect(placedIn(document)).toBe("0");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(assembly.firstDropMs);
+    });
+    expect(placedIn(document)).toBe("1");
+
+    act(() => showSecond(true));
+    const second = document.querySelector('[data-testid="second"]');
+    if (second === null) throw new Error("第二枚胶囊没有挂载");
+    expect(placedIn(second)).toBe("1");
+  });
+
+  it("加载面刚换上就进入运行：等首落延迟与落位间隔把三面落齐、坐定之后，再停一拍才换到运行面", async () => {
+    const started = deferred<{ pid: number }>();
+    ipc.overrides.set("launch_game", () => started.promise);
+    act(() => buttonByText(LAUNCH_COPY.launch).click());
+    await flush();
+    expect(placedIn(document)).toBe("0");
+    await act(async () => {
+      started.resolve({ pid: 4242 });
+      await settle();
+    });
+    expect(launcher.state.session?.phase).toBe("running");
+    // 方块每落一面要提交一次才排下一面：按 10 ms 一步推进，每一步的重渲染都在 act 收尾时提交
+    const advanceInSteps = async (ms: number) => {
+      for (let passed = 0; passed < ms; passed += 10) {
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(Math.min(10, ms - passed));
+        });
+      }
+    };
+    // 首落之后三面隔着落位间隔落齐，最后一面落下后再过坐定延迟才坐定：这期间一直是加载面
+    await advanceInSteps(assembly.firstDropMs + 2 * assembly.stepGapMs + assembly.seatDelayMs);
+    expect(placedIn(document)).toBe("3");
+    expect(document.querySelector('[data-face="running"]')).toBeNull();
+    await advanceInSteps(capsuleSwap.holdMs.afterSeat);
+    expect(document.querySelector('[data-face="running"]')).not.toBeNull();
+  });
+
+  /** 一行文字槽里看得见的那段与占宽的候选。 */
+  const slotOf = (line: Element) => {
+    const children = [...line.children];
+    return {
+      shown: children.filter((c) => c.getAttribute("aria-hidden") !== "true").map((c) => c.textContent),
+      reserve: children.filter((c) => c.getAttribute("aria-hidden") === "true").map((c) => c.textContent),
+    };
+  };
+
+  it("加载面的标题、副行与百分比都按候选里最宽的一条占位，进度怎么走胶囊都不变宽", async () => {
+    act(() => {
+      void launcher.actions.launch("生存");
+    });
+    await flush();
+    const lines = [...document.querySelectorAll('[data-face="loading"] [data-slot]')].map(slotOf);
+    expect(lines).toEqual([
+      { shown: ["验证账户"], reserve: [...TEXT_SLOTS.loadingTitle] },
+      { shown: ["准备中"], reserve: [...TEXT_SLOTS.loadingSub] },
+      { shown: [expect.stringMatching(/^\d+%$/)], reserve: ["99%"] },
+    ]);
+  });
+
+  // 只断言交接的那一刻：同一文件里前面的用例换下假时钟时 framer-motion 的帧循环还排着帧，之后的动画在这里不再推进，
+  // 退场演完被移除这一步在 LaunchCapsule.frames.test.tsx 里走真实时间断言
+  it("阶段名换行：旧行不原地换字，与新行在同一格里交接", async () => {
+    act(() => {
+      void launcher.actions.launch("生存");
+    });
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("没有会话");
+    const titleLine = () => {
+      const line = document.querySelector('[data-face="loading"] [data-slot]');
+      if (line === null) throw new Error("加载面没有标题槽");
+      return line;
+    };
+    act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "preparing", stage_index: 1 }));
+    await flush();
+    expect(slotOf(titleLine()).shown).toEqual(["验证账户", "检查 Java"]);
+    // 新行从下方入场，起点是 lineSwap 的 enter
+    const entering = [...titleLine().children].find((c) => c.textContent === "检查 Java") as HTMLElement;
+    expect(entering.style.opacity).toBe("0");
+    expect(entering.style.transform).toBe("translateY(4px)");
+  });
+
+  it("下载阶段的速度走显示节流：不随每次上报跳字，满一个刷新间隔才换成平均后的值；文件数照常跟随", async () => {
+    act(() => {
+      void launcher.actions.launch("生存");
+    });
+    await flush();
+    const session = launcher.state.session;
+    if (session === null) throw new Error("没有会话");
+    const MB = 1024 * 1024;
+    const report = (finished: number, speed: number) =>
+      act(() => emit(LAUNCH_PHASE_EVENT, { task_id: session.taskId, phase: "downloading", stage_index: 4, download: { finished, total: 10, bytes: 0, total_bytes: null, speed } }));
+    const sub = () => {
+      const line = document.querySelectorAll('[data-face="loading"] [data-slot]')[1];
+      if (line === undefined) throw new Error("加载面没有副行");
+      return slotOf(line).shown;
+    };
+    const t0 = Date.now();
+    // 第一次报上来的速度直接写，不从 0 爬上来
+    report(1, MB);
+    expect(sub()).toEqual([SESSION_COPY.downloadProgress(1, 10, MB)]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    report(2, 5 * MB);
+    // 文件数跟着走，速度还是上一次换上的
+    expect(sub()).toEqual([SESSION_COPY.downloadProgress(2, 10, MB)]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SPEED_REFRESH_MS - 100);
+    });
+    const averaged = publishSpeed(feedSpeed(startSpeed(MB, t0), 5 * MB, t0 + 100), t0 + SPEED_REFRESH_MS).shown;
+    expect(sub()).toEqual([SESSION_COPY.downloadProgress(2, 10, averaged)]);
+    // 平均后的值不是这一刻的瞬时速度
+    expect(SESSION_COPY.downloadProgress(2, 10, averaged)).not.toBe(SESSION_COPY.downloadProgress(2, 10, 5 * MB));
+  });
+
+  it("崩溃线索读出来之前副行就在（空着），读出来后只在这一行里换上字", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
+    const report = deferred<null>();
+    ipc.overrides.set("last_crash", () => report.promise);
+    await act(async () => {
+      await launcher.actions.launch("生存");
+      await settle();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    act(() => emit(GAME_EXIT_EVENT, { version_id: "生存", exit_code: 1, crashed: true, killed: false, duration_ms: 1000 }));
+    await flush();
+    expect(launcher.state.session?.phase).toBe("crashed");
+    const subLine = () => {
+      const line = document.querySelector('[data-face="crashed"] [data-slot]');
+      if (line === null) throw new Error("崩溃面没有常驻的副行");
+      return line;
+    };
+    expect(slotOf(subLine())).toEqual({ shown: [], reserve: [...TEXT_SLOTS.crashSub] });
+
+    await act(async () => {
+      report.resolve(null);
+      await settle();
+    });
+    expect(slotOf(subLine()).shown).toEqual([SESSION_COPY.noClue]);
+  });
+
+  it("坐定后换到运行面：进度填充留下来淡出，光晕从透明淡入，不在换面那一帧硬切", async () => {
+    ipc.overrides.set("launch_game", () => ({ pid: 4242 }));
+    await act(async () => {
+      await launcher.actions.launch("生存");
+      await settle();
+    });
+    expect(document.querySelector("[data-fill]")).not.toBeNull();
+    expect(document.querySelector("[data-glow]")).toBeNull();
+    for (let i = 0; i < 200 && document.querySelector('[data-face="running"]') === null; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10);
+      });
+    }
+    expect(document.querySelector('[data-face="running"]')).not.toBeNull();
+    expect(document.querySelector("[data-fill]")).not.toBeNull();
+    expect(document.querySelector<HTMLElement>("[data-glow]")?.style.opacity).toBe("0");
+  });
+
+  it("新面晚一拍入场让旧面先走；减少动画时这一拍归零", () => {
+    const show = faceSwap.show;
+    if (typeof show !== "function") throw new Error("show 应按减少动画生效值取过渡");
+    const delayOf = (reduced: boolean) => {
+      const target = show(reduced, {}, {});
+      if (typeof target === "string" || target.transition === undefined) throw new Error("show 缺少过渡");
+      const transition = target.transition as { delay?: number; opacity: { delay?: number } };
+      return { all: transition.delay, opacity: transition.opacity.delay };
+    };
+    expect(delayOf(false)).toEqual({ all: capsuleSwap.faceEnterDelay, opacity: capsuleSwap.faceEnterDelay });
+    expect(delayOf(true)).toEqual({ all: 0, opacity: 0 });
+  });
+
+  it("减少动画时换面只交叉淡化：新面不从下方来，旧面不先跳 6px 再淡出", () => {
+    const { enter, leave } = faceSwap;
+    if (typeof enter !== "function" || typeof leave !== "function") throw new Error("enter 与 leave 应按减少动画生效值取");
+    expect(enter(true, {}, {})).toEqual({ opacity: 0 });
+    expect(leave(true, {}, {})).toEqual({ opacity: 0, transition: fade.out });
+    expect(enter(false, {}, {})).toEqual({ opacity: 0, y: 6 });
+    expect(leave(false, {}, {})).toEqual({ opacity: 0, y: -6, transition: fade.out });
   });
 });

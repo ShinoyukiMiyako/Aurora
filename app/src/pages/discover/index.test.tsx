@@ -20,7 +20,9 @@ import { emulateFocusFixup } from "../../test/focus-fixup";
 import { bootOverrides, callsOf, cancelledError, configDto, deferred, instanceDto, resetRecorder, settle, type Deferred } from "../../test/launcher";
 import { entry, match, modVersion, result } from "./fixtures";
 import DiscoverPage from "./index";
+import { PAGE_SIZE } from "./model";
 import { PickFolderProvider, type PickFolder } from "./platform";
+import { SKELETON_CARDS } from "./ResultCard";
 import { clearSnapshot } from "./session";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -119,6 +121,40 @@ function card(title: string): HTMLElement {
 }
 
 const cardTitles = () => [...document.querySelectorAll('[role="button"][aria-label$="，查看详情"]')].map((el) => el.getAttribute("aria-label"));
+
+/** 卡上还在场的「已装入」标签；退场中（正在淡出）的不算。 */
+const installedTag = (title: string) => card(title).querySelector("[data-installed]:not([data-leaving])");
+
+/**
+ * 还在场的文字：退场中的节点（带 inert，已让出位置、正在淡出）不算。
+ * jsdom 里 framer-motion 的帧循环跑在真实时间上，用例走完之前退场播不完，淡出的节点一直留在 DOM 里。
+ * LabelSlot 里没在显示的候选只用来撑宽（visibility: hidden），也不算。
+ */
+function liveText(root: Element = document.body): string {
+  const copy = root.cloneNode(true) as Element;
+  for (const el of copy.querySelectorAll("[inert]")) el.remove();
+  for (const shown of copy.querySelectorAll("[data-current]")) {
+    const slot = shown.parentElement;
+    if (slot === null) continue;
+    for (const candidate of [...slot.children]) if (candidate !== shown) candidate.remove();
+  }
+  return copy.textContent as string;
+}
+
+/** 结果说明行的计数槽：正在显示的那条，与叠在同一格里撑宽的全部候选。说明行没有计数（失败、超时）时为 null。 */
+function infoSlot(): { shown: string | null; candidates: (string | null)[] } | null {
+  const shown = document.querySelector('section[aria-label="搜索资源"] [aria-live="polite"] [data-current]');
+  if (shown === null || shown.parentElement === null) return null;
+  return { shown: shown.textContent, candidates: [...shown.parentElement.children].map((el) => el.textContent) };
+}
+
+/** 计数槽里正在显示的那条。 */
+function infoCount(): string | null {
+  const slot = infoSlot();
+  return slot === null ? null : slot.shown;
+}
+
+const SLOW_HINT = "比平时慢一些，仍在加载…";
 
 /** 打开着的弹窗：关闭后在退场动画期间仍挂着，带 data-exiting 的不算。 */
 function openDialogs(): HTMLElement[] {
@@ -259,8 +295,24 @@ describe("发现页：搜索", () => {
       cursor: null,
     });
     expect(cardTitles()).toEqual(["资源 A，查看详情", "资源 B，查看详情"]);
-    expect(document.body.textContent).toContain("约 57 个结果");
+    expect(infoCount()).toBe("约 57 个结果");
     expect(searchInput().value).toBe("sod");
+  });
+
+  it.each([
+    [true, ["hero:0", "toolbar:1", "panel:2"]],
+    [false, ["banner:0", "hero:1", "toolbar:2", "panel:3"]],
+  ] as const)("进页的错开序号（联网：%s）：离线横幅的常驻槽空着时不占号，头图、工具条、结果面板不因它晚一拍", async (connected, expected) => {
+    online = connected;
+    await mount();
+    const label = (el: HTMLElement) => {
+      if (el.dataset.tone !== undefined) return "banner";
+      if (el.querySelector("h1") !== null) return "hero";
+      if (el.getAttribute("role") === "tabpanel") return "panel";
+      if (el.className.includes("toolbarWrap")) return "toolbar";
+      throw new Error(`没想到的入场区块：${el.outerHTML.slice(0, 80)}`);
+    };
+    expect([...document.querySelectorAll<HTMLElement>("[data-entrance]")].map((el) => `${label(el)}:${el.dataset.entrance}`)).toEqual(expected);
   });
 
   it("从实例的 Mod 页过来：写回路由之后适配实例还在，搜索按它的版本与加载器", async () => {
@@ -307,6 +359,44 @@ describe("发现页：搜索", () => {
     expect(nav.route).toEqual({ page: "discover", kind: "shader" });
   });
 
+  it("热门分类每枚都留着对勾位：选中与取消只换对勾的显隐与按钮底色，胶囊不变宽", async () => {
+    await mount();
+    const chips = () => [...document.querySelectorAll<HTMLButtonElement>('[role="group"][aria-label="热门分类"] button')];
+    const glyphs = () => chips().map((b) => b.querySelector('[data-glyph="check"]') !== null);
+    const ALL = [true, true, true, true, true, true, true];
+    expect(glyphs()).toEqual(ALL);
+    act(() => buttonByText("优化").click());
+    await flush();
+    expect(chips().filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => b.textContent)).toEqual(["优化"]);
+    expect(glyphs()).toEqual(ALL);
+  });
+
+  it("筛选条件数是叠在按钮右上角的角标，不在按钮文字后面占宽度", async () => {
+    await mount({ page: "discover", kind: "mod", forInstance: "生存" });
+    const filter = document.querySelector('button[aria-label="筛选，2 个条件生效"]');
+    if (filter === null) throw new Error("找不到带条件数的筛选按钮");
+    const badge = [...filter.querySelectorAll("span")].find((el) => el.className.split(" ").some((c) => c.includes("filterBadge")));
+    expect(badge?.textContent).toBe("2");
+  });
+
+  it("适配实例与排序两个下拉按最长的选项预留宽度，换选中项时不挤动同排；筛选浮层里撑满的版本下拉不预留", async () => {
+    await mount({ page: "discover", kind: "mod", forInstance: "生存" });
+    /** 触发器里叠着撑宽的候选文案（不进文字内容）。 */
+    const reserved = (label: string) => {
+      const trigger = document.querySelector(`button[role="combobox"][aria-label="${label}"]`);
+      if (trigger === null) throw new Error(`找不到下拉 ${label}`);
+      return [...trigger.querySelectorAll("[data-label]")].map((el) => el.getAttribute("data-label")).sort();
+    };
+    expect(reserved("适配实例")).toEqual(["选择", "适配：不限", "适配：创造", "适配：生存"].sort());
+    expect(reserved("排序")).toEqual(["选择", "相关度", "下载量", "关注数", "最新发布", "最近更新"].sort());
+
+    const filter = document.querySelector<HTMLButtonElement>('button[aria-label="筛选，2 个条件生效"]');
+    if (filter === null) throw new Error("找不到带条件数的筛选按钮");
+    act(() => filter.click());
+    await flush();
+    expect(reserved("游戏版本")).toEqual([]);
+  });
+
   it("「已装入」一条 installed_sources 取齐全部实例的已装来源，不逐个读 Mod 列表", async () => {
     await mount();
     expect(callsOf(ipc, "installed_sources")).toEqual([{}]);
@@ -341,13 +431,32 @@ describe("发现页：搜索", () => {
       return null;
     });
     await mount();
-    expect(card("资源 A").textContent).toContain("已装入 1 个实例");
+    expect(installedTag("资源 A")?.textContent).toBe("已装入 1 个实例");
     await act(async () => {
       await launcher.actions.removeMod("生存", "A.jar", "资源 A");
       await settle();
     });
     expect(callsOf(ipc, "installed_sources")).toHaveLength(2);
-    expect(card("资源 A").textContent).not.toContain("已装入");
+    expect(installedTag("资源 A")).toBeNull();
+  });
+
+  it.each([
+    ["never", "scale(0.8)"],
+    ["always", null],
+  ] as const)("「已装入」晚于结果卡到达时弹出（减少动画：%s）：按有尺寸的小标记从 0.8 弹出，减少动画时只淡入", async (reduced, transform) => {
+    const sources = deferred<InstanceSources[]>();
+    ipc.overrides.set("installed_sources", () => sources.promise);
+    await mount({ page: "discover" }, reduced);
+    expect(installedTag("资源 A")).toBeNull();
+    await act(async () => {
+      sources.resolve([sourcesOf("创造", []), sourcesOf("生存", ["A"])]);
+      await settle();
+    });
+    const tag = installedTag("资源 A");
+    if (!(tag instanceof HTMLElement)) throw new Error("「已装入」标签没有出现");
+    // 假定时器下帧循环不走：标签停在入场的起点
+    expect(tag.style.opacity).toBe("0");
+    expect(tag.style.transform === "" || tag.style.transform === "none" ? null : tag.style.transform).toBe(transform);
   });
 
   it("结果里一个 Mod 都没有时不读已装来源", async () => {
@@ -369,11 +478,59 @@ describe("发现页：搜索", () => {
     expect(lastSearch().cursor).toEqual(CURSOR);
     expect(cardTitles()).toEqual(["资源 A，查看详情", "资源 B，查看详情", "资源 C，查看详情"]);
     expect(document.body.textContent).toContain("已经到底了");
+    // 翻页接上来的卡各自淡入，首页的卡随结果区整块出现、不再逐张动
+    const fresh = (title: string) => card(title).className.split(" ").some((c) => c.includes("fresh"));
+    expect(["资源 A", "资源 B", "资源 C"].map(fresh)).toEqual([false, false, true]);
   });
 });
 
-/** 结果区里正在显示的骨架卡数。 */
-const skeletonCards = () => document.querySelectorAll('section[aria-label="搜索资源"] [aria-busy="true"] > *').length;
+/** 结果区的加载占位层（Loadable 的骨架层）。结果到了之后结果区不再 aria-busy，正在淡出的旧骨架层不算。 */
+const skeletonLayers = () => [...document.querySelectorAll<HTMLElement>('section[aria-label="搜索资源"] [aria-busy="true"] > [aria-hidden="true"]')];
+
+/** 骨架层里网格的格子：骨架卡与空着的同高格子。 */
+function skeletonCells(layer: Element): Element[] {
+  const grid = layer.firstElementChild;
+  if (grid === null) throw new Error("骨架层里没有网格");
+  return [...grid.children];
+}
+
+const isSlot = (cell: Element) => cell.className.split(" ").some((c) => c.includes("skeletonSlot"));
+
+/** 看得见的骨架卡数：等待期（data-pending）占着位但看不见的不算，空着的格子不算。 */
+const skeletonCards = () =>
+  skeletonLayers()
+    .filter((layer) => !layer.hasAttribute("data-pending"))
+    .flatMap(skeletonCells)
+    .filter((cell) => !isSlot(cell)).length;
+
+/** 等待期看不见、只占位的骨架格子数：换条件时结果区靠它保住一整页的高度。 */
+const pendingCells = () =>
+  skeletonLayers()
+    .filter((layer) => layer.hasAttribute("data-pending"))
+    .flatMap(skeletonCells).length;
+
+/** jsdom 的窗口宽 1024，外壳按 compact 档：骨架画 2 列 × 4 行。 */
+const DRAWN_SKELETONS = SKELETON_CARDS.compact;
+
+/** CSS 模块的类名（_name_hash）还原成样式表里的名字；没有类名为 null。 */
+function moduleClass(el: Element): string | null {
+  const raw = el.getAttribute("class");
+  if (raw === null) return null;
+  const m = /(?:^|\s)_([A-Za-z]+)_/.exec(raw);
+  return m === null ? null : m[1];
+}
+
+/** 一张卡（结果卡或骨架卡）的版式：有没有色带与压在下沿的图标，正文由哪几行组成。 */
+function cardShape(el: Element): { band: boolean; icon: boolean; rows: (string | null)[] } {
+  const all = [...el.querySelectorAll("*")];
+  const body = all.find((node) => moduleClass(node) === "cardBody");
+  if (body === undefined) throw new Error("卡里没有正文");
+  return {
+    band: all.some((node) => moduleClass(node) === "band"),
+    icon: all.some((node) => moduleClass(node) === "cardIcon"),
+    rows: [...body.children].map(moduleClass),
+  };
+}
 
 describe("发现页：加载态的时机", () => {
   const advance = (ms: number) =>
@@ -386,36 +543,64 @@ describe("发现页：加载态的时机", () => {
     await mount();
     await advance(279);
     expect(skeletonCards()).toBe(0);
+    // 等待期照常占住一整页结果的位置，只是看不见：结果区不是先 0 高、数据一到再撑开
+    expect(pendingCells()).toBe(PAGE_SIZE);
     await advance(1);
     await flush();
     expect(cardTitles()).toEqual(["资源 A，查看详情"]);
     expect(skeletonCards()).toBe(0);
+    expect(pendingCells()).toBe(0);
 
     // 换个关键词：这次 320 ms 才返回，骨架在 300 ms 出现，数据到了也要停满 300 ms
     pages = () => new Promise<SearchResultDto>((resolve) => setTimeout(() => resolve(result([entry("B")])), 320)) as never;
     typeInto(searchInput(), "慢");
     act(() => searchInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     await flush();
+    // 旧结果撤下的同一帧（让出位置、带 inert 淡出），看不见的占位接住整页的高度：结果区不塌，往下滚过的位置不被夹回
+    expect([...document.querySelectorAll('[role="button"][aria-label$="，查看详情"]')].filter((el) => el.closest("[inert]") === null)).toEqual([]);
+    expect(pendingCells()).toBe(PAGE_SIZE);
     await advance(299);
     expect(skeletonCards()).toBe(0);
     await advance(1);
-    expect(skeletonCards()).toBe(24);
+    // 骨架只画头一屏，其余格子空着占位
+    expect(skeletonCards()).toBe(DRAWN_SKELETONS);
+    expect(skeletonLayers().flatMap(skeletonCells)).toHaveLength(PAGE_SIZE);
     await advance(20);
     await flush();
-    expect(skeletonCards()).toBe(24);
+    expect(skeletonCards()).toBe(DRAWN_SKELETONS);
     await advance(280);
     await flush();
     expect(skeletonCards()).toBe(0);
     expect(cardTitles()).toEqual(["资源 B，查看详情"]);
   });
 
-  it("首页请求 10 s 还没回来才提示「比平时慢」，20 s 按超时呈现可重试", async () => {
+  it("骨架卡与结果卡逐行对齐：色带、压在下沿的图标、正文各行用同一套内边距与行高", async () => {
+    pages = () => new Promise<SearchResultDto>((resolve) => setTimeout(() => resolve(result([entry("A")])), 400)) as never;
+    await mount();
+    await advance(300);
+    const skeleton = skeletonLayers()
+      .flatMap(skeletonCells)
+      .find((cell) => !isSlot(cell));
+    if (skeleton === undefined) throw new Error("骨架没有画出来");
+    await advance(300);
+    await flush();
+    const real = card("资源 A");
+    expect(cardShape(skeleton)).toEqual({ band: true, icon: true, rows: ["cardName", "cardAuthor", "skeletonSummary", "cardFoot"] });
+    expect(cardShape(real)).toEqual({ band: true, icon: true, rows: ["cardName", "cardAuthor", "cardSummary", "cardFoot"] });
+  });
+
+  it("首页请求 10 s 还没回来，说明行的「搜索中…」原位换成「比平时慢」；20 s 按超时呈现可重试", async () => {
     pages = () => new Promise<SearchResultDto>(() => {}) as never;
     await mount();
+    // 计数槽从一开始就按候选里最宽的那条留宽：换成慢提示时，后面的条件片段不被挤动
+    expect(infoSlot()?.candidates).toEqual(expect.arrayContaining(["搜索中…", SLOW_HINT]));
     await advance(9_999);
-    expect(document.body.textContent).not.toContain("比平时慢一些");
+    expect(infoCount()).toBe("搜索中…");
+    expect(liveText()).not.toContain(SLOW_HINT);
     await advance(1);
-    expect(document.body.textContent).toContain("比平时慢一些");
+    expect(infoCount()).toBe(SLOW_HINT);
+    // 只在说明行里说这一次：不再另起一行排在整页骨架下面
+    expect(liveText().split(SLOW_HINT)).toHaveLength(2);
     await advance(9_999);
     expect(document.body.textContent).not.toContain("请求超时");
     await advance(1);
@@ -440,17 +625,16 @@ describe("发现页：加载态的时机", () => {
     act(() => buttonByText("重试").click());
     await flush();
     expect(searchCalls()).toHaveLength(2);
-    expect(document.body.textContent).not.toContain("请求超时");
-    expect(document.body.textContent).toContain("搜索中…");
-    expect(document.body.textContent).not.toContain("比平时慢一些");
+    expect(liveText()).not.toContain("请求超时");
+    expect(infoCount()).toBe("搜索中…");
     await advance(9_999);
-    expect(document.body.textContent).not.toContain("比平时慢一些");
+    expect(infoCount()).toBe("搜索中…");
     await advance(1);
-    expect(document.body.textContent).toContain("比平时慢一些");
+    expect(infoCount()).toBe(SLOW_HINT);
     await advance(9_999);
-    expect(document.body.textContent).not.toContain("请求超时");
+    expect(liveText()).not.toContain("请求超时");
     await advance(1);
-    expect(document.body.textContent).toContain("请求超时");
+    expect(liveText()).toContain("请求超时");
     // 超时之后结果才到：照常换成结果
     await advance(5_000);
     await flush();
@@ -496,11 +680,11 @@ describe("发现页：加载态的时机", () => {
     typeInto(searchInput(), "");
     await flush();
     expect(searchCalls()).toHaveLength(before + 1);
-    expect(document.body.textContent).toContain("搜索中…");
+    expect(infoCount()).toBe("搜索中…");
     expect(document.body.textContent).not.toContain("请求超时");
     // 分两步走：慢提示在 10 s 那一刻渲染出来，超时接在它后面计
     await advance(10_000);
-    expect(document.body.textContent).toContain("比平时慢一些");
+    expect(infoCount()).toBe(SLOW_HINT);
     await advance(9_999);
     expect(document.body.textContent).not.toContain("请求超时");
     await advance(1);
@@ -531,11 +715,11 @@ describe("发现页：加载态的时机", () => {
     });
     expect(searchCalls()).toHaveLength(2);
     expect(document.body.textContent).not.toContain("请求超时");
-    expect(document.body.textContent).toContain("搜索中…");
+    expect(infoCount()).toBe("搜索中…");
     await advance(300);
-    expect(skeletonCards()).toBe(24);
+    expect(skeletonCards()).toBe(DRAWN_SKELETONS);
     await advance(9_700);
-    expect(document.body.textContent).toContain("比平时慢一些");
+    expect(infoCount()).toBe(SLOW_HINT);
     await advance(9_999);
     expect(document.body.textContent).not.toContain("请求超时");
     await advance(1);
@@ -551,29 +735,29 @@ describe("发现页：加载态的时机", () => {
     pages = () => new Promise<SearchResultDto>(() => {}) as never;
     await mount();
     await advance(10_000);
-    expect(document.body.textContent).toContain("比平时慢一些");
+    expect(infoCount()).toBe(SLOW_HINT);
     await advance(2_000);
     typeInto(searchInput(), "换一个");
     act(() => searchInput().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     await flush();
     expect(searchCalls()).toHaveLength(2);
-    expect(document.body.textContent).not.toContain("比平时慢一些");
-    expect(skeletonCards()).toBe(24);
+    expect(infoCount()).toBe("搜索中…");
+    expect(skeletonCards()).toBe(DRAWN_SKELETONS);
     // 旧请求本该超时的时刻（开始后 20 s）过去了，新请求才等了 8 s
     await advance(8_000);
     expect(document.body.textContent).not.toContain("请求超时");
     await advance(1_999);
-    expect(document.body.textContent).not.toContain("比平时慢一些");
+    expect(infoCount()).toBe("搜索中…");
     // 分两步走到新请求的 20 s：慢提示在 10 s 那一刻渲染出来，超时接在它后面计
     await advance(1);
-    expect(document.body.textContent).toContain("比平时慢一些");
+    expect(infoCount()).toBe(SLOW_HINT);
     await advance(9_999);
     expect(document.body.textContent).not.toContain("请求超时");
     await advance(1);
     expect(document.body.textContent).toContain("请求超时");
   });
 
-  it("下一页 10 s 还没回来才在列表尾写「比平时慢」，回来后收起", async () => {
+  it("下一页 300 ms 还没回来才在列表尾出加载行，10 s 还没回来才写「比平时慢」，回来后收起", async () => {
     let resolveNext: ((r: SearchResultDto) => void) | undefined;
     pages = (args) =>
       args.cursor === null
@@ -589,9 +773,16 @@ describe("发现页：加载态的时机", () => {
       await settle();
     });
     expect(searchCalls()).toHaveLength(2);
-    const foot = () => document.querySelector('section[aria-label="搜索资源"]')?.textContent as string;
+    const section = document.querySelector('section[aria-label="搜索资源"]');
+    if (section === null) throw new Error("找不到结果区");
+    // 说明行写的是总数，「搜索中…」只可能来自列表尾的加载行
+    const foot = () => liveText(section);
+    // 与首页骨架同一口径：300 ms 内回来的下一页不出加载行，列表尾不一闪
+    await advance(299);
+    expect(foot()).not.toContain("搜索中…");
+    await advance(1);
     expect(foot()).toContain("搜索中…");
-    await advance(9_999);
+    await advance(9_699);
     expect(foot()).not.toContain("比平时慢一些");
     await advance(1);
     expect(foot()).toContain("比平时慢一些");
@@ -602,7 +793,100 @@ describe("发现页：加载态的时机", () => {
       await settle();
     });
     expect(foot()).not.toContain("比平时慢一些");
+    expect(foot()).toContain("已经到底了");
     expect(cardTitles()).toEqual(["资源 A，查看详情", "资源 B，查看详情", "资源 C，查看详情"]);
+  });
+});
+
+describe("发现页：换一组条件时回到结果区顶", () => {
+  /** 结果区顶边在滚动内容里的位置。 */
+  const RESULTS_TOP = 400;
+  /** 滚动容器的视口在窗口里的位置。 */
+  const VIEW_TOP = 40;
+  /** 滚回之后的滚动位置：1px 高的哨兵整个出了顶边再多 1px，吸顶的工具条保持吸住（见 hooks.test.ts）。 */
+  const REVEALED = RESULTS_TOP + 2;
+
+  const rectAt = (top: number) => ({ left: 0, top, width: 1000, height: 1, x: 0, y: top, right: 1000, bottom: top + 1, toJSON: () => null }) as DOMRect;
+
+  /**
+   * jsdom 不做布局：把页面滚动容器摆成已滚到 scrollTop，结果区顶边的哨兵随滚动位置移动。返回读当前滚动位置的函数。
+   * onWrite：每次写滚动位置时调用，用来记下写的那一刻界面处在哪一步。
+   */
+  function scrolledTo(scrollTop: number, onWrite?: () => void): () => number {
+    const sentinel = document.querySelector<HTMLElement>('section[aria-label="搜索资源"] > [aria-hidden="true"]');
+    if (sentinel === null) throw new Error("找不到结果区顶边的哨兵");
+    let scroller = sentinel.parentElement;
+    while (scroller !== null && scroller.style.overflowY !== "auto") scroller = scroller.parentElement;
+    if (scroller === null) throw new Error("找不到页面滚动容器");
+    let top = scrollTop;
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      get: () => top,
+      set: (value: number) => {
+        top = value;
+        onWrite?.();
+      },
+    });
+    scroller.getBoundingClientRect = () => rectAt(VIEW_TOP);
+    sentinel.getBoundingClientRect = () => rectAt(VIEW_TOP + RESULTS_TOP - top);
+    return () => top;
+  }
+
+  const tab = (label: string) => {
+    const el = [...document.querySelectorAll<HTMLElement>('[role="tab"]')].find((t) => t.textContent === label);
+    if (el === undefined) throw new Error(`找不到 ${label} 标签`);
+    return el;
+  };
+
+  it("已经往下滚过结果区顶边时点热门分类：瞬时滚回结果区顶，新结果从头看起", async () => {
+    await mount();
+    const scrollTop = scrolledTo(1500);
+    act(() => buttonByText("优化").click());
+    await flush();
+    expect(lastSearch().category).toBe("optimization");
+    expect(scrollTop()).toBe(REVEALED);
+  });
+
+  it("吸顶时切类型：同样滚回结果区顶，吸顶的工具条停在原处；先滚再提交，标签指示块不按滚动差纵向飞", async () => {
+    await mount();
+    const selected = () => {
+      const el = document.querySelector('[role="tab"][aria-selected="true"]');
+      return el === null ? null : el.textContent;
+    };
+    // 每次写滚动位置的那一刻，标签条上选中的是哪一个
+    const selectedAtWrite: (string | null)[] = [];
+    const scrollTop = scrolledTo(2200, () => selectedAtWrite.push(selected()));
+    act(() => tab("光影").click());
+    await flush();
+    expect(lastSearch().resourceTypes).toEqual(["shader"]);
+    expect(scrollTop()).toBe(REVEALED);
+    // 只写了一次，写的时候选中的还是旧标签：滚动发生在提交之前，指示块的布局动画前后两次快照都量在滚回之后的位置上
+    expect(selectedAtWrite).toEqual(["全部"]);
+  });
+
+  it("关键词在防抖之后才生效：生效那一刻才滚回，输入期间不动", async () => {
+    await mount();
+    const scrollTop = scrolledTo(1500);
+    typeInto(searchInput(), "钠");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(299);
+    });
+    expect(scrollTop()).toBe(1500);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    await flush();
+    expect(lastSearch().query).toBe("钠");
+    expect(scrollTop()).toBe(REVEALED);
+  });
+
+  it("结果区顶边还在视口里时换条件不滚动", async () => {
+    await mount();
+    const scrollTop = scrolledTo(120);
+    act(() => buttonByText("优化").click());
+    await flush();
+    expect(lastSearch().category).toBe("optimization");
+    expect(scrollTop()).toBe(120);
   });
 });
 
@@ -640,7 +924,7 @@ describe("发现页：失败与离线", () => {
     act(() => buttonByText("重试").click());
     await flush();
     expect(cardTitles()).toEqual(["资源 A，查看详情"]);
-    expect(document.body.textContent).not.toContain("暂时没有响应");
+    expect(liveText()).not.toContain("暂时没有响应");
     expect(searchCalls()).toHaveLength(2);
   });
 
@@ -657,7 +941,7 @@ describe("发现页：失败与离线", () => {
       window.dispatchEvent(new Event("online"));
       await settle();
     });
-    expect(document.body.textContent).not.toContain("搜索和安装需要联网");
+    expect(liveText()).not.toContain("搜索和安装需要联网");
     expect(searchCalls()).toHaveLength(2);
   });
 });
@@ -689,7 +973,7 @@ describe("发现页：资源详情与安装", () => {
     expect(creative.getAttribute("aria-checked")).toBe("false");
     expect(creative.hasAttribute("disabled")).toBe(true);
     expect(dialog().textContent).toContain("已选 1 个实例");
-    expect(dialog().textContent).not.toContain("只列出了其中一部分");
+    expect(liveText(dialog())).not.toContain("只列出了其中一部分");
 
     act(() => buttonByText("安装", dialog()).click());
     await flush();
@@ -732,11 +1016,7 @@ describe("发现页：资源详情与安装", () => {
 
   it("版本列表截断时，安装面板的版本下拉与版本标签都说明列表不全", async () => {
     const note = "CurseForge 上的文件太多，这里只列出了其中一部分，没找到的版本请到 CurseForge 网页查看";
-    const notes = () => {
-      const text = dialog().textContent;
-      if (text === null) throw new Error("弹窗没有文字");
-      return text.split(note).length - 1;
-    };
+    const notes = () => liveText(dialog()).split(note).length - 1;
     ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: true }));
     await mount();
     act(() => card("柔光材质").click());
@@ -1005,6 +1285,70 @@ describe("发现页：整合包", () => {
     expect(callsOf(ipc, "install_modpack").map((a) => a.name)).toEqual(["樱落"]);
   });
 
+  it("整合包表单的名称错误行常驻占位：清空或重名时版本与清单不被推下去", async () => {
+    await mount({ page: "discover", importFile: "D:\\Downloads\\生存.mrpack" });
+    const name = dialog().querySelector<HTMLInputElement>('input:not([aria-label="整合包文件的完整路径"])');
+    if (name === null) throw new Error("没有名称输入框");
+    const message = document.getElementById(name.getAttribute("aria-describedby") ?? "");
+    expect(message?.hasAttribute("data-reserve")).toBe(true);
+  });
+
+  it("换封面：选中的勾标在新的一格弹出，旧的一格淡出；面板打开时已选中的那一格不弹", async () => {
+    await mount({ page: "discover", importFile: "D:\\Downloads\\生存.mrpack" });
+    await act(async () => {
+      buttonByText("换封面", dialog()).click();
+      await settle();
+    });
+    const grid = document.querySelector<HTMLElement>('[role="radiogroup"]');
+    if (grid === null) throw new Error("换封面面板没有打开");
+    const checkOf = (cell: Element | null) => cell?.querySelector<HTMLElement>("[data-cover-check]");
+    const selected = () => grid.querySelector('[role="radio"][aria-checked="true"]');
+    const first = selected();
+    expect(checkOf(first)?.style.opacity).toBe("1");
+
+    act(() => {
+      grid.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    });
+    const next = selected();
+    expect(next).not.toBe(first);
+    expect(checkOf(next)?.style.opacity).toBe("0");
+    expect(checkOf(next)?.style.transform).toContain("scale(0.6)");
+  });
+
+  it("整合包表单的清单读完后才多出来的行淡入，一开始就在的行不另播", async () => {
+    const pack = entry("M1", { title: "生存", resource_type: "modpack", loaders: ["fabric"] });
+    const v = modVersion("mp-1", { project_id: "M1", version_number: "2.0.0", loaders: ["fabric"], game_versions: ["1.20.1"] });
+    pages = () => result([pack]);
+    ipc.overrides.set("project_detail", () => detailOf(pack, { latest_version: v }));
+    ipc.overrides.set("list_mod_versions", () => ({ versions: [v], truncated: false }));
+    const summary = deferred<unknown>();
+    ipc.overrides.set("summarize_platform_modpack", () => summary.promise);
+    await mount();
+    act(() => card("生存").click());
+    await flush();
+    const line = (text: string) => [...dialog().querySelectorAll("li")].find((li) => li.textContent?.startsWith(text));
+    expect(line("内存跟随全局设置")?.querySelector("span")).toBeNull();
+
+    await act(async () => {
+      summary.resolve({
+        format: "modrinth",
+        name: "生存",
+        version: "2.0.0",
+        minecraft: "1.21.1",
+        loader: { kind: "fabric", version: "0.16.9" },
+        pack_bytes: 1_048_576,
+        remote_files: 48,
+        mod_files: 41,
+        remote_bytes: 9 * 1_048_576,
+        override_files: 3,
+        override_bytes: 512,
+      });
+      await settle();
+    });
+    expect(line("41 个 Mod")?.querySelector("span")?.style.opacity).toBe("0");
+    expect(line("内存跟随全局设置")?.querySelector("span")).toBeNull();
+  });
+
   it("本地整合包：读取失败按错误码说明原因并留在第一步；读取成功后导入为新实例", async () => {
     const { IpcError } = await import("../../ipc/errors");
     let broken = true;
@@ -1143,7 +1487,7 @@ describe("发现页：平台整合包的清单摘要与同包提醒", () => {
     act(() => retry[0].click());
     await flush();
     expect(dialog().textContent).toContain("41 个 Mod");
-    expect(dialog().textContent).not.toContain("整合包清单没能提前读出来");
+    expect(liveText(dialog())).not.toContain("整合包清单没能提前读出来");
   });
 
   it("CurseForge 拒绝了下载密钥：摘要失败处写出怎么换密钥，不只给后端原文", async () => {
@@ -1191,7 +1535,7 @@ describe("发现页：平台整合包的清单摘要与同包提醒", () => {
     ipc.overrides.set("summarize_platform_modpack", () => summary());
     await openPack();
     expect(card("樱落").textContent).not.toContain("实例来自它");
-    expect(dialog().textContent).not.toContain("来自这个整合包");
+    expect(liveText(dialog())).not.toContain("来自这个整合包");
   });
 
   describe("一步至多一条说明块", () => {
@@ -1200,8 +1544,10 @@ describe("发现页：平台整合包的清单摘要与同包提醒", () => {
       if (found === null) throw new Error("详情弹窗里没有安装面板");
       return found;
     };
-    const callouts = () => [...panel().querySelectorAll('[class*="_callout_"]')].map((el) => el.textContent);
-    const rows = () => [...panel().querySelectorAll('[class*="_warnNote_"]')].map((el) => el.textContent);
+    // 撤下的提醒若在原处淡出，退场期间带 inert 留在 DOM 里：只数还在场的
+    const live = (selector: string) => [...panel().querySelectorAll<HTMLElement>(selector)].filter((el) => el.closest("[inert]") === null);
+    const callouts = () => live('[class*="_callout_"]').map((el) => el.textContent);
+    const rows = () => live('[class*="_warnNote_"]').map((el) => el.textContent);
     const fromPack = { platform: "modrinth" as const, project_id: "M1", version_id: "mp-2", name: "樱落", version: "2.0.0" };
     const hasInstanceFromPack = () => bootOverrides(ipc, { instances: [instanceDto("樱落周目", { modpack: fromPack })], config: configDto({ selected_version: "樱落周目" }) });
     const DUPLICATE = "你已经有 1 个来自这个整合包的实例（「樱落周目」），再装一次会得到一个独立的新实例。";
@@ -1225,7 +1571,7 @@ describe("发现页：平台整合包的清单摘要与同包提醒", () => {
       expect(rows()).toEqual([`${VERSIONS_FAILED}版本接口超时重试`, `${SUMMARY_FAILED}服务器不支持分段下载重试`, DUPLICATE]);
 
       versionsFail = false;
-      const [versionsRow] = panel().querySelectorAll<HTMLElement>('[class*="_warnNote_"]');
+      const [versionsRow] = live('[class*="_warnNote_"]');
       act(() => buttonByText("重试", versionsRow).click());
       await flush();
       expect(rows()).toEqual([`${SUMMARY_FAILED}服务器不支持分段下载重试`, DUPLICATE]);
@@ -1481,6 +1827,134 @@ describe("发现页：本地整合包的三种入口", () => {
     expect(dialog().textContent).toContain("只认 .mrpack 和 CurseForge 导出的 .zip");
     expect(dropZone()).toBeDefined();
   });
+
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  const pathInput = () => dialog().querySelector('input[aria-label="整合包文件的完整路径"]');
+  /** 投放区里的读取面（与选文件面叠在同一格）。 */
+  const readingFace = () => [...dropZone().children].find((el) => el.textContent === "正在读取 生存.mrpack…");
+
+  it("读取不换掉选文件这一步：300 ms 内只在投放区里不可见地占位，超过才换上读取面，路径区一直在；读完后读取面留满 300 ms 才换成确认步", async () => {
+    const gate = deferred<void>();
+    ipc.overrides.set("preview_modpack", (args) => gate.promise.then(() => preview(String(args.path))));
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    await fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
+
+    expect(readingFace()?.getAttribute("aria-hidden")).toBe("true");
+    expect(dropZone().dataset.state).toBeUndefined();
+    expect(dropZone().getAttribute("aria-busy")).toBe("true");
+    expect(pathInput()).not.toBeNull();
+    // 等待期界面照旧：两颗按钮不先变暗，但点了也不从这里再起一次读取
+    expect(buttonByText("选择文件", dialog()).hasAttribute("data-disabled")).toBe(false);
+    expect(buttonByText("读取", dialog()).hasAttribute("data-disabled")).toBe(false);
+    await clickInDialog("选择文件");
+    await clickInDialog("读取");
+    expect(vi.mocked(pickFile)).not.toHaveBeenCalled();
+    expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: PACK }]);
+
+    await advance(300);
+    expect(readingFace()?.hasAttribute("aria-hidden")).toBe(false);
+    expect(dropZone().dataset.state).toBe("reading");
+    expect(pathInput()).not.toBeNull();
+    // 读取面露出后才显示为不可用，按钮保持可聚焦
+    expect(buttonByText("选择文件", dialog()).getAttribute("aria-disabled")).toBe("true");
+    expect(buttonByText("读取", dialog()).getAttribute("aria-disabled")).toBe("true");
+
+    await act(async () => {
+      gate.resolve();
+      await settle();
+    });
+    expect(dropZone().dataset.state).toBe("reading");
+    expect(dialog().textContent).not.toContain("版本 1.2.0");
+    await advance(300);
+    expect(nameValue()).toBe("生存包");
+  });
+
+  it("300 ms 内读完：读取面始终不露面，直接换成确认步", async () => {
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    await fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
+    expect(nameValue()).toBe("生存包");
+    expect(dialog().querySelector("[data-drop-zone]")).toBeNull();
+  });
+
+  it("已有读取错误时再读：等待期错误照旧留着，很快又失败就原地换成新原因；读得慢时读取面露出才收起", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    const CORRUPT = "文件不完整或已损坏，重新下载一份再试";
+    const EXTENSION = "只认 .mrpack 和 CurseForge 导出的 .zip";
+    let gate = deferred<void>();
+    let code = "modpack_corrupt";
+    ipc.overrides.set("preview_modpack", () =>
+      gate.promise.then(() => {
+        throw new IpcError(code, "x");
+      }),
+    );
+    const finish = () =>
+      act(async () => {
+        gate.resolve();
+        await settle();
+      });
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    await fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
+    await finish();
+    expect(liveText(dialog())).toContain(CORRUPT);
+
+    gate = deferred<void>();
+    code = "modpack_unsupported_extension";
+    await clickInDialog("读取");
+    expect(callsOf(ipc, "preview_modpack")).toHaveLength(2);
+    expect(liveText(dialog())).toContain(CORRUPT);
+    expect(pathInput()?.getAttribute("aria-invalid")).toBe("true");
+    await finish();
+    // 同一处错误原地换字，没有旧的一条在淡出
+    expect(liveText(dialog())).toContain(EXTENSION);
+    expect(dialog().textContent).not.toContain(CORRUPT);
+
+    gate = deferred<void>();
+    await clickInDialog("读取");
+    expect(liveText(dialog())).toContain(EXTENSION);
+    await advance(300);
+    expect(liveText(dialog())).not.toContain(EXTENSION);
+    expect([...dialog().querySelectorAll("[inert]")].some((el) => el.textContent === EXTENSION)).toBe(true);
+    await finish();
+    await advance(300);
+    expect(liveText(dialog())).toContain(EXTENSION);
+  });
+
+  it("换步后焦点落在新一步里，不掉回 body：读完换成确认步落在名称框，「换一个文件」回到选文件步落在「选择文件」", async () => {
+    await mount({ page: "discover", importFile: PACK });
+    const name = dialog().querySelector('input:not([aria-label="整合包文件的完整路径"])');
+    expect(name).not.toBeNull();
+    expect(document.activeElement).toBe(name);
+
+    await clickInDialog("换一个文件");
+    expect(document.activeElement).toBe(buttonByText("选择文件", dialog()));
+
+    // 自己点「选择文件」读进来的同样落在名称框
+    vi.mocked(pickFile).mockResolvedValueOnce(PACK);
+    await clickInDialog("选择文件");
+    expect(document.activeElement).toBe(dialog().querySelector('input:not([aria-label="整合包文件的完整路径"])'));
+  });
+
+  it("换步时新的一步淡入并从下方落到位；弹窗打开时就在的那一步不另播，跟着弹窗入场", async () => {
+    await mount();
+    act(() => buttonByText("导入整合包文件").click());
+    await flush();
+    const chooseStep = dropZone().parentElement?.parentElement;
+    expect(chooseStep?.style.opacity).toBe("1");
+
+    await fire({ type: "drop", content: { kind: "files", paths: [PACK] } });
+    const confirmStep = dialog().querySelector('section[aria-label="包内 Mod"]')?.parentElement?.parentElement;
+    expect(confirmStep?.style.opacity).toBe("0");
+    expect(confirmStep?.style.transform).toContain("translateY(6px)");
+  });
 });
 
 describe("发现页：需要手动下载的文件与可选文件", () => {
@@ -1519,10 +1993,10 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
       buttonByText(text, root).click();
       await settle();
     });
-  /** 看得见的文字：状态标签换一个时旧的还在淡出（标着 data-exiting），不算。 */
+  /** 看得见的文字：状态标签、说明块换一个时旧的还在淡出（标着 data-exiting 或 inert），不算。 */
   const shownText = (el: Element) => {
     const copy = el.cloneNode(true) as Element;
-    for (const gone of copy.querySelectorAll("[data-exiting]")) gone.remove();
+    for (const gone of copy.querySelectorAll("[data-exiting], [inert]")) gone.remove();
     return copy.textContent;
   };
   const blockedDialog = () => {
@@ -1536,7 +2010,11 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     return row;
   };
   const modRows = () => [...dialog().querySelectorAll('ul[aria-label="包内 Mod"] > li')];
-  const rowsTagged = (tag: string) => modRows().filter((li) => li.textContent?.endsWith(tag)).map((li) => li.textContent?.slice(0, -tag.length));
+  const rowsTagged = (tag: string) =>
+    modRows()
+      .map((li) => shownText(li))
+      .filter((text) => text !== null && text.endsWith(tag))
+      .map((text) => text?.slice(0, -tag.length));
   const submitButton = () => buttonByText("导入为新实例", dialog());
   const checkbox = (label: string) => {
     const el = dialog().querySelector<HTMLButtonElement>(`[role="checkbox"][aria-label="${label}"]`);
@@ -1568,7 +2046,7 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(launcher.state.tasks[0].spec.args.excludedOptional).toEqual(["mods/optional-helper.jar"]);
   });
 
-  it("减少动效时清单的状态标签与说明块照常淡入淡出：换成「已找到」时旧标签先留在原处淡出", async () => {
+  it("减少动效时清单的状态标签与说明块照常淡入淡出：换成「已找到」时旧标签连同「打开网页」先留在原处淡出", async () => {
     seedMockDownloads(["blocked-a.jar"]);
     await mount({ page: "discover", importFile: BLOCKED_PACK }, "always");
     await clickIn(dialog(), "查看这些文件");
@@ -1578,7 +2056,7 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     seedMockDownloads(["blocked-b.jar"]);
     await clickIn(blockedDialog(), "我已下载，重新检查");
     const row = blockedRow("blocked-b.jar");
-    expect([...row.querySelectorAll("[data-exiting]")].map((el) => el.textContent)).toEqual(["还没找到"]);
+    expect([...row.querySelectorAll("[data-exiting]")].map((el) => el.textContent)).toEqual(["还没找到打开网页"]);
     expect(shownText(row)).toBe("blocked-b.jar装到 mods/已找到");
     expect([...blockedDialog().querySelectorAll("[data-exiting]")].map((el) => el.textContent)).toContain("找到 1 个，还差 1 个。文件要和网页上的完全一致，改过名也能认出来。");
   });
@@ -1611,7 +2089,7 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     await clickIn(blockedDialog(), "我已下载，重新检查");
     expect(pickFolder.mock.calls).toEqual([[MOCK_DOWNLOADS_DIR, "选择下载好的文件所在的文件夹"]]);
     expect(callsOf(ipc, "claim_blocked_files").map((c) => [c.folder, (c.files as BlockedFileDto[]).map((f) => f.file_id)])).toEqual([[MOCK_DOWNLOADS_DIR, [5000001, 5000002]]]);
-    expect(blockedRow("blocked-a.jar").textContent).toBe("blocked-a.jar装到 mods/已找到");
+    expect(shownText(blockedRow("blocked-a.jar"))).toBe("blocked-a.jar装到 mods/已找到");
     expect(blockedRow("blocked-b.jar").textContent).toBe("blocked-b.jar装到 mods/还没找到打开网页");
     expect(blockedDialog().textContent).toContain("找到 1 个，还差 1 个。文件要和网页上的完全一致，改过名也能认出来。");
     expect(buttonByText("我已下载，重新检查", blockedDialog())).toBeDefined();
@@ -1622,13 +2100,16 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(shownText(blockedDialog())).toContain("2 个文件都已找到。");
     expect(shownText(blockedDialog())).not.toContain("还差");
 
-    // 第二次读取挂起：确认步原地显示重新读取，主按钮不能点
+    // 第二次读取挂起：确认步原地等新结果，主按钮不能点；等待期界面照旧，受限说明还在，但不再打开那份旧清单
     const gate = deferred<void>();
     ipc.overrides.set("preview_modpack", (args) => gate.promise.then(() => mockInvoke("preview_modpack", args)));
     await clickIn(blockedDialog(), "继续导入");
     expect(openDialogs()).toHaveLength(1);
-    expect(dialog().textContent).toContain("正在重新读取 blocked-pack.zip…");
+    expect(shownText(dialog())).toContain("下载好之前不能导入");
+    expect(dialog().textContent).not.toContain("正在重新读取");
     expect(submitButton().disabled).toBe(true);
+    await clickIn(dialog(), "查看这些文件");
+    expect(openDialogs()).toHaveLength(1);
     await act(async () => {
       gate.resolve();
       await settle();
@@ -1636,7 +2117,8 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(callsOf(ipc, "preview_modpack")).toEqual([{ path: BLOCKED_PACK }, { path: BLOCKED_PACK }]);
     expect(dialog().textContent).not.toContain("正在重新读取");
     expect(rowsTagged("已找到")).toEqual(["blocked-a.jar", "blocked-b.jar"]);
-    expect(dialog().textContent).not.toContain("下载好之前不能导入");
+    // 读得快：受限说明在结果出来后才原地淡出（不可交互），只收起这一次
+    expect(shownText(dialog())).not.toContain("下载好之前不能导入");
     expect(nameInput.isConnected && nameInput.value).toBe("周末联机");
     expect(submitButton().getAttribute("aria-disabled")).toBeNull();
 
@@ -1645,7 +2127,14 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(callsOf(ipc, "install_modpack")).toMatchObject([{ source: { kind: "file", path: BLOCKED_PACK }, name: "周末联机", excludedOptional: [] }]);
   });
 
-  it("「继续导入」：「查看这些文件」被重新读取换掉，焦点落回确认步的第一个控件，不掉回 body，也不停在关闭按钮上", async () => {
+  /** 确认步的名称框：换到确认步时的焦点落点。 */
+  const nameField = () => {
+    const input = dialog().querySelector<HTMLInputElement>('input:not([aria-label="整合包文件的完整路径"])');
+    if (input === null) throw new Error("没有名称输入框");
+    return input;
+  };
+
+  it("「继续导入」：焦点先还给还在原处的「查看这些文件」；读完说明收起时按钮随说明淡出，焦点交给名称框，不掉回 body", async () => {
     seedMockDownloads(["blocked-a.jar", "blocked-b.jar"]);
     await mount({ page: "discover", importFile: BLOCKED_PACK });
     const view = buttonByText("查看这些文件", dialog());
@@ -1656,16 +2145,74 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     const gate = deferred<void>();
     ipc.overrides.set("preview_modpack", (args) => gate.promise.then(() => mockInvoke("preview_modpack", args)));
     await clickIn(blockedDialog(), "继续导入");
-    expect(view.isConnected).toBe(false);
-    expect(dialog().textContent).toContain("正在重新读取 blocked-pack.zip…");
-    expect(document.activeElement).toBe(buttonByText("换封面", dialog()));
+    expect(view.closest("[inert]")).toBeNull();
+    expect(document.activeElement).toBe(view);
 
-    // 读完之后焦点不被新内容打断
     await act(async () => {
       gate.resolve();
       await settle();
     });
-    expect(document.activeElement).toBe(buttonByText("换封面", dialog()));
+    expect(view.isConnected && view.closest("[inert]") !== null).toBe(true);
+    expect(document.activeElement).toBe(nameField());
+  });
+
+  it("读得慢时「查看这些文件」聚焦着、说明换成重读行：焦点同样交给名称框，读完不被新内容打断", async () => {
+    seedMockDownloads(["blocked-a.jar", "blocked-b.jar"]);
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    const view = buttonByText("查看这些文件", dialog());
+    act(() => view.focus());
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    const gate = deferred<void>();
+    ipc.overrides.set("preview_modpack", (args) => gate.promise.then(() => mockInvoke("preview_modpack", args)));
+    await clickIn(blockedDialog(), "继续导入");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(view.closest("[inert]")).not.toBeNull();
+    expect(document.activeElement).toBe(nameField());
+
+    await act(async () => {
+      gate.resolve();
+      await settle();
+    });
+    expect(document.activeElement).toBe(nameField());
+  });
+
+  it("认领完原地重读：等待期受限说明照旧；读得慢时 300 ms 后换成「正在重新读取」，说明连同按钮原地淡出，重读行露出后留满 300 ms；行内标签交叉淡化成「已找到」", async () => {
+    const advance = (ms: number) =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    seedMockDownloads(["blocked-a.jar", "blocked-b.jar"]);
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    const gate = deferred<void>();
+    ipc.overrides.set("preview_modpack", (args) => gate.promise.then(() => mockInvoke("preview_modpack", args)));
+    await clickIn(blockedDialog(), "继续导入");
+
+    const notice = "有 2 个文件需要到 CurseForge 网页手动下载，下载好之前不能导入。";
+    const lines = () => [...dialog().querySelectorAll<HTMLElement>("[aria-busy]")].filter((el) => el.textContent === "正在重新读取 blocked-pack.zip…" && el.closest("[inert]") === null);
+    expect(shownText(dialog())).toContain(notice);
+    expect(lines()).toHaveLength(0);
+
+    await advance(300);
+    expect(lines()).toHaveLength(1);
+    // 按钮留在正在淡出的说明里一起淡出，说明文字不在淡出途中铺进它让出的位置
+    const leaving = [...dialog().querySelectorAll("[inert]")].find((el) => el.textContent === `${notice}查看这些文件`);
+    expect(leaving?.querySelector("button")?.textContent).toBe("查看这些文件");
+
+    await act(async () => {
+      gate.resolve();
+      await settle();
+    });
+    expect(rowsTagged("已找到")).toEqual(["blocked-a.jar", "blocked-b.jar"]);
+    expect(modRows().flatMap((li) => [...li.querySelectorAll("[data-exiting]")].map((el) => el.textContent))).toEqual(["需手动下载", "需手动下载"]);
+    expect(lines()).toHaveLength(1);
+    await advance(300);
+    expect(lines()).toHaveLength(0);
+    expect(shownText(dialog())).not.toContain("下载好之前不能导入");
   });
 
   it("选文件夹时取消什么都不变；选的文件夹读不了时原位写出后端原文，列表状态不变；别的失败交给外层通知", async () => {
@@ -1762,6 +2309,51 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     expect(blockedRow("blocked-a.jar").textContent).toBe("blocked-a.jar装到 mods/打开网页");
     expect(blockedRow("blocked-b.jar").textContent).toBe("blocked-b.jar装到 mods/打开网页");
     expect(buttonByText("我已下载，重新检查", blockedDialog()).getAttribute("aria-busy")).toBeNull();
+  });
+
+  it("主按钮在「我已下载，重新检查」「正在检查…」「继续导入」之间换字时按最宽那条留宽：没在显示的两条只在留宽的取值里，按钮的文字只有当前这条，也不重挂", async () => {
+    seedMockDownloads(["blocked-a.jar", "blocked-b.jar"]);
+    const gate = deferred<void>();
+    ipc.overrides.set("claim_blocked_files", (args) => gate.promise.then(() => mockInvoke("claim_blocked_files", args)));
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    await clickIn(dialog(), "查看这些文件");
+    const primary = buttonByText("我已下载，重新检查", blockedDialog());
+    const slot = () => {
+      const el = primary.querySelector<HTMLElement>("[data-reserve-a]");
+      if (el === null) throw new Error("主按钮的文案没有留宽");
+      return [el.textContent, el.dataset.reserveA, el.dataset.reserveB];
+    };
+    expect(slot()).toEqual(["我已下载，重新检查", "正在检查…", "继续导入"]);
+
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(slot()).toEqual(["正在检查…", "我已下载，重新检查", "继续导入"]);
+
+    await act(async () => {
+      gate.resolve();
+      await settle();
+    });
+    expect(buttonByText("继续导入", blockedDialog())).toBe(primary);
+    expect(slot()).toEqual(["继续导入", "我已下载，重新检查", "正在检查…"]);
+  });
+
+  it("文件夹读不了时错误顶替上一次的检查结果：说明块只有一处，旧结果原地淡出、不可交互", async () => {
+    const { IpcError } = await import("../../ipc/errors");
+    seedMockDownloads(["blocked-a.jar"]);
+    await mount({ page: "discover", importFile: BLOCKED_PACK });
+    await clickIn(dialog(), "查看这些文件");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    const partial = "找到 1 个，还差 1 个。文件要和网页上的完全一致，改过名也能认出来。";
+    expect(shownText(blockedDialog())).toContain(partial);
+
+    ipc.overrides.set("claim_blocked_files", () => {
+      throw new IpcError("io", "选的文件夹不存在：D:\\nope", { path: "D:\\nope" });
+    });
+    pickFolder.mockResolvedValueOnce("D:\\nope");
+    await clickIn(blockedDialog(), "我已下载，重新检查");
+    expect(shownText(blockedDialog())).toContain("选的文件夹不存在：D:\\nope");
+    expect(shownText(blockedDialog())).not.toContain(partial);
+    const leaving = [...blockedDialog().querySelectorAll<HTMLElement>("[data-exiting]")].find((el) => el.textContent === partial);
+    expect(leaving?.hasAttribute("inert")).toBe(true);
   });
 
   it("「打开网页」聚焦着时开始检查：焦点留在按钮上；这个文件找到后按钮消失，焦点交给主按钮，没找到的行照旧", async () => {
@@ -1939,8 +2531,10 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     await flush();
 
     const panel = dialog().querySelector("aside") as HTMLElement;
-    const callouts = () => [...panel.querySelectorAll<HTMLElement>('[class*="_callout_"]')];
-    const rows = () => [...panel.querySelectorAll<HTMLElement>('[class*="_warnNote_"]')];
+    // 撤下的提醒若在原处淡出，退场期间带 inert 留在 DOM 里：只数还在场的
+    const live = (selector: string) => [...panel.querySelectorAll<HTMLElement>(selector)].filter((el) => el.closest("[inert]") === null);
+    const callouts = () => live('[class*="_callout_"]');
+    const rows = () => live('[class*="_warnNote_"]');
     expect(callouts().map((el) => [el.dataset.tone, el.textContent])).toEqual([["danger", "没能判断能装进哪些实例连接超时重试"]]);
     expect(rows().map((el) => el.textContent)).toEqual(["作者不允许在启动器里下载这个资源，只能去 CurseForge 网页下载。打开网页"]);
 
@@ -2022,8 +2616,8 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
     it("摘要报本体受限：只说要手动下载，不当成清单读不出来，也不给重试；安装照常能点，点了走手动下载", async () => {
       await openPack(false, blockedSummary);
       expect(dialog().textContent).toContain(LISTED);
-      expect(dialog().textContent).not.toContain(NOTE);
-      expect(dialog().textContent).not.toContain(SUMMARY_FAILED);
+      expect(liveText(dialog())).not.toContain(NOTE);
+      expect(liveText(dialog())).not.toContain(SUMMARY_FAILED);
       expect([...dialog().querySelectorAll("button")].some((b) => b.textContent === "重试")).toBe(false);
 
       const { IpcError } = await import("../../ipc/errors");
@@ -2032,14 +2626,14 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
       });
       await clickIn(dialog(), "安装为新实例");
       expect(dialog().textContent).toContain("没装成：有 1 个文件需要到 CurseForge 网页手动下载");
-      expect(dialog().textContent).not.toContain(LISTED);
+      expect(liveText(dialog())).not.toContain(LISTED);
       expect(buttonByText("查看这些文件", dialog())).toBeDefined();
     });
 
     it("工程允许下载、这个版本的本体受限：以摘要为准，同样提前说明", async () => {
       await openPack(true, blockedSummary);
       expect(dialog().textContent).toContain(LISTED);
-      expect(dialog().textContent).not.toContain(SUMMARY_FAILED);
+      expect(liveText(dialog())).not.toContain(SUMMARY_FAILED);
     });
 
     it("安装前就能打开清单：认领到本体后摘要重读，说明收起、Mod 数出来，没有发起安装", async () => {
@@ -2056,7 +2650,7 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
       expect(callsOf(ipc, "summarize_platform_modpack")).toHaveLength(2);
       await clickIn(blockedDialog(), "继续导入");
 
-      expect(dialog().textContent).not.toContain(LISTED);
+      expect(liveText(dialog())).not.toContain(LISTED);
       expect(dialog().textContent).toContain("2 个 Mod");
       expect(callsOf(ipc, "install_modpack")).toEqual([]);
     });
@@ -2073,7 +2667,7 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
       await clickIn(blockedDialog(), "我已下载，重新检查");
       await clickIn(blockedDialog(), "关闭");
 
-      expect(dialog().textContent).not.toContain(LISTED);
+      expect(liveText(dialog())).not.toContain(LISTED);
     });
 
     it("清单里没找到本体：摘要不重读，说明还在", async () => {
@@ -2095,14 +2689,14 @@ describe("发现页：需要手动下载的文件与可选文件", () => {
 
     it("工程标着不允许、这个版本的摘要读到了：本体拿得到，不说明", async () => {
       await openPack(false, () => READY_SUMMARY);
-      expect(dialog().textContent).not.toContain(NOTE);
-      expect(dialog().textContent).not.toContain(SUMMARY_FAILED);
+      expect(liveText(dialog())).not.toContain(NOTE);
+      expect(liveText(dialog())).not.toContain(SUMMARY_FAILED);
     });
 
     it("工程允许、摘要因别的原因失败：照旧写清单读不出来并给重试，不说要手动下载", async () => {
       const { IpcError } = await import("../../ipc/errors");
       await openPack(true, () => Promise.reject(new IpcError("network_failed", "连接超时")));
-      expect(dialog().textContent).not.toContain(NOTE);
+      expect(liveText(dialog())).not.toContain(NOTE);
       expect(dialog().textContent).toContain(SUMMARY_FAILED);
       expect(buttonByText("重试", dialog())).toBeDefined();
     });

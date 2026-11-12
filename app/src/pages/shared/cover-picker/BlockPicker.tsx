@@ -4,13 +4,17 @@
 // Esc 由弹窗关闭（搜索框里有字时先清空）。选中只回调 onPick，关不关由调用方定。
 // 没有材质源时只有推荐与我的图片两页，推荐方块画成徽记，框内顶部放下载原版材质的部件。
 
-import { memo, useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { motion } from "framer-motion";
+import { memo, useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { blockDisplayName, useBlockCatalog, type BlockCatalog, type CatalogBlock } from "../../../art/iso/catalog";
 import { COVER_PRESETS, type InstanceCover } from "../../../art/iso/covers";
 import { InstanceBlock } from "../../../art/iso/InstanceBlock";
 import { BLOCK_PICKER_COPY } from "../../../copy/cover";
 import { coverLabel } from "../../../copy/flows";
+import { fade } from "../../../lib/motion";
+import { useReflow } from "../../../lib/reflow";
 import { clamp, cssVars, isImeComposing, isTypingTarget } from "../../../lib/util";
+import { Appear } from "../../../ui/Appear";
 import { Button } from "../../../ui/Button";
 import { EmptyState } from "../../../ui/EmptyState";
 import { AUTOFOCUS_ATTR, Modal } from "../../../ui/Modal";
@@ -158,16 +162,25 @@ function initialView(value: BlockPickerProps["value"], catalog: BlockCatalog | n
   return listed === undefined ? "recommended" : categoryOf(listed);
 }
 
+/** 选择框的版式只随有没有材质源变：没有时顶部是下载部件、两个页签；有了换成搜索框与七个页签。 */
+export function pickerLayoutKey(catalog: BlockCatalog | null): string {
+  return catalog === null ? "bare" : "catalog";
+}
+
 export function BlockPicker({ open, instanceId, value, onPick, onPickImage, imageBusy, onClose }: BlockPickerProps) {
+  // 目录在这一层读：材质下完、目录载入时弹窗自己跟着重渲染，面板才量得到新尺寸、沿弹簧形变过去，
+  // 而不是上下沿各瞬跳高度差的一半。形变只认版式键，其余重渲染不量布局
+  const catalog = useBlockCatalog();
   return (
-    <Modal open={open} onClose={onClose} title={BLOCK_PICKER_COPY.title} size="md">
-      <PickerBody instanceId={instanceId} value={value} onPick={onPick} onPickImage={onPickImage} imageBusy={imageBusy} />
+    <Modal open={open} onClose={onClose} title={BLOCK_PICKER_COPY.title} size="md" layoutKey={pickerLayoutKey(catalog)}>
+      <PickerBody catalog={catalog} instanceId={instanceId} value={value} onPick={onPick} onPickImage={onPickImage} imageBusy={imageBusy} />
     </Modal>
   );
 }
 
-function PickerBody({ instanceId, value, onPick, onPickImage, imageBusy }: Omit<BlockPickerProps, "open" | "onClose">) {
-  const catalog = useBlockCatalog();
+function PickerBody({ catalog, instanceId, value, onPick, onPickImage, imageBusy }: Omit<BlockPickerProps, "open" | "onClose"> & { catalog: BlockCatalog | null }) {
+  // 下载部件淡出、搜索框淡入时，页签与网格从旧位置滑过去
+  const reflow = useReflow<HTMLDivElement>();
   const lists = useMemo(() => (catalog === null ? null : catalogLists(catalog)), [catalog]);
   const [view, setView] = useState<PickerView>(() => initialView(value, catalog));
   const [query, setQuery] = useState("");
@@ -217,19 +230,22 @@ function PickerBody({ instanceId, value, onPick, onPickImage, imageBusy }: Omit<
   };
 
   return (
-    <div className={styles.body} onKeyDown={onKeyDown}>
-      {catalog === null && <ArtDownload />}
+    <div ref={reflow} className={styles.body} onKeyDown={onKeyDown}>
+      <Appear>{catalog === null && <ArtDownload key="art-download" />}</Appear>
       <Tabs id={tabsId} value={shown} onChange={changeView} items={tabs} variant="pill" size="sm" ariaLabel={BLOCK_PICKER_COPY.tabsLabel} />
-      {lists !== null && (
-        <SearchInput
-          ref={searchRef}
-          size="sm"
-          value={query}
-          onChange={changeQuery}
-          placeholder={BLOCK_PICKER_COPY.searchPlaceholder}
-          aria-label={BLOCK_PICKER_COPY.searchLabel}
-        />
-      )}
+      <Appear>
+        {lists !== null && (
+          <SearchInput
+            key="search"
+            ref={searchRef}
+            size="sm"
+            value={query}
+            onChange={changeQuery}
+            placeholder={BLOCK_PICKER_COPY.searchPlaceholder}
+            aria-label={BLOCK_PICKER_COPY.searchLabel}
+          />
+        )}
+      </Appear>
       <TabPanel tabsId={tabsId} value={shown} motion="card" className={styles.panel}>
         {shown === "image" ? (
           <div className={styles.page} style={{ minHeight: VIEWPORT_HEIGHT }}>
@@ -244,22 +260,47 @@ function PickerBody({ instanceId, value, onPick, onPickImage, imageBusy }: Omit<
               }
             />
           </div>
-        ) : items.length === 0 ? (
-          <div className={styles.page} style={{ minHeight: VIEWPORT_HEIGHT }}>
-            <EmptyState icon="search" title={BLOCK_PICKER_COPY.noMatch(query.trim())} body={BLOCK_PICKER_COPY.noMatchBody} />
-          </div>
         ) : (
-          <BlockGrid
-            key={`${shown}|${query}`}
-            items={items}
-            instanceId={instanceId}
-            selected={value.image ? null : value.block}
-            label={BLOCK_PICKER_COPY.gridLabel[shown]}
-            onPick={onPick}
-          />
+          <ResultSwap empty={items.length === 0}>
+            {items.length === 0 ? (
+              <div className={styles.page} style={{ minHeight: VIEWPORT_HEIGHT }}>
+                <EmptyState icon="search" title={BLOCK_PICKER_COPY.noMatch(query.trim())} body={BLOCK_PICKER_COPY.noMatchBody} />
+              </div>
+            ) : (
+              <BlockGrid
+                key={`${shown}|${query}`}
+                items={items}
+                instanceId={instanceId}
+                selected={value.image ? null : value.block}
+                label={BLOCK_PICKER_COPY.gridLabel[shown]}
+                onPick={onPick}
+              />
+            )}
+          </ResultSwap>
         )}
       </TabPanel>
     </div>
+  );
+}
+
+/**
+ * 搜索结果在「有」与「没有匹配」之间换：两面同高，换上来的那面只淡入、不位移（同卡内页签的切换）。
+ * 打开选择框、换页签时跟着弹窗与面板的入场走，不单独再淡一次；每打一个字刷新网格也不淡，只有有无互换才淡。
+ */
+function ResultSwap({ empty, children }: { empty: boolean; children: ReactNode }) {
+  const [first] = useState(empty);
+  const [swapped, setSwapped] = useState(false);
+  if (!swapped && empty !== first) setSwapped(true);
+  return (
+    <motion.div
+      key={empty ? "empty" : "grid"}
+      className={styles.swap}
+      data-results={empty ? "empty" : "grid"}
+      initial={swapped ? { opacity: 0 } : false}
+      animate={{ opacity: 1, transition: fade.in }}
+    >
+      {children}
+    </motion.div>
   );
 }
 

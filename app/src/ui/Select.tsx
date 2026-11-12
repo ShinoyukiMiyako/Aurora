@@ -6,6 +6,9 @@
 // Enter 选中并关闭、Esc 关闭并把焦点还给触发器、Tab 关闭并前进；任意时刻键入字符按首字跳转
 // （500 ms 内连续键入合并为前缀；关闭时直接选中匹配项，与原生下拉一致）。
 // 选项超过 12 个时列表顶部出现过滤框，打开即聚焦，按标签包含匹配。
+// 尺寸不随内容跳：宽度随内容走的触发器传 reserveWidth，按最长的选项预留宽度，换选中项时同一行的其他控件不被挤动
+// （选项很多时只取估算最长的几条）；撑满或调用方已定宽的触发器不用传；
+// 打开期间面板不变矮（键入筛选词只换内容），过滤框有没有在打开那一刻定下，选项晚到也不会把它插进来。
 
 import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { Icon, type IconName } from "../art/Icon";
@@ -35,6 +38,12 @@ export interface SelectProps<T extends string> {
   placeholder?: string;
   size?: "sm" | "md";
   block?: boolean;
+  /**
+   * 触发器宽度按最长的选项（含占位）预留：换选中项时触发器不变宽，同一行右对齐的其他控件不被挤动。
+   * 只给宽度随内容走的触发器打开（工具条里的排序、适配实例）。撑满（block）或调用方已给固定宽的不要开：
+   * 宽度本来就不变，预留只会在触发器里白白多出最多 8 个隐藏节点。block 时不生效。
+   */
+  reserveWidth?: boolean;
   disabled?: boolean;
   invalid?: boolean;
   /** 不在 Field 里时必填。 */
@@ -48,6 +57,30 @@ export const SELECT_PLACEHOLDER = "选择";
 export const SELECT_EMPTY_COPY = "没有匹配项";
 export const SELECT_FILTER_LABEL = "筛选选项";
 export const SELECT_FILTER_PLACEHOLDER = "筛选";
+
+/**
+ * 触发器预留宽度时最多叠放的候选数。游戏版本这类下拉有几百个选项，每个都放一个隐藏节点的话，
+ * 触发器里多出同样数量的节点与文字排版，所在组件每次重渲染都要逐个对比。
+ */
+const WIDTH_CANDIDATE_LIMIT = 8;
+
+/** 估算文字宽度用的权重：全角字符（中日韩文字、全角符号）按两个半角算。只用来挑候选，真实宽度仍由排版决定。 */
+function textWeight(text: string): number {
+  let weight = 0;
+  for (const ch of text) weight += ch.charCodeAt(0) >= 0x2e80 ? 2 : 1;
+  return weight;
+}
+
+/** 叠在触发器里撑宽的候选文案：不多于上限时全部，超过时取估算最宽的几条。 */
+function widthCandidates(labels: readonly string[]): string[] {
+  const unique = [...new Set(labels)];
+  if (unique.length <= WIDTH_CANDIDATE_LIMIT) return unique;
+  return unique
+    .map((label) => ({ label, weight: textWeight(label) }))
+    .sort((a, b) => b.weight - a.weight)
+    .slice(0, WIDTH_CANDIDATE_LIMIT)
+    .map((c) => c.label);
+}
 
 interface Section<T extends string> {
   group: string | undefined;
@@ -75,6 +108,7 @@ export function Select<T extends string>({
   placeholder = SELECT_PLACEHOLDER,
   size = "md",
   block = false,
+  reserveWidth = false,
   disabled = false,
   invalid = false,
   ariaLabel,
@@ -93,7 +127,8 @@ export function Select<T extends string>({
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(-1);
   const pushTypeahead = useTypeahead();
-  const filterable = options.length > SELECT_FILTER_THRESHOLD;
+  // 打开那一刻定下：列表开着时选项才读到（版本下拉加载中就能点开），过滤框不在顶上插进来、把焦点抢走
+  const [filterable, setFilterable] = useState(false);
   const isInvalid = invalid || (field !== null && field.invalid);
 
   const needle = query.trim().toLocaleLowerCase();
@@ -104,6 +139,7 @@ export function Select<T extends string>({
   const openList = () => {
     setQuery("");
     setHighlight(selected >= 0 && options[selected].disabled !== true ? selected : disabledFlags.indexOf(false));
+    setFilterable(options.length > SELECT_FILTER_THRESHOLD);
     setOpen(true);
   };
 
@@ -181,6 +217,7 @@ export function Select<T extends string>({
 
   const current = selected >= 0 ? options[selected] : null;
   const activeId = open && highlight >= 0 && visible.includes(highlight) ? optionId(highlight) : undefined;
+  const widthLabels = reserveWidth && !block ? widthCandidates([placeholder, ...options.map((o) => o.label)]) : [];
 
   return (
     <>
@@ -207,7 +244,11 @@ export function Select<T extends string>({
       >
         {current?.icon !== undefined && <Icon name={current.icon} size={16} className={styles.triggerIcon} />}
         <span className={styles.value} data-placeholder={current === null || undefined}>
-          {current === null ? placeholder : current.label}
+          <span className={styles.valueText}>{current === null ? placeholder : current.label}</span>
+          {/* 全部候选叠在同一格里撑出宽度；文字写在伪元素上，不进 textContent 与可访问名称 */}
+          {widthLabels.map((label) => (
+            <span key={label} className={styles.widthLabel} data-label={label} aria-hidden="true" />
+          ))}
         </span>
         <Icon name="chevron-down" size={16} className={styles.chevron} />
       </button>
@@ -274,8 +315,17 @@ function SelectList<T extends string>({
   onPick,
   onKeyDown,
 }: SelectListProps<T>) {
+  const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const filterRef = useRef<HTMLInputElement>(null);
+
+  // 打开时的高度定为下限：键入筛选词让列表变矮时面板不跟着缩，向上展开的面板顶上的过滤框也就不随每次按键下移。
+  // 只在挂载时量这一次，直接写到元素上，不为它多渲染一遍
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    if (panel === null) throw new Error("下拉列表没有挂上面板");
+    panel.style.minHeight = `${panel.offsetHeight}px`;
+  }, []);
 
   // 打开即聚焦过滤框。不用 autoFocus：开发构建的 StrictMode 会重放 effect，autoFocus 不会重放
   useLayoutEffect(() => {
@@ -321,7 +371,7 @@ function SelectList<T extends string>({
   };
 
   return (
-    <div className={styles.panel}>
+    <div ref={panelRef} className={styles.panel}>
       {filterable && (
         <div className={styles.filter}>
           <TextInput

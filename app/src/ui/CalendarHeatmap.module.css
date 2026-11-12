@@ -1,4 +1,4 @@
-/* 7 列，格 34 × 30、间距 5，整格宽 268；这是日历自己的几何，不随页面变 */
+/* 7 列，格 34 × 30、间距 5，整格宽 268；固定 6 周，网格高 16 + 6 × 35。这是日历自己的几何，不随页面与月份变 */
 .calendar {
   --day-width: 34px;
   --day-height: 30px;
@@ -8,7 +8,8 @@
   gap: var(--sk-space-10);
 }
 
-.grid {
+.grid,
+.weeks {
   display: flex;
   flex-direction: column;
   gap: var(--day-gap);
@@ -108,6 +109,11 @@
   scale: 1.1;
 }
 
+/* 按下：在悬停的放大上收 0.94，约 1.03 */
+.day:active:not([data-level="none"]) {
+  scale: 1.03;
+}
+
 .day[data-selected] {
   box-shadow: 0 0 0 2px var(--sk-surface), 0 0 0 4px var(--sk-accent-strong);
 }
@@ -118,6 +124,12 @@
 
 :global([data-sk-reduced]) .day:hover:not([data-level="none"]) {
   scale: none;
+}
+
+/* 减少动画：按下不缩放，瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .day:active:not([data-level="none"]) {
+  scale: none;
+  opacity: 0.85;
 }
 
 /* 图例：少 + 五档色块 + 多 */

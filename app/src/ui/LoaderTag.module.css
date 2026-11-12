@@ -34,12 +34,15 @@
 /*
  * 名称用正文色、版本退到次级色，两者在描边标签里才分得出主次。两者各自写字色，会盖过描边标签按 --tag-ink 给的字色，
  * 所以也读卡面下发的变量：压在图片或材质平铺上时卡面给出 --tag-ink 与强一档的 --tag-ink-strong，主次换成媒体文字色的两档。
+ * 各自写了字色，也要各自带上标签的字色过渡，不然卡面换底时名称和版本先一步跳色。
  */
 .name {
   color: var(--tag-ink-strong, var(--sk-text));
+  transition: color var(--sk-dur-in) var(--sk-ease-out);
 }
 
 .version {
   color: var(--tag-ink, var(--sk-text-2));
   font-variant-numeric: tabular-nums;
+  transition: color var(--sk-dur-in) var(--sk-ease-out);
 }

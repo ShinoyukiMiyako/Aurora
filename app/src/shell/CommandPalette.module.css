@@ -35,6 +35,8 @@
   box-shadow: var(--sk-shadow-lg);
   color: var(--sk-text);
   outline: none;
+  /* 面板顶边锚定在标题栏下方：缩放以顶边中点为原点，开合时像从顶端落下、收回顶端，顶边不上下漂 */
+  transform-origin: top center;
 }
 
 :global(:root[data-sk-tier="compact"]) .panel {
@@ -74,12 +76,18 @@
   color: var(--sk-text-3);
 }
 
+/*
+ * 定高而不是最大高：结果条数随每次键入变化，按内容收缩时面板下沿与底栏会跟着上下跳几百像素；
+ * 窗口矮到放不下时仍随面板的最大高收缩。滚动槽常驻，结果从溢出变成放得下时各行不再横跳，
+ * 右侧留白由这条槽承担，所以右内边距为 0
+ */
 .list {
   position: relative;
   flex: 0 1 auto;
-  max-height: min(400px, 52vh);
-  padding: var(--sk-space-6);
+  height: min(400px, 52vh);
+  padding: var(--sk-space-6) 0 var(--sk-space-6) var(--sk-space-6);
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .group + .group {

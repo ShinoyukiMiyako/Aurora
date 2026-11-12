@@ -3,7 +3,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
-import { ACTION_ERROR, NEXT_LAUNCH_SUFFIX, PAGE_LABEL, TOAST_COPY, accountKindLabel } from "../copy/flows";
+import { ACTION_ERROR, INSTANCE_TAB_LABEL, NEXT_LAUNCH_SUFFIX, PAGE_LABEL, TOAST_COPY, accountKindLabel } from "../copy/flows";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
@@ -12,6 +12,7 @@ import { ACCOUNT_COPY, PEEK_COPY, TITLEBAR_COPY } from "../copy/shell";
 import { OverlayRoot } from "./overlay";
 import { ShellProvider, useNav, type NavApi } from "./shell";
 import { TitleBar } from "./TitleBar";
+import styles from "./TitleBar.module.css";
 import { WindowPortProvider, browserWindowPort, type WindowPort } from "./window";
 
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
@@ -90,6 +91,33 @@ describe("窗口三键", () => {
   });
 });
 
+describe("页面标题", () => {
+  const spanWithText = (text: string) => {
+    const el = [...document.querySelectorAll<HTMLElement>("header span")].find((s) => s.textContent === text);
+    if (el === undefined) throw new Error(`标题栏里没有「${text}」`);
+    return el;
+  };
+
+  it("挂载时就在的标题不单独淡入；换页后新标题从透明淡入", async () => {
+    await mount();
+    expect(spanWithText(PAGE_LABEL.home).style.opacity).toBe("1");
+    act(() => nav.go({ page: "library" }));
+    expect(spanWithText(PAGE_LABEL.library).style.opacity).toBe("0");
+  });
+
+  it("实例页换分页：面包屑不重挂，只有新出现的分页名淡入", async () => {
+    await mount();
+    act(() => nav.go({ page: "instance", id: "生存", tab: "overview" }));
+    const crumbName = spanWithText("生存");
+    act(() => nav.go({ page: "instance", id: "生存", tab: "mods" }));
+    expect(spanWithText("生存")).toBe(crumbName);
+    expect(spanWithText(INSTANCE_TAB_LABEL.mods).style.opacity).toBe("0");
+    act(() => nav.go({ page: "instance", id: "生存", tab: "logs" }));
+    expect(spanWithText(INSTANCE_TAB_LABEL.logs).style.opacity).toBe("0");
+    expect(spanWithText("生存")).toBe(crumbName);
+  });
+});
+
 describe("后退与前进", () => {
   it("没有历史时禁用；去过别的页面后可以后退", async () => {
     await mount();
@@ -142,6 +170,72 @@ describe("账户胶囊", () => {
     act(() => [...document.querySelectorAll<HTMLElement>("[role='menuitemradio']")][1].click());
     await flush();
     expect(launcher.state.toasts.map((t) => [t.tone, t.title])).toEqual([["error", ACTION_ERROR.selectAccount]]);
+  });
+
+  it("切换账户、胶囊伸缩：左边的搜索与下载入口与它同组取快照，换之前量到旧位置、换之后量到新位置", async () => {
+    await mount();
+    const steve = ACCOUNT_COPY.current("Steve", accountKindLabel("offline", null));
+    const alex = ACCOUNT_COPY.current("Alex", accountKindLabel("microsoft", null));
+    const capsule = byLabel(steve);
+    const capsuleLabel = () => {
+      const label = capsule.getAttribute("aria-label");
+      if (label === null) throw new Error("账户胶囊没有名称");
+      return label;
+    };
+    // jsdom 不做布局：入口的矩形随胶囊写的是哪个账户而定，并记下每次被量时胶囊上的账户。
+    // 入口自己没有重渲染、布局依赖也没变，被量到只能是因为与胶囊同在一个布局组里
+    const track = (el: HTMLElement) => {
+      const seen: string[] = [];
+      el.getBoundingClientRect = () => {
+        const label = capsuleLabel();
+        seen.push(label);
+        const left = label === steve ? 600 : 560;
+        return { left, top: 11, width: 34, height: 34, x: left, y: 11, right: left + 34, bottom: 45, toJSON: () => null } as DOMRect;
+      };
+      return seen;
+    };
+    const search = track(byLabel(TITLEBAR_COPY.searchLabel));
+    const download = track(byLabel(PEEK_COPY.button(0, 0)));
+    act(() => capsule.click());
+    await flush();
+    ipc.overrides.set("current_account", () => ALEX);
+    act(() => [...document.querySelectorAll<HTMLElement>("[role='menuitemradio']")][1].click());
+    await flush();
+    expect(capsuleLabel()).toBe(alex);
+    for (const seen of [search, download]) {
+      expect(seen[0]).toBe(steve);
+      expect(seen.at(-1)).toBe(alex);
+    }
+  });
+
+  it("窄窗口里右列超过 1fr 时胶囊伸缩会推动中列：状态岛也与胶囊同组取快照，换之前量到旧位置、换之后量到新位置", async () => {
+    ipc.overrides.set("launch_game", () => deferred<never>().promise);
+    await mount();
+    act(() => void launcher.actions.launch("生存"));
+    await flush();
+    const island = document.querySelector<HTMLElement>(`.${styles.center} button`);
+    if (island === null) throw new Error("标题栏中列没有状态岛");
+    const steve = ACCOUNT_COPY.current("Steve", accountKindLabel("offline", null));
+    const alex = ACCOUNT_COPY.current("Alex", accountKindLabel("microsoft", null));
+    const capsule = byLabel(steve);
+    // 状态岛自己的布局依赖（档位、名字、阶段文字、数字位数）在换账户时都没变，被量到只能是因为与胶囊同在一个布局组里。
+    // 右列按内容定宽时中列的位置随右列宽度变：胶囊写 Alex 时更宽，状态岛整体左移
+    const seen: string[] = [];
+    island.getBoundingClientRect = () => {
+      const label = capsule.getAttribute("aria-label");
+      if (label === null) throw new Error("账户胶囊没有名称");
+      seen.push(label);
+      const left = label === steve ? 420 : 380;
+      return { left, top: 11, width: 160, height: 34, x: left, y: 11, right: left + 160, bottom: 45, toJSON: () => null } as DOMRect;
+    };
+    act(() => capsule.click());
+    await flush();
+    ipc.overrides.set("current_account", () => ALEX);
+    act(() => [...document.querySelectorAll<HTMLElement>("[role='menuitemradio']")][1].click());
+    await flush();
+    expect(capsule.getAttribute("aria-label")).toBe(alex);
+    expect(seen[0]).toBe(steve);
+    expect(seen.at(-1)).toBe(alex);
   });
 
   it("没有账户时是「添加账户」，直接去账户页", async () => {

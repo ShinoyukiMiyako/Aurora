@@ -3,22 +3,23 @@ import { act, useState, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TOOLTIP_TIMING } from "../lib/motion";
 import { OverlayProvider, OverlayRoot, useEscapeLayer } from "../shell/overlay";
-import { focusByKeyboard, keydown, render, setRect, type Rendered } from "../test/dom";
-import { Tooltip } from "./Tooltip";
+import { focusByKeyboard, keydown, render, setRect, stubResizeObserver, type Rendered } from "../test/dom";
+import { resetTooltipState, Tooltip } from "./Tooltip";
 
 let view: Rendered | undefined;
-let now = 1_000_000;
 
 beforeEach(() => {
-  // Date 一并假：预热窗口按 Date.now() 计算
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"], now });
+  // performance 一并假：预热窗口按 performance.now() 计算。Date 也假，系统时钟回拨的用例要拨它
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"], now: 1_000_000 });
+  // 预热时刻与在显示的气泡是全站共享的模块状态：前一个用例留下的不能带进来。
+  // 要等动画真的播完的用例（退场撤掉、入场方向）放在 Tooltip.frames.test.tsx，整个文件走真实计时器
+  resetTooltipState();
 });
 
 afterEach(() => {
   view?.unmount();
   view = undefined;
   vi.useRealTimers();
-  now += 10_000_000;
 });
 
 function mount(ui: ReactNode) {
@@ -38,7 +39,11 @@ const button = (label: string) => {
 };
 const bubble = () => document.querySelector<HTMLElement>('[role="tooltip"]');
 const advance = (ms: number) => act(() => vi.advanceTimersByTime(ms));
-
+/** 触发元素当前关联的那个气泡。 */
+const bubbleOf = (label: string) => {
+  const id = button(label).getAttribute("aria-describedby");
+  return id === null ? null : document.getElementById(id);
+};
 /** React 的 onPointerEnter / onPointerLeave 由 pointerover / pointerout 推导，直接派发 pointerenter 收不到。 */
 function pointerEnter(el: Element, from: Element = document.body) {
   act(() => {
@@ -140,6 +145,368 @@ describe("悬停时机", () => {
     expect(button("A").hasAttribute("aria-describedby")).toBe(false);
     advance(TOOLTIP_TIMING.delay);
     expect(button("A").hasAttribute("aria-describedby")).toBe(true);
+  });
+
+  // 墙上时间的差值在时钟回拨后是负的，曾被一直算成预热：回拨一小时后所有提示都不等 delay
+  it("系统时钟往回调不影响预热：超过窗口后照常等待 delay", () => {
+    mount(
+      <>
+        <Tooltip content="甲">
+          <button>A</button>
+        </Tooltip>
+        <Tooltip content="乙">
+          <button>B</button>
+        </Tooltip>
+      </>,
+    );
+    pointerEnter(button("A"));
+    advance(TOOLTIP_TIMING.delay);
+    pointerLeave(button("A"));
+    advance(TOOLTIP_TIMING.linger + TOOLTIP_TIMING.warmWindow);
+    vi.setSystemTime(Date.now() - 3_600_000);
+    pointerEnter(button("B"));
+    expect(bubbleOf("B")).toBeNull();
+    advance(TOOLTIP_TIMING.delay - 1);
+    expect(bubbleOf("B")).toBeNull();
+    advance(1);
+    expect(bubbleOf("B")?.textContent).toBe("乙");
+  });
+
+  // performance.now() 在同一个页面里是单调的，差值为负只出现在计时起点换过之后（测试换了一次假时钟）。
+  // 负的差值小于窗口，不设下界的话会被一直算成预热，所有提示都不等 delay
+  it("计时起点换过、距上次消失的差值为负：不算预热，照常等待 delay", () => {
+    mount(
+      <>
+        <Tooltip content="甲">
+          <button>A</button>
+        </Tooltip>
+        <Tooltip content="乙">
+          <button>B</button>
+        </Tooltip>
+      </>,
+    );
+    pointerEnter(button("A"));
+    advance(TOOLTIP_TIMING.delay);
+    pointerLeave(button("A"));
+    advance(TOOLTIP_TIMING.linger + TOOLTIP_TIMING.warmWindow);
+    const hiddenBy = performance.now();
+    // 重装假时钟：performance.now() 从 0 重新计起，比记下的消失时刻还早
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"], now: 1_000_000 });
+    expect(performance.now()).toBeLessThan(hiddenBy - TOOLTIP_TIMING.warmWindow);
+    pointerEnter(button("B"));
+    expect(bubbleOf("B")).toBeNull();
+    advance(TOOLTIP_TIMING.delay - 1);
+    expect(bubbleOf("B")).toBeNull();
+    advance(1);
+    expect(bubbleOf("B")?.textContent).toBe("乙");
+  });
+});
+
+describe("连续扫过", () => {
+  function Row() {
+    return (
+      <>
+        <Tooltip content="甲">
+          <button>A</button>
+        </Tooltip>
+        <Tooltip content="乙">
+          <button>B</button>
+        </Tooltip>
+      </>
+    );
+  }
+
+  it("一轮里第一个气泡带入场；旧气泡还在驻留时移到下一个：新气泡立即出现、不播入场，旧气泡同时撤掉", () => {
+    mount(<Row />);
+    pointerEnter(button("A"));
+    advance(TOOLTIP_TIMING.delay);
+    expect(bubbleOf("A")?.hasAttribute("data-instant")).toBe(false);
+
+    pointerLeave(button("A"), button("B"));
+    pointerEnter(button("B"), button("A"));
+    expect(button("A").hasAttribute("aria-describedby")).toBe(false);
+    expect(bubbleOf("B")?.textContent).toBe("乙");
+    expect(bubbleOf("B")?.hasAttribute("data-instant")).toBe(true);
+    // 旧气泡的驻留计时已随它一起撤掉，新气泡不受影响
+    advance(TOOLTIP_TIMING.linger);
+    expect(bubbleOf("B")?.textContent).toBe("乙");
+  });
+
+  it("旧气泡已收起、仍在预热窗口里：新气泡同样原地出现、不播入场", () => {
+    mount(<Row />);
+    pointerEnter(button("A"));
+    advance(TOOLTIP_TIMING.delay);
+    pointerLeave(button("A"));
+    advance(TOOLTIP_TIMING.linger + 100);
+    pointerEnter(button("B"));
+    expect(bubbleOf("B")?.hasAttribute("data-instant")).toBe(true);
+  });
+});
+
+describe("由 open 强制显示的气泡", () => {
+  it("指针移到别的提示上：不被顶替，也不让别的提示借它预热", () => {
+    let setForced!: (v: boolean) => void;
+    function Host() {
+      const [forced, set] = useState(false);
+      setForced = set;
+      return (
+        <>
+          <Tooltip content="游戏运行中不能删除" open={forced}>
+            <button>A</button>
+          </Tooltip>
+          <Tooltip content="乙">
+            <button>B</button>
+          </Tooltip>
+        </>
+      );
+    }
+    mount(<Host />);
+    act(() => setForced(true));
+    expect(bubbleOf("A")?.textContent).toBe("游戏运行中不能删除");
+    pointerEnter(button("B"));
+    advance(TOOLTIP_TIMING.delay - 1);
+    expect(bubbleOf("B")).toBeNull();
+    advance(1);
+    expect(bubbleOf("B")?.textContent).toBe("乙");
+    expect(bubbleOf("A")?.textContent).toBe("游戏运行中不能删除");
+    // 别的提示收起后，强制的那个照旧挂着
+    pointerLeave(button("B"));
+    advance(TOOLTIP_TIMING.linger);
+    expect(bubbleOf("B")).toBeNull();
+    expect(bubbleOf("A")?.textContent).toBe("游戏运行中不能删除");
+  });
+
+  it("悬停打开后才转成强制显示：同样不被别的提示顶替", () => {
+    let setForced!: (v: boolean) => void;
+    function Host() {
+      const [forced, set] = useState(false);
+      setForced = set;
+      return (
+        <>
+          <Tooltip content="石头" open={forced}>
+            <button>A</button>
+          </Tooltip>
+          <Tooltip content="乙">
+            <button>B</button>
+          </Tooltip>
+        </>
+      );
+    }
+    mount(<Host />);
+    pointerEnter(button("A"));
+    advance(TOOLTIP_TIMING.delay);
+    act(() => setForced(true));
+    pointerEnter(button("B"));
+    advance(TOOLTIP_TIMING.delay);
+    expect(bubbleOf("B")?.textContent).toBe("乙");
+    expect(bubbleOf("A")?.textContent).toBe("石头");
+  });
+
+  /** 一排带原因的格子，键盘高亮到哪一格就强制显示哪一格的提示（菜单里的禁用项、方块网格）。 */
+  function Cells({ handle }: { handle: { at?: (i: number) => void } }) {
+    const [at, setAt] = useState(1);
+    handle.at = setAt;
+    return (
+      <>
+        <Tooltip content="甲" open={at === 0}>
+          <button>A</button>
+        </Tooltip>
+        <Tooltip content="乙" open={at === 1}>
+          <button>B</button>
+        </Tooltip>
+      </>
+    );
+  }
+
+  // 新格子的布局副作用先于旧格子运行：新气泡打开时旧的还没收起，以前两者都不在 showing 里，谁也撤不掉谁
+  it("强制显示往回移到树里靠前的一格：旧气泡被直接撤掉（不播退场），新气泡原地出现、不播入场", () => {
+    const handle: { at?: (i: number) => void } = {};
+    mount(<Cells handle={handle} />);
+    expect(bubbleOf("B")?.textContent).toBe("乙");
+    // 空闲超过预热窗口：不靠预热，也要原地换上
+    advance(TOOLTIP_TIMING.warmWindow * 2);
+    act(() => handle.at?.(0));
+    expect(bubbleOf("A")?.textContent).toBe("甲");
+    expect(bubbleOf("A")?.hasAttribute("data-instant")).toBe(true);
+    expect(button("B").hasAttribute("aria-describedby")).toBe(false);
+    act(() => handle.at?.(1));
+    expect(bubbleOf("B")?.hasAttribute("data-instant")).toBe(true);
+    expect(button("A").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  // 在「已复制」停留期间又点了另一行的复制键：两个「已复制」同时挂着、互相压住
+  it("两个各自的强制显示先后打开：后开的顶掉先开的", () => {
+    const sets: ((v: boolean) => void)[] = [];
+    function Copy({ label }: { label: string }) {
+      const [copied, set] = useState(false);
+      sets.push(set);
+      return (
+        <Tooltip content={copied ? "已复制" : "复制"} open={copied}>
+          <button>{label}</button>
+        </Tooltip>
+      );
+    }
+    mount(
+      <>
+        <Copy label="A" />
+        <Copy label="B" />
+      </>,
+    );
+    act(() => sets[1](true));
+    expect(bubbleOf("B")?.textContent).toBe("已复制");
+    act(() => sets[0](true));
+    expect(bubbleOf("A")?.textContent).toBe("已复制");
+    expect(bubbleOf("A")?.hasAttribute("data-instant")).toBe(true);
+    expect(button("B").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  /** 复制键：复制后强制显示「已复制」，停留结束时 open 转假、文案在同一次渲染里换回原文。 */
+  function CopyKey({ handle }: { handle: { copied?: (v: boolean) => void } }) {
+    const [copied, set] = useState(false);
+    handle.copied = set;
+    return (
+      <>
+        <Tooltip content={copied ? "已复制" : "复制"} open={copied}>
+          <button>A</button>
+        </Tooltip>
+        <Tooltip content="乙">
+          <button>B</button>
+        </Tooltip>
+      </>
+    );
+  }
+
+  it("强制显示结束、文案同时换回原文：收起的气泡带着结束前的字退场，不在眼前先翻回去", () => {
+    const handle: { copied?: (v: boolean) => void } = {};
+    mount(<CopyKey handle={handle} />);
+    act(() => handle.copied?.(true));
+    const tip = bubbleOf("A") as HTMLElement;
+    expect(tip.textContent).toBe("已复制");
+    act(() => handle.copied?.(false));
+    expect(button("A").hasAttribute("aria-describedby")).toBe(false);
+    expect(tip.isConnected).toBe(true);
+    expect(tip.textContent).toBe("已复制");
+  });
+
+  // 键盘聚焦复制键时提示本来就开着：按回车复制，停留结束后焦点还在它身上，提示不该跟着收起
+  it("键盘聚焦打开、后来转成强制显示的提示：强制结束时焦点还在就留着，换回原文，之后照常参与顶替", () => {
+    const handle: { copied?: (v: boolean) => void } = {};
+    mount(<CopyKey handle={handle} />);
+    focusByKeyboard(button("A"));
+    expect(bubbleOf("A")?.textContent).toBe("复制");
+    act(() => handle.copied?.(true));
+    expect(bubbleOf("A")?.textContent).toBe("已复制");
+    act(() => handle.copied?.(false));
+    expect(bubbleOf("A")?.textContent).toBe("复制");
+    // 转回普通显示：指针移到别的提示上就被顶掉
+    pointerEnter(button("B"));
+    expect(bubbleOf("B")?.textContent).toBe("乙");
+    expect(button("A").hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("指针点下复制键（焦点不是键盘带来的）：强制结束时照常收起", () => {
+    const handle: { copied?: (v: boolean) => void } = {};
+    mount(<CopyKey handle={handle} />);
+    act(() => {
+      button("A").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      button("A").dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      button("A").focus();
+    });
+    act(() => handle.copied?.(true));
+    expect(bubbleOf("A")?.textContent).toBe("已复制");
+    act(() => handle.copied?.(false));
+    expect(button("A").hasAttribute("aria-describedby")).toBe(false);
+  });
+});
+
+describe("按在带原因禁用的控件上", () => {
+  it("点击被挡掉的那一刻立即显示原因，不收起", () => {
+    mount(
+      <Tooltip content="游戏正在运行，先结束游戏">
+        <button aria-disabled="true">A</button>
+      </Tooltip>,
+    );
+    act(() => {
+      button("A").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    });
+    expect(bubble()?.textContent).toBe("游戏正在运行，先结束游戏");
+    expect(button("A").getAttribute("aria-describedby")).toBe(bubble()?.id);
+    act(() => {
+      button("A").dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    });
+    expect(button("A").getAttribute("aria-describedby")).toBe(bubble()?.id);
+  });
+});
+
+describe("显示中重新定位", () => {
+  it("气泡尺寸变了（文案换成「已复制」、多出一行原因）：按新尺寸重新贴到锚点旁", () => {
+    const sizes = stubResizeObserver();
+    const container = mount(
+      <Tooltip content="复制链接" side="top">
+        <button>A</button>
+      </Tooltip>,
+    );
+    setRect(container.querySelector("[data-sk-overlay-root]") as HTMLElement, { left: 0, top: 0, width: 1000, height: 700 });
+    setRect(button("A"), { left: 100, top: 300, width: 80, height: 30 });
+    focusByKeyboard(button("A"));
+    const tip = bubble() as HTMLElement;
+    // jsdom 量不出尺寸：按 0 × 0 贴在锚点上方正中
+    expect([tip.style.left, tip.style.top]).toEqual(["140px", "292px"]);
+    Object.defineProperty(tip, "offsetWidth", { configurable: true, value: 60 });
+    Object.defineProperty(tip, "offsetHeight", { configurable: true, value: 28 });
+    sizes.resize(tip, 60);
+    // 横向居中：100 + (80 − 60) / 2；上方：300 − 8 − 28
+    expect([tip.style.left, tip.style.top]).toEqual(["110px", "264px"]);
+  });
+
+  it("由 open 强制显示的气泡：滚动时不收起，跟着锚点走", () => {
+    const container = mount(
+      <Tooltip content="石头" open>
+        <button>A</button>
+      </Tooltip>,
+    );
+    setRect(container.querySelector("[data-sk-overlay-root]") as HTMLElement, { left: 0, top: 0, width: 1000, height: 700 });
+    setRect(button("A"), { left: 100, top: 300, width: 80, height: 30 });
+    act(() => {
+      document.dispatchEvent(new Event("scroll"));
+    });
+    const tip = bubble() as HTMLElement;
+    expect(button("A").getAttribute("aria-describedby")).toBe(tip.id);
+    expect([tip.style.left, tip.style.top]).toEqual(["140px", "292px"]);
+  });
+
+  // 滚轮滚动方块网格：锚点被滚出网格的可视区后，气泡被夹在窗口里、脱离锚点浮在别的内容上
+  it("由 open 强制显示的气泡：锚点被滚出所在滚动容器的可视区时藏起，滚回来再出现", () => {
+    const container = mount(
+      <div data-testid="grid" style={{ overflowY: "auto" }}>
+        <Tooltip content="石头" open>
+          <button>A</button>
+        </Tooltip>
+      </div>,
+    );
+    setRect(container.querySelector("[data-sk-overlay-root]") as HTMLElement, { left: 0, top: 0, width: 1000, height: 700 });
+    setRect(container.querySelector('[data-testid="grid"]') as HTMLElement, { left: 0, top: 100, width: 400, height: 200 });
+    const scrollTo = (top: number) => {
+      setRect(button("A"), { left: 100, top, width: 80, height: 30 });
+      act(() => {
+        document.dispatchEvent(new Event("scroll"));
+      });
+    };
+    scrollTo(150);
+    const tip = bubble() as HTMLElement;
+    expect(tip.style.visibility).toBe("visible");
+    // 部分露在可视区里时照常显示
+    scrollTo(290);
+    expect(tip.style.visibility).toBe("visible");
+    scrollTo(320);
+    expect(tip.style.visibility).toBe("hidden");
+    // 只是藏起，提示仍关联着、仍跟着锚点
+    expect(button("A").getAttribute("aria-describedby")).toBe(tip.id);
+    scrollTo(60);
+    expect(tip.style.visibility).toBe("hidden");
+    scrollTo(160);
+    expect(tip.style.visibility).toBe("visible");
+    expect(tip.style.top).toBe("152px");
   });
 });
 

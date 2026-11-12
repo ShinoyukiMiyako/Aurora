@@ -26,11 +26,13 @@
   cursor: pointer;
   user-select: none;
   outline: none;
+  /* 不透明度也过渡：按钮在眼前变成禁用（任务收尾时的取消键）时淡到半透明，不在 1 与 0.5 之间一帧硬切 */
   transition:
     transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
     background-color var(--sk-dur-hover) var(--sk-ease),
     border-color var(--sk-dur-hover) var(--sk-ease),
-    color var(--sk-dur-hover) var(--sk-ease);
+    color var(--sk-dur-hover) var(--sk-ease),
+    opacity var(--sk-dur-hover) var(--sk-ease);
 }
 
 .button[data-has-icon] {
@@ -69,6 +71,20 @@
 
 .label {
   min-width: 0;
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+/* 后置图标的翻转（展开收起的箭头）：只转独立的 rotate，与按下的 transform 缩放互不覆盖 */
+.iconRight {
+  transition: rotate var(--sk-spring-settle-dur) var(--sk-spring-settle);
+}
+
+.button[data-icon-right-flipped] .iconRight {
+  rotate: 180deg;
+}
+
+:global([data-sk-reduced]) .iconRight {
+  transition: none;
 }
 
 /* ---- 主：全站唯一的渐变填充 + 强调投影 + 顶边高光 ---- */
@@ -187,15 +203,44 @@
   cursor: progress;
 }
 
-/* 无前置图标的加载态：指示居中叠在按钮上，文字隐去但保留占位，按钮宽度不变 */
+/*
+ * 无前置图标的加载态：指示居中叠在按钮上，文字淡去但保留占位，按钮宽度不变。
+ * 用透明度而不是 visibility：能过渡，文字也留在可访问性树里，加载中的按钮不丢名称。
+ */
 .button[data-loading]:not([data-has-icon]) .label {
-  visibility: hidden;
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
 }
 
+/* ---- 图标位：新旧两层叠在同一格里，换内容时按钮尺寸不变 ---- */
+.glyphSlot {
+  display: inline-grid;
+  flex: none;
+}
+
+/*
+ * 弹性盒去掉行内图标的基线留白，图标位正好是图标的尺寸。
+ * 入场与淡出由脚本在换内容的那一刻起（见 GlyphSlot），这里不挂关键帧：挂在属性上的关键帧会随子树显隐重播。
+ */
+.glyph {
+  display: flex;
+  grid-area: 1 / 1;
+}
+
+/* 当前层画在退场层之上。接回的层 key 较小、DOM 里排在前面，靠 order 调画序而不挪节点（挪节点会让加载指示的旋转重来） */
+.glyph:not([data-leaving]) {
+  order: 1;
+}
+
+/* 退场层静止时就是透明的：淡出播完、还没来得及移除的那一帧，它也不会盖在新内容上 */
+.glyph[data-leaving] {
+  opacity: 0;
+}
+
+/* 写在图标位之后：同为单类选择器，靠先后顺序盖掉 inline-grid */
 .centerSpinner {
   position: absolute;
   inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  place-items: center;
 }

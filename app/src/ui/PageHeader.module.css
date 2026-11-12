@@ -25,7 +25,9 @@
   color: var(--sk-text);
 }
 
+/* 至少一行高：副标题还没到（传 null）时这一行照样占着，到达时页头不长高、下面的内容不被推下去 */
 .subtitle {
+  min-height: var(--sk-lh-body);
   margin: 0;
   font-size: var(--sk-fs-body);
   line-height: var(--sk-lh-body);

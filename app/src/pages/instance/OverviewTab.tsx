@@ -1,16 +1,23 @@
 // 概览：状态横幅（至多一条）→ 四格数据 → 存档与实例信息 → Mod 速览与资源包光影。
 // 每个模块各自加载、各自出错，不互相等待。
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { AnimatePresence, motion, useIsPresent } from "framer-motion";
+import { useLayoutEffect, useRef, useState, type ReactNode, type Ref, type RefObject } from "react";
 import { Icon } from "../../art/Icon";
 import { KindTile, WorldModeTile, type WorldMode } from "../../art/illustrations/FeatureTile";
 import { hueOf } from "../../art/illustrations/seed";
 import { ACTION_ERROR, CRASH_COPY, crashCategoryLabel, INSTANCE_IN_USE_COPY, lockReason, MODPACK_REIMPORT_COPY, modpackLabel, REINSTALL_LOADER_LABEL, taskPhaseText } from "../../copy/flows";
 import type { InstanceSummary } from "../../domain/adapt";
-import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed, percent } from "../../domain/format";
+import { formatBytes, formatDate, formatMemory, formatRelative, formatSpeed } from "../../domain/format";
 import { canReinstallLoader, lostLoaderLibrary, needsReimport } from "../../domain/rules";
 import type { LaunchView } from "../../launch/launchView";
 import { useLaunch } from "../../launch/useLaunch";
+import { useMounted } from "../../lib/useMounted";
+import { useInsertItem } from "../../lib/useInsertItem";
+import { useLoadingGate } from "../../lib/loading-gate";
+import { useCompletionHold, useDisplaySpeed, useFinishing } from "../../lib/progress-display";
+import { fade } from "../../lib/motion";
+import { useReflow } from "../../lib/reflow";
 import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -23,13 +30,15 @@ import {
   type InstalledMod,
   type InstanceContentDto,
   type UpdateCandidate,
+  type WorldDto,
 } from "../../state/queries/instance";
 import type { ResourceResult } from "../../state/resource";
 import { reimportRoute, type InstanceTab } from "../../state/route";
 import { instanceTask } from "../../state/selectors";
 import { progressTrack } from "../../state/tasks";
+import { Appear } from "../../ui/Appear";
 import { Badge } from "../../ui/Badge";
-import { Banner } from "../../ui/Banner";
+import { Banner, BannerSlot } from "../../ui/Banner";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import { Card } from "../../ui/Card";
@@ -37,10 +46,12 @@ import { CardHeader } from "../../ui/CardHeader";
 import { EmptyState } from "../../ui/EmptyState";
 import { IconButton } from "../../ui/IconButton";
 import { KV } from "../../ui/KV";
+import { Loadable } from "../../ui/Loadable";
 import { LoaderTag } from "../../ui/LoaderTag";
 import { MoreMenu } from "../../ui/MoreMenu";
 import { ProgressBar } from "../../ui/ProgressBar";
 import { Skeleton } from "../../ui/Skeleton";
+import { SmoothPercent } from "../../ui/SmoothPercent";
 import { StatGrid, StatTile } from "../../ui/StatTile";
 import { Tag } from "../../ui/Tag";
 import { Thumb } from "../../ui/Thumb";
@@ -55,16 +66,19 @@ import {
   modRows,
   modTotals,
   overviewBanner,
+  PEEK_TILE,
   peekLayout,
   peekPerRow,
+  peekPlaceholder,
   playtimeNote,
   sortWorlds,
   worldName,
+  worldsPlaceholder,
   WORLDS_PREVIEW,
   type ModRow,
 } from "./model";
 import type { InstanceOps } from "./ops";
-import { FolderButton, ModuleError, SlowHint, useModuleView } from "./parts";
+import { FolderButton, loadableView, ModuleError, SlowHint, useModuleView } from "./parts";
 import { useWorldOps, WorldBackupsModal, worldRef, type WorldRef } from "./WorldBackupsModal";
 import { UpdatePreviewModal } from "./UpdatePreviewModal";
 
@@ -74,26 +88,45 @@ export interface OverviewTabProps {
   ops: InstanceOps;
   view: LaunchView;
   crash: ResourceResult<CrashReportDto | null>;
+  /** 上次崩溃的时刻：实例列表与崩溃报告里较晚的那个，报告没到时取列表里的。 */
+  crashAt: number | null;
   crashActive: boolean;
   updates: ResourceResult<UpdateCandidate[]>;
   onTab(tab: InstanceTab): void;
 }
 
-export function OverviewTab({ inst, queryId, ops, view, crash, crashActive, updates, onTab }: OverviewTabProps) {
+export function OverviewTab({ inst, queryId, ops, view, crash, crashAt, crashActive, updates, onTab }: OverviewTabProps) {
   const modded = inst.loader !== "vanilla";
   const content = useInstanceContent(queryId);
   const mods = useInstanceMods(modded ? queryId : null);
   const banner = overviewBanner(view.kind, crashActive);
   const outdated = updates.status === "ready" ? updates.data.length : null;
+  // 横幅出现、消失与各模块数据晚到撑高时，下面的卡片从原位置滑过去（标签面板里的栈不在页面一级，要自己挂）
+  const stack = useReflow<HTMLDivElement>();
+  const grid = useReflow<HTMLDivElement>();
+  // 上次崩溃由列表时刻先判定：报告还在读就先画横幅（正文写正在读取），不等报告到了再插进来把下面整块推下去。
+  // 报告读不到或读出来是空的时不画，与读到之前的口径一致
+  const crashShown = banner === "crashed" && (crash.status === "loading" || (crash.status === "ready" && crash.data !== null));
+  // 补全装完的那一刻实例就不再按安装中画：横幅先把进度推满、停一拍再走。这一拍里状态层还拿着补全之前扫的那份列表，
+  // 原先损坏的实例会被说成损坏，等重扫回来才对，所以损坏横幅让给收尾；启动失败与上次崩溃照常优先
+  const install = useInstallingBanner(inst.id, banner === "installing" && view.kind === "installing");
+  const holdInstall = install.holding && (banner === null || banner === "broken");
+  const installing = (banner === "installing" && view.kind === "installing") || holdInstall;
 
   return (
-    <div className={styles.stack}>
-      {banner === "failed" && <FailedBanner inst={inst} />}
-      {banner === "crashed" && crash.status === "ready" && crash.data !== null && <CrashBanner report={crash.data} onTab={onTab} />}
-      {banner === "broken" && view.kind === "broken" && (needsReimport(inst) ? <ReimportBanner inst={inst} reason={view.reason} ops={ops} /> : <BrokenBanner inst={inst} reason={view.reason} ops={ops} />)}
-      {banner === "installing" && view.kind === "installing" && <InstallingBanner instanceId={inst.id} />}
+    <div ref={stack} className={styles.stack}>
+      {/* 至多一条横幅：换成另一种时旧的淡出、新的淡入，每种各自一个 key */}
+      <BannerSlot>
+        {banner === "failed" && <FailedBanner key="failed" inst={inst} />}
+        {crashShown && <CrashBanner key="crashed" at={crashAt} report={crash.status === "ready" ? crash.data : null} onTab={onTab} />}
+        {banner === "broken" &&
+          !holdInstall &&
+          view.kind === "broken" &&
+          (needsReimport(inst) ? <ReimportBanner key="reimport" inst={inst} reason={view.reason} ops={ops} /> : <BrokenBanner key="broken" inst={inst} reason={view.reason} ops={ops} />)}
+        {installing && <InstallingBanner key="installing" instanceId={inst.id} held={install.held} />}
+      </BannerSlot>
       <StatsCard inst={inst} content={content} mods={mods} outdated={outdated} />
-      <div className={styles.overviewGrid}>
+      <div ref={grid} className={styles.overviewGrid}>
         <WorldsCard inst={inst} view={view} content={content} ops={ops} />
         <InfoCard inst={inst} queryId={queryId} onTab={onTab} />
         <ModsPeekCard inst={inst} queryId={queryId} mods={mods} updates={updates} ops={ops} onTab={onTab} />
@@ -107,7 +140,11 @@ export function OverviewTab({ inst, queryId, ops, view, crash, crashActive, upda
 
 function FailedBanner({ inst }: { inst: InstanceSummary }) {
   const entry = useLaunch(inst.id);
-  const failure = entry.failure;
+  // 横幅退场淡出的那一小段里它仍挂着、仍随启动状态重渲染，而会话可能已经不是失败态：留着最后一份失败文案画完退场。
+  // 文案对象每次渲染都新建，记在 ref 里而不是 state（state 会因引用变化在渲染期反复重设）
+  const last = useRef(entry.failure);
+  if (entry.failure !== null) last.current = entry.failure;
+  const failure = last.current;
   if (failure === null) throw new Error("启动失败横幅需要失败会话的文案");
   const secondary = failure.secondary;
   return (
@@ -131,18 +168,32 @@ function FailedBanner({ inst }: { inst: InstanceSummary }) {
   );
 }
 
-function CrashBanner({ report, onTab }: { report: CrashReportDto; onTab(tab: InstanceTab): void }) {
+/** report 为 null：报告还在读，标题按列表里的崩溃时刻先写出来，正文先写正在读取，报告到了原位换成诊断。 */
+function CrashBanner({ at, report, onTab }: { at: number | null; report: CrashReportDto | null; onTab(tab: InstanceTab): void }) {
   const now = useNow(30_000);
-  if (report.at === null) throw new Error("实例的崩溃报告缺少崩溃时刻");
-  const first = report.diagnoses[0];
+  // 等过报告的才让诊断正文淡入；挂载时报告就在的跟着横幅自己的入场
+  const [waited, setWaited] = useState(report === null);
+  if (report === null && !waited) setWaited(true);
+  if (at === null) throw new Error("上次崩溃横幅需要崩溃时刻");
+  const first = report === null ? undefined : report.diagnoses[0];
+  const body =
+    report === null
+      ? OVERVIEW_COPY.crashBodyPending
+      : first === undefined
+        ? OVERVIEW_COPY.crashBodyNoClue
+        : first.category === "manual_debug_crash"
+          ? CRASH_COPY.manualNote
+          : OVERVIEW_COPY.crashBody(crashCategoryLabel(first.category));
   return (
     <Banner
       tone="danger"
       icon="bug"
-      title={OVERVIEW_COPY.crashTitle(formatRelative(report.at, now))}
+      title={OVERVIEW_COPY.crashTitle(formatRelative(at, now))}
       actions={<Button onClick={() => onTab("crash")}>{OVERVIEW_COPY.viewCrash}</Button>}
     >
-      {first === undefined ? OVERVIEW_COPY.crashBodyNoClue : first.category === "manual_debug_crash" ? CRASH_COPY.manualNote : OVERVIEW_COPY.crashBody(crashCategoryLabel(first.category))}
+      <motion.span key={report === null ? "pending" : "report"} initial={report !== null && waited ? { opacity: 0 } : false} animate={{ opacity: 1, transition: fade.in }}>
+        {body}
+      </motion.span>
     </Banner>
   );
 }
@@ -196,23 +247,70 @@ function ReimportBanner({ inst, reason, ops }: { inst: InstanceSummary; reason: 
   );
 }
 
-export function InstallingBanner({ instanceId }: { instanceId: string }) {
+/**
+ * 安装横幅的收尾。横幅画着的任务完成时，进度条与百分数先推满、停一拍（lib/progress-display 的 useFinishing）再交给调用方退场，
+ * 不在完成的那一刻连同进度一起撤走。完成之后调用方仍挂着横幅时（概览要等实例列表重读才知道装好了），接着画这个已完成的任务，
+ * 不翻回「排队中」。
+ * shown：调用方按自己的条件此刻要不要横幅。返回 holding（不论 shown，横幅画着的任务正在收尾）与 held（横幅没有进行中的任务时
+ * 接着画的那个已完成任务）。只订阅任务的 id 与完成时刻，不随进度重渲染。
+ */
+export function useInstallingBanner(instanceId: string, shown: boolean): { holding: boolean; held: string | null } {
+  const activeId = useLauncherSelector((s) => {
+    const task = instanceTask(s, instanceId);
+    return task === null ? null : task.id;
+  });
+  const [lastId, setLastId] = useState<string | null>(null);
+  if (shown && activeId !== null && activeId !== lastId) setLastId(activeId);
+  const finishedAt = useLauncherSelector((s) => {
+    if (lastId === null) return null;
+    const task = s.tasks.find((t) => t.id === lastId);
+    if (task === undefined || task.status !== "done") return null;
+    if (task.finishedAt === null) throw new Error(`已完成的任务 ${task.id} 没有完成时刻`);
+    return task.finishedAt;
+  });
+  const finishing = useFinishing(lastId === null || finishedAt === null ? [] : [{ id: lastId, finishedAt }], useCompletionHold());
+  const holding = lastId !== null && finishing.has(lastId);
+  // 横幅撤下、收尾也过了就忘掉：之后后端单独报「安装中」（没有前端任务）时横幅照常写排队中，不拿很久以前的任务充数
+  if (!shown && !holding && lastId !== null) setLastId(null);
+  return { holding, held: finishedAt === null ? null : lastId };
+}
+
+/** held：本实例没有进行中的任务时接着画的那个已完成任务（见 useInstallingBanner），按进行中、满格画。 */
+export function InstallingBanner({ instanceId, held }: { instanceId: string; held: string | null }) {
   const { go } = useNav();
   // 进度每个任务约 100 ms 一次：横幅自己订阅本实例的任务，页面拿到的启动视图里的任务进度可能是旧的
-  const task = useLauncherSelector((s) => instanceTask(s, instanceId));
-  const running = task !== null && task.status === "running";
+  const task = useLauncherSelector((s) => {
+    const active = instanceTask(s, instanceId);
+    if (active !== null || held === null) return active;
+    const done = s.tasks.find((t) => t.id === held);
+    return done === undefined ? null : done;
+  });
+  const finished = task !== null && task.status === "done";
+  const running = task !== null && (task.status === "running" || finished);
+  // 完成时后端把速度归零：收尾那一拍接着显示完成前的速度，进度推满的同时文字不跳成 0
+  const lastSpeed = useRef(0);
+  if (task !== null && task.status === "running") lastSpeed.current = task.speedBps;
+  // 速度按固定间隔换字、带平滑，不随每 100 ms 的上报跳；百分数与进度条同一份平滑（同一个 track）
+  const speed = formatSpeed(useDisplaySpeed(running ? (finished ? lastSpeed.current : task.speedBps) : 0));
   const title = task === null ? OVERVIEW_COPY.queuedTitle : task.title;
+  const track = task === null ? undefined : progressTrack(task);
+  const progress = finished ? 1 : running ? task.progress : 0;
   return (
     <Banner tone="info" icon="download" title={title} actions={<Button variant="ghost" onClick={() => go({ page: "tasks" })}>{OVERVIEW_COPY.viewTasks}</Button>}>
       <div className={styles.bannerProgress}>
         {/* 排队可能很久：静态空轨道，不放常驻的不定进度动画 */}
-        <ProgressBar value={running ? task.progress : 0} tone="info" size="sm" track={task === null ? undefined : progressTrack(task)} label={title} />
+        <ProgressBar value={progress} tone="info" size="sm" track={track} label={title} />
         <span className={styles.num}>
-          {running
-            ? task.phase === null
-              ? OVERVIEW_COPY.installProgress(percent(task.progress), formatSpeed(task.speedBps), task.totalBytes === null ? null : formatBytes(task.totalBytes))
-              : OVERVIEW_COPY.installStepProgress(percent(task.progress), taskPhaseText(task.phase, "long"), formatSpeed(task.speedBps))
-            : OVERVIEW_COPY.queuedBody}
+          {running && track !== undefined ? (
+            <>
+              <SmoothPercent value={progress} track={track} />
+              {task.phase === null
+                ? OVERVIEW_COPY.installProgressTail(speed, task.totalBytes === null ? null : formatBytes(task.totalBytes))
+                : OVERVIEW_COPY.installStepProgressTail(taskPhaseText(task.phase, "long"), speed)}
+            </>
+          ) : (
+            OVERVIEW_COPY.queuedBody
+          )}
         </span>
       </div>
     </Banner>
@@ -291,19 +389,29 @@ function StatsCard({
         ) : (
           <StatTile icon="box" label={OVERVIEW_COPY.statMods} value={String(modTotal)} unit={OVERVIEW_COPY.modsUnit} delta={modDelta} />
         )}
-        {worlds.view === "ready" && content.status === "ready" ? (
-          <StatTile
-            icon="globe"
-            label={OVERVIEW_COPY.statWorlds}
-            value={String(content.data.worlds.length)}
-            unit={OVERVIEW_COPY.worldsUnit}
-            delta={{ direction: "flat", text: content.data.worlds.length > 0 ? OVERVIEW_COPY.worldsSize(worldsBytes) : OVERVIEW_COPY.worldsNone }}
-          />
-        ) : worlds.view === "error" ? (
-          <StatTile icon="globe" label={OVERVIEW_COPY.statWorlds} kind="text" value={OVERVIEW_COPY.worldsError} />
-        ) : (
-          <div className={styles.statSkeleton}>{worlds.view === "skeleton" && <Skeleton shape="text" lines={3} />}</div>
-        )}
+        {/* 存档格：读到之前骨架照常占着格子，读到后骨架淡出、数字淡入，叠在同一格里交接 */}
+        <Loadable
+          view={loadableView(worlds.view)}
+          skeleton={
+            <div className={styles.statSkeleton}>
+              <Skeleton shape="text" lines={3} />
+            </div>
+          }
+        >
+          {() => {
+            if (content.status === "loading") throw new Error("加载门已放行，存档查询却还在加载");
+            if (content.status === "error") return <StatTile icon="globe" label={OVERVIEW_COPY.statWorlds} kind="text" value={OVERVIEW_COPY.worldsError} />;
+            return (
+              <StatTile
+                icon="globe"
+                label={OVERVIEW_COPY.statWorlds}
+                value={String(content.data.worlds.length)}
+                unit={OVERVIEW_COPY.worldsUnit}
+                delta={{ direction: "flat", text: content.data.worlds.length > 0 ? OVERVIEW_COPY.worldsSize(worldsBytes) : OVERVIEW_COPY.worldsNone }}
+              />
+            );
+          }}
+        </Loadable>
       </StatGrid>
       {notices.length > 0 && (
         <Callout tone="warn" className={styles.statsNotice}>
@@ -345,8 +453,15 @@ function WorldsCard({ inst, view, content, ops }: { inst: InstanceSummary; view:
   const worlds = content.status === "ready" ? sortWorlds(content.data.worlds) : [];
   const total = worlds.reduce((sum, w) => sum + w.size_bytes, 0);
   const shown = expanded ? worlds : worlds.slice(0, WORLDS_PREVIEW);
+  // 读到之后副标题必定会有：读到之前先占住一行（null），卡头不因文案晚到变高。读不出来时没有可写的，不留空行
   const subtitle =
-    load.view !== "ready" ? undefined : worlds.length > 0 ? OVERVIEW_COPY.worldsSubtitle(worlds.length, total) : OVERVIEW_COPY.worldsEmptySubtitle;
+    load.view === "error"
+      ? undefined
+      : load.view !== "ready"
+        ? null
+        : worlds.length > 0
+          ? OVERVIEW_COPY.worldsSubtitle(worlds.length, total)
+          : OVERVIEW_COPY.worldsEmptySubtitle;
 
   return (
     <Card>
@@ -356,66 +471,138 @@ function WorldsCard({ inst, view, content, ops }: { inst: InstanceSummary; view:
         subtitle={subtitle}
         actions={<FolderButton ops={ops} target="saves" label={OVERVIEW_COPY.openSaves} size="sm" />}
       />
-      {load.view === "skeleton" && <RowSkeletons rows={3} slow={load.slow} />}
-      {load.view === "error" && content.status === "error" && <ModuleError title={OVERVIEW_COPY.worldsError} error={content.error} onRetry={content.reload} />}
-      {load.view === "ready" && worlds.length === 0 && <EmptyState compact scene="map" title={OVERVIEW_COPY.worldsEmptyTitle} body={OVERVIEW_COPY.worldsEmptyBody} />}
-      {load.view === "ready" && worlds.length > 0 && (
-        <>
-          <ul className={styles.rows}>
-            {shown.map((w, i) => {
-              const name = worldName(w);
-              const tile = w.mode === null ? null : MODE_TILE[w.mode];
-              return (
-                <li key={w.dir_name} className={styles.row}>
-                  {tile === null ? <KindTile kind="unknown" /> : <WorldModeTile mode={tile} />}
-                  <div className={styles.rowMain}>
-                    <span className={styles.rowTitle}>
-                      <span className={styles.ellipsis}>{name}</span>
-                      {i === 0 && w.last_played !== null && (
-                        <Tag tone="accent" size="sm">
-                          {OVERVIEW_COPY.recent}
-                        </Tag>
-                      )}
-                    </span>
-                    <span className={styles.rowSub}>
-                      {w.level_status === "unreadable" ? (
-                        OVERVIEW_COPY.worldUnreadable
-                      ) : (
-                        <>
-                          <span data-mode={w.mode === null ? undefined : w.mode} className={styles.modeText}>
-                            {w.mode === null ? OVERVIEW_COPY.modeUnknown : MODE_LABEL[w.mode]}
-                          </span>
-                          {` · ${w.last_played === null ? OVERVIEW_COPY.worldNeverPlayed : formatRelative(w.last_played, now)}`}
-                        </>
-                      )}
-                    </span>
-                  </div>
-                  <span className={cx(styles.rowMeta, styles.worldSize)}>{formatBytes(w.size_bytes)}</span>
-                  <IconButton icon="play" label={OVERVIEW_COPY.enterWorld(name)} size="sm" disabledReason={enterReason} onClick={() => enter(w.dir_name)} />
-                  <IconButton icon="folder" label={OVERVIEW_COPY.openWorld(name)} size="sm" onClick={() => ops.openFolder("world", w.dir_name)} />
-                  <MoreMenu
-                    size="sm"
-                    label={WORLD_BACKUP_COPY.rowMenu(name)}
-                    items={worldOps.menu(worldRef(w), () => {
-                      setBackupsOf(worldRef(w));
-                      setBackupsOpen(true);
-                    })}
-                  />
-                </li>
-              );
-            })}
-          </ul>
-          {worlds.length > WORLDS_PREVIEW && (
-            <div className={styles.cardFoot}>
-              <Button variant="ghost" size="sm" onClick={() => setExpanded((v) => !v)}>
-                {expanded ? OVERVIEW_COPY.collapse : OVERVIEW_COPY.expandWorlds(worlds.length - WORLDS_PREVIEW)}
-              </Button>
-            </div>
-          )}
-        </>
-      )}
+      {/* 读到之前按实例列表里的存档数画同样多的占位行，读到后卡片高度不变，第二行的卡片不被推下去 */}
+      <Loadable view={loadableView(load.view)} skeleton={<WorldsSkeleton count={inst.worldCount} />}>
+        {() => {
+          if (content.status === "loading") throw new Error("加载门已放行，存档查询却还在加载");
+          if (content.status === "error") return <ModuleError title={OVERVIEW_COPY.worldsError} error={content.error} onRetry={content.reload} />;
+          if (worlds.length === 0) return <EmptyState compact scene="map" title={OVERVIEW_COPY.worldsEmptyTitle} body={OVERVIEW_COPY.worldsEmptyBody} />;
+          return (
+            <>
+              <WorldRows worlds={shown}>
+                {(w, i) => {
+                  const name = worldName(w);
+                  const tile = w.mode === null ? null : MODE_TILE[w.mode];
+                  return (
+                    <>
+                      {tile === null ? <KindTile kind="unknown" /> : <WorldModeTile mode={tile} />}
+                      <div className={styles.rowMain}>
+                        <span className={styles.rowTitle}>
+                          <span className={styles.ellipsis}>{name}</span>
+                          {i === 0 && w.last_played !== null && (
+                            <Tag tone="accent" size="sm">
+                              {OVERVIEW_COPY.recent}
+                            </Tag>
+                          )}
+                        </span>
+                        <span className={styles.rowSub}>
+                          {w.level_status === "unreadable" ? (
+                            OVERVIEW_COPY.worldUnreadable
+                          ) : (
+                            <>
+                              <span data-mode={w.mode === null ? undefined : w.mode} className={styles.modeText}>
+                                {w.mode === null ? OVERVIEW_COPY.modeUnknown : MODE_LABEL[w.mode]}
+                              </span>
+                              {` · ${w.last_played === null ? OVERVIEW_COPY.worldNeverPlayed : formatRelative(w.last_played, now)}`}
+                            </>
+                          )}
+                        </span>
+                      </div>
+                      <span className={cx(styles.rowMeta, styles.worldSize)}>{formatBytes(w.size_bytes)}</span>
+                      <IconButton icon="play" label={OVERVIEW_COPY.enterWorld(name)} size="sm" disabledReason={enterReason} onClick={() => enter(w.dir_name)} />
+                      <IconButton icon="folder" label={OVERVIEW_COPY.openWorld(name)} size="sm" onClick={() => ops.openFolder("world", w.dir_name)} />
+                      <MoreMenu
+                        size="sm"
+                        label={WORLD_BACKUP_COPY.rowMenu(name)}
+                        items={worldOps.menu(worldRef(w), () => {
+                          setBackupsOf(worldRef(w));
+                          setBackupsOpen(true);
+                        })}
+                      />
+                    </>
+                  );
+                }}
+              </WorldRows>
+              {worlds.length > WORLDS_PREVIEW && (
+                <div className={styles.cardFoot}>
+                  <Button variant="ghost" size="sm" onClick={() => setExpanded((v) => !v)}>
+                    {expanded ? OVERVIEW_COPY.collapse : OVERVIEW_COPY.expandWorlds(worlds.length - WORLDS_PREVIEW)}
+                  </Button>
+                </div>
+              )}
+            </>
+          );
+        }}
+      </Loadable>
+      <SlowHint slow={load.slow} />
       {backupsOf !== null && <WorldBackupsModal inst={inst} world={backupsOf} open={backupsOpen} onClose={() => setBackupsOpen(false)} worldOps={worldOps} />}
     </Card>
+  );
+}
+
+/**
+ * 存档行的列表：游戏退出后重读、最近玩过的排到第一，或新建了存档、展开收起时，行不在原地瞬移。
+ * 新来的行淡入并从略小处落到位，走掉的行抽出布局原地淡出，其余行从旧位置滑到新位置（列表挂着让位）。
+ * 列表挂载时就在的行不单独入场：它们跟着模块内容一起淡入。
+ */
+function WorldRows({ worlds, children }: { worlds: readonly WorldDto[]; children(world: WorldDto, index: number): ReactNode }) {
+  const reflow = useReflow<HTMLUListElement>();
+  const mounted = useMounted();
+  return (
+    <ul ref={reflow} className={styles.rows}>
+      <AnimatePresence mode="popLayout">
+        {worlds.map((w, i) => (
+          <WorldRow key={w.dir_name} entering={mounted.current}>
+            {children(w, i)}
+          </WorldRow>
+        ))}
+      </AnimatePresence>
+    </ul>
+  );
+}
+
+/**
+ * popLayout 量尺寸、把退场的行抽出布局要用 ref，由 AnimatePresence 递进来，落到 li 上。
+ * 退场时已经不是列表的一行，不接受指针与焦点。减少动画时只留透明度（缩放在那里是一步到位的）。
+ */
+function WorldRow({ ref, entering, children }: { ref?: Ref<HTMLLIElement>; entering: boolean; children: ReactNode }) {
+  const present = useIsPresent();
+  const item = useInsertItem();
+  return (
+    <motion.li ref={ref} className={styles.row} inert={!present} initial={entering ? item.initial : false} animate={item.animate} exit={item.exit}>
+      {children}
+    </motion.li>
+  );
+}
+
+/** 存档卡读到之前的占位：形状按实例列表里的存档数定（见 worldsPlaceholder），没有文字，退场叠在内容上淡出时也不留字。 */
+function WorldsSkeleton({ count }: { count: number | null }) {
+  const shape = worldsPlaceholder(count);
+  if (shape.kind === "empty") return <EmptySkeleton />;
+  return (
+    <>
+      <RowSkeletons rows={shape.rows} />
+      {shape.foot && (
+        <div className={styles.cardFoot}>
+          <Skeleton shape="block" width={112} height={30} radius="sm" />
+        </div>
+      )}
+    </>
+  );
+}
+
+/** 紧凑空状态的轮廓：插画 64、标题一行、正文一行，与 EmptyState compact 的几何一致。 */
+function EmptySkeleton() {
+  return (
+    <div className={styles.emptySkeleton}>
+      <Skeleton shape="square" size={64} />
+      <span className={styles.emptySkeletonTitle}>
+        <Skeleton shape="text" width={96} />
+      </span>
+      <span className={styles.emptySkeletonBody}>
+        <Skeleton shape="text" width={220} />
+      </span>
+    </div>
   );
 }
 
@@ -426,9 +613,13 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
   const java = useJavaInfo(inst, settings);
   const memory = useMemoryInfo(inst, settings, queryId);
   const description = settings.status === "ready" ? settings.data.description : inst.description;
+  // 这两格要等实例设置、本机 Java 与内存建议：300 ms 内读到不出骨架（只占位），骨架按常见文案的宽度给，
+  // 读到后骨架淡出、值淡入叠在同一格里交接，右对齐的值不从骨架的左缘跳到自己的左缘
+  const javaGate = useLoadingGate(java.status === "loading");
+  const memoryGate = useLoadingGate(memory.status === "loading");
 
-  const javaValue = (() => {
-    if (java.status === "loading") return <Skeleton shape="text" width={96} />;
+  const javaValue = () => {
+    if (java.status === "loading") throw new Error("加载门已放行，Java 信息却还在加载");
     if (java.status === "error") return <span className={styles.dangerText}>{java.error.message}</span>;
     const info = java.value;
     if (info === null) return HERO_COPY.versionUnknown;
@@ -452,7 +643,7 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
         <span className={styles.soft}>{OVERVIEW_COPY.javaRequired(info.required)}</span>
       </span>
     );
-  })();
+  };
 
   // 整合包记录读不出来时如实写原因，不当成「自行组装」
   const modpackValue =
@@ -464,17 +655,16 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
       OVERVIEW_COPY.modpackNone
     );
 
-  const memoryValue =
-    memory.status === "loading" ? (
-      <Skeleton shape="text" width={72} />
-    ) : memory.status === "error" ? (
-      <span className={styles.dangerText}>{memory.error.message}</span>
-    ) : (
+  const memoryValue = () => {
+    if (memory.status === "loading") throw new Error("加载门已放行，内存信息却还在加载");
+    if (memory.status === "error") return <span className={styles.dangerText}>{memory.error.message}</span>;
+    return (
       <span className={styles.num}>
         {formatMemory(memory.value.effectiveMb)}
         {memory.value.followsGlobal && <span className={styles.soft}>{OVERVIEW_COPY.memoryFollow}</span>}
       </span>
     );
+  };
 
   return (
     <Card>
@@ -493,8 +683,22 @@ function InfoCard({ inst, queryId, onTab }: { inst: InstanceSummary; queryId: st
           { label: OVERVIEW_COPY.kvVersion, value: <span className={styles.num}>{inst.mcVersion === null ? HERO_COPY.versionUnknown : inst.mcVersion}</span> },
           { label: OVERVIEW_COPY.kvLoader, value: <LoaderTag loader={inst.loader} version={inst.loaderVersion} size="sm" /> },
           { label: OVERVIEW_COPY.kvModpack, value: modpackValue },
-          { label: OVERVIEW_COPY.kvJava, value: javaValue },
-          { label: OVERVIEW_COPY.kvMemory, value: memoryValue },
+          {
+            label: OVERVIEW_COPY.kvJava,
+            value: (
+              <Loadable view={javaGate.view} skeleton={<Skeleton shape="text" width={130} />} contentClassName={styles.kvLoaded}>
+                {javaValue}
+              </Loadable>
+            ),
+          },
+          {
+            label: OVERVIEW_COPY.kvMemory,
+            value: (
+              <Loadable view={memoryGate.view} skeleton={<Skeleton shape="text" width={100} />} contentClassName={styles.kvLoaded}>
+                {memoryValue}
+              </Loadable>
+            ),
+          },
           { label: OVERVIEW_COPY.kvCreated, value: inst.createdAt === null ? OVERVIEW_COPY.createdUnknown : formatDate(inst.createdAt) },
         ]}
       />
@@ -532,7 +736,16 @@ function ModsPeekCard({
   // 「全部更新」先打开更新预览，与 Mod 标签同一个弹窗；key 每次打开递增，勾选从默认全选重新开始
   const [preview, setPreview] = useState<{ key: number; open: boolean } | null>(null);
 
-  const subtitle = vanilla || load.view !== "ready" || rows.length === 0 ? undefined : partial ? OVERVIEW_COPY.modsPartial(total, rows.length) : OVERVIEW_COPY.modsCount(total);
+  const loading = load.view === "pending" || load.view === "skeleton";
+  // 读到之前先占住副标题那一行（null），卡头不因数量晚到变高；实例列表已说没有 Mod 时读到后也没有这一行，不占
+  const subtitle =
+    vanilla || (loading && inst.modCount === 0) || (!loading && (load.view !== "ready" || rows.length === 0))
+      ? undefined
+      : loading
+        ? null
+        : partial
+          ? OVERVIEW_COPY.modsPartial(total, rows.length)
+          : OVERVIEW_COPY.modsCount(total);
 
   return (
     <Card>
@@ -559,49 +772,60 @@ function ModsPeekCard({
         >
           {OVERVIEW_COPY.vanillaPeek}
         </Callout>
-      ) : load.view === "pending" || load.view === "skeleton" ? (
-        <>
-          <div className={styles.peek}>{load.view === "skeleton" && Array.from({ length: 12 }, (_, i) => <Skeleton key={i} shape="square" size={44} />)}</div>
-          <SlowHint slow={load.slow} />
-        </>
-      ) : mods.status === "error" ? (
-        <ModuleError title={OVERVIEW_COPY.modsError} error={mods.error} onRetry={mods.reload} />
-      ) : rows.length === 0 ? (
-        <Callout
-          tone="info"
-          action={
-            <Button size="sm" icon="compass" onClick={() => go({ page: "discover", kind: "mod", forInstance: inst.id })}>
-              {OVERVIEW_COPY.findMods}
-            </Button>
-          }
-        >
-          {OVERVIEW_COPY.noModsPeek}
-        </Callout>
       ) : (
         <>
-          <PeekTiles rows={rows} total={total} onOpen={() => onTab("mods")} />
-          {outdated.length > 0 && (
-            <Callout
-              tone="info"
-              icon="sparkle"
-              action={
-                <Button
-                  size="sm"
-                  icon="download"
-                  disabledReason={ops.modsReason}
-                  loading={updating}
-                  onClick={() => setPreview((p) => ({ key: p === null ? 0 : p.key + 1, open: true }))}
-                >
-                  {OVERVIEW_COPY.updateAll}
-                </Button>
-              }
-            >
-              {OVERVIEW_COPY.outdatedHint(
-                outdated.slice(0, 3).map((r) => r.name),
-                outdated.length,
-              )}
-            </Callout>
-          )}
+          {/* 读到之前按实例列表里的 Mod 数画占位格（按卡片内宽排成同样的行数），读到后叠放交叉淡入 */}
+          <Loadable view={loadableView(load.view)} skeleton={<PeekSkeleton modCount={inst.modCount} />}>
+            {() => {
+              if (mods.status === "loading") throw new Error("加载门已放行，Mod 列表却还在加载");
+              if (mods.status === "error") return <ModuleError title={OVERVIEW_COPY.modsError} error={mods.error} onRetry={mods.reload} />;
+              if (rows.length === 0)
+                return (
+                  <Callout
+                    tone="info"
+                    action={
+                      <Button size="sm" icon="compass" onClick={() => go({ page: "discover", kind: "mod", forInstance: inst.id })}>
+                        {OVERVIEW_COPY.findMods}
+                      </Button>
+                    }
+                  >
+                    {OVERVIEW_COPY.noModsPeek}
+                  </Callout>
+                );
+              return (
+                <>
+                  <PeekTiles rows={rows} total={total} onOpen={() => onTab("mods")} />
+                  {/* 联网的更新检查晚到秒级：提示条淡入并从略小处落到位，全部更新完消失时淡出 */}
+                  <Appear>
+                    {outdated.length > 0 && (
+                      <Callout
+                        key="outdated"
+                        tone="info"
+                        icon="sparkle"
+                        action={
+                          <Button
+                            size="sm"
+                            icon="download"
+                            disabledReason={ops.modsReason}
+                            loading={updating}
+                            onClick={() => setPreview((p) => ({ key: p === null ? 0 : p.key + 1, open: true }))}
+                          >
+                            {OVERVIEW_COPY.updateAll}
+                          </Button>
+                        }
+                      >
+                        {OVERVIEW_COPY.outdatedHint(
+                          outdated.slice(0, 3).map((r) => r.name),
+                          outdated.length,
+                        )}
+                      </Callout>
+                    )}
+                  </Appear>
+                </>
+              );
+            }}
+          </Loadable>
+          <SlowHint slow={load.slow} />
         </>
       )}
       {preview !== null && (
@@ -622,20 +846,40 @@ function ModsPeekCard({
   );
 }
 
-function PeekTiles({ rows, total, onOpen }: { rows: readonly ModRow[]; total: number; onOpen(): void }) {
+/**
+ * 速览容器每行放几格。挂载时在布局效应里先同步量一次：那里的更新在绘制之前提交，首帧就是终值，
+ * 不会先按 1 格加「+N」画一帧、下一帧才铺成两行；之后随卡片宽度变化。
+ */
+function usePeekPerRow(): [RefObject<HTMLDivElement | null>, number] {
   const ref = useRef<HTMLDivElement>(null);
   const [perRow, setPerRow] = useState(1);
-
   useLayoutEffect(() => {
     const el = ref.current;
     if (el === null) throw new Error("Mod 速览容器尚未挂载");
+    setPerRow(peekPerRow(el.clientWidth));
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) setPerRow(peekPerRow(entry.contentRect.width));
     });
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
+  return [ref, perRow];
+}
 
+/** 速览读到之前的占位格：格数见 peekPlaceholder，与真实图块同尺寸、同排布。 */
+function PeekSkeleton({ modCount }: { modCount: number | null }) {
+  const [ref, perRow] = usePeekPerRow();
+  return (
+    <div ref={ref} className={styles.peek}>
+      {Array.from({ length: peekPlaceholder(modCount, perRow) }, (_, i) => (
+        <Skeleton key={i} shape="square" size={PEEK_TILE} />
+      ))}
+    </div>
+  );
+}
+
+function PeekTiles({ rows, total, onOpen }: { rows: readonly ModRow[]; total: number; onOpen(): void }) {
+  const [ref, perRow] = usePeekPerRow();
   const { shown, more } = peekLayout(rows.length, total, perRow);
   return (
     <div ref={ref} className={styles.peek}>
@@ -643,7 +887,8 @@ function PeekTiles({ rows, total, onOpen }: { rows: readonly ModRow[]; total: nu
         <Tooltip key={r.fileName} content={r.name} sub={`${r.version === null ? "" : r.version}${r.enabled ? "" : OVERVIEW_COPY.modDisabledSuffix}`}>
           <button type="button" className={styles.peekTile} aria-label={r.name} onClick={onOpen}>
             <Thumb url={r.iconUrl} kind="mod" hue={hueOf(r.seed)} size={44} inactive={!r.enabled} />
-            {r.update !== null && <Badge tone="accent" ring className={styles.peekDot} />}
+            {/* 更新检查晚到时提醒点弹出来，更新装完时缩小淡出；图块挂载时就有的不单独弹 */}
+            <AnimatePresence initial={false}>{r.update !== null && <Badge key="update" tone="accent" ring className={styles.peekDot} />}</AnimatePresence>
           </button>
         </Tooltip>
       ))}
@@ -663,71 +908,77 @@ function PacksCard({ inst, content }: { inst: InstanceSummary; content: Resource
   const vanilla = inst.loader === "vanilla";
   const discover = () => go({ page: "discover", kind: "resourcepack", forInstance: inst.id });
   const load = useModuleView(content);
+  // 光影一行加资源包至少一行，读到之前就按这两行占位；包多出来的那几行撑高卡片时，底部说明从原位置滑下去
+  const body = useReflow<HTMLDivElement>();
 
   return (
     <Card>
       <CardHeader icon="image" title={OVERVIEW_COPY.packsTitle} actions={<IconButton icon="compass" label={OVERVIEW_COPY.findPacks} size="sm" onClick={discover} />} />
-      {load.view === "skeleton" && <RowSkeletons rows={2} slow={load.slow} />}
-      {load.view === "error" && content.status === "error" && <ModuleError title={OVERVIEW_COPY.packsError} error={content.error} onRetry={content.reload} />}
-      {load.view === "ready" && content.status === "ready" && (
-        <ul className={styles.rows}>
-          {(() => {
+      <div ref={body} className={styles.packsBody}>
+        <Loadable view={loadableView(load.view)} skeleton={<RowSkeletons rows={2} />}>
+          {() => {
+            if (content.status === "loading") throw new Error("加载门已放行，资源包查询却还在加载");
+            if (content.status === "error") return <ModuleError title={OVERVIEW_COPY.packsError} error={content.error} onRetry={content.reload} />;
             const active = content.data.shader_packs.find((s) => s.active);
             return (
-              <li className={styles.row}>
-                <KindTile kind="shader" />
-                <div className={styles.rowMain}>
-                  <span className={styles.rowTitle} data-muted={active === undefined || undefined}>
-                    <span className={styles.ellipsis}>{active === undefined ? OVERVIEW_COPY.noShader : active.file_name}</span>
-                  </span>
-                  <span className={styles.rowSub}>{active !== undefined ? OVERVIEW_COPY.shaderSub : vanilla ? OVERVIEW_COPY.shaderVanilla : OVERVIEW_COPY.shaderHint}</span>
-                </div>
-                {active !== undefined && (
-                  <Tag tone="accent" size="sm">
-                    {OVERVIEW_COPY.shaderActive}
-                  </Tag>
-                )}
-              </li>
-            );
-          })()}
-          {content.data.resource_packs.length === 0 ? (
-            <li className={styles.row}>
-              <KindTile kind="resource-pack" />
-              <div className={styles.rowMain}>
-                <span className={styles.rowTitle} data-muted="">
-                  {OVERVIEW_COPY.noResourcePack}
-                </span>
-                <span className={styles.rowSub}>{OVERVIEW_COPY.vanillaTextures}</span>
-              </div>
-            </li>
-          ) : (
-            [...content.data.resource_packs]
-              .sort((a, b) => (a.load_order === null ? Infinity : a.load_order) - (b.load_order === null ? Infinity : b.load_order))
-              .map((p) => (
-                <li key={p.file_name} className={styles.row}>
-                  <KindTile kind="resource-pack" />
+              <ul className={styles.rows}>
+                <li className={styles.row}>
+                  <KindTile kind="shader" />
                   <div className={styles.rowMain}>
-                    <span className={styles.rowTitle}>
-                      <span className={styles.ellipsis}>{p.file_name}</span>
+                    <span className={styles.rowTitle} data-muted={active === undefined || undefined}>
+                      <span className={styles.ellipsis}>{active === undefined ? OVERVIEW_COPY.noShader : active.file_name}</span>
                     </span>
-                    <span className={styles.rowSub}>{p.load_order === null ? OVERVIEW_COPY.packInactive : OVERVIEW_COPY.packOrder(p.load_order)}</span>
+                    <span className={styles.rowSub}>{active !== undefined ? OVERVIEW_COPY.shaderSub : vanilla ? OVERVIEW_COPY.shaderVanilla : OVERVIEW_COPY.shaderHint}</span>
                   </div>
+                  {active !== undefined && (
+                    <Tag tone="accent" size="sm">
+                      {OVERVIEW_COPY.shaderActive}
+                    </Tag>
+                  )}
                 </li>
-              ))
-          )}
-        </ul>
-      )}
-      {inst.mcVersion !== null && (
-        <p className={styles.footNote}>
-          <Icon name="info" size={14} />
-          {OVERVIEW_COPY.packsFoot(inst.loader, inst.mcVersion)}
-        </p>
-      )}
+                {content.data.resource_packs.length === 0 ? (
+                  <li className={styles.row}>
+                    <KindTile kind="resource-pack" />
+                    <div className={styles.rowMain}>
+                      <span className={styles.rowTitle} data-muted="">
+                        {OVERVIEW_COPY.noResourcePack}
+                      </span>
+                      <span className={styles.rowSub}>{OVERVIEW_COPY.vanillaTextures}</span>
+                    </div>
+                  </li>
+                ) : (
+                  [...content.data.resource_packs]
+                    .sort((a, b) => (a.load_order === null ? Infinity : a.load_order) - (b.load_order === null ? Infinity : b.load_order))
+                    .map((p) => (
+                      <li key={p.file_name} className={styles.row}>
+                        <KindTile kind="resource-pack" />
+                        <div className={styles.rowMain}>
+                          <span className={styles.rowTitle}>
+                            <span className={styles.ellipsis}>{p.file_name}</span>
+                          </span>
+                          <span className={styles.rowSub}>{p.load_order === null ? OVERVIEW_COPY.packInactive : OVERVIEW_COPY.packOrder(p.load_order)}</span>
+                        </div>
+                      </li>
+                    ))
+                )}
+              </ul>
+            );
+          }}
+        </Loadable>
+        <SlowHint slow={load.slow} />
+        {inst.mcVersion !== null && (
+          <p className={styles.footNote}>
+            <Icon name="info" size={14} />
+            {OVERVIEW_COPY.packsFoot(inst.loader, inst.mcVersion)}
+          </p>
+        )}
+      </div>
     </Card>
   );
 }
 
-function RowSkeletons({ rows, slow }: { rows: number; slow: boolean }) {
+/** 行的占位：与真实的行同高（52）、同间距，没有文字。 */
+function RowSkeletons({ rows }: { rows: number }) {
   return (
     <div className={styles.rows}>
       {Array.from({ length: rows }, (_, i) => (
@@ -738,7 +989,6 @@ function RowSkeletons({ rows, slow }: { rows: number; slow: boolean }) {
           </div>
         </div>
       ))}
-      <SlowHint slow={slow} />
     </div>
   );
 }

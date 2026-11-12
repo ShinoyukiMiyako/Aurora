@@ -5,6 +5,21 @@
   color: var(--sk-text-2);
 }
 
+/* 换内容的一格：退场的旧内容脱离布局后以这里为定位基准，叠在新内容上淡出 */
+.swap {
+  position: relative;
+  min-width: 0;
+}
+
+/*
+ * 有东西在退场时（旧内容、淡出中的说明块都带 inert）纵向裁到这一格：新内容比旧的矮时，脱离布局的旧内容仍是旧高度，
+ * 不裁的话它伸出这一格的下沿，算进弹窗主体的可滚动范围，淡出那一下主体里闪出滚动条。
+ * 只裁纵向、只在退场期间裁：贴着左右边的输入框与底部按钮平时的焦点环不能被切掉
+ */
+.swap:has([inert]) {
+  overflow-y: clip;
+}
+
 /* ---- 设备码 ---- */
 .device {
   display: flex;
@@ -77,6 +92,13 @@
   user-select: text;
 }
 
+/* 链接行骨架里复制键（sm 档图标按钮 30 见方）的位置：空着也撑出同样 40 高的行 */
+.copySpace {
+  flex: none;
+  width: 30px;
+  height: 30px;
+}
+
 .code {
   --cell-w: 44px;
   --cell-h: 58px;
@@ -108,6 +130,8 @@
   font-weight: var(--sk-w-mono);
   letter-spacing: var(--sk-ls-mono-lg);
   color: var(--sk-text);
+  /* 过期时字色转灰：只过渡颜色，位移与透明度由入场动画管 */
+  transition: color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .code[data-expired] .cell {
@@ -139,10 +163,20 @@
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
   color: var(--sk-text-2);
+  transition: color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .wait[data-expired] .waitLine {
   color: var(--sk-danger);
+}
+
+/* 等待行的图标位：常驻 18 见方，转圈出现、换成时钟时后面的文字不横移 */
+.waitIcon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 18px;
+  height: 18px;
 }
 
 .waitText {
@@ -249,6 +283,23 @@
   left: 0;
 }
 
+/*
+ * 换立绘的那一格铺满舞台：并排两位与单人宽窄不同，这一格要是随内容定宽、在舞台里居中，
+ * 换人时它会挪位，按它定位的淡出中的旧立绘跟着横跳
+ */
+.stageSwap {
+  display: flex;
+  flex: 1;
+  align-self: stretch;
+}
+
+.stageSlot {
+  display: flex;
+  flex: 1;
+  align-items: flex-end;
+  justify-content: center;
+}
+
 .stageFigure {
   position: relative;
   margin-bottom: var(--sk-space-16);
@@ -266,6 +317,11 @@
   flex-direction: column;
   gap: var(--sk-space-14);
   min-width: 0;
+}
+
+/* 用户名的提示区预留两行：默认说明在这一列里折成两行，换成一行的提示或错误时下面的内容不上抽 */
+.offlineForm .nameField [data-reserve] {
+  min-height: calc(var(--sk-lh-caption) * 2);
 }
 
 .offlineForm [data-tone="warn"] {
@@ -338,6 +394,7 @@
   font-size: var(--sk-fs-small);
   line-height: var(--sk-lh-small);
   color: var(--sk-text-3);
+  transition: color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .stepperItem[data-state="now"] {
@@ -360,6 +417,11 @@
   font-size: var(--sk-fs-micro);
   line-height: var(--sk-lh-micro);
   font-variant-numeric: tabular-nums;
+  /* 换步时描边、底色、字色一起渐变，序号与勾号由图标位交接 */
+  transition:
+    border-color var(--sk-dur-hover) var(--sk-ease),
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease);
 }
 
 .stepperItem[data-state="now"] .stepperDot {
@@ -393,6 +455,7 @@
   color: var(--sk-text-2);
   cursor: pointer;
   transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
     border-color var(--sk-dur-hover) var(--sk-ease),
     color var(--sk-dur-hover) var(--sk-ease);
 }
@@ -400,6 +463,17 @@
 .preset:hover {
   border-color: var(--sk-accent-line);
   color: var(--sk-accent-strong);
+}
+
+/* 按下回馈与按钮一致：缩到 0.97，松开沿 tap 弹回；减少动画时不缩放，瞬时降到 0.85 不透明度 */
+.preset:active {
+  transform: scale(0.97);
+}
+
+:global([data-sk-reduced]) .preset:active {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 .preset:focus-visible {
@@ -478,6 +552,7 @@
   text-align: left;
   cursor: pointer;
   transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
     border-color var(--sk-dur-hover) var(--sk-ease),
     background-color var(--sk-dur-hover) var(--sk-ease);
 }
@@ -489,6 +564,16 @@
 .profile[aria-checked="true"] {
   border-color: var(--sk-accent-line);
   background: var(--sk-accent-soft);
+}
+
+.profile:active {
+  transform: scale(0.97);
+}
+
+:global([data-sk-reduced]) .profile:active {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 .profile:focus-visible {
@@ -504,6 +589,26 @@
   font-weight: var(--sk-w-medium);
 }
 
+/* 勾号常驻：取消选中时原地淡出并缩回 0.6，选中时从 0.6 沿 pop 弹到位并淡入 */
 .profileCheck {
+  flex: none;
   color: var(--sk-accent-strong);
+  opacity: 0;
+  scale: 0.6;
+  transition:
+    opacity var(--sk-dur-out) var(--sk-ease-in),
+    scale var(--sk-dur-out) var(--sk-ease-in);
+}
+
+.profile[aria-checked="true"] .profileCheck {
+  opacity: 1;
+  scale: 1;
+  transition:
+    opacity var(--sk-dur-in) var(--sk-ease-out),
+    scale var(--sk-spring-pop-dur) var(--sk-spring-pop);
+}
+
+/* 减少动画：不缩放，只淡入淡出 */
+:global([data-sk-reduced]) .profileCheck {
+  scale: none;
 }

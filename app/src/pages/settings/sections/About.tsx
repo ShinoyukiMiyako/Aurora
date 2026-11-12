@@ -9,6 +9,7 @@ import { RELEASE_CHANNEL_LABEL } from "../../../copy/flows";
 import { formatDate } from "../../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../../domain/limits";
 import { APP_LICENSE, APP_NAME, APP_NAME_EN, ASSET_LICENSE, buildInfo, ISSUES_URL, REPO_URL, type BuildInfo } from "../../../lib/app-info";
+import { useLoadingGate } from "../../../lib/loading-gate";
 import { useShell } from "../../../shell/shell";
 import { useRunner } from "../../../shell/useRunner";
 import { useLauncherActions } from "../../../state/launcher";
@@ -20,6 +21,7 @@ import { Card } from "../../../ui/Card";
 import { CardHeader } from "../../../ui/CardHeader";
 import { CopyButton, KV } from "../../../ui/KV";
 import { Inset } from "../../../ui/Inset";
+import { Loadable } from "../../../ui/Loadable";
 import { Modal } from "../../../ui/Modal";
 import { SettingRow } from "../../../ui/SettingRow";
 import { Tag } from "../../../ui/Tag";
@@ -105,8 +107,12 @@ function LicenseGroup({ title, packages }: { title: string; packages: readonly T
   );
 }
 
-/** 弹窗里按需读取的内容：读取中转圈；读失败写明原因、给重试，不静默留白；读到了交给 children 渲染。 */
+/**
+ * 弹窗里按需读取的内容：读失败写明原因、给重试，不静默留白；读到了交给 children 渲染。
+ * 读取中的转圈经加载门：随产物分发的文件通常几十毫秒就读到，那时转圈只占位不显形，内容直接淡入。
+ */
 function LoadedBody<T>({ resource, loading, failed, children }: { resource: ResourceResult<T>; loading: string; failed: string; children: (data: T) => ReactNode }) {
+  const gate = useLoadingGate(resource.status === "loading");
   if (resource.status === "error") {
     return (
       <Callout
@@ -123,23 +129,37 @@ function LoadedBody<T>({ resource, loading, failed, children }: { resource: Reso
       </Callout>
     );
   }
-  if (resource.status === "loading") {
-    return (
-      <div className={s.licensesLoading} role="status">
-        <Spinner size={20} />
-        <span>{loading}</span>
-      </div>
-    );
-  }
-  return children(resource.data);
+  return (
+    <>
+      {/* 骨架层对读屏隐藏，读取中的说明另放一份给读屏：区域挂载时就在、先是空的，转圈显形时才写进文字，读屏才会念出来 */}
+      <span className={s.srOnly} role="status">
+        {gate.view === "skeleton" ? loading : ""}
+      </span>
+      <Loadable
+        view={gate.view}
+        skeleton={
+          <div className={s.licensesLoading}>
+            <Spinner size={20} />
+            <span>{loading}</span>
+          </div>
+        }
+      >
+        {() => {
+          if (resource.status !== "ready") throw new Error("加载门放行内容时文件必须已经读到");
+          return children(resource.data);
+        }}
+      </Loadable>
+    </>
+  );
 }
 
 /** 清单体积大，弹窗打开时才去读；读过一次之后整个会话复用。 */
 function LicensesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const manifest = useThirdPartyLicenses(open);
-  const subtitle = manifest.status === "ready" ? ABOUT_COPY.licensesSubtitle(manifest.data.packages.length) : undefined;
+  // 条数读到之前先占住副标题这一行（null），读到后原位淡入；读失败就没有这一行
+  const subtitle = manifest.status === "ready" ? ABOUT_COPY.licensesSubtitle(manifest.data.packages.length) : manifest.status === "loading" ? null : undefined;
   return (
-    <Modal open={open} onClose={onClose} size="md" icon="file-text" title={ABOUT_COPY.licenses} subtitle={subtitle}>
+    <Modal open={open} onClose={onClose} size="md" icon="file-text" title={ABOUT_COPY.licenses} subtitle={subtitle} className={s.licenseDialog}>
       <LoadedBody resource={manifest} loading={ABOUT_COPY.licensesLoading} failed={ABOUT_COPY.licensesFailed}>
         {({ packages }) => (
           <div className={s.licenses}>
@@ -167,7 +187,7 @@ interface TextDialogCopy {
  */
 function TextFileDialog({ open, onClose, text, copy }: { open: boolean; onClose: () => void; text: ResourceResult<string>; copy: TextDialogCopy }) {
   return (
-    <Modal open={open} onClose={onClose} size="lg" icon="file-text" title={copy.title} subtitle={copy.subtitle}>
+    <Modal open={open} onClose={onClose} size="lg" icon="file-text" title={copy.title} subtitle={copy.subtitle} className={s.licenseDialog}>
       <LoadedBody resource={text} loading={copy.loading} failed={copy.failed}>
         {(value) => (
           <pre className={s.licenseText} role="region" aria-label={copy.title} tabIndex={0}>

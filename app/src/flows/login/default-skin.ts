@@ -32,11 +32,18 @@ export const STARTER_SKINS: readonly { name: string; skin: DefaultSkinRef }[] = 
   { name: "Alex", skin: { kind: "default", path: "entity/player/slim/alex", model: "slim" } },
 ];
 
-/** 这个 UUID 在原版客户端里的默认皮肤：下标为哈希对 18 取非负余数（Java 的 Math.floorMod）。 */
-export function defaultSkin(uuid: string): DefaultSkinRef {
-  const index = ((javaUuidHash(uuid) % DEFAULT_SKIN_COUNT) + DEFAULT_SKIN_COUNT) % DEFAULT_SKIN_COUNT;
+/** 原版默认皮肤数组里第 index 套（0 到 17）。 */
+function skinAt(index: number): DefaultSkinRef {
   const slim = index < DEFAULT_SKIN_NAMES.length;
   const name = DEFAULT_SKIN_NAMES[slim ? index : index - DEFAULT_SKIN_NAMES.length];
   const model = slim ? "slim" : "wide";
   return { kind: "default", path: `entity/player/${model}/${name}`, model };
 }
+
+/** 这个 UUID 在原版客户端里的默认皮肤：下标为哈希对 18 取非负余数（Java 的 Math.floorMod）。 */
+export function defaultSkin(uuid: string): DefaultSkinRef {
+  return skinAt(((javaUuidHash(uuid) % DEFAULT_SKIN_COUNT) + DEFAULT_SKIN_COUNT) % DEFAULT_SKIN_COUNT);
+}
+
+/** 全部 18 套默认皮肤，顺序同原版数组。离线弹窗打开时预取它们，输入停顿后换上的立绘第一帧就是真皮肤。 */
+export const DEFAULT_SKINS: readonly DefaultSkinRef[] = Array.from({ length: DEFAULT_SKIN_COUNT }, (_, i) => skinAt(i));

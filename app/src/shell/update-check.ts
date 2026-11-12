@@ -9,17 +9,21 @@ import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import { useOnline } from "../state/online";
 import { AUTO_CHECK_DELAY_MS, AUTO_CHECK_INTERVAL_MS, autoCheckEnabled, updateToAnnounce } from "../state/updater/auto-check";
 import { canCheck } from "../state/updater/machine";
-import { useUpdater } from "../state/updater/useUpdater";
+import { useUpdaterSelector, type UpdaterApi } from "../state/updater/useUpdater";
 import { useRunner } from "./useRunner";
 
-export function useUpdaterAutoCheck(openUpdatePanel: () => void): void {
+/**
+ * updater 取此刻的更新接口，只在事件里调：状态只订阅「该不该排期」这一个布尔，动作与此刻的阶段都经它读，
+ * 下载更新的每条进度事件不让调用方重渲染。
+ */
+export function useUpdaterAutoCheck(openUpdatePanel: () => void, updater: () => Pick<UpdaterApi, "snapshot" | "check">): void {
   const firstRun = useLauncherSelector((s) => s.firstRun);
   const settings = useLauncherSelector((s) => s.settings);
   const actions = useLauncherActions();
-  const updater = useUpdater();
   const online = useOnline();
   const run = useRunner();
-  const enabled = autoCheckEnabled(updater.state, { firstRun, checkUpdates: settings === null ? null : settings.checkUpdates });
+  const checkUpdates = settings === null ? null : settings.checkUpdates;
+  const enabled = useUpdaterSelector((state) => autoCheckEnabled(state, { firstRun, checkUpdates }));
 
   const [due, setDue] = useState(false);
   useEffect(() => {
@@ -45,7 +49,7 @@ export function useUpdaterAutoCheck(openUpdatePanel: () => void): void {
   useEffect(() => {
     if (!due || !online) return;
     setDue(false);
-    const { updater: api } = latest.current;
+    const api = latest.current.updater();
     const phase = api.snapshot().phase;
     if (!canCheck(phase)) {
       console.info(`[updater] 跳过这一轮自动检查：当前阶段 ${phase.kind}`);
@@ -57,7 +61,7 @@ export function useUpdaterAutoCheck(openUpdatePanel: () => void): void {
         await api.check();
         const now = latest.current;
         if (now.settings === null) throw new Error("自动检查只在配置读到之后排期");
-        return updateToAnnounce(now.updater.snapshot(), now.settings.skippedUpdateVersion, now.settings.notifiedUpdateVersion);
+        return updateToAnnounce(now.updater().snapshot(), now.settings.skippedUpdateVersion, now.settings.notifiedUpdateVersion);
       }, UPDATE_COPY.checkStartFailed);
       if (!found.ok || found.value === null) return;
       const { version } = found.value;

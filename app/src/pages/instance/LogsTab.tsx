@@ -1,7 +1,8 @@
 // 日志与历史：左侧日志控制台（本实例有会话就看会话日志，否则看最近一次启动的留底），右侧 Mod 变更时间线。
 // 时间线上可回滚的给回滚按钮，不可回滚的如实写原因；回滚不确认，它本身会再记一条可追溯的回滚记录。
 
-import { useMemo, useState } from "react";
+import { motion } from "framer-motion";
+import { useMemo, useState, type ReactNode } from "react";
 import { Icon } from "../../art/Icon";
 import { ACTION_ERROR, phaseLabel } from "../../copy/flows";
 import { logLineFromDto, type InstanceSummary } from "../../domain/adapt";
@@ -9,15 +10,19 @@ import { clock, formatDate, formatRelative } from "../../domain/format";
 import { COPY_FEEDBACK_MS } from "../../domain/limits";
 import type { LogLine } from "../../domain/types";
 import { useLoadingGate } from "../../lib/loading-gate";
+import { insertItem } from "../../lib/motion";
+import { useReflow } from "../../lib/reflow";
+import { useMounted } from "../../lib/useMounted";
 import { useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
 import { useLauncherActions, useLauncherSelector, useNow } from "../../state/launcher";
-import { useHistory, useLastLaunchLog, useRollbackChecks } from "../../state/queries/instance";
+import { useHistory, useLastLaunchLog, useRollbackChecks, type HistoryEvent, type RollbackCheck } from "../../state/queries/instance";
 import { isSessionActive, type SessionState } from "../../state/session";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
 import { CardHeader } from "../../ui/CardHeader";
 import { EmptyState } from "../../ui/EmptyState";
+import { Loadable } from "../../ui/Loadable";
 import { countLogLevels, LOG_LEVEL_FILTER_LABEL, LOG_SOURCE_FILTER_LABEL, LogConsole, type LogLevelFilter, type LogSourceFilter } from "../../ui/LogConsole";
 import { SegmentedControl } from "../../ui/SegmentedControl";
 import { Skeleton } from "../../ui/Skeleton";
@@ -27,7 +32,7 @@ import { HISTORY_KIND_LABEL, LOGS_COPY } from "./copy";
 import styles from "./instance.module.css";
 import { HISTORY_PAGE, historyItems, type HistoryItem } from "./model";
 import type { InstanceOps } from "./ops";
-import { ModuleError, SlowHint, useModuleView } from "./parts";
+import { ModuleError, SlowHint } from "./parts";
 
 export interface LogsTabProps {
   inst: InstanceSummary;
@@ -62,57 +67,58 @@ function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
   const { copyText } = useShell();
   const [level, setLevel] = useState<LogLevelFilter>("all");
   const [source, setSource] = useState<LogSourceFilter>("all");
-  const lastLog = useLastLaunchLog(session === null ? queryId : null);
+  const live = session !== null && isSessionActive(session);
+  // 会话一离开实时就去读留底（后端推送退出事件之前已经写好）：停留期满会话清空时留底多半已经在手，直接换数据
+  const lastLog = useLastLaunchLog(live ? null : queryId);
+  // 会话清空了、留底还没读回（读得慢，或在状态岛里提前收起了会话）：接着画刚结束的这一局，两者是同一份输出。
+  // 不在中间换成骨架：那会让整卡闪一次、控制台重挂，换行开关与滚动位置都丢掉
+  const [ended, setEnded] = useState<SessionState | null>(null);
+  if (session !== null && !live && ended !== session) setEnded(session);
+  else if (session === null && ended !== null && lastLog.status !== "loading") setEnded(null);
+  const shown = session !== null ? session : lastLog.status === "loading" ? ended : null;
   // 留底最多 5000 行，而这张卡随会话日志重渲染（游戏日志每 100 ms 一批）：转换结果按查询结果缓存，
   // 行对象不变，控制台按行对象分配的键与测量缓存才不会每次整批作废
   const lastData = lastLog.status === "ready" ? lastLog.data : null;
   const lastLines = useMemo(() => (lastData === null ? NO_LINES : lastData.lines.map(logLineFromDto)), [lastData]);
-  const lines = session !== null ? session.logs : lastLines;
+  const lines = shown !== null ? shown.logs : lastLines;
   const counts = useMemo(() => countLogLevels(lines, source), [lines, source]);
-  const load = useModuleView(lastLog);
+  // 只有既没有会话可画、留底又在读的时候才算加载
+  const gate = useLoadingGate(shown === null && lastLog.status === "loading");
 
-  let dropped = 0;
-  let subtitle: string;
-  const live = session !== null && isSessionActive(session);
-  if (session !== null) {
-    subtitle = live ? LOGS_COPY.live(phaseLabel(session.phase, session.stopReason)) : LOGS_COPY.sessionEnded;
-  } else if (load.view === "pending" || load.view === "skeleton") {
+  const content = (): ReactNode => {
+    let dropped = 0;
+    let subtitle: string;
+    if (shown !== null) {
+      subtitle = live && session !== null ? LOGS_COPY.live(phaseLabel(session.phase, session.stopReason)) : LOGS_COPY.sessionEnded;
+    } else if (lastLog.status === "loading") {
+      throw new Error("加载门放行时最近一次启动的日志不可能还在读取");
+    } else if (lastLog.status === "error") {
+      return (
+        <div className={styles.consolePad}>
+          <CardHeader icon="terminal" title={LOGS_COPY.consoleTitle} />
+          <ModuleError title={LOGS_COPY.error} error={lastLog.error} onRetry={lastLog.reload} />
+        </div>
+      );
+    } else if (lastData !== null && lastData.ended === null && lastData.lines.length === 0) {
+      return (
+        <div className={styles.consolePad}>
+          <CardHeader icon="terminal" title={LOGS_COPY.consoleTitle} subtitle={LOGS_COPY.lastLaunch(formatRelative(lastData.started_at, now), false)} />
+          <EmptyState compact scene="book-pen" title={LOGS_COPY.noOutputTitle} body={LOGS_COPY.noOutputBody} />
+        </div>
+      );
+    } else if (lastData !== null) {
+      dropped = lastData.omitted;
+      const outcome = lastData.ended;
+      subtitle = LOGS_COPY.lastLaunch(formatRelative(lastData.started_at, now), outcome !== null && outcome.outcome === "crashed");
+    } else {
+      return (
+        <div className={styles.consolePad}>
+          <CardHeader icon="terminal" title={LOGS_COPY.consoleTitle} subtitle={LOGS_COPY.noRecord} />
+          <EmptyState compact scene="book-pen" title={LOGS_COPY.emptyTitle} body={LOGS_COPY.emptyBody} />
+        </div>
+      );
+    }
     return (
-      <Card className={styles.console}>
-        <CardHeader icon="terminal" title={LOGS_COPY.consoleTitle} />
-        {load.view === "skeleton" && <Skeleton shape="text" lines={SKELETON_LINES} />}
-        <SlowHint slow={load.slow} />
-      </Card>
-    );
-  } else if (lastLog.status === "error") {
-    return (
-      <Card className={styles.console}>
-        <CardHeader icon="terminal" title={LOGS_COPY.consoleTitle} />
-        <ModuleError title={LOGS_COPY.error} error={lastLog.error} onRetry={lastLog.reload} />
-      </Card>
-    );
-  } else if (lastData !== null && lastData.ended === null && lastData.lines.length === 0) {
-    return (
-      <Card className={styles.console}>
-        <CardHeader icon="terminal" title={LOGS_COPY.consoleTitle} subtitle={LOGS_COPY.lastLaunch(formatRelative(lastData.started_at, now), false)} />
-        <EmptyState compact scene="book-pen" title={LOGS_COPY.noOutputTitle} body={LOGS_COPY.noOutputBody} />
-      </Card>
-    );
-  } else if (lastData !== null) {
-    dropped = lastData.omitted;
-    const ended = lastData.ended;
-    subtitle = LOGS_COPY.lastLaunch(formatRelative(lastData.started_at, now), ended !== null && ended.outcome === "crashed");
-  } else {
-    return (
-      <Card className={styles.console}>
-        <CardHeader icon="terminal" title={LOGS_COPY.consoleTitle} subtitle={LOGS_COPY.noRecord} />
-        <EmptyState compact scene="book-pen" title={LOGS_COPY.emptyTitle} body={LOGS_COPY.emptyBody} />
-      </Card>
-    );
-  }
-
-  return (
-    <Card padding="none" className={styles.console}>
       <LogConsole
         title={LOGS_COPY.consoleTitle}
         subtitle={subtitle}
@@ -130,11 +136,13 @@ function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
         filteredEmpty={LOGS_COPY.noLinesForFilter}
         filters={
           <>
+            {/* 计数槽按四位定宽（会话与留底都至多 5000 行）：开局清零、计数进位时级别组不变宽，右边的来源组不被推动 */}
             <SegmentedControl
               size="sm"
               value={level}
               onChange={setLevel}
               ariaLabel={LOGS_COPY.levelFilter}
+              countDigits={LEVEL_COUNT_DIGITS}
               options={[
                 { value: "all", label: LOG_LEVEL_FILTER_LABEL.all, count: counts.all },
                 { value: "warn", label: LOG_LEVEL_FILTER_LABEL.warn, count: counts.warn },
@@ -155,7 +163,45 @@ function ConsoleCard({ inst, queryId, ops }: LogsTabProps) {
           </>
         }
       />
+    );
+  };
+
+  // 卡片恒为无内边距：加载占位照控制台的框架画，换成控制台时只有日志区由骨架交叉淡化成日志，头部不变高、不换底色
+  return (
+    <Card padding="none" className={styles.console}>
+      {/* 占位里的卡头整层对读屏隐藏：加载期间在占位外面另给读屏一个同名标题，内容到了由内容自己的卡头接替 */}
+      {gate.view !== "content" && <h3 className={styles.consoleHeading}>{LOGS_COPY.consoleTitle}</h3>}
+      <Loadable view={gate.view} skeleton={<ConsoleSkeleton />} className={styles.consoleFill} contentClassName={styles.consoleFill}>
+        {content}
+      </Loadable>
+      {/* 慢提示同理放在占位外面，贴在卡片底部 */}
+      {gate.slow && (
+        <div className={styles.consoleSlow}>
+          <SlowHint slow />
+        </div>
+      )}
     </Card>
+  );
+}
+
+/** 级别计数槽的定宽位数：会话日志与留底都至多 5000 行。 */
+const LEVEL_COUNT_DIGITS = 4;
+
+/** 控制台的加载占位：与控制台同一套框架（头部的图标、标题、副标题一行、两组筛选，下面是日志区的行）。 */
+function ConsoleSkeleton() {
+  return (
+    <>
+      <div className={styles.consoleSkeletonHead}>
+        <CardHeader className={styles.consoleSkeletonHeader} icon={<Skeleton shape="square" size={30} />} title={LOGS_COPY.consoleTitle} subtitle={null} />
+        <div className={styles.consoleSkeletonFilters}>
+          <Skeleton shape="block" width={248} height={30} radius="sm" />
+          <Skeleton shape="block" width={176} height={30} radius="sm" />
+        </div>
+      </div>
+      <div className={styles.consoleSkeletonLines}>
+        <Skeleton shape="text" lines={SKELETON_LINES} />
+      </div>
+    </>
   );
 }
 
@@ -165,44 +211,98 @@ const KIND_ICON = { install: "download", update: "refresh", remove: "trash", rol
 const KIND_TONE = { install: "ok", update: "info", remove: "danger", rollback: "accent" } as const;
 const FILE_CHIPS = 2;
 
+/** 变更历史骨架画几条：一屏里常见的条数，多的位置留空。 */
+const HISTORY_SKELETON_ITEMS = 3;
+
+type HistoryPair = { events: HistoryEvent[]; checks: RollbackCheck[] };
+
 function HistoryCard({ queryId, ops }: { queryId: string | null; ops: InstanceOps }) {
   const history = useHistory(queryId);
   const checks = useRollbackChecks(queryId);
   const [limit, setLimit] = useState(HISTORY_PAGE);
 
-  const ready = history.status === "ready" && checks.status === "ready";
+  // 回滚、装卸 Mod 之后两份查询一起失效重取、先后到达：先到的历史里新事件还对不上可回滚检查，按不可回滚画，
+  // 后到的再改一次，时间线连跳两下。重取期间接着画上一份对得上的，两份都落定后一起换
+  const [held, setHeld] = useState<HistoryPair | null>(null);
+  const loaded = history.status === "ready" && checks.status === "ready";
+  const settled = loaded && !history.refreshing && !checks.refreshing ? { events: history.data, checks: checks.data } : null;
+  if (settled !== null && (held === null || held.events !== settled.events || held.checks !== settled.checks)) setHeld(settled);
+  const pair = settled !== null ? settled : loaded ? held : null;
+
   const error = history.status === "error" ? history : checks.status === "error" ? checks : null;
-  const gate = useLoadingGate(!ready && error === null);
-  const items = ready && gate.view === "content" ? historyItems(history.data, checks.data, LOGS_COPY) : null;
-  const rollbackable = items === null ? 0 : items.filter((i) => i.canRollback).length;
-  const subtitle = items === null ? undefined : items.length > 0 ? LOGS_COPY.historySubtitle(items.length, rollbackable) : LOGS_COPY.historyEmptySubtitle;
+  const gate = useLoadingGate(pair === null && error === null);
+  const items = useMemo(() => (pair === null ? null : historyItems(pair.events, pair.checks, LOGS_COPY)), [pair?.events, pair?.checks]);
+  const shownItems = gate.view === "content" ? items : null;
+  const rollbackable = shownItems === null ? 0 : shownItems.filter((i) => i.canRollback).length;
+  // 副标题那一行一直占着：加载中先空着，文案到了淡入；读不出时也空着（重试读到后文案照样回来），
+  // 卡头不在报错的那一刻从两行缩成一行，下面的错误块不上移
+  const subtitle = shownItems === null ? null : shownItems.length > 0 ? LOGS_COPY.historySubtitle(shownItems.length, rollbackable) : LOGS_COPY.historyEmptySubtitle;
 
   return (
     <Card className={styles.historyCard}>
       <CardHeader icon="history" title={LOGS_COPY.historyTitle} subtitle={subtitle} />
-      {gate.view === "content" && error !== null && error.status === "error" && <ModuleError title={LOGS_COPY.historyError} error={error.error} onRetry={error.reload} />}
-      {gate.view === "skeleton" && <Skeleton shape="text" lines={4} />}
+      <Loadable view={gate.view} skeleton={<HistorySkeleton />} className={styles.historyBody} contentClassName={styles.historyBody}>
+        {() => {
+          if (shownItems === null) {
+            if (error === null || error.status !== "error") throw new Error("加载门放行时变更历史不可能还在读取");
+            return <ModuleError title={LOGS_COPY.historyError} error={error.error} onRetry={error.reload} />;
+          }
+          if (shownItems.length === 0) return <EmptyState compact scene="clock" title={LOGS_COPY.historyEmptyTitle} body={LOGS_COPY.historyEmptyBody} />;
+          return <Timeline items={shownItems} limit={limit} onMore={() => setLimit((n) => n + HISTORY_PAGE)} queryId={queryId} ops={ops} />;
+        }}
+      </Loadable>
+      {/* 占位整层对读屏隐藏，慢提示放在它外面，位置仍在骨架条目下方 */}
       <SlowHint slow={gate.slow} />
-      {items !== null && items.length === 0 && <EmptyState compact scene="clock" title={LOGS_COPY.historyEmptyTitle} body={LOGS_COPY.historyEmptyBody} />}
-      {items !== null && items.length > 0 && (
-        <div className={styles.timelineScroll}>
-          <ol className={styles.timeline}>
-            {items.slice(0, limit).map((item) => (
-              <TimelineItem key={item.event.id} item={item} queryId={queryId} ops={ops} />
-            ))}
-          </ol>
-          {items.length > limit && (
-            <Button variant="ghost" size="sm" onClick={() => setLimit((n) => n + HISTORY_PAGE)}>
-              {LOGS_COPY.showEarlier(Math.min(HISTORY_PAGE, items.length - limit))}
-            </Button>
-          )}
-        </div>
-      )}
     </Card>
   );
 }
 
-function TimelineItem({ item, queryId, ops }: { item: HistoryItem; queryId: string | null; ops: InstanceOps }) {
+/** 变更历史的加载占位：与时间线同一套条目框架（节点圆点、连线、标题与元信息两行）。 */
+function HistorySkeleton() {
+  return (
+    <div className={styles.timeline}>
+      {Array.from({ length: HISTORY_SKELETON_ITEMS }, (_, i) => (
+        <div key={i} className={styles.tlItem}>
+          <Skeleton shape="block" width={28} height={28} radius="pill" />
+          <div className={styles.tlBody}>
+            <span className={styles.tlTitle}>
+              <Skeleton shape="text" width={168} />
+            </span>
+            <span className={styles.tlMeta}>
+              <Skeleton shape="text" width={112} />
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Timeline({ items, limit, onMore, queryId, ops }: { items: readonly HistoryItem[]; limit: number; onMore(): void; queryId: string | null; ops: InstanceOps }) {
+  // 时间线挂上之后才出现的条目（回滚、装卸 Mod 记下的新事件，「显示更早」展开的一批）淡入并从略小处落到位；
+  // 挂载时就在的跟着卡片内容一起淡入，不再单独入场
+  const mounted = useMounted();
+  // 新事件插到最上面、被撤销的那条掉了按钮变矮时，其余条目从原位置滑过去；滚动区里的锚定由让位自己按滚动量扣除
+  const reflow = useReflow<HTMLOListElement>();
+  // 「显示更早」在列表外面、是滚动区的直接子项：列表变高变矮时它跟着条目一起滑，不一帧跳过去
+  const scroll = useReflow<HTMLDivElement>();
+  return (
+    <div ref={scroll} className={styles.timelineScroll}>
+      <ol ref={reflow} className={styles.timeline}>
+        {items.slice(0, limit).map((item) => (
+          <TimelineItem key={item.event.id} item={item} entering={mounted.current} queryId={queryId} ops={ops} />
+        ))}
+      </ol>
+      {items.length > limit && (
+        <Button variant="ghost" size="sm" onClick={onMore}>
+          {LOGS_COPY.showEarlier(Math.min(HISTORY_PAGE, items.length - limit))}
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function TimelineItem({ item, entering, queryId, ops }: { item: HistoryItem; entering: boolean; queryId: string | null; ops: InstanceOps }) {
   const actions = useLauncherActions();
   const run = useRunner();
   const now = useNow(30_000);
@@ -218,7 +318,7 @@ function TimelineItem({ item, queryId, ops }: { item: HistoryItem; queryId: stri
   };
 
   return (
-    <li className={styles.tlItem}>
+    <motion.li className={styles.tlItem} initial={entering ? insertItem.initial : false} animate={insertItem.animate}>
       <span className={styles.tlNode} data-tone={KIND_TONE[kind]} aria-hidden="true">
         <Icon name={KIND_ICON[kind]} size={14} />
       </span>
@@ -274,6 +374,6 @@ function TimelineItem({ item, queryId, ops }: { item: HistoryItem; queryId: stri
           )
         )}
       </div>
-    </li>
+    </motion.li>
   );
 }

@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 import { SLOW_LOADING_HINT } from "../../copy/flows";
-import { useLoadingGate } from "../../lib/loading-gate";
+import { useLoadingGate, type LoadingView } from "../../lib/loading-gate";
 import { describeError } from "../../state/errors";
 import type { ResourceResult } from "../../state/resource";
 import { Button } from "../../ui/Button";
@@ -13,14 +13,22 @@ import { OVERVIEW_COPY } from "./copy";
 import styles from "./instance.module.css";
 import type { FolderTarget, InstanceOps } from "./ops";
 
+export type ModuleView = "pending" | "skeleton" | "error" | "ready";
+
 /**
- * 模块此刻该画什么：300 ms 内读到就不出骨架（pending 期间只留卡片框架），骨架一旦出现至少停留 300 ms，
- * 数据早到也等满再换成内容；之后按查询结果画错误或内容。slow 为这一轮加载已超过 10 s。
+ * 模块此刻该画什么：300 ms 内读到就不出骨架（pending），骨架一旦出现至少停留 300 ms，数据早到也等满再换成内容；
+ * 之后按查询结果画错误或内容。slow 为这一轮加载已超过 10 s。pending 期间画什么由调用方定：经 loadableView 交给
+ * ui/Loadable 的，骨架照常占位、只是不可见。
  */
-export function useModuleView(resource: ResourceResult<unknown>): { view: "pending" | "skeleton" | "error" | "ready"; slow: boolean } {
+export function useModuleView(resource: ResourceResult<unknown>): { view: ModuleView; slow: boolean } {
   const gate = useLoadingGate(resource.status === "loading");
   if (gate.view !== "content") return { view: gate.view, slow: gate.slow };
   return { view: resource.status === "error" ? "error" : "ready", slow: false };
+}
+
+/** 交给 ui/Loadable 的那一态：错误与内容都是「内容」，在原位交叉淡入。 */
+export function loadableView(view: ModuleView): LoadingView {
+  return view === "pending" || view === "skeleton" ? view : "content";
 }
 
 /** 骨架下方的「比平时慢一些」：同一轮加载超过 10 s 才出现。 */

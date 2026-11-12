@@ -4,11 +4,13 @@
 
 /* ---------------------------------------------------------------- 骨架：导航 + 内容列 */
 
+/* 导航锚点：换分区时外壳把它滚回视口顶上这么远处，正好是 .navCard 吸顶的 top，滚回时导航卡停在原处不动 */
 .layout {
   display: grid;
   grid-template-columns: 196px minmax(0, 1fr);
   gap: var(--sk-space-18);
   align-items: start;
+  scroll-margin-top: 4px;
 }
 
 :global(:root[data-sk-tier="wide"]) .layout {
@@ -23,6 +25,14 @@
   min-width: 0;
 }
 
+/* 分区里的卡片栈（载入门里的一层，会让位）与载入时的骨架卡栈：卡间距与内容列相同 */
+.sectionFlow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sk-gap);
+  min-width: 0;
+}
+
 /* ---------------------------------------------------------------- 分区导航 */
 
 .navCard {
@@ -31,6 +41,7 @@
 }
 
 .nav {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-2);
@@ -63,11 +74,15 @@
   box-shadow: var(--sk-focus);
 }
 
+/* 选中胶囊：全导航只有一块，排在各项之前、画在它们底下；位置由 lib/slide 写在 translate 上，高度在摆放时按选中项取 */
 .navPill {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: var(--sk-space-8);
+  left: var(--sk-space-8);
   border-radius: var(--sk-r);
   background: var(--sk-accent-soft);
+  pointer-events: none;
 }
 
 .navIcon {
@@ -81,14 +96,44 @@
   background: var(--sk-bg-2);
   color: var(--sk-text-2);
   transition:
-    background-color var(--sk-dur-hover) var(--sk-ease),
+    color var(--sk-dur-hover) var(--sk-ease),
     translate var(--sk-spring-settle-dur) var(--sk-spring-settle);
 }
 
-.navItem[data-on] .navIcon {
+/*
+ * 选中底是渐变，渐变图层之间没法补间：换底会先瞬切、回程再从透明补到底色，中间空一下。
+ * 改成底色常驻、渐变叠在上面一层，只淡入淡出这一层；图标排在叠层之上。
+ */
+.navIcon::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
   background: var(--sk-accent-grad);
+  opacity: 0;
+  transition: opacity var(--sk-dur-hover) var(--sk-ease);
+}
+
+.navIcon > * {
+  position: relative;
+}
+
+.navItem[data-on] .navIcon {
   color: var(--sk-accent-ink);
   translate: 0 -1px;
+}
+
+.navItem[data-on] .navIcon::before {
+  opacity: 1;
+}
+
+/* 减少动画：选中时不上浮，底与图标色照常淡入 */
+:global([data-sk-reduced]) .navIcon {
+  transition: color var(--sk-dur-hover) var(--sk-ease);
+}
+
+:global([data-sk-reduced]) .navItem[data-on] .navIcon {
+  translate: none;
 }
 
 .navText {
@@ -126,25 +171,6 @@
 
 /* ---------------------------------------------------------------- 载入与错误 */
 
-.skeletonCard {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sk-space-16);
-}
-
-.skeletonRow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sk-space-18);
-}
-
-.listSkeleton {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sk-space-10);
-}
-
 .calloutTitle {
   display: block;
   font-weight: var(--sk-w-medium);
@@ -166,6 +192,13 @@
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-12);
+  min-width: 0;
+}
+
+/* 卡头下面会让位的一列设置行：与卡片自己一样纵向排、不加间距，相邻设置行之间的分隔线照常 */
+.flow {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
 }
 
@@ -236,6 +269,23 @@
   min-width: 0;
 }
 
+.idTag {
+  display: inline-flex;
+}
+
+/* client_id 行尾的「清除」「修改」：编辑时淡出并不可交互，但留着位置 */
+.idActions {
+  display: flex;
+  align-items: center;
+  gap: var(--sk-space-8);
+  transition: opacity var(--sk-dur-in) var(--sk-ease-out);
+}
+
+.idActions[data-hidden] {
+  opacity: 0;
+  transition: opacity var(--sk-dur-out) var(--sk-ease-in);
+}
+
 .monoInput input {
   font-family: var(--sk-mono);
 }
@@ -261,10 +311,56 @@
   color: var(--sk-text-2);
 }
 
+/* ---------------------------------------------------------------- 游戏与 Java：让位的栈 */
+
+/* 卡片里挂让位的一层：只把会被挤开的几块收进同一个容器，不改它们原有的间距（外边距、行间分隔线照旧） */
+.slideStack {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/*
+ * 内存滑杆的占位：命中区一行 22（轨道之后是 64 宽的读数列）、刻度行 16、占用说明上距 8 加一行，
+ * 与没有警示条的内存滑杆等高
+ */
+.memorySkeleton {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.memorySkeletonTrack {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 64px;
+  align-items: center;
+  justify-items: end;
+  gap: var(--sk-space-12);
+  height: 22px;
+  margin-bottom: var(--sk-space-16);
+}
+
+.memorySkeletonUsage {
+  display: block;
+  margin-top: var(--sk-space-8);
+  line-height: var(--sk-lh-caption);
+}
+
 /* ---------------------------------------------------------------- Java */
 
 /* 「自动选择」在两列时也独占一整行 */
 .javaList > :first-child {
+  grid-column: 1 / -1;
+}
+
+/* 运行时列表的占位：与单选块网格同列数、同间距，「自动选择」同样独占一行 */
+.javaSkeleton {
+  display: grid;
+  grid-template-columns: repeat(var(--java-skeleton-columns), minmax(0, 1fr));
+  gap: var(--sk-space-10);
+}
+
+.javaSkeleton > :first-child {
   grid-column: 1 / -1;
 }
 
@@ -410,7 +506,9 @@
   color: var(--sk-text);
 }
 
+/* 退场的行脱离布局后以列表为定位基准，留在原处淡出 */
 .dirList {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-2);
@@ -427,7 +525,8 @@
   padding: var(--sk-space-8) 0;
 }
 
-.dirRow + .dirRow {
+/* 行间分隔线只画在在场的行之间：退场中的行（inert）一开始淡出，分隔线就交给下一行，不等它从文档里拿掉 */
+.dirRow:not([inert]) ~ .dirRow:not([inert]) {
   border-top: 1px solid var(--sk-line);
 }
 
@@ -580,6 +679,14 @@
   color: var(--sk-text-2);
 }
 
+/*
+ * 协议全文、附加条款、素材许可与第三方许可的弹窗：内容一定比窗口长，打开就取满高（窗口内容区减四周留白），
+ * 读取中与读到后是同一个框，读到时不从转圈的高度一下撑开。
+ */
+.licenseDialog {
+  height: 100%;
+}
+
 /* 协议原文靠换行与缩进分段，要原样保留；弹窗窄于原文行宽时在行内折行，不出横向滚动条 */
 .licenseText {
   margin: 0;
@@ -687,6 +794,18 @@
   color: var(--sk-text-2);
 }
 
+/* 只给读屏的读取中说明：不占位置、看不见，但仍在无障碍树里 */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* ---------------------------------------------------------------- 启动器更新 */
 
 .updateRow {
@@ -697,12 +816,14 @@
   padding-bottom: var(--sk-space-4);
 }
 
+/* 至少留主句加一行次句：检查中没有次句，状态行也不变矮；次句本来就只有一行，预留不占多余的地方 */
 .updateText {
   display: flex;
   flex: 1;
   flex-direction: column;
   gap: var(--sk-space-2);
   min-width: 0;
+  min-height: calc(var(--sk-lh-body) + var(--sk-space-2) + var(--sk-lh-caption));
 }
 
 .updateTitle {

@@ -10,6 +10,7 @@ import {
   bucketTasks,
   cancelAllConfirm,
   cancelConfirm,
+  chartCeiling,
   chartGeometry,
   durationText,
   etaSpeed,
@@ -18,7 +19,10 @@ import {
   filterOf,
   filterRoute,
   laneSlots,
+  listBuckets,
+  NO_LANES,
   overviewOf,
+  overviewTrack,
   overviewRemaining,
   pushSample,
   rowMeta,
@@ -41,7 +45,7 @@ function task(id: string, overrides: Partial<Task> = {}): Task {
   };
 }
 
-const ctx = (over: Partial<Parameters<typeof rowMeta>[1]> = {}) => ({ queuePosition: null, etaSpeed: 0, now: T0 + 10 * 60_000, ...over });
+const ctx = (over: Partial<Parameters<typeof rowMeta>[1]> = {}) => ({ queuePosition: null, etaSpeed: 0, speed: 0, bytes: 0, now: T0 + 10 * 60_000, ...over });
 
 describe("剩余时间与用时", () => {
   it("剩余时间：秒按 5 向上取整，满 60 秒进到分钟，满 1 小时不再细说", () => {
@@ -107,6 +111,8 @@ describe("分组与筛选", () => {
     expect(taskGroups(b, "active").map((g) => [g.label, g.tasks.length])).toEqual([[null, 3]]);
     expect(taskGroups(b, "done").map((g) => g.tasks.map((t) => t.id))).toEqual([["d2", "d1"]]);
     expect(taskGroups(b, "failed").map((g) => g.tasks.map((t) => t.id))).toEqual([["f1", "c1"]]);
+    // 已完成、失败与取消都是已结束的子集，沿用同一个分组容器：换筛选时列表不重建
+    expect((["all", "active", "done", "failed"] as const).map((f) => taskGroups(b, f).map((g) => g.key))).toEqual([["active", "finished"], ["active"], ["finished"], ["finished"]]);
   });
 
   it("空组不出现：只有已结束的任务时「全部」只剩一组，空筛选返回空数组", () => {
@@ -127,26 +133,90 @@ describe("分组与筛选", () => {
     expect(filterRoute("done")).toEqual({ page: "tasks", filter: "done" });
   });
 
-  it("三条通道依次放运行中的任务，空出的为 null；超过上限是调度的错", () => {
-    expect(laneSlots([running1]).map((t) => (t === null ? null : t.id))).toEqual(["r1", null, null]);
-    expect(laneSlots([]).every((t) => t === null)).toBe(true);
-    expect(() => laneSlots([running1, running2, task("r3", { status: "running" }), task("r4", { status: "running" })])).toThrow("超过了上限 3");
+  const ids = (lanes: readonly (Task | null)[]) => lanes.map((t) => (t === null ? null : t.id));
+
+  it("通道一开始按开始顺序依次放运行中的任务，空出的为 null；超过上限是调度的错", () => {
+    expect(ids(laneSlots(NO_LANES, [running1], []))).toEqual(["r1", null, null]);
+    expect(laneSlots(NO_LANES, [], []).every((t) => t === null)).toBe(true);
+    expect(() => laneSlots(NO_LANES, [running1, running2, task("r3", { status: "running" }), task("r4", { status: "running" })], [])).toThrow("超过了上限 3");
+    expect(() => laneSlots([null], [running1], [])).toThrow("应为 3 条");
+  });
+
+  it("通道粘住任务：前面的任务结束，后面的不换道；新任务填进编号最小的空通道", () => {
+    const r3 = task("r3", { status: "running" });
+    const r4 = task("r4", { status: "running" });
+    // r1 在 1 号道结束：r2、r3 留在 2、3 号道，1 号道空出来
+    expect(ids(laneSlots(["r1", "r2", "r3"], [running2, r3], []))).toEqual([null, "r2", "r3"]);
+    // r4 开始：填进空出的 1 号道，而不是排到末尾
+    expect(ids(laneSlots([null, "r2", "r3"], [running2, r3, r4], []))).toEqual(["r4", "r2", "r3"]);
+    // 两条空道时按开始顺序先填小号
+    expect(ids(laneSlots([null, "r2", null], [running2, r3, r4], []))).toEqual(["r3", "r2", "r4"]);
+  });
+
+  it("收尾的任务留在原通道把进度推满，没有空位的新任务先不画，等收尾结束再接上", () => {
+    const r3 = task("r3", { status: "running" });
+    const r4 = task("r4", { status: "running" });
+    const finished = { ...running1, status: "done" as const, progress: 1, finishedAt: T0 };
+    // r1 刚完成还在收尾、r4 同时开始：三条道都占着，r4 先不画
+    expect(ids(laneSlots(["r1", "r2", "r3"], [running2, r3, r4], [finished]))).toEqual(["r1", "r2", "r3"]);
+    // 收尾结束：r4 接进 1 号道
+    expect(ids(laneSlots(["r1", "r2", "r3"], [running2, r3, r4], []))).toEqual(["r4", "r2", "r3"]);
+    // 收尾的任务不会抢新通道：上一次不在通道里的不画
+    expect(ids(laneSlots([null, null, null], [running2], [finished]))).toEqual(["r2", null, null]);
+  });
+});
+
+describe("列表分组用的桶", () => {
+  it("刚完成、还在收尾的任务留在运行中原来的位置，不进已结束；其余照真实状态分", () => {
+    const r1 = task("r1", { status: "running" });
+    const d1 = task("d1", { status: "done", finishedAt: T0 + 5000, progress: 1 });
+    const r2 = task("r2", { status: "running" });
+    const d0 = task("d0", { status: "done", finishedAt: T0 });
+    const all = [r1, d1, r2, d0];
+    const held = listBuckets(all, new Set(["d1"]));
+    expect(held.running.map((t) => t.id)).toEqual(["r1", "d1", "r2"]);
+    expect(held.done.map((t) => t.id)).toEqual(["d0"]);
+    expect(held.finished.map((t) => t.id)).toEqual(["d0"]);
+    expect(taskGroups(held, "all").map((g) => [g.label, g.tasks.length])).toEqual([
+      ["进行中 · 3", 3],
+      ["已结束 · 1", 1],
+    ]);
+    // 没有在收尾的与 bucketTasks 相同；收尾集合里的失败、取消不算（没有走满这回事）
+    expect(listBuckets(all, new Set())).toEqual(bucketTasks(all));
+    const failed = task("f1", { status: "failed", finishedAt: T0, error: { code: "network_failed", message: "dns" } });
+    expect(listBuckets([failed], new Set(["f1"])).running).toEqual([]);
   });
 });
 
 describe("行内元信息", () => {
   it("运行中：已下 / 总量，速度 · 剩余时间（按平均速度估算）", () => {
     const t = task("r", { status: "running", bytes: 120 * MB, totalBytes: 612 * MB, speedBps: 12 * MB, progress: 0.2 });
-    // 剩余 492 MB，平均 4 MB/s → 123 秒 → 约 3 分钟；显示的速度仍是瞬时值
-    expect(rowMeta(t, ctx({ etaSpeed: 4 * MB }))).toEqual({ left: "120 MB / 612 MB", right: "12.0 MB/s · 约 3 分钟", danger: false });
+    // 剩余 492 MB，平均 4 MB/s → 123 秒 → 约 3 分钟
+    expect(rowMeta(t, ctx({ etaSpeed: 4 * MB, speed: 12 * MB, bytes: 120 * MB }))).toEqual({ left: "120 MB / 612 MB", right: "12.0 MB/s · 约 3 分钟", danger: false });
     // 平均速度还没有（0）时用瞬时速度：492 / 12 = 41 秒 → 约 45 秒
-    expect(rowMeta(t, ctx({ etaSpeed: 0 })).right).toBe("12.0 MB/s · 约 45 秒");
+    expect(rowMeta(t, ctx({ etaSpeed: 0, speed: 12 * MB, bytes: 120 * MB })).right).toBe("12.0 MB/s · 约 45 秒");
+  });
+
+  it("运行中：写出来的是平滑过的显示速度，不是每 100 ms 一跳的瞬时值；等待数据仍按瞬时值判断", () => {
+    const t = task("r", { status: "running", bytes: 120 * MB, totalBytes: 612 * MB, speedBps: 12 * MB, progress: 0.2 });
+    expect(rowMeta(t, ctx({ etaSpeed: 0, speed: 10 * MB, bytes: 120 * MB })).right).toBe("10.0 MB/s · 约 45 秒");
+    expect(rowMeta({ ...t, totalBytes: null }, ctx({ speed: 10 * MB, bytes: 120 * MB })).right).toBe("10.0 MB/s");
+    expect(rowMeta({ ...t, speedBps: 0 }, ctx({ speed: 10 * MB, bytes: 120 * MB })).right).toBe("等待数据");
+  });
+
+  it("运行中：已下大小与剩余时间按写出来的已下字节算（按节拍换字的那个），不是任务里最新报上来的原值", () => {
+    const t = task("r", { status: "running", bytes: 120 * MB, totalBytes: 612 * MB, speedBps: 12 * MB, progress: 0.2 });
+    // 写出来的还停在 60 MB：剩余 552 MB / 12 MB/s = 46 秒 → 约 50 秒；按原值算会是 41 秒 → 约 45 秒
+    expect(rowMeta(t, ctx({ speed: 12 * MB, bytes: 60 * MB }))).toEqual({ left: "60.0 MB / 612 MB", right: "12.0 MB/s · 约 50 秒", danger: false });
+    // 总量未知时同样写写出来的那个；还没写出过任何字节时仍是大小待定
+    expect(rowMeta({ ...t, totalBytes: null }, ctx({ speed: 12 * MB, bytes: 60 * MB })).left).toBe("60.0 MB / 大小待定");
+    expect(rowMeta({ ...t, totalBytes: null }, ctx({ speed: 12 * MB, bytes: 0 })).left).toBe("大小待定");
   });
 
   it("运行中：速度为 0 写等待数据；总量未知时写大小待定，只报速度", () => {
     expect(rowMeta(task("r", { status: "running", bytes: 0, totalBytes: 612 * MB, speedBps: 0 }), ctx()).right).toBe("等待数据");
     expect(rowMeta(task("r", { status: "running", bytes: 0, totalBytes: null, speedBps: 0 }), ctx())).toMatchObject({ left: "大小待定", right: "等待数据" });
-    expect(rowMeta(task("r", { status: "running", bytes: 3 * MB, totalBytes: null, speedBps: MB }), ctx())).toMatchObject({ left: "3.0 MB / 大小待定", right: "1.0 MB/s" });
+    expect(rowMeta(task("r", { status: "running", bytes: 3 * MB, totalBytes: null, speedBps: MB }), ctx({ speed: MB, bytes: 3 * MB }))).toMatchObject({ left: "3.0 MB / 大小待定", right: "1.0 MB/s" });
   });
 
   describe("运行中的分步任务", () => {
@@ -160,7 +230,7 @@ describe("行内元信息", () => {
 
     it("认下了这一步的那批：在第几步之后写这一批的量，右侧照常是速度与剩余时间", () => {
       const t = task("r", { kind: "game", status: "running", bytes: 24_800_000, totalBytes: 124_000_000, speedBps: 4 * MB, phase: { plan: VANILLA, index: 2, batch: { total: 3000, totalBytes: 124_000_000 } } });
-      const meta = rowMeta(t, ctx({ etaSpeed: 4 * MB }));
+      const meta = rowMeta(t, ctx({ etaSpeed: 4 * MB, speed: 4 * MB, bytes: 24_800_000 }));
       expect(meta.left).toBe(`下载资源文件 · 第 3/4 步 · ${TASKS_COPY.row.transfer(formatBytes(24_800_000), formatBytes(124_000_000))}`);
       // 剩余 99.2 MB（这一批的），4 MB/s → 23.7 秒 → 约 25 秒
       expect(meta.right).toBe("4.0 MB/s · 约 25 秒");
@@ -249,13 +319,13 @@ describe("行内元信息", () => {
 describe("吞吐采样与总览", () => {
   const sample = (total: number, tasks: Record<string, number> = {}): ThroughputSample => ({ total, tasks });
 
-  it("采样记下每个运行中任务（按这一次尝试）的速度与总和，只留最近 48 个", () => {
+  it("采样记下每个运行中任务（按这一次尝试）的速度与总和，只留窗口 48 个再多一个（曲线左缘正滑出去的那一个）", () => {
     const s = takeSample([task("a", { status: "running", speedBps: 300 }), task("b", { status: "running", speedBps: 700, attempt: 2 })]);
     expect(s).toEqual({ total: 1000, tasks: { "a#1": 300, "b#2": 700 } });
     let history: ThroughputSample[] = [];
     for (let i = 0; i < THROUGHPUT_SAMPLES + 5; i++) history = pushSample(history, sample(i));
-    expect(history).toHaveLength(THROUGHPUT_SAMPLES);
-    expect([history[0].total, history[THROUGHPUT_SAMPLES - 1].total]).toEqual([5, THROUGHPUT_SAMPLES + 4]);
+    expect(history).toHaveLength(THROUGHPUT_SAMPLES + 1);
+    expect([history[0].total, history[THROUGHPUT_SAMPLES].total]).toEqual([4, THROUGHPUT_SAMPLES + 4]);
   });
 
   it("剩余时间速度取最近 5 秒里这一次尝试的平均；没有采样或平均为 0 时用瞬时速度", () => {
@@ -287,9 +357,11 @@ describe("吞吐采样与总览", () => {
     ]);
     const o = overviewOf(b);
     expect(o).toEqual({ label: "running", speed: 100, downloaded: 1300, total: 2000, fraction: 0.65, localOnly: false });
-    expect(overviewRemaining(o, 0)).toBe("剩余 700 B · 约 10 秒");
-    expect(overviewRemaining(o, 10)).toBe("剩余 700 B · 约 2 分钟");
-    expect(overviewRemaining({ ...o, speed: 0 }, 0)).toBe("剩余 700 B · 等待数据");
+    expect(overviewRemaining(o, o.downloaded, 0)).toBe("剩余 700 B · 约 10 秒");
+    expect(overviewRemaining(o, o.downloaded, 10)).toBe("剩余 700 B · 约 2 分钟");
+    expect(overviewRemaining({ ...o, speed: 0 }, o.downloaded, 0)).toBe("剩余 700 B · 等待数据");
+    // 剩余字节与剩余时间按写出来的已下字节（按节拍换字的那个）算：停在 300 时剩 1700，1700 / 10 = 170 秒 → 约 3 分钟
+    expect(overviewRemaining(o, 300, 10)).toBe("剩余 1.7 KB · 约 3 分钟");
     // 只有总量未知的排队任务、或没有任何活动任务：没有可显示的进度，而不是 0%
     expect(overviewOf(bucketTasks([task("q1")]))).toEqual({ label: "waiting", speed: 0, downloaded: 0, total: 0, fraction: null, localOnly: false });
     expect(overviewOf(bucketTasks([task("d1", { status: "done", finishedAt: T0 })]))).toEqual({ label: "idle", speed: 0, downloaded: 0, total: 0, fraction: null, localOnly: false });
@@ -297,22 +369,54 @@ describe("吞吐采样与总览", () => {
     expect(overviewOf(bucketTasks([task("r0", { status: "running", bytes: 0, totalBytes: 1 })])).fraction).toBe(0);
   });
 
-  it("曲线：不足 48 个采样左侧补 0；纵轴上限至少 4 MB/s，超过时按样本最大值", () => {
-    const empty = chartGeometry([]);
-    expect(empty.line.split(" ")).toHaveLength(THROUGHPUT_SAMPLES);
+  it("总进度环的标识：同一批活动任务进度怎么变都不变；有任务离开、加入或换批次就变，环直接跳到新值", () => {
+    const a = task("a", { status: "running", bytes: 10, totalBytes: 100, batchFiles: 4 });
+    const b = task("b", { status: "running", bytes: 100, totalBytes: 100, batchFiles: 2 });
+    const base = overviewTrack([a, b]);
+    // 顺序无关、进度无关
+    expect(overviewTrack([{ ...b, bytes: 100 }, { ...a, bytes: 60, progress: 0.6 }])).toBe(base);
+    // b 完成离开活动集：组成变了，不从 55% 倒扫回 10%
+    expect(overviewTrack([a])).not.toBe(base);
+    expect(overviewTrack([a, b, task("c")])).not.toBe(base);
+    expect(overviewTrack([{ ...a, totalBytes: 300 }, b])).not.toBe(base);
+    expect(overviewTrack([{ ...a, attempt: 2 }, b])).not.toBe(base);
+  });
+
+  it("曲线：画窗口再多一个点，不足时左侧补 0；最新的一点在右缘外一格，滑一格后正好落在右缘", () => {
+    const step = 100 / (THROUGHPUT_SAMPLES - 1);
+    const right = (THROUGHPUT_SAMPLES * step).toFixed(2);
+    const empty = chartGeometry([], CHART_MIN_CEILING_BPS);
+    expect(empty.line.split(" ")).toHaveLength(THROUGHPUT_SAMPLES + 1);
     expect(empty.line.startsWith("M0.00,30.00")).toBe(true);
 
     // 2 MB/s 在 4 MB/s 的上限下画到一半高度：30 - 25 × 0.5
-    const low = chartGeometry([CHART_MIN_CEILING_BPS / 2]);
+    const low = chartGeometry([CHART_MIN_CEILING_BPS / 2], CHART_MIN_CEILING_BPS);
     expect(low.idle).toBe(false);
-    expect(low.line.endsWith("L100.00,17.50")).toBe(true);
-    expect(low.area.endsWith("L100,30 L0,30 Z")).toBe(true);
+    expect(low.line.endsWith(`L${right},17.50`)).toBe(true);
+    expect(low.area.endsWith(`L${right},30 L0,30 Z`)).toBe(true);
 
-    // 上限随样本最大值抬高：最大的那个画到顶（距顶 5）
-    const high = chartGeometry([8 * MB, 4 * MB]);
+    // 按给的上限画：等于上限的画到顶（距顶 5），其余按比例
+    const high = chartGeometry([8 * MB, 4 * MB], 8 * MB);
     const points = high.line.split(" ");
-    expect(points[THROUGHPUT_SAMPLES - 2]).toBe(`L${((46 / 47) * 100).toFixed(2)},5.00`);
-    expect(points[THROUGHPUT_SAMPLES - 1]).toBe("L100.00,17.50");
+    expect(points[THROUGHPUT_SAMPLES - 1]).toBe(`L${(47 * step).toFixed(2)},5.00`);
+    expect(points[THROUGHPUT_SAMPLES]).toBe(`L${right},17.50`);
+    // 上限比要画的采样低是调用方的错：曲线会画出视图
+    expect(() => chartGeometry([8 * MB], 4 * MB)).toThrow("低于要画的采样");
+  });
+
+  it("纵轴上限：至少 4 MB/s、不低于画着的采样；峰值滑出窗口后每个采样只回落一成，不一下落到新的最大值", () => {
+    expect(chartCeiling(null, [])).toBe(CHART_MIN_CEILING_BPS);
+    expect(chartCeiling(null, [MB, 20 * MB, 3 * MB])).toBe(20 * MB);
+    // 峰值已经不在：上一次 20 MB/s，这一次只降到 18 MB/s
+    expect(chartCeiling(20 * MB, [3 * MB, 2 * MB])).toBeCloseTo(18 * MB, 0);
+    // 一直没有新峰值，一路回落到最低上限为止
+    let ceiling = 20 * MB;
+    for (let i = 0; i < 60; i++) ceiling = chartCeiling(ceiling, [MB]);
+    expect(ceiling).toBe(CHART_MIN_CEILING_BPS);
+    // 新的峰值比回落中的上限高：立刻抬上去
+    expect(chartCeiling(10 * MB, [30 * MB])).toBe(30 * MB);
+    // 左缘外正滑出去的那一个也还画着，也算
+    expect(chartCeiling(null, [9 * MB, ...Array<number>(THROUGHPUT_SAMPLES).fill(0)])).toBe(9 * MB);
   });
 });
 
@@ -320,22 +424,22 @@ describe("曲线空闲的判定", () => {
   const zeros = (count: number) => Array<number>(count).fill(0);
 
   it("采样不足一个窗口时不判空闲：采样从进页才开始，更早有没有流量不知道", () => {
-    expect(chartGeometry([]).idle).toBe(false);
-    expect(chartGeometry(zeros(1)).idle).toBe(false);
-    expect(chartGeometry(zeros(THROUGHPUT_SAMPLES - 1)).idle).toBe(false);
+    expect(chartGeometry([], CHART_MIN_CEILING_BPS).idle).toBe(false);
+    expect(chartGeometry(zeros(1), CHART_MIN_CEILING_BPS).idle).toBe(false);
+    expect(chartGeometry(zeros(THROUGHPUT_SAMPLES - 1), CHART_MIN_CEILING_BPS).idle).toBe(false);
   });
 
   it("采满一个窗口且全为 0 才判空闲；超出窗口的采样不算", () => {
-    expect(chartGeometry(zeros(THROUGHPUT_SAMPLES)).idle).toBe(true);
-    expect(chartGeometry([MB, ...zeros(THROUGHPUT_SAMPLES)]).idle).toBe(true);
+    expect(chartGeometry(zeros(THROUGHPUT_SAMPLES), CHART_MIN_CEILING_BPS).idle).toBe(true);
+    expect(chartGeometry([MB, ...zeros(THROUGHPUT_SAMPLES)], CHART_MIN_CEILING_BPS).idle).toBe(true);
   });
 
   it("窗口里任何一秒有流量都不算空闲", () => {
     const at = Math.floor(Math.random() * THROUGHPUT_SAMPLES);
     const window = zeros(THROUGHPUT_SAMPLES);
     window[at] = 1;
-    expect(chartGeometry(window).idle, `第 ${at} 秒有 1 B/s`).toBe(false);
-    expect(chartGeometry([...zeros(THROUGHPUT_SAMPLES - 1), 1]).idle).toBe(false);
+    expect(chartGeometry(window, CHART_MIN_CEILING_BPS).idle, `第 ${at} 秒有 1 B/s`).toBe(false);
+    expect(chartGeometry([...zeros(THROUGHPUT_SAMPLES - 1), 1], CHART_MIN_CEILING_BPS).idle).toBe(false);
   });
 });
 

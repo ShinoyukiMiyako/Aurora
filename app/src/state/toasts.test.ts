@@ -63,6 +63,22 @@ describe("通知去重与挤出", () => {
     expect(otherBody.state.items).toHaveLength(2);
   });
 
+  it("并进旧条时记一次重复：新条从 0 起，每并进一次加 1，别的通知不动", () => {
+    const first = pushToast(EMPTY_TOASTS, { tone: "info", title: "已复制" }, T0);
+    expect(first.state.items[0].repeats).toBe(0);
+    let s = push(first.state, { tone: "warning", title: "另一条" }, T0 + 10);
+    // 去重窗口 3000 ms 内随机并进 1 到 5 次
+    const times = 1 + Math.floor(Math.random() * 5);
+    for (let i = 1; i <= times; i++) s = push(s, { tone: "info", title: "已复制" }, T0 + i * 500);
+    expect(s.items.map((t) => [t.title, t.repeats])).toEqual([
+      ["已复制", times],
+      ["另一条", 0],
+    ]);
+    // 窗口外的同文案是新的一条，从 0 起
+    s = push(s, { tone: "info", title: "已复制" }, T0 + 3001);
+    expect(s.items.map((t) => t.repeats)).toEqual([times, 0, 0]);
+  });
+
   it("第 5 条挤掉最早的非 error 条", () => {
     let s = push(EMPTY_TOASTS, { tone: "error", title: "E1" });
     s = push(s, { tone: "info", title: "I1" });

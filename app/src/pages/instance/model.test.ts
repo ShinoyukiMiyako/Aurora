@@ -14,7 +14,10 @@ import {
   batchAvailability,
   batchRemovalRelations,
   crashFixes,
+  crashFixRowEstimate,
+  crashRanAfter,
   crashFixKey,
+  creationFinished,
   creationRef,
   creationRefEqual,
   deletableWorldCount,
@@ -26,6 +29,7 @@ import {
   filterMods,
   hasFlags,
   hasGraphicsClue,
+  heldInstallStage,
   historyItems,
   installStage,
   instanceFolderPath,
@@ -44,15 +48,18 @@ import {
   parseDimension,
   peekLayout,
   peekPerRow,
+  peekPlaceholder,
   presetFlags,
   RESOLUTION_LIMITS,
   removalRelations,
   sortRows,
   sortWorlds,
   playtimeNote,
+  tabStep,
   toggleFlags,
   weeklyHours,
   workLock,
+  worldsPlaceholder,
   type CrashFix,
   type CrashFixContext,
 } from "./model";
@@ -177,6 +184,24 @@ describe("上次崩溃判定", () => {
     expect(isCrashActive(5000, 4000, "loading")).toBe(false);
     expect(isCrashActive(5000, 4000, "running")).toBe(false);
     expect(isCrashActive(5000, 4000, "crashed")).toBe(true);
+  });
+
+  it("这份崩溃之后又跑起来过：上次游玩还是旧值也不再提示；换了一份崩溃照常提示", () => {
+    expect(isCrashActive(5000, 4000, "stopped", 5000)).toBe(false);
+    expect(isCrashActive(5000, 4000, "ready", 5000)).toBe(false);
+    expect(isCrashActive(5000, 4000, "stopped", 3000)).toBe(true);
+    expect(isCrashActive(5000, 4000, "stopped", null)).toBe(true);
+  });
+
+  it("运行中记下此刻的崩溃时刻，又崩了一次清掉，其余时候保持", () => {
+    expect(crashRanAfter(null, 5000, "running")).toBe(5000);
+    expect(crashRanAfter(3000, 5000, "running")).toBe(5000);
+    expect(crashRanAfter(null, null, "running")).toBeNull();
+    expect(crashRanAfter(5000, 5000, "stopped")).toBe(5000);
+    expect(crashRanAfter(5000, 5000, "ready")).toBe(5000);
+    expect(crashRanAfter(5000, 5000, "loading")).toBe(5000);
+    expect(crashRanAfter(5000, 5000, "crashed")).toBeNull();
+    expect(crashRanAfter(null, 5000, "ready")).toBeNull();
   });
 });
 
@@ -306,6 +331,20 @@ describe("概览横幅取最高严重度", () => {
   });
 });
 
+describe("换标签时面板的来向", () => {
+  const ORDER = ["overview", "mods", "settings", "logs", "crash"] as const;
+  it("新标签在旧标签右边从右侧进来，左边从左侧进来，隔几个都一样", () => {
+    expect(tabStep(ORDER, "overview", "mods")).toBe(1);
+    expect(tabStep(ORDER, "mods", "crash")).toBe(1);
+    expect(tabStep(ORDER, "logs", "settings")).toBe(-1);
+    expect(tabStep(ORDER, "crash", "overview")).toBe(-1);
+  });
+
+  it("不在顺序里的标签直接报错，不猜一个方向", () => {
+    expect(() => tabStep<string>(ORDER, "overview", "history")).toThrow("不在标签顺序里");
+  });
+});
+
 describe("新建与导入还没装好", () => {
   const T0 = 1_700_000_000_000;
   const NAME = "周末生存";
@@ -327,7 +366,14 @@ describe("新建与导入还没装好", () => {
       task("java", "install_java", "running", { instanceId: null }),
     ];
     expect(creationRef(others, NAME)).toBeNull();
-    expect(creationRef([...others, task("pack", "install_modpack", "queued")], NAME)).toEqual({ id: "pack", status: "queued", title: "任务 pack", modpack: true, error: null });
+    expect(creationRef([...others, task("pack", "install_modpack", "queued")], NAME)).toEqual({
+      id: "pack",
+      status: "queued",
+      title: "任务 pack",
+      modpack: true,
+      error: null,
+      finishedAt: null,
+    });
   });
 
   it("进行中的优先于更晚建的已结束任务；都结束时取最近建的，建的时刻相同取排在后面的", () => {
@@ -349,6 +395,29 @@ describe("新建与导入还没装好", () => {
     expect(creationRefEqual(failedA, failedB)).toBe(false);
     expect(creationRefEqual(null, null)).toBe(true);
     expect(creationRefEqual(before, null)).toBe(false);
+    const doneA = creationRef([task("t", "install_version", "done", { finishedAt: T0 + 10 })], NAME);
+    const doneB = creationRef([task("t", "install_version", "done", { finishedAt: T0 + 20 })], NAME);
+    expect(creationRefEqual(doneA, doneB)).toBe(false);
+  });
+
+  it("刚完成的新建交给收尾：只有已完成的才算，带完成时刻；完成了却没有时刻是状态层的约定坏了", () => {
+    expect(creationFinished(null)).toEqual([]);
+    expect(creationFinished(creationRef([task("t", "install_version", "running")], NAME))).toEqual([]);
+    expect(creationFinished(creationRef([task("t", "install_version", "failed", { error: failure, finishedAt: T0 + 5 })], NAME))).toEqual([]);
+    expect(creationFinished(creationRef([task("t", "install_version", "done", { finishedAt: T0 + 5 })], NAME))).toEqual([{ id: "t", finishedAt: T0 + 5 }]);
+    expect(() => creationFinished(creationRef([task("t", "install_version", "done", { finishedAt: null })], NAME))).toThrow("已完成的任务 t 没有完成时刻");
+  });
+
+  it("刚完成、还在收尾时照旧按在跑画，标题沿用任务的；收尾过了、或不是完成（失败、取消）都按实际阶段", () => {
+    const done = creationRef([task("t", "install_version", "done", { finishedAt: T0 + 5 })], NAME);
+    const landing = installStage(placeholder, done);
+    expect(heldInstallStage(landing, done, new Set(["t"]))).toEqual({ kind: "running", title: "任务 t" });
+    expect(heldInstallStage({ kind: "none" }, done, new Set(["t"]))).toEqual({ kind: "running", title: "任务 t" });
+    expect(heldInstallStage(landing, done, new Set())).toEqual({ kind: "landing" });
+    expect(heldInstallStage(landing, done, new Set(["别的任务"]))).toEqual({ kind: "landing" });
+    const cancelled = creationRef([task("t", "install_version", "cancelled", { finishedAt: T0 + 5 })], NAME);
+    expect(heldInstallStage(installStage(placeholder, cancelled), cancelled, new Set(["t"]))).toEqual({ kind: "landing" });
+    expect(heldInstallStage({ kind: "none" }, null, new Set(["t"]))).toEqual({ kind: "none" });
   });
 
   it("任务在排队或在跑：占位项与扫到了半成品目录的实例一样只给说明", () => {
@@ -717,6 +786,29 @@ describe("Mod 速览", () => {
     expect(peekLayout(24, 168, 7)).toEqual({ shown: 13, more: 155 });
     expect(peekLayout(5, 168, 7)).toEqual({ shown: 5, more: 163 });
   });
+
+  it("读到列表之前的占位格数按实例列表里的 Mod 数，至多两行；没有 Mod 占一格，读不出占一整行", () => {
+    expect(peekPlaceholder(3, 7)).toBe(3);
+    expect(peekPlaceholder(14, 7)).toBe(14);
+    expect(peekPlaceholder(168, 7)).toBe(14);
+    expect(peekPlaceholder(168, 4)).toBe(8);
+    expect(peekPlaceholder(0, 7)).toBe(1);
+    expect(peekPlaceholder(null, 7)).toBe(7);
+  });
+});
+
+describe("存档卡加载期的占位", () => {
+  it("按实例列表里的存档数画行，至多 5 行，超出时加展开钮那一栏", () => {
+    expect(worldsPlaceholder(2)).toEqual({ kind: "rows", rows: 2, foot: false });
+    expect(worldsPlaceholder(5)).toEqual({ kind: "rows", rows: 5, foot: false });
+    expect(worldsPlaceholder(6)).toEqual({ kind: "rows", rows: 5, foot: true });
+    expect(worldsPlaceholder(40)).toEqual({ kind: "rows", rows: 5, foot: true });
+  });
+
+  it("没有存档画空状态的轮廓；存档数读不出时按 3 行", () => {
+    expect(worldsPlaceholder(0)).toEqual({ kind: "empty" });
+    expect(worldsPlaceholder(null)).toEqual({ kind: "rows", rows: 3, foot: false });
+  });
 });
 
 describe("存档排序", () => {
@@ -933,6 +1025,28 @@ describe("一键尝试：每个诊断类别都有落点", () => {
   it("不认识的类别照样抛错：上面的遍历靠这一点才抓得住漏掉的类别", () => {
     const stray = "cosmic_ray" as unknown as CrashClueDto["category"];
     expect(() => crashFixes(report([clue(stray)]), ctx())).toThrow("未知的崩溃诊断类别：cosmic_ray");
+  });
+});
+
+describe("一键尝试的骨架行数", () => {
+  it.each(CRASH_CATEGORIES)("%s 单独出现时：不比推出来的行少，不出行的类别只留对照完整日志", (category) => {
+    const one = report([clue(category)]);
+    const fixes = crashFixes(one, ctx()).length;
+    expect(crashFixRowEstimate(one)).toBeGreaterThanOrEqual(fixes);
+    expect(crashFixRowEstimate(one)).toBe(category === "manual_debug_crash" || category === "loopback_unavailable" ? 1 : 2);
+  });
+
+  it("同一类别只算一行，显卡驱动、Intel 显卡驱动与本地崩溃共用一行，末尾恒有对照完整日志", () => {
+    expect(crashFixRowEstimate(report([]))).toBe(1);
+    expect(crashFixRowEstimate(report([clue("out_of_memory"), clue("out_of_memory")]))).toBe(2);
+    expect(crashFixRowEstimate(report([clue("graphics_driver"), clue("intel_graphics_driver"), clue("native_crash")]))).toBe(2);
+    expect(crashFixRowEstimate(report([clue("out_of_memory"), clue("manual_debug_crash"), clue("native_crash"), clue("mixin_failure")]))).toBe(4);
+    expect(crashFixRowEstimate(report(CRASH_CATEGORIES.map((c) => clue(c))))).toBe(CRASH_CATEGORIES.length - 2 - 2 + 1);
+  });
+
+  it("不认识的类别抛错，不按出行或不出行猜", () => {
+    const stray = "cosmic_ray" as unknown as CrashClueDto["category"];
+    expect(() => crashFixRowEstimate(report([clue(stray)]))).toThrow("未知的崩溃诊断类别：cosmic_ray");
   });
 });
 

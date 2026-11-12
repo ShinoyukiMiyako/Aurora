@@ -130,6 +130,29 @@ describe("HTML 正文", () => {
     ]);
   });
 
+  it("图片同时写了像素宽高才带上尺寸：百分比、零、只写一边、非数字都不算", () => {
+    const images = parseHtml(
+      [
+        '<img src="https://i.io/a.png" width="600" height="338">',
+        '<img src="https://i.io/b.png" width="640px" height=" 360.5 ">',
+        '<img src="https://i.io/c.png" width="100%" height="200">',
+        '<img src="https://i.io/d.png" width="0" height="200">',
+        '<img src="https://i.io/e.png" width="300">',
+        '<img src="https://i.io/f.png" width="auto" height="auto">',
+      ].join(""),
+    ).flatMap((block) => (block.t === "p" ? block.c : []));
+    expect(images.map((n) => (n.t === "image" ? n.size : "不是图片"))).toEqual([
+      { width: 600, height: 338 },
+      { width: 640, height: 360.5 },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(images[2]).toEqual({ t: "image", src: "https://i.io/c.png", alt: "" });
+    expect("size" in images[2]).toBe(false);
+  });
+
   it("裸文字与行内元素并成段落，空白折叠；按格式分派", () => {
     expect(parseHtml("  前  <em>斜</em>\n\n后  ")).toEqual([{ t: "p", c: [{ t: "text", v: "前 " }, { t: "em", c: [{ t: "text", v: "斜" }] }, { t: "text", v: " 后" }] }]);
     expect(parseBody("**x**", "markdown")).toEqual([{ t: "p", c: [{ t: "strong", c: [{ t: "text", v: "x" }] }] }]);

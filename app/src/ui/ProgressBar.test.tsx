@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
 import { MotionConfig, type MotionValue } from "framer-motion";
 import { afterEach, describe, expect, it } from "vitest";
-import { render, type Rendered } from "../test/dom";
+import { render, waitForFrames, type Rendered } from "../test/dom";
 import { fillOffset, MIN_VISIBLE_PROGRESS, nextProgressTarget, ProgressBar, useSmoothProgress, visibleProgress } from "./ProgressBar";
 import { ProgressRing, RING_EMPTY_TEXT, RING_PLACEHOLDER, RING_STROKE, ringHasLabel } from "./ProgressRing";
 
@@ -91,6 +92,30 @@ describe("useSmoothProgress", () => {
       </MotionConfig>,
     );
     expect(latest()).toBe(0.8);
+  });
+
+  // 调用方在同一组件里接着用 useTransform 派生文字与位移，它每次渲染都在布局阶段退订再重订：跳变不能落在这个空当里
+  it("跳到的新值也画到同组件派生的文字与位移上：减少动画下不慢一次上报，换标识后不停在上一个任务的进度", async () => {
+    const reducedRing = (value: number) => (
+      <MotionConfig reducedMotion="always">
+        <ProgressRing value={value} size={36} track="t" label="下载" />
+      </MotionConfig>
+    );
+    view = render(reducedRing(0.6));
+    view.rerender(reducedRing(0.8));
+    await waitForFrames(() => expect(view?.container.textContent).toBe("80%"));
+    view.unmount();
+
+    const bar = (value: number, track: string) => (
+      <MotionConfig reducedMotion="never">
+        <ProgressBar value={value} track={track} label="安装" />
+      </MotionConfig>
+    );
+    view = render(bar(0.9, "t#1"));
+    view.rerender(bar(0.1, "t#2"));
+    const fill = view.container.querySelector<HTMLElement>('[role="progressbar"] > span');
+    if (fill === null) throw new Error("进度条没有填充");
+    await waitForFrames(() => expect(fill.style.transform).toBe("translateX(-90%)"));
   });
 
   it("完整动画下换标识也立即跳到新值", () => {
@@ -279,5 +304,64 @@ describe("ProgressRing", () => {
 
   it("没有名称时抛错", () => {
     expect(() => render(<ProgressRing value={0.5} />)).toThrow(/label 或 labelledBy/);
+  });
+
+  // 减少动画下平滑值直接跳到目标：不停住的弧在下一帧就会退回起点。同屏另一只环跳到新值，说明那一帧已经渲染过
+  it("转为没有进度时填充弧不在那一帧移除，停在原位淡出，不随占位的 0 往回走", async () => {
+    const circumference = 2 * Math.PI * ((84 - 7) / 2);
+    const pair = (a: number | null, b: number) => (
+      <MotionConfig reducedMotion="always">
+        <span data-ring="a">
+          <ProgressRing value={a} size={84} tone={a === null ? "muted" : "accent"} label="下载总进度" />
+        </span>
+        <span data-ring="b">
+          <ProgressRing value={b} size={84} label="对照" />
+        </span>
+      </MotionConfig>
+    );
+    const fillIn = (name: string) => {
+      const fill = view?.container.querySelectorAll(`[data-ring="${name}"] circle`)[1];
+      if (fill === undefined) throw new Error(`进度环 ${name} 没有填充弧`);
+      return fill;
+    };
+    const offsetOf = (el: Element) => Number(el.getAttribute("stroke-dashoffset"));
+    view = render(pair(0.6, 0.6));
+    const fill = fillIn("a");
+    expect(offsetOf(fill)).toBeCloseTo(circumference * 0.4, 5);
+    view.rerender(pair(null, 0.3));
+    expect(emptyRing().textContent).toBe("--");
+    expect(fillIn("a")).toBe(fill);
+    await waitForFrames(() => expect(offsetOf(fillIn("b"))).toBeCloseTo(circumference * 0.7, 3));
+    expect(offsetOf(fill)).toBeCloseTo(circumference * 0.4, 5);
+  });
+
+  it("挂载时就有进度的填充弧直接显示；挂载之后才出现的从透明淡入", () => {
+    // SVG 元素上 framer-motion 把透明度写成属性
+    view = render(<ProgressRing value={0.5} size={36} label="下载" />);
+    expect(ring().querySelectorAll("circle")[1].getAttribute("opacity")).toBe("1");
+    view.unmount();
+    view = render(<ProgressRing value={0} size={36} label="下载" />);
+    view.rerender(<ProgressRing value={0.5} size={36} label="下载" />);
+    expect(ring().querySelectorAll("circle")[1].getAttribute("opacity")).toBe("0");
+  });
+});
+
+describe("进度填充的样式", () => {
+  const strip = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, "");
+  const ruleOf = (file: string, selector: string) => {
+    const css = strip(readFileSync(new URL(file, import.meta.url), "utf8"));
+    const rule = new RegExp(`(?:^|\\n)${selector.replace(".", "\\.")} \\{([^}]*)\\}`).exec(css);
+    if (rule === null) throw new Error(`${file} 里没有 ${selector} 规则`);
+    return rule[1];
+  };
+
+  it("确定进度条的填充不常驻 will-change：任务页几十行会各占一个合成层；循环的光带照常保留", () => {
+    expect(ruleOf("./ProgressBar.module.css", ".fill")).not.toContain("will-change");
+    expect(ruleOf("./ProgressBar.module.css", ".indeterminate")).toContain("will-change: transform");
+  });
+
+  it("进度环换色调时描边色与圆心字色一次性过渡", () => {
+    expect(ruleOf("./ProgressRing.module.css", ".fill")).toContain("transition: stroke var(--sk-dur-hover) var(--sk-ease)");
+    expect(ruleOf("./ProgressRing.module.css", ".label")).toContain("transition: color var(--sk-dur-hover) var(--sk-ease)");
   });
 });

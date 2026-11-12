@@ -2,10 +2,10 @@
 // checked 为 "mixed" 时显示半选（表头的「部分已选」），点击后变为全选。
 // Space 切换；Enter 不切换（与原生复选框一致，表单里的 Enter 留给提交）。
 
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotionConfig } from "framer-motion";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { Icon } from "../art/Icon";
-import { fade, springs } from "../lib/motion";
+import { faceSwap } from "../lib/motion";
 import { cx } from "../lib/util";
 import styles from "./Checkbox.module.css";
 import { mergeDescribedBy, useFieldControl } from "./Field";
@@ -32,6 +32,8 @@ export function Checkbox({ checked, onChange, label, ariaLabel, invalid = false,
   const softDisabled = disabledReason !== undefined && !disabled;
   const isInvalid = invalid || (field !== null && field.invalid);
   const glyph = checked === "mixed" ? "minus" : checked ? "check" : null;
+  // 减少动画时缩放是一步到位的，勾号只淡入淡出
+  const swap = useReducedMotionConfig() === true ? faceSwap.reduced : faceSwap.pop;
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
     // 按钮的 Enter 会合成一次点击，这里拦下
@@ -60,13 +62,7 @@ export function Checkbox({ checked, onChange, label, ariaLabel, invalid = false,
       <span className={styles.box}>
         <AnimatePresence initial={false}>
           {glyph !== null && (
-            <motion.span
-              key={glyph}
-              className={styles.glyph}
-              initial={{ opacity: 0, scale: 0.6 }}
-              animate={{ opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } }}
-              exit={{ opacity: 0, transition: fade.out }}
-            >
+            <motion.span key={glyph} className={styles.glyph} initial={swap.initial} animate={swap.animate} exit={faceSwap.exit}>
               <Icon name={glyph} size={14} />
             </motion.span>
           )}

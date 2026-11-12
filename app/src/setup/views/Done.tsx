@@ -1,8 +1,12 @@
+import { motion } from "framer-motion";
+import { Icon } from "../../art/Icon";
+import { fade, springs } from "../../lib/motion";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
 import type { InstallMode } from "../contract";
 import type { SetupCopy } from "../copy";
 import { Frame } from "../Frame";
+import styles from "./Done.module.css";
 
 export interface DoneProps {
   copy: SetupCopy;
@@ -27,7 +31,15 @@ export function Done({ copy, mode, version, keptData, elevated, opening, onOpen,
   const text = copy.done;
   return (
     <Frame
-      title={text.title[mode](version)}
+      title={
+        <span className={styles.title}>
+          {/* 装好了的落点：徽记从小处弹出来。减少动画时根部 MotionConfig 关掉缩放，只剩淡入 */}
+          <motion.span className={styles.mark} aria-hidden="true" initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1, transition: { ...springs.base, opacity: fade.in } }}>
+            <Icon name="check" size={18} />
+          </motion.span>
+          {text.title[mode](version)}
+        </span>
+      }
       lead={keptData ? text.kept : text.firstRun}
       footer={
         <>

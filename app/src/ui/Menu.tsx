@@ -7,6 +7,7 @@
 // 禁用原因不显而易见的项（「游戏运行中不能修改」）给出 disabledReason：指针停在该项上、或键盘高亮到它时，以提示气泡写明原因。
 // 这类项与带原因禁用的按钮一样保持可达：跳过它们的话，键盘与读屏用户只知道少了一项，看不到原因；Enter / Space 与点击对它们无效。
 
+import { useIsPresent } from "framer-motion";
 import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Icon, type IconName } from "../art/Icon";
 import { isImeComposing } from "../lib/util";
@@ -97,6 +98,9 @@ function MenuList({ items, onClose, openedBy, id, aria }: MenuListProps) {
   const last = reachable.lastIndexOf(true);
   const [highlight, setHighlight] = useState(() => (openedBy === "keyboard" ? first : openedBy === "keyboard-last" ? last : -1));
   const pushTypeahead = useTypeahead();
+  // 菜单开始退场时先收起禁用原因的气泡：它在浮层根里自成一层，不跟着面板淡出，
+  // 留到面板卸载才会连同退场动画一起被直接拿掉
+  const present = useIsPresent();
 
   useLayoutEffect(() => {
     listRef.current?.focus();
@@ -199,7 +203,7 @@ function MenuList({ items, onClose, openedBy, id, aria }: MenuListProps) {
         );
         if (entry.disabled !== true || entry.disabledReason === undefined) return item;
         return (
-          <Tooltip key={i} content={entry.disabledReason} side="right" wrap open={highlight === i}>
+          <Tooltip key={i} content={entry.disabledReason} side="right" wrap open={highlight === i} disabled={!present}>
             {item}
           </Tooltip>
         );

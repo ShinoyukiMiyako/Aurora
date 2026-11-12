@@ -5,9 +5,11 @@
 // - 键盘：↑↓ 首尾循环移动高亮，Enter 执行，Tab 不做事（焦点留在输入框），输入法组字期间不响应；指针移动即高亮。
 // - 执行：先同步关闭面板再执行动作，动作弹出的确认框、弹窗才在栈顶；导航类动作不把焦点还给打开前的元素，
 //   而是交给内容区，读屏从新页面开头读起。
+// - 结果列表：键入过滤时整批换上；面板开着时后台数据插进、拿掉条目（数据晚到、占位实例转正、当前实例的启动项换了），
+//   插进来的淡入，被挤开的从旧位置滑到新位置。
 
-import { AnimatePresence, motion, useIsPresent } from "framer-motion";
-import { useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { AnimatePresence, motion, useIsPresent, useReducedMotionConfig } from "framer-motion";
+import { useCallback, useId, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { createPortal, flushSync } from "react-dom";
 import { Icon, type IconName } from "../art/Icon";
 import { ACTION_ERROR, LAUNCH_COPY, LOADER_NAME, MSA_CLIENT_ID_MISSING, PAGE_LABEL, SETTINGS_SECTION_LABEL, accountKindLabel } from "../copy/flows";
@@ -15,15 +17,18 @@ import type { InstanceSummary } from "../domain/adapt";
 import { InstanceAvatar } from "../launch/InstanceAvatar";
 import { brokenAction } from "../launch/launchView";
 import { useLaunch, type LaunchEntry } from "../launch/useLaunch";
-import { fade, springs } from "../lib/motion";
+import { fade, insertItemFade, springs } from "../lib/motion";
+import { REFLOW_PAUSED_ATTR, useReflow } from "../lib/reflow";
+import { playTween } from "../lib/slide";
 import { isImeComposing } from "../lib/util";
 import { useAppearance } from "../state/appearance";
 import { useLauncherActions, useLauncherSelector } from "../state/launcher";
 import type { LauncherState } from "../state/store";
-import { SETTINGS_SECTIONS, type PageId, type Route } from "../state/route";
+import { SETTINGS_SECTIONS, sameRoute, type PageId, type Route } from "../state/route";
 import { activeAccount, findInstance, microsoftLoginUnavailable } from "../state/selectors";
 import { FocusReturnPoint, type FocusReturnHandle } from "../ui/focus-return";
 import { KeyHint } from "../ui/KeyHint";
+import { useOpenGeneration } from "../ui/Popover";
 import { useSwitchAccount } from "./AccountCapsule";
 import { useChrome } from "./chrome";
 import styles from "./CommandPalette.module.css";
@@ -64,16 +69,28 @@ const SECTION_KEYWORDS: Readonly<Record<(typeof SETTINGS_SECTIONS)[number], read
 
 const JUMP_PAGES: readonly Exclude<PageId, "instance">[] = ["home", "library", "discover", "tasks", "accounts", "settings"];
 
+/**
+ * 面板的进出：从上方 8px、略小处落下淡入，退场原地略缩淡出。减少动画时换成 insertItemFade：根部 MotionConfig
+ * 把位移与缩放改成一步到位，照用这一份的话关闭那一刻面板会先缩一下再淡出。
+ */
+const PANEL_MOTION = {
+  initial: { opacity: 0, y: -8, scale: 0.98 },
+  animate: { opacity: 1, y: 0, scale: 1, transition: { ...springs.soft, opacity: fade.in } },
+  exit: { opacity: 0, scale: 0.98, transition: fade.out },
+} as const;
+
 export function CommandPalette() {
   const { palette, closePalette } = useShell();
   const root = useOverlayRoot();
   const focusReturn = useRef<FocusReturnHandle | null>(null);
+  // 退场途中再按 Ctrl+K：同一个 key 会把正在退场的面板拉回来，连同上次的关键词与高亮；每次打开换 key，新面板从头挂载
+  const generation = useOpenGeneration(palette.open);
   useEscapeLayer(palette.open, closePalette, { kind: "palette" });
   return (
     <>
       <FocusReturnPoint active={palette.open} handle={focusReturn} />
       {root !== null &&
-        createPortal(<AnimatePresence>{palette.open && <PaletteLayer key="palette" initialQuery={palette.query} focusReturn={focusReturn} />}</AnimatePresence>, root)}
+        createPortal(<AnimatePresence>{palette.open && <PaletteLayer key={generation} initialQuery={palette.query} focusReturn={focusReturn} />}</AnimatePresence>, root)}
     </>
   );
 }
@@ -86,10 +103,20 @@ function currentInstanceId(state: LauncherState): string | null {
 }
 
 function PaletteLayer({ initialQuery, focusReturn }: { initialQuery: string; focusReturn: { current: FocusReturnHandle | null } }) {
-  const currentId = useLauncherSelector(currentInstanceId);
   const { closePalette } = useShell();
   const chrome = useChrome();
   const present = useIsPresent();
+  const panelMoves = useReducedMotionConfig() === true ? insertItemFade : PANEL_MOTION;
+  // 退场的那一段沿用最后在场时的当前实例：刚执行的动作（结束游戏、取消启动）可能让它在 null 与某个实例之间换了，
+  // 换了就会把淡出中的面板整块重挂，冻结的条目与列表滚动位置都丢掉。那个实例在退场途中没了（被删、改名）时只能跟着换
+  const liveId = useLauncherSelector(currentInstanceId);
+  const lastId = useRef(liveId);
+  useLayoutEffect(() => {
+    if (present) lastId.current = liveId;
+  });
+  const keptId = lastId.current;
+  const keptAlive = useLauncherSelector((s) => keptId === null || findInstance(s, keptId) !== undefined);
+  const currentId = !present && keptAlive ? keptId : liveId;
   const panelRef = useRef<HTMLDivElement>(null);
   const [query, setQuery] = useState(initialQuery);
   useFocusTrap(panelRef, present);
@@ -111,9 +138,7 @@ function PaletteLayer({ initialQuery, focusReturn }: { initialQuery: string; foc
         role="dialog"
         aria-modal="true"
         aria-label={PALETTE_COPY.label}
-        initial={{ opacity: 0, y: -8, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1, transition: { ...springs.settle, opacity: fade.in } }}
-        exit={{ opacity: 0, scale: 0.98, transition: fade.out }}
+        {...panelMoves}
       >
         {currentId === null ? body(null) : <WithLaunch key={currentId} id={currentId}>{body}</WithLaunch>}
       </motion.div>
@@ -162,14 +187,16 @@ function usePaletteEntries(query: string, current: LaunchEntry | null): PaletteE
   const me = useLauncherSelector(activeAccount);
   const microsoftUnavailable = useLauncherSelector(microsoftLoginUnavailable);
   const actions = useLauncherActions();
-  const { go } = useNav();
+  const { go, route: here } = useNav();
+  const chrome = useChrome();
   const { openCreateInstance } = useShell();
   const { appearance, setAppearance } = useAppearance();
   const run = useRunner();
   const switchAccount = useSwitchAccount();
 
   const entries: PaletteEntry[] = [];
-  const goTo = (route: Route) => () => go(route);
+  // 已经在那一页：不压历史，把内容区滚回顶部，与侧栏点当前项一致；否则面板收起后什么都不发生
+  const goTo = (route: Route) => () => (sameRoute(here, route) ? chrome.scrollContentToTop() : go(route));
 
   for (const inst of instances) {
     if (inst.placeholder) continue;
@@ -327,17 +354,49 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
   const listId = `${base}-list`;
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const sections = rankPalette(query, usePaletteEntries(query, current));
+  // 结果列表与每一组各自让位：组里插进、拿掉一行时同组下面的行滑开，组变高变矮时后面的组滑开
+  const listFlow = useReflow<HTMLDivElement>();
+  const groupFlow = useReflow<HTMLDivElement>();
+  const attachList = useCallback(
+    (el: HTMLDivElement | null) => {
+      listRef.current = el;
+      const stop = listFlow(el);
+      return () => {
+        listRef.current = null;
+        if (typeof stop === "function") stop();
+      };
+    },
+    [listFlow],
+  );
+  const present = useIsPresent();
+  const live = rankPalette(query, usePaletteEntries(query, current));
+  // 退场的那一段不再跟着状态重算：刚执行的动作（切换账户、启动）此刻已改了状态，淡出中的条目不该换字、换位。
+  // 快照在提交之后才记：并发渲染里被丢弃的那次渲染不会成为冻结的样子
+  const committed = useRef(live);
+  useLayoutEffect(() => {
+    if (present) committed.current = live;
+  });
+  const sections = present ? live : committed.current;
   const flat = sections.flatMap((s) => s.items);
-  const [highlight, setHighlight] = useState(0);
-  const active = flat.length === 0 ? -1 : Math.min(highlight, flat.length - 1);
+  // 高亮记的是条目：面板开着时后台插进新条目（数据晚到、占位实例转正），高亮留在原来那一条上，不按下标落到别的条目。
+  // 那一条不在了才按它最后所在的下标落位；id 为 null 表示「第一项」（刚打开、刚改了查询）
+  const [highlight, setHighlight] = useState<{ id: string | null; index: number }>({ id: null, index: 0 });
+  const kept = highlight.id === null ? -1 : flat.findIndex((entry) => entry.id === highlight.id);
+  if (kept >= 0 && kept !== highlight.index) setHighlight({ id: highlight.id, index: kept });
+  const active = flat.length === 0 ? -1 : kept >= 0 ? kept : Math.min(highlight.index, flat.length - 1);
+  const highlightAt = (index: number) => {
+    const entry = flat[index];
+    setHighlight(entry === undefined ? { id: null, index: 0 } : { id: entry.id, index });
+  };
   const optionId = (i: number) => `${base}-opt-${i}`;
 
+  // 只在挂载时聚焦一次。退场中挂上的面板不拿焦点：执行导航时焦点已交给内容区，退场途中万一重挂也不能把它抢回来
   useLayoutEffect(() => {
-    inputRef.current?.focus();
+    if (present) inputRef.current?.focus();
   }, []);
 
-  // 高亮项滚进可见区：只在越出上下边缘时最小幅度滚动
+  // 高亮项滚进可见区：只在越出上下边缘时最小幅度滚动。只在高亮项或查询变了时量：
+  // 后台数据更新这类重渲染不量布局，也不把用户正在滚轮翻看的列表拽回高亮项
   useLayoutEffect(() => {
     const list = listRef.current;
     if (list === null || active < 0) return;
@@ -345,6 +404,37 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
     if (option === null) return;
     if (option.offsetTop < list.scrollTop) list.scrollTop = option.offsetTop;
     else if (option.offsetTop + option.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = option.offsetTop + option.offsetHeight - list.clientHeight;
+  }, [active, query]);
+
+  // 上一次提交时的查询与条目：这一次的增删是键入过滤带来的，还是后台数据带来的，靠它分辨
+  const shownRows = useRef<{ query: string; groups: ReadonlySet<PaletteGroup>; ids: ReadonlySet<string> } | null>(null);
+  useLayoutEffect(() => {
+    const last = shownRows.current;
+    shownRows.current = { query, groups: new Set(sections.map((section) => section.group)), ids: new Set(flat.map((entry) => entry.id)) };
+    const list = listRef.current;
+    // 刚挂上：跟着面板一起入场
+    if (last === null || list === null) return;
+    if (last.query !== query) {
+      // 键入过滤：结果整批换上，一行行滑过去结果就跟不上手。让位在这次提交之后才读位置，
+      // 暂停开关在这里开了又关：开关的增删让列表与各组这一趟只记下新位置，之后后台数据带来的增删照常滑
+      const flows = [list, ...list.children];
+      for (const flow of flows) flow.setAttribute(REFLOW_PAUSED_ATTR, "");
+      for (const flow of flows) flow.removeAttribute(REFLOW_PAUSED_ATTR);
+      return;
+    }
+    // 后台数据插进来的条目淡入，整组后到的整组淡入；被挤开的由让位滑开
+    let index = 0;
+    sections.forEach((section, s) => {
+      const freshGroup = !last.groups.has(section.group);
+      const group = list.children[s];
+      if (freshGroup && group instanceof HTMLElement) arrive(group);
+      for (const entry of section.items) {
+        const i = index++;
+        if (freshGroup || last.ids.has(entry.id)) continue;
+        const row = list.ownerDocument.getElementById(optionId(i));
+        if (row !== null) arrive(row);
+      }
+    });
   });
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -353,7 +443,7 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
       case "ArrowDown":
       case "ArrowUp":
         event.preventDefault();
-        setHighlight(moveHighlight(active, event.key === "ArrowDown" ? 1 : -1, flat.length));
+        highlightAt(moveHighlight(active, event.key === "ArrowDown" ? 1 : -1, flat.length));
         return;
       case "Enter": {
         event.preventDefault();
@@ -387,15 +477,15 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
           autoComplete="off"
           onChange={(event) => {
             onQuery(event.target.value);
-            setHighlight(0);
+            setHighlight({ id: null, index: 0 });
           }}
           onKeyDown={onKeyDown}
         />
         <KeyHint keys={["Esc"]} />
       </div>
-      <div ref={listRef} id={listId} className={styles.list} role="listbox" aria-label={PALETTE_COPY.label}>
+      <div ref={attachList} id={listId} className={styles.list} role="listbox" aria-label={PALETTE_COPY.label}>
         {sections.map((section) => (
-          <div key={section.group} className={styles.group} role="group" aria-label={groupLabel(section.group)}>
+          <div key={section.group} ref={groupFlow} className={styles.group} role="group" aria-label={groupLabel(section.group)}>
             <div className={styles.groupLabel} aria-hidden="true">
               {groupLabel(section.group)}
             </div>
@@ -412,7 +502,7 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
                   aria-selected={i === active}
                   data-active={i === active || undefined}
                   onMouseMove={() => {
-                    if (i !== active) setHighlight(i);
+                    if (i !== active) highlightAt(i);
                   }}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => onExecute(entry)}
@@ -451,4 +541,10 @@ function PaletteBody({ query, onQuery, current, onExecute }: PaletteBodyProps) {
 
 function groupLabel(group: PaletteGroup): string {
   return PALETTE_COPY.groups[group];
+}
+
+/** 面板开着时后到的一行或一组：原地淡入。运行环境没有 Web Animations（组件测试的 jsdom）时直接出现。 */
+function arrive(el: HTMLElement): void {
+  if (typeof el.animate !== "function") return;
+  playTween(el, [{ opacity: 0 }, { opacity: 1 }], fade.in);
 }

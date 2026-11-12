@@ -72,19 +72,31 @@
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sk-info) 35%, transparent);
 }
 
-/* 运行面的外环光晕：独立叠层，只动不透明度；窗口外为静止帧 0.5 */
-.glow {
+/* 运行面的外环光晕：独立叠层，只动不透明度。外层（.glowLayer）随运行面淡入淡出，里层（.glow）呼吸 */
+.glowLayer {
   position: absolute;
   inset: 0;
   z-index: -1;
   border-radius: inherit;
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--sk-ok) 22%, transparent);
-  opacity: 0.5;
   pointer-events: none;
 }
 
+/* 窗口外为静止帧 0.5 */
+.glow {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--sk-ok) 22%, transparent);
+  opacity: 0.5;
+}
+
+/*
+ * 整个呼吸窗口（3 个周期）写成一段只播一次的关键帧：从静止帧 0.5 起，在 0.2 与 0.9 之间呼吸，最后回到 0.5 停住。
+ * 首尾都是静止帧，窗口开始与结束时不跳变，也不收窄呼吸幅度；三次最亮仍落在各周期的中点，与角标的呼吸同相。
+ * 窗口内新挂载的光晕按窗口起点取负延迟，跳到这一段里同一时刻。
+ */
 :global(:root[data-sk-breath]:not([data-sk-reduced])) .glow {
-  animation: glow var(--sk-loop-breath) var(--sk-ease-breath) infinite;
+  animation: glow calc(var(--sk-loop-breath) * 3) var(--sk-ease-breath);
   /* 未设置时整条声明在计算期失效，回到初始值 0 */
   animation-delay: var(--breath-delay);
 }
@@ -92,10 +104,16 @@
 @keyframes glow {
   0%,
   100% {
-    opacity: 0.2;
+    opacity: 0.5;
   }
-  50% {
+  16.667%,
+  50%,
+  83.333% {
     opacity: 0.9;
+  }
+  33.333%,
+  66.667% {
+    opacity: 0.2;
   }
 }
 
@@ -114,7 +132,6 @@
   inset: 0;
   border-radius: inherit;
   background: linear-gradient(90deg, var(--sk-accent-soft), var(--sk-accent-soft-2));
-  will-change: transform;
 }
 
 .fill[data-tone="info"] {
@@ -157,7 +174,10 @@
   white-space: nowrap;
   cursor: pointer;
   outline: none;
-  transition: transform var(--sk-spring-tap-dur) var(--sk-spring-tap);
+  /* 透明度过渡给带原因禁用的进出（存档备份开始、结束）：整枚按钮不在一帧里闪成半透明 */
+  transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
+    opacity var(--sk-dur-hover) var(--sk-ease);
 }
 
 .capsule[data-size="lg"] .go {
@@ -183,6 +203,21 @@
 
 .go:active {
   transform: scale(0.97);
+}
+
+/*
+ * 减少动画：按压反馈只有透明度，按下与松开都要即时，与同一面上的其它按钮一致。松开时落到的是上面 .go 的过渡，
+ * 所以这里整枚按钮都不留透明度过渡；带原因禁用的进出随之一步到位，同 .iconAction 的禁用。
+ */
+:global([data-sk-reduced]) .go {
+  transition: none;
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .go:active:not([data-disabled]) {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 .go:focus-visible {
@@ -242,23 +277,44 @@
 }
 
 .title {
-  overflow: hidden;
   font-size: 13.5px;
   font-weight: var(--sk-w-title);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  text-overflow: ellipsis;
 }
 
 .sub {
-  overflow: hidden;
   color: var(--sk-text-2);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 一行文字的槽：可见文字（.value）与占宽的候选文案（.reserve）叠在同一格。带 data-slot 时格宽只取候选里最宽的一条，
+ * 可见文字宽度记 0、再撑满格子：文字怎么换胶囊都不变宽；格子被压窄（撑满父宽的胶囊）时可见文字省略。
+ */
+.line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.line > * {
+  grid-area: 1 / 1;
+  min-width: 0;
+  overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
+.line[data-slot] > .value {
+  width: 0;
+  min-width: 100%;
+}
+
+.reserve {
+  visibility: hidden;
+}
+
+/* 百分比靠右贴着取消按钮：位数变化时「%」不动 */
 .pct {
   flex: none;
   padding: 0 var(--sk-space-4);
@@ -266,6 +322,7 @@
   font-size: 18px;
   font-weight: var(--sk-w-title);
   font-variant-numeric: tabular-nums;
+  text-align: end;
 }
 
 .dot {
@@ -318,12 +375,26 @@
   transform: scale(0.96);
 }
 
+:global([data-sk-reduced]) .pill:active:not([aria-disabled="true"]) {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
+}
+
 .pill:focus-visible {
   box-shadow: var(--sk-focus);
 }
 
 .pill[aria-disabled="true"] {
   cursor: default;
+}
+
+.pillIcon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  height: 16px;
 }
 
 .pill[data-tone="ok"] {
@@ -349,6 +420,7 @@
   cursor: pointer;
   outline: none;
   transition:
+    transform var(--sk-spring-tap-dur) var(--sk-spring-tap),
     background-color var(--sk-dur-hover) var(--sk-ease),
     color var(--sk-dur-hover) var(--sk-ease);
 }
@@ -356,6 +428,17 @@
 .iconAction:hover:not([aria-disabled="true"]) {
   background: var(--sk-bg-2);
   color: var(--sk-text);
+}
+
+/* 方形图标按钮的按压：与同一面上胶囊内按钮的按压同一手感，小控件缩得更深一点 */
+.iconAction:active:not([aria-disabled="true"]) {
+  transform: scale(0.94);
+}
+
+:global([data-sk-reduced]) .iconAction:active:not([aria-disabled="true"]) {
+  transform: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 .iconAction:focus-visible {

@@ -11,13 +11,12 @@
   gap: var(--sk-space-16);
 }
 
-/* 第一个事件到之前没有字，先占住一行，字出现时下面不跳 */
+/* 阶段行常驻（没字时是一个不换行空格），这一块的高度与基线从一开始就和有字时一样 */
 .status {
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-2);
   min-width: 0;
-  min-height: var(--sk-lh-small);
 }
 
 .phase {

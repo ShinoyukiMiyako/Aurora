@@ -7,9 +7,10 @@ import type { ConfigDto, GameDirectoryDto } from "../../ipc/config";
 import { mockInvoke, resetMocks } from "../../ipc/mock";
 import { OverlayRoot } from "../../shell/overlay";
 import { ShellProvider } from "../../shell/shell";
+import type { Appearance } from "../../domain/types";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../../state/appearance";
 import { LauncherProvider, useLauncher, type LauncherApi } from "../../state/launcher";
-import { render, stubMatchMedia, stubResizeObserver, type Rendered } from "../../test/dom";
+import { render, stubMatchMedia, stubResizeObserver, stubSpanAnimations, type Rendered } from "../../test/dom";
 import type { IpcRecorder } from "../../test/fake-bridge";
 import { callsOf, resetRecorder, settle } from "../../test/launcher";
 import OnboardingFlow from "./index";
@@ -38,9 +39,9 @@ const flush = () =>
     await settle(20);
   });
 
-async function mount() {
+async function mount(appearance: Appearance = DEFAULT_APPEARANCE) {
   view = render(
-    <AppearanceProvider initial={DEFAULT_APPEARANCE}>
+    <AppearanceProvider initial={appearance}>
       <LauncherProvider>
         <ShellProvider>
           <PickDirectoryProvider value={pick}>
@@ -58,8 +59,9 @@ function all<E extends Element = HTMLElement>(selector: string): E[] {
   return [...document.querySelectorAll<E>(selector)];
 }
 
+/** 在场的按钮：换步与增删时退场中的那一份（inert）还留在文档里淡出，假定时器下动画不走，它会一直留着。 */
 function button(name: string): HTMLButtonElement {
-  const found = all<HTMLButtonElement>("button").find((b) => b.getAttribute("aria-label") === name || b.textContent?.trim() === name);
+  const found = all<HTMLButtonElement>("button").find((b) => b.closest("[inert]") === null && (b.getAttribute("aria-label") === name || b.textContent?.trim() === name));
   if (found === undefined) throw new Error(`找不到按钮「${name}」`);
   return found;
 }
@@ -112,6 +114,7 @@ afterEach(() => {
   view = undefined;
   document.documentElement.removeAttribute("data-sk-mode");
   document.documentElement.removeAttribute("data-sk-accent");
+  document.documentElement.removeAttribute("data-sk-reduced");
   vi.useRealTimers();
 });
 
@@ -167,6 +170,102 @@ describe("首次启动向导：第一步", () => {
   });
 });
 
+describe("首次启动向导：第一步的内容不跳", () => {
+  const HAS_FILES = "这个目录里已经有游戏文件，会直接接管";
+  const settleInput = () =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+  /** 在场（不在退场中）的元素里有没有这段文字。 */
+  const shownText = (needle: string) => all("*").some((el) => el.children.length === 0 && el.textContent?.includes(needle) === true && el.closest("[inert]") === null);
+
+  it("已有文件提示：改了路径、新的检查回来之前沿用上一次的结论，不先消失再闪回来；新结论回来才收起", async () => {
+    await mount();
+    await typePath("D:\\HMCL\\.minecraft");
+    await settleInput();
+    await flush();
+    expect(shownText(HAS_FILES)).toBe(true);
+
+    const pending: ((dto: { exists: boolean; has_versions: boolean }) => void)[] = [];
+    ipc.overrides.set("inspect_game_directory", () => new Promise((resolve) => pending.push(resolve)));
+    await typePath("D:\\Games\\Fresh");
+    await settleInput();
+    await flush();
+    expect(pending).toHaveLength(1);
+    expect(shownText(HAS_FILES)).toBe(true);
+
+    act(() => pending[0]({ exists: false, has_versions: false }));
+    await flush();
+    expect(shownText(HAS_FILES)).toBe(false);
+  });
+
+  it("「用回默认位置」随改动淡入、改回默认后原地淡出；第一步里之后才挂上的块照常入场", async () => {
+    await mount();
+    await typePath("D:\\Games\\Petal");
+    const wrapper = button("用回默认位置").closest("div");
+    expect(wrapper?.style.opacity).toBe("0");
+    await click(button("用回默认位置"));
+    expect(dirInput().value).toBe(DEFAULT_DIR);
+    expect(all("button").filter((b) => b.textContent?.trim() === "用回默认位置").every((b) => b.closest("[inert]") !== null)).toBe(true);
+  });
+
+  it("选中的游戏目录正好是探测到的文件夹：那一行原地淡出、不可再勾，计数随之变化", async () => {
+    await mount();
+    await typePath("D:\\HMCL\\.minecraft");
+    const rows = all("li").filter((li) => li.textContent?.includes("D:\\HMCL\\.minecraft"));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].hasAttribute("inert")).toBe(true);
+    expect(text()).toContain("1/1");
+  });
+
+  it("配置还没读到：加载门内只占位不显示，到点才淡入照字段画的骨架；读到后换成输入框", async () => {
+    let answer: () => void = () => undefined;
+    ipc.overrides.set("get_config", () => new Promise((resolve) => (answer = () => void mockInvoke("get_config").then(resolve))));
+    await mount();
+    const skeleton = () => document.querySelector<HTMLElement>("[aria-busy='true'] > [aria-hidden='true']");
+    expect(skeleton()?.hasAttribute("data-pending")).toBe(true);
+    // 骨架照真实字段画：标签与常驻提示都在，输入行是 44 高的块
+    expect(skeleton()?.textContent).toContain("目录不存在会自动创建");
+    expect(skeleton()?.querySelector("[style*='height: 44px']")).not.toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(skeleton()?.hasAttribute("data-pending")).toBe(false);
+    act(() => answer());
+    await flush();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    await flush();
+    expect(dirInput().value).toBe(DEFAULT_DIR);
+  });
+
+  it("配置过了等待期才到、文件夹探测更晚：文件夹骨架从外层骨架接过来一直显着，不先消失、再过 300ms 重新淡入", async () => {
+    let answer: () => void = () => undefined;
+    ipc.overrides.set("get_config", () => new Promise((resolve) => (answer = () => void mockInvoke("get_config").then(resolve))));
+    ipc.overrides.set("discover_game_directories", () => new Promise(() => undefined));
+    await mount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    act(() => answer());
+    await flush();
+    // 外层骨架显出来后至少停 300ms，到点才换成真实的第一步
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    await flush();
+    expect(dirInput().value).toBe(DEFAULT_DIR);
+    // 只剩文件夹区还在加载：它的骨架一挂上就是显出来的，不是等待期里看不见的占位
+    const busy = all("[aria-busy='true']");
+    expect(busy).toHaveLength(1);
+    const others = busy[0].querySelector<HTMLElement>(":scope > [aria-hidden='true']");
+    if (others === null) throw new Error("文件夹区没有骨架");
+    expect(others.hasAttribute("data-pending")).toBe(false);
+    expect(others.style.opacity).toBe("1");
+  });
+});
+
 describe("首次启动向导：推进与收尾", () => {
   it("第二步的 Java 列表照样列出缺运行时文件的，并给它标「不完整」", async () => {
     const runtime = (major: number, missing: string[]) => ({
@@ -188,6 +287,37 @@ describe("首次启动向导：推进与收尾", () => {
     ]);
   });
 
+  it("第二步的 Java 扫描：300ms 内只占位不显示，超过才淡入扫描行；结果回来后换成列表，开关行一直在", async () => {
+    let found: (list: unknown[]) => void = () => undefined;
+    ipc.overrides.set("detect_java", () => new Promise((resolve) => (found = resolve)));
+    await mount();
+    await click(button("下一步"));
+    const scanning = () => all("[aria-busy='true'] > [aria-hidden='true']").find((el) => el.textContent?.includes("正在查找本机的 Java…"));
+    // 扫描行在 aria-hidden 的骨架层里：读屏听到的是这一步里先挂好的状态区（不在任何 aria-hidden 之内）
+    const announced = () => {
+      const regions = all("[data-step-pane]:not([inert]) [role='status']").filter((el) => el.closest("[aria-hidden='true']") === null);
+      expect(regions).toHaveLength(1);
+      return regions[0].textContent;
+    };
+    expect(scanning()?.hasAttribute("data-pending")).toBe(true);
+    expect(announced()).toBe("");
+    expect(button("自动下载 Java").getAttribute("aria-checked")).toBe("true");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    expect(scanning()?.hasAttribute("data-pending")).toBe(false);
+    expect(announced()).toBe("正在查找本机的 Java…");
+    act(() => found([]));
+    await flush();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    await flush();
+    expect(text()).toContain("没有在本机找到 Java");
+    expect(document.querySelector("[aria-busy='true']")).toBeNull();
+    expect(announced()).toBe("");
+  });
+
   it("第二步扫描 Java 并能关掉自动下载；跳过后步骤条标「已跳过」，只能点回到过的步", async () => {
     await mount();
     await click(button("下一步"));
@@ -202,6 +332,36 @@ describe("首次启动向导：推进与收尾", () => {
     expect(railItem("外观").disabled).toBe(true);
     await click(railItem("游戏目录"));
     expect(title()).toBe("游戏文件放在哪");
+  });
+
+  it("第三步加上第一个账户：「已添加」区淡入，三张选项卡原地淡出、换成一行按钮；「继续添加」再交叉换回选项卡", async () => {
+    ipc.overrides.set("list_accounts", () => []);
+    ipc.overrides.set("current_account", () => null);
+    await mount();
+    await click(button("下一步"));
+    await click(button("下一步"));
+    expect(all("button[data-kind]").every((b) => b.closest("[inert]") === null)).toBe(true);
+
+    // 登录弹窗里添加成功后账户切片重读
+    ipc.overrides.delete("list_accounts");
+    ipc.overrides.delete("current_account");
+    await act(async () => {
+      await launcher.actions.reload("accounts");
+    });
+    await flush();
+    const added = all("section").find((section) => section.textContent?.startsWith("已添加"));
+    if (added === undefined) throw new Error("没有「已添加」区");
+    expect(added.parentElement?.style.opacity).toBe("0");
+    expect(all("button[data-kind]").every((b) => b.closest("[inert]") !== null)).toBe(true);
+    expect(button("离线账户").closest("div[style]")?.getAttribute("style")).toContain("opacity: 0");
+
+    const addMore = button("继续添加");
+    await click(addMore);
+    expect(all("button").filter((b) => b.textContent?.trim() === "继续添加").every((b) => b.closest("[inert]") !== null)).toBe(true);
+    // 点掉的按钮不离开布局：还是同一颗、留在标题行的常驻槽里淡出，行高由它撑着
+    expect(addMore.isConnected).toBe(true);
+    expect(addMore.closest("[data-spent]")?.hasAttribute("inert")).toBe(true);
+    expect(all("button[data-kind]").some((b) => b.closest("[inert]") === null)).toBe(true);
   });
 
   it("第三步的选项打开同一个登录弹窗（由状态驱动）", async () => {
@@ -389,5 +549,122 @@ describe("首次启动向导：推进与收尾", () => {
     await click(button("开始使用"));
     expect(callsOf(ipc, "complete_first_run")).toHaveLength(1);
     expect(launcher.state.firstRun).toBe(false);
+  });
+});
+
+describe("首次启动向导：换步动效", () => {
+  /** 在场的那一步（退场中的那一步带 inert 与 aria-hidden）。 */
+  const presentPane = () => {
+    const pane = document.querySelector<HTMLElement>("[data-step-pane]:not([inert])");
+    if (pane === null) throw new Error("没有在场的步骤");
+    return pane;
+  };
+
+  it("换步时退场的那一步把 ref 交给 popLayout，被量好尺寸抽出布局，新的一步不和它平分舞台", async () => {
+    // jsdom 不做布局：给步骤报一个尺寸，popLayout 才会给退场的那一步打上抽出布局的标记
+    const computed = window.getComputedStyle.bind(window);
+    const spy = vi.spyOn(window, "getComputedStyle").mockImplementation((el, pseudo) => {
+      const style = computed(el, pseudo);
+      if (!(el instanceof HTMLElement) || !el.hasAttribute("data-step-pane")) return style;
+      return new Proxy(style, {
+        get: (target, key) => {
+          if (key === "width") return "520px";
+          if (key === "height") return "360px";
+          const value: unknown = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    });
+    try {
+      await mount();
+      await click(button("下一步"));
+      const leaving = document.querySelector<HTMLElement>("[data-step-pane][inert]");
+      if (leaving === null) throw new Error("换步后没有退场中的那一步");
+      expect(leaving.querySelector("h1")?.textContent).toBe("游戏文件放在哪");
+      expect(leaving.hasAttribute("data-motion-pop-id")).toBe(true);
+      expect(presentPane().hasAttribute("data-motion-pop-id")).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // 后退的那一步在假定时器下还停在退场里，回去时沿用的是同一个节点，量不到新挂载的起点，这里只看前进
+  it("向导挂上时的第一步直接就位；之后换上来的一步从前进一侧 16px 处淡入", async () => {
+    await mount();
+    expect(presentPane().style.opacity).toBe("1");
+    expect(presentPane().style.transform).not.toContain("translateX");
+    await click(button("下一步"));
+    expect(presentPane().style.opacity).toBe("0");
+    expect(presentPane().style.transform).toContain("translateX(16px)");
+  });
+
+  it("步骤条：走过的那一步序号换成勾号时勾号弹出、序号原地淡出；向导挂上时就在的序号不入场", async () => {
+    const waapi = stubSpanAnimations();
+    await mount();
+    const dot = () => railItem("游戏目录").querySelector<HTMLElement>("[data-glyph]:not([data-leaving])");
+    const leavingIndex = () => railItem("游戏目录").querySelector<HTMLElement>('[data-glyph="index"][data-leaving]');
+    expect(dot()?.getAttribute("data-glyph")).toBe("index");
+    expect(dot()?.hasAttribute("data-enter")).toBe(false);
+    await click(button("下一步"));
+    expect(dot()?.getAttribute("data-glyph")).toBe("check");
+    expect(dot()?.getAttribute("data-enter")).toBe("pop");
+    expect(Number(waapi.running(dot() as HTMLElement, "scale").frames[0].scale)).toBe(0.6);
+    const index = leavingIndex();
+    if (index === null) throw new Error("序号没有留在原处淡出");
+    expect(index.textContent).toBe("1");
+    expect(waapi.running(index, "opacity").frames).toEqual([{ opacity: 1 }, { opacity: 0 }]);
+    // 淡出播完才移除
+    waapi.finish(waapi.running(index, "opacity"));
+    expect(leavingIndex()).toBeNull();
+    expect(dot()?.getAttribute("data-glyph")).toBe("check");
+  });
+
+  it("底栏随步骤出现的按钮淡入，离开的原地淡出并且不可再点", async () => {
+    await mount();
+    await click(button("下一步"));
+    // 出没包裹层是按钮外最近的 div：挂上那一刻从透明开始
+    for (const name of ["上一步", "直接开始", "跳过"]) expect(button(name).closest("div")?.style.opacity).toBe("0");
+    await click(button("上一步"));
+    const leaving = all<HTMLButtonElement>("footer button").filter((b) => ["上一步", "直接开始", "跳过"].includes(b.textContent?.trim() ?? ""));
+    expect(leaving).toHaveLength(3);
+    expect(leaving.every((b) => b.closest("[inert]") !== null)).toBe(true);
+  });
+
+  it("主按钮与隐形的「开始使用 →」叠在同一格：前三步的「下一步」也按它撑宽，隐形的那颗点不到、读屏读不到", async () => {
+    await mount();
+    const slot = button("下一步").closest<HTMLElement>('[class*="_primarySlot_"]');
+    if (slot === null) throw new Error("主按钮不在定宽的格里");
+    const ghost = slot.querySelector<HTMLElement>('[class*="_primaryGhost_"]');
+    if (ghost === null) throw new Error("格里没有撑宽的隐形按钮");
+    expect(ghost.getAttribute("aria-hidden")).toBe("true");
+    expect(ghost.hasAttribute("inert")).toBe(true);
+    const widest = ghost.querySelector("button");
+    expect(widest?.textContent?.trim()).toBe("开始使用");
+    expect(widest?.getAttribute("data-variant")).toBe("primary");
+    expect(widest?.querySelector("svg")).not.toBeNull();
+    for (let i = 0; i < 3; i++) await click(button("下一步"));
+    expect(button("开始使用").closest('[class*="_primarySlot_"]')).toBe(slot);
+  });
+
+  it("点下「开始使用」后按钮文案不换（换成更长的字会撑宽按钮、推走「跳过」），进行中的说法只给读屏", async () => {
+    await mount();
+    for (let i = 0; i < 3; i++) await click(button("下一步"));
+    const primary = button("开始使用");
+    let release: () => void = () => undefined;
+    vi.spyOn(launcher.actions, "finishFirstRun").mockImplementation(() => new Promise<void>((resolve) => (release = resolve)));
+    await click(primary);
+    expect(primary.getAttribute("aria-busy")).toBe("true");
+    expect(primary.textContent?.trim()).toBe("开始使用");
+    expect(primary.getAttribute("aria-label")).toBe("正在准备…");
+    act(() => release());
+    await flush();
+  });
+
+  it("减少动画：换上来的一步只淡入，不带横移（根部只会把横移改成一步到位，旧步会先跳一下）", async () => {
+    await mount({ ...DEFAULT_APPEARANCE, reduceMotion: true });
+    await click(button("下一步"));
+    expect(title()).toBe("看看这台电脑上的 Java");
+    expect(presentPane().style.opacity).toBe("0");
+    expect(presentPane().style.transform).not.toContain("translateX");
   });
 });

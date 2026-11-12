@@ -191,7 +191,17 @@ describe("设置页常规分区：界面语言", () => {
 
 describe("设置页常规分区：游戏启动后关闭与自动备份", () => {
   const NOTE = `「游戏启动后」选了「关闭${APP_NAME}」，游戏退出时不会自动备份存档`;
-  const page = () => document.body.textContent;
+  // 退场中的提醒行带 inert：假定时器下淡出走不完，节点会留在文档里，不算在页面上
+  const page = () => {
+    const copy = document.body.cloneNode(true) as HTMLElement;
+    for (const leaving of copy.querySelectorAll("[inert]")) leaving.remove();
+    return copy.textContent;
+  };
+  const noteHost = () => {
+    const note = [...document.querySelectorAll<HTMLElement>("span")].find((el) => el.textContent === NOTE);
+    if (note === undefined || note.parentElement === null) throw new Error("没有提醒行");
+    return note.parentElement;
+  };
   const radio = (label: string) => {
     const found = [...document.querySelectorAll<HTMLElement>('[role="radio"]')].find((el) => el.textContent === label);
     if (found === undefined) throw new Error(`找不到选项「${label}」`);
@@ -218,10 +228,21 @@ describe("设置页常规分区：游戏启动后关闭与自动备份", () => {
     expect(page()).not.toContain(NOTE);
   });
 
-  it("配置里本来就是关闭：打开设置页就有这行", async () => {
+  it("提醒行出现时淡入并从略小处落到位，换走时退场期间不可交互", async () => {
+    await mountGeneral();
+    act(() => radio(`关闭${APP_NAME}`).click());
+    expect([noteHost().style.opacity, noteHost().style.transform]).toEqual(["0", "scale(0.98)"]);
+    await flush();
+    const host = noteHost();
+    await choose("最小化");
+    expect(host.hasAttribute("inert")).toBe(true);
+  });
+
+  it("配置里本来就是关闭：打开设置页就有这行，跟着页面入场，不单独淡入", async () => {
     config = configDto({ after_launch: "close" });
     await mountGeneral();
     expect(page()).toContain(NOTE);
+    expect(noteHost().style.opacity).toBe("1");
   });
 
   it("自动备份关着时选关闭：没有要提醒的", async () => {

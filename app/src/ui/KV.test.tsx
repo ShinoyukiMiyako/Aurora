@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OverlayProvider, OverlayRoot } from "../shell/overlay";
-import { render, type Rendered } from "../test/dom";
+import { focusByKeyboard, render, stubSpanAnimations, type Rendered } from "../test/dom";
 import { CopyButton, KV } from "./KV";
 
 let view: Rendered | undefined;
@@ -27,6 +29,22 @@ function mount(ui: ReactNode) {
 
 /** 让 onCopy 返回的 Promise 及其 then 回调跑完。 */
 const flush = () => act(async () => {});
+
+/** 指针点一下：先按下（提示照例收起），再 click。指针点出来的 click 带点击次数，键盘的回车、空格触发的是 0（jsdom 的 click() 也是 0）。 */
+function pointerClick(el: HTMLElement) {
+  act(() => {
+    el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+  });
+  act(() => {
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
+  });
+}
+
+/** 按钮当前关联的提示气泡（aria-describedby 指向的那个）；没关联时为 null。 */
+function bubbleOf(button: HTMLElement) {
+  const id = button.getAttribute("aria-describedby");
+  return id === null ? null : document.getElementById(id);
+}
 
 describe("CopyButton", () => {
   it("复制成功后图标与名称换成已复制，停留 feedbackMs 后复原", async () => {
@@ -86,6 +104,138 @@ describe("CopyButton", () => {
     const container = mount(<CopyButton text="x" label="复制" onCopy={() => new Promise(() => undefined)} feedbackMs={2000} />);
     act(() => (container.querySelector("button") as HTMLButtonElement).click());
     expect(container.querySelector("button")?.getAttribute("aria-label")).toBe("复制");
+  });
+
+  it("指针点的复制成功后强制显示「已复制」提示：没有悬停与聚焦也显示，停留结束收起", async () => {
+    const container = mount(<CopyButton text="x" label="复制路径" onCopy={() => Promise.resolve()} feedbackMs={1500} />);
+    const button = () => container.querySelector("button") as HTMLButtonElement;
+    expect(bubbleOf(button())).toBeNull();
+    pointerClick(button());
+    await flush();
+    expect(bubbleOf(button())?.getAttribute("role")).toBe("tooltip");
+    expect(bubbleOf(button())?.textContent).toBe("已复制");
+    act(() => vi.advanceTimersByTime(1500));
+    expect(button().hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("复制失败：不强制显示提示", async () => {
+    const container = mount(<CopyButton text="x" label="复制路径" onCopy={() => Promise.resolve(false)} feedbackMs={1500} />);
+    pointerClick(container.querySelector("button") as HTMLButtonElement);
+    await flush();
+    expect(container.querySelector("button")?.hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("停留期间再点一次：按下时收起的「已复制」在这次复制成功后重新弹出，停留从这一次重新计时", async () => {
+    const onCopy = vi.fn(() => Promise.resolve());
+    const container = mount(<CopyButton text="x" label="复制路径" onCopy={onCopy} feedbackMs={1500} />);
+    const button = () => container.querySelector("button") as HTMLButtonElement;
+    pointerClick(button());
+    await flush();
+    act(() => vi.advanceTimersByTime(1000));
+    act(() => {
+      button().dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    });
+    expect(button().hasAttribute("aria-describedby")).toBe(false);
+    act(() => {
+      button().dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
+    });
+    await flush();
+    expect(onCopy).toHaveBeenCalledTimes(2);
+    expect(bubbleOf(button())?.textContent).toBe("已复制");
+    act(() => vi.advanceTimersByTime(1499));
+    expect(bubbleOf(button())?.textContent).toBe("已复制");
+    act(() => vi.advanceTimersByTime(1));
+    expect(button().hasAttribute("aria-describedby")).toBe(false);
+  });
+
+  it("停留结束：先收起气泡再换回原名称，淡出中的气泡仍是「已复制」，不先翻回原文案", async () => {
+    const container = mount(<CopyButton text="x" label="复制路径" onCopy={() => Promise.resolve()} feedbackMs={1500} />);
+    const button = () => container.querySelector("button") as HTMLButtonElement;
+    pointerClick(button());
+    await flush();
+    const bubble = bubbleOf(button());
+    expect(bubble?.textContent).toBe("已复制");
+    act(() => vi.advanceTimersByTime(1500));
+    expect(button().getAttribute("aria-label")).toBe("复制路径");
+    expect(button().hasAttribute("aria-describedby")).toBe(false);
+    // 退场要几帧才播完，这一刻气泡还在浮层里淡出
+    expect(bubble?.isConnected).toBe(true);
+    expect(bubble?.textContent).toBe("已复制");
+  });
+
+  it("键盘触发的复制不强制显示：聚焦打开的提示原地换成「已复制」，复原后仍开着，换回原名称", async () => {
+    const container = mount(<CopyButton text="x" label="复制路径" onCopy={() => Promise.resolve()} feedbackMs={1500} />);
+    const button = () => container.querySelector("button") as HTMLButtonElement;
+    focusByKeyboard(button());
+    expect(bubbleOf(button())?.textContent).toBe("复制路径");
+    // 回车、空格触发的 click 不带点击次数
+    act(() => button().click());
+    await flush();
+    expect(bubbleOf(button())?.textContent).toBe("已复制");
+    act(() => vi.advanceTimersByTime(1500));
+    expect(button().getAttribute("aria-label")).toBe("复制路径");
+    expect(bubbleOf(button())?.textContent).toBe("复制路径");
+  });
+
+  it("另一个复制按钮复制成功：这一个的「已复制」随即复原，同一时刻只有一个对勾和一个气泡", async () => {
+    const container = mount(
+      <>
+        <CopyButton text="a" label="复制甲" onCopy={() => Promise.resolve()} feedbackMs={1500} />
+        <CopyButton text="b" label="复制乙" onCopy={() => Promise.resolve()} feedbackMs={1500} />
+      </>,
+    );
+    const [first, second] = [...container.querySelectorAll("button")];
+    pointerClick(first);
+    await flush();
+    expect(first.getAttribute("aria-label")).toBe("已复制");
+    pointerClick(second);
+    await flush();
+    expect([first.getAttribute("aria-label"), second.getAttribute("aria-label")]).toEqual(["复制甲", "已复制"]);
+    expect(first.hasAttribute("aria-describedby")).toBe(false);
+    expect([...document.querySelectorAll('[role="tooltip"]')].map((b) => b.textContent)).toEqual(["已复制"]);
+    act(() => vi.advanceTimersByTime(1500));
+    expect(second.getAttribute("aria-label")).toBe("复制乙");
+  });
+
+  /** 图标位里各层：[身份, 入场方式或 leaving / still]。 */
+  const glyphs = (container: HTMLElement) =>
+    [...container.querySelectorAll<HTMLElement>("button [data-glyph]")].map((g) => [g.dataset.glyph, g.hasAttribute("data-leaving") ? "leaving" : (g.dataset.enter ?? "still")]);
+
+  it("图标位：初次挂载的复制图标不播入场；复制成功对勾弹出、复制图标淡出；停留结束复制图标弹回", async () => {
+    const waapi = stubSpanAnimations();
+    const container = mount(<CopyButton text="x" label="复制" onCopy={() => Promise.resolve()} feedbackMs={1500} />);
+    expect(glyphs(container)).toEqual([["copy", "still"]]);
+    expect(waapi.played).toHaveLength(0);
+    act(() => (container.querySelector("button") as HTMLButtonElement).click());
+    await flush();
+    expect(glyphs(container)).toEqual([
+      ["copy", "leaving"],
+      ["check", "pop"],
+    ]);
+    const layer = (glyph: string) => container.querySelector(`button [data-glyph="${glyph}"]`) as HTMLElement;
+    expect(waapi.running(layer("copy"), "opacity").frames).toEqual([{ opacity: 1 }, { opacity: 0 }]);
+    expect(Number(waapi.running(layer("check"), "scale").frames[0].scale)).toBe(0.6);
+    // 淡出播完才移除复制图标；入场播完摘掉标记
+    waapi.finishAll();
+    expect(glyphs(container)).toEqual([["check", "still"]]);
+    act(() => vi.advanceTimersByTime(1500));
+    expect(glyphs(container)).toEqual([
+      ["check", "leaving"],
+      ["copy", "pop"],
+    ]);
+  });
+
+  it("复制失败（onCopy 以 false 结束）：图标位不换", async () => {
+    const container = mount(<CopyButton text="x" label="复制" onCopy={() => Promise.resolve(false)} feedbackMs={1500} />);
+    act(() => (container.querySelector("button") as HTMLButtonElement).click());
+    await flush();
+    expect(glyphs(container)).toEqual([["copy", "still"]]);
+  });
+
+  it("样式：不再给图标另加动画，换图标的弹出与淡出只由图标位做一层", () => {
+    const css = readFileSync(resolve(__dirname, "KV.module.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(css).not.toMatch(/animation|@keyframes/);
+    expect(css).not.toMatch(/\bsvg\b/);
   });
 });
 

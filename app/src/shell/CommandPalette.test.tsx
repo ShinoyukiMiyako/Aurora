@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
 // @module-tag heavy-page
 import { act } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
+import { fade } from "../lib/motion";
+import { REFLOW_PAUSED_ATTR } from "../lib/reflow";
 import { DEFAULT_APPEARANCE, AppearanceProvider } from "../state/appearance";
-import { LauncherProvider } from "../state/launcher";
+import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
+import { activeAccount } from "../state/selectors";
 import { keydown, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
 import { accountDto, bootOverrides, callsOf, configDto, instanceDto, resetRecorder, settle } from "../test/launcher";
@@ -17,14 +20,36 @@ import { ShellProvider, useNav, useShell, type NavApi, type ShellApi } from "./s
 const ipc = vi.hoisted((): IpcRecorder => ({ calls: [], overrides: new Map() }));
 vi.mock("../ipc/bridge", async (orig) => (await import("../test/fake-bridge")).fakeBridge(await orig(), ipc));
 
+// 挂了让位的容器。jsdom 不做布局，让位本身在这里不动，只记下谁挂了它
+const reflowed = vi.hoisted(() => new Set<Element>());
+vi.mock("../lib/reflow", async (orig) => {
+  const mod = await orig<typeof import("../lib/reflow")>();
+  const { useCallback } = await import("react");
+  return {
+    ...mod,
+    useReflow: <T extends HTMLElement>(spring: Parameters<typeof mod.useReflow>[0] = "settle") => {
+      const real = mod.useReflow<T>(spring);
+      return useCallback(
+        (el: T | null) => {
+          if (el !== null) reflowed.add(el);
+          return real(el);
+        },
+        [real],
+      );
+    },
+  };
+});
+
 let view: Rendered | undefined;
 let nav: NavApi;
 let shell: ShellApi;
+let launcher: LauncherApi;
 const chrome: ChromeApi = { scrollContentToTop: vi.fn(), focusContent: vi.fn() };
 
 function Probe() {
   nav = useNav();
   shell = useShell();
+  launcher = useLauncher();
   return null;
 }
 
@@ -85,6 +110,8 @@ beforeEach(() => {
   ipc.overrides.set("art_status", () => ({ source: null, panorama: false }));
   ipc.overrides.set("set_current_account", () => null);
   vi.mocked(chrome.focusContent).mockClear();
+  vi.mocked(chrome.scrollContentToTop).mockClear();
+  reflowed.clear();
 });
 afterEach(() => {
   view?.unmount();
@@ -162,5 +189,259 @@ describe("命令面板", () => {
     await flush();
     expect(shell.palette.open).toBe(false);
     expect(document.activeElement).toBe(before);
+  });
+});
+
+describe("命令面板的开合与后台变化", () => {
+  /** 面板层：关闭后退场动画播完前仍挂着，带 data-exiting。假定时器下帧跟着假时钟走，这里的 flush 只推进 0 ms，一帧也不来，退场一直停在半路。 */
+  const panels = () => [...document.querySelectorAll<HTMLElement>("[role='dialog']")].map((panel) => ({ panel, exiting: panel.closest("[data-exiting]") !== null }));
+  const livePanel = () => {
+    const live = panels().filter((p) => !p.exiting);
+    if (live.length !== 1) throw new Error(`应当恰好有一个在场的面板，实为 ${live.length} 个`);
+    return live[0].panel;
+  };
+  const optionLabels = (panel: HTMLElement) => [...panel.querySelectorAll<HTMLElement>("[role='option']")].map((o) => o.textContent);
+  const liveInput = () => {
+    const el = livePanel().querySelector<HTMLInputElement>("[role='combobox']");
+    if (el === null) throw new Error("在场的面板里没有输入框");
+    return el;
+  };
+
+  it("退场途中重新打开：新面板从这次的查询与第一项开始，旧面板照常退场", async () => {
+    await mount();
+    act(() => shell.openPalette());
+    await flush();
+    type("生存");
+    keydown(input(), "ArrowDown");
+    act(() => shell.closePalette());
+    act(() => shell.openPalette("空岛"));
+    await flush();
+
+    expect(panels().map((p) => p.exiting)).toEqual([true, false]);
+    expect(liveInput().value).toBe("空岛");
+    expect(livePanel().querySelector("[role='option'][aria-selected='true']")?.textContent?.startsWith("空岛")).toBe(true);
+  });
+
+  it("执行后淡出的那一段，条目不跟着状态变：切换账户后退场中的面板仍是执行时的样子", async () => {
+    const alex = accountDto({ uuid: "00000000-0000-0000-0000-00000000a002", name: "Alex" });
+    ipc.overrides.set("set_current_account", () => {
+      ipc.overrides.set("current_account", () => alex);
+      return null;
+    });
+    await mount();
+    act(() => shell.openPalette("alex"));
+    await flush();
+    const before = optionLabels(livePanel());
+    expect(before[0]?.startsWith(PALETTE_COPY.switchAccount("Alex"))).toBe(true);
+
+    keydown(input(), "Enter");
+    await flush();
+    // 状态确实已经换到 Alex：没冻结的话「切换到 Alex」这一条此刻已不在列表里
+    expect(activeAccount(launcher.state)?.name).toBe("Alex");
+    const [leaving] = panels();
+    expect(leaving.exiting).toBe(true);
+    expect(optionLabels(leaving.panel)).toEqual(before);
+  });
+
+  it("退场途中当前实例变了：淡出中的面板不整块重挂，条目照旧，也不把焦点抢回它的输入框", async () => {
+    await mount();
+    expect(launcher.state.selectedInstanceId).toBeNull();
+    const before = document.getElementById("before");
+    if (before === null) throw new Error("缺少起始焦点");
+    act(() => before.focus());
+    act(() => shell.openPalette("生存"));
+    await flush();
+    const field = liveInput();
+    const shown = optionLabels(livePanel());
+    act(() => shell.closePalette());
+    expect(document.activeElement).toBe(before);
+
+    // 当前实例从没有变成「生存」：没冻结的话面板换成另一棵子树重挂，「生存」这一条的提示也会变成「当前实例」
+    await act(async () => {
+      await launcher.actions.selectInstance("生存");
+    });
+    await flush();
+    expect(launcher.state.selectedInstanceId).toBe("生存");
+    const [leaving] = panels();
+    expect(leaving.exiting).toBe(true);
+    expect(leaving.panel.querySelector("[role='combobox']")).toBe(field);
+    expect(optionLabels(leaving.panel)).toEqual(shown);
+    expect(document.activeElement).toBe(before);
+  });
+
+  it("高亮项滚进可见区只在高亮或查询变了时量：后台数据更新引起的重渲染不碰列表", async () => {
+    await mount();
+    act(() => shell.openPalette());
+    await flush();
+    const list = livePanel().querySelector<HTMLElement>("[role='listbox']");
+    if (list === null) throw new Error("面板里没有结果列表");
+    const lookups = vi.spyOn(list, "querySelector");
+
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { last_played_at: 100 }), instanceDto("创造", { last_played_at: 900 }), instanceDto("空岛"), instanceDto("后来的")]);
+    await act(async () => {
+      await launcher.actions.reload("instances");
+    });
+    await flush();
+    expect(options().some((o) => o.textContent?.startsWith("后来的"))).toBe(true);
+    expect(lookups).not.toHaveBeenCalled();
+
+    keydown(input(), "ArrowDown");
+    expect(lookups).toHaveBeenCalledTimes(1);
+    type("空");
+    expect(lookups).toHaveBeenCalledTimes(2);
+  });
+
+  it("面板开着时后台插进新实例：高亮留在原来那一条上，不按下标落到别的条目", async () => {
+    await mount();
+    act(() => shell.openPalette());
+    await flush();
+    keydown(input(), "ArrowDown");
+    expect(activeLabel()?.startsWith("生存")).toBe(true);
+
+    ipc.overrides.set("list_instances", () => [instanceDto("生存", { last_played_at: 100 }), instanceDto("创造", { last_played_at: 900 }), instanceDto("空岛"), instanceDto("新装的", { last_played_at: 1000 })]);
+    await act(async () => {
+      await launcher.actions.reload("instances");
+    });
+    await flush();
+    expect(options()[0].textContent?.startsWith("新装的")).toBe(true);
+    expect(activeLabel()?.startsWith("生存")).toBe(true);
+
+    // 高亮的那一条没了：按原来的下标落位
+    ipc.overrides.set("list_instances", () => [instanceDto("创造", { last_played_at: 900 }), instanceDto("空岛"), instanceDto("新装的", { last_played_at: 1000 })]);
+    await act(async () => {
+      await launcher.actions.reload("instances");
+    });
+    await flush();
+    expect(activeLabel()?.startsWith("空岛")).toBe(true);
+  });
+
+  it("跳到当前所在的页：不导航，把内容区滚回顶部", async () => {
+    await mount();
+    expect(nav.route).toEqual({ page: "home" });
+    act(() => shell.openPalette("主页"));
+    await flush();
+    expect(activeLabel()).toBe("主页");
+    keydown(input(), "Enter");
+    await flush();
+    expect(nav.route).toEqual({ page: "home" });
+    expect(nav.canBack).toBe(false);
+    expect(chrome.scrollContentToTop).toHaveBeenCalledTimes(1);
+
+    // 别的页照常导航，不滚动（上一个面板可能还在退场，按键发给在场的那个）
+    act(() => shell.openPalette("实例库"));
+    await flush();
+    keydown(liveInput(), "Enter");
+    await flush();
+    expect(nav.route).toEqual({ page: "library" });
+    expect(chrome.scrollContentToTop).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("命令面板的结果列表：后台变化让位，键入过滤整批换上", () => {
+  const listbox = () => {
+    const el = document.querySelector<HTMLElement>("[role='listbox']");
+    if (el === null) throw new Error("命令面板没有结果列表");
+    return el;
+  };
+  const groups = () => [...listbox().querySelectorAll<HTMLElement>("[role='group']")];
+  const withInstances = (...names: [string, number | null][]) => names.map(([name, at]) => instanceDto(name, { last_played_at: at }));
+
+  /** 开始记录列表里让位暂停开关的增删。返回取结果的函数：每个元素依次的旧值，打开时是 null，去掉时是 ""。 */
+  function watchPauses() {
+    const records: MutationRecord[] = [];
+    const watcher = new MutationObserver((batch) => records.push(...batch));
+    watcher.observe(listbox(), { subtree: true, attributes: true, attributeFilter: [REFLOW_PAUSED_ATTR], attributeOldValue: true });
+    onTestFinished(() => watcher.disconnect());
+    return () => {
+      records.push(...watcher.takeRecords());
+      const toggles = new Map<Node, (string | null)[]>();
+      for (const record of records) {
+        const seen = toggles.get(record.target);
+        if (seen === undefined) toggles.set(record.target, [record.oldValue]);
+        else seen.push(record.oldValue);
+      }
+      return toggles;
+    };
+  }
+
+  /** 后到的行或组淡入走 Web Animations。jsdom 没有：给 div 装一个只记录调用的（不碰 Element.prototype，framer-motion 照旧走 JS）。 */
+  function recordFades() {
+    const played: { el: Element; frames: Keyframe[]; options: KeyframeAnimationOptions }[] = [];
+    Object.defineProperty(HTMLDivElement.prototype, "animate", {
+      configurable: true,
+      writable: true,
+      value(this: HTMLDivElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
+        played.push({ el: this, frames, options });
+        return {} as Animation;
+      },
+    });
+    onTestFinished(() => {
+      Reflect.deleteProperty(HTMLDivElement.prototype, "animate");
+    });
+    return () => played.filter((p) => listbox().contains(p.el));
+  }
+
+  const reload = async (instances: ReturnType<typeof withInstances>) => {
+    ipc.overrides.set("list_instances", () => instances);
+    await act(async () => {
+      await launcher.actions.reload("instances");
+    });
+    await flush();
+  };
+
+  it("结果列表与每一组都挂了让位", async () => {
+    await mount();
+    act(() => shell.openPalette());
+    await flush();
+    expect(reflowed.has(listbox())).toBe(true);
+    expect(groups().length).toBeGreaterThan(1);
+    for (const group of groups()) expect(reflowed.has(group)).toBe(true);
+  });
+
+  it("键入过滤：列表与在场的各组在这一次提交里开过让位暂停又去掉，结果整批换上，不逐行淡入", async () => {
+    const fades = recordFades();
+    await mount();
+    act(() => shell.openPalette());
+    await flush();
+    const pauses = watchPauses();
+
+    type("生");
+    const toggles = pauses();
+    expect(toggles.get(listbox())).toEqual([null, ""]);
+    expect(groups().length).toBeGreaterThan(0);
+    for (const group of groups()) expect(toggles.get(group)).toEqual([null, ""]);
+    expect(listbox().hasAttribute(REFLOW_PAUSED_ATTR)).toBe(false);
+    expect(fades()).toEqual([]);
+  });
+
+  it("面板开着时后台插进新实例：不暂停让位，插进来的那一行原地淡入，其余行不动", async () => {
+    const fades = recordFades();
+    await mount();
+    act(() => shell.openPalette());
+    await flush();
+    const pauses = watchPauses();
+
+    await reload(withInstances(["生存", 100], ["创造", 900], ["空岛", null], ["新装的", 1000]));
+    expect(options()[0].textContent?.startsWith("新装的")).toBe(true);
+    expect(pauses().size).toBe(0);
+    const played = fades();
+    expect(played.map((p) => [p.el.getAttribute("role"), p.el.textContent?.startsWith("新装的")])).toEqual([["option", true]]);
+    expect(played[0].frames).toEqual([{ opacity: 0 }, { opacity: 1 }]);
+    // 走的是淡入补间：时长与曲线照搬 fade.in
+    expect(played[0].options.duration).toBe(fade.in.duration * 1000);
+    expect(played[0].options.easing).toContain(fade.in.ease.join(", "));
+  });
+
+  it("整组后到（冷启动时实例列表晚到）：整组淡入，组里的行不再各自淡入", async () => {
+    ipc.overrides.set("list_instances", () => []);
+    const fades = recordFades();
+    await mount();
+    act(() => shell.openPalette());
+    await flush();
+    expect(groups().map((g) => g.getAttribute("aria-label"))).not.toContain(PALETTE_COPY.groups.instance);
+
+    await reload(withInstances(["生存", 100], ["创造", 900]));
+    const played = fades();
+    expect(played.map((p) => [p.el.getAttribute("role"), p.el.getAttribute("aria-label")])).toEqual([["group", PALETTE_COPY.groups.instance]]);
   });
 });

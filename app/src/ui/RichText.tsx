@@ -4,10 +4,11 @@
 
 import { useLayoutEffect, useRef, type MouseEvent, type ReactNode } from "react";
 import { prepareDisplayCanvas, useDevicePixelRatio } from "../art/illustrations/canvas";
+import { useReflow } from "../lib/reflow";
 import { cx } from "../lib/util";
 import { useExternalLinkOpener, type ExternalLinkOpener } from "./external-link";
 import { useNearViewport, useRemoteImage } from "./remote-image";
-import type { Block, Inline } from "./richtext-parse";
+import type { Block, ImageSize, Inline } from "./richtext-parse";
 import styles from "./RichText.module.css";
 
 /** 配图最宽画到这么宽（CSS px）：再宽也超出正文列，按需缩小显示。 */
@@ -19,15 +20,25 @@ export function richImageSize(naturalWidth: number, naturalHeight: number): { wi
   return { width, height: Math.max(1, Math.round((naturalHeight * width) / naturalWidth)) };
 }
 
-function RichImage({ src, alt }: { src: string; alt: string }) {
+/**
+ * 配图位的显示尺寸。原文写了宽高的（HTML 正文常见）照写的显示，与浏览器对 <img width height> 的处理一致，
+ * 取图之前就能把位置占好；没写的只能等解码出原图尺寸，在那之前为 null，不占高度。
+ */
+export function richImageBox(declared: ImageSize | undefined, natural: ImageSize | null): { width: number; height: number } | null {
+  if (declared !== undefined) return richImageSize(declared.width, declared.height);
+  return natural === null ? null : richImageSize(natural.width, natural.height);
+}
+
+function RichImage({ src, alt, size }: { src: string; alt: string; size: ImageSize | undefined }) {
   const ref = useRef<HTMLSpanElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dpr = useDevicePixelRatio();
   const near = useNearViewport(ref);
   const image = useRemoteImage(src, near, Math.ceil(RICH_IMAGE_MAX_WIDTH * dpr));
-  const size = image.status === "ready" ? richImageSize(image.naturalWidth, image.naturalHeight) : null;
-  const width = size === null ? 0 : size.width;
-  const height = size === null ? 0 : size.height;
+  const ready = image.status === "ready";
+  const box = richImageBox(size, ready ? { width: image.naturalWidth, height: image.naturalHeight } : null);
+  const width = box === null ? 0 : box.width;
+  const height = box === null ? 0 : box.height;
 
   useLayoutEffect(() => {
     if (image.status !== "ready") return;
@@ -40,8 +51,16 @@ function RichImage({ src, alt }: { src: string; alt: string }) {
   // 取不到的图不占位、不显示裂图：当这张图不存在
   if (image.status === "failed") return null;
   return (
-    <span ref={ref} className={styles.image} role={size === null ? undefined : "img"} aria-label={size === null ? undefined : alt}>
-      {size !== null && <canvas ref={canvasRef} className={styles.canvas} style={{ width: size.width, aspectRatio: `${size.width} / ${size.height}` }} />}
+    <span
+      ref={ref}
+      className={styles.image}
+      data-reserved={size === undefined ? undefined : ""}
+      data-ready={ready ? "" : undefined}
+      role={ready ? "img" : undefined}
+      aria-label={ready ? alt : undefined}
+      style={box === null ? undefined : { width: box.width, aspectRatio: `${box.width} / ${box.height}` }}
+    >
+      {ready && <canvas ref={canvasRef} className={styles.canvas} />}
     </span>
   );
 }
@@ -87,7 +106,7 @@ function renderInline(nodes: readonly Inline[], prefix: string, open: ExternalLi
           </a>
         );
       case "image":
-        return <RichImage key={key} src={node.src} alt={node.alt} />;
+        return <RichImage key={key} src={node.src} alt={node.alt} size={node.size} />;
       case "br":
         return <br key={key} />;
     }
@@ -140,5 +159,11 @@ export interface RichTextProps {
 
 export function RichText({ blocks, className }: RichTextProps) {
   const open = useExternalLinkOpener();
-  return <div className={cx(styles.body, className)}>{renderBlocks(blocks, "b", open)}</div>;
+  // 没写尺寸的配图解码后才撑开所在的块：后面的段落、列表从原位置滑下去，而不是一帧跳过去
+  const reflow = useReflow<HTMLDivElement>();
+  return (
+    <div ref={reflow} className={cx(styles.body, className)}>
+      {renderBlocks(blocks, "b", open)}
+    </div>
+  );
 }

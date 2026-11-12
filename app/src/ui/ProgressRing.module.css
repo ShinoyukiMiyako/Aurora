@@ -37,8 +37,10 @@
   stroke: var(--sk-bg-3);
 }
 
+/* 色调随状态换（有任务时强调色、空闲时灰）：描边色与圆心字色一次性过渡，不在一帧里换色 */
 .fill {
   stroke: var(--ring-fill);
+  transition: stroke var(--sk-dur-hover) var(--sk-ease);
 }
 
 .label {
@@ -48,6 +50,7 @@
   line-height: 1;
   font-variant-numeric: tabular-nums;
   color: var(--sk-text);
+  transition: color var(--sk-dur-hover) var(--sk-ease);
 }
 
 /* 84 档是页面级的总进度环：圆心数字按小标题字号画，才和 7px 的描边相称 */

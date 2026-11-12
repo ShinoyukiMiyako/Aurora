@@ -1,10 +1,14 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas, type CanvasStub } from "../art/illustrations/test-canvas";
+import { LOADING_DELAY_MS } from "../domain/limits";
 import { render, stubMatchMedia, type Rendered } from "../test/dom";
 import { RemoteImageProvider } from "./remote-image";
 import { isPixelArtThumb, Thumb, THUMB_RADIUS, thumbIconSize, type ThumbSize } from "./Thumb";
+import styles from "./Thumb.module.css";
 
 let view: Rendered | undefined;
 let canvas: CanvasStub;
@@ -63,6 +67,16 @@ function enterViewport() {
 
 const withResolver = (resolve: (url: string) => Promise<string>, ui: ReactNode) => <RemoteImageProvider resolve={resolve}>{ui}</RemoteImageProvider>;
 
+/**
+ * 某条 CSS 动画播完。jsdom 不播 CSS 动画，也没有 AnimationEvent：React 按环境选带不带 webkit 前缀的事件名，
+ * 两个都派发；伪元素照浏览器的样子挂在事件上（不是伪元素上的动画为空串）。
+ */
+function animationEnds(el: Element, pseudoElement: string) {
+  act(() => {
+    for (const type of ["animationend", "webkitAnimationEnd"]) el.dispatchEvent(Object.assign(new Event(type, { bubbles: true }), { pseudoElement }));
+  });
+}
+
 describe("判定规则", () => {
   it("像素风：不超过 64 的正方形源图，按 2 倍及以上整数倍放大", () => {
     expect(isPixelArtThumb(16, 16, 32)).toBe(true);
@@ -95,6 +109,8 @@ describe("Thumb", () => {
     expect(thumb().querySelector("svg")?.getAttribute("width")).toBe("24");
     expect(thumb().getAttribute("aria-hidden")).toBe("true");
     expect(fetchMock).not.toHaveBeenCalled();
+    // 一开始就没有图：图标不单独淡入
+    expect(thumb().querySelector("svg")?.classList.contains(styles.late)).toBe(false);
   });
 
   it("44 档：底座 44 见方、圆角 13、类型图标 20", () => {
@@ -152,6 +168,8 @@ describe("Thumb", () => {
     expect(thumb().dataset.view).toBe("fallback");
     expect(thumb().dataset.inactive).toBe("true");
     expect(thumb().querySelector("svg")?.getAttribute("width")).toBe("20");
+    // 加载失败才落到回落图形：图标淡入
+    expect(thumb().querySelector("svg")?.classList.contains(styles.late)).toBe(true);
     expect(String(warn.mock.calls[0][0])).toContain("https://x.test/a.png");
 
     view.unmount();
@@ -161,5 +179,168 @@ describe("Thumb", () => {
     await settle();
     expect(thumb().dataset.view).toBe("fallback");
     expect(String(warn.mock.calls.at(-1)?.[1])).toContain("HTTP 404");
+  });
+
+  it("光带：进入加载态才有；图到了不同帧消失，标成淡出留到 ::before 上的淡出播完才摘掉", async () => {
+    view = render(withResolver(async (u) => u, <Thumb url="https://cdn.modrinth.com/data/x/icon.png" kind="mod" hue={1} size={48} />));
+    // 视口外的静止占位没有光带
+    expect(thumb().hasAttribute("data-shimmer")).toBe(false);
+    enterViewport();
+    expect(thumb().dataset.shimmer).toBe("run");
+    await settle();
+    expect(thumb().dataset.view).toBe("image");
+    expect(thumb().dataset.shimmer).toBe("fading");
+
+    // 图片自己的淡入冒上来、::after 内描边上的事件都不算
+    animationEnds(thumb().querySelector("canvas") as HTMLCanvasElement, "");
+    animationEnds(thumb(), "::after");
+    expect(thumb().dataset.shimmer).toBe("fading");
+
+    animationEnds(thumb(), "::before");
+    expect(thumb().hasAttribute("data-shimmer")).toBe(false);
+  });
+
+  it("光带：加载失败落到回落图形时同样淡出；本来就没有图的从头到尾没有光带", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    view = render(withResolver(async () => Promise.reject(new Error("登记失败")), <Thumb url="https://x.test/a.png" kind="shader" hue={40} size={40} />));
+    enterViewport();
+    expect(thumb().dataset.shimmer).toBe("run");
+    await settle();
+    expect(thumb().dataset.view).toBe("fallback");
+    expect(thumb().dataset.shimmer).toBe("fading");
+    view.unmount();
+
+    view = render(<Thumb url={null} kind="resourcepack" hue={210} size={64} />);
+    enterViewport();
+    expect(thumb().dataset.view).toBe("fallback");
+    expect(thumb().hasAttribute("data-shimmer")).toBe(false);
+  });
+
+  it("正显示回落图形时来了地址、图很快就到：不经过加载态与光带，图直接在底座上淡入；图标还是同一个节点原地淡出，淡完才摘掉", async () => {
+    const tree = (url: string | null) => withResolver(async (u) => u, <Thumb url={url} kind="server" hue={120} size={40} />);
+    view = render(tree(null));
+    enterViewport();
+    const icon = thumb().querySelector("svg") as SVGSVGElement;
+    expect(thumb().dataset.view).toBe("fallback");
+
+    view.rerender(tree("data:image/png;base64,AAAA"));
+    // 地址刚来、图还没到：色相底座与图标留着，不切到灰色骨架
+    expect(thumb().dataset.view).toBe("fallback");
+    expect(thumb().hasAttribute("data-shimmer")).toBe(false);
+    expect(thumb().querySelector("svg")).toBe(icon);
+    expect(icon.classList.contains(styles.leaving)).toBe(false);
+
+    await settle();
+    expect(thumb().dataset.view).toBe("image");
+    expect(thumb().hasAttribute("data-shimmer")).toBe(false);
+    const image = thumb().querySelector("canvas") as HTMLCanvasElement;
+    expect(image).not.toBeNull();
+    // 图标排在图片后面、叠在上面淡出，与图片的淡入交叉
+    expect(thumb().querySelector("svg")).toBe(icon);
+    expect(image.nextElementSibling).toBe(icon);
+    expect(icon.classList.contains(styles.leaving)).toBe(true);
+
+    // 图片淡入播完不算，图标自己的淡出播完才摘
+    animationEnds(image, "");
+    expect(thumb().querySelector("svg")).toBe(icon);
+    animationEnds(icon, "");
+    expect(thumb().querySelector("svg")).toBeNull();
+  });
+
+  it("留住底座等图超过加载延迟：转入加载态扫光，图标淡出；之后加载失败落回回落图形时图标淡入", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      let fail: (error: Error) => void = () => {
+        throw new Error("解析函数还没被调用");
+      };
+      const resolver = () => new Promise<string>((_, reject) => (fail = reject));
+      const tree = (url: string | null) => withResolver(resolver, <Thumb url={url} kind="server" hue={120} size={40} />);
+      view = render(tree(null));
+      enterViewport();
+      view.rerender(tree("https://x.test/favicon.png"));
+
+      await act(() => vi.advanceTimersByTimeAsync(LOADING_DELAY_MS - 1));
+      expect(thumb().dataset.view).toBe("fallback");
+      expect(thumb().hasAttribute("data-shimmer")).toBe(false);
+
+      await act(() => vi.advanceTimersByTimeAsync(1));
+      expect(thumb().dataset.view).toBe("loading");
+      expect(thumb().dataset.shimmer).toBe("run");
+      const icon = thumb().querySelector("svg") as SVGSVGElement;
+      expect(icon.classList.contains(styles.leaving)).toBe(true);
+
+      fail(new Error("离线"));
+      await act(() => vi.advanceTimersByTimeAsync(0));
+      expect(thumb().dataset.view).toBe("fallback");
+      // 淡到一半的那个节点接着用，换成淡入
+      expect(thumb().querySelector("svg")).toBe(icon);
+      expect(icon.classList.contains(styles.late)).toBe(true);
+      expect(icon.classList.contains(styles.leaving)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("留住底座等图的那段里加载失败：图标一直在，不重播淡入", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const tree = (url: string | null) => withResolver(async () => Promise.reject(new Error("离线")), <Thumb url={url} kind="server" hue={120} size={40} />);
+    view = render(tree(null));
+    enterViewport();
+    const icon = thumb().querySelector("svg") as SVGSVGElement;
+    view.rerender(tree("https://x.test/favicon.png"));
+    await settle();
+    expect(thumb().dataset.view).toBe("fallback");
+    expect(thumb().querySelector("svg")).toBe(icon);
+    expect(icon.classList.contains(styles.late)).toBe(false);
+    expect(icon.classList.contains(styles.leaving)).toBe(false);
+  });
+
+  it("挂载时就有地址的照旧：进视口就是加载态扫光，不留回落图形", () => {
+    view = render(withResolver(() => new Promise<string>(() => undefined), <Thumb url="https://x.test/a.png" kind="mod" hue={1} size={40} />));
+    expect(thumb().dataset.view).toBe("pending");
+    enterViewport();
+    expect(thumb().dataset.view).toBe("loading");
+    expect(thumb().dataset.shimmer).toBe("run");
+    expect(thumb().querySelector("svg")).toBeNull();
+  });
+
+  it("样式：光带挂在 ::before 的标记上，淡出时横扫的那条只暂停不换名、再叠一条退场补间的淡出；减少动画时没有光带、淡出照播", () => {
+    const css = readFileSync(resolve(__dirname, "Thumb.module.css"), "utf8");
+    const body = (selector: string) => {
+      const at = css.indexOf(`${selector} {`);
+      if (at < 0) throw new Error(`Thumb.module.css 里没有 ${selector}`);
+      return css.slice(at, css.indexOf("}", at));
+    };
+    const run = "shimmer var(--sk-loop-shimmer) linear infinite";
+    expect(body(".thumb[data-shimmer]::before")).toContain(`animation: ${run};`);
+    // 同名同位：浏览器按名字认出还是那一条，保留播放进度，光带停在淡出开始那一刻的位置而不是跳回起点
+    expect(body('.thumb[data-shimmer="fading"]::before').replace(/\s+/g, " ")).toContain(`animation: ${run} paused, shimmer-out var(--sk-dur-out) var(--sk-ease-in) forwards;`);
+    expect(body("@keyframes shimmer-out")).toMatch(/to\s*\{\s*opacity: 0;/);
+    expect(body(":global([data-sk-reduced]) .thumb[data-shimmer]::before")).toContain("animation: none;");
+    // 减少动画时淡出也要播完一遍（看不见），否则等不到 ::before 上的结束事件，fading 标记一直摘不掉
+    expect(body(':global([data-sk-reduced]) .thumb[data-shimmer="fading"]::before')).toContain("animation: shimmer-out var(--sk-dur-out) var(--sk-ease-in) forwards;");
+    // 光带不再跟着 data-view="loading" 出没：那样一换形态就同帧消失
+    expect(css).not.toContain('[data-view="loading"]::');
+  });
+
+  it("样式：失败时底色从骨架淡到色相底座、图标淡入；减少动画时图片淡入缩到 200ms", () => {
+    const css = readFileSync(resolve(__dirname, "Thumb.module.css"), "utf8");
+    const body = (selector: string) => {
+      const at = css.indexOf(`${selector} {`);
+      if (at < 0) throw new Error(`Thumb.module.css 里没有 ${selector}`);
+      return css.slice(at, css.indexOf("}", at));
+    };
+    expect(body(".thumb")).toContain("transition: background-color var(--sk-dur-in) var(--sk-ease-out);");
+    expect(body(".late")).toContain("animation: reveal var(--sk-dur-in) var(--sk-ease-out);");
+    expect(body(".image")).toContain("animation: reveal var(--sk-dur-reveal) var(--sk-ease-out);");
+    expect(body(":global([data-sk-reduced]) .image")).toContain("animation: reveal var(--sk-dur-in) var(--sk-ease-out);");
+    // 让位的图标与图片的淡入同一时长同一曲线交叉，绝对定位不占网格的格子，留着底座上的图标色
+    const leaving = body(".leaving");
+    expect(leaving).toContain("animation: conceal var(--sk-dur-reveal) var(--sk-ease-out) forwards;");
+    expect(leaving).toContain("position: absolute;");
+    expect(leaving).toContain("color: hsl(var(--hue) var(--sk-hue-glyph-s) var(--sk-hue-glyph-l));");
+    expect(body(":global([data-sk-reduced]) .leaving")).toContain("animation: conceal var(--sk-dur-in) var(--sk-ease-out) forwards;");
+    expect(body("@keyframes conceal")).toMatch(/to\s*\{\s*opacity: 0;/);
   });
 });

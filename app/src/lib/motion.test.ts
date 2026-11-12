@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { fade, pageItem, rootTransition, SPRING_PARAMS, springs, tabPanel, TOOLTIP_TIMING, twoParam, type SpringName } from "./motion";
+import { ambientFade, fade, faceSwap, insertItem, insertItemFade, lineSwap, lineSwapFade, pageItem, popMark, rootTransition, shake, SPRING_PARAMS, springAt, springs, stepPane, stepPaneFade, tabPanel, TOOLTIP_TIMING, tweenAt, twoParam, type PanelFrom, type SpringName } from "./motion";
 
 const TOKENS = readFileSync(new URL("../styles/tokens.css", import.meta.url), "utf8");
 
@@ -101,6 +101,72 @@ describe("CSS 弹簧近似与动效令牌", () => {
     expect(token("--sk-dur-in")).toBe(`${fade.in.duration * 1000}ms`);
     expect(token("--sk-dur-out")).toBe(`${fade.out.duration * 1000}ms`);
   });
+
+  it("环境层显隐：入 480 ms 走淡入曲线，出 200 ms 走淡出曲线", () => {
+    expect(ambientFade).toEqual({
+      in: { duration: 0.48, ease: [0.16, 1, 0.3, 1] },
+      out: { duration: 0.2, ease: [0.4, 0, 1, 1] },
+    });
+    expect(ambientFade.in.ease).toBe(fade.in.ease);
+    expect(ambientFade.out.ease).toBe(fade.out.ease);
+  });
+
+  it("tweenAt：按补间自己的时长与缓动曲线给进度，两端钳在 0 与 1", () => {
+    expect(tweenAt(ambientFade.in, -0.1)).toBe(0);
+    expect(tweenAt(ambientFade.in, 0)).toBe(0);
+    expect(tweenAt(ambientFade.in, 0.48)).toBe(1);
+    expect(tweenAt(ambientFade.in, 3)).toBe(1);
+    // 三次贝塞尔的参数式：x(s) 是时间占比，y(s) 是进度
+    const bezier = (a: number, b: number, s: number) => 3 * a * s * (1 - s) ** 2 + 3 * b * s * s * (1 - s) + s ** 3;
+    for (const tween of [ambientFade.in, ambientFade.out, fade.in]) {
+      const [x1, y1, x2, y2] = tween.ease;
+      for (const s of [0.1, 0.35, 0.6, 0.9]) expect(tweenAt(tween, bezier(x1, x2, s) * tween.duration)).toBeCloseTo(bezier(y1, y2, s), 2);
+    }
+    // 淡入前快后慢，过一半时间已走完九成；淡出前慢后快，过一半时间还不到四成
+    expect(tweenAt(ambientFade.in, 0.24)).toBeGreaterThan(0.9);
+    expect(tweenAt(ambientFade.out, 0.1)).toBeLessThan(0.4);
+  });
+});
+
+describe("springAt：带初值的解析解", () => {
+  const NAMES: SpringName[] = ["tap", "settle", "pop", "soft", "morph", "base"];
+
+  it.each(NAMES)("%s：从 -1 静止出发，与 0 到 1 的阶跃解只差一个平移", (name) => {
+    const { duration, bounce } = SPRING_PARAMS[name];
+    for (const t of [0, 0.01, 0.05, 0.12, 0.3, 0.6]) {
+      expect(springAt(name, -1, 0, t).x).toBeCloseTo(position(t, duration, bounce) - 1, 9);
+    }
+  });
+
+  it.each(NAMES)("%s：t = 0 时原样给回初始位移与初速度", (name) => {
+    const at = springAt(name, -120, 640, 0);
+    expect(at.x).toBeCloseTo(-120, 9);
+    expect(at.v).toBeCloseTo(640, 9);
+  });
+
+  it.each(NAMES)("%s：速度是位移对时间的导数", (name) => {
+    const h = 1e-6;
+    for (const t of [0.003, 0.04, 0.11, 0.25]) {
+      const slope = (springAt(name, -80, 300, t + h).x - springAt(name, -80, 300, t - h).x) / (2 * h);
+      expect(springAt(name, -80, 300, t).v).toBeCloseTo(slope, 3);
+    }
+  });
+
+  it("途中接力：从某一刻的位移与速度重新出发，轨迹与不间断时相同", () => {
+    const mid = springAt("settle", -120, 0, 0.05);
+    const relay = springAt("settle", mid.x, mid.v, 0.07);
+    const straight = springAt("settle", -120, 0, 0.12);
+    expect(relay.x).toBeCloseTo(straight.x, 9);
+    expect(relay.v).toBeCloseTo(straight.v, 9);
+  });
+
+  it("最终回到 0 并停住", () => {
+    for (const name of NAMES) {
+      const end = springAt(name, 300, -900, 2);
+      expect(Math.abs(end.x)).toBeLessThan(1e-3);
+      expect(Math.abs(end.v)).toBeLessThan(1e-2);
+    }
+  });
 });
 
 describe("变体与时机", () => {
@@ -108,16 +174,118 @@ describe("变体与时机", () => {
     expect(rootTransition).toEqual({ ...springs.base, opacity: fade.in });
   });
 
-  it("页面区块第 i 项延迟 20 + min(i, 5) × 40 ms", () => {
-    const show = pageItem.show as (i: number) => { transition: { delay: number } };
+  it("页面区块从下方 6px 上移，第 i 项延迟 20 + min(i, 4) × 25 ms，120 ms 封顶", () => {
+    expect(pageItem.hidden).toEqual({ opacity: 0, y: 6 });
+    const show = pageItem.show as (i: number) => { y: number; transition: { delay: number; opacity: { delay: number } } };
+    expect(show(0).y).toBe(0);
     expect(show(0).transition.delay).toBeCloseTo(0.02, 10);
-    expect(show(1).transition.delay).toBeCloseTo(0.06, 10);
-    expect(show(5).transition.delay).toBeCloseTo(0.22, 10);
-    expect(show(9).transition.delay).toBeCloseTo(0.22, 10);
+    expect(show(1).transition.delay).toBeCloseTo(0.045, 10);
+    expect(show(3).transition.delay).toBeCloseTo(0.095, 10);
+    expect(show(4).transition.delay).toBeCloseTo(0.12, 10);
+    expect(show(9).transition.delay).toBeCloseTo(0.12, 10);
+  });
+
+  it("页面区块的透明度与位移同一个延迟：按值指定的 opacity 过渡不继承根上的 delay，必须自己带", () => {
+    const show = pageItem.show as (i: number) => { transition: Record<string, unknown> & { delay: number; opacity: Record<string, unknown> } };
+    for (const i of [0, 1, 2, 3, 4, 7]) {
+      const { transition } = show(i);
+      expect(transition.opacity).toEqual({ ...fade.in, delay: transition.delay });
+      expect(transition.opacity.delay).toBeGreaterThan(0);
+    }
+    const second = show(2).transition;
+    expect(second.opacity.delay).toBeCloseTo(0.07, 10);
+    expect(second).toEqual({ ...springs.soft, delay: second.delay, opacity: { ...fade.in, delay: second.delay } });
   });
 
   it("面板变体与页面区块同名，子元素才接得住编排", () => {
     expect(Object.keys(tabPanel).sort()).toEqual(Object.keys(pageItem).sort());
+  });
+
+  it("面板来向：不传时从下方 6px，横排标签按方向从左右 8px，竖排分区按方向从上下 6px", () => {
+    const hidden = tabPanel.hidden as (from: PanelFrom | undefined) => Record<string, number>;
+    expect(hidden(undefined)).toEqual({ opacity: 0, y: 6 });
+    expect(hidden({ axis: "x", dir: 1 })).toEqual({ opacity: 0, x: 8 });
+    expect(hidden({ axis: "x", dir: -1 })).toEqual({ opacity: 0, x: -8 });
+    expect(hidden({ axis: "y", dir: 1 })).toEqual({ opacity: 0, y: 6 });
+    expect(hidden({ axis: "y", dir: -1 })).toEqual({ opacity: 0, y: -6 });
+    // 落定时两个方向都回到 0：上一块面板从哪一侧进来，不影响这一块
+    expect(tabPanel.show).toEqual({ opacity: 1, x: 0, y: 0, transition: { ...springs.settle, opacity: fade.in } });
+  });
+
+  it("否定抖动每段走淡入的令牌曲线", () => {
+    expect(shake.transition).toEqual({ duration: 0.36, ease: fade.in.ease });
+  });
+
+  it("流内块增删：从 0.98 落到位走 settle，透明度走补间，退场只淡出不回弹", () => {
+    expect(insertItem.initial).toEqual({ opacity: 0, scale: 0.98 });
+    expect(insertItem.animate).toEqual({ opacity: 1, scale: 1, transition: { ...springs.settle, opacity: fade.in } });
+    expect(insertItem.exit).toEqual({ opacity: 0, scale: 0.98, transition: fade.out });
+  });
+
+  it("小标记两档：点从 0 弹出、退场缩到 0.6；图形从 0.8 弹出、退场只淡出；入场都走 pop 加淡入补间", () => {
+    const show = { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } };
+    expect(popMark.dot).toEqual({ initial: { opacity: 0, scale: 0 }, animate: show, exit: { opacity: 0, scale: 0.6, transition: fade.out } });
+    expect(popMark.glyph).toEqual({ initial: { opacity: 0, scale: 0.8 }, animate: show, exit: { opacity: 0, transition: fade.out } });
+  });
+
+  it("小标记的减少动画档只动透明度，进出都不带缩放", () => {
+    expect(popMark.reduced).toEqual({ initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in }, exit: { opacity: 0, transition: fade.out } });
+    for (const phase of Object.values(popMark.reduced)) expect(phase).not.toHaveProperty("scale");
+  });
+
+  it("小标记的标签档：从 0.6 弹出走 pop 加淡入补间，退场同 glyph 只原地淡出", () => {
+    expect(popMark.tag).toEqual({
+      initial: { opacity: 0, scale: 0.6 },
+      animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } },
+      exit: { opacity: 0, transition: fade.out },
+    });
+    expect(popMark.tag.animate).toEqual(popMark.glyph.animate);
+    expect(popMark.tag.exit).toEqual(popMark.glyph.exit);
+  });
+
+  it("换一枚小控件：换成别的东西取标签档，减少动画取小标记的减少动画档，同一组参数只留一份", () => {
+    expect(faceSwap.pop).toEqual({ initial: { opacity: 0, scale: 0.6 }, animate: { opacity: 1, scale: 1, transition: { ...springs.pop, opacity: fade.in } } });
+    expect(faceSwap.pop.initial).toBe(popMark.tag.initial);
+    expect(faceSwap.pop.animate).toBe(popMark.tag.animate);
+    expect(faceSwap.exit).toEqual({ opacity: 0, transition: fade.out });
+    expect(faceSwap.exit).toBe(popMark.tag.exit);
+    expect(faceSwap.reduced).toBe(popMark.reduced);
+    expect(faceSwap.tap).toEqual({ initial: { opacity: 0, scale: 0.8 }, animate: { opacity: 1, scale: 1, transition: { ...springs.tap, opacity: fade.in } } });
+  });
+
+  it("向导换步：前进时新步骤从右侧 16px 进、旧步骤朝左 16px 退，后退反过来，方向为 0 只淡入淡出", () => {
+    const enter = stepPane.enter as (dir: number) => Record<string, unknown>;
+    const exit = stepPane.exit as (dir: number) => Record<string, unknown>;
+    expect(enter(1)).toEqual({ opacity: 0, x: 16 });
+    expect(exit(1)).toEqual({ opacity: 0, x: -16, transition: fade.out });
+    expect(enter(-1)).toEqual({ opacity: 0, x: -16 });
+    expect(exit(-1)).toEqual({ opacity: 0, x: 16, transition: fade.out });
+    expect(Math.abs(enter(0).x as number)).toBe(0);
+    expect(Math.abs(exit(0).x as number)).toBe(0);
+    expect(stepPane.center).toEqual({ opacity: 1, x: 0, transition: { ...springs.soft, opacity: fade.in } });
+  });
+
+  it("减少动画档的增删与换步只动透明度：没有缩放与位移可让根部配置一步到位", () => {
+    expect(insertItemFade).toEqual({ initial: { opacity: 0 }, animate: { opacity: 1, transition: fade.in }, exit: { opacity: 0, transition: fade.out } });
+    expect(stepPaneFade).toEqual({ enter: { opacity: 0 }, center: { opacity: 1, transition: fade.in }, exit: { opacity: 0, transition: fade.out } });
+  });
+
+  it("换行：新行从下方 4px 落到位走 settle，旧行上移 4px 淡出", () => {
+    expect(lineSwap).toEqual({
+      enter: { opacity: 0, y: 4 },
+      show: { opacity: 1, y: 0, transition: { ...springs.settle, opacity: fade.in } },
+      leave: { opacity: 0, y: -4, transition: fade.out },
+    });
+  });
+
+  it("减少动画档的换行与 lineSwap 同一组变体标签，进出只动透明度", () => {
+    expect(lineSwapFade).toEqual({ enter: { opacity: 0 }, show: { opacity: 1, transition: fade.in }, leave: { opacity: 0, transition: fade.out } });
+    expect(Object.keys(lineSwapFade).sort()).toEqual(Object.keys(lineSwap).sort());
+    for (const phase of Object.values(lineSwapFade)) {
+      expect(phase).not.toHaveProperty("y");
+      expect(phase).not.toHaveProperty("x");
+      expect(phase).not.toHaveProperty("scale");
+    }
   });
 
   it("提示气泡时机", () => {

@@ -1,4 +1,10 @@
+/*
+ * 定位基准：材质载入时下载部件退场，被抽出布局、按它到最近定位祖先的偏移绝对定位。没有这一层时那个祖先是弹窗面板，
+ * 而弹窗同一刻开始形变，主体在形变期间带着 transform，成了绝对定位的包含块：偏移按面板量、按主体摆，
+ * 淡出的部件整体下移一个弹窗头部的高度，叠到页签上。这一层自己不随这次变化移动
+ */
 .body {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--sk-space-12);
@@ -16,6 +22,14 @@
   flex: 1;
   align-items: center;
   justify-content: center;
+}
+
+/* 搜索结果与无结果互换的那一层：接过面板的横向排法，网格照旧居中、无结果照旧撑满 */
+.swap {
+  display: flex;
+  flex: 1;
+  justify-content: center;
+  min-width: 0;
 }
 
 /*
@@ -72,12 +86,25 @@
   cursor: pointer;
   transition:
     border-color var(--sk-dur-hover) var(--sk-ease),
-    background-color var(--sk-dur-hover) var(--sk-ease);
+    background-color var(--sk-dur-hover) var(--sk-ease),
+    scale var(--sk-spring-tap-dur) var(--sk-spring-tap);
 }
 
 .cell:hover {
   border-color: var(--sk-accent-line);
   background: var(--sk-card-hover);
+}
+
+/* 按下：格子连同方块缩一点，像把方块按进物品栏的槽里；松手（或选中关窗前）弹回 */
+.cell:active {
+  scale: 0.94;
+}
+
+/* 减少动画：不缩放，按下时瞬时降到 0.85 不透明度 */
+:global([data-sk-reduced]) .cell:active {
+  scale: none;
+  opacity: 0.85;
+  transition: none;
 }
 
 /* 选中格：主色描边，内侧再压一道主色线，读作 2px 的框 */

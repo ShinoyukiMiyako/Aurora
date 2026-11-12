@@ -1,8 +1,11 @@
 // 「继续游玩」大卡：当前实例的代码绘制封面、名称与信息、本页唯一的主按钮（启动胶囊）、右侧的等距方块。
 // 「换一个」切换当前实例时整块内容交叉淡入；被删除的实例在淡出期间直接不画（它的启动入口已不存在）。
+//
+// 加载、出错、没有实例与实例大卡始终是同一张卡片，只换卡里的内容：卡片不重挂，页面入场就不会重播。
+// 骨架逐行照真实内容画（顶行、标题区三行、胶囊行同高），加载完叠放交叉淡化，不位移。
 
-import { AnimatePresence, motion } from "framer-motion";
-import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { AnimatePresence, motion, useIsPresent } from "framer-motion";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref, type RefObject } from "react";
 import { Icon } from "../../art/Icon";
 import { InstanceBlock } from "../../art/iso/InstanceBlock";
 import { ACTION_ERROR, BOOT_SLICE_ERROR, GAME_DIR_SWITCH_COPY, gameDirSwitchReason, SLOW_LOADING_HINT } from "../../copy/flows";
@@ -12,6 +15,8 @@ import { useCoverBackdrop, useInstanceCover } from "../../launch/cover";
 import { LaunchCapsule } from "../../launch/LaunchCapsule";
 import { useLoadingGate } from "../../lib/loading-gate";
 import { fade } from "../../lib/motion";
+import { useReflow } from "../../lib/reflow";
+import { useMounted } from "../../lib/useMounted";
 import { cx } from "../../lib/util";
 import { useNav, useShell } from "../../shell/shell";
 import { useRunner } from "../../shell/useRunner";
@@ -20,10 +25,13 @@ import { useLauncherActions, useLauncherSelector, useNow } from "../../state/lau
 import { useGameDirectories } from "../../state/queries/catalog";
 import { useInstanceContent } from "../../state/queries/instance";
 import { findInstance, gameDirectoryBusy } from "../../state/selectors";
+import type { SliceStatus } from "../../state/store";
+import { Appear } from "../../ui/Appear";
 import { Button } from "../../ui/Button";
 import { Card, type ResponsiveValue } from "../../ui/Card";
 import { Cover } from "../../ui/Cover";
 import { EmptyState } from "../../ui/EmptyState";
+import { Loadable } from "../../ui/Loadable";
 import { LoaderTag } from "../../ui/LoaderTag";
 import type { MenuEntry } from "../../ui/Menu";
 import { MenuButton } from "../../ui/MenuButton";
@@ -39,49 +47,122 @@ import s from "./home.module.css";
 
 export interface ContinueCardProps {
   span: ResponsiveValue;
-  /** 大卡指向的实例；实例列表就绪且一个实例都没有时为 null。 */
+  /** 大卡指向的实例；实例列表与设置都读完、且一个实例都没有时为 null（读完之前的 null 不会被画出来）。 */
   target: InstanceSummary | null;
+}
+
+/** 一轮读取落定后画在卡里的结论：列表读取出错，或列表与设置都已读完。 */
+type Outcome = Exclude<SliceStatus, { kind: "loading" }>;
+
+/** 卡里这一面是什么：出错、没有实例，或某个实例的大卡（换实例由大卡自己交叉淡化）。 */
+function faceOf(outcome: Outcome, target: InstanceSummary | null): "error" | "empty" | "hero" {
+  if (outcome.kind === "error") return "error";
+  return target === null ? "empty" : "hero";
 }
 
 export function ContinueCard({ span, target }: ContinueCardProps) {
   const status = useLauncherSelector((s) => s.status.instances);
-  const actions = useLauncherActions();
-  const run = useRunner();
-  const gate = useLoadingGate(status.kind === "loading");
-
-  if (status.kind === "loading" || gate.view === "skeleton") {
-    return (
-      <Card span={span} padding="none" className={s.rowOne}>
-        <HeroSkeleton pending={gate.view === "pending"} slow={gate.slow} />
-      </Card>
-    );
-  }
-  if (status.kind === "error") {
-    return (
-      <Card span={span} className={cx(s.rowOne, s.heroCentered)}>
-        <EmptyState
-          scene="error"
-          title={BOOT_SLICE_ERROR.instances}
-          body={describeError(status.error)}
-          action={
-            <Button variant="secondary" icon="refresh" onClick={() => void run(() => actions.reload("instances"), BOOT_SLICE_ERROR.instances)}>
-              {HOME_COPY.retry}
-            </Button>
-          }
-        />
-      </Card>
-    );
-  }
-  if (target === null) return <NoInstances span={span} />;
+  // 实例列表先到、设置还在读时继续占着骨架：大卡指向谁要等设置里的当前实例（主页按同一条件才算 target），
+  // 不先画最近玩的那个再换。列表读取出错时与设置无关，错误面照常出来
+  const settingsLoading = useLauncherSelector((s) => s.status.settings.kind === "loading");
+  const outcome: Outcome | null = status.kind === "error" ? status : status.kind === "ready" && !settingsLoading ? status : null;
+  // 上一次落定的结论。读取出错后点重试的这一轮不开加载门：错误面留在原处、重试按钮转圈，结果回来再原位换掉。
+  // 不这样做的话错误面一点就淡出、换成不可见的骨架，300 ms 内又失败时再淡入，整块闪一下
+  const [settled, setSettled] = useState<Outcome | null>(outcome);
+  if (outcome !== null && outcome !== settled) setSettled(outcome);
+  const retryingFrom = outcome === null && settled !== null && settled.kind === "error" ? settled : null;
+  const gate = useLoadingGate(outcome === null && retryingFrom === null);
   return (
     <Card span={span} padding="none" clip className={s.rowOne}>
-      <HeroFrame instanceId={target.id} />
+      <Loadable view={gate.view} skeleton={<HeroSkeleton slow={gate.slow} />} className={s.heroLoadable} contentClassName={s.heroLoaded}>
+        {() => {
+          const drawn = outcome !== null ? outcome : retryingFrom;
+          if (drawn === null) throw new Error("实例列表或设置还在加载，却要画大卡内容");
+          return (
+            <FaceSwap face={faceOf(drawn, target)} className={s.heroLayer}>
+              {drawn.kind === "error" ? <HeroError error={drawn.error} retrying={retryingFrom !== null} /> : target === null ? <NoInstances /> : <HeroFrame instanceId={target.id} />}
+            </FaceSwap>
+          );
+        }}
+      </Loadable>
     </Card>
   );
 }
 
-/** 只有这里读目录列表：探测目录要摸盘，有实例时主页用不到它。 */
-function NoInstances({ span }: { span: ResponsiveValue }) {
+interface FaceSwapProps {
+  /** 这一面的身份；变了就是换一面。 */
+  face: string;
+  /** 每一面包裹层的类名，只用于布局。 */
+  className: string;
+  children: ReactNode;
+}
+
+/**
+ * 卡里整面换内容（出错、没有实例、实例大卡，以及换一个实例）：新面淡入，旧面抽出布局、原地淡出，淡出期间不可交互。
+ * 挂载时就在的那一面不单独淡入，跟着页面入场或骨架换内容的淡入走。这件事不交给 AnimatePresence 的 initial={false}：
+ * 它会让这一面里之后才挂载的动画元素（晚到的存档名）也永远跳过入场。
+ */
+function FaceSwap({ face, className, children }: FaceSwapProps) {
+  const mounted = useMounted();
+  return (
+    <AnimatePresence mode="popLayout">
+      <FaceLayer key={face} className={className} enter={mounted.current}>
+        {children}
+      </FaceLayer>
+    </AnimatePresence>
+  );
+}
+
+interface FaceLayerProps {
+  /** popLayout 量尺寸、把旧面抽出布局要用这一层，由 AnimatePresence 递进来。 */
+  ref?: Ref<HTMLDivElement>;
+  enter: boolean;
+  className: string;
+  children: ReactNode;
+}
+
+function FaceLayer({ ref, enter, className, children }: FaceLayerProps) {
+  const present = useIsPresent();
+  return (
+    <motion.div
+      ref={ref}
+      className={className}
+      inert={!present}
+      initial={enter ? { opacity: 0 } : false}
+      animate={{ opacity: 1, transition: fade.in }}
+      exit={{ opacity: 0, transition: fade.out }}
+    >
+      {children}
+    </motion.div>
+  );
+}
+
+function HeroError({ error, retrying }: { error: Error; retrying: boolean }) {
+  const actions = useLauncherActions();
+  const run = useRunner();
+  // 紧凑空状态：落在第一排的最小高度之内，出错时不把整排撑高
+  return (
+    <div className={s.heroCentered}>
+      <EmptyState
+        scene="error"
+        compact
+        title={BOOT_SLICE_ERROR.instances}
+        body={describeError(error)}
+        action={
+          <Button variant="secondary" icon="refresh" loading={retrying} onClick={() => void run(() => actions.reload("instances"), BOOT_SLICE_ERROR.instances)}>
+            {HOME_COPY.retry}
+          </Button>
+        }
+      />
+    </div>
+  );
+}
+
+/**
+ * 主页上只有这一面订阅目录列表：探测目录要摸盘，有实例时主页用不到它，也就不在回到主页时重读。
+ * 外壳在主界面出来后预取过一次（实例库的工具条要用），缓存还在时这一面首帧就有数据，下面只在后台重读。
+ */
+function NoInstances() {
   const { openCreateInstance } = useShell();
   const busy = useLauncherSelector(gameDirectoryBusy);
   const dirs = useGameDirectories();
@@ -93,53 +174,77 @@ function NoInstances({ span }: { span: ResponsiveValue }) {
   const refreshDirs = dirs.refresh;
   useEffect(() => refreshDirs(), [refreshDirs]);
 
-  if (dirs.status === "loading" || gate.view === "skeleton") {
-    return (
-      <Card span={span} padding="none" className={s.rowOne}>
-        <HeroSkeleton pending={gate.view === "pending"} slow={gate.slow} />
-      </Card>
-    );
-  }
-  // 目录列表读不出时这里只是少一个切换入口，错误由设置页的游戏目录卡片原位呈现
-  const suggestion = dirs.data === undefined ? null : switchSuggestion(dirs.data);
   return (
-    <Card span={span} className={cx(s.rowOne, s.heroCentered)}>
-      <EmptyState
-        scene="sapling"
-        title={suggestion === null ? HOME_COPY.continueEmptyTitle : GAME_DIR_SWITCH_COPY.emptyTitle}
-        body={suggestion === null ? HOME_COPY.continueEmptyBody : GAME_DIR_SWITCH_COPY.emptyBody(suggestion.dir.name, suggestion.versions)}
-        action={
-          <div className={s.emptyActions}>
-            {suggestion !== null && (
-              <Button variant="primary" icon="folder-open" disabledReason={gameDirSwitchReason(busy, suggestion.dir.available)} onClick={() => void switchTo(suggestion.dir.path, suggestion.dir.name)}>
-                {GAME_DIR_SWITCH_COPY.emptyAction(suggestion.dir.name)}
-              </Button>
-            )}
-            <Button variant={suggestion === null ? "primary" : "secondary"} icon="plus" onClick={() => openCreateInstance()}>
-              {HOME_COPY.createInstance}
-            </Button>
+    <Loadable view={gate.view} skeleton={<HeroSkeleton slow={gate.slow} />} className={s.heroLoadable} contentClassName={s.heroLoaded}>
+      {() => {
+        // 目录列表读不出时这里只是少一个切换入口，错误由设置页的游戏目录卡片原位呈现
+        const suggestion = dirs.data === undefined ? null : switchSuggestion(dirs.data);
+        // 紧凑空状态：正文折成两行也落在第一排的最小高度之内，不把整排撑高
+        return (
+          <div className={s.heroCentered}>
+            <EmptyState
+              scene="sapling"
+              compact
+              title={suggestion === null ? HOME_COPY.continueEmptyTitle : GAME_DIR_SWITCH_COPY.emptyTitle}
+              body={suggestion === null ? HOME_COPY.continueEmptyBody : GAME_DIR_SWITCH_COPY.emptyBody(suggestion.dir.name, suggestion.versions)}
+              action={
+                <div className={s.emptyActions}>
+                  {suggestion !== null && (
+                    <Button
+                      variant="primary"
+                      icon="folder-open"
+                      disabledReason={gameDirSwitchReason(busy, suggestion.dir.available)}
+                      onClick={() => void switchTo(suggestion.dir.path, suggestion.dir.name)}
+                    >
+                      {GAME_DIR_SWITCH_COPY.emptyAction(suggestion.dir.name)}
+                    </Button>
+                  )}
+                  <Button variant={suggestion === null ? "primary" : "secondary"} icon="plus" onClick={() => openCreateInstance()}>
+                    {HOME_COPY.createInstance}
+                  </Button>
+                </div>
+              }
+            />
           </div>
-        }
-      />
-    </Card>
+        );
+      }}
+    </Loadable>
   );
 }
 
-function HeroSkeleton({ pending, slow }: { pending: boolean; slow: boolean }) {
+/**
+ * 大卡骨架，逐行对着 HeroContent 画：顶行是标签加「换一个」的小按钮（行高由按钮撑到 30）；底部的标题区是名称、标签、信息行三行；
+ * 再下面是胶囊。标题区与胶囊靠 margin-top: auto 压在底边，骨架与内容在同一张卡里的落点一致。
+ * 慢提示放在顶行里实例「上次游玩」那一格：行高不变，出现时不把标题与胶囊往上顶。
+ */
+function HeroSkeleton({ slow }: { slow: boolean }) {
   const { tier } = useShell();
   const block = tier === "compact" ? 96 : 128;
   return (
-    <div className={cx(s.heroFrame, pending && s.pending)} aria-busy="true">
+    <div className={s.heroFrame}>
       <div className={s.heroInner}>
-        <Skeleton shape="block" width="30%" height={SKELETON_SIZE.tagSm} radius="pill" />
+        <div className={s.heroTop}>
+          <Skeleton shape="block" width={SKELETON_SIZE.continueTag} height={SKELETON_SIZE.tagSm} radius="pill" />
+          <Appear itemClassName={s.heroSlow}>
+            {slow && (
+              <span key="slow" className={cx(s.slowHint, s.ellipsis)}>
+                {SLOW_LOADING_HINT}
+              </span>
+            )}
+          </Appear>
+          <span className={s.grow} />
+          <Skeleton shape="block" width={SKELETON_SIZE.switchButton} height={SKELETON_SIZE.buttonSm} radius="sm" />
+        </div>
         <div className={s.heroTitle}>
-          <Skeleton shape="block" width="60%" height={SKELETON_SIZE.heroName} radius="sm" />
-          <Skeleton shape="text" lines={2} width="70%" />
+          <Skeleton shape="block" width="60%" height={tier === "wide" ? SKELETON_SIZE.heroNameWide : SKELETON_SIZE.heroName} radius="sm" />
+          <Skeleton shape="block" width="40%" height={SKELETON_SIZE.tagSm} radius="pill" />
+          <span className={s.heroLine}>
+            <Skeleton shape="text" width="45%" />
+          </span>
         </div>
         <div className={s.heroActions}>
           <Skeleton shape="block" width="50%" height={SKELETON_SIZE.capsule} radius="pill" />
         </div>
-        {slow && <span className={s.slowHint}>{SLOW_LOADING_HINT}</span>}
       </div>
       <span className={s.heroBlock}>
         <Skeleton shape="square" size={block} />
@@ -196,17 +301,9 @@ function HeroFrame({ instanceId }: { instanceId: string }) {
   // 方块只在悬停整张大卡时上浮：大卡里有胶囊与按钮，整卡不能是按钮，所以由框体标记为悬停宿主
   return (
     <div ref={frameRef} className={s.heroFrame} data-sk-hover-host="">
-      <AnimatePresence initial={false} mode="popLayout">
-        <motion.div
-          key={instanceId}
-          className={s.heroFace}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1, transition: fade.in }}
-          exit={{ opacity: 0, transition: fade.out }}
-        >
-          <HeroFace instanceId={instanceId} height={height} />
-        </motion.div>
-      </AnimatePresence>
+      <FaceSwap face={instanceId} className={s.heroFace}>
+        <HeroFace instanceId={instanceId} height={height} />
+      </FaceSwap>
     </div>
   );
 }
@@ -227,6 +324,9 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
   const now = useNow(30_000);
   const cover = useInstanceCover(inst);
   const backdrop = useCoverBackdrop(inst);
+  const mounted = useMounted();
+  // 胶囊换面时按 morph 伸缩：「详情」用同一条弹簧让位，和胶囊的右缘一起走，中间不裂缝也不叠
+  const actionsRef = useReflow<HTMLDivElement>("morph");
 
   // 游戏退出后状态层作废这个实例的存档缓存，这里订阅着就会重取，信息行里的存档名才是刚玩的那个。
   // 实例列表已数过 saves/：一个存档都没有就不必读目录（信息行本来就省略这一段）；数不出来时照常去读。
@@ -285,18 +385,25 @@ function HeroContent({ inst, height }: { inst: InstanceSummary; height: number }
           <p className={s.heroLine}>
             <Icon name="clock" size={16} />
             <span>{inst.playtimeMin === null ? HOME_COPY.playtimeUnknown : HOME_COPY.playtime(inst.playtimeMin)}</span>
+            {/* 存档名常比大卡晚到（要读存档目录），追加在行尾不挤别人：到了淡入；换成新存档也淡入。挂载时就有的跟着大卡走 */}
             {world !== null && (
-              <>
+              <motion.span
+                key={worldName(world)}
+                className={s.heroWorld}
+                initial={mounted.current ? { opacity: 0 } : false}
+                animate={{ opacity: 1, transition: fade.in }}
+              >
                 <span className={s.dot} aria-hidden="true" />
                 <Icon name="world" size={16} />
                 <span className={s.ellipsis}>{HOME_COPY.world(worldName(world))}</span>
-              </>
+              </motion.span>
             )}
           </p>
         </div>
 
-        <div className={s.heroActions}>
+        <div ref={actionsRef} className={s.heroActions}>
           <LaunchCapsule instanceId={inst.id} size="lg" />
+          {/* 外面提示气泡的包裹是 display: contents，让位会越过它直接移动按钮，不必再垫一层盒子 */}
           <Button size="lg" variant="secondary" iconRight="arrow-right" onClick={() => go({ page: "instance", id: inst.id, tab: "overview" })}>
             {HOME_COPY.details}
           </Button>

@@ -229,6 +229,45 @@ describe("通知容器的指针暂停", () => {
   });
 });
 
+describe("通知的删除", () => {
+  const toastOf = (title: string) => {
+    const el = [...document.querySelectorAll<HTMLElement>("[data-tone]")].find((t) => t.textContent?.includes(title));
+    if (el === undefined) throw new Error(`找不到通知 ${title}`);
+    return el;
+  };
+  /** popLayout 给退场项注入的那条样式规则。 */
+  const popRule = (popId: string) => {
+    for (const style of document.head.querySelectorAll("style")) {
+      const sheet = style.sheet;
+      if (sheet === null) continue;
+      for (const rule of sheet.cssRules) if (rule.cssText.includes(popId)) return rule.cssText;
+    }
+    throw new Error(`没有给 ${popId} 注入样式`);
+  };
+
+  it("关掉一条：它立即被抽出布局、贴着栈底淡出，其余通知不用等它淡完才补位", async () => {
+    act(() => {
+      launcher.actions.toast("info", "甲");
+      launcher.actions.toast("success", "乙");
+    });
+    const first = toastOf("甲");
+    // jsdom 不做布局：给出 popLayout 量尺寸时要读的宽高
+    first.style.width = "340px";
+    first.style.height = "60px";
+    act(() => closeButtons()[0].click());
+
+    expect(first.isConnected).toBe(true);
+    const popId = first.dataset.motionPopId;
+    if (popId === undefined) throw new Error("退场的那条没有被抽出布局：ref 没有一路交到通知的根元素上");
+    const rule = popRule(popId);
+    expect(rule).toContain("position: absolute");
+    // 栈在右下角、贴底增长：退场项按到底边的距离定位，栈变矮时它不跟着容器的顶边往下跑
+    expect(rule).toMatch(/\bbottom: /);
+    expect(rule).not.toMatch(/\btop: /);
+    await vi.waitFor(() => expect(first.isConnected).toBe(false), { timeout: 3000, interval: 20 });
+  });
+});
+
 describe("通知上的动作按钮", () => {
   it("改名后点已经显示着的「启动」：按钮走的是迁移后的动作，启动新名字", async () => {
     let onDisk = [instanceDto("生存"), instanceDto("创造")];

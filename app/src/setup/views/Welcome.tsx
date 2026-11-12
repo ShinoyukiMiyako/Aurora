@@ -1,8 +1,9 @@
+import { useIsPresent } from "framer-motion";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { isImeComposing } from "../../lib/util";
 import { Button } from "../../ui/Button";
 import { Callout } from "../../ui/Callout";
-import type { SetupCopy } from "../copy";
+import { welcomeLead, type SetupCopy } from "../copy";
 import { Frame } from "../Frame";
 import { PathRow } from "../PathRow";
 import styles from "./Welcome.module.css";
@@ -43,19 +44,26 @@ function useEnterToInstall(active: boolean, onInstall: () => void): void {
 
 export function Welcome({ copy, dir, interrupted, busy, onChangeDir, onInstall }: WelcomeProps) {
   const text = copy.welcome;
-  useEnterToInstall(!busy, onInstall);
+  // 换步后这一页还要淡出一会儿：这期间的回车属于新的一页，不能在选目录页上替用户发起安装
+  const present = useIsPresent();
+  useEnterToInstall(!busy && present, onInstall);
   return (
     <Frame
       title={text.title}
-      lead={text.languageNote === null ? text.lead : `${text.lead} ${text.languageNote}`}
+      lead={welcomeLead(copy)}
+      leadFloor={copy.location.lead}
       footer={
         <Button variant="primary" loading={busy} onClick={onInstall}>
           {text.install}
         </Button>
       }
     >
-      <div className={styles.content}>
-        {interrupted && <Callout tone="info">{text.interrupted}</Callout>}
+      {/*
+        路径行排第一：选目录页的路径输入框也贴着内容区顶，点「更改」过去原地变成可编辑，续装提示因此放在它下面。
+        两页的说明长短不同（英文的欢迎页多一句语言说明），各自按对方的说明占高（leadFloor），这一块在两页里同一高度；
+        仍有差时由 Frame 的 carryAcross 从旧位置滑过去
+      */}
+      <div className={styles.content} data-setup-carry="location">
         <PathRow
           label={text.locationLabel}
           path={dir}
@@ -65,6 +73,7 @@ export function Welcome({ copy, dir, interrupted, busy, onChangeDir, onInstall }
             </Button>
           }
         />
+        {interrupted && <Callout tone="info">{text.interrupted}</Callout>}
         <p className={styles.legal}>{text.legalNote}</p>
       </div>
     </Frame>

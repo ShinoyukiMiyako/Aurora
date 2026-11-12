@@ -2,7 +2,7 @@ import { useReducedMotionConfig } from "framer-motion";
 import { useCallback, useLayoutEffect, useRef, type MouseEvent, type PointerEvent } from "react";
 import { prepareDisplayCanvas } from "../illustrations/canvas";
 import styles from "./AccountFigure.module.css";
-import { REST_POSE, settleYaw } from "./figure3d";
+import { releaseVelocity, releaseYaw, REST_POSE, type YawSample } from "./figure3d";
 import { FIGURE_FRAME } from "./layout";
 import { paintSkinFigure, skinFigureCanvas, type LoadedSkin } from "./render";
 
@@ -15,11 +15,22 @@ const DRAG_SLOP_PX = 4;
 /** 松手后第一帧没有上一帧时刻可减，按 60 Hz 的一帧算。 */
 const FIRST_FRAME_MS = 16;
 
+/** 估算松手速度只用最近的拖动；指针事件按帧合并，留这么多条足够覆盖估算窗口。 */
+const MAX_SAMPLES = 32;
+
 interface Drag {
   pointerId: number;
   startX: number;
   startYaw: number;
   moved: boolean;
+  samples: YawSample[];
+}
+
+/** 松手后的回位：从哪个 yaw、带着多大的角速度出发；start 是第一帧的时刻，第一帧到来之前为 null。 */
+interface Release {
+  from: number;
+  velocity: number;
+  start: number | null;
 }
 
 export interface SpinningFigureProps {
@@ -29,17 +40,16 @@ export interface SpinningFigureProps {
 }
 
 /**
- * 可拖动的立绘：拖动改 yaw，松手回到默认姿态。只在姿态变化时申请一帧，静止时没有循环；
- * 回到默认姿态后贴缓存的位图，不重算。立绘只是装饰，不进键盘焦点序列，也不是拖动窗口的把手。
+ * 可拖动的立绘：拖动改 yaw，松手沿 pop 弹簧回到默认姿态，接着松手前的角速度走。只在姿态变化时申请一帧，
+ * 静止时没有循环；回到默认姿态后贴缓存的位图，不重算。立绘只是装饰，不进键盘焦点序列，也不是拖动窗口的把手。
  */
 export function SpinningFigure({ skin, scale, dpr }: SpinningFigureProps) {
   const ref = useRef<HTMLCanvasElement>(null);
   const reduced = useReducedMotionConfig() === true;
   const yaw = useRef(REST_POSE.yaw);
   const drag = useRef<Drag | null>(null);
-  const settling = useRef(false);
+  const settling = useRef<Release | null>(null);
   const frame = useRef<number | null>(null);
-  const lastTick = useRef<number | null>(null);
   const swallowClick = useRef(false);
   const cssWidth = FIGURE_FRAME.width * scale;
   const cssHeight = FIGURE_FRAME.height * scale;
@@ -60,21 +70,21 @@ export function SpinningFigure({ skin, scale, dpr }: SpinningFigureProps) {
   useLayoutEffect(() => {
     yaw.current = REST_POSE.yaw;
     drag.current = null;
-    settling.current = false;
+    settling.current = null;
     paint();
     return cancelFrame;
   }, [paint]);
 
   const tick = (now: number) => {
     frame.current = null;
-    if (settling.current) {
-      const elapsed = lastTick.current === null ? FIRST_FRAME_MS : now - lastTick.current;
-      lastTick.current = now;
-      yaw.current = settleYaw(yaw.current, REST_POSE.yaw, elapsed);
-      settling.current = yaw.current !== REST_POSE.yaw;
+    const release = settling.current;
+    if (release !== null) {
+      if (release.start === null) release.start = now - FIRST_FRAME_MS;
+      yaw.current = releaseYaw(release.from, REST_POSE.yaw, release.velocity, (now - release.start) / 1000);
+      if (yaw.current === REST_POSE.yaw) settling.current = null;
     }
     paint();
-    if (settling.current) requestPaint();
+    if (settling.current !== null) requestPaint();
   };
 
   const requestPaint = () => {
@@ -84,9 +94,10 @@ export function SpinningFigure({ skin, scale, dpr }: SpinningFigureProps) {
   const onPointerDown = (e: PointerEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return;
     e.currentTarget.setPointerCapture(e.pointerId);
-    settling.current = false;
+    // 回位途中按住：停在此刻的姿态上，从这里接着拖
+    settling.current = null;
     swallowClick.current = false;
-    drag.current = { pointerId: e.pointerId, startX: e.clientX, startYaw: yaw.current, moved: false };
+    drag.current = { pointerId: e.pointerId, startX: e.clientX, startYaw: yaw.current, moved: false, samples: [{ t: e.timeStamp, yaw: yaw.current }] };
   };
 
   const onPointerMove = (e: PointerEvent<HTMLCanvasElement>) => {
@@ -97,6 +108,8 @@ export function SpinningFigure({ skin, scale, dpr }: SpinningFigureProps) {
     active.moved = true;
     swallowClick.current = true;
     yaw.current = active.startYaw + dx * RADIANS_PER_PX;
+    active.samples.push({ t: e.timeStamp, yaw: yaw.current });
+    if (active.samples.length > MAX_SAMPLES) active.samples.shift();
     requestPaint();
   };
 
@@ -112,8 +125,7 @@ export function SpinningFigure({ skin, scale, dpr }: SpinningFigureProps) {
       paint();
       return;
     }
-    settling.current = true;
-    lastTick.current = null;
+    settling.current = { from: yaw.current, velocity: releaseVelocity(active.samples, e.timeStamp, yaw.current), start: null };
     requestPaint();
   };
 

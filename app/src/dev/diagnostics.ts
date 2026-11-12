@@ -3,6 +3,7 @@
 //   __sk.textureAudit()      所有取自游戏本机材质的元素及其所在点缀位，ok 为 false 的就是越界使用
 //   __sk.petals()            主页花瓣的运行状态：是否在跑 rAF、降级等级、数量与每帧耗时
 //   __sk.resetMockData()     纯浏览器里把模拟后端恢复到种子数据、清掉存下的状态并刷新页面
+//   __sk.mockLatency(400)    纯浏览器里给模拟后端的每条命令加 400ms 延迟并刷新页面，用来看数据晚到时界面跳不跳；传 0 关掉
 // 这些检查都是近似测量，口径写在各函数的注释里；它们不进生产构建。
 
 import { parseComputedColor, resolveColorToken, sameColor, type Rgba } from "../art/petals/color";
@@ -341,6 +342,8 @@ export interface SkDiagnostics {
   petals(): PetalStats | null;
   /** 模拟后端回到种子数据并清掉 localStorage 里存下的状态，随后刷新页面；Tauri 窗口里没有模拟后端，直接报错。 */
   resetMockData(): Promise<void>;
+  /** 给模拟后端的每条命令加延迟（毫秒，0 为关）并存下，随后刷新页面：冷启动也按这个延迟走。Tauri 窗口里直接报错。 */
+  mockLatency(ms: number): Promise<void>;
 }
 
 declare global {
@@ -372,6 +375,12 @@ export function installDevDiagnostics(target: Window = window): SkDiagnostics {
       if (inTauri()) throw new Error("Tauri 窗口里走的是真实后端，没有模拟数据可以重置");
       const mock = await import("../ipc/mock");
       mock.resetMockData();
+      target.location.reload();
+    },
+    mockLatency: async (ms) => {
+      if (inTauri()) throw new Error("Tauri 窗口里走的是真实后端，没有模拟延迟可调");
+      const mock = await import("../ipc/mock");
+      mock.setMockLatency(ms);
       target.location.reload();
     },
   };
