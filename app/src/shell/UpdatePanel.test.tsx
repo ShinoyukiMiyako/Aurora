@@ -4,6 +4,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stubCanvas } from "../art/illustrations/test-canvas";
+import { ACTION_ERROR } from "../copy/flows";
 import { sourceSwitchedCopy, UPDATE_COPY } from "../copy/updater";
 import { formatBytes } from "../domain/format";
 import { IpcError } from "../ipc/errors";
@@ -11,7 +12,7 @@ import type { UpdateDto, UpdaterInfoDto } from "../ipc/system";
 import { CORE_EVENT } from "../ipc/tasks";
 import { SPEED_REFRESH_MS } from "../lib/progress-display";
 import { AppearanceProvider, DEFAULT_APPEARANCE } from "../state/appearance";
-import { LauncherProvider } from "../state/launcher";
+import { LauncherProvider, useLauncher, type LauncherApi } from "../state/launcher";
 import type { DownloadSource, UpdaterPhase } from "../state/updater/machine";
 import { drainFrames, render, stubMatchMedia, stubResizeObserver, type Rendered } from "../test/dom";
 import type { IpcRecorder } from "../test/fake-bridge";
@@ -29,13 +30,18 @@ const UPDATE: UpdateDto = { version: "0.2.0", current_version: "0.1.0", notes: "
 
 let view: Rendered | undefined;
 let shell: ShellApi;
+let launcher: LauncherApi;
 let info: UpdaterInfoDto;
 let install: Deferred<null>;
 
 function Probe() {
   shell = useShell();
+  launcher = useLauncher();
   return null;
 }
+
+/** 报错通知的标题与正文，按弹出先后。 */
+const errorToasts = () => launcher.state.toasts.filter((t) => t.tone === "error").map((t) => [t.title, t.body]);
 
 const flush = () =>
   act(async () => {
@@ -152,6 +158,52 @@ describe("开始安装", () => {
     expect(document.querySelector('[data-sk-modal-layer]:not([data-exiting])')).toBeNull();
     const leaving = document.querySelector<HTMLElement>("[data-sk-modal-layer][data-exiting]");
     expect(leaving?.textContent).toContain(UPDATE_COPY.panelTitle(UPDATE.version));
+  });
+});
+
+describe("安装前写任务记录", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+
+  // 数据目录只读、盘满、文件被占用时任务记录写不进去，但更新包本身好好的：不能因此连更新都装不上
+  it.each([
+    { entry: UPDATE_COPY.restartInstall, installOnExit: false },
+    { entry: UPDATE_COPY.switchToNow, installOnExit: true },
+  ])("任务记录写不进去时按 $entry：只报任务记录没保存，照常安装，不报没能安装更新", async ({ entry, installOnExit }) => {
+    const reason = `拒绝访问 tasks.json（${Math.floor(Math.random() * 1_000_000)}）`;
+    ipc.overrides.set("save_task_journal", () => {
+      throw new IpcError("io", reason);
+    });
+    info = { ...info, install_on_exit: installOnExit };
+    await openReady();
+    act(() => button(entry).click());
+    await flush();
+    expect(callsOf(ipc, "save_task_journal")).toHaveLength(1);
+    expect(callsOf(ipc, "install_update")).toHaveLength(1);
+    expect(button(entry).getAttribute("aria-busy")).toBe("true");
+    expect(errorToasts()).toEqual([[ACTION_ERROR.saveJournal, reason]]);
+
+    install.reject(new IpcError("install_failed", "安装程序没有启动"));
+    await flush();
+    expect(errorToasts()).toEqual([
+      [ACTION_ERROR.saveJournal, reason],
+      [UPDATE_COPY.installFailed, "安装程序没有启动"],
+    ]);
+  });
+
+  it("任务记录写好了、安装没能拉起：只报没能安装更新", async () => {
+    const reason = `安装程序没有启动（${Math.floor(Math.random() * 1_000_000)}）`;
+    await openReady();
+    act(() => button(UPDATE_COPY.restartInstall).click());
+    await flush();
+    expect(callsOf(ipc, "save_task_journal")).toHaveLength(1);
+    expect(callsOf(ipc, "install_update")).toHaveLength(1);
+    expect(errorToasts()).toEqual([]);
+
+    install.reject(new IpcError("install_failed", reason));
+    await flush();
+    expect(errorToasts()).toEqual([[UPDATE_COPY.installFailed, reason]]);
   });
 });
 

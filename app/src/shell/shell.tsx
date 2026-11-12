@@ -483,10 +483,9 @@ function ShellCore({ children }: { children: ReactNode }) {
       const ok = await confirm({ ...UPDATE_COPY.restartConfirm(tasks, downloads), tone: "danger" });
       if (!ok) return;
     }
-    await run(async () => {
-      await actions.flushTaskJournal();
-      await updater().install();
-    }, UPDATE_COPY.installFailed);
+    // 任务记录写不进去（数据目录只读、盘满、文件被占用）不该拦住更新：与关窗、启动后自动退出一致，单独报错后照常安装
+    await run(() => actions.flushTaskJournal(), ACTION_ERROR.saveJournal);
+    await run(() => updater().install(), UPDATE_COPY.installFailed);
   }, [actions, confirm, run, updater]);
   useUpdaterAutoCheck(openUpdatePanel, updater);
 
