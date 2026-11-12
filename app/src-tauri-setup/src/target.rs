@@ -22,7 +22,7 @@ pub const APP_FOLDER: &str = "Petalfall";
 const GAME_FOLDER: &str = ".minecraft";
 const VERSIONS_FOLDER: &str = "versions";
 /// 沿用启动器便携判定的探针名，留下残骸时看得出是谁的。
-const WRITE_PROBE: &str = ".petalfall-write-probe";
+pub(crate) const WRITE_PROBE: &str = ".petalfall-write-probe";
 /// NSIS 对超过 MAX_PATH 的行为没有保证，而游戏文件还要落在这个目录更深处，这里保守收紧。按 UTF-16 码元算。
 const MAX_PATH_UNITS: usize = 200;
 /// 目标盘在 exe 之外要多留的：uninstall.exe、快捷方式和簇对齐的余量。
@@ -467,7 +467,8 @@ fn read_contents(dir: &Path) -> io::Result<Contents> {
 /// 建目录而不是只写文件：`C:\` 的默认权限许普通用户建目录、不许建文件，只写文件会把
 /// `C:\Petalfall` 误判成写不进。名字带随机后缀，上次崩溃留下的残骸不会让这次失败。
 ///
-/// 安装前判断登记目录是不是启动器的数据根也用它，两处对「写得进」的认定才一致。
+/// 它答的是「能不能在这下面新建安装目录」。登记目录是不是启动器的数据根不能用它判：启动器只在那一层
+/// 写文件，见 `datamark` 的数据格式关探针。
 pub(crate) fn probe_write(dir: &Path) -> io::Result<()> {
     let probe = tempfile::Builder::new()
         .prefix(WRITE_PROBE)

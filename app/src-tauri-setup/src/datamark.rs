@@ -23,7 +23,7 @@ use petalfall_release::install_policy;
 
 use crate::contract::DataBlock;
 use crate::existing::CONFIG_FILE;
-use crate::target::{APP_FOLDER, probe_write};
+use crate::target::{APP_FOLDER, WRITE_PROBE};
 
 /// 数据关的结论，连同为它读过哪些根。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,9 +44,9 @@ pub struct DataGate {
 /// 已有安装（含程序文件残缺）时的数据关。`registered` 是登记的安装目录，`local_app_data` 是
 /// `%LOCALAPPDATA%`，`supported` 是安装包认得的号（生产传 `DATA_FORMAT`）。
 ///
-/// 探针与选目录时的写入探针是同一个：在登记目录里建一个随机名的目录、写一个文件，再全删掉。
+/// 探针是 `probe_data_root`，与启动器选数据根时的写入探针同一判据，不是选目录时的那个。
 pub fn inspect_installed(registered: &Path, local_app_data: &Path, supported: u32) -> DataGate {
-    inspect_installed_with(registered, local_app_data, supported, probe_write)
+    inspect_installed_with(registered, local_app_data, supported, probe_data_root)
 }
 
 /// 首装时的数据关：只读最终目标目录 `target`，也就是目录校验给出的 `normalized`（含追加的产品名子目录）。
@@ -115,6 +115,20 @@ fn has_readable_config(dir: &Path) -> io::Result<bool> {
     };
     serde_json::from_slice::<serde_json::Value>(&bytes)?;
     Ok(true)
+}
+
+/// 与启动器 `petalfall-base` 的 `fs::probe_writable` 同一判据：直接在 `dir` 这一层写一个探针文件再删掉，
+/// 写不进去交回系统错误。
+///
+/// 不能用选目录时的 `target::probe_write`：它先建一层子目录再在里面写文件，`C:\` 根这类许建子目录、
+/// 不许建文件的目录上它判写得进，启动器却写不进、把数据放到 `%LOCALAPPDATA%\Petalfall`，只读登记目录
+/// 就看不到那边号更高的记号。
+fn probe_data_root(dir: &Path) -> io::Result<()> {
+    let probe = dir.join(WRITE_PROBE);
+    fs::write(&probe, b"")?;
+    // 写进去就已经证明可写，删不掉不改结论，与启动器一致；留下的空文件下次探针照样覆盖再删
+    let _ = fs::remove_file(&probe);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -448,6 +462,206 @@ mod tests {
         assert_eq!(gate.verdict, StampVerdict::Pass);
         assert_eq!(gate.block, None);
         assert_eq!(fs::read_dir(&machine.registered).unwrap().count(), 0);
+    }
+
+    /// 用 SID 而不是组名：组名随系统语言变。
+    #[cfg(windows)]
+    const EVERYONE: &str = "*S-1-1-0";
+
+    /// 给 `dir` 加一条拒绝 Everyone `rights` 的权限跑完 `run` 再撤掉：不撤的话临时目录删不干净。
+    /// 断言都放在撤掉之后，免得断言挂了把权限留下。`rights` 是 icacls 的细分权限，目录上 `WD` 管建文件，
+    /// `AD` 管建子目录。
+    #[cfg(windows)]
+    fn with_denied<T>(dir: &Path, rights: Option<&str>, run: impl FnOnce() -> T) -> T {
+        let Some(rights) = rights else {
+            return run();
+        };
+        icacls(dir, &["/deny", &format!("{EVERYONE}:({rights})")]);
+        let out = run();
+        icacls(dir, &["/remove:d", EVERYONE]);
+        out
+    }
+
+    #[cfg(windows)]
+    fn icacls(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("icacls")
+            .arg(dir)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "icacls {} {args:?}", dir.display());
+    }
+
+    #[cfg(windows)]
+    fn names(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// `C:\` 根的默认权限就是这样：普通用户许建子目录、不许建文件。启动器的探针直接在这一层写文件，
+    /// 写不进就把数据放到 `%LOCALAPPDATA%\Petalfall`，号更高的记号就在那里。
+    #[cfg(windows)]
+    #[test]
+    fn a_registered_dir_that_takes_folders_but_not_files_reads_the_fallback_too() {
+        let machine = Machine::new();
+        put_stamp(&machine.registered, 2, Some("1.0.0"));
+        put_stamp(&machine.fallback(), 4, Some("1.1.0"));
+        let folder = machine.registered.join("folder");
+
+        let (takes_folders, takes_files, gate) =
+            with_denied(&machine.registered, Some("WD"), || {
+                (
+                    fs::create_dir(&folder).and_then(|()| fs::remove_dir(&folder)),
+                    fs::write(machine.registered.join("file"), b""),
+                    inspect_installed(&machine.registered, &machine.local_app_data, 3),
+                )
+            });
+
+        takes_folders.unwrap();
+        assert_eq!(takes_files.unwrap_err().raw_os_error(), Some(5));
+        assert_eq!(
+            gate.roots,
+            vec![machine.registered.clone(), machine.fallback()]
+        );
+        assert_eq!(gate.stamp, stamp_of(&machine.fallback()));
+        assert_eq!(
+            gate.verdict,
+            StampVerdict::TooNew {
+                found: 4,
+                written_by: Some("1.1.0".to_owned()),
+            }
+        );
+        assert_eq!(
+            gate.block,
+            Some(too_new(
+                &stamp_of(&machine.fallback()),
+                4,
+                3,
+                Some(("1.1.0", Channel::Stable))
+            ))
+        );
+        assert_eq!(
+            gate.fallback_reason,
+            Some(denied_reason(&machine.registered))
+        );
+        assert_eq!(names(&machine.registered), vec![STAMP_FILE.to_owned()]);
+    }
+
+    /// 登记目录在磁盘上的样子。
+    #[cfg(windows)]
+    #[derive(Debug, Clone, Copy)]
+    enum Shape {
+        Plain,
+        FoldersOnly,
+        Locked,
+        /// 上次探针没删掉的空文件。
+        LeftoverProbe,
+        /// 探针的名字被一个目录占了。
+        ProbeNameTaken,
+        Missing,
+        AFile,
+    }
+
+    #[cfg(windows)]
+    impl Shape {
+        fn denied(self) -> Option<&'static str> {
+            match self {
+                Shape::FoldersOnly => Some("WD"),
+                Shape::Locked => Some("AD,WD"),
+                _ => None,
+            }
+        }
+    }
+
+    /// 一个按 `Shape` 摆好的登记目录，连同它的 `%LOCALAPPDATA%`。
+    #[cfg(windows)]
+    struct Spot {
+        _temp: tempfile::TempDir,
+        dir: PathBuf,
+        local_app_data: PathBuf,
+    }
+
+    #[cfg(windows)]
+    impl Spot {
+        fn new(shape: Shape) -> Self {
+            // 探针名照启动器写死，不取引导程序的常量：名字分了叉，`ProbeNameTaken` 两边的结论就不同
+            const LAUNCHER_PROBE: &str = ".petalfall-write-probe";
+            let temp = tempfile::tempdir().unwrap();
+            let dir = temp.path().join("Petalfall");
+            match shape {
+                Shape::Missing => {}
+                Shape::AFile => fs::write(&dir, b"").unwrap(),
+                _ => fs::create_dir(&dir).unwrap(),
+            }
+            match shape {
+                Shape::LeftoverProbe => fs::write(dir.join(LAUNCHER_PROBE), b"").unwrap(),
+                Shape::ProbeNameTaken => fs::create_dir(dir.join(LAUNCHER_PROBE)).unwrap(),
+                _ => {}
+            }
+            let local_app_data = temp.path().join("LocalAppData");
+            Self {
+                _temp: temp,
+                dir,
+                local_app_data,
+            }
+        }
+    }
+
+    /// 启动器在哪类目录上写不进、落到回落的数据根，数据关就在哪类目录上多读那一处，记下的失败原因也是
+    /// 启动器遇到的那一个。引导程序不依赖 `petalfall-base`，这里照启动器 `probe_writable` 的判据（直接在
+    /// 这一层写探针文件）造一份对照，`stays` 一列钉住启动器在每类目录上的去留，两边改判据时要一起改。
+    #[cfg(windows)]
+    #[test]
+    fn the_data_gate_keeps_the_registered_dir_exactly_where_the_launcher_does() {
+        // (目录的样子, 启动器留不留在这里)
+        let shapes = [
+            (Shape::Plain, true),
+            (Shape::FoldersOnly, false),
+            (Shape::Locked, false),
+            (Shape::LeftoverProbe, true),
+            (Shape::ProbeNameTaken, false),
+            (Shape::Missing, false),
+            (Shape::AFile, false),
+        ];
+        for (shape, stays) in shapes {
+            // 各用各的一份：有残骸的目录探一次就变了样
+            let ours = Spot::new(shape);
+            let theirs = Spot::new(shape);
+
+            let gate = with_denied(&ours.dir, shape.denied(), || {
+                inspect_installed(&ours.dir, &ours.local_app_data, DATA_FORMAT)
+            });
+            let launcher = with_denied(&theirs.dir, shape.denied(), || {
+                let probe = theirs.dir.join(WRITE_PROBE);
+                std::fs::write(&probe, b"").map(|()| {
+                    let _ = std::fs::remove_file(&probe);
+                })
+            });
+
+            assert_eq!(launcher.is_ok(), stays, "{shape:?}");
+            match launcher {
+                Ok(()) => {
+                    assert_eq!(gate.roots, vec![ours.dir.clone()], "{shape:?}");
+                    assert_eq!(gate.fallback_reason, None, "{shape:?}");
+                    // 写通了两边都不留探针，上次的残骸也一并清掉
+                    assert_eq!(names(&ours.dir), Vec::<String>::new(), "{shape:?}");
+                    assert_eq!(names(&theirs.dir), Vec::<String>::new(), "{shape:?}");
+                }
+                Err(err) => {
+                    assert_eq!(
+                        gate.roots,
+                        vec![ours.dir.clone(), ours.local_app_data.join("Petalfall")],
+                        "{shape:?}"
+                    );
+                    let reason = gate.fallback_reason.unwrap();
+                    let launchers = format!("{} 不可写：{err}", ours.dir.display());
+                    assert!(reason.starts_with(&launchers), "{shape:?}：{reason}");
+                }
+            }
+        }
     }
 
     #[test]
