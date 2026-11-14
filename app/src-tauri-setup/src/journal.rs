@@ -208,6 +208,10 @@ pub fn recover(
 /// 装回较早版本要在「换到」页上确认的那一步，所以同样保持原判；比记录新时那次安装早被盖过了，半装留下的登记只会比
 /// 记录旧，这时藏起现有安装，用户在选目录页换个位置，那份数据就成了孤儿；登记在别的目录时，按记录走首装或修复
 /// 都会带着 /D= 把登记改指回记录的目录，原来那份成孤儿。
+///
+/// 过期时核验查出的程序文件不符也不拿来改判：核验只在记录与载荷同版本时比长度与哈希，比的是记录那个版本，
+/// 登记的是另一个版本时完好的程序文件同样对不上，分不出是不是写了一半；登记在别的目录时，核验查的又不是登记的那份。
+/// 没过期时不看不符项，一律改成修复或首装，都不会再给「打开」。
 pub fn mark_interrupted(probe: Probe, journal: &Journal) -> Probe {
     let dir = journal.instdir.to_string_lossy().into_owned();
     let superseded = probe.existing.as_ref().is_some_and(|existing| {
@@ -242,14 +246,21 @@ pub fn mark_interrupted(probe: Probe, journal: &Journal) -> Probe {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
     use std::process::{Command, Stdio};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    use petalfall_setup_payload::Header;
     use serde_json::json;
 
     use super::*;
     use crate::contract::Channel;
+    use crate::existing::{APP_EXE, DISPLAY_VERSION, INSTALL_LOCATION};
+    use crate::overlay::test_support::random_bytes;
+    use crate::verify::test_support::MemoryEntry;
+    use crate::verify::{Expected, UNINSTALLER_NAME, verify};
 
     fn sample(pid: Option<u32>) -> Journal {
         Journal {
@@ -789,6 +800,155 @@ mod tests {
                 ..probe(None)
             }
         );
+    }
+
+    fn random_below(bound: u64) -> u64 {
+        RandomState::new().build_hasher().finish() % bound
+    }
+
+    const PAYLOAD_EXE_LEN: usize = 4096;
+
+    /// 在记录的目录里放 `on_disk` 与卸载程序，卸载项登记 `registered` 版本、指向 `registered_dir`，载荷与记录同版本，
+    /// 照启动时那样恢复一次，返回留下的记录与核验出的不符项。
+    fn recover_with_exe(
+        journal: &Journal,
+        payload_exe: &[u8],
+        on_disk: &[u8],
+        registered: &str,
+        registered_dir: &Path,
+    ) -> (Journal, Vec<Mismatch>) {
+        let (_state, store) = store();
+        fs::create_dir_all(&journal.instdir).unwrap();
+        fs::write(journal.instdir.join(APP_EXE), on_disk).unwrap();
+        fs::write(journal.instdir.join(UNINSTALLER_NAME), b"MZ").unwrap();
+        let header = Header::new(b"payload", payload_exe, &journal.version).unwrap();
+        let location = format!("\"{}\"", registered_dir.display());
+        let entry =
+            MemoryEntry::with(&[(DISPLAY_VERSION, registered), (INSTALL_LOCATION, &location)]);
+        store.save(journal).unwrap();
+
+        let recovery = recover(&store, &Scripted::new(0), Duration::ZERO, |journal| {
+            verify(&Expected::for_journal(journal, &header), &entry)
+        })
+        .unwrap();
+
+        match recovery {
+            Recovery::Interrupted {
+                journal,
+                mismatches,
+            } => (journal, mismatches),
+            other => panic!("程序文件对不上，记录应当留着：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_half_written_exe_under_a_live_record_is_only_offered_a_reinstall() {
+        // 升级写到一半：卸载项还是旧版本，程序文件只落下了新版本开头的一段
+        let payload_exe = random_bytes(PAYLOAD_EXE_LEN);
+        let random_cut = 1 + random_below(PAYLOAD_EXE_LEN as u64 - 2) as usize;
+        for cut in [1, random_cut, PAYLOAD_EXE_LEN - 1] {
+            let dir = tempfile::tempdir().unwrap();
+            let instdir = dir.path().join("Petalfall");
+            let journal = Journal {
+                instdir: instdir.clone(),
+                was_fresh: false,
+                version: "1.0.0-beta.5".into(),
+                ..sample(None)
+            };
+
+            let (left, mismatches) = recover_with_exe(
+                &journal,
+                &payload_exe,
+                &payload_exe[..cut],
+                "1.0.0-beta.4",
+                &instdir,
+            );
+            assert!(
+                mismatches.contains(&Mismatch::ExeLength {
+                    expected: PAYLOAD_EXE_LEN as u64,
+                    actual: cut as u64,
+                }),
+                "{cut} {mismatches:?}"
+            );
+
+            let registered = Existing {
+                kind: ExistingKind::Upgrade,
+                version: "1.0.0-beta.4".into(),
+                dir: instdir.to_string_lossy().into_owned(),
+                channel: Some(Channel::Beta),
+            };
+            let marked = mark_interrupted(
+                payload_with("1.0.0-beta.5", Channel::Beta, registered.clone()),
+                &left,
+            );
+
+            assert_eq!(
+                marked.existing,
+                Some(Existing {
+                    kind: ExistingKind::Broken,
+                    ..registered
+                }),
+                "{cut}"
+            );
+            assert!(marked.interrupted, "{cut}");
+        }
+    }
+
+    /// 登记的是比记录新的另一个版本时，完好的程序文件和写了一半的报出同一种长度不符；登记在别的目录时核验查的是
+    /// 记录的目录。凭这一项改判，降级保护、「换到」页的确认和别处的登记都会被绕过去。
+    #[test]
+    fn an_exe_mismatch_under_an_expired_record_lifts_no_guard() {
+        let payload_exe = random_bytes(PAYLOAD_EXE_LEN);
+        let half_written = &payload_exe[..1 + random_below(PAYLOAD_EXE_LEN as u64 - 1) as usize];
+        let intact_other_version = random_bytes(PAYLOAD_EXE_LEN + 1 + random_below(4096) as usize);
+        let dir = tempfile::tempdir().unwrap();
+        let instdir = dir.path().join("Petalfall");
+        let elsewhere = dir.path().join("Elsewhere");
+        let cases = [
+            (ExistingKind::Switch, "1.1.0-dev.61", Channel::Dev, &instdir),
+            (ExistingKind::Newer, "1.0.0-beta.6", Channel::Beta, &instdir),
+            (
+                ExistingKind::Upgrade,
+                "1.0.0-beta.4",
+                Channel::Beta,
+                &elsewhere,
+            ),
+        ];
+        for was_fresh in [true, false] {
+            let journal = Journal {
+                instdir: instdir.clone(),
+                was_fresh,
+                version: "1.0.0-beta.5".into(),
+                ..sample(None)
+            };
+            for (kind, version, channel, registered_dir) in &cases {
+                for on_disk in [half_written, &intact_other_version[..]] {
+                    let context = format!("{was_fresh} {kind:?} 程序文件 {} 字节", on_disk.len());
+                    let (left, mismatches) =
+                        recover_with_exe(&journal, &payload_exe, on_disk, version, registered_dir);
+                    assert!(
+                        mismatches.contains(&Mismatch::ExeLength {
+                            expected: PAYLOAD_EXE_LEN as u64,
+                            actual: on_disk.len() as u64,
+                        }),
+                        "{context} {mismatches:?}"
+                    );
+
+                    let found = payload_with(
+                        "1.0.0-beta.5",
+                        Channel::Beta,
+                        Existing {
+                            kind: *kind,
+                            version: (*version).into(),
+                            dir: registered_dir.to_string_lossy().into_owned(),
+                            channel: Some(*channel),
+                        },
+                    );
+
+                    assert_eq!(mark_interrupted(found.clone(), &left), found, "{context}");
+                }
+            }
+        }
     }
 
     #[test]
